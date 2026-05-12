@@ -53,6 +53,25 @@ pub struct DuetosTgaInfo {
     pub _pad: u8,
 }
 
+/// JPEG header decode result. `width` / `height` come from the
+/// first Start-of-Frame (SOF) marker the walker finds; `precision`
+/// is the bits-per-sample byte from the same SOF; `components` is
+/// the number of channels (1 = grayscale, 3 = YCbCr, 4 = CMYK).
+/// `sof_marker` is the actual marker byte (`0xC0..=0xCF` excluding
+/// `0xC4` / `0xC8` / `0xCC` which are tables, not frames) so the
+/// caller can tell baseline (`0xC0`) from progressive (`0xC2`).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DuetosJpegInfo {
+    pub width: u32,
+    pub height: u32,
+    pub precision: u8,
+    pub components: u8,
+    pub sof_marker: u8,
+    pub ok: u8,
+    pub _pad: u32,
+}
+
 // ---------- helpers ----------
 //
 // Every raw-pointer dereference is concentrated in helpers so the
@@ -320,11 +339,185 @@ pub extern "C" fn duetos_img_meta_parse_tga(buf: *const u8, len: usize, out: *mu
     parse_tga_header(slice, dst)
 }
 
+// ---------- JPEG ----------
+//
+// JPEG / JFIF / EXIF byte layout: every file starts with the
+// Start-of-Image marker (FFD8). After that, segments are
+// introduced by a marker byte FFxx; most segments carry a u16
+// big-endian length (length-inclusive) followed by their body.
+// The header walker hops segment-to-segment looking for the
+// first Start-of-Frame marker (`FFC0..=FFCF` excluding `FFC4`
+// DHT / `FFC8` JPG / `FFCC` DAC). When it finds one, the SOF
+// body shape is fixed: precision (u8), height (u16 BE), width
+// (u16 BE), components (u8), then per-component info.
+//
+// What this is NOT: a decoder. We extract dimensions + precision
+// + component count so a future viewer (or stat() / file-type
+// probe / thumbnail cache) can validate the header before
+// committing to a decode pass. Quantisation tables, Huffman
+// tables, entropy-coded data: all stay invisible to this
+// walker.
+
+const JPEG_MARKER_PREFIX: u8 = 0xFF;
+const JPEG_MARKER_SOI: u8 = 0xD8;
+const JPEG_MARKER_EOI: u8 = 0xD9;
+const JPEG_MARKER_SOS: u8 = 0xDA; // Start-of-Scan — entropy-coded payload follows
+const JPEG_MARKER_RST_BASE: u8 = 0xD0;
+const JPEG_MARKER_RST_LAST: u8 = 0xD7;
+const JPEG_MARKER_TEM: u8 = 0x01;
+const JPEG_MARKER_SOF0: u8 = 0xC0;
+const JPEG_MARKER_SOF15: u8 = 0xCF;
+const JPEG_MARKER_DHT: u8 = 0xC4; // not a SOF
+const JPEG_MARKER_JPG: u8 = 0xC8; // reserved, not a SOF
+const JPEG_MARKER_DAC: u8 = 0xCC; // not a SOF
+
+/// Hop cap on segment iteration. Real JPEGs have <100 markers
+/// before SOS; a hostile file padding with empty segments could
+/// otherwise spin the walker.
+const JPEG_SEGMENT_HOP_CAP: usize = 4096;
+
+/// Dimension cap mirrors the PNG / BMP / TGA ones above.
+const JPEG_MAX_DIM: u32 = 16384;
+
+#[inline]
+fn load_u16_be(buf: &[u8], off: usize) -> u16 {
+    u16::from_be_bytes([buf[off], buf[off + 1]])
+}
+
+/// True for any 0xC0..0xCF marker that introduces a Start-of-Frame
+/// segment (i.e. carries the dimension + component info). Excludes
+/// the three byte values in that range that are NOT frames per
+/// ISO/IEC 10918-1 Annex B.
+fn marker_is_sof(m: u8) -> bool {
+    (JPEG_MARKER_SOF0..=JPEG_MARKER_SOF15).contains(&m)
+        && m != JPEG_MARKER_DHT
+        && m != JPEG_MARKER_JPG
+        && m != JPEG_MARKER_DAC
+}
+
+/// True for the stand-alone markers that DON'T carry a length
+/// field (SOI, EOI, TEM, RSTn). Other markers all carry a u16-BE
+/// length immediately after the marker byte.
+fn marker_is_standalone(m: u8) -> bool {
+    m == JPEG_MARKER_SOI
+        || m == JPEG_MARKER_EOI
+        || m == JPEG_MARKER_TEM
+        || (JPEG_MARKER_RST_BASE..=JPEG_MARKER_RST_LAST).contains(&m)
+}
+
+fn parse_jpeg_header(buf: &[u8], out: &mut DuetosJpegInfo) -> bool {
+    // Need at least SOI (2) + one segment marker (2) + length (2).
+    if buf.len() < 6 {
+        return false;
+    }
+    // SOI: 0xFF 0xD8.
+    if buf[0] != JPEG_MARKER_PREFIX || buf[1] != JPEG_MARKER_SOI {
+        return false;
+    }
+    let mut cursor = 2usize;
+    for _ in 0..JPEG_SEGMENT_HOP_CAP {
+        // Marker bytes are FFxx. There can be FILL bytes (0xFF)
+        // before the real marker per Annex B.1.1.2 — skip them.
+        while cursor < buf.len() && buf[cursor] == JPEG_MARKER_PREFIX {
+            cursor += 1;
+        }
+        if cursor >= buf.len() {
+            return false;
+        }
+        let marker = buf[cursor];
+        cursor += 1;
+        // Reserved 0x00 after a 0xFF is "this is just an 0xFF in
+        // entropy-coded data, not a marker" — but we haven't
+        // entered SOS yet, so a 0x00 here is malformed.
+        if marker == 0x00 {
+            return false;
+        }
+        if marker_is_standalone(marker) {
+            // SOI inside the body, EOI before any SOF, or a stray
+            // restart marker — all malformed for v0.
+            if marker == JPEG_MARKER_EOI {
+                return false;
+            }
+            // SOI / TEM / RST stand-alone: just advance and keep
+            // searching for a SOF.
+            continue;
+        }
+        // Length-bearing segment: u16 BE length (length-inclusive).
+        if cursor + 2 > buf.len() {
+            return false;
+        }
+        let seg_len = load_u16_be(buf, cursor) as usize;
+        // Spec: length is at least 2 (the length field itself).
+        if seg_len < 2 {
+            return false;
+        }
+        if cursor + seg_len > buf.len() {
+            return false;
+        }
+        if marker_is_sof(marker) {
+            // SOF body shape (length-inclusive == seg_len):
+            //   length (u16 BE)
+            //   precision (u8)
+            //   height (u16 BE)
+            //   width (u16 BE)
+            //   components (u8)
+            // = 8 bytes minimum.
+            if seg_len < 8 {
+                return false;
+            }
+            let precision = buf[cursor + 2];
+            let height = load_u16_be(buf, cursor + 3) as u32;
+            let width = load_u16_be(buf, cursor + 5) as u32;
+            let components = buf[cursor + 7];
+            // Spec: precision is 8 or 12 for baseline; 8/12/16 for
+            // extended sequential / progressive. Reject other
+            // values.
+            if precision != 8 && precision != 12 && precision != 16 {
+                return false;
+            }
+            // Components: 1 (grayscale), 3 (YCbCr / RGB), 4 (CMYK /
+            // YCCK). Anything else is rejected.
+            if components != 1 && components != 3 && components != 4 {
+                return false;
+            }
+            if width == 0 || height == 0 || width > JPEG_MAX_DIM || height > JPEG_MAX_DIM {
+                return false;
+            }
+            out.width = width;
+            out.height = height;
+            out.precision = precision;
+            out.components = components;
+            out.sof_marker = marker;
+            out.ok = 1;
+            return true;
+        }
+        if marker == JPEG_MARKER_SOS {
+            // SOS introduces entropy-coded data. If we reach SOS
+            // without seeing a SOF first, the file is malformed.
+            return false;
+        }
+        cursor += seg_len;
+    }
+    false
+}
+
+#[no_mangle]
+pub extern "C" fn duetos_img_meta_parse_jpeg(buf: *const u8, len: usize, out: *mut DuetosJpegInfo) -> bool {
+    let Some(dst) = out_init(out) else {
+        return false;
+    };
+    let Some(slice) = slice_from_raw(buf, len) else {
+        return false;
+    };
+    parse_jpeg_header(slice, dst)
+}
+
 // ---------- hosted tests ----------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate alloc;
 
     fn make_png_ihdr(width: u32, height: u32, color_type: u8) -> [u8; 33] {
         let mut buf = [0u8; 33];
@@ -595,5 +788,207 @@ mod tests {
         let mut out = DuetosTgaInfo::default();
         assert!(parse_tga_header(&buf, &mut out));
         assert_eq!(out.right_to_left, 1);
+    }
+
+    // --- JPEG ---
+
+    /// Build a minimal JPEG-shaped buffer: SOI + optional APP0 +
+    /// SOF0 + EOI. `app0_len` controls a JFIF APP0 segment to
+    /// exercise the segment hop; pass 0 to skip it.
+    fn make_jpeg_with_sof(
+        width: u16,
+        height: u16,
+        components: u8,
+        sof_marker: u8,
+        app0_len: u16,
+    ) -> alloc::vec::Vec<u8> {
+        use alloc::vec::Vec;
+        let mut buf: Vec<u8> = Vec::new();
+        // SOI
+        buf.push(0xFF);
+        buf.push(JPEG_MARKER_SOI);
+        // Optional APP0 (FFE0) segment to ensure the walker hops over it.
+        if app0_len > 0 {
+            buf.push(0xFF);
+            buf.push(0xE0);
+            buf.extend_from_slice(&app0_len.to_be_bytes());
+            for _ in 0..(app0_len as usize - 2) {
+                buf.push(0);
+            }
+        }
+        // SOF segment. Body shape (length-inclusive 8 bytes minimum):
+        //   length(2) precision(1) height(2) width(2) components(1)
+        let body_len: u16 = 8 + (components as u16) * 3; // each component descriptor is 3 bytes
+        buf.push(0xFF);
+        buf.push(sof_marker);
+        buf.extend_from_slice(&body_len.to_be_bytes());
+        buf.push(8); // precision
+        buf.extend_from_slice(&height.to_be_bytes());
+        buf.extend_from_slice(&width.to_be_bytes());
+        buf.push(components);
+        for _ in 0..components {
+            buf.push(1); // component id
+            buf.push(0x11); // sampling factors
+            buf.push(0); // quant table
+        }
+        // EOI
+        buf.push(0xFF);
+        buf.push(JPEG_MARKER_EOI);
+        buf
+    }
+
+    #[test]
+    fn jpeg_baseline_sof0_round_trip() {
+        let buf = make_jpeg_with_sof(320, 200, 3, JPEG_MARKER_SOF0, 16);
+        let mut out = DuetosJpegInfo::default();
+        assert!(parse_jpeg_header(&buf, &mut out));
+        assert_eq!(out.width, 320);
+        assert_eq!(out.height, 200);
+        assert_eq!(out.precision, 8);
+        assert_eq!(out.components, 3);
+        assert_eq!(out.sof_marker, JPEG_MARKER_SOF0);
+        assert_eq!(out.ok, 1);
+    }
+
+    #[test]
+    fn jpeg_progressive_sof2_round_trip() {
+        let buf = make_jpeg_with_sof(640, 480, 3, 0xC2, 0);
+        let mut out = DuetosJpegInfo::default();
+        assert!(parse_jpeg_header(&buf, &mut out));
+        assert_eq!(out.sof_marker, 0xC2);
+    }
+
+    #[test]
+    fn jpeg_grayscale_1_component() {
+        let buf = make_jpeg_with_sof(64, 64, 1, JPEG_MARKER_SOF0, 0);
+        let mut out = DuetosJpegInfo::default();
+        assert!(parse_jpeg_header(&buf, &mut out));
+        assert_eq!(out.components, 1);
+    }
+
+    #[test]
+    fn jpeg_bad_soi_rejects() {
+        let mut buf = make_jpeg_with_sof(8, 8, 3, JPEG_MARKER_SOF0, 0);
+        buf[0] = 0xAB;
+        let mut out = DuetosJpegInfo::default();
+        assert!(!parse_jpeg_header(&buf, &mut out));
+    }
+
+    #[test]
+    fn jpeg_too_short_rejects() {
+        let buf = [0xFF, 0xD8];
+        let mut out = DuetosJpegInfo::default();
+        assert!(!parse_jpeg_header(&buf, &mut out));
+    }
+
+    #[test]
+    fn jpeg_zero_dim_rejects() {
+        let buf = make_jpeg_with_sof(0, 8, 3, JPEG_MARKER_SOF0, 0);
+        let mut out = DuetosJpegInfo::default();
+        assert!(!parse_jpeg_header(&buf, &mut out));
+    }
+
+    #[test]
+    fn jpeg_overlong_dim_rejects() {
+        let buf = make_jpeg_with_sof(JPEG_MAX_DIM as u16, 8, 3, JPEG_MARKER_SOF0, 0);
+        // Exactly the cap is fine (16384); +1 fails. u16 caps at 65535,
+        // and 16385 fits — make sure the parser rejects it.
+        let buf2 = make_jpeg_with_sof((JPEG_MAX_DIM + 1) as u16, 8, 3, JPEG_MARKER_SOF0, 0);
+        let mut out1 = DuetosJpegInfo::default();
+        let mut out2 = DuetosJpegInfo::default();
+        assert!(parse_jpeg_header(&buf, &mut out1));
+        assert!(!parse_jpeg_header(&buf2, &mut out2));
+    }
+
+    #[test]
+    fn jpeg_bad_components_rejects() {
+        // 2 components — not a valid value per ISO/IEC 10918-1.
+        let buf = make_jpeg_with_sof(8, 8, 2, JPEG_MARKER_SOF0, 0);
+        let mut out = DuetosJpegInfo::default();
+        assert!(!parse_jpeg_header(&buf, &mut out));
+    }
+
+    #[test]
+    fn jpeg_dht_in_sof_range_is_not_a_frame() {
+        // FFC4 (DHT) sits in the 0xC0..0xCF range but is NOT a SOF;
+        // the walker must hop past it and keep searching.
+        use alloc::vec::Vec;
+        let mut buf: Vec<u8> = Vec::new();
+        buf.push(0xFF);
+        buf.push(JPEG_MARKER_SOI);
+        // DHT segment (FFC4) — length 4 (length-inclusive), 2 bytes of body.
+        buf.push(0xFF);
+        buf.push(0xC4);
+        buf.extend_from_slice(&4u16.to_be_bytes());
+        buf.push(0);
+        buf.push(0);
+        // Real SOF0.
+        buf.push(0xFF);
+        buf.push(JPEG_MARKER_SOF0);
+        buf.extend_from_slice(&11u16.to_be_bytes()); // 8 + 3*1
+        buf.push(8); // precision
+        buf.extend_from_slice(&100u16.to_be_bytes()); // height
+        buf.extend_from_slice(&200u16.to_be_bytes()); // width
+        buf.push(1); // components
+        buf.push(1);
+        buf.push(0x11);
+        buf.push(0);
+        let mut out = DuetosJpegInfo::default();
+        assert!(parse_jpeg_header(&buf, &mut out));
+        assert_eq!(out.width, 200);
+        assert_eq!(out.height, 100);
+    }
+
+    #[test]
+    fn jpeg_segment_length_overflows_buffer_rejects() {
+        // SOI + SOF0 with claimed length far past the buffer's end.
+        let buf: [u8; 6] = [0xFF, 0xD8, 0xFF, 0xC0, 0xFF, 0xFF];
+        let mut out = DuetosJpegInfo::default();
+        assert!(!parse_jpeg_header(&buf, &mut out));
+    }
+
+    #[test]
+    fn jpeg_sos_before_sof_rejects() {
+        // SOI then SOS — entropy-coded scan without a frame defined
+        // is malformed.
+        let mut buf: alloc::vec::Vec<u8> = alloc::vec![0xFF, 0xD8, 0xFF, 0xDA];
+        buf.extend_from_slice(&3u16.to_be_bytes());
+        buf.push(0);
+        let mut out = DuetosJpegInfo::default();
+        assert!(!parse_jpeg_header(&buf, &mut out));
+    }
+
+    #[test]
+    fn jpeg_fill_byte_padding_tolerated() {
+        // Spec allows any number of 0xFF "fill bytes" between
+        // markers. Insert a handful before the SOF marker.
+        use alloc::vec::Vec;
+        let mut buf: Vec<u8> = Vec::new();
+        buf.push(0xFF);
+        buf.push(JPEG_MARKER_SOI);
+        // Padding 0xFF bytes.
+        for _ in 0..5 {
+            buf.push(0xFF);
+        }
+        buf.push(JPEG_MARKER_SOF0);
+        buf.extend_from_slice(&11u16.to_be_bytes());
+        buf.push(8);
+        buf.extend_from_slice(&50u16.to_be_bytes());
+        buf.extend_from_slice(&80u16.to_be_bytes());
+        buf.push(1);
+        buf.push(1);
+        buf.push(0x11);
+        buf.push(0);
+        let mut out = DuetosJpegInfo::default();
+        assert!(parse_jpeg_header(&buf, &mut out));
+        assert_eq!(out.width, 80);
+        assert_eq!(out.height, 50);
+    }
+
+    #[test]
+    fn jpeg_segment_length_below_two_rejects() {
+        let buf: [u8; 6] = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x01]; // APP0 with bogus length=1
+        let mut out = DuetosJpegInfo::default();
+        assert!(!parse_jpeg_header(&buf, &mut out));
     }
 }

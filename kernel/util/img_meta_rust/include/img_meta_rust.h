@@ -53,6 +53,17 @@ struct DuetosTgaInfo
     u8 _pad;
 };
 
+struct DuetosJpegInfo
+{
+    u32 width;
+    u32 height;
+    u8 precision;
+    u8 components;
+    u8 sof_marker; // 0xC0 baseline, 0xC2 progressive, etc.
+    u8 ok;
+    u32 _pad;
+};
+
 extern "C"
 {
     /// Validate a PNG header: 8-byte signature, IHDR length / tag /
@@ -76,6 +87,17 @@ extern "C"
     /// for the optional image-id field and (tolerantly) any
     /// trailing colormap bytes some encoders leave dangling.
     bool duetos_img_meta_parse_tga(const u8* buf, usize len, DuetosTgaInfo* out);
+
+    /// Validate a JPEG / JFIF / EXIF header: SOI marker (FFD8) at
+    /// offset 0, then hop segment-to-segment looking for the first
+    /// Start-of-Frame marker (FFC0..FFCF excluding DHT / JPG / DAC).
+    /// On match, `out->{width, height, precision, components,
+    /// sof_marker, ok=1}` is populated from the SOF body.
+    ///
+    /// Returns false on bad SOI, premature SOS / EOI, malformed
+    /// segment length (< 2), segment length overrunning the slice,
+    /// or unsupported precision / component count.
+    bool duetos_img_meta_parse_jpeg(const u8* buf, usize len, DuetosJpegInfo* out);
 }
 
 } // namespace duetos::util::img_meta

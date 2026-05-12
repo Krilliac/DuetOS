@@ -6,7 +6,7 @@
 >
 > **Maturity:** Stable foundation; sixteen production Rust subsystems live in the kernel tree.
 >
-> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, and Multiboot2 info-structure walker.
+> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA / JPEG header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, and Multiboot2 info-structure walker.
 >
 > All sixteen crates have a current C++ caller; there are no skeleton crates left in this slice.
 
@@ -85,10 +85,18 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   (`kernel/drivers/usb/msc_scsi.cpp`) delegates its parse functions through
   this crate.
 - `/kernel/util/img_meta_rust/` (`duetos_img_meta`) validates PNG, BMP,
-  and TGA image headers. `kernel/util/png.cpp::PngParseHeader`,
-  `kernel/util/bmp.cpp::BmpParseHeader`, and
-  `kernel/util/tga.cpp::TgaParseHeader` delegate to this crate; the C++
-  side keeps zlib inflate, scanline filter unwind, and pixel-copy.
+  TGA, and JPEG / JFIF / EXIF image headers.
+  `kernel/util/png.cpp::PngParseHeader`,
+  `kernel/util/bmp.cpp::BmpParseHeader`,
+  `kernel/util/tga.cpp::TgaParseHeader`, and
+  `kernel/util/jpeg.cpp::JpegParseHeader` all delegate to this crate;
+  the C++ side keeps zlib inflate, scanline filter unwind, and
+  pixel-copy. The JPEG validator walks segments from the SOI marker
+  until the first Start-of-Frame (SOF) and extracts dimensions +
+  precision + component count without entering the entropy-coded
+  scan data. No decoder lives in the tree yet; the validator is the
+  toolkit a future viewer / thumbnail cache / wallpaper-extension
+  consumer will sit on.
 - `/kernel/loader/exec_meta_rust/` (`duetos_exec_meta`) validates ELF64
   files (header + every PT_LOAD segment) and PE/COFF images
   (DOS stub + e_lfanew bounds + PE signature + AMD64 machine check +

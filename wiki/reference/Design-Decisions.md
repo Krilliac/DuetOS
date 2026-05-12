@@ -8801,3 +8801,72 @@ a real C++ caller now goes through its FFI.
   sixteenth production crates. ACPI/SMBIOS/PCI capability-table
   P2 row in [`Rust-Subsystems`](../tooling/Rust-Subsystems.md) —
   now fully addressed; the PCI half lands here.
+
+---
+
+## 2026-05-12 — JPEG header validator added to img_meta_rust
+
+- **Scope:** New `parse_jpeg_header` function in
+  `kernel/util/img_meta_rust/src/lib.rs` exporting
+  `duetos_img_meta_parse_jpeg` over a new `DuetosJpegInfo` C-ABI
+  struct. New `kernel/util/jpeg.{h,cpp}` exposing the C++ wrapper
+  `JpegParseHeader` in the same shape as `PngParseHeader` /
+  `BmpParseHeader` / `TgaParseHeader`.
+- **Decision:** Extend the existing PNG / BMP / TGA family with
+  the natural fourth member. JPEG header validation matches the
+  same "attacker-controlled bytes → validated dimensions"
+  contract that already justifies the other three: the SOI
+  marker, segment-length fields, SOF body shape, and SOS-before-
+  SOF ordering are all fixed-size validation surfaces a hostile
+  file can use to inject mis-sized lengths, out-of-range
+  component counts, or oversize dimensions.
+- **Scope inside the validator:**
+  - SOI marker (`FFD8`) recognition at offset 0.
+  - Segment hop over all length-bearing markers, including
+    APP0 / APP1 / APP2 / DQT / DRI / COM, until the first SOF
+    marker is found.
+  - Stand-alone marker handling (SOI / EOI / TEM / RST0..RST7
+    don't carry a length field — the walker treats them
+    correctly).
+  - Fill-byte (0xFF padding before a real marker) tolerated
+    per ISO/IEC 10918-1 Annex B.1.1.2.
+  - SOF body decode: precision (8 / 12 / 16), height (u16 BE),
+    width (u16 BE), components (1 / 3 / 4). Other values reject.
+  - 16384 × 16384 dimension cap to match the other img_meta
+    parsers.
+- **Out of scope (deliberate):**
+  - JPEG decoder itself. The Huffman / DCT / dequantisation /
+    IDCT / colour-conversion passes are several thousand lines
+    and we'd want a real consumer (image viewer, thumbnail
+    cache, wallpaper format extension) before paying that cost.
+  - EXIF tag walking. The validator hops past APP1 without
+    reading its body.
+  - JPEG-2000 / JPEG-XL / arithmetic-coded JPEG.
+- **No current C++ caller — speculative-but-paired-with-tools:**
+  The end-user-features Roadmap lists "PNG / JPEG / PDF / video
+  viewers" as a deferred surface. When that lands, the viewer
+  doesn't have to write the validator from scratch; it has the
+  same Rust-side primitive PNG / BMP / TGA do today. This is the
+  one case where we ship a Rust function without a current C++
+  caller — justified because the C++ wrapper `JpegParseHeader`
+  is in tree and ready, the FFI contract is pinned, and the
+  validator is bounded (no decoder, no allocations, no internal
+  state). A future viewer adding the validator's call site is a
+  pure additive change.
+- **Tests:** 13 new hosted cases in
+  `img_meta_rust/src/lib.rs::tests`, bringing the crate's test
+  count from 25 to 38: baseline SOF0 round-trip, progressive
+  SOF2 round-trip, grayscale (1 component), bad SOI, too short,
+  zero dimension, overlong dimension (`JPEG_MAX_DIM + 1`),
+  invalid component count (2), DHT-marker-in-SOF-range hopped
+  past correctly, segment length overruns buffer, SOS-before-
+  SOF rejected, fill-byte padding tolerated, segment length
+  below 2 rejected.
+- **Revisit when:** A JPEG decoder lands. The validator's
+  `sof_marker` field already distinguishes baseline (`0xC0`)
+  from progressive (`0xC2`) etc., so the decoder can route by
+  frame type without re-parsing the SOF.
+- **Related roadmap track(s):** Rust bring-up — production crate
+  expansion (img_meta_rust grows from 3 to 4 image-format
+  validators). End-user-features "PNG / JPEG / PDF / video
+  viewers" — JPEG now has its header foundation.
