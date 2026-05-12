@@ -175,9 +175,7 @@ impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
                 let mut new_len: usize = tgt_bytes.len();
                 let remaining = &buf[cursor..buf_len];
                 if !remaining.is_empty() {
-                    let need_sep = new_len > 0
-                        && new_buf[new_len - 1] != b'/'
-                        && remaining[0] != b'/';
+                    let need_sep = new_len > 0 && new_buf[new_len - 1] != b'/' && remaining[0] != b'/';
                     if need_sep {
                         if new_len + 1 > PATH_SCRATCH_BYTES {
                             return Err(FsError::SymlinkLoop);
