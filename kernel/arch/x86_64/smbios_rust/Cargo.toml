@@ -1,0 +1,58 @@
+# DuetOS SMBIOS table walker.
+#
+# Production crate. Decodes the SMBIOS entry-point anchor (_SM_ /
+# _SM3_) and walks the variable-length structure table the firmware
+# publishes for the OS to read. The C++ caller at
+# `kernel/arch/x86_64/smbios.cpp` keeps direct-map MMIO access,
+# single-init guarding, the summary-cache write-back, and the boot
+# log; this crate owns every offset arithmetic + variable-length
+# string list walk over firmware-controlled bytes.
+#
+# Why Rust here: SMBIOS tables come from firmware before the kernel
+# has any trust base. The 2.x anchor and 3.x anchor have different
+# fixed sizes and different table-pointer widths (u32 vs u64); the
+# structure table chains records by a `length` byte followed by a
+# NUL-terminated string list terminated by a double-NUL. A hostile
+# or buggy firmware can choose to omit either NUL, choose a wrong
+# `length`, or claim a string-list size that runs off the end of
+# the table — every one of those is a classic over-read primitive
+# in C++ pointer arithmetic. Slice-bounded Rust catches them.
+#
+# Scope (v0):
+#   - parse_entry_point — accept 2.x ("_SM_" + "_DMI_") and 3.x
+#     ("_SM3_") anchors. Return (table_phys, table_len, major, minor).
+#     Validates anchor lengths, entry-point checksum, table length
+#     fits in 16-bit (2.x) / 32-bit (3.x) caps.
+#   - parse_structure_header — at a given offset, return (type,
+#     length, handle) and the start offset of the trailing-strings
+#     region.
+#   - find_next_structure — given a starting offset, advance past
+#     the formatted area and the variable-length string list (NUL-
+#     terminated entries, ended by a double-NUL). Returns the next
+#     structure's start offset or "end of table" — always within
+#     the bounded slice.
+#   - read_structure_string — given a structure offset, the
+#     structure's formatted-area length, and a 1-based string
+#     index, return the validated string slice. Bounds-checked.
+#
+# Not in scope (v0):
+#   - Per-structure body decoders (BIOS info / system / chassis /
+#     CPU). The C++ side already field-reads at known offsets
+#     using the bounded slice the Rust walker validates.
+#   - SMBIOS write surface (UEFI runtime services). The OS never
+#     writes back; this is a read-only table.
+
+[package]
+name = "duetos_smbios"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS SMBIOS entry-point + structure table walker"
+
+[lib]
+name = "duetos_smbios"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

@@ -87,7 +87,7 @@ userland. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 | `gpu` | 15 | `kernel/drivers/gpu/` |
 | `input` | 2 | `kernel/drivers/input/` |
 | `mei` | 1 | `kernel/drivers/mei/` |
-| `net` | 13 | `kernel/drivers/net/` |
+| `net` | 18 | `kernel/drivers/net/` |
 | `pci` | 1 | `kernel/drivers/pci/` |
 | `power` | 1 | `kernel/drivers/power/` |
 | `storage` | 3 | `kernel/drivers/storage/` |

@@ -8641,3 +8641,71 @@ a real C++ caller now goes through its FFI.
   `StealNormalFromPeer`'s post-split design.
 - **Related roadmap track(s):** Topology-driven follow-ons (now
   one item left: cluster-broadcast IPIs).
+
+---
+
+## 2026-05-12 — SMBIOS table walker lifted to Rust (`duetos_smbios`)
+
+- **Scope:** New `kernel/arch/x86_64/smbios_rust/` crate (Cargo.toml,
+  `src/lib.rs`, `include/smbios_rust.h`).
+  `kernel/arch/x86_64/smbios.cpp` refactored to delegate every
+  byte-level decode to the crate; the C++ side keeps the legacy-BIOS
+  scan window (`PhysToVirt` of `0xF0000..0x100000` in 16-byte
+  strides), single-init guarding, summary-cache write-back, and the
+  boot-log line.
+- **Decision:** Promote SMBIOS entry-point + structure-table parsing
+  to a production Rust subsystem alongside ACPI / NTFS / exFAT /
+  ext4 / 802.11 / HCI. The crate exposes three FFI entry points:
+  `duetos_smbios_parse_entry_point` (validates `_SM_` 2.x or `_SM3_`
+  3.x anchor: signature, length, 8-bit additive checksum, table-
+  length cap), `duetos_smbios_parse_structure` (decodes the four-byte
+  header + walks the trailing strings region to a double-NUL
+  terminator with per-string + per-table caps), and
+  `duetos_smbios_read_string` (resolves a 1-based string index inside
+  the bounded strings region).
+- **Why this is its own surface:** The v0 C++ walker had two genuine
+  over-read paths in firmware-controlled bytes:
+  `NextStructure` walked raw memory past the last byte of the
+  declared `table_length` chasing a double-NUL terminator, and
+  `SmbiosString` chased NUL-terminated entries without any per-entry
+  cap. A buggy or hostile firmware that omits a terminator could
+  feed the BIOS scan window's tail bytes (or whatever followed in
+  the direct map) into the summary cache. Slice-bounded Rust catches
+  both — the FFI never sees a raw pointer past the declared
+  `table_length`, and each string entry is capped at
+  `SMBIOS_STRING_LENGTH_CAP = 1024` bytes (enough headroom for spec-
+  bounded fields, ~8× the largest real-world SMBIOS string).
+- **Caps:** Table length capped at 1 MiB (real tables are 1-50 KiB);
+  per-string length capped at 1 KiB. The 1 MiB ceiling keeps a
+  malformed firmware from making the walker spin for half a second
+  on every boot.
+- **3.x anchor preference:** When both `_SM_` and `_SM3_` appear at
+  the same scan position, the parser dispatches to the 3.x decoder
+  first because the 3.x anchor publishes a 64-bit table physical
+  address (the 2.x anchor's 32-bit pointer can't reach above 4 GiB
+  even when the firmware places the table there).
+- **What it rules out / defers:** Per-structure body decoders (BIOS
+  Info / System Info / Chassis / Processor) stay in C++ — they read
+  at fixed byte offsets within the Rust-validated bounded slice,
+  which is short enough that the win-vs-cost of porting individual
+  field offsets is too small to justify. UEFI runtime-services SMBIOS
+  configuration-table handoff stays deferred until the UEFI-direct
+  boot path lands — the legacy scan-window path covers Multiboot2
+  + QEMU + every real BIOS today.
+- **Tests:** 19 hosted unit tests in `smbios_rust/src/lib.rs::tests`
+  cover anchor decode (both revisions, bad signature, bad checksum,
+  missing `_DMI_`, oversize table, zero table, short buffer, 3.x-
+  preference), structure walking (minimal table round-trip, no-
+  strings record, malformed-length, length-overflows-table, no
+  double-NUL terminator, overlong unterminated string, end-of-table
+  with cropped trailer, type-1-at-EOF-without-trailer), and string
+  resolution (zero-index reject, out-of-range index).
+- **Revisit when:** UEFI runtime-services boot path lands — add a
+  `SmbiosInitFromConfigTable(u64 va)` overload that bypasses the
+  scan window and feeds the entry-point bytes directly to
+  `duetos_smbios_parse_entry_point`.
+- **Related roadmap track(s):** Rust bring-up — fourteenth production
+  crate. ACPI/SMBIOS/PCI capability-table P2 row in
+  [`Rust-Subsystems`](../tooling/Rust-Subsystems.md) — SMBIOS lifted;
+  PCI-extended capabilities remain in C++ pending real-workload
+  signal.

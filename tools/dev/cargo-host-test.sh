@@ -25,6 +25,7 @@ HOST_TEST_CRATES=(
     "kernel/fs/exfat_rust"
     "kernel/fs/ext4_rust"
     "kernel/acpi/acpi_rust"
+    "kernel/arch/x86_64/smbios_rust"
     "kernel/net/wifi80211_rust"
     "kernel/net/hci_rust"
 )

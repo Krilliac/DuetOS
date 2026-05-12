@@ -17,6 +17,7 @@ pub use duetos_hci::*;
 pub use duetos_img_meta::*;
 pub use duetos_net_parsers::*;
 pub use duetos_ntfs::*;
+pub use duetos_smbios::*;
 pub use duetos_usb_msc_scsi::*;
 pub use duetos_wifi80211::*;
 pub use usbclass::*;

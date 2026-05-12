@@ -62,6 +62,7 @@ list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^fs/ntfs_rust/(target|ca
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^fs/exfat_rust/(target|cargo-target|exfat-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^fs/ext4_rust/(target|cargo-target|ext4-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^acpi/acpi_rust/(target|cargo-target|acpi-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^arch/x86_64/smbios_rust/(target|cargo-target|smbios-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/wifi80211_rust/(target|cargo-target|wifi80211-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/hci_rust/(target|cargo-target|hci-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^rust/(target|cargo-target|duetos-kernel-rust-cargo-target)/")
@@ -815,6 +816,7 @@ set(NTFS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fs/ntfs_rust/include")
 set(EXFAT_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fs/exfat_rust/include")
 set(EXT4_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fs/ext4_rust/include")
 set(ACPIRUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/acpi/acpi_rust/include")
+set(SMBIOSRUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/smbios_rust/include")
 set(WIFI80211_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/net/wifi80211_rust/include")
 set(HCIRUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/net/hci_rust/include")
 
@@ -852,6 +854,7 @@ target_include_directories(duetos-kernel-stage1 PRIVATE
     "${EXFAT_INCLUDE_DIR}"
     "${EXT4_INCLUDE_DIR}"
     "${ACPIRUST_INCLUDE_DIR}"
+    "${SMBIOSRUST_INCLUDE_DIR}"
     "${WIFI80211_INCLUDE_DIR}"
     "${HCIRUST_INCLUDE_DIR}"
 )
@@ -955,6 +958,7 @@ target_include_directories(duetos-kernel PRIVATE
     "${EXFAT_INCLUDE_DIR}"
     "${EXT4_INCLUDE_DIR}"
     "${ACPIRUST_INCLUDE_DIR}"
+    "${SMBIOSRUST_INCLUDE_DIR}"
     "${WIFI80211_INCLUDE_DIR}"
     "${HCIRUST_INCLUDE_DIR}"
 )

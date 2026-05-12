@@ -4,11 +4,11 @@
 >
 > **Execution context:** Kernel build tooling and kernel-linked Rust crates.
 >
-> **Maturity:** Stable foundation; thirteen production Rust subsystems live in the kernel tree.
+> **Maturity:** Stable foundation; fourteen production Rust subsystems live in the kernel tree.
 >
-> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, and Bluetooth HCI walker.
+> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, and SMBIOS table walker.
 >
-> All thirteen crates have a current C++ caller; there are no skeleton crates left in this slice.
+> All fourteen crates have a current C++ caller; there are no skeleton crates left in this slice.
 
 ## Overview
 
@@ -132,6 +132,18 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   Read_BD_ADDR bodies. `kernel/net/bluetooth/hci.cpp` delegates
   the Read_Local_Version + Read_BD_ADDR rparam decoders to the
   crate.
+- `/kernel/arch/x86_64/smbios_rust/` (`duetos_smbios`) decodes
+  the 2.x (`_SM_` + `_DMI_`) and 3.x (`_SM3_`) entry-point
+  anchors (signature + length + 8-bit checksum), then walks the
+  variable-length structure table — each call returns the
+  bounded `(formatted_offset, strings_offset, end_offset)`
+  triple a C++ caller needs to advance to the next record. The
+  trailing-strings walker enforces a 1 KiB per-string cap so a
+  firmware that omits a NUL terminator can't make the walker
+  run past the structure-table slice. `kernel/arch/x86_64/smbios.cpp`
+  keeps the legacy-BIOS scan window (`PhysToVirt(0xF0000)` +
+  16-byte stride), single-init guarding, the BIOS / system /
+  chassis / processor field extraction, and the boot-log line.
 - `/cmake/DuetOSRust.cmake` exposes `duetos_add_rust_staticlib(...)`, used by
   `/kernel/rust/CMakeLists.txt` to build the aggregate Rust link unit.
 

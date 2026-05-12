@@ -1,15 +1,23 @@
 #include "arch/x86_64/smbios.h"
 
 #include "arch/x86_64/serial.h"
-#include "log/klog.h"
 #include "core/panic.h"
+#include "log/klog.h"
 #include "mm/page.h"
+#include "smbios_rust.h"
 
 namespace duetos::arch
 {
 
 namespace
 {
+
+using ::duetos::arch::smbios_rust::duetos_smbios_parse_entry_point;
+using ::duetos::arch::smbios_rust::duetos_smbios_parse_structure;
+using ::duetos::arch::smbios_rust::duetos_smbios_read_string;
+using ::duetos::arch::smbios_rust::DuetosSmbiosEntryPoint;
+using ::duetos::arch::smbios_rust::DuetosSmbiosString;
+using ::duetos::arch::smbios_rust::DuetosSmbiosStructure;
 
 SmbiosSummary g_summary = {};
 
@@ -18,154 +26,97 @@ SmbiosSummary g_summary = {};
 constexpr u64 kScanStart = 0xF0000;
 constexpr u64 kScanEnd = 0x100000;
 
-// "_SM_"  (2.x) and "_SM3_" (3.x) anchors.
-constexpr u8 kAnchor2x[4] = {'_', 'S', 'M', '_'};
-constexpr u8 kAnchor3x[5] = {'_', 'S', 'M', '3', '_'};
+// The 3.x anchor entry-point length is 24 bytes; the 2.x anchor
+// is 31. Pass 32 bytes to the Rust validator so either fits.
+constexpr u64 kScanProbeBytes = 32;
 
-// Copy at most `cap-1` chars + NUL terminator. Caps strings
-// pulled from the structure table — those can be up to 64 KiB
-// per the SMBIOS spec, way larger than our budgets.
-void CopyStringBounded(char* dst, const char* src, u64 cap)
+// SMBIOS string fields are spec-capped at 64 KiB but real strings
+// run < 128 bytes. We mirror the kernel-side summary buffer width
+// when copying.
+constexpr u64 kSummaryFieldCap = 64;
+
+// Copy a slice of validated SMBIOS bytes into a NUL-terminated
+// C string, truncating at `cap - 1`. Used after
+// `duetos_smbios_read_string` validates the slice's bounds.
+void CopyStringSlice(char* dst, u64 cap, const u8* src, u32 length)
 {
     if (cap == 0)
         return;
-    if (src == nullptr)
+    u32 copy = length;
+    if (static_cast<u64>(copy) + 1 > cap)
+        copy = static_cast<u32>(cap - 1);
+    for (u32 i = 0; i < copy; ++i)
+        dst[i] = static_cast<char>(src[i]);
+    dst[copy] = '\0';
+}
+
+/// Read a structure's 1-based string index and copy it into a
+/// caller-provided buffer. No-op when the index is 0 (SMBIOS "no
+/// string" sentinel) or the lookup fails.
+void ReadStringIntoBuffer(const u8* table, u64 table_len, const DuetosSmbiosStructure& s, u8 idx, char* dst, u64 cap)
+{
+    if (idx == 0 || cap == 0)
+    {
+        if (cap != 0)
+            dst[0] = '\0';
+        return;
+    }
+    DuetosSmbiosString out = {};
+    const bool ok =
+        duetos_smbios_read_string(table, static_cast<usize>(table_len), s.strings_offset, s.end_offset, idx, &out);
+    if (!ok)
     {
         dst[0] = '\0';
         return;
     }
-    u64 i = 0;
-    while (i + 1 < cap)
-    {
-        const char c = src[i];
-        if (c == '\0')
-            break;
-        dst[i] = c;
-        ++i;
-    }
-    dst[i] = '\0';
+    CopyStringSlice(dst, cap, table + out.offset, out.length);
 }
 
-// SMBIOS stores strings immediately after each structure's
-// formatted-area bytes, in a u8-indexed list (1-based). The
-// unformatted area ends with a double-NUL.
-//
-// `struct_ptr` points at the start of the formatted area.
-// `formatted_len` is the `Length` byte from the header (the
-// size of the formatted area, not including the trailing
-// strings).
-// `index` is the 1-based string index.
-const char* SmbiosString(const u8* struct_ptr, u8 formatted_len, u8 index)
+void HandleStructure(const u8* table, u64 table_len, const DuetosSmbiosStructure& s)
 {
-    if (index == 0)
-        return nullptr;
-    const char* p = reinterpret_cast<const char*>(struct_ptr + formatted_len);
-    u8 cur = 1;
-    while (*p != '\0')
-    {
-        if (cur == index)
-            return p;
-        while (*p != '\0')
-            ++p;
-        ++p; // skip the NUL
-        ++cur;
-    }
-    return nullptr;
-}
-
-// Return a pointer to the byte AFTER the unformatted strings of
-// a structure (i.e. the start of the next structure). Handles
-// the case where there are no strings at all (two NULs
-// back-to-back immediately after the formatted area).
-const u8* NextStructure(const u8* struct_ptr, u8 formatted_len)
-{
-    const u8* p = struct_ptr + formatted_len;
-    // Walk until we find the terminating double-NUL.
-    if (*p == '\0' && *(p + 1) == '\0')
-        return p + 2; // no strings at all
-    while (true)
-    {
-        while (*p != '\0')
-            ++p;
-        if (*(p + 1) == '\0')
-            return p + 2;
-        ++p;
-    }
-}
-
-void HandleStructure(const u8* hdr, u8 type, u8 length)
-{
-    switch (type)
+    // The Rust walker has already validated that
+    // `formatted_offset .. formatted_offset + formatted_length`
+    // is a bounded slice inside `table`. We're free to read
+    // fixed-offset bytes within that window with no further
+    // bounds check; positions below match SMBIOS §7.
+    const u8* fmt = table + s.formatted_offset;
+    const u8 length = s.formatted_length;
+    switch (s.struct_type)
     {
     case 0: // BIOS Information
-        CopyStringBounded(g_summary.bios_vendor, SmbiosString(hdr, length, hdr[4]), sizeof(g_summary.bios_vendor));
-        CopyStringBounded(g_summary.bios_version, SmbiosString(hdr, length, hdr[5]), sizeof(g_summary.bios_version));
+        if (length >= 6)
+        {
+            ReadStringIntoBuffer(table, table_len, s, fmt[4], g_summary.bios_vendor, kSummaryFieldCap);
+            ReadStringIntoBuffer(table, table_len, s, fmt[5], g_summary.bios_version, kSummaryFieldCap);
+        }
         break;
     case 1: // System Information
-        CopyStringBounded(g_summary.system_manufacturer, SmbiosString(hdr, length, hdr[4]),
-                          sizeof(g_summary.system_manufacturer));
-        CopyStringBounded(g_summary.system_product, SmbiosString(hdr, length, hdr[5]),
-                          sizeof(g_summary.system_product));
-        CopyStringBounded(g_summary.system_version, SmbiosString(hdr, length, hdr[6]),
-                          sizeof(g_summary.system_version));
+        if (length >= 7)
+        {
+            ReadStringIntoBuffer(table, table_len, s, fmt[4], g_summary.system_manufacturer, kSummaryFieldCap);
+            ReadStringIntoBuffer(table, table_len, s, fmt[5], g_summary.system_product, kSummaryFieldCap);
+            ReadStringIntoBuffer(table, table_len, s, fmt[6], g_summary.system_version, kSummaryFieldCap);
+        }
         break;
     case 3: // System Enclosure / Chassis
         // Chassis type is byte 5 (offset 0x05 from structure
         // start). High bit = chassis lock, bits 6:0 = type.
         if (length >= 6)
-            g_summary.chassis_type = hdr[5] & 0x7F;
+            g_summary.chassis_type = fmt[5] & 0x7F;
         break;
     case 4: // Processor Information
-        if (g_summary.cpu_manufacturer[0] == '\0')
+        // Only capture the FIRST processor — multi-socket parts
+        // would otherwise overwrite earlier slots with the last
+        // CPU's info.
+        if (g_summary.cpu_manufacturer[0] == '\0' && length >= 0x11)
         {
-            CopyStringBounded(g_summary.cpu_manufacturer, SmbiosString(hdr, length, hdr[7]),
-                              sizeof(g_summary.cpu_manufacturer));
-            CopyStringBounded(g_summary.cpu_version, SmbiosString(hdr, length, hdr[0x10]),
-                              sizeof(g_summary.cpu_version));
+            ReadStringIntoBuffer(table, table_len, s, fmt[7], g_summary.cpu_manufacturer, kSummaryFieldCap);
+            ReadStringIntoBuffer(table, table_len, s, fmt[0x10], g_summary.cpu_version, kSummaryFieldCap);
         }
         break;
     default:
         break;
     }
-}
-
-bool TryAnchor2x(const u8* p, u64* out_table_phys, u16* out_table_len, u16* out_major, u16* out_minor)
-{
-    // SMBIOS 2.x entry point is 31 bytes: "_SM_" + checksum +
-    // entry-length + major + minor + max_struct_size + ...
-    // "_DMI_" anchor at offset 16, table addr at 24, length at 22.
-    for (u64 i = 0; i < 4; ++i)
-    {
-        if (p[i] != kAnchor2x[i])
-            return false;
-    }
-    if (p[16] != '_' || p[17] != 'D' || p[18] != 'M' || p[19] != 'I' || p[20] != '_')
-        return false;
-    *out_major = p[6];
-    *out_minor = p[7];
-    *out_table_len = u16(p[22]) | (u16(p[23]) << 8);
-    *out_table_phys = u32(p[24]) | (u32(p[25]) << 8) | (u32(p[26]) << 16) | (u32(p[27]) << 24);
-    return true;
-}
-
-bool TryAnchor3x(const u8* p, u64* out_table_phys, u16* out_table_len, u16* out_major, u16* out_minor)
-{
-    // SMBIOS 3.x entry point: "_SM3_" anchor, 24-byte struct,
-    // major at 7, minor at 8, table len at 12 (u32), table
-    // phys at 16 (u64).
-    for (u64 i = 0; i < 5; ++i)
-    {
-        if (p[i] != kAnchor3x[i])
-            return false;
-    }
-    *out_major = p[7];
-    *out_minor = p[8];
-    *out_table_len = u16(p[12]) | (u16(p[13]) << 8);
-    u64 phys = 0;
-    for (u64 i = 0; i < 8; ++i)
-        phys |= u64(p[16 + i]) << (i * 8);
-    *out_table_phys = phys;
-    return true;
 }
 
 } // namespace
@@ -176,24 +127,18 @@ void SmbiosInit()
     KASSERT(!s_done, "arch/smbios", "SmbiosInit called twice");
     s_done = true;
 
-    // Direct-map view of the BIOS scan window.
-    u64 table_phys = 0;
-    u16 table_len = 0;
-    u16 major = 0;
-    u16 minor = 0;
+    // 1) Walk the legacy BIOS scan window 16-byte aligned, asking
+    // the Rust validator to decode each candidate. The first
+    // success wins — the parser prefers the 3.x anchor when both
+    // are present at the same address.
+    DuetosSmbiosEntryPoint ep = {};
     bool found = false;
-    for (u64 phys = kScanStart; phys + 32 < kScanEnd; phys += 16)
+    for (u64 phys = kScanStart; phys + kScanProbeBytes <= kScanEnd; phys += 16)
     {
         const auto* p = static_cast<const u8*>(mm::PhysToVirt(phys));
         if (p == nullptr)
             continue;
-        // Prefer 3.x if both are present; more detail.
-        if (TryAnchor3x(p, &table_phys, &table_len, &major, &minor))
-        {
-            found = true;
-            break;
-        }
-        if (TryAnchor2x(p, &table_phys, &table_len, &major, &minor))
+        if (duetos_smbios_parse_entry_point(p, static_cast<usize>(kScanProbeBytes), &ep))
         {
             found = true;
             break;
@@ -207,37 +152,34 @@ void SmbiosInit()
     }
 
     g_summary.present = true;
-    g_summary.major_version = major;
-    g_summary.minor_version = minor;
+    g_summary.major_version = ep.major_version;
+    g_summary.minor_version = ep.minor_version;
 
-    // Walk the structure table. Each structure starts with a
-    // 4-byte header: type, length, handle (u16).
-    const auto* tbl_base = static_cast<const u8*>(mm::PhysToVirt(table_phys));
+    // 2) Map the structure table through the direct map. The
+    // anchor parser already capped `table_length` at 1 MiB.
+    const auto* tbl_base = static_cast<const u8*>(mm::PhysToVirt(ep.table_phys));
     if (tbl_base == nullptr)
     {
         core::Log(core::LogLevel::Warn, "arch/smbios", "SMBIOS table phys not in direct map");
         return;
     }
-    const u8* p = tbl_base;
-    const u8* end = tbl_base + table_len;
-    while (p + 4 < end)
+
+    // 3) Walk every structure. Each `parse_structure` call returns
+    // the next structure's start in `end_offset` — we stop on the
+    // type=127 sentinel, a parse error, or running off the end.
+    u64 off = 0;
+    while (off < ep.table_length)
     {
-        const u8 type = p[0];
-        const u8 length = p[1];
-        if (length < 4)
+        DuetosSmbiosStructure s = {};
+        if (!duetos_smbios_parse_structure(tbl_base, static_cast<usize>(ep.table_length), static_cast<usize>(off), &s))
             break;
-        if (p + length >= end)
+        HandleStructure(tbl_base, ep.table_length, s);
+        if (s.struct_type == 127)
             break;
-        HandleStructure(p, type, length);
-        // End-of-table marker.
-        if (type == 127)
-            break;
-        p = NextStructure(p, length);
-        if (p == nullptr || p >= end)
-            break;
+        off = s.end_offset;
     }
 
-    // Log compact summary.
+    // 4) Log compact summary.
     arch::SerialWrite("[smbios] v");
     arch::SerialWriteHex(g_summary.major_version);
     arch::SerialWrite(".");
