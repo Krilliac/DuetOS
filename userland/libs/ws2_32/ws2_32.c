@@ -516,7 +516,7 @@ __declspec(dllexport) INT gethostname(char* buf, INT len)
  *     as a numeric port; symbolic names like "http" return
  *     WSANO_DATA — which a future getservbyname could fill).
  */
-#define WS2_DNS_CACHE_SIZE 16
+#define WS2_DNS_CACHE_SIZE 64
 typedef struct
 {
     char name[256];
@@ -1059,8 +1059,6 @@ __declspec(dllexport) DWORD WSAWaitForMultipleEvents(DWORD cEvents, const WSAEVE
                                                      DWORD dwTimeout, BOOL fAlertable)
 {
     (void)fAlertable; /* v0 doesn't honour alertable here. */
-    (void)fWaitAll;   /* GAP: fWaitAll==TRUE reduces to fWaitAll==FALSE
-                       *      (return on the first ready event). */
     if (lphEvents == (const WSAEVENT_t*)0 || cEvents == 0)
     {
         g_wsa_last_error = 10014;
@@ -1072,9 +1070,12 @@ __declspec(dllexport) DWORD WSAWaitForMultipleEvents(DWORD cEvents, const WSAEVE
      *      socket has a fresh FD_* event the caller subscribed to,
      *      SetEvent the bound event handle (so it shows up in the
      *      per-event WaitForSingleObject probe below).
-     *   2. Probe each event in lphEvents with a 0 ms wait. A
-     *      WAIT_OBJECT_0 (0) return means that index is signaled —
-     *      hand it back immediately.
+     *   2. Probe each event in lphEvents with a 0 ms wait.
+     *      fWaitAll=FALSE: return on the first signaled index.
+     *      fWaitAll=TRUE:  only return if EVERY event is signaled;
+     *                      the returned index is WSA_WAIT_EVENT_0
+     *                      (Win32 returns the lowest index in the
+     *                      all-signaled case).
      *   3. If the overall timeout has elapsed, return WSA_WAIT_TIMEOUT.
      *   4. Sleep 10 ms and loop.
      *
@@ -1096,11 +1097,26 @@ __declspec(dllexport) DWORD WSAWaitForMultipleEvents(DWORD cEvents, const WSAEVE
                 ws2_event_set(g_wsa_bindings[i].event);
         }
         /* Step 2 — non-blocking probe of every event in lphEvents. */
-        for (DWORD i = 0; i < cEvents; ++i)
+        if (fWaitAll)
         {
-            const long long r = ws2_event_wait(lphEvents[i], 0);
-            if (r == 0) /* WAIT_OBJECT_0 */
-                return WSA_WAIT_EVENT_0 + i;
+            DWORD signaled = 0;
+            for (DWORD i = 0; i < cEvents; ++i)
+            {
+                if (ws2_event_wait(lphEvents[i], 0) == 0)
+                    ++signaled;
+                else
+                    break; /* one miss is enough — wait for next iter */
+            }
+            if (signaled == cEvents)
+                return WSA_WAIT_EVENT_0;
+        }
+        else
+        {
+            for (DWORD i = 0; i < cEvents; ++i)
+            {
+                if (ws2_event_wait(lphEvents[i], 0) == 0)
+                    return WSA_WAIT_EVENT_0 + i;
+            }
         }
         /* Step 3 — overall timeout. */
         if (dwTimeout != WSA_INFINITE)
