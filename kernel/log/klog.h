@@ -406,18 +406,35 @@ inline constexpr u64 kLogRingCapacity = 64;
 using LogTee = void (*)(const char*);
 void SetLogTee(LogTee writer);
 
-/// Install a third sink dedicated to file-style persistence
-/// (tmpfs today, on-disk log once a real FS lands). Called on every
-/// log-line chunk, independently of the framebuffer tee. When set,
-/// the current log ring is replayed into `writer` immediately so the
-/// sink captures the full boot history — not just post-install lines.
-/// Pass `nullptr` to disable. Safe to install from task context.
+/// Line-oriented sink for area-routed persistence. Called once per
+/// fully-formatted log line (no timestamp prefix, trailing newline
+/// included) with the LogLevel and LogArea so the receiver can route
+/// each line to a per-subsystem file rather than dumping everything
+/// into a single aggregate log.
+///
+/// When set, the current log ring is replayed through the sink
+/// immediately so it captures the full boot history — not just
+/// post-install lines. Pass `nullptr` to disable. Safe to install
+/// from task context.
 ///
 /// The sink's minimum severity is controlled separately via
-/// `SetLogFileSinkMinLevel` (default Info — Debug entries are filtered
-/// out so the file isn't overwhelmed by timer-tick spam).
-void SetLogFileSink(LogTee writer);
-void SetLogFileSinkMinLevel(LogLevel min_level);
+/// `SetLogLineSinkMinLevel` (default Info — Debug entries are
+/// filtered out so the per-area files aren't overwhelmed by
+/// timer-tick spam).
+///
+/// The `line` pointer is into a small static accumulator owned by
+/// klog; treat it as valid only for the duration of the call. The
+/// `line_len` argument is the byte length excluding the trailing
+/// NUL (the buffer IS NUL-terminated for convenience but `line_len`
+/// is what callers should use when appending to a file).
+///
+/// Replaces the older chunk-based `SetLogFileSink` API; the line +
+/// area shape lets each subsystem own its own log file (NET.LOG,
+/// USB.LOG, FS.LOG, …) instead of every line flooding into one
+/// aggregate.
+using LogLineSink = void (*)(LogLevel level, LogArea area, const char* line, u32 line_len);
+void SetLogLineSink(LogLineSink sink);
+void SetLogLineSinkMinLevel(LogLevel min_level);
 
 /// Variant of DumpLogRing that writes to an arbitrary string
 /// sink instead of COM1 directly. Useful for surfacing the ring

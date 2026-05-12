@@ -914,9 +914,12 @@ void CmdDmesg(u32 argc, char** argv)
         if (c == 'f' || c == 'F')
         {
             // File mode: stream the on-disk KERNEL.LOG instead
-            // of the in-memory ring. Captures the full Info+
-            // history since the FAT32 sink came online (rather
-            // than just the last kLogRingCapacity entries).
+            // of the in-memory ring. KERNEL.LOG is now the
+            // catch-all aggregate for lines whose subsystem
+            // didn't map to a specific area; per-subsystem
+            // chatter (NET.LOG, USB.LOG, FS.LOG, …) lives in
+            // its own file and is best inspected with
+            // `cat <AREA>.LOG`.
             namespace fat = duetos::fs::fat32;
             duetos::core::KlogPersistFlush();
             const fat::Volume* v = fat::Fat32Volume(0);
@@ -928,10 +931,10 @@ void CmdDmesg(u32 argc, char** argv)
             fat::DirEntry e;
             if (!fat::Fat32LookupPath(v, "KERNEL.LOG", &e))
             {
-                ConsoleWriteln("DMESG: KERNEL.LOG NOT FOUND");
+                ConsoleWriteln("DMESG: KERNEL.LOG NOT FOUND (per-area logs may still exist; try CAT <AREA>.LOG)");
                 return;
             }
-            ConsoleWriteln("-- KERNEL.LOG (FAT32) --");
+            ConsoleWriteln("-- KERNEL.LOG (FAT32, general bucket; per-area logs in <AREA>.LOG) --");
             fat::Fat32ReadFileStream(
                 v, &e,
                 [](const u8* data, u64 len, void*)

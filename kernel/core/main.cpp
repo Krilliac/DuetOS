@@ -2190,33 +2190,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // the same screen origin so the flip is in-place.
     duetos::core::SetLogTee([](const char* s) { duetos::drivers::video::ConsoleWriteKlog(s); });
 
-    // File sink: tee every Info+ log line into /tmp/boot.log on tmpfs.
-    // Accumulates chunks until a newline arrives, then appends the
-    // whole line. tmpfs caps files at 512 bytes — once that fills,
-    // further appends silently truncate, so the file captures the
-    // earliest boot-critical Info+ lines. Once a real FS lands, swap
-    // the sink for an on-disk writer and remove the cap.
-    duetos::core::SetLogFileSink(
-        [](const char* s)
-        {
-            static char line[256];
-            static duetos::u32 len = 0;
-            if (s == nullptr)
-                return;
-            while (*s != 0)
-            {
-                if (len < sizeof(line) - 1)
-                {
-                    line[len++] = *s;
-                }
-                if (*s == '\n')
-                {
-                    duetos::fs::TmpFsAppend("boot.log", line, len);
-                    len = 0;
-                }
-                ++s;
-            }
-        });
+    // Early-boot file sink: tee every Info+ log line into
+    // /tmp/boot.log on tmpfs. Receives one fully-formed line per
+    // call — the per-area FAT32 router will replace this sink later
+    // (KlogPersistInstall) once a real FS is mounted; until then,
+    // every line lands in the single boot.log so post-boot inspection
+    // has the early bring-up record. tmpfs caps files at 512 bytes —
+    // once that fills, further appends silently truncate, so the
+    // file captures the earliest boot-critical Info+ lines.
+    duetos::core::SetLogLineSink([](duetos::core::LogLevel, duetos::core::LogArea, const char* line, duetos::u32 len)
+                                 { duetos::fs::TmpFsAppend("boot.log", line, len); });
     duetos::drivers::video::ConsoleWriteln("DUETOS BOOT LOG");
     duetos::drivers::video::ConsoleWriteln("=================");
     duetos::drivers::video::ConsoleWriteln("");
