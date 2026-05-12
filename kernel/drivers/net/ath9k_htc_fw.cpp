@@ -139,8 +139,13 @@ void AthHtcFirmwareSelfTest()
     KASSERT(parsed.chunk_count == 13u, "drivers/net/ath9k_htc_fw", "chunk_count mismatch");
     KASSERT(parsed.tail_chunk_bytes == 3u * 1024, "drivers/net/ath9k_htc_fw", "tail_chunk_bytes mismatch");
 
-    // AR7010-sized blob: 70 KiB. Same pattern, different band.
-    constexpr u32 kSize7010 = 70u * 1024;
+    // AR7010-sized blob. The AR9271 band [24..96] KiB and the
+    // AR7010 band [56..160] KiB overlap intentionally (real-world
+    // firmware sizes do, and the first-match-wins predicate is the
+    // documented behaviour — see the 40 KiB / 200 KiB cases below).
+    // Pick 130 KiB so the blob is unambiguously in the AR7010 band
+    // and the test exercises the AR7010 leg of the predicate.
+    constexpr u32 kSize7010 = 130u * 1024;
     static u8 buf7010[kSize7010];
     for (u32 i = 0; i < kSize7010; ++i)
         buf7010[i] = static_cast<u8>((i * 13u + 11u) & 0xFFu);
