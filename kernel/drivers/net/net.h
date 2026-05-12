@@ -146,5 +146,6 @@ const char* IntelNicTag(u16 device_id);
 const char* RealtekNicTag(u16 device_id);
 const char* BroadcomNicTag(u16 device_id);
 const char* VirtioNetTag(u16 device_id);
+const char* MediatekNicTag(u16 device_id);
 
 } // namespace duetos::drivers::net

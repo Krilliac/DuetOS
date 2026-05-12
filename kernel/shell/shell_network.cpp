@@ -38,6 +38,7 @@
 #include "net/firewall.h"
 #include "net/stack.h"
 #include "net/wifi.h"
+#include "net/wireless/inventory.h"
 #include "net/wireless/wifi_diag.h"
 #include "sched/sched.h"
 #include "diag/cleanroom_trace.h"
@@ -686,6 +687,39 @@ void CmdNetscan()
 
 void CmdWifi(u32 argc, char** argv)
 {
+    if (argc >= 2 && (StrEq(argv[1], "info") || StrEq(argv[1], "inventory") || StrEq(argv[1], "hw")))
+    {
+        // Hardware inventory: walk every detected wireless adapter
+        // (PCI + USB) and print what firmware basename it needs,
+        // where to stage it, and current driver/firmware state.
+        // Mirrors the boot-log block emitted by
+        // `WirelessInventoryDump` but routed through the console
+        // so an operator with a shell session can re-print it on
+        // demand without rebooting.
+        duetos::net::wireless::WirelessInventoryDump();
+        return;
+    }
+    if (argc >= 2 && StrEq(argv[1], "help"))
+    {
+        ConsoleWriteln("wifi — Wi-Fi adapter / association / hardware test commands");
+        ConsoleWriteln("  wifi                       short for `wifi status`");
+        ConsoleWriteln("  wifi status                association state for iface 0");
+        ConsoleWriteln("  wifi info                  hardware inventory (every detected adapter +");
+        ConsoleWriteln("                             expected firmware basename + stage location)");
+        ConsoleWriteln("  wifi scan                  active probe; lists nearby BSSIDs (driver-backed)");
+        ConsoleWriteln("  wifi connect <ssid> [psk]  associate + DHCP; psk omitted = open auth");
+        ConsoleWriteln("  wifi disconnect            tear down the active association");
+        ConsoleWriteln("  wifi capture               dump captured frames from the diagnostic ring");
+        ConsoleWriteln("");
+        ConsoleWriteln("Hardware-test playbook (real-laptop bring-up):");
+        ConsoleWriteln("  1. Boot DuetOS from the ISO; run `wifi info`.");
+        ConsoleWriteln("  2. Note each adapter's expected basename + stage directory.");
+        ConsoleWriteln("  3. Drop the matching `linux-firmware` blob(s) at the listed paths");
+        ConsoleWriteln("     (or wrap with `tools/firmware/mkduetfw.py` and use `.duetfw`).");
+        ConsoleWriteln("  4. Reboot; `wifi info` should now show fw=ready for each adapter.");
+        ConsoleWriteln("  5. `wifi scan` to enumerate; `wifi connect <ssid> <psk>` to join.");
+        return;
+    }
     if (argc < 2 || StrEq(argv[1], "status"))
     {
         const auto st = duetos::net::WifiStatusRead(0);

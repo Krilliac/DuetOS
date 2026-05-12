@@ -359,9 +359,14 @@ In rough priority:
   MSI/MSI-X. iwlwifi TFD descriptor build / doorbell / per-RBD
   data buffers. Installer integration for the offline Wi-Fi firmware kit
   (`tools/firmware/prepare-wifi-firmware.py` output staged from install
-  media or USB before the network picker opens). Recommended first
-  open-firmware loop: AR9271/AR7010 `ath9k_htc` USB adapter, then return
-  to Intel iwlwifi.
+  media or USB before the network picker opens). The AR9271/AR7010
+  `ath9k_htc` open-firmware bring-up scaffold (USB ID match table,
+  HTC `FIRMWARE_DOWNLOAD` chunking, `FwLoad` open-firmware lookup,
+  three boot self-tests) is now in tree at
+  `kernel/drivers/net/ath9k_htc{,_fw,_upload}.{h,cpp}`; running it
+  end-to-end requires a physical AR9271/AR7010 USB dongle (open
+  firmware is not available for any on-board commodity Wi-Fi chip).
+  Returning to Intel iwlwifi after that loop is unchanged.
 - **Unlocks:** Network flyout SSID picker, Settings → Network →
   Wi-Fi tab, captive-portal handler.
 - **Owner:** `kernel/drivers/net/wireless/` (per-vendor upload +

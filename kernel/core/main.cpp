@@ -94,6 +94,9 @@
 #include "drivers/gpu/intel_gsc_fw.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
+#include "drivers/net/ath9k_htc.h"
+#include "drivers/net/ath9k_htc_fw.h"
+#include "drivers/net/ath9k_htc_upload.h"
 #include "drivers/net/bcm43xx_fw.h"
 #include "drivers/net/bcm43xx_upload.h"
 #include "drivers/net/firmware_policy.h"
@@ -101,12 +104,14 @@
 #include "drivers/net/iwlwifi_rings.h"
 #include "drivers/net/iwlwifi_ucode_builder.h"
 #include "drivers/net/iwlwifi_upload.h"
+#include "drivers/net/mt76_fw.h"
 #include "drivers/net/net.h"
 #include "drivers/net/rtl88xx_fw.h"
 #include "drivers/net/rtl88xx_upload.h"
 #include "net/bluetooth/diag.h"
 #include "net/bluetooth/hci.h"
 #include "net/wireless/beacon.h"
+#include "net/wireless/inventory.h"
 #include "crypto/aes.h"
 #include "crypto/aes_keywrap.h"
 #include "crypto/hmac.h"
@@ -2901,6 +2906,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlFirmwareBuilderSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::RtlFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::BcmFirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::AthHtcFirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::AthHtcUploadSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::AthHtcSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::Mt76FirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::WirelessInventorySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::BeaconSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::HciSelfTest());
     duetos::net::bluetooth::BluetoothDiagInit();
@@ -2977,6 +2987,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::hid::HidSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::UsbClassDescriptorSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::msc::MscSelfTest());
+
+    // ath9k_htc USB Wi-Fi adapters (AR9271 / AR7010 family) are the
+    // canonical open-firmware Wi-Fi target — `qca/open-ath9k-htc-firmware`
+    // ships rebuildable images that the firmware loader prefers via
+    // the `/lib/firmware/duetos/open/ath9k-htc/` namespace before
+    // any vendor blob path. AthHtcInit walks the live xHCI PortRecord
+    // cache, matches VID/PID, and runs the HTC firmware download
+    // protocol for each adapter found.
+    duetos::drivers::net::AthHtcInit();
+    // Wireless hardware inventory: emit a single, easy-to-grep boot-log
+    // block that lists every detected Wi-Fi adapter and the firmware
+    // basename it needs. First thing a real-hardware tester reads.
+    duetos::net::wireless::WirelessInventoryDump();
 
     SerialWrite("[boot] Detecting audio controllers.\n");
     duetos::drivers::audio::AudioInit();

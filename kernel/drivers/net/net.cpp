@@ -37,6 +37,7 @@
 #include "diag/cleanroom_trace.h"
 #include "drivers/net/bcm43xx.h"
 #include "drivers/net/iwlwifi.h"
+#include "drivers/net/mt76.h"
 #include "drivers/net/rtl88xx.h"
 #include "drivers/pci/pci.h"
 #include "log/klog.h"
@@ -68,8 +69,9 @@ struct VendorEntry
 };
 
 constexpr VendorEntry kVendors[] = {
-    {kVendorIntel, "Intel"},     {kVendorRealtek, "Realtek"},   {kVendorBroadcom, "Broadcom"},
-    {kVendorMarvell, "Marvell"}, {kVendorMellanox, "Mellanox"}, {kVendorRedHatVirt, "virtio-net"},
+    {kVendorIntel, "Intel"},       {kVendorRealtek, "Realtek"},   {kVendorBroadcom, "Broadcom"},
+    {kVendorMarvell, "Marvell"},   {kVendorMellanox, "Mellanox"}, {kVendorRedHatVirt, "virtio-net"},
+    {kVendorMediaTek, "MediaTek"},
 };
 
 const char* VendorShort(u16 vid)
@@ -712,6 +714,9 @@ bool RunVendorProbe(NicInfo& n)
     case kVendorRedHatVirt:
         family = VirtioNetTag(n.device_id);
         break;
+    case kVendorMediaTek:
+        family = MediatekNicTag(n.device_id);
+        break;
     default:
         return false;
     }
@@ -754,6 +759,11 @@ bool RunVendorProbe(NicInfo& n)
     else if (Bcm43xxMatches(n.vendor_id, n.device_id))
     {
         wireless_shell = Bcm43xxBringUp(n);
+        brought_up = wireless_shell;
+    }
+    else if (Mt76Matches(n.vendor_id, n.device_id))
+    {
+        wireless_shell = Mt76BringUp(n);
         brought_up = wireless_shell;
     }
     {
@@ -886,6 +896,8 @@ void NetInit()
                 Rtl88xxStartWatch(g_nics[nic_index]);
             else if (Bcm43xxMatches(g_nics[nic_index].vendor_id, g_nics[nic_index].device_id))
                 Bcm43xxStartWatch(g_nics[nic_index]);
+            else if (Mt76Matches(g_nics[nic_index].vendor_id, g_nics[nic_index].device_id))
+                Mt76StartWatch(g_nics[nic_index]);
         }
     }
 
@@ -1019,7 +1031,11 @@ bool FamilyLooksWireless(const char* family)
     // since the suffixes drift across silicon revisions.
     return StrPrefixMatches(family, "iwlwifi") || StrPrefixMatches(family, "rtl8821") ||
            StrPrefixMatches(family, "bcm43") || StrPrefixMatches(family, "bcm4331") ||
-           StrPrefixMatches(family, "rtl88");
+           StrPrefixMatches(family, "rtl88") || StrPrefixMatches(family, "mt76") ||
+           StrPrefixMatches(family, "mt7615") || StrPrefixMatches(family, "mt7663") ||
+           StrPrefixMatches(family, "mt7915") || StrPrefixMatches(family, "mt7916") ||
+           StrPrefixMatches(family, "mt7921") || StrPrefixMatches(family, "mt7922") ||
+           StrPrefixMatches(family, "mt7925");
 }
 
 } // namespace
@@ -1211,6 +1227,33 @@ const char* VirtioNetTag(u16 device_id)
     if (device_id == 0x1000 || device_id == 0x1041)
         return "virtio-net";
     return "virtio-unknown-class";
+}
+
+const char* MediatekNicTag(u16 device_id)
+{
+    // MediaTek mt76 PCIe wireless family. Tag returned drives the
+    // family-string heuristic in `FamilyLooksWireless`, so the
+    // names below must start with a recognised wireless prefix.
+    switch (Mt76FamilyFromDeviceId(device_id))
+    {
+    case Mt76Family::Mt7615:
+        return "mt7615-wifi";
+    case Mt76Family::Mt7663:
+        return "mt7663-wifi";
+    case Mt76Family::Mt7915:
+        return "mt7915-wifi";
+    case Mt76Family::Mt7916:
+        return "mt7916-wifi";
+    case Mt76Family::Mt7921:
+        return "mt7921-wifi";
+    case Mt76Family::Mt7922:
+        return "mt7922-wifi";
+    case Mt76Family::Mt7925:
+        return "mt7925-wifi";
+    case Mt76Family::Unknown:
+    default:
+        return "mediatek-unknown";
+    }
 }
 
 namespace

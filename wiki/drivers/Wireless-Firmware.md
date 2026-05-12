@@ -215,13 +215,77 @@ move back to Intel iwlwifi for the tier-1 laptop path.
 - openSUSE `b43-openfwwf` feature/limit notes: <https://build.opensuse.org/package/show/hardware/b43-openfwwf>
 - Nexmon firmware patching framework paper: <https://www.sciencedirect.com/science/article/pii/S014036641731294X>
 
+## Hardware-test playbook
+
+Boot DuetOS on the target laptop (USB stick imaged from the ISO is the simplest
+path). On the serial console / earliest boot output, look for the block:
+
+```
+=== WIRELESS HARDWARE INVENTORY ===
+  [pci 02:00.0] vid=8086 did=A0F0 family=iwlwifi ... fw=missing (closed-redistributable)
+    firmware basename : iwlwifi-cc-a0-46.ucode
+    stage under       : /lib/firmware/intel-iwlwifi/
+=== END WIRELESS INVENTORY (...) ===
+```
+
+That block is the single source of truth for "what was detected" and "what to
+stage". The same block is reachable at runtime via the shell command
+`wifi info` (or `wifi inventory` / `wifi hw`) without needing to reboot, and
+`wifi help` prints this playbook.
+
+Staging firmware uses one of two paths:
+
+- **Direct staging** — drop the raw blob from `linux-firmware` at the listed
+  path. Boot media's ramfs is mounted read-only from the firmware staging
+  directory passed to CMake via `-DDUETOS_FIRMWARE_STAGING_DIR`.
+- **`.duetfw` package** — wrap the raw blob with `tools/firmware/mkduetfw.py`
+  for source-tracking + SHA-256 verification. The loader transparently
+  unwraps verified packages alongside the canonical basename.
+
+After staging:
+
+1. Reboot. `wifi info` should now read `fw=ready` for each wired-up adapter.
+2. `wifi scan` to enumerate nearby SSIDs (driver-backed; needs a finished
+   per-vendor PCIe ring / MSI-X path — currently in progress for iwlwifi).
+3. `wifi connect <ssid> [psk]` to associate + DHCP. Open networks omit the
+   PSK; WPA2-PSK uses the second arg.
+
+The expected current outcome on commodity hardware: the inventory block lists
+the adapter correctly, `fw=ready` flips when firmware is staged, but `scan` /
+`connect` fail until each per-vendor driver finishes its TX/RX ring + IRQ
+wiring. The inventory and firmware paths landing first is deliberate — they
+turn "no Wi-Fi" into a series of small, testable steps instead of a single
+blocking question.
+
+## Hardware reality check for on-board Wi-Fi
+
+No commodity laptop / desktop chipset ships with open Wi-Fi firmware. The
+open-firmware path (`ath9k_htc`, see below) requires obtaining a small external
+USB dongle (AR9271 or AR7010 based — TP-Link TL-WN722N v1, Alfa AWUS036NHA,
+Netgear WNA1100, Ubiquiti SR71-USB, etc., ~$15-30). If that is not acceptable,
+the on-board Wi-Fi will work only via the redistributable closed-firmware path
+already supported by `iwlwifi` (Intel) / `rtl88xx` (Realtek) / `bcm43xx`
+(Broadcom). For those, the gating work is finishing the per-vendor PCIe ring /
+MSI-X / TFD plumbing — not firmware availability. Identify on-board hardware on
+a Linux host with `lspci -nn | grep -iE 'network|wireless'`; the vendor:device
+ID drives which existing DuetOS driver scaffold the firmware kit must populate.
+
 ## Next implementation steps
 
-1. Add an `ath9k_htc` USB probe skeleton and HTC firmware-download path for
-   AR9271/AR7010, using `.duetfw` packages for source-built firmware.
+1. ~~Add an `ath9k_htc` USB probe skeleton and HTC firmware-download path for
+   AR9271/AR7010, using `.duetfw` packages for source-built firmware.~~ Landed:
+   `kernel/drivers/net/ath9k_htc.{h,cpp}`, `ath9k_htc_fw.{h,cpp}`, and
+   `ath9k_htc_upload.{h,cpp}` implement VID/PID matching against the xHCI
+   `PortRecord` cache, blob validation, deterministic chunk planning, and the
+   USB control-transfer state machine for `FIRMWARE_DOWNLOAD` (0x30) +
+   `FIRMWARE_DOWNLOAD_COMP` (0x31). `AthHtcInit()` runs after `XhciInit()` and
+   three boot self-tests (parser, upload plan, USB ID table) gate every boot.
 2. Extend the package manifest/header with an optional signer key ID once the
    project has a firmware signing root.
 3. Teach `IwlUploadDrive()` to consume all `SEC_RT` sections, not just the first
    parsed section, then wire PCIe doorbells and per-RBD receive buffers.
 4. Add a shell command that prints retained `FwTraceEntry` records and package
    source flags for field debugging.
+5. After bootrom hand-off completes on real AR9271 hardware, implement the HTC
+   service negotiation (WMI service IDs, EP1/EP2 bulk mailbox endpoints) so the
+   driver can drive scan / auth / assoc through the wdev/MLME layer.

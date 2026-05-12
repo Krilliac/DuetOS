@@ -39,6 +39,7 @@ enum class FirmwareFamily : u8
     BroadcomB43OpenFwwf = 3,
     BroadcomBrcmFullMac = 4,
     RealtekRtl88xx = 5,
+    MediatekMt76 = 6,
 };
 
 enum class FirmwareSourceKind : u8
