@@ -1960,6 +1960,23 @@ void TcpOnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_
         return;
     }
 
+    // RST: tear the connection down before any further state work.
+    // RFC 793: a segment carrying RST on the established 4-tuple
+    // moves us into Closed; v0 doesn't bother with the in-window
+    // sequence check (single-connection state machine) — any RST
+    // that survives the 4-tuple match above is an in-band kill.
+    // Without this branch the state machine ignored RSTs entirely,
+    // leaving the slot pinned to a half-dead connection and silently
+    // continuing to ACK data the peer had already abandoned.
+    if ((flags & kTcpFlagRstBit) != 0)
+    {
+        g_tcp_conn.state = TcpState::Closed;
+        g_tcp_conn.response_complete = true;
+        ++g_tcp_stats.rx_out_of_state;
+        SocketTcpRxNotify();
+        return;
+    }
+
     // Client side: SYN+ACK arrives while we're in SynSent → ACK
     // the handshake, transition to Established, ship the queued
     // request as the first data segment. The server's own ACK of

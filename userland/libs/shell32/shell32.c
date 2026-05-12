@@ -40,6 +40,13 @@ __declspec(dllexport) wchar_t16** CommandLineToArgvW(const wchar_t16* cmd, int* 
         }
         ++total; /* NUL */
     }
+    /* Empty / whitespace-only commands count zero tokens. The syscall
+     * gladly returns success on a zero-byte allocation (some allocators
+     * hand out a non-null pointer to an empty block), at which point
+     * the second pass's `argv[k++] = ...` writes one wchar_t16* past
+     * the allocation. Short-circuit before we ask for nothing. */
+    if (n == 0)
+        return (wchar_t16**)0;
     /* Allocate via SYS_HEAP_ALLOC — argv pointers + parallel chars. */
     unsigned long bytes = (unsigned long)n * sizeof(wchar_t16*) + (unsigned long)total * sizeof(wchar_t16);
     long long rv;
