@@ -1,6 +1,7 @@
 #include "util/bmp.h"
 
 #include "core/panic.h"
+#include "img_meta_rust.h"
 
 namespace duetos::util
 {
@@ -20,16 +21,6 @@ inline void StoreU32(u8* p, u32 v)
     p[1] = u8(v >> 8);
     p[2] = u8(v >> 16);
     p[3] = u8(v >> 24);
-}
-
-inline u16 LoadU16(const u8* p)
-{
-    return u16(u16(p[0]) | (u16(p[1]) << 8));
-}
-
-inline u32 LoadU32(const u8* p)
-{
-    return u32(p[0]) | (u32(p[1]) << 8) | (u32(p[2]) << 16) | (u32(p[3]) << 24);
 }
 
 } // namespace
@@ -65,31 +56,25 @@ void BmpWriteHeader32(u8 out[kBmpHeaderBytes], u32 width, u32 height, bool top_d
 
 BmpInfo BmpParseHeader(const u8* hdr)
 {
+    // Validation lives in the Rust crate `duetos_img_meta` —
+    // bounds-checked LE field reads + sign-bit height handling +
+    // 16384×16384 dim cap. C++ wrapper does field-by-field copy
+    // on the way out so layout drift can't silently break callers.
+    // The historic C++ signature took no length parameter and
+    // assumed `hdr` carried at least 54 bytes; we pass the exact
+    // header-size budget down to the Rust crate so a future
+    // shorter-than-expected caller still gets a clean failure.
     BmpInfo info = {};
-    if (hdr[0] != 'B' || hdr[1] != 'M')
+    img_meta::DuetosBmpInfo r{};
+    if (!img_meta::duetos_img_meta_parse_bmp(hdr, static_cast<usize>(kBmpHeaderBytes), &r))
         return info;
-    info.pixel_offset = LoadU32(hdr + 10);
-    const u32 dib_size = LoadU32(hdr + 14);
-    if (dib_size < 40)
-        return info;
-    info.width = LoadU32(hdr + 18);
-    const i32 signed_height = i32(LoadU32(hdr + 22));
-    if (signed_height < 0)
-    {
-        info.height = u32(-signed_height);
-        info.top_down = true;
-    }
-    else
-    {
-        info.height = u32(signed_height);
-        info.top_down = false;
-    }
-    info.bpp = LoadU16(hdr + 28);
-    info.compression = LoadU32(hdr + 30);
-    constexpr u32 kMaxDim = 16384;
-    if (info.width == 0 || info.height == 0 || info.width > kMaxDim || info.height > kMaxDim)
-        return info;
-    info.ok = true;
+    info.width = r.width;
+    info.height = r.height;
+    info.bpp = r.bpp;
+    info.compression = r.compression;
+    info.pixel_offset = r.pixel_offset;
+    info.top_down = (r.top_down != 0);
+    info.ok = (r.ok != 0);
     return info;
 }
 

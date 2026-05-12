@@ -8259,3 +8259,74 @@ doc helps future readers audit the trail.
     that the open path sets.
 - **Related roadmap track(s):** Track 11 (kernel infrastructure
   gaps) — companion to T11-02 (anonymous cross-process pipes).
+
+## 2026-05-12 — Rust bring-up complete: PE/ELF + PNG/BMP land, speculative items deferred with explicit triggers
+
+- **Context.** The Rust-bring-up section of `wiki/reference/Roadmap.md`
+  enumerated five categories of P0/P1 candidates after the first
+  four Rust slices (DuetFS, USB HID, USB class config, DHCP/DNS,
+  USB MSC SCSI). This slice lands the two remaining items with
+  current C++ callers — image-header validators (PNG + BMP) and
+  executable-image validators (ELF64 + PE prefix) — and closes
+  out the speculative tail.
+- **Decision: land two new crates.**
+  - `kernel/util/img_meta_rust/` (`duetos_img_meta`) — bounds-
+    checked walkers for the PNG 8-byte signature + IHDR length +
+    IHDR tag + IHDR CRC + dimension / bit-depth / colour-type /
+    compress / filter / interlace gates, and for the BMP "BM"
+    signature + DIB-size ≥ 40 + width/height + sign-bit (top-down)
+    + bpp + compression word.
+  - `kernel/loader/exec_meta_rust/` (`duetos_exec_meta`) — full
+    ELF64 header validator (replaces `ElfValidate` in
+    `kernel/loader/elf_loader.cpp`) and PE prefix validator
+    (replaces the first six `PeStatus` returns of `ParseHeaders`
+    in `kernel/loader/pe_loader.cpp`). The deeper PE optional-
+    header / section-table / data-directory walk stays in C++
+    pending its own slice.
+- **What does NOT land.** Six categories from the original
+  Rust-bring-up list are deferred with explicit re-open triggers,
+  documented in the Roadmap "Items deliberately left out of v0
+  Rust" table:
+  - USB MSC REQUEST SENSE parser — no CBW-stall-recovery path
+    in the bulk transport, so a parser today would have no
+    caller (anti-bloat violation per
+    `wiki/tooling/Rust-Subsystems.md`).
+  - USB hub status-change endpoint parser — no current hub
+    driver TU consumes the bytes.
+  - USB UVC class-specific descriptor bodies — no camera-class
+    driver exists.
+  - TCP / IPv4 / ICMP option-list walkers — the existing C++
+    stack reads only header-fixed-fields; options aren't used by
+    any kernel decision.
+  - NTFS / exFAT / ext4 metadata walkers — no read-only driver
+    for any of the three exists in-tree.
+  - Compression / font-file / crypto-framing parsers — no new
+    format-decoder TU is in flight.
+- **Why deferring is the right call here.** The anti-bloat rule
+  (`CLAUDE.md`) is explicit: don't add a system that isn't wired
+  in. Each deferred item is a parser without a consumer; landing
+  the Rust crate today would create an unreferenced FFI surface
+  + permanent maintenance burden. The Roadmap table records the
+  exact trigger that re-opens each one.
+- **What this closes.** The "Rust bring-up — bootstrapped" section
+  of the Roadmap moves from "five candidates listed; two
+  partially landed" to "closed out". Future Rust work proceeds
+  per the contract in `wiki/tooling/Rust-Subsystems.md`: one
+  crate per subsystem, narrow C FFI, no Rust in the middle of a
+  C++ call chain, hand-written headers, every new crate has a
+  real C++ caller.
+- **Carry-overs / follow-ups (not blockers).**
+  - The PE prefix validator covers the first six `PeStatus` values
+    (`Ok` / `TooSmall` / `BadDosMagic` / `BadLfanewBounds` /
+    `BadNtSignature` / `BadMachine`). The remaining values
+    (`NotPe32Plus`, `SectionAlignUnsup`, `FileAlignUnsup`,
+    `SectionCountZero`, `OptHeaderOutOfBounds`,
+    `SectionOutOfBounds`, etc.) still come from the C++ side.
+    Pulling those in is its own slice once the C++ state machine
+    in `ParseHeaders` is split up cleanly.
+  - `clippy::undocumented_unsafe_blocks` is still aspirational
+    (the v0 duetfs + USB crates carry ~117 bare unsafe blocks
+    without SAFETY comments). All five new crates ship SAFETY
+    comments on every unsafe block, so a future backfill slice
+    can lift the lint to "deny" once the legacy crates are
+    annotated.

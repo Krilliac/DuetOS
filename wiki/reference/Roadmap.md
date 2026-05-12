@@ -665,32 +665,43 @@ DuetFS slice (trigger #1 — on-disk filesystem parsing). See
 pinned in `/rust-toolchain.toml`; CMake builds drive cargo through
 each crate's leaf `CMakeLists.txt`.
 
-The second through fifth Rust subsystems are now live: USB HID report-descriptor
-parsing (`kernel/drivers/usb/hid_rust/`), USB class configuration parsing
+All seven Rust subsystems are now live: USB HID report-descriptor parsing
+(`kernel/drivers/usb/hid_rust/`), USB class configuration parsing
 (`kernel/drivers/usb/class_rust/`), DHCPv4 option + DNSv1 name walkers
-(`kernel/net/parsers_rust/`, replaces `DhcpFindOption` / `DnsSkipName` in
-`kernel/net/stack.cpp`), and USB MSC SCSI response parsers
-(`kernel/drivers/usb/msc_scsi_rust/`, replaces the INQUIRY / READ CAPACITY /
-GET CONFIGURATION / READ TOC / READ DISC INFORMATION parser bodies in
-`kernel/drivers/usb/msc_scsi.cpp`). All five are standalone Rust rlibs called
-through hand-written C ABIs from existing C++ surfaces.
+(`kernel/net/parsers_rust/`), USB MSC SCSI response parsers
+(`kernel/drivers/usb/msc_scsi_rust/`), PNG + BMP header validators
+(`kernel/util/img_meta_rust/`), and ELF64 / PE-prefix validators
+(`kernel/loader/exec_meta_rust/`). All seven are standalone Rust rlibs
+called through hand-written C ABIs from existing C++ surfaces; the
+canonical inventory lives at
+[`wiki/tooling/Rust-Subsystems.md`](../tooling/Rust-Subsystems.md).
 
-Remaining triggers for **future** Rust subsystems:
+The Rust-bring-up checklist is **closed out**. Future Rust work happens
+through one of two channels:
 
-1. **Deeper USB class payload parsers (continued)** — MSC REQUEST SENSE /
-   hub status-change endpoint / UVC class-specific descriptor bodies. (MSC
-   INQUIRY / capacity / config / TOC / disc-info landed in `msc_scsi_rust`;
-   REQUEST SENSE waits for the CBW-stall-recovery path in the bulk transport.)
-2. **TCP/IP stack header walkers** — IPv4 / ICMP / UDP / TCP option-list
-   parsers. (DHCP + DNS option walkers are in `parsers_rust`; the IP-layer
-   headers are still C++.)
-3. **PE/COFF + ELF metadata readers** — project pillar surface; image
-   metadata is fully attacker-controlled.
-4. **Read-only disk-format parsers** — NTFS / exFAT / ext4 metadata walkers
-   (the kernel only ships FAT32 today; new formats land in Rust from day one).
-5. **Anything else with non-trivial parsing of attacker-supplied
-   structured bytes** — image formats, compression, font files,
-   crypto framings.
+1. **Existing crates grow to cover their successor surface** — `parsers_rust`
+   adds TCP-option / IPv4-option walkers when a real consumer for those
+   options lands; `msc_scsi_rust` adds REQUEST SENSE when the bulk-transport
+   CBW-stall recovery path lands; `exec_meta_rust` absorbs the rest of the
+   PE optional-header / section-table / data-directory walk when the
+   C++ `ParseHeaders` state machine gets split up. Each is its own slice.
+2. **New crates land per the contract in
+   [`wiki/tooling/Rust-Subsystems.md`](../tooling/Rust-Subsystems.md)** —
+   one crate per subsystem, narrow C FFI, no Rust in the middle of a C++
+   call chain. A new Rust subsystem is a real new feature with a real
+   caller, not a speculative future-proofing.
+
+Items deliberately left out of v0 Rust, with the trigger that would re-open
+each (see [`Design-Decisions.md`](Design-Decisions.md) for the rationale):
+
+| Topic | Trigger to revisit |
+| --- | --- |
+| USB MSC REQUEST SENSE parser | CBW-stall-recovery path in the bulk transport lands |
+| USB hub status-change endpoint parser | A real hub driver TU starts consuming the bytes |
+| USB UVC class-specific descriptor bodies | A UVC driver lands (no current camera-class consumer) |
+| TCP / IPv4 / ICMP option-list walkers | TCP options affect kernel decisions (currently ignored) |
+| NTFS / exFAT / ext4 metadata walkers | A read-only driver for any of the three is wanted |
+| Compression / font-file / crypto-framing parsers | A new format-decoder enters the tree |
 
 **Not** triggers (unchanged):
 

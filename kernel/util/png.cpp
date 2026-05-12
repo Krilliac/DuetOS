@@ -1,6 +1,7 @@
 #include "util/png.h"
 
 #include "core/panic.h"
+#include "img_meta_rust.h"
 #include "util/adler32.h"
 #include "util/crc32.h"
 #include "util/gzip.h"
@@ -18,7 +19,6 @@ inline u32 LoadU32Be(const u8* p)
 
 constexpr u8 kSignature[kPngSignatureBytes] = {0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A};
 
-constexpr u8 kColorTypeRgb = 2;
 constexpr u8 kColorTypeRgba = 6;
 
 bool TagEq(const u8* p, const char* tag)
@@ -48,38 +48,20 @@ inline u8 PaethPredictor(u8 a, u8 b, u8 c)
 
 PngInfo PngParseHeader(const u8* src, u32 src_len)
 {
+    // Validation lives in the Rust crate `duetos_img_meta` — same
+    // bounds-checked walker, CRC32 verification, dimension /
+    // bit-depth / colour-type / compress / filter / interlace
+    // gates. C++ wrapper does field-by-field copy on the way out
+    // so layout drift between Rust and C++ can't silently break.
     PngInfo info = {};
-    if (src_len < kPngSignatureBytes + 8 + 13 + 4)
+    img_meta::DuetosPngInfo r{};
+    if (!img_meta::duetos_img_meta_parse_png(src, static_cast<usize>(src_len), &r))
         return info;
-    for (u32 i = 0; i < kPngSignatureBytes; ++i)
-        if (src[i] != kSignature[i])
-            return info;
-    const u32 ihdr_len = LoadU32Be(src + 8);
-    if (ihdr_len != 13)
-        return info;
-    if (!TagEq(src + 12, "IHDR"))
-        return info;
-    const u32 stored_crc = LoadU32Be(src + 12 + 4 + 13);
-    if (!VerifyChunkCrc(src + 12, 4 + 13, stored_crc))
-        return info;
-    info.width = LoadU32Be(src + 16);
-    info.height = LoadU32Be(src + 20);
-    info.bit_depth = src[24];
-    info.color_type = src[25];
-    const u8 compress = src[26];
-    const u8 filter = src[27];
-    const u8 interlace = src[28];
-    if (info.width == 0 || info.height == 0)
-        return info;
-    if (info.width > 16384 || info.height > 16384)
-        return info;
-    if (info.bit_depth != 8)
-        return info;
-    if (info.color_type != kColorTypeRgb && info.color_type != kColorTypeRgba)
-        return info;
-    if (compress != 0 || filter != 0 || interlace != 0)
-        return info;
-    info.ok = true;
+    info.width = r.width;
+    info.height = r.height;
+    info.bit_depth = r.bit_depth;
+    info.color_type = r.color_type;
+    info.ok = (r.ok != 0);
     return info;
 }
 

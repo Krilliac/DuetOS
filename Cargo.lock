@@ -112,10 +112,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "duetos_exec_meta"
+version = "0.0.1"
+
+[[package]]
+name = "duetos_img_meta"
+version = "0.0.1"
+
+[[package]]
 name = "duetos_kernel_rust"
 version = "0.0.1"
 dependencies = [
  "duetfs",
+ "duetos_exec_meta",
+ "duetos_img_meta",
  "duetos_net_parsers",
  "duetos_usb_msc_scsi",
  "usbclass",

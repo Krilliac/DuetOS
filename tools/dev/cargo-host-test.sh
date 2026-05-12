@@ -19,6 +19,8 @@ set -euo pipefail
 HOST_TEST_CRATES=(
     "kernel/net/parsers_rust"
     "kernel/drivers/usb/msc_scsi_rust"
+    "kernel/util/img_meta_rust"
+    "kernel/loader/exec_meta_rust"
 )
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

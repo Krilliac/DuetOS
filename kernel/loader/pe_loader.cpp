@@ -45,6 +45,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "debug/probes.h"
+#include "exec_meta_rust.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -84,9 +85,9 @@ inline u64 LeU64(const u8* p)
 }
 
 // ---- PE constants (the handful the v0 loader cares about) ----
-constexpr u16 kDosMagic = 0x5A4D;        // 'M','Z' in LE
-constexpr u32 kPeSignature = 0x00004550; // 'P','E',0,0 in LE
-constexpr u16 kMachineAmd64 = 0x8664;
+// kDosMagic / kPeSignature / kMachineAmd64 used to live here; the
+// PE prefix check now runs in the Rust crate `duetos_exec_meta`,
+// which holds the canonical magic numbers.
 constexpr u16 kOptMagicPe32Plus = 0x020B;
 constexpr u32 kPageAlign = 4096;
 
@@ -286,30 +287,25 @@ PeDataDir ReadDataDir(const u8* file, const PeHeaders& h, u64 idx)
 // Parse and validate. PeHeaders is populated iff status is Ok.
 PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
 {
-    // DOS stub: need at least e_lfanew (offset 0x3C + 4 bytes).
-    if (file == nullptr || file_len < 0x40)
-        return PeStatus::TooSmall;
-    if (LeU16(file) != kDosMagic)
-        return PeStatus::BadDosMagic;
-
-    const u32 e_lfanew = LeU32(file + 0x3C);
-    // NT header = 4 bytes sig + 20 FileHeader + 240 PE32+ OptHeader.
-    // Demand at least sig + FileHeader; OptHeader size is read
-    // from FileHeader and bounds-checked below.
-    if (u64(e_lfanew) + 4 + kFileHeaderSize > file_len)
-        return PeStatus::BadLfanewBounds;
-    out.nt_base = e_lfanew;
-
-    if (LeU32(file + out.nt_base) != kPeSignature)
-        return PeStatus::BadNtSignature;
-
-    const u8* file_hdr = file + out.nt_base + 4;
-    const u16 machine = LeU16(file_hdr + 0);
-    if (machine != kMachineAmd64)
-        return PeStatus::BadMachine;
-    out.section_count = LeU16(file_hdr + 2);
+    // Prefix validation (DOS stub + e_lfanew bounds + PE signature
+    // + AMD64 machine check) lives in the Rust crate
+    // `duetos_exec_meta`. The first six PeStatus enumerators are
+    // byte-identical to the Rust crate's status enum so the FFI
+    // round-trips cleanly through a u32 cast.
+    using ::duetos::loader::exec_meta::duetos_exec_meta_pe_validate_prefix;
+    using ::duetos::loader::exec_meta::DuetosPePrefix;
+    DuetosPePrefix prefix{};
+    u32 prefix_status = 0;
+    if (!duetos_exec_meta_pe_validate_prefix(file, static_cast<usize>(file_len), &prefix, &prefix_status))
+        return static_cast<PeStatus>(prefix_status);
+    out.nt_base = prefix.nt_base;
+    out.section_count = prefix.section_count;
     if (out.section_count == 0)
         return PeStatus::SectionCountZero;
+    // FileHeader.SizeOfOptionalHeader lives at file_hdr+16; the
+    // prefix walker only validated through Machine+NumberOfSections,
+    // so we still read this directly from the source bytes.
+    const u8* file_hdr = file + out.nt_base + 4;
     out.opt_header_size = LeU16(file_hdr + 16);
 
     out.opt_base = out.nt_base + 4 + kFileHeaderSize;

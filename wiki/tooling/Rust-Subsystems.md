@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel build tooling and kernel-linked Rust crates.
 >
-> **Maturity:** Stable foundation; DuetFS, USB HID, USB class config parsing, DHCP/DNS byte-walkers, and USB MSC SCSI response parsers are live Rust subsystems.
+> **Maturity:** Stable foundation; seven live Rust subsystems — DuetFS, USB HID, USB class config, DHCP/DNS byte-walkers, USB MSC SCSI responses, PNG/BMP header validators, and ELF/PE-prefix validators.
 
 ## Overview
 
@@ -80,6 +80,17 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   header / READ DISC INFORMATION responses. The C++ MSC driver
   (`kernel/drivers/usb/msc_scsi.cpp`) delegates its parse functions through
   this crate.
+- `/kernel/util/img_meta_rust/` (`duetos_img_meta`) validates PNG and BMP
+  image headers. `kernel/util/png.cpp::PngParseHeader` and
+  `kernel/util/bmp.cpp::BmpParseHeader` delegate to this crate; the C++
+  side keeps zlib inflate, scanline filter unwind, and pixel-copy.
+- `/kernel/loader/exec_meta_rust/` (`duetos_exec_meta`) validates ELF64
+  files (header + every PT_LOAD segment) and the PE/COFF prefix
+  (DOS stub + e_lfanew bounds + PE signature + AMD64 machine check).
+  `kernel/loader/elf_loader.cpp::ElfValidate` and the prefix of
+  `kernel/loader/pe_loader.cpp::ParseHeaders` delegate to this crate;
+  the C++ side keeps address-space mapping, capability checks, and
+  process creation.
 - `/cmake/DuetOSRust.cmake` exposes `duetos_add_rust_staticlib(...)`, used by
   `/kernel/rust/CMakeLists.txt` to build the aggregate Rust link unit.
 

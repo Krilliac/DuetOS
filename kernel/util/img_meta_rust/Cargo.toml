@@ -1,0 +1,37 @@
+# Image metadata header walkers for DuetOS.
+#
+# Two parsers, both consume the *header* of an attacker-controlled
+# image file and emit a validated dimensions/format struct. The
+# heavy lifting (chunk-walk, zlib stream, filter unwind for PNG;
+# pixel copy for BMP) stays in C++. Rust owns the validation that
+# decides "is this file plausibly an image we know how to
+# decode" — the bit a malformed/hostile file can use to feed the
+# C++ side wrong dimensions, wrong bit depth, or wrong colour
+# type.
+#
+# Scope (v0):
+#   - parse_png_header — PNG signature + IHDR + IHDR CRC.
+#   - parse_bmp_header — BMP file/info headers + dimension sanity.
+#
+# Not in scope (v0):
+#   - PLTE / tRNS / gAMA / sRGB / iCCP / IDAT chunk walking — the
+#     C++ side does these already and the metadata layer doesn't
+#     need to peek.
+#   - BMP RLE8/RLE4/BITFIELDS compression decode paths.
+#   - TGA — header is small enough that the existing C++ parser
+#     isn't worth porting until a real workload arrives.
+
+[package]
+name = "duetos_img_meta"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS PNG + BMP header validators"
+
+[lib]
+name = "duetos_img_meta"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true
