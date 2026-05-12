@@ -36,6 +36,11 @@ constexpr FirmwareSourceFacts kSources[] = {
      "rtl88xx", "Realtek rtlwifi/rtw88/rtw89 USB and PCIe devices", "linux-firmware realtek/rtlwifi blobs",
      "redistributable binary firmware; no generally usable open replacement for current targets", false, false, false,
      true, true, true},
+    {FirmwareFamily::MediatekMt76, FirmwareSourceKind::RedistributableBinary, FirmwareDisposition::RuntimePackage,
+     "mt76", "MediaTek MT7615 / MT7663 / MT7915/16 / MT7921/22/25 Wi-Fi (very common in 2021+ AMD/Intel laptops)",
+     "linux-firmware mediatek/ blobs",
+     "redistributable binary firmware under MediaTek's firmware licence; no open replacement available", false, false,
+     false, true, true, true},
 };
 
 constexpr u32 kSourceCount = sizeof(kSources) / sizeof(kSources[0]);
@@ -72,6 +77,8 @@ const char* FirmwareFamilyName(FirmwareFamily family)
         return "brcm-fullmac";
     case FirmwareFamily::RealtekRtl88xx:
         return "rtl88xx";
+    case FirmwareFamily::MediatekMt76:
+        return "mediatek-mt76";
     }
     return "unknown";
 }
@@ -164,6 +171,11 @@ void FirmwarePolicySelfTest()
     KASSERT(nexmon != nullptr, "drivers/net/firmware_policy", "missing nexmon policy");
     KASSERT(!FirmwarePolicyCanBundle(*nexmon), "drivers/net/firmware_policy", "nexmon should not bundle");
     KASSERT(!FirmwarePolicyCanLoadRuntime(*nexmon), "drivers/net/firmware_policy", "nexmon should stay research-only");
+
+    const FirmwareSourceFacts* mt76 = FirmwarePolicyFind(FirmwareFamily::MediatekMt76);
+    KASSERT(mt76 != nullptr, "drivers/net/firmware_policy", "missing mt76 policy");
+    KASSERT(!FirmwarePolicyCanBundle(*mt76), "drivers/net/firmware_policy", "mt76 blob should not bundle");
+    KASSERT(FirmwarePolicyCanLoadRuntime(*mt76), "drivers/net/firmware_policy", "mt76 should be runtime-loadable");
 
     KASSERT(FirmwarePolicyFindByName("does-not-exist") == nullptr, "drivers/net/firmware_policy",
             "unknown firmware name should miss");

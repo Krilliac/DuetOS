@@ -104,6 +104,7 @@
 #include "drivers/net/iwlwifi_rings.h"
 #include "drivers/net/iwlwifi_ucode_builder.h"
 #include "drivers/net/iwlwifi_upload.h"
+#include "drivers/net/mt76_fw.h"
 #include "drivers/net/net.h"
 #include "drivers/net/rtl88xx_fw.h"
 #include "drivers/net/rtl88xx_upload.h"
@@ -2907,6 +2908,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::AthHtcFirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::AthHtcUploadSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::AthHtcSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::Mt76FirmwareSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::BeaconSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::HciSelfTest());
     duetos::net::bluetooth::BluetoothDiagInit();
