@@ -433,6 +433,28 @@ void DuetFsSelfTest()
                  "lookup symlink failed");
     Expect(res.kind == kKindSymlink, "lookup symlink kind wrong");
 
+    // 11b. Auto-symlink resolution: `duetfs_lookup_follow` follows
+    //      the final symlink and surfaces the resolved target (big.bin)
+    //      rather than the symlink node itself. Cycle detection: feed
+    //      it a self-cycle and observe kStatusSymlinkLoop.
+    LookupResult fres = {};
+    ExpectStatus(duetfs_lookup_follow(&scratch, reinterpret_cast<const u8*>("/linkme.txt"), 12, &fres), kStatusOk,
+                 "lookup_follow symlink failed");
+    Expect(fres.kind == kKindFile, "lookup_follow returned non-file kind");
+    Expect(fres.node_id != sym_id, "lookup_follow did not pivot off the symlink");
+    // Build a self-cycle: /cycle -> /cycle. Resolution must abort at
+    // MAX_SYMLINK_HOPS hops with kStatusSymlinkLoop, not run forever.
+    u32 cycle_id = 0;
+    ExpectStatus(duetfs_create_symlink(&scratch, reinterpret_cast<const u8*>("/cycle"), 7,
+                                       reinterpret_cast<const u8*>("/cycle"), 7, &cycle_id),
+                 kStatusOk, "create self-cycle symlink failed");
+    Expect(duetfs_lookup_follow(&scratch, reinterpret_cast<const u8*>("/cycle"), 7, &fres) == kStatusSymlinkLoop,
+           "self-cycle did not surface kStatusSymlinkLoop");
+    // Remove the cycle so the rest of the self-test doesn't drag a
+    // dangling-loop sentinel through subsequent fsck passes.
+    ExpectStatus(duetfs_unlink_path(&scratch, reinterpret_cast<const u8*>("/cycle"), 7), kStatusOk,
+                 "unlink self-cycle symlink failed");
+
     // 12. Hard link: create /hl.bin (same name as the source so v3's
     //     name-must-match rule holds — first need to create a fresh
     //     file under that name then link a second dirent to it).

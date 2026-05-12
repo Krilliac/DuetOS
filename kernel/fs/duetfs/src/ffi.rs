@@ -43,6 +43,7 @@ const STATUS_NO_SPACE_EXTENTS: u32 = 12;
 const STATUS_CORRUPT: u32 = 13;
 const STATUS_NOT_A_SYMLINK: u32 = 14;
 const STATUS_XDEV_LINK: u32 = 15;
+const STATUS_SYMLINK_LOOP: u32 = 16;
 
 #[repr(C)]
 pub struct DuetFsDevice {
@@ -80,6 +81,7 @@ fn err_to_status(e: FsError) -> u32 {
         FsError::Corrupt => STATUS_CORRUPT,
         FsError::NotASymlink => STATUS_NOT_A_SYMLINK,
         FsError::XdevLink => STATUS_XDEV_LINK,
+        FsError::SymlinkLoop => STATUS_SYMLINK_LOOP,
     }
 }
 
@@ -165,6 +167,56 @@ pub unsafe extern "C" fn duetfs_lookup(
         Err(e) => return err_to_status(e),
     };
     match fs.lookup_path(path_bytes) {
+        Ok(r) => {
+            if !out.is_null() {
+                unsafe {
+                    (*out).kind = r.node.kind;
+                    (*out).node_id = r.node_id;
+                    (*out).size_bytes = r.node.size_bytes;
+                    (*out).child_count = r.node.child_count;
+                }
+            }
+            STATUS_OK
+        }
+        Err(e) => err_to_status(e),
+    }
+}
+
+/// Like `duetfs_lookup` but follows the final component too.
+/// POSIX-`stat`-style: a path landing on a symlink returns the
+/// symlink's resolved target rather than the symlink node itself.
+/// Returns `kStatusSymlinkLoop` on chains deeper than the
+/// `MAX_SYMLINK_HOPS` floor (8 hops).
+///
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_lookup_follow(
+    desc: *const DuetFsDevice,
+    path: *const c_uchar,
+    path_max: usize,
+    out: *mut DuetFsLookupResult,
+) -> c_uint {
+    if !out.is_null() {
+        unsafe {
+            (*out).kind = KIND_MISS;
+            (*out).node_id = 0;
+            (*out).size_bytes = 0;
+            (*out).child_count = 0;
+        }
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let Some(path_bytes) = (unsafe { cstr_to_slice(path, path_max) }) else {
+        return STATUS_INVALID;
+    };
+    let fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    match fs.lookup_path_follow(path_bytes) {
         Ok(r) => {
             if !out.is_null() {
                 unsafe {

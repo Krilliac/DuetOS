@@ -2963,11 +2963,11 @@ __declspec(dllexport) NTSTATUS NtSignalAndWaitForSingleObject(HANDLE ObjectToSig
  * The native Win32 contract: ApcRoutine is invoked as
  *   ApcRoutine(NormalContext, SystemArgument1, SystemArgument2)
  * when the target enters an alertable wait. The kernel queue
- * carries a single ulData payload; we pack NormalContext as that
- * payload and ignore SystemArgument1/2 in v0 — the same SDK
- * shape kernel32!QueueUserAPC uses (single ulData). PE callers
- * that need the three-arg shape can fall back to a userland
- * shim that recovers SA1/SA2 from a side table.
+ * stores all three values verbatim (see Process::ApcSlot) so a
+ * future drain path can replay the full three-arg call; today's
+ * kernel32!win32_drain_apc_queue still calls the pfn with the
+ * single-arg PAPCFUNC convention (NormalContext only) but that
+ * is a userland-shim concern, not a kernel ABI gap.
  *
  * Returns STATUS_SUCCESS on success, STATUS_NOT_IMPLEMENTED
  * on cross-process / unknown-tid (kernel returns -1). The
@@ -2977,16 +2977,16 @@ __declspec(dllexport) NTSTATUS NtSignalAndWaitForSingleObject(HANDLE ObjectToSig
 __declspec(dllexport) NTSTATUS NtQueueApcThread(HANDLE ThreadHandle, void* ApcRoutine, void* NormalContext,
                                                 void* SystemArgument1, void* SystemArgument2)
 {
-    (void)SystemArgument1;
-    (void)SystemArgument2;
     if (ApcRoutine == (void*)0)
         return (NTSTATUS)0xC000000DL; /* STATUS_INVALID_PARAMETER */
     long long target_tid = (long long)(unsigned long long)ThreadHandle;
+    register long long r10 __asm__("r10") = (long long)SystemArgument1;
+    register long long r8 __asm__("r8") = (long long)SystemArgument2;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
                      : "a"((long long)187), /* SYS_QUEUE_USER_APC */
-                       "D"(target_tid), "S"((long long)ApcRoutine), "d"((long long)NormalContext)
+                       "D"(target_tid), "S"((long long)ApcRoutine), "d"((long long)NormalContext), "r"(r10), "r"(r8)
                      : "memory");
     if (rv != 0)
         return (NTSTATUS)0xC0000002L; /* STATUS_NOT_IMPLEMENTED — caller falls back */

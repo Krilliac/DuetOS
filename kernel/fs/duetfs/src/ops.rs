@@ -17,13 +17,26 @@ use crate::format::{
     NODE_KIND_SYMLINK, ROOT_NODE_ID, SYMLINK_TARGET_MAX,
 };
 use crate::fs::{Fs, FsError, FsResult};
-use crate::path::PathIter;
 
 #[derive(Clone, Copy)]
 pub struct Resolved {
     pub node_id: u32,
     pub node: Node,
 }
+
+/// Maximum number of symbolic-link hops `lookup_path_with` will
+/// follow before failing with `FsError::SymlinkLoop`. Matches the
+/// POSIX `SYMLOOP_MAX` floor (8); a path that needs more is almost
+/// certainly cyclic.
+const MAX_SYMLINK_HOPS: u32 = 8;
+
+/// Scratch-buffer size for the rewritten path during symlink
+/// follow. Holds the longest legal path the resolver can construct
+/// — a `SYMLINK_TARGET_MAX` (1024) target stacked under at most a
+/// few cycles of remaining components. 4 KiB is generous; an
+/// overflow surfaces as `FsError::SymlinkLoop` so a hostile FS
+/// can't drive a stack blow-up.
+const PATH_SCRATCH_BYTES: usize = 4096;
 
 /// Resolve a byte offset to (extent_index, in_extent_byte_offset).
 fn locate(node: &Node, offset: u32) -> Option<(usize, u32)> {
@@ -50,21 +63,153 @@ fn last_extent_count(node: &Node) -> u32 {
 }
 
 impl<'d, D: BlockDevice + ?Sized> Fs<'d, D> {
+    /// POSIX-style path resolution. Symlinks at intermediate
+    /// components are followed transparently; the final component
+    /// is returned as-is (so a caller landing on a symlink sees
+    /// `kind == NODE_KIND_SYMLINK` and can pivot to `readlink`).
+    /// Resolution caps at `MAX_SYMLINK_HOPS` hops; deeper / cyclic
+    /// chains return `FsError::SymlinkLoop`.
     pub fn lookup_path(&self, path: &[u8]) -> FsResult<Resolved> {
+        self.lookup_path_with(path, /*follow_final=*/ false)
+    }
+
+    /// Variant that follows the final component too. Equivalent to
+    /// POSIX `stat()` (vs `lookup_path`'s `lstat()` semantics) — a
+    /// path landing on a symlink returns the symlink's TARGET
+    /// resolved, not the symlink node itself. Returns
+    /// `FsError::NotFound` if the target doesn't exist;
+    /// `FsError::SymlinkLoop` on cyclic chains.
+    pub fn lookup_path_follow(&self, path: &[u8]) -> FsResult<Resolved> {
+        self.lookup_path_with(path, /*follow_final=*/ true)
+    }
+
+    fn lookup_path_with(&self, path: &[u8], follow_final: bool) -> FsResult<Resolved> {
+        if path.len() > PATH_SCRATCH_BYTES {
+            return Err(FsError::SymlinkLoop);
+        }
+
+        // Scratch buffer holds the path we're currently walking.
+        // On a symlink follow we rewrite it to (target + remaining)
+        // and reset the cursor to 0 (absolute targets also reset
+        // the current node to root).
+        let mut buf = [0u8; PATH_SCRATCH_BYTES];
+        buf[..path.len()].copy_from_slice(path);
+        let mut buf_len = path.len();
+        let mut cursor: usize = 0;
+        let mut hops: u32 = 0;
+
         let root = self.read_node(ROOT_NODE_ID)?;
+        // `current` is the directory we resolve the next component
+        // against (and after we consume the final component, it
+        // holds the final result). When we follow a symlink, the
+        // target resolves relative to the dir that held the symlink
+        // — which IS `current` at the moment of the follow, since
+        // we haven't yet descended into the symlink's node.
         let mut current = Resolved {
             node_id: ROOT_NODE_ID,
             node: root,
         };
-        let iter = PathIter::new(path);
-        for comp in iter {
-            let comp = comp.ok_or(FsError::Invalid)?;
+
+        loop {
+            // Skip leading separators.
+            while cursor < buf_len && buf[cursor] == b'/' {
+                cursor += 1;
+            }
+            if cursor >= buf_len {
+                return Ok(current);
+            }
+
+            // Slice the next component.
+            let comp_start = cursor;
+            while cursor < buf_len && buf[cursor] != b'/' {
+                cursor += 1;
+            }
+            let comp = &buf[comp_start..cursor];
+            if comp == b"." {
+                continue;
+            }
+            if comp == b".." {
+                // PathIter rejects "..", keep the same contract here.
+                return Err(FsError::Invalid);
+            }
+
             if current.node.kind != NODE_KIND_DIR {
                 return Err(FsError::NotADir);
             }
-            current = self.find_in_dir(&current.node, comp)?;
+            let found = self.find_in_dir(&current.node, comp)?;
+
+            // Is this the final component? (Only trailing separators
+            // / "." entries left in the buffer.)
+            let is_final = {
+                let mut peek = cursor;
+                while peek < buf_len && buf[peek] == b'/' {
+                    peek += 1;
+                }
+                peek >= buf_len
+            };
+
+            if found.node.kind == NODE_KIND_SYMLINK && (!is_final || follow_final) {
+                hops += 1;
+                if hops > MAX_SYMLINK_HOPS {
+                    return Err(FsError::SymlinkLoop);
+                }
+
+                // Read the target. SYMLINK_TARGET_MAX caps the on-disk
+                // payload at 1024 bytes; using that as the read buffer
+                // captures everything stored there.
+                let mut tgt = [0u8; SYMLINK_TARGET_MAX as usize];
+                let n = self.read_at(found.node_id, 0, &mut tgt[..])? as usize;
+                if n == 0 {
+                    return Err(FsError::Corrupt);
+                }
+                let tgt_bytes = &tgt[..n];
+                let absolute = tgt_bytes[0] == b'/';
+
+                // Rewrite buf to (target + remaining-after-symlink),
+                // ensuring a single '/' between them.
+                if tgt_bytes.len() > PATH_SCRATCH_BYTES {
+                    return Err(FsError::SymlinkLoop);
+                }
+                let mut new_buf = [0u8; PATH_SCRATCH_BYTES];
+                new_buf[..tgt_bytes.len()].copy_from_slice(tgt_bytes);
+                let mut new_len: usize = tgt_bytes.len();
+                let remaining = &buf[cursor..buf_len];
+                if !remaining.is_empty() {
+                    let need_sep = new_len > 0
+                        && new_buf[new_len - 1] != b'/'
+                        && remaining[0] != b'/';
+                    if need_sep {
+                        if new_len + 1 > PATH_SCRATCH_BYTES {
+                            return Err(FsError::SymlinkLoop);
+                        }
+                        new_buf[new_len] = b'/';
+                        new_len += 1;
+                    }
+                    if new_len + remaining.len() > PATH_SCRATCH_BYTES {
+                        return Err(FsError::SymlinkLoop);
+                    }
+                    new_buf[new_len..new_len + remaining.len()].copy_from_slice(remaining);
+                    new_len += remaining.len();
+                }
+                buf = new_buf;
+                buf_len = new_len;
+                cursor = 0;
+
+                if absolute {
+                    // Restart from root.
+                    current = Resolved {
+                        node_id: ROOT_NODE_ID,
+                        node: self.read_node(ROOT_NODE_ID)?,
+                    };
+                }
+                // Relative target keeps `current` pointed at the dir
+                // that held the symlink — no work needed.
+                continue;
+            }
+
+            // Descend into the found node and consume the component.
+            current = found;
         }
-        Ok(current)
     }
 
     pub fn read_at(&self, node_id: u32, offset: u32, dst: &mut [u8]) -> FsResult<u32> {

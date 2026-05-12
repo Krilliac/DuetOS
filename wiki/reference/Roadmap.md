@@ -750,15 +750,23 @@ extends. Next:
    through the same syscall surface as ramfs and FAT32 paths.
 4. **Separate dirent table** — decouples hard-link names from the
    inode's `name` (today's v3 caveat).
-5. **Auto-symlink resolution in `lookup_path`** with cycle detection.
+5. ~~**Auto-symlink resolution in `lookup_path`**~~ — landed.
+   POSIX-`lstat`-style: intermediate symlinks resolve transparently;
+   the final component is preserved so `readlink` callers still see
+   the symlink node. New `duetfs_lookup_follow` FFI follows the
+   final component too (POSIX-`stat`-style). Cycle detection caps
+   at `MAX_SYMLINK_HOPS = 8` and surfaces as `kStatusSymlinkLoop`;
+   verified by the self-test against a `/cycle → /cycle` self-loop.
 6. **Indirect extents** — files needing > 8 extents.
 7. **Multi-block dirs + B-tree directory index** — bump the 1024-child cap.
 8. ~~**Auto-mkfs of a blank disk via shell command**~~ — `mkfs.duetfs <handle> ERASE`
    landed alongside the existing FAT32 `mkfs`. Same admin / confirmation-token
    contract; uses `MakeBlockHandleDevice` to wrap the kernel block-device
-   handle and calls `duetfs_mkfs` followed by a probe re-validate. The
-   formatted volume isn't auto-mounted at runtime — the boot probe path
-   only mounts pre-formatted volumes; runtime auto-mount is a follow-on.
+   handle and calls `duetfs_mkfs` followed by a probe re-validate. After a
+   successful format + re-probe the command also walks `/disks/duetfsN` for
+   the first free slot (`N` in `0..15`) and registers the volume through
+   `VfsMount` so the freshly formatted disk is usable without a reboot;
+   the operator still gets a one-line message if every slot is taken.
 9. **AES-XTS encryption + Argon2 KDF** — full-disk encryption tier.
 10. **LZ4 compression** — optional per-file compression.
 
@@ -1010,22 +1018,30 @@ Track 3 has no remaining roadmap rows.
 ### Track 8 — Scheduler
 
 > **T8-02** kernel-resident APC queue + `NtQueueApcThread` shipped:
-> `Process::apc_slots[16]` carries (target_tid, pfn, data) triples;
-> new syscalls `SYS_QUEUE_USER_APC = 187` + `SYS_DRAIN_USER_APC = 188`
+> `Process::apc_slots[16]` carries
+> (target_tid, pfn, NormalContext, SystemArgument1, SystemArgument2)
+> tuples; syscalls `SYS_QUEUE_USER_APC = 187` + `SYS_DRAIN_USER_APC = 188`
 > insert/pop entries with cap-gating on `kCapSpawnThread` and
 > same-process restriction on the target tid. `kernel32!QueueUserAPC`
-> tries the kernel queue first and falls back to the legacy
+> tries the kernel queue first (with SA1/SA2 zeroed for the
+> single-`ulData` PAPCFUNC shape) and falls back to the legacy
 > user-space queue on overflow; `kernel32!win32_drain_apc_queue`
-> drains both kernel and user-space queues during alertable
-> waits. `ntdll!NtQueueApcThread` / `NtQueueApcThreadEx` route the
-> first three SDK args (NormalContext as ulData) through the new
-> syscall — full three-arg fidelity (SystemArgument1/2) is GAP.
-> Cross-process delivery is still GAP — same-process targeting
-> covers the workloads that depend on APCs today; cross-process
-> would require a target-side wakeup IPI which lands with the
-> per-thread kernel-side APC list. Boot self-test
-> (`ApcSelfTest`) exercises queue / drain / cross-tid
-> isolation / capacity overflow on every boot.
+> reads the full 4-tuple from the kernel slot via the
+> rdi=&pfn / rsi=&data / rdx=&arg1 / r10=&arg2 sink quartet and
+> invokes the routine through a three-arg `PIO_APC_ROUTINE` shape
+> (`pfn(NormalContext, SA1, SA2)`). Microsoft x64 ABI ensures a
+> 1-arg PAPCFUNC callee ignores RDX / R8, so the wider shape is
+> wire-compatible with the legacy queue. `ntdll!NtQueueApcThread`
+> / `NtQueueApcThreadEx` now route ALL five SDK args
+> (Thread / Routine / NormalContext / SA1 / SA2) through the
+> kernel queue. SA1 / SA2 sinks on `SYS_DRAIN_USER_APC` are
+> NULL-tolerant, preserving the original 2-pointer ABI for any
+> binary built against it. Cross-process delivery is still GAP —
+> same-process targeting covers the workloads that depend on
+> APCs today; cross-process would require a target-side wakeup
+> IPI which lands with the per-thread kernel-side APC list. Boot
+> self-test (`ApcSelfTest`) exercises queue / drain / cross-tid
+> isolation / capacity overflow / SA1+SA2 round-trip on every boot.
 
 > **T8-01** Win32 priority class mapping shipped: new syscall
 > `SYS_PRIORITY_CLASS = 189` (op=get/set) on a per-process

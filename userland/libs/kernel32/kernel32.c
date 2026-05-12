@@ -4387,12 +4387,21 @@ __declspec(dllexport) DWORD QueueUserAPC(PAPCFUNC pfn, HANDLE hThread, unsigned 
      * 10ms slice-poll. Fall through to the legacy user-space queue
      * on any failure (queue full, foreign tid, kCapSpawnThread
      * denied) so single-threaded callers still see the same
-     * happy-path semantics they did before T8-02 wiring. */
+     * happy-path semantics they did before T8-02 wiring.
+     *
+     * QueueUserAPC carries a single ulData (PAPCFUNC shape).
+     * Zero r10 / r8 explicitly so the kernel stores SA1=SA2=0
+     * for the slot rather than reading the compiler's leftover
+     * register state — this is how a future drain path
+     * distinguishes "no SA1/SA2 was ever supplied" from "the
+     * caller passed SystemArgument*=0". */
+    register long long r10 __asm__("r10") = 0;
+    register long long r8 __asm__("r8") = 0;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)
                      : "a"((long long)187), /* SYS_QUEUE_USER_APC */
-                       "D"((long long)target_tid), "S"((long long)pfn), "d"((long long)dwData)
+                       "D"((long long)target_tid), "S"((long long)pfn), "d"((long long)dwData), "r"(r10), "r"(r8)
                      : "memory");
     if (rv == 0)
         return 1;
@@ -4414,29 +4423,50 @@ __declspec(dllexport) DWORD QueueUserAPC(PAPCFUNC pfn, HANDLE hThread, unsigned 
 /* Drain APCs queued for the calling thread. Returns the count
  * fired. Called by SleepEx / WaitForSingleObjectEx when
  * bAlertable=TRUE. Drains both the kernel-resident queue
- * (SYS_DRAIN_USER_APC = 188) and the legacy user-space queue. */
+ * (SYS_DRAIN_USER_APC = 188) and the legacy user-space queue.
+ *
+ * Reads the full (pfn, NormalContext, SA1, SA2) tuple from the
+ * kernel slot so an NtQueueApcThread caller that supplied
+ * SystemArgument1 / SystemArgument2 gets all three args delivered
+ * to the routine. Single-arg PAPCFUNC pfns simply ignore the
+ * trailing register inputs — Microsoft x64 ABI puts each arg in
+ * a dedicated register, so a callee that only reads RCX is
+ * unaffected by writes to RDX / R8. */
 static unsigned int win32_drain_apc_queue(void)
 {
     DWORD self_tid = (DWORD)syscall_get_tid();
     unsigned int fired = 0;
     /* Drain the kernel queue first. Each successful pop returns
-     * the (pfn, data) pair; we invoke from user mode. */
+     * the (pfn, NormalContext, SA1, SA2) tuple; we invoke from
+     * user mode. */
     for (;;)
     {
         unsigned long long pfn_raw = 0;
         unsigned long long data = 0;
+        unsigned long long arg1 = 0;
+        unsigned long long arg2 = 0;
+        /* SYS_DRAIN_USER_APC contract:
+         *   rdi = &pfn  rsi = &data  rdx = &arg1  r10 = &arg2.
+         * arg1/arg2 sinks are optional in the kernel; we pass real
+         * pointers here so a 3-arg NtQueueApcThread caller's
+         * SystemArgument* values reach the routine. */
+        register long long r10 __asm__("r10") = (long long)&arg2;
         long long rv;
         __asm__ volatile("int $0x80"
                          : "=a"(rv)
                          : "a"((long long)188), /* SYS_DRAIN_USER_APC */
-                           "D"((long long)&pfn_raw), "S"((long long)&data)
+                           "D"((long long)&pfn_raw), "S"((long long)&data), "d"((long long)&arg1), "r"(r10)
                          : "memory");
         if (rv != 1)
             break;
-        PAPCFUNC pfn = (PAPCFUNC)(void*)(unsigned long long)pfn_raw;
-        if (pfn != (PAPCFUNC)0)
+        typedef void (*PIO_APC_ROUTINE)(unsigned long long, unsigned long long, unsigned long long);
+        PIO_APC_ROUTINE pfn3 = (PIO_APC_ROUTINE)(void*)(unsigned long long)pfn_raw;
+        if (pfn3 != (PIO_APC_ROUTINE)0)
         {
-            pfn(data);
+            /* Microsoft x64 ABI: arg0=RCX, arg1=RDX, arg2=R8.
+             * A PAPCFUNC (single-arg) callee reads RCX only; the
+             * extra register writes are inert. */
+            pfn3(data, arg1, arg2);
             ++fired;
         }
     }

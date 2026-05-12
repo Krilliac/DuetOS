@@ -36,6 +36,10 @@ pub enum FsError {
     NotASymlink,
     #[allow(dead_code)] // reserved for cross-volume link rejection (future slice)
     XdevLink,
+    /// A symbolic-link chain exceeded MAX_SYMLINK_HOPS or the
+    /// rewritten path exceeded the scratch buffer. Surfaced from
+    /// lookup_path-style resolvers that follow symlinks.
+    SymlinkLoop,
 }
 
 pub type FsResult<T> = Result<T, FsError>;

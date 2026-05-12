@@ -65,6 +65,7 @@ inline constexpr u32 kStatusNoSpaceExtents = 12;
 inline constexpr u32 kStatusCorrupt = 13;
 inline constexpr u32 kStatusNotASymlink = 14;
 inline constexpr u32 kStatusXdevLink = 15;
+inline constexpr u32 kStatusSymlinkLoop = 16;
 
 // ----------------------------------------------------------------
 // Device descriptor
@@ -125,10 +126,20 @@ extern "C"
     u32 duetfs_mkfs(const Device* dev);
 
     /// Resolve `path` (NUL-terminated, kernel buffer, bounded by
-    /// `path_max`) against the FS. On success fills `*out` and
-    /// returns kStatusOk. On miss / corruption / bad args returns a
-    /// non-zero status code and `out->kind == kKindMiss`.
+    /// `path_max`) against the FS. POSIX-`lstat`-style — symbolic
+    /// links at intermediate components are followed transparently,
+    /// but a path landing on a symlink returns the symlink node
+    /// (kind == kKindSymlink) so the caller can call `readlink`.
+    /// Cyclic / over-deep symlink chains surface as
+    /// `kStatusSymlinkLoop`. On miss / corruption / bad args
+    /// returns a non-zero status code and `out->kind == kKindMiss`.
     u32 duetfs_lookup(const Device* dev, const u8* path, usize path_max, LookupResult* out);
+
+    /// Like `duetfs_lookup` but follows the final component too
+    /// (POSIX-`stat`-style). A path landing on a symlink returns
+    /// the resolved target. Returns `kStatusSymlinkLoop` on cyclic
+    /// chains, `kStatusNotFound` if the target does not exist.
+    u32 duetfs_lookup_follow(const Device* dev, const u8* path, usize path_max, LookupResult* out);
 
     /// Read up to `dst_max` bytes of `node_id`'s file contents into
     /// `dst` starting at `offset`. On success writes the actual byte
