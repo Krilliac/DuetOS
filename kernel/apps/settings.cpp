@@ -575,6 +575,18 @@ void SettingsSelfTest()
 {
     using duetos::arch::SerialWrite;
 
+    // Capture the live theme BEFORE any dispatch so the restore
+    // at the bottom puts it back faithfully. The `'h'` (high-
+    // contrast) and `'0'` (default = Classic) dispatches and the
+    // explicit DispatchById path all mutate g_current as a side
+    // effect; capturing `start` after them would silently leave
+    // the desktop on whichever theme the last dispatch happened
+    // to set — which is what made every kernel cmdline
+    // `theme=…` boot land on Classic regardless of the boot
+    // selection (the boot self-test fires AFTER cmdline-driven
+    // ThemeSet but before the user can ever interact).
+    const auto start = ThemeCurrentId();
+
     // Verify char dispatch covers every documented key. We don't
     // assert side effects on the live theme/opacity state — those
     // are observed externally. Just ensure dispatch returns true
@@ -590,19 +602,22 @@ void SettingsSelfTest()
     // Verify cycle round-trips: ThemeCycle 9 times returns to the
     // same id. The DoThemeNext path goes through the same code
     // path the next-button click takes.
-    const auto start = ThemeCurrentId();
+    const auto cycle_start = ThemeCurrentId();
     for (u32 i = 0; i < static_cast<u32>(ThemeId::kCount); ++i)
     {
         DoThemeNext();
     }
-    ok = ok && (ThemeCurrentId() == start);
+    ok = ok && (ThemeCurrentId() == cycle_start);
 
     // Verify id dispatch range gates correctly.
     ok = ok && !DispatchById(kIdBase - 1);
     ok = ok && !DispatchById(kIdBase + kIdCount);
     ok = ok && DispatchById(kIdBase);
 
-    // Restore start theme so the live desktop is unchanged.
+    // Restore the boot-time theme so the live desktop is
+    // unchanged. ThemeApplyToAll re-publishes the palette into
+    // every chrome owner that may have re-coloured during the
+    // test dispatches above.
     ThemeSet(start);
     ThemeApplyToAll();
 

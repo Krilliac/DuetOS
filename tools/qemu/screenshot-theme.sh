@@ -2,30 +2,32 @@
 #
 # Capture a screenshot of DuetOS booted with a specific GRUB
 # menu entry. Written for the theme demo so we can produce one
-# PNG per theme without shuffling grub.cfg's default= line.
+# PNG per theme without shuffling the canonical grub.cfg.
 #
 # Usage:
-#   tools/qemu/screenshot-theme.sh <menu-down-count> <output.png>
+#   tools/qemu/screenshot-theme.sh <menu-entry-index> <output.png>
 #
-# <menu-down-count> is how many "sendkey down" presses to issue
-# before "ret" during GRUB's 3-second timeout window. 0 boots the
-# default entry (index 0). See boot/grub/grub.cfg for the
-# entry order.
+# <menu-entry-index> is the absolute entry index into
+# boot/grub/grub.cfg counting from 0. E.g. 5 → "Desktop Classic
+# (autologin)". The harness builds a one-shot sidecar ISO that
+# pins `set default=<menu-entry-index>` so GRUB auto-boots the
+# target without keystroke navigation — sendkey-based nav under
+# `-display none` is brittle (`error: no suitable video mode
+# found` when keys arrive mid-gfxterm transition).
 #
-# Mirrors tools/qemu/screenshot.sh one-for-one — same QEMU args,
-# same serial-marker poll, same PPM->PNG conversion path — with
-# the arrow-key sequence exposed as an argument.
+# Mirrors tools/qemu/screenshot.sh's QEMU args + serial-marker
+# polling + PPM->PNG conversion; only the boot path differs.
 
 set -euo pipefail
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 if [[ $# -lt 2 ]]; then
-    echo "usage: $0 <menu-down-count> <output.png>" >&2
+    echo "usage: $0 <menu-entry-index> <output.png>" >&2
     exit 2
 fi
 
-DOWN_COUNT="$1"
+ENTRY_INDEX="$1"
 OUT_PNG="$2"
 PRESET="${DUETOS_PRESET:-x86_64-debug}"
 BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
@@ -39,11 +41,42 @@ if [[ ! -f "${ISO_IMAGE}" ]]; then
     echo "error: ISO not built: ${ISO_IMAGE}" >&2
     exit 1
 fi
+if ! command -v grub-mkrescue >/dev/null 2>&1; then
+    echo "error: grub-mkrescue not found — install via:" >&2
+    echo "       sudo apt-get install -y grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools" >&2
+    exit 1
+fi
 
 NVME_IMAGE="${BUILD_DIR}/nvme0.img"
 SATA_IMAGE="${BUILD_DIR}/sata0.img"
 python3 "${SCRIPT_DIR}/make-gpt-image.py" "${NVME_IMAGE}"
 python3 "${SCRIPT_DIR}/make-gpt-image.py" "${SATA_IMAGE}"
+
+# Build a sidecar ISO that pins the requested entry as the GRUB
+# default, copies the kernel ELF from the canonical staging dir,
+# and runs `timeout=0` so the boot auto-fires. Source the menu
+# entries from the live boot/grub/grub.cfg so we don't drift
+# from the canonical menu — just replace the timeout + default
+# header.
+SCREEN_ISO_STAGE="${BUILD_DIR}/screenshot-iso-stage-${ENTRY_INDEX}"
+SCREEN_ISO="${BUILD_DIR}/duetos-screen-${ENTRY_INDEX}.iso"
+rm -rf "${SCREEN_ISO_STAGE}"
+mkdir -p "${SCREEN_ISO_STAGE}/boot/grub"
+cp "${BUILD_DIR}/kernel/iso-stage/boot/duetos-kernel.elf" "${SCREEN_ISO_STAGE}/boot/duetos-kernel.elf"
+{
+    echo "set timeout=0"
+    echo "set default=${ENTRY_INDEX}"
+    # Drop the original `set timeout=`/`set default=` lines from
+    # the canonical grub.cfg; keep every menuentry block as-is so
+    # entry indices align with the documented mapping
+    # (README.md → docs/screenshots/).
+    grep -v -E '^[[:space:]]*set (timeout|default)=' "${REPO_ROOT}/boot/grub/grub.cfg"
+} > "${SCREEN_ISO_STAGE}/boot/grub/grub.cfg"
+grub-mkrescue --compress=xz -o "${SCREEN_ISO}" "${SCREEN_ISO_STAGE}" >/dev/null 2>&1
+if [[ ! -f "${SCREEN_ISO}" ]]; then
+    echo "error: failed to build screenshot ISO ${SCREEN_ISO}" >&2
+    exit 1
+fi
 
 rm -f "${SERIAL_LOG}" "${PPM_OUT}" "${MON_SOCK}" "${OUT_PNG}"
 
@@ -55,6 +88,25 @@ OVMF_CODE="${DUETOS_OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
 OVMF_VARS_TEMPLATE="${DUETOS_OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
 OVMF_VARS_COPY="${BUILD_DIR}/screen-theme-ovmf-vars.fd"
 cp "${OVMF_VARS_TEMPLATE}" "${OVMF_VARS_COPY}"
+
+# Match screenshot.sh's option matrix: USB can be disabled via
+# DUETOS_NO_USB=1 to dodge an intermittent xHCI reset-loop wedge
+# under TCG, and we always pass `-net none` so QEMU 8.2's default
+# e1000e + user-mode netdev can't race the ArpInsert chain walk
+# during net stack bring-up. A networking-specific screenshot can
+# override via DUETOS_NET_DEVICE.
+USB_ARGS=()
+if [[ "${DUETOS_NO_USB:-0}" != "1" ]]; then
+    USB_ARGS=(
+        -device "qemu-xhci,id=xhci"
+        -device "usb-kbd,bus=xhci.0"
+    )
+fi
+NET_ARGS=(-net none)
+if [[ -n "${DUETOS_NET_DEVICE:-}" ]]; then
+    # shellcheck disable=SC2206
+    NET_ARGS=(${DUETOS_NET_DEVICE})
+fi
 
 qemu-system-x86_64 \
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
@@ -70,64 +122,26 @@ qemu-system-x86_64 \
     -device "ahci,id=ahci1" \
     -drive "file=${SATA_IMAGE},if=none,id=sata0,format=raw" \
     -device "ide-hd,bus=ahci1.0,drive=sata0" \
-    -device "qemu-xhci,id=xhci" \
-    -device "usb-kbd,bus=xhci.0" \
-    -cdrom "${ISO_IMAGE}" -boot d &
+    "${USB_ARGS[@]}" \
+    "${NET_ARGS[@]}" \
+    -cdrom "${SCREEN_ISO}" -boot d &
 QEMU_PID=$!
 
 trap 'kill "${QEMU_PID}" 2>/dev/null || true; rm -f "${MON_SOCK}"' EXIT
 
-# Drive GRUB: poll the serial log for the "highlighted entry will
-# be executed automatically" marker that GRUB emits while the menu
-# is up, then send N down-arrows and ret. Polling the marker
-# (instead of a fixed sleep) handles slow firmware paths (OVMF
-# takes 3-5s to reach GRUB) without baking in a worst-case wait.
-(
-    # First: wait until the QEMU monitor socket exists.
-    for _ in $(seq 1 60); do
-        [[ -S "${MON_SOCK}" ]] && break
-        sleep 0.5
-    done
-    # Second: wait for GRUB to be on screen (it writes the
-    # menu countdown to the serial log).
-    for _ in $(seq 1 60); do
-        if grep -q "automatically in" "${SERIAL_LOG}" 2>/dev/null; then
-            break
-        fi
-        sleep 0.3
-    done
-    python3 - <<PY "${MON_SOCK}" "${DOWN_COUNT}"
-import socket, sys, time
-p = sys.argv[1]
-n = int(sys.argv[2])
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(p)
-# Drain the monitor banner so subsequent commands aren't racing
-# against init bytes the parser hasn't consumed yet.
-s.settimeout(0.5)
-try:
-    while s.recv(4096):
-        pass
-except socket.timeout:
-    pass
-def send(cmd):
-    s.sendall((cmd + "\n").encode()); time.sleep(0.4)
-for _ in range(n):
-    send("sendkey down")
-send("sendkey ret")
-s.close()
-PY
-) &
-
-# Poll for the kheartbeat marker.
-for _ in $(seq 1 60); do
-    if [[ -f "${SERIAL_LOG}" ]] && grep -q "kheartbeat" "${SERIAL_LOG}"; then
+# Poll for the bringup-complete marker (compositor online and
+# painting). screenshot.sh uses the same marker — kheartbeat is a
+# scheduler-thread tick that fires AFTER the full ring-3 spawn
+# settles, which under TCG can push past the harness budget.
+readonly BOOT_MARKER="${DUETOS_BOOT_MARKER:-bringup-complete}"
+for _ in $(seq 1 "${DUETOS_BOOT_WAIT_SECS:-600}"); do
+    if [[ -f "${SERIAL_LOG}" ]] && grep -q "${BOOT_MARKER}" "${SERIAL_LOG}"; then
         break
     fi
     sleep 1
 done
-if ! grep -q "kheartbeat" "${SERIAL_LOG}" 2>/dev/null; then
-    echo "error: kheartbeat marker never appeared in ${SERIAL_LOG}" >&2
+if ! grep -q "${BOOT_MARKER}" "${SERIAL_LOG}" 2>/dev/null; then
+    echo "error: '${BOOT_MARKER}' marker never appeared in ${SERIAL_LOG}" >&2
     tail -60 "${SERIAL_LOG}" >&2 || true
     exit 1
 fi
@@ -163,4 +177,4 @@ if [[ ! -f "${PPM_OUT}" ]]; then
 fi
 
 convert "${PPM_OUT}" "${OUT_PNG}"
-echo "screenshot: ${OUT_PNG}  (grub-down=${DOWN_COUNT})"
+echo "screenshot: ${OUT_PNG}  (grub-entry=${ENTRY_INDEX})"

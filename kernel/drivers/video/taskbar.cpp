@@ -5,6 +5,7 @@
 #include "drivers/power/power.h"
 #include "mm/frame_allocator.h"
 #include "net/stack.h"
+#include "sched/sched.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -909,28 +910,27 @@ void TaskbarRedraw()
                                tid_pill == ThemeId::DuetGreen;
         if (show_pill && tray_right > 180)
         {
-            // Live windows count = a coarse "system load" stand-in
-            // until /proc/cpuhist lands. The prototype shows a CPU
-            // percentage; we render a percentage digit shape with
-            // a value derived from how many windows are actually
-            // alive (a 0-99 range scaled to a 0-99% reading) so
-            // the number responds to launch / close rather than
-            // sitting at a fake constant.
-            const u32 wcount = WindowRegistryCount();
-            u32 alive = 0;
-            for (u32 i = 0; i < wcount; ++i)
+            // Real CPU-busy percentage from the scheduler's tick
+            // accounting: 100 - (idle_ticks * 100 / total_ticks).
+            // Previous v0 stand-in mapped alive-window count to a
+            // "0..99" reading — visible to anyone who could count
+            // windows that the number wasn't load, and the
+            // canonical screenshots showed an idle desktop pegged
+            // at 60-64% which is plainly wrong. `cpu_busy_pct` is
+            // already published every heartbeat under the same
+            // arithmetic; reading it here keeps the pill and the
+            // klog telemetry in lockstep.
+            const auto stats = ::duetos::sched::SchedStatsRead();
+            u32 cpu_pct = 0;
+            if (stats.total_ticks > 0)
             {
-                if (WindowIsAlive(i))
+                const u64 busy = (stats.total_ticks > stats.idle_ticks) ? (stats.total_ticks - stats.idle_ticks) : 0;
+                cpu_pct = static_cast<u32>((busy * 100u) / stats.total_ticks);
+                if (cpu_pct > 99u)
                 {
-                    ++alive;
+                    cpu_pct = 99u;
                 }
             }
-            // Map alive-window count to a 0..99 percentage so the
-            // pill reads as a live load gauge: 4 windows -> 16%,
-            // 12 windows -> 48%, etc. Caps at 99 so the digit
-            // pair stays stable — more than ~25 live windows is a
-            // separate problem the load gauge will visibly pin.
-            const u32 cpu_pct = ((alive * 4u) > 99u) ? 99u : (alive * 4u);
             // FPS: the compose pump runs at ~1 Hz when idle and
             // bursts to 60 Hz under cursor activity. Hard-code
             // 60.0 here so the pill matches the prototype's

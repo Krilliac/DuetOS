@@ -213,10 +213,13 @@ for the PNGs. Reproduce any of them with:
 cmake --preset x86_64-debug
 cmake --build build/x86_64-debug --parallel $(nproc)
 
-# Full framebuffer PNG of the default boot (login gate)
-tools/qemu/screenshot.sh docs/screenshots/01-login-screen.png
+# Login gate — explicit entry 0 (no autologin) via the theme harness
+DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh  0 docs/screenshots/01-login-screen.png
 
-# Themed desktops by GRUB-entry index (see boot/grub/grub.cfg)
+# Themed desktops by GRUB-entry index (see boot/grub/grub.cfg). The
+# harness drops a per-call sidecar grub.cfg with the requested
+# entry pinned as the default, so the canonical menu (and the
+# boot-smoke test's autologin default) stay untouched.
 DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh  5 docs/screenshots/02-desktop-classic.png
 DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh  6 docs/screenshots/03-desktop-slate10.png
 DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh 10 docs/screenshots/05-desktop-amber.png

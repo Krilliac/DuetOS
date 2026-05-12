@@ -32,7 +32,12 @@ readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 PRESET="${DUETOS_PRESET:-x86_64-debug}"
 BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
-ISO_IMAGE="${BUILD_DIR}/duetos.iso"
+# DUETOS_SMOKE_ISO swaps the canonical ISO out for a per-call
+# sidecar (built by ctest-boot-smoke.sh with `pe-smokes=1` baked
+# into the cmdline). Keeps the canonical grub.cfg untouched while
+# letting one specific harness opt into the emulator-gated
+# smokes. Mirrors the DUETOS_SMOKE_PROFILE pattern below.
+ISO_IMAGE="${DUETOS_SMOKE_ISO:-${BUILD_DIR}/duetos.iso}"
 KERNEL_ELF="${BUILD_DIR}/kernel/duetos-kernel.elf"
 DISPLAY_MODE="${DUETOS_DISPLAY:-none}"
 TIMEOUT_SECS="${DUETOS_TIMEOUT:-}"
