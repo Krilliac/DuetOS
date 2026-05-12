@@ -37,12 +37,16 @@ struct FeatureBitTag
 };
 
 constexpr FeatureBitTag kFeatures[] = {
-    {kCpuFeatFpu, "fpu"},         {kCpuFeatTsc, "tsc"},       {kCpuFeatMsr, "msr"},       {kCpuFeatApic, "apic"},
-    {kCpuFeatMmx, "mmx"},         {kCpuFeatSse, "sse"},       {kCpuFeatSse2, "sse2"},     {kCpuFeatSse3, "sse3"},
-    {kCpuFeatSsse3, "ssse3"},     {kCpuFeatSse4_1, "sse4.1"}, {kCpuFeatSse4_2, "sse4.2"}, {kCpuFeatAesNi, "aes"},
-    {kCpuFeatAvx, "avx"},         {kCpuFeatF16c, "f16c"},     {kCpuFeatRdrand, "rdrand"}, {kCpuFeatSmep, "smep"},
-    {kCpuFeatSmap, "smap"},       {kCpuFeatBmi1, "bmi1"},     {kCpuFeatBmi2, "bmi2"},     {kCpuFeatAvx2, "avx2"},
-    {kCpuFeatAvx512f, "avx512f"}, {kCpuFeatRdseed, "rdseed"},
+    {kCpuFeatFpu, "fpu"},        {kCpuFeatTsc, "tsc"},       {kCpuFeatMsr, "msr"},
+    {kCpuFeatApic, "apic"},      {kCpuFeatMmx, "mmx"},       {kCpuFeatSse, "sse"},
+    {kCpuFeatSse2, "sse2"},      {kCpuFeatSse3, "sse3"},     {kCpuFeatSsse3, "ssse3"},
+    {kCpuFeatSse4_1, "sse4.1"},  {kCpuFeatSse4_2, "sse4.2"}, {kCpuFeatAesNi, "aes"},
+    {kCpuFeatAvx, "avx"},        {kCpuFeatF16c, "f16c"},     {kCpuFeatRdrand, "rdrand"},
+    {kCpuFeatSmep, "smep"},      {kCpuFeatSmap, "smap"},     {kCpuFeatBmi1, "bmi1"},
+    {kCpuFeatBmi2, "bmi2"},      {kCpuFeatAvx2, "avx2"},     {kCpuFeatAvx512f, "avx512f"},
+    {kCpuFeatRdseed, "rdseed"},  {kCpuFeatNx, "nx"},         {kCpuFeatPdpe1Gb, "1g"},
+    {kCpuFeatLongMode, "lm"},    {kCpuFeatX2Apic, "x2apic"}, {kCpuFeatTscDeadline, "tscdl"},
+    {kCpuFeatHypervisor, "hyp"},
 };
 
 // Pack 4 bytes of a u32 register into a char buffer (little-endian
@@ -82,16 +86,20 @@ void CpuInfoProbe()
     g_info.logical_cpus = (r1.ebx >> 16) & 0xFF;
 
     // ECX bits we care about:
-    //  0=SSE3, 9=SSSE3, 19=SSE4.1, 20=SSE4.2, 25=AES, 28=AVX,
-    //  29=F16C, 30=RDRAND.
+    //  0=SSE3, 9=SSSE3, 19=SSE4.1, 20=SSE4.2, 21=x2APIC,
+    //  24=TSC-Deadline, 25=AES, 28=AVX, 29=F16C, 30=RDRAND,
+    //  31=Hypervisor-present.
     StoreBit(kCpuFeatSse3, (r1.ecx >> 0) & 1);
     StoreBit(kCpuFeatSsse3, (r1.ecx >> 9) & 1);
     StoreBit(kCpuFeatSse4_1, (r1.ecx >> 19) & 1);
     StoreBit(kCpuFeatSse4_2, (r1.ecx >> 20) & 1);
+    StoreBit(kCpuFeatX2Apic, (r1.ecx >> 21) & 1);
+    StoreBit(kCpuFeatTscDeadline, (r1.ecx >> 24) & 1);
     StoreBit(kCpuFeatAesNi, (r1.ecx >> 25) & 1);
     StoreBit(kCpuFeatAvx, (r1.ecx >> 28) & 1);
     StoreBit(kCpuFeatF16c, (r1.ecx >> 29) & 1);
     StoreBit(kCpuFeatRdrand, (r1.ecx >> 30) & 1);
+    StoreBit(kCpuFeatHypervisor, (r1.ecx >> 31) & 1);
 
     // EDX bits: 0=FPU, 4=TSC, 5=MSR, 6=PAE, 9=APIC, 11=SEP,
     //           23=MMX, 25=SSE, 26=SSE2.
@@ -119,9 +127,22 @@ void CpuInfoProbe()
         StoreBit(kCpuFeatSmap, (r7.ebx >> 20) & 1);
     }
 
+    // Leaf 0x80000001 EDX bits: 20=NX/XD, 26=1G-pages, 29=Long-Mode.
+    // The whole leaf-range is gated on `r80.eax >= 0x80000001` so a
+    // CPU that doesn't even expose extended leaves leaves these
+    // feature bits clear (and the minimum-feature gate flags the
+    // missing NX as a hard-stop).
+    Cpuid r80 = DoCpuid(0x80000000);
+    if (r80.eax >= 0x80000001)
+    {
+        Cpuid r81 = DoCpuid(0x80000001);
+        StoreBit(kCpuFeatNx, (r81.edx >> 20) & 1);
+        StoreBit(kCpuFeatPdpe1Gb, (r81.edx >> 26) & 1);
+        StoreBit(kCpuFeatLongMode, (r81.edx >> 29) & 1);
+    }
+
     // Leaves 0x80000002/3/4: brand string (48 chars + NUL). Not
     // all CPUs expose it; check max extended leaf first.
-    Cpuid r80 = DoCpuid(0x80000000);
     if (r80.eax >= 0x80000004)
     {
         Cpuid a = DoCpuid(0x80000002);
@@ -188,6 +209,82 @@ bool CpuHas(CpuFeature feat)
     if (u32(feat) >= u32(kCpuFeatCount))
         return false;
     return (g_info.feature_bits & (1u << feat)) != 0;
+}
+
+[[noreturn]] void CpuMinimumFeatureGateFail(const char* missing)
+{
+    // Use raw serial because the panic system relies on serial
+    // already, and we want the same single-line marker visible whether
+    // the operator is reading via QEMU `-serial stdio` or a real COM1
+    // pin-out. The line shape is grep-friendly:
+    //     [cpu] HARD STOP: CPU baseline unmet — missing: <feature> ...
+    SerialWrite("\n[cpu] HARD STOP: CPU baseline unmet — missing:");
+    SerialWrite(missing);
+    SerialWrite("\n[cpu] DuetOS requires an x86_64 CPU advertising at minimum:\n");
+    SerialWrite("[cpu]   FPU MMX SSE SSE2 TSC MSR APIC PAE NX LongMode\n");
+    SerialWrite("[cpu] The probed CPUID feature word was incomplete; halting.\n");
+    core::Panic("arch/cpu", "minimum CPU feature baseline unmet");
+}
+
+void CpuMinimumFeatureGate()
+{
+    // We deliberately use a tight chain of explicit checks instead of
+    // a table loop. The point of this gate is "halt with a clear
+    // message naming the missing feature" — a table would force a
+    // generic "missing feature #N" log line that an operator on real
+    // hardware would have to cross-reference manually.
+    if (!CpuHas(kCpuFeatFpu))
+        CpuMinimumFeatureGateFail(" FPU");
+    if (!CpuHas(kCpuFeatMmx))
+        CpuMinimumFeatureGateFail(" MMX");
+    if (!CpuHas(kCpuFeatSse))
+        CpuMinimumFeatureGateFail(" SSE");
+    if (!CpuHas(kCpuFeatSse2))
+        CpuMinimumFeatureGateFail(" SSE2");
+    if (!CpuHas(kCpuFeatTsc))
+        CpuMinimumFeatureGateFail(" TSC");
+    if (!CpuHas(kCpuFeatMsr))
+        CpuMinimumFeatureGateFail(" MSR");
+    if (!CpuHas(kCpuFeatApic))
+        CpuMinimumFeatureGateFail(" APIC");
+    if (!CpuHas(kCpuFeatPae))
+        CpuMinimumFeatureGateFail(" PAE");
+    // NX is the critical one: paging.cpp unconditionally sets
+    // EFER.NXE, which #GPs on a CPU that doesn't advertise NX.
+    // Without this gate, that #GP fires from an early-init context
+    // where the trap path may not yet be fully set up — and the
+    // result is a silent triple-fault instead of a readable banner.
+    if (!CpuHas(kCpuFeatNx))
+        CpuMinimumFeatureGateFail(" NX");
+    if (!CpuHas(kCpuFeatLongMode))
+        CpuMinimumFeatureGateFail(" LongMode");
+
+    SerialWrite("[cpu] minimum-feature gate OK (FPU MMX SSE SSE2 TSC MSR APIC PAE NX LongMode all present)\n");
+
+    // Advisory log of optional-but-impactful features that the
+    // kernel adapts around at the call sites. Naming them here gives
+    // the operator a single line to scan when triaging "why is
+    // feature X behaving differently on this box?".
+    SerialWrite("[cpu] optional:");
+    if (CpuHas(kCpuFeatSmep))
+        SerialWrite(" smep");
+    if (CpuHas(kCpuFeatSmap))
+        SerialWrite(" smap");
+    if (CpuHas(kCpuFeatPdpe1Gb))
+        SerialWrite(" 1g");
+    if (CpuHas(kCpuFeatX2Apic))
+        SerialWrite(" x2apic");
+    if (CpuHas(kCpuFeatTscDeadline))
+        SerialWrite(" tscdl");
+    if (CpuHas(kCpuFeatRdrand))
+        SerialWrite(" rdrand");
+    if (CpuHas(kCpuFeatRdseed))
+        SerialWrite(" rdseed");
+    if (CpuHas(kCpuFeatAesNi))
+        SerialWrite(" aes");
+    if (CpuHas(kCpuFeatHypervisor))
+        SerialWrite(" hyp");
+    SerialWrite("\n");
 }
 
 } // namespace duetos::arch

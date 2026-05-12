@@ -38,6 +38,7 @@
 #include "mm/page.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/cpu_info.h"
 #include "arch/x86_64/serial.h"
 #include "diag/diag_decode.h"
 #include "log/klog.h"
@@ -332,18 +333,41 @@ void PagingInit()
     g_pml4 = static_cast<u64*>(PhysToVirt(pml4_phys));
 
     // Enable EFER.NXE so PageNoExecute mappings are honoured. Without this
-    // bit, setting bit 63 in any PTE causes a #GP.
+    // bit, setting bit 63 in any PTE causes a #GP. Gated on CPUID
+    // 0x80000001 EDX bit 20 (NX/XD) — every x86_64 CPU since K8/Yonah
+    // advertises NX, but the CpuMinimumFeatureGate has already
+    // hard-stopped the kernel if it doesn't; the gate here is
+    // defence-in-depth so a future code path that calls PagingInit
+    // outside the normal boot sequence cannot accidentally #GP.
     //
     // Also enable EFER.SCE (bit 0) so the `syscall` instruction is
     // legal from ring 3. Without it, the Linux-ABI entry at
     // MSR_LSTAR is never reached — the CPU raises #UD on the
     // syscall opcode. MSR_LSTAR itself gets programmed separately
-    // by linux::SyscallInit once per-CPU data is up.
+    // by linux::SyscallInit once per-CPU data is up. The SYSCALL/
+    // SYSRET feature was added in long mode and is implicit in
+    // CPUID 0x80000001 EDX bit 11 (SYSCALL) — gated together with
+    // NX so a missing extended-leaf doesn't leave EFER half-
+    // programmed.
     constexpr u32 kEferMsr = 0xC0000080;
     constexpr u64 kEferNxeBit = 1ULL << 11;
     constexpr u64 kEferSceBit = 1ULL << 0;
     const u64 efer = ReadMsr(kEferMsr);
-    const u64 efer_want = efer | kEferNxeBit | kEferSceBit;
+    u64 efer_want = efer;
+    if (arch::CpuHas(arch::kCpuFeatNx))
+    {
+        efer_want |= kEferNxeBit;
+    }
+    else
+    {
+        // Belt-and-braces: the minimum-feature gate refuses to boot
+        // a CPU without NX, so this branch is unreachable in
+        // practice. If it's ever taken, surface it as a WARN so the
+        // operator knows NX-marked mappings are silently ignored on
+        // this machine.
+        arch::SerialWrite("[mm/paging] WARN: NX not advertised by CPUID; EFER.NXE left clear\n");
+    }
+    efer_want |= kEferSceBit;
     if (efer != efer_want)
     {
         WriteMsr(kEferMsr, efer_want);

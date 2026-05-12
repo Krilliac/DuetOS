@@ -20,6 +20,7 @@
 
 #include "drivers/storage/ahci.h"
 
+#include "arch/x86_64/hpet.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "diag/kdbg.h"
@@ -189,6 +190,55 @@ void CpuPause()
     asm volatile("pause" ::: "memory");
 }
 
+// HPET-deadline helpers, sibling to the NVMe driver's pair. Letting
+// each driver carry its own copy keeps the TU self-contained and
+// avoids a kernel/util/timer.h cross-cutting header. The two
+// drivers will share a common helper once a third consumer arrives.
+bool AhciHpetOnline()
+{
+    return arch::HpetPeriodFemtoseconds() != 0;
+}
+
+u64 AhciHpetDeadlineMs(u64 ms)
+{
+    const u64 period_fs = arch::HpetPeriodFemtoseconds();
+    if (period_fs == 0)
+        return 0;
+    const u64 ticks = (ms * 1'000'000'000'000ULL) / period_fs;
+    return arch::HpetReadCounter() + ticks;
+}
+
+bool AhciHpetDeadlinePassed(u64 deadline)
+{
+    return arch::HpetReadCounter() >= deadline;
+}
+
+// Spec-faithful bounded poll. Uses HPET when available, otherwise
+// falls back to a generous pause-count budget that scales with
+// `max_pause_iters`. Returns true when (Reg & mask) == match held
+// within the budget. Pattern matches the NVMe driver's WaitReady.
+bool AhciPollMmio(volatile u8* port, u64 reg_off, u32 mask, u32 match, u64 budget_ms, u64 max_pause_iters)
+{
+    const bool have_hpet = AhciHpetOnline();
+    const u64 deadline = have_hpet ? AhciHpetDeadlineMs(budget_ms) : 0;
+    u64 iters = 0;
+    for (;;)
+    {
+        if ((Reg(port, reg_off) & mask) == match)
+            return true;
+        if (have_hpet)
+        {
+            if (AhciHpetDeadlinePassed(deadline))
+                return false;
+        }
+        else if (++iters >= max_pause_iters)
+        {
+            return false;
+        }
+        CpuPause();
+    }
+}
+
 // Byte-wise zero. Written through a volatile pointer so clang's
 // loop idiom recognizer does NOT lower the loop to a libc memset
 // call — we have no libc in the freestanding kernel. Use for every
@@ -203,34 +253,25 @@ void VolatileZero(void* p, u64 n)
 
 void PortStop(volatile u8* port)
 {
-    // Clear ST and FRE, then wait for CR and FR to clear.
+    // Clear ST and FRE, then wait for CR and FR to clear. AHCI 1.3.1
+    // §10.3.2 mandates a 500 ms timeout for each transition; if the
+    // controller misses it the port is wedged and the driver
+    // should give up on it rather than burning CPU forever.
     Reg(port, kPortRegCmd) &= ~kCmdSt;
-    for (u32 i = 0; i < 10000; ++i)
-    {
-        if ((Reg(port, kPortRegCmd) & kCmdCr) == 0)
-            break;
-        CpuPause();
-    }
+    (void)AhciPollMmio(port, kPortRegCmd, kCmdCr, 0, /*budget_ms=*/500, /*max_pause_iters=*/10000);
     Reg(port, kPortRegCmd) &= ~kCmdFre;
-    for (u32 i = 0; i < 10000; ++i)
-    {
-        if ((Reg(port, kPortRegCmd) & kCmdFr) == 0)
-            break;
-        CpuPause();
-    }
+    (void)AhciPollMmio(port, kPortRegCmd, kCmdFr, 0, /*budget_ms=*/500, /*max_pause_iters=*/10000);
 }
 
 bool PortStart(volatile u8* port)
 {
     // Per spec: wait for BSY and DRQ in PxTFD to be clear before
-    // starting. Then set FRE and ST.
-    for (u32 i = 0; i < 10000; ++i)
-    {
-        if ((Reg(port, kPortRegTfd) & (kTfdBsy | kTfdDrq)) == 0)
-            break;
-        CpuPause();
-    }
-    if ((Reg(port, kPortRegTfd) & (kTfdBsy | kTfdDrq)) != 0)
+    // starting. Then set FRE and ST. AHCI 1.3.1 allows up to 1 s for
+    // link / COMRESET to train on a slow disk; bumping our poll
+    // window to that budget closes a real-hardware false-fail where
+    // a healthy spinning disk gets refused at bring-up.
+    if (!AhciPollMmio(port, kPortRegTfd, kTfdBsy | kTfdDrq, 0, /*budget_ms=*/1000,
+                      /*max_pause_iters=*/10000))
     {
         return false;
     }
@@ -240,30 +281,60 @@ bool PortStart(volatile u8* port)
 }
 
 // Returns true + leaves PxCI zeroed if the command issued on slot
-// 0 finishes without the TFES error bit. Polls PxCI for up to a
-// generous retry window; returns false on timeout or error.
+// 0 finishes without the TFES error bit. Polls PxCI for up to the
+// ATA command timeout (30 s for IDENTIFY; spec-defined floor); a
+// real-hardware spinning drive servicing an internal relocation
+// can legitimately take seconds to respond, and the previous
+// iter-count poll declared false-fail well below that.
 bool IssueSlot0(volatile u8* port)
 {
     // Clear stale interrupt status + task-file errors.
     Reg(port, kPortRegIs) = 0xFFFFFFFFu;
     Reg(port, kPortRegSerr) = 0xFFFFFFFFu;
+    // Memory fence: every BuildCmd write (cmd-list header, PRDT)
+    // must be globally visible before PxCI tells the HBA "go".
+    // QEMU TCG tolerates the missing fence; some real-hardware
+    // AHCI HBAs (Marvell, JMicron) fetch the cmd table before the
+    // PRDT writes drain and either error or DMA garbage.
+    asm volatile("sfence" ::: "memory");
     Reg(port, kPortRegCi) = 1u << 0;
 
-    for (u32 i = 0; i < 1000000; ++i)
+    const bool have_hpet = AhciHpetOnline();
+    // 30 s spec timeout for IDENTIFY / common ATA commands. WRITE
+    // FLUSH can take longer on a busy disk; we use the same window
+    // for v0 (correctness over throughput) and let a future slice
+    // tune per-command budgets.
+    constexpr u64 kCommandBudgetMs = 30'000;
+    const u64 deadline = have_hpet ? AhciHpetDeadlineMs(kCommandBudgetMs) : 0;
+    u64 iters = 0;
+    for (;;)
     {
-        const u32 ci = Reg(port, kPortRegCi);
         const u32 is = Reg(port, kPortRegIs);
         if ((is & kIsTfes) != 0)
         {
             return false;
         }
+        const u32 ci = Reg(port, kPortRegCi);
         if ((ci & 1u) == 0)
         {
             return true;
         }
+        if (have_hpet)
+        {
+            if (AhciHpetDeadlinePassed(deadline))
+                return false;
+        }
+        else if (++iters >= 4'000'000ULL)
+        {
+            // Fallback budget when HPET isn't online (e.g. firmware
+            // didn't advertise it). 4M pause iters is wallclock-
+            // sloppy but bounded — better than the previous
+            // 1M-iter cap which was below the spec's command-time
+            // floor on any real disk.
+            return false;
+        }
         CpuPause();
     }
-    return false;
 }
 
 // Build the command header + command table for a single-PRD

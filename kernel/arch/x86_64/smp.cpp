@@ -72,6 +72,20 @@ inline void WriteMsrGsBase(u64 value)
     asm volatile("wrmsr" : : "c"(0xC0000101u), "a"(lo), "d"(hi));
 }
 
+// IA32_KERNEL_GS_BASE (MSR 0xC0000102) is the swapgs target: when ring-3
+// runs SYSCALL into the kernel, `swapgs` atomically swaps GS_BASE with
+// IA32_KERNEL_GS_BASE so the kernel sees its per-CPU pointer in GS while
+// userland sees its own (typically TLS) value. The BSP programs this in
+// linux::SyscallInit; the APs need the equivalent set HERE before any
+// syscall path can fire. Without it, the first `swapgs` on an AP loads
+// zero into GS_BASE and the next gs-relative load triple-faults.
+inline void WriteMsrKernelGsBase(u64 value)
+{
+    const u32 lo = static_cast<u32>(value & 0xFFFFFFFF);
+    const u32 hi = static_cast<u32>(value >> 32);
+    asm volatile("wrmsr" : : "c"(0xC0000102u), "a"(lo), "d"(hi));
+}
+
 inline void* TrampVirt()
 {
     return mm::PhysToVirt(kTrampolinePhys);
@@ -475,6 +489,15 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
 {
     cpu::PerCpu* pcpu = g_ap_percpus[cpu_id];
     WriteMsrGsBase(reinterpret_cast<u64>(pcpu));
+    // ALSO program IA32_KERNEL_GS_BASE to the same per-CPU pointer.
+    // This is the value `swapgs` will load into GS_BASE on the first
+    // ring-3 -> ring-0 transition (SYSCALL/syscall_entry's `swapgs`).
+    // Without this, a swapgs on this AP loads zero into GS_BASE and
+    // the next `gs:[per_cpu_offset]` read faults at a kernel-mode RIP
+    // — a confusing failure whose root cause (KERNEL_GS_BASE=0) is
+    // hard to spot from the resulting crash dump. Match the BSP path
+    // in linux::SyscallInit which programs this same MSR.
+    WriteMsrKernelGsBase(reinterpret_cast<u64>(pcpu));
 
     // Install this AP's own GDT + TSS so NMI / #DF / #MC trap entries
     // resolve to the AP's IST stacks (not the BSP's, which would race

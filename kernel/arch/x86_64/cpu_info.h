@@ -50,9 +50,26 @@ enum CpuFeature : u32
     kCpuFeatAvx2,
     kCpuFeatAvx512f,
     kCpuFeatRdseed,
+    // CPUID leaf 0x80000001, EDX bits
+    kCpuFeatNx,       // bit 20 — NX/XD; required for EFER.NXE
+    kCpuFeatPdpe1Gb,  // bit 26 — 1 GiB superpages
+    kCpuFeatLongMode, // bit 29 — IA-32e (we always run with this set)
+    // CPUID leaf 1, ECX bit 21 — x2APIC. We currently bring up only
+    // MMIO-based xAPIC; this bit is probed so LapicInit can detect
+    // when firmware left the CPU in x2APIC mode and refuse / recover.
+    kCpuFeatX2Apic,
+    // CPUID leaf 1, ECX bit 24 — TSC-Deadline mode. Lets the LAPIC
+    // timer fire at an absolute TSC value instead of a periodic
+    // reload; future tickless slice will gate on this.
+    kCpuFeatTscDeadline,
+    // CPUID leaf 1, ECX bit 31 — hypervisor present (synthetic; set
+    // by every popular hypervisor). Drives hypervisor-quirk paths
+    // and toggles a few "is this a VM?" diagnostics.
+    kCpuFeatHypervisor,
     // Sentinel
     kCpuFeatCount,
 };
+static_assert(static_cast<u32>(kCpuFeatCount) <= 32, "feature_bits is u32 — extend if more features are added");
 
 struct CpuInfo
 {
@@ -78,5 +95,32 @@ const CpuInfo& CpuInfoGet();
 /// Query a single feature bit. Returns false if CpuInfoProbe
 /// hasn't run or the bit is out of range.
 bool CpuHas(CpuFeature feat);
+
+/// Verify every CPU feature this kernel depends on at runtime is
+/// actually advertised by CPUID. Anything missing is a hard-stop —
+/// the kernel cannot run safely on the box. Panics with a clear
+/// list of missing features so an operator on real hardware knows
+/// exactly which CPU baseline is unmet, instead of triple-faulting
+/// later when the first dependent code path runs.
+///
+/// Today's baseline (matches what the rest of the kernel actually
+/// uses):
+///   FPU MMX SSE SSE2  — part of x86_64; needed by the FPU init +
+///                       any SSE codegen the compiler emits
+///   TSC               — used by every deadline / calibration loop
+///   MSR               — every MSR read in the codebase
+///   APIC              — the entire interrupt path
+///   PAE               — required for long mode anyway
+///   NX                — paging.cpp sets EFER.NXE; without NX, that
+///                       write #GPs the kernel before main() returns
+///   LongMode          — always set on the CPU we run on; the gate
+///                       is here for symmetry + future cross-arch
+///                       work
+///
+/// Optional-but-recommended features (SMEP, SMAP, RDRAND/RDSEED,
+/// AES-NI, x2APIC handling) are NOT gated here — the kernel adapts
+/// at the call sites. Anything that is "we assume it" lives here.
+[[noreturn]] void CpuMinimumFeatureGateFail(const char* missing);
+void CpuMinimumFeatureGate();
 
 } // namespace duetos::arch
