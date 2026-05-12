@@ -88,13 +88,18 @@ struct Task
     // mutually exclusive; at most one of those is the task's home
     // at any given moment.
     Task* next;
-    // `sleep_next` is a SEPARATE intrusive link used only for the
-    // sleep queue. Kept out of `next` so a task can be parked on
-    // BOTH a wait queue (via `next`) and the sleep queue (via
-    // `sleep_next`) simultaneously — that's how
-    // WaitQueueBlockTimeout implements "wake me on event OR on
-    // timer, whichever comes first."
+    // `sleep_next` / `sleep_prev` form a SEPARATE doubly-linked
+    // intrusive list used only for the sleep queue. Kept out of
+    // `next` so a task can be parked on BOTH a wait queue (via
+    // `next`) and the sleep queue (via `sleep_{next,prev}`)
+    // simultaneously — that's how WaitQueueBlockTimeout implements
+    // "wake me on event OR on timer, whichever comes first." The
+    // `sleep_prev` link lets SleepqueueRemove unlink in O(1)
+    // (a timed waiter being woken explicitly is the common case);
+    // without it, removal had to re-walk the sorted list looking
+    // for the predecessor.
     Task* sleep_next;
+    Task* sleep_prev;
     // Back-pointer to the WaitQueue a Blocked task is currently on
     // (nullptr otherwise). Lets OnTimerTick unlink a timed-waiter
     // from its wait queue when the timeout path wakes it first.
@@ -809,9 +814,12 @@ void RunqueueOrSuspendPush(Task* t)
 void SleepqueueInsert(Task* t)
 {
     t->sleep_next = nullptr;
+    t->sleep_prev = nullptr;
     if (g_sleep_head == nullptr || t->wake_tick < g_sleep_head->wake_tick)
     {
         t->sleep_next = g_sleep_head;
+        if (g_sleep_head != nullptr)
+            g_sleep_head->sleep_prev = t;
         g_sleep_head = t;
         return;
     }
@@ -822,32 +830,28 @@ void SleepqueueInsert(Task* t)
         it = it->sleep_next;
     }
     t->sleep_next = it->sleep_next;
+    t->sleep_prev = it;
+    if (it->sleep_next != nullptr)
+        it->sleep_next->sleep_prev = t;
     it->sleep_next = t;
 }
 
 // Remove a task from the sleep queue. Used when an explicit wake
-// beats the timer path for a timed waiter. Linear walk — fine for
-// the sleep queue sizes we expect; becomes a hotspot only if
-// thousands of timed waits are outstanding at once.
+// beats the timer path for a timed waiter. O(1) via the
+// sleep_prev back-pointer maintained by SleepqueueInsert; without
+// it removal was an O(n) walk to find the predecessor.
 void SleepqueueRemove(Task* t)
 {
-    if (g_sleep_head == t)
-    {
-        g_sleep_head = t->sleep_next;
-        t->sleep_next = nullptr;
-        return;
-    }
-
-    Task* it = g_sleep_head;
-    while (it != nullptr && it->sleep_next != t)
-    {
-        it = it->sleep_next;
-    }
-    if (it != nullptr)
-    {
-        it->sleep_next = t->sleep_next;
-    }
+    Task* prev = t->sleep_prev;
+    Task* next = t->sleep_next;
+    if (prev != nullptr)
+        prev->sleep_next = next;
+    else if (g_sleep_head == t)
+        g_sleep_head = next;
+    if (next != nullptr)
+        next->sleep_prev = prev;
     t->sleep_next = nullptr;
+    t->sleep_prev = nullptr;
 }
 
 // Remove a task from a specific wait queue. Used when a timeout
@@ -961,6 +965,7 @@ void SchedInit()
     boot_task->name = "kboot";
     boot_task->next = nullptr;
     boot_task->sleep_next = nullptr;
+    boot_task->sleep_prev = nullptr;
     boot_task->waiting_on = nullptr;
     boot_task->wake_by_timeout = false;
     boot_task->priority = TaskPriority::Normal;
@@ -1046,6 +1051,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->name = name;
     t->next = nullptr;
     t->sleep_next = nullptr;
+    t->sleep_prev = nullptr;
     t->waiting_on = nullptr;
     t->wake_by_timeout = false;
     t->priority = priority;
@@ -1695,7 +1701,10 @@ void OnTimerTick(u64 now_ticks)
         {
             Task* woken = g_sleep_head;
             g_sleep_head = woken->sleep_next;
+            if (g_sleep_head != nullptr)
+                g_sleep_head->sleep_prev = nullptr;
             woken->sleep_next = nullptr;
+            woken->sleep_prev = nullptr;
             --g_tasks_sleeping;
 
             // If the task was on a wait queue with a timeout, the
@@ -2130,23 +2139,28 @@ bool IsProtectedTask(const Task* t)
     return false;
 }
 
-// Detach `t` from g_sleep_head (threaded by sleep_next).
-// No-op if t isn't on the list. Caller holds CLI.
+// Detach `t` from g_sleep_head. O(1) via the sleep_prev back-
+// pointer; no-op if t isn't on the list (both links nullptr).
+// Caller holds CLI.
 void SleepQueueRemove(Task* t)
 {
-    Task** pp = &g_sleep_head;
-    while (*pp != nullptr)
-    {
-        if (*pp == t)
-        {
-            *pp = t->sleep_next;
-            t->sleep_next = nullptr;
-            if (g_tasks_sleeping > 0)
-                --g_tasks_sleeping;
-            return;
-        }
-        pp = &(*pp)->sleep_next;
-    }
+    // A task on the list always has prev != nullptr OR is the
+    // head. Off-list tasks have both nullptr AND aren't the
+    // head, so this safely no-ops them.
+    if (t->sleep_prev == nullptr && g_sleep_head != t)
+        return;
+    Task* prev = t->sleep_prev;
+    Task* next = t->sleep_next;
+    if (prev != nullptr)
+        prev->sleep_next = next;
+    else
+        g_sleep_head = next;
+    if (next != nullptr)
+        next->sleep_prev = prev;
+    t->sleep_next = nullptr;
+    t->sleep_prev = nullptr;
+    if (g_tasks_sleeping > 0)
+        --g_tasks_sleeping;
 }
 
 } // namespace
