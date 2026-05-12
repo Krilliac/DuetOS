@@ -1141,8 +1141,89 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
             record_bytes(cur);
             return cur;
         }
-        // GAP: covers MOVZX/MOVSX/CMOVcc/SETcc and others — when needed.
-        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-prefix", "decode MOVZX/MOVSX/CMOVcc/SETcc");
+        // 0F 40..4F: CMOVcc r{16,32,64}, r/m{16,32,64}.
+        // The dest reg width follows the standard 16/32/64 GPR
+        // selection (REX.W → 64, 0x66 → 16, default 32). Both
+        // operands share the same width.
+        if (op2 >= 0x40 && op2 <= 0x4F)
+        {
+            if (cur >= available)
+                return fail_db(op);
+            const ModRm mr = DecodeModRmByte(bytes[cur], p);
+            ++cur;
+            const OpW w = GprWidth(p, false);
+            char rm_buf[48] = {0};
+            const u8 rm_extra = FormatRmOperand(rm_buf, sizeof(rm_buf), mr, w, w, p, &bytes[cur], available - cur);
+            if (rm_extra == 0xFF)
+                return fail_db(op);
+            cur += rm_extra;
+            char m[16] = {0};
+            StrAppend(m, sizeof(m), "cmov");
+            StrAppend(m, sizeof(m), kCc[op2 & 0xF]);
+            StrCopy(out->mnemonic, kBufMnem, m);
+            StrAppend(out->operands, kBufOpr, RegName(mr.reg_idx, w, p.rex_seen));
+            StrAppend(out->operands, kBufOpr, ", ");
+            StrAppend(out->operands, kBufOpr, rm_buf);
+            out->len = cur;
+            out->decoded = true;
+            record_bytes(cur);
+            return cur;
+        }
+        // 0F 90..9F: SETcc r/m8. Single 8-bit destination; only
+        // the r/m operand prints.
+        if (op2 >= 0x90 && op2 <= 0x9F)
+        {
+            if (cur >= available)
+                return fail_db(op);
+            const ModRm mr = DecodeModRmByte(bytes[cur], p);
+            ++cur;
+            char rm_buf[48] = {0};
+            const u8 rm_extra =
+                FormatRmOperand(rm_buf, sizeof(rm_buf), mr, OpW::B8, OpW::B8, p, &bytes[cur], available - cur);
+            if (rm_extra == 0xFF)
+                return fail_db(op);
+            cur += rm_extra;
+            char m[16] = {0};
+            StrAppend(m, sizeof(m), "set");
+            StrAppend(m, sizeof(m), kCc[op2 & 0xF]);
+            StrCopy(out->mnemonic, kBufMnem, m);
+            StrAppend(out->operands, kBufOpr, rm_buf);
+            out->len = cur;
+            out->decoded = true;
+            record_bytes(cur);
+            return cur;
+        }
+        // 0F B6 / 0F B7: MOVZX r{16,32,64}, r/m{8,16}.
+        // 0F BE / 0F BF: MOVSX r{16,32,64}, r/m{8,16}.
+        // Source width is 8 (B6/BE) or 16 (B7/BF); destination
+        // follows standard GPR selection.
+        if (op2 == 0xB6 || op2 == 0xB7 || op2 == 0xBE || op2 == 0xBF)
+        {
+            if (cur >= available)
+                return fail_db(op);
+            const ModRm mr = DecodeModRmByte(bytes[cur], p);
+            ++cur;
+            const OpW dst_w = GprWidth(p, false);
+            const OpW src_w = (op2 == 0xB6 || op2 == 0xBE) ? OpW::B8 : OpW::W16;
+            char rm_buf[48] = {0};
+            const u8 rm_extra =
+                FormatRmOperand(rm_buf, sizeof(rm_buf), mr, dst_w, src_w, p, &bytes[cur], available - cur);
+            if (rm_extra == 0xFF)
+                return fail_db(op);
+            cur += rm_extra;
+            const bool is_signed = (op2 == 0xBE || op2 == 0xBF);
+            StrCopy(out->mnemonic, kBufMnem, is_signed ? "movsx" : "movzx");
+            StrAppend(out->operands, kBufOpr, RegName(mr.reg_idx, dst_w, p.rex_seen));
+            StrAppend(out->operands, kBufOpr, ", ");
+            StrAppend(out->operands, kBufOpr, rm_buf);
+            out->len = cur;
+            out->decoded = true;
+            record_bytes(cur);
+            return cur;
+        }
+        // GAP: remaining 0x0F-prefix opcodes (BSWAP, BT/BTS/BTC,
+        // POPCNT, etc.) decode as `db` until they earn a slice.
+        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-prefix", "decode BSWAP/BT/BSF/BSR/POPCNT");
         return fail_db(op);
     }
 
@@ -1210,7 +1291,12 @@ bool SelfTest()
         0xE8, 0x00, 0x00, 0x00, 0x00,             // call rel32 → next insn
         0x0F, 0x05,                               // syscall
         0xC9,                                     // leave
-        0xC4, 0xE3, 0x71, 0x60, 0xC1, 0x00,       // VEX-prefixed → must reject as `db`
+        // 0x0F-prefix extensions landed in this slice:
+        0x0F, 0xB6, 0xC0,                   // movzx eax, al
+        0x0F, 0xBE, 0xC0,                   // movsx eax, al
+        0x48, 0x0F, 0x44, 0xC3,             // cmove rax, rbx
+        0x0F, 0x94, 0xC0,                   // sete al
+        0xC4, 0xE3, 0x71, 0x60, 0xC1, 0x00, // VEX-prefixed → must reject as `db`
     };
     struct Expected
     {
@@ -1232,6 +1318,10 @@ bool SelfTest()
         {"call", 5},
         {"syscall", 2},
         {"leave", 1},
+        {"movzx", 3},
+        {"movsx", 3},
+        {"cmove", 4},
+        {"sete", 3},
         // The VEX byte rejects as `db 0xC4`, then the decoder walks
         // forward one byte at a time through the rest until end.
         {"db", 1},
