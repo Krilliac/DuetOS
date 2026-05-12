@@ -112,7 +112,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "duetos_acpi"
+version = "0.0.1"
+
+[[package]]
 name = "duetos_exec_meta"
+version = "0.0.1"
+
+[[package]]
+name = "duetos_exfat"
+version = "0.0.1"
+
+[[package]]
+name = "duetos_ext4"
+version = "0.0.1"
+
+[[package]]
+name = "duetos_hci"
 version = "0.0.1"
 
 [[package]]
@@ -124,10 +140,16 @@ name = "duetos_kernel_rust"
 version = "0.0.1"
 dependencies = [
  "duetfs",
+ "duetos_acpi",
  "duetos_exec_meta",
+ "duetos_exfat",
+ "duetos_ext4",
+ "duetos_hci",
  "duetos_img_meta",
  "duetos_net_parsers",
+ "duetos_ntfs",
  "duetos_usb_msc_scsi",
+ "duetos_wifi80211",
  "usbclass",
  "usbhid",
 ]
@@ -137,7 +159,15 @@ name = "duetos_net_parsers"
 version = "0.0.1"
 
 [[package]]
+name = "duetos_ntfs"
+version = "0.0.1"
+
+[[package]]
 name = "duetos_usb_msc_scsi"
+version = "0.0.1"
+
+[[package]]
+name = "duetos_wifi80211"
 version = "0.0.1"
 
 [[package]]

@@ -21,6 +21,12 @@ HOST_TEST_CRATES=(
     "kernel/drivers/usb/msc_scsi_rust"
     "kernel/util/img_meta_rust"
     "kernel/loader/exec_meta_rust"
+    "kernel/fs/ntfs_rust"
+    "kernel/fs/exfat_rust"
+    "kernel/fs/ext4_rust"
+    "kernel/acpi/acpi_rust"
+    "kernel/net/wifi80211_rust"
+    "kernel/net/hci_rust"
 )
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

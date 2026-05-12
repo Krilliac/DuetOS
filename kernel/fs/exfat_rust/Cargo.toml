@@ -1,0 +1,27 @@
+# DuetOS exFAT metadata walker — skeleton.
+#
+# Foundation crate for an eventual read-only exFAT driver. v0
+# ships only the VBR (Volume Boot Record) signature check + cluster
+# layout extraction; the FAT chain walker, directory-entry decoder,
+# and up-case table are tracked in `wiki/filesystem/exFAT.md` as
+# the next slices.
+#
+# Status: SKELETON. No C++ caller — DuetOS ships only FAT32 +
+# DuetFS today.
+#
+# Spec: Microsoft exFAT File System Specification (1.00, Aug 2019).
+
+[package]
+name = "duetos_exfat"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS exFAT metadata walker (skeleton)"
+
+[lib]
+name = "duetos_exfat"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

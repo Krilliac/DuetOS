@@ -1,0 +1,28 @@
+# DuetOS Bluetooth HCI walker — skeleton.
+#
+# Foundation crate for moving Bluetooth HCI parsing out of the
+# C++ side (kernel/net/bluetooth/diag.cpp et al). v0 covers only
+# the HCI packet header (packet-type byte + minimum length) and
+# the HCI event packet (event-code + parameter length). Command
+# Complete / Command Status / Connection Complete event-body
+# parsers are tracked in `wiki/networking/Bluetooth.md` as next
+# slices.
+#
+# Status: SKELETON. The C++ side keeps its current diag callers.
+#
+# Spec: Bluetooth Core 5.4, Vol 4 (Host Controller Interface).
+
+[package]
+name = "duetos_hci"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS Bluetooth HCI walker (skeleton)"
+
+[lib]
+name = "duetos_hci"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

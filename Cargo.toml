@@ -7,12 +7,18 @@
 [workspace]
 resolver = "2"
 members = [
+    "kernel/acpi/acpi_rust",
     "kernel/drivers/usb/class_rust",
     "kernel/drivers/usb/hid_rust",
     "kernel/drivers/usb/msc_scsi_rust",
     "kernel/fs/duetfs",
+    "kernel/fs/exfat_rust",
+    "kernel/fs/ext4_rust",
+    "kernel/fs/ntfs_rust",
     "kernel/loader/exec_meta_rust",
+    "kernel/net/hci_rust",
     "kernel/net/parsers_rust",
+    "kernel/net/wifi80211_rust",
     "kernel/rust",
     "kernel/util/img_meta_rust",
 ]

@@ -1,0 +1,29 @@
+# DuetOS ACPI table walker — skeleton.
+#
+# Foundation crate for moving ACPI table validation out of the
+# C++ side (kernel/acpi/acpi.cpp). v0 covers the RSDP (root system
+# description pointer, v1 + v2) signature + checksum, and the
+# generic 36-byte table header walker (signature / length /
+# checksum). FADT, MADT, SRAT, AML interpreter, etc. stay in C++
+# pending follow-up slices.
+#
+# Status: SKELETON. The C++ side keeps its current callers; this
+# crate is the bytes-walker layer for a future audit slice.
+#
+# Spec: ACPI 6.5 (UEFI Forum). Linked from
+# `wiki/kernel/ACPI.md`.
+
+[package]
+name = "duetos_acpi"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS ACPI table walker (skeleton)"
+
+[lib]
+name = "duetos_acpi"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

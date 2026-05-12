@@ -17,10 +17,16 @@ crate-type = ["staticlib"]
 
 [dependencies]
 duetfs = { path = "../fs/duetfs" }
+duetos_acpi = { path = "../acpi/acpi_rust" }
 duetos_exec_meta = { path = "../loader/exec_meta_rust" }
+duetos_exfat = { path = "../fs/exfat_rust" }
+duetos_ext4 = { path = "../fs/ext4_rust" }
+duetos_hci = { path = "../net/hci_rust" }
 duetos_img_meta = { path = "../util/img_meta_rust" }
 duetos_net_parsers = { path = "../net/parsers_rust" }
+duetos_ntfs = { path = "../fs/ntfs_rust" }
 duetos_usb_msc_scsi = { path = "../drivers/usb/msc_scsi_rust" }
+duetos_wifi80211 = { path = "../net/wifi80211_rust" }
 usbclass = { path = "../drivers/usb/class_rust" }
 usbhid = { path = "../drivers/usb/hid_rust" }
 

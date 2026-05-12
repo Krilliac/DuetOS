@@ -45,4 +45,37 @@ extern "C"
     usize duetos_parsers_dns_skip_name(const u8* buf, usize offset, usize len);
 }
 
+/// One TCP option as decoded by the walker. `value_off` and
+/// `value_len` reference the value sub-slice of the original
+/// `opts` buffer (not the absolute TCP segment).
+struct DuetosTcpOption
+{
+    u8 kind;
+    u8 _pad;
+    u16 value_len;
+    u32 value_off;
+};
+
+/// Callback shape: returns `true` to continue iteration, `false`
+/// to stop. The Rust crate passes `cookie` back unchanged.
+using DuetosTcpOptionCallback = bool (*)(void* cookie, DuetosTcpOption opt);
+
+extern "C"
+{
+    /// Walk a TCP options stream (typically TCP-header bytes
+    /// `20..(data_offset × 4)`). For each option the crate calls
+    /// `cb(cookie, option)`. Iteration stops on:
+    ///   - the EOL (kind=0) short option,
+    ///   - a malformed TLV (length < 2 or length > remaining stream),
+    ///   - the callback returning `false`,
+    ///   - the 64-iteration guard cap.
+    ///
+    /// Returns the number of options visited. Currently NO C++
+    /// caller — the function is here for a future TCP slice that
+    /// honours MSS / window-scale / SACK / timestamps. Keeping
+    /// the parser ready avoids re-deriving the option-walk every
+    /// time a new option needs to be honoured.
+    u32 duetos_parsers_tcp_walk_options(const u8* opts, usize opts_len, DuetosTcpOptionCallback cb, void* cookie);
+}
+
 } // namespace duetos::net::parsers

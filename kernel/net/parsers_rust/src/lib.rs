@@ -199,6 +199,129 @@ pub extern "C" fn duetos_parsers_dns_skip_name(buf: *const u8, offset: usize, le
     dns_skip_name(slice, offset)
 }
 
+// ---------- TCP options ----------
+//
+// RFC 793 + 9293 §3.1: an options stream lives in TCP-header bytes
+// 20..(data_offset × 4). Each option is either a single-byte short
+// option (EOL = 0, NOP = 1) or a TLV (kind, length-incl-header,
+// value). The walker iterates the stream and invokes a callback
+// for each option; the C++ caller decides what to do with each.
+//
+// No current consumer in DuetOS — `kernel/net/stack.cpp` extracts
+// the fixed TCP fields and ignores options. The walker is here so
+// future code can pull MSS / window-scale / SACK / timestamps out
+// of incoming SYN segments via a single FFI call.
+
+/// TCP option kinds that carry no length / value byte (each is a
+/// single-byte short option).
+const TCP_OPT_END_OF_LIST: u8 = 0;
+const TCP_OPT_NOP: u8 = 1;
+/// Maximum number of options we'll iterate before bailing. The
+/// 40-byte options field at most carries 20-ish TLVs; the cap is
+/// generous + saturates on a malicious option-of-length-0 spin.
+const TCP_OPT_GUARD: u32 = 64;
+
+/// Single TCP option as decoded by `tcp_walk_options`. `kind` is
+/// the RFC-assigned number (2 = MSS, 3 = WindowScale, 4 = SACK
+/// Permitted, 5 = SACK, 8 = Timestamps, ...). `value_off` and
+/// `value_len` describe the value sub-slice; `value_len` is 0 for
+/// short options.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DuetosTcpOption {
+    pub kind: u8,
+    pub _pad: u8,
+    pub value_len: u16,
+    pub value_off: u32,
+}
+
+/// Callback shape: returns `true` to continue iteration, `false` to
+/// stop. The C++ caller stores the cookie pointer; the Rust crate
+/// passes it back unchanged.
+pub type DuetosTcpOptionCallback = extern "C" fn(*mut core::ffi::c_void, DuetosTcpOption) -> bool;
+
+fn walk_tcp_options(opts: &[u8], cb: DuetosTcpOptionCallback, cookie: *mut core::ffi::c_void) -> u32 {
+    let mut visited: u32 = 0;
+    let mut i: usize = 0;
+    while i < opts.len() && visited < TCP_OPT_GUARD {
+        let kind = opts[i];
+        if kind == TCP_OPT_END_OF_LIST {
+            return visited;
+        }
+        if kind == TCP_OPT_NOP {
+            // Single-byte option, no length / value.
+            let opt = DuetosTcpOption {
+                kind,
+                _pad: 0,
+                value_len: 0,
+                value_off: i as u32,
+            };
+            visited = visited.saturating_add(1);
+            if !cb(cookie, opt) {
+                return visited;
+            }
+            i = i.saturating_add(1);
+            continue;
+        }
+        // TLV option: kind + length + (length-2) value bytes.
+        // length is total option size INCLUDING the kind+length
+        // header, so length must be >= 2.
+        let Some(len_off) = i.checked_add(1) else {
+            return visited;
+        };
+        if len_off >= opts.len() {
+            return visited;
+        }
+        let opt_len = opts[len_off] as usize;
+        if opt_len < 2 {
+            // Malformed — every TLV must carry at least the
+            // header. Bail rather than risk an infinite loop on
+            // length-0 options.
+            return visited;
+        }
+        let Some(end) = i.checked_add(opt_len) else {
+            return visited;
+        };
+        if end > opts.len() {
+            return visited;
+        }
+        let opt = DuetosTcpOption {
+            kind,
+            _pad: 0,
+            value_len: (opt_len - 2) as u16,
+            value_off: (i + 2) as u32,
+        };
+        visited = visited.saturating_add(1);
+        if !cb(cookie, opt) {
+            return visited;
+        }
+        i = end;
+    }
+    visited
+}
+
+/// FFI: walk the TCP-options stream `opts` (typically TCP-header
+/// bytes 20..(data_offset × 4)). For each option the crate calls
+/// `cb(cookie, option)`. Returning `false` from the callback
+/// stops iteration. Returns the number of options visited
+/// (capped at `TCP_OPT_GUARD = 64`).
+///
+/// Malformed options (length < 2, length > remaining stream) abort
+/// iteration without panic; a hostile peer sending a length-0 TLV
+/// can't pin the kernel in a loop.
+#[no_mangle]
+pub extern "C" fn duetos_parsers_tcp_walk_options(
+    opts: *const u8,
+    opts_len: usize,
+    cb: DuetosTcpOptionCallback,
+    cookie: *mut core::ffi::c_void,
+) -> u32 {
+    let Some(slice) = slice_from_raw(opts, opts_len) else {
+        return 0;
+    };
+    walk_tcp_options(slice, cb, cookie)
+}
+
 // ---------- hosted tests ----------
 //
 // These run under `cargo test --target <host>`; the kernel build
@@ -324,5 +447,115 @@ mod tests {
         let off = dns_skip_name(&buf, 99);
         // The skip helper returns `len` on out-of-range offset.
         assert_eq!(off, buf.len());
+    }
+
+    // --- TCP options ---
+
+    extern crate alloc;
+    use alloc::vec::Vec;
+    use core::cell::RefCell;
+
+    /// Test fixture: a thread-local Vec the callback pushes options
+    /// into. Using a `RefCell` keeps the callback `extern "C"` safe.
+    /// Each test borrows the fixture for the call window only.
+    fn collect(opts: &[u8]) -> Vec<DuetosTcpOption> {
+        // RefCell lives in a static via thread_local! — we'd use one
+        // here but no_std hosted-test-only convenience makes a plain
+        // RefCell + raw pointer simpler.
+        let collected: RefCell<Vec<DuetosTcpOption>> = RefCell::new(Vec::new());
+        extern "C" fn cb(cookie: *mut core::ffi::c_void, opt: DuetosTcpOption) -> bool {
+            // SAFETY: cookie was set up below as a `&RefCell<Vec<…>>`
+            // pointer that outlives the call.
+            let cell: &RefCell<Vec<DuetosTcpOption>> = unsafe { &*(cookie as *const RefCell<Vec<DuetosTcpOption>>) };
+            cell.borrow_mut().push(opt);
+            true
+        }
+        let cookie = &collected as *const _ as *mut core::ffi::c_void;
+        walk_tcp_options(opts, cb, cookie);
+        collected.into_inner()
+    }
+
+    #[test]
+    fn tcp_opts_empty_returns_zero() {
+        let opts: [u8; 0] = [];
+        let got = collect(&opts);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn tcp_opts_eol_terminates() {
+        let opts = [TCP_OPT_END_OF_LIST, 99, 99];
+        let got = collect(&opts);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn tcp_opts_nop_iterates() {
+        let opts = [TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_END_OF_LIST];
+        let got = collect(&opts);
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|o| o.kind == TCP_OPT_NOP && o.value_len == 0));
+    }
+
+    #[test]
+    fn tcp_opts_mss_decodes() {
+        // MSS option: kind=2, length=4, value = u16 BE = 1460.
+        let opts = [2, 4, 0x05, 0xB4, TCP_OPT_END_OF_LIST];
+        let got = collect(&opts);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].kind, 2);
+        assert_eq!(got[0].value_len, 2);
+        assert_eq!(got[0].value_off, 2);
+    }
+
+    #[test]
+    fn tcp_opts_zero_length_tlv_rejected() {
+        // Hostile: kind=42, length=0 — would loop forever in a naive
+        // walker. We bail.
+        let opts = [42, 0, 0xff];
+        let got = collect(&opts);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn tcp_opts_truncated_length_rejected() {
+        let opts = [42];
+        let got = collect(&opts);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn tcp_opts_truncated_value_rejected() {
+        // Claims length=8 but only 3 bytes follow.
+        let opts = [42, 8, 1, 2];
+        let got = collect(&opts);
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn tcp_opts_guard_caps_iteration() {
+        // 64+ NOPs in a row — should stop at the guard and return
+        // exactly 64 collected options.
+        let mut opts = [TCP_OPT_NOP; 100];
+        opts[99] = TCP_OPT_END_OF_LIST; // unreachable but documented intent
+        let got = collect(&opts);
+        assert_eq!(got.len(), TCP_OPT_GUARD as usize);
+    }
+
+    #[test]
+    fn tcp_opts_callback_can_stop_iteration() {
+        let opts = [TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_END_OF_LIST];
+        // Use a callback that stops after the first option.
+        let count: RefCell<u32> = RefCell::new(0);
+        extern "C" fn cb(cookie: *mut core::ffi::c_void, _opt: DuetosTcpOption) -> bool {
+            // SAFETY: cookie is a `&RefCell<u32>` that outlives the call.
+            let cell: &RefCell<u32> = unsafe { &*(cookie as *const RefCell<u32>) };
+            *cell.borrow_mut() += 1;
+            false // stop after the first option
+        }
+        let cookie = &count as *const _ as *mut core::ffi::c_void;
+        let visited = walk_tcp_options(&opts, cb, cookie);
+        assert_eq!(visited, 1);
+        assert_eq!(*count.borrow(), 1);
     }
 }

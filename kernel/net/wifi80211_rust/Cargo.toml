@@ -1,0 +1,28 @@
+# DuetOS 802.11 management-frame walker — skeleton.
+#
+# Foundation crate for moving 802.11 management-frame parsing out
+# of the C++ side (kernel/net/wireless/mlme.cpp et al). v0
+# covers only the frame-control byte decode + MAC-address extract;
+# Beacon / Probe Response / Auth / Assoc IE-list walkers and the
+# 4-way handshake (EAPOL-Key) parser are tracked in
+# `wiki/networking/Wireless.md` as next slices.
+#
+# Status: SKELETON. The C++ side keeps its current MLME callers;
+# this crate is the bytes-walker layer for a future audit slice.
+#
+# Spec: IEEE 802.11-2020. Frame format §9.2.
+
+[package]
+name = "duetos_wifi80211"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS IEEE 802.11 management-frame walker (skeleton)"
+
+[lib]
+name = "duetos_wifi80211"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

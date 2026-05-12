@@ -21,6 +21,18 @@ file(GLOB_RECURSE DUETOS_RUST_SUBSYSTEM_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/kernel/util/img_meta_rust/Cargo.toml"
     "${CMAKE_SOURCE_DIR}/kernel/loader/exec_meta_rust/src/*.rs"
     "${CMAKE_SOURCE_DIR}/kernel/loader/exec_meta_rust/Cargo.toml"
+    "${CMAKE_SOURCE_DIR}/kernel/fs/ntfs_rust/src/*.rs"
+    "${CMAKE_SOURCE_DIR}/kernel/fs/ntfs_rust/Cargo.toml"
+    "${CMAKE_SOURCE_DIR}/kernel/fs/exfat_rust/src/*.rs"
+    "${CMAKE_SOURCE_DIR}/kernel/fs/exfat_rust/Cargo.toml"
+    "${CMAKE_SOURCE_DIR}/kernel/fs/ext4_rust/src/*.rs"
+    "${CMAKE_SOURCE_DIR}/kernel/fs/ext4_rust/Cargo.toml"
+    "${CMAKE_SOURCE_DIR}/kernel/acpi/acpi_rust/src/*.rs"
+    "${CMAKE_SOURCE_DIR}/kernel/acpi/acpi_rust/Cargo.toml"
+    "${CMAKE_SOURCE_DIR}/kernel/net/wifi80211_rust/src/*.rs"
+    "${CMAKE_SOURCE_DIR}/kernel/net/wifi80211_rust/Cargo.toml"
+    "${CMAKE_SOURCE_DIR}/kernel/net/hci_rust/src/*.rs"
+    "${CMAKE_SOURCE_DIR}/kernel/net/hci_rust/Cargo.toml"
 )
 
 duetos_add_rust_staticlib(
@@ -40,6 +52,12 @@ duetos_add_rust_staticlib(
         "${CMAKE_SOURCE_DIR}/kernel/drivers/usb/msc_scsi_rust/include/msc_scsi_rust.h"
         "${CMAKE_SOURCE_DIR}/kernel/util/img_meta_rust/include/img_meta_rust.h"
         "${CMAKE_SOURCE_DIR}/kernel/loader/exec_meta_rust/include/exec_meta_rust.h"
+        "${CMAKE_SOURCE_DIR}/kernel/fs/ntfs_rust/include/ntfs_rust.h"
+        "${CMAKE_SOURCE_DIR}/kernel/fs/exfat_rust/include/exfat_rust.h"
+        "${CMAKE_SOURCE_DIR}/kernel/fs/ext4_rust/include/ext4_rust.h"
+        "${CMAKE_SOURCE_DIR}/kernel/acpi/acpi_rust/include/acpi_rust.h"
+        "${CMAKE_SOURCE_DIR}/kernel/net/wifi80211_rust/include/wifi80211_rust.h"
+        "${CMAKE_SOURCE_DIR}/kernel/net/hci_rust/include/hci_rust.h"
 )
 
 set(DUETOS_KERNEL_RUST_STATIC_LIB "${DUETOS_KERNEL_RUST_STATIC_LIB}" PARENT_SCOPE)

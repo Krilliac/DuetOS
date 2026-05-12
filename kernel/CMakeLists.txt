@@ -58,6 +58,12 @@ list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/usb/msc_scsi_ru
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/parsers_rust/(target|cargo-target|net-parsers-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^util/img_meta_rust/(target|cargo-target|img-meta-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^loader/exec_meta_rust/(target|cargo-target|exec-meta-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^fs/ntfs_rust/(target|cargo-target|ntfs-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^fs/exfat_rust/(target|cargo-target|exfat-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^fs/ext4_rust/(target|cargo-target|ext4-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^acpi/acpi_rust/(target|cargo-target|acpi-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/wifi80211_rust/(target|cargo-target|wifi80211-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/hci_rust/(target|cargo-target|hci-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^rust/(target|cargo-target|duetos-kernel-rust-cargo-target)/")
 
 # security/stack_canary.cpp provides __stack_chk_fail and the
@@ -802,6 +808,15 @@ set(NETPARSERS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/net/parsers_rust/include
 set(MSCSCSI_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/usb/msc_scsi_rust/include")
 set(IMGMETA_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/util/img_meta_rust/include")
 set(EXECMETA_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/loader/exec_meta_rust/include")
+# Skeleton crates — no current C++ caller, but the include dirs
+# stay on the search path so the FFI headers are reachable the
+# instant a caller appears.
+set(NTFS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fs/ntfs_rust/include")
+set(EXFAT_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fs/exfat_rust/include")
+set(EXT4_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/fs/ext4_rust/include")
+set(ACPIRUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/acpi/acpi_rust/include")
+set(WIFI80211_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/net/wifi80211_rust/include")
+set(HCIRUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/net/hci_rust/include")
 
 # Stage 1 needs a stub `kernel_elf_blob` so ramfs.cpp's references
 # to kBinKernelElfBytes / kBinKernelElfBytes_len link cleanly.
@@ -833,6 +848,12 @@ target_include_directories(duetos-kernel-stage1 PRIVATE
     "${MSCSCSI_INCLUDE_DIR}"
     "${IMGMETA_INCLUDE_DIR}"
     "${EXECMETA_INCLUDE_DIR}"
+    "${NTFS_INCLUDE_DIR}"
+    "${EXFAT_INCLUDE_DIR}"
+    "${EXT4_INCLUDE_DIR}"
+    "${ACPIRUST_INCLUDE_DIR}"
+    "${WIFI80211_INCLUDE_DIR}"
+    "${HCIRUST_INCLUDE_DIR}"
 )
 add_dependencies(duetos-kernel-stage1 ${DUETOS_KERNEL_RUST_TARGET})
 set_target_properties(duetos-kernel-stage1 PROPERTIES
@@ -930,6 +951,12 @@ target_include_directories(duetos-kernel PRIVATE
     "${MSCSCSI_INCLUDE_DIR}"
     "${IMGMETA_INCLUDE_DIR}"
     "${EXECMETA_INCLUDE_DIR}"
+    "${NTFS_INCLUDE_DIR}"
+    "${EXFAT_INCLUDE_DIR}"
+    "${EXT4_INCLUDE_DIR}"
+    "${ACPIRUST_INCLUDE_DIR}"
+    "${WIFI80211_INCLUDE_DIR}"
+    "${HCIRUST_INCLUDE_DIR}"
 )
 add_dependencies(duetos-kernel ${DUETOS_KERNEL_RUST_TARGET})
 
