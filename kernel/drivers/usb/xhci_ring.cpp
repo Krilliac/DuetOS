@@ -105,6 +105,14 @@ u64 SubmitCmd(Runtime& rt, u32 type, u32 param_lo, u32 param_hi, u32 status, u32
                                     param_hi, status, extra_control);
     if (phys == 0)
         return 0;
+    // xHCI spec §4.9.4.1: the producer MUST ensure every byte of the
+    // enqueued TRB is globally visible BEFORE the doorbell write
+    // (which is what tells the HC to fetch the new TRB). EnqueueRingTrb
+    // above writes the Cycle bit last as required, but without this
+    // store fence the doorbell can land before the entire TRB body
+    // reaches DRAM — real Intel/AMD xHCI controllers will then read
+    // a half-written TRB and hang the slot endpoint.
+    asm volatile("sfence" ::: "memory");
     RingDoorbell(rt, 0, 0);
     return phys;
 }

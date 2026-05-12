@@ -509,6 +509,42 @@ void FrameAllocatorInit(uptr multiboot_info_phys)
     // captured value is defensive.
     ReserveRange(multiboot_info_phys, multiboot_info_phys + info_size);
 
+    // Firmware MMIO windows. On a well-behaved BIOS / UEFI these are
+    // already marked "reserved" in the Multiboot2 mmap (so the
+    // "available" pass above never flipped their bits free in the
+    // first place). On a real-hardware box where firmware lied and
+    // reported these as available — or where the mmap simply stops
+    // below 0xFEE00000 and our `highest` extended the bitmap past it
+    // (any machine with > 4 GiB RAM crosses this threshold) — the
+    // bitmap would happily hand the LAPIC's MMIO page to a kernel
+    // allocator, and the next LapicWrite would scribble onto random
+    // kheap memory. Belt-and-braces: reserve the canonical xAPIC
+    // windows at every boot.
+    //
+    //   0xFEC00000  IOAPIC base (one 4 KiB window; multi-IOAPIC
+    //               firmware may use additional pages — covered by
+    //               the BIOS' "reserved" mmap entry for the wider
+    //               range).
+    //   0xFED00000  HPET base (one 4 KiB window).
+    //   0xFEE00000  LAPIC base (one 4 KiB window).
+    //
+    // The actual LAPIC base is read from IA32_APIC_BASE later, so a
+    // relocated LAPIC won't be covered here — but the default
+    // address is what 99%+ of real hardware uses, and the firmware
+    // mmap should cover any relocated case.
+    ReserveRange(0xFEC00000ull, 0xFEC00000ull + 0x1000);
+    ReserveRange(0xFED00000ull, 0xFED00000ull + 0x1000);
+    ReserveRange(0xFEE00000ull, 0xFEE00000ull + 0x1000);
+
+    // SMP AP trampoline frame at 0x8000 — used by ap_trampoline.S
+    // when the BSP brings APs up via INIT/SIPI/SIPI. It's already
+    // covered by the broad 0..1MiB reserve above, but a future
+    // change that tightens the low reserve (e.g. for ISA DMA
+    // bounce buffers) would silently re-enable allocation from
+    // 0x8000 and corrupt the in-flight AP image during bring-up.
+    // Mark it explicitly so the dependency is greppable.
+    BitmapMarkUsed(0x8000 >> kPageSizeLog2);
+
     // Frame 0 is never handed out — it aliases kNullFrame, used as the
     // "no memory" sentinel. Defense in depth over the 1 MiB reserve above.
     BitmapMarkUsed(0);

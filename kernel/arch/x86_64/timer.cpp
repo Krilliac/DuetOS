@@ -191,13 +191,45 @@ void TimerHandler()
 }
 
 // Spin until the PIT channel 2 OUT line goes high (terminal count reached
-// in mode 0). Returns immediately if it's already high.
-void WaitPitTerminal()
+// in mode 0). Returns true on success, false if the bounded TSC budget
+// expired before OUT went high.
+//
+// Real-hardware hardening: many modern UEFI machines (Tiger Lake server
+// boards, Apple Mac via Boot Camp, recent Chromebooks) ship with no
+// working legacy PIT. Without a bound on this poll the kernel hangs
+// indefinitely during LAPIC timer calibration on first boot. We use
+// TSC (which is guaranteed by the minimum-feature gate) for the
+// deadline rather than HPET, because TimerInit runs before HpetInit,
+// and we don't want to add a circular bring-up dependency.
+//
+// 100 ms is comfortably 10x the expected 10 ms PIT countdown — anything
+// over that and the PIT is broken/absent.
+bool WaitPitTerminal()
 {
+    // Read TSC. The minimum-feature gate has confirmed TSC is
+    // present on this CPU, so this is safe.
+    u32 tsc_lo, tsc_hi;
+    asm volatile("rdtsc" : "=a"(tsc_lo), "=d"(tsc_hi));
+    const u64 tsc_start = (static_cast<u64>(tsc_hi) << 32) | tsc_lo;
+    // Worst-case modern CPU is ~5 GHz; pick 1 GHz cycles-per-ms as a
+    // floor that won't false-fire on slow CPUs (gives ~500 ms wall
+    // time at 1 GHz, ~100 ms at 5 GHz — both safely > the 10 ms PIT
+    // calibration window).
+    constexpr u64 kPitTimeoutCycles = 500ULL * 1000ULL * 1000ULL;
     while ((Inb(kPitGatePort) & kPitGateOut2Mask) == 0)
     {
-        // Spin. Calibration runs once at boot, with interrupts disabled.
+        asm volatile("rdtsc" : "=a"(tsc_lo), "=d"(tsc_hi));
+        const u64 tsc_now = (static_cast<u64>(tsc_hi) << 32) | tsc_lo;
+        if (tsc_now - tsc_start > kPitTimeoutCycles)
+        {
+            return false;
+        }
+        // pause hints to the CPU that we're in a spinwait — drops
+        // power consumption and reduces memory-ordering pipeline
+        // stalls when the loop exits.
+        asm volatile("pause" ::: "memory");
     }
+    return true;
 }
 
 // Drive PIT channel 2 in mode 0 (one-shot, OUT goes high at terminal
@@ -229,11 +261,29 @@ u32 CalibrateLapicTimer()
     // PIT-go and LAPIC-go is one I/O write of latency.
     LapicWrite(kLapicRegTimerInit, 0xFFFFFFFFU);
 
-    WaitPitTerminal();
+    const bool pit_ok = WaitPitTerminal();
 
     // Stop the LAPIC timer ASAP and read the residual count.
     LapicWrite(kLapicRegLvtTimer, kLvtTimerMaskBit);
     const u32 residual = LapicRead(kLapicRegTimerCount);
+    if (!pit_ok)
+    {
+        // The PIT never raised OUT2 within our TSC budget. Either
+        // the firmware reports no PIT (FADT IAPC_BOOT_ARCH bit 4 set),
+        // the chipset has gated the PIT off, or the gate-port write
+        // didn't take. Real-hardware fallback: return a synthetic
+        // calibration value derived from a known-safe rate so the
+        // LAPIC timer starts ticking at a coarse-but-correct cadence.
+        // The downstream tick rate will be wrong by an order of
+        // magnitude on some hardware, but the box BOOTS — far better
+        // than the previous "hang here forever" behaviour. A future
+        // slice should re-calibrate against HPET once HpetInit runs.
+        SerialWrite("[arch/timer] WARN: PIT calibration timed out — using fallback estimate\n");
+        // 100 MHz bus / 16 divider = 6.25 MHz LAPIC ticks; over 10 ms
+        // that's 62500 ticks. Picked to be in the right order of
+        // magnitude for any commodity CPU.
+        return 62500;
+    }
     return 0xFFFFFFFFU - residual;
 }
 

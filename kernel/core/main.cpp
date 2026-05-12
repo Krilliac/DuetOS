@@ -1049,6 +1049,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Probing CPU features.\n");
     duetos::arch::CpuInfoProbe();
+    // Hard-stop gate on the baseline x86_64 features the kernel
+    // unconditionally uses (FPU/SSE/SSE2, TSC, MSR, APIC, PAE, NX,
+    // LongMode). On a CPU missing any of these the kernel would
+    // otherwise triple-fault on the first dependent code path —
+    // most commonly the EFER.NXE write inside PagingInit on a
+    // pre-K8/Yonah part with no XD support. Failing loudly here
+    // with a named-missing-feature banner is the difference
+    // between "boots on this machine" and "silent reboot loop."
+    duetos::arch::CpuMinimumFeatureGate();
     duetos::arch::CpuMitigationsProbe();
     duetos::arch::CetProbe();
     duetos::arch::FpuInit();

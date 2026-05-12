@@ -52,7 +52,11 @@ void HpetInit()
         // Debug: panic so the failure surfaces. Release: leave
         // g_mmio null and return — the timekeeper layer already
         // falls back to LAPIC timing when HPET is absent
-        // (matches the "no ACPI table" path above).
+        // (matches the "no ACPI table" path above). Explicitly
+        // null g_mmio before bailing — without this, a previous
+        // (re-)init attempt could leave a stale pointer the
+        // fallback layer would then poke.
+        g_mmio = nullptr;
         core::DebugPanicOrWarn("arch/hpet", "MapMmio failed for HPET block");
         return;
     }
@@ -110,13 +114,29 @@ void HpetSelfTest()
     const u64 after = HpetReadCounter();
     if (after == before)
     {
-        core::Panic("arch/hpet", "self-test: counter did not advance");
+        // Real-hardware soft-fail: some firmware (Intel C600 errata,
+        // some AMD SB7xx, occasional Insyde laptops) report a present
+        // HPET whose counter is dead-on-arrival because the chipset
+        // gate is held low by an undocumented register. Panicking
+        // here would brick boot on those boxes; the rest of the
+        // kernel already treats `g_mmio==nullptr` as "no HPET, fall
+        // back to LAPIC/TSC". Log a loud WARN and disable HPET
+        // instead so the timekeeper layer transparently degrades.
+        core::Log(core::LogLevel::Warn, "arch/hpet",
+                  "self-test: counter did not advance — disabling HPET, falling back to LAPIC/TSC timing");
+        g_mmio = nullptr;
+        return;
     }
     if (after < before)
     {
-        // 64-bit monotonic counter — any backwards step is a bug in
-        // firmware, emulator, or our read path. Worth halting over.
-        core::PanicWithValue("arch/hpet", "self-test: counter went backwards", after);
+        // Same soft-fail reasoning: a 64-bit monotonic counter that
+        // went backwards is a firmware bug, but it's the firmware's
+        // bug, not ours. Disable HPET and degrade gracefully —
+        // panicking here would refuse to boot on a buggy laptop.
+        core::LogWithValue(core::LogLevel::Warn, "arch/hpet", "self-test: counter went backwards — disabling HPET",
+                           after);
+        g_mmio = nullptr;
+        return;
     }
 
     core::LogWithValue(core::LogLevel::Info, "arch/hpet", "self-test delta", after - before);

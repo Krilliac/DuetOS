@@ -407,6 +407,13 @@ bool SubmitAndWait(Queue& q, SqEntry entry)
     sq_slot.cdw15 = entry.cdw15;
     const u32 new_tail = (tail + 1) % q.entries;
     q.sq_tail = new_tail;
+    // Ensure every SQ-entry store above is globally visible BEFORE
+    // the doorbell write below. Without this fence, real-hardware
+    // NVMe controllers (Samsung, WD/SanDisk) routinely fetch a
+    // half-written SQ entry and either error out or DMA garbage —
+    // QEMU TCG silently allows the out-of-order behaviour, which is
+    // why the missing barrier didn't show up earlier.
+    asm volatile("sfence" ::: "memory");
     *SqTailDoorbell(q.id) = new_tail;
 
     // Poll the CQ slot at cq_head until its phase flips. CAP.TO is
