@@ -12,13 +12,21 @@
 - [Boot Path](kernel/Boot.md)
 - [UEFI Loader](kernel/UEFI-Loader.md)
 - [Memory Management](kernel/Memory-Management.md)
+- [Synchronization](kernel/Synchronization.md)
 - [Scheduler](kernel/Scheduler.md)
 - [CPU Topology](kernel/CPU-Topology.md)
+- [Time](kernel/Time.md)
+- [ACPI](kernel/ACPI.md)
 - [Syscalls](kernel/Syscalls.md)
 - [IPC](kernel/IPC.md)
 - [Process Model](kernel/Process-Model.md)
+- [Image Loaders](kernel/Loader.md)
 - [Subsystem Isolation](kernel/Subsystem-Isolation.md)
 - [Logging and Tracing](kernel/Logging-And-Tracing.md)
+- [Diagnostics](kernel/Diagnostics.md)
+- [Crypto Primitives](kernel/Crypto.md)
+- [Utilities](kernel/Util.md)
+- [In-Kernel Apps](kernel/Kernel-Apps.md)
 - [Start Menu](kernel/Start-Menu.md)
 
 ### Drivers
@@ -29,17 +37,25 @@
 - [Networking Drivers](drivers/Networking-Drivers.md)
 - [Wireless/GPU Firmware](drivers/Wireless-Firmware.md)
 - [Wi-Fi Onboarding](drivers/WiFi-Onboarding.md)
+- [802.11 Wireless Stack](drivers/Wireless-80211.md)
+- [Bluetooth](drivers/Bluetooth.md)
 - [Graphics Drivers](drivers/Graphics-Drivers.md)
 - [Audio](drivers/Audio.md)
 - [Input](drivers/Input.md)
+- [VirtIO Devices](drivers/Virtio.md)
+- [Power Management](drivers/Power-Management.md)
 
 ### Subsystems
 - [Win32 PE Subsystem](subsystems/Win32-PE-Subsystem.md)
 - [PE Loader](subsystems/PE-Loader.md)
 - [Win32 DLLs](subsystems/Win32-DLLs.md)
+- [Win32 Registry](subsystems/Win32-Registry.md)
 - [Linux ABI](subsystems/Linux-ABI.md)
+- [ABI Translation Layer](subsystems/Translation-Layer.md)
 - [Compositor and Window Manager](subsystems/Compositor.md)
+- [UI Toolkit](subsystems/UI-Toolkit.md)
 - [DirectX v0 Path](subsystems/DirectX.md)
+- [Vulkan ICD](subsystems/Vulkan-ICD.md)
 
 ### Filesystem
 - [VFS](filesystem/VFS.md)
@@ -57,9 +73,11 @@
 - [DRSH Remote Access](networking/DRSH-Remote-Access.md)
 
 ### Security
+- [Auth and Login](security/Auth-and-Login.md)
 - [Sandboxing](security/Sandboxing.md)
 - [Capabilities](security/Capabilities.md)
 - [RBAC and Elevation](security/RBAC-and-Elevation.md)
+- [Driver and Fault Domains](security/Driver-Domains.md)
 - [Persistence (secrets at rest)](security/Persistence.md)
 - [W^X / NX Enforcement](security/WX-Enforcement.md)
 - [Attack Simulation](security/Attack-Simulation.md)
@@ -95,6 +113,7 @@
 - [Knowledge Base Index](reference/Knowledge-Base-Index.md)
 - [Shell Commands](reference/Shell-Commands.md)
 - [Shell Scripting](reference/Shell-Scripting.md)
+- [Smoke Test Suite](reference/Smoke-Test-Suite.md)
 - [Win32 / DirectX Surface Status](reference/Win32-Surface-Status.md)
 
 ### Advanced

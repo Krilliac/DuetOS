@@ -1,0 +1,181 @@
+# ACPI
+
+> **Audience:** Kernel hackers, driver authors, BIOS / firmware hackers
+>
+> **Execution context:** Kernel — init phase only; no runtime AML evaluation
+> in v0
+>
+> **Maturity:** v0 — RSDP/XSDT/MADT/HPET/MCFG/SRAT parsed; minimal AML
+> walker; ACPICA-class evaluator deferred
+
+## Overview
+
+ACPI on DuetOS is two things:
+
+1. **Boot-time table parser** — RSDP discovery, XSDT walk, per-table
+   structured decode. This is what makes the kernel SMP-aware, find IOAPICs,
+   route legacy ISA IRQs, and find power-management ports.
+2. **AML namespace walker** — a minimal DSDT/SSDT bytecode walker that
+   answers structural questions (does `BAT0` exist? what's the byte stream
+   for `_S5_`?) without evaluating arbitrary AML. Used by the power
+   subsystem to detect battery presence and to find the shutdown package.
+
+Full ACPICA-class AML evaluation (running `_BIF`, `_BST`, EC traffic) is
+**not** in scope for v0. The wiki page for the power subsystem
+([Power Management](../drivers/Power-Management.md)) lists what bits of
+AML the runtime would need to gain to graduate that surface from "static
+inventory" to "live battery dashboard."
+
+Sources:
+
+- [`kernel/acpi/acpi.h`](../../kernel/acpi/acpi.h) +
+  [`acpi.cpp`](../../kernel/acpi/acpi.cpp) — table discovery + decode
+- [`kernel/acpi/aml.h`](../../kernel/acpi/aml.h) +
+  [`aml.cpp`](../../kernel/acpi/aml.cpp) — namespace walker
+- [`kernel/acpi/srat.h`](../../kernel/acpi/srat.h) — NUMA topology
+- [`kernel/acpi/acpi_rust/`](../../kernel/acpi/acpi_rust/) — Rust crate
+  for tightly-bounded decoders (see [Rust Subsystems](../tooling/Rust-Subsystems.md))
+
+## Table Discovery
+
+`AcpiInit()` runs in the early boot phase. It:
+
+1. Looks for the RSDP in the EBDA (`0x9FC00..0xA0000`) and BIOS ROM
+   (`0xE0000..0x100000`) using the canonical 8-byte signature `RSD PTR `.
+2. Uses the RSDP revision to pick XSDT (v2+) over RSDT (v1).
+3. Walks the SDT pointer array, checksums each table, and dispatches by
+   4-byte signature: `APIC` → MADT, `HPET` → HPET, `MCFG` → MCFG, `SRAT`
+   → SRAT, `DSDT`/`SSDT` cached for `aml.cpp` to walk later.
+
+A table that fails its checksum fires the `kAcpiMcfgTruncated` probe (or
+the per-table equivalent) and is skipped — the kernel keeps booting on
+the tables that did checksum.
+
+## Public Read APIs
+
+```cpp
+acpi::LocalApicAddress();                  // u64 phys
+acpi::IoApicCount();                       // u32
+acpi::IoApicRecords();                     // span<IoApicRecord>
+acpi::CpuCount();                          // u32, from MADT LAPIC entries
+acpi::IsaIrqToGsi(u8 isa_irq, ...);        // resolves ISA → GSI overrides
+acpi::Pm1aControlPort();                   // u16 I/O port for shutdown
+acpi::Pm1bControlPort();                   // u16
+acpi::HpetAddress();                       // PhysAddr or 0
+acpi::McfgAddress();                       // PhysAddr or 0 (ECAM base)
+acpi::DsdtAddress() / .DsdtLength();       // for AML walker
+acpi::SsdtAddress(i) / .SsdtLength(i);     // per-SSDT
+acpi::AcpiReset();                         // writes RESET_REG if present
+acpi::AcpiShutdown();                      // S5 transition (uses AML S5 pkg)
+```
+
+All accessors are read-only and IRQ-safe after `AcpiInit()` returns.
+
+## MADT — SMP Topology
+
+The MADT (Multiple APIC Description Table) is the source of truth for:
+
+- CPU count (one local APIC entry per logical CPU)
+- IOAPIC base + GSI base per IOAPIC
+- ISA → GSI overrides (the classic "IRQ 0 is actually GSI 2" PIT remap)
+- NMI source list
+
+The scheduler reads `CpuCount()` to size its per-CPU array
+([`kernel/cpu/percpu.cpp`](../../kernel/cpu/percpu.cpp)). The interrupt
+router reads `IoApicRecords()` to know which IOAPIC owns which GSI range.
+
+See [CPU Topology](CPU-Topology.md) for the consumer side.
+
+## HPET, MCFG, SRAT
+
+- **HPET** — the HPET base address feeds the
+  [time](Time.md#clocksource-selection) clocksource layer. If
+  `HpetAddress()` returns 0 the kernel boots on calibrated TSC; if
+  neither is available the boot panics.
+- **MCFG** — the PCI Express Enhanced Configuration Access Mechanism
+  base. [`kernel/drivers/pci/pci.cpp`](../../kernel/drivers/pci/pci.cpp)
+  uses it to do MMIO config-space reads instead of falling back to
+  CF8/CFC port I/O. See [PCIe Enumeration](../drivers/PCIe-Enumeration.md).
+- **SRAT** — System Resource Affinity Table. NUMA memory ranges parsed
+  by [`srat.cpp`](../../kernel/acpi/srat.cpp). Currently advisory; the
+  frame allocator does not yet honour NUMA-local preference.
+
+## AML Namespace Walker
+
+[`aml.cpp`](../../kernel/acpi/aml.cpp) is **structural** only: it builds
+a name → bytecode-offset index from DSDT + every SSDT and answers
+questions like "does `\_SB.PCI0.BAT0` exist?" or "what bytes follow the
+`_S5_` Package opcode?"
+
+Public surface:
+
+```cpp
+bool aml::AmlContainsName(const char* qualified_name);
+size_t aml::AmlNamespaceBuild();   // returns entry count
+size_t aml::AmlNamespaceCount();
+const char* aml::AmlObjectKindName(AmlObjectKind k);
+ResultStruct aml::AmlReadS5();     // extracts the SLP_TYPx values from _S5_
+```
+
+The walker recognises a handful of opcodes (Name, Scope, Method, Device,
+Package, the `_HID` / `_UID` / `_STA` short-form helpers) and treats
+everything else as opaque bytes. That is enough to:
+
+- Detect `BAT0` for the power UI
+- Find `_S5_` for clean shutdown
+- Count Device blocks under `\_SB.PCI0` to cross-check PCI enumeration
+
+It is **not** enough to execute `_BST` or to evaluate an EC region read.
+Adding those is the gate to live battery telemetry; see the Roadmap.
+
+## Rust Decoders
+
+[`kernel/acpi/acpi_rust/`](../../kernel/acpi/acpi_rust/) is a small Rust
+crate that exposes byte-stream decoders for the fixed-shape tables
+(RSDP / RSDT / XSDT / MADT headers). The C++ side calls into it through
+a thin C wrapper. The choice was made because table-bytes-from-firmware
+is exactly the call-site profile where memory safety matters more than
+C++ ergonomics. See [Rust Subsystems](../tooling/Rust-Subsystems.md).
+
+## Threading and Locking
+
+- All discovery and parsing happens once in `AcpiInit()` during early
+  boot, single CPU, IRQs masked. No locking needed at that point.
+- Post-init, the public accessors return cached snapshots. They take no
+  locks and are safe from any context including IRQ tails.
+- `AcpiReset()` / `AcpiShutdown()` are terminal — they take the system
+  down, so no concurrency concerns.
+
+## Capability Gates
+
+ACPI itself has no `kCap*` gate — the tables are read once and the
+accessors are public. Operations that consume ACPI data (e.g. shutting
+down the machine via the shell `shutdown` command) carry their own
+gates; see [Capabilities](../security/Capabilities.md).
+
+## Known Limits / GAPs
+
+- **No AML executor.** Methods (`_BST`, `_BIF`, `_PSV`, `_TMP` …) are
+  visible by name but not runnable. Power-subsystem battery telemetry
+  is consequently inert.
+- **No SCI handler.** SCI events from the embedded controller, lid
+  switch, power button, thermal trip points are unmasked at the IOAPIC
+  and dropped. Adding a handler is the prerequisite for lid-close /
+  power-button events.
+- **No EC driver.** The embedded controller is the gateway to most
+  laptop sensors. v0 leaves it untouched.
+- **No NUMA-aware allocation.** SRAT is parsed but the frame allocator
+  is a single global pool; per-node pools land when SMP scaling
+  demands them.
+- **No ACPICA-style namespace mutation.** Object lookup is read-only;
+  there is no `_INI` walker, no GPE binding.
+
+## Related Pages
+
+- [Boot Path](Boot.md) — when ACPI parsing happens
+- [CPU Topology](CPU-Topology.md) — MADT consumer
+- [PCIe Enumeration](../drivers/PCIe-Enumeration.md) — MCFG consumer
+- [Time](Time.md) — HPET consumer
+- [Power Management](../drivers/Power-Management.md) — `_S5_` shutdown,
+  battery detection
+- [Rust Subsystems](../tooling/Rust-Subsystems.md) — `acpi_rust` crate
