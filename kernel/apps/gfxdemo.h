@@ -48,7 +48,8 @@ enum class Mode : duetos::u8
     Particles = 3,
     Starfield = 4,
     Fire = 5,
-    Count = 6,
+    VulkanCube = 6, // Solid Gouraud-shaded cube rendered through the in-kernel Vulkan ICD
+    Count = 7,
 };
 
 void GfxDemoInit(duetos::drivers::video::WindowHandle handle);

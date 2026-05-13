@@ -80,10 +80,144 @@ state from "recording" to "executable."
 | Opcode | What it does in v0 |
 |--------|--------------------|
 | `vkCmdClearColorImage` | Writes the clear colour to the image's backing memory. If the image is scanout-backed, the framebuffer's damage rect is widened. |
-| `vkCmdBindPipeline`, `vkCmdBindDescriptorSets`, `vkCmdBindVertexBuffers`, `vkCmdBindIndexBuffer` | Update tape-local "current state" only. |
-| `vkCmdDraw`, `vkCmdDrawIndexed`, `vkCmdDispatch` | Bump a counter. No pixels move. |
+| `vkCmdBindPipeline`, `vkCmdBindDescriptorSets`, `vkCmdBindIndexBuffer` | Update tape-local "current state" only. |
+| `vkCmdBindVertexBuffers` | Recorded; the binding-0 buffer + offset feed the software triangle rasterizer at `vkCmdDraw` replay time. |
+| `vkCmdDraw` | Software triangle rasterizer — paints flat-shaded triangles into the bound scanout-backed render target via the DuetOS v0 fixed vertex format (see below). Bumps `vk_triangles_drawn` by `vertex_count / 3` regardless of whether pixels reach the framebuffer. |
+| `vkCmdDrawIndexed`, `vkCmdDispatch` | Bump a counter. No pixels move (no index-buffer fetch in the rasterizer yet; no shader to run for compute). |
 | `vkCmdCopyBuffer`, `vkCmdCopyImage`, `vkCmdCopyBufferToImage` | Real `memcpy` between mapped backing buffers. |
 | `vkCmdPipelineBarrier`, `vkCmdSetViewport`, `vkCmdSetScissor` | No-op (state recorded, not enforced). |
+
+## Software triangle rasterizer (v1)
+
+`graphics_vk_raster.cpp` is a CPU edge-function rasterizer that
+turns `vkCmdDraw` and `vkCmdDrawIndexed` into visible pixels when
+the caller fills its vertex buffer with one of the DuetOS fixed
+vertex formats and points the draw at a scanout-backed render
+target. No SPIR-V execution, no vertex transform — positions are
+already in pixel space — but the rasterizer interpolates colour
+(Gouraud), honours per-pixel alpha (src-over) and runs a
+hardware-style depth test on the v1 vertex format.
+
+**Vertex formats:**
+
+| Format | Stride | Layout |
+|--------|--------|--------|
+| v0 (default) | 8 bytes | `{i16 x_px; i16 y_px; u32 argb;}` |
+| v1 (with depth) | 12 bytes | `{i16 x_px; i16 y_px; i16 z; u16 reserved; u32 argb;}` |
+
+The format is per-command-buffer state. Defaults to v0;
+callers select v1 via the DuetOS extension
+`vkCmdSetVertexFormatDuet(cb, 1)`. `argb` is 0xAARRGGBB; the
+high byte drives `FramebufferPutPixelAlpha` (src-over blend)
+when < 0xFF and `FramebufferPutPixel` (opaque) when == 0xFF.
+
+**Topologies (Vulkan spec values):**
+
+| Topology | Value | Primitives produced |
+|----------|-------|---------------------|
+| PointList | 0 | `vertex_count` 1×1 pixel stamps |
+| LineList | 1 | `vertex_count / 2` Bresenham segments |
+| LineStrip | 2 | `vertex_count - 1` Bresenham segments |
+| TriangleList | 3 | `vertex_count / 3` triangles |
+| TriangleStrip | 4 | `vertex_count - 2` triangles (odd triangles flip winding) |
+| TriangleFan | 5 | `vertex_count - 2` triangles (every triangle shares vertex 0) |
+
+Point and line topologies are flat-shaded with the first vertex's
+colour and bypass the triangle bbox walk. `*_with_adjacency`
+topologies record but produce no pixels. Selected via
+`vkCmdSetPrimitiveTopology(cb, n)`; defaults to TriangleList.
+
+**Indexed draws:** `vkCmdDrawIndexed` walks the buffer bound by
+`vkCmdBindIndexBuffer`. UINT16 and UINT32 index formats are
+both supported; each index is offset by the draw's
+`vertex_offset` parameter before lookup in the vertex buffer.
+Strip and fan topologies are honoured the same way as the
+non-indexed path.
+
+**Scissor:** the rasterizer's bounding-box walk is intersected
+with the most-recent `vkCmdSetScissor` rect when it's
+non-empty. A zero-extent scissor disables enforcement.
+
+**Depth test:** when the vertex format is v1 AND
+`vkCmdSetDepthTestEnable(cb, 1)` has run AND the shared depth
+surface allocates successfully:
+
+- Z is interpolated barycentrically per pixel using the same
+  weights as colour.
+- The depth surface is a single `u16` per-pixel buffer sized to
+  the live framebuffer extent (one buffer total — v0 doesn't
+  multi-target). Lazy-allocated through `kheap` on the first
+  Z-test draw; cleared to `0xFFFF` (far) at alloc and by
+  `vkCmdClearDepthStencilImage` (recognising the canonical
+  `0.0f` / `1.0f` bit patterns to avoid pulling in soft-float).
+- `vkCmdSetDepthCompareOp(cb, op)` honours every Vulkan
+  compare op (Never / Less / Equal / LessOrEqual / Greater /
+  NotEqual / GreaterOrEqual / Always). Default Less.
+- `vkCmdSetDepthWriteEnable(cb, 1)` gates the write-back of
+  the new Z value to the depth surface; the compare still
+  runs when write is disabled.
+
+When the depth surface can't allocate (low memory, headless
+boot) the rasterizer silently falls back to the no-Z path and
+logs one WARN line — no per-frame chatter.
+
+**Algorithm:** integer edge-function (barycentric) test. For
+each pixel `(px, py)` in the clipped bounding box, compute the
+three edge functions; a pixel is inside when all three share a
+sign consistent with the triangle's signed area. Barycentric
+weights are the absolute edge magnitudes; channels and Z are
+interpolated as
+`(w0*a + w1*b + w2*c + |area|/2) / |area|`. Degenerate
+(zero-area) triangles are skipped. The flat-shade fast path
+(all three vertex colours identical) skips the per-pixel
+divide.
+
+**Replay state machine** — these per-cb commands feed the
+rasterizer at submit time:
+
+| Command | Effect on RasterState |
+|---------|-----------------------|
+| `vkCmdBeginRenderPass` / `BeginRendering` / `ClearColorImage` | sets `rt_image` |
+| `vkCmdBindVertexBuffers(binding=0)` | sets `vertex_buffer` + `vertex_offset` |
+| `vkCmdBindIndexBuffer` | sets `index_buffer` + `index_offset` + `index_type` |
+| `vkCmdSetScissor` | sets `scissor` + `has_scissor` (cleared by zero-extent rect) |
+| `vkCmdSetPrimitiveTopology` | sets `topology` |
+| `vkCmdSetVertexFormatDuet` *(extension)* | sets `vertex_format` (0 = v0, 1 = v1) |
+| `vkCmdSetDepthTestEnable` / `SetDepthWriteEnable` / `SetDepthCompareOp` | gates depth |
+| `vkCmdClearDepthStencilImage` | lazy-allocates + clears the shared depth surface |
+
+State is per-command-buffer; a secondary cb invoked via
+`vkCmdExecuteCommands` starts with fresh state in its own
+recursion of the replay walker.
+
+**Counters** — `vk_triangles_drawn` ticks per dispatched
+triangle (TriangleList: `vertex_count / 3`; strip/fan:
+`vertex_count - 2`; same for indexed-draw counts) regardless of
+whether the rasterizer actually paints (counter bumps before
+the scanout / host-visible / format gates), so the dispatch
+chain is observable to tests that don't own the live
+framebuffer.
+
+**Front-face culling:** `vkCmdSetCullMode(cb, mode)` and
+`vkCmdSetFrontFace(cb, face)` enforce backface / frontface
+culling at raster time. Cull modes: 0=None, 1=Front, 2=Back,
+3=FrontAndBack. Front-face values: 0=CounterClockwise (default),
+1=Clockwise. The sign of the integer signed-area test
+(`EdgeFn(v0, v1, v2)`) decides screen-space orientation;
+triangles whose orientation matches the cull selection are
+dropped before the bbox walk. Default is "no culling".
+
+Out of scope — deferred:
+
+- Texture sampling. The descriptor surface accepts
+  `CombinedImageSampler` binds but the rasterizer has no
+  per-pixel sampler fetch path; the bound image-view is recorded
+  for stats only.
+- Perspective-correct attribute interpolation. The rasterizer
+  is affine; pre-divided W-space attributes are the caller's
+  responsibility.
+- Multi-binding vertex buffers — only binding 0 is consumed.
+- Multi-rect scissor — only the first scissor rect is recorded.
 
 The reason `Copy*` works while `Draw*` doesn't: copy operations don't
 need shader execution. The framebuffer's pixels move because the
@@ -173,10 +307,15 @@ syscalls that the Win32 thunks issue to reach the ICD. See
 ## Known Limits / GAPs
 
 - **No real GPU submission.** Every device-side command is replayed
-  on the CPU; the only visible effect is `Clear` (and resource
-  copies).
+  on the CPU; the visible effects are `Clear`, resource copies, and
+  the CPU triangle rasterizer for `vkCmdDraw` / `vkCmdDrawIndexed`
+  (TriangleList / TriangleStrip / TriangleFan; Gouraud-shaded with
+  per-pixel src-over alpha; software Z-test when v1 vertex format
+  is selected).
 - **No SPIR-V execution.** Shader modules are parsed (entry points
-  enumerated, descriptor bindings counted) but not run.
+  enumerated, descriptor bindings counted) but not run. The
+  rasterizer is fixed-function; no per-fragment shader, no texture
+  sampling, no perspective-correct interpolation.
 - **Single queue family.** No async compute, no transfer queue
   separation.
 - **No swapchain resize.** Recreating the swapchain is supported;

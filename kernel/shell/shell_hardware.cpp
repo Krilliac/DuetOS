@@ -1321,6 +1321,8 @@ void CmdGfx(u32 argc, char** argv)
     WriteU64Dec(s.vk_clear_pixels_painted);
     ConsoleWrite(" upload-px=");
     WriteU64Dec(s.vk_image_upload_pixels);
+    ConsoleWrite(" triangles=");
+    WriteU64Dec(s.vk_triangles_drawn);
     ConsoleWriteChar('\n');
     ConsoleWrite("                         copy-bytes=");
     WriteU64Dec(s.vk_buffer_copy_bytes);

@@ -59,4 +59,12 @@ void RenderParticles(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32
 void RenderStarfield(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, duetos::u32 frame);
 void RenderFire(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, duetos::u32 frame);
 
+// Solid Gouraud-shaded cube rendered through the in-kernel Vulkan
+// ICD's software triangle rasterizer (indexed DrawIndexed with v1
+// vertex format, TriangleList, scissor + depth-test). Demonstrates
+// every feature of the rasterizer end-to-end. Pre-allocates its
+// Vulkan resources on first call; subsequent frames just rewrite
+// the vertex buffer + replay the command list.
+void RenderVulkanCube(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, duetos::u32 frame);
+
 } // namespace duetos::apps::gfxdemo

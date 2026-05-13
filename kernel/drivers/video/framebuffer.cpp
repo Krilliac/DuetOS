@@ -470,6 +470,44 @@ void FramebufferPutPixel(u32 x, u32 y, u32 rgb)
     MarkDamage(x, y, 1, 1);
 }
 
+void FramebufferPutPixelAlpha(u32 x, u32 y, u32 argb)
+{
+    if (!g_available)
+    {
+        return;
+    }
+    if (x >= g_info.width || y >= g_info.height)
+    {
+        return;
+    }
+    const u32 alpha = (argb >> 24) & 0xFFU;
+    if (alpha == 0U)
+    {
+        return;
+    }
+    const WriteTarget wt = GetWriteTarget();
+    auto* row = reinterpret_cast<volatile u32*>(wt.base + static_cast<u64>(y) * wt.pitch);
+    if (alpha == 0xFFU)
+    {
+        row[x] = argb & 0x00FFFFFFU;
+        MarkDamage(x, y, 1, 1);
+        return;
+    }
+    const u32 src_r = (argb >> 16) & 0xFFU;
+    const u32 src_g = (argb >> 8) & 0xFFU;
+    const u32 src_b = argb & 0xFFU;
+    const u32 inv = 255U - alpha;
+    const u32 dst = row[x];
+    const u32 dr = (dst >> 16) & 0xFFU;
+    const u32 dg = (dst >> 8) & 0xFFU;
+    const u32 db = dst & 0xFFU;
+    const u32 r = (src_r * alpha + dr * inv + 127U) / 255U;
+    const u32 g = (src_g * alpha + dg * inv + 127U) / 255U;
+    const u32 b = (src_b * alpha + db * inv + 127U) / 255U;
+    row[x] = (r << 16) | (g << 8) | b;
+    MarkDamage(x, y, 1, 1);
+}
+
 void FramebufferFillRect(u32 x, u32 y, u32 w, u32 h, u32 rgb)
 {
     if (!g_available || w == 0 || h == 0)

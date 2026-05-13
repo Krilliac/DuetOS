@@ -242,6 +242,7 @@ enum class CmdOp : u8
     ResetEvent2 = 63,
     WaitEvents2 = 64,
     PipelineBarrier2 = 65,
+    SetVertexFormatDuet = 66, // DuetOS extension: rasterizer vertex layout (0 = v0, 1 = v1)
 };
 
 struct CmdRecord
@@ -452,6 +453,7 @@ extern u32 g_debug_labels;
 extern u32 g_secondary_executes;
 extern u32 g_secondary_ops_replayed;
 extern u32 g_push_descriptor_writes;
+extern u32 g_triangles_drawn;
 
 // -------------------------------------------------------------------
 // Shared helper functions.
@@ -461,6 +463,75 @@ u32 ColorToRgb(const VkClearColorValue& c);
 void PaintScanoutClear(VkImage image, VkClearColorValue color);
 VkResult AppendOp(VkCommandBuffer cb, const CmdRecord& op);
 void ReplayCommandBuffer(VkCommandBuffer cb);
+
+/// State the replay walker hands the rasterizer for each Draw /
+/// DrawIndexed dispatch. Carries every bound resource the v1
+/// rasterizer cares about — render target, vertex buffer, index
+/// buffer, scissor rect, topology, vertex-format hint, depth-test
+/// state, and the framebuffer extent (snapshotted at submit time
+/// so the rasterizer doesn't keep calling into
+/// `display_info::Query()` per pixel).
+struct RasterState
+{
+    VkImage rt_image;
+    VkBuffer vertex_buffer;
+    u64 vertex_offset;
+    VkBuffer index_buffer;
+    u64 index_offset;
+    VkIndexType index_type;
+    bool has_index_buffer;
+    bool has_scissor;
+    VkRect2D scissor;
+    u32 topology;      // Vulkan-spec VkPrimitiveTopology value (0..5 supported; 0/1/2 = point/line/line-strip;
+                       // 3/4/5 = triangle list/strip/fan)
+    u32 vertex_format; // 0 = v0 (8 bytes, no Z); 1 = v1 (12 bytes, with i16 Z + reserved)
+    u32 depth_compare; // VkCompareOp: 0=Never, 1=Less, 2=Equal, 3=LessOrEqual, 4=Greater, 5=NotEqual, 6=GtEq, 7=Always
+    bool depth_test;   // SetDepthTestEnable
+    bool depth_write;  // SetDepthWriteEnable
+    u32 cull_mode;     // VkCullModeFlagBits: 0=None, 1=Front, 2=Back, 3=Both
+    u32 front_face;    // VkFrontFace: 0=CounterClockwise, 1=Clockwise
+    u32 fb_w;
+    u32 fb_h;
+};
+
+/// Lazy-allocated shared software depth buffer.
+///
+/// Storage: 16-bit unorm depth, `width * height * 2` bytes, one
+/// entry per pixel. Lazily allocated by `DepthSurfaceGetOrAlloc`
+/// on the first Z-test draw and sized to the live framebuffer
+/// extent. Cleared to `0xFFFF` (far) on alloc.
+struct DepthSurface
+{
+    u16* data;
+    u32 w;
+    u32 h;
+};
+
+/// Get or lazy-alloc the shared depth surface. Returns `nullptr`
+/// when the framebuffer is unavailable or the alloc fails — the
+/// caller treats that as "depth test off" and falls back to
+/// non-depth rasterization.
+DepthSurface* DepthSurfaceGetOrAlloc();
+
+/// Clear the depth surface to `value` (0..65535). No-op if not
+/// allocated.
+void DepthSurfaceClear(u16 value);
+
+/// Free the surface (used by the boot self-test teardown).
+void DepthSurfaceFree();
+
+/// Non-indexed draw: walk the vertex buffer in topology order.
+void RasterizeDuetDraw(const RasterState& st, u32 first_vertex, u32 vertex_count);
+
+/// Indexed draw: walk the index buffer, dereferencing each
+/// `index + vertex_offset` into the vertex buffer.
+void RasterizeDuetDrawIndexed(const RasterState& st, u32 first_index, u32 index_count, i32 vertex_offset);
+
+/// Legacy entry point used by older sites + tests. Internally
+/// builds a RasterState with `topology = TriangleList` and the
+/// live framebuffer extent, then calls `RasterizeDuetDraw`.
+void RasterizeDuetTriangles(VkImage rt_image, VkBuffer vertex_buffer, u64 vb_offset, u32 first_vertex,
+                            u32 vertex_count);
 
 // One-shot logging dedupe across the ICD.  Each entry-point id
 // gets a single boot-log line the first time it's reached;
@@ -496,6 +567,7 @@ u32 CommandReplayedCount();
 u32 SpirvModulesParsedCount();
 u32 SpirvEntryPointsSeenCount();
 u32 SpirvCapabilitiesSeenCount();
+u32 TrianglesDrawnCount();
 
 // ----- leak check ---------------------------------------------------
 
