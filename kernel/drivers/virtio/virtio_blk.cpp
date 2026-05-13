@@ -1,19 +1,39 @@
+#include "drivers/storage/block.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/virtio/virtio_pci.h"
 
 #include "log/klog.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
 
 /*
  * virtio-blk — block device.
  *
- * Real driver: a single requestq virtqueue. Each request is a
- * three-descriptor chain (header + data + status). The block
- * shim plugs into the existing `drivers/storage/block.h`
- * BlockDevice abstraction so VFS / lsblk / install / mkfs all
- * see virtio-blk uniformly with NVMe / AHCI / xHCI-MSC.
+ * One requestq virtqueue. Each request is a three-descriptor
+ * chain:
  *
- * v0 (this file): probe + feature negotiate + log; no requests
- * dispatched. STUB until shared queue-setup lands.
+ *   desc[0]  driver-write    virtio_blk_outhdr (16 B)
+ *   desc[1]  device-write    data buffer (count * sector_size B)
+ *   desc[2]  device-write    status byte (1 B)
+ *
+ * The driver presents the header (operation + LBA) and a buffer
+ * (device fills on read, driver fills on write); the device
+ * writes the status byte (0=OK, 1=IO_ERR, 2=UNSUPP) on
+ * completion. We poll the used ring — IRQ wire-up is the next
+ * slice.
+ *
+ * v0 ships read only. Write is stubbed via a nullptr in
+ * `BlockOps.write`, which the block layer maps to -1 without
+ * calling through. Capacity comes from `device_cfg + 0`
+ * (8-byte u64); sector size is hard-coded to 512 unless
+ * `VIRTIO_BLK_F_BLK_SIZE` is offered (read from `device_cfg +
+ * 20` in that case).
+ *
+ * Per-process / multi-queue locking is GAP: v0 assumes a
+ * single in-flight request at a time, which holds for the
+ * boot path (one shell, no parallel I/O). A real driver gates
+ * the request chain on a spinlock and uses multiple chains
+ * concurrently.
  */
 
 namespace duetos::drivers::virtio
@@ -26,16 +46,136 @@ inline constexpr u64 kBlkFeatureGeometry = 1ULL << 4;
 inline constexpr u64 kBlkFeatureRo = 1ULL << 5;
 inline constexpr u64 kBlkFeatureBlkSize = 1ULL << 6;
 
+namespace
+{
+
+// virtio_blk_outhdr layout (virtio 1.0 §5.2.6). 16 bytes.
+constexpr u32 kBlkTypeIn = 0; // read from device
+// Spec landmarks for the write + flush paths the next slice
+// lands. Kept here as named constants so the upcoming code reads
+// against the same names the spec uses; `[[maybe_unused]]`
+// silences -Wunused-const-variable until they're referenced.
+[[maybe_unused]] constexpr u32 kBlkTypeOut = 1;
+[[maybe_unused]] constexpr u32 kBlkTypeFlush = 4;
+constexpr u8 kBlkStatusOk = 0;
+
+struct BlkReqHdr
+{
+    u32 type;
+    u32 reserved;
+    u64 sector;
+};
+
+struct DeviceState
+{
+    bool up;
+    bool read_only;
+    u8 _pad[6];
+
+    VirtioPciLayout layout;
+    VirtioQueue q;
+
+    // Header + status backing — header lives in the first 16
+    // bytes of a 4 KiB page, status in the byte after. Single
+    // page covers both because descriptor phys-addresses can
+    // point at arbitrary offsets within a frame.
+    mm::PhysAddr hdr_phys;
+    u8* hdr_virt;
+
+    u32 sector_size;
+    u64 sector_count;
+};
+
+constinit DeviceState g_blk = {};
+
+i32 VirtioBlkBlockRead(void* cookie, u64 lba, u32 count, void* buf)
+{
+    auto* dev = static_cast<DeviceState*>(cookie);
+    if (dev == nullptr || !dev->up || buf == nullptr || count == 0)
+        return -1;
+
+    // The block layer already bounds-checked against sector_count
+    // before calling here. The data buffer must be in the kernel
+    // direct map so VirtToPhys yields its DMA-reachable address —
+    // BlockDeviceRead's contract states this explicitly.
+    const u64 byte_len = u64(count) * dev->sector_size;
+    const mm::PhysAddr data_phys = mm::VirtToPhys(buf);
+    if (data_phys == 0)
+    {
+        KLOG_WARN("drivers/virtio/blk", "VirtToPhys returned 0; buf not in direct map?");
+        return -1;
+    }
+
+    // Populate header at offset 0, status at offset 16 of the
+    // shared scratch page. Status is reset to a sentinel the
+    // device must overwrite — we use 0xFF, well outside the
+    // legal {OK, IO_ERR, UNSUPP} range.
+    auto* hdr = reinterpret_cast<BlkReqHdr*>(dev->hdr_virt);
+    hdr->type = kBlkTypeIn;
+    hdr->reserved = 0;
+    hdr->sector = lba;
+    u8* status = dev->hdr_virt + 16;
+    *status = 0xFF;
+
+    VirtqDesc* d = const_cast<VirtqDesc*>(dev->q.desc);
+    // Chain head — header, driver-write.
+    d[0].addr = dev->hdr_phys;
+    d[0].len = 16;
+    d[0].flags = kVirtqDescNext;
+    d[0].next = 1;
+    // Data — device-write for read.
+    d[1].addr = data_phys;
+    d[1].len = static_cast<u32>(byte_len);
+    d[1].flags = kVirtqDescNext | kVirtqDescWrite;
+    d[1].next = 2;
+    // Status — device-write, 1 byte.
+    d[2].addr = dev->hdr_phys + 16;
+    d[2].len = 1;
+    d[2].flags = kVirtqDescWrite;
+    d[2].next = 0;
+
+    VirtioQueuePublish(&dev->layout, &dev->q, /*desc_head=*/0);
+    for (u32 spin = 0; spin < 5000000; ++spin)
+    {
+        u32 head = 0;
+        u32 used_len = 0;
+        if (VirtioQueueTryPop(&dev->q, &head, &used_len))
+        {
+            if (*status == kBlkStatusOk)
+                return 0;
+            KLOG_WARN_V("drivers/virtio/blk", "request completed non-OK", static_cast<u64>(*status));
+            return -1;
+        }
+        asm volatile("pause" ::: "memory");
+    }
+    KLOG_WARN("drivers/virtio/blk", "request poll timed out");
+    return -1;
+}
+
+constinit const duetos::drivers::storage::BlockOps kBlkOps = {
+    /*.read = */ &VirtioBlkBlockRead,
+    /*.write = */ nullptr, // read-only v0; future slice flips the
+                           // sentinel to a writer that builds a
+                           // VIRTIO_BLK_T_OUT request chain.
+};
+
+} // namespace
+
 bool VirtioBlkProbe(const VirtioPciLayout& L)
 {
+    if (g_blk.up)
+    {
+        // Second virtio-blk device — v0 supports only one. The
+        // probe still acks/drives the device so it doesn't sit
+        // half-negotiated, but skips registration.
+        KLOG_WARN("drivers/virtio/blk", "second device detected; v0 supports only one");
+        return false;
+    }
+
     VirtioPciLayout layout = L;
-    // Only ask for features the device offered, intersected with
-    // what we know how to obey today. Geometry / blk_size are
-    // informational — if the device advertises them, opt in so the
-    // device-cfg page parses correctly; otherwise stay out.
-    u64 want = kFeatureVersion1;
     const u64 dev_features =
         (static_cast<u64>(layout.device_features_hi) << 32) | static_cast<u64>(layout.device_features_lo);
+    u64 want = kFeatureVersion1;
     want |= dev_features & (kBlkFeatureSegMax | kBlkFeatureGeometry | kBlkFeatureRo | kBlkFeatureBlkSize);
 
     if (!VirtioNegotiate(&layout, want))
@@ -43,12 +183,78 @@ bool VirtioBlkProbe(const VirtioPciLayout& L)
         KLOG_WARN("drivers/virtio/blk", "feature negotiation failed");
         return false;
     }
-    KLOG_INFO_V("drivers/virtio/blk", "attached (no requests dispatched yet)", static_cast<u64>(layout.num_queues));
-    // STUB: read/write request dispatch. A real driver reads the
-    // capacity (8-byte u64 at device_cfg + 0) into a BlockDevice
-    // registration, then hands every BlockDeviceRead / Write
-    // through a virtqueue request chain. Until queue setup lands
-    // in the shared transport, virtio-blk is observe-only.
+
+    // virtio_blk_config layout (virtio 1.0 §5.2.4):
+    //   u64 capacity (sectors of 512B, or of blk_size if F_BLK_SIZE)
+    //   u32 size_max, seg_max, ...
+    //   u32 blk_size at offset 20 (when F_BLK_SIZE negotiated)
+    u64 capacity = 0;
+    u32 sector_size = 512;
+    if (layout.device_cfg != nullptr)
+    {
+        // Capacity is 8 bytes at offset 0; do two 32-bit reads to
+        // match the 4-byte alignment guarantee.
+        const u32 lo = *reinterpret_cast<volatile u32*>(layout.device_cfg + 0);
+        const u32 hi = *reinterpret_cast<volatile u32*>(layout.device_cfg + 4);
+        capacity = (static_cast<u64>(hi) << 32) | lo;
+        if ((want & kBlkFeatureBlkSize) != 0)
+        {
+            const u32 bs = *reinterpret_cast<volatile u32*>(layout.device_cfg + 20);
+            if (bs >= 512 && bs <= 4096 && (bs & (bs - 1)) == 0)
+                sector_size = bs;
+        }
+    }
+    if (capacity == 0)
+    {
+        KLOG_WARN("drivers/virtio/blk", "device reports zero capacity; skipping registration");
+        return false;
+    }
+
+    if (!VirtioQueueSetup(&layout, &g_blk.q, /*queue_index=*/0, kVirtqDefaultSize))
+    {
+        KLOG_WARN("drivers/virtio/blk", "requestq setup failed");
+        return false;
+    }
+
+    // One shared header + status page. Single in-flight request
+    // (see file-level GAP comment) means we don't need per-call
+    // allocation here.
+    const mm::PhysAddr hdr_phys = mm::AllocateFrame();
+    if (hdr_phys == mm::kNullFrame)
+    {
+        KLOG_WARN("drivers/virtio/blk", "header page alloc failed");
+        return false;
+    }
+    g_blk.hdr_phys = hdr_phys;
+    g_blk.hdr_virt = static_cast<u8*>(mm::PhysToVirt(hdr_phys));
+    for (u64 i = 0; i < 4096; ++i)
+        g_blk.hdr_virt[i] = 0;
+
+    g_blk.layout = layout;
+    g_blk.sector_size = sector_size;
+    g_blk.sector_count = capacity;
+    g_blk.read_only = ((want & kBlkFeatureRo) != 0);
+    g_blk.up = true;
+
+    duetos::drivers::storage::BlockDesc desc{};
+    desc.name = "vblk0";
+    desc.ops = &kBlkOps;
+    desc.cookie = &g_blk;
+    desc.sector_size = sector_size;
+    desc.sector_count = capacity;
+    const u32 h = duetos::drivers::storage::BlockDeviceRegister(desc);
+    if (h == duetos::drivers::storage::kBlockHandleInvalid)
+    {
+        KLOG_WARN("drivers/virtio/blk", "BlockDeviceRegister failed");
+        g_blk.up = false;
+        return false;
+    }
+
+    KLOG_INFO_2V("drivers/virtio/blk", "attached as block device", "sectors", capacity, "sector-size",
+                 static_cast<u64>(sector_size));
+    // GAP: write path (VIRTIO_BLK_T_OUT) — read-only registration
+    // for v0. Adding it is a mirror of the read path with
+    // flags=kVirtqDescNext (no WRITE) on the data descriptor.
     return true;
 }
 

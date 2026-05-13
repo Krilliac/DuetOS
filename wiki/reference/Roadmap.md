@@ -1388,25 +1388,23 @@ kernel-side primitive is in tree; what's missing is the per-call
 wiring that turns "infrastructure exists" into "real callers using
 it."
 
-### VirtIO — virtio-blk BlockDevice integration
+### VirtIO — virtio-blk write path
 
-- **Today:** `kernel/drivers/virtio/virtio_blk.cpp` does the
-  probe + feature negotiate but doesn't dispatch requests
-  through a virtqueue (STUB marked at the function tail). The
-  shared transport (`virtio_queue.cpp`) hosts the queue setup
-  helpers virtio-rng already uses.
-- **Lands:** virtio-blk allocates one requestq, registers a
-  `BlockDesc` with `BlockDeviceRegister`, and routes
-  `BlockDeviceRead` / `Write` calls through a 3-descriptor
-  chain: `virtio_blk_outhdr` (driver-write) + data
-  (device-write for read, driver-write for write) + status
-  byte (device-write). Read capacity from
-  `device_cfg + 0` (8-byte u64). Polls used ring; IRQ wire-up
-  is a separate slice. Bridges through `mm::PhysToVirt` /
-  `VirtToPhys` so the caller's kernel-virt buffer surfaces
-  the right phys to the device.
-- **Blocks on:** nothing — the queue helpers + the block-
-  device API already exist.
+- **Today:** read path landed. `virtio-blk` allocates one
+  requestq, registers a `BlockDesc` as `vblk0`, and routes
+  `BlockDeviceRead` through the 3-descriptor chain
+  (`virtio_blk_outhdr` + data + status). Capacity is read
+  from `device_cfg + 0`; sector size honours
+  `VIRTIO_BLK_F_BLK_SIZE`. Polls used ring (no IRQ).
+- **Lands:** write path. Mirror of the read path with
+  `kBlkTypeOut` + `flags = kVirtqDescNext` (no
+  `kVirtqDescWrite`) on the data descriptor. Per-call
+  locking once multiple in-flight requests need to coexist
+  (today v0 reuses a single shared header page under the
+  "one in-flight" assumption). Also: `VIRTIO_BLK_T_FLUSH`
+  for `BlockOps.flush` (not yet in the BlockOps vtable;
+  lands alongside).
+- **Blocks on:** nothing.
 
 ### VirtIO — virtio-net packet TX/RX
 
@@ -1456,30 +1454,36 @@ it."
   flags at first call. The cache invalidation story for
   process re-exec is a v1 concern, not v0.
 
-### IOCP — syscall surface
+### IOCP — Win32 syscall surface
 
-- **Today:** kernel-side primitive (`kernel/ipc/iocp.{h,cpp}`)
-  with `IocpCompletion` / `IocpPort` + try-post / try-pop /
-  close + boot self-test. No syscall surface; no per-process
-  handle binding.
-- **Lands:** four syscalls (numbers reserved here so future
-  ABI growth is predictable; do not commit numbers until the
-  handlers compile + run):
-  - `SYS_IOCP_CREATE` — kernel allocates an `IocpPort` via
-    the `KObject`-shaped path (mirror `KMutex` / `KEvent`),
-    returns a handle from `proc->kobj_handles`.
-  - `SYS_IOCP_POST` — handle + completion struct → posts to
-    the port.
-  - `SYS_IOCP_WAIT` — handle + timeout → blocks in
-    `KMailbox`-style sleep/wake (the IOCP wrapper currently
-    has a plain inline ring; the wait variant needs a
-    `sched::Condvar` analogue or a wrap over KMailbox).
-  - `SYS_IOCP_CLOSE` — handle release; existing
-    HandleTableRemove path applies once the IocpPort is a
-    proper KObject.
-- **Blocks on:** elevating `IocpPort` to a `KObject` (init,
-  retain, release, destroy callback) so it can sit in the
-  shared handle table.
+- **Today:** kernel-side primitive is KObject-compliant.
+  `IocpPort` embeds a `KObject base` (type
+  `KObjectType::Iocp = 7`); `IocpCreate()` allocates through
+  kheap + `KObjectInit` and is ready for
+  `HandleTableInsert`. The destroy callback frees the storage
+  on last release. Boot self-test covers FIFO + overflow +
+  KObject round-trip (type tag, refcount, destroy callback).
+- **Lands:** four Win32 syscalls + the user-mode DLL shim.
+  `Process::kobj_handles` is the right table; mirror the
+  shape of `kernel/subsystems/win32/mutex_syscall.cpp`:
+  - `SYS_IOCP_CREATE` — `IocpCreate` + `HandleTableInsert`,
+    return `Process::kWin32IocpBase + handle` (need to
+    pick a base — `0x52000000` is free in the Win32 handle
+    space).
+  - `SYS_IOCP_POST` — resolve handle → `IocpTryPost`.
+    Caller passes the completion record by-value via
+    `CopyFromUser` so an unmapped user buffer fails
+    cleanly.
+  - `SYS_IOCP_WAIT` — resolve handle → `IocpTryPop`. The
+    blocking variant needs a `sched::Condvar` wired into
+    `IocpPort` (mirror `KMailbox`'s `not_empty`); for v0
+    poll-with-timeout is sufficient.
+  - `SYS_IOCP_CLOSE` — `HandleTableRemove`. Last reference
+    fires `IocpDestroy` → `KFree`.
+- **Blocks on:** the user-mode `CreateIoCompletionPort` /
+  `GetQueuedCompletionStatus` DLL shim. Numbers are NOT
+  burned until the handlers compile + run against a real
+  PE — per CLAUDE.md, syscall numbers are forever ABI.
 
 ### A/B kernel slots — installer + bootloader integration
 

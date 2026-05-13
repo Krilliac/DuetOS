@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ipc/kobject.h"
+#include "util/result.h"
 #include "util/types.h"
 
 /*
@@ -71,6 +73,13 @@ struct IocpCompletion
 
 struct IocpPort
 {
+    /// MUST be the first member — `KObject*` ↔ `IocpPort*` cast
+    /// shape for `HandleTable` round-trips. Empty when the port
+    /// is exercised through the legacy `IocpInit` path (boot
+    /// self-test); populated via `IocpCreate` for handle-table
+    /// callers.
+    KObject base;
+
     // Fixed-cap inline ring. v0 doesn't need a heap-allocated
     // variable-depth queue — every realistic Win32 IOCP user
     // pulls completions fast enough that 32 in-flight is
@@ -104,8 +113,18 @@ bool IocpTryPost(IocpPort* port, const IocpCompletion& c);
 bool IocpTryPop(IocpPort* port, IocpCompletion* out);
 
 /// Tear down a port — drains the queue, zeroes the association
-/// count. Safe to call on an already-clean port.
+/// count. Safe to call on an already-clean port. Does NOT free
+/// the port's storage — use `IocpRelease` for the heap-allocated
+/// path that came out of `IocpCreate`.
 void IocpClose(IocpPort* port);
+
+/// Allocate a fresh IocpPort on the kernel heap, wired up as a
+/// `KObjectType::Iocp`. Returns the new object with refcount = 1;
+/// the caller hands it to `HandleTableInsert` which takes that
+/// reference. The destroy callback frees the storage on last
+/// release. Returns `Err{ErrorCode::OutOfMemory}` on heap
+/// exhaustion. Safe from any kernel context once kheap is online.
+::duetos::core::Result<IocpPort*> IocpCreate();
 
 /// Boot-time self-test. Posts a small batch of completions,
 /// drains them, asserts FIFO order + no leaks. Panics on any
