@@ -1631,6 +1631,11 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::LoaderReject, pin,
                                                "implement PE feature or improve loader policy",
                                                static_cast<u64>(effective_ps), file_len);
+        // Surface the reject reason on serial so the boot transcript
+        // carries the specific status name (e.g. Pe32ExecutionNotReady)
+        // rather than the generic "PeLoad failed" line emitted by the
+        // caller. WARN level so it shows under any sensible loglevel.
+        KLOG_WARN_S("loader/pe", "PE rejected", "status", PeStatusName(effective_ps));
         return r;
     }
 

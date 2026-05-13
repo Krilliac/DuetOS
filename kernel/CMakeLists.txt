@@ -416,6 +416,47 @@ else()
 endif()
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_MINIBROWSER_HEADER}")
 
+# pe32_smoke.exe — minimal PE32 (i386) test image. Built with the
+# i686 mingw cross compiler so the PE has Machine=0x014C +
+# OptHdrMagic=0x10B. Today the loader's MapAndRun rejects it with
+# `PeStatus::Pe32ExecutionNotReady`; once 32-bit DLL preload + IAT-32
+# walker land, it'll run end-to-end via EnterUserMode32.
+find_program(MINGW_W64_I686_GCC i686-w64-mingw32-gcc)
+set(DUETOS_PE32_SMOKE_SRC "${CMAKE_SOURCE_DIR}/userland/apps/pe32_smoke/pe32_smoke.c")
+set(DUETOS_PE32_SMOKE_EXE "${CMAKE_CURRENT_BINARY_DIR}/pe32_smoke.exe")
+set(DUETOS_PE32_SMOKE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_pe32_smoke_pe.h")
+if(MINGW_W64_I686_GCC)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_SMOKE_EXE}"
+        COMMAND "${MINGW_W64_I686_GCC}"
+                -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
+                -e _mainCRTStartup -Wl,--subsystem,console -Wl,--entry,_mainCRTStartup
+                -o "${DUETOS_PE32_SMOKE_EXE}" "${DUETOS_PE32_SMOKE_SRC}" -lkernel32
+        DEPENDS "${DUETOS_PE32_SMOKE_SRC}"
+        COMMENT "Cross-compiling pe32_smoke.exe (i386 PE32)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_SMOKE_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${DUETOS_PE32_SMOKE_EXE}" "${DUETOS_PE32_SMOKE_HEADER}"
+                kBinPe32SmokeBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_PE32_SMOKE_EXE}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding pe32_smoke PE"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_SMOKE_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                "${DUETOS_PE32_SMOKE_HEADER}"
+                kBinPe32SmokeBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Emitting pe32_smoke PE stub (i686 mingw absent)"
+        VERBATIM)
+    message(STATUS "PE32 smoke fixture disabled (i686-w64-mingw32-gcc not found).")
+    message(STATUS "  Install with: sudo apt-get install -y gcc-mingw-w64-i686")
+endif()
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_PE32_SMOKE_HEADER}")
+
 # Surface-coverage PE smoke apps. Each one is a self-contained
 # console PE (~10 KB) targeting a single Win32 API surface. Source
 # lives in userland/apps/<name>/<name>.c; CMake embeds build-tree

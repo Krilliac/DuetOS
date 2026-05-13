@@ -108,6 +108,7 @@
 #include "generated_fs_smoke_pe.h"
 #include "generated_handle_smoke_pe.h"
 #include "generated_browser_pe_pe.h"
+#include "generated_pe32_smoke_pe.h"
 #include "generated_iphlpapi_smoke_pe.h"
 #include "generated_mem_smoke_pe.h"
 #include "generated_minibrowser_pe.h"
@@ -2849,6 +2850,21 @@ bool SpawnOnDemand(const char* kind)
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
+    if (LocalStrEq(kind, "pe32"))
+    {
+        // pe32_smoke.exe — minimal PE32 (i386) test image. The
+        // kernel's loader recognises PE32 (Layer 1 of 32-bit PE
+        // support) but rejects MapAndRun with the typed status
+        // `PeStatus::Pe32ExecutionNotReady` until Layers 4 (i386
+        // DLL set) and 5 (pointer marshalling) land. The boot
+        // log carries a "loader/pe:Pe32ExecutionNotReady" pin so
+        // the reject signal is visible. SpawnPeFile's diagnostic
+        // PeReport pre-pass walks the PE32's headers + imports so
+        // the gap inventory is filled out from the live boot.
+        SpawnPeFile("ring3-pe32-smoke", fs::generated::kBinPe32SmokeBytes, fs::generated::kBinPe32SmokeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
     return false;
 }
 
@@ -3065,6 +3081,14 @@ void StartRing3SmokeTask()
     //     under TCG.
     if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::Ring3))
     {
+        // pe32_smoke.exe runs in BOTH emulator and bare metal — it's
+        // a single tiny image (~6 KiB) and the loader rejects it
+        // immediately with Pe32ExecutionNotReady, so it costs
+        // microseconds of CPU and adds one diagnostic line to the
+        // boot transcript. Keeping it always-on means CI catches
+        // any regression in the Layer 1..3 PE32 recognition path.
+        SpawnPeFile("ring3-pe32-smoke", fs::generated::kBinPe32SmokeBytes, fs::generated::kBinPe32SmokeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         if (!emulator)
         {
             // mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0
