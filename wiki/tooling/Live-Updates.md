@@ -90,6 +90,7 @@ The command is admin-gated:
 
 ```
 live-update help                            usage
+live-update version                         hash / branch / commit subject / date of running kernel
 live-update status                          slot table + non-reloadable surfaces
 live-update reload <path>                   respawn one userland image, retiring prior pid
 live-update reload-all                      respawn every live slot from /tmp/<basename>
@@ -100,6 +101,54 @@ live-update kernel-patches                  list every live patch
 live-update kernel-auto-patch               install every entry in the registry section
 live-update kernel-auto-revert              revert every live patch in one call
 ```
+
+### `live-update version`
+
+Prints the build identity of the running kernel:
+
+```
+[live-update] running kernel build info:
+              hash        : df930edb52+
+              branch      : claude/live-updates-hot-reload-BOVKD
+              subject     : debug/hot_patch: real kernel-function hot-patching
+              author date : 2026-05-13T18:25:35+00:00
+              built       : 2026-05-13T18:37:25Z
+```
+
+All five fields are baked in at CMake configure time via
+`DUETOS_GIT_HASH`, `DUETOS_GIT_BRANCH`, `DUETOS_GIT_SUBJECT`,
+`DUETOS_GIT_AUTHOR_DATE` and `DUETOS_BUILD_DATE` (see top-level
+[`CMakeLists.txt`](../../CMakeLists.txt)). A trailing `+` on the
+hash means the working tree had uncommitted edits when CMake ran.
+
+The same `hash=… branch=…` one-liner is printed as a header at the
+top of `live-update kernel-auto-patch` and `live-update
+kernel-auto-revert`, so an operator running a bulk patch can see
+immediately which build they hit:
+
+```
+shell> live-update kernel-auto-patch
+[live-update] running kernel  hash=df930edb52+  branch=claude/…
+[live-update] kernel-auto-patch  considered=1 installed=1 already_patched=0 failed=0
+```
+
+### Host script fetch output
+
+`tools/dev/live-update.sh` now prints a from/to header on every
+real fetch, so the operator can match the running kernel's hash
+against the incoming one without consulting `git log` separately:
+
+```
+[live-update] current HEAD: df930ed  debug/hot_patch: real kernel-function hot-patching  (2026-05-13, Claude)
+[live-update] remote  HEAD: 1568cfa  Merge pull request #234 from …  (2026-05-13, Krill)
+[live-update] 17 new commit(s) to pick up:
+[live-update]   * abc1234  shell: …
+[live-update]   * def5678  fs/duetfs: …
+[live-update]   ...
+```
+
+The new-commits list is capped at 20 entries so a long-deferred
+branch doesn't scroll past the verdict at the bottom.
 
 ### `live-update reload <path>`
 

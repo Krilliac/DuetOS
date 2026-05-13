@@ -103,8 +103,20 @@ endif()
 # any tracked change so the user sees `1757083+` (a working tree
 # diverged from the named commit) instead of mistaking it for the
 # pristine commit. Falls back to "unknown" outside a git checkout.
+#
+# In addition to the hash we also capture: the commit subject
+# (first line of the message), the author date in ISO-strict form,
+# and the current branch name. These feed `live-update version`
+# inside the running kernel and the post-fetch verdict on
+# tools/dev/live-update.sh so an operator can match a hash against
+# a human-readable "what changed" without having to consult git log
+# externally. All four pieces use the same configure-time capture
+# discipline as the hash.
 find_package(Git QUIET)
 set(_duetos_git_hash "unknown")
+set(_duetos_git_subject "(unknown)")
+set(_duetos_git_branch "(unknown)")
+set(_duetos_git_author_date "(unknown)")
 if(GIT_FOUND)
     execute_process(
         COMMAND ${GIT_EXECUTABLE} rev-parse --short=10 HEAD
@@ -126,10 +138,68 @@ if(GIT_FOUND)
         if(NOT "${_duetos_git_dirty}" STREQUAL "")
             set(_duetos_git_hash "${_duetos_git_hash}+")
         endif()
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} log -1 --pretty=format:%s
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE _duetos_git_subject_raw
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(NOT "${_duetos_git_subject_raw}" STREQUAL "")
+            # Drop characters that break a C string literal: backslash,
+            # double quote, and anything outside the printable ASCII
+            # band. Commit subjects routinely contain quotes / em-dashes
+            # so this is not defensive code, it's required.
+            string(REPLACE "\\" "/" _duetos_git_subject_raw "${_duetos_git_subject_raw}")
+            string(REPLACE "\"" "'" _duetos_git_subject_raw "${_duetos_git_subject_raw}")
+            string(REGEX REPLACE "[^ -~]" "?" _duetos_git_subject_raw "${_duetos_git_subject_raw}")
+            # Cap the subject at 120 chars so a runaway commit message
+            # can't blow past the kernel's serial-line width.
+            string(LENGTH "${_duetos_git_subject_raw}" _len)
+            if(_len GREATER 120)
+                string(SUBSTRING "${_duetos_git_subject_raw}" 0 117 _duetos_git_subject_raw)
+                set(_duetos_git_subject_raw "${_duetos_git_subject_raw}...")
+            endif()
+            set(_duetos_git_subject "${_duetos_git_subject_raw}")
+        endif()
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} rev-parse --abbrev-ref HEAD
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE _duetos_git_branch_raw
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(NOT "${_duetos_git_branch_raw}" STREQUAL "")
+            string(REPLACE "\"" "'" _duetos_git_branch_raw "${_duetos_git_branch_raw}")
+            set(_duetos_git_branch "${_duetos_git_branch_raw}")
+        endif()
+        execute_process(
+            COMMAND ${GIT_EXECUTABLE} log -1 --pretty=format:%ad --date=iso-strict
+            WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+            OUTPUT_VARIABLE _duetos_git_author_date_raw
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(NOT "${_duetos_git_author_date_raw}" STREQUAL "")
+            set(_duetos_git_author_date "${_duetos_git_author_date_raw}")
+        endif()
     endif()
 endif()
+# Build timestamp — UTC ISO-strict, captured at configure time. Pair
+# with the git hash: `(hash, build_date)` together pin down which
+# build artefact is running, even when the same commit was built
+# twice with different flags.
+string(TIMESTAMP _duetos_build_date "%Y-%m-%dT%H:%M:%SZ" UTC)
 add_compile_definitions(DUETOS_GIT_HASH="${_duetos_git_hash}")
+add_compile_definitions(DUETOS_GIT_SUBJECT="${_duetos_git_subject}")
+add_compile_definitions(DUETOS_GIT_BRANCH="${_duetos_git_branch}")
+add_compile_definitions(DUETOS_GIT_AUTHOR_DATE="${_duetos_git_author_date}")
+add_compile_definitions(DUETOS_BUILD_DATE="${_duetos_build_date}")
 message(STATUS "  git hash             : ${_duetos_git_hash}")
+message(STATUS "  git branch           : ${_duetos_git_branch}")
+message(STATUS "  git subject          : ${_duetos_git_subject}")
+message(STATUS "  git author date      : ${_duetos_git_author_date}")
+message(STATUS "  build date           : ${_duetos_build_date}")
 
 # Per-flavor option blocks. Each option's default falls out of the build
 # type; the user can flip them explicitly on the cmake command line or

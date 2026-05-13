@@ -443,6 +443,89 @@ void SubcmdKernelRevert(u32 argc, char** argv)
     ConsoleWriteChar('\n');
 }
 
+// Build-time identity of the currently-running kernel. All four
+// preprocessor strings are baked in by the top-level CMakeLists.txt
+// at configure time — see the "Git short hash + dirty flag" block.
+// The fallback strings keep the output well-formed when CMake
+// couldn't reach git or when the macros are missing for some reason
+// (out-of-tree build, stripped define, etc.).
+constexpr const char* BuildGitHash()
+{
+#if defined(DUETOS_GIT_HASH)
+    return DUETOS_GIT_HASH;
+#else
+    return "(undefined)";
+#endif
+}
+constexpr const char* BuildGitSubject()
+{
+#if defined(DUETOS_GIT_SUBJECT)
+    return DUETOS_GIT_SUBJECT;
+#else
+    return "(undefined)";
+#endif
+}
+constexpr const char* BuildGitBranch()
+{
+#if defined(DUETOS_GIT_BRANCH)
+    return DUETOS_GIT_BRANCH;
+#else
+    return "(undefined)";
+#endif
+}
+constexpr const char* BuildGitAuthorDate()
+{
+#if defined(DUETOS_GIT_AUTHOR_DATE)
+    return DUETOS_GIT_AUTHOR_DATE;
+#else
+    return "(undefined)";
+#endif
+}
+constexpr const char* BuildDate()
+{
+#if defined(DUETOS_BUILD_DATE)
+    return DUETOS_BUILD_DATE;
+#else
+    return "(undefined)";
+#endif
+}
+
+// One-line build identity. Cheap enough to print in front of every
+// bulk operation; an operator who runs `kernel-auto-patch` on the
+// wrong kernel can see immediately which build they hit.
+void WriteBuildIdentityLine()
+{
+    ConsoleWrite("[live-update] running kernel  hash=");
+    ConsoleWrite(BuildGitHash());
+    ConsoleWrite("  branch=");
+    ConsoleWrite(BuildGitBranch());
+    ConsoleWriteChar('\n');
+}
+
+// Full multi-line build identity. Used by `live-update version`.
+void WriteBuildIdentityBlock()
+{
+    ConsoleWrite("[live-update] running kernel build info:\n");
+    ConsoleWrite("              hash        : ");
+    ConsoleWriteln(BuildGitHash());
+    ConsoleWrite("              branch      : ");
+    ConsoleWriteln(BuildGitBranch());
+    ConsoleWrite("              subject     : ");
+    ConsoleWriteln(BuildGitSubject());
+    ConsoleWrite("              author date : ");
+    ConsoleWriteln(BuildGitAuthorDate());
+    ConsoleWrite("              built       : ");
+    ConsoleWriteln(BuildDate());
+    ConsoleWriteln("              (configure-time capture — a trailing '+' on hash means");
+    ConsoleWriteln("               the working tree had uncommitted edits at CMake configure)");
+}
+
+void SubcmdVersion()
+{
+    WriteBuildIdentityBlock();
+    KLOG_INFO_S("live-update", "version queried", "hash", BuildGitHash());
+}
+
 void SubcmdKernelPatches()
 {
     duetos::debug::HotPatchRecord rows[duetos::debug::kMaxLivePatches];
@@ -469,6 +552,7 @@ void SubcmdKernelPatches()
 
 void SubcmdKernelAutoPatch()
 {
+    WriteBuildIdentityLine();
     const auto r = duetos::debug::HotPatchApplyAll();
     ConsoleWrite("[live-update] kernel-auto-patch  considered=");
     WriteU64Dec(r.considered);
@@ -487,6 +571,7 @@ void SubcmdKernelAutoPatch()
 
 void SubcmdKernelAutoRevert()
 {
+    WriteBuildIdentityLine();
     const auto r = duetos::debug::HotPatchRevertAll();
     ConsoleWrite("[live-update] kernel-auto-revert  considered=");
     WriteU64Dec(r.considered);
@@ -550,6 +635,7 @@ void SubcmdHelp()
 {
     ConsoleWriteln("live-update — in-kernel hot-reload + hot-patch primitive");
     ConsoleWriteln("usage:");
+    ConsoleWriteln("  live-update version                           running kernel hash + commit subject");
     ConsoleWriteln("  live-update status                            slot table + classes");
     ConsoleWriteln("  live-update reload <path>                     respawn a userland image");
     ConsoleWriteln("  live-update reload-all                        respawn every live slot from /tmp/<name>");
@@ -608,6 +694,11 @@ void CmdLiveUpdate(u32 argc, char** argv)
     if (StrEq(sub, "kernel-patches"))
     {
         SubcmdKernelPatches();
+        return;
+    }
+    if (StrEq(sub, "version"))
+    {
+        SubcmdVersion();
         return;
     }
     if (StrEq(sub, "kernel-auto-patch"))

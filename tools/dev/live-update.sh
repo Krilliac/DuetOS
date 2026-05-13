@@ -267,6 +267,19 @@ fi
 LOCAL_HEAD="$(git rev-parse HEAD)"
 REMOTE_HEAD="$(git rev-parse "${REMOTE}/${REF}")"
 
+# Pretty one-line commit summary: "<short-hash>  <subject>  (<date>, <author>)".
+# Used to bracket the fetch with a human-readable from/to. `--no-show-signature`
+# avoids GPG output cluttering CI logs.
+commit_summary() {
+    local sha="$1"
+    git --no-pager log -1 --no-show-signature \
+        --pretty=format:'%h  %s  (%ad, %an)' --date=short "${sha}" 2>/dev/null \
+        || echo "${sha:0:12}  (no metadata)"
+}
+
+echo "[live-update] current HEAD: $(commit_summary "${LOCAL_HEAD}")"
+echo "[live-update] remote  HEAD: $(commit_summary "${REMOTE_HEAD}")"
+
 if [[ "${LOCAL_HEAD}" == "${REMOTE_HEAD}" ]]; then
     echo "[live-update] already at ${REMOTE}/${REF} (${LOCAL_HEAD:0:12}); nothing to apply"
     exit "${EXIT_NO_REBUILD}"
@@ -276,6 +289,29 @@ MERGE_BASE="$(git merge-base HEAD "${REMOTE}/${REF}" || true)"
 if [[ -z "${MERGE_BASE}" ]]; then
     echo "[live-update] no common ancestor with ${REMOTE}/${REF}; aborting" >&2
     exit "${EXIT_DIVERGED}"
+fi
+
+# Range summary: list commits the remote has that we don't, oldest
+# first. Capped at 20 entries so a long-deferred branch doesn't
+# scroll past the verdict at the bottom. The git-log invocation runs
+# AFTER `git merge-base` so we know the range is non-degenerate.
+mapfile -t NEW_COMMITS < <(git --no-pager log --no-show-signature \
+    --pretty=format:'%h  %s  (%ad, %an)' --date=short --reverse \
+    "${LOCAL_HEAD}..${REMOTE_HEAD}" 2>/dev/null || true)
+if (( ${#NEW_COMMITS[@]} > 0 )); then
+    echo "[live-update] ${#NEW_COMMITS[@]} new commit(s) to pick up:"
+    _shown=0
+    for line in "${NEW_COMMITS[@]}"; do
+        echo "[live-update]   * ${line}"
+        _shown=$((_shown + 1))
+        if (( _shown >= 20 )); then
+            remaining=$(( ${#NEW_COMMITS[@]} - _shown ))
+            if (( remaining > 0 )); then
+                echo "[live-update]   ... and ${remaining} more (use \`git log ${LOCAL_HEAD:0:12}..${REMOTE_HEAD:0:12}\` for the full list)"
+            fi
+            break
+        fi
+    done
 fi
 
 # Collect the changed paths between MERGE_BASE and the fetched ref.
@@ -370,7 +406,8 @@ apply_fast_forward() {
         echo "[live-update] fast-forward merge failed" >&2
         return "${EXIT_DIVERGED}"
     fi
-    echo "[live-update] fast-forwarded $(git rev-parse --abbrev-ref HEAD) to ${REMOTE_HEAD:0:12}"
+    echo "[live-update] fast-forwarded $(git rev-parse --abbrev-ref HEAD) ${LOCAL_HEAD:0:12} -> ${REMOTE_HEAD:0:12}"
+    echo "[live-update]   new tip: $(commit_summary "${REMOTE_HEAD}")"
     return 0
 }
 
