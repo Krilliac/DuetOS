@@ -1882,6 +1882,12 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
         case CmdOp::SetVertexFormatDuet:
             st.vertex_format = op.vertex_count;
             break;
+        case CmdOp::SetCullMode:
+            st.cull_mode = op.vertex_count;
+            break;
+        case CmdOp::SetFrontFace:
+            st.front_face = op.vertex_count;
+            break;
         case CmdOp::ClearDepthStencilImage:
             // Spec: the depth float in `op.depth_bits` is in
             // [0.0, 1.0]; we map it to the u16 unorm value. To
@@ -1915,8 +1921,6 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
         case CmdOp::DrawIndirect:
         case CmdOp::DrawIndexedIndirect:
         case CmdOp::DispatchIndirect:
-        case CmdOp::SetCullMode:
-        case CmdOp::SetFrontFace:
         case CmdOp::SetStencilTestEnable:
         case CmdOp::SetStencilOp:
         case CmdOp::SetDepthBoundsTestEnable:

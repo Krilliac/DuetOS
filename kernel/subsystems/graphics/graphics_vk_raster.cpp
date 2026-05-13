@@ -5,48 +5,48 @@
 #include "drivers/video/framebuffer.h"
 
 /*
- * DuetOS — Vulkan ICD software triangle rasterizer.
+ * DuetOS — Vulkan ICD software rasterizer.
  *
- * What this paints (v1):
- *   - Triangles emitted by `vkCmdDraw` and `vkCmdDrawIndexed`
- *     against a scanout-backed render target.
- *   - Topologies: TriangleList (3), TriangleStrip (4),
- *     TriangleFan (5). Vulkan's other topologies record but
- *     produce no pixels.
- *   - Per-vertex colour interpolation (Gouraud shading) via
- *     integer barycentric weights derived from the edge
- *     functions. No floating point at any step.
+ * What this paints (v1.1):
+ *   - Triangles, lines, and points emitted by `vkCmdDraw` and
+ *     `vkCmdDrawIndexed` against a scanout-backed render target.
+ *   - Topologies: PointList (0), LineList (1), LineStrip (2),
+ *     TriangleList (3), TriangleStrip (4), TriangleFan (5).
+ *   - Per-vertex colour interpolation (Gouraud shading) for
+ *     triangles via integer barycentric weights. Lines and
+ *     points are flat-shaded with the first vertex's colour.
  *   - Per-pixel alpha when the interpolated alpha is < 0xFF —
  *     blended through `FramebufferPutPixelAlpha` (src-over).
  *   - Scissor enforcement when the most-recent
- *     `vkCmdSetScissor` recorded a non-empty rect; the
- *     rasterizer intersects the triangle bbox with the scissor
- *     before walking.
+ *     `vkCmdSetScissor` recorded a non-empty rect.
+ *   - Front-face culling: `vkCmdSetCullMode` +
+ *     `vkCmdSetFrontFace` drop triangles whose screen-space
+ *     orientation matches the cull selection before bbox walk.
+ *   - Software 16-bit depth buffer when the vertex format is
+ *     v1 and `vkCmdSetDepthTestEnable` is on; Z is
+ *     interpolated barycentrically and compared per
+ *     `vkCmdSetDepthCompareOp`.
  *
- * Vertex format (8 bytes, packed):
- *   bytes 0-1  i16 x_px  — signed framebuffer pixel x
- *   bytes 2-3  i16 y_px  — signed framebuffer pixel y
- *   bytes 4-7  u32 argb  — 0xAARRGGBB; alpha drives per-pixel
- *                          src-over blending when < 0xFF.
+ * Vertex formats (selected by `vkCmdSetVertexFormatDuet`):
+ *   v0 (default, 8 bytes): `{i16 x_px; i16 y_px; u32 argb;}`
+ *   v1 (12 bytes):         `{i16 x_px; i16 y_px; i16 z;
+ *                            u16 _reserved; u32 argb;}`
+ *   `argb` is 0xAARRGGBB; the high byte drives alpha blending.
  *
  * Indexed draws read indices from the buffer bound by
- * `vkCmdBindIndexBuffer`: UINT16 (2 bytes/index) or UINT32
- * (4 bytes/index). Each index is then offset by the draw's
- * `vertex_offset` (the `vkCmdDrawIndexed` parameter) before
- * lookup in the vertex buffer.
+ * `vkCmdBindIndexBuffer` (UINT16 or UINT32) and offset each by
+ * the draw's `vertex_offset` before vertex-buffer lookup.
  *
- * `vk_triangles_drawn` ticks per dispatched triangle (TriangleList
- * triangle count, or strip/fan triangle count). The counter
- * advances even when no pixels are produced (non-scanout target,
- * non-host-visible buffers, degenerate triangles) so the dispatch
- * chain is observable to the self-test.
+ * `vk_triangles_drawn` ticks per dispatched triangle regardless
+ * of whether pixels reach the framebuffer (counter bumps before
+ * resource resolution / scanout gate). Points and lines do not
+ * tick the triangle counter.
  *
  * Out of scope today:
- *   - Depth buffer / Z-test (no third position component).
  *   - Texture sampling (no descriptor set fetch path).
- *   - Point / line topologies.
  *   - Multi-binding vertex buffers (only binding 0 is read).
- *   - Front-face culling (the bbox walk paints both windings).
+ *   - Perspective-correct interpolation (rasterizer is affine).
+ *   - Wide / textured lines.
  */
 
 namespace duetos::subsystems::graphics::internal
@@ -64,9 +64,19 @@ struct VertexV0
 };
 
 // Vulkan spec values for VkPrimitiveTopology.
+inline constexpr u32 kTopologyPointList = 0;
+inline constexpr u32 kTopologyLineList = 1;
+inline constexpr u32 kTopologyLineStrip = 2;
 inline constexpr u32 kTopologyTriangleList = 3;
 inline constexpr u32 kTopologyTriangleStrip = 4;
 inline constexpr u32 kTopologyTriangleFan = 5;
+
+// Vulkan spec values for VkCullModeFlagBits / VkFrontFace.
+inline constexpr u32 kCullNone = 0;
+inline constexpr u32 kCullFront = 1;
+inline constexpr u32 kCullBack = 2;
+inline constexpr u32 kCullBoth = 3;
+inline constexpr u32 kFrontFaceCounterClockwise = 0;
 
 // Vulkan spec VkCompareOp.
 inline constexpr u32 kCompareNever = 0;
@@ -222,6 +232,143 @@ ClippedBBox ComputeClippedBBox(i32 x0, i32 y0, i32 x1, i32 y1, i32 x2, i32 y2, c
     return ClippedBBox{min_x, min_y, max_x, max_y, (min_x > max_x || min_y > max_y)};
 }
 
+// Paint a single Vulkan-Point at the vertex's pixel using the
+// vertex colour. Honours scissor and the rasterizer's per-pixel
+// alpha path. Bumps the damage rect.
+void RasterizePoint(const VertexV0& v, const RasterState& st, u32 rt_w, u32 rt_h)
+{
+    if (rt_w == 0 || rt_h == 0 || st.fb_w == 0 || st.fb_h == 0)
+        return;
+    const i32 surface_w = static_cast<i32>(rt_w < st.fb_w ? rt_w : st.fb_w);
+    const i32 surface_h = static_cast<i32>(rt_h < st.fb_h ? rt_h : st.fb_h);
+    const i32 px = v.x_px;
+    const i32 py = v.y_px;
+    if (px < 0 || py < 0 || px >= surface_w || py >= surface_h)
+        return;
+    if (st.has_scissor)
+    {
+        const i32 sx0 = st.scissor.offset.x;
+        const i32 sy0 = st.scissor.offset.y;
+        const i32 sx1 = sx0 + static_cast<i32>(st.scissor.extent.width);
+        const i32 sy1 = sy0 + static_cast<i32>(st.scissor.extent.height);
+        if (px < sx0 || py < sy0 || px >= sx1 || py >= sy1)
+            return;
+    }
+    const u32 a = (v.argb >> 24) & 0xFFu;
+    const u32 rgb = v.argb & 0x00FFFFFFu;
+    if (a == 0xFFu)
+        drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py), rgb);
+    else if (a > 0)
+        drivers::video::FramebufferPutPixelAlpha(static_cast<u32>(px), static_cast<u32>(py), v.argb);
+    drivers::video::FramebufferAddDamage(static_cast<u32>(px), static_cast<u32>(py), 1, 1);
+}
+
+// Paint a line from v0 to v1 using DDA / Bresenham at 1-pixel
+// thickness. Honours scissor; flat-shaded with v0's colour
+// (line endpoint interpolation isn't needed for v0). Each plotted
+// pixel goes through the alpha-aware writer like points do.
+void RasterizeLine(const VertexV0& v0, const VertexV0& v1, const RasterState& st, u32 rt_w, u32 rt_h)
+{
+    if (rt_w == 0 || rt_h == 0 || st.fb_w == 0 || st.fb_h == 0)
+        return;
+    const i32 surface_w = static_cast<i32>(rt_w < st.fb_w ? rt_w : st.fb_w);
+    const i32 surface_h = static_cast<i32>(rt_h < st.fb_h ? rt_h : st.fb_h);
+    i32 sx0 = 0, sy0 = 0, sx1 = surface_w, sy1 = surface_h;
+    if (st.has_scissor)
+    {
+        sx0 = st.scissor.offset.x;
+        sy0 = st.scissor.offset.y;
+        sx1 = sx0 + static_cast<i32>(st.scissor.extent.width);
+        sy1 = sy0 + static_cast<i32>(st.scissor.extent.height);
+        if (sx0 < 0)
+            sx0 = 0;
+        if (sy0 < 0)
+            sy0 = 0;
+        if (sx1 > surface_w)
+            sx1 = surface_w;
+        if (sy1 > surface_h)
+            sy1 = surface_h;
+    }
+    i32 x0 = v0.x_px, y0 = v0.y_px;
+    i32 x1 = v1.x_px, y1 = v1.y_px;
+    i32 dx = x1 - x0;
+    if (dx < 0)
+        dx = -dx;
+    i32 dy = y1 - y0;
+    if (dy < 0)
+        dy = -dy;
+    const i32 step_x = (x0 < x1) ? 1 : -1;
+    const i32 step_y = (y0 < y1) ? 1 : -1;
+    i32 err = dx - dy;
+    const i32 max_steps = dx + dy + 4; // safety bound — bounded by surface extent in the worst case
+    const u32 a = (v0.argb >> 24) & 0xFFu;
+    const u32 rgb = v0.argb & 0x00FFFFFFu;
+    for (i32 step = 0; step < max_steps; ++step)
+    {
+        if (x0 >= sx0 && y0 >= sy0 && x0 < sx1 && y0 < sy1)
+        {
+            if (a == 0xFFu)
+                drivers::video::FramebufferPutPixel(static_cast<u32>(x0), static_cast<u32>(y0), rgb);
+            else if (a > 0)
+                drivers::video::FramebufferPutPixelAlpha(static_cast<u32>(x0), static_cast<u32>(y0), v0.argb);
+        }
+        if (x0 == x1 && y0 == y1)
+            break;
+        const i32 e2 = err << 1;
+        if (e2 > -dy)
+        {
+            err -= dy;
+            x0 += step_x;
+        }
+        if (e2 < dx)
+        {
+            err += dx;
+            y0 += step_y;
+        }
+    }
+    // Crude damage rect — bounding box of endpoints clipped to scissor.
+    i32 min_x = v0.x_px < v1.x_px ? v0.x_px : v1.x_px;
+    i32 max_x = v0.x_px < v1.x_px ? v1.x_px : v0.x_px;
+    i32 min_y = v0.y_px < v1.y_px ? v0.y_px : v1.y_px;
+    i32 max_y = v0.y_px < v1.y_px ? v1.y_px : v0.y_px;
+    if (min_x < sx0)
+        min_x = sx0;
+    if (min_y < sy0)
+        min_y = sy0;
+    if (max_x >= sx1)
+        max_x = sx1 - 1;
+    if (max_y >= sy1)
+        max_y = sy1 - 1;
+    if (min_x <= max_x && min_y <= max_y)
+        drivers::video::FramebufferAddDamage(static_cast<u32>(min_x), static_cast<u32>(min_y),
+                                             static_cast<u32>(max_x - min_x + 1), static_cast<u32>(max_y - min_y + 1));
+}
+
+// Decide whether a triangle is culled by the current CullMode +
+// FrontFace state. Returns true when the triangle should be
+// dropped.
+bool TriangleCulled(i64 area2, const RasterState& st)
+{
+    if (st.cull_mode == kCullNone)
+        return false;
+    if (st.cull_mode == kCullBoth)
+        return true;
+    // Sign of `area2` decides screen-space orientation:
+    //   area2 > 0  -> the (v0, v1, v2) order is CCW in framebuffer
+    //                 coordinates (Y-down).
+    //   area2 < 0  -> CW.
+    // VkFrontFace::CounterClockwise (0): CCW is front.
+    // VkFrontFace::Clockwise (1): CW is front.
+    const bool ccw = area2 > 0;
+    const bool front_is_ccw = (st.front_face == kFrontFaceCounterClockwise);
+    const bool is_front = (ccw == front_is_ccw);
+    if (st.cull_mode == kCullFront)
+        return is_front;
+    if (st.cull_mode == kCullBack)
+        return !is_front;
+    return false;
+}
+
 void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, const RasterState& st, u32 rt_w, u32 rt_h)
 {
     if (rt_w == 0 || rt_h == 0 || st.fb_w == 0 || st.fb_h == 0)
@@ -237,6 +384,8 @@ void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, co
 
     const i64 area2 = EdgeFn(x0, y0, x1, y1, x2, y2);
     if (area2 == 0)
+        return;
+    if (TriangleCulled(area2, st))
         return;
     const bool ccw = area2 > 0;
     const u64 area_abs = static_cast<u64>(ccw ? area2 : -area2);
@@ -398,18 +547,35 @@ bool ResolveVertexBuffer(const RasterState& st, const u8*& base_out, u64& size_o
 
 void RasterizeDuetDraw(const RasterState& st, u32 first_vertex, u32 vertex_count)
 {
-    if (vertex_count < 3)
+    if (vertex_count == 0)
         return;
 
-    // Triangle count from topology.
+    // Triangle / line / point count from topology.
     u32 tri_count = 0;
     switch (st.topology)
     {
+    case kTopologyPointList:
+        tri_count = 0;
+        break;
+    case kTopologyLineList:
+        if (vertex_count < 2)
+            return;
+        tri_count = 0;
+        break;
+    case kTopologyLineStrip:
+        if (vertex_count < 2)
+            return;
+        tri_count = 0;
+        break;
     case kTopologyTriangleList:
+        if (vertex_count < 3)
+            return;
         tri_count = vertex_count / 3u;
         break;
     case kTopologyTriangleStrip:
     case kTopologyTriangleFan:
+        if (vertex_count < 3)
+            return;
         tri_count = vertex_count - 2u;
         break;
     default:
@@ -433,6 +599,43 @@ void RasterizeDuetDraw(const RasterState& st, u32 first_vertex, u32 vertex_count
 
     auto fetch = [&](u32 logical_vertex_index, VertexV0& out)
     { return FetchVertex(vb_base, vb_size, logical_vertex_index, st.vertex_format, out); };
+
+    // Point / line topologies bypass the triangle bbox walk and
+    // paint one pixel / one Bresenham segment per primitive.
+    if (st.topology == kTopologyPointList)
+    {
+        for (u32 i = 0; i < vertex_count; ++i)
+        {
+            VertexV0 v;
+            if (!fetch(first_vertex + i, v))
+                continue;
+            RasterizePoint(v, st, rt_w, rt_h);
+        }
+        return;
+    }
+    if (st.topology == kTopologyLineList)
+    {
+        const u32 line_count = vertex_count / 2u;
+        for (u32 i = 0; i < line_count; ++i)
+        {
+            VertexV0 a, b;
+            if (!fetch(first_vertex + i * 2u, a) || !fetch(first_vertex + i * 2u + 1u, b))
+                continue;
+            RasterizeLine(a, b, st, rt_w, rt_h);
+        }
+        return;
+    }
+    if (st.topology == kTopologyLineStrip)
+    {
+        for (u32 i = 0; i + 1u < vertex_count; ++i)
+        {
+            VertexV0 a, b;
+            if (!fetch(first_vertex + i, a) || !fetch(first_vertex + i + 1u, b))
+                continue;
+            RasterizeLine(a, b, st, rt_w, rt_h);
+        }
+        return;
+    }
 
     for (u32 t = 0; t < tri_count; ++t)
     {
@@ -482,17 +685,28 @@ void RasterizeDuetDraw(const RasterState& st, u32 first_vertex, u32 vertex_count
 
 void RasterizeDuetDrawIndexed(const RasterState& st, u32 first_index, u32 index_count, i32 vertex_offset)
 {
-    if (index_count < 3)
+    if (index_count == 0)
         return;
 
     u32 tri_count = 0;
     switch (st.topology)
     {
+    case kTopologyPointList:
+    case kTopologyLineList:
+    case kTopologyLineStrip:
+        if (index_count < ((st.topology == kTopologyPointList) ? 1u : 2u))
+            return;
+        tri_count = 0;
+        break;
     case kTopologyTriangleList:
+        if (index_count < 3)
+            return;
         tri_count = index_count / 3u;
         break;
     case kTopologyTriangleStrip:
     case kTopologyTriangleFan:
+        if (index_count < 3)
+            return;
         tri_count = index_count - 2u;
         break;
     default:
@@ -521,6 +735,41 @@ void RasterizeDuetDrawIndexed(const RasterState& st, u32 first_index, u32 index_
             return false;
         return FetchVertex(vb_base, vb_size, static_cast<u64>(logical), st.vertex_format, out);
     };
+
+    if (st.topology == kTopologyPointList)
+    {
+        for (u32 i = 0; i < index_count; ++i)
+        {
+            VertexV0 v;
+            if (!fetch_vert_at_index(first_index + i, v))
+                continue;
+            RasterizePoint(v, st, rt_w, rt_h);
+        }
+        return;
+    }
+    if (st.topology == kTopologyLineList)
+    {
+        const u32 line_count = index_count / 2u;
+        for (u32 i = 0; i < line_count; ++i)
+        {
+            VertexV0 a, b;
+            if (!fetch_vert_at_index(first_index + i * 2u, a) || !fetch_vert_at_index(first_index + i * 2u + 1u, b))
+                continue;
+            RasterizeLine(a, b, st, rt_w, rt_h);
+        }
+        return;
+    }
+    if (st.topology == kTopologyLineStrip)
+    {
+        for (u32 i = 0; i + 1u < index_count; ++i)
+        {
+            VertexV0 a, b;
+            if (!fetch_vert_at_index(first_index + i, a) || !fetch_vert_at_index(first_index + i + 1u, b))
+                continue;
+            RasterizeLine(a, b, st, rt_w, rt_h);
+        }
+        return;
+    }
 
     for (u32 t = 0; t < tri_count; ++t)
     {

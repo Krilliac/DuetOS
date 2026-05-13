@@ -482,11 +482,14 @@ struct RasterState
     bool has_index_buffer;
     bool has_scissor;
     VkRect2D scissor;
-    u32 topology;      // Vulkan-spec VkPrimitiveTopology value (3=list/4=strip/5=fan supported)
+    u32 topology;      // Vulkan-spec VkPrimitiveTopology value (0..5 supported; 0/1/2 = point/line/line-strip;
+                       // 3/4/5 = triangle list/strip/fan)
     u32 vertex_format; // 0 = v0 (8 bytes, no Z); 1 = v1 (12 bytes, with i16 Z + reserved)
     u32 depth_compare; // VkCompareOp: 0=Never, 1=Less, 2=Equal, 3=LessOrEqual, 4=Greater, 5=NotEqual, 6=GtEq, 7=Always
     bool depth_test;   // SetDepthTestEnable
     bool depth_write;  // SetDepthWriteEnable
+    u32 cull_mode;     // VkCullModeFlagBits: 0=None, 1=Front, 2=Back, 3=Both
+    u32 front_face;    // VkFrontFace: 0=CounterClockwise, 1=Clockwise
     u32 fb_w;
     u32 fb_h;
 };

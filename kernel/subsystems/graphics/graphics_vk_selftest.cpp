@@ -390,6 +390,49 @@ bool RunCanonicalLifecycle()
         VkFreeCommandBuffers(dev, pool, 1, &rcb);
     }
 
+    // Point / line / cull leg. Exercises the non-triangle
+    // topologies and the cull-mode + front-face state. None of
+    // these paint pixels (image is non-scanout) but every recorded
+    // op must dispatch cleanly: a wrong dispatch path crashes
+    // here rather than silently producing nothing.
+    {
+        VkCommandBuffer pcb = 0;
+        if (VkAllocateCommandBuffers(dev, pool, 1, &pcb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] pcb allocate failed", 0);
+        if (VkBeginCommandBuffer(pcb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] pcb begin failed", 0);
+        const u64 pcb_vb_off = 0;
+        if (VkCmdBindVertexBuffers(pcb, 0, 1, &buf, &pcb_vb_off) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] BindVertexBuffers(pcb) failed", 0);
+        // Cull-back, CCW front. Won't affect non-triangle paths.
+        if (VkCmdSetCullMode(pcb, 2u) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] SetCullMode failed", 0);
+        if (VkCmdSetFrontFace(pcb, 0u) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] SetFrontFace failed", 0);
+        // PointList — three vertices = three pixels.
+        if (VkCmdSetPrimitiveTopology(pcb, 0u) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] SetPrimitiveTopology(point) failed", 0);
+        if (VkCmdDraw(pcb, 3, 1, 0, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] Draw(point) failed", 0);
+        // LineList — four vertices = two lines.
+        if (VkCmdSetPrimitiveTopology(pcb, 1u) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] SetPrimitiveTopology(line list) failed", 0);
+        if (VkCmdDraw(pcb, 4, 1, 0, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] Draw(line list) failed", 0);
+        // LineStrip — three vertices = two lines.
+        if (VkCmdSetPrimitiveTopology(pcb, 2u) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] SetPrimitiveTopology(line strip) failed", 0);
+        if (VkCmdDraw(pcb, 3, 1, 0, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] Draw(line strip) failed", 0);
+        if (VkEndCommandBuffer(pcb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] pcb end failed", 0);
+        if (VkQueueSubmit(queue, 1, &pcb, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] pcb submit failed", 0);
+        if (VkQueueWaitIdle(queue) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] pcb wait failed", 0);
+        VkFreeCommandBuffers(dev, pool, 1, &pcb);
+    }
+
     // Memory-mapping leg: allocate host-visible memory, bind two
     // buffers into it, map the source, write a recognisable byte
     // pattern, record CopyBuffer + FillBuffer + CopyBufferToImage

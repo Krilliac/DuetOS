@@ -113,14 +113,18 @@ when < 0xFF and `FramebufferPutPixel` (opaque) when == 0xFF.
 
 **Topologies (Vulkan spec values):**
 
-| Topology | Value | Triangles produced |
-|----------|-------|--------------------|
-| TriangleList | 3 | `vertex_count / 3` |
-| TriangleStrip | 4 | `vertex_count - 2` (odd triangles flip winding) |
-| TriangleFan | 5 | `vertex_count - 2` (every triangle shares vertex 0) |
+| Topology | Value | Primitives produced |
+|----------|-------|---------------------|
+| PointList | 0 | `vertex_count` 1×1 pixel stamps |
+| LineList | 1 | `vertex_count / 2` Bresenham segments |
+| LineStrip | 2 | `vertex_count - 1` Bresenham segments |
+| TriangleList | 3 | `vertex_count / 3` triangles |
+| TriangleStrip | 4 | `vertex_count - 2` triangles (odd triangles flip winding) |
+| TriangleFan | 5 | `vertex_count - 2` triangles (every triangle shares vertex 0) |
 
-Other topologies (point list, line list, line strip,
-`*_with_adjacency`) record but produce no pixels. Selected via
+Point and line topologies are flat-shaded with the first vertex's
+colour and bypass the triangle bbox walk. `*_with_adjacency`
+topologies record but produce no pixels. Selected via
 `vkCmdSetPrimitiveTopology(cb, n)`; defaults to TriangleList.
 
 **Indexed draws:** `vkCmdDrawIndexed` walks the buffer bound by
@@ -194,16 +198,21 @@ the scanout / host-visible / format gates), so the dispatch
 chain is observable to tests that don't own the live
 framebuffer.
 
+**Front-face culling:** `vkCmdSetCullMode(cb, mode)` and
+`vkCmdSetFrontFace(cb, face)` enforce backface / frontface
+culling at raster time. Cull modes: 0=None, 1=Front, 2=Back,
+3=FrontAndBack. Front-face values: 0=CounterClockwise (default),
+1=Clockwise. The sign of the integer signed-area test
+(`EdgeFn(v0, v1, v2)`) decides screen-space orientation;
+triangles whose orientation matches the cull selection are
+dropped before the bbox walk. Default is "no culling".
+
 Out of scope — deferred:
 
 - Texture sampling. The descriptor surface accepts
   `CombinedImageSampler` binds but the rasterizer has no
   per-pixel sampler fetch path; the bound image-view is recorded
   for stats only.
-- Front-face culling. The rasterizer paints both windings (no
-  cull-mode enforcement); games that depend on backface culling
-  for correctness still receive the right pixel output but pay
-  the cost of painting back-faces.
 - Perspective-correct attribute interpolation. The rasterizer
   is affine; pre-divided W-space attributes are the caller's
   responsibility.
