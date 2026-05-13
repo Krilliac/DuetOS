@@ -75,31 +75,89 @@ as `HOST-TOOLS`.
 CI runners and shell watch-loops can use the `10` vs `0` split to
 decide whether to kick a rebuild without scraping stdout.
 
-## Why there is no "hot patch the running kernel" path
+## In-kernel companion — `live-update` shell command
 
-In a mature OS, hot-reload usually means one of three things:
+The kernel ships a paired shell command. Once a kernel rebuild has
+landed in a running QEMU instance, `live-update` lets the operator
+hot-reload userland images **without rebooting the kernel**. It is
+the only true hot-reload primitive DuetOS has today; everything
+else (kernel core, drivers, subsystems, baked-in DLLs) requires a
+full reboot, which the host script's `KERNEL-IMAGE` verdict will
+catch.
 
-1. **Kernel module reload** (`rmmod` / `insmod`). DuetOS does not yet
-   have a loadable-module ABI — every driver and subsystem links
-   into the kernel ELF.
-2. **User-space process restart**. The userland binaries and DLLs are
-   `.incbin`'d into the kernel image, so "swap the binary on disk"
-   would not be reflected by the running kernel anyway.
-3. **Live patching** (kpatch-style). Requires a stable function-pointer
-   table the patcher can swing under traffic. None of the kernel's
-   hot paths are wrapped that way today.
+The command is admin-gated:
 
-Until one of those landings happens, the only true hot-reload is
-"the change did not touch the kernel image, so the running image is
-still right." That is exactly what this script reports.
+```
+live-update help                          usage
+live-update status                        slot table + non-reloadable surfaces
+live-update reload <path>                 respawn an image, retiring prior pid
+live-update restart-required [reason]     emit canonical RESTART REQUIRED line
+```
 
-If a future slice adds a loadable-module ABI (search the roadmap for
-"System updater" and "Kernel Modularization"), this script gains a
-fourth bucket (`MODULE`) that triggers an in-kernel reload via a
-shell command instead of a QEMU restart. The `KERNEL-IMAGE` bucket
-stays — there will always be parts of the kernel (early boot,
-scheduler, paging) that no live-patch system can swap under a running
-foot.
+### `live-update reload <path>`
+
+`<path>` is either a writable tmpfs slot (`/tmp/<leaf>`, capped at
+512 B per the v0 tmpfs ceiling) or a read-only ramfs path
+(any size; the embedded image's bytes feed the loader directly).
+
+The implementation is a slim wrapper around the same `SpawnElfFile`
+/ `SpawnPeFile` paths the existing `exec` command uses, plus an
+8-slot per-name registry that tracks the pid of the most recent
+spawn. When a `reload` lands a new pid for a name, the old pid is
+signalled for kill via `SchedKillByPid` first so two generations
+of the same image never run in parallel.
+
+Image format is picked by header magic: `7F 45 4C 46 02` routes to
+ELF64, `4D 5A` routes to PE/COFF. Anything else is rejected.
+
+Caps and budgets are the kernel-trusted set
+(`CapSetTrusted` / `kFrameBudgetTrusted` / `kTickBudgetTrusted`):
+hot-reload is a developer primitive, not a sandbox.
+
+### `live-update status`
+
+Prints the live-app slot table (name → last_pid → reload count) and
+re-states the canonical non-reloadable surfaces. Use this to confirm
+which slots are bound, what their last spawn looked like, and how
+many times an image has been swapped without rebooting.
+
+### `live-update restart-required [reason]`
+
+Emits the canonical `[live-update] RESTART REQUIRED` line both to
+the serial console and through `KLOG_WARN`. Use it when an operator
+discovers, mid-session, that a path they assumed was hot-reloadable
+in fact requires a reboot — the host-side script (and any future
+CI watcher) greps for this exact wording on the serial log to flag
+a kernel-image divergence the running kernel cannot reflect.
+
+## Why there is no full "hot patch the running kernel" path
+
+In a mature OS, hot-reload spans three families. DuetOS only has one
+of them today, and only at the user-mode boundary:
+
+1. **User-space process respawn.** This is what `live-update reload`
+   does — kill the prior pid, re-load the binary, queue a fresh
+   ring-3 task. Works only because the source binary exists in a
+   reachable VFS path (tmpfs or ramfs); the binary in the
+   `.incbin`'d kernel image still requires a rebuild + reboot for
+   its bytes to update.
+2. **Kernel module reload** (`rmmod` / `insmod`). DuetOS does not
+   yet have a loadable-module ABI — every driver and subsystem
+   links into the kernel ELF. This is the planned
+   [Kernel Modularization](../security/Kernel-Modularization.md)
+   surface; when it lands, this page gains a fourth bucket
+   (`MODULE`) and a matching `live-update module-reload` subcommand.
+3. **Live patching** (kpatch-style). Requires a stable function-
+   pointer table the patcher can swing under traffic. None of the
+   kernel's hot paths are wrapped that way today, and the cost of
+   doing so for the entire kernel is higher than the iteration
+   loop justifies.
+
+The host-side verdict therefore stays "rebuild + reboot" for
+anything touching the kernel ELF, and the in-kernel `live-update`
+covers the post-reboot loop where the same image needs to be
+re-spawned (after a smoke test, after a crash, after a tweak that
+lands via tmpfs sideload).
 
 ## See also
 

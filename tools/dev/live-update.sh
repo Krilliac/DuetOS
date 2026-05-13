@@ -290,6 +290,33 @@ fi
 
 declare -i DOCS_N=0 HOST_TOOLS_N=0 HOST_TESTS_N=0 KERNEL_N=0
 declare -a KERNEL_PATHS=()
+declare -a SIDELOAD_APPS=() # userland apps the in-kernel `live-update reload` can re-spawn
+
+# is_userland_app_path <path>
+#
+# Echoes the basename of a userland app source if the path looks
+# like a per-app source file. These are the KERNEL-IMAGE entries
+# the in-kernel `live-update reload <ramfs-path>` command can
+# respawn without a QEMU restart — the kernel still has to be
+# rebuilt+rebooted for the new bytes to land in ramfs, but once
+# the new build is up the same primitive lets developers re-run
+# the app fresh after a tweak without restarting QEMU through
+# the boot loader.
+#
+# Emits nothing if the path is not a per-app source.
+is_userland_app_path() {
+    local path="$1"
+    case "${path}" in
+        userland/apps/*/*.c|userland/apps/*/*.cpp|userland/apps/*/*.S)
+            # userland/apps/<name>/... -> <name>
+            local rest="${path#userland/apps/}"
+            echo "${rest%%/*}" ;;
+        userland/native-apps/*/*.c|userland/native-apps/*/*.cpp)
+            local rest="${path#userland/native-apps/}"
+            echo "${rest%%/*}" ;;
+        *) ;;
+    esac
+}
 
 for path in "${CHANGED[@]}"; do
     [[ -z "${path}" ]] && continue
@@ -301,7 +328,20 @@ for path in "${CHANGED[@]}"; do
         DOCS) DOCS_N=$((DOCS_N + 1)) ;;
         HOST-TOOLS) HOST_TOOLS_N=$((HOST_TOOLS_N + 1)) ;;
         HOST-TESTS) HOST_TESTS_N=$((HOST_TESTS_N + 1)) ;;
-        KERNEL-IMAGE) KERNEL_N=$((KERNEL_N + 1)); KERNEL_PATHS+=("${path}") ;;
+        KERNEL-IMAGE)
+            KERNEL_N=$((KERNEL_N + 1))
+            KERNEL_PATHS+=("${path}")
+            app="$(is_userland_app_path "${path}")"
+            if [[ -n "${app}" ]]; then
+                # Dedupe — multiple files under the same app dir
+                # only emit one reload tip.
+                seen=0
+                for a in "${SIDELOAD_APPS[@]:-}"; do
+                    [[ "${a}" == "${app}" ]] && { seen=1; break; }
+                done
+                (( seen )) || SIDELOAD_APPS+=("${app}")
+            fi
+            ;;
     esac
 done
 
@@ -355,6 +395,14 @@ if (( KERNEL_N > 0 )); then
         fi
     done
     echo "[live-update] next: cmake --build build/<preset> && tools/qemu/run.sh"
+    if (( ${#SIDELOAD_APPS[@]} > 0 )); then
+        echo "[live-update] after the rebuild lands, these userland apps can be re-spawned"
+        echo "[live-update] in the running kernel without a second reboot:"
+        for app in "${SIDELOAD_APPS[@]}"; do
+            echo "[live-update]   live-update reload ${app}    (kernel shell; ramfs path may differ)"
+        done
+        echo "[live-update] run \`live-update status\` in the kernel shell to see active slots"
+    fi
     exit "${EXIT_REBUILD_REQUIRED}"
 fi
 
