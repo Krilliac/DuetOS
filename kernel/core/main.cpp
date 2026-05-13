@@ -204,6 +204,7 @@
 #include "mm/frame_allocator.h"
 #include "mm/zone.h"
 #include "ipc/handle_table.h"
+#include "diag/boot_progress.h"
 #include "diag/event_trace.h"
 #include "diag/fault_react.h"
 #include "diag/fix_journal.h"
@@ -2233,15 +2234,20 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // accounts, run the verify/reject self-test, then arm the
     // login gate below. Order matters: the gate consults the
     // account table, so AuthInit must precede LoginStart.
+    duetos::diag::BootProgress("before-AuthInit");
     duetos::core::AuthInit();
+    duetos::diag::BootProgress("after-AuthInit");
     DUETOS_BOOT_SELFTEST(duetos::core::AuthSelfTest());
+    duetos::diag::BootProgress("after-AuthSelfTest");
     DUETOS_BOOT_SELFTEST(duetos::security::AuthBruteForceProbe());
+    duetos::diag::BootProgress("after-AuthBruteForceProbe");
 
     // Shell welcome + initial prompt. Landing here after every
     // subsystem init line keeps the boot log visible above the
     // prompt — the user sees the tail end of the kernel's own
     // output, then their own typing cursor.
     duetos::core::ShellInit();
+    duetos::diag::BootProgress("after-ShellInit");
 
     // Demo clickable button, owned by window A. x/y are offsets
     // (The CLICK ME demo button previously registered here has
@@ -2266,6 +2272,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // query in the boot tail (ring3 spawn gate, Linux ABI gate, sleep-
     // and-exit sentinel) sees a stable answer.
     duetos::test::SmokeProfileInit(cmdline);
+    duetos::diag::BootProgress("after-SmokeProfileInit");
     bool want_tty = false;
     if (CmdlineMatches(cmdline, "boot", "tty"))
     {
@@ -2316,11 +2323,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // mark (just before the login gate, before user input).
     // After this, all five files behave like any other
     // static-bytes ramfs entry.
+    duetos::diag::BootProgress("before-ramfs-snapshots");
     duetos::fs::RamfsBoottraceSnapshot();
     duetos::fs::RamfsSyscallsSnapshot();
     duetos::fs::RamfsAbiSnapshot();
     duetos::fs::RamfsCpuhistSnapshot();
     duetos::fs::RamfsInspectSnapshot();
+    duetos::diag::BootProgress("after-ramfs-snapshots");
 
     // Spawn the userland shell stub. Hand-built ELF ships in
     // /bin/usershell.elf; calls SYS_WRITE("Hello from
@@ -2385,6 +2394,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // — useful for headless screenshot captures + CI boot smoke
     // tests where the runner can't drive a keyboard. The default
     // remains "login required."
+    duetos::diag::BootProgress("before-login-gate");
     const bool autologin = CmdlineMatches(cmdline, "autologin", "1");
     if (!autologin)
     {
@@ -2395,6 +2405,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     {
         SerialWrite("[boot] autologin=1 — skipping login gate\n");
     }
+    duetos::diag::BootProgress("after-login-gate");
 
 
     // Phase::Vfs — ramfs init imperative (it lays down the v0 root
@@ -2418,9 +2429,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                        });
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Vfs);
+    duetos::diag::BootProgress("after-RunPhase-Vfs");
 
     SerialWrite("[boot] Parsing ACPI tables.\n");
     duetos::acpi::AcpiInit(multiboot_info);
+    duetos::diag::BootProgress("after-AcpiInit");
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiUnderflowSelfTest());
 
     // SRAT memory-affinity records are now parsed (AcpiInit ->
@@ -2430,8 +2443,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // and the global linear-scan path stays the only path.
     duetos::mm::FrameAllocatorBuildNumaRanges();
     DUETOS_BOOT_SELFTEST(duetos::mm::FrameAllocatorNumaSelfTest());
+    duetos::diag::BootProgress("after-NumaRanges");
     SerialWrite("[boot] Building AML namespace from DSDT/SSDT.\n");
     duetos::acpi::AmlNamespaceBuild();
+    duetos::diag::BootProgress("after-AmlNamespaceBuild");
     {
         auto aml_init = []() -> duetos::core::Result<void>
         {
@@ -2442,8 +2457,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         duetos::security::RegisterDriverDomain("acpi/aml", aml_init, aml_teardown);
     }
 
+    duetos::diag::BootProgress("before-PicDisable");
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();
+    duetos::diag::BootProgress("after-PicDisable");
 
     // Phase::Apic — LAPIC + IOAPIC + HPET init are imperative (each
     // depends on the previous), but HPET's self-test fits the

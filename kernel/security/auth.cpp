@@ -266,6 +266,19 @@ void PopulateView(const Account* a, u64 now_ns, AccountView* view)
 
 void AuthInit()
 {
+    // Re-anchor the decoy record's iteration count to the runtime
+    // value of PasswordDefaultIterations(). The constinit
+    // initializer hard-codes kPasswordDefaultIterations (the
+    // production 100 000) because constinit needs a compile-time
+    // constant; PasswordDefaultIterations() is a runtime function
+    // that returns kPasswordEmulatorIterations (1 000) under any
+    // VMM. Without this re-anchor every "unknown account" or
+    // "no-password account" verify burns the production budget
+    // even on emulators — which is the path the auth self-test
+    // takes (`AuthVerify("nobody", "x")`) and the path that wedged
+    // the Bochs row of diff-boot-smoke (~10× longer per call).
+    g_decoy_record.iterations = duetos::security::PasswordDefaultIterations();
+
     for (u32 i = 0; i < kAuthMaxAccounts; ++i)
     {
         g_accounts[i] = {};

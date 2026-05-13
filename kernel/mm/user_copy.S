@@ -40,6 +40,28 @@
 .section .text
 .align 16
 
+/* SMAP-availability flag set by mm::EnableKernelProtectionBits()
+ * after probing CPUID.7.0.EBX[20]. STAC / CLAC are #UD on CPUs
+ * older than Intel Broadwell (2014) / AMD Zen+, so every site
+ * below tests the flag before issuing the instruction. The flag
+ * lives outside the anonymous namespace in paging.cpp so this
+ * unmangled symbol is reachable from asm. */
+.extern g_smap_enabled
+
+.macro maybe_stac
+    cmp     byte ptr [rip + g_smap_enabled], 0
+    je      99f
+    stac
+99:
+.endm
+
+.macro maybe_clac
+    cmp     byte ptr [rip + g_smap_enabled], 0
+    je      99f
+    clac
+99:
+.endm
+
 /* -------------------------------------------------------------------------
  * bool _copy_user_from(void* kernel_dst, const void* user_src, u64 len);
  *
@@ -56,7 +78,7 @@ _copy_user_from:
      * the way out. */
     mov     eax, 1
 
-    stac                            /* allow kernel to read user pages */
+    maybe_stac                      /* allow kernel to read user pages */
 
 .global __copy_user_from_start
 __copy_user_from_start:
@@ -78,7 +100,7 @@ __copy_user_from_start:
 .global __copy_user_from_end
 __copy_user_from_end:
 
-    clac
+    maybe_clac
     ret
 .size _copy_user_from, . - _copy_user_from
 
@@ -94,7 +116,7 @@ _copy_user_to:
     endbr64
 
     mov     eax, 1
-    stac
+    maybe_stac
 
 .global __copy_user_to_start
 __copy_user_to_start:
@@ -111,7 +133,7 @@ __copy_user_to_start:
 .global __copy_user_to_end
 __copy_user_to_end:
 
-    clac
+    maybe_clac
     ret
 .size _copy_user_to, . - _copy_user_to
 
@@ -130,7 +152,7 @@ __copy_user_to_end:
 .type __copy_user_fault_fixup, @function
 __copy_user_fault_fixup:
     endbr64
-    clac
+    maybe_clac
     xor     eax, eax
     ret
 .size __copy_user_fault_fixup, . - __copy_user_fault_fixup

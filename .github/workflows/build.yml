@@ -439,6 +439,96 @@ jobs:
               });
             }
 
+  diff-boot-smoke:
+    # Differential-boot harness. Boots the bringup profile under a
+    # matrix of (engine, cpu, accel, firmware) configs and diffs
+    # the canonical sentinel streams pairwise. Catches the class of
+    # bug a single-config qemu-smoke can't see — CPUID-gated paths,
+    # UEFI-vs-SeaBIOS memory-map deltas, emulator-specific
+    # instruction modelling. Advisory until the matrix has shaken
+    # down (Bochs in particular is finicky on the GitHub-runner
+    # Bochs build), but its diff output is captured as an artefact
+    # so a regression is reviewable from the failed run alone.
+    name: diff-boot-smoke (bringup)
+    needs: build-debug
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install QEMU + grub + bochs
+        run: |
+          for attempt in 1 2 3 4; do
+            if sudo apt-get update; then break; fi
+            sleep $((attempt * 5))
+          done
+          sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin \
+                                  grub-efi-amd64-bin xorriso mtools ovmf \
+                                  bochs bochs-x bochs-term bochsbios vgabios \
+                                  clang-18 lld-18 llvm-18 cmake ninja-build python3
+          # Same toolchain symlinks the qemu-smoke job needs — cmake
+          # configure below pulls in lld-link via boot/uefi/.
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+          sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
+          sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
+          sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
+      - name: Enable KVM access
+        # KVM doesn't help the differential harness because every
+        # row pins accel=tcg (KVM erases the cross-config signal),
+        # but opening up /dev/kvm is harmless and matches the
+        # qemu-smoke job's posture.
+        run: |
+          if [[ -e /dev/kvm ]]; then sudo chmod 666 /dev/kvm; fi
+      - name: Download kernel artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: duetos-kernel-debug
+          path: build/x86_64-debug/
+      - name: Configure
+        run: cmake --preset x86_64-debug
+      - name: Run differential matrix
+        id: diff
+        shell: bash
+        run: |
+          # Exit codes (mirrors diff-boot-smoke.sh):
+          #   0 = matrix converged
+          #   1 = at least one row failed
+          #   2 = rows passed but canonical sets diverged (config-
+          #       dependent behaviour — also a regression)
+          #   3 = environment skip
+          set +e
+          echo "::group::diff-boot-smoke matrix"
+          DUETOS_TIMEOUT=480 \
+            tools/test/diff-boot-smoke.sh bringup build/x86_64-debug
+          rc=$?
+          echo "::endgroup::"
+          echo "rc=${rc}" >> "$GITHUB_OUTPUT"
+          case ${rc} in
+            0) echo "::notice::diff-boot-smoke: matrix converged" ;;
+            1) echo "::warning::diff-boot-smoke: a row failed (rc=1)" ;;
+            2) echo "::warning::diff-boot-smoke: rows diverged (rc=2)" ;;
+            3) echo "::notice::diff-boot-smoke: skipped (env)" ;;
+          esac
+          # Advisory: don't fail the job. continue-on-error catches
+          # the eventual exit too, but this keeps the step status
+          # green so the CI summary doesn't read as red until the
+          # harness has stabilised.
+          exit 0
+      - name: Upload per-row logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diff-boot-smoke-logs
+          if-no-files-found: ignore
+          path: |
+            build/x86_64-debug/diff-bringup-*/runner.log
+            build/x86_64-debug/diff-bringup-*/serial.log
+            build/x86_64-debug/diff-bringup-*/canonical.txt
+            build/x86_64-debug/diff-bringup-*/rc
+          retention-days: 7
+
   clang-tidy:
     name: clang-tidy (advisory)
     runs-on: ubuntu-24.04

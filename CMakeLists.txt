@@ -367,6 +367,34 @@ set_tests_properties(duetos-uefi-smoke PROPERTIES
     SKIP_RETURN_CODE 2
 )
 
+# Differential-boot smoke. Boots one profile (`bringup`) under a
+# matrix of (engine, cpu, accel, firmware) configs and diffs the
+# canonical sentinel streams pairwise. Catches config-dependent
+# bugs (CPUID-gated paths, UEFI-vs-SeaBIOS memory-map deltas,
+# emulator-specific instruction modelling) that a single-config
+# smoke would miss. Default matrix: 3 QEMU rows + 1 Bochs row.
+#
+# Wall clock is the sum of the rows under TCG (~3-5 minutes per
+# row on cold dev workstations). The matrix is parallelisable
+# in principle but the rows share filesystem state, so the
+# harness runs them sequentially — TIMEOUT scales accordingly.
+set(DUETOS_DIFF_DRIVER "${CMAKE_SOURCE_DIR}/tools/test/diff-boot-smoke.sh")
+add_test(NAME duetos-diff-boot-smoke
+    COMMAND "${DUETOS_DIFF_DRIVER}" bringup "${CMAKE_BINARY_DIR}"
+)
+set_tests_properties(duetos-diff-boot-smoke PROPERTIES
+    LABELS "smoke;boot;differential"
+    # Generous outer timeout: 4 rows x 480s inner cap each = 32 min
+    # worst case; 2400s gives headroom for the verifier passes too.
+    # Real wall clock under KVM is ~30s; under TCG, 5-15 min.
+    TIMEOUT 2400
+    # Exit 3 from diff-boot-smoke.sh means a prerequisite is
+    # missing (qemu / iso / bochs); CTEST reports SKIP. Exit 2
+    # means rows-passed-but-diverged — that's a real regression,
+    # NOT a skip, so it falls through to FAIL.
+    SKIP_RETURN_CODE 3
+)
+
 message(STATUS "")
 message(STATUS "DuetOS configured.")
 message(STATUS "  Build type : ${CMAKE_BUILD_TYPE}")

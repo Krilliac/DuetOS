@@ -183,10 +183,17 @@ python3 "${SCRIPT_DIR}/make-gpt-image.py" "${SATA_IMAGE}"
 # everywhere without an env-var dance. KVM speeds the qemu-smoke
 # job ~50x — the boot/test path that takes ~60s under TCG completes
 # in ~1.5s under KVM, well inside the CI wall-clock budget.
+#
+# DUETOS_ACCEL overrides the auto-pick. Differential-boot harnesses
+# (tools/test/diff-boot-smoke.sh) pin to `tcg` so two passes on the
+# same host both run the modeled instruction stream — KVM would
+# defeat the comparison by handing both passes the same host
+# silicon and erasing the cross-emulator signal.
 ACCEL="tcg"
 if [[ -r /dev/kvm && -w /dev/kvm ]]; then
     ACCEL="kvm:tcg"
 fi
+ACCEL="${DUETOS_ACCEL:-${ACCEL}}"
 # Log the acceleration choice so a slow CI run is easy to diagnose
 # from the workflow log alone — without this, "did the smoke job
 # actually use KVM?" required re-checking permissions on /dev/kvm
@@ -267,9 +274,16 @@ case "${DUETOS_GDB_TRANSPORT:-tcp}" in
 esac
 echo "[run.sh] gdb transport=${DUETOS_GDB_TRANSPORT:-tcp} -> ${DUETOS_GDB_TRANSPORT_QEMU}" >&2
 
+# DUETOS_CPU overrides `-cpu max` for differential matrices — pinning
+# qemu64 / Haswell / Skylake-Client / etc. exercises different CPUID
+# leaves, MSR sets, and feature gates than `max` does, and the
+# diff-boot harness uses that to surface CPUID-dependent bugs that
+# `max` would silently paper over.
+CPU_MODEL="${DUETOS_CPU:-max}"
+
 QEMU_ARGS=(
     -machine  "q35,accel=${ACCEL}"
-    -cpu      max
+    -cpu      "${CPU_MODEL}"
     -m        512M
     -display  "${DISPLAY_MODE}"
     -serial   stdio

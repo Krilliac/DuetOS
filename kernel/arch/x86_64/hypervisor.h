@@ -44,6 +44,9 @@ enum class HypervisorKind : u8
     Acrn,       // "ACRNACRNACRN"
     Bhyve,      // "bhyve bhyve "
     Qnx,        // "QNXQVMBSQG"
+    Bochs,      // detected via port 0xE9 read-back (Bochs doesn't
+                // set CPUID.1.ECX[31], so the standard probe path
+                // misses it; secondary probe checks port 0xE9).
 };
 
 /// Pretty-print the kind enum. Always returns a static string.
