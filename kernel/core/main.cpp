@@ -234,7 +234,10 @@
 #include "diag/cleanroom_trace.h"
 #include "security/auth.h"
 #include "security/auth_pentest.h"
+#include "security/broker.h"
 #include "security/cap_audit.h"
+#include "security/grace.h"
+#include "security/rbac.h"
 #include "security/kaslr.h"
 #include "loader/firmware_loader.h"
 #include "loader/firmware_package.h"
@@ -2241,6 +2244,22 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::diag::BootProgress("after-AuthSelfTest");
     DUETOS_BOOT_SELFTEST(duetos::security::AuthBruteForceProbe());
     duetos::diag::BootProgress("after-AuthBruteForceProbe");
+
+    // Role-based access control: seed the built-in role table and
+    // bind the default memberships. Must precede the broker self-
+    // test below (which uses the seeded role policy to authorise
+    // the synthetic FsWrite elevation). The grace cache likewise
+    // needs an explicit Init before broker calls. Order:
+    //   RbacInit -> GraceCacheInit -> BrokerSelfTest -> RbacSelfTest -> GraceCacheSelfTest
+    // (See wiki/security/RBAC-and-Elevation.md for the design.)
+    duetos::diag::BootProgress("before-RbacInit");
+    duetos::security::RbacInit();
+    duetos::security::GraceCacheInit();
+    duetos::diag::BootProgress("after-RbacInit");
+    DUETOS_BOOT_SELFTEST(duetos::security::RbacSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::GraceCacheSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::BrokerSelfTest());
+    duetos::diag::BootProgress("after-RbacSelfTests");
 
     // Shell welcome + initial prompt. Landing here after every
     // subsystem init line keeps the boot log visible above the

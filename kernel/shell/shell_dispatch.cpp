@@ -1622,6 +1622,21 @@ void Dispatch(char* line)
         CmdSu(argc, argv);
         return;
     }
+    if (StrEq(cmd, "elevate"))
+    {
+        CmdElevate(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "roles"))
+    {
+        CmdRoles(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "elevations"))
+    {
+        CmdElevations();
+        return;
+    }
     if (StrEq(cmd, "login"))
     {
         CmdLoginCmd(argc, argv);

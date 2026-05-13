@@ -549,6 +549,46 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ## End-user features
 
+### RBAC + elevation broker — v1 follow-ups
+
+- **Today:** v0 broker, role table, grace cache, CLI + GUI prompt
+  loop, and shell `elevate` / `roles` / `elevations` commands
+  shipping. Password hashes are PBKDF2-HMAC-SHA256; the broker
+  facade does not yet wire into Win32 NT privilege APIs; the role
+  + account tables are in-memory and reseed on every boot.
+- **v1 — Argon2id with lazy migration.** Replace PBKDF2 with
+  Argon2id (memory-hard, 64 MiB / t=3 / p=1) as the default KDF
+  for new password sets. PBKDF2 records re-hash to Argon2id on
+  the next successful verify. Both timings sit inside the
+  existing decoy envelope so verify wall-clock stays uniform
+  across "user not found / user found / wrong password / right
+  password" leaves regardless of which KDF a record holds. See
+  [`wiki/security/RBAC-and-Elevation.md`](../security/RBAC-and-Elevation.md#argon2id-rollout).
+- **v1 — Win32 facade routing.** `userland/libs/ntdll/`'s
+  `NtAdjustPrivilegesToken`, `RtlAdjustPrivilege`, and the
+  `RequestExecutionState` paths call `BrokerRequestElevation`
+  for each requested privilege that maps to a `kCap*`, then
+  return `STATUS_SUCCESS` regardless (probe-satisfying) but
+  only flip kernel cap bits when the broker actually granted.
+  Per `wiki/kernel/Subsystem-Isolation.md` the gate stays in the
+  kernel; the NT thunks are facades that consult it.
+- **v1 — Persistence.** `/system/secrets/` holds the account
+  + role tables encrypted at rest. Argon2id-derived key wraps
+  the table; TPM driver (when it lands) seals the wrap key.
+  Until then `AuthInit` / `RbacInit` re-seed defaults on every
+  boot; runtime additions are lost. Tracked in
+  `wiki/security/RBAC-and-Elevation.md#persistence`.
+- **v1 — First-boot installer flow.** Replaces the hardcoded
+  `admin / admin` seed with a userland install wizard launched
+  by init when `/system/secrets/` is empty. Blocks on the
+  persistence work above.
+- **v1 — Secure Attention Key.** Reserve Ctrl+Alt+Del at the
+  PS/2 driver level; trigger a kernel-drawn full-screen broker
+  prompt so a paranoid user can force a known-good prompt
+  rather than trusting the currently-drawn one. v0 modal is
+  drawn under the compositor lock above other windows but
+  doesn't pre-empt a focused full-screen surface.
+
 ### ACPI S5 / soft-off shutdown
 
 - **Today:** Start menu's SHUT DOWN action calls `KernelHalt`,

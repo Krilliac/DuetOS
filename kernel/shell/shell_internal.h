@@ -500,6 +500,17 @@ void CmdSu(u32 argc, char** argv);
 void CmdLoginCmd(u32 argc, char** argv);
 void CmdIdleLock(u32 argc, char** argv);
 
+// RBAC + elevation broker commands (shell_security.cpp).
+void CmdElevate(u32 argc, char** argv);
+void CmdRoles(u32 argc, char** argv);
+void CmdElevations();
+
+// True iff the kernel shell currently has a live broker-granted
+// elevation. Consulted by `RequireAdmin` so a non-admin who ran
+// `elevate <cap>` can pass admin-gated commands for the grace
+// window. Lazily expires the underlying broker grant.
+bool ShellIsElevatedNow();
+
 // ---------------------------------------------------------------
 // Storage / mount / device-list commands (shell_storage.cpp).
 // Thin views over the block layer + GPT parser + mount table.

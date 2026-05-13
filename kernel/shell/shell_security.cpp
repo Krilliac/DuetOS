@@ -17,11 +17,15 @@
 #include "arch/x86_64/serial.h"
 #include "drivers/video/console.h"
 #include "security/attack_sim.h"
+#include "security/broker.h"
 #include "security/event_ring.h"
+#include "security/grace.h"
 #include "security/guard.h"
 #include "security/policy.h"
 #include "security/purple_team.h"
+#include "security/rbac.h"
 #include "log/klog.h"
+#include "proc/process.h"
 
 namespace duetos::core::shell::internal
 {
@@ -509,6 +513,216 @@ void CmdPolicy(u32 argc, char** argv)
         return;
     }
     ConsoleWriteln("POLICY: UNKNOWN SUBCOMMAND");
+}
+
+// ---------------------------------------------------------------
+// RBAC + elevation broker surface.
+//
+// `elevate <cap>`   — prompt for the current user's password and,
+//                     on success, add the cap to the kernel shell's
+//                     pseudo-process. Future shell commands that
+//                     consult `g_shell_proc.caps` honour the grant
+//                     for the configured grace window.
+// `elevate off`     — clear every cap held by the pseudo-process
+//                     and drop the broker grants from the cache.
+// `roles [me]`      — list every registered role (or, with `me`,
+//                     the roles the active session belongs to).
+// `elevations`      — dump the live grace-cache rows so the
+//                     operator can see what is currently elevated
+//                     and how long is left.
+//
+// The pseudo-process is a `core::Process` with a sentinel pid; the
+// broker writes its caps and the grace cache keys against that pid
+// the same way it would for a real ring-3 process.
+// ---------------------------------------------------------------
+namespace
+{
+
+constexpr u64 kShellPseudoPid = ~0ull;
+duetos::core::Process g_shell_proc{};
+bool g_shell_proc_initialized = false;
+
+void EnsureShellProcInitialized()
+{
+    if (g_shell_proc_initialized)
+        return;
+    g_shell_proc.pid = kShellPseudoPid;
+    g_shell_proc.caps = duetos::core::CapSetEmpty();
+    g_shell_proc_initialized = true;
+}
+
+duetos::core::Cap ParseCapArg(const char* s)
+{
+    if (s == nullptr || s[0] == '\0')
+        return duetos::core::kCapNone;
+    // Accept both "FsWrite" and "kCapFsWrite" forms.
+    for (u32 c = 1; c < static_cast<u32>(duetos::core::kCapCount); ++c)
+    {
+        const char* name = duetos::core::CapName(static_cast<duetos::core::Cap>(c));
+        if (name == nullptr)
+            continue;
+        if (StrEq(s, name))
+            return static_cast<duetos::core::Cap>(c);
+        // Tolerate the "kCap" prefix being omitted.
+        if (name[0] == 'k' && name[1] == 'C' && name[2] == 'a' && name[3] == 'p')
+        {
+            if (StrEq(s, name + 4))
+                return static_cast<duetos::core::Cap>(c);
+        }
+    }
+    return duetos::core::kCapNone;
+}
+
+void PrintCapBundle(u64 mask)
+{
+    bool first = true;
+    for (u32 c = 1; c < static_cast<u32>(duetos::core::kCapCount); ++c)
+    {
+        if ((mask & (1ULL << c)) == 0)
+            continue;
+        if (!first)
+            ConsoleWrite(", ");
+        ConsoleWrite(duetos::core::CapName(static_cast<duetos::core::Cap>(c)));
+        first = false;
+    }
+    if (first)
+        ConsoleWrite("(empty)");
+}
+
+} // namespace
+
+bool ShellIsElevatedNow()
+{
+    EnsureShellProcInitialized();
+    // A cap held by the pseudo-process whose grace row has expired
+    // should be considered dropped. Sweep the cache, then trim caps
+    // whose grant is no longer cached. v0 keeps the cap bits in
+    // sync with the cache by rechecking on every call.
+    duetos::security::GraceCacheReap();
+    for (u32 c = 1; c < static_cast<u32>(duetos::core::kCapCount); ++c)
+    {
+        const duetos::core::Cap cap = static_cast<duetos::core::Cap>(c);
+        if ((g_shell_proc.caps.bits & (1ULL << c)) == 0)
+            continue;
+        if (!duetos::security::GraceCacheLookup(kShellPseudoPid, cap))
+            g_shell_proc.caps.bits &= ~(1ULL << c);
+    }
+    return g_shell_proc.caps.bits != 0;
+}
+
+void CmdElevate(u32 argc, char** argv)
+{
+    EnsureShellProcInitialized();
+    if (argc < 2)
+    {
+        ConsoleWriteln("ELEVATE: USAGE:");
+        ConsoleWriteln("  ELEVATE <CAP>        prompt + grant cap for grace window");
+        ConsoleWriteln("  ELEVATE OFF          drop every active elevation");
+        ConsoleWriteln("  (CAP example: FsWrite, NetAdmin, Debug — see ROLES)");
+        return;
+    }
+    if (StrEq(argv[1], "off") || StrEq(argv[1], "OFF"))
+    {
+        duetos::security::GraceCacheExpirePid(kShellPseudoPid);
+        g_shell_proc.caps = duetos::core::CapSetEmpty();
+        ConsoleWriteln("ELEVATE: cleared shell elevation state");
+        return;
+    }
+    const duetos::core::Cap cap = ParseCapArg(argv[1]);
+    if (cap == duetos::core::kCapNone)
+    {
+        ConsoleWrite("ELEVATE: UNKNOWN CAP '");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln("' — run ROLES to see available caps");
+        return;
+    }
+    duetos::security::BrokerRequest req{};
+    req.proc = &g_shell_proc;
+    req.cap = cap;
+    req.reason = argv[1];
+    const auto outcome = duetos::security::BrokerRequestElevation(req);
+    ConsoleWrite("ELEVATE: ");
+    ConsoleWrite(duetos::security::BrokerOutcomeName(outcome));
+    if (outcome == duetos::security::BrokerOutcome::Granted)
+    {
+        ConsoleWrite(" — cap ");
+        ConsoleWrite(duetos::core::CapName(cap));
+        ConsoleWriteln(" held for grace window");
+    }
+    else
+    {
+        ConsoleWriteln("");
+    }
+}
+
+void CmdRoles(u32 argc, char** argv)
+{
+    if (argc >= 2 && (StrEq(argv[1], "me") || StrEq(argv[1], "ME")))
+    {
+        const char* who = AuthCurrentUserName();
+        ConsoleWrite("ROLES FOR ");
+        ConsoleWrite((who != nullptr && who[0] != '\0') ? who : "(no session)");
+        ConsoleWriteln(":");
+        const u32 mask = duetos::security::RbacAccountRoleMask(who);
+        if (mask == 0)
+        {
+            ConsoleWriteln("  (none — no roles attached, broker will deny every request)");
+            return;
+        }
+        const u32 n = duetos::security::RbacRoleCount();
+        for (u32 i = 0; i < n; ++i)
+        {
+            duetos::security::Role r{};
+            if (!duetos::security::RbacRoleAt(i, &r))
+                continue;
+            const duetos::security::RoleId id = duetos::security::RbacFindRole(r.name);
+            if ((mask & (1u << id)) == 0)
+                continue;
+            ConsoleWrite("  ");
+            ConsoleWrite(r.name);
+            ConsoleWrite(" -> ");
+            PrintCapBundle(r.policy.cap_mask);
+            ConsoleWriteln("");
+        }
+        return;
+    }
+    const u32 n = duetos::security::RbacRoleCount();
+    ConsoleWrite("ROLES (");
+    WriteU64Dec(n);
+    ConsoleWriteln("):");
+    for (u32 i = 0; i < n; ++i)
+    {
+        duetos::security::Role r{};
+        if (!duetos::security::RbacRoleAt(i, &r))
+            continue;
+        ConsoleWrite("  ");
+        ConsoleWrite(r.name);
+        ConsoleWrite("  caps: ");
+        PrintCapBundle(r.policy.cap_mask);
+        ConsoleWriteln("");
+    }
+}
+
+void CmdElevations()
+{
+    duetos::security::GraceCacheReap();
+    const u32 n = duetos::security::GraceCacheLiveCount();
+    ConsoleWrite("ELEVATIONS LIVE: ");
+    WriteU64Dec(n);
+    ConsoleWriteln("");
+    for (u32 i = 0; i < n; ++i)
+    {
+        duetos::security::GraceEntry e{};
+        if (!duetos::security::GraceCacheEntryAt(i, &e))
+            continue;
+        ConsoleWrite("  pid=");
+        WriteU64Hex(e.pid, 0);
+        ConsoleWrite("  cap=");
+        ConsoleWrite(duetos::core::CapName(e.cap));
+        ConsoleWrite("  expires_ns=");
+        WriteU64Hex(e.deadline_ns, 0);
+        ConsoleWriteln("");
+    }
 }
 
 void CmdPurple()

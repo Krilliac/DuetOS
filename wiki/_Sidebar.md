@@ -59,6 +59,7 @@
 ### Security
 - [Sandboxing](security/Sandboxing.md)
 - [Capabilities](security/Capabilities.md)
+- [RBAC and Elevation](security/RBAC-and-Elevation.md)
 - [W^X / NX Enforcement](security/WX-Enforcement.md)
 - [Attack Simulation](security/Attack-Simulation.md)
 - [Runtime Recovery Strategy](security/Runtime-Recovery.md)
