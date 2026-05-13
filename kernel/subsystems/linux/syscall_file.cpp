@@ -98,6 +98,12 @@ void FillStatFromEntry(const fs::fat32::DirEntry& e, u8* out_144)
 //   - Only FAT32 volume 0. Path may be absolute ("/HELLO.TXT"),
 //     mount-prefixed ("/fat/HELLO.TXT"), or bare ("HELLO.TXT").
 // Returns the new fd on success, -errno otherwise.
+//
+// // GAP: mount-aware routing through `fs::routing::OpenForProcess`
+// — the routing facade currently returns a Win32 handle that
+// doesn't fit the Linux fd shape. Migration is a bigger slice
+// (introduce a Linux-side routing helper that shares the mount
+// table walk with file_route but returns a Linux fd state).
 i64 DoOpen(u64 user_path, u64 flags, u64 mode)
 {
     (void)mode;

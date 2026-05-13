@@ -31,6 +31,7 @@
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smbios.h"
+#include "arch/x86_64/timer.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/thermal.h"
 #include "arch/x86_64/timer.h"
@@ -100,9 +101,7 @@ inline u64 ReadRflags()
 
 inline u64 ReadTsc()
 {
-    u32 lo, hi;
-    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return (static_cast<u64>(hi) << 32) | lo;
+    return ::duetos::arch::TscRead();
 }
 
 inline u64 ReadMsrRaw(u32 msr)

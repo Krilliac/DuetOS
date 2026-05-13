@@ -2,6 +2,8 @@
 #include "security/stack_canary.h"
 #include "util/types.h"
 
+#include "arch/x86_64/timer.h"
+
 /*
  * DuetOS stack-canary runtime support.
  *
@@ -120,10 +122,7 @@ __attribute__((no_stack_protector)) void RandomizeStackCanary()
         // Last resort: TSC. Not cryptographic but still per-boot
         // unique — an attacker who reads the disk image can't
         // predict when we booted.
-        duetos::u32 lo = 0;
-        duetos::u32 hi = 0;
-        asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-        fresh = (duetos::u64(hi) << 32) | lo;
+        fresh = ::duetos::arch::TscRead();
     }
     // Keep at least one non-NUL byte — a canary of all zeros
     // would still panic on corruption but looks suspicious in

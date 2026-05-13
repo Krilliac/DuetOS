@@ -2557,6 +2557,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     duetos::cpu::PerCpuInitBsp();
 
+    // Drive any future Phase::PerCpuBsp registrants. No callers
+    // yet, but the phase slot exists so the registry stays the
+    // single contract for "per-CPU BSP init."
+    (void)duetos::core::RunPhase(duetos::core::Phase::PerCpuBsp);
+
     // Decode BSP CPUID 0x1F/0x0B + SRAT row into the per-CPU
     // topology table. AP rows are filled later by each AP from
     // inside ApEntryFromTrampoline before signaling online_flag,
@@ -6354,6 +6359,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // independent of worker-creation order.
     SerialWrite("[boot] Bringing up APs.\n");
     SmpStartAps();
+
+    // Drive any future Phase::Smp registrants now that APs are
+    // online and the per-CPU runqueues exist.
+    (void)duetos::core::RunPhase(duetos::core::Phase::Smp);
 
     // Every AP populated its own k_topo[i] before flipping the
     // trampoline's online_flag, so by the time SmpStartAps returns

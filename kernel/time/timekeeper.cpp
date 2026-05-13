@@ -13,6 +13,7 @@
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 #include "core/panic.h"
 #include "log/klog.h"
 #include "time/clocksource.h"
@@ -168,9 +169,7 @@ u64 CalibrateTscFreqHz()
 
 u64 ReadTsc()
 {
-    u32 lo, hi;
-    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return (static_cast<u64>(hi) << 32) | lo;
+    return ::duetos::arch::TscRead();
 }
 
 u64 TscToNanos(u64 cycles)

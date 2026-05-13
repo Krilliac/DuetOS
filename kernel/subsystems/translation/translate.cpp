@@ -30,6 +30,7 @@
 #include "subsystems/translation/translate.h"
 
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 #include "arch/x86_64/traps.h"
 #include "diag/fix_journal.h"
 #include "log/klog.h"
@@ -108,9 +109,7 @@ constinit MissSampleTable g_native_miss_sampling = {};
 
 inline u64 ReadTsc()
 {
-    u32 lo, hi;
-    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return (static_cast<u64>(hi) << 32) | lo;
+    return ::duetos::arch::TscRead();
 }
 
 void BumpOverhead(OverheadTally& t, u64 delta)
