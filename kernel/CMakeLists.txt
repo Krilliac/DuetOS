@@ -691,6 +691,14 @@ duetos_embed_blob(generated_kernel32_dll.h
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32.c"
     COMMENT "Compiling + embedding kernel32.dll (first stub retirement)")
 
+# 32-bit kernel32 companion — PE32 (i386) DLL, preloaded into PE32
+# processes' address spaces so their IAT entries to KERNEL32.dll
+# resolve. Layer 4 of 32-bit PE support.
+duetos_embed_blob(generated_kernel32_32_dll.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-kernel32-32-dll.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32.c"
+    COMMENT "Compiling + embedding kernel32_32.dll (i386 PE32 companion)")
+
 duetos_embed_blob(generated_vcruntime140_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-vcruntime140-dll.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/vcruntime140.c"
