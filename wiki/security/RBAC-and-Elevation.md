@@ -117,29 +117,38 @@ SYS_FILE_WRITE
 | `roleadd` / `roledel`      | REAL — admin-gated membership management                       |
 | `elevations`               | REAL — dump live grace-cache rows                              |
 | `RequireAdmin` integration | REAL — passes if you're admin OR (root-role member AND elevated)|
-| Win32 `NtAdjustPrivilegesToken` routing | DEFERRED — see *Open blockers* below             |
+| Win32 `NtAdjustPrivilegesToken` routing | REAL — enable-but-not-held routes to broker via deferred prompt |
 | Argon2id KDF               | DEFERRED — see Roadmap                                         |
 | Persistence                | DEFERRED — needs writable system FS                            |
 
-## Open blockers — why Win32 facade routing is deferred
+## Deferred-prompt mechanism (v0.2)
 
-`Ps2KeyboardReadEvent` is single-consumer by contract: "two
-concurrent readers would fight over bytes." The current broker
-prompt is safe only when called from the kbd-reader thread — which
-is what happens for shell commands (the shell IS the kbd reader),
-but NOT for a Win32 PE syscall (the PE runs on a different task).
-A naive `BrokerRequestElevation` call inside `SysTokenAdjust` would
-race the shell for keystrokes.
+`Ps2KeyboardReadEvent` is single-consumer by contract — concurrent
+readers race for bytes. A shell-driven `elevate` works because the
+shell IS the kbd-reader thread, so the inline prompt loop in
+`BrokerRequestElevation` is safe. A Win32 PE syscall runs in a
+different task and would race the shell.
 
-The fix is a deferred-prompt mechanism: the broker, when invoked
-off-thread, marks the request pending; the kbd reader, when it
-notices a pending request, displays the prompt and feeds keys to
-the broker; the requesting thread sleeps on a wait queue and wakes
-on completion. That's roughly the same shape as the existing
-`LoginIsActive` / `LoginFeedKey` demux, parameterised for elevation.
+The broker resolves this by picking the path at call time:
 
-Tracked in `wiki/reference/Roadmap.md` as part of "RBAC v1
-follow-ups."
+1. `BrokerSetKbdReaderTid(tid)` records the kbd-reader's TaskId at
+   bring-up (`kernel/core/main.cpp` after `SchedCreate`).
+2. `RunPrompt` checks `CurrentTaskId() == g_kbd_reader_tid`. Match
+   → inline TTY/GUI prompt (same as v0). Mismatch → deferred path.
+3. The deferred path posts a request to a single-slot global
+   `DeferredSlot`, injects a synthetic `kKeyNone` event to wake the
+   kbd reader, and blocks on a `WaitQueue`.
+4. The kbd-reader loop calls `BrokerKbdReaderPumpDeferred()` at the
+   top of every iteration. On a pending slot it runs the prompt UI
+   (safe — the kbd reader IS the legal `Ps2KeyboardReadEvent`
+   consumer), stores the password in the slot, sets `completed`,
+   and wakes the waiter.
+
+State is guarded by `arch::Cli/Sti` only (no spinlock), mirroring
+the existing `Process::StdinRing` discipline. Single-flight for v0:
+a second concurrent deferred request returns `false` immediately
+and the caller falls through to the legacy denial branch
+(`NOT_ALL_ASSIGNED` for Win32 callers).
 
 ## File layout
 

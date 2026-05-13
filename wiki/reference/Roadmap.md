@@ -564,22 +564,15 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   across "user not found / user found / wrong password / right
   password" leaves regardless of which KDF a record holds. See
   [`wiki/security/RBAC-and-Elevation.md`](../security/RBAC-and-Elevation.md#argon2id-rollout).
-- **v1 — Win32 facade routing.** `userland/libs/ntdll/`'s
-  `NtAdjustPrivilegesToken`, `RtlAdjustPrivilege`, and the
-  `RequestExecutionState` paths call `BrokerRequestElevation`
-  for each requested privilege that maps to a `kCap*`, then
-  return `STATUS_SUCCESS` regardless (probe-satisfying) but
-  only flip kernel cap bits when the broker actually granted.
-  Per `wiki/kernel/Subsystem-Isolation.md` the gate stays in the
-  kernel; the NT thunks are facades that consult it.
-  **Blocked on:** deferred-prompt mechanism. The broker's current
-  prompt loop reads `Ps2KeyboardReadEvent` directly, which is
-  single-consumer by contract. A shell command works because the
-  shell IS the kbd-reader thread; a Win32 PE syscall runs on a
-  different task and would race the shell for keystrokes. The
-  fix is a wait-queue + kbd-reader handoff modeled on the
-  existing `LoginIsActive` / `LoginFeedKey` demux. See
-  `wiki/security/RBAC-and-Elevation.md` → *Open blockers*.
+- **LANDED (v0.2) — Win32 facade routing.** `NtAdjustPrivilegesToken`'s
+  enable-but-not-held branch now routes to
+  `BrokerRequestElevation`. On grant, the cap is added to the
+  caller's `CapSet` and reflected in PreviousState; on cancel /
+  bad password / denied / single-flight contention, the legacy
+  `STATUS_NOT_ALL_ASSIGNED` return shape is preserved. Backed by
+  the deferred-prompt mechanism in `kernel/security/broker.cpp`.
+  See `wiki/security/RBAC-and-Elevation.md` → *Deferred-prompt
+  mechanism*.
 - **v1 — Persistence.** `/system/secrets/` holds the account
   + role tables encrypted at rest. Argon2id-derived key wraps
   the table; TPM driver (when it lands) seals the wrap key.

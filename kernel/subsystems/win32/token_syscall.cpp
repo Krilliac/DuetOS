@@ -13,6 +13,7 @@
 #include "arch/x86_64/serial.h"
 #include "mm/paging.h"
 #include "proc/process.h"
+#include "security/broker.h"
 
 namespace duetos::subsystems::win32
 {
@@ -58,6 +59,26 @@ core::Cap LuidLowToCap(u32 luid_low)
         return kCapDebug;
     default:
         return kCapNone;
+    }
+}
+
+// Short, human-readable name for the prompt reason. We don't want to
+// surface raw LUID numbers to the user — "SeDebugPrivilege" is what
+// a Windows operator would expect to see in a UAC dialog.
+const char* LuidLowToPrivilegeName(u32 luid_low)
+{
+    switch (luid_low)
+    {
+    case 14:
+        return "SeIncreaseBasePriorityPrivilege";
+    case 17:
+        return "SeBackupPrivilege";
+    case 18:
+        return "SeRestorePrivilege";
+    case 20:
+        return "SeDebugPrivilege";
+    default:
+        return "Win32 privilege";
     }
 }
 
@@ -163,9 +184,31 @@ i64 SysTokenAdjust(u64 disable_all, u64 user_new, u64 user_new_len, u64 user_pre
             if (!core::CapSetHas(caller->caps, mapped))
             {
                 // Caller asked to enable a privilege whose cap
-                // isn't on the token. Real Windows returns
-                // STATUS_NOT_ALL_ASSIGNED here. Refuse — never
-                // grant a cap from user space.
+                // isn't on the token. Route through the elevation
+                // broker (UAC-style): the broker prompts for the
+                // logged-in user's password (deferred-prompt path,
+                // since this syscall runs in the PE's task, not
+                // the kbd-reader's), checks the role table, and
+                // on success adds the cap to caller->caps and
+                // caches the grant. Failure paths (no role grants
+                // this cap, bad password, cancelled, no kbd reader
+                // available) report STATUS_NOT_ALL_ASSIGNED — the
+                // same shape an unprivileged Windows process sees
+                // when the user clicks "No" on a UAC dialog.
+                duetos::security::BrokerRequest req{};
+                req.proc = caller;
+                req.cap = mapped;
+                req.reason = LuidLowToPrivilegeName(luid_low);
+                const auto outcome = duetos::security::BrokerRequestElevation(req);
+                if (outcome == duetos::security::BrokerOutcome::Granted)
+                {
+                    // Broker added the cap to caller->caps. Reflect
+                    // the new state in PreviousState so a follow-up
+                    // AdjustTokenPrivileges with the prev blob
+                    // round-trips correctly.
+                    *reinterpret_cast<u32*>(prev_la + 8) = kSePrivEnabled;
+                    continue;
+                }
                 not_all_assigned = true;
                 continue;
             }
