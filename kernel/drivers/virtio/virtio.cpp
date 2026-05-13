@@ -67,6 +67,8 @@ void VirtioInit()
             attached = true;
             break;
         case VirtioClass::kConsole:
+            attached = VirtioConsoleProbe(L);
+            break;
         case VirtioClass::kBalloon:
         case VirtioClass::kScsi:
         case VirtioClass::kInput:

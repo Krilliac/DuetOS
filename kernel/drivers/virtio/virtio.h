@@ -56,5 +56,13 @@ VirtioStats GetStats();
 bool VirtioRngProbe(const VirtioPciLayout& L);
 bool VirtioBlkProbe(const VirtioPciLayout& L);
 bool VirtioNetProbe(const VirtioPciLayout& L);
+bool VirtioConsoleProbe(const VirtioPciLayout& L);
+
+/// Forward a byte buffer over the attached virtio-console TX
+/// queue. No-op if the device wasn't found (returns false). The
+/// host renders the bytes on its `-chardev` sink — typically a
+/// QEMU stdout pipe or a log file. Cheap diagnostic surface for
+/// long-running boots and CI.
+bool VirtioConsoleWrite(const char* buf, u32 len);
 
 } // namespace duetos::drivers::virtio

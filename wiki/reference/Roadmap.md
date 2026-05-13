@@ -1418,16 +1418,27 @@ it."
   MAC) and `kNetFeatureMq` (multi-queue) when offered. IRQ
   routing is a separate slice — v0 can poll on a timer.
 
-### VirtIO — per-class drivers for the other classes
+### VirtIO — remaining per-class drivers
 
-- **Today:** `virtio.cpp` enumerates console / balloon / scsi
-  / input / socket and logs "class present but no driver yet"
-  for each.
-- **Lands:** highest-leverage first — `virtio-console` for
-  hypervisor-side serial / debug log forwarding;
-  `virtio-balloon` for hypervisor-controlled memory pressure.
-  Both are spec-stable, modest implementations on top of the
-  shared transport.
+- **Today:** virtio-console lands as TX-only single-port
+  (`kernel/drivers/virtio/virtio_console.cpp`). On attach it
+  posts a hello-world line onto the host's `-chardev` sink;
+  the kernel can route klog through `VirtioConsoleWrite`.
+  Receiveq (host → guest input) is deferred.
+- **Lands:**
+  - **virtio-balloon** — hypervisor-controlled memory
+    pressure. Two queues (inflate/deflate); device reads
+    `num_pages` via device-cfg, driver hands back pages.
+    Modest spec, small impl on top of shared transport.
+  - **virtio-console receiveq** — host → guest input.
+    Pre-fill receiveq with buffers; on each used-ring
+    completion, feed the bytes to a TTY-style buffer
+    that a future shell input path can poll. Needs an
+    IRQ wire-up to be useful (otherwise input lags one
+    poll cycle behind).
+  - **virtio-console multiport** —
+    `VIRTIO_CONSOLE_F_MULTIPORT` + the control-queue
+    protocol. Adds per-port queue pairs.
 
 ### App-compat — per-Win32-API hooks
 
