@@ -401,7 +401,21 @@ if (( KERNEL_N > 0 )); then
         for app in "${SIDELOAD_APPS[@]}"; do
             echo "[live-update]   live-update reload ${app}    (kernel shell; ramfs path may differ)"
         done
+        echo "[live-update] or \`live-update reload-all\` to respawn every live slot at once"
         echo "[live-update] run \`live-update status\` in the kernel shell to see active slots"
+    fi
+    # Kernel hot-patch is the post-reboot iteration loop for
+    # changes inside kernel/ that have a registered patch pair.
+    # We don't try to classify which kernel changes have a
+    # registered pair (that's per-change source-side metadata
+    # via KHOTPATCH_REGISTER_PAIR), but mention the commands so
+    # the operator knows they exist.
+    if (( KERNEL_N > 0 )); then
+        echo "[live-update] if the changed kernel functions carry KHOTPATCH_REGISTER_PAIR,"
+        echo "[live-update] the post-reboot loop can drop further reboots via:"
+        echo "[live-update]   live-update kernel-auto-patch       install every registered pair"
+        echo "[live-update]   live-update kernel-auto-revert      back out every live patch"
+        echo "[live-update]   live-update kernel-patches          list current live patches"
     fi
     exit "${EXIT_REBUILD_REQUIRED}"
 fi

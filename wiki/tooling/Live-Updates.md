@@ -79,19 +79,26 @@ decide whether to kick a rebuild without scraping stdout.
 
 The kernel ships a paired shell command. Once a kernel rebuild has
 landed in a running QEMU instance, `live-update` lets the operator
-hot-reload userland images **without rebooting the kernel**. It is
-the only true hot-reload primitive DuetOS has today; everything
-else (kernel core, drivers, subsystems, baked-in DLLs) requires a
-full reboot, which the host script's `KERNEL-IMAGE` verdict will
-catch.
+hot-reload userland images **and hot-patch kernel functions**
+without rebooting. Most kernel surfaces (drivers, subsystem
+dispatch, baked-in DLLs) still require a full reboot — what `live-
+update kernel-patch` covers is the narrow but powerful "redirect
+one function to a different one" primitive, plus a bulk auto-apply
+path for sets of patches registered in source.
 
 The command is admin-gated:
 
 ```
-live-update help                          usage
-live-update status                        slot table + non-reloadable surfaces
-live-update reload <path>                 respawn an image, retiring prior pid
-live-update restart-required [reason]     emit canonical RESTART REQUIRED line
+live-update help                            usage
+live-update status                          slot table + non-reloadable surfaces
+live-update reload <path>                   respawn one userland image, retiring prior pid
+live-update reload-all                      respawn every live slot from /tmp/<basename>
+live-update restart-required [reason]       emit canonical RESTART REQUIRED line
+live-update kernel-patch <target> <repl>    install one JMP-rel32 trampoline by symbol name
+live-update kernel-revert <handle>          revert one named patch
+live-update kernel-patches                  list every live patch
+live-update kernel-auto-patch               install every entry in the registry section
+live-update kernel-auto-revert              revert every live patch in one call
 ```
 
 ### `live-update reload <path>`
@@ -130,34 +137,144 @@ in fact requires a reboot — the host-side script (and any future
 CI watcher) greps for this exact wording on the serial log to flag
 a kernel-image divergence the running kernel cannot reflect.
 
-## Why there is no full "hot patch the running kernel" path
+## Kernel hot-patch — how `kernel-patch` actually works
 
-In a mature OS, hot-reload spans three families. DuetOS only has one
-of them today, and only at the user-mode boundary:
+DuetOS implements a real (single-CPU, single-pair) kernel-function
+hot-patcher in [`kernel/debug/hot_patch.h`](../../kernel/debug/hot_patch.h)
+and [`kernel/debug/hot_patch.cpp`](../../kernel/debug/hot_patch.cpp).
+The pattern is the same one Linux's livepatch / kpatch uses, scaled
+down to the kernel's actual safety guarantees.
 
-1. **User-space process respawn.** This is what `live-update reload`
-   does — kill the prior pid, re-load the binary, queue a fresh
-   ring-3 task. Works only because the source binary exists in a
-   reachable VFS path (tmpfs or ramfs); the binary in the
-   `.incbin`'d kernel image still requires a rebuild + reboot for
-   its bytes to update.
-2. **Kernel module reload** (`rmmod` / `insmod`). DuetOS does not
+### How a patchable target is marked
+
+A kernel function declares itself patchable by carrying the
+`KHOTPATCH_PATCHABLE` attribute:
+
+```cpp
+KHOTPATCH_PATCHABLE int CompositorDraw() { /* ... */ }
+```
+
+This expands to
+`__attribute__((patchable_function_entry(5, 0), noinline))`, which
+makes the compiler emit a 5-byte multi-byte NOP (`0F 1F 44 00 08` —
+`nopl 8(%rax,%rax,1)`) at the function entry, before the prologue.
+The function symbol points to the start of that NOP. Calling the
+function executes the NOP and falls through to the body; the NOP is
+the "patch area."
+
+### How a patch is installed
+
+`HotPatchInstall(target_va, replacement_va, &handle)`:
+
+1. Validates both addresses are inside the embedded kernel
+   symbol-table bounds.
+2. Verifies the displacement fits in a signed 32-bit rel32.
+3. Confirms the target's first 5 bytes are the patchability sentinel
+   (refuses with `NotPatchable` otherwise).
+4. Walks the caller's RBP frame chain and refuses with
+   `SelfReferential` if any saved RIP is inside `[target, target+5)`
+   — the obvious foot-gun of patching the code calling us.
+5. Saves the 5 NOP bytes into the per-patch record (for revert).
+6. Flips the containing 4 KiB page from R+X to R+W via
+   `mm::SetPteFlags4K`, writes `E9 <rel32>` (JMP rel32) at the
+   target, issues `mfence`, restores the page to R+X.
+7. Records (id, target, replacement, original_bytes, names) in the
+   live-patch table and returns a non-zero handle.
+
+The PTE-flip primitive is exactly the one the existing software-
+breakpoint subsystem uses for `0xCC` patches; the v0 SMP contract
+("no other CPU is fetching from this page during the W window") is
+inherited unchanged.
+
+`HotPatchRevert(handle)` walks the same path in reverse: looks up
+the record, writes the saved 5 NOP bytes back, frees the slot.
+
+### Bulk apply via the `.duetos_hotpatch_pairs` registry
+
+For sets of patches that ship as a unit, the source registers each
+pair into a dedicated linker section:
+
+```cpp
+KHOTPATCH_REGISTER_PAIR("compositor-fast-path",
+                         CompositorDraw,
+                         CompositorDrawFast)
+```
+
+This emits a `HotPatchPair` struct (target, replacement, tag) into
+section `.duetos_hotpatch_pairs`, which the linker bookends with
+`__duetos_hotpatch_pairs_start` / `__duetos_hotpatch_pairs_end`.
+`HotPatchApplyAll` walks `[start, end)` and calls
+`HotPatchInstall` for every entry that isn't already live;
+`HotPatchRevertAll` snapshots the live-patch table and reverts each
+entry. Both functions return a small `{considered, installed,
+already_patched, failed}` summary so operators can see a clean
+"applied N, skipped M because already-live, M failed" verdict.
+
+The shell wraps these as:
+
+```
+live-update kernel-auto-patch     # = HotPatchApplyAll
+live-update kernel-auto-revert    # = HotPatchRevertAll
+```
+
+The kernel ships with one demo pair pre-registered (the self-test's
+`HotPatchTestTargetReturns7` → `HotPatchTestReplacementReturns42`),
+so `kernel-auto-patch` always has at least one entry to work with
+out of the box. The full round-trip is verified at boot by
+`HotPatchSelfTest` — look for `[hot-patch] PASS` on the serial log.
+
+### Safety contract
+
+- **Patchable attribute is mandatory.** Targets without
+  `KHOTPATCH_PATCHABLE` get rejected with `NotPatchable` because
+  the first 5 bytes don't match the multi-byte NOP sentinel —
+  overlaying real instruction bytes would clip whatever
+  instruction starts at offset 4 and crash any in-flight execution.
+- **Single-CPU patch window.** The PTE flip + 5-byte write isn't
+  atomic against another CPU fetching from the same page mid-flip.
+  The boot self-test runs before SMP bring-up (trivially safe);
+  operator-driven patches are admin-gated. The
+  [Kernel Modularization](../security/Kernel-Modularization.md)
+  roadmap covers turning this into a real CPU-quiesce + IPI dance.
+- **Replacement signature must match.** A wrong-signature
+  replacement compiles, patches, and trashes the stack at the
+  first call — no runtime check can catch this.
+- **No stack-walk refusal for foreign tasks.** v0 only refuses a
+  self-patch (caller's RBP chain landing in the target). A v1
+  enhancement would walk every `Task`'s saved RIP and refuse when
+  any frame is inside `[target, target+5)`.
+
+## What's still missing (and why)
+
+Three families of hot-reload exist in mature kernels. DuetOS now
+has two of the three:
+
+1. **User-space process respawn** — `live-update reload[-all]`.
+   ✅ Works today.
+2. **Kernel function-level hot patch** — `live-update
+   kernel-patch[es]` / `kernel-auto-patch` / `kernel-auto-revert`.
+   ✅ Works today, with the v0 single-CPU contract documented above.
+3. **Kernel module reload** (`rmmod` / `insmod`). DuetOS does not
    yet have a loadable-module ABI — every driver and subsystem
    links into the kernel ELF. This is the planned
    [Kernel Modularization](../security/Kernel-Modularization.md)
-   surface; when it lands, this page gains a fourth bucket
-   (`MODULE`) and a matching `live-update module-reload` subcommand.
-3. **Live patching** (kpatch-style). Requires a stable function-
-   pointer table the patcher can swing under traffic. None of the
-   kernel's hot paths are wrapped that way today, and the cost of
-   doing so for the entire kernel is higher than the iteration
-   loop justifies.
+   surface; when it lands, this page gains a `MODULE` bucket and
+   a matching `live-update module-reload` subcommand.
 
-The host-side verdict therefore stays "rebuild + reboot" for
-anything touching the kernel ELF, and the in-kernel `live-update`
-covers the post-reboot loop where the same image needs to be
-re-spawned (after a smoke test, after a crash, after a tweak that
-lands via tmpfs sideload).
+Above and below those, the iteration loop is:
+
+- **For host-only changes (docs / dev tools / hosted tests):** the
+  host script reports "hot reload applied" and you just re-open the
+  page / re-run the script. No QEMU touch.
+- **For userland source changes:** rebuild + reboot, then
+  `kernel-auto-patch` and `reload-all` to skip further reboots
+  for the same source files.
+- **For kernel function changes that carry `KHOTPATCH_REGISTER_PAIR`:**
+  rebuild + reboot once, then iterate via `kernel-auto-patch` /
+  `kernel-auto-revert` against the running kernel.
+- **Everything else (kernel core / drivers / boot / scheduler):**
+  the host script reports `RESTART REQUIRED`; rebuild + reboot is
+  the only path until the modularization story lands.
 
 ## See also
 

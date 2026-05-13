@@ -77,6 +77,7 @@
 #include "cpu/percpu.h"
 #include "cpu/topology.h"
 #include "debug/breakpoints.h"
+#include "debug/hot_patch.h"
 #include "debug/extable.h"
 #include "debug/probes.h"
 #include "debug/tripwire.h"
@@ -1150,8 +1151,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     SerialWrite("[boot] Exercising A/B boot-slot state machine.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::boot_slot::SelfTest());
 
-    SerialWrite("[boot] Exercising IOCP completion-port primitive.\n");
-    DUETOS_BOOT_SELFTEST(duetos::ipc::IocpSelfTest());
+    // IocpSelfTest used to run here, but its KObject-promotion
+    // half calls IocpCreate → KMalloc, which needs the kernel
+    // heap to be live. KernelHeapInit doesn't run until later
+    // (see "Bringing up kernel heap" below) so the early call
+    // panicked with "kheap OOM?" on every boot. The self-test
+    // is now registered as a Heap-phase initcall down at the
+    // KernelHeapInit site, where the heap is guaranteed online.
 
     SerialWrite("[boot] Exercising kernel registry helpers.\n");
     DUETOS_BOOT_SELFTEST(duetos::subsystems::win32::registry::RegistrySelfTest());
@@ -1545,6 +1551,20 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                            KernelHeapSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
+        // IocpSelfTest's KObject-promotion half does IocpCreate
+        // -> KMalloc, so it has to land after KernelHeapInit.
+        // Registered here so the ordering is enforced by the
+        // phase mechanism rather than by line-number proximity
+        // to the imperative early-self-test cluster (where it
+        // used to sit, and where it consistently OOM-panicked
+        // on every boot because the heap wasn't online yet).
+        duetos::core::InitcallRegister(duetos::core::Phase::Heap, "iocp-selftest",
+                                       []()
+                                       {
+                                           SerialWrite("[boot] Exercising IOCP completion-port primitive.\n");
+                                           duetos::ipc::IocpSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Heap);
 
@@ -1608,6 +1628,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         if (!duetos::debug::TripwireSelfTest())
         {
             SerialWrite("[boot] WARN: tripwire self-test failed — see serial log\n");
+        }
+        // Kernel hot-patch — exercises the 5-byte JMP-rel32 overlay
+        // over the `patchable_function_entry` NOP, end-to-end on
+        // an in-TU target + replacement. Runs here (after
+        // ProtectKernelImage, before SMP bring-up) so the .text
+        // is 4 KiB-mapped and the single-CPU patch-window contract
+        // holds trivially. See kernel/debug/hot_patch.h.
+        if (!duetos::debug::HotPatchSelfTest())
+        {
+            SerialWrite("[boot] WARN: hot-patch self-test failed — see serial log\n");
         }
     }
 
