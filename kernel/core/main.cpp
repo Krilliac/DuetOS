@@ -246,6 +246,7 @@
 #include "loader/firmware_loader.h"
 #include "loader/firmware_package.h"
 #include "diag/heartbeat.h"
+#include "diag/stress_driver.h"
 #include "log/klog.h"
 #include "log/klog_persist.h"
 #include "power/reboot.h"
@@ -4829,6 +4830,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         SerialWrite("[boot] pentest=gui — arming GUI pentest runner\n");
         duetos::security::PentestGuiStart();
     }
+
+    // `stress=cpu|mem|mix|spin` arms the boot-time stress driver in
+    // kernel/diag/stress_driver.cpp. No-op when the token is absent,
+    // so a normal boot pays nothing. Optional tunables come from the
+    // same cmdline: stress-secs=N, stress-workers=N, stress-mib=N.
+    duetos::core::diag::StressDriverArm(cmdline);
 
     // Idle-timeout auto-lock watcher. Wakes once a second and
     // calls LoginLock when the active session has been idle past

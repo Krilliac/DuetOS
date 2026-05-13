@@ -281,10 +281,24 @@ echo "[run.sh] gdb transport=${DUETOS_GDB_TRANSPORT:-tcp} -> ${DUETOS_GDB_TRANSP
 # `max` would silently paper over.
 CPU_MODEL="${DUETOS_CPU:-max}"
 
+# Optional knobs for stress testing the live kernel:
+#   DUETOS_RAM   — sets `-m` (default 512M). Useful for forcing the
+#                  memory stress driver to hit the heap ceiling early.
+#   DUETOS_SMP   — sets `-smp` (default unset = single-CPU). On a
+#                  multi-CPU build, raising this exercises the per-CPU
+#                  runqueues + APIC routing under sustained load.
+RAM_SIZE="${DUETOS_RAM:-512M}"
+
+SMP_ARGS=()
+if [[ -n "${DUETOS_SMP:-}" ]]; then
+    SMP_ARGS=(-smp "${DUETOS_SMP}")
+fi
+
 QEMU_ARGS=(
     -machine  "q35,accel=${ACCEL}"
     -cpu      "${CPU_MODEL}"
-    -m        512M
+    "${SMP_ARGS[@]}"
+    -m        "${RAM_SIZE}"
     -display  "${DISPLAY_MODE}"
     -serial   stdio
     # COM2 → GDB transport. Default is a TCP server on
