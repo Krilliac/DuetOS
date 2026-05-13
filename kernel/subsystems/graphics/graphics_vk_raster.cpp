@@ -7,41 +7,46 @@
 /*
  * DuetOS — Vulkan ICD software triangle rasterizer.
  *
- * Closes the v0 "vkCmdDraw produces no pixels" gap for callers that
- * fill their vertex buffer with the DuetOS v0 vertex format and
- * draw against a scanout-backed render target. No SPIR-V execution,
- * no transform: vertex positions are already in pixel-space.
+ * What this paints (v1):
+ *   - Triangles emitted by `vkCmdDraw` and `vkCmdDrawIndexed`
+ *     against a scanout-backed render target.
+ *   - Topologies: TriangleList (3), TriangleStrip (4),
+ *     TriangleFan (5). Vulkan's other topologies record but
+ *     produce no pixels.
+ *   - Per-vertex colour interpolation (Gouraud shading) via
+ *     integer barycentric weights derived from the edge
+ *     functions. No floating point at any step.
+ *   - Per-pixel alpha when the interpolated alpha is < 0xFF —
+ *     blended through `FramebufferPutPixelAlpha` (src-over).
+ *   - Scissor enforcement when the most-recent
+ *     `vkCmdSetScissor` recorded a non-empty rect; the
+ *     rasterizer intersects the triangle bbox with the scissor
+ *     before walking.
  *
  * Vertex format (8 bytes, packed):
  *   bytes 0-1  i16 x_px  — signed framebuffer pixel x
  *   bytes 2-3  i16 y_px  — signed framebuffer pixel y
- *   bytes 4-7  u32 argb  — 0xAARRGGBB; the low 24 bits go to the
- *                          framebuffer (A is recorded for the
- *                          counter only — v0 doesn't blend).
+ *   bytes 4-7  u32 argb  — 0xAARRGGBB; alpha drives per-pixel
+ *                          src-over blending when < 0xFF.
  *
- * Three consecutive vertices form one triangle (TriangleList; no
- * indexed draw, no strip topology — vkCmdBindIndexBuffer + Draw is
- * recorded but the rasterizer does not consume the index buffer
- * yet). Each triangle is flat-shaded with the colour of its first
- * vertex.
+ * Indexed draws read indices from the buffer bound by
+ * `vkCmdBindIndexBuffer`: UINT16 (2 bytes/index) or UINT32
+ * (4 bytes/index). Each index is then offset by the draw's
+ * `vertex_offset` (the `vkCmdDrawIndexed` parameter) before
+ * lookup in the vertex buffer.
  *
- * Algorithm: integer edge-function (barycentric) test over the
- * triangle's bounding box. Pixels with the same sign on all three
- * edge functions are inside; the FramebufferPutPixel path takes
- * care of clipping against the surface bounds and bumping the
- * damage rect for the next present.
+ * `vk_triangles_drawn` ticks per dispatched triangle (TriangleList
+ * triangle count, or strip/fan triangle count). The counter
+ * advances even when no pixels are produced (non-scanout target,
+ * non-host-visible buffers, degenerate triangles) so the dispatch
+ * chain is observable to the self-test.
  *
- * The rasterizer is invoked from `ReplayCommandBuffer` only when:
- *   - the current bound graphics pipeline + vertex buffer are
- *     valid,
- *   - the bound vertex buffer is host-visible (backing != null),
- *   - the current render-target image is scanout-backed (the same
- *     gate that already allows `vkCmdClearColorImage` to paint).
- *
- * When the gates don't hold, the per-draw triangle counter still
- * advances so the dispatch chain is observable in the self-test
- * (otherwise a non-scanout test couldn't tell whether `Draw` was
- * even reached).
+ * Out of scope today:
+ *   - Depth buffer / Z-test (no third position component).
+ *   - Texture sampling (no descriptor set fetch path).
+ *   - Point / line topologies.
+ *   - Multi-binding vertex buffers (only binding 0 is read).
+ *   - Front-face culling (the bbox walk paints both windings).
  */
 
 namespace duetos::subsystems::graphics::internal
@@ -54,19 +59,28 @@ struct VertexV0
 {
     i16 x_px;
     i16 y_px;
+    i32 z_raw; // [-32768, 32767]; 0 for v0 (no depth)
     u32 argb;
 };
 
-inline u32 ArgbToFramebufferRgb(u32 argb)
-{
-    return argb & 0x00FFFFFFu; // strip alpha; framebuffer is 0x00RRGGBB
-}
+// Vulkan spec values for VkPrimitiveTopology.
+inline constexpr u32 kTopologyTriangleList = 3;
+inline constexpr u32 kTopologyTriangleStrip = 4;
+inline constexpr u32 kTopologyTriangleFan = 5;
 
-// 2D cross product (signed area * 2) for the triangle (a, b, c).
-// Returns positive when (a, b, c) is counter-clockwise on screen
-// (remember the framebuffer is Y-down, so on-screen CCW reads as
-// CW in screen space — the sign just has to be consistent across
-// the three edge functions, which it is).
+// Vulkan spec VkCompareOp.
+inline constexpr u32 kCompareNever = 0;
+inline constexpr u32 kCompareLess = 1;
+inline constexpr u32 kCompareEqual = 2;
+inline constexpr u32 kCompareLessOrEqual = 3;
+inline constexpr u32 kCompareGreater = 4;
+inline constexpr u32 kCompareNotEqual = 5;
+inline constexpr u32 kCompareGreaterOrEqual = 6;
+inline constexpr u32 kCompareAlways = 7;
+
+inline constexpr u64 kStrideV0 = 8;
+inline constexpr u64 kStrideV1 = 12;
+
 inline i64 EdgeFn(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy)
 {
     const i64 dx1 = static_cast<i64>(bx) - ax;
@@ -87,21 +101,97 @@ inline i32 Max3(i32 a, i32 b, i32 c)
     return m > c ? m : c;
 }
 
-void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, u32 fb_w, u32 fb_h, u32 rt_w, u32 rt_h)
+inline u32 LerpChannel(u32 c0, u32 c1, u32 c2, u64 w0, u64 w1, u64 w2, u64 sum)
 {
-    // Clip the per-triangle bounding box to the smaller of the
-    // render target and the live framebuffer. The render target
-    // extent is the spec-shaped clip; the framebuffer is the
-    // physical surface backing it for scanout-backed images.
-    const i32 surface_w = static_cast<i32>(rt_w < fb_w ? rt_w : fb_w);
-    const i32 surface_h = static_cast<i32>(rt_h < fb_h ? rt_h : fb_h);
-    if (surface_w <= 0 || surface_h <= 0)
-        return;
+    // Integer barycentric interp: the three weights are the
+    // unsigned edge magnitudes opposite each vertex; their sum
+    // equals the unsigned triangle area * 2. /(sum) yields the
+    // correctly-rounded channel value.
+    if (sum == 0)
+        return c0;
+    const u64 acc = w0 * c0 + w1 * c1 + w2 * c2 + (sum / 2u);
+    const u64 v = acc / sum;
+    return static_cast<u32>(v > 0xFFu ? 0xFFu : v);
+}
 
-    const i32 x0 = v0.x_px, y0 = v0.y_px;
-    const i32 x1 = v1.x_px, y1 = v1.y_px;
-    const i32 x2 = v2.x_px, y2 = v2.y_px;
+// Read a v0 or v1 vertex from a host-visible vertex buffer at the
+// given vertex slot. Returns false when the slot is out of range;
+// the caller drops the triangle in that case. v1 layout adds an
+// i16 Z and 2 bytes of reserved padding between x/y and argb.
+bool FetchVertex(const u8* vb_base, u64 vb_size, u64 vertex_index, u32 vertex_format, VertexV0& out)
+{
+    const u64 stride = (vertex_format == 1) ? kStrideV1 : kStrideV0;
+    const u64 byte_off = vertex_index * stride;
+    if (byte_off + stride > vb_size)
+        return false;
+    const u8* vp = vb_base + byte_off;
+    out.x_px = static_cast<i16>(static_cast<u16>(vp[0]) | (static_cast<u16>(vp[1]) << 8));
+    out.y_px = static_cast<i16>(static_cast<u16>(vp[2]) | (static_cast<u16>(vp[3]) << 8));
+    if (vertex_format == 1)
+    {
+        out.z_raw = static_cast<i16>(static_cast<u16>(vp[4]) | (static_cast<u16>(vp[5]) << 8));
+        // bytes 6..7 reserved, ignored
+        out.argb = static_cast<u32>(vp[8]) | (static_cast<u32>(vp[9]) << 8) | (static_cast<u32>(vp[10]) << 16) |
+                   (static_cast<u32>(vp[11]) << 24);
+    }
+    else
+    {
+        out.z_raw = 0;
+        out.argb = static_cast<u32>(vp[4]) | (static_cast<u32>(vp[5]) << 8) | (static_cast<u32>(vp[6]) << 16) |
+                   (static_cast<u32>(vp[7]) << 24);
+    }
+    return true;
+}
 
+// Map signed i16 depth (z_raw in [-32768, 32767]) to a u16 unorm
+// depth value where 0 = nearest and 65535 = farthest. The map is
+// `unorm = z_raw + 32768`, which preserves ordering (smaller
+// z_raw = smaller unorm = closer).
+inline u32 EncodeDepthU16(i32 z_raw)
+{
+    const i32 v = z_raw + 32768;
+    return static_cast<u32>(v < 0 ? 0 : (v > 0xFFFF ? 0xFFFF : v));
+}
+
+// Depth compare per VkCompareOp spec values.
+inline bool DepthCompare(u32 src, u32 dst, u32 op)
+{
+    switch (op)
+    {
+    case kCompareNever:
+        return false;
+    case kCompareLess:
+        return src < dst;
+    case kCompareEqual:
+        return src == dst;
+    case kCompareLessOrEqual:
+        return src <= dst;
+    case kCompareGreater:
+        return src > dst;
+    case kCompareNotEqual:
+        return src != dst;
+    case kCompareGreaterOrEqual:
+        return src >= dst;
+    case kCompareAlways:
+    default:
+        return true;
+    }
+}
+
+struct ClippedBBox
+{
+    i32 min_x;
+    i32 min_y;
+    i32 max_x;
+    i32 max_y;
+    bool empty;
+};
+
+ClippedBBox ComputeClippedBBox(i32 x0, i32 y0, i32 x1, i32 y1, i32 x2, i32 y2, const RasterState& st, u32 rt_w,
+                               u32 rt_h)
+{
+    const i32 surface_w = static_cast<i32>(rt_w < st.fb_w ? rt_w : st.fb_w);
+    const i32 surface_h = static_cast<i32>(rt_h < st.fb_h ? rt_h : st.fb_h);
     i32 min_x = Min3(x0, x1, x2);
     i32 min_y = Min3(y0, y1, y2);
     i32 max_x = Max3(x0, x1, x2);
@@ -114,119 +204,384 @@ void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, u3
         max_x = surface_w - 1;
     if (max_y >= surface_h)
         max_y = surface_h - 1;
-    if (min_x > max_x || min_y > max_y)
-        return; // entirely off-surface
+    if (st.has_scissor)
+    {
+        const i32 sx0 = st.scissor.offset.x;
+        const i32 sy0 = st.scissor.offset.y;
+        const i32 sx1 = sx0 + static_cast<i32>(st.scissor.extent.width);
+        const i32 sy1 = sy0 + static_cast<i32>(st.scissor.extent.height);
+        if (sx0 > min_x)
+            min_x = sx0;
+        if (sy0 > min_y)
+            min_y = sy0;
+        if (sx1 - 1 < max_x)
+            max_x = sx1 - 1;
+        if (sy1 - 1 < max_y)
+            max_y = sy1 - 1;
+    }
+    return ClippedBBox{min_x, min_y, max_x, max_y, (min_x > max_x || min_y > max_y)};
+}
 
-    // Degenerate (collinear / zero-area) triangle: skip the
-    // bounding-box walk so we don't burn pixels on a sliver that
-    // can't even pass the edge tests consistently.
+void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, const RasterState& st, u32 rt_w, u32 rt_h)
+{
+    if (rt_w == 0 || rt_h == 0 || st.fb_w == 0 || st.fb_h == 0)
+        return;
+
+    const i32 x0 = v0.x_px, y0 = v0.y_px;
+    const i32 x1 = v1.x_px, y1 = v1.y_px;
+    const i32 x2 = v2.x_px, y2 = v2.y_px;
+
+    const ClippedBBox bb = ComputeClippedBBox(x0, y0, x1, y1, x2, y2, st, rt_w, rt_h);
+    if (bb.empty)
+        return;
+
     const i64 area2 = EdgeFn(x0, y0, x1, y1, x2, y2);
     if (area2 == 0)
         return;
-
-    const u32 fill = ArgbToFramebufferRgb(v0.argb);
-
-    // Walk pixels; an inside pixel has the SAME sign on all three
-    // edge functions relative to the triangle's signed area. We
-    // include edges (>= 0) so two adjacent triangles sharing an
-    // edge both paint along the seam; v0 doesn't care about top-
-    // left fill rules.
     const bool ccw = area2 > 0;
-    for (i32 py = min_y; py <= max_y; ++py)
+    const u64 area_abs = static_cast<u64>(ccw ? area2 : -area2);
+
+    // Per-vertex channels — extracted once outside the inner loop.
+    const u32 v0_r = (v0.argb >> 16) & 0xFFu;
+    const u32 v0_g = (v0.argb >> 8) & 0xFFu;
+    const u32 v0_b = v0.argb & 0xFFu;
+    const u32 v0_a = (v0.argb >> 24) & 0xFFu;
+    const u32 v1_r = (v1.argb >> 16) & 0xFFu;
+    const u32 v1_g = (v1.argb >> 8) & 0xFFu;
+    const u32 v1_b = v1.argb & 0xFFu;
+    const u32 v1_a = (v1.argb >> 24) & 0xFFu;
+    const u32 v2_r = (v2.argb >> 16) & 0xFFu;
+    const u32 v2_g = (v2.argb >> 8) & 0xFFu;
+    const u32 v2_b = v2.argb & 0xFFu;
+    const u32 v2_a = (v2.argb >> 24) & 0xFFu;
+
+    // Depth test setup. Only honoured when the vertex format
+    // carries Z (v1) AND depth-test is enabled AND the depth
+    // surface can be allocated. Otherwise the rasterizer paints
+    // without sampling Z.
+    const bool depth_active = st.depth_test && st.vertex_format == 1;
+    DepthSurface* dsurf = depth_active ? DepthSurfaceGetOrAlloc() : nullptr;
+    const bool depth_enabled = dsurf != nullptr;
+    const u32 v0_z = depth_enabled ? EncodeDepthU16(v0.z_raw) : 0;
+    const u32 v1_z = depth_enabled ? EncodeDepthU16(v1.z_raw) : 0;
+    const u32 v2_z = depth_enabled ? EncodeDepthU16(v2.z_raw) : 0;
+    const u32 depth_op = (st.depth_compare == 0u && !depth_enabled) ? kCompareAlways : st.depth_compare;
+    const bool depth_write = st.depth_write;
+
+    // Flat-shade fast path: all three vertex colours identical.
+    // Skip the barycentric divide in the inner loop.
+    const bool flat = (v0.argb == v1.argb) && (v1.argb == v2.argb);
+    const u32 flat_argb = v0.argb;
+
+    for (i32 py = bb.min_y; py <= bb.max_y; ++py)
     {
-        for (i32 px = min_x; px <= max_x; ++px)
+        for (i32 px = bb.min_x; px <= bb.max_x; ++px)
         {
+            // Edge functions at this pixel — barycentric weights
+            // are |e0| (opposite v0), |e1| (opposite v1), |e2|
+            // (opposite v2).
             const i64 e0 = EdgeFn(x1, y1, x2, y2, px, py);
             const i64 e1 = EdgeFn(x2, y2, x0, y0, px, py);
             const i64 e2 = EdgeFn(x0, y0, x1, y1, px, py);
             const bool inside = ccw ? (e0 >= 0 && e1 >= 0 && e2 >= 0) : (e0 <= 0 && e1 <= 0 && e2 <= 0);
             if (!inside)
                 continue;
-            drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py), fill);
+            const u64 w0 = static_cast<u64>(ccw ? e0 : -e0);
+            const u64 w1 = static_cast<u64>(ccw ? e1 : -e1);
+            const u64 w2 = static_cast<u64>(ccw ? e2 : -e2);
+            // Depth test (when active): interpolate Z, compare,
+            // optionally write back. The depth surface is sized
+            // to the framebuffer so the bbox clip above
+            // guarantees the index is in range.
+            if (depth_enabled)
+            {
+                const u64 z_acc = w0 * v0_z + w1 * v1_z + w2 * v2_z + (area_abs / 2u);
+                const u32 z_pix = static_cast<u32>(z_acc / area_abs);
+                const u32 idx = static_cast<u32>(py) * dsurf->w + static_cast<u32>(px);
+                const u32 dst_z = dsurf->data[idx];
+                if (!DepthCompare(z_pix, dst_z, depth_op))
+                    continue;
+                if (depth_write)
+                    dsurf->data[idx] = static_cast<u16>(z_pix);
+            }
+            if (flat)
+            {
+                if (((flat_argb >> 24) & 0xFFu) == 0xFFu)
+                    drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py),
+                                                        flat_argb & 0x00FFFFFFu);
+                else
+                    drivers::video::FramebufferPutPixelAlpha(static_cast<u32>(px), static_cast<u32>(py), flat_argb);
+                continue;
+            }
+            const u32 r = LerpChannel(v0_r, v1_r, v2_r, w0, w1, w2, area_abs);
+            const u32 g = LerpChannel(v0_g, v1_g, v2_g, w0, w1, w2, area_abs);
+            const u32 b = LerpChannel(v0_b, v1_b, v2_b, w0, w1, w2, area_abs);
+            const u32 a = LerpChannel(v0_a, v1_a, v2_a, w0, w1, w2, area_abs);
+            if (a == 0xFFu)
+                drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py),
+                                                    (r << 16) | (g << 8) | b);
+            else if (a > 0)
+                drivers::video::FramebufferPutPixelAlpha(static_cast<u32>(px), static_cast<u32>(py),
+                                                         (a << 24) | (r << 16) | (g << 8) | b);
         }
     }
-    drivers::video::FramebufferAddDamage(static_cast<u32>(min_x), static_cast<u32>(min_y),
-                                         static_cast<u32>(max_x - min_x + 1), static_cast<u32>(max_y - min_y + 1));
+    drivers::video::FramebufferAddDamage(static_cast<u32>(bb.min_x), static_cast<u32>(bb.min_y),
+                                         static_cast<u32>(bb.max_x - bb.min_x + 1),
+                                         static_cast<u32>(bb.max_y - bb.min_y + 1));
+}
+
+// Fetch one index from the bound index buffer. Returns the 32-bit
+// upgraded value (UINT16 indices are zero-extended). On any
+// out-of-range or bad-type, returns false and the caller drops the
+// triangle.
+bool FetchIndex(const RasterState& st, u32 index_pos, u32& out)
+{
+    if (!st.has_index_buffer)
+        return false;
+    if (!HandleInRange(st.index_buffer, kBufferBase) ||
+        !PoolIsLive(g_buffer_pool, SlotOf(st.index_buffer, kBufferBase)))
+        return false;
+    const auto& ib = g_buffer_data[SlotOf(st.index_buffer, kBufferBase)];
+    if (ib.backing == nullptr)
+        return false;
+    const u8* base = static_cast<const u8*>(ib.backing) + st.index_offset;
+    const u64 stride = (st.index_type == VkIndexType::Uint32) ? 4u : 2u;
+    const u64 byte_off = static_cast<u64>(index_pos) * stride;
+    if (st.index_offset + byte_off + stride > ib.size)
+        return false;
+    if (stride == 2u)
+    {
+        out = static_cast<u32>(base[byte_off]) | (static_cast<u32>(base[byte_off + 1]) << 8);
+    }
+    else
+    {
+        const u8* p = base + byte_off;
+        out = static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) |
+              (static_cast<u32>(p[3]) << 24);
+    }
+    return true;
+}
+
+bool ResolveRenderTarget(const RasterState& st, u32& rt_w_out, u32& rt_h_out)
+{
+    if (!HandleInRange(st.rt_image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(st.rt_image, kImageBase)))
+        return false;
+    const auto& img = g_image_data[SlotOf(st.rt_image, kImageBase)];
+    if ((img.flags & kImageScanoutBacked) == 0u)
+        return false;
+    rt_w_out = img.extent.width;
+    rt_h_out = img.extent.height;
+    return true;
+}
+
+bool ResolveVertexBuffer(const RasterState& st, const u8*& base_out, u64& size_out)
+{
+    if (!HandleInRange(st.vertex_buffer, kBufferBase) ||
+        !PoolIsLive(g_buffer_pool, SlotOf(st.vertex_buffer, kBufferBase)))
+        return false;
+    const auto& vb = g_buffer_data[SlotOf(st.vertex_buffer, kBufferBase)];
+    if (vb.backing == nullptr)
+        return false;
+    if (st.vertex_offset > vb.size)
+        return false;
+    const u8* base = static_cast<const u8*>(vb.backing) + st.vertex_offset;
+    // 4-byte alignment for the u32 argb field. Refuse rather than
+    // emit an unaligned load.
+    if ((reinterpret_cast<uptr>(base) & 3u) != 0u)
+        return false;
+    base_out = base;
+    size_out = vb.size - st.vertex_offset;
+    return true;
 }
 
 } // namespace
 
-// Replay-time entry point. Called from ReplayCommandBuffer when a
-// Draw opcode is reached with valid bound state. `vertex_count`
-// MUST be a multiple of 3 — extra vertices are ignored. `rt_image`
-// is the render-target image handle (looked up by the caller from
-// the most recent BeginRenderPass / BeginRendering / ClearColorImage
-// in the cb tape). `vertex_buffer` is the bound vertex buffer for
-// binding 0; `vb_offset` is the byte offset into its backing store.
-//
-// The function always bumps `g_triangles_drawn` for every full
-// triangle in the draw — even when the render target isn't scanout-
-// backed — so the self-test can observe the dispatch chain on a
-// non-scanout target without painting the boot console.
-void RasterizeDuetTriangles(VkImage rt_image, VkBuffer vertex_buffer, u64 vb_offset, u32 first_vertex, u32 vertex_count)
+void RasterizeDuetDraw(const RasterState& st, u32 first_vertex, u32 vertex_count)
 {
     if (vertex_count < 3)
         return;
-    const u32 tri_count = vertex_count / 3u;
+
+    // Triangle count from topology.
+    u32 tri_count = 0;
+    switch (st.topology)
+    {
+    case kTopologyTriangleList:
+        tri_count = vertex_count / 3u;
+        break;
+    case kTopologyTriangleStrip:
+    case kTopologyTriangleFan:
+        tri_count = vertex_count - 2u;
+        break;
+    default:
+        // Unsupported topology — record the dispatch but paint no
+        // pixels. Counter stays at zero for this draw so a
+        // wrong-topology slice is observable.
+        return;
+    }
     g_triangles_drawn += tri_count;
 
-    // Resolve the vertex buffer's backing memory. If the buffer
-    // isn't host-visible (no backing), we counted the triangles
-    // but can't paint them — there's no shader to fetch attributes
-    // from a device-local buffer.
-    if (!HandleInRange(vertex_buffer, kBufferBase) || !PoolIsLive(g_buffer_pool, SlotOf(vertex_buffer, kBufferBase)))
+    u32 rt_w = 0, rt_h = 0;
+    if (!ResolveRenderTarget(st, rt_w, rt_h))
         return;
-    const auto& vb = g_buffer_data[SlotOf(vertex_buffer, kBufferBase)];
-    if (vb.backing == nullptr)
+    const u8* vb_base = nullptr;
+    u64 vb_size = 0;
+    if (!ResolveVertexBuffer(st, vb_base, vb_size))
         return;
-
-    // Render-target gate: only scanout-backed images get pixels.
-    if (!HandleInRange(rt_image, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(rt_image, kImageBase)))
-        return;
-    const auto& img = g_image_data[SlotOf(rt_image, kImageBase)];
-    if ((img.flags & kImageScanoutBacked) == 0u)
-        return;
-
     const auto di = drivers::video::Query();
     if (!di.available)
         return;
 
-    constexpr u64 kStride = sizeof(VertexV0);
-    const u64 first_byte = vb_offset + static_cast<u64>(first_vertex) * kStride;
-    const u64 needed = static_cast<u64>(vertex_count) * kStride;
-    if (first_byte + needed > vb.size)
-        return; // would over-read the buffer
-
-    const auto* base = static_cast<const u8*>(vb.backing) + first_byte;
-    // The buffer's backing came from kheap (u64 alignment) and
-    // VertexV0 needs 4-byte alignment for its u32 colour field.
-    // Refuse a non-aligned offset rather than emit an unaligned
-    // read that UBSAN would flag.
-    if ((reinterpret_cast<uptr>(base) & 3u) != 0u)
-        return;
+    auto fetch = [&](u32 logical_vertex_index, VertexV0& out)
+    { return FetchVertex(vb_base, vb_size, logical_vertex_index, st.vertex_format, out); };
 
     for (u32 t = 0; t < tri_count; ++t)
     {
-        VertexV0 verts[3];
-        const u8* tri_base = base + static_cast<u64>(t) * 3u * kStride;
-        for (u32 v = 0; v < 3; ++v)
+        VertexV0 verts[3] = {};
+        switch (st.topology)
         {
-            const u8* vp = tri_base + static_cast<u64>(v) * kStride;
-            // Byte-wise copy keeps us aligned-safe even when the
-            // base happened to land at a 2-byte boundary (the
-            // alignment gate above guarantees 4-byte alignment so
-            // the u32 colour is fine; the i16 fields are always
-            // safe).
-            i16 x = static_cast<i16>(static_cast<u16>(vp[0]) | (static_cast<u16>(vp[1]) << 8));
-            i16 y = static_cast<i16>(static_cast<u16>(vp[2]) | (static_cast<u16>(vp[3]) << 8));
-            u32 c = static_cast<u32>(vp[4]) | (static_cast<u32>(vp[5]) << 8) | (static_cast<u32>(vp[6]) << 16) |
-                    (static_cast<u32>(vp[7]) << 24);
-            verts[v].x_px = x;
-            verts[v].y_px = y;
-            verts[v].argb = c;
+        case kTopologyTriangleList:
+        {
+            const u32 base = first_vertex + t * 3u;
+            if (!fetch(base + 0u, verts[0]) || !fetch(base + 1u, verts[1]) || !fetch(base + 2u, verts[2]))
+                continue;
+            break;
         }
-        RasterizeOne(verts[0], verts[1], verts[2], di.width, di.height, img.extent.width, img.extent.height);
+        case kTopologyTriangleStrip:
+        {
+            // Every triangle shares two vertices with the previous;
+            // odd-indexed triangles flip winding via index swap so
+            // the visible winding stays consistent. v0's rasterizer
+            // doesn't enforce winding (it paints both sides), so
+            // the swap is here for spec accuracy and to keep the
+            // gouraud weights consistent.
+            const u32 base = first_vertex + t;
+            if (!fetch(base + 0u, verts[0]) || !fetch(base + 1u, verts[1]) || !fetch(base + 2u, verts[2]))
+                continue;
+            if ((t & 1u) != 0u)
+            {
+                VertexV0 tmp = verts[1];
+                verts[1] = verts[2];
+                verts[2] = tmp;
+            }
+            break;
+        }
+        case kTopologyTriangleFan:
+        {
+            // Every triangle shares vertex 0 (the fan centre).
+            if (!fetch(first_vertex + 0u, verts[0]) || !fetch(first_vertex + t + 1u, verts[1]) ||
+                !fetch(first_vertex + t + 2u, verts[2]))
+                continue;
+            break;
+        }
+        default:
+            continue;
+        }
+        RasterizeOne(verts[0], verts[1], verts[2], st, rt_w, rt_h);
     }
+}
+
+void RasterizeDuetDrawIndexed(const RasterState& st, u32 first_index, u32 index_count, i32 vertex_offset)
+{
+    if (index_count < 3)
+        return;
+
+    u32 tri_count = 0;
+    switch (st.topology)
+    {
+    case kTopologyTriangleList:
+        tri_count = index_count / 3u;
+        break;
+    case kTopologyTriangleStrip:
+    case kTopologyTriangleFan:
+        tri_count = index_count - 2u;
+        break;
+    default:
+        return;
+    }
+    g_triangles_drawn += tri_count;
+
+    u32 rt_w = 0, rt_h = 0;
+    if (!ResolveRenderTarget(st, rt_w, rt_h))
+        return;
+    const u8* vb_base = nullptr;
+    u64 vb_size = 0;
+    if (!ResolveVertexBuffer(st, vb_base, vb_size))
+        return;
+    const auto di = drivers::video::Query();
+    if (!di.available)
+        return;
+
+    auto fetch_vert_at_index = [&](u32 index_pos, VertexV0& out)
+    {
+        u32 idx = 0;
+        if (!FetchIndex(st, index_pos, idx))
+            return false;
+        const i64 logical = static_cast<i64>(idx) + vertex_offset;
+        if (logical < 0)
+            return false;
+        return FetchVertex(vb_base, vb_size, static_cast<u64>(logical), st.vertex_format, out);
+    };
+
+    for (u32 t = 0; t < tri_count; ++t)
+    {
+        VertexV0 verts[3] = {};
+        switch (st.topology)
+        {
+        case kTopologyTriangleList:
+        {
+            const u32 base = first_index + t * 3u;
+            if (!fetch_vert_at_index(base + 0u, verts[0]) || !fetch_vert_at_index(base + 1u, verts[1]) ||
+                !fetch_vert_at_index(base + 2u, verts[2]))
+                continue;
+            break;
+        }
+        case kTopologyTriangleStrip:
+        {
+            const u32 base = first_index + t;
+            if (!fetch_vert_at_index(base + 0u, verts[0]) || !fetch_vert_at_index(base + 1u, verts[1]) ||
+                !fetch_vert_at_index(base + 2u, verts[2]))
+                continue;
+            if ((t & 1u) != 0u)
+            {
+                VertexV0 tmp = verts[1];
+                verts[1] = verts[2];
+                verts[2] = tmp;
+            }
+            break;
+        }
+        case kTopologyTriangleFan:
+        {
+            if (!fetch_vert_at_index(first_index + 0u, verts[0]) ||
+                !fetch_vert_at_index(first_index + t + 1u, verts[1]) ||
+                !fetch_vert_at_index(first_index + t + 2u, verts[2]))
+                continue;
+            break;
+        }
+        default:
+            continue;
+        }
+        RasterizeOne(verts[0], verts[1], verts[2], st, rt_w, rt_h);
+    }
+}
+
+// Legacy entry point — keeps `graphics_vk.cpp`'s `Draw` op-dispatch
+// from needing to know about RasterState directly. The replay
+// walker fills `st` from its current bound state and calls into
+// the new entry point.
+void RasterizeDuetTriangles(VkImage rt_image, VkBuffer vertex_buffer, u64 vb_offset, u32 first_vertex, u32 vertex_count)
+{
+    RasterState st{};
+    st.rt_image = rt_image;
+    st.vertex_buffer = vertex_buffer;
+    st.vertex_offset = vb_offset;
+    st.topology = kTopologyTriangleList;
+    const auto di = drivers::video::Query();
+    if (di.available)
+    {
+        st.fb_w = di.width;
+        st.fb_h = di.height;
+    }
+    RasterizeDuetDraw(st, first_vertex, vertex_count);
 }
 
 } // namespace duetos::subsystems::graphics::internal

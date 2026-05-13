@@ -242,6 +242,7 @@ enum class CmdOp : u8
     ResetEvent2 = 63,
     WaitEvents2 = 64,
     PipelineBarrier2 = 65,
+    SetVertexFormatDuet = 66, // DuetOS extension: rasterizer vertex layout (0 = v0, 1 = v1)
 };
 
 struct CmdRecord
@@ -463,14 +464,69 @@ void PaintScanoutClear(VkImage image, VkClearColorValue color);
 VkResult AppendOp(VkCommandBuffer cb, const CmdRecord& op);
 void ReplayCommandBuffer(VkCommandBuffer cb);
 
-/// Software triangle rasterizer for `vkCmdDraw` replay. Reads
-/// triangles from the bound vertex buffer using the DuetOS v0
-/// fixed vertex format (see `graphics_vk_raster.cpp`) and paints
-/// flat-shaded triangles into the bound scanout-backed render
-/// target via `FramebufferPutPixel`. Always bumps
-/// `g_triangles_drawn` by `vertex_count / 3` so the dispatch
-/// chain is observable even when no pixels are produced
-/// (non-scanout target, no live framebuffer, etc.).
+/// State the replay walker hands the rasterizer for each Draw /
+/// DrawIndexed dispatch. Carries every bound resource the v1
+/// rasterizer cares about — render target, vertex buffer, index
+/// buffer, scissor rect, topology, vertex-format hint, depth-test
+/// state, and the framebuffer extent (snapshotted at submit time
+/// so the rasterizer doesn't keep calling into
+/// `display_info::Query()` per pixel).
+struct RasterState
+{
+    VkImage rt_image;
+    VkBuffer vertex_buffer;
+    u64 vertex_offset;
+    VkBuffer index_buffer;
+    u64 index_offset;
+    VkIndexType index_type;
+    bool has_index_buffer;
+    bool has_scissor;
+    VkRect2D scissor;
+    u32 topology;      // Vulkan-spec VkPrimitiveTopology value (3=list/4=strip/5=fan supported)
+    u32 vertex_format; // 0 = v0 (8 bytes, no Z); 1 = v1 (12 bytes, with i16 Z + reserved)
+    u32 depth_compare; // VkCompareOp: 0=Never, 1=Less, 2=Equal, 3=LessOrEqual, 4=Greater, 5=NotEqual, 6=GtEq, 7=Always
+    bool depth_test;   // SetDepthTestEnable
+    bool depth_write;  // SetDepthWriteEnable
+    u32 fb_w;
+    u32 fb_h;
+};
+
+/// Lazy-allocated shared software depth buffer.
+///
+/// Storage: 16-bit unorm depth, `width * height * 2` bytes, one
+/// entry per pixel. Lazily allocated by `DepthSurfaceGetOrAlloc`
+/// on the first Z-test draw and sized to the live framebuffer
+/// extent. Cleared to `0xFFFF` (far) on alloc.
+struct DepthSurface
+{
+    u16* data;
+    u32 w;
+    u32 h;
+};
+
+/// Get or lazy-alloc the shared depth surface. Returns `nullptr`
+/// when the framebuffer is unavailable or the alloc fails — the
+/// caller treats that as "depth test off" and falls back to
+/// non-depth rasterization.
+DepthSurface* DepthSurfaceGetOrAlloc();
+
+/// Clear the depth surface to `value` (0..65535). No-op if not
+/// allocated.
+void DepthSurfaceClear(u16 value);
+
+/// Free the surface (used by the boot self-test teardown).
+void DepthSurfaceFree();
+
+/// Non-indexed draw: walk the vertex buffer in topology order.
+void RasterizeDuetDraw(const RasterState& st, u32 first_vertex, u32 vertex_count);
+
+/// Indexed draw: walk the index buffer, dereferencing each
+/// `index + vertex_offset` into the vertex buffer.
+void RasterizeDuetDrawIndexed(const RasterState& st, u32 first_index, u32 index_count, i32 vertex_offset);
+
+/// Legacy entry point used by older sites + tests. Internally
+/// builds a RasterState with `topology = TriangleList` and the
+/// live framebuffer extent, then calls `RasterizeDuetDraw`.
 void RasterizeDuetTriangles(VkImage rt_image, VkBuffer vertex_buffer, u64 vb_offset, u32 first_vertex,
                             u32 vertex_count);
 

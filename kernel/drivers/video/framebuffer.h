@@ -174,6 +174,15 @@ void FramebufferClear(u32 rgb);
 /// that care are expected to clip up front. No-op if !Available().
 void FramebufferPutPixel(u32 x, u32 y, u32 rgb);
 
+/// Alpha-blend one pixel using src-over. `argb` is 0xAARRGGBB. The
+/// high byte is the source alpha (0..255). Fast paths handle
+/// `alpha == 0` (no-op) and `alpha == 0xFF` (opaque write).
+/// Out-of-range coordinates silently drop; no-op if !Available().
+/// The pixel-write goes through the same compose / direct-MMIO
+/// selector as `FramebufferPutPixel`, and the damage rect is
+/// extended to cover `(x, y, 1, 1)`.
+void FramebufferPutPixelAlpha(u32 x, u32 y, u32 argb);
+
 /// Fill the axis-aligned rect [x, x+w) x [y, y+h) with `rgb`.
 /// Clipped to the surface; passing a rect that's entirely off-screen
 /// is a silent no-op. No-op if !Available().

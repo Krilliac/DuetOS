@@ -330,6 +330,66 @@ bool RunCanonicalLifecycle()
         return SelftestFail("[selftest:graphics] triangles-drawn counter did not advance after vkCmdDraw",
                             internal::TrianglesDrawnCount());
 
+    // Rasterizer-feature leg. Records the v1 state machine the
+    // software rasterizer exposes for game-like workloads:
+    //   - SetVertexFormatDuet(v1): 12-byte vertices with Z.
+    //   - SetPrimitiveTopology(TriangleStrip): 4 verts -> 2 tris.
+    //   - SetScissor(0,0,8,8): clip the bbox at raster time.
+    //   - SetDepthTestEnable/CompareOp/WriteEnable: gate the Z
+    //     test.
+    //   - ClearDepthStencilImage: lazy-alloc the shared depth
+    //     surface and clear it.
+    //   - DrawIndexed with the existing non-scanout image: the
+    //     rasterizer ticks `g_triangles_drawn` (by `index_count
+    //     - 2` for strips), then bails before painting.
+    {
+        VkCommandBuffer rcb = 0;
+        if (VkAllocateCommandBuffers(dev, pool, 1, &rcb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] rcb allocate failed", 0);
+        if (VkBeginCommandBuffer(rcb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] rcb begin failed", 0);
+        if (VkCmdSetVertexFormatDuet(rcb, 1) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCmdSetVertexFormatDuet failed", 0);
+        if (VkCmdSetPrimitiveTopology(rcb, 4) != VkResult::Success) // TriangleStrip
+            return SelftestFail("[selftest:graphics] SetPrimitiveTopology(strip) failed", 0);
+        const VkRect2D rscissor{VkOffset2D{0, 0}, VkExtent2D{8, 8}};
+        if (VkCmdSetScissor(rcb, 0, 1, &rscissor) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] SetScissor failed", 0);
+        if (VkCmdSetDepthTestEnable(rcb, 1) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] SetDepthTestEnable failed", 0);
+        if (VkCmdSetDepthCompareOp(rcb, 1) != VkResult::Success) // Less
+            return SelftestFail("[selftest:graphics] SetDepthCompareOp failed", 0);
+        if (VkCmdSetDepthWriteEnable(rcb, 1) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] SetDepthWriteEnable failed", 0);
+        if (VkCmdClearDepthStencilImage(rcb, img, 1.0f, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] CmdClearDepthStencilImage failed", 0);
+        const u64 rvb_off = 0;
+        if (VkCmdBindVertexBuffers(rcb, 0, 1, &buf, &rvb_off) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] BindVertexBuffers(rcb) failed", 0);
+        if (VkCmdBindIndexBuffer(rcb, buf, 0, VkIndexType::Uint16) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] BindIndexBuffer(rcb) failed", 0);
+        // Four-vertex strip -> 2 triangles.
+        if (VkCmdDrawIndexed(rcb, 4, 1, 0, 0, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] DrawIndexed(strip) failed", 0);
+        if (VkEndCommandBuffer(rcb) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] rcb end failed", 0);
+
+        const u32 raster_before = internal::TrianglesDrawnCount();
+        if (VkQueueSubmit(queue, 1, &rcb, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] rcb submit failed", 0);
+        if (VkQueueWaitIdle(queue) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] rcb wait failed", 0);
+        // strip with 4 indices -> 2 triangles. The counter ticks
+        // even though the image isn't scanout-backed, so the
+        // dispatch chain (including the new strip / scissor /
+        // depth / vertex-format / index-fetch paths) is
+        // verified end-to-end.
+        if (internal::TrianglesDrawnCount() - raster_before != 2u)
+            return SelftestFail("[selftest:graphics] strip DrawIndexed did not produce 2 triangles",
+                                internal::TrianglesDrawnCount() - raster_before);
+        VkFreeCommandBuffers(dev, pool, 1, &rcb);
+    }
+
     // Memory-mapping leg: allocate host-visible memory, bind two
     // buffers into it, map the source, write a recognisable byte
     // pattern, record CopyBuffer + FillBuffer + CopyBufferToImage

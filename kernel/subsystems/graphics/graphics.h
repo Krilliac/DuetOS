@@ -796,6 +796,24 @@ VkResult VkCmdEndDebugUtilsLabelEXT(VkCommandBuffer cb);
 VkResult VkCmdInsertDebugUtilsLabelEXT(VkCommandBuffer cb, const char* label);
 
 // -------------------------------------------------------------------
+// DuetOS extension: rasterizer vertex format.
+// -------------------------------------------------------------------
+//
+// Selects the in-memory layout the software rasterizer assumes
+// for binding-0 vertex buffers on subsequent Draw / DrawIndexed
+// dispatches. `format`:
+//   0 — v0 (8 bytes per vertex): `{i16 x_px; i16 y_px; u32 argb;}`.
+//       Z is treated as 0 for every vertex; depth test is
+//       effectively disabled regardless of the depth-test bit.
+//   1 — v1 (12 bytes per vertex): `{i16 x_px; i16 y_px; i16 z;
+//       u16 _reserved; u32 argb;}`. Z is interpolated
+//       barycentrically and compared against the shared depth
+//       surface when `vkCmdSetDepthTestEnable(1)` is in effect.
+// State is per-command-buffer; the default is v0. Recording-only —
+// the rasterizer reads the format during replay.
+VkResult VkCmdSetVertexFormatDuet(VkCommandBuffer cb, u32 format);
+
+// -------------------------------------------------------------------
 // Push descriptors (VK_KHR_push_descriptor).
 // -------------------------------------------------------------------
 //

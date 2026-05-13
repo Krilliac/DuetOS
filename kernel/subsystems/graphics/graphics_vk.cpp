@@ -1731,14 +1731,28 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
     if (rec.state != CbState::Executable)
         return;
 
-    // Per-replay state shadow. Tracks the bound state that
-    // `vkCmdDraw` needs to invoke the software rasterizer:
-    // render-target image, binding-0 vertex buffer + offset.
+    // Per-replay state shadow. Tracks the bound state the v1
+    // rasterizer needs for Draw / DrawIndexed dispatch:
+    //   * render-target image (set by BeginRenderPass /
+    //     BeginRendering / ClearColorImage),
+    //   * binding-0 vertex buffer + offset (set by
+    //     BindVertexBuffer),
+    //   * index buffer + offset + type (set by BindIndexBuffer),
+    //   * primitive topology (set by SetPrimitiveTopology; defaults
+    //     to TriangleList = 3 per spec when never set),
+    //   * scissor rect (set by SetScissor).
     // Reset per command-buffer; a secondary cb invoked via
     // ExecuteCommands gets its own state via the recursive call.
-    VkImage cur_rt_image = 0;
-    VkBuffer cur_vertex_buffer_binding0 = 0;
-    u64 cur_vertex_buffer_offset = 0;
+    RasterState st{};
+    st.topology = 3; // TriangleList
+    {
+        const auto di = drivers::video::Query();
+        if (di.available)
+        {
+            st.fb_w = di.width;
+            st.fb_h = di.height;
+        }
+    }
 
     for (u32 i = 0; i < rec.op_count; ++i)
     {
@@ -1748,11 +1762,11 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
         {
         case CmdOp::ClearColorImage:
             ReplayClear(op);
-            cur_rt_image = op.image;
+            st.rt_image = op.image;
             break;
         case CmdOp::BeginRenderPass:
             ReplayBeginRenderPass(op);
-            cur_rt_image = ResolveFramebufferImage(op.framebuffer);
+            st.rt_image = ResolveFramebufferImage(op.framebuffer);
             break;
         case CmdOp::CopyBuffer:
             ReplayCopyBuffer(op);
@@ -1795,15 +1809,14 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
             // dynamic rendering's clear value paints the
             // attachment image when scanout-backed.
             PaintScanoutClear(op.image, op.color);
-            cur_rt_image = op.image;
+            st.rt_image = op.image;
             ++g_dynamic_renderings;
             break;
         case CmdOp::CopyImage: // no real image storage in v0
         case CmdOp::BlitImage:
         case CmdOp::CopyImageToBuffer:
         case CmdOp::ResolveImage:
-        case CmdOp::ClearAttachments:       // no concept of bound attachments outside RP begin
-        case CmdOp::ClearDepthStencilImage: // no depth buffer
+        case CmdOp::ClearAttachments: // no concept of bound attachments outside RP begin
         case CmdOp::ExecuteCommands:
             ReplayExecuteCommands(op);
             break;
@@ -1821,22 +1834,72 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
         case CmdOp::BindVertexBuffer:
             if (op.vertex_binding == 0)
             {
-                cur_vertex_buffer_binding0 = op.vertex_buffer;
-                cur_vertex_buffer_offset = op.vertex_offset_bytes;
+                st.vertex_buffer = op.vertex_buffer;
+                st.vertex_offset = op.vertex_offset_bytes;
+            }
+            break;
+        case CmdOp::BindIndexBuffer:
+            st.index_buffer = op.index_buffer;
+            st.index_offset = op.index_offset;
+            st.index_type = op.index_type;
+            st.has_index_buffer = true;
+            break;
+        case CmdOp::SetScissor:
+            // Recorder stashes the first scissor rect in `op.area`.
+            // A zero-extent rect means "scissor disabled" for the
+            // rasterizer's purposes.
+            if (op.area.extent.width != 0 && op.area.extent.height != 0)
+            {
+                st.scissor = op.area;
+                st.has_scissor = true;
+            }
+            else
+            {
+                st.has_scissor = false;
+            }
+            break;
+        case CmdOp::SetPrimitiveTopology:
+            // Recorder stashes the topology in `op.vertex_count`.
+            st.topology = op.vertex_count;
+            break;
+        case CmdOp::SetDepthTestEnable:
+            st.depth_test = (op.vertex_count != 0u);
+            break;
+        case CmdOp::SetDepthWriteEnable:
+            st.depth_write = (op.vertex_count != 0u);
+            break;
+        case CmdOp::SetDepthCompareOp:
+            st.depth_compare = op.vertex_count;
+            break;
+        case CmdOp::SetVertexFormatDuet:
+            st.vertex_format = op.vertex_count;
+            break;
+        case CmdOp::ClearDepthStencilImage:
+            // Spec: the depth float in `op.depth_bits` is in
+            // [0.0, 1.0]; we map it to the u16 unorm value. To
+            // avoid pulling in soft-float, recognise just the
+            // canonical 0.0 / 1.0 bit patterns plus a "treat
+            // anything else as 1.0" fallback — every real caller
+            // is going to clear to 0.0 (near) or 1.0 (far).
+            if (op.image == 0 ||
+                (HandleInRange(op.image, kImageBase) && PoolIsLive(g_image_pool, SlotOf(op.image, kImageBase))))
+            {
+                const u16 clear_val = (op.depth_bits == 0u) ? 0u : 0xFFFFu;
+                if (DepthSurfaceGetOrAlloc() != nullptr)
+                    DepthSurfaceClear(clear_val);
             }
             break;
         case CmdOp::Draw:
-            RasterizeDuetTriangles(cur_rt_image, cur_vertex_buffer_binding0, cur_vertex_buffer_offset, op.first_vertex,
-                                   op.vertex_count);
+            RasterizeDuetDraw(st, op.first_vertex, op.vertex_count);
+            break;
+        case CmdOp::DrawIndexed:
+            RasterizeDuetDrawIndexed(st, op.first_index, op.index_count, op.vertex_offset);
             break;
         case CmdOp::WaitEvents: // no-op replay (events already signalled)
         case CmdOp::BeginQuery: // pairs with EndQuery — write happens at End
         case CmdOp::EndRenderPass:
         case CmdOp::BindPipeline:
-        case CmdOp::DrawIndexed:
         case CmdOp::SetViewport:
-        case CmdOp::SetScissor:
-        case CmdOp::BindIndexBuffer:
         // Indirect / dynamic-state-2 / sync2 / subpass / extended-query
         // recorded entries — no GPU side effect in v0; the AppendOp at
         // record time already ticked the per-op counter, so the
@@ -1846,10 +1909,6 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
         case CmdOp::DispatchIndirect:
         case CmdOp::SetCullMode:
         case CmdOp::SetFrontFace:
-        case CmdOp::SetPrimitiveTopology:
-        case CmdOp::SetDepthTestEnable:
-        case CmdOp::SetDepthWriteEnable:
-        case CmdOp::SetDepthCompareOp:
         case CmdOp::SetStencilTestEnable:
         case CmdOp::SetStencilOp:
         case CmdOp::SetDepthBoundsTestEnable:

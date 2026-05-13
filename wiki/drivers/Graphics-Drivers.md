@@ -256,11 +256,19 @@ Implemented:
 - `vkCreateCommandPool`, `vkAllocateCommandBuffers`,
   `vkBeginCommandBuffer` / `vkEndCommandBuffer` /
   `vkResetCommandBuffer`.
-- `vkCmdDraw` against a scanout-backed render target now runs a
-  CPU edge-function triangle rasterizer. Vertex buffers bound at
-  binding 0 are interpreted in the DuetOS v0 fixed format
-  (`{i16 x_px; i16 y_px; u32 argb;}`, 8 bytes per vertex,
-  TriangleList — see [Vulkan ICD](../subsystems/Vulkan-ICD.md)).
+- `vkCmdDraw` and `vkCmdDrawIndexed` against a scanout-backed
+  render target run a CPU edge-function triangle rasterizer.
+  Vertex buffers bound at binding 0 are interpreted in one of
+  two DuetOS fixed formats (8-byte v0 default; 12-byte v1 with
+  i16 Z when `vkCmdSetVertexFormatDuet(cb, 1)` is in effect —
+  see [Vulkan ICD](../subsystems/Vulkan-ICD.md)). The rasterizer
+  supports TriangleList / TriangleStrip / TriangleFan
+  topologies, UINT16 / UINT32 indices, Gouraud-shaded
+  per-vertex colour interpolation, per-pixel src-over alpha,
+  scissor-rect clipping, and a software 16-bit depth buffer
+  (lazy-allocated to the live framebuffer extent, cleared by
+  `vkCmdClearDepthStencilImage`, gated by every Vulkan
+  VkCompareOp).
   `vk_triangles_drawn` ticks per dispatched triangle whether or
   not pixels actually reach the framebuffer, so non-scanout test
   draws still exercise the dispatch chain.

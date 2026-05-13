@@ -572,6 +572,14 @@ VkResult VkCmdSetPrimitiveTopology(VkCommandBuffer cb, u32 topology)
     return AppendOp(cb, op);
 }
 
+VkResult VkCmdSetVertexFormatDuet(VkCommandBuffer cb, u32 format)
+{
+    CmdRecord op{};
+    op.op = CmdOp::SetVertexFormatDuet;
+    op.vertex_count = format;
+    return AppendOp(cb, op);
+}
+
 VkResult VkCmdSetDepthTestEnable(VkCommandBuffer cb, u32 enable)
 {
     CmdRecord op{};
