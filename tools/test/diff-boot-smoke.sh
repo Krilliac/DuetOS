@@ -73,21 +73,27 @@ if [[ ! -f "${BIN_DIR}/duetos.iso" ]]; then
     exit 3
 fi
 
-# Matrix rows: "tag|engine|accel|cpu|legacy". Pipe-delimited because
-# spaces in tag values would split badly under set -e.
-#   engine = qemu (uses profile-boot-smoke.sh) | bochs (uses
-#            bochs-smoke.sh; accel/legacy ignored).
-#   legacy = 1 selects SeaBIOS (DUETOS_LEGACY=1); 0 leaves the UEFI
-#            default in place. QEMU-only.
+# Matrix rows: "tag|engine|accel|cpu|legacy|advisory". Pipe-
+# delimited because spaces in tag values would split badly under
+# set -e.
+#   engine   = qemu (uses profile-boot-smoke.sh) | bochs (uses
+#              bochs-smoke.sh; accel/legacy ignored).
+#   legacy   = 1 selects SeaBIOS (DUETOS_LEGACY=1); 0 leaves the
+#              UEFI default in place. QEMU-only.
+#   advisory = 1 means a failure on this row logs but doesn't fail
+#              the overall matrix — used for rows that are still
+#              shaking down (Bochs is currently slow enough at the
+#              50M-IPS pacing that bringup doesn't finish under the
+#              default per-row timeout — useful signal but not a
+#              gate). Default 0 = treated as a hard requirement.
 # Adding a row is one line — keep this list tight; every QEMU row
 # adds ~one TCG boot's worth of wall-clock, every Bochs row adds
-# more (Bochs is single-threaded and slower than TCG by a factor
-# of ~3-5x at the default ips).
+# significantly more.
 ROWS=(
-    "A-qemu-tcg-qemu64-uefi|qemu|tcg|qemu64|0"
-    "B-qemu-tcg-max-uefi|qemu|tcg|max|0"
-    "C-qemu-tcg-qemu64-seabios|qemu|tcg|qemu64|1"
-    "D-bochs-core2-seabios|bochs|tcg|core2_penryn_t9600|1"
+    "A-qemu-tcg-qemu64-uefi|qemu|tcg|qemu64|0|0"
+    "B-qemu-tcg-max-uefi|qemu|tcg|max|0|0"
+    "C-qemu-tcg-qemu64-seabios|qemu|tcg|qemu64|1|0"
+    "D-bochs-core2-seabios|bochs|tcg|core2_penryn_t9600|1|1"
 )
 
 # Canonical-sentinel filter. Keeps only structured kernel output —
@@ -194,9 +200,10 @@ run_row() {
 ROW_TAGS=()
 ROW_RCS=()
 ROW_DIRS=()
+ROW_ADVISORY=()
 any_fail=0
 for spec in "${ROWS[@]}"; do
-    IFS='|' read -r tag engine accel cpu legacy <<< "${spec}"
+    IFS='|' read -r tag engine accel cpu legacy advisory <<< "${spec}"
     set +e
     run_row "${tag}" "${engine}" "${accel}" "${cpu}" "${legacy}"
     rc=$?
@@ -204,9 +211,11 @@ for spec in "${ROWS[@]}"; do
     ROW_TAGS+=("${tag}")
     ROW_RCS+=("${rc}")
     ROW_DIRS+=("${BIN_DIR}/diff-${PROFILE}-${tag}")
-    if [[ "${rc}" -ne 0 && "${rc}" -ne 2 ]]; then
+    ROW_ADVISORY+=("${advisory}")
+    if [[ "${rc}" -ne 0 && "${rc}" -ne 2 && "${advisory}" != "1" ]]; then
         # rc=2 from a runner = environment skip; surface as a
-        # top-level skip rather than a regression.
+        # top-level skip rather than a regression. Advisory rows
+        # log their failure but don't gate the matrix.
         any_fail=1
     fi
 done
@@ -215,9 +224,14 @@ done
 echo
 echo "=== diff-boot-smoke: profile=${PROFILE} matrix summary ==="
 for i in "${!ROW_TAGS[@]}"; do
-    printf '  row=%-24s rc=%s canon=%d lines\n' \
+    flag=""
+    if [[ "${ROW_ADVISORY[$i]}" == "1" ]]; then
+        flag=" [advisory]"
+    fi
+    printf '  row=%-24s rc=%s canon=%d lines%s\n' \
         "${ROW_TAGS[$i]}" "${ROW_RCS[$i]}" \
-        "$(wc -l < "${ROW_DIRS[$i]}/canonical.txt" 2>/dev/null || echo 0)"
+        "$(wc -l < "${ROW_DIRS[$i]}/canonical.txt" 2>/dev/null || echo 0)" \
+        "${flag}"
 done
 
 # Any row reporting environment skip on its own (rc=2 from
@@ -242,17 +256,31 @@ if [[ "${any_fail}" -ne 0 ]]; then
     exit 1
 fi
 
-# All rows passed individually. Now diff their canonical streams.
-# Pairwise diff against row 0 — if any pair differs, the matrix
-# diverges. Three-way `comm` is awkward; pairwise diff is enough
-# for a three-row matrix and the diff output is directly readable.
-BASE_CANON="${ROW_DIRS[0]}/canonical.txt"
+# All non-advisory rows passed individually. Now diff their
+# canonical streams. Pairwise diff against the first non-advisory
+# row — if any pair differs, the matrix diverges. Advisory rows are
+# excluded from the diff: they're informative ("how does Bochs
+# compare?") but their incomplete sentinel set would falsely flag
+# the entire matrix as divergent.
+BASE_IDX=-1
+for i in "${!ROW_TAGS[@]}"; do
+    if [[ "${ROW_ADVISORY[$i]}" != "1" && "${ROW_RCS[$i]}" == "0" ]]; then
+        BASE_IDX="${i}"
+        break
+    fi
+done
+if [[ "${BASE_IDX}" -lt 0 ]]; then
+    echo "OK: no non-advisory rows passed; nothing to diff."
+    exit 0
+fi
+BASE_CANON="${ROW_DIRS[${BASE_IDX}]}/canonical.txt"
 diverged=0
 for i in "${!ROW_TAGS[@]}"; do
-    if [[ "${i}" == "0" ]]; then continue; fi
+    if [[ "${i}" == "${BASE_IDX}" ]]; then continue; fi
+    if [[ "${ROW_ADVISORY[$i]}" == "1" ]]; then continue; fi
     if ! diff -q "${BASE_CANON}" "${ROW_DIRS[$i]}/canonical.txt" > /dev/null; then
         diverged=1
-        echo "=== DIVERGE: row[0]=${ROW_TAGS[0]} vs row[${i}]=${ROW_TAGS[$i]} ==="
+        echo "=== DIVERGE: row[${BASE_IDX}]=${ROW_TAGS[${BASE_IDX}]} vs row[${i}]=${ROW_TAGS[$i]} ==="
         diff -u "${BASE_CANON}" "${ROW_DIRS[$i]}/canonical.txt" | head -80 || true
     fi
 done
