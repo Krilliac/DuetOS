@@ -211,5 +211,93 @@ EnterUserModeThread:
     ud2
 .size EnterUserModeThread, . - EnterUserModeThread
 
+/* EnterUserMode32: enter ring 3 in 32-bit compatibility mode for
+ * PE32 (i386) workloads. Builds an iretq frame with the 32-bit
+ * user code (0x3B) + data (0x43) selectors from gdt.h. The slots
+ * pushed are still 8 bytes each — that's the iretq layout
+ * regardless of the destination bitness; the CPU sign/zero-extends
+ * as needed when it pops them into 32-bit registers.
+ *
+ *   rdi = user_eip   (32-bit entry point; high bits ignored)
+ *   rsi = user_esp   (32-bit stack pointer; high bits ignored)
+ *
+ * Contract is otherwise identical to EnterUserMode:
+ *   - caller mapped the code/stack pages with kPageUser
+ *   - caller called TssSetRsp0 with the kernel-side stack top
+ *
+ * No swapgs / wrmsr GSBASE setup here — 32-bit Windows ABIs don't
+ * use gs-relative TEB reads the way x64 PEs do (gs:[0x18]). PE32
+ * code uses fs-relative reads on the TEB instead (`fs:[18h]`), and
+ * those go through the standard segment-descriptor base, not the
+ * MSR. The 32-bit DLL preload slice will set FSBASE via wrmsr the
+ * same way EnterUserModeWithGs does for the 64-bit path.
+ *
+ * Layer 2 of 32-bit PE support — Layers 3+ (32-bit syscall ABI,
+ * 32-bit DLL set, pointer marshalling) still required before this
+ * is reachable from a real PE32 spawn path. Today's caller is the
+ * pe32_smoke hand-built test PE.
+ */
+.global EnterUserMode32
+.type EnterUserMode32, @function
+EnterUserMode32:
+    endbr64
+
+    cli
+
+    /* Load user data selector. Use the 32-bit user data segment
+     * (0x43) for DS/ES/FS/GS so the segment-descriptor base + limit
+     * cached by the load matches the 32-bit segment shape. SS is
+     * set by iretq from the frame.
+     *
+     * No swapgs: 32-bit code can't use the MSR-based GSBASE anyway
+     * (compat-mode `mov rax, gs:[...]` decodes as a 32-bit move),
+     * and clearing the kernel's GSBASE here would mean we couldn't
+     * find per-CPU state on the next kernel entry. The matching
+     * isr_common swapgs on user→kernel transition does NOT fire for
+     * compat-mode CS unless we add it — see the syscall ABI Layer 3
+     * notes for the route. */
+    mov     ax, 0x43                /* kUserData32Selector */
+    mov     ds, ax
+    mov     es, ax
+    mov     fs, ax
+    mov     gs, ax
+
+    /* Build the iretq frame:
+     *   [rsp+0]  : EIP    <- user entry point (low 32)
+     *   [rsp+8]  : CS     <- kUserCode32Selector (0x3B)
+     *   [rsp+16] : RFLAGS <- 0x202 (IF=1 + reserved)
+     *   [rsp+24] : ESP    <- user stack (low 32)
+     *   [rsp+32] : SS     <- kUserData32Selector (0x43)
+     *
+     * The push order is reverse — SS first (highest addr), RIP
+     * last (lowest). */
+    push    0x43                    /* SS = kUserData32Selector */
+    push    rsi                     /* user ESP (low 32 used) */
+    push    0x202                   /* RFLAGS */
+    push    0x3B                    /* CS = kUserCode32Selector */
+    push    rdi                     /* user EIP (low 32 used) */
+
+    /* Zero all GPRs for clean ring-3 entry. */
+    xor     eax, eax
+    xor     ebx, ebx
+    xor     ecx, ecx
+    xor     edx, edx
+    xor     ebp, ebp
+    xor     esi, esi
+    xor     edi, edi
+    xor     r8d,  r8d
+    xor     r9d,  r9d
+    xor     r10d, r10d
+    xor     r11d, r11d
+    xor     r12d, r12d
+    xor     r13d, r13d
+    xor     r14d, r14d
+    xor     r15d, r15d
+
+    iretq
+
+    ud2
+.size EnterUserMode32, . - EnterUserMode32
+
 /* NX stack — silence lld's PT_GNU_STACK warning. */
 .section .note.GNU-stack, "", @progbits
