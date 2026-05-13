@@ -120,10 +120,19 @@ successful verify — see *Lazy migration* below.
 ## Lazy migration
 
 `AuthVerify` reads the record's algorithm tag and runs the matching
-KDF. On a successful PBKDF2 verify, the kernel re-hashes the
-plaintext password with Argon2id (using current per-install params)
-and writes a fresh V2 record over the old V1 slot. The user notices
-nothing; the on-disk record gets stronger silently.
+KDF (V2 records are algorithm-tagged; see
+`security/password_hash.h::PasswordHashRecordV2`). On a successful
+PBKDF2 verify, `MaybeUpgradeHash` re-hashes the plaintext password
+with Argon2id (using the current per-install params from
+`password_hash.cpp`) and writes a fresh V2-Argon2id record over the
+old V2-PBKDF2 slot. The user notices nothing; the in-memory record
+gets stronger silently, and the next snapshot export carries the
+upgraded form.
+
+Coverage: `kernel/security/auth.cpp::AuthLazyMigrationSelfTest`
+injects a PBKDF2 V2 record into a probe account, drives one
+`AuthVerify`, then asserts the stored algorithm tag flipped to
+`Argon2id`. Wired into the boot self-test list.
 
 Both code paths run a full derivation regardless of which kind
 wins, so the verify wall-clock is uniform across "user not found
@@ -161,6 +170,8 @@ shell uses today.
 | ChaCha20-Poly1305 AEAD               | REAL — `kernel/security/chacha20_poly1305.{h,cpp}`, RFC 8439 §2.8.2 KAT |
 | `DuetSecretsFile` envelope           | REAL — `kernel/security/persistence.{h,cpp}`, round-trip + tamper KATs |
 | `AuthExportSnapshot` / Import        | REAL — `kernel/security/auth.{h,cpp}`, boot self-test pins the path    |
+| `RbacExportSnapshot` / Import        | REAL — `kernel/security/rbac.{h,cpp}`, boot self-test pins the path    |
+| Lazy V1→V2 (PBKDF2→Argon2id) upgrade | REAL — fires on `AuthVerify` success; boot self-test pins behaviour    |
 | `/system/secrets/` layout (on FS)    | MISSING — no writable system FS yet (next dependent slice)             |
 | Installer flow                       | MISSING — needs the writable FS                                        |
 | TPM sealing                          | MISSING — blocks on TPM driver                                         |

@@ -155,4 +155,47 @@ bool RbacRoleAt(u32 idx, Role* out);
 /// known accounts. Panics on mismatch (cap policy is load-bearing).
 void RbacSelfTest();
 
+// ---------------------------------------------------------------------
+// Persistence bridge — see wiki/security/Persistence.md.
+//
+// Mirrors the AuthExportSnapshot / AuthImportSnapshot shape: an RBAC
+// snapshot encodes the current role table + the membership table
+// into a single Argon2id-KEK + ChaCha20-Poly1305 envelope. The boot
+// path's "writable-FS slice" will land both auth + RBAC snapshots in
+// /system/secrets/.
+//
+// Account-name strings inside memberships are byte-preserved so a
+// future cross-snapshot import order (RBAC before Auth) doesn't
+// dangle — the memberships still bind by name, the auth slice just
+// hasn't filled the matching account rows yet.
+// ---------------------------------------------------------------------
+
+struct RbacSnapshotParams
+{
+    u32 memory_kib;
+    u32 time_cost;
+    u32 parallelism;
+};
+
+/// Maximum encoded envelope size for the current role + membership
+/// table. Returns 0 when both are empty. Use to size the buffer
+/// passed to RbacExportSnapshot.
+u32 RbacSnapshotEncodedSize();
+
+/// Encode the live role + membership tables into `out`. The buffer
+/// must be at least RbacSnapshotEncodedSize() bytes. Returns false
+/// on parameter validation failure or KEK-derivation failure.
+bool RbacExportSnapshot(const char* password, const RbacSnapshotParams& params, u8* out, u32 out_capacity,
+                        u32* out_len);
+
+/// Decode an envelope and atomically replace the live role +
+/// membership tables. Returns false on malformed header, MAC
+/// mismatch, version mismatch, or wrong password.
+bool RbacImportSnapshot(const char* password, const u8* in, u32 in_len);
+
+/// Boot self-test for the RBAC snapshot round-trip: exports the
+/// seeded role table + memberships, mutates one row, imports back,
+/// verifies the mutation was reverted. Panics on regression.
+void RbacSnapshotSelfTest();
+
 } // namespace duetos::security

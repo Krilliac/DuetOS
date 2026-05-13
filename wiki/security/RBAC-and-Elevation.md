@@ -120,8 +120,13 @@ SYS_FILE_WRITE
 | `RequireCap(cap, cmd)` per-cap gating | REAL — fine-grained gate at shell sites               |
 | Win32 `NtAdjustPrivilegesToken` routing | REAL — enable-but-not-held routes to broker via deferred prompt |
 | Blake2b primitive                       | REAL — RFC 7693, KAT-verified at boot (foundation for Argon2id) |
-| Argon2id KDF               | DEFERRED — see Roadmap                                         |
-| Persistence                | DEFERRED — needs writable system FS                            |
+| Argon2id KDF                            | REAL — RFC 9106 §5.3 KAT-verified at boot; V2 default for new pw |
+| Lazy V1→V2 (PBKDF2→Argon2id) migration  | REAL — fires on AuthVerify success; boot self-test pins behaviour |
+| ChaCha20-Poly1305 AEAD                  | REAL — RFC 8439 §2.8.2 KAT-verified at boot                    |
+| `DuetSecretsFile` envelope              | REAL — `security/persistence.{h,cpp}`, round-trip + tamper KATs |
+| Auth snapshot (export / import)         | REAL — `security/auth.{h,cpp}::Auth{Export,Import}Snapshot`     |
+| RBAC snapshot (export / import)         | REAL — `security/rbac.{h,cpp}::Rbac{Export,Import}Snapshot`     |
+| On-disk persistence (`/system/secrets/`)| DEFERRED — needs writable system FS slice                       |
 
 ## Per-cap admin gating (v0.3)
 

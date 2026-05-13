@@ -251,4 +251,11 @@ bool AuthImportSnapshot(const char* password, const u8* in, u32 in_len);
 /// on regression.
 void AuthSnapshotSelfTest();
 
+/// Boot self-test for lazy-migration of legacy PBKDF2 V2 records
+/// to Argon2id. Injects a PBKDF2-tagged record into a probe slot,
+/// drives one successful AuthVerify against it, then checks the
+/// stored record's algorithm tag has flipped to Argon2id. Panics
+/// on regression.
+void AuthLazyMigrationSelfTest();
+
 } // namespace duetos::core

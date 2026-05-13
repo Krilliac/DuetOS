@@ -18,7 +18,7 @@ struct Account
     bool in_use;
     bool has_password;
     AuthRole role;
-    duetos::security::PasswordHashRecord record;
+    duetos::security::PasswordHashRecordV2 record;
     char name[kAuthNameMax];
 
     // Audit + lockout metadata. All zero-initialised when the slot
@@ -42,20 +42,26 @@ struct Session
 
 constinit Session g_session = {};
 
-// A "decoy" hash record kept for constant-time verifies against
-// inputs that have no real account behind them. PasswordHashVerify
-// always runs the full PBKDF2 chain then a constant-time compare,
-// so calling it with the decoy burns the same wall-clock as a real
-// verify and the return value is discarded. The decoy uses the
-// default iteration count, an all-zeros salt, and an all-zeros
-// hash; no real password derives to that record (~2^-256). The
-// same record is also used to flatten the timing of "this account
-// exists but has no password set" — see VerifyPasswordOnAccount.
-constinit duetos::security::PasswordHashRecord g_decoy_record = {
+// A "decoy" V2 record kept for constant-time verifies against
+// inputs that have no real account behind them. PasswordHashVerifyV2
+// always runs the full KDF chain then a constant-time compare, so
+// calling it with the decoy burns the same wall-clock as a real
+// verify and the return value is discarded. The decoy is PBKDF2 —
+// not Argon2id — so the decoy path costs PBKDF2-iterations CPU
+// rather than an Argon2id memory allocation per unknown-user verify,
+// which keeps boot self-test wall-clock predictable and avoids
+// kheap churn on the brute-force probe loop.
+//
+// AuthInit re-anchors the iteration count to the runtime
+// PasswordDefaultIterations() (emulator vs production); the
+// constinit initialiser uses the production value at compile time
+// because constinit needs a constant.
+constinit duetos::security::PasswordHashRecordV2 g_decoy_record = {
+    duetos::security::kPasswordRecordV2Version,
     duetos::security::PasswordAlgorithm::Pbkdf2HmacSha256,
-    duetos::security::kPasswordDefaultIterations,
-    {0},
-    {0},
+    {0}, // salt
+    {0}, // hash
+    {{duetos::security::kPasswordDefaultIterations, {0, 0, 0}}},
 };
 
 u32 StrLen(const char* s)
@@ -161,40 +167,72 @@ bool AccountIsLocked(Account* a, u64 now_ns)
 // password ⇒ has_password = false and the record is zeroed; the
 // account can be logged into by supplying an empty password (the
 // guest seed relies on this). Non-empty password ⇒ a fresh
-// PBKDF2-HMAC-SHA256 record is derived through the kernel entropy
-// pool's salt and the default iteration count.
+// Argon2id record is derived (V2 default; see password_hash.cpp's
+// PasswordHashCreateV2). PBKDF2 fallback fires only when Argon2id
+// can't run (KMalloc exhaustion under heavy heap pressure).
 void SetAccountPassword(Account* a, const char* password)
 {
     const u32 pw_len = StrLen(password);
     if (pw_len == 0)
     {
         a->has_password = false;
-        a->record = duetos::security::PasswordHashRecord{};
+        a->record = duetos::security::PasswordHashRecordV2{};
         return;
     }
-    duetos::security::PasswordHashCreate(password, pw_len, &a->record);
+    duetos::security::PasswordHashCreateV2(password, pw_len, &a->record);
     a->has_password = true;
 }
 
 // Verify a supplied password against an existing account in
-// constant-ish time. Always performs a full PBKDF2 derivation
+// constant-ish time. Always performs a full KDF derivation
 // (against the account record if one exists, against the decoy
 // otherwise) so "wrong password" and "no password set, caller
 // supplied a non-empty password" take the same wall-clock.
+//
+// The decoy is PBKDF2-tagged. A no-password account also routes to
+// the decoy on a non-empty supplied password, again to keep the
+// wall-clock indistinguishable.
 bool VerifyPasswordOnAccount(const Account* a, const char* password)
 {
     const char* pw = password != nullptr ? password : "";
     const u32 pw_len = StrLen(pw);
-    const bool pbkdf2_match =
-        duetos::security::PasswordHashVerify(pw, pw_len, a->has_password ? a->record : g_decoy_record);
+    const bool kdf_match =
+        duetos::security::PasswordHashVerifyV2(pw, pw_len, a->has_password ? a->record : g_decoy_record);
     if (a->has_password)
     {
-        return pbkdf2_match;
+        return kdf_match;
     }
-    // The PBKDF2 result is intentionally discarded for no-password
+    // The KDF result is intentionally discarded for no-password
     // accounts — only an empty supplied password authenticates.
-    (void)pbkdf2_match;
+    (void)kdf_match;
     return pw_len == 0;
+}
+
+// Lazy-migration: if the account's stored record is the older
+// PBKDF2 algorithm tag, re-hash with the current default
+// (Argon2id) and overwrite. Called on a successful verify when
+// we still hold the plaintext password. Skipped silently if the
+// record is already Argon2id.
+//
+// "Lazy" because the upgrade only happens on a successful
+// authenticated touch — never on a wrong-password path (which
+// has nothing to hash with) and never proactively without a
+// plaintext password (which would require holding the user's
+// password in memory between logins).
+void MaybeUpgradeHash(Account* a, const char* password)
+{
+    if (!a->has_password)
+        return;
+    if (a->record.algorithm == duetos::security::PasswordAlgorithm::Argon2id)
+        return;
+    const u32 pw_len = StrLen(password);
+    if (pw_len == 0)
+        return;
+    duetos::security::PasswordHashCreateV2(password, pw_len, &a->record);
+    // PasswordHashCreateV2 sets algorithm = Argon2id on success
+    // (or back to PBKDF2 on a KMalloc-failure fallback). We
+    // accept either outcome silently — the record is still
+    // valid; a future successful verify will retry the upgrade.
 }
 
 Account* FindAccount(const char* username)
@@ -267,18 +305,14 @@ void PopulateView(const Account* a, u64 now_ns, AccountView* view)
 
 void AuthInit()
 {
-    // Re-anchor the decoy record's iteration count to the runtime
+    // Re-anchor the PBKDF2 decoy iteration count to the runtime
     // value of PasswordDefaultIterations(). The constinit
-    // initializer hard-codes kPasswordDefaultIterations (the
-    // production 100 000) because constinit needs a compile-time
-    // constant; PasswordDefaultIterations() is a runtime function
-    // that returns kPasswordEmulatorIterations (1 000) under any
-    // VMM. Without this re-anchor every "unknown account" or
-    // "no-password account" verify burns the production budget
-    // even on emulators — which is the path the auth self-test
-    // takes (`AuthVerify("nobody", "x")`) and the path that wedged
-    // the Bochs row of diff-boot-smoke (~10× longer per call).
-    g_decoy_record.iterations = duetos::security::PasswordDefaultIterations();
+    // initialiser hard-codes the production count because constinit
+    // needs a compile-time constant; the runtime function returns
+    // the cheaper emulator count under any VMM. Without this
+    // re-anchor every "unknown account" or "no-password account"
+    // verify burns the production budget even on emulators.
+    g_decoy_record.params.pbkdf2.iterations = duetos::security::PasswordDefaultIterations();
 
     for (u32 i = 0; i < kAuthMaxAccounts; ++i)
     {
@@ -289,7 +323,7 @@ void AuthInit()
     StoreAccount(a, "admin", "admin", AuthRole::Admin);
     a = AllocAccount();
     StoreAccount(a, "guest", "", AuthRole::Guest);
-    KLOG_INFO("auth", "seeded default accounts (admin, guest) — PBKDF2-HMAC-SHA256 hashed");
+    KLOG_INFO("auth", "seeded default accounts (admin, guest) — V2 records, Argon2id default");
 }
 
 bool AuthIsAuthenticated()
@@ -319,23 +353,25 @@ bool AuthVerify(const char* username, const char* password)
     Account* a = FindAccount(username);
     if (a == nullptr)
     {
-        // Burn an equivalent PBKDF2 cycle against the decoy record
-        // so an unknown user doesn't respond faster than a bad
-        // password against a real user.
+        // Burn an equivalent KDF cycle against the decoy record so
+        // an unknown user doesn't respond faster than a bad password
+        // against a real user. The decoy is PBKDF2 (no Argon2id heap
+        // allocation per probe), which gives a stable wall-clock for
+        // the brute-force probe without serialising on the kheap.
         const char* pw = password != nullptr ? password : "";
-        (void)sec::PasswordHashVerify(pw, StrLen(pw), g_decoy_record);
+        (void)sec::PasswordHashVerifyV2(pw, StrLen(pw), g_decoy_record);
         sec::EventRingPublishKind(sec::EventKind::AuthLoginFailure, 0, 0, 0, username != nullptr ? username : "");
         return false;
     }
 
     a->last_attempt_ns = now_ns;
 
-    // Locked-out account: still burn a PBKDF2 cycle so the wall
-    // clock doesn't betray the lock state, then refuse.
+    // Locked-out account: still burn a KDF cycle so the wall clock
+    // doesn't betray the lock state, then refuse.
     if (AccountIsLocked(a, now_ns))
     {
         const char* pw = password != nullptr ? password : "";
-        (void)sec::PasswordHashVerify(pw, StrLen(pw), g_decoy_record);
+        (void)sec::PasswordHashVerifyV2(pw, StrLen(pw), g_decoy_record);
         sec::EventRingPublishKind(sec::EventKind::AuthLoginFailure, 0, 1 /*locked*/, 0, a->name);
         return false;
     }
@@ -356,6 +392,15 @@ bool AuthVerify(const char* username, const char* password)
         sec::EventRingPublishKind(sec::EventKind::AuthLoginFailure, 0, 0, a->failed_attempts, a->name);
         return false;
     }
+
+    // Successful verify. Pull the lazy-migration trigger: if the
+    // stored record is the older PBKDF2 algorithm tag (legacy from
+    // an imported snapshot or a previous kernel's seed), re-hash
+    // with the current default (Argon2id) and overwrite. We have
+    // the plaintext password here — the only place in the kernel
+    // where we do — so this is the only safe spot to do the
+    // upgrade. See wiki/security/Persistence.md "Lazy migration".
+    MaybeUpgradeHash(a, password);
 
     a->failed_attempts = 0;
     a->last_login_ns = now_ns;
@@ -554,35 +599,38 @@ bool AuthAccountByName(const char* username, AccountView* view)
 // Persistence bridge — see auth.h header comments and
 // wiki/security/Persistence.md.
 //
-// On-disk record format (v0, version stamped in the AuthSnapshot
-// header via the persistence envelope's record_size field):
+// On-disk record format (snapshot v1):
 //
 //   struct AccountSnapshotRecord {
-//     u8  name[kAuthNameMax];     // NUL-padded
-//     u8  role;                   // AuthRole as u8
-//     u8  has_password;           // 0/1
-//     u8  reserved[2];            // zero
-//     PasswordHashRecord record;  // 56 bytes
-//     u64 created_ns;
-//     u64 last_login_ns;
-//     u64 last_attempt_ns;
-//     u64 locked_until_ns;
-//     u32 failed_attempts;
-//     u32 total_logins;
-//   };  // 32+1+1+2+56+8*4+4*2 = 132 bytes
+//     u8  name[kAuthNameMax];        // 32, NUL-padded
+//     u8  role;                       //  1, AuthRole
+//     u8  has_password;               //  1, 0/1
+//     u8  reserved[2];                //  2, zero
+//     PasswordHashRecordV2 record;    // 72, algorithm-tagged KDF record
+//     u64 created_ns;                 //  8
+//     u64 last_login_ns;              //  8
+//     u64 last_attempt_ns;            //  8
+//     u64 locked_until_ns;            //  8
+//     u32 failed_attempts;            //  4
+//     u32 total_logins;               //  4
+//   };  // 32 + 1 + 1 + 2 + 72 + 8*4 + 4*2 = 148 bytes
 //
 // Records with `name[0] == '\0'` are not encoded (the table is
 // sparse — empty slots are skipped on write, allocated freshly on
 // read). `record_count` in the envelope reflects the number of
 // in-use slots at write time.
+//
+// The persistence-envelope record_size field carries the 148-byte
+// stamp so a future format bump can be detected on read.
 // ---------------------------------------------------------------------
 
 namespace
 {
 
-constexpr u32 kAccountSnapshotRecordBytes = 132;
+constexpr u32 kAccountSnapshotRecordBytes = 148;
 static_assert(kAuthNameMax == 32, "AccountSnapshotRecord layout assumes name=32");
-static_assert(sizeof(duetos::security::PasswordHashRecord) == 56, "AccountSnapshotRecord layout assumes record=56");
+static_assert(sizeof(duetos::security::PasswordHashRecordV2) == 72,
+              "AccountSnapshotRecord layout assumes V2 record=72");
 
 void StoreU32LE(u8* p, u32 v)
 {
@@ -622,10 +670,10 @@ void EncodeAccount(const Account& a, u8 out[kAccountSnapshotRecordBytes])
     out[kAuthNameMax + 1] = a.has_password ? 1u : 0u;
     // [+2..+3] reserved.
     u32 off = kAuthNameMax + 4;
-    // PasswordHashRecord: algorithm(u32) + iterations(u32) + salt(16) + hash(32) = 56.
-    StoreU32LE(out + off, static_cast<u32>(a.record.algorithm));
+    // PasswordHashRecordV2: version(4) + algorithm(4) + salt(16) + hash(32) + params(16) = 72.
+    StoreU32LE(out + off, a.record.version);
     off += 4;
-    StoreU32LE(out + off, a.record.iterations);
+    StoreU32LE(out + off, static_cast<u32>(a.record.algorithm));
     off += 4;
     for (u32 i = 0; i < duetos::security::kPasswordSaltBytes; ++i)
         out[off + i] = a.record.salt[i];
@@ -633,6 +681,13 @@ void EncodeAccount(const Account& a, u8 out[kAccountSnapshotRecordBytes])
     for (u32 i = 0; i < duetos::security::kPasswordHashBytes; ++i)
         out[off + i] = a.record.hash[i];
     off += duetos::security::kPasswordHashBytes;
+    // Union: 16 bytes. We serialise the raw 16 bytes regardless of
+    // which arm is live; the algorithm tag above tells the reader
+    // how to interpret them.
+    const u8* params_bytes = reinterpret_cast<const u8*>(&a.record.params);
+    for (u32 i = 0; i < 16; ++i)
+        out[off + i] = params_bytes[i];
+    off += 16;
     // Metadata.
     StoreU64LE(out + off, a.created_ns);
     off += 8;
@@ -658,9 +713,9 @@ void DecodeAccount(const u8 in[kAccountSnapshotRecordBytes], Account& a)
     a.role = static_cast<AuthRole>(in[kAuthNameMax + 0]);
     a.has_password = (in[kAuthNameMax + 1] != 0);
     u32 off = kAuthNameMax + 4;
-    a.record.algorithm = static_cast<duetos::security::PasswordAlgorithm>(LoadU32LE(in + off));
+    a.record.version = LoadU32LE(in + off);
     off += 4;
-    a.record.iterations = LoadU32LE(in + off);
+    a.record.algorithm = static_cast<duetos::security::PasswordAlgorithm>(LoadU32LE(in + off));
     off += 4;
     for (u32 i = 0; i < duetos::security::kPasswordSaltBytes; ++i)
         a.record.salt[i] = in[off + i];
@@ -668,6 +723,10 @@ void DecodeAccount(const u8 in[kAccountSnapshotRecordBytes], Account& a)
     for (u32 i = 0; i < duetos::security::kPasswordHashBytes; ++i)
         a.record.hash[i] = in[off + i];
     off += duetos::security::kPasswordHashBytes;
+    u8* params_bytes = reinterpret_cast<u8*>(&a.record.params);
+    for (u32 i = 0; i < 16; ++i)
+        params_bytes[i] = in[off + i];
+    off += 16;
     a.created_ns = LoadU64LE(in + off);
     off += 8;
     a.last_login_ns = LoadU64LE(in + off);
@@ -795,7 +854,7 @@ void AuthSnapshotSelfTest()
     KASSERT(!AuthAccountByName("postsnap", &v), "auth/snapshot",
             "self-test: postsnap survived import (mutation not reverted)");
     KASSERT(AuthVerify("snapseed", "snapseed-pw"), "auth/snapshot",
-            "self-test: snapseed PBKDF2 record didn't round-trip");
+            "self-test: snapseed Argon2id record didn't round-trip through snapshot");
     KASSERT(AuthVerify("admin", "admin"), "auth/snapshot", "self-test: admin defaults didn't round-trip");
 
     // Wrong password rejects.
@@ -817,6 +876,83 @@ void AuthSnapshotSelfTest()
     KASSERT(AuthDeleteUser("snapseed"), "auth/snapshot", "self-test: cleanup delete failed");
 
     KLOG_INFO("auth", "snapshot self-test OK");
+}
+
+void AuthLazyMigrationSelfTest()
+{
+    namespace sec = duetos::security;
+    // Seed a probe with the default (Argon2id) path so the slot
+    // and metadata exist, then surgically replace the record with
+    // a PBKDF2-tagged V2 record that hashes the same plaintext
+    // password. This simulates a record imported from a legacy
+    // V1 / V2-PBKDF2 snapshot.
+    const char* pw = "lazy-up-pw";
+    const u32 pw_len = StrLen(pw);
+    KASSERT(AuthAddUser("lazyprobe", pw, AuthRole::User), "auth/lazy-migrate", "self-test: failed to add lazyprobe");
+
+    Account* a = FindAccount("lazyprobe");
+    KASSERT(a != nullptr, "auth/lazy-migrate", "self-test: probe missing post-add");
+
+    // Overwrite with a PBKDF2 V2 record. PasswordHashCreateExplicit
+    // / Pbkdf2HmacSha256 isn't directly exposed for V2 records, so
+    // we construct it manually: same plaintext + a fresh salt,
+    // PBKDF2 with the runtime default iteration count.
+    {
+        sec::PasswordHashRecordV2 legacy{};
+        legacy.version = sec::kPasswordRecordV2Version;
+        legacy.algorithm = sec::PasswordAlgorithm::Pbkdf2HmacSha256;
+        // Use a deterministic salt for reproducibility in case the
+        // self-test ever diffs on output.
+        for (u32 i = 0; i < sec::kPasswordSaltBytes; ++i)
+            legacy.salt[i] = static_cast<u8>(0xC0 ^ i);
+        legacy.params.pbkdf2.iterations = sec::PasswordDefaultIterations();
+        for (u32 i = 0; i < 3; ++i)
+            legacy.params.pbkdf2.reserved[i] = 0;
+        // Re-derive the hash so the record verifies against `pw`.
+        // We have access to the V1 PBKDF2 helper via password_hash.h
+        // semantics: the V2 PBKDF2 arm of PasswordHashVerifyV2 calls
+        // crypto::Pbkdf2HmacSha256 with the same shape. To keep this
+        // self-test free of crypto/pbkdf2.h includes we re-use the
+        // V2 create path with a temporary record:
+        sec::PasswordHashRecord v1{};
+        v1.algorithm = sec::PasswordAlgorithm::Pbkdf2HmacSha256;
+        v1.iterations = legacy.params.pbkdf2.iterations;
+        for (u32 i = 0; i < sec::kPasswordSaltBytes; ++i)
+            v1.salt[i] = legacy.salt[i];
+        // PasswordHashCreateExplicit derives v1.hash from password +
+        // salt + iterations. We then mirror it into the V2 record.
+        sec::PasswordHashCreateExplicit(pw, pw_len, legacy.salt, legacy.params.pbkdf2.iterations, &v1);
+        for (u32 i = 0; i < sec::kPasswordHashBytes; ++i)
+            legacy.hash[i] = v1.hash[i];
+        a->record = legacy;
+    }
+    KASSERT(a->record.algorithm == sec::PasswordAlgorithm::Pbkdf2HmacSha256, "auth/lazy-migrate",
+            "self-test: failed to inject PBKDF2 record");
+
+    // Sanity: the injected PBKDF2 record actually verifies against
+    // the correct password (so the upgrade trigger fires for the
+    // right reason).
+    KASSERT(VerifyPasswordOnAccount(a, pw), "auth/lazy-migrate",
+            "self-test: injected PBKDF2 record failed direct verify");
+
+    // Drive the upgrade through AuthVerify. AuthVerify on the
+    // success branch calls MaybeUpgradeHash, which re-hashes with
+    // Argon2id and overwrites a->record.
+    KASSERT(AuthVerify("lazyprobe", pw), "auth/lazy-migrate", "self-test: AuthVerify rejected pre-upgrade record");
+    KASSERT(a->record.algorithm == sec::PasswordAlgorithm::Argon2id, "auth/lazy-migrate",
+            "self-test: record algorithm did NOT flip to Argon2id after successful verify");
+
+    // After the flip, the same password should still verify (now
+    // through the Argon2id arm).
+    KASSERT(AuthVerify("lazyprobe", pw), "auth/lazy-migrate", "self-test: post-upgrade Argon2id record didn't verify");
+    // Wrong password still rejects.
+    KASSERT(!AuthVerify("lazyprobe", "wrong"), "auth/lazy-migrate",
+            "self-test: post-upgrade record accepted wrong password");
+
+    // Cleanup.
+    KASSERT(AuthDeleteUser("lazyprobe"), "auth/lazy-migrate", "self-test: cleanup delete failed");
+
+    KLOG_INFO("auth", "lazy-migration self-test OK");
 }
 
 void AuthSelfTest()

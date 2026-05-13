@@ -2248,6 +2248,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::diag::BootProgress("after-AuthSelfTest");
     DUETOS_BOOT_SELFTEST(duetos::core::AuthSnapshotSelfTest());
     duetos::diag::BootProgress("after-AuthSnapshotSelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::core::AuthLazyMigrationSelfTest());
+    duetos::diag::BootProgress("after-AuthLazyMigrationSelfTest");
     DUETOS_BOOT_SELFTEST(duetos::security::AuthBruteForceProbe());
     duetos::diag::BootProgress("after-AuthBruteForceProbe");
 
@@ -2283,6 +2285,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::security::GraceCacheInit();
     duetos::diag::BootProgress("after-RbacInit");
     DUETOS_BOOT_SELFTEST(duetos::security::RbacSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::RbacSnapshotSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::GraceCacheSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::BrokerSelfTest());
     duetos::diag::BootProgress("after-RbacSelfTests");
