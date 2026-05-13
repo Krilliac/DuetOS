@@ -617,10 +617,14 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   device table that walks every xHCI controller's port
   records (vendor:product, speed, class label,
   HID kbd/mouse hint). Read-only.
-- **Blocks on:** virtio child enumeration to merge in (no
-  virtio bus walker exists today), `Eject` capability
-  gating, and a hot-unplug driver path that the AHCI /
-  xHCI controllers don't yet support.
+- **Blocks on:** `Eject` capability gating, and a
+  hot-unplug driver path that the AHCI / xHCI controllers
+  don't yet support. (The VirtIO bus walker landed —
+  `drivers/virtio::VirtioInit()` enumerates every modern
+  VirtIO PCI function and feeds `VirtioStats`; the Device
+  Manager can now read `GetStats()` to render the virtio
+  section. Per-class probes — rng / blk / net — are
+  attach-only in v0; queue-setup + I/O is the next slice.)
 
 ### Network Status — Wi-Fi scan
 

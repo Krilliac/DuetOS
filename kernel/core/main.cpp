@@ -128,6 +128,7 @@
 #include "net/wireless/wifi_diag.h"
 #include "drivers/mei/mei.h"
 #include "drivers/pci/pci.h"
+#include "drivers/virtio/virtio.h"
 #include "drivers/power/power.h"
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/hid_descriptor.h"
@@ -279,6 +280,7 @@
 #include "subsystems/win32/nt_coverage.h"
 #include "subsystems/win32/registry.h"
 #include "subsystems/win32/window_syscall.h"
+#include "loader/compat_shim.h"
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
 #include "shell/shell.h"
@@ -1139,6 +1141,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Exercising process / capability helpers.\n");
     DUETOS_BOOT_SELFTEST(duetos::core::ProcessSelfTest());
+
+    SerialWrite("[boot] Exercising PE app-compat sidecar parser.\n");
+    DUETOS_BOOT_SELFTEST(duetos::core::compat::SelfTest());
 
     SerialWrite("[boot] Exercising kernel registry helpers.\n");
     DUETOS_BOOT_SELFTEST(duetos::subsystems::win32::registry::RegistrySelfTest());
@@ -2944,6 +2949,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Enumerating PCI bus.\n");
     duetos::drivers::pci::PciEnumerate();
+
+    SerialWrite("[boot] Probing VirtIO PCI devices.\n");
+    duetos::drivers::virtio::VirtioInit();
 
     SerialWrite("[boot] Detecting Intel MEI/HECI devices.\n");
     duetos::drivers::mei::MeiInit();

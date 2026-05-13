@@ -23,6 +23,7 @@
 #include "fs/ramfs.h"
 #include "fs/tmpfs.h"
 #include "mm/address_space.h"
+#include "sched/sched.h"
 #include "subsystems/translation/translate.h"
 #include "loader/elf_loader.h"
 #include "proc/process.h"
@@ -493,6 +494,118 @@ void CmdReadelf(u32 argc, char** argv)
         WriteU64Hex(p_align, 5);
         ConsoleWriteChar('\n');
     }
+}
+
+// ---------------------------------------------------------------
+// pe-triage — Win32 PE first-run import report.
+//
+// Reads `Process::win32_iat_misses[]`, the table the PE loader
+// populates with every IAT entry that couldn't bind to a real
+// stub. With no args, walks every live task with an owning
+// process and prints the table for any that have entries — i.e.
+// every Win32 PE the kernel has spawned this boot whose import
+// surface still has gaps. With a numeric pid, prints just that
+// process. The data is the same signal the [win32-miss] runtime
+// trampoline emits per call, batched at load-time so the report
+// is available BEFORE the PE actually invokes a missing import.
+// ---------------------------------------------------------------
+namespace
+{
+void PrintProcessTriage(const duetos::core::Process* p, u64 pid)
+{
+    ConsoleWrite("[pe-triage] pid=");
+    WriteU64Dec(pid);
+    ConsoleWrite(" name=");
+    ConsoleWrite((p->name != nullptr && p->name[0] != '\0') ? p->name : "(unnamed)");
+    ConsoleWrite(" imports-missing=");
+    WriteU64Dec(p->win32_iat_miss_count);
+    ConsoleWriteChar('\n');
+    for (u64 i = 0; i < p->win32_iat_miss_count; ++i)
+    {
+        ConsoleWrite("  slot=");
+        WriteU64Hex(p->win32_iat_misses[i].slot_va);
+        ConsoleWrite("  fn=\"");
+        ConsoleWrite(p->win32_iat_misses[i].name != nullptr ? p->win32_iat_misses[i].name : "(unmapped)");
+        ConsoleWriteln("\"");
+    }
+}
+
+// SchedEnumerate visitor cookie — dedupes by pid (one process can
+// own several tasks) and forwards each unique process to the
+// printer. 64 slots is enough for any plausible PE count under v0;
+// any pid past that is silently dropped.
+struct TriageCookie
+{
+    static constexpr u32 kSeenCap = 64;
+    u64 seen[kSeenCap];
+    u32 seen_count;
+    u32 reported;
+};
+
+bool TriageSeen(TriageCookie* c, u64 pid)
+{
+    for (u32 i = 0; i < c->seen_count; ++i)
+    {
+        if (c->seen[i] == pid)
+            return true;
+    }
+    if (c->seen_count < TriageCookie::kSeenCap)
+        c->seen[c->seen_count++] = pid;
+    return false;
+}
+} // namespace
+
+void CmdPeTriage(u32 argc, char** argv)
+{
+    if (argc >= 2)
+    {
+        u64 pid = 0;
+        bool ok = false;
+        for (const char* s = argv[1]; *s != '\0'; ++s)
+        {
+            if (*s < '0' || *s > '9')
+            {
+                ok = false;
+                break;
+            }
+            pid = pid * 10 + static_cast<u64>(*s - '0');
+            ok = true;
+        }
+        if (!ok)
+        {
+            ConsoleWriteln("PE-TRIAGE: USAGE: PE-TRIAGE [PID]");
+            return;
+        }
+        duetos::core::Process* p = duetos::sched::SchedFindProcessByPid(pid);
+        if (p == nullptr)
+        {
+            ConsoleWrite("PE-TRIAGE: NO SUCH PID: ");
+            WriteU64Dec(pid);
+            ConsoleWriteChar('\n');
+            return;
+        }
+        PrintProcessTriage(p, pid);
+        return;
+    }
+
+    TriageCookie cookie{};
+    duetos::sched::SchedEnumerate(
+        [](const duetos::sched::SchedTaskInfo& info, void* ck)
+        {
+            auto* c = static_cast<TriageCookie*>(ck);
+            if (!info.has_process || info.owner_pid == 0)
+                return;
+            if (TriageSeen(c, info.owner_pid))
+                return;
+            duetos::core::Process* p = duetos::sched::SchedFindProcessByPid(info.owner_pid);
+            if (p == nullptr || p->win32_iat_miss_count == 0)
+                return;
+            PrintProcessTriage(p, info.owner_pid);
+            ++c->reported;
+        },
+        &cookie);
+    if (cookie.reported == 0)
+        ConsoleWriteln("PE-TRIAGE: NO WIN32 PES WITH UNRESOLVED IMPORTS");
 }
 
 } // namespace duetos::core::shell::internal
