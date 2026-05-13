@@ -489,6 +489,7 @@ i32 AhciBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
 constexpr BlockOps kAhciOps{
     .read = AhciBlockRead,
     .write = AhciBlockWrite,
+    .flush = nullptr, // AHCI device flush command not wired yet — landing alongside the FUA-write extension.
 };
 
 void NamePort(Port& p, u32 idx)

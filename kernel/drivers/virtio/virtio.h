@@ -66,4 +66,20 @@ bool VirtioBalloonProbe(const VirtioPciLayout& L);
 /// long-running boots and CI.
 bool VirtioConsoleWrite(const char* buf, u32 len);
 
+/// Poll for a single byte the host pushed onto the
+/// virtio-console receiveq. Returns true and writes the byte
+/// through `*out` on success; returns false if no byte is
+/// available (or the device wasn't found). Non-blocking; the
+/// caller wraps this in a busy-poll or in a future timer-tick
+/// driven shell-input loop.
+bool VirtioConsolePollByte(u8* out);
+
+/// Transmit one Ethernet frame over the attached virtio-net
+/// device. `frame` must be in the kernel direct map (the
+/// transport calls `mm::VirtToPhys` to get the DMA address) and
+/// `len` is the byte count, capped at 1518 (Ethernet max).
+/// Returns false if no device is attached, the call timed out,
+/// or `frame` doesn't resolve to a phys address.
+bool VirtioNetTransmit(const void* frame, u32 len);
+
 } // namespace duetos::drivers::virtio

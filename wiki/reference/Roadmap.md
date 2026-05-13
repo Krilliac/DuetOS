@@ -1388,22 +1388,20 @@ kernel-side primitive is in tree; what's missing is the per-call
 wiring that turns "infrastructure exists" into "real callers using
 it."
 
-### VirtIO — virtio-blk flush + concurrency
+### VirtIO — virtio-blk concurrency + IRQ
 
-- **Today:** read AND write paths both land through the
-  shared `VirtioBlkBlockRequest` helper. `BlockOps.read` +
-  `BlockOps.write` are both wired; the device's
-  `VIRTIO_BLK_F_RO` bit gates writes.
+- **Today:** read, write, AND flush paths all land. The
+  `BlockOps` vtable grew a `flush` slot;
+  `BlockDeviceFlush(handle)` calls through (returns 0 for
+  backends with no flush hook). virtio-blk routes the flush
+  through `VIRTIO_BLK_T_FLUSH` via the same shared scratch
+  page; the other registered backends (RAM disk, partition
+  view, NVMe, AHCI) declare `flush = nullptr` until their
+  own flush primitives wire up.
 - **Lands:**
-  - `VIRTIO_BLK_T_FLUSH` once `BlockOps` gains a `flush`
-    slot (the vtable has no flush hook today; lands alongside
-    the FS-side fsync path that needs it).
-  - Per-call locking once concurrent I/O matters: the v0
-    shared header-page assumes a single in-flight request,
-    which holds for the boot path (one shell, no parallel
-    I/O). A future slice that needs concurrency gates the
-    request chain on a spinlock or allocates a header chain
-    per in-flight request.
+  - Per-call locking once concurrent I/O matters (today's
+    single-in-flight model is observed-safe on the boot
+    path).
   - IRQ wire-up so consumers don't pay a busy-poll for I/O
     that's already serviced by the host.
 
@@ -1418,30 +1416,34 @@ it."
   MAC) and `kNetFeatureMq` (multi-queue) when offered. IRQ
   routing is a separate slice — v0 can poll on a timer.
 
-### VirtIO — remaining per-class drivers
+### VirtIO — per-class polish
 
-- **Today:** virtio-console (TX-only) and virtio-balloon
-  (probe-only) both land
-  (`kernel/drivers/virtio/virtio_console.cpp`,
-  `virtio_balloon.cpp`). Console posts a hello-world line on
-  attach; balloon reads `num_pages` / `actual` from
-  device-cfg and logs them so a host-side test can see the
-  device responded.
+- **Today:** every per-class probe v0 ships.
+  - virtio-rng pulls entropy into the kernel pool via
+    `RandomMix`.
+  - virtio-blk drives read + write + flush through
+    `BlockDevice`.
+  - virtio-net transmits frames via `VirtioNetTransmit`
+    (TX-only).
+  - virtio-console writes to the host via
+    `VirtioConsoleWrite` AND drains host-typed bytes from
+    the receiveq via `VirtioConsolePollByte`.
+  - virtio-balloon negotiates + installs inflateq +
+    deflateq; the device sees a fully-configured driver.
 - **Lands:**
-  - **virtio-balloon inflateq + deflateq** — driver hands
-    PFNs back to the host on inflate requests, claims them
-    back on deflate. Needs queue setup + a policy for
-    "when does the kernel agree to give up memory?" (the
-    latter is the harder half).
-  - **virtio-console receiveq** — host → guest input.
-    Pre-fill receiveq with buffers; on each used-ring
-    completion, feed the bytes to a TTY-style buffer
-    that a future shell input path can poll. Needs an
-    IRQ wire-up to be useful (otherwise input lags one
-    poll cycle behind).
+  - **virtio-blk concurrency + IRQ** (see entry above).
+  - **virtio-net RX queue + NIC registration** so inbound
+    frames land on the kernel net stack and `NetTransmit`
+    routes through `VirtioNetTransmit`.
   - **virtio-console multiport** —
     `VIRTIO_CONSOLE_F_MULTIPORT` + the control-queue
-    protocol. Adds per-port queue pairs.
+    protocol.
+  - **virtio-balloon inflate/deflate policy** — driver
+    hands PFNs back on inflate requests. The harder half
+    is the "when do we agree to give up memory?" policy;
+    spec-pure dispatch is straightforward.
+  - IRQ wire-up across the board (rng, blk, net, console,
+    balloon).
 
 ### App-compat — per-Win32-API hooks
 
@@ -1469,56 +1471,51 @@ it."
   flags at first call. The cache invalidation story for
   process re-exec is a v1 concern, not v0.
 
-### IOCP — Win32 syscall surface
+### IOCP — primitive consolidation + blocking wait
 
-- **Today:** kernel-side primitive is KObject-compliant.
-  `IocpPort` embeds a `KObject base` (type
-  `KObjectType::Iocp = 7`); `IocpCreate()` allocates through
-  kheap + `KObjectInit` and is ready for
-  `HandleTableInsert`. The destroy callback frees the storage
-  on last release. Boot self-test covers FIFO + overflow +
-  KObject round-trip (type tag, refcount, destroy callback).
-- **Lands:** four Win32 syscalls + the user-mode DLL shim.
-  `Process::kobj_handles` is the right table; mirror the
-  shape of `kernel/subsystems/win32/mutex_syscall.cpp`:
-  - `SYS_IOCP_CREATE` — `IocpCreate` + `HandleTableInsert`,
-    return `Process::kWin32IocpBase + handle` (need to
-    pick a base — `0x52000000` is free in the Win32 handle
-    space).
-  - `SYS_IOCP_POST` — resolve handle → `IocpTryPost`.
-    Caller passes the completion record by-value via
-    `CopyFromUser` so an unmapped user buffer fails
-    cleanly.
-  - `SYS_IOCP_WAIT` — resolve handle → `IocpTryPop`. The
-    blocking variant needs a `sched::Condvar` wired into
-    `IocpPort` (mirror `KMailbox`'s `not_empty`); for v0
-    poll-with-timeout is sufficient.
-  - `SYS_IOCP_CLOSE` — `HandleTableRemove`. Last reference
-    fires `IocpDestroy` → `KFree`.
-- **Blocks on:** the user-mode `CreateIoCompletionPort` /
-  `GetQueuedCompletionStatus` DLL shim. Numbers are NOT
-  burned until the handlers compile + run against a real
-  PE — per CLAUDE.md, syscall numbers are forever ABI.
+- **Today:** two parallel IOCP infrastructures exist in
+  tree:
+  - The legacy `kernel/subsystems/win32/iocp_job.{h,cpp}`
+    impl provides `SYS_IOCP_CREATE/SET/REMOVE/CLOSE`
+    (numbers 159–162) — wire-compatible with the Win32
+    ABI shape the existing Win32 DLLs expect.
+  - The newer `kernel/ipc/iocp.{h,cpp}` KObject-compliant
+    primitive — `IocpPort` embeds a `KObject base` (type
+    `KObjectType::Iocp = 7`); `IocpCreate` allocates via
+    kheap + `KObjectInit`; destroy callback frees on last
+    release. Boot self-test covers FIFO + overflow +
+    KObject round-trip.
+- **Lands:**
+  - **Consolidation:** migrate `iocp_job.cpp` onto the
+    new KObject-shaped `IocpPort` so the per-process
+    storage sits in `kobj_handles` alongside KMutex /
+    KEvent (uniform handle-table semantics).
+  - **Blocking wait** (`GetQueuedCompletionStatus` with
+    non-zero timeout) — needs a condvar in `IocpPort`
+    (mirror `KMailbox`'s `not_empty`).
+  - A `SYS_IOCP_POST` (synthetic completion injection,
+    `PostQueuedCompletionStatus`) to round out the
+    Win32 ABI — the legacy `iocp_job` surface doesn't
+    expose this yet.
 
-### A/B kernel slots — installer + state persistence + GRUB cfg
+### A/B kernel slots — installer + GRUB cfg
 
 - **Today:** state machine, parser/writer, in-RAM
-  `CurrentState`, path helpers, boot-time hand-off, AND
-  heartbeat-driven watchdog mark-healthy all landed. The
-  first heartbeat cycle fires `boot_slot::MarkHealthyNow()`
-  + logs `[I] kheartbeat : boot-slot healthy active=<n>` so
-  the in-RAM state's `last_healthy` is pinned to the
-  running slot as soon as the boot path proves liveness.
+  `CurrentState`, path helpers, boot-time hand-off,
+  heartbeat-driven watchdog mark-healthy, AND
+  callback-based persistence helpers (`LoadVia` /
+  `SaveVia`) all landed. The persistence helpers take
+  caller-supplied I/O callbacks so the FAT32 / ramfs /
+  DuetFS integrations plug in without coupling
+  `boot_slot` to any specific FS. The self-test exercises
+  the round-trip through an in-memory buffer.
 - **Lands:**
-  - **State-file persistence:** the watchdog updates only
-    the in-RAM state today. Serialising + writing the
-    state file to ESP via FAT32 (`SlotStateFilePath`)
-    needs the FAT32 write path the installer also uses;
-    they land together.
   - **Installer:** `CmdInstall` writes the new kernel to
     `SlotKernelPath(Other(active))`, validates, then
-    `BeginInstall(state, Other(active))` + serialise +
-    write the state file.
+    `BeginInstall(state, Other(active))` +
+    `SaveVia(<fat32-writer>, &state)` so the new state
+    persists on the ESP. The FAT32 writer callback is the
+    only new code — `boot_slot` handles the rest.
   - **GRUB cfg:** two menuentries, one per slot; the
     install path writes the current `active` as the GRUB
     default (`set default=a`/`b`) and embeds the matching

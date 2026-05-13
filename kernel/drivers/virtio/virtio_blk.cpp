@@ -55,12 +55,9 @@ namespace
 {
 
 // virtio_blk_outhdr layout (virtio 1.0 §5.2.6). 16 bytes.
-constexpr u32 kBlkTypeIn = 0;  // read from device
-constexpr u32 kBlkTypeOut = 1; // write to device
-// FLUSH lands when BlockOps gains a `flush` slot — kept as a
-// named landmark so the next slice's code reads against the same
-// name the spec uses.
-[[maybe_unused]] constexpr u32 kBlkTypeFlush = 4;
+constexpr u32 kBlkTypeIn = 0;    // read from device
+constexpr u32 kBlkTypeOut = 1;   // write to device
+constexpr u32 kBlkTypeFlush = 4; // commit any in-flight writes
 constexpr u8 kBlkStatusOk = 0;
 
 struct BlkReqHdr
@@ -175,9 +172,48 @@ i32 VirtioBlkBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
                                  /*is_write=*/true);
 }
 
+i32 VirtioBlkBlockFlush(void* cookie)
+{
+    auto* dev = static_cast<DeviceState*>(cookie);
+    if (dev == nullptr || !dev->up)
+        return -1;
+    // VIRTIO_BLK_T_FLUSH: header.sector is ignored, no data
+    // descriptor — the chain is header + status only. Reuse the
+    // shared scratch page; sector field set to 0 for cleanliness.
+    auto* hdr = reinterpret_cast<BlkReqHdr*>(dev->hdr_virt);
+    hdr->type = kBlkTypeFlush;
+    hdr->reserved = 0;
+    hdr->sector = 0;
+    u8* status = dev->hdr_virt + 16;
+    *status = 0xFF;
+
+    VirtqDesc* d = const_cast<VirtqDesc*>(dev->q.desc);
+    d[0].addr = dev->hdr_phys;
+    d[0].len = 16;
+    d[0].flags = kVirtqDescNext;
+    d[0].next = 1;
+    d[1].addr = dev->hdr_phys + 16;
+    d[1].len = 1;
+    d[1].flags = kVirtqDescWrite;
+    d[1].next = 0;
+
+    VirtioQueuePublish(&dev->layout, &dev->q, /*desc_head=*/0);
+    for (u32 spin = 0; spin < 5000000; ++spin)
+    {
+        u32 head = 0;
+        u32 used_len = 0;
+        if (VirtioQueueTryPop(&dev->q, &head, &used_len))
+            return (*status == kBlkStatusOk) ? 0 : -1;
+        asm volatile("pause" ::: "memory");
+    }
+    KLOG_WARN("drivers/virtio/blk", "flush poll timed out");
+    return -1;
+}
+
 constinit const duetos::drivers::storage::BlockOps kBlkOps = {
     /*.read = */ &VirtioBlkBlockRead,
     /*.write = */ &VirtioBlkBlockWrite,
+    /*.flush = */ &VirtioBlkBlockFlush,
 };
 
 } // namespace

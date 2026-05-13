@@ -46,15 +46,25 @@ namespace
 struct ConsoleState
 {
     bool up;
-    u8 _pad[7];
+    bool rx_up;
+    u8 _pad[6];
     VirtioPciLayout layout;
     VirtioQueue txq;
+    VirtioQueue rxq;
     mm::PhysAddr tx_buf_phys;
     u8* tx_buf_virt;
+    mm::PhysAddr rx_buf_phys;
+    u8* rx_buf_virt;
+    // Bytes consumed out of the most-recent RX completion. When
+    // `rx_consumed == rx_avail` the buffer is fully drained and
+    // we re-post it to the device for the next batch.
+    u32 rx_consumed;
+    u32 rx_avail;
 };
 
 constinit ConsoleState g_console = {};
 inline constexpr u32 kTxBufLen = 256; // < 4 KiB page; one transmit at a time.
+inline constexpr u32 kRxBufLen = 256;
 
 // Drain any already-completed used-ring entries. Called before
 // each post so the descriptor index 0 doesn't collide with a
@@ -95,15 +105,40 @@ bool VirtioConsoleProbe(const VirtioPciLayout& L)
         return false;
     }
 
-    // queue_index 1 is the port-0 transmitq. We skip queue 0
-    // (receiveq) for v0 — there's no consumer for host-typed
-    // bytes today. The device tolerates an unconfigured RX
-    // queue: it simply has nowhere to put inbound bytes, which
-    // is correct for a TX-only log forwarder.
+    // queue_index 1 is the port-0 transmitq.
     if (!VirtioQueueSetup(&layout, &g_console.txq, /*queue_index=*/1, kVirtqDefaultSize))
     {
         KLOG_WARN("drivers/virtio/console", "transmitq setup failed");
         return false;
+    }
+    // queue_index 0 is the port-0 receiveq. We pre-post one
+    // device-write descriptor with a 256-byte buffer; on each
+    // used-ring completion the buffer carries up to that many
+    // bytes the host wrote. `VirtioConsolePollByte` drains the
+    // buffer and re-posts when empty.
+    if (VirtioQueueSetup(&layout, &g_console.rxq, /*queue_index=*/0, kVirtqDefaultSize))
+    {
+        const mm::PhysAddr rx_phys = mm::AllocateFrame();
+        if (rx_phys != mm::kNullFrame)
+        {
+            g_console.rx_buf_phys = rx_phys;
+            g_console.rx_buf_virt = static_cast<u8*>(mm::PhysToVirt(rx_phys));
+            VirtqDesc* d = const_cast<VirtqDesc*>(g_console.rxq.desc);
+            d[0].addr = rx_phys;
+            d[0].len = kRxBufLen;
+            d[0].flags = kVirtqDescWrite; // device writes into our buffer
+            d[0].next = 0;
+            VirtioQueuePublish(&layout, &g_console.rxq, /*desc_head=*/0);
+            g_console.rx_up = true;
+        }
+        else
+        {
+            KLOG_WARN("drivers/virtio/console", "rx buffer alloc failed (TX-only)");
+        }
+    }
+    else
+    {
+        KLOG_WARN("drivers/virtio/console", "receiveq setup failed (TX-only)");
     }
 
     // Static TX scratch — one page is plenty for the line-at-a-
@@ -164,6 +199,38 @@ bool VirtioConsoleWrite(const char* buf, u32 len)
     }
     KLOG_WARN("drivers/virtio/console", "TX completion poll timed out");
     return false;
+}
+
+bool VirtioConsolePollByte(u8* out)
+{
+    if (!g_console.up || !g_console.rx_up || out == nullptr)
+        return false;
+    // Drain a fresh completion from the RX used ring if our
+    // local buffer is empty.
+    if (g_console.rx_consumed >= g_console.rx_avail)
+    {
+        u32 head = 0;
+        u32 used_len = 0;
+        if (!VirtioQueueTryPop(&g_console.rxq, &head, &used_len))
+            return false; // nothing yet.
+        g_console.rx_consumed = 0;
+        g_console.rx_avail = (used_len <= kRxBufLen) ? used_len : kRxBufLen;
+    }
+    *out = g_console.rx_buf_virt[g_console.rx_consumed++];
+    // If we just drained the last byte, re-post the descriptor
+    // so the device can fill it on the next inbound burst.
+    if (g_console.rx_consumed >= g_console.rx_avail)
+    {
+        VirtqDesc* d = const_cast<VirtqDesc*>(g_console.rxq.desc);
+        d[0].addr = g_console.rx_buf_phys;
+        d[0].len = kRxBufLen;
+        d[0].flags = kVirtqDescWrite;
+        d[0].next = 0;
+        VirtioQueuePublish(&g_console.layout, &g_console.rxq, /*desc_head=*/0);
+        g_console.rx_consumed = 0;
+        g_console.rx_avail = 0;
+    }
+    return true;
 }
 
 } // namespace duetos::drivers::virtio

@@ -45,6 +45,17 @@ namespace
 [[maybe_unused]] inline constexpr u64 kBalloonFeatureMustTellHost = 1ULL << 0;
 [[maybe_unused]] inline constexpr u64 kBalloonFeatureStatsVq = 1ULL << 1;
 [[maybe_unused]] inline constexpr u64 kBalloonFeatureDeflateOnOom = 1ULL << 2;
+
+struct BalloonState
+{
+    bool up;
+    u8 _pad[7];
+    VirtioPciLayout layout;
+    VirtioQueue inflateq; // queue 0
+    VirtioQueue deflateq; // queue 1
+};
+
+constinit BalloonState g_balloon = {};
 } // namespace
 
 bool VirtioBalloonProbe(const VirtioPciLayout& L)
@@ -66,15 +77,34 @@ bool VirtioBalloonProbe(const VirtioPciLayout& L)
         num_pages = *reinterpret_cast<volatile u32*>(layout.device_cfg + 0);
         actual = *reinterpret_cast<volatile u32*>(layout.device_cfg + 4);
     }
+    // Set up inflateq + deflateq so the device sees a
+    // fully-configured driver. Without queues, the device's
+    // status hangs at FEATURES_OK and host-side balloon
+    // commands silently fail. With queues but no PFN dispatch,
+    // the host's requests sit in the inflateq waiting for a
+    // driver-supplied descriptor — that's the v0 "we noticed
+    // but won't reclaim yet" semantics.
+    if (!VirtioQueueSetup(&layout, &g_balloon.inflateq, /*queue_index=*/0, kVirtqDefaultSize))
+    {
+        KLOG_WARN("drivers/virtio/balloon", "inflateq setup failed");
+        return false;
+    }
+    if (!VirtioQueueSetup(&layout, &g_balloon.deflateq, /*queue_index=*/1, kVirtqDefaultSize))
+    {
+        KLOG_WARN("drivers/virtio/balloon", "deflateq setup failed");
+        return false;
+    }
+    g_balloon.layout = layout;
+    g_balloon.up = true;
+
     KLOG_INFO_2V("drivers/virtio/balloon", "attached", "num-pages-target", static_cast<u64>(num_pages), "actual",
                  static_cast<u64>(actual));
-    // STUB: inflateq / deflateq + per-call PFN dispatch. Until
-    // the queues are set up the host's inflate requests are
-    // silently ignored — the driver acks the device-status
-    // bits (so the device leaves the negotiation state) but
-    // never gives memory back. That's safe for v0 — the host
-    // is allowed to never see the actual count rise — but a
-    // real hypervisor that wants reclaim does need this next.
+    // GAP: per-call PFN dispatch + policy. The queues are
+    // installed; the host can see a properly-configured device.
+    // What's missing is the inflate handler that, on host
+    // request, allocates pages and writes their PFNs into
+    // inflateq descriptors. The policy ("when do we agree?")
+    // lands with a real hypervisor workload.
     return true;
 }
 

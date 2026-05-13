@@ -147,4 +147,32 @@ inline constexpr const char* kSlotStateFilePath = "/boot/duetos-slot.cfg";
 /// nullptr for invalid slots.
 const char* SlotKernelPath(Slot s);
 
+// ---------------------------------------------------------------
+// Callback-based persistence. The state-file lives on the ESP
+// (FAT32) AND on the future native DuetFS install, AND should
+// be loadable from a kernel-side ramfs blob for tests. Rather
+// than couple `boot_slot` to any one of those, the persistence
+// helpers below take caller-supplied I/O callbacks. The caller
+// owns FAT32Read/Write, ramfs lookups, or VFS path resolution;
+// `boot_slot` only knows the byte-level format.
+//
+// `LoadFn` reads up to `cap` bytes into `buf` and returns the
+// byte count written, or a negative value on failure.
+// `SaveFn` writes `len` bytes from `buf` and returns true on
+// success.
+// ---------------------------------------------------------------
+using LoadFn = i64 (*)(void* ctx, u8* buf, u64 cap);
+using SaveFn = bool (*)(void* ctx, const u8* buf, u64 len);
+
+/// Read + parse the state file through `fn`. On success writes
+/// the parsed state into `*out` and returns true. On any error
+/// (load returned <= 0, parse rejected) writes `Default()` into
+/// `*out` with `valid=false` and returns false.
+bool LoadVia(LoadFn fn, void* ctx, State* out);
+
+/// Serialise `state` and write it via `fn`. Returns true if both
+/// serialise + write succeed. The buffer is bounded at 256 B
+/// (the format's hard cap).
+bool SaveVia(SaveFn fn, void* ctx, const State& state);
+
 } // namespace duetos::fs::boot_slot

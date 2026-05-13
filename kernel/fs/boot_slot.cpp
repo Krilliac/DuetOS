@@ -337,6 +337,32 @@ const char* SlotKernelPath(Slot s)
     }
 }
 
+bool LoadVia(LoadFn fn, void* ctx, State* out)
+{
+    if (out == nullptr)
+        return false;
+    *out = Default();
+    out->valid = false;
+    if (fn == nullptr)
+        return false;
+    u8 buf[256];
+    const i64 n = fn(ctx, buf, sizeof(buf));
+    if (n <= 0)
+        return false;
+    return Parse(buf, static_cast<u64>(n), out);
+}
+
+bool SaveVia(SaveFn fn, void* ctx, const State& state)
+{
+    if (fn == nullptr || state.active == Slot::kInvalid)
+        return false;
+    u8 buf[256];
+    const u64 n = Serialise(state, buf, sizeof(buf));
+    if (n == 0)
+        return false;
+    return fn(ctx, buf, n);
+}
+
 void SelfTest()
 {
     // 1. Default state is self-consistent.
@@ -394,6 +420,45 @@ void SelfTest()
         ::duetos::core::Panic("fs/boot_slot", "self-test: SlotKernelPath wrong");
     // Restore default for any subsequent boot consumer.
     SetCurrentState(Default());
+
+    // 8. LoadVia + SaveVia round-trip via in-memory buffer
+    //    callbacks — same shape the real FAT32 / ramfs / DuetFS
+    //    integrations will use, exercised with no external FS
+    //    dependency.
+    struct MemBuf
+    {
+        u8 bytes[256];
+        u64 len;
+    };
+    MemBuf mem = {};
+    SaveFn save_fn = +[](void* c, const u8* b, u64 ln) -> bool
+    {
+        auto* m = static_cast<MemBuf*>(c);
+        if (ln > sizeof(m->bytes))
+            return false;
+        for (u64 i = 0; i < ln; ++i)
+            m->bytes[i] = b[i];
+        m->len = ln;
+        return true;
+    };
+    LoadFn load_fn = +[](void* c, u8* b, u64 cap) -> i64
+    {
+        auto* m = static_cast<MemBuf*>(c);
+        const u64 want = (m->len < cap) ? m->len : cap;
+        for (u64 i = 0; i < want; ++i)
+            b[i] = m->bytes[i];
+        return static_cast<i64>(want);
+    };
+    State to_save = Default();
+    to_save.active = Slot::kB;
+    to_save.last_healthy = Slot::kA;
+    if (!SaveVia(save_fn, &mem, to_save))
+        ::duetos::core::Panic("fs/boot_slot", "self-test: SaveVia failed");
+    State loaded;
+    if (!LoadVia(load_fn, &mem, &loaded) || !loaded.valid)
+        ::duetos::core::Panic("fs/boot_slot", "self-test: LoadVia rejected round-trip");
+    if (loaded.active != Slot::kB || loaded.last_healthy != Slot::kA)
+        ::duetos::core::Panic("fs/boot_slot", "self-test: LoadVia lost fields");
 
     KLOG_INFO("fs/boot_slot", "self-test PASS");
 }
