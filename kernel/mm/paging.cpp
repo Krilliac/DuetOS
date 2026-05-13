@@ -144,7 +144,18 @@ inline void WriteCr4(u64 v)
     asm volatile("mov %0, %%cr4" : : "r"(v) : "memory");
 }
 
-bool g_smap_enabled = false;
+} // namespace
+
+// SMAP-availability flag. Defined here, but lives outside the
+// anonymous namespace because user_copy.S references it by
+// unmangled name to gate STAC/CLAC at runtime. SMAP was added
+// in Intel Broadwell / AMD Zen+; on older CPUs (qemu64, generic
+// pre-Haswell models) STAC/CLAC are #UD. The asm checks this
+// flag and skips the instructions when SMAP isn't on.
+extern "C" volatile bool g_smap_enabled = false;
+
+namespace
+{
 
 // Flip on SMEP (bit 20) and SMAP (bit 21) in CR4 if CPUID reports them.
 // SMEP: kernel-mode code fetch from a user page #PFs — kills an entire

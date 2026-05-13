@@ -11,17 +11,22 @@
 # If a kernel passes one config but fails another, the divergence
 # IS the bug — even if no row hit a forbidden sentinel.
 #
-# Default matrix (three rows, ~3x the wall-clock of profile-boot-
-# smoke for one profile under TCG):
+# Default matrix (four rows, ~4-6x the wall-clock of profile-boot-
+# smoke for one profile under TCG — Bochs is slower than TCG):
 #
-#   row A : accel=tcg, cpu=qemu64, firmware=uefi   — baseline
-#   row B : accel=tcg, cpu=max,    firmware=uefi   — wide CPUID
-#   row C : accel=tcg, cpu=qemu64, firmware=seabios — legacy boot
+#   row A : qemu, accel=tcg, cpu=qemu64, firmware=uefi    — baseline
+#   row B : qemu, accel=tcg, cpu=max,    firmware=uefi    — wide CPUID
+#   row C : qemu, accel=tcg, cpu=qemu64, firmware=seabios — legacy boot
+#   row D : bochs, cpu=core2_penryn_t9600, firmware=seabios
+#           — stricter x86 semantics (segment limits, undefined-flag
+#             propagation, IF/RF/NT, TLB shootdown ordering). The
+#             Bochs default ROM (BIOS-bochs-latest) triple-faults
+#             during the legacy-BIOS power-on sequence on Bochs 2.7;
+#             bochs-run.sh defaults the ROM to SeaBIOS instead.
 #
-# Accelerator is pinned to `tcg` on every row: KVM hands the guest
-# host silicon and would erase the cross-config signal we're after.
-# A future slice can add a Bochs row for stricter x86 semantics
-# (different bug profile entirely).
+# Accelerator is pinned to `tcg` on every QEMU row: KVM hands the
+# guest host silicon and would erase the cross-config signal we're
+# after.
 #
 # Exit codes:
 #   0 — every row passed AND every row produced the same canonical
@@ -47,6 +52,7 @@ PROFILE="$1"
 BIN_DIR="$2"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROFILE_SCRIPT="${REPO_ROOT}/tools/test/profile-boot-smoke.sh"
+BOCHS_SCRIPT="${REPO_ROOT}/tools/test/bochs-smoke.sh"
 
 if [[ ! -x "${PROFILE_SCRIPT}" ]]; then
     echo "SKIP: ${PROFILE_SCRIPT} not found" >&2
@@ -62,15 +68,21 @@ if [[ ! -f "${BIN_DIR}/duetos.iso" ]]; then
     exit 3
 fi
 
-# Matrix rows: "tag|accel|cpu|legacy". Pipe-delimited because spaces
-# in tag values would split badly under set -e. legacy=1 selects
-# SeaBIOS (DUETOS_LEGACY=1); legacy=0 leaves the UEFI default in
-# place. Adding a row is one line — keep this list tight; every
-# row adds ~one TCG boot's worth of wall-clock to the harness.
+# Matrix rows: "tag|engine|accel|cpu|legacy". Pipe-delimited because
+# spaces in tag values would split badly under set -e.
+#   engine = qemu (uses profile-boot-smoke.sh) | bochs (uses
+#            bochs-smoke.sh; accel/legacy ignored).
+#   legacy = 1 selects SeaBIOS (DUETOS_LEGACY=1); 0 leaves the UEFI
+#            default in place. QEMU-only.
+# Adding a row is one line — keep this list tight; every QEMU row
+# adds ~one TCG boot's worth of wall-clock, every Bochs row adds
+# more (Bochs is single-threaded and slower than TCG by a factor
+# of ~3-5x at the default ips).
 ROWS=(
-    "A-tcg-qemu64-uefi|tcg|qemu64|0"
-    "B-tcg-max-uefi|tcg|max|0"
-    "C-tcg-qemu64-seabios|tcg|qemu64|1"
+    "A-qemu-tcg-qemu64-uefi|qemu|tcg|qemu64|0"
+    "B-qemu-tcg-max-uefi|qemu|tcg|max|0"
+    "C-qemu-tcg-qemu64-seabios|qemu|tcg|qemu64|1"
+    "D-bochs-core2-seabios|bochs|tcg|core2_penryn_t9600|1"
 )
 
 # Canonical-sentinel filter. Keeps only structured kernel output —
@@ -97,24 +109,20 @@ filter_canonical() {
       | LC_ALL=C sort -u > "${dst}"
 }
 
-# Run one row. Returns exit status of profile-boot-smoke.sh; writes
-# the raw serial log to ${row_log_raw} and the filtered canonical
-# stream to ${row_log_canon}. Both are kept on disk for later
-# inspection regardless of pass/fail.
+# Run one row. Returns exit status of the underlying smoke runner;
+# writes the raw serial log + the filtered canonical stream to the
+# per-row dir for later inspection regardless of pass/fail.
 run_row() {
-    local tag="$1" accel="$2" cpu="$3" legacy="$4"
+    local tag="$1" engine="$2" accel="$3" cpu="$4" legacy="$5"
     local row_dir="${BIN_DIR}/diff-${PROFILE}-${tag}"
     rm -rf "${row_dir}"
     mkdir -p "${row_dir}"
 
-    echo "[diff] row=${tag} accel=${accel} cpu=${cpu} legacy=${legacy}" >&2
+    echo "[diff] row=${tag} engine=${engine} accel=${accel} cpu=${cpu} legacy=${legacy}" >&2
 
-    local rc=0
-    # profile-boot-smoke.sh writes its serial log to BIN_DIR/smoke-
-    # <profile>.log. We want one per row, so each row runs against
-    # a per-row scratch BIN_DIR that symlinks the canonical iso /
-    # kernel ELF + ovmf vars into place. Cheaper than mutating the
-    # canonical BIN_DIR or threading a new env var through.
+    # Per-row scratch BIN_DIR mirrors the canonical iso + kernel ELF
+    # via symlinks; both runners write their serial log into this
+    # directory, so each row gets a clean output slot.
     ln -sf "${BIN_DIR}/duetos.iso" "${row_dir}/duetos.iso"
     mkdir -p "${row_dir}/kernel"
     if [[ -f "${BIN_DIR}/kernel/duetos-kernel.elf" ]]; then
@@ -122,27 +130,48 @@ run_row() {
                "${row_dir}/kernel/duetos-kernel.elf"
     fi
 
-    local legacy_env=""
-    if [[ "${legacy}" == "1" ]]; then
-        legacy_env="DUETOS_LEGACY=1"
-    fi
-
-    # eval so a row with legacy_env="" doesn't pass an empty arg to
-    # env. profile-boot-smoke.sh inherits DUETOS_PRESET / DUETOS_TIMEOUT
-    # from our environment if set; we don't override either here.
+    local rc=0
     set +e
-    eval ${legacy_env} \
-         DUETOS_ACCEL="${accel}" \
-         DUETOS_CPU="${cpu}" \
-         "${PROFILE_SCRIPT}" "${PROFILE}" "${row_dir}" \
-         > "${row_dir}/runner.log" 2>&1
-    rc=$?
+    case "${engine}" in
+        qemu)
+            local legacy_env=""
+            if [[ "${legacy}" == "1" ]]; then
+                legacy_env="DUETOS_LEGACY=1"
+            fi
+            # eval so a row with legacy_env="" doesn't pass an empty
+            # arg to env. profile-boot-smoke.sh inherits DUETOS_PRESET
+            # / DUETOS_TIMEOUT from our environment if set; we don't
+            # override either here.
+            eval ${legacy_env} \
+                 DUETOS_ACCEL="${accel}" \
+                 DUETOS_CPU="${cpu}" \
+                 "${PROFILE_SCRIPT}" "${PROFILE}" "${row_dir}" \
+                 > "${row_dir}/runner.log" 2>&1
+            rc=$?
+            ;;
+        bochs)
+            DUETOS_BOCHS_CPU="${cpu}" \
+                "${BOCHS_SCRIPT}" "${PROFILE}" "${row_dir}" \
+                > "${row_dir}/runner.log" 2>&1
+            rc=$?
+            ;;
+        *)
+            echo "error: unknown engine '${engine}' for row ${tag}" >&2
+            rc=99
+            ;;
+    esac
     set -e
 
-    # profile-boot-smoke.sh always writes smoke-<profile>.log into
-    # its bindir argument. Pick it up from the per-row dir.
+    # Pick up whichever serial log the runner produced. QEMU rows
+    # write smoke-<profile>.log; Bochs rows write bochs-<profile>.log.
+    local serial_src=""
     if [[ -f "${row_dir}/smoke-${PROFILE}.log" ]]; then
-        cp "${row_dir}/smoke-${PROFILE}.log" "${row_dir}/serial.log"
+        serial_src="${row_dir}/smoke-${PROFILE}.log"
+    elif [[ -f "${row_dir}/bochs-${PROFILE}.log" ]]; then
+        serial_src="${row_dir}/bochs-${PROFILE}.log"
+    fi
+    if [[ -n "${serial_src}" ]]; then
+        cp "${serial_src}" "${row_dir}/serial.log"
         filter_canonical "${row_dir}/serial.log" "${row_dir}/canonical.txt"
     else
         : > "${row_dir}/serial.log"
@@ -159,17 +188,17 @@ ROW_RCS=()
 ROW_DIRS=()
 any_fail=0
 for spec in "${ROWS[@]}"; do
-    IFS='|' read -r tag accel cpu legacy <<< "${spec}"
+    IFS='|' read -r tag engine accel cpu legacy <<< "${spec}"
     set +e
-    run_row "${tag}" "${accel}" "${cpu}" "${legacy}"
+    run_row "${tag}" "${engine}" "${accel}" "${cpu}" "${legacy}"
     rc=$?
     set -e
     ROW_TAGS+=("${tag}")
     ROW_RCS+=("${rc}")
     ROW_DIRS+=("${BIN_DIR}/diff-${PROFILE}-${tag}")
     if [[ "${rc}" -ne 0 && "${rc}" -ne 2 ]]; then
-        # rc=2 from profile-boot-smoke = environment skip; surface
-        # as a top-level skip rather than a regression.
+        # rc=2 from a runner = environment skip; surface as a
+        # top-level skip rather than a regression.
         any_fail=1
     fi
 done

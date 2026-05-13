@@ -372,6 +372,26 @@ long_mode_entry:
     mov     rcx, offset __stack_chk_guard
     mov     [rcx], rax
 
+    /* Mask every line on the legacy 8259 PIC (master + slave) before
+     * any C++ code can `sti`. UEFI firmware leaves the PIC masked;
+     * SeaBIOS / legacy-BIOS firmware does not. Without this early
+     * mask, the first arch::Sti() inside kernel_main (or any of the
+     * subsystems it spins up before reaching PicDisable() in
+     * main.cpp's late init) lets a held IRQ fire — and since the
+     * IDT entries 0x08..0x0F overlap the CPU exception vectors
+     * until PicDisable() remaps them, a held line lands on
+     * #DF / #TS / #NP / etc., which then double-faults on a
+     * trap frame the firmware-set IST never expected.
+     *
+     * 0x21 = master PIC IMR (data port). 0xA1 = slave PIC IMR.
+     * 0xFF on each masks all 8 lines. The full PicDisable() in
+     * pic.cpp later reprograms vector base + cascade and re-masks;
+     * this is the t=0 belt-and-suspenders so nothing can sneak in
+     * before then. */
+    mov     al, 0xFF
+    out     0x21, al
+    out     0xA1, al
+
     call    kernel_main
 
     /* kernel_main should never return. If it does, halt deterministically. */
