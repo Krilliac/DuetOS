@@ -1198,6 +1198,11 @@ VkResult VkCmdBeginRendering(VkCommandBuffer cb, VkRect2D render_area, u32 color
             op.image = g_imageview_data[SlotOf(a.imageView, kImageViewBase)].image;
         }
         op.color = a.clearValue;
+        // Stash loadOp in fill_pattern (unused for this opcode).
+        // Replay only paints when loadOp == 1 (Clear); Load /
+        // DontCare update rt_image without overwriting the
+        // attachment.
+        op.fill_pattern = a.loadOp;
     }
     return AppendOp(cb, op);
 }
@@ -1805,10 +1810,13 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
             ReplayUpdateBuffer(op);
             break;
         case CmdOp::BeginRendering:
-            // Same scanout-clear path as VkCmdBeginRenderPass —
-            // dynamic rendering's clear value paints the
-            // attachment image when scanout-backed.
-            PaintScanoutClear(op.image, op.color);
+            // Dynamic rendering's loadOp gates the clear paint —
+            // Clear (1) repaints the attachment, Load (0) and
+            // DontCare (2) leave existing pixels alone. Either way
+            // the attachment image becomes the active render
+            // target for subsequent Draw ops.
+            if (op.fill_pattern == 1u)
+                PaintScanoutClear(op.image, op.color);
             st.rt_image = op.image;
             ++g_dynamic_renderings;
             break;

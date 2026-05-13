@@ -38,6 +38,8 @@ const char* ModeName(Mode m)
         return "STARFIELD";
     case Mode::Fire:
         return "FIRE";
+    case Mode::VulkanCube:
+        return "VK-CUBE";
     case Mode::Count:
     default:
         return "?";
@@ -72,6 +74,9 @@ void DispatchRender(Mode m, duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duet
         break;
     case Mode::Fire:
         RenderFire(cx, cy, cw, ch, frame);
+        break;
+    case Mode::VulkanCube:
+        RenderVulkanCube(cx, cy, cw, ch, frame);
         break;
     case Mode::Count:
         break;

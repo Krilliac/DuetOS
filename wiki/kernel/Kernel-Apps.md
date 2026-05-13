@@ -80,7 +80,7 @@ Apps marked **v0** are scaffolded but missing significant functionality
 | App | Source | What it does | Subsystems touched |
 |-----|--------|--------------|--------------------|
 | **dbg** | [`dbg.cpp`](../../kernel/apps/dbg.cpp) (+ `dbg_core.cpp`, `dbg_render.cpp`) | Interactive debugger UI — process list, memory hex window, register view, breakpoint table, mini disassembly, watch panel, syscall-scan results. | `kernel/debug/` namespace |
-| **gfxdemo** | [`gfxdemo.cpp`](../../kernel/apps/gfxdemo.cpp) + [`gfxdemo_modes.cpp`](../../kernel/apps/gfxdemo_modes.cpp) | Mode gallery exercising the framebuffer primitives + Vulkan clear path. | [framebuffer](../subsystems/UI-Toolkit.md), [Vulkan ICD](../subsystems/Vulkan-ICD.md) |
+| **gfxdemo** | [`gfxdemo.cpp`](../../kernel/apps/gfxdemo.cpp) + [`gfxdemo_modes.cpp`](../../kernel/apps/gfxdemo_modes.cpp) + [`gfxdemo_modes_vk.cpp`](../../kernel/apps/gfxdemo_modes_vk.cpp) | Mode gallery exercising the framebuffer primitives + Vulkan rasterizer. VK-CUBE renders a depth-tested Gouraud-shaded cube through `vkCmdDrawIndexed` with the v1 vertex format. | [framebuffer](../subsystems/UI-Toolkit.md), [Vulkan ICD](../subsystems/Vulkan-ICD.md) |
 | **screenshot** | [`screenshot.cpp`](../../kernel/apps/screenshot.cpp) | Captures the live framebuffer to a BMP saved on FAT32. | framebuffer, [util/bmp](Util.md) |
 
 ### Help / Notification / Misc
