@@ -452,6 +452,7 @@ extern u32 g_debug_labels;
 extern u32 g_secondary_executes;
 extern u32 g_secondary_ops_replayed;
 extern u32 g_push_descriptor_writes;
+extern u32 g_triangles_drawn;
 
 // -------------------------------------------------------------------
 // Shared helper functions.
@@ -461,6 +462,17 @@ u32 ColorToRgb(const VkClearColorValue& c);
 void PaintScanoutClear(VkImage image, VkClearColorValue color);
 VkResult AppendOp(VkCommandBuffer cb, const CmdRecord& op);
 void ReplayCommandBuffer(VkCommandBuffer cb);
+
+/// Software triangle rasterizer for `vkCmdDraw` replay. Reads
+/// triangles from the bound vertex buffer using the DuetOS v0
+/// fixed vertex format (see `graphics_vk_raster.cpp`) and paints
+/// flat-shaded triangles into the bound scanout-backed render
+/// target via `FramebufferPutPixel`. Always bumps
+/// `g_triangles_drawn` by `vertex_count / 3` so the dispatch
+/// chain is observable even when no pixels are produced
+/// (non-scanout target, no live framebuffer, etc.).
+void RasterizeDuetTriangles(VkImage rt_image, VkBuffer vertex_buffer, u64 vb_offset, u32 first_vertex,
+                            u32 vertex_count);
 
 // One-shot logging dedupe across the ICD.  Each entry-point id
 // gets a single boot-log line the first time it's reached;
@@ -496,6 +508,7 @@ u32 CommandReplayedCount();
 u32 SpirvModulesParsedCount();
 u32 SpirvEntryPointsSeenCount();
 u32 SpirvCapabilitiesSeenCount();
+u32 TrianglesDrawnCount();
 
 // ----- leak check ---------------------------------------------------
 

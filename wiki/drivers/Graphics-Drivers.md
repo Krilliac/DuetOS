@@ -256,6 +256,14 @@ Implemented:
 - `vkCreateCommandPool`, `vkAllocateCommandBuffers`,
   `vkBeginCommandBuffer` / `vkEndCommandBuffer` /
   `vkResetCommandBuffer`.
+- `vkCmdDraw` against a scanout-backed render target now runs a
+  CPU edge-function triangle rasterizer. Vertex buffers bound at
+  binding 0 are interpreted in the DuetOS v0 fixed format
+  (`{i16 x_px; i16 y_px; u32 argb;}`, 8 bytes per vertex,
+  TriangleList — see [Vulkan ICD](../subsystems/Vulkan-ICD.md)).
+  `vk_triangles_drawn` ticks per dispatched triangle whether or
+  not pixels actually reach the framebuffer, so non-scanout test
+  draws still exercise the dispatch chain.
 - Recording: `vkCmdBeginRenderPass`, `vkCmdEndRenderPass`,
   `vkCmdBindPipeline`, `vkCmdClearColorImage`, `vkCmdDraw`,
   `vkCmdDrawIndexed`, `vkCmdSetViewport`, `vkCmdSetScissor`,
@@ -401,8 +409,11 @@ recompose. Four themes ship:
 - **Vulkan ICD does not execute shaders.** SPIR-V blobs are
   validated (magic-word check) + parsed (entry-point /
   capability / decoration counts), but the bytecode is not
-  executed. `vkCmdDraw` is recorded for stats but produces
-  no pixels.
+  executed. `vkCmdDraw` now drives a CPU triangle rasterizer
+  (DuetOS v0 fixed vertex format, flat-shaded, TriangleList
+  only — see [Vulkan ICD](../subsystems/Vulkan-ICD.md)); attribute
+  interpolation, depth, and indexed draws are still gated on
+  the SPIR-V execution slice.
 - **Damage tracking is single-bbox.** A frame that touches the
   top-left and bottom-right corners flushes the whole surface. A
   list-of-rects damage tracker would help for chrome-heavy frames

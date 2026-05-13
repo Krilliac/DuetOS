@@ -80,10 +80,68 @@ state from "recording" to "executable."
 | Opcode | What it does in v0 |
 |--------|--------------------|
 | `vkCmdClearColorImage` | Writes the clear colour to the image's backing memory. If the image is scanout-backed, the framebuffer's damage rect is widened. |
-| `vkCmdBindPipeline`, `vkCmdBindDescriptorSets`, `vkCmdBindVertexBuffers`, `vkCmdBindIndexBuffer` | Update tape-local "current state" only. |
-| `vkCmdDraw`, `vkCmdDrawIndexed`, `vkCmdDispatch` | Bump a counter. No pixels move. |
+| `vkCmdBindPipeline`, `vkCmdBindDescriptorSets`, `vkCmdBindIndexBuffer` | Update tape-local "current state" only. |
+| `vkCmdBindVertexBuffers` | Recorded; the binding-0 buffer + offset feed the software triangle rasterizer at `vkCmdDraw` replay time. |
+| `vkCmdDraw` | Software triangle rasterizer — paints flat-shaded triangles into the bound scanout-backed render target via the DuetOS v0 fixed vertex format (see below). Bumps `vk_triangles_drawn` by `vertex_count / 3` regardless of whether pixels reach the framebuffer. |
+| `vkCmdDrawIndexed`, `vkCmdDispatch` | Bump a counter. No pixels move (no index-buffer fetch in the rasterizer yet; no shader to run for compute). |
 | `vkCmdCopyBuffer`, `vkCmdCopyImage`, `vkCmdCopyBufferToImage` | Real `memcpy` between mapped backing buffers. |
 | `vkCmdPipelineBarrier`, `vkCmdSetViewport`, `vkCmdSetScissor` | No-op (state recorded, not enforced). |
+
+## Software triangle rasterizer
+
+`graphics_vk_raster.cpp` adds a CPU edge-function rasterizer that
+turns `vkCmdDraw` into visible pixels when the caller fills its
+vertex buffer with the DuetOS v0 fixed vertex format and points
+the draw at a scanout-backed render target. There is no SPIR-V
+execution, no vertex transform, and no per-fragment shading —
+positions are already in pixel space and the triangle is
+flat-shaded with the colour of its first vertex.
+
+**Vertex format (8 bytes per vertex):**
+
+| Bytes | Field | Meaning |
+|-------|-------|---------|
+| 0..1  | `i16 x_px` | Signed framebuffer pixel x |
+| 2..3  | `i16 y_px` | Signed framebuffer pixel y |
+| 4..7  | `u32 argb` | 0xAARRGGBB; alpha is recorded but not blended in v0 |
+
+Three consecutive vertices form one triangle (TriangleList only —
+no strip topology, no indexed draw). The replay walker:
+
+1. Tracks the most-recent `BindVertexBuffer(binding=0)` and the
+   active render-target image (set by `BeginRenderPass`,
+   `BeginRendering`, or `ClearColorImage` as a fallback).
+2. On `Draw`: hands `(render_target, vb, vb_offset, first_vertex,
+   vertex_count)` to `internal::RasterizeDuetTriangles`.
+3. The rasterizer bumps `vk_triangles_drawn += vertex_count / 3`
+   immediately so the dispatch chain is observable even when no
+   pixels are produced (non-scanout target, no live framebuffer,
+   non-host-visible vertex buffer).
+4. When the render target IS scanout-backed and the vertex
+   buffer IS host-visible, every covered pixel goes through
+   `FramebufferPutPixel`; the per-triangle bounding box widens
+   the damage rect for the next `vkQueuePresentKHR`.
+
+Algorithm: integer edge-function (barycentric) test over the
+triangle's bounding box. A pixel is inside when all three edge
+functions share a sign consistent with the triangle's signed
+area; the loop walks the bounding box clipped to
+`min(image_extent, framebuffer_dimensions)`. Degenerate
+(zero-area) triangles are skipped.
+
+Out of scope — deferred:
+
+- Strip / fan topologies (only TriangleList today).
+- Indexed draws (`vkCmdDrawIndexed` is recorded; the index
+  fetch path doesn't exist yet).
+- Per-vertex colour interpolation; v0 is flat-shaded with
+  vertex 0's colour.
+- Z-buffering / depth testing — there's no depth attachment.
+- Alpha blending — the high byte of `argb` is recorded but
+  ignored.
+- Viewport / scissor enforcement at raster time (clip is the
+  intersection of the render-target extent and the framebuffer
+  surface).
 
 The reason `Copy*` works while `Draw*` doesn't: copy operations don't
 need shader execution. The framebuffer's pixels move because the
@@ -173,10 +231,13 @@ syscalls that the Win32 thunks issue to reach the ICD. See
 ## Known Limits / GAPs
 
 - **No real GPU submission.** Every device-side command is replayed
-  on the CPU; the only visible effect is `Clear` (and resource
-  copies).
+  on the CPU; the visible effects are `Clear`, resource copies, and
+  the CPU triangle rasterizer for `vkCmdDraw` (DuetOS v0 vertex
+  format, scanout-backed targets, TriangleList topology only).
 - **No SPIR-V execution.** Shader modules are parsed (entry points
-  enumerated, descriptor bindings counted) but not run.
+  enumerated, descriptor bindings counted) but not run. The
+  triangle rasterizer is fixed-function — flat-shaded, no per-vertex
+  attribute interpolation, no depth.
 - **Single queue family.** No async compute, no transfer queue
   separation.
 - **No swapchain resize.** Recreating the swapchain is supported;

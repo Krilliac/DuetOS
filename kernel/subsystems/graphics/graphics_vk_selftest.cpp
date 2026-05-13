@@ -313,12 +313,22 @@ bool RunCanonicalLifecycle()
     if (VkCreateFence(dev, false, &fence) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkCreateFence failed", 0);
 
+    // The cb above recorded `VkCmdDraw(cb, 3, ...)` against a
+    // non-scanout image — the rasterizer must STILL bump the
+    // triangles-drawn counter (one triangle = vertex_count / 3)
+    // even though it skips painting pixels, so the dispatch
+    // chain is observable in tests that don't own the live
+    // framebuffer.
+    const u32 tri_before = internal::TrianglesDrawnCount();
     if (VkQueueSubmit(queue, 1, &cb, fence) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkQueueSubmit failed", 0);
     if (VkWaitForFences(dev, 1, &fence, 0) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkWaitForFences failed", 0);
     if (VkQueueWaitIdle(queue) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkQueueWaitIdle failed", 0);
+    if (internal::TrianglesDrawnCount() <= tri_before)
+        return SelftestFail("[selftest:graphics] triangles-drawn counter did not advance after vkCmdDraw",
+                            internal::TrianglesDrawnCount());
 
     // Memory-mapping leg: allocate host-visible memory, bind two
     // buffers into it, map the source, write a recognisable byte

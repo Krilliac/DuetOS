@@ -123,6 +123,7 @@ u32 g_dispatches = 0;
 u32 g_queries_executed = 0;
 u32 g_memory_maps = 0;
 u32 g_image_upload_pixels = 0;
+u32 g_triangles_drawn = 0;
 u32 g_dynamic_renderings = 0;
 u32 g_debug_labels = 0;
 u32 g_secondary_executes = 0;
@@ -1707,6 +1708,21 @@ void ReplayWriteQueryResult(const CmdRecord& op, bool is_timestamp)
     ++g_queries_executed;
 }
 
+// Resolve a framebuffer handle to its underlying image (via the
+// single attached image view). Returns 0 when any link in the chain
+// is dead, which signals the rasterizer / clear paths to skip.
+static VkImage ResolveFramebufferImage(VkFramebuffer fb_handle)
+{
+    if (!HandleInRange(fb_handle, kFramebufferBase) ||
+        !PoolIsLive(g_framebuffer_pool, SlotOf(fb_handle, kFramebufferBase)))
+        return 0;
+    const auto& fb = g_framebuffer_data[SlotOf(fb_handle, kFramebufferBase)];
+    if (!HandleInRange(fb.attachment, kImageViewBase) ||
+        !PoolIsLive(g_imageview_pool, SlotOf(fb.attachment, kImageViewBase)))
+        return 0;
+    return g_imageview_data[SlotOf(fb.attachment, kImageViewBase)].image;
+}
+
 void ReplayCommandBuffer(VkCommandBuffer cb)
 {
     if (!HandleInRange(cb, kCmdBufBase) || !PoolIsLive(g_cmdbuf_pool, SlotOf(cb, kCmdBufBase)))
@@ -1714,6 +1730,16 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
     const auto& rec = g_cmdbuf_data[SlotOf(cb, kCmdBufBase)];
     if (rec.state != CbState::Executable)
         return;
+
+    // Per-replay state shadow. Tracks the bound state that
+    // `vkCmdDraw` needs to invoke the software rasterizer:
+    // render-target image, binding-0 vertex buffer + offset.
+    // Reset per command-buffer; a secondary cb invoked via
+    // ExecuteCommands gets its own state via the recursive call.
+    VkImage cur_rt_image = 0;
+    VkBuffer cur_vertex_buffer_binding0 = 0;
+    u64 cur_vertex_buffer_offset = 0;
+
     for (u32 i = 0; i < rec.op_count; ++i)
     {
         const auto& op = rec.ops[i];
@@ -1722,9 +1748,11 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
         {
         case CmdOp::ClearColorImage:
             ReplayClear(op);
+            cur_rt_image = op.image;
             break;
         case CmdOp::BeginRenderPass:
             ReplayBeginRenderPass(op);
+            cur_rt_image = ResolveFramebufferImage(op.framebuffer);
             break;
         case CmdOp::CopyBuffer:
             ReplayCopyBuffer(op);
@@ -1767,6 +1795,7 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
             // dynamic rendering's clear value paints the
             // attachment image when scanout-backed.
             PaintScanoutClear(op.image, op.color);
+            cur_rt_image = op.image;
             ++g_dynamic_renderings;
             break;
         case CmdOp::CopyImage: // no real image storage in v0
@@ -1789,15 +1818,24 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
         case CmdOp::InsertDebugLabel:
         case CmdOp::PushDescriptor:
             break;
+        case CmdOp::BindVertexBuffer:
+            if (op.vertex_binding == 0)
+            {
+                cur_vertex_buffer_binding0 = op.vertex_buffer;
+                cur_vertex_buffer_offset = op.vertex_offset_bytes;
+            }
+            break;
+        case CmdOp::Draw:
+            RasterizeDuetTriangles(cur_rt_image, cur_vertex_buffer_binding0, cur_vertex_buffer_offset, op.first_vertex,
+                                   op.vertex_count);
+            break;
         case CmdOp::WaitEvents: // no-op replay (events already signalled)
         case CmdOp::BeginQuery: // pairs with EndQuery — write happens at End
         case CmdOp::EndRenderPass:
         case CmdOp::BindPipeline:
-        case CmdOp::Draw:
         case CmdOp::DrawIndexed:
         case CmdOp::SetViewport:
         case CmdOp::SetScissor:
-        case CmdOp::BindVertexBuffer:
         case CmdOp::BindIndexBuffer:
         // Indirect / dynamic-state-2 / sync2 / subpass / extended-query
         // recorded entries — no GPU side effect in v0; the AppendOp at
@@ -1957,6 +1995,7 @@ GraphicsStats VkStatsSnapshot()
     s.vk_pipeline_barriers = g_pipeline_barriers;
     s.vk_dispatches = g_dispatches;
     s.vk_image_upload_pixels = g_image_upload_pixels;
+    s.vk_triangles_drawn = g_triangles_drawn;
     s.vk_samplers_live = g_sampler_pool.live;
     s.vk_events_live = g_event_pool.live;
     s.vk_pipeline_caches_live = g_pipeline_cache_pool.live;
@@ -2037,6 +2076,10 @@ u32 SpirvEntryPointsSeenCount()
 u32 SpirvCapabilitiesSeenCount()
 {
     return g_spirv_capabilities_seen;
+}
+u32 TrianglesDrawnCount()
+{
+    return g_triangles_drawn;
 }
 
 bool LeakCheckHandlePools()

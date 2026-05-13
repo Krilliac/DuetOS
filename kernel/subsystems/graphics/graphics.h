@@ -54,6 +54,18 @@
  *   - vkQueueSubmit replays the tape.  Clears against an image
  *     that was tagged with kImageScanoutBacked land on the
  *     framebuffer via FramebufferFillRect.
+ *   - vkCmdDraw against a scanout-backed render target runs a
+ *     CPU triangle rasterizer (edge-function, integer math,
+ *     flat-shaded with the colour of vertex 0).  Vertex buffers
+ *     bound at binding 0 are interpreted in the DuetOS v0 fixed
+ *     vertex format: 8 bytes per vertex, packed as
+ *     `{i16 x_px; i16 y_px; u32 argb;}` (0xAARRGGBB; alpha is
+ *     recorded but not blended).  Three consecutive vertices
+ *     form one triangle (TriangleList only).  The rasterizer is
+ *     skipped — but `vk_triangles_drawn` still ticks — when the
+ *     render target isn't scanout-backed or the vertex buffer
+ *     isn't host-visible, so the dispatch chain is observable
+ *     without painting pixels.
  *   - Fence + semaphore create/destroy (signalling is a no-op,
  *     vkWaitForFences returns Success immediately).
  *   - Self-test (`GraphicsIcdSelfTest`) runs the canonical
@@ -1158,6 +1170,7 @@ struct GraphicsStats
     u32 vk_pipeline_barriers;    // count of vkCmdPipelineBarrier ops recorded
     u32 vk_dispatches;           // count of vkCmdDispatch ops recorded
     u32 vk_image_upload_pixels;  // pixels uploaded by vkCmdCopyBufferToImage replay
+    u32 vk_triangles_drawn;      // count of triangles dispatched to the software rasterizer by vkCmdDraw replay
     u32 vk_samplers_live;
     u32 vk_events_live;
     u32 vk_pipeline_caches_live;
