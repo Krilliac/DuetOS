@@ -31,7 +31,11 @@ EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
 WORK_DIR="$(dirname "${OUT_HEADER}")/kernel32_32"
 mkdir -p "${WORK_DIR}"
 OBJ="${WORK_DIR}/kernel32_32.obj"
-DLL="${WORK_DIR}/kernel32_32.dll"
+# Output filename is "kernel32.dll" (not kernel32_32.dll) because
+# lld-link stamps the basename of /out: into the PE Export Directory's
+# Name field. That's the string the PE32 importer's case-insensitive
+# DllNameEqCI compares against "KERNEL32.dll" in the import-descriptor.
+DLL="${WORK_DIR}/kernel32.dll"
 
 CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"
@@ -46,13 +50,16 @@ LLD_LINK="${LLD_LINK:-lld-link}"
 
 rm -f "${DLL}"
 set +e
+# A .def file with `LIBRARY kernel32.dll` sets the PE export-table
+# Name field — the string the PE32 importer's IAT walker compares
+# against the import-descriptor DLL name ("KERNEL32.dll" in
+# pe32_smoke's case). Without this the field would default to the
+# file basename "kernel32_32.dll" and the case-insensitive
+# DllNameEqCI match would never fire.
 "${LLD_LINK}" \
     /dll /noentry /nodefaultlib /machine:x86 \
     /base:0x10020000 \
-    /export:ExitProcess /export:TerminateProcess \
-    /export:GetCurrentProcessId /export:GetCurrentThreadId \
-    /export:GetCurrentProcess /export:GetCurrentThread \
-    /export:GetLastError /export:SetLastError \
+    /def:"${SRC_DIR}/kernel32_32.def" \
     /out:"${DLL}" "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e

@@ -25,23 +25,45 @@
  * rc=0x32 (50 in decimal) is the success signature.
  */
 
+typedef void* HANDLE;
+typedef unsigned long DWORD;
+typedef int BOOL;
+
+#define STD_OUTPUT_HANDLE ((DWORD) - 11)
+
 __declspec(dllimport) void __stdcall ExitProcess(unsigned);
+__declspec(dllimport) HANDLE __stdcall GetStdHandle(DWORD);
+__declspec(dllimport) BOOL __stdcall WriteConsoleA(HANDLE, const void*, DWORD, DWORD*, void*);
+__declspec(dllimport) DWORD __stdcall GetCurrentProcessId(void);
+
+static void say(const char* s)
+{
+    HANDLE h = GetStdHandle(STD_OUTPUT_HANDLE);
+    DWORD n = 0;
+    DWORD len = 0;
+    while (s[len] != '\0')
+        ++len;
+    WriteConsoleA(h, s, len, &n, (void*)0);
+}
 
 void __cdecl mainCRTStartup(void)
 {
-    /* Layer-4 path: call ExitProcess via the PE32 IAT. The kernel
-     * preloads kernel32_32.dll at boot and ResolveImports patches
-     * the IAT slot with the real ExitProcess VA, so this indirect
-     * call lands in our 32-bit kernel32 stub which then issues
-     * `int $0x80` with eax=SYS_EXIT, ebx=uExitCode.
+    /* Exercise the Layer-4 import chain: GetStdHandle returns the
+     * STD_OUTPUT_HANDLE sentinel, WriteConsoleA issues SYS_WRITE
+     * (syscall 2) with fd=1 via our 32-bit kernel32 stub. Each
+     * call is an indirect-call through the post-reloc IAT slot
+     * the loader patched to point at the kernel32_32.dll export.
      *
-     * If for any reason the IAT is unresolved (e.g. the catch-all
-     * NOP stub gets installed), the fallback path below issues
-     * the syscall directly so the smoke never just spins.
-     *
-     * Exit code 0x32 (50 decimal) is the success signature for
-     * the boot-log scraper. */
-    ExitProcess(0x32);
+     * GetCurrentProcessId returns the kernel-assigned pid; we pass
+     * it to ExitProcess so the destroy line carries it as the
+     * exit code — both the "[pe32] hello" print and the
+     * exit-rc=<pid> line are end-to-end signals that the PE32
+     * IAT walker resolved every import correctly. */
+    say("[pe32] hello from compat mode\r\n");
+    /* Exit code carries the pid so the boot-log scraper has a
+     * value to check. Pid 8 (or whatever ProcessCreate assigned)
+     * appears in both `[proc] destroy` and the exit code. */
+    ExitProcess(GetCurrentProcessId());
 
     /* Belt-and-braces fallback: if ExitProcess somehow returned
      * (it never should — it's __declspec(noreturn) on the real API

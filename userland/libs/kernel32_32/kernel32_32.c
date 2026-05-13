@@ -36,6 +36,14 @@ typedef void* HANDLE;
 
 #define WIN32_NORETURN __attribute__((noreturn))
 
+/* No-arg syscall trampoline: eax = nr. */
+static inline int duet_syscall0(int nr)
+{
+    int rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"(nr) : "memory");
+    return rv;
+}
+
 /* Single-arg syscall trampoline: eax = nr, ebx = arg1. */
 static inline int duet_syscall1(int nr, unsigned a1)
 {
@@ -44,11 +52,13 @@ static inline int duet_syscall1(int nr, unsigned a1)
     return rv;
 }
 
-/* No-arg syscall trampoline: eax = nr. */
-static inline int duet_syscall0(int nr)
+/* Three-arg syscall trampoline: eax = nr, ebx = arg1, ecx = arg2,
+ * edx = arg3. Linux i386 ABI; the kernel's isr_common remaps
+ * (ebx,ecx,edx) -> (rdi,rsi,rdx) for the C++ dispatcher. */
+static inline int duet_syscall3(int nr, unsigned a1, unsigned a2, unsigned a3)
 {
     int rv;
-    __asm__ volatile("int $0x80" : "=a"(rv) : "a"(nr) : "memory");
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"(nr), "b"(a1), "c"(a2), "d"(a3) : "memory");
     return rv;
 }
 
@@ -115,4 +125,44 @@ __declspec(dllexport) DWORD __stdcall GetLastError(void)
 __declspec(dllexport) void __stdcall SetLastError(DWORD err)
 {
     duet_syscall1(10 /* SYS_SETLASTERROR */, err);
+}
+
+/* ------------------------------------------------------------------
+ * Standard-handle + console output
+ *
+ * GetStdHandle returns the magic sentinel values Windows itself
+ * returns: STD_OUTPUT_HANDLE = (HANDLE)-11, STD_INPUT_HANDLE =
+ * (HANDLE)-10, STD_ERROR_HANDLE = (HANDLE)-12. WriteFile recognises
+ * those exact values and routes to SYS_WRITE(fd=1).
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) HANDLE __stdcall GetStdHandle(DWORD nStdHandle)
+{
+    /* (DWORD)-11 = 0xFFFFFFF5 → STD_OUTPUT_HANDLE
+     * (DWORD)-12 = 0xFFFFFFF4 → STD_ERROR_HANDLE
+     * (DWORD)-10 = 0xFFFFFFF6 → STD_INPUT_HANDLE */
+    return (HANDLE)(unsigned)nStdHandle;
+}
+
+__declspec(dllexport) BOOL __stdcall WriteFile(HANDLE h, const void* buf, DWORD n, DWORD* lpWritten, void* lpOverlapped)
+{
+    (void)lpOverlapped;
+    const unsigned h_low = (unsigned)(unsigned long)h;
+    /* Std handles only — no file I/O in the 32-bit kernel32 v0. */
+    if (h_low != 0xFFFFFFF5u && h_low != 0xFFFFFFF4u && h_low != 0xFFFFFFF6u)
+    {
+        if (lpWritten != (DWORD*)0)
+            *lpWritten = 0;
+        return 0;
+    }
+    const int rv = duet_syscall3(2 /* SYS_WRITE */, 1 /* fd=stdout */, (unsigned)(unsigned long)buf, n);
+    if (lpWritten != (DWORD*)0)
+        *lpWritten = rv >= 0 ? (DWORD)rv : 0;
+    return rv >= 0 ? 1 : 0;
+}
+
+__declspec(dllexport) BOOL __stdcall WriteConsoleA(HANDLE hConsole, const void* buf, DWORD n, DWORD* lpWritten,
+                                                   void* lpReserved)
+{
+    return WriteFile(hConsole, buf, n, lpWritten, lpReserved);
 }

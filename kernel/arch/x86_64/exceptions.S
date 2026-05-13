@@ -285,6 +285,28 @@ isr_common:
      * No extra sub/add rsp needed. */
     call    TrapDispatch
 
+    /* 32-bit syscall ABI un-remap. The remap above clobbered the
+     * trap frame's rdi (slot 72) and rsi (slot 80) slots with the
+     * remapped arg1 / arg2 values. iretq pops those slots back to
+     * the user's rdi/rsi — but in compat mode the user expects
+     * their pre-syscall edi/esi values to be preserved (32-bit
+     * syscalls don't return in those regs). The remap also wrote
+     * source rsi/rdi into target r10 (slot 40) and target r8
+     * (slot 56); the C++ syscall handlers never write back to arg
+     * slots, so those still hold the user's original rsi/rdi
+     * values. Copy them back to the rsi/rdi slots before the
+     * pop-all. Kernel32_32!WriteFile's `*lpWritten = bytes_written`
+     * needs esi intact to find the caller's DWORD; without this
+     * restore, esi was clobbered with the rcx_user value during
+     * the remap and the store at 0x10021111 page-faulted. */
+    cmp     word ptr [rsp + 144], 0x3B
+    jne     91f
+    mov     r11, [rsp + 40]     /* target r10 still = user's orig rsi */
+    mov     r12, [rsp + 56]     /* target r8  still = user's orig rdi */
+    mov     [rsp + 80], r11     /* restore rsi slot */
+    mov     [rsp + 72], r12     /* restore rdi slot */
+91:
+
     /* Unreachable today (TrapDispatch halts). Kept so the return path is
      * present when some future vector actually returns. */
     pop     r15
