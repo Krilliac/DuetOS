@@ -2257,6 +2257,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::security::Blake2bSelfTest());
     duetos::diag::BootProgress("after-Blake2bSelfTest");
 
+    duetos::diag::BootProgress("before-PasswordHashV2SelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashV2SelfTest());
+    duetos::diag::BootProgress("after-PasswordHashV2SelfTest");
+
     duetos::diag::BootProgress("before-RbacInit");
     duetos::security::RbacInit();
     duetos::security::GraceCacheInit();

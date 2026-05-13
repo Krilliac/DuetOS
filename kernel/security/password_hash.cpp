@@ -1,6 +1,7 @@
 #include "security/password_hash.h"
 
 #include "arch/x86_64/hypervisor.h"
+#include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "crypto/pbkdf2.h"
 #include "util/random.h"
@@ -64,6 +65,120 @@ bool PasswordHashVerify(const char* password, u32 password_len, const PasswordHa
     duetos::crypto::Pbkdf2HmacSha256(reinterpret_cast<const u8*>(password), password_len, record.salt,
                                      kPasswordSaltBytes, record.iterations, candidate, kPasswordHashBytes);
     return ConstantTimeEqual(candidate, record.hash, kPasswordHashBytes);
+}
+
+// ---------------------------------------------------------------------
+// V2 record API.
+//
+// V1 records (PasswordHashRecord, 56 bytes) remain the in-memory
+// shape AuthInit / AuthAddUser write. V2 (PasswordHashRecordV2,
+// 72 bytes) is the shape the persistence layer will write to
+// /system/secrets/accounts.duet — once that layer lands.
+//
+// Today (no persistence): the V2 path exists so callers can be
+// migrated incrementally. The Argon2id arm of the dispatch is a
+// fail-closed stub — see wiki/security/Persistence.md → Dependency
+// order for the v1 plan.
+// ---------------------------------------------------------------------
+
+bool PasswordHashVerifyV2(const char* password, u32 password_len, const PasswordHashRecordV2& record)
+{
+    if (record.version != kPasswordRecordV2Version)
+        return false;
+
+    switch (record.algorithm)
+    {
+    case PasswordAlgorithm::Pbkdf2HmacSha256:
+    {
+        const u32 iters = record.params.pbkdf2.iterations;
+        if (iters == 0 || iters > 10'000'000u)
+            return false;
+        u8 candidate[kPasswordHashBytes];
+        duetos::crypto::Pbkdf2HmacSha256(reinterpret_cast<const u8*>(password), password_len, record.salt,
+                                         kPasswordSaltBytes, iters, candidate, kPasswordHashBytes);
+        return ConstantTimeEqual(candidate, record.hash, kPasswordHashBytes);
+    }
+    case PasswordAlgorithm::Argon2id:
+        // STUB: Argon2id verify path. Blake2b primitive is shipping
+        // (kernel/security/blake2b.{h,cpp}, KAT-verified); Argon2id
+        // on top of it is the next slice. A V2 record carrying
+        // PasswordAlgorithm::Argon2id will round-trip correctly once
+        // the implementation lands; until then any such record fails
+        // closed with a serial-log warning so it's visible in boot.
+        arch::SerialWrite("[password] Argon2id verify requested — not yet implemented\n");
+        return false;
+    default:
+        return false;
+    }
+}
+
+void PasswordHashCreateV2(const char* password, u32 password_len, PasswordHashRecordV2* out)
+{
+    if (out == nullptr)
+        return;
+    // Default to PBKDF2 for v0 — Argon2id is reserved but the
+    // implementation hasn't landed yet (see Persistence.md).
+    // When Argon2id ships, flip this to PasswordAlgorithm::Argon2id
+    // and populate out->params.argon2id from the per-install KDF
+    // params in /system/secrets/header.duet.
+    out->version = kPasswordRecordV2Version;
+    out->algorithm = PasswordAlgorithm::Pbkdf2HmacSha256;
+    duetos::core::RandomFillBytes(out->salt, kPasswordSaltBytes);
+    out->params.pbkdf2.iterations = PasswordDefaultIterations();
+    for (u32 i = 0; i < 3; ++i)
+        out->params.pbkdf2.reserved[i] = 0;
+    duetos::crypto::Pbkdf2HmacSha256(reinterpret_cast<const u8*>(password), password_len, out->salt, kPasswordSaltBytes,
+                                     out->params.pbkdf2.iterations, out->hash, kPasswordHashBytes);
+}
+
+void PasswordHashV2SelfTest()
+{
+    arch::SerialWrite("[password-v2] self-test: V2 record dispatch\n");
+
+    // PBKDF2 arm — exercise round-trip with explicit salt + iters
+    // to keep the test deterministic. The KAT itself is in
+    // PasswordHashSelfTest; here we only check the algorithm
+    // dispatch shape.
+    {
+        const char* pw = "correct horse battery staple";
+        const u32 pw_len = 28;
+        PasswordHashRecordV2 rec{};
+        rec.version = kPasswordRecordV2Version;
+        rec.algorithm = PasswordAlgorithm::Pbkdf2HmacSha256;
+        for (u32 i = 0; i < kPasswordSaltBytes; ++i)
+            rec.salt[i] = static_cast<u8>(i);
+        rec.params.pbkdf2.iterations = 1000;
+        duetos::crypto::Pbkdf2HmacSha256(reinterpret_cast<const u8*>(pw), pw_len, rec.salt, kPasswordSaltBytes, 1000,
+                                         rec.hash, kPasswordHashBytes);
+        KASSERT(PasswordHashVerifyV2(pw, pw_len, rec), "security/password_hash-v2",
+                "PBKDF2 arm: verify rejected correct password");
+        KASSERT(!PasswordHashVerifyV2("wrong", 5, rec), "security/password_hash-v2",
+                "PBKDF2 arm: verify accepted wrong password");
+    }
+
+    // Argon2id arm — stub returns false; record carrying the
+    // reserved algorithm must fail closed.
+    {
+        PasswordHashRecordV2 rec{};
+        rec.version = kPasswordRecordV2Version;
+        rec.algorithm = PasswordAlgorithm::Argon2id;
+        rec.params.argon2id.memory_kib = 65536;
+        rec.params.argon2id.time_cost = 3;
+        rec.params.argon2id.parallelism = 1;
+        KASSERT(!PasswordHashVerifyV2("anything", 8, rec), "security/password_hash-v2",
+                "Argon2id stub should fail closed until implementation lands");
+    }
+
+    // Version mismatch — defensive read of a record from a future
+    // kernel that has bumped the format.
+    {
+        PasswordHashRecordV2 rec{};
+        rec.version = 0xFEEDFACE;
+        rec.algorithm = PasswordAlgorithm::Pbkdf2HmacSha256;
+        KASSERT(!PasswordHashVerifyV2("x", 1, rec), "security/password_hash-v2", "unknown version must fail closed");
+    }
+
+    arch::SerialWrite("[password-v2] self-test: PASS\n");
 }
 
 void PasswordHashSelfTest()
