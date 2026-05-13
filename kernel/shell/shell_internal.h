@@ -580,6 +580,16 @@ void CmdExit(u32 argc, char** argv);
 // ---------------------------------------------------------------
 void CmdLoadTest(u32 argc, char** argv);
 
+// Boot-time stress driver hooks (shell_loadtest.cpp). Same code path
+// as the `loadtest` shell command, but reachable from the kernel boot
+// hook in kernel/diag/stress_driver.cpp without going through the
+// interactive shell or the admin gate. Called from a dedicated kernel
+// task spawned after sched + heap are online.
+void StressDriverCpu(u32 secs, u32 workers);
+void StressDriverMem(u32 mib, u32 secs);
+void StressDriverMix(u32 secs, u32 workers, u32 mib);
+void StressDriverSpin(u32 secs);
+
 // ---------------------------------------------------------------
 // Microbenchmark harness (shell_bench.cpp). Measures cycles/ns
 // per op on specific kernel hot paths (KMalloc, sched::Mutex,

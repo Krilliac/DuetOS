@@ -734,4 +734,31 @@ void CmdLoadTest(u32 argc, char** argv)
     PrintUsage();
 }
 
+// Boot-time stress driver entry points. Used by kernel/diag/stress_driver.cpp
+// to drive the same code paths the shell's `loadtest` command exercises,
+// without going through the interactive shell or the admin gate (which has
+// no user logged in this early). Functions in the anon namespace above are
+// visible here because they share the TU; this layer just renames them for
+// callers that aren't shell-internal. The serial tee carries every
+// ConsoleWrite line, so a headless boot leaves a full transcript behind.
+void StressDriverCpu(u32 secs, u32 workers)
+{
+    RunCpuLoad(secs, workers, false, 0);
+}
+
+void StressDriverMem(u32 mib, u32 secs)
+{
+    RunMemLoad(mib, secs);
+}
+
+void StressDriverMix(u32 secs, u32 workers, u32 mib)
+{
+    RunCpuLoad(secs, workers, true, mib);
+}
+
+void StressDriverSpin(u32 secs)
+{
+    RunSpin(secs);
+}
+
 } // namespace duetos::core::shell::internal
