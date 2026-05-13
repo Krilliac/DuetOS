@@ -4,6 +4,7 @@
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
+#include "util/random.h"
 
 /*
  * virtio-rng — entropy provider.
@@ -15,11 +16,11 @@
  * completion lands, the buffer contents are guaranteed-fresh
  * entropy bytes the kernel can mix into its pool.
  *
- * v0 lands the full request/response round-trip and logs the
- * first 8 bytes pulled per attach. Mixing those bytes into
- * `util/random`'s pool is the next slice — that surface needs a
- * public `RandomMix(const u8*, u64)` and the random TU doesn't
- * have one yet.
+ * v0 lands the full request/response round-trip, mixes the
+ * pulled bytes into the kernel entropy pool via
+ * `core::RandomMix`, and logs the first 8 bytes per attach
+ * as a grep-able boot-log sentinel. The mix is XOR-fold-only
+ * so a misbehaving QEMU device can never weaken the pool.
  */
 
 namespace duetos::drivers::virtio
@@ -64,14 +65,19 @@ bool PullEntropy(VirtioPciLayout* L, VirtioQueue* q)
         u32 used_len = 0;
         if (VirtioQueueTryPop(q, &head, &used_len))
         {
-            // Log the first 8 bytes as a u64. Anyone reviewing
-            // boot logs sees a non-zero, non-repeating value =
-            // the device actually wrote entropy.
+            // Feed the pulled bytes into the kernel entropy pool.
+            // RandomMix only XOR-folds in, so even if QEMU's
+            // virtio-rng misbehaves and returns all zeros, the
+            // pool's existing TSC/HPET seed is unaffected.
+            const u32 mix_len = (used_len < kBufLen) ? used_len : kBufLen;
+            ::duetos::core::RandomMix(buf, mix_len);
+            // Sample the first 8 bytes so the boot log carries a
+            // grep-able non-zero, non-repeating signature.
             u64 sample = 0;
             for (u32 i = 0; i < 8; ++i)
                 sample = (sample << 8) | buf[i];
-            KLOG_INFO_2V("drivers/virtio/rng", "entropy pulled", "bytes", static_cast<u64>(used_len), "sample-u64",
-                         sample);
+            KLOG_INFO_2V("drivers/virtio/rng", "entropy pulled + mixed", "bytes", static_cast<u64>(mix_len),
+                         "sample-u64", sample);
             return true;
         }
         asm volatile("pause" ::: "memory");
@@ -106,10 +112,6 @@ bool VirtioRngProbe(const VirtioPciLayout& L)
     if (PullEntropy(&layout, &g_rng_q))
         g_entropy_pulled = true;
     KLOG_INFO_V("drivers/virtio/rng", "attached", static_cast<u64>(g_entropy_pulled ? 1 : 0));
-    // GAP: entropy is read but not yet mixed into util::random.
-    // `RandomMix` doesn't exist; adding it is the next slice. The
-    // pulled bytes are observable in the boot log so the round-
-    // trip is verifiable today.
     return true;
 }
 

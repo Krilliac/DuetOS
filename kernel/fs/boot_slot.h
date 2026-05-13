@@ -109,4 +109,42 @@ State Rollback(const State& cur);
 /// Called from kernel_main alongside other diag self-tests.
 void SelfTest();
 
+// ---------------------------------------------------------------
+// In-RAM "current state" — single source of truth for "which slot
+// is this kernel running from?". Initialised to Default() at
+// kernel start; the bootloader hand-off (cmdline param `slot=`
+// or a multiboot2 module carrying the on-disk state file) will
+// `SetCurrentState` before any consumer reads it.
+//
+// Consumers: `slotinfo` shell command, the future watchdog that
+// calls `MarkHealthyNow()` once the boot path completes, the
+// installer's "is it safe to flip the active slot?" check.
+// ---------------------------------------------------------------
+
+/// Snapshot of the current boot-slot state. Cheap (struct copy).
+/// Safe from any kernel context.
+State CurrentState();
+
+/// Replace the in-RAM current state. Called by the boot-loader
+/// hand-off path once it has parsed cmdline / loaded the on-disk
+/// state file. Idempotent on the same value.
+void SetCurrentState(const State& state);
+
+/// Convenience: apply `MarkHealthy` against the in-RAM state with
+/// `CurrentState().active` as the running slot. Returns the new
+/// state. The watchdog hook calls this once the boot path
+/// completes — pending → active promotion + tries_remaining
+/// refill all happen here.
+State MarkHealthyNow();
+
+/// Canonical on-disk paths the installer + bootloader integrate
+/// against. The kernel does NOT consume them directly — they
+/// exist here so the integration slices have a single source of
+/// truth for the filename convention.
+inline constexpr const char* kSlotStateFilePath = "/boot/duetos-slot.cfg";
+
+/// Return the ESP-relative path for a given slot's kernel image.
+/// nullptr for invalid slots.
+const char* SlotKernelPath(Slot s);
+
 } // namespace duetos::fs::boot_slot

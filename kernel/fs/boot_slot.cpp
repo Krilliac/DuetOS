@@ -284,6 +284,59 @@ State Rollback(const State& cur)
     return next;
 }
 
+namespace
+{
+// In-RAM current state. Default at boot; SetCurrentState replaces
+// it when the bootloader hand-off lands the parsed on-disk
+// state. Single-CPU access pattern under v0 — shell command +
+// future watchdog both run in process / heartbeat context — so
+// no lock yet.
+constinit State g_current = {};
+constinit bool g_current_initialised = false;
+
+void EnsureInitialised()
+{
+    if (!g_current_initialised)
+    {
+        g_current = Default();
+        g_current_initialised = true;
+    }
+}
+} // namespace
+
+State CurrentState()
+{
+    EnsureInitialised();
+    return g_current;
+}
+
+void SetCurrentState(const State& state)
+{
+    g_current = state;
+    g_current_initialised = true;
+}
+
+State MarkHealthyNow()
+{
+    EnsureInitialised();
+    g_current = MarkHealthy(g_current, g_current.active);
+    return g_current;
+}
+
+const char* SlotKernelPath(Slot s)
+{
+    switch (s)
+    {
+    case Slot::kA:
+        return "/boot/duetos-kernel-a.elf";
+    case Slot::kB:
+        return "/boot/duetos-kernel-b.elf";
+    case Slot::kInvalid:
+    default:
+        return nullptr;
+    }
+}
+
 void SelfTest()
 {
     // 1. Default state is self-consistent.
@@ -328,6 +381,19 @@ void SelfTest()
         ::duetos::core::Panic("fs/boot_slot", "self-test: Parse accepted null buffer");
     if (junk.valid)
         ::duetos::core::Panic("fs/boot_slot", "self-test: Parse left junk.valid set");
+
+    // 7. CurrentState defaults; SetCurrentState round-trips; path helpers.
+    State cur = CurrentState();
+    if (!cur.valid || cur.active != Slot::kA)
+        ::duetos::core::Panic("fs/boot_slot", "self-test: CurrentState default wrong");
+    SetCurrentState(after_healthy);
+    if (CurrentState().active != Slot::kB)
+        ::duetos::core::Panic("fs/boot_slot", "self-test: SetCurrentState didn't take");
+    const char* path_b = SlotKernelPath(Slot::kB);
+    if (path_b == nullptr || path_b[0] != '/' || SlotKernelPath(Slot::kInvalid) != nullptr)
+        ::duetos::core::Panic("fs/boot_slot", "self-test: SlotKernelPath wrong");
+    // Restore default for any subsequent boot consumer.
+    SetCurrentState(Default());
 
     KLOG_INFO("fs/boot_slot", "self-test PASS");
 }

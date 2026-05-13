@@ -1380,6 +1380,143 @@ inventory and [`Design-Decisions`](Design-Decisions.md) for the
 landing notes. The table is removed; future regressions surface
 through the per-DLL smoke tests in `userland/apps/*_smoke/`.
 
+## Tier-1/2 follow-ups (next-slice gaps from the suggest-additions branch)
+
+Tracking the explicit GAPs / STUBs the recent multi-slice feature
+additions left behind. Each one is a clean integration point — the
+kernel-side primitive is in tree; what's missing is the per-call
+wiring that turns "infrastructure exists" into "real callers using
+it."
+
+### VirtIO — virtio-blk BlockDevice integration
+
+- **Today:** `kernel/drivers/virtio/virtio_blk.cpp` does the
+  probe + feature negotiate but doesn't dispatch requests
+  through a virtqueue (STUB marked at the function tail). The
+  shared transport (`virtio_queue.cpp`) hosts the queue setup
+  helpers virtio-rng already uses.
+- **Lands:** virtio-blk allocates one requestq, registers a
+  `BlockDesc` with `BlockDeviceRegister`, and routes
+  `BlockDeviceRead` / `Write` calls through a 3-descriptor
+  chain: `virtio_blk_outhdr` (driver-write) + data
+  (device-write for read, driver-write for write) + status
+  byte (device-write). Read capacity from
+  `device_cfg + 0` (8-byte u64). Polls used ring; IRQ wire-up
+  is a separate slice. Bridges through `mm::PhysToVirt` /
+  `VirtToPhys` so the caller's kernel-virt buffer surfaces
+  the right phys to the device.
+- **Blocks on:** nothing — the queue helpers + the block-
+  device API already exist.
+
+### VirtIO — virtio-net packet TX/RX
+
+- **Today:** `kernel/drivers/virtio/virtio_net.cpp` is
+  probe-only with a STUB marker for the queue + dispatch.
+- **Lands:** virtio-net allocates RX (queue 0) + TX (queue 1)
+  virtqueues, registers a NIC against `kernel/drivers/net/net.h`,
+  pre-fills RX descriptors with empty buffers, dispatches TX
+  on `NetTransmit`. Honour `kNetFeatureMac` (use device-cfg
+  MAC) and `kNetFeatureMq` (multi-queue) when offered. IRQ
+  routing is a separate slice — v0 can poll on a timer.
+
+### VirtIO — per-class drivers for the other classes
+
+- **Today:** `virtio.cpp` enumerates console / balloon / scsi
+  / input / socket and logs "class present but no driver yet"
+  for each.
+- **Lands:** highest-leverage first — `virtio-console` for
+  hypervisor-side serial / debug log forwarding;
+  `virtio-balloon` for hypervisor-controlled memory pressure.
+  Both are spec-stable, modest implementations on top of the
+  shared transport.
+
+### App-compat — per-Win32-API hooks
+
+- **Today:** the policy infrastructure (`compat::CompatPolicy`,
+  `ApplySidecar`, `ShouldIgnoreDebugger` /
+  `ShouldIgnoreEtw` / `ShouldFakeOkStackGuarantee`) is in tree
+  and verified by a boot self-test. No per-API call site
+  consults it yet.
+- **Lands:** for each row in
+  [`Win32-Surface-Status`](Win32-Surface-Status.md) that has a
+  STUB whose semantics flip cleanly on a per-process flag,
+  add a policy consultation. First targets:
+  - `kernel32!IsDebuggerPresent` →
+    `compat::ShouldIgnoreDebugger(CurrentProcess())` for the
+    return value.
+  - The ETW family (`advapi32!EventWrite*`,
+    `EventRegister*`) → `compat::ShouldIgnoreEtw` to silently
+    drop instead of returning `ERROR_INVALID_PARAMETER`.
+  - `kernel32!SetThreadStackGuarantee` →
+    `compat::ShouldFakeOkStackGuarantee` to return TRUE
+    without touching the stack.
+- **Pattern:** the per-call read is one `if (...)` branch.
+  Avoid funneling through a syscall every call — the policy
+  is fixed for a process's lifetime, so DLLs can cache the
+  flags at first call. The cache invalidation story for
+  process re-exec is a v1 concern, not v0.
+
+### IOCP — syscall surface
+
+- **Today:** kernel-side primitive (`kernel/ipc/iocp.{h,cpp}`)
+  with `IocpCompletion` / `IocpPort` + try-post / try-pop /
+  close + boot self-test. No syscall surface; no per-process
+  handle binding.
+- **Lands:** four syscalls (numbers reserved here so future
+  ABI growth is predictable; do not commit numbers until the
+  handlers compile + run):
+  - `SYS_IOCP_CREATE` — kernel allocates an `IocpPort` via
+    the `KObject`-shaped path (mirror `KMutex` / `KEvent`),
+    returns a handle from `proc->kobj_handles`.
+  - `SYS_IOCP_POST` — handle + completion struct → posts to
+    the port.
+  - `SYS_IOCP_WAIT` — handle + timeout → blocks in
+    `KMailbox`-style sleep/wake (the IOCP wrapper currently
+    has a plain inline ring; the wait variant needs a
+    `sched::Condvar` analogue or a wrap over KMailbox).
+  - `SYS_IOCP_CLOSE` — handle release; existing
+    HandleTableRemove path applies once the IocpPort is a
+    proper KObject.
+- **Blocks on:** elevating `IocpPort` to a `KObject` (init,
+  retain, release, destroy callback) so it can sit in the
+  shared handle table.
+
+### A/B kernel slots — installer + bootloader integration
+
+- **Today:** state machine, parser/writer, in-RAM
+  `CurrentState`, path helpers landed
+  (`kernel/fs/boot_slot.{h,cpp}`). No on-disk read at boot;
+  no installer integration; no dynamic grub.cfg.
+- **Lands:**
+  - **Boot hand-off:** parse `slot=a` / `slot=b` from the
+    multiboot2 cmdline; `SetCurrentState` from it. Update
+    the GRUB cfg in tree to pass the parameter.
+  - **Watchdog:** after the heartbeat declares the boot
+    healthy, call `MarkHealthyNow()` and persist the new
+    state to ESP via FAT32 write.
+  - **Installer:** `CmdInstall` writes the new kernel to
+    `SlotKernelPath(Other(active))`, validates, then
+    `BeginInstall(state, Other(active))` + serialise +
+    write the state file.
+  - **GRUB cfg:** two menuentries, one per slot; the
+    install path writes the current `active` as the GRUB
+    default (`set default=a`/`b`). Limine / direct-load
+    flavours pick the same convention.
+
+### PE-compat smoke — per-PE structured pass/fail
+
+- **Today:** the battery emits per-API PASS/FAIL on serial;
+  one anchor line `[pe-compat-smoke] battery complete`
+  proves the queueing path ran. ctest greps for the anchor.
+- **Lands:** a kernel-side aggregator that counts per-PE
+  PASS lines and emits a final `[pe-compat-smoke]
+  passed=N failed=M skipped=K` summary. Requires every
+  smoke PE to standardise its PASS line shape
+  (`[ring3-<n>-smoke] PASS` / `... FAIL <reason>`). One
+  small per-PE source edit per shape; the aggregator
+  watches the serial stream from the kernel side via the
+  klog ring.
+
 ---
 
 ## How to graduate an item
