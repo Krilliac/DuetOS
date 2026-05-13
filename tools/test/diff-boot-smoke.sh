@@ -93,7 +93,7 @@ ROWS=(
     "A-qemu-tcg-qemu64-uefi|qemu|tcg|qemu64|0|0"
     "B-qemu-tcg-max-uefi|qemu|tcg|max|0|0"
     "C-qemu-tcg-qemu64-seabios|qemu|tcg|qemu64|1|0"
-    "D-bochs-core2-seabios|bochs|tcg|core2_penryn_t9600|1|1"
+    "D-bochs-core2-seabios|bochs|tcg|core2_penryn_t9600|1|0"
 )
 
 # Canonical-sentinel filter. Keeps only structured kernel output —

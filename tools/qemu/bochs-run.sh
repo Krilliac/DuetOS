@@ -188,9 +188,31 @@ echo "[bochs-run] serial=${SERIAL_LOG}" >&2
 # `-q` skips the interactive configuration menu (Bochs prompts by
 # default on first run for "press enter to start"). `-f` selects
 # the rc we just wrote. `-rc` feeds the debugger `c` to continue
-# past its t=0 prompt. External `timeout` cuts the run regardless
-# of whether the kernel halts at its sentinel — Bochs doesn't honour
-# QEMU's isa-debug-exit, so reaching the [smoke] complete sentinel
-# leaves the CPU spinning on HLT until we kill it.
-exec timeout --foreground --preserve-status --signal=TERM "${TIMEOUT_SECS}" \
-     bochs -q -f "${BOCHSRC}" -rc "${DEBUGGER_RC}" </dev/null >>"${BOCHS_LOG}" 2>&1
+# past its t=0 prompt. External `timeout` cuts the run if the
+# kernel never reaches its sentinel. The sentinel-watcher (below)
+# kills Bochs early once `[smoke] profile=<X> complete` lands —
+# Bochs doesn't honour QEMU's isa-debug-exit on port 0xf4, so a
+# kernel that reaches its sentinel + HLTs would otherwise pin the
+# host CPU at 100% until the timeout fires, adding ~5 minutes per
+# Bochs row to a passing matrix run.
+timeout --foreground --preserve-status --signal=TERM "${TIMEOUT_SECS}" \
+    bochs -q -f "${BOCHSRC}" -rc "${DEBUGGER_RC}" </dev/null >>"${BOCHS_LOG}" 2>&1 &
+BOCHS_PID=$!
+
+(
+    SENTINEL="[smoke] profile=${SMOKE_PROFILE} complete"
+    # `tail -F` survives the file appearing slightly after this
+    # subshell starts. `--max-count=1` exits after the first
+    # sentinel hit. We then SIGTERM Bochs; the parent's `wait`
+    # drains the exit status.
+    if tail -F "${SERIAL_LOG}" 2>/dev/null | grep --line-buffered -F --max-count=1 "${SENTINEL}" >/dev/null; then
+        kill -TERM "${BOCHS_PID}" 2>/dev/null || true
+    fi
+) &
+WATCHER_PID=$!
+
+wait "${BOCHS_PID}"
+BOCHS_RC=$?
+kill -KILL "${WATCHER_PID}" 2>/dev/null || true
+wait "${WATCHER_PID}" 2>/dev/null || true
+exit "${BOCHS_RC}"
