@@ -905,6 +905,23 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         // plausible, but > 1 GiB user-space RIPs fall outside the
         // PlausibleKernelAddress range and emit a skipped line).
         core::DumpInstructionBytes("user-fault-rip", frame->rip, 16);
+        // Emit a Windows-format minidump for the faulting PE before
+        // we reap the task. Kernel-mode panics already do this at the
+        // hard-panic site below; ring-3 faults previously left no
+        // post-mortem behind, so a PE that crashed on a STUB
+        // import / wild pointer / bad opcode forced an operator to
+        // rebuild + replay just to see register state. With the dump
+        // egressed via debugcon the host gets a real `.dmp` per ring-3
+        // crash — loadable in WinDbg / VS / VSCode — and the NVMe
+        // reserved slot picks up the same bytes for offline triage.
+        u32 user_ntstatus = 0x80000003;
+        if (frame->vector == 6)
+            user_ntstatus = 0xC000001D;
+        else if (frame->vector == 13)
+            user_ntstatus = 0xC0000005;
+        else if (frame->vector == 14)
+            user_ntstatus = 0xC0000005;
+        duetos::diag::minidump::EmitMinidumpFromTrapFrame(frame, user_ntstatus);
         // SchedExit must NOT run with IF=0 forever; it ends in a
         // Schedule() that waits for the reaper, and the reaper needs
         // timer IRQs to make progress. SchedYield/SchedExit internally

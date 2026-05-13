@@ -106,6 +106,37 @@ void CapAuditForceNextSample();
 /// Cheap (one byte load).
 duetos::core::CapAuditMode CapAuditGetMode();
 
+/// A single captured cap-gate denial. Lives in the kernel-owned
+/// ring buffer accessible through `CapAuditCopyRecentDenials`.
+/// All fields are by-value snapshots — no pointers escape the
+/// kernel — so the ring is safe to expose to the shell and to a
+/// future `/proc/caplog` file.
+struct CapAuditDenialRecord
+{
+    u64 sequence;              // monotonic; rolls over after 2^64 denies (never).
+    u64 boot_tick;             // sched tick when the denial fired.
+    u64 syscall_number;        // matches CapAuditEvent.syscall_number.
+    u64 proc_id;               // 0 for kernel-thread origin.
+    u64 required_mask;         // bitmask of required caps.
+    duetos::core::Cap missing; // first missing cap.
+    u8 _pad[7];
+};
+
+/// Copy the most recent denials (newest-first) into `out`. Returns
+/// the count written, capped at `out_cap` and at the ring's live
+/// occupancy. The ring is 256 entries deep; a tight deny storm
+/// older than ~256 events is dropped silently — the operator is
+/// expected to `dmesg` for the full klog history and use this
+/// surface for "what just happened?" triage.
+u64 CapAuditCopyRecentDenials(CapAuditDenialRecord* out, u64 out_cap);
+
+/// Total entries dropped because the ring was full when a denial
+/// arrived. Wraps the simple "256 most recent" model: callers see
+/// a clean cap on the per-call cost, and the operator sees a
+/// non-zero `dropped` count as a signal to widen the buffer (or
+/// to filter the workload that's generating the storm).
+u64 CapAuditDenialDropCount();
+
 /// Set the runtime audit mode. Takes effect on the next
 /// `CapAuditTrace` call. Has NO EFFECT on a build whose compile-time
 /// mode is `Off` — the EmitLine path is dead code in such a build,

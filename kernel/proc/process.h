@@ -2,6 +2,7 @@
 
 #include "fs/fat32.h"
 #include "ipc/handle_table.h"
+#include "loader/compat_shim.h"
 #include "loader/dll_loader.h"
 #include "sched/sched.h"
 #include "util/types.h"
@@ -1214,6 +1215,15 @@ struct Process
     static constexpr u64 kWin32ExtraHeapArenaBase = 0x55000000ULL;
     static constexpr u64 kWin32ExtraHeapStride = 0x100000ULL; // 1 MiB per slot
     Win32ExtraHeap extra_heaps[kWin32ExtraHeapCap];
+
+    // Per-PE app-compat policy applied from a `<exe>.duetcompat`
+    // sidecar at load time. Defaults are all-zero (= kernel behaves
+    // exactly as it did before app-compat existed). The canonical
+    // type lives in `kernel/loader/compat_shim.h` so subsystem
+    // call-sites can `#include` just the small header instead of
+    // the full process.h. Field is inlined into Process; small +
+    // POD-shaped, no allocation needed.
+    compat::CompatPolicy compat_policy;
 
     u64 refcount;
 };

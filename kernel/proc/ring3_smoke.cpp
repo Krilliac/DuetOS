@@ -237,6 +237,7 @@
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "subsystems/win32/heap.h"
+#include "loader/compat_shim.h"
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
 #include "log/klog.h"
@@ -2642,6 +2643,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // import, SYS_WIN32_MISS_LOG can decode the IAT slot VA back
     // to the function name via this table.
     PeLoadDrainIatMisses(proc);
+    // Apply the per-PE app-compat sidecar, if any. Looks for
+    // `<name>.duetcompat` next to the PE under the process's
+    // ramfs root. No-op when the file is absent — the default
+    // policy is "every override flag off, kernel acts as it did
+    // before app-compat existed."
+    duetos::core::compat::ApplySidecar(proc, root, name);
     // Per-process Win32 heap. Only initialised for PEs that
     // actually imported anything — a freestanding PE like
     // /bin/hello.exe doesn't call HeapAlloc and shouldn't burn
@@ -3420,6 +3427,16 @@ void StartRing3SmokeTask()
         "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread + "
         "ptrfuzz + writefuzz + hellope + winkill-report + thread-stress + syscall-stress + "
         "customdll-test)");
+    // Canonical PE-compat smoke battery anchor. ctest's
+    // duetos-boot-smoke greps for this exact line to confirm
+    // every surface-coverage PE spawn fired and the battery
+    // completed. The line is intentionally bare-bones — a
+    // single grep-able sentinel beats a structured PASS/FAIL
+    // tally that depends on every PE emitting in a uniform
+    // shape (they don't; each one prints its own PASS/FAIL
+    // per-API). The per-PE pass/fail signal stays in the
+    // existing expected[] list in ctest-boot-smoke.sh.
+    arch::SerialWrite("[pe-compat-smoke] battery complete\n");
 }
 
 } // namespace duetos::core

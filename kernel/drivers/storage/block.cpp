@@ -69,6 +69,7 @@ i32 RamBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
 constinit const BlockOps kRamBlockOps = {
     /*.read = */ &RamBlockRead,
     /*.write = */ &RamBlockWrite,
+    /*.flush = */ nullptr, // RAM disk is immediately durable; nothing to flush.
 };
 
 // --- Partition-view block device -----------------------------------------
@@ -104,6 +105,7 @@ i32 PartitionBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
 constinit const BlockOps kPartitionBlockOps = {
     /*.read = */ &PartitionBlockRead,
     /*.write = */ &PartitionBlockWrite,
+    /*.flush = */ nullptr, // partition view forwards to parent; flush is owned at the parent level.
 };
 
 // Read-only variant used when the parent device exposes no write
@@ -113,6 +115,7 @@ constinit const BlockOps kPartitionBlockOps = {
 constinit const BlockOps kPartitionBlockOpsRO = {
     /*.read = */ &PartitionBlockRead,
     /*.write = */ nullptr,
+    /*.flush = */ nullptr,
 };
 
 } // namespace
@@ -334,6 +337,19 @@ i32 BlockDeviceWrite(u32 handle, u64 lba, u32 count, const void* buf)
         }
     }
     return d.ops->write(d.cookie, lba, count, buf);
+}
+
+i32 BlockDeviceFlush(u32 handle)
+{
+    if (!ValidHandle(handle))
+        return -1;
+    const BlockDesc& d = g_devices[handle].desc;
+    // Absent flush = nothing-to-flush success. Filesystem code
+    // that commits at every fsync doesn't need to special-case
+    // backends without a flush op (RAM disk, read-only mounts).
+    if (d.ops->flush == nullptr)
+        return 0;
+    return d.ops->flush(d.cookie);
 }
 
 u32 RamBlockDeviceCreate(const char* name, u32 sector_size, u64 sector_count)

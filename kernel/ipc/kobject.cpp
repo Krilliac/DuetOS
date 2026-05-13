@@ -56,6 +56,8 @@ const char* KObjectTypeName(KObjectType type)
         return "waitable";
     case KObjectType::File:
         return "file";
+    case KObjectType::Iocp:
+        return "iocp";
     case KObjectType::Test:
         return "test";
     default:

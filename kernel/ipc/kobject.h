@@ -65,6 +65,7 @@ enum class KObjectType : u32
     Mailbox = 4,
     Waitable = 5,
     File = 6, ///< KFile — open file descriptor (plan A3-followup).
+    Iocp = 7, ///< IocpPort — I/O completion port (Win32 IOCP backing).
 
     /// Used by the v0 self-test exclusively. Real kernel code must
     /// never use this — it exists so the infrastructure can be

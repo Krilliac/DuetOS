@@ -81,6 +81,13 @@ struct BlockOps
     /// read-only devices — the layer returns -1 without
     /// calling through.
     i32 (*write)(void* cookie, u64 lba, u32 count, const void* buf);
+    /// Optional flush hook. Returns 0 on success, -1 on any
+    /// failure. May be nullptr — the layer treats absent flush
+    /// as "nothing to flush" and returns 0 without calling
+    /// through. Filesystem drivers call this at commit points
+    /// (fsync, journal close) so the device persists any
+    /// in-flight writes before the call returns.
+    i32 (*flush)(void* cookie);
 };
 
 /// Register a backend. Returns a stable handle for the life of
@@ -141,6 +148,13 @@ inline ::duetos::core::Result<void> TryBlockDeviceWrite(u32 handle, u64 lba, u32
         return ::duetos::core::Err{::duetos::core::ErrorCode::IoError};
     return {};
 }
+
+/// Flush any in-flight writes on `handle`. Returns 0 on success
+/// (including when the backend has no flush op — the layer
+/// treats absent as a no-op success), -1 on failure. Filesystem
+/// drivers call this at commit points so the device persists
+/// before the call returns.
+i32 BlockDeviceFlush(u32 handle);
 
 // -------------------------------------------------------------------
 // Write-guard for sensitive LBAs.

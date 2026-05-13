@@ -201,6 +201,35 @@ RandomStats RandomStatsRead()
     return g_stats;
 }
 
+void RandomMix(const void* buf, u64 len)
+{
+    if (buf == nullptr || len == 0)
+        return;
+    // Fold caller bytes into the splitmix state 8 bytes at a time,
+    // then byte-by-byte for any tail. Each fold is a XOR followed
+    // by one Splitmix64 step so a degenerate caller (all zeros)
+    // still advances the state instead of leaving it unchanged.
+    // The state only grows in entropy: XOR cannot reduce it, and
+    // the Splitmix64 mix function is a bijection, so the post-mix
+    // state remains at least as random as the pre-mix state.
+    const u8* p = static_cast<const u8*>(buf);
+    u64 i = 0;
+    while (i + 8 <= len)
+    {
+        u64 chunk = 0;
+        for (u32 b = 0; b < 8; ++b)
+            chunk |= static_cast<u64>(p[i + b]) << (b * 8);
+        g_splitmix_state ^= chunk;
+        (void)Splitmix64(g_splitmix_state);
+        i += 8;
+    }
+    for (; i < len; ++i)
+    {
+        g_splitmix_state ^= static_cast<u64>(p[i]);
+        (void)Splitmix64(g_splitmix_state);
+    }
+}
+
 Uuid UuidV4()
 {
     Uuid u;

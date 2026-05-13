@@ -71,6 +71,21 @@ RandomStats RandomStatsRead();
 /// isn't all-zeros / all-0xFF / trivially monotonic. Logs result.
 void RandomSelfTest();
 
+/// Mix `len` bytes of caller-supplied entropy into the pool. Used by
+/// external entropy sources (virtio-rng, hardware HWRNG drivers, the
+/// future early-boot interrupt-jitter collector) to push their bytes
+/// through to RandomU64 / RandomFillBytes consumers without
+/// replacing the existing TSC/HPET seed path. Cheap; bounded by
+/// `len` (the implementation mixes byte-by-byte). Calling with
+/// `len == 0` or `buf == nullptr` is a safe no-op so callers don't
+/// need to guard.
+///
+/// Bytes coming from an untrusted source (e.g. a misbehaving
+/// virtio-rng QEMU device that returns all zeros) cannot WORSEN
+/// the pool — they only ever XOR-mix in, so the post-mix state
+/// remains at least as random as it was before.
+void RandomMix(const void* buf, u64 len);
+
 // -------------------------------------------------------------------
 // UUID v4 — RFC 4122 §4.4 "random-based" UUID.
 //

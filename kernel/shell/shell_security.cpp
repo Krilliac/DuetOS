@@ -18,6 +18,7 @@
 #include "drivers/video/console.h"
 #include "security/attack_sim.h"
 #include "security/broker.h"
+#include "security/cap_audit.h"
 #include "security/event_ring.h"
 #include "security/grace.h"
 #include "security/guard.h"
@@ -901,6 +902,78 @@ void CmdPurple()
     ConsoleWrite(" runbooks=");
     WriteU64Dec(s.runbooks_emitted);
     ConsoleWriteln("");
+}
+
+// ---------------------------------------------------------------
+// caplog — operator-readout for the last N cap-gate denials.
+//
+// The `security::CapAuditTrace` hook fires for every cap-gated
+// syscall and captures denials into a fixed 256-entry ring. This
+// command drains the ring, newest-first, printing one row per
+// denial: sequence, tick, pid, syscall #, missing cap. With no
+// arguments, prints up to 32 rows. A numeric arg overrides the
+// row cap, clamped at the ring's depth.
+//
+// Operator workflow: `caplog` after a workload to see what cap
+// gates fired; cross-reference with the originating process's
+// `ps` row + the syscall name table to identify which subsystem
+// asked for something it didn't have.
+// ---------------------------------------------------------------
+void CmdCaplog(u32 argc, char** argv)
+{
+    u64 want = 32;
+    if (argc >= 2)
+    {
+        u64 v = 0;
+        bool ok = false;
+        for (const char* s = argv[1]; *s != '\0'; ++s)
+        {
+            if (*s < '0' || *s > '9')
+            {
+                ok = false;
+                break;
+            }
+            v = v * 10 + static_cast<u64>(*s - '0');
+            ok = true;
+        }
+        if (!ok)
+        {
+            ConsoleWriteln("CAPLOG: USAGE: CAPLOG [COUNT]");
+            return;
+        }
+        want = v;
+    }
+    if (want > 256)
+        want = 256;
+    duetos::security::CapAuditDenialRecord recs[256];
+    const u64 got = duetos::security::CapAuditCopyRecentDenials(recs, want);
+    ConsoleWrite("CAP-AUDIT: calls=");
+    WriteU64Dec(duetos::security::CapAuditCallCount());
+    ConsoleWrite(" denies=");
+    WriteU64Dec(duetos::security::CapAuditDenyCount());
+    ConsoleWrite(" ring-dropped=");
+    WriteU64Dec(duetos::security::CapAuditDenialDropCount());
+    ConsoleWriteln("");
+    if (got == 0)
+    {
+        ConsoleWriteln("CAPLOG: NO DENIALS RECORDED");
+        return;
+    }
+    ConsoleWriteln("  SEQ      TICK      PID  SYS#  MISSING-CAP");
+    for (u64 i = 0; i < got; ++i)
+    {
+        const auto& r = recs[i];
+        ConsoleWrite("  ");
+        WriteU64Dec(r.sequence);
+        ConsoleWrite("  ");
+        WriteU64Dec(r.boot_tick);
+        ConsoleWrite("  ");
+        WriteU64Dec(r.proc_id);
+        ConsoleWrite("  ");
+        WriteU64Dec(r.syscall_number);
+        ConsoleWrite("  ");
+        ConsoleWriteln(duetos::core::CapName(r.missing));
+    }
 }
 
 } // namespace duetos::core::shell::internal

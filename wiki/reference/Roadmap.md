@@ -617,10 +617,14 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   device table that walks every xHCI controller's port
   records (vendor:product, speed, class label,
   HID kbd/mouse hint). Read-only.
-- **Blocks on:** virtio child enumeration to merge in (no
-  virtio bus walker exists today), `Eject` capability
-  gating, and a hot-unplug driver path that the AHCI /
-  xHCI controllers don't yet support.
+- **Blocks on:** `Eject` capability gating, and a
+  hot-unplug driver path that the AHCI / xHCI controllers
+  don't yet support. (The VirtIO bus walker landed —
+  `drivers/virtio::VirtioInit()` enumerates every modern
+  VirtIO PCI function and feeds `VirtioStats`; the Device
+  Manager can now read `GetStats()` to render the virtio
+  section. Per-class probes — rng / blk / net — are
+  attach-only in v0; queue-setup + I/O is the next slice.)
 
 ### Network Status — Wi-Fi scan
 
@@ -1375,6 +1379,163 @@ All twelve imported quick wins (QW-01..QW-12) shipped — see
 inventory and [`Design-Decisions`](Design-Decisions.md) for the
 landing notes. The table is removed; future regressions surface
 through the per-DLL smoke tests in `userland/apps/*_smoke/`.
+
+## Tier-1/2 follow-ups (next-slice gaps from the suggest-additions branch)
+
+Tracking the explicit GAPs / STUBs the recent multi-slice feature
+additions left behind. Each one is a clean integration point — the
+kernel-side primitive is in tree; what's missing is the per-call
+wiring that turns "infrastructure exists" into "real callers using
+it."
+
+### VirtIO — virtio-blk concurrency + IRQ
+
+- **Today:** read, write, AND flush paths all land. The
+  `BlockOps` vtable grew a `flush` slot;
+  `BlockDeviceFlush(handle)` calls through (returns 0 for
+  backends with no flush hook). virtio-blk routes the flush
+  through `VIRTIO_BLK_T_FLUSH` via the same shared scratch
+  page; the other registered backends (RAM disk, partition
+  view, NVMe, AHCI) declare `flush = nullptr` until their
+  own flush primitives wire up.
+- **Lands:**
+  - Per-call locking once concurrent I/O matters (today's
+    single-in-flight model is observed-safe on the boot
+    path).
+  - IRQ wire-up so consumers don't pay a busy-poll for I/O
+    that's already serviced by the host.
+
+### VirtIO — virtio-net packet TX/RX
+
+- **Today:** `kernel/drivers/virtio/virtio_net.cpp` is
+  probe-only with a STUB marker for the queue + dispatch.
+- **Lands:** virtio-net allocates RX (queue 0) + TX (queue 1)
+  virtqueues, registers a NIC against `kernel/drivers/net/net.h`,
+  pre-fills RX descriptors with empty buffers, dispatches TX
+  on `NetTransmit`. Honour `kNetFeatureMac` (use device-cfg
+  MAC) and `kNetFeatureMq` (multi-queue) when offered. IRQ
+  routing is a separate slice — v0 can poll on a timer.
+
+### VirtIO — per-class polish
+
+- **Today:** every per-class probe v0 ships.
+  - virtio-rng pulls entropy into the kernel pool via
+    `RandomMix`.
+  - virtio-blk drives read + write + flush through
+    `BlockDevice`.
+  - virtio-net transmits frames via `VirtioNetTransmit`
+    (TX-only).
+  - virtio-console writes to the host via
+    `VirtioConsoleWrite` AND drains host-typed bytes from
+    the receiveq via `VirtioConsolePollByte`.
+  - virtio-balloon negotiates + installs inflateq +
+    deflateq; the device sees a fully-configured driver.
+- **Lands:**
+  - **virtio-blk concurrency + IRQ** (see entry above).
+  - **virtio-net RX queue + NIC registration** so inbound
+    frames land on the kernel net stack and `NetTransmit`
+    routes through `VirtioNetTransmit`.
+  - **virtio-console multiport** —
+    `VIRTIO_CONSOLE_F_MULTIPORT` + the control-queue
+    protocol.
+  - **virtio-balloon inflate/deflate policy** — driver
+    hands PFNs back on inflate requests. The harder half
+    is the "when do we agree to give up memory?" policy;
+    spec-pure dispatch is straightforward.
+  - IRQ wire-up across the board (rng, blk, net, console,
+    balloon).
+
+### App-compat — per-Win32-API hooks
+
+- **Today:** the policy infrastructure (`compat::CompatPolicy`,
+  `ApplySidecar`, `ShouldIgnoreDebugger` /
+  `ShouldIgnoreEtw` / `ShouldFakeOkStackGuarantee`) is in tree
+  and verified by a boot self-test. No per-API call site
+  consults it yet.
+- **Lands:** for each row in
+  [`Win32-Surface-Status`](Win32-Surface-Status.md) that has a
+  STUB whose semantics flip cleanly on a per-process flag,
+  add a policy consultation. First targets:
+  - `kernel32!IsDebuggerPresent` →
+    `compat::ShouldIgnoreDebugger(CurrentProcess())` for the
+    return value.
+  - The ETW family (`advapi32!EventWrite*`,
+    `EventRegister*`) → `compat::ShouldIgnoreEtw` to silently
+    drop instead of returning `ERROR_INVALID_PARAMETER`.
+  - `kernel32!SetThreadStackGuarantee` →
+    `compat::ShouldFakeOkStackGuarantee` to return TRUE
+    without touching the stack.
+- **Pattern:** the per-call read is one `if (...)` branch.
+  Avoid funneling through a syscall every call — the policy
+  is fixed for a process's lifetime, so DLLs can cache the
+  flags at first call. The cache invalidation story for
+  process re-exec is a v1 concern, not v0.
+
+### IOCP — primitive consolidation + blocking wait
+
+- **Today:** two parallel IOCP infrastructures exist in
+  tree:
+  - The legacy `kernel/subsystems/win32/iocp_job.{h,cpp}`
+    impl provides `SYS_IOCP_CREATE/SET/REMOVE/CLOSE`
+    (numbers 159–162) — wire-compatible with the Win32
+    ABI shape the existing Win32 DLLs expect.
+  - The newer `kernel/ipc/iocp.{h,cpp}` KObject-compliant
+    primitive — `IocpPort` embeds a `KObject base` (type
+    `KObjectType::Iocp = 7`); `IocpCreate` allocates via
+    kheap + `KObjectInit`; destroy callback frees on last
+    release. Boot self-test covers FIFO + overflow +
+    KObject round-trip.
+- **Lands:**
+  - **Consolidation:** migrate `iocp_job.cpp` onto the
+    new KObject-shaped `IocpPort` so the per-process
+    storage sits in `kobj_handles` alongside KMutex /
+    KEvent (uniform handle-table semantics).
+  - **Blocking wait** (`GetQueuedCompletionStatus` with
+    non-zero timeout) — needs a condvar in `IocpPort`
+    (mirror `KMailbox`'s `not_empty`).
+  - A `SYS_IOCP_POST` (synthetic completion injection,
+    `PostQueuedCompletionStatus`) to round out the
+    Win32 ABI — the legacy `iocp_job` surface doesn't
+    expose this yet.
+
+### A/B kernel slots — installer + GRUB cfg
+
+- **Today:** state machine, parser/writer, in-RAM
+  `CurrentState`, path helpers, boot-time hand-off,
+  heartbeat-driven watchdog mark-healthy, AND
+  callback-based persistence helpers (`LoadVia` /
+  `SaveVia`) all landed. The persistence helpers take
+  caller-supplied I/O callbacks so the FAT32 / ramfs /
+  DuetFS integrations plug in without coupling
+  `boot_slot` to any specific FS. The self-test exercises
+  the round-trip through an in-memory buffer.
+- **Lands:**
+  - **Installer:** `CmdInstall` writes the new kernel to
+    `SlotKernelPath(Other(active))`, validates, then
+    `BeginInstall(state, Other(active))` +
+    `SaveVia(<fat32-writer>, &state)` so the new state
+    persists on the ESP. The FAT32 writer callback is the
+    only new code — `boot_slot` handles the rest.
+  - **GRUB cfg:** two menuentries, one per slot; the
+    install path writes the current `active` as the GRUB
+    default (`set default=a`/`b`) and embeds the matching
+    `slot=a` / `slot=b` in each menuentry's `multiboot2`
+    line. Limine / direct-load flavours pick the same
+    convention.
+
+### PE-compat smoke — per-PE structured pass/fail
+
+- **Today:** the battery emits per-API PASS/FAIL on serial;
+  one anchor line `[pe-compat-smoke] battery complete`
+  proves the queueing path ran. ctest greps for the anchor.
+- **Lands:** a kernel-side aggregator that counts per-PE
+  PASS lines and emits a final `[pe-compat-smoke]
+  passed=N failed=M skipped=K` summary. Requires every
+  smoke PE to standardise its PASS line shape
+  (`[ring3-<n>-smoke] PASS` / `... FAIL <reason>`). One
+  small per-PE source edit per shape; the aggregator
+  watches the serial stream from the kernel side via the
+  klog ring.
 
 ---
 

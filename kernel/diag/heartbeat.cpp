@@ -6,6 +6,7 @@
 #include "mm/kheap.h"
 #include "sched/sched.h"
 #include "subsystems/translation/translate.h"
+#include "fs/boot_slot.h"
 #include "fs/ramfs.h"
 #include "security/fault_domain.h"
 #include "log/klog.h"
@@ -58,10 +59,24 @@ u64 DeltaClampMonotonic(const char* counter_name, u64 now, u64 prev)
     // yielding, so a long stall just compresses subsequent
     // heartbeats rather than breaking the loop.
     u64 deadline = sched::SchedNowTicks() + kHeartbeatTicks;
+    // A/B-slot watchdog: once we've made it past the FIRST heartbeat
+    // delay, the boot path is provably reaching steady state. Mark
+    // the current slot healthy so the next boot has a fresh
+    // tries_remaining + last_healthy pin, and a botched kernel update
+    // can't run away with the active flag. Idempotent: subsequent
+    // beats are no-ops via the static guard.
+    static constinit bool s_marked_healthy = false;
     for (;;)
     {
         sched::SchedSleepUntil(deadline);
         deadline += kHeartbeatTicks;
+        if (!s_marked_healthy)
+        {
+            const auto st = ::duetos::fs::boot_slot::MarkHealthyNow();
+            LogWithString(LogLevel::Info, "kheartbeat", "boot-slot healthy", "active",
+                          ::duetos::fs::boot_slot::Name(st.active));
+            s_marked_healthy = true;
+        }
 
         const auto sched_stats = sched::SchedStatsRead();
         const auto heap_stats = mm::KernelHeapStatsRead();

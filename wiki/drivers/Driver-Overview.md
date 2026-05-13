@@ -20,6 +20,7 @@ directly.
 | Class | Path | Notable drivers |
 |-------|------|-----------------|
 | PCI bus | `kernel/drivers/pci/` | PCIe enumeration |
+| VirtIO | `kernel/drivers/virtio/` | Shared transport + virtio-rng, virtio-blk, virtio-net (probe-only v0) |
 | Storage | `kernel/drivers/storage/` | NVMe, AHCI |
 | USB | `kernel/drivers/usb/` | xHCI host + HID/MSC/CDC-ECM/RNDIS class |
 | Network | `kernel/drivers/net/` | Intel e1000 |
@@ -28,6 +29,19 @@ directly.
 | Input | `kernel/drivers/input/` | PS/2 keyboard/mouse |
 | Video | `kernel/drivers/video/` | Framebuffer, compositor primitives, theme |
 | Power | `kernel/drivers/power/` | Reboot / shutdown |
+
+The **VirtIO bus** is the canonical entry point for guest workloads
+running under QEMU / KVM / cloud hypervisors — every cloud /CI
+environment exposes paravirtualised devices instead of real PCH
+NICs or NVMe controllers. `VirtioInit()` walks every modern VirtIO
+PCI function (vendor `0x1AF4`, device `0x1040..0x107F`), maps the
+common / notify / isr / device cfg cap regions through `mm::MapMmio`,
+runs the reset → ACK → DRIVER → FEATURES_OK → DRIVER_OK status
+dance, and dispatches by class to the per-device probe. v0 ships
+`virtio-rng`, `virtio-blk` and `virtio-net` as attach-only probes —
+they negotiate features and log the device but don't yet set up
+virtqueues. Queue setup + I/O dispatch is the next slice; the
+shared transport hosts the seam where it lands.
 
 ## Hardware Target Matrix
 

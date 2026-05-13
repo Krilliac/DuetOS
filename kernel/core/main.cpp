@@ -128,6 +128,7 @@
 #include "net/wireless/wifi_diag.h"
 #include "drivers/mei/mei.h"
 #include "drivers/pci/pci.h"
+#include "drivers/virtio/virtio.h"
 #include "drivers/power/power.h"
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/hid_descriptor.h"
@@ -143,6 +144,7 @@
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
 #include "drivers/storage/nvme.h"
+#include "fs/boot_slot.h"
 #include "fs/duetfs.h"
 #include "fs/exfat.h"
 #include "fs/ext4.h"
@@ -204,6 +206,7 @@
 #include "mm/frame_allocator.h"
 #include "mm/zone.h"
 #include "ipc/handle_table.h"
+#include "ipc/iocp.h"
 #include "diag/boot_progress.h"
 #include "diag/event_trace.h"
 #include "diag/fault_react.h"
@@ -279,6 +282,7 @@
 #include "subsystems/win32/nt_coverage.h"
 #include "subsystems/win32/registry.h"
 #include "subsystems/win32/window_syscall.h"
+#include "loader/compat_shim.h"
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
 #include "shell/shell.h"
@@ -1139,6 +1143,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Exercising process / capability helpers.\n");
     DUETOS_BOOT_SELFTEST(duetos::core::ProcessSelfTest());
+
+    SerialWrite("[boot] Exercising PE app-compat sidecar parser.\n");
+    DUETOS_BOOT_SELFTEST(duetos::core::compat::SelfTest());
+
+    SerialWrite("[boot] Exercising A/B boot-slot state machine.\n");
+    DUETOS_BOOT_SELFTEST(duetos::fs::boot_slot::SelfTest());
+
+    SerialWrite("[boot] Exercising IOCP completion-port primitive.\n");
+    DUETOS_BOOT_SELFTEST(duetos::ipc::IocpSelfTest());
 
     SerialWrite("[boot] Exercising kernel registry helpers.\n");
     DUETOS_BOOT_SELFTEST(duetos::subsystems::win32::registry::RegistrySelfTest());
@@ -2316,6 +2329,27 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         SerialWrite(cmdline);
         SerialWrite("\"\n");
     }
+    // Pick up the A/B boot-slot hand-off from the bootloader. `slot=a`
+    // or `slot=b` overrides the default; absence is treated as
+    // slot=a (the boot_slot::Default fallback). Once SetCurrentState
+    // runs, the running kernel's `CurrentState()` reflects which slot
+    // it's executing from, which lets the future watchdog +
+    // installer + shell `slotinfo` all answer "which slot am I?"
+    // without re-deriving it.
+    if (CmdlineMatches(cmdline, "slot", "b"))
+    {
+        auto st = duetos::fs::boot_slot::CurrentState();
+        st.active = duetos::fs::boot_slot::Slot::kB;
+        duetos::fs::boot_slot::SetCurrentState(st);
+        SerialWrite("[boot] boot-slot active=b (from cmdline)\n");
+    }
+    else if (CmdlineMatches(cmdline, "slot", "a"))
+    {
+        auto st = duetos::fs::boot_slot::CurrentState();
+        st.active = duetos::fs::boot_slot::Slot::kA;
+        duetos::fs::boot_slot::SetCurrentState(st);
+        SerialWrite("[boot] boot-slot active=a (from cmdline)\n");
+    }
     // Pin the qemu-smoke profile early. Read once, cached. If the
     // cmdline carries `smoke=<profile>`, every subsequent SmokeProfile*
     // query in the boot tail (ring3 spawn gate, Linux ABI gate, sleep-
@@ -2944,6 +2978,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Enumerating PCI bus.\n");
     duetos::drivers::pci::PciEnumerate();
+
+    SerialWrite("[boot] Probing VirtIO PCI devices.\n");
+    duetos::drivers::virtio::VirtioInit();
 
     SerialWrite("[boot] Detecting Intel MEI/HECI devices.\n");
     duetos::drivers::mei::MeiInit();

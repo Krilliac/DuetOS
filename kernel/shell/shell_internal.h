@@ -452,6 +452,7 @@ void CmdTranslate();
 void CmdRead(u32 argc, char** argv);
 void CmdExec(u32 argc, char** argv);
 void CmdReadelf(u32 argc, char** argv);
+void CmdPeTriage(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Process + security commands. Kill / Spawn live in
@@ -463,6 +464,7 @@ void CmdGuard(u32 argc, char** argv);
 void CmdAttackSim();
 void CmdSecEvents(u32 argc, char** argv);
 void CmdPolicy(u32 argc, char** argv);
+void CmdCaplog(u32 argc, char** argv);
 void CmdPurple();
 
 // ---------------------------------------------------------------

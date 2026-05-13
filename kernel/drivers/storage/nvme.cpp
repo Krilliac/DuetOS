@@ -890,6 +890,7 @@ constinit u64 g_panic_last_bytes = 0;
 constinit const BlockOps kNvmeBlockOps = {
     /*.read = */ &NvmeBlockRead,
     /*.write = */ &NvmeBlockWrite,
+    /*.flush = */ nullptr, // NVMe Flush (opcode 0x00 on Admin / 0x00 on IO) — wired alongside FUA writes.
 };
 
 bool RegisterAsBlockDevice()
