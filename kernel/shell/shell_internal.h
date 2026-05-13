@@ -453,6 +453,7 @@ void CmdRead(u32 argc, char** argv);
 void CmdExec(u32 argc, char** argv);
 void CmdReadelf(u32 argc, char** argv);
 void CmdPeTriage(u32 argc, char** argv);
+void CmdLiveUpdate(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Process + security commands. Kill / Spawn live in

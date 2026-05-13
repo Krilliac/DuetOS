@@ -102,6 +102,21 @@ SECTIONS
         __init_array_end = .;
     }
 
+    /* Hot-patch pair registry. Each KHOTPATCH_REGISTER_PAIR
+     * macro emits one HotPatchPair struct into this section.
+     * `live-update kernel-auto-patch` walks
+     * [__duetos_hotpatch_pairs_start, __duetos_hotpatch_pairs_end)
+     * and installs every entry that isn't already live. See
+     * kernel/debug/hot_patch.h for the macro + record layout.
+     * KEEP() so the entries survive `--gc-sections`.
+     */
+    .duetos_hotpatch_pairs : AT(ADDR(.duetos_hotpatch_pairs) - KERNEL_VIRTUAL_BASE) ALIGN(8)
+    {
+        __duetos_hotpatch_pairs_start = .;
+        KEEP(*(.duetos_hotpatch_pairs .duetos_hotpatch_pairs.*))
+        __duetos_hotpatch_pairs_end = .;
+    }
+
     . = ALIGN(4K);
     _rodata_end = .;
 

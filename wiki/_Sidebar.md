@@ -81,6 +81,7 @@
 - [Wiki Auto-Sections](tooling/Wiki-Auto-Sections.md)
 - [duet-pkg (package manager)](tooling/Duet-Pkg.md)
 - [Portable Native Apps](tooling/Native-Apps.md)
+- [Live Updates](tooling/Live-Updates.md)
 
 ### Specifications
 - [Syscall ABI](specifications/Syscall-ABI.md)
