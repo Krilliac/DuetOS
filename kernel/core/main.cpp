@@ -232,9 +232,16 @@
 #include "time/timekeeper.h"
 #include "time/timezone.h"
 #include "diag/cleanroom_trace.h"
+#include "security/argon2id.h"
 #include "security/auth.h"
 #include "security/auth_pentest.h"
+#include "security/blake2b.h"
+#include "security/chacha20_poly1305.h"
+#include "security/persistence.h"
+#include "security/broker.h"
 #include "security/cap_audit.h"
+#include "security/grace.h"
+#include "security/rbac.h"
 #include "security/kaslr.h"
 #include "loader/firmware_loader.h"
 #include "loader/firmware_package.h"
@@ -2239,8 +2246,49 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::diag::BootProgress("after-AuthInit");
     DUETOS_BOOT_SELFTEST(duetos::core::AuthSelfTest());
     duetos::diag::BootProgress("after-AuthSelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::core::AuthSnapshotSelfTest());
+    duetos::diag::BootProgress("after-AuthSnapshotSelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::core::AuthLazyMigrationSelfTest());
+    duetos::diag::BootProgress("after-AuthLazyMigrationSelfTest");
     DUETOS_BOOT_SELFTEST(duetos::security::AuthBruteForceProbe());
     duetos::diag::BootProgress("after-AuthBruteForceProbe");
+
+    // Role-based access control: seed the built-in role table and
+    // bind the default memberships. Must precede the broker self-
+    // test below (which uses the seeded role policy to authorise
+    // the synthetic FsWrite elevation). The grace cache likewise
+    // needs an explicit Init before broker calls. Order:
+    //   RbacInit -> GraceCacheInit -> BrokerSelfTest -> RbacSelfTest -> GraceCacheSelfTest
+    // (See wiki/security/RBAC-and-Elevation.md for the design.)
+    duetos::diag::BootProgress("before-Blake2bSelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::security::Blake2bSelfTest());
+    duetos::diag::BootProgress("after-Blake2bSelfTest");
+
+    duetos::diag::BootProgress("before-Argon2idSelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::security::Argon2idSelfTest());
+    duetos::diag::BootProgress("after-Argon2idSelfTest");
+
+    duetos::diag::BootProgress("before-ChaCha20Poly1305SelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::security::ChaCha20Poly1305SelfTest());
+    duetos::diag::BootProgress("after-ChaCha20Poly1305SelfTest");
+
+    duetos::diag::BootProgress("before-PersistenceSelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::security::PersistenceSelfTest());
+    duetos::diag::BootProgress("after-PersistenceSelfTest");
+
+    duetos::diag::BootProgress("before-PasswordHashV2SelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashV2SelfTest());
+    duetos::diag::BootProgress("after-PasswordHashV2SelfTest");
+
+    duetos::diag::BootProgress("before-RbacInit");
+    duetos::security::RbacInit();
+    duetos::security::GraceCacheInit();
+    duetos::diag::BootProgress("after-RbacInit");
+    DUETOS_BOOT_SELFTEST(duetos::security::RbacSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::RbacSnapshotSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::GraceCacheSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::BrokerSelfTest());
+    duetos::diag::BootProgress("after-RbacSelfTests");
 
     // Shell welcome + initial prompt. Landing here after every
     // subsystem init line keeps the boot log visible above the
@@ -3255,6 +3303,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         for (;;)
         {
             const KeyEvent ev = Ps2KeyboardReadEvent();
+            // Elevation broker — if an off-thread broker request has
+            // posted a deferred prompt, the kbd reader takes over the
+            // prompt UI here (safe because we ARE the legal
+            // Ps2KeyboardReadEvent consumer). On a real handled
+            // prompt, skip the normal routing for the synthetic
+            // kKeyNone wake event that brought us here.
+            if (duetos::security::BrokerKbdReaderPumpDeferred())
+                continue;
             // Track async keyboard state BEFORE the early
             // release / kKeyNone filter so release edges are
             // recorded. `ev.code` wraps to the low 8 bits of
@@ -4752,8 +4808,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             }
         }
     };
-    duetos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
+    duetos::sched::Task* kbd_reader_task = duetos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
     SerialWrite("[bringup-tail] kbd-reader spawned\n");
+
+    // Register the kbd-reader task id with the elevation broker so
+    // off-thread broker requests (Win32 NtAdjustPrivilegesToken, any
+    // future user-mode elevation API) route through the deferred-
+    // prompt path instead of racing the shell for keystrokes.
+    if (kbd_reader_task != nullptr)
+    {
+        duetos::security::BrokerSetKbdReaderTid(duetos::sched::TaskId(kbd_reader_task));
+    }
 
     // `pentest=gui` scripts keystrokes into the login gate + shell.
     // Arm it only after the kbd-reader is live; starting it when the

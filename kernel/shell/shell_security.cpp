@@ -17,11 +17,15 @@
 #include "arch/x86_64/serial.h"
 #include "drivers/video/console.h"
 #include "security/attack_sim.h"
+#include "security/broker.h"
 #include "security/event_ring.h"
+#include "security/grace.h"
 #include "security/guard.h"
 #include "security/policy.h"
 #include "security/purple_team.h"
+#include "security/rbac.h"
 #include "log/klog.h"
+#include "proc/process.h"
 
 namespace duetos::core::shell::internal
 {
@@ -57,25 +61,84 @@ AuthRole RoleFromArg(const char* s)
     return AuthRole::User;
 }
 
+// Shell pseudo-process state — the broker's target for shell-side
+// elevation grants. RequireCap (just below) and the elevate /
+// roles / elevations commands (further down) all consult these.
+constexpr u64 kShellPseudoPid = ~0ull;
+inline duetos::core::Process g_shell_proc{};
+inline bool g_shell_proc_initialized = false;
+
+inline void EnsureShellProcInitialized()
+{
+    if (g_shell_proc_initialized)
+        return;
+    g_shell_proc.pid = kShellPseudoPid;
+    g_shell_proc.caps = duetos::core::CapSetEmpty();
+    g_shell_proc_initialized = true;
+}
+
 } // namespace
 
-bool RequireAdmin(const char* cmd)
+bool RequireCap(::duetos::core::Cap cap, const char* cmd)
 {
+    using namespace duetos::core;
+    using namespace duetos::security;
+
     if (AuthIsAdmin())
-    {
         return true;
-    }
-    // Denial = non-zero exit so scripts can react. POSIX `sudo`
-    // returns 1 on auth failure; mirror that.
+
+    // Live cap check: the shell's pseudo-process must hold the
+    // specific cap AND that cap's grace grant must still be valid.
+    // ShellIsElevatedNow() lazily reaps expired grants, so checking
+    // CapSetHas after that call gives an accurate read.
+    EnsureShellProcInitialized();
+    GraceCacheReap();
+    const bool elevated_for_cap = CapSetHas(g_shell_proc.caps, cap) && GraceCacheLookup(kShellPseudoPid, cap);
+    if (elevated_for_cap)
+        return true;
+
     ShellSetExit(1);
     ConsoleWrite("DENIED: ");
     ConsoleWrite(cmd);
-    ConsoleWriteln(" REQUIRES ADMIN");
-    duetos::core::Log(duetos::core::LogLevel::Warn, "shell", "admin-only command denied");
-    duetos::arch::SerialWrite("[shell] denied (non-admin): ");
+    ConsoleWrite(" REQUIRES CAP ");
+    ConsoleWriteln(CapName(cap));
+
+    // Hint path: if the active user's roles WOULD grant this cap,
+    // tell them which elevate command to run. Without this hint
+    // an unhelpful user just sees "denied" and never discovers the
+    // broker UX.
+    const char* user = AuthCurrentUserName();
+    RoleId resolved = kRbacRoleInvalid;
+    if (user != nullptr && RbacResolveElevation(user, cap, &resolved, nullptr))
+    {
+        ConsoleWrite("  (your roles allow this — run `elevate ");
+        // CapName returns "kCapFsWrite" etc. The elevate command
+        // accepts the "kCap" prefix as well, but the friendlier
+        // form is without — strip it for the hint.
+        const char* n = CapName(cap);
+        if (n[0] == 'k' && n[1] == 'C' && n[2] == 'a' && n[3] == 'p')
+            n += 4;
+        ConsoleWrite(n);
+        ConsoleWriteln("` to authenticate)");
+    }
+
+    duetos::core::Log(LogLevel::Warn, "shell", "cap-gated command denied");
+    duetos::arch::SerialWrite("[shell] denied (cap): ");
     duetos::arch::SerialWrite(cmd);
     duetos::arch::SerialWrite("\n");
     return false;
+}
+
+bool RequireAdmin(const char* cmd)
+{
+    // Legacy admin gate — coarse "you have admin authority"
+    // predicate kept for sites that don't have a cleaner per-cap
+    // mapping yet. Maps onto kCapFsWrite as the canonical
+    // "mutates persistent state" cap — root, developer roles
+    // both grant it; auditor / sandbox don't. Specific
+    // subcommands that have a cleaner cap (NetAdmin etc.) should
+    // call RequireCap directly with that cap instead.
+    return RequireCap(::duetos::core::kCapFsWrite, cmd);
 }
 
 void CmdUsers()
@@ -372,7 +435,10 @@ void CmdGuard(u32 argc, char** argv)
     // read above is harmless (just counters).
     if (StrEq(argv[1], "on") || StrEq(argv[1], "advisory"))
     {
-        if (!RequireAdmin("GUARD MODE"))
+        // GUARD MODE flips kernel-wide security policy — bound it
+        // to kCapDebug so an unprivileged user can't quietly turn
+        // image-load protection off.
+        if (!RequireCap(duetos::core::kCapDebug, "GUARD MODE"))
             return;
         sec::SetGuardMode(sec::Mode::Advisory);
         ConsoleWriteln("GUARD: ADVISORY (logs, never blocks)");
@@ -380,7 +446,7 @@ void CmdGuard(u32 argc, char** argv)
     }
     if (StrEq(argv[1], "enforce"))
     {
-        if (!RequireAdmin("GUARD MODE"))
+        if (!RequireCap(duetos::core::kCapDebug, "GUARD MODE"))
             return;
         sec::SetGuardMode(sec::Mode::Enforce);
         ConsoleWriteln("GUARD: ENFORCE (prompts on Warn/Deny, default-deny on timeout)");
@@ -388,7 +454,7 @@ void CmdGuard(u32 argc, char** argv)
     }
     if (StrEq(argv[1], "off"))
     {
-        if (!RequireAdmin("GUARD MODE"))
+        if (!RequireCap(duetos::core::kCapDebug, "GUARD MODE"))
             return;
         sec::SetGuardMode(sec::Mode::Off);
         ConsoleWriteln("GUARD: OFF (all images pass through)");
@@ -509,6 +575,313 @@ void CmdPolicy(u32 argc, char** argv)
         return;
     }
     ConsoleWriteln("POLICY: UNKNOWN SUBCOMMAND");
+}
+
+// ---------------------------------------------------------------
+// RBAC + elevation broker surface.
+//
+// `elevate <cap>`   — prompt for the current user's password and,
+//                     on success, add the cap to the kernel shell's
+//                     pseudo-process. Future shell commands that
+//                     consult `g_shell_proc.caps` honour the grant
+//                     for the configured grace window.
+// `elevate off`     — clear every cap held by the pseudo-process
+//                     and drop the broker grants from the cache.
+// `roles [me]`      — list every registered role (or, with `me`,
+//                     the roles the active session belongs to).
+// `elevations`      — dump the live grace-cache rows so the
+//                     operator can see what is currently elevated
+//                     and how long is left.
+//
+// The pseudo-process is a `core::Process` with a sentinel pid; the
+// broker writes its caps and the grace cache keys against that pid
+// the same way it would for a real ring-3 process.
+// ---------------------------------------------------------------
+namespace
+{
+
+duetos::core::Cap ParseCapArg(const char* s)
+{
+    if (s == nullptr || s[0] == '\0')
+        return duetos::core::kCapNone;
+    // Accept both "FsWrite" and "kCapFsWrite" forms.
+    for (u32 c = 1; c < static_cast<u32>(duetos::core::kCapCount); ++c)
+    {
+        const char* name = duetos::core::CapName(static_cast<duetos::core::Cap>(c));
+        if (name == nullptr)
+            continue;
+        if (StrEq(s, name))
+            return static_cast<duetos::core::Cap>(c);
+        // Tolerate the "kCap" prefix being omitted.
+        if (name[0] == 'k' && name[1] == 'C' && name[2] == 'a' && name[3] == 'p')
+        {
+            if (StrEq(s, name + 4))
+                return static_cast<duetos::core::Cap>(c);
+        }
+    }
+    return duetos::core::kCapNone;
+}
+
+void PrintCapBundle(u64 mask)
+{
+    bool first = true;
+    for (u32 c = 1; c < static_cast<u32>(duetos::core::kCapCount); ++c)
+    {
+        if ((mask & (1ULL << c)) == 0)
+            continue;
+        if (!first)
+            ConsoleWrite(", ");
+        ConsoleWrite(duetos::core::CapName(static_cast<duetos::core::Cap>(c)));
+        first = false;
+    }
+    if (first)
+        ConsoleWrite("(empty)");
+}
+
+} // namespace
+
+bool ShellIsElevatedNow()
+{
+    EnsureShellProcInitialized();
+    // A cap held by the pseudo-process whose grace row has expired
+    // should be considered dropped. Sweep the cache, then trim caps
+    // whose grant is no longer cached. v0 keeps the cap bits in
+    // sync with the cache by rechecking on every call.
+    duetos::security::GraceCacheReap();
+    for (u32 c = 1; c < static_cast<u32>(duetos::core::kCapCount); ++c)
+    {
+        const duetos::core::Cap cap = static_cast<duetos::core::Cap>(c);
+        if ((g_shell_proc.caps.bits & (1ULL << c)) == 0)
+            continue;
+        if (!duetos::security::GraceCacheLookup(kShellPseudoPid, cap))
+            g_shell_proc.caps.bits &= ~(1ULL << c);
+    }
+    return g_shell_proc.caps.bits != 0;
+}
+
+void CmdElevate(u32 argc, char** argv)
+{
+    EnsureShellProcInitialized();
+    if (argc < 2)
+    {
+        ConsoleWriteln("ELEVATE: USAGE:");
+        ConsoleWriteln("  ELEVATE <CAP>           prompt + grant cap for grace window");
+        ConsoleWriteln("  ELEVATE ROLE <NAME>     prompt once, grant every cap in role");
+        ConsoleWriteln("  ELEVATE OFF             drop every active elevation");
+        ConsoleWriteln("  (CAP example: FsWrite, NetAdmin, Debug — see ROLES)");
+        return;
+    }
+    if (StrEq(argv[1], "off") || StrEq(argv[1], "OFF"))
+    {
+        duetos::security::GraceCacheExpirePid(kShellPseudoPid);
+        g_shell_proc.caps = duetos::core::CapSetEmpty();
+        ConsoleWriteln("ELEVATE: cleared shell elevation state");
+        return;
+    }
+    if ((StrEq(argv[1], "role") || StrEq(argv[1], "ROLE")) && argc >= 3)
+    {
+        const duetos::security::RoleId rid = duetos::security::RbacFindRole(argv[2]);
+        if (rid == duetos::security::kRbacRoleInvalid)
+        {
+            ConsoleWrite("ELEVATE: UNKNOWN ROLE '");
+            ConsoleWrite(argv[2]);
+            ConsoleWriteln("' — run ROLES to list");
+            return;
+        }
+        duetos::security::Role r{};
+        if (!duetos::security::RbacGetRole(rid, &r))
+        {
+            ConsoleWriteln("ELEVATE: failed to read role");
+            return;
+        }
+        // Walk every cap in the role's bundle. The first prompt
+        // populates the grace cache; subsequent caps either hit
+        // the cache or are denied if the active user's roles do
+        // not also grant them.
+        bool any_granted = false;
+        bool any_denied = false;
+        for (u32 c = 1; c < static_cast<u32>(duetos::core::kCapCount); ++c)
+        {
+            if ((r.policy.cap_mask & (1ULL << c)) == 0)
+                continue;
+            duetos::security::BrokerRequest req{};
+            req.proc = &g_shell_proc;
+            req.cap = static_cast<duetos::core::Cap>(c);
+            req.reason = r.name;
+            const auto o = duetos::security::BrokerRequestElevation(req);
+            if (o == duetos::security::BrokerOutcome::Granted)
+                any_granted = true;
+            else
+                any_denied = true;
+            // First non-Granted that isn't a cache miss is a hard
+            // stop — bail so we don't spam N password prompts.
+            if (o == duetos::security::BrokerOutcome::Cancelled || o == duetos::security::BrokerOutcome::BadPassword ||
+                o == duetos::security::BrokerOutcome::NoSession)
+                break;
+        }
+        ConsoleWrite("ELEVATE ROLE ");
+        ConsoleWrite(r.name);
+        ConsoleWrite(": ");
+        if (any_granted && !any_denied)
+            ConsoleWriteln("full bundle granted");
+        else if (any_granted)
+            ConsoleWriteln("partial bundle granted (some caps denied by role gate)");
+        else
+            ConsoleWriteln("denied");
+        return;
+    }
+    const duetos::core::Cap cap = ParseCapArg(argv[1]);
+    if (cap == duetos::core::kCapNone)
+    {
+        ConsoleWrite("ELEVATE: UNKNOWN CAP '");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln("' — run ROLES to see available caps");
+        return;
+    }
+    duetos::security::BrokerRequest req{};
+    req.proc = &g_shell_proc;
+    req.cap = cap;
+    req.reason = argv[1];
+    const auto outcome = duetos::security::BrokerRequestElevation(req);
+    ConsoleWrite("ELEVATE: ");
+    ConsoleWrite(duetos::security::BrokerOutcomeName(outcome));
+    if (outcome == duetos::security::BrokerOutcome::Granted)
+    {
+        ConsoleWrite(" — cap ");
+        ConsoleWrite(duetos::core::CapName(cap));
+        ConsoleWriteln(" held for grace window");
+    }
+    else
+    {
+        ConsoleWriteln("");
+    }
+}
+
+void CmdRoles(u32 argc, char** argv)
+{
+    if (argc >= 2 && (StrEq(argv[1], "me") || StrEq(argv[1], "ME")))
+    {
+        const char* who = AuthCurrentUserName();
+        ConsoleWrite("ROLES FOR ");
+        ConsoleWrite((who != nullptr && who[0] != '\0') ? who : "(no session)");
+        ConsoleWriteln(":");
+        const u32 mask = duetos::security::RbacAccountRoleMask(who);
+        if (mask == 0)
+        {
+            ConsoleWriteln("  (none — no roles attached, broker will deny every request)");
+            return;
+        }
+        const u32 n = duetos::security::RbacRoleCount();
+        for (u32 i = 0; i < n; ++i)
+        {
+            duetos::security::Role r{};
+            if (!duetos::security::RbacRoleAt(i, &r))
+                continue;
+            const duetos::security::RoleId id = duetos::security::RbacFindRole(r.name);
+            if ((mask & (1u << id)) == 0)
+                continue;
+            ConsoleWrite("  ");
+            ConsoleWrite(r.name);
+            ConsoleWrite(" -> ");
+            PrintCapBundle(r.policy.cap_mask);
+            ConsoleWriteln("");
+        }
+        return;
+    }
+    const u32 n = duetos::security::RbacRoleCount();
+    ConsoleWrite("ROLES (");
+    WriteU64Dec(n);
+    ConsoleWriteln("):");
+    for (u32 i = 0; i < n; ++i)
+    {
+        duetos::security::Role r{};
+        if (!duetos::security::RbacRoleAt(i, &r))
+            continue;
+        ConsoleWrite("  ");
+        ConsoleWrite(r.name);
+        ConsoleWrite("  caps: ");
+        PrintCapBundle(r.policy.cap_mask);
+        ConsoleWriteln("");
+    }
+}
+
+void CmdRoleAdd(u32 argc, char** argv)
+{
+    if (!RequireAdmin("ROLEADD"))
+        return;
+    if (argc < 3)
+    {
+        ConsoleWriteln("ROLEADD: USAGE: ROLEADD <USER> <ROLE>");
+        ConsoleWriteln("  Adds the role membership; user keeps any existing roles.");
+        return;
+    }
+    const duetos::security::RoleId rid = duetos::security::RbacFindRole(argv[2]);
+    if (rid == duetos::security::kRbacRoleInvalid)
+    {
+        ConsoleWrite("ROLEADD: UNKNOWN ROLE '");
+        ConsoleWrite(argv[2]);
+        ConsoleWriteln("'");
+        return;
+    }
+    if (!duetos::security::RbacAddMembership(argv[1], rid))
+    {
+        ConsoleWriteln("ROLEADD: FAILED (membership table full, or bad user)");
+        return;
+    }
+    ConsoleWrite("ROLEADD: ");
+    ConsoleWrite(argv[1]);
+    ConsoleWrite(" now a member of ");
+    ConsoleWriteln(argv[2]);
+}
+
+void CmdRoleDel(u32 argc, char** argv)
+{
+    if (!RequireAdmin("ROLEDEL"))
+        return;
+    if (argc < 3)
+    {
+        ConsoleWriteln("ROLEDEL: USAGE: ROLEDEL <USER> <ROLE>");
+        return;
+    }
+    const duetos::security::RoleId rid = duetos::security::RbacFindRole(argv[2]);
+    if (rid == duetos::security::kRbacRoleInvalid)
+    {
+        ConsoleWrite("ROLEDEL: UNKNOWN ROLE '");
+        ConsoleWrite(argv[2]);
+        ConsoleWriteln("'");
+        return;
+    }
+    if (!duetos::security::RbacRemoveMembership(argv[1], rid))
+    {
+        ConsoleWriteln("ROLEDEL: not a member (or unknown user)");
+        return;
+    }
+    ConsoleWrite("ROLEDEL: ");
+    ConsoleWrite(argv[1]);
+    ConsoleWrite(" removed from ");
+    ConsoleWriteln(argv[2]);
+}
+
+void CmdElevations()
+{
+    duetos::security::GraceCacheReap();
+    const u32 n = duetos::security::GraceCacheLiveCount();
+    ConsoleWrite("ELEVATIONS LIVE: ");
+    WriteU64Dec(n);
+    ConsoleWriteln("");
+    for (u32 i = 0; i < n; ++i)
+    {
+        duetos::security::GraceEntry e{};
+        if (!duetos::security::GraceCacheEntryAt(i, &e))
+            continue;
+        ConsoleWrite("  pid=");
+        WriteU64Hex(e.pid, 0);
+        ConsoleWrite("  cap=");
+        ConsoleWrite(duetos::core::CapName(e.cap));
+        ConsoleWrite("  expires_ns=");
+        WriteU64Hex(e.deadline_ns, 0);
+        ConsoleWriteln("");
+    }
 }
 
 void CmdPurple()

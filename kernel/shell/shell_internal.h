@@ -12,6 +12,7 @@
 // so the existing if/else dispatch chain keeps reading like the
 // in-TU layout the file used to have.
 
+#include "proc/process.h"
 #include "util/types.h"
 
 namespace duetos::core::shell::internal
@@ -431,6 +432,16 @@ void CmdMetrics();
 // ---------------------------------------------------------------
 bool RequireAdmin(const char* cmd);
 
+/// Cap-aware gate. Passes when:
+///   (1) the active session is `AuthRole::Admin` (legacy admin
+///       semantics — admin holds every cap implicitly), OR
+///   (2) the shell's pseudo-process holds `cap` via a live grace-
+///       cache grant (i.e. the user ran `elevate <cap>` recently).
+/// On denial: prints DENIED + the missing cap name and, if the
+/// active user's roles would grant this cap, hints at the elevate
+/// command to use.
+bool RequireCap(::duetos::core::Cap cap, const char* cmd);
+
 // ---------------------------------------------------------------
 // Executable + low-level read commands (shell_exec.cpp). Loaders
 // for native ELF + Linux ELF + raw block-device peek + ABI
@@ -499,6 +510,19 @@ void CmdLogout();
 void CmdSu(u32 argc, char** argv);
 void CmdLoginCmd(u32 argc, char** argv);
 void CmdIdleLock(u32 argc, char** argv);
+
+// RBAC + elevation broker commands (shell_security.cpp).
+void CmdElevate(u32 argc, char** argv);
+void CmdRoles(u32 argc, char** argv);
+void CmdRoleAdd(u32 argc, char** argv);
+void CmdRoleDel(u32 argc, char** argv);
+void CmdElevations();
+
+// True iff the kernel shell currently has a live broker-granted
+// elevation. Consulted by `RequireAdmin` so a non-admin who ran
+// `elevate <cap>` can pass admin-gated commands for the grace
+// window. Lazily expires the underlying broker grant.
+bool ShellIsElevatedNow();
 
 // ---------------------------------------------------------------
 // Storage / mount / device-list commands (shell_storage.cpp).

@@ -549,6 +549,50 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ## End-user features
 
+### RBAC + elevation broker — v1 follow-ups
+
+- **Today:** v0 broker, role table, grace cache, CLI + GUI prompt
+  loop, and shell `elevate` / `roles` / `elevations` commands
+  shipping. Password hashes are PBKDF2-HMAC-SHA256; the broker
+  facade does not yet wire into Win32 NT privilege APIs; the role
+  + account tables are in-memory and reseed on every boot.
+- **v1 — Argon2id with lazy migration.** Blake2b primitive
+  (RFC 7693) shipping in `kernel/security/blake2b.{h,cpp}` —
+  passes the Appendix A test vectors at boot. Argon2id itself
+  (RFC 9106) sits on top: H_0 derivation, fill_block /
+  BlamkaRound P, hybrid data-independent/data-dependent
+  indexing, final tag, lazy migration on successful PBKDF2
+  verify. Blocked on a record-format extension — the current
+  56-byte `PasswordHashRecord` doesn't carry Argon2id's memory
+  /time/parallelism parameters; needs a V2 shape sized for
+  both old PBKDF2 + new Argon2id rows. See
+  [`wiki/security/RBAC-and-Elevation.md`](../security/RBAC-and-Elevation.md#argon2id-rollout).
+- **LANDED (v0.2) — Win32 facade routing.** `NtAdjustPrivilegesToken`'s
+  enable-but-not-held branch now routes to
+  `BrokerRequestElevation`. On grant, the cap is added to the
+  caller's `CapSet` and reflected in PreviousState; on cancel /
+  bad password / denied / single-flight contention, the legacy
+  `STATUS_NOT_ALL_ASSIGNED` return shape is preserved. Backed by
+  the deferred-prompt mechanism in `kernel/security/broker.cpp`.
+  See `wiki/security/RBAC-and-Elevation.md` → *Deferred-prompt
+  mechanism*.
+- **v1 — Persistence.** `/system/secrets/` holds the account
+  + role tables encrypted at rest. Argon2id-derived key wraps
+  the table; TPM driver (when it lands) seals the wrap key.
+  Until then `AuthInit` / `RbacInit` re-seed defaults on every
+  boot; runtime additions are lost. Tracked in
+  `wiki/security/RBAC-and-Elevation.md#persistence`.
+- **v1 — First-boot installer flow.** Replaces the hardcoded
+  `admin / admin` seed with a userland install wizard launched
+  by init when `/system/secrets/` is empty. Blocks on the
+  persistence work above.
+- **v1 — Secure Attention Key.** Reserve Ctrl+Alt+Del at the
+  PS/2 driver level; trigger a kernel-drawn full-screen broker
+  prompt so a paranoid user can force a known-good prompt
+  rather than trusting the currently-drawn one. v0 modal is
+  drawn under the compositor lock above other windows but
+  doesn't pre-empt a focused full-screen surface.
+
 ### ACPI S5 / soft-off shutdown
 
 - **Today:** Start menu's SHUT DOWN action calls `KernelHalt`,

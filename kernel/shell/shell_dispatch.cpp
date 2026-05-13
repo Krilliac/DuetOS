@@ -1307,8 +1307,10 @@ void Dispatch(char* line)
     {
         // Firewall rules + default policy are kernel-enforced packet
         // filtering. Unprivileged mutation lets an attacker disable
-        // filtering or steer traffic; gate the whole verb.
-        if (!RequireAdmin("FIREWALL"))
+        // filtering or steer traffic; gate the whole verb. kCapNetAdmin
+        // is the netop role's signature cap — a non-admin netop can
+        // `elevate NetAdmin` and run firewall without being root.
+        if (!RequireCap(::duetos::core::kCapNetAdmin, "FIREWALL"))
             return;
         CmdFirewall(argc, argv);
         return;
@@ -1317,8 +1319,9 @@ void Dispatch(char* line)
     {
         // Firmware-source policy decides whether the kernel will
         // load open-source vs vendor-signed firmware blobs. Switching
-        // it without admin is a code-signing bypass.
-        if (!RequireAdmin("FWPOLICY"))
+        // it without admin is a code-signing bypass. kCapNetAdmin —
+        // the cap netop holds — gates this alongside firewall.
+        if (!RequireCap(::duetos::core::kCapNetAdmin, "FWPOLICY"))
             return;
         CmdFwPolicy(argc, argv);
         return;
@@ -1620,6 +1623,31 @@ void Dispatch(char* line)
     if (StrEq(cmd, "su"))
     {
         CmdSu(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "elevate"))
+    {
+        CmdElevate(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "roles"))
+    {
+        CmdRoles(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "roleadd"))
+    {
+        CmdRoleAdd(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "roledel"))
+    {
+        CmdRoleDel(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "elevations"))
+    {
+        CmdElevations();
         return;
     }
     if (StrEq(cmd, "login"))

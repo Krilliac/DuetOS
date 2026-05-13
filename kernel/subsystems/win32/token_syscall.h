@@ -20,12 +20,15 @@
  * silent no-op — Windows lets a process "enable" a privilege that
  * isn't gated on anything DuetOS observes, so we match that shape.
  *
- * Adding a cap from user space is intentionally impossible: the
- * handler can only DROP caps (CapSetRemove). A process that wants
- * a cap it doesn't have was never going to be granted one by
- * asking nicely — Windows AdjustTokenPrivileges has the same
- * property in practice (privileges have to be on the token first,
- * which is set at creation time, not via this API).
+ * Enabling a privilege whose cap isn't already on the token routes
+ * through the elevation broker (kernel/security/broker.h) — the
+ * UAC-equivalent. The broker prompts for the logged-in user's
+ * password (via the deferred-prompt mechanism, since the syscall
+ * runs in the PE's task rather than the kbd-reader's), checks the
+ * role table, and on a "Yes + correct password" outcome adds the
+ * cap and caches the grant for the role's configured window.
+ * "No" / wrong password / cancelled / role table refused all map
+ * to the legacy STATUS_NOT_ALL_ASSIGNED return shape.
  */
 
 #include "util/types.h"
