@@ -1388,23 +1388,24 @@ kernel-side primitive is in tree; what's missing is the per-call
 wiring that turns "infrastructure exists" into "real callers using
 it."
 
-### VirtIO — virtio-blk write path
+### VirtIO — virtio-blk flush + concurrency
 
-- **Today:** read path landed. `virtio-blk` allocates one
-  requestq, registers a `BlockDesc` as `vblk0`, and routes
-  `BlockDeviceRead` through the 3-descriptor chain
-  (`virtio_blk_outhdr` + data + status). Capacity is read
-  from `device_cfg + 0`; sector size honours
-  `VIRTIO_BLK_F_BLK_SIZE`. Polls used ring (no IRQ).
-- **Lands:** write path. Mirror of the read path with
-  `kBlkTypeOut` + `flags = kVirtqDescNext` (no
-  `kVirtqDescWrite`) on the data descriptor. Per-call
-  locking once multiple in-flight requests need to coexist
-  (today v0 reuses a single shared header page under the
-  "one in-flight" assumption). Also: `VIRTIO_BLK_T_FLUSH`
-  for `BlockOps.flush` (not yet in the BlockOps vtable;
-  lands alongside).
-- **Blocks on:** nothing.
+- **Today:** read AND write paths both land through the
+  shared `VirtioBlkBlockRequest` helper. `BlockOps.read` +
+  `BlockOps.write` are both wired; the device's
+  `VIRTIO_BLK_F_RO` bit gates writes.
+- **Lands:**
+  - `VIRTIO_BLK_T_FLUSH` once `BlockOps` gains a `flush`
+    slot (the vtable has no flush hook today; lands alongside
+    the FS-side fsync path that needs it).
+  - Per-call locking once concurrent I/O matters: the v0
+    shared header-page assumes a single in-flight request,
+    which holds for the boot path (one shell, no parallel
+    I/O). A future slice that needs concurrency gates the
+    request chain on a spinlock or allocates a header chain
+    per in-flight request.
+  - IRQ wire-up so consumers don't pay a busy-poll for I/O
+    that's already serviced by the host.
 
 ### VirtIO — virtio-net packet TX/RX
 
@@ -1485,16 +1486,16 @@ it."
   burned until the handlers compile + run against a real
   PE — per CLAUDE.md, syscall numbers are forever ABI.
 
-### A/B kernel slots — installer + bootloader integration
+### A/B kernel slots — installer + watchdog + GRUB cfg
 
 - **Today:** state machine, parser/writer, in-RAM
-  `CurrentState`, path helpers landed
-  (`kernel/fs/boot_slot.{h,cpp}`). No on-disk read at boot;
-  no installer integration; no dynamic grub.cfg.
+  `CurrentState`, path helpers, AND boot-time hand-off all
+  landed (`kernel/fs/boot_slot.{h,cpp}`,
+  `kernel/core/main.cpp`). The kernel parses `slot=a` /
+  `slot=b` from the multiboot2 cmdline and calls
+  `SetCurrentState` early — the running kernel now knows
+  which slot it's on.
 - **Lands:**
-  - **Boot hand-off:** parse `slot=a` / `slot=b` from the
-    multiboot2 cmdline; `SetCurrentState` from it. Update
-    the GRUB cfg in tree to pass the parameter.
   - **Watchdog:** after the heartbeat declares the boot
     healthy, call `MarkHealthyNow()` and persist the new
     state to ESP via FAT32 write.
@@ -1504,8 +1505,10 @@ it."
     write the state file.
   - **GRUB cfg:** two menuentries, one per slot; the
     install path writes the current `active` as the GRUB
-    default (`set default=a`/`b`). Limine / direct-load
-    flavours pick the same convention.
+    default (`set default=a`/`b`) and embeds the
+    matching `slot=a` / `slot=b` in each menuentry's
+    `multiboot2` line. Limine / direct-load flavours pick
+    the same convention.
 
 ### PE-compat smoke — per-PE structured pass/fail
 

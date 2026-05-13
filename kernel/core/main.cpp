@@ -2329,6 +2329,27 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         SerialWrite(cmdline);
         SerialWrite("\"\n");
     }
+    // Pick up the A/B boot-slot hand-off from the bootloader. `slot=a`
+    // or `slot=b` overrides the default; absence is treated as
+    // slot=a (the boot_slot::Default fallback). Once SetCurrentState
+    // runs, the running kernel's `CurrentState()` reflects which slot
+    // it's executing from, which lets the future watchdog +
+    // installer + shell `slotinfo` all answer "which slot am I?"
+    // without re-deriving it.
+    if (CmdlineMatches(cmdline, "slot", "b"))
+    {
+        auto st = duetos::fs::boot_slot::CurrentState();
+        st.active = duetos::fs::boot_slot::Slot::kB;
+        duetos::fs::boot_slot::SetCurrentState(st);
+        SerialWrite("[boot] boot-slot active=b (from cmdline)\n");
+    }
+    else if (CmdlineMatches(cmdline, "slot", "a"))
+    {
+        auto st = duetos::fs::boot_slot::CurrentState();
+        st.active = duetos::fs::boot_slot::Slot::kA;
+        duetos::fs::boot_slot::SetCurrentState(st);
+        SerialWrite("[boot] boot-slot active=a (from cmdline)\n");
+    }
     // Pin the qemu-smoke profile early. Read once, cached. If the
     // cmdline carries `smoke=<profile>`, every subsequent SmokeProfile*
     // query in the boot tail (ring3 spawn gate, Linux ABI gate, sleep-

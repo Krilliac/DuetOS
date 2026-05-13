@@ -22,12 +22,17 @@
  * completion. We poll the used ring — IRQ wire-up is the next
  * slice.
  *
- * v0 ships read only. Write is stubbed via a nullptr in
- * `BlockOps.write`, which the block layer maps to -1 without
- * calling through. Capacity comes from `device_cfg + 0`
- * (8-byte u64); sector size is hard-coded to 512 unless
- * `VIRTIO_BLK_F_BLK_SIZE` is offered (read from `device_cfg +
- * 20` in that case).
+ * v0 ships read + write through a shared `VirtioBlkBlockRequest`
+ * helper; the only differences between read and write are the
+ * header `type` (kBlkTypeIn vs kBlkTypeOut) and the data
+ * descriptor's `kVirtqDescWrite` flag (set on read, cleared on
+ * write — read is "device writes our buffer", write is "device
+ * reads our buffer"). Devices that advertise `VIRTIO_BLK_F_RO`
+ * keep the read-only path: `BlockOps.write` is still wired but
+ * VirtioBlkBlockRequest fails fast on the RO check. Capacity
+ * comes from `device_cfg + 0` (8-byte u64); sector size is
+ * 512 unless `VIRTIO_BLK_F_BLK_SIZE` is offered (read from
+ * `device_cfg + 20` in that case).
  *
  * Per-process / multi-queue locking is GAP: v0 assumes a
  * single in-flight request at a time, which holds for the
@@ -50,12 +55,11 @@ namespace
 {
 
 // virtio_blk_outhdr layout (virtio 1.0 §5.2.6). 16 bytes.
-constexpr u32 kBlkTypeIn = 0; // read from device
-// Spec landmarks for the write + flush paths the next slice
-// lands. Kept here as named constants so the upcoming code reads
-// against the same names the spec uses; `[[maybe_unused]]`
-// silences -Wunused-const-variable until they're referenced.
-[[maybe_unused]] constexpr u32 kBlkTypeOut = 1;
+constexpr u32 kBlkTypeIn = 0;  // read from device
+constexpr u32 kBlkTypeOut = 1; // write to device
+// FLUSH lands when BlockOps gains a `flush` slot — kept as a
+// named landmark so the next slice's code reads against the same
+// name the spec uses.
 [[maybe_unused]] constexpr u32 kBlkTypeFlush = 4;
 constexpr u8 kBlkStatusOk = 0;
 
@@ -88,16 +92,17 @@ struct DeviceState
 
 constinit DeviceState g_blk = {};
 
-i32 VirtioBlkBlockRead(void* cookie, u64 lba, u32 count, void* buf)
+i32 VirtioBlkBlockRequest(DeviceState* dev, u64 lba, u32 count, void* buf, bool is_write)
 {
-    auto* dev = static_cast<DeviceState*>(cookie);
     if (dev == nullptr || !dev->up || buf == nullptr || count == 0)
+        return -1;
+    if (is_write && dev->read_only)
         return -1;
 
     // The block layer already bounds-checked against sector_count
     // before calling here. The data buffer must be in the kernel
     // direct map so VirtToPhys yields its DMA-reachable address —
-    // BlockDeviceRead's contract states this explicitly.
+    // BlockDeviceRead/Write's contract states this explicitly.
     const u64 byte_len = u64(count) * dev->sector_size;
     const mm::PhysAddr data_phys = mm::VirtToPhys(buf);
     if (data_phys == 0)
@@ -111,7 +116,7 @@ i32 VirtioBlkBlockRead(void* cookie, u64 lba, u32 count, void* buf)
     // device must overwrite — we use 0xFF, well outside the
     // legal {OK, IO_ERR, UNSUPP} range.
     auto* hdr = reinterpret_cast<BlkReqHdr*>(dev->hdr_virt);
-    hdr->type = kBlkTypeIn;
+    hdr->type = is_write ? kBlkTypeOut : kBlkTypeIn;
     hdr->reserved = 0;
     hdr->sector = lba;
     u8* status = dev->hdr_virt + 16;
@@ -123,10 +128,12 @@ i32 VirtioBlkBlockRead(void* cookie, u64 lba, u32 count, void* buf)
     d[0].len = 16;
     d[0].flags = kVirtqDescNext;
     d[0].next = 1;
-    // Data — device-write for read.
+    // Data — direction depends on op: device-write for reads
+    // (kVirtqDescWrite set), driver-write for writes (no Write
+    // flag).
     d[1].addr = data_phys;
     d[1].len = static_cast<u32>(byte_len);
-    d[1].flags = kVirtqDescNext | kVirtqDescWrite;
+    d[1].flags = static_cast<u16>(kVirtqDescNext | (is_write ? 0 : kVirtqDescWrite));
     d[1].next = 2;
     // Status — device-write, 1 byte.
     d[2].addr = dev->hdr_phys + 16;
@@ -152,11 +159,25 @@ i32 VirtioBlkBlockRead(void* cookie, u64 lba, u32 count, void* buf)
     return -1;
 }
 
+i32 VirtioBlkBlockRead(void* cookie, u64 lba, u32 count, void* buf)
+{
+    return VirtioBlkBlockRequest(static_cast<DeviceState*>(cookie), lba, count, buf, /*is_write=*/false);
+}
+
+i32 VirtioBlkBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
+{
+    // Write data is driver-write in the chain (host reads from
+    // the buffer), so the device doesn't touch our buffer — the
+    // const_cast strips the C-side promise, not the actual
+    // mutability. Safe because the descriptor flags omit
+    // kVirtqDescWrite for the data descriptor on a write.
+    return VirtioBlkBlockRequest(static_cast<DeviceState*>(cookie), lba, count, const_cast<void*>(buf),
+                                 /*is_write=*/true);
+}
+
 constinit const duetos::drivers::storage::BlockOps kBlkOps = {
     /*.read = */ &VirtioBlkBlockRead,
-    /*.write = */ nullptr, // read-only v0; future slice flips the
-                           // sentinel to a writer that builds a
-                           // VIRTIO_BLK_T_OUT request chain.
+    /*.write = */ &VirtioBlkBlockWrite,
 };
 
 } // namespace
@@ -252,9 +273,15 @@ bool VirtioBlkProbe(const VirtioPciLayout& L)
 
     KLOG_INFO_2V("drivers/virtio/blk", "attached as block device", "sectors", capacity, "sector-size",
                  static_cast<u64>(sector_size));
-    // GAP: write path (VIRTIO_BLK_T_OUT) — read-only registration
-    // for v0. Adding it is a mirror of the read path with
-    // flags=kVirtqDescNext (no WRITE) on the data descriptor.
+    // GAP: VIRTIO_BLK_T_FLUSH is not yet exposed — the
+    // BlockOps vtable doesn't carry a `flush` slot today.
+    // Single-in-flight request assumption: shared header page
+    // + no per-call locking means concurrent BlockDeviceRead /
+    // Write calls would corrupt each other's descriptors. Boot-
+    // smoke workload is single-thread, so this is observed-safe
+    // for v0; a future slice that issues concurrent I/O needs
+    // either a per-call header alloc or a spinlock around the
+    // request path.
     return true;
 }
 
