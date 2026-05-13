@@ -116,10 +116,43 @@ SYS_FILE_WRITE
 | `roles` / `roles me`       | REAL — list all roles / list the active user's memberships     |
 | `roleadd` / `roledel`      | REAL — admin-gated membership management                       |
 | `elevations`               | REAL — dump live grace-cache rows                              |
-| `RequireAdmin` integration | REAL — passes if you're admin OR (root-role member AND elevated)|
+| `RequireAdmin` integration | REAL — composes on top of `RequireCap(kCapFsWrite)`            |
+| `RequireCap(cap, cmd)` per-cap gating | REAL — fine-grained gate at shell sites               |
 | Win32 `NtAdjustPrivilegesToken` routing | REAL — enable-but-not-held routes to broker via deferred prompt |
+| Blake2b primitive                       | REAL — RFC 7693, KAT-verified at boot (foundation for Argon2id) |
 | Argon2id KDF               | DEFERRED — see Roadmap                                         |
 | Persistence                | DEFERRED — needs writable system FS                            |
+
+## Per-cap admin gating (v0.3)
+
+`RequireCap(cap, cmd_name)` is the fine-grained admin gate. It passes
+when:
+
+1. The active session is `AuthRole::Admin` (admin holds every cap
+   implicitly), OR
+2. The shell pseudo-process holds the specific `cap` via a live
+   grace-cache grant — i.e. the user ran `elevate <cap>` recently
+   AND the role they elevated under still grants the cap.
+
+A non-admin `netop` who runs `elevate NetAdmin` can now run
+`firewall` and `fwpolicy` (gated on `kCapNetAdmin`) without being
+root. The same netop running `elevate FsWrite` does NOT unlock
+firewall — the cap they elevated for is different from the cap the
+command requires. Each command picks the most appropriate cap; the
+default `RequireAdmin` composes on top of `RequireCap(kCapFsWrite)`
+for sites that don't yet have a more specific mapping.
+
+On denial, `RequireCap` consults the role table for the active
+user and, if their roles WOULD grant the missing cap, prints a
+hint telling them which `elevate <cap>` to run. Without this hint
+non-discoverable UX trapped users in "denied" loops.
+
+Migrated sites:
+  - `firewall` / `fwpolicy` → `kCapNetAdmin`
+  - `guard mode advisory|enforce|off` → `kCapDebug`
+  - Everything else still goes through `RequireAdmin` → `kCapFsWrite`.
+  Sites can migrate one at a time as their natural cap becomes
+  clear.
 
 ## Deferred-prompt mechanism (v0.2)
 

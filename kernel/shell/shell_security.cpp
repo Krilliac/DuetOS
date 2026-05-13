@@ -61,43 +61,84 @@ AuthRole RoleFromArg(const char* s)
     return AuthRole::User;
 }
 
+// Shell pseudo-process state — the broker's target for shell-side
+// elevation grants. RequireCap (just below) and the elevate /
+// roles / elevations commands (further down) all consult these.
+constexpr u64 kShellPseudoPid = ~0ull;
+inline duetos::core::Process g_shell_proc{};
+inline bool g_shell_proc_initialized = false;
+
+inline void EnsureShellProcInitialized()
+{
+    if (g_shell_proc_initialized)
+        return;
+    g_shell_proc.pid = kShellPseudoPid;
+    g_shell_proc.caps = duetos::core::CapSetEmpty();
+    g_shell_proc_initialized = true;
+}
+
 } // namespace
 
-bool RequireAdmin(const char* cmd)
+bool RequireCap(::duetos::core::Cap cap, const char* cmd)
 {
+    using namespace duetos::core;
+    using namespace duetos::security;
+
     if (AuthIsAdmin())
-    {
         return true;
-    }
-    // Broker-elevated path: a non-admin who belongs to the `root`
-    // role AND has an active broker grant (typed their password
-    // within the role's grace window) passes too. Without the role
-    // membership, an `elevate` call for any cap is meaningless for
-    // admin-gating; without the grant, a root-role member still has
-    // to authenticate. Both must hold simultaneously.
-    const char* user = AuthCurrentUserName();
-    const duetos::security::RoleId root_id = duetos::security::RbacFindRole("root");
-    if (root_id != duetos::security::kRbacRoleInvalid && user != nullptr &&
-        duetos::security::RbacIsMember(user, root_id) && ShellIsElevatedNow())
-    {
+
+    // Live cap check: the shell's pseudo-process must hold the
+    // specific cap AND that cap's grace grant must still be valid.
+    // ShellIsElevatedNow() lazily reaps expired grants, so checking
+    // CapSetHas after that call gives an accurate read.
+    EnsureShellProcInitialized();
+    GraceCacheReap();
+    const bool elevated_for_cap = CapSetHas(g_shell_proc.caps, cap) && GraceCacheLookup(kShellPseudoPid, cap);
+    if (elevated_for_cap)
         return true;
-    }
-    // Denial = non-zero exit so scripts can react. POSIX `sudo`
-    // returns 1 on auth failure; mirror that.
+
     ShellSetExit(1);
     ConsoleWrite("DENIED: ");
     ConsoleWrite(cmd);
-    ConsoleWriteln(" REQUIRES ADMIN");
-    if (root_id != duetos::security::kRbacRoleInvalid && user != nullptr &&
-        duetos::security::RbacIsMember(user, root_id))
+    ConsoleWrite(" REQUIRES CAP ");
+    ConsoleWriteln(CapName(cap));
+
+    // Hint path: if the active user's roles WOULD grant this cap,
+    // tell them which elevate command to run. Without this hint
+    // an unhelpful user just sees "denied" and never discovers the
+    // broker UX.
+    const char* user = AuthCurrentUserName();
+    RoleId resolved = kRbacRoleInvalid;
+    if (user != nullptr && RbacResolveElevation(user, cap, &resolved, nullptr))
     {
-        ConsoleWriteln("  (root-role member: run `elevate FsWrite` first to authenticate)");
+        ConsoleWrite("  (your roles allow this — run `elevate ");
+        // CapName returns "kCapFsWrite" etc. The elevate command
+        // accepts the "kCap" prefix as well, but the friendlier
+        // form is without — strip it for the hint.
+        const char* n = CapName(cap);
+        if (n[0] == 'k' && n[1] == 'C' && n[2] == 'a' && n[3] == 'p')
+            n += 4;
+        ConsoleWrite(n);
+        ConsoleWriteln("` to authenticate)");
     }
-    duetos::core::Log(duetos::core::LogLevel::Warn, "shell", "admin-only command denied");
-    duetos::arch::SerialWrite("[shell] denied (non-admin): ");
+
+    duetos::core::Log(LogLevel::Warn, "shell", "cap-gated command denied");
+    duetos::arch::SerialWrite("[shell] denied (cap): ");
     duetos::arch::SerialWrite(cmd);
     duetos::arch::SerialWrite("\n");
     return false;
+}
+
+bool RequireAdmin(const char* cmd)
+{
+    // Legacy admin gate — coarse "you have admin authority"
+    // predicate kept for sites that don't have a cleaner per-cap
+    // mapping yet. Maps onto kCapFsWrite as the canonical
+    // "mutates persistent state" cap — root, developer roles
+    // both grant it; auditor / sandbox don't. Specific
+    // subcommands that have a cleaner cap (NetAdmin etc.) should
+    // call RequireCap directly with that cap instead.
+    return RequireCap(::duetos::core::kCapFsWrite, cmd);
 }
 
 void CmdUsers()
@@ -394,7 +435,10 @@ void CmdGuard(u32 argc, char** argv)
     // read above is harmless (just counters).
     if (StrEq(argv[1], "on") || StrEq(argv[1], "advisory"))
     {
-        if (!RequireAdmin("GUARD MODE"))
+        // GUARD MODE flips kernel-wide security policy — bound it
+        // to kCapDebug so an unprivileged user can't quietly turn
+        // image-load protection off.
+        if (!RequireCap(duetos::core::kCapDebug, "GUARD MODE"))
             return;
         sec::SetGuardMode(sec::Mode::Advisory);
         ConsoleWriteln("GUARD: ADVISORY (logs, never blocks)");
@@ -402,7 +446,7 @@ void CmdGuard(u32 argc, char** argv)
     }
     if (StrEq(argv[1], "enforce"))
     {
-        if (!RequireAdmin("GUARD MODE"))
+        if (!RequireCap(duetos::core::kCapDebug, "GUARD MODE"))
             return;
         sec::SetGuardMode(sec::Mode::Enforce);
         ConsoleWriteln("GUARD: ENFORCE (prompts on Warn/Deny, default-deny on timeout)");
@@ -410,7 +454,7 @@ void CmdGuard(u32 argc, char** argv)
     }
     if (StrEq(argv[1], "off"))
     {
-        if (!RequireAdmin("GUARD MODE"))
+        if (!RequireCap(duetos::core::kCapDebug, "GUARD MODE"))
             return;
         sec::SetGuardMode(sec::Mode::Off);
         ConsoleWriteln("GUARD: OFF (all images pass through)");
@@ -555,19 +599,6 @@ void CmdPolicy(u32 argc, char** argv)
 // ---------------------------------------------------------------
 namespace
 {
-
-constexpr u64 kShellPseudoPid = ~0ull;
-duetos::core::Process g_shell_proc{};
-bool g_shell_proc_initialized = false;
-
-void EnsureShellProcInitialized()
-{
-    if (g_shell_proc_initialized)
-        return;
-    g_shell_proc.pid = kShellPseudoPid;
-    g_shell_proc.caps = duetos::core::CapSetEmpty();
-    g_shell_proc_initialized = true;
-}
 
 duetos::core::Cap ParseCapArg(const char* s)
 {

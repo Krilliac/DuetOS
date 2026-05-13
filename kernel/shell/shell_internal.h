@@ -12,6 +12,7 @@
 // so the existing if/else dispatch chain keeps reading like the
 // in-TU layout the file used to have.
 
+#include "proc/process.h"
 #include "util/types.h"
 
 namespace duetos::core::shell::internal
@@ -430,6 +431,16 @@ void CmdMetrics();
 // Definition lives in shell.cpp.
 // ---------------------------------------------------------------
 bool RequireAdmin(const char* cmd);
+
+/// Cap-aware gate. Passes when:
+///   (1) the active session is `AuthRole::Admin` (legacy admin
+///       semantics — admin holds every cap implicitly), OR
+///   (2) the shell's pseudo-process holds `cap` via a live grace-
+///       cache grant (i.e. the user ran `elevate <cap>` recently).
+/// On denial: prints DENIED + the missing cap name and, if the
+/// active user's roles would grant this cap, hints at the elevate
+/// command to use.
+bool RequireCap(::duetos::core::Cap cap, const char* cmd);
 
 // ---------------------------------------------------------------
 // Executable + low-level read commands (shell_exec.cpp). Loaders
