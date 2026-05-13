@@ -49,7 +49,12 @@ if [[ $# -ne 2 ]]; then
 fi
 
 PROFILE="$1"
-BIN_DIR="$2"
+# Canonicalise BIN_DIR to an absolute path. Per-row dirs are
+# referenced by symlinks (kernel/, duetos.iso) inside the row dir;
+# a relative BIN_DIR makes the symlink target relative to the
+# symlink's own location instead of cwd, which silently breaks
+# the row's kernel-ELF lookup later.
+BIN_DIR="$(cd "$2" && pwd)"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROFILE_SCRIPT="${REPO_ROOT}/tools/test/profile-boot-smoke.sh"
 BOCHS_SCRIPT="${REPO_ROOT}/tools/test/bochs-smoke.sh"
@@ -101,9 +106,12 @@ filter_canonical() {
     grep -aE '^\[(smoke|boot|panic|panic-summary|health|bringup-tail|string-selftest|hexdump-selftest|fs/vfs|hello-pe|hello-winapi|vcruntime140|strings|heap|advapi|perf-counter|heap-resize|calc|files|clock|block|ring3|linux-smoke|linux-elf)\]|boot : metrics|^Hello from ring 3!|^DuetOS v0|^Windows Kill|^exit rc|^pe spawn|^queued task|PANIC|DUETOS CRASH|triple fault|UNRESOLVED' "${src}" \
       | sed -E \
           -e 's/0x[0-9a-fA-F]+/0xX/g' \
+          -e 's/\[t=[0-9]+\.[0-9]+ms\]/[t=Tms]/g' \
+          -e 's/\[t~[0-9]+ms\]/[t=Tms]/g' \
           -e 's/\[[0-9]+\.[0-9]+\]/[T]/g' \
           -e 's/\[CPU[0-9]+\]/[CPU]/g' \
           -e 's/(pid|tid|rip|rsp|rbp|cr2)=[0-9a-fA-FxX]+/\1=N/g' \
+          -e 's/(ctx_switches|ctx_sw)=[0-9]+/\1=N/g' \
           -e 's/serial=[0-9a-fA-F]+/serial=N/g' \
           -e 's/mac=([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}/mac=M/g' \
       | LC_ALL=C sort -u > "${dst}"

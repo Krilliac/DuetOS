@@ -49,7 +49,12 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 PRESET="${DUETOS_PRESET:-x86_64-debug}"
-BUILD_DIR="${REPO_ROOT}/build/${PRESET}"
+# DUETOS_BUILD_DIR overrides the derived ${REPO_ROOT}/build/${PRESET}
+# path. Used by tools/test/diff-boot-smoke.sh when invoking the
+# Bochs row against a per-row scratch dir that already has the
+# kernel ELF + canonical ISO symlinked in place — the row-dir
+# basename can't double as a preset name.
+BUILD_DIR="${DUETOS_BUILD_DIR:-${REPO_ROOT}/build/${PRESET}}"
 KERNEL_ELF="${BUILD_DIR}/kernel/duetos-kernel.elf"
 SMOKE_PROFILE="${DUETOS_SMOKE_PROFILE:-}"
 TIMEOUT_SECS="${DUETOS_TIMEOUT:-300}"

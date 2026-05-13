@@ -41,8 +41,21 @@ fi
 SERIAL_LOG="${BIN_DIR}/bochs-${PROFILE}.log"
 rm -f "${SERIAL_LOG}"
 
+# Bochs is single-threaded and runs the guest at ~1/8 the wall-
+# clock speed of QEMU/TCG (which itself is ~50x slower than KVM).
+# 900s is the comfortable default for a bringup-profile run; PE
+# profiles may need to override higher.
+#
+# DUETOS_BUILD_DIR pins bochs-run.sh's BUILD_DIR to the BIN_DIR
+# we were called with. Without this, bochs-run.sh derives
+# BUILD_DIR from ${REPO_ROOT}/build/${PRESET}, which works when
+# BIN_DIR's basename is a real preset name (x86_64-debug) but
+# breaks when the diff-boot harness calls us against a per-row
+# scratch dir whose basename is something like
+# diff-bringup-D-bochs-core2-seabios.
 DUETOS_PRESET="$(basename "${BIN_DIR}")" \
-DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-600}" \
+DUETOS_BUILD_DIR="${BIN_DIR}" \
+DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-900}" \
 DUETOS_SMOKE_PROFILE="${PROFILE}" \
     "${BOCHS_RUN}" 2>&1 || true
 
