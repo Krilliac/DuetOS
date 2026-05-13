@@ -2,25 +2,84 @@
 #include "drivers/virtio/virtio_pci.h"
 
 #include "log/klog.h"
+#include "mm/frame_allocator.h"
+#include "mm/page.h"
 
 /*
  * virtio-rng — entropy provider.
  *
- * Real driver: one virtqueue (requestq). Driver pushes a
- * descriptor pointing at a kernel-owned page; device fills it
- * with hardware/host entropy and signals via the used ring.
- * Kernel pushes the bytes into the entropy pool, which is the
- * one virtio device that gives the kernel something useful even
- * before a single user-mode process exists.
+ * Real driver: one virtqueue (requestq). Driver pushes a single
+ * device-writable descriptor pointing at a kernel-owned buffer;
+ * device fills it with hardware/host entropy and signals via the
+ * used ring. We poll the used ring (no IRQ in v0); when the
+ * completion lands, the buffer contents are guaranteed-fresh
+ * entropy bytes the kernel can mix into its pool.
  *
- * v0 (this file): completes feature negotiation (no rng-specific
- * features today — only VERSION_1) and logs the attach. Queue
- * allocation + the actual entropy pull is STUBBED until the
- * shared transport gains a VirtioQueueSetup helper.
+ * v0 lands the full request/response round-trip and logs the
+ * first 8 bytes pulled per attach. Mixing those bytes into
+ * `util/random`'s pool is the next slice — that surface needs a
+ * public `RandomMix(const u8*, u64)` and the random TU doesn't
+ * have one yet.
  */
 
 namespace duetos::drivers::virtio
 {
+
+namespace
+{
+constinit VirtioQueue g_rng_q = {};
+constinit bool g_entropy_pulled = false;
+
+bool PullEntropy(VirtioPciLayout* L, VirtioQueue* q)
+{
+    // Allocate one page as the device-write buffer. virtio-rng has
+    // no per-request header — the device just writes random bytes
+    // into the supplied buffer.
+    const mm::PhysAddr buf_phys = mm::AllocateFrame();
+    if (buf_phys == mm::kNullFrame)
+    {
+        KLOG_WARN("drivers/virtio/rng", "entropy buffer alloc failed");
+        return false;
+    }
+    void* buf_virt = mm::PhysToVirt(buf_phys);
+    u8* buf = static_cast<u8*>(buf_virt);
+    constexpr u32 kBufLen = 64;
+    for (u32 i = 0; i < kBufLen; ++i)
+        buf[i] = 0;
+
+    // Fill descriptor 0: device-writable, points at our buffer.
+    q->desc[0].addr = buf_phys;
+    q->desc[0].len = kBufLen;
+    q->desc[0].flags = kVirtqDescWrite;
+    q->desc[0].next = 0;
+
+    // Publish + notify, then poll for completion. virtio-rng on
+    // QEMU completes instantly; cap the poll at ~10ms equivalent
+    // (1M `pause` iterations) so a stuck device doesn't hang
+    // boot.
+    VirtioQueuePublish(L, q, /*desc_head=*/0);
+    for (u32 spin = 0; spin < 1000000; ++spin)
+    {
+        u32 head = 0;
+        u32 used_len = 0;
+        if (VirtioQueueTryPop(q, &head, &used_len))
+        {
+            // Log the first 8 bytes as a u64. Anyone reviewing
+            // boot logs sees a non-zero, non-repeating value =
+            // the device actually wrote entropy.
+            u64 sample = 0;
+            for (u32 i = 0; i < 8; ++i)
+                sample = (sample << 8) | buf[i];
+            KLOG_INFO_2V("drivers/virtio/rng", "entropy pulled", "bytes", static_cast<u64>(used_len), "sample-u64",
+                         sample);
+            return true;
+        }
+        asm volatile("pause" ::: "memory");
+    }
+    KLOG_WARN("drivers/virtio/rng", "entropy poll timed out");
+    return false;
+}
+} // namespace
 
 bool VirtioRngProbe(const VirtioPciLayout& L)
 {
@@ -30,11 +89,27 @@ bool VirtioRngProbe(const VirtioPciLayout& L)
         KLOG_WARN("drivers/virtio/rng", "feature negotiation failed");
         return false;
     }
-    KLOG_INFO_V("drivers/virtio/rng", "attached (no entropy pulled yet)", static_cast<u64>(layout.num_queues));
-    // STUB: a real driver allocates a virtqueue here and posts a
-    // descriptor pointing at the entropy buffer. Until the shared
-    // transport hosts queue setup, virtio-rng cannot pull entropy
-    // — RandomInit's existing seed path is unaffected.
+
+    if (!VirtioQueueSetup(&layout, &g_rng_q, /*queue_index=*/0, kVirtqDefaultSize))
+    {
+        KLOG_WARN("drivers/virtio/rng", "requestq setup failed");
+        return false;
+    }
+    // VirtioNegotiate already set DRIVER_OK for the transport-only
+    // path. Future drivers that set up queues BEFORE finalising
+    // negotiation should defer DRIVER_OK and call
+    // `VirtioMarkDriverOk` here — for v0 the eager path is fine
+    // because the device tolerates a queue installed post-
+    // DRIVER_OK (QEMU's virtio-rng accepts requests as soon as
+    // the queue is enabled).
+
+    if (PullEntropy(&layout, &g_rng_q))
+        g_entropy_pulled = true;
+    KLOG_INFO_V("drivers/virtio/rng", "attached", static_cast<u64>(g_entropy_pulled ? 1 : 0));
+    // GAP: entropy is read but not yet mixed into util::random.
+    // `RandomMix` doesn't exist; adding it is the next slice. The
+    // pulled bytes are observable in the boot log so the round-
+    // trip is verifiable today.
     return true;
 }
 

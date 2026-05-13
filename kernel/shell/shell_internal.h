@@ -464,6 +464,7 @@ void CmdGuard(u32 argc, char** argv);
 void CmdAttackSim();
 void CmdSecEvents(u32 argc, char** argv);
 void CmdPolicy(u32 argc, char** argv);
+void CmdCaplog(u32 argc, char** argv);
 void CmdPurple();
 
 // ---------------------------------------------------------------

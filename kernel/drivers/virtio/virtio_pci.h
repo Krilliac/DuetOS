@@ -135,4 +135,110 @@ VirtioClass VirtioClassFromDeviceId(u16 device_id);
 /// log lines. Returns "unknown" for `kInvalid` / unsupported.
 const char* VirtioClassName(VirtioClass c);
 
+// ===================================================================
+// Split virtqueue (virtio 1.0 §2.6).
+//
+// Three host-visible memory regions per queue:
+//   - descriptor table: queue_size * VirtqDesc (16 B each)
+//   - available ring  : VirtqAvailHdr + queue_size * u16
+//   - used ring       : VirtqUsedHdr  + queue_size * VirtqUsedElem
+//
+// For v0 we cap queue_size at 32 and allocate each region as a
+// single 4 KiB frame:
+//   desc:  32 * 16 = 512 B    (fits in one page)
+//   avail: 4 + 32*2 = 68 B    (fits in one page)
+//   used:  4 + 32*8 = 260 B   (fits in one page)
+// Drivers that want bigger queues will need a contiguous-pages
+// variant — `mm::AllocateContiguousFrames` is the helper for it,
+// but no v0 device demands more than 32 entries.
+// ===================================================================
+
+struct VirtqDesc
+{
+    u64 addr;
+    u32 len;
+    u16 flags;
+    u16 next;
+};
+
+inline constexpr u16 kVirtqDescNext = 0x1;
+inline constexpr u16 kVirtqDescWrite = 0x2;
+
+struct VirtqAvailHdr
+{
+    u16 flags;
+    u16 idx;
+    // u16 ring[queue_size] follows here.
+};
+
+struct VirtqUsedElem
+{
+    u32 id;
+    u32 len;
+};
+
+struct VirtqUsedHdr
+{
+    u16 flags;
+    u16 idx;
+    // VirtqUsedElem ring[queue_size] follows here.
+};
+
+inline constexpr u16 kVirtqDefaultSize = 32;
+
+struct VirtioQueue
+{
+    bool up;
+    u16 queue_index;   // queue_select value used during setup.
+    u16 queue_size;    // capped at the device's advertised max.
+    u16 last_used_idx; // last `used->idx` the driver consumed.
+    u16 next_avail;    // driver-owned avail->idx counter.
+    u16 notify_off;    // device-supplied; multiplied by L.notify_off_multiplier.
+
+    u64 desc_phys;
+    u64 avail_phys;
+    u64 used_phys;
+
+    volatile VirtqDesc* desc;
+    volatile VirtqAvailHdr* avail_hdr;
+    volatile u16* avail_ring;
+    volatile VirtqUsedHdr* used_hdr;
+    volatile VirtqUsedElem* used_ring;
+};
+
+/// Allocate + register one split virtqueue against the device.
+/// Writes queue_select=queue_index, queue_size=min(advertised, want_size),
+/// the three ring phys addresses, queue_enable=1. Caller must
+/// have completed `VirtioPciProbe` AND `VirtioNegotiate` already
+/// — DRIVER_OK must NOT be set yet (spec §3.1.1 step 7). Returns
+/// true on success, false if alloc failed or the device rejected.
+bool VirtioQueueSetup(VirtioPciLayout* L, VirtioQueue* q, u16 queue_index, u16 want_size);
+
+/// Final DRIVER_OK transition. Some drivers want to set up
+/// several queues before flipping the bit; `VirtioNegotiate` sets
+/// DRIVER_OK eagerly for the transport-only path, so callers that
+/// install queues should pass `defer_driver_ok=true` to
+/// `VirtioNegotiate` and then invoke this once the queues are up.
+/// (v0 transport sets DRIVER_OK eagerly — this helper is the seam
+/// for the deferred path.)
+void VirtioMarkDriverOk(VirtioPciLayout* L);
+
+/// Publish one descriptor (or chain) into the queue and notify the
+/// device. `desc_head` is the queue-index slot of the chain's head
+/// descriptor; the caller is responsible for populating
+/// `q->desc[desc_head ...]` first, with the chain terminating at
+/// the descriptor whose flags do NOT carry `kVirtqDescNext`.
+///
+/// Memory ordering: this helper performs the required write
+/// barriers so the device sees descriptor contents before
+/// `avail->idx`, and the notify write last.
+void VirtioQueuePublish(VirtioPciLayout* L, VirtioQueue* q, u16 desc_head);
+
+/// Poll the used ring for a new completion. Returns true if a
+/// fresh completion was consumed and writes the descriptor head
+/// id + bytes-written into the out parameters. Caller invokes
+/// this in a busy-poll loop with `pause` — IRQ-driven completion
+/// is a future enhancement.
+bool VirtioQueueTryPop(VirtioQueue* q, u32* out_desc_head, u32* out_used_len);
+
 } // namespace duetos::drivers::virtio

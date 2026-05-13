@@ -230,6 +230,11 @@ expected=(
     '[hello-native] portable native ELF spawned'
     '[nat-calc] all eval cases passed'
     '[nat-sysinfo] report complete'
+    # PE-compat smoke battery completion sentinel. ring3_smoke.cpp
+    # emits this once every surface-coverage PE has been spawned —
+    # its absence means the battery's queueing path regressed
+    # (an early panic, an early return, a guard that fired).
+    '[pe-compat-smoke] battery complete'
 )
 
 # Forbidden signatures — anything indicating an unhandled

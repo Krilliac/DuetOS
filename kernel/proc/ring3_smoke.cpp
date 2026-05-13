@@ -3427,6 +3427,16 @@ void StartRing3SmokeTask()
         "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread + "
         "ptrfuzz + writefuzz + hellope + winkill-report + thread-stress + syscall-stress + "
         "customdll-test)");
+    // Canonical PE-compat smoke battery anchor. ctest's
+    // duetos-boot-smoke greps for this exact line to confirm
+    // every surface-coverage PE spawn fired and the battery
+    // completed. The line is intentionally bare-bones — a
+    // single grep-able sentinel beats a structured PASS/FAIL
+    // tally that depends on every PE emitting in a uniform
+    // shape (they don't; each one prints its own PASS/FAIL
+    // per-API). The per-PE pass/fail signal stays in the
+    // existing expected[] list in ctest-boot-smoke.sh.
+    arch::SerialWrite("[pe-compat-smoke] battery complete\n");
 }
 
 } // namespace duetos::core

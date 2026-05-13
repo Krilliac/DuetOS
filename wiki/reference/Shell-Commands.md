@@ -31,7 +31,7 @@ Source: `kernel/shell/*.cpp` — every `void Cmd*(...)` symbol appears here. Tot
 | `kernel/shell/shell_loadtest.cpp` | `CmdLoadTest` |
 | `kernel/shell/shell_network.cpp` | `CmdArp`, `CmdBt`, `CmdCrTrace`, `CmdDhcp`, `CmdFirewall`, `CmdFwPolicy`, `CmdFwTrace`, `CmdHttp`, `CmdIfconfig`, `CmdIpv4`, `CmdNet`, `CmdNetscan`, `CmdNic`, `CmdNslookup`, `CmdNtp`, `CmdPing`, `CmdRoute`, `CmdUsbNet`, `CmdWifi` |
 | `kernel/shell/shell_process.cpp` | `CmdFree`, `CmdKill`, `CmdPs`, `CmdSpawn`, `CmdTop` |
-| `kernel/shell/shell_security.cpp` | `CmdAttackSim`, `CmdGuard`, `CmdIdleLock`, `CmdLoginCmd`, `CmdLogout`, `CmdPasswd`, `CmdPolicy`, `CmdPurple`, `CmdSecEvents`, `CmdSu`, `CmdUnlock`, `CmdUseradd`, `CmdUserdel`, `CmdUsers` |
+| `kernel/shell/shell_security.cpp` | `CmdAttackSim`, `CmdCaplog`, `CmdGuard`, `CmdIdleLock`, `CmdLoginCmd`, `CmdLogout`, `CmdPasswd`, `CmdPolicy`, `CmdPurple`, `CmdSecEvents`, `CmdSu`, `CmdUnlock`, `CmdUseradd`, `CmdUserdel`, `CmdUsers` |
 | `kernel/shell/shell_storage.cpp` | `CmdInstall`, `CmdLastdump`, `CmdLsblk`, `CmdLsgpt`, `CmdLsmod`, `CmdMkfs`, `CmdMkfsDuetfs`, `CmdMount` |
 | `kernel/shell/shell_utilities.cpp` | `CmdBasename`, `CmdBeep`, `CmdCal`, `CmdChecksum`, `CmdColor`, `CmdDirname`, `CmdDmesg`, `CmdExpr`, `CmdFlushTlb`, `CmdHexdump`, `CmdHistory`, `CmdMan`, `CmdMem`, `CmdMode`, `CmdNl`, `CmdRand`, `CmdReset`, `CmdRev`, `CmdSeq`, `CmdSleep`, `CmdStat`, `CmdStats`, `CmdTac`, `CmdUuid` |
 <!-- AUTO:shell-commands END -->
@@ -155,6 +155,7 @@ All write-side FAT operations are admin-gated.
 | `install <handle> INSTALL [--duetfs]` | Run the disk-installer pipeline: GPT (ESP / system / crash-dump) + FAT32 ESP format + system format (FAT32 default, DuetFS with `--duetfs`) + ESP grub.cfg stub + BOOTX64.EFI copy + auto-mount /esp + /system (DESTRUCTIVE, admin, ≥100 MiB minimum disk) |
 | `lastdump` | Last in-RAM minidump readout (signature + size) |
 | `pe-triage [pid]` | Win32 PE first-run import report — unresolved IAT entries per process (no args = every process with misses) |
+| `caplog [count]` | Newest-first dump of the cap-gate denial ring (sequence, tick, pid, syscall #, missing cap). Counts of total calls / denies / dropped-from-ring print as a header. |
 
 ## Environment & shell state
 

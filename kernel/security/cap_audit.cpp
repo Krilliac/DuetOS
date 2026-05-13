@@ -32,6 +32,7 @@
 #include "core/panic.h"
 #include "log/klog.h"
 #include "proc/process.h"
+#include "time/tick.h"
 #include "util/build_config.h"
 #include "util/types.h"
 
@@ -45,6 +46,35 @@ constinit u64 g_call_count = 0;
 constinit u64 g_deny_count = 0;
 constinit u64 g_sample_cursor = 0;
 constinit bool g_force_next_sample = false;
+
+// Denial-history ring. Fixed-capacity, newest-overwrites-oldest, all
+// access from the audit hook (which is called with IRQs already
+// inhibited by the gate path). `g_deny_seq` is the monotonic
+// sequence number of the *next* denial slot; `(g_deny_seq - 1) %
+// kDenyRingCap` is therefore the most-recently-written index. The
+// `dropped` count records how many denials would have been
+// evicted by the wrap had the operator not drained the ring — a
+// non-zero value is the operator's signal to widen the buffer.
+constexpr u64 kDenyRingCap = 256;
+constinit CapAuditDenialRecord g_deny_ring[kDenyRingCap] = {};
+constinit u64 g_deny_seq = 0;
+constinit u64 g_deny_dropped = 0;
+
+void RingPushDenial(const CapAuditEvent& event)
+{
+    const u64 seq = g_deny_seq++;
+    if (seq >= kDenyRingCap)
+        ++g_deny_dropped;
+    CapAuditDenialRecord& slot = g_deny_ring[seq % kDenyRingCap];
+    slot.sequence = seq;
+    slot.boot_tick = ::duetos::time::TickCount();
+    slot.syscall_number = event.syscall_number;
+    slot.proc_id = event.proc_id;
+    slot.required_mask = event.required_mask;
+    slot.missing = event.missing;
+    for (u32 i = 0; i < sizeof(slot._pad); ++i)
+        slot._pad[i] = 0;
+}
 
 // Runtime mode. Initialised from the compile-time constexpr at the
 // first call (or via CapAuditSetMode). The static-initialised value
@@ -122,6 +152,11 @@ void CapAuditTrace(const CapAuditEvent& event)
     if (event.missing != duetos::core::kCapNone)
     {
         ++g_deny_count;
+        // Push into the denial ring so `caplog` from the shell can
+        // see what just happened even if klog is filtered to WARN
+        // or the operator missed the burst. The ring is bounded so
+        // a deny storm doesn't unbounded-grow.
+        RingPushDenial(event);
     }
 
     if constexpr (duetos::core::kCapAuditMode == CapAuditMode::Off)
@@ -224,6 +259,29 @@ void CapAuditSelfTest()
 
     arch::SerialWrite("[cap-audit] self-test: OK.\n");
     CapAuditResetCounters();
+}
+
+u64 CapAuditCopyRecentDenials(CapAuditDenialRecord* out, u64 out_cap)
+{
+    if (out == nullptr || out_cap == 0)
+        return 0;
+    const u64 live = (g_deny_seq < kDenyRingCap) ? g_deny_seq : kDenyRingCap;
+    const u64 n = (live < out_cap) ? live : out_cap;
+    // Walk newest-first: index N-1 is the last written. We rebuild
+    // the index for each step rather than chase a cursor because
+    // the ring is small and the read is rare (operator-driven).
+    for (u64 i = 0; i < n; ++i)
+    {
+        const u64 from_end = i + 1; // 1 = newest
+        const u64 abs_seq = g_deny_seq - from_end;
+        out[i] = g_deny_ring[abs_seq % kDenyRingCap];
+    }
+    return n;
+}
+
+u64 CapAuditDenialDropCount()
+{
+    return g_deny_dropped;
 }
 
 } // namespace duetos::security

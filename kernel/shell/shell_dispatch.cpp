@@ -669,7 +669,7 @@ const char* const kCommandSet[] = {
     "tty",         "type",      "printenv",  "df",         "du",        "loadavg",  "clearhist", "pause",
     "yes",         "sync",      "port",      "assert",     "watch",     "script",   "exit",      "mkfs",
     "mkfs.duetfs", "install",   "lastdump",  "loadtest",   "stress",    "bench",    "dbg",       "dfix",
-    "drshd",      "pe-triage",
+    "drshd",      "pe-triage", "caplog",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1881,6 +1881,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "pe-triage"))
     {
         CmdPeTriage(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "caplog"))
+    {
+        CmdCaplog(argc, argv);
         return;
     }
     if (StrEq(cmd, "hexdump"))

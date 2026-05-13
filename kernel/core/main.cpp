@@ -144,6 +144,7 @@
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
 #include "drivers/storage/nvme.h"
+#include "fs/boot_slot.h"
 #include "fs/duetfs.h"
 #include "fs/exfat.h"
 #include "fs/ext4.h"
@@ -205,6 +206,7 @@
 #include "mm/frame_allocator.h"
 #include "mm/zone.h"
 #include "ipc/handle_table.h"
+#include "ipc/iocp.h"
 #include "diag/boot_progress.h"
 #include "diag/event_trace.h"
 #include "diag/fault_react.h"
@@ -1144,6 +1146,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Exercising PE app-compat sidecar parser.\n");
     DUETOS_BOOT_SELFTEST(duetos::core::compat::SelfTest());
+
+    SerialWrite("[boot] Exercising A/B boot-slot state machine.\n");
+    DUETOS_BOOT_SELFTEST(duetos::fs::boot_slot::SelfTest());
+
+    SerialWrite("[boot] Exercising IOCP completion-port primitive.\n");
+    DUETOS_BOOT_SELFTEST(duetos::ipc::IocpSelfTest());
 
     SerialWrite("[boot] Exercising kernel registry helpers.\n");
     DUETOS_BOOT_SELFTEST(duetos::subsystems::win32::registry::RegistrySelfTest());
