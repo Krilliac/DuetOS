@@ -1,0 +1,7 @@
+LIBRARY comctl32.dll
+EXPORTS
+    ImageList_Create
+    ImageList_Destroy
+    ImageList_AddMasked
+    InitCommonControlsEx
+    PropertySheetA

@@ -62,11 +62,20 @@
 #include "generated_dbghelp_dll.h"
 #include "generated_dxgi_dll.h"
 #include "generated_gdi32_dll.h"
+#include "generated_advapi32_32_dll.h"
+#include "generated_bcrypt_32_dll.h"
+#include "generated_comctl32_32_dll.h"
+#include "generated_comdlg32_32_dll.h"
+#include "generated_crypt32_32_dll.h"
 #include "generated_gdi32_32_dll.h"
+#include "generated_iphlpapi_32_dll.h"
 #include "generated_kernel32_32_dll.h"
 #include "generated_kernel32_dll.h"
 #include "generated_msvcrt_32_dll.h"
+#include "generated_shell32_32_dll.h"
+#include "generated_shlwapi_32_dll.h"
 #include "generated_user32_32_dll.h"
+#include "generated_ws2_32_32_dll.h"
 #include "generated_kernelbase_dll.h"
 #include "generated_msvcp140_dll.h"
 #include "generated_msvcrt_dll.h"
@@ -2515,6 +2524,30 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"user32.dll", fs::generated::kBinUser32_32DllBytes, fs::generated::kBinUser32_32DllBytes_len,
          /*essential=*/true},
         {"gdi32.dll", fs::generated::kBinGdi32_32DllBytes, fs::generated::kBinGdi32_32DllBytes_len,
+         /*essential=*/true},
+        /* All PE32 stubs marked essential — they're each ~2-3 KiB
+         * and DllLoad is microseconds. Skipping any of them under
+         * emulator would leave the PE32 IAT walker falling back to
+         * the (unmapped-for-PE32) Win32 thunks catch-all on every
+         * unresolved import, defeating the whole point of the
+         * 32-bit DLL set. */
+        {"advapi32.dll", fs::generated::kBinAdvapi32_32DllBytes, fs::generated::kBinAdvapi32_32DllBytes_len,
+         /*essential=*/true},
+        {"comctl32.dll", fs::generated::kBinComctl32_32DllBytes, fs::generated::kBinComctl32_32DllBytes_len,
+         /*essential=*/true},
+        {"comdlg32.dll", fs::generated::kBinComdlg32_32DllBytes, fs::generated::kBinComdlg32_32DllBytes_len,
+         /*essential=*/true},
+        {"crypt32.dll", fs::generated::kBinCrypt32_32DllBytes, fs::generated::kBinCrypt32_32DllBytes_len,
+         /*essential=*/true},
+        {"iphlpapi.dll", fs::generated::kBinIphlpapi_32DllBytes, fs::generated::kBinIphlpapi_32DllBytes_len,
+         /*essential=*/true},
+        {"shell32.dll", fs::generated::kBinShell32_32DllBytes, fs::generated::kBinShell32_32DllBytes_len,
+         /*essential=*/true},
+        {"shlwapi.dll", fs::generated::kBinShlwapi_32DllBytes, fs::generated::kBinShlwapi_32DllBytes_len,
+         /*essential=*/true},
+        {"ws2_32.dll", fs::generated::kBinWs2_32_32DllBytes, fs::generated::kBinWs2_32_32DllBytes_len,
+         /*essential=*/true},
+        {"bcrypt.dll", fs::generated::kBinBcrypt_32DllBytes, fs::generated::kBinBcrypt_32DllBytes_len,
          /*essential=*/true},
     };
     constexpr u64 kPreloadPe32EntryCount = sizeof(preload_set_pe32) / sizeof(preload_set_pe32[0]);

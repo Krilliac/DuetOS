@@ -726,8 +726,17 @@ macro(duetos_embed_32bit_stub_dll name base_va symbol)
     list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${_hdr}")
 endmacro()
 
-duetos_embed_32bit_stub_dll(user32 0x10060000 kBinUser32_32DllBytes)
-duetos_embed_32bit_stub_dll(gdi32  0x10080000 kBinGdi32_32DllBytes)
+duetos_embed_32bit_stub_dll(user32   0x10060000 kBinUser32_32DllBytes)
+duetos_embed_32bit_stub_dll(gdi32    0x10080000 kBinGdi32_32DllBytes)
+duetos_embed_32bit_stub_dll(advapi32 0x100A0000 kBinAdvapi32_32DllBytes)
+duetos_embed_32bit_stub_dll(comctl32 0x100C0000 kBinComctl32_32DllBytes)
+duetos_embed_32bit_stub_dll(comdlg32 0x100D0000 kBinComdlg32_32DllBytes)
+duetos_embed_32bit_stub_dll(crypt32  0x100E0000 kBinCrypt32_32DllBytes)
+duetos_embed_32bit_stub_dll(iphlpapi 0x100F0000 kBinIphlpapi_32DllBytes)
+duetos_embed_32bit_stub_dll(shell32  0x10110000 kBinShell32_32DllBytes)
+duetos_embed_32bit_stub_dll(shlwapi  0x10130000 kBinShlwapi_32DllBytes)
+duetos_embed_32bit_stub_dll(ws2_32   0x10150000 kBinWs2_32_32DllBytes)
+duetos_embed_32bit_stub_dll(bcrypt   0x10170000 kBinBcrypt_32DllBytes)
 
 duetos_embed_blob(generated_vcruntime140_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-vcruntime140-dll.sh"

@@ -1,0 +1,6 @@
+LIBRARY iphlpapi.dll
+EXPORTS
+    GetAdaptersAddresses
+    GetBestRoute2
+    GetUnicastIpAddressTable
+    FreeMibTable
