@@ -17,3 +17,37 @@ EXPORTS
     GetStdHandle
     WriteFile
     WriteConsoleA
+    WriteConsoleW
+    GetModuleHandleA
+    GetModuleHandleW
+    GetProcAddress
+    LoadLibraryA
+    LoadLibraryW
+    FreeLibrary
+    Sleep
+    GetTickCount
+    GetProcessHeap
+    HeapAlloc
+    HeapFree
+    HeapSize
+    HeapReAlloc
+    GetCommandLineA
+    GetCommandLineW
+    GetStartupInfoA
+    GetStartupInfoW
+    GetFileType
+    InitializeCriticalSection
+    EnterCriticalSection
+    LeaveCriticalSection
+    DeleteCriticalSection
+    InitializeCriticalSectionAndSpinCount
+    IsDebuggerPresent
+    IsProcessorFeaturePresent
+    SetUnhandledExceptionFilter
+    UnhandledExceptionFilter
+    CloseHandle
+    GetVersion
+    InterlockedIncrement
+    InterlockedDecrement
+    InterlockedExchange
+    InterlockedCompareExchange
