@@ -322,11 +322,65 @@ __declspec(dllexport) NTSTATUS NtReleaseMutant(HANDLE h, long* previous_count)
  * NtCreateMutant / NtOpenMutant / NtReleaseMutant — Win32 mutexes.
  *
  * Mutant is the NT-internal name for what Win32 calls a mutex.
- * NtCreateMutant forwards directly to SYS_MUTEX_CREATE; v0
- * doesn't honour OBJECT_ATTRIBUTES (no named-object table yet),
- * so the returned handle is unnamed and can't be opened by
- * NtOpenMutant. Sub-GAP.
+ * NtCreateMutant forwards directly to SYS_MUTEX_CREATE (unnamed
+ * variant). NtOpenMutant routes through SYS_NAMED_KOBJ_OPEN_OR_CREATE
+ * (=185) with open_only=1 so a Create+Open pair on the same name
+ * resolves through the kernel-resident named-object table.
+ * OBJECT_ATTRIBUTES->ObjectName carries the UNICODE_STRING; ASCII
+ * subset only (matches kernel32 CreateMutexW path).
  * ------------------------------------------------------------------ */
+
+/* Copy the wide ObjectName into an ASCII buffer (low byte) and
+ * dispatch SYS_NAMED_KOBJ_OPEN_OR_CREATE with open_only=1.
+ *  type: 0=mutex, 1=event, 2=semaphore.
+ *  Returns the type-biased handle on success, or 0 (treated as
+ *  STATUS_OBJECT_NAME_NOT_FOUND by the caller) on miss / bad input.
+ *
+ * UNICODE_STRING / OBJECT_ATTRIBUTES layouts are inlined here so
+ * this helper can live above the full typedefs further down in the
+ * TU; field order matches the Win32 ABI exactly. */
+static long long ntdll_named_kobj_open(unsigned int type, void* object_attributes)
+{
+    typedef struct
+    {
+        unsigned short Length;
+        unsigned short MaximumLength;
+        unsigned short* Buffer;
+    } _OA_UniStr;
+    typedef struct
+    {
+        unsigned long Length;
+        void* RootDirectory;
+        _OA_UniStr* ObjectName;
+        unsigned long Attributes;
+        void* SecurityDescriptor;
+        void* SecurityQualityOfService;
+    } _OA_View;
+    if (object_attributes == (void*)0)
+        return 0;
+    _OA_View* oa = (_OA_View*)object_attributes;
+    if (oa->ObjectName == (_OA_UniStr*)0 || oa->ObjectName->Buffer == (unsigned short*)0
+        || oa->ObjectName->Length == 0)
+        return 0;
+    char name[64] = {0};
+    const unsigned short wchars = (unsigned short)(oa->ObjectName->Length / 2);
+    unsigned short i = 0;
+    for (; i < wchars && i < 63; ++i)
+        name[i] = (char)(unsigned char)(oa->ObjectName->Buffer[i] & 0xFF);
+    name[i] = 0;
+    if (name[0] == 0)
+        return 0;
+    long long rv;
+    register long long r10 __asm__("r10") = 0;
+    register long long r8 __asm__("r8") = 1; /* open_only */
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)185), "D"((long long)type), "S"((long long)name), "d"((long long)64), "r"(r10),
+                       "r"(r8)
+                     : "memory");
+    return rv;
+}
+
 __declspec(dllexport) NTSTATUS NtCreateMutant(HANDLE* MutantHandle, ULONG DesiredAccess, void* ObjectAttributes,
                                               BOOL InitialOwner)
 {
@@ -351,11 +405,14 @@ __declspec(dllexport) NTSTATUS ZwCreateMutant(HANDLE* MutantHandle, ULONG Desire
 
 __declspec(dllexport) NTSTATUS NtOpenMutant(HANDLE* MutantHandle, ULONG DesiredAccess, void* ObjectAttributes)
 {
-    (void)MutantHandle;
     (void)DesiredAccess;
-    (void)ObjectAttributes;
-    /* No named-object table yet. */
-    return (NTSTATUS)0xC0000034; /* STATUS_OBJECT_NAME_NOT_FOUND */
+    if (MutantHandle == (HANDLE*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    const long long handle = ntdll_named_kobj_open(0, ObjectAttributes);
+    if (handle <= 0)
+        return (NTSTATUS)0xC0000034; /* STATUS_OBJECT_NAME_NOT_FOUND */
+    *MutantHandle = (HANDLE)handle;
+    return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS ZwOpenMutant(HANDLE* MutantHandle, ULONG DesiredAccess, void* ObjectAttributes)
@@ -401,10 +458,14 @@ __declspec(dllexport) NTSTATUS ZwCreateEvent(HANDLE* EventHandle, ULONG DesiredA
 
 __declspec(dllexport) NTSTATUS NtOpenEvent(HANDLE* EventHandle, ULONG DesiredAccess, void* ObjectAttributes)
 {
-    (void)EventHandle;
     (void)DesiredAccess;
-    (void)ObjectAttributes;
-    return (NTSTATUS)0xC0000034;
+    if (EventHandle == (HANDLE*)0)
+        return NTSTATUS_INVALID_PARAMETER;
+    const long long handle = ntdll_named_kobj_open(1, ObjectAttributes);
+    if (handle <= 0)
+        return (NTSTATUS)0xC0000034;
+    *EventHandle = (HANDLE)handle;
+    return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS ZwOpenEvent(HANDLE* EventHandle, ULONG DesiredAccess, void* ObjectAttributes)

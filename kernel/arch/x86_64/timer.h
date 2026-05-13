@@ -28,6 +28,21 @@ namespace duetos::arch
 inline constexpr u8 kTimerVector = 0x20;     // IRQ 0 in remapped layout
 inline constexpr u64 kTickFrequencyHz = 100; // 10 ms tick
 
+/// Read the x86_64 Time-Stamp Counter as a u64. Single source of truth
+/// so subsystems don't open-code `rdtsc` inline asm — keeps the
+/// implementation in one place if/when we need to add an `mfence;
+/// rdtsc` ordering variant or switch to `rdtscp` for serialised reads.
+/// Callers requiring strict ordering w.r.t. surrounding loads/stores
+/// should add their own fence; this helper is the unordered fast path.
+/// Safe from any context, including NMI.
+inline u64 TscRead()
+{
+    u32 lo;
+    u32 hi;
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    return (static_cast<u64>(hi) << 32) | lo;
+}
+
 /// Calibrate the LAPIC timer against the PIT, configure it in periodic
 /// mode at `kTickFrequencyHz`, install the tick handler on `kTimerVector`,
 /// and start the timer. Interrupts are NOT unmasked here — caller should

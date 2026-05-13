@@ -208,9 +208,7 @@ bool WaitPitTerminal()
 {
     // Read TSC. The minimum-feature gate has confirmed TSC is
     // present on this CPU, so this is safe.
-    u32 tsc_lo, tsc_hi;
-    asm volatile("rdtsc" : "=a"(tsc_lo), "=d"(tsc_hi));
-    const u64 tsc_start = (static_cast<u64>(tsc_hi) << 32) | tsc_lo;
+    const u64 tsc_start = TscRead();
     // Worst-case modern CPU is ~5 GHz; pick 1 GHz cycles-per-ms as a
     // floor that won't false-fire on slow CPUs (gives ~500 ms wall
     // time at 1 GHz, ~100 ms at 5 GHz — both safely > the 10 ms PIT
@@ -218,8 +216,7 @@ bool WaitPitTerminal()
     constexpr u64 kPitTimeoutCycles = 500ULL * 1000ULL * 1000ULL;
     while ((Inb(kPitGatePort) & kPitGateOut2Mask) == 0)
     {
-        asm volatile("rdtsc" : "=a"(tsc_lo), "=d"(tsc_hi));
-        const u64 tsc_now = (static_cast<u64>(tsc_hi) << 32) | tsc_lo;
+        const u64 tsc_now = TscRead();
         if (tsc_now - tsc_start > kPitTimeoutCycles)
         {
             return false;

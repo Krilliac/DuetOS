@@ -143,7 +143,7 @@ bool Rtl88xxBringUp(NicInfo& n)
     KLOG_TRACE_SCOPE("drivers/net/rtl88xx", "BringUp");
     if (n.mmio_virt == nullptr)
     {
-        arch::SerialWrite("[rtl88xx] no MMIO BAR — skipping\n");
+        KLOG_WARN("drivers/net/rtl88xx", "no MMIO BAR — skipping");
         return false;
     }
     if (n.driver_online)
@@ -152,9 +152,7 @@ bool Rtl88xxBringUp(NicInfo& n)
     const u32 cfg1 = Mmio32Read(n, kRegSysCfg1);
     if (cfg1 == 0xFFFFFFFFu || cfg1 == 0)
     {
-        arch::SerialWrite("[rtl88xx] chip not responsive (sys_cfg1=");
-        arch::SerialWriteHex(cfg1);
-        arch::SerialWrite(") — leaving in probe-only state\n");
+        KLOG_WARN_V("drivers/net/rtl88xx", "chip not responsive — probe-only", cfg1);
         return false;
     }
 
@@ -207,8 +205,7 @@ bool Rtl88xxBringUp(NicInfo& n)
         }
         else
         {
-            arch::SerialWrite("[rtl88xx] firmware blob found but header parse "
-                              "failed — marking Incompatible\n");
+            KLOG_WARN("drivers/net/rtl88xx", "firmware blob header parse failed — Incompatible");
             n.firmware_pending = true;
             n.wireless_fw_state = NicInfo::WirelessFwState::Incompatible;
         }
@@ -235,25 +232,13 @@ bool Rtl88xxBringUp(NicInfo& n)
     g_stats.sys_cfg2 = cfg2;
     ++g_stats.adapters_bound;
 
-    arch::SerialWrite("[rtl88xx] online pci=");
-    arch::SerialWriteHex(n.bus);
-    arch::SerialWrite(":");
-    arch::SerialWriteHex(n.device);
-    arch::SerialWrite(".");
-    arch::SerialWriteHex(n.function);
-    arch::SerialWrite(" did=");
-    arch::SerialWriteHex(n.device_id);
-    arch::SerialWrite(" sys_cfg1=");
-    arch::SerialWriteHex(cfg1);
-    arch::SerialWrite(" cfg2=");
-    arch::SerialWriteHex(cfg2);
-    arch::SerialWrite(" mac_id=");
-    arch::SerialWriteHex(mac_id);
-    arch::SerialWrite(" ic=");
-    arch::SerialWrite(IcTypeString(cfg1));
-    arch::SerialWrite(" cut=");
-    arch::SerialWrite(CutVersionString(cfg1));
-    arch::SerialWrite(" status=fw-pending\n");
+    const u32 bdf = (static_cast<u32>(n.bus) << 16) | (static_cast<u32>(n.device) << 8) | n.function;
+    KLOG_INFO_2V("drivers/net/rtl88xx", "online (status=fw-pending)", "pci_bdf", bdf, "did", n.device_id);
+    KLOG_DEBUG_V("drivers/net/rtl88xx", "sys_cfg1", cfg1);
+    KLOG_DEBUG_V("drivers/net/rtl88xx", "sys_cfg2", cfg2);
+    KLOG_DEBUG_V("drivers/net/rtl88xx", "mac_id", mac_id);
+    KLOG_DEBUG_S("drivers/net/rtl88xx", "ic", "type", IcTypeString(cfg1));
+    KLOG_DEBUG_S("drivers/net/rtl88xx", "ic", "cut", CutVersionString(cfg1));
 
     return true;
 }

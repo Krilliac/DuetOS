@@ -1,6 +1,7 @@
 #include "diag/boot_progress.h"
 
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 
 namespace duetos::diag
 {
@@ -22,10 +23,7 @@ constinit const char* g_last_tag = nullptr;
 
 inline u64 ReadTsc()
 {
-    u32 lo;
-    u32 hi;
-    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return (static_cast<u64>(hi) << 32) | lo;
+    return ::duetos::arch::TscRead();
 }
 
 } // namespace

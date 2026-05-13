@@ -42,9 +42,7 @@ u64 Splitmix64(u64& state)
 
 u64 ReadTsc()
 {
-    u32 lo, hi;
-    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return (u64(hi) << 32) | lo;
+    return ::duetos::arch::TscRead();
 }
 
 // RDRAND wrapper — retries up to 10x per the Intel recommendation.

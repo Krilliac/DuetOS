@@ -13,6 +13,7 @@
 #include "debug/probes.h"
 #include "net/wireless/wifi_diag.h"
 #include "diag/diag_decode.h"
+#include "diag/event_trace.h"
 #include "diag/soft_lockup.h"
 #include "diag/hexdump.h"
 #include "diag/minidump.h"
@@ -527,6 +528,41 @@ void DumpProcessVmInfo()
     }
 }
 
+// Snapshot the tail of the diag event-trace ring into the dump.
+// The ring lives in BSS, so it survives a panic in any path that
+// hasn't corrupted that range. Bounded by `kDumpTraceCap` so a
+// runaway tracer doesn't drown the dump.
+void DumpEventTraceTail()
+{
+    constexpr u32 kDumpTraceCap = 32;
+    ::duetos::diag::EventRecord records[kDumpTraceCap] = {};
+    const u32 n = ::duetos::diag::EventTraceSnapshot(records, kDumpTraceCap);
+    arch::SerialWrite("[panic] --- event-trace tail ---\n");
+    if (n == 0)
+    {
+        arch::SerialWrite("  (no trace records)\n");
+        return;
+    }
+    arch::SerialWrite("  records  : ");
+    arch::SerialWriteHex(n);
+    arch::SerialWrite("\n  total    : ");
+    arch::SerialWriteHex(::duetos::diag::EventTraceTotalRecords());
+    arch::SerialWrite("\n");
+    for (u32 i = 0; i < n; ++i)
+    {
+        const auto& r = records[i];
+        arch::SerialWrite("  tick=");
+        arch::SerialWriteHex(r.tick);
+        arch::SerialWrite(" kind=");
+        arch::SerialWrite(::duetos::diag::EventKindName(r.kind));
+        arch::SerialWrite(" arg0=");
+        arch::SerialWriteHex(r.arg0);
+        arch::SerialWrite(" arg1=");
+        arch::SerialWriteHex(r.arg1);
+        arch::SerialWrite("\n");
+    }
+}
+
 } // namespace
 
 void DumpPeerCpuSnapshots()
@@ -857,6 +893,7 @@ void Panic(const char* subsystem, const char* message)
     // walker then climbs up through the caller.
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
     DumpPeerCpuSnapshots();
+    DumpEventTraceTail();
 
     EndCrashDump();
 
@@ -920,6 +957,7 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
 
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
     DumpPeerCpuSnapshots();
+    DumpEventTraceTail();
 
     EndCrashDump();
 

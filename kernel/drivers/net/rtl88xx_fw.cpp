@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "log/klog.h"
 
 namespace duetos::drivers::net
 {
@@ -117,21 +118,13 @@ const char* RtlFwGenerationName(RtlFwGeneration g)
 
 void RtlFirmwareLog(const RtlFirmwareParsed& parsed)
 {
-    arch::SerialWrite("[rtl-fw] gen=");
-    arch::SerialWrite(RtlFwGenerationName(parsed.generation));
-    arch::SerialWrite(" sig=");
-    arch::SerialWriteHex(parsed.signature);
-    arch::SerialWrite(" ver=");
-    arch::SerialWriteHex(parsed.version);
-    arch::SerialWrite(" sub=");
-    arch::SerialWriteHex(parsed.subversion);
-    arch::SerialWrite(".");
-    arch::SerialWriteHex(parsed.subsubversion);
-    arch::SerialWrite(" payload=");
-    arch::SerialWriteHex(parsed.payload_size);
-    if (parsed.size_mismatch)
-        arch::SerialWrite(" (size-mismatch)");
-    arch::SerialWrite("\n");
+    KLOG_INFO_S("drivers/net/rtl88xx", parsed.size_mismatch ? "firmware parsed (size-mismatch)" : "firmware parsed",
+                "gen", RtlFwGenerationName(parsed.generation));
+    KLOG_DEBUG_V("drivers/net/rtl88xx", "firmware sig", parsed.signature);
+    KLOG_DEBUG_V("drivers/net/rtl88xx", "firmware ver", parsed.version);
+    KLOG_DEBUG_V("drivers/net/rtl88xx", "firmware subversion", parsed.subversion);
+    KLOG_DEBUG_V("drivers/net/rtl88xx", "firmware subsubversion", parsed.subsubversion);
+    KLOG_DEBUG_V("drivers/net/rtl88xx", "firmware payload size", parsed.payload_size);
 }
 
 void RtlFirmwareSelfTest()

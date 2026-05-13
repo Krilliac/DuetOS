@@ -282,9 +282,11 @@ enum : u64
     // (the common case) resolves against the sandbox root exactly
     // like the non-*at variants. Other dirfd values — -EBADF.
     //
-    // FS-mutation stubs that would need filesystem primitives we
-    // don't have (rename, link, symlink) return -EPERM or -ENOSYS
-    // as appropriate rather than silently pretending to succeed.
+    // FS-mutation surface: rename wires through to Fat32RenameAtPath
+    // (DoRename in syscall_fs_mut.cpp). link / symlink return
+    // -EOPNOTSUPP because FAT32 has no hardlink concept and v0 has
+    // no symlink storage — spec-correct so glibc falls back to its
+    // copy-then-rename path rather than treating it as permissions.
     kSysPtrace = 101,
     kSysSyslog = 103,
     kSysSetsid = 112,

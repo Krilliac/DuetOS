@@ -28,23 +28,21 @@ namespace duetos::subsystems::linux::internal
 namespace
 {
 
-// Read the CPU timestamp counter. Used as a seed for the tiny
-// PRNG path elsewhere in the subsystem — kept here so the
-// freestanding header doesn't pull `rdtsc` into every consumer.
+// Read the CPU timestamp counter. Forwards to the canonical
+// `arch::TscRead()` so the entropy seeding paths here, in
+// `kernel/util/random.cpp`, and in `kernel/diag/boot_progress.cpp`
+// all read TSC the same way.
 [[maybe_unused]] u64 ReadTsc()
 {
-    u32 lo, hi;
-    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
-    return (static_cast<u64>(hi) << 32) | lo;
+    return ::duetos::arch::TscRead();
 }
 
-// Wall-clock offset for CLOCK_REALTIME readers. Signed because a
-// caller can set the wall clock to a value before boot (e.g. an
-// embedded image whose RTC is wrong) — that produces a negative
-// offset relative to the monotonic counter. Aligned i64 writes
-// are atomic on x86_64; no spinlock needed for this v0 design.
-// Non-CLOCK_REALTIME clocks ignore this — monotonic stays purely
-// monotonic.
+// Wall-clock adjustment for CLOCK_REALTIME readers. Signed because
+// settimeofday can shift the wall clock backwards. Steady-state v0
+// has no adjustments — the offset stays 0 and `RealtimeNs()` derives
+// every read from the canonical `time::RealtimeFiletime()` so the
+// Linux and Win32 (SYS_GETTIME_FT) wall-clock surfaces always agree.
+// Aligned i64 writes are atomic on x86_64; no spinlock needed.
 i64 g_realtime_offset_ns = 0;
 
 constexpr u64 kClockRealtime = 0;
@@ -65,44 +63,43 @@ bool ClockHonorsOffset(u64 clk_id)
     return clk_id == kClockRealtime || clk_id == kClockRealtimeCoarse;
 }
 
-// Compose the wall-clock reading: monotonic ns + signed offset.
-// Saturates at zero on negative-offset underflow so userspace
-// can't observe a negative tv_sec.
+// Canonical wall-clock ns derived from the kernel's
+// `time::RealtimeFiletime()`. Returns 0 if RTC is unreadable so
+// callers can distinguish the failure from a legitimate Epoch-equal
+// reading.
 //
-// Lazy-seed: g_realtime_offset_ns starts at 0, which means
-// RealtimeNs returns "ns since boot" — wrong for time(2) and
-// gettimeofday(2). On first call we sample the CMOS RTC via
-// time::RealtimeFiletime() and convert to a Unix-epoch offset
-// so subsequent reads land on the actual wall clock.
-//
-// Why lazy: TimekeeperInit may race with very-early boot
-// callers. By the time any user-mode process can call time(),
-// HPET + RTC are both up.
+// FILETIME = 100-ns ticks since 1601-01-01 UTC. Unix epoch starts
+// 11644473600 seconds later.
+u64 CanonicalRealtimeUnixNs()
+{
+    constexpr u64 kFiletimeUnixDeltaSec = 11644473600ULL;
+    constexpr u64 kFiletimePerSec = 10000000ULL;
+    const u64 ft = ::duetos::time::RealtimeFiletime();
+    if (ft == 0)
+        return 0;
+    const u64 unix_sec = (ft / kFiletimePerSec) - kFiletimeUnixDeltaSec;
+    return unix_sec * 1'000'000'000ULL + (ft % kFiletimePerSec) * 100ULL;
+}
+
+// Compose the wall-clock reading from the canonical
+// `time::RealtimeFiletime()` plus the settimeofday adjustment.
+// Single source of truth shared with the Win32 SYS_GETTIME_FT path
+// — both observe the same RTC sample without a per-subsystem cache
+// that could drift.
 u64 RealtimeNs()
 {
-    static bool seeded = false;
-    if (!seeded && g_realtime_offset_ns == 0)
+    const u64 unix_ns = CanonicalRealtimeUnixNs();
+    if (unix_ns == 0)
     {
-        // FILETIME = 100-ns ticks since 1601-01-01 UTC.
-        // Unix epoch starts 11644473600 seconds later.
-        constexpr u64 kFiletimeUnixDeltaSec = 11644473600ULL;
-        constexpr u64 kFiletimePerSec = 10000000ULL;
-        const u64 ft = ::duetos::time::RealtimeFiletime();
-        if (ft != 0)
-        {
-            const u64 unix_sec_at_boot = ft / kFiletimePerSec - kFiletimeUnixDeltaSec;
-            const u64 unix_ns_at_boot = unix_sec_at_boot * 1'000'000'000ULL;
-            const u64 mono = NowNs();
-            g_realtime_offset_ns = static_cast<i64>(unix_ns_at_boot) - static_cast<i64>(mono);
-            seeded = true;
-        }
+        // RTC unreadable — fall back to the monotonic counter so
+        // callers don't observe time-since-1601 chaos.
+        return NowNs();
     }
-    const u64 mono = NowNs();
     const i64 off = g_realtime_offset_ns;
     if (off >= 0)
-        return mono + static_cast<u64>(off);
+        return unix_ns + static_cast<u64>(off);
     const u64 neg = static_cast<u64>(-off);
-    return (mono > neg) ? (mono - neg) : 0;
+    return (unix_ns > neg) ? (unix_ns - neg) : 0;
 }
 
 // CAP_SYS_TIME analog. v0 has no dedicated kCapTimeSet — kCapDebug
@@ -151,10 +148,11 @@ u64 NowNs()
 }
 
 // Linux: clock_gettime(clk_id, ts). Fills struct timespec
-// {tv_sec (i64), tv_nsec (i64)} with current time. v0 backs every
-// clock id with the HPET monotonic counter; CLOCK_REALTIME and
-// CLOCK_REALTIME_COARSE then add `g_realtime_offset_ns` so a
-// preceding clock_settime is observable.
+// {tv_sec (i64), tv_nsec (i64)} with current time. CLOCK_REALTIME and
+// CLOCK_REALTIME_COARSE route through `RealtimeNs()`, which derives
+// from the canonical `time::RealtimeFiletime()` so this surface and
+// the Win32 SYS_GETTIME_FT surface always observe the same RTC.
+// Every other clock id reads the HPET monotonic counter directly.
 i64 DoClockGetTime(u64 clk_id, u64 user_ts)
 {
     const u64 ns = ClockHonorsOffset(clk_id) ? RealtimeNs() : NowNs();
@@ -321,8 +319,9 @@ i64 DoClockSettime(u64 clk_id, u64 user_ts)
     if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1'000'000'000)
         return kEINVAL;
     const u64 want_ns = static_cast<u64>(ts.tv_sec) * 1'000'000'000ull + static_cast<u64>(ts.tv_nsec);
-    const u64 mono = NowNs();
-    g_realtime_offset_ns = static_cast<i64>(want_ns) - static_cast<i64>(mono);
+    const u64 canon = CanonicalRealtimeUnixNs();
+    const u64 base = (canon != 0) ? canon : NowNs();
+    g_realtime_offset_ns = static_cast<i64>(want_ns) - static_cast<i64>(base);
     return 0;
 }
 
@@ -346,8 +345,9 @@ i64 DoSettimeofday(u64 user_tv, u64 user_tz)
     if (tv.tv_sec < 0 || tv.tv_usec < 0 || tv.tv_usec >= 1'000'000)
         return kEINVAL;
     const u64 want_ns = static_cast<u64>(tv.tv_sec) * 1'000'000'000ull + static_cast<u64>(tv.tv_usec) * 1000ull;
-    const u64 mono = NowNs();
-    g_realtime_offset_ns = static_cast<i64>(want_ns) - static_cast<i64>(mono);
+    const u64 canon = CanonicalRealtimeUnixNs();
+    const u64 base = (canon != 0) ? canon : NowNs();
+    g_realtime_offset_ns = static_cast<i64>(want_ns) - static_cast<i64>(base);
     return 0;
 }
 
