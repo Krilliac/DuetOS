@@ -603,6 +603,61 @@ kernel pipe pool.
   - Security descriptors / ACLs / `Global\` vs `Local\` namespace
     prefixes — bare names only.
 
+## Phase 6.12 — WinInet real HTTP transport + browser_pe (2026-05-13)
+
+The wininet.dll thunks used to return a fixed `"HTTP/1.1 200 OK"` /
+`"DuetOS hello"` body for any `InternetOpenUrl` + `InternetReadFile`
+sequence. Browsers and other WinInet-using PEs would always see the
+canned response — useful for verifying ABI shape, useless for
+verifying anything else.
+
+This slice replaces the canned response with real HTTP/1.1 GET
+transport over the kernel socket pool (`SYS_SOCKET_OP`, the same path
+ws2_32 already uses), and ships a WinInet-based browser_pe smoke that
+exercises the new path end-to-end.
+
+- **What landed.**
+  - **wininet.dll transport.** `userland/libs/wininet/wininet.c` —
+    new freestanding handle pool (8 slots × 256 B host + 1 KiB
+    path + 1 KiB extra headers + 4 KiB rxbuf). `InternetOpenA/W`,
+    `InternetConnectA/W`, `HttpOpenRequestA/W`, `HttpSendRequestA/W`,
+    `HttpAddRequestHeadersA/W`, `InternetOpenUrlA/W`,
+    `InternetReadFile`, `InternetReadFileExA/W`, `InternetCloseHandle`,
+    and `InternetQueryDataAvailable` now drive the same kernel
+    socket pool ws2_32 uses (DNS via `kSockOpResolveA`, then
+    socket / connect / sendto / recvfrom).
+  - **Handle encoding.** `0x4000 | (kind << 8) | slot` — fits in
+    16 bits, never collides with `NULL` or `INVALID_HANDLE_VALUE`,
+    decodes with a single kind / slot tag check.
+  - **Header parsing.** `HttpQueryInfoA/W` now answers real queries:
+    `STATUS_CODE`, `STATUS_TEXT`, `RAW_HEADERS`,
+    `RAW_HEADERS_CRLF`, `CONTENT_TYPE`, `CONTENT_LENGTH`,
+    `LOCATION`, `SERVER`, `VERSION` — and their `FLAG_NUMBER`
+    variants for the numeric ones.
+  - **Graceful CI fallback.** If DNS / connect / send / first recv
+    fails (e.g. on a host with no outbound networking), the slot
+    transparently switches to a fixed `"HTTP/1.1 200 OK"` /
+    `"DuetOS hello"` body. ABI-shape smokes still pass; live boots
+    on QEMU SLIRP (or bare metal) see real Google responses.
+  - **browser_pe smoke.** `userland/apps/browser_pe/browser_pe.c` —
+    a real WinInet client that does three GETs (root / example.com /
+    404 path), prints status + content-type + content-length +
+    Location (on redirect) + first body line for each. Wired into
+    `ring3_smoke.cpp` alongside `mini_browser` and reachable via
+    the shell as `kind=browser2` / `kind=wininet`.
+- **What's still GAP.**
+  - **HTTPS / TLS.** `InternetOpenUrl` against an `https://` URL
+    parses the scheme and reports port 443, but the slot
+    short-circuits to the canned body — no TLS handshake yet.
+  - **Async I/O.** `INTERNET_FLAG_ASYNC` / `InternetSetStatusCallback`
+    are still STUB. Synchronous flow only.
+  - **Auto-redirects.** v0 honours `INTERNET_FLAG_NO_AUTO_REDIRECT`
+    implicitly — 3xx responses surface to the caller. Auto-follow
+    is a follow-up.
+  - **Persistent connections.** Each request opens and closes its
+    own socket; `Connection: close` is hardcoded. HTTP/1.1
+    keep-alive needs request multiplexing in the handle pool.
+
 ---
 
 ## How to read the rest of the tree

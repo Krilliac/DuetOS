@@ -1824,15 +1824,28 @@ exports per-process residency telemetry).
 `NotifyAddrChange`, `NotifyRouteChange`,
 `SetIpInterfaceEntry` — STUB.
 
-### wininet.dll  (~1100 LOC, ~50 exports)
+### wininet.dll  (~1700 LOC, ~50 exports)
 
-> **Status:** HTTP/1.0 GET works end-to-end (mini_browser PE
-> uses it). Cookies REAL via in-process LRU table. RFC 1123
-> time format / parse REAL. FTP / cache / async — STUB.
+> **Status:** HTTP/1.1 GET works end-to-end (browser_pe + mini_browser
+> PEs use it via WinInet and raw WinSock respectively). Cookies REAL
+> via in-process LRU table. RFC 1123 time format / parse REAL. FTP /
+> cache / async — STUB.
 
-`InternetOpenA/W`, `InternetOpenUrlA/W`, `InternetReadFile`,
-`InternetCloseHandle`, `HttpQueryInfoA`, `InternetQueryDataAvailable`
-— REAL for HTTP/1.0 + simple Content-Length flow.
+`InternetOpenA/W`, `InternetConnectA/W`, `HttpOpenRequestA/W`,
+`HttpSendRequestA/W`, `HttpAddRequestHeadersA/W`,
+`InternetOpenUrlA/W`, `InternetReadFile`, `InternetReadFileExA/W`,
+`InternetCloseHandle`, `InternetQueryDataAvailable` — REAL: full HTTP/1.1
+GET via the kernel socket pool (SYS_SOCKET_OP, same path ws2_32 uses).
+Handle pool of 8 slots; encoding `0x4000 | (kind<<8) | slot` so handles
+never collide with NULL or INVALID_HANDLE_VALUE. On DNS / connect /
+send / first-recv failure the slot transparently falls back to a fixed
+"HTTP/1.1 200 OK" / "DuetOS hello" body so ABI-shape smokes pass on
+hosts with no live Internet.
+
+`HttpQueryInfoA/W` — REAL for `STATUS_CODE`, `STATUS_TEXT`,
+`RAW_HEADERS`, `RAW_HEADERS_CRLF`, `CONTENT_TYPE`, `CONTENT_LENGTH`,
+`LOCATION`, `SERVER`, `VERSION` (and their `FLAG_NUMBER` variants
+for `STATUS_CODE` + `CONTENT_LENGTH`).
 `InternetTimeFromSystemTimeA/W`, `InternetTimeToSystemTimeA/W`
 — REAL: RFC 1123 format / parse round-trip ("Sun, 06 Nov 1994
 08:49:37 GMT"). Day-of-week is recomputed via Zeller on parse

@@ -107,6 +107,7 @@
 #include "generated_env_smoke_pe.h"
 #include "generated_fs_smoke_pe.h"
 #include "generated_handle_smoke_pe.h"
+#include "generated_browser_pe_pe.h"
 #include "generated_iphlpapi_smoke_pe.h"
 #include "generated_mem_smoke_pe.h"
 #include "generated_minibrowser_pe.h"
@@ -2837,6 +2838,17 @@ bool SpawnOnDemand(const char* kind)
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
+    if (LocalStrEq(kind, "browser2") || LocalStrEq(kind, "wininet"))
+    {
+        // browser_pe.exe — WinInet-based browser. Imports kernel32 +
+        // wininet; the kernel-side wininet thunks do real HTTP/1.1
+        // GET via the same kernel socket pool ws2_32 uses. Prints
+        // status code, content-type, content-length, and the first
+        // body line for each of three URLs.
+        SpawnPeFile("ring3-browser-pe", fs::generated::kBinBrowserPeBytes, fs::generated::kBinBrowserPeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
     return false;
 }
 
@@ -3077,6 +3089,13 @@ void StartRing3SmokeTask()
             SpawnPeFile("ring3-wininet-smoke", fs::generated::kBinWininetSmokeBytes,
                         fs::generated::kBinWininetSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                         mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+            // browser_pe.exe — WinInet-based browser. Drives the same
+            // Open → Connect → Request → Send → Read → Close flow any
+            // real Win32 browser uses, layered on userland/libs/wininet
+            // (which now performs real HTTP/1.1 GETs over the kernel
+            // socket pool rather than returning a canned response).
+            SpawnPeFile("ring3-browser-pe", fs::generated::kBinBrowserPeBytes, fs::generated::kBinBrowserPeBytes_len,
+                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
             SpawnPeFile("ring3-string-smoke", fs::generated::kBinStringSmokeBytes,
                         fs::generated::kBinStringSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                         mm::kFrameBudgetTrusted, kTickBudgetTrusted);
