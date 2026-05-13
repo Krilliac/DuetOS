@@ -92,6 +92,12 @@ enum class PeStatus : u8
                              // user low half (>0x00007FFFFFFFFFFF). A malicious PE with a
                              // kernel-half ImageBase would otherwise drive AddressSpaceMapUserPage
                              // into PanicAs and DoS the kernel from any execve-style spawn path.
+    Pe32ExecutionNotReady,   // OptionalHeader.Magic == 0x10B (PE32 / i386). The image parses
+                             // and PeReport can walk it (diagnostic-load), but actual MapAndRun
+                             // is gated until the 32-bit user-CS, syscall-ABI, and i386 DLL
+                             // set land. Distinct from NotPe32Plus so callers can tell "rejected
+                             // because of format" (NotPe32Plus, malformed magic) apart from
+                             // "rejected because of policy" (this).
 };
 
 const char* PeStatusName(PeStatus s);

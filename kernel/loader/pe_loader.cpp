@@ -157,6 +157,13 @@ struct PeHeaders
     u64 image_base;
     u64 image_size;
     u64 entry_rva;
+    // Bitness picked up from the optional-header magic. PE32 (i386)
+    // images parse cleanly but are rejected before MapAndRun until
+    // the 32-bit user-CS + syscall-ABI layers land — see
+    // PeStatus::NotPe32PlusYet emitted in PeLoad.
+    bool is_pe32;
+    u32 data_dir_offset;
+    u32 number_of_rva_and_sizes;
 };
 
 // Allocation-ladder unwind for PeLoad. PE startup maps headers,
@@ -309,6 +316,9 @@ PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
     out.entry_rva = image.entry_rva;
     out.image_base = image.image_base;
     out.section_base = image.section_base;
+    out.is_pe32 = (image.is_pe32 != 0);
+    out.data_dir_offset = image.data_dir_offset;
+    out.number_of_rva_and_sizes = image.number_of_rva_and_sizes;
     if (status != static_cast<u32>(PeStatus::Ok))
         return static_cast<PeStatus>(status);
 
@@ -318,22 +328,29 @@ PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
     // parsing them is done separately by PeReport, which runs
     // BEFORE this function on the spawn path so the log
     // carries a full picture even when we reject.
+    //
+    // PE32 (i386) vs PE32+ (AMD64): the data-directory array sits
+    // at offset 96 in PE32 and 112 in PE32+ (the four stack/heap
+    // Reserve/Commit slots are u32 in PE32, u64 in PE32+). The
+    // Rust validator pre-computes the correct offset; we use it
+    // verbatim here.
     const u8* opt = file + out.opt_base;
-    const u32 num_dirs = LeU32(opt + kOptHeaderNumberOfRvaAndSizes);
+    const u32 num_dirs = out.number_of_rva_and_sizes;
+    const u64 dd_off = out.data_dir_offset;
     const u64 dir_bytes = u64(num_dirs) * kDataDirEntrySize;
-    if (kOptHeaderDataDirectories + dir_bytes > out.opt_header_size)
+    if (dd_off + dir_bytes > out.opt_header_size)
         return PeStatus::OptHeaderOutOfBounds;
     auto dir_rva = [&](u64 idx) -> u32
     {
         if (idx >= num_dirs)
             return 0;
-        return LeU32(opt + kOptHeaderDataDirectories + idx * kDataDirEntrySize + 0);
+        return LeU32(opt + dd_off + idx * kDataDirEntrySize + 0);
     };
     auto dir_size = [&](u64 idx) -> u32
     {
         if (idx >= num_dirs)
             return 0;
-        return LeU32(opt + kOptHeaderDataDirectories + idx * kDataDirEntrySize + 4);
+        return LeU32(opt + dd_off + idx * kDataDirEntrySize + 4);
     };
     if (dir_rva(kDirEntryImport) != 0 || dir_size(kDirEntryImport) != 0)
         return PeStatus::ImportsPresent;
@@ -510,6 +527,8 @@ const char* PeStatusName(PeStatus s)
         return "StubsPageAllocFail";
     case PeStatus::ImageBaseOutOfRange:
         return "ImageBaseOutOfRange";
+    case PeStatus::Pe32ExecutionNotReady:
+        return "Pe32ExecutionNotReady";
     default:
         KLOG_ONCE_WARN("loader/pe", "PeStatusName: unrecognised PeStatus enumerator");
         return "?";
@@ -1575,7 +1594,20 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // alone keeps us from even ATTEMPTING to run binaries like
     // windows-kill.exe; accepting + logging lets us see how
     // far they get before the first real gap.
-    if (ps != PeStatus::Ok && ps != PeStatus::ImportsPresent && ps != PeStatus::TlsPresent)
+    // PE32 (i386) is now recognised by the prefix + image
+    // validators so PeReport can walk its imports / relocs / TLS
+    // diagnostically. Actual MapAndRun is still gated until the
+    // 32-bit user-CS, syscall-ABI, and i386 DLL set land.
+    // Re-classify the OK / ImportsPresent / TlsPresent path as
+    // Pe32ExecutionNotReady so the existing reject machinery
+    // (FixJournalRecord, PeReport pin) does the right thing.
+    PeStatus effective_ps = ps;
+    if (h.is_pe32 && (ps == PeStatus::Ok || ps == PeStatus::ImportsPresent || ps == PeStatus::TlsPresent))
+    {
+        effective_ps = PeStatus::Pe32ExecutionNotReady;
+    }
+    if (effective_ps != PeStatus::Ok && effective_ps != PeStatus::ImportsPresent &&
+        effective_ps != PeStatus::TlsPresent)
     {
         // Journal the rejection so the reviewer sees which PE
         // characteristics our v0 loader can't handle yet, even
@@ -1589,7 +1621,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             pin[p] = tag[p];
             ++p;
         }
-        const char* sn = PeStatusName(ps);
+        const char* sn = PeStatusName(effective_ps);
         u64 i = 0;
         while (p < 39 && sn[i] != '\0')
         {
@@ -1597,8 +1629,8 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         }
         pin[p] = '\0';
         (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::LoaderReject, pin,
-                                               "implement PE feature or improve loader policy", static_cast<u64>(ps),
-                                               file_len);
+                                               "implement PE feature or improve loader policy",
+                                               static_cast<u64>(effective_ps), file_len);
         return r;
     }
 

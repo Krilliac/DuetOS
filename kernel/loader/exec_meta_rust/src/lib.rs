@@ -223,6 +223,7 @@ pub extern "C" fn duetos_exec_meta_elf_validate(buf: *const u8, len: usize) -> u
 const DOS_MAGIC: u16 = 0x5A4D; // 'M','Z' in LE
 const PE_SIGNATURE: u32 = 0x0000_4550; // 'P','E',0,0 in LE
 const PE_MACHINE_AMD64: u16 = 0x8664;
+const PE_MACHINE_I386: u16 = 0x014C;
 /// FileHeader (COFF) is 20 bytes immediately after the PE signature.
 const PE_FILE_HEADER_SIZE: usize = 20;
 /// e_lfanew is at offset 0x3C in the DOS stub.
@@ -264,7 +265,7 @@ fn pe_validate_prefix(buf: &[u8], out: &mut DuetosPePrefix) -> DuetosPePrefixSta
     }
     let file_hdr = nt_base + 4;
     let machine = load_u16_le(buf, file_hdr);
-    if machine != PE_MACHINE_AMD64 {
+    if machine != PE_MACHINE_AMD64 && machine != PE_MACHINE_I386 {
         return DuetosPePrefixStatus::BadMachine;
     }
     out.nt_base = e_lfanew;
@@ -303,15 +304,28 @@ pub extern "C" fn duetos_exec_meta_pe_validate_prefix(
 
 /// Offset of FileHeader.SizeOfOptionalHeader within FileHeader.
 const PE_FILEHDR_OFF_SIZE_OF_OPT_HEADER: usize = 16;
-/// PE32+ optional-header magic.
+/// Optional-header magic for the two PE variants we accept.
 const PE_OPT_MAGIC_PE32_PLUS: u16 = 0x020B;
-/// Optional-header offsets (PE32+, the only variant we accept).
+const PE_OPT_MAGIC_PE32: u16 = 0x010B;
+/// Optional-header offsets common to PE32 and PE32+ (the layout
+/// matches through offset 32 because BaseOfData (PE32 only, u32 at
+/// 24) lines up with the upper half of ImageBase (u64 at 24 in
+/// PE32+)).
+const PE_OPT_OFF_ADDRESS_OF_ENTRY_POINT: usize = 16;
 const PE_OPT_OFF_SECTION_ALIGNMENT: usize = 32;
 const PE_OPT_OFF_FILE_ALIGNMENT: usize = 36;
 const PE_OPT_OFF_SIZE_OF_IMAGE: usize = 56;
-const PE_OPT_OFF_IMAGE_BASE: usize = 24;
-const PE_OPT_OFF_ADDRESS_OF_ENTRY_POINT: usize = 16;
-const PE_OPT_OFF_NUMBER_OF_RVA_AND_SIZES: usize = 108;
+/// ImageBase: u64 at offset 24 in PE32+; u32 at offset 28 in PE32.
+const PE_OPT_OFF_IMAGE_BASE_PE32_PLUS: usize = 24;
+const PE_OPT_OFF_IMAGE_BASE_PE32: usize = 28;
+/// NumberOfRvaAndSizes (and the data directories that follow it)
+/// land at different offsets because the four stack/heap reserve/
+/// commit slots are u32 in PE32 (16 bytes total) and u64 in PE32+
+/// (32 bytes total).
+const PE_OPT_OFF_NUMBER_OF_RVA_AND_SIZES_PE32_PLUS: usize = 108;
+const PE_OPT_OFF_NUMBER_OF_RVA_AND_SIZES_PE32: usize = 92;
+const PE_OPT_OFF_DATA_DIRECTORIES_PE32_PLUS: usize = 112;
+const PE_OPT_OFF_DATA_DIRECTORIES_PE32: usize = 96;
 /// Section-header bytes.
 const PE_SECTION_HEADER_SIZE: usize = 40;
 const PE_SECTION_OFF_POINTER_TO_RAW_DATA: usize = 20;
@@ -321,9 +335,13 @@ const PE_PAGE_ALIGN: u32 = 4096;
 /// Canonical low-half user VA ceiling.
 const PE_USER_MAX: u64 = 0x0000_7FFF_FFFF_FFFF;
 
-/// Deeper PE image-validation output. Superset of `DuetosPePrefix`;
-/// callers that just need the cheap "is this an AMD64 PE?" gate
-/// can still use the prefix function.
+/// Deeper PE image-validation output. Superset of `DuetosPePrefix`.
+///
+/// `is_pe32` is 1 for a PE32 (i386) image, 0 for PE32+ (AMD64). PE32
+/// images pass the validator for diagnostic load (PeReport can walk
+/// imports / relocs / TLS) but the C++ loader rejects the actual
+/// MapAndRun path until the 32-bit user-CS + syscall-ABI layers
+/// (kernel/arch/x86_64/{gdt,syscall}.cpp) land.
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct DuetosPeImage {
@@ -333,9 +351,13 @@ pub struct DuetosPeImage {
     pub opt_base: u32,
     pub image_size: u32,
     pub entry_rva: u32,
-    pub _pad1: u32,
+    pub is_pe32: u8,
+    pub _pad1a: u8,
+    pub _pad1b: u16,
     pub image_base: u64,
     pub section_base: u32,
+    pub data_dir_offset: u32,
+    pub number_of_rva_and_sizes: u32,
     pub _pad2: u32,
 }
 
@@ -360,21 +382,46 @@ fn pe_validate_image(buf: &[u8], out: &mut DuetosPeImage) -> DuetosPeImageStatus
     let file_hdr = out.nt_base as usize + 4;
     out.opt_header_size = load_u16_le(buf, file_hdr + PE_FILEHDR_OFF_SIZE_OF_OPT_HEADER);
     out.opt_base = out.nt_base + 4 + PE_FILE_HEADER_SIZE as u32;
-    // Need enough optional-header bytes to reach our last-read field
-    // (NumberOfRvaAndSizes is the deepest u32 we touch).
-    let min_opt = (PE_OPT_OFF_NUMBER_OF_RVA_AND_SIZES + 4) as u16;
+    // OptionalHeader.Magic at offset 0 picks the variant. We need to
+    // peek it before knowing how big the optional header should be.
+    let min_opt_for_magic = 2u16;
+    if out.opt_header_size < min_opt_for_magic {
+        return DuetosPeImageStatus::OptHeaderOutOfBounds;
+    }
+    let opt_end_peek = (out.opt_base as u64) + (min_opt_for_magic as u64);
+    if opt_end_peek > buf.len() as u64 {
+        return DuetosPeImageStatus::OptHeaderOutOfBounds;
+    }
+    let opt = out.opt_base as usize;
+    let opt_magic = load_u16_le(buf, opt);
+    let (is_pe32, image_base_off, n_rva_off, dd_off) = if opt_magic == PE_OPT_MAGIC_PE32_PLUS {
+        (
+            false,
+            PE_OPT_OFF_IMAGE_BASE_PE32_PLUS,
+            PE_OPT_OFF_NUMBER_OF_RVA_AND_SIZES_PE32_PLUS,
+            PE_OPT_OFF_DATA_DIRECTORIES_PE32_PLUS,
+        )
+    } else if opt_magic == PE_OPT_MAGIC_PE32 {
+        (
+            true,
+            PE_OPT_OFF_IMAGE_BASE_PE32,
+            PE_OPT_OFF_NUMBER_OF_RVA_AND_SIZES_PE32,
+            PE_OPT_OFF_DATA_DIRECTORIES_PE32,
+        )
+    } else {
+        return DuetosPeImageStatus::NotPe32Plus;
+    };
+    out.is_pe32 = if is_pe32 { 1 } else { 0 };
+    out.data_dir_offset = dd_off as u32;
+    // Need enough optional-header bytes to reach NumberOfRvaAndSizes
+    // (the deepest u32 we touch before the data-directory array).
+    let min_opt = (n_rva_off + 4) as u16;
     if out.opt_header_size < min_opt {
         return DuetosPeImageStatus::OptHeaderOutOfBounds;
     }
     let opt_end = (out.opt_base as u64) + (out.opt_header_size as u64);
     if opt_end > buf.len() as u64 {
         return DuetosPeImageStatus::OptHeaderOutOfBounds;
-    }
-    let opt = out.opt_base as usize;
-    // OptionalHeader.Magic at offset 0 → PE32+ only.
-    let opt_magic = load_u16_le(buf, opt);
-    if opt_magic != PE_OPT_MAGIC_PE32_PLUS {
-        return DuetosPeImageStatus::NotPe32Plus;
     }
     // SectionAlignment must equal page size — the loader maps each
     // section at (ImageBase + VirtualAddress), and a sub-page
@@ -388,9 +435,15 @@ fn pe_validate_image(buf: &[u8], out: &mut DuetosPeImage) -> DuetosPeImageStatus
     if file_alignment != 512 && file_alignment != 1024 && file_alignment != 2048 && file_alignment != 4096 {
         return DuetosPeImageStatus::FileAlignUnsup;
     }
-    out.image_base = load_u64_le(buf, opt + PE_OPT_OFF_IMAGE_BASE);
+    out.image_base = if is_pe32 {
+        // PE32 stores ImageBase as a 32-bit zero-extended value.
+        load_u32_le(buf, opt + image_base_off) as u64
+    } else {
+        load_u64_le(buf, opt + image_base_off)
+    };
     out.entry_rva = load_u32_le(buf, opt + PE_OPT_OFF_ADDRESS_OF_ENTRY_POINT);
     out.image_size = load_u32_le(buf, opt + PE_OPT_OFF_SIZE_OF_IMAGE);
+    out.number_of_rva_and_sizes = load_u32_le(buf, opt + n_rva_off);
     // ImageBase + SizeOfImage must fit in canonical low half — a
     // malicious PE with a kernel-half ImageBase would otherwise
     // drive AddressSpaceMapUserPage into PanicAs and DoS the kernel.

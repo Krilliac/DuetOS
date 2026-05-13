@@ -47,6 +47,7 @@ inline u32 LeU32(const u8* p)
 constexpr u16 kDosMagic = 0x5A4D;
 constexpr u32 kPeSignature = 0x00004550;
 constexpr u16 kMachineAmd64 = 0x8664;
+constexpr u16 kMachineI386 = 0x014C;
 constexpr u16 kOptMagicPe32Plus = 0x020B;
 constexpr u64 kFileHeaderSize = 20;
 constexpr u64 kOptHeaderNumberOfRvaAndSizes = 108;
@@ -116,8 +117,11 @@ bool ParsePeShape(const u8* file, u64 file_len, PeHeaderShape& out)
     if (LeU32(file + e_lfanew) != kPeSignature)
         return false;
     const u8* fh = file + e_lfanew + 4;
-    if (LeU16(fh + 0) != kMachineAmd64)
-        return false;
+    {
+        const u16 machine = LeU16(fh + 0);
+        if (machine != kMachineAmd64 && machine != kMachineI386)
+            return false;
+    }
     out.section_count = LeU16(fh + 2);
     out.opt_header_size = LeU16(fh + 16);
     out.opt_base = u64(e_lfanew) + 4 + kFileHeaderSize;
