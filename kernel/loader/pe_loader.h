@@ -115,6 +115,14 @@ PeStatus PeValidate(const u8* file, u64 file_len);
 /// than throwing.
 bool PeIsDynamicBase(const u8* file, u64 file_len);
 
+/// True iff the PE bytes parse as a PE32 (i386) image — OptHdrMagic
+/// == 0x10B. False for PE32+ (AMD64, OptHdrMagic == 0x20B) and for
+/// malformed inputs. Lets SpawnPeFile pick the bitness-correct
+/// preload set BEFORE running the full PeLoad parser. Cheap: just
+/// the DOS stub + COFF header walk that PeValidate's prefix path
+/// already does.
+bool PeIsPe32(const u8* file, u64 file_len);
+
 /// Read the optional-header `ImageBase` (preferred base VA) +
 /// `SizeOfImage` from `file`. Returns 0 on parse failure so the
 /// caller can fall back to a default. Used by pre-load loops to

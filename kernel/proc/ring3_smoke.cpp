@@ -62,6 +62,7 @@
 #include "generated_dbghelp_dll.h"
 #include "generated_dxgi_dll.h"
 #include "generated_gdi32_dll.h"
+#include "generated_kernel32_32_dll.h"
 #include "generated_kernel32_dll.h"
 #include "generated_kernelbase_dll.h"
 #include "generated_msvcp140_dll.h"
@@ -2277,6 +2278,10 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         SerialWrite("\n");
         return 0;
     }
+    // Bitness probe: drives the preload-set pick below. PE32 (i386)
+    // images get the i386 DLL set (currently just kernel32_32.dll);
+    // PE32+ images get the existing 44-DLL preload list.
+    const bool pe_is_pe32 = duetos::core::PeIsPe32(pe_bytes, pe_len);
     AddressSpace* as = AddressSpaceCreate(frame_budget);
     if (as == nullptr)
     {
@@ -2495,6 +2500,21 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
 
+    // 32-bit (PE32) preload set. Today just one entry —
+    // kernel32_32.dll — enough for pe32_smoke's ExitProcess
+    // import. Grows as PE32 callers need more. Mapped at the same
+    // ImageBase the DLL was built with (low 4 GiB).
+    static const PreloadDllEntry preload_set_pe32[] = {
+        {"kernel32.dll", fs::generated::kBinKernel32_32DllBytes, fs::generated::kBinKernel32_32DllBytes_len,
+         /*essential=*/true},
+    };
+    constexpr u64 kPreloadPe32EntryCount = sizeof(preload_set_pe32) / sizeof(preload_set_pe32[0]);
+    static_assert(kPreloadPe32EntryCount <= kPreloadSlotCap, "PE32 preload list exceeds cap");
+
+    // Pick the bitness-correct list.
+    const PreloadDllEntry* active_set = pe_is_pe32 ? preload_set_pe32 : preload_set;
+    const u64 active_count = pe_is_pe32 ? kPreloadPe32EntryCount : kPreloadEntryCount;
+
     // Intentionally NOT value-initialised: zero-init of a 4-entry
     // DllImage array (~400 bytes) makes clang emit memset, which
     // the kernel doesn't link. We only ever read entries
@@ -2504,7 +2524,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     u64 preloaded_count = 0;
     if (vs == PeStatus::ImportsPresent)
     {
-        for (u64 i = 0; i < kPreloadEntryCount; ++i)
+        for (u64 i = 0; i < active_count; ++i)
         {
             // Under emulator: only preload entries marked
             // essential. The 3 PEs the boot smoke actually
@@ -2515,7 +2535,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             // a stub that the runtime never reaches. Skipping
             // them here trims ~26 DllLoads × 2 import-bearing PEs
             // off the post-bringup wall budget.
-            if (emulator_pe_report && !preload_set[i].essential)
+            if (emulator_pe_report && !active_set[i].essential)
             {
                 continue;
             }
@@ -2532,7 +2552,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             // points into the first DLL's range now reads garbage
             // — typically manifesting as a ring-3 #GP/#UD/#PF at a
             // valid-looking RIP inside a previously-loaded DLL.
-            const bool dll_dynamic_base = duetos::core::PeIsDynamicBase(preload_set[i].bytes, preload_set[i].len);
+            const bool dll_dynamic_base = duetos::core::PeIsDynamicBase(active_set[i].bytes, active_set[i].len);
             u64 dll_aslr_delta = 0;
             DllLoadResult dll{};
             dll.status = DllLoadStatus::HeaderParseFailed;
@@ -2545,12 +2565,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 // for overlap with already-loaded DLLs without
                 // actually mapping pages. PeImageSizeOf returns 0
                 // on parse failure; let DllLoad re-detect that.
-                const u64 trial_size = duetos::core::PeImageSizeOf(preload_set[i].bytes, preload_set[i].len);
-                const u64 trial_pref = duetos::core::PePreferredBaseOf(preload_set[i].bytes, preload_set[i].len);
+                const u64 trial_size = duetos::core::PeImageSizeOf(active_set[i].bytes, active_set[i].len);
+                const u64 trial_pref = duetos::core::PePreferredBaseOf(active_set[i].bytes, active_set[i].len);
                 if (trial_size == 0 || trial_pref == 0)
                 {
                     dll_aslr_delta = trial_delta;
-                    dll = DllLoad(preload_set[i].bytes, preload_set[i].len, as, dll_aslr_delta);
+                    dll = DllLoad(active_set[i].bytes, active_set[i].len, as, dll_aslr_delta);
                     break;
                 }
                 const u64 trial_base = trial_pref + trial_delta;
@@ -2576,7 +2596,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                         continue;
                 }
                 dll_aslr_delta = trial_delta;
-                dll = DllLoad(preload_set[i].bytes, preload_set[i].len, as, dll_aslr_delta);
+                dll = DllLoad(active_set[i].bytes, active_set[i].len, as, dll_aslr_delta);
                 break;
             }
             if (dll.status == DllLoadStatus::Ok)
@@ -2584,7 +2604,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 preloaded_dlls[preloaded_count] = dll.image;
                 ++preloaded_count;
                 SerialWrite("[ring3] pre-loaded ");
-                SerialWrite(preload_set[i].label);
+                SerialWrite(active_set[i].label);
                 SerialWrite(" base=");
                 SerialWriteHex(dll.image.base_va);
                 SerialWrite(" aslr_delta=");
@@ -2594,7 +2614,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             else
             {
                 SerialWrite("[ring3] ");
-                SerialWrite(preload_set[i].label);
+                SerialWrite(active_set[i].label);
                 SerialWrite(" DllLoad failed for \"");
                 SerialWrite(name);
                 SerialWrite("\" status=");

@@ -49,9 +49,15 @@ constexpr u32 kPeSignature = 0x00004550;
 constexpr u16 kMachineAmd64 = 0x8664;
 constexpr u16 kMachineI386 = 0x014C;
 constexpr u16 kOptMagicPe32Plus = 0x020B;
+constexpr u16 kOptMagicPe32 = 0x010B;
 constexpr u64 kFileHeaderSize = 20;
-constexpr u64 kOptHeaderNumberOfRvaAndSizes = 108;
-constexpr u64 kOptHeaderDataDirectories = 112;
+// PE32+ offsets (used when OptHdrMagic == 0x020B).
+constexpr u64 kOptHeaderNumberOfRvaAndSizesPe32Plus = 108;
+constexpr u64 kOptHeaderDataDirectoriesPe32Plus = 112;
+// PE32 offsets (used when OptHdrMagic == 0x010B). Shifted by -16
+// because PE32's stack/heap reserve/commit are u32 instead of u64.
+constexpr u64 kOptHeaderNumberOfRvaAndSizesPe32 = 92;
+constexpr u64 kOptHeaderDataDirectoriesPe32 = 96;
 constexpr u64 kDataDirEntrySize = 8; // RVA + Size
 constexpr u64 kSectionHeaderSize = 40;
 constexpr u64 kSectionHeaderVirtualSize = 8;
@@ -103,6 +109,8 @@ struct PeHeaderShape
     u64 section_base;
     u16 section_count;
     u32 num_rva_and_sizes;
+    bool is_pe32;
+    u64 data_dir_offset;
 };
 
 bool ParsePeShape(const u8* file, u64 file_len, PeHeaderShape& out)
@@ -128,11 +136,27 @@ bool ParsePeShape(const u8* file, u64 file_len, PeHeaderShape& out)
     if (out.opt_base + out.opt_header_size > file_len)
         return false;
     const u8* opt = file + out.opt_base;
-    if (LeU16(opt) != kOptMagicPe32Plus)
+    const u16 opt_magic = LeU16(opt);
+    u64 n_rva_off = 0;
+    if (opt_magic == kOptMagicPe32Plus)
+    {
+        out.is_pe32 = false;
+        n_rva_off = kOptHeaderNumberOfRvaAndSizesPe32Plus;
+        out.data_dir_offset = kOptHeaderDataDirectoriesPe32Plus;
+    }
+    else if (opt_magic == kOptMagicPe32)
+    {
+        out.is_pe32 = true;
+        n_rva_off = kOptHeaderNumberOfRvaAndSizesPe32;
+        out.data_dir_offset = kOptHeaderDataDirectoriesPe32;
+    }
+    else
+    {
         return false;
-    if (out.opt_header_size < kOptHeaderNumberOfRvaAndSizes + 4)
+    }
+    if (out.opt_header_size < n_rva_off + 4)
         return false;
-    out.num_rva_and_sizes = LeU32(opt + kOptHeaderNumberOfRvaAndSizes);
+    out.num_rva_and_sizes = LeU32(opt + n_rva_off);
     out.section_base = out.opt_base + out.opt_header_size;
     const u64 sect_bytes = u64(out.section_count) * kSectionHeaderSize;
     if (out.section_base + sect_bytes > file_len)
@@ -221,15 +245,18 @@ PeExportStatus PeParseExports(const u8* file, u64 file_len, PeExports& out)
     if (!ParsePeShape(file, file_len, h))
         return PeExportStatus::HeaderParseFailed;
 
-    // Read data directory 0 (Export).
+    // Read data directory 0 (Export). The directory-array offset
+    // varies between PE32 (offset 96) and PE32+ (offset 112) because
+    // the four stack/heap-reserve/commit slots are u32 vs u64. The
+    // shape parser pre-computes the correct offset.
     const u64 dir_bytes = u64(h.num_rva_and_sizes) * kDataDirEntrySize;
-    if (kOptHeaderDataDirectories + dir_bytes > h.opt_header_size)
+    if (h.data_dir_offset + dir_bytes > h.opt_header_size)
         return PeExportStatus::HeaderParseFailed;
     if (kDirEntryExport >= h.num_rva_and_sizes)
         return PeExportStatus::NoExportDirectory;
     const u8* opt = file + h.opt_base;
-    const u32 dir_rva = LeU32(opt + kOptHeaderDataDirectories + kDirEntryExport * kDataDirEntrySize + 0);
-    const u32 dir_size = LeU32(opt + kOptHeaderDataDirectories + kDirEntryExport * kDataDirEntrySize + 4);
+    const u32 dir_rva = LeU32(opt + h.data_dir_offset + kDirEntryExport * kDataDirEntrySize + 0);
+    const u32 dir_size = LeU32(opt + h.data_dir_offset + kDirEntryExport * kDataDirEntrySize + 4);
     if (dir_rva == 0 || dir_size == 0)
         return PeExportStatus::NoExportDirectory;
     // Spec: the directory payload is at least 40 bytes (the
