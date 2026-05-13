@@ -503,6 +503,8 @@ void CmdIdleLock(u32 argc, char** argv);
 // RBAC + elevation broker commands (shell_security.cpp).
 void CmdElevate(u32 argc, char** argv);
 void CmdRoles(u32 argc, char** argv);
+void CmdRoleAdd(u32 argc, char** argv);
+void CmdRoleDel(u32 argc, char** argv);
 void CmdElevations();
 
 // True iff the kernel shell currently has a live broker-granted

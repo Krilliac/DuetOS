@@ -69,12 +69,30 @@ bool RequireAdmin(const char* cmd)
     {
         return true;
     }
+    // Broker-elevated path: a non-admin who belongs to the `root`
+    // role AND has an active broker grant (typed their password
+    // within the role's grace window) passes too. Without the role
+    // membership, an `elevate` call for any cap is meaningless for
+    // admin-gating; without the grant, a root-role member still has
+    // to authenticate. Both must hold simultaneously.
+    const char* user = AuthCurrentUserName();
+    const duetos::security::RoleId root_id = duetos::security::RbacFindRole("root");
+    if (root_id != duetos::security::kRbacRoleInvalid && user != nullptr &&
+        duetos::security::RbacIsMember(user, root_id) && ShellIsElevatedNow())
+    {
+        return true;
+    }
     // Denial = non-zero exit so scripts can react. POSIX `sudo`
     // returns 1 on auth failure; mirror that.
     ShellSetExit(1);
     ConsoleWrite("DENIED: ");
     ConsoleWrite(cmd);
     ConsoleWriteln(" REQUIRES ADMIN");
+    if (root_id != duetos::security::kRbacRoleInvalid && user != nullptr &&
+        duetos::security::RbacIsMember(user, root_id))
+    {
+        ConsoleWriteln("  (root-role member: run `elevate FsWrite` first to authenticate)");
+    }
     duetos::core::Log(duetos::core::LogLevel::Warn, "shell", "admin-only command denied");
     duetos::arch::SerialWrite("[shell] denied (non-admin): ");
     duetos::arch::SerialWrite(cmd);
@@ -616,8 +634,9 @@ void CmdElevate(u32 argc, char** argv)
     if (argc < 2)
     {
         ConsoleWriteln("ELEVATE: USAGE:");
-        ConsoleWriteln("  ELEVATE <CAP>        prompt + grant cap for grace window");
-        ConsoleWriteln("  ELEVATE OFF          drop every active elevation");
+        ConsoleWriteln("  ELEVATE <CAP>           prompt + grant cap for grace window");
+        ConsoleWriteln("  ELEVATE ROLE <NAME>     prompt once, grant every cap in role");
+        ConsoleWriteln("  ELEVATE OFF             drop every active elevation");
         ConsoleWriteln("  (CAP example: FsWrite, NetAdmin, Debug — see ROLES)");
         return;
     }
@@ -626,6 +645,58 @@ void CmdElevate(u32 argc, char** argv)
         duetos::security::GraceCacheExpirePid(kShellPseudoPid);
         g_shell_proc.caps = duetos::core::CapSetEmpty();
         ConsoleWriteln("ELEVATE: cleared shell elevation state");
+        return;
+    }
+    if ((StrEq(argv[1], "role") || StrEq(argv[1], "ROLE")) && argc >= 3)
+    {
+        const duetos::security::RoleId rid = duetos::security::RbacFindRole(argv[2]);
+        if (rid == duetos::security::kRbacRoleInvalid)
+        {
+            ConsoleWrite("ELEVATE: UNKNOWN ROLE '");
+            ConsoleWrite(argv[2]);
+            ConsoleWriteln("' — run ROLES to list");
+            return;
+        }
+        duetos::security::Role r{};
+        if (!duetos::security::RbacGetRole(rid, &r))
+        {
+            ConsoleWriteln("ELEVATE: failed to read role");
+            return;
+        }
+        // Walk every cap in the role's bundle. The first prompt
+        // populates the grace cache; subsequent caps either hit
+        // the cache or are denied if the active user's roles do
+        // not also grant them.
+        bool any_granted = false;
+        bool any_denied = false;
+        for (u32 c = 1; c < static_cast<u32>(duetos::core::kCapCount); ++c)
+        {
+            if ((r.policy.cap_mask & (1ULL << c)) == 0)
+                continue;
+            duetos::security::BrokerRequest req{};
+            req.proc = &g_shell_proc;
+            req.cap = static_cast<duetos::core::Cap>(c);
+            req.reason = r.name;
+            const auto o = duetos::security::BrokerRequestElevation(req);
+            if (o == duetos::security::BrokerOutcome::Granted)
+                any_granted = true;
+            else
+                any_denied = true;
+            // First non-Granted that isn't a cache miss is a hard
+            // stop — bail so we don't spam N password prompts.
+            if (o == duetos::security::BrokerOutcome::Cancelled || o == duetos::security::BrokerOutcome::BadPassword ||
+                o == duetos::security::BrokerOutcome::NoSession)
+                break;
+        }
+        ConsoleWrite("ELEVATE ROLE ");
+        ConsoleWrite(r.name);
+        ConsoleWrite(": ");
+        if (any_granted && !any_denied)
+            ConsoleWriteln("full bundle granted");
+        else if (any_granted)
+            ConsoleWriteln("partial bundle granted (some caps denied by role gate)");
+        else
+            ConsoleWriteln("denied");
         return;
     }
     const duetos::core::Cap cap = ParseCapArg(argv[1]);
@@ -701,6 +772,63 @@ void CmdRoles(u32 argc, char** argv)
         PrintCapBundle(r.policy.cap_mask);
         ConsoleWriteln("");
     }
+}
+
+void CmdRoleAdd(u32 argc, char** argv)
+{
+    if (!RequireAdmin("ROLEADD"))
+        return;
+    if (argc < 3)
+    {
+        ConsoleWriteln("ROLEADD: USAGE: ROLEADD <USER> <ROLE>");
+        ConsoleWriteln("  Adds the role membership; user keeps any existing roles.");
+        return;
+    }
+    const duetos::security::RoleId rid = duetos::security::RbacFindRole(argv[2]);
+    if (rid == duetos::security::kRbacRoleInvalid)
+    {
+        ConsoleWrite("ROLEADD: UNKNOWN ROLE '");
+        ConsoleWrite(argv[2]);
+        ConsoleWriteln("'");
+        return;
+    }
+    if (!duetos::security::RbacAddMembership(argv[1], rid))
+    {
+        ConsoleWriteln("ROLEADD: FAILED (membership table full, or bad user)");
+        return;
+    }
+    ConsoleWrite("ROLEADD: ");
+    ConsoleWrite(argv[1]);
+    ConsoleWrite(" now a member of ");
+    ConsoleWriteln(argv[2]);
+}
+
+void CmdRoleDel(u32 argc, char** argv)
+{
+    if (!RequireAdmin("ROLEDEL"))
+        return;
+    if (argc < 3)
+    {
+        ConsoleWriteln("ROLEDEL: USAGE: ROLEDEL <USER> <ROLE>");
+        return;
+    }
+    const duetos::security::RoleId rid = duetos::security::RbacFindRole(argv[2]);
+    if (rid == duetos::security::kRbacRoleInvalid)
+    {
+        ConsoleWrite("ROLEDEL: UNKNOWN ROLE '");
+        ConsoleWrite(argv[2]);
+        ConsoleWriteln("'");
+        return;
+    }
+    if (!duetos::security::RbacRemoveMembership(argv[1], rid))
+    {
+        ConsoleWriteln("ROLEDEL: not a member (or unknown user)");
+        return;
+    }
+    ConsoleWrite("ROLEDEL: ");
+    ConsoleWrite(argv[1]);
+    ConsoleWrite(" removed from ");
+    ConsoleWriteln(argv[2]);
 }
 
 void CmdElevations()

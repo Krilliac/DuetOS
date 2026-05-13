@@ -102,6 +102,45 @@ SYS_FILE_WRITE
      if Denied:  dispatcher returns -1 (existing behaviour)
 ```
 
+## What's wired up today (v0.1)
+
+| Surface                    | State                                                          |
+|----------------------------|----------------------------------------------------------------|
+| Broker prompt loop (TTY)   | REAL — reads from `Ps2KeyboardReadEvent` directly              |
+| Broker prompt loop (GUI)   | REAL — kernel-drawn modal under the compositor lock            |
+| Grace cache                | REAL — per-process, per-cap, role-policy lifetime              |
+| Role table + memberships   | REAL — in-memory; `admin`→`root`, `guest`→`sandbox` seeded     |
+| `elevate <cap>`            | REAL — single-cap prompt + grant                               |
+| `elevate role <name>`      | REAL — one prompt, grants every cap in the role bundle         |
+| `elevate off`              | REAL — drops every active grant on the shell pseudo-process    |
+| `roles` / `roles me`       | REAL — list all roles / list the active user's memberships     |
+| `roleadd` / `roledel`      | REAL — admin-gated membership management                       |
+| `elevations`               | REAL — dump live grace-cache rows                              |
+| `RequireAdmin` integration | REAL — passes if you're admin OR (root-role member AND elevated)|
+| Win32 `NtAdjustPrivilegesToken` routing | DEFERRED — see *Open blockers* below             |
+| Argon2id KDF               | DEFERRED — see Roadmap                                         |
+| Persistence                | DEFERRED — needs writable system FS                            |
+
+## Open blockers — why Win32 facade routing is deferred
+
+`Ps2KeyboardReadEvent` is single-consumer by contract: "two
+concurrent readers would fight over bytes." The current broker
+prompt is safe only when called from the kbd-reader thread — which
+is what happens for shell commands (the shell IS the kbd reader),
+but NOT for a Win32 PE syscall (the PE runs on a different task).
+A naive `BrokerRequestElevation` call inside `SysTokenAdjust` would
+race the shell for keystrokes.
+
+The fix is a deferred-prompt mechanism: the broker, when invoked
+off-thread, marks the request pending; the kbd reader, when it
+notices a pending request, displays the prompt and feeds keys to
+the broker; the requesting thread sleeps on a wait queue and wakes
+on completion. That's roughly the same shape as the existing
+`LoginIsActive` / `LoginFeedKey` demux, parameterised for elevation.
+
+Tracked in `wiki/reference/Roadmap.md` as part of "RBAC v1
+follow-ups."
+
 ## File layout
 
 | File                              | Owns                                              |

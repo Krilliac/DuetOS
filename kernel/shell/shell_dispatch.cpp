@@ -1632,6 +1632,16 @@ void Dispatch(char* line)
         CmdRoles(argc, argv);
         return;
     }
+    if (StrEq(cmd, "roleadd"))
+    {
+        CmdRoleAdd(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "roledel"))
+    {
+        CmdRoleDel(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "elevations"))
     {
         CmdElevations();
