@@ -62,8 +62,11 @@
 #include "generated_dbghelp_dll.h"
 #include "generated_dxgi_dll.h"
 #include "generated_gdi32_dll.h"
+#include "generated_gdi32_32_dll.h"
 #include "generated_kernel32_32_dll.h"
 #include "generated_kernel32_dll.h"
+#include "generated_msvcrt_32_dll.h"
+#include "generated_user32_32_dll.h"
 #include "generated_kernelbase_dll.h"
 #include "generated_msvcp140_dll.h"
 #include "generated_msvcrt_dll.h"
@@ -2506,6 +2509,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // ImageBase the DLL was built with (low 4 GiB).
     static const PreloadDllEntry preload_set_pe32[] = {
         {"kernel32.dll", fs::generated::kBinKernel32_32DllBytes, fs::generated::kBinKernel32_32DllBytes_len,
+         /*essential=*/true},
+        {"msvcrt.dll", fs::generated::kBinMsvcrt_32DllBytes, fs::generated::kBinMsvcrt_32DllBytes_len,
+         /*essential=*/true},
+        {"user32.dll", fs::generated::kBinUser32_32DllBytes, fs::generated::kBinUser32_32DllBytes_len,
+         /*essential=*/true},
+        {"gdi32.dll", fs::generated::kBinGdi32_32DllBytes, fs::generated::kBinGdi32_32DllBytes_len,
          /*essential=*/true},
     };
     constexpr u64 kPreloadPe32EntryCount = sizeof(preload_set_pe32) / sizeof(preload_set_pe32[0]);

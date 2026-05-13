@@ -699,6 +699,36 @@ duetos_embed_blob(generated_kernel32_32_dll.h
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32.c"
     COMMENT "Compiling + embedding kernel32_32.dll (i386 PE32 companion)")
 
+# 32-bit msvcrt companion — string / memory / CRT-startup intrinsics
+# every MSVC-built PE32 calls during boot.
+duetos_embed_blob(generated_msvcrt_32_dll.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-msvcrt-32-dll.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/msvcrt_32.c"
+    COMMENT "Compiling + embedding msvcrt_32.dll (i386 PE32 companion)")
+
+# 32-bit stub DLLs. Each takes (dll_name, base_va, symbol_name) and
+# produces a PE32 (i386) DLL whose Export Name field matches the
+# i386 importer's descriptor. The bodies are safe-ignore stubs;
+# real implementations land slice-by-slice as Layer 4 grows.
+macro(duetos_embed_32bit_stub_dll name base_va symbol)
+    set(_src "${CMAKE_SOURCE_DIR}/userland/libs/${name}_32/${name}_32.c")
+    set(_def "${CMAKE_SOURCE_DIR}/userland/libs/${name}_32/${name}_32.def")
+    set(_hdr "${CMAKE_CURRENT_BINARY_DIR}/generated_${name}_32_dll.h")
+    add_custom_command(
+        OUTPUT "${_hdr}"
+        COMMAND "${CMAKE_SOURCE_DIR}/tools/build/build-stub-32-dll.sh"
+                "${CMAKE_SOURCE_DIR}" "${_hdr}" "${name}" "${base_va}" "${symbol}"
+        DEPENDS "${_src}" "${_def}"
+                "${CMAKE_SOURCE_DIR}/tools/build/build-stub-32-dll.sh"
+                "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Compiling + embedding ${name}_32.dll (i386 PE32 stub DLL)"
+        VERBATIM)
+    list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${_hdr}")
+endmacro()
+
+duetos_embed_32bit_stub_dll(user32 0x10060000 kBinUser32_32DllBytes)
+duetos_embed_32bit_stub_dll(gdi32  0x10080000 kBinGdi32_32DllBytes)
+
 duetos_embed_blob(generated_vcruntime140_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-vcruntime140-dll.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/vcruntime140.c"

@@ -1,0 +1,50 @@
+; msvcrt_32.def — exported symbols for the i386 msvcrt.dll companion.
+LIBRARY msvcrt.dll
+
+EXPORTS
+    memcpy
+    memmove
+    memset
+    memcmp
+    strlen
+    strcmp
+    strncmp
+    strcpy
+    strncpy
+    strcat
+    strchr
+    strrchr
+    strstr
+    _stricmp
+    _strnicmp
+    _errno
+    _amsg_exit
+    _assert
+    exit
+    _exit
+    abort
+    _initterm
+    _initterm_e
+    __set_app_type
+    __setusermatherr
+    _iob DATA
+    __p__commode
+    __p__fmode
+    __p__acmdln
+    __getmainargs
+    __initenv
+    fopen
+    fclose
+    fread
+    fwrite
+    fputs
+    fflush
+    feof
+    ferror
+    malloc
+    calloc
+    free
+    realloc
+    puts
+    atoi
+    atol
