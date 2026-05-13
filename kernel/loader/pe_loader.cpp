@@ -888,7 +888,14 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
 
             if (type == 0) // IMAGE_REL_BASED_ABSOLUTE — pad entry.
                 continue;
-            if (type != 10) // IMAGE_REL_BASED_DIR64 is the only other type we expect.
+            // Two real types we apply:
+            //   3  IMAGE_REL_BASED_HIGHLOW — PE32 (i386), patches 4 bytes
+            //   10 IMAGE_REL_BASED_DIR64   — PE32+ (AMD64), patches 8 bytes
+            // PE32 images use HIGHLOW exclusively; PE32+ images use DIR64
+            // exclusively. Mixing within one image is malformed.
+            const bool is_highlow = (type == 3);
+            const bool is_dir64 = (type == 10);
+            if (!is_highlow && !is_dir64)
             {
                 // Surface the IMAGE_REL_BASED_* name so a reader doesn't
                 // have to look up `type=3` against the PE spec table.
@@ -938,10 +945,11 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
                 continue; // no-op apply — still validated the entry shape.
 
             const u64 patch_va = h.image_base + u64(page_rva) + u64(offset);
-            // Read current 8 bytes, add delta, write back. Split
-            // across two frames if the write straddles a page.
+            // HIGHLOW = 4 bytes, DIR64 = 8 bytes. Read, add delta, write
+            // back. Split across two frames if the write straddles a page.
+            const u64 patch_bytes = is_highlow ? 4 : 8;
             u64 orig = 0;
-            for (u64 b = 0; b < 8; ++b)
+            for (u64 b = 0; b < patch_bytes; ++b)
             {
                 const u64 va = patch_va + b;
                 const u64 page_va = va & ~0xFFFULL;
@@ -958,8 +966,12 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
                 const auto* direct = static_cast<const u8*>(mm::PhysToVirt(frame));
                 orig |= u64(direct[va & 0xFFFULL]) << (b * 8);
             }
+            // HIGHLOW only patches the low 32 bits; the delta itself for
+            // a 32-bit image lives in the low 32 bits too (ImageBase is
+            // u32). Truncating after the add matches what a 32-bit
+            // Windows loader does.
             const u64 fixed = orig + delta;
-            for (u64 b = 0; b < 8; ++b)
+            for (u64 b = 0; b < patch_bytes; ++b)
             {
                 const u64 va = patch_va + b;
                 const u64 page_va = va & ~0xFFFULL;
@@ -1594,18 +1606,15 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // alone keeps us from even ATTEMPTING to run binaries like
     // windows-kill.exe; accepting + logging lets us see how
     // far they get before the first real gap.
-    // PE32 (i386) is now recognised by the prefix + image
-    // validators so PeReport can walk its imports / relocs / TLS
-    // diagnostically. Actual MapAndRun is still gated until the
-    // 32-bit user-CS, syscall-ABI, and i386 DLL set land.
-    // Re-classify the OK / ImportsPresent / TlsPresent path as
-    // Pe32ExecutionNotReady so the existing reject machinery
-    // (FixJournalRecord, PeReport pin) does the right thing.
+    // PE32 (i386) is now executable end-to-end for self-contained
+    // images whose import surface is never actually called — the
+    // pe32_smoke fixture exits via int 0x80 directly. PE32 images
+    // that DO call their imports will faceplant at the first call
+    // until the i386 DLL set lands (Layer 4 follow-up); the
+    // Pe32ExecutionNotReady status is retained so a future
+    // policy gate can flip it back on if we want to reject such
+    // PEs preemptively.
     PeStatus effective_ps = ps;
-    if (h.is_pe32 && (ps == PeStatus::Ok || ps == PeStatus::ImportsPresent || ps == PeStatus::TlsPresent))
-    {
-        effective_ps = PeStatus::Pe32ExecutionNotReady;
-    }
     if (effective_ps != PeStatus::Ok && effective_ps != PeStatus::ImportsPresent &&
         effective_ps != PeStatus::TlsPresent)
     {
@@ -1791,13 +1800,15 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     SerialWriteHex(kV0StackPages);
     SerialWrite("\n");
 
-    // 4b. TEB page (Win32 PEs only). MSVC CRT startup reads
-    //     gs:[0x30] for the self-pointer during __security_init
+    // 4b. TEB page (64-bit Win32 PEs only). MSVC x64 CRT startup
+    //     reads gs:[0x30] for the self-pointer during __security_init
     //     _cookie / __scrt_common_main_seh; without this page it
     //     faults at linear 0x30. One page, RW+NX. Self-pointer
-    //     stored at offset 0x30.
+    //     stored at offset 0x30. PE32 (i386) PEs use a different
+    //     TEB layout reached via FS, not GS — skipped here; their
+    //     TEB lands with the 32-bit DLL set port.
     u64 teb_va = 0;
-    if (ps == PeStatus::ImportsPresent)
+    if (!h.is_pe32 && ps == PeStatus::ImportsPresent)
     {
         const PhysAddr teb_frame = AllocateFrame();
         if (teb_frame == kNullFrame)
@@ -1820,14 +1831,14 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         SerialWrite("\n");
     }
 
-    // 4c. Proc-env page (Win32 PEs only). MSVC CRT startup
+    // 4c. Proc-env page (64-bit Win32 PEs only). MSVC CRT startup
     //     reads argc/argv via `__p___argc()` / `__p___argv()`
-    //     accessor functions; their stubs return addresses
-    //     inside this page. One page, R-W + NX. Populated with
-    //     argc=1, argv=[program_name, NULL], program_name="a.exe".
-    //     A future slice will plumb the real spawn-time program
-    //     name through here.
-    if (ps == PeStatus::ImportsPresent)
+    //     accessor functions; their stubs return addresses inside
+    //     this page. One page, R-W + NX. Populated with argc=1,
+    //     argv=[program_name, NULL], program_name="a.exe". PE32
+    //     accessors live in a 32-bit kernel32 — gated alongside
+    //     Layer 4.
+    if (!h.is_pe32 && ps == PeStatus::ImportsPresent)
     {
         const PhysAddr env_frame = AllocateFrame();
         if (env_frame == kNullFrame)
@@ -1849,7 +1860,14 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     }
 
     // 5. If imports are present, stand up the per-process
-    //    Win32 stubs region + resolve every IAT entry.
+    //    Win32 stubs region + resolve every IAT entry. PE32
+    //    (i386) images skip both: the existing thunks page is
+    //    64-bit code, and the IAT format itself is different
+    //    (4-byte entries vs 8-byte). Pe32 callers that actually
+    //    touch their IAT fault visibly at the first import call,
+    //    which is fine — the pe32_smoke fixture never calls its
+    //    one import (ExitProcess) because the int 0x80 above it
+    //    is non-returning.
     //
     // The stub byte table has outgrown a single 4 KiB page (render
     // work: filled Rectangle/Ellipse + UTF-16 paint + message loop
@@ -1857,7 +1875,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // R-X. `Win32ThunksPopulate` writes the full `sizeof(kThunksBytes)`
     // into the direct-map window; any trailing bytes in the second
     // page beyond the stub table stay zeroed from the pre-clear.
-    if (ps == PeStatus::ImportsPresent)
+    if (!h.is_pe32 && ps == PeStatus::ImportsPresent)
     {
         const PhysAddr stubs_frame = AllocateContiguousFrames(2);
         if (stubs_frame == kNullFrame)
@@ -1890,7 +1908,8 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     SerialWrite("[pe-load] OK\n");
 
     r.ok = true;
-    r.imports_resolved = (ps == PeStatus::ImportsPresent);
+    r.imports_resolved = !h.is_pe32 && (ps == PeStatus::ImportsPresent);
+    r.is_pe32 = h.is_pe32;
     r.entry_va = h.image_base + h.entry_rva;
     r.stack_va = kV0StackVa;
     r.stack_top = kV0StackTop;

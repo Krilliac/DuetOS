@@ -244,18 +244,29 @@ EnterUserMode32:
 
     cli
 
+    /* swapgs BEFORE we reload gs so the kernel's per-CPU pointer
+     * lands in KERNEL_GS_BASE. The `mov gs, ax` below loads the
+     * hidden GSBASE from the user data descriptor (base=0); without
+     * the stash, the next int 0x80 from ring 3 would swapgs to a
+     * stale or zero KERNEL_GS_BASE and any per-CPU read (cpu::Curre
+     * ntCpu(), TssSetRsp0's per-CPU TSS lookup, the syscall arg
+     * remap's scratch state) would deref 0 — recursive #PF.
+     *
+     * Mirror of the 64-bit EnterUserModeWithGs's swapgs gate. The
+     * isr_common entry path's matching swapgs on user→kernel
+     * transition restores the kernel pcpu pointer on every trap. */
+    swapgs
+
     /* Load user data selector. Use the 32-bit user data segment
      * (0x43) for DS/ES/FS/GS so the segment-descriptor base + limit
      * cached by the load matches the 32-bit segment shape. SS is
      * set by iretq from the frame.
      *
-     * No swapgs: 32-bit code can't use the MSR-based GSBASE anyway
-     * (compat-mode `mov rax, gs:[...]` decodes as a 32-bit move),
-     * and clearing the kernel's GSBASE here would mean we couldn't
-     * find per-CPU state on the next kernel entry. The matching
-     * isr_common swapgs on user→kernel transition does NOT fire for
-     * compat-mode CS unless we add it — see the syscall ABI Layer 3
-     * notes for the route. */
+     * Compat-mode code uses FS-relative TEB reads, not GS-relative
+     * (which is the 64-bit Windows convention). The 32-bit DLL
+     * preload slice (Layer 4) will wrmsr FSBASE for those reads; for
+     * now the kernel-side GSBASE swap above is all the pe32_smoke
+     * fixture needs to round-trip through int 0x80 cleanly. */
     mov     ax, 0x43                /* kUserData32Selector */
     mov     ds, ax
     mov     es, ax

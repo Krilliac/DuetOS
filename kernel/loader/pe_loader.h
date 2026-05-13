@@ -155,6 +155,10 @@ struct PeLoadResult
                            // PEs (hello.exe) get ok=true, imports_resolved=false
                            // and skip heap init to keep their frame footprint
                            // down.
+    bool is_pe32;          // true for PE32 (i386), false for PE32+ (AMD64).
+                           // Drives the ring-3 entry-mode pick downstream:
+                           // PE32 enters via EnterUserMode32 (compat mode,
+                           // CS=0x3B), PE32+ via EnterUserModeWithGs.
     u64 entry_va;          // ImageBase + AddressOfEntryPoint
     u64 stack_va;          // Lowest VA of the stack page.
     u64 stack_top;         // rsp at ring-3 entry (stack_va + kPageSize).

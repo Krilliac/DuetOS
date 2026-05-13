@@ -31,15 +31,17 @@ void __cdecl mainCRTStartup(void)
 {
     /* Two paths to exit. Either works as a success signal.
      *
-     * Path A: native int 0x80 with SYS_EXIT (=1). Args via Linux i386
-     * ABI: eax=nr, ebx=arg1. Rest are zero.
+     * Path A: native int 0x80 with SYS_EXIT (=0). Args via Linux i386
+     * ABI: eax=nr, ebx=arg1. Rest are zero. The kernel's 32-bit
+     * register remap turns this into the SysV AMD64 convention the
+     * C++ syscall dispatcher expects (rax=nr, rdi=arg1).
      *
-     * Path B: ExitProcess(0x32) from kernel32. Until the 32-bit
+     * Path B: ExitProcess(0x33) from kernel32. Until the 32-bit
      * kernel32 stub is shipped this just resolves to a dangling
      * import. Keep it as documentation of what we'd call once
      * Layer 4 lands.
      */
-    __asm__ volatile("movl $1, %%eax\n\t"    /* SYS_EXIT */
+    __asm__ volatile("movl $0, %%eax\n\t"    /* SYS_EXIT */
                      "movl $0x32, %%ebx\n\t" /* rc = 0x32 */
                      "int $0x80\n\t"
                      :

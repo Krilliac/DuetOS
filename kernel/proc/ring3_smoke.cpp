@@ -583,6 +583,8 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     SerialWriteHex(code_va);
     SerialWrite(" rsp=");
     SerialWriteHex(stack_top);
+    if (proc->user_is_pe32)
+        SerialWrite(" mode=pe32");
     if (proc->user_gs_base != 0)
     {
         SerialWrite(" gs_base=");
@@ -590,6 +592,13 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     }
     SerialWrite("\n");
 
+    if (proc->user_is_pe32)
+    {
+        // PE32 (i386) task: enter compat mode via the 32-bit user
+        // CS (0x3B). No GSBASE setup — 32-bit PEs reach the TEB
+        // through FS, not GS.
+        arch::EnterUserMode32(code_va, stack_top);
+    }
     arch::EnterUserModeWithGs(code_va, stack_top, proc->user_gs_base);
 }
 
@@ -2635,6 +2644,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // satisfying the 16n+8 rule.
     proc->user_rsp_init = r.stack_top - 0x48;
     proc->user_gs_base = r.teb_va;
+    proc->user_is_pe32 = r.is_pe32;
     /* Record the post-ASLR EXE base so SYS_DLL_BASE_BY_NAME
      * with an empty / NULL name can return it for
      * GetModuleHandleW(NULL). */
