@@ -91,7 +91,7 @@ u32 PasswordDefaultIterations();
 enum class PasswordAlgorithm : u32
 {
     Pbkdf2HmacSha256 = 1,
-    Argon2id = 2, // reserved — implementation deferred (wiki/security/Persistence.md)
+    Argon2id = 2, // RFC 9106; implementation lives in security/argon2id.{h,cpp}
 };
 
 struct PasswordHashRecord
@@ -193,35 +193,38 @@ void PasswordHashSelfTest();
 // ---------------------------------------------------------------------
 // V2 verify — algorithm-tagged dispatch.
 //
-// Reads `record.algorithm` and runs the matching KDF. PBKDF2 path
-// is identical to the V1 verify above; Argon2id path returns false
-// in v0 with a serial-console diagnostic (the algorithm is reserved
-// but not yet implemented — see wiki/security/Persistence.md, the
-// "Dependency order" section). When Argon2id lands, this is the
-// single spot to wire it.
+// Reads `record.algorithm` and runs the matching KDF. Both arms
+// are wired:
+//   - PBKDF2-HMAC-SHA256 — identical to the V1 verify above.
+//   - Argon2id (RFC 9106) — via security/argon2id.h; the per-record
+//     params triple (memory_kib, time_cost, parallelism) lives in
+//     `params.argon2id` and is what governs the cost of a verify.
 //
-// Lazy migration: callers that successfully verified a V1 record
-// against a plaintext password should call PasswordHashUpgradeToV2
-// to re-hash with the current default algorithm (today: PBKDF2;
-// future: Argon2id). The kernel writes the new record back to the
-// persistent store, transparently upgrading.
+// `PasswordHashCreateV2` defaults to Argon2id for new records. The
+// PBKDF2 arm is retained for lazy migration of existing V1/V2-PBKDF2
+// records: a successful PBKDF2 verify against the user's plaintext
+// password can drive a `PasswordHashCreateV2` to re-hash under
+// Argon2id, and the resulting record overwrites the stored one
+// (transparent upgrade to a stronger KDF on next login).
 // ---------------------------------------------------------------------
 
 /// Verify `password` against a V2 record. Dispatches on
-/// `record.algorithm`. Returns false for unknown / unimplemented
-/// algorithms.
+/// `record.algorithm`. Returns false for unknown algorithms or
+/// out-of-range KDF parameters.
 bool PasswordHashVerifyV2(const char* password, u32 password_len, const PasswordHashRecordV2& record);
 
-/// Re-hash `password` with the current default algorithm + a fresh
-/// salt. Used by the lazy-migration path: a successful verify of a
-/// weaker / older record triggers a re-hash to the strongest
-/// algorithm the kernel currently supports.
+/// Re-hash `password` with the current default algorithm
+/// (Argon2id) and a fresh salt. Used by callers seeding new
+/// records and by the lazy-migration path. Falls back to PBKDF2
+/// only if Argon2id derivation fails (KMalloc exhaustion); the
+/// fallback is logged at WARN.
 void PasswordHashCreateV2(const char* password, u32 password_len, PasswordHashRecordV2* out);
 
 /// V2 KAT — exercises the algorithm dispatch for both the PBKDF2
-/// path (matches the V1 KAT byte-for-byte) and the Argon2id stub
-/// (currently asserts false). Panics on regression. The Argon2id
-/// half flips to a real test vector when the implementation lands.
+/// path (matches the V1 KAT byte-for-byte) and the Argon2id round-
+/// trip (a freshly-created Argon2id record verifies against its
+/// own plaintext and rejects a wrong password). Panics on
+/// regression.
 void PasswordHashV2SelfTest();
 
 } // namespace duetos::security

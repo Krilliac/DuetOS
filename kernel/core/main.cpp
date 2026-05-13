@@ -232,9 +232,12 @@
 #include "time/timekeeper.h"
 #include "time/timezone.h"
 #include "diag/cleanroom_trace.h"
+#include "security/argon2id.h"
 #include "security/auth.h"
 #include "security/auth_pentest.h"
 #include "security/blake2b.h"
+#include "security/chacha20_poly1305.h"
+#include "security/persistence.h"
 #include "security/broker.h"
 #include "security/cap_audit.h"
 #include "security/grace.h"
@@ -2243,6 +2246,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::diag::BootProgress("after-AuthInit");
     DUETOS_BOOT_SELFTEST(duetos::core::AuthSelfTest());
     duetos::diag::BootProgress("after-AuthSelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::core::AuthSnapshotSelfTest());
+    duetos::diag::BootProgress("after-AuthSnapshotSelfTest");
     DUETOS_BOOT_SELFTEST(duetos::security::AuthBruteForceProbe());
     duetos::diag::BootProgress("after-AuthBruteForceProbe");
 
@@ -2256,6 +2261,18 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::diag::BootProgress("before-Blake2bSelfTest");
     DUETOS_BOOT_SELFTEST(duetos::security::Blake2bSelfTest());
     duetos::diag::BootProgress("after-Blake2bSelfTest");
+
+    duetos::diag::BootProgress("before-Argon2idSelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::security::Argon2idSelfTest());
+    duetos::diag::BootProgress("after-Argon2idSelfTest");
+
+    duetos::diag::BootProgress("before-ChaCha20Poly1305SelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::security::ChaCha20Poly1305SelfTest());
+    duetos::diag::BootProgress("after-ChaCha20Poly1305SelfTest");
+
+    duetos::diag::BootProgress("before-PersistenceSelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::security::PersistenceSelfTest());
+    duetos::diag::BootProgress("after-PersistenceSelfTest");
 
     duetos::diag::BootProgress("before-PasswordHashV2SelfTest");
     DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashV2SelfTest());

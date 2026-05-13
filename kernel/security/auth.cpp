@@ -4,6 +4,7 @@
 #include "log/klog.h"
 #include "security/event_ring.h"
 #include "security/password_hash.h"
+#include "security/persistence.h"
 #include "time/timekeeper.h"
 
 namespace duetos::core
@@ -547,6 +548,275 @@ bool AuthAccountByName(const char* username, AccountView* view)
     }
     PopulateView(a, NowNs(), view);
     return true;
+}
+
+// ---------------------------------------------------------------------
+// Persistence bridge — see auth.h header comments and
+// wiki/security/Persistence.md.
+//
+// On-disk record format (v0, version stamped in the AuthSnapshot
+// header via the persistence envelope's record_size field):
+//
+//   struct AccountSnapshotRecord {
+//     u8  name[kAuthNameMax];     // NUL-padded
+//     u8  role;                   // AuthRole as u8
+//     u8  has_password;           // 0/1
+//     u8  reserved[2];            // zero
+//     PasswordHashRecord record;  // 56 bytes
+//     u64 created_ns;
+//     u64 last_login_ns;
+//     u64 last_attempt_ns;
+//     u64 locked_until_ns;
+//     u32 failed_attempts;
+//     u32 total_logins;
+//   };  // 32+1+1+2+56+8*4+4*2 = 132 bytes
+//
+// Records with `name[0] == '\0'` are not encoded (the table is
+// sparse — empty slots are skipped on write, allocated freshly on
+// read). `record_count` in the envelope reflects the number of
+// in-use slots at write time.
+// ---------------------------------------------------------------------
+
+namespace
+{
+
+constexpr u32 kAccountSnapshotRecordBytes = 132;
+static_assert(kAuthNameMax == 32, "AccountSnapshotRecord layout assumes name=32");
+static_assert(sizeof(duetos::security::PasswordHashRecord) == 56, "AccountSnapshotRecord layout assumes record=56");
+
+void StoreU32LE(u8* p, u32 v)
+{
+    p[0] = static_cast<u8>(v);
+    p[1] = static_cast<u8>(v >> 8);
+    p[2] = static_cast<u8>(v >> 16);
+    p[3] = static_cast<u8>(v >> 24);
+}
+
+void StoreU64LE(u8* p, u64 v)
+{
+    for (u32 i = 0; i < 8; ++i)
+        p[i] = static_cast<u8>(v >> (8u * i));
+}
+
+u32 LoadU32LE(const u8* p)
+{
+    return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) |
+           (static_cast<u32>(p[3]) << 24);
+}
+
+u64 LoadU64LE(const u8* p)
+{
+    u64 v = 0;
+    for (u32 i = 0; i < 8; ++i)
+        v |= static_cast<u64>(p[i]) << (8u * i);
+    return v;
+}
+
+void EncodeAccount(const Account& a, u8 out[kAccountSnapshotRecordBytes])
+{
+    for (u32 i = 0; i < kAccountSnapshotRecordBytes; ++i)
+        out[i] = 0;
+    for (u32 i = 0; i < kAuthNameMax; ++i)
+        out[i] = static_cast<u8>(a.name[i]);
+    out[kAuthNameMax + 0] = static_cast<u8>(a.role);
+    out[kAuthNameMax + 1] = a.has_password ? 1u : 0u;
+    // [+2..+3] reserved.
+    u32 off = kAuthNameMax + 4;
+    // PasswordHashRecord: algorithm(u32) + iterations(u32) + salt(16) + hash(32) = 56.
+    StoreU32LE(out + off, static_cast<u32>(a.record.algorithm));
+    off += 4;
+    StoreU32LE(out + off, a.record.iterations);
+    off += 4;
+    for (u32 i = 0; i < duetos::security::kPasswordSaltBytes; ++i)
+        out[off + i] = a.record.salt[i];
+    off += duetos::security::kPasswordSaltBytes;
+    for (u32 i = 0; i < duetos::security::kPasswordHashBytes; ++i)
+        out[off + i] = a.record.hash[i];
+    off += duetos::security::kPasswordHashBytes;
+    // Metadata.
+    StoreU64LE(out + off, a.created_ns);
+    off += 8;
+    StoreU64LE(out + off, a.last_login_ns);
+    off += 8;
+    StoreU64LE(out + off, a.last_attempt_ns);
+    off += 8;
+    StoreU64LE(out + off, a.locked_until_ns);
+    off += 8;
+    StoreU32LE(out + off, a.failed_attempts);
+    off += 4;
+    StoreU32LE(out + off, a.total_logins);
+    off += 4;
+    KASSERT(off == kAccountSnapshotRecordBytes, "auth/persist", "record encoder size drift");
+}
+
+void DecodeAccount(const u8 in[kAccountSnapshotRecordBytes], Account& a)
+{
+    a = Account{};
+    a.in_use = true;
+    for (u32 i = 0; i < kAuthNameMax; ++i)
+        a.name[i] = static_cast<char>(in[i]);
+    a.role = static_cast<AuthRole>(in[kAuthNameMax + 0]);
+    a.has_password = (in[kAuthNameMax + 1] != 0);
+    u32 off = kAuthNameMax + 4;
+    a.record.algorithm = static_cast<duetos::security::PasswordAlgorithm>(LoadU32LE(in + off));
+    off += 4;
+    a.record.iterations = LoadU32LE(in + off);
+    off += 4;
+    for (u32 i = 0; i < duetos::security::kPasswordSaltBytes; ++i)
+        a.record.salt[i] = in[off + i];
+    off += duetos::security::kPasswordSaltBytes;
+    for (u32 i = 0; i < duetos::security::kPasswordHashBytes; ++i)
+        a.record.hash[i] = in[off + i];
+    off += duetos::security::kPasswordHashBytes;
+    a.created_ns = LoadU64LE(in + off);
+    off += 8;
+    a.last_login_ns = LoadU64LE(in + off);
+    off += 8;
+    a.last_attempt_ns = LoadU64LE(in + off);
+    off += 8;
+    a.locked_until_ns = LoadU64LE(in + off);
+    off += 8;
+    a.failed_attempts = LoadU32LE(in + off);
+    off += 4;
+    a.total_logins = LoadU32LE(in + off);
+    off += 4;
+    KASSERT(off == kAccountSnapshotRecordBytes, "auth/persist", "record decoder size drift");
+}
+
+u32 CountActiveAccounts()
+{
+    u32 n = 0;
+    for (u32 i = 0; i < kAuthMaxAccounts; ++i)
+        if (g_accounts[i].in_use)
+            ++n;
+    return n;
+}
+
+} // namespace
+
+u32 AuthSnapshotEncodedSize()
+{
+    const u32 n = CountActiveAccounts();
+    if (n == 0)
+        return 0;
+    return duetos::security::PersistenceEncodedSize(n, kAccountSnapshotRecordBytes);
+}
+
+bool AuthExportSnapshot(const char* password, const AuthSnapshotParams& params, u8* out, u32 out_capacity, u32* out_len)
+{
+    if (password == nullptr || out == nullptr)
+        return false;
+    const u32 pw_len = StrLen(password);
+    if (pw_len == 0)
+        return false;
+    const u32 n = CountActiveAccounts();
+    if (n == 0)
+        return false;
+    // Pack each in-use slot.
+    u8 plain[kAuthMaxAccounts * kAccountSnapshotRecordBytes];
+    u32 idx = 0;
+    for (u32 i = 0; i < kAuthMaxAccounts; ++i)
+    {
+        if (!g_accounts[i].in_use)
+            continue;
+        EncodeAccount(g_accounts[i], plain + idx * kAccountSnapshotRecordBytes);
+        ++idx;
+    }
+    duetos::security::PersistenceParams pp{};
+    pp.memory_kib = params.memory_kib;
+    pp.time_cost = params.time_cost;
+    pp.parallelism = params.parallelism;
+    return duetos::security::PersistenceEncode(plain, n, kAccountSnapshotRecordBytes, password, pw_len, pp, out,
+                                               out_capacity, out_len);
+}
+
+bool AuthImportSnapshot(const char* password, const u8* in, u32 in_len)
+{
+    if (password == nullptr || in == nullptr)
+        return false;
+    const u32 pw_len = StrLen(password);
+    if (pw_len == 0)
+        return false;
+    u8 plain[kAuthMaxAccounts * kAccountSnapshotRecordBytes];
+    u32 record_count = 0;
+    u32 record_size = 0;
+    if (!duetos::security::PersistenceDecode(in, in_len, password, pw_len, plain, sizeof(plain), &record_count,
+                                             &record_size))
+        return false;
+    if (record_size != kAccountSnapshotRecordBytes)
+        return false;
+    if (record_count == 0 || record_count > kAuthMaxAccounts)
+        return false;
+    // Atomic replace: decode into a scratch table first; only swap
+    // in on success of every record.
+    Account scratch[kAuthMaxAccounts] = {};
+    for (u32 i = 0; i < record_count; ++i)
+    {
+        DecodeAccount(plain + i * kAccountSnapshotRecordBytes, scratch[i]);
+    }
+    // Commit.
+    for (u32 i = 0; i < kAuthMaxAccounts; ++i)
+        g_accounts[i] = scratch[i];
+    g_session = {};
+    return true;
+}
+
+void AuthSnapshotSelfTest()
+{
+    // Seed-state has admin/guest already (AuthInit ran). Add a
+    // probe slot so we can tell whether import reverted a runtime
+    // mutation.
+    KASSERT(AuthAddUser("snapseed", "snapseed-pw", AuthRole::User), "auth/snapshot",
+            "self-test: failed to seed snapseed");
+
+    // Export.
+    AuthSnapshotParams params{};
+    params.memory_kib = 32;
+    params.time_cost = 2;
+    params.parallelism = 1;
+    u8 envelope[4096];
+    u32 written = 0;
+    KASSERT(AuthExportSnapshot("snap-password", params, envelope, sizeof(envelope), &written), "auth/snapshot",
+            "self-test: export failed");
+    KASSERT(written > 0 && written <= sizeof(envelope), "auth/snapshot", "self-test: export wrote bogus length");
+
+    // Mutate live table: delete snapseed, add a different account.
+    KASSERT(AuthDeleteUser("snapseed"), "auth/snapshot", "self-test: failed to delete snapseed");
+    KASSERT(AuthAddUser("postsnap", "postsnap-pw", AuthRole::User), "auth/snapshot",
+            "self-test: failed to add postsnap");
+    AccountView v{};
+    KASSERT(AuthAccountByName("postsnap", &v), "auth/snapshot", "self-test: postsnap missing pre-import");
+    KASSERT(!AuthAccountByName("snapseed", &v), "auth/snapshot", "self-test: snapseed should be gone pre-import");
+
+    // Import — should restore the pre-mutation state.
+    KASSERT(AuthImportSnapshot("snap-password", envelope, written), "auth/snapshot",
+            "self-test: import rejected its own envelope");
+    KASSERT(AuthAccountByName("snapseed", &v), "auth/snapshot", "self-test: snapseed missing post-import");
+    KASSERT(!AuthAccountByName("postsnap", &v), "auth/snapshot",
+            "self-test: postsnap survived import (mutation not reverted)");
+    KASSERT(AuthVerify("snapseed", "snapseed-pw"), "auth/snapshot",
+            "self-test: snapseed PBKDF2 record didn't round-trip");
+    KASSERT(AuthVerify("admin", "admin"), "auth/snapshot", "self-test: admin defaults didn't round-trip");
+
+    // Wrong password rejects.
+    KASSERT(!AuthImportSnapshot("wrong-password", envelope, written), "auth/snapshot",
+            "self-test: wrong password accepted on import");
+
+    // Tampered envelope rejects.
+    {
+        u8 bad[sizeof(envelope)];
+        for (u32 i = 0; i < written; ++i)
+            bad[i] = envelope[i];
+        bad[written - 1] ^= 0x01;
+        KASSERT(!AuthImportSnapshot("snap-password", bad, written), "auth/snapshot",
+                "self-test: tampered envelope accepted on import");
+    }
+
+    // Cleanup — restore the canonical seed state so subsequent
+    // tests see what AuthInit produced.
+    KASSERT(AuthDeleteUser("snapseed"), "auth/snapshot", "self-test: cleanup delete failed");
+
+    KLOG_INFO("auth", "snapshot self-test OK");
 }
 
 void AuthSelfTest()

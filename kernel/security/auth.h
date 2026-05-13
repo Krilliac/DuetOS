@@ -195,4 +195,60 @@ bool AuthAccountByName(const char* username, AccountView* view);
 /// breakage is unacceptable).
 void AuthSelfTest();
 
+// ---------------------------------------------------------------------
+// Persistence bridge (wiki/security/Persistence.md).
+//
+// Encodes the current in-memory account table into a single
+// encrypted blob via the security/persistence.h envelope
+// (Argon2id KEK + ChaCha20-Poly1305 AEAD). The reverse path
+// imports a previously-encoded blob, replacing the in-memory
+// table on success.
+//
+// Today these run against caller-provided buffers — there is no
+// writable system FS yet, so the kernel doesn't actually persist
+// across reboots. The slice that brings up `/system/secrets/`
+// will call AuthExportSnapshot after every mutation and feed the
+// blob to the VFS; the boot path will call AuthImportSnapshot
+// before AuthInit's hardcoded-seed fallback. The shape of those
+// callers is pinned by the API here.
+//
+// Both calls take the encrypting password (typically the admin's
+// password at the time of write / read) and Argon2id KDF params.
+// They are kernel-mediated like every other auth API — no
+// subsystem code calls them directly.
+// ---------------------------------------------------------------------
+
+struct AuthSnapshotParams
+{
+    u32 memory_kib;
+    u32 time_cost;
+    u32 parallelism;
+};
+
+/// Compute the maximum encoded size of the current account table.
+/// Caller uses this to size the buffer passed to
+/// AuthExportSnapshot. Returns 0 if the table is empty.
+u32 AuthSnapshotEncodedSize();
+
+/// Encode the current account table into `out`. On success
+/// `*out_len` carries the bytes written. Returns false on
+/// validation failure (null buffers, capacity too small, password
+/// empty, Argon2id derive failure).
+bool AuthExportSnapshot(const char* password, const AuthSnapshotParams& params, u8* out, u32 out_capacity,
+                        u32* out_len);
+
+/// Decode an envelope and replace the in-memory account table
+/// with its contents. Returns false on header malformation,
+/// MAC mismatch, version mismatch, or wrong password — the table
+/// is NOT touched in any of those cases (the import is atomic).
+/// Returns true on a successful import; the live session (if any)
+/// is logged out as a side effect.
+bool AuthImportSnapshot(const char* password, const u8* in, u32 in_len);
+
+/// Boot self-test for the snapshot round-trip: exports the seeded
+/// admin/guest table, mutates one slot in the live table, imports
+/// the snapshot back, verifies the mutation was reverted. Panics
+/// on regression.
+void AuthSnapshotSelfTest();
+
 } // namespace duetos::core

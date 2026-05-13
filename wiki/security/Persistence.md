@@ -153,31 +153,40 @@ shell uses today.
 
 ## What's wired up today
 
-| Surface                          | State                                                  |
-|----------------------------------|--------------------------------------------------------|
-| Blake2b primitive                | REAL — `kernel/security/blake2b.{h,cpp}`, KAT-verified |
-| Argon2id                         | MISSING — design only                                  |
-| ChaCha20-Poly1305 AEAD            | MISSING                                                |
-| `PasswordHashRecordV2`            | MISSING — V1 record still in active use                |
-| `/system/secrets/` layout         | MISSING — no writable system FS yet                    |
-| Installer flow                    | MISSING                                                |
-| TPM sealing                       | MISSING — blocks on TPM driver                         |
+| Surface                              | State                                                                  |
+|--------------------------------------|------------------------------------------------------------------------|
+| Blake2b primitive                    | REAL — `kernel/security/blake2b.{h,cpp}`, KAT-verified                 |
+| Argon2id                             | REAL — `kernel/security/argon2id.{h,cpp}`, RFC 9106 §5.3 KAT-verified  |
+| `PasswordHashRecordV2`               | REAL — Argon2id is now the V2 default; PBKDF2 retained for migration   |
+| ChaCha20-Poly1305 AEAD               | REAL — `kernel/security/chacha20_poly1305.{h,cpp}`, RFC 8439 §2.8.2 KAT |
+| `DuetSecretsFile` envelope           | REAL — `kernel/security/persistence.{h,cpp}`, round-trip + tamper KATs |
+| `AuthExportSnapshot` / Import        | REAL — `kernel/security/auth.{h,cpp}`, boot self-test pins the path    |
+| `/system/secrets/` layout (on FS)    | MISSING — no writable system FS yet (next dependent slice)             |
+| Installer flow                       | MISSING — needs the writable FS                                        |
+| TPM sealing                          | MISSING — blocks on TPM driver                                         |
+
+The cryptographic + serialisation layers are complete and exercised
+at every boot via the security self-test sequence. The remaining
+work is plumbing — pointing the existing `Auth{Export,Import}Snapshot`
+calls at a writable `/system/secrets/accounts.duet` instead of a
+caller-supplied buffer. That requires the writable-FS slice landing
+first; the API contract is already pinned and will not change shape.
 
 ## Dependency order
 
 ```
-1. Argon2id  (Blake2b foundation already shipping)
-2. PasswordHashRecordV2 + lazy migration
-3. ChaCha20-Poly1305 (AEAD for the on-disk envelope)
-4. Writable system FS partition + /system/secrets/ mount
-5. First-boot installer flow
-6. (later) TPM driver + KEK sealing
+1. Argon2id  (Blake2b foundation already shipping)        — DONE
+2. PasswordHashRecordV2 + Argon2id default                — DONE
+3. ChaCha20-Poly1305 (AEAD for the on-disk envelope)      — DONE
+4. DuetSecretsFile envelope + Auth snapshot API           — DONE
+5. Writable system FS partition + /system/secrets/ mount  — pending
+6. First-boot installer flow                              — pending
+7. (later) TPM driver + KEK sealing                       — pending
 ```
 
-Each step is its own slice. The order matters: Argon2id without the
-record format change cannot be persisted; the AEAD without a
-writable FS has nothing to write to; the installer without all of
-the above has no machinery to call.
+Steps 1–4 land in this slice. The remaining steps depend on the
+writable-FS work being scheduled before the secrets directory can
+have a physical home.
 
 ## Related pages
 
