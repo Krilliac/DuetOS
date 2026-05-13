@@ -57,6 +57,7 @@ bool VirtioRngProbe(const VirtioPciLayout& L);
 bool VirtioBlkProbe(const VirtioPciLayout& L);
 bool VirtioNetProbe(const VirtioPciLayout& L);
 bool VirtioConsoleProbe(const VirtioPciLayout& L);
+bool VirtioBalloonProbe(const VirtioPciLayout& L);
 
 /// Forward a byte buffer over the attached virtio-console TX
 /// queue. No-op if the device wasn't found (returns false). The

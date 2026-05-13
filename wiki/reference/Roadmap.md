@@ -1420,16 +1420,19 @@ it."
 
 ### VirtIO — remaining per-class drivers
 
-- **Today:** virtio-console lands as TX-only single-port
-  (`kernel/drivers/virtio/virtio_console.cpp`). On attach it
-  posts a hello-world line onto the host's `-chardev` sink;
-  the kernel can route klog through `VirtioConsoleWrite`.
-  Receiveq (host → guest input) is deferred.
+- **Today:** virtio-console (TX-only) and virtio-balloon
+  (probe-only) both land
+  (`kernel/drivers/virtio/virtio_console.cpp`,
+  `virtio_balloon.cpp`). Console posts a hello-world line on
+  attach; balloon reads `num_pages` / `actual` from
+  device-cfg and logs them so a host-side test can see the
+  device responded.
 - **Lands:**
-  - **virtio-balloon** — hypervisor-controlled memory
-    pressure. Two queues (inflate/deflate); device reads
-    `num_pages` via device-cfg, driver hands back pages.
-    Modest spec, small impl on top of shared transport.
+  - **virtio-balloon inflateq + deflateq** — driver hands
+    PFNs back to the host on inflate requests, claims them
+    back on deflate. Needs queue setup + a policy for
+    "when does the kernel agree to give up memory?" (the
+    latter is the harder half).
   - **virtio-console receiveq** — host → guest input.
     Pre-fill receiveq with buffers; on each used-ring
     completion, feed the bytes to a TTY-style buffer
@@ -1497,29 +1500,31 @@ it."
   burned until the handlers compile + run against a real
   PE — per CLAUDE.md, syscall numbers are forever ABI.
 
-### A/B kernel slots — installer + watchdog + GRUB cfg
+### A/B kernel slots — installer + state persistence + GRUB cfg
 
 - **Today:** state machine, parser/writer, in-RAM
-  `CurrentState`, path helpers, AND boot-time hand-off all
-  landed (`kernel/fs/boot_slot.{h,cpp}`,
-  `kernel/core/main.cpp`). The kernel parses `slot=a` /
-  `slot=b` from the multiboot2 cmdline and calls
-  `SetCurrentState` early — the running kernel now knows
-  which slot it's on.
+  `CurrentState`, path helpers, boot-time hand-off, AND
+  heartbeat-driven watchdog mark-healthy all landed. The
+  first heartbeat cycle fires `boot_slot::MarkHealthyNow()`
+  + logs `[I] kheartbeat : boot-slot healthy active=<n>` so
+  the in-RAM state's `last_healthy` is pinned to the
+  running slot as soon as the boot path proves liveness.
 - **Lands:**
-  - **Watchdog:** after the heartbeat declares the boot
-    healthy, call `MarkHealthyNow()` and persist the new
-    state to ESP via FAT32 write.
+  - **State-file persistence:** the watchdog updates only
+    the in-RAM state today. Serialising + writing the
+    state file to ESP via FAT32 (`SlotStateFilePath`)
+    needs the FAT32 write path the installer also uses;
+    they land together.
   - **Installer:** `CmdInstall` writes the new kernel to
     `SlotKernelPath(Other(active))`, validates, then
     `BeginInstall(state, Other(active))` + serialise +
     write the state file.
   - **GRUB cfg:** two menuentries, one per slot; the
     install path writes the current `active` as the GRUB
-    default (`set default=a`/`b`) and embeds the
-    matching `slot=a` / `slot=b` in each menuentry's
-    `multiboot2` line. Limine / direct-load flavours pick
-    the same convention.
+    default (`set default=a`/`b`) and embeds the matching
+    `slot=a` / `slot=b` in each menuentry's `multiboot2`
+    line. Limine / direct-load flavours pick the same
+    convention.
 
 ### PE-compat smoke — per-PE structured pass/fail
 
