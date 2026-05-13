@@ -234,6 +234,7 @@
 #include "diag/cleanroom_trace.h"
 #include "security/auth.h"
 #include "security/auth_pentest.h"
+#include "security/blake2b.h"
 #include "security/broker.h"
 #include "security/cap_audit.h"
 #include "security/grace.h"
@@ -2252,6 +2253,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // needs an explicit Init before broker calls. Order:
     //   RbacInit -> GraceCacheInit -> BrokerSelfTest -> RbacSelfTest -> GraceCacheSelfTest
     // (See wiki/security/RBAC-and-Elevation.md for the design.)
+    duetos::diag::BootProgress("before-Blake2bSelfTest");
+    DUETOS_BOOT_SELFTEST(duetos::security::Blake2bSelfTest());
+    duetos::diag::BootProgress("after-Blake2bSelfTest");
+
     duetos::diag::BootProgress("before-RbacInit");
     duetos::security::RbacInit();
     duetos::security::GraceCacheInit();

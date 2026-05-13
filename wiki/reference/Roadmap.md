@@ -556,13 +556,16 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   shipping. Password hashes are PBKDF2-HMAC-SHA256; the broker
   facade does not yet wire into Win32 NT privilege APIs; the role
   + account tables are in-memory and reseed on every boot.
-- **v1 — Argon2id with lazy migration.** Replace PBKDF2 with
-  Argon2id (memory-hard, 64 MiB / t=3 / p=1) as the default KDF
-  for new password sets. PBKDF2 records re-hash to Argon2id on
-  the next successful verify. Both timings sit inside the
-  existing decoy envelope so verify wall-clock stays uniform
-  across "user not found / user found / wrong password / right
-  password" leaves regardless of which KDF a record holds. See
+- **v1 — Argon2id with lazy migration.** Blake2b primitive
+  (RFC 7693) shipping in `kernel/security/blake2b.{h,cpp}` —
+  passes the Appendix A test vectors at boot. Argon2id itself
+  (RFC 9106) sits on top: H_0 derivation, fill_block /
+  BlamkaRound P, hybrid data-independent/data-dependent
+  indexing, final tag, lazy migration on successful PBKDF2
+  verify. Blocked on a record-format extension — the current
+  56-byte `PasswordHashRecord` doesn't carry Argon2id's memory
+  /time/parallelism parameters; needs a V2 shape sized for
+  both old PBKDF2 + new Argon2id rows. See
   [`wiki/security/RBAC-and-Elevation.md`](../security/RBAC-and-Elevation.md#argon2id-rollout).
 - **LANDED (v0.2) — Win32 facade routing.** `NtAdjustPrivilegesToken`'s
   enable-but-not-held branch now routes to
