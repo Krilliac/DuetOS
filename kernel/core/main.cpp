@@ -3274,6 +3274,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         for (;;)
         {
             const KeyEvent ev = Ps2KeyboardReadEvent();
+            // Elevation broker — if an off-thread broker request has
+            // posted a deferred prompt, the kbd reader takes over the
+            // prompt UI here (safe because we ARE the legal
+            // Ps2KeyboardReadEvent consumer). On a real handled
+            // prompt, skip the normal routing for the synthetic
+            // kKeyNone wake event that brought us here.
+            if (duetos::security::BrokerKbdReaderPumpDeferred())
+                continue;
             // Track async keyboard state BEFORE the early
             // release / kKeyNone filter so release edges are
             // recorded. `ev.code` wraps to the low 8 bits of
@@ -4771,8 +4779,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             }
         }
     };
-    duetos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
+    duetos::sched::Task* kbd_reader_task = duetos::sched::SchedCreate(kbd_reader, nullptr, "kbd-reader");
     SerialWrite("[bringup-tail] kbd-reader spawned\n");
+
+    // Register the kbd-reader task id with the elevation broker so
+    // off-thread broker requests (Win32 NtAdjustPrivilegesToken, any
+    // future user-mode elevation API) route through the deferred-
+    // prompt path instead of racing the shell for keystrokes.
+    if (kbd_reader_task != nullptr)
+    {
+        duetos::security::BrokerSetKbdReaderTid(duetos::sched::TaskId(kbd_reader_task));
+    }
 
     // `pentest=gui` scripts keystrokes into the login gate + shell.
     // Arm it only after the kbd-reader is live; starting it when the

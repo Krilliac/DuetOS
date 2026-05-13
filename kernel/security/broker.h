@@ -85,4 +85,42 @@ void BrokerSelfTest();
 using BrokerPromptHook = bool (*)(const char* reason, char* out_pw, u32 out_pw_cap);
 void BrokerSetPromptHook(BrokerPromptHook hook);
 
+// --------------------------------------------------------------------
+// Deferred-prompt mechanism.
+//
+// `Ps2KeyboardReadEvent` is single-consumer by contract — two
+// concurrent readers race for bytes. A shell-driven elevation works
+// because the shell IS the kbd-reader thread (the dispatcher runs
+// inline on it), so the direct-read in `BrokerRequestElevation` is
+// safe. A Win32 PE syscall (or any future user-mode broker request)
+// runs in a different task and would race the shell.
+//
+// The deferred path closes that gap: the broker, on detecting that
+// it is NOT running on the kbd-reader thread, posts the request to
+// a single-slot mailbox, injects a wakeup event so the kbd reader
+// notices, and blocks on a wait queue. The kbd reader, on each
+// loop iteration, calls `BrokerKbdReaderPumpDeferred()`; on a
+// pending request it runs the prompt UI itself (safe — the kbd
+// reader IS the legal Ps2KeyboardReadEvent consumer) and wakes the
+// blocked broker task.
+//
+// v0 is single-flight: a second concurrent deferred request returns
+// false immediately. The shell `elevate` path still uses the
+// direct-read fast path (no mailbox traversal).
+// --------------------------------------------------------------------
+
+/// Record the kbd-reader task ID so the broker can pick fast-path
+/// vs deferred-path. Called once from the kbd-reader bring-up in
+/// `kernel/core/main.cpp`. A zero `tid` disables the fast path —
+/// every broker request becomes deferred (this is the configured
+/// state until the kbd reader registers itself).
+void BrokerSetKbdReaderTid(u64 tid);
+
+/// Run any pending deferred prompt from the kbd-reader thread. No-op
+/// when no request is pending. Called by the kbd-reader loop after
+/// each `Ps2KeyboardReadEvent` returns. Returns true if a prompt
+/// was actually handled (so the caller can skip its usual routing
+/// for the synthetic wake-up event that arrived alongside).
+bool BrokerKbdReaderPumpDeferred();
+
 } // namespace duetos::security
