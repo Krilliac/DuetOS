@@ -53,7 +53,7 @@ u32 NameLen(const char* name)
 {
     u32 i = 0;
     for (; i < kNamedKObjectMaxNameLen && name[i] != '\0'; ++i)
-    {
+    { /* count to NUL */
     }
     return i;
 }
