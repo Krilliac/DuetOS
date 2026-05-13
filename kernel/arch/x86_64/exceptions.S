@@ -225,6 +225,57 @@ isr_common:
     push    r14
     push    r15
 
+    /* 32-bit syscall ABI remap. Trap frame layout after the 15 pushes:
+     *   [rsp+0]    r15
+     *   [rsp+8]    r14
+     *   [rsp+16]   r13
+     *   [rsp+24]   r12
+     *   [rsp+32]   r11
+     *   [rsp+40]   r10
+     *   [rsp+48]   r9
+     *   [rsp+56]   r8
+     *   [rsp+64]   rbp
+     *   [rsp+72]   rdi   (target arg1)
+     *   [rsp+80]   rsi   (target arg2)
+     *   [rsp+88]   rdx   (target arg3 / source arg3 — same slot)
+     *   [rsp+96]   rcx   (source arg2)
+     *   [rsp+104]  rbx   (source arg1)
+     *   [rsp+112]  rax   (syscall number, kept)
+     *   [rsp+120]  vector
+     *   [rsp+128]  error
+     *   [rsp+136]  rip
+     *   [rsp+144]  cs
+     *   ...
+     *
+     * 32-bit ABI (Linux i386, the convention we use): eax=nr,
+     * ebx=a1, ecx=a2, edx=a3, esi=a4, edi=a5, ebp=a6.
+     * 64-bit ABI (what the C++ dispatcher expects): rax=nr,
+     * rdi=a1, rsi=a2, rdx=a3, r10=a4, r8=a5, r9=a6.
+     *
+     * If CS == 0x3B (kUserCode32Selector) the caller is a 32-bit
+     * compat-mode PE and the arg slots need to be moved into the
+     * 64-bit slots before TrapDispatch reads them. Source-stable
+     * order: snapshot every source via a kernel scratch register
+     * BEFORE writing any target slot. */
+    cmp     word ptr [rsp + 144], 0x3B
+    jne     90f
+    mov     r11, [rsp + 104]    /* source: rbx (arg1) */
+    mov     r12, [rsp + 96]     /* source: rcx (arg2) */
+    mov     r13, [rsp + 80]     /* source: rsi (arg4) */
+    mov     r14, [rsp + 72]     /* source: rdi (arg5) */
+    mov     r15, [rsp + 64]     /* source: rbp (arg6) */
+    mov     [rsp + 72],  r11    /* target rdi := arg1 */
+    mov     [rsp + 80],  r12    /* target rsi := arg2 */
+    mov     [rsp + 40],  r13    /* target r10 := arg4 */
+    mov     [rsp + 56],  r14    /* target r8  := arg5 */
+    mov     [rsp + 48],  r15    /* target r9  := arg6 */
+    /* rdx (arg3) and rax (syscall_no) are already where the
+     * C++ dispatcher expects them. The CPU zero-extended every
+     * 32-bit register write on the user side, so the slots
+     * holding 32-bit user pointers already contain a clean
+     * 64-bit value (high 32 == 0). */
+90:
+
     /* SysV AMD64: first argument in rdi. Point it at the trap frame. */
     mov     rdi, rsp
 
