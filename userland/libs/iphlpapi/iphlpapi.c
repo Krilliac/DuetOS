@@ -568,12 +568,10 @@ __declspec(dllexport) DWORD GetTcpTable2(void* tbl, ULONG* size, BOOL order)
 
 __declspec(dllexport) DWORD GetTcp6Table(void* tbl, ULONG* size, BOOL order)
 {
+    (void)tbl;
     (void)order;
     if (size)
         *size = 0;
-    if (tbl)
-    {
-    }
     return ERROR_NO_DATA;
 }
 

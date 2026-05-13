@@ -823,7 +823,7 @@ __declspec(dllexport) NO_BUILTIN_LSTR char* lstrcpyA(char* dst, const char* src)
         return dst;
     char* d = dst;
     while ((*d++ = *src++) != 0)
-    {
+    { /* copy including NUL */
     }
     return dst;
 }
@@ -836,7 +836,7 @@ __declspec(dllexport) NO_BUILTIN_LSTR char* lstrcatA(char* dst, const char* src)
     while (*d != 0)
         ++d;
     while ((*d++ = *src++) != 0)
-    {
+    { /* copy including NUL */
     }
     return dst;
 }
@@ -888,7 +888,7 @@ __declspec(dllexport) wchar_t16* lstrcpyW(wchar_t16* dst, const wchar_t16* src)
         return dst;
     wchar_t16* d = dst;
     while ((*d++ = *src++) != 0)
-    {
+    { /* copy including NUL */
     }
     return dst;
 }
@@ -3329,7 +3329,7 @@ __declspec(dllexport) wchar_t16* lstrcatW(wchar_t16* dst, const wchar_t16* src)
     while (*d != 0)
         ++d;
     while ((*d++ = *src++) != 0)
-    {
+    { /* copy including NUL */
     }
     return dst;
 }

@@ -291,7 +291,7 @@ __declspec(dllexport) NO_BUILTIN_STR char* strcpy(char* dst, const char* src)
 {
     char* d = dst;
     while ((*d++ = *src++) != 0)
-    {
+    { /* copy including NUL */
     }
     return dst;
 }

@@ -65,7 +65,7 @@ __declspec(dllexport) NO_BUILTIN_STR char* strcat(char* dst, const char* src)
     while (*d != 0)
         ++d;
     while ((*d++ = *src++) != 0)
-    {
+    { /* copy including NUL */
     }
     return dst;
 }
