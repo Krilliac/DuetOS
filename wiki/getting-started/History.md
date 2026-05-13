@@ -658,6 +658,96 @@ exercises the new path end-to-end.
     own socket; `Connection: close` is hardcoded. HTTP/1.1
     keep-alive needs request multiplexing in the handle pool.
 
+## Phase 6.13 — 32-bit PE (i386) loader recognition + Layer 2/3 plumbing (2026-05-13)
+
+Until now the PE loader rejected anything that wasn't
+`Machine=0x8664` (AMD64) + `Magic=0x20B` (PE32+). That makes every
+real-world 32-bit Windows browser binary (NetSurf 3.11 ships only
+x86, lynx/links/dillo are 32-bit by default) load-time invisible —
+PeReport can't even walk its imports because the validator fails at
+byte 18 of the FileHeader.
+
+This slice lands Layers 1, 2 and 3 of a four-layer plan for proper
+WoW64-style 32-bit PE support. With Layers 1-3 in, the kernel
+**recognises** PE32 (the validator parses the i386 optional-header
+layout, the data-directory array, and per-section table correctly);
+it has the **arch-level mechanics** (32-bit user code/data
+descriptors in the GDT, EnterUserMode32 entry path, 32-bit syscall
+register remap in the int 0x80 handler) ready to use; and it
+**cleanly rejects** execution with a typed status until Layer 4
+(the i386 DLL set port) and Layer 5 (pointer marshalling across all
+syscalls) land.
+
+- **What landed (Layer 1 — loader recognition).**
+  - `kernel/loader/exec_meta_rust/src/lib.rs` accepts
+    `PE_MACHINE_I386 = 0x014C` alongside `PE_MACHINE_AMD64 = 0x8664`,
+    and branches the optional-header parser on
+    `OptHdrMagic == 0x10B` (PE32) vs `0x20B` (PE32+). PE32 stores
+    ImageBase as `u32` at offset 28 (because BaseOfData occupies
+    offsets 24..27 in that variant) and the four
+    stack/heap-reserve/commit slots are `u32` instead of `u64`,
+    shifting the data-directory array from offset 112 (PE32+) to 96
+    (PE32). `DuetosPeImage` grows three new fields — `is_pe32`,
+    `data_dir_offset`, `number_of_rva_and_sizes` — so the C++ side
+    never re-derives the layout.
+  - `kernel/loader/dll_loader.cpp` + `pe_exports.cpp` accept both
+    Machine values so the DLL loader can also walk the EAT of a
+    PE32-imported file diagnostically.
+  - New `PeStatus::Pe32ExecutionNotReady` enumerator. The loader
+    re-classifies the otherwise-Ok PE32 path as this status so
+    `FixJournalRecord` + the boot-log warning (`[W] loader/pe : PE
+    rejected status="Pe32ExecutionNotReady"`) make the reject
+    reason visible.
+- **What landed (Layer 2 — 32-bit user mode mechanics).**
+  - The GDT grows from 7 to 9 entries. Slot 7 is a 32-bit user
+    code descriptor (flags=0xC -> G=1 L=0 D=1, access=0xFA -> P
+    DPL=3 S R/Exec); slot 8 is the matching 32-bit user data
+    descriptor. Selector constants:
+    `kUserCode32Selector = 0x3B`, `kUserData32Selector = 0x43`.
+  - `EnterUserMode32(user_rip, user_rsp)` in
+    `kernel/arch/x86_64/usermode.S` builds an iretq frame with the
+    32-bit selectors so the ring-3 transition lands in long
+    compatibility mode and instructions decode as 32-bit. No
+    swapgs / GSBASE-MSR setup — 32-bit PEs reach the TEB through
+    FS, not GS.
+  - Per-AP GDT bundles are extended uniformly so all CPUs see the
+    same 9-entry GDT.
+- **What landed (Layer 3 — 32-bit syscall ABI).**
+  - `isr_common` (kernel/arch/x86_64/exceptions.S) detects 32-bit
+    callers by `CS == 0x3B` in the trap frame and remaps the Linux
+    i386 syscall register convention into the 64-bit slots the C++
+    dispatcher expects:
+    `(eax,ebx,ecx,edx,esi,edi,ebp) -> (rax,rdi,rsi,rdx,r10,r8,r9)`.
+    Source-stable order: every source slot is snapshotted into
+    kernel scratch (r11..r15) before any target slot is written.
+    Pointer args zero-extend automatically — every 32-bit register
+    write in compat mode zeros the upper 32 bits of the matching
+    64-bit register.
+  - 64-bit callers skip the remap via a `cmp+jne` fast path. Zero
+    overhead delta on the PE32+ smokes.
+- **Live verification.**
+  - `userland/apps/pe32_smoke/pe32_smoke.c` — a 6 KiB PE32 (i386)
+    built with i686-w64-mingw32-gcc. Wired into the ring3 smoke
+    profile so every boot prints the explicit reject status line.
+- **What's still GAP (Layers 4 + 5).**
+  - **Layer 4 — i386 DLL set port.** All 44 userland DLLs are
+    PE32+ today; a 32-bit PE can't import from them. Each DLL
+    needs to be recompiled as PE32 (i386), the syscall trampolines
+    in `userland/libs/ws2_32/ws2_32.c` and
+    `userland/libs/wininet/wininet.c` need 32-bit asm variants
+    (`int $0x80` with eax/ebx/.../edi instead of rdi/rsi/r10/r8/r9),
+    and the kernel needs to map the matching set based on each
+    process's bitness. Realistic scope: ~10 hours.
+  - **Layer 5 — pointer marshalling.** Every syscall that takes
+    user pointers needs to be reviewed for the "32-bit caller
+    passes a 4-byte pointer in the low 32 of the register" case.
+    Most syscalls already work because of the auto-zero-extension
+    in Layer 3's remap; the audit catches the corner cases
+    (sockaddr structs, WriteFile/ReadFile buffer descriptors, etc.).
+  - **PE32 ImageBase / stack VA**: the loader currently doesn't
+    pin the mapping to the low 4 GiB. Layer 4 lands the bitness-
+    aware ImageBase allocator and stack VA picker.
+
 ---
 
 ## How to read the rest of the tree
