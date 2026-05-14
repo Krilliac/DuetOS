@@ -139,6 +139,7 @@
 #include "generated_version_smoke_pe.h"
 #include "generated_winhttp_smoke_pe.h"
 #include "generated_wininet_smoke_pe.h"
+#include "generated_unity_pe.h"
 #include "generated_winkill_pe.h"
 #include "generated_atom_smoke_pe.h"
 #include "generated_console_smoke_pe.h"
@@ -2085,6 +2086,20 @@ bool SpawnOnDemand(const char* kind)
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
+    if (StrEqual(kind, "unity"))
+    {
+        // Real-world Unity-2022-LTS standalone-launcher PE.
+        // Imports KERNEL32.dll (~71 fns: CRT bootstrap, TLS,
+        // LoadLibraryExW, exception-unwind plumbing) +
+        // UnityPlayer.dll!UnityMain2 (single import, resolved
+        // to the catch-all NO-OP because UnityPlayer.dll is not
+        // present). Per-import lines in the boot transcript
+        // are the deliverable; see
+        // userland/apps/unity_engine/README.md.
+        SpawnPeFile("ring3-unity", fs::generated::kBinUnityEngineBytes, fs::generated::kBinUnityEngineBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
     if (StrEqual(kind, "threads"))
     {
         // thread_stress.exe — exercises CreateThread +
@@ -2322,6 +2337,15 @@ void StartRing3SmokeTask()
     if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::PeWinkill))
     {
         SpawnPeFile("ring3-winkill", fs::generated::kBinWinKillBytes, fs::generated::kBinWinKillBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // Unity 2022 LTS standalone launcher. Two-DLL import surface
+        // (UnityPlayer.dll!UnityMain2 + ~71 kernel32 fns). UnityPlayer
+        // is not present so UnityMain2 falls through to the catch-all
+        // NO-OP; the kernel32 imports light up the existing thunks
+        // table. Boot transcript shows the full Unity-launcher
+        // import inventory as a measurement of what a real engine
+        // load would need. See userland/apps/unity_engine/README.md.
+        SpawnPeFile("ring3-unity", fs::generated::kBinUnityEngineBytes, fs::generated::kBinUnityEngineBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
     // mini-browser + the surface-coverage PE zoo + dx-demo block
@@ -2747,7 +2771,7 @@ void StartRing3SmokeTask()
     } // end SmokeProfileShouldSpawn(Ring3) gate
     Log(LogLevel::Info, "core/ring3",
         "ring3 smoke tasks queued (incl cpu-hog + hostile + dropcaps + priv + badint + kread + "
-        "ptrfuzz + writefuzz + hellope + winkill-report + thread-stress + syscall-stress + "
+        "ptrfuzz + writefuzz + hellope + winkill-report + unity-report + thread-stress + syscall-stress + "
         "customdll-test)");
     // Canonical PE-compat smoke battery anchor. ctest's
     // duetos-boot-smoke greps for this exact line to confirm

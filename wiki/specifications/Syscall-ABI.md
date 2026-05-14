@@ -1219,6 +1219,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 201 | `SYS_VIRTUAL_PROTECT` |
 | 202 | `SYS_NAMED_PIPE_CREATE` |
 | 203 | `SYS_NAMED_PIPE_OPEN` |
+| 204 | `SYS_DIAG_FAULT_INJECT` |
 <!-- /AUTO:syscall_list -->
 
 ## Native Syscall Argument / Return Reference
@@ -1446,4 +1447,5 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 201 | `SYS_VIRTUAL_PROTECT` | `rdi` = u64 base_va rsi = u64 size_bytes rdx = u64 new_protection... | 1 on success, 0 on miss / W^X violation |
 | 202 | `SYS_NAMED_PIPE_CREATE` | `rdi` = const char* user name      // bare pipe name (no //  "\; `rsi` = u64 name_len_cap           // bounds the name copy rdx = ... | a Win32-shaped file handle (kWin32HandleBase + slot) for the server end on su... |
 | 203 | `SYS_NAMED_PIPE_OPEN` | `rdi` = const char* user name      // bare pipe name rsi = u64 na... | a Win32-shaped file handle for the client end on success, (u64)-1 on miss (na... |
+| 204 | `SYS_DIAG_FAULT_INJECT` | `rdi` = FaultClass enum value (1 = NullDeref | -EACCES and the call is recorded as a sandbox denial |
 <!-- /AUTO:syscall_args -->

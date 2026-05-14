@@ -4102,3 +4102,20 @@
     0x5E,                               // 0x131F pop rsi
     0x5B,                               // 0x1320 pop rbx
     0xC3,                               // 0x1321 ret
+
+    // kOffPcToFileHeaderNull (0x1322, 15 bytes):
+    // RtlPcToFileHeader(PVOID PcValue, PVOID* BaseOfImage)
+    // v0 contract: "could not locate the image containing PcValue".
+    // The win32-doc'd shape requires writing NULL to *BaseOfImage
+    // AND returning NULL. The catch-all NO-OP returns 0 but leaves
+    // *BaseOfImage uninitialised, which the MSVC CRT (and Unity's
+    // launcher startup) immediately dereferences — crashed v0
+    // Unity at ring3-unity rip=image_base+0x7a6d / cr2=0x20
+    // before this pin landed. NULL-guards rdx in case a caller
+    // passes nullptr for the out param (legal per the API).
+    0x48, 0x85, 0xD2,                         // 0x1322 test rdx, rdx
+    0x74, 0x07,                               // 0x1325 jz .ret +7  -> 0x132E
+    0x48, 0xC7, 0x02, 0x00, 0x00, 0x00, 0x00, // 0x1327 mov qword [rdx], 0
+    // .ret @ 0x132E
+    0x31, 0xC0,                               // 0x132E xor eax, eax
+    0xC3,                                     // 0x1330 ret

@@ -35,6 +35,7 @@
 // userland/apps/windows_kill/windows-kill.exe. 79 KiB, 12 DLL
 // imports, TLS callbacks — the v0 loader rejects it (no Win32
 // subsystem) but PeReport still dumps the full gap on boot.
+#include "generated_unity_pe.h"
 #include "generated_winkill_pe.h"
 
 // UEFI loader bytes (PE32+ EFI Application). Embedded so the
@@ -476,6 +477,20 @@ constinit RamfsNode k_trusted_bin_winkill = {
     .file_size = generated::kBinWinKillBytes_len,
 };
 
+// /bin/unity_engine.exe — Unity 2022 LTS standalone-launcher PE.
+// Vendored verbatim from the NSMB-MarioVsLuigi v2.1.1.0 release
+// (MIT-licensed). Two-DLL import surface: KERNEL32.dll (~71 imports)
+// + UnityPlayer.dll!UnityMain2 (single import; catch-all NO-OP
+// because UnityPlayer.dll is not present). See
+// userland/apps/unity_engine/README.md for what this measures.
+constinit RamfsNode k_trusted_bin_unity_engine = {
+    .name = "unity_engine.exe",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = generated::kBinUnityEngineBytes,
+    .file_size = generated::kBinUnityEngineBytes_len,
+};
+
 constinit RamfsNode k_trusted_bin_hello_winapi = {
     .name = "hello_winapi.exe",
     .type = RamfsNodeType::kFile,
@@ -535,17 +550,10 @@ constinit RamfsNode k_trusted_bin_usershell = {
 };
 
 constinit const RamfsNode* const k_trusted_bin_children[] = {
-    &k_trusted_bin_hello,
-    &k_trusted_bin_exit_elf,
-    &k_trusted_bin_hello_pe,
-    &k_trusted_bin_winkill,
-    &k_trusted_bin_hello_winapi,
-    &k_trusted_bin_thread_stress,
-    &k_trusted_bin_syscall_stress,
-    &k_trusted_bin_customdll_test,
-    &k_trusted_bin_windowed_hello,
-    &k_trusted_bin_usershell,
-    nullptr,
+    &k_trusted_bin_hello,          &k_trusted_bin_exit_elf,       &k_trusted_bin_hello_pe,
+    &k_trusted_bin_winkill,        &k_trusted_bin_unity_engine,   &k_trusted_bin_hello_winapi,
+    &k_trusted_bin_thread_stress,  &k_trusted_bin_syscall_stress, &k_trusted_bin_customdll_test,
+    &k_trusted_bin_windowed_hello, &k_trusted_bin_usershell,      nullptr,
 };
 
 constinit RamfsNode k_trusted_bin_dir = {
@@ -583,6 +591,7 @@ InspectSlot g_inspect_slots[] = {
     {"windowed_hello.exe", generated::kBinWindowedHelloBytes, generated::kBinWindowedHelloBytes_len, {}, 0, {}},
     {"customdll_test.exe", generated::kBinCustomDllTestBytes, generated::kBinCustomDllTestBytes_len, {}, 0, {}},
     {"windows-kill.exe", generated::kBinWinKillBytes, generated::kBinWinKillBytes_len, {}, 0, {}},
+    {"unity_engine.exe", generated::kBinUnityEngineBytes, generated::kBinUnityEngineBytes_len, {}, 0, {}},
 };
 constexpr u32 kInspectSlotCount = sizeof(g_inspect_slots) / sizeof(g_inspect_slots[0]);
 

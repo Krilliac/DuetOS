@@ -123,6 +123,21 @@ convention.
 - **Resource section**: mapped read-only but not interpreted — the
   resource APIs (`FindResource`, `LoadIcon`, etc.) walk the section
   themselves.
+- **PEB / PEB_LDR_DATA**: the loader populates a minimal v0
+  scaffolding inside the TEB page (`pe_loader.cpp` step 4b for
+  PE32+) — `gs:[0x60]` -> PEB at TEB+0x100, `PEB.Ldr` at
+  PEB+0x20 -> PEB_LDR_DATA at TEB+0x200 with `Length=0x58`,
+  `Initialized=1`, and three circular-empty
+  `LIST_ENTRY` heads. This is what every loader-walking
+  helper stamped by MSVC actually reads (the Unity launcher's
+  `mov gs:0x60, %rax; mov 0x20(%rax), %rcx; cmp ebx, 0x8(%rcx)`
+  pattern faulted at cr2=0x20 / 0x08 before this landed).
+  Real `ImageBaseAddress`, `ProcessParameters`, and the loaded-
+  module list itself are NOT populated — anything that iterates
+  the list immediately wraps back to the head, the documented
+  "no DLLs loaded" state. Adding a non-empty module list is a
+  follow-on when a PE that needs `GetModuleHandle` walks for
+  itself surfaces.
 
 See [History](../getting-started/History.md) Phases 4-6 for the loader's
 evolution.

@@ -1872,6 +1872,78 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             // x64 CRT reads gs:[0x30] for the self-pointer.
             for (u64 b = 0; b < 8; ++b)
                 teb_direct[kTebOffSelf + b] = static_cast<u8>((kV0TebVa >> (b * 8)) & 0xFF);
+
+            // PEB / PEB_LDR_DATA minimal v0 scaffolding. The MSVC
+            // x64 CRT bootstrap (and any of the Image / loader-walk
+            // helpers stamped by the toolchain) reads:
+            //   gs:[0x60]            -> PEB
+            //   PEB[0x20]            -> PEB.Ldr
+            //   PEB.Ldr[0x08]        -> SsHandle (compared, jl exit)
+            //   PEB.Ldr[0x10..0x37]  -> three LIST_ENTRY heads
+            // Without these pre-populated, the bootstrap reads NULL
+            // and faults at cr2=0x20 (Unity launcher orig.) or 0x08
+            // (post-PEB-set).
+            //
+            // Layout inside the 4 KiB TEB page so we don't burn a
+            // second frame for v0:
+            //   0x000..0x05F  NT_TIB + the few fields above
+            //   0x060        PEB pointer  -> TEB+0x100
+            //   0x100..0x17F PEB (128 B). Only Ldr (PEB+0x20) is set;
+            //                ImageBaseAddress / ProcessParameters /
+            //                etc. stay NULL until a future slice.
+            //   0x200..0x257 PEB_LDR_DATA (0x58 bytes). Length +
+            //                Initialized populated; all three module
+            //                lists are circular-empty (Flink=Blink=
+            //                &ListHead), the documented "loader has
+            //                no modules" state. CRT walkers wrap
+            //                straight back without dereferencing
+            //                anything outside this struct.
+            constexpr u64 kTeb64OffPeb = 0x60;
+            constexpr u64 kPebOffsetInTeb = 0x100;
+            constexpr u64 kLdrOffsetInTeb = 0x200;
+            constexpr u64 kPebVa = kV0TebVa + kPebOffsetInTeb;
+            constexpr u64 kLdrVa = kV0TebVa + kLdrOffsetInTeb;
+
+            auto write_u64 = [&](u64 page_off, u64 value)
+            {
+                for (u64 b = 0; b < 8; ++b)
+                    teb_direct[page_off + b] = static_cast<u8>((value >> (b * 8)) & 0xFF);
+            };
+            auto write_u32 = [&](u64 page_off, u32 value)
+            {
+                for (u64 b = 0; b < 4; ++b)
+                    teb_direct[page_off + b] = static_cast<u8>((value >> (b * 8)) & 0xFF);
+            };
+
+            // TEB.ProcessEnvironmentBlock -> PEB
+            write_u64(kTeb64OffPeb, kPebVa);
+
+            // PEB.Ldr (offset 0x20 in PEB) -> PEB_LDR_DATA
+            write_u64(kPebOffsetInTeb + 0x20, kLdrVa);
+
+            // PEB_LDR_DATA.Length = 0x58, .Initialized = TRUE.
+            // SsHandle (offset 0x08) stays 0 — the comparison
+            // `cmp ebx, 0x8(rcx)` in the Unity launcher then sees
+            // 0 vs 0 (equal) and falls through to the list-walk.
+            write_u32(kLdrOffsetInTeb + 0x00, 0x58);
+            write_u32(kLdrOffsetInTeb + 0x04, 1);
+
+            // Three module lists, each circular-empty: Flink and
+            // Blink point at the list head itself. CRT iteration
+            // (`while (entry->Flink != head) entry = entry->Flink`)
+            // wraps on the first read.
+            constexpr u64 kLdrOffInLoad = 0x10;
+            constexpr u64 kLdrOffInMem = 0x20;
+            constexpr u64 kLdrOffInInit = 0x30;
+            const u64 in_load_va = kLdrVa + kLdrOffInLoad;
+            const u64 in_mem_va = kLdrVa + kLdrOffInMem;
+            const u64 in_init_va = kLdrVa + kLdrOffInInit;
+            write_u64(kLdrOffsetInTeb + kLdrOffInLoad + 0, in_load_va);
+            write_u64(kLdrOffsetInTeb + kLdrOffInLoad + 8, in_load_va);
+            write_u64(kLdrOffsetInTeb + kLdrOffInMem + 0, in_mem_va);
+            write_u64(kLdrOffsetInTeb + kLdrOffInMem + 8, in_mem_va);
+            write_u64(kLdrOffsetInTeb + kLdrOffInInit + 0, in_init_va);
+            write_u64(kLdrOffsetInTeb + kLdrOffInInit + 8, in_init_va);
         }
         else
         {

@@ -364,16 +364,21 @@ void WorkPoolSubmit(WorkPool* p, WorkFn fn, void* arg)
             any_full = true;
         }
         // Every lane was full at the moment we scanned. Wait on
-        // ANY lane's not_full so we can retry as soon as a worker
-        // pops an item somewhere.
+        // the pool-wide space_avail condvar; workers signal it on
+        // every successful pop, so we wake as soon as ANY lane has
+        // room. Re-check the predicate under `inner` before waiting
+        // so a signal sent between our lane scan and the wait isn't
+        // lost — that lost-wakeup is the classic intermittent
+        // workpool-selftest hang (Submit blocks forever after the
+        // last worker drained the last lane between scan and wait).
         if (any_full)
         {
-            // Every lane was full at the moment we scanned. Wait on
-            // the pool-wide space_avail condvar; workers signal it
-            // on every successful pop, so we wake as soon as ANY
-            // lane has room. The retry loop covers any lost wakeup.
+            const u64 total_capacity = static_cast<u64>(p->lane_count) * static_cast<u64>(p->lanes[0].capacity);
             sched::MutexLock(&p->inner);
-            sched::CondvarWait(&p->space_avail, &p->inner);
+            while (p->count_total >= total_capacity && !p->shutdown)
+            {
+                sched::CondvarWait(&p->space_avail, &p->inner);
+            }
             sched::MutexUnlock(&p->inner);
         }
     }

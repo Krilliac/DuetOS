@@ -703,6 +703,8 @@ syscall routing shows up immediately.
 | `RtlDecodePointer` | REAL | `kOffDecodePointer` |
 | `RtlEncodePointer` | REAL | `kOffDecodePointer` |
 | `RtlLookupFunctionEntry` | REAL | `kOffSehNoUnwind` |
+| `RtlPcToFileHeader` | REAL | `kOffPcToFileHeaderNull` — writes NULL to `*BaseOfImage` then returns NULL. Without the out-param write, the MSVC CRT exception bootstrap fault'd at cr2=0x20 (Unity launcher); plain `xor eax,eax;ret` is not enough here. |
+| `RtlUnwindEx` | REAL | `kOffSehNoUnwind` — no-op void; CRT exception dispatcher treats the return as "unwind completed silently" and continues. |
 | `RtlVirtualUnwind` | REAL | `kOffSehNoUnwind` |
 | `SetConsoleActiveScreenBuffer` | REAL | `kOffPinReturn1` |
 | `SetConsoleCP` | REAL | `kOffPinReturn1` |
