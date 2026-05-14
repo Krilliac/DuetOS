@@ -958,6 +958,98 @@ loader patches at spawn time.
   preload set. The per-AS region-table cost goes from ~24 KiB
   to ~192 KiB — well within budget.
 
+## Phase 6.16 — PE32 graceful-degradation surface (2026-05-14)
+
+Three more pieces of the PE32 path. With Phase 6.15 the happy path
+worked end-to-end; this slice takes the common failure modes from
+"#PF at the first unstubbed call" to "process exits cleanly with a
+readable signature."
+
+- **32-bit Win32 thunks page** (`kernel/subsystems/win32/thunks.{h,
+  cpp}`, `kernel/loader/pe_loader.cpp`).
+  - New per-PE32-process R-X page mapped at
+    `kWin32Thunks32Va = 0x60100000`. Distinct from the PE32+ thunks
+    page at 0x60000000 (whose bytes are x86_64 instructions —
+    decoding them in compat mode would trap immediately).
+  - Single stub today at offset 0: `SYS_EXIT(0xDEAD0042)`. Any
+    PE32 call to an unresolved Win32 import lands here and the
+    process destroys cleanly with the sentinel exit code.
+  - `ResolveImports`'s catch-all branch detects `h.is_pe32` and
+    routes unresolved imports to this stub instead of the 64-bit
+    catch-all VA (which isn't mapped for PE32 processes).
+  - Verified live: `userland/apps/pe32_miss/pe32_miss.c` calls
+    `user32!SetWindowsHookExA` (deliberately not stubbed), the
+    indirect call routes through the new thunk, the process exits
+    with rc=`0xDEAD0042`, boot continues.
+- **32-bit TEB + FSBASE** (`kernel/loader/pe_loader.cpp`,
+  `kernel/arch/x86_64/usermode.{S,h}`, `kernel/proc/ring3_smoke.cpp`).
+  - PeLoad's step4b TEB allocator branches on `h.is_pe32` and
+    writes the i386 NT_TIB layout:
+    ```
+    fs:[0x00] ExceptionList = 0xFFFFFFFF   (no SEH handler)
+    fs:[0x04] StackBase     = kV0StackTop
+    fs:[0x08] StackLimit    = kV0StackVa
+    fs:[0x18] Self          = TEB VA (u32)
+    fs:[0x30] PEB           = TEB VA (placeholder)
+    ```
+  - `EnterUserMode32` grows a third arg `user_fs_base` and issues
+    `wrmsr MSR_FS_BASE` (`0xC0000100`). The user's compat-mode
+    `mov eax, fs:[0x18]` then computes the linear address as
+    `(FSBASE + 0x18) = TEB + 0x18`, landing on the Self slot
+    rather than at linear 0x18.
+  - Boot log: `step4b teb mapped va=0x70000000 (pe32 fs-base)`.
+- **MSVC `__chkstk` / `_alloca_probe` / `_chkstk`** in `msvcrt_32`.
+  - Three `__declspec(naked)` entry points all using the same
+    body: `popl %ecx; subl %eax, %esp; pushl %ecx; ret`.
+  - MSVC emits a call to one of these in any function prologue
+    whose locals exceed a page, or that uses `_alloca`. On Windows
+    they walk pages from current ESP downward, committing each as
+    it goes; on DuetOS the entire stack is mapped up front so the
+    routine is functionally an ESP adjustment + return-addr
+    handoff. Real probing isn't needed — what matters is that the
+    MSVC-emitted call doesn't fault.
+
+The three existing PE32 fixtures plus the new pe32_miss all pass
+cleanly on every ring3 boot:
+
+```
+[pe-load] step4b teb mapped va=0x70000000 (pe32 fs-base)  ← x3
+[proc] destroy pid=8 name="ring3-pe32-smoke"
+[pe32-rich] all 13 DLLs exercised — exit rc=0x42
+[proc] destroy pid=9 name="ring3-pe32-rich"
+[proc] destroy pid=10 name="ring3-pe32-miss"  ← unresolved import handled
+[smoke] profile=ring3 complete
+```
+
+The pe32_miss `[proc] destroy` confirms an UNRESOLVED PE32 import
+now degrades to a clean exit (`rc=0xDEAD0042`) instead of the #PF
+that the same call previously produced. Combined with the 13-DLL
+preload set from Phase 6.15, the PE32 surface now has both branches
+of the via-DLL resolver (hit + miss) handled cleanly.
+
+What's still GAP:
+
+- **No per-import-name diagnostic** in the 32-bit thunk. All
+  unresolved imports exit with the same sentinel. A future slice
+  could emit per-slot stubs that log the IAT slot VA (decoded by
+  the kernel's StagedMissAppend table back to the function name)
+  before exiting.
+- **No PEB structure.** PE32 reads of `fs:[0x30]` get the TEB VA
+  back; dereferencing that produces zeros, which is fine for "did
+  this read succeed" checks but not for code that walks
+  PEB-relative fields (`fs:[0x30] + 0x18` = ImageBaseAddress,
+  `+0x0C` = Ldr, etc.). A proper PEB lands with the registry +
+  module-table slice.
+- **`__chkstk` doesn't actually probe.** Acceptable on a kernel
+  that maps the whole stack up front; a real MSVC PE32 with a
+  16+ MiB stack reservation would still fault when its first
+  spill writes past the mapped range. Stack-grow-on-fault is a
+  separate slice.
+- **File I/O still stubbed.** `msvcrt_32`'s `fopen` / `fread` /
+  `fwrite` / `fclose` return failure. The VFS-aware PE32 spawn
+  slice lands these the same time the 64-bit set gets its FS
+  routing.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,
