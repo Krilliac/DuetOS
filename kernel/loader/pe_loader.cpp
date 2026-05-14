@@ -870,7 +870,12 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
     const u64 tbl_off = RvaToFile(file, h, br.rva);
     if (tbl_off == ~u64(0) || tbl_off + br.size > file_len)
     {
-        SerialWrite("[pe-reloc] reloc table rva out of bounds\n");
+        // Either the data dir's reloc-table RVA didn't resolve to a
+        // file offset (truncated section table) or the claimed
+        // size walks past the end of the on-disk image. Could be a
+        // malformed PE or a deliberate fuzz attempt; route through
+        // klog so the panic-time replay shows the offending values.
+        KLOG_ERROR_2V("loader/pe-reloc", "reloc table rva out of bounds", "tbl_off", tbl_off, "size", br.size);
         return false;
     }
     KDBG_2V(PeReloc, "pe-reloc", "reloc table mapped", "tbl_off", tbl_off, "size", br.size);
@@ -886,7 +891,12 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
         const u32 block_sz = LeU32(file + cursor + 4);
         if (block_sz < 8 || cursor + block_sz > end)
         {
-            SerialWrite("[pe-reloc] malformed block size\n");
+            // Block header smaller than the fixed 8-byte preamble
+            // OR its claimed size walks past the table end. Pin
+            // both the page_rva (locates the block in the image)
+            // and block_sz so a post-mortem can correlate against
+            // the offending image's reloc table.
+            KLOG_ERROR_2V("loader/pe-reloc", "malformed reloc block size", "page_rva", page_rva, "block_sz", block_sz);
             return false;
         }
         // Terminator: an all-zero block ends the directory even if

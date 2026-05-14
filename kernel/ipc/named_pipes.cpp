@@ -92,13 +92,22 @@ i32 NamedPipeRegisterServer(const char* name, u32 pool_idx, bool server_is_write
     auto flags = ::duetos::sync::SpinLockAcquire(g_table_lock);
     if (FindByName(name) >= 0)
     {
+        // Same name already registered — caller's responsibility,
+        // returning -1 is the documented "name in use" path. No
+        // log here (a normal program may probe a name before
+        // registering).
         ::duetos::sync::SpinLockRelease(g_table_lock, flags);
         return -1;
     }
     const i32 slot = FindFreeSlot();
     if (slot < 0)
     {
+        // Table saturated — every named-pipe slot is in use. This
+        // IS an operational signal; surface once so an operator
+        // sees it before subsequent registrations start failing
+        // silently.
         ::duetos::sync::SpinLockRelease(g_table_lock, flags);
+        KLOG_ONCE_WARN("ipc/named-pipes", "registry full — server registration dropped");
         return -1;
     }
     NamedPipeEntry& e = g_table[slot];

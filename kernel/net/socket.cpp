@@ -68,9 +68,19 @@ u16 AllocEphemeralUdpPort()
 i32 SocketAlloc(u16 domain, u16 type)
 {
     if (domain != kSocketDomainInet)
+    {
+        // Only AF_INET is supported at v0; AF_INET6 / AF_UNIX
+        // syscalls land here and fail. The first user-mode call
+        // shape that trips this should be visible so we can
+        // prioritise the next ABI slice.
+        KLOG_ONCE_WARN_V("net/socket", "SocketAlloc: unsupported domain", domain);
         return -1;
+    }
     if (type != kSocketTypeDgram && type != kSocketTypeStream)
+    {
+        KLOG_ONCE_WARN_V("net/socket", "SocketAlloc: unsupported type", type);
         return -1;
+    }
 
     arch::Cli();
     for (u32 i = 0; i < kSocketPoolCap; ++i)
@@ -84,7 +94,13 @@ i32 SocketAlloc(u16 domain, u16 type)
         {
             rx = static_cast<SocketDgram*>(mm::KMalloc(sizeof(SocketDgram) * kSocketUdpRxQueueCap));
             if (rx == nullptr)
+            {
+                // UDP RX ring allocation failed — caller sees EMFILE-
+                // shaped error but the kernel had no signal of the
+                // OOM. Log so a panic dump captures the saturation.
+                KLOG_ERROR("net/socket", "SocketAlloc: UDP rx ring KMalloc failed");
                 return -1;
+            }
         }
         arch::Cli();
         if (g_pool[i].in_use)

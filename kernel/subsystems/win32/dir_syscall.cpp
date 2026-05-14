@@ -23,6 +23,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 #include "fs/fat32.h"
 #include "fs/ramfs.h"
 #include "mm/kheap.h"
@@ -72,6 +73,11 @@ i32 AllocDirSlot(core::Process* proc)
     for (u64 i = 0; i < core::Process::kWin32DirCap; ++i)
         if (!proc->win32_dirs[i].in_use)
             return static_cast<i32>(i);
+    // Per-process Win32 directory-handle table saturated. The thunk
+    // returns INVALID_HANDLE_VALUE; klog gets the first hit so the
+    // operator sees the saturation before subsequent FindFirstFile
+    // calls all start failing.
+    KLOG_ONCE_WARN("subsystems/win32/dir", "per-process directory handle table full");
     return -1;
 }
 

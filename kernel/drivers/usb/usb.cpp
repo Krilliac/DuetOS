@@ -124,6 +124,13 @@ bool WirelessProbe(u8 subclass, u8 prog_if)
             arch::SerialWrite("  (registered — transport stub, no I/O yet)\n");
             return false; // do not claim until transport URBs land
         }
+        // Bluetooth adapter registry saturated — the registration
+        // path holds a static table of N adapters. Saturation means
+        // either too many USB Bluetooth dongles plugged in or a
+        // leaked registration that never released. Either way the
+        // first occurrence should show up in dmesg so the operator
+        // knows why no btusb adapter is online.
+        KLOG_ONCE_WARN("drivers/usb/btusb", "BluetoothDiagRegisterAdapter failed — adapter table full");
         arch::SerialWrite("  (registration failed — adapter table full)\n");
         return false;
     }

@@ -27,6 +27,7 @@
 #include "drivers/gpu/virtio_gpu.h"
 
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 #include "drivers/gpu/gpu_resources.h"
 #include "drivers/pci/pci.h"
 #include "mm/frame_allocator.h"
@@ -431,7 +432,13 @@ bool VirtioGpuBringUp()
         return true;
     if (!g_last.present || g_last.common_cfg == nullptr || g_last.notify == nullptr)
     {
-        arch::SerialWrite("[virtio-gpu] bring-up: no common_cfg or notify region — run VirtioGpuProbe first\n");
+        // The probe walks the PCI capability list to find the
+        // common_cfg + notify BAR regions; if either is null here
+        // the probe was never run or it failed silently. Routing
+        // through klog gives the panic dump a record of why no
+        // virtio-gpu framebuffer ever came online.
+        KLOG_ERROR("drivers/gpu/virtio_gpu",
+                   "bring-up failed: missing common_cfg or notify region — run VirtioGpuProbe first");
         return false;
     }
 

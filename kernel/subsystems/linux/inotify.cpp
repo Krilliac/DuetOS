@@ -20,6 +20,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
@@ -115,6 +116,10 @@ i32 InotifyAlloc()
         }
     }
     arch::Sti();
+    // Inotify instance pool saturated. Subsequent inotify_init1
+    // calls will keep failing until something closes; once-warn
+    // surfaces the saturation to the operator.
+    KLOG_ONCE_WARN("subsystems/linux/inotify", "instance pool exhausted");
     return -1;
 }
 
