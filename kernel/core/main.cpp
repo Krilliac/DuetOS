@@ -276,6 +276,7 @@
 #include "util/result.h"
 #include "util/string.h"
 #include "proc/ring3_smoke.h"
+#include "proc/spawn.h"
 #include "diag/runtime_checker.h"
 #include "diag/ubsan.h"
 #include "subsystems/linux/ring3_smoke.h"

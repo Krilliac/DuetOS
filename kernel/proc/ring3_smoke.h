@@ -2,16 +2,6 @@
 
 #include "util/types.h"
 
-// Forward-declares to keep this header lightweight.
-namespace duetos::fs
-{
-struct RamfsNode;
-}
-namespace duetos::core
-{
-struct CapSet;
-}
-
 /*
  * DuetOS ring-3 smoke task — v0.
  *
@@ -72,42 +62,12 @@ void StartRing3SmokeTask();
 /// without waiting for completion.
 bool SpawnOnDemand(const char* kind);
 
-/// Entry trampoline for every ring-3 task created via
-/// SchedCreateUser. Reads user_code_va / user_stack_va from
-/// CurrentProcess(), publishes the kernel stack top to the
-/// TSS, and iretqs into ring 3. Exposed so non-ring3 callers
-/// (shell `exec`, SYS_SPAWN handler) can hand it to
-/// SchedCreateUser.
-[[noreturn]] void Ring3UserEntry(void* arg);
-
-/// Load an ELF64 image into a fresh AddressSpace, wrap it in a
-/// Process with the given caps + namespace root + budgets, and
-/// queue a ring-3 task for it via SchedCreateUser. Returns the
-/// new pid on success, or 0 on any failure (invalid ELF, OOM,
-/// ProcessCreate failure). On failure, any partial state is
-/// cleaned up through AddressSpaceRelease.
-u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
-                 u64 frame_budget, u64 tick_budget);
-
-/// Linux-ABI twin of SpawnElfFile. Same parse + AS + Process
-/// pipeline, but flips `Process::abi_flavor = kAbiLinux` after
-/// ProcessCreate so the task's ring-3 `syscall` instructions land
-/// on the Linux dispatcher (MSR_LSTAR) rather than the native
-/// int-0x80 path. Also seeds linux_brk_{base,current} and
-/// linux_mmap_cursor so brk/mmap have sensible starting anchors.
-///
-/// The underlying ELF loader does NOT inspect EI_OSABI — caller
-/// decides the flavor. A future auto-detector could sniff the
-/// ELF's `.note` sections or PT_INTERP contents to pick between
-/// this and SpawnElfFile; for now, it's explicit.
-u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
-                  u64 frame_budget, u64 tick_budget);
-
-/// PE/COFF twin of SpawnElfFile. Loads via the v0 PE loader
-/// (freestanding, no imports, no relocations) and queues a
-/// ring-3 task at the image's entry point. Same return-code
-/// and cleanup contract as SpawnElfFile.
-u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, const fs::RamfsNode* root,
-                u64 frame_budget, u64 tick_budget);
-
 } // namespace duetos::core
+
+// `Ring3UserEntry`, `SpawnElfFile`, `SpawnElfLinux`, and
+// `SpawnPeFile` moved to `proc/spawn.h` — see that header for
+// the canonical loader-bridging API and the rationale for the
+// split. Anything calling those four should `#include
+// "proc/spawn.h"` directly; this header now only carries the
+// adversarial probe-suite surface (`StartRing3SmokeTask`,
+// `SpawnOnDemand`).

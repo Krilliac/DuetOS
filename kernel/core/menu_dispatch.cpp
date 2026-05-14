@@ -48,7 +48,7 @@
 #include "mm/kheap.h"
 #include "power/reboot.h"
 #include "proc/process.h"
-#include "proc/ring3_smoke.h"
+#include "proc/spawn.h"
 #include "security/login.h"
 #include "util/types.h"
 

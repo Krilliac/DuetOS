@@ -51,7 +51,7 @@
 #include "log/klog.h"
 #include "mm/address_space.h"
 #include "proc/process.h"
-#include "proc/ring3_smoke.h"
+#include "proc/spawn.h"
 #include "sched/sched.h"
 
 namespace duetos::core::shell::internal

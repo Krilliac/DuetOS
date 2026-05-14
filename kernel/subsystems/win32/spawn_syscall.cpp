@@ -28,7 +28,7 @@
 #include "mm/kheap.h"
 #include "mm/paging.h"
 #include "proc/process.h"
-#include "proc/ring3_smoke.h"
+#include "proc/spawn.h"
 #include "sched/sched.h"
 #include "subsystems/linux/syscall_pipe.h"
 #include "syscall/syscall.h"
