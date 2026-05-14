@@ -87,6 +87,7 @@
 #include "drivers/audio/hda.h"
 #include "drivers/audio/hda_jack.h"
 #include "drivers/audio/hda_jack_inventory.h"
+#include "subsystems/audio/audio_backend.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
 #include "drivers/gpu/dpms.h"
@@ -3166,6 +3167,26 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::VerbEncodingSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::HdaJackSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::HdaJackInventorySelfTest());
+
+    // Audio backend (slice 2 of the ToaruOS port). Wires the HDA
+    // driver's StreamArm + codec configuration into a buffer ring
+    // a producer can submit S16LE/48 kHz/stereo PCM into. RUN
+    // stays at 0 — playback only starts when a future producer
+    // (winmm thunk, system-beep driver) calls Start() with audio
+    // in the ring. See wiki/drivers/Audio.md and
+    // wiki/advanced/Toaru-Port-Plan.md.
+    {
+        auto r = duetos::subsystems::audio::Init();
+        if (!r.has_value())
+        {
+            // Init() already logged the specific failure reason
+            // (no HDA, allocation failed, codec walker found no
+            // output path, etc.). One additional line records the
+            // overall outcome for grep-friendliness.
+            SerialWrite("[audio-backend] init did not complete — see preceding [audio-backend] line for cause\n");
+        }
+    }
+    DUETOS_BOOT_SELFTEST(duetos::subsystems::audio::SelfTest());
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");
     duetos::drivers::power::PowerInit();

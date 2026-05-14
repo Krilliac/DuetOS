@@ -47,32 +47,65 @@ The HDA driver:
 `winmm!waveOutWrite` still returns success with a `// STUB:`
 marker because no audio server consumes the armed stream.
 
-## Audio Routing (planned)
+## Audio Routing
+
+Slice 2 of the ToaruOS clean-room port landed the in-kernel
+backend layer.
 
 ```
-[ App ]                            winmm / xaudio2
+[ Producer ]                       winmm / xaudio2 / native apps (future)
         |
-[ Audio server (process) ]         subsystems/audio/ (planned)
-        |
-[ Mixer / format conversion ]      kernel/subsystems/audio/ (planned)
+[ Audio backend ]                  kernel/subsystems/audio/audio_backend.{h,cpp}
+        |   (Init / Start / Stop / WritePcmS16Stereo / WriteSine)
         |
 [ HDA driver ]                     kernel/drivers/audio/hda/
+        |   (StreamArm / StreamFillBdl / StreamRun / ConfigureOutputPath)
         |
 [ Audio codec ]
 ```
 
-The plan is for the audio server to be one of the first IPC-isolated
-processes — it holds the HDA hardware capability, every other process
-sends mix submissions over a port. See
-[IPC](../kernel/IPC.md).
+DuetOS's compositor and toolkit are in-kernel rather than userland
+(see [Subsystem Isolation](../kernel/Subsystem-Isolation.md)), so
+the "audio server" in this stack is also an in-kernel subsystem
+(`kernel/subsystems/audio/`) rather than a separate IPC-isolated
+process. Producers reach it through an in-kernel API today; a
+future slice exposes `SYS_AUDIO_*` syscalls for ring-3 PE thunks
+(`winmm!waveOutWrite`, `xaudio2!IXAudio2SourceVoice::SubmitSourceBuffer`).
+
+The backend's v0 format is fixed at S16LE / 48 kHz / stereo —
+HDA's consumer default. Producers convert to that shape before
+calling `WritePcmS16Stereo`; a follow-up slice adds format /
+sample-rate conversion when a producer demands a different format.
 
 ## Known Limits / GAPs
 
-- **No live audio output.** HDA driver is a shell; mixer / format
-  conversion / sample-rate conversion are not implemented.
-- **No microphone / capture path.**
-- **`winmm` and `xaudio2`** at the userland DLL level satisfy probes
-  but do not produce sound.
+- **No producers yet.** Slice 2 ships the backend layer but no
+  caller. `winmm!waveOutWrite` and `xaudio2` thunks still return
+  success without producing sound — wiring needs new
+  `SYS_AUDIO_*` syscalls (separate slice). A native in-kernel
+  beep producer (e.g. error tone on policy violation) is the
+  most likely first consumer.
+- **HDA codec walker stops at 0 function groups on QEMU
+  virtual codecs.** Both `-device hda-output` and `-device
+  hda-duplex` advertise codecs that the DuetOS walker reads as
+  having zero function groups, so `FindFirstOutputPath` returns
+  no path and the backend logs `[audio-backend]
+  FindFirstOutputPath returned no path ...` and skips
+  initialisation. This is a pre-existing limitation of the
+  walker, surfaced by slice 2's diagnostic logging — fix tracked
+  outside this slice. The StreamArm path and codec verb framing
+  *do* succeed; the walker is the only thing blocking output on
+  emulator.
+- **No mixer.** Single producer / single stream in v0. Multiple
+  concurrent producers would race on the ring; that's the next
+  audio slice's first job.
+- **No IRQ-driven refill.** BDL entries have IOC = 0; the HDA
+  DMA loops the ring forever. A producer that wants longer
+  playback than the ring fits (~85 ms at the v0 format) needs
+  the IRQ + per-buffer refill path that's a future slice.
+- **No microphone / capture path.** v0 is output-only.
+- **No format conversion / sample-rate conversion.** Producers
+  must submit S16LE / 48 kHz / stereo.
 
 ## Related Pages
 
