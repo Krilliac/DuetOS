@@ -2347,6 +2347,15 @@ void StartRing3SmokeTask()
         // load would need. See userland/apps/unity_engine/README.md.
         SpawnPeFile("ring3-unity", fs::generated::kBinUnityEngineBytes, fs::generated::kBinUnityEngineBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // module_smoke exercises LoadLibraryW for both the
+        // already-preloaded fast path (kernel32.dll) and the
+        // disk-load slow path (customdll2.dll via
+        // SYS_DLL_LOAD_FROM_PATH + /lib/customdll2.dll). Under
+        // emulator customdll2 is NOT in the preload set
+        // (essential=false) so the second LoadLibraryW call
+        // genuinely triggers the new syscall.
+        SpawnPeFile("ring3-module-smoke", fs::generated::kBinModuleSmokeBytes, fs::generated::kBinModuleSmokeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
     // mini-browser + the surface-coverage PE zoo + dx-demo block
     // below run alongside the ring3 trio: under profile=None

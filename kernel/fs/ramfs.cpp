@@ -35,6 +35,8 @@
 // userland/apps/windows_kill/windows-kill.exe. 79 KiB, 12 DLL
 // imports, TLS callbacks — the v0 loader rejects it (no Win32
 // subsystem) but PeReport still dumps the full gap on boot.
+#include "generated_customdll.h"
+#include "generated_customdll2.h"
 #include "generated_unity_pe.h"
 #include "generated_winkill_pe.h"
 
@@ -812,11 +814,35 @@ constinit RamfsNode k_proc_dir = {
 };
 
 
+// /lib/customdll.dll and /lib/customdll2.dll — dynamic-load
+// fixtures for SYS_DLL_LOAD_FROM_PATH (real LoadLibraryW from
+// filesystem). The exact same bytes are also preloaded into
+// every PE via spawn.cpp's preload_set, so a process can reach
+// these DLLs via either the preload fast path or the dynamic
+// disk-load path. Pointers borrow from the embedded blob; no
+// extra storage cost.
+constinit RamfsNode k_trusted_lib_customdll = {
+    .name = "customdll.dll",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = generated::kBinCustomDllBytes,
+    .file_size = generated::kBinCustomDllBytes_len,
+};
+constinit RamfsNode k_trusted_lib_customdll2 = {
+    .name = "customdll2.dll",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = generated::kBinCustomDll2Bytes,
+    .file_size = generated::kBinCustomDll2Bytes_len,
+};
+
 // /lib/firmware is generated from DUETOS_FIRMWARE_STAGING_DIR.
 // The directory exists even when no firmware was staged so the
 // firmware loader's VFS path is stable across installer images.
 constinit const RamfsNode* const k_trusted_lib_children[] = {
     &generated::kFirmwareRamfsNode,
+    &k_trusted_lib_customdll,
+    &k_trusted_lib_customdll2,
     nullptr,
 };
 

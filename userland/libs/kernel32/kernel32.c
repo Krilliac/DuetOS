@@ -554,35 +554,84 @@ __declspec(dllexport) void* GetModuleHandleA(const char* name)
     return (void*)(unsigned long long)sys_dll_base_by_name(name);
 }
 
-/* LoadLibraryW / LoadLibraryA — v0 only resolves names that are
- * already in the process's loaded-DLL table (kernel32.dll,
- * user32.dll, advapi32.dll, ucrtbase.dll, …). Real on-disk
- * dynamic loading lands when the disk-FS-backed image walk does;
- * for now this is "give me the handle for a preloaded DLL by
- * name," which covers GetProcAddress-style late-binding workflows
- * and the module_smoke probe. */
-__declspec(dllexport) void* LoadLibraryW(const WCHAR_t* name)
+/* SYS_DLL_LOAD_FROM_PATH wrapper: ask the kernel to walk
+ * `/lib/<name>` in the trusted ramfs, hand the bytes to DllLoad,
+ * register the resulting image in the process's DLL table, and
+ * return the base VA. Idempotent on the kernel side; safe to call
+ * after a successful GetModuleHandleW miss.
+ *
+ * The name is ASCII (caller already widened/narrowed); kernel
+ * caps length at 63 + NUL. Zero return = miss (no /lib/<name>
+ * file, DllLoad failure, image table full). */
+static unsigned long long sys_dll_load_from_path(const char* name)
 {
-    return GetModuleHandleW(name);
+    int len = 0;
+    if (name != (const char*)0)
+    {
+        while (name[len] != 0 && len < 63)
+            ++len;
+    }
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)205), "D"((long long)name), "S"((long long)len)
+                     : "memory");
+    return (unsigned long long)rv;
 }
 
+/* LoadLibraryW / LoadLibraryA — Win32 dynamic DLL load by name.
+ *
+ * Search order matches Windows-on-disk semantics:
+ *   1. Already-loaded module in the process's image table
+ *      (covers every preloaded DLL: kernel32, user32, ntdll,
+ *      ucrtbase, vcruntime140, msvcp140, advapi32, ...). Fast
+ *      path; no syscall round-trip beyond SYS_DLL_BASE_BY_NAME.
+ *   2. Filesystem `/lib/<name>` via SYS_DLL_LOAD_FROM_PATH. The
+ *      kernel maps the DLL into this process's AS, parses the
+ *      EAT, and adds it to the image table — so a follow-up
+ *      GetModuleHandleW returns the same base.
+ *
+ * Returns NULL only if both lookups miss. `LoadLibraryExW`'s
+ * `hFile` (reserved on Windows) and `flags` (DONT_RESOLVE_DLL_REFERENCES,
+ * LOAD_LIBRARY_AS_DATAFILE, ...) are accepted but ignored in v0
+ * — the kernel always maps + resolves the same way regardless. */
 __declspec(dllexport) void* LoadLibraryA(const char* name)
 {
-    return GetModuleHandleA(name);
+    if (name == (const char*)0)
+        return (void*)(unsigned long long)sys_dll_base_by_name("");
+    void* h = (void*)(unsigned long long)sys_dll_base_by_name(name);
+    if (h != (void*)0)
+        return h;
+    return (void*)(unsigned long long)sys_dll_load_from_path(name);
+}
+
+__declspec(dllexport) void* LoadLibraryW(const WCHAR_t* name)
+{
+    if (name == (const WCHAR_t*)0)
+        return (void*)(unsigned long long)sys_dll_base_by_name("");
+    char abuf[64];
+    int i = 0;
+    while (i < 63 && name[i] != 0)
+    {
+        abuf[i] = (char)(name[i] & 0xFF);
+        ++i;
+    }
+    abuf[i] = 0;
+    return LoadLibraryA(abuf);
 }
 
 __declspec(dllexport) void* LoadLibraryExW(const WCHAR_t* name, void* hFile, DWORD flags)
 {
     (void)hFile;
     (void)flags;
-    return GetModuleHandleW(name);
+    return LoadLibraryW(name);
 }
 
 __declspec(dllexport) void* LoadLibraryExA(const char* name, void* hFile, DWORD flags)
 {
     (void)hFile;
     (void)flags;
-    return GetModuleHandleA(name);
+    return LoadLibraryA(name);
 }
 
 /* GetModuleHandleExW / GetModuleHandleExA — the *Ex* variants

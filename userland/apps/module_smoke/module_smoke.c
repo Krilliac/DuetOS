@@ -100,13 +100,46 @@ void __cdecl mainCRTStartup(void)
     }
 
     /* LoadLibraryW on a preloaded DLL — should succeed via the
-     * loader's already-mapped image. */
+     * loader's already-mapped image (fast path:
+     * SYS_DLL_BASE_BY_NAME). */
     {
         HMODULE m = LoadLibraryW(L"kernel32.dll");
         Out("[module_smoke] LoadLibraryW(k32)      = ");
         Out(m != NULL ? "PASS\r\n" : "FAIL\r\n");
         if (m != NULL)
             FreeLibrary(m);
+    }
+
+    /* LoadLibraryW("customdll2.dll") — exercises the
+     * disk-load path via SYS_DLL_LOAD_FROM_PATH. Under emulator,
+     * customdll2.dll is NOT in the preload set (essential=false),
+     * so GetModuleHandleW misses and the kernel falls through to
+     * the /lib/customdll2.dll ramfs lookup + DllLoad. Under bare
+     * metal, it IS preloaded, and the fast path returns the
+     * existing base. Either way the call returns a valid handle
+     * and GetProcAddress(CustomDouble) yields a function that
+     * doubles its argument. */
+    {
+        HMODULE m = LoadLibraryW(L"customdll2.dll");
+        Out("[module_smoke] LoadLibraryW(cdll2)    = ");
+        if (m == NULL)
+        {
+            Out("FAIL/null-handle\r\n");
+        }
+        else
+        {
+            typedef int(__stdcall * CustomDoubleFn)(int);
+            CustomDoubleFn fn = (CustomDoubleFn)GetProcAddress(m, "CustomDouble");
+            if (fn == NULL)
+            {
+                Out("FAIL/no-export\r\n");
+            }
+            else
+            {
+                int v = fn(21);
+                Out(v == 42 ? "PASS\r\n" : "FAIL/wrong-result\r\n");
+            }
+        }
     }
 
     /* GetLastError / SetLastError round-trip. */
