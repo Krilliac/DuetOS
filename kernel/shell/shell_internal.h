@@ -466,6 +466,9 @@ void CmdXxd(u32 argc, char** argv);
 // (the cluster of coreutils-style text-file readers).
 void CmdTr(u32 argc, char** argv);
 void CmdDd(u32 argc, char** argv);
+void CmdCrc32(u32 argc, char** argv);
+void CmdCmp(u32 argc, char** argv);
+void CmdTee(u32 argc, char** argv);
 void CmdLiveUpdate(u32 argc, char** argv);
 
 // ---------------------------------------------------------------

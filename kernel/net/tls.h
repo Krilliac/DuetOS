@@ -320,6 +320,12 @@ struct Connection
     crypto::RsaPublicKey server_rsa;
     bool server_cert_seen;
 
+    // Hostname the caller asked us to connect to. Captured in
+    // ConnectionStart; the cert parser uses this to enforce
+    // hostname matching against the leaf cert's subject CN.
+    // Empty -> no enforcement (for testing / opt-out paths).
+    char expected_hostname[256];
+
     // Last error message, valid when state == Failed. Pointer
     // into a static literal — never freed.
     const char* err;

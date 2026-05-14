@@ -496,6 +496,21 @@ u32 ConnectionStart(Connection* c, const u8 client_random[kClientRandomBytes], c
     c->server_rsa.n_bytes = 0;
     c->server_cert_seen = false;
     c->err = nullptr;
+    // Capture the hostname for later cert-CN verification. Empty
+    // hostname disables the check (some callers — internal tests,
+    // CN-less self-signed deployments — legitimately want this).
+    for (u32 i = 0; i < sizeof(c->expected_hostname); ++i)
+        c->expected_hostname[i] = 0;
+    if (hostname != nullptr)
+    {
+        u32 i = 0;
+        while (hostname[i] != '\0' && i + 1 < sizeof(c->expected_hostname))
+        {
+            c->expected_hostname[i] = hostname[i];
+            ++i;
+        }
+        c->expected_hostname[i] = '\0';
+    }
 
     // Build the ClientHello body, then the handshake-framed body
     // for transcript hashing, then the record-wrapped version
@@ -613,6 +628,24 @@ bool ConsumeServerHandshakes(Connection* c, const u8* hs_payload, u32 hs_payload
             {
                 ConnectionFail(c, "leaf cert has no RSA SPKI");
                 return false;
+            }
+            // Hostname check: when an expected hostname is set,
+            // the leaf cert's subject CN must match. v0 does
+            // CN-only matching (no Subject Alternative Name
+            // walk yet); wildcard CNs are rejected because
+            // CnMatchesHostname is exact-match.
+            if (c->expected_hostname[0] != '\0')
+            {
+                if (parsed.subject_cn == nullptr || parsed.subject_cn_len == 0)
+                {
+                    ConnectionFail(c, "leaf cert has no subject CN");
+                    return false;
+                }
+                if (!crypto::x509::CnMatchesHostname(parsed.subject_cn, parsed.subject_cn_len, c->expected_hostname))
+                {
+                    ConnectionFail(c, "leaf cert CN does not match expected hostname");
+                    return false;
+                }
             }
             c->server_rsa = parsed.subject_rsa;
             c->server_cert_seen = true;

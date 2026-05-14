@@ -269,6 +269,8 @@ bool ParseTbs(const asn1::Element& tbs, Certificate* out)
     return true;
 }
 
+} // namespace
+
 bool CnMatchesHostname(const u8* cn, u32 cn_len, const char* hostname)
 {
     if (cn == nullptr || hostname == nullptr)
@@ -291,8 +293,6 @@ bool CnMatchesHostname(const u8* cn, u32 cn_len, const char* hostname)
     }
     return true;
 }
-
-} // namespace
 
 Status Parse(const u8* der, u32 der_len, Certificate* out)
 {

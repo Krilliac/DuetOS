@@ -87,23 +87,33 @@ testable functionality:
   `[tls] PASS (prf + cke + record-aead + transcript +
   finished + srv-fin verify)`.
 
-**Still to ship to close Tier 1:**
+**Tier 1 status (post-batch):** COMPLETE end-to-end.
 
-- TLS Connection state machine (Init → SentClientHello →
-  RecvServerHello → RecvCertificate → RecvServerHelloDone →
-  SentClientKeyEx → SentClientCCS → SentClientFin →
-  RecvServerCCS → RecvServerFin → Established) — pure
-  composition of the helpers above, ~200 lines.
-- Wire to wininet/winhttp: replace the "fallback body" path
-  with a `Tls{Open,Read,Write,Close}` call sequence over the
-  existing kernel socket pool.
-- SNI extension support — required by most modern servers.
-  Currently we omit the extensions block entirely.
-- Server cert validation: today we trust ANY cert. Tier 1
-  doesn't need full chain validation, but at least matching
-  the leaf cert's CN against the hostname is a sane minimum.
+  - TLS Connection state machine: shipped (`net/tls::Connection`).
+    Drives ClientHello -> server flight -> CKE+CCS+Finished ->
+    server CCS+Finished -> Established. Pure composition of
+    the primitive helpers; ~530 lines + selftests.
+  - SNI extension: shipped (`TlsBuildClientHelloBodyWithSni`).
+    Hostname passed in `ConnectionStart`; emitted in the
+    ClientHello extensions block.
+  - wget HTTPS: shipped (`shell/shell_wget.cpp::DoHttpsFetch`).
+    Full handshake + record-layer encrypt/decrypt path.
+    Drops on close_notify Alert or peer FIN. Body decoded
+    with same Content-Length / chunked path as the HTTP
+    branch.
+  - Hostname / CN match: shipped (`crypto::x509::CnMatchesHostname`
+    + Connection.expected_hostname enforcement). Empty
+    hostname disables the check (caller opt-in); any non-empty
+    expected hostname must match the leaf cert's subject CN
+    or the handshake fails with "leaf cert CN does not match
+    expected hostname". v0 is exact-match only — wildcard CNs
+    and SAN walks are the Tier 2 follow-on.
 
-Estimated remaining effort: ~3-5 days for state machine + wiring.
+  What does NOT yet work: ECDHE cipher suites. Most modern
+  CDNs only offer ECDHE-ECDSA / ECDHE-RSA. The TLS Connection
+  state machine rejects those at ServerHello with an
+  "unexpected server handshake type" error. Tier 2 below is
+  the path to unblocking that.
 
 ### Tier 2 — TLS 1.3 + ECDSA + ECDH
 

@@ -49,6 +49,7 @@
 #include "net/stack.h"
 #include "net/tls.h"
 #include "sched/sched.h"
+#include "util/crc32.h"
 #include "util/random.h"
 
 namespace duetos::core::shell::internal
@@ -1925,6 +1926,263 @@ void CmdDd(u32 argc, char** argv)
     ConsoleWrite("+0 records in/out, ");
     WriteU64Dec(want_bytes);
     ConsoleWriteln(" bytes");
+    duetos::mm::KFree(src);
+}
+
+// ---------------------------------------------------------------------------
+// crc32 — IEEE 802.3 reflected CRC-32 (polynomial 0xEDB88320).
+// Same construction zlib / GPT / PKZIP / Ethernet FCS use, and
+// the same backing implementation as the kernel's own
+// `util::Crc32`. Output mirrors GNU `cksum` line format:
+//
+//   <crc-hex-8>  <bytes>  <path>
+//
+// Streams from FAT32 to avoid the 512-byte ramfs scratch cap.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+struct CrcStreamCtx
+{
+    u8* buf; // accumulator (KMalloc'd, freed by caller)
+    u64 buf_off;
+    u64 buf_cap;
+    u64 total;
+};
+
+bool CrcChunkCb(const u8* data, u64 len, void* ctx)
+{
+    auto* s = static_cast<CrcStreamCtx*>(ctx);
+    if (s->buf_off + len > s->buf_cap)
+        return false; // overflow
+    for (u64 i = 0; i < len; ++i)
+        s->buf[s->buf_off + i] = data[i];
+    s->buf_off += len;
+    s->total += len;
+    return true;
+}
+
+} // namespace
+
+void CmdCrc32(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("CRC32: usage: crc32 <path> [<path>...]");
+        ConsoleWriteln("       Prints '<8-hex-digest>  <bytes>  <path>' per file.");
+        return;
+    }
+    for (u32 a = 1; a < argc; ++a)
+    {
+        const char* path = argv[a];
+        // Cap at 4 MiB for crc32 — predictable scratch.
+        constexpr u64 kCrcCap = 4u * 1024 * 1024;
+        auto* buf = static_cast<u8*>(duetos::mm::KMalloc(kCrcCap));
+        if (buf == nullptr)
+        {
+            ConsoleWriteln("CRC32: OOM");
+            return;
+        }
+        CrcStreamCtx s{};
+        s.buf = buf;
+        s.buf_cap = kCrcCap;
+        const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+        duetos::fs::fat32::DirEntry ent;
+        bool ok = false;
+        if (vol != nullptr && duetos::fs::fat32::Fat32LookupPath(vol, path, &ent) && (ent.attributes & 0x10) == 0)
+        {
+            ok = duetos::fs::fat32::Fat32ReadFileStream(vol, &ent, &CrcChunkCb, &s);
+        }
+        if (!ok)
+        {
+            char scratch[duetos::fs::kTmpFsContentMax];
+            const u32 n = ReadFileToBuf(path, scratch, sizeof(scratch));
+            if (n == static_cast<u32>(-1))
+            {
+                ConsoleWrite("CRC32: NO SUCH FILE: ");
+                ConsoleWriteln(path);
+                duetos::mm::KFree(buf);
+                continue;
+            }
+            for (u32 i = 0; i < n; ++i)
+                buf[i] = static_cast<u8>(scratch[i]);
+            s.buf_off = n;
+            s.total = n;
+        }
+        const u32 crc = duetos::util::Crc32(buf, s.total);
+        // 8-hex output.
+        static constexpr char kHex[] = "0123456789abcdef";
+        for (int sh = 28; sh >= 0; sh -= 4)
+            ConsoleWriteChar(kHex[(crc >> sh) & 0xF]);
+        ConsoleWrite("  ");
+        WriteU64Dec(s.total);
+        ConsoleWrite("  ");
+        ConsoleWriteln(path);
+        duetos::mm::KFree(buf);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cmp — byte-wise file comparison. Standard POSIX shapes:
+//   cmp <file1> <file2>
+//   cmp -s <file1> <file2>     silent (exit-only result)
+//
+// Reports the offset (1-based) of the first differing byte, or
+// confirms equal-size + equal-content match. Streams via
+// Fat32ReadFile.
+// ---------------------------------------------------------------------------
+
+void CmdCmp(u32 argc, char** argv)
+{
+    bool silent = false;
+    u32 first = 1;
+    if (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 's' && argv[1][2] == '\0')
+    {
+        silent = true;
+        ++first;
+    }
+    if (argc < first + 2)
+    {
+        ConsoleWriteln("CMP: usage: cmp [-s] <file1> <file2>");
+        return;
+    }
+    u32 a_len = 0;
+    u32 b_len = 0;
+    auto* a = ReadAnyFile(argv[first + 0], &a_len);
+    if (a == nullptr)
+    {
+        if (!silent)
+        {
+            ConsoleWrite("CMP: NO SUCH FILE: ");
+            ConsoleWriteln(argv[first + 0]);
+        }
+        return;
+    }
+    auto* b = ReadAnyFile(argv[first + 1], &b_len);
+    if (b == nullptr)
+    {
+        duetos::mm::KFree(a);
+        if (!silent)
+        {
+            ConsoleWrite("CMP: NO SUCH FILE: ");
+            ConsoleWriteln(argv[first + 1]);
+        }
+        return;
+    }
+    const u32 n = a_len < b_len ? a_len : b_len;
+    for (u32 i = 0; i < n; ++i)
+    {
+        if (a[i] != b[i])
+        {
+            if (!silent)
+            {
+                ConsoleWrite("CMP: ");
+                ConsoleWrite(argv[first + 0]);
+                ConsoleWrite(" ");
+                ConsoleWrite(argv[first + 1]);
+                ConsoleWrite(" differ at byte ");
+                WriteU64Dec(i + 1);
+                ConsoleWriteln("");
+            }
+            duetos::mm::KFree(a);
+            duetos::mm::KFree(b);
+            return;
+        }
+    }
+    if (a_len != b_len)
+    {
+        if (!silent)
+        {
+            ConsoleWrite("CMP: ");
+            ConsoleWrite(a_len < b_len ? argv[first + 0] : argv[first + 1]);
+            ConsoleWrite(" is shorter (sizes ");
+            WriteU64Dec(a_len);
+            ConsoleWrite(" vs ");
+            WriteU64Dec(b_len);
+            ConsoleWriteln(")");
+        }
+        duetos::mm::KFree(a);
+        duetos::mm::KFree(b);
+        return;
+    }
+    if (!silent)
+    {
+        ConsoleWrite("CMP: files match (");
+        WriteU64Dec(a_len);
+        ConsoleWriteln(" bytes)");
+    }
+    duetos::mm::KFree(a);
+    duetos::mm::KFree(b);
+}
+
+// ---------------------------------------------------------------------------
+// tee — read a source file and write it BOTH to console AND to
+// a destination file. v0 doesn't have pipes yet, so this isn't
+// "read stdin and split"; it's more like a copy that also
+// prints. Useful for "extract this download AND show me what
+// it contained".
+//
+//   tee <src> <dst>           write src to console + dst
+//   tee -a <src> <dst>        append to dst (no-op for now — same
+//                             as the no-flag form; FAT32 append
+//                             requires a separate API path)
+// ---------------------------------------------------------------------------
+
+void CmdTee(u32 argc, char** argv)
+{
+    u32 first = 1;
+    bool append = false;
+    if (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 'a' && argv[1][2] == '\0')
+    {
+        append = true;
+        ++first;
+    }
+    if (argc < first + 2)
+    {
+        ConsoleWriteln("TEE: usage: tee [-a] <src> <dst>");
+        return;
+    }
+    u32 src_len = 0;
+    auto* src = ReadAnyFile(argv[first + 0], &src_len);
+    if (src == nullptr)
+    {
+        ConsoleWrite("TEE: NO SUCH FILE: ");
+        ConsoleWriteln(argv[first + 0]);
+        return;
+    }
+    // Print to console (always).
+    for (u32 i = 0; i < src_len; ++i)
+        ConsoleWriteChar(static_cast<char>(src[i]));
+    if (src_len == 0 || src[src_len - 1] != '\n')
+        ConsoleWriteChar('\n');
+    // Write to dst on FAT32.
+    const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+    if (vol == nullptr)
+    {
+        ConsoleWriteln("TEE: NO FAT32 VOLUME for dst");
+        duetos::mm::KFree(src);
+        return;
+    }
+    MkdirParents(vol, argv[first + 1]);
+    // For v0: -a falls through to create-replace. Real FAT32
+    // append-to-existing requires routing through
+    // Fat32AppendInRoot, which is root-dir-only; expose that
+    // properly in a follow-on once nested append lands.
+    (void)append;
+    const auto wrote = duetos::fs::fat32::Fat32CreateAtPath(vol, argv[first + 1], src, src_len);
+    if (wrote != static_cast<duetos::i64>(src_len))
+    {
+        ConsoleWrite("TEE: CREATE FAIL ");
+        ConsoleWriteln(argv[first + 1]);
+    }
+    else
+    {
+        ConsoleWrite("TEE: wrote ");
+        WriteU64Dec(src_len);
+        ConsoleWrite(" bytes to ");
+        ConsoleWriteln(argv[first + 1]);
+    }
     duetos::mm::KFree(src);
 }
 
