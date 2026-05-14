@@ -172,8 +172,6 @@ void RsaSelfTest()
     short_em[7] = 0x30;
     short_em[8] = 0x11;
     const u8 fake_prefix[] = {0x30, 0x11};
-    const u8 fake_hash[] = {};
-    (void)fake_hash;
     if (Pkcs1V15UnwrapAndMatch(short_em, 9, fake_prefix, sizeof(fake_prefix), nullptr, 0))
     {
         SerialWrite("[rsa] FAIL unwrap-short-ps-still-passed\n");

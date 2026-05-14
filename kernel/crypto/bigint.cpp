@@ -20,16 +20,6 @@ inline void TrimUsed(BigInt* a)
     a->used = u;
 }
 
-// Single-limb left shift by `bits` (0..31). Returns the new
-// high-bit overflow (bits shifted past the top); callers either
-// assert it's zero or fold it into the next limb.
-u32 ShiftLeftLimb(u32 v, u32 bits, u32 carry_in)
-{
-    if (bits == 0)
-        return 0;
-    return (v >> (32 - bits)) | (carry_in & 0); // unused — see ShiftLeft1 below
-}
-
 // In-place a <<= 1. The high bit shifted off the top is asserted
 // zero — callers must keep BigInts within `kBigIntBits - 1` of
 // the modulus before calling ModExp's internal shift.
@@ -43,19 +33,6 @@ void ShiftLeft1(BigInt* a)
         carry = (v >> 31) & 1;
     }
     KASSERT(carry == 0, "bigint", "ShiftLeft1 overflow");
-    TrimUsed(a);
-}
-
-// In-place a >>= 1.
-void ShiftRight1(BigInt* a)
-{
-    u32 carry = 0;
-    for (u32 i = kBigIntLimbs; i-- > 0;)
-    {
-        const u32 v = a->limbs[i];
-        a->limbs[i] = (v >> 1) | (carry << 31);
-        carry = v & 1;
-    }
     TrimUsed(a);
 }
 

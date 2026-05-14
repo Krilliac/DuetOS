@@ -4,8 +4,10 @@
 >
 > **Execution context:** Kernel — IRQ + process; pixel ops in compositor pass
 >
-> **Maturity:** virtio-gpu v0 scanout; Intel/AMD/NVIDIA discovery only;
-> Vulkan ICD v0 (CPU-side lifecycle, command tape replay, scanout-backed clears)
+> **Maturity:** virtio-gpu v0 scanout; Intel Render Command Streamer
+> ring bring-up wired (MI_NOOP submission proven, AMD/NVIDIA still
+> discovery-only); Vulkan ICD v0 (CPU-side lifecycle, command tape
+> replay, scanout-backed clears)
 
 ## Overview
 
@@ -57,8 +59,23 @@ negotiation against a vendor-specific GPU driver is roadmap work.
 Each tier-1 vendor now has a dedicated driver TU under
 `kernel/drivers/gpu/`:
 
-- `intel_gpu.{h,cpp}` — Gen9..Gen13 register map, RCS ring scaffold
-  at MMIO 0x2000.
+- `intel_gpu.{h,cpp}` — Gen9..Gen13 register map and **live RCS
+  bring-up** at MMIO 0x2000. `Bringup` allocates a 4 KiB DMA-
+  coherent ring in Zone::Dma32, programs
+  `RCS_CTL=0 → RCS_TAIL=0 → RCS_HEAD=0 → RCS_START=ring.phys →
+  RCS_CTL=length|enable`, walks `RCS_TAIL` past 64 `MI_NOOP`
+  instructions, then bounded-polls `RCS_HEAD` (100 ms wall-clock
+  OR 1 Mi iterations, whichever first) until head catches tail.
+  On success the ring buffer is retained for the lifetime of the
+  boot and `[gpu/intel/rcs] ring online …` is emitted. On
+  timeout the ring is disabled (CTL←0), a `kGpuRingBringupFail`
+  probe fires with the last-seen `RCS_HEAD`, the buffer is freed,
+  and one `KLOG_WARN` summarises the failure. `IntelRcsRingSelfTest`
+  hooked to `DUETOS_BOOT_SELFTEST` emits a structural sentinel —
+  `[gpu/intel/rcs] selftest PASS …`, `selftest FAIL …`, or
+  `no Intel device — skipped` — that CI greps for. QEMU's
+  emulated `-vga std` / `-vga virtio` boots take the "skipped"
+  path (vendor IDs 0x1234 / 0x1AF4, not Intel's 0x8086).
 - `amd_gpu.{h,cpp}` — GFX9+ scaffold; opportunistically maps BAR5
   (the register file lives there, not at BAR0 like Intel) and
   reads `mmGRBM_STATUS` / `mmRLC_GPM_STAT`.
@@ -71,12 +88,12 @@ Each driver exposes:
   the per-controller `GpuInfo` record. Called by
   `gpu::RunVendorProbe` after BAR0 is mapped.
 - `Bringup(GpuInfo&)` — allocates a 4 KiB DMA-coherent ring/
-  pushbuffer, logs the would-be ring program, frees the buffer,
-  and returns `Unsupported`. The skeleton stays gated until the
-  vendor-specific firmware loaders (Intel GuC/HuC, AMD MEC/RLC,
-  NVIDIA GSP) land. The dispatch surface is in place so
-  follow-up slices flip a known set of register pokes rather
-  than re-derive the bring-up shape.
+  pushbuffer and, for Intel, actually programs the Render
+  Command Streamer + walks `MI_NOOP`s through it (see the
+  `intel_gpu` bullet above). AMD's and NVIDIA's `Bringup` still
+  log the would-be ring program, free the buffer, and return
+  `Unsupported`; their per-vendor firmware loaders (AMD MEC/RLC,
+  NVIDIA GSP) are the next gate to flip.
 - `IsBroughtUp()` — diagnostic accessor.
 
 `gpu.cpp` no longer hosts vendor-specific register pokes; it
@@ -409,11 +426,27 @@ recompose. Four themes ship:
 
 ## Known Limits / GAPs
 
-- **No real Intel/AMD/NVIDIA driver beyond discovery.** virtio-gpu is
-  the only path that produces pixels today.
-- **No GPU command queue.** Submission is direct register writes for
-  virtio-gpu's tiny command set; a real GPU driver will need a
-  proper queue.
+- **Intel RCS bring-up is `MI_NOOP`-only.** The Render Command
+  Streamer ring is now programmed and proven alive (head catches
+  tail) on Intel silicon, but the only opcode written through it
+  today is `MI_NOOP`. Real workloads need
+  `MI_STORE_DWORD_IMM` / `MI_BATCH_BUFFER_START` + a populated
+  GTT, plus GuC/HuC firmware push (the firmware files are
+  located via `intel::Probe` but never uploaded — there is no
+  MEI driver to deliver them). On QEMU's emulated `-vga std` /
+  `-vga virtio` the Intel RCS path is correctly inert: those
+  devices report vendor IDs 0x1234 / 0x1AF4 and the
+  `IntelRcsRingSelfTest` emits the structural "no Intel device
+  — skipped" sentinel.
+- **AMD / NVIDIA still discovery-only.** Both vendors classify
+  the device, map the register file, log identifying dwords,
+  and stop. AMD needs MEC/RLC firmware ordering + PM4 packet
+  encoding; NVIDIA Turing+ needs GSP firmware + RPC channel
+  before a PFIFO channel can come online.
+- **No GPU command queue exposed to userland.** Submission is
+  kernel-side direct register writes (virtio-gpu's tiny command
+  set; Intel's NOOP submitter). The Vulkan ICD is still CPU-only
+  and does not route through the Intel ring yet.
 - **Vulkan ICD does not execute shaders.** SPIR-V blobs are
   validated (magic-word check) + parsed (entry-point /
   capability / decoration counts), but the bytecode is not

@@ -9,12 +9,13 @@
 #include "drivers/gpu/intel_gpu.h"
 
 #include "arch/x86_64/serial.h"
-#include "diag/fix_journal.h"
+#include "debug/probes.h"
 #include "drivers/gpu/intel_gsc_fw.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
 #include "mm/dma.h"
 #include "mm/zone.h"
+#include "time/timekeeper.h"
 
 namespace duetos::drivers::gpu::intel
 {
@@ -24,12 +25,27 @@ namespace
 
 bool g_brought_up = false;
 
+// The RCS ring buffer is owned for the lifetime of the boot on
+// success — we retain the DmaBuffer here so the controller's
+// programmed RCS_START stays valid. On failure the buffer is
+// freed before this slot is touched and `.virt == nullptr`
+// remains the live state.
+mm::DmaBuffer g_rcs_ring = {};
+
 u32 Mmio32(const GpuInfo& g, u64 offset)
 {
     if (g.mmio_virt == nullptr || offset + 4 > g.mmio_size)
         return 0xFFFFFFFFu;
     auto* p = reinterpret_cast<volatile u32*>(static_cast<u8*>(g.mmio_virt) + offset);
     return *p;
+}
+
+void Mmio32Write(const GpuInfo& g, u64 offset, u32 value)
+{
+    if (g.mmio_virt == nullptr || offset + 4 > g.mmio_size)
+        return;
+    auto* p = reinterpret_cast<volatile u32*>(static_cast<u8*>(g.mmio_virt) + offset);
+    *p = value;
 }
 
 // Map the FUSE_STRAP DISPLAY_FUSE field (bits 0..3) to a coarse
@@ -166,37 +182,166 @@ void Probe(GpuInfo& g)
     if (g.mmio_virt == nullptr || !g.mmio_live)
         return ::duetos::core::Err{::duetos::core::ErrorCode::NotReady};
 
-    // Reserve the RCS ring DMA buffer. We allocate it now so the
-    // physical address is known + logged even though we don't
-    // currently program it into the controller. A follow-up slice
-    // will write the dword to RCS_START and flip the enable bit.
+    // Allocate the RCS ring backing. Zone::Dma32 so the engine sees
+    // the address inside the 32-bit aperture without GTT
+    // intervention — the Render Command Streamer's RCS_START is a
+    // 32-bit register on Gen9..Gen13 and is interpreted as a guest-
+    // physical address when GTT isn't programmed (i915 calls this
+    // "ggtt unbound" mode; for v0 it's exactly what we want).
+    // The frame allocator zeroes the buffer, so the ring already
+    // holds 1024 `MI_NOOP` (= 0x00000000) entries on return.
     auto r = mm::AllocDmaCoherent(kIntelRingBytes, mm::Zone::Dma32);
     if (!r.has_value())
         return ::duetos::core::Err{r.error()};
-    const mm::DmaBuffer ring = r.value();
+    g_rcs_ring = r.value();
 
     arch::SerialWrite("[gpu/intel] rcs_ring_phys=");
-    arch::SerialWriteHex(ring.phys);
+    arch::SerialWriteHex(g_rcs_ring.phys);
     arch::SerialWrite(" bytes=");
     arch::SerialWriteHex(kIntelRingBytes);
-    arch::SerialWrite(" — would write RCS_START / RCS_CTL but real ring submission is gated\n");
+    arch::SerialWrite("\n");
 
-    // STUB: Real bring-up writes RCS_TAIL=0, RCS_HEAD=0,
-    // RCS_START=ring.phys, then RCS_CTL=(kIntelRingLengthMask &
-    // (kIntelRingBytes-PAGE_SIZE)) | kIntelRingEnable. We don't
-    // do that today because we haven't validated this on real
-    // silicon — pokes that are wrong on Gen9..Gen13 will corrupt
-    // an active engine. Free the buffer so the next Bringup
-    // doesn't leak.
-    FIX_NOTE_STUB("drivers/gpu/intel_gpu.cpp:RCS_CTL", "wire RCS ring submit on validated silicon");
-    mm::FreeDmaCoherent(ring);
+    // Program the ring. Sequence matches i915
+    // `intel_ring_submission.c::__ring_context_init` minus the
+    // GuC / context-state bits we don't have:
+    //   1) Drain any prior ring state — CTL=0 first.
+    //   2) Reset head + tail to the start of the buffer.
+    //   3) Point RCS_START at the buffer's guest-physical base
+    //      (must be 4 KiB aligned; AllocDmaCoherent guarantees
+    //      page alignment).
+    //   4) Re-enable with the length encoded in the high bits:
+    //      `length` is (#pages - 1) << 12 — for a 1-page ring
+    //      that's 0, AND the enable bit.
+    Mmio32Write(g, kIntelRcsCtl, 0);
+    Mmio32Write(g, kIntelRcsTail, 0);
+    Mmio32Write(g, kIntelRcsHead, 0);
+    Mmio32Write(g, kIntelRcsStart, static_cast<u32>(g_rcs_ring.phys));
+    const u32 ctl = (static_cast<u32>(kIntelRingBytes - 0x1000u) & kIntelRingLengthMask) | kIntelRingEnable;
+    Mmio32Write(g, kIntelRcsCtl, ctl);
 
-    return ::duetos::core::Err{::duetos::core::ErrorCode::Unsupported};
+    // Submit: bump TAIL past the first kNoopBatch entries. The ring
+    // was zero-filled by the frame allocator, so the buffer already
+    // contains MI_NOOPs (opcode 0x00000000) at every dword from
+    // offset 0 onward. We still call DmaSyncForDevice to flush any
+    // speculative write the CPU may have queued through the cached
+    // alias — on x86 this is a compiler barrier; on a future ARM64
+    // port it's the cache maintenance op that makes the buffer
+    // device-visible.
+    constexpr u32 kNoopBatch = 64;
+    constexpr u32 kSubmitBytes = kNoopBatch * 4;
+    static_assert(kSubmitBytes < kIntelRingBytes, "noop submission must fit inside the ring");
+
+    mm::DmaSyncForDevice(g_rcs_ring, 0, kSubmitBytes);
+    Mmio32Write(g, kIntelRcsTail, kSubmitBytes);
+
+    // Poll HEAD until it reaches TAIL or 100 ms elapses, whichever
+    // comes first. Each pause + load is ~50-100 ns on a modern
+    // Intel core, so the iteration cap (~1M) is roughly the same
+    // wall-clock bound — we keep both because MonotonicNs() returns
+    // 0 if Timekeeper hasn't selected a source yet, in which case
+    // the iteration cap is the only thing standing between us and
+    // an infinite loop.
+    constexpr u64 kTimeoutNs = 100ull * 1000ull * 1000ull;
+    constexpr u32 kIterCap = 1u << 20;
+    const u64 start_ns = ::duetos::time::MonotonicNs();
+    u32 head = 0;
+    bool ring_live = false;
+    for (u32 iter = 0; iter < kIterCap; ++iter)
+    {
+        head = Mmio32(g, kIntelRcsHead);
+        if (head == kSubmitBytes)
+        {
+            ring_live = true;
+            break;
+        }
+        asm volatile("pause" ::: "memory");
+        if (start_ns != 0)
+        {
+            const u64 now_ns = ::duetos::time::MonotonicNs();
+            if (now_ns > start_ns && (now_ns - start_ns) > kTimeoutNs)
+                break;
+        }
+    }
+
+    if (!ring_live)
+    {
+        // Bring-up did not converge. Disable the ring so the
+        // controller isn't left fetching from a buffer we're about
+        // to free, fire the structural probe so an attached GDB
+        // halts here, drop a single WARN sentinel, and leave a
+        // DEBUG line with the observed register state so a triage
+        // session can re-derive what happened without re-running
+        // the boot.
+        Mmio32Write(g, kIntelRcsCtl, 0);
+        const u32 final_head = Mmio32(g, kIntelRcsHead);
+        const u32 final_tail = Mmio32(g, kIntelRcsTail);
+        const u32 final_ctl = Mmio32(g, kIntelRcsCtl);
+        KBP_PROBE_V(::duetos::debug::ProbeId::kGpuRingBringupFail, final_head);
+        KLOG_WARN_V("drivers/gpu/intel", "RCS ring head never caught tail (head)", final_head);
+        KLOG_DEBUG_V("drivers/gpu/intel", "RCS final tail", final_tail);
+        KLOG_DEBUG_V("drivers/gpu/intel", "RCS final ctl", final_ctl);
+        KLOG_DEBUG_V("drivers/gpu/intel", "RCS ring phys", g_rcs_ring.phys);
+        mm::FreeDmaCoherent(g_rcs_ring);
+        g_rcs_ring = {};
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Unsupported};
+    }
+
+    g_brought_up = true;
+    arch::SerialWrite("[gpu/intel/rcs] ring online head=tail=");
+    arch::SerialWriteHex(head);
+    arch::SerialWrite(" ctl=");
+    arch::SerialWriteHex(ctl);
+    arch::SerialWrite(" phys=");
+    arch::SerialWriteHex(g_rcs_ring.phys);
+    arch::SerialWrite("\n");
+    return {};
 }
 
 bool IsBroughtUp()
 {
     return g_brought_up;
+}
+
+void IntelRcsRingSelfTest()
+{
+    // Walk the GPU records and find an Intel display controller.
+    // Self-tests run after `GpuInit` populates the cache, so by
+    // this point every PCI display controller has been classified.
+    const u64 n = GpuCount();
+    bool found = false;
+    for (u64 i = 0; i < n; ++i)
+    {
+        const GpuInfo& info = Gpu(i);
+        if (info.vendor_id == kVendorIntel)
+        {
+            found = true;
+            break;
+        }
+    }
+    if (!found)
+    {
+        // Typical QEMU `-vga std` / `-vga virtio` boot. Not a
+        // failure — the structural sentinel CI greps for says so
+        // explicitly so a regression that loses the Intel record
+        // is distinguishable from a host that never had one.
+        arch::SerialWrite("[gpu/intel/rcs] no Intel device — skipped\n");
+        return;
+    }
+
+    if (IsBroughtUp())
+    {
+        arch::SerialWrite("[gpu/intel/rcs] selftest PASS (ring online, brought_up=true)\n");
+        return;
+    }
+
+    // Intel device present but the bring-up didn't reach the live
+    // state. This is the regression case — the bring-up itself
+    // will have already fired `kGpuRingBringupFail` and dropped a
+    // WARN, so we don't duplicate that here. We still fire
+    // `kBootSelftestFail` so the canonical "boot self-test
+    // regressed" GDB break catches it.
+    KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, /*sub-check tag*/ 0xC51u);
+    arch::SerialWrite("[gpu/intel/rcs] selftest FAIL (Intel device present, ring not online)\n");
 }
 
 } // namespace duetos::drivers::gpu::intel

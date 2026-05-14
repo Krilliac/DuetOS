@@ -226,8 +226,29 @@ void RunVendorProbe(GpuInfo& g)
         }
         break;
     case kVendorIntel:
+    {
         intel::Probe(g);
+        // Probe is pure observation; Bringup actually programs the
+        // RCS ring. We only attempt bring-up when the probe came
+        // back live — otherwise a wedged or absent decode would
+        // cause us to write to a phantom MMIO window. On QEMU's
+        // emulated displays this case never enters (vendor=Bochs
+        // 0x1234 / virtio-gpu 0x1AF4, not Intel 0x8086), so the
+        // typical smoke boot returns here without firing the ring
+        // probe; the IntelRcsRingSelfTest below emits the
+        // "no Intel device — skipped" sentinel for CI.
+        if (g.mmio_live)
+        {
+            auto br = intel::Bringup(g);
+            if (!br.has_value() && br.error() != ::duetos::core::ErrorCode::AlreadyExists)
+            {
+                // Bringup logged its own WARN + probe; don't
+                // duplicate the diagnostic here.
+                (void)br;
+            }
+        }
         break;
+    }
     case kVendorAmd:
         amd::Probe(g);
         break;

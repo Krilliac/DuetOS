@@ -56,7 +56,6 @@ constexpr u32 kCdOffName = 46;
 // Local-file-header offsets.
 constexpr u32 kLocalOffNameLen = 26;
 constexpr u32 kLocalOffExtraLen = 28;
-constexpr u32 kLocalOffName = 30;
 
 // Search the trailing kEocdSearchWindow bytes for the EOCD magic.
 // Scans backwards because a sane archive has the EOCD at the very
