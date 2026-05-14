@@ -123,6 +123,7 @@
 #include "crypto/asn1.h"
 #include "crypto/bigint.h"
 #include "crypto/rsa.h"
+#include "crypto/x509.h"
 #include "crypto/hmac.h"
 #include "crypto/pbkdf2.h"
 #include "crypto/prf.h"
@@ -2613,6 +2614,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::crypto::BigIntSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::asn1::Asn1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::RsaSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::x509::X509SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::EapolSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::FourWaySelfTest());
