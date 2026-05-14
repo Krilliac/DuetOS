@@ -242,6 +242,99 @@ u32 FindBodyStart(const u8* buf, u32 len)
     return len;
 }
 
+// Find a header line by name (case-insensitive) in `[buf..buf+header_len)`
+// and copy its value (whitespace-trimmed) into `out[0..out_cap)`. Returns
+// the number of bytes written (excluding NUL), or 0 if the header is
+// absent / value too long for `out_cap`.
+u32 FindHeader(const u8* buf, u32 header_len, const char* name, char* out, u32 out_cap)
+{
+    if (out_cap == 0)
+        return 0;
+    out[0] = '\0';
+    const u32 name_len = [&]() -> u32
+    {
+        u32 n = 0;
+        while (name[n] != '\0')
+            ++n;
+        return n;
+    }();
+    u32 i = 0;
+    while (i + name_len + 1 < header_len)
+    {
+        const bool line_start = (i == 0) || (buf[i - 1] == '\n');
+        if (line_start && StrCaseEqN(reinterpret_cast<const char*>(buf + i), name, name_len) &&
+            buf[i + name_len] == ':')
+        {
+            u32 k = i + name_len + 1;
+            while (k < header_len && (buf[k] == ' ' || buf[k] == '\t'))
+                ++k;
+            u32 w = 0;
+            while (k < header_len && buf[k] != '\r' && buf[k] != '\n' && w + 1 < out_cap)
+                out[w++] = static_cast<char>(buf[k++]);
+            out[w] = '\0';
+            return w;
+        }
+        ++i;
+    }
+    return 0;
+}
+
+// Decode an HTTP chunked-transfer-encoding stream IN-PLACE.
+// `src` points at the body bytes, `src_len` is the chunked-encoded
+// length. On success returns the decoded payload length and writes
+// the bytes to `dst` (which can alias src). Returns 0 on any
+// malformed input — caller falls back to "treat body as already-
+// decoded" since most plain-static servers reply Content-Length.
+u32 DecodeChunked(const u8* src, u32 src_len, u8* dst, u32 dst_cap)
+{
+    u32 in = 0;
+    u32 out = 0;
+    while (in < src_len)
+    {
+        // Parse the hex length line.
+        u32 chunk_len = 0;
+        bool digit_seen = false;
+        while (in < src_len && src[in] != '\r' && src[in] != ';')
+        {
+            const u8 c = src[in++];
+            u32 d = 0;
+            if (c >= '0' && c <= '9')
+                d = c - '0';
+            else if (c >= 'a' && c <= 'f')
+                d = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F')
+                d = c - 'A' + 10;
+            else
+                return 0;
+            chunk_len = (chunk_len << 4) | d;
+            digit_seen = true;
+            if (chunk_len > 16u * 1024u * 1024u)
+                return 0;
+        }
+        if (!digit_seen)
+            return 0;
+        // Skip optional chunk-extension (";name=value") + CRLF.
+        while (in < src_len && src[in] != '\n')
+            ++in;
+        if (in >= src_len)
+            return 0;
+        ++in; // past '\n'
+        if (chunk_len == 0)
+            return out; // last chunk; ignore trailers
+        if (in + chunk_len > src_len || out + chunk_len > dst_cap)
+            return 0;
+        for (u32 k = 0; k < chunk_len; ++k)
+            dst[out + k] = src[in + k];
+        in += chunk_len;
+        out += chunk_len;
+        // Trailing CRLF after the chunk data.
+        if (in + 2 > src_len || src[in] != '\r' || src[in + 1] != '\n')
+            return 0;
+        in += 2;
+    }
+    return out;
+}
+
 // Parse the "HTTP/1.x XXX ..." status line; returns the 3-digit
 // status code or 0 on parse failure.
 u32 ParseStatusCode(const u8* buf, u32 len)
@@ -424,15 +517,57 @@ void CmdWget(u32 argc, char** argv)
 
     const u32 status = ParseStatusCode(buf, got);
     const u32 body_off = FindBodyStart(buf, got);
-    const u32 body_len = got - body_off;
+    u32 body_len = got - body_off;
+
+    // Surface Content-Type / Content-Length so the user sees
+    // what they're getting BEFORE the body prints / writes.
+    char ctype[96];
+    char clen[32];
+    char xfer[32];
+    const u32 ctype_n = FindHeader(buf, body_off, "Content-Type", ctype, sizeof(ctype));
+    const u32 clen_n = FindHeader(buf, body_off, "Content-Length", clen, sizeof(clen));
+    const u32 xfer_n = FindHeader(buf, body_off, "Transfer-Encoding", xfer, sizeof(xfer));
 
     ConsoleWrite("WGET: HTTP ");
     WriteU64Dec(status);
-    ConsoleWrite("  ");
+    if (ctype_n > 0)
+    {
+        ConsoleWrite("  type=");
+        ConsoleWrite(ctype);
+    }
+    if (clen_n > 0)
+    {
+        ConsoleWrite("  length=");
+        ConsoleWrite(clen);
+    }
+    ConsoleWriteln("");
+
+    // Chunked transfer-encoding: decode the body in place. Most
+    // static-file servers reply with Content-Length when given
+    // Connection: close (we send that), but some (esp. dynamic
+    // content / load balancers) still send chunked even so.
+    if (xfer_n > 0 && StrCaseEqN(xfer, "chunked", 7))
+    {
+        const u32 decoded = DecodeChunked(buf + body_off, body_len, buf + body_off, kBodyCapBytes - body_off);
+        if (decoded == 0)
+        {
+            ConsoleWriteln("WGET: chunked decode failed (malformed Transfer-Encoding)");
+            duetos::mm::KFree(buf);
+            return;
+        }
+        ConsoleWrite("WGET: chunked-decoded ");
+        WriteU64Dec(body_len);
+        ConsoleWrite(" -> ");
+        WriteU64Dec(decoded);
+        ConsoleWriteln(" bytes");
+        body_len = decoded;
+    }
+
+    ConsoleWrite("WGET: total wire=");
     WriteU64Dec(got);
-    ConsoleWrite(" bytes total, ");
+    ConsoleWrite("  body=");
     WriteU64Dec(body_len);
-    ConsoleWriteln(" body");
+    ConsoleWriteln("");
 
     if (status == 0)
     {
