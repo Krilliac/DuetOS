@@ -24,6 +24,7 @@
 - [Subsystem Isolation](kernel/Subsystem-Isolation.md)
 - [Logging and Tracing](kernel/Logging-And-Tracing.md)
 - [Diagnostics](kernel/Diagnostics.md)
+- [Fault Injection](kernel/Fault-Injection.md)
 - [Crypto Primitives](kernel/Crypto.md)
 - [Utilities](kernel/Util.md)
 - [In-Kernel Apps](kernel/Kernel-Apps.md)

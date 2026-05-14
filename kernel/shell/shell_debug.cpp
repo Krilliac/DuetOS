@@ -30,6 +30,7 @@
 #include "sched/sched.h"
 #include "core/init.h"
 #include "diag/event_trace.h"
+#include "diag/fault_inject.h"
 #include "diag/fault_react.h"
 #include "diag/gdb_server.h"
 #include "diag/leak_detector.h"
@@ -2715,6 +2716,51 @@ void CmdMetrics()
 {
     duetos::core::LogMetrics(duetos::core::LogLevel::Info, "shell", "user-requested");
     ConsoleWriteln("(also logged to kernel ring at INFO)");
+}
+
+void CmdFaultInject(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("FAULT-INJECT: USAGE:");
+        ConsoleWriteln("    FAULT-INJECT NULL-DEREF   KERNEL #PF FROM AN UNMAPPED VA");
+        ConsoleWriteln("    FAULT-INJECT PANIC        DELIBERATE KERNEL PANIC");
+        ConsoleWriteln("    FAULT-INJECT OOM-SLAB     DRAIN A SLAB TO SlabAlloc==nullptr");
+        return;
+    }
+    const char* arg = argv[1];
+    using ::duetos::diag::fault_inject::FaultClass;
+    FaultClass fc;
+    if (StrEq(arg, "null-deref"))
+    {
+        fc = FaultClass::NullDeref;
+    }
+    else if (StrEq(arg, "panic"))
+    {
+        fc = FaultClass::Panic;
+    }
+    else if (StrEq(arg, "oom-slab"))
+    {
+        fc = FaultClass::OomSlab;
+    }
+    else
+    {
+        ConsoleWrite("FAULT-INJECT: UNKNOWN CLASS ");
+        ConsoleWriteln(arg);
+        ShellSetExit(1);
+        return;
+    }
+    const auto r = ::duetos::diag::fault_inject::Trigger(fc);
+    // Only OomSlab returns; NullDeref and Panic transferred control
+    // to the trap or panic path before reaching this point.
+    if (r.has_value())
+    {
+        ConsoleWriteln("FAULT-INJECT: OOM-SLAB OK (RECOVERED FROM SlabAlloc==nullptr)");
+        return;
+    }
+    ConsoleWrite("FAULT-INJECT: ERROR ");
+    ConsoleWriteln(::duetos::core::ErrorCodeName(r.error()));
+    ShellSetExit(1);
 }
 
 } // namespace duetos::core::shell::internal

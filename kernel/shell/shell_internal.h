@@ -425,6 +425,7 @@ void CmdLogarea(u32 argc, char** argv);
 void CmdKdbg(u32 argc, char** argv);
 void CmdDfix(u32 argc, char** argv);
 void CmdMetrics();
+void CmdFaultInject(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
 // Admin gate. Returns true if the current user has the admin role,

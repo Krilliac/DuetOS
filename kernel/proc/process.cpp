@@ -677,6 +677,8 @@ const char* CapName(Cap c)
         return "Input";
     case kCapNetAdmin:
         return "NetAdmin";
+    case kCapDiag:
+        return "Diag";
     case kCapCount:
         return "<sentinel>";
     default:
@@ -898,6 +900,7 @@ void ProcessSelfTest()
         Expect(!CapSetHas(empty, kCapNet), "empty has no Net");
         Expect(!CapSetHas(empty, kCapInput), "empty has no Input");
         Expect(!CapSetHas(empty, kCapNetAdmin), "empty has no NetAdmin");
+        Expect(!CapSetHas(empty, kCapDiag), "empty has no Diag");
     }
     {
         constexpr CapSet trusted = CapSetTrusted();
@@ -910,6 +913,7 @@ void ProcessSelfTest()
         Expect(CapSetHas(trusted, kCapNet), "trusted has Net");
         Expect(CapSetHas(trusted, kCapInput), "trusted has Input");
         Expect(CapSetHas(trusted, kCapNetAdmin), "trusted has NetAdmin");
+        Expect(CapSetHas(trusted, kCapDiag), "trusted has Diag");
     }
 
     // ----- Boundary cases on the cap enum -----
@@ -951,6 +955,7 @@ void ProcessSelfTest()
     Expect(StrEqual(CapName(kCapNet), "Net"), "CapName(Net)");
     Expect(StrEqual(CapName(kCapInput), "Input"), "CapName(Input)");
     Expect(StrEqual(CapName(kCapNetAdmin), "NetAdmin"), "CapName(NetAdmin)");
+    Expect(StrEqual(CapName(kCapDiag), "Diag"), "CapName(Diag)");
     Expect(StrEqual(CapName(kCapCount), "<sentinel>"), "CapName(kCapCount) == <sentinel>");
 
     // Catches "added an enum value, forgot the switch arm" — every

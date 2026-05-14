@@ -72,6 +72,15 @@ enum class ProbeId : u8
                           // the elapsed-silence tick count as `value`;
                           // attached GDB can `b duetos::debug::ProbeFire`
                           // to halt at the exact tick the wedge tripped.
+    kFaultInjectFired,    // diag::fault_inject::Trigger entered. Caller
+                          // passes the FaultClass enum value as `value`
+                          // so an attached GDB can break at the exact
+                          // frame the harness fired — the deliberate
+                          // panic / kernel PF / slab-OOM trigger lives
+                          // one stack frame up. ArmedLog by default so a
+                          // clean boot stays quiet (the harness is never
+                          // entered by accident) and any trigger leaves
+                          // a sentinel line + a fire count for triage.
 
     // Medium-frequency events — disarmed by default, the
     // operator arms these when hunting a specific issue.

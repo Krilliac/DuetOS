@@ -214,6 +214,7 @@
 #include "ipc/iocp.h"
 #include "diag/boot_progress.h"
 #include "diag/event_trace.h"
+#include "diag/fault_inject.h"
 #include "diag/fault_react.h"
 #include "diag/fix_journal.h"
 #include "diag/fix_journal_persist.h"
@@ -2423,6 +2424,21 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                        []()
                                        {
                                            duetos::mm::SlabSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // Deliberate fault-injection harness (kernel/diag/fault_inject).
+        // Only the recoverable OomSlab class runs at boot — the panic
+        // and NullDeref classes are non-returning and would halt the
+        // box. The self-test exists so the recoverable-OOM path is
+        // exercised every boot, not just when an operator types the
+        // shell command. Same Phase::Sched bucket as the slab self-
+        // test because the harness creates its own SlabCache and so
+        // shares the slab subsystem's "scheduler must be online"
+        // prerequisite.
+        duetos::core::InitcallRegister(duetos::core::Phase::Sched, "fault-inject-selftest",
+                                       []()
+                                       {
+                                           duetos::diag::fault_inject::FaultInjectSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
         // Dynamic event tracer self-test (plan D2). Verifies the
