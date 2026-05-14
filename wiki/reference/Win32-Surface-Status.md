@@ -2610,6 +2610,82 @@ slowly closes the gap with real Windows.
 
 ---
 
+## 11b. i386 (PE32) companion DLL set
+
+The kernel preloads a parallel set of i386 (PE32, Machine=0x014C,
+OptHdrMagic=0x10B) DLLs into every PE32 process's address space.
+They are companions to the 44 PE32+ (x86_64) DLLs listed in section
+1; the file basenames inside the build tree differ
+(`<dll>_32.dll` source, `<dll>.dll` output, set via
+`/out:` basename so the Export Directory's Name field matches the
+i386 importer's descriptor). Sources live in
+`userland/libs/<dll>_32/`.
+
+Today's i386 surface (~280 exports, 13 DLLs):
+
+| DLL          | Exports | Source                                |
+|--------------|---------|---------------------------------------|
+| kernel32     | ~40     | `userland/libs/kernel32_32/`         |
+| msvcrt       | ~50     | `userland/libs/msvcrt_32/`           |
+| user32       | ~60     | `userland/libs/user32_32/`           |
+| gdi32        | ~45     | `userland/libs/gdi32_32/`            |
+| advapi32     | 24      | `userland/libs/advapi32_32/`         |
+| comctl32     | 5       | `userland/libs/comctl32_32/`         |
+| comdlg32     | 1       | `userland/libs/comdlg32_32/`         |
+| crypt32      | 10      | `userland/libs/crypt32_32/`          |
+| iphlpapi     | 4       | `userland/libs/iphlpapi_32/`         |
+| shell32      | 2       | `userland/libs/shell32_32/`          |
+| shlwapi      | 1       | `userland/libs/shlwapi_32/`          |
+| ws2_32       | ~40     | `userland/libs/ws2_32_32/`           |
+| bcrypt       | 1       | `userland/libs/bcrypt_32/`           |
+
+The set was sized to cover NetSurf 3.11's 446-import surface; the
+function-level audit lives in the git log entry for that slice.
+
+Most exports are safe-ignore stubs. The non-trivial real
+implementations:
+
+- `ws2_32_32` drives the kernel socket pool via SYS_SOCKET_OP
+  (the same path the PE32+ ws2_32 uses), so PE32 callers get
+  real DNS / TCP. `htons` / `ntohs` / `htonl` / `ntohl` are
+  real bit-swaps. `inet_addr` / `inet_ntoa` parse real dotted-
+  quad strings.
+- `kernel32_32` covers full process / thread / heap / time /
+  module surface with real syscall trampolines for the
+  syscall-backed entries (GetCurrentProcessId, GetTickCount,
+  Sleep, etc.) and sentinel returns for the pseudo-handles.
+- `msvcrt_32` provides real string + memory intrinsics
+  (memcpy / strlen / strcmp / etc.) and a bump-allocator
+  malloc / free until the proper heap port lands.
+- `shlwapi_32::PathAppendA` walks the path and appends a
+  separator — the only non-stub in the rest of the surface.
+- `advapi32_32::SystemFunction036` and `bcrypt_32::BCryptGenRandom`
+  return LCG entropy so consumers see non-zero bytes.
+
+Live verification: `userland/apps/pe32_rich/pe32_rich.c` imports
+one or two functions from each i386 DLL and prints a per-DLL
+`[pe32-rich] <name> ok` line. Every ring3 boot exercises the
+full chain.
+
+What's still GAP for the i386 set:
+
+- No 32-bit Win32 thunks page. Unresolved PE32 imports point at
+  the 64-bit catch-all VA (kWin32ThunksVa = 0x60000000), which
+  is **unmapped** in PE32 ASs — so the call faults visibly.
+  Adequate as a "loud fail" v0; a real 32-bit thunks page lets
+  PE32s survive their first unresolved import.
+- No 32-bit TEB. PE32 callers that dereference `fs:[0x18]` (TEB
+  self-pointer) / `fs:[0x30]` (PEB) fault — fs base is the
+  hidden GDT descriptor base, currently zero for PE32 user
+  data.
+- No `__chkstk` for MSVC-built PE32s. The CRT probes the stack
+  page-by-page during startup; without an _alloca-style
+  trampoline the prologue faults at first `sub esp, large`.
+- File I/O surface stubbed throughout (`fopen` / `fread` /
+  `CreateFileA` etc.). The VFS-aware PE32 spawn slice lands
+  these the same time the 64-bit set gets its FS routing
+  through `mm::AddressSpace`'s permission gate.
+
 ## 12. Where to start filling things in
 
 If you're picking up this doc and want a task: scan the STUB
