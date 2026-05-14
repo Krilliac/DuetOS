@@ -324,26 +324,6 @@ add_custom_command(
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_WINKILL_HEADER}")
 
 # ----------------------------------------------------------------------------
-# Real Windows PE — unity_engine.exe (~652 KiB Unity 2022 LTS standalone
-# launcher, MIT-licensed, vendored from NSMB-MarioVsLuigi v2.1.1.0).
-# Same embed pattern as windows-kill above. The loader's catch-all
-# resolves UnityPlayer.dll!UnityMain2 to a NO-OP thunk; the kernel32
-# imports route through the existing Win32 thunks table. See
-# userland/apps/unity_engine/README.md for full provenance.
-# ----------------------------------------------------------------------------
-set(DUETOS_UNITY_SRC    "${CMAKE_SOURCE_DIR}/userland/apps/unity_engine/unity_engine.exe")
-set(DUETOS_UNITY_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_unity_pe.h")
-add_custom_command(
-    OUTPUT "${DUETOS_UNITY_HEADER}"
-    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
-            "${DUETOS_UNITY_SRC}" "${DUETOS_UNITY_HEADER}"
-            kBinUnityEngineBytes --namespace "duetos::fs::generated"
-    DEPENDS "${DUETOS_UNITY_SRC}" "${DUETOS_EMBED_BLOB_SCRIPT}"
-    COMMENT "Embedding real Unity-built PE /bin/unity_engine.exe"
-    VERBATIM)
-list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_UNITY_HEADER}")
-
-# ----------------------------------------------------------------------------
 # UEFI loader bytes — embed BOOTX64.EFI into the kernel image so the
 # disk installer can copy it onto the freshly-formatted ESP. Same
 # embed pattern as windows-kill above; depends on the duetos-uefi

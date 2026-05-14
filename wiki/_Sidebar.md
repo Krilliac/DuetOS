@@ -101,6 +101,7 @@
 - [Wiki Auto-Sections](tooling/Wiki-Auto-Sections.md)
 - [duet-pkg (package manager)](tooling/Duet-Pkg.md)
 - [Portable Native Apps](tooling/Native-Apps.md)
+- [Install Flow (third-party apps)](tooling/Install-Flow.md)
 - [Live Updates](tooling/Live-Updates.md)
 
 ### Specifications
