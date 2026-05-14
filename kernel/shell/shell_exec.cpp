@@ -28,6 +28,7 @@
 #include "loader/elf_loader.h"
 #include "proc/process.h"
 #include "proc/spawn.h"
+#include "util/zip.h"
 
 namespace duetos::core::shell::internal
 {
@@ -356,6 +357,184 @@ void CmdExec(u32 argc, char** argv)
     WriteU64Dec(new_pid);
     ConsoleWriteln(" queued.");
     ConsoleWriteln("EXEC: (use `ps` to observe, kernel log for entry line.)");
+}
+
+// unzip <archive-path> [-l]
+//
+// Reads a ZIP archive from any readable VFS path (ramfs or FAT32),
+// walks the central directory, and either lists entries (-l) or
+// extracts each one to the calling process's CWD-relative
+// /unzip/<entry-path> via Fat32CreateAtPath + Fat32MkdirAtPath.
+// Mirrors `unzip -l` and `unzip -d` from POSIX. v0 limits:
+//   - Archive must fit in kTmpFsContentMax (the shared scratch).
+//   - Extracted entries must fit in a 1 MiB per-entry decompress
+//     buffer.
+//   - Extract destination is a FAT32 volume (first mounted) —
+//     ramfs is read-only.
+void CmdUnzip(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("UNZIP: USAGE: unzip <archive> [-l]");
+        ConsoleWriteln("       -l     list entries only (no extract)");
+        ConsoleWriteln("       (default) extract into /unzip/ on FAT32 vol 0");
+        return;
+    }
+    const bool list_only = (argc >= 3 && argv[2][0] == '-' && argv[2][1] == 'l' && argv[2][2] == '\0');
+
+    char scratch[duetos::fs::kTmpFsContentMax];
+    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
+    if (n == static_cast<u32>(-1))
+    {
+        ConsoleWrite("UNZIP: NO SUCH FILE: ");
+        ConsoleWriteln(argv[1]);
+        return;
+    }
+    if (n == 0)
+    {
+        ConsoleWriteln("UNZIP: ARCHIVE IS EMPTY");
+        return;
+    }
+
+    duetos::util::ZipReader r{};
+    duetos::util::ZipStatus rc = duetos::util::ZipOpen(reinterpret_cast<const u8*>(scratch), n, &r);
+    if (rc != duetos::util::ZipStatus::Ok)
+    {
+        ConsoleWrite("UNZIP: NOT A ZIP / OPEN FAILED: ");
+        ConsoleWriteln(duetos::util::ZipStatusName(rc));
+        return;
+    }
+
+    ConsoleWrite("UNZIP: ");
+    WriteU64Dec(r.entry_count);
+    ConsoleWrite(" ENTRIES, CENTRAL DIR ");
+    WriteU64Dec(r.central_size);
+    ConsoleWriteln(" BYTES");
+
+    // The FAT32 destination is only consulted when actually
+    // extracting. Resolve it once so missing-volume errors fire
+    // before we start decompressing.
+    const duetos::fs::fat32::Volume* vol = nullptr;
+    if (!list_only)
+    {
+        vol = duetos::fs::fat32::Fat32Volume(0);
+        if (vol == nullptr)
+        {
+            ConsoleWriteln("UNZIP: NO FAT32 VOLUME MOUNTED — pass -l to list");
+            return;
+        }
+        // Pre-create the top-level /unzip/ directory; if it
+        // already exists we ignore the failure (mkdir is
+        // idempotent at the consumer level).
+        (void)duetos::fs::fat32::Fat32MkdirAtPath(vol, "/unzip");
+    }
+
+    constexpr u32 kPerEntryCap = 1u << 20; // 1 MiB
+    static u8 entry_buf[kPerEntryCap];
+    u32 extracted = 0;
+    u32 skipped = 0;
+    u32 failed = 0;
+    for (u32 i = 0; i < r.entry_count; ++i)
+    {
+        duetos::util::ZipEntryInfo info{};
+        rc = duetos::util::ZipReadEntry(r, i, &info);
+        if (rc != duetos::util::ZipStatus::Ok)
+        {
+            ConsoleWrite("UNZIP:   [");
+            WriteU64Dec(i);
+            ConsoleWrite("] READ ERR: ");
+            ConsoleWriteln(duetos::util::ZipStatusName(rc));
+            ++failed;
+            continue;
+        }
+        ConsoleWrite("  ");
+        WriteU64Dec(info.uncompressed_size);
+        ConsoleWrite("\t");
+        ConsoleWriteln(info.name);
+        if (list_only)
+            continue;
+        if (info.uncompressed_size > kPerEntryCap)
+        {
+            ConsoleWriteln("    -> SKIP (entry > 1 MiB)");
+            ++skipped;
+            continue;
+        }
+        // Directory entry: just plant the directory.
+        if (info.name_len > 0 && info.name[info.name_len - 1] == '/')
+        {
+            char dirpath[300];
+            duetos::u32 di = 0;
+            const char* prefix = "/unzip/";
+            while (prefix[di] != '\0' && di < sizeof(dirpath) - 1)
+            {
+                dirpath[di] = prefix[di];
+                ++di;
+            }
+            for (duetos::u32 j = 0; j < info.name_len && di < sizeof(dirpath) - 1; ++j)
+                dirpath[di++] = info.name[j];
+            // Trim trailing slash so Fat32MkdirAtPath sees a
+            // bare directory basename.
+            if (di > 0 && dirpath[di - 1] == '/')
+                --di;
+            dirpath[di] = '\0';
+            (void)duetos::fs::fat32::Fat32MkdirAtPath(vol, dirpath);
+            continue;
+        }
+        u32 produced = 0;
+        rc = duetos::util::ZipExtractEntry(r, i, entry_buf, sizeof(entry_buf), &produced);
+        if (rc != duetos::util::ZipStatus::Ok)
+        {
+            ConsoleWrite("    -> EXTRACT FAIL: ");
+            ConsoleWriteln(duetos::util::ZipStatusName(rc));
+            ++failed;
+            continue;
+        }
+        // Build /unzip/<name> and recursively mkdir every
+        // intermediate path component the entry implies. ZIP
+        // entries that nest two levels deep require pre-existing
+        // parents (Fat32CreateAtPath calls ResolveParentDir which
+        // does NOT auto-mkdir).
+        char outpath[300];
+        duetos::u32 oi = 0;
+        const char* prefix = "/unzip/";
+        while (prefix[oi] != '\0' && oi < sizeof(outpath) - 1)
+        {
+            outpath[oi] = prefix[oi];
+            ++oi;
+        }
+        const duetos::u32 base = oi;
+        for (duetos::u32 j = 0; j < info.name_len && oi < sizeof(outpath) - 1; ++j)
+            outpath[oi++] = info.name[j];
+        outpath[oi] = '\0';
+        // Walk forward from `base` and mkdir each "/"-terminated
+        // intermediate. /unzip/foo/bar/baz.txt -> mkdir /unzip/foo,
+        // mkdir /unzip/foo/bar, then create /unzip/foo/bar/baz.txt.
+        for (duetos::u32 j = base; j < oi; ++j)
+        {
+            if (outpath[j] == '/')
+            {
+                outpath[j] = '\0';
+                (void)duetos::fs::fat32::Fat32MkdirAtPath(vol, outpath);
+                outpath[j] = '/';
+            }
+        }
+        const auto wrote = duetos::fs::fat32::Fat32CreateAtPath(vol, outpath, entry_buf, produced);
+        if (wrote != static_cast<duetos::i64>(produced))
+        {
+            ConsoleWrite("    -> CREATE FAIL: ");
+            ConsoleWriteln(outpath);
+            ++failed;
+            continue;
+        }
+        ++extracted;
+    }
+    ConsoleWrite("UNZIP: ");
+    WriteU64Dec(extracted);
+    ConsoleWrite(" EXTRACTED, ");
+    WriteU64Dec(skipped);
+    ConsoleWrite(" SKIPPED, ");
+    WriteU64Dec(failed);
+    ConsoleWriteln(" FAILED");
 }
 
 void CmdReadelf(u32 argc, char** argv)

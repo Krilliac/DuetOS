@@ -15,6 +15,10 @@
 #include "drivers/video/theme.h"
 #include "fs/fat32.h"
 #include "fs/ramfs.h"
+#include "mm/address_space.h"
+#include "mm/kheap.h"
+#include "proc/process.h"
+#include "proc/spawn.h"
 
 namespace duetos::apps::files
 {
@@ -583,6 +587,129 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         DrawRamfs(cx, cy, cw, ch);
 }
 
+// Spawn a PE / ELF directly from a ramfs node's embedded bytes.
+// Returns true if the file was an executable and a spawn was
+// attempted (regardless of whether the spawn ultimately
+// succeeded — caller doesn't need to retry).
+bool MaybeLaunchRamfsExe(const duetos::fs::RamfsNode* sel)
+{
+    if (sel == nullptr || sel->name == nullptr || sel->file_bytes == nullptr || sel->file_size == 0)
+        return false;
+    const bool is_exe = EndsWithCi(sel->name, ".exe");
+    const bool is_elf = EndsWithCi(sel->name, ".elf");
+    if (!is_exe && !is_elf)
+        return false;
+    char tag[40];
+    duetos::u32 ti = 0;
+    const char* prefix = "ramfs-launch:";
+    while (prefix[ti] != '\0' && ti < sizeof(tag) - 1)
+    {
+        tag[ti] = prefix[ti];
+        ++ti;
+    }
+    duetos::u32 ni = 0;
+    while (sel->name[ni] != '\0' && ti < sizeof(tag) - 1)
+    {
+        tag[ti++] = sel->name[ni++];
+    }
+    tag[ti] = '\0';
+    const duetos::u64 pid =
+        is_exe ? duetos::core::SpawnPeFile(tag, sel->file_bytes, sel->file_size, duetos::core::CapSetTrusted(),
+                                           duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                           duetos::core::kTickBudgetTrusted)
+               : duetos::core::SpawnElfFile(tag, sel->file_bytes, sel->file_size, duetos::core::CapSetTrusted(),
+                                            duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                            duetos::core::kTickBudgetTrusted);
+    duetos::arch::SerialWrite("[files] launch ");
+    duetos::arch::SerialWrite(is_exe ? "PE" : "ELF");
+    duetos::arch::SerialWrite(" name=");
+    duetos::arch::SerialWrite(sel->name);
+    duetos::arch::SerialWrite(pid != 0 ? " spawn=OK pid=" : " spawn=FAIL");
+    if (pid != 0)
+    {
+        char hex[20];
+        duetos::u32 hi = 0;
+        for (int i = 60; i >= 0; i -= 4)
+        {
+            const auto nib = (pid >> i) & 0xF;
+            hex[hi++] = static_cast<char>(nib < 10 ? '0' + nib : 'a' + nib - 10);
+        }
+        hex[hi] = '\0';
+        duetos::arch::SerialWrite(hex);
+    }
+    duetos::arch::SerialWrite("\n");
+    duetos::drivers::video::NotifyShow(pid != 0 ? "launched" : "launch failed");
+    return true;
+}
+
+// FAT32 counterpart: read the selected file into a heap buffer,
+// hand it to SpawnPeFile / SpawnElfFile. Same end-to-end shape
+// the start-menu launcher already uses (kernel/core/menu_dispatch.cpp).
+// Returns true iff the entry was an executable and a spawn was
+// attempted.
+bool MaybeLaunchFat32Entry(const duetos::fs::fat32::DirEntry& e)
+{
+    const bool is_exe = EndsWithCi(e.name, ".EXE");
+    const bool is_elf = EndsWithCi(e.name, ".ELF");
+    if (!is_exe && !is_elf)
+        return false;
+    constexpr duetos::u64 kMaxLaunchSize = 8 * 1024 * 1024;
+    if (e.size_bytes == 0 || e.size_bytes > kMaxLaunchSize)
+    {
+        duetos::drivers::video::NotifyShow("file too large to launch");
+        return true;
+    }
+    const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+    if (vol == nullptr)
+    {
+        duetos::drivers::video::NotifyShow("no fat32 volume");
+        return true;
+    }
+    auto* staging = static_cast<duetos::u8*>(duetos::mm::KMalloc(e.size_bytes));
+    if (staging == nullptr)
+    {
+        duetos::drivers::video::NotifyShow("OOM staging exe");
+        return true;
+    }
+    const auto got = duetos::fs::fat32::Fat32ReadFile(vol, &e, staging, e.size_bytes);
+    if (got != static_cast<duetos::i64>(e.size_bytes))
+    {
+        duetos::mm::KFree(staging);
+        duetos::drivers::video::NotifyShow("read failed");
+        return true;
+    }
+    char tag[40];
+    duetos::u32 ti = 0;
+    const char* prefix = "fat32-launch:";
+    while (prefix[ti] != '\0' && ti < sizeof(tag) - 1)
+    {
+        tag[ti] = prefix[ti];
+        ++ti;
+    }
+    for (duetos::u32 i = 0; e.name[i] != '\0' && ti < sizeof(tag) - 1; ++i)
+        tag[ti++] = e.name[i];
+    tag[ti] = '\0';
+    const duetos::u64 pid =
+        is_exe ? duetos::core::SpawnPeFile(tag, staging, e.size_bytes, duetos::core::CapSetTrusted(),
+                                           duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                           duetos::core::kTickBudgetTrusted)
+               : duetos::core::SpawnElfFile(tag, staging, e.size_bytes, duetos::core::CapSetTrusted(),
+                                            duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                            duetos::core::kTickBudgetTrusted);
+    // SpawnPeFile/SpawnElfFile copies the bytes into the new
+    // process's AS during PeLoad / ElfLoad, so the staging buffer
+    // can be freed immediately after the call returns regardless
+    // of whether the spawn succeeded.
+    duetos::mm::KFree(staging);
+    duetos::arch::SerialWrite("[files] launch ");
+    duetos::arch::SerialWrite(is_exe ? "PE" : "ELF");
+    duetos::arch::SerialWrite(" name=");
+    duetos::arch::SerialWrite(e.name);
+    duetos::arch::SerialWrite(pid != 0 ? " spawn=OK\n" : " spawn=FAIL\n");
+    duetos::drivers::video::NotifyShow(pid != 0 ? "launched" : "launch failed");
+    return true;
+}
+
 bool OpenFat32Selected()
 {
     if (g_state.fat_selection >= g_state.fat_count)
@@ -612,6 +739,10 @@ bool OpenFat32Selected()
             duetos::arch::SerialWrite(e.name);
             duetos::arch::SerialWrite("\n");
         }
+        return true;
+    }
+    if (MaybeLaunchFat32Entry(e))
+    {
         return true;
     }
     if (EndsWithCi(e.name, ".TXT"))
@@ -1146,9 +1277,18 @@ bool FilesFeedChar(char c)
             }
             else
             {
-                duetos::arch::SerialWrite("[files] open file name=");
-                duetos::arch::SerialWrite(sel->name ? sel->name : "(unnamed)");
-                duetos::arch::SerialWrite("\n");
+                // First chance: launchable PE / ELF — spawn it like
+                // a real installed app. MaybeLaunchRamfsExe handles
+                // .exe / .elf and reports the result; if it returns
+                // true we are done. Anything else falls through to
+                // the legacy "open file" log line so the user gets a
+                // breadcrumb even when no handler matches.
+                if (!MaybeLaunchRamfsExe(sel))
+                {
+                    duetos::arch::SerialWrite("[files] open file name=");
+                    duetos::arch::SerialWrite(sel->name ? sel->name : "(unnamed)");
+                    duetos::arch::SerialWrite("\n");
+                }
             }
             return true;
         }

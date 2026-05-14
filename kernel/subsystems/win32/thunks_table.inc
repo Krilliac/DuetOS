@@ -1059,6 +1059,18 @@
     {"kernel32.dll", "RtlCaptureStackBackTrace", kOffSehNoUnwind},
     {"kernel32.dll", "RtlCaptureContext", kOffSehNoUnwind}, {"kernel32.dll", "RtlLookupFunctionEntry", kOffSehNoUnwind},
     {"kernel32.dll", "RtlVirtualUnwind", kOffSehNoUnwind},
+    // RtlUnwindEx (no-op): VOID, ignores all args, never actually
+    // unwinds. The caller (CRT exception dispatcher) treats the
+    // return as "unwind completed silently" and continues.
+    {"kernel32.dll", "RtlUnwindEx", kOffSehNoUnwind},
+    // RtlPcToFileHeader: distinct from the others above because
+    // it has an out *BaseOfImage param. Plain return-0 leaves
+    // *BaseOfImage uninitialised, which crashes the MSVC CRT
+    // exception bootstrap (Unity launcher PF'd at cr2=0x20).
+    // kOffPcToFileHeaderNull writes 0 to *BaseOfImage then
+    // returns 0 — the documented "PC not in any loaded image"
+    // shape.
+    {"kernel32.dll", "RtlPcToFileHeader", kOffPcToFileHeaderNull},
 
     // Toolhelp32 + thread management (empty snapshot / no
     // ops). Real implementation requires the kernel to

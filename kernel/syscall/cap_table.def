@@ -54,6 +54,11 @@ X(SYS_DIR_REWIND, (1ULL << ::duetos::core::kCapFsRead))
 // row removes that redundancy. (A4-followup, 2026-04-27.)
 X(SYS_READ, (1ULL << ::duetos::core::kCapFsRead))
 X(SYS_SPAWN, (1ULL << ::duetos::core::kCapFsRead))
+// SYS_DLL_LOAD_FROM_PATH — LoadLibraryW from /lib/<name>. Reads
+// the DLL bytes out of the ramfs, so kCapFsRead gates the read
+// side. The mapping/registration happens in the calling process's
+// own AS; no extra kCapSpawnThread needed.
+X(SYS_DLL_LOAD_FROM_PATH, (1ULL << ::duetos::core::kCapFsRead))
 
 // kCapSpawnThread — create an additional ring-3 task in the caller.
 X(SYS_THREAD_CREATE, (1ULL << ::duetos::core::kCapSpawnThread))

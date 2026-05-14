@@ -154,6 +154,22 @@ void PeReport(const u8* file, u64 file_len);
 using PeReportFn = void (*)(const char* chunk);
 void PeQuickSummaryTo(PeReportFn writer, const u8* file, u64 file_len);
 
+/// Walk an already-mapped PE / DLL's import directory and
+/// patch each IAT slot in place. Used by `DllLoad` consumers
+/// to resolve a vendored DLL's own imports against the same
+/// preloaded DLL set the main PE sees — without this call,
+/// the DLL is loaded but its own IAT contains the on-disk
+/// (zero / placeholder) values and any export that calls one
+/// of its imports crashes on the first indirect call.
+///
+/// Returns true iff every import resolved. Returns false on a
+/// header parse failure or an unresolvable import that had no
+/// catch-all fallback. The pattern matches `PeLoad`'s
+/// internal import-walk; this is the same code reused on a
+/// loaded-DLL basis.
+bool PeResolveImportsForLoadedImage(const u8* file, u64 file_len, duetos::mm::AddressSpace* as,
+                                    const DllImage* preloaded_dlls, u64 preloaded_dll_count);
+
 struct PeLoadResult
 {
     bool ok;

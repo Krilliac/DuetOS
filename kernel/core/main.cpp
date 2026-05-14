@@ -48,6 +48,7 @@
 #include "util/datetime.h"
 #include "util/deflate.h"
 #include "util/gzip.h"
+#include "util/zip.h"
 #include "util/jpeg.h"
 #include "util/png.h"
 #include "util/tga.h"
@@ -118,7 +119,13 @@
 #include "net/wireless/beacon.h"
 #include "net/wireless/inventory.h"
 #include "crypto/aes.h"
+#include "crypto/aes_gcm.h"
 #include "crypto/aes_keywrap.h"
+#include "crypto/asn1.h"
+#include "crypto/bigint.h"
+#include "crypto/hkdf.h"
+#include "crypto/rsa.h"
+#include "crypto/x509.h"
 #include "crypto/hmac.h"
 #include "crypto/pbkdf2.h"
 #include "crypto/prf.h"
@@ -144,6 +151,7 @@
 #include "net/firewall.h"
 #include "net/stack.h"
 #include "net/tcp.h"
+#include "net/tls.h"
 #include "subsystems/graphics/graphics.h"
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
@@ -2594,6 +2602,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::TgaSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::DateTimeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::DeflateSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::ZipReaderSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::GzipZlibSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::PngSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::JpegDecoderSelfTest());
@@ -2605,6 +2614,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::crypto::PrfSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::AesSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::AesKeyWrapSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::AesGcmSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::BigIntSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::asn1::Asn1SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::RsaSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::HkdfSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::x509::X509SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::tls::TlsSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::EapolSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::FourWaySelfTest());

@@ -1010,27 +1010,49 @@ bool RenameForProcess(::duetos::core::Process* proc, const char* src, const char
 }
 
 // ---------------------------------------------------------------
-// DuetFS-backed metadata operations. These call into the Rust
-// crate via the FFI; non-DuetFS paths return false (kept simple
-// — extending into FAT32 / ramfs is its own slice).
+// DuetFS- and FAT32-backed metadata operations. DuetFS routes
+// through the Rust FFI; FAT32 routes through Fat32MkdirAtPath /
+// the matching delete path. Ramfs is read-only and returns false.
 // ---------------------------------------------------------------
 
 bool MkdirForProcess(::duetos::core::Process* proc, const char* path)
 {
     if (proc == nullptr || path == nullptr || path[0] == '\0')
         return false;
+    // DuetFS path: <duet-handle>:/sub/dir
     u32 duet_handle = 0;
     const char* duet_sub = nullptr;
-    if (!ParseDuetFsPath(proc->root, path, &duet_handle, &duet_sub))
+    if (ParseDuetFsPath(proc->root, path, &duet_handle, &duet_sub))
+    {
+        const auto dev = DuetFsDeviceFor(duet_handle);
+        u32 new_id = 0;
+        const u64 sub_len = PathLen(duet_sub);
+        const u32 st = duetfs_create_path(&dev, reinterpret_cast<const u8*>(duet_sub), sub_len + 1,
+                                          duetos::fs::duetfs::kKindDir, &new_id);
+        if (st != duetos::fs::duetfs::kStatusOk)
+            return false;
+        ::duetos::subsystems::linux::internal::InotifyPublish(duet_sub,
+                                                              ::duetos::subsystems::linux::internal::kInCreate);
+        return true;
+    }
+    // FAT32 path: a disk volume reachable via /disk/<n>/ or the
+    // process's root namespace. ParseDiskPath returns the volume
+    // index + the in-volume tail; Fat32MkdirAtPath walks the
+    // parent chain (parent must already exist) and plants a fresh
+    // directory entry with seeded "." / ".." records. This was the
+    // gap blocking installer-style "mkdir -p /Program Files/<app>"
+    // from a userland Win32 PE — the create path already routed
+    // here, but mkdir was DuetFS-only.
+    u32 disk_idx = 0;
+    const char* disk_rest = nullptr;
+    if (!ParseDiskPath(proc->root, path, &disk_idx, &disk_rest))
         return false;
-    const auto dev = DuetFsDeviceFor(duet_handle);
-    u32 new_id = 0;
-    const u64 sub_len = PathLen(duet_sub);
-    const u32 st = duetfs_create_path(&dev, reinterpret_cast<const u8*>(duet_sub), sub_len + 1,
-                                      duetos::fs::duetfs::kKindDir, &new_id);
-    if (st != duetos::fs::duetfs::kStatusOk)
+    const fat32::Volume* vol = fat32::Fat32Volume(disk_idx);
+    if (vol == nullptr)
         return false;
-    ::duetos::subsystems::linux::internal::InotifyPublish(duet_sub, ::duetos::subsystems::linux::internal::kInCreate);
+    if (!fat32::Fat32MkdirAtPath(vol, disk_rest))
+        return false;
+    ::duetos::subsystems::linux::internal::InotifyPublish(disk_rest, ::duetos::subsystems::linux::internal::kInCreate);
     return true;
 }
 

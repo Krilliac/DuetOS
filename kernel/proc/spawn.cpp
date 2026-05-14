@@ -22,7 +22,10 @@
 #include "core/panic.h"
 #include "cpu/percpu.h"
 #include "debug/inspect.h"
+#include "fs/fat32.h"
 #include "fs/ramfs.h"
+#include "fs/vfs.h"
+#include "mm/kheap.h"
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
 #include "loader/pe_loader.h"
@@ -760,6 +763,15 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             {
                 preloaded_dlls[preloaded_count] = dll.image;
                 ++preloaded_count;
+                // Resolve THIS DLL's own imports against every
+                // DLL preloaded so far. Catches the "vendored
+                // DLL chain" case where DLL N imports from
+                // kernel32 (preloaded earlier in this loop) —
+                // without this, N is loaded but its IAT is
+                // never patched and the first import call
+                // from N's exports crashes.
+                (void)duetos::core::PeResolveImportsForLoadedImage(dll.image.file, dll.image.file_len, as,
+                                                                   preloaded_dlls, preloaded_count - 1);
                 SerialWrite("[ring3] pre-loaded ");
                 SerialWrite(active_set[i].label);
                 SerialWrite(" base=");
@@ -777,6 +789,343 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 SerialWrite("\" status=");
                 SerialWrite(DllLoadStatusName(dll.status));
                 SerialWrite(" — this DLL's exports won't be resolvable via-DLL\n");
+            }
+        }
+    }
+
+    // ----------------------------------------------------------
+    // /lib/ ramfs DLL fallback. After the curated preload_set
+    // above, walk the trusted `/lib/` directory and dynamically
+    // load any *.dll file that isn't already in the preloaded
+    // set. Mirrors what SYS_DLL_LOAD_FROM_PATH does at runtime
+    // for LoadLibraryW callers — but here at PE-load time so
+    // *statically*-imported DLLs not in the curated preload
+    // also resolve via-DLL.
+    //
+    // The motivating case: a user drops a vendored Win32 DLL
+    // (UnityPlayer.dll, a third-party plugin, etc.) into /lib/
+    // and the loader picks it up without needing a CMake / embed
+    // dance. The DLL still has to be a well-formed PE the
+    // existing DllLoad understands.
+    //
+    // Skip:
+    //   - the firmware directory entry (not a DLL)
+    //   - any file whose name doesn't end in ".dll"
+    //   - any DLL whose name already matches a preloaded entry
+    //     (case-insensitive, suffix-tolerant — mirrors the
+    //     match used in ResolveImports via-DLL path)
+    if (preloaded_count < kPreloadSlotCap)
+    {
+        const fs::RamfsNode* lib_dir = fs::VfsLookup(fs::RamfsTrustedRoot(), "/lib", 8);
+        if (lib_dir != nullptr && lib_dir->children != nullptr)
+        {
+            auto ends_with_dll_ci = [](const char* name)
+            {
+                u32 n = 0;
+                while (name[n] != '\0')
+                    ++n;
+                if (n < 4)
+                    return false;
+                const char* t = name + n - 4;
+                auto lo = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; };
+                return t[0] == '.' && lo(t[1]) == 'd' && lo(t[2]) == 'l' && lo(t[3]) == 'l';
+            };
+            auto base_name_ci_eq = [](const char* a, const char* b) -> bool
+            {
+                u32 i = 0;
+                auto lo = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; };
+                while (a[i] != '\0' && b[i] != '\0')
+                {
+                    if (lo(a[i]) != lo(b[i]))
+                        return false;
+                    ++i;
+                }
+                return a[i] == b[i];
+            };
+
+            for (u64 k = 0; lib_dir->children[k] != nullptr && preloaded_count < kPreloadSlotCap; ++k)
+            {
+                const fs::RamfsNode* child = lib_dir->children[k];
+                if (child->type != fs::RamfsNodeType::kFile)
+                    continue;
+                if (child->name == nullptr || child->file_bytes == nullptr || child->file_size == 0)
+                    continue;
+                if (!ends_with_dll_ci(child->name))
+                    continue;
+                // Skip if a DLL with this name is already preloaded.
+                bool already = false;
+                for (u64 j = 0; j < preloaded_count; ++j)
+                {
+                    if (!preloaded_dlls[j].has_exports)
+                        continue;
+                    const char* ename = PeExportsDllName(preloaded_dlls[j].exports);
+                    if (ename != nullptr && base_name_ci_eq(ename, child->name))
+                    {
+                        already = true;
+                        break;
+                    }
+                }
+                if (already)
+                    continue;
+                // ASLR + collision-roll: same shape as the
+                // curated preload above, but smaller — we
+                // expect /lib/ to hold a handful of v0 DLLs.
+                const bool dyn_base = duetos::core::PeIsDynamicBase(child->file_bytes, child->file_size);
+                u64 lib_aslr_delta = 0;
+                DllLoadResult dyn{};
+                dyn.status = DllLoadStatus::HeaderParseFailed;
+                constexpr u32 kMaxLibRoll = 32;
+                for (u32 attempt = 0; attempt < kMaxLibRoll; ++attempt)
+                {
+                    const u64 trial = dyn_base ? (duetos::core::RandomU64() & 0xFF) * 4096ULL : 0ULL;
+                    const u64 size = duetos::core::PeImageSizeOf(child->file_bytes, child->file_size);
+                    const u64 pref = duetos::core::PePreferredBaseOf(child->file_bytes, child->file_size);
+                    if (size == 0 || pref == 0)
+                    {
+                        lib_aslr_delta = trial;
+                        dyn = DllLoad(child->file_bytes, child->file_size, as, lib_aslr_delta);
+                        break;
+                    }
+                    bool collides = false;
+                    for (u64 j = 0; j < preloaded_count; ++j)
+                    {
+                        const u64 a_start = preloaded_dlls[j].base_va;
+                        const u64 a_end = a_start + preloaded_dlls[j].size;
+                        const u64 b_start = pref + trial;
+                        const u64 b_end = b_start + size;
+                        if (a_start < b_end && b_start < a_end)
+                        {
+                            collides = true;
+                            break;
+                        }
+                    }
+                    if (collides && dyn_base && attempt + 1 < kMaxLibRoll)
+                        continue;
+                    lib_aslr_delta = trial;
+                    dyn = DllLoad(child->file_bytes, child->file_size, as, lib_aslr_delta);
+                    break;
+                }
+                if (dyn.status == DllLoadStatus::Ok)
+                {
+                    preloaded_dlls[preloaded_count] = dyn.image;
+                    ++preloaded_count;
+                    (void)duetos::core::PeResolveImportsForLoadedImage(dyn.image.file, dyn.image.file_len, as,
+                                                                       preloaded_dlls, preloaded_count - 1);
+                    SerialWrite("[ring3] /lib auto-preload ");
+                    SerialWrite(child->name);
+                    SerialWrite(" base=");
+                    SerialWriteHex(dyn.image.base_va);
+                    SerialWrite(" (pre-PeLoad — visible to ResolveImports)\n");
+                }
+                else
+                {
+                    SerialWrite("[ring3] /lib skip ");
+                    SerialWrite(child->name);
+                    SerialWrite(" DllLoad failed: ");
+                    SerialWrite(DllLoadStatusName(dyn.status));
+                    SerialWrite("\n");
+                }
+            }
+        }
+    }
+
+    // ----------------------------------------------------------
+    // FAT32 `/lib/` DLL fallback. Lets a user install a vendored
+    // Windows DLL via plain shell commands (wget -> unzip ->
+    // place under /lib/) without rebuilding the kernel. Mirrors
+    // the ramfs /lib/ scan above; the on-disk version uses a
+    // small static cache so the same DLL isn't re-read + leaked
+    // for every spawn.
+    //
+    // Cache: 16 slots, never freed. Per-DLL allocations land in
+    // KMalloc and the AS borrows the pointer for the life of the
+    // process. v0 simplification — a real refcount + free path
+    // is a follow-on. The cache is keyed by the on-disk
+    // filename; FAT32 short-name preservation makes that stable.
+    {
+        struct Fat32DllCacheEntry
+        {
+            char name[24];
+            u8* bytes;
+            u32 len;
+        };
+        static Fat32DllCacheEntry s_lib_cache[16] = {};
+
+        auto find_cached = [&](const char* fname) -> Fat32DllCacheEntry*
+        {
+            for (auto& e : s_lib_cache)
+            {
+                if (e.bytes == nullptr)
+                    continue;
+                u32 i = 0;
+                while (e.name[i] != '\0' && fname[i] != '\0' && e.name[i] == fname[i])
+                    ++i;
+                if (e.name[i] == fname[i])
+                    return &e;
+            }
+            return nullptr;
+        };
+        auto add_to_cache = [&](const char* fname, u8* bytes, u32 len) -> bool
+        {
+            for (auto& e : s_lib_cache)
+            {
+                if (e.bytes != nullptr)
+                    continue;
+                u32 i = 0;
+                while (fname[i] != '\0' && i + 1 < sizeof(e.name))
+                {
+                    e.name[i] = fname[i];
+                    ++i;
+                }
+                e.name[i] = '\0';
+                e.bytes = bytes;
+                e.len = len;
+                return true;
+            }
+            return false;
+        };
+
+        auto ends_with_dll = [](const char* fn)
+        {
+            u32 n = 0;
+            while (fn[n] != '\0')
+                ++n;
+            if (n < 4)
+                return false;
+            const char* t = fn + n - 4;
+            auto lo = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; };
+            return t[0] == '.' && lo(t[1]) == 'd' && lo(t[2]) == 'l' && lo(t[3]) == 'l';
+        };
+
+        if (preloaded_count < kPreloadSlotCap)
+        {
+            const fs::fat32::Volume* vol = fs::fat32::Fat32Volume(0);
+            if (vol != nullptr)
+            {
+                // Walk /LIB on FAT32. ListDir reports each entry's
+                // attributes + filename; .dll files get loaded.
+                // FAT32 is case-insensitive — match on either
+                // "lib" or "LIB".
+                fs::fat32::DirEntry lib_dir{};
+                bool have_lib = fs::fat32::Fat32LookupPath(vol, "/LIB", &lib_dir);
+                if (!have_lib)
+                    have_lib = fs::fat32::Fat32LookupPath(vol, "/lib", &lib_dir);
+                if (have_lib && (lib_dir.attributes & 0x10) != 0)
+                {
+                    constexpr u32 kMaxFatDllListing = 32;
+                    fs::fat32::DirEntry kids[kMaxFatDllListing];
+                    const u32 count =
+                        fs::fat32::Fat32ListDirByCluster(vol, lib_dir.first_cluster, kids, kMaxFatDllListing);
+                    for (u32 ki = 0; ki < count && preloaded_count < kPreloadSlotCap; ++ki)
+                    {
+                        const auto& kid = kids[ki];
+                        if ((kid.attributes & 0x10) != 0)
+                            continue; // directory
+                        if (!ends_with_dll(kid.name))
+                            continue;
+                        if (kid.size_bytes == 0 || kid.size_bytes > 64 * 1024 * 1024)
+                            continue; // cap at 64 MiB per DLL
+                        // Try cache.
+                        u8* bytes = nullptr;
+                        u32 len = 0;
+                        if (auto* hit = find_cached(kid.name); hit != nullptr)
+                        {
+                            bytes = hit->bytes;
+                            len = hit->len;
+                        }
+                        else
+                        {
+                            auto* buf = static_cast<u8*>(mm::KMalloc(kid.size_bytes));
+                            if (buf == nullptr)
+                                continue;
+                            const auto rc = fs::fat32::Fat32ReadFile(vol, &kid, buf, kid.size_bytes);
+                            if (rc != static_cast<i64>(kid.size_bytes))
+                            {
+                                mm::KFree(buf);
+                                continue;
+                            }
+                            if (!add_to_cache(kid.name, buf, kid.size_bytes))
+                            {
+                                mm::KFree(buf);
+                                continue;
+                            }
+                            bytes = buf;
+                            len = kid.size_bytes;
+                        }
+                        // Skip if a DLL with this name is already preloaded.
+                        bool already = false;
+                        for (u64 j = 0; j < preloaded_count; ++j)
+                        {
+                            if (!preloaded_dlls[j].has_exports)
+                                continue;
+                            const char* ename = PeExportsDllName(preloaded_dlls[j].exports);
+                            if (ename == nullptr)
+                                continue;
+                            // case-insensitive prefix match — FAT32
+                            // short names are uppercase, EAT names may be
+                            // mixed case.
+                            u32 i = 0;
+                            auto lo = [](char c) -> char
+                            { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; };
+                            while (ename[i] != '\0' && kid.name[i] != '\0' && lo(ename[i]) == lo(kid.name[i]))
+                                ++i;
+                            if (ename[i] == kid.name[i])
+                            {
+                                already = true;
+                                break;
+                            }
+                        }
+                        if (already)
+                            continue;
+                        const bool dyn_base = duetos::core::PeIsDynamicBase(bytes, len);
+                        u64 lib_aslr_delta = 0;
+                        DllLoadResult dyn{};
+                        dyn.status = DllLoadStatus::HeaderParseFailed;
+                        constexpr u32 kMaxFatRoll = 32;
+                        for (u32 attempt = 0; attempt < kMaxFatRoll; ++attempt)
+                        {
+                            const u64 trial = dyn_base ? (duetos::core::RandomU64() & 0xFF) * 4096ULL : 0ULL;
+                            const u64 size = duetos::core::PeImageSizeOf(bytes, len);
+                            const u64 pref = duetos::core::PePreferredBaseOf(bytes, len);
+                            if (size == 0 || pref == 0)
+                            {
+                                lib_aslr_delta = trial;
+                                dyn = DllLoad(bytes, len, as, lib_aslr_delta);
+                                break;
+                            }
+                            bool collides = false;
+                            for (u64 j = 0; j < preloaded_count; ++j)
+                            {
+                                const u64 a_start = preloaded_dlls[j].base_va;
+                                const u64 a_end = a_start + preloaded_dlls[j].size;
+                                const u64 b_start = pref + trial;
+                                const u64 b_end = b_start + size;
+                                if (a_start < b_end && b_start < a_end)
+                                {
+                                    collides = true;
+                                    break;
+                                }
+                            }
+                            if (collides && dyn_base && attempt + 1 < kMaxFatRoll)
+                                continue;
+                            lib_aslr_delta = trial;
+                            dyn = DllLoad(bytes, len, as, lib_aslr_delta);
+                            break;
+                        }
+                        if (dyn.status == DllLoadStatus::Ok)
+                        {
+                            preloaded_dlls[preloaded_count] = dyn.image;
+                            ++preloaded_count;
+                            (void)duetos::core::PeResolveImportsForLoadedImage(dyn.image.file, dyn.image.file_len, as,
+                                                                               preloaded_dlls, preloaded_count - 1);
+                            SerialWrite("[ring3] /FAT32-lib auto-preload ");
+                            SerialWrite(kid.name);
+                            SerialWrite(" base=");
+                            SerialWriteHex(dyn.image.base_va);
+                            SerialWrite("\n");
+                        }
+                    }
+                }
             }
         }
     }

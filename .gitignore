@@ -54,6 +54,7 @@ Makefile
 *.exe
 userland/apps/**/*.exe
 !userland/apps/windows_kill/windows-kill.exe
+!userland/apps/unity_engine/unity_engine.exe
 *.pdb
 *.gch
 *.pch

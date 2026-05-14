@@ -65,7 +65,10 @@
 #include "ipc/kevent.h"
 #include "ipc/kobject.h"
 #include "ipc/ksemaphore.h"
+#include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
+#include "loader/pe_loader.h"
+#include "util/random.h"
 #include "mm/kheap.h"
 #include "fs/vfs.h"
 #include "mm/address_space.h"
@@ -3569,6 +3572,154 @@ void SyscallDispatch(arch::TrapFrame* frame)
         frame->rax = ProcessFindDllBaseByName(proc, kname);
         return;
     }
+
+    case SYS_DLL_LOAD_FROM_PATH:
+    {
+        // Real LoadLibraryW from disk: look the name up under
+        // `/lib/` in the calling process's namespace, hand the
+        // bytes to DllLoad, register the resulting DllImage in the
+        // process's image table, and return the base VA. Idempotent
+        // — a second call with the same name returns the original
+        // base.
+        // kCapFsRead is enforced centrally by SyscallGate via the
+        // cap_table.def row for this number — no in-handler check.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        const u64 user_name = frame->rdi;
+        const u64 name_len = frame->rsi;
+        if (user_name == 0 || name_len == 0 || name_len >= 64)
+        {
+            frame->rax = 0;
+            return;
+        }
+        char kname[64];
+        if (!mm::CopyUserCString(kname, name_len + 1, reinterpret_cast<const void*>(user_name)).ok())
+        {
+            frame->rax = 0;
+            return;
+        }
+        // Reject path separators in the basename — the caller is
+        // supposed to pass "customdll.dll", not "../etc/passwd".
+        for (u64 i = 0; kname[i] != '\0' && i < sizeof(kname); ++i)
+        {
+            if (kname[i] == '/' || kname[i] == '\\')
+            {
+                frame->rax = 0;
+                return;
+            }
+        }
+
+        // Idempotent: if the DLL is already in the process's image
+        // table (matched by its EAT-stamped DLL name vs the
+        // requested basename, both `.dll`-suffix-tolerant), return
+        // the existing base. Mirrors Windows: a second
+        // LoadLibrary("foo.dll") returns the same HMODULE.
+        const u64 existing = ProcessFindDllBaseByName(proc, kname);
+        if (existing != 0)
+        {
+            frame->rax = existing;
+            return;
+        }
+
+        // Compose `/lib/<name>` and look it up in the trusted ramfs.
+        char kpath[80];
+        kpath[0] = '/';
+        kpath[1] = 'l';
+        kpath[2] = 'i';
+        kpath[3] = 'b';
+        kpath[4] = '/';
+        u64 p = 5;
+        for (u64 i = 0; kname[i] != '\0' && p < sizeof(kpath) - 1; ++i, ++p)
+        {
+            kpath[p] = kname[i];
+        }
+        kpath[p] = '\0';
+
+        const fs::RamfsNode* n = fs::VfsLookup(proc->root, kpath, sizeof(kpath));
+        if (n == nullptr || n->type != fs::RamfsNodeType::kFile || n->file_bytes == nullptr || n->file_size == 0)
+        {
+            arch::SerialWrite("[dll-load] miss path=\"");
+            arch::SerialWrite(kpath);
+            arch::SerialWrite("\"\n");
+            frame->rax = 0;
+            return;
+        }
+
+        // Pick an ASLR delta avoiding overlap with already-loaded
+        // DLLs in the process. Mirrors the same loop in spawn.cpp's
+        // preload path. The check uses `dll_images[]` directly
+        // because ProcessRegisterDllImage just appends to that
+        // array.
+        const u8* bytes = n->file_bytes;
+        const u64 len = n->file_size;
+        const bool dyn = PeIsDynamicBase(bytes, len);
+        const u64 want_size = PeImageSizeOf(bytes, len);
+        const u64 want_pref = PePreferredBaseOf(bytes, len);
+        u64 aslr_delta = 0;
+        constexpr u32 kMaxRolls = 32;
+        for (u32 attempt = 0; attempt < kMaxRolls; ++attempt)
+        {
+            const u64 entropy = RandomU64();
+            const u64 trial = dyn ? (entropy & 0xFF) * 4096ULL : 0ULL;
+            if (want_size == 0 || want_pref == 0)
+            {
+                aslr_delta = trial;
+                break;
+            }
+            const u64 trial_base = want_pref + trial;
+            bool collides = false;
+            for (u64 j = 0; j < proc->dll_image_count; ++j)
+            {
+                const u64 a_start = proc->dll_images[j].base_va;
+                const u64 a_end = a_start + proc->dll_images[j].size;
+                if (a_start < trial_base + want_size && trial_base < a_end)
+                {
+                    collides = true;
+                    break;
+                }
+            }
+            if (collides && dyn && attempt + 1 < kMaxRolls)
+                continue;
+            aslr_delta = trial;
+            break;
+        }
+
+        DllLoadResult dl = DllLoad(bytes, len, proc->as, aslr_delta);
+        if (dl.status != DllLoadStatus::Ok)
+        {
+            arch::SerialWrite("[dll-load] DllLoad FAIL status=");
+            arch::SerialWrite(DllLoadStatusName(dl.status));
+            arch::SerialWrite(" path=\"");
+            arch::SerialWrite(kpath);
+            arch::SerialWrite("\"\n");
+            frame->rax = 0;
+            return;
+        }
+        if (!ProcessRegisterDllImage(proc, dl.image))
+        {
+            arch::SerialWrite("[dll-load] image-table FULL pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite("\n");
+            frame->rax = 0;
+            return;
+        }
+        arch::SerialWrite("[dll-load] OK name=\"");
+        arch::SerialWrite(kname);
+        arch::SerialWrite("\" base=");
+        arch::SerialWriteHex(dl.image.base_va);
+        arch::SerialWrite(" size=");
+        arch::SerialWriteHex(dl.image.size);
+        arch::SerialWrite(" aslr_delta=");
+        arch::SerialWriteHex(aslr_delta);
+        arch::SerialWrite("\n");
+        frame->rax = dl.image.base_va;
+        return;
+    }
+
     case SYS_WIN_TRACK_POPUP:
         subsystems::win32::DoWinTrackPopup(frame);
         return;

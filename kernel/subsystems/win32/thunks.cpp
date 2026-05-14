@@ -434,12 +434,20 @@ constexpr u32 kOffPinFiberVoid = 0x11EC;  // 1 byte  — no-fiber world: SwitchT
 constexpr u32 kOffPinBadPtrSafe = 0x11ED; // 3 bytes — IsBadXPtr: can't probe, report not-bad (returns 0)
 constexpr u32 kOffPinLcidEnUs = 0x11F0;   // 6 bytes — pinned en-US LCID/LANGID (0x0409)
 
+// kOffPcToFileHeaderNull (0x1322, 15 bytes) — RtlPcToFileHeader v0
+// contract: write NULL to the out *BaseOfImage param + return NULL.
+// Distinct from kOffSehNoUnwind because that one ignores all args;
+// the CRT crashes if *BaseOfImage is left uninitialised (cr2~=0x20
+// at a deref shortly after the call). NULL-guards the out pointer
+// so callers passing nullptr don't fault inside the thunk itself.
+constexpr u32 kOffPcToFileHeaderNull = 0x1322;
+
 constexpr u8 kThunksBytes[] = {
 #include "subsystems/win32/thunks_bytecode.inc"
 };
 
 static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks page fits in two 4 KiB pages");
-static_assert(sizeof(kThunksBytes) == 0x1322, "thunk layout drifted; update kOff* constants");
+static_assert(sizeof(kThunksBytes) == 0x1331, "thunk layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The thunk
 // bytes encode 0x65000000 and 0x65000008 directly; if proc_env.h

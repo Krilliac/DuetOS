@@ -70,6 +70,7 @@
 - [Network Stack](networking/Network-Stack.md)
 - [TCP State Machine](networking/TCP-State-Machine.md)
 - [Live Internet Verification](networking/Live-Internet.md)
+- [TLS Roadmap](networking/TLS-Roadmap.md)
 - [Firewall Roadmap](networking/Firewall-Roadmap.md)
 - [DRSH Remote Access](networking/DRSH-Remote-Access.md)
 
@@ -100,6 +101,7 @@
 - [Wiki Auto-Sections](tooling/Wiki-Auto-Sections.md)
 - [duet-pkg (package manager)](tooling/Duet-Pkg.md)
 - [Portable Native Apps](tooling/Native-Apps.md)
+- [Install Flow (third-party apps)](tooling/Install-Flow.md)
 - [Live Updates](tooling/Live-Updates.md)
 
 ### Specifications

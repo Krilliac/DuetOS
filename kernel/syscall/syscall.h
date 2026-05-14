@@ -2028,6 +2028,33 @@ enum SyscallNumber : u64
     // this number; future userland diagnostics could call it
     // directly if they hold kCapDiag.
     SYS_DIAG_FAULT_INJECT = 204,
+
+    // SYS_DLL_LOAD_FROM_PATH — first half of a real LoadLibraryExW:
+    // look up <name> in the trusted ramfs `/lib/` directory, map
+    // the PE via `DllLoad`, register the resulting `DllImage` in
+    // the calling process's image table, and return the base VA.
+    // Idempotent: if a DLL with this name (or an exports-table DLL
+    // name matching the same basename) is already registered in
+    // the process, the existing base VA is returned without
+    // re-mapping.
+    //
+    //   rdi = user pointer to NUL-terminated ASCII basename
+    //         (e.g. "customdll.dll"). The handler prepends
+    //         "/lib/" and walks the ramfs.
+    //   rsi = name length in bytes (excluding NUL), capped at 63.
+    //   rax = base VA on success, 0 on miss / bad pointer /
+    //         file-not-found / DllLoad failure / image-table full.
+    //
+    // Cap: kCapFsRead (the syscall reads a file out of the
+    // kernel-owned ramfs; same gate as SYS_FILE_READ on the
+    // trusted root).
+    //
+    // This is the kernel half of `LoadLibraryW`/`LoadLibraryExW`
+    // in `userland/libs/kernel32/`. The userland thunk first calls
+    // `GetModuleHandleW` (existing SYS_DLL_BASE_BY_NAME path) and
+    // only invokes this syscall on miss, so the existing
+    // preloaded-DLL fast path stays untouched.
+    SYS_DLL_LOAD_FROM_PATH = 205,
 };
 
 // Inheritable stdio bundle for SYS_PROCESS_SPAWN_EX. Each entry
