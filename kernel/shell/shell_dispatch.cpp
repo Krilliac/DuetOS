@@ -643,34 +643,34 @@ u32 Tokenize(char* buf, char** argv)
 // New commands added here + dispatched in Dispatch — keeping
 // the two in sync is the price of not having reflection.
 const char* const kCommandSet[] = {
-    "help",      "about",     "version",     "clear",        "console",  "panic-test", "uptime",     "date",
-    "windows",   "mode",      "ls",          "cat",          "touch",    "rm",         "echo",       "cp",
-    "mv",        "wc",        "head",        "tail",         "dmesg",    "stats",      "mem",        "history",
-    "set",       "unset",     "env",         "alias",        "unalias",  "sysinfo",    "source",     "man",
-    "grep",      "find",      "time",        "which",        "seq",      "sort",       "uniq",       "cpuid",
-    "cr",        "rflags",    "tsc",         "hpet",         "ticks",    "msr",        "lapic",      "smp",
-    "lspci",     "heap",      "paging",      "fb",           "kbdstats", "mousestats", "loglevel",   "logcolor",
-    "logarea",   "kdbg",      "getenv",      "yield",        "reboot",   "halt",       "uname",      "whoami",
-    "hostname",  "pwd",       "true",        "false",        "mount",    "lsmod",      "lsblk",      "lsgpt",
-    "free",      "ps",        "spawn",       "readelf",      "hexdump",  "stat",       "basename",   "dirname",
-    "cal",       "sleep",     "reset",       "tac",          "nl",       "rev",        "expr",       "color",
-    "rand",      "flushtlb",  "checksum",    "repeat",       "kill",     "exec",       "unzip",      "wget",
-    "curl",      "sha256sum", "shasum",      "metrics",      "trace",    "read",       "guard",      "top",
-    "fatcat",    "fatls",     "fatwrite",    "fatappend",    "fatnew",   "fatrm",      "fattrunc",   "fatmkdir",
-    "fatrmdir",  "linuxexec", "translate",   "smbios",       "power",    "battery",    "thermal",    "temp",
-    "hw",        "hardware",  "gpu",         "lsgpu",        "gfx",      "nic",        "lsnic",      "ip",
-    "arp",       "ipv4",      "uuid",        "uuidgen",      "health",   "checkup",    "attacksim",  "redteam",
-    "memdump",   "leakcheck", "ifconfig",    "netinfo",      "dhcp",     "route",      "netscan",    "wifi",
-    "firewall",  "fwpolicy",  "fwtrace",     "crtrace",      "crprobe",  "net",        "usbnet",     "instr",
-    "dumpstate", "bp",        "breakpoint",  "login",        "logout",   "passwd",     "useradd",    "userdel",
-    "users",     "who",       "su",          "idlelock",     "hwmon",    "vbe",        "ping",       "nslookup",
-    "ntp",       "http",      "shutdown",    "poweroff",     "beep",     "inspect",    "theme",      "addr2sym",
-    "cap-audit", "monitor",   "secevents",   "events",       "policy",   "purple",     "purpleteam", "mkdir",
-    "rmdir",     "truncate",  "realpath",    "id",           "groups",   "nproc",      "arch",       "tty",
-    "type",      "printenv",  "df",          "du",           "loadavg",  "clearhist",  "pause",      "yes",
-    "sync",      "port",      "assert",      "watch",        "script",   "exit",       "mkfs",       "mkfs.duetfs",
-    "install",   "lastdump",  "loadtest",    "stress",       "bench",    "dbg",        "dfix",       "drshd",
-    "pe-triage", "caplog",    "live-update", "fault-inject",
+    "help",        "about",     "version",   "clear",       "console",      "panic-test", "uptime",    "date",
+    "windows",     "mode",      "ls",        "cat",         "touch",        "rm",         "echo",      "cp",
+    "mv",          "wc",        "head",      "tail",        "dmesg",        "stats",      "mem",       "history",
+    "set",         "unset",     "env",       "alias",       "unalias",      "sysinfo",    "source",    "man",
+    "grep",        "find",      "time",      "which",       "seq",          "sort",       "uniq",      "cpuid",
+    "cr",          "rflags",    "tsc",       "hpet",        "ticks",        "msr",        "lapic",     "smp",
+    "lspci",       "heap",      "paging",    "fb",          "kbdstats",     "mousestats", "loglevel",  "logcolor",
+    "logarea",     "kdbg",      "getenv",    "yield",       "reboot",       "halt",       "uname",     "whoami",
+    "hostname",    "pwd",       "true",      "false",       "mount",        "lsmod",      "lsblk",     "lsgpt",
+    "free",        "ps",        "spawn",     "readelf",     "hexdump",      "stat",       "basename",  "dirname",
+    "cal",         "sleep",     "reset",     "tac",         "nl",           "rev",        "expr",      "color",
+    "rand",        "flushtlb",  "checksum",  "repeat",      "kill",         "exec",       "unzip",     "wget",
+    "curl",        "sha256sum", "shasum",    "base64",      "metrics",      "trace",      "read",      "guard",
+    "top",         "fatcat",    "fatls",     "fatwrite",    "fatappend",    "fatnew",     "fatrm",     "fattrunc",
+    "fatmkdir",    "fatrmdir",  "linuxexec", "translate",   "smbios",       "power",      "battery",   "thermal",
+    "temp",        "hw",        "hardware",  "gpu",         "lsgpu",        "gfx",        "nic",       "lsnic",
+    "ip",          "arp",       "ipv4",      "uuid",        "uuidgen",      "health",     "checkup",   "attacksim",
+    "redteam",     "memdump",   "leakcheck", "ifconfig",    "netinfo",      "dhcp",       "route",     "netscan",
+    "wifi",        "firewall",  "fwpolicy",  "fwtrace",     "crtrace",      "crprobe",    "net",       "usbnet",
+    "instr",       "dumpstate", "bp",        "breakpoint",  "login",        "logout",     "passwd",    "useradd",
+    "userdel",     "users",     "who",       "su",          "idlelock",     "hwmon",      "vbe",       "ping",
+    "nslookup",    "ntp",       "http",      "shutdown",    "poweroff",     "beep",       "inspect",   "theme",
+    "addr2sym",    "cap-audit", "monitor",   "secevents",   "events",       "policy",     "purple",    "purpleteam",
+    "mkdir",       "rmdir",     "truncate",  "realpath",    "id",           "groups",     "nproc",     "arch",
+    "tty",         "type",      "printenv",  "df",          "du",           "loadavg",    "clearhist", "pause",
+    "yes",         "sync",      "port",      "assert",      "watch",        "script",     "exit",      "mkfs",
+    "mkfs.duetfs", "install",   "lastdump",  "loadtest",    "stress",       "bench",      "dbg",       "dfix",
+    "drshd",       "pe-triage", "caplog",    "live-update", "fault-inject",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1927,6 +1927,11 @@ void Dispatch(char* line)
         // back to the 512-byte scratch with a `(ramfs; cap=...)`
         // annotation so truncation is visible to the user.
         CmdSha256Sum(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "base64"))
+    {
+        CmdBase64(argc, argv);
         return;
     }
     if (StrEq(cmd, "pe-triage"))

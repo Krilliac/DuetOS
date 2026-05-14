@@ -762,4 +762,265 @@ void CmdSha256Sum(u32 argc, char** argv)
     }
 }
 
+// ---------------------------------------------------------------------------
+// base64 — Unix-style encode/decode. Uses the standard alphabet
+// (A-Z a-z 0-9 + /) with `=` padding per RFC 4648 §4.
+//
+// Usage:
+//   base64 <file>              encode file contents to console
+//   base64 -d <file>           decode base64 text to console
+//   base64 -d <src> <dst>      decode to FAT32 path
+//   base64 <src> <dst>         encode to FAT32 path
+//
+// Source can be a ramfs path (capped at kTmpFsContentMax) or a
+// FAT32 path (capped by a 64 KiB heap stage — base64 of a 48 KiB
+// payload is exactly 64 KiB).
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+constexpr char kB64Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+i32 B64DecodeChar(u8 c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return c - 'A';
+    if (c >= 'a' && c <= 'z')
+        return 26 + (c - 'a');
+    if (c >= '0' && c <= '9')
+        return 52 + (c - '0');
+    if (c == '+')
+        return 62;
+    if (c == '/')
+        return 63;
+    return -1;
+}
+
+u32 Base64Encode(const u8* src, u32 src_len, u8* dst, u32 dst_cap)
+{
+    const u32 need = ((src_len + 2) / 3) * 4;
+    if (dst_cap < need)
+        return 0;
+    u32 si = 0;
+    u32 di = 0;
+    while (si + 3 <= src_len)
+    {
+        const u32 v = (u32(src[si]) << 16) | (u32(src[si + 1]) << 8) | u32(src[si + 2]);
+        dst[di++] = kB64Alphabet[(v >> 18) & 0x3F];
+        dst[di++] = kB64Alphabet[(v >> 12) & 0x3F];
+        dst[di++] = kB64Alphabet[(v >> 6) & 0x3F];
+        dst[di++] = kB64Alphabet[v & 0x3F];
+        si += 3;
+    }
+    if (si + 1 == src_len)
+    {
+        const u32 v = u32(src[si]) << 16;
+        dst[di++] = kB64Alphabet[(v >> 18) & 0x3F];
+        dst[di++] = kB64Alphabet[(v >> 12) & 0x3F];
+        dst[di++] = '=';
+        dst[di++] = '=';
+    }
+    else if (si + 2 == src_len)
+    {
+        const u32 v = (u32(src[si]) << 16) | (u32(src[si + 1]) << 8);
+        dst[di++] = kB64Alphabet[(v >> 18) & 0x3F];
+        dst[di++] = kB64Alphabet[(v >> 12) & 0x3F];
+        dst[di++] = kB64Alphabet[(v >> 6) & 0x3F];
+        dst[di++] = '=';
+    }
+    return di;
+}
+
+// Returns decoded length, or 0 on malformed input. Skips
+// whitespace (per coreutils -d compatibility).
+u32 Base64Decode(const u8* src, u32 src_len, u8* dst, u32 dst_cap)
+{
+    u32 quad[4];
+    u32 qi = 0;
+    u32 di = 0;
+    u32 pad = 0;
+    for (u32 i = 0; i < src_len; ++i)
+    {
+        const u8 c = src[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n')
+            continue;
+        if (c == '=')
+        {
+            quad[qi++] = 0;
+            ++pad;
+        }
+        else
+        {
+            const i32 v = B64DecodeChar(c);
+            if (v < 0)
+                return 0;
+            if (pad > 0)
+                return 0; // base64 char after padding
+            quad[qi++] = static_cast<u32>(v);
+        }
+        if (qi == 4)
+        {
+            const u32 v = (quad[0] << 18) | (quad[1] << 12) | (quad[2] << 6) | quad[3];
+            if (di + 3 - pad > dst_cap)
+                return 0;
+            dst[di++] = static_cast<u8>((v >> 16) & 0xFF);
+            if (pad < 2)
+                dst[di++] = static_cast<u8>((v >> 8) & 0xFF);
+            if (pad < 1)
+                dst[di++] = static_cast<u8>(v & 0xFF);
+            qi = 0;
+            if (pad > 0)
+                break;
+        }
+    }
+    if (qi != 0 && pad == 0)
+        return 0; // truncated input (not byte-aligned)
+    return di;
+}
+
+// Read a file into a heap buffer. Tries FAT32 first, then
+// ramfs (via ReadFileToBuf — capped at kTmpFsContentMax).
+// Returns nullptr on failure; on success, `*out_len` is the
+// data size and the caller must KFree the returned pointer.
+u8* ReadAnyFile(const char* path, u32* out_len)
+{
+    *out_len = 0;
+    const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+    duetos::fs::fat32::DirEntry ent;
+    if (vol != nullptr && duetos::fs::fat32::Fat32LookupPath(vol, path, &ent) && (ent.attributes & 0x10) == 0)
+    {
+        if (ent.size_bytes == 0 || ent.size_bytes > 64 * 1024)
+            return nullptr;
+        auto* buf = static_cast<u8*>(duetos::mm::KMalloc(ent.size_bytes));
+        if (buf == nullptr)
+            return nullptr;
+        const auto got = duetos::fs::fat32::Fat32ReadFile(vol, &ent, buf, ent.size_bytes);
+        if (got != static_cast<duetos::i64>(ent.size_bytes))
+        {
+            duetos::mm::KFree(buf);
+            return nullptr;
+        }
+        *out_len = ent.size_bytes;
+        return buf;
+    }
+    // Fallback: ramfs / tmpfs via 512-byte scratch.
+    auto* buf = static_cast<u8*>(duetos::mm::KMalloc(duetos::fs::kTmpFsContentMax));
+    if (buf == nullptr)
+        return nullptr;
+    const u32 n = ReadFileToBuf(path, reinterpret_cast<char*>(buf), duetos::fs::kTmpFsContentMax);
+    if (n == static_cast<u32>(-1))
+    {
+        duetos::mm::KFree(buf);
+        return nullptr;
+    }
+    *out_len = n;
+    return buf;
+}
+
+} // namespace
+
+void CmdBase64(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("BASE64: usage: base64 [-d] <src> [<dst>]");
+        ConsoleWriteln("        -d     decode (default: encode)");
+        ConsoleWriteln("        <src>  source path (FAT32 or ramfs)");
+        ConsoleWriteln("        <dst>  optional FAT32 destination path");
+        return;
+    }
+    bool decode = false;
+    u32 arg = 1;
+    if (argv[1][0] == '-' && argv[1][1] == 'd' && argv[1][2] == '\0')
+    {
+        decode = true;
+        ++arg;
+        if (arg >= argc)
+        {
+            ConsoleWriteln("BASE64: -d needs a source path");
+            return;
+        }
+    }
+    const char* src_path = argv[arg++];
+    const char* dst_path = (arg < argc) ? argv[arg] : nullptr;
+
+    u32 src_len = 0;
+    auto* src = ReadAnyFile(src_path, &src_len);
+    if (src == nullptr)
+    {
+        ConsoleWrite("BASE64: NO SUCH FILE: ");
+        ConsoleWriteln(src_path);
+        return;
+    }
+
+    constexpr u32 kStageCap = 128 * 1024;
+    auto* stage = static_cast<u8*>(duetos::mm::KMalloc(kStageCap));
+    if (stage == nullptr)
+    {
+        duetos::mm::KFree(src);
+        ConsoleWriteln("BASE64: OOM staging buffer");
+        return;
+    }
+
+    u32 out_len = 0;
+    if (decode)
+    {
+        out_len = Base64Decode(src, src_len, stage, kStageCap);
+        if (out_len == 0 && src_len > 0)
+        {
+            ConsoleWriteln("BASE64: malformed input (bad char / truncated)");
+            duetos::mm::KFree(src);
+            duetos::mm::KFree(stage);
+            return;
+        }
+    }
+    else
+    {
+        out_len = Base64Encode(src, src_len, stage, kStageCap);
+        if (out_len == 0 && src_len > 0)
+        {
+            ConsoleWriteln("BASE64: encode buffer overflow");
+            duetos::mm::KFree(src);
+            duetos::mm::KFree(stage);
+            return;
+        }
+    }
+    duetos::mm::KFree(src);
+
+    if (dst_path == nullptr)
+    {
+        // Print to console.
+        for (u32 i = 0; i < out_len; ++i)
+            ConsoleWriteChar(static_cast<char>(stage[i]));
+        if (out_len == 0 || stage[out_len - 1] != '\n')
+            ConsoleWriteChar('\n');
+        duetos::mm::KFree(stage);
+        return;
+    }
+
+    const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+    if (vol == nullptr)
+    {
+        ConsoleWriteln("BASE64: NO FAT32 VOLUME MOUNTED for dst");
+        duetos::mm::KFree(stage);
+        return;
+    }
+    MkdirParents(vol, dst_path);
+    const auto wrote = duetos::fs::fat32::Fat32CreateAtPath(vol, dst_path, stage, out_len);
+    if (wrote != static_cast<duetos::i64>(out_len))
+    {
+        ConsoleWrite("BASE64: CREATE FAIL ");
+        ConsoleWriteln(dst_path);
+        duetos::mm::KFree(stage);
+        return;
+    }
+    ConsoleWrite("BASE64: ");
+    ConsoleWrite(decode ? "decoded " : "encoded ");
+    WriteU64Dec(out_len);
+    ConsoleWrite(" bytes to ");
+    ConsoleWriteln(dst_path);
+    duetos::mm::KFree(stage);
+}
+
 } // namespace duetos::core::shell::internal

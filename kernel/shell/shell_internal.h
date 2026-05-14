@@ -460,6 +460,7 @@ void CmdPeTriage(u32 argc, char** argv);
 void CmdUnzip(u32 argc, char** argv);
 void CmdWget(u32 argc, char** argv);
 void CmdSha256Sum(u32 argc, char** argv);
+void CmdBase64(u32 argc, char** argv);
 void CmdLiveUpdate(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
