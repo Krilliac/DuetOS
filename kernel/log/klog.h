@@ -673,6 +673,26 @@ void DumpLogRingFilteredAreaTo(LogTee writer, u32 area_mask, u32 max_entries);
         }                                                                                                              \
     } while (0)
 
+// Warn-once that also renders a single u64 value alongside the message.
+// Same dedup semantics as KLOG_ONCE_WARN (one fire per call site, ever),
+// but the value gives the caller a way to pin which specific instance
+// of the bug tripped — e.g. "OOB TLS slot index" with the offending idx,
+// or "unhandled IRQ vector" with the vector number. The value is
+// captured by the function call, not by the static once flag, so a
+// callsite that fires once per BAD vector still needs explicit
+// per-vector dedup; this macro is the right shape for "I want the
+// first occurrence's value, ignore the rest forever."
+#define KLOG_ONCE_WARN_V(subsys, msg, val)                                                                             \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        static bool _klog_once = false;                                                                                \
+        if (!_klog_once)                                                                                               \
+        {                                                                                                              \
+            _klog_once = true;                                                                                         \
+            ::duetos::core::LogWithValue(::duetos::core::LogLevel::Warn, (subsys), (msg), (val));                      \
+        }                                                                                                              \
+    } while (0)
+
 // -----------------------------------------------------------------
 // Area-aware variants — caller passes an explicit LogArea so a
 // runtime `logarea off net` (etc.) can silence the chatter without

@@ -239,12 +239,23 @@ u64 CurrentTaskId();
 u32 CurrentTaskWin32LastError();
 u32 SetCurrentTaskWin32LastError(u32 err);
 
+/// Per-thread Win32 TLS slot cap. The TEB-equivalent storage is a
+/// fixed-size array on each Task; idx must be `< kWin32TlsCap`.
+/// The constant has lived only as a magic literal `64` until now
+/// — promoting it to a named constant lets the bounds checks AND
+/// the storage declaration share one source of truth, so a future
+/// resize ripples through both without leaving an OOB hole.
+inline constexpr u32 kWin32TlsCap = 64;
+
 /// Win32 TLS slot value (per-thread). The slot ALLOCATION bitmap
 /// stays on Process — TlsAlloc returns one shared index. The
 /// VALUE per slot is per-thread: TlsSetValue / TlsGetValue read
 /// and write the calling Task's `win32_tls_slot_value[idx]`. idx
-/// must be < 64 (kWin32TlsCap); higher indices read 0 / writes
-/// silently drop. Kernel-only callers read 0 and ignore writes.
+/// must be < `kWin32TlsCap`; higher indices read 0 / writes
+/// silently drop. The first OOB call at each access shape lands
+/// a klog WARN with the offending idx so a Win32 shim regression
+/// surfaces in the log even though the call itself returns
+/// successfully. Kernel-only callers read 0 and ignore writes.
 u64 CurrentTaskTlsSlotValue(u32 idx);
 void SetCurrentTaskTlsSlotValue(u32 idx, u64 value);
 
