@@ -259,6 +259,107 @@ bool TlsVerifyEncryptedServerFinished(const u8 master_secret[kMasterSecretBytes]
                                       const u8 read_key[kAesGcmKeyBytes], const u8 read_iv_salt[kAesGcmFixedIvBytes],
                                       u64 seq_num, const u8* record_bytes, u32 record_len);
 
+// ---- Connection state machine ----------------------------------
+
+enum class State : u8
+{
+    Init = 0,
+    SentClientHello,
+    RecvServerHelloBundle, // got ServerHello + Cert + SrvHelloDone
+    SentClientKeyAndFinish,
+    Established,
+    Failed,
+};
+
+/// Caller-owned TLS 1.2 client connection. Holds every piece of
+/// state across the handshake plus the established-mode read /
+/// write keys. The state machine is driven by three calls:
+///
+///   1. ConnectionStart(c, random, pms, ...) — emits ClientHello
+///   2. ConnectionFeed(c, server_bytes, ...) — parses server
+///      records and emits the next client bytes (one round-trip
+///      at a time)
+///   3. After Established: ConnectionEncryptApp /
+///      ConnectionDecryptApp for application-data records.
+struct Connection
+{
+    State state;
+    u8 client_random[kClientRandomBytes];
+    u8 server_random[kServerRandomBytes];
+    u8 pre_master_secret[kPreMasterSecretBytes];
+    u8 master_secret[kMasterSecretBytes];
+
+    // Derived from key_block (RFC 5246 §6.3). For TLS_RSA_WITH_
+    // AES_128_GCM_SHA256: client_key | server_key | client_iv |
+    // server_iv (16, 16, 4, 4 bytes).
+    u8 client_write_key[kAesGcmKeyBytes];
+    u8 server_write_key[kAesGcmKeyBytes];
+    u8 client_iv_salt[kAesGcmFixedIvBytes];
+    u8 server_iv_salt[kAesGcmFixedIvBytes];
+
+    // Record-layer sequence numbers, per direction. Both reset
+    // to 0 immediately after their respective ChangeCipherSpec.
+    u64 client_seq;
+    u64 server_seq;
+
+    // Running SHA-256 of every handshake message (with the
+    // 4-byte handshake header but no record framing).
+    Transcript transcript;
+
+    // Pulled from the server's leaf certificate. The state
+    // machine RSA-encrypts the pms under this key for the
+    // ClientKeyExchange.
+    crypto::RsaPublicKey server_rsa;
+    bool server_cert_seen;
+
+    // Last error message, valid when state == Failed. Pointer
+    // into a static literal — never freed.
+    const char* err;
+};
+
+/// Initialise + emit ClientHello. Caller passes:
+///   client_random: 32 bytes of CSPRNG output
+///   pms          : 48 bytes — first two bytes MUST be 0x03 0x03
+///                  (the client's offered TLS version, per
+///                  RFC 5246 §7.4.7.1). Remaining 46 are
+///                  caller-supplied entropy.
+///
+/// Writes the ClientHello record bytes to `out` and returns the
+/// length. Advances state to SentClientHello.
+u32 ConnectionStart(Connection* c, const u8 client_random[kClientRandomBytes], const u8 pms[kPreMasterSecretBytes],
+                    u8* out, u32 cap);
+
+/// Feed bytes received from the server. The state machine peels
+/// off complete TLS records, advances state, and emits whatever
+/// client-side bytes are owed in response. Returns the number of
+/// bytes written to `out`. On state == Failed, writes nothing
+/// and sets `c->err`.
+///
+/// `server_bytes` MUST cover at least one complete record /
+/// flight worth of data (the caller buffers socket reads until a
+/// boundary). v0 simplification — real-world TLS libraries
+/// stream-decode incrementally; layering that on is a follow-on.
+u32 ConnectionFeed(Connection* c, const u8* server_bytes, u32 len, u8* out, u32 cap, RandomByteFn random_nonzero_byte);
+
+/// Encrypt an application-data payload into a wire-format TLS
+/// record. Only valid in state == Established. Wraps the payload
+/// with TlsEncryptRecord using client_write_key +
+/// client_iv_salt + client_seq, then advances client_seq.
+/// Returns the on-wire length, or 0 on capacity / state error.
+u32 ConnectionEncryptApp(Connection* c, const u8* pt, u32 pt_len, u8* dst, u32 cap);
+
+/// Decrypt one inbound application-data record. Validates the
+/// content type, decrypts under server_write_key + server_iv_salt
+/// + server_seq, then advances server_seq. Returns true on
+/// success; writes the plaintext to `pt_out` + `*pt_len_out`.
+bool ConnectionDecryptApp(Connection* c, const u8* record_bytes, u32 record_len, u8* pt_out, u32 cap, u32* pt_len_out);
+
+/// True iff the handshake has completed.
+inline bool ConnectionIsEstablished(const Connection* c)
+{
+    return c != nullptr && c->state == State::Established;
+}
+
 // ---- record-layer AES-GCM encrypt / decrypt ---------------------
 
 /// Encrypt one TLS 1.2 record. Composes a wire-format record:

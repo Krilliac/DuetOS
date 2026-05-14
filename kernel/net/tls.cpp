@@ -385,6 +385,435 @@ bool Pkcs1V15Type2Pad(const crypto::RsaPublicKey& k, const u8* msg, u32 msg_len,
 }
 
 // ---------------------------------------------------------------------------
+// Connection state machine
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+inline void ZeroBytes(u8* p, u32 n)
+{
+    for (u32 i = 0; i < n; ++i)
+        p[i] = 0;
+}
+
+inline void CopyBytes(u8* dst, const u8* src, u32 n)
+{
+    for (u32 i = 0; i < n; ++i)
+        dst[i] = src[i];
+}
+
+void ConnectionFail(Connection* c, const char* msg)
+{
+    c->state = State::Failed;
+    c->err = msg;
+}
+
+// Slice the key_block into the four per-direction outputs.
+void SplitKeyBlock(Connection* c, const u8 kb[kKeyBlockBytes])
+{
+    u32 off = 0;
+    CopyBytes(c->client_write_key, kb + off, kAesGcmKeyBytes);
+    off += kAesGcmKeyBytes;
+    CopyBytes(c->server_write_key, kb + off, kAesGcmKeyBytes);
+    off += kAesGcmKeyBytes;
+    CopyBytes(c->client_iv_salt, kb + off, kAesGcmFixedIvBytes);
+    off += kAesGcmFixedIvBytes;
+    CopyBytes(c->server_iv_salt, kb + off, kAesGcmFixedIvBytes);
+}
+
+} // namespace
+
+u32 ConnectionStart(Connection* c, const u8 client_random[kClientRandomBytes], const u8 pms[kPreMasterSecretBytes],
+                    u8* out, u32 cap)
+{
+    if (c == nullptr || client_random == nullptr || pms == nullptr || out == nullptr)
+        return 0;
+    // Zero everything except the things we're about to set.
+    c->state = State::Init;
+    CopyBytes(c->client_random, client_random, kClientRandomBytes);
+    ZeroBytes(c->server_random, kServerRandomBytes);
+    CopyBytes(c->pre_master_secret, pms, kPreMasterSecretBytes);
+    ZeroBytes(c->master_secret, kMasterSecretBytes);
+    ZeroBytes(c->client_write_key, kAesGcmKeyBytes);
+    ZeroBytes(c->server_write_key, kAesGcmKeyBytes);
+    ZeroBytes(c->client_iv_salt, kAesGcmFixedIvBytes);
+    ZeroBytes(c->server_iv_salt, kAesGcmFixedIvBytes);
+    c->client_seq = 0;
+    c->server_seq = 0;
+    TranscriptInit(&c->transcript);
+    crypto::BigIntZero(&c->server_rsa.n);
+    crypto::BigIntZero(&c->server_rsa.e);
+    c->server_rsa.n_bytes = 0;
+    c->server_cert_seen = false;
+    c->err = nullptr;
+
+    // Build the ClientHello body, then the handshake-framed body
+    // for transcript hashing, then the record-wrapped version
+    // for the wire.
+    u8 ch_body[64];
+    const u32 ch_body_len = TlsBuildClientHelloBody(c->client_random, ch_body, sizeof(ch_body));
+    if (ch_body_len == 0)
+    {
+        ConnectionFail(c, "ClientHello body build failed");
+        return 0;
+    }
+    // Mix the 4-byte-handshake-header + body into the transcript.
+    u8 hs_msg[4 + sizeof(ch_body)];
+    hs_msg[0] = kHandshakeClientHello;
+    hs_msg[1] = 0;
+    hs_msg[2] = 0;
+    hs_msg[3] = static_cast<u8>(ch_body_len);
+    CopyBytes(hs_msg + 4, ch_body, ch_body_len);
+    TranscriptUpdate(&c->transcript, hs_msg, 4 + ch_body_len);
+
+    const u32 record_len = TlsWrapHandshake(kHandshakeClientHello, ch_body, ch_body_len, out, cap);
+    if (record_len == 0)
+    {
+        ConnectionFail(c, "ClientHello record wrap failed");
+        return 0;
+    }
+    c->state = State::SentClientHello;
+    return record_len;
+}
+
+namespace
+{
+
+// Walk a buffer of consecutive TLS records and call `visit` for
+// each one. Stops at the first malformed record or when `visit`
+// returns false. Returns the number of bytes consumed.
+//
+// `visit` receives the record TYPE and a slice over the record
+// PAYLOAD (not including the 5-byte header).
+struct RecordIter
+{
+    const u8* buf;
+    u32 len;
+    u32 cursor;
+};
+
+bool RecordIterNext(RecordIter* it, RecordView* out)
+{
+    if (it->cursor + 5 > it->len)
+        return false;
+    if (!TlsPeekRecord(it->buf + it->cursor, it->len - it->cursor, out))
+        return false;
+    if (5u + out->length > it->len - it->cursor)
+        return false;
+    it->cursor += 5u + out->length;
+    return true;
+}
+
+// Walk a buffer of consecutive HANDSHAKE messages (inside a
+// single record's payload) and absorb each into the transcript
+// + dispatch to a handler. Handshake messages CAN be coalesced
+// inside a single TLS record (e.g. ServerHello + Certificate +
+// SrvHelloDone in one record); the parser handles that by
+// iterating until the record payload is exhausted.
+bool ConsumeServerHandshakes(Connection* c, const u8* hs_payload, u32 hs_payload_len)
+{
+    u32 off = 0;
+    while (off < hs_payload_len)
+    {
+        HandshakeView hv{};
+        if (!TlsPeekHandshake(hs_payload + off, hs_payload_len - off, &hv))
+        {
+            ConnectionFail(c, "malformed handshake header from server");
+            return false;
+        }
+        // Mix the full handshake message (header + body) into
+        // the transcript BEFORE dispatching so the verify_data
+        // computation later sees the canonical bytes.
+        const u32 msg_len = 4 + hv.length;
+        TranscriptUpdate(&c->transcript, hs_payload + off, msg_len);
+
+        switch (hv.type)
+        {
+        case kHandshakeServerHello:
+        {
+            u16 cipher = 0;
+            if (!TlsParseServerHello(hv.body, hv.length, c->server_random, &cipher))
+            {
+                ConnectionFail(c, "ServerHello parse failed");
+                return false;
+            }
+            break;
+        }
+        case kHandshakeCertificate:
+        {
+            const u8* leaf_der = nullptr;
+            u32 leaf_len = 0;
+            if (!TlsParseCertificateLeaf(hv.body, hv.length, &leaf_der, &leaf_len))
+            {
+                ConnectionFail(c, "Certificate parse failed");
+                return false;
+            }
+            // Pull the server's RSA public key out of the leaf
+            // cert. v0 does NOT validate the cert chain or
+            // hostname — see wiki/networking/TLS-Roadmap.md
+            // Tier 3 for the trust-store roadmap.
+            crypto::x509::Certificate parsed{};
+            if (crypto::x509::Parse(leaf_der, leaf_len, &parsed) != crypto::x509::Status::Ok)
+            {
+                ConnectionFail(c, "X.509 parse failed");
+                return false;
+            }
+            if (!parsed.subject_rsa_present)
+            {
+                ConnectionFail(c, "leaf cert has no RSA SPKI");
+                return false;
+            }
+            c->server_rsa = parsed.subject_rsa;
+            c->server_cert_seen = true;
+            break;
+        }
+        case kHandshakeServerHelloDone:
+        {
+            if (!TlsParseServerHelloDone(hv.body, hv.length))
+            {
+                ConnectionFail(c, "malformed ServerHelloDone");
+                return false;
+            }
+            // Done — we have everything we need to build the
+            // ClientKeyExchange.
+            return true;
+        }
+        default:
+            // CertificateRequest / ServerKeyExchange (for non-RSA
+            // suites) etc. show up here. v0 only negotiates
+            // TLS_RSA so we shouldn't see ServerKeyExchange; if
+            // we do, fail loudly.
+            ConnectionFail(c, "unexpected server handshake type");
+            return false;
+        }
+        off += msg_len;
+    }
+    return true; // ran out without seeing ServerHelloDone — wait for more
+}
+
+// Compose the second client flight:
+//   ClientKeyExchange (handshake record)
+//   ChangeCipherSpec (1-byte record, type 20)
+//   Finished (handshake record, ENCRYPTED under new keys)
+//
+// Returns total bytes written. On failure, sets c->err and
+// transitions to Failed.
+u32 EmitClientKeyAndFinish(Connection* c, RandomByteFn random_nonzero_byte, u8* out, u32 cap)
+{
+    if (!c->server_cert_seen || c->server_rsa.n_bytes == 0)
+    {
+        ConnectionFail(c, "no server cert before client key exchange");
+        return 0;
+    }
+    // CKE body
+    u8 cke_body[crypto::kBigIntBits / 8 + 2];
+    const u32 cke_body_len = TlsBuildClientKeyExchangeBody(c->server_rsa, c->pre_master_secret, random_nonzero_byte,
+                                                           cke_body, sizeof(cke_body));
+    if (cke_body_len == 0)
+    {
+        ConnectionFail(c, "ClientKeyExchange build failed");
+        return 0;
+    }
+    // Mix the CKE handshake message into the transcript.
+    u8 cke_hs_hdr[4];
+    cke_hs_hdr[0] = kHandshakeClientKeyExchange;
+    cke_hs_hdr[1] = static_cast<u8>((cke_body_len >> 16) & 0xFF);
+    cke_hs_hdr[2] = static_cast<u8>((cke_body_len >> 8) & 0xFF);
+    cke_hs_hdr[3] = static_cast<u8>(cke_body_len & 0xFF);
+    TranscriptUpdate(&c->transcript, cke_hs_hdr, 4);
+    TranscriptUpdate(&c->transcript, cke_body, cke_body_len);
+
+    // Derive master_secret + key_block now that we have both
+    // randoms + the pms.
+    TlsMasterSecret(c->pre_master_secret, c->client_random, c->server_random, c->master_secret);
+    u8 key_block[kKeyBlockBytes];
+    TlsKeyBlock(c->master_secret, c->server_random, c->client_random, key_block);
+    SplitKeyBlock(c, key_block);
+    // Sequence numbers reset to 0 each time CCS flips the
+    // cipher (only happens once per direction in TLS 1.2).
+    c->client_seq = 0;
+    c->server_seq = 0;
+
+    u32 off = 0;
+
+    // Wrap CKE as a Handshake record.
+    const u32 cke_rec_len = TlsWrapHandshake(kHandshakeClientKeyExchange, cke_body, cke_body_len, out + off, cap - off);
+    if (cke_rec_len == 0)
+    {
+        ConnectionFail(c, "CKE record wrap failed");
+        return 0;
+    }
+    off += cke_rec_len;
+
+    // ChangeCipherSpec: single 0x01 byte, content type 20.
+    static constexpr u8 ccs_payload[1] = {0x01};
+    const u32 ccs_rec_len = TlsWrapRecord(kContentChangeCipherSpec, ccs_payload, 1, out + off, cap - off);
+    if (ccs_rec_len == 0)
+    {
+        ConnectionFail(c, "CCS record wrap failed");
+        return 0;
+    }
+    off += ccs_rec_len;
+
+    // Finished: encrypted under the freshly-derived client
+    // keys at seq 0.
+    const u32 fin_rec_len =
+        TlsBuildEncryptedFinished(c->master_secret, c->transcript, c->client_write_key, c->client_iv_salt,
+                                  c->client_seq, /*is_client=*/true, out + off, cap - off);
+    if (fin_rec_len == 0)
+    {
+        ConnectionFail(c, "Finished build failed");
+        return 0;
+    }
+    // After sending an encrypted record, advance the client
+    // sequence. The client Finished message bytes (4 + 12 = 16)
+    // also need to be mixed into the transcript so the server
+    // Finished verify_data is computed over the right snapshot.
+    u8 client_fin_msg[4 + kVerifyDataBytes];
+    client_fin_msg[0] = kHandshakeFinished;
+    client_fin_msg[1] = 0;
+    client_fin_msg[2] = 0;
+    client_fin_msg[3] = kVerifyDataBytes;
+    // Re-derive verify_data so we can mix it in. (Slightly
+    // wasteful — TlsBuildEncryptedFinished computed it
+    // internally — but keeps the API simple.)
+    {
+        u8 hash[32];
+        TranscriptSnapshot(&c->transcript, hash);
+        u8 vd[kVerifyDataBytes];
+        TlsFinishedVerifyData(c->master_secret, hash, /*is_client=*/true, vd);
+        CopyBytes(client_fin_msg + 4, vd, kVerifyDataBytes);
+    }
+    TranscriptUpdate(&c->transcript, client_fin_msg, sizeof(client_fin_msg));
+    c->client_seq++;
+    off += fin_rec_len;
+    return off;
+}
+
+} // namespace
+
+u32 ConnectionFeed(Connection* c, const u8* server_bytes, u32 len, u8* out, u32 cap, RandomByteFn random_nonzero_byte)
+{
+    if (c == nullptr || server_bytes == nullptr || out == nullptr)
+        return 0;
+    if (c->state == State::Failed)
+        return 0;
+
+    RecordIter it{server_bytes, len, 0};
+    if (c->state == State::SentClientHello)
+    {
+        // Expect a handshake record carrying ServerHello +
+        // Certificate + ServerHelloDone (potentially in one
+        // or split across records).
+        while (c->state == State::SentClientHello)
+        {
+            RecordView rv{};
+            if (!RecordIterNext(&it, &rv))
+            {
+                if (it.cursor >= len)
+                    break; // waiting for more bytes
+                ConnectionFail(c, "malformed server record");
+                return 0;
+            }
+            if (rv.type != kContentHandshake)
+            {
+                ConnectionFail(c, "expected handshake record from server");
+                return 0;
+            }
+            if (!ConsumeServerHandshakes(c, rv.payload, rv.length))
+                return 0;
+            // ConsumeServerHandshakes returns true once it sees
+            // ServerHelloDone — at that point we own the
+            // RecvServerHelloBundle transition.
+            if (c->server_cert_seen)
+            {
+                c->state = State::RecvServerHelloBundle;
+                break;
+            }
+        }
+    }
+
+    if (c->state == State::RecvServerHelloBundle)
+    {
+        // Build the second client flight: CKE + CCS + Finished.
+        const u32 wrote = EmitClientKeyAndFinish(c, random_nonzero_byte, out, cap);
+        if (wrote == 0)
+            return 0;
+        c->state = State::SentClientKeyAndFinish;
+        return wrote;
+    }
+
+    if (c->state == State::SentClientKeyAndFinish)
+    {
+        // Expect server CCS + encrypted Finished.
+        // CCS is one record; Finished is the next (encrypted).
+        RecordView ccs_rv{};
+        if (!RecordIterNext(&it, &ccs_rv))
+        {
+            if (it.cursor >= len)
+                return 0; // wait for more
+            ConnectionFail(c, "malformed record awaiting CCS");
+            return 0;
+        }
+        if (ccs_rv.type != kContentChangeCipherSpec || ccs_rv.length != 1 || ccs_rv.payload[0] != 0x01)
+        {
+            ConnectionFail(c, "bad server ChangeCipherSpec");
+            return 0;
+        }
+        // Encrypted Finished
+        RecordView fin_rv{};
+        if (!RecordIterNext(&it, &fin_rv))
+        {
+            if (it.cursor >= len)
+                return 0;
+            ConnectionFail(c, "malformed record awaiting Finished");
+            return 0;
+        }
+        // TlsVerifyEncryptedServerFinished wants the FULL
+        // record bytes (including 5-byte header), so use the
+        // pre-iter cursor.
+        const u8* fin_record = server_bytes + (it.cursor - (5 + fin_rv.length));
+        const u32 fin_record_len = 5 + fin_rv.length;
+        if (!TlsVerifyEncryptedServerFinished(c->master_secret, c->transcript, c->server_write_key, c->server_iv_salt,
+                                              c->server_seq, fin_record, fin_record_len))
+        {
+            ConnectionFail(c, "server Finished verify failed");
+            return 0;
+        }
+        c->server_seq++;
+        c->state = State::Established;
+        return 0; // no client bytes owed; handshake complete
+    }
+
+    return 0;
+}
+
+u32 ConnectionEncryptApp(Connection* c, const u8* pt, u32 pt_len, u8* dst, u32 cap)
+{
+    if (c == nullptr || c->state != State::Established)
+        return 0;
+    const u32 wire = TlsEncryptRecord(c->client_write_key, c->client_iv_salt, c->client_seq, kContentApplicationData,
+                                      pt, pt_len, dst, cap);
+    if (wire == 0)
+        return 0;
+    c->client_seq++;
+    return wire;
+}
+
+bool ConnectionDecryptApp(Connection* c, const u8* record_bytes, u32 record_len, u8* pt_out, u32 cap, u32* pt_len_out)
+{
+    if (c == nullptr || c->state != State::Established)
+        return false;
+    u8 content_type = 0;
+    if (!TlsDecryptRecord(c->server_write_key, c->server_iv_salt, c->server_seq, record_bytes, record_len, pt_out, cap,
+                          pt_len_out, &content_type))
+        return false;
+    c->server_seq++;
+    return content_type == kContentApplicationData;
+}
+
+// ---------------------------------------------------------------------------
 // Transcript hash + Finished message
 // ---------------------------------------------------------------------------
 
