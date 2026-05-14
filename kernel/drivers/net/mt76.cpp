@@ -116,7 +116,7 @@ bool Mt76BringUp(NicInfo& n)
     KLOG_TRACE_SCOPE("drivers/net/mt76", "BringUp");
     if (n.mmio_virt == nullptr)
     {
-        arch::SerialWrite("[mt76] no MMIO BAR — skipping\n");
+        KLOG_WARN("drivers/net/mt76", "no MMIO BAR — skipping");
         return false;
     }
     if (n.driver_online)
@@ -125,9 +125,10 @@ bool Mt76BringUp(NicInfo& n)
     const u32 hw_bound = Mmio32Read(n, kRegHwBound);
     if (hw_bound == 0xFFFFFFFFu || hw_bound == 0)
     {
-        arch::SerialWrite("[mt76] chip not responsive (hw_bound=");
-        arch::SerialWriteHex(hw_bound);
-        arch::SerialWrite(") — leaving in probe-only state\n");
+        // Same dead-chip shape as iwlwifi: all-ones / all-zeros on
+        // the first register read means BAR mapping is broken or the
+        // chip is wedged. Route through klog so the ring captures it.
+        KLOG_ERROR_V("drivers/net/mt76", "chip not responsive — leaving in probe-only state", hw_bound);
         return false;
     }
 

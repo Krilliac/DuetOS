@@ -848,12 +848,24 @@ void PciEnumerate()
         }
         else
         {
-            arch::SerialWrite("[pci] MCFG present but MapMmio failed, falling back to port-IO\n");
+            // ACPI advertised an MCFG aperture but our paging path
+            // couldn't map it — almost always a kernel-side bug
+            // (insufficient direct-map coverage, conflicting region).
+            // We continue in port-IO mode (bus 0 only), but the bus
+            // sweep WILL miss devices behind any bridge; route this
+            // through klog so the regression is visible in the ring
+            // buffer and any post-mortem rather than buried in
+            // boot-only serial chatter.
+            KLOG_WARN_V("drivers/pci", "MCFG present but MapMmio failed — falling back to port-IO (base)", mcfg_base);
         }
     }
     else
     {
-        arch::SerialWrite("[pci] no MCFG — using legacy port-IO (bus 0 only)\n");
+        // No MCFG at all — typical on QEMU TCG or very old firmware.
+        // Not an error; logged at info so a regression that hides a
+        // real MCFG behind an enumerator bug is still spottable, but
+        // a clean boot doesn't get a warn-tagged line.
+        KLOG_INFO("drivers/pci", "no MCFG — using legacy port-IO (bus 0 only)");
     }
 
     // Walk bus 0 first; recursive bridge descent picks up the rest
