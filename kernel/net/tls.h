@@ -197,6 +197,37 @@ u32 TlsBuildClientKeyExchangeBody(const crypto::RsaPublicKey& server_rsa, const 
 bool Pkcs1V15Type2Pad(const crypto::RsaPublicKey& k, const u8* msg, u32 msg_len, RandomByteFn random_nonzero_byte,
                       u8* dst);
 
+// ---- record-layer AES-GCM encrypt / decrypt ---------------------
+
+/// Encrypt one TLS 1.2 record. Composes a wire-format record:
+///
+///   header  : type(1) | version(2) | length(2)
+///             where length = 8 + plaintext_len + 16
+///   payload : explicit_iv(8) || GCM-ciphertext(plaintext_len)
+///                            || GCM-tag(16)
+///
+/// AAD (per RFC 5288 §3 / RFC 5246 §6.2.3.3) is:
+///   seq_num(8 BE) || type(1) || version(2) || plaintext_len(2 BE)
+///
+/// GCM nonce is implicit_iv(4, the "salt" from key_block) ||
+/// explicit_iv(8 — we use the record seq_num, BE). Returns the
+/// total wire-format byte count, or 0 on capacity / argument
+/// failure.
+u32 TlsEncryptRecord(const u8 write_key[kAesGcmKeyBytes], const u8 write_iv_salt[kAesGcmFixedIvBytes], u64 seq_num,
+                     u8 content_type, const u8* plaintext, u32 plaintext_len, u8* dst, u32 cap);
+
+/// Decrypt one TLS 1.2 record. `record_bytes` is the full wire-
+/// format record starting at the type byte; `record_len` is the
+/// total record length (header + 8 explicit_iv + ct + 16 tag).
+/// On success, writes the plaintext to `plaintext_out`,
+/// populates `*out_plaintext_len` and `*out_content_type`, and
+/// returns true. On any failure (bad header, bad length, GCM
+/// tag mismatch), returns false without writing partial
+/// plaintext.
+bool TlsDecryptRecord(const u8 read_key[kAesGcmKeyBytes], const u8 read_iv_salt[kAesGcmFixedIvBytes], u64 seq_num,
+                      const u8* record_bytes, u32 record_len, u8* plaintext_out, u32 cap, u32* out_plaintext_len,
+                      u8* out_content_type);
+
 void TlsSelfTest();
 
 } // namespace duetos::net::tls

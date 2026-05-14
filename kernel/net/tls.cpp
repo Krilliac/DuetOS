@@ -384,6 +384,120 @@ bool Pkcs1V15Type2Pad(const crypto::RsaPublicKey& k, const u8* msg, u32 msg_len,
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// Record-layer AES-GCM encrypt / decrypt
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+// Compose the 13-byte TLS 1.2 GCM AAD:
+//   seq_num(8 BE) || type(1) || version(2 BE) || length(2 BE)
+void BuildGcmAad(u64 seq_num, u8 content_type, u16 plaintext_len, u8 aad[13])
+{
+    for (u32 i = 0; i < 8; ++i)
+        aad[i] = static_cast<u8>((seq_num >> ((7 - i) * 8)) & 0xFF);
+    aad[8] = content_type;
+    StoreU16Be(aad + 9, kVersionTls12);
+    StoreU16Be(aad + 11, plaintext_len);
+}
+
+// Build the 12-byte GCM nonce from the per-direction salt + the
+// 8-byte explicit-IV (RFC 5288 §3). v0 uses the record seq_num
+// as the explicit-IV — same convention OpenSSL / BoringSSL use
+// by default. Unique per record because the seq_num is unique.
+void BuildGcmNonce(const u8 salt[kAesGcmFixedIvBytes], u64 seq_num, u8 nonce[crypto::kGcmIvBytes])
+{
+    for (u32 i = 0; i < kAesGcmFixedIvBytes; ++i)
+        nonce[i] = salt[i];
+    for (u32 i = 0; i < kAesGcmExplicitIvBytes; ++i)
+        nonce[kAesGcmFixedIvBytes + i] = static_cast<u8>((seq_num >> ((7 - i) * 8)) & 0xFF);
+}
+
+} // namespace
+
+u32 TlsEncryptRecord(const u8 write_key[kAesGcmKeyBytes], const u8 write_iv_salt[kAesGcmFixedIvBytes], u64 seq_num,
+                     u8 content_type, const u8* plaintext, u32 plaintext_len, u8* dst, u32 cap)
+{
+    if (dst == nullptr || write_key == nullptr || write_iv_salt == nullptr)
+        return 0;
+    if (plaintext_len > 0 && plaintext == nullptr)
+        return 0;
+    if (plaintext_len > 0xFFFFu - kAesGcmExplicitIvBytes - crypto::kGcmTagBytes)
+        return 0;
+    const u32 wire_len = 5u + kAesGcmExplicitIvBytes + plaintext_len + crypto::kGcmTagBytes;
+    if (cap < wire_len)
+        return 0;
+
+    // Record header: type | version | length (length = 8 + pt + 16).
+    dst[0] = content_type;
+    StoreU16Be(dst + 1, kVersionTls12);
+    StoreU16Be(dst + 3, static_cast<u16>(kAesGcmExplicitIvBytes + plaintext_len + crypto::kGcmTagBytes));
+
+    // Explicit IV bytes go on the wire right after the header.
+    // We mirror the GCM nonce's explicit-IV half — the seq_num
+    // in big-endian byte order.
+    u8* explicit_iv = dst + 5;
+    for (u32 i = 0; i < kAesGcmExplicitIvBytes; ++i)
+        explicit_iv[i] = static_cast<u8>((seq_num >> ((7 - i) * 8)) & 0xFF);
+
+    u8 aad[13];
+    BuildGcmAad(seq_num, content_type, static_cast<u16>(plaintext_len), aad);
+    u8 nonce[crypto::kGcmIvBytes];
+    BuildGcmNonce(write_iv_salt, seq_num, nonce);
+
+    u8* ct = dst + 5 + kAesGcmExplicitIvBytes;
+    u8* tag = ct + plaintext_len;
+    if (!crypto::AesGcm128Encrypt(write_key, nonce, aad, sizeof(aad), plaintext, plaintext_len, ct, tag))
+        return 0;
+    return wire_len;
+}
+
+bool TlsDecryptRecord(const u8 read_key[kAesGcmKeyBytes], const u8 read_iv_salt[kAesGcmFixedIvBytes], u64 seq_num,
+                      const u8* record_bytes, u32 record_len, u8* plaintext_out, u32 cap, u32* out_plaintext_len,
+                      u8* out_content_type)
+{
+    if (record_bytes == nullptr || read_key == nullptr || read_iv_salt == nullptr || out_plaintext_len == nullptr ||
+        out_content_type == nullptr)
+        return false;
+    if (record_len < 5u + kAesGcmExplicitIvBytes + crypto::kGcmTagBytes)
+        return false;
+    const u8 type = record_bytes[0];
+    const u16 version = LoadU16Be(record_bytes + 1);
+    const u16 frag_len = LoadU16Be(record_bytes + 3);
+    if (version != kVersionTls12)
+        return false;
+    if (record_len != 5u + frag_len)
+        return false;
+    if (frag_len < kAesGcmExplicitIvBytes + crypto::kGcmTagBytes)
+        return false;
+    const u32 plaintext_len = frag_len - kAesGcmExplicitIvBytes - crypto::kGcmTagBytes;
+    if (cap < plaintext_len)
+        return false;
+
+    const u8* explicit_iv_in = record_bytes + 5;
+    const u8* ct = record_bytes + 5 + kAesGcmExplicitIvBytes;
+    const u8* tag = ct + plaintext_len;
+
+    // Build the GCM nonce from the salt + the on-wire explicit
+    // IV. We trust the server's explicit IV (RFC 5288 only
+    // requires uniqueness, and the AEAD tag verify catches any
+    // replay-shaped misuse).
+    u8 nonce[crypto::kGcmIvBytes];
+    for (u32 i = 0; i < kAesGcmFixedIvBytes; ++i)
+        nonce[i] = read_iv_salt[i];
+    for (u32 i = 0; i < kAesGcmExplicitIvBytes; ++i)
+        nonce[kAesGcmFixedIvBytes + i] = explicit_iv_in[i];
+
+    u8 aad[13];
+    BuildGcmAad(seq_num, type, static_cast<u16>(plaintext_len), aad);
+    if (!crypto::AesGcm128Decrypt(read_key, nonce, aad, sizeof(aad), ct, plaintext_len, tag, plaintext_out))
+        return false;
+    *out_plaintext_len = plaintext_len;
+    *out_content_type = type;
+    return true;
+}
+
 u32 TlsBuildClientKeyExchangeBody(const crypto::RsaPublicKey& server_rsa, const u8 pms[kPreMasterSecretBytes],
                                   RandomByteFn random_nonzero_byte, u8* dst, u32 cap)
 {
@@ -739,6 +853,66 @@ void TlsSelfTest()
         return;
     }
 
-    SerialWrite("[tls] PASS (prf + key-block + finished-labels + clienthello + record + parse + peek + cke)\n");
+    // Test 11: AES-GCM record encrypt/decrypt round-trip.
+    // Build a 9-byte plaintext, encrypt under a known key+salt
+    // at seq=42, decrypt with the same params, recover bytes.
+    const u8 record_key[16] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+                               0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00};
+    const u8 record_salt[4] = {0xCA, 0xFE, 0xBA, 0xBE};
+    const u8 record_pt[9] = {'H', 'e', 'l', 'l', 'o', ' ', 'T', 'L', 'S'};
+    u8 record_wire[64];
+    const u32 record_wire_len = TlsEncryptRecord(record_key, record_salt, /*seq=*/42, kContentApplicationData,
+                                                 record_pt, sizeof(record_pt), record_wire, sizeof(record_wire));
+    if (record_wire_len != 5u + 8u + sizeof(record_pt) + 16u)
+    {
+        SerialWrite("[tls] FAIL record-enc-len\n");
+        return;
+    }
+    if (record_wire[0] != kContentApplicationData || record_wire[1] != 0x03 || record_wire[2] != 0x03)
+    {
+        SerialWrite("[tls] FAIL record-enc-header\n");
+        return;
+    }
+    u8 record_back[32];
+    u32 record_back_len = 0;
+    u8 record_back_type = 0;
+    if (!TlsDecryptRecord(record_key, record_salt, /*seq=*/42, record_wire, record_wire_len, record_back,
+                          sizeof(record_back), &record_back_len, &record_back_type))
+    {
+        SerialWrite("[tls] FAIL record-dec\n");
+        return;
+    }
+    if (record_back_len != sizeof(record_pt) || record_back_type != kContentApplicationData)
+    {
+        SerialWrite("[tls] FAIL record-dec-shape\n");
+        return;
+    }
+    for (u32 i = 0; i < sizeof(record_pt); ++i)
+    {
+        if (record_back[i] != record_pt[i])
+        {
+            SerialWrite("[tls] FAIL record-dec-bytes\n");
+            return;
+        }
+    }
+    // Flip a ciphertext byte and confirm decrypt fails (the
+    // AEAD tag catches it).
+    record_wire[14] ^= 0x80;
+    if (TlsDecryptRecord(record_key, record_salt, 42, record_wire, record_wire_len, record_back, sizeof(record_back),
+                         &record_back_len, &record_back_type))
+    {
+        SerialWrite("[tls] FAIL record-dec-tamper-accepted\n");
+        return;
+    }
+    record_wire[14] ^= 0x80; // restore
+    // Wrong seq_num at decrypt -> AAD mismatch -> tag fail.
+    if (TlsDecryptRecord(record_key, record_salt, /*seq=*/43, record_wire, record_wire_len, record_back,
+                         sizeof(record_back), &record_back_len, &record_back_type))
+    {
+        SerialWrite("[tls] FAIL record-dec-wrong-seq-accepted\n");
+        return;
+    }
+
+    SerialWrite("[tls] PASS (prf + key-block + clienthello + record-frame + parse + peek + cke + record-aead)\n");
 }
 } // namespace duetos::net::tls
