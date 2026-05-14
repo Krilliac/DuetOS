@@ -2007,6 +2007,27 @@ enum SyscallNumber : u64
     // does not touch the registry on close — it's an ordinary
     // pipe-pool handle from that point onward.
     SYS_NAMED_PIPE_OPEN = 203,
+
+    // SYS_DIAG_FAULT_INJECT — trigger one of the kernel's
+    // deliberate fault-injection classes (see
+    // kernel/diag/fault_inject.h). Cap-gated on kCapDiag via
+    // kSyscallCapTable; without the cap the syscall returns
+    // -EACCES and the call is recorded as a sandbox denial.
+    //
+    //   rdi = FaultClass enum value (1 = NullDeref, 2 = Panic, 3 = OomSlab)
+    // Returns:
+    //   0                     on a clean OomSlab drain.
+    //   -EINVAL               for an out-of-range FaultClass.
+    //   -ENOSYS / kernel halt for NullDeref / Panic — those are
+    //                         non-returning and the trap or panic
+    //                         path is what the caller sees instead
+    //                         of an rax value.
+    //
+    // The "named caller" justifying this syscall is the kernel-shell
+    // `fault-inject` command. No v0 ring-3 CLI tool ships against
+    // this number; future userland diagnostics could call it
+    // directly if they hold kCapDiag.
+    SYS_DIAG_FAULT_INJECT = 204,
 };
 
 // Inheritable stdio bundle for SYS_PROCESS_SPAWN_EX. Each entry

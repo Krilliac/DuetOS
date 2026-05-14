@@ -87,3 +87,9 @@ X(SYS_STDIN_READ, (1ULL << ::duetos::core::kCapInput))
 // but that branch was unreachable once the gate landed and is now
 // gone. Any future split into Send/Recv touches one row.
 X(SYS_SOCKET_OP, (1ULL << ::duetos::core::kCapNet))
+
+// kCapDiag — trigger kernel diag fault injection (panic / kernel
+// PF / slab OOM). Held by the trusted profile and the root role;
+// withheld from every sandbox / developer / netop / auditor seed
+// so an untrusted PE cannot crash the kernel by issuing the syscall.
+X(SYS_DIAG_FAULT_INJECT, (1ULL << ::duetos::core::kCapDiag))

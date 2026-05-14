@@ -104,6 +104,7 @@
 #include "log/klog.h"
 #include "diag/cleanroom_trace.h"
 #include "diag/event_trace.h"
+#include "diag/fault_inject.h"
 #include "diag/fix_journal.h"
 #include "diag/log_names.h"
 #include "proc/process.h"
@@ -3900,6 +3901,31 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         const u64 va = ProcessResolveDllExportByBase(proc, frame->rdi, name_buf);
         frame->rax = va;
+        return;
+    }
+
+    case SYS_DIAG_FAULT_INJECT:
+    {
+        // Cap-gated on kCapDiag at the dispatcher's gate (see
+        // cap_table.def); reaching here means the caller is
+        // authorised. Validate the FaultClass enum value before
+        // entering the harness so an out-of-range argument
+        // returns -EINVAL rather than tripping a bogus enum
+        // assertion deep in the switch.
+        const u64 fc_raw = frame->rdi;
+        using ::duetos::diag::fault_inject::FaultClass;
+        if (fc_raw != static_cast<u64>(FaultClass::NullDeref) && fc_raw != static_cast<u64>(FaultClass::Panic) &&
+            fc_raw != static_cast<u64>(FaultClass::OomSlab))
+        {
+            frame->rax = static_cast<u64>(kSysErrnoEINVAL);
+            return;
+        }
+        const auto r = ::duetos::diag::fault_inject::Trigger(static_cast<FaultClass>(fc_raw));
+        // Only OomSlab returns; NullDeref and Panic transferred
+        // control to the trap / panic path. A returning trigger
+        // either succeeded (rax = 0) or surfaced an error code we
+        // map onto the standard native-errno space.
+        frame->rax = r.has_value() ? 0ULL : ErrorCodeToNativeSyscallReturn(r.error());
         return;
     }
 

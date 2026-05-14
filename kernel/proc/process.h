@@ -169,6 +169,15 @@ enum Cap : u32
     // without being allowed to RECONFIGURE it.
     kCapNetAdmin = 8,
 
+    // Trigger kernel diagnostic-fault injection (SYS_DIAG_FAULT_INJECT).
+    // Gates the deliberate panic / kernel page-fault / slab-OOM
+    // harness in `diag/fault_inject` — surfaces a malicious PE could
+    // use to crash the box or deny service if they reached it. Held
+    // by the trusted profile (kernel-shell pseudo-process and the
+    // root role gain it via the [1..kCapCount) loop); withheld from
+    // every sandboxed profile and from every seed role except root.
+    kCapDiag = 9,
+
     // Sentinel: keep this as the last entry so kProfileTrusted can
     // be built by a loop that iterates [1 .. kCapCount). Do NOT
     // use kCapCount as a live cap — it's a boundary marker.
