@@ -1,10 +1,14 @@
 #include "diag/bsod.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/cpu_mitigations.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/traps.h"
 #include "cpu/percpu.h"
 #include "drivers/video/framebuffer.h"
 #include "log/klog.h"
+#include "mm/frame_allocator.h"
+#include "mm/kheap.h"
 #include "sched/sched.h"
 #include "time/tick.h"
 #include "util/build_config.h"
@@ -357,6 +361,178 @@ u32 DrawResolvedRip(u32 x, u32 y, u64 rip, u32 fg, u32 bg)
     return y;
 }
 
+// One-line CPU mitigation summary. Each token is "name=on/off".
+// The condensed format trades self-documenting prose for a single
+// row of grep-friendly tokens — when a crash is silicon-state
+// related (Meltdown / Spectre fired, SMEP didn't block what it
+// should have), the operator wants every flag visible at once.
+u32 DrawMitigationsLine(u32 x, u32 y, u32 fg, u32 bg)
+{
+    DrawString(x, y, "Mitigations: ", fg, bg);
+    u32 cx = x + 13 * kGlyphW;
+    const u64 cr4 = arch::ReadCr4();
+    const bool smep_on = (cr4 & (1ULL << 20)) != 0;
+    const bool smap_on = (cr4 & (1ULL << 21)) != 0;
+    const bool umip_on = (cr4 & (1ULL << 11)) != 0;
+    const bool nx_on = (arch::ReadCr0() & 0); // CR0 doesn't hold NX; just a placeholder until EFER read lands.
+    (void)nx_on;
+    const auto& m = arch::CpuMitigationsGet();
+    auto tok = [&](const char* label, bool on)
+    {
+        const u32 lc = DrawString(cx, y, label, fg, bg);
+        cx += lc * kGlyphW;
+        DrawString(cx, y, "=", fg, bg);
+        cx += kGlyphW;
+        DrawString(cx, y, on ? "on" : "off", on ? fg : kInkPale, bg);
+        cx += (on ? 2u : 3u) * kGlyphW;
+        DrawString(cx, y, "  ", fg, bg);
+        cx += 2 * kGlyphW;
+    };
+    tok("smep", smep_on);
+    tok("smap", smap_on);
+    tok("umip", umip_on);
+    tok("ibrs", m.has_ibrs);
+    tok("eibrs", m.has_eibrs);
+    tok("stibp", m.has_stibp);
+    tok("retpoline", m.needs_retpolines);
+    return y + kLineH;
+}
+
+// Memory + free-frame snapshot. Heap is a single 2 MiB pool today
+// so used/free reads in KiB.
+u32 DrawMemoryLine(u32 x, u32 y, u32 fg, u32 bg)
+{
+    const mm::KernelHeapStats h = mm::KernelHeapStatsRead();
+    const u64 free_frames = mm::FreeFramesCount();
+    DrawString(x, y, "Memory:    ", fg, bg);
+    u32 cx = x + 11 * kGlyphW;
+    DrawString(cx, y, "heap_used=", fg, bg);
+    cx += 10 * kGlyphW;
+    cx = DrawDecU32(cx, y, static_cast<u32>(h.used_bytes / 1024), fg, bg);
+    DrawString(cx, y, "K  free=", fg, bg);
+    cx += 8 * kGlyphW;
+    cx = DrawDecU32(cx, y, static_cast<u32>(h.free_bytes / 1024), fg, bg);
+    DrawString(cx, y, "K  frag=", fg, bg);
+    cx += 8 * kGlyphW;
+    cx = DrawDecU32(cx, y, static_cast<u32>(h.free_chunk_count), fg, bg);
+    DrawString(cx, y, "  frames_free=", fg, bg);
+    cx += 14 * kGlyphW;
+    cx = DrawDecU32(cx, y, static_cast<u32>(free_frames), fg, bg);
+    return y + kLineH;
+}
+
+// Fault-counter snapshot. Six 64-bit counters compressed into one
+// row: A=access-violation, NX=nx-violation, W=write-to-ro,
+// SO=stack-overflow, R=reserved-bit, GP=#GP, UD=#UD. If a counter
+// is zero we still render it so the row layout stays constant
+// (the eye reads the SAME column for the same value).
+u32 DrawFaultLine(u32 x, u32 y, u32 fg, u32 bg)
+{
+    const arch::FaultCounts f = arch::FaultCountsSnapshot();
+    DrawString(x, y, "Faults:    ", fg, bg);
+    u32 cx = x + 11 * kGlyphW;
+    auto col = [&](const char* label, u64 v)
+    {
+        const u32 lc = DrawString(cx, y, label, fg, bg);
+        cx += lc * kGlyphW;
+        DrawString(cx, y, "=", fg, bg);
+        cx += kGlyphW;
+        cx = DrawDecU32(cx, y, static_cast<u32>(v), fg, bg);
+        DrawString(cx, y, "  ", fg, bg);
+        cx += 2 * kGlyphW;
+    };
+    col("AV", f.access_violation);
+    col("NX", f.nx_violation);
+    col("W", f.write_to_ro);
+    col("SO", f.stack_overflow);
+    col("RES", f.reserved_bit);
+    col("GP", f.gp);
+    col("UD", f.ud);
+    return y + kLineH;
+}
+
+// Held-locks snapshot for the panicking CPU. If lockdep didn't
+// record anything (cap=0), the section is skipped entirely so
+// the layout doesn't leak empty rows. Each row format:
+//   `  [N] 0xADDR acq@ <symbol+0xOFF>`
+// Innermost (most-recently-acquired) first.
+u32 DrawHeldLocks(u32 x, u32 y_top, u32 fg, u32 bg)
+{
+    if (!cpu::BspInstalled())
+        return y_top;
+    const cpu::PerCpu* p = cpu::CurrentCpu();
+    if (p == nullptr || p->held_locks_count == 0)
+        return y_top;
+    u32 y = y_top;
+    DrawString(x, y, "Held locks (", fg, bg);
+    u32 cx = x + 12 * kGlyphW;
+    cx = DrawDecU32(cx, y, p->held_locks_count, fg, bg);
+    DrawString(cx, y, ", innermost first):", fg, bg);
+    y += kLineH;
+    const u32 cap = (p->held_locks_count < cpu::kPerCpuMaxHeldLocks) ? p->held_locks_count : cpu::kPerCpuMaxHeldLocks;
+    for (u32 i = 0; i < cap; ++i)
+    {
+        const u32 idx = cap - 1 - i;
+        DrawString(x + 2 * kGlyphW, y, "[", fg, bg);
+        const u32 after_idx = DrawDecU32(x + 3 * kGlyphW, y, idx, fg, bg);
+        DrawString(after_idx, y, "] ", fg, bg);
+        const u32 hex_x = after_idx + 2 * kGlyphW;
+        DrawHex64(hex_x, y, reinterpret_cast<u64>(p->held_locks[idx]), fg, bg);
+        const u32 after_hex = hex_x + 18 * kGlyphW;
+        DrawString(after_hex, y, "  acq@ ", fg, bg);
+        const u32 sym_x = after_hex + 7 * kGlyphW;
+        core::SymbolResolution sr = {};
+        if (core::ResolveAddress(p->held_lock_rips[idx], &sr) && sr.entry != nullptr)
+            (void)DrawSymbolOffset(sym_x, y, sr, fg, bg);
+        else
+            DrawHex64(sym_x, y, p->held_lock_rips[idx], fg, bg);
+        y += kLineH;
+    }
+    return y;
+}
+
+// Hex dump of `quads` 64-bit values starting at `rsp`. Renders 2
+// quads per row (32 chars of hex + spacing), so 8 quads = 4 rows
+// = ~48 px of vertical space. Each deref is guarded by
+// PlausibleStackPointer so a corrupt RSP can't fault-during-
+// panic.
+u32 DrawStackTop(u32 x, u32 y_top, u64 rsp, u32 quads, u32 fg, u32 bg)
+{
+    DrawString(x, y_top, "Stack top (", fg, bg);
+    u32 cx = x + 11 * kGlyphW;
+    cx = DrawDecU32(cx, y_top, quads, fg, bg);
+    DrawString(cx, y_top, " qwords @ RSP):", fg, bg);
+    u32 y = y_top + kLineH;
+    // Layout per row: "  +NN  <hex0>    <hex1>". `+NN` is the
+    // decimal byte offset from RSP (0, 8, 16, ...). Each hex
+    // value is 18 chars; we put the second column at a fixed
+    // 22-char gap so the columns don't touch.
+    for (u32 i = 0; i < quads; ++i)
+    {
+        if ((i & 1) == 0)
+        {
+            DrawString(x + 2 * kGlyphW, y, "+", fg, bg);
+            (void)DrawDecU32(x + 3 * kGlyphW, y, i * 8, fg, bg);
+        }
+        const u32 col = (i & 1) ? (x + 38 * kGlyphW) : (x + 8 * kGlyphW);
+        const u64 addr = rsp + i * 8;
+        if (PlausibleStackPointer(addr))
+        {
+            const u64 v = *reinterpret_cast<const u64*>(addr);
+            DrawHex64(col, y, v, fg, bg);
+        }
+        else
+        {
+            DrawString(col, y, "<unreadable>", fg, bg);
+        }
+        if (i & 1)
+            y += kLineH;
+    }
+    if (quads & 1)
+        y += kLineH;
+    return y;
+}
+
 bool Read8042Byte(u8& out)
 {
     // Status port 0x64; output buffer full is bit 0. Mouse data
@@ -419,6 +595,14 @@ void BsodRender(const char* subsystem, const char* message, duetos::u64 rip, due
         // already covers diagnostics for headless boots.
         return;
     }
+
+    // Disable interrupts before painting. The timer IRQ would
+    // otherwise wake the ui-ticker, which calls DesktopCompose
+    // and overwrites the BSOD with the live desktop. Once CLI
+    // is set, our polling-mode 8042 read stays the only way out
+    // of this CPU until reset fires — and reset is a port-out
+    // write, not IRQ-driven, so disabling interrupts is safe.
+    asm volatile("cli" ::: "memory");
 
     drivers::video::FramebufferInfo fb = drivers::video::FramebufferGet();
     const u32 W = fb.width;
@@ -502,19 +686,35 @@ void BsodRender(const char* subsystem, const char* message, duetos::u64 rip, due
     DrawString(kPanelPad + 4 * kGlyphW + 19 * kGlyphW + 6 * kGlyphW + 19 * kGlyphW, y, "  CR4 ", kInkPale, kBgBlue);
     DrawHex64(kPanelPad + 4 * kGlyphW + 19 * kGlyphW + 6 * kGlyphW + 19 * kGlyphW + 6 * kGlyphW, y, arch::ReadCr4(),
               kInkPale, kBgBlue);
-    y += kLineH * 2;
-
-    // Backtrace — walk RBP chain. Up to 6 frames to leave room
-    // for the klog tail below.
-    y = DrawBacktrace(kPanelPad, y, rbp, /*max_frames=*/6, kInkWhite, kBgBlue);
+    y += kLineH;
+    y = DrawMitigationsLine(kPanelPad, y, kInkPale, kBgBlue);
+    y = DrawMemoryLine(kPanelPad, y, kInkPale, kBgBlue);
+    y = DrawFaultLine(kPanelPad, y, kInkPale, kBgBlue);
     y += kLineH;
 
-    // klog tail — capture ring through sink, render last 12 lines.
+    // Backtrace — walk RBP chain. Up to 6 frames.
+    y = DrawBacktrace(kPanelPad, y, rbp, /*max_frames=*/6, kInkWhite, kBgBlue);
+    y += kLineH / 2;
+
+    // Held locks — usually empty; only renders rows when something
+    // was actually held at panic. Critical for deadlock triage.
+    const u32 y_before_locks = y;
+    y = DrawHeldLocks(kPanelPad, y, kInkPale, kBgBlue);
+    if (y > y_before_locks)
+        y += kLineH / 2;
+
+    // Stack-top hex dump — 8 quads = ~64 bytes of stack, enough
+    // to see the immediate frame's locals + the caller's saved
+    // RBP + return addr.
+    y = DrawStackTop(kPanelPad, y, rsp, /*quads=*/8, kInkPale, kBgBlue);
+    y += kLineH / 2;
+
+    // klog tail — capture ring through sink, render last 10 lines.
     DrawString(kPanelPad, y, "Recent kernel log:", kInkWhite, kBgBlue);
     y += kLineH;
     g_klog_len = 0;
     core::DumpLogRingTo(&KlogSink);
-    (void)DrawKlogTail(kPanelPad, y, W - 2 * kPanelPad, /*max_lines=*/12, kInkPale, kBgBlue);
+    (void)DrawKlogTail(kPanelPad, y, W - 2 * kPanelPad, /*max_lines=*/10, kInkPale, kBgBlue);
 
     // Footer strip.
     const u32 footer_y = (H > 40) ? (H - 40) : 0;
