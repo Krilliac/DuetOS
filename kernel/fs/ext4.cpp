@@ -171,11 +171,12 @@ void ProcessLeafExtents(Volume& v, u32 sector_size, const u8* hdr_buf, u32 hdr_b
             const u64 lba = block_phys * v.block_size / sector_size;
             if (!ReadIntoBlockScratch(v.block_handle, lba, sector_size, v.block_size))
             {
-                arch::SerialWrite("[ext4]   root-dir data block read failed (extent=");
-                arch::SerialWriteHex(ei);
-                arch::SerialWrite(" block=");
-                arch::SerialWriteHex(bi);
-                arch::SerialWrite(")\n");
+                // Block-layer read of a root-dir data block failed —
+                // klog captures the (extent, block-within-extent)
+                // pair so a post-mortem can correlate against the
+                // storage stack's own diagnostic.
+                KLOG_ERROR_2V("fs/ext4", "root-dir data block read failed", "extent", static_cast<u64>(ei), "block",
+                              static_cast<u64>(bi));
                 any_failed = true;
                 break;
             }

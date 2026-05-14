@@ -277,7 +277,10 @@ void StressDriverArm(const char* cmdline)
     auto* t = sched::SchedCreate(&StressDriverEntry, nullptr, "stress-driver");
     if (t == nullptr)
     {
-        arch::SerialWrite("[stress] SchedCreate failed — driver not started\n");
+        // Scheduler refused to create the driver thread —
+        // typically means the task table is full or KMalloc OOM.
+        // Klog the failure so the disarm is visible in dmesg.
+        KLOG_ERROR("diag/stress", "SchedCreate failed — driver not started");
         g_cfg.mode = Mode::None;
     }
 }

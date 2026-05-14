@@ -90,7 +90,7 @@ void RotateChain(const fs::fat32::Volume* v)
         {
             if (!fat::Fat32RenameAtPath(v, src_path, dst_path))
             {
-                arch::SerialWrite("[fix-journal-persist] rotate (archive promotion) failed\n");
+                KLOG_WARN("diag/fix-journal-persist", "rotate archive promotion failed");
             }
         }
     }
@@ -102,7 +102,10 @@ void RotateChain(const fs::fat32::Volume* v)
     {
         if (!fat::Fat32RenameAtPath(v, kFixJournalPath, dst_path))
         {
-            arch::SerialWrite("[fix-journal-persist] rotate KERNEL.FIX -> KERNEL.F0 failed; dropping\n");
+            // Live -> .F0 rotation failed; delete fallback so a
+            // future boot doesn't append to a stale tail. Klog
+            // the data loss so it's visible in dmesg.
+            KLOG_WARN("diag/fix-journal-persist", "rotate KERNEL.FIX -> KERNEL.F0 failed; dropping");
             fat::Fat32DeleteAtPath(v, kFixJournalPath);
         }
     }
