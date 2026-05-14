@@ -119,6 +119,7 @@
 #include "net/wireless/beacon.h"
 #include "net/wireless/inventory.h"
 #include "crypto/aes.h"
+#include "crypto/aes_gcm.h"
 #include "crypto/aes_keywrap.h"
 #include "crypto/asn1.h"
 #include "crypto/bigint.h"
@@ -2611,6 +2612,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::crypto::PrfSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::AesSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::AesKeyWrapSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::AesGcmSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::BigIntSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::asn1::Asn1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::RsaSelfTest());
