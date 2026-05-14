@@ -41,6 +41,8 @@
 
 #include "shell/shell_internal.h"
 
+#include "util/build_config.h"
+
 #include "debug/hot_patch.h"
 #include "drivers/video/console.h"
 #include "fs/ramfs.h"
@@ -443,52 +445,11 @@ void SubcmdKernelRevert(u32 argc, char** argv)
     ConsoleWriteChar('\n');
 }
 
-// Build-time identity of the currently-running kernel. All four
-// preprocessor strings are baked in by the top-level CMakeLists.txt
-// at configure time — see the "Git short hash + dirty flag" block.
-// The fallback strings keep the output well-formed when CMake
-// couldn't reach git or when the macros are missing for some reason
-// (out-of-tree build, stripped define, etc.).
-constexpr const char* BuildGitHash()
-{
-#if defined(DUETOS_GIT_HASH)
-    return DUETOS_GIT_HASH;
-#else
-    return "(undefined)";
-#endif
-}
-constexpr const char* BuildGitSubject()
-{
-#if defined(DUETOS_GIT_SUBJECT)
-    return DUETOS_GIT_SUBJECT;
-#else
-    return "(undefined)";
-#endif
-}
-constexpr const char* BuildGitBranch()
-{
-#if defined(DUETOS_GIT_BRANCH)
-    return DUETOS_GIT_BRANCH;
-#else
-    return "(undefined)";
-#endif
-}
-constexpr const char* BuildGitAuthorDate()
-{
-#if defined(DUETOS_GIT_AUTHOR_DATE)
-    return DUETOS_GIT_AUTHOR_DATE;
-#else
-    return "(undefined)";
-#endif
-}
-constexpr const char* BuildDate()
-{
-#if defined(DUETOS_BUILD_DATE)
-    return DUETOS_BUILD_DATE;
-#else
-    return "(undefined)";
-#endif
-}
+// Build-time identity of the currently-running kernel: BuildGitHash,
+// BuildGitSubject, BuildGitBranch, BuildGitAuthorDate, BuildDate.
+// Defined in `util/build_config.h` alongside `BuildFlavorName`; they
+// fall back to `"(undefined)"` when CMake couldn't reach git or the
+// macros were stripped. Pulled into this TU's outer namespace below.
 
 // One-line build identity. Cheap enough to print in front of every
 // bulk operation; an operator who runs `kernel-auto-patch` on the

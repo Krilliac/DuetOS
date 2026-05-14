@@ -7,6 +7,7 @@
 #include "fs/fat32.h"
 #include "mm/kheap.h"
 #include "time/tick.h"
+#include "util/build_config.h"
 
 namespace duetos::apps::about
 {
@@ -184,11 +185,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // checkout, or git not installed during configure).
     p = 0;
     AppendStr(line, &p, sizeof(line), "COMMIT:   ");
-#if defined(DUETOS_GIT_HASH)
-    AppendStr(line, &p, sizeof(line), DUETOS_GIT_HASH);
-#else
-    AppendStr(line, &p, sizeof(line), "(undefined)");
-#endif
+    AppendStr(line, &p, sizeof(line), duetos::core::BuildGitHash());
     line[p] = '\0';
     DrawLine(cx, y, line, fg, bg);
     y += kRowH;
