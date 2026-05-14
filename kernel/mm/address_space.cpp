@@ -226,6 +226,11 @@ AddressSpace* AddressSpaceCreate(u64 frame_budget)
     auto* as = static_cast<AddressSpace*>(KMalloc(sizeof(AddressSpace)));
     if (as == nullptr)
     {
+        // OOM during AddressSpace bookkeeping struct alloc — the
+        // caller (typically ProcessCreate) returns nullptr upward
+        // without a separate signal. Surface so a post-mortem can
+        // tie the process-create failure to memory pressure.
+        KLOG_ERROR("mm/as", "AddressSpaceCreate: KMalloc for AddressSpace struct failed");
         return nullptr;
     }
     // Zero the chunk before populating. KMalloc returns memory still
@@ -241,6 +246,12 @@ AddressSpace* AddressSpaceCreate(u64 frame_budget)
     const PhysAddr pml4_frame = AllocateFrame();
     if (pml4_frame == kNullFrame)
     {
+        // Frame allocator exhausted while reserving the PML4 root —
+        // every user process needs one, so a fresh-process spawn
+        // under high memory pressure dies here silently. Cleanup
+        // releases the struct alloc; we still return nullptr but
+        // now the OOM is in the log.
+        KLOG_ERROR("mm/as", "AddressSpaceCreate: AllocateFrame for PML4 root failed");
         KFree(as);
         return nullptr;
     }
