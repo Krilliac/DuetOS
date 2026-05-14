@@ -150,6 +150,7 @@
 #include "net/firewall.h"
 #include "net/stack.h"
 #include "net/tcp.h"
+#include "net/tls.h"
 #include "subsystems/graphics/graphics.h"
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
@@ -2617,6 +2618,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::crypto::asn1::Asn1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::RsaSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::x509::X509SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::tls::TlsSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::EapolSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::FourWaySelfTest());
