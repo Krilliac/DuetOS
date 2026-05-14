@@ -48,6 +48,7 @@
 #include "util/datetime.h"
 #include "util/deflate.h"
 #include "util/gzip.h"
+#include "util/zip.h"
 #include "util/jpeg.h"
 #include "util/png.h"
 #include "util/tga.h"
@@ -2594,6 +2595,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::TgaSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::DateTimeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::DeflateSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::ZipReaderSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::GzipZlibSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::PngSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::JpegDecoderSelfTest());
