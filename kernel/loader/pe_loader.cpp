@@ -1598,6 +1598,23 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
 
 } // namespace
 
+bool PeResolveImportsForLoadedImage(const u8* file, u64 file_len, duetos::mm::AddressSpace* as,
+                                    const DllImage* preloaded_dlls, u64 preloaded_dll_count)
+{
+    if (file == nullptr || as == nullptr || file_len == 0)
+        return false;
+    PeHeaders h{};
+    const PeStatus s = ParseHeaders(file, file_len, h);
+    // ImportsPresent is the only status that still warrants
+    // walking; Ok means no imports (we're done), anything
+    // else is a header problem the caller already knows about.
+    if (s != PeStatus::Ok && s != PeStatus::ImportsPresent && s != PeStatus::TlsPresent)
+        return false;
+    if (s == PeStatus::Ok)
+        return true; // no imports to resolve
+    return ResolveImports(file, file_len, h, as, preloaded_dlls, preloaded_dll_count);
+}
+
 PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, const char* program_name,
                     u64 aslr_delta, const DllImage* preloaded_dlls, u64 preloaded_dll_count)
 {

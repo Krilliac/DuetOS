@@ -763,6 +763,15 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             {
                 preloaded_dlls[preloaded_count] = dll.image;
                 ++preloaded_count;
+                // Resolve THIS DLL's own imports against every
+                // DLL preloaded so far. Catches the "vendored
+                // DLL chain" case where DLL N imports from
+                // kernel32 (preloaded earlier in this loop) —
+                // without this, N is loaded but its IAT is
+                // never patched and the first import call
+                // from N's exports crashes.
+                (void)duetos::core::PeResolveImportsForLoadedImage(dll.image.file, dll.image.file_len, as,
+                                                                   preloaded_dlls, preloaded_count - 1);
                 SerialWrite("[ring3] pre-loaded ");
                 SerialWrite(active_set[i].label);
                 SerialWrite(" base=");
@@ -900,6 +909,8 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 {
                     preloaded_dlls[preloaded_count] = dyn.image;
                     ++preloaded_count;
+                    (void)duetos::core::PeResolveImportsForLoadedImage(dyn.image.file, dyn.image.file_len, as,
+                                                                       preloaded_dlls, preloaded_count - 1);
                     SerialWrite("[ring3] /lib auto-preload ");
                     SerialWrite(child->name);
                     SerialWrite(" base=");
@@ -1105,6 +1116,8 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                         {
                             preloaded_dlls[preloaded_count] = dyn.image;
                             ++preloaded_count;
+                            (void)duetos::core::PeResolveImportsForLoadedImage(dyn.image.file, dyn.image.file_len, as,
+                                                                               preloaded_dlls, preloaded_count - 1);
                             SerialWrite("[ring3] /FAT32-lib auto-preload ");
                             SerialWrite(kid.name);
                             SerialWrite(" base=");
