@@ -120,6 +120,7 @@
 #include "net/wireless/inventory.h"
 #include "crypto/aes.h"
 #include "crypto/aes_keywrap.h"
+#include "crypto/bigint.h"
 #include "crypto/hmac.h"
 #include "crypto/pbkdf2.h"
 #include "crypto/prf.h"
@@ -2607,6 +2608,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::crypto::PrfSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::AesSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::AesKeyWrapSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::BigIntSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::EapolSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::FourWaySelfTest());
