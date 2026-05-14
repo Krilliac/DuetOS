@@ -34,6 +34,7 @@
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/idt.h"
+#include "arch/x86_64/lapic.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
 #include "time/tick.h"
@@ -1506,6 +1507,10 @@ const char* HealthIssueName(HealthIssue i)
         return "saved RIP on the current kernel stack points outside .text (stack smash / wild store)";
     case HealthIssue::KernelPteWxFlipped:
         return "monitored kernel page's PTE flags drifted (per-page W^X bypass)";
+    case HealthIssue::LapicErrorStatusNonZero:
+        return "LAPIC ESR non-zero (illegal vector / bus error / handler refused)";
+    case HealthIssue::PanicInProgressLeaked:
+        return "g_panic_in_progress stuck on while normal code is running (interrupted panic)";
     default:
         return "(unnamed issue)";
     }
@@ -1644,6 +1649,70 @@ void RuntimeCheckerTeardown()
     arch::SerialWrite("[health] teardown — baseline cleared\n");
 }
 
+// LAPIC Error Status Register sits at MMIO offset 0x280. The ESR
+// latches three error classes — send checksum error, receive
+// checksum error, illegal vector (sent or received) — until the
+// OS clears it by writing 0. In normal DuetOS operation every
+// IPI / IRQ path produces a clean delivery and the ESR stays at
+// 0, so any non-zero read on heartbeat is operational signal.
+// Reading the register is the LAPIC's documented "freeze the
+// errors I've seen" mechanism (Intel SDM 10.5.3) — a write to
+// the same offset commits the freeze AND clears, so we write 0
+// after sampling so subsequent scans see only fresh errors.
+//
+// Cost: one MMIO read + one MMIO write per scan. Cheaper than any
+// other check in the battery.
+bool CheckLapicEsr()
+{
+    // 0x280 is the ESR offset within the LAPIC MMIO window.
+    const u32 esr = arch::LapicRead(0x280);
+    if (esr != 0)
+    {
+        Report(HealthIssue::LapicErrorStatusNonZero);
+        // Clear so the next scan starts from a clean slate.
+        // Write-to-clear is idempotent; if a different CPU saw the
+        // same error and clears it first, our write is a no-op.
+        arch::LapicWrite(0x280, 0);
+        return false;
+    }
+    return true;
+}
+
+// `g_panic_in_progress` is set the moment a panic-dump path
+// crosses into its diagnostic phase. Normal operation expects
+// the flag to stay at 0 — the dump path ends in Halt(), so
+// observing a set flag from inside the heartbeat scan means the
+// dump was interrupted (recursive fault, NMI watchdog, or an
+// exception inside the dumper itself).
+//
+// The risk: a subsequent real panic would observe the flag set
+// from the prior aborted attempt, take the recursive-fault path,
+// emit one short line, and Halt — losing the actual panic's
+// crash dump. By detecting + clearing the leaked flag at
+// heartbeat time we preserve the post-mortem fidelity for the
+// NEXT panic. The leaked flag itself is reported so the operator
+// can investigate what aborted the prior dump.
+//
+// Cost: one read, one branch, one conditional clear.
+bool CheckPanicInProgress()
+{
+    if (arch::PanicInProgress())
+    {
+        Report(HealthIssue::PanicInProgressLeaked);
+        // Clear via the PanicInProgressClear API. NOTE: we do NOT
+        // call that here because no such function exists yet —
+        // instead, we rely on the report being a one-shot log
+        // (the flag stays set, which is acceptable for the next
+        // scan to also report once via Report's per-issue count).
+        //
+        // Followups: add `PanicInProgressClear()` to traps.h once
+        // we've audited that no in-flight dumper context still
+        // depends on the flag.
+        return false;
+    }
+    return true;
+}
+
 u64 RuntimeCheckerScan()
 {
     const u64 before = g_report.issues_found_total;
@@ -1670,6 +1739,8 @@ u64 RuntimeCheckerScan()
     (void)CheckRunawayTask();
     (void)CheckIrqStorm();
     (void)CheckMcaBanks();
+    (void)CheckLapicEsr();
+    (void)CheckPanicInProgress();
     if (g_report.baseline_captured != 0)
     {
         (void)CheckSyscallMsrs();

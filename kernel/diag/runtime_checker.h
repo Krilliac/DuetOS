@@ -249,6 +249,29 @@ enum class HealthIssue : u32
     // PTE attributes are per-page.
     KernelPteWxFlipped,
 
+    // LAPIC Error Status Register (offset 0x280) read back non-zero.
+    // The ESR latches bus errors (illegal vector, send checksum
+    // fail, receive accept error) until cleared by writing 0. In
+    // normal operation it stays at 0 — every existing IPI / IRQ
+    // path produces a clean delivery. A non-zero ESR means
+    // hardware-level corruption on a recent interrupt OR a rootkit
+    // installed an illegal vector / handler the LAPIC refused.
+    // Cheap to check (one MMIO read + one write-to-clear) and the
+    // existing battery never looked at it.
+    LapicErrorStatusNonZero,
+
+    // `g_panic_in_progress` was set when the heartbeat scan saw it
+    // but the system is still running normal code. That means a
+    // panic-dump path was entered but never reached Halt — either a
+    // recoverable abort in the dumper itself or an interrupted
+    // panic. Either way the panic-mode flag is "stuck on", which
+    // means a SUBSEQUENT real panic would bypass spinlocks on
+    // serial and may produce a torn dump. Catching the leaked
+    // flag at heartbeat time lets us either clear it (safe — we
+    // observed running code, so we're not in a panic) or surface
+    // the regression for investigation.
+    PanicInProgressLeaked,
+
     // Count sentinel
     Count,
 };
