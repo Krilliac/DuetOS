@@ -23,6 +23,7 @@
 #include "cpu/percpu.h"
 #include "debug/inspect.h"
 #include "fs/ramfs.h"
+#include "fs/vfs.h"
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
 #include "loader/pe_loader.h"
@@ -777,6 +778,140 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 SerialWrite("\" status=");
                 SerialWrite(DllLoadStatusName(dll.status));
                 SerialWrite(" — this DLL's exports won't be resolvable via-DLL\n");
+            }
+        }
+    }
+
+    // ----------------------------------------------------------
+    // /lib/ ramfs DLL fallback. After the curated preload_set
+    // above, walk the trusted `/lib/` directory and dynamically
+    // load any *.dll file that isn't already in the preloaded
+    // set. Mirrors what SYS_DLL_LOAD_FROM_PATH does at runtime
+    // for LoadLibraryW callers — but here at PE-load time so
+    // *statically*-imported DLLs not in the curated preload
+    // also resolve via-DLL.
+    //
+    // The motivating case: a user drops a vendored Win32 DLL
+    // (UnityPlayer.dll, a third-party plugin, etc.) into /lib/
+    // and the loader picks it up without needing a CMake / embed
+    // dance. The DLL still has to be a well-formed PE the
+    // existing DllLoad understands.
+    //
+    // Skip:
+    //   - the firmware directory entry (not a DLL)
+    //   - any file whose name doesn't end in ".dll"
+    //   - any DLL whose name already matches a preloaded entry
+    //     (case-insensitive, suffix-tolerant — mirrors the
+    //     match used in ResolveImports via-DLL path)
+    if (preloaded_count < kPreloadSlotCap)
+    {
+        const fs::RamfsNode* lib_dir = fs::VfsLookup(fs::RamfsTrustedRoot(), "/lib", 8);
+        if (lib_dir != nullptr && lib_dir->children != nullptr)
+        {
+            auto ends_with_dll_ci = [](const char* name)
+            {
+                u32 n = 0;
+                while (name[n] != '\0')
+                    ++n;
+                if (n < 4)
+                    return false;
+                const char* t = name + n - 4;
+                auto lo = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; };
+                return t[0] == '.' && lo(t[1]) == 'd' && lo(t[2]) == 'l' && lo(t[3]) == 'l';
+            };
+            auto base_name_ci_eq = [](const char* a, const char* b) -> bool
+            {
+                u32 i = 0;
+                auto lo = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; };
+                while (a[i] != '\0' && b[i] != '\0')
+                {
+                    if (lo(a[i]) != lo(b[i]))
+                        return false;
+                    ++i;
+                }
+                return a[i] == b[i];
+            };
+
+            for (u64 k = 0; lib_dir->children[k] != nullptr && preloaded_count < kPreloadSlotCap; ++k)
+            {
+                const fs::RamfsNode* child = lib_dir->children[k];
+                if (child->type != fs::RamfsNodeType::kFile)
+                    continue;
+                if (child->name == nullptr || child->file_bytes == nullptr || child->file_size == 0)
+                    continue;
+                if (!ends_with_dll_ci(child->name))
+                    continue;
+                // Skip if a DLL with this name is already preloaded.
+                bool already = false;
+                for (u64 j = 0; j < preloaded_count; ++j)
+                {
+                    if (!preloaded_dlls[j].has_exports)
+                        continue;
+                    const char* ename = PeExportsDllName(preloaded_dlls[j].exports);
+                    if (ename != nullptr && base_name_ci_eq(ename, child->name))
+                    {
+                        already = true;
+                        break;
+                    }
+                }
+                if (already)
+                    continue;
+                // ASLR + collision-roll: same shape as the
+                // curated preload above, but smaller — we
+                // expect /lib/ to hold a handful of v0 DLLs.
+                const bool dyn_base = duetos::core::PeIsDynamicBase(child->file_bytes, child->file_size);
+                u64 lib_aslr_delta = 0;
+                DllLoadResult dyn{};
+                dyn.status = DllLoadStatus::HeaderParseFailed;
+                constexpr u32 kMaxLibRoll = 32;
+                for (u32 attempt = 0; attempt < kMaxLibRoll; ++attempt)
+                {
+                    const u64 trial = dyn_base ? (duetos::core::RandomU64() & 0xFF) * 4096ULL : 0ULL;
+                    const u64 size = duetos::core::PeImageSizeOf(child->file_bytes, child->file_size);
+                    const u64 pref = duetos::core::PePreferredBaseOf(child->file_bytes, child->file_size);
+                    if (size == 0 || pref == 0)
+                    {
+                        lib_aslr_delta = trial;
+                        dyn = DllLoad(child->file_bytes, child->file_size, as, lib_aslr_delta);
+                        break;
+                    }
+                    bool collides = false;
+                    for (u64 j = 0; j < preloaded_count; ++j)
+                    {
+                        const u64 a_start = preloaded_dlls[j].base_va;
+                        const u64 a_end = a_start + preloaded_dlls[j].size;
+                        const u64 b_start = pref + trial;
+                        const u64 b_end = b_start + size;
+                        if (a_start < b_end && b_start < a_end)
+                        {
+                            collides = true;
+                            break;
+                        }
+                    }
+                    if (collides && dyn_base && attempt + 1 < kMaxLibRoll)
+                        continue;
+                    lib_aslr_delta = trial;
+                    dyn = DllLoad(child->file_bytes, child->file_size, as, lib_aslr_delta);
+                    break;
+                }
+                if (dyn.status == DllLoadStatus::Ok)
+                {
+                    preloaded_dlls[preloaded_count] = dyn.image;
+                    ++preloaded_count;
+                    SerialWrite("[ring3] /lib auto-preload ");
+                    SerialWrite(child->name);
+                    SerialWrite(" base=");
+                    SerialWriteHex(dyn.image.base_va);
+                    SerialWrite(" (pre-PeLoad — visible to ResolveImports)\n");
+                }
+                else
+                {
+                    SerialWrite("[ring3] /lib skip ");
+                    SerialWrite(child->name);
+                    SerialWrite(" DllLoad failed: ");
+                    SerialWrite(DllLoadStatusName(dyn.status));
+                    SerialWrite("\n");
+                }
             }
         }
     }
