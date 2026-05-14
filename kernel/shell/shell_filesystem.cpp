@@ -262,59 +262,10 @@ void CmdMv(u32 argc, char** argv)
     duetos::fs::TmpFsUnlink(src_leaf);
 }
 
-void CmdWc(u32 argc, char** argv)
-{
-    if (argc < 2)
-    {
-        ShellSetExit(2);
-        ConsoleWriteln("WC: MISSING PATH");
-        return;
-    }
-    char scratch[duetos::fs::kTmpFsContentMax];
-    const u32 n = ReadFileToBuf(argv[1], scratch, sizeof(scratch));
-    if (n == static_cast<u32>(-1))
-    {
-        ShellSetExit(1);
-        ConsoleWrite("WC: NO SUCH FILE: ");
-        ConsoleWriteln(argv[1]);
-        return;
-    }
-    u32 lines = 0;
-    u32 words = 0;
-    bool in_word = false;
-    for (u32 i = 0; i < n; ++i)
-    {
-        const char c = scratch[i];
-        if (c == '\n')
-        {
-            ++lines;
-        }
-        const bool is_space = (c == ' ' || c == '\t' || c == '\n' || c == '\r');
-        if (is_space)
-        {
-            in_word = false;
-        }
-        else if (!in_word)
-        {
-            in_word = true;
-            ++words;
-        }
-    }
-    // Treat an unterminated last line as a line for counting
-    // purposes — matches `wc` on POSIX.
-    if (n > 0 && scratch[n - 1] != '\n')
-    {
-        ++lines;
-    }
-    ConsoleWrite("  ");
-    WriteU64Dec(lines);
-    ConsoleWrite(" LINES  ");
-    WriteU64Dec(words);
-    ConsoleWrite(" WORDS  ");
-    WriteU64Dec(n);
-    ConsoleWrite(" BYTES  ");
-    ConsoleWriteln(argv[1]);
-}
+// CmdWc moved to shell_wget.cpp where it can share the FAT32
+// streaming reader (Fat32ReadFileStream) and pick up -l/-w/-c
+// flags. The new impl drops the 512-byte ramfs scratch cap that
+// hobbled the old version on multi-MiB files.
 
 void CmdHead(u32 argc, char** argv)
 {

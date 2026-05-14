@@ -1516,4 +1516,416 @@ void CmdXxd(u32 argc, char** argv)
     (void)used_fat32;
 }
 
+// ---------------------------------------------------------------------------
+// wc — line / word / byte counts (coreutils-shaped output).
+//   wc <path>          newlines  words  bytes  path
+//   wc -l <path>       newlines only
+//   wc -w <path>       words only
+//   wc -c <path>       bytes only
+// Streams via Fat32ReadFileStream so multi-MiB files don't
+// hit the 512-byte ramfs scratch cap.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+struct WcCtx
+{
+    u64 lines;
+    u64 words;
+    u64 bytes;
+    bool in_word;
+};
+
+void WcAccumulate(WcCtx* w, const u8* data, u64 n)
+{
+    for (u64 i = 0; i < n; ++i)
+    {
+        const u8 c = data[i];
+        ++w->bytes;
+        if (c == '\n')
+            ++w->lines;
+        const bool is_ws = (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f');
+        if (!is_ws && !w->in_word)
+        {
+            ++w->words;
+            w->in_word = true;
+        }
+        else if (is_ws)
+        {
+            w->in_word = false;
+        }
+    }
+}
+
+bool WcChunkCb(const u8* data, u64 len, void* ctx)
+{
+    WcAccumulate(static_cast<WcCtx*>(ctx), data, len);
+    return true;
+}
+
+} // namespace
+
+void CmdWc(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("WC: usage: wc [-l|-w|-c] <path> [<path>...]");
+        return;
+    }
+    bool only_lines = false;
+    bool only_words = false;
+    bool only_bytes = false;
+    u32 first = 1;
+    if (argv[1][0] == '-' && argv[1][1] != '\0' && argv[1][2] == '\0')
+    {
+        switch (argv[1][1])
+        {
+        case 'l':
+            only_lines = true;
+            ++first;
+            break;
+        case 'w':
+            only_words = true;
+            ++first;
+            break;
+        case 'c':
+            only_bytes = true;
+            ++first;
+            break;
+        default:
+            ConsoleWrite("WC: bad flag ");
+            ConsoleWriteln(argv[1]);
+            return;
+        }
+    }
+    if (first >= argc)
+    {
+        ConsoleWriteln("WC: need a path");
+        return;
+    }
+    for (u32 a = first; a < argc; ++a)
+    {
+        WcCtx w{};
+        const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+        duetos::fs::fat32::DirEntry ent;
+        if (vol != nullptr && duetos::fs::fat32::Fat32LookupPath(vol, argv[a], &ent) && (ent.attributes & 0x10) == 0)
+        {
+            if (!duetos::fs::fat32::Fat32ReadFileStream(vol, &ent, &WcChunkCb, &w))
+            {
+                ConsoleWrite("WC: I/O ERROR: ");
+                ConsoleWriteln(argv[a]);
+                continue;
+            }
+        }
+        else
+        {
+            char scratch[duetos::fs::kTmpFsContentMax];
+            const u32 n = ReadFileToBuf(argv[a], scratch, sizeof(scratch));
+            if (n == static_cast<u32>(-1))
+            {
+                ConsoleWrite("WC: NO SUCH FILE: ");
+                ConsoleWriteln(argv[a]);
+                continue;
+            }
+            WcAccumulate(&w, reinterpret_cast<const u8*>(scratch), n);
+        }
+        if (only_lines)
+        {
+            WriteU64Dec(w.lines);
+        }
+        else if (only_words)
+        {
+            WriteU64Dec(w.words);
+        }
+        else if (only_bytes)
+        {
+            WriteU64Dec(w.bytes);
+        }
+        else
+        {
+            WriteU64Dec(w.lines);
+            ConsoleWriteChar(' ');
+            WriteU64Dec(w.words);
+            ConsoleWriteChar(' ');
+            WriteU64Dec(w.bytes);
+        }
+        ConsoleWriteChar(' ');
+        ConsoleWriteln(argv[a]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// tr — translate / squeeze / delete characters in console
+// stream form. v0 reads source from a file path (no real stdin
+// pipeline yet) and writes to console / FAT32. Supports:
+//   tr <from> <to> <src>            translate set1->set2
+//   tr -d <set> <src>               delete every char in set
+//   tr -s <char> <src>              squeeze runs of `char` to one
+//
+// Sets are literal byte strings (no [a-z] ranges or [:class:]).
+// Practical for stripping CRs, lowercasing ASCII when sets are
+// equal-length, etc.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+bool ContainsByte(const char* set, u8 b)
+{
+    for (u32 i = 0; set[i] != '\0'; ++i)
+        if (static_cast<u8>(set[i]) == b)
+            return true;
+    return false;
+}
+
+i32 IndexOfByte(const char* set, u8 b)
+{
+    for (i32 i = 0; set[i] != '\0'; ++i)
+        if (static_cast<u8>(set[i]) == b)
+            return i;
+    return -1;
+}
+
+} // namespace
+
+void CmdTr(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("TR: usage:");
+        ConsoleWriteln("    tr <from> <to> <src>     translate bytes (sets must match length)");
+        ConsoleWriteln("    tr -d <set> <src>        delete bytes in set");
+        ConsoleWriteln("    tr -s <char> <src>       squeeze runs of char to one");
+        return;
+    }
+    bool del = false;
+    bool squeeze = false;
+    u32 idx = 1;
+    if (argv[1][0] == '-' && argv[1][1] == 'd' && argv[1][2] == '\0')
+    {
+        del = true;
+        ++idx;
+    }
+    else if (argv[1][0] == '-' && argv[1][1] == 's' && argv[1][2] == '\0')
+    {
+        squeeze = true;
+        ++idx;
+    }
+    if (del || squeeze)
+    {
+        if (argc < idx + 2)
+        {
+            ConsoleWriteln("TR: missing args");
+            return;
+        }
+    }
+    else
+    {
+        if (argc < 4)
+        {
+            ConsoleWriteln("TR: missing args");
+            return;
+        }
+    }
+    const char* set1 = argv[idx];
+    const char* set2 = (del || squeeze) ? nullptr : argv[idx + 1];
+    const char* path = (del || squeeze) ? argv[idx + 1] : argv[idx + 2];
+
+    if (!del && !squeeze)
+    {
+        u32 n1 = 0, n2 = 0;
+        while (set1[n1] != '\0')
+            ++n1;
+        while (set2[n2] != '\0')
+            ++n2;
+        if (n1 != n2)
+        {
+            ConsoleWriteln("TR: <from> and <to> sets must be equal length");
+            return;
+        }
+    }
+
+    u32 src_len = 0;
+    auto* src = ReadAnyFile(path, &src_len);
+    if (src == nullptr)
+    {
+        ConsoleWrite("TR: NO SUCH FILE: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    u8 last_emit = 0;
+    bool have_last = false;
+    for (u32 i = 0; i < src_len; ++i)
+    {
+        u8 b = src[i];
+        if (del)
+        {
+            if (ContainsByte(set1, b))
+                continue;
+        }
+        else if (squeeze)
+        {
+            if (have_last && last_emit == b && ContainsByte(set1, b))
+                continue;
+        }
+        else
+        {
+            const i32 k = IndexOfByte(set1, b);
+            if (k >= 0)
+                b = static_cast<u8>(set2[k]);
+        }
+        ConsoleWriteChar(static_cast<char>(b));
+        last_emit = b;
+        have_last = true;
+    }
+    if (!have_last || last_emit != '\n')
+        ConsoleWriteChar('\n');
+    duetos::mm::KFree(src);
+}
+
+// ---------------------------------------------------------------------------
+// dd — bytewise file copy with skip / count / bs flags.
+// Coreutils-shaped subset:
+//   dd if=<src> [of=<dst>] [bs=N] [skip=N] [count=N]
+// Default block size 512 bytes (POSIX). Without `of=` writes to
+// console. count counts BLOCKS of bs bytes; skip skips that many
+// blocks of input.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+bool ParseKeyEq(const char* arg, const char* key, const char** out_value)
+{
+    u32 i = 0;
+    while (key[i] != '\0' && arg[i] != '\0' && arg[i] == key[i])
+        ++i;
+    if (key[i] != '\0' || arg[i] != '=')
+        return false;
+    *out_value = arg + i + 1;
+    return true;
+}
+
+bool ParseU64Dec(const char* s, u64* out)
+{
+    if (s == nullptr || *s == '\0')
+        return false;
+    u64 v = 0;
+    for (u32 i = 0; s[i] != '\0'; ++i)
+    {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+        v = v * 10 + u64(s[i] - '0');
+    }
+    *out = v;
+    return true;
+}
+
+} // namespace
+
+void CmdDd(u32 argc, char** argv)
+{
+    const char* in_path = nullptr;
+    const char* out_path = nullptr;
+    u64 bs = 512;
+    u64 skip = 0;
+    u64 count = ~u64(0); // until EOF
+    for (u32 i = 1; i < argc; ++i)
+    {
+        const char* v = nullptr;
+        if (ParseKeyEq(argv[i], "if", &v))
+            in_path = v;
+        else if (ParseKeyEq(argv[i], "of", &v))
+            out_path = v;
+        else if (ParseKeyEq(argv[i], "bs", &v))
+        {
+            u64 n = 0;
+            if (!ParseU64Dec(v, &n) || n == 0 || n > 65536)
+            {
+                ConsoleWriteln("DD: bs out of range (1..65536)");
+                return;
+            }
+            bs = n;
+        }
+        else if (ParseKeyEq(argv[i], "skip", &v))
+        {
+            if (!ParseU64Dec(v, &skip))
+            {
+                ConsoleWriteln("DD: bad skip=");
+                return;
+            }
+        }
+        else if (ParseKeyEq(argv[i], "count", &v))
+        {
+            if (!ParseU64Dec(v, &count))
+            {
+                ConsoleWriteln("DD: bad count=");
+                return;
+            }
+        }
+        else
+        {
+            ConsoleWrite("DD: unknown arg ");
+            ConsoleWriteln(argv[i]);
+            return;
+        }
+    }
+    if (in_path == nullptr)
+    {
+        ConsoleWriteln("DD: usage: dd if=<src> [of=<dst>] [bs=N] [skip=N] [count=N]");
+        return;
+    }
+    u32 src_len = 0;
+    auto* src = ReadAnyFile(in_path, &src_len);
+    if (src == nullptr)
+    {
+        ConsoleWrite("DD: NO SUCH FILE: ");
+        ConsoleWriteln(in_path);
+        return;
+    }
+    const u64 skip_bytes = skip * bs;
+    if (skip_bytes >= src_len)
+    {
+        duetos::mm::KFree(src);
+        ConsoleWriteln("DD: 0+0 records in / out (skip past EOF)");
+        return;
+    }
+    const u64 want_bytes_max = (count == ~u64(0)) ? (src_len - skip_bytes) : (count * bs);
+    const u64 want_bytes = (want_bytes_max < src_len - skip_bytes) ? want_bytes_max : (src_len - skip_bytes);
+    const u8* payload = src + skip_bytes;
+    if (out_path != nullptr)
+    {
+        const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+        if (vol == nullptr)
+        {
+            ConsoleWriteln("DD: NO FAT32 VOLUME for of=");
+            duetos::mm::KFree(src);
+            return;
+        }
+        MkdirParents(vol, out_path);
+        const auto wrote = duetos::fs::fat32::Fat32CreateAtPath(vol, out_path, payload, want_bytes);
+        if (wrote != static_cast<duetos::i64>(want_bytes))
+        {
+            ConsoleWrite("DD: CREATE FAIL ");
+            ConsoleWriteln(out_path);
+            duetos::mm::KFree(src);
+            return;
+        }
+    }
+    else
+    {
+        for (u64 i = 0; i < want_bytes; ++i)
+            ConsoleWriteChar(static_cast<char>(payload[i]));
+        if (want_bytes == 0 || payload[want_bytes - 1] != '\n')
+            ConsoleWriteChar('\n');
+    }
+    const u64 records = (want_bytes + bs - 1) / bs;
+    WriteU64Dec(records);
+    ConsoleWrite("+0 records in/out, ");
+    WriteU64Dec(want_bytes);
+    ConsoleWriteln(" bytes");
+    duetos::mm::KFree(src);
+}
+
 } // namespace duetos::core::shell::internal

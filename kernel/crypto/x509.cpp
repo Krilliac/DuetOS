@@ -201,15 +201,94 @@ bool ParseTbs(const asn1::Element& tbs, Certificate* out)
         }
     }
     off += validity.header_len + validity.len;
-    // subject Name
-    if (!step_next())
+    // subject Name — RDN sequence; walk it looking for the
+    // commonName attribute (OID 2.5.4.3 = body bytes 55 04 03).
+    asn1::Element subject{};
+    if (asn1::Read(tbs.value + off, tbs.len - off, &subject) != asn1::Status::Ok)
         return false;
+    if (subject.tag == asn1::kTagSequence)
+    {
+        // Walk RDNSequence -> SET -> SEQUENCE { OID, value }
+        u32 sub_off = 0;
+        while (sub_off < subject.len)
+        {
+            asn1::Element rdn{};
+            if (asn1::Read(subject.value + sub_off, subject.len - sub_off, &rdn) != asn1::Status::Ok)
+                break;
+            if (rdn.tag == asn1::kTagSet)
+            {
+                u32 set_off = 0;
+                while (set_off < rdn.len)
+                {
+                    asn1::Element atv{};
+                    if (asn1::Read(rdn.value + set_off, rdn.len - set_off, &atv) != asn1::Status::Ok)
+                        break;
+                    if (atv.tag == asn1::kTagSequence)
+                    {
+                        asn1::Element oid{};
+                        if (asn1::Read(atv.value, atv.len, &oid) == asn1::Status::Ok && oid.tag == asn1::kTagOid)
+                        {
+                            // commonName OID body = 0x55 0x04 0x03
+                            static constexpr u8 kCnOid[] = {0x55, 0x04, 0x03};
+                            if (asn1::OidEquals(oid, kCnOid, sizeof(kCnOid)))
+                            {
+                                const u32 oid_step = oid.header_len + oid.len;
+                                if (oid_step < atv.len)
+                                {
+                                    asn1::Element val{};
+                                    if (asn1::Read(atv.value + oid_step, atv.len - oid_step, &val) == asn1::Status::Ok)
+                                    {
+                                        // Accept any string-shaped tag
+                                        // (PrintableString / UTF8String /
+                                        // IA5String). Other tags are
+                                        // legal-but-rare; ignore for v0.
+                                        if (val.tag == asn1::kTagPrintableString || val.tag == asn1::kTagUtf8String ||
+                                            val.tag == asn1::kTagIa5String)
+                                        {
+                                            out->subject_cn = val.value;
+                                            out->subject_cn_len = val.len;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    set_off += atv.header_len + atv.len;
+                }
+            }
+            sub_off += rdn.header_len + rdn.len;
+        }
+    }
+    off += subject.header_len + subject.len;
     // SPKI
     asn1::Element spki{};
     if (asn1::Read(tbs.value + off, tbs.len - off, &spki) != asn1::Status::Ok)
         return false;
     if (!ParseSpki(spki, &out->subject_rsa, &out->subject_rsa_present))
         return false;
+    return true;
+}
+
+bool CnMatchesHostname(const u8* cn, u32 cn_len, const char* hostname)
+{
+    if (cn == nullptr || hostname == nullptr)
+        return false;
+    u32 host_len = 0;
+    while (hostname[host_len] != '\0')
+        ++host_len;
+    if (cn_len != host_len)
+        return false;
+    for (u32 i = 0; i < cn_len; ++i)
+    {
+        u8 a = cn[i];
+        u8 b = static_cast<u8>(hostname[i]);
+        if (a >= 'A' && a <= 'Z')
+            a = static_cast<u8>(a + 32);
+        if (b >= 'A' && b <= 'Z')
+            b = static_cast<u8>(b + 32);
+        if (a != b)
+            return false;
+    }
     return true;
 }
 

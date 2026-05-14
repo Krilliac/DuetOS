@@ -462,6 +462,10 @@ void CmdWget(u32 argc, char** argv);
 void CmdSha256Sum(u32 argc, char** argv);
 void CmdBase64(u32 argc, char** argv);
 void CmdXxd(u32 argc, char** argv);
+// CmdWc is declared higher up alongside CmdHead / CmdTail
+// (the cluster of coreutils-style text-file readers).
+void CmdTr(u32 argc, char** argv);
+void CmdDd(u32 argc, char** argv);
 void CmdLiveUpdate(u32 argc, char** argv);
 
 // ---------------------------------------------------------------

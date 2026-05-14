@@ -91,10 +91,26 @@ struct Certificate
     u32 validity_not_before_len;
     const u8* validity_not_after;
     u32 validity_not_after_len;
+
+    // Subject Common Name (CN) — slice into the TBS bytes.
+    // The most common identity carried in a leaf cert; TLS
+    // hostname matching uses this when there's no SAN
+    // (Subject Alternative Name) extension. Empty when the
+    // subject DN has no CN attribute.
+    const u8* subject_cn;
+    u32 subject_cn_len;
 };
 
 /// Parse an X.509 v3 cert from a DER buffer.
 Status Parse(const u8* der, u32 der_len, Certificate* out);
+
+/// Compare a subject CN slice (from `Certificate.subject_cn`)
+/// against a hostname string. Case-insensitive ASCII match.
+/// Returns true on exact equality. v0: no wildcard support
+/// (a leaf cert's "*.example.com" CN against host
+/// "foo.example.com" returns false). Wildcard support is the
+/// obvious follow-on once a real-world server requires it.
+bool CnMatchesHostname(const u8* cn, u32 cn_len, const char* hostname);
 
 /// Boot self-test. Builds a minimal hand-crafted certificate
 /// in a stack buffer (just enough to exercise the parser:
