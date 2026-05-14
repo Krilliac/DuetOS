@@ -81,7 +81,14 @@ namespace duetos::mm
 // stack + TEB + stubs). 1024 × 16 bytes/region = 16 KiB per AS
 // (four pages) — still cheap. A region-arena-backed impl can
 // replace this flat table when a workload exceeds 1024.
-inline constexpr u64 kMaxUserVmRegionsPerAs = 1024;
+// 8192 entries = 32 MiB per process. Bumped from 1024 to accommodate
+// real third-party PE32 images (NetSurf 3.11 is ~20 MiB of sections
+// + 13 preloaded DLLs + stack + TEB + proc-env + Win32 thunks page).
+// Cost is sizeof(AddressSpaceUserRegion) (~24 bytes) × 8192 ≈ 192 KiB
+// per AddressSpace struct — within budget for a kernel that already
+// allocates ~50 KiB AS structs and is targeted at machines with
+// >= 256 MiB of RAM.
+inline constexpr u64 kMaxUserVmRegionsPerAs = 8192;
 
 // Default frame budgets for the two canonical profiles. A new AS is
 // created with one of these (or a caller-supplied value) and

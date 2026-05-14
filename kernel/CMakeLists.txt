@@ -457,6 +457,45 @@ else()
 endif()
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_PE32_SMOKE_HEADER}")
 
+# pe32_rich.exe — PE32 test that imports one or two functions from
+# each of the 13 preloaded i386 DLLs. Verifies the full via-DLL IAT
+# resolution chain end-to-end. Built the same way as pe32_smoke.
+set(DUETOS_PE32_RICH_SRC "${CMAKE_SOURCE_DIR}/userland/apps/pe32_rich/pe32_rich.c")
+set(DUETOS_PE32_RICH_EXE "${CMAKE_CURRENT_BINARY_DIR}/pe32_rich.exe")
+set(DUETOS_PE32_RICH_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_pe32_rich_pe.h")
+if(MINGW_W64_I686_GCC)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_RICH_EXE}"
+        COMMAND "${MINGW_W64_I686_GCC}"
+                -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
+                -e _mainCRTStartup -Wl,--subsystem,console -Wl,--entry,_mainCRTStartup
+                -o "${DUETOS_PE32_RICH_EXE}" "${DUETOS_PE32_RICH_SRC}"
+                -lkernel32 -lmsvcrt -luser32 -lgdi32 -ladvapi32
+                -lcomctl32 -lcomdlg32 -lcrypt32 -liphlpapi
+                -lshell32 -lshlwapi -lws2_32 -lbcrypt
+        DEPENDS "${DUETOS_PE32_RICH_SRC}"
+        COMMENT "Cross-compiling pe32_rich.exe (i386 PE32 with 13-DLL imports)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_RICH_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${DUETOS_PE32_RICH_EXE}" "${DUETOS_PE32_RICH_HEADER}"
+                kBinPe32RichBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_PE32_RICH_EXE}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding pe32_rich PE"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_RICH_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                "${DUETOS_PE32_RICH_HEADER}"
+                kBinPe32RichBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Emitting pe32_rich PE stub (i686 mingw absent)"
+        VERBATIM)
+endif()
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_PE32_RICH_HEADER}")
+
 # Surface-coverage PE smoke apps. Each one is a self-contained
 # console PE (~10 KB) targeting a single Win32 API surface. Source
 # lives in userland/apps/<name>/<name>.c; CMake embeds build-tree

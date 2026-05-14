@@ -72,6 +72,7 @@
 #include "generated_kernel32_32_dll.h"
 #include "generated_kernel32_dll.h"
 #include "generated_msvcrt_32_dll.h"
+#include "generated_pe32_rich_pe.h"
 #include "generated_shell32_32_dll.h"
 #include "generated_shlwapi_32_dll.h"
 #include "generated_user32_32_dll.h"
@@ -3160,6 +3161,12 @@ void StartRing3SmokeTask()
         // boot transcript. Keeping it always-on means CI catches
         // any regression in the Layer 1..3 PE32 recognition path.
         SpawnPeFile("ring3-pe32-smoke", fs::generated::kBinPe32SmokeBytes, fs::generated::kBinPe32SmokeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // pe32_rich — exercises one import per preloaded i386 DLL.
+        // Boot transcript shows a "[pe-resolve] via-dll" line for
+        // each, plus "[pe32-rich] <dll> ok" runtime confirmation,
+        // proving the full Layer 4 surface works end-to-end.
+        SpawnPeFile("ring3-pe32-rich", fs::generated::kBinPe32RichBytes, fs::generated::kBinPe32RichBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         if (!emulator)
         {

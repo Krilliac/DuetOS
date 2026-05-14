@@ -843,7 +843,120 @@ the full Win32 -> int 0x80 -> kernel -> serial chain.
     `__chkstk` to probe the stack a page at a time. Not in our
     msvcrt_32 yet.
 
----
+## Phase 6.15 — i386 DLL set: 13-DLL PE32 surface (2026-05-14)
+
+Layer 4 of 32-bit PE support delivered. The PE32 preload set is
+now **13 i386 stub DLLs** mirroring the imports of a real-world
+Win32 PE32 (NetSurf 3.11's import set was the audit reference).
+The `pe32_rich` smoke exercises one or two functions from each
+DLL — every call goes through the via-DLL IAT path the kernel
+loader patches at spawn time.
+
+- **What landed (new userland DLLs, all PE32 / i386).**
+  - `userland/libs/kernel32_32/` — ~40 exports (built up
+    in Phase 6.14, expanded in this slice with `GetModuleHandleA/W`,
+    `GetProcAddress`, `LoadLibraryA/W`, `FreeLibrary`,
+    `GetProcessHeap`, `HeapAlloc/Free/Size/ReAlloc`,
+    `GetCommandLineA/W`, `GetStartupInfoA/W`, `GetFileType`,
+    `Sleep`, `GetTickCount`, the full `InitializeCriticalSection`
+    family, `IsDebuggerPresent`, the `Interlocked*` quartet,
+    `GetVersion`, `CloseHandle`, `SetUnhandledExceptionFilter`).
+  - `userland/libs/msvcrt_32/` — ~50 exports: memcpy / memmove /
+    memset / memcmp; strlen / strcmp / strncmp / strcpy / strncpy
+    / strcat / strchr / strrchr / strstr / _stricmp / _strnicmp;
+    CRT startup (_errno, _amsg_exit, _assert, exit, _exit, abort,
+    _initterm, _initterm_e, __set_app_type, __setusermatherr,
+    _iob, __p__commode / _fmode / _acmdln, __getmainargs,
+    __initenv); a minimal bump-allocator malloc / free / calloc /
+    realloc; stubbed fopen / fread / fwrite; puts (forwards to
+    SYS_WRITE); atoi / atol.
+  - `userland/libs/user32_32/` — ~60 exports: window lifecycle
+    (CreateWindowEx, Destroy / Show / UpdateWindow), full message
+    loop (Peek / Get / Translate / Dispatch / Post / SendMessage,
+    DefWindowProc, PostQuitMessage), class registration
+    (RegisterClass[Ex][AW], UnregisterClass), resource loaders
+    (LoadIcon / Cursor / etc.), MessageBoxA/W returning IDOK,
+    GetDC / ReleaseDC, clipboard / caret / paint / cursor / focus
+    stubs, GetSystemMetrics with sensible defaults.
+  - `userland/libs/gdi32_32/` — ~45 exports: Create{Bitmap,
+    CompatibleBitmap, CompatibleDC, Pen, SolidBrush, BrushIndirect,
+    Font{A,W,IndirectA,IndirectW}}, Delete{DC,Object},
+    SelectObject, GetStockObject, drawing primitives, pixel ops,
+    SetBkColor / TextColor / BkMode / TextAlign / MapMode,
+    GetObject{A,W}, CreateDIB{Section,itmap}, GetDIBits.
+  - `userland/libs/advapi32_32/` — 24 exports: Registry stubs
+    (RegOpen/Enum/Close/QueryValue), the full CryptoAPI v0
+    (Crypt{Acquire,Release}Context, CryptCreateHash,
+    CryptHashData, CryptGetHashParam, CryptGenRandom,
+    CryptSignHashW, etc.), Event log stubs, and
+    SystemFunction036 (RtlGenRandom) returning an LCG sequence.
+  - `userland/libs/comctl32_32/` — 5 exports: ImageList_Create /
+    Destroy / AddMasked, InitCommonControlsEx, PropertySheetA.
+  - `userland/libs/comdlg32_32/` — 1 export: ChooseFontA.
+  - `userland/libs/crypt32_32/` — 10 exports: Cert{Close,Open,
+    OpenSystem}Store, CertDuplicateCertificateContext,
+    CertEnumCertificatesInStore, CertFindCertificateInStore,
+    CertFreeCertificateContext, CertGet{Certificate,Enhanced,
+    Intended}KeyUsage / Property.
+  - `userland/libs/iphlpapi_32/` — 4 exports: GetAdaptersAddresses,
+    GetBestRoute2, GetUnicastIpAddressTable, FreeMibTable.
+  - `userland/libs/shell32_32/` — 2 exports: CommandLineToArgvW
+    (returns `argv = ["a.exe"]`), SHGetFolderPathA.
+  - `userland/libs/shlwapi_32/` — 1 export: PathAppendA (real
+    impl — walks the path string and appends with a `\` separator).
+  - `userland/libs/ws2_32_32/` — ~40 exports: full Winsock
+    surface backed by **real syscalls** to the kernel socket
+    pool. socket / bind / listen / connect / accept / send / recv
+    / sendto / recvfrom / shutdown / closesocket / select /
+    inet_addr / inet_ntoa / gethostname / gethostbyname; the
+    network-order helpers (htons / ntohs / htonl / ntohl) are
+    real bit-swap implementations; WSA*Event surface stubbed.
+  - `userland/libs/bcrypt_32/` — 1 export: BCryptGenRandom
+    (LCG entropy).
+- **Build infrastructure.**
+  - `tools/build/build-stub-32-dll.sh` — generic builder that
+    takes `(dll_name, base_va, symbol)` and produces a PE32 DLL
+    via `clang --target=i686-pc-windows-msvc + lld-link
+    /machine:x86 /def:<dll>_32.def`. The .def's `LIBRARY <name>.dll`
+    directive plus the `/out:` basename being `<name>.dll` sets
+    the PE Export Directory's Name field correctly for the i386
+    importer's case-insensitive resolver.
+  - `duetos_embed_32bit_stub_dll` CMake macro — one-line entry
+    per new DLL.
+- **Live verification.**
+  - `userland/apps/pe32_rich/pe32_rich.c` — PE32 test that
+    imports one or two functions from each preloaded i386 DLL.
+    The boot transcript on every ring3 smoke run records:
+    ```
+    [pe32-rich] starting
+    [pe32-rich] kernel32 ok
+    [pe32-rich] msvcrt ok
+    [pe32-rich] user32 ok
+    [pe32-rich] gdi32 ok
+    [pe32-rich] advapi32 ok
+    [pe32-rich] comctl32 ok
+    [pe32-rich] comdlg32 ok
+    [pe32-rich] crypt32 ok
+    [pe32-rich] iphlpapi ok
+    [pe32-rich] shell32 ok
+    [pe32-rich] shlwapi ok
+    [pe32-rich] ws2_32 ok (htons real)
+    [pe32-rich] bcrypt ok
+    [pe32-rich] timer + module ok
+    [pe32-rich] all 13 DLLs exercised — exit rc=0x42
+    [proc] destroy pid=9 name="ring3-pe32-rich"
+    ```
+    Every line above the destroy is a real Win32 API call going
+    through the IAT into one of our i386 stubs and back. The
+    `htons` "real" tag confirms a byte-swap of 0x1234 → 0x3412,
+    proving the 32-bit syscall remap + the i386 calling convention
+    round-trip cleanly.
+- **Memory budget bump.**
+  `kernel/mm/address_space.h::kMaxUserVmRegionsPerAs` raised from
+  1024 to 8192. Real-world PE32 images (e.g. NetSurf 3.11 at
+  ~20 MiB) need ~5000+ pages just for sections + the 13-DLL
+  preload set. The per-AS region-table cost goes from ~24 KiB
+  to ~192 KiB — well within budget.
 
 ## How to read the rest of the tree
 
