@@ -59,6 +59,15 @@ struct LogEntry
     const char* subsystem;
     const char* message;
     u64 value;
+    // Source location captured by the KLOG_WARN/ERROR/CRITICAL macros
+    // at the call site. `file` points to the compiler-emitted __FILE__
+    // string (read-only .rodata, stable for the program lifetime) so
+    // the ring can store the pointer rather than copy the string.
+    // Null for entries written by callers that bypass the macros
+    // (direct `core::Log(...)` calls — the documented escape hatch
+    // for ring-buffer replay and synthesised lines).
+    const char* file;
+    u32 line;
 };
 
 constinit LogEntry g_log_ring[kLogRingCapacity] = {};
@@ -172,7 +181,8 @@ inline void Tee(const char* s)
 // Forward decl — defined below; PushEntry captures timestamp.
 inline u64 ElapsedMicros();
 
-inline void PushEntry(LogLevel level, const char* subsystem, const char* message, u64 value, bool has_value)
+inline void PushEntry(LogLevel level, const char* subsystem, const char* message, u64 value, bool has_value,
+                      const char* file, u32 line)
 {
     const u64 slot = g_log_ring_next % kLogRingCapacity;
     g_log_ring[slot] = LogEntry{
@@ -182,6 +192,8 @@ inline void PushEntry(LogLevel level, const char* subsystem, const char* message
         .subsystem = subsystem,
         .message = message,
         .value = value,
+        .file = file,
+        .line = line,
     };
     ++g_log_ring_next;
     if (g_log_ring_count < kLogRingCapacity)
@@ -252,6 +264,107 @@ inline void MaybeAppendDecimal(u64 v)
         WriteDecimal(v);
         arch::SerialWrite(")");
     }
+}
+
+// Trim the `__FILE__` prefix down to a kernel-tree-relative path.
+// Compilers emit `__FILE__` with whatever path the build system fed
+// the source — typically an absolute path like
+//   /home/user/DuetOS/kernel/log/klog.cpp
+// which is 30+ bytes of noise per warn/error line. Walk the string
+// for the LAST occurrence of "kernel/" and emit from there:
+//   kernel/log/klog.cpp
+// If "kernel/" isn't found (e.g. a future userland TU that links
+// klog), fall back to the basename so the line stays short.
+//
+// O(N) per emission, but warnings + errors are a small fraction of
+// the log volume and the path is typically <80 bytes; the renderer
+// cost is dominated by the serial UART rate, not the strncmp loop.
+inline const char* KlogShortFilePath(const char* path)
+{
+    if (path == nullptr)
+    {
+        return "";
+    }
+    const char* found_kernel = nullptr;
+    const char* basename_start = path;
+    for (const char* p = path; *p != 0; ++p)
+    {
+        if (*p == '/')
+        {
+            basename_start = p + 1;
+        }
+        if (p[0] == 'k' && p[1] == 'e' && p[2] == 'r' && p[3] == 'n' && p[4] == 'e' && p[5] == 'l' && p[6] == '/')
+        {
+            found_kernel = p;
+        }
+    }
+    if (found_kernel != nullptr)
+    {
+        return found_kernel;
+    }
+    return basename_start;
+}
+
+// Emit `   at <short-path>:<line>` to the serial sink when the
+// caller passed a source location. Called by every Log* function
+// just before the trailing newline. The Tee path deliberately does
+// NOT receive this — framebuffer / on-screen renderers want clean
+// text without the 30-character location suffix dwarfing the
+// message body (matches the existing "no timestamp on Tee" policy
+// at the top of Log()).
+inline void WriteAtLocation(const char* file, u32 line)
+{
+    if (file == nullptr)
+    {
+        return;
+    }
+    arch::SerialWrite("   at ");
+    arch::SerialWrite(KlogShortFilePath(file));
+    arch::SerialWrite(":");
+    WriteDecimal(line);
+}
+
+// Writer-callback variant for the ring-buffer dumpers that go
+// through a caller-supplied `void(const char*)` sink rather than
+// directly to serial. Renders the decimal line number into a tiny
+// stack buffer so the writer can ingest one fully-formed C string;
+// keeps the dump path allocation-free.
+using AtWriter = void (*)(const char*);
+inline void WriteAtLocationVia(AtWriter writer, const char* file, u32 line)
+{
+    if (file == nullptr || writer == nullptr)
+    {
+        return;
+    }
+    writer("   at ");
+    writer(KlogShortFilePath(file));
+    writer(":");
+    // u32 max is 10 digits; 12-byte buf with NUL + safety. Rendered
+    // big-endian by reversing as we extract digits.
+    char buf[12];
+    u32 v = line;
+    u32 n = 0;
+    if (v == 0)
+    {
+        buf[n++] = '0';
+    }
+    else
+    {
+        while (v > 0 && n + 1 < sizeof(buf))
+        {
+            buf[n++] = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        }
+    }
+    // Reverse in place.
+    for (u32 i = 0, j = n - 1; i < j; ++i, --j)
+    {
+        const char t = buf[i];
+        buf[i] = buf[j];
+        buf[j] = t;
+    }
+    buf[n] = '\0';
+    writer(buf);
 }
 
 inline const char* LevelTag(LogLevel level)
@@ -653,6 +766,39 @@ void SetLogLineSink(LogLineSink sink)
         append(e.subsystem);
         append(" : ");
         append(e.message);
+        // Replay the captured source location so the line-sink's
+        // back-fill records match the live emissions byte-for-byte.
+        // Entries without a captured location (info / debug / trace,
+        // or callers that bypassed the KLOG macros) skip the suffix.
+        if (e.file != nullptr)
+        {
+            append("   at ");
+            append(KlogShortFilePath(e.file));
+            append(":");
+            char num[12];
+            u32 v = e.line;
+            u32 n = 0;
+            if (v == 0)
+            {
+                num[n++] = '0';
+            }
+            else
+            {
+                while (v > 0 && n + 1 < sizeof(num))
+                {
+                    num[n++] = static_cast<char>('0' + (v % 10));
+                    v /= 10;
+                }
+            }
+            for (u32 a = 0, b = n - 1; a < b; ++a, --b)
+            {
+                const char t = num[a];
+                num[a] = num[b];
+                num[b] = t;
+            }
+            num[n] = '\0';
+            append(num);
+        }
         append("\n");
         line[len] = '\0';
         const LogArea area = AreaFromSubsystemImpl(e.subsystem);
@@ -697,7 +843,7 @@ void SetPostEmitHook(PostEmitHook hook)
     g_post_emit_hook = hook;
 }
 
-void Log(LogLevel level, const char* subsystem, const char* message)
+void Log(LogLevel level, const char* subsystem, const char* message, const char* file, u32 line)
 {
     const LogArea inferred_area = AreaFromSubsystemImpl(subsystem);
     if (!LevelAndAreaEnabled(level, inferred_area))
@@ -725,6 +871,7 @@ void Log(LogLevel level, const char* subsystem, const char* message)
     arch::SerialWrite(subsystem);
     arch::SerialWrite(" : ");
     arch::SerialWrite(message);
+    WriteAtLocation(file, line);
     arch::SerialWrite("\n");
 
     // Tee to the secondary sink (framebuffer console etc.). No
@@ -736,11 +883,11 @@ void Log(LogLevel level, const char* subsystem, const char* message)
     Tee(message);
     Tee("\n");
 
-    PushEntry(level, subsystem, message, 0, false);
+    PushEntry(level, subsystem, message, 0, false, file, line);
     PostEmit();
 }
 
-void LogWithValue(LogLevel level, const char* subsystem, const char* message, u64 value)
+void LogWithValue(LogLevel level, const char* subsystem, const char* message, u64 value, const char* file, u32 line)
 {
     const LogArea inferred_area = AreaFromSubsystemImpl(subsystem);
     if (!LevelAndAreaEnabled(level, inferred_area))
@@ -768,6 +915,7 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     arch::SerialWrite("   val=");
     WriteCompactHex(value);
     MaybeAppendDecimal(value);
+    WriteAtLocation(file, line);
     arch::SerialWrite("\n");
 
     Tee(tag);
@@ -776,11 +924,12 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     Tee(message);
     Tee("\n");
 
-    PushEntry(level, subsystem, message, value, true);
+    PushEntry(level, subsystem, message, value, true, file, line);
     PostEmit();
 }
 
-void LogWithString(LogLevel level, const char* subsystem, const char* message, const char* label, const char* value_str)
+void LogWithString(LogLevel level, const char* subsystem, const char* message, const char* label, const char* value_str,
+                   const char* file, u32 line)
 {
     const LogArea inferred_area = AreaFromSubsystemImpl(subsystem);
     if (!LevelAndAreaEnabled(level, inferred_area))
@@ -817,7 +966,9 @@ void LogWithString(LogLevel level, const char* subsystem, const char* message, c
     arch::SerialWrite(label ? label : "str");
     arch::SerialWrite("=\"");
     arch::SerialWrite(value_str ? value_str : "(null)");
-    arch::SerialWrite("\"\n");
+    arch::SerialWrite("\"");
+    WriteAtLocation(file, line);
+    arch::SerialWrite("\n");
 
     Tee(tag);
     Tee(subsystem);
@@ -831,12 +982,12 @@ void LogWithString(LogLevel level, const char* subsystem, const char* message, c
 
     // Ring-buffer entry records the message only; the string pointer
     // would need per-entry deep-copy storage we don't have yet.
-    PushEntry(level, subsystem, message, 0, false);
+    PushEntry(level, subsystem, message, 0, false, file, line);
     PostEmit();
 }
 
 void LogWith2Values(LogLevel level, const char* subsystem, const char* message, const char* a_label, u64 a_value,
-                    const char* b_label, u64 b_value)
+                    const char* b_label, u64 b_value, const char* file, u32 line)
 {
     const LogArea inferred_area = AreaFromSubsystemImpl(subsystem);
     if (!LevelAndAreaEnabled(level, inferred_area))
@@ -879,6 +1030,7 @@ void LogWith2Values(LogLevel level, const char* subsystem, const char* message, 
     arch::SerialWrite("=");
     WriteCompactHex(b_value);
     MaybeAppendDecimal(b_value);
+    WriteAtLocation(file, line);
     arch::SerialWrite("\n");
 
     Tee(tag);
@@ -889,7 +1041,7 @@ void LogWith2Values(LogLevel level, const char* subsystem, const char* message, 
 
     // Record only the first value — a second u64 would bloat every
     // entry just to service the rarer 2-value path.
-    PushEntry(level, subsystem, message, a_value, true);
+    PushEntry(level, subsystem, message, a_value, true, file, line);
     PostEmit();
 }
 
@@ -996,6 +1148,13 @@ void DumpLogRing()
             WriteCompactHex(e.value);
             MaybeAppendDecimal(e.value);
         }
+        // Replay the captured source location for warn-and-above
+        // entries — same place a live emission would put it, so the
+        // panic dump is byte-identical to the live boot log for
+        // those lines. Entries without a captured location (info /
+        // debug / trace, or direct `core::Log()` calls) get the
+        // unsuffixed form.
+        WriteAtLocation(e.file, e.line);
         arch::SerialWrite("\n");
     }
 }
@@ -1030,6 +1189,7 @@ void DumpLogRingToFiltered(LogTee writer, LogLevel min_level)
         writer(e.subsystem);
         writer(" : ");
         writer(e.message);
+        WriteAtLocationVia(writer, e.file, e.line);
         writer("\n");
     }
 }
@@ -1063,6 +1223,7 @@ void DumpLogRingFilteredAreaTo(LogTee writer, u32 area_mask, u32 max_entries)
         writer(e.subsystem);
         writer(" : ");
         writer(e.message);
+        WriteAtLocationVia(writer, e.file, e.line);
         writer("\n");
         ++emitted;
         if (max_entries != 0 && emitted >= max_entries)
@@ -1175,7 +1336,7 @@ TraceScope::~TraceScope()
     Tee(m_name);
     Tee("\n");
 
-    PushEntry(LogLevel::Trace, m_subsystem, m_name, elapsed, true);
+    PushEntry(LogLevel::Trace, m_subsystem, m_name, elapsed, true, nullptr, 0);
     PostEmit();
 }
 
@@ -1260,7 +1421,7 @@ void LogMetrics(LogLevel level, const char* subsystem, const char* label)
 
     // Ring entry: record heap used as the one preserved value so
     // post-mortem shows "at metrics checkpoint X, heap was at Y".
-    PushEntry(level, subsystem, label ? label : "metrics", heap.used_bytes, true);
+    PushEntry(level, subsystem, label ? label : "metrics", heap.used_bytes, true, nullptr, 0);
     PostEmit();
 }
 
@@ -1300,7 +1461,7 @@ void KLogSelfTest()
 // multiple areas (e.g. a syscall handler logging Memory + Sched
 // inside its body).
 // -----------------------------------------------------------------
-void LogA(LogLevel level, LogArea area, const char* subsystem, const char* message)
+void LogA(LogLevel level, LogArea area, const char* subsystem, const char* message, const char* file, u32 line)
 {
     if (!LevelAndAreaEnabled(level, area))
         return;
@@ -1318,17 +1479,19 @@ void LogA(LogLevel level, LogArea area, const char* subsystem, const char* messa
     arch::SerialWrite(subsystem);
     arch::SerialWrite(" : ");
     arch::SerialWrite(message);
+    WriteAtLocation(file, line);
     arch::SerialWrite("\n");
     Tee(tag);
     Tee(subsystem);
     Tee(" : ");
     Tee(message);
     Tee("\n");
-    PushEntry(level, subsystem, message, 0, false);
+    PushEntry(level, subsystem, message, 0, false, file, line);
     PostEmit();
 }
 
-void LogAWithValue(LogLevel level, LogArea area, const char* subsystem, const char* message, u64 value)
+void LogAWithValue(LogLevel level, LogArea area, const char* subsystem, const char* message, u64 value,
+                   const char* file, u32 line)
 {
     if (!LevelAndAreaEnabled(level, area))
         return;
@@ -1349,18 +1512,19 @@ void LogAWithValue(LogLevel level, LogArea area, const char* subsystem, const ch
     arch::SerialWrite("   val=");
     WriteCompactHex(value);
     MaybeAppendDecimal(value);
+    WriteAtLocation(file, line);
     arch::SerialWrite("\n");
     Tee(tag);
     Tee(subsystem);
     Tee(" : ");
     Tee(message);
     Tee("\n");
-    PushEntry(level, subsystem, message, value, true);
+    PushEntry(level, subsystem, message, value, true, file, line);
     PostEmit();
 }
 
 void LogAWithString(LogLevel level, LogArea area, const char* subsystem, const char* message, const char* label,
-                    const char* value_str)
+                    const char* value_str, const char* file, u32 line)
 {
     if (!LevelAndAreaEnabled(level, area))
         return;
@@ -1386,18 +1550,20 @@ void LogAWithString(LogLevel level, LogArea area, const char* subsystem, const c
     arch::SerialWrite(label);
     arch::SerialWrite("=\"");
     arch::SerialWrite(value_str);
-    arch::SerialWrite("\"\n");
+    arch::SerialWrite("\"");
+    WriteAtLocation(file, line);
+    arch::SerialWrite("\n");
     Tee(tag);
     Tee(subsystem);
     Tee(" : ");
     Tee(message);
     Tee("\n");
-    PushEntry(level, subsystem, message, 0, false);
+    PushEntry(level, subsystem, message, 0, false, file, line);
     PostEmit();
 }
 
 void LogAWith2Values(LogLevel level, LogArea area, const char* subsystem, const char* message, const char* a_label,
-                     u64 a_value, const char* b_label, u64 b_value)
+                     u64 a_value, const char* b_label, u64 b_value, const char* file, u32 line)
 {
     if (!LevelAndAreaEnabled(level, area))
         return;
@@ -1429,13 +1595,14 @@ void LogAWith2Values(LogLevel level, LogArea area, const char* subsystem, const 
     arch::SerialWrite("=");
     WriteCompactHex(b_value);
     MaybeAppendDecimal(b_value);
+    WriteAtLocation(file, line);
     arch::SerialWrite("\n");
     Tee(tag);
     Tee(subsystem);
     Tee(" : ");
     Tee(message);
     Tee("\n");
-    PushEntry(level, subsystem, message, a_value, true);
+    PushEntry(level, subsystem, message, a_value, true, file, line);
     PostEmit();
 }
 
