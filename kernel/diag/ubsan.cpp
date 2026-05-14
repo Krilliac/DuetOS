@@ -21,9 +21,7 @@
 #include "diag/ubsan.h"
 
 #include "arch/x86_64/serial.h"
-#include "diag/fault_react.h"
 #include "log/klog.h"
-#include "security/fault_domain.h"
 #include "util/saturating.h"
 #include "util/types.h"
 
@@ -123,19 +121,32 @@ struct AlignmentAssumptionData
 
 // Centralised report path. Keeps every handler down to one line of
 // glue and ensures every report increments the counter, so a future
-// runtime checker can ask "any UB since boot?" in O(1).
+// runtime checker can ask "any UB since boot?" in O(1) (see
+// `UbsanReportsEmitted` / `inspect health`).
 //
-// Dispatch policy: routes through diag::FaultReactDispatch with
-// kind=Unknown and severity=Degraded. The dispatcher's default
-// policy for Unknown is Continue — the floor doesn't escalate
-// either, so the observable outcome is the same as the previous
-// log-and-return path. The win is that UBSan reports now show
-// up in `inspect fault-react` counters, so a "any UB since boot?"
-// triage answer comes from the same chokepoint as every other
-// fault class.
+// Two outputs per incident:
+//
+//   1. A verbatim "[ubsan] <kind> at <file>:<line>:<col>\n" serial
+//      line. Host-side tooling already greps for this anchor, so
+//      the format is stable. Bypasses klog level/area gating —
+//      host capture wants every incident on the wire.
+//
+//   2. One klog WARN line whose MESSAGE field carries the UBSan
+//      kind ("add-overflow", "type-mismatch", …) — NOT a generic
+//      placeholder. Previously this path routed through
+//      diag::FaultReactDispatch with kind=Unknown, which logged
+//      `[W] diag/ubsan : unknown   val=...` and made the BSOD's
+//      recent-klog tail (which renders only `subsystem : message`
+//      from the in-kernel ring) read as `[W] DIAG/UBSAN : UNKNOWN`
+//      for every UBSan incident. The dispatcher's only effect was
+//      that log line — bookkeeping is already covered by g_reports
+//      and surfaced through `inspect health` — so we log directly
+//      with the actual kind, keeping the BSOD tail informative.
 void Report(const char* kind, const SourceLocation* loc)
 {
     ++g_reports;
+
+    const char* file = (loc != nullptr && loc->filename != nullptr) ? loc->filename : "<no-loc>";
 
     // Detailed serial line, preserved verbatim — host-side
     // tooling already greps for "[ubsan]" and the file:line:col
@@ -152,24 +163,16 @@ void Report(const char* kind, const SourceLocation* loc)
         arch::SerialWriteHex(loc->column);
         arch::SerialWrite("\n");
     }
-    else
-    {
-        KLOG_WARN_S("ubsan", "incident", "kind", kind);
-    }
 
-    // Dispatcher hand-off. UBSan handlers can run from any
-    // context the compiler emitted them in (including IRQ),
-    // so we conform to the dispatcher's IRQ-safety contract by
-    // not allocating / locking — FaultReactDispatch itself only
-    // calls klog (which is IRQ-safe).
-    ::duetos::diag::FaultEvidence ev = {};
-    ev.source = "diag/ubsan";
-    ev.kind = ::duetos::diag::FaultKind::Unknown;
-    ev.severity = ::duetos::diag::FaultSeverity::Degraded;
-    ev.attempt_count = 0;
-    ev.faulting_rip = (loc != nullptr) ? loc->line : 0;
-    ev.aux = 0;
-    (void)::duetos::diag::FaultReactDispatch(::duetos::core::kFaultDomainInvalid, ev);
+    // klog ring entry — message = kind so the in-ring entry
+    // (and therefore the BSOD recent-log tail) carries the
+    // failing UBSan class, not a generic placeholder. The
+    // labelled `file` string keeps the source anchor on serial
+    // and any registered tee; the line/column are already on
+    // the "[ubsan]" serial line above. UBSan handlers can run
+    // from any context the compiler emitted them in (including
+    // IRQ); klog is IRQ-safe (no locks, no allocation).
+    KLOG_WARN_S("diag/ubsan", kind, "at", file);
 }
 
 } // namespace
