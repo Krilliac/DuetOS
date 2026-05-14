@@ -12,6 +12,7 @@
 #include "cpu/percpu.h"
 #include "debug/probes.h"
 #include "net/wireless/wifi_diag.h"
+#include "diag/bsod.h"
 #include "diag/diag_decode.h"
 #include "diag/event_trace.h"
 #include "diag/soft_lockup.h"
@@ -911,6 +912,11 @@ void Panic(const char* subsystem, const char* message)
     // that PersistToDisk call site, so panicking here AND faulting
     // through a trap both land the journal on disk.
 
+    // BSOD: fullscreen panel + 8042 reset on keypress. See
+    // PanicWithValue for the rationale.
+    duetos::diag::BsodRender(subsystem, message, reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(),
+                             arch::ReadRbp(), 0, /*has_value=*/false);
+
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();
 }
@@ -974,6 +980,14 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     // soft (this) and hard (EmitMinidumpFromTrapFrame) paths share
     // that PersistToDisk call site, so panicking here AND faulting
     // through a trap both land the journal on disk.
+
+    // BSOD: fullscreen panel + 8042 reset on keypress. If the
+    // framebuffer is unavailable (very early boot, headless
+    // hand-off), this returns and we fall through to Halt() as
+    // before. The serial dump above is the authoritative
+    // record either way.
+    duetos::diag::BsodRender(subsystem, message, reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(),
+                             arch::ReadRbp(), value, /*has_value=*/true);
 
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
     arch::Halt();
