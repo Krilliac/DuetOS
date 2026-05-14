@@ -115,6 +115,7 @@
 - [Shell Scripting](reference/Shell-Scripting.md)
 - [Smoke Test Suite](reference/Smoke-Test-Suite.md)
 - [Win32 / DirectX Surface Status](reference/Win32-Surface-Status.md)
+- [External References](reference/External-References.md)
 
 ### Advanced
 - [Contributing](advanced/Contributing.md)

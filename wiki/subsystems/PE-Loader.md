@@ -91,11 +91,35 @@ convention.
 - **No SEH unwinding by the loader**. SEH tables are mapped (so the
   `__C_specific_handler` finds them) but DuetOS does not unwind on
   exception — exceptions inside a PE produce a process kill.
-- **TLS callbacks**: dispatched only at thread create. Per-thread TLS
-  init by the CRT works; image-level callbacks for module load are
-  fired on first map only.
+- **TLS image-level callbacks**: a non-empty `IMAGE_DIRECTORY_ENTRY_TLS`
+  callback array causes the PE load to fail with
+  `TlsCallbacksUnsupported` (`pe_loader.cpp:1805`). Empty callback
+  arrays — common because the MSVC CRT reserves the directory
+  unconditionally — are accepted. A future slice will inject a
+  per-process x64 thunk that walks the array with
+  `(rcx=image_base, rdx=DLL_PROCESS_ATTACH, r8=nullptr)` before
+  jumping to the real entry. Per-thread TLS init via the CRT works.
 - **No PE delay-load** (`__delayLoadHelper2`). Anything imported by
   delay-load is treated as eager-import.
+- **Bound imports**: the `IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT` directory
+  is silently ignored. Bound imports are an optimisation that
+  embeds resolved addresses for a specific DLL build; safe to skip
+  because the eager-import walk re-resolves them, but the loader
+  does not validate that the bound timestamps still match.
+- **Subsystem field**: the optional header `Subsystem` field
+  (`IMAGE_SUBSYSTEM_WINDOWS_GUI` / `_CUI` / `_NATIVE`) is not
+  inspected. Both GUI and console binaries are loaded identically;
+  `user32`/`kernel32` thunks decide their own behaviour. Native
+  subsystem PEs (`smss.exe`-class) are out of scope for v0.
+- **`IMAGE_DLLCHARACTERISTICS_NX_COMPAT` bit**: not consulted —
+  W^X is enforced unconditionally for every PE regardless of the
+  bit. This is stricter than Windows; PEs that incorrectly omit
+  the bit still get NX. Recorded for the audit trail, not as a
+  fix target.
+- **CFG (Control Flow Guard)**: `__security_cookie` is seeded
+  (`SeedSecurityCookie` at `pe_loader.cpp:773`) but the
+  `GuardCFFunctionTable` is not loaded — indirect calls land
+  without CFG validation.
 - **Resource section**: mapped read-only but not interpreted — the
   resource APIs (`FindResource`, `LoadIcon`, etc.) walk the section
   themselves.
