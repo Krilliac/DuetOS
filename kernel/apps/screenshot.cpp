@@ -1,6 +1,7 @@
 #include "apps/screenshot.h"
 
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
@@ -177,7 +178,10 @@ bool ScreenshotCapture()
     const u32 idx = NextShotIndex(v);
     if (idx == 0)
     {
-        SerialWrite("[shot] capture: filename counter exhausted (>9999)\n");
+        // 4-digit screenshot counter overflowed (>9999). Klog
+        // captures the saturation; the on-screen notify keeps
+        // the user-facing signal as-is.
+        KLOG_WARN("apps/screenshot", "filename counter exhausted (>9999)");
         CursorPopWait();
         NotifyShow("screenshot: filename slots exhausted");
         return false;
@@ -192,7 +196,11 @@ bool ScreenshotCapture()
     constexpr u32 kMaxRows = 2048;
     if (fb.height > kMaxRows)
     {
-        SerialWrite("[shot] capture: framebuffer too tall (>2048 rows)\n");
+        // Framebuffer taller than our row-pointer-table cap. Klog
+        // captures the offending height so a future regression
+        // (e.g. compositor advertising a taller mode than the
+        // capture path supports) is greppable.
+        KLOG_WARN_V("apps/screenshot", "framebuffer height exceeds row-table cap", fb.height);
         CursorPopWait();
         NotifyShow("screenshot: too tall (>2048 rows)");
         return false;

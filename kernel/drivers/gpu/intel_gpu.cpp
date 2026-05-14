@@ -69,7 +69,11 @@ void Probe(GpuInfo& g)
     g.mmio_live = (dword0 != 0xFFFFFFFFu);
     if (!g.mmio_live)
     {
-        arch::SerialWrite("[gpu/intel] BAR0[0]=0xFFFFFFFF — MMIO decode failed\n");
+        // Same dead-chip shape as iwlwifi/mt76: a register reads
+        // back all-ones, meaning BAR is unmapped or the device is
+        // wedged before bring-up could touch it. Route through
+        // klog so the ring buffer captures the GPU absence cause.
+        KLOG_ERROR("drivers/gpu/intel", "BAR0[0]=0xFFFFFFFF — MMIO decode failed");
         return;
     }
 

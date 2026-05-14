@@ -488,36 +488,36 @@ bool BringUp(u8 slot_id)
     // SET_CONFIGURATION.
     if (!xhci::XhciControlOut(slot_id, kReqTypeStandardOut, kUsbReqSetConfiguration, config_value, 0, nullptr, 0))
     {
-        arch::SerialWrite("[rndis] SET_CONFIGURATION failed\n");
+        KLOG_ERROR("drivers/usb/rndis", "SET_CONFIGURATION failed");
         return false;
     }
 
     // Configure both bulk endpoints.
     if (!xhci::XhciConfigureBulkEndpoint(slot_id, g_state.bulk_in_ep, g_state.bulk_in_mps))
     {
-        arch::SerialWrite("[rndis] configure bulk-IN failed\n");
+        KLOG_ERROR_V("drivers/usb/rndis", "configure bulk-IN failed (ep)", g_state.bulk_in_ep);
         return false;
     }
     if (!xhci::XhciConfigureBulkEndpoint(slot_id, g_state.bulk_out_ep, g_state.bulk_out_mps))
     {
-        arch::SerialWrite("[rndis] configure bulk-OUT failed\n");
+        KLOG_ERROR_V("drivers/usb/rndis", "configure bulk-OUT failed (ep)", g_state.bulk_out_ep);
         return false;
     }
 
     // RNDIS protocol bring-up.
     if (!RndisInitialize())
     {
-        arch::SerialWrite("[rndis] INITIALIZE failed\n");
+        KLOG_ERROR("drivers/usb/rndis", "INITIALIZE failed");
         return false;
     }
     if (!RndisSetU32Oid(kOidGenCurrentPacketFilter, kPktFilterDirected | kPktFilterBroadcast | kPktFilterAllMulticast))
     {
-        arch::SerialWrite("[rndis] SET packet filter failed\n");
+        KLOG_ERROR("drivers/usb/rndis", "SET packet filter failed");
         return false;
     }
     if (!RndisQueryMac(g_state.mac))
     {
-        arch::SerialWrite("[rndis] QUERY mac failed\n");
+        KLOG_ERROR("drivers/usb/rndis", "QUERY mac failed");
         return false;
     }
 

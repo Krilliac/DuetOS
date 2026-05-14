@@ -310,7 +310,7 @@ bool BringUp(u8 slot_id)
     if (!xhci::XhciControlIn(slot_id, kReqTypeStandardIn, kUsbReqGetDescriptor, u16(u16(kDescTypeConfig) << 8) | 0,
                              /*wIndex=*/0, cfg, total))
     {
-        arch::SerialWrite("[cdc-ecm] GET_DESCRIPTOR(Config, full) failed\n");
+        KLOG_ERROR("drivers/usb/cdc-ecm", "GET_DESCRIPTOR(Config, full) failed");
         mm::FreeFrame(cfg_phys);
         return false;
     }
@@ -325,7 +325,7 @@ bool BringUp(u8 slot_id)
 
     if (!ReadMacFromString(slot_id, g_state.imac_string_idx, g_state.mac))
     {
-        arch::SerialWrite("[cdc-ecm] failed to parse MAC from iMACAddress string descriptor\n");
+        KLOG_ERROR("drivers/usb/cdc-ecm", "failed to parse MAC from iMACAddress string descriptor");
         return false;
     }
 
@@ -333,7 +333,7 @@ bool BringUp(u8 slot_id)
     if (!xhci::XhciControlOut(slot_id, kReqTypeStandardOut, kUsbReqSetConfiguration, g_state.config_value, 0, nullptr,
                               0))
     {
-        arch::SerialWrite("[cdc-ecm] SET_CONFIGURATION failed\n");
+        KLOG_ERROR_V("drivers/usb/cdc-ecm", "SET_CONFIGURATION failed (config_value)", g_state.config_value);
         return false;
     }
 
@@ -341,19 +341,19 @@ bool BringUp(u8 slot_id)
     if (!xhci::XhciControlOut(slot_id, kReqTypeStandardIfaceOut, kUsbReqSetInterface, /*wValue=*/1,
                               /*wIndex=*/g_state.data_iface, nullptr, 0))
     {
-        arch::SerialWrite("[cdc-ecm] SET_INTERFACE 1 failed\n");
+        KLOG_ERROR_V("drivers/usb/cdc-ecm", "SET_INTERFACE 1 failed (data_iface)", g_state.data_iface);
         return false;
     }
 
     // Configure bulk endpoints in the xHCI device context.
     if (!xhci::XhciConfigureBulkEndpoint(slot_id, g_state.bulk_in_ep, g_state.bulk_in_mps))
     {
-        arch::SerialWrite("[cdc-ecm] configure bulk-IN failed\n");
+        KLOG_ERROR_V("drivers/usb/cdc-ecm", "configure bulk-IN failed (ep)", g_state.bulk_in_ep);
         return false;
     }
     if (!xhci::XhciConfigureBulkEndpoint(slot_id, g_state.bulk_out_ep, g_state.bulk_out_mps))
     {
-        arch::SerialWrite("[cdc-ecm] configure bulk-OUT failed\n");
+        KLOG_ERROR_V("drivers/usb/cdc-ecm", "configure bulk-OUT failed (ep)", g_state.bulk_out_ep);
         return false;
     }
 
@@ -367,9 +367,14 @@ bool BringUp(u8 slot_id)
     if (!xhci::XhciControlOut(slot_id, kReqTypeClassIfaceOut, kCdcReqSetEthernetPacketFilter,
                               /*wValue=*/kPktFilterDefault, /*wIndex=*/comm_iface, nullptr, 0))
     {
-        arch::SerialWrite("[cdc-ecm] SET_ETHERNET_PACKET_FILTER failed (continuing — some devices reject this)\n");
-        // Don't bail — QEMU's emulation accepts even without this;
-        // some real devices reject the request and still RX fine.
+        // Soft failure: QEMU's emulation accepts the device even
+        // without this request; some real-device firmwares reject
+        // it and the RX path still works. Log once at warn level
+        // (not error) so the operator can correlate against any
+        // RX dropouts that DO happen with a specific NIC.
+        KLOG_ONCE_WARN("drivers/usb/cdc-ecm",
+                       "SET_ETHERNET_PACKET_FILTER refused — continuing (some devices reject this)");
+        // Don't bail — see above.
     }
 
     // DMA buffers.
@@ -377,7 +382,7 @@ bool BringUp(u8 slot_id)
     g_state.tx_buf_phys = mm::AllocateFrame();
     if (g_state.rx_buf_phys == mm::kNullFrame || g_state.tx_buf_phys == mm::kNullFrame)
     {
-        arch::SerialWrite("[cdc-ecm] DMA buffer allocation failed\n");
+        KLOG_ERROR("drivers/usb/cdc-ecm", "DMA buffer allocation failed (rx or tx frame)");
         return false;
     }
     g_state.rx_buf_virt = static_cast<u8*>(mm::PhysToVirt(g_state.rx_buf_phys));

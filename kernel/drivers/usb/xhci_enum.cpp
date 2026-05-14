@@ -136,6 +136,12 @@ bool AddressDevice(Runtime& rt, PortRecord& port)
     const u32 code = (status >> 24) & 0xFF;
     if (code != kCompletionCodeSuccess)
     {
+        // xHCI Address Device command refused — device won't be
+        // usable. Klog summary captures the completion code (pin
+        // its hex value so the operator can look up the meaning),
+        // serial keeps the rich completion-code-name + slot dump
+        // for boot-time visibility.
+        KLOG_ERROR_V("drivers/usb/xhci", "Address Device failed (completion code)", code);
         arch::SerialWrite("[xhci]   Address Device failed code=");
         arch::SerialWriteHex(code);
         arch::SerialWrite(" (");
@@ -327,6 +333,7 @@ bool BringUpHidKeyboard(Runtime& rt, PortRecord& port)
     const u32 code = (cc >> 24) & 0xFF;
     if (code != kCompletionCodeSuccess)
     {
+        KLOG_ERROR_V("drivers/usb/xhci", "Configure Endpoint failed (completion code)", code);
         arch::SerialWrite("[xhci]   Configure Endpoint failed code=");
         arch::SerialWriteHex(code);
         arch::SerialWrite(" (");

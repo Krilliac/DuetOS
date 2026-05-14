@@ -1,6 +1,7 @@
 #include "apps/browser.h"
 
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
@@ -678,6 +679,7 @@ void SaveDownload()
     const u32 idx = NextDownloadIndex(v);
     if (idx == 0)
     {
+        KLOG_WARN("apps/browser", "download filename counter exhausted (>9999)");
         StatusSet("save: counter exhausted (>9999)");
         return;
     }
@@ -790,6 +792,7 @@ void DoFetch(const char* url)
     const i32 sock = net::SocketAlloc(net::kSocketDomainInet, net::kSocketTypeStream);
     if (sock < 0)
     {
+        KLOG_ONCE_WARN("apps/browser", "socket pool exhausted on TCP open");
         StatusSet("socket pool exhausted");
         return;
     }
@@ -817,6 +820,7 @@ void DoFetch(const char* url)
     u8* raw = static_cast<u8*>(mm::KMalloc(kHttpResponseCap));
     if (raw == nullptr)
     {
+        KLOG_ERROR_V("apps/browser", "KMalloc failed for HTTP response buffer (cap)", kHttpResponseCap);
         net::SocketRelease(static_cast<u32>(sock));
         StatusSet("OOM (heap exhausted)");
         return;
