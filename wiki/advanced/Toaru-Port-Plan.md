@@ -91,7 +91,48 @@ contributors don't relitigate them.
 
 ## Slice plan
 
-### Slice 1 — Windowed terminal emulator (this slice)
+### Status — port closed (2026-05-14)
+
+Four slices landed; slice 4 deliberately deferred. The
+maintainable subset of ToaruOS prior-art has been folded into
+DuetOS. The clean-room methodology held: no source lines copied,
+every component re-implemented from spec / DuetOS primitives.
+
+| # | Slice | Status | Commit |
+|---|---|---|---|
+| 1 | Windowed terminal emulator + VT/ANSI parser | ✅ landed | `ddcc129` |
+| 2 | In-kernel audio backend over HDA | ✅ landed | `5f5f3b4` |
+| 3a | Console hide + terminal-shell merge | ✅ landed | `76c0379` |
+| 3b | BSOD framebuffer panic UI + 8042 reset | ✅ landed | `0a5d98e` |
+| 3 (rev) | Baseline JPEG decoder + ImageView wire-up | ✅ landed | `ee5ab45` |
+| 4 | VBox / VMware guest additions | ⏸ deferred | — |
+
+Non-port follow-ups that landed alongside the slices:
+- `fad2ba0` — `panic-test` shell command + BSOD capture harness
+- `30d65f1` — BSOD enhancements (build/uptime/CPU/task/CR/backtrace)
+- `d0d13cf` — BSOD mitigations / heap / faults / held-locks / stack-top
+
+### Why slice 4 was deferred
+
+Guest additions (seamless cursor, host clipboard, dynamic
+resolution, shared folders, drag-and-drop) are pure
+developer-experience features. Three different vendor protocols
+(VBox, VMware, virtio) would be ~1.5k LoC cumulatively. None has
+a caller today: DuetOS doesn't have an interactive desktop demo
+loop that needs window-resize, and the dev workflow is "headless
+QEMU + serial + screendump" which guest additions don't change.
+Per anti-bloat: "if you can't name the caller, don't write it."
+
+Revisit when one of these triggers:
+- A live demo / public release uses an interactive VirtualBox or
+  VMware window where window-resize / clipboard would be
+  noticeable friction.
+- A QEMU-only dev iteration starts regularly copying large
+  datasets between host and guest.
+- The compositor gains a clipboard manager that wants to bridge
+  to a host clipboard.
+
+### Slice 1 — Windowed terminal emulator (landed)
 
 **Goal**: a windowed terminal app under `kernel/apps/terminal.cpp`
 that hosts a character-cell grid, parses a useful subset of
@@ -104,40 +145,99 @@ shell session.
 - `kernel/util/vt_parser.h` + `vt_parser.cpp` — UTF-8 + VT/ANSI
   parser as a callback-driven state machine; no allocations.
 - `kernel/apps/terminal.h` + `terminal.cpp` — windowed app:
-  cell grid, repaint, keyboard input, demo echo loop.
+  cell grid, repaint, keyboard input, mirror-of-kernel-shell.
 - Start-menu registration so the app shows in the system menu.
 
-**Out of scope for slice 1** (recorded as follow-ups, not GAP
-markers in code — anti-bloat rule):
-- Wiring to the kernel shell — the shell's hard-coupled
-  `ConsoleWrite*` calls span ~20k LoC; refactor is its own slice.
+**Out of scope for slice 1** (some landed in 3a, others remain
+follow-ups, not GAP markers in code — anti-bloat rule):
+- Wiring to the kernel shell — landed in slice 3a via the
+  `ConsoleRegisterMirror` hook (no shell refactor needed).
 - Wiring to PE consoles (Win32 `WriteConsoleW`, `ReadConsoleA`).
 - Mouse selection / clipboard.
-- True SGR colour palette (initial slice ships monochrome).
+- True SGR colour palette (slice 1 ships monochrome).
 - Scrollback beyond what fits in the cell-grid backing store.
 
-### Slice 2 — Audio path (future)
+### Slice 2 — Audio path (landed)
 
-Bring up an in-kernel audio mixer + ring buffer that consumes
-PCM submissions and feeds the HDA driver's BDL with real audio
-data. End state: `winmm!waveOutWrite` produces sound. Reference:
-ToaruOS `modules/hda.c` + `apps/play.c` audio submission path
-(adapted to our cap-gated `SYS_AUDIO_*` surface — not
-implemented yet, will be added in this slice).
+In-kernel audio backend under `kernel/subsystems/audio/` that
+owns the BDL + audio buffer ring above the HDA driver, exposes
+`Init / Start / Stop / WritePcmS16Stereo / WriteSine`. v0 format
+is fixed S16LE / 48 kHz / stereo. Confirmed end-to-end via the
+StreamArm path on QEMU; codec walker on emulator returns 0
+function groups so output is blocked there, but on real hardware
+the path completes.
 
-### Slice 3 — JPEG decoder (future)
+Out of scope (still): mixer (multi-producer summing), `SYS_AUDIO_*`
+syscalls for ring-3 producers, `winmm!waveOutWrite` thunking,
+IRQ-driven refill (IOC + interrupt path), format / sample-rate
+conversion, microphone / capture path.
 
-Promote `kernel/util/jpeg.cpp` from a header-only parser to a
-full Baseline JPEG (SOF0) decoder. Reference: ToaruOS `lib/jpeg.c`.
-Wire into the Image Viewer app when complete.
+### Slice 3a — Console hide + terminal-shell merge (landed)
 
-### Slice 4 — VBox / VMware guest additions (future)
+Three architectural changes addressing the "framebuffer console
+hogs the desktop" + "merge the two terminals" concerns:
 
-Recognise the QEMU/VirtualBox/VMware hypervisor host, expose a
-guest-tools driver that handles seamless cursor integration and
-clipboard sharing. Reference: ToaruOS `modules/vbox.c`,
-`modules/vmware.c`. Low priority (developer-experience win, not
-production).
+- `ConsoleSetPaintEnabled(bool)` — paint-toggle; off by default
+  after the windowed Terminal initialises so the 80×40 region is
+  reclaimed for the desktop.
+- `ConsoleRegisterMirror(fn)` — single-slot callback teed for
+  every shell-buffer write. The windowed Terminal registers as
+  the mirror; the framebuffer console and the windowed terminal
+  show the SAME shell content byte-for-byte without refactoring
+  the 3,819 ConsoleWrite* call sites in the shell.
+- Terminal keystrokes route directly to `ShellFeedChar` /
+  `ShellSubmit` / `ShellBackspace` / `ShellHistoryPrev` /
+  `ShellHistoryNext`.
+- Ctrl+Alt+C + `console show|hide` shell command toggle paint
+  state on demand.
+
+### Slice 3b — BSOD framebuffer panic UI (landed)
+
+`kernel/diag/bsod.{h,cpp}` — fullscreen panic panel hooked into
+both `Panic()` and `PanicWithValue()` after the serial dump.
+Layout (final, ~30 text rows of dense info):
+
+- Title strip + subsystem / message / optional value
+- Build flavor + git hash + date, uptime, CPU, current task
+- RIP with symbol + `at file:line` continuation line
+- RSP, RBP, CR2, CR3, CR4
+- Mitigations one-liner (SMEP/SMAP/UMIP/IBRS/EIBRS/STIBP/RETPOLINE)
+- Memory snapshot (heap used/free, frag, frames free)
+- Fault counters (AV/NX/W/SO/RES/GP/UD)
+- 6-frame symbolised RBP-chain backtrace
+- Held locks (auto-skipped when none)
+- 8-qword stack-top hex dump in two columns
+- 10-line klog tail (ANSI escapes stripped)
+- Footer "PRESS ANY KEY TO REBOOT"
+
+Reboot via 8042 controller reset (write 0xFE to port 0x64).
+`cli` before paint so the timer IRQ can't recompose the desktop
+on top of the BSOD. Falls through to plain `Halt()` if the
+framebuffer is unavailable.
+
+Verified visually via `tools/test/capture-bsod.py` —
+`panic-test` shell command triggers a real panic; the harness
+sends it over the serial pump, waits for `[bsod] rendered`, and
+issues a QEMU monitor `screendump` to capture the panel.
+
+### Slice 3 (rev) — Baseline JPEG decoder (landed)
+
+Promoted `kernel/util/jpeg.cpp` from 28-line header-validator
+wrapper to a ~1k-line in-tree Baseline-DCT (SOF0) decoder. Full
+ISO/IEC 10918-1 Baseline path: marker walking, 8/16-bit
+quantisation tables, Huffman tables with 9-bit fast lookup,
+byte-stuffing-aware bit reader, DC predictor + AC run/length,
+integer fixed-point IDCT, grayscale + YCbCr→RGB output with NN
+chroma upsampling. Wired into `kernel/apps/imageview.cpp`
+alongside the existing BMP / TGA / PNG paths; `.JPG` / `.JPEG`
+extensions classify, `DecodeJpeg` reads the file, calls the
+decoder, NN-downsamples to the window. Selftest embeds a real
+161-byte 16×16 grayscale Baseline JPEG (ImageMagick-generated)
+and decodes it end-to-end.
+
+Out of scope (still): progressive JPEG (SOF2 — rejected),
+arithmetic-coded JPEG (SOF9..SOFE — rejected), 12/16-bit
+precision, bilinear chroma upsample, EXIF orientation.
 
 ## Related Pages
 
