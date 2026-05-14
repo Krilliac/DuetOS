@@ -32,30 +32,6 @@ using duetos::net::drsh::DrshStatus;
 namespace
 {
 
-void WriteU64Dec(u64 v)
-{
-    char buf[24];
-    u32 n = 0;
-    if (v == 0)
-    {
-        buf[n++] = '0';
-    }
-    else
-    {
-        char rev[24];
-        u32 r = 0;
-        while (v > 0 && r < sizeof(rev))
-        {
-            rev[r++] = static_cast<char>('0' + (v % 10));
-            v /= 10;
-        }
-        while (r > 0)
-            buf[n++] = rev[--r];
-    }
-    buf[n] = '\0';
-    ConsoleWrite(buf);
-}
-
 void PrintStatus()
 {
     const DrshStatus s = DrshServerStatus();

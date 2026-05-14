@@ -32,8 +32,8 @@ struct Row
 };
 
 // Reference list. Must stay in lock-step with PrintShortcutHelp
-// in kernel/core/main.cpp — both surfaces document the same
-// bindings; if one drifts the other is wrong.
+// in kernel/core/menu_dispatch.cpp — both surfaces document the
+// same bindings; if one drifts the other is wrong.
 constexpr Row kRows[] = {
     {"GETTING STARTED", true},
     {"  CLICK [START] (BOTTOM-LEFT) TO LAUNCH APPS", false},

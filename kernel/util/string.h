@@ -87,6 +87,37 @@ inline bool StrEqual(const char* a, const char* b)
     return *a == *b;
 }
 
+/// ASCII case-insensitive twin of `StrEqual`. Maps any 'A'..'Z'
+/// byte to its lowercase counterpart before comparing; everything
+/// else is byte-equal. NULL-safe with the same semantics as
+/// `StrEqual`. Replaces the three ad-hoc `StrEqCi` / `StrEqI`
+/// copies that used to live in `drivers/video/theme`,
+/// `drivers/video/start_menu_apps`, and `apps/browser`. Pure
+/// ASCII because the kernel does no locale-aware folding —
+/// theme names, /APPS shortcuts, and URL hosts are all ASCII.
+inline bool StrEqualCaseInsensitive(const char* a, const char* b)
+{
+    if (a == b)
+    {
+        return true;
+    }
+    if (a == nullptr || b == nullptr)
+    {
+        return false;
+    }
+    auto lower = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c; };
+    while (*a != '\0' && *b != '\0')
+    {
+        if (lower(*a) != lower(*b))
+        {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
 /// Out-of-line panic helper for the bounds-checked wrappers. The
 /// callers below invoke this when `__builtin_object_size` reports
 /// a known destination size and `n` exceeds it. Out-of-line so

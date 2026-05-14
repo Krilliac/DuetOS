@@ -111,8 +111,9 @@ namespace duetos::core
 // caller-configured layout (ASLR'd smoke tasks, ELF-loaded tasks
 // at 0x400000 / 0x7FFFE000, etc.) is picked up automatically.
 //
-// Exposed via ring3_smoke.h so non-ring3 callers (syscall
-// dispatch, shell `exec`) can hand it to SchedCreateUser too.
+// Exposed via spawn.h so non-ring3 callers (syscall dispatch,
+// shell `exec`, the desktop launcher) can hand it to
+// SchedCreateUser too.
 [[noreturn]] void Ring3UserEntry(void*)
 {
     using arch::SerialWrite;

@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "fs/fat32.h"
 #include "log/klog.h"
+#include "util/string.h"
 
 /*
  * /APPS shortcut enumeration.
@@ -52,6 +53,8 @@ struct Slot
 constinit Slot g_slots[kStartMenuAppsMax] = {};
 constinit u32 g_slot_count = 0;
 
+using duetos::core::StrEqualCaseInsensitive;
+
 bool CharEqIgnoreCase(char a, char b)
 {
     if (a >= 'A' && a <= 'Z')
@@ -65,103 +68,91 @@ bool CharEqIgnoreCase(char a, char b)
     return a == b;
 }
 
-bool StrEqI(const char* a, const char* b)
-{
-    while (*a != 0 && *b != 0)
-    {
-        if (!CharEqIgnoreCase(*a, *b))
-        {
-            return false;
-        }
-        ++a;
-        ++b;
-    }
-    return *a == 0 && *b == 0;
-}
-
 bool ResolveTargetName(const char* s, ThemeRole* out)
 {
-    if (StrEqI(s, "calculator"))
+    if (StrEqualCaseInsensitive(s, "calculator"))
     {
         *out = ThemeRole::Calculator;
         return true;
     }
-    if (StrEqI(s, "notes") || StrEqI(s, "notepad"))
+    if (StrEqualCaseInsensitive(s, "notes") || StrEqualCaseInsensitive(s, "notepad"))
     {
         *out = ThemeRole::Notes;
         return true;
     }
-    if (StrEqI(s, "files"))
+    if (StrEqualCaseInsensitive(s, "files"))
     {
         *out = ThemeRole::Files;
         return true;
     }
-    if (StrEqI(s, "clock"))
+    if (StrEqualCaseInsensitive(s, "clock"))
     {
         *out = ThemeRole::Clock;
         return true;
     }
-    if (StrEqI(s, "settings"))
+    if (StrEqualCaseInsensitive(s, "settings"))
     {
         *out = ThemeRole::Settings;
         return true;
     }
-    if (StrEqI(s, "gfxdemo"))
+    if (StrEqualCaseInsensitive(s, "gfxdemo"))
     {
         *out = ThemeRole::GfxDemo;
         return true;
     }
-    if (StrEqI(s, "taskmanager"))
+    if (StrEqualCaseInsensitive(s, "taskmanager"))
     {
         *out = ThemeRole::TaskManager;
         return true;
     }
-    if (StrEqI(s, "logview"))
+    if (StrEqualCaseInsensitive(s, "logview"))
     {
         *out = ThemeRole::LogView;
         return true;
     }
-    if (StrEqI(s, "imageview") || StrEqI(s, "imageviewer"))
+    if (StrEqualCaseInsensitive(s, "imageview") || StrEqualCaseInsensitive(s, "imageviewer"))
     {
         *out = ThemeRole::ImageView;
         return true;
     }
-    if (StrEqI(s, "about") || StrEqI(s, "sysinfo"))
+    if (StrEqualCaseInsensitive(s, "about") || StrEqualCaseInsensitive(s, "sysinfo"))
     {
         *out = ThemeRole::About;
         return true;
     }
-    if (StrEqI(s, "help") || StrEqI(s, "shortcuts"))
+    if (StrEqualCaseInsensitive(s, "help") || StrEqualCaseInsensitive(s, "shortcuts"))
     {
         *out = ThemeRole::Help;
         return true;
     }
-    if (StrEqI(s, "browser") || StrEqI(s, "web"))
+    if (StrEqualCaseInsensitive(s, "browser") || StrEqualCaseInsensitive(s, "web"))
     {
         *out = ThemeRole::Browser;
         return true;
     }
-    if (StrEqI(s, "calendar") || StrEqI(s, "cal"))
+    if (StrEqualCaseInsensitive(s, "calendar") || StrEqualCaseInsensitive(s, "cal"))
     {
         *out = ThemeRole::Calendar;
         return true;
     }
-    if (StrEqI(s, "sysmon") || StrEqI(s, "monitor"))
+    if (StrEqualCaseInsensitive(s, "sysmon") || StrEqualCaseInsensitive(s, "monitor"))
     {
         *out = ThemeRole::Sysmon;
         return true;
     }
-    if (StrEqI(s, "hex") || StrEqI(s, "hexview") || StrEqI(s, "hexviewer"))
+    if (StrEqualCaseInsensitive(s, "hex") || StrEqualCaseInsensitive(s, "hexview") ||
+        StrEqualCaseInsensitive(s, "hexviewer"))
     {
         *out = ThemeRole::HexView;
         return true;
     }
-    if (StrEqI(s, "charmap") || StrEqI(s, "characters"))
+    if (StrEqualCaseInsensitive(s, "charmap") || StrEqualCaseInsensitive(s, "characters"))
     {
         *out = ThemeRole::CharMap;
         return true;
     }
-    if (StrEqI(s, "terminal") || StrEqI(s, "term") || StrEqI(s, "console"))
+    if (StrEqualCaseInsensitive(s, "terminal") || StrEqualCaseInsensitive(s, "term") ||
+        StrEqualCaseInsensitive(s, "console"))
     {
         *out = ThemeRole::Terminal;
         return true;
@@ -247,22 +238,22 @@ bool ParseManifest(const char* buf, u64 len, ParsedManifest* out)
                 line[eq] = 0;
                 const char* k = line;
                 const char* val = line + eq + 1;
-                if (StrEqI(k, "name"))
+                if (StrEqualCaseInsensitive(k, "name"))
                 {
                     CopyTo(name, kLabelCap, val);
                     have_name = true;
                 }
-                else if (StrEqI(k, "target"))
+                else if (StrEqualCaseInsensitive(k, "target"))
                 {
                     CopyTo(target, kLabelCap, val);
                     have_target = true;
                 }
-                else if (StrEqI(k, "kind"))
+                else if (StrEqualCaseInsensitive(k, "kind"))
                 {
                     CopyTo(kind_str, kLabelCap, val);
                     have_kind = true;
                 }
-                else if (StrEqI(k, "path"))
+                else if (StrEqualCaseInsensitive(k, "path"))
                 {
                     CopyTo(path, kPathCap, val);
                     have_path = true;
@@ -282,9 +273,9 @@ bool ParseManifest(const char* buf, u64 len, ParsedManifest* out)
     }
     if (have_kind && have_path)
     {
-        if (StrEqI(kind_str, "pe"))
+        if (StrEqualCaseInsensitive(kind_str, "pe"))
             out->kind = ShortcutKind::Pe;
-        else if (StrEqI(kind_str, "elf"))
+        else if (StrEqualCaseInsensitive(kind_str, "elf"))
             out->kind = ShortcutKind::Elf;
         else
             return false;

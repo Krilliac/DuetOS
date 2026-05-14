@@ -9,6 +9,7 @@
 #include "drivers/video/taskbar.h"
 #include "drivers/video/tray_flyout.h"
 #include "drivers/video/widget.h"
+#include "util/string.h"
 
 namespace duetos::drivers::video
 {
@@ -16,25 +17,7 @@ namespace duetos::drivers::video
 namespace
 {
 
-// Ascii-lower. No locale awareness needed — theme names are fixed.
-constexpr char ToLower(char c)
-{
-    return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c;
-}
-
-bool StrEqCi(const char* a, const char* b)
-{
-    if (a == nullptr || b == nullptr)
-        return false;
-    while (*a != '\0' && *b != '\0')
-    {
-        if (ToLower(*a) != ToLower(*b))
-            return false;
-        ++a;
-        ++b;
-    }
-    return *a == '\0' && *b == '\0';
-}
+using duetos::core::StrEqualCaseInsensitive;
 
 // ---------------------------------------------------------------
 // Theme palettes.
@@ -876,7 +859,7 @@ bool ThemeIdFromName(const char* s, ThemeId* out)
         return false;
     for (u32 i = 0; i < static_cast<u32>(ThemeId::kCount); ++i)
     {
-        if (StrEqCi(s, kThemes[i]->name))
+        if (StrEqualCaseInsensitive(s, kThemes[i]->name))
         {
             *out = static_cast<ThemeId>(i);
             return true;
@@ -1042,7 +1025,7 @@ void ThemeSelfTest()
         {
             const auto id = static_cast<ThemeId>(i);
             const char* n = ThemeIdName(id);
-            if (n == nullptr || !StrEqCi(n, kThemes[i]->name))
+            if (n == nullptr || !StrEqualCaseInsensitive(n, kThemes[i]->name))
             {
                 mark_fail(2);
                 break;

@@ -13,6 +13,7 @@
 // in-TU layout the file used to have.
 
 #include "proc/process.h"
+#include "util/string.h"
 #include "util/types.h"
 
 namespace duetos::core::shell::internal
@@ -75,16 +76,16 @@ bool EnvUnset(const char* name);
 // StrEq returns true iff a and b are equal C-strings. StrStartsWith
 // returns true iff `s` begins with `prefix`. Both stop at the first
 // '\0' on the shorter side.
+//
+// `StrEq` is a thin alias for `duetos::core::StrEqual`
+// (util/string.h). The shell's command-parser code calls it often
+// enough that the short name pays its weight; the body delegates so
+// the implementation lives in one place. The wrapper is also
+// NULL-safe (the canonical helper returns false on a nullptr arg).
 // ---------------------------------------------------------------
 inline bool StrEq(const char* a, const char* b)
 {
-    for (u32 i = 0;; ++i)
-    {
-        if (a[i] != b[i])
-            return false;
-        if (a[i] == '\0')
-            return true;
-    }
+    return duetos::core::StrEqual(a, b);
 }
 
 inline bool StrStartsWith(const char* s, const char* prefix)
