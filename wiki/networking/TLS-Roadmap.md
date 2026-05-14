@@ -1,11 +1,17 @@
 # TLS Roadmap
 
-> **Status:** Not implemented. This page is the design doc for
-> the slice(s) that will land TLS 1.2 + cert validation, written
-> alongside the gap audit that surfaced TLS as the single
-> critical blocker for "download an app from the OS desktop and
-> install it" (which fails today because every modern CDN
-> requires HTTPS).
+> **Status:** Tier 1 primitives complete. Every wire-level
+> helper a TLS_RSA_WITH_AES_128_GCM_SHA256 client needs is
+> implemented and self-tested at boot (see `[tls] PASS` line
+> in the serial transcript). What's left is the thin
+> Connection-state-machine glue that drives the helpers in
+> order against a real socket, plus the wininet/winhttp
+> HTTPS wiring that flips today's "fallback body" to "real
+> TLS GET".
+>
+> The Tier 2/3 sections below remain forward-looking — TLS 1.3,
+> ECDH/ECDSA, real cert chain validation against a bundled root
+> store, and constant-time hardening are still future work.
 
 ## Why TLS is the blocker
 
@@ -45,32 +51,59 @@ The full surface is ~3–5 weeks of work. To make incremental
 progress, slice it into tiers each of which lands real,
 testable functionality:
 
-### Tier 1 — TLS-1.2-only, RSA-only cipher suite
+### Tier 1 — TLS-1.2-only, RSA-only cipher suite (PARTIAL)
 
-Ships:
-- ASN.1 DER reader (1 KB of code; minimal — INTEGER, OCTET STRING,
-  BIT STRING, SEQUENCE, OID).
-- X.509 parser (issuer, subject, validity dates, SubjectPublicKeyInfo,
-  signature algorithm, signature).
-- RSA verify (PKCS#1 v1.5 only).
-- TLS 1.2 client with **one** mandatory cipher suite:
-  `TLS_RSA_WITH_AES_128_GCM_SHA256` (RFC 5288). Uses existing
-  AES-128, SHA-256, HMAC. No ECDH, no DH ephemeral. This is
-  the simplest cipher suite that:
-   - Doesn't need ECDSA / ECDH (no curve math required).
-   - Uses AEAD (no MAC-then-encrypt pitfalls).
-   - Is supported by enough modern servers that we can fetch
-     real artifacts (verified on GitHub release URLs as of
-     2026).
-- Modulus-only RSA: skip Chinese-Remainder optimisation,
-  vanilla `m^e mod n`. Slow for verify but correct.
+**Shipped this session** (every line a boot self-test):
 
-Deliverable: a `kernel/net/tls/` crate / module that exposes
-`TlsClientHandshake(socket_fd, hostname, cert_store) -> TlsConn`,
-plus `TlsRead` / `TlsWrite`. Live-smoke: connect to a known
-HTTPS endpoint, GET 200 bytes, decrypt, log.
+- `crypto/bigint.{h,cpp}` — 128-limb (4096-bit) BigInt with
+  `Add/Sub/Mul/Mod/ModExp`, BE byte round-trip. `[bigint] PASS`.
+- `crypto/asn1.{h,cpp}` — DER reader (INTEGER, BIT STRING,
+  OCTET STRING, NULL, OID, UTF8/Printable/IA5String, UTCTime,
+  GeneralizedTime, SEQUENCE, SET) with `IntegerToBytesBE` and
+  `OidEquals`. `[asn1] PASS`.
+- `crypto/rsa.{h,cpp}` — `RsaPublicKey` + `RsaPkcs1V15Verify` +
+  `Pkcs1V15UnwrapAndMatch`. SHA-256 + SHA-1 DigestInfo
+  prefixes baked in. `[rsa] PASS`.
+- `crypto/x509.{h,cpp}` — Certificate parser exposing
+  `tbs`, `sig_algo`, `signature`, `subject_rsa`, and the
+  validity-time byte slices. `[x509] PASS`.
+- `crypto/aes_gcm.{h,cpp}` — AES-128-GCM AEAD encrypt +
+  decrypt, validated against NIST SP 800-38D vectors v1 + v2
+  with round-trip + tamper detection. `[aes-gcm] PASS`.
+- `net/tls.{h,cpp}` — TLS 1.2 client primitives:
+  - `TlsPrfSha256` (RFC 5246 §5 P_SHA256, expands to any length)
+  - `TlsMasterSecret`, `TlsKeyBlock`, `TlsFinishedVerifyData`
+  - `TlsBuildClientHelloBody`, `TlsWrapRecord`,
+    `TlsWrapHandshake`
+  - `TlsPeekRecord`, `TlsPeekHandshake`
+  - `TlsParseServerHello`, `TlsParseCertificateLeaf`,
+    `TlsParseServerHelloDone`
+  - `Pkcs1V15Type2Pad`, `TlsBuildClientKeyExchangeBody`
+  - `TlsEncryptRecord`, `TlsDecryptRecord` (TLS 1.2 GCM
+    framing with seq-bound nonces + AAD)
+  - `Transcript` (running SHA-256 with non-destructive
+    snapshot), `TlsBuildEncryptedFinished`,
+    `TlsVerifyEncryptedServerFinished`.
+  `[tls] PASS (prf + cke + record-aead + transcript +
+  finished + srv-fin verify)`.
 
-Estimated effort: 1.5–2 weeks.
+**Still to ship to close Tier 1:**
+
+- TLS Connection state machine (Init → SentClientHello →
+  RecvServerHello → RecvCertificate → RecvServerHelloDone →
+  SentClientKeyEx → SentClientCCS → SentClientFin →
+  RecvServerCCS → RecvServerFin → Established) — pure
+  composition of the helpers above, ~200 lines.
+- Wire to wininet/winhttp: replace the "fallback body" path
+  with a `Tls{Open,Read,Write,Close}` call sequence over the
+  existing kernel socket pool.
+- SNI extension support — required by most modern servers.
+  Currently we omit the extensions block entirely.
+- Server cert validation: today we trust ANY cert. Tier 1
+  doesn't need full chain validation, but at least matching
+  the leaf cert's CN against the hostname is a sane minimum.
+
+Estimated remaining effort: ~3-5 days for state machine + wiring.
 
 ### Tier 2 — TLS 1.3 + ECDSA + ECDH
 
