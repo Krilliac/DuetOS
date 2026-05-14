@@ -16,6 +16,7 @@
 #include "shell/shell_internal.h"
 
 #include "arch/x86_64/rtc.h"
+#include "core/panic.h"
 #include "drivers/video/console.h"
 #include "sched/loadavg.h"
 #include "sched/sched.h"
@@ -117,6 +118,18 @@ void CmdConsole(u32 argc, char** argv)
     duetos::drivers::video::ConsoleSetPaintEnabled(target_state);
     ConsoleWrite("console paint -> ");
     ConsoleWriteln(target_state ? "visible" : "hidden");
+}
+
+void CmdPanicTest(u32 argc, char** argv)
+{
+    // Deliberate panic so the operator can verify the BSOD UI
+    // works as designed. Accepts an optional message argument;
+    // empty / unspecified uses a fixed default. Calls Panic
+    // unconditionally — the kernel halts after the BSOD finishes
+    // rendering and the user issues a reboot via keypress.
+    const char* msg =
+        (argc > 1 && argv[1] != nullptr && argv[1][0] != '\0') ? argv[1] : "deliberate panic-test from shell";
+    duetos::core::Panic("shell/panic-test", msg);
 }
 
 void CmdUptime()

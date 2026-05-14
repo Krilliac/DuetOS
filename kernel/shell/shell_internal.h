@@ -287,6 +287,7 @@ void CmdAbout();
 void CmdVersion();
 void CmdClear();
 void CmdConsole(u32 argc, char** argv);
+void CmdPanicTest(u32 argc, char** argv);
 void CmdUptime();
 void CmdDate();
 void CmdYield();
