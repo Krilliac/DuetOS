@@ -228,6 +228,127 @@ u32 TlsWrapHandshake(u8 hs_type, const u8* body, u32 body_len, u8* dst, u32 cap)
 }
 
 // ---------------------------------------------------------------------------
+// Record / handshake header peek
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+inline u16 LoadU16Be(const u8* p)
+{
+    return (u16(p[0]) << 8) | u16(p[1]);
+}
+
+inline u32 LoadU24Be(const u8* p)
+{
+    return (u32(p[0]) << 16) | (u32(p[1]) << 8) | u32(p[2]);
+}
+
+} // namespace
+
+bool TlsPeekRecord(const u8* buf, u32 len, RecordView* out)
+{
+    if (buf == nullptr || out == nullptr || len < 5)
+        return false;
+    out->type = buf[0];
+    out->version = LoadU16Be(buf + 1);
+    out->length = LoadU16Be(buf + 3);
+    out->payload = buf + 5;
+    return true;
+}
+
+bool TlsPeekHandshake(const u8* buf, u32 len, HandshakeView* out)
+{
+    if (buf == nullptr || out == nullptr || len < 4)
+        return false;
+    out->type = buf[0];
+    out->length = LoadU24Be(buf + 1);
+    out->body = buf + 4;
+    if (out->length > len - 4)
+        return false;
+    return true;
+}
+
+bool TlsParseServerHello(const u8* body, u32 len, u8 server_random[kServerRandomBytes], u16* out_cipher)
+{
+    // ServerHello layout (RFC 5246 §7.4.1.3):
+    //   ProtocolVersion server_version;            // 2 bytes
+    //   Random          random;                    // 32 bytes
+    //   SessionID       session_id<0..32>;         // 1-byte length + body
+    //   CipherSuite     cipher_suite;              // 2 bytes
+    //   CompressionMethod compression_method;      // 1 byte
+    //   Extension       extensions<0..2^16-1>;     // optional, 2-byte length + body
+    if (body == nullptr || server_random == nullptr || out_cipher == nullptr)
+        return false;
+    if (len < 2 + 32 + 1 + 2 + 1)
+        return false;
+    const u16 version = LoadU16Be(body);
+    if (version != kVersionTls12)
+        return false;
+    for (u32 i = 0; i < kServerRandomBytes; ++i)
+        server_random[i] = body[2 + i];
+    u32 off = 2 + 32;
+    const u8 sid_len = body[off++];
+    if (sid_len > 32 || off + sid_len + 2 + 1 > len)
+        return false;
+    off += sid_len;
+    const u16 cipher = LoadU16Be(body + off);
+    off += 2;
+    if (cipher != kCipherTlsRsaAes128GcmSha256)
+        return false;
+    const u8 compression = body[off++];
+    if (compression != 0)
+        return false;
+    // Extensions are optional. If `off` reaches `len`, server
+    // chose to omit them entirely. Otherwise, there must be a
+    // 2-byte length followed by exactly that many bytes — we
+    // skip the contents in v0 (no extensions we negotiate).
+    if (off < len)
+    {
+        if (off + 2 > len)
+            return false;
+        const u16 ext_len = LoadU16Be(body + off);
+        off += 2;
+        if (off + ext_len > len)
+            return false;
+        // off += ext_len; // (don't need to read; just validate length)
+    }
+    *out_cipher = cipher;
+    return true;
+}
+
+bool TlsParseCertificateLeaf(const u8* body, u32 len, const u8** out_leaf_der, u32* out_leaf_len)
+{
+    // Certificate message body layout (RFC 5246 §7.4.2):
+    //   opaque ASN.1Cert<1..2^24-1>;
+    //   struct {
+    //       ASN.1Cert certificate_list<0..2^24-1>;
+    //   } Certificate;
+    //
+    // i.e. 3-byte total list length, then a stream of
+    // [3-byte cert length | cert bytes] entries. The leaf
+    // is the FIRST entry.
+    if (body == nullptr || out_leaf_der == nullptr || out_leaf_len == nullptr || len < 6)
+        return false;
+    const u32 list_len = LoadU24Be(body);
+    if (list_len + 3 > len)
+        return false;
+    if (list_len < 3)
+        return false; // need at least one cert-length prefix
+    const u32 leaf_len = LoadU24Be(body + 3);
+    if (leaf_len == 0 || leaf_len + 3 > list_len)
+        return false;
+    *out_leaf_der = body + 6;
+    *out_leaf_len = leaf_len;
+    return true;
+}
+
+bool TlsParseServerHelloDone(const u8* /*body*/, u32 len)
+{
+    return len == 0;
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -370,7 +491,119 @@ void TlsSelfTest()
         return;
     }
 
-    SerialWrite("[tls] PASS (prf + key-block + finished-labels + clienthello + record)\n");
+    // Test 6: Round-trip a synthetic ServerHello body and
+    // confirm the parser extracts server_random + cipher.
+    u8 sh_body[64];
+    u32 si = 0;
+    // version 0x0303
+    sh_body[si++] = 0x03;
+    sh_body[si++] = 0x03;
+    // server_random: 0xAB filled
+    for (u32 i = 0; i < 32; ++i)
+        sh_body[si++] = 0xAB;
+    // session_id (empty)
+    sh_body[si++] = 0;
+    // cipher_suite = TLS_RSA_WITH_AES_128_GCM_SHA256 = 0x009C
+    sh_body[si++] = 0x00;
+    sh_body[si++] = 0x9C;
+    // compression_method = null (0)
+    sh_body[si++] = 0;
+    u8 parsed_sr[32];
+    u16 parsed_cipher = 0;
+    if (!TlsParseServerHello(sh_body, si, parsed_sr, &parsed_cipher))
+    {
+        SerialWrite("[tls] FAIL parse-serverhello\n");
+        return;
+    }
+    if (parsed_cipher != kCipherTlsRsaAes128GcmSha256)
+    {
+        SerialWrite("[tls] FAIL parse-serverhello-cipher\n");
+        return;
+    }
+    for (u32 i = 0; i < 32; ++i)
+    {
+        if (parsed_sr[i] != 0xAB)
+        {
+            SerialWrite("[tls] FAIL parse-serverhello-random\n");
+            return;
+        }
+    }
+    // Tampered: replace cipher with one we don't support.
+    sh_body[35] = 0x00;
+    sh_body[36] = 0xFF; // not 0x009C
+    if (TlsParseServerHello(sh_body, si, parsed_sr, &parsed_cipher))
+    {
+        SerialWrite("[tls] FAIL parse-serverhello-bad-cipher-accepted\n");
+        return;
+    }
+
+    // Test 7: Certificate message with one 5-byte fake "cert".
+    //   3 bytes list len = 0x000008
+    //     3 bytes cert len = 0x000005
+    //     5 bytes cert body 0xCA 0xFE 0xBA 0xBE 0x42
+    u8 cert_body[16];
+    cert_body[0] = 0x00;
+    cert_body[1] = 0x00;
+    cert_body[2] = 0x08;
+    cert_body[3] = 0x00;
+    cert_body[4] = 0x00;
+    cert_body[5] = 0x05;
+    cert_body[6] = 0xCA;
+    cert_body[7] = 0xFE;
+    cert_body[8] = 0xBA;
+    cert_body[9] = 0xBE;
+    cert_body[10] = 0x42;
+    const u8* leaf = nullptr;
+    u32 leaf_len = 0;
+    if (!TlsParseCertificateLeaf(cert_body, 11, &leaf, &leaf_len))
+    {
+        SerialWrite("[tls] FAIL parse-cert\n");
+        return;
+    }
+    if (leaf_len != 5 || leaf[0] != 0xCA || leaf[4] != 0x42)
+    {
+        SerialWrite("[tls] FAIL parse-cert-leaf-bytes\n");
+        return;
+    }
+
+    // Test 8: ServerHelloDone is zero-length.
+    if (!TlsParseServerHelloDone(nullptr, 0))
+    {
+        SerialWrite("[tls] FAIL parse-shd-empty\n");
+        return;
+    }
+    if (TlsParseServerHelloDone(cert_body, 1))
+    {
+        SerialWrite("[tls] FAIL parse-shd-nonempty-accepted\n");
+        return;
+    }
+
+    // Test 9: Record/handshake peek round-trip.
+    // Re-use the record we built in test 5 (rec / rec_len).
+    RecordView rv{};
+    if (!TlsPeekRecord(rec, rec_len, &rv))
+    {
+        SerialWrite("[tls] FAIL peek-record\n");
+        return;
+    }
+    if (rv.type != kContentHandshake || rv.version != kVersionTls12 || rv.length != 9)
+    {
+        SerialWrite("[tls] FAIL peek-record-fields\n");
+        return;
+    }
+    HandshakeView hv{};
+    if (!TlsPeekHandshake(rv.payload, rv.length, &hv))
+    {
+        SerialWrite("[tls] FAIL peek-handshake\n");
+        return;
+    }
+    if (hv.type != kHandshakeClientHello || hv.length != 5 || hv.body[0] != 0x11 || hv.body[4] != 0x55)
+    {
+        SerialWrite("[tls] FAIL peek-handshake-fields\n");
+        return;
+    }
+
+    SerialWrite("[tls] PASS (prf + key-block + finished-labels + clienthello + record + sh/cert/shd parse + peek)\n");
 }
 
 } // namespace duetos::net::tls

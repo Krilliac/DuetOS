@@ -116,6 +116,59 @@ u32 TlsWrapRecord(u8 type, const u8* payload, u32 payload_len, u8* dst, u32 cap)
 /// `TlsWrapRecord` with type kContentHandshake.
 u32 TlsWrapHandshake(u8 hs_type, const u8* body, u32 body_len, u8* dst, u32 cap);
 
+// ---- record / handshake message peek ---------------------------
+
+/// Parsed TLS record header. Slice into the caller's input
+/// buffer — `payload` points to the first byte AFTER the
+/// 5-byte record header.
+struct RecordView
+{
+    u8 type;
+    u16 version;
+    u16 length; // record payload length
+    const u8* payload;
+};
+
+/// Parse one record header out of `buf[0..len)`. Returns true
+/// on success and populates `out`. Does NOT validate the
+/// payload length against `len`; callers do `len >= 5 +
+/// out.length` before consuming.
+bool TlsPeekRecord(const u8* buf, u32 len, RecordView* out);
+
+/// Parsed handshake header. Slice into the caller's input
+/// buffer — `body` points to the first byte AFTER the 4-byte
+/// handshake header.
+struct HandshakeView
+{
+    u8 type;
+    u32 length; // 24-bit handshake-body length
+    const u8* body;
+};
+
+/// Parse the 4-byte handshake header from `buf[0..len)`. The
+/// caller must have already extracted the record-layer
+/// payload (e.g. via TlsPeekRecord).
+bool TlsPeekHandshake(const u8* buf, u32 len, HandshakeView* out);
+
+// ---- server-side handshake-message parsers ---------------------
+
+/// Parse a ServerHello body (RFC 5246 §7.4.1.3) — the bytes
+/// AFTER the handshake header (HandshakeView::body). Extracts
+/// the server_random and the selected cipher suite. Returns
+/// true on a well-formed message + a cipher suite we
+/// recognise (we only support kCipherTlsRsaAes128GcmSha256).
+bool TlsParseServerHello(const u8* body, u32 len, u8 server_random[kServerRandomBytes], u16* out_cipher);
+
+/// Parse a Certificate message body (RFC 5246 §7.4.2). Returns
+/// a slice over the LEAF certificate's DER bytes (the first
+/// cert in the chain). The DER blob can be handed to
+/// crypto::x509::Parse to extract the server's RSA public key.
+bool TlsParseCertificateLeaf(const u8* body, u32 len, const u8** out_leaf_der, u32* out_leaf_len);
+
+/// Confirm a ServerHelloDone message body is well-formed.
+/// Body must be exactly 0 bytes; the only check is `len == 0`.
+bool TlsParseServerHelloDone(const u8* body, u32 len);
+
 void TlsSelfTest();
 
 } // namespace duetos::net::tls
