@@ -132,4 +132,43 @@ void ConsoleEndCapture();
 /// this on at startup.
 void ConsoleEnableSerialMirror(bool on);
 
+// ---------------------------------------------------------------
+// Paint toggle — when off, `ConsoleRedraw` is a no-op so the
+// console's 80x40 region is reclaimed for the desktop. The
+// character buffer keeps receiving writes regardless; any
+// registered mirror (see below) still fires. Default = on, so
+// boot-time logging shows up on the framebuffer until a later
+// boot phase explicitly toggles it.
+// ---------------------------------------------------------------
+
+void ConsoleSetPaintEnabled(bool enabled);
+bool ConsoleIsPaintEnabled();
+
+// ---------------------------------------------------------------
+// Mirror hook — invoked for every character written to the SHELL
+// buffer (not the klog buffer). Lets a windowed terminal app
+// duplicate the kernel shell's I/O without parsing the existing
+// 80x40 grid. The callback runs synchronously inside
+// `ConsoleWriteChar`/`ConsoleWrite`/`ConsoleWriteln`; it must not
+// re-enter the console module. Registering nullptr clears the
+// mirror.
+// ---------------------------------------------------------------
+
+using ConsoleMirrorFn = void (*)(char c);
+void ConsoleRegisterMirror(ConsoleMirrorFn fn);
+
+// ---------------------------------------------------------------
+// Read-only access to the SHELL buffer's last contents. Used by
+// the windowed Terminal app to populate its grid with whatever
+// kernel boot output the user missed before opening the window.
+// The buffer is a fixed (rows × cols) ASCII grid; entries are
+// space (0x20) where nothing has been written. Callers that want
+// to consume the buffer one cell at a time use the row/col
+// accessors below.
+// ---------------------------------------------------------------
+
+char ConsoleShellCharAt(u32 row, u32 col);
+u32 ConsoleShellCursorRow();
+u32 ConsoleShellCursorCol();
+
 } // namespace duetos::drivers::video

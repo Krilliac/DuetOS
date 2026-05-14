@@ -2182,6 +2182,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::apps::terminal::TerminalInit(term_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::terminal::TerminalSelfTest());
 
+    // Slice 3a: hide the framebuffer console region now that the
+    // windowed Terminal is mirroring the same shell content. The
+    // console keeps buffering writes (the Terminal's mirror still
+    // fires); only the 80x40 paint region is reclaimed for the
+    // desktop. Ctrl+Alt+C toggles it visible again on demand.
+    duetos::drivers::video::ConsoleSetPaintEnabled(false);
+
     // NETWORK STATUS — read-only viewer over net::stack accessors.
     // No ThemeRole today; the chrome is seeded from Settings'
     // palette so it sits in the same slate-grey "tools" family.
@@ -4166,6 +4173,27 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
                     duetos::drivers::video::CursorShow();
                 }
+                duetos::drivers::video::CompositorUnlock();
+                continue;
+            }
+
+            // Ctrl+Alt+C — toggle the framebuffer console region's
+            // visibility. The console region is hidden by default
+            // once the windowed Terminal app is up (the Terminal
+            // shows the same shell content through the console
+            // mirror), so this shortcut is the on-demand "show me
+            // the on-screen console" escape hatch — useful when
+            // the compositor is wedged or the Terminal window
+            // has been closed. Slice 3a of the ToaruOS port.
+            if (ctrl && alt && (ev.code == 'c' || ev.code == 'C'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const bool now_visible = !duetos::drivers::video::ConsoleIsPaintEnabled();
+                duetos::drivers::video::ConsoleSetPaintEnabled(now_visible);
+                SerialWrite(now_visible ? "[ui] console -> visible\n" : "[ui] console -> hidden\n");
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
                 duetos::drivers::video::CompositorUnlock();
                 continue;
             }

@@ -87,6 +87,38 @@ void CmdClear()
     duetos::drivers::video::ConsoleClear();
 }
 
+void CmdConsole(u32 argc, char** argv)
+{
+    // `console`         — toggle paint state
+    // `console show`    — force visible
+    // `console hide`    — force hidden
+    bool target_state;
+    if (argc <= 1)
+    {
+        target_state = !duetos::drivers::video::ConsoleIsPaintEnabled();
+    }
+    else
+    {
+        const char* a = argv[1];
+        const bool is_show = (a[0] == 's' && a[1] == 'h' && a[2] == 'o' && a[3] == 'w' && a[4] == '\0') ||
+                             (a[0] == 'S' && a[1] == 'H' && a[2] == 'O' && a[3] == 'W' && a[4] == '\0');
+        const bool is_hide = (a[0] == 'h' && a[1] == 'i' && a[2] == 'd' && a[3] == 'e' && a[4] == '\0') ||
+                             (a[0] == 'H' && a[1] == 'I' && a[2] == 'D' && a[3] == 'E' && a[4] == '\0');
+        if (is_show)
+            target_state = true;
+        else if (is_hide)
+            target_state = false;
+        else
+        {
+            ConsoleWriteln("usage: console [show|hide]");
+            return;
+        }
+    }
+    duetos::drivers::video::ConsoleSetPaintEnabled(target_state);
+    ConsoleWrite("console paint -> ");
+    ConsoleWriteln(target_state ? "visible" : "hidden");
+}
+
 void CmdUptime()
 {
     // Match the operator-facing shape users expect from Unix-like

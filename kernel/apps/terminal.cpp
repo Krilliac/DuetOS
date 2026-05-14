@@ -2,8 +2,10 @@
 
 #include "arch/x86_64/serial.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/video/console.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
+#include "shell/shell.h"
 #include "util/vt_parser.h"
 
 namespace duetos::apps::terminal
@@ -61,17 +63,9 @@ struct State
     u8 cur_attr;
     bool cur_visible;
     u8 _pad[2];
-
-    // Demo line buffer — what the user is typing this turn.
-    // Slice 1 echoes typed chars back into the grid through the
-    // parser; a follow-up slice replaces this with a real shell
-    // sink.
-    char input_buf[256];
-    u32 input_len;
-    u8 _pad2[4];
 };
 
-constinit State g_state = {kWindowInvalid, {}, 0, 0, {}, 0, 0, 0, true, {}, {}, 0, {}};
+constinit State g_state = {kWindowInvalid, {}, 0, 0, {}, 0, 0, 0, true, {}};
 
 // ---- Grid primitives -------------------------------------------
 
@@ -459,43 +453,46 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     }
 }
 
-// ---- Demo loop -------------------------------------------------
+// ---- Console mirror hook ---------------------------------------
+//
+// The kernel shell prints to the framebuffer console via the
+// 3,800+ ConsoleWrite* call sites scattered across kernel/shell/.
+// Rather than refactor those, the Terminal app registers as a
+// mirror on the console — every byte the shell writes to the
+// shell-slot buffer also flows here, through the VT parser, into
+// our grid. The framebuffer console can paint or not paint that
+// data independently; this terminal becomes a true second view of
+// the same shell session.
 
-const char* kBanner = "DuetOS Terminal v0\r\n"
-                      "Echo loop — typed bytes flow through VT parser.\r\n"
-                      "Try \x1b[1mbold\x1b[m, \x1b[4munderline\x1b[m, \x1b[7mreverse\x1b[m.\r\n";
-
-void FeedBanner()
+void MirrorFromConsole(char c)
 {
-    u32 n = 0;
-    while (kBanner[n] != '\0')
-        ++n;
-    util::vt::ParserFeed(g_state.parser, reinterpret_cast<const u8*>(kBanner), n);
+    const u8 byte = static_cast<u8>(c);
+    util::vt::ParserFeed(g_state.parser, &byte, 1);
 }
 
-void Prompt()
-{
-    const char* p = "> ";
-    util::vt::ParserFeed(g_state.parser, reinterpret_cast<const u8*>(p), 2);
-    g_state.input_len = 0;
-    g_state.input_buf[0] = 0;
-}
+// ---- Initial-grid seed -----------------------------------------
+//
+// When the terminal window opens, we want to show whatever the
+// shell has already printed (boot log, prompt). The console's
+// shell-buffer is a fixed (rows × cols) ASCII grid; we walk it
+// once, feed each row + newline through the parser, and the
+// resulting grid mirrors the console exactly.
 
-void HandleInputComplete()
+void SeedFromConsole()
 {
-    // Echo a newline + a debug "you typed: ..." line, then prompt
-    // again. This is the demo behaviour the v0 ships with; the
-    // follow-up slice replaces it with shell-dispatch.
-    const u8 nl[] = {'\r', '\n'};
-    util::vt::ParserFeed(g_state.parser, nl, 2);
-    const char* lead = "you typed: ";
-    util::vt::ParserFeed(g_state.parser, reinterpret_cast<const u8*>(lead), 11);
-    if (g_state.input_len > 0)
+    using duetos::drivers::video::kConsoleCols;
+    using duetos::drivers::video::kConsoleRows;
+    for (u32 r = 0; r < kConsoleRows; ++r)
     {
-        util::vt::ParserFeed(g_state.parser, reinterpret_cast<const u8*>(g_state.input_buf), g_state.input_len);
+        for (u32 c = 0; c < kConsoleCols; ++c)
+        {
+            const char ch = duetos::drivers::video::ConsoleShellCharAt(r, c);
+            const u8 byte = static_cast<u8>(ch);
+            util::vt::ParserFeed(g_state.parser, &byte, 1);
+        }
+        const u8 nl[] = {'\r', '\n'};
+        util::vt::ParserFeed(g_state.parser, nl, 2);
     }
-    util::vt::ParserFeed(g_state.parser, nl, 2);
-    Prompt();
 }
 
 } // namespace
@@ -507,8 +504,6 @@ void TerminalInit(WindowHandle handle)
     g_state.cur_y = 0;
     g_state.cur_attr = 0;
     g_state.cur_visible = true;
-    g_state.input_len = 0;
-    g_state.input_buf[0] = 0;
     ClearAll();
 
     util::vt::Callbacks cb = {};
@@ -519,8 +514,11 @@ void TerminalInit(WindowHandle handle)
     cb.osc = &OnOsc;
     util::vt::ParserInit(g_state.parser, cb);
 
-    FeedBanner();
-    Prompt();
+    // Pre-populate from whatever's already in the kernel shell's
+    // backing buffer (boot log + first prompt), then register the
+    // live mirror so subsequent ConsoleWrite* calls land here too.
+    SeedFromConsole();
+    duetos::drivers::video::ConsoleRegisterMirror(&MirrorFromConsole);
 
     WindowSetContentDraw(handle, DrawFn, nullptr);
 }
@@ -532,46 +530,46 @@ WindowHandle TerminalWindow()
 
 bool TerminalFeedChar(char c)
 {
+    // Route every keystroke into the kernel shell's input API.
+    // The shell's response flows back to us through the console
+    // mirror — no local echo here. This is the "merge": the
+    // windowed terminal and the framebuffer console both write
+    // to the same shell, and both read its output via the same
+    // ConsoleWrite* path.
     if (c == '\r' || c == '\n')
     {
-        HandleInputComplete();
+        duetos::core::ShellSubmit();
         return true;
     }
     if (c == 0x08 || c == 0x7F)
     {
-        if (g_state.input_len > 0)
-        {
-            --g_state.input_len;
-            g_state.input_buf[g_state.input_len] = 0;
-            // Echo the backspace through the parser so the cursor
-            // moves; the visual effect is BS + space + BS (xterm
-            // semantics for a destructive backspace).
-            const u8 erase[] = {0x08, ' ', 0x08};
-            util::vt::ParserFeed(g_state.parser, erase, 3);
-        }
+        duetos::core::ShellBackspace();
         return true;
     }
     if (static_cast<u8>(c) < 0x20)
     {
-        // Drop other control chars in the demo loop. A real shell
-        // sink will forward them.
+        // Drop other C0 chars — the shell doesn't accept them.
         return true;
     }
-    if (g_state.input_len + 1 < sizeof(g_state.input_buf))
-    {
-        g_state.input_buf[g_state.input_len++] = c;
-        g_state.input_buf[g_state.input_len] = 0;
-    }
-    const u8 byte = static_cast<u8>(c);
-    util::vt::ParserFeed(g_state.parser, &byte, 1);
+    duetos::core::ShellFeedChar(c);
     return true;
 }
 
-bool TerminalFeedArrow(u16 /*keycode*/)
+bool TerminalFeedArrow(u16 keycode)
 {
-    // v0 swallows arrows without effect. A follow-up slice maps
-    // them to CSI A/B/C/D bytes injected back into the input
-    // queue so an attached shell sees them.
+    // Forward up/down to the shell's history cycle. Left/right
+    // line editing inside the input buffer is not supported by
+    // the v0 shell, so we swallow those silently.
+    if (keycode == duetos::drivers::input::kKeyArrowUp)
+    {
+        duetos::core::ShellHistoryPrev();
+        return true;
+    }
+    if (keycode == duetos::drivers::input::kKeyArrowDown)
+    {
+        duetos::core::ShellHistoryNext();
+        return true;
+    }
     return true;
 }
 
@@ -585,8 +583,6 @@ void TerminalReset()
     g_state.cur_x = 0;
     g_state.cur_y = 0;
     g_state.cur_attr = 0;
-    g_state.input_len = 0;
-    g_state.input_buf[0] = 0;
     ClearAll();
     util::vt::ParserReset(g_state.parser);
 }

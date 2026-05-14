@@ -4,55 +4,55 @@
 #include "util/types.h"
 
 /*
- * DuetOS Terminal — v0.
+ * DuetOS Terminal — windowed view of the kernel shell.
  *
- * A windowed terminal emulator that hosts a fixed-cell character
- * grid, parses a useful subset of VT/ANSI escape sequences via
- * `kernel/util/vt_parser`, and renders the grid into the active
- * compositor window. Sister to the kernel's framebuffer console
- * (`kernel/drivers/video/console.cpp`), which is the boot-time
- * single-instance text surface this widget cannot displace —
- * but unlike that surface, the terminal lives inside a normal
- * window managed by `kernel/drivers/video/widget`.
+ * A windowed terminal emulator that hosts a character-cell grid,
+ * parses VT/ANSI escape sequences via `kernel/util/vt_parser`,
+ * and mirrors the live kernel shell session by attaching to the
+ * framebuffer console's mirror hook (see
+ * `kernel/drivers/video/console.h`). Sister surface to the
+ * framebuffer console — they show the SAME shell I/O byte-for-
+ * byte, by design.
  *
- * Why this exists:
- *   - The kernel shell prints to the framebuffer console
- *     directly. Operators who want to run shell commands without
- *     dropping out of the windowed desktop currently cannot. A
- *     windowed terminal fixes that, even before the shell is
- *     plumbed through an output abstraction (separate slice).
- *   - PE binaries that call WriteConsoleA / WriteConsoleW
- *     currently log to the boot serial. A future slice will
- *     route those into a Terminal window so console-mode Win32
- *     programs show up on the desktop.
+ * The merge:
+ *   - The framebuffer console (`kernel/drivers/video/console.cpp`)
+ *     is the kernel shell's output sink. Slice 1 of the ToaruOS
+ *     port built this Terminal as a windowed mirror; slice 3a
+ *     completed the merge by routing keystrokes here through
+ *     `ShellFeedChar` / `ShellSubmit` / `ShellHistoryPrev/Next` so
+ *     this window is a fully-functional shell session.
+ *   - The framebuffer console region is hidden by default once
+ *     this window is up (paint toggle off, set by main.cpp).
+ *     Ctrl+Alt+L (or a shell `console show` command) flips it
+ *     visible again on demand for debugging.
  *
  * Cell-grid model:
- *   - Fixed (cols × rows) character cells; each cell stores a
- *     UTF-32 codepoint plus an inverted-attribute bit.
- *   - The grid is double-buffered as one contiguous array; the
- *     parser writes to a cursor position, the painter walks
- *     every cell on every compose. No dirty tracking in v0 —
- *     the compositor's WindowContentFn already runs only on
- *     repaint requests.
+ *   - Fixed-size character cells (up to kMaxCols × kMaxRows,
+ *     clamped to whatever fits the window's client rect).
+ *   - Each cell stores a UTF-32 codepoint plus an attribute byte.
+ *   - The painter walks every cell on every compose (the
+ *     compositor's WindowContentFn already only runs on
+ *     repaint).
  *
- * What slice 1 handles:
+ * What this slice handles:
  *   - Plain print of codepoints (UTF-8 input via the parser).
- *   - C0 controls: BEL ignored, BS, HT, LF (with implicit CR
- *     for sanity), CR.
- *   - CSI 'H' / 'f' (CUP — cursor position), 'A'/'B'/'C'/'D'
- *     (cursor up/down/right/left), 'J' (ED), 'K' (EL), 'm' (SGR;
- *     bold / underline / reverse — colour palette deliberately
- *     deferred since the compositor uses theme colours).
- *   - Demo loop: keys typed into the focused window echo into
- *     the grid (with a leading prompt). This proves the round-
- *     trip without requiring shell-integration plumbing.
+ *   - C0 controls: BS, HT, LF (with implicit CR), CR (BEL is
+ *     ignored).
+ *   - CSI 'H' / 'f' (CUP), 'A'/'B'/'C'/'D' (cursor motion),
+ *     'J' (ED), 'K' (EL), 'm' (SGR; bold / underline / reverse).
+ *   - Live mirror of shell output via
+ *     `ConsoleRegisterMirror(&MirrorFromConsole)`.
+ *   - Keystroke → shell input via `ShellFeedChar` /
+ *     `ShellBackspace` / `ShellSubmit`. Up/Down cycle shell
+ *     history.
  *
- * Out of scope for slice 1 (recorded in Toaru-Port-Plan):
- *   - Hosting the kernel shell (refactor of ~20k LoC of
- *     ConsoleWrite* calls is its own slice).
- *   - Routing Win32 console PEs through the widget.
- *   - Mouse selection / clipboard / scrollback navigation.
- *   - Full SGR colour palette (we ship monochrome v0).
+ * Out of scope (recorded in Toaru-Port-Plan, not as `// GAP:`
+ * markers — no callers today):
+ *   - Routing Win32 console PEs through the widget. Slice 3+.
+ *   - Mouse selection / clipboard / scrollback navigation
+ *     beyond what the cell grid holds.
+ *   - Full SGR colour palette (monochrome v0).
+ *   - ESC ( / ) charset switching, DCS, OSC 52 clipboard.
  *
  * Context: kernel. DrawFn runs under the compositor lock from
  * WindowDrawAllOrdered. Keyboard handlers are called from the
@@ -68,9 +68,13 @@ namespace duetos::apps::terminal
 inline constexpr duetos::u32 kMaxCols = 100;
 inline constexpr duetos::u32 kMaxRows = 36;
 
-/// Install Terminal state on `handle`. Initial paint shows a
-/// banner + prompt. Subsequent input flows through FeedChar /
-/// FeedArrow.
+/// Install Terminal state on `handle`. Seeds the grid from the
+/// current framebuffer-console shell buffer (boot log + the most
+/// recent prompt) and registers a mirror so subsequent shell
+/// output is replayed here. Keystrokes routed in via
+/// `TerminalFeedChar` / `TerminalFeedArrow` drive the kernel
+/// shell directly (`ShellFeedChar` / `ShellBackspace` /
+/// `ShellSubmit` / `ShellHistoryPrev` / `ShellHistoryNext`).
 void TerminalInit(duetos::drivers::video::WindowHandle handle);
 
 /// Handle of the Terminal window, or `kWindowInvalid` until Init.
