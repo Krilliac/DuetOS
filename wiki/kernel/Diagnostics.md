@@ -43,7 +43,7 @@ The contract every module follows:
 | `leak_detector` | [`leak_detector.h`](../../kernel/diag/leak_detector.h) | Aggregates per-subsystem resource counters; fires `kLeakAttributable` on process exit if any pinned. | none (read-only of existing counters) |
 | `soft_lockup` | [`soft_lockup.h`](../../kernel/diag/soft_lockup.h) | Single-task CPU hog detector (100 ticks ≈ 1 s default). | `SoftLockupSelfTest()` |
 | `stress_driver` | [`stress_driver.h`](../../kernel/diag/stress_driver.h) | Boot-time stress harness driven by `stress=` cmdline. | none |
-| `ubsan` | [`ubsan.h`](../../kernel/diag/ubsan.h) | UBSAN runtime — 14 handler classes (overflow, shift, OOB, alignment, …). Rate-limited via `KLOG_ONCE_*`. Off by default. | `UbsanSelfTest()` |
+| `ubsan` | [`ubsan.h`](../../kernel/diag/ubsan.h) | UBSAN runtime — 14 handler classes (overflow, shift, OOB, alignment, …). Each incident emits one `[W] diag/ubsan : <kind>` klog line carrying the failing class as the ring-entry message (so the BSOD recent-log tail shows the actual UB class, not a generic placeholder). Off by default. | `UbsanSelfTest()` |
 | `fault_react` | [`fault_react.h`](../../kernel/diag/fault_react.h) | Self-defensive fault dispatcher (`FaultKind` × `FaultSeverity` → `FaultReaction`). Trap-safe deferred drain. | `FaultReactSelfTest()` |
 | `fix_journal` | [`fix_journal.h`](../../kernel/diag/fix_journal.h) | Record-and-defer for STUB/GAP hits at runtime — 1024×128B ring. Macros `FIX_NOTE_STUB()` / `FIX_NOTE_GAP()`. | `FixJournalSelfTest()` |
 | `fix_journal_persist` | [`fix_journal_persist.h`](../../kernel/diag/fix_journal_persist.h) | Tier-2/3 persistence to FAT32 `/KERNEL.FIX` and NVMe reserved LBAs. | `FixJournalPersistSelfTest()` |
