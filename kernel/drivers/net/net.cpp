@@ -566,7 +566,10 @@ void E1000SelfTestTx(const NicInfo& n)
     }
     else
     {
-        arch::SerialWrite("[e1000] self-test TX: submission failed\n");
+        // Self-test TX submission failed — typically means the
+        // tx ring is wedged or the BAR mapping is broken. Klog
+        // so the regression appears in dmesg + panic dump.
+        KLOG_ERROR("drivers/net/e1000", "self-test TX submission failed");
     }
 }
 

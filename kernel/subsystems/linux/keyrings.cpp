@@ -36,6 +36,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 #include "mm/paging.h"
 #include "proc/process.h"
 
@@ -115,6 +116,10 @@ ProcKeyring* GetOrCreateKeyringForCurrent()
         return &k;
     }
     arch::Sti();
+    // Per-process keyring slot table saturated. The keyctl() caller
+    // sees ENOMEM; klog gets the first hit so a regression doesn't
+    // bury operational pressure.
+    KLOG_ONCE_WARN("subsystems/linux/keyrings", "per-process keyring table full");
     return nullptr;
 }
 

@@ -1152,7 +1152,15 @@ bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*rele
     auto kf_r = ::duetos::ipc::KFileCreate(KindOf(kind), pool_index, release, /*vnode=*/nullptr,
                                            /*flags=*/0);
     if (!kf_r.has_value())
+    {
+        // KFile pool exhausted — the caller already grabbed a
+        // pool_index slot but the kfile bookkeeping struct couldn't
+        // be allocated. Surface so a real pool-saturation event
+        // appears in dmesg + the panic dump; the syscall layer
+        // returns -ENFILE upward unchanged.
+        KLOG_ONCE_WARN_V("proc/linux-fd", "KFileCreate failed (pool exhausted) on attach (kind)", kind);
         return false;
+    }
     auto h_r = ::duetos::ipc::HandleTableInsert(p->kobj_handles, &kf_r.value()->base);
     if (!h_r.has_value())
     {
@@ -1160,6 +1168,7 @@ bool LinuxFdAttachKFile(Process* p, u32 fd, u8 kind, u32 pool_index, void (*rele
         // its destroy callback runs and releases the pool slot —
         // the caller had already allocated `pool_index` and is
         // counting on cleanup if attach fails.
+        KLOG_ONCE_WARN("proc/linux-fd", "HandleTableInsert failed (table full) on attach");
         ::duetos::ipc::KObjectRelease(&kf_r.value()->base);
         return false;
     }
@@ -1174,13 +1183,17 @@ bool LinuxFdAttachKFileOwned(Process* p, u32 fd, u8 kind, u32 pool_index, void (
     auto kf_r = ::duetos::ipc::KFileCreateWithOwner(KindOf(kind), pool_index, release, p,
                                                     /*vnode=*/nullptr, /*flags=*/0);
     if (!kf_r.has_value())
+    {
+        KLOG_ONCE_WARN_V("proc/linux-fd", "KFileCreateWithOwner failed on attach (kind)", kind);
         return false;
+    }
     auto h_r = ::duetos::ipc::HandleTableInsert(p->kobj_handles, &kf_r.value()->base);
     if (!h_r.has_value())
     {
         // Same rollback shape as `LinuxFdAttachKFile` — KObjectRelease
         // fires the owner-aware destroy callback, which frees the
         // pool slot the caller had already allocated.
+        KLOG_ONCE_WARN("proc/linux-fd", "HandleTableInsert failed (table full) on attach-owned");
         ::duetos::ipc::KObjectRelease(&kf_r.value()->base);
         return false;
     }

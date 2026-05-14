@@ -643,6 +643,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         if (idx == Process::kWin32ProcessCap)
         {
+            // No free slot — caller's per-process handle table is
+            // saturated. Subsequent OpenProcess calls will keep
+            // failing until something closes; surface the first
+            // occurrence so an operator can correlate against the
+            // misbehaving Win32 app instead of debugging a silent
+            // "OpenProcess returns 0" report from user mode.
+            KLOG_ONCE_WARN("syscall", "OpenProcess: per-process Win32 handle table full");
             frame->rax = 0; // table full
             return;
         }
@@ -1653,10 +1660,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
         mm::KFree(buf);
         if (!r.ok)
         {
-            // No way back — terminate the calling task.
-            arch::SerialWrite("[execve] ElfLoad failed; terminating task pid=");
-            arch::SerialWriteHex(caller->pid);
-            arch::SerialWrite("\n");
+            // execve is past the point of no return — the caller's
+            // address space has already been torn down. The task
+            // gets killed. Route through klog so a post-mortem
+            // dmesg replay shows the pid + the failure cause
+            // (vs the boot-only serial line that used to scroll
+            // past with no ring-buffer record).
+            KLOG_ERROR_V("syscall/execve", "ElfLoad failed past point of no return — terminating task (pid)",
+                         caller->pid);
             sched::SchedExit();
         }
 

@@ -387,9 +387,12 @@ void StartMenuAppsScan()
         ParsedManifest pm{};
         if (!ParseManifest(buf, static_cast<u64>(n), &pm))
         {
-            arch::SerialWrite("[startapps] skipping malformed ");
-            arch::SerialWrite(e.name);
-            arch::SerialWrite("\n");
+            // ParseManifest rejects unknown keys / bad encoding;
+            // a malformed shortcut shows up here. The serial line
+            // bypassed the klog ring so a panic dump would have
+            // lost the offending shortcut name — route through
+            // klog so the dmesg replay carries the filename.
+            KLOG_WARN_S("startapps", "skipping malformed manifest", "file", e.name);
             continue;
         }
         Slot& s = g_slots[g_slot_count];

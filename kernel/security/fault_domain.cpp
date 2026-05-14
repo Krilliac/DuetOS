@@ -211,11 +211,28 @@ void FaultDomainMarkRestart(FaultDomainId id)
 bool FaultDomainAddDependency(FaultDomainId parent, FaultDomainId dependent)
 {
     if (parent >= g_domain_count || dependent >= g_domain_count)
+    {
+        // OOB domain id — caller's bug. Route through klog so a
+        // regression in subsystem-registration ordering (depending
+        // on a domain that doesn't exist yet) surfaces with the
+        // offending ids pinned, instead of returning false silently
+        // and breaking restart-cascade behaviour.
+        KLOG_ONCE_WARN_V("security/fault-domain", "AddDependency: parent or dependent id out of range",
+                         static_cast<u64>(parent) << 16 | dependent);
         return false;
+    }
     if (parent == dependent)
+    {
+        KLOG_ONCE_WARN_V("security/fault-domain", "AddDependency: self-dependency rejected", parent);
         return false;
+    }
     if (g_dep_count >= kMaxFaultDomainDeps)
     {
+        // Dependency table saturated. Route through klog so the
+        // table-full condition lands in dmesg + panic dump replay;
+        // the existing serial dump kept rich context (parent +
+        // dependent names) but bypassed the ring buffer.
+        KLOG_ONCE_WARN_V("security/fault-domain", "dependency table full — refused (cap)", kMaxFaultDomainDeps);
         arch::SerialWrite("[fault-domain] dep table full — refused parent=");
         arch::SerialWrite(g_domains[parent].name);
         arch::SerialWrite(" dependent=");

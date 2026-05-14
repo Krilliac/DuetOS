@@ -173,6 +173,13 @@ u32 RcuReclaimLocal()
     const u32 cpu = cpu::CurrentCpuIdOrBsp();
     if (cpu >= acpi::kMaxCpus)
     {
+        // CurrentCpuIdOrBsp returned a corrupted / unconfigured CPU
+        // id past the max-CPU array bound. Means PerCpu state was
+        // never set up on this CPU; reclaim is a no-op AND the
+        // queued callbacks leak. Once-warn so the first occurrence
+        // surfaces — the leak side is permanent for this CPU's
+        // lifetime, so spamming wouldn't help.
+        KLOG_ONCE_WARN_V("sync/rcu", "RcuReclaimLocal: CPU id past kMaxCpus — callbacks will leak", cpu);
         return 0;
     }
     return DrainQueue(g_per_cpu[cpu]);

@@ -242,9 +242,12 @@ void RotateAreaChain(const fs::fat32::Volume* v, const char* base)
         {
             if (!fat::Fat32RenameAtPath(v, src_path, rot_path))
             {
-                arch::SerialWrite("[klog-persist] rotate archive promotion failed for ");
-                arch::SerialWrite(src_path);
-                arch::SerialWrite("\n");
+                // Rotation chain broke mid-promotion — the old
+                // archive slot stays in place and we'll keep
+                // writing to the live file. Klog so a regression
+                // in the FS rename path appears in dmesg + panic
+                // dump.
+                KLOG_WARN_S("log/klog-persist", "rotate archive promotion failed", "path", src_path);
             }
         }
     }
@@ -256,9 +259,11 @@ void RotateAreaChain(const fs::fat32::Volume* v, const char* base)
     {
         if (!fat::Fat32RenameAtPath(v, live_path, rot_path))
         {
-            arch::SerialWrite("[klog-persist] rotate live -> .0 failed for ");
-            arch::SerialWrite(live_path);
-            arch::SerialWrite("; dropping\n");
+            // Rename of the live log to the .0 slot failed; we
+            // delete the live file as fallback so the next boot
+            // doesn't append to a stale tail. Klog the rotation
+            // failure separately so the operator sees data loss.
+            KLOG_WARN_S("log/klog-persist", "rotate live -> .0 failed; dropping", "path", live_path);
             fat::Fat32DeleteAtPath(v, live_path);
         }
     }
@@ -299,9 +304,10 @@ u64 SeedFreshAreaLog(const fs::fat32::Volume* v, const char* base)
     header[h] = '\0';
     if (fat::Fat32CreateAtPath(v, live_path, header, h) < 0)
     {
-        arch::SerialWrite("[klog-persist] create failed for ");
-        arch::SerialWrite(live_path);
-        arch::SerialWrite("\n");
+        // Creating the fresh live-log file failed — likely FAT
+        // free-cluster exhaustion or a corrupt dir entry. Klog so
+        // a regression in the FS create path appears in dmesg.
+        KLOG_WARN_S("log/klog-persist", "create failed", "path", live_path);
         return 0;
     }
     return h;

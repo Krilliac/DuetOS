@@ -353,7 +353,11 @@ bool ApplyRelocations(const u8* file, u64 file_len, const DllHeaders& h, duetos:
         const u32 block_sz = LeU32(file + cursor + 4);
         if (block_sz < 8 || cursor + block_sz > end)
         {
-            SerialWrite("[dll-load] malformed reloc block\n");
+            // Same shape as the pe_loader reloc-walk check: a block
+            // header smaller than the preamble or one that walks
+            // past the table end. Capture both fields so a panic
+            // dump reproduces the offending block.
+            KLOG_ERROR_2V("loader/dll", "malformed reloc block", "page_rva", page_rva, "block_sz", block_sz);
             return false;
         }
         if (page_rva == 0 && block_sz == 0)

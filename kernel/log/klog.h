@@ -40,6 +40,24 @@
  *     their timestamps, replayed by core::Panic so the post-mortem
  *     shows "what happened in the 63 lines before we died" with
  *     wall-clock times attached.
+ *   - Source-location for Warn / Error / Critical: every KLOG_WARN*
+ *     / KLOG_ERROR* / KLOG_CRITICAL* macro captures `__FILE__` /
+ *     `__LINE__` at the call site and the renderer appends
+ *     `   at <kernel-relative-path>:<line>` after the message body.
+ *     The motivation: a `[W] mm/paging : something tripped` line in
+ *     a 30,000-line boot log is one grep away from the call site,
+ *     not a debugger session. Trace / Debug / Info macros DO NOT
+ *     capture file:line — they are high-volume and the location is
+ *     usually obvious from the subsystem prefix; adding 30 bytes
+ *     per line would dwarf the message.
+ *
+ *     Escape hatch — call `core::Log()` / `core::LogWithValue()` /
+ *     etc. DIRECTLY (without the KLOG_* macro) and the file/line
+ *     defaults to nullptr/0; the renderer omits the at-clause. Use
+ *     for ring-buffer replay, post-mortem reconstruction, or any
+ *     site that intentionally wants to emit a synthetic log line
+ *     whose source location should NOT be the call site (because
+ *     the call site is the synthesis point, not the origin).
  *
  * Context: kernel. Safe at any interrupt level.
  */
@@ -243,18 +261,28 @@ LogArea LogAreaFromName(const char* name);
 
 /// Emit a tagged log line. Single-letter severity + subsystem + msg.
 /// Safe from IRQ context. No-op if level / area filters drop it.
-void Log(LogLevel level, const char* subsystem, const char* message);
+///
+/// `file` / `line` carry the source-location of the call site —
+/// populated automatically by the KLOG_WARN / KLOG_ERROR /
+/// KLOG_CRITICAL macros, defaulted to nullptr / 0 for the direct-
+/// call escape hatch (ring-buffer replay, synthesised log lines).
+/// When non-null, the renderer appends `   at <path>:<line>` after
+/// the message body and stores the pair in the ring entry so the
+/// panic-time replay can reproduce it. Trace / Debug / Info macros
+/// do NOT capture file:line — they would dwarf the message.
+void Log(LogLevel level, const char* subsystem, const char* message, const char* file = nullptr, u32 line = 0);
 
 /// As above, with a u64 rendered as hex after the message.
-void LogWithValue(LogLevel level, const char* subsystem, const char* message, u64 value);
+void LogWithValue(LogLevel level, const char* subsystem, const char* message, u64 value, const char* file = nullptr,
+                  u32 line = 0);
 
 /// Variant that takes a labelled NUL-terminated string. Renders as
 ///     [I] subsys : message   <label>="<value>"
 /// Handy for device names, PCI vendors, file paths — anything the
 /// reader wants to see literally, not as hex. `value_str` must
 /// outlive the log call; it's stored by pointer in the ring buffer.
-void LogWithString(LogLevel level, const char* subsystem, const char* message, const char* label,
-                   const char* value_str);
+void LogWithString(LogLevel level, const char* subsystem, const char* message, const char* label, const char* value_str,
+                   const char* file = nullptr, u32 line = 0);
 
 /// Variant that carries two labelled u64 values on one line. Renders as
 ///     [I] subsys : message   <a_label>=0x... (dec)   <b_label>=0x... (dec)
@@ -264,7 +292,7 @@ void LogWithString(LogLevel level, const char* subsystem, const char* message, c
 /// both values matter for post-mortem analysis, use two LogWithValue
 /// calls instead.
 void LogWith2Values(LogLevel level, const char* subsystem, const char* message, const char* a_label, u64 a_value,
-                    const char* b_label, u64 b_value);
+                    const char* b_label, u64 b_value, const char* file = nullptr, u32 line = 0);
 
 // Area-aware variants. Same shape as the top set, but the caller
 // names an explicit LogArea so the runtime mask can silence whole
@@ -272,12 +300,14 @@ void LogWith2Values(LogLevel level, const char* subsystem, const char* message, 
 // I focus on a memory bug"). The legacy non-A variants above
 // auto-tag via `AreaFromSubsystem(subsystem)` so old call sites
 // stay zero-touch.
-void LogA(LogLevel level, LogArea area, const char* subsystem, const char* message);
-void LogAWithValue(LogLevel level, LogArea area, const char* subsystem, const char* message, u64 value);
+void LogA(LogLevel level, LogArea area, const char* subsystem, const char* message, const char* file = nullptr,
+          u32 line = 0);
+void LogAWithValue(LogLevel level, LogArea area, const char* subsystem, const char* message, u64 value,
+                   const char* file = nullptr, u32 line = 0);
 void LogAWithString(LogLevel level, LogArea area, const char* subsystem, const char* message, const char* label,
-                    const char* value_str);
+                    const char* value_str, const char* file = nullptr, u32 line = 0);
 void LogAWith2Values(LogLevel level, LogArea area, const char* subsystem, const char* message, const char* a_label,
-                     u64 a_value, const char* b_label, u64 b_value);
+                     u64 a_value, const char* b_label, u64 b_value, const char* file = nullptr, u32 line = 0);
 
 /// Toggle ANSI colour codes on the serial sink. Defaults to on.
 /// Off is useful for log-capture tools that don't understand escape
@@ -557,13 +587,13 @@ void DumpLogRingFilteredAreaTo(LogTee writer, u32 area_mask, u32 max_entries);
 #define KLOG_WARN(subsys, msg)                                                                                         \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::Log(::duetos::core::LogLevel::Warn, (subsys), (msg));                                          \
+        ::duetos::core::Log(::duetos::core::LogLevel::Warn, (subsys), (msg), __FILE__, __LINE__);                      \
     } while (0)
 
 #define KLOG_ERROR(subsys, msg)                                                                                        \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::Log(::duetos::core::LogLevel::Error, (subsys), (msg));                                         \
+        ::duetos::core::Log(::duetos::core::LogLevel::Error, (subsys), (msg), __FILE__, __LINE__);                     \
     } while (0)
 
 // Critical: degraded-but-still-running events that warrant the same
@@ -574,19 +604,20 @@ void DumpLogRingFilteredAreaTo(LogTee writer, u32 area_mask, u32 max_entries);
 #define KLOG_CRITICAL(subsys, msg)                                                                                     \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::Log(::duetos::core::LogLevel::Critical, (subsys), (msg));                                      \
+        ::duetos::core::Log(::duetos::core::LogLevel::Critical, (subsys), (msg), __FILE__, __LINE__);                  \
     } while (0)
 
 #define KLOG_CRITICAL_V(subsys, msg, val)                                                                              \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWithValue(::duetos::core::LogLevel::Critical, (subsys), (msg), (val));                      \
+        ::duetos::core::LogWithValue(::duetos::core::LogLevel::Critical, (subsys), (msg), (val), __FILE__, __LINE__);  \
     } while (0)
 
 #define KLOG_CRITICAL_S(subsys, msg, label, s)                                                                         \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWithString(::duetos::core::LogLevel::Critical, (subsys), (msg), (label), (s));              \
+        ::duetos::core::LogWithString(::duetos::core::LogLevel::Critical, (subsys), (msg), (label), (s), __FILE__,     \
+                                      __LINE__);                                                                       \
     } while (0)
 
 // "With value" forms — one u64 appended as hex.
@@ -599,25 +630,27 @@ void DumpLogRingFilteredAreaTo(LogTee writer, u32 area_mask, u32 max_entries);
 #define KLOG_WARN_V(subsys, msg, val)                                                                                  \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWithValue(::duetos::core::LogLevel::Warn, (subsys), (msg), (val));                          \
+        ::duetos::core::LogWithValue(::duetos::core::LogLevel::Warn, (subsys), (msg), (val), __FILE__, __LINE__);      \
     } while (0)
 
 #define KLOG_ERROR_V(subsys, msg, val)                                                                                 \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWithValue(::duetos::core::LogLevel::Error, (subsys), (msg), (val));                         \
+        ::duetos::core::LogWithValue(::duetos::core::LogLevel::Error, (subsys), (msg), (val), __FILE__, __LINE__);     \
     } while (0)
 
 #define KLOG_ERROR_S(subsys, msg, label, s)                                                                            \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWithString(::duetos::core::LogLevel::Error, (subsys), (msg), (label), (s));                 \
+        ::duetos::core::LogWithString(::duetos::core::LogLevel::Error, (subsys), (msg), (label), (s), __FILE__,        \
+                                      __LINE__);                                                                       \
     } while (0)
 
 #define KLOG_ERROR_2V(subsys, msg, la, a, lb, b)                                                                       \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWith2Values(::duetos::core::LogLevel::Error, (subsys), (msg), (la), (a), (lb), (b));        \
+        ::duetos::core::LogWith2Values(::duetos::core::LogLevel::Error, (subsys), (msg), (la), (a), (lb), (b),         \
+                                       __FILE__, __LINE__);                                                            \
     } while (0)
 
 // "With string" forms — one labelled C-string appended.
@@ -630,7 +663,8 @@ void DumpLogRingFilteredAreaTo(LogTee writer, u32 area_mask, u32 max_entries);
 #define KLOG_WARN_S(subsys, msg, label, s)                                                                             \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWithString(::duetos::core::LogLevel::Warn, (subsys), (msg), (label), (s));                  \
+        ::duetos::core::LogWithString(::duetos::core::LogLevel::Warn, (subsys), (msg), (label), (s), __FILE__,         \
+                                      __LINE__);                                                                       \
     } while (0)
 
 // "With two values" forms — two labelled u64 values on one line.
@@ -643,7 +677,8 @@ void DumpLogRingFilteredAreaTo(LogTee writer, u32 area_mask, u32 max_entries);
 #define KLOG_WARN_2V(subsys, msg, la, a, lb, b)                                                                        \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogWith2Values(::duetos::core::LogLevel::Warn, (subsys), (msg), (la), (a), (lb), (b));         \
+        ::duetos::core::LogWith2Values(::duetos::core::LogLevel::Warn, (subsys), (msg), (la), (a), (lb), (b),          \
+                                       __FILE__, __LINE__);                                                            \
     } while (0)
 
 // Once-firing variants — each call site emits at most once per boot.
@@ -669,7 +704,27 @@ void DumpLogRingFilteredAreaTo(LogTee writer, u32 area_mask, u32 max_entries);
         if (!_klog_once)                                                                                               \
         {                                                                                                              \
             _klog_once = true;                                                                                         \
-            ::duetos::core::Log(::duetos::core::LogLevel::Warn, (subsys), (msg));                                      \
+            ::duetos::core::Log(::duetos::core::LogLevel::Warn, (subsys), (msg), __FILE__, __LINE__);                  \
+        }                                                                                                              \
+    } while (0)
+
+// Warn-once that also renders a single u64 value alongside the message.
+// Same dedup semantics as KLOG_ONCE_WARN (one fire per call site, ever),
+// but the value gives the caller a way to pin which specific instance
+// of the bug tripped — e.g. "OOB TLS slot index" with the offending idx,
+// or "unhandled IRQ vector" with the vector number. The value is
+// captured by the function call, not by the static once flag, so a
+// callsite that fires once per BAD vector still needs explicit
+// per-vector dedup; this macro is the right shape for "I want the
+// first occurrence's value, ignore the rest forever."
+#define KLOG_ONCE_WARN_V(subsys, msg, val)                                                                             \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        static bool _klog_once = false;                                                                                \
+        if (!_klog_once)                                                                                               \
+        {                                                                                                              \
+            _klog_once = true;                                                                                         \
+            ::duetos::core::LogWithValue(::duetos::core::LogLevel::Warn, (subsys), (msg), (val), __FILE__, __LINE__);  \
         }                                                                                                              \
     } while (0)
 
@@ -746,53 +801,59 @@ void DumpLogRingFilteredAreaTo(LogTee writer, u32 area_mask, u32 max_entries);
 #define KLOG_WARN_A(area_, subsys, msg)                                                                                \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogA(::duetos::core::LogLevel::Warn, (area_), (subsys), (msg));                                \
+        ::duetos::core::LogA(::duetos::core::LogLevel::Warn, (area_), (subsys), (msg), __FILE__, __LINE__);            \
     } while (0)
 
 #define KLOG_WARN_AV(area_, subsys, msg, val)                                                                          \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogAWithValue(::duetos::core::LogLevel::Warn, (area_), (subsys), (msg), (val));                \
+        ::duetos::core::LogAWithValue(::duetos::core::LogLevel::Warn, (area_), (subsys), (msg), (val), __FILE__,       \
+                                      __LINE__);                                                                       \
     } while (0)
 
 #define KLOG_ERROR_A(area_, subsys, msg)                                                                               \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogA(::duetos::core::LogLevel::Error, (area_), (subsys), (msg));                               \
+        ::duetos::core::LogA(::duetos::core::LogLevel::Error, (area_), (subsys), (msg), __FILE__, __LINE__);           \
     } while (0)
 
 #define KLOG_ERROR_AV(area_, subsys, msg, val)                                                                         \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogAWithValue(::duetos::core::LogLevel::Error, (area_), (subsys), (msg), (val));               \
+        ::duetos::core::LogAWithValue(::duetos::core::LogLevel::Error, (area_), (subsys), (msg), (val), __FILE__,      \
+                                      __LINE__);                                                                       \
     } while (0)
 
 #define KLOG_CRITICAL_A(area_, subsys, msg)                                                                            \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogA(::duetos::core::LogLevel::Critical, (area_), (subsys), (msg));                            \
+        ::duetos::core::LogA(::duetos::core::LogLevel::Critical, (area_), (subsys), (msg), __FILE__, __LINE__);        \
     } while (0)
 
 #define KLOG_CRITICAL_AV(area_, subsys, msg, val)                                                                      \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogAWithValue(::duetos::core::LogLevel::Critical, (area_), (subsys), (msg), (val));            \
+        ::duetos::core::LogAWithValue(::duetos::core::LogLevel::Critical, (area_), (subsys), (msg), (val), __FILE__,   \
+                                      __LINE__);                                                                       \
     } while (0)
 
 #define KLOG_CRITICAL_AS(area_, subsys, msg, label, s)                                                                 \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogAWithString(::duetos::core::LogLevel::Critical, (area_), (subsys), (msg), (label), (s));    \
+        ::duetos::core::LogAWithString(::duetos::core::LogLevel::Critical, (area_), (subsys), (msg), (label), (s),     \
+                                       __FILE__, __LINE__);                                                            \
     } while (0)
 
 #define KLOG_WARN_AS(area_, subsys, msg, label, s)                                                                     \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogAWithString(::duetos::core::LogLevel::Warn, (area_), (subsys), (msg), (label), (s));        \
+        ::duetos::core::LogAWithString(::duetos::core::LogLevel::Warn, (area_), (subsys), (msg), (label), (s),         \
+                                       __FILE__, __LINE__);                                                            \
     } while (0)
 
 #define KLOG_ERROR_AS(area_, subsys, msg, label, s)                                                                    \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::core::LogAWithString(::duetos::core::LogLevel::Error, (area_), (subsys), (msg), (label), (s));       \
+        ::duetos::core::LogAWithString(::duetos::core::LogLevel::Error, (area_), (subsys), (msg), (label), (s),        \
+                                       __FILE__, __LINE__);                                                            \
     } while (0)

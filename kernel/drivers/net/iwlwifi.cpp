@@ -175,7 +175,11 @@ bool IwlwifiBringUp(NicInfo& n)
     KLOG_TRACE_SCOPE("drivers/net/iwlwifi", "BringUp");
     if (n.mmio_virt == nullptr)
     {
-        arch::SerialWrite("[iwlwifi] no MMIO BAR — skipping\n");
+        // No MMIO BAR means the PCI enumerator didn't (or couldn't)
+        // map BAR0 — route through klog so the ring buffer carries
+        // the bring-up failure for the panic dump. Raw serial alone
+        // was invisible to dmesg-style replay.
+        KLOG_WARN("drivers/net/iwlwifi", "no MMIO BAR — skipping");
         return false;
     }
     if (n.driver_online)
@@ -196,9 +200,13 @@ bool IwlwifiBringUp(NicInfo& n)
         wdiag::RecordErr(wdiag::Layer::Driver, "iwl-dead", static_cast<u32>(duetos::core::ErrorCode::IoError), bdf,
                          n.device_id, hw_rev);
         duetos::core::CleanroomTraceRecord("iwlwifi", "dead", bdf, n.device_id, hw_rev);
-        arch::SerialWrite("[iwlwifi] chip not responsive (hw_rev=");
-        arch::SerialWriteHex(hw_rev);
-        arch::SerialWrite(") — leaving in probe-only state\n");
+        // Chip reads back all-ones or all-zeros: BAR is unmapped,
+        // the device is in deep-sleep without a wake handshake, or
+        // it's a hardware fault. Either way we can't proceed.
+        // Route through klog (with the hw_rev we observed) so the
+        // ring buffer captures it; the panic dump replay will then
+        // include the dead-chip line + its source location.
+        KLOG_ERROR_V("drivers/net/iwlwifi", "chip not responsive — leaving in probe-only state", hw_rev);
         return false;
     }
 
@@ -286,8 +294,13 @@ bool IwlwifiBringUp(NicInfo& n)
         }
         else
         {
-            arch::SerialWrite("[iwlwifi] firmware blob found but TLV parse failed — "
-                              "marking Incompatible\n");
+            // FW blob loaded but the TLV header didn't parse: either
+            // wrong firmware for this chip family, truncated file, or
+            // a vendor-format we don't recognise. Captures the blob
+            // size in the klog value field so the operator can sanity-
+            // check against the expected microcode size.
+            KLOG_ERROR_V("drivers/net/iwlwifi",
+                         "firmware blob found but TLV parse failed — marking Incompatible (size)", fw.value().size);
             n.firmware_pending = true;
             n.wireless_fw_state = NicInfo::WirelessFwState::Incompatible;
             wdiag::RecordErr(wdiag::Layer::Driver, "iwl-fw-parse", static_cast<u32>(duetos::core::ErrorCode::Corrupt),

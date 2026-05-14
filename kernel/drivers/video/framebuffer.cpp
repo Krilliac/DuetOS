@@ -1,6 +1,7 @@
 #include "drivers/video/framebuffer.h"
 
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/multiboot2.h"
 #include "mm/page.h"
@@ -268,7 +269,12 @@ bool FramebufferRebind(u64 phys, u32 width, u32 height, u32 pitch, u8 bpp)
     void* virt = mm::MapMmio(phys, bytes);
     if (virt == nullptr)
     {
-        SerialWrite("[video/fb] rebind MapMmio failed — MMIO arena exhausted?\n");
+        // MMIO arena (the kernel's MapMmio reservation pool) is
+        // saturated — typically means a driver leaked a region or
+        // we reserved smaller than the framebuffer needs. Klog
+        // captures the byte count so a post-mortem can sanity-
+        // check against the arena cap.
+        KLOG_ERROR_V("drivers/video/fb", "rebind MapMmio failed — MMIO arena exhausted? (bytes)", bytes);
         return false;
     }
     g_info.virt = virt;

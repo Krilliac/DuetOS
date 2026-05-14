@@ -1,6 +1,7 @@
 #include "drivers/video/wallpaper.h"
 
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/svg.h"
 #include "drivers/video/theme.h"
@@ -266,9 +267,12 @@ void InitSvgImage(SvgImage& img, const u8* bytes, u32 size, SvgShape* shape_buf,
     img.max_path_segments = max_segs;
     if (!SvgParse(bytes, size, &img))
     {
-        arch::SerialWrite("[video/wallpaper] SVG parse failed: ");
-        arch::SerialWrite(tag);
-        arch::SerialWrite("\n");
+        // SVG decoder rejected the blob — either truncated /
+        // malformed input from an asset bake step regression, or
+        // a feature our parser doesn't support. Surface via klog
+        // with the asset tag so a regression in the wallpaper
+        // bake pipeline is visible in dmesg.
+        KLOG_WARN_S("drivers/video/wallpaper", "SVG parse failed", "tag", tag);
         img.shape_count = 0;
     }
 }

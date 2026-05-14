@@ -4,6 +4,7 @@
 #include "crypto/hmac.h"
 #include "crypto/sha1.h"
 #include "crypto/sha256.h"
+#include "log/klog.h"
 
 namespace duetos::crypto
 {
@@ -46,9 +47,15 @@ void Pbkdf2HmacSha1(const u8* password, u32 password_len, const u8* salt, u32 sa
         // Build salt || INT(block).
         u8 work[256]; // bounded — WPA2 salts are SSIDs, ≤ 32 bytes.
         // Salts longer than 252 bytes aren't a real-world concern
-        // here; bail safely if so.
+        // here; bail safely if so. Once-warn so a buggy caller
+        // (or a future protocol that legitimately wants longer
+        // salts) shows up in dmesg instead of derived keys
+        // silently differing from the spec-mandated output.
         if (salt_len > 252)
+        {
+            KLOG_ONCE_WARN_V("crypto/pbkdf2", "salt_len exceeds 252 — derivation aborted (len)", salt_len);
             return;
+        }
         for (u32 i = 0; i < salt_len; ++i)
             work[i] = salt[i];
         work[salt_len] = static_cast<u8>((block >> 24) & 0xFFu);

@@ -159,6 +159,12 @@ bool BringUpSlot(const AthHtcUsbId& match, u8 slot_id, AthHtcAdapter& adapter)
     duetos::core::FwRelease(fw.value());
     if (!up.has_value() || !ur.ok)
     {
+        // Firmware upload bailed mid-way — the stage name lives in
+        // the existing serial dump; klog gets the failed-stage enum
+        // value so a panic dump replay can identify which upload
+        // phase the device rejected.
+        KLOG_ERROR_2V("drivers/net/ath9k_htc", "firmware upload failed", "stage", static_cast<u64>(ur.failed_at),
+                      "chunks_sent", static_cast<u64>(ur.chunks_sent));
         arch::SerialWrite("[ath9k-htc] upload failed at stage=");
         arch::SerialWrite(AthHtcUploadStageName(ur.failed_at));
         arch::SerialWrite(" sent=");

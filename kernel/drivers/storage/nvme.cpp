@@ -356,11 +356,17 @@ bool QueueInit(Queue& q, u32 entries, u32 id)
     const mm::PhysAddr sq_phys = AllocZeroedPage();
     if (sq_phys == 0)
     {
+        // OOM during NVMe queue creation — admin or I/O queue can't
+        // come online without backing pages. Existing `core::Log`
+        // call above for the entries-exceed-page case set the
+        // pattern; route this OOM path through it too.
+        KLOG_ERROR("drivers/nvme", "submission queue page allocation failed");
         return false;
     }
     const mm::PhysAddr cq_phys = AllocZeroedPage();
     if (cq_phys == 0)
     {
+        KLOG_ERROR("drivers/nvme", "completion queue page allocation failed");
         mm::FreeFrame(sq_phys);
         return false;
     }
@@ -591,6 +597,11 @@ bool IdentifyController()
     const mm::PhysAddr buf = AllocZeroedPage();
     if (buf == 0)
     {
+        // No backing page for the IDENTIFY data buffer — driver
+        // can't continue without controller metadata (LBA size,
+        // namespace count, vendor capabilities). Surface via klog
+        // so a panic-time replay carries the OOM cause.
+        KLOG_ERROR("drivers/nvme", "IDENTIFY buffer page allocation failed");
         return false;
     }
     SqEntry e{};

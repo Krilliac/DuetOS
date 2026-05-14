@@ -86,7 +86,11 @@ void WalkRootDir(Volume& v)
     const i32 rc = drivers::storage::BlockDeviceRead(v.block_handle, root_sector, sectors_to_read, g_dir_scratch);
     if (rc < 0)
     {
-        arch::SerialWrite("[exfat]   root-dir read failed\n");
+        // BlockDeviceRead returned an error reading the root
+        // directory cluster — without it we can't enumerate any
+        // files. Surface via klog with the storage rc value so a
+        // post-mortem ties the failure back to the storage stack.
+        KLOG_ERROR_V("fs/exfat", "root-dir read failed (rc)", static_cast<u64>(rc));
         return;
     }
 

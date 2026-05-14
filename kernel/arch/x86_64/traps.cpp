@@ -46,6 +46,7 @@
 #include "diag/minidump.h"
 #include "diag/log_names.h"
 #include "core/panic.h"
+#include "log/klog.h"
 #include "util/saturating.h"
 #include "util/symbols.h"
 #include "syscall/syscall.h"
@@ -93,6 +94,35 @@ constexpr duetos::u8* g_copy_user_fault_fixup = ::__copy_user_fault_fixup;
 // registered" — the dispatcher logs and EOIs but takes no other
 // action.
 constinit IrqHandler g_irq_handlers[256] = {};
+
+// Per-vector "have we already warned about this one?" bitmap.
+// 256 bits = 4 u64. The unhandled-vector and spurious-vector
+// branches of TrapDispatch each consult their own bitmap so the
+// first occurrence of a stray IRQ lands in the klog ring buffer
+// (and thus in the crash dump) while subsequent occurrences from
+// the same vector are dropped silently — a chattering device that
+// fires unhandled at 10 kHz used to flood raw serial at
+// SerialWrite latency and bypass the ring entirely; now we capture
+// it once per vector, per category, and move on.
+constinit u64 g_unhandled_vector_warned[4] = {};
+constinit u64 g_spurious_vector_warned[4] = {};
+
+// Test-and-set a per-vector "already warned" bit. Returns true on
+// FIRST observation (caller should log), false on every subsequent
+// observation. Strictly per-CPU correctness is not required — at
+// most one extra log per vector if two CPUs race the same vector's
+// first miss, which is fine.
+static inline bool ClaimVectorWarnSlot(u64 (&bitmap)[4], u8 vector)
+{
+    const u32 word = vector >> 6; // /64
+    const u64 bit = 1ull << (vector & 63);
+    if ((bitmap[word] & bit) != 0)
+    {
+        return false;
+    }
+    bitmap[word] |= bit;
+    return true;
+}
 
 // Per-vector cumulative handler-invocation count. Stored per-CPU
 // so the IRQ dispatch path (which fires hundreds of times per
@@ -519,11 +549,15 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         }
         else
         {
-            SerialWrite("[irq] unhandled vector ");
-            SerialWriteHex(frame->vector);
-            SerialWrite("(");
-            SerialWrite(::duetos::core::IdtVectorName(frame->vector));
-            SerialWrite(")\n");
+            // First time we see this unhandled vector: route through
+            // klog so it shows up in the ring buffer + any future
+            // crash dump. Subsequent fires from the same vector are
+            // dropped — a chattering device used to flood raw serial
+            // here at handler-dispatch latency.
+            if (ClaimVectorWarnSlot(g_unhandled_vector_warned, static_cast<u8>(frame->vector)))
+            {
+                KLOG_WARN_V("arch/traps", "unhandled IRQ vector", frame->vector);
+            }
         }
         return;
     }
@@ -550,13 +584,23 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // its own handler installed via IrqInstall.
     if (frame->vector >= 48 && frame->vector < 256)
     {
-        SerialWrite("[idt] spurious vector ");
-        SerialWriteHex(frame->vector);
-        SerialWrite(" rip=");
-        duetos::core::WriteAddressWithSymbol(frame->rip);
-        SerialWrite(" cs=");
-        SerialWriteHex(frame->cs);
-        SerialWrite("\n");
+        // First time we see this spurious vector: emit the rich
+        // serial diagnostic (with RIP symbol + CS) AND drop a
+        // dedup-ed klog WARN so the ring buffer carries the event.
+        // A stray-IRQ storm from a chattering device used to write
+        // ~80 bytes per fire to raw serial; the per-vector once
+        // bitmap caps the cost at one trace per (vector, category).
+        if (ClaimVectorWarnSlot(g_spurious_vector_warned, static_cast<u8>(frame->vector)))
+        {
+            SerialWrite("[idt] spurious vector ");
+            SerialWriteHex(frame->vector);
+            SerialWrite(" rip=");
+            duetos::core::WriteAddressWithSymbol(frame->rip);
+            SerialWrite(" cs=");
+            SerialWriteHex(frame->cs);
+            SerialWrite("\n");
+            KLOG_WARN_V("arch/traps", "spurious IDT vector", frame->vector);
+        }
         return;
     }
 
@@ -1195,10 +1239,23 @@ void IrqInstall(u8 vector, IrqHandler handler)
 {
     if (!IsDispatchedVector(vector))
     {
-        SerialWrite("[irq] IrqInstall: vector out of range ");
-        SerialWriteHex(vector);
-        SerialWrite("\n");
-        Halt();
+        // A caller passing an OOB vector is a kernel bug — there is
+        // no recovery path that produces a working device. The old
+        // shape here raw-serialled the vector then bare-Halt()ed,
+        // bypassing klog and the panic dump entirely so a
+        // post-mortem only ever saw the four-line trailer. Route
+        // through the full panic path so the crash dump captures
+        // the offending vector, the call site (via backtrace), and
+        // the per-CPU state.
+        ::duetos::core::PanicWithValue("arch/traps", "IrqInstall: vector out of range", vector);
+    }
+    if (handler == nullptr)
+    {
+        // A null handler would compile, then null-deref the first
+        // time the IRQ fires — far from the registration site. Catch
+        // it at registration so the panic frame points at the buggy
+        // driver rather than at TrapDispatch.
+        ::duetos::core::PanicWithValue("arch/traps", "IrqInstall: null handler", vector);
     }
     g_irq_handlers[vector] = handler;
 }

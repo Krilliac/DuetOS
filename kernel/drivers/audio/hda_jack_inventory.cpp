@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "log/klog.h"
 #include "sync/spinlock.h"
 
 namespace duetos::drivers::audio::hda
@@ -88,6 +89,13 @@ bool HdaJackInventoryRecord(u8 codec_slot, u8 pin_node, u32 config_default_raw)
     }
 
     duetos::sync::SpinLockRelease(g_inv_lock, flags);
+    // Reached end of the records[] array without finding a free or
+    // matching slot — the jack inventory is saturated. The codec
+    // discovery walks the pin nodes one-shot at boot, so a real
+    // overflow signals either a board with more pins than we
+    // sized for OR a duplicate-registration bug. Either way it's
+    // worth a one-time warn pointing at the offending codec.
+    KLOG_ONCE_WARN_V("drivers/audio/hda", "jack inventory full — pin registration dropped (codec)", codec_slot);
     return false;
 }
 

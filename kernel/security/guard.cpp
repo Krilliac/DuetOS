@@ -491,7 +491,12 @@ void AppendAllowedHash(const u8 h[32])
 {
     if (g_allowed_count >= kMaxAllowed)
     {
-        arch::SerialWrite("[guard] allowlist full (256 entries); dropping new entry\n");
+        // Code-image allowlist saturated — subsequent additions are
+        // dropped, which means newly-baked binaries won't load
+        // until something is removed. Route through klog (once)
+        // so the saturation appears in dmesg + the panic dump
+        // replay, not just the boot-only serial line.
+        KLOG_ONCE_WARN_V("security/guard", "allowlist full — dropping new entry (cap)", kMaxAllowed);
         return;
     }
     for (u32 i = 0; i < 32; ++i)

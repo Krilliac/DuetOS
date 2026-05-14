@@ -156,7 +156,15 @@ i32 SectionCreate(u64 size_bytes, u32 page_protect)
 void SectionRetain(u32 idx)
 {
     if (idx >= kSectionPoolCap)
+    {
+        // OOB handle index — caller minted the handle outside the
+        // section pool or a Win32 thunk corrupted it before reaching
+        // us. Log once per call site so the first occurrence pins
+        // the buggy caller, then drop the retain so the section
+        // pool doesn't run a phantom refcount.
+        KLOG_ONCE_WARN_V("subsystems/win32/section", "SectionRetain idx out of range", idx);
         return;
+    }
     Section& s = g_pool[idx];
     if (!s.in_use)
         return;
@@ -166,7 +174,10 @@ void SectionRetain(u32 idx)
 void SectionRelease(u32 idx)
 {
     if (idx >= kSectionPoolCap)
+    {
+        KLOG_ONCE_WARN_V("subsystems/win32/section", "SectionRelease idx out of range", idx);
         return;
+    }
     Section& s = g_pool[idx];
     if (!s.in_use)
         return;

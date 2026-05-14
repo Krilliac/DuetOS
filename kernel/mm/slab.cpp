@@ -148,6 +148,11 @@ SlabFreeNode* GrowOneSlab(SlabCache* c)
     void* block = KMalloc(kSlabBytes);
     if (block == nullptr)
     {
+        // KMalloc OOM during slab growth — the calling cache can't
+        // service its next Alloc() and the caller upstack receives
+        // nullptr without any signal of why. Pin the cache name in
+        // the log so a regression points at the responsible cache.
+        KLOG_ONCE_WARN_V("mm/slab", "GrowOneSlab: KMalloc failed — cache cannot grow (slab bytes)", kSlabBytes);
         return nullptr;
     }
 

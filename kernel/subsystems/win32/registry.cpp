@@ -238,6 +238,12 @@ i64 OpAllocateSlot(core::Process* proc, const RegKey* key)
             return static_cast<i64>(core::Process::kWin32RegistryBase + i);
         }
     }
+    // Per-process registry handle table saturated (32 slots). The
+    // Win32 thunk returns INVALID_HANDLE_VALUE upward; here we
+    // surface the first occurrence so the operator can correlate
+    // against the misbehaving process before subsequent opens
+    // start failing silently.
+    KLOG_ONCE_WARN("subsystems/win32/registry", "per-process registry handle table full");
     return -1; // table full
 }
 

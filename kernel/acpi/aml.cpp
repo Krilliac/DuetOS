@@ -721,6 +721,13 @@ void AmlNamespaceBuild()
             WalkTable(sdt, len, u8(i + 1));
     }
 
+    // Klog-side summary mirrors the rich serial dump below: gives
+    // dmesg a single high-signal line ("namespace built — N
+    // entries") plus emits the original detailed hex on serial for
+    // anyone watching at boot. KLOG_INFO_2V pins the count + cap
+    // so saturation against kMaxAmlNsEntries is grep-able from a
+    // post-mortem.
+    KLOG_INFO_2V("acpi/aml", "namespace built", "entries", g_entry_count, "cap", kMaxAmlNsEntries);
     arch::SerialWrite("[acpi/aml] namespace: ");
     arch::SerialWriteHex(g_entry_count);
     arch::SerialWrite(" entries (cap ");
@@ -748,6 +755,7 @@ void AmlNamespaceBuild()
     const u32 dropped = g_entry_count;
     g_entry_count = 0;
     g_built = false;
+    KLOG_INFO_V("acpi/aml", "namespace shutdown — dropped entries", dropped);
     arch::SerialWrite("[acpi/aml] shutdown: dropped ");
     arch::SerialWriteHex(dropped);
     arch::SerialWrite(" namespace entries\n");

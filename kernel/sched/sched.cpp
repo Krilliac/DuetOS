@@ -194,7 +194,7 @@ struct Task
     // KiB, which the kheap absorbs without notice. Kernel-only
     // tasks (idle, workers, reaper) never call TlsAlloc / Set /
     // Get and leave the array zero-initialised.
-    u64 win32_tls_slot_value[64];
+    u64 win32_tls_slot_value[kWin32TlsCap];
 
     // Linux-ABI FS.base (MSR_FS_BASE). Meaningful only for tasks
     // whose process has abi_flavor == kAbiLinux — that's where
@@ -2095,8 +2095,18 @@ u32 SetCurrentTaskWin32LastError(u32 err)
 u64 CurrentTaskTlsSlotValue(u32 idx)
 {
     Task* self = CurrentTask();
-    if (self == nullptr || idx >= 64)
+    if (self == nullptr)
     {
+        return 0;
+    }
+    if (idx >= kWin32TlsCap)
+    {
+        // Win32 thunks bake idx into the call site, so an OOB read
+        // is a shim bug — log the first occurrence so the
+        // regression surfaces in the boot log, then fall through to
+        // the documented "read 0" behaviour so the caller doesn't
+        // observe a crash + the rest of the boot proceeds.
+        KLOG_ONCE_WARN_V("sched", "TlsGetValue idx out of range", idx);
         return 0;
     }
     return self->win32_tls_slot_value[idx];
@@ -2105,8 +2115,13 @@ u64 CurrentTaskTlsSlotValue(u32 idx)
 void SetCurrentTaskTlsSlotValue(u32 idx, u64 value)
 {
     Task* self = CurrentTask();
-    if (self == nullptr || idx >= 64)
+    if (self == nullptr)
     {
+        return;
+    }
+    if (idx >= kWin32TlsCap)
+    {
+        KLOG_ONCE_WARN_V("sched", "TlsSetValue idx out of range", idx);
         return;
     }
     self->win32_tls_slot_value[idx] = value;
@@ -2130,11 +2145,23 @@ bool SchedSetAffinity(Task* t, u32 cpu_id)
 {
     if (t == nullptr)
     {
+        // SchedSetAffinity is exposed to the Win32/Linux affinity
+        // syscalls; a null Task is a kernel-side bug (ABI thunk
+        // failed to translate handle → Task*) rather than a
+        // user-mode mistake. Surface it once so the regression is
+        // visible.
+        KLOG_ONCE_WARN("sched", "SchedSetAffinity called with null task");
         return false;
     }
     const u32 online = static_cast<u32>(arch::SmpCpusOnline());
     if (cpu_id >= online)
     {
+        // Caller asked us to pin to a CPU that doesn't exist on
+        // this box. Either the user passed a bad mask (their bug,
+        // returned via the boolean) OR the thunk advertised the
+        // kernel's CPU count incorrectly (our bug). Log once with
+        // the offending id so a later audit can tell the two apart.
+        KLOG_ONCE_WARN_V("sched", "SchedSetAffinity cpu_id out of range", cpu_id);
         return false;
     }
     sync::SpinLockGuard guard(g_sched_lock);

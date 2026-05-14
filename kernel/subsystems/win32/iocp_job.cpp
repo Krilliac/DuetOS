@@ -39,6 +39,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "log/klog.h"
 #include "mm/paging.h"
 #include "proc/process.h"
 #include "sched/sched.h"
@@ -180,7 +181,15 @@ i64 SysIocpCreate()
 i64 SysIocpSet(u64 handle, u64 completion_key, u64 apc_context, u64 status, u64 information)
 {
     if (handle < kIocpHandleBase || handle >= kIocpHandleBase + kIocpPoolCap)
+    {
+        // First user-mode IOCP-handle escape lands in the boot
+        // log so a regression in the Win32 thunk's handle-mint
+        // path is visible. Subsequent fires from any user task
+        // are dropped (the user already gets STATUS_INVALID_HANDLE
+        // via the -1 return).
+        KLOG_ONCE_WARN_V("subsystems/win32/iocp", "SysIocpSet handle out of range", handle);
         return -1;
+    }
     const u32 idx = static_cast<u32>(handle - kIocpHandleBase);
     arch::Cli();
     IocpPort& p = g_iocp_pool[idx];
@@ -214,7 +223,10 @@ i64 SysIocpSet(u64 handle, u64 completion_key, u64 apc_context, u64 status, u64 
 i64 SysIocpRemove(u64 handle, u64 user_key, u64 user_apc, u64 user_iosb, u64 timeout_ms)
 {
     if (handle < kIocpHandleBase || handle >= kIocpHandleBase + kIocpPoolCap)
+    {
+        KLOG_ONCE_WARN_V("subsystems/win32/iocp", "SysIocpRemove handle out of range", handle);
         return -1;
+    }
     const u32 idx = static_cast<u32>(handle - kIocpHandleBase);
     IocpPort& p = g_iocp_pool[idx];
     arch::Cli();
@@ -257,7 +269,10 @@ i64 SysIocpRemove(u64 handle, u64 user_key, u64 user_apc, u64 user_iosb, u64 tim
 i64 SysIocpClose(u64 handle)
 {
     if (handle < kIocpHandleBase || handle >= kIocpHandleBase + kIocpPoolCap)
+    {
+        KLOG_ONCE_WARN_V("subsystems/win32/iocp", "SysIocpClose handle out of range", handle);
         return -1;
+    }
     const u32 idx = static_cast<u32>(handle - kIocpHandleBase);
     arch::Cli();
     IocpPort& p = g_iocp_pool[idx];
@@ -303,7 +318,10 @@ i64 SysJobCreate()
 i64 SysJobAssign(u64 job_handle, u64 process_handle)
 {
     if (job_handle < kJobHandleBase || job_handle >= kJobHandleBase + kJobPoolCap)
+    {
+        KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobAssign job_handle out of range", job_handle);
         return -1;
+    }
     const u32 idx = static_cast<u32>(job_handle - kJobHandleBase);
     core::Process* caller = core::CurrentProcess();
     if (caller == nullptr)
@@ -415,7 +433,10 @@ i64 SysJobTerminate(u64 job_handle, u64 exit_code)
 {
     (void)exit_code;
     if (job_handle < kJobHandleBase || job_handle >= kJobHandleBase + kJobPoolCap)
+    {
+        KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobTerminate job_handle out of range", job_handle);
         return -1;
+    }
     const u32 idx = static_cast<u32>(job_handle - kJobHandleBase);
     arch::Cli();
     JobObject& j = g_job_pool[idx];
@@ -449,7 +470,10 @@ i64 SysJobTerminate(u64 job_handle, u64 exit_code)
 i64 SysJobQuery(u64 job_handle, u64 info_class, u64 user_buf, u64 buf_len)
 {
     if (job_handle < kJobHandleBase || job_handle >= kJobHandleBase + kJobPoolCap)
+    {
+        KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobQuery job_handle out of range", job_handle);
         return -1;
+    }
     const u32 idx = static_cast<u32>(job_handle - kJobHandleBase);
     arch::Cli();
     JobObject& j = g_job_pool[idx];
@@ -524,7 +548,10 @@ i64 SysJobQuery(u64 job_handle, u64 info_class, u64 user_buf, u64 buf_len)
 i64 SysJobClose(u64 job_handle)
 {
     if (job_handle < kJobHandleBase || job_handle >= kJobHandleBase + kJobPoolCap)
+    {
+        KLOG_ONCE_WARN_V("subsystems/win32/job", "SysJobClose job_handle out of range", job_handle);
         return -1;
+    }
     const u32 idx = static_cast<u32>(job_handle - kJobHandleBase);
     arch::Cli();
     JobObject& j = g_job_pool[idx];
