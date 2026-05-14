@@ -643,6 +643,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         if (idx == Process::kWin32ProcessCap)
         {
+            // No free slot — caller's per-process handle table is
+            // saturated. Subsequent OpenProcess calls will keep
+            // failing until something closes; surface the first
+            // occurrence so an operator can correlate against the
+            // misbehaving Win32 app instead of debugging a silent
+            // "OpenProcess returns 0" report from user mode.
+            KLOG_ONCE_WARN("syscall", "OpenProcess: per-process Win32 handle table full");
             frame->rax = 0; // table full
             return;
         }

@@ -2145,11 +2145,23 @@ bool SchedSetAffinity(Task* t, u32 cpu_id)
 {
     if (t == nullptr)
     {
+        // SchedSetAffinity is exposed to the Win32/Linux affinity
+        // syscalls; a null Task is a kernel-side bug (ABI thunk
+        // failed to translate handle → Task*) rather than a
+        // user-mode mistake. Surface it once so the regression is
+        // visible.
+        KLOG_ONCE_WARN("sched", "SchedSetAffinity called with null task");
         return false;
     }
     const u32 online = static_cast<u32>(arch::SmpCpusOnline());
     if (cpu_id >= online)
     {
+        // Caller asked us to pin to a CPU that doesn't exist on
+        // this box. Either the user passed a bad mask (their bug,
+        // returned via the boolean) OR the thunk advertised the
+        // kernel's CPU count incorrectly (our bug). Log once with
+        // the offending id so a later audit can tell the two apart.
+        KLOG_ONCE_WARN_V("sched", "SchedSetAffinity cpu_id out of range", cpu_id);
         return false;
     }
     sync::SpinLockGuard guard(g_sched_lock);
