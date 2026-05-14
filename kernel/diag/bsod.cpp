@@ -30,7 +30,6 @@ constexpr u32 kInkWhite = 0x00FFFFFFu;   // primary text
 constexpr u32 kInkPale = 0x00C8D0E0u;    // secondary text (registers, logs)
 
 constexpr u32 kGlyphW = 8;
-constexpr u32 kGlyphH = 8;
 constexpr u32 kLineH = 12;
 constexpr u32 kPanelPad = 32;
 

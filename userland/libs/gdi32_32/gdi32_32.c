@@ -263,6 +263,7 @@ __declspec(dllexport) int __stdcall DrawTextA(HDC dc, const char* s, int n, void
 
 __declspec(dllexport) int __stdcall DrawTextW(HDC dc, const wchar_t16* s, int n, void* rect, UINT fmt)
 {
+    (void)s;
     return DrawTextA(dc, (const char*)0, n, rect, fmt);
 }
 
