@@ -72,6 +72,7 @@
 #include "generated_kernel32_32_dll.h"
 #include "generated_kernel32_dll.h"
 #include "generated_msvcrt_32_dll.h"
+#include "generated_pe32_miss_pe.h"
 #include "generated_pe32_rich_pe.h"
 #include "generated_shell32_32_dll.h"
 #include "generated_shlwapi_32_dll.h"
@@ -609,9 +610,11 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     if (proc->user_is_pe32)
     {
         // PE32 (i386) task: enter compat mode via the 32-bit user
-        // CS (0x3B). No GSBASE setup — 32-bit PEs reach the TEB
-        // through FS, not GS.
-        arch::EnterUserMode32(code_va, stack_top);
+        // CS (0x3B). FSBASE = TEB VA so fs:[0x18] (Self) /
+        // fs:[0x30] (PEB) reads in compat mode hit the TEB page
+        // the loader mapped at proc->user_gs_base. Pass via rdx
+        // (third arg).
+        arch::EnterUserMode32(code_va, stack_top, proc->user_gs_base);
     }
     arch::EnterUserModeWithGs(code_va, stack_top, proc->user_gs_base);
 }
@@ -3167,6 +3170,11 @@ void StartRing3SmokeTask()
         // each, plus "[pe32-rich] <dll> ok" runtime confirmation,
         // proving the full Layer 4 surface works end-to-end.
         SpawnPeFile("ring3-pe32-rich", fs::generated::kBinPe32RichBytes, fs::generated::kBinPe32RichBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // pe32_miss — calls an unresolved Win32 import to validate
+        // the 32-bit Win32 thunks page. Process exits with code
+        // 0xDEAD0042 in the boot log.
+        SpawnPeFile("ring3-pe32-miss", fs::generated::kBinPe32MissBytes, fs::generated::kBinPe32MissBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         if (!emulator)
         {

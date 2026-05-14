@@ -48,3 +48,6 @@ EXPORTS
     puts
     atoi
     atol
+    _chkstk
+    __chkstk
+    _alloca_probe

@@ -496,6 +496,46 @@ else()
 endif()
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_PE32_RICH_HEADER}")
 
+# pe32_miss.exe — PE32 that calls an unresolved Win32 import to
+# validate the 32-bit Win32 thunks page. The import (user32!
+# SetWindowsHookExA) is NOT in our v0 user32_32 stubs, so the
+# ResolveImports catch-all routes the IAT slot to
+# kWin32Thunks32UnresolvedVa. The stub does SYS_EXIT(0xDEAD0042)
+# and the process destroys cleanly.
+set(DUETOS_PE32_MISS_SRC "${CMAKE_SOURCE_DIR}/userland/apps/pe32_miss/pe32_miss.c")
+set(DUETOS_PE32_MISS_EXE "${CMAKE_CURRENT_BINARY_DIR}/pe32_miss.exe")
+set(DUETOS_PE32_MISS_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_pe32_miss_pe.h")
+if(MINGW_W64_I686_GCC)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_MISS_EXE}"
+        COMMAND "${MINGW_W64_I686_GCC}"
+                -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
+                -e _mainCRTStartup -Wl,--subsystem,console -Wl,--entry,_mainCRTStartup
+                -o "${DUETOS_PE32_MISS_EXE}" "${DUETOS_PE32_MISS_SRC}"
+                -lkernel32 -luser32
+        DEPENDS "${DUETOS_PE32_MISS_SRC}"
+        COMMENT "Cross-compiling pe32_miss.exe (PE32 calling unresolved import)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_MISS_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${DUETOS_PE32_MISS_EXE}" "${DUETOS_PE32_MISS_HEADER}"
+                kBinPe32MissBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_PE32_MISS_EXE}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding pe32_miss PE"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_MISS_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                "${DUETOS_PE32_MISS_HEADER}"
+                kBinPe32MissBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Emitting pe32_miss PE stub (i686 mingw absent)"
+        VERBATIM)
+endif()
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_PE32_MISS_HEADER}")
+
 # Surface-coverage PE smoke apps. Each one is a self-contained
 # console PE (~10 KB) targeting a single Win32 API surface. Source
 # lives in userland/apps/<name>/<name>.c; CMake embeds build-tree

@@ -58,12 +58,12 @@ extern "C" [[noreturn]] void EnterUserModeThread(u64 user_rip, u64 user_rsp, u64
 // loader has mapped the image's code/stack in the low 4 GiB of the
 // process address space.
 //
-//   user_rip = 32-bit entry point (high bits ignored by CPU on pop)
-//   user_rsp = 32-bit stack top (high bits ignored)
-//
-// No GSBASE knob — 32-bit PEs use FS-relative TEB reads, which go
-// through the segment descriptor's base field rather than the MSR.
-// FSBASE setup lands with the 32-bit DLL preload slice.
-extern "C" [[noreturn]] void EnterUserMode32(u64 user_rip, u64 user_rsp);
+//   user_rip     = 32-bit entry point (high bits ignored by CPU on pop)
+//   user_rsp     = 32-bit stack top (high bits ignored)
+//   user_fs_base = TEB VA (32-bit). Set via wrmsr MSR_FS_BASE so
+//                  fs:[0x18] / fs:[0x30] reads in compat mode hit
+//                  the TEB page the PE loader mapped. Pass 0 to
+//                  leave FSBASE at the descriptor's base field (0).
+extern "C" [[noreturn]] void EnterUserMode32(u64 user_rip, u64 user_rsp, u64 user_fs_base);
 
 } // namespace duetos::arch

@@ -1448,6 +1448,19 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 SerialWriteHex(stub_va);
                 SerialWrite("\n");
             }
+            else if (h.is_pe32)
+            {
+                // PE32: via-DLL miss → 32-bit unresolved-import
+                // stub. The Win32ThunksLookupKind path is skipped
+                // because the bytes in the PE32+ thunks page are
+                // 64-bit instructions; decoding them in compat
+                // mode would trap immediately. The 32-bit stub
+                // does SYS_EXIT(0xDEAD0042) so any call to an
+                // unresolved import cleanly terminates the
+                // process with a readable signature.
+                stub_va = win32::kWin32Thunks32UnresolvedVa;
+                is_noop_stub = true;
+            }
             else if (!win32::Win32ThunksLookupKind(dll_name, fn_name, &stub_va, &is_noop_stub))
             {
                 // Unresolved import. Two flavours land here:
@@ -1825,15 +1838,15 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     SerialWriteHex(kV0StackPages);
     SerialWrite("\n");
 
-    // 4b. TEB page (64-bit Win32 PEs only). MSVC x64 CRT startup
-    //     reads gs:[0x30] for the self-pointer during __security_init
-    //     _cookie / __scrt_common_main_seh; without this page it
-    //     faults at linear 0x30. One page, RW+NX. Self-pointer
-    //     stored at offset 0x30. PE32 (i386) PEs use a different
-    //     TEB layout reached via FS, not GS — skipped here; their
-    //     TEB lands with the 32-bit DLL set port.
+    // 4b. TEB page. PE32+ (64-bit) reads via gs:[0x30] (self),
+    //     PE32 (32-bit) via fs:[0x18] (self) and fs:[0x30] (PEB).
+    //     Both variants land in the same allocated frame at
+    //     kV0TebVa with the appropriate offsets populated. The
+    //     32-bit task's FSBASE gets pointed at this VA by
+    //     EnterUserMode32 (via wrmsr) so the fs-relative reads
+    //     land here rather than at linear 0x18 / 0x30.
     u64 teb_va = 0;
-    if (!h.is_pe32 && ps == PeStatus::ImportsPresent)
+    if (ps == PeStatus::ImportsPresent)
     {
         const PhysAddr teb_frame = AllocateFrame();
         if (teb_frame == kNullFrame)
@@ -1845,14 +1858,63 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         auto* teb_direct = static_cast<u8*>(PhysToVirt(teb_frame));
         for (u64 i = 0; i < kPageSize; ++i)
             teb_direct[i] = 0;
-        // Write self-pointer (little-endian u64).
-        for (u64 b = 0; b < 8; ++b)
-            teb_direct[kTebOffSelf + b] = static_cast<u8>((kV0TebVa >> (b * 8)) & 0xFF);
+        if (!h.is_pe32)
+        {
+            // 64-bit TEB: NT_TIB.Self at offset 0x30 (u64). MSVC
+            // x64 CRT reads gs:[0x30] for the self-pointer.
+            for (u64 b = 0; b < 8; ++b)
+                teb_direct[kTebOffSelf + b] = static_cast<u8>((kV0TebVa >> (b * 8)) & 0xFF);
+        }
+        else
+        {
+            // 32-bit TEB layout differs from x64. Key fields the
+            // MSVC i386 CRT touches:
+            //   fs:[0x00]  ExceptionList (head of SEH chain). Set
+            //              to 0xFFFFFFFF (no handler) per the v0
+            //              "no SEH" stance.
+            //   fs:[0x04]  StackBase (high address). Top of the
+            //              user stack we just mapped.
+            //   fs:[0x08]  StackLimit (low address). Bottom of the
+            //              user stack.
+            //   fs:[0x18]  Self (TEB self-pointer, u32).
+            //   fs:[0x20]  ClientId.UniqueProcess (pid).
+            //   fs:[0x24]  ClientId.UniqueThread (tid).
+            //   fs:[0x30]  PEB pointer. v0 stores the TEB VA itself
+            //              so dereferences read zero (process-wide
+            //              PEB structure is a separate slice).
+            constexpr u64 kTeb32OffSelf = 0x18;
+            constexpr u64 kTeb32OffPeb = 0x30;
+            constexpr u64 kTeb32OffStackBase = 0x04;
+            constexpr u64 kTeb32OffStackLimit = 0x08;
+            constexpr u32 kSehSentinel = 0xFFFFFFFFu;
+            // ExceptionList = 0xFFFFFFFF
+            for (u64 b = 0; b < 4; ++b)
+                teb_direct[0x00 + b] = static_cast<u8>((kSehSentinel >> (b * 8)) & 0xFF);
+            // StackBase / StackLimit (low 32 bits of the user VAs).
+            const u32 stack_top32 = static_cast<u32>(kV0StackTop);
+            const u32 stack_va32 = static_cast<u32>(kV0StackVa);
+            for (u64 b = 0; b < 4; ++b)
+            {
+                teb_direct[kTeb32OffStackBase + b] = static_cast<u8>((stack_top32 >> (b * 8)) & 0xFF);
+                teb_direct[kTeb32OffStackLimit + b] = static_cast<u8>((stack_va32 >> (b * 8)) & 0xFF);
+            }
+            // Self pointer (u32) — TEB VA, low 32 bits.
+            const u32 teb_va32 = static_cast<u32>(kV0TebVa);
+            for (u64 b = 0; b < 4; ++b)
+                teb_direct[kTeb32OffSelf + b] = static_cast<u8>((teb_va32 >> (b * 8)) & 0xFF);
+            // PEB pointer (u32) — for v0 we point at the TEB itself
+            // so `fs:[0x30]` is non-NULL and dereferences land in
+            // the (mostly zero) TEB page rather than #PFing.
+            for (u64 b = 0; b < 4; ++b)
+                teb_direct[kTeb32OffPeb + b] = static_cast<u8>((teb_va32 >> (b * 8)) & 0xFF);
+        }
         AddressSpaceMapUserPage(as, kV0TebVa, teb_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
         guard.Track(kV0TebVa);
         teb_va = kV0TebVa;
         SerialWrite("[pe-load] step4b teb mapped va=");
         SerialWriteHex(teb_va);
+        if (h.is_pe32)
+            SerialWrite(" (pe32 fs-base)");
         SerialWrite("\n");
     }
 
@@ -1930,15 +1992,26 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     }
     else if (h.is_pe32 && ps == PeStatus::ImportsPresent)
     {
-        // PE32 IAT walk — no Win32 thunks page (the bytes are 64-bit
-        // code and there's no 32-bit replacement yet). Unresolved
-        // imports fall back to the catch-all noop stub, which is
-        // also 64-bit but the slot still gets a value so the PE's
-        // indirect-call site has something to dereference instead
-        // of NULL. PE32 callers that actually invoke their imports
-        // will fault visibly at the noop stub; ones whose imports
-        // resolve via the preloaded kernel32_32.dll get the real
-        // export VA and run cleanly.
+        // PE32 IAT walk + 32-bit Win32 thunks page. Unresolved
+        // imports get pointed at the i386 "SYS_EXIT(0xDEAD0042)"
+        // stub at kWin32Thunks32Va, so calling an unresolved
+        // import cleanly terminates the process instead of #PFing
+        // at the 64-bit catch-all VA (which isn't mapped for PE32).
+        const PhysAddr thunks32_frame = AllocateFrame();
+        if (thunks32_frame == kNullFrame)
+        {
+            SerialWrite("[pe-load] FAIL pe32 thunks page alloc\n");
+            KBP_PROBE(::duetos::debug::ProbeId::kPeLoaderOom);
+            return r;
+        }
+        auto* thunks32_direct = static_cast<u8*>(PhysToVirt(thunks32_frame));
+        for (u64 i = 0; i < kPageSize; ++i)
+            thunks32_direct[i] = 0;
+        win32::Win32Thunks32Populate(thunks32_direct);
+        // R-X — same W^X discipline as the 64-bit thunks page.
+        AddressSpaceMapUserPage(as, win32::kWin32Thunks32Va, thunks32_frame, kPagePresent | kPageUser);
+        guard.Track(win32::kWin32Thunks32Va);
+
         if (!ResolveImports(file, file_len, h, as, preloaded_dlls, preloaded_dll_count))
         {
             SerialWrite("[pe-load] FAIL ResolveImports (pe32)\n");

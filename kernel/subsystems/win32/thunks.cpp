@@ -641,6 +641,62 @@ void Win32ThunksPopulate(u8* dst)
         dst[i] = kThunksBytes[i];
 }
 
+// 32-bit Win32 thunks page. Single stub today — the unresolved-import
+// handler at offset 0. Encoded byte-by-byte so the layout is
+// unambiguous and matches the header's documented offsets.
+//
+// The stub is intentionally compact (13 bytes) so the page is
+// almost entirely zero; future stubs grow into the rest of the
+// page if/when we need different unresolved-import behaviours
+// (per-import-name logging, runtime DLL load attempt, etc.).
+//
+//   00: B8 42 00 AD DE   mov eax, 0xDEAD0042  ; syscall number? no — SYS_EXIT is 0,
+//                                                we put the sentinel in eax/ebx so
+//                                                a triple fault dump retains "DEAD0042"
+//   05: B8 00 00 00 00   mov eax, 0           ; SYS_EXIT
+//   0A: BB 42 00 AD DE   mov ebx, 0xDEAD0042  ; exit code = sentinel
+//   0F: CD 80            int 0x80             ; SYS_EXIT
+//   11: F4               hlt                  ; unreachable
+//
+// Note the first mov eax is overwritten on the second line; both
+// land for cleanliness (the immediate value is visible in a hex dump
+// of the page, which makes "is this stub really mapped" debuggable
+// from a panic-rip readback even before the int 0x80 fires).
+constexpr u8 kThunks32Bytes[] = {
+    /* mov eax, 0xDEAD0042 (overwritten — diagnostic-only) */
+    0xB8,
+    0x42,
+    0x00,
+    0xAD,
+    0xDE,
+    /* mov eax, 0 (SYS_EXIT) */
+    0xB8,
+    0x00,
+    0x00,
+    0x00,
+    0x00,
+    /* mov ebx, 0xDEAD0042 (exit code sentinel) */
+    0xBB,
+    0x42,
+    0x00,
+    0xAD,
+    0xDE,
+    /* int 0x80 */
+    0xCD,
+    0x80,
+    /* hlt (unreachable) */
+    0xF4,
+};
+static_assert(sizeof(kThunks32Bytes) <= 4096, "32-bit Win32 thunks fit in one page");
+
+void Win32Thunks32Populate(u8* dst)
+{
+    if (dst == nullptr)
+        return;
+    for (u64 i = 0; i < sizeof(kThunks32Bytes); ++i)
+        dst[i] = kThunks32Bytes[i];
+}
+
 bool Win32ThunksLookup(const char* dll, const char* func, u64* out_va)
 {
     return Win32ThunksLookupKind(dll, func, out_va, nullptr);

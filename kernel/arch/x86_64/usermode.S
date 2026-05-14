@@ -220,22 +220,19 @@ EnterUserModeThread:
  *
  *   rdi = user_eip   (32-bit entry point; high bits ignored)
  *   rsi = user_esp   (32-bit stack pointer; high bits ignored)
+ *   rdx = user_fs_base (TEB VA, 32-bit; high bits ignored. Set
+ *                        via wrmsr MSR_FS_BASE so fs:[0x18] /
+ *                        fs:[0x30] reads in compat-mode hit the
+ *                        TEB page the PE loader mapped at this
+ *                        VA. Zero leaves FSBASE at whatever the
+ *                        `mov fs, ax` descriptor load set, which
+ *                        is the descriptor's base field = 0.)
  *
  * Contract is otherwise identical to EnterUserMode:
  *   - caller mapped the code/stack pages with kPageUser
+ *   - caller mapped the TEB page (if user_fs_base != 0) with
+ *     kPageUser + kPageWritable
  *   - caller called TssSetRsp0 with the kernel-side stack top
- *
- * No swapgs / wrmsr GSBASE setup here — 32-bit Windows ABIs don't
- * use gs-relative TEB reads the way x64 PEs do (gs:[0x18]). PE32
- * code uses fs-relative reads on the TEB instead (`fs:[18h]`), and
- * those go through the standard segment-descriptor base, not the
- * MSR. The 32-bit DLL preload slice will set FSBASE via wrmsr the
- * same way EnterUserModeWithGs does for the 64-bit path.
- *
- * Layer 2 of 32-bit PE support — Layers 3+ (32-bit syscall ABI,
- * 32-bit DLL set, pointer marshalling) still required before this
- * is reachable from a real PE32 spawn path. Today's caller is the
- * pe32_smoke hand-built test PE.
  */
 .global EnterUserMode32
 .type EnterUserMode32, @function
@@ -272,6 +269,24 @@ EnterUserMode32:
     mov     es, ax
     mov     fs, ax
     mov     gs, ax
+
+    /* Set FSBASE via wrmsr if the caller asked for a non-zero TEB
+     * VA. The `mov fs, ax` above reloaded the hidden FSBASE from
+     * the user data descriptor (base=0); MSR_FS_BASE (0xC0000100)
+     * is the only way to override that to a non-zero value in
+     * long mode. Compat-mode code does `mov eax, fs:[0x18]` and
+     * the CPU computes the linear address as (FSBASE + 0x18) — so
+     * with FSBASE = TEB VA, the read lands at the TEB's
+     * NT_TIB.Self slot. Clobbers rax/rcx/rdx; rdi/rsi preserved
+     * for the iretq frame below. Skip the wrmsr if rdx == 0 (no
+     * TEB) so legacy callers don't pay the MSR write. */
+    test    rdx, rdx
+    jz      1f
+    mov     rax, rdx                /* low 32 */
+    shr     rdx, 32                 /* high 32 (will be 0 for a 32-bit VA) */
+    mov     ecx, 0xC0000100         /* MSR_FS_BASE */
+    wrmsr
+1:
 
     /* Build the iretq frame:
      *   [rsp+0]  : EIP    <- user entry point (low 32)
