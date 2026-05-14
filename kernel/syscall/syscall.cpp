@@ -107,7 +107,7 @@
 #include "diag/fix_journal.h"
 #include "diag/log_names.h"
 #include "proc/process.h"
-#include "proc/ring3_smoke.h"
+#include "proc/spawn.h"
 #include "syscall/time_syscall.h"
 
 // Defined in exceptions.S (via `ISR_NOERR 128`) — the .global label for

@@ -12,6 +12,7 @@
 #include "core/panic.h"
 #include "sync/seqlock.h"
 #include "util/result.h"
+#include "util/string.h"
 #include "util/types.h"
 
 namespace duetos::time
@@ -33,23 +34,7 @@ u32 g_registry_count = 0;
 const Clocksource* g_current = nullptr;
 sync::SeqLock g_current_lock = {};
 
-bool StrEqual(const char* a, const char* b)
-{
-    if (a == nullptr || b == nullptr)
-    {
-        return false;
-    }
-    while (*a != '\0' && *b != '\0')
-    {
-        if (*a != *b)
-        {
-            return false;
-        }
-        ++a;
-        ++b;
-    }
-    return *a == *b;
-}
+using duetos::core::StrEqual;
 
 [[noreturn]] void PanicCs(const char* what)
 {

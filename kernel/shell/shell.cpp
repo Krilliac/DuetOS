@@ -101,7 +101,6 @@
 #include "proc/process.h"
 #include "util/random.h"
 #include "power/reboot.h"
-#include "proc/ring3_smoke.h"
 #include "diag/runtime_checker.h"
 #include "shell/shell_internal.h"
 

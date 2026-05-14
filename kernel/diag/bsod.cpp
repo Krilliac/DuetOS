@@ -30,7 +30,6 @@ constexpr u32 kInkWhite = 0x00FFFFFFu;   // primary text
 constexpr u32 kInkPale = 0x00C8D0E0u;    // secondary text (registers, logs)
 
 constexpr u32 kGlyphW = 8;
-constexpr u32 kGlyphH = 8;
 constexpr u32 kLineH = 12;
 constexpr u32 kPanelPad = 32;
 
@@ -640,18 +639,10 @@ void BsodRender(const char* subsystem, const char* message, duetos::u64 rip, due
     const u32 after_flavor =
         kPanelPad + 11 * kGlyphW + DrawString(kPanelPad + 11 * kGlyphW, y, flavor, kInkPale, kBgBlue) * kGlyphW;
     DrawString(after_flavor, y, " ", kInkPale, kBgBlue);
-#if defined(DUETOS_GIT_HASH)
-    const u32 hash_chars = DrawString(after_flavor + 1 * kGlyphW, y, DUETOS_GIT_HASH, kInkPale, kBgBlue);
-#else
-    const u32 hash_chars = DrawString(after_flavor + 1 * kGlyphW, y, "?", kInkPale, kBgBlue);
-#endif
+    const u32 hash_chars = DrawString(after_flavor + 1 * kGlyphW, y, core::BuildGitHash(), kInkPale, kBgBlue);
     const u32 after_hash = after_flavor + (1 + hash_chars) * kGlyphW;
     DrawString(after_hash, y, " ", kInkPale, kBgBlue);
-#if defined(DUETOS_BUILD_DATE)
-    DrawString(after_hash + 1 * kGlyphW, y, DUETOS_BUILD_DATE, kInkPale, kBgBlue);
-#else
-    DrawString(after_hash + 1 * kGlyphW, y, "?", kInkPale, kBgBlue);
-#endif
+    DrawString(after_hash + 1 * kGlyphW, y, core::BuildDate(), kInkPale, kBgBlue);
     y += kLineH;
 
     DrawString(kPanelPad, y, "Uptime:    ", kInkPale, kBgBlue);

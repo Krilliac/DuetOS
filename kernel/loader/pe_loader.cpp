@@ -98,8 +98,6 @@ constexpr u32 kPageAlign = 4096;
 // that the C++ code still reaches into. Hand-coded so the kernel
 // stays self-contained.
 constexpr u64 kOptHeaderSizeOfHeaders = 60;
-constexpr u64 kOptHeaderNumberOfRvaAndSizes = 108;
-constexpr u64 kOptHeaderDataDirectories = 112;
 constexpr u64 kDataDirEntrySize = 8; // RVA + Size
 constexpr u64 kSectionHeaderSize = 40;
 constexpr u64 kSectionHeaderVirtualSize = 8;

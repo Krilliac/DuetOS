@@ -21,6 +21,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
+#include "util/string.h"
 
 namespace duetos::core
 {
@@ -195,22 +196,6 @@ const char* CStringAt(const u8* file, u64 file_len, u64 off)
             return reinterpret_cast<const char*>(file + off);
     }
     return nullptr;
-}
-
-// Case-sensitive strcmp with an explicit end-of-string guard.
-// No stdlib in kernel space.
-bool StrEq(const char* a, const char* b)
-{
-    if (a == nullptr || b == nullptr)
-        return a == b;
-    while (*a && *b)
-    {
-        if (*a != *b)
-            return false;
-        ++a;
-        ++b;
-    }
-    return *a == *b;
 }
 
 } // namespace
@@ -488,7 +473,7 @@ bool PeExportLookupName(const PeExports& exp, const char* name, PeExport& out)
                 const char* c = load_name(n);
                 if (c == nullptr)
                     continue;
-                if (!StrEq(c, name))
+                if (!StrEqual(c, name))
                     continue;
                 u32 eat_idx = 0;
                 if (!NameIdxToOrdinalIndex(exp, n, eat_idx))

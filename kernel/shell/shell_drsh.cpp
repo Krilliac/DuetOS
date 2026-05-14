@@ -1,6 +1,7 @@
 #include "drivers/video/console.h"
 #include "net/drsh/drsh.h"
 #include "shell/shell_internal.h"
+#include "util/string.h"
 #include "util/types.h"
 
 /*
@@ -30,42 +31,6 @@ using duetos::net::drsh::DrshStatus;
 
 namespace
 {
-
-bool StrEqLocal(const char* a, const char* b)
-{
-    while (*a != '\0' && *b != '\0')
-    {
-        if (*a != *b)
-            return false;
-        ++a;
-        ++b;
-    }
-    return *a == '\0' && *b == '\0';
-}
-
-void WriteU64Dec(u64 v)
-{
-    char buf[24];
-    u32 n = 0;
-    if (v == 0)
-    {
-        buf[n++] = '0';
-    }
-    else
-    {
-        char rev[24];
-        u32 r = 0;
-        while (v > 0 && r < sizeof(rev))
-        {
-            rev[r++] = static_cast<char>('0' + (v % 10));
-            v /= 10;
-        }
-        while (r > 0)
-            buf[n++] = rev[--r];
-    }
-    buf[n] = '\0';
-    ConsoleWrite(buf);
-}
 
 void PrintStatus()
 {
@@ -115,12 +80,12 @@ bool ParseU16(const char* s, u16* out)
 
 void CmdDrshd(u32 argc, char** argv)
 {
-    if (argc < 2 || StrEqLocal(argv[1], "status") || StrEqLocal(argv[1], "info"))
+    if (argc < 2 || StrEqual(argv[1], "status") || StrEqual(argv[1], "info"))
     {
         PrintStatus();
         return;
     }
-    if (StrEqLocal(argv[1], "passwd") || StrEqLocal(argv[1], "password"))
+    if (StrEqual(argv[1], "passwd") || StrEqual(argv[1], "password"))
     {
         if (!RequireAdmin("DRSHD"))
             return;
@@ -137,7 +102,7 @@ void CmdDrshd(u32 argc, char** argv)
         ConsoleWriteln("DRSHD: password updated");
         return;
     }
-    if (StrEqLocal(argv[1], "start"))
+    if (StrEqual(argv[1], "start"))
     {
         if (!RequireAdmin("DRSHD"))
             return;
@@ -158,7 +123,7 @@ void CmdDrshd(u32 argc, char** argv)
         ConsoleWriteln("DRSHD: listener started");
         return;
     }
-    if (StrEqLocal(argv[1], "stop"))
+    if (StrEqual(argv[1], "stop"))
     {
         if (!RequireAdmin("DRSHD"))
             return;

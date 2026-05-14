@@ -6,6 +6,7 @@
 #include "mm/kheap.h"
 #include "sched/sched.h"
 #include "shell/shell_internal.h"
+#include "util/string.h"
 #include "util/types.h"
 
 namespace duetos::core::diag
@@ -117,16 +118,6 @@ bool ParseU32(const char* s, u32* out)
     return true;
 }
 
-bool StrEq(const char* a, const char* b)
-{
-    while (*a != '\0' && *b != '\0' && *a == *b)
-    {
-        ++a;
-        ++b;
-    }
-    return *a == '\0' && *b == '\0';
-}
-
 // Run-on-its-own-task entry. We deliberately leave a serial sentinel
 // at start + end so a headless boot can grep for `[stress] start` and
 // `[stress] done`; the body emits the existing loadtest console
@@ -229,19 +220,19 @@ void StressDriverArm(const char* cmdline)
         return;
     }
 
-    if (StrEq(value, "cpu"))
+    if (StrEqual(value, "cpu"))
     {
         g_cfg.mode = Mode::Cpu;
     }
-    else if (StrEq(value, "mem"))
+    else if (StrEqual(value, "mem"))
     {
         g_cfg.mode = Mode::Mem;
     }
-    else if (StrEq(value, "mix"))
+    else if (StrEqual(value, "mix"))
     {
         g_cfg.mode = Mode::Mix;
     }
-    else if (StrEq(value, "spin"))
+    else if (StrEqual(value, "spin"))
     {
         g_cfg.mode = Mode::Spin;
     }

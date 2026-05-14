@@ -4,6 +4,7 @@
 #include "sched/sched.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "util/string.h"
 
 namespace duetos::core
 {
@@ -23,18 +24,6 @@ struct DependencyEdge
 constinit DependencyEdge g_deps[kMaxFaultDomainDeps] = {};
 constinit u32 g_dep_count = 0;
 constinit u64 g_throttle_count = 0;
-
-bool StrEq(const char* a, const char* b)
-{
-    if (a == nullptr || b == nullptr)
-        return false;
-    while (*a && *b && *a == *b)
-    {
-        ++a;
-        ++b;
-    }
-    return *a == *b;
-}
 
 // Rate-throttle decision. A domain that has restarted
 // `kRestartHistoryDepth` times within `kRestartThrottleWindowTicks`
@@ -134,7 +123,7 @@ FaultDomainId FaultDomainFind(const char* name)
 {
     for (u32 i = 0; i < g_domain_count; ++i)
     {
-        if (StrEq(g_domains[i].name, name))
+        if (StrEqual(g_domains[i].name, name))
             return i;
     }
     return kFaultDomainInvalid;

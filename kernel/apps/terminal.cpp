@@ -26,7 +26,6 @@ using duetos::drivers::video::WindowSetContentDraw;
 // FramebufferDrawChar emits 8x8 glyphs; the terminal's cell box
 // is one row of pixels taller so adjacent rows separate visually.
 constexpr u32 kGlyphW = 8;
-constexpr u32 kGlyphH = 8;
 constexpr u32 kCellW = kGlyphW;
 constexpr u32 kCellH = 10;
 constexpr u32 kPad = 4;
@@ -34,13 +33,12 @@ constexpr u32 kPad = 4;
 // SGR attribute flags packed into a single u8 per cell. We only
 // honour bits that the v0 painter can render with a monochrome
 // fg/bg pair: bold maps to a brighter ink, underline draws a
-// hline under the cell, reverse swaps ink/bg. Bit 7 marks the
-// cell as the cursor for the current frame so the painter inverts
-// it without consulting external cursor state.
+// hline under the cell, reverse swaps ink/bg. The cursor cell is
+// tracked via g_state.cur_x/cur_y + cur_visible rather than a
+// per-cell attribute bit.
 constexpr u8 kAttrBold = 1u << 0;
 constexpr u8 kAttrUnderline = 1u << 1;
 constexpr u8 kAttrReverse = 1u << 2;
-constexpr u8 kAttrCursor = 1u << 7;
 
 struct Cell
 {

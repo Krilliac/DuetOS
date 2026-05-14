@@ -12,6 +12,7 @@
 #include "fs/fat32.h"
 #include "log/klog.h"
 #include "time/timezone.h"
+#include "util/string.h"
 
 /*
  * SESSION.CFG round-trip.
@@ -60,29 +61,12 @@ constexpr u64 kPayloadCap = 2048;
 constinit char g_last_payload[kPayloadCap] = {};
 constinit u64 g_last_len = 0;
 
-// Small helpers — no <string.h> in kernel.
-
-bool StrEq(const char* a, const char* b)
-{
-    while (*a != 0 && *b != 0)
-    {
-        if (*a++ != *b++)
-        {
-            return false;
-        }
-    }
-    return *a == 0 && *b == 0;
-}
-
-u64 StrLen(const char* s)
-{
-    u64 n = 0;
-    while (s[n] != 0)
-    {
-        ++n;
-    }
-    return n;
-}
+// Pull the canonical NUL-string helpers into scope so the
+// session-restore parser code below can call them unqualified —
+// previously this TU rolled its own near-identical copies of
+// each (since retired into util/string.h).
+using duetos::core::StrEqual;
+using duetos::core::StrLen;
 
 // Append `s` to `dst[*pos]`, bounded by cap. No-op on overflow.
 void Append(char* dst, u64* pos, u64 cap, const char* s)
@@ -316,32 +300,32 @@ const char* KeyboardLayoutName(drivers::input::KeyboardLayout l)
 bool KeyboardLayoutFromName(const char* name, drivers::input::KeyboardLayout* out)
 {
     using drivers::input::KeyboardLayout;
-    if (StrEq(name, "us"))
+    if (StrEqual(name, "us"))
     {
         *out = KeyboardLayout::US;
         return true;
     }
-    if (StrEq(name, "uk"))
+    if (StrEqual(name, "uk"))
     {
         *out = KeyboardLayout::UK;
         return true;
     }
-    if (StrEq(name, "dvorak"))
+    if (StrEqual(name, "dvorak"))
     {
         *out = KeyboardLayout::Dvorak;
         return true;
     }
-    if (StrEq(name, "de"))
+    if (StrEqual(name, "de"))
     {
         *out = KeyboardLayout::DE;
         return true;
     }
-    if (StrEq(name, "fr"))
+    if (StrEqual(name, "fr"))
     {
         *out = KeyboardLayout::FR;
         return true;
     }
-    if (StrEq(name, "colemak"))
+    if (StrEqual(name, "colemak"))
     {
         *out = KeyboardLayout::Colemak;
         return true;
@@ -463,7 +447,7 @@ void FormatPayload(char* dst, u64 cap, u64* len_out)
 bool ApplyOne(const char* key, const char* val)
 {
     namespace v = drivers::video;
-    if (StrEq(key, "theme"))
+    if (StrEqual(key, "theme"))
     {
         v::ThemeId id;
         if (v::ThemeIdFromName(val, &id))
@@ -472,7 +456,7 @@ bool ApplyOne(const char* key, const char* val)
         }
         return true;
     }
-    if (StrEq(key, "mouse.dblclick"))
+    if (StrEqual(key, "mouse.dblclick"))
     {
         u32 num = 0;
         if (ParseU32(val, static_cast<u32>(StrLen(val)), &num))
@@ -481,7 +465,7 @@ bool ApplyOne(const char* key, const char* val)
         }
         return true;
     }
-    if (StrEq(key, "mouse.sens"))
+    if (StrEqual(key, "mouse.sens"))
     {
         u32 num = 0;
         if (ParseU32(val, static_cast<u32>(StrLen(val)), &num) && num <= 0xFF)
@@ -490,7 +474,7 @@ bool ApplyOne(const char* key, const char* val)
         }
         return true;
     }
-    if (StrEq(key, "kbd.rate") || StrEq(key, "kbd.delay"))
+    if (StrEqual(key, "kbd.rate") || StrEqual(key, "kbd.delay"))
     {
         u32 num = 0;
         if (!ParseU32(val, static_cast<u32>(StrLen(val)), &num))
@@ -502,18 +486,18 @@ bool ApplyOne(const char* key, const char* val)
         // two keys the parser sees first.
         u8 rate = apps::settings::KeyboardTypematicRateIdx();
         u8 delay = apps::settings::KeyboardTypematicDelayIdx();
-        if (StrEq(key, "kbd.rate") && num <= 31)
+        if (StrEqual(key, "kbd.rate") && num <= 31)
         {
             rate = static_cast<u8>(num);
         }
-        else if (StrEq(key, "kbd.delay") && num <= 3)
+        else if (StrEqual(key, "kbd.delay") && num <= 3)
         {
             delay = static_cast<u8>(num);
         }
         apps::settings::KeyboardSetTypematicIdx(rate, delay);
         return true;
     }
-    if (StrEq(key, "kbd.layout"))
+    if (StrEqual(key, "kbd.layout"))
     {
         drivers::input::KeyboardLayout l;
         if (KeyboardLayoutFromName(val, &l))
@@ -522,7 +506,7 @@ bool ApplyOne(const char* key, const char* val)
         }
         return true;
     }
-    if (StrEq(key, "sound.cues"))
+    if (StrEqual(key, "sound.cues"))
     {
         u32 num = 0;
         if (ParseU32(val, static_cast<u32>(StrLen(val)), &num))
@@ -531,7 +515,7 @@ bool ApplyOne(const char* key, const char* val)
         }
         return true;
     }
-    if (StrEq(key, "tz.minutes"))
+    if (StrEqual(key, "tz.minutes"))
     {
         i32 num = 0;
         if (ParseI32(val, static_cast<u32>(StrLen(val)), &num))
@@ -540,7 +524,7 @@ bool ApplyOne(const char* key, const char* val)
         }
         return true;
     }
-    if (StrEq(key, "calc.mem"))
+    if (StrEqual(key, "calc.mem"))
     {
         i64 num = 0;
         if (ParseI64(val, static_cast<u32>(StrLen(val)), &num))
@@ -554,7 +538,7 @@ bool ApplyOne(const char* key, const char* val)
         }
         return true;
     }
-    if (StrEq(key, "calc.memset"))
+    if (StrEqual(key, "calc.memset"))
     {
         u32 num = 0;
         if (ParseU32(val, static_cast<u32>(StrLen(val)), &num))
@@ -569,7 +553,7 @@ bool ApplyOne(const char* key, const char* val)
         }
         return true;
     }
-    if (StrEq(key, "imageview.last"))
+    if (StrEqual(key, "imageview.last"))
     {
         if (val[0] != '\0')
         {

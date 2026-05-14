@@ -880,24 +880,6 @@ void Expect(bool cond, const char* what)
     Panic("core/process", "ProcessSelfTest assertion failed");
 }
 
-bool StrEq(const char* a, const char* b)
-{
-    if (a == nullptr || b == nullptr)
-    {
-        return a == b;
-    }
-    while (*a && *b)
-    {
-        if (*a != *b)
-        {
-            return false;
-        }
-        ++a;
-        ++b;
-    }
-    return *a == *b;
-}
-
 } // namespace
 
 void ProcessSelfTest()
@@ -960,16 +942,16 @@ void ProcessSelfTest()
     }
 
     // ----- CapName: every defined cap returns a real string -----
-    Expect(StrEq(CapName(kCapNone), "<none>"), "CapName(kCapNone) == <none>");
-    Expect(StrEq(CapName(kCapSerialConsole), "SerialConsole"), "CapName(SerialConsole)");
-    Expect(StrEq(CapName(kCapFsRead), "FsRead"), "CapName(FsRead)");
-    Expect(StrEq(CapName(kCapDebug), "Debug"), "CapName(Debug)");
-    Expect(StrEq(CapName(kCapFsWrite), "FsWrite"), "CapName(FsWrite)");
-    Expect(StrEq(CapName(kCapSpawnThread), "SpawnThread"), "CapName(SpawnThread)");
-    Expect(StrEq(CapName(kCapNet), "Net"), "CapName(Net)");
-    Expect(StrEq(CapName(kCapInput), "Input"), "CapName(Input)");
-    Expect(StrEq(CapName(kCapNetAdmin), "NetAdmin"), "CapName(NetAdmin)");
-    Expect(StrEq(CapName(kCapCount), "<sentinel>"), "CapName(kCapCount) == <sentinel>");
+    Expect(StrEqual(CapName(kCapNone), "<none>"), "CapName(kCapNone) == <none>");
+    Expect(StrEqual(CapName(kCapSerialConsole), "SerialConsole"), "CapName(SerialConsole)");
+    Expect(StrEqual(CapName(kCapFsRead), "FsRead"), "CapName(FsRead)");
+    Expect(StrEqual(CapName(kCapDebug), "Debug"), "CapName(Debug)");
+    Expect(StrEqual(CapName(kCapFsWrite), "FsWrite"), "CapName(FsWrite)");
+    Expect(StrEqual(CapName(kCapSpawnThread), "SpawnThread"), "CapName(SpawnThread)");
+    Expect(StrEqual(CapName(kCapNet), "Net"), "CapName(Net)");
+    Expect(StrEqual(CapName(kCapInput), "Input"), "CapName(Input)");
+    Expect(StrEqual(CapName(kCapNetAdmin), "NetAdmin"), "CapName(NetAdmin)");
+    Expect(StrEqual(CapName(kCapCount), "<sentinel>"), "CapName(kCapCount) == <sentinel>");
 
     // Catches "added an enum value, forgot the switch arm" — every
     // entry from 1 to kCapCount must produce a non-fallback name.
@@ -977,7 +959,7 @@ void ProcessSelfTest()
     {
         const char* name = CapName(static_cast<Cap>(c));
         Expect(name != nullptr, "CapName non-null");
-        Expect(!StrEq(name, "<unknown>"), "CapName covers every enumerator");
+        Expect(!StrEqual(name, "<unknown>"), "CapName covers every enumerator");
     }
 
     // ----- ShouldLogDenial rate-limit (1st, then every 32nd) -----

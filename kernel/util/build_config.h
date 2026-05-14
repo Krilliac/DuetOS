@@ -248,6 +248,64 @@ constexpr const char* BuildFlavorName()
     }
 }
 
+// -----------------------------------------------------------------
+// Build-identity accessors — git hash + branch + subject + author
+// date + build date, baked in at CMake-configure time.
+//
+// Each one wraps the corresponding `DUETOS_GIT_*` / `DUETOS_BUILD_*`
+// macro emitted by the top-level CMakeLists.txt and falls back to a
+// `"(undefined)"` sentinel when the macro is missing (out-of-tree
+// build, stripped define, etc.) so callers can pass the result
+// straight to a string writer without re-doing the `#if defined`
+// dance. Used by the BSoD header, the About app, and the
+// `live-update version` shell command.
+// -----------------------------------------------------------------
+
+constexpr const char* BuildGitHash()
+{
+#if defined(DUETOS_GIT_HASH)
+    return DUETOS_GIT_HASH;
+#else
+    return "(undefined)";
+#endif
+}
+
+constexpr const char* BuildGitSubject()
+{
+#if defined(DUETOS_GIT_SUBJECT)
+    return DUETOS_GIT_SUBJECT;
+#else
+    return "(undefined)";
+#endif
+}
+
+constexpr const char* BuildGitBranch()
+{
+#if defined(DUETOS_GIT_BRANCH)
+    return DUETOS_GIT_BRANCH;
+#else
+    return "(undefined)";
+#endif
+}
+
+constexpr const char* BuildGitAuthorDate()
+{
+#if defined(DUETOS_GIT_AUTHOR_DATE)
+    return DUETOS_GIT_AUTHOR_DATE;
+#else
+    return "(undefined)";
+#endif
+}
+
+constexpr const char* BuildDate()
+{
+#if defined(DUETOS_BUILD_DATE)
+    return DUETOS_BUILD_DATE;
+#else
+    return "(undefined)";
+#endif
+}
+
 } // namespace duetos::core
 
 // -----------------------------------------------------------------

@@ -34,6 +34,7 @@
 #include "arch/x86_64/serial.h"
 #include "crypto/sha256.h"
 #include "log/klog.h"
+#include "util/string.h"
 #include "util/types.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
@@ -119,13 +120,8 @@ constexpr u32 kSuspiciousApiCount = sizeof(kSuspiciousApis) / sizeof(kSuspicious
 // String + hash helpers (no libc in kernel).
 // ---------------------------------------------------------------
 
-u64 StrLen(const char* s)
-{
-    u64 n = 0;
-    while (s != nullptr && s[n] != 0)
-        ++n;
-    return n;
-}
+using duetos::core::StrEqual;
+using duetos::core::StrLen;
 
 // Volatile byte-zero. Prevents clang from lowering a plain loop
 // into memset, which the freestanding kernel does not link.
@@ -158,20 +154,6 @@ void CopyReport(Report& dst, const Report& src)
     }
 }
 
-bool StrEq(const char* a, const char* b)
-{
-    if (a == b)
-        return true;
-    if (a == nullptr || b == nullptr)
-        return false;
-    for (u64 i = 0;; ++i)
-    {
-        if (a[i] != b[i])
-            return false;
-        if (a[i] == 0)
-            return true;
-    }
-}
 
 // Naive strstr equivalent for ASCII needles in a byte buffer.
 // The O(n*m) cost is bounded: needles are 15..25 chars, buffers
@@ -245,7 +227,7 @@ Verdict CheckNameDeny(const ImageDescriptor& desc, Report& r)
 {
     for (u32 i = 0; kDeniedNames[i] != nullptr; ++i)
     {
-        if (StrEq(desc.name, kDeniedNames[i]))
+        if (StrEqual(desc.name, kDeniedNames[i]))
         {
             AppendFinding(r, kFindingNameDeny, kDeniedNames[i]);
             return Verdict::Deny;

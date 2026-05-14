@@ -21,8 +21,8 @@
  * closed (e.g. mid-shell-debug). The windowed version is the
  * better discovery surface for someone seeing DuetOS for the
  * first time. They share the same reference list at compile
- * time — see `kernel/core/main.cpp::PrintShortcutHelp` for the
- * console form.
+ * time — see `kernel/core/menu_dispatch.cpp::PrintShortcutHelp`
+ * for the console form.
  *
  * Context: kernel. DrawFn runs under the compositor lock.
  */

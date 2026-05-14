@@ -27,7 +27,7 @@
 #include "subsystems/translation/translate.h"
 #include "loader/elf_loader.h"
 #include "proc/process.h"
-#include "proc/ring3_smoke.h"
+#include "proc/spawn.h"
 
 namespace duetos::core::shell::internal
 {

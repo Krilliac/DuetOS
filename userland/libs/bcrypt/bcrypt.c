@@ -8,7 +8,7 @@
  *
  * NOTE: kernel/crypto/sha256.cpp has a parallel implementation
  * for kernel-side hashing. They are kept separate intentionally —
- * userland/libs/* DLLs are freestanding (CLAUDE.md "Subsystem
+ * userland/libs/<dll> DLLs are freestanding (CLAUDE.md "Subsystem
  * isolation"), and SHA-256 is a pure function with no shared state
  * to coordinate. The "one source of truth" rule applies to
  * stateful resources (TCP, VFS, registry, window manager), not

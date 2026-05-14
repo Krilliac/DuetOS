@@ -36,6 +36,109 @@ namespace duetos::core
 /// this from real workloads.
 void StringSelfTest();
 
+/// Length of a NUL-terminated C string. NULL-safe (returns 0). The
+/// kernel can't reach for `<string.h>`'s strlen because we link
+/// freestanding; this is the one canonical replacement. Defined
+/// here because eleven separate kernel TUs used to roll their own
+/// 5-line copy — all functionally identical, varying only in
+/// return type (u32 / u64) and whether they NULL-check. This form
+/// returns `usize` and is NULL-safe so it covers every prior
+/// caller without churn.
+inline duetos::usize StrLen(const char* s)
+{
+    if (s == nullptr)
+    {
+        return 0;
+    }
+    duetos::usize n = 0;
+    while (s[n] != '\0')
+    {
+        ++n;
+    }
+    return n;
+}
+
+/// Lexicographic equality of two NUL-terminated C strings.
+/// NULL-safe: two nullptrs (or the same pointer) compare equal;
+/// one-nullptr-one-non-nullptr compares unequal. Replaces the
+/// half-dozen ad-hoc `StrEqual` / `StrEqualLocal` / `LocalStrEq`
+/// copies that used to live in `time/`, `security/`, `diag/`,
+/// `debug/`, `subsystems/graphics/`, and `proc/` — all the same
+/// loop, varying only in their NULL-handling and trailing check.
+inline bool StrEqual(const char* a, const char* b)
+{
+    if (a == b)
+    {
+        return true;
+    }
+    if (a == nullptr || b == nullptr)
+    {
+        return false;
+    }
+    while (*a != '\0' && *b != '\0')
+    {
+        if (*a != *b)
+        {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
+/// Append a NUL-terminated source string to `dst` at offset
+/// `*pos`, advancing `*pos` past the last byte written. Bounded
+/// by `cap`: never writes index `cap-1` or beyond, so the caller
+/// can always NUL-terminate at `dst[*pos]` after a sequence of
+/// appends. NULL `s` is a no-op. Replaces the byte-identical
+/// `AppendStr` copies in `apps/about` and `apps/sysmon`; other
+/// variants (`u64` offset, arg-order-swap) stay TU-local because
+/// their callers' offset types or argument-order conventions
+/// don't match this canonical form.
+inline void AppendStr(char* dst, duetos::u32* pos, duetos::u32 cap, const char* s)
+{
+    if (s == nullptr)
+    {
+        return;
+    }
+    for (duetos::u32 i = 0; s[i] != '\0' && *pos + 1 < cap; ++i)
+    {
+        dst[(*pos)++] = s[i];
+    }
+}
+
+/// ASCII case-insensitive twin of `StrEqual`. Maps any 'A'..'Z'
+/// byte to its lowercase counterpart before comparing; everything
+/// else is byte-equal. NULL-safe with the same semantics as
+/// `StrEqual`. Replaces the three ad-hoc `StrEqCi` / `StrEqI`
+/// copies that used to live in `drivers/video/theme`,
+/// `drivers/video/start_menu_apps`, and `apps/browser`. Pure
+/// ASCII because the kernel does no locale-aware folding —
+/// theme names, /APPS shortcuts, and URL hosts are all ASCII.
+inline bool StrEqualCaseInsensitive(const char* a, const char* b)
+{
+    if (a == b)
+    {
+        return true;
+    }
+    if (a == nullptr || b == nullptr)
+    {
+        return false;
+    }
+    auto lower = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c; };
+    while (*a != '\0' && *b != '\0')
+    {
+        if (lower(*a) != lower(*b))
+        {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
 /// Out-of-line panic helper for the bounds-checked wrappers. The
 /// callers below invoke this when `__builtin_object_size` reports
 /// a known destination size and `n` exceeds it. Out-of-line so

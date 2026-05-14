@@ -146,12 +146,18 @@ if(GIT_FOUND)
             ERROR_QUIET
         )
         if(NOT "${_duetos_git_subject_raw}" STREQUAL "")
-            # Drop characters that break a C string literal: backslash,
-            # double quote, and anything outside the printable ASCII
-            # band. Commit subjects routinely contain quotes / em-dashes
-            # so this is not defensive code, it's required.
+            # Sanitise the subject so it survives both the C string
+            # literal AND the compiler command line. Commit subjects
+            # routinely contain quotes / em-dashes / PR refs so this
+            # is not defensive code, it's required.
+            #   \  "  non-printable  break the C string literal
+            #   #  is silently dropped by CMake when passed via
+            #       add_compile_definitions (many compilers treat #
+            #       as a comment on -D args), and a merge-commit
+            #       subject like "Merge pull request #240" trips it.
             string(REPLACE "\\" "/" _duetos_git_subject_raw "${_duetos_git_subject_raw}")
             string(REPLACE "\"" "'" _duetos_git_subject_raw "${_duetos_git_subject_raw}")
+            string(REPLACE "#" "" _duetos_git_subject_raw "${_duetos_git_subject_raw}")
             string(REGEX REPLACE "[^ -~]" "?" _duetos_git_subject_raw "${_duetos_git_subject_raw}")
             # Cap the subject at 120 chars so a runaway commit message
             # can't blow past the kernel's serial-line width.
@@ -171,6 +177,7 @@ if(GIT_FOUND)
         )
         if(NOT "${_duetos_git_branch_raw}" STREQUAL "")
             string(REPLACE "\"" "'" _duetos_git_branch_raw "${_duetos_git_branch_raw}")
+            string(REPLACE "#" "" _duetos_git_branch_raw "${_duetos_git_branch_raw}")
             set(_duetos_git_branch "${_duetos_git_branch_raw}")
         endif()
         execute_process(

@@ -5,6 +5,7 @@
 #include "drivers/video/theme.h"
 #include "mm/kheap.h"
 #include "time/tick.h"
+#include "util/string.h"
 
 namespace duetos::apps::sysmon
 {
@@ -142,15 +143,7 @@ void AppendU64(char* dst, u32* pos, u32 cap, u64 v)
     }
 }
 
-void AppendStr(char* dst, u32* pos, u32 cap, const char* s)
-{
-    if (s == nullptr)
-        return;
-    for (u32 i = 0; s[i] != '\0' && *pos + 1 < cap; ++i)
-    {
-        dst[(*pos)++] = s[i];
-    }
-}
+using duetos::core::AppendStr;
 
 void AppendBytes(char* dst, u32* pos, u32 cap, u64 bytes)
 {

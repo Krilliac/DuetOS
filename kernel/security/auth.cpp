@@ -6,6 +6,7 @@
 #include "security/password_hash.h"
 #include "security/persistence.h"
 #include "time/timekeeper.h"
+#include "util/string.h"
 
 namespace duetos::core
 {
@@ -64,34 +65,7 @@ constinit duetos::security::PasswordHashRecordV2 g_decoy_record = {
     {{duetos::security::kPasswordDefaultIterations, {0, 0, 0}}},
 };
 
-u32 StrLen(const char* s)
-{
-    u32 n = 0;
-    while (s != nullptr && s[n] != '\0')
-    {
-        ++n;
-    }
-    return n;
-}
-
-bool StrEq(const char* a, const char* b)
-{
-    if (a == nullptr || b == nullptr)
-    {
-        return false;
-    }
-    for (u32 i = 0;; ++i)
-    {
-        if (a[i] != b[i])
-        {
-            return false;
-        }
-        if (a[i] == '\0')
-        {
-            return true;
-        }
-    }
-}
+// StrLen / StrEqual moved to util/string.h.
 
 void StrCopy(char* dst, const char* src, u32 cap)
 {
@@ -243,7 +217,7 @@ Account* FindAccount(const char* username)
     }
     for (u32 i = 0; i < kAuthMaxAccounts; ++i)
     {
-        if (g_accounts[i].in_use && StrEq(g_accounts[i].name, username))
+        if (g_accounts[i].in_use && StrEqual(g_accounts[i].name, username))
         {
             return &g_accounts[i];
         }
@@ -474,7 +448,7 @@ bool AuthDeleteUser(const char* username)
     {
         return false;
     }
-    const bool was_session_user = g_session.active && StrEq(g_session.name, a->name);
+    const bool was_session_user = g_session.active && StrEqual(g_session.name, a->name);
     char name_copy[kAuthNameMax];
     StrCopy(name_copy, a->name, kAuthNameMax);
     const AuthRole role = a->role;

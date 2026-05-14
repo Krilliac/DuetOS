@@ -27,7 +27,7 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "proc/process.h"
-#include "proc/ring3_smoke.h"
+#include "proc/spawn.h"
 #include "generated_synet_elf.h"
 #include "generated_synfs_elf.h"
 #include "generated_synfull_elf.h"
