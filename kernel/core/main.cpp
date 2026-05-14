@@ -48,6 +48,7 @@
 #include "util/datetime.h"
 #include "util/deflate.h"
 #include "util/gzip.h"
+#include "util/jpeg.h"
 #include "util/png.h"
 #include "util/tga.h"
 #include "util/types.h"
@@ -3080,6 +3081,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::DeflateSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::GzipZlibSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::PngSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::JpegDecoderSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::Adler32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha256SelfTest());
