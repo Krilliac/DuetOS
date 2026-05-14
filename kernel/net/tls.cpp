@@ -385,6 +385,85 @@ bool Pkcs1V15Type2Pad(const crypto::RsaPublicKey& k, const u8* msg, u32 msg_len,
 }
 
 // ---------------------------------------------------------------------------
+// Transcript hash + Finished message
+// ---------------------------------------------------------------------------
+
+void TranscriptInit(Transcript* t)
+{
+    if (t == nullptr)
+        return;
+    crypto::Sha256Init(t->ctx);
+}
+
+void TranscriptUpdate(Transcript* t, const u8* msg, u32 len)
+{
+    if (t == nullptr || msg == nullptr || len == 0)
+        return;
+    crypto::Sha256Update(t->ctx, msg, len);
+}
+
+void TranscriptSnapshot(const Transcript* t, u8 out[32])
+{
+    if (t == nullptr || out == nullptr)
+        return;
+    // SHA-256 final is destructive — clone the running ctx
+    // first so the snapshot doesn't disturb future updates.
+    crypto::Sha256Ctx clone = t->ctx;
+    crypto::Sha256Final(clone, out);
+}
+
+u32 TlsBuildEncryptedFinished(const u8 master_secret[kMasterSecretBytes], const Transcript& transcript,
+                              const u8 write_key[kAesGcmKeyBytes], const u8 write_iv_salt[kAesGcmFixedIvBytes],
+                              u64 seq_num, bool is_client, u8* dst, u32 cap)
+{
+    if (master_secret == nullptr || write_key == nullptr || write_iv_salt == nullptr || dst == nullptr)
+        return 0;
+    u8 hash[32];
+    TranscriptSnapshot(&transcript, hash);
+    u8 vd[kVerifyDataBytes];
+    TlsFinishedVerifyData(master_secret, hash, is_client, vd);
+    // Compose the inner handshake message: 4-byte handshake
+    // header (type=0x14 Finished, 24-bit length=0x0c) followed
+    // by the 12-byte verify_data. Total 16 bytes.
+    u8 inner[4 + kVerifyDataBytes];
+    inner[0] = kHandshakeFinished;
+    inner[1] = 0;
+    inner[2] = 0;
+    inner[3] = static_cast<u8>(kVerifyDataBytes);
+    for (u32 i = 0; i < kVerifyDataBytes; ++i)
+        inner[4 + i] = vd[i];
+    return TlsEncryptRecord(write_key, write_iv_salt, seq_num, kContentHandshake, inner, sizeof(inner), dst, cap);
+}
+
+bool TlsVerifyEncryptedServerFinished(const u8 master_secret[kMasterSecretBytes], const Transcript& transcript,
+                                      const u8 read_key[kAesGcmKeyBytes], const u8 read_iv_salt[kAesGcmFixedIvBytes],
+                                      u64 seq_num, const u8* record_bytes, u32 record_len)
+{
+    if (record_bytes == nullptr || master_secret == nullptr)
+        return false;
+    u8 inner[64];
+    u32 inner_len = 0;
+    u8 content_type = 0;
+    if (!TlsDecryptRecord(read_key, read_iv_salt, seq_num, record_bytes, record_len, inner, sizeof(inner), &inner_len,
+                          &content_type))
+        return false;
+    if (content_type != kContentHandshake)
+        return false;
+    if (inner_len != 4 + kVerifyDataBytes)
+        return false;
+    if (inner[0] != kHandshakeFinished || inner[1] != 0 || inner[2] != 0 || inner[3] != kVerifyDataBytes)
+        return false;
+    u8 hash[32];
+    TranscriptSnapshot(&transcript, hash);
+    u8 expected_vd[kVerifyDataBytes];
+    TlsFinishedVerifyData(master_secret, hash, /*is_client=*/false, expected_vd);
+    u8 diff = 0;
+    for (u32 i = 0; i < kVerifyDataBytes; ++i)
+        diff |= inner[4 + i] ^ expected_vd[i];
+    return diff == 0;
+}
+
+// ---------------------------------------------------------------------------
 // Record-layer AES-GCM encrypt / decrypt
 // ---------------------------------------------------------------------------
 
@@ -913,6 +992,120 @@ void TlsSelfTest()
         return;
     }
 
-    SerialWrite("[tls] PASS (prf + key-block + clienthello + record-frame + parse + peek + cke + record-aead)\n");
+    // Test 12: Finished round-trip + transcript verify.
+    // Build two parallel transcripts (client + server), feed
+    // both the same handshake bytes, then verify the client's
+    // encrypted Finished re-snaps the same verify_data and
+    // that a server Finished computed with the matching
+    // master_secret + transcript verifies via
+    // TlsVerifyEncryptedServerFinished.
+    Transcript tr_client{};
+    Transcript tr_server{};
+    TranscriptInit(&tr_client);
+    TranscriptInit(&tr_server);
+    // Feed three synthetic handshake messages into both
+    // transcripts. Any 4-byte-headered byte sequence will do
+    // for the test — we just need both sides to agree.
+    const u8 msg_a[] = {0x01, 0x00, 0x00, 0x03, 0xAA, 0xBB, 0xCC};
+    const u8 msg_b[] = {0x02, 0x00, 0x00, 0x02, 0xDE, 0xAD};
+    const u8 msg_c[] = {0x0E, 0x00, 0x00, 0x00}; // ServerHelloDone
+    TranscriptUpdate(&tr_client, msg_a, sizeof(msg_a));
+    TranscriptUpdate(&tr_server, msg_a, sizeof(msg_a));
+    TranscriptUpdate(&tr_client, msg_b, sizeof(msg_b));
+    TranscriptUpdate(&tr_server, msg_b, sizeof(msg_b));
+    TranscriptUpdate(&tr_client, msg_c, sizeof(msg_c));
+    TranscriptUpdate(&tr_server, msg_c, sizeof(msg_c));
+
+    // Use a synthetic master_secret + a single key for both
+    // directions (simplifies the test; real handshake derives
+    // distinct client/server keys from key_block).
+    u8 test_ms[kMasterSecretBytes];
+    for (u32 i = 0; i < kMasterSecretBytes; ++i)
+        test_ms[i] = static_cast<u8>(0xA0 + (i & 0x1F));
+    const u8 test_key[kAesGcmKeyBytes] = {0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+                                          0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F};
+    const u8 test_salt[kAesGcmFixedIvBytes] = {0x20, 0x21, 0x22, 0x23};
+
+    // Client builds its Finished. Then the SERVER side
+    // (different transcript at this exact point — client's
+    // Finished hasn't been mixed in yet) would expect to see
+    // exactly this verify_data when it decrypts.
+    u8 client_fin_wire[64];
+    const u32 client_fin_len = TlsBuildEncryptedFinished(test_ms, tr_client, test_key, test_salt, /*seq=*/0,
+                                                         /*is_client=*/true, client_fin_wire, sizeof(client_fin_wire));
+    if (client_fin_len == 0)
+    {
+        SerialWrite("[tls] FAIL fin-build\n");
+        return;
+    }
+
+    // Decrypt the client Finished to confirm verify_data
+    // matches what's expected with the "client finished" label.
+    u8 fin_pt[32];
+    u32 fin_pt_len = 0;
+    u8 fin_pt_type = 0;
+    if (!TlsDecryptRecord(test_key, test_salt, /*seq=*/0, client_fin_wire, client_fin_len, fin_pt, sizeof(fin_pt),
+                          &fin_pt_len, &fin_pt_type))
+    {
+        SerialWrite("[tls] FAIL fin-decrypt\n");
+        return;
+    }
+    if (fin_pt_type != kContentHandshake || fin_pt_len != 4 + kVerifyDataBytes || fin_pt[0] != kHandshakeFinished)
+    {
+        SerialWrite("[tls] FAIL fin-shape\n");
+        return;
+    }
+    u8 fin_hash[32];
+    TranscriptSnapshot(&tr_server, fin_hash);
+    u8 want_client_vd[kVerifyDataBytes];
+    TlsFinishedVerifyData(test_ms, fin_hash, /*is_client=*/true, want_client_vd);
+    for (u32 i = 0; i < kVerifyDataBytes; ++i)
+    {
+        if (fin_pt[4 + i] != want_client_vd[i])
+        {
+            SerialWrite("[tls] FAIL fin-vd\n");
+            return;
+        }
+    }
+
+    // Now mix the client Finished message bytes into the
+    // server's transcript (the server's view of what the
+    // client just sent), then have a "server" build its
+    // Finished and verify it from the client side.
+    u8 client_fin_msg[4 + kVerifyDataBytes];
+    client_fin_msg[0] = kHandshakeFinished;
+    client_fin_msg[1] = 0;
+    client_fin_msg[2] = 0;
+    client_fin_msg[3] = kVerifyDataBytes;
+    for (u32 i = 0; i < kVerifyDataBytes; ++i)
+        client_fin_msg[4 + i] = want_client_vd[i];
+    TranscriptUpdate(&tr_server, client_fin_msg, sizeof(client_fin_msg));
+    TranscriptUpdate(&tr_client, client_fin_msg, sizeof(client_fin_msg));
+
+    u8 server_fin_wire[64];
+    const u32 server_fin_len = TlsBuildEncryptedFinished(test_ms, tr_server, test_key, test_salt, /*seq=*/0,
+                                                         /*is_client=*/false, server_fin_wire, sizeof(server_fin_wire));
+    if (server_fin_len == 0)
+    {
+        SerialWrite("[tls] FAIL srvfin-build\n");
+        return;
+    }
+    if (!TlsVerifyEncryptedServerFinished(test_ms, tr_client, test_key, test_salt, /*seq=*/0, server_fin_wire,
+                                          server_fin_len))
+    {
+        SerialWrite("[tls] FAIL srvfin-verify\n");
+        return;
+    }
+    // Negative: tamper with the encrypted Finished -> verify
+    // fails (GCM tag catches it before we even reach the
+    // verify_data compare).
+    server_fin_wire[5 + kAesGcmExplicitIvBytes] ^= 0x80;
+    if (TlsVerifyEncryptedServerFinished(test_ms, tr_client, test_key, test_salt, 0, server_fin_wire, server_fin_len))
+    {
+        SerialWrite("[tls] FAIL srvfin-tamper-accepted\n");
+        return;
+    }
+
+    SerialWrite("[tls] PASS (prf + cke + record-aead + transcript + finished + srv-fin verify)\n");
 }
 } // namespace duetos::net::tls

@@ -197,6 +197,68 @@ u32 TlsBuildClientKeyExchangeBody(const crypto::RsaPublicKey& server_rsa, const 
 bool Pkcs1V15Type2Pad(const crypto::RsaPublicKey& k, const u8* msg, u32 msg_len, RandomByteFn random_nonzero_byte,
                       u8* dst);
 
+// ---- handshake transcript hash ---------------------------------
+
+/// Running SHA-256 over the handshake transcript. RFC 5246 §7.4.9
+/// requires the Finished verify_data to be computed against a
+/// hash of "all handshake messages sent or received in
+/// chronological order" with their 4-byte handshake headers but
+/// no record-layer framing. This wrapper exists so the call
+/// site can keep state inside a Connection struct without
+/// reaching into Sha256Ctx directly.
+struct Transcript
+{
+    crypto::Sha256Ctx ctx;
+};
+
+void TranscriptInit(Transcript* t);
+
+/// Mix one handshake message into the transcript. `msg` must
+/// include the 4-byte handshake header (type + 24-bit length)
+/// followed by the body — i.e. exactly what
+/// `TlsWrapHandshake` produces from offset 5 onwards.
+void TranscriptUpdate(Transcript* t, const u8* msg, u32 len);
+
+/// Snapshot the current transcript hash without disturbing
+/// the running state. Lets callers compute Finished
+/// verify_data and then continue feeding subsequent messages
+/// (the server's Finished, for instance).
+void TranscriptSnapshot(const Transcript* t, u8 out[32]);
+
+// ---- Finished message -----------------------------------------
+
+/// Build a complete wire-format Finished record. Composes:
+///   1. Snapshot the transcript hash.
+///   2. Derive verify_data (12 bytes) via TlsFinishedVerifyData.
+///   3. Frame it as a Finished handshake message
+///        [type=0x14, 24-bit length=0x0c, verify_data...]
+///      (16 bytes total, header + body).
+///   4. Encrypt that as a TLS 1.2 record under (write_key,
+///      write_iv_salt, seq_num) using TlsEncryptRecord.
+///
+/// Caller is responsible for incrementing the sequence number
+/// after this call AND for mixing the 16-byte unencrypted
+/// Finished message into the transcript afterwards (so the
+/// matching server Finished verifies against the same
+/// transcript snapshot).
+///
+/// Returns the on-wire record length, or 0 on capacity / arg
+/// failure.
+u32 TlsBuildEncryptedFinished(const u8 master_secret[kMasterSecretBytes], const Transcript& transcript,
+                              const u8 write_key[kAesGcmKeyBytes], const u8 write_iv_salt[kAesGcmFixedIvBytes],
+                              u64 seq_num, bool is_client, u8* dst, u32 cap);
+
+/// Verify a server Finished record under the server's keys.
+/// `record_bytes` is the encrypted wire-format record. The
+/// helper decrypts it, confirms the inner handshake is a
+/// 16-byte Finished message, computes the expected
+/// verify_data from `transcript` + master_secret with the
+/// "server finished" label, and constant-time-compares.
+/// Returns true on a valid match.
+bool TlsVerifyEncryptedServerFinished(const u8 master_secret[kMasterSecretBytes], const Transcript& transcript,
+                                      const u8 read_key[kAesGcmKeyBytes], const u8 read_iv_salt[kAesGcmFixedIvBytes],
+                                      u64 seq_num, const u8* record_bytes, u32 record_len);
+
 // ---- record-layer AES-GCM encrypt / decrypt ---------------------
 
 /// Encrypt one TLS 1.2 record. Composes a wire-format record:
