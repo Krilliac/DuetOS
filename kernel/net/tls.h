@@ -169,6 +169,34 @@ bool TlsParseCertificateLeaf(const u8* body, u32 len, const u8** out_leaf_der, u
 /// Body must be exactly 0 bytes; the only check is `len == 0`.
 bool TlsParseServerHelloDone(const u8* body, u32 len);
 
+// ---- client outbound: ClientKeyExchange ------------------------
+
+/// Build the ClientKeyExchange body for a TLS_RSA cipher suite
+/// (RFC 5246 §7.4.7.1):
+///   struct {
+///       opaque encrypted_pre_master_secret<0..2^16-1>;
+///   } ClientKeyExchange;
+///
+/// The encrypted PMS is `pms` PKCS#1 v1.5 type-2 padded to the
+/// server's RSA modulus width, then ModExp(server_e, server_n).
+/// `random_fill` generates the non-zero padding bytes (one byte
+/// per call, must be non-zero). v0 callers pass
+/// duetos::core::RandomU64-backed wrappers.
+///
+/// Returns the body length on success (2-byte len + modulus
+/// bytes), 0 on any failure (bad cap, RSA reject, etc.).
+using RandomByteFn = u8 (*)();
+u32 TlsBuildClientKeyExchangeBody(const crypto::RsaPublicKey& server_rsa, const u8 pms[kPreMasterSecretBytes],
+                                  RandomByteFn random_nonzero_byte, u8* dst, u32 cap);
+
+/// PKCS#1 v1.5 type-2 encrypt of a message into a buffer at the
+/// modulus width. Exposed separately so the padding logic is
+/// unit-testable without going through ModExp. Pads the EM to
+/// `k.n_bytes` and writes to `dst[0..k.n_bytes)`. Caller still
+/// has to do the ModExp to produce the ciphertext.
+bool Pkcs1V15Type2Pad(const crypto::RsaPublicKey& k, const u8* msg, u32 msg_len, RandomByteFn random_nonzero_byte,
+                      u8* dst);
+
 void TlsSelfTest();
 
 } // namespace duetos::net::tls

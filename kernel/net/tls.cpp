@@ -349,6 +349,70 @@ bool TlsParseServerHelloDone(const u8* /*body*/, u32 len)
 }
 
 // ---------------------------------------------------------------------------
+// Client outbound: ClientKeyExchange
+// ---------------------------------------------------------------------------
+
+bool Pkcs1V15Type2Pad(const crypto::RsaPublicKey& k, const u8* msg, u32 msg_len, RandomByteFn random_nonzero_byte,
+                      u8* dst)
+{
+    // EME-PKCS1-v1_5 encrypt (RFC 8017 §7.2.1):
+    //   EM = 0x00 || 0x02 || PS || 0x00 || M
+    //   PS is `k.n_bytes - msg_len - 3` bytes of non-zero
+    //   random bytes (>= 8 per RFC 8017).
+    if (dst == nullptr || msg == nullptr || random_nonzero_byte == nullptr)
+        return false;
+    if (k.n_bytes < msg_len + 11)
+        return false;
+    dst[0] = 0x00;
+    dst[1] = 0x02;
+    const u32 ps_len = k.n_bytes - msg_len - 3;
+    for (u32 i = 0; i < ps_len; ++i)
+    {
+        u8 b = 0;
+        // Pull non-zero bytes. random_nonzero_byte is expected
+        // to do its own retry-until-nonzero, but defend
+        // against a callback that doesn't.
+        for (u32 tries = 0; tries < 16 && b == 0; ++tries)
+            b = random_nonzero_byte();
+        if (b == 0)
+            return false;
+        dst[2 + i] = b;
+    }
+    dst[2 + ps_len] = 0x00;
+    for (u32 i = 0; i < msg_len; ++i)
+        dst[3 + ps_len + i] = msg[i];
+    return true;
+}
+
+u32 TlsBuildClientKeyExchangeBody(const crypto::RsaPublicKey& server_rsa, const u8 pms[kPreMasterSecretBytes],
+                                  RandomByteFn random_nonzero_byte, u8* dst, u32 cap)
+{
+    // ClientKeyExchange body for TLS_RSA:
+    //   2-byte length | encrypted_PMS (server modulus width)
+    if (dst == nullptr || pms == nullptr || random_nonzero_byte == nullptr)
+        return 0;
+    if (server_rsa.n_bytes == 0 || cap < 2u + server_rsa.n_bytes)
+        return 0;
+    // Build the padded EM at the modulus width.
+    constexpr u32 kMaxModBytes = crypto::kBigIntBits / 8;
+    if (server_rsa.n_bytes > kMaxModBytes)
+        return 0;
+    u8 em[kMaxModBytes];
+    if (!Pkcs1V15Type2Pad(server_rsa, pms, kPreMasterSecretBytes, random_nonzero_byte, em))
+        return 0;
+    // c = EM^e mod n (same primitive RSAVP1 verify uses).
+    crypto::BigInt m{};
+    if (!crypto::BigIntFromBytesBE(&m, em, server_rsa.n_bytes))
+        return 0;
+    crypto::BigInt c{};
+    crypto::BigIntModExp(&c, m, server_rsa.e, server_rsa.n);
+    // Write 2-byte length prefix + ciphertext at modulus width.
+    StoreU16Be(dst, static_cast<u16>(server_rsa.n_bytes));
+    crypto::BigIntToBytesBE(c, dst + 2, server_rsa.n_bytes);
+    return 2u + server_rsa.n_bytes;
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -603,7 +667,78 @@ void TlsSelfTest()
         return;
     }
 
-    SerialWrite("[tls] PASS (prf + key-block + finished-labels + clienthello + record + sh/cert/shd parse + peek)\n");
-}
+    // Test 10: PKCS#1 v1.5 type-2 padding (ClientKeyExchange).
+    // Confirm the EM shape (0x00 0x02 PS 0x00 M) and that PS
+    // contains no zero bytes. ModExp itself is exercised by
+    // RsaSelfTest's toy key — here we only need to test the
+    // padding + ClientKeyExchange wire shape.
+    struct Det
+    {
+        static u8 NonZero()
+        {
+            static u8 counter = 0;
+            ++counter;
+            if (counter == 0)
+                counter = 1;
+            return counter;
+        }
+    };
+    crypto::RsaPublicKey toy{};
+    crypto::BigIntZero(&toy.n);
+    crypto::BigIntZero(&toy.e);
+    toy.n_bytes = 64;
+    u8 em64[64];
+    const u8 msg = 0x42;
+    if (!Pkcs1V15Type2Pad(toy, &msg, 1, &Det::NonZero, em64))
+    {
+        SerialWrite("[tls] FAIL pkcs1-type2-pad\n");
+        return;
+    }
+    if (em64[0] != 0x00 || em64[1] != 0x02 || em64[62] != 0x00 || em64[63] != 0x42)
+    {
+        SerialWrite("[tls] FAIL pkcs1-type2-shape\n");
+        return;
+    }
+    for (u32 i = 2; i < 62; ++i)
+    {
+        if (em64[i] == 0)
+        {
+            SerialWrite("[tls] FAIL pkcs1-type2-ps-zero\n");
+            return;
+        }
+    }
+    // Modulus too small to fit PMS + padding -> reject.
+    crypto::RsaPublicKey tiny{};
+    crypto::BigIntZero(&tiny.n);
+    tiny.n.limbs[0] = 3233;
+    tiny.n.used = 1;
+    crypto::BigIntZero(&tiny.e);
+    tiny.e.limbs[0] = 17;
+    tiny.e.used = 1;
+    tiny.n_bytes = 2;
+    u8 pms_zero[kPreMasterSecretBytes] = {0};
+    u8 cke_buf[256];
+    if (TlsBuildClientKeyExchangeBody(tiny, pms_zero, &Det::NonZero, cke_buf, sizeof(cke_buf)) != 0)
+    {
+        SerialWrite("[tls] FAIL cke-tiny-mod-accepted\n");
+        return;
+    }
+    // 65-byte modulus is large enough — confirm body shape.
+    crypto::RsaPublicKey big{};
+    crypto::BigIntZero(&big.n);
+    big.n.limbs[16] = 1; // 513-bit value, n_bytes = 65
+    big.n.used = 17;
+    crypto::BigIntZero(&big.e);
+    big.e.limbs[0] = 3;
+    big.e.used = 1;
+    big.n_bytes = 65;
+    const u32 cke_len = TlsBuildClientKeyExchangeBody(big, pms_zero, &Det::NonZero, cke_buf, sizeof(cke_buf));
+    if (cke_len != 2 + 65 || cke_buf[0] != 0x00 || cke_buf[1] != 0x41)
+    {
+        SerialWrite("[tls] FAIL cke-len-prefix\n");
+        return;
+    }
 
+    SerialWrite("[tls] PASS (prf + key-block + finished-labels + clienthello + record + parse + peek + cke)\n");
+}
 } // namespace duetos::net::tls
