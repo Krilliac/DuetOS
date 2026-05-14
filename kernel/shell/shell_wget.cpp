@@ -38,9 +38,12 @@
 
 #include "shell/shell_internal.h"
 
+#include "crypto/sha256.h"
 #include "drivers/video/console.h"
 #include "drivers/video/notify.h"
 #include "fs/fat32.h"
+#include "fs/ramfs.h"
+#include "fs/tmpfs.h"
 #include "mm/kheap.h"
 #include "net/socket.h"
 #include "net/stack.h"
@@ -510,6 +513,118 @@ void CmdWget(u32 argc, char** argv)
     ConsoleWrite(" bytes to ");
     ConsoleWriteln(dest);
     duetos::mm::KFree(buf);
+}
+
+// ---------------------------------------------------------------------------
+// sha256sum — Unix-style file hash. Output format mirrors coreutils:
+//   "<lowercase-hex-digest>  <path>".
+// Streams the file in chunks via Fat32ReadFileStream so multi-MiB
+// archives don't need a heap allocation the size of the file. The
+// kernel SHA-256 implementation already exists (crypto/sha256.h) —
+// this is the shell-facing surface.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+void WriteHexLower(u8 b)
+{
+    static constexpr char kHex[] = "0123456789abcdef";
+    ConsoleWriteChar(kHex[(b >> 4) & 0xF]);
+    ConsoleWriteChar(kHex[b & 0xF]);
+}
+
+struct Sha256StreamCtx
+{
+    duetos::crypto::Sha256Ctx hash;
+    u64 byte_count;
+};
+
+bool Sha256ChunkCb(const u8* data, u64 len, void* ctx)
+{
+    auto* s = static_cast<Sha256StreamCtx*>(ctx);
+    // Sha256Update takes u32; chunk loop handles large clusters
+    // by splitting if needed (FAT32 cluster max is 32 KiB though).
+    u64 off = 0;
+    while (off < len)
+    {
+        const u32 take = (len - off > 0xFFFFFFFFull) ? 0xFFFFFFFFu : static_cast<u32>(len - off);
+        duetos::crypto::Sha256Update(s->hash, data + off, take);
+        off += take;
+    }
+    s->byte_count += len;
+    return true;
+}
+
+} // namespace
+
+void CmdSha256Sum(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("SHA256SUM: usage: sha256sum <path>");
+        ConsoleWriteln("           Prints '<digest>  <path>' on success.");
+        ConsoleWriteln("           Works on ramfs (/etc, /bin, /lib) AND FAT32 disk paths.");
+        return;
+    }
+    for (u32 a = 1; a < argc; ++a)
+    {
+        const char* path = argv[a];
+        Sha256StreamCtx sctx{};
+        duetos::crypto::Sha256Init(sctx.hash);
+
+        // Prefer FAT32 (real disk) — file sizes there are
+        // unbounded relative to the ramfs scratch cap. Fall
+        // back to ReadFileToBuf for ramfs / tmpfs paths.
+        const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+        duetos::fs::fat32::DirEntry ent;
+        bool used_fat32 = false;
+        if (vol != nullptr && duetos::fs::fat32::Fat32LookupPath(vol, path, &ent))
+        {
+            if ((ent.attributes & 0x10) != 0)
+            {
+                ConsoleWrite("SHA256SUM: IS A DIRECTORY: ");
+                ConsoleWriteln(path);
+                continue;
+            }
+            if (!duetos::fs::fat32::Fat32ReadFileStream(vol, &ent, &Sha256ChunkCb, &sctx))
+            {
+                ConsoleWrite("SHA256SUM: I/O ERROR: ");
+                ConsoleWriteln(path);
+                continue;
+            }
+            used_fat32 = true;
+        }
+        else
+        {
+            char scratch[duetos::fs::kTmpFsContentMax];
+            const u32 n = ReadFileToBuf(path, scratch, sizeof(scratch));
+            if (n == static_cast<u32>(-1))
+            {
+                ConsoleWrite("SHA256SUM: NO SUCH FILE: ");
+                ConsoleWriteln(path);
+                continue;
+            }
+            duetos::crypto::Sha256Update(sctx.hash, reinterpret_cast<const u8*>(scratch), n);
+            sctx.byte_count = n;
+        }
+
+        u8 digest[duetos::crypto::kSha256DigestBytes];
+        duetos::crypto::Sha256Final(sctx.hash, digest);
+        for (u32 i = 0; i < duetos::crypto::kSha256DigestBytes; ++i)
+            WriteHexLower(digest[i]);
+        ConsoleWrite("  ");
+        ConsoleWrite(path);
+        if (!used_fat32)
+        {
+            // Annotate ramfs reads so the user knows the
+            // 512-byte ramfs scratch cap might have truncated.
+            ConsoleWrite("  (ramfs; cap=");
+            WriteU64Dec(duetos::fs::kTmpFsContentMax);
+            ConsoleWriteChar(')');
+        }
+        ConsoleWriteln("");
+    }
 }
 
 } // namespace duetos::core::shell::internal
