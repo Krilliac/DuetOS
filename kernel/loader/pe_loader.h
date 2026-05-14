@@ -92,6 +92,12 @@ enum class PeStatus : u8
                              // user low half (>0x00007FFFFFFFFFFF). A malicious PE with a
                              // kernel-half ImageBase would otherwise drive AddressSpaceMapUserPage
                              // into PanicAs and DoS the kernel from any execve-style spawn path.
+    Pe32ExecutionNotReady,   // OptionalHeader.Magic == 0x10B (PE32 / i386). The image parses
+                             // and PeReport can walk it (diagnostic-load), but actual MapAndRun
+                             // is gated until the 32-bit user-CS, syscall-ABI, and i386 DLL
+                             // set land. Distinct from NotPe32Plus so callers can tell "rejected
+                             // because of format" (NotPe32Plus, malformed magic) apart from
+                             // "rejected because of policy" (this).
 };
 
 const char* PeStatusName(PeStatus s);
@@ -108,6 +114,14 @@ PeStatus PeValidate(const u8* file, u64 file_len);
 /// preferred base. Returns false on malformed input rather
 /// than throwing.
 bool PeIsDynamicBase(const u8* file, u64 file_len);
+
+/// True iff the PE bytes parse as a PE32 (i386) image — OptHdrMagic
+/// == 0x10B. False for PE32+ (AMD64, OptHdrMagic == 0x20B) and for
+/// malformed inputs. Lets SpawnPeFile pick the bitness-correct
+/// preload set BEFORE running the full PeLoad parser. Cheap: just
+/// the DOS stub + COFF header walk that PeValidate's prefix path
+/// already does.
+bool PeIsPe32(const u8* file, u64 file_len);
 
 /// Read the optional-header `ImageBase` (preferred base VA) +
 /// `SizeOfImage` from `file`. Returns 0 on parse failure so the
@@ -149,6 +163,10 @@ struct PeLoadResult
                            // PEs (hello.exe) get ok=true, imports_resolved=false
                            // and skip heap init to keep their frame footprint
                            // down.
+    bool is_pe32;          // true for PE32 (i386), false for PE32+ (AMD64).
+                           // Drives the ring-3 entry-mode pick downstream:
+                           // PE32 enters via EnterUserMode32 (compat mode,
+                           // CS=0x3B), PE32+ via EnterUserModeWithGs.
     u64 entry_va;          // ImageBase + AddressOfEntryPoint
     u64 stack_va;          // Lowest VA of the stack page.
     u64 stack_top;         // rsp at ring-3 entry (stack_va + kPageSize).

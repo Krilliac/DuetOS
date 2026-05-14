@@ -359,8 +359,7 @@ static long long ntdll_named_kobj_open(unsigned int type, void* object_attribute
     if (object_attributes == (void*)0)
         return 0;
     _OA_View* oa = (_OA_View*)object_attributes;
-    if (oa->ObjectName == (_OA_UniStr*)0 || oa->ObjectName->Buffer == (unsigned short*)0
-        || oa->ObjectName->Length == 0)
+    if (oa->ObjectName == (_OA_UniStr*)0 || oa->ObjectName->Buffer == (unsigned short*)0 || oa->ObjectName->Length == 0)
         return 0;
     char name[64] = {0};
     const unsigned short wchars = (unsigned short)(oa->ObjectName->Length / 2);

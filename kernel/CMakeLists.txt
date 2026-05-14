@@ -416,6 +416,126 @@ else()
 endif()
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_MINIBROWSER_HEADER}")
 
+# pe32_smoke.exe — minimal PE32 (i386) test image. Built with the
+# i686 mingw cross compiler so the PE has Machine=0x014C +
+# OptHdrMagic=0x10B. Today the loader's MapAndRun rejects it with
+# `PeStatus::Pe32ExecutionNotReady`; once 32-bit DLL preload + IAT-32
+# walker land, it'll run end-to-end via EnterUserMode32.
+find_program(MINGW_W64_I686_GCC i686-w64-mingw32-gcc)
+set(DUETOS_PE32_SMOKE_SRC "${CMAKE_SOURCE_DIR}/userland/apps/pe32_smoke/pe32_smoke.c")
+set(DUETOS_PE32_SMOKE_EXE "${CMAKE_CURRENT_BINARY_DIR}/pe32_smoke.exe")
+set(DUETOS_PE32_SMOKE_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_pe32_smoke_pe.h")
+if(MINGW_W64_I686_GCC)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_SMOKE_EXE}"
+        COMMAND "${MINGW_W64_I686_GCC}"
+                -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
+                -e _mainCRTStartup -Wl,--subsystem,console -Wl,--entry,_mainCRTStartup
+                -o "${DUETOS_PE32_SMOKE_EXE}" "${DUETOS_PE32_SMOKE_SRC}" -lkernel32
+        DEPENDS "${DUETOS_PE32_SMOKE_SRC}"
+        COMMENT "Cross-compiling pe32_smoke.exe (i386 PE32)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_SMOKE_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${DUETOS_PE32_SMOKE_EXE}" "${DUETOS_PE32_SMOKE_HEADER}"
+                kBinPe32SmokeBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_PE32_SMOKE_EXE}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding pe32_smoke PE"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_SMOKE_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                "${DUETOS_PE32_SMOKE_HEADER}"
+                kBinPe32SmokeBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Emitting pe32_smoke PE stub (i686 mingw absent)"
+        VERBATIM)
+    message(STATUS "PE32 smoke fixture disabled (i686-w64-mingw32-gcc not found).")
+    message(STATUS "  Install with: sudo apt-get install -y gcc-mingw-w64-i686")
+endif()
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_PE32_SMOKE_HEADER}")
+
+# pe32_rich.exe — PE32 test that imports one or two functions from
+# each of the 13 preloaded i386 DLLs. Verifies the full via-DLL IAT
+# resolution chain end-to-end. Built the same way as pe32_smoke.
+set(DUETOS_PE32_RICH_SRC "${CMAKE_SOURCE_DIR}/userland/apps/pe32_rich/pe32_rich.c")
+set(DUETOS_PE32_RICH_EXE "${CMAKE_CURRENT_BINARY_DIR}/pe32_rich.exe")
+set(DUETOS_PE32_RICH_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_pe32_rich_pe.h")
+if(MINGW_W64_I686_GCC)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_RICH_EXE}"
+        COMMAND "${MINGW_W64_I686_GCC}"
+                -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
+                -e _mainCRTStartup -Wl,--subsystem,console -Wl,--entry,_mainCRTStartup
+                -o "${DUETOS_PE32_RICH_EXE}" "${DUETOS_PE32_RICH_SRC}"
+                -lkernel32 -lmsvcrt -luser32 -lgdi32 -ladvapi32
+                -lcomctl32 -lcomdlg32 -lcrypt32 -liphlpapi
+                -lshell32 -lshlwapi -lws2_32 -lbcrypt
+        DEPENDS "${DUETOS_PE32_RICH_SRC}"
+        COMMENT "Cross-compiling pe32_rich.exe (i386 PE32 with 13-DLL imports)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_RICH_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${DUETOS_PE32_RICH_EXE}" "${DUETOS_PE32_RICH_HEADER}"
+                kBinPe32RichBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_PE32_RICH_EXE}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding pe32_rich PE"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_RICH_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                "${DUETOS_PE32_RICH_HEADER}"
+                kBinPe32RichBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Emitting pe32_rich PE stub (i686 mingw absent)"
+        VERBATIM)
+endif()
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_PE32_RICH_HEADER}")
+
+# pe32_miss.exe — PE32 that calls an unresolved Win32 import to
+# validate the 32-bit Win32 thunks page. The import (user32!
+# SetWindowsHookExA) is NOT in our v0 user32_32 stubs, so the
+# ResolveImports catch-all routes the IAT slot to
+# kWin32Thunks32UnresolvedVa. The stub does SYS_EXIT(0xDEAD0042)
+# and the process destroys cleanly.
+set(DUETOS_PE32_MISS_SRC "${CMAKE_SOURCE_DIR}/userland/apps/pe32_miss/pe32_miss.c")
+set(DUETOS_PE32_MISS_EXE "${CMAKE_CURRENT_BINARY_DIR}/pe32_miss.exe")
+set(DUETOS_PE32_MISS_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_pe32_miss_pe.h")
+if(MINGW_W64_I686_GCC)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_MISS_EXE}"
+        COMMAND "${MINGW_W64_I686_GCC}"
+                -nostdlib -ffreestanding -fno-stack-protector -mno-stack-arg-probe
+                -e _mainCRTStartup -Wl,--subsystem,console -Wl,--entry,_mainCRTStartup
+                -o "${DUETOS_PE32_MISS_EXE}" "${DUETOS_PE32_MISS_SRC}"
+                -lkernel32 -luser32
+        DEPENDS "${DUETOS_PE32_MISS_SRC}"
+        COMMENT "Cross-compiling pe32_miss.exe (PE32 calling unresolved import)"
+        VERBATIM)
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_MISS_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+                "${DUETOS_PE32_MISS_EXE}" "${DUETOS_PE32_MISS_HEADER}"
+                kBinPe32MissBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_PE32_MISS_EXE}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Embedding pe32_miss PE"
+        VERBATIM)
+else()
+    add_custom_command(
+        OUTPUT "${DUETOS_PE32_MISS_HEADER}"
+        COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}" --empty
+                "${DUETOS_PE32_MISS_HEADER}"
+                kBinPe32MissBytes --namespace "duetos::fs::generated"
+        DEPENDS "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Emitting pe32_miss PE stub (i686 mingw absent)"
+        VERBATIM)
+endif()
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_PE32_MISS_HEADER}")
+
 # Surface-coverage PE smoke apps. Each one is a self-contained
 # console PE (~10 KB) targeting a single Win32 API surface. Source
 # lives in userland/apps/<name>/<name>.c; CMake embeds build-tree
@@ -454,6 +574,7 @@ duetos_embed_smoke_pe(crypto_smoke   kBinCryptoSmokeBytes)
 duetos_embed_smoke_pe(paths_smoke    kBinPathsSmokeBytes)
 duetos_embed_smoke_pe(time_smoke     kBinTimeSmokeBytes)
 duetos_embed_smoke_pe(wininet_smoke  kBinWininetSmokeBytes)
+duetos_embed_smoke_pe(browser_pe     kBinBrowserPeBytes)
 duetos_embed_smoke_pe(iphlpapi_smoke kBinIphlpapiSmokeBytes)
 duetos_embed_smoke_pe(string_smoke   kBinStringSmokeBytes)
 duetos_embed_smoke_pe(mem_smoke      kBinMemSmokeBytes)
@@ -648,6 +769,53 @@ duetos_embed_blob(generated_kernel32_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-kernel32-dll.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32.c"
     COMMENT "Compiling + embedding kernel32.dll (first stub retirement)")
+
+# 32-bit kernel32 companion — PE32 (i386) DLL, preloaded into PE32
+# processes' address spaces so their IAT entries to KERNEL32.dll
+# resolve. Layer 4 of 32-bit PE support.
+duetos_embed_blob(generated_kernel32_32_dll.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-kernel32-32-dll.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/kernel32_32/kernel32_32.c"
+    COMMENT "Compiling + embedding kernel32_32.dll (i386 PE32 companion)")
+
+# 32-bit msvcrt companion — string / memory / CRT-startup intrinsics
+# every MSVC-built PE32 calls during boot.
+duetos_embed_blob(generated_msvcrt_32_dll.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-msvcrt-32-dll.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/msvcrt_32.c"
+    COMMENT "Compiling + embedding msvcrt_32.dll (i386 PE32 companion)")
+
+# 32-bit stub DLLs. Each takes (dll_name, base_va, symbol_name) and
+# produces a PE32 (i386) DLL whose Export Name field matches the
+# i386 importer's descriptor. The bodies are safe-ignore stubs;
+# real implementations land slice-by-slice as Layer 4 grows.
+macro(duetos_embed_32bit_stub_dll name base_va symbol)
+    set(_src "${CMAKE_SOURCE_DIR}/userland/libs/${name}_32/${name}_32.c")
+    set(_def "${CMAKE_SOURCE_DIR}/userland/libs/${name}_32/${name}_32.def")
+    set(_hdr "${CMAKE_CURRENT_BINARY_DIR}/generated_${name}_32_dll.h")
+    add_custom_command(
+        OUTPUT "${_hdr}"
+        COMMAND "${CMAKE_SOURCE_DIR}/tools/build/build-stub-32-dll.sh"
+                "${CMAKE_SOURCE_DIR}" "${_hdr}" "${name}" "${base_va}" "${symbol}"
+        DEPENDS "${_src}" "${_def}"
+                "${CMAKE_SOURCE_DIR}/tools/build/build-stub-32-dll.sh"
+                "${DUETOS_EMBED_BLOB_SCRIPT}"
+        COMMENT "Compiling + embedding ${name}_32.dll (i386 PE32 stub DLL)"
+        VERBATIM)
+    list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${_hdr}")
+endmacro()
+
+duetos_embed_32bit_stub_dll(user32   0x10060000 kBinUser32_32DllBytes)
+duetos_embed_32bit_stub_dll(gdi32    0x10080000 kBinGdi32_32DllBytes)
+duetos_embed_32bit_stub_dll(advapi32 0x100A0000 kBinAdvapi32_32DllBytes)
+duetos_embed_32bit_stub_dll(comctl32 0x100C0000 kBinComctl32_32DllBytes)
+duetos_embed_32bit_stub_dll(comdlg32 0x100D0000 kBinComdlg32_32DllBytes)
+duetos_embed_32bit_stub_dll(crypt32  0x100E0000 kBinCrypt32_32DllBytes)
+duetos_embed_32bit_stub_dll(iphlpapi 0x100F0000 kBinIphlpapi_32DllBytes)
+duetos_embed_32bit_stub_dll(shell32  0x10110000 kBinShell32_32DllBytes)
+duetos_embed_32bit_stub_dll(shlwapi  0x10130000 kBinShlwapi_32DllBytes)
+duetos_embed_32bit_stub_dll(ws2_32   0x10150000 kBinWs2_32_32DllBytes)
+duetos_embed_32bit_stub_dll(bcrypt   0x10170000 kBinBcrypt_32DllBytes)
 
 duetos_embed_blob(generated_vcruntime140_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-vcruntime140-dll.sh"

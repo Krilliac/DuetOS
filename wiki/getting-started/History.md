@@ -603,7 +603,452 @@ kernel pipe pool.
   - Security descriptors / ACLs / `Global\` vs `Local\` namespace
     prefixes — bare names only.
 
----
+## Phase 6.12 — WinInet real HTTP transport + browser_pe (2026-05-13)
+
+The wininet.dll thunks used to return a fixed `"HTTP/1.1 200 OK"` /
+`"DuetOS hello"` body for any `InternetOpenUrl` + `InternetReadFile`
+sequence. Browsers and other WinInet-using PEs would always see the
+canned response — useful for verifying ABI shape, useless for
+verifying anything else.
+
+This slice replaces the canned response with real HTTP/1.1 GET
+transport over the kernel socket pool (`SYS_SOCKET_OP`, the same path
+ws2_32 already uses), and ships a WinInet-based browser_pe smoke that
+exercises the new path end-to-end.
+
+- **What landed.**
+  - **wininet.dll transport.** `userland/libs/wininet/wininet.c` —
+    new freestanding handle pool (8 slots × 256 B host + 1 KiB
+    path + 1 KiB extra headers + 4 KiB rxbuf). `InternetOpenA/W`,
+    `InternetConnectA/W`, `HttpOpenRequestA/W`, `HttpSendRequestA/W`,
+    `HttpAddRequestHeadersA/W`, `InternetOpenUrlA/W`,
+    `InternetReadFile`, `InternetReadFileExA/W`, `InternetCloseHandle`,
+    and `InternetQueryDataAvailable` now drive the same kernel
+    socket pool ws2_32 uses (DNS via `kSockOpResolveA`, then
+    socket / connect / sendto / recvfrom).
+  - **Handle encoding.** `0x4000 | (kind << 8) | slot` — fits in
+    16 bits, never collides with `NULL` or `INVALID_HANDLE_VALUE`,
+    decodes with a single kind / slot tag check.
+  - **Header parsing.** `HttpQueryInfoA/W` now answers real queries:
+    `STATUS_CODE`, `STATUS_TEXT`, `RAW_HEADERS`,
+    `RAW_HEADERS_CRLF`, `CONTENT_TYPE`, `CONTENT_LENGTH`,
+    `LOCATION`, `SERVER`, `VERSION` — and their `FLAG_NUMBER`
+    variants for the numeric ones.
+  - **Graceful CI fallback.** If DNS / connect / send / first recv
+    fails (e.g. on a host with no outbound networking), the slot
+    transparently switches to a fixed `"HTTP/1.1 200 OK"` /
+    `"DuetOS hello"` body. ABI-shape smokes still pass; live boots
+    on QEMU SLIRP (or bare metal) see real Google responses.
+  - **browser_pe smoke.** `userland/apps/browser_pe/browser_pe.c` —
+    a real WinInet client that does three GETs (root / example.com /
+    404 path), prints status + content-type + content-length +
+    Location (on redirect) + first body line for each. Wired into
+    `ring3_smoke.cpp` alongside `mini_browser` and reachable via
+    the shell as `kind=browser2` / `kind=wininet`.
+- **What's still GAP.**
+  - **HTTPS / TLS.** `InternetOpenUrl` against an `https://` URL
+    parses the scheme and reports port 443, but the slot
+    short-circuits to the canned body — no TLS handshake yet.
+  - **Async I/O.** `INTERNET_FLAG_ASYNC` / `InternetSetStatusCallback`
+    are still STUB. Synchronous flow only.
+  - **Auto-redirects.** v0 honours `INTERNET_FLAG_NO_AUTO_REDIRECT`
+    implicitly — 3xx responses surface to the caller. Auto-follow
+    is a follow-up.
+  - **Persistent connections.** Each request opens and closes its
+    own socket; `Connection: close` is hardcoded. HTTP/1.1
+    keep-alive needs request multiplexing in the handle pool.
+
+## Phase 6.13 — 32-bit PE (i386) loader recognition + Layer 2/3 plumbing (2026-05-13)
+
+Until now the PE loader rejected anything that wasn't
+`Machine=0x8664` (AMD64) + `Magic=0x20B` (PE32+). That makes every
+real-world 32-bit Windows browser binary (NetSurf 3.11 ships only
+x86, lynx/links/dillo are 32-bit by default) load-time invisible —
+PeReport can't even walk its imports because the validator fails at
+byte 18 of the FileHeader.
+
+This slice lands Layers 1, 2 and 3 of a four-layer plan for proper
+WoW64-style 32-bit PE support. With Layers 1-3 in, the kernel
+**recognises** PE32 (the validator parses the i386 optional-header
+layout, the data-directory array, and per-section table correctly);
+it has the **arch-level mechanics** (32-bit user code/data
+descriptors in the GDT, EnterUserMode32 entry path, 32-bit syscall
+register remap in the int 0x80 handler) ready to use; and it
+**cleanly rejects** execution with a typed status until Layer 4
+(the i386 DLL set port) and Layer 5 (pointer marshalling across all
+syscalls) land.
+
+- **What landed (Layer 1 — loader recognition).**
+  - `kernel/loader/exec_meta_rust/src/lib.rs` accepts
+    `PE_MACHINE_I386 = 0x014C` alongside `PE_MACHINE_AMD64 = 0x8664`,
+    and branches the optional-header parser on
+    `OptHdrMagic == 0x10B` (PE32) vs `0x20B` (PE32+). PE32 stores
+    ImageBase as `u32` at offset 28 (because BaseOfData occupies
+    offsets 24..27 in that variant) and the four
+    stack/heap-reserve/commit slots are `u32` instead of `u64`,
+    shifting the data-directory array from offset 112 (PE32+) to 96
+    (PE32). `DuetosPeImage` grows three new fields — `is_pe32`,
+    `data_dir_offset`, `number_of_rva_and_sizes` — so the C++ side
+    never re-derives the layout.
+  - `kernel/loader/dll_loader.cpp` + `pe_exports.cpp` accept both
+    Machine values so the DLL loader can also walk the EAT of a
+    PE32-imported file diagnostically.
+  - New `PeStatus::Pe32ExecutionNotReady` enumerator. The loader
+    re-classifies the otherwise-Ok PE32 path as this status so
+    `FixJournalRecord` + the boot-log warning (`[W] loader/pe : PE
+    rejected status="Pe32ExecutionNotReady"`) make the reject
+    reason visible.
+- **What landed (Layer 2 — 32-bit user mode mechanics).**
+  - The GDT grows from 7 to 9 entries. Slot 7 is a 32-bit user
+    code descriptor (flags=0xC -> G=1 L=0 D=1, access=0xFA -> P
+    DPL=3 S R/Exec); slot 8 is the matching 32-bit user data
+    descriptor. Selector constants:
+    `kUserCode32Selector = 0x3B`, `kUserData32Selector = 0x43`.
+  - `EnterUserMode32(user_rip, user_rsp)` in
+    `kernel/arch/x86_64/usermode.S` builds an iretq frame with the
+    32-bit selectors so the ring-3 transition lands in long
+    compatibility mode and instructions decode as 32-bit. No
+    swapgs / GSBASE-MSR setup — 32-bit PEs reach the TEB through
+    FS, not GS.
+  - Per-AP GDT bundles are extended uniformly so all CPUs see the
+    same 9-entry GDT.
+- **What landed (Layer 3 — 32-bit syscall ABI).**
+  - `isr_common` (kernel/arch/x86_64/exceptions.S) detects 32-bit
+    callers by `CS == 0x3B` in the trap frame and remaps the Linux
+    i386 syscall register convention into the 64-bit slots the C++
+    dispatcher expects:
+    `(eax,ebx,ecx,edx,esi,edi,ebp) -> (rax,rdi,rsi,rdx,r10,r8,r9)`.
+    Source-stable order: every source slot is snapshotted into
+    kernel scratch (r11..r15) before any target slot is written.
+    Pointer args zero-extend automatically — every 32-bit register
+    write in compat mode zeros the upper 32 bits of the matching
+    64-bit register.
+  - 64-bit callers skip the remap via a `cmp+jne` fast path. Zero
+    overhead delta on the PE32+ smokes.
+- **Live verification.**
+  - `userland/apps/pe32_smoke/pe32_smoke.c` — a 6 KiB PE32 (i386)
+    built with i686-w64-mingw32-gcc. Wired into the ring3 smoke
+    profile so every boot prints the explicit reject status line.
+- **What's still GAP (Layers 4 + 5).**
+  - **Layer 4 — i386 DLL set port.** All 44 userland DLLs are
+    PE32+ today; a 32-bit PE can't import from them. Each DLL
+    needs to be recompiled as PE32 (i386), the syscall trampolines
+    in `userland/libs/ws2_32/ws2_32.c` and
+    `userland/libs/wininet/wininet.c` need 32-bit asm variants
+    (`int $0x80` with eax/ebx/.../edi instead of rdi/rsi/r10/r8/r9),
+    and the kernel needs to map the matching set based on each
+    process's bitness. Realistic scope: ~10 hours.
+  - **Layer 5 — pointer marshalling.** Every syscall that takes
+    user pointers needs to be reviewed for the "32-bit caller
+    passes a 4-byte pointer in the low 32 of the register" case.
+    Most syscalls already work because of the auto-zero-extension
+    in Layer 3's remap; the audit catches the corner cases
+    (sockaddr structs, WriteFile/ReadFile buffer descriptors, etc.).
+  - **PE32 ImageBase / stack VA**: the loader currently doesn't
+    pin the mapping to the low 4 GiB. Layer 4 lands the bitness-
+    aware ImageBase allocator and stack VA picker.
+
+## Phase 6.14 — PE32 (i386) execution end-to-end (2026-05-13)
+
+Companion to Phase 6.13: the same session lifted the
+`Pe32ExecutionNotReady` gate and pushed Layers 4 + the integration
+glue across the finish line. `pe32_smoke.exe` now boots ring 3 in
+32-bit compat mode, calls `GetStdHandle`, `WriteConsoleA`,
+`GetCurrentProcessId`, and `ExitProcess` through its post-reloc IAT,
+and exits cleanly. Each call is an indirect jump through an IAT slot
+the kernel loader patched at load time to point at the matching
+export in our `kernel32_32.dll` (a 2 KiB i386 companion to the
+existing PE32+ kernel32.dll).
+
+Live verification on every ring3 boot now includes the line
+`[pe32] hello from compat mode` printed by ring-3 32-bit code via
+the full Win32 -> int 0x80 -> kernel -> serial chain.
+
+- **What landed.**
+  - **`kernel32_32.dll` (i386).** New userland DLL under
+    `userland/libs/kernel32_32/`. Exports `ExitProcess`,
+    `TerminateProcess`, `GetCurrentProcessId`, `GetCurrentThreadId`,
+    `GetCurrentProcess`, `GetCurrentThread`, `GetLastError`,
+    `SetLastError`, `GetStdHandle`, `WriteFile`, `WriteConsoleA`.
+    Built with `clang --target=i686-pc-windows-msvc` + `lld-link
+    /machine:x86`. Output filename is `kernel32.dll` (not
+    `kernel32_32.dll`) so the PE Export Directory's Name field
+    reads `kernel32.dll` — the string the PE32 importer's
+    case-insensitive resolver compares against.
+  - **Per-bitness preload set.** `SpawnPeFile` probes the PE bytes
+    via the new `PeIsPe32` helper, then picks between the existing
+    44-DLL PE32+ preload list and a fresh PE32 list (currently just
+    `kernel32_32.dll`). PE32 processes get the i386 DLL mapped in
+    the low 4 GiB and visible to `ResolveImports` at IAT walk time.
+  - **`dll_loader.cpp` + `pe_exports.cpp` PE32-aware.** Both
+    branches the optional-header layout on `OptHdrMagic` —
+    `ImageBase` reads as `u32` at offset 28 for PE32 vs `u64` at
+    offset 24 for PE32+; data-directory array sits at offset 96
+    (PE32) vs 112 (PE32+). `DllHeaders` + `PeHeaderShape` grow
+    `is_pe32` + `data_dir_offset` so the EAT walker / reloc applier
+    pick the right offsets.
+  - **`pe_loader::ReadDataDir` bitness-aware.** Was hardcoded to
+    PE32+ offsets (108 / 112) — the silent bug that caused PE32
+    relocs to walk an empty data directory. Now reads
+    `h.number_of_rva_and_sizes` + `h.data_dir_offset` from the
+    per-`PeHeaders` fields the Rust validator pre-populates.
+  - **`pe_loader::ResolveImports` PE32-aware.** Branches its IAT
+    slot-size and ordinal-bit reads on `h.is_pe32`: 4-byte slots
+    with the ordinal flag at bit 31 for PE32, 8-byte slots with
+    the flag at bit 63 for PE32+. The IAT-slot patch writes 4
+    bytes for PE32, 8 for PE32+. The `Win32ThunksLookupKind`
+    catch-all is skipped for PE32 (the 64-bit thunks page isn't
+    mapped in PE32 ASs); imports that don't resolve via the
+    i386 preload set still get the IAT entry pointed at the
+    catch-all VA for diagnostic visibility.
+  - **`pe_loader::ApplyRelocations` HIGHLOW.** Accepts
+    `IMAGE_REL_BASED_HIGHLOW` (type=3, 4-byte patch) alongside
+    `IMAGE_REL_BASED_DIR64` (type=10, 8-byte). PE32 images use
+    HIGHLOW exclusively. `dll_loader::ApplyDllRelocs` got the same
+    treatment.
+  - **`Process::user_is_pe32`** + **`Ring3UserEntry` branch.** A
+    PE32 process spawns through `arch::EnterUserMode32` (CS=0x3B,
+    SS=0x43, long-compatibility mode) instead of
+    `EnterUserModeWithGs`. The kernel's `isr_common` detects the
+    bitness from CS in the trap frame and routes the syscall arg
+    remap accordingly.
+  - **`isr_common` syscall un-remap.** After `TrapDispatch`
+    returns, the trap frame's rdi (slot 72) and rsi (slot 80)
+    slots are restored from the target r10 (slot 40) and r8 (slot
+    56) — the remap path planted user's original rsi/rdi there as
+    a side effect, and the C++ syscall handlers don't write back
+    to those arg slots. Without this restore, `iretq` would pop
+    the remapped arg1/arg2 values back into user's edi/esi, and
+    `kernel32_32!WriteFile`'s `*lpWritten = bytes_written` store
+    would `#PF` at the bogus pointer. The visible failure mode
+    that motivated this fix was `ring3-pe32-smoke #PF` at the
+    `mov %ecx,(%esi)` in WriteFile.
+- **What's still GAP.**
+  - **Layer 4 surface is tiny.** 11 kernel32 exports cover
+    pe32_smoke's print-and-exit flow. NetSurf's 13 imported DLLs
+    span ~450 functions. Each follow-up slice ports a chunk of
+    that surface as a PE32 DLL (msvcrt_32, ntdll_32, user32_32,
+    gdi32_32, ws2_32_32, wininet_32, etc.).
+  - **No 32-bit Win32 thunks page.** PE32 callers whose imports
+    don't resolve via the i386 preload set get the IAT slot
+    pointed at the 64-bit catch-all VA, which isn't mapped in
+    PE32 ASs. The page-fault is visible as a clear "task-kill" so
+    the missing export shows up immediately, but a real PE32
+    workload needs the catch-all to be 32-bit code at a low VA.
+  - **No 32-bit TEB.** The 32-bit Windows TEB has a different
+    layout from x64's, and is reached via FS, not GS. PE32s that
+    deref `fs:[0x18]` (TEB self-pointer) or `fs:[0x30]` (PEB)
+    fault. Lands with the 32-bit TEB setup slice.
+  - **No 32-bit `__chkstk`.** PE32s built with MSVC use
+    `__chkstk` to probe the stack a page at a time. Not in our
+    msvcrt_32 yet.
+
+## Phase 6.15 — i386 DLL set: 13-DLL PE32 surface (2026-05-14)
+
+Layer 4 of 32-bit PE support delivered. The PE32 preload set is
+now **13 i386 stub DLLs** mirroring the imports of a real-world
+Win32 PE32 (NetSurf 3.11's import set was the audit reference).
+The `pe32_rich` smoke exercises one or two functions from each
+DLL — every call goes through the via-DLL IAT path the kernel
+loader patches at spawn time.
+
+- **What landed (new userland DLLs, all PE32 / i386).**
+  - `userland/libs/kernel32_32/` — ~40 exports (built up
+    in Phase 6.14, expanded in this slice with `GetModuleHandleA/W`,
+    `GetProcAddress`, `LoadLibraryA/W`, `FreeLibrary`,
+    `GetProcessHeap`, `HeapAlloc/Free/Size/ReAlloc`,
+    `GetCommandLineA/W`, `GetStartupInfoA/W`, `GetFileType`,
+    `Sleep`, `GetTickCount`, the full `InitializeCriticalSection`
+    family, `IsDebuggerPresent`, the `Interlocked*` quartet,
+    `GetVersion`, `CloseHandle`, `SetUnhandledExceptionFilter`).
+  - `userland/libs/msvcrt_32/` — ~50 exports: memcpy / memmove /
+    memset / memcmp; strlen / strcmp / strncmp / strcpy / strncpy
+    / strcat / strchr / strrchr / strstr / _stricmp / _strnicmp;
+    CRT startup (_errno, _amsg_exit, _assert, exit, _exit, abort,
+    _initterm, _initterm_e, __set_app_type, __setusermatherr,
+    _iob, __p__commode / _fmode / _acmdln, __getmainargs,
+    __initenv); a minimal bump-allocator malloc / free / calloc /
+    realloc; stubbed fopen / fread / fwrite; puts (forwards to
+    SYS_WRITE); atoi / atol.
+  - `userland/libs/user32_32/` — ~60 exports: window lifecycle
+    (CreateWindowEx, Destroy / Show / UpdateWindow), full message
+    loop (Peek / Get / Translate / Dispatch / Post / SendMessage,
+    DefWindowProc, PostQuitMessage), class registration
+    (RegisterClass[Ex][AW], UnregisterClass), resource loaders
+    (LoadIcon / Cursor / etc.), MessageBoxA/W returning IDOK,
+    GetDC / ReleaseDC, clipboard / caret / paint / cursor / focus
+    stubs, GetSystemMetrics with sensible defaults.
+  - `userland/libs/gdi32_32/` — ~45 exports: Create{Bitmap,
+    CompatibleBitmap, CompatibleDC, Pen, SolidBrush, BrushIndirect,
+    Font{A,W,IndirectA,IndirectW}}, Delete{DC,Object},
+    SelectObject, GetStockObject, drawing primitives, pixel ops,
+    SetBkColor / TextColor / BkMode / TextAlign / MapMode,
+    GetObject{A,W}, CreateDIB{Section,itmap}, GetDIBits.
+  - `userland/libs/advapi32_32/` — 24 exports: Registry stubs
+    (RegOpen/Enum/Close/QueryValue), the full CryptoAPI v0
+    (Crypt{Acquire,Release}Context, CryptCreateHash,
+    CryptHashData, CryptGetHashParam, CryptGenRandom,
+    CryptSignHashW, etc.), Event log stubs, and
+    SystemFunction036 (RtlGenRandom) returning an LCG sequence.
+  - `userland/libs/comctl32_32/` — 5 exports: ImageList_Create /
+    Destroy / AddMasked, InitCommonControlsEx, PropertySheetA.
+  - `userland/libs/comdlg32_32/` — 1 export: ChooseFontA.
+  - `userland/libs/crypt32_32/` — 10 exports: Cert{Close,Open,
+    OpenSystem}Store, CertDuplicateCertificateContext,
+    CertEnumCertificatesInStore, CertFindCertificateInStore,
+    CertFreeCertificateContext, CertGet{Certificate,Enhanced,
+    Intended}KeyUsage / Property.
+  - `userland/libs/iphlpapi_32/` — 4 exports: GetAdaptersAddresses,
+    GetBestRoute2, GetUnicastIpAddressTable, FreeMibTable.
+  - `userland/libs/shell32_32/` — 2 exports: CommandLineToArgvW
+    (returns `argv = ["a.exe"]`), SHGetFolderPathA.
+  - `userland/libs/shlwapi_32/` — 1 export: PathAppendA (real
+    impl — walks the path string and appends with a `\` separator).
+  - `userland/libs/ws2_32_32/` — ~40 exports: full Winsock
+    surface backed by **real syscalls** to the kernel socket
+    pool. socket / bind / listen / connect / accept / send / recv
+    / sendto / recvfrom / shutdown / closesocket / select /
+    inet_addr / inet_ntoa / gethostname / gethostbyname; the
+    network-order helpers (htons / ntohs / htonl / ntohl) are
+    real bit-swap implementations; WSA*Event surface stubbed.
+  - `userland/libs/bcrypt_32/` — 1 export: BCryptGenRandom
+    (LCG entropy).
+- **Build infrastructure.**
+  - `tools/build/build-stub-32-dll.sh` — generic builder that
+    takes `(dll_name, base_va, symbol)` and produces a PE32 DLL
+    via `clang --target=i686-pc-windows-msvc + lld-link
+    /machine:x86 /def:<dll>_32.def`. The .def's `LIBRARY <name>.dll`
+    directive plus the `/out:` basename being `<name>.dll` sets
+    the PE Export Directory's Name field correctly for the i386
+    importer's case-insensitive resolver.
+  - `duetos_embed_32bit_stub_dll` CMake macro — one-line entry
+    per new DLL.
+- **Live verification.**
+  - `userland/apps/pe32_rich/pe32_rich.c` — PE32 test that
+    imports one or two functions from each preloaded i386 DLL.
+    The boot transcript on every ring3 smoke run records:
+    ```
+    [pe32-rich] starting
+    [pe32-rich] kernel32 ok
+    [pe32-rich] msvcrt ok
+    [pe32-rich] user32 ok
+    [pe32-rich] gdi32 ok
+    [pe32-rich] advapi32 ok
+    [pe32-rich] comctl32 ok
+    [pe32-rich] comdlg32 ok
+    [pe32-rich] crypt32 ok
+    [pe32-rich] iphlpapi ok
+    [pe32-rich] shell32 ok
+    [pe32-rich] shlwapi ok
+    [pe32-rich] ws2_32 ok (htons real)
+    [pe32-rich] bcrypt ok
+    [pe32-rich] timer + module ok
+    [pe32-rich] all 13 DLLs exercised — exit rc=0x42
+    [proc] destroy pid=9 name="ring3-pe32-rich"
+    ```
+    Every line above the destroy is a real Win32 API call going
+    through the IAT into one of our i386 stubs and back. The
+    `htons` "real" tag confirms a byte-swap of 0x1234 → 0x3412,
+    proving the 32-bit syscall remap + the i386 calling convention
+    round-trip cleanly.
+- **Memory budget bump.**
+  `kernel/mm/address_space.h::kMaxUserVmRegionsPerAs` raised from
+  1024 to 8192. Real-world PE32 images (e.g. NetSurf 3.11 at
+  ~20 MiB) need ~5000+ pages just for sections + the 13-DLL
+  preload set. The per-AS region-table cost goes from ~24 KiB
+  to ~192 KiB — well within budget.
+
+## Phase 6.16 — PE32 graceful-degradation surface (2026-05-14)
+
+Three more pieces of the PE32 path. With Phase 6.15 the happy path
+worked end-to-end; this slice takes the common failure modes from
+"#PF at the first unstubbed call" to "process exits cleanly with a
+readable signature."
+
+- **32-bit Win32 thunks page** (`kernel/subsystems/win32/thunks.{h,
+  cpp}`, `kernel/loader/pe_loader.cpp`).
+  - New per-PE32-process R-X page mapped at
+    `kWin32Thunks32Va = 0x60100000`. Distinct from the PE32+ thunks
+    page at 0x60000000 (whose bytes are x86_64 instructions —
+    decoding them in compat mode would trap immediately).
+  - Single stub today at offset 0: `SYS_EXIT(0xDEAD0042)`. Any
+    PE32 call to an unresolved Win32 import lands here and the
+    process destroys cleanly with the sentinel exit code.
+  - `ResolveImports`'s catch-all branch detects `h.is_pe32` and
+    routes unresolved imports to this stub instead of the 64-bit
+    catch-all VA (which isn't mapped for PE32 processes).
+  - Verified live: `userland/apps/pe32_miss/pe32_miss.c` calls
+    `user32!SetWindowsHookExA` (deliberately not stubbed), the
+    indirect call routes through the new thunk, the process exits
+    with rc=`0xDEAD0042`, boot continues.
+- **32-bit TEB + FSBASE** (`kernel/loader/pe_loader.cpp`,
+  `kernel/arch/x86_64/usermode.{S,h}`, `kernel/proc/ring3_smoke.cpp`).
+  - PeLoad's step4b TEB allocator branches on `h.is_pe32` and
+    writes the i386 NT_TIB layout:
+    ```
+    fs:[0x00] ExceptionList = 0xFFFFFFFF   (no SEH handler)
+    fs:[0x04] StackBase     = kV0StackTop
+    fs:[0x08] StackLimit    = kV0StackVa
+    fs:[0x18] Self          = TEB VA (u32)
+    fs:[0x30] PEB           = TEB VA (placeholder)
+    ```
+  - `EnterUserMode32` grows a third arg `user_fs_base` and issues
+    `wrmsr MSR_FS_BASE` (`0xC0000100`). The user's compat-mode
+    `mov eax, fs:[0x18]` then computes the linear address as
+    `(FSBASE + 0x18) = TEB + 0x18`, landing on the Self slot
+    rather than at linear 0x18.
+  - Boot log: `step4b teb mapped va=0x70000000 (pe32 fs-base)`.
+- **MSVC `__chkstk` / `_alloca_probe` / `_chkstk`** in `msvcrt_32`.
+  - Three `__declspec(naked)` entry points all using the same
+    body: `popl %ecx; subl %eax, %esp; pushl %ecx; ret`.
+  - MSVC emits a call to one of these in any function prologue
+    whose locals exceed a page, or that uses `_alloca`. On Windows
+    they walk pages from current ESP downward, committing each as
+    it goes; on DuetOS the entire stack is mapped up front so the
+    routine is functionally an ESP adjustment + return-addr
+    handoff. Real probing isn't needed — what matters is that the
+    MSVC-emitted call doesn't fault.
+
+The three existing PE32 fixtures plus the new pe32_miss all pass
+cleanly on every ring3 boot:
+
+```
+[pe-load] step4b teb mapped va=0x70000000 (pe32 fs-base)  ← x3
+[proc] destroy pid=8 name="ring3-pe32-smoke"
+[pe32-rich] all 13 DLLs exercised — exit rc=0x42
+[proc] destroy pid=9 name="ring3-pe32-rich"
+[proc] destroy pid=10 name="ring3-pe32-miss"  ← unresolved import handled
+[smoke] profile=ring3 complete
+```
+
+The pe32_miss `[proc] destroy` confirms an UNRESOLVED PE32 import
+now degrades to a clean exit (`rc=0xDEAD0042`) instead of the #PF
+that the same call previously produced. Combined with the 13-DLL
+preload set from Phase 6.15, the PE32 surface now has both branches
+of the via-DLL resolver (hit + miss) handled cleanly.
+
+What's still GAP:
+
+- **No per-import-name diagnostic** in the 32-bit thunk. All
+  unresolved imports exit with the same sentinel. A future slice
+  could emit per-slot stubs that log the IAT slot VA (decoded by
+  the kernel's StagedMissAppend table back to the function name)
+  before exiting.
+- **No PEB structure.** PE32 reads of `fs:[0x30]` get the TEB VA
+  back; dereferencing that produces zeros, which is fine for "did
+  this read succeed" checks but not for code that walks
+  PEB-relative fields (`fs:[0x30] + 0x18` = ImageBaseAddress,
+  `+0x0C` = Ldr, etc.). A proper PEB lands with the registry +
+  module-table slice.
+- **`__chkstk` doesn't actually probe.** Acceptable on a kernel
+  that maps the whole stack up front; a real MSVC PE32 with a
+  16+ MiB stack reservation would still fault when its first
+  spill writes past the mapped range. Stack-grow-on-fault is a
+  separate slice.
+- **File I/O still stubbed.** `msvcrt_32`'s `fopen` / `fread` /
+  `fwrite` / `fclose` return failure. The VFS-aware PE32 spawn
+  slice lands these the same time the 64-bit set gets its FS
+  routing.
 
 ## How to read the rest of the tree
 

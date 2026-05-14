@@ -1,0 +1,3 @@
+LIBRARY shlwapi.dll
+EXPORTS
+    PathAppendA

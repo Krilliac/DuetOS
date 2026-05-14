@@ -15,8 +15,10 @@ struct PerCpu;
  * reloads the segment registers so all downstream code runs against a
  * single canonical table.
  *
- * The GDT now holds 5 slots: null / kcode / kdata / TSS-low / TSS-high
- * (a long-mode TSS descriptor is 16 bytes, so it occupies two slots).
+ * The GDT now holds 9 slots: null / kcode / kdata / TSS-low / TSS-high /
+ * ucode64 / udata64 / ucode32 / udata32. Long-mode TSS descriptors are
+ * 16 bytes, so they occupy two slots. The 32-bit user descriptors back
+ * PE32 (i386) compatibility-mode execution.
  * `TssInit()` fills the TSS descriptor at runtime, initialises the TSS
  * body with per-IST stack pointers, and loads the task register.
  *
@@ -44,6 +46,13 @@ inline constexpr u16 kTssSelector = 0x18;
 // 0x28. Same for user data in slot 6 — 0x33, not 0x30.
 inline constexpr u16 kUserCodeSelector = 0x28 | 0x3;
 inline constexpr u16 kUserDataSelector = 0x30 | 0x3;
+// 32-bit user descriptors for PE32 (i386) compatibility-mode execution.
+// Slot 7 is 32-bit user code (D=1, L=0); slot 8 is 32-bit user data.
+// Loaded by EnterUserMode32 in usermode.S when the loader spawns a
+// PE32 image. The 64-bit kernel never references these for its own
+// code paths.
+inline constexpr u16 kUserCode32Selector = 0x38 | 0x3;
+inline constexpr u16 kUserData32Selector = 0x40 | 0x3;
 
 // IST indices are 1..7 in the IDT (0 means "use the RSP-for-this-DPL
 // from TSS"); we reserve 1..3 for the three critical faults.
@@ -128,7 +137,7 @@ bool IstStackCanariesIntact();
 Tss* BspTssPtr();
 
 /// Per-AP GDT bundle. Each AP needs:
-///   - a 7-entry GDT clone (so ltr can resolve TSS slot 3-4 to
+///   - a 9-entry GDT clone (so ltr can resolve TSS slot 3-4 to
 ///     the AP's own TSS rather than the BSP's),
 ///   - a Tss body (RSP0 + IST1..3 slots),
 ///   - three 4 KiB IST stacks (#DF, #MC, #NMI).

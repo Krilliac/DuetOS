@@ -1,0 +1,12 @@
+LIBRARY crypt32.dll
+EXPORTS
+    CertCloseStore
+    CertOpenStore
+    CertOpenSystemStoreA
+    CertDuplicateCertificateContext
+    CertEnumCertificatesInStore
+    CertFindCertificateInStore
+    CertFreeCertificateContext
+    CertGetCertificateContextProperty
+    CertGetEnhancedKeyUsage
+    CertGetIntendedKeyUsage

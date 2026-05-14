@@ -25,8 +25,17 @@ namespace
 constexpr u64 kGdtNull = 0x0000000000000000ULL;
 constexpr u64 kGdtKernelCode = 0x00AF9A000000FFFFULL;
 constexpr u64 kGdtKernelData = 0x00AF92000000FFFFULL;
+// 64-bit user code/data: access=0xFA/0xF2 (P, DPL=3, S, R/RW, code/data),
+// flags=0xA (G=1, L=1 for code, L ignored for data, D=0).
 constexpr u64 kGdtUserCode = 0x00AFFA000000FFFFULL;
 constexpr u64 kGdtUserData = 0x00AFF2000000FFFFULL;
+// 32-bit user code/data for compatibility-mode execution of PE32 (i386)
+// binaries. Same DPL=3 + S + R/RW bits, but the flags nibble is 0xC
+// (G=1, L=0, D=1) — D=1 = 32-bit default operand size + 32-bit stack
+// pointer width. Used by the loader path that maps a PE32 image and
+// enters it via EnterUserMode32 (kernel/arch/x86_64/usermode.S).
+constexpr u64 kGdtUserCode32 = 0x00CFFA000000FFFFULL;
+constexpr u64 kGdtUserData32 = 0x00CFF2000000FFFFULL;
 
 // Slots 3-4 hold the 16-byte TSS system descriptor, filled in at
 // runtime by TssInit. The initial 0s make them a null-present-bit
@@ -38,8 +47,17 @@ constexpr u64 kGdtUserData = 0x00AFF2000000FFFFULL;
 // up in the GDT, and checks DPL/RPL/permission bits. An iretq with
 // CS == kUserCodeSelector with the matching DPL=3 descriptor absent
 // raises #GP(selector).
-alignas(16) constinit u64 g_gdt[7] = {
-    kGdtNull, kGdtKernelCode, kGdtKernelData, 0, 0, kGdtUserCode, kGdtUserData,
+// GDT layout (9 entries):
+//   0: NULL
+//   1: kernel code (long mode)
+//   2: kernel data
+//   3-4: TSS descriptor (filled by TssInit)
+//   5: user code (long mode, DPL=3) — kUserCodeSelector = 0x28|3 = 0x2B
+//   6: user data (DPL=3)            — kUserDataSelector = 0x30|3 = 0x33
+//   7: user code 32-bit (DPL=3)     — kUserCode32Selector = 0x38|3 = 0x3B
+//   8: user data 32-bit (DPL=3)     — kUserData32Selector = 0x40|3 = 0x43
+alignas(16) constinit u64 g_gdt[9] = {
+    kGdtNull, kGdtKernelCode, kGdtKernelData, 0, 0, kGdtUserCode, kGdtUserData, kGdtUserCode32, kGdtUserData32,
 };
 
 struct [[gnu::packed]] GdtPointer
@@ -214,10 +232,10 @@ ApGdtBundle* AllocateApGdt(cpu::PerCpu* pcpu)
     }
     *bundle = {};
 
-    // 7-entry GDT clone — same layout as BSP's g_gdt. Slots 3-4
+    // 9-entry GDT clone — same layout as BSP's g_gdt. Slots 3-4
     // are the TSS descriptor; we fill them after allocating the
     // AP's TSS so the descriptor's base field can point at it.
-    constexpr u64 kGdtSlots = 7;
+    constexpr u64 kGdtSlots = 9;
     auto* ap_gdt = static_cast<u64*>(mm::KMalloc(kGdtSlots * sizeof(u64)));
     if (ap_gdt == nullptr)
     {
@@ -231,6 +249,8 @@ ApGdtBundle* AllocateApGdt(cpu::PerCpu* pcpu)
     ap_gdt[4] = 0; // filled below
     ap_gdt[5] = kGdtUserCode;
     ap_gdt[6] = kGdtUserData;
+    ap_gdt[7] = kGdtUserCode32;
+    ap_gdt[8] = kGdtUserData32;
 
     auto* ap_tss = static_cast<Tss*>(mm::KMalloc(sizeof(Tss)));
     if (ap_tss == nullptr)

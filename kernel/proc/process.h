@@ -270,6 +270,16 @@ struct Process
     // look at gs-relative addresses.
     u64 user_gs_base;
 
+    // True iff this process is a PE32 (i386) image. Drives the
+    // ring-3 entry-mode pick: PE32 tasks enter compat mode via
+    // arch::EnterUserMode32 (CS=0x3B, D=1, L=0); PE32+ tasks enter
+    // long mode via arch::EnterUserModeWithGs (CS=0x2B, L=1).
+    // The kernel's int 0x80 dispatcher detects the same bit from
+    // the trap-frame CS at every syscall and remaps the i386
+    // register convention to the SysV AMD64 slots the C++
+    // SyscallDispatch expects.
+    bool user_is_pe32;
+
     // CPU-tick budget. tick_budget is a hard cap; ticks_used is
     // incremented by the timer IRQ for every tick this process's
     // task(s) were currently-running. When ticks_used >= tick_budget,

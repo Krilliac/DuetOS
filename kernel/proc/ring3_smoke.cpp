@@ -62,7 +62,22 @@
 #include "generated_dbghelp_dll.h"
 #include "generated_dxgi_dll.h"
 #include "generated_gdi32_dll.h"
+#include "generated_advapi32_32_dll.h"
+#include "generated_bcrypt_32_dll.h"
+#include "generated_comctl32_32_dll.h"
+#include "generated_comdlg32_32_dll.h"
+#include "generated_crypt32_32_dll.h"
+#include "generated_gdi32_32_dll.h"
+#include "generated_iphlpapi_32_dll.h"
+#include "generated_kernel32_32_dll.h"
 #include "generated_kernel32_dll.h"
+#include "generated_msvcrt_32_dll.h"
+#include "generated_pe32_miss_pe.h"
+#include "generated_pe32_rich_pe.h"
+#include "generated_shell32_32_dll.h"
+#include "generated_shlwapi_32_dll.h"
+#include "generated_user32_32_dll.h"
+#include "generated_ws2_32_32_dll.h"
 #include "generated_kernelbase_dll.h"
 #include "generated_msvcp140_dll.h"
 #include "generated_msvcrt_dll.h"
@@ -107,6 +122,8 @@
 #include "generated_env_smoke_pe.h"
 #include "generated_fs_smoke_pe.h"
 #include "generated_handle_smoke_pe.h"
+#include "generated_browser_pe_pe.h"
+#include "generated_pe32_smoke_pe.h"
 #include "generated_iphlpapi_smoke_pe.h"
 #include "generated_mem_smoke_pe.h"
 #include "generated_minibrowser_pe.h"
@@ -581,6 +598,8 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     SerialWriteHex(code_va);
     SerialWrite(" rsp=");
     SerialWriteHex(stack_top);
+    if (proc->user_is_pe32)
+        SerialWrite(" mode=pe32");
     if (proc->user_gs_base != 0)
     {
         SerialWrite(" gs_base=");
@@ -588,6 +607,15 @@ void WriteUserCodeFrame(mm::PhysAddr frame, u64 code_va, u64 stack_va)
     }
     SerialWrite("\n");
 
+    if (proc->user_is_pe32)
+    {
+        // PE32 (i386) task: enter compat mode via the 32-bit user
+        // CS (0x3B). FSBASE = TEB VA so fs:[0x18] (Self) /
+        // fs:[0x30] (PEB) reads in compat mode hit the TEB page
+        // the loader mapped at proc->user_gs_base. Pass via rdx
+        // (third arg).
+        arch::EnterUserMode32(code_va, stack_top, proc->user_gs_base);
+    }
     arch::EnterUserModeWithGs(code_va, stack_top, proc->user_gs_base);
 }
 
@@ -2266,6 +2294,10 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         SerialWrite("\n");
         return 0;
     }
+    // Bitness probe: drives the preload-set pick below. PE32 (i386)
+    // images get the i386 DLL set (currently just kernel32_32.dll);
+    // PE32+ images get the existing 44-DLL preload list.
+    const bool pe_is_pe32 = duetos::core::PeIsPe32(pe_bytes, pe_len);
     AddressSpace* as = AddressSpaceCreate(frame_budget);
     if (as == nullptr)
     {
@@ -2484,6 +2516,51 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     constexpr u64 kPreloadEntryCount = sizeof(preload_set) / sizeof(preload_set[0]);
     static_assert(kPreloadEntryCount <= kPreloadSlotCap, "Preload DLL list exceeds stack-local cap");
 
+    // 32-bit (PE32) preload set. Today just one entry —
+    // kernel32_32.dll — enough for pe32_smoke's ExitProcess
+    // import. Grows as PE32 callers need more. Mapped at the same
+    // ImageBase the DLL was built with (low 4 GiB).
+    static const PreloadDllEntry preload_set_pe32[] = {
+        {"kernel32.dll", fs::generated::kBinKernel32_32DllBytes, fs::generated::kBinKernel32_32DllBytes_len,
+         /*essential=*/true},
+        {"msvcrt.dll", fs::generated::kBinMsvcrt_32DllBytes, fs::generated::kBinMsvcrt_32DllBytes_len,
+         /*essential=*/true},
+        {"user32.dll", fs::generated::kBinUser32_32DllBytes, fs::generated::kBinUser32_32DllBytes_len,
+         /*essential=*/true},
+        {"gdi32.dll", fs::generated::kBinGdi32_32DllBytes, fs::generated::kBinGdi32_32DllBytes_len,
+         /*essential=*/true},
+        /* All PE32 stubs marked essential — they're each ~2-3 KiB
+         * and DllLoad is microseconds. Skipping any of them under
+         * emulator would leave the PE32 IAT walker falling back to
+         * the (unmapped-for-PE32) Win32 thunks catch-all on every
+         * unresolved import, defeating the whole point of the
+         * 32-bit DLL set. */
+        {"advapi32.dll", fs::generated::kBinAdvapi32_32DllBytes, fs::generated::kBinAdvapi32_32DllBytes_len,
+         /*essential=*/true},
+        {"comctl32.dll", fs::generated::kBinComctl32_32DllBytes, fs::generated::kBinComctl32_32DllBytes_len,
+         /*essential=*/true},
+        {"comdlg32.dll", fs::generated::kBinComdlg32_32DllBytes, fs::generated::kBinComdlg32_32DllBytes_len,
+         /*essential=*/true},
+        {"crypt32.dll", fs::generated::kBinCrypt32_32DllBytes, fs::generated::kBinCrypt32_32DllBytes_len,
+         /*essential=*/true},
+        {"iphlpapi.dll", fs::generated::kBinIphlpapi_32DllBytes, fs::generated::kBinIphlpapi_32DllBytes_len,
+         /*essential=*/true},
+        {"shell32.dll", fs::generated::kBinShell32_32DllBytes, fs::generated::kBinShell32_32DllBytes_len,
+         /*essential=*/true},
+        {"shlwapi.dll", fs::generated::kBinShlwapi_32DllBytes, fs::generated::kBinShlwapi_32DllBytes_len,
+         /*essential=*/true},
+        {"ws2_32.dll", fs::generated::kBinWs2_32_32DllBytes, fs::generated::kBinWs2_32_32DllBytes_len,
+         /*essential=*/true},
+        {"bcrypt.dll", fs::generated::kBinBcrypt_32DllBytes, fs::generated::kBinBcrypt_32DllBytes_len,
+         /*essential=*/true},
+    };
+    constexpr u64 kPreloadPe32EntryCount = sizeof(preload_set_pe32) / sizeof(preload_set_pe32[0]);
+    static_assert(kPreloadPe32EntryCount <= kPreloadSlotCap, "PE32 preload list exceeds cap");
+
+    // Pick the bitness-correct list.
+    const PreloadDllEntry* active_set = pe_is_pe32 ? preload_set_pe32 : preload_set;
+    const u64 active_count = pe_is_pe32 ? kPreloadPe32EntryCount : kPreloadEntryCount;
+
     // Intentionally NOT value-initialised: zero-init of a 4-entry
     // DllImage array (~400 bytes) makes clang emit memset, which
     // the kernel doesn't link. We only ever read entries
@@ -2493,7 +2570,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     u64 preloaded_count = 0;
     if (vs == PeStatus::ImportsPresent)
     {
-        for (u64 i = 0; i < kPreloadEntryCount; ++i)
+        for (u64 i = 0; i < active_count; ++i)
         {
             // Under emulator: only preload entries marked
             // essential. The 3 PEs the boot smoke actually
@@ -2504,7 +2581,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             // a stub that the runtime never reaches. Skipping
             // them here trims ~26 DllLoads × 2 import-bearing PEs
             // off the post-bringup wall budget.
-            if (emulator_pe_report && !preload_set[i].essential)
+            if (emulator_pe_report && !active_set[i].essential)
             {
                 continue;
             }
@@ -2521,7 +2598,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             // points into the first DLL's range now reads garbage
             // — typically manifesting as a ring-3 #GP/#UD/#PF at a
             // valid-looking RIP inside a previously-loaded DLL.
-            const bool dll_dynamic_base = duetos::core::PeIsDynamicBase(preload_set[i].bytes, preload_set[i].len);
+            const bool dll_dynamic_base = duetos::core::PeIsDynamicBase(active_set[i].bytes, active_set[i].len);
             u64 dll_aslr_delta = 0;
             DllLoadResult dll{};
             dll.status = DllLoadStatus::HeaderParseFailed;
@@ -2534,12 +2611,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 // for overlap with already-loaded DLLs without
                 // actually mapping pages. PeImageSizeOf returns 0
                 // on parse failure; let DllLoad re-detect that.
-                const u64 trial_size = duetos::core::PeImageSizeOf(preload_set[i].bytes, preload_set[i].len);
-                const u64 trial_pref = duetos::core::PePreferredBaseOf(preload_set[i].bytes, preload_set[i].len);
+                const u64 trial_size = duetos::core::PeImageSizeOf(active_set[i].bytes, active_set[i].len);
+                const u64 trial_pref = duetos::core::PePreferredBaseOf(active_set[i].bytes, active_set[i].len);
                 if (trial_size == 0 || trial_pref == 0)
                 {
                     dll_aslr_delta = trial_delta;
-                    dll = DllLoad(preload_set[i].bytes, preload_set[i].len, as, dll_aslr_delta);
+                    dll = DllLoad(active_set[i].bytes, active_set[i].len, as, dll_aslr_delta);
                     break;
                 }
                 const u64 trial_base = trial_pref + trial_delta;
@@ -2565,7 +2642,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                         continue;
                 }
                 dll_aslr_delta = trial_delta;
-                dll = DllLoad(preload_set[i].bytes, preload_set[i].len, as, dll_aslr_delta);
+                dll = DllLoad(active_set[i].bytes, active_set[i].len, as, dll_aslr_delta);
                 break;
             }
             if (dll.status == DllLoadStatus::Ok)
@@ -2573,7 +2650,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 preloaded_dlls[preloaded_count] = dll.image;
                 ++preloaded_count;
                 SerialWrite("[ring3] pre-loaded ");
-                SerialWrite(preload_set[i].label);
+                SerialWrite(active_set[i].label);
                 SerialWrite(" base=");
                 SerialWriteHex(dll.image.base_va);
                 SerialWrite(" aslr_delta=");
@@ -2583,7 +2660,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             else
             {
                 SerialWrite("[ring3] ");
-                SerialWrite(preload_set[i].label);
+                SerialWrite(active_set[i].label);
                 SerialWrite(" DllLoad failed for \"");
                 SerialWrite(name);
                 SerialWrite("\" status=");
@@ -2633,6 +2710,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // satisfying the 16n+8 rule.
     proc->user_rsp_init = r.stack_top - 0x48;
     proc->user_gs_base = r.teb_va;
+    proc->user_is_pe32 = r.is_pe32;
     /* Record the post-ASLR EXE base so SYS_DLL_BASE_BY_NAME
      * with an empty / NULL name can return it for
      * GetModuleHandleW(NULL). */
@@ -2834,6 +2912,32 @@ bool SpawnOnDemand(const char* kind)
         // exactly which WS2_32 thunks are missing and to drive
         // their implementation iteratively.
         SpawnPeFile("ring3-mini-browser", fs::generated::kBinMiniBrowserBytes, fs::generated::kBinMiniBrowserBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
+    if (LocalStrEq(kind, "browser2") || LocalStrEq(kind, "wininet"))
+    {
+        // browser_pe.exe — WinInet-based browser. Imports kernel32 +
+        // wininet; the kernel-side wininet thunks do real HTTP/1.1
+        // GET via the same kernel socket pool ws2_32 uses. Prints
+        // status code, content-type, content-length, and the first
+        // body line for each of three URLs.
+        SpawnPeFile("ring3-browser-pe", fs::generated::kBinBrowserPeBytes, fs::generated::kBinBrowserPeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        return true;
+    }
+    if (LocalStrEq(kind, "pe32"))
+    {
+        // pe32_smoke.exe — minimal PE32 (i386) test image. The
+        // kernel's loader recognises PE32 (Layer 1 of 32-bit PE
+        // support) but rejects MapAndRun with the typed status
+        // `PeStatus::Pe32ExecutionNotReady` until Layers 4 (i386
+        // DLL set) and 5 (pointer marshalling) land. The boot
+        // log carries a "loader/pe:Pe32ExecutionNotReady" pin so
+        // the reject signal is visible. SpawnPeFile's diagnostic
+        // PeReport pre-pass walks the PE32's headers + imports so
+        // the gap inventory is filled out from the live boot.
+        SpawnPeFile("ring3-pe32-smoke", fs::generated::kBinPe32SmokeBytes, fs::generated::kBinPe32SmokeBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
@@ -3053,6 +3157,25 @@ void StartRing3SmokeTask()
     //     under TCG.
     if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::Ring3))
     {
+        // pe32_smoke.exe runs in BOTH emulator and bare metal — it's
+        // a single tiny image (~6 KiB) and the loader rejects it
+        // immediately with Pe32ExecutionNotReady, so it costs
+        // microseconds of CPU and adds one diagnostic line to the
+        // boot transcript. Keeping it always-on means CI catches
+        // any regression in the Layer 1..3 PE32 recognition path.
+        SpawnPeFile("ring3-pe32-smoke", fs::generated::kBinPe32SmokeBytes, fs::generated::kBinPe32SmokeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // pe32_rich — exercises one import per preloaded i386 DLL.
+        // Boot transcript shows a "[pe-resolve] via-dll" line for
+        // each, plus "[pe32-rich] <dll> ok" runtime confirmation,
+        // proving the full Layer 4 surface works end-to-end.
+        SpawnPeFile("ring3-pe32-rich", fs::generated::kBinPe32RichBytes, fs::generated::kBinPe32RichBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // pe32_miss — calls an unresolved Win32 import to validate
+        // the 32-bit Win32 thunks page. Process exits with code
+        // 0xDEAD0042 in the boot log.
+        SpawnPeFile("ring3-pe32-miss", fs::generated::kBinPe32MissBytes, fs::generated::kBinPe32MissBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         if (!emulator)
         {
             // mini_browser.exe — minimal WinSock 2 PE that does an HTTP/1.0
@@ -3077,6 +3200,13 @@ void StartRing3SmokeTask()
             SpawnPeFile("ring3-wininet-smoke", fs::generated::kBinWininetSmokeBytes,
                         fs::generated::kBinWininetSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                         mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+            // browser_pe.exe — WinInet-based browser. Drives the same
+            // Open → Connect → Request → Send → Read → Close flow any
+            // real Win32 browser uses, layered on userland/libs/wininet
+            // (which now performs real HTTP/1.1 GETs over the kernel
+            // socket pool rather than returning a canned response).
+            SpawnPeFile("ring3-browser-pe", fs::generated::kBinBrowserPeBytes, fs::generated::kBinBrowserPeBytes_len,
+                        CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
             SpawnPeFile("ring3-string-smoke", fs::generated::kBinStringSmokeBytes,
                         fs::generated::kBinStringSmokeBytes_len, CapSetTrusted(), fs::RamfsTrustedRoot(),
                         mm::kFrameBudgetTrusted, kTickBudgetTrusted);

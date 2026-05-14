@@ -30,9 +30,13 @@ struct DuetosPeImage
     u32 opt_base;
     u32 image_size;
     u32 entry_rva;
-    u32 _pad1;
+    u8 is_pe32; // 1 = PE32 (i386), 0 = PE32+ (AMD64)
+    u8 _pad1a;
+    u16 _pad1b;
     u64 image_base;
     u32 section_base;
+    u32 data_dir_offset;         // offset of data-directory array inside opt header
+    u32 number_of_rva_and_sizes; // count of data directories
     u32 _pad2;
 };
 

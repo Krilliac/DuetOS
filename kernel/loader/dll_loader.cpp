@@ -30,19 +30,33 @@ inline u64 LeU64(const u8* p)
 constexpr u16 kDosMagic = 0x5A4D;
 constexpr u32 kPeSignature = 0x00004550;
 constexpr u16 kMachineAmd64 = 0x8664;
+constexpr u16 kMachineI386 = 0x014C;
 constexpr u16 kOptMagicPe32Plus = 0x020B;
+constexpr u16 kOptMagicPe32 = 0x010B;
 constexpr u16 kCharacteristicsDll = 0x2000;
 constexpr u64 kFileHeaderSize = 20;
 constexpr u64 kFileHeaderCharacteristics = 18;
 
 constexpr u64 kOptHeaderAddressOfEntryPoint = 16;
-constexpr u64 kOptHeaderImageBase = 24;
+// PE32+ offsets (used when OptHdrMagic == 0x020B).
+constexpr u64 kOptHeaderImageBasePe32Plus = 24; // u64
+constexpr u64 kOptHeaderNumberOfRvaAndSizesPe32Plus = 108;
+constexpr u64 kOptHeaderDataDirectoriesPe32Plus = 112;
+// PE32 offsets (used when OptHdrMagic == 0x010B). The optional-header
+// shape diverges because BaseOfData (PE32 only, u32 at 24) and the
+// four stack/heap reserve/commit slots (u32 in PE32, u64 in PE32+)
+// shift everything past offset 72.
+constexpr u64 kOptHeaderImageBasePe32 = 28; // u32
+constexpr u64 kOptHeaderNumberOfRvaAndSizesPe32 = 92;
+constexpr u64 kOptHeaderDataDirectoriesPe32 = 96;
+// Common between PE32 and PE32+: BaseOfData (PE32 only) lives in the
+// PE32 layout's u32 slot at 24, while the upper half of PE32+'s u64
+// ImageBase occupies the same bytes — both fall through to the
+// SectionAlignment/FileAlignment/SizeOfImage/SizeOfHeaders block at 32.
 constexpr u64 kOptHeaderSectionAlignment = 32;
 constexpr u64 kOptHeaderFileAlignment = 36;
 constexpr u64 kOptHeaderSizeOfImage = 56;
 constexpr u64 kOptHeaderSizeOfHeaders = 60;
-constexpr u64 kOptHeaderNumberOfRvaAndSizes = 108;
-constexpr u64 kOptHeaderDataDirectories = 112;
 constexpr u64 kDataDirEntrySize = 8;
 constexpr u64 kSectionHeaderSize = 40;
 constexpr u64 kSectionHeaderVirtualSize = 8;
@@ -67,6 +81,10 @@ struct DllHeaders
     u16 section_count;
     u16 characteristics;
     u32 num_rva_and_sizes;
+    // Bitness picked up from OptHdrMagic; drives layout-dependent
+    // offsets (ImageBase u32 vs u64, data-directory array offset).
+    bool is_pe32;
+    u64 data_dir_offset;
 
     u64 image_base;
     u64 image_size;
@@ -91,8 +109,11 @@ bool ParseHeaders(const u8* file, u64 file_len, DllHeaders& out)
     if (LeU32(file + e_lfanew) != kPeSignature)
         return false;
     const u8* fh = file + e_lfanew + 4;
-    if (LeU16(fh + 0) != kMachineAmd64)
-        return false;
+    {
+        const u16 machine = LeU16(fh + 0);
+        if (machine != kMachineAmd64 && machine != kMachineI386)
+            return false;
+    }
     out.section_count = LeU16(fh + 2);
     out.opt_header_size = LeU16(fh + 16);
     out.characteristics = LeU16(fh + kFileHeaderCharacteristics);
@@ -100,12 +121,33 @@ bool ParseHeaders(const u8* file, u64 file_len, DllHeaders& out)
     if (out.opt_base > file_len || out.opt_header_size > file_len - out.opt_base)
         return false;
     const u8* opt = file + out.opt_base;
-    if (LeU16(opt) != kOptMagicPe32Plus)
+    const u16 opt_magic = LeU16(opt);
+    u64 image_base_off = 0;
+    u64 n_rva_off = 0;
+    u64 dd_off = 0;
+    if (opt_magic == kOptMagicPe32Plus)
+    {
+        out.is_pe32 = false;
+        image_base_off = kOptHeaderImageBasePe32Plus;
+        n_rva_off = kOptHeaderNumberOfRvaAndSizesPe32Plus;
+        dd_off = kOptHeaderDataDirectoriesPe32Plus;
+    }
+    else if (opt_magic == kOptMagicPe32)
+    {
+        out.is_pe32 = true;
+        image_base_off = kOptHeaderImageBasePe32;
+        n_rva_off = kOptHeaderNumberOfRvaAndSizesPe32;
+        dd_off = kOptHeaderDataDirectoriesPe32;
+    }
+    else
+    {
         return false;
-    if (out.opt_header_size < kOptHeaderNumberOfRvaAndSizes + 4)
+    }
+    if (out.opt_header_size < n_rva_off + 4)
         return false;
-    out.num_rva_and_sizes = LeU32(opt + kOptHeaderNumberOfRvaAndSizes);
-    out.image_base = LeU64(opt + kOptHeaderImageBase);
+    out.num_rva_and_sizes = LeU32(opt + n_rva_off);
+    out.data_dir_offset = dd_off;
+    out.image_base = out.is_pe32 ? u64(LeU32(opt + image_base_off)) : LeU64(opt + image_base_off);
     out.image_size = LeU32(opt + kOptHeaderSizeOfImage);
     out.sizeof_headers = LeU32(opt + kOptHeaderSizeOfHeaders);
     out.entry_rva = LeU32(opt + kOptHeaderAddressOfEntryPoint);
@@ -286,12 +328,12 @@ bool ApplyRelocations(const u8* file, u64 file_len, const DllHeaders& h, duetos:
 
     const u8* opt = file + h.opt_base;
     const u64 dir_bytes = u64(h.num_rva_and_sizes) * kDataDirEntrySize;
-    if (kOptHeaderDataDirectories + dir_bytes > h.opt_header_size)
+    if (h.data_dir_offset + dir_bytes > h.opt_header_size)
         return true; // no reloc dir in header — treat as empty
     if (kDirEntryBaseReloc >= h.num_rva_and_sizes)
         return true;
-    const u32 br_rva = LeU32(opt + kOptHeaderDataDirectories + kDirEntryBaseReloc * kDataDirEntrySize + 0);
-    const u32 br_sz = LeU32(opt + kOptHeaderDataDirectories + kDirEntryBaseReloc * kDataDirEntrySize + 4);
+    const u32 br_rva = LeU32(opt + h.data_dir_offset + kDirEntryBaseReloc * kDataDirEntrySize + 0);
+    const u32 br_sz = LeU32(opt + h.data_dir_offset + kDirEntryBaseReloc * kDataDirEntrySize + 4);
     if (br_rva == 0 || br_sz == 0)
         return true;
 
@@ -323,8 +365,12 @@ bool ApplyRelocations(const u8* file, u64 file_len, const DllHeaders& h, duetos:
             const u16 type = entry >> 12;
             const u16 offset = entry & 0x0FFF;
             if (type == 0)
-                continue;   // padding
-            if (type != 10) // IMAGE_REL_BASED_DIR64
+                continue; // padding
+            // Two real types: 10 = IMAGE_REL_BASED_DIR64 (PE32+, 8 bytes)
+            // and 3 = IMAGE_REL_BASED_HIGHLOW (PE32, 4 bytes).
+            const bool is_highlow = (type == 3);
+            const bool is_dir64 = (type == 10);
+            if (!is_highlow && !is_dir64)
             {
                 SerialWrite("[dll-load] unsupported reloc type=");
                 SerialWriteHex(type);
@@ -334,8 +380,9 @@ bool ApplyRelocations(const u8* file, u64 file_len, const DllHeaders& h, duetos:
             if (delta == 0)
                 continue;
             const u64 patch_va = base_va + u64(page_rva) + u64(offset);
+            const u64 patch_bytes = is_highlow ? 4 : 8;
             u64 orig = 0;
-            for (u64 b = 0; b < 8; ++b)
+            for (u64 b = 0; b < patch_bytes; ++b)
             {
                 const u64 va = patch_va + b;
                 const u64 page_va = va & ~0xFFFULL;
@@ -349,7 +396,7 @@ bool ApplyRelocations(const u8* file, u64 file_len, const DllHeaders& h, duetos:
                 orig |= u64(direct[va & 0xFFFULL]) << (b * 8);
             }
             const u64 fixed = orig + delta;
-            for (u64 b = 0; b < 8; ++b)
+            for (u64 b = 0; b < patch_bytes; ++b)
             {
                 const u64 va = patch_va + b;
                 const u64 page_va = va & ~0xFFFULL;

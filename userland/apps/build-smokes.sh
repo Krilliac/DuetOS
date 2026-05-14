@@ -41,6 +41,7 @@ COMMON_FLAGS=(
 
 declare -A APPS=(
     [mini_browser]="-lkernel32 -lws2_32"
+    [browser_pe]="-lkernel32 -lwininet"
     [crypto_smoke]="-lkernel32 -lbcrypt -ladvapi32"
     [paths_smoke]="-lkernel32 -lshlwapi"
     [time_smoke]="-lkernel32 -lwinmm"

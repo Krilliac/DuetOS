@@ -136,12 +136,42 @@ inline constexpr u64 kWin32ThunksVa = 0x60000000ULL;
 // (which issues SYS_EXIT(retcode)) rather than #PF'ing at rip=0.
 inline constexpr u64 kWin32ThreadExitTrampVa = kWin32ThunksVa + 0x8A6ULL;
 
+// 32-bit Win32 thunks page for PE32 (i386) processes. Mapped at a
+// distinct user VA in the low 4 GiB so the 32-bit code segment can
+// reach it. PE32 processes don't get the PE32+ thunks page (its
+// bytes are x86_64 instructions; decoding them in compat mode would
+// trap immediately), so the ResolveImports catch-all fallback for
+// PE32 binaries points at a stub inside THIS page instead.
+inline constexpr u64 kWin32Thunks32Va = 0x60100000ULL;
+
+// Offset of the "unresolved-import" stub within the 32-bit page.
+// Single shared stub: SYS_EXIT(0xDEAD_0042) so any PE32 call to an
+// unresolved import terminates the process cleanly with a readable
+// signature in the [proc] destroy / exit-rc log line. Stack
+// corruption from stdcall callee-pop mismatch is bounded because
+// the process exits before another frame runs.
+inline constexpr u64 kWin32Thunks32UnresolvedOffset = 0x0ULL;
+inline constexpr u64 kWin32Thunks32UnresolvedVa = kWin32Thunks32Va + kWin32Thunks32UnresolvedOffset;
+
 /// Copy the compiled thunk bytes into `dst`. Caller supplies a
 /// 2 * kPageSize buffer; we write exactly sizeof(kThunksBytes)
 /// bytes starting at offset 0, leaving the rest zero. The page
 /// must subsequently be mapped R-X at kWin32ThunksVa in the
 /// process's address space.
 void Win32ThunksPopulate(u8* dst);
+
+/// Populate the 32-bit Win32 thunks page. One stub today: the
+/// unresolved-import handler at offset kWin32Thunks32UnresolvedOffset.
+/// The byte sequence is:
+///   B8 42 00 AD DE   mov eax, 0xDEAD0042
+///   BB 42 00 AD DE   mov ebx, 0xDEAD0042  (SYS_EXIT arg1)
+///   CD 80            int 0x80               (SYS_EXIT)
+///   F4               hlt                    (unreachable / panic
+///                                            if SYS_EXIT ever
+///                                            returns)
+/// Caller supplies a kPageSize buffer; the page must subsequently
+/// be mapped R-X at kWin32Thunks32Va in the PE32 process's AS.
+void Win32Thunks32Populate(u8* dst);
 
 /// Resolve an imported function to its thunk's user VA. Returns
 /// true and writes to *out_va if the {dll, func} pair is known;

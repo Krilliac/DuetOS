@@ -1,0 +1,53 @@
+; kernel32_32.def — sets the PE export-table Name field to "kernel32.dll"
+; (the string the PE32 IAT walker compares against the importer's
+; descriptor DLL name) while keeping the file basename
+; kernel32_32.dll so it can coexist with the 64-bit kernel32.dll
+; in build/embed paths.
+LIBRARY kernel32.dll
+
+EXPORTS
+    ExitProcess
+    TerminateProcess
+    GetCurrentProcessId
+    GetCurrentThreadId
+    GetCurrentProcess
+    GetCurrentThread
+    GetLastError
+    SetLastError
+    GetStdHandle
+    WriteFile
+    WriteConsoleA
+    WriteConsoleW
+    GetModuleHandleA
+    GetModuleHandleW
+    GetProcAddress
+    LoadLibraryA
+    LoadLibraryW
+    FreeLibrary
+    Sleep
+    GetTickCount
+    GetProcessHeap
+    HeapAlloc
+    HeapFree
+    HeapSize
+    HeapReAlloc
+    GetCommandLineA
+    GetCommandLineW
+    GetStartupInfoA
+    GetStartupInfoW
+    GetFileType
+    InitializeCriticalSection
+    EnterCriticalSection
+    LeaveCriticalSection
+    DeleteCriticalSection
+    InitializeCriticalSectionAndSpinCount
+    IsDebuggerPresent
+    IsProcessorFeaturePresent
+    SetUnhandledExceptionFilter
+    UnhandledExceptionFilter
+    CloseHandle
+    GetVersion
+    InterlockedIncrement
+    InterlockedDecrement
+    InterlockedExchange
+    InterlockedCompareExchange

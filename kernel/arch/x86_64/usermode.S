@@ -211,5 +211,119 @@ EnterUserModeThread:
     ud2
 .size EnterUserModeThread, . - EnterUserModeThread
 
+/* EnterUserMode32: enter ring 3 in 32-bit compatibility mode for
+ * PE32 (i386) workloads. Builds an iretq frame with the 32-bit
+ * user code (0x3B) + data (0x43) selectors from gdt.h. The slots
+ * pushed are still 8 bytes each — that's the iretq layout
+ * regardless of the destination bitness; the CPU sign/zero-extends
+ * as needed when it pops them into 32-bit registers.
+ *
+ *   rdi = user_eip   (32-bit entry point; high bits ignored)
+ *   rsi = user_esp   (32-bit stack pointer; high bits ignored)
+ *   rdx = user_fs_base (TEB VA, 32-bit; high bits ignored. Set
+ *                        via wrmsr MSR_FS_BASE so fs:[0x18] /
+ *                        fs:[0x30] reads in compat-mode hit the
+ *                        TEB page the PE loader mapped at this
+ *                        VA. Zero leaves FSBASE at whatever the
+ *                        `mov fs, ax` descriptor load set, which
+ *                        is the descriptor's base field = 0.)
+ *
+ * Contract is otherwise identical to EnterUserMode:
+ *   - caller mapped the code/stack pages with kPageUser
+ *   - caller mapped the TEB page (if user_fs_base != 0) with
+ *     kPageUser + kPageWritable
+ *   - caller called TssSetRsp0 with the kernel-side stack top
+ */
+.global EnterUserMode32
+.type EnterUserMode32, @function
+EnterUserMode32:
+    endbr64
+
+    cli
+
+    /* swapgs BEFORE we reload gs so the kernel's per-CPU pointer
+     * lands in KERNEL_GS_BASE. The `mov gs, ax` below loads the
+     * hidden GSBASE from the user data descriptor (base=0); without
+     * the stash, the next int 0x80 from ring 3 would swapgs to a
+     * stale or zero KERNEL_GS_BASE and any per-CPU read (cpu::Curre
+     * ntCpu(), TssSetRsp0's per-CPU TSS lookup, the syscall arg
+     * remap's scratch state) would deref 0 — recursive #PF.
+     *
+     * Mirror of the 64-bit EnterUserModeWithGs's swapgs gate. The
+     * isr_common entry path's matching swapgs on user→kernel
+     * transition restores the kernel pcpu pointer on every trap. */
+    swapgs
+
+    /* Load user data selector. Use the 32-bit user data segment
+     * (0x43) for DS/ES/FS/GS so the segment-descriptor base + limit
+     * cached by the load matches the 32-bit segment shape. SS is
+     * set by iretq from the frame.
+     *
+     * Compat-mode code uses FS-relative TEB reads, not GS-relative
+     * (which is the 64-bit Windows convention). The 32-bit DLL
+     * preload slice (Layer 4) will wrmsr FSBASE for those reads; for
+     * now the kernel-side GSBASE swap above is all the pe32_smoke
+     * fixture needs to round-trip through int 0x80 cleanly. */
+    mov     ax, 0x43                /* kUserData32Selector */
+    mov     ds, ax
+    mov     es, ax
+    mov     fs, ax
+    mov     gs, ax
+
+    /* Set FSBASE via wrmsr if the caller asked for a non-zero TEB
+     * VA. The `mov fs, ax` above reloaded the hidden FSBASE from
+     * the user data descriptor (base=0); MSR_FS_BASE (0xC0000100)
+     * is the only way to override that to a non-zero value in
+     * long mode. Compat-mode code does `mov eax, fs:[0x18]` and
+     * the CPU computes the linear address as (FSBASE + 0x18) — so
+     * with FSBASE = TEB VA, the read lands at the TEB's
+     * NT_TIB.Self slot. Clobbers rax/rcx/rdx; rdi/rsi preserved
+     * for the iretq frame below. Skip the wrmsr if rdx == 0 (no
+     * TEB) so legacy callers don't pay the MSR write. */
+    test    rdx, rdx
+    jz      1f
+    mov     rax, rdx                /* low 32 */
+    shr     rdx, 32                 /* high 32 (will be 0 for a 32-bit VA) */
+    mov     ecx, 0xC0000100         /* MSR_FS_BASE */
+    wrmsr
+1:
+
+    /* Build the iretq frame:
+     *   [rsp+0]  : EIP    <- user entry point (low 32)
+     *   [rsp+8]  : CS     <- kUserCode32Selector (0x3B)
+     *   [rsp+16] : RFLAGS <- 0x202 (IF=1 + reserved)
+     *   [rsp+24] : ESP    <- user stack (low 32)
+     *   [rsp+32] : SS     <- kUserData32Selector (0x43)
+     *
+     * The push order is reverse — SS first (highest addr), RIP
+     * last (lowest). */
+    push    0x43                    /* SS = kUserData32Selector */
+    push    rsi                     /* user ESP (low 32 used) */
+    push    0x202                   /* RFLAGS */
+    push    0x3B                    /* CS = kUserCode32Selector */
+    push    rdi                     /* user EIP (low 32 used) */
+
+    /* Zero all GPRs for clean ring-3 entry. */
+    xor     eax, eax
+    xor     ebx, ebx
+    xor     ecx, ecx
+    xor     edx, edx
+    xor     ebp, ebp
+    xor     esi, esi
+    xor     edi, edi
+    xor     r8d,  r8d
+    xor     r9d,  r9d
+    xor     r10d, r10d
+    xor     r11d, r11d
+    xor     r12d, r12d
+    xor     r13d, r13d
+    xor     r14d, r14d
+    xor     r15d, r15d
+
+    iretq
+
+    ud2
+.size EnterUserMode32, . - EnterUserMode32
+
 /* NX stack — silence lld's PT_GNU_STACK warning. */
 .section .note.GNU-stack, "", @progbits

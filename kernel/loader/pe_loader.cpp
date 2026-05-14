@@ -157,6 +157,13 @@ struct PeHeaders
     u64 image_base;
     u64 image_size;
     u64 entry_rva;
+    // Bitness picked up from the optional-header magic. PE32 (i386)
+    // images parse cleanly but are rejected before MapAndRun until
+    // the 32-bit user-CS + syscall-ABI layers land — see
+    // PeStatus::NotPe32PlusYet emitted in PeLoad.
+    bool is_pe32;
+    u32 data_dir_offset;
+    u32 number_of_rva_and_sizes;
 };
 
 // Allocation-ladder unwind for PeLoad. PE startup maps headers,
@@ -271,11 +278,16 @@ PeDataDir ReadDataDir(const u8* file, const PeHeaders& h, u64 idx)
 {
     if (file == nullptr)
         return {0, 0};
+    // PE32 vs PE32+: the data-directory array sits at a different
+    // offset in the two layouts (96 vs 112) because the four
+    // stack/heap reserve/commit slots are u32 in PE32 and u64 in
+    // PE32+. ParseHeaders precomputes the correct offset and count
+    // via the Rust validator; use those instead of the hardcoded
+    // PE32+ constants which only work for AMD64 images.
     const u8* opt = file + h.opt_base;
-    const u32 num_dirs = LeU32(opt + kOptHeaderNumberOfRvaAndSizes);
-    if (idx >= num_dirs)
+    if (idx >= h.number_of_rva_and_sizes)
         return {0, 0};
-    const u8* e = opt + kOptHeaderDataDirectories + idx * kDataDirEntrySize;
+    const u8* e = opt + h.data_dir_offset + idx * kDataDirEntrySize;
     return {LeU32(e + 0), LeU32(e + 4)};
 }
 
@@ -309,6 +321,9 @@ PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
     out.entry_rva = image.entry_rva;
     out.image_base = image.image_base;
     out.section_base = image.section_base;
+    out.is_pe32 = (image.is_pe32 != 0);
+    out.data_dir_offset = image.data_dir_offset;
+    out.number_of_rva_and_sizes = image.number_of_rva_and_sizes;
     if (status != static_cast<u32>(PeStatus::Ok))
         return static_cast<PeStatus>(status);
 
@@ -318,22 +333,29 @@ PeStatus ParseHeaders(const u8* file, u64 file_len, PeHeaders& out)
     // parsing them is done separately by PeReport, which runs
     // BEFORE this function on the spawn path so the log
     // carries a full picture even when we reject.
+    //
+    // PE32 (i386) vs PE32+ (AMD64): the data-directory array sits
+    // at offset 96 in PE32 and 112 in PE32+ (the four stack/heap
+    // Reserve/Commit slots are u32 in PE32, u64 in PE32+). The
+    // Rust validator pre-computes the correct offset; we use it
+    // verbatim here.
     const u8* opt = file + out.opt_base;
-    const u32 num_dirs = LeU32(opt + kOptHeaderNumberOfRvaAndSizes);
+    const u32 num_dirs = out.number_of_rva_and_sizes;
+    const u64 dd_off = out.data_dir_offset;
     const u64 dir_bytes = u64(num_dirs) * kDataDirEntrySize;
-    if (kOptHeaderDataDirectories + dir_bytes > out.opt_header_size)
+    if (dd_off + dir_bytes > out.opt_header_size)
         return PeStatus::OptHeaderOutOfBounds;
     auto dir_rva = [&](u64 idx) -> u32
     {
         if (idx >= num_dirs)
             return 0;
-        return LeU32(opt + kOptHeaderDataDirectories + idx * kDataDirEntrySize + 0);
+        return LeU32(opt + dd_off + idx * kDataDirEntrySize + 0);
     };
     auto dir_size = [&](u64 idx) -> u32
     {
         if (idx >= num_dirs)
             return 0;
-        return LeU32(opt + kOptHeaderDataDirectories + idx * kDataDirEntrySize + 4);
+        return LeU32(opt + dd_off + idx * kDataDirEntrySize + 4);
     };
     if (dir_rva(kDirEntryImport) != 0 || dir_size(kDirEntryImport) != 0)
         return PeStatus::ImportsPresent;
@@ -510,6 +532,8 @@ const char* PeStatusName(PeStatus s)
         return "StubsPageAllocFail";
     case PeStatus::ImageBaseOutOfRange:
         return "ImageBaseOutOfRange";
+    case PeStatus::Pe32ExecutionNotReady:
+        return "Pe32ExecutionNotReady";
     default:
         KLOG_ONCE_WARN("loader/pe", "PeStatusName: unrecognised PeStatus enumerator");
         return "?";
@@ -537,6 +561,18 @@ bool PeIsDynamicBase(const u8* file, u64 file_len)
     const u16 chars = LeU16(file + h.opt_base + kOptHeaderDllCharacteristics);
     constexpr u16 kDynamicBase = 0x0040;
     return (chars & kDynamicBase) != 0;
+}
+
+bool PeIsPe32(const u8* file, u64 file_len)
+{
+    PeHeaders h{};
+    const PeStatus s = ParseHeaders(file, file_len, h);
+    // PE32 images come back with status Ok / ImportsPresent / TlsPresent
+    // and h.is_pe32 set; everything else (malformed magic, out-of-bounds
+    // section table, etc.) is "no".
+    if (s != PeStatus::Ok && s != PeStatus::ImportsPresent && s != PeStatus::TlsPresent)
+        return false;
+    return h.is_pe32;
 }
 
 u64 PePreferredBaseOf(const u8* file, u64 file_len)
@@ -869,7 +905,14 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
 
             if (type == 0) // IMAGE_REL_BASED_ABSOLUTE — pad entry.
                 continue;
-            if (type != 10) // IMAGE_REL_BASED_DIR64 is the only other type we expect.
+            // Two real types we apply:
+            //   3  IMAGE_REL_BASED_HIGHLOW — PE32 (i386), patches 4 bytes
+            //   10 IMAGE_REL_BASED_DIR64   — PE32+ (AMD64), patches 8 bytes
+            // PE32 images use HIGHLOW exclusively; PE32+ images use DIR64
+            // exclusively. Mixing within one image is malformed.
+            const bool is_highlow = (type == 3);
+            const bool is_dir64 = (type == 10);
+            if (!is_highlow && !is_dir64)
             {
                 // Surface the IMAGE_REL_BASED_* name so a reader doesn't
                 // have to look up `type=3` against the PE spec table.
@@ -919,10 +962,11 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
                 continue; // no-op apply — still validated the entry shape.
 
             const u64 patch_va = h.image_base + u64(page_rva) + u64(offset);
-            // Read current 8 bytes, add delta, write back. Split
-            // across two frames if the write straddles a page.
+            // HIGHLOW = 4 bytes, DIR64 = 8 bytes. Read, add delta, write
+            // back. Split across two frames if the write straddles a page.
+            const u64 patch_bytes = is_highlow ? 4 : 8;
             u64 orig = 0;
-            for (u64 b = 0; b < 8; ++b)
+            for (u64 b = 0; b < patch_bytes; ++b)
             {
                 const u64 va = patch_va + b;
                 const u64 page_va = va & ~0xFFFULL;
@@ -939,8 +983,12 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
                 const auto* direct = static_cast<const u8*>(mm::PhysToVirt(frame));
                 orig |= u64(direct[va & 0xFFFULL]) << (b * 8);
             }
+            // HIGHLOW only patches the low 32 bits; the delta itself for
+            // a 32-bit image lives in the low 32 bits too (ImageBase is
+            // u32). Truncating after the add matches what a 32-bit
+            // Windows loader does.
             const u64 fixed = orig + delta;
-            for (u64 b = 0; b < 8; ++b)
+            for (u64 b = 0; b < patch_bytes; ++b)
             {
                 const u64 va = patch_va + b;
                 const u64 page_va = va & ~0xFFFULL;
@@ -1306,18 +1354,24 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             return false;
         }
 
+        // IAT entry size depends on PE32+ (8 bytes) vs PE32 (4 bytes).
+        // Ordinal flag is bit 63 in PE32+, bit 31 in PE32. The low 31
+        // bits carry the IBN RVA in both formats; the low 16 bits
+        // carry the ordinal value when the flag is set.
+        const u64 ent_bytes = h.is_pe32 ? u64(4) : u64(8);
+        const u64 ordinal_flag = h.is_pe32 ? (u64(1) << 31) : (u64(1) << 63);
         for (u32 fn_idx = 0; fn_idx < kMaxFnPerDll; ++fn_idx)
         {
-            const u64 int_ent_off = int_off + u64(fn_idx) * 8;
-            if (int_ent_off + 8 > file_len)
+            const u64 int_ent_off = int_off + u64(fn_idx) * ent_bytes;
+            if (int_ent_off + ent_bytes > file_len)
                 break;
-            const u64 ent = LeU64(file + int_ent_off);
+            const u64 ent = h.is_pe32 ? u64(LeU32(file + int_ent_off)) : LeU64(file + int_ent_off);
             if (ent == 0)
                 break;
 
-            // Ordinal vs by-name: bit 63 set marks an ordinal
-            // import. The low 16 bits hold the ordinal value.
-            const bool is_ordinal_import = (ent & (u64(1) << 63)) != 0;
+            // Ordinal vs by-name: the ordinal flag bit gates which
+            // shape the low bits carry.
+            const bool is_ordinal_import = (ent & ordinal_flag) != 0;
             const u32 import_ordinal = static_cast<u32>(ent & 0xFFFF);
 
             const char* fn_name = nullptr;
@@ -1394,6 +1448,19 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 SerialWriteHex(stub_va);
                 SerialWrite("\n");
             }
+            else if (h.is_pe32)
+            {
+                // PE32: via-DLL miss → 32-bit unresolved-import
+                // stub. The Win32ThunksLookupKind path is skipped
+                // because the bytes in the PE32+ thunks page are
+                // 64-bit instructions; decoding them in compat
+                // mode would trap immediately. The 32-bit stub
+                // does SYS_EXIT(0xDEAD0042) so any call to an
+                // unresolved import cleanly terminates the
+                // process with a readable signature.
+                stub_va = win32::kWin32Thunks32UnresolvedVa;
+                is_noop_stub = true;
+            }
             else if (!win32::Win32ThunksLookupKind(dll_name, fn_name, &stub_va, &is_noop_stub))
             {
                 // Unresolved import. Two flavours land here:
@@ -1458,17 +1525,19 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 // hit SYS_WIN32_MISS_LOG.
                 if (!is_data)
                 {
-                    const u64 iat_slot_va_for_miss = h.image_base + u64(first_thunk) + u64(fn_idx) * 8;
+                    const u64 iat_slot_va_for_miss = h.image_base + u64(first_thunk) + u64(fn_idx) * ent_bytes;
                     StagedMissAppend(iat_slot_va_for_miss, fn_name);
                 }
                 core::CleanroomTraceRecord("pe-loader", is_data ? "import-data-catchall" : "import-fn-catchall",
                                            h.image_base, first_thunk, fn_idx);
             }
 
-            // Patch the IAT slot. Slot VA = image_base +
-            // first_thunk + fn_idx * 8. Find backing frame,
-            // write via direct map.
-            const u64 iat_slot_va = h.image_base + u64(first_thunk) + u64(fn_idx) * 8;
+            // Patch the IAT slot. Slot size is bitness-dependent
+            // (8 bytes for PE32+, 4 for PE32) — the same as the INT
+            // entry size we just read. For PE32 the resolved VA
+            // must fit in 32 bits; we asserted this implicitly by
+            // mapping the 32-bit DLL set into the low 4 GiB.
+            const u64 iat_slot_va = h.image_base + u64(first_thunk) + u64(fn_idx) * ent_bytes;
             const mm::PhysAddr iat_frame = mm::AddressSpaceLookupUserFrame(as, iat_slot_va);
             if (iat_frame == mm::kNullFrame)
             {
@@ -1481,9 +1550,9 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             }
             auto* iat_direct = static_cast<u8*>(mm::PhysToVirt(iat_frame));
             const u64 page_off = iat_slot_va & 0xFFFULL;
-            // Store little-endian u64 byte-by-byte; avoids any
+            // Store little-endian byte-by-byte; avoids any
             // alignment assumption on the direct-map pointer.
-            for (u64 b = 0; b < 8; ++b)
+            for (u64 b = 0; b < ent_bytes; ++b)
                 iat_direct[page_off + b] = static_cast<u8>((stub_va >> (b * 8)) & 0xFF);
             ++resolved;
 
@@ -1575,7 +1644,17 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // alone keeps us from even ATTEMPTING to run binaries like
     // windows-kill.exe; accepting + logging lets us see how
     // far they get before the first real gap.
-    if (ps != PeStatus::Ok && ps != PeStatus::ImportsPresent && ps != PeStatus::TlsPresent)
+    // PE32 (i386) is now executable end-to-end for self-contained
+    // images whose import surface is never actually called — the
+    // pe32_smoke fixture exits via int 0x80 directly. PE32 images
+    // that DO call their imports will faceplant at the first call
+    // until the i386 DLL set lands (Layer 4 follow-up); the
+    // Pe32ExecutionNotReady status is retained so a future
+    // policy gate can flip it back on if we want to reject such
+    // PEs preemptively.
+    PeStatus effective_ps = ps;
+    if (effective_ps != PeStatus::Ok && effective_ps != PeStatus::ImportsPresent &&
+        effective_ps != PeStatus::TlsPresent)
     {
         // Journal the rejection so the reviewer sees which PE
         // characteristics our v0 loader can't handle yet, even
@@ -1589,7 +1668,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             pin[p] = tag[p];
             ++p;
         }
-        const char* sn = PeStatusName(ps);
+        const char* sn = PeStatusName(effective_ps);
         u64 i = 0;
         while (p < 39 && sn[i] != '\0')
         {
@@ -1597,8 +1676,13 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         }
         pin[p] = '\0';
         (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::LoaderReject, pin,
-                                               "implement PE feature or improve loader policy", static_cast<u64>(ps),
-                                               file_len);
+                                               "implement PE feature or improve loader policy",
+                                               static_cast<u64>(effective_ps), file_len);
+        // Surface the reject reason on serial so the boot transcript
+        // carries the specific status name (e.g. Pe32ExecutionNotReady)
+        // rather than the generic "PeLoad failed" line emitted by the
+        // caller. WARN level so it shows under any sensible loglevel.
+        KLOG_WARN_S("loader/pe", "PE rejected", "status", PeStatusName(effective_ps));
         return r;
     }
 
@@ -1754,11 +1838,13 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     SerialWriteHex(kV0StackPages);
     SerialWrite("\n");
 
-    // 4b. TEB page (Win32 PEs only). MSVC CRT startup reads
-    //     gs:[0x30] for the self-pointer during __security_init
-    //     _cookie / __scrt_common_main_seh; without this page it
-    //     faults at linear 0x30. One page, RW+NX. Self-pointer
-    //     stored at offset 0x30.
+    // 4b. TEB page. PE32+ (64-bit) reads via gs:[0x30] (self),
+    //     PE32 (32-bit) via fs:[0x18] (self) and fs:[0x30] (PEB).
+    //     Both variants land in the same allocated frame at
+    //     kV0TebVa with the appropriate offsets populated. The
+    //     32-bit task's FSBASE gets pointed at this VA by
+    //     EnterUserMode32 (via wrmsr) so the fs-relative reads
+    //     land here rather than at linear 0x18 / 0x30.
     u64 teb_va = 0;
     if (ps == PeStatus::ImportsPresent)
     {
@@ -1772,25 +1858,74 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         auto* teb_direct = static_cast<u8*>(PhysToVirt(teb_frame));
         for (u64 i = 0; i < kPageSize; ++i)
             teb_direct[i] = 0;
-        // Write self-pointer (little-endian u64).
-        for (u64 b = 0; b < 8; ++b)
-            teb_direct[kTebOffSelf + b] = static_cast<u8>((kV0TebVa >> (b * 8)) & 0xFF);
+        if (!h.is_pe32)
+        {
+            // 64-bit TEB: NT_TIB.Self at offset 0x30 (u64). MSVC
+            // x64 CRT reads gs:[0x30] for the self-pointer.
+            for (u64 b = 0; b < 8; ++b)
+                teb_direct[kTebOffSelf + b] = static_cast<u8>((kV0TebVa >> (b * 8)) & 0xFF);
+        }
+        else
+        {
+            // 32-bit TEB layout differs from x64. Key fields the
+            // MSVC i386 CRT touches:
+            //   fs:[0x00]  ExceptionList (head of SEH chain). Set
+            //              to 0xFFFFFFFF (no handler) per the v0
+            //              "no SEH" stance.
+            //   fs:[0x04]  StackBase (high address). Top of the
+            //              user stack we just mapped.
+            //   fs:[0x08]  StackLimit (low address). Bottom of the
+            //              user stack.
+            //   fs:[0x18]  Self (TEB self-pointer, u32).
+            //   fs:[0x20]  ClientId.UniqueProcess (pid).
+            //   fs:[0x24]  ClientId.UniqueThread (tid).
+            //   fs:[0x30]  PEB pointer. v0 stores the TEB VA itself
+            //              so dereferences read zero (process-wide
+            //              PEB structure is a separate slice).
+            constexpr u64 kTeb32OffSelf = 0x18;
+            constexpr u64 kTeb32OffPeb = 0x30;
+            constexpr u64 kTeb32OffStackBase = 0x04;
+            constexpr u64 kTeb32OffStackLimit = 0x08;
+            constexpr u32 kSehSentinel = 0xFFFFFFFFu;
+            // ExceptionList = 0xFFFFFFFF
+            for (u64 b = 0; b < 4; ++b)
+                teb_direct[0x00 + b] = static_cast<u8>((kSehSentinel >> (b * 8)) & 0xFF);
+            // StackBase / StackLimit (low 32 bits of the user VAs).
+            const u32 stack_top32 = static_cast<u32>(kV0StackTop);
+            const u32 stack_va32 = static_cast<u32>(kV0StackVa);
+            for (u64 b = 0; b < 4; ++b)
+            {
+                teb_direct[kTeb32OffStackBase + b] = static_cast<u8>((stack_top32 >> (b * 8)) & 0xFF);
+                teb_direct[kTeb32OffStackLimit + b] = static_cast<u8>((stack_va32 >> (b * 8)) & 0xFF);
+            }
+            // Self pointer (u32) — TEB VA, low 32 bits.
+            const u32 teb_va32 = static_cast<u32>(kV0TebVa);
+            for (u64 b = 0; b < 4; ++b)
+                teb_direct[kTeb32OffSelf + b] = static_cast<u8>((teb_va32 >> (b * 8)) & 0xFF);
+            // PEB pointer (u32) — for v0 we point at the TEB itself
+            // so `fs:[0x30]` is non-NULL and dereferences land in
+            // the (mostly zero) TEB page rather than #PFing.
+            for (u64 b = 0; b < 4; ++b)
+                teb_direct[kTeb32OffPeb + b] = static_cast<u8>((teb_va32 >> (b * 8)) & 0xFF);
+        }
         AddressSpaceMapUserPage(as, kV0TebVa, teb_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
         guard.Track(kV0TebVa);
         teb_va = kV0TebVa;
         SerialWrite("[pe-load] step4b teb mapped va=");
         SerialWriteHex(teb_va);
+        if (h.is_pe32)
+            SerialWrite(" (pe32 fs-base)");
         SerialWrite("\n");
     }
 
-    // 4c. Proc-env page (Win32 PEs only). MSVC CRT startup
+    // 4c. Proc-env page (64-bit Win32 PEs only). MSVC CRT startup
     //     reads argc/argv via `__p___argc()` / `__p___argv()`
-    //     accessor functions; their stubs return addresses
-    //     inside this page. One page, R-W + NX. Populated with
-    //     argc=1, argv=[program_name, NULL], program_name="a.exe".
-    //     A future slice will plumb the real spawn-time program
-    //     name through here.
-    if (ps == PeStatus::ImportsPresent)
+    //     accessor functions; their stubs return addresses inside
+    //     this page. One page, R-W + NX. Populated with argc=1,
+    //     argv=[program_name, NULL], program_name="a.exe". PE32
+    //     accessors live in a 32-bit kernel32 — gated alongside
+    //     Layer 4.
+    if (!h.is_pe32 && ps == PeStatus::ImportsPresent)
     {
         const PhysAddr env_frame = AllocateFrame();
         if (env_frame == kNullFrame)
@@ -1812,7 +1947,12 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     }
 
     // 5. If imports are present, stand up the per-process
-    //    Win32 stubs region + resolve every IAT entry.
+    //    Win32 stubs region (PE32+ only — the bytes are 64-bit) +
+    //    resolve every IAT entry. PE32 (i386) images skip the
+    //    thunks page (64-bit code) but DO run ResolveImports,
+    //    which now branches its slot-size + ordinal-bit reads on
+    //    h.is_pe32. Pe32 IAT entries that resolve cleanly point
+    //    at the kernel32_32.dll preload set's exports.
     //
     // The stub byte table has outgrown a single 4 KiB page (render
     // work: filled Rectangle/Ellipse + UTF-16 paint + message loop
@@ -1820,7 +1960,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // R-X. `Win32ThunksPopulate` writes the full `sizeof(kThunksBytes)`
     // into the direct-map window; any trailing bytes in the second
     // page beyond the stub table stay zeroed from the pre-clear.
-    if (ps == PeStatus::ImportsPresent)
+    if (!h.is_pe32 && ps == PeStatus::ImportsPresent)
     {
         const PhysAddr stubs_frame = AllocateContiguousFrames(2);
         if (stubs_frame == kNullFrame)
@@ -1850,10 +1990,40 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         }
         SerialWrite("[pe-load] step5 imports resolved\n");
     }
+    else if (h.is_pe32 && ps == PeStatus::ImportsPresent)
+    {
+        // PE32 IAT walk + 32-bit Win32 thunks page. Unresolved
+        // imports get pointed at the i386 "SYS_EXIT(0xDEAD0042)"
+        // stub at kWin32Thunks32Va, so calling an unresolved
+        // import cleanly terminates the process instead of #PFing
+        // at the 64-bit catch-all VA (which isn't mapped for PE32).
+        const PhysAddr thunks32_frame = AllocateFrame();
+        if (thunks32_frame == kNullFrame)
+        {
+            SerialWrite("[pe-load] FAIL pe32 thunks page alloc\n");
+            KBP_PROBE(::duetos::debug::ProbeId::kPeLoaderOom);
+            return r;
+        }
+        auto* thunks32_direct = static_cast<u8*>(PhysToVirt(thunks32_frame));
+        for (u64 i = 0; i < kPageSize; ++i)
+            thunks32_direct[i] = 0;
+        win32::Win32Thunks32Populate(thunks32_direct);
+        // R-X — same W^X discipline as the 64-bit thunks page.
+        AddressSpaceMapUserPage(as, win32::kWin32Thunks32Va, thunks32_frame, kPagePresent | kPageUser);
+        guard.Track(win32::kWin32Thunks32Va);
+
+        if (!ResolveImports(file, file_len, h, as, preloaded_dlls, preloaded_dll_count))
+        {
+            SerialWrite("[pe-load] FAIL ResolveImports (pe32)\n");
+            return r;
+        }
+        SerialWrite("[pe-load] step5 pe32 imports resolved\n");
+    }
     SerialWrite("[pe-load] OK\n");
 
     r.ok = true;
     r.imports_resolved = (ps == PeStatus::ImportsPresent);
+    r.is_pe32 = h.is_pe32;
     r.entry_va = h.image_base + h.entry_rva;
     r.stack_va = kV0StackVa;
     r.stack_top = kV0StackTop;

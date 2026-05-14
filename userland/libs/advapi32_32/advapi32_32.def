@@ -1,0 +1,26 @@
+LIBRARY advapi32.dll
+EXPORTS
+    RegCloseKey
+    RegOpenKeyExA
+    RegEnumKeyExA
+    RegQueryValueExA
+    CryptAcquireContextA
+    CryptAcquireContextW
+    CryptCreateHash
+    CryptDecrypt
+    CryptDestroyHash
+    CryptDestroyKey
+    CryptEnumProvidersW
+    CryptExportKey
+    CryptGenRandom
+    CryptGetHashParam
+    CryptGetProvParam
+    CryptGetUserKey
+    CryptHashData
+    CryptReleaseContext
+    CryptSetHashParam
+    CryptSignHashW
+    DeregisterEventSource
+    RegisterEventSourceW
+    ReportEventW
+    SystemFunction036
