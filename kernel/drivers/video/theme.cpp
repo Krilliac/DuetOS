@@ -90,6 +90,7 @@ constexpr Theme kClassic = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .role_client =
         {
@@ -110,6 +111,7 @@ constexpr Theme kClassic = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
 
     .console_fg = 0x0080F088,
@@ -167,6 +169,7 @@ constexpr Theme kAmber = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .role_client =
         {
@@ -187,6 +190,7 @@ constexpr Theme kAmber = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
 
     .console_fg = 0x00FFA830,
@@ -248,6 +252,7 @@ constexpr Theme kSlate10 = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .role_client =
         {
@@ -268,6 +273,7 @@ constexpr Theme kSlate10 = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
 
     .console_fg = 0x00D4D4D4, // VSCode default editor ink
@@ -335,6 +341,7 @@ constexpr Theme kDuet = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .role_client =
         {
@@ -355,6 +362,7 @@ constexpr Theme kDuet = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
 
     .console_fg = 0x00E8EDF2, // `--ink` — JetBrains-Mono ink in the prototype
@@ -421,6 +429,7 @@ constexpr Theme kDuetLight = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .role_client =
         {
@@ -441,6 +450,7 @@ constexpr Theme kDuetLight = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
 
     .console_fg = 0x00161A20,
@@ -499,6 +509,7 @@ constexpr Theme kDuetBlue = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .role_client =
         {
@@ -513,6 +524,7 @@ constexpr Theme kDuetBlue = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -555,6 +567,7 @@ constexpr Theme kDuetViolet = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .role_client =
         {
@@ -569,6 +582,7 @@ constexpr Theme kDuetViolet = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -611,6 +625,7 @@ constexpr Theme kDuetGreen = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .role_client =
         {
@@ -625,6 +640,7 @@ constexpr Theme kDuetGreen = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .console_fg = 0x00E8EDF2,
     .console_bg = 0x000F1319,
@@ -686,6 +702,7 @@ constexpr Theme kDuetClassic = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .role_client =
         {
@@ -706,6 +723,7 @@ constexpr Theme kDuetClassic = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
 
     .console_fg = 0x00000000,
@@ -766,6 +784,7 @@ constexpr Theme kHighContrast = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
     .role_client =
         {
@@ -780,6 +799,7 @@ constexpr Theme kHighContrast = {
             0x00306070, // Sysmon  — teal "monitor" hue, shared across themes pending tuning
             0x00404858, // HexView — slate "tool" hue
             0x00604070, // CharMap — muted-purple "utility" hue
+            0x00202830, // Terminal — near-black slate "console" hue
         },
 
     .console_fg = 0x00FFFFFF,

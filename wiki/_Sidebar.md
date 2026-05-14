@@ -115,6 +115,7 @@
 - [Shell Scripting](reference/Shell-Scripting.md)
 - [Smoke Test Suite](reference/Smoke-Test-Suite.md)
 - [Win32 / DirectX Surface Status](reference/Win32-Surface-Status.md)
+- [External References](reference/External-References.md)
 
 ### Advanced
 - [Contributing](advanced/Contributing.md)
@@ -123,3 +124,4 @@
 - [SMP AP Bring-up Scope](advanced/SMP-AP-Bringup-Scope.md)
 - [Win32 Thunks Compat Note](advanced/Win32-Thunks-Compat-Note.md)
 - [Linux Networking Port Opportunities](advanced/Linux-Networking-Port-Opportunities.md)
+- [ToaruOS Port Plan](advanced/Toaru-Port-Plan.md)

@@ -109,14 +109,19 @@ The DLLs are not flat stubs. Real implementations land per slice:
    and refresh `docs/sync-wiki.sh` output.
 
 <!-- AUTO:dll_list -->
-*46 DLLs preloaded into every Win32 PE process.*
+*59 DLLs preloaded into every Win32 PE process.*
 
 | DLL | Exports (approx) | Path |
 |-----|------------------|------|
+| `advapi32_32` | 0 | `userland/libs/advapi32_32/` |
 | `advapi32` | 0 | `userland/libs/advapi32/` |
+| `bcrypt_32` | 0 | `userland/libs/bcrypt_32/` |
 | `bcrypt` | 0 | `userland/libs/bcrypt/` |
+| `comctl32_32` | 0 | `userland/libs/comctl32_32/` |
 | `comctl32` | 0 | `userland/libs/comctl32/` |
+| `comdlg32_32` | 0 | `userland/libs/comdlg32_32/` |
 | `comdlg32` | 0 | `userland/libs/comdlg32/` |
+| `crypt32_32` | 0 | `userland/libs/crypt32_32/` |
 | `crypt32` | 0 | `userland/libs/crypt32/` |
 | `customdll2` | 0 | `userland/libs/customdll2/` |
 | `customdll` | 0 | `userland/libs/customdll/` |
@@ -132,11 +137,15 @@ The DLLs are not flat stubs. Real implementations land per slice:
 | `dwmapi` | 0 | `userland/libs/dwmapi/` |
 | `dwrite` | 0 | `userland/libs/dwrite/` |
 | `dxgi` | 0 | `userland/libs/dxgi/` |
+| `gdi32_32` | 0 | `userland/libs/gdi32_32/` |
 | `gdi32` | 0 | `userland/libs/gdi32/` |
+| `iphlpapi_32` | 0 | `userland/libs/iphlpapi_32/` |
 | `iphlpapi` | 0 | `userland/libs/iphlpapi/` |
+| `kernel32_32` | 0 | `userland/libs/kernel32_32/` |
 | `kernel32` | 0 | `userland/libs/kernel32/` |
 | `kernelbase` | 0 | `userland/libs/kernelbase/` |
 | `msvcp140` | 0 | `userland/libs/msvcp140/` |
+| `msvcrt_32` | 0 | `userland/libs/msvcrt_32/` |
 | `msvcrt` | 0 | `userland/libs/msvcrt/` |
 | `ntdll` | 0 | `userland/libs/ntdll/` |
 | `ole32` | 0 | `userland/libs/ole32/` |
@@ -144,9 +153,12 @@ The DLLs are not flat stubs. Real implementations land per slice:
 | `psapi` | 0 | `userland/libs/psapi/` |
 | `secur32` | 0 | `userland/libs/secur32/` |
 | `setupapi` | 0 | `userland/libs/setupapi/` |
+| `shell32_32` | 0 | `userland/libs/shell32_32/` |
 | `shell32` | 0 | `userland/libs/shell32/` |
+| `shlwapi_32` | 0 | `userland/libs/shlwapi_32/` |
 | `shlwapi` | 0 | `userland/libs/shlwapi/` |
 | `ucrtbase` | 0 | `userland/libs/ucrtbase/` |
+| `user32_32` | 0 | `userland/libs/user32_32/` |
 | `user32` | 0 | `userland/libs/user32/` |
 | `userenv` | 0 | `userland/libs/userenv/` |
 | `uxtheme` | 0 | `userland/libs/uxtheme/` |
@@ -155,6 +167,7 @@ The DLLs are not flat stubs. Real implementations land per slice:
 | `winhttp` | 0 | `userland/libs/winhttp/` |
 | `wininet` | 0 | `userland/libs/wininet/` |
 | `winmm` | 0 | `userland/libs/winmm/` |
+| `ws2_32_32` | 0 | `userland/libs/ws2_32_32/` |
 | `ws2_32` | 0 | `userland/libs/ws2_32/` |
 | `wtsapi32` | 0 | `userland/libs/wtsapi32/` |
 | `xaudio2_8` | 0 | `userland/libs/xaudio2_8/` |

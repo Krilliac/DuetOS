@@ -272,6 +272,16 @@ void DrawTaskbarGlyph(u32 gx, u32 gy, u32 size, u32 ink, u32 bg, bool have_role,
             }
         }
         break;
+    case ThemeRole::Terminal:
+        // Box with a single ">_" prompt glyph sketched inside.
+        FramebufferDrawRect(gx + 1, gy + 1, size - 2, size - 2, ink, 1);
+        // ">"
+        FramebufferFillRect(gx + 3, gy + 4, 1, 1, ink);
+        FramebufferFillRect(gx + 4, gy + 5, 1, 1, ink);
+        FramebufferFillRect(gx + 3, gy + 6, 1, 1, ink);
+        // "_" cursor
+        FramebufferFillRect(gx + 6, gy + 7, 3, 1, ink);
+        break;
     default:
         FramebufferDrawRect(gx + 1, gy + 1, size - 2, size - 2, ink, 1);
         break;

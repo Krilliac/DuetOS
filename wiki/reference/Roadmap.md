@@ -1388,6 +1388,41 @@ kernel-side primitive is in tree; what's missing is the per-call
 wiring that turns "infrastructure exists" into "real callers using
 it."
 
+### UBSAN klog flood — `[W] diag/ubsan : UNKNOWN` repeating
+
+- **Today:** every BSOD capture (and every debug-build live boot)
+  fills the recent-klog tail with `[W] diag/ubsan : UNKNOWN`
+  entries — typically the last 10–20 entries of the ring. This
+  was first surfaced by the slice-3b BSOD smoke
+  (`tools/test/capture-bsod.py`); the entries dominate the
+  on-screen log tail and crowd out genuinely useful late-boot
+  context.
+- **Two possible roots — investigate before fixing:**
+  1. **Real UBSAN tripwires.** Code somewhere is firing
+     genuine undefined-behaviour reports late in boot. The
+     `UNKNOWN` payload suggests the report path is hitting a
+     case its formatter doesn't recognise — so we get a WARN
+     for every UB, but no useful "what was wrong" string. Track
+     down which UBSAN handler is firing (alignment? signed-
+     overflow? bounds?) and which call sites.
+  2. **klog format gap.** The `UNKNOWN` could be a klog
+     formatter that doesn't know how to render the UBSAN
+     payload — i.e. the UB might be cheap / benign but the
+     reporting code prints `UNKNOWN` as a placeholder for a
+     real message it can't synthesise. Inspect `kernel/diag/`
+     UBSAN runtime handlers + the klog encoder for the
+     `LogArea::Diag` path.
+- **First step:** `git grep -nE "ubsan|__ubsan_handle"` and walk
+  every callsite that pipes into klog. The repetition + identity
+  of payloads suggests one or two firing paths, not a broad
+  class.
+- **Why it matters for BSOD UX:** the BSOD's recent-klog tail
+  is meant to give operators the LAST useful state before crash.
+  Right now it's near-useless on debug builds because the tail
+  is dominated by these. Either silence the path (gate to
+  DEBUG-level log) or fix the underlying UB / formatter.
+- **Blocks on:** nothing — pure investigation slice.
+
 ### VirtIO — virtio-blk concurrency + IRQ
 
 - **Today:** read, write, AND flush paths all land. The

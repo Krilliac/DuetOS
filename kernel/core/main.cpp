@@ -48,10 +48,12 @@
 #include "util/datetime.h"
 #include "util/deflate.h"
 #include "util/gzip.h"
+#include "util/jpeg.h"
 #include "util/png.h"
 #include "util/tga.h"
 #include "util/types.h"
 #include "util/unicode.h"
+#include "util/vt_parser.h"
 #include "acpi/acpi.h"
 #include "acpi/aml.h"
 #include "arch/x86_64/cpu.h"
@@ -86,6 +88,7 @@
 #include "drivers/audio/hda.h"
 #include "drivers/audio/hda_jack.h"
 #include "drivers/audio/hda_jack_inventory.h"
+#include "subsystems/audio/audio_backend.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
 #include "drivers/gpu/dpms.h"
@@ -175,6 +178,7 @@
 #include "apps/screenshot.h"
 #include "apps/settings.h"
 #include "apps/taskman.h"
+#include "apps/terminal.h"
 #include "apps/trash.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
@@ -1168,6 +1172,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::Crc32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::Base64SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::SaturatingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::vt::VtParserSelfTest());
 
     // KASLR — compute the candidate slide from the now-seeded entropy
     // pool. The slide isn't applied to the kernel image yet (that
@@ -2163,6 +2168,28 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::apps::charmap::CharMapInit(charmap_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::charmap::CharMapSelfTest());
 
+    // TERMINAL — windowed VT/ANSI host (slice 1 of the ToaruOS
+    // clean-room port). Wide window to fit ~80 cells of an 8 px
+    // bitmap glyph plus padding; tall enough for ~24 rows of the
+    // 10 px terminal cell. See wiki/advanced/Toaru-Port-Plan.md.
+    duetos::drivers::video::WindowChrome term_chrome = theme_chrome(Role::Terminal);
+    term_chrome.x = 120;
+    term_chrome.y = 70;
+    term_chrome.w = 680;
+    term_chrome.h = 280;
+    const duetos::drivers::video::WindowHandle term_handle =
+        duetos::drivers::video::WindowRegister(term_chrome, "TERMINAL");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Terminal, term_handle);
+    duetos::apps::terminal::TerminalInit(term_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::terminal::TerminalSelfTest());
+
+    // Slice 3a: hide the framebuffer console region now that the
+    // windowed Terminal is mirroring the same shell content. The
+    // console keeps buffering writes (the Terminal's mirror still
+    // fires); only the 80x40 paint region is reclaimed for the
+    // desktop. Ctrl+Alt+C toggles it visible again on demand.
+    duetos::drivers::video::ConsoleSetPaintEnabled(false);
+
     // NETWORK STATUS — read-only viewer over net::stack accessors.
     // No ThemeRole today; the chrome is seeded from Settings'
     // palette so it sits in the same slate-grey "tools" family.
@@ -3054,6 +3081,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::DeflateSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::GzipZlibSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::PngSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::JpegDecoderSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::Adler32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::Sha256SelfTest());
@@ -3148,6 +3176,26 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::VerbEncodingSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::HdaJackSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::HdaJackInventorySelfTest());
+
+    // Audio backend (slice 2 of the ToaruOS port). Wires the HDA
+    // driver's StreamArm + codec configuration into a buffer ring
+    // a producer can submit S16LE/48 kHz/stereo PCM into. RUN
+    // stays at 0 — playback only starts when a future producer
+    // (winmm thunk, system-beep driver) calls Start() with audio
+    // in the ring. See wiki/drivers/Audio.md and
+    // wiki/advanced/Toaru-Port-Plan.md.
+    {
+        auto r = duetos::subsystems::audio::Init();
+        if (!r.has_value())
+        {
+            // Init() already logged the specific failure reason
+            // (no HDA, allocation failed, codec walker found no
+            // output path, etc.). One additional line records the
+            // overall outcome for grep-friendliness.
+            SerialWrite("[audio-backend] init did not complete — see preceding [audio-backend] line for cause\n");
+        }
+    }
+    DUETOS_BOOT_SELFTEST(duetos::subsystems::audio::SelfTest());
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");
     duetos::drivers::power::PowerInit();
@@ -4131,6 +4179,27 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 continue;
             }
 
+            // Ctrl+Alt+C — toggle the framebuffer console region's
+            // visibility. The console region is hidden by default
+            // once the windowed Terminal app is up (the Terminal
+            // shows the same shell content through the console
+            // mirror), so this shortcut is the on-demand "show me
+            // the on-screen console" escape hatch — useful when
+            // the compositor is wedged or the Terminal window
+            // has been closed. Slice 3a of the ToaruOS port.
+            if (ctrl && alt && (ev.code == 'c' || ev.code == 'C'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const bool now_visible = !duetos::drivers::video::ConsoleIsPaintEnabled();
+                duetos::drivers::video::ConsoleSetPaintEnabled(now_visible);
+                SerialWrite(now_visible ? "[ui] console -> visible\n" : "[ui] console -> hidden\n");
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                duetos::drivers::video::CompositorUnlock();
+                continue;
+            }
+
             // Ctrl+Alt+T flips between desktop and TTY mode. In
             // TTY mode the console fills the framebuffer with a
             // Linux-VT feel (black bg, console top-left); in
@@ -4697,6 +4766,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     {
                         app_consumed = duetos::apps::charmap::CharMapFeedArrow(static_cast<duetos::u16>(ev.code));
                     }
+                    else if (active == duetos::apps::terminal::TerminalWindow() &&
+                             (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
+                              ev.code == kKeyArrowRight))
+                    {
+                        app_consumed = duetos::apps::terminal::TerminalFeedArrow(static_cast<duetos::u16>(ev.code));
+                    }
                     else if (active == duetos::apps::notes::NotesWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
                               ev.code == kKeyArrowRight || ev.code == kKeyHome || ev.code == kKeyEnd ||
@@ -4772,6 +4847,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             else if (active == duetos::apps::charmap::CharMapWindow())
                             {
                                 app_consumed = duetos::apps::charmap::CharMapFeedChar(c);
+                            }
+                            else if (active == duetos::apps::terminal::TerminalWindow())
+                            {
+                                app_consumed = duetos::apps::terminal::TerminalFeedChar(c);
                             }
                             else if (active == duetos::apps::sysmon::SysmonWindow())
                             {

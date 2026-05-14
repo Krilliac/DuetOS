@@ -8,6 +8,7 @@
 #include "fs/fat32.h"
 #include "mm/kheap.h"
 #include "util/bmp.h"
+#include "util/jpeg.h"
 #include "util/png.h"
 #include "util/saturating.h"
 #include "util/tga.h"
@@ -126,6 +127,7 @@ enum class ImageFormat : u8
     Bmp = 1,
     Tga = 2,
     Png = 3,
+    Jpeg = 4,
 };
 
 ImageFormat ClassifyByName(const char* name)
@@ -136,17 +138,32 @@ ImageFormat ClassifyByName(const char* name)
     if (len < 5)
         return ImageFormat::Unknown;
     auto up = [](char c) { return (c >= 'a' && c <= 'z') ? static_cast<char>(c - ('a' - 'A')) : c; };
-    if (name[len - 4] != '.')
-        return ImageFormat::Unknown;
-    const char e0 = up(name[len - 3]);
-    const char e1 = up(name[len - 2]);
-    const char e2 = up(name[len - 1]);
-    if (e0 == 'B' && e1 == 'M' && e2 == 'P')
-        return ImageFormat::Bmp;
-    if (e0 == 'T' && e1 == 'G' && e2 == 'A')
-        return ImageFormat::Tga;
-    if (e0 == 'P' && e1 == 'N' && e2 == 'G')
-        return ImageFormat::Png;
+    // 3-char extension (.bmp / .tga / .png / .jpg) — look at the
+    // last 4 chars.
+    if (name[len - 4] == '.')
+    {
+        const char e0 = up(name[len - 3]);
+        const char e1 = up(name[len - 2]);
+        const char e2 = up(name[len - 1]);
+        if (e0 == 'B' && e1 == 'M' && e2 == 'P')
+            return ImageFormat::Bmp;
+        if (e0 == 'T' && e1 == 'G' && e2 == 'A')
+            return ImageFormat::Tga;
+        if (e0 == 'P' && e1 == 'N' && e2 == 'G')
+            return ImageFormat::Png;
+        if (e0 == 'J' && e1 == 'P' && e2 == 'G')
+            return ImageFormat::Jpeg;
+    }
+    // 4-char extension (.jpeg) — look at the last 5 chars.
+    if (len >= 6 && name[len - 5] == '.')
+    {
+        const char e0 = up(name[len - 4]);
+        const char e1 = up(name[len - 3]);
+        const char e2 = up(name[len - 2]);
+        const char e3 = up(name[len - 1]);
+        if (e0 == 'J' && e1 == 'P' && e2 == 'E' && e3 == 'G')
+            return ImageFormat::Jpeg;
+    }
     return ImageFormat::Unknown;
 }
 
@@ -746,6 +763,114 @@ bool DecodePng(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const c
     return true;
 }
 
+// JPEG decode path. Same full-file-load shape as PNG/TGA, with
+// caps that bound both the file read and the decoder scratch.
+constexpr u32 kJpegMaxFileBytes = 4u * 1024u * 1024u;
+
+bool DecodeJpeg(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const char* name, u32 cw, u32 ch)
+{
+    namespace fat = fs::fat32;
+    if (e->size_bytes > kJpegMaxFileBytes)
+    {
+        StatusSet("JPEG too large (>4 MiB): ");
+        StatusAppendStr(name);
+        return false;
+    }
+    if (e->size_bytes < 4)
+    {
+        StatusSet("JPEG truncated: ");
+        StatusAppendStr(name);
+        return false;
+    }
+    void* file_alloc = mm::KMalloc(e->size_bytes);
+    if (file_alloc == nullptr)
+    {
+        StatusSet("out of kheap memory");
+        return false;
+    }
+    u8* file_buf = static_cast<u8*>(file_alloc);
+    const i64 read = fat::Fat32ReadFile(v, e, file_buf, e->size_bytes);
+    if (read < 4)
+    {
+        mm::KFree(file_alloc);
+        StatusSet("JPEG read failed: ");
+        StatusAppendStr(name);
+        return false;
+    }
+
+    duetos::util::JpegInfo info = duetos::util::JpegParseHeader(file_buf, static_cast<u32>(read));
+    if (!info.ok || info.precision != 8 || info.components > 3)
+    {
+        mm::KFree(file_alloc);
+        StatusSet("unsupported JPEG (need 8-bit Baseline, <=3 components): ");
+        StatusAppendStr(name);
+        return false;
+    }
+
+    const u64 scratch_bytes = duetos::util::JpegEstimateScratch(info);
+    const u64 inter_bytes = duetos::util::SatMul(
+        duetos::util::SatMul(static_cast<u64>(info.width), static_cast<u64>(info.height)), static_cast<u64>(4));
+    if (scratch_bytes == 0 || inter_bytes == 0xFFFFFFFFFFFFFFFFull)
+    {
+        mm::KFree(file_alloc);
+        StatusSet("JPEG dimensions overflow: ");
+        StatusAppendStr(name);
+        return false;
+    }
+    void* scratch_alloc = mm::KMalloc(scratch_bytes);
+    void* inter_alloc = mm::KMalloc(inter_bytes);
+    if (scratch_alloc == nullptr || inter_alloc == nullptr)
+    {
+        mm::KFree(scratch_alloc);
+        mm::KFree(inter_alloc);
+        mm::KFree(file_alloc);
+        StatusSet("out of kheap memory (JPEG): ");
+        StatusAppendStr(name);
+        return false;
+    }
+    const u64 n = duetos::util::JpegDecode(file_buf, static_cast<u32>(read), info, static_cast<u8*>(scratch_alloc),
+                                           scratch_bytes, static_cast<u32*>(inter_alloc));
+    mm::KFree(scratch_alloc);
+    mm::KFree(file_alloc);
+    if (n == 0)
+    {
+        mm::KFree(inter_alloc);
+        StatusSet("JPEG decode failed: ");
+        StatusAppendStr(name);
+        return false;
+    }
+
+    // Fit-to-window NN downsample, matching the PNG path. The
+    // decoder already wrote 0xFF000000 | (R<<16) | (G<<8) | B so
+    // no channel swap is needed here.
+    const u32 dst_w = (info.width <= cw) ? info.width : cw;
+    const u32 dst_h = (info.height <= ch) ? info.height : ch;
+    const u32* inter = static_cast<const u32*>(inter_alloc);
+    u32* dst = g_state.pixels;
+    for (u32 dy = 0; dy < dst_h; ++dy)
+    {
+        const u32 sy = (dy * info.height) / dst_h;
+        u32* drow = dst + static_cast<u64>(dy) * dst_w;
+        const u32* srow = inter + static_cast<u64>(sy) * info.width;
+        for (u32 dx = 0; dx < dst_w; ++dx)
+        {
+            const u32 sx = (dx * info.width) / dst_w;
+            drow[dx] = srow[sx] & 0x00FFFFFFu;
+        }
+    }
+    mm::KFree(inter_alloc);
+
+    g_state.disp_w = dst_w;
+    g_state.disp_h = dst_h;
+    StatusSet(name);
+    StatusAppendStr("  ");
+    StatusAppendDec(info.width);
+    StatusAppendStr("x");
+    StatusAppendDec(info.height);
+    StatusAppendStr(" JPEG");
+    return true;
+}
+
 // Decode the currently-selected file into g_state.pixels at the
 // largest size that fits a (cw, ch) content rect. Returns true on
 // success; on failure clears pixels and writes a status line.
@@ -756,7 +881,7 @@ bool DecodeCurrent(u32 cw, u32 ch)
     StatusSet("");
     if (g_state.count == 0)
     {
-        StatusSet("(no .BMP/.TGA files in root)");
+        StatusSet("(no .BMP/.TGA/.PNG/.JPG files in root)");
         return false;
     }
     if (g_state.index >= g_state.count)
@@ -785,6 +910,8 @@ bool DecodeCurrent(u32 cw, u32 ch)
         return DecodeTga(v, &e, name, cw, ch);
     case ImageFormat::Png:
         return DecodePng(v, &e, name, cw, ch);
+    case ImageFormat::Jpeg:
+        return DecodeJpeg(v, &e, name, cw, ch);
     case ImageFormat::Unknown:
     default:
         StatusSet("unsupported extension: ");

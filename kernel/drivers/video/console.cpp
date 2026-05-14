@@ -57,6 +57,18 @@ constinit u32 g_shell_serial_mirror = 0;
 constinit u32 g_capture_cap = 0;
 constinit u32* g_capture_len = nullptr;
 
+// Paint toggle. Default ON so the boot log is visible on the
+// framebuffer during early bring-up. A later boot phase
+// (typically right after the windowed Terminal lands) flips it
+// OFF so the 80x40 region is reclaimed for the desktop. Bytes
+// keep flowing into the buffer + the mirror regardless.
+constinit bool g_paint_enabled = true;
+
+// Mirror callback for shell-slot writes. Single slot — a future
+// fan-out (if multiple terminals or a log scope want copies) just
+// chains the existing callback. Null until something registers.
+constinit ConsoleMirrorFn g_mirror = nullptr;
+
 ConsoleState& Shell()
 {
     return g_consoles[kConsoleShellIdx];
@@ -117,6 +129,14 @@ void WriteCharImpl(ConsoleState& cs, char c)
     if (&cs == &g_consoles[kConsoleShellIdx] && g_shell_serial_mirror != 0)
     {
         arch::SerialWriteByte(static_cast<u8>(c));
+    }
+    // Shell-slot writes also fan out to a registered mirror
+    // (typically the windowed Terminal app). Mirror runs BEFORE
+    // capture diversion so a piped command's intermediate output
+    // is still visible in the terminal window if one is active.
+    if (&cs == &g_consoles[kConsoleShellIdx] && g_mirror != nullptr)
+    {
+        g_mirror(c);
     }
     // Shell-slot writes under capture mode divert to the
     // buffer instead of the scrollback. Klog-slot writes
@@ -268,11 +288,50 @@ void ConsoleWriteKlog(const char* s)
 
 void ConsoleRedraw()
 {
+    if (!g_paint_enabled)
+    {
+        return;
+    }
     if (g_render_target >= kConsoleCount)
     {
         g_render_target = kConsoleShellIdx;
     }
     RedrawImpl(g_consoles[g_render_target]);
+}
+
+void ConsoleSetPaintEnabled(bool enabled)
+{
+    g_paint_enabled = enabled;
+}
+
+bool ConsoleIsPaintEnabled()
+{
+    return g_paint_enabled;
+}
+
+void ConsoleRegisterMirror(ConsoleMirrorFn fn)
+{
+    g_mirror = fn;
+}
+
+char ConsoleShellCharAt(u32 row, u32 col)
+{
+    if (row >= kConsoleRows || col >= kConsoleCols)
+    {
+        return ' ';
+    }
+    const ConsoleState& cs = Shell();
+    return cs.buffer[row][col];
+}
+
+u32 ConsoleShellCursorRow()
+{
+    return Shell().cursor_row;
+}
+
+u32 ConsoleShellCursorCol()
+{
+    return Shell().cursor_col;
 }
 
 void ConsoleSetOrigin(u32 x, u32 y)
