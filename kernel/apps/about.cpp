@@ -8,6 +8,7 @@
 #include "mm/kheap.h"
 #include "time/tick.h"
 #include "util/build_config.h"
+#include "util/string.h"
 
 namespace duetos::apps::about
 {
@@ -59,15 +60,7 @@ void AppendU64(char* dst, u32* pos, u32 cap, u64 v)
     }
 }
 
-void AppendStr(char* dst, u32* pos, u32 cap, const char* s)
-{
-    if (s == nullptr)
-        return;
-    for (u32 i = 0; s[i] != '\0' && *pos + 1 < cap; ++i)
-    {
-        dst[(*pos)++] = s[i];
-    }
-}
+using duetos::core::AppendStr;
 
 // Produce a human-friendly byte size. Picks the largest unit that
 // keeps the integer part under 1024. e.g. 2_097_152 → "2 MiB",
