@@ -159,8 +159,19 @@ void TlsFinishedVerifyData(const u8 master_secret[kMasterSecretBytes], const u8 
 
 u32 TlsBuildClientHelloBody(const u8 client_random[kClientRandomBytes], u8* dst, u32 cap)
 {
+    return TlsBuildClientHelloBodyWithSni(client_random, nullptr, dst, cap);
+}
+
+u32 TlsBuildClientHelloBodyWithSni(const u8 client_random[kClientRandomBytes], const char* hostname, u8* dst, u32 cap)
+{
     if (dst == nullptr || cap < 64)
         return 0;
+    u32 host_len = 0;
+    if (hostname != nullptr)
+    {
+        while (hostname[host_len] != '\0' && host_len < 255)
+            ++host_len;
+    }
     u32 off = 0;
     // ClientVersion (TLS 1.2)
     StoreU16Be(dst + off, kVersionTls12);
@@ -179,11 +190,49 @@ u32 TlsBuildClientHelloBody(const u8 client_random[kClientRandomBytes], u8* dst,
     // CompressionMethods (one method: null = 0, length prefix 1)
     dst[off++] = 1;
     dst[off++] = 0;
-    // Extensions: empty list (length 0). RFC 5246 §7.4.1.2
-    // makes extensions OPTIONAL on the wire; we omit the
-    // 2-byte length altogether per the pre-TLS-1.3 minimum.
-    // (Real-world servers tend to require at least SNI;
-    // adding that is a focused follow-on.)
+    if (host_len == 0)
+    {
+        // RFC 5246 §7.4.1.2 allows omitting the extensions
+        // block entirely — preserve the pre-SNI shape so the
+        // existing self-tests don't need updating.
+        return off;
+    }
+    // Extensions block. Single extension: SNI (RFC 6066 §3).
+    //
+    //   extension_type   = 0 (server_name)
+    //   extension_data:
+    //     u16 server_name_list_length
+    //     u8  NameType = 0 (host_name)
+    //     u16 host_name_length
+    //     opaque host_name[host_name_length]
+    //
+    // Total extension_data size = 2 (list length)
+    //                           + 1 (name type)
+    //                           + 2 (host name length)
+    //                           + host_len
+    const u32 sni_ext_data_len = 2 + 1 + 2 + host_len;
+    const u32 ext_block_len = 2 + 2 + sni_ext_data_len; // type + len + data
+    if (off + 2 + ext_block_len > cap)
+        return 0;
+    StoreU16Be(dst + off, static_cast<u16>(ext_block_len));
+    off += 2;
+    // Extension type = 0 (server_name)
+    StoreU16Be(dst + off, 0);
+    off += 2;
+    // Extension data length
+    StoreU16Be(dst + off, static_cast<u16>(sni_ext_data_len));
+    off += 2;
+    // server_name_list_length
+    StoreU16Be(dst + off, static_cast<u16>(1 + 2 + host_len));
+    off += 2;
+    // NameType = host_name
+    dst[off++] = 0;
+    // host_name length + bytes
+    StoreU16Be(dst + off, static_cast<u16>(host_len));
+    off += 2;
+    for (u32 i = 0; i < host_len; ++i)
+        dst[off + i] = static_cast<u8>(hostname[i]);
+    off += host_len;
     return off;
 }
 
@@ -425,7 +474,7 @@ void SplitKeyBlock(Connection* c, const u8 kb[kKeyBlockBytes])
 } // namespace
 
 u32 ConnectionStart(Connection* c, const u8 client_random[kClientRandomBytes], const u8 pms[kPreMasterSecretBytes],
-                    u8* out, u32 cap)
+                    const char* hostname, u8* out, u32 cap)
 {
     if (c == nullptr || client_random == nullptr || pms == nullptr || out == nullptr)
         return 0;
@@ -450,9 +499,10 @@ u32 ConnectionStart(Connection* c, const u8 client_random[kClientRandomBytes], c
 
     // Build the ClientHello body, then the handshake-framed body
     // for transcript hashing, then the record-wrapped version
-    // for the wire.
-    u8 ch_body[64];
-    const u32 ch_body_len = TlsBuildClientHelloBody(c->client_random, ch_body, sizeof(ch_body));
+    // for the wire. With SNI: 41-byte base + 9-byte SNI overhead
+    // + hostname length. 320 bytes covers any realistic FQDN.
+    u8 ch_body[320];
+    const u32 ch_body_len = TlsBuildClientHelloBodyWithSni(c->client_random, hostname, ch_body, sizeof(ch_body));
     if (ch_body_len == 0)
     {
         ConnectionFail(c, "ClientHello body build failed");
@@ -461,9 +511,9 @@ u32 ConnectionStart(Connection* c, const u8 client_random[kClientRandomBytes], c
     // Mix the 4-byte-handshake-header + body into the transcript.
     u8 hs_msg[4 + sizeof(ch_body)];
     hs_msg[0] = kHandshakeClientHello;
-    hs_msg[1] = 0;
-    hs_msg[2] = 0;
-    hs_msg[3] = static_cast<u8>(ch_body_len);
+    hs_msg[1] = static_cast<u8>((ch_body_len >> 16) & 0xFF);
+    hs_msg[2] = static_cast<u8>((ch_body_len >> 8) & 0xFF);
+    hs_msg[3] = static_cast<u8>(ch_body_len & 0xFF);
     CopyBytes(hs_msg + 4, ch_body, ch_body_len);
     TranscriptUpdate(&c->transcript, hs_msg, 4 + ch_body_len);
 

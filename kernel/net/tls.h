@@ -105,6 +105,14 @@ void TlsFinishedVerifyData(const u8 master_secret[kMasterSecretBytes], const u8 
 /// small.
 u32 TlsBuildClientHelloBody(const u8 client_random[kClientRandomBytes], u8* dst, u32 cap);
 
+/// Same as `TlsBuildClientHelloBody`, but appends a Server Name
+/// Indication (SNI) extension (RFC 6066 §3) carrying
+/// `hostname` as the host_name entry. Required by most
+/// modern HTTPS servers (CDNs typically refuse the handshake
+/// without it). Pass nullptr / "" for `hostname` to fall back
+/// to the no-extensions form.
+u32 TlsBuildClientHelloBodyWithSni(const u8 client_random[kClientRandomBytes], const char* hostname, u8* dst, u32 cap);
+
 /// Wrap a payload as a TLS record (RFC 5246 §6.2.1):
 ///   type | version | length | payload
 /// `type` is one of the kContent* constants. Returns the total
@@ -323,11 +331,15 @@ struct Connection
 ///                  (the client's offered TLS version, per
 ///                  RFC 5246 §7.4.7.1). Remaining 46 are
 ///                  caller-supplied entropy.
+///   hostname     : optional SNI hostname; pass nullptr / ""
+///                  to fall back to the no-SNI shape (most
+///                  modern CDNs reject that — pass a name
+///                  whenever possible).
 ///
 /// Writes the ClientHello record bytes to `out` and returns the
 /// length. Advances state to SentClientHello.
 u32 ConnectionStart(Connection* c, const u8 client_random[kClientRandomBytes], const u8 pms[kPreMasterSecretBytes],
-                    u8* out, u32 cap);
+                    const char* hostname, u8* out, u32 cap);
 
 /// Feed bytes received from the server. The state machine peels
 /// off complete TLS records, advances state, and emits whatever

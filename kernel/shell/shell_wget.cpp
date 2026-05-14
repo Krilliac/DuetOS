@@ -47,7 +47,9 @@
 #include "mm/kheap.h"
 #include "net/socket.h"
 #include "net/stack.h"
+#include "net/tls.h"
 #include "sched/sched.h"
+#include "util/random.h"
 
 namespace duetos::core::shell::internal
 {
@@ -355,6 +357,25 @@ u32 ParseStatusCode(const u8* buf, u32 len)
     return code;
 }
 
+// RandomByteFn callback for TLS: yields a non-zero byte by
+// pulling from the kernel CSPRNG. PKCS#1 v1.5 type-2 padding
+// requires every PS byte to be non-zero, so the helper loops
+// until it gets one.
+u8 NonZeroRandByte()
+{
+    for (u32 tries = 0; tries < 32; ++tries)
+    {
+        const u64 v = duetos::core::RandomU64();
+        for (u32 i = 0; i < 8; ++i)
+        {
+            const u8 b = static_cast<u8>((v >> (i * 8)) & 0xFFu);
+            if (b != 0)
+                return b;
+        }
+    }
+    return 1; // give up; PKCS#1 PS only needs non-zero, value doesn't matter
+}
+
 // Mkdir each intermediate directory of `path` on FAT32 vol 0.
 // Mirrors the same loop used by `unzip` so /foo/bar/baz.dat
 // works even if /foo and /foo/bar don't exist yet.
@@ -377,6 +398,358 @@ void MkdirParents(const duetos::fs::fat32::Volume* vol, const char* path)
             tmp[j] = '/';
         }
     }
+}
+
+// Walks the TLS handshake against a connected stream socket.
+// Sends ClientHello, receives server records into a heap stage
+// buffer until a server flight is complete, hands the bytes to
+// ConnectionFeed, sends whatever the state machine emits in
+// reply, and loops until c->state hits Established or Failed.
+// Returns true once Established, false on timeout / error.
+bool TlsHandshakeOverSocket(u32 sock, duetos::net::tls::Connection* c, const u8 client_random[32], const u8 pms[48],
+                            const char* sni_hostname)
+{
+    u8 out_buf[2048];
+    u32 out_len = duetos::net::tls::ConnectionStart(c, client_random, pms, sni_hostname, out_buf, sizeof(out_buf));
+    if (out_len == 0)
+        return false;
+    {
+        u32 sent = 0;
+        while (sent < out_len)
+        {
+            const i64 n = duetos::net::SocketSendStream(sock, out_buf + sent, out_len - sent);
+            if (n <= 0)
+                return false;
+            sent += static_cast<u32>(n);
+        }
+    }
+
+    // Server flight buffer. ServerHello + Certificate +
+    // ServerHelloDone can run a few KiB once a real cert
+    // chain shows up; 32 KiB stages a single full handshake
+    // flight comfortably.
+    constexpr u32 kFlightCap = 32 * 1024;
+    auto* flight = static_cast<u8*>(duetos::mm::KMalloc(kFlightCap));
+    if (flight == nullptr)
+        return false;
+    u32 flight_len = 0;
+    u32 idle_ticks = 0;
+    while (c->state != duetos::net::tls::State::Established && c->state != duetos::net::tls::State::Failed)
+    {
+        const i64 n = duetos::net::SocketRecvStream(sock, flight + flight_len, kFlightCap - flight_len);
+        if (n > 0)
+        {
+            flight_len += static_cast<u32>(n);
+            idle_ticks = 0;
+            // Feed everything we have. ConnectionFeed will
+            // bail early if it needs more bytes; we keep
+            // looping the socket recv until the state
+            // advances.
+            out_len =
+                duetos::net::tls::ConnectionFeed(c, flight, flight_len, out_buf, sizeof(out_buf), &NonZeroRandByte);
+            if (c->state == duetos::net::tls::State::Failed)
+                break;
+            if (out_len > 0)
+            {
+                u32 sent = 0;
+                while (sent < out_len)
+                {
+                    const i64 m = duetos::net::SocketSendStream(sock, out_buf + sent, out_len - sent);
+                    if (m <= 0)
+                    {
+                        c->state = duetos::net::tls::State::Failed;
+                        c->err = "socket send failed mid-handshake";
+                        break;
+                    }
+                    sent += static_cast<u32>(m);
+                }
+                // Reset the flight buffer — we've consumed
+                // and replied. Subsequent recvs feed a fresh
+                // server flight (the encrypted Finished round).
+                flight_len = 0;
+            }
+            continue;
+        }
+        if (n == 0)
+        {
+            // Peer closed mid-handshake.
+            c->state = duetos::net::tls::State::Failed;
+            c->err = "peer closed mid-handshake";
+            break;
+        }
+        // n < 0 — nothing to read. Sleep + retry; ~10s ceiling.
+        duetos::sched::SchedSleepTicks(1);
+        if (++idle_ticks > 100)
+        {
+            c->state = duetos::net::tls::State::Failed;
+            c->err = "handshake timeout";
+            break;
+        }
+    }
+    duetos::mm::KFree(flight);
+    return c->state == duetos::net::tls::State::Established;
+}
+
+void DoHttpsFetch(const ParsedUrl& url, const char* dest)
+{
+    duetos::net::Ipv4Address ip{};
+    ConsoleWrite("WGET: resolving ");
+    ConsoleWrite(url.host);
+    ConsoleWriteln(" (https) ...");
+    if (!ResolveHost(url.host, &ip))
+    {
+        ConsoleWriteln("WGET: DNS lookup failed");
+        return;
+    }
+    ConsoleWrite("WGET:   -> ");
+    for (u32 j = 0; j < 4; ++j)
+    {
+        if (j != 0)
+            ConsoleWriteChar('.');
+        WriteU64Dec(ip.octets[j]);
+    }
+    ConsoleWrite(":");
+    WriteU64Dec(url.port);
+    ConsoleWriteln(" (TLS 1.2)");
+
+    const i32 sock = duetos::net::SocketAlloc(duetos::net::kSocketDomainInet, duetos::net::kSocketTypeStream);
+    if (sock < 0)
+    {
+        ConsoleWriteln("WGET: SocketAlloc failed");
+        return;
+    }
+    if (!duetos::net::SocketConnect(static_cast<u32>(sock), ip, url.port))
+    {
+        duetos::net::SocketRelease(static_cast<u32>(sock));
+        ConsoleWriteln("WGET: TCP connect failed");
+        return;
+    }
+
+    // Seed the client_random + pre_master_secret from the
+    // kernel CSPRNG. PMS first two bytes are the offered TLS
+    // version (RFC 5246 §7.4.7.1).
+    u8 client_random[32];
+    u8 pms[48];
+    duetos::core::RandomFillBytes(client_random, sizeof(client_random));
+    duetos::core::RandomFillBytes(pms, sizeof(pms));
+    pms[0] = 0x03;
+    pms[1] = 0x03;
+
+    auto* c = static_cast<duetos::net::tls::Connection*>(duetos::mm::KMalloc(sizeof(duetos::net::tls::Connection)));
+    if (c == nullptr)
+    {
+        duetos::net::SocketRelease(static_cast<u32>(sock));
+        ConsoleWriteln("WGET: OOM tls connection state");
+        return;
+    }
+
+    ConsoleWriteln("WGET: starting TLS handshake (RSA + AES-128-GCM)...");
+    const bool handshake_ok = TlsHandshakeOverSocket(static_cast<u32>(sock), c, client_random, pms, url.host);
+    if (!handshake_ok)
+    {
+        ConsoleWrite("WGET: TLS handshake FAILED");
+        if (c->err != nullptr)
+        {
+            ConsoleWrite(" — ");
+            ConsoleWrite(c->err);
+        }
+        ConsoleWriteln("");
+        ConsoleWriteln("      Note: v0 only offers TLS_RSA_WITH_AES_128_GCM_SHA256.");
+        ConsoleWriteln("      Most modern CDNs only accept ECDHE. ECDHE support");
+        ConsoleWriteln("      lands when Tier 2 of the TLS roadmap ships.");
+        duetos::net::SocketRelease(static_cast<u32>(sock));
+        duetos::mm::KFree(c);
+        return;
+    }
+    ConsoleWriteln("WGET: TLS handshake established");
+
+    // Build the HTTP request and encrypt it under the
+    // post-Finished client_write_key + client_iv_salt.
+    char req[768];
+    const u32 req_len = BuildHttpRequest(url, req, sizeof(req));
+    u8 enc_req[1024];
+    const u32 enc_req_len =
+        duetos::net::tls::ConnectionEncryptApp(c, reinterpret_cast<const u8*>(req), req_len, enc_req, sizeof(enc_req));
+    if (enc_req_len == 0)
+    {
+        ConsoleWriteln("WGET: failed to encrypt HTTP request");
+        duetos::net::SocketRelease(static_cast<u32>(sock));
+        duetos::mm::KFree(c);
+        return;
+    }
+    {
+        u32 sent = 0;
+        while (sent < enc_req_len)
+        {
+            const i64 n = duetos::net::SocketSendStream(static_cast<u32>(sock), enc_req + sent, enc_req_len - sent);
+            if (n <= 0)
+                break;
+            sent += static_cast<u32>(n);
+        }
+    }
+    // Half-close removed in the encrypted path — TLS Alerts
+    // are how a clean close works. We just rely on the
+    // server's "Connection: close" Response + an idle
+    // timeout to terminate the read loop.
+
+    // Read encrypted records, decrypt, accumulate plaintext.
+    auto* enc_in = static_cast<u8*>(duetos::mm::KMalloc(kBodyCapBytes));
+    auto* plain = static_cast<u8*>(duetos::mm::KMalloc(kBodyCapBytes));
+    if (enc_in == nullptr || plain == nullptr)
+    {
+        if (enc_in != nullptr)
+            duetos::mm::KFree(enc_in);
+        if (plain != nullptr)
+            duetos::mm::KFree(plain);
+        duetos::net::SocketRelease(static_cast<u32>(sock));
+        duetos::mm::KFree(c);
+        ConsoleWriteln("WGET: OOM read buffers");
+        return;
+    }
+    u32 enc_in_len = 0;
+    u32 plain_len = 0;
+    u32 idle_ticks = 0;
+    while (plain_len < kBodyCapBytes && idle_ticks < 300)
+    {
+        const i64 n =
+            duetos::net::SocketRecvStream(static_cast<u32>(sock), enc_in + enc_in_len, kBodyCapBytes - enc_in_len);
+        if (n > 0)
+        {
+            enc_in_len += static_cast<u32>(n);
+            idle_ticks = 0;
+            // Peel off as many complete TLS records as we can.
+            u32 off = 0;
+            while (off + 5 < enc_in_len)
+            {
+                duetos::net::tls::RecordView rv{};
+                if (!duetos::net::tls::TlsPeekRecord(enc_in + off, enc_in_len - off, &rv))
+                    break;
+                const u32 record_total = 5u + rv.length;
+                if (off + record_total > enc_in_len)
+                    break; // partial; wait for more
+                u32 pt_chunk = 0;
+                if (rv.type == duetos::net::tls::kContentApplicationData)
+                {
+                    if (duetos::net::tls::ConnectionDecryptApp(c, enc_in + off, record_total, plain + plain_len,
+                                                               kBodyCapBytes - plain_len, &pt_chunk))
+                    {
+                        plain_len += pt_chunk;
+                    }
+                    else
+                    {
+                        ConsoleWriteln("WGET: TLS record decrypt failed");
+                        goto done;
+                    }
+                }
+                else if (rv.type == duetos::net::tls::kContentAlert)
+                {
+                    // Server-initiated close_notify (level=1)
+                    // or fatal alert. Either way, stop reading.
+                    goto done;
+                }
+                off += record_total;
+            }
+            // Shift unconsumed bytes to front of buffer.
+            if (off > 0)
+            {
+                for (u32 i = 0; i + off < enc_in_len; ++i)
+                    enc_in[i] = enc_in[i + off];
+                enc_in_len -= off;
+            }
+            continue;
+        }
+        if (n == 0)
+            break; // peer closed
+        duetos::sched::SchedSleepTicks(1);
+        ++idle_ticks;
+    }
+done:
+    duetos::net::SocketRelease(static_cast<u32>(sock));
+    duetos::mm::KFree(c);
+    duetos::mm::KFree(enc_in);
+
+    // Same HTTP-response handling as the HTTP path. Surface
+    // status, headers, then write/print body.
+    const u32 status = ParseStatusCode(plain, plain_len);
+    const u32 body_off = FindBodyStart(plain, plain_len);
+    u32 body_len = plain_len - body_off;
+    char ctype[96];
+    char clen[32];
+    char xfer[32];
+    const u32 ctype_n = FindHeader(plain, body_off, "Content-Type", ctype, sizeof(ctype));
+    const u32 clen_n = FindHeader(plain, body_off, "Content-Length", clen, sizeof(clen));
+    const u32 xfer_n = FindHeader(plain, body_off, "Transfer-Encoding", xfer, sizeof(xfer));
+    ConsoleWrite("WGET: HTTPS ");
+    WriteU64Dec(status);
+    if (ctype_n > 0)
+    {
+        ConsoleWrite("  type=");
+        ConsoleWrite(ctype);
+    }
+    if (clen_n > 0)
+    {
+        ConsoleWrite("  length=");
+        ConsoleWrite(clen);
+    }
+    ConsoleWriteln("");
+    if (xfer_n > 0 && StrCaseEqN(xfer, "chunked", 7))
+    {
+        const u32 decoded = DecodeChunked(plain + body_off, body_len, plain + body_off, kBodyCapBytes - body_off);
+        if (decoded == 0)
+        {
+            ConsoleWriteln("WGET: chunked decode failed");
+            duetos::mm::KFree(plain);
+            return;
+        }
+        body_len = decoded;
+    }
+    ConsoleWrite("WGET: total wire=");
+    WriteU64Dec(plain_len);
+    ConsoleWrite("  body=");
+    WriteU64Dec(body_len);
+    ConsoleWriteln("");
+
+    if (dest == nullptr)
+    {
+        constexpr u32 kPrintCap = 4096;
+        const u32 print_len = body_len > kPrintCap ? kPrintCap : body_len;
+        for (u32 i = 0; i < print_len; ++i)
+            ConsoleWriteChar(static_cast<char>(plain[body_off + i]));
+        if (body_len > kPrintCap)
+        {
+            ConsoleWrite("\n[... ");
+            WriteU64Dec(body_len - kPrintCap);
+            ConsoleWriteln(" more bytes elided]");
+        }
+        else
+        {
+            ConsoleWriteln("");
+        }
+        duetos::mm::KFree(plain);
+        return;
+    }
+    const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+    if (vol == nullptr)
+    {
+        ConsoleWriteln("WGET: NO FAT32 VOLUME for dst");
+        duetos::mm::KFree(plain);
+        return;
+    }
+    MkdirParents(vol, dest);
+    const auto written = duetos::fs::fat32::Fat32CreateAtPath(vol, dest, plain + body_off, body_len);
+    if (written != static_cast<duetos::i64>(body_len))
+    {
+        ConsoleWrite("WGET: CREATE FAIL ");
+        ConsoleWriteln(dest);
+    }
+    else
+    {
+        ConsoleWrite("WGET: saved ");
+        WriteU64Dec(body_len);
+        ConsoleWrite(" bytes to ");
+        ConsoleWriteln(dest);
+    }
+    duetos::mm::KFree(plain);
 }
 
 } // namespace
@@ -428,9 +801,7 @@ void CmdWget(u32 argc, char** argv)
     }
     if (url.scheme == kSchemeHttps)
     {
-        ConsoleWriteln("WGET: https:// not yet supported — TLS state machine pending");
-        ConsoleWriteln("      every TLS primitive is in tree (see [tls] PASS at boot)");
-        ConsoleWriteln("      next slice glues them into a Connection state machine");
+        DoHttpsFetch(url, dest);
         return;
     }
 
@@ -1021,6 +1392,128 @@ void CmdBase64(u32 argc, char** argv)
     ConsoleWrite(" bytes to ");
     ConsoleWriteln(dst_path);
     duetos::mm::KFree(stage);
+}
+
+// ---------------------------------------------------------------------------
+// xxd — xxd-style hex dump. Differs from `hexdump` in two ways:
+//   1. Reads via FAT32 streaming (no 512-byte cap; works on
+//      multi-MiB files).
+//   2. Output is xxd-compatible: lowercase hex, 16-byte rows
+//      grouped in pairs (4-char groups), 8-character offset
+//      column, and a trailing printable-ASCII gutter.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+
+void WriteHex2Lower(u8 b)
+{
+    static constexpr char kHex[] = "0123456789abcdef";
+    ConsoleWriteChar(kHex[(b >> 4) & 0xF]);
+    ConsoleWriteChar(kHex[b & 0xF]);
+}
+
+void WriteHex8Lower(u32 v)
+{
+    for (int s = 28; s >= 0; s -= 4)
+    {
+        static constexpr char kHex[] = "0123456789abcdef";
+        ConsoleWriteChar(kHex[(v >> s) & 0xF]);
+    }
+}
+
+void DumpXxdRow(u32 offset, const u8* row, u32 row_len)
+{
+    WriteHex8Lower(offset);
+    ConsoleWriteChar(':');
+    ConsoleWriteChar(' ');
+    for (u32 i = 0; i < 16; ++i)
+    {
+        if (i < row_len)
+            WriteHex2Lower(row[i]);
+        else
+            ConsoleWrite("  ");
+        if ((i & 1) == 1 && i < 15)
+            ConsoleWriteChar(' ');
+    }
+    ConsoleWrite("  ");
+    for (u32 i = 0; i < row_len; ++i)
+    {
+        const u8 c = row[i];
+        ConsoleWriteChar((c >= 0x20 && c <= 0x7E) ? static_cast<char>(c) : '.');
+    }
+    ConsoleWriteln("");
+}
+
+struct XxdStreamCtx
+{
+    u32 offset;
+    u8 carry[16];
+    u32 carry_len;
+};
+
+bool XxdChunkCb(const u8* data, u64 len, void* ctx)
+{
+    auto* s = static_cast<XxdStreamCtx*>(ctx);
+    u64 i = 0;
+    while (i < len)
+    {
+        // Fill from carry first.
+        while (s->carry_len < 16 && i < len)
+            s->carry[s->carry_len++] = data[i++];
+        if (s->carry_len == 16)
+        {
+            DumpXxdRow(s->offset, s->carry, 16);
+            s->offset += 16;
+            s->carry_len = 0;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+void CmdXxd(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("XXD: usage: xxd <path>");
+        ConsoleWriteln("     Streams a FAT32 / ramfs file as 16-byte hex rows.");
+        return;
+    }
+    const char* path = argv[1];
+    XxdStreamCtx s{};
+    bool used_fat32 = false;
+    const auto* vol = duetos::fs::fat32::Fat32Volume(0);
+    duetos::fs::fat32::DirEntry ent;
+    if (vol != nullptr && duetos::fs::fat32::Fat32LookupPath(vol, path, &ent) && (ent.attributes & 0x10) == 0)
+    {
+        if (!duetos::fs::fat32::Fat32ReadFileStream(vol, &ent, &XxdChunkCb, &s))
+        {
+            ConsoleWrite("XXD: I/O ERROR: ");
+            ConsoleWriteln(path);
+            return;
+        }
+        used_fat32 = true;
+    }
+    else
+    {
+        char scratch[duetos::fs::kTmpFsContentMax];
+        const u32 n = ReadFileToBuf(path, scratch, sizeof(scratch));
+        if (n == static_cast<u32>(-1))
+        {
+            ConsoleWrite("XXD: NO SUCH FILE: ");
+            ConsoleWriteln(path);
+            return;
+        }
+        XxdChunkCb(reinterpret_cast<const u8*>(scratch), n, &s);
+    }
+    if (s.carry_len > 0)
+    {
+        DumpXxdRow(s.offset, s.carry, s.carry_len);
+        s.offset += s.carry_len;
+    }
+    (void)used_fat32;
 }
 
 } // namespace duetos::core::shell::internal
