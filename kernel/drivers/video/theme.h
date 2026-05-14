@@ -115,10 +115,11 @@ enum class ThemeRole : u8
     Browser = 11,
     Calendar = 12,
     NotifyCenter = 13,
-    Sysmon = 14,  // System Monitor — rolling CPU / heap / window stats
-    HexView = 15, // Hex Viewer — binary file inspector
-    CharMap = 16, // Character Map — codepoint picker
-    kCount = 17,
+    Sysmon = 14,   // System Monitor — rolling CPU / heap / window stats
+    HexView = 15,  // Hex Viewer — binary file inspector
+    CharMap = 16,  // Character Map — codepoint picker
+    Terminal = 17, // Terminal — windowed shell host with VT/ANSI parsing
+    kCount = 18,
 };
 
 struct Theme

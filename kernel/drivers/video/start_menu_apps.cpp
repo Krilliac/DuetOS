@@ -161,6 +161,11 @@ bool ResolveTargetName(const char* s, ThemeRole* out)
         *out = ThemeRole::CharMap;
         return true;
     }
+    if (StrEqI(s, "terminal") || StrEqI(s, "term") || StrEqI(s, "console"))
+    {
+        *out = ThemeRole::Terminal;
+        return true;
+    }
     return false;
 }
 

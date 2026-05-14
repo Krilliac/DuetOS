@@ -52,6 +52,7 @@
 #include "util/tga.h"
 #include "util/types.h"
 #include "util/unicode.h"
+#include "util/vt_parser.h"
 #include "acpi/acpi.h"
 #include "acpi/aml.h"
 #include "arch/x86_64/cpu.h"
@@ -175,6 +176,7 @@
 #include "apps/screenshot.h"
 #include "apps/settings.h"
 #include "apps/taskman.h"
+#include "apps/terminal.h"
 #include "apps/trash.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
@@ -1168,6 +1170,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::util::Crc32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::Base64SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::SaturatingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::vt::VtParserSelfTest());
 
     // KASLR — compute the candidate slide from the now-seeded entropy
     // pool. The slide isn't applied to the kernel image yet (that
@@ -2162,6 +2165,21 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::drivers::video::ThemeRegisterWindow(Role::CharMap, charmap_handle);
     duetos::apps::charmap::CharMapInit(charmap_handle);
     DUETOS_BOOT_SELFTEST(duetos::apps::charmap::CharMapSelfTest());
+
+    // TERMINAL — windowed VT/ANSI host (slice 1 of the ToaruOS
+    // clean-room port). Wide window to fit ~80 cells of an 8 px
+    // bitmap glyph plus padding; tall enough for ~24 rows of the
+    // 10 px terminal cell. See wiki/advanced/Toaru-Port-Plan.md.
+    duetos::drivers::video::WindowChrome term_chrome = theme_chrome(Role::Terminal);
+    term_chrome.x = 120;
+    term_chrome.y = 70;
+    term_chrome.w = 680;
+    term_chrome.h = 280;
+    const duetos::drivers::video::WindowHandle term_handle =
+        duetos::drivers::video::WindowRegister(term_chrome, "TERMINAL");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Terminal, term_handle);
+    duetos::apps::terminal::TerminalInit(term_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::terminal::TerminalSelfTest());
 
     // NETWORK STATUS — read-only viewer over net::stack accessors.
     // No ThemeRole today; the chrome is seeded from Settings'
@@ -4697,6 +4715,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     {
                         app_consumed = duetos::apps::charmap::CharMapFeedArrow(static_cast<duetos::u16>(ev.code));
                     }
+                    else if (active == duetos::apps::terminal::TerminalWindow() &&
+                             (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
+                              ev.code == kKeyArrowRight))
+                    {
+                        app_consumed = duetos::apps::terminal::TerminalFeedArrow(static_cast<duetos::u16>(ev.code));
+                    }
                     else if (active == duetos::apps::notes::NotesWindow() &&
                              (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
                               ev.code == kKeyArrowRight || ev.code == kKeyHome || ev.code == kKeyEnd ||
@@ -4772,6 +4796,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                             else if (active == duetos::apps::charmap::CharMapWindow())
                             {
                                 app_consumed = duetos::apps::charmap::CharMapFeedChar(c);
+                            }
+                            else if (active == duetos::apps::terminal::TerminalWindow())
+                            {
+                                app_consumed = duetos::apps::terminal::TerminalFeedChar(c);
                             }
                             else if (active == duetos::apps::sysmon::SysmonWindow())
                             {

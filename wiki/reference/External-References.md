@@ -148,6 +148,37 @@ in:
   reading list of "the order subsystems usually need to land".
   Architecture is microkernel-leaning and incompatible with DuetOS's
   hybrid model.
+- **SerenityOS** (BSD-2-Clause) — full POSIX hobby OS in C++.
+  Highest-value reading: LibGfx image codecs (PNG/JPEG/BMP/GIF/ICO
+  parser shapes), the WindowServer/LibGUI compositor/toolkit split,
+  pledge/unveil per-process capability scoping (parallel to our
+  `kCap*` bits). Caveats: everything depends on AK (their STL
+  replacement) which is threaded through every library, so
+  single-component extraction is expensive. POSIX-evangelist
+  userland — copy designs, not code.
+- **ToaruOS** (NCSA / BSD-style) — **the closest architectural
+  cousin** in the references list: hybrid kernel (Misaka), x86_64 +
+  ARMv8, UEFI-first, SMP, ACPI. Plain C with no AK-equivalent
+  stdlib threaded through it, which makes single-component reading
+  much easier than Serenity. Highest-value reading: Yutani
+  compositor architecture (alternate design to ours — Yutani is
+  userland, ours is in-kernel; useful to see the trade-offs),
+  terminal emulator's VT/ANSI escape parser + character-cell grid
+  + glyph-cache shape, audio-server / mixer routing between the
+  per-app `winmm`-equivalent and the kernel HDA driver. Caveats:
+  POSIX-ish userland, PTY-shaped shell hosting, no PE/Win32 — all
+  of which require re-imagining inside DuetOS's capability-gated
+  model.
+- **Linux kernel** (GPLv2) — **read-only reference for protocol
+  shapes only**. The license is incompatible with MIT; do not copy
+  code. Useful for driver register layouts, iwlwifi firmware
+  protocols, Wi-Fi standards, ACPI/AML edge cases. Always
+  re-derive from public specs where possible to keep the audit
+  trail clean.
+
+See [Toaru Port Plan](../advanced/Toaru-Port-Plan.md) for the
+clean-room methodology and slice plan for the ongoing ToaruOS
+prior-art port.
 
 ## Related Pages
 

@@ -124,3 +124,4 @@
 - [SMP AP Bring-up Scope](advanced/SMP-AP-Bringup-Scope.md)
 - [Win32 Thunks Compat Note](advanced/Win32-Thunks-Compat-Note.md)
 - [Linux Networking Port Opportunities](advanced/Linux-Networking-Port-Opportunities.md)
+- [ToaruOS Port Plan](advanced/Toaru-Port-Plan.md)
