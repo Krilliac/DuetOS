@@ -5,6 +5,7 @@
 #include "arch/x86_64/serial.h"
 #include "mm/address_space.h"
 #include "mm/kheap.h"
+#include "util/string.h"
 
 #include "generated_customdll.h"
 
@@ -44,20 +45,6 @@ namespace duetos::core
 namespace
 {
 
-bool StrEq(const char* a, const char* b)
-{
-    if (a == nullptr || b == nullptr)
-        return a == b;
-    while (*a && *b)
-    {
-        if (*a != *b)
-            return false;
-        ++a;
-        ++b;
-    }
-    return *a == *b;
-}
-
 bool Expect(bool ok, const char* label)
 {
     using arch::SerialWrite;
@@ -93,7 +80,7 @@ void DllLoaderSelfTest()
     const char* dll_name = PeExportsDllName(exp);
     if (!Expect(dll_name != nullptr, "PeExportsDllName"))
         return;
-    if (!Expect(StrEq(dll_name, "customdll.dll"), "dll-name match"))
+    if (!Expect(StrEqual(dll_name, "customdll.dll"), "dll-name match"))
     {
         SerialWrite("  got=\"");
         SerialWrite(dll_name);

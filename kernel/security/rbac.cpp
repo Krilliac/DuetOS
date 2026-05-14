@@ -10,6 +10,7 @@
 #include "core/panic.h"
 #include "log/klog.h"
 #include "security/persistence.h"
+#include "util/string.h"
 #include "util/types.h"
 
 namespace duetos::security
@@ -19,6 +20,8 @@ using duetos::core::Cap;
 using duetos::core::kCapCount;
 using duetos::core::kCapNone;
 using duetos::core::Panic;
+using duetos::core::StrEqual;
+using duetos::core::StrLen;
 
 namespace
 {
@@ -31,28 +34,6 @@ constexpr u32 kRbacMaxMemberships = duetos::core::kAuthMaxAccounts;
 Role g_roles[kRbacMaxRoles];
 AccountMembership g_memberships[kRbacMaxMemberships];
 bool g_initialized = false;
-
-bool StrEqual(const char* a, const char* b)
-{
-    if (a == nullptr || b == nullptr)
-        return false;
-    while (*a != '\0' && *b != '\0')
-    {
-        if (*a != *b)
-            return false;
-        ++a;
-        ++b;
-    }
-    return *a == '\0' && *b == '\0';
-}
-
-u32 StrLen(const char* s)
-{
-    u32 n = 0;
-    while (s != nullptr && s[n] != '\0')
-        ++n;
-    return n;
-}
 
 void StrCopy(char* dst, const char* src, u32 cap)
 {

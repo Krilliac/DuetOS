@@ -20,6 +20,7 @@
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 #include "log/klog.h"
+#include "util/string.h"
 
 namespace duetos::net::tcp
 {
@@ -150,25 +151,15 @@ bool TestRtoBackoff()
     return true;
 }
 
-bool StrEq(const char* a, const char* b)
-{
-    while (*a != 0 && *b != 0)
-    {
-        if (*a != *b)
-            return false;
-        ++a;
-        ++b;
-    }
-    return *a == 0 && *b == 0;
-}
+using duetos::core::StrEqual;
 
 bool TestStateNames()
 {
-    if (!StrEq(StateName(State::Closed), "CLOSED"))
+    if (!StrEqual(StateName(State::Closed), "CLOSED"))
         return false;
-    if (!StrEq(StateName(State::Established), "ESTABLISHED"))
+    if (!StrEqual(StateName(State::Established), "ESTABLISHED"))
         return false;
-    if (!StrEq(StateName(State::TimeWait), "TIME_WAIT"))
+    if (!StrEqual(StateName(State::TimeWait), "TIME_WAIT"))
         return false;
     return true;
 }

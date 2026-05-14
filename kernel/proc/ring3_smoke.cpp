@@ -261,6 +261,7 @@
 #include "loader/elf_loader.h"
 #include "log/klog.h"
 #include "util/random.h"
+#include "util/string.h"
 #include "core/panic.h"
 #include "loader/pe_loader.h"
 #include "diag/log_names.h"
@@ -1978,103 +1979,92 @@ void SpawnBpProbeTask()
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-bp-probe", proc);
 }
 
-bool LocalStrEq(const char* a, const char* b)
-{
-    for (u32 i = 0;; ++i)
-    {
-        if (a[i] != b[i])
-            return false;
-        if (a[i] == '\0')
-            return true;
-    }
-}
-
 } // namespace
 
 bool SpawnOnDemand(const char* kind)
 {
     if (kind == nullptr || kind[0] == '\0')
         return false;
-    if (LocalStrEq(kind, "hello"))
+    if (StrEqual(kind, "hello"))
     {
         SpawnRing3Task("ring3-cmd-hello", CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted,
                        kTickBudgetTrusted);
         return true;
     }
-    if (LocalStrEq(kind, "sandbox"))
+    if (StrEqual(kind, "sandbox"))
     {
         CapSet caps = CapSetEmpty();
         CapSetAdd(caps, kCapFsRead);
         SpawnRing3Task("ring3-cmd-sandbox", caps, fs::RamfsSandboxRoot(), mm::kFrameBudgetSandbox, kTickBudgetSandbox);
         return true;
     }
-    if (LocalStrEq(kind, "jail"))
+    if (StrEqual(kind, "jail"))
     {
         SpawnJailProbeTask();
         return true;
     }
-    if (LocalStrEq(kind, "nx"))
+    if (StrEqual(kind, "nx"))
     {
         SpawnNxProbeTask();
         return true;
     }
-    if (LocalStrEq(kind, "hog"))
+    if (StrEqual(kind, "hog"))
     {
         SpawnCpuHogProbe();
         return true;
     }
-    if (LocalStrEq(kind, "syscallstorm"))
+    if (StrEqual(kind, "syscallstorm"))
     {
         SpawnSyscallStormProbeTask();
         return true;
     }
-    if (LocalStrEq(kind, "hostile"))
+    if (StrEqual(kind, "hostile"))
     {
         SpawnHostileProbe();
         return true;
     }
-    if (LocalStrEq(kind, "crosspid"))
+    if (StrEqual(kind, "crosspid"))
     {
         SpawnCrossPidProbe();
         return true;
     }
-    if (LocalStrEq(kind, "dropcaps"))
+    if (StrEqual(kind, "dropcaps"))
     {
         SpawnDropcapsProbe();
         return true;
     }
-    if (LocalStrEq(kind, "priv"))
+    if (StrEqual(kind, "priv"))
     {
         SpawnPrivProbeTask();
         return true;
     }
-    if (LocalStrEq(kind, "badint"))
+    if (StrEqual(kind, "badint"))
     {
         SpawnBadIntProbeTask();
         return true;
     }
-    if (LocalStrEq(kind, "kread"))
+    if (StrEqual(kind, "kread"))
     {
         SpawnKernelReadProbeTask();
         return true;
     }
-    if (LocalStrEq(kind, "ptrfuzz"))
+    if (StrEqual(kind, "ptrfuzz"))
     {
         SpawnPtrFuzzProbeTask();
         return true;
     }
-    if (LocalStrEq(kind, "writefuzz"))
+    if (StrEqual(kind, "writefuzz"))
     {
         SpawnWriteFuzzProbeTask();
         return true;
     }
-    if (LocalStrEq(kind, "hellope"))
+    if (StrEqual(kind, "hellope"))
     {
         SpawnPeFile("ring3-hello-pe", fs::generated::kBinHelloPeBytes, fs::generated::kBinHelloPeBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
-    if (LocalStrEq(kind, "winhello"))
+    if (StrEqual(kind, "winhello"))
     {
         // First Win32 PE: imports ExitProcess, gets resolved
         // through the kernel-hosted stub page, exits with
@@ -2084,7 +2074,7 @@ bool SpawnOnDemand(const char* kind)
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
-    if (LocalStrEq(kind, "winkill"))
+    if (StrEqual(kind, "winkill"))
     {
         // Real-world PE that the v0 loader cannot execute.
         // SpawnPeFile's diagnostic pre-pass still fires
@@ -2095,7 +2085,7 @@ bool SpawnOnDemand(const char* kind)
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
-    if (LocalStrEq(kind, "threads"))
+    if (StrEqual(kind, "threads"))
     {
         // thread_stress.exe — exercises CreateThread +
         // CreateEventW + SetEvent + WaitForSingleObject.
@@ -2105,7 +2095,7 @@ bool SpawnOnDemand(const char* kind)
                     mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
-    if (LocalStrEq(kind, "browser"))
+    if (StrEqual(kind, "browser"))
     {
         // mini_browser.exe — minimal WinSock 2 PE that does an
         // HTTP/1.0 GET to www.google.com. Imports kernel32 +
@@ -2117,7 +2107,7 @@ bool SpawnOnDemand(const char* kind)
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
-    if (LocalStrEq(kind, "browser2") || LocalStrEq(kind, "wininet"))
+    if (StrEqual(kind, "browser2") || StrEqual(kind, "wininet"))
     {
         // browser_pe.exe — WinInet-based browser. Imports kernel32 +
         // wininet; the kernel-side wininet thunks do real HTTP/1.1
@@ -2128,7 +2118,7 @@ bool SpawnOnDemand(const char* kind)
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         return true;
     }
-    if (LocalStrEq(kind, "pe32"))
+    if (StrEqual(kind, "pe32"))
     {
         // pe32_smoke.exe — minimal PE32 (i386) test image. The
         // kernel's loader recognises PE32 (Layer 1 of 32-bit PE

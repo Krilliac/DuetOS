@@ -5,6 +5,7 @@
 #include "sync/spinlock.h"
 #include "time/timekeeper.h"
 #include "util/result.h"
+#include "util/string.h"
 #include "util/symbols.h"
 #include "util/types.h"
 
@@ -153,22 +154,6 @@ u64 CopyTruncated(char* dst, u64 dst_cap, const char* src)
     return i;
 }
 
-bool StrEqualsLocal(const char* a, const char* b)
-{
-    if (a == b)
-        return true;
-    if (a == nullptr || b == nullptr)
-        return false;
-    while (*a != '\0' && *b != '\0')
-    {
-        if (*a != *b)
-            return false;
-        ++a;
-        ++b;
-    }
-    return *a == *b;
-}
-
 // Linear scan — returns the slot index of an existing record
 // matching (detector, source_pin) or g_used (out-of-range) if no
 // match. Caller must hold g_lock.
@@ -178,7 +163,7 @@ u64 FindMatchLocked(FixDetector detector, const char* source_pin)
     {
         if (g_ring[i].detector != static_cast<u8>(detector))
             continue;
-        if (StrEqualsLocal(g_ring[i].source_pin, source_pin))
+        if (duetos::core::StrEqual(g_ring[i].source_pin, source_pin))
             return i;
     }
     return g_used; // sentinel: not found

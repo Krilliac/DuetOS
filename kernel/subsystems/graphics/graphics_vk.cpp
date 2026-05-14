@@ -8,6 +8,7 @@
 #include "log/klog.h"
 #include "mm/kheap.h"
 #include "time/timekeeper.h"
+#include "util/string.h"
 
 /*
  * DuetOS — Vulkan ICD implementation, v0.
@@ -519,17 +520,7 @@ constexpr NamedEntry kKnownEntries[] = {
     {"vkEnumerateInstanceVersion", kEpFnBase + 40, false},
 };
 
-bool StrEqual(const char* a, const char* b)
-{
-    if (a == nullptr || b == nullptr)
-        return false;
-    while (*a != '\0' && *b != '\0' && *a == *b)
-    {
-        ++a;
-        ++b;
-    }
-    return *a == '\0' && *b == '\0';
-}
+using duetos::core::StrEqual;
 
 u64 ResolveProc(const char* name, bool device_level_only)
 {

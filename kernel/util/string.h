@@ -36,6 +36,57 @@ namespace duetos::core
 /// this from real workloads.
 void StringSelfTest();
 
+/// Length of a NUL-terminated C string. NULL-safe (returns 0). The
+/// kernel can't reach for `<string.h>`'s strlen because we link
+/// freestanding; this is the one canonical replacement. Defined
+/// here because eleven separate kernel TUs used to roll their own
+/// 5-line copy — all functionally identical, varying only in
+/// return type (u32 / u64) and whether they NULL-check. This form
+/// returns `usize` and is NULL-safe so it covers every prior
+/// caller without churn.
+inline duetos::usize StrLen(const char* s)
+{
+    if (s == nullptr)
+    {
+        return 0;
+    }
+    duetos::usize n = 0;
+    while (s[n] != '\0')
+    {
+        ++n;
+    }
+    return n;
+}
+
+/// Lexicographic equality of two NUL-terminated C strings.
+/// NULL-safe: two nullptrs (or the same pointer) compare equal;
+/// one-nullptr-one-non-nullptr compares unequal. Replaces the
+/// half-dozen ad-hoc `StrEqual` / `StrEqualLocal` / `LocalStrEq`
+/// copies that used to live in `time/`, `security/`, `diag/`,
+/// `debug/`, `subsystems/graphics/`, and `proc/` — all the same
+/// loop, varying only in their NULL-handling and trailing check.
+inline bool StrEqual(const char* a, const char* b)
+{
+    if (a == b)
+    {
+        return true;
+    }
+    if (a == nullptr || b == nullptr)
+    {
+        return false;
+    }
+    while (*a != '\0' && *b != '\0')
+    {
+        if (*a != *b)
+        {
+            return false;
+        }
+        ++a;
+        ++b;
+    }
+    return *a == *b;
+}
+
 /// Out-of-line panic helper for the bounds-checked wrappers. The
 /// callers below invoke this when `__builtin_object_size` reports
 /// a known destination size and `n` exceeds it. Out-of-line so

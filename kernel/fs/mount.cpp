@@ -5,6 +5,7 @@
 #include "fs/fat32.h"
 #include "fs/vfs.h"
 #include "log/klog.h"
+#include "util/string.h"
 
 namespace duetos::fs
 {
@@ -16,36 +17,8 @@ constinit MountEntry g_mounts[kMaxMounts] = {};
 constinit u32 g_mount_count = 0;
 constinit u32 g_mount_seq = 1;
 
-bool StrEq(const char* a, const char* b)
-{
-    if (a == nullptr || b == nullptr)
-    {
-        return false;
-    }
-    while (*a && *b)
-    {
-        if (*a != *b)
-        {
-            return false;
-        }
-        ++a;
-        ++b;
-    }
-    return *a == *b;
-}
-
-u32 StrLen(const char* s)
-{
-    u32 n = 0;
-    if (s != nullptr)
-    {
-        while (s[n])
-        {
-            ++n;
-        }
-    }
-    return n;
-}
+using duetos::core::StrEqual;
+using duetos::core::StrLen;
 
 void StrCopyCapped(char* dst, u32 dst_max, const char* src)
 {
@@ -128,7 +101,7 @@ MountId VfsMount(const char* mount_point, FsType fs_type, u32 block_handle)
     // they want to swap the backing for an existing path.
     for (u32 i = 0; i < kMaxMounts; ++i)
     {
-        if (g_mounts[i].in_use && StrEq(g_mounts[i].mount_point, mount_point))
+        if (g_mounts[i].in_use && StrEqual(g_mounts[i].mount_point, mount_point))
         {
             return kInvalidMountId;
         }
@@ -199,7 +172,7 @@ const MountEntry* VfsMountFind(const char* mount_point)
         {
             continue;
         }
-        if (StrEq(g_mounts[i].mount_point, mount_point))
+        if (StrEqual(g_mounts[i].mount_point, mount_point))
         {
             return &g_mounts[i];
         }

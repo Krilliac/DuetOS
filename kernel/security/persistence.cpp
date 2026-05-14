@@ -15,6 +15,7 @@
 #include "security/argon2id.h"
 #include "security/chacha20_poly1305.h"
 #include "util/random.h"
+#include "util/string.h"
 #include "util/types.h"
 
 namespace duetos::security
@@ -40,13 +41,7 @@ inline u32 LoadLE32(const u8* p)
            (static_cast<u32>(p[3]) << 24);
 }
 
-inline u32 StrLen(const char* s)
-{
-    u32 n = 0;
-    while (s != nullptr && s[n] != '\0')
-        ++n;
-    return n;
-}
+using duetos::core::StrLen;
 
 // Pack the cleartext header (everything that precedes the
 // ciphertext). Returns the number of bytes written

@@ -1,25 +1,13 @@
 #include "debug/probes.h"
 
 #include "log/klog.h"
+#include "util/string.h"
 
 namespace duetos::debug
 {
 
 namespace
 {
-
-// Simple C string compare — no <string.h> in freestanding.
-bool StrEqualLocal(const char* a, const char* b)
-{
-    while (*a != 0 && *b != 0)
-    {
-        if (*a != *b)
-            return false;
-        ++a;
-        ++b;
-    }
-    return *a == *b;
-}
 
 struct ProbeRow
 {
@@ -139,7 +127,7 @@ ProbeId ProbeByName(const char* name)
         return ProbeId::kCount;
     for (const ProbeRow& row : kProbeTable)
     {
-        if (StrEqualLocal(row.name, name))
+        if (duetos::core::StrEqual(row.name, name))
             return row.id;
     }
     return ProbeId::kCount;
