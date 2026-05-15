@@ -8,7 +8,6 @@
 
 #include "arch/x86_64/serial.h"
 #include "diag/fix_journal.h"
-#include "loader/firmware_loader.h"
 #include "log/klog.h"
 #include "mm/dma.h"
 #include "mm/zone.h"
@@ -59,29 +58,9 @@ const char* PfifoIntrTag(u32 intr)
 //                      gsp_rm.bin.
 void ProbeFirmwareBlobs()
 {
-    auto probe_one = [](const char* basename)
-    {
-        ::duetos::core::FwLoadRequest req{};
-        req.vendor = "nvidia-gpu";
-        req.basename = basename;
-        req.min_bytes = 64;
-        req.max_bytes = 0; // accept up to u32 max
-        auto fw = ::duetos::core::FwLoad(req);
-        if (fw.has_value())
-        {
-            arch::SerialWrite("[gpu/nvidia] firmware probe ");
-            arch::SerialWrite(basename);
-            arch::SerialWrite(" present, size=");
-            arch::SerialWriteHex(fw.value().size);
-            arch::SerialWrite("\n");
-            ::duetos::core::FwRelease(fw.value());
-        }
-        // Misses are silent — the firmware loader's own trace
-        // ring records every attempt.
-    };
-    probe_one("gsp_rm.bin");
-    probe_one("gsp_log.bin");
-    probe_one("bootloader.bin");
+    ProbeFirmwareBlob("nvidia-gpu", "[gpu/nvidia]", "gsp_rm.bin");
+    ProbeFirmwareBlob("nvidia-gpu", "[gpu/nvidia]", "gsp_log.bin");
+    ProbeFirmwareBlob("nvidia-gpu", "[gpu/nvidia]", "bootloader.bin");
 }
 
 } // namespace

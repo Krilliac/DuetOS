@@ -30,6 +30,7 @@
 #include "drivers/gpu/virtio_gpu.h"
 #include "drivers/pci/pci.h"
 #include "drivers/video/framebuffer.h"
+#include "loader/firmware_loader.h"
 #include "log/klog.h"
 #include "mm/paging.h"
 #include "security/driver_domain.h"
@@ -640,6 +641,25 @@ const char* NvidiaGenTag(u16 device_id)
     if (device_id >= 0x2680 && device_id <= 0x28E1)
         return "ada-rtx-4000";
     return "nvidia-pre-turing-or-unknown";
+}
+
+void ProbeFirmwareBlob(const char* vendor, const char* log_prefix, const char* basename)
+{
+    ::duetos::core::FwLoadRequest req{};
+    req.vendor = vendor;
+    req.basename = basename;
+    req.min_bytes = 64;
+    req.max_bytes = 0; // accept up to u32 max
+    auto fw = ::duetos::core::FwLoad(req);
+    if (!fw.has_value())
+        return;
+    arch::SerialWrite(log_prefix);
+    arch::SerialWrite(" firmware probe ");
+    arch::SerialWrite(basename);
+    arch::SerialWrite(" present, size=");
+    arch::SerialWriteHex(fw.value().size);
+    arch::SerialWrite("\n");
+    ::duetos::core::FwRelease(fw.value());
 }
 
 namespace

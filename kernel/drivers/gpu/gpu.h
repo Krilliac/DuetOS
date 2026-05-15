@@ -122,4 +122,23 @@ const char* AmdGenTag(u16 device_id);
 /// Classify an NVIDIA GPU by device_id. Turing / Ampere / Ada tags.
 const char* NvidiaGenTag(u16 device_id);
 
+/// Probe the firmware loader for `basename` under the `vendor`
+/// namespace (e.g. "intel-gpu" / "amd-gpu" / "nvidia-gpu"). On
+/// a hit, emits one line via `arch::SerialWrite`:
+///
+///     <log_prefix> firmware probe <basename> present, size=0x...
+///
+/// `log_prefix` is the bracketed driver-namespace tag the rest of
+/// the driver's diagnostics use (e.g. "[gpu/intel]"). Misses are
+/// silent — the firmware loader's own trace ring records every
+/// attempt, so `fwtrace show` is the right tool when an operator
+/// wants to know what failed. Caller pays for the load only on
+/// a hit; `FwRelease` runs before return.
+///
+/// Used by `intel::Probe` / `amd::Probe` / `nvidia::Probe` to
+/// surface which firmware blobs an operator has dropped under
+/// `/lib/firmware/duetos/open/<vendor>/` ahead of the real
+/// firmware-push slices that follow each driver's bring-up.
+void ProbeFirmwareBlob(const char* vendor, const char* log_prefix, const char* basename);
+
 } // namespace duetos::drivers::gpu

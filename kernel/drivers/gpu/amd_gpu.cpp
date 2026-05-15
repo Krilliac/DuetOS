@@ -11,7 +11,6 @@
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 #include "drivers/pci/pci.h"
-#include "loader/firmware_loader.h"
 #include "log/klog.h"
 #include "mm/dma.h"
 #include "mm/paging.h"
@@ -67,43 +66,23 @@ const char* GrbmStatusTag(u32 grbm)
 // asic-specific filename from the device-id. For the v0 advisory
 // probe we look up the generic basenames an operator might drop
 // in — every hit is recorded in the boot log + `fwtrace show`.
+//
+// The five GFX-pipeline microcodes plus SDMA. Any real bring-up
+// needs PFP + ME + CE (or, on newer ASICs, a single PFP + ME
+// pair with the CE merged) before the CP can fetch a single
+// PM4 packet. RLC owns power management; SDMA is the side-band
+// DMA copy engine. None of these are loaded today — the probes
+// exist so an operator dropping a blob into
+// /lib/firmware/duetos/open/amd-gpu/ sees their image in the
+// boot log.
 void ProbeFirmwareBlobs()
 {
-    auto probe_one = [](const char* basename)
-    {
-        ::duetos::core::FwLoadRequest req{};
-        req.vendor = "amd-gpu";
-        req.basename = basename;
-        req.min_bytes = 64;
-        req.max_bytes = 0; // accept up to u32 max
-        auto fw = ::duetos::core::FwLoad(req);
-        if (fw.has_value())
-        {
-            arch::SerialWrite("[gpu/amd] firmware probe ");
-            arch::SerialWrite(basename);
-            arch::SerialWrite(" present, size=");
-            arch::SerialWriteHex(fw.value().size);
-            arch::SerialWrite("\n");
-            ::duetos::core::FwRelease(fw.value());
-        }
-        // Misses are silent here — the firmware loader's own trace
-        // ring records every attempt, so `fwtrace show` is the right
-        // tool when an operator wants to know what missed.
-    };
-    // The five GFX-pipeline microcodes plus SDMA. Any real bring-up
-    // needs PFP + ME + CE (or, on newer ASICs, a single PFP + ME
-    // pair with the CE merged) before the CP can fetch a single
-    // PM4 packet. RLC owns power management; SDMA is the side-band
-    // DMA copy engine. None of these are loaded today — the probes
-    // exist so an operator dropping a blob into
-    // /lib/firmware/duetos/open/amd-gpu/ sees their image in the
-    // boot log.
-    probe_one("gfx_pfp.bin");
-    probe_one("gfx_me.bin");
-    probe_one("gfx_ce.bin");
-    probe_one("gfx_mec.bin");
-    probe_one("gfx_rlc.bin");
-    probe_one("sdma.bin");
+    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", "gfx_pfp.bin");
+    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", "gfx_me.bin");
+    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", "gfx_ce.bin");
+    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", "gfx_mec.bin");
+    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", "gfx_rlc.bin");
+    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", "sdma.bin");
 }
 
 } // namespace
