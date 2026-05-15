@@ -4811,6 +4811,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         kStartItems[6] = {"POWER", 0, kMenuItemFlagSubmenu, kPowerItems, sizeof(kPowerItems) / sizeof(kPowerItems[0])};
         constexpr duetos::u32 start_items_count = sizeof(kStartItems) / sizeof(kStartItems[0]);
         static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
+            {"FILE MANAGER", 104, 0, nullptr, 0}, // 100 + ThemeRole::Files(4)
+            {"TERMINAL", 117, 0, nullptr, 0},     // 100 + ThemeRole::Terminal(17)
             {"NEW TEXT FILE", 7, 0, nullptr, 0},    {"REFRESH DESKTOP", 8, 0, nullptr, 0},
             {"SETTINGS", 107, 0, nullptr, 0}, // 100 + ThemeRole::Settings(7)
             {"HELP / SHORTCUTS", 6, 0, nullptr, 0}, {"ABOUT DUETOS", 1, 0, nullptr, 0},
