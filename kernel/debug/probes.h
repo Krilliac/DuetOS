@@ -81,6 +81,19 @@ enum class ProbeId : u8
                           // clean boot stays quiet (the harness is never
                           // entered by accident) and any trigger leaves
                           // a sentinel line + a fire count for triage.
+    kGpuRingBringupFail,  // a GPU vendor's command-ring bring-up did not
+                          // reach the live state its register protocol
+                          // requires (Intel RCS head/tail never converged,
+                          // AMD CP never came out of reset, NVIDIA PFIFO
+                          // never reported runlist online). Caller passes
+                          // the last-observed engine head/status word as
+                          // `value` so an attached GDB can break at the
+                          // exact frame the bring-up gave up. ArmedLog by
+                          // default: on hardware that ships a working
+                          // engine a clean boot stays quiet; a regression
+                          // (or an absence we hadn't catalogued — QEMU's
+                          // `-vga std` legitimately can't satisfy this) is
+                          // a single sentinel line + the recorded value.
 
     // Medium-frequency events — disarmed by default, the
     // operator arms these when hunting a specific issue.

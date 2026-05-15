@@ -30,6 +30,7 @@
 #include "drivers/gpu/virtio_gpu.h"
 #include "drivers/pci/pci.h"
 #include "drivers/video/framebuffer.h"
+#include "loader/firmware_loader.h"
 #include "log/klog.h"
 #include "mm/paging.h"
 #include "security/driver_domain.h"
@@ -226,11 +227,50 @@ void RunVendorProbe(GpuInfo& g)
         }
         break;
     case kVendorIntel:
+    {
         intel::Probe(g);
+        // Probe is pure observation; Bringup actually programs the
+        // RCS ring. We only attempt bring-up when the probe came
+        // back live — otherwise a wedged or absent decode would
+        // cause us to write to a phantom MMIO window. On QEMU's
+        // emulated displays this case never enters (vendor=Bochs
+        // 0x1234 / virtio-gpu 0x1AF4, not Intel 0x8086), so the
+        // typical smoke boot returns here without firing the ring
+        // probe; the IntelRcsRingSelfTest below emits the
+        // "no Intel device — skipped" sentinel for CI.
+        if (g.mmio_live)
+        {
+            auto br = intel::Bringup(g);
+            if (!br.has_value() && br.error() != ::duetos::core::ErrorCode::AlreadyExists)
+            {
+                // Bringup logged its own WARN + probe; don't
+                // duplicate the diagnostic here.
+                (void)br;
+            }
+        }
         break;
+    }
     case kVendorAmd:
+    {
         amd::Probe(g);
+        // Same pattern as Intel: Probe is pure observation, Bringup
+        // programs the CP_RB0 register file. We only attempt
+        // bring-up when probe came back live; on QEMU's emulated
+        // displays the vendor never matches AMD so the case never
+        // enters and AmdCpRingSelfTest emits the structural
+        // "no AMD device — skipped" sentinel for CI.
+        if (g.mmio_live)
+        {
+            auto br = amd::Bringup(g);
+            if (!br.has_value() && br.error() != ::duetos::core::ErrorCode::AlreadyExists)
+            {
+                // Bringup logged its own WARN + probe; don't
+                // duplicate the diagnostic here.
+                (void)br;
+            }
+        }
         break;
+    }
     default:
         break;
     }
@@ -601,6 +641,25 @@ const char* NvidiaGenTag(u16 device_id)
     if (device_id >= 0x2680 && device_id <= 0x28E1)
         return "ada-rtx-4000";
     return "nvidia-pre-turing-or-unknown";
+}
+
+void ProbeFirmwareBlob(const char* vendor, const char* log_prefix, const char* basename)
+{
+    ::duetos::core::FwLoadRequest req{};
+    req.vendor = vendor;
+    req.basename = basename;
+    req.min_bytes = 64;
+    req.max_bytes = 0; // accept up to u32 max
+    auto fw = ::duetos::core::FwLoad(req);
+    if (!fw.has_value())
+        return;
+    arch::SerialWrite(log_prefix);
+    arch::SerialWrite(" firmware probe ");
+    arch::SerialWrite(basename);
+    arch::SerialWrite(" present, size=");
+    arch::SerialWriteHex(fw.value().size);
+    arch::SerialWrite("\n");
+    ::duetos::core::FwRelease(fw.value());
 }
 
 namespace

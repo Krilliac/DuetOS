@@ -23,37 +23,6 @@ inline void StoreU24Be(u8 dst[3], u32 v)
     dst[2] = static_cast<u8>(v & 0xFF);
 }
 
-// One iteration of the TLS PRF P_<hash> chain:
-//   A(i) = HMAC(secret, A(i-1))
-//   output += HMAC(secret, A(i) || seed)
-// Returns the bytes added to `out`. The caller maintains the
-// outer `A` state across iterations.
-void PSha256Step(const u8* secret, u32 secret_len, u8 A[crypto::kSha256DigestBytes], const u8* seed_concat,
-                 u32 seed_concat_len, u8* out, u32 chunk_len)
-{
-    // Build A(i) = HMAC(secret, A(i-1))
-    u8 next_A[crypto::kSha256DigestBytes];
-    crypto::HmacSha256(secret, secret_len, A, crypto::kSha256DigestBytes, next_A);
-    for (u32 i = 0; i < crypto::kSha256DigestBytes; ++i)
-        A[i] = next_A[i];
-
-    // Compute HMAC(secret, A(i) || seed)
-    // Build the concatenated input on the stack so HmacSha256
-    // sees one contiguous buffer (its API is non-streaming).
-    constexpr u32 kMaxInputBytes = crypto::kSha256DigestBytes + 256;
-    if (crypto::kSha256DigestBytes + seed_concat_len > kMaxInputBytes)
-        return; // safety net; callers stay well under this in v0
-    u8 hmac_input[kMaxInputBytes];
-    for (u32 i = 0; i < crypto::kSha256DigestBytes; ++i)
-        hmac_input[i] = A[i];
-    for (u32 i = 0; i < seed_concat_len; ++i)
-        hmac_input[crypto::kSha256DigestBytes + i] = seed_concat[i];
-    u8 mac[crypto::kSha256DigestBytes];
-    crypto::HmacSha256(secret, secret_len, hmac_input, crypto::kSha256DigestBytes + seed_concat_len, mac);
-    for (u32 i = 0; i < chunk_len; ++i)
-        out[i] = mac[i];
-}
-
 } // namespace
 
 void TlsPrfSha256(const u8* secret, u32 secret_len, const char* label, const u8* seed, u32 seed_len, u8* out,
@@ -82,17 +51,10 @@ void TlsPrfSha256(const u8* secret, u32 secret_len, const char* label, const u8*
         seed_concat[label_len + i] = seed[i];
     const u32 seed_concat_len = label_len + seed_len;
 
-    // A(0) = label || seed (RFC 5246 §5)
+    // RFC 5246 §5: A(0) = label || seed; A(i) = HMAC(secret, A(i-1)).
+    // Compute A(1) up front so the loop below can produce the
+    // first output chunk on entry.
     u8 A[crypto::kSha256DigestBytes];
-    // We initialise A as the FULL seed_concat passed through
-    // HMAC in the first PSha256Step invocation, by faking
-    // A(0) = seed_concat first. PSha256Step does
-    // A(i) = HMAC(secret, A(i-1)) before computing output —
-    // so we set A so that the first HMAC produces A(1) =
-    // HMAC(secret, seed_concat). Trick: stage A as a "buffer
-    // that hashes to seed_concat under HMAC" — easier to just
-    // compute A(1) directly here and then call PSha256Step in
-    // a loop with chunk-handling.
     crypto::HmacSha256(secret, secret_len, seed_concat, seed_concat_len, A);
 
     u32 written = 0;

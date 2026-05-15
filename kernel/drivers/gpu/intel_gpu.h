@@ -76,15 +76,39 @@ inline constexpr u64 kIntelRingBytes = 4096; // single-page ring
 /// when the BAR map failed (skips the actual read).
 void Probe(GpuInfo& g);
 
-/// v0 ring scaffold. Allocates a 4 KiB DMA-coherent buffer, logs
-/// the would-be ring program (without writing it), and returns
-/// NotImplemented unless DUETOS_INTEL_GPU_RING is defined. The
-/// scaffold is here so a follow-up slice can flip the build flag,
-/// finish the actual register writes, and run a NOOP submission.
+/// Bring the Render Command Streamer ring online. Allocates a
+/// 4 KiB DMA-coherent ring buffer in Zone::Dma32, programs
+/// RCS_HEAD / RCS_TAIL / RCS_START / RCS_CTL, writes a short
+/// stream of `MI_NOOP` instructions, and bounded-polls RCS_HEAD
+/// until it catches up to RCS_TAIL. On success `g_brought_up`
+/// flips to true, the ring buffer is retained for the lifetime
+/// of the boot, and `[gpu/intel/rcs] ring online …` is logged.
+/// On timeout the ring is disabled, the buffer is freed, a
+/// `kGpuRingBringupFail` probe fires (carrying the last-seen
+/// RCS_HEAD value as `value`), one `KLOG_WARN` line is emitted,
+/// and `Unsupported` is returned. Idempotent — a second call
+/// after success returns `AlreadyExists` without poking the
+/// engine again.
 ::duetos::core::Result<void> Bringup(GpuInfo& g);
 
-/// True iff a successful Bringup has run. v0 always returns false
-/// because Bringup currently exits early.
+/// True iff a successful Bringup has run on at least one
+/// Intel display controller this boot. Drivers / self-tests
+/// gate "do we have a real GPU ring to dispatch to?" against
+/// this. Cleared by `GpuShutdown` -> intel-specific reset path
+/// when one is added; for v0 the flag stays set for the boot.
 bool IsBroughtUp();
+
+/// Boot self-test. Walks the GPU records discovered by
+/// `gpu::GpuInit`; if an Intel display controller is present
+/// and `IsBroughtUp()` returned true, emits the structural
+/// sentinel `[gpu/intel/rcs] selftest PASS (...)` line CI greps
+/// for. If no Intel controller is present (typical QEMU smoke),
+/// emits `[gpu/intel/rcs] no Intel device — skipped`. If an
+/// Intel controller IS present but bring-up did NOT succeed,
+/// emits a WARN + fires `kBootSelftestFail` so a regression
+/// gets caught on the next clean-boot grep. Never panics —
+/// hardware that doesn't expose a working RCS today is a
+/// documented limitation, not a kernel bug.
+void IntelRcsRingSelfTest();
 
 } // namespace duetos::drivers::gpu::intel

@@ -174,7 +174,17 @@ run_row() {
             rc=99
             ;;
     esac
-    set -e
+    # Intentionally do NOT re-enable `set -e` here. The caller wraps
+    # this call in its own `set +e`/`set -e` pair, and a `set -e`
+    # right before `return "${rc}"` causes the shell to abort the
+    # whole script when the underlying runner returned non-zero —
+    # including the rc=2 "environment skip" path that the matrix
+    # summary block (line ~240) is explicitly designed to surface as
+    # a top-level SKIP. Leaving `set +e` active through the post-
+    # processing block means a `cp` / `filter_canonical` failure is
+    # silently ignored too; that's an acceptable trade for honest
+    # rc propagation, and the canonical.txt content is checked again
+    # by the diff step downstream.
 
     # Pick up whichever serial log the runner produced. QEMU rows
     # write smoke-<profile>.log; Bochs rows write bochs-<profile>.log.
