@@ -397,22 +397,30 @@ void WriteU64Dec(char* dst, u32 cap, u64 v)
 // Header line + item count, e.g. "DISK:/   (12 items)". Every
 // commodity file manager shows the count; this is the one place
 // all four views render it so the format stays consistent.
-void DrawListHeaderWithCount(u32 cx, u32 cy, const char* path, u32 count, u32 color)
+// `sort_by` (nullable) appends ", by <mode>" so the user can see
+// the active sort order — only the FAT32 / Trash views sort, so
+// ramfs / DuetFS pass nullptr.
+void DrawListHeaderWithCount(u32 cx, u32 cy, const char* path, u32 count, u32 color, const char* sort_by = nullptr)
 {
     char line[96];
     u32 o = 0;
-    for (u32 i = 0; path[i] != '\0' && o + 1 < sizeof(line); ++i)
-        line[o++] = path[i];
-    const char* sep = "   (";
-    for (u32 i = 0; sep[i] != '\0' && o + 1 < sizeof(line); ++i)
-        line[o++] = sep[i];
+    auto put = [&](const char* s)
+    {
+        for (u32 i = 0; s[i] != '\0' && o + 1 < sizeof(line); ++i)
+            line[o++] = s[i];
+    };
+    put(path);
+    put("   (");
     char num[24];
     WriteU64Dec(num, sizeof(num), count);
-    for (u32 i = 0; num[i] != '\0' && o + 1 < sizeof(line); ++i)
-        line[o++] = num[i];
-    const char* tail = (count == 1) ? " item)" : " items)";
-    for (u32 i = 0; tail[i] != '\0' && o + 1 < sizeof(line); ++i)
-        line[o++] = tail[i];
+    put(num);
+    put((count == 1) ? " item" : " items");
+    if (sort_by != nullptr)
+    {
+        put(", by ");
+        put(sort_by);
+    }
+    put(")");
     line[o] = '\0';
     duetos::drivers::video::FramebufferDrawString(cx + 4, cy + 2, line, color, kBg);
 }
@@ -518,7 +526,7 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
     for (u32 i = 0; prefix[i] != '\0' && h_off + 1 < sizeof(header); ++i)
         header[h_off++] = prefix[i];
     header[h_off] = '\0';
-    DrawListHeaderWithCount(cx, cy, header, g_state.fat_count, 0x0080F088);
+    DrawListHeaderWithCount(cx, cy, header, g_state.fat_count, 0x0080F088, SortModeName(g_state.sort));
 
     if (g_state.fat_count == 0)
     {
@@ -604,7 +612,7 @@ void DrawTrash(u32 cx, u32 cy, u32 cw, u32 ch)
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
     FramebufferFillRect(cx, cy, cw, ch, kBg);
-    DrawListHeaderWithCount(cx, cy, "TRASH:/", g_state.trash_count, 0x00FFA060);
+    DrawListHeaderWithCount(cx, cy, "TRASH:/", g_state.trash_count, 0x00FFA060, SortModeName(g_state.sort));
 
     if (g_state.trash_count == 0)
     {
