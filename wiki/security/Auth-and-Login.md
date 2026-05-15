@@ -72,6 +72,32 @@ Switching users (`su <name>`) requires the target account's password
 and replaces the current session. The grace cache (below) is dropped
 on `su` — elevations belong to the previous session.
 
+## Input-path gate invariant
+
+The login gate is enforced at the **input-routing layer, not the
+shell layer**. `ShellSubmit()` / `Dispatch()` have no authentication
+check of their own — they assume the caller already passed the gate.
+Therefore **every interactive input source that can reach the shell
+must, while `LoginIsActive()`, cook its input into a key code and
+route it to `LoginFeedKey()` instead of the `Shell*` API.**
+
+There are exactly two such sources, and both enforce the gate:
+
+- **PS/2 keyboard reader** (`kernel/core/main.cpp`) — the original
+  gate; `if (LoginIsActive()) { … LoginFeedKey(ev.code); continue; }`.
+- **Serial-input pump** (`kernel/core/serial_input.cpp`) — mirrors the
+  same gate in `HandleByte`. Before this was added, a host on COM1
+  (`-serial stdio`, a real UART, or a BMC serial-over-LAN console)
+  got a fully interactive kernel shell with the login screen still
+  up — a complete pre-authentication bypass that defeated the entire
+  login model on the serial path.
+
+Any future input feeder (a new console transport, a network REPL)
+**must** replicate this gate. The in-kernel terminal app
+(`kernel/apps/terminal.cpp`) is exempt only because it is launched
+from the post-login desktop and is unreachable before authentication
+by construction.
+
 ## Password Hashing — V1 and V2
 
 Two on-disk schemes coexist:

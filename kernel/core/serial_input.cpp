@@ -35,6 +35,12 @@
  * bracketed paste, ...) — none of it is meaningful to the v0 shell,
  * so dropping is correct.
  *
+ * Login gate: while LoginIsActive() every inbound byte is auth
+ * input, cooked into a key code and routed to LoginFeedKey — never
+ * to the shell. This mirrors the PS/2 kbd-reader's gate so the
+ * serial console is not a pre-authentication shell bypass. See
+ * HandleByte.
+ *
  * Thread context: kernel task created by `SerialInputStart` from
  * core::main right after the PS/2 kbd reader. Owns no shared state.
  *
@@ -47,8 +53,11 @@
 #include "core/serial_input.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/input/ps2kbd.h"
 #include "drivers/video/console.h"
+#include "drivers/video/widget.h"
 #include "sched/sched.h"
+#include "security/login.h"
 #include "shell/shell.h"
 
 namespace duetos::core
@@ -70,6 +79,51 @@ enum class EscState : u8
 
 void HandleByte(u8 byte, EscState& esc)
 {
+    // Login gate has absolute priority. While a session isn't
+    // open the PS/2 kbd-reader (kernel/core/main.cpp) routes every
+    // keystroke into LoginFeedKey and never lets it reach the
+    // shell. The serial pump MUST enforce the same gate — without
+    // this, anyone on COM1 (QEMU `-serial stdio`, a real UART, a
+    // BMC/serial-over-LAN console) gets a fully interactive kernel
+    // shell with the login screen still up, i.e. a complete
+    // pre-authentication bypass. Cook the byte into a login key
+    // code and feed LoginFeedKey under the compositor lock so the
+    // GUI gate's framebuffer paint doesn't race the ui-ticker
+    // (same discipline as the PS/2 path).
+    if (LoginIsActive())
+    {
+        // History/cursor CSI navigation is meaningless at the gate;
+        // never leave the ESC machine half-open across the gate.
+        esc = EscState::Idle;
+        u16 code;
+        if (byte == '\r' || byte == '\n')
+        {
+            code = drivers::input::kKeyEnter;
+        }
+        else if (byte == 0x7F || byte == 0x08)
+        {
+            code = drivers::input::kKeyBackspace;
+        }
+        else if (byte == 0x09)
+        {
+            code = drivers::input::kKeyTab;
+        }
+        else if (byte >= 0x20 && byte <= 0x7E)
+        {
+            code = byte;
+        }
+        else
+        {
+            // ESC, NUL, other C0 controls — nothing to type at the
+            // login form. Drop without touching the shell.
+            return;
+        }
+        drivers::video::CompositorLock();
+        LoginFeedKey(code);
+        drivers::video::CompositorUnlock();
+        return;
+    }
+
     switch (esc)
     {
     case EscState::Idle:
