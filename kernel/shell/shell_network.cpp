@@ -1064,6 +1064,44 @@ void CmdCrTrace(u32 argc, char** argv)
         ConsoleWriteln("CRTRACE: cleared");
         return;
     }
+    if (argc >= 2 && StrEq(argv[1], "stats"))
+    {
+        ConsoleWrite("CRTRACE: boot=");
+        WriteU64Dec(duetos::core::CleanroomTraceBootCount());
+        ConsoleWrite("/");
+        WriteU64Dec(duetos::core::kCleanroomTraceBootCapacity);
+        ConsoleWrite("  rolling=");
+        WriteU64Dec(duetos::core::CleanroomTraceRollingCount());
+        ConsoleWrite("/");
+        WriteU64Dec(duetos::core::kCleanroomTraceRollingCapacity);
+        ConsoleWrite("  total=");
+        WriteU64Dec(duetos::core::CleanroomTraceCount());
+        ConsoleWriteln("");
+        return;
+    }
+    if (argc >= 2 && StrEq(argv[1], "mark"))
+    {
+        if (argc < 4)
+        {
+            ConsoleWriteln("CRTRACE: USAGE: CRTRACE MARK <SUBSYS> <EVENT> [A [B [C]]]");
+            return;
+        }
+        u64 a = 0;
+        u64 b = 0;
+        u64 c = 0;
+        if (argc >= 5)
+            ParseU64Str(argv[4], &a);
+        if (argc >= 6)
+            ParseU64Str(argv[5], &b);
+        if (argc >= 7)
+            ParseU64Str(argv[6], &c);
+        duetos::core::CleanroomTraceRecord(argv[2], argv[3], a, b, c);
+        ConsoleWrite("CRTRACE: marked ");
+        ConsoleWrite(argv[2]);
+        ConsoleWrite("::");
+        ConsoleWriteln(argv[3]);
+        return;
+    }
 
     u32 limit = duetos::core::CleanroomTraceCount();
     if (argc >= 3 && StrEq(argv[1], "show"))
