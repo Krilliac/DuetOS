@@ -97,12 +97,16 @@ void DoFileRead(arch::TrapFrame* frame)
     // Bounded staging buffer. Larger reads loop in the caller; the
     // 4 KiB chunk matches the page size, ramfs cap reads, and the
     // FAT32 cluster scratch's effective per-call ceiling.
+    // Per-call on the kernel stack, NOT process-shared static: the
+    // backing read can block/reschedule on the pipe and FAT32 paths,
+    // so a file-scope buffer would let a concurrent ReadFile from
+    // another process clobber the staged bytes before CopyToUser.
     constexpr u64 kStageBytes = 4096;
     if (cap_bytes > kStageBytes)
         cap_bytes = kStageBytes;
-    static u8 s_stage[kStageBytes];
+    u8 stage[kStageBytes];
 
-    const u64 got = fs::routing::ReadForProcess(proc, handle, s_stage, cap_bytes);
+    const u64 got = fs::routing::ReadForProcess(proc, handle, stage, cap_bytes);
     if (got == u64(-1))
     {
         frame->rax = static_cast<u64>(-1);
@@ -113,7 +117,7 @@ void DoFileRead(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
-    if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), s_stage, got))
+    if (!mm::CopyToUser(reinterpret_cast<void*>(frame->rsi), stage, got))
     {
         // Already consumed `got` bytes from the handle's cursor —
         // refund is impossible without a backing-specific seek.
@@ -367,16 +371,20 @@ void DoFileWrite(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
+    // Per-call on the kernel stack, NOT process-shared static —
+    // see DoFileRead: the FS write can block, so a shared buffer
+    // would let a concurrent WriteFile from another process inject
+    // its bytes between CopyFromUser and WriteForProcess.
     constexpr u64 kStageBytes = 4096;
     if (cap_bytes > kStageBytes)
         cap_bytes = kStageBytes;
-    static u8 s_stage[kStageBytes];
-    if (!mm::CopyFromUser(s_stage, reinterpret_cast<const void*>(frame->rsi), cap_bytes))
+    u8 stage[kStageBytes];
+    if (!mm::CopyFromUser(stage, reinterpret_cast<const void*>(frame->rsi), cap_bytes))
     {
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    const u64 wrote = fs::routing::WriteForProcess(proc, handle, s_stage, cap_bytes);
+    const u64 wrote = fs::routing::WriteForProcess(proc, handle, stage, cap_bytes);
     frame->rax = wrote;
 }
 
@@ -425,7 +433,11 @@ void DoFileCreate(arch::TrapFrame* frame)
         frame->rax = static_cast<u64>(-1);
         return;
     }
-    static u8 s_init_stage[kStageBytes];
+    // Per-call on the kernel stack, NOT process-shared static —
+    // see DoFileRead: CreateForProcess can block, so a shared
+    // buffer would let a concurrent CreateFile substitute another
+    // process's initial-content payload.
+    u8 init_stage[kStageBytes];
     if (init_len > 0)
     {
         if (frame->rdx == 0)
@@ -433,14 +445,14 @@ void DoFileCreate(arch::TrapFrame* frame)
             frame->rax = static_cast<u64>(-1);
             return;
         }
-        if (!mm::CopyFromUser(s_init_stage, reinterpret_cast<const void*>(frame->rdx), init_len))
+        if (!mm::CopyFromUser(init_stage, reinterpret_cast<const void*>(frame->rdx), init_len))
         {
             frame->rax = static_cast<u64>(-1);
             return;
         }
     }
 
-    frame->rax = fs::routing::CreateForProcess(proc, kpath, init_len > 0 ? s_init_stage : nullptr, init_len);
+    frame->rax = fs::routing::CreateForProcess(proc, kpath, init_len > 0 ? init_stage : nullptr, init_len);
 }
 
 void DoFileUnlink(arch::TrapFrame* frame)

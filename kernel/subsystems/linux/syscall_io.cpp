@@ -147,7 +147,11 @@ i64 DoWrite(u64 fd, u64 user_buf, u64 len)
     u64 to_copy = len;
     if (to_copy > kLinuxIoMax)
         to_copy = kLinuxIoMax;
-    static u8 kbuf[kLinuxIoMax];
+    // Per-call on the kernel stack, NOT process-shared static: the
+    // FAT32 write below can block/reschedule, so a file-scope
+    // buffer would let a concurrent write() from another process
+    // inject its bytes between CopyFromUser and the disk write.
+    u8 kbuf[kLinuxIoMax];
     if (!mm::CopyFromUser(kbuf, reinterpret_cast<const void*>(user_buf), to_copy))
         return kEFAULT;
     const auto* v = fs::fat32::Fat32Volume(0);
@@ -303,7 +307,11 @@ i64 DoRead(u64 fd, u64 user_buf, u64 len)
         return kEIO;
     }
 
-    static u8 scratch[4096];
+    // Per-call on the kernel stack, NOT process-shared static: the
+    // FAT32 read blocks/reschedules, so a shared buffer would let a
+    // concurrent read() from another process leak its file bytes
+    // into this caller via CopyToUser below.
+    u8 scratch[4096];
     fs::fat32::DirEntry entry;
     for (u64 i = 0; i < sizeof(entry.name); ++i)
         entry.name[i] = 0;

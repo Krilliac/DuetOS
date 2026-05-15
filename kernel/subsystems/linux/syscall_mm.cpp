@@ -221,6 +221,13 @@ i64 DoBrk(u64 new_brk)
             const mm::PhysAddr frame = mm::AllocateFrame();
             if (frame == mm::kNullFrame)
             {
+                // Partial-brk contract: report the page-aligned
+                // boundary we actually reached. Invariant held:
+                // every page below linux_brk_current stays mapped,
+                // and `va` is the first UNmapped page, so the next
+                // grow resumes here with no overlap (no leak, no
+                // double-map panic). Caller detects the short grow
+                // via ret < requested. Do NOT "round up" this value.
                 p->linux_brk_current = va;
                 KLOG_ERROR_AV(::duetos::core::LogArea::Linux, "linux/mm",
                               "brk: AllocateFrame OOM mid-grow; partial brk", va);
@@ -299,6 +306,15 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
             if (frame == mm::kNullFrame)
             {
                 KLOG_ERROR_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap anon: AllocateFrame OOM at va", va);
+                // Unwind the pages mapped so far. Without this the
+                // leaked frames stay mapped at [base, va) AND the
+                // cursor is not advanced, so the NEXT mmap hands out
+                // the same base and AddressSpaceMapUserPage panics
+                // on "virt already mapped" — an unprivileged guest
+                // turns OOM into a kernel panic. Mirrors the mremap
+                // unwind idiom below.
+                for (u64 j = base; j < va; j += mm::kPageSize)
+                    (void)mm::AddressSpaceUnmapUserPage(p->as, j);
                 return kENOMEM;
             }
             mm::AddressSpaceMapUserPage(p->as, va, frame, pte_flags);
@@ -327,7 +343,11 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     if (v == nullptr)
         return kEIO;
 
-    static u8 file_scratch[4096];
+    // Per-call on the kernel stack, NOT process-shared static: the
+    // FAT32 read and the per-page AllocateFrame loop below can
+    // block, so a shared buffer would let a concurrent mmap() from
+    // another process leak its file bytes into this mapping.
+    u8 file_scratch[4096];
     fs::fat32::DirEntry entry;
     for (u64 i = 0; i < sizeof(entry.name); ++i)
         entry.name[i] = 0;
@@ -344,7 +364,14 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
         const u64 va = base + page_idx * mm::kPageSize;
         const mm::PhysAddr frame = mm::AllocateFrame();
         if (frame == mm::kNullFrame)
+        {
+            // Unwind [base, va) — same partial-OOM hazard as the
+            // anon branch: leaked frames + an unadvanced cursor
+            // make the next mmap re-map base and panic.
+            for (u64 j = base; j < va; j += mm::kPageSize)
+                (void)mm::AddressSpaceUnmapUserPage(p->as, j);
             return kENOMEM;
+        }
         u8* dst = static_cast<u8*>(mm::PhysToVirt(frame));
         const u64 page_off_in_file = off + page_idx * mm::kPageSize;
         if (page_off_in_file < file_size)
@@ -551,7 +578,7 @@ i64 DoMincore(u64 addr, u64 len, u64 user_vec)
         return 0;
     constexpr u64 kMaxPages = 4096;
     const u64 to_mark = (pages > kMaxPages) ? kMaxPages : pages;
-    static u8 ones[kMaxPages];
+    u8 ones[kMaxPages]; // per-call, not process-shared static
     for (u64 i = 0; i < to_mark; ++i)
         ones[i] = 1;
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_vec), ones, to_mark))

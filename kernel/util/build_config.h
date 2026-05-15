@@ -252,14 +252,19 @@ constexpr const char* BuildFlavorName()
 // Build-identity accessors — git hash + branch + subject + author
 // date + build date, baked in at CMake-configure time.
 //
-// Each one wraps the corresponding `DUETOS_GIT_*` / `DUETOS_BUILD_*`
-// macro emitted by the top-level CMakeLists.txt and falls back to a
-// `"(undefined)"` sentinel when the macro is missing (out-of-tree
-// build, stripped define, etc.) so callers can pass the result
-// straight to a string writer without re-doing the `#if defined`
-// dance. Used by the BSoD header, the About app, and the
+// The DUETOS_GIT_* / DUETOS_BUILD_DATE macros come from a
+// configure_file-generated header (kernel/CMakeLists.txt). It is
+// delivered as a header, NOT `-D` defines, because the git subject is
+// free-form text and a `;`/backtick/`$` in a commit message would
+// otherwise break the compiler command line via /bin/sh. The
+// `__has_include` guard keeps the `"(undefined)"` fallback working
+// for out-of-tree builds where the header was never generated.
+// Used by the BSoD header, the About app, and the
 // `live-update version` shell command.
 // -----------------------------------------------------------------
+#if __has_include("duetos_build_info.h")
+#include "duetos_build_info.h"
+#endif
 
 constexpr const char* BuildGitHash()
 {

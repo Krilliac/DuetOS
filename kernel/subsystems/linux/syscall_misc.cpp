@@ -146,7 +146,12 @@ i64 DoGetRandom(u64 user_buf, u64 count, u64 flags)
         return 0;
     if (count > 4096)
         count = 4096;
-    static u8 tmp[4096];
+    // Per-call on the kernel stack, NOT process-shared static: a
+    // timer preemption between RandomFillBytes and CopyToUser would
+    // otherwise let another process's getrandom output overwrite
+    // this caller's buffer — cross-process leakage of key/ASLR
+    // seed material.
+    u8 tmp[4096];
     core::RandomFillBytes(tmp, count);
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), tmp, count))
         return kEFAULT;

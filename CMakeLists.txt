@@ -197,11 +197,12 @@ endif()
 # build artefact is running, even when the same commit was built
 # twice with different flags.
 string(TIMESTAMP _duetos_build_date "%Y-%m-%dT%H:%M:%SZ" UTC)
-add_compile_definitions(DUETOS_GIT_HASH="${_duetos_git_hash}")
-add_compile_definitions(DUETOS_GIT_SUBJECT="${_duetos_git_subject}")
-add_compile_definitions(DUETOS_GIT_BRANCH="${_duetos_git_branch}")
-add_compile_definitions(DUETOS_GIT_AUTHOR_DATE="${_duetos_git_author_date}")
-add_compile_definitions(DUETOS_BUILD_DATE="${_duetos_build_date}")
+# Deliver the git/build strings via a configure_file-generated header
+# (kernel/CMakeLists.txt does the configure_file) rather than `-D`
+# defines. Free-form text on the compiler command line transits
+# /bin/sh, so a commit subject containing `;` / backtick / `$` / `"`
+# broke EVERY preset with "Unterminated quoted string". A generated
+# header keeps the text off the command line entirely.
 message(STATUS "  git hash             : ${_duetos_git_hash}")
 message(STATUS "  git branch           : ${_duetos_git_branch}")
 message(STATUS "  git subject          : ${_duetos_git_subject}")

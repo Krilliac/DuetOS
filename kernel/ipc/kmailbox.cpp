@@ -51,6 +51,16 @@ void KMailboxDestroy(KObject* obj)
     {
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     }
+    // Refuse absurd requests before the allocation rather than
+    // bouncing off a multi-GB KMalloc. A u32 capacity would
+    // otherwise let a (future) syscall caller demand
+    // capacity * sizeof(KMailboxMessage) ≈ 137 GiB. 64 Ki slots
+    // (2 MiB buffer) is far past any real mailbox depth.
+    constexpr u32 kMailboxMaxCapacity = 65536;
+    if (capacity > kMailboxMaxCapacity)
+    {
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
     auto* mb = static_cast<KMailbox*>(duetos::mm::KMalloc(sizeof(KMailbox)));
     if (mb == nullptr)
     {

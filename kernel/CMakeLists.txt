@@ -34,6 +34,19 @@
 # CONFIGURE_DEPENDS reruns the glob when a file appears or disappears, so
 # adding a new source file just needs the file itself; no CMakeLists edit.
 # ----------------------------------------------------------------------------
+# Build-info header. The _duetos_git_* / _duetos_build_date vars are
+# computed (and sanitised to valid C string literals) by the top-level
+# CMakeLists.txt before add_subdirectory(kernel), so they are in scope
+# here. configure_file writes them into a FILE on the kernel include
+# path — they never reach the compiler command line / a shell, so a
+# commit subject with shell metacharacters (`;` etc.) can't break the
+# build. util/build_config.h includes the result.
+configure_file(
+    "${CMAKE_SOURCE_DIR}/cmake/duetos_build_info.h.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/duetos_build_info.h"
+    @ONLY)
+
+# ----------------------------------------------------------------------------
 file(GLOB_RECURSE DUETOS_KERNEL_SHARED_SOURCES
     CONFIGURE_DEPENDS
     RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
