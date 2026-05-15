@@ -43,7 +43,7 @@ The contract every module follows:
 | `leak_detector` | [`leak_detector.h`](../../kernel/diag/leak_detector.h) | Aggregates per-subsystem resource counters; fires `kLeakAttributable` on process exit if any pinned. | none (read-only of existing counters) |
 | `soft_lockup` | [`soft_lockup.h`](../../kernel/diag/soft_lockup.h) | Single-task CPU hog detector (100 ticks ≈ 1 s default). | `SoftLockupSelfTest()` |
 | `stress_driver` | [`stress_driver.h`](../../kernel/diag/stress_driver.h) | Boot-time stress harness driven by `stress=` cmdline. | none |
-| `ubsan` | [`ubsan.h`](../../kernel/diag/ubsan.h) | UBSAN runtime — 14 handler classes (overflow, shift, OOB, alignment, …). Each incident emits one `[W] diag/ubsan : <kind>` klog line carrying the failing class as the ring-entry message (so the BSOD recent-log tail shows the actual UB class, not a generic placeholder). Off by default. | `UbsanSelfTest()` |
+| `ubsan` | [`ubsan.h`](../../kernel/diag/ubsan.h) | UBSAN runtime — 14 handler classes (overflow, shift, OOB, alignment, …). Each incident emits one `[W] diag/ubsan : <kind>` klog line carrying the failing class as the ring-entry message (so the BSOD recent-log tail shows the actual UB class, not a generic placeholder). `type-mismatch` additionally emits one deduped `[ubsan]   tm-detail …` line per call site decoding the access kind (load/store/…), the failing pointer, the required alignment, and which fault it is (`null-deref` / `misaligned` / `obj-too-small`) — the source line alone is misleading when the UB is a misaligned wide access whose attributed line is a plain scalar op. Off by default. | `UbsanSelfTest()` |
 | `fault_react` | [`fault_react.h`](../../kernel/diag/fault_react.h) | Self-defensive fault dispatcher (`FaultKind` × `FaultSeverity` → `FaultReaction`). Trap-safe deferred drain. | `FaultReactSelfTest()` |
 | `fix_journal` | [`fix_journal.h`](../../kernel/diag/fix_journal.h) | Record-and-defer for STUB/GAP hits at runtime — 1024×128B ring. Macros `FIX_NOTE_STUB()` / `FIX_NOTE_GAP()`. | `FixJournalSelfTest()` |
 | `fix_journal_persist` | [`fix_journal_persist.h`](../../kernel/diag/fix_journal_persist.h) | Tier-2/3 persistence to FAT32 `/KERNEL.FIX` and NVMe reserved LBAs. | `FixJournalPersistSelfTest()` |
@@ -194,6 +194,16 @@ its self-test belongs in the appropriate block.
 
 - **UBSAN off by default.** Enable with `ubsan=on` cmdline; rate-limited
   reports otherwise drown the log.
+- **`blake2b.cpp` type-mismatch on the auth path (open).** Running
+  `su` / any password verify trips `[ubsan] type-mismatch at
+  blake2b.cpp` with `tm-detail … fault=misaligned need-align=0x10
+  ty='u64'` on an 8-aligned **stack** address. The sched stack setup
+  is ABI-correct (16-aligned, padding quad → RSP%16==8 at entry), so
+  the 8-byte skew is introduced somewhere on the serial-input-task →
+  shell → `AuthLogin` → Argon2id → Blake2b asm/trampoline chain.
+  Diagnostic-only (x86 tolerates the access); needs its own slice to
+  trace the offending frame — a kernel-wide stack-ABI change is too
+  risky to land blind.
 - **PMU sampling wiring deferred.** `perf_profile` rings are present and
   exercised by the self-test, but no `OvfInterrupt → PerfRecord` path
   yet.
