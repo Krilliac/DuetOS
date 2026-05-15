@@ -88,6 +88,36 @@ const char* FatLeaf(const char* path)
     return nullptr;
 }
 
+// Rewrite the legacy "/fat" shell alias onto the canonical
+// "/disk/0" registry mount so `ls` / `cat` / the line-processing
+// commands all resolve through the one cross-mount `VfsResolve`
+// path. "/fat" -> "/disk/0", "/fat/X" -> "/disk/0/X"; anything
+// else is returned verbatim (no copy).
+const char* DiskAliasPath(const char* path, char* buf, u32 cap)
+{
+    const char* fat_leaf = FatLeaf(path);
+    if (fat_leaf == nullptr || buf == nullptr || cap == 0)
+    {
+        return path;
+    }
+    const char head[] = "/disk/0";
+    u32 i = 0;
+    for (; head[i] != '\0' && i + 1 < cap; ++i)
+    {
+        buf[i] = head[i];
+    }
+    if (*fat_leaf != '\0' && i + 1 < cap)
+    {
+        buf[i++] = '/';
+        for (u32 j = 0; fat_leaf[j] != '\0' && i + 1 < cap; ++j)
+        {
+            buf[i++] = fat_leaf[j];
+        }
+    }
+    buf[i] = '\0';
+    return buf;
+}
+
 // Shared helper: parse decimal (default) or hex (0x prefix) into u64.
 // Returns true + writes `*out` on success. Used by `read` + any future
 // command taking a sector number / address.

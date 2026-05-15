@@ -219,6 +219,12 @@ extern const u32 kCommandCount;
 // ---------------------------------------------------------------
 const char* TmpLeaf(const char* path);
 const char* FatLeaf(const char* path);
+// DiskAliasPath rewrites the legacy "/fat[/...]" shell alias onto
+// the canonical "/disk/0[/...]" registry mount so every file
+// command resolves through the one `VfsResolve` path. Returns
+// `path` unchanged for non-/fat inputs; otherwise writes into
+// `buf` (cap bytes) and returns `buf`.
+const char* DiskAliasPath(const char* path, char* buf, u32 cap);
 bool ParseU64Str(const char* s, u64* out);
 i64 ParseInt(const char* s);
 bool ParseI64(const char* s, i64* out);
@@ -232,8 +238,10 @@ bool ParseHex32(const char* s, u32* out);
 // processes file content.
 //
 // ReadFileToBuf returns the number of bytes copied (capped at
-// `cap`) or u32(-1) if the path doesn't resolve in tmpfs or
-// ramfs. Never dereferences a nullptr buf.
+// `cap`) or u32(-1) if the path doesn't resolve. Resolves tmpfs
+// directly and everything else through the cross-mount
+// `VfsResolve` (ramfs, FAT32 /disk/<n> + /fat alias, DuetFS).
+// Never dereferences a nullptr buf.
 //
 // SliceLines walks `scratch[0..n)` and populates parallel
 // `offs[]`/`lens[]` arrays — one entry per line, excluding the

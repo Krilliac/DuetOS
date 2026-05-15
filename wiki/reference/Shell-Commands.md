@@ -102,8 +102,8 @@ the dispatcher (`RequireAdmin`).
 
 | Command | Synopsis | Notes |
 |---|---|---|
-| `ls [path]` | List directory contents | Walks ramfs + tmpfs + /fat |
-| `cat <path>` | Print file contents | tmpfs / ramfs / `/fat` |
+| `ls [path]` | List directory contents | tmpfs + cross-mount `VfsResolve` (ramfs, FAT32 `/disk/<n>`, DuetFS); `ls /` enumerates every registered mount |
+| `cat <path>` | Print file contents | tmpfs + cross-mount `VfsResolve` (ramfs, FAT32 `/disk/<n>`, DuetFS "main drive") |
 | `head [-N] <path>` | First N lines (default 5) | |
 | `tail [-N] <path>` | Last N lines (default 5) | |
 | `wc <path>` | Lines / words / bytes | |
@@ -124,7 +124,11 @@ the dispatcher (`RequireAdmin`).
 ## Filesystem (write)
 
 All write paths target tmpfs (`/tmp/<name>`) unless noted. Ramfs is
-read-only at runtime; `/fat/` paths route to the FAT32 driver.
+read-only at runtime. Read paths (`ls`, `cat`) resolve through the
+cross-mount `VfsResolve` layer, so any registered mount is reachable:
+FAT32 disks at `/disk/<n>` (with `/fat` kept as a legacy alias for
+`/disk/0`) and the native DuetFS volume at `/duetfs`. Run `ls /` or
+`mount` to discover what is mounted.
 
 | Command | Synopsis | Notes |
 |---|---|---|

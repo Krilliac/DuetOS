@@ -4,9 +4,11 @@
  * Sibling TU of shell.cpp. Houses the coreutils-flavoured
  * commands that walk the layered shell namespace:
  *
- *   /tmp/...    writable tmpfs
- *   /fat/...    read-only FAT32 mount (volume 0)
- *   anything else  read-only ramfs (the boot image)
+ *   /tmp/...    writable tmpfs (shell-only synth backend)
+ *   everything else  resolved through the cross-mount
+ *                    `VfsResolve`: ramfs boot image, FAT32
+ *                    disks at /disk/<idx> (legacy /fat alias),
+ *                    and the native DuetFS "main drive"
  *
  * Commands moved here as one bucket because they share both the
  * mount-routing pattern and a small set of TU-private helpers
@@ -23,7 +25,9 @@
 #include "shell/shell_internal.h"
 
 #include "drivers/video/console.h"
+#include "fs/duetfs.h"
 #include "fs/fat32.h"
+#include "fs/mount.h"
 #include "fs/ramfs.h"
 #include "fs/tmpfs.h"
 #include "fs/vfs.h"
@@ -180,6 +184,182 @@ void LsTmpDir()
     {
         ConsoleWriteln("(EMPTY DIRECTORY)");
     }
+}
+
+// Stream a resolved file's bytes to the console, ending on a fresh
+// row. Handles every `VfsResolve` backend so `cat` works on any
+// mounted volume (ramfs boot image, FAT32 disks, the native DuetFS
+// "main drive"), not just the three hard-coded prefixes.
+bool VfsCatNode(const duetos::fs::VfsNode& n)
+{
+    using duetos::fs::VfsBackend;
+    if (n.backend == VfsBackend::Ramfs)
+    {
+        const auto* node = n.ramfs;
+        for (u64 i = 0; i < node->file_size; ++i)
+        {
+            ConsoleWriteChar(static_cast<char>(node->file_bytes[i]));
+        }
+        if (node->file_size == 0 || node->file_bytes[node->file_size - 1] != '\n')
+        {
+            ConsoleWriteChar('\n');
+        }
+        return true;
+    }
+    if (n.backend == VfsBackend::Fat32)
+    {
+        namespace fat = duetos::fs::fat32;
+        const fat::Volume* v = fat::Fat32Volume(n.fat32_volume_idx);
+        if (v == nullptr)
+        {
+            return false;
+        }
+        struct StreamCtx
+        {
+            u8 last_byte;
+            bool any;
+        };
+        StreamCtx ctx{0, false};
+        const bool ok = fat::Fat32ReadFileStream(
+            v, &n.fat32_entry,
+            [](const duetos::u8* data, duetos::u64 len, void* cx) -> bool
+            {
+                auto* s = static_cast<StreamCtx*>(cx);
+                for (duetos::u64 i = 0; i < len; ++i)
+                {
+                    ConsoleWriteChar(static_cast<char>(data[i]));
+                }
+                if (len > 0)
+                {
+                    s->last_byte = data[len - 1];
+                    s->any = true;
+                }
+                return true;
+            },
+            &ctx);
+        if (!ok)
+        {
+            return false;
+        }
+        if (!ctx.any || ctx.last_byte != '\n')
+        {
+            ConsoleWriteChar('\n');
+        }
+        return true;
+    }
+    if (n.backend == VfsBackend::DuetFs)
+    {
+        namespace df = duetos::fs::duetfs;
+        const df::Device dev = df::DeviceForMountHandle(n.duetfs_block_handle);
+        u8 scratch[512];
+        u32 off = 0;
+        u8 last = 0;
+        bool any = false;
+        for (;;)
+        {
+            duetos::usize got = 0;
+            const u32 st = df::duetfs_read_file(&dev, n.duetfs_node_id, off, scratch, sizeof(scratch), &got);
+            if (st != df::kStatusOk)
+            {
+                return false;
+            }
+            if (got == 0)
+            {
+                break;
+            }
+            for (duetos::usize i = 0; i < got; ++i)
+            {
+                ConsoleWriteChar(static_cast<char>(scratch[i]));
+            }
+            last = scratch[got - 1];
+            any = true;
+            off += static_cast<u32>(got);
+            if (got < sizeof(scratch))
+            {
+                break;
+            }
+        }
+        if (!any || last != '\n')
+        {
+            ConsoleWriteChar('\n');
+        }
+        return true;
+    }
+    return false;
+}
+
+// Enumerate a resolved directory to the console. ramfs + FAT32
+// have in-tree directory walkers; DuetFS does not yet expose a
+// readdir over its FFI.
+void VfsLsDir(const char* path, const duetos::fs::VfsNode& n)
+{
+    using duetos::fs::VfsBackend;
+    if (n.backend == VfsBackend::Ramfs)
+    {
+        const auto* node = n.ramfs;
+        if (node->children == nullptr)
+        {
+            ConsoleWriteln("(EMPTY DIRECTORY)");
+            return;
+        }
+        for (u32 i = 0; node->children[i] != nullptr; ++i)
+        {
+            const auto* c = node->children[i];
+            ConsoleWrite("  ");
+            ConsoleWrite(c->name);
+            if (c->type == duetos::fs::RamfsNodeType::kDir)
+            {
+                ConsoleWriteln("/");
+            }
+            else
+            {
+                ConsoleWrite("   ");
+                WriteU64Dec(c->file_size);
+                ConsoleWriteln(" BYTES");
+            }
+        }
+        return;
+    }
+    if (n.backend == VfsBackend::Fat32)
+    {
+        namespace fat = duetos::fs::fat32;
+        const fat::Volume* v = fat::Fat32Volume(n.fat32_volume_idx);
+        if (v == nullptr)
+        {
+            ConsoleWriteln("LS: FAT32 NOT MOUNTED");
+            return;
+        }
+        static fat::DirEntry listing[32];
+        const u32 count = fat::Fat32ListDirByCluster(v, n.fat32_entry.first_cluster, listing, 32);
+        if (count == 0)
+        {
+            ConsoleWriteln("(EMPTY DIRECTORY)");
+            return;
+        }
+        for (u32 i = 0; i < count; ++i)
+        {
+            const fat::DirEntry& e = listing[i];
+            ConsoleWrite("  ");
+            ConsoleWrite(e.name);
+            if (e.attributes & 0x10)
+            {
+                ConsoleWriteln("/");
+            }
+            else
+            {
+                ConsoleWrite("   ");
+                WriteU64Dec(e.size_bytes);
+                ConsoleWriteln(" BYTES");
+            }
+        }
+        return;
+    }
+    // GAP: DuetFS readdir — the crate's FFI exposes lookup + read
+    // but no list-children entry point yet, so `ls <duetfs-dir>`
+    // can confirm the directory exists but not enumerate it.
+    // Revisit when duetfs_readdir lands in kernel/fs/duetfs/src/ffi.rs.
+    ConsoleWrite(path);
+    ConsoleWriteln("   (DIRECTORY — listing not yet supported on this backend)");
 }
 
 } // namespace
@@ -562,112 +742,55 @@ void CmdLs(u32 argc, char** argv)
         return;
     }
 
-    // FAT32 mount at /fat → volume 0. `ls /fat[/subpath]` resolves
-    // the full path via Fat32LookupPath so arbitrarily deep
-    // directory trees work, not just the root.
-    if (const char* fat_leaf = FatLeaf(path); fat_leaf != nullptr)
-    {
-        namespace fat = duetos::fs::fat32;
-        const fat::Volume* v = fat::Fat32Volume(0);
-        if (v == nullptr)
-        {
-            ConsoleWriteln("LS: FAT32 NOT MOUNTED (no probed volume)");
-            return;
-        }
-        fat::DirEntry entry;
-        if (!fat::Fat32LookupPath(v, fat_leaf, &entry))
-        {
-            ConsoleWrite("LS: NO SUCH PATH: ");
-            ConsoleWriteln(path);
-            return;
-        }
-        if ((entry.attributes & 0x10) == 0)
-        {
-            // Regular file — POSIX-style: print the name and size.
-            ConsoleWrite(entry.name);
-            ConsoleWrite("   ");
-            WriteU64Dec(entry.size_bytes);
-            ConsoleWriteln(" BYTES");
-            return;
-        }
-        // Directory — enumerate. The on-disk walker returns a
-        // fresh snapshot each call; cap at 32 entries for v0.
-        static fat::DirEntry listing[32];
-        const u32 count = fat::Fat32ListDirByCluster(v, entry.first_cluster, listing, 32);
-        if (count == 0)
-        {
-            ConsoleWriteln("(EMPTY DIRECTORY)");
-            return;
-        }
-        for (u32 i = 0; i < count; ++i)
-        {
-            const fat::DirEntry& e = listing[i];
-            ConsoleWrite("  ");
-            ConsoleWrite(e.name);
-            if (e.attributes & 0x10)
-            {
-                ConsoleWriteln("/");
-            }
-            else
-            {
-                ConsoleWrite("   ");
-                WriteU64Dec(e.size_bytes);
-                ConsoleWriteln(" BYTES");
-            }
-        }
-        return;
-    }
-
-    const auto* root = duetos::fs::RamfsTrustedRoot();
-    const auto* node = duetos::fs::VfsLookup(root, path, 128);
-    if (node == nullptr)
+    // Everything else routes through the one cross-mount resolver
+    // the rest of the OS uses, so `ls` reaches every mounted volume
+    // — the ramfs boot image, FAT32 disks at /disk/<idx> (and the
+    // legacy /fat alias), and the native DuetFS "main drive" — not
+    // just a hard-coded prefix list.
+    char alias_buf[256];
+    const char* rpath = DiskAliasPath(path, alias_buf, sizeof(alias_buf));
+    const duetos::fs::VfsNode n = duetos::fs::VfsResolve(duetos::fs::RamfsTrustedRoot(), rpath, sizeof(alias_buf));
+    if (!duetos::fs::VfsNodeIsValid(n))
     {
         ConsoleWrite("LS: NO SUCH PATH: ");
         ConsoleWriteln(path);
         return;
     }
-    if (node->type == duetos::fs::RamfsNodeType::kFile)
+    if (duetos::fs::VfsNodeIsFile(n))
     {
-        // POSIX-style: `ls file` prints the filename (no dir walk).
-        ConsoleWrite(node->name);
+        // POSIX-style: `ls file` prints the basename and size.
+        const char* base = path;
+        for (const char* p = path; *p != '\0'; ++p)
+        {
+            if (*p == '/' && *(p + 1) != '\0')
+            {
+                base = p + 1;
+            }
+        }
+        ConsoleWrite(base);
         ConsoleWrite("   ");
-        WriteU64Dec(node->file_size);
+        WriteU64Dec(duetos::fs::VfsNodeSize(n));
         ConsoleWriteln(" BYTES");
         return;
     }
-    if (node->children == nullptr)
-    {
-        ConsoleWriteln("(EMPTY DIRECTORY)");
-        return;
-    }
-    for (u32 i = 0; node->children[i] != nullptr; ++i)
-    {
-        const auto* c = node->children[i];
-        ConsoleWrite("  ");
-        ConsoleWrite(c->name);
-        if (c->type == duetos::fs::RamfsNodeType::kDir)
-        {
-            ConsoleWriteln("/");
-        }
-        else
-        {
-            ConsoleWrite("   ");
-            WriteU64Dec(c->file_size);
-            ConsoleWriteln(" BYTES");
-        }
-    }
-    // If the caller asked for the root, also surface /tmp and
-    // /fat as directories so both are discoverable without the
-    // operator needing to know the mount points are hard-coded.
-    // Only show /fat when a volume has actually been probed —
-    // don't advertise a mount that isn't there.
+    VfsLsDir(path, n);
+    // When listing the root, also surface the writable tmpfs and
+    // every registered mount so a user can discover their drive
+    // without having to know the mount points are hard-coded.
     if (StrEq(path, "/") || StrEq(path, ""))
     {
         ConsoleWriteln("  tmp/   (WRITABLE)");
-        if (duetos::fs::fat32::Fat32VolumeCount() > 0)
-        {
-            ConsoleWriteln("  fat/   (READ-ONLY)");
-        }
+        duetos::fs::VfsMountEnumerate(
+            [](const duetos::fs::MountEntry& e, duetos::fs::MountId /*id*/, void* /*cookie*/) -> bool
+            {
+                ConsoleWrite("  ");
+                ConsoleWrite(e.mount_point);
+                ConsoleWrite("   (");
+                ConsoleWrite(duetos::fs::FsTypeName(e.fs_type));
+                ConsoleWriteln(")");
+                return true;
+            },
+            nullptr);
     }
 }
 
@@ -705,95 +828,33 @@ void CmdCat(u32 argc, char** argv)
         return;
     }
 
-    if (const char* fat_leaf = FatLeaf(path); fat_leaf != nullptr && *fat_leaf != '\0')
+    // Everything else routes through the one cross-mount resolver:
+    // ramfs boot image, FAT32 disks at /disk/<idx> (and the legacy
+    // /fat alias), and the native DuetFS "main drive". The per-
+    // backend streaming lives in VfsCatNode so all three large-file
+    // paths share one newline-termination convention.
+    char alias_buf[256];
+    const char* rpath = DiskAliasPath(path, alias_buf, sizeof(alias_buf));
+    const duetos::fs::VfsNode n = duetos::fs::VfsResolve(duetos::fs::RamfsTrustedRoot(), rpath, sizeof(alias_buf));
+    if (!duetos::fs::VfsNodeIsValid(n))
     {
-        namespace fat = duetos::fs::fat32;
-        const fat::Volume* v = fat::Fat32Volume(0);
-        if (v == nullptr)
-        {
-            ShellSetExit(1);
-            ConsoleWriteln("CAT: FAT32 NOT MOUNTED");
-            return;
-        }
-        fat::DirEntry entry;
-        if (!fat::Fat32LookupPath(v, fat_leaf, &entry))
-        {
-            ShellSetExit(1);
-            ConsoleWrite("CAT: NO SUCH FILE: ");
-            ConsoleWriteln(path);
-            return;
-        }
-        if (entry.attributes & 0x10)
-        {
-            ShellSetExit(1);
-            ConsoleWrite("CAT: IS A DIRECTORY: ");
-            ConsoleWriteln(path);
-            return;
-        }
-        // Stream cluster-by-cluster so files larger than scratch
-        // (4 KiB) are not truncated. The driver streams 4 KiB per
-        // chunk; ConsoleWriteChar handles each byte synchronously,
-        // so the chunk pointer (into FAT scratch) stays valid
-        // for the whole callback.
-        struct StreamCtx
-        {
-            u8 last_byte;
-            bool any;
-        };
-        StreamCtx ctx{0, false};
-        const bool ok = fat::Fat32ReadFileStream(
-            v, &entry,
-            [](const duetos::u8* data, duetos::u64 len, void* cx) -> bool
-            {
-                auto* s = static_cast<StreamCtx*>(cx);
-                for (duetos::u64 i = 0; i < len; ++i)
-                {
-                    ConsoleWriteChar(static_cast<char>(data[i]));
-                }
-                if (len > 0)
-                {
-                    s->last_byte = data[len - 1];
-                    s->any = true;
-                }
-                return true;
-            },
-            &ctx);
-        if (!ok)
-        {
-            ConsoleWriteln("CAT: READ ERROR");
-            return;
-        }
-        if (!ctx.any || ctx.last_byte != '\n')
-        {
-            ConsoleWriteChar('\n');
-        }
-        return;
-    }
-
-    const auto* root = duetos::fs::RamfsTrustedRoot();
-    const auto* node = duetos::fs::VfsLookup(root, path, 128);
-    if (node == nullptr)
-    {
+        ShellSetExit(1);
         ConsoleWrite("CAT: NO SUCH FILE: ");
         ConsoleWriteln(path);
         return;
     }
-    if (node->type != duetos::fs::RamfsNodeType::kFile)
+    if (!duetos::fs::VfsNodeIsFile(n))
     {
-        ConsoleWrite("CAT: NOT A FILE: ");
+        ShellSetExit(1);
+        ConsoleWrite("CAT: IS A DIRECTORY: ");
         ConsoleWriteln(path);
         return;
     }
-    for (u64 i = 0; i < node->file_size; ++i)
+    if (!VfsCatNode(n))
     {
-        ConsoleWriteChar(static_cast<char>(node->file_bytes[i]));
-    }
-    // Ensure the prompt lands on a fresh row if the file didn't
-    // end in a newline. Most text files do; binary or generated
-    // ones often don't.
-    if (node->file_size == 0 || node->file_bytes[node->file_size - 1] != '\n')
-    {
-        ConsoleWriteChar('\n');
+        ShellSetExit(1);
+        ConsoleWriteln("CAT: READ ERROR");
+        return;
     }
 }
 

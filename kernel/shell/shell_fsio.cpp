@@ -12,6 +12,8 @@
 
 #include "shell/shell_internal.h"
 
+#include "fs/duetfs.h"
+#include "fs/fat32.h"
 #include "fs/ramfs.h"
 #include "fs/tmpfs.h"
 #include "fs/vfs.h"
@@ -44,18 +46,80 @@ u32 ReadFileToBuf(const char* path, char* buf, u32 cap)
         }
         return n;
     }
-    const auto* root = duetos::fs::RamfsTrustedRoot();
-    const auto* node = duetos::fs::VfsLookup(root, path, 128);
-    if (node == nullptr || node->type != duetos::fs::RamfsNodeType::kFile)
+    // Everything else resolves through the one cross-mount path so
+    // the line-processing commands (head/tail/grep/wc/sort/uniq/
+    // stat/...) reach the same volumes `cat` does — ramfs, FAT32
+    // disks at /disk/<idx> (and the /fat alias), and DuetFS.
+    char alias_buf[256];
+    const char* rpath = DiskAliasPath(path, alias_buf, sizeof(alias_buf));
+    const duetos::fs::VfsNode v = duetos::fs::VfsResolve(duetos::fs::RamfsTrustedRoot(), rpath, sizeof(alias_buf));
+    if (!duetos::fs::VfsNodeIsValid(v) || !duetos::fs::VfsNodeIsFile(v))
     {
         return static_cast<u32>(-1);
     }
-    const u32 n = (node->file_size > cap) ? cap : static_cast<u32>(node->file_size);
-    for (u32 i = 0; i < n; ++i)
+    using duetos::fs::VfsBackend;
+    if (v.backend == VfsBackend::Ramfs)
     {
-        buf[i] = static_cast<char>(node->file_bytes[i]);
+        const u32 n = (v.ramfs->file_size > cap) ? cap : static_cast<u32>(v.ramfs->file_size);
+        for (u32 i = 0; i < n; ++i)
+        {
+            buf[i] = static_cast<char>(v.ramfs->file_bytes[i]);
+        }
+        return n;
     }
-    return n;
+    if (v.backend == VfsBackend::Fat32)
+    {
+        namespace fat = duetos::fs::fat32;
+        const fat::Volume* vol = fat::Fat32Volume(v.fat32_volume_idx);
+        if (vol == nullptr)
+        {
+            return static_cast<u32>(-1);
+        }
+        struct Ctx
+        {
+            char* buf;
+            u32 cap;
+            u32 used;
+        };
+        Ctx ctx{buf, cap, 0};
+        const bool ok = fat::Fat32ReadFileStream(
+            vol, &v.fat32_entry,
+            [](const duetos::u8* data, duetos::u64 len, void* cx) -> bool
+            {
+                auto* c = static_cast<Ctx*>(cx);
+                for (duetos::u64 i = 0; i < len && c->used < c->cap; ++i)
+                {
+                    c->buf[c->used++] = static_cast<char>(data[i]);
+                }
+                return c->used < c->cap; // stop streaming once full
+            },
+            &ctx);
+        if (!ok && ctx.used == 0)
+        {
+            return static_cast<u32>(-1);
+        }
+        return ctx.used;
+    }
+    // DuetFS — read sequential chunks until the buffer is full or
+    // the file ends.
+    namespace df = duetos::fs::duetfs;
+    const df::Device dev = df::DeviceForMountHandle(v.duetfs_block_handle);
+    u32 used = 0;
+    while (used < cap)
+    {
+        duetos::usize got = 0;
+        const u32 st = df::duetfs_read_file(&dev, v.duetfs_node_id, used, buf + used, cap - used, &got);
+        if (st != df::kStatusOk)
+        {
+            return used > 0 ? used : static_cast<u32>(-1);
+        }
+        if (got == 0)
+        {
+            break;
+        }
+        used += static_cast<u32>(got);
+    }
+    return used;
 }
 
 // Walk `scratch[0..n)` and populate `offs`/`lens` with one

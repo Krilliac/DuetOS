@@ -64,12 +64,12 @@ void CmdMount()
     // backend).
     ConsoleWriteln("ramfs on /       type=ramfs (ro)");
     ConsoleWriteln("tmpfs on /tmp    type=tmpfs (rw, 16 slots, 512B each)");
-    // Walk the VfsMount registry. Stage-6 first slice landed
-    // the registry; the lookup-routing slice that switches
-    // backends at mount points lands separately. Until then,
-    // these entries are bookkeeping only — but listing them
-    // here gives the operator the same one-line view of the
-    // mount surface real Linux's `mount` provides.
+    // Walk the VfsMount registry. These entries are live: the
+    // cross-mount `VfsResolve` / `fs::routing` layer dispatches
+    // file ops to each backend at its mount point, and the shell's
+    // `ls` / `cat` resolve through the same path. Listing them here
+    // gives the operator the same one-line view of the mount
+    // surface real Linux's `mount` provides.
     using duetos::fs::FsTypeName;
     using duetos::fs::MountEntry;
     using duetos::fs::MountId;
