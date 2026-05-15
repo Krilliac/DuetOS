@@ -841,6 +841,100 @@ void CmdPaging()
     ConsoleWriteln(" bytes");
 }
 
+void CmdVtop(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("VTOP: USAGE: VTOP <VADDR>   (decimal or 0x-hex)");
+        ConsoleWriteln("  Walks the active CR3 and decodes the leaf PTE.");
+        return;
+    }
+    u64 virt = 0;
+    if (!ParseU64Str(argv[1], &virt))
+    {
+        ConsoleWriteln("VTOP: BAD ADDRESS");
+        return;
+    }
+    const auto w = duetos::mm::SnapshotPageWalk(virt);
+    ConsoleWrite("VADDR:  ");
+    WriteU64Hex(w.virt);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("CR3:    ");
+    WriteU64Hex(w.cr3);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("INDEX:  pml4=");
+    WriteU64Dec(w.idx_pml4);
+    ConsoleWrite(" pdpt=");
+    WriteU64Dec(w.idx_pdpt);
+    ConsoleWrite(" pd=");
+    WriteU64Dec(w.idx_pd);
+    ConsoleWrite(" pt=");
+    WriteU64Dec(w.idx_pt);
+    ConsoleWriteChar('\n');
+
+    u64 leaf = 0;
+    const char* size = nullptr;
+    switch (w.stop)
+    {
+    case duetos::mm::PageWalkStop::FourKiB:
+        leaf = w.entry_pt;
+        size = "4 KiB";
+        break;
+    case duetos::mm::PageWalkStop::TwoMiB:
+        leaf = w.entry_pd;
+        size = "2 MiB";
+        break;
+    case duetos::mm::PageWalkStop::OneGiB:
+        leaf = w.entry_pdpt;
+        size = "1 GiB";
+        break;
+    case duetos::mm::PageWalkStop::NotPresentPml4:
+        ConsoleWriteln("RESULT: not mapped (PML4E not present)");
+        return;
+    case duetos::mm::PageWalkStop::NotPresentPdpt:
+        ConsoleWriteln("RESULT: not mapped (PDPTE not present)");
+        return;
+    case duetos::mm::PageWalkStop::NotPresentPd:
+        ConsoleWriteln("RESULT: not mapped (PDE not present)");
+        return;
+    case duetos::mm::PageWalkStop::NotPresentPt:
+        ConsoleWriteln("RESULT: not mapped (PTE not present)");
+        return;
+    case duetos::mm::PageWalkStop::NonCanonical:
+        ConsoleWriteln("RESULT: non-canonical address");
+        return;
+    case duetos::mm::PageWalkStop::OutOfDirectMap:
+    default:
+        ConsoleWriteln("RESULT: walk aborted (table phys outside direct map)");
+        return;
+    }
+
+    ConsoleWrite("PADDR:  ");
+    WriteU64Hex(w.leaf_phys);
+    ConsoleWrite("  (");
+    ConsoleWrite(size);
+    ConsoleWriteln(" page)");
+    ConsoleWrite("PTE:    ");
+    WriteU64Hex(leaf);
+    ConsoleWriteChar('\n');
+    ConsoleWrite("FLAGS: ");
+    ConsoleWrite((leaf & duetos::mm::kPageWritable) ? " W" : " R");
+    ConsoleWrite((leaf & duetos::mm::kPageUser) ? " USER" : " KERN");
+    if (leaf & duetos::mm::kPageNoExecute)
+        ConsoleWrite(" NX");
+    if (leaf & duetos::mm::kPageGlobal)
+        ConsoleWrite(" GLOBAL");
+    if (leaf & duetos::mm::kPageCacheDisable)
+        ConsoleWrite(" UC");
+    if (leaf & duetos::mm::kPageWriteThru)
+        ConsoleWrite(" WT");
+    if (leaf & duetos::mm::kPageAccessed)
+        ConsoleWrite(" A");
+    if (leaf & duetos::mm::kPageDirty)
+        ConsoleWrite(" D");
+    ConsoleWriteChar('\n');
+}
+
 void CmdFb()
 {
     if (!duetos::drivers::video::FramebufferAvailable())

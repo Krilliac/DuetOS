@@ -11,6 +11,7 @@
 #include "shell/shell_internal.h"
 
 #include "drivers/video/console.h"
+#include "arch/x86_64/smp.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
 #include "sched/sched.h"
@@ -256,6 +257,172 @@ void CmdSpawn(u32 argc, char** argv)
     ConsoleWrite("SPAWN: QUEUED ");
     ConsoleWriteln(argv[1]);
     ConsoleWriteln("  (RUN `PS` TO SEE IT, OR WATCH THE KERNEL LOG)");
+}
+
+namespace
+{
+
+// Shared decimal-tid parser for the suspend/resume/affinity
+// manipulators. Returns false on empty / non-digit input so the
+// caller can print a usage line instead of acting on tid 0.
+bool ParseTid(const char* s, u64* out)
+{
+    if (s == nullptr || s[0] == '\0')
+        return false;
+    u64 v = 0;
+    for (u32 i = 0; s[i] != '\0'; ++i)
+    {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+        v = v * 10 + static_cast<u64>(s[i] - '0');
+    }
+    *out = v;
+    return true;
+}
+
+} // namespace
+
+void CmdSuspend(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("SUSPEND: USAGE: SUSPEND <TID>");
+        return;
+    }
+    u64 tid = 0;
+    if (!ParseTid(argv[1], &tid))
+    {
+        ConsoleWriteln("SUSPEND: BAD TID");
+        return;
+    }
+    duetos::sched::Task* t = duetos::sched::SchedFindTaskByTid(tid);
+    if (t == nullptr)
+    {
+        ConsoleWrite("SUSPEND: NO SUCH TID: ");
+        WriteU64Dec(tid);
+        ConsoleWriteChar('\n');
+        return;
+    }
+    u32 prev = 0;
+    const auto r = duetos::sched::SchedSuspendTask(t, &prev);
+    switch (r)
+    {
+    case duetos::sched::SuspendResult::Signaled:
+        ConsoleWrite("SUSPEND: TID ");
+        WriteU64Dec(tid);
+        ConsoleWrite(" SUSPEND COUNT ");
+        WriteU64Dec(prev);
+        ConsoleWrite(" -> ");
+        WriteU64Dec(static_cast<u64>(prev) + 1);
+        ConsoleWriteln("");
+        break;
+    case duetos::sched::SuspendResult::AlreadyDead:
+        ConsoleWrite("SUSPEND: TID ");
+        WriteU64Dec(tid);
+        ConsoleWriteln(" IS ALREADY DEAD");
+        break;
+    case duetos::sched::SuspendResult::NotFound:
+    default:
+        ConsoleWrite("SUSPEND: TID ");
+        WriteU64Dec(tid);
+        ConsoleWriteln(" NOT FOUND");
+        break;
+    }
+}
+
+void CmdResume(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("RESUME: USAGE: RESUME <TID>");
+        return;
+    }
+    u64 tid = 0;
+    if (!ParseTid(argv[1], &tid))
+    {
+        ConsoleWriteln("RESUME: BAD TID");
+        return;
+    }
+    duetos::sched::Task* t = duetos::sched::SchedFindTaskByTid(tid);
+    if (t == nullptr)
+    {
+        ConsoleWrite("RESUME: NO SUCH TID: ");
+        WriteU64Dec(tid);
+        ConsoleWriteChar('\n');
+        return;
+    }
+    u32 prev = 0;
+    const auto r = duetos::sched::SchedResumeTask(t, &prev);
+    switch (r)
+    {
+    case duetos::sched::SuspendResult::Signaled:
+        ConsoleWrite("RESUME: TID ");
+        WriteU64Dec(tid);
+        ConsoleWrite(" SUSPEND COUNT ");
+        WriteU64Dec(prev);
+        ConsoleWrite(" -> ");
+        WriteU64Dec(prev == 0 ? 0 : static_cast<u64>(prev) - 1);
+        ConsoleWriteln(prev == 0 ? "  (WAS NOT SUSPENDED)" : "");
+        break;
+    case duetos::sched::SuspendResult::AlreadyDead:
+        ConsoleWrite("RESUME: TID ");
+        WriteU64Dec(tid);
+        ConsoleWriteln(" IS ALREADY DEAD");
+        break;
+    case duetos::sched::SuspendResult::NotFound:
+    default:
+        ConsoleWrite("RESUME: TID ");
+        WriteU64Dec(tid);
+        ConsoleWriteln(" NOT FOUND");
+        break;
+    }
+}
+
+void CmdAffinity(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("AFFINITY: USAGE: AFFINITY <TID> <CPU>");
+        ConsoleWrite("  CPUS ONLINE: 0..");
+        WriteU64Dec(duetos::arch::SmpCpusOnline() - 1);
+        ConsoleWriteln("");
+        ConsoleWriteln("  NOTE: routing HINT for the task's next wake, not a hard pin");
+        return;
+    }
+    u64 tid = 0;
+    if (!ParseTid(argv[1], &tid))
+    {
+        ConsoleWriteln("AFFINITY: BAD TID");
+        return;
+    }
+    u64 cpu = 0;
+    if (!ParseTid(argv[2], &cpu))
+    {
+        ConsoleWriteln("AFFINITY: BAD CPU");
+        return;
+    }
+    duetos::sched::Task* t = duetos::sched::SchedFindTaskByTid(tid);
+    if (t == nullptr)
+    {
+        ConsoleWrite("AFFINITY: NO SUCH TID: ");
+        WriteU64Dec(tid);
+        ConsoleWriteChar('\n');
+        return;
+    }
+    if (!duetos::sched::SchedSetAffinity(t, static_cast<u32>(cpu)))
+    {
+        ConsoleWrite("AFFINITY: CPU ");
+        WriteU64Dec(cpu);
+        ConsoleWrite(" OUT OF RANGE (0..");
+        WriteU64Dec(duetos::arch::SmpCpusOnline() - 1);
+        ConsoleWriteln(")");
+        return;
+    }
+    ConsoleWrite("AFFINITY: TID ");
+    WriteU64Dec(tid);
+    ConsoleWrite(" NEXT WAKE HINTED TO CPU ");
+    WriteU64Dec(cpu);
+    ConsoleWriteln("");
 }
 
 } // namespace duetos::core::shell::internal

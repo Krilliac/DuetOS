@@ -671,7 +671,8 @@ const char* const kCommandSet[] = {
     "type",      "printenv",  "df",          "du",           "loadavg",  "clearhist",  "pause",      "yes",
     "sync",      "port",      "assert",      "watch",        "script",   "exit",       "mkfs",       "mkfs.duetfs",
     "install",   "lastdump",  "loadtest",    "stress",       "bench",    "dbg",        "dfix",       "drshd",
-    "pe-triage", "caplog",    "live-update", "fault-inject",
+    "pe-triage", "caplog",    "live-update", "fault-inject", "suspend",  "resume",     "affinity",   "vtop",
+    "logclock",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1179,6 +1180,15 @@ void Dispatch(char* line)
         CmdPaging();
         return;
     }
+    if (StrEq(cmd, "vtop"))
+    {
+        // Leaking kernel virtual->physical layout + PTE flags is a
+        // KASLR / side-channel oracle; gate behind admin like flushtlb.
+        if (!RequireAdmin("VTOP"))
+            return;
+        CmdVtop(argc, argv);
+        return;
+    }
     if (StrEq(cmd, "fb"))
     {
         CmdFb();
@@ -1488,6 +1498,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "logcolor"))
     {
         CmdLogcolor(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "logclock"))
+    {
+        CmdLogclock(argc, argv);
         return;
     }
     if (StrEq(cmd, "loglevel"))
@@ -1888,6 +1903,31 @@ void Dispatch(char* line)
         if (!RequireAdmin("KILL"))
             return;
         CmdKill(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "suspend"))
+    {
+        // Parking an arbitrary task indefinitely is a denial-of-
+        // service primitive against another principal's threads.
+        if (!RequireAdmin("SUSPEND"))
+            return;
+        CmdSuspend(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "resume"))
+    {
+        if (!RequireAdmin("RESUME"))
+            return;
+        CmdResume(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "affinity"))
+    {
+        // Pinning another task's wake onto a chosen CPU is a
+        // scheduling-side influence a logged-in guest shouldn't have.
+        if (!RequireAdmin("AFFINITY"))
+            return;
+        CmdAffinity(argc, argv);
         return;
     }
     if (StrEq(cmd, "readelf"))

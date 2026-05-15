@@ -2640,6 +2640,23 @@ void CmdLogcolor(u32 argc, char** argv)
     ConsoleWriteln(want ? "ON" : "OFF");
 }
 
+void CmdLogclock(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        const bool cur = duetos::core::GetLogWallClock();
+        ConsoleWrite("LOG WALL-CLOCK PREFIX: ");
+        ConsoleWriteln(cur ? "ON" : "OFF");
+        ConsoleWriteln("USAGE: LOGCLOCK ON|OFF");
+        return;
+    }
+    const char c = argv[1][0];
+    const bool want = (c == 'o' || c == 'O') ? (argv[1][1] == 'n' || argv[1][1] == 'N') : false;
+    duetos::core::SetLogWallClock(want);
+    ConsoleWrite("LOG WALL-CLOCK PREFIX: ");
+    ConsoleWriteln(want ? "ON" : "OFF");
+}
+
 void CmdKdbg(u32 argc, char** argv)
 {
     if (argc < 2)
