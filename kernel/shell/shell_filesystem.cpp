@@ -288,10 +288,10 @@ bool VfsCatNode(const duetos::fs::VfsNode& n)
     return false;
 }
 
-// Enumerate a resolved directory to the console. ramfs + FAT32
-// have in-tree directory walkers; DuetFS does not yet expose a
-// readdir over its FFI.
-void VfsLsDir(const char* path, const duetos::fs::VfsNode& n)
+// Enumerate a resolved directory to the console. Every backend
+// has a walker now: ramfs children, FAT32 cluster listing, and
+// the DuetFS duetfs_readdir FFI.
+void VfsLsDir(const duetos::fs::VfsNode& n)
 {
     using duetos::fs::VfsBackend;
     if (n.backend == VfsBackend::Ramfs)
@@ -354,12 +354,56 @@ void VfsLsDir(const char* path, const duetos::fs::VfsNode& n)
         }
         return;
     }
-    // GAP: DuetFS readdir — the crate's FFI exposes lookup + read
-    // but no list-children entry point yet, so `ls <duetfs-dir>`
-    // can confirm the directory exists but not enumerate it.
-    // Revisit when duetfs_readdir lands in kernel/fs/duetfs/src/ffi.rs.
-    ConsoleWrite(path);
-    ConsoleWriteln("   (DIRECTORY — listing not yet supported on this backend)");
+    // DuetFS — page through the directory via the crate's
+    // duetfs_readdir FFI, 16 entries at a time.
+    namespace df = duetos::fs::duetfs;
+    const df::Device dev = df::DeviceForMountHandle(n.duetfs_block_handle);
+    df::DirEntry batch[16];
+    u32 start = 0;
+    bool any = false;
+    for (;;)
+    {
+        duetos::usize got = 0;
+        const u32 st = df::duetfs_readdir(&dev, n.duetfs_node_id, start, batch, sizeof(batch) / sizeof(batch[0]), &got);
+        if (st != df::kStatusOk)
+        {
+            ConsoleWriteln("LS: DUETFS READDIR ERROR");
+            return;
+        }
+        if (got == 0)
+        {
+            break;
+        }
+        for (duetos::usize i = 0; i < got; ++i)
+        {
+            const df::DirEntry& e = batch[i];
+            any = true;
+            ConsoleWrite("  ");
+            char nm[df::kNameMax + 1];
+            u32 nl = e.name_len < df::kNameMax ? e.name_len : df::kNameMax;
+            for (u32 k = 0; k < nl; ++k)
+            {
+                nm[k] = static_cast<char>(e.name[k]);
+            }
+            nm[nl] = '\0';
+            ConsoleWrite(nm);
+            if (e.kind == df::kKindDir)
+            {
+                ConsoleWriteln("/");
+            }
+            else
+            {
+                ConsoleWrite("   ");
+                WriteU64Dec(e.size_bytes);
+                ConsoleWriteln(" BYTES");
+            }
+        }
+        start += static_cast<u32>(got);
+    }
+    if (!any)
+    {
+        ConsoleWriteln("(EMPTY DIRECTORY)");
+    }
 }
 
 } // namespace
@@ -773,7 +817,7 @@ void CmdLs(u32 argc, char** argv)
         ConsoleWriteln(" BYTES");
         return;
     }
-    VfsLsDir(path, n);
+    VfsLsDir(n);
     // When listing the root, also surface the writable tmpfs and
     // every registered mount so a user can discover their drive
     // without having to know the mount points are hard-coded.

@@ -94,6 +94,20 @@ struct LookupResult
 };
 inline constexpr u32 kKindMiss = 0xFFFFFFFFu;
 
+// ----------------------------------------------------------------
+// Directory entry — one child, surfaced by duetfs_readdir.
+// `name` is NUL-padded to kNameMax; `name_len` is the valid count.
+// ----------------------------------------------------------------
+inline constexpr u32 kNameMax = 64;
+struct DirEntry
+{
+    u32 node_id;
+    u32 kind; // kKind*
+    u32 size_bytes;
+    u32 name_len;
+    u8 name[kNameMax];
+};
+
 /// fsck output. `repaired = 1` iff the on-disk bitmap was
 /// rewritten. `sb_crc_mismatch = 1` if the superblock's stored
 /// CRC didn't match the computed one (informational; CRC failure
@@ -146,6 +160,15 @@ extern "C"
     /// count to `*out_copied` (may be 0 on EOF, < dst_max on partial)
     /// and returns kStatusOk.
     u32 duetfs_read_file(const Device* dev, u32 node_id, u32 offset, void* dst, usize dst_max, usize* out_copied);
+
+    /// Enumerate the children of directory `dir_node_id` starting at
+    /// child slot `start_index`, filling up to `out_max` `DirEntry`
+    /// records. Writes the produced count to `*out_count` (0 once
+    /// `start_index` >= the directory's child_count). Page by
+    /// advancing `start_index` by the returned count until it is 0.
+    /// Returns kStatusNotADir if the node is not a directory.
+    u32 duetfs_readdir(const Device* dev, u32 dir_node_id, u32 start_index, DirEntry* out, usize out_max,
+                       usize* out_count);
 
     /// Write `src_max` bytes from `src` to `node_id` starting at
     /// `offset`. Auto-grows the file (realloc + copy) if the write
