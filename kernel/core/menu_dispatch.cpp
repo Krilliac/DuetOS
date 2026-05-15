@@ -399,10 +399,20 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
     // The Files app's own dispatcher knows what to do with each
     // row id; we route there. RENAME (31) is a known v0 GAP —
     // there's no text-input modal yet; it just notifies the user.
-    case 30: // FILES — OPEN
-    case 31: // FILES — RENAME (GAP)
-    case 32: // FILES — DELETE
-    case 33: // FILES — PROPERTIES
+    // Files context-action band 30..39: 30 OPEN, 31 RENAME, 32
+    // DELETE, 33 PROPERTIES, 34 REFRESH, 35 NEW FILE, 36 NEW
+    // FOLDER, 37 OPEN (non-FAT views), 38 PROPERTIES (non-FAT),
+    // 39 REFRESH (non-FAT). All route to the app's own dispatcher.
+    case 30:
+    case 31:
+    case 32:
+    case 33:
+    case 34:
+    case 35:
+    case 36:
+    case 37:
+    case 38:
+    case 39:
         duetos::apps::files::FilesDispatchContextAction(action, ctx);
         break;
     // Power / session band (40..49). 40/41 don't return.
