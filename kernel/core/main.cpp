@@ -4805,6 +4805,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         kStartItems[6] = {"POWER", 0, kMenuItemFlagSubmenu, kPowerItems, sizeof(kPowerItems) / sizeof(kPowerItems[0])};
         constexpr duetos::u32 start_items_count = sizeof(kStartItems) / sizeof(kStartItems[0]);
         static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
+            {"NEW TEXT FILE", 7, 0, nullptr, 0},    {"REFRESH DESKTOP", 8, 0, nullptr, 0},
             {"HELP / SHORTCUTS", 6, 0, nullptr, 0}, {"ABOUT DUETOS", 1, 0, nullptr, 0},
             {"CYCLE WINDOWS", 2, 0, nullptr, 0},    {"LIST WINDOWS", 3, 0, nullptr, 0},
             {"SWITCH TO TTY", 5, 0, nullptr, 0},

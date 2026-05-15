@@ -1609,9 +1609,14 @@ namespace
 // Per-row context menu items. Static so the menu primitive can
 // hold a borrowed pointer for the open lifetime.
 constinit duetos::drivers::video::MenuItem kFilesContextMenuItems[] = {
-    {"OPEN", 30, 0, nullptr, 0},       {"RENAME", 31, 0, nullptr, 0},  {"DELETE", 32, 0, nullptr, 0},
-    {"PROPERTIES", 33, 0, nullptr, 0}, {"REFRESH", 34, 0, nullptr, 0},
+    {"OPEN", 30, 0, nullptr, 0},       {"RENAME", 31, 0, nullptr, 0},        {"DELETE", 32, 0, nullptr, 0},
+    {"PROPERTIES", 33, 0, nullptr, 0}, {"NEW TEXT FILE", 35, 0, nullptr, 0}, {"NEW FOLDER", 36, 0, nullptr, 0},
+    {"REFRESH", 34, 0, nullptr, 0},
 };
+// Sentinel ctx for a right-click on empty space (no row under the
+// cursor): row-specific actions (OPEN/RENAME/DELETE/PROPERTIES)
+// no-op on it; the create/refresh actions still work.
+constexpr duetos::u32 kFilesNoRow = 0xFFFFFFFFu;
 constexpr duetos::u32 kFilesContextMenuItemsN = sizeof(kFilesContextMenuItems) / sizeof(kFilesContextMenuItems[0]);
 
 } // namespace
@@ -1703,10 +1708,11 @@ bool FilesOnRightClick(duetos::u32 sx, duetos::u32 sy)
     if (g_state.mode != Mode::Fat32)
         return false;
     const duetos::i32 row = FilesRowAt(sx, sy);
-    if (row < 0)
-        return false;
-    duetos::drivers::video::MenuOpen(kFilesContextMenuItems, kFilesContextMenuItemsN, sx, sy,
-                                     static_cast<duetos::u32>(row));
+    // Empty space still gets the menu so NEW TEXT FILE / NEW FOLDER
+    // are reachable without aiming at an existing entry — the
+    // everyday "right-click to create" gesture.
+    const duetos::u32 ctx = (row < 0) ? kFilesNoRow : static_cast<duetos::u32>(row);
+    duetos::drivers::video::MenuOpen(kFilesContextMenuItems, kFilesContextMenuItemsN, sx, sy, ctx);
     duetos::arch::SerialWrite("[files] context menu opened row=");
     duetos::arch::SerialWriteHex(static_cast<duetos::u64>(row));
     duetos::arch::SerialWrite(" name=");
@@ -1723,8 +1729,13 @@ void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
     // re-scanned between right-click and click-on-item.
     if (g_state.mode != Mode::Fat32)
         return;
-    if (ctx >= g_state.fat_count)
-        return;
+    // Row-specific actions need a valid row; create/refresh do
+    // not (ctx may be kFilesNoRow from an empty-space right-click).
+    if (action == 30 || action == 31 || action == 32 || action == 33)
+    {
+        if (ctx >= g_state.fat_count)
+            return;
+    }
     switch (action)
     {
     case 30: // OPEN
@@ -1812,17 +1823,31 @@ void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
         duetos::arch::SerialWrite("[files] delete-to-trash armed via context menu\n");
         break;
     }
-    case 33: // PROPERTIES — log + notify
+    case 33: // PROPERTIES — real info dialog (name / size / type / attr)
     {
         const auto& e = g_state.fat_entries[ctx];
-        duetos::arch::SerialWrite("[files] properties: name=");
-        duetos::arch::SerialWrite(e.name);
-        duetos::arch::SerialWrite(" size=");
-        char sb[24];
-        duetos::u32 si = 0;
+        const bool is_dir = (e.attributes & 0x10) != 0;
+        // MessageBoxOpen stores the body by reference until the
+        // callback fires, so it must outlive this scope — a
+        // file-scope static is safe given the dialog primitive is
+        // single-instance.
+        static char s_props[160];
+        u32 p = 0;
+        auto put = [&](const char* s)
+        {
+            for (u32 i = 0; s[i] != '\0' && p + 1 < sizeof(s_props); ++i)
+                s_props[p++] = s[i];
+        };
+        put("Name: ");
+        put(e.name);
+        put("\nType: ");
+        put(is_dir ? "Folder" : "File");
+        put("\nSize: ");
+        char num[24];
+        u32 ni = 0;
         duetos::u64 v = e.size_bytes;
         char tmp[24];
-        duetos::u32 ti = 0;
+        u32 ti = 0;
         if (v == 0)
             tmp[ti++] = '0';
         while (v != 0)
@@ -1831,13 +1856,105 @@ void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
             v /= 10;
         }
         while (ti > 0)
-            sb[si++] = tmp[--ti];
-        sb[si] = '\0';
-        duetos::arch::SerialWrite(sb);
-        duetos::arch::SerialWrite(" attr=");
-        duetos::arch::SerialWriteHex(e.attributes);
+            num[ni++] = tmp[--ti];
+        num[ni] = '\0';
+        put(num);
+        put(" bytes\nAttr: 0x");
+        const char* hexd = "0123456789ABCDEF";
+        char ah[3] = {hexd[(e.attributes >> 4) & 0xF], hexd[e.attributes & 0xF], '\0'};
+        put(ah);
+        s_props[p] = '\0';
+        duetos::arch::SerialWrite("[files] properties: ");
+        duetos::arch::SerialWrite(s_props);
         duetos::arch::SerialWrite("\n");
-        duetos::drivers::video::NotifyShow(e.name);
+        duetos::drivers::video::MessageBoxOpen(
+            "PROPERTIES", s_props, [](duetos::drivers::video::DialogResult, const char*, void*) {}, nullptr);
+        break;
+    }
+    case 35: // NEW TEXT FILE — prompt for a name, create empty file
+    {
+        duetos::drivers::video::InputBoxOpen(
+            "NEW TEXT FILE", "Enter file name (8.3 form):", "NEW.TXT",
+            [](duetos::drivers::video::DialogResult r, const char* text, void*)
+            {
+                if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr || text[0] == '\0')
+                {
+                    duetos::drivers::video::NotifyShow("new file cancelled");
+                    return;
+                }
+                namespace fat = duetos::fs::fat32;
+                const fat::Volume* v = fat::Fat32Volume(0);
+                if (v == nullptr)
+                {
+                    duetos::drivers::video::NotifyShow("new file: no FAT32 volume");
+                    return;
+                }
+                char path[24];
+                path[0] = '/';
+                u32 pi = 1;
+                for (u32 i = 0; text[i] != '\0' && pi + 1 < sizeof(path); ++i)
+                    path[pi++] = text[i];
+                path[pi] = '\0';
+                const bool ok = fat::Fat32CreateAtPath(v, path, nullptr, 0) >= 0;
+                if (ok)
+                {
+                    RescanFat32();
+                    duetos::drivers::video::NotifyShow("file created");
+                }
+                else
+                {
+                    duetos::drivers::video::NotifyShowKind("create failed", duetos::drivers::video::NotifyKind::Error);
+                    duetos::drivers::video::SoundCueError();
+                }
+                duetos::arch::SerialWrite("[files] new file ");
+                duetos::arch::SerialWrite(ok ? "ok: " : "FAILED: ");
+                duetos::arch::SerialWrite(path);
+                duetos::arch::SerialWrite("\n");
+            },
+            nullptr);
+        break;
+    }
+    case 36: // NEW FOLDER — prompt for a name, mkdir
+    {
+        duetos::drivers::video::InputBoxOpen(
+            "NEW FOLDER", "Enter folder name (8.3 form):", "NEWDIR",
+            [](duetos::drivers::video::DialogResult r, const char* text, void*)
+            {
+                if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr || text[0] == '\0')
+                {
+                    duetos::drivers::video::NotifyShow("new folder cancelled");
+                    return;
+                }
+                namespace fat = duetos::fs::fat32;
+                const fat::Volume* v = fat::Fat32Volume(0);
+                if (v == nullptr)
+                {
+                    duetos::drivers::video::NotifyShow("new folder: no FAT32 volume");
+                    return;
+                }
+                char path[24];
+                path[0] = '/';
+                u32 pi = 1;
+                for (u32 i = 0; text[i] != '\0' && pi + 1 < sizeof(path); ++i)
+                    path[pi++] = text[i];
+                path[pi] = '\0';
+                const bool ok = fat::Fat32MkdirAtPath(v, path);
+                if (ok)
+                {
+                    RescanFat32();
+                    duetos::drivers::video::NotifyShow("folder created");
+                }
+                else
+                {
+                    duetos::drivers::video::NotifyShowKind("mkdir failed", duetos::drivers::video::NotifyKind::Error);
+                    duetos::drivers::video::SoundCueError();
+                }
+                duetos::arch::SerialWrite("[files] new folder ");
+                duetos::arch::SerialWrite(ok ? "ok: " : "FAILED: ");
+                duetos::arch::SerialWrite(path);
+                duetos::arch::SerialWrite("\n");
+            },
+            nullptr);
         break;
     }
     case 34: // REFRESH — re-scan FAT32 root, clamp selection.

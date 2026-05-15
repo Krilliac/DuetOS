@@ -38,7 +38,9 @@
 #include "core/session_restore.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
+#include "drivers/video/dialog.h"
 #include "drivers/video/modal_input.h"
+#include "drivers/video/notify.h"
 #include "drivers/video/start_menu_apps.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -205,6 +207,46 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
         duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Tty);
         duetos::drivers::video::ConsoleSetOrigin(16, 16);
         duetos::drivers::video::ConsoleSetColours(duetos::drivers::video::ThemeCurrent().console_fg, 0x00000000);
+        break;
+    case 7: // NEW TEXT FILE — prompt, then create an empty file on
+            // the FAT32 disk root (the user-visible writable volume
+            // the Files app's Disk view lists).
+    {
+        duetos::drivers::video::InputBoxOpen(
+            "NEW TEXT FILE", "Enter file name (8.3 form):", "NEW.TXT",
+            [](duetos::drivers::video::DialogResult r, const char* text, void*)
+            {
+                if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr || text[0] == '\0')
+                {
+                    duetos::drivers::video::NotifyShow("new file cancelled");
+                    return;
+                }
+                const duetos::fs::fat32::Volume* v = duetos::fs::fat32::Fat32Volume(0);
+                if (v == nullptr)
+                {
+                    duetos::drivers::video::NotifyShow("new file: no FAT32 volume");
+                    return;
+                }
+                char path[24];
+                path[0] = '/';
+                duetos::u32 pi = 1;
+                for (duetos::u32 i = 0; text[i] != '\0' && pi + 1 < sizeof(path); ++i)
+                    path[pi++] = text[i];
+                path[pi] = '\0';
+                const bool ok = duetos::fs::fat32::Fat32CreateAtPath(v, path, nullptr, 0) >= 0;
+                duetos::drivers::video::NotifyShow(ok ? "file created" : "create failed");
+                duetos::arch::SerialWrite("[desktop] new text file ");
+                duetos::arch::SerialWrite(ok ? "ok: " : "FAILED: ");
+                duetos::arch::SerialWrite(path);
+                duetos::arch::SerialWrite("\n");
+            },
+            nullptr);
+        break;
+    }
+    case 8: // REFRESH DESKTOP — recompose the wallpaper + windows.
+        duetos::drivers::video::DesktopCompose(duetos::drivers::video::ThemeCurrent().desktop_bg,
+                                               "WELCOME TO DUETOS   BOOT OK");
+        duetos::drivers::video::ConsoleWriteln("-> DESKTOP REFRESHED");
         break;
     case 6: // HELP / SHORTCUTS
     {
