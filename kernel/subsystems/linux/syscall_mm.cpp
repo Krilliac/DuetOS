@@ -327,7 +327,11 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     if (v == nullptr)
         return kEIO;
 
-    static u8 file_scratch[4096];
+    // Per-call on the kernel stack, NOT process-shared static: the
+    // FAT32 read and the per-page AllocateFrame loop below can
+    // block, so a shared buffer would let a concurrent mmap() from
+    // another process leak its file bytes into this mapping.
+    u8 file_scratch[4096];
     fs::fat32::DirEntry entry;
     for (u64 i = 0; i < sizeof(entry.name); ++i)
         entry.name[i] = 0;
@@ -551,7 +555,7 @@ i64 DoMincore(u64 addr, u64 len, u64 user_vec)
         return 0;
     constexpr u64 kMaxPages = 4096;
     const u64 to_mark = (pages > kMaxPages) ? kMaxPages : pages;
-    static u8 ones[kMaxPages];
+    u8 ones[kMaxPages]; // per-call, not process-shared static
     for (u64 i = 0; i < to_mark; ++i)
         ones[i] = 1;
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_vec), ones, to_mark))

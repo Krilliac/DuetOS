@@ -1,0 +1,8 @@
+build/
+corpus/
+crash-*
+leak-*
+timeout-*
+oom-*
+# hand-written fuzz driver (root .gitignore blanket-ignores Makefile for CMake)
+!Makefile
