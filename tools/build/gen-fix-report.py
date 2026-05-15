@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import struct
 import sys
 from collections import defaultdict
@@ -81,6 +82,23 @@ class FixRecord:
     @property
     def audited(self) -> bool:
         return bool(self.flags & 0x01)
+
+
+def _is_selftest_record(source_pin: str) -> bool:
+    """True for the synthetic records `FixJournalSelfTest()` injects to
+    validate the journal mechanism. They point at no real source
+    (`selftest/stub.cpp:1`, `selftest!ThunkSelftest`, the auto-pinned
+    `…FixJournalSelfTest()+0xNN`, …) so they are excluded from the
+    report; the patch generator filters the same set. Keep this
+    predicate in sync with `gen-fix-patches.py:is_selftest_record`.
+    """
+    p = source_pin.strip()
+    return (
+        p == "selftest"
+        or bool(re.match(r"selftest[/!.#:\s]", p))
+        or "FixJournalSelfTest" in p
+        or "FaultReactSelfTest" in p
+    )
 
 
 def read_records(path: str) -> tuple[int, list[FixRecord]]:
@@ -244,6 +262,8 @@ def render_markdown(
     by_detector: dict[str, dict[str, dict]] = defaultdict(lambda: defaultdict(dict))
     for path, _ver, recs in boots:
         for r in recs:
+            if _is_selftest_record(r.source_pin):
+                continue  # synthetic FixJournalSelfTest validation noise
             slot = by_detector[r.detector_name].setdefault(
                 r.source_pin,
                 {

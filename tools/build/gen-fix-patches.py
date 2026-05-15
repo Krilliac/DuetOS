@@ -70,6 +70,33 @@ DETECTORS = {
     6: "loader_reject",
 }
 
+
+def is_selftest_record(source_pin: str) -> bool:
+    """True for the synthetic records `FixJournalSelfTest()` injects to
+    validate the journal mechanism (one per detector + an auto-pin
+    probe). These are NOT real gaps: their pins (`selftest/stub.cpp:1`,
+    `selftest!ThunkSelftest`, `selftest/syscall#999`, …, and the
+    auto-derived `…FixJournalSelfTest()+0xNN`) point at no real source.
+    Treating them as gaps produces actively harmful candidate patches —
+    e.g. a thunk-table row for a fake `selftest.dll` that, if applied
+    in CI, corrupts the Win32 ABI table. They are filtered before any
+    action is planned. See `kernel/diag/fix_journal.cpp`
+    `FixJournalSelfTest()` for the injected pin set.
+    """
+    p = source_pin.strip()
+    # `selftest` followed by a path/dll/syscall/domain separator is
+    # the synthetic shape: `selftest/stub.cpp:1`, `selftest!Thunk…`,
+    # `selftest/syscall#999`, and `selftest.fault-react` (the
+    # FaultReactSelfTest domain). No real source pin starts that way
+    # (real pins are `kernel/...`, `drivers/...`, `dll!Fn`, …). The
+    # auto-pinned probe record carries the function name instead.
+    return (
+        p == "selftest"
+        or bool(re.match(r"selftest[/!.#:\s]", p))
+        or "FixJournalSelfTest" in p
+        or "FaultReactSelfTest" in p
+    )
+
 # FaultKind enum from kernel/diag/fault_react.h. Used by the
 # SoftFaultRecov template to decode `ctx_a` for records that come
 # out of `FaultReactDispatch` (RetryNow / RestartDomain branches).
@@ -1535,6 +1562,8 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
         seen.add(key)
         if r.audited:
             continue  # reviewer already triaged
+        if is_selftest_record(r.source_pin):
+            continue  # synthetic FixJournalSelfTest noise — never a real gap
 
         if r.detector_name == "unmapped_thunk":
             parsed = parse_thunk_pin(r.source_pin)
