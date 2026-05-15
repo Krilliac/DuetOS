@@ -24,6 +24,7 @@
 #include "subsystems/linux/syscall_pipe.h"
 #include "subsystems/linux/syscall_socket.h"
 
+#include "diag/fix_journal.h"
 #include "proc/process.h"
 #include "fs/fat32.h"
 #include "mm/address_space.h"
@@ -107,6 +108,7 @@ void FillStatFromEntry(const fs::fat32::DirEntry& e, u8* out_144)
 i64 DoOpen(u64 user_path, u64 flags, u64 mode)
 {
     (void)mode;
+    FIX_NOTE_GAP("subsystems/linux/syscall_file.cpp:DoOpen", "Linux fd via fs::routing mount-aware open");
     // Linux open flags we care about for the FAT32-backed v0 path.
     // kSysOpen and kSysOpenat both come through here, so the same
     // bits mean the same thing.

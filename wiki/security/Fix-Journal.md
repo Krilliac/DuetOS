@@ -109,11 +109,30 @@ For each unique record:
 | `unmapped_thunk` (in table at `kOffReturnZero/One/CritSecNop/GetProcessHeap`) | YES | Emits a named-equivalent bytecode patch at a fresh `kOff*` offset and rewrites the row, suppressing repeat journal noise for accepted placeholders while preserving a reviewable diff |
 | `unknown_syscall` | No | Emits a markdown implementation brief with syscall number, repeat count, caller RIP, ctx fields, and hint; syscall semantics are ABI work and should not be mechanically converted into permanent `-ENOSYS` stubs |
 | `stub` / `gap` / `soft_fault_recov` / `loader_reject` | No | Detector-specific implementation brief pointing at the source pin and captured runtime context |
-| marker manifest rows without `FIX_NOTE_*` (via `--markers`) | YES, when safe | Adds `diag/fix_journal.h` and a `FIX_NOTE_STUB` / `FIX_NOTE_GAP` macro for in-function kernel `.c/.cc/.cpp` markers; unsafe header/userland/namespace-scope rows become review notes |
+| marker manifest rows without fix-journal instrumentation (via `--markers`) | YES, when safe | Adds `diag/fix_journal.h` and a `FIX_NOTE_STUB` / `FIX_NOTE_GAP` macro for in-function kernel `.c/.cc/.cpp` markers; unsafe header/userland/namespace-scope rows become review notes |
 
 Patch files are unified diffs ready for `git apply`. Re-running after applying is safe — the script doesn't re-emit a patch for a row that already exists. Optional `--apply` runs `git apply` on each patch with a y/n prompt; `--yes` skips the prompts (use only in CI). Marker-manifest generation is deliberately conservative: it only auto-inserts macros into indented, in-function kernel source markers where the macro is a valid statement. Header comments, userland DLL code, and namespace-scope declarations are surfaced as notes instead of risking an invalid patch.
 
-Current in-tree marker coverage is intentionally source-aware rather than blanket: GPU bring-up (`nvidia_gpu`, Intel GSC manufacturing partitions), DuetFS emulator probe gating, and iwlwifi legacy RBD encoding now feed the journal from their actual runtime branches. Architecture-deferred DMA cache maintenance remains comment-only because it sits on a hot synchronization path where a journal call on every DMA sync would be the wrong fix.
+**Instrumentation recognition.** A marker counts as already-wired (`has_macro` in the manifest) when the lookahead window holds *either* a `FIX_NOTE_STUB` / `FIX_NOTE_GAP` macro *or* a direct `FixJournalRecord*(... FixDetector::StubMarker / GapMarker ...)` call. The direct-call form is what a site uses when it needs to attach detector-specific `ctx_a` / `ctx_b` (e.g. `kernel/drivers/virtio/virtio.cpp` records the unprobed `cls_idx` / `device_id`) — the parameterless macro can't carry that. Recognising both forms stops the generator emitting a redundant double-instrumentation patch over a site that is already observable.
+
+**Documented comment-only markers** carry a precise rationale instead of the generic "likely namespace scope" guess. `gen-fix-patches.py`'s `_MARKER_SKIP_REASONS` pins the *why* for each marker that is intentionally never auto-instrumented (DMA hot-path cache maintenance, the `virtio_pci` transport-only DRIVER_OK design boundary, the `fault_inject` namespace-scope assumption note, and the `NtQueryDefaultLocale` / `NtQueryDefaultUILanguage` GAPs that annotate their absent `NtSet*` counterparts rather than the complete Query function they sit in). A reviewer reading the plan sees the real reason, not a heuristic stand-in.
+
+Current in-tree marker coverage is intentionally source-aware rather than blanket. The journal is fed from the actual runtime branches of:
+
+- GPU bring-up — `nvidia_gpu` GSP channel, Intel GSC manufacturing partitions.
+- DuetFS emulator probe gating.
+- iwlwifi legacy RBD encoding + TFD DMA upload.
+- virtio transport — unprobed scsi/input/socket device classes (carries `cls_idx`/`device_id` as ctx), virtio-blk single-in-flight request assumption, virtio-balloon inflate/deflate dispatch.
+- Security — RBAC role/membership tables that re-seed every boot (persistence pending a writable system FS).
+- Linux subsystem — `DoOpen` read-only / non-mount-aware FAT32 path.
+- NT translation — `NtSetInformationThread` (TLS-slot / exit-status classes ignored) and `NtTestAlert` (no alertable-wait drain).
+- DRSH desktop — client-side resize-ack negotiation.
+
+Comment-only-on-purpose (a journal call here would be noise or mis-attributed, not a real gap signal):
+
+- Architecture-deferred DMA cache maintenance (`mm/dma.cpp`) — hot synchronization path; a record on every DMA sync would be the wrong fix.
+- `virtio_pci` negotiate DRIVER_OK — correct for the transport-only path; per-device drivers install queues, so this is not a behavioural gap.
+- `NtQueryDefaultLocale` / `NtQueryDefaultUILanguage` — the `// GAP:` there annotates the *missing Set* counterpart; the Query function itself is complete, so wiring it would mis-attribute the gap.
 
 ### Why generated noop patches still need review
 

@@ -583,6 +583,8 @@ i64 NtDoQuerySystemTime(arch::TrapFrame* f)
 // — revisit when a real workload depends on one.
 i64 NtDoSetInformationThread(arch::TrapFrame* /*f*/)
 {
+    FIX_NOTE_GAP("subsystems/translation/translate.cpp:NtDoSetInformationThread",
+                 "apply TLS-slot / exit-status thread-info classes");
     return kStatusSuccess;
 }
 
@@ -635,6 +637,7 @@ i64 NtDoFlushInstructionCache(arch::TrapFrame* /*f*/)
 // consume the alert flag and run any queued user-APC.
 i64 NtDoTestAlert(arch::TrapFrame* /*f*/)
 {
+    FIX_NOTE_GAP("subsystems/translation/translate.cpp:NtDoTestAlert", "drain alert flag + run queued user-APC");
     return kStatusSuccess;
 }
 

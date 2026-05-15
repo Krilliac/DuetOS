@@ -620,6 +620,26 @@ _MARKER_SKIP_REASONS = {
         "architecture-deferred cache-maintenance marker in a DMA hot path; "
         "recording every sync would add journal lock traffic to normal device I/O"
     ),
+    "kernel/diag/fault_inject.cpp:57": (
+        "namespace-scope assumption note on a constexpr VA constant, not a "
+        "reachable runtime branch; there is no statement context to instrument"
+    ),
+    "kernel/drivers/virtio/virtio_pci.cpp:238": (
+        "DRIVER_OK on the transport-only negotiate path is correct as written "
+        "(per-device drivers install queues before they need I/O); this is a "
+        "design-boundary note, not a behavioural gap, so a journal record here "
+        "would be permanent false noise on every virtio device probe"
+    ),
+    "kernel/subsystems/translation/translate.cpp:595": (
+        "the GAP annotates the absent NtSetDefaultLocale counterpart, not the "
+        "NtQueryDefaultLocale function it sits in (which is complete); wiring "
+        "the Query path would mis-attribute the gap to the wrong call site"
+    ),
+    "kernel/subsystems/translation/translate.cpp:610": (
+        "the GAP annotates the absent NtSetDefaultUILanguage counterpart, not "
+        "the NtQueryDefaultUILanguage function it sits in (which is complete); "
+        "wiring the Query path would mis-attribute the gap to the wrong call site"
+    ),
 }
 
 

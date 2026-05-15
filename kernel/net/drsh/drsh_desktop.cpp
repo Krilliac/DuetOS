@@ -1,5 +1,6 @@
 #include "net/drsh/drsh_internal.h"
 
+#include "diag/fix_journal.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
 #include "log/klog.h"
@@ -276,6 +277,7 @@ bool DesktopChannelService(DrshTransport& t, DrshSession& s, u8 channel_id)
             break;
         case kSubResizeAck:
             // GAP: client-side resize negotiation — not used in v0.
+            FIX_NOTE_GAP("net/drsh/drsh_desktop.cpp:ResizeAck", "wire client-side resize negotiation");
             break;
         default:
             // Unknown sub-type: ignore. Forward-compatible if a

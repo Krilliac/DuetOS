@@ -3,11 +3,17 @@
 Scan the DuetOS source tree for `// STUB:` and `// GAP:` markers
 and emit a JSON manifest of (file, line, kind, comment, has_macro).
 
-Each marker is one row. `has_macro` is true when the line
-immediately following the marker (or the next non-blank line
-within 3 lines) contains a `FIX_NOTE_STUB(...)` or
-`FIX_NOTE_GAP(...)` macro call — i.e. the marker is **observable**
-at runtime and feeds the fix journal.
+Each marker is one row. `has_macro` is true when the lookahead
+window after the marker contains EITHER a `FIX_NOTE_STUB(...)` /
+`FIX_NOTE_GAP(...)` convenience macro OR a direct
+`FixJournalRecord*(... FixDetector::StubMarker / GapMarker ...)`
+call — both are equivalent fix-journal instrumentation, so the
+marker is **observable** at runtime and feeds the fix journal.
+The direct-call form is used by sites that want to attach
+detector-specific `ctx_a` / `ctx_b` (which the parameterless
+macro can't carry); the detector must treat it as covered so the
+patch generator does not emit a redundant double-instrumentation
+patch over an already-wired site.
 
 Use cases:
     1. Compare the manifest against a fix-journal report to find
@@ -43,6 +49,13 @@ from pathlib import Path
 
 MARKER_RE = re.compile(r"^\s*//\s*(STUB|GAP):\s*(.*)$")
 MACRO_RE = re.compile(r"\bFIX_NOTE_(STUB|GAP)\s*\(")
+# Direct `FixJournalRecord*(...)` instrumentation: the StubMarker /
+# GapMarker detector enum is the precise equivalent of the
+# FIX_NOTE_* macro. It only ever appears as the detector argument
+# to a FixJournalRecord call, so matching the enum token is an
+# unambiguous "this marker is wired" signal even when the call is
+# wrapped across several lines by clang-format.
+JOURNAL_DIRECT_RE = re.compile(r"\bFixDetector::(StubMarker|GapMarker)\b")
 COMMENT_CONT_RE = re.compile(r"^\s*//")  # any `//`-starting continuation line
 SOURCE_DIRS = ["kernel", "drivers", "subsystems", "userland", "boot"]
 SOURCE_EXTS = {".h", ".hpp", ".c", ".cpp", ".cc", ".rs"}
@@ -98,7 +111,7 @@ def scan_file(path: Path, root: Path) -> list[dict]:
             if MARKER_RE.match(line_j):
                 # Hit the next marker — stop without finding a macro.
                 break
-            if MACRO_RE.search(line_j):
+            if MACRO_RE.search(line_j) or JOURNAL_DIRECT_RE.search(line_j):
                 has_macro = True
                 break
         results.append(
