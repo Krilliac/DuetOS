@@ -174,7 +174,7 @@ banner reflects the active set:
 
 All release automation is in-repo under [`.github/workflows/`](.github/workflows/):
 
-- [`build.yml`](.github/workflows/build.yml) runs format + debug/release builds and CI smoke checks.
+- [`build.yml`](.github/workflows/build.yml) runs format + debug/release builds, builds and smoke-boots every non-default flavor (release-asserts, release-audit, release-lto, debug-fast), and uploads each flavor's ISO + kernel ELF as a per-run artifact alongside the debug/release artifacts.
 - [`release.yml`](.github/workflows/release.yml) publishes rolling channels (`latest-release` + `latest-debug` as front-runners; `latest-flavors` for the specialized presets — release-asserts, release-audit, release-lto, debug-fast) from `main` and from `v*` tags.
 
 Local validation of release logic (same core commands used by CI):

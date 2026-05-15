@@ -212,6 +212,21 @@ jobs:
         run: cmake --preset ${{ matrix.preset }}
       - name: Build
         run: cmake --build build/${{ matrix.preset }} --parallel $(nproc)
+      - name: Upload flavor kernel
+        # Mirrors build-debug / build-release: every flavor the
+        # matrix builds produces a downloadable ISO + kernel ELF,
+        # not just a serial log on failure. Uploaded right after
+        # Build so a later smoke regression doesn't suppress the
+        # artifact — the build itself is the thing the README's
+        # "Build flavors" badge promises is covered.
+        uses: actions/upload-artifact@v4
+        with:
+          name: duetos-kernel-${{ matrix.preset }}
+          if-no-files-found: error
+          path: |
+            build/${{ matrix.preset }}/duetos.iso
+            build/${{ matrix.preset }}/kernel/duetos-kernel.elf
+          retention-days: 7
       - name: Smoke-boot bringup
         id: smoke
         shell: bash
