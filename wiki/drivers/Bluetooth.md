@@ -142,18 +142,23 @@ boot input stream stays clean. See
 
 **Transport driver.** The btusb USB transport driver
 ([`../../kernel/drivers/usb/btusb.{h,cpp}`](../../kernel/drivers/usb/btusb.cpp))
-finds the USB Bluetooth controller, parses its endpoints, sends the
-HCI identity bring-up commands over EP0, and runs a real ACL RX
-pump (bulk-IN → `BtHidDeliverAcl`). Like `CdcEcmProbe` it is not
-auto-claimed at boot (it would race the shared xHCI event ring and
-regress the e1000 DHCP path — see the CdcEcmProbe note in
-`kernel/core/main.cpp`); it is invoked on demand via the `bt probe`
-shell command. **The remaining gap is the HCI _event_
-interrupt-IN endpoint** — the public xHCI surface is control +
-bulk only, so v0 sends bring-up commands and pumps ACL but does
-not read Command_Complete / async events. That means connection
-establishment, SMP pairing, and GATT (HOGP) discovery are the next
-slice; the ACL→keyboard decode itself is fully real and tested.
+finds the USB Bluetooth controller, parses its endpoints,
+configures the bulk + interrupt-IN endpoints, registers a diag
+adapter, sends the HCI identity bring-up commands over EP0, and
+runs two RX pumps: bulk-IN → `BtHidDeliverAcl` (the keyboard data
+path) and interrupt-IN → HCI event processing (diag ring +
+adapter stamping from the Command_Complete answers,
+Disconnection_Complete → `BtHidUnregister`). The interrupt-IN
+xHCI primitive is additive — independent `DeviceState` fields +
+functions — so no bulk/HID/EP0 caller is perturbed. Like
+`CdcEcmProbe` it is not auto-claimed at boot (event-ring race;
+see the CdcEcmProbe note in `kernel/core/main.cpp`); invoked on
+demand via the `bt probe` shell command. **The remaining gap is
+the connection manager** — LE scan/connect, SMP pairing, GATT
+(HOGP) discovery — a deliberate SMP-gated frontier (see
+[Known Limits](#known-limits--gaps)). Once a link is up and a
+keyboard registered, the ACL→keystroke path is fully real and
+self-tested.
 
 ## H4 Framing — `hci_rust` Crate
 
@@ -191,16 +196,20 @@ choice is tracked in
 
 ## Known Limits / GAPs
 
-- **USB transport: command + ACL only.** The btusb driver
+- **No connection manager (SMP-gated).** The btusb driver
   ([`../../drivers/usb/btusb.cpp`](../../kernel/drivers/usb/btusb.cpp))
-  brings up a USB Bluetooth controller and runs a real bulk-IN ACL
-  RX pump, but the HCI **event** interrupt-IN endpoint is not
-  drained (the public xHCI surface is control + bulk only; a
-  generic interrupt-IN primitive is a separate slice that must not
-  perturb the working HID event ring). So Command_Complete /
-  Disconnection_Complete / LE Connection Complete are not consumed.
-  No UART/SDIO transport, no integrated controller. On a host with
-  no BT hardware the driver no-ops; logic is boot self-tested.
+  brings the controller up, runs a real bulk-IN ACL RX pump, and
+  drains the HCI **event** interrupt-IN endpoint (diag stamping
+  from the Command_Complete bring-up answers,
+  Disconnection_Complete → `BtHidUnregister`). What is *not* done:
+  LE scan/connect, **SMP pairing/bonding**, and GATT (HOGP)
+  service discovery — so a real BT keyboard cannot associate on
+  its own yet. This is a deliberate frontier gated on the
+  project's standing decision to defer SMP (see
+  [Design-Decisions](../reference/Design-Decisions.md)); it is a
+  multi-slice, security-critical effort unprovable on a host with
+  no radio. No UART/SDIO transport. On a host with no BT hardware
+  the driver no-ops; every layer is boot self-tested.
 - **ACL data path: keyboard only.** [`hid.h`](../../kernel/net/bluetooth/hid.h)
   reassembles ACL fragments and decodes L2CAP B-frames for the HID
   keyboard path. No SCO (voice) path; no other ACL consumer.

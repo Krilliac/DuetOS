@@ -85,14 +85,15 @@ xHCI interrupt-IN poll (`kernel/drivers/usb/xhci_init.cpp`
 The btusb transport driver
 (`kernel/drivers/usb/btusb.{h,cpp}`, invoked via the `bt probe`
 shell command) is the real producer: it finds the USB Bluetooth
-controller, sends HCI bring-up commands over EP0, and runs the
-bulk-IN ACL RX pump into `BtHidDeliverAcl`.
+controller, configures the bulk + interrupt-IN endpoints, sends
+HCI bring-up commands over EP0, and runs two RX pumps — bulk-IN
+ACL into `BtHidDeliverAcl`, and interrupt-IN HCI events into the
+diag layer / connection teardown.
 
-GAPs (documented limits, not stubs): the HCI event interrupt-IN
-endpoint is not drained yet (so connection establishment / SMP
-pairing / GATT-HOGP discovery is the next slice), and only the
-boot keyboard report map is decoded. The ACL→keystroke path itself
-is live and self-tested.
+GAPs (documented limits, not stubs): no connection manager (LE
+scan/connect + SMP pairing + GATT-HOGP discovery — an SMP-gated
+frontier), and only the boot keyboard report map is decoded. Once
+a link is up the ACL→keystroke path is live and self-tested.
 
 ## Mouse
 
@@ -122,13 +123,14 @@ Chrome Interactions" for the full chrome-press dispatch.
 - **No USB HID mouse driver yet.**
 - **No raw input** API (`Win32 GetRawInputData`) — the few PEs that
   use it fall back to the message-pump path.
-- **Bluetooth connection setup not yet implemented** — the btusb
-  transport driver (`bt probe`) brings up the controller and pumps
-  ACL into the keyboard stack, but reading HCI events (needed for
-  scan/connect/pair/GATT-discover) is the next slice, so a real BT
-  keyboard can't yet associate on its own. The full ACL→keystroke
-  decode is live and self-tested. See
-  [Bluetooth](Bluetooth.md#hid-keyboard).
+- **Bluetooth connection manager not yet implemented** — the
+  btusb transport driver (`bt probe`) brings up the controller,
+  pumps ACL into the keyboard stack, and processes HCI events
+  (identity stamping, disconnect teardown). What is missing is LE
+  scan/connect + SMP pairing + GATT-HOGP discovery, so a real BT
+  keyboard can't yet associate on its own — a deliberate SMP-gated
+  frontier. Once a link is up the full ACL→keystroke decode is
+  live and self-tested. See [Bluetooth](Bluetooth.md#hid-keyboard).
 - **No IME / non-Latin layouts** — PS/2 + xHCI HID drivers
   hardcode US layout. See
   [Roadmap](../reference/Roadmap.md#ime--non-latin-input).

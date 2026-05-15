@@ -18,29 +18,34 @@
  *                        keyboard connection is up).
  *   - Isochronous      — SCO voice (not used by a keyboard).
  *
- * v0 transport scope (built on the existing real xHCI transfer
- * surface — no changes to the working HID/event ring):
+ * v0 transport scope (built on the real xHCI transfer surface —
+ * the interrupt-IN primitive is additive: independent DeviceState
+ * fields + functions, so no bulk/HID/EP0 caller is perturbed):
  *   - Find the controller (`XhciFindDeviceByClass`), parse its
  *     config descriptor for the bulk-IN / bulk-OUT (ACL) and
  *     interrupt-IN (events) endpoints, SET_CONFIGURATION, configure
- *     the bulk endpoints.
+ *     the bulk + interrupt-IN endpoints, register a diag adapter.
  *   - Send the HCI identity bring-up commands (Reset,
  *     Read_Local_Version, Read_BD_ADDR) over EP0 via the class
- *     request, and stamp the diag adapter.
- *   - Spawn an ACL RX pump: bulk-IN → `BtHidDeliverAcl`. This is
- *     the real, wired keyboard data path.
+ *     request.
+ *   - Spawn two RX pumps: bulk-IN → `BtHidDeliverAcl` (the real,
+ *     wired keyboard data path) and interrupt-IN → HCI event
+ *     processing (records to the diag ring, stamps the adapter from
+ *     the Command_Complete bring-up answers, tears a HID connection
+ *     down on Disconnection_Complete).
  *
  * GAPs (documented limits, not stubs):
- *   - GAP: the HCI **event** interrupt-IN endpoint is not drained
- *     in v0. The public xHCI surface exposes control + bulk only;
- *     adding a generic interrupt-IN primitive would perturb the
- *     working HID poll/event ring, which is a separate slice. Until
- *     then HCI command *responses* (Command_Complete) and async
- *     events (LE Connection Complete, Disconnection_Complete) are
- *     not consumed — so connection establishment / SMP pairing /
- *     GATT (HOGP) discovery is the next slice. The ACL→keyboard
- *     decode itself is fully real and self-tested (BtHid).
+ *   - GAP: no connection manager. v0 processes HCI events but does
+ *     not yet drive LE scan/connect, SMP pairing/bonding, or GATT
+ *     (HOGP) service discovery — so a real BT keyboard cannot
+ *     associate on its own and call `BtHidRegisterLeKeyboard`.
+ *     That layer is a deliberate separate frontier (the project
+ *     defers SMP; see wiki/reference/Design-Decisions.md). Once a
+ *     link is up and a keyboard registered, the full
+ *     ACL→keystroke path is real and self-tested.
  *   - GAP: no SCO / isochronous path (voice — not a keyboard).
+ *   - GAP: the event-endpoint Interval is a fixed 8 ms, not derived
+ *     from the descriptor's bInterval (fine for HCI events).
  *
  * Wiring: like `CdcEcmProbe`, `BtusbProbe` is deliberately NOT
  * auto-called at boot. Auto-probing every enumerated device runs
@@ -71,7 +76,7 @@ struct BtusbStats
     u8 slot_id;
     u8 acl_in_ep;
     u8 acl_out_ep;
-    u8 event_in_ep; // located but not yet drained (see GAP)
+    u8 event_in_ep; // HCI events drained by the event RX pump
     u64 acl_packets_rx;
     u64 acl_bytes_rx;
     u64 acl_short_drops;

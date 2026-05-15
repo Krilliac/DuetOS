@@ -315,6 +315,23 @@ struct DeviceState
     u32 bulk_out_ring_idx;
     u32 bulk_out_ring_cycle;
 
+    // Interrupt-IN endpoint state. Independent of the bulk pair and
+    // the HID ring so a device with bulk-IN + bulk-OUT + a separate
+    // interrupt-IN (e.g. a USB Bluetooth controller: ACL on bulk,
+    // HCI events on interrupt-IN) can run all three concurrently.
+    // Appended after the bulk block so the struct change is purely
+    // additive — every existing bulk/HID/EP0 user is byte-for-byte
+    // unaffected, and g_devices is zero-init so these start clean.
+    bool evt_in_ready;
+    u8 evt_in_ep_addr;
+    u8 evt_in_dci;
+    u16 evt_in_mps;
+    mm::PhysAddr evt_in_ring_phys;
+    Trb* evt_in_ring;
+    u32 evt_in_ring_slots;
+    u32 evt_in_ring_idx;
+    u32 evt_in_ring_cycle;
+
     // Class/subclass for device-by-class lookup (populated during
     // descriptor parse).
     u8 dev_class;

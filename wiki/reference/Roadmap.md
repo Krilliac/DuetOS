@@ -438,17 +438,24 @@ In rough priority:
   L2CAP B-frame decode, BLE HOGP ATT-notification + classic HIDP
   DATA/Input → the shared input-layer boot-keyboard decoder
   (`kernel/drivers/input/hid_keyboard.{h,cpp}`, also used by USB
-  HID); and the btusb USB transport driver
+  HID); the btusb USB transport driver
   `kernel/drivers/usb/btusb.{h,cpp}` — finds the controller, parses
-  endpoints, sends HCI bring-up commands over EP0, runs a real
-  bulk-IN ACL RX pump into `BtHidDeliverAcl` (invoked via the `bt
-  probe` shell command, not auto-claimed — same event-ring race as
-  CdcEcmProbe). Boot self-tests assert every shape end-to-end. The
-  remaining work: drain the HCI **event** interrupt-IN endpoint
-  (needs a public xHCI interrupt-IN primitive that doesn't perturb
-  the HID event ring), then connection establishment + SMP pairing
-  + GATT-HOGP discovery; plus general L2CAP signalling / RFCOMM /
-  SDP for non-keyboard profiles.)
+  endpoints, configures the bulk + interrupt-IN endpoints, sends
+  HCI bring-up commands over EP0, and runs an ACL RX pump into
+  `BtHidDeliverAcl` plus an HCI-event RX pump (diag stamping,
+  Disconnection_Complete → `BtHidUnregister`); and an additive
+  public xHCI interrupt-IN transfer primitive
+  (`XhciConfigureInterruptInEndpoint` / `XhciInterruptInSubmit` /
+  `XhciInterruptInPoll`) on independent `DeviceState` fields so no
+  bulk/HID caller is perturbed. Invoked via `bt probe` (not
+  auto-claimed — same event-ring race as CdcEcmProbe). Boot
+  self-tests assert every shape end-to-end. **Remaining (SMP-gated
+  frontier):** the connection manager — LE scan/connect, SMP
+  pairing/bonding, GATT-HOGP service discovery — so a real BT
+  keyboard can associate on its own; plus general L2CAP signalling
+  / RFCOMM / SDP for non-keyboard profiles. See
+  [Design-Decisions](Design-Decisions.md) for why this is a
+  deliberate boundary.)
 - **Printer:** USB printer-class driver + IPP / PostScript /
   raster pipeline.
 - **Webcam:** UVC USB-Video class driver.

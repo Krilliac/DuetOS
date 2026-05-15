@@ -43,6 +43,16 @@ constexpr u32 kAclRxBufBytes = 4096;
 // packet is at least its 4-byte header (handle + length).
 constexpr u32 kAclMinBytes = 4;
 
+// Fixed xHCI Interval for the HCI event endpoint (period = 2^N ×
+// 125 µs; N=6 → 8 ms). HCI events are not isochronous and we drain
+// the ring in a task with its own timeout, so the exact period is
+// not latency-critical. GAP: not derived from the descriptor's
+// bInterval — fine for events, would need refining for an
+// isochronous (SCO) path which v0 does not have.
+constexpr u8 kEvtInterval = 6;
+
+constexpr u32 kEvtRxBufBytes = 260; // HCI event max = 2-byte hdr + 255 params.
+
 struct BtusbState
 {
     bool online;
@@ -51,9 +61,14 @@ struct BtusbState
     u16 acl_in_mps;
     u8 acl_out_ep;
     u16 acl_out_mps;
-    u8 event_in_ep; // located, not drained in v0 (GAP)
+    u8 event_in_ep;
+    u16 event_in_mps;
+    u32 diag_slot;
+    bool diag_slot_valid;
     mm::PhysAddr rx_buf_phys;
     u8* rx_buf_virt;
+    mm::PhysAddr evt_buf_phys;
+    u8* evt_buf_virt;
     BtusbStats stats;
 };
 
@@ -73,15 +88,17 @@ bool AclAcceptLen(u32 got)
 // path) were found. The interrupt-IN (events) endpoint is recorded
 // when present but is not required by v0 (see GAP). Bounds-checked
 // against `len`; a malformed descriptor yields false.
-bool ClassifyEndpoints(const u8* cfg, u32 len, u8* acl_in, u16* acl_in_mps, u8* acl_out, u16* acl_out_mps, u8* event_in)
+bool ClassifyEndpoints(const u8* cfg, u32 len, u8* acl_in, u16* acl_in_mps, u8* acl_out, u16* acl_out_mps, u8* event_in,
+                       u16* event_in_mps)
 {
-    if (cfg == nullptr || acl_in == nullptr || acl_out == nullptr || event_in == nullptr)
+    if (cfg == nullptr || acl_in == nullptr || acl_out == nullptr || event_in == nullptr || event_in_mps == nullptr)
         return false;
     *acl_in = 0;
     *acl_out = 0;
     *event_in = 0;
     *acl_in_mps = 0;
     *acl_out_mps = 0;
+    *event_in_mps = 0;
 
     bool in_bt_iface = false;
     bool got_in = false;
@@ -125,7 +142,10 @@ bool ClassifyEndpoints(const u8* cfg, u32 len, u8* acl_in, u16* acl_in_mps, u8* 
                 break;
             case kEpXferInterrupt:
                 if (is_in)
+                {
                     *event_in = ep_addr;
+                    *event_in_mps = mps;
+                }
                 break;
             default:
                 break;
@@ -144,6 +164,81 @@ bool SendHciCommand(u8 slot_id, const u8* cmd, u16 cmd_len)
     if (ok)
         ++g_state.stats.hci_cmds_sent;
     return ok;
+}
+
+// Parse + act on one HCI event packet from the interrupt-IN
+// endpoint. Records it in the diag ring, stamps the adapter on the
+// identity bring-up responses, and tears down a HID connection on
+// Disconnection_Complete. Pure w.r.t. btusb state (only touches the
+// kernel-owned diag + HID tables) so the self-test can drive it
+// with canned event bytes.
+void ProcessHciEvent(const u8* buf, u32 len)
+{
+    using namespace duetos::net::bluetooth;
+    HciEventHeader hdr;
+    if (!HciParseEventHeader(buf, len, &hdr))
+        return;
+
+    if (g_state.diag_slot_valid)
+        BluetoothDiagRecordEvent(g_state.diag_slot, hdr);
+
+    if (hdr.event_code == kEvtCommandComplete)
+    {
+        HciCommandComplete cc;
+        if (!HciParseCommandComplete(buf, len, &cc) || cc.return_parameters == nullptr)
+            return;
+        if (!g_state.diag_slot_valid)
+            return;
+        if (cc.command_opcode == HciOpcode(kOgfInformational, kOcfReadLocalVersion))
+        {
+            HciReadLocalVersion v;
+            if (HciParseReadLocalVersion(cc.return_parameters, cc.return_parameters_size, &v) && v.status == 0)
+                BluetoothDiagStampLocalVersion(g_state.diag_slot, v);
+        }
+        else if (cc.command_opcode == HciOpcode(kOgfInformational, kOcfReadBdAddr))
+        {
+            HciReadBdAddr a;
+            if (HciParseReadBdAddr(cc.return_parameters, cc.return_parameters_size, &a) && a.status == 0)
+                BluetoothDiagStampBdAddr(g_state.diag_slot, a);
+        }
+        return;
+    }
+
+    if (hdr.event_code == kEvtDisconnectionComplete)
+    {
+        // §7.7.5: [0]=status, [1..2]=connection_handle LE, [3]=reason.
+        if (hdr.parameter_total_length >= 3 && hdr.parameters != nullptr)
+        {
+            const u16 handle = u16(u16(hdr.parameters[1]) | (u16(hdr.parameters[2]) << 8));
+            BtHidUnregister(handle);
+        }
+    }
+}
+
+// HCI event pump: drain the interrupt-IN endpoint and feed each
+// event through ProcessHciEvent.
+void EvtRxEntry(void*)
+{
+    for (;;)
+    {
+        const u64 trb =
+            xhci::XhciInterruptInSubmit(g_state.slot_id, g_state.event_in_ep, g_state.evt_buf_phys, kEvtRxBufBytes);
+        if (trb == 0)
+        {
+            duetos::sched::SchedSleepTicks(10);
+            continue;
+        }
+        u32 got = 0;
+        if (xhci::XhciInterruptInPoll(g_state.slot_id, g_state.event_in_ep, trb, &got, /*timeout_us=*/100000))
+        {
+            if (got >= 2)
+                ProcessHciEvent(g_state.evt_buf_virt, got);
+        }
+        else
+        {
+            duetos::sched::SchedSleepTicks(1);
+        }
+    }
 }
 
 // Real, wired keyboard data path: drain bulk-IN ACL packets and
@@ -212,8 +307,9 @@ bool BringUp(u8 slot_id)
     }
 
     u8 acl_in = 0, acl_out = 0, evt_in = 0;
-    u16 acl_in_mps = 0, acl_out_mps = 0;
-    const bool classified = ClassifyEndpoints(cfg, total, &acl_in, &acl_in_mps, &acl_out, &acl_out_mps, &evt_in);
+    u16 acl_in_mps = 0, acl_out_mps = 0, evt_in_mps = 0;
+    const bool classified =
+        ClassifyEndpoints(cfg, total, &acl_in, &acl_in_mps, &acl_out, &acl_out_mps, &evt_in, &evt_in_mps);
     const u8 config_value = cfg[5];
     mm::FreeFrame(cfg_phys);
     if (!classified)
@@ -238,12 +334,41 @@ bool BringUp(u8 slot_id)
     g_state.acl_out_ep = acl_out;
     g_state.acl_out_mps = acl_out_mps;
     g_state.event_in_ep = evt_in;
+    g_state.event_in_mps = evt_in_mps;
 
-    // HCI identity bring-up. Responses arrive on the event
-    // interrupt-IN endpoint, which v0 does not drain (GAP) — we
-    // send the commands so a real chip is reset + queried, and the
-    // (future) event-endpoint slice will read the answers and stamp
-    // diag. Build via the shared HCI encoder.
+    // Register a diag adapter so the `bt` shell command shows the
+    // controller and the event pump has a slot to stamp/record into.
+    {
+        auto reg =
+            duetos::net::bluetooth::BluetoothDiagRegisterAdapter(duetos::net::bluetooth::BluetoothTransport::Usb);
+        if (reg.has_value())
+        {
+            g_state.diag_slot = reg.value();
+            g_state.diag_slot_valid = true;
+            duetos::net::bluetooth::BluetoothDiagSetName(g_state.diag_slot, "btusb");
+        }
+    }
+
+    // Configure + drain the HCI event interrupt-IN endpoint if the
+    // device exposes one (it is mandatory per the BT USB transport
+    // spec; a device without it can still pump ACL but won't report
+    // bring-up responses).
+    bool evt_ok = false;
+    if (evt_in != 0 && evt_in_mps != 0 &&
+        xhci::XhciConfigureInterruptInEndpoint(slot_id, evt_in, evt_in_mps, kEvtInterval))
+    {
+        g_state.evt_buf_phys = mm::AllocateFrame();
+        if (g_state.evt_buf_phys != mm::kNullFrame)
+        {
+            g_state.evt_buf_virt = static_cast<u8*>(mm::PhysToVirt(g_state.evt_buf_phys));
+            evt_ok = true;
+        }
+    }
+
+    // HCI identity bring-up. With the event endpoint drained, the
+    // EvtRxEntry pump reads the Command_Complete answers and stamps
+    // the diag adapter (version + BD_ADDR). Build via the shared
+    // HCI encoder.
     u8 cmd[8];
     u32 n = duetos::net::bluetooth::HciBuildCmdReset(cmd, sizeof(cmd));
     if (n != 0)
@@ -264,8 +389,10 @@ bool BringUp(u8 slot_id)
     g_state.stats.acl_out_ep = acl_out;
     g_state.stats.event_in_ep = evt_in;
 
+    if (evt_ok)
+        duetos::sched::SchedCreate(EvtRxEntry, nullptr, "btusb-evt-rx");
     duetos::sched::SchedCreate(AclRxEntry, nullptr, "btusb-acl-rx");
-    KLOG_INFO("drivers/usb/btusb", "online — ACL RX pump started");
+    KLOG_INFO("drivers/usb/btusb", "online — ACL + event RX pumps started");
     return true;
 }
 
@@ -354,11 +481,11 @@ void BtusbSelfTest()
                       7, kDescTypeEndpoint, 0x82, kEpXferBulk, 64, 0, 0};
 
     u8 ai = 0, ao = 0, ei = 0;
-    u16 aimps = 0, aomps = 0;
-    Expect(ClassifyEndpoints(cfg, sizeof(cfg), &ai, &aimps, &ao, &aomps, &ei), "classify ok");
+    u16 aimps = 0, aomps = 0, eimps = 0;
+    Expect(ClassifyEndpoints(cfg, sizeof(cfg), &ai, &aimps, &ao, &aomps, &ei, &eimps), "classify ok");
     Expect(ai == 0x82 && aimps == 64, "acl-in ep + mps");
     Expect(ao == 0x02 && aomps == 64, "acl-out ep + mps");
-    Expect(ei == 0x81, "event-in ep located");
+    Expect(ei == 0x81 && eimps == 16, "event-in ep + mps located");
 
     // Endpoints outside a Bluetooth interface must be ignored.
     const u8 not_bt[] = {9,
@@ -386,7 +513,7 @@ void BtusbSelfTest()
                          64,
                          0,
                          0};
-    Expect(!ClassifyEndpoints(not_bt, sizeof(not_bt), &ai, &aimps, &ao, &aomps, &ei), "non-BT iface ignored");
+    Expect(!ClassifyEndpoints(not_bt, sizeof(not_bt), &ai, &aimps, &ao, &aomps, &ei, &eimps), "non-BT iface ignored");
 
     // Missing the bulk pair (only interrupt-IN) → not usable.
     const u8 no_bulk[] = {9,
@@ -414,15 +541,98 @@ void BtusbSelfTest()
                           16,
                           0,
                           1};
-    Expect(!ClassifyEndpoints(no_bulk, sizeof(no_bulk), &ai, &aimps, &ao, &aomps, &ei), "no bulk pair rejected");
+    Expect(!ClassifyEndpoints(no_bulk, sizeof(no_bulk), &ai, &aimps, &ao, &aomps, &ei, &eimps),
+           "no bulk pair rejected");
 
     // Malformed: a zero-length descriptor mid-stream must bail
     // without running off the buffer.
     const u8 bad[] = {9, kDescTypeConfig, 12, 0, 1, 1, 0, 0xC0, 50, 0 /*bLength=0*/, 0, 0};
-    Expect(!ClassifyEndpoints(bad, sizeof(bad), &ai, &aimps, &ao, &aomps, &ei), "malformed descriptor safe");
+    Expect(!ClassifyEndpoints(bad, sizeof(bad), &ai, &aimps, &ao, &aomps, &ei, &eimps), "malformed descriptor safe");
 
     // Null-arg guard.
-    Expect(!ClassifyEndpoints(nullptr, 0, &ai, &aimps, &ao, &aomps, &ei), "null cfg rejected");
+    Expect(!ClassifyEndpoints(nullptr, 0, &ai, &aimps, &ao, &aomps, &ei, &eimps), "null cfg rejected");
+
+    // ---- HCI event processing (interrupt-IN path). -------------
+    // ProcessHciEvent drives the kernel-owned diag + HID tables, so
+    // we can assert it end-to-end. Register a scratch diag adapter,
+    // point g_state at it, feed canned events, check the effects,
+    // then restore production state.
+    {
+        using namespace duetos::net::bluetooth;
+        auto reg = BluetoothDiagRegisterAdapter(BluetoothTransport::Loopback);
+        Expect(reg.has_value(), "diag adapter registered for test");
+        const u32 slot = reg.value();
+        const bool saved_valid = g_state.diag_slot_valid;
+        const u32 saved_slot = g_state.diag_slot;
+        g_state.diag_slot = slot;
+        g_state.diag_slot_valid = true;
+
+        auto wle = [](u8* d, u16 v)
+        {
+            d[0] = u8(v & 0xFF);
+            d[1] = u8(v >> 8);
+        };
+
+        // Command_Complete(Read_BD_ADDR): status + 6-byte addr.
+        {
+            const u16 op = HciOpcode(kOgfInformational, kOcfReadBdAddr);
+            u8 e[2 + 3 + 7];
+            e[0] = kEvtCommandComplete;
+            e[1] = 3 + 7;
+            e[2] = 1;
+            wle(e + 3, op);
+            e[5] = 0x00; // status
+            e[6] = 0x66;
+            e[7] = 0x55;
+            e[8] = 0x44;
+            e[9] = 0x33;
+            e[10] = 0x22;
+            e[11] = 0x11;
+            ProcessHciEvent(e, sizeof(e));
+            const auto& a = BluetoothDiagAdapter(slot);
+            Expect(a.bd_addr_valid, "BD_ADDR stamped from event");
+            Expect(a.bd_addr[0] == 0x66 && a.bd_addr[5] == 0x11, "BD_ADDR bytes");
+            Expect(a.events_seen >= 1, "event recorded in diag ring");
+        }
+
+        // Command_Complete(Read_Local_Version): 9-byte rparams.
+        {
+            const u16 op = HciOpcode(kOgfInformational, kOcfReadLocalVersion);
+            u8 e[2 + 3 + 9];
+            e[0] = kEvtCommandComplete;
+            e[1] = 3 + 9;
+            e[2] = 1;
+            wle(e + 3, op);
+            const u8 rp[9] = {0x00, 0x0C, 0x34, 0x12, 0x0C, 0x0F, 0x00, 0x16, 0x61};
+            for (u32 i = 0; i < 9; ++i)
+                e[5 + i] = rp[i];
+            ProcessHciEvent(e, sizeof(e));
+            const auto& a = BluetoothDiagAdapter(slot);
+            Expect(a.hci_version == 0x0C, "HCI version stamped");
+            Expect(a.manufacturer_id == 0x000F, "manufacturer stamped");
+        }
+
+        // Disconnection_Complete tears down the matching HID
+        // connection.
+        {
+            BtHidInit();
+            Expect(BtHidRegisterLeKeyboard(0x0040, 0x002A).has_value(), "register LE kbd for disc test");
+            Expect(BtHidConnectionCount() == 1, "one connection before disconnect");
+            u8 e[6];
+            e[0] = kEvtDisconnectionComplete;
+            e[1] = 4;
+            e[2] = 0x00; // status
+            wle(e + 3, 0x0040);
+            e[5] = 0x13; // reason: remote terminated
+            ProcessHciEvent(e, sizeof(e));
+            Expect(BtHidConnectionCount() == 0, "connection torn down on disconnect");
+        }
+
+        // Restore production state.
+        BluetoothDiagUnregisterAdapter(slot);
+        g_state.diag_slot_valid = saved_valid;
+        g_state.diag_slot = saved_slot;
+    }
 
     arch::SerialWrite("[btusb] selftest pass\n");
 }
