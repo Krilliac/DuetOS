@@ -5644,10 +5644,34 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             }
             if (release_edge && drag.active)
             {
-                SerialWrite("[ui] drag end window=");
+                // Aero-style edge snap: dropping a dragged window
+                // against a screen edge snaps it (top = maximize,
+                // left/right = half). The snap APIs were already
+                // keyboard-wired; the mouse drag-to-edge gesture —
+                // what most users actually reach for — was the dead
+                // zone. Compositor lock is held here (loop acquires
+                // it at the top), so call the snap ops directly.
+                const auto fb_snap = duetos::drivers::video::FramebufferGet();
+                constexpr duetos::u32 kSnapEdge = 12;
+                bool snapped = true;
+                if (cy <= kSnapEdge)
+                    duetos::drivers::video::WindowMaximize(drag.window);
+                else if (cx <= kSnapEdge)
+                    duetos::drivers::video::WindowSnapLeft(drag.window);
+                else if (fb_snap.width > kSnapEdge && cx >= fb_snap.width - kSnapEdge)
+                    duetos::drivers::video::WindowSnapRight(drag.window);
+                else
+                    snapped = false;
+                SerialWrite(snapped ? "[ui] drag end (edge snap) window=" : "[ui] drag end window=");
                 SerialWriteHex(drag.window);
                 SerialWrite("\n");
                 drag.active = false;
+                if (snapped)
+                {
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
+                }
             }
             if (release_edge && sb_drag.active)
             {
