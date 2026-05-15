@@ -9069,3 +9069,66 @@ a real C++ caller now goes through its FFI.
 - **Related roadmap track(s):** Tier-1/2 follow-ups — IOCP
   primitive consolidation + blocking wait. Blocking wait
   graduates; consolidation + `SYS_IOCP_POST` remain.
+
+## 2026-05-15 — Bluetooth keyboard input: transport + the SMP/GATT frontier
+
+The Bluetooth HID keyboard path landed in three slices: the
+upper stack (`net/bluetooth/hid.{h,cpp}` — ACL reassembly,
+L2CAP, ATT-HOGP / classic HIDP) feeding the shared input-layer
+boot-keyboard decoder (`drivers/input/hid_keyboard.{h,cpp}`,
+also used by USB HID); the btusb USB transport driver
+(`drivers/usb/btusb.{h,cpp}`); and the HCI event interrupt-IN
+endpoint.
+
+- **Shared decoder, not duplicated.** The 8-byte boot-keyboard
+  report → KeyEvent logic was extracted out of the xHCI TU into
+  the input layer so USB HID and Bluetooth HID share one
+  usage→KeyEvent table and one inject queue. Duplicating the
+  256-entry table into `net/bluetooth` (or coupling it to
+  `drivers/usb/xhci` internals) was rejected — that is the
+  "sentinel divergence" class-of-bug the anti-bloat rules warn
+  about.
+- **Additive interrupt-IN xHCI primitive, not a generalized
+  bulk path.** btusb needs three endpoints (ACL bulk-IN/OUT +
+  HCI-event interrupt-IN). `DeviceState` only had one bulk-IN
+  slot, so the event endpoint needed its own ring. Generalizing
+  the existing `XhciConfigureBulkEndpoint`/`XhciBulkSubmit`/
+  `XhciBulkPoll` to be endpoint-type-agnostic would have touched
+  the code paths cdc-ecm / rndis / the HID poll task depend on.
+  Instead the interrupt-IN path is **purely additive**:
+  independent `evt_in_*` `DeviceState` fields + three new
+  `XhciInterruptIn*` functions that reuse the already
+  periodic-correct context builder and the same shared
+  transfer-event cache the bulk path uses. Zero existing
+  field/function changed; regression surface for the working
+  USB-net + HID paths is nil.
+- **Not auto-probed at boot.** Like `CdcEcmProbe`, `BtusbProbe`
+  is invoked on demand (`bt probe` shell command), not at boot:
+  auto-probing races the shared xHCI event-ring consumer with
+  `HidPollEntry` and regresses the e1000 DHCP path until the
+  TRB-dispatch slice lands. This reuses the existing documented
+  decision rather than inventing a second probe-timing model.
+- **Deliberate stop at the connection-manager frontier.** btusb
+  brings the controller up, pumps ACL into the HID stack, and
+  processes HCI events (diag stamping, Disconnection_Complete →
+  `BtHidUnregister`). It does **not** drive LE scan/connect,
+  **SMP pairing/bonding**, or GATT (HOGP) service discovery.
+  That is a deliberate boundary, not an omission: the project
+  has a standing decision to defer the Security Manager Protocol
+  ("No pairing / SMP"), and a GATT client + SMP + L2CAP
+  signalling is a multi-slice, security-critical effort that is
+  not provable on a host with no Bluetooth radio. The next slice
+  that picks up "a real BT keyboard associates on its own" must
+  start from this boundary and is gated on the SMP decision
+  being revisited.
+- **Validation model.** No Bluetooth radio exists on the dev/CI
+  host and a full bond+connect is unprovable there, so — exactly
+  like the HCI codec and diag layer before it — every layer is
+  proven by boot self-tests driving synthetic packets end-to-end
+  (`[hid-kbd]` / `[bt-hid]` / `[btusb]` selftest pass), asserting
+  the decode/dispatch boundary rather than faking hardware.
+- **Related roadmap track(s):** Bluetooth. Keyboard transport +
+  upper stack + event endpoint graduate; connection manager
+  (LE scan/connect), SMP pairing, GATT-HOGP discovery, and the
+  general L2CAP-signalling / RFCOMM / SDP layers for non-keyboard
+  profiles remain open and SMP-gated.

@@ -1,10 +1,12 @@
 /*
- * DuetOS — xHCI driver: public transfer surface (control + bulk).
+ * DuetOS — xHCI driver: public transfer surface (control + bulk
+ * + interrupt-IN).
  *
  * Sibling TU. Houses the public Xhci* surface that USB class
- * drivers (HID keyboard, MSC SCSI, CDC-ECM, RTL88xx, RNDIS) call
- * to issue control transfers on EP0 and bulk IN/OUT transfers on
- * configured class endpoints. Plus the three small accessor
+ * drivers (HID keyboard, MSC SCSI, CDC-ECM, RTL88xx, RNDIS, btusb)
+ * call to issue control transfers on EP0, bulk IN/OUT transfers,
+ * and interrupt-IN transfers on configured class endpoints. Plus
+ * the three small accessor
  * helpers — DeviceForSlot, EndpointDci, HidEnqueueNormalTrb — that
  * cross both this TU and xhci.cpp via xhci_internal.h.
  *
@@ -321,6 +323,139 @@ bool XhciBulkPoll(u8 slot_id, u8 ep_addr, u64 trb_phys, u32* out_bytes, u64 time
     }
     KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci", "BulkPoll: timeout, timeout_us", timeout_us);
     core::CleanroomTraceRecord("xhci", "bulk-timeout", trb_phys, timeout_us, 0);
+    return false;
+}
+
+// ---------------------------------------------------------------------
+// Interrupt-IN transfer surface. Structurally identical to the bulk
+// trio (Normal TRBs on a per-endpoint transfer ring drained via the
+// shared transfer-event cache) — the only differences are the EP
+// Type (Interrupt IN vs Bulk IN) and a periodic Interval. Kept as a
+// separate path on independent DeviceState fields so a btusb-style
+// device with bulk-IN + bulk-OUT + interrupt-IN runs all three at
+// once, and so no existing bulk/HID caller is perturbed.
+// ---------------------------------------------------------------------
+
+bool XhciConfigureInterruptInEndpoint(u8 slot_id, u8 ep_addr, u16 max_packet, u8 xhci_interval)
+{
+    KLOG_TRACE_SCOPE("drivers/usb/xhci", "XhciConfigureInterruptInEndpoint");
+    DeviceState* dev = DeviceForSlot(slot_id);
+    if (dev == nullptr || (ep_addr & 0x80) == 0)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci", "ConfigureInterruptIn: bad slot/ep",
+                     static_cast<u64>(ep_addr));
+        return false;
+    }
+    if (dev->evt_in_ready && dev->evt_in_ep_addr == ep_addr)
+        return true;
+
+    mm::PhysAddr ring_phys = 0;
+    void* ring_virt = nullptr;
+    if (!AllocZeroPage(&ring_phys, &ring_virt))
+    {
+        KLOG_ERROR_A(::duetos::core::LogArea::USB, "drivers/usb/xhci", "ConfigureInterruptIn: ring alloc failed");
+        return false;
+    }
+
+    auto* ring = static_cast<Trb*>(ring_virt);
+    const u32 slots = mm::kPageSize / sizeof(Trb);
+    Trb& link = ring[slots - 1];
+    link.param_lo = u32(ring_phys);
+    link.param_hi = u32(ring_phys >> 32);
+    link.status = 0;
+    link.control = (kTrbTypeLink << 10) | (1u << 1) | 1u;
+
+    const u8 dci = EndpointDci(ep_addr);
+    Runtime& rt = g_poll_rt[dev->ctrlr_idx];
+    BuildConfigureEndpointInputContext(dev->input_ctx_virt, rt.ctx_bytes, dev->port_num, dev->speed, dci,
+                                       kEpTypeInterruptIn, max_packet, xhci_interval, ring_phys);
+    const u64 cmd_phys = SubmitCmd(rt, kTrbTypeConfigureEndpoint, u32(dev->input_ctx_phys),
+                                   u32(dev->input_ctx_phys >> 32), 0, u32(slot_id) << 24);
+    if (cmd_phys == 0)
+    {
+        KLOG_ERROR_A(::duetos::core::LogArea::USB, "drivers/usb/xhci", "ConfigureInterruptIn: SubmitCmd returned 0");
+        return false;
+    }
+    u32 cc = 0;
+    u8 sl = 0;
+    if (!WaitCmdCompletion(rt, cmd_phys, &cc, &sl))
+    {
+        KLOG_ERROR_A(::duetos::core::LogArea::USB, "drivers/usb/xhci",
+                     "ConfigureInterruptIn: WaitCmdCompletion timeout");
+        return false;
+    }
+    const u32 code = (cc >> 24) & 0xFF;
+    if (code != kCompletionCodeSuccess)
+    {
+        KLOG_ERROR_2V("drivers/usb/xhci", "ConfigureInterruptIn: HW rejected", "code", static_cast<u64>(code), "slot",
+                      static_cast<u64>(slot_id));
+        return false;
+    }
+
+    dev->evt_in_ep_addr = ep_addr;
+    dev->evt_in_dci = dci;
+    dev->evt_in_mps = max_packet;
+    dev->evt_in_ring_phys = ring_phys;
+    dev->evt_in_ring = ring;
+    dev->evt_in_ring_slots = slots;
+    dev->evt_in_ring_idx = 0;
+    dev->evt_in_ring_cycle = 1;
+    dev->evt_in_ready = true;
+    return true;
+}
+
+u64 XhciInterruptInSubmit(u8 slot_id, u8 ep_addr, u64 buf_phys, u32 len)
+{
+    DeviceState* dev = DeviceForSlot(slot_id);
+    if (dev == nullptr || !dev->evt_in_ready || ep_addr != dev->evt_in_ep_addr)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::USB, "drivers/usb/xhci", "InterruptInSubmit: endpoint not configured",
+                     static_cast<u64>(ep_addr));
+        return 0;
+    }
+    Runtime& rt = g_poll_rt[dev->ctrlr_idx];
+    const u64 trb_phys =
+        EnqueueRingTrb(dev->evt_in_ring, dev->evt_in_ring_phys, dev->evt_in_ring_slots, dev->evt_in_ring_idx,
+                       dev->evt_in_ring_cycle, kTrbTypeNormal, u32(buf_phys), u32(buf_phys >> 32), len, kTrbCtlIoc);
+    RingDoorbell(rt, slot_id, dev->evt_in_dci);
+    return trb_phys;
+}
+
+bool XhciInterruptInPoll(u8 slot_id, u8 ep_addr, u64 trb_phys, u32* out_bytes, u64 timeout_us)
+{
+    DeviceState* dev = DeviceForSlot(slot_id);
+    if (dev == nullptr || trb_phys == 0 || !dev->evt_in_ready || ep_addr != dev->evt_in_ep_addr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::USB, "drivers/usb/xhci", "InterruptInPoll: bad slot/ep/trb");
+        return false;
+    }
+
+    auto compute_bytes = [&](u32 residual) -> u32
+    {
+        u32 trb_idx = 0;
+        const u64 base = dev->evt_in_ring_phys;
+        if (trb_phys >= base && trb_phys < base + dev->evt_in_ring_slots * sizeof(Trb))
+            trb_idx = u32((trb_phys - base) / sizeof(Trb));
+        const u32 trb_len = dev->evt_in_ring[trb_idx].status & 0x0001FFFF;
+        return trb_len > residual ? trb_len - residual : 0;
+    };
+
+    const u64 timeout_ticks = (timeout_us + 9'999) / 10'000;
+    const u64 polls = timeout_ticks == 0 ? 1 : timeout_ticks;
+    for (u64 i = 0; i < polls; ++i)
+    {
+        u32 code = 0;
+        u32 residual = 0;
+        u32 len_unused = 0;
+        if (TrbEventCacheTake(trb_phys, &code, &residual, &len_unused))
+        {
+            if (out_bytes != nullptr)
+                *out_bytes = compute_bytes(residual);
+            return code == kCompletionCodeSuccess || code == 13 /* Short Packet */;
+        }
+        if (timeout_ticks != 0)
+            duetos::sched::SchedSleepTicks(1);
+    }
     return false;
 }
 

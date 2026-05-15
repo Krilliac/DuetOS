@@ -219,4 +219,22 @@ u64 XhciBulkSubmit(u8 slot_id, u8 ep_addr, u64 buf_phys, u32 len);
 /// `timeout_us` is a coarse microsecond budget.
 bool XhciBulkPoll(u8 slot_id, u8 ep_addr, u64 trb_phys, u32* out_bytes, u64 timeout_us);
 
+/// Configure an interrupt-IN endpoint. Independent of the bulk pair
+/// (a device may have bulk-IN + bulk-OUT + a separate interrupt-IN,
+/// e.g. a USB Bluetooth controller: ACL on bulk, HCI events on
+/// interrupt-IN). `xhci_interval` is the xHCI Interval encoding
+/// (period = 2^N × 125 µs). Idempotent per `(slot_id, ep_addr)`.
+/// Returns false on allocation / Configure Endpoint failure.
+bool XhciConfigureInterruptInEndpoint(u8 slot_id, u8 ep_addr, u16 max_packet, u8 xhci_interval);
+
+/// Submit one Normal TRB on the configured interrupt-IN ring for
+/// `(slot_id, ep_addr)` and ring the doorbell. Returns the TRB
+/// physical address for XhciInterruptInPoll, or 0 on error.
+u64 XhciInterruptInSubmit(u8 slot_id, u8 ep_addr, u64 buf_phys, u32 len);
+
+/// Poll for the Transfer Event completing `trb_phys` on the
+/// interrupt-IN endpoint. Same contract as XhciBulkPoll (uses the
+/// same shared transfer-event cache HidPollEntry feeds).
+bool XhciInterruptInPoll(u8 slot_id, u8 ep_addr, u64 trb_phys, u32* out_bytes, u64 timeout_us);
+
 } // namespace duetos::drivers::usb::xhci

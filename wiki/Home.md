@@ -84,18 +84,18 @@ DuetOS is licensed under the terms in [`LICENSE`](../LICENSE).
 <!-- AUTO:stats -->
 | Metric | Count |
 |--------|-------|
-| Header files | 400 |
-| Source files | 728 |
+| Header files | 403 |
+| Source files | 731 |
 | Syscalls (numbered) | 168 |
 | Capability bits | 13 |
 | Kernel drivers | 11 |
 | Userland DLLs | 59 |
 | DLL exports (approx) | 0 |
 | Test files | 20 |
-| STUB markers | 32 |
-| GAP markers | 53 |
-| Wiki pages | 107 |
-| *Last synced* | *2026-05-15 06:20* |
+| STUB markers | 33 |
+| GAP markers | 55 |
+| Wiki pages | 108 |
+| *Last synced* | *2026-05-15 13:43* |
 <!-- /AUTO:stats -->
 
 _Run `docs/sync-wiki.sh sync` to refresh this block from the live tree._

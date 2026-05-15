@@ -100,6 +100,7 @@
 #include "drivers/gpu/intel_gpu.h"
 #include "drivers/gpu/intel_gsc_fw.h"
 #include "drivers/gpu/nvidia_gpu.h"
+#include "drivers/input/hid_keyboard.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/net/ath9k_htc.h"
@@ -119,6 +120,7 @@
 #include "net/bluetooth/diag.h"
 #include "net/drsh/drsh.h"
 #include "net/bluetooth/hci.h"
+#include "net/bluetooth/hid.h"
 #include "net/wireless/beacon.h"
 #include "net/wireless/inventory.h"
 #include "crypto/aes.h"
@@ -144,6 +146,7 @@
 #include "drivers/pci/pci.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/power/power.h"
+#include "drivers/usb/btusb.h"
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/hid_descriptor.h"
 #include "drivers/usb/usb_class_desc.h"
@@ -2612,6 +2615,8 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::HciSelfTest());
     duetos::net::bluetooth::BluetoothDiagInit();
     DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::BluetoothDiagSelfTest());
+    duetos::net::bluetooth::BtHidInit();
+    DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::BtHidSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::UnicodeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::BmpSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::TgaSelfTest());
@@ -2698,7 +2703,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // that dispatches events by TRB so class drivers don't race
     // with each other or the HID polling path.
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::hid::HidSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::input::HidKeyboardSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::UsbClassDescriptorSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::usb::BtusbSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::msc::MscSelfTest());
 
     // ath9k_htc USB Wi-Fi adapters (AR9271 / AR7010 family) are the

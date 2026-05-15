@@ -430,13 +430,32 @@ In rough priority:
 
 ### Bluetooth, Printer, Webcam
 
-- **Bluetooth:** HCI host-controller driver + L2CAP / RFCOMM /
-  GATT stack. (HCI command/event packet parser landed in
-  `kernel/net/bluetooth/hci.{h,cpp}` — covers HCI_Reset / Read
-  Local Version / Read BD_ADDR / LE Set Scan Params + Enable on
-  the encode side, Command_Complete / Command_Status / event
-  header on the decode side. Boot self-test asserts every shape.
-  Real bring-up still needs a btusb / btuart transport driver.)
+- **Bluetooth:** btusb / btuart transport driver + general L2CAP
+  signalling / RFCOMM / SDP / full GATT + SMP pairing. (Landed:
+  HCI command/event codec in `kernel/net/bluetooth/hci.{h,cpp}`;
+  and the HID **keyboard** upper stack in
+  `kernel/net/bluetooth/hid.{h,cpp}` — ACL fragment reassembly,
+  L2CAP B-frame decode, BLE HOGP ATT-notification + classic HIDP
+  DATA/Input → the shared input-layer boot-keyboard decoder
+  (`kernel/drivers/input/hid_keyboard.{h,cpp}`, also used by USB
+  HID); the btusb USB transport driver
+  `kernel/drivers/usb/btusb.{h,cpp}` — finds the controller, parses
+  endpoints, configures the bulk + interrupt-IN endpoints, sends
+  HCI bring-up commands over EP0, and runs an ACL RX pump into
+  `BtHidDeliverAcl` plus an HCI-event RX pump (diag stamping,
+  Disconnection_Complete → `BtHidUnregister`); and an additive
+  public xHCI interrupt-IN transfer primitive
+  (`XhciConfigureInterruptInEndpoint` / `XhciInterruptInSubmit` /
+  `XhciInterruptInPoll`) on independent `DeviceState` fields so no
+  bulk/HID caller is perturbed. Invoked via `bt probe` (not
+  auto-claimed — same event-ring race as CdcEcmProbe). Boot
+  self-tests assert every shape end-to-end. **Remaining (SMP-gated
+  frontier):** the connection manager — LE scan/connect, SMP
+  pairing/bonding, GATT-HOGP service discovery — so a real BT
+  keyboard can associate on its own; plus general L2CAP signalling
+  / RFCOMM / SDP for non-keyboard profiles. See
+  [Design-Decisions](Design-Decisions.md) for why this is a
+  deliberate boundary.)
 - **Printer:** USB printer-class driver + IPP / PostScript /
   raster pipeline.
 - **Webcam:** UVC USB-Video class driver.

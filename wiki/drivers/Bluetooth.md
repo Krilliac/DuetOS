@@ -39,6 +39,8 @@ bytes, not designing a packet format.
 |------|---------|
 | [`hci.h`](../../kernel/net/bluetooth/hci.h) / `.cpp` | HCI packet codec |
 | [`diag.h`](../../kernel/net/bluetooth/diag.h) / `.cpp` | Diagnostic ring — every packet in/out gets a one-liner |
+| [`hid.h`](../../kernel/net/bluetooth/hid.h) / `.cpp` | HID keyboard upper stack — ACL reassembly + L2CAP + ATT-HOGP / HIDP → input queue |
+| [`../../drivers/usb/btusb.h`](../../kernel/drivers/usb/btusb.h) / `.cpp` | USB Bluetooth transport driver — EP0 HCI commands + bulk-IN ACL RX pump |
 | [`../hci_rust/`](../../kernel/net/hci_rust/) | Rust crate for the H4 framing layer (the byte-on-the-wire wrapper) |
 
 ## HCI Packet Codec
@@ -105,6 +107,59 @@ wired) reads from this ring. The ring is sized for a few seconds of
 LE scan traffic; expect older entries to be overwritten on a long
 scan.
 
+## HID Keyboard
+
+[`hid.h`](../../kernel/net/bluetooth/hid.h) is the upper stack that
+turns a Bluetooth keyboard's ACL traffic into kernel key events —
+the layer the HCI codec deferred, scoped to the keyboard workload.
+
+A keystroke's path:
+
+```
+HCI ACL packet  →  BtHidDeliverAcl   (transport driver IRQ ingress)
+  └─ per-connection fragment reassembly (ACL PB flag)
+     └─ L2CAP B-frame  {len, CID, payload}
+        ├─ CID 0x0004  → ATT  : Handle Value Notification → HID report  (BLE HOGP)
+        └─ dynamic CID → HIDP : DATA/Input transaction      → HID report  (classic)
+     └─ 8-byte boot keyboard report (optional Report-ID prefix stripped)
+        └─ drivers::input::HidKeyboardDiffAndInject
+           (the SAME decoder + inject queue USB HID uses)
+```
+
+The connection table is bounded (`kBtHidMaxConnections`) and keyed
+on the 12-bit ACL handle. `BtHidRegisterLeKeyboard` /
+`BtHidRegisterClassicKeyboard` are called when a keyboard
+connection comes up; `BtHidUnregister` on Disconnection_Complete.
+The `bt` shell command lists live HID keyboard connections and
+their report counts.
+
+The whole chain is end-to-end self-tested at boot
+(`[bt-hid] selftest pass`): synthetic ACL packets exercise BLE
+notification, classic HIDP, fragmented L2CAP reassembly, and the
+Report-ID strip; KeyEvents are captured rather than injected so the
+boot input stream stays clean. See
+[Input](Input.md#bluetooth-hid-keyboard) for the consumer side.
+
+**Transport driver.** The btusb USB transport driver
+([`../../kernel/drivers/usb/btusb.{h,cpp}`](../../kernel/drivers/usb/btusb.cpp))
+finds the USB Bluetooth controller, parses its endpoints,
+configures the bulk + interrupt-IN endpoints, registers a diag
+adapter, sends the HCI identity bring-up commands over EP0, and
+runs two RX pumps: bulk-IN → `BtHidDeliverAcl` (the keyboard data
+path) and interrupt-IN → HCI event processing (diag ring +
+adapter stamping from the Command_Complete answers,
+Disconnection_Complete → `BtHidUnregister`). The interrupt-IN
+xHCI primitive is additive — independent `DeviceState` fields +
+functions — so no bulk/HID/EP0 caller is perturbed. Like
+`CdcEcmProbe` it is not auto-claimed at boot (event-ring race;
+see the CdcEcmProbe note in `kernel/core/main.cpp`); invoked on
+demand via the `bt probe` shell command. **The remaining gap is
+the connection manager** — LE scan/connect, SMP pairing, GATT
+(HOGP) discovery — a deliberate SMP-gated frontier (see
+[Known Limits](#known-limits--gaps)). Once a link is up and a
+keyboard registered, the ACL→keystroke path is fully real and
+self-tested.
+
 ## H4 Framing — `hci_rust` Crate
 
 [`kernel/net/hci_rust/`](../../kernel/net/hci_rust/) is a small Rust
@@ -141,15 +196,31 @@ choice is tracked in
 
 ## Known Limits / GAPs
 
-- **No transport.** No USB-Bluetooth HCI driver, no UART, no
-  integrated controller. Until one lands the codec is exercised by
-  unit tests only.
-- **No ACL/SCO data path.** Parse hooks exist but the payload is
-  treated as opaque bytes.
-- **No L2CAP / RFCOMM / GATT.** Once a transport is up these are the
-  next layers; planned via the Linux ABI's BlueZ-compatible surface.
+- **No connection manager (SMP-gated).** The btusb driver
+  ([`../../drivers/usb/btusb.cpp`](../../kernel/drivers/usb/btusb.cpp))
+  brings the controller up, runs a real bulk-IN ACL RX pump, and
+  drains the HCI **event** interrupt-IN endpoint (diag stamping
+  from the Command_Complete bring-up answers,
+  Disconnection_Complete → `BtHidUnregister`). What is *not* done:
+  LE scan/connect, **SMP pairing/bonding**, and GATT (HOGP)
+  service discovery — so a real BT keyboard cannot associate on
+  its own yet. This is a deliberate frontier gated on the
+  project's standing decision to defer SMP (see
+  [Design-Decisions](../reference/Design-Decisions.md)); it is a
+  multi-slice, security-critical effort unprovable on a host with
+  no radio. No UART/SDIO transport. On a host with no BT hardware
+  the driver no-ops; every layer is boot self-tested.
+- **ACL data path: keyboard only.** [`hid.h`](../../kernel/net/bluetooth/hid.h)
+  reassembles ACL fragments and decodes L2CAP B-frames for the HID
+  keyboard path. No SCO (voice) path; no other ACL consumer.
+- **L2CAP / GATT: HID slice only.** L2CAP B-frame decode + ATT
+  Handle Value Notification (BLE HOGP) + classic HIDP DATA/Input
+  are implemented for keyboards. No L2CAP signalling channel, no
+  GATT service discovery (the report handle is supplied at
+  connection setup), no RFCOMM, no SDP.
 - **No pairing / SMP.** The Security Manager Protocol is not yet
-  modelled.
+  modelled — a production keyboard bonds first; the HID path
+  decodes the post-connection report stream and trusts the link.
 - **Vendor-specific opcodes** (Broadcom, Intel) deferred — the codec
   doesn't pretend to know vendor-specific TLVs.
 - **LE Extended Advertising** (5.x): plan-of-record, but the v0 codec
