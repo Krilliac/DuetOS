@@ -250,8 +250,26 @@ void RunVendorProbe(GpuInfo& g)
         break;
     }
     case kVendorAmd:
+    {
         amd::Probe(g);
+        // Same pattern as Intel: Probe is pure observation, Bringup
+        // programs the CP_RB0 register file. We only attempt
+        // bring-up when probe came back live; on QEMU's emulated
+        // displays the vendor never matches AMD so the case never
+        // enters and AmdCpRingSelfTest emits the structural
+        // "no AMD device — skipped" sentinel for CI.
+        if (g.mmio_live)
+        {
+            auto br = amd::Bringup(g);
+            if (!br.has_value() && br.error() != ::duetos::core::ErrorCode::AlreadyExists)
+            {
+                // Bringup logged its own WARN + probe; don't
+                // duplicate the diagnostic here.
+                (void)br;
+            }
+        }
         break;
+    }
     default:
         break;
     }

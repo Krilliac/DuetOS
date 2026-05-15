@@ -5,9 +5,10 @@
 > **Execution context:** Kernel — IRQ + process; pixel ops in compositor pass
 >
 > **Maturity:** virtio-gpu v0 scanout; Intel Render Command Streamer
-> ring bring-up wired (MI_NOOP submission proven, AMD/NVIDIA still
-> discovery-only); Vulkan ICD v0 (CPU-side lifecycle, command tape
-> replay, scanout-backed clears)
+> ring bring-up wired (MI_NOOP submission proven); AMD CP_RB0
+> register file programmed + read-back verified (firmware push is
+> the next gate); NVIDIA still discovery-only; Vulkan ICD v0
+> (CPU-side lifecycle, command tape replay, scanout-backed clears)
 
 ## Overview
 
@@ -76,9 +77,27 @@ Each tier-1 vendor now has a dedicated driver TU under
   `no Intel device — skipped` — that CI greps for. QEMU's
   emulated `-vga std` / `-vga virtio` boots take the "skipped"
   path (vendor IDs 0x1234 / 0x1AF4, not Intel's 0x8086).
-- `amd_gpu.{h,cpp}` — GFX9+ scaffold; opportunistically maps BAR5
-  (the register file lives there, not at BAR0 like Intel) and
-  reads `mmGRBM_STATUS` / `mmRLC_GPM_STAT`.
+- `amd_gpu.{h,cpp}` — GFX9+ driver that opportunistically maps
+  BAR5 (the register file lives there, not at BAR0 like Intel),
+  reads `mmGRBM_STATUS` / `mmRLC_GPM_STAT`, probes the
+  firmware-loader for the six standard AMD GFX microcode blobs
+  (`gfx_pfp.bin` / `gfx_me.bin` / `gfx_ce.bin` / `gfx_mec.bin` /
+  `gfx_rlc.bin` / `sdma.bin` under the open-firmware path
+  policy), and on `Bringup` allocates a 4 KiB DMA-coherent CP
+  ring buffer (Zone::Dma32) + programs `mmCP_RB0_BASE` /
+  `mmCP_RB0_BASE_HI` / `mmCP_RB0_CNTL` (encoded as
+  `log2(ring_dwords)-1` | `block-size` | `RPTR_WR_ENA`). Each
+  register is read back; a readback mismatch fires
+  `kGpuRingBringupFail` (carrying a packed which-register-
+  mismatched bitmap as `value`), drops a `KLOG_WARN`, frees the
+  buffer, and disables the ring. On success the ring buffer is
+  retained for the lifetime of the boot but the CP itself stays
+  inert — without a MEC/PFP/ME firmware push the engine can't
+  fetch a single PM4 packet. `AmdCpRingSelfTest` hooked to
+  `DUETOS_BOOT_SELFTEST` emits the structural sentinel CI greps
+  for — `selftest PASS (registers programmed, firmware-pending)`,
+  `selftest FAIL`, or `no AMD device — skipped`. QEMU's emulated
+  `-vga std` / `-vga virtio` boots take the "skipped" path.
 - `nvidia_gpu.{h,cpp}` — Turing+ scaffold; reads `PMC_BOOT_0`,
   `PMC_INTR_EN_0`, `PFIFO_INTR`, and `PFB_PRI_RD` for diagnostics.
 
@@ -87,13 +106,18 @@ Each driver exposes:
 - `Probe(GpuInfo&)` — pure observation: register reads stored in
   the per-controller `GpuInfo` record. Called by
   `gpu::RunVendorProbe` after BAR0 is mapped.
-- `Bringup(GpuInfo&)` — allocates a 4 KiB DMA-coherent ring/
-  pushbuffer and, for Intel, actually programs the Render
-  Command Streamer + walks `MI_NOOP`s through it (see the
-  `intel_gpu` bullet above). AMD's and NVIDIA's `Bringup` still
-  log the would-be ring program, free the buffer, and return
-  `Unsupported`; their per-vendor firmware loaders (AMD MEC/RLC,
-  NVIDIA GSP) are the next gate to flip.
+- `Bringup(GpuInfo&)` — vendor-specific:
+  * **Intel** walks `MI_NOOP`s through the Render Command Streamer
+    and waits for HEAD to catch TAIL (the engine executes natively
+    without firmware — see the `intel_gpu` bullet above).
+  * **AMD** programs `CP_RB0_BASE` / `_BASE_HI` / `_CNTL` and
+    read-back-verifies the writes (see the `amd_gpu` bullet
+    above). The CP itself stays inert until microcode is pushed;
+    submission-style verification needs the MEC/PFP/ME firmware
+    loader, which is the next gate.
+  * **NVIDIA** still logs the would-be ring program, frees the
+    buffer, and returns `Unsupported` — Turing+ GSP push is a
+    multi-week effort that has not started.
 - `IsBroughtUp()` — diagnostic accessor.
 
 `gpu.cpp` no longer hosts vendor-specific register pokes; it
@@ -438,11 +462,22 @@ recompose. Four themes ship:
   devices report vendor IDs 0x1234 / 0x1AF4 and the
   `IntelRcsRingSelfTest` emits the structural "no Intel device
   — skipped" sentinel.
-- **AMD / NVIDIA still discovery-only.** Both vendors classify
-  the device, map the register file, log identifying dwords,
-  and stop. AMD needs MEC/RLC firmware ordering + PM4 packet
-  encoding; NVIDIA Turing+ needs GSP firmware + RPC channel
-  before a PFIFO channel can come online.
+- **AMD CP ring is register-programmed, not executing.** GFX9+
+  hardware has `mmCP_RB0_BASE` / `_BASE_HI` / `_CNTL` programmed
+  and read-back verified, so the kernel knows it can talk to the
+  CP register file. But the Command Processor can't execute a
+  single PM4 packet without microcode pushed (`gfx_pfp.bin` /
+  `gfx_me.bin` / `gfx_ce.bin` for the GFX pipeline, plus
+  `gfx_mec.bin` for compute and `gfx_rlc.bin` for power
+  management). The firmware-loader probe in `amd::Probe` logs
+  which blobs an operator has dropped in; an actual MEC/PFP/ME
+  push is the next gate. Until that lands, RPTR stays at 0 on
+  every boot — that's expected behaviour, not a bug.
+- **NVIDIA still discovery-only.** Turing+ classifies the device,
+  reads `PMC_BOOT_0` / `PMC_INTR_EN_0` / `PFIFO_INTR` /
+  `PFB_PRI_RD`, and stops. GSP firmware is mandatory on Turing+
+  and the RPC channel has no public docs — that's the multi-week
+  effort that has not started.
 - **No GPU command queue exposed to userland.** Submission is
   kernel-side direct register writes (virtio-gpu's tiny command
   set; Intel's NOOP submitter). The Vulkan ICD is still CPU-only
