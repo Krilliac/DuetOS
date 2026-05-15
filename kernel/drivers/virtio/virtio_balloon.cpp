@@ -1,6 +1,7 @@
 #include "drivers/virtio/virtio.h"
 #include "drivers/virtio/virtio_pci.h"
 
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 
 /*
@@ -105,6 +106,7 @@ bool VirtioBalloonProbe(const VirtioPciLayout& L)
     // request, allocates pages and writes their PFNs into
     // inflateq descriptors. The policy ("when do we agree?")
     // lands with a real hypervisor workload.
+    FIX_NOTE_GAP("drivers/virtio/virtio_balloon.cpp:InflateHandler", "wire inflate/deflate PFN dispatch + policy");
     return true;
 }
 

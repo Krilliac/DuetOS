@@ -70,6 +70,33 @@ DETECTORS = {
     6: "loader_reject",
 }
 
+
+def is_selftest_record(source_pin: str) -> bool:
+    """True for the synthetic records `FixJournalSelfTest()` injects to
+    validate the journal mechanism (one per detector + an auto-pin
+    probe). These are NOT real gaps: their pins (`selftest/stub.cpp:1`,
+    `selftest!ThunkSelftest`, `selftest/syscall#999`, …, and the
+    auto-derived `…FixJournalSelfTest()+0xNN`) point at no real source.
+    Treating them as gaps produces actively harmful candidate patches —
+    e.g. a thunk-table row for a fake `selftest.dll` that, if applied
+    in CI, corrupts the Win32 ABI table. They are filtered before any
+    action is planned. See `kernel/diag/fix_journal.cpp`
+    `FixJournalSelfTest()` for the injected pin set.
+    """
+    p = source_pin.strip()
+    # `selftest` followed by a path/dll/syscall/domain separator is
+    # the synthetic shape: `selftest/stub.cpp:1`, `selftest!Thunk…`,
+    # `selftest/syscall#999`, and `selftest.fault-react` (the
+    # FaultReactSelfTest domain). No real source pin starts that way
+    # (real pins are `kernel/...`, `drivers/...`, `dll!Fn`, …). The
+    # auto-pinned probe record carries the function name instead.
+    return (
+        p == "selftest"
+        or bool(re.match(r"selftest[/!.#:\s]", p))
+        or "FixJournalSelfTest" in p
+        or "FaultReactSelfTest" in p
+    )
+
 # FaultKind enum from kernel/diag/fault_react.h. Used by the
 # SoftFaultRecov template to decode `ctx_a` for records that come
 # out of `FaultReactDispatch` (RetryNow / RestartDomain branches).
@@ -619,6 +646,26 @@ _MARKER_SKIP_REASONS = {
     "kernel/mm/dma.cpp:122": (
         "architecture-deferred cache-maintenance marker in a DMA hot path; "
         "recording every sync would add journal lock traffic to normal device I/O"
+    ),
+    "kernel/diag/fault_inject.cpp:57": (
+        "namespace-scope assumption note on a constexpr VA constant, not a "
+        "reachable runtime branch; there is no statement context to instrument"
+    ),
+    "kernel/drivers/virtio/virtio_pci.cpp:238": (
+        "DRIVER_OK on the transport-only negotiate path is correct as written "
+        "(per-device drivers install queues before they need I/O); this is a "
+        "design-boundary note, not a behavioural gap, so a journal record here "
+        "would be permanent false noise on every virtio device probe"
+    ),
+    "kernel/subsystems/translation/translate.cpp:595": (
+        "the GAP annotates the absent NtSetDefaultLocale counterpart, not the "
+        "NtQueryDefaultLocale function it sits in (which is complete); wiring "
+        "the Query path would mis-attribute the gap to the wrong call site"
+    ),
+    "kernel/subsystems/translation/translate.cpp:610": (
+        "the GAP annotates the absent NtSetDefaultUILanguage counterpart, not "
+        "the NtQueryDefaultUILanguage function it sits in (which is complete); "
+        "wiring the Query path would mis-attribute the gap to the wrong call site"
     ),
 }
 
@@ -1329,6 +1376,169 @@ def synth_soft_fault_recov_brief(r: FixRecord, resolver: SymbolResolver | None =
     return Action(kind="note", title=title, body="\n".join(lines), filename=None)
 
 
+# ------------------------------------------------- fault-react probe patch
+
+_FAULT_REACT_CPP = "kernel/diag/fault_react.cpp"
+_PROBES_H = "kernel/debug/probes.h"
+_PROBES_CPP = "kernel/debug/probes.cpp"
+_FR_PROBE_ID = "kFaultReactRecover"
+_FR_PROBE_NAME = "diag.fault_react_recover"
+_PROBES_INCLUDE = '#include "debug/probes.h"\n'
+_FR_RECORD_ANCHOR = "::duetos::diag::FixJournalRecordSev("
+
+
+def _insert_include_sorted(file_rel: str, lines: list[str], include_line: str) -> str:
+    """Insert `include_line` into the quoted-include block in sorted
+    position. `.clang-format` sets `SortIncludes: false`, so this is
+    cosmetic-only — but a sorted insert keeps the emitted patch
+    reviewable. Returns "" if the include is already present.
+    """
+    want = re.search(r'"([^"]+)"', include_line)
+    if want is None:
+        return ""
+    want_path = want.group(1)
+    inc_idx: list[int] = []
+    for i, ln in enumerate(lines):
+        m = re.match(r'^#include\s+"([^"]+)"', ln)
+        if m is None:
+            continue
+        if m.group(1) == want_path:
+            return ""  # already included
+        inc_idx.append(i)
+    if not inc_idx:
+        return ""
+    # Pick the include whose path sorts after ours within the LAST
+    # contiguous quoted-include run (the project groups the file's
+    # own header first, then a blank, then the dependency block).
+    run: list[int] = [inc_idx[-1]]
+    for i in reversed(inc_idx[:-1]):
+        if run[-1] - i == 1:
+            run.append(i)
+        else:
+            break
+    run.sort()
+    insert_at = run[-1] + 1
+    for i in run:
+        m = re.match(r'^#include\s+"([^"]+)"', lines[i])
+        if m and m.group(1) > want_path:
+            insert_at = i
+            break
+    return _hunk_insert_lines(file_rel, lines, insert_at, [include_line])
+
+
+def synth_fault_react_probe_patch(repo_root: Path) -> str | None:
+    """Emit a candidate patch that hardens the fault-react recovery
+    dispatch so a *detected runtime fault* (the RetryNow /
+    RestartDomain / KillProcess branches in `fault_react.cpp`) is
+    GDB-breakable and leaves a `[probe]` line.
+
+    This is the mechanically-sound shape of "emit modified code in
+    response to a detected runtime fault" under Design-Decision #016:
+    the patch is **additive observability only** — it never changes
+    control flow, never swallows a fault, never guesses semantics,
+    and is applied by a human / CI, never by the running kernel. It
+    is exactly the discipline CLAUDE.md "Diagnostic Logging — Keep
+    It, Gate It, Probe It" prescribes for a recurring fault path.
+
+    Three coordinated files (all anchored on stable existing text so
+    the patch compiles by construction):
+
+      * probes.h   — new `ProbeId::kFaultReactRecover` before kCount
+      * probes.cpp — matching `kProbeTable` row before the closing
+                      brace (keeps the size `static_assert` balanced)
+      * fault_react.cpp — `#include "debug/probes.h"` + a
+                      `KBP_PROBE_V(...)` next to each of the three
+                      `FixJournalRecordSev` recovery records
+
+    Idempotent: returns None if the probe already exists (so
+    re-running after apply is a no-op), or if any anchor is missing
+    (fall back to the advisory brief — never emit a patch we cannot
+    place correctly).
+    """
+    h_path = repo_root / _PROBES_H
+    c_path = repo_root / _PROBES_CPP
+    fr_path = repo_root / _FAULT_REACT_CPP
+    if not (h_path.exists() and c_path.exists() and fr_path.exists()):
+        return None
+
+    h_lines = h_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    c_lines = c_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    fr_lines = fr_path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+    # Idempotency: already wired anywhere → nothing to do.
+    if any(_FR_PROBE_ID in ln for ln in h_lines):
+        return None
+
+    # --- probes.h: insert the enum member just before `kCount`.
+    kcount_idx = None
+    for i, ln in enumerate(h_lines):
+        if re.match(r"^\s*kCount\b", ln):
+            kcount_idx = i
+            break
+    if kcount_idx is None:
+        return None
+    enum_inserts = [
+        "    // Fault-react dispatcher took a recovery decision\n",
+        "    // (RetryNow / RestartDomain / KillProcess) for a\n",
+        "    // detected runtime fault. ArmedLog so a clean boot is\n",
+        "    // silent and an attached GDB can `b\n",
+        "    // duetos::debug::ProbeFire` to halt the instant a fault\n",
+        "    // recovery fires; the packed value carries the FaultKind.\n",
+        f"    {_FR_PROBE_ID},\n",
+        "\n",
+    ]
+    h_hunk = _hunk_insert_lines(_PROBES_H, h_lines, kcount_idx, enum_inserts)
+
+    # --- probes.cpp: insert the row before the `};` that closes
+    # kProbeTable (the line right before the size static_assert).
+    sa_idx = None
+    for i, ln in enumerate(c_lines):
+        if "static_assert(sizeof(kProbeTable)" in ln:
+            sa_idx = i
+            break
+    if sa_idx is None:
+        return None
+    brace_idx = None
+    for i in range(sa_idx - 1, -1, -1):
+        if c_lines[i].strip() == "};":
+            brace_idx = i
+            break
+        if c_lines[i].strip():
+            break  # only a blank line may sit between `};` and the assert
+    if brace_idx is None:
+        return None
+    row = (
+        f'    {{ProbeId::{_FR_PROBE_ID}, "{_FR_PROBE_NAME}", '
+        f"ProbeArm::ArmedLog}},\n"
+    )
+    c_hunk = _hunk_insert_lines(_PROBES_CPP, c_lines, brace_idx, [row])
+
+    # --- fault_react.cpp: include + a probe next to every record.
+    inc_hunk = _insert_include_sorted(_FAULT_REACT_CPP, fr_lines, _PROBES_INCLUDE)
+    record_idx = [
+        i for i, ln in enumerate(fr_lines) if _FR_RECORD_ANCHOR in ln
+    ]
+    if not record_idx:
+        return None
+    # If a KBP_PROBE already sits next to a record, treat the file as
+    # hand-wired and bail rather than double-instrument.
+    for i in record_idx:
+        window = "".join(fr_lines[max(0, i - 3):i])
+        if "KBP_PROBE" in window:
+            return None
+    probe_stmt = (
+        f"        KBP_PROBE_V(::duetos::debug::ProbeId::{_FR_PROBE_ID}, "
+        f"ev.kind);\n"
+    )
+    # Hunks for the same file must be emitted in ascending original-
+    # line order; the include sits near the top, records far below.
+    fr_hunks = inc_hunk
+    for i in record_idx:
+        fr_hunks += _hunk_insert_lines(_FAULT_REACT_CPP, fr_lines, i, [probe_stmt])
+
+    return h_hunk + c_hunk + fr_hunks
+
+
 # ---------------------------------------------------------------- per-record action
 
 
@@ -1344,6 +1554,7 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
                  resolver: SymbolResolver | None = None) -> list[Action]:
     actions: list[Action] = []
     seen: set[tuple[str, str]] = set()
+    fault_react_probe_done = False
     for r in records:
         key = (r.detector_name, r.source_pin)
         if key in seen:
@@ -1351,6 +1562,8 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
         seen.add(key)
         if r.audited:
             continue  # reviewer already triaged
+        if is_selftest_record(r.source_pin):
+            continue  # synthetic FixJournalSelfTest noise — never a real gap
 
         if r.detector_name == "unmapped_thunk":
             parsed = parse_thunk_pin(r.source_pin)
@@ -1431,6 +1644,27 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
             actions.append(synth_marker_hit_brief(r, resolver))
         elif r.detector_name == "soft_fault_recov":
             actions.append(synth_soft_fault_recov_brief(r, resolver))
+            # A fault-react recovery record IS a detected runtime
+            # fault (RetryNow / RestartDomain / KillProcess). Emit
+            # the GDB-probe hardening patch once per run so the next
+            # occurrence of *any* fault-react decision is breakable
+            # and WARN-logged. The brief above stays — the patch is
+            # observability scaffolding, not the root-cause fix.
+            if not fault_react_probe_done and r.hint.startswith("fault-react:"):
+                fault_react_probe_done = True
+                diff = synth_fault_react_probe_patch(repo_root)
+                if diff:
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                "Harden fault-react recovery dispatch with a "
+                                "GDB probe (additive; #016-safe)"
+                            ),
+                            body=diff,
+                            filename="fault-react-recover-probe.patch",
+                        )
+                    )
         elif r.detector_name == "loader_reject":
             actions.append(synth_loader_reject_brief(r, resolver))
     return actions

@@ -2,6 +2,7 @@
 #include "drivers/virtio/virtio.h"
 #include "drivers/virtio/virtio_pci.h"
 
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -318,6 +319,7 @@ bool VirtioBlkProbe(const VirtioPciLayout& L)
     // or a serialising mutex around the request path. Read /
     // Write / Flush are all wired through the BlockOps vtable
     // today.
+    FIX_NOTE_GAP("drivers/virtio/virtio_blk.cpp:SingleInflight", "serialise concurrent virtio-blk req descriptors");
     return true;
 }
 

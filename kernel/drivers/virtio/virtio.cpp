@@ -1,5 +1,6 @@
 #include "drivers/virtio/virtio.h"
 
+#include "diag/fix_journal.h"
 #include "drivers/pci/pci.h"
 #include "log/klog.h"
 
@@ -80,6 +81,9 @@ void VirtioInit()
             // slice can pick the highest-leverage one and land it
             // against the shared transport.
             KLOG_INFO_V("drivers/virtio", "class present but no driver yet", static_cast<u64>(cls_idx));
+            (void)::duetos::diag::FixJournalRecord(
+                ::duetos::diag::FixDetector::StubMarker, "drivers/virtio/virtio.cpp:UnprobedClass",
+                "land scsi/input/socket virtio class probe", static_cast<u64>(cls_idx), static_cast<u64>(d.device_id));
             break;
         case VirtioClass::kInvalid:
         default:

@@ -8,6 +8,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "security/persistence.h"
 #include "util/string.h"
@@ -291,6 +292,7 @@ void RbacInit()
     // on every boot. Persistence is blocked on a writable system
     // FS + the /system/secrets layout; tracked in
     // wiki/reference/Roadmap.md (RBAC v1 follow-ups).
+    FIX_NOTE_GAP("security/rbac.cpp:RbacInit", "persist role + membership tables across boots");
     for (u32 i = 0; i < kRbacMaxRoles; ++i)
         g_roles[i].in_use = false;
     for (u32 i = 0; i < kRbacMaxMemberships; ++i)
