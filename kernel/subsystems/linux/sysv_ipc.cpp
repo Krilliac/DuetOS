@@ -113,6 +113,12 @@ i32 ShmAlloc(i32 key, u64 size)
 {
     if (size == 0)
         return -1;
+    // Bound `size` BEFORE the page round-up: `size + kPage - 1`
+    // wraps for size in [U64_MAX-4094, U64_MAX], yielding a tiny
+    // page_count that would pass the kShmMaxPages check below and
+    // turn a near-U64_MAX request into a silent 1-page segment.
+    if (size > static_cast<u64>(kShmMaxPages) * kPage)
+        return -1;
     const u64 page_count = (size + kPage - 1) / kPage;
     if (page_count > kShmMaxPages)
         return -1;
@@ -274,7 +280,16 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
     if (base >= kShmUserMaxExclusive || want_bytes > (kShmUserMaxExclusive - base))
         return -22; // -EINVAL
 
-    // Map every frame.
+    // Pin the segment, THEN map with interrupts enabled. The map
+    // loop calls AddressSpaceMapBorrowedPage → WalkToPteIn(create) →
+    // AllocateFrame; running up to kShmMaxPages (256) of that under
+    // arch::Cli() is a long IRQ-off critical section (≈3 page-table
+    // frame allocs/page) that starves the timer/scheduler — an
+    // unprivileged ELF with a shm key could trigger it on demand.
+    // Bumping seg.refcount here (under Cli, after re-validating)
+    // pins the segment so a concurrent IPC_RMID cannot free
+    // seg.frames while we map outside the lock — the same staged
+    // discipline ShmAlloc/DoMsgsnd already use in this file.
     arch::Cli();
     auto& seg = g_shm_pool[idx];
     if (!seg.in_use || seg.marked_destroy)
@@ -282,12 +297,35 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
         arch::Sti();
         return -22;
     }
+    // Snapshot frames + page count together under this lock so the
+    // map loop can't mix a fresh frames[] with a stale count if the
+    // pool slot was recycled (IPC_RMID + full detach + new shmget)
+    // since the earlier validate.
+    mm::PhysAddr* const frames = seg.frames;
+    const u32 pages = seg.page_count;
+    ++seg.refcount;
+    arch::Sti();
+
+    // Authoritative VA-range check against the pinned page count
+    // (the pre-pin check above used a possibly-stale count). A page
+    // past the user half would trip AddressSpaceMapBorrowedPage's
+    // PanicAs gate (kernel halt) rather than fail gracefully.
+    if (base >= kShmUserMaxExclusive || static_cast<u64>(pages) * kPage > (kShmUserMaxExclusive - base))
+    {
+        arch::Cli();
+        if (seg.refcount > 0)
+            --seg.refcount;
+        ShmMaybeFreeLocked(seg);
+        arch::Sti();
+        return -22; // -EINVAL
+    }
+
     constexpr u64 kFlags = mm::kPagePresent | mm::kPageWritable | mm::kPageUser | mm::kPageNoExecute;
     bool ok = true;
     u32 mapped = 0;
-    for (u32 i = 0; i < page_count; ++i)
+    for (u32 i = 0; i < pages; ++i)
     {
-        if (!mm::AddressSpaceMapBorrowedPage(p->as, base + i * kPage, seg.frames[i], kFlags))
+        if (!mm::AddressSpaceMapBorrowedPage(p->as, base + i * kPage, frames[i], kFlags))
         {
             ok = false;
             break;
@@ -298,18 +336,21 @@ i64 DoShmat(u64 shmid, u64 shmaddr, u64 shmflg)
     {
         for (u32 i = 0; i < mapped; ++i)
             mm::AddressSpaceUnmapBorrowedPage(p->as, base + i * kPage);
+        arch::Cli();
+        if (seg.refcount > 0)
+            --seg.refcount;
+        ShmMaybeFreeLocked(seg);
         arch::Sti();
         return -12; // -ENOMEM
     }
-    ++seg.refcount;
-    arch::Sti();
+    // refcount already bumped above (segment pinned); attach recorded below.
 
     p->linux_shm_attaches[slot].in_use = true;
     p->linux_shm_attaches[slot].shmid = static_cast<u32>(shmid);
     p->linux_shm_attaches[slot].base_va = base;
-    p->linux_shm_attaches[slot].page_count = page_count;
+    p->linux_shm_attaches[slot].page_count = pages;
     if (shmaddr == 0)
-        p->linux_shm_cursor = base + page_count * kPage;
+        p->linux_shm_cursor = base + pages * kPage;
 
     arch::SerialWrite("[linux/shm] attach pid=");
     arch::SerialWriteHex(p->pid);
