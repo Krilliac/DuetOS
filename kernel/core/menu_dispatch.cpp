@@ -248,6 +248,10 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
                                                "WELCOME TO DUETOS   BOOT OK");
         duetos::drivers::video::ConsoleWriteln("-> DESKTOP REFRESHED");
         break;
+    case 9: // SHOW DESKTOP — toggle minimize-all / restore.
+        duetos::drivers::video::WindowShowDesktopToggle();
+        duetos::drivers::video::ConsoleWriteln("-> SHOW DESKTOP TOGGLED");
+        break;
     case 6: // HELP / SHORTCUTS
     {
         const duetos::drivers::video::WindowHandle hh =

@@ -4810,6 +4810,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             {"CYCLE WINDOWS", 2, 0, nullptr, 0},    {"LIST WINDOWS", 3, 0, nullptr, 0},
             {"SWITCH TO TTY", 5, 0, nullptr, 0},
         };
+        // Taskbar right-click menu — the everyday "manage windows
+        // from the bar" gesture. TASK MANAGER uses the 100+role
+        // raise band (ThemeRole::TaskManager == 2 -> 102); the rest
+        // reuse the existing global window actions.
+        static const duetos::drivers::video::MenuItem kTaskbarMenuItems[] = {
+            {"TASK MANAGER", 102, 0, nullptr, 0},
+            {"CYCLE WINDOWS", 2, 0, nullptr, 0},
+            {"LIST WINDOWS", 3, 0, nullptr, 0},
+            {"SHOW DESKTOP", 9, 0, nullptr, 0},
+        };
         // Window body menu (right-click on a native window's
         // client area). Enriches the original Raise/Close pair
         // with the same Min/Max/Restore the system menu offers,
@@ -4995,7 +5005,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     }
                     duetos::drivers::video::MenuClose();
                 }
-                else if (!duetos::drivers::video::TaskbarContains(cx, cy))
+                else if (duetos::drivers::video::TaskbarContains(cx, cy))
+                {
+                    duetos::drivers::video::MenuOpen(
+                        kTaskbarMenuItems, sizeof(kTaskbarMenuItems) / sizeof(kTaskbarMenuItems[0]), cx, cy, 0);
+                    SerialWrite("[ui] right-click target=taskbar\n");
+                }
+                else
                 {
                     const auto hit = duetos::drivers::video::WindowTopmostAt(cx, cy);
                     if (hit != duetos::drivers::video::kWindowInvalid)
