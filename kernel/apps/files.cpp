@@ -4,6 +4,7 @@
 #include "apps/notes.h"
 #include "apps/trash.h"
 #include "arch/x86_64/serial.h"
+#include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/dialog.h"
@@ -1186,6 +1187,48 @@ bool FilesFeedArrow(bool up)
     return true;
 }
 
+// Visible list rows for the current window size. Mirrors the
+// max_rows formula in every Draw* path / FilesRowAt (title bar
+// 22 px + 2-px borders, header line at 2 + kRowH + 2). Used to
+// make PageUp/PageDown step exactly one screenful.
+u32 FilesListVisibleRows()
+{
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh) || wh < 26)
+        return 0;
+    const duetos::u32 content_y = wy + 22 + 2;
+    const duetos::u32 content_h = wh - 22 - 4;
+    const duetos::u32 list_top = content_y + 2 + kRowH + 2;
+    return (content_h > (list_top - content_y) + kRowH) ? (content_h - (list_top - content_y)) / kRowH : 0;
+}
+
+// Home / End / PageUp / PageDown for the active list. Matches the
+// list-navigation surface sibling apps (calendar, hexview,
+// notify-center) already expose. `code` is a VK navigation key.
+bool FilesFeedListKey(duetos::u16 code)
+{
+    g_state.pending = Pending::None;
+    const u32 n = ModeCount();
+    if (n == 0)
+        return true;
+    u32 sel = ModeSelection();
+    u32 page = FilesListVisibleRows();
+    if (page == 0)
+        page = 1;
+    if (code == duetos::drivers::input::kKeyHome)
+        sel = 0;
+    else if (code == duetos::drivers::input::kKeyEnd)
+        sel = n - 1;
+    else if (code == duetos::drivers::input::kKeyPageUp)
+        sel = (sel > page) ? sel - page : 0;
+    else if (code == duetos::drivers::input::kKeyPageDown)
+        sel = (sel + page < n) ? sel + page : n - 1;
+    else
+        return false;
+    ModeSelectionSet(sel);
+    return true;
+}
+
 bool FilesFeedChar(char c)
 {
     // Pending two-step prompts. 'Y' confirms whatever was armed,
@@ -1595,11 +1638,24 @@ void FilesSelfTest()
     if (g_state.pending != Pending::None)
         pass = false;
 
+    // Home / End list navigation on the ramfs root listing.
+    g_state.mode = Mode::Ramfs;
+    g_state.ramfs_depth = 1;
+    if (ModeCount() > 1)
+    {
+        FilesFeedListKey(duetos::drivers::input::kKeyEnd);
+        if (ModeSelection() != ModeCount() - 1)
+            pass = false;
+        FilesFeedListKey(duetos::drivers::input::kKeyHome);
+        if (ModeSelection() != 0)
+            pass = false;
+    }
+
     g_state.ramfs_depth = saved_depth;
     g_state.ramfs_selection = saved_sel;
     g_state.mode = saved_mode;
-    SerialWrite(pass ? "[files] self-test OK (ramfs descend+back, mode toggle, duetfs descend+back, ext match, "
-                       "delete-disarm)\n"
+    SerialWrite(pass ? "[files] self-test OK (ramfs descend+back, mode toggle, duetfs descend+back, home/end, "
+                       "ext match, delete-disarm)\n"
                      : "[files] self-test FAILED\n");
 }
 

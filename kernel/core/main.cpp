@@ -4279,6 +4279,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     {
                         app_consumed = duetos::apps::files::FilesFeedArrow(ev.code == kKeyArrowUp);
                     }
+                    else if (active == duetos::apps::files::FilesWindow() &&
+                             (ev.code == kKeyHome || ev.code == kKeyEnd || ev.code == kKeyPageUp ||
+                              ev.code == kKeyPageDown))
+                    {
+                        app_consumed = duetos::apps::files::FilesFeedListKey(static_cast<duetos::u16>(ev.code));
+                    }
                     else if (active == duetos::apps::imageview::ImageViewWindow() &&
                              (ev.code == kKeyArrowLeft || ev.code == kKeyArrowRight))
                     {

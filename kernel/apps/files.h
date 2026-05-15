@@ -62,6 +62,11 @@ bool FilesFeedChar(char c);
 /// true iff consumed.
 bool FilesFeedArrow(bool up);
 
+/// Home / End / PageUp / PageDown handler for the active list.
+/// `code` is a VK navigation key (kKeyHome / kKeyEnd /
+/// kKeyPageUp / kKeyPageDown). Returns true iff consumed.
+bool FilesFeedListKey(duetos::u16 code);
+
 /// One-shot self-test: verifies the root has at least one
 /// child and that Enter on a directory updates the listing
 /// to that directory's children. Prints PASS/FAIL to COM1.
