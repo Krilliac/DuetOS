@@ -7,8 +7,10 @@
 > **Maturity:** virtio-gpu v0 scanout; Intel Render Command Streamer
 > ring bring-up wired (MI_NOOP submission proven); AMD CP_RB0
 > register file programmed + read-back verified (firmware push is
-> the next gate); NVIDIA still discovery-only; Vulkan ICD v0
-> (CPU-side lifecycle, command tape replay, scanout-backed clears)
+> the next gate); NVIDIA Turing+ diagnostic probe + GSP firmware
+> probe wired (PFIFO submission is gated on the multi-month GSP
+> RPC slice); Vulkan ICD v0 (CPU-side lifecycle, command tape
+> replay, scanout-backed clears)
 
 ## Overview
 
@@ -98,8 +100,27 @@ Each tier-1 vendor now has a dedicated driver TU under
   for — `selftest PASS (registers programmed, firmware-pending)`,
   `selftest FAIL`, or `no AMD device — skipped`. QEMU's emulated
   `-vga std` / `-vga virtio` boots take the "skipped" path.
-- `nvidia_gpu.{h,cpp}` — Turing+ scaffold; reads `PMC_BOOT_0`,
-  `PMC_INTR_EN_0`, `PFIFO_INTR`, and `PFB_PRI_RD` for diagnostics.
+- `nvidia_gpu.{h,cpp}` — Turing+ scaffold. `Probe` reads
+  `PMC_BOOT_0` / `PMC_BOOT_42` / `PMC_BOOT_8` (chip /
+  SKU / stepping), `PMC_INTR_EN_0` / `PFIFO_INTR` /
+  `PBUS_INTR_0` (engine + bus liveness), and `PFB_PRI_RD`
+  (memory-subsystem decode), then walks the firmware-loader for
+  the three standard GSP blobs (`gsp_rm.bin` / `gsp_log.bin` /
+  `bootloader.bin` under the open-firmware path policy). Pure
+  observation — not a single register is written, because
+  unlike Intel (no firmware needed for `MI_NOOP`) and AMD (a few
+  configuration writes are safe without microcode) NVIDIA
+  Turing+ requires the GSP RPC ring alive before any host-side
+  write to a PFIFO / PGRAPH register is safe. `Bringup` stays
+  scaffold/`Unsupported` for the same reason — the smallest
+  meaningful bring-up step is the GSP firmware push + RPC
+  channel, and that is multi-month work whose RPC schema has no
+  public documentation. `NvidiaGspSelfTest` hooked to
+  `DUETOS_BOOT_SELFTEST` emits the structural sentinel CI greps
+  for — `selftest PASS (device present, GSP RPC gated)`,
+  `selftest FAIL (BAR0 decode failed)`, or `no NVIDIA device —
+  skipped`. QEMU's emulated `-vga std` / `-vga virtio` boots
+  take the "skipped" path.
 
 Each driver exposes:
 
@@ -473,11 +494,16 @@ recompose. Four themes ship:
   which blobs an operator has dropped in; an actual MEC/PFP/ME
   push is the next gate. Until that lands, RPTR stays at 0 on
   every boot — that's expected behaviour, not a bug.
-- **NVIDIA still discovery-only.** Turing+ classifies the device,
-  reads `PMC_BOOT_0` / `PMC_INTR_EN_0` / `PFIFO_INTR` /
-  `PFB_PRI_RD`, and stops. GSP firmware is mandatory on Turing+
-  and the RPC channel has no public docs — that's the multi-week
-  effort that has not started.
+- **NVIDIA Turing+ is observation-only.** The driver now reads
+  a wider diagnostic register set (PMC_BOOT_0 / _42 / _8 +
+  PMC_INTR_EN_0 + PFIFO_INTR + PBUS_INTR_0 + PFB_PRI_RD) and
+  probes the firmware loader for `gsp_rm.bin` / `gsp_log.bin` /
+  `bootloader.bin`, but writes nothing — every PFIFO-side effect
+  on Turing+ goes through the GSP RPC ring and there is no
+  smaller intermediate gate to land first. GSP firmware push +
+  RPC channel is a multi-month effort whose schema has no public
+  documentation (the only reference is reverse-engineering work
+  in the `nouveau` driver), so it stays the next gate.
 - **No GPU command queue exposed to userland.** Submission is
   kernel-side direct register writes (virtio-gpu's tiny command
   set; Intel's NOOP submitter). The Vulkan ICD is still CPU-only
