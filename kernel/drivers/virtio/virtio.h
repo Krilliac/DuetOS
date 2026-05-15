@@ -75,11 +75,13 @@ bool VirtioConsoleWrite(const char* buf, u32 len);
 bool VirtioConsolePollByte(u8* out);
 
 /// Transmit one Ethernet frame over the attached virtio-net
-/// device. `frame` must be in the kernel direct map (the
-/// transport calls `mm::VirtToPhys` to get the DMA address) and
-/// `len` is the byte count, capped at 1518 (Ethernet max).
-/// Returns false if no device is attached, the call timed out,
-/// or `frame` doesn't resolve to a phys address.
+/// device. `frame` may point anywhere readable — the bytes are
+/// copied into the driver's direct-map TX staging page before
+/// the DMA, so callers (including the kernel net stack's
+/// IfaceTx reply path) do not need a direct-map buffer. `len`
+/// is the byte count, capped at 1518 (Ethernet max). Returns
+/// false if no device is attached or the completion poll timed
+/// out.
 bool VirtioNetTransmit(const void* frame, u32 len);
 
 } // namespace duetos::drivers::virtio

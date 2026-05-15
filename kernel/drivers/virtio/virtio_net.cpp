@@ -24,8 +24,11 @@
  *
  * The header is all-zero for plain frames (no offloads
  * negotiated); a single static 12-byte header page is reused
- * for every transmit. The frame buffer is the caller's —
- * `mm::VirtToPhys` resolves its DMA address.
+ * for every transmit. The caller's frame is copied into a
+ * pre-allocated direct-map TX staging page (the net stack's
+ * reply frames are not guaranteed to be direct-map-resolvable
+ * via `mm::VirtToPhys`); the device DMAs from the staging
+ * page, mirroring e1000's `E1000Send` contract.
  *
  * Each RX slot owns one 2 KiB device-write buffer big enough to
  * hold the 12-byte virtio_net_hdr + max-size Ethernet frame. We
@@ -104,6 +107,16 @@ struct NetState
     VirtioQueue rxq;
     mm::PhysAddr hdr_phys;
     u8* hdr_virt;
+    // TX DMA staging buffer. The net stack hands `IfaceTx` reply
+    // frames built in transient buffers that are NOT guaranteed
+    // to be in the kernel direct map, so we cannot resolve the
+    // caller's pointer through `mm::VirtToPhys` (it panics on a
+    // non-direct-map address). Mirror the e1000 driver: copy the
+    // caller's frame into this pre-allocated, direct-map staging
+    // page and DMA from there. One frame at a time matches the
+    // single-in-flight TX model.
+    mm::PhysAddr tx_buf_phys;
+    u8* tx_buf_virt;
     // RX-buffer phys / virt for every slot. Indexed by descriptor
     // id; the device returns `head == slot` on completion because
     // every RX descriptor is a single-buffer chain.
@@ -246,6 +259,19 @@ bool VirtioNetProbe(const VirtioPciLayout& L)
     auto* h = reinterpret_cast<NetHdr*>(g_net.hdr_virt);
     *h = NetHdr{};
 
+    // TX DMA staging page. One 4 KiB frame holds any single
+    // Ethernet frame (max 1518 B) with room to spare. The TX
+    // path copies the caller's frame here, then DMAs from this
+    // direct-map address — never from the caller's pointer.
+    const mm::PhysAddr tx_phys = mm::AllocateFrame();
+    if (tx_phys == mm::kNullFrame)
+    {
+        KLOG_WARN("drivers/virtio/net", "TX staging page alloc failed");
+        return false;
+    }
+    g_net.tx_buf_phys = tx_phys;
+    g_net.tx_buf_virt = static_cast<u8*>(mm::PhysToVirt(tx_phys));
+
     // RX buffers: kRxFrames physical frames, each carved into
     // kRxBuffersPerFrame buffers. Slot id `f * per + b` resolves to
     // a buffer inside frame `f` at offset `b * kRxBufBytes`.
@@ -309,16 +335,22 @@ bool VirtioNetTransmit(const void* frame, u32 len)
 
     DrainTxUsed(&g_net.txq);
 
-    const mm::PhysAddr data_phys = mm::VirtToPhys(frame);
-    if (data_phys == 0)
-        return false;
+    // Copy the caller's frame into the direct-map TX staging
+    // page. The net stack's IfaceTx path builds reply frames
+    // (ARP / ICMP / TCP) in transient buffers that are not
+    // guaranteed to live in the kernel direct map; resolving
+    // such a pointer through mm::VirtToPhys panics. Staging +
+    // copy is the same contract e1000's E1000Send uses.
+    const u8* src = static_cast<const u8*>(frame);
+    for (u32 i = 0; i < len; ++i)
+        g_net.tx_buf_virt[i] = src[i];
 
     VirtqDesc* d = const_cast<VirtqDesc*>(g_net.txq.desc);
     d[0].addr = g_net.hdr_phys;
     d[0].len = sizeof(NetHdr);
     d[0].flags = kVirtqDescNext;
     d[0].next = 1;
-    d[1].addr = data_phys;
+    d[1].addr = g_net.tx_buf_phys;
     d[1].len = len;
     d[1].flags = 0; // driver-write only — device reads our frame.
     d[1].next = 0;
