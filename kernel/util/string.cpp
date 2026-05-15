@@ -90,26 +90,24 @@ extern "C" void* memmove(void* dst, const void* src, duetos::usize n)
         // 64-byte unrolled chunks of 8-byte loads/stores. We
         // don't require alignment — x86 tolerates unaligned
         // 8-byte access at a small (cache-line-cross) cost
-        // that's still cheaper than per-byte work.
+        // that's still cheaper than per-byte work. The wide
+        // unit goes through __builtin_memcpy rather than a
+        // reinterpret_cast<u64*> deref: casting an arbitrarily-
+        // aligned u8* to u64* and dereferencing it is C++ UB
+        // (alignment), which -fsanitize=undefined flags on every
+        // call and drowns the real UBSan signal. clang lowers a
+        // fixed-size __builtin_memcpy to the same single unaligned
+        // movq under -mno-sse, so this is UB-free at zero cost.
         while (n >= 64)
         {
-            auto* qd = reinterpret_cast<duetos::u64*>(d);
-            const auto* qs = reinterpret_cast<const duetos::u64*>(s);
-            qd[0] = qs[0];
-            qd[1] = qs[1];
-            qd[2] = qs[2];
-            qd[3] = qs[3];
-            qd[4] = qs[4];
-            qd[5] = qs[5];
-            qd[6] = qs[6];
-            qd[7] = qs[7];
+            __builtin_memcpy(d, s, 64);
             d += 64;
             s += 64;
             n -= 64;
         }
         while (n >= 8)
         {
-            *reinterpret_cast<duetos::u64*>(d) = *reinterpret_cast<const duetos::u64*>(s);
+            __builtin_memcpy(d, s, 8);
             d += 8;
             s += 8;
             n -= 8;

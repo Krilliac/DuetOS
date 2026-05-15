@@ -175,6 +175,107 @@ void Report(const char* kind, const SourceLocation* loc)
     KLOG_WARN_S("diag/ubsan", kind, "at", file);
 }
 
+// clang TypeCheckKind enum (compiler-rt/lib/ubsan/ubsan_handlers.cpp).
+// The numbering is part of the emitted-call ABI, stable across LLVM.
+const char* TypeCheckKindName(u8 k)
+{
+    switch (k)
+    {
+    case 0:
+        return "load";
+    case 1:
+        return "store";
+    case 2:
+        return "reference-bind";
+    case 3:
+        return "member-access";
+    case 4:
+        return "member-call";
+    case 5:
+        return "constructor-call";
+    case 6:
+        return "downcast-ptr";
+    case 7:
+        return "downcast-ref";
+    case 8:
+        return "upcast";
+    case 9:
+        return "upcast-virtual-base";
+    case 10:
+        return "nonnull-bind";
+    case 11:
+        return "dynamic-op";
+    default:
+        return "kind?";
+    }
+}
+
+// type-mismatch fires once per *dynamic* hit; a hot path (e.g. a
+// password hash) can produce hundreds of identical incidents. The
+// stable "[ubsan] type-mismatch at file:line:col" line + g_reports
+// counter still fire every time (host tooling + `inspect health`
+// depend on that). The richer decode below is what a human needs to
+// actually pin the bug, and it only needs to be seen ONCE per call
+// site — so dedupe it on the SourceLocation pointer, which is a
+// stable rodata literal owned by the calling TU. Best-effort: the
+// scan/insert is lock-free and may race under SMP/IRQ reentrancy,
+// at worst double-printing one detail line — acceptable for a
+// diagnostic, and it keeps this path allocation- and lock-free so
+// it stays safe in every context the compiler emitted it in.
+constexpr u32 kSeenLocCap = 32;
+constinit const SourceLocation* g_seen_locs[kSeenLocCap] = {};
+constinit u32 g_seen_loc_count = 0;
+
+bool DetailAlreadyEmitted(const SourceLocation* loc)
+{
+    for (u32 i = 0; i < g_seen_loc_count && i < kSeenLocCap; ++i)
+        if (g_seen_locs[i] == loc)
+            return true;
+    const u32 slot = g_seen_loc_count;
+    if (slot < kSeenLocCap)
+    {
+        g_seen_locs[slot] = loc;
+        g_seen_loc_count = slot + 1;
+    }
+    return false;
+}
+
+// Enriched type-mismatch path. `ptr` is the value that failed the
+// check — clang passes it as the handler's second argument and the
+// v0 handler threw it away, leaving every incident opaque. With the
+// pointer + log_alignment + type_check_kind we can say *which* of
+// the three type-mismatch faults this is (null / misaligned /
+// object-too-small) instead of just pointing at a line.
+void ReportTypeMismatch(const TypeMismatchData* d, u64 ptr)
+{
+    Report("type-mismatch", &d->loc);
+
+    if (d->loc.filename == nullptr || DetailAlreadyEmitted(&d->loc))
+        return;
+
+    const u64 align = (d->log_alignment < 64) ? (1ULL << d->log_alignment) : 0;
+    const char* fault = "obj-too-small";
+    if (ptr == 0)
+        fault = "null-deref";
+    else if (align > 1 && (ptr & (align - 1)) != 0)
+        fault = "misaligned";
+
+    arch::SerialWrite("[ubsan]   tm-detail ");
+    arch::SerialWrite(TypeCheckKindName(d->type_check_kind));
+    arch::SerialWrite(" fault=");
+    arch::SerialWrite(fault);
+    arch::SerialWrite(" ptr=");
+    arch::SerialWriteHex(ptr);
+    arch::SerialWrite(" need-align=");
+    arch::SerialWriteHex(align);
+    if (d->type != nullptr)
+    {
+        arch::SerialWrite(" ty=");
+        arch::SerialWrite(d->type->name);
+    }
+    arch::SerialWrite("\n");
+}
+
 } // namespace
 
 u64 UbsanReportsEmitted()
@@ -312,12 +413,14 @@ extern "C"
     {
         Emit("load-invalid-value", &reinterpret_cast<InvalidValueData*>(data)->loc);
     }
-    void __ubsan_handle_type_mismatch_v1(void* data, u64)
+    void __ubsan_handle_type_mismatch_v1(void* data, u64 ptr)
     {
-        // Covers null deref / unaligned access / unrelated-type access.
-        // We don't decode the kind in v0 — the source location alone
-        // tells the dev which line to look at.
-        Emit("type-mismatch", &reinterpret_cast<TypeMismatchData*>(data)->loc);
+        // Covers null deref / unaligned access / object-too-small.
+        // ReportTypeMismatch decodes which one (and the access kind +
+        // failing pointer), deduped per call site so a hot path can't
+        // flood serial. The stable "[ubsan] type-mismatch at ..." line
+        // + g_reports counter still fire on every hit inside Report().
+        ::duetos::diag::ReportTypeMismatch(reinterpret_cast<TypeMismatchData*>(data), ptr);
     }
     void __ubsan_handle_pointer_overflow(void* data, u64, u64)
     {
