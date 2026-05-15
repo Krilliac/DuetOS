@@ -1633,7 +1633,11 @@ constexpr duetos::u32 kFilesDuetMenuItemsN = sizeof(kFilesDuetMenuItems) / sizeo
 
 duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
 {
-    if (g_state.mode != Mode::Fat32 || g_state.fat_count == 0)
+    // Mode-agnostic: every view (FAT32 / DuetFS / ramfs / Trash)
+    // draws its list with the same geometry, so the hit-test only
+    // needs the per-mode count + selection (via ModeCount /
+    // ModeSelection) — no per-mode whitelist.
+    if (ModeCount() == 0)
         return -1;
     duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
     if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
@@ -1652,14 +1656,15 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
     const duetos::u32 list_top = content_y + 2 + kRowH + 2;
     if (sy < list_top)
         return -1;
-    const duetos::u32 n = g_state.fat_count;
+    const duetos::u32 n = ModeCount();
     const duetos::u32 max_rows =
         (content_h > (list_top - content_y) + kRowH) ? (content_h - (list_top - content_y)) / kRowH : 0;
     if (max_rows == 0)
         return -1;
+    const duetos::u32 sel = ModeSelection();
     duetos::u32 first = 0;
-    if (n > max_rows && g_state.fat_selection >= max_rows)
-        first = g_state.fat_selection - (max_rows - 1);
+    if (n > max_rows && sel >= max_rows)
+        first = sel - (max_rows - 1);
     const duetos::u32 row_in_view = (sy - list_top) / kRowH;
     if (row_in_view >= max_rows)
         return -1;
@@ -1693,18 +1698,17 @@ bool FilesBeginDragSelection()
 
 bool FilesOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
 {
-    // FAT32 mode is the only mode with a click-to-row hit-test
-    // today. Trash / ramfs DC could be wired the same way — keep
-    // them GAP'd until those modes get a real RowAt helper, so a
-    // double-click in those modes simply doesn't open anything
-    // (it doesn't misfire).
-    if (g_state.mode != Mode::Fat32)
-        return false;
+    // Works in every view now that FilesRowAt is mode-agnostic.
+    // Select the clicked row then reuse the ENTER dispatch, which
+    // already does the right thing per mode (FAT32 open, DuetFS /
+    // ramfs descend-or-open). Trash has no open verb so the ENTER
+    // path is a no-op there — double-click simply does nothing,
+    // which is the correct behaviour.
     const duetos::i32 row = FilesRowAt(sx, sy);
     if (row < 0)
         return false;
-    g_state.fat_selection = static_cast<duetos::u32>(row);
-    OpenFat32Selected();
+    ModeSelectionSet(static_cast<duetos::u32>(row));
+    FilesFeedChar('\n');
     duetos::arch::SerialWrite("[files] double-click open row=");
     duetos::arch::SerialWriteHex(static_cast<duetos::u64>(row));
     duetos::arch::SerialWrite("\n");
@@ -1715,14 +1719,16 @@ bool FilesOnRightClick(duetos::u32 sx, duetos::u32 sy)
 {
     // DuetFS "main drive" view gets its own context menu so the
     // everyday Open / Properties gestures work on the native
-    // volume — not just on the FAT32 disk. GAP: acts on the
-    // highlighted row (FilesRowAt is FAT32-geometry only); precise
-    // DuetFS hit-testing waits on a shared row-geometry helper.
+    // volume — not just on the FAT32 disk. FilesRowAt is now
+    // mode-agnostic, so this hit-tests the exact row; empty space
+    // falls back to the highlighted selection.
     if (g_state.mode == Mode::DuetFs)
     {
-        duetos::drivers::video::MenuOpen(kFilesDuetMenuItems, kFilesDuetMenuItemsN, sx, sy, g_state.duet_selection);
-        duetos::arch::SerialWrite("[files] duetfs context menu opened sel=");
-        duetos::arch::SerialWriteHex(g_state.duet_selection);
+        const duetos::i32 drow = FilesRowAt(sx, sy);
+        const duetos::u32 dctx = (drow < 0) ? g_state.duet_selection : static_cast<duetos::u32>(drow);
+        duetos::drivers::video::MenuOpen(kFilesDuetMenuItems, kFilesDuetMenuItemsN, sx, sy, dctx);
+        duetos::arch::SerialWrite("[files] duetfs context menu opened ctx=");
+        duetos::arch::SerialWriteHex(dctx);
         duetos::arch::SerialWrite("\n");
         return true;
     }
