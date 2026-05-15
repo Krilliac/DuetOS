@@ -394,6 +394,29 @@ void WriteU64Dec(char* dst, u32 cap, u64 v)
     dst[n] = '\0';
 }
 
+// Header line + item count, e.g. "DISK:/   (12 items)". Every
+// commodity file manager shows the count; this is the one place
+// all four views render it so the format stays consistent.
+void DrawListHeaderWithCount(u32 cx, u32 cy, const char* path, u32 count, u32 color)
+{
+    char line[96];
+    u32 o = 0;
+    for (u32 i = 0; path[i] != '\0' && o + 1 < sizeof(line); ++i)
+        line[o++] = path[i];
+    const char* sep = "   (";
+    for (u32 i = 0; sep[i] != '\0' && o + 1 < sizeof(line); ++i)
+        line[o++] = sep[i];
+    char num[24];
+    WriteU64Dec(num, sizeof(num), count);
+    for (u32 i = 0; num[i] != '\0' && o + 1 < sizeof(line); ++i)
+        line[o++] = num[i];
+    const char* tail = (count == 1) ? " item)" : " items)";
+    for (u32 i = 0; tail[i] != '\0' && o + 1 < sizeof(line); ++i)
+        line[o++] = tail[i];
+    line[o] = '\0';
+    duetos::drivers::video::FramebufferDrawString(cx + 4, cy + 2, line, color, kBg);
+}
+
 // Generic row painter — takes the type tag, name, and size; the
 // per-mode draw paths assemble these from their entry types.
 void DrawRowGeneric(u32 x, u32 y, u32 w, bool is_dir, const char* name, u64 size_bytes, bool selected)
@@ -459,7 +482,7 @@ void DrawRamfs(u32 cx, u32 cy, u32 cw, u32 ch)
         }
     }
     header[h_off] = '\0';
-    FramebufferDrawString(cx + 4, cy + 2, header, 0x0080F088, kBg);
+    DrawListHeaderWithCount(cx, cy, header, CountChildren(RamfsCur()), 0x0080F088);
 
     const u32 list_top = cy + 2 + kRowH + 2;
     const u32 n = CountChildren(cur);
@@ -495,7 +518,7 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
     for (u32 i = 0; prefix[i] != '\0' && h_off + 1 < sizeof(header); ++i)
         header[h_off++] = prefix[i];
     header[h_off] = '\0';
-    FramebufferDrawString(cx + 4, cy + 2, header, 0x0080F088, kBg);
+    DrawListHeaderWithCount(cx, cy, header, g_state.fat_count, 0x0080F088);
 
     if (g_state.fat_count == 0)
     {
@@ -581,7 +604,7 @@ void DrawTrash(u32 cx, u32 cy, u32 cw, u32 ch)
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
     FramebufferFillRect(cx, cy, cw, ch, kBg);
-    FramebufferDrawString(cx + 4, cy + 2, "TRASH:/", 0x00FFA060, kBg);
+    DrawListHeaderWithCount(cx, cy, "TRASH:/", g_state.trash_count, 0x00FFA060);
 
     if (g_state.trash_count == 0)
     {
@@ -656,7 +679,7 @@ void DrawDuetFs(u32 cx, u32 cy, u32 cw, u32 ch)
             header[h++] = '/';
     }
     header[h] = '\0';
-    FramebufferDrawString(cx + 4, cy + 2, header, 0x0080F088, kBg);
+    DrawListHeaderWithCount(cx, cy, header, g_state.duet_count, 0x0080F088);
 
     if (g_state.duet_count == 0)
     {
