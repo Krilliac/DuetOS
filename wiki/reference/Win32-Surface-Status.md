@@ -344,6 +344,13 @@ syscall routing shows up immediately.
   `AllocConsole`, `FreeConsole`, `AttachConsole`,
   `GetConsoleScreenBufferInfo` (basic),
   `SetConsoleTextAttribute`, `SetConsoleCursorPosition`
+- App-compat: `IsDebuggerPresent`,
+  `SetThreadStackGuarantee` — both consult the per-process
+  compat sidecar via the cached `SYS_COMPAT_QUERY = 206`
+  syscall. `IsDebuggerPresent` returns FALSE either way today
+  (no debugger surface); `SetThreadStackGuarantee` returns TRUE
+  iff `fake_ok_stack_guarantee=1` is set on the sidecar,
+  otherwise FALSE + `ERROR_INVALID_PARAMETER`.
 
 **STUB / GAP:**
 - File: `LockFile`, `UnlockFile`, `LockFileEx`, `UnlockFileEx`

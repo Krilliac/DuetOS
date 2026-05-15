@@ -110,6 +110,7 @@
 #include "diag/fault_inject.h"
 #include "diag/fix_journal.h"
 #include "diag/log_names.h"
+#include "loader/compat_shim.h"
 #include "proc/process.h"
 #include "proc/spawn.h"
 #include "syscall/time_syscall.h"
@@ -3717,6 +3718,23 @@ void SyscallDispatch(arch::TrapFrame* frame)
         arch::SerialWriteHex(aslr_delta);
         arch::SerialWrite("\n");
         frame->rax = dl.image.base_va;
+        return;
+    }
+
+    case SYS_COMPAT_QUERY:
+    {
+        // Per-process app-compat policy snapshot. Returns the
+        // packed `CompatPolicyBits` mask defined in syscall.h.
+        // Userland kernel32 / advapi32 / … read once at first
+        // call and cache the result — the policy is set by the
+        // PE loader before ring-3 entry and never mutates for a
+        // process's lifetime.
+        //
+        // No cap gate: a process is allowed to read its own
+        // compat-policy flags, and the kernel doesn't reveal
+        // anything beyond the documented bits.
+        const Process* proc = CurrentProcess();
+        frame->rax = compat::QueryPolicyBits(proc);
         return;
     }
 

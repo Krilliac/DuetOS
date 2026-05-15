@@ -8870,3 +8870,202 @@ a real C++ caller now goes through its FFI.
   expansion (img_meta_rust grows from 3 to 4 image-format
   validators). End-user-features "PNG / JPEG / PDF / video
   viewers" — JPEG now has its header foundation.
+
+## 2026-05-15 — App-compat policy wired into per-Win32-API hooks via SYS_COMPAT_QUERY
+
+- **Context:** The per-PE sidecar policy infrastructure
+  (`compat::CompatPolicy`, `ApplySidecar`, `ShouldIgnoreDebugger`
+  / `ShouldIgnoreEtw` / `ShouldFakeOkStackGuarantee`) has shipped
+  for two releases. A boot self-test validated the parser, but
+  no user-mode call site consulted the resulting flags — the
+  policy was effectively dead infrastructure.
+- **Decision:** Expose the policy to userland DLLs through a new
+  no-arg syscall, `SYS_COMPAT_QUERY = 206`. The handler returns
+  a packed `CompatPolicyBits` mask (bit 0 = ignore_debugger,
+  bit 1 = ignore_etw, bit 2 = fake_ok_stack_guarantee, bit 3 =
+  sidecar applied; the remaining 60 bits are reserved). The
+  call is unconditional — no cap is required, because a process
+  is always allowed to read its own policy snapshot and the
+  kernel reveals nothing else through the surface.
+- **Caching:** Per-process userland DLLs (kernel32.dll and the
+  PE32 sibling kernel32_32.dll) read the bitmask once on first
+  consultation and cache it for the process's lifetime. The
+  cache lives in a DLL-global static. The high bit (bit 63 in
+  64-bit, bit 31 in 32-bit) doubles as a "primed" sentinel so
+  the first call distinguishes "policy is zero" from "policy
+  not yet read." Multiple threads racing the first call get the
+  same answer; the worst case is two syscall trips on cold
+  start. The policy never mutates after spawn, so cache
+  invalidation isn't a concern in v0.
+- **Wired sites:**
+  - `kernel32!IsDebuggerPresent` consults
+    `DUETOS_COMPAT_BIT_IGNORE_DEBUGGER`. DuetOS has no debugger
+    surface in v0, so the production-build answer is FALSE
+    either way; the consultation wires the documented contract
+    for a future debugger surface.
+  - `kernel32!SetThreadStackGuarantee` is a new export. It
+    consults `DUETOS_COMPAT_BIT_FAKE_OK_STACK_GUARANTEE` —
+    policy set returns TRUE without touching the stack, policy
+    clear returns FALSE + `ERROR_INVALID_PARAMETER`. The PE32+
+    `kernel32_32` sibling mirrors the policy cache.
+- **ETW family unchanged:** The roadmap listed `advapi32!Event*`
+  as a wire-up target, but the existing thunks_table.inc rows
+  for `EventRegister` / `EventWrite` / `EventWriteTransfer` /
+  `EventUnregister` / `EventEnabled` already route to
+  `kOffPinReturn0` (= 0 = `ERROR_SUCCESS`). That's
+  semantically identical to "silently drop" — the policy-on
+  path. No change needed; documenting the alignment here
+  prevents a future slice from accidentally re-introducing a
+  divergent ERROR_INVALID_PARAMETER return.
+- **Why a syscall, not an aux-vector / PEB field:** The Win32
+  PEB shape is fixed by external ABI; we'd be carving out a
+  DuetOS-private slot inside someone else's published struct.
+  A dedicated syscall keeps the surface visible in
+  `syscall_names.def` + `cap_table.def` and lets future tooling
+  (`pe-triage`, `loglevel`, the live wiki) introspect the
+  policy by tracing the call.
+- **Bit-layout stability:** `enum CompatPolicyBits` in
+  `kernel/syscall/syscall.h` is the canonical source. The
+  userland DLL macros (`DUETOS_COMPAT_BIT_*`) mirror it
+  verbatim and MUST stay in sync; reshuffling bits is an ABI
+  break. New flags append at bit 4 and above.
+- **Drift fix:** While auditing syscall_names.def for the new
+  row, the previous slice's `SYS_DLL_LOAD_FROM_PATH = 205` was
+  found missing from the names table. The static_assert in
+  syscall_names.h only fires for rows IN the def, so the
+  drift was silent. Both rows are now in place.
+- **Related roadmap track(s):** Tier-1/2 follow-ups —
+  "App-compat per-Win32-API hooks" graduates. Future per-API
+  hooks (additional STUB-shaped semantics that flip cleanly on
+  a per-process flag) reuse the same cache pattern.
+
+## 2026-05-15 — virtio-net RX queue + NIC registration + polled drain
+
+- **Context:** `kernel/drivers/virtio/virtio_net.cpp` shipped
+  TX-only for two releases. The receiveq was unconfigured, so
+  the device dropped every inbound frame and the NIC never
+  reached the kernel net stack — the operator only saw
+  `[drivers/virtio/net] attached (TX-only ...)` and had no way
+  to use the device for anything beyond outbound debug traffic.
+- **Decision:** Stand up the receiveq alongside the transmitq at
+  probe time, post 32 device-write descriptors backed by 16 KiB
+  of buffer pool (16 frames × 2 buffers / frame × 2 KiB), and
+  bind the device into the kernel net stack at
+  `iface_index = 2` (slot after e1000 = 0, cdc_ecm = 1; the next
+  NIC takes slot 3 within the `kMaxInterfaces = 4` ceiling).
+  DhcpStart fires at probe so the device is leased the moment
+  RX is live.
+- **RX descriptor layout:** Single descriptor per slot with
+  `kVirtqDescWrite` flag — the device writes the 12-byte
+  virtio_net_hdr followed by the Ethernet frame into our buffer.
+  Slot id doubles as descriptor index, so the device's
+  used-ring `head` lookup resolves straight back to
+  `rx_buf_virt[head]` without a separate cookie table. The
+  drain helper pops the used ring, hands the frame body
+  (post-header) to `NetStackInjectRx`, and immediately
+  re-publishes the descriptor for the next packet.
+- **Polling cadence:** Dedicated `virtio-net-rx-poll` kernel task
+  drains up to 16 packets per wake then sleeps one scheduler
+  tick (~10 ms at 100 Hz). Mirrors the cdc_ecm rhythm — IRQ
+  wire-up is the next slice and would replace the sleep with a
+  wait-queue block, leaving the drain inner loop unchanged.
+- **Buffer sizing:** 2 KiB per slot holds the 12-byte header
+  plus up to 2036 bytes of Ethernet frame, well past the 1518
+  standard cap. Future jumbo-frame work can grow the buffer
+  without reshuffling the layout because every slot is
+  independently sized. Two buffers fit per 4 KiB page; the
+  layout asserts `kRxSlots % kRxBuffersPerFrame == 0` so the
+  carve is exact.
+- **Buffer pool ownership:** Buffers live in the kernel
+  direct map (via `mm::AllocateFrame` + `mm::PhysToVirt`); the
+  drain hands a pointer into the buffer to `NetStackInjectRx`,
+  which immediately copies into its own L2 reassembly buffers
+  before returning, so the descriptor re-publish is safe.
+- **Multi-queue handling:** The probe still negotiates
+  `kNetFeatureMq` when the device offers it, but only the
+  queue 0 / queue 1 pair is driven. Full MQ queue-pair
+  selection is deferred until a workload demonstrates
+  bottleneck behaviour on the single-pair path; the
+  negotiation today just keeps the device happy and
+  preserves the option to grow into MQ without reshuffling
+  the boot flow.
+- **Iface index reservation:** Picked iface 2 explicitly
+  because e1000 (iface 0) and cdc_ecm (iface 1) are already
+  hard-coded. The choice is documented at the call site so
+  the next NIC driver knows to take iface 3 and the
+  `kMaxInterfaces = 4` cap is the next pressure point.
+- **Tests:** No new self-test — the path is QEMU-only and the
+  existing boot smoke (under
+  `tools/qemu/run.sh -device virtio-net-pci`) exercises the
+  full attach + DHCP DISCOVER round-trip end-to-end.
+  Build-clean is the kernel-side signal until runtime smoke
+  with virtio devices is installed in CI.
+- **Related roadmap track(s):** Tier-1/2 follow-ups —
+  "VirtIO virtio-net packet TX/RX" graduates; per-class polish
+  section trims the "virtio-net RX queue + NIC registration"
+  bullet. Next adjacent piece is IRQ wire-up across the
+  per-class probes (rng, blk, net, console, balloon).
+
+## 2026-05-15 — IOCP blocking-wait primitive on the KObject-shaped IocpPort
+
+- **Context:** The KObject-shaped `IocpPort` in
+  `kernel/ipc/iocp.{h,cpp}` shipped two releases ago as a clean
+  consolidation target for the legacy
+  `kernel/subsystems/win32/iocp_job` implementation, but only
+  exposed non-blocking `IocpTryPost` / `IocpTryPop`. Every
+  `GetQueuedCompletionStatus` caller that wanted a finite or
+  infinite wait still had to stay on the legacy
+  `iocp_job.cpp::SysIocpRemove` path, which carries its own
+  per-port `sched::WaitQueue` + an ad-hoc IRQ-off acquire
+  protocol. Two divergent blocking-wait paths blocked the
+  promised consolidation slice.
+- **Decision:** Bring the new `IocpPort` to parity with the
+  legacy port's blocking shape by embedding a `sched::Mutex` +
+  a `sched::Condvar not_empty` directly on the struct (mirroring
+  `KMailbox`'s pattern verbatim — same two waiters / one
+  primitive design). Every ring mutation (post, pop, wait,
+  close) now serialises through the mutex; consumers park on
+  `not_empty` via `CondvarWait` / `CondvarWaitTimeout` depending
+  on the caller-supplied timeout.
+- **Public API:** `IocpWait(port, out, timeout_ticks)`. Three
+  modes mirror Win32 GetQueuedCompletionStatus:
+  - `timeout_ticks == 0` — probe (same observable as
+    `IocpTryPop` on an empty port).
+  - `timeout_ticks == kIocpTimeoutInfinite` — loop on
+    `CondvarWait` until a producer signals or the port closes.
+  - any other value — single `CondvarWaitTimeout` pass (the
+    legacy `iocp_job` carries the same "best-effort timeout
+    budget" sub-GAP; the consolidation slice can sharpen this
+    to a deadline loop without changing the API).
+- **Close semantics:** `IocpClose` now flips a `closed` flag,
+  broadcasts `not_empty` to wake every parked consumer, and
+  resets the ring. After close, `IocpTryPost` returns false
+  and `IocpWait` returns false even with an infinite timeout
+  — matches the Win32 contract where closing the port
+  abandons every pending wait.
+- **Test-phase migration:** `IocpSelfTest` moved from
+  `Phase::Heap` to `Phase::Sched`. The test now drives the
+  blocking-wait variants (probe, drain-after-post,
+  finite-timeout on empty, post-close refuses-post), all of
+  which require `sched::Mutex` / `sched::Condvar` and
+  therefore the scheduler online. The KMalloc-driven
+  KObject-promotion half of the test is still valid at
+  Phase::Sched (heap stays up across phases).
+- **Why not a multi-task self-test:** A producer task that
+  signals a consumer would prove the wake path end-to-end,
+  but the boot self-tests run single-threaded for
+  deterministic ordering. The contended path is exercised by
+  the existing `kmailbox-contention` stress test that uses
+  the same Mutex/Condvar pattern; an Iocp-specific contention
+  test is a follow-up if the consolidation slice surfaces a
+  regression.
+- **Scope:** This commit lands the blocking-wait primitive
+  only. The remaining two roadmap bullets — consolidating
+  the legacy `iocp_job.cpp` onto the new port, and adding a
+  user-facing `SYS_IOCP_POST` for
+  `PostQueuedCompletionStatus` — stay open. The roadmap row
+  is rewritten to reflect the new state: the primitive is
+  ready, the migration is the next slice.
+- **Related roadmap track(s):** Tier-1/2 follow-ups — IOCP
+  primitive consolidation + blocking wait. Blocking wait
+  graduates; consolidation + `SYS_IOCP_POST` remain.

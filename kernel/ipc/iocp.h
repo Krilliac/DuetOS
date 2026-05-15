@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ipc/kobject.h"
+#include "sched/sched.h"
 #include "util/result.h"
 #include "util/types.h"
 
@@ -80,6 +81,14 @@ struct IocpPort
     /// callers.
     KObject base;
 
+    /// Producer / consumer serialisation. Every ring mutation
+    /// (post, pop, close) acquires this mutex; the condvar pairs
+    /// with it for blocking-wait — drops the mutex, parks on
+    /// `not_empty`, re-acquires on wake. Zero-init is the empty
+    /// state; no explicit init needed.
+    sched::Mutex inner;
+    sched::Condvar not_empty;
+
     // Fixed-cap inline ring. v0 doesn't need a heap-allocated
     // variable-depth queue — every realistic Win32 IOCP user
     // pulls completions fast enough that 32 in-flight is
@@ -92,7 +101,18 @@ struct IocpPort
     u32 tail;              // Next pop slot.
     u32 count;             // 0..kCapacity.
     u32 association_count; // # of file handles associated, for diag.
+    /// True after `IocpClose` ran. `IocpWait` wakes blocked
+    /// consumers when this flips and returns false from then on
+    /// — the Win32 ABI maps that to STATUS_ABANDONED_WAIT_0 /
+    /// ERROR_ABANDONED_WAIT_0 in a future consolidation slice.
+    bool closed;
+    u8 _pad[7];
 };
+
+/// Sentinel `timeout_ticks` argument for `IocpWait`: "block
+/// indefinitely until a completion arrives or the port is
+/// closed". Matches Win32 `INFINITE` for GetQueuedCompletionStatus.
+inline constexpr u64 kIocpTimeoutInfinite = ~u64{0};
 
 /// Initialise an IOCP port. Calls through to `KMailboxInit`
 /// with a completion-record-shaped slot size and a v0 fixed
@@ -107,10 +127,22 @@ void IocpInit(IocpPort* port);
 bool IocpTryPost(IocpPort* port, const IocpCompletion& c);
 
 /// Drain one completion from the queue (FIFO). Returns false if
-/// no completion is available. Non-blocking; the blocking
-/// `Wait` variant lands when the syscall surface integrates
-/// with the scheduler's sleep paths.
+/// no completion is available. Non-blocking; pairs with
+/// `IocpWait` for the blocking variant a `GetQueuedCompletionStatus`
+/// thunk consumes.
 bool IocpTryPop(IocpPort* port, IocpCompletion* out);
+
+/// Block until a completion arrives, then drain one (FIFO).
+/// `timeout_ticks`:
+///   - `0`            — behaves exactly like `IocpTryPop` (probe
+///                      and return).
+///   - `kIocpTimeoutInfinite` — wait indefinitely.
+///   - any other      — wait at most `timeout_ticks` scheduler
+///                      timer ticks (one tick = 10 ms at 100 Hz).
+/// Returns true iff a completion was popped into `*out`. Returns
+/// false on timeout or on a port that has been closed. Safe to
+/// call from any kernel context whose task is allowed to block.
+bool IocpWait(IocpPort* port, IocpCompletion* out, u64 timeout_ticks);
 
 /// Tear down a port — drains the queue, zeroes the association
 /// count. Safe to call on an already-clean port. Does NOT free

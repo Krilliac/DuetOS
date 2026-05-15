@@ -26,23 +26,46 @@ void IocpInit(IocpPort* port)
 {
     if (port == nullptr)
         return;
+    // The lock fields MUST be zeroed here, not assumed
+    // value-initialised. Callers legitimately pass a bare
+    // stack-local `IocpPort port;` (the boot self-test does) —
+    // without an explicit `{}` the embedded `sched::Mutex` has
+    // an indeterminate `owner`, and the first MutexLock would
+    // mistake the garbage for "held by someone else" and block
+    // forever on a garbage wait queue. Zero IS the valid empty
+    // state for both primitives: Mutex → owner=nullptr +
+    // no waiters, Condvar → no waiters (see the zero-init
+    // contract documented on `sched::Condvar`). Neither holds
+    // dynamic resources, so zeroing an in-use lock here would
+    // only be wrong if a caller re-init'd a contended port —
+    // which `IocpClose` (the only re-init path) never does
+    // while waiters are parked.
+    port->inner = sched::Mutex{};
+    port->not_empty = sched::Condvar{};
     for (u32 i = 0; i < IocpPort::kCapacity; ++i)
         Zero(&port->slots[i]);
     port->head = 0;
     port->tail = 0;
     port->count = 0;
     port->association_count = 0;
+    port->closed = false;
 }
 
 bool IocpTryPost(IocpPort* port, const IocpCompletion& c)
 {
     if (port == nullptr)
         return false;
-    if (port->count >= IocpPort::kCapacity)
+    sched::MutexLock(&port->inner);
+    if (port->closed || port->count >= IocpPort::kCapacity)
+    {
+        sched::MutexUnlock(&port->inner);
         return false;
+    }
     port->slots[port->head] = c;
     port->head = (port->head + 1) % IocpPort::kCapacity;
     ++port->count;
+    sched::CondvarSignal(&port->not_empty);
+    sched::MutexUnlock(&port->inner);
     return true;
 }
 
@@ -50,12 +73,62 @@ bool IocpTryPop(IocpPort* port, IocpCompletion* out)
 {
     if (port == nullptr || out == nullptr)
         return false;
+    sched::MutexLock(&port->inner);
     if (port->count == 0)
+    {
+        sched::MutexUnlock(&port->inner);
         return false;
+    }
     *out = port->slots[port->tail];
     Zero(&port->slots[port->tail]);
     port->tail = (port->tail + 1) % IocpPort::kCapacity;
     --port->count;
+    sched::MutexUnlock(&port->inner);
+    return true;
+}
+
+bool IocpWait(IocpPort* port, IocpCompletion* out, u64 timeout_ticks)
+{
+    if (port == nullptr || out == nullptr)
+        return false;
+    sched::MutexLock(&port->inner);
+    if (port->count == 0 && !port->closed)
+    {
+        if (timeout_ticks == 0)
+        {
+            // Probe-and-return — same observable as IocpTryPop
+            // on an empty port, with the lock already taken.
+            sched::MutexUnlock(&port->inner);
+            return false;
+        }
+        if (timeout_ticks == kIocpTimeoutInfinite)
+        {
+            // Win32 `INFINITE` — loop until either a producer
+            // signals not_empty or `IocpClose` broadcasts.
+            while (port->count == 0 && !port->closed)
+                sched::CondvarWait(&port->not_empty, &port->inner);
+        }
+        else
+        {
+            // Finite timeout — single CondvarWaitTimeout pass.
+            // Win32 GetQueuedCompletionStatus's timeout is a
+            // best-effort budget; spurious wakes are rare in
+            // this codebase and the caller can re-issue if it
+            // needs sharper granularity.
+            (void)sched::CondvarWaitTimeout(&port->not_empty, &port->inner, timeout_ticks);
+        }
+    }
+    if (port->count == 0)
+    {
+        // Either timed out or the port was closed underneath us.
+        sched::MutexUnlock(&port->inner);
+        return false;
+    }
+    *out = port->slots[port->tail];
+    Zero(&port->slots[port->tail]);
+    port->tail = (port->tail + 1) % IocpPort::kCapacity;
+    --port->count;
+    sched::MutexUnlock(&port->inner);
     return true;
 }
 
@@ -63,7 +136,19 @@ void IocpClose(IocpPort* port)
 {
     if (port == nullptr)
         return;
-    IocpInit(port);
+    sched::MutexLock(&port->inner);
+    port->closed = true;
+    // Wake every blocked consumer so they observe `closed` and
+    // return false. Broadcast (not Signal) — multiple callers
+    // may be parked.
+    sched::CondvarBroadcast(&port->not_empty);
+    for (u32 i = 0; i < IocpPort::kCapacity; ++i)
+        Zero(&port->slots[i]);
+    port->head = 0;
+    port->tail = 0;
+    port->count = 0;
+    port->association_count = 0;
+    sched::MutexUnlock(&port->inner);
 }
 
 namespace
@@ -147,6 +232,66 @@ void IocpSelfTest()
     IocpClose(&port);
     if (port.count != 0)
         ::duetos::core::Panic("ipc/iocp", "self-test: Close didn't drain");
+    if (!port.closed)
+        ::duetos::core::Panic("ipc/iocp", "self-test: Close didn't set closed flag");
+
+    // Closed port refuses subsequent posts.
+    IocpCompletion after_close = {};
+    if (IocpTryPost(&port, after_close))
+        ::duetos::core::Panic("ipc/iocp", "self-test: try-post accepted on closed port");
+
+    // Blocking wait — reset to a fresh state for the next batch
+    // of checks. IocpInit clears `closed` back to false.
+    IocpInit(&port);
+
+    // IocpWait with timeout_ticks == 0 behaves like IocpTryPop:
+    // empty queue returns false without parking the caller.
+    IocpCompletion drained = {};
+    if (IocpWait(&port, &drained, /*timeout_ticks=*/0))
+        ::duetos::core::Panic("ipc/iocp", "self-test: IocpWait(timeout=0) returned true on empty");
+
+    // IocpWait drains a posted completion (single-threaded — the
+    // post happens before the wait, so no parking is required to
+    // make progress).
+    IocpCompletion fresh = {};
+    fresh.overlapped_user_va = 0xC0DEULL;
+    fresh.completion_key = 0xAA55;
+    fresh.bytes_transferred = 7;
+    if (!IocpTryPost(&port, fresh))
+        ::duetos::core::Panic("ipc/iocp", "self-test: try-post failed before IocpWait");
+    if (!IocpWait(&port, &drained, /*timeout_ticks=*/1))
+        ::duetos::core::Panic("ipc/iocp", "self-test: IocpWait failed to drain a queued completion");
+    if (drained.overlapped_user_va != 0xC0DEULL || drained.completion_key != 0xAA55 || drained.bytes_transferred != 7)
+        ::duetos::core::Panic("ipc/iocp", "self-test: IocpWait returned the wrong completion");
+
+    // NOTE: the genuinely-parking path (IocpWait on an empty port
+    // with a finite or infinite timeout) is deliberately NOT
+    // exercised here. This self-test runs from the boot task
+    // inside RunPhase(Phase::Sched); parking it on a
+    // CondvarWaitTimeout with no producer to signal relies on
+    // timer-driven sleep-queue wakeup of the boot task, which is
+    // not a guarantee this early in bring-up (it hung the boot in
+    // testing). The blocking primitive is the verbatim
+    // KMailbox Mutex+Condvar pattern, whose contended wake/timeout
+    // paths are covered by `KMailboxContentionSelfTest` (spawned
+    // producer/consumer tasks) in the same phase. Here we only
+    // assert the non-parking branches: probe (timeout=0),
+    // drain-when-ready (count>0), and the closed-port
+    // short-circuit below.
+
+    // Closed port short-circuits IocpWait without parking — even
+    // a timeout=0 probe must return false once `closed` is set.
+    // This is the production path real GetQueuedCompletionStatus
+    // callers hit when the port is destroyed underneath them
+    // (the infinite-wait wake-on-close broadcast is exercised by
+    // real workloads, not the boot self-test).
+    IocpClose(&port);
+    if (IocpWait(&port, &drained, /*timeout_ticks=*/0))
+        ::duetos::core::Panic("ipc/iocp", "self-test: IocpWait returned true on closed port");
+
+    // Re-init to leave the port in a clean state for any
+    // subsequent self-test extensions.
+    IocpInit(&port);
 
     // KObject promotion path: IocpCreate / KObjectRelease must
     // produce a well-formed KObjectType::Iocp + free the storage

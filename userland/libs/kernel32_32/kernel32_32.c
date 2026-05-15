@@ -408,11 +408,46 @@ __declspec(dllexport) BOOL __stdcall InitializeCriticalSectionAndSpinCount(void*
 }
 
 /* ------------------------------------------------------------------
+ * Per-process app-compat policy cache (mirrors kernel32.c)
+ *
+ * `SYS_COMPAT_QUERY = 206` returns the packed CompatPolicyBits
+ * the PE loader baked in at spawn time. The policy never mutates,
+ * so we read it once and cache the result. Bit layout matches
+ * `enum CompatPolicyBits` in kernel/syscall/syscall.h — every
+ * relevant bit fits in the low byte, so the 32-bit syscall
+ * trampoline's eax return is wide enough.
+ * ------------------------------------------------------------------ */
+#define DUETOS_COMPAT_BIT_IGNORE_DEBUGGER (1u << 0)
+#define DUETOS_COMPAT_BIT_IGNORE_ETW (1u << 1)
+#define DUETOS_COMPAT_BIT_FAKE_OK_STACK_GUARANTEE (1u << 2)
+#define DUETOS_COMPAT_BIT_APPLIED (1u << 3)
+/* Top bit (within a u32) marks the cache primed; reserved high
+ * so the kernel never sets it on its own. */
+#define DUETOS_COMPAT_CACHE_PRIMED (1u << 31)
+
+static unsigned g_duet_compat_cache = 0;
+
+static unsigned duet_compat_query(void)
+{
+    unsigned cached = g_duet_compat_cache;
+    if ((cached & DUETOS_COMPAT_CACHE_PRIMED) != 0)
+        return cached;
+    unsigned bits = (unsigned)duet_syscall0(206) | DUETOS_COMPAT_CACHE_PRIMED;
+    g_duet_compat_cache = bits;
+    return bits;
+}
+
+/* ------------------------------------------------------------------
  * IsDebuggerPresent / safe-ignore shims
  * ------------------------------------------------------------------ */
 
 __declspec(dllexport) BOOL __stdcall IsDebuggerPresent(void)
 {
+    /* See kernel32.c::IsDebuggerPresent for the rationale: in v0
+     * the production-build answer is FALSE either way; the policy
+     * consultation wires the contract for a future debugger. */
+    if ((duet_compat_query() & DUETOS_COMPAT_BIT_IGNORE_DEBUGGER) != 0)
+        return 0;
     return 0;
 }
 

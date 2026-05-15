@@ -309,15 +309,15 @@ bool VirtioBlkProbe(const VirtioPciLayout& L)
 
     KLOG_INFO_2V("drivers/virtio/blk", "attached as block device", "sectors", capacity, "sector-size",
                  static_cast<u64>(sector_size));
-    // GAP: VIRTIO_BLK_T_FLUSH is not yet exposed — the
-    // BlockOps vtable doesn't carry a `flush` slot today.
-    // Single-in-flight request assumption: shared header page
-    // + no per-call locking means concurrent BlockDeviceRead /
-    // Write calls would corrupt each other's descriptors. Boot-
-    // smoke workload is single-thread, so this is observed-safe
-    // for v0; a future slice that issues concurrent I/O needs
-    // either a per-call header alloc or a spinlock around the
-    // request path.
+    // GAP: single-in-flight request assumption — the shared
+    // header page + no per-call locking means concurrent
+    // BlockDeviceRead / Write / Flush calls would corrupt each
+    // other's descriptors. Boot-smoke workload is single-thread,
+    // so this is observed-safe for v0; a future slice that
+    // issues concurrent I/O needs either a per-call header alloc
+    // or a serialising mutex around the request path. Read /
+    // Write / Flush are all wired through the BlockOps vtable
+    // today.
     return true;
 }
 
