@@ -9005,3 +9005,67 @@ a real C++ caller now goes through its FFI.
   section trims the "virtio-net RX queue + NIC registration"
   bullet. Next adjacent piece is IRQ wire-up across the
   per-class probes (rng, blk, net, console, balloon).
+
+## 2026-05-15 — IOCP blocking-wait primitive on the KObject-shaped IocpPort
+
+- **Context:** The KObject-shaped `IocpPort` in
+  `kernel/ipc/iocp.{h,cpp}` shipped two releases ago as a clean
+  consolidation target for the legacy
+  `kernel/subsystems/win32/iocp_job` implementation, but only
+  exposed non-blocking `IocpTryPost` / `IocpTryPop`. Every
+  `GetQueuedCompletionStatus` caller that wanted a finite or
+  infinite wait still had to stay on the legacy
+  `iocp_job.cpp::SysIocpRemove` path, which carries its own
+  per-port `sched::WaitQueue` + an ad-hoc IRQ-off acquire
+  protocol. Two divergent blocking-wait paths blocked the
+  promised consolidation slice.
+- **Decision:** Bring the new `IocpPort` to parity with the
+  legacy port's blocking shape by embedding a `sched::Mutex` +
+  a `sched::Condvar not_empty` directly on the struct (mirroring
+  `KMailbox`'s pattern verbatim — same two waiters / one
+  primitive design). Every ring mutation (post, pop, wait,
+  close) now serialises through the mutex; consumers park on
+  `not_empty` via `CondvarWait` / `CondvarWaitTimeout` depending
+  on the caller-supplied timeout.
+- **Public API:** `IocpWait(port, out, timeout_ticks)`. Three
+  modes mirror Win32 GetQueuedCompletionStatus:
+  - `timeout_ticks == 0` — probe (same observable as
+    `IocpTryPop` on an empty port).
+  - `timeout_ticks == kIocpTimeoutInfinite` — loop on
+    `CondvarWait` until a producer signals or the port closes.
+  - any other value — single `CondvarWaitTimeout` pass (the
+    legacy `iocp_job` carries the same "best-effort timeout
+    budget" sub-GAP; the consolidation slice can sharpen this
+    to a deadline loop without changing the API).
+- **Close semantics:** `IocpClose` now flips a `closed` flag,
+  broadcasts `not_empty` to wake every parked consumer, and
+  resets the ring. After close, `IocpTryPost` returns false
+  and `IocpWait` returns false even with an infinite timeout
+  — matches the Win32 contract where closing the port
+  abandons every pending wait.
+- **Test-phase migration:** `IocpSelfTest` moved from
+  `Phase::Heap` to `Phase::Sched`. The test now drives the
+  blocking-wait variants (probe, drain-after-post,
+  finite-timeout on empty, post-close refuses-post), all of
+  which require `sched::Mutex` / `sched::Condvar` and
+  therefore the scheduler online. The KMalloc-driven
+  KObject-promotion half of the test is still valid at
+  Phase::Sched (heap stays up across phases).
+- **Why not a multi-task self-test:** A producer task that
+  signals a consumer would prove the wake path end-to-end,
+  but the boot self-tests run single-threaded for
+  deterministic ordering. The contended path is exercised by
+  the existing `kmailbox-contention` stress test that uses
+  the same Mutex/Condvar pattern; an Iocp-specific contention
+  test is a follow-up if the consolidation slice surfaces a
+  regression.
+- **Scope:** This commit lands the blocking-wait primitive
+  only. The remaining two roadmap bullets — consolidating
+  the legacy `iocp_job.cpp` onto the new port, and adding a
+  user-facing `SYS_IOCP_POST` for
+  `PostQueuedCompletionStatus` — stay open. The roadmap row
+  is rewritten to reflect the new state: the primitive is
+  ready, the migration is the next slice.
+- **Related roadmap track(s):** Tier-1/2 follow-ups — IOCP
+  primitive consolidation + blocking wait. Blocking wait
+  graduates; consolidation + `SYS_IOCP_POST` remain.

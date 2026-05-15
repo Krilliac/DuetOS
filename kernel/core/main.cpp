@@ -1067,20 +1067,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                            KernelHeapSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
-        // IocpSelfTest's KObject-promotion half does IocpCreate
-        // -> KMalloc, so it has to land after KernelHeapInit.
-        // Registered here so the ordering is enforced by the
-        // phase mechanism rather than by line-number proximity
-        // to the imperative early-self-test cluster (where it
-        // used to sit, and where it consistently OOM-panicked
-        // on every boot because the heap wasn't online yet).
-        duetos::core::InitcallRegister(duetos::core::Phase::Heap, "iocp-selftest",
-                                       []()
-                                       {
-                                           SerialWrite("[boot] Exercising IOCP completion-port primitive.\n");
-                                           duetos::ipc::IocpSelfTest();
-                                           return duetos::core::Result<void>{};
-                                       });
+        // IocpSelfTest moved to Phase::Sched — alongside the
+        // other IPC primitives that use `sched::Mutex` /
+        // `sched::Condvar`. IocpTryPost / IocpTryPop / IocpWait
+        // serialise through the embedded mutex (blocking-wait
+        // support, plan IOCP-followup); the scheduler must be
+        // online for those calls to deadlock-detect correctly.
+        // The IocpCreate -> KMalloc half is still valid here
+        // (heap is up at Phase::Sched too), so the test runs end
+        // to end at the later phase.
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Heap);
 
@@ -2435,6 +2430,20 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                        []()
                                        {
                                            duetos::mm::SlabSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // IOCP completion-port primitive (`kernel/ipc/iocp.{h,cpp}`).
+        // Moved to Phase::Sched because the post / pop / wait paths
+        // serialise through an embedded `sched::Mutex` and the
+        // blocking-wait variant parks on a `sched::Condvar` —
+        // both require the scheduler to be online. KMalloc is up
+        // by this phase too, so the KObject-promotion half still
+        // runs end to end.
+        duetos::core::InitcallRegister(duetos::core::Phase::Sched, "iocp-selftest",
+                                       []()
+                                       {
+                                           SerialWrite("[boot] Exercising IOCP completion-port primitive.\n");
+                                           duetos::ipc::IocpSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
         // Deliberate fault-injection harness (kernel/diag/fault_inject).

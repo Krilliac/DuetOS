@@ -1435,10 +1435,10 @@ it."
   - IRQ wire-up across the board (rng, blk, net, console,
     balloon).
 
-### IOCP — primitive consolidation + blocking wait
+### IOCP — primitive consolidation
 
-- **Today:** two parallel IOCP infrastructures exist in
-  tree:
+- **Today:** two parallel IOCP infrastructures still exist
+  in tree but the newer one is now feature-complete:
   - The legacy `kernel/subsystems/win32/iocp_job.{h,cpp}`
     impl provides `SYS_IOCP_CREATE/SET/REMOVE/CLOSE`
     (numbers 159–162) — wire-compatible with the Win32
@@ -1447,20 +1447,39 @@ it."
     primitive — `IocpPort` embeds a `KObject base` (type
     `KObjectType::Iocp = 7`); `IocpCreate` allocates via
     kheap + `KObjectInit`; destroy callback frees on last
-    release. Boot self-test covers FIFO + overflow +
-    KObject round-trip.
+    release. `IocpPort` now carries an embedded
+    `sched::Mutex` + `sched::Condvar not_empty`; every
+    post / pop / wait serialises through the mutex, and
+    `IocpWait(port, out, timeout_ticks)` provides the
+    `GetQueuedCompletionStatus`-shaped blocking variant
+    (`0` = probe, `kIocpTimeoutInfinite` = block
+    indefinitely, any other value = block at most N
+    ticks). `IocpClose` flips a `closed` flag and
+    broadcasts `not_empty` so blocked consumers wake and
+    return false. Boot self-test covers FIFO + overflow +
+    KObject round-trip + `closed`-rejects-post + the
+    three IocpWait paths (probe, drain-after-post,
+    finite-timeout on empty). Self-test moved to
+    `Phase::Sched` because the new mutex/condvar paths
+    require the scheduler online.
 - **Lands:**
   - **Consolidation:** migrate `iocp_job.cpp` onto the
     new KObject-shaped `IocpPort` so the per-process
     storage sits in `kobj_handles` alongside KMutex /
-    KEvent (uniform handle-table semantics).
-  - **Blocking wait** (`GetQueuedCompletionStatus` with
-    non-zero timeout) — needs a condvar in `IocpPort`
-    (mirror `KMailbox`'s `not_empty`).
+    KEvent (uniform handle-table semantics). The new
+    primitive is wire-compatible with the
+    `SetIoCompletion` / `RemoveIoCompletion[Ex]` shapes
+    the legacy `iocp_job` ports expose — every per-call
+    field has a slot on `IocpCompletion`, and the
+    blocking-wait semantics line up directly with
+    `IocpWait`. The migration is a re-routing patch in
+    the four `SysIocp*` syscalls.
   - A `SYS_IOCP_POST` (synthetic completion injection,
     `PostQueuedCompletionStatus`) to round out the
     Win32 ABI — the legacy `iocp_job` surface doesn't
-    expose this yet.
+    expose this yet; the new `IocpTryPost` already does
+    the right thing from kernel context and the
+    syscall is a thin Win32-shaped wrapper.
 
 ### A/B kernel slots — installer + GRUB cfg
 
