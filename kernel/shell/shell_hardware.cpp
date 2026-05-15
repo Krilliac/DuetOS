@@ -45,6 +45,7 @@
 #include "drivers/gpu/bochs_vbe.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
+#include "drivers/gpu/dpms.h"
 #include "drivers/gpu/edid.h"
 #include "drivers/gpu/gpu.h"
 #include "drivers/gpu/virtio_gpu.h"
@@ -1691,6 +1692,59 @@ void CmdVbe(u32 argc, char** argv)
     else
     {
         ConsoleWriteln("VBE: mode-set rejected (dimensions exceed max, bpp unsupported, or no BGA)");
+    }
+}
+
+void CmdDpms(u32 argc, char** argv)
+{
+    using duetos::drivers::gpu::DpmsGet;
+    using duetos::drivers::gpu::DpmsSetState;
+    using duetos::drivers::gpu::DpmsState;
+    using duetos::drivers::gpu::DpmsStateName;
+    using duetos::drivers::gpu::DpmsTransitionCount;
+
+    if (argc < 2)
+    {
+        ConsoleWrite("DPMS: state=");
+        ConsoleWrite(DpmsStateName(DpmsGet()));
+        ConsoleWrite("  driver-hook transitions=");
+        WriteU64Dec(DpmsTransitionCount());
+        ConsoleWriteChar('\n');
+        ConsoleWriteln("USAGE: DPMS ON|STANDBY|SUSPEND|OFF");
+        ConsoleWriteln("  ON       both syncs active (full power)");
+        ConsoleWriteln("  STANDBY  H-sync off (~80% power)");
+        ConsoleWriteln("  SUSPEND  V-sync off (~30% power)");
+        ConsoleWriteln("  OFF      both syncs off (panel sleep, <8W)");
+        return;
+    }
+
+    DpmsState target;
+    if (StrEq(argv[1], "on") || StrEq(argv[1], "ON"))
+        target = DpmsState::On;
+    else if (StrEq(argv[1], "standby") || StrEq(argv[1], "STANDBY"))
+        target = DpmsState::Standby;
+    else if (StrEq(argv[1], "suspend") || StrEq(argv[1], "SUSPEND"))
+        target = DpmsState::Suspend;
+    else if (StrEq(argv[1], "off") || StrEq(argv[1], "OFF"))
+        target = DpmsState::Off;
+    else
+    {
+        ConsoleWrite("DPMS: UNKNOWN STATE '");
+        ConsoleWrite(argv[1]);
+        ConsoleWriteln("' (ON|STANDBY|SUSPEND|OFF)");
+        return;
+    }
+
+    if (DpmsSetState(target))
+    {
+        ConsoleWrite("DPMS: -> ");
+        ConsoleWriteln(DpmsStateName(target));
+    }
+    else
+    {
+        ConsoleWrite("DPMS: transition to ");
+        ConsoleWrite(DpmsStateName(target));
+        ConsoleWriteln(" VETOED by driver hook (state unchanged)");
     }
 }
 

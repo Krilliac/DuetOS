@@ -366,6 +366,7 @@ void CmdHw(u32 argc, char** argv);
 void CmdGpu();
 void CmdGfx(u32 argc, char** argv);
 void CmdVbe(u32 argc, char** argv);
+void CmdDpms(u32 argc, char** argv);
 void CmdMonitor(u32 argc, char** argv);
 
 // ---------------------------------------------------------------
