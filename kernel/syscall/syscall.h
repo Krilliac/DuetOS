@@ -2055,6 +2055,41 @@ enum SyscallNumber : u64
     // only invokes this syscall on miss, so the existing
     // preloaded-DLL fast path stays untouched.
     SYS_DLL_LOAD_FROM_PATH = 205,
+
+    // SYS_COMPAT_QUERY — return the per-process app-compat policy
+    // flags as a packed bitmask. No args (every other register is
+    // ignored). Returns:
+    //
+    //   bit 0  kCompatBitIgnoreDebugger          ignore_debugger_present
+    //   bit 1  kCompatBitIgnoreEtw               ignore_etw
+    //   bit 2  kCompatBitFakeOkStackGuarantee    fake_ok_stack_guarantee
+    //   bit 3  kCompatBitApplied                 sidecar parsed at least once
+    //   bits 4..63                               reserved, always zero
+    //
+    // No cap is gated on this call: a process is allowed to read
+    // its own compat-policy flags, and the kernel never reveals
+    // anything else here. Userland DLLs (kernel32, advapi32, …)
+    // cache the result at first call and consult the cached bits
+    // on every subsequent per-API decision — see the pattern
+    // documented above the cache in `userland/libs/kernel32/`.
+    //
+    // ABI is stable from this commit forward: bit assignments
+    // are part of `enum CompatPolicyBits` below and won't be
+    // reshuffled. New flags append at bit 4 and beyond.
+    SYS_COMPAT_QUERY = 206,
+};
+
+// Stable bit assignments for SYS_COMPAT_QUERY's return value.
+// Mirrors the boolean fields on `CompatPolicy` in
+// `kernel/loader/compat_shim.h`; the userland-side DLLs see this
+// enum (via the syscall return), the kernel-side handler packs
+// the boolean fields into these bits.
+enum CompatPolicyBits : u64
+{
+    kCompatBitIgnoreDebugger = 1ULL << 0,
+    kCompatBitIgnoreEtw = 1ULL << 1,
+    kCompatBitFakeOkStackGuarantee = 1ULL << 2,
+    kCompatBitApplied = 1ULL << 3,
 };
 
 // Inheritable stdio bundle for SYS_PROCESS_SPAWN_EX. Each entry

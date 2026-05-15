@@ -8870,3 +8870,71 @@ a real C++ caller now goes through its FFI.
   expansion (img_meta_rust grows from 3 to 4 image-format
   validators). End-user-features "PNG / JPEG / PDF / video
   viewers" — JPEG now has its header foundation.
+
+## 2026-05-15 — App-compat policy wired into per-Win32-API hooks via SYS_COMPAT_QUERY
+
+- **Context:** The per-PE sidecar policy infrastructure
+  (`compat::CompatPolicy`, `ApplySidecar`, `ShouldIgnoreDebugger`
+  / `ShouldIgnoreEtw` / `ShouldFakeOkStackGuarantee`) has shipped
+  for two releases. A boot self-test validated the parser, but
+  no user-mode call site consulted the resulting flags — the
+  policy was effectively dead infrastructure.
+- **Decision:** Expose the policy to userland DLLs through a new
+  no-arg syscall, `SYS_COMPAT_QUERY = 206`. The handler returns
+  a packed `CompatPolicyBits` mask (bit 0 = ignore_debugger,
+  bit 1 = ignore_etw, bit 2 = fake_ok_stack_guarantee, bit 3 =
+  sidecar applied; the remaining 60 bits are reserved). The
+  call is unconditional — no cap is required, because a process
+  is always allowed to read its own policy snapshot and the
+  kernel reveals nothing else through the surface.
+- **Caching:** Per-process userland DLLs (kernel32.dll and the
+  PE32 sibling kernel32_32.dll) read the bitmask once on first
+  consultation and cache it for the process's lifetime. The
+  cache lives in a DLL-global static. The high bit (bit 63 in
+  64-bit, bit 31 in 32-bit) doubles as a "primed" sentinel so
+  the first call distinguishes "policy is zero" from "policy
+  not yet read." Multiple threads racing the first call get the
+  same answer; the worst case is two syscall trips on cold
+  start. The policy never mutates after spawn, so cache
+  invalidation isn't a concern in v0.
+- **Wired sites:**
+  - `kernel32!IsDebuggerPresent` consults
+    `DUETOS_COMPAT_BIT_IGNORE_DEBUGGER`. DuetOS has no debugger
+    surface in v0, so the production-build answer is FALSE
+    either way; the consultation wires the documented contract
+    for a future debugger surface.
+  - `kernel32!SetThreadStackGuarantee` is a new export. It
+    consults `DUETOS_COMPAT_BIT_FAKE_OK_STACK_GUARANTEE` —
+    policy set returns TRUE without touching the stack, policy
+    clear returns FALSE + `ERROR_INVALID_PARAMETER`. The PE32+
+    `kernel32_32` sibling mirrors the policy cache.
+- **ETW family unchanged:** The roadmap listed `advapi32!Event*`
+  as a wire-up target, but the existing thunks_table.inc rows
+  for `EventRegister` / `EventWrite` / `EventWriteTransfer` /
+  `EventUnregister` / `EventEnabled` already route to
+  `kOffPinReturn0` (= 0 = `ERROR_SUCCESS`). That's
+  semantically identical to "silently drop" — the policy-on
+  path. No change needed; documenting the alignment here
+  prevents a future slice from accidentally re-introducing a
+  divergent ERROR_INVALID_PARAMETER return.
+- **Why a syscall, not an aux-vector / PEB field:** The Win32
+  PEB shape is fixed by external ABI; we'd be carving out a
+  DuetOS-private slot inside someone else's published struct.
+  A dedicated syscall keeps the surface visible in
+  `syscall_names.def` + `cap_table.def` and lets future tooling
+  (`pe-triage`, `loglevel`, the live wiki) introspect the
+  policy by tracing the call.
+- **Bit-layout stability:** `enum CompatPolicyBits` in
+  `kernel/syscall/syscall.h` is the canonical source. The
+  userland DLL macros (`DUETOS_COMPAT_BIT_*`) mirror it
+  verbatim and MUST stay in sync; reshuffling bits is an ABI
+  break. New flags append at bit 4 and above.
+- **Drift fix:** While auditing syscall_names.def for the new
+  row, the previous slice's `SYS_DLL_LOAD_FROM_PATH = 205` was
+  found missing from the names table. The static_assert in
+  syscall_names.h only fires for rows IN the def, so the
+  drift was silent. Both rows are now in place.
+- **Related roadmap track(s):** Tier-1/2 follow-ups —
+  "App-compat per-Win32-API hooks" graduates. Future per-API
+  hooks (additional STUB-shaped semantics that flip cleanly on
+  a per-process flag) reuse the same cache pattern.

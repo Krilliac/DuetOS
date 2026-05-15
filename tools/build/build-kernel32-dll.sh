@@ -305,6 +305,7 @@ set +e
     /export:InitOnceExecuteOnce \
     /export:CreateThread \
     /export:ResumeThread \
+    /export:SetThreadStackGuarantee \
     /export:GetExitCodeThread \
     /export:ExitThread \
     /export:GetExitCodeProcess \

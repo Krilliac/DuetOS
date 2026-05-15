@@ -137,6 +137,14 @@
     // SetConsoleCtrlHandler — pretend we registered.
     {"kernel32.dll", "SetConsoleCtrlHandler", kOffPinReturn1},
 
+    // SetThreadStackGuarantee — userland kernel32.dll implements
+    // the real consult-the-compat-policy path. This flat-stub row
+    // is only reached when the userland DLL preload fails; in that
+    // case we have no per-process state to consult, so the safe
+    // fallback is "reject the request" (= return 0, same shape as
+    // the policy-off path in the userland impl).
+    {"kernel32.dll", "SetThreadStackGuarantee", kOffPinReturn0},
+
     // file I/O. Real handle table on Process,
     // backed by SYS_FILE_OPEN / SYS_FILE_READ / SYS_FILE_CLOSE
     // / SYS_FILE_SEEK. CloseHandle is the file-close path —

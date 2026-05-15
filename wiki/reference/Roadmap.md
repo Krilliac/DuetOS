@@ -1445,32 +1445,6 @@ it."
   - IRQ wire-up across the board (rng, blk, net, console,
     balloon).
 
-### App-compat — per-Win32-API hooks
-
-- **Today:** the policy infrastructure (`compat::CompatPolicy`,
-  `ApplySidecar`, `ShouldIgnoreDebugger` /
-  `ShouldIgnoreEtw` / `ShouldFakeOkStackGuarantee`) is in tree
-  and verified by a boot self-test. No per-API call site
-  consults it yet.
-- **Lands:** for each row in
-  [`Win32-Surface-Status`](Win32-Surface-Status.md) that has a
-  STUB whose semantics flip cleanly on a per-process flag,
-  add a policy consultation. First targets:
-  - `kernel32!IsDebuggerPresent` →
-    `compat::ShouldIgnoreDebugger(CurrentProcess())` for the
-    return value.
-  - The ETW family (`advapi32!EventWrite*`,
-    `EventRegister*`) → `compat::ShouldIgnoreEtw` to silently
-    drop instead of returning `ERROR_INVALID_PARAMETER`.
-  - `kernel32!SetThreadStackGuarantee` →
-    `compat::ShouldFakeOkStackGuarantee` to return TRUE
-    without touching the stack.
-- **Pattern:** the per-call read is one `if (...)` branch.
-  Avoid funneling through a syscall every call — the policy
-  is fixed for a process's lifetime, so DLLs can cache the
-  flags at first call. The cache invalidation story for
-  process re-exec is a v1 concern, not v0.
-
 ### IOCP — primitive consolidation + blocking wait
 
 - **Today:** two parallel IOCP infrastructures exist in

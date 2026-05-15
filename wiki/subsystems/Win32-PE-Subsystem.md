@@ -101,18 +101,17 @@ Per-process cost: ~96 frames for the preloaded DLL set.
   printf, file I/O, registry queries — since Phase 4 / 5.
 - **`windows-kill.exe`** (real shipped third-party Windows binary) —
   since the end of Phase 3.
-- **`unity_engine.exe`** (real Unity 2022 LTS standalone launcher,
-  vendored from NSMB-MarioVsLuigi v2.1.1.0). 72 imports across
-  KERNEL32.dll + UnityPlayer.dll resolve cleanly; CRT bootstrap
-  walks PEB + PEB_LDR_DATA (set up by the PE loader's TEB
-  scaffolding); `UnityMain2` returns through the catch-all NO-OP;
-  process exits with `rc=0`. The boot transcript carries a
-  `[ring3] pe spawn name="ring3-unity"` line followed by
-  `[I] sys : exit rc val=0x0 (0)` and `[proc] destroy
-  ring3-unity` — no #PF, no task-kill. See
-  [`userland/apps/unity_engine/README.md`](../../userland/apps/unity_engine/README.md)
-  for the per-import inventory and the three loader fixes that
-  unlocked it.
+- **`unity_engine.exe`** (real Unity 2022 LTS standalone launcher)
+  ran end-to-end during Phase 5 — 72 imports across KERNEL32.dll
+  + UnityPlayer.dll resolved cleanly, CRT bootstrap walked
+  PEB + PEB_LDR_DATA (set up by the PE loader's TEB scaffolding),
+  `UnityMain2` returned through the catch-all NO-OP, process
+  exited `rc=0` with no #PF or task-kill. The binary itself
+  was vendored at that time but has since been removed
+  (no-vendored-binaries policy, commit ceaf972) — the loader
+  fixes it forced through stay in tree and the same
+  invocation works against a binary the operator drops into
+  FAT32 `/lib/` at boot.
 - **Windowed Win32 PEs** (`windowed_hello`) — Phase 6, end-to-end on
   every boot.
 - **Live Internet** (DNS + TCP to a real Internet host) — Phase 6.

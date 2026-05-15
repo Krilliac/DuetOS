@@ -105,6 +105,11 @@ bool ShouldIgnoreDebugger(const Process* proc);
 bool ShouldIgnoreEtw(const Process* proc);
 bool ShouldFakeOkStackGuarantee(const Process* proc);
 
+/// Pack the policy flags into the bit layout SYS_COMPAT_QUERY
+/// returns to userland (`enum CompatPolicyBits` in
+/// `kernel/syscall/syscall.h`). nullptr-process safe: returns 0.
+u64 QueryPolicyBits(const Process* proc);
+
 /// Boot-time check: builds a tiny in-memory sidecar through
 /// `ApplyBuffer`, validates every recognised key flipped its
 /// flag, then resets the policy. Panics on any mismatch.

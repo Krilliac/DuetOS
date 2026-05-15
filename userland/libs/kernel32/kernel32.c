@@ -127,6 +127,47 @@ __declspec(dllexport) WIN32_NORETURN BOOL TerminateProcess(HANDLE hProcess, UINT
 }
 
 /* ------------------------------------------------------------------
+ * Per-process app-compat policy cache
+ *
+ * `SYS_COMPAT_QUERY = 206` returns the packed CompatPolicyBits the
+ * PE loader baked in at spawn time (sidecar `<exe>.duetcompat`).
+ * The policy never mutates for a process's lifetime, so we read it
+ * once on first consultation and serve every subsequent call from
+ * cache — see the pattern note in
+ * `wiki/reference/Roadmap.md#app-compat--per-win32-api-hooks`.
+ *
+ * Bit layout MUST match `enum CompatPolicyBits` in
+ * kernel/syscall/syscall.h. A breaking change there breaks every
+ * shim below.
+ * ------------------------------------------------------------------ */
+#define DUETOS_COMPAT_BIT_IGNORE_DEBUGGER (1ull << 0)
+#define DUETOS_COMPAT_BIT_IGNORE_ETW (1ull << 1)
+#define DUETOS_COMPAT_BIT_FAKE_OK_STACK_GUARANTEE (1ull << 2)
+#define DUETOS_COMPAT_BIT_APPLIED (1ull << 3)
+/* Top bit marks the cache primed. Reserved high so the kernel
+ * never sets it on its own. Multiple threads can race the syscall
+ * — every call returns the same answer, so the worst case is two
+ * trips on first use. */
+#define DUETOS_COMPAT_CACHE_PRIMED (1ull << 63)
+
+static unsigned long long g_duet_compat_cache = 0;
+
+static unsigned long long duet_compat_query(void)
+{
+    unsigned long long cached = g_duet_compat_cache;
+    if ((cached & DUETOS_COMPAT_CACHE_PRIMED) != 0)
+        return cached;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)206) /* SYS_COMPAT_QUERY */
+                     : "memory");
+    unsigned long long bits = (unsigned long long)rv | DUETOS_COMPAT_CACHE_PRIMED;
+    g_duet_compat_cache = bits;
+    return bits;
+}
+
+/* ------------------------------------------------------------------
  * "Safe-ignore" return-constant shims
  * Semantically equivalent to the flat-stubs kOffReturnZero /
  * kOffReturnOne family for these specific Win32 contracts.
@@ -134,7 +175,15 @@ __declspec(dllexport) WIN32_NORETURN BOOL TerminateProcess(HANDLE hProcess, UINT
 
 __declspec(dllexport) BOOL IsDebuggerPresent(void)
 {
-    return 0; /* No debugger attached (this OS has no debug API yet). */
+    /* DuetOS has no debugger surface in v0 — the production-build
+     * answer is FALSE either way. We still consult the compat
+     * policy to wire the documented contract: when a future
+     * release lights up a real debugger and an `ignore_debugger`
+     * sidecar is present, the call returns FALSE without exposing
+     * the live attach state. */
+    if ((duet_compat_query() & DUETOS_COMPAT_BIT_IGNORE_DEBUGGER) != 0)
+        return 0;
+    return 0;
 }
 
 __declspec(dllexport) BOOL IsProcessorFeaturePresent(DWORD feature)
@@ -4977,6 +5026,34 @@ __declspec(dllexport) DWORD ResumeThread(HANDLE hThread)
     /* No suspended-thread state in v0 — every CreateThread runs
      * immediately. Return 0 (= "thread was not previously
      * suspended"), matching the flat stub's behaviour. */
+    return 0;
+}
+
+/* SetThreadStackGuarantee — Windows reserves additional stack
+ * space for SEH unwinding under low-memory conditions. DuetOS
+ * doesn't model SEH guard pages today (the user stack is a
+ * single page); the request can't be granted.
+ *
+ * If `fake_ok_stack_guarantee` is set in the per-process compat
+ * sidecar we lie and return TRUE without touching the stack —
+ * real Windows binaries that gate their startup on a non-zero
+ * stack guarantee (e.g. the VC runtime, mscorlib) thread on
+ * unchanged. Without the policy, the call fails with
+ * ERROR_INVALID_PARAMETER so the caller knows the request was
+ * rejected.
+ *
+ * `pStackSizeInBytes` is an in/out: on success it should be
+ * overwritten with the previous (now-replaced) value. We don't
+ * have a previous value to report, so we leave the slot alone
+ * (most callers ignore the out-write anyway). */
+__declspec(dllexport) BOOL SetThreadStackGuarantee(unsigned long* pStackSizeInBytes)
+{
+    if ((duet_compat_query() & DUETOS_COMPAT_BIT_FAKE_OK_STACK_GUARANTEE) != 0)
+    {
+        (void)pStackSizeInBytes;
+        return 1;
+    }
+    SetLastError(87u); /* ERROR_INVALID_PARAMETER */
     return 0;
 }
 

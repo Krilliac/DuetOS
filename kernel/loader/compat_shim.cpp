@@ -4,6 +4,7 @@
 #include "fs/ramfs.h"
 #include "log/klog.h"
 #include "proc/process.h"
+#include "syscall/syscall.h"
 #include "util/types.h"
 
 namespace duetos::core::compat
@@ -259,6 +260,34 @@ bool ShouldFakeOkStackGuarantee(const Process* proc)
     return proc != nullptr && proc->compat_policy.fake_ok_stack_guarantee;
 }
 
+namespace
+{
+// Shared between QueryPolicyBits and SelfTest. Stack-allocating
+// a full Process to test the public accessor would blow the early-
+// boot stack (Process is several KiB); this helper lets the self-
+// test exercise the exact bit-pack logic without that allocation.
+u64 PackBits(const CompatPolicy& p)
+{
+    u64 bits = 0;
+    if (p.ignore_debugger_present)
+        bits |= kCompatBitIgnoreDebugger;
+    if (p.ignore_etw)
+        bits |= kCompatBitIgnoreEtw;
+    if (p.fake_ok_stack_guarantee)
+        bits |= kCompatBitFakeOkStackGuarantee;
+    if (p.applied)
+        bits |= kCompatBitApplied;
+    return bits;
+}
+} // namespace
+
+u64 QueryPolicyBits(const Process* proc)
+{
+    if (proc == nullptr)
+        return 0;
+    return PackBits(proc->compat_policy);
+}
+
 void SelfTest()
 {
     // In-memory sidecar that touches every recognised key + one
@@ -285,6 +314,25 @@ void SelfTest()
         Panic("loader/compat", "self-test: keys_applied != 3");
     if (policy.keys_unknown != 1)
         Panic("loader/compat", "self-test: keys_unknown != 1");
+
+    // Verify the SYS_COMPAT_QUERY bit packing matches every flag.
+    // Drive `PackBits` directly to avoid stack-allocating a full
+    // Process during early boot; the public `QueryPolicyBits`
+    // entry point just forwards to it on a non-null process.
+    const u64 bits = PackBits(policy);
+    const u64 want =
+        kCompatBitIgnoreDebugger | kCompatBitIgnoreEtw | kCompatBitFakeOkStackGuarantee | kCompatBitApplied;
+    if (bits != want)
+        Panic("loader/compat", "self-test: PackBits packed wrong");
+    if (QueryPolicyBits(nullptr) != 0)
+        Panic("loader/compat", "self-test: QueryPolicyBits(nullptr) != 0");
+
+    // A fully-zero CompatPolicy must pack to zero — the
+    // "no sidecar, defaults" case.
+    CompatPolicy empty;
+    Reset(&empty);
+    if (PackBits(empty) != 0)
+        Panic("loader/compat", "self-test: PackBits(empty) != 0");
 }
 
 } // namespace duetos::core::compat
