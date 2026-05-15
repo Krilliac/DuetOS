@@ -146,6 +146,7 @@
 #include "drivers/pci/pci.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/power/power.h"
+#include "drivers/usb/btusb.h"
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/hid_descriptor.h"
 #include "drivers/usb/usb_class_desc.h"
@@ -2704,6 +2705,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::hid::HidSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::input::HidKeyboardSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::UsbClassDescriptorSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::usb::BtusbSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::usb::msc::MscSelfTest());
 
     // ath9k_htc USB Wi-Fi adapters (AR9271 / AR7010 family) are the

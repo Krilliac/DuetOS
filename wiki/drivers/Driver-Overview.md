@@ -105,7 +105,7 @@ userland. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 | `pci` | 1 | `kernel/drivers/pci/` |
 | `power` | 1 | `kernel/drivers/power/` |
 | `storage` | 3 | `kernel/drivers/storage/` |
-| `usb` | 20 | `kernel/drivers/usb/` |
+| `usb` | 21 | `kernel/drivers/usb/` |
 | `video` | 25 | `kernel/drivers/video/` |
 | `virtio` | 8 | `kernel/drivers/virtio/` |
 <!-- /AUTO:driver_list -->

@@ -82,13 +82,17 @@ xHCI interrupt-IN poll (`kernel/drivers/usb/xhci_init.cpp`
   fragmented reassembly, and Report-ID strip, with KeyEvents
   captured (not injected) so the boot input stream stays clean.
 
-GAPs (documented limits, not stubs): no GATT service discovery
-(the connection-setup step supplies the report handle), no SMP
-pairing / link encryption (a production keyboard bonds first; v0
-decodes the post-connection report stream), and only the boot
-keyboard report map (no report-descriptor-defined layouts). The
-btusb/btuart transport driver that calls `BtHidDeliverAcl` is the
-remaining piece — the upper stack above it is live and tested.
+The btusb transport driver
+(`kernel/drivers/usb/btusb.{h,cpp}`, invoked via the `bt probe`
+shell command) is the real producer: it finds the USB Bluetooth
+controller, sends HCI bring-up commands over EP0, and runs the
+bulk-IN ACL RX pump into `BtHidDeliverAcl`.
+
+GAPs (documented limits, not stubs): the HCI event interrupt-IN
+endpoint is not drained yet (so connection establishment / SMP
+pairing / GATT-HOGP discovery is the next slice), and only the
+boot keyboard report map is decoded. The ACL→keystroke path itself
+is live and self-tested.
 
 ## Mouse
 
@@ -118,10 +122,13 @@ Chrome Interactions" for the full chrome-press dispatch.
 - **No USB HID mouse driver yet.**
 - **No raw input** API (`Win32 GetRawInputData`) — the few PEs that
   use it fall back to the message-pump path.
-- **No Bluetooth transport driver** — the BT HID keyboard upper
-  stack (L2CAP/ATT-HOGP/HIDP → input queue) is live and
-  self-tested, but no btusb/btuart driver yet feeds it real ACL
-  packets. See [Bluetooth](Bluetooth.md#hid-keyboard).
+- **Bluetooth connection setup not yet implemented** — the btusb
+  transport driver (`bt probe`) brings up the controller and pumps
+  ACL into the keyboard stack, but reading HCI events (needed for
+  scan/connect/pair/GATT-discover) is the next slice, so a real BT
+  keyboard can't yet associate on its own. The full ACL→keystroke
+  decode is live and self-tested. See
+  [Bluetooth](Bluetooth.md#hid-keyboard).
 - **No IME / non-Latin layouts** — PS/2 + xHCI HID drivers
   hardcode US layout. See
   [Roadmap](../reference/Roadmap.md#ime--non-latin-input).

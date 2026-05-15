@@ -40,6 +40,7 @@ bytes, not designing a packet format.
 | [`hci.h`](../../kernel/net/bluetooth/hci.h) / `.cpp` | HCI packet codec |
 | [`diag.h`](../../kernel/net/bluetooth/diag.h) / `.cpp` | Diagnostic ring — every packet in/out gets a one-liner |
 | [`hid.h`](../../kernel/net/bluetooth/hid.h) / `.cpp` | HID keyboard upper stack — ACL reassembly + L2CAP + ATT-HOGP / HIDP → input queue |
+| [`../../drivers/usb/btusb.h`](../../kernel/drivers/usb/btusb.h) / `.cpp` | USB Bluetooth transport driver — EP0 HCI commands + bulk-IN ACL RX pump |
 | [`../hci_rust/`](../../kernel/net/hci_rust/) | Rust crate for the H4 framing layer (the byte-on-the-wire wrapper) |
 
 ## HCI Packet Codec
@@ -139,10 +140,20 @@ Report-ID strip; KeyEvents are captured rather than injected so the
 boot input stream stays clean. See
 [Input](Input.md#bluetooth-hid-keyboard) for the consumer side.
 
-**Still missing — the transport driver.** Nothing yet calls
-`BtHidDeliverAcl` with real bytes; a btusb/btuart driver's ACL IRQ
-path is the one remaining piece. The upper stack above it is live
-and tested.
+**Transport driver.** The btusb USB transport driver
+([`../../kernel/drivers/usb/btusb.{h,cpp}`](../../kernel/drivers/usb/btusb.cpp))
+finds the USB Bluetooth controller, parses its endpoints, sends the
+HCI identity bring-up commands over EP0, and runs a real ACL RX
+pump (bulk-IN → `BtHidDeliverAcl`). Like `CdcEcmProbe` it is not
+auto-claimed at boot (it would race the shared xHCI event ring and
+regress the e1000 DHCP path — see the CdcEcmProbe note in
+`kernel/core/main.cpp`); it is invoked on demand via the `bt probe`
+shell command. **The remaining gap is the HCI _event_
+interrupt-IN endpoint** — the public xHCI surface is control +
+bulk only, so v0 sends bring-up commands and pumps ACL but does
+not read Command_Complete / async events. That means connection
+establishment, SMP pairing, and GATT (HOGP) discovery are the next
+slice; the ACL→keyboard decode itself is fully real and tested.
 
 ## H4 Framing — `hci_rust` Crate
 
@@ -180,10 +191,16 @@ choice is tracked in
 
 ## Known Limits / GAPs
 
-- **No transport.** No USB-Bluetooth HCI driver, no UART, no
-  integrated controller. Until one lands the codec **and** the HID
-  keyboard upper stack are exercised by boot self-tests only —
-  nothing feeds them real bytes yet.
+- **USB transport: command + ACL only.** The btusb driver
+  ([`../../drivers/usb/btusb.cpp`](../../kernel/drivers/usb/btusb.cpp))
+  brings up a USB Bluetooth controller and runs a real bulk-IN ACL
+  RX pump, but the HCI **event** interrupt-IN endpoint is not
+  drained (the public xHCI surface is control + bulk only; a
+  generic interrupt-IN primitive is a separate slice that must not
+  perturb the working HID event ring). So Command_Complete /
+  Disconnection_Complete / LE Connection Complete are not consumed.
+  No UART/SDIO transport, no integrated controller. On a host with
+  no BT hardware the driver no-ops; logic is boot self-tested.
 - **ACL data path: keyboard only.** [`hid.h`](../../kernel/net/bluetooth/hid.h)
   reassembles ACL fragments and decodes L2CAP B-frames for the HID
   keyboard path. No SCO (voice) path; no other ACL consumer.

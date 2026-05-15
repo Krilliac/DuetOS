@@ -103,13 +103,14 @@ bool VideoProbe(u8 subclass, u8 prog_if)
 // Vol 4 Part B §1.2). Other wireless-class devices (UWB radios,
 // Wireless USB hubs) are extremely rare — we log them but do not
 // claim. v0 registers an adapter slot in the diag layer so the
-// `bt` shell command shows the controller exists; real I/O
-// (control + bulk + interrupt URB plumbing) lands in the btusb
-// transport-driver follow-on slice. When that driver lands, its
-// ACL IRQ path feeds raw packets to
-// duetos::net::bluetooth::BtHidDeliverAcl — the keyboard upper
-// stack (L2CAP/ATT-HOGP/HIDP -> input queue) is already live and
-// self-tested.
+// `bt` shell command shows the controller exists; the real
+// transport driver lives in btusb.{h,cpp}
+// (duetos::drivers::usb::BtusbProbe). Like CdcEcmProbe it is NOT
+// auto-claimed here — auto-probing races the shared xHCI event
+// ring (see the CdcEcmProbe note in kernel/core/main.cpp); it is
+// invoked on demand via the `bt probe` shell command, and its
+// ACL pump feeds duetos::net::bluetooth::BtHidDeliverAcl (the
+// keyboard upper stack — L2CAP/ATT-HOGP/HIDP -> input queue).
 bool WirelessProbe(u8 subclass, u8 prog_if)
 {
     arch::SerialWrite("[btusb] probe subclass=");

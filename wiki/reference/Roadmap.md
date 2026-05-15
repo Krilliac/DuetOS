@@ -438,10 +438,17 @@ In rough priority:
   L2CAP B-frame decode, BLE HOGP ATT-notification + classic HIDP
   DATA/Input → the shared input-layer boot-keyboard decoder
   (`kernel/drivers/input/hid_keyboard.{h,cpp}`, also used by USB
-  HID). Boot self-tests assert every shape end-to-end. The one
-  remaining piece for a working Bluetooth keyboard is a btusb /
-  btuart transport driver feeding `BtHidDeliverAcl`; pairing/SMP
-  and the non-keyboard upper-stack layers are still out.)
+  HID); and the btusb USB transport driver
+  `kernel/drivers/usb/btusb.{h,cpp}` — finds the controller, parses
+  endpoints, sends HCI bring-up commands over EP0, runs a real
+  bulk-IN ACL RX pump into `BtHidDeliverAcl` (invoked via the `bt
+  probe` shell command, not auto-claimed — same event-ring race as
+  CdcEcmProbe). Boot self-tests assert every shape end-to-end. The
+  remaining work: drain the HCI **event** interrupt-IN endpoint
+  (needs a public xHCI interrupt-IN primitive that doesn't perturb
+  the HID event ring), then connection establishment + SMP pairing
+  + GATT-HOGP discovery; plus general L2CAP signalling / RFCOMM /
+  SDP for non-keyboard profiles.)
 - **Printer:** USB printer-class driver + IPP / PostScript /
   raster pipeline.
 - **Webcam:** UVC USB-Video class driver.

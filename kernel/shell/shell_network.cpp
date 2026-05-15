@@ -31,6 +31,7 @@
 #include "arch/x86_64/serial.h"
 #include "diag/fix_journal.h"
 #include "drivers/net/net.h"
+#include "drivers/usb/btusb.h"
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/rndis.h"
 #include "drivers/video/console.h"
@@ -1891,6 +1892,35 @@ const char* BtHidKindName(duetos::net::bluetooth::BtHidKind k)
     return "?";
 }
 
+void BtPrintBtusb()
+{
+    const auto s = duetos::drivers::usb::BtusbStatsRead();
+    ConsoleWrite("  btusb transport: ");
+    if (!s.online)
+    {
+        ConsoleWriteln("offline (run `bt probe`)");
+        return;
+    }
+    ConsoleWrite("online slot=");
+    WriteHexU16(s.slot_id);
+    ConsoleWrite(" acl_in=");
+    WriteHexU16(s.acl_in_ep);
+    ConsoleWrite(" acl_out=");
+    WriteHexU16(s.acl_out_ep);
+    ConsoleWrite(" evt_in=");
+    WriteHexU16(s.event_in_ep);
+    ConsoleWriteln("");
+    ConsoleWrite("    acl rx pkts=");
+    WriteU64Dec(s.acl_packets_rx);
+    ConsoleWrite(" bytes=");
+    WriteU64Dec(s.acl_bytes_rx);
+    ConsoleWrite(" short_drops=");
+    WriteU64Dec(s.acl_short_drops);
+    ConsoleWrite(" hci_cmds=");
+    WriteU64Dec(s.hci_cmds_sent);
+    ConsoleWriteln("");
+}
+
 void BtPrintHidKeyboards()
 {
     const u32 hid = duetos::net::bluetooth::BtHidConnectionCount();
@@ -1923,6 +1953,15 @@ void BtPrintHidKeyboards()
 
 void CmdBt(u32 argc, char** argv)
 {
+    if (argc >= 2 && StrEq(argv[1], "probe"))
+    {
+        ConsoleWriteln("BT: probing for a USB Bluetooth controller...");
+        const bool ok = duetos::drivers::usb::BtusbProbe();
+        ConsoleWrite("BT: btusb probe ");
+        ConsoleWriteln(ok ? "online (ACL RX pump started)" : "no controller found / bring-up failed");
+        return;
+    }
+
     const u32 count = duetos::net::bluetooth::BluetoothDiagAdapterCount();
     const bool show_events = (argc >= 2 && StrEq(argv[1], "events"));
 
@@ -1930,7 +1969,8 @@ void CmdBt(u32 argc, char** argv)
     {
         ConsoleWriteln("BT: no Bluetooth adapter registered");
         ConsoleWriteln("    (USB Bluetooth: declare class=0xE0/sub=0x01/prog=0x01)");
-        ConsoleWriteln("    (transport drivers: btusb / btuart not yet wired — diag layer is live)");
+        ConsoleWriteln("    (run `bt probe` to bring up an attached USB Bluetooth controller)");
+        BtPrintBtusb();
         BtPrintHidKeyboards();
         return;
     }
@@ -2013,10 +2053,11 @@ void CmdBt(u32 argc, char** argv)
         }
     }
 
+    BtPrintBtusb();
     BtPrintHidKeyboards();
 
     if (!show_events)
-        ConsoleWriteln("  (try `bt events` to dump per-adapter event ring)");
+        ConsoleWriteln("  (try `bt events` to dump per-adapter event ring, `bt probe` to bring up btusb)");
 }
 
 } // namespace duetos::core::shell::internal
