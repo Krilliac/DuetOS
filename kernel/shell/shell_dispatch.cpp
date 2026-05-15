@@ -672,7 +672,7 @@ const char* const kCommandSet[] = {
     "sync",      "port",      "assert",      "watch",        "script",   "exit",       "mkfs",       "mkfs.duetfs",
     "install",   "lastdump",  "loadtest",    "stress",       "bench",    "dbg",        "dfix",       "drshd",
     "pe-triage", "caplog",    "live-update", "fault-inject", "suspend",  "resume",     "affinity",   "vtop",
-    "logclock",  "dpms",
+    "logclock",  "dpms",      "wrmsr",       "io",           "peek",     "poke",
 };
 const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1148,6 +1148,37 @@ void Dispatch(char* line)
         if (!RequireAdmin("MSR"))
             return;
         CmdMsr(argc, argv);
+        return;
+    }
+    // DANGER ZONE: raw register / port / physical-memory pokes.
+    // Admin-gated here; each also demands a literal FORCE token
+    // inside the handler before it touches hardware.
+    if (StrEq(cmd, "wrmsr"))
+    {
+        if (!RequireAdmin("WRMSR"))
+            return;
+        CmdWrmsr(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "io"))
+    {
+        if (!RequireAdmin("IO"))
+            return;
+        CmdIo(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "peek"))
+    {
+        if (!RequireAdmin("PEEK"))
+            return;
+        CmdPeek(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "poke"))
+    {
+        if (!RequireAdmin("POKE"))
+            return;
+        CmdPoke(argc, argv);
         return;
     }
     if (StrEq(cmd, "lapic"))

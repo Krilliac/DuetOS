@@ -64,6 +64,7 @@
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/render_stats.h"
 #include "mm/kheap.h"
+#include "mm/page.h"
 #include "mm/paging.h"
 #include "sched/sched.h"
 #include "subsystems/graphics/graphics.h"
@@ -515,6 +516,283 @@ void CmdMsr(u32 argc, char** argv)
     ConsoleWrite(":  ");
     WriteU64Hex(ReadMsrRaw(idx));
     ConsoleWriteChar('\n');
+}
+
+// ============================================================
+// DANGER ZONE — raw hardware/memory pokes.
+//
+// These bypass every kernel safety net by design: no MSR
+// whitelist, no page-permission check, no device arbitration.
+// They exist so the OS author can drive bring-up / silicon
+// debug from the live shell (the wrmsr / devmem2 / inb-outb
+// equivalents). A wrong value here triple-faults the box or
+// silently corrupts RAM — that is the accepted cost of the
+// tool, not a bug. Every one is admin-gated in the dispatcher
+// AND requires the literal FORCE confirmation token, mirroring
+// the `mkfs ... ERASE` contract.
+// ============================================================
+
+namespace
+{
+
+// Print the risk banner and check the confirmation token.
+// Returns true only when `token` is the literal "FORCE".
+bool DangerConfirmed(const char* cmd, const char* risk, const char* token)
+{
+    ConsoleWriteln("");
+    ConsoleWriteln("  !!! ===================== DANGER ===================== !!!");
+    ConsoleWrite("  !!!  ");
+    ConsoleWrite(cmd);
+    ConsoleWriteln("");
+    ConsoleWrite("  !!!  ");
+    ConsoleWrite(risk);
+    ConsoleWriteln("");
+    ConsoleWriteln("  !!!  No whitelist, no permission check, no undo.");
+    ConsoleWriteln("  !!! =================================================== !!!");
+    if (token != nullptr && StrEq(token, "FORCE"))
+    {
+        ConsoleWriteln("  (FORCE supplied — proceeding)");
+        return true;
+    }
+    ConsoleWriteln("  REFUSED: append the literal token  FORCE  to proceed.");
+    return false;
+}
+
+// Bare-hex (no 0x) or 0x-prefixed parser for register indices /
+// physical addresses — matches how the read-only `msr` command
+// already accepts an index.
+bool ParseBareHex64(const char* s, u64* out)
+{
+    u64 v = 0;
+    bool any = false;
+    for (u32 i = 0; s[i] != '\0'; ++i)
+    {
+        char ch = s[i];
+        if ((i == 1) && (ch == 'x' || ch == 'X') && s[0] == '0')
+            continue;
+        u8 nib;
+        if (ch >= '0' && ch <= '9')
+            nib = static_cast<u8>(ch - '0');
+        else if (ch >= 'a' && ch <= 'f')
+            nib = static_cast<u8>(ch - 'a' + 10);
+        else if (ch >= 'A' && ch <= 'F')
+            nib = static_cast<u8>(ch - 'A' + 10);
+        else
+            return false;
+        v = (v << 4) | nib;
+        any = true;
+    }
+    if (!any)
+        return false;
+    *out = v;
+    return true;
+}
+
+} // namespace
+
+void CmdWrmsr(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("WRMSR: USAGE: WRMSR <HEX-INDEX> <HEX-VALUE> FORCE");
+        ConsoleWriteln("  Pairs with the read-only `msr`. NO index whitelist —");
+        ConsoleWriteln("  a bad write to EFER/PAT/MTRR triple-faults the box.");
+        return;
+    }
+    u64 idx = 0;
+    u64 val = 0;
+    if (!ParseBareHex64(argv[1], &idx) || idx > 0xFFFFFFFFull)
+    {
+        ConsoleWriteln("WRMSR: BAD INDEX (hex u32)");
+        return;
+    }
+    if (!ParseBareHex64(argv[2], &val))
+    {
+        ConsoleWriteln("WRMSR: BAD VALUE (hex u64)");
+        return;
+    }
+    if (!DangerConfirmed("WRMSR — write a model-specific register",
+                         "Wrong MSR/value = #GP / triple fault / silent CPU misconfig.",
+                         (argc >= 4) ? argv[3] : nullptr))
+        return;
+    duetos::arch::WriteMsr(static_cast<u32>(idx), val);
+    ConsoleWrite("WRMSR: wrote ");
+    WriteU64Hex(val);
+    ConsoleWrite(" to MSR ");
+    WriteU64Hex(idx, 8);
+    ConsoleWrite("  (readback ");
+    WriteU64Hex(duetos::arch::ReadMsr(static_cast<u32>(idx)));
+    ConsoleWriteln(")");
+}
+
+void CmdIo(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("IO: USAGE:");
+        ConsoleWriteln("  IO INB|INW  <PORT>                read a port (admin)");
+        ConsoleWriteln("  IO OUTB|OUTW <PORT> <VALUE> FORCE write a port");
+        ConsoleWriteln("  Ports are hex. Writing the wrong port can reset the");
+        ConsoleWriteln("  machine or corrupt a live device.");
+        return;
+    }
+    u64 port = 0;
+    if (!ParseBareHex64(argv[2], &port) || port > 0xFFFFull)
+    {
+        ConsoleWriteln("IO: BAD PORT (hex u16)");
+        return;
+    }
+    const u16 p = static_cast<u16>(port);
+    if (StrEq(argv[1], "inb"))
+    {
+        ConsoleWrite("IO INB ");
+        WriteU64Hex(p, 4);
+        ConsoleWrite(" = ");
+        WriteU64Hex(duetos::arch::Inb(p), 2);
+        ConsoleWriteChar('\n');
+        return;
+    }
+    if (StrEq(argv[1], "inw"))
+    {
+        ConsoleWrite("IO INW ");
+        WriteU64Hex(p, 4);
+        ConsoleWrite(" = ");
+        WriteU64Hex(duetos::arch::Inw(p), 4);
+        ConsoleWriteChar('\n');
+        return;
+    }
+    const bool outb = StrEq(argv[1], "outb");
+    const bool outw = StrEq(argv[1], "outw");
+    if (!outb && !outw)
+    {
+        ConsoleWriteln("IO: UNKNOWN OP (inb|inw|outb|outw)");
+        return;
+    }
+    if (argc < 4)
+    {
+        ConsoleWriteln("IO: OUT NEEDS A VALUE");
+        return;
+    }
+    u64 val = 0;
+    if (!ParseBareHex64(argv[3], &val))
+    {
+        ConsoleWriteln("IO: BAD VALUE (hex)");
+        return;
+    }
+    if (!DangerConfirmed("IO OUT — raw x86 port write", "Wrong port can reset the box or wedge a live device.",
+                         (argc >= 5) ? argv[4] : nullptr))
+        return;
+    if (outb)
+        duetos::arch::Outb(p, static_cast<u8>(val));
+    else
+        duetos::arch::Outw(p, static_cast<u16>(val));
+    ConsoleWrite("IO: wrote ");
+    WriteU64Hex(val, outb ? 2 : 4);
+    ConsoleWrite(" -> port ");
+    WriteU64Hex(p, 4);
+    ConsoleWriteln("");
+}
+
+// Shared width decode for peek/poke: 'b'=1 'w'=2 'd'=4 'q'=8.
+// Returns 0 on an unrecognised spec.
+static u32 PeekWidth(const char* s)
+{
+    if (s == nullptr)
+        return 8;
+    if (StrEq(s, "b"))
+        return 1;
+    if (StrEq(s, "w"))
+        return 2;
+    if (StrEq(s, "d"))
+        return 4;
+    if (StrEq(s, "q"))
+        return 8;
+    return 0;
+}
+
+void CmdPeek(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        ConsoleWriteln("PEEK: USAGE: PEEK <HEX-PADDR> [b|w|d|q]   (admin)");
+        ConsoleWriteln("  Reads raw physical RAM via the 1 GiB direct map.");
+        return;
+    }
+    u64 pa = 0;
+    if (!ParseBareHex64(argv[1], &pa))
+    {
+        ConsoleWriteln("PEEK: BAD ADDRESS");
+        return;
+    }
+    const u32 w = PeekWidth(argc >= 3 ? argv[2] : nullptr);
+    if (w == 0)
+    {
+        ConsoleWriteln("PEEK: BAD WIDTH (b|w|d|q)");
+        return;
+    }
+    if (pa >= duetos::mm::kDirectMapBytes || w > duetos::mm::kDirectMapBytes - pa)
+    {
+        ConsoleWriteln("PEEK: ADDRESS OUTSIDE 1 GiB DIRECT MAP (would panic)");
+        return;
+    }
+    const volatile u8* base = static_cast<const volatile u8*>(duetos::mm::PhysToVirt(pa));
+    u64 v = 0;
+    for (u32 i = 0; i < w; ++i)
+        v |= static_cast<u64>(base[i]) << (8 * i);
+    ConsoleWrite("PEEK ");
+    WriteU64Hex(pa);
+    ConsoleWrite(" = ");
+    WriteU64Hex(v, w * 2);
+    ConsoleWriteChar('\n');
+}
+
+void CmdPoke(u32 argc, char** argv)
+{
+    if (argc < 3)
+    {
+        ConsoleWriteln("POKE: USAGE: POKE <HEX-PADDR> <HEX-VALUE> [b|w|d|q] FORCE");
+        ConsoleWriteln("  Writes raw physical RAM. Corrupting a page table,");
+        ConsoleWriteln("  kernel struct, or MMIO window faults or bricks the run.");
+        return;
+    }
+    u64 pa = 0;
+    u64 val = 0;
+    if (!ParseBareHex64(argv[1], &pa))
+    {
+        ConsoleWriteln("POKE: BAD ADDRESS");
+        return;
+    }
+    if (!ParseBareHex64(argv[2], &val))
+    {
+        ConsoleWriteln("POKE: BAD VALUE");
+        return;
+    }
+    const char* wspec = (argc >= 4 && PeekWidth(argv[3]) != 0) ? argv[3] : nullptr;
+    const u32 w = (argc >= 4 && PeekWidth(argv[3]) != 0) ? PeekWidth(argv[3]) : 8;
+    (void)wspec;
+    if (pa >= duetos::mm::kDirectMapBytes || w > duetos::mm::kDirectMapBytes - pa)
+    {
+        ConsoleWriteln("POKE: ADDRESS OUTSIDE 1 GiB DIRECT MAP (would panic)");
+        return;
+    }
+    // The FORCE token is the last arg; it may be at index 3 (no
+    // width given) or 4 (width given).
+    const char* tok = nullptr;
+    if (argc >= 5)
+        tok = argv[4];
+    else if (argc == 4 && PeekWidth(argv[3]) == 0)
+        tok = argv[3];
+    if (!DangerConfirmed("POKE — write raw physical memory",
+                         "Hitting a page table / kernel struct / MMIO = instant fault or corruption.", tok))
+        return;
+    volatile u8* base = static_cast<volatile u8*>(duetos::mm::PhysToVirt(pa));
+    for (u32 i = 0; i < w; ++i)
+        base[i] = static_cast<u8>((val >> (8 * i)) & 0xFF);
+    ConsoleWrite("POKE: wrote ");
+    WriteU64Hex(val, w * 2);
+    ConsoleWrite(" -> phys ");
+    WriteU64Hex(pa);
+    ConsoleWriteln("");
 }
 
 void CmdLapic()
