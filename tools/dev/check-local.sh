@@ -14,6 +14,7 @@ RUN_CONFIGURE=1
 RUN_BUILD=0
 RUN_CTEST=0
 RUN_SMOKE=0
+RUN_ANALYZE=0
 
 usage() {
     cat <<'USAGE'
@@ -27,7 +28,8 @@ Options:
   --build           Build the selected preset after configure
   --ctest           Run hosted CTest in build/<preset> (implies --build)
   --smoke           Run QEMU profile smoke via CTest harness (implies --build)
-  --all             Run build + CTest + QEMU smoke
+  --analyze         Run static codebase analysis (own + cppcheck + clippy)
+  --all             Run build + CTest + QEMU smoke + analyze
   --live            Run doctor in live mode even if --smoke is not selected
   --no-doctor       Skip host-toolchain doctor
   --no-wiki         Skip wiki navigation/quality checks
@@ -62,10 +64,15 @@ while [[ $# -gt 0 ]]; do
             DOCTOR_MODE="live"
             shift
             ;;
+        --analyze)
+            RUN_ANALYZE=1
+            shift
+            ;;
         --all)
             RUN_BUILD=1
             RUN_CTEST=1
             RUN_SMOKE=1
+            RUN_ANALYZE=1
             DOCTOR_MODE="live"
             shift
             ;;
@@ -160,6 +167,10 @@ fi
 
 if [[ ${RUN_SMOKE} -eq 1 ]]; then
     run_step "QEMU boot smoke (${PRESET})" "${REPO_ROOT}/tools/test/ctest-boot-smoke.sh" "build/${PRESET}"
+fi
+
+if [[ ${RUN_ANALYZE} -eq 1 ]]; then
+    run_step "codebase analysis (static)" "${REPO_ROOT}/tools/dev/analyze.sh" --preset "${PRESET}"
 fi
 
 printf '\ncheck-local.sh: all selected checks passed for %s\n' "${PRESET}"

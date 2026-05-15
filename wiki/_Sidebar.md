@@ -94,6 +94,7 @@
 - [Rust Subsystems](tooling/Rust-Subsystems.md)
 - [Coding Standards](tooling/Coding-Standards.md)
 - [Anti-Bloat Guidelines](tooling/Anti-Bloat-Guidelines.md)
+- [Codebase Analysis](tooling/Codebase-Analysis.md)
 - [Git Workflow](tooling/Git-Workflow.md)
 - [Debugging](tooling/Debugging.md)
 - [Debugger](tooling/Debugger.md)
