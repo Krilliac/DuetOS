@@ -264,7 +264,7 @@ All write-side FAT operations are admin-gated.
 | `usbnet [args...]` | USB-network helpers | |
 | `fwpolicy [args...]` | Firewall policy view / edit | |
 | `fwtrace [show N]` | Firewall trace dispatch points | |
-| `crtrace [show N]` | Cleanroom-trace ring dump | |
+| `crtrace [show N\|clear\|stats\|mark ...]` | Cleanroom-trace ring: dump / clear / boot+rolling counts / inject a manual marker | |
 | `crprobe` | Fire wifi + fw-loader trace dispatch points | |
 | `tty` | Console device name (`/dev/console0`) | |
 
