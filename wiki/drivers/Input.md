@@ -4,7 +4,8 @@
 >
 > **Execution context:** Kernel — IRQ for key/button events
 >
-> **Maturity:** PS/2 v0 + USB HID boot keyboard v0
+> **Maturity:** PS/2 v0 + USB HID boot keyboard v0 + Bluetooth HID
+> keyboard v0 (decode path; transport driver pending)
 
 ## Overview
 
@@ -13,14 +14,22 @@ input subsystem into the kernel shell and the focused compositor
 window.
 
 ```
-[ HW: PS/2 controller / USB keyboard ]
+[ HW: PS/2 controller / USB keyboard / Bluetooth keyboard ]
         |  IRQ
-[ Driver: ps2 / xhci+hid ]         kernel/drivers/input/ps2/, drivers/usb/class/hid/keyboard/
+[ Driver: ps2 / xhci+hid / bluetooth (L2CAP→ATT-HOGP|HIDP) ]
         |
-[ Input event queue ]              kernel/drivers/input/
+[ Boot-report decoder ]            kernel/drivers/input/hid_keyboard.{h,cpp}
+        |   (shared by USB + Bluetooth — one usage→KeyEvent table)
+[ Input event queue ]              kernel/drivers/input/ (KeyboardInjectEvent)
         |
 [ Kernel shell + Compositor focused window ]
 ```
+
+PS/2 feeds the queue through its scancode decoder; USB HID and
+Bluetooth HID both feed it through the shared boot-protocol decoder
+in `kernel/drivers/input/hid_keyboard.{h,cpp}`, so a runtime layout
+switch and the press/release/modifier semantics are identical
+regardless of which bus carried the key.
 
 ## PS/2 Keyboard v0
 
@@ -44,10 +53,42 @@ debugger-side view, or alternate keymap.
 
 ## USB HID Boot Keyboard
 
-`kernel/drivers/usb/class/hid/keyboard/`.
+xHCI interrupt-IN poll (`kernel/drivers/usb/xhci_init.cpp`
+`HidPollEntry`).
 
-- 8-byte boot-protocol HID report decoded into key events.
+- 8-byte boot-protocol HID report handed to the shared decoder
+  `duetos::drivers::input::HidKeyboardDiffAndInject`
+  (`kernel/drivers/input/hid_keyboard.{h,cpp}`).
 - Routes events into the same queue PS/2 uses.
+
+## Bluetooth HID Keyboard
+
+`kernel/net/bluetooth/hid.{h,cpp}`.
+
+- Single ACL ingress `BtHidDeliverAcl` for a (future) btusb/btuart
+  transport driver's IRQ path. Performs per-connection L2CAP
+  fragment reassembly, B-frame decode, then routes by CID:
+  - **BLE HOGP** (CID 0x0004 → ATT): a Handle Value Notification /
+    Indication carrying the HID Input report.
+  - **Classic HID** (dynamic CID → HIDP): a DATA/Input transaction
+    carrying the report.
+- The normalised 8-byte boot report (optionally one Report-ID
+  prefix byte) goes through the *same* shared decoder USB HID uses
+  — one source of truth for usage→KeyEvent, one inject queue.
+- Bounded connection table keyed on the 12-bit ACL handle;
+  register on connection-up, unregister on Disconnection_Complete.
+- End-to-end self-tested at boot (`[bt-hid] selftest pass`):
+  synthetic ACL packets for BLE notification, classic HIDP,
+  fragmented reassembly, and Report-ID strip, with KeyEvents
+  captured (not injected) so the boot input stream stays clean.
+
+GAPs (documented limits, not stubs): no GATT service discovery
+(the connection-setup step supplies the report handle), no SMP
+pairing / link encryption (a production keyboard bonds first; v0
+decodes the post-connection report stream), and only the boot
+keyboard report map (no report-descriptor-defined layouts). The
+btusb/btuart transport driver that calls `BtHidDeliverAcl` is the
+remaining piece — the upper stack above it is live and tested.
 
 ## Mouse
 
@@ -77,6 +118,10 @@ Chrome Interactions" for the full chrome-press dispatch.
 - **No USB HID mouse driver yet.**
 - **No raw input** API (`Win32 GetRawInputData`) — the few PEs that
   use it fall back to the message-pump path.
+- **No Bluetooth transport driver** — the BT HID keyboard upper
+  stack (L2CAP/ATT-HOGP/HIDP → input queue) is live and
+  self-tested, but no btusb/btuart driver yet feeds it real ACL
+  packets. See [Bluetooth](Bluetooth.md#hid-keyboard).
 - **No IME / non-Latin layouts** — PS/2 + xHCI HID drivers
   hardcode US layout. See
   [Roadmap](../reference/Roadmap.md#ime--non-latin-input).
@@ -85,4 +130,5 @@ Chrome Interactions" for the full chrome-press dispatch.
 
 - [Driver Overview](Driver-Overview.md)
 - [USB](USB.md)
+- [Bluetooth](Bluetooth.md) — HID keyboard upper stack
 - [Compositor and Window Manager](../subsystems/Compositor.md)

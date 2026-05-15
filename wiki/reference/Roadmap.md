@@ -430,13 +430,18 @@ In rough priority:
 
 ### Bluetooth, Printer, Webcam
 
-- **Bluetooth:** HCI host-controller driver + L2CAP / RFCOMM /
-  GATT stack. (HCI command/event packet parser landed in
-  `kernel/net/bluetooth/hci.{h,cpp}` — covers HCI_Reset / Read
-  Local Version / Read BD_ADDR / LE Set Scan Params + Enable on
-  the encode side, Command_Complete / Command_Status / event
-  header on the decode side. Boot self-test asserts every shape.
-  Real bring-up still needs a btusb / btuart transport driver.)
+- **Bluetooth:** btusb / btuart transport driver + general L2CAP
+  signalling / RFCOMM / SDP / full GATT + SMP pairing. (Landed:
+  HCI command/event codec in `kernel/net/bluetooth/hci.{h,cpp}`;
+  and the HID **keyboard** upper stack in
+  `kernel/net/bluetooth/hid.{h,cpp}` — ACL fragment reassembly,
+  L2CAP B-frame decode, BLE HOGP ATT-notification + classic HIDP
+  DATA/Input → the shared input-layer boot-keyboard decoder
+  (`kernel/drivers/input/hid_keyboard.{h,cpp}`, also used by USB
+  HID). Boot self-tests assert every shape end-to-end. The one
+  remaining piece for a working Bluetooth keyboard is a btusb /
+  btuart transport driver feeding `BtHidDeliverAcl`; pairing/SMP
+  and the non-keyboard upper-stack layers are still out.)
 - **Printer:** USB printer-class driver + IPP / PostScript /
   raster pipeline.
 - **Webcam:** UVC USB-Video class driver.

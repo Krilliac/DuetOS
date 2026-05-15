@@ -105,7 +105,11 @@ bool VideoProbe(u8 subclass, u8 prog_if)
 // claim. v0 registers an adapter slot in the diag layer so the
 // `bt` shell command shows the controller exists; real I/O
 // (control + bulk + interrupt URB plumbing) lands in the btusb
-// transport-driver follow-on slice.
+// transport-driver follow-on slice. When that driver lands, its
+// ACL IRQ path feeds raw packets to
+// duetos::net::bluetooth::BtHidDeliverAcl — the keyboard upper
+// stack (L2CAP/ATT-HOGP/HIDP -> input queue) is already live and
+// self-tested.
 bool WirelessProbe(u8 subclass, u8 prog_if)
 {
     arch::SerialWrite("[btusb] probe subclass=");

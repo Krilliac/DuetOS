@@ -99,7 +99,7 @@ userland. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 |-------|--------------|------|
 | `audio` | 5 | `kernel/drivers/audio/` |
 | `gpu` | 15 | `kernel/drivers/gpu/` |
-| `input` | 2 | `kernel/drivers/input/` |
+| `input` | 3 | `kernel/drivers/input/` |
 | `mei` | 1 | `kernel/drivers/mei/` |
 | `net` | 18 | `kernel/drivers/net/` |
 | `pci` | 1 | `kernel/drivers/pci/` |
