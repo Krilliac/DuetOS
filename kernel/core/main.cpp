@@ -4812,6 +4812,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         constexpr duetos::u32 start_items_count = sizeof(kStartItems) / sizeof(kStartItems[0]);
         static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
             {"NEW TEXT FILE", 7, 0, nullptr, 0},    {"REFRESH DESKTOP", 8, 0, nullptr, 0},
+            {"SETTINGS", 107, 0, nullptr, 0}, // 100 + ThemeRole::Settings(7)
             {"HELP / SHORTCUTS", 6, 0, nullptr, 0}, {"ABOUT DUETOS", 1, 0, nullptr, 0},
             {"CYCLE WINDOWS", 2, 0, nullptr, 0},    {"LIST WINDOWS", 3, 0, nullptr, 0},
             {"SWITCH TO TTY", 5, 0, nullptr, 0},
@@ -5477,12 +5478,30 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::CursorShow();
                     menu_handled = true; // taskbar ate the click
                 }
-                else if (!duetos::drivers::video::TaskbarIsLocked())
+                else
                 {
-                    // Empty-strip click on an unlocked taskbar -> begin
-                    // drag. Snap target is decided on release below.
-                    duetos::drivers::video::TaskbarBeginDrag();
-                    menu_handled = true;
+                    // Clock / date widget click -> open the Calendar
+                    // (everyday "click the clock to see the calendar"
+                    // gesture). 112 == 100 + ThemeRole::Calendar(12),
+                    // routed through the shared role-raise path.
+                    duetos::u32 clx = 0, cly = 0, clw = 0, clh = 0;
+                    duetos::drivers::video::TaskbarClockBounds(&clx, &cly, &clw, &clh);
+                    if (clw > 0 && clh > 0 && cx >= clx && cx < clx + clw && cy >= cly && cy < cly + clh)
+                    {
+                        duetos::core::DispatchMenuAction(112, 0);
+                        SerialWrite("[ui] taskbar clock click -> calendar\n");
+                        duetos::drivers::video::CursorHide();
+                        duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                        duetos::drivers::video::CursorShow();
+                        menu_handled = true;
+                    }
+                    else if (!duetos::drivers::video::TaskbarIsLocked())
+                    {
+                        // Empty-strip click on an unlocked taskbar ->
+                        // begin drag. Snap target decided on release.
+                        duetos::drivers::video::TaskbarBeginDrag();
+                        menu_handled = true;
+                    }
                 }
             }
 
