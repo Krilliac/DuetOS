@@ -406,6 +406,95 @@ void VfsLsDir(const duetos::fs::VfsNode& n)
     }
 }
 
+// Bound on how deep `find` recurses into a DuetFS tree. Keeps the
+// recursion's per-frame buffer footprint predictable on the
+// kernel stack while still covering realistic user trees.
+constexpr u32 kFindMaxDepth = 8;
+
+// Recursive DuetFS name search for `find`. `path_buf[0..path_len)`
+// holds the absolute path of the directory `node_id` (mount point
+// included). Prints every descendant whose leaf contains `needle`.
+void FindDuetFs(const duetos::fs::duetfs::Device& dev, u32 node_id, const char* needle, char* path_buf, u32 path_len,
+                u32 path_cap, u32 depth)
+{
+    if (depth > kFindMaxDepth)
+    {
+        return;
+    }
+    namespace df = duetos::fs::duetfs;
+    df::DirEntry batch[8];
+    u32 start = 0;
+    for (;;)
+    {
+        duetos::usize got = 0;
+        if (df::duetfs_readdir(&dev, node_id, start, batch, sizeof(batch) / sizeof(batch[0]), &got) != df::kStatusOk)
+        {
+            return;
+        }
+        if (got == 0)
+        {
+            break;
+        }
+        for (duetos::usize i = 0; i < got; ++i)
+        {
+            const df::DirEntry& e = batch[i];
+            const u32 nl = e.name_len < df::kNameMax ? e.name_len : df::kNameMax;
+            const u32 saved = path_len;
+            if (path_len + 1 < path_cap)
+            {
+                path_buf[path_len++] = '/';
+            }
+            for (u32 k = 0; k < nl && path_len + 1 < path_cap; ++k)
+            {
+                path_buf[path_len++] = static_cast<char>(e.name[k]);
+            }
+            path_buf[path_len] = '\0';
+            if (SubstringPresent(reinterpret_cast<const char*>(e.name), nl, needle))
+            {
+                for (u32 j = 0; j < path_len; ++j)
+                {
+                    ConsoleWriteChar(path_buf[j]);
+                }
+                ConsoleWriteChar('\n');
+            }
+            if (e.kind == df::kKindDir)
+            {
+                FindDuetFs(dev, e.node_id, needle, path_buf, path_len, path_cap, depth + 1);
+            }
+            path_len = saved;
+            path_buf[path_len] = '\0';
+        }
+        start += static_cast<u32>(got);
+    }
+}
+
+// Root-level FAT32 name search for one mount. GAP: subdirectory
+// recursion is not done here — the FAT32 driver lists one
+// directory per call with no offset cursor, so deep recursion
+// would need a per-level 32-entry buffer. Matches the existing
+// "root only in v0" FAT limitation the GUI file manager carries;
+// revisit alongside a paged Fat32 directory walker.
+void FindFat32Mount(const duetos::fs::fat32::Volume* v, const char* mount_point, const char* needle)
+{
+    namespace fat = duetos::fs::fat32;
+    static fat::DirEntry listing[fat::kMaxDirEntries];
+    const u32 n = fat::Fat32ListDirByCluster(v, v->root_cluster, listing, fat::kMaxDirEntries);
+    for (u32 i = 0; i < n; ++i)
+    {
+        u32 nlen = 0;
+        while (listing[i].name[nlen] != '\0')
+        {
+            ++nlen;
+        }
+        if (SubstringPresent(listing[i].name, nlen, needle))
+        {
+            ConsoleWrite(mount_point);
+            ConsoleWrite("/");
+            ConsoleWriteln(listing[i].name);
+        }
+    }
+}
+
 } // namespace
 
 void CmdCp(u32 argc, char** argv)
@@ -753,6 +842,35 @@ void CmdFind(u32 argc, char** argv)
                 ConsoleWrite("/tmp/");
                 ConsoleWriteln(name);
             }
+        },
+        &cookie);
+    // Search every registered mount too, so a user finds files on
+    // their FAT32 disks and the native DuetFS "main drive" — not
+    // just the ramfs boot image and tmpfs scratch.
+    duetos::fs::VfsMountEnumerate(
+        [](const duetos::fs::MountEntry& e, duetos::fs::MountId /*id*/, void* ck) -> bool
+        {
+            const char* nd = static_cast<Cookie*>(ck)->needle;
+            if (e.fs_type == duetos::fs::FsType::Fat32)
+            {
+                const auto* v = duetos::fs::fat32::Fat32Volume(e.block_handle);
+                if (v != nullptr)
+                {
+                    FindFat32Mount(v, e.mount_point, nd);
+                }
+            }
+            else if (e.fs_type == duetos::fs::FsType::DuetFs)
+            {
+                const auto dev = duetos::fs::duetfs::DeviceForMountHandle(e.block_handle);
+                char pbuf[192] = {};
+                u32 plen = 0;
+                for (; e.mount_point[plen] != '\0' && plen + 1 < sizeof(pbuf); ++plen)
+                {
+                    pbuf[plen] = e.mount_point[plen];
+                }
+                FindDuetFs(dev, duetos::fs::duetfs::kRootNodeId, nd, pbuf, plen, sizeof(pbuf), 0);
+            }
+            return true;
         },
         &cookie);
 }
