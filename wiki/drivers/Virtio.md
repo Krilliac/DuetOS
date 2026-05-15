@@ -98,17 +98,26 @@ so the block layer can issue multiple reads concurrently.
 1 (Network).
 
 - **Queues**: `receiveq` + `transmitq` (multi-queue support negotiated
-  but only one of each used in v0).
-- **Descriptor chains**: 2 descriptors per packet — 12-byte virtio-net
-  header + frame body.
+  but only the queue 0/1 pair driven in v0).
+- **Descriptor chains**:
+  - TX: 2 descriptors per packet — 12-byte virtio-net header + frame body.
+  - RX: 1 descriptor per slot, 2 KiB buffer (12-byte virtio-net header +
+    up to 2036 bytes of Ethernet frame). 32 slots pre-posted at probe.
 - **Features negotiated**: `MAC` (use device-cfg MAC), `STATUS` (read
-  link state), `MQ` (single queue selected).
-- **TX**: live. **RX**: not yet wired into the network stack —
-  receiveq descriptors are not posted at boot. See the [Network Stack](../networking/Network-Stack.md)
-  for the user-side.
+  link state), `MQ` (advertised; v0 still uses one queue pair).
+- **TX**: live via `VirtioNetTransmit` + the kernel net stack's iface 2
+  TX trampoline. **RX**: live — a dedicated `virtio-net-rx-poll` task
+  drains the receiveq every 10 ms (no IRQ wire-up yet), parses the
+  per-frame virtio-net header, and injects the Ethernet payload into
+  the stack via `NetStackInjectRx`. The descriptor is re-published
+  immediately so the buffer is available for the next packet.
+- **NIC registration**: `NetStackBindInterface(iface_index=2, …)` runs
+  at probe, then `DhcpStart(2)` kicks off a lease — the device behaves
+  as a real Ethernet NIC from the rest of the stack's perspective.
 
-GAP: receiveq not posted; NIC registration with the network stack
-pending the RX path.
+GAP: IRQ-driven RX delivery (today's 10 ms polling cadence is the
+CPU-time floor); checksum / TSO / GSO offload negotiation;
+multi-queue queue-pair selection.
 
 ### virtio-console — Serial Console
 
@@ -207,7 +216,9 @@ gate (`kCapFsRead` on `read()` against a virtio-blk-backed file,
 - **All paths poll.** IRQ wiring deferred across all device classes.
 - **virtio-blk single in-flight.** Multi-tag queue is a near-term
   follow-up.
-- **virtio-net RX not posted.** TX-only in v0.
+- **virtio-net RX is polled.** Receiveq is posted and a dedicated
+  `virtio-net-rx-poll` task drains it every 10 ms; IRQ-driven delivery
+  is the next slice.
 - **virtio-balloon does not inflate.** Target page count read, action
   not taken.
 - **virtio-console single-port.** Multi-port support pending.

@@ -1405,17 +1405,6 @@ it."
   - IRQ wire-up so consumers don't pay a busy-poll for I/O
     that's already serviced by the host.
 
-### VirtIO — virtio-net packet TX/RX
-
-- **Today:** `kernel/drivers/virtio/virtio_net.cpp` is
-  probe-only with a STUB marker for the queue + dispatch.
-- **Lands:** virtio-net allocates RX (queue 0) + TX (queue 1)
-  virtqueues, registers a NIC against `kernel/drivers/net/net.h`,
-  pre-fills RX descriptors with empty buffers, dispatches TX
-  on `NetTransmit`. Honour `kNetFeatureMac` (use device-cfg
-  MAC) and `kNetFeatureMq` (multi-queue) when offered. IRQ
-  routing is a separate slice — v0 can poll on a timer.
-
 ### VirtIO — per-class polish
 
 - **Today:** every per-class probe v0 ships.
@@ -1423,8 +1412,12 @@ it."
     `RandomMix`.
   - virtio-blk drives read + write + flush through
     `BlockDevice`.
-  - virtio-net transmits frames via `VirtioNetTransmit`
-    (TX-only).
+  - virtio-net transmits frames via `VirtioNetTransmit` AND
+    drains inbound frames off the receiveq into
+    `NetStackInjectRx` from a dedicated 10 ms-cadence
+    `virtio-net-rx-poll` task; `NetStackBindInterface`
+    registers the device at iface index 2 with DHCP kicked
+    off at probe time.
   - virtio-console writes to the host via
     `VirtioConsoleWrite` AND drains host-typed bytes from
     the receiveq via `VirtioConsolePollByte`.
@@ -1432,9 +1425,6 @@ it."
     deflateq; the device sees a fully-configured driver.
 - **Lands:**
   - **virtio-blk concurrency + IRQ** (see entry above).
-  - **virtio-net RX queue + NIC registration** so inbound
-    frames land on the kernel net stack and `NetTransmit`
-    routes through `VirtioNetTransmit`.
   - **virtio-console multiport** —
     `VIRTIO_CONSOLE_F_MULTIPORT` + the control-queue
     protocol.

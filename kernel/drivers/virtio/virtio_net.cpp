@@ -1,17 +1,21 @@
 #include "drivers/virtio/virtio.h"
 #include "drivers/virtio/virtio_pci.h"
 
+#include "drivers/net/net.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
+#include "net/stack.h"
+#include "sched/sched.h"
 
 /*
  * virtio-net — paravirtualised NIC.
  *
- * Spec: virtio 1.0 §5.1. Single-queue v0: one transmitq
- * (queue 1). Receiveq + multi-queue + checksum/TSO/GSO offload
- * are all advertised on top and ignored in v0 — we negotiate
- * VERSION_1 + MAC + STATUS only.
+ * Spec: virtio 1.0 §5.1. v0 wires receiveq (queue 0) + transmitq
+ * (queue 1); multi-queue / checksum / TSO / GSO offload are
+ * advertised on top and ignored — we negotiate VERSION_1 + MAC +
+ * STATUS, plus MQ-advertised-only when offered (we still only
+ * drive the queue 0/1 pair).
  *
  * Each TX request is a 2-descriptor chain:
  *
@@ -21,14 +25,21 @@
  * The header is all-zero for plain frames (no offloads
  * negotiated); a single static 12-byte header page is reused
  * for every transmit. The frame buffer is the caller's —
- * `mm::VirtToPhys` resolves its DMA address. Receiveq is GAP
- * (queue 0 unconfigured); the device tolerates that by
- * dropping inbound frames, which matches "TX-only sender" v0
- * semantics.
+ * `mm::VirtToPhys` resolves its DMA address.
  *
- * `VirtioNetTransmit(buf, len)` is the public surface — a
- * future NIC-registration slice can plug it into
- * `kernel/drivers/net/net.h` so `NetTransmit` routes here.
+ * Each RX slot owns one 2 KiB device-write buffer big enough to
+ * hold the 12-byte virtio_net_hdr + max-size Ethernet frame. We
+ * carve 16 contiguous 4 KiB frames into 32 buffers and pre-post
+ * all 32 to the receiveq at probe time. The drain helper pops
+ * completed buffers, hands them to the kernel net stack via
+ * `NetStackInjectRx`, and re-publishes the descriptor.
+ *
+ * `VirtioNetTransmit(buf, len)` is the public TX surface; the
+ * `VirtioNetTxTrampoline` adapter routes it as a `NetTxFn` so
+ * `NetStackBindInterface` wires the device into the same iface
+ * table e1000 / cdc_ecm use. IRQ wire-up is the next slice —
+ * v0 polls the receiveq from a dedicated kernel task at 10 ms
+ * cadence.
  */
 
 namespace duetos::drivers::virtio
@@ -42,7 +53,9 @@ namespace
 {
 
 // virtio_net_hdr layout with VERSION_1 negotiated (virtio 1.0
-// §5.1.6). 12 bytes. All-zero for the no-offload TX path.
+// §5.1.6). 12 bytes. All-zero for the no-offload TX path; on RX
+// the device fills it in and the driver skips past it before
+// handing the frame up the stack.
 struct NetHdr
 {
     u8 flags;
@@ -54,6 +67,33 @@ struct NetHdr
     u16 num_buffers;
 };
 
+// RX-buffer geometry. 32 slots × 2048 bytes = 64 KiB across 16
+// physical frames. Each buffer holds one virtio_net_hdr (12 B)
+// + up to 2036 bytes of Ethernet frame — well past the 1518-byte
+// Ethernet max so a future jumbo-frame slice can grow without
+// reshuffling the layout.
+inline constexpr u32 kRxSlots = 32;
+inline constexpr u32 kRxBufBytes = 2048;
+inline constexpr u32 kRxBuffersPerFrame = static_cast<u32>(mm::kPageSize / kRxBufBytes);
+static_assert(kRxBuffersPerFrame > 0, "page size must hold at least one RX buffer");
+static_assert(kRxSlots % kRxBuffersPerFrame == 0, "RX slot count must divide evenly into frames");
+inline constexpr u32 kRxFrames = kRxSlots / kRxBuffersPerFrame;
+
+// Polling cadence for the RX-drain task: one scheduler tick =
+// 10 ms at 100 Hz. Matches the cdc_ecm RX rhythm; e1000 polls
+// faster because it can also block on a wait queue when IRQs
+// fire. v0 virtio-net has no IRQ wire-up.
+inline constexpr u32 kRxPollSleepTicks = 1;
+inline constexpr u32 kRxPollBudget = 16;
+
+// Pick the iface_index after the two existing drivers:
+//   0 = e1000 (kernel/drivers/net/net.cpp)
+//   1 = cdc_ecm (kernel/drivers/usb/cdc_ecm.cpp)
+//   2 = virtio-net (this driver)
+// kMaxInterfaces in net/stack.cpp is 4, leaving slot 3 for the
+// next NIC to land.
+inline constexpr u32 kVirtioNetIfaceIndex = 2;
+
 struct NetState
 {
     bool up;
@@ -61,8 +101,14 @@ struct NetState
     u8 _pad;
     VirtioPciLayout layout;
     VirtioQueue txq;
+    VirtioQueue rxq;
     mm::PhysAddr hdr_phys;
     u8* hdr_virt;
+    // RX-buffer phys / virt for every slot. Indexed by descriptor
+    // id; the device returns `head == slot` on completion because
+    // every RX descriptor is a single-buffer chain.
+    mm::PhysAddr rx_buf_phys[kRxSlots];
+    u8* rx_buf_virt[kRxSlots];
 };
 
 constinit NetState g_net = {};
@@ -74,6 +120,76 @@ void DrainTxUsed(VirtioQueue* q)
     while (VirtioQueueTryPop(q, &head, &used_len))
     {
         // Discard.
+    }
+}
+
+// Publish one RX descriptor as a single-buffer device-write chain.
+// `idx` doubles as both the descriptor index and the buffer slot
+// id — the device's used-ring `head` lookup goes straight back to
+// rx_buf_virt[idx].
+void NetRxPostDesc(u16 idx)
+{
+    VirtqDesc* d = const_cast<VirtqDesc*>(g_net.rxq.desc);
+    d[idx].addr = g_net.rx_buf_phys[idx];
+    d[idx].len = kRxBufBytes;
+    d[idx].flags = kVirtqDescWrite;
+    d[idx].next = 0;
+    VirtioQueuePublish(&g_net.layout, &g_net.rxq, idx);
+}
+
+// TX entry point shaped as a `net::NetTxFn` so
+// `NetStackBindInterface` can plug it into the iface table. The
+// stack already enforces firewall + counters before reaching this
+// trampoline, so the call is unconditional.
+bool VirtioNetTxTrampoline(u32 iface_index, const void* frame, u64 len)
+{
+    (void)iface_index;
+    if (len == 0 || len > 0xFFFFFFFFULL)
+        return false;
+    return VirtioNetTransmit(frame, static_cast<u32>(len));
+}
+
+// RX drain — pop every completion the device handed us up to
+// `budget`, inject each frame into the kernel net stack, and
+// re-publish the descriptor so the buffer is available for the
+// next packet. Single-CPU v0; no locking required.
+u32 NetDrainRx(u32 budget)
+{
+    if (!g_net.up)
+        return 0;
+    u32 drained = 0;
+    while (drained < budget)
+    {
+        u32 head = 0;
+        u32 used_len = 0;
+        if (!VirtioQueueTryPop(&g_net.rxq, &head, &used_len))
+            break;
+        if (head < kRxSlots && used_len > sizeof(NetHdr))
+        {
+            const u8* buf = g_net.rx_buf_virt[head];
+            const u32 frame_len = used_len - static_cast<u32>(sizeof(NetHdr));
+            duetos::net::NetStackInjectRx(kVirtioNetIfaceIndex, buf + sizeof(NetHdr), frame_len);
+        }
+        if (head < kRxSlots)
+            NetRxPostDesc(static_cast<u16>(head));
+        ++drained;
+    }
+    return drained;
+}
+
+// Dedicated RX-poll task. Mirrors the e1000 pattern but without
+// the MSI-X wait-queue branch — virtio-net IRQ wiring is the
+// next slice. The 10 ms sleep matches the receiveq's typical
+// drain cadence under QEMU SLIRP / vhost-net and keeps the CPU
+// out of a busy-poll when no traffic is arriving.
+void VirtioNetRxPollEntry(void*)
+{
+    for (;;)
+    {
+        const u32 drained = NetDrainRx(kRxPollBudget);
+        if (drained == kRxPollBudget)
+            continue;
+        duetos::sched::SchedSleepTicks(kRxPollSleepTicks);
     }
 }
 
@@ -104,24 +220,51 @@ bool VirtioNetProbe(const VirtioPciLayout& L)
         return false;
     }
 
-    // queue_index 1 = transmitq. queue 0 = receiveq (unconfigured
-    // in TX-only v0; the device drops inbound frames).
+    // queue 0 = receiveq, queue 1 = transmitq. Set up both before
+    // posting anything; the device sees a fully-configured driver
+    // by the time we mark DRIVER_OK.
+    if (!VirtioQueueSetup(&layout, &g_net.rxq, /*queue_index=*/0, kRxSlots))
+    {
+        KLOG_WARN("drivers/virtio/net", "receiveq setup failed");
+        return false;
+    }
     if (!VirtioQueueSetup(&layout, &g_net.txq, /*queue_index=*/1, kVirtqDefaultSize))
     {
         KLOG_WARN("drivers/virtio/net", "transmitq setup failed");
         return false;
     }
 
-    const mm::PhysAddr phys = mm::AllocateFrame();
-    if (phys == mm::kNullFrame)
+    // TX header page (12 bytes, all-zero, reused across transmits).
+    const mm::PhysAddr hdr_phys = mm::AllocateFrame();
+    if (hdr_phys == mm::kNullFrame)
     {
         KLOG_WARN("drivers/virtio/net", "header page alloc failed");
         return false;
     }
-    g_net.hdr_phys = phys;
-    g_net.hdr_virt = static_cast<u8*>(mm::PhysToVirt(phys));
+    g_net.hdr_phys = hdr_phys;
+    g_net.hdr_virt = static_cast<u8*>(mm::PhysToVirt(hdr_phys));
     auto* h = reinterpret_cast<NetHdr*>(g_net.hdr_virt);
     *h = NetHdr{};
+
+    // RX buffers: kRxFrames physical frames, each carved into
+    // kRxBuffersPerFrame buffers. Slot id `f * per + b` resolves to
+    // a buffer inside frame `f` at offset `b * kRxBufBytes`.
+    for (u32 f = 0; f < kRxFrames; ++f)
+    {
+        const mm::PhysAddr phys = mm::AllocateFrame();
+        if (phys == mm::kNullFrame)
+        {
+            KLOG_WARN_V("drivers/virtio/net", "RX buffer frame alloc failed at frame", static_cast<u64>(f));
+            return false;
+        }
+        u8* virt = static_cast<u8*>(mm::PhysToVirt(phys));
+        for (u32 b = 0; b < kRxBuffersPerFrame; ++b)
+        {
+            const u32 slot = f * kRxBuffersPerFrame + b;
+            g_net.rx_buf_phys[slot] = phys + b * kRxBufBytes;
+            g_net.rx_buf_virt[slot] = virt + b * kRxBufBytes;
+        }
+    }
 
     if ((want & kNetFeatureMac) != 0 && layout.device_cfg != nullptr)
     {
@@ -131,14 +274,31 @@ bool VirtioNetProbe(const VirtioPciLayout& L)
     g_net.layout = layout;
     g_net.up = true;
 
+    // Pre-fill every RX descriptor. From this moment the device
+    // can write inbound frames into our buffers; the drain task
+    // (spawned below) pops the used ring on a 10 ms cadence.
+    for (u16 i = 0; i < kRxSlots; ++i)
+        NetRxPostDesc(i);
+
+    // Register with the kernel net stack. Iface 2 is the
+    // virtio-net slot (see kVirtioNetIfaceIndex). Bind with
+    // 0.0.0.0 so DHCP DISCOVER goes out with the correct src.
+    duetos::net::MacAddress mac{};
+    for (u64 i = 0; i < 6; ++i)
+        mac.octets[i] = g_net.mac[i];
+    duetos::net::Ipv4Address ip{{0, 0, 0, 0}};
+    duetos::net::NetStackBindInterface(kVirtioNetIfaceIndex, mac, ip, &VirtioNetTxTrampoline);
+    duetos::net::DhcpStart(kVirtioNetIfaceIndex);
+
+    // Spawn the RX-drain task. The thread runs for the lifetime
+    // of the kernel; no graceful shutdown today (virtio-net never
+    // hot-unplugs in QEMU).
+    duetos::sched::SchedCreate(VirtioNetRxPollEntry, nullptr, "virtio-net-rx-poll");
+
     u64 mac_packed = 0;
     for (u32 i = 0; i < 6; ++i)
         mac_packed = (mac_packed << 8) | g_net.mac[i];
-    KLOG_INFO_V("drivers/virtio/net", "attached (TX-only, mac in lower 6 bytes)", mac_packed);
-    // GAP: receiveq + per-frame RX dispatch + NIC registration
-    // against `drivers/net/net.h`. `VirtioNetTransmit` is
-    // reachable today but inbound packets are dropped at the
-    // device.
+    KLOG_INFO_V("drivers/virtio/net", "attached (RX+TX, iface=2, mac in lower 6 bytes)", mac_packed);
     return true;
 }
 
