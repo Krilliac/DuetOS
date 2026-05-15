@@ -1,0 +1,46 @@
+# DuetOS cppcheck suppressions - verified false positives only.
+#
+# Policy: this file holds ONLY findings that were individually traced to
+# a cppcheck analysis blind spot and confirmed safe. It is not a
+# convenience dumping ground. Each entry is line-pinned (id:file:line)
+# rather than file-wide on purpose: if a line drifts after a refactor
+# the suppression simply stops matching and the known FP re-appears
+# loudly - it can never silently mask a *new* real bug elsewhere in the
+# same file. Re-pin drifted lines; never widen to id:file to "make it
+# quiet".
+#
+# Two confirmed cppcheck blind spots account for every entry below.
+#
+# (1) comparePointers on linker-script section symbols.
+#     `extern` symbols like _text_start/_text_end, __init_array_*,
+#     ap_trampoline_*, __duetos_hotpatch_pairs_* are distinct objects
+#     to the C++ abstract machine, so cppcheck flags subtracting /
+#     comparing them. In a freestanding kernel the linker script
+#     defines them to bracket one contiguous region; the arithmetic
+#     is the standard, correct way to size a section. Not a bug.
+#
+# (2) arrayIndexOutOfBounds on NUL-guarded bounded string copies.
+#     The loop shape `for (i=0; s[i] != '\0' && i < CAP; ++i)` (or an
+#     equivalent early-return-on-NUL compare) reads s[i] only while
+#     s[i] != '\0'. cppcheck's ValueFlow ignores the NUL guard,
+#     assumes i reaches CAP, then matches a short string-literal
+#     caller and reports an overrun that the guard makes unreachable.
+#     Each site below was checked: the source string is a NUL-
+#     terminated literal shorter than CAP, so the access stays in
+#     bounds. Not a bug.
+
+# --- (1) linker-script section-symbol arithmetic ---
+comparePointers:kernel/apps/dbg_core.cpp:309
+comparePointers:kernel/apps/dbg_core.cpp:311
+comparePointers:kernel/arch/x86_64/smp.cpp:566
+comparePointers:kernel/core/init.cpp:307
+comparePointers:kernel/debug/hot_patch.cpp:505
+comparePointers:kernel/diag/runtime_checker.cpp:871
+comparePointers:kernel/diag/runtime_checker.cpp:900
+
+# --- (2) NUL-guarded bounded string copy / compare ---
+arrayIndexOutOfBounds:kernel/drivers/net/iwlwifi_fw.cpp:224
+arrayIndexOutOfBounds:kernel/fs/installer.cpp:79
+arrayIndexOutOfBounds:kernel/net/wireless/test/loopback_driver.cpp:202
+arrayIndexOutOfBounds:kernel/net/wireless/wdev.cpp:319
+arrayIndexOutOfBounds:kernel/sched/sched.cpp:2492
