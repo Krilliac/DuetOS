@@ -14,12 +14,13 @@ input subsystem into the kernel shell and the focused compositor
 window.
 
 ```
-[ HW: PS/2 controller / USB keyboard / Bluetooth keyboard ]
-        |  IRQ
-[ Driver: ps2 / xhci+hid / bluetooth (L2CAP→ATT-HOGP|HIDP) ]
+[ HW: PS/2 controller / USB keyboard / BT keyboard / virtio-input ]
+        |  IRQ / poll
+[ Driver: ps2 / xhci+hid / bluetooth (L2CAP→ATT-HOGP|HIDP) / virtio ]
         |
 [ Boot-report decoder ]            kernel/drivers/input/hid_keyboard.{h,cpp}
-        |   (shared by USB + Bluetooth — one usage→KeyEvent table)
+        |   (USB + Bluetooth — one usage→KeyEvent table;
+        |    PS/2 + virtio-input share the active scancode keymap)
 [ Input event queue ]              kernel/drivers/input/ (KeyboardInjectEvent)
         |
 [ Kernel shell + Compositor focused window ]
@@ -27,9 +28,13 @@ window.
 
 PS/2 feeds the queue through its scancode decoder; USB HID and
 Bluetooth HID both feed it through the shared boot-protocol decoder
-in `kernel/drivers/input/hid_keyboard.{h,cpp}`, so a runtime layout
-switch and the press/release/modifier semantics are identical
-regardless of which bus carried the key.
+in `kernel/drivers/input/hid_keyboard.{h,cpp}`; virtio-input
+([`kernel/drivers/virtio/virtio_input.cpp`](../../kernel/drivers/virtio/virtio_input.cpp))
+feeds it from a polled eventq, translating Linux evdev keycodes
+through the same active PS/2 scancode keymap (the AT-block evdev
+codes ARE set-1 scancodes). All paths land identical
+press/release/modifier semantics and honour a runtime layout
+switch regardless of which bus carried the key.
 
 ## PS/2 Keyboard v0
 

@@ -24,8 +24,8 @@ VirtioInit() — walks the discovered list, dispatches by class
                 |
         +-------+---------+---------+----------+----------+--------+
         v       v         v         v          v          v        v
-    net      blk     console     balloon      rng        gpu     scsi/input/socket
-                                                       (drivers/gpu/virtio_gpu)   (logged, no probe yet)
+  net    blk   console   balloon   rng   input    gpu    scsi/socket
+                                                (drivers/gpu/virtio_gpu)  (logged, no probe yet)
 ```
 
 The fabric does not own driver state — each `virtio_<class>.cpp` keeps
@@ -162,6 +162,34 @@ matters even when no other device of its class is in use — the
 entropy contribution is non-trivial on hosts that don't expose
 RDRAND to the guest.
 
+### virtio-input — Keyboard
+
+[`virtio_input.cpp`](../../kernel/drivers/virtio/virtio_input.cpp).
+PCI class 18 (Input).
+
+- **Queues**: `eventq` (0, device → driver). The `statusq` (1,
+  LED / force-feedback) is not installed — no consumer in tree.
+- **Wire format**: a stream of `virtio_input_event {type, code,
+  value}` records, one per used-ring buffer — the exact Linux
+  evdev shape.
+- **Decode**: `EV_KEY` records translate to the shared kernel
+  `KeyEvent`. Linux keycodes for the AT 101/104 block are
+  numerically identical to PS/2 set-1 scancodes, so the printable
+  path reuses the **active PS/2 keymap** — the same layout source
+  the PS/2 and USB-HID decoders use (one source of truth). Decoded
+  events go through `KeyboardInjectEvent`, the same input queue
+  PS/2 / xHCI HID / Bluetooth HID feed.
+- **Polling cadence**: a dedicated `virtio-input-evt-poll` task
+  drains the eventq every 10 ms (same rhythm as `virtio-net-rx`).
+- **Boot sentinel**: the device's `ID_NAME` config string is read
+  and logged (`attached (keyboard, eventq) name="…"`).
+
+GAP: pointer devices (`EV_REL` / `EV_ABS` — virtio-mouse /
+virtio-tablet) are not decoded; mouse injection is a separate
+slice. GAP: single device — a second virtio-input function is
+rejected (matches virtio-console's v0 stance). GAP: IRQ-driven
+eventq delivery is the next layer beyond the poll task.
+
 ### virtio-gpu — Display
 
 Lives at [`kernel/drivers/gpu/virtio_gpu.cpp`](../../kernel/drivers/gpu/virtio_gpu.cpp),
@@ -170,11 +198,11 @@ state (scanouts, 2D resources, command rings) that it earns its own
 home. It does negotiate features through the same `VirtioPciLayout`,
 though. See [Graphics Drivers](Graphics-Drivers.md).
 
-### virtio-scsi / -input / -socket — Detected, no probe
+### virtio-scsi / -socket — Detected, no probe
 
 The fabric recognises the device IDs and logs them at boot; no probe
-exists yet. The reason is pragmatic: NVMe + USB cover the storage and
-input shapes we already need; vsock is on the Roadmap for the live
+exists yet. The reason is pragmatic: NVMe + AHCI cover the storage
+shapes we already need; vsock is on the Roadmap for the live
 remote-debug story.
 
 ## Probe Lifecycle
@@ -222,7 +250,10 @@ gate (`kCapFsRead` on `read()` against a virtio-blk-backed file,
 - **virtio-balloon does not inflate.** Target page count read, action
   not taken.
 - **virtio-console single-port.** Multi-port support pending.
-- **scsi / input / socket** detected but not probed.
+- **virtio-input keyboard only.** eventq keyboard path is live and
+  polled every 10 ms; pointer (EV_REL/EV_ABS) and the statusq
+  (LED/FF) are deferred; IRQ-driven eventq is the next layer.
+- **scsi / socket** detected but not probed.
 
 ## Related Pages
 

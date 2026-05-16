@@ -9127,8 +9127,70 @@ endpoint.
   proven by boot self-tests driving synthetic packets end-to-end
   (`[hid-kbd]` / `[bt-hid]` / `[btusb]` selftest pass), asserting
   the decode/dispatch boundary rather than faking hardware.
+- **ATT indication egress is a symmetric seam, not an inline
+  reply.** A received ATT Handle Value Indication owes a 1-byte
+  Handle Value Confirmation or the GATT server stalls all further
+  indications. Rather than teach the HID layer about the
+  transport, the confirmation goes out a `BtHidSetAclSink`
+  function-pointer egress — the exact mirror of the
+  `BtHidDeliverAcl` ingress seam — which btusb wires to its
+  bulk-OUT endpoint at bring-up. Two consequences fixed here:
+  (1) the confirmation is owed for *any* indication on the ATT
+  bearer regardless of which attribute it carried or whether the
+  HID layer decodes the value (it acknowledges receipt at the
+  ATT layer, not the HID layer), so the dispatcher keys off the
+  opcode independent of the report-handle match; (2) the sink is
+  invoked *after* `g_hid_lock` is dropped, because a transport
+  bulk-OUT submit may poll/block and must never run under the
+  connection-table spinlock. The seam is null until a transport
+  registers it — consistent with the ingress, which is likewise
+  inert until btusb pumps it.
 - **Related roadmap track(s):** Bluetooth. Keyboard transport +
   upper stack + event endpoint graduate; connection manager
   (LE scan/connect), SMP pairing, GATT-HOGP discovery, and the
   general L2CAP-signalling / RFCOMM / SDP layers for non-keyboard
   profiles remain open and SMP-gated.
+
+## 2026-05-16 — virtio-input keyboard: reuse the PS/2 keymap, don't add an evdev table
+
+The `kInput` virtio class was detected-but-unprobed (a `// STUB:`
+in the fabric dispatch). virtio-input is the highest-leverage
+unclaimed class: every QEMU/cloud guest can attach
+`virtio-keyboard-pci`, and it has a clear in-kernel consumer (the
+shared input queue) and a clear test path.
+
+- **Decode reuses the active PS/2 keymap; no new evdev table.**
+  Linux evdev keycodes for the AT 101/104 block (1..0x58) are
+  numerically identical to PS/2 set-1 scancodes by historical
+  design. So `EvdevToKeyCode` indexes the *same*
+  `Ps2KeyboardActiveLowerMap()` / `UpperMap()` the PS/2 and
+  USB-HID decoders already use, with a small switch for the
+  specials that diverge (Esc, F1–F12, the extended nav block at
+  102–111). This is the deliberate alternative to shipping a
+  parallel ~110-entry evdev→char table: a second table would be
+  a second source of truth for keyboard layout and would silently
+  drift on a runtime layout switch. The next slice must extend the
+  switch / shared keymap, NOT add an evdev table. (CLAUDE.md rule
+  6 — one source of truth per resource.)
+- **eventq mirrors the proven virtio-net RX shape.** N device-
+  write descriptors, one `virtio_input_event` per buffer, drained
+  by a dedicated 10 ms-cadence `virtio-input-evt-poll` task,
+  re-posted per slot. No new queue primitive; the wire plumbing
+  is the verbatim virtio-net/console pattern. IRQ-driven eventq
+  is the next layer, exactly as it is for net/console.
+- **Keyboard only, single device.** The statusq (LED/FF) is not
+  installed (no consumer) and EV_REL/EV_ABS pointer events decode
+  to nothing — virtio-mouse/tablet is a separate slice into the
+  mouse injection path, GAP-marked. A second virtio-input
+  function is rejected, matching virtio-console's v0 single-device
+  stance. These are deliberate boundaries, not omissions.
+- **Validation model.** A pure capture-seam self-test
+  (`VirtioInputSelfTest`, `DUETOS_BOOT_SELFTEST`) drives synthetic
+  evdev records and asserts the decoded KeyEvents
+  (`[virtio-input] selftest pass`); a headless boot with
+  `-device virtio-keyboard-pci` confirms the real device-probe /
+  config-name / queue-setup / poll-task path attaches cleanly.
+- **Related roadmap track(s):** VirtIO per-class polish.
+  virtio-input keyboard graduates; pointer (EV_REL/EV_ABS) +
+  statusq + IRQ delivery remain open. The fabric `// STUB:` now
+  covers scsi/socket only.

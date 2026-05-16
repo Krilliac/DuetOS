@@ -46,6 +46,27 @@ bool NormaliseBootReport(const u8* value, u32 value_len, u8 out[8])
     return false;
 }
 
+void WriteLe16(u8* d, u16 v)
+{
+    d[0] = u8(v & 0xFF);
+    d[1] = u8((v >> 8) & 0xFF);
+}
+
+// Build one HCI ACL packet wrapping an L2CAP B-frame around `sdu`.
+// Returns total length written into `out`.
+u32 BuildAcl(u8* out, u16 acl_handle, u8 pb, u16 cid, const u8* sdu, u32 sdu_len)
+{
+    const u16 hf = u16((acl_handle & 0x0FFF) | (u16(pb & 0x3) << 12));
+    const u16 l2cap_total = u16(4 + sdu_len);
+    WriteLe16(out, hf);
+    WriteLe16(out + 2, l2cap_total);
+    WriteLe16(out + 4, u16(sdu_len)); // L2CAP payload length
+    WriteLe16(out + 6, cid);          // L2CAP CID
+    for (u32 i = 0; i < sdu_len; ++i)
+        out[8 + i] = sdu[i];
+    return 8 + sdu_len;
+}
+
 } // namespace
 
 bool BtHidParseAclHeader(const u8* p, u32 len, BtHidAclHeader* out, const u8** payload, u32* payload_len)
@@ -103,10 +124,10 @@ bool BtHidExtractBootReport(BtHidKind kind, u16 att_match_handle, const u8* sdu,
         const u16 attr = ReadLeU16(sdu + 1);
         if (att_match_handle != 0 && attr != att_match_handle)
             return false;
-        // GAP: an Indication should be answered with a Handle Value
-        // Confirmation (0x1E). Keyboards use notifications; v0 does
-        // not emit the confirmation, so an indication-only keyboard
-        // would stop after one report. Notification path is exact.
+        // An Indication (0x1D) is acknowledged by the dispatcher with
+        // an ATT Handle Value Confirmation pushed back through the
+        // transport's ACL egress sink (see DispatchL2capLocked); the
+        // report value itself is normalised the same as a Notification.
         return NormaliseBootReport(sdu + 3, sdu_len - 3, out_report);
     }
 
@@ -161,6 +182,12 @@ constinit bool g_capture_active = false;
 constinit duetos::drivers::input::KeyEvent g_capture_buf[duetos::drivers::input::kHidKbMaxEventsPerDiff * 4] = {};
 constinit u32 g_capture_count = 0;
 
+// ACL egress sink — the transport driver's bulk-OUT submit, set once
+// at btusb bring-up before any RX pump runs. Read lock-free on the
+// confirmation path (pointer-aligned, set-once); writes go through
+// g_hid_lock for ordering against teardown.
+constinit BtHidAclSink g_acl_sink = nullptr;
+
 BtHidConnection* FindByHandleLocked(u16 acl_handle)
 {
     for (u32 i = 0; i < kBtHidMaxConnections; ++i)
@@ -208,14 +235,17 @@ void EmitReportLocked(BtHidConnection& c, const u8 report[8])
 }
 
 // Route one fully-reassembled L2CAP PDU for a connection. Caller
-// holds g_hid_lock.
-void DispatchL2capLocked(BtHidConnection& c, const u8* pdu, u32 pdu_len)
+// holds g_hid_lock. Returns the ACL handle that owes an ATT Handle
+// Value Confirmation (a Handle Value Indication was received on the
+// ATT bearer), or 0 if none. The caller emits the confirmation after
+// dropping g_hid_lock so the transport submit never runs under it.
+u16 DispatchL2capLocked(BtHidConnection& c, const u8* pdu, u32 pdu_len)
 {
     u16 cid = 0;
     const u8* sdu = nullptr;
     u32 sdu_len = 0;
     if (!BtHidParseL2cap(pdu, pdu_len, &cid, &sdu, &sdu_len))
-        return;
+        return 0;
 
     bool match = false;
     if (c.kind == BtHidKind::LeHogp)
@@ -223,11 +253,21 @@ void DispatchL2capLocked(BtHidConnection& c, const u8* pdu, u32 pdu_len)
     else if (c.kind == BtHidKind::Classic)
         match = (cid == c.interrupt_cid);
     if (!match)
-        return;
+        return 0;
+
+    // An Indication on the ATT bearer must be confirmed regardless of
+    // which attribute it carried or whether we decode its value —
+    // the confirmation acknowledges receipt at the ATT layer, and
+    // the server stalls all further indications until it arrives.
+    u16 confirm_handle = 0;
+    if (c.kind == BtHidKind::LeHogp && sdu != nullptr && sdu_len >= 1 && sdu[0] == kAttHandleValueIndication)
+        confirm_handle = c.acl_handle;
 
     u8 report[8];
     if (BtHidExtractBootReport(c.kind, c.att_report_handle, sdu, sdu_len, report))
         EmitReportLocked(c, report);
+
+    return confirm_handle;
 }
 
 } // namespace
@@ -346,15 +386,38 @@ void BtHidDeliverAcl(const u8* acl_pkt, u32 len)
 
     // Dispatch once the full L2CAP PDU (4-byte header + declared
     // payload) has arrived.
+    u16 confirm_handle = 0;
     if (c->reasm_len >= 4)
     {
         const u32 want = u32(4) + ReadLeU16(c->reasm);
         if (c->reasm_len >= want)
         {
-            DispatchL2capLocked(*c, c->reasm, want);
+            confirm_handle = DispatchL2capLocked(*c, c->reasm, want);
             c->reasm_len = 0;
         }
     }
+    duetos::sync::SpinLockRelease(g_hid_lock, flags);
+
+    // Emit the ATT Handle Value Confirmation outside g_hid_lock — the
+    // transport's bulk-OUT submit may poll/block and must never run
+    // under the connection-table spinlock.
+    if (confirm_handle != 0)
+    {
+        BtHidAclSink sink = g_acl_sink;
+        if (sink != nullptr)
+        {
+            const u8 confirm = kAttHandleValueConfirmation;
+            u8 pkt[16];
+            const u32 n = BuildAcl(pkt, confirm_handle, 2 /*start*/, kL2capCidAtt, &confirm, 1);
+            sink(pkt, n);
+        }
+    }
+}
+
+void BtHidSetAclSink(BtHidAclSink sink)
+{
+    auto flags = duetos::sync::SpinLockAcquire(g_hid_lock);
+    g_acl_sink = sink;
     duetos::sync::SpinLockRelease(g_hid_lock, flags);
 }
 
@@ -401,25 +464,16 @@ void Expect(bool cond, const char* what)
     core::Panic("net/bluetooth/hid", "BT HID self-test mismatch");
 }
 
-void WriteLe16(u8* d, u16 v)
-{
-    d[0] = u8(v & 0xFF);
-    d[1] = u8((v >> 8) & 0xFF);
-}
+// Capture seam for the egress sink: BtHidSelfTest registers this so
+// it can assert the ATT confirmation bytes without a live radio.
+constinit u8 g_tx_capture[32] = {};
+constinit u32 g_tx_capture_len = 0;
 
-// Build one HCI ACL packet wrapping an L2CAP B-frame around `sdu`.
-// Returns total length written into `out`.
-u32 BuildAcl(u8* out, u16 acl_handle, u8 pb, u16 cid, const u8* sdu, u32 sdu_len)
+void TestAclSink(const u8* pkt, u32 len)
 {
-    const u16 hf = u16((acl_handle & 0x0FFF) | (u16(pb & 0x3) << 12));
-    const u16 l2cap_total = u16(4 + sdu_len);
-    WriteLe16(out, hf);
-    WriteLe16(out + 2, l2cap_total);
-    WriteLe16(out + 4, u16(sdu_len)); // L2CAP payload length
-    WriteLe16(out + 6, cid);          // L2CAP CID
-    for (u32 i = 0; i < sdu_len; ++i)
-        out[8 + i] = sdu[i];
-    return 8 + sdu_len;
+    g_tx_capture_len = (len <= sizeof(g_tx_capture)) ? len : 0;
+    for (u32 i = 0; i < g_tx_capture_len; ++i)
+        g_tx_capture[i] = pkt[i];
 }
 
 } // namespace
@@ -519,6 +573,42 @@ void BtHidSelfTest()
             BtHidDeliverAcl(pkt, n);
             Expect(g_capture_count == 1 && g_capture_buf[0].code == u16('b'), "report-id strip -> 'b'");
         }
+    }
+
+    // ---- ATT Indication -> Handle Value Confirmation egress. ----
+    // An indication-type keyboard (op 0x1D) must see a 0x1E pushed
+    // back through the ACL sink, AND its report still decodes. Use a
+    // dedicated connection so the press diffs against a clean prev.
+    {
+        Expect(BtHidRegisterLeKeyboard(0x0042, 0x002A).has_value(), "register LE kbd #3");
+        BtHidSetAclSink(TestAclSink);
+        g_tx_capture_len = 0;
+        const u8 press_e[8] = {0, 0, 0x08, 0, 0, 0, 0, 0};
+        u8 att[3 + 8];
+        att[0] = kAttHandleValueIndication;
+        WriteLe16(att + 1, 0x002A);
+        for (u32 i = 0; i < 8; ++i)
+            att[3 + i] = press_e[i];
+        u8 pkt[64];
+        const u32 n = BuildAcl(pkt, 0x0042, 2, kL2capCidAtt, att, sizeof(att));
+        g_capture_count = 0;
+        BtHidDeliverAcl(pkt, n);
+        Expect(g_capture_count == 1 && g_capture_buf[0].code == u16('e'), "indication report decoded");
+        // Confirmation = ACL{handle=0x42,pb=2} + L2CAP{len=1,cid=ATT}
+        // + ATT{0x1E} = 9 bytes.
+        Expect(g_tx_capture_len == 9, "confirmation packet length");
+        Expect(g_tx_capture[0] == 0x42 && g_tx_capture[1] == 0x20, "confirmation ACL handle/pb");
+        Expect(g_tx_capture[4] == 0x01 && g_tx_capture[5] == 0x00, "confirmation L2CAP len=1");
+        Expect(g_tx_capture[6] == 0x04 && g_tx_capture[7] == 0x00, "confirmation L2CAP cid=ATT");
+        Expect(g_tx_capture[8] == kAttHandleValueConfirmation, "confirmation ATT opcode 0x1E");
+        // A Notification on the same link gets NO confirmation.
+        att[0] = kAttHandleValueNotification;
+        const u32 n2 = BuildAcl(pkt, 0x0042, 2, kL2capCidAtt, att, sizeof(att));
+        g_tx_capture_len = 0;
+        BtHidDeliverAcl(pkt, n2);
+        Expect(g_tx_capture_len == 0, "notification gets no confirmation");
+        BtHidSetAclSink(nullptr);
+        BtHidUnregister(0x0042);
     }
 
     // ---- Fragmented L2CAP reassembly (START + CONT). -----------
