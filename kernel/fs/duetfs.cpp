@@ -339,8 +339,7 @@ void DuetFsSelfTest()
     ExpectStatus(duetfs_readdir(&scratch, etc_id, 0, dents, 4, &dcount), kStatusOk, "readdir /etc failed");
     Expect(dcount == 1, "readdir /etc count != 1");
     Expect(dents[0].node_id == ver_id && dents[0].kind == kKindFile, "readdir /etc entry mis-stat");
-    Expect(dents[0].name_len == 7 && dents[0].name[0] == 'v' && dents[0].name[6] == 'n',
-           "readdir /etc name mismatch");
+    Expect(dents[0].name_len == 7 && dents[0].name[0] == 'v' && dents[0].name[6] == 'n', "readdir /etc name mismatch");
     dcount = 99;
     ExpectStatus(duetfs_readdir(&scratch, etc_id, 1, dents, 4, &dcount), kStatusOk, "readdir /etc page2 failed");
     Expect(dcount == 0, "readdir /etc page2 not empty");
