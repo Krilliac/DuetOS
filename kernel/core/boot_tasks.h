@@ -25,4 +25,10 @@ void KbdReaderTask(void* arg);
 // interaction and the desktop context menu.
 void MouseReaderTask(void* arg);
 
+// Win32 per-window timer ticker (posts WM_TIMER).
+void WinTimerTickerTask(void* arg);
+
+// Scheduler self-test worker (mutex-guarded shared counter).
+void SchedDemoWorkerTask(void* arg);
+
 } // namespace duetos::core

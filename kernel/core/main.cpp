@@ -528,17 +528,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // elapses. SYS_WIN_TIMER_SET / KILL mutate the table
     // directly. Runs under the compositor lock so it serialises
     // with the input readers + GetMessage blockers.
-    auto win_timer_ticker = [](void*)
-    {
-        for (;;)
-        {
-            duetos::sched::SchedSleepTicks(1);
-            duetos::drivers::video::CompositorLock();
-            duetos::drivers::video::WindowTimerTick();
-            duetos::drivers::video::CompositorUnlock();
-        }
-    };
-    duetos::sched::SchedCreate(win_timer_ticker, nullptr, "win-timer");
+    duetos::sched::SchedCreate(duetos::core::WinTimerTickerTask, nullptr, "win-timer");
 
     // Scheduler self-test: three kernel threads that each bump a shared
     // counter five times under a mutex. If the mutex serialises them
@@ -548,39 +538,6 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // exercises WaitQueueBlock / WaitQueueWakeOne whenever two workers
     // collide on MutexLock, so the wait-queue machinery is on the boot
     // path by default.
-    static duetos::sched::Mutex s_demo_mutex{};
-    static duetos::u64 s_shared_counter = 0;
-
-    auto worker = [](void* arg)
-    {
-        const char* name = static_cast<const char*>(arg);
-        for (duetos::u64 i = 0; i < 5; ++i)
-        {
-            duetos::sched::MutexLock(&s_demo_mutex);
-
-            const duetos::u64 before = s_shared_counter;
-            // Burn a couple of ms of CPU inside the critical section so
-            // that other workers are almost guaranteed to hit the slow
-            // path on MutexLock and park on the wait queue. Without this
-            // the race is too tight for the self-test to be meaningful.
-            for (duetos::u64 j = 0; j < 2'000'000; ++j)
-            {
-                asm volatile("" ::: "memory");
-            }
-            s_shared_counter = before + 1;
-
-            SerialWrite("[sched] ");
-            SerialWrite(name);
-            SerialWrite(" i=");
-            SerialWriteHex(i);
-            SerialWrite(" counter=");
-            SerialWriteHex(s_shared_counter);
-            SerialWrite("\n");
-
-            duetos::sched::MutexUnlock(&s_demo_mutex);
-            duetos::sched::SchedSleepTicks(1); // yield + 10 ms pause
-        }
-    };
 
     // Scheduler self-test workers exit after 5 iterations and so
     // they bump g_tasks_exited — which would falsely satisfy
@@ -592,9 +549,9 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // smoke arg → profile=None) keeps running them.
     if (duetos::test::SmokeProfileGet() == duetos::test::SmokeProfile::None)
     {
-        duetos::sched::SchedCreate(worker, const_cast<char*>("A"), "worker-A");
-        duetos::sched::SchedCreate(worker, const_cast<char*>("B"), "worker-B");
-        duetos::sched::SchedCreate(worker, const_cast<char*>("C"), "worker-C");
+        duetos::sched::SchedCreate(duetos::core::SchedDemoWorkerTask, const_cast<char*>("A"), "worker-A");
+        duetos::sched::SchedCreate(duetos::core::SchedDemoWorkerTask, const_cast<char*>("B"), "worker-B");
+        duetos::sched::SchedCreate(duetos::core::SchedDemoWorkerTask, const_cast<char*>("C"), "worker-C");
     }
 
     // First ring-3 slice: spawn a dedicated scheduler thread that maps a

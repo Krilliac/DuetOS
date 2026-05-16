@@ -68,6 +68,17 @@
 namespace duetos::core
 {
 
+namespace
+{
+
+// Scheduler self-test shared state, worker-only. Moved with
+// SchedDemoWorkerTask out of kernel_main; must outlive each
+// spawn so it keeps static storage duration.
+duetos::sched::Mutex s_demo_mutex{};
+duetos::u64 s_shared_counter = 0;
+
+} // namespace
+
 void UiTickerTask(void*)
 {
     auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
@@ -2981,6 +2992,53 @@ void MouseReaderTask(void*)
         SerialWrite(" btn=");
         SerialWriteHex(p.buttons);
         SerialWrite("\n");
+    }
+}
+
+// Win32 timer ticker: walks the per-window timer table every
+// scheduler tick and posts WM_TIMER under the compositor lock.
+void WinTimerTickerTask(void*)
+{
+    for (;;)
+    {
+        duetos::sched::SchedSleepTicks(1);
+        duetos::drivers::video::CompositorLock();
+        duetos::drivers::video::WindowTimerTick();
+        duetos::drivers::video::CompositorUnlock();
+    }
+}
+
+// Scheduler self-test worker: bumps a mutex-guarded shared
+// counter five times, exercising the wait-queue slow path.
+void SchedDemoWorkerTask(void* arg)
+{
+    using namespace duetos::arch;
+    const char* name = static_cast<const char*>(arg);
+    for (duetos::u64 i = 0; i < 5; ++i)
+    {
+        duetos::sched::MutexLock(&s_demo_mutex);
+
+        const duetos::u64 before = s_shared_counter;
+        // Burn a couple of ms of CPU inside the critical section so
+        // that other workers are almost guaranteed to hit the slow
+        // path on MutexLock and park on the wait queue. Without this
+        // the race is too tight for the self-test to be meaningful.
+        for (duetos::u64 j = 0; j < 2'000'000; ++j)
+        {
+            asm volatile("" ::: "memory");
+        }
+        s_shared_counter = before + 1;
+
+        SerialWrite("[sched] ");
+        SerialWrite(name);
+        SerialWrite(" i=");
+        SerialWriteHex(i);
+        SerialWrite(" counter=");
+        SerialWriteHex(s_shared_counter);
+        SerialWrite("\n");
+
+        duetos::sched::MutexUnlock(&s_demo_mutex);
+        duetos::sched::SchedSleepTicks(1); // yield + 10 ms pause
     }
 }
 } // namespace duetos::core
