@@ -20,4 +20,9 @@ void UiTickerTask(void* arg);
 // window/app keyboard dispatch, console + COM1 mirroring.
 void KbdReaderTask(void* arg);
 
+// Mouse reader: Ps2 packet consumer driving window
+// focus/drag/resize/snap, menu/taskbar/tray + scrollbar
+// interaction and the desktop context menu.
+void MouseReaderTask(void* arg);
+
 } // namespace duetos::core

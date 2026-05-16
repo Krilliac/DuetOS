@@ -27,6 +27,7 @@
 #include "apps/terminal.h"
 #include "apps/trash.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 #include "core/menu_dispatch.h"
 #include "core/session_restore.h"
 #include "diag/fix_journal_persist.h"
@@ -1679,6 +1680,1307 @@ void KbdReaderTask(void*)
             }
             duetos::drivers::video::CompositorUnlock();
         }
+    }
+}
+
+// Mouse reader task: Ps2 packet consumer driving window
+// focus/drag/resize/snap, menu + taskbar + tray interaction,
+// scrollbar drag and the desktop context menu.
+void MouseReaderTask(void*)
+{
+    using namespace duetos::arch;
+    // Drag state is local to this thread. No other task
+    // observes windows moving, so keeping the state on the
+    // stack (via static-lambda-local) avoids a fragile global.
+    struct DragState
+    {
+        bool active;
+        duetos::drivers::video::WindowHandle window;
+        duetos::u32 grab_offset_x;
+        duetos::u32 grab_offset_y;
+    };
+    static DragState drag{false, duetos::drivers::video::kWindowInvalid, 0, 0};
+    // Edge-resize state. Activated when the user presses on
+    // a window's resize border. Tracks the window + edge +
+    // anchor bounds so the resize is computed off the
+    // press-time geometry, not the prior frame's.
+    struct ResizeState
+    {
+        bool active;
+        duetos::drivers::video::WindowHandle window;
+        duetos::drivers::video::WindowResizeEdge edge;
+        duetos::u32 anchor_cx, anchor_cy;
+        duetos::u32 anchor_x, anchor_y, anchor_w, anchor_h;
+    };
+    static ResizeState resize{
+        false, duetos::drivers::video::kWindowInvalid, duetos::drivers::video::WindowResizeEdge::None, 0, 0, 0, 0, 0,
+        0};
+    // Scrollbar drag-the-thumb state.
+    struct ScrollbarDrag
+    {
+        bool active;
+        duetos::drivers::video::WindowHandle hwnd;
+        duetos::u32 grab_offset_in_thumb;
+    };
+    static ScrollbarDrag sb_drag{false, duetos::drivers::video::kWindowInvalid, 0};
+    static bool prev_left = false;
+    static bool prev_right = false;
+    auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
+
+    // Menu item sets — static so their label pointers outlive
+    // the menu's open state. action_id scheme is documented in
+    // kernel_main's comment above; keep these tables in sync.
+    //
+    // Action-id allocation:
+    //   1..39   — misc commands (1=ABOUT, 2=CYCLE, 5=TTY, 6=HELP,
+    //             10/11=RAISE/CLOSE, 20-25=system menu,
+    //             30-33=Files context).
+    //   40..49  — power / session
+    //               40=REBOOT, 41=SHUT DOWN, 42=LOCK, 43=LOG OUT.
+    //   50..59  — system shortcuts
+    //               50=SCREENSHOT.
+    //   60..69  — bespoke viewer windows that don't have a
+    //             ThemeRole today
+    //               60=NETWORK STATUS, 61=DEVICE MANAGER,
+    //               62=FIREWALL.
+    //   100..199 — open app by ThemeRole (id = 100 + role).
+    //   200..255 — /APPS shortcut slots (StartMenuAppsResolveLaunch).
+    //
+    // Layout: a six-row root that fans out to four submenus
+    // (APPS, SYSTEM, USER APPS, POWER) plus a leaf SCREENSHOT
+    // and a separator. Each leaf panel stays under the menu
+    // renderer's 12-item-per-panel cap (kMaxItems in menu.cpp).
+    using duetos::drivers::video::kMenuItemFlagDisabled;
+    using duetos::drivers::video::kMenuItemFlagSeparator;
+    using duetos::drivers::video::kMenuItemFlagSubmenu;
+    using StartMenuRole = duetos::drivers::video::ThemeRole;
+
+    static const duetos::drivers::video::MenuItem kAppsItems[] = {
+        {"CALCULATOR", 100 + static_cast<duetos::u32>(StartMenuRole::Calculator), 0, nullptr, 0},
+        {"NOTEPAD", 100 + static_cast<duetos::u32>(StartMenuRole::Notes), 0, nullptr, 0},
+        {"FILES", 100 + static_cast<duetos::u32>(StartMenuRole::Files), 0, nullptr, 0},
+        {"CLOCK", 100 + static_cast<duetos::u32>(StartMenuRole::Clock), 0, nullptr, 0},
+        {"CALENDAR", 100 + static_cast<duetos::u32>(StartMenuRole::Calendar), 0, nullptr, 0},
+        {"BROWSER", 100 + static_cast<duetos::u32>(StartMenuRole::Browser), 0, nullptr, 0},
+        {"IMAGE VIEWER", 100 + static_cast<duetos::u32>(StartMenuRole::ImageView), 0, nullptr, 0},
+        {"GFX DEMO", 100 + static_cast<duetos::u32>(StartMenuRole::GfxDemo), 0, nullptr, 0},
+        {"ABOUT", 100 + static_cast<duetos::u32>(StartMenuRole::About), 0, nullptr, 0},
+        {"HELP", 100 + static_cast<duetos::u32>(StartMenuRole::Help), 0, nullptr, 0},
+    };
+    static const duetos::drivers::video::MenuItem kSystemItems[] = {
+        {"SETTINGS", 100 + static_cast<duetos::u32>(StartMenuRole::Settings), 0, nullptr, 0},
+        {"TASK MANAGER", 100 + static_cast<duetos::u32>(StartMenuRole::TaskManager), 0, nullptr, 0},
+        {"SYSTEM MONITOR", 100 + static_cast<duetos::u32>(StartMenuRole::Sysmon), 0, nullptr, 0},
+        {"KERNEL LOG", 100 + static_cast<duetos::u32>(StartMenuRole::LogView), 0, nullptr, 0},
+        {"NETWORK STATUS", 60, 0, nullptr, 0},
+        {"DEVICE MANAGER", 61, 0, nullptr, 0},
+        {"FIREWALL", 62, 0, nullptr, 0},
+        {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0},
+        {"CYCLE WINDOWS", 2, 0, nullptr, 0},
+        {"SWITCH TO TTY", 5, 0, nullptr, 0},
+    };
+    static const duetos::drivers::video::MenuItem kUtilitiesItems[] = {
+        {"HEX VIEWER", 100 + static_cast<duetos::u32>(StartMenuRole::HexView), 0, nullptr, 0},
+        {"CHARACTER MAP", 100 + static_cast<duetos::u32>(StartMenuRole::CharMap), 0, nullptr, 0},
+    };
+    static const duetos::drivers::video::MenuItem kPowerItems[] = {
+        {"LOCK", 42, 0, nullptr, 0},
+        {"LOG OUT", 43, 0, nullptr, 0},
+        {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0},
+        {"REBOOT", 40, 0, nullptr, 0},
+        {"SHUT DOWN", 41, 0, nullptr, 0},
+    };
+
+    // /APPS shortcuts — populated each open from the FAT32
+    // scan so a freshly-dropped /APPS/*.MNF picks up without
+    // a reboot. Capped at 12 to fit the menu renderer's per-
+    // panel limit (StartMenuAppsAppendTo logs an overflow line
+    // if more were discovered).
+    constexpr duetos::u32 kUserAppsCap = 12;
+    static duetos::drivers::video::MenuItem kUserAppsItems[kUserAppsCap] = {};
+    duetos::u32 user_apps_count = 0;
+    duetos::drivers::video::StartMenuAppsAppendTo(kUserAppsItems, &user_apps_count, kUserAppsCap);
+
+    // Six-row root. USER APPS is disabled when empty so the
+    // user sees the bucket (and learns about the /APPS slot)
+    // without firing a launcher path that resolves to nothing.
+    static duetos::drivers::video::MenuItem kStartItems[7] = {};
+    kStartItems[0] = {"APPS", 0, kMenuItemFlagSubmenu, kAppsItems, sizeof(kAppsItems) / sizeof(kAppsItems[0])};
+    kStartItems[1] = {"UTILITIES", 0, kMenuItemFlagSubmenu, kUtilitiesItems,
+                      sizeof(kUtilitiesItems) / sizeof(kUtilitiesItems[0])};
+    kStartItems[2] = {"SYSTEM", 0, kMenuItemFlagSubmenu, kSystemItems, sizeof(kSystemItems) / sizeof(kSystemItems[0])};
+    kStartItems[3] = {(user_apps_count == 0) ? "USER APPS (EMPTY)" : "USER APPS", 0,
+                      kMenuItemFlagSubmenu | (user_apps_count == 0 ? kMenuItemFlagDisabled : 0u), kUserAppsItems,
+                      user_apps_count};
+    kStartItems[4] = {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0};
+    kStartItems[5] = {"SCREENSHOT", 50, 0, nullptr, 0};
+    kStartItems[6] = {"POWER", 0, kMenuItemFlagSubmenu, kPowerItems, sizeof(kPowerItems) / sizeof(kPowerItems[0])};
+    constexpr duetos::u32 start_items_count = sizeof(kStartItems) / sizeof(kStartItems[0]);
+    static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
+        {"FILE MANAGER", 104, 0, nullptr, 0}, // 100 + ThemeRole::Files(4)
+        {"TERMINAL", 117, 0, nullptr, 0},     // 100 + ThemeRole::Terminal(17)
+        {"NEW TEXT FILE", 7, 0, nullptr, 0},    {"REFRESH DESKTOP", 8, 0, nullptr, 0},
+        {"SETTINGS", 107, 0, nullptr, 0}, // 100 + ThemeRole::Settings(7)
+        {"HELP / SHORTCUTS", 6, 0, nullptr, 0}, {"ABOUT DUETOS", 1, 0, nullptr, 0},
+        {"CYCLE WINDOWS", 2, 0, nullptr, 0},    {"LIST WINDOWS", 3, 0, nullptr, 0},
+        {"SWITCH TO TTY", 5, 0, nullptr, 0},
+    };
+    // Taskbar right-click menu — the everyday "manage windows
+    // from the bar" gesture. TASK MANAGER uses the 100+role
+    // raise band (ThemeRole::TaskManager == 2 -> 102); the rest
+    // reuse the existing global window actions.
+    static const duetos::drivers::video::MenuItem kTaskbarMenuItems[] = {
+        {"TASK MANAGER", 102, 0, nullptr, 0},
+        {"CYCLE WINDOWS", 2, 0, nullptr, 0},
+        {"LIST WINDOWS", 3, 0, nullptr, 0},
+        {"SHOW DESKTOP", 9, 0, nullptr, 0},
+    };
+    // Window body menu (right-click on a native window's
+    // client area). Enriches the original Raise/Close pair
+    // with the same Min/Max/Restore the system menu offers,
+    // so a user who right-clicks the body gets full controls
+    // without aiming at the title bar.
+    static const duetos::drivers::video::MenuItem kWindowMenuItems[] = {
+        {"RAISE", 10, 0, nullptr, 0},   {"MINIMIZE", 23, 0, nullptr, 0}, {"MAXIMIZE", 24, 0, nullptr, 0},
+        {"RESTORE", 20, 0, nullptr, 0}, {"CLOSE", 11, 0, nullptr, 0},
+    };
+    // Title-bar (NC) right-click — the classic Win32 system
+    // menu. RESTORE/MINIMIZE/MAXIMIZE/CLOSE are wired; MOVE
+    // does a one-shot recenter (GAP) and SIZE is shown
+    // disabled — both wait on a modal-input mode.
+    static const duetos::drivers::video::MenuItem kSystemMenuItems[] = {
+        {"RESTORE", 20, 0, nullptr, 0},  {"MOVE", 21, 0, nullptr, 0},     {"SIZE", 22, 0, nullptr, 0},
+        {"MINIMIZE", 23, 0, nullptr, 0}, {"MAXIMIZE", 24, 0, nullptr, 0}, {"CLOSE", 25, 0, nullptr, 0},
+    };
+
+    for (;;)
+    {
+        const auto p = duetos::drivers::input::Ps2MouseReadPacket();
+
+        // In TTY mode the cursor is hidden and windows aren't
+        // painted — ignore UI-side mouse handling entirely.
+        // Serial logging still happens so packet delivery is
+        // visible end-to-end.
+        if (duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty)
+        {
+            SerialWrite("[mouse-tty] dx=");
+            SerialWriteHex(static_cast<duetos::u64>(p.dx));
+            SerialWrite(" dy=");
+            SerialWriteHex(static_cast<duetos::u64>(p.dy));
+            SerialWrite(" btn=");
+            SerialWriteHex(p.buttons);
+            SerialWrite("\n");
+            continue;
+        }
+
+        // Feed the kernel-side raw-motion accumulator before
+        // any compositor warp logic touches the cursor. This is
+        // what DirectInput's GetDeviceState mouse path reads —
+        // the warp-corrected cursor diff would lie about user
+        // motion when programmatic SetCursor moves the cursor
+        // (e.g. confined-to-window capture).
+        // PS/2 packets carry dz=0 in the MousePacket (the IBM
+        // 3-byte wire format has no wheel slot); USB-HID mice
+        // populate it from a 4+ byte report.
+        duetos::subsystems::win32::MouseInputAccumulate(p.dx, p.dy, p.dz, p.buttons);
+
+        // Every UI mutation inside this packet lives under
+        // the compositor mutex — the kbd reader can be mid-
+        // ConsoleWrite / DesktopCompose at the same time.
+        duetos::drivers::video::CompositorLock();
+        // Apply per-user mouse sensitivity scale (Settings
+        // Mouse panel). 128 = identity. Bypass while a
+        // modal-input or DnD session is live so the user
+        // gets 1:1 cursor tracking during gestures.
+        const duetos::u8 sens = duetos::drivers::video::WindowMouseSensitivity();
+        const bool gesture_active =
+            duetos::drivers::video::ModalInputIsActive() || duetos::drivers::video::DndIsActive();
+        duetos::i32 mdx = p.dx;
+        duetos::i32 mdy = p.dy;
+        if (sens != 128 && !gesture_active)
+        {
+            mdx = static_cast<duetos::i32>((static_cast<duetos::i64>(mdx) * sens) / 128);
+            mdy = static_cast<duetos::i32>((static_cast<duetos::i64>(mdy) * sens) / 128);
+        }
+        duetos::drivers::video::CursorMove(mdx, mdy);
+
+        duetos::u32 cx = 0, cy = 0;
+        duetos::drivers::video::CursorPosition(&cx, &cy);
+
+        // Track menu hover. Cheap when no menu is open. When
+        // open, this updates the highlighted row so the next
+        // compose paints it. The recompose itself is forced
+        // below if the cursor moved while a menu was open.
+        duetos::drivers::video::MenuTrackHoverAt(cx, cy);
+
+        // Tooltip hover tracker. Records widget-under-cursor
+        // + first-hover tick so a 1-second linger can promote
+        // to a tooltip on the next compose.
+        duetos::drivers::video::WidgetTooltipTrack(cx, cy, duetos::arch::TimerTicks());
+
+        // Modal-input session (Move / Size from system menu)
+        // — feed every motion frame to the registered handler
+        // so the window follows the cursor live.
+        if (duetos::drivers::video::ModalInputIsActive())
+        {
+            duetos::drivers::video::ModalInputOnMotion(cx, cy);
+        }
+        // DnD ghost follows the cursor every motion frame
+        // while a drag is live.
+        if (duetos::drivers::video::DndIsActive())
+        {
+            duetos::drivers::video::DndUpdateCursor(cx, cy);
+        }
+
+        // Cursor-shape hit-test. Skipped while Wait is active
+        // (the long-op holder owns the shape). Otherwise:
+        // hovering a button widget → Hand; hovering Notes /
+        // Browser editable client area → IBeam; everywhere
+        // else → Arrow. The CursorSetShape change-gate keeps
+        // per-packet calls cheap when the shape doesn't move.
+        if (duetos::drivers::video::CursorGetShape() != duetos::drivers::video::CursorShape::Wait)
+        {
+            using duetos::drivers::video::CursorShape;
+            using duetos::drivers::video::WindowResizeEdge;
+            CursorShape want = CursorShape::Arrow;
+            const auto over_resize = duetos::drivers::video::WindowTopmostAt(cx, cy);
+            WindowResizeEdge edge = WindowResizeEdge::None;
+            if (over_resize != duetos::drivers::video::kWindowInvalid)
+            {
+                edge = duetos::drivers::video::WindowPointInResizeEdge(over_resize, cx, cy);
+            }
+            if (edge == WindowResizeEdge::Left || edge == WindowResizeEdge::Right)
+            {
+                want = CursorShape::ResizeEW;
+            }
+            else if (edge == WindowResizeEdge::Top || edge == WindowResizeEdge::Bottom)
+            {
+                want = CursorShape::ResizeNS;
+            }
+            else if (edge == WindowResizeEdge::TopLeft || edge == WindowResizeEdge::BottomRight)
+            {
+                want = CursorShape::ResizeNWSE;
+            }
+            else if (edge == WindowResizeEdge::TopRight || edge == WindowResizeEdge::BottomLeft)
+            {
+                want = CursorShape::ResizeNESW;
+            }
+            else if (duetos::drivers::video::WidgetCursorOverButton(cx, cy))
+            {
+                want = CursorShape::Hand;
+            }
+            else if (over_resize != duetos::drivers::video::kWindowInvalid &&
+                     !duetos::drivers::video::WindowPointInTitle(over_resize, cx, cy) &&
+                     (over_resize == duetos::apps::notes::NotesWindow() ||
+                      over_resize == duetos::apps::browser::BrowserWindow()))
+            {
+                want = CursorShape::IBeam;
+            }
+            duetos::drivers::video::CursorSetShape(want);
+        }
+
+        const bool left_down = (p.buttons & duetos::drivers::input::kMouseButtonLeft) != 0;
+        const bool press_edge = left_down && !prev_left;
+        const bool release_edge = !left_down && prev_left;
+        prev_left = left_down;
+
+        const bool right_down = (p.buttons & duetos::drivers::input::kMouseButtonRight) != 0;
+        const bool right_press = right_down && !prev_right;
+        const bool right_release = !right_down && prev_right;
+        prev_right = right_down;
+
+        // Right-click opens a context menu. Different item set
+        // depending on what's under the cursor:
+        //   - Taskbar: skip (no right-click menu there yet).
+        //   - Title bar (any window): system menu (Restore /
+        //     Move / Size / Min / Max / Close), ctx = HWND.
+        //   - Native (kernel-app) window body: enriched
+        //     window menu (Raise + Min/Max/Restore/Close),
+        //     ctx = HWND. Also lets the Files app intercept
+        //     to show its per-row menu.
+        //   - PE (user-process) window body: NO kernel menu
+        //     opens. Instead a WM_CONTEXTMENU is posted (see
+        //     the PE mouse-routing block below) so the app
+        //     can call TrackPopupMenu itself.
+        //   - Desktop: desktop menu (ABOUT / CYCLE / LIST /
+        //     TTY), ctx = 0.
+        // If a menu is already open, a right-click simply
+        // closes it — matches Windows behaviour.
+        bool pe_right_skip = false;
+        if (right_press)
+        {
+            if (duetos::drivers::video::MenuIsOpen())
+            {
+                // If the open menu belongs to a PE
+                // TrackPopupMenu syscall, signal cancel so the
+                // syscall returns 0. Then close.
+                if (duetos::drivers::video::MenuContext() == duetos::subsystems::win32::kTrackPopupSentinelCtx)
+                {
+                    duetos::subsystems::win32::TrackPopupCompleteFromKernel(0);
+                }
+                duetos::drivers::video::MenuClose();
+            }
+            else if (duetos::drivers::video::TaskbarContains(cx, cy))
+            {
+                duetos::drivers::video::MenuOpen(kTaskbarMenuItems,
+                                                 sizeof(kTaskbarMenuItems) / sizeof(kTaskbarMenuItems[0]), cx, cy, 0);
+                SerialWrite("[ui] right-click target=taskbar\n");
+            }
+            else
+            {
+                const auto hit = duetos::drivers::video::WindowTopmostAt(cx, cy);
+                if (hit != duetos::drivers::video::kWindowInvalid)
+                {
+                    const bool in_title = duetos::drivers::video::WindowPointInTitle(hit, cx, cy);
+                    if (in_title)
+                    {
+                        duetos::drivers::video::MenuOpen(
+                            kSystemMenuItems, sizeof(kSystemMenuItems) / sizeof(kSystemMenuItems[0]), cx, cy, hit);
+                        SerialWrite("[ui] right-click target=title window=");
+                        SerialWriteHex(hit);
+                        SerialWrite("\n");
+                    }
+                    else
+                    {
+                        const duetos::u64 owner_pid = duetos::drivers::video::WindowOwnerPid(hit);
+                        if (owner_pid > 0)
+                        {
+                            // PE window body: defer to the
+                            // app via WM_CONTEXTMENU.
+                            pe_right_skip = true;
+                            SerialWrite("[ui] right-click target=client (pe) window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
+                        else if (hit == duetos::apps::files::FilesWindow() &&
+                                 duetos::apps::files::FilesOnRightClick(cx, cy))
+                        {
+                            // Files app claimed it (per-row
+                            // context menu opened). No-op
+                            // here; the menu is up.
+                            SerialWrite("[ui] right-click target=client (files) window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
+                        else
+                        {
+                            duetos::drivers::video::MenuOpen(
+                                kWindowMenuItems, sizeof(kWindowMenuItems) / sizeof(kWindowMenuItems[0]), cx, cy, hit);
+                            SerialWrite("[ui] right-click target=client (native) window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
+                    }
+                }
+                else
+                {
+                    duetos::drivers::video::MenuOpen(
+                        kDesktopMenuItems, sizeof(kDesktopMenuItems) / sizeof(kDesktopMenuItems[0]), cx, cy, 0);
+                    SerialWrite("[ui] right-click target=desktop\n");
+                }
+            }
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+            if (!pe_right_skip)
+            {
+                duetos::drivers::video::CompositorUnlock();
+                continue;
+            }
+            // PE-bound right-click: fall through so the PE
+            // mouse-routing block below can post WM_RBUTTONDOWN
+            // / WM_RBUTTONUP / WM_CONTEXTMENU. drag.active stays
+            // false, so the ordinary press_edge cases that
+            // follow are bypassed naturally (right_press is
+            // handled here, left state unchanged).
+        }
+
+        // Priority for press edges (highest first):
+        //   0a. Menu open + click on item → fire action, close.
+        //   0b. Menu open + click outside → close.
+        //   1.  Click on START → open/close menu.
+        //   2.  Taskbar tab → raise tab's window.
+        //   3.  Close-box on topmost window → close it.
+        //   4.  Title bar → raise + begin drag.
+        //   5.  Any other part of a window → raise only.
+        bool menu_handled = false;
+        // DnD gate: a press edge during a drag resolves the
+        // drop at the cursor position. Consume the click so
+        // it doesn't fall through.
+        if (press_edge && duetos::drivers::video::DndIsActive())
+        {
+            duetos::drivers::video::DndResolveAt(cx, cy);
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+            menu_handled = true;
+        }
+        // Modal-input gate: a press edge during a Move /
+        // Size session commits and exits. Consume the click
+        // so it doesn't fall through to chrome handling.
+        if (press_edge && duetos::drivers::video::ModalInputIsActive())
+        {
+            duetos::drivers::video::ModalInputOnPress(cx, cy);
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+            menu_handled = true;
+        }
+        // Modal-dialog gate: if a MessageBox / InputBox is up,
+        // route press edges into it and consume the click.
+        // The dialog runs OK / Cancel hit-tests + dismiss
+        // logic itself.
+        if (press_edge && duetos::drivers::video::DialogIsActive())
+        {
+            duetos::drivers::video::DialogOnPress(cx, cy);
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+            menu_handled = true; // suppress every downstream press path
+        }
+        if (press_edge && duetos::drivers::video::MenuIsOpen())
+        {
+            // Track stack depth around MenuItemAt so we can
+            // detect "click on a submenu row opened a child
+            // panel" — in that case the menu stays up and no
+            // dispatch happens.
+            const duetos::u32 ctx = duetos::drivers::video::MenuContext();
+            const duetos::u32 prev_depth = duetos::drivers::video::MenuStackDepth();
+            const duetos::u32 action = duetos::drivers::video::MenuItemAt(cx, cy);
+            const duetos::u32 new_depth = duetos::drivers::video::MenuStackDepth();
+            bool keep_open = false;
+            if (new_depth > prev_depth)
+            {
+                // Submenu opened — keep menu up, dispatch nothing.
+                keep_open = true;
+            }
+            else if (action != 0)
+            {
+                if (ctx == duetos::subsystems::win32::kTrackPopupSentinelCtx)
+                {
+                    duetos::subsystems::win32::TrackPopupCompleteFromKernel(action);
+                }
+                else
+                {
+                    duetos::core::DispatchMenuAction(action, ctx);
+                }
+            }
+            else
+            {
+                // Click missed item / outside menu — cancel.
+                if (ctx == duetos::subsystems::win32::kTrackPopupSentinelCtx)
+                {
+                    duetos::subsystems::win32::TrackPopupCompleteFromKernel(0);
+                }
+            }
+            if (!keep_open)
+            {
+                duetos::drivers::video::MenuClose();
+            }
+            // Force an immediate recompose so any console
+            // output the action wrote (HELP / ABOUT / -> RAISED
+            // ...) appears now rather than waiting up to a
+            // second for the ui-ticker. Also clears (or refreshes)
+            // the menu panel from the framebuffer.
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+            menu_handled = true;
+        }
+
+        // Click on the clock/date widget toggles the calendar
+        // popup. Tested BEFORE the start-menu branch because
+        // the clock lives on the opposite side of the
+        // taskbar; a hit here can never overlap the START
+        // rect.
+        if (press_edge && !menu_handled && !drag.active)
+        {
+            duetos::u32 kx = 0, ky = 0, kw = 0, kh = 0;
+            duetos::drivers::video::TaskbarClockBounds(&kx, &ky, &kw, &kh);
+            if (kw > 0 && cx >= kx && cx < kx + kw && cy >= ky && cy < ky + kh)
+            {
+                if (duetos::drivers::video::CalendarIsOpen())
+                {
+                    duetos::drivers::video::CalendarClose();
+                }
+                else
+                {
+                    // Anchor upper-left so the popup sits
+                    // flush above the taskbar's top edge.
+                    const duetos::u32 ph = duetos::drivers::video::CalendarPanelHeight();
+                    const duetos::u32 pw = duetos::drivers::video::CalendarPanelWidth();
+                    const duetos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
+                    const duetos::u32 ay = (ky > ph) ? ky - ph : 0;
+                    duetos::drivers::video::CalendarOpen(ax, ay);
+                    SerialWrite("[ui] calendar open\n");
+                }
+                menu_handled = true;
+            }
+        }
+
+        // Clicking outside an open calendar dismisses it.
+        if (press_edge && !menu_handled && duetos::drivers::video::CalendarIsOpen() &&
+            !duetos::drivers::video::CalendarContains(cx, cy))
+        {
+            duetos::drivers::video::CalendarClose();
+        }
+
+        // --- Network flyout handlers ---------------------------
+        //
+        // Hover-preview + click-toggle on the NET tray cell,
+        // mirroring the Windows / GNOME bottom-right Wi-Fi flyout.
+        // State machine:
+        //   - Cursor over cell + no mode → open Preview.
+        //   - Click on cell + Preview open → upgrade to Full.
+        //   - Click on cell + Full open → close.
+        //   - Cursor leaves cell + panel + mode is Preview →
+        //     close (Full sticks through hover-out by design).
+        //   - Click outside Full panel → close.
+        //   - Click on RENEW button inside Full → kick DHCP.
+        {
+            duetos::u32 nx = 0, ny = 0, nw = 0, nh = 0;
+            duetos::drivers::video::TaskbarNetCellBounds(&nx, &ny, &nw, &nh);
+            const bool over_cell = (nw > 0) && cx >= nx && cx < nx + nw && cy >= ny && cy < ny + nh;
+            const auto net_mode = duetos::drivers::video::NetPanelCurrentMode();
+
+            // RENEW button — handled BEFORE the click-outside
+            // dismissal so the press doesn't simultaneously
+            // close the panel.
+            if (press_edge && !menu_handled && net_mode == duetos::drivers::video::NetPanelMode::Full &&
+                duetos::drivers::video::NetPanelRenewButtonContains(cx, cy))
+            {
+                (void)duetos::drivers::video::NetPanelDoRenew();
+                SerialWrite("[ui] netpanel renew\n");
+                menu_handled = true;
+            }
+
+            // Click on the NET tray cell — toggle modes.
+            if (press_edge && !menu_handled && over_cell)
+            {
+                if (net_mode == duetos::drivers::video::NetPanelMode::Full)
+                {
+                    duetos::drivers::video::NetPanelClose();
+                }
+                else
+                {
+                    // Always (re-)open in Full mode on click,
+                    // even if Preview was already up — clicking
+                    // is the explicit "show me everything" gesture.
+                    const duetos::u32 fw = 320; // matches netpanel kFullW
+                    duetos::drivers::video::NetPanelOpen(0, 0, duetos::drivers::video::NetPanelMode::Full);
+                    const duetos::u32 fh = duetos::drivers::video::NetPanelHeight();
+                    const duetos::u32 ax = (nx + nw > fw) ? (nx + nw - fw) : 0;
+                    const duetos::u32 ay = (ny > fh) ? ny - fh : 0;
+                    duetos::drivers::video::NetPanelOpen(ax, ay, duetos::drivers::video::NetPanelMode::Full);
+                    SerialWrite("[ui] netpanel open (full)\n");
+                }
+                menu_handled = true;
+            }
+            // Click outside an open Full panel → close.
+            else if (press_edge && !menu_handled && net_mode == duetos::drivers::video::NetPanelMode::Full &&
+                     !duetos::drivers::video::NetPanelContains(cx, cy))
+            {
+                duetos::drivers::video::NetPanelClose();
+                SerialWrite("[ui] netpanel close (click outside)\n");
+                // Don't set menu_handled — the click might still
+                // legitimately fall through to a window or other
+                // taskbar widget.
+            }
+            // Hover open / close — runs every packet, no
+            // press_edge gate. Only mutates state if the panel
+            // isn't already in Full mode (Full ignores hover-out).
+            else if (over_cell && net_mode == duetos::drivers::video::NetPanelMode::Closed)
+            {
+                const duetos::u32 pw = 220; // matches netpanel kPreviewW
+                const duetos::u32 ph = 56;  // matches kPreviewH
+                const duetos::u32 ax = (nx + nw > pw) ? (nx + nw - pw) : 0;
+                const duetos::u32 ay = (ny > ph) ? ny - ph : 0;
+                duetos::drivers::video::NetPanelOpen(ax, ay, duetos::drivers::video::NetPanelMode::Preview);
+                SerialWrite("[ui] netpanel hover preview\n");
+            }
+            else if (!over_cell && net_mode == duetos::drivers::video::NetPanelMode::Preview &&
+                     !duetos::drivers::video::NetPanelContains(cx, cy))
+            {
+                duetos::drivers::video::NetPanelClose();
+            }
+        }
+
+        // --- Tray flyout (chevron-up overflow button) -----------
+        //
+        // Hover-expand + click-toggle on the chevron at the
+        // left of the system tray. Mirrors Win10/Win11's "show
+        // hidden icons" pattern: hover lifts the chevron's
+        // glyph slightly, click opens a popup with detailed
+        // status rows (network, volume, battery, memory,
+        // CPU, uptime).
+        {
+            duetos::u32 chx = 0, chy = 0, chw = 0, chh = 0;
+            duetos::drivers::video::TaskbarChevronBounds(&chx, &chy, &chw, &chh);
+            const bool over_chev = (chw > 0) && cx >= chx && cx < chx + chw && cy >= chy && cy < chy + chh;
+
+            // Hover state — runs every packet (no press_edge
+            // gate). The taskbar redraw consults this on the
+            // next compose to decide whether to enlarge the
+            // chevron glyph.
+            duetos::drivers::video::TaskbarChevronSetHover(over_chev);
+            duetos::drivers::video::TrayFlyoutSetHover(over_chev);
+
+            // Click on the chevron toggles the flyout.
+            if (press_edge && !menu_handled && over_chev)
+            {
+                if (duetos::drivers::video::TrayFlyoutIsOpen())
+                {
+                    duetos::drivers::video::TrayFlyoutClose();
+                    SerialWrite("[ui] tray flyout close (chevron)\n");
+                }
+                else
+                {
+                    // Anchor the flyout's bottom edge against
+                    // the chevron's top — the popup paints
+                    // ABOVE the anchor.
+                    duetos::drivers::video::TrayFlyoutOpen(chx, chy);
+                    SerialWrite("[ui] tray flyout open\n");
+                }
+                menu_handled = true;
+            }
+            // Click outside an open flyout dismisses it.
+            else if (press_edge && !menu_handled && duetos::drivers::video::TrayFlyoutIsOpen() &&
+                     !duetos::drivers::video::TrayFlyoutContains(cx, cy))
+            {
+                duetos::drivers::video::TrayFlyoutClose();
+                SerialWrite("[ui] tray flyout close (click outside)\n");
+            }
+        }
+
+        // START button press opens (or closes) the menu.
+        if (press_edge && !menu_handled && !drag.active)
+        {
+            duetos::u32 sx = 0, sy = 0, sw = 0, sh = 0;
+            duetos::drivers::video::TaskbarStartBounds(&sx, &sy, &sw, &sh);
+            if (cx >= sx && cx < sx + sw && cy >= sy && cy < sy + sh)
+            {
+                if (duetos::drivers::video::MenuIsOpen())
+                {
+                    duetos::drivers::video::MenuClose();
+                }
+                else
+                {
+                    // Open with the start item set; measure
+                    // panel height AFTER MenuOpen populates
+                    // its item count so the anchor sits
+                    // flush against the top of the START
+                    // button regardless of how many items
+                    // are in the set.
+                    duetos::drivers::video::MenuOpen(kStartItems, start_items_count, sx, sy, 0);
+                    const duetos::u32 mh = duetos::drivers::video::MenuPanelHeight();
+                    const duetos::u32 my = (sy > mh) ? sy - mh : 0;
+                    duetos::drivers::video::MenuOpen(kStartItems, start_items_count, sx, my, 0);
+                    SerialWrite("[ui] menu open\n");
+                }
+                menu_handled = true;
+            }
+        }
+
+        // "Show Desktop" sliver at the right edge of the
+        // taskbar. First press snapshots the visibility of
+        // every alive window and hides them; second press
+        // restores the snapshotted state. Tab-click + START
+        // clicks already consumed earlier presses, so this
+        // hit-test runs on the residual press_edge stream.
+        if (press_edge && !menu_handled && !drag.active)
+        {
+            duetos::u32 dx = 0, dy = 0, dw = 0, dh = 0;
+            duetos::drivers::video::TaskbarShowDesktopBounds(&dx, &dy, &dw, &dh);
+            if (dw > 0 && cx >= dx && cx < dx + dw && cy >= dy && cy < dy + dh)
+            {
+                const bool now_active = duetos::drivers::video::WindowShowDesktopToggle();
+                SerialWrite(now_active ? "[ui] show-desktop ON\n" : "[ui] show-desktop OFF\n");
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                menu_handled = true; // sliver ate the click
+            }
+        }
+
+        // Scrollbar press hit-test. Runs before edge-resize
+        // and chrome handling because a scrollbar bar lives
+        // inside the client area + is a higher-priority
+        // gesture than "raise window". Track click sets a
+        // new `first` (page-back / page-forward / on-thumb).
+        // On-thumb captures into sb_drag for follow-up motion.
+        if (press_edge && !menu_handled && !drag.active && !resize.active)
+        {
+            const auto sh = duetos::drivers::video::WindowTopmostAt(cx, cy);
+            duetos::drivers::video::WindowScrollbarSurface s{};
+            if (sh != duetos::drivers::video::kWindowInvalid && duetos::drivers::video::WindowGetScrollbar(sh, &s))
+            {
+                const duetos::drivers::video::ScrollbarState state{s.total, s.visible, s.first};
+                const duetos::u32 hit = duetos::drivers::video::ScrollbarHitTest(cx, cy, s.x, s.y, s.w, s.h, state);
+                if (hit != duetos::drivers::video::kScrollbarNoHit)
+                {
+                    const duetos::u32 thumb_y = duetos::drivers::video::ScrollbarThumbY(s.h, state);
+                    const duetos::u32 thumb_h = duetos::drivers::video::ScrollbarThumbH(s.h, state);
+                    const duetos::u32 click_y = cy - s.y;
+                    if (click_y >= thumb_y && click_y < thumb_y + thumb_h)
+                    {
+                        sb_drag.active = true;
+                        sb_drag.hwnd = sh;
+                        sb_drag.grab_offset_in_thumb = click_y - thumb_y;
+                    }
+                    else
+                    {
+                        duetos::drivers::video::WindowDispatchScroll(sh, hit);
+                    }
+                    menu_handled = true;
+                }
+            }
+        }
+
+        // Edge-resize detection. Runs before the chrome-press
+        // block so a click on the 4-px border doesn't fall
+        // through to title-bar drag-start. Handles the press
+        // edge only — the motion + release branches further
+        // down do the actual resize.
+        if (press_edge && !menu_handled && !drag.active && !resize.active)
+        {
+            const auto rh = duetos::drivers::video::WindowTopmostAt(cx, cy);
+            if (rh != duetos::drivers::video::kWindowInvalid)
+            {
+                const auto rede = duetos::drivers::video::WindowPointInResizeEdge(rh, cx, cy);
+                if (rede != duetos::drivers::video::WindowResizeEdge::None)
+                {
+                    duetos::u32 ax = 0, ay = 0, aw = 0, ah = 0;
+                    duetos::drivers::video::WindowGetBounds(rh, &ax, &ay, &aw, &ah);
+                    resize.active = true;
+                    resize.window = rh;
+                    resize.edge = rede;
+                    resize.anchor_cx = cx;
+                    resize.anchor_cy = cy;
+                    resize.anchor_x = ax;
+                    resize.anchor_y = ay;
+                    resize.anchor_w = aw;
+                    resize.anchor_h = ah;
+                    duetos::drivers::video::WindowRaise(rh);
+                    menu_handled = true; // chrome path skips
+                    SerialWrite("[ui] resize begin window=");
+                    SerialWriteHex(rh);
+                    SerialWrite(" edge=");
+                    SerialWriteHex(static_cast<duetos::u64>(rede));
+                    SerialWrite("\n");
+                }
+            }
+        }
+
+        if (press_edge && !menu_handled && !drag.active && duetos::drivers::video::TaskbarContains(cx, cy))
+        {
+            const duetos::u32 tab_hit = duetos::drivers::video::TaskbarTabAt(cx, cy);
+            if (tab_hit != duetos::drivers::video::kWindowInvalid)
+            {
+                duetos::drivers::video::WindowRaise(tab_hit);
+                SerialWrite("[ui] taskbar raise window=");
+                SerialWriteHex(tab_hit);
+                SerialWrite("\n");
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+                menu_handled = true; // taskbar ate the click
+            }
+            else
+            {
+                // Clock / date widget click -> open the Calendar
+                // (everyday "click the clock to see the calendar"
+                // gesture). 112 == 100 + ThemeRole::Calendar(12),
+                // routed through the shared role-raise path.
+                duetos::u32 clx = 0, cly = 0, clw = 0, clh = 0;
+                duetos::drivers::video::TaskbarClockBounds(&clx, &cly, &clw, &clh);
+                if (clw > 0 && clh > 0 && cx >= clx && cx < clx + clw && cy >= cly && cy < cly + clh)
+                {
+                    duetos::core::DispatchMenuAction(112, 0);
+                    SerialWrite("[ui] taskbar clock click -> calendar\n");
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
+                    menu_handled = true;
+                }
+                else if (!duetos::drivers::video::TaskbarIsLocked())
+                {
+                    // Empty-strip click on an unlocked taskbar ->
+                    // begin drag. Snap target decided on release.
+                    duetos::drivers::video::TaskbarBeginDrag();
+                    menu_handled = true;
+                }
+            }
+        }
+
+        if (press_edge && menu_handled)
+        {
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+        }
+        else if (press_edge && !drag.active)
+        {
+            const auto hit = duetos::drivers::video::WindowTopmostAt(cx, cy);
+            if (hit != duetos::drivers::video::kWindowInvalid)
+            {
+                if (duetos::drivers::video::WindowPointInCloseBox(hit, cx, cy))
+                {
+                    // PE-owned windows receive WM_CLOSE and
+                    // decide whether to DestroyWindow (or
+                    // ignore). Kernel-owned boot windows
+                    // still close immediately — no PE to
+                    // delegate to.
+                    if (duetos::drivers::video::WindowOwnerPid(hit) > 0)
+                    {
+                        constexpr duetos::u32 kWmClose = 0x0010;
+                        duetos::drivers::video::WindowPostMessage(hit, kWmClose, 0, 0);
+                        duetos::drivers::video::WindowMsgWakeAll();
+                        SerialWrite("[ui] post WM_CLOSE window=");
+                        SerialWriteHex(hit);
+                        SerialWrite("\n");
+                    }
+                    else
+                    {
+                        duetos::drivers::video::WindowClose(hit);
+                        SerialWrite("[ui] close window=");
+                        SerialWriteHex(hit);
+                        SerialWrite("\n");
+                    }
+                }
+                else if (duetos::drivers::video::WindowPointInMaxBox(hit, cx, cy))
+                {
+                    // Toggle: max → restore, restore → max.
+                    if (duetos::drivers::video::WindowIsMaximized(hit))
+                    {
+                        duetos::drivers::video::WindowRestore(hit);
+                        SerialWrite("[ui] restore window=");
+                    }
+                    else
+                    {
+                        duetos::drivers::video::WindowMaximize(hit);
+                        SerialWrite("[ui] maximize window=");
+                    }
+                    SerialWriteHex(hit);
+                    SerialWrite("\n");
+                    duetos::drivers::video::WindowRaise(hit);
+                }
+                else if (duetos::drivers::video::WindowPointInMinBox(hit, cx, cy))
+                {
+                    duetos::drivers::video::WindowMinimize(hit);
+                    SerialWrite("[ui] minimize window=");
+                    SerialWriteHex(hit);
+                    SerialWrite("\n");
+                }
+                else
+                {
+                    duetos::u32 wx = 0, wy = 0;
+                    duetos::drivers::video::WindowGetBounds(hit, &wx, &wy, nullptr, nullptr);
+                    duetos::drivers::video::WindowRaise(hit);
+                    const bool in_title = duetos::drivers::video::WindowPointInTitle(hit, cx, cy);
+                    if (in_title)
+                    {
+                        // Title-bar double-click toggles
+                        // maximize/restore — the gesture every
+                        // desktop OS converges on. Detected here
+                        // (not in the routing block below)
+                        // because the title-bar branch swallows
+                        // press edges before the routing block
+                        // sees them; without this the second
+                        // click would just re-arm the drag.
+                        const duetos::u64 kTitleDblClickTicks = duetos::drivers::video::WindowDoubleClickTicks();
+                        static duetos::u64 s_title_dc_tick = 0;
+                        static duetos::drivers::video::WindowHandle s_title_dc_hwnd =
+                            duetos::drivers::video::kWindowInvalid;
+                        const duetos::u64 now_tick = duetos::arch::TimerTicks();
+                        const bool is_title_dbl =
+                            (s_title_dc_hwnd == hit) && (now_tick - s_title_dc_tick <= kTitleDblClickTicks);
+                        if (is_title_dbl)
+                        {
+                            if (duetos::drivers::video::WindowIsMaximized(hit))
+                            {
+                                duetos::drivers::video::WindowRestore(hit);
+                                SerialWrite("[ui] title-bar dblclk -> restore window=");
+                            }
+                            else
+                            {
+                                duetos::drivers::video::WindowMaximize(hit);
+                                SerialWrite("[ui] title-bar dblclk -> maximize window=");
+                            }
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                            // Consume the second click so a fast
+                            // triple-click doesn't fire a third
+                            // toggle in the same gesture.
+                            s_title_dc_hwnd = duetos::drivers::video::kWindowInvalid;
+                        }
+                        else
+                        {
+                            s_title_dc_tick = now_tick;
+                            s_title_dc_hwnd = hit;
+                            drag.active = true;
+                            drag.window = hit;
+                            drag.grab_offset_x = cx - wx;
+                            drag.grab_offset_y = cy - wy;
+                            SerialWrite("[ui] drag begin window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
+                    }
+                    else
+                    {
+                        SerialWrite("[ui] raise window=");
+                        SerialWriteHex(hit);
+                        SerialWrite("\n");
+                        // Native-app press dispatch on
+                        // client-area clicks. Calendar's
+                        // click-to-select-date is the only
+                        // current consumer; other apps fan
+                        // their press events through the
+                        // routing block further down (PE
+                        // path) or get them via WidgetRouteMouse.
+                        if (hit == duetos::apps::calendar::CalendarWindow())
+                        {
+                            duetos::apps::calendar::CalendarOnClick(cx, cy);
+                        }
+                    }
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+            }
+        }
+        if (release_edge && drag.active)
+        {
+            // Aero-style edge snap: dropping a dragged window
+            // against a screen edge snaps it (top = maximize,
+            // left/right = half). The snap APIs were already
+            // keyboard-wired; the mouse drag-to-edge gesture —
+            // what most users actually reach for — was the dead
+            // zone. Compositor lock is held here (loop acquires
+            // it at the top), so call the snap ops directly.
+            const auto fb_snap = duetos::drivers::video::FramebufferGet();
+            constexpr duetos::u32 kSnapEdge = 12;
+            bool snapped = true;
+            if (cy <= kSnapEdge)
+                duetos::drivers::video::WindowMaximize(drag.window);
+            else if (cx <= kSnapEdge)
+                duetos::drivers::video::WindowSnapLeft(drag.window);
+            else if (fb_snap.width > kSnapEdge && cx >= fb_snap.width - kSnapEdge)
+                duetos::drivers::video::WindowSnapRight(drag.window);
+            else
+                snapped = false;
+            SerialWrite(snapped ? "[ui] drag end (edge snap) window=" : "[ui] drag end window=");
+            SerialWriteHex(drag.window);
+            SerialWrite("\n");
+            drag.active = false;
+            if (snapped)
+            {
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+            }
+        }
+        if (release_edge && sb_drag.active)
+        {
+            sb_drag.active = false;
+            sb_drag.hwnd = duetos::drivers::video::kWindowInvalid;
+            SerialWrite("[ui] scrollbar drag end\n");
+        }
+        if (release_edge && resize.active)
+        {
+            SerialWrite("[ui] resize end window=");
+            SerialWriteHex(resize.window);
+            SerialWrite("\n");
+            resize.active = false;
+            resize.edge = duetos::drivers::video::WindowResizeEdge::None;
+        }
+        if (release_edge && duetos::drivers::video::TaskbarIsDragging())
+        {
+            // Snap to whichever horizontal edge the cursor was
+            // released over.
+            duetos::drivers::video::TaskbarEndDrag(cy);
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+            SerialWrite("[ui] taskbar dock -> ");
+            SerialWrite(duetos::drivers::video::TaskbarGetDock() == duetos::drivers::video::TaskbarDock::Top
+                            ? "top (drag-snap)\n"
+                            : "bottom (drag-snap)\n");
+        }
+
+        // Mouse-message routing to PE windows. Posts
+        // WM_MOUSEMOVE / WM_LBUTTONDOWN / WM_LBUTTONUP to the
+        // topmost PE window under the cursor — unless a
+        // window has SetCapture'd the mouse, in which case
+        // events always go to the captured window regardless
+        // of cursor location. Skipped in the obvious
+        // compositor-owned states (menu open, mid-drag, over
+        // the taskbar / calendar). Close-box presses on a PE
+        // re-route to WM_CLOSE (already handled below).
+        if (!drag.active && !menu_handled && !duetos::drivers::video::TaskbarContains(cx, cy) &&
+            !duetos::drivers::video::MenuIsOpen() && !duetos::drivers::video::CalendarContains(cx, cy))
+        {
+            const auto captured = duetos::drivers::video::WindowGetCapture();
+            const auto pe_hit = (captured != duetos::drivers::video::kWindowInvalid)
+                                    ? captured
+                                    : duetos::drivers::video::WindowTopmostAt(cx, cy);
+            const duetos::u64 pe_pid =
+                (pe_hit != duetos::drivers::video::kWindowInvalid) ? duetos::drivers::video::WindowOwnerPid(pe_hit) : 0;
+            if (pe_pid > 0)
+            {
+                constexpr duetos::u32 kWmMouseMove = 0x0200;
+                constexpr duetos::u32 kWmLButtonDown = 0x0201;
+                constexpr duetos::u32 kWmLButtonUp = 0x0202;
+                constexpr duetos::u32 kWmRButtonDown = 0x0204;
+                constexpr duetos::u32 kWmRButtonUp = 0x0205;
+                constexpr duetos::u32 kWmContextMenu = 0x007B;
+                constexpr duetos::u64 kMkLButton = 0x0001;
+                constexpr duetos::u64 kMkRButton = 0x0002;
+                duetos::u32 wx = 0, wy = 0;
+                duetos::drivers::video::WindowGetBounds(pe_hit, &wx, &wy, nullptr, nullptr);
+                // Client-local coords. title bar is 22 px by
+                // default + 2 px top border; widget chrome
+                // uses these constants internally.
+                const duetos::i32 client_x = static_cast<duetos::i32>(cx) - static_cast<duetos::i32>(wx) - 2;
+                const duetos::i32 client_y = static_cast<duetos::i32>(cy) - static_cast<duetos::i32>(wy) - 22 - 2;
+                const duetos::u64 lparam = (static_cast<duetos::u64>(client_x) & 0xFFFF) |
+                                           ((static_cast<duetos::u64>(client_y) & 0xFFFF) << 16);
+                duetos::u64 wparam = 0;
+                if (left_down)
+                    wparam |= kMkLButton;
+                if (right_down)
+                    wparam |= kMkRButton;
+                // WM_MOUSEMOVE on every packet that actually
+                // moved — dx/dy are signed byte deltas in
+                // the PS/2 packet.
+                if (p.dx != 0 || p.dy != 0)
+                {
+                    duetos::drivers::video::WindowPostMessage(pe_hit, kWmMouseMove, wparam, lparam);
+                }
+                if (press_edge)
+                {
+                    // Double-click detection: two press edges
+                    // within ~500ms (50 ticks @ 100Hz) at the
+                    // same pixel on the same HWND fire
+                    // WM_LBUTTONDBLCLK (0x0203) instead of a
+                    // second WM_LBUTTONDOWN.
+                    constexpr duetos::u32 kWmLButtonDblClk = 0x0203;
+                    const duetos::u64 kDblClickTicks = duetos::drivers::video::WindowDoubleClickTicks();
+                    static duetos::u64 s_last_click_tick = 0;
+                    static duetos::drivers::video::WindowHandle s_last_click_hwnd =
+                        duetos::drivers::video::kWindowInvalid;
+                    static duetos::u32 s_last_click_x = 0;
+                    static duetos::u32 s_last_click_y = 0;
+                    const duetos::u64 now_tick = duetos::arch::TimerTicks();
+                    const bool is_dbl = (s_last_click_hwnd == pe_hit) &&
+                                        (now_tick - s_last_click_tick <= kDblClickTicks) && (s_last_click_x == cx) &&
+                                        (s_last_click_y == cy);
+                    if (is_dbl)
+                    {
+                        duetos::drivers::video::WindowPostMessage(pe_hit, kWmLButtonDblClk, wparam, lparam);
+                        s_last_click_hwnd = duetos::drivers::video::kWindowInvalid;
+                    }
+                    else
+                    {
+                        duetos::drivers::video::WindowPostMessage(pe_hit, kWmLButtonDown, wparam, lparam);
+                        s_last_click_tick = now_tick;
+                        s_last_click_hwnd = pe_hit;
+                        s_last_click_x = cx;
+                        s_last_click_y = cy;
+                    }
+                }
+                if (release_edge)
+                {
+                    duetos::drivers::video::WindowPostMessage(pe_hit, kWmLButtonUp, wparam, lparam);
+                }
+                if (right_press)
+                {
+                    duetos::drivers::video::WindowPostMessage(pe_hit, kWmRButtonDown, wparam, lparam);
+                }
+                if (right_release)
+                {
+                    duetos::drivers::video::WindowPostMessage(pe_hit, kWmRButtonUp, wparam, lparam);
+                    // Win32 WM_CONTEXTMENU contract: posted on
+                    // RBUTTONUP, wparam = HWND, lparam = SCREEN
+                    // coords (not client-local). PE apps decode
+                    // with GET_X/Y_LPARAM.
+                    const duetos::u64 ctx_lparam =
+                        (static_cast<duetos::u64>(cx) & 0xFFFF) | ((static_cast<duetos::u64>(cy) & 0xFFFF) << 16);
+                    duetos::drivers::video::WindowPostMessage(pe_hit, kWmContextMenu,
+                                                              static_cast<duetos::u64>(pe_hit) + 1, ctx_lparam);
+                    SerialWrite("[win32/wm] wm_contextmenu posted hwnd=");
+                    SerialWriteHex(pe_hit);
+                    SerialWrite(" pid=");
+                    SerialWriteHex(pe_pid);
+                    SerialWrite("\n");
+                }
+                duetos::drivers::video::WindowMsgWakeAll();
+            }
+            else if (pe_hit != duetos::drivers::video::kWindowInvalid && press_edge)
+            {
+                // Native-window double-click dispatch. Only
+                // fires on press_edge for owner_pid == 0
+                // windows (kernel apps). Same 500ms / same-
+                // pixel / same-hwnd discipline as the PE DC
+                // path above. Title-bar DC is handled in the
+                // chrome branch (maximize/restore toggle), so
+                // a hit here is always client-area.
+                const duetos::u64 kNativeDblClickTicks = duetos::drivers::video::WindowDoubleClickTicks();
+                static duetos::u64 s_native_dc_tick = 0;
+                static duetos::drivers::video::WindowHandle s_native_dc_hwnd = duetos::drivers::video::kWindowInvalid;
+                static duetos::u32 s_native_dc_x = 0;
+                static duetos::u32 s_native_dc_y = 0;
+                const duetos::u64 now_tick = duetos::arch::TimerTicks();
+                const bool is_dbl = (s_native_dc_hwnd == pe_hit) &&
+                                    (now_tick - s_native_dc_tick <= kNativeDblClickTicks) && (s_native_dc_x == cx) &&
+                                    (s_native_dc_y == cy);
+                if (is_dbl)
+                {
+                    if (pe_hit == duetos::apps::files::FilesWindow())
+                    {
+                        duetos::apps::files::FilesOnDoubleClick(cx, cy);
+                    }
+                    else if (pe_hit == duetos::apps::browser::BrowserWindow())
+                    {
+                        duetos::apps::browser::BrowserOnDoubleClick(cx, cy);
+                    }
+                    else if (pe_hit == duetos::apps::notes::NotesWindow())
+                    {
+                        duetos::apps::notes::NotesOnDoubleClick(cx, cy);
+                    }
+                    // Calculator / Calendar / Clock / ImageView
+                    // don't have a DC entry point — those
+                    // gestures aren't part of their UX.
+                    s_native_dc_hwnd = duetos::drivers::video::kWindowInvalid;
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
+                }
+                else
+                {
+                    s_native_dc_tick = now_tick;
+                    s_native_dc_hwnd = pe_hit;
+                    s_native_dc_x = cx;
+                    s_native_dc_y = cy;
+                }
+            }
+
+            // Wheel dispatch — works for native AND PE owners.
+            // The dispatcher fans out: PE windows get
+            // WM_MOUSEWHEEL posted; native windows invoke their
+            // registered WindowWheelFn handler.
+            if (p.dz != 0 && pe_hit != duetos::drivers::video::kWindowInvalid)
+            {
+                duetos::i32 dz = p.dz;
+                if (dz > 8)
+                    dz = 8;
+                if (dz < -8)
+                    dz = -8;
+                duetos::u32 wx = 0, wy = 0;
+                duetos::drivers::video::WindowGetBounds(pe_hit, &wx, &wy, nullptr, nullptr);
+                const duetos::i32 client_x = static_cast<duetos::i32>(cx) - static_cast<duetos::i32>(wx) - 2;
+                const duetos::i32 client_y = static_cast<duetos::i32>(cy) - static_cast<duetos::i32>(wy) - 22 - 2;
+                duetos::u64 mk = 0;
+                if (left_down)
+                    mk |= 0x0001U;
+                if (right_down)
+                    mk |= 0x0002U;
+                // Modifiers come from the kbd-reader's last
+                // published state. Wheel handlers branch on
+                // Ctrl (zoom in ImageView) etc.
+                const duetos::u8 mods = duetos::drivers::video::WindowModifierState();
+                duetos::drivers::video::WindowDispatchWheel(pe_hit, client_x, client_y, dz, cx, cy, mk, mods);
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+            }
+        }
+
+        if (drag.active)
+        {
+            // Position the window so the grabbed pixel stays
+            // under the cursor. Any sub-pixel clamp lives
+            // inside WindowMoveTo.
+            const duetos::u32 nx = (cx > drag.grab_offset_x) ? cx - drag.grab_offset_x : 0;
+            const duetos::u32 ny = (cy > drag.grab_offset_y) ? cy - drag.grab_offset_y : 0;
+            duetos::drivers::video::WindowMoveTo(drag.window, nx, ny);
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+        }
+        else if (sb_drag.active)
+        {
+            // Scrollbar drag — follow the cursor's vertical
+            // position, translate via ScrollbarDragTo, dispatch.
+            duetos::drivers::video::WindowScrollbarSurface s{};
+            if (duetos::drivers::video::WindowGetScrollbar(sb_drag.hwnd, &s))
+            {
+                const duetos::drivers::video::ScrollbarState state{s.total, s.visible, s.first};
+                const duetos::u32 nf =
+                    duetos::drivers::video::ScrollbarDragTo(cy, s.y, s.h, sb_drag.grab_offset_in_thumb, state);
+                duetos::drivers::video::WindowDispatchScroll(sb_drag.hwnd, nf);
+            }
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+        }
+        else if (resize.active)
+        {
+            // Resize-drag: feed the cumulative cursor delta
+            // since the press into the resize calc, anchored
+            // on the press-time bounds.
+            const duetos::i32 dx = static_cast<duetos::i32>(cx) - static_cast<duetos::i32>(resize.anchor_cx);
+            const duetos::i32 dy = static_cast<duetos::i32>(cy) - static_cast<duetos::i32>(resize.anchor_cy);
+            duetos::drivers::video::WindowResizeFromEdge(resize.window, resize.edge, resize.anchor_x, resize.anchor_y,
+                                                         resize.anchor_w, resize.anchor_h, dx, dy);
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+        }
+        else
+        {
+            // Non-drag path: route clicks + motion through the
+            // widget table as before. Only reachable when the
+            // cursor is NOT pinning a window move; this keeps
+            // the button widget inert during drag, matching
+            // Windows' "modal drag" semantics.
+            const duetos::u32 hit = duetos::drivers::video::WidgetRouteMouse(cx, cy, p.buttons);
+            if (hit != duetos::drivers::video::kWidgetInvalid)
+            {
+                SerialWrite("[ui] widget event id=");
+                SerialWriteHex(hit);
+                SerialWrite("\n");
+                // Dispatch to app-level handlers. Each app
+                // claims a private ID range (see Calculator's
+                // kIdBase); non-claiming handlers return false
+                // and the event is just logged above.
+                duetos::apps::calculator::CalculatorOnWidgetEvent(hit);
+                duetos::apps::settings::SettingsOnWidgetEvent(hit);
+            }
+        }
+
+        // Hover responsiveness: when a menu is open and the
+        // cursor moved this frame, force an immediate recompose
+        // so the highlighted row tracks the mouse without
+        // waiting for the 1 Hz ui-ticker. Skipped during drag
+        // (drag has its own compose) and when the menu was
+        // already handled (the dispatch path composes too).
+        if (!drag.active && !menu_handled && duetos::drivers::video::MenuIsOpen() && (p.dx != 0 || p.dy != 0))
+        {
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+        }
+
+        duetos::drivers::video::CompositorUnlock();
+
+        SerialWrite("[mouse] dx=");
+        SerialWriteHex(static_cast<duetos::u64>(p.dx));
+        SerialWrite(" dy=");
+        SerialWriteHex(static_cast<duetos::u64>(p.dy));
+        SerialWrite(" btn=");
+        SerialWriteHex(p.buttons);
+        SerialWrite("\n");
     }
 }
 } // namespace duetos::core
