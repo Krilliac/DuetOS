@@ -3574,6 +3574,20 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
 
+    case SYS_MODULE_BASE_BY_VA:
+    {
+        // rdi = absolute user VA. Returns the owning module's load
+        // base (EXE or preloaded DLL), or 0 if no module matches.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = ProcessFindModuleBaseByVa(proc, frame->rdi);
+        return;
+    }
+
     case SYS_DLL_LOAD_FROM_PATH:
     {
         // Real LoadLibraryW from disk: look the name up under

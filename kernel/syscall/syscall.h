@@ -2077,6 +2077,17 @@ enum SyscallNumber : u64
     // are part of `enum CompatPolicyBits` below and won't be
     // reshuffled. New flags append at bit 4 and beyond.
     SYS_COMPAT_QUERY = 206,
+
+    // SYS_MODULE_BASE_BY_VA — reverse-map an absolute user VA to
+    // the load base of the module (main EXE image or any preloaded
+    // DLL) that contains it. Arg: rdi = VA. Returns the module
+    // base VA, or 0 if the VA lies in no known module. No cap
+    // gated — a process may ask which of its own images owns a
+    // pointer. Backs the cross-module `RtlLookupFunctionEntry`
+    // used by ntdll's SEH frame walk so a stack that crosses the
+    // EXE↔kernel32↔ntdll boundary still resolves each frame's
+    // `.pdata`. ABI stable from this commit.
+    SYS_MODULE_BASE_BY_VA = 207,
 };
 
 // Stable bit assignments for SYS_COMPAT_QUERY's return value.

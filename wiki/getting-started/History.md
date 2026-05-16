@@ -1050,6 +1050,45 @@ What's still GAP:
   slice lands these the same time the 64-bit set gets its FS
   routing.
 
+## Phase 6.17 — x64 SEH: kernel fault → user exception dispatch (2026-05-16)
+
+Slices 1-2 had built the x64 unwinder (capture / `.pdata` lookup /
+`RtlVirtualUnwind`) but a CPU fault in a Win32 PE still just
+task-killed it. Phase 6.17 closes the loop: a ring-3 #DE/#UD/#GP/#PF
+in a PE that has our ntdll mapped is no longer terminated on sight.
+`kernel/subsystems/win32/seh_dispatch.cpp` builds a Microsoft
+`EXCEPTION_RECORD` + `CONTEXT` (with a valid seeded FXSAVE image) on
+the faulting thread's own user stack and rewrites the trap frame to
+resume at `ntdll!KiUserExceptionDispatcher` — the same shape Windows
+uses. ntdll's new `ntdll_dispatch.c` is the user-mode engine: it runs
+the Vectored Exception Handler chain first, then the frame-based
+`__C_specific_handler` → `RtlUnwindEx` → `RtlRestoreContext` walk;
+`NtContinue` and `NtRaiseException` became real, and
+`RtlLookupFunctionEntry` went cross-module (`SYS_MODULE_BASE_BY_VA`)
+so a stack that crosses the EXE↔kernel32↔ntdll boundary resolves
+every frame.
+
+Two things shaped the slice:
+
+- **The high-risk part is the trap-path rewrite**, so it fails safe:
+  if ntdll isn't mapped, the user stack can't be written, or the same
+  instruction keeps re-faulting into a wedged dispatcher, the kernel
+  falls back to the original task-kill. A per-task backstop
+  (`SchedSehDeliveryAllowed`) bounds a dispatcher that faults on
+  itself; a genuinely unhandled exception terminates in *user* mode
+  via the dispatcher's no-handler path, not by spinning the kernel.
+
+- **mingw-w64 GCC has no MSVC `__try`/`__except` in C** (only the
+  degenerate `__try1` macros), so the literal `__try` acceptance
+  couldn't be smoke-tested under the existing toolchain. The
+  frame-based engine ships exported and correct-by-construction for
+  real MSVC-toolchain PEs (Chrome's vcruntime); the `seh_pe` smoke
+  proves the *identical* kernel→user delivery + `RtlRestoreContext`
+  machinery via a Vectored Exception Handler that catches a null
+  write and a divide-by-zero, edits the CONTEXT, and continues —
+  repeatably. Closing the `__try` smoke gap waits for a
+  clang-windows-msvc (or real MSVC) PE in the smoke set.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

@@ -788,6 +788,37 @@ u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name)
     return 0;
 }
 
+u64 ProcessFindModuleBaseByVa(const Process* proc, u64 va)
+{
+    if (proc == nullptr || va == 0)
+    {
+        return 0;
+    }
+    // Preloaded DLLs first — they carry an exact mapped extent.
+    for (u64 j = 0; j < proc->dll_image_count; ++j)
+    {
+        const DllImage& img = proc->dll_images[j];
+        if (img.base_va == 0 || img.size == 0)
+        {
+            continue;
+        }
+        if (va >= img.base_va && va < img.base_va + img.size)
+        {
+            return img.base_va;
+        }
+    }
+    // EXE fallback: no SizeOfImage is recorded for the main image,
+    // so any VA at/above its base that matched no DLL is attributed
+    // to the EXE. The ntdll caller re-checks the MZ/PE header at the
+    // returned base before reading .pdata, so an over-broad guess
+    // degrades to "no RUNTIME_FUNCTION" rather than a wild read.
+    if (proc->pe_image_base != 0 && va >= proc->pe_image_base)
+    {
+        return proc->pe_image_base;
+    }
+    return 0;
+}
+
 bool ProcessRegisterDllImage(Process* proc, const DllImage& image)
 {
     if (proc == nullptr)

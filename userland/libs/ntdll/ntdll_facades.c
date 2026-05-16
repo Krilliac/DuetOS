@@ -393,16 +393,8 @@ __declspec(dllexport) NTSTATUS NtTestAlert(void)
     return NTSTATUS_SUCCESS;
 }
 
-__declspec(dllexport) NTSTATUS NtRaiseException(void* ExceptionRecord, void* ContextRecord, BOOL HandleException)
-{
-    (void)ExceptionRecord;
-    (void)ContextRecord;
-    (void)HandleException;
-    /* No SEH dispatch in v0; the right answer is "we couldn't
-     * raise it" — Windows uses STATUS_UNHANDLED_EXCEPTION
-     * (0xC0000144) on the unhandled path. */
-    return (NTSTATUS)0xC0000144;
-}
+/* NtRaiseException now lives in ntdll_dispatch.c (real first-chance
+ * user SEH dispatch, T6-02 slice 3). */
 
 /* ------------------------------------------------------------------
  * NT process-creation thunks — explicit NotImpl facades.

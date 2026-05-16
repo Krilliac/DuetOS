@@ -109,6 +109,17 @@ core::Process* TaskProcess(Task* t);
 /// the correct (per-thread) TEB. No-op on a null task.
 void SchedSetUserGsOverride(Task* t, u64 gs_base);
 
+/// T6-02 kernel→user SEH delivery recursion guard. Returns true
+/// if the kernel may build an EXCEPTION_RECORD/CONTEXT and resume
+/// the faulting ring-3 thread at ntdll!KiUserExceptionDispatcher
+/// for a fault at `fault_rip`; false once the same instruction has
+/// faulted into the dispatcher too many times in a row (caller
+/// must fall back to task-kill — the unhandled SEH path has to
+/// terminate, never loop). A distinct `fault_rip` resets the
+/// counter, so a program that handles faults and continues is
+/// never throttled. No-op-false on a null task.
+bool SchedSehDeliveryAllowed(Task* t, u64 fault_rip);
+
 /// Find the first live `core::Process*` with `pid == target_pid`.
 /// Walks every queue (running, normal-runqueue, idle-runqueue,
 /// sleep-queue, zombies) under arch::Cli to keep the lists stable

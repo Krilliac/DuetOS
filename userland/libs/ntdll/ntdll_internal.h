@@ -57,3 +57,8 @@ typedef struct
 __declspec(dllexport) NTSTATUS NtQueryPerformanceCounter(long long* counter, long long* freq);
 __declspec(dllexport) NTSTATUS NtQuerySystemTime(long long* SystemTime);
 __declspec(dllexport) NTSTATUS NtWaitForSingleObject(HANDLE h, BOOL bAlertable, const long long* timeout100ns);
+
+/* T6-02 SEH engine (defined in ntdll_dispatch.c). RtlRestoreContext
+ * loads a Microsoft CONTEXT and resumes at its Rip — used by
+ * NtContinue and the unwinder. */
+__declspec(dllexport) void RtlRestoreContext(void* ContextRecord, void* ExceptionRecord);
