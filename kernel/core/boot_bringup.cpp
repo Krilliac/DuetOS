@@ -1498,4 +1498,404 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // workload exercises it.
     DUETOS_BOOT_SELFTEST(duetos::diag::SoftLockupSelfTest());
 }
+
+// Device + late-bring-up: PS/2 kbd/mouse, PCI enumeration,
+// VirtIO/MEI, GPU, audio, network + storage stacks, security
+// surface, Start-menu app scan, read-only FS shells, the
+// bringup-complete metrics checkpoint and the tmpfs log-sink
+// sanity check. Pure code motion out of kernel_main: the only
+// crossed local is the boot cmdline string (netsmoke=force
+// probe); every other effect lands on global/subsystem state.
+void BootBringupDevices(bool force_net_smoke)
+{
+    using namespace duetos::arch;
+    using namespace duetos::mm;
+
+    SerialWrite("[boot] Bringing up PS/2 keyboard.\n");
+    duetos::drivers::input::Ps2KeyboardInit();
+
+    SerialWrite("[boot] Bringing up PS/2 mouse.\n");
+    duetos::drivers::input::Ps2MouseInit();
+
+    SerialWrite("[boot] Enumerating PCI bus.\n");
+    duetos::drivers::pci::PciEnumerate();
+
+    SerialWrite("[boot] Probing VirtIO PCI devices.\n");
+    duetos::drivers::virtio::VirtioInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::virtio::VirtioInputSelfTest());
+
+    SerialWrite("[boot] Detecting Intel MEI/HECI devices.\n");
+    duetos::drivers::mei::MeiInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::mei::MeiSelfTest());
+
+    SerialWrite("[boot] Detecting GPUs.\n");
+    duetos::drivers::gpu::GpuInit();
+    // drivers/gpu fault domain self-registers via
+    // KERNEL_INITCALL(Drivers, "drivers/gpu.module", ...) in
+    // `kernel/drivers/gpu/gpu.cpp`.
+
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::EdidSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::CvtSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::DpmsSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::Cea861SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::intel::IntelGscFwSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::intel::IntelRcsRingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::amd::AmdCpRingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::nvidia::NvidiaGspSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::GpuResourcesSelfTest());
+
+    SerialWrite("[boot] Bringing up firmware loader (scaffold).\n");
+    duetos::core::FwLoaderInit();
+    DUETOS_BOOT_SELFTEST(duetos::core::FwPackageSelfTest());
+    duetos::net::wireless::diag::Init();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::FirmwarePolicySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlFirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlFirmwareBuilderSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::RtlFirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::BcmFirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::AthHtcFirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::AthHtcUploadSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::AthHtcSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::Mt76FirmwareSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::WirelessInventorySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::BeaconSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::HciSelfTest());
+    duetos::net::bluetooth::BluetoothDiagInit();
+    DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::BluetoothDiagSelfTest());
+    duetos::net::bluetooth::BtHidInit();
+    DUETOS_BOOT_SELFTEST(duetos::net::bluetooth::BtHidSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::UnicodeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::BmpSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::TgaSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::DateTimeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::DeflateSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::ZipReaderSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::GzipZlibSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::PngSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::JpegDecoderSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::util::Adler32SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::Sha1SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::Sha256SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::HmacSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::Pbkdf2SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::PrfSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::AesSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::AesKeyWrapSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::AesGcmSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::BigIntSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::asn1::Asn1SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::RsaSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::HkdfSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::crypto::x509::X509SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::tls::TlsSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::EapolSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::FourWaySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::WdevSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::MlmeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlUploadSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlRingsSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::RtlUploadSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::BcmUploadSelfTest());
+    // End-to-end loopback self-test exercises the entire control
+    // tier (scan + auth + assoc + 4-way handshake) against a
+    // software FakeAp peer + LoopbackDriver. Equivalent to
+    // Linux's `mac80211_hwsim` for our stack.
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::test::WirelessE2ESelfTest());
+
+    // DRSH remote-access service: initialise state structures but
+    // do NOT start a listener. The admin opts in via `drshd passwd
+    // ...` + `drshd start` once the service is wanted. Self-test
+    // round-trips one encrypted frame through the in-memory transport.
+    duetos::net::drsh::DrshInit();
+    DUETOS_BOOT_SELFTEST(duetos::net::drsh::DrshSelfTest());
+
+    SerialWrite("[boot] Detecting NICs.\n");
+    duetos::drivers::net::NetInit();
+    // drivers/net fault domain self-registers via
+    // KERNEL_INITCALL(Drivers, "drivers/net.module", ...) in
+    // `kernel/drivers/net/net.cpp`.
+
+    SerialWrite("[boot] Detecting USB host controllers.\n");
+    duetos::drivers::usb::UsbInit();
+    duetos::drivers::usb::xhci::XhciInit();
+    // Register xHCI as a restartable fault domain. Init() is
+    // already idempotent (early-return on g_init_done), so the
+    // domain's init hook just wraps it in a Result<void>.
+    {
+        auto xhci_init = []() -> duetos::core::Result<void>
+        {
+            duetos::drivers::usb::xhci::XhciInit();
+            return {};
+        };
+        auto xhci_teardown = []() -> duetos::core::Result<void> { return duetos::drivers::usb::xhci::XhciShutdown(); };
+        duetos::security::RegisterDriverDomain("drivers/usb/xhci", xhci_init, xhci_teardown);
+    }
+    // Probe USB-Ethernet adapters now that xHCI enumeration is
+    // complete. CDC-ECM is the USB standard — works with QEMU's
+    // `-device usb-net` emulation, premium USB-Ethernet dongles,
+    // and iPhone tethering. RNDIS (Android default), CDC-NCM
+    // (Apple devices, Wi-Fi 6 routers), AX88xxx and RTL81xx
+    // vendor-specific protocols are follow-up class drivers.
+    // CdcEcmProbe is deliberately NOT called here. Invoking it
+    // during USB init auto-probes every enumerated device; when
+    // the device isn't CDC-ECM (QEMU's usb-net is RNDIS, most
+    // Android phones are RNDIS too) the probe's control transfers
+    // still happen, and a timing interaction with the pre-poll
+    // event-ring state regresses the e1000 DHCP path (the RX
+    // polling task stops delivering frames to the network stack
+    // until a reboot). Callable manually from a shell command or
+    // a kernel thread once a real CDC-ECM device is known to be
+    // attached; the auto-probe will land in a follow-up slice
+    // that dispatches events by TRB so class drivers don't race
+    // with each other or the HID polling path.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::usb::hid::HidSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::input::HidKeyboardSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::usb::UsbClassDescriptorSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::usb::BtusbSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::usb::msc::MscSelfTest());
+
+    // ath9k_htc USB Wi-Fi adapters (AR9271 / AR7010 family) are the
+    // canonical open-firmware Wi-Fi target — `qca/open-ath9k-htc-firmware`
+    // ships rebuildable images that the firmware loader prefers via
+    // the `/lib/firmware/duetos/open/ath9k-htc/` namespace before
+    // any vendor blob path. AthHtcInit walks the live xHCI PortRecord
+    // cache, matches VID/PID, and runs the HTC firmware download
+    // protocol for each adapter found.
+    duetos::drivers::net::AthHtcInit();
+    // Wireless hardware inventory: emit a single, easy-to-grep boot-log
+    // block that lists every detected Wi-Fi adapter and the firmware
+    // basename it needs. First thing a real-hardware tester reads.
+    duetos::net::wireless::WirelessInventoryDump();
+
+    SerialWrite("[boot] Detecting audio controllers.\n");
+    duetos::drivers::audio::AudioInit();
+    // drivers/audio fault domain self-registers via
+    // KERNEL_INITCALL(Drivers, "drivers/audio.module", ...) in
+    // `kernel/drivers/audio/audio.cpp`.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::VerbEncodingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::HdaJackSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::audio::hda::HdaJackInventorySelfTest());
+
+    // Audio backend (slice 2 of the ToaruOS port). Wires the HDA
+    // driver's StreamArm + codec configuration into a buffer ring
+    // a producer can submit S16LE/48 kHz/stereo PCM into. RUN
+    // stays at 0 — playback only starts when a future producer
+    // (winmm thunk, system-beep driver) calls Start() with audio
+    // in the ring. See wiki/drivers/Audio.md and
+    // wiki/advanced/Toaru-Port-Plan.md.
+    {
+        auto r = duetos::subsystems::audio::Init();
+        if (!r.has_value())
+        {
+            // Init() already logged the specific failure reason
+            // (no HDA, allocation failed, codec walker found no
+            // output path, etc.). One additional line records the
+            // overall outcome for grep-friendliness.
+            SerialWrite("[audio-backend] init did not complete — see preceding [audio-backend] line for cause\n");
+        }
+    }
+    DUETOS_BOOT_SELFTEST(duetos::subsystems::audio::SelfTest());
+
+    SerialWrite("[boot] Bringing up power / thermal shell.\n");
+    duetos::drivers::power::PowerInit();
+
+    SerialWrite("[boot] Bringing up network stack skeleton.\n");
+    duetos::net::NetStackInit();
+    DUETOS_BOOT_SELFTEST(duetos::net::firewall::FwSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::tcp::SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::core::IdleLockSelfTest());
+    // Smoke test runs in its own task. v1 TCP allows the smoke
+    // probe and any other concurrent listener to coexist; the v0
+    // single-slot collision is gone. `netsmoke=force` opts in to
+    // running on emulator (QEMU SLIRP supports DNS+TCP egress).
+    // force_net_smoke is the `netsmoke=force` cmdline match,
+    // evaluated by the caller where CmdlineMatches is in scope.
+    duetos::net::NetSmokeTestStart(force_net_smoke);
+
+    SerialWrite("[boot] Bringing up graphics ICD.\n");
+    duetos::subsystems::graphics::GraphicsIcdInit();
+    DUETOS_BOOT_SELFTEST(duetos::subsystems::graphics::GraphicsIcdSelfTest());
+    duetos::subsystems::win32::GdiInit();
+
+    SerialWrite("[boot] Bringing up block device layer.\n");
+    duetos::drivers::storage::BlockLayerInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::storage::BlockLayerSelfTest());
+
+    SerialWrite("[boot] Bringing up NVMe controller.\n");
+    duetos::drivers::storage::NvmeInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::storage::NvmeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::diag::minidump::DiskPersistSelfTest());
+
+    SerialWrite("[boot] Bringing up AHCI controller(s).\n");
+    duetos::drivers::storage::AhciInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::storage::AhciSelfTest());
+
+    // Security event ring + IR runbook: stand up the structured
+    // event surface BEFORE any wall TU starts publishing. Storage
+    // is constinit so a stray pre-init publish is safe; this call
+    // just zeroes counters + logs the init.
+    SerialWrite("[boot] Starting security event ring.\n");
+    duetos::security::EventRingInit();
+    DUETOS_BOOT_SELFTEST(duetos::security::EventRingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::IrRunbookSelfTest());
+
+    // Security guard must be live BEFORE any loader runs. Advisory
+    // mode at boot: scans + logs, never blocks. Flip to Enforce via
+    // the shell `guard enforce` once the boot-log is clean.
+    SerialWrite("[boot] Starting security guard.\n");
+    duetos::security::GuardInit();
+    DUETOS_BOOT_SELFTEST(duetos::security::GuardSelfTest());
+
+    // Canary file-self-defense init: seed per-boot dynamic
+    // canary names from kernel entropy. MUST follow RandomInit
+    // (already on the boot path above). Without this the
+    // dynamic-canary slots stay empty and only the static
+    // registry matches.
+    SerialWrite("[boot] Seeding per-boot canary names.\n");
+    duetos::security::CanaryInit();
+
+    // Policy engine: snapshot the per-subsystem modes Guard /
+    // Canary / Blockguard chose for themselves. Profile starts at
+    // Default; operators flip to Lab/Production/Forensic via the
+    // `policy` shell command.
+    SerialWrite("[boot] Initializing security policy engine.\n");
+    duetos::security::PolicyInit();
+    DUETOS_BOOT_SELFTEST(duetos::security::PolicySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::PurpleTeamSelfTest());
+
+    DUETOS_BOOT_SELFTEST(duetos::fs::TmpFsSelfTest());
+
+    SerialWrite("[boot] Probing GPT on block devices.\n");
+    DUETOS_BOOT_SELFTEST(duetos::fs::gpt::GptSelfTest());
+
+    SerialWrite("[boot] Probing FAT32 on block devices.\n");
+    DUETOS_BOOT_SELFTEST(duetos::fs::fat32::Fat32SelfTest());
+    // fs/fat32 fault domain self-registers via
+    // KERNEL_INITCALL(Drivers, "fs/fat32.module", ...) in
+    // `kernel/fs/fat32.cpp`.
+
+    // Disk-installer layout-math self-test. Pure math (no block I/O,
+    // no GPT writes), so cheap to run on every boot. A regression
+    // here means the partition layout planner drifted — surfaces
+    // immediately rather than waiting for an operator to type
+    // `install <handle> INSTALL` on a real disk.
+    DUETOS_BOOT_SELFTEST(duetos::fs::installer::InstallerSelfTest());
+
+    // Auto-register every probed FAT32 volume in the mount registry
+    // so `VfsMountResolve` (and therefore the file-routing layer)
+    // sees them. The mount point matches the existing hardcoded
+    // "/disk/<idx>" routing prefix — the longest-prefix resolver
+    // produces the same routing decision the legacy parser made,
+    // but now gated on actual mount-table entries.
+    {
+        char mp[16] = "/disk/0";
+        for (duetos::u32 i = 0; i < duetos::fs::fat32::Fat32VolumeCount() && i < 10; ++i)
+        {
+            mp[6] = static_cast<char>('0' + i);
+            mp[7] = '\0';
+            (void)duetos::fs::VfsMount(mp, duetos::fs::FsType::Fat32, i);
+        }
+    }
+
+    SerialWrite("[boot] Cross-mount VfsResolve self-test.\n");
+    DUETOS_BOOT_SELFTEST(duetos::fs::VfsResolveCrossMountSelfTest());
+
+    // First Rust subsystem in the kernel — DuetFS v1 brings up the
+    // project's native filesystem. DuetFsBoot creates a 256 KiB RAM-
+    // backed volume, mkfs's it, seeds /etc/version, and registers it
+    // in the VFS mount table at /duetfs. DuetFsSelfTest exercises the
+    // full v1 surface (mkfs, create, write, read, mkdir, unlink,
+    // truncate) on a SCRATCH image so the boot mount stays clean.
+    SerialWrite("[boot] DuetFS bring-up.\n");
+    duetos::fs::duetfs::DuetFsBoot();
+    DUETOS_BOOT_SELFTEST(duetos::fs::duetfs::DuetFsSelfTest());
+
+    SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
+    DUETOS_BOOT_SELFTEST(duetos::fs::routing::SelfTest());
+
+    // Notes save/load round-trip — runs here (post-FAT32-probe) so
+    // the SKIP path stays only "no FAT32 volume" rather than "Notes
+    // ran before storage was up". Skipped silently if NOTES.TXT
+    // pre-exists on the boot image.
+    DUETOS_BOOT_SELFTEST(duetos::apps::notes::NotesPersistSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::screenshot::ScreenshotSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::trash::TrashSelfTest());
+
+    // FAT32 is online. Promote the Files app's default view from
+    // RAM to DISK so the first time a user clicks Start -> FILES
+    // they see what's actually on the volume (notes / screenshots
+    // / logs) rather than the read-only ramfs tree. The user can
+    // still toggle back with M (memory).
+    duetos::apps::files::FilesPromoteToDisk();
+
+    // Restore the saved Calendar event table from CALENDAR.TXT if
+    // one exists. Silent no-op if the file isn't there — first-
+    // boot Calendar simply starts with an empty event store.
+    duetos::apps::calendar::CalendarLoad();
+
+    // Install the FAT32 file sink — replaces the early tmpfs
+    // sink (single-slot API). The tmpfs `/tmp/boot.log`
+    // captured the early-boot lines; from here on, every
+    // Info+ log entry goes to `KERNEL.LOG` on the FAT32 root.
+    // Non-fatal if FAT32 is unavailable — Install logs and
+    // returns.
+    duetos::core::KlogPersistInstall();
+    DUETOS_BOOT_SELFTEST(duetos::core::KlogPersistSelfTest());
+
+    // Install the FAT32 sink for the fix journal — KERNEL.FIX on
+    // the root volume. Same install-after-FAT32 contract as klog;
+    // the rotation policy ages the prior session's KERNEL.FIX into
+    // KERNEL.F0..F<N-1> so a reviewer can pull gaps from previous
+    // boots too.
+    duetos::diag::FixJournalPersistInstall();
+    DUETOS_BOOT_SELFTEST(duetos::diag::FixJournalPersistSelfTest());
+
+    // Session restore: read SESSION.CFG and apply the saved
+    // theme + per-app window positions. No-op on first boot
+    // (file doesn't exist) or if FAT32 isn't mounted.
+    // SessionRestoreSelfTest exercises the parse path in
+    // memory without touching the on-disk config.
+    DUETOS_BOOT_SELFTEST(duetos::core::SessionRestoreSelfTest());
+    duetos::core::SessionRestoreApply();
+
+    // Win32 registry hive: replay any sidecar values the previous
+    // boot wrote (NtSetValueKey / NtDeleteValueKey targets land in
+    // REGISTRY.HIV and are restored here). Self-test runs first so
+    // a regression surfaces before the live load mutates the pool.
+    DUETOS_BOOT_SELFTEST(duetos::subsystems::win32::registry::RegistryHiveSelfTest());
+    duetos::subsystems::win32::registry::RegistryHiveLoad();
+
+    // /APPS shortcut enumeration. Creates the directory + a
+    // SAMPLE.MNF seed on first boot so the user has a working
+    // template to copy. Each *.MNF file becomes an extra entry
+    // in the Start menu, dispatched through ThemeRole.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::StartMenuAppsSelfTest());
+    duetos::drivers::video::StartMenuAppsScan();
+
+    SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
+    duetos::fs::ext4::Ext4ScanAll();
+    duetos::fs::ntfs::NtfsScanAll();
+    duetos::fs::exfat::ExfatScanAll();
+
+    // Metrics checkpoint: everything above is bringup overhead; what
+    // the system consumes from here on is steady-state.
+    KLOG_METRICS("boot", "bringup-complete");
+    SerialWrite("[bringup-tail] post-metrics\n");
+
+    // Sanity-check the tmpfs log sink — by now enough Info+ lines
+    // have fired that /tmp/boot.log should be at its 512-byte cap.
+    {
+        const char* bytes = nullptr;
+        duetos::u32 len = 0;
+        if (duetos::fs::TmpFsRead("boot.log", &bytes, &len))
+        {
+            duetos::core::LogWithValue(duetos::core::LogLevel::Info, "core/klog", "/tmp/boot.log size (bytes)", len);
+        }
+        else
+        {
+            duetos::core::Log(duetos::core::LogLevel::Warn, "core/klog", "/tmp/boot.log not present");
+        }
+    }
+}
 } // namespace duetos::core

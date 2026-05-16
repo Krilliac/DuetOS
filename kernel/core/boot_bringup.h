@@ -36,4 +36,13 @@ void BootBringupMemPaging();
 // Multiboot2 info pointer (AcpiInit); pure code motion otherwise.
 void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info);
 
+// Device + late-bring-up: PS/2 kbd/mouse, PCI enumeration,
+// VirtIO/MEI, GPU, audio, network + storage stacks, security
+// surface, Start-menu app scan, read-only FS shells, the
+// bringup-complete metrics checkpoint and the tmpfs log-sink
+// sanity check. force_net_smoke is the caller-evaluated
+// `netsmoke=force` cmdline match (CmdlineMatches lives in
+// main.cpp's anon namespace); pure code motion otherwise.
+void BootBringupDevices(bool force_net_smoke);
+
 } // namespace duetos::core
