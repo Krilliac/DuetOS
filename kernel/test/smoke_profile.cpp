@@ -124,6 +124,8 @@ u64 ProfileSleepTicks(SmokeProfile profile)
         return kTicksPerSecond * 10; // real-world MSVC PE w/ DLL preload
     case SmokeProfile::Linux:
         return kTicksPerSecond * 5; // single Linux ABI smoke
+    case SmokeProfile::Browser:
+        return kTicksPerSecond * 25; // 2 browser PEs: DNS + TCP + HTTP x4
     default:
         return kTicksPerSecond * 5;
     }
@@ -245,6 +247,10 @@ SmokeProfile SmokeProfileInit(const char* cmdline)
     {
         g_profile = SmokeProfile::Linux;
     }
+    else if (TokenMatches(value, end, "browser"))
+    {
+        g_profile = SmokeProfile::Browser;
+    }
     // Unknown values fall through to None — full boot. Logged below.
 
     arch::SerialWrite("[smoke] profile=");
@@ -276,6 +282,8 @@ const char* SmokeProfileName(SmokeProfile profile)
         return "pe-winkill";
     case SmokeProfile::Linux:
         return "linux";
+    case SmokeProfile::Browser:
+        return "browser";
     default:
         return "unknown";
     }
@@ -318,6 +326,12 @@ bool SmokeProfileShouldSpawn(SmokeTarget target)
         case SmokeTarget::PeOther:
         case SmokeTarget::Linux:
             return !duetos::arch::IsEmulator();
+        case SmokeTarget::Browser:
+            // profile=None already runs the browser PEs on bare metal
+            // via the legacy !emulator block in StartRing3SmokeTask;
+            // don't double-spawn here. The explicit `smoke=browser`
+            // profile is the emulator-friendly path.
+            return false;
         default:
             return true;
         }
@@ -338,6 +352,8 @@ bool SmokeProfileShouldSpawn(SmokeTarget target)
         return false; // never under a smoke profile
     case SmokeTarget::Linux:
         return p == SmokeProfile::Linux;
+    case SmokeTarget::Browser:
+        return p == SmokeProfile::Browser;
     default:
         return false;
     }
