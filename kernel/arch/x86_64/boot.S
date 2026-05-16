@@ -48,20 +48,22 @@ multiboot2_header_start:
     .long   multiboot2_header_end - multiboot2_header_start
     .long   -(MULTIBOOT2_MAGIC + MULTIBOOT2_ARCH_I386 + (multiboot2_header_end - multiboot2_header_start))
 
-    /* Framebuffer request tag (type 5). width=height=depth=0 means
-     * "give me any linear framebuffer the firmware has" — GRUB picks
-     * a sensible default (1024x768x32 on QEMU std-vga, 800x600 on
-     * VESA fallback). Flags bit 0 = 0 → optional: if no mode is
-     * available, GRUB still boots us with EGA text. The kernel-side
-     * framebuffer driver treats "no tag 8" as "no graphics; keep
-     * using serial" rather than a hard failure. */
+    /* Framebuffer request tag (type 5). Request a concrete, universally
+     * supported mode (1024x768x32) rather than 0/0/0 "any": with "any",
+     * GRUB lands at 1024x768 on QEMU std-vga but at the lowest VBE mode
+     * (640x480) under VirtualBox, which renders the desktop unusably
+     * oversized. 1024x768x32 is in every VBE/VBoxVGA mode list and fits
+     * default VBox VRAM (3 MiB). Flags bit 0 = 1 → optional: if the mode
+     * is unavailable GRUB still boots us (EGA text / serial); the
+     * kernel-side framebuffer driver treats "no tag 8" as "no graphics,
+     * keep using serial" rather than a hard failure. */
     .align 8
     .word   5                   /* type = MULTIBOOT_HEADER_TAG_FRAMEBUFFER */
     .word   1                   /* flags = 1 → optional */
     .long   20                  /* size */
-    .long   0                   /* width  — any  */
-    .long   0                   /* height — any  */
-    .long   0                   /* depth  — any  */
+    .long   1024                /* width  */
+    .long   768                 /* height */
+    .long   32                  /* depth  */
 
     /* End tag */
     .align 8

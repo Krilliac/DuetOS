@@ -393,8 +393,10 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     const char* cmdline = duetos::core::FindBootCmdline(multiboot_info);
 
     duetos::core::BootBringupKernelServices(cmdline, multiboot_info);
+    SerialWrite("[bringup-tail] kernel-services done\n");
 
     duetos::core::BootBringupDevices(CmdlineMatches(cmdline, "netsmoke", "force"));
+    SerialWrite("[bringup-tail] devices done\n");
 
     // Keyboard reader thread: consumes KeyEvents and writes the
     // printable ones into the framebuffer console. Backspace and
