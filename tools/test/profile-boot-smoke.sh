@@ -63,11 +63,40 @@ rm -f "${SERIAL_LOG}"
 # regenerates a per-profile ISO with `smoke=<profile>` baked into
 # the grub cmdline + adds the isa-debug-exit device. QEMU exits
 # cleanly when the kernel reaches the [smoke] complete sentinel
-# and writes 0x10 to port 0xf4 (exit status 0x21 = 33). On
-# timeout, run.sh's `timeout` wrapper SIGTERMs QEMU.
+# and writes 0x10 to port 0xf4 (exit status 0x21 = 33). The
+# boot-observability slice also exits with hierarchical codes on
+# hang / phase-init-fail / panic. On a true hang (no isa-debug-exit
+# write at all), run.sh's `timeout --preserve-status` wrapper
+# SIGTERMs QEMU. Capture the exit code instead of discarding it.
+QEMU_RC=0
 DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-480}" \
 DUETOS_SMOKE_PROFILE="${PROFILE}" \
-    "${RUN_SCRIPT}" > "${SERIAL_LOG}" 2>&1 || true
+    "${RUN_SCRIPT}" > "${SERIAL_LOG}" 2>&1 || QEMU_RC=$?
+
+# Decode the run.sh exit status against the kernel's hierarchical
+# scheme (kernel/diag/boot_observe.h). QEMU exits (b<<1)|1 for an
+# isa-debug-exit byte b; so b = (rc-1)>>1. Top nibble = class, low
+# nibble = core::Phase ordinal. Only the four kernel-emitted classes
+# are structured — anything else (e.g. SIGTERM-on-timeout → 143) is
+# left to the serial-log evidence below, never force-decoded.
+PHASE_NAMES=(earlycon physmem paging heap idt apic time percpubsp sched smp drivers vfs userland)
+EXIT_CLASS=""   # pass | hung | phase-init-fail | panic | "" (unstructured)
+EXIT_PHASE=""
+if (( QEMU_RC >= 1 && QEMU_RC <= 255 && QEMU_RC % 2 == 1 )); then
+    b=$(((QEMU_RC - 1) / 2))
+    cls=$((b & 0xF0))
+    ord=$((b & 0x0F))
+    if (( ord >= 0 && ord < ${#PHASE_NAMES[@]} )); then
+        EXIT_PHASE="${PHASE_NAMES[$ord]}"
+    fi
+    case "${cls}" in
+        16)  [[ "${b}" == "16" ]] && EXIT_CLASS="pass" ;;   # 0x10
+        32)  EXIT_CLASS="hung" ;;                            # 0x20
+        64)  EXIT_CLASS="phase-init-fail" ;;                 # 0x40
+        112) EXIT_CLASS="panic" ;;                           # 0x70
+    esac
+fi
+echo "smoke: qemu_rc=${QEMU_RC} exit_class=${EXIT_CLASS:-<unstructured>} exit_phase=${EXIT_PHASE:-n/a}"
 
 # ----------------------------------------------------------------------
 # Per-profile signature lists. The kernel-built ring3 trio prints
@@ -96,15 +125,17 @@ forbidden=(
     "[health] ESCALATE:"
 )
 
+# `scenario` = the per-profile scenario output (NOT covered by the
+# structured [boot-report], which reports boot health only). `expected`
+# = common + scenario, used unchanged by the legacy fallback path when
+# a kernel predates the [boot-report] block.
 case "${PROFILE}" in
     bringup)
-        # Nothing user-facing past bringup. Common signatures are
-        # the whole assertion set.
-        expected=("${common_expected[@]}")
+        # Nothing user-facing past bringup; boot health IS the test.
+        scenario=()
         ;;
     ring3)
-        expected=(
-            "${common_expected[@]}"
+        scenario=(
             "DuetOS v0 (ramfs-seeded)"
             "Hello from ring 3!"
             'queued task name="ring3-smoke-A"'
@@ -113,15 +144,13 @@ case "${PROFILE}" in
         )
         ;;
     pe-hello)
-        expected=(
-            "${common_expected[@]}"
+        scenario=(
             "[hello-pe] Hello from a PE executable!"
             'pe spawn name="ring3-hello-pe"'
         )
         ;;
     pe-winapi)
-        expected=(
-            "${common_expected[@]}"
+        scenario=(
             'pe spawn name="ring3-hello-winapi"'
             "[hello-winapi] printed via kernel32.WriteFile!"
             "[vcruntime140] memset+memcpy+memmove OK"
@@ -140,19 +169,16 @@ case "${PROFILE}" in
         )
         ;;
     pe-winkill)
-        expected=(
-            "${common_expected[@]}"
+        scenario=(
             'pe spawn name="ring3-winkill"'
             "Windows Kill "
         )
         ;;
     linux)
-        expected=(
-            "${common_expected[@]}"
-            # Linux smoke output: the LinuxSmoke task's sys_write
-            # writes a recognizable banner. The exact line depends
-            # on the smoke implementations; we look for the queued
-            # marker that's always logged from SpawnRing3Linux*.
+        scenario=(
+            # The LinuxSmoke task's sys_write writes a recognizable
+            # banner; the exact line depends on the smoke impls, so we
+            # look for the marker always logged from SpawnRing3Linux*.
             'linux'
         )
         ;;
@@ -162,6 +188,7 @@ case "${PROFILE}" in
         exit 2
         ;;
 esac
+expected=("${common_expected[@]}" "${scenario[@]}")
 
 # Boot-banner sniff — selftest pass-marker signatures
 # (string/hexdump/fs-vfs) only appear when the build was compiled
@@ -182,24 +209,16 @@ selftest_sigs=(
     "[fs/vfs] self-test OK"
 )
 
+# ----------------------------------------------------------------------
+# Decision. The forbidden backstop is always on. The structured
+# [boot-report] block + the hierarchical exit code are the primary
+# gate when present; the legacy full-signature list is the fallback
+# for a kernel that predates the boot-observability slice.
+# ----------------------------------------------------------------------
 fail=0
 missing=()
-for sig in "${expected[@]}"; do
-    # Skip selftest-only signatures when this build had selftests off.
-    if [[ ${selftests_on} -eq 0 ]]; then
-        is_selftest_sig=0
-        for ss in "${selftest_sigs[@]}"; do
-            if [[ "$sig" == "$ss" ]]; then is_selftest_sig=1; break; fi
-        done
-        if [[ ${is_selftest_sig} -eq 1 ]]; then
-            continue
-        fi
-    fi
-    if ! grep -aF "$sig" "${SERIAL_LOG}" > /dev/null; then
-        missing+=("$sig")
-        fail=1
-    fi
-done
+
+# Forbidden backstop (PANIC / crash / triple fault / health escalate).
 for sig in "${forbidden[@]}"; do
     if grep -aF "$sig" "${SERIAL_LOG}" > /dev/null; then
         echo "FORBIDDEN (present): $sig"
@@ -207,6 +226,58 @@ for sig in "${forbidden[@]}"; do
         fail=1
     fi
 done
+
+# Structured-failure evidence. The kernel ALWAYS emits a
+# [boot] phase=... STUCK/FAIL (or a panic) serial line *before* it
+# TestExits, so the serial line is authoritative and the decoded
+# QEMU exit code is only corroborating detail. This matters because a
+# SIGTERM-on-timeout exit (143) coincidentally lands in the
+# phase-init-fail rc range — decoding rc in isolation would mislabel
+# a plain hang. So: trust the serial line; enrich with the rc decode.
+struct_line=$(grep -aE '^\[boot\] phase=.* (STUCK|FAIL) ' "${SERIAL_LOG}" | tail -2 || true)
+if [[ -n "${struct_line}" ]]; then
+    echo "BOOT PHASE FAILURE (qemu_rc=${QEMU_RC}, decoded=${EXIT_CLASS:-?} phase=${EXIT_PHASE:-?}):"
+    echo "${struct_line}"
+    fail=1
+fi
+
+if grep -aqF '[boot-report] begin' "${SERIAL_LOG}"; then
+    echo "smoke: gate=structured ([boot-report] present)"
+    if ! grep -aF '[boot-report] result=pass' "${SERIAL_LOG}" > /dev/null; then
+        missing+=("[boot-report] result=pass")
+        fail=1
+    fi
+    if ! grep -aF "[smoke] profile=${PROFILE} complete" "${SERIAL_LOG}" > /dev/null; then
+        missing+=("[smoke] profile=${PROFILE} complete")
+        fail=1
+    fi
+    # The [boot-report] covers boot health only; per-profile scenario
+    # output is still asserted explicitly.
+    for sig in "${scenario[@]}"; do
+        if ! grep -aF "$sig" "${SERIAL_LOG}" > /dev/null; then
+            missing+=("$sig")
+            fail=1
+        fi
+    done
+else
+    echo "smoke: gate=legacy (no [boot-report]; full signature list)"
+    for sig in "${expected[@]}"; do
+        # Skip selftest-only signatures when this build had selftests off.
+        if [[ ${selftests_on} -eq 0 ]]; then
+            is_selftest_sig=0
+            for ss in "${selftest_sigs[@]}"; do
+                if [[ "$sig" == "$ss" ]]; then is_selftest_sig=1; break; fi
+            done
+            if [[ ${is_selftest_sig} -eq 1 ]]; then
+                continue
+            fi
+        fi
+        if ! grep -aF "$sig" "${SERIAL_LOG}" > /dev/null; then
+            missing+=("$sig")
+            fail=1
+        fi
+    done
+fi
 
 if [[ $fail -ne 0 ]]; then
     for m in "${missing[@]}"; do
@@ -250,5 +321,5 @@ if [[ $fail -ne 0 ]]; then
     exit 1
 fi
 
-echo "OK: profile=${PROFILE} — all ${#expected[@]} signatures present."
+echo "OK: profile=${PROFILE} — boot-report result=pass, sentinel + scenario signatures present."
 exit 0

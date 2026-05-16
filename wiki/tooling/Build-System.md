@@ -127,7 +127,15 @@ Does **not** count:
 DUETOS_TIMEOUT=30 tools/qemu/run.sh build/x86_64-debug/duetos.iso
 ```
 
-See [QEMU Smoke Tests](QEMU-Smoke.md) for the smoke harness and
+`DUETOS_QMP=1` (default) exposes a QMP control socket at
+`build/<preset>/qmp.sock` — orthogonal to the serial log and the GDB
+transport. Inspect or nudge a running guest with
+`tools/qemu/qmp.sh status | screenshot <out.ppm> | quit`. Set
+`DUETOS_QMP=0` to omit it.
+
+See [QEMU Smoke Tests](QEMU-Smoke.md) for the smoke harness (including
+the boot-observability phase ladder, structured `[boot-report]`, and
+hierarchical exit codes) and
 [Getting Started](../getting-started/Getting-Started.md) for the
 end-to-end build + boot flow.
 
