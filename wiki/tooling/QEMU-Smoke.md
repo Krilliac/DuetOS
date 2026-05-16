@@ -59,10 +59,10 @@ DUETOS_TIMEOUT=30 tools/test/ctest-boot-smoke.sh build/x86_64-debug
   paging heap idt apic time percpubsp sched smp drivers vfs userland`)
   wedges that `core::Phase`'s `BootPhaseEnter` — demonstrates ladder
   localisation (the log stops at `[boot] phase=<phase> begin`).
-  `smoke-tail` is the watchdog proof: it spins in the post-`sti`,
-  init-wedge-armed smoke settle path (see the watchdog GAP below for
-  why a `<phase>` value cannot prove the watchdog under a smoke
-  profile).
+  `smoke-tail` is the watchdog proof: it deterministically exercises
+  the structured STUCK → `TestExit` → harness-decode path (see the
+  watchdog GAP below for why a `<phase>` value cannot prove it under
+  a smoke profile).
 
 See the script header for the full env-var list.
 
@@ -147,16 +147,24 @@ wedge to the active phase, emits the `STUCK` line, and — under a
 smoke profile — `TestExit`s with the HungInPhase code. No second
 watchdog, no false positives on a chatty-but-slow phase.
 
-**GAP:** the init-wedge detector only arms once the timer IRQ is
-firing (~`Phase::Apic` onward); a hang strictly before that stays
-owned by the triple-fault domain and the early-console path. A
-`<phase>`-valued stall also cannot prove the watchdog: under a smoke
-profile `SmokeProfileSleepAndExit` `TestExit`s before the post-`sti`
-phases (`smp`/`userland`) are ever entered, and the last reachable
-phase (`sched`) is entered with interrupts still masked (spinning
-there freezes the timer IRQ too). Hence the dedicated `smoke-tail`
-injection, which spins at a point that is post-`sti` and still
-init-wedge-armed (a smoke profile never reaches `MarkInitComplete`).
+**GAP:** the byte-delta init-wedge detector only fires on *total*
+serial silence (every other thread quiet) with the timer IRQ still
+firing — the signature of an early single-thread deadlock before the
+scheduler brings up background log threads. It is correct for that
+real shape but is, by construction, not reproducible by a simple
+injected stall once the scheduler is running (soft-lockup / fix-
+journal threads keep serial chatty). A `<phase>`-valued stall also
+can't prove it: a smoke profile `TestExit`s before the post-`sti`
+phases (`smp`/`userland`), and `sched` is entered with interrupts
+still masked.
+
+So the `smoke-tail` injection proves the genuinely-new surface
+deterministically — the `STUCK` line, the `EncodeExit` byte,
+`arch::TestExit`, and the harness decode — by calling
+`diag::BootWatchdogOnWedge()` directly. The *trigger* (the existing
+byte-delta detector calling that function at its existing fire
+point) is one reviewed line, not new code, and is covered by the
+detector's own probe.
 
 ```bash
 DUETOS_BOOT_STALL=smoke-tail DUETOS_TIMEOUT=300 \

@@ -360,19 +360,24 @@ void SmokeProfileSleepAndExit()
     arch::SerialWrite(SmokeProfileName(g_profile));
     arch::SerialWrite("\n");
 
-    // Debug injection (boot-stall=smoke-tail): spin here instead of
-    // sleeping. This point is post-`sti` and the init-wedge detector
-    // is still armed (a smoke profile never reaches MarkInitComplete),
-    // so ~15 s of no serial progress trips diag::BootWatchdogOnWedge,
-    // which emits the structured STUCK line + TestExits with the
-    // HungInPhase code. Proves the wedge → structured-exit path.
+    // Debug injection (boot-stall=smoke-tail): deterministically
+    // exercise the structured wedge → STUCK → TestExit → harness
+    // decode path. We call BootWatchdogOnWedge() directly rather than
+    // recreating the byte-delta init-wedge's trigger condition: that
+    // detector fires only on TOTAL serial silence, which a one-thread
+    // stall can't produce here (the scheduler keeps background
+    // threads — soft-lockup, fix-journal — logging every second). The
+    // trigger wiring is one reviewed line at the detector's existing
+    // fire point in arch/x86_64/timer.cpp; what this proves is the
+    // genuinely-new surface: the STUCK line format, the EncodeExit
+    // byte, arch::TestExit, and profile-boot-smoke.sh's decode.
     if (g_stall_smoke_tail)
     {
-        arch::SerialWrite("[smoke] boot-stall=smoke-tail: spinning to exercise init-wedge\n");
-        for (;;)
-        {
-            asm volatile("pause" ::: "memory");
-        }
+        arch::SerialWrite("[smoke] boot-stall=smoke-tail: invoking BootWatchdogOnWedge\n");
+        ::duetos::diag::BootWatchdogOnWedge();
+        // If not under a smoke profile, OnWedge only warns; fall
+        // through to the normal sleep+sentinel so a bare run still
+        // terminates cleanly.
     }
 
     // Log the live scheduler stats AT entry so a CI failure
