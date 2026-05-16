@@ -235,6 +235,7 @@
 #include "log/klog_persist.h"
 #include "power/reboot.h"
 #include "security/login.h"
+#include "core/boot_cmdline.h"
 #include "core/init.h"
 #include "core/menu_dispatch.h"
 #include "core/panic.h"
@@ -291,6 +292,17 @@
 
 namespace duetos::core
 {
+
+namespace
+{
+
+// Storage for the chrome font handle. Populated by the
+// chrome-font-load initcall once at boot inside BootBringupDesktop;
+// outlives the registration because TtfChromeFontSet stores a
+// borrowed pointer, so it must have static storage duration.
+constinit duetos::drivers::video::TtfFont g_chrome_font_storage{};
+
+} // namespace
 
 void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
 {
@@ -1896,6 +1908,874 @@ void BootBringupDevices(bool force_net_smoke)
         {
             duetos::core::Log(duetos::core::LogLevel::Warn, "core/klog", "/tmp/boot.log not present");
         }
+    }
+}
+
+// Desktop / Phase::Drivers bring-up: framebuffer + chrome
+// font, theme selection from cmdline, the theme_chrome
+// helper + ~20 app windows (calculator, notes, taskman,
+// files, clock, gfxdemo, settings, imageview, about, help,
+// browser, calendar, notify-center, sysmon, hexview,
+// charmap, terminal, ...), taskbar/console wiring, the
+// boot-slot + smoke-profile + boot-mode (tty/desktop)
+// selection, and the login gate. Every local it builds
+// (theme0, theme_chrome, the WindowChrome objects + window
+// handles, want_tty, autologin, demo_calendar, cmdline) is
+// consumed within this block — none cross back into
+// kernel_main, so this is pure code motion. multiboot_info
+// is the only input (FramebufferInit + FindBootCmdline);
+// the boot task lambdas downstream re-derive cmdline via
+// the cached FindBootCmdline.
+void BootBringupDesktop(duetos::uptr multiboot_info)
+{
+    using namespace duetos::arch;
+    using namespace duetos::mm;
+
+    // Phase::Drivers — framebuffer is the only "driver" with a
+    // self-test that fits the registry shape today; PCI/NVMe/USB
+    // self-tests are inline checks rather than separately-named
+    // SelfTest functions. (A1-followup, 2026-04-28.)
+    SerialWrite("[boot] Bringing up framebuffer (if present).\n");
+    duetos::drivers::video::FramebufferInit(multiboot_info);
+    // Initialise the DPMS bookkeeper (record state = On, no driver
+    // hook). Settings shutdown/reboot transition to Off before the
+    // firmware-level shutdown, so any on-screen state matches the
+    // power request.
+    duetos::drivers::gpu::DpmsInit();
+    if constexpr (duetos::core::kBootSelfTests)
+    {
+        duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "framebuffer-selftest",
+                                       []()
+                                       {
+                                           duetos::drivers::video::FramebufferSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "ttf-selftest",
+                                       []()
+                                       {
+                                           duetos::drivers::video::TtfSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "ttf-raster-selftest",
+                                       []()
+                                       {
+                                           duetos::drivers::video::TtfRasterSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "svg-selftest",
+                                       []()
+                                       {
+                                           duetos::drivers::video::SvgSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+    }
+    // Load the embedded chrome font (Liberation Sans Regular, SIL OFL
+    // 1.1) and register it for the TTF dispatch path. Once registered,
+    // the 5 Duet-family themes' window-title paint stops falling back
+    // to the bitmap font and renders via the slice-4 rasterizer.
+    duetos::core::InitcallRegister(
+        duetos::core::Phase::Drivers, "chrome-font-load",
+        []()
+        {
+            const auto* bytes = duetos::drivers::video::generated::kBinChromeFontBytes;
+            const auto size = static_cast<duetos::u32>(sizeof(duetos::drivers::video::generated::kBinChromeFontBytes));
+            auto r = duetos::drivers::video::TtfLoad(bytes, size);
+            if (r.has_value())
+            {
+                g_chrome_font_storage = r.value();
+                duetos::drivers::video::TtfChromeFontSet(&g_chrome_font_storage);
+                duetos::arch::SerialWrite("[boot] chrome font (Liberation Sans) loaded + registered\n");
+            }
+            else
+            {
+                duetos::arch::SerialWrite("[boot] chrome font load FAILED — staying on bitmap fallback\n");
+            }
+            return duetos::core::Result<void>{};
+        });
+    // Parse the embedded wallpaper SVGs once into static SvgImage
+    // instances. WallpaperPaint then layers them on the matching
+    // theme paints (DuetMark + topo for Duet family; syscalls grid
+    // for Slate10).
+    duetos::core::InitcallRegister(duetos::core::Phase::Drivers, "wallpaper-svg-init",
+                                   []()
+                                   {
+                                       duetos::drivers::video::WallpaperSvgInit();
+                                       return duetos::core::Result<void>{};
+                                   });
+    (void)duetos::core::RunPhase(duetos::core::Phase::Drivers);
+
+    // GUI composition. Order for every paint pass:
+    //   1. Desktop fill
+    //   2. Desktop banner text
+    //   3. Windows in z-order (back-to-front)
+    //   4. Widgets (buttons on top of windows for v0)
+    //   5. Cursor on top (CursorShow re-samples backing)
+    //
+    // Wrapped in a file-scope helper so both the initial boot
+    // paint AND the window-drag path (mouse reader thread) can
+    // repaint the whole surface with one call.
+    //
+    // Initial theme selection honours the kernel cmdline
+    // (theme=classic / theme=slate10 / theme=amber / theme=duet);
+    // default is the classic teal palette the first GUI slice
+    // shipped. Ctrl+Alt+Y cycles at runtime.
+    {
+        const char* early_cmdline = FindBootCmdline(multiboot_info);
+        for (int i = 0; i < static_cast<int>(duetos::drivers::video::ThemeId::kCount); ++i)
+        {
+            const auto id = static_cast<duetos::drivers::video::ThemeId>(i);
+            if (CmdlineMatches(early_cmdline, "theme", duetos::drivers::video::ThemeIdName(id)))
+            {
+                duetos::drivers::video::ThemeSet(id);
+                break;
+            }
+        }
+    }
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::ThemeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::NotifySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::MagnifierSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::time::TimezoneSelfTest());
+    const auto& theme0 = duetos::drivers::video::ThemeCurrent();
+
+    // CALCULATOR — native DuetOS app. Window chrome first,
+    // then CalculatorInit registers its 16 buttons + content
+    // drawer against the returned handle. Width / height are
+    // sized to fit the 4x4 keypad (4 * 68 + 3 * 4 = 284 px
+    // wide + 2 * 8 inset = 300; 4 * 36 + 3 * 4 + 60 top
+    // inset + 4 bottom = 220). Colours come from the active
+    // theme so Ctrl+Alt+Y re-hues without touching layout.
+    using Role = duetos::drivers::video::ThemeRole;
+    auto theme_chrome = [&](Role role)
+    {
+        duetos::drivers::video::WindowChrome c{};
+        c.colour_border = theme0.window_border;
+        c.colour_title = theme0.role_title[static_cast<duetos::u32>(role)];
+        c.colour_client = theme0.role_client[static_cast<duetos::u32>(role)];
+        c.colour_close_btn = theme0.window_close;
+        c.title_height = 22;
+        return c;
+    };
+
+    duetos::drivers::video::WindowChrome win_a_chrome = theme_chrome(Role::Calculator);
+    win_a_chrome.x = 60;
+    win_a_chrome.y = 60;
+    win_a_chrome.w = 300;
+    // Bumped from 220 to fit the multi-radix preview band that
+    // sits between the main display strip and the 4x4 button grid.
+    win_a_chrome.h = 260;
+    const duetos::drivers::video::WindowHandle calc_handle =
+        duetos::drivers::video::WindowRegister(win_a_chrome, "CALCULATOR");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Calculator, calc_handle);
+    duetos::apps::calculator::CalculatorInit(calc_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::calculator::CalculatorSelfTest());
+
+    duetos::drivers::video::WindowChrome win_b_chrome = theme_chrome(Role::Notes);
+    win_b_chrome.x = 500;
+    win_b_chrome.y = 100;
+    win_b_chrome.w = 380;
+    win_b_chrome.h = 200;
+    // NOTEPAD — native DuetOS notes app. The content-draw
+    // callback is installed inside NotesInit; the kbd-reader
+    // thread below routes keystrokes here when this window
+    // is active (focus == keyboard owner).
+    const duetos::drivers::video::WindowHandle notes_handle =
+        duetos::drivers::video::WindowRegister(win_b_chrome, "NOTEPAD");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Notes, notes_handle);
+    duetos::apps::notes::NotesInit(notes_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::notes::NotesSelfTest());
+
+    // Task Manager window — a window whose content drawer
+    // prints live scheduler + memory stats. The ui-ticker's
+    // 1 Hz recompose refreshes it for free.
+    duetos::drivers::video::WindowChrome taskman_chrome = theme_chrome(Role::TaskManager);
+    taskman_chrome.x = 180;
+    taskman_chrome.y = 310;
+    // Bigger default size for the 5-column per-task list — the
+    // original 340x170 aggregate-stats panel is too narrow to
+    // host PID + NAME + STATE + CPU% + TICKS without truncation.
+    taskman_chrome.w = 520;
+    taskman_chrome.h = 260;
+    const duetos::drivers::video::WindowHandle taskman_handle =
+        duetos::drivers::video::WindowRegister(taskman_chrome, "TASK MANAGER");
+    duetos::drivers::video::ThemeRegisterWindow(Role::TaskManager, taskman_handle);
+
+    // Live log viewer window — renders a compact view of the
+    // klog ring (the same ring `dmesg` prints). Refreshes every
+    // ui-ticker beat, so kernel activity appears without the
+    // user having to flip consoles.
+    duetos::drivers::video::WindowChrome logview_chrome = theme_chrome(Role::LogView);
+    logview_chrome.x = 560;
+    logview_chrome.y = 310;
+    logview_chrome.w = 420;
+    logview_chrome.h = 180;
+    const duetos::drivers::video::WindowHandle logview_handle =
+        duetos::drivers::video::WindowRegister(logview_chrome, "KERNEL LOG");
+    duetos::drivers::video::ThemeRegisterWindow(Role::LogView, logview_handle);
+    // Subtitle for Duet-era chrome to render next to the title.
+    // Themes that don't read it (Classic / Slate10 / Amber)
+    // ignore the field; the storage is unconditional.
+    duetos::drivers::video::WindowSetSubtitle(logview_handle, "/sys/klog | live");
+
+    duetos::drivers::video::WindowSetContentDraw(
+        logview_handle,
+        [](duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void*)
+        {
+            // Shared state so the klog chunk callback knows
+            // where to render. Compositor mutex is held
+            // around the whole compose so these statics are
+            // race-free.
+            //
+            // Severity colouring: the first chunk per log line
+            // is always the 4-byte tag ("[I] " / "[W] " / "[E] "
+            // / "[D] ") from LevelTag(). We inspect it and set
+            // the line's fg; subsequent chunks on the same line
+            // inherit that colour until the newline resets.
+            constexpr duetos::u32 kFgInfo = 0x00A0C8FF;  // muted blue-white
+            constexpr duetos::u32 kFgWarn = 0x00FFD860;  // amber
+            constexpr duetos::u32 kFgError = 0x00FF6050; // soft red
+            constexpr duetos::u32 kFgDebug = 0x00808080; // grey
+            struct Render
+            {
+                duetos::u32 cx, cy, col, row, max_col, max_row, fg, bg;
+                bool done;
+            };
+            static Render r;
+            r.cx = cx;
+            r.cy = cy;
+            r.col = 0;
+            r.row = 0;
+            r.max_col = cw / 8;
+            r.max_row = ch / 10;
+            r.fg = kFgInfo;
+            // Match the window's current client fill so text cells
+            // blend cleanly into the chrome after a theme switch.
+            r.bg = duetos::drivers::video::ThemeCurrent()
+                       .role_client[static_cast<duetos::u32>(duetos::drivers::video::ThemeRole::LogView)];
+            r.done = false;
+            duetos::core::DumpLogRingTo(
+                [](const char* s)
+                {
+                    if (r.done || s == nullptr)
+                        return;
+                    // Severity detection: first char per chunk
+                    // is '[' for the tag chunks klog emits.
+                    // Other chunks (subsystem, message) don't
+                    // start with '[' so won't match.
+                    if (s[0] == '[' && s[2] == ']')
+                    {
+                        switch (s[1])
+                        {
+                        case 'I':
+                            r.fg = kFgInfo;
+                            break;
+                        case 'W':
+                            r.fg = kFgWarn;
+                            break;
+                        case 'E':
+                            r.fg = kFgError;
+                            break;
+                        case 'D':
+                            r.fg = kFgDebug;
+                            break;
+                        default:
+                            break;
+                        }
+                    }
+                    while (*s != '\0')
+                    {
+                        const char c = *s++;
+                        if (c == '\n')
+                        {
+                            ++r.row;
+                            r.col = 0;
+                            if (r.row >= r.max_row)
+                            {
+                                r.done = true;
+                                return;
+                            }
+                            continue;
+                        }
+                        if (r.col >= r.max_col)
+                        {
+                            ++r.row;
+                            r.col = 0;
+                            if (r.row >= r.max_row)
+                            {
+                                r.done = true;
+                                return;
+                            }
+                        }
+                        duetos::drivers::video::FramebufferDrawChar(r.cx + r.col * 8, r.cy + r.row * 10, c, r.fg, r.bg);
+                        ++r.col;
+                    }
+                });
+        },
+        nullptr);
+
+    // Per-task list with sort + kill — see kernel/apps/taskman.cpp.
+    // Replaces the original 7-row aggregate-stats panel; the
+    // header still shows CPU% / IDLE% / MEM totals, then a row
+    // per task with PID, name, state, since-boot CPU%, and ticks.
+    duetos::apps::taskman::TaskmanInit(taskman_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::taskman::TaskmanSelfTest());
+
+    // FILES — native DuetOS file browser. Lists the ramfs
+    // trusted root; Up/Down to move, Enter to descend, Backspace
+    // or 'B' to go back.
+    duetos::drivers::video::WindowChrome files_chrome = theme_chrome(Role::Files);
+    files_chrome.x = 220;
+    files_chrome.y = 160;
+    files_chrome.w = 400;
+    files_chrome.h = 200;
+    const duetos::drivers::video::WindowHandle files_handle =
+        duetos::drivers::video::WindowRegister(files_chrome, "FILES");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Files, files_handle);
+    duetos::apps::files::FilesInit(files_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::files::FilesSelfTest());
+
+    // CLOCK — 7-segment-style wall clock. No input, refreshes
+    // via the 1 Hz ui-ticker. Sized tight around the digit row
+    // (6 digits + 2 colons + gaps) with room for a date line.
+    duetos::drivers::video::WindowChrome clock_chrome = theme_chrome(Role::Clock);
+    clock_chrome.x = 640;
+    clock_chrome.y = 520;
+    clock_chrome.w = 240;
+    clock_chrome.h = 110;
+    const duetos::drivers::video::WindowHandle clock_handle =
+        duetos::drivers::video::WindowRegister(clock_chrome, "CLOCK");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Clock, clock_handle);
+    duetos::apps::clock::ClockInit(clock_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::clock::ClockSelfTest());
+
+    // GFX DEMO — native graphics demonstration. Renders a per-
+    // pixel computed image (RGB gradient + sine-wave overlay +
+    // concentric rings) into its window's client area, exercising
+    // the same FramebufferPutPixel / FramebufferFillRect /
+    // FramebufferDrawString primitives that the DirectX v0 path
+    // uses internally. Visible proof that the kernel's pixel
+    // pipeline produces real graphical output, not just glyphs.
+    duetos::drivers::video::WindowChrome gfx_chrome = theme_chrome(Role::GfxDemo);
+    gfx_chrome.x = 900;
+    gfx_chrome.y = 40;
+    gfx_chrome.w = 340;
+    gfx_chrome.h = 280;
+    const duetos::drivers::video::WindowHandle gfx_handle =
+        duetos::drivers::video::WindowRegister(gfx_chrome, "GFX DEMO");
+    duetos::drivers::video::ThemeRegisterWindow(Role::GfxDemo, gfx_handle);
+    duetos::apps::gfxdemo::GfxDemoInit(gfx_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::gfxdemo::GfxDemoSelfTest());
+
+    // DEBUGGER — native interactive debugger app (memory view +
+    // edit, regs, breakpoints, watchlist, byte-pattern scan,
+    // disassembly). DbgInit registers its own window via
+    // WindowRegister using a Slate-10-friendly chrome, so we
+    // don't pre-register one here.
+    duetos::apps::dbg::DbgInit();
+    DUETOS_BOOT_SELFTEST(duetos::apps::dbg::DbgSelfTest());
+
+    // SETTINGS — unified panel that wraps the Ctrl+Alt chord
+    // surfaces (theme cycle / direct picker, opacity step, high-
+    // contrast preset, default reset) plus a wall-clock and
+    // about readout. Hidden by default; raised from the Start
+    // menu's SETTINGS entry.
+    duetos::drivers::video::WindowChrome settings_chrome = theme_chrome(Role::Settings);
+    settings_chrome.x = 320;
+    settings_chrome.y = 100;
+    settings_chrome.w = 380;
+    settings_chrome.h = 340;
+    const duetos::drivers::video::WindowHandle settings_handle =
+        duetos::drivers::video::WindowRegister(settings_chrome, "SETTINGS");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Settings, settings_handle);
+    duetos::apps::settings::SettingsInit(settings_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsSelfTest());
+
+    // IMAGE VIEWER — opens BMP files from the FAT32 root volume.
+    // Pairs with the Screenshot app (Ctrl+Alt+P): every capture
+    // lands as a 32-bpp top-down BMP this viewer accepts byte-
+    // for-byte. Hidden by default; raised from the Start menu's
+    // IMAGE VIEWER entry. N/P cycle images, R re-scans the root.
+    duetos::drivers::video::WindowChrome image_chrome = theme_chrome(Role::ImageView);
+    image_chrome.x = 280;
+    image_chrome.y = 90;
+    image_chrome.w = 460;
+    image_chrome.h = 360;
+    const duetos::drivers::video::WindowHandle image_handle =
+        duetos::drivers::video::WindowRegister(image_chrome, "IMAGE VIEWER");
+    duetos::drivers::video::ThemeRegisterWindow(Role::ImageView, image_handle);
+    duetos::apps::imageview::ImageViewInit(image_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::imageview::ImageViewSelfTest());
+
+    // ABOUT — windowed system-info readout. Replaces the legacy
+    // two-line "ABOUT DUETOS" console message; raised from the
+    // Start menu's ABOUT entry. Refreshes on every compositor
+    // tick so uptime + heap counters update visibly.
+    duetos::drivers::video::WindowChrome about_chrome = theme_chrome(Role::About);
+    about_chrome.x = 360;
+    about_chrome.y = 140;
+    about_chrome.w = 360;
+    about_chrome.h = 220;
+    const duetos::drivers::video::WindowHandle about_handle =
+        duetos::drivers::video::WindowRegister(about_chrome, "ABOUT DUETOS");
+    duetos::drivers::video::ThemeRegisterWindow(Role::About, about_handle);
+    duetos::apps::about::AboutInit(about_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::about::AboutSelfTest());
+
+    // HELP — windowed shortcut reference. F1 + Start-menu HELP /
+    // SHORTCUTS still print to the framebuffer console (so the
+    // text survives a console scrollback); this window is the
+    // discovery surface for someone seeing DuetOS for the first
+    // time. Static content list — see kernel/apps/help.cpp.
+    duetos::drivers::video::WindowChrome help_chrome = theme_chrome(Role::Help);
+    help_chrome.x = 200;
+    help_chrome.y = 50;
+    help_chrome.w = 380;
+    help_chrome.h = 480;
+    const duetos::drivers::video::WindowHandle help_handle =
+        duetos::drivers::video::WindowRegister(help_chrome, "HELP");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Help, help_handle);
+    duetos::apps::help::HelpInit(help_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::help::HelpSelfTest());
+
+    // BROWSER — minimal HTTP-only browser. Hidden by default;
+    // raised from the Start menu's BROWSER entry. Each fetch
+    // spawns a one-shot kernel task so the input thread stays
+    // responsive.
+    duetos::drivers::video::WindowChrome browser_chrome = theme_chrome(Role::Browser);
+    browser_chrome.x = 100;
+    browser_chrome.y = 60;
+    browser_chrome.w = 640;
+    browser_chrome.h = 460;
+    const duetos::drivers::video::WindowHandle browser_handle =
+        duetos::drivers::video::WindowRegister(browser_chrome, "BROWSER");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Browser, browser_handle);
+    duetos::apps::browser::BrowserInit(browser_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserSelfTest());
+
+    // CALENDAR — windowed month-view sibling of the read-only
+    // taskbar-clock popup. Lets the user page through past / future
+    // months. Hidden by default; raised from the Start menu's
+    // CALENDAR entry. T jumps back to today.
+    duetos::drivers::video::WindowChrome calendar_chrome = theme_chrome(Role::Calendar);
+    calendar_chrome.x = 240;
+    calendar_chrome.y = 80;
+    calendar_chrome.w = 360;
+    calendar_chrome.h = 280;
+    const duetos::drivers::video::WindowHandle calendar_handle =
+        duetos::drivers::video::WindowRegister(calendar_chrome, "CALENDAR");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Calendar, calendar_handle);
+    duetos::apps::calendar::CalendarInit(calendar_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::calendar::CalendarSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::calendar::CalendarPersistSelfTest());
+
+    // NOTIFICATION CENTER — windowed reader over the toast
+    // history ring kept in drivers/video/notify.cpp. Same
+    // info-panel chrome family as Calendar / Browser / About.
+    duetos::drivers::video::WindowChrome notify_chrome = theme_chrome(Role::NotifyCenter);
+    notify_chrome.x = 280;
+    notify_chrome.y = 120;
+    notify_chrome.w = 380;
+    notify_chrome.h = 240;
+    const duetos::drivers::video::WindowHandle notify_handle =
+        duetos::drivers::video::WindowRegister(notify_chrome, "NOTIFICATIONS");
+    duetos::drivers::video::ThemeRegisterWindow(Role::NotifyCenter, notify_handle);
+    duetos::apps::notify_center::NotifyCenterInit(notify_handle);
+
+    // SYSMON — rolling system monitor: heap-used % + free-list
+    // fragmentation, sampled once per ui-ticker tick. About
+    // shows a snapshot; Sysmon shows the trend.
+    duetos::drivers::video::WindowChrome sysmon_chrome = theme_chrome(Role::Sysmon);
+    sysmon_chrome.x = 320;
+    sysmon_chrome.y = 100;
+    sysmon_chrome.w = 380;
+    sysmon_chrome.h = 280;
+    const duetos::drivers::video::WindowHandle sysmon_handle =
+        duetos::drivers::video::WindowRegister(sysmon_chrome, "SYSTEM MONITOR");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Sysmon, sysmon_handle);
+    duetos::apps::sysmon::SysmonInit(sysmon_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::sysmon::SysmonSelfTest());
+
+    // HEXVIEW — read-only hex / ASCII inspector for FAT32 root
+    // files. Loads up to 1 MiB per file; J/K scrolls one row,
+    // PageUp/Down by one screen, N/P cycles files. Wider than
+    // most app windows because the canonical hex layout is
+    // ~616 px (8 + 16*3 + 16 char cells).
+    duetos::drivers::video::WindowChrome hex_chrome = theme_chrome(Role::HexView);
+    hex_chrome.x = 80;
+    hex_chrome.y = 80;
+    hex_chrome.w = 640;
+    hex_chrome.h = 360;
+    const duetos::drivers::video::WindowHandle hex_handle =
+        duetos::drivers::video::WindowRegister(hex_chrome, "HEX VIEWER");
+    duetos::drivers::video::ThemeRegisterWindow(Role::HexView, hex_handle);
+    duetos::apps::hexview::HexViewInit(hex_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::hexview::HexViewSelfTest());
+
+    // CHARMAP — codepoint grid; Enter copies selected glyph as
+    // UTF-8 to the clipboard so it pastes into Notes / Calculator
+    // / Browser via the standard Ctrl+V path.
+    duetos::drivers::video::WindowChrome charmap_chrome = theme_chrome(Role::CharMap);
+    charmap_chrome.x = 240;
+    charmap_chrome.y = 90;
+    charmap_chrome.w = 400;
+    charmap_chrome.h = 320;
+    const duetos::drivers::video::WindowHandle charmap_handle =
+        duetos::drivers::video::WindowRegister(charmap_chrome, "CHARACTER MAP");
+    duetos::drivers::video::ThemeRegisterWindow(Role::CharMap, charmap_handle);
+    duetos::apps::charmap::CharMapInit(charmap_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::charmap::CharMapSelfTest());
+
+    // TERMINAL — windowed VT/ANSI host (slice 1 of the ToaruOS
+    // clean-room port). Wide window to fit ~80 cells of an 8 px
+    // bitmap glyph plus padding; tall enough for ~24 rows of the
+    // 10 px terminal cell. See wiki/advanced/Toaru-Port-Plan.md.
+    duetos::drivers::video::WindowChrome term_chrome = theme_chrome(Role::Terminal);
+    term_chrome.x = 120;
+    term_chrome.y = 70;
+    term_chrome.w = 680;
+    term_chrome.h = 280;
+    const duetos::drivers::video::WindowHandle term_handle =
+        duetos::drivers::video::WindowRegister(term_chrome, "TERMINAL");
+    duetos::drivers::video::ThemeRegisterWindow(Role::Terminal, term_handle);
+    duetos::apps::terminal::TerminalInit(term_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::terminal::TerminalSelfTest());
+
+    // Slice 3a: hide the framebuffer console region now that the
+    // windowed Terminal is mirroring the same shell content. The
+    // console keeps buffering writes (the Terminal's mirror still
+    // fires); only the 80x40 paint region is reclaimed for the
+    // desktop. Ctrl+Alt+C toggles it visible again on demand.
+    duetos::drivers::video::ConsoleSetPaintEnabled(false);
+
+    // NETWORK STATUS — read-only viewer over net::stack accessors.
+    // No ThemeRole today; the chrome is seeded from Settings'
+    // palette so it sits in the same slate-grey "tools" family.
+    {
+        duetos::drivers::video::WindowChrome chrome = theme_chrome(Role::Settings);
+        chrome.x = 220;
+        chrome.y = 110;
+        chrome.w = 480;
+        chrome.h = 260;
+        const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "NETWORK STATUS");
+        duetos::drivers::video::WindowSetVisible(h, false);
+        duetos::apps::netstatus::NetStatusInit(h);
+        DUETOS_BOOT_SELFTEST(duetos::apps::netstatus::NetStatusSelfTest());
+    }
+
+    // DEVICE MANAGER — read-only PCI device list.
+    {
+        duetos::drivers::video::WindowChrome chrome = theme_chrome(Role::TaskManager);
+        chrome.x = 260;
+        chrome.y = 130;
+        chrome.w = 460;
+        chrome.h = 320;
+        const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "DEVICE MANAGER");
+        duetos::drivers::video::WindowSetVisible(h, false);
+        duetos::apps::devicemgr::DeviceMgrInit(h);
+        DUETOS_BOOT_SELFTEST(duetos::apps::devicemgr::DeviceMgrSelfTest());
+    }
+
+    // FIREWALL — empty-state placeholder; honest about the absent
+    // filter subsystem. See apps/firewall.h for the GAP marker.
+    {
+        duetos::drivers::video::WindowChrome chrome = theme_chrome(Role::Settings);
+        chrome.x = 300;
+        chrome.y = 150;
+        chrome.w = 440;
+        chrome.h = 240;
+        const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "FIREWALL");
+        duetos::drivers::video::WindowSetVisible(h, false);
+        duetos::apps::firewall::FirewallInit(h);
+    }
+
+    // Framebuffer text console. 80x40 chars of boot log at the
+    // bottom of the desktop, under the windows in z-order. Dragging
+    // a window over it occludes; moving away restores.
+    // Taskbar across the bottom of the framebuffer. Placed at
+    // runtime so a different resolution still anchors correctly.
+    {
+        const auto fb_info = duetos::drivers::video::FramebufferGet();
+        // Per-theme taskbar height — Duet family ships 36 px,
+        // others ship 28. The fallback (theme.taskbar_height
+        // == 0 from a stale palette in a future ABI bump) keeps
+        // the historical 28-px strip so the chrome stays
+        // recognizable.
+        const duetos::u32 tb_h = (theme0.taskbar_height != 0) ? theme0.taskbar_height : 28u;
+        const duetos::u32 tb_y = (fb_info.height > tb_h) ? fb_info.height - tb_h : 0;
+        duetos::drivers::video::TaskbarInit(tb_y, tb_h, theme0.taskbar_bg, theme0.taskbar_fg, theme0.taskbar_accent,
+                                            theme0.taskbar_tab_inactive, theme0.taskbar_border);
+    }
+
+    // Menu action ids. Ambient MenuContext() carries a target
+    // (window handle) for context-menu items that need one.
+    //   1..9   — desktop / global actions (ignore context)
+    //   10     — raise window (context = WindowHandle)
+    //   11     — close window (context = WindowHandle)
+    // Range scheme keeps the dispatcher's switch table readable
+    // and leaves room for future desktop / window actions without
+    // reshuffling ids.
+
+    duetos::drivers::video::ConsoleInit(16, 400, theme0.console_fg, theme0.console_bg);
+
+    // Publish theme0's palette into every chrome owner that
+    // didn't already get its colours via Init (the taskbar +
+    // console did, the start menu didn't). After this point any
+    // theme-cycle hotkey simply re-runs the same publish path.
+    duetos::drivers::video::ThemeApplyToAll();
+
+    // Tee kernel log lines to the on-screen console so the desktop
+    // shows subsystem activity live — not just the boot seed block.
+    // Forwards chunks through ConsoleWrite; no DesktopCompose is
+    // triggered here (ui-ticker recomposes at 1 Hz, and user input
+    // forces a recompose on demand). IRQ-time klogs race the kbd
+    // reader on the char buffer but the damage is bounded to one
+    // garbled line at worst; the authoritative log ring is serial.
+    // Klog lines route to the dedicated klog console buffer.
+    // Ctrl+Alt+F2 switches the render target to that buffer so
+    // the user sees live kernel log output; Ctrl+Alt+F1 goes
+    // back to the interactive shell buffer. Both consoles share
+    // the same screen origin so the flip is in-place.
+    duetos::core::SetLogTee([](const char* s) { duetos::drivers::video::ConsoleWriteKlog(s); });
+
+    // Early-boot file sink: tee every Info+ log line into
+    // /tmp/boot.log on tmpfs. Receives one fully-formed line per
+    // call — the per-area FAT32 router will replace this sink later
+    // (KlogPersistInstall) once a real FS is mounted; until then,
+    // every line lands in the single boot.log so post-boot inspection
+    // has the early bring-up record. tmpfs caps files at 512 bytes —
+    // once that fills, further appends silently truncate, so the
+    // file captures the earliest boot-critical Info+ lines.
+    duetos::core::SetLogLineSink([](duetos::core::LogLevel, duetos::core::LogArea, const char* line, duetos::u32 len)
+                                 { duetos::fs::TmpFsAppend("boot.log", line, len); });
+    duetos::drivers::video::ConsoleWriteln("DUETOS BOOT LOG");
+    duetos::drivers::video::ConsoleWriteln("=================");
+    duetos::drivers::video::ConsoleWriteln("");
+    duetos::drivers::video::ConsoleWriteln("LONG-MODE KERNEL        OK");
+    duetos::drivers::video::ConsoleWriteln("GDT IDT TSS IST         OK");
+    duetos::drivers::video::ConsoleWriteln("PAGING W^X SMEP SMAP    OK");
+    duetos::drivers::video::ConsoleWriteln("FRAME ALLOCATOR / HEAP  OK");
+    duetos::drivers::video::ConsoleWriteln("ACPI MADT FADT MCFG     OK");
+    duetos::drivers::video::ConsoleWriteln("LAPIC IOAPIC HPET       OK");
+    duetos::drivers::video::ConsoleWriteln("SCHEDULER + BLOCKING    OK");
+    duetos::drivers::video::ConsoleWriteln("PS/2 KEYBOARD           OK");
+    duetos::drivers::video::ConsoleWriteln("PS/2 MOUSE              OK");
+    duetos::drivers::video::ConsoleWriteln("PCI ENUMERATION         OK");
+    duetos::drivers::video::ConsoleWriteln("FRAMEBUFFER + FONT      OK");
+    duetos::drivers::video::ConsoleWriteln("WINDOW MANAGER v0       OK");
+    duetos::drivers::video::ConsoleWriteln("");
+    duetos::drivers::video::ConsoleWriteln("READY.  TRY DRAGGING A WINDOW BY ITS TITLE BAR.");
+
+    // Account subsystem — seed the built-in admin/guest
+    // accounts, run the verify/reject self-test, then arm the
+    // login gate below. Order matters: the gate consults the
+    // account table, so AuthInit must precede LoginStart.
+    duetos::core::AuthInit();
+    DUETOS_BOOT_SELFTEST(duetos::core::AuthSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::core::AuthSnapshotSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::core::AuthLazyMigrationSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::AuthBruteForceProbe());
+
+    // Role-based access control: seed the built-in role table and
+    // bind the default memberships. Must precede the broker self-
+    // test below (which uses the seeded role policy to authorise
+    // the synthetic FsWrite elevation). The grace cache likewise
+    // needs an explicit Init before broker calls. Order:
+    //   RbacInit -> GraceCacheInit -> BrokerSelfTest -> RbacSelfTest -> GraceCacheSelfTest
+    // (See wiki/security/RBAC-and-Elevation.md for the design.)
+    DUETOS_BOOT_SELFTEST(duetos::security::Blake2bSelfTest());
+
+    DUETOS_BOOT_SELFTEST(duetos::security::Argon2idSelfTest());
+
+    DUETOS_BOOT_SELFTEST(duetos::security::ChaCha20Poly1305SelfTest());
+
+    DUETOS_BOOT_SELFTEST(duetos::security::PersistenceSelfTest());
+
+    DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashV2SelfTest());
+
+    duetos::security::RbacInit();
+    duetos::security::GraceCacheInit();
+    DUETOS_BOOT_SELFTEST(duetos::security::RbacSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::RbacSnapshotSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::GraceCacheSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::BrokerSelfTest());
+
+    // Shell welcome + initial prompt. Landing here after every
+    // subsystem init line keeps the boot log visible above the
+    // prompt — the user sees the tail end of the kernel's own
+    // output, then their own typing cursor.
+    duetos::core::ShellInit();
+
+    // Demo clickable button, owned by window A. x/y are offsets
+    // (The CLICK ME demo button previously registered here has
+    // been removed — the window it lived in is now the Calculator,
+    // which registers its own 4x4 keypad via CalculatorInit above.)
+
+    // Initial display mode. Priority:
+    //   1. Runtime kernel cmdline "boot=tty" / "boot=desktop"
+    //      (Multiboot2 tag 1 — set via GRUB menu entry).
+    //   2. Compile-time DUETOS_BOOT_TTY fallback.
+    //   3. Desktop (default).
+    // Runtime Ctrl+Alt+T still flips regardless after boot.
+    const char* cmdline = FindBootCmdline(multiboot_info);
+    if (cmdline != nullptr)
+    {
+        SerialWrite("[boot] cmdline: \"");
+        SerialWrite(cmdline);
+        SerialWrite("\"\n");
+    }
+    // Pick up the A/B boot-slot hand-off from the bootloader. `slot=a`
+    // or `slot=b` overrides the default; absence is treated as
+    // slot=a (the boot_slot::Default fallback). Once SetCurrentState
+    // runs, the running kernel's `CurrentState()` reflects which slot
+    // it's executing from, which lets the future watchdog +
+    // installer + shell `slotinfo` all answer "which slot am I?"
+    // without re-deriving it.
+    if (CmdlineMatches(cmdline, "slot", "b"))
+    {
+        auto st = duetos::fs::boot_slot::CurrentState();
+        st.active = duetos::fs::boot_slot::Slot::kB;
+        duetos::fs::boot_slot::SetCurrentState(st);
+        SerialWrite("[boot] boot-slot active=b (from cmdline)\n");
+    }
+    else if (CmdlineMatches(cmdline, "slot", "a"))
+    {
+        auto st = duetos::fs::boot_slot::CurrentState();
+        st.active = duetos::fs::boot_slot::Slot::kA;
+        duetos::fs::boot_slot::SetCurrentState(st);
+        SerialWrite("[boot] boot-slot active=a (from cmdline)\n");
+    }
+    // Pin the qemu-smoke profile early. Read once, cached. If the
+    // cmdline carries `smoke=<profile>`, every subsequent SmokeProfile*
+    // query in the boot tail (ring3 spawn gate, Linux ABI gate, sleep-
+    // and-exit sentinel) sees a stable answer.
+    duetos::test::SmokeProfileInit(cmdline);
+    bool want_tty = false;
+    if (CmdlineMatches(cmdline, "boot", "tty"))
+    {
+        want_tty = true;
+    }
+    else if (CmdlineMatches(cmdline, "boot", "desktop"))
+    {
+        want_tty = false;
+    }
+    else
+    {
+#ifdef DUETOS_BOOT_TTY
+        want_tty = true;
+#endif
+    }
+
+    // demo-calendar=1 opens the calendar popup at boot so a headless
+    // screenshot can capture the widget without needing to inject a
+    // mouse click. No effect on normal boots.
+    const bool demo_calendar = CmdlineMatches(cmdline, "demo-calendar", "1");
+
+    if (want_tty)
+    {
+        duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Tty);
+        duetos::drivers::video::ConsoleSetOrigin(16, 16);
+        duetos::drivers::video::ConsoleSetColours(theme0.console_fg, 0x00000000);
+        duetos::drivers::video::DesktopCompose(0x00000000, nullptr);
+    }
+    else
+    {
+        duetos::drivers::video::DesktopCompose(theme0.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        duetos::drivers::video::CursorInit(theme0.desktop_bg);
+        if (demo_calendar)
+        {
+            duetos::u32 kx = 0, ky = 0, kw = 0, kh = 0;
+            duetos::drivers::video::TaskbarClockBounds(&kx, &ky, &kw, &kh);
+            const duetos::u32 ph = duetos::drivers::video::CalendarPanelHeight();
+            const duetos::u32 pw = duetos::drivers::video::CalendarPanelWidth();
+            const duetos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
+            const duetos::u32 ay = (ky > ph) ? ky - ph : 0;
+            duetos::drivers::video::CalendarOpen(ax, ay);
+            duetos::drivers::video::DesktopCompose(theme0.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        }
+    }
+
+    // procfs / sysfs snapshots: materialize the static-text
+    // dumps NOW so they capture state at the "system ready"
+    // mark (just before the login gate, before user input).
+    // After this, all five files behave like any other
+    // static-bytes ramfs entry.
+    duetos::fs::RamfsBoottraceSnapshot();
+    duetos::fs::RamfsSyscallsSnapshot();
+    duetos::fs::RamfsAbiSnapshot();
+    duetos::fs::RamfsCpuhistSnapshot();
+    duetos::fs::RamfsInspectSnapshot();
+
+    // Spawn the userland shell stub. Hand-built ELF ships in
+    // /bin/usershell.elf; calls SYS_WRITE("Hello from
+    // userland shell stub\n") + SYS_EXIT(0) and returns to
+    // the reaper. Proves end-to-end ring-3: ELF parse,
+    // PT_LOAD map, ring transition, syscall round-trip,
+    // exit cleanup. A future slice grows this into a real
+    // prompt-driven shell with TOML reader.
+    {
+        const auto pid = duetos::core::SpawnElfFile("/bin/usershell.elf", duetos::fs::RamfsUsershellElfBytes(),
+                                                    duetos::fs::RamfsUsershellElfSize(), duetos::core::CapSetTrusted(),
+                                                    duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                                    duetos::core::kTickBudgetTrusted);
+        SerialWrite("[boot] usershell pid=");
+        SerialWriteHex(pid);
+        SerialWrite("\n");
+    }
+
+    // Portable native ELF demo apps. Both compiled by the new
+    // `duetos_native_app()` CMake helper (see kernel/CMakeLists.txt)
+    // and embedded into ramfs the same way usershell.elf is.
+    // hello_native is a "did the pipeline survive?" smoke; nat_calc
+    // exercises the userland libc's printf-family + a recursive-
+    // descent expression evaluator. Same trusted-cap set + frame
+    // budget as the shell.
+    {
+        const auto pid = duetos::core::SpawnElfFile("/bin/hello_native", duetos::fs::RamfsHelloNativeBytes(),
+                                                    duetos::fs::RamfsHelloNativeSize(), duetos::core::CapSetTrusted(),
+                                                    duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                                    duetos::core::kTickBudgetTrusted);
+        SerialWrite("[boot] hello_native pid=");
+        SerialWriteHex(pid);
+        SerialWrite("\n");
+    }
+    {
+        const auto pid =
+            duetos::core::SpawnElfFile("/bin/nat_calc", duetos::fs::RamfsNatCalcBytes(), duetos::fs::RamfsNatCalcSize(),
+                                       duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
+                                       duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
+        SerialWrite("[boot] nat_calc pid=");
+        SerialWriteHex(pid);
+        SerialWrite("\n");
+    }
+    {
+        const auto pid = duetos::core::SpawnElfFile("/bin/nat_sysinfo", duetos::fs::RamfsNatSysinfoBytes(),
+                                                    duetos::fs::RamfsNatSysinfoSize(), duetos::core::CapSetTrusted(),
+                                                    duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                                    duetos::core::kTickBudgetTrusted);
+        SerialWrite("[boot] nat_sysinfo pid=");
+        SerialWriteHex(pid);
+        SerialWrite("\n");
+    }
+
+    // Login gate — blocks keyboard input from reaching the shell
+    // until a valid session is open. TTY mode prints a classic
+    // `username:` / `password:` banner; desktop mode paints a
+    // winlogon-style welcome panel over the framebuffer. The
+    // kbd-reader thread routes keys to LoginFeedKey while the
+    // gate is up.
+    //
+    // `autologin=1` on the kernel cmdline skips the gate entirely
+    // — useful for headless screenshot captures + CI boot smoke
+    // tests where the runner can't drive a keyboard. The default
+    // remains "login required."
+    const bool autologin = CmdlineMatches(cmdline, "autologin", "1");
+    if (!autologin)
+    {
+        const auto mode = want_tty ? duetos::core::LoginMode::Tty : duetos::core::LoginMode::Gui;
+        duetos::core::LoginStart(mode);
+    }
+    else
+    {
+        SerialWrite("[boot] autologin=1 — skipping login gate\n");
     }
 }
 } // namespace duetos::core

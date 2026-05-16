@@ -34,6 +34,16 @@ void BootBringupMemPaging();
 // IPC/KObject/Win32/Linux-fd/soft-lockup self-tests. Inputs are
 // the boot cmdline string (init-wedge-panic parse) and the
 // Multiboot2 info pointer (AcpiInit); pure code motion otherwise.
+// Desktop / Phase::Drivers bring-up: framebuffer + chrome font,
+// theme + boot-mode selection, the theme_chrome helper + ~20 app
+// windows, taskbar/console wiring, boot-slot + smoke-profile
+// selection, and the login gate. Every local it builds is
+// consumed within the block — nothing crosses back into
+// kernel_main, so it is pure code motion. multiboot_info is the
+// only input; downstream phases re-derive cmdline via the cached
+// FindBootCmdline.
+void BootBringupDesktop(duetos::uptr multiboot_info);
+
 void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info);
 
 // Device + late-bring-up: PS/2 kbd/mouse, PCI enumeration,
