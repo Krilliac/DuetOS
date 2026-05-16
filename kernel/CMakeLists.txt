@@ -781,7 +781,17 @@ duetos_embed_blob(generated_customdll2.h
 duetos_embed_blob(generated_kernel32_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-kernel32-dll.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32.c"
-    COMMENT "Compiling + embedding kernel32.dll (first stub retirement)")
+    EXTRA_DEPS
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_internal.h"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_interlocked.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_strmem.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_env.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_locale.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_io.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_sync.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_fs.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_psapi.c"
+    COMMENT "Compiling + embedding kernel32.dll (split into per-domain TUs)")
 
 # 32-bit kernel32 companion — PE32 (i386) DLL, preloaded into PE32
 # processes' address spaces so their IAT entries to KERNEL32.dll
