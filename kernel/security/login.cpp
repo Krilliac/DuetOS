@@ -40,9 +40,11 @@ namespace duetos::core
 using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
+using duetos::drivers::video::FramebufferBeginCompose;
 using duetos::drivers::video::FramebufferDrawRect;
 using duetos::drivers::video::FramebufferDrawString;
 using duetos::drivers::video::FramebufferDropShadow;
+using duetos::drivers::video::FramebufferEndCompose;
 using duetos::drivers::video::FramebufferFillRect;
 using duetos::drivers::video::FramebufferFillRectGradient;
 using duetos::drivers::video::FramebufferGet;
@@ -422,6 +424,14 @@ void DrawField(u32 x, u32 y, u32 w, u32 h, const char* text, u32 len, bool mask,
 void GuiRepaint()
 {
     const GuiLayout l = ComputeLayout();
+    // Compose the whole panel offscreen so the 1 Hz ui-ticker
+    // repaint lands in a single blit. Without this the full-screen
+    // gradient clear is visible on its own for a frame on
+    // un-coalesced host framebuffers (VBox), reading as a 1 Hz
+    // flicker. Mirrors DesktopCompose's BeginCompose/EndCompose/
+    // Present flow; no-op fallback to direct mode if the shadow
+    // allocator is unavailable.
+    FramebufferBeginCompose();
     DrawBackground(l);
     DrawPanel(l);
 
@@ -473,6 +483,10 @@ void GuiRepaint()
         FramebufferDrawString(16, y_hint, "DEFAULT ACCOUNTS: ADMIN/ADMIN  GUEST/(EMPTY)", 0x00C0D0E0, kBgBottom);
     }
 
+    // Flush the offscreen shadow surface to the live framebuffer in
+    // one row-by-row copy (no-op if BeginCompose fell back to direct
+    // mode).
+    FramebufferEndCompose();
     // Push the freshly-painted login surface to the active backend
     // (virtio-gpu TRANSFER_TO_HOST_2D + RESOURCE_FLUSH; no-op for
     // direct firmware-handoff framebuffers). Without this the
