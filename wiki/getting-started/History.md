@@ -1086,8 +1086,23 @@ Two things shaped the slice:
   proves the *identical* kernel→user delivery + `RtlRestoreContext`
   machinery via a Vectored Exception Handler that catches a null
   write and a divide-by-zero, edits the CONTEXT, and continues —
-  repeatably. Closing the `__try` smoke gap waits for a
-  clang-windows-msvc (or real MSVC) PE in the smoke set.
+  repeatably.
+
+- **The `__try` smoke gap was then closed in the same effort.**
+  `userland/apps/seh_try_pe` is compiled with
+  `clang --target=x86_64-pc-windows-msvc -fasync-exceptions` (the
+  flag that makes clang emit `.pdata`/`.xdata` + the
+  `__C_specific_handler` personality over hardware faults) and
+  linked by `lld-link` against our *own* `kernel32.lib` /
+  `ntdll.lib` import libraries — no MSVC SDK, no CRT. It exercises
+  the real frame-based path (`__C_specific_handler` scope-table
+  walk → `RtlUnwindEx` → `RtlRestoreContext`): a null-write #PF and
+  a divide-by-zero #DE caught by `__except` with the right
+  `_exception_code()`, a `__finally` that runs while `RtlUnwindEx`
+  walks out to the handler frame, and a repeatable case — all PASS.
+  The clang `-fasync-exceptions` requirement was the catch: without
+  it clang silently elides `__try` over faults and emits no unwind
+  data. C++ EH (`__CxxFrameHandler*`) is still a separate slice.
 
 ## How to read the rest of the tree
 
