@@ -6,8 +6,8 @@
  *   WSAEventSelect (skipped — heavy)
  *   FD_ZERO / FD_SET (macros — pure logic)
  */
-#include <windows.h>
 #include <winsock2.h>
+#include <windows.h>
 
 static void Out(const char* s)
 {
