@@ -20,4 +20,10 @@ namespace duetos::core
 
 void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info);
 
+// Memory + paging + debug-subsystem bring-up: FrameAllocator /
+// Heap / Paging phase self-tests, KernelHeapInit, RunInitArray,
+// PagingInit, ProtectKernelImage, BpInit, ProbeInit,
+// FixJournalInit. No inputs, no outputs — pure code motion.
+void BootBringupMemPaging();
+
 } // namespace duetos::core

@@ -796,4 +796,188 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     SerialWrite("\n");
 }
 
+
+void BootBringupMemPaging()
+{
+    using namespace duetos::arch;
+    using namespace duetos::mm;
+
+    // Phase::PhysMem (plan A1-followup, continued migration). The
+    // FrameAllocator's init has inter-dependencies with the
+    // multiboot parse above, so it stays imperative — the
+    // VERIFICATION step (`FrameAllocatorSelfTest`) is the part
+    // that fits cleanly into the registry. Same pattern follows
+    // for Heap below: init imperative, self-test through
+    // RunPhase. As more subsystems gain init() functions whose
+    // ordering is verifiable through phase membership alone, the
+    // imperative tail shrinks.
+    if constexpr (duetos::core::kBootSelfTests)
+    {
+        duetos::core::InitcallRegister(duetos::core::Phase::PhysMem, "frame-allocator-selftest",
+                                       []()
+                                       {
+                                           FrameAllocatorSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // Robustness — frame allocator OOM injection hook used by
+        // the loader unwind self-tests below.
+        duetos::core::InitcallRegister(duetos::core::Phase::PhysMem, "frame-oom-injection-selftest",
+                                       []()
+                                       {
+                                           duetos::mm::FrameAllocatorOomInjectionSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // mm/zone scaffold (plan C1) — additive layer over the
+        // global frame allocator; v0 forwards every zone request
+        // to the same pool.
+        duetos::core::InitcallRegister(duetos::core::Phase::PhysMem, "zone-selftest",
+                                       []()
+                                       {
+                                           ZoneSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // mm/dma — DMA-coherent buffer allocation. Sits on top of
+        // the per-zone contiguous-frame allocator; the first real
+        // consumers are the iwlwifi TFD/RBD rings + (when they
+        // land) AHCI + Intel HDA CORB. See `dma-coherent-v0.md`.
+        duetos::core::InitcallRegister(duetos::core::Phase::PhysMem, "dma-selftest",
+                                       []()
+                                       {
+                                           DmaSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+    }
+    (void)duetos::core::RunPhase(duetos::core::Phase::PhysMem);
+
+    SerialWrite("[boot] Bringing up kernel heap.\n");
+    KernelHeapInit();
+    // Walk _init_array AFTER the heap is online (any constructor
+    // that needs to allocate is now safe). v0 entry count is
+    // typically 0 — kernel TUs use `constinit` — but invoking
+    // the table closes the "silent partial-init" gap A1-followup
+    // identified.
+    duetos::core::RunInitArray();
+    if constexpr (duetos::core::kBootSelfTests)
+    {
+        duetos::core::InitcallRegister(duetos::core::Phase::Heap, "kernel-heap-selftest",
+                                       []()
+                                       {
+                                           KernelHeapSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // IocpSelfTest moved to Phase::Sched — alongside the
+        // other IPC primitives that use `sched::Mutex` /
+        // `sched::Condvar`. IocpTryPost / IocpTryPop / IocpWait
+        // serialise through the embedded mutex (blocking-wait
+        // support, plan IOCP-followup); the scheduler must be
+        // online for those calls to deadlock-detect correctly.
+        // The IocpCreate -> KMalloc half is still valid here
+        // (heap is up at Phase::Sched too), so the test runs end
+        // to end at the later phase.
+    }
+    (void)duetos::core::RunPhase(duetos::core::Phase::Heap);
+
+    KLOG_METRICS("boot", "after-kernel-heap");
+
+    SerialWrite("[boot] Bringing up paging.\n");
+    PagingInit();
+    if constexpr (duetos::core::kBootSelfTests)
+    {
+        duetos::core::InitcallRegister(duetos::core::Phase::Paging, "paging-selftest",
+                                       []()
+                                       {
+                                           PagingSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+    }
+    (void)duetos::core::RunPhase(duetos::core::Phase::Paging);
+
+    // Kernel-stack guard-paged arena — runs here because it needs
+    // the managed paging API (PagingInit) for MapPage / UnmapPage
+    // but must be online before any SchedCreate call uses it.
+    DUETOS_BOOT_SELFTEST(duetos::mm::KernelStackSelfTest());
+    // Kernel-image W^X / DEP — split the 2 MiB PS direct map covering
+    // the kernel image into 4 KiB pages, then apply per-section flags:
+    //   .text  → R + X   (writes to .text now #PF)
+    //   .rodata → R      (writes or execution from .rodata now #PF)
+    //   .data/.bss → R + W (execution from .data/.bss now #PF)
+    //
+    // MUST run AFTER PagingInit adopted the boot PML4 + enabled
+    // EFER.NXE, and BEFORE anything else needs .rodata strings. No
+    // subsystem below this point should be writing to .text; if any
+    // of them does, the fault will fire here at boot rather than
+    // corrupt code silently later.
+    ProtectKernelImage();
+
+    // Breakpoint subsystem (int3 + DR0..DR3). Must run AFTER
+    // ProtectKernelImage so we know .text is at its final 4 KiB-
+    // granular protection and SetPteFlags4K can flip the W bit
+    // for a BP install. Runs BEFORE SMP bring-up so the single-
+    // CPU invariant the BP installer asserts is still true.
+    duetos::debug::BpInit();
+    if (!duetos::debug::BpSelfTest())
+    {
+        SerialWrite("[boot] WARN: breakpoint self-test failed — see serial log\n");
+    }
+    // Named hardware-watchpoint wrapper — exercises the on-hit
+    // dispatch + counter + remove path on a stack-local. Uses one
+    // DR slot transiently and releases it before returning. See
+    // kernel/debug/watch.h for the public API and `bp watch …`
+    // for the operator-facing surface.
+    if constexpr (duetos::core::kBootSelfTests)
+    {
+        if (!duetos::debug::WatchSelfTest())
+        {
+            SerialWrite("[boot] WARN: watchpoint self-test failed — see serial log\n");
+        }
+        // Software-tripwire counterpart to Watch — exercises CRC32
+        // baseline / scribble-detect / refresh / remove on a stack-
+        // local buffer. No hardware DR slots involved; the table is
+        // pure .bss. See kernel/debug/tripwire.h.
+        if (!duetos::debug::TripwireSelfTest())
+        {
+            SerialWrite("[boot] WARN: tripwire self-test failed — see serial log\n");
+        }
+        // Kernel hot-patch — exercises the 5-byte JMP-rel32 overlay
+        // over the `patchable_function_entry` NOP, end-to-end on
+        // an in-TU target + replacement. Runs here (after
+        // ProtectKernelImage, before SMP bring-up) so the .text
+        // is 4 KiB-mapped and the single-CPU patch-window contract
+        // holds trivially. See kernel/debug/hot_patch.h.
+        if (!duetos::debug::HotPatchSelfTest())
+        {
+            SerialWrite("[boot] WARN: hot-patch self-test failed — see serial log\n");
+        }
+    }
+
+#ifdef DUETOS_GDB_DEMO
+    // Deliberate int3 so the AI / dev can exercise the full
+    // attach + inspect + continue cycle without staging a real
+    // crash. Fires HERE (after BpInit) so GDB's Z0 packets can
+    // round-trip through debug::BpInstallSoftware → PokeByte →
+    // SetPteFlags4K — every layer is now online. The stop loop
+    // blocks until GDB attaches AND issues `c` / `D` / `k`.
+    // Build with -DDUETOS_GDB_DEMO=ON to enable.
+    SerialWrite("[gdb-demo] firing int3 — kernel pauses until GDB attaches + continues\n");
+    asm volatile("int3");
+    SerialWrite("[gdb-demo] resumed from GDB int3 — kernel_main continues\n");
+#endif
+    // Static probes — KBP_PROBE(...) call sites sprinkled across
+    // the kernel. Rare+useful events (panic, sandbox denial,
+    // Win32 stub miss, kernel #PF) are armed-log by default so
+    // the first boot shows activity without any arming.
+    duetos::debug::ProbeInit();
+
+    // Fix journal — observe-and-record gap detector. Recorders
+    // must be live BEFORE the syscall surface starts taking real
+    // calls so an unknown syscall on the first ring3 spawn lands
+    // a record. Init zeroes the .bss ring and resets stats; the
+    // selftest synthesizes one record per detector kind and
+    // verifies dedup + mark-done. Per Design-Decision #016 this
+    // is observe-only; nothing in the journal mutates kernel
+    // state.
+    duetos::diag::FixJournalInit();
+    DUETOS_BOOT_SELFTEST(duetos::diag::FixJournalSelfTest());
+}
+
 } // namespace duetos::core
