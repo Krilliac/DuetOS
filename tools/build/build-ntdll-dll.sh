@@ -774,6 +774,15 @@ set +e
     /export:RtlIpv4StringToAddressW \
     /export:RtlIpv4AddressToStringA \
     /export:RtlIpv4AddressToStringW \
+    `# SEH unwinder foundation (T6-02). RtlCaptureContext +` \
+    `# RtlLookupFunctionEntry are real; the rest keep their` \
+    `# safe v0 contract until the fault-dispatch slice lands.` \
+    /export:RtlCaptureContext \
+    /export:RtlLookupFunctionEntry \
+    /export:RtlVirtualUnwind \
+    /export:RtlCaptureStackBackTrace \
+    /export:RtlUnwind \
+    /export:RtlUnwindEx \
     /out:"${DLL}" \
     "${OBJS[@]}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

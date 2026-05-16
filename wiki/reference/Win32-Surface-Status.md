@@ -1850,7 +1850,13 @@ Handle pool of 8 slots; encoding `0x4000 | (kind<<8) | slot` so handles
 never collide with NULL or INVALID_HANDLE_VALUE. On DNS / connect /
 send / first-recv failure the slot transparently falls back to a fixed
 "HTTP/1.1 200 OK" / "DuetOS hello" body so ABI-shape smokes pass on
-hosts with no live Internet.
+hosts with no live Internet. `InternetReadFile` transparently decodes
+`Transfer-Encoding: chunked` responses (hex size lines, chunk
+extensions, inter-chunk + terminal CRLFs stripped) so the caller
+only ever sees the entity body — matching the Win32 contract. This
+is exercised live: real google.com / example.com `200` responses
+are chunked, and the `smoke=browser` profile verifies the decoded
+first body line is HTML, not a chunk-size header.
 
 `HttpQueryInfoA/W` — REAL for `STATUS_CODE`, `STATUS_TEXT`,
 `RAW_HEADERS`, `RAW_HEADERS_CRLF`, `CONTENT_TYPE`, `CONTENT_LENGTH`,

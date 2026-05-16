@@ -418,3 +418,283 @@ __declspec(dllexport) void InitializeSListHead(void* head)
             b[i] = 0;
     }
 }
+
+/* ------------------------------------------------------------------
+ * SEH unwinder foundation (T6-02). Windows forwards these from
+ * kernel32 to ntdll; we can't emit PE forwarders, so kernel32
+ * carries its own copy (ntdll exports the same — whichever the
+ * PE imports resolves via-dll). RtlCaptureContext is a real
+ * register snapshot; RtlLookupFunctionEntry is a real
+ * table-based .pdata lookup for the main EXE. Pure routines —
+ * no kernel fault dispatch yet (that is the next slice).
+ * ------------------------------------------------------------------ */
+
+__attribute__((naked)) __declspec(dllexport) void RtlCaptureContext(void* ContextRecord)
+{
+    __asm__ volatile("movq %%rax, 0x78(%%rcx)\n\t"
+                     "movq %%rdx, 0x88(%%rcx)\n\t"
+                     "movq %%rbx, 0x90(%%rcx)\n\t"
+                     "movq %%rbp, 0xA0(%%rcx)\n\t"
+                     "movq %%rsi, 0xA8(%%rcx)\n\t"
+                     "movq %%rdi, 0xB0(%%rcx)\n\t"
+                     "movq %%r8,  0xB8(%%rcx)\n\t"
+                     "movq %%r9,  0xC0(%%rcx)\n\t"
+                     "movq %%r10, 0xC8(%%rcx)\n\t"
+                     "movq %%r11, 0xD0(%%rcx)\n\t"
+                     "movq %%r12, 0xD8(%%rcx)\n\t"
+                     "movq %%r13, 0xE0(%%rcx)\n\t"
+                     "movq %%r14, 0xE8(%%rcx)\n\t"
+                     "movq %%r15, 0xF0(%%rcx)\n\t"
+                     "movq %%rcx, 0x80(%%rcx)\n\t"
+                     "leaq 8(%%rsp), %%rax\n\t"
+                     "movq %%rax, 0x98(%%rcx)\n\t"
+                     "movq (%%rsp), %%rax\n\t"
+                     "movq %%rax, 0xF8(%%rcx)\n\t"
+                     "pushfq\n\t"
+                     "popq %%rax\n\t"
+                     "movl %%eax, 0x44(%%rcx)\n\t"
+                     "movl $0x0010000F, 0x30(%%rcx)\n\t"
+                     "movq 0x78(%%rcx), %%rax\n\t"
+                     "ret\n\t" ::
+                         : "memory");
+}
+
+typedef struct
+{
+    unsigned int BeginAddress;
+    unsigned int EndAddress;
+    unsigned int UnwindInfoAddress;
+} K32_RUNTIME_FUNCTION;
+
+__declspec(dllexport) void* RtlLookupFunctionEntry(unsigned long long ControlPc, unsigned long long* ImageBase,
+                                                   void* HistoryTable)
+{
+    (void)HistoryTable;
+    const unsigned long long base = sys_dll_base_by_name("");
+    if (ImageBase != (unsigned long long*)0)
+        *ImageBase = base;
+    if (base == 0 || ControlPc < base)
+        return (void*)0;
+    const unsigned char* img = (const unsigned char*)base;
+    if (img[0] != 'M' || img[1] != 'Z')
+        return (void*)0;
+    const unsigned int e_lfanew = *(const unsigned int*)(img + 0x3C);
+    const unsigned char* nt = img + e_lfanew;
+    if (nt[0] != 'P' || nt[1] != 'E' || nt[2] != 0 || nt[3] != 0)
+        return (void*)0;
+    const unsigned char* opt = nt + 0x18;
+    if (*(const unsigned short*)opt != 0x20B)
+        return (void*)0;
+    const unsigned int* dd = (const unsigned int*)(opt + 0x70 + 3 * 8);
+    const unsigned int pdata_rva = dd[0];
+    const unsigned int pdata_sz = dd[1];
+    if (pdata_rva == 0 || pdata_sz < sizeof(K32_RUNTIME_FUNCTION))
+        return (void*)0;
+    const K32_RUNTIME_FUNCTION* fns = (const K32_RUNTIME_FUNCTION*)(img + pdata_rva);
+    const unsigned int n = pdata_sz / (unsigned int)sizeof(K32_RUNTIME_FUNCTION);
+    const unsigned int off = (unsigned int)(ControlPc - base);
+    unsigned int lo = 0, hi = n;
+    while (lo < hi)
+    {
+        const unsigned int mid = lo + (hi - lo) / 2;
+        if (off < fns[mid].BeginAddress)
+            hi = mid;
+        else if (off >= fns[mid].EndAddress)
+            lo = mid + 1;
+        else
+            return (void*)&fns[mid];
+    }
+    return (void*)0;
+}
+
+/* ------------------------------------------------------------------
+ * RtlVirtualUnwind (T6-02 slice 2) — x64 table-based frame unwind.
+ *
+ * Interprets the function's UNWIND_INFO unwind codes to transform
+ * ContextRecord from "in this frame" to "in the caller's frame":
+ * pops PUSH_NONVOL saves, undoes stack allocs, follows SET_FPREG /
+ * SAVE_NONVOL / PUSH_MACHFRAME / chained info, then pops the
+ * return address into Rip. Pure computation — no control flow
+ * transfer. GAP: prologue/epilogue-precise unwinding (we apply
+ * the full code list, correct for fault PCs / call sites in the
+ * function body — the only places a backtrace or fault unwinds
+ * from); XMM saves are skipped (not needed for return-addr walk).
+ * ------------------------------------------------------------------ */
+
+/* CONTEXT GPR offsets, indexed by the x64 unwind register number
+ * (0=RAX..15=R15). RSP is index 4. */
+static const unsigned short k_ctx_gpr_off[16] = {0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0,
+                                                 0xB8, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0};
+#define K32_CTX_RSP_OFF 0x98
+#define K32_CTX_RIP_OFF 0xF8
+
+static unsigned long long* k32_ctx_reg(void* ctx, int idx)
+{
+    return (unsigned long long*)((unsigned char*)ctx + k_ctx_gpr_off[idx & 15]);
+}
+static unsigned long long* k32_ctx_rsp(void* ctx)
+{
+    return (unsigned long long*)((unsigned char*)ctx + K32_CTX_RSP_OFF);
+}
+static unsigned long long* k32_ctx_rip(void* ctx)
+{
+    return (unsigned long long*)((unsigned char*)ctx + K32_CTX_RIP_OFF);
+}
+
+__declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned long long ImageBase,
+                                             unsigned long long ControlPc, void* FunctionEntry, void* ContextRecord,
+                                             void** HandlerData, unsigned long long* EstablisherFrame,
+                                             void* ContextPointers)
+{
+    (void)HandlerType;
+    (void)ControlPc;
+    (void)ContextPointers;
+    if (HandlerData != (void**)0)
+        *HandlerData = (void*)0;
+    if (FunctionEntry == (void*)0 || ContextRecord == (void*)0)
+        return (void*)0;
+    const K32_RUNTIME_FUNCTION* rf = (const K32_RUNTIME_FUNCTION*)FunctionEntry;
+
+    for (int chain_guard = 0; chain_guard < 32; ++chain_guard)
+    {
+        const unsigned char* ui = (const unsigned char*)(ImageBase + rf->UnwindInfoAddress);
+        const unsigned char flags = (unsigned char)(ui[0] >> 3);
+        const unsigned char count = ui[2];
+        const unsigned char frreg = (unsigned char)(ui[3] & 0x0F);
+        const unsigned char froff = (unsigned char)(ui[3] >> 4);
+        const unsigned short* codes = (const unsigned short*)(ui + 4);
+
+        unsigned long long fb;
+        if (frreg != 0)
+            fb = *k32_ctx_reg(ContextRecord, frreg) - (unsigned long long)froff * 16ULL;
+        else
+            fb = *k32_ctx_rsp(ContextRecord);
+
+        unsigned i = 0;
+        while (i < count)
+        {
+            const unsigned short cw = codes[i];
+            const unsigned op = (cw >> 8) & 0x0F;
+            const unsigned info = (cw >> 12) & 0x0F;
+            unsigned long long* rsp = k32_ctx_rsp(ContextRecord);
+            if (op == 0) /* PUSH_NONVOL */
+            {
+                *k32_ctx_reg(ContextRecord, (int)info) = *(unsigned long long*)(*rsp);
+                *rsp += 8;
+                i += 1;
+            }
+            else if (op == 1) /* ALLOC_LARGE */
+            {
+                if (info == 0)
+                {
+                    *rsp += (unsigned long long)codes[i + 1] * 8ULL;
+                    i += 2;
+                }
+                else
+                {
+                    *rsp += (unsigned long long)(*(const unsigned int*)&codes[i + 1]);
+                    i += 3;
+                }
+            }
+            else if (op == 2) /* ALLOC_SMALL */
+            {
+                *rsp += (unsigned long long)info * 8ULL + 8ULL;
+                i += 1;
+            }
+            else if (op == 3) /* SET_FPREG */
+            {
+                *rsp = *k32_ctx_reg(ContextRecord, (int)frreg) - (unsigned long long)froff * 16ULL;
+                i += 1;
+            }
+            else if (op == 4) /* SAVE_NONVOL */
+            {
+                const unsigned long long off = (unsigned long long)codes[i + 1] * 8ULL;
+                *k32_ctx_reg(ContextRecord, (int)info) = *(unsigned long long*)(fb + off);
+                i += 2;
+            }
+            else if (op == 5) /* SAVE_NONVOL_FAR */
+            {
+                const unsigned long long off = (unsigned long long)(*(const unsigned int*)&codes[i + 1]);
+                *k32_ctx_reg(ContextRecord, (int)info) = *(unsigned long long*)(fb + off);
+                i += 3;
+            }
+            else if (op == 8) /* SAVE_XMM128 */
+            {
+                i += 2;
+            }
+            else if (op == 9) /* SAVE_XMM128_FAR */
+            {
+                i += 3;
+            }
+            else if (op == 10) /* PUSH_MACHFRAME */
+            {
+                const unsigned long long base = *rsp + (info ? 8ULL : 0ULL);
+                *k32_ctx_rip(ContextRecord) = *(unsigned long long*)base;
+                *rsp = *(unsigned long long*)(base + 24ULL);
+                if (EstablisherFrame != (unsigned long long*)0)
+                    *EstablisherFrame = fb;
+                return (void*)0; /* machine frame: Rip/Rsp already final */
+            }
+            else
+            {
+                i += 1; /* unknown op — best effort skip */
+            }
+        }
+
+        if (flags & 0x4) /* UNW_FLAG_CHAININFO */
+        {
+            const unsigned even = (unsigned)((count + 1) & ~1u);
+            rf = (const K32_RUNTIME_FUNCTION*)(codes + even);
+            continue;
+        }
+        break;
+    }
+
+    /* Pop the return address. */
+    unsigned long long* rsp = k32_ctx_rsp(ContextRecord);
+    *k32_ctx_rip(ContextRecord) = *(unsigned long long*)(*rsp);
+    *rsp += 8;
+    if (EstablisherFrame != (unsigned long long*)0)
+        *EstablisherFrame = *rsp;
+    return (void*)0;
+}
+
+/* Real RtlCaptureStackBackTrace: capture + repeatedly
+ * RtlLookupFunctionEntry / RtlVirtualUnwind. Leaf functions with
+ * no .pdata entry terminate the walk (return-addr-on-rsp
+ * fallback for a leaf, then stop). */
+__declspec(dllexport) unsigned short RtlCaptureStackBackTrace(unsigned long FramesToSkip, unsigned long FramesToCapture,
+                                                              void** BackTrace, unsigned long* BackTraceHash)
+{
+    if (BackTrace == (void**)0 || FramesToCapture == 0)
+        return 0;
+    unsigned char ctxbuf[1232];
+    for (int z = 0; z < 1232; ++z)
+        ctxbuf[z] = 0;
+    RtlCaptureContext(ctxbuf);
+    unsigned long hash = 0;
+    unsigned short n = 0;
+    for (unsigned long depth = 0; depth < FramesToSkip + FramesToCapture && n < 0xFFFF; ++depth)
+    {
+        unsigned long long pc = *k32_ctx_rip(ctxbuf);
+        if (pc == 0)
+            break;
+        unsigned long long ib = 0;
+        void* fe = RtlLookupFunctionEntry(pc, &ib, (void*)0);
+        if (fe == (void*)0)
+            break; /* leaf / no .pdata — stop the walk */
+        unsigned long long est = 0;
+        RtlVirtualUnwind(0, ib, pc, fe, ctxbuf, (void**)0, &est, (void*)0);
+        unsigned long long npc = *k32_ctx_rip(ctxbuf);
+        if (npc == 0 || npc == pc)
+            break;
+        if (depth >= FramesToSkip)
+        {
+            BackTrace[n++] = (void*)npc;
+            hash += (unsigned long)npc;
+        }
+    }
+    if (BackTraceHash != (unsigned long*)0)
+        *BackTraceHash = hash;
+    return n;
+}

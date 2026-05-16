@@ -102,6 +102,13 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
 /// handlers via `core::CurrentProcess()` to cap-check.
 core::Process* TaskProcess(Task* t);
 
+/// Pin a per-task user GSBASE (T6-01 per-thread TLS). 0 restores
+/// the default "use Process::user_gs_base" behaviour. The
+/// scheduler writes the resolved value into KERNEL_GS_BASE after
+/// every ContextSwitch so the task's return-to-user swapgs loads
+/// the correct (per-thread) TEB. No-op on a null task.
+void SchedSetUserGsOverride(Task* t, u64 gs_base);
+
 /// Find the first live `core::Process*` with `pid == target_pid`.
 /// Walks every queue (running, normal-runqueue, idle-runqueue,
 /// sleep-queue, zombies) under arch::Cli to keep the lists stable

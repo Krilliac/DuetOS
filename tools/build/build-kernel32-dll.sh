@@ -89,6 +89,13 @@ set +e
     /export:GetLastError \
     /export:SetLastError \
     /export:ExitProcess \
+    `# SEH unwinder foundation (T6-02). Windows forwards these` \
+    `# kernel32 -> ntdll; we carry a real copy so the via-dll` \
+    `# resolve path binds them instead of the no-op SEH thunk.` \
+    /export:RtlCaptureContext \
+    /export:RtlLookupFunctionEntry \
+    /export:RtlVirtualUnwind \
+    /export:RtlCaptureStackBackTrace \
     /export:TerminateProcess \
     /export:IsDebuggerPresent \
     /export:IsProcessorFeaturePresent \

@@ -125,6 +125,8 @@
 #include "generated_fs_smoke_pe.h"
 #include "generated_handle_smoke_pe.h"
 #include "generated_browser_pe_pe.h"
+#include "generated_tls_pe_pe.h"
+#include "generated_seh_pe_pe.h"
 #include "generated_pe32_smoke_pe.h"
 #include "generated_iphlpapi_smoke_pe.h"
 #include "generated_mem_smoke_pe.h"
@@ -2266,6 +2268,18 @@ void StartRing3SmokeTask()
     {
         SpawnPeFile("ring3-hello-pe", fs::generated::kBinHelloPeBytes, fs::generated::kBinHelloPeBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // T6-01: static TLS + TLS-callback PE. Exercises the
+        // loader's IMAGE_TLS_DIRECTORY path: template copy,
+        // TEB.ThreadLocalStoragePointer wiring, and the
+        // callback-before-entry trampoline. Prints
+        // [tls_pe] RESULT PASS on success.
+        SpawnPeFile("ring3-tls-pe", fs::generated::kBinTlsPeBytes, fs::generated::kBinTlsPeBytes_len, CapSetTrusted(),
+                    fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // T6-02 slice 1: SEH foundation. Exercises real
+        // RtlCaptureContext + table-based RtlLookupFunctionEntry
+        // (.pdata parse). Prints [seh_pe] RESULT PASS on success.
+        SpawnPeFile("ring3-seh-pe", fs::generated::kBinSehPeBytes, fs::generated::kBinSehPeBytes_len, CapSetTrusted(),
+                    fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
     // First Win32 PE that gets RESOLVED (not just reported)
     // by the kernel. Imports kernel32.dll!ExitProcess, hits
@@ -2275,6 +2289,24 @@ void StartRing3SmokeTask()
         SpawnPeFile("ring3-hello-winapi", fs::generated::kBinHelloWinapiBytes, fs::generated::kBinHelloWinapiBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
+    // Browser profile: the WinInet browser PE then the WinSock
+    // browser PE. browser_pe.exe drives InternetOpenA /
+    // InternetOpenUrlA / HttpQueryInfoA / InternetReadFile; the
+    // kernel wininet thunks do a real HTTP/1.1 GET over the socket
+    // pool (qemu SLIRP has a DHCP lease by bringup), falling back
+    // to a fixed body when egress is blocked. mini_browser.exe
+    // drives the raw WSAStartup / gethostbyname / socket / connect
+    // / send / recv path. Runs under emulator (unlike the legacy
+    // !emulator zoo below) because it's the explicit `smoke=browser`
+    // scenario — the whole point is to exercise it under QEMU.
+    if (::duetos::test::SmokeProfileShouldSpawn(::duetos::test::SmokeTarget::Browser))
+    {
+        SpawnPeFile("ring3-browser-pe", fs::generated::kBinBrowserPeBytes, fs::generated::kBinBrowserPeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        SpawnPeFile("ring3-mini-browser", fs::generated::kBinMiniBrowserBytes, fs::generated::kBinMiniBrowserBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+    }
+
     // The four PE smokes below cover thread / syscall / DLL /
     // registry-fopen surface. None of their stdout lines are
     // checked by the qemu-smoke critical path (only hello-pe,

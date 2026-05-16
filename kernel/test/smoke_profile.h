@@ -62,6 +62,16 @@ enum class SmokeProfile : duetos::u8
 
     /// `smoke=linux`: spawn the seven Linux ABI smokes. Sentinel + exit.
     Linux,
+
+    /// `smoke=browser`: spawn the WinInet browser PE (browser_pe.exe)
+    /// and the WinSock browser PE (mini_browser.exe). Drives the full
+    /// Win32 networking surface a real browser uses (InternetOpenUrlA
+    /// / HttpQueryInfoA / InternetReadFile and WSAStartup / socket /
+    /// connect / send / recv) over the kernel socket pool. The qemu
+    /// SLIRP NIC has a DHCP lease by bringup so the fetch is live;
+    /// wininet falls back to a fixed body if egress is blocked so the
+    /// profile stays deterministic. Sentinel + exit.
+    Browser,
 };
 
 /// Targets a particular spawn site can ask about. Values mirror
@@ -76,6 +86,7 @@ enum class SmokeTarget : duetos::u8
     PeOther,   // ring3-thread-stress, ring3-customdll-test, etc.
                //   (only enabled in profile=None bare-metal full boot)
     Linux,     // SpawnRing3LinuxSmoke and friends
+    Browser,   // ring3-browser-pe (WinInet) + ring3-mini-browser (WinSock)
 };
 
 /// Parse `smoke=<profile>` from the boot cmdline once. Returns the

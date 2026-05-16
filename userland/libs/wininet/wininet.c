@@ -91,6 +91,16 @@ typedef struct
     int body_start;
     int rxlen;
     int rxpos;
+    /* Transfer-Encoding: chunked decoder state. WinInet de-chunks
+     * transparently — the application only ever sees the entity
+     * body, never the chunk-size framing. chunk_state: 0=reading
+     * size line, 1=copying chunk data, 2=consuming the CRLF that
+     * trails chunk data, 3=terminal 0-length chunk seen (EOF). */
+    int chunked;
+    int chunk_state;
+    int chunk_sawcr;
+    int chunk_ext;
+    long chunk_remaining;
     unsigned char rxbuf[WININET_RXBUF_MAX];
     char headers[WININET_HEADERS_MAX];
     char status_line[128];
@@ -381,6 +391,61 @@ static int wininet_parse_response_headers(WininetSlot* s)
     }
     s->status = code;
     s->rxpos = s->body_start;
+    /* Detect Transfer-Encoding: chunked so InternetReadFile can
+     * de-chunk transparently (the Win32 contract). Scan the RAW
+     * header bytes in rxbuf [0, headers_len) rather than the
+     * s->headers copy: the latter is truncated to
+     * WININET_HEADERS_MAX-1 and a header-heavy origin (google.com
+     * sends Set-Cookie / P3P / alt-svc ... before/around
+     * Transfer-Encoding) would drop the header out of the copy and
+     * the body would surface as raw chunk-size framing. */
+    s->chunked = 0;
+    s->chunk_state = 0;
+    s->chunk_sawcr = 0;
+    s->chunk_ext = 0;
+    s->chunk_remaining = 0;
+    {
+        static const char kTe[] = "transfer-encoding:";
+        int hlen = s->headers_len;
+        if (hlen > s->rxlen)
+            hlen = s->rxlen;
+        int i = 0;
+        while (i < hlen)
+        {
+            int k = 0;
+            while (kTe[k] != 0 && i + k < hlen)
+            {
+                char x = (char)s->rxbuf[i + k];
+                if (x >= 'A' && x <= 'Z')
+                    x = (char)(x - 'A' + 'a');
+                if (x != kTe[k])
+                    break;
+                ++k;
+            }
+            if (kTe[k] == 0)
+            {
+                /* Matched the field name; scan the value to EOL for "chunked". */
+                int v = i + k;
+                while (v + 1 < hlen && !(s->rxbuf[v] == '\r' && s->rxbuf[v + 1] == '\n'))
+                {
+                    char a = (char)s->rxbuf[v];
+                    char b = (char)s->rxbuf[v + 1];
+                    char c2 = (char)s->rxbuf[v + 2];
+                    if ((a == 'c' || a == 'C') && (b == 'h' || b == 'H') && (c2 == 'u' || c2 == 'U'))
+                    {
+                        s->chunked = 1;
+                        break;
+                    }
+                    ++v;
+                }
+                break;
+            }
+            /* Advance to the start of the next header line. */
+            while (i + 1 < hlen && !(s->rxbuf[i] == '\r' && s->rxbuf[i + 1] == '\n'))
+                ++i;
+            i += 2;
+        }
+    }
     return 1;
 }
 
@@ -613,6 +678,121 @@ __declspec(dllexport) BOOL HttpSendRequestA(HANDLE h, const char* hdrs, DWORD hl
     wininet_perform_request(&g_pool[req]);
     return 1;
 }
+/* Pull one body byte out of the rx window, pumping the socket when
+ * the window drains. Returns 0 at EOF (socket closed / fake slot
+ * exhausted). Used only by the chunked decoder, where the framing
+ * is parsed a byte at a time and may straddle a pump boundary. */
+static int wininet_getc(WininetSlot* s, unsigned char* out)
+{
+    if (s->rxpos >= s->rxlen)
+    {
+        if (s->fake)
+            return 0;
+        wininet_pump(s);
+        if (s->rxpos >= s->rxlen)
+            return 0;
+    }
+    *out = s->rxbuf[s->rxpos++];
+    return 1;
+}
+
+/* Decode a Transfer-Encoding: chunked body into dst (up to cb
+ * bytes). Strips the hex chunk-size lines, chunk extensions, and
+ * the inter-chunk CRLFs so the caller sees only the entity body —
+ * exactly what WinInet does on Windows. State persists in the slot
+ * so repeated InternetReadFile calls resume mid-stream. */
+static int wininet_read_chunked(WininetSlot* s, unsigned char* dst, int cb)
+{
+    int produced = 0;
+    while (produced < cb && s->chunk_state != 3)
+    {
+        if (s->chunk_state == 0) /* size line */
+        {
+            unsigned char c;
+            if (!wininet_getc(s, &c))
+                break;
+            if (c == '\r')
+            {
+                s->chunk_sawcr = 1;
+                continue;
+            }
+            if (c == '\n')
+            {
+                if (!s->chunk_sawcr)
+                    continue;
+                s->chunk_sawcr = 0;
+                s->chunk_state = (s->chunk_remaining == 0) ? 3 : 1;
+                continue;
+            }
+            if (c == ';')
+            {
+                s->chunk_ext = 1; /* chunk-extension — ignore to EOL */
+                continue;
+            }
+            if (!s->chunk_ext)
+            {
+                int d = -1;
+                if (c >= '0' && c <= '9')
+                    d = c - '0';
+                else if (c >= 'a' && c <= 'f')
+                    d = c - 'a' + 10;
+                else if (c >= 'A' && c <= 'F')
+                    d = c - 'A' + 10;
+                if (d >= 0)
+                    s->chunk_remaining = s->chunk_remaining * 16 + d;
+            }
+            continue;
+        }
+        if (s->chunk_state == 1) /* chunk data */
+        {
+            if (s->chunk_remaining <= 0)
+            {
+                s->chunk_state = 2;
+                s->chunk_sawcr = 0;
+                continue;
+            }
+            if (s->rxpos >= s->rxlen)
+            {
+                if (s->fake)
+                    break;
+                wininet_pump(s);
+                if (s->rxpos >= s->rxlen)
+                    break;
+            }
+            int avail = s->rxlen - s->rxpos;
+            int want = cb - produced;
+            if (want > avail)
+                want = avail;
+            if (want > (int)s->chunk_remaining)
+                want = (int)s->chunk_remaining;
+            for (int i = 0; i < want; ++i)
+                dst[produced + i] = s->rxbuf[s->rxpos + i];
+            s->rxpos += want;
+            produced += want;
+            s->chunk_remaining -= want;
+            if (s->chunk_remaining == 0)
+            {
+                s->chunk_state = 2;
+                s->chunk_sawcr = 0;
+            }
+            continue;
+        }
+        /* state 2: consume the CRLF that trails the chunk data,
+         * then reset for the next size line. */
+        unsigned char c;
+        if (!wininet_getc(s, &c))
+            break;
+        if (c == '\n')
+        {
+            s->chunk_state = 0;
+            s->chunk_remaining = 0;
+            s->chunk_ext = 0;
+            s->chunk_sawcr = 0;
+        }
+    }
+    return produced;
+}
+
 __declspec(dllexport) BOOL InternetReadFile(HANDLE h, void* buf, DWORD cb, DWORD* nread)
 {
     if (nread)
@@ -626,6 +806,13 @@ __declspec(dllexport) BOOL InternetReadFile(HANDLE h, void* buf, DWORD cb, DWORD
     /* Lazy-send if a caller skipped HttpSendRequest. */
     if (!s->request_sent && !s->fake)
         wininet_perform_request(s);
+    if (s->chunked)
+    {
+        int n = wininet_read_chunked(s, (unsigned char*)buf, (int)cb);
+        if (nread)
+            *nread = (DWORD)n;
+        return 1;
+    }
     /* Top up from the socket if the body region is drained. */
     if (s->rxpos >= s->rxlen && !s->fake)
         wininet_pump(s);
