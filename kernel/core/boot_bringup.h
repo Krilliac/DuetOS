@@ -26,4 +26,14 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info);
 // FixJournalInit. No inputs, no outputs — pure code motion.
 void BootBringupMemPaging();
 
+// Kernel-services bring-up: VFS/ramfs, ACPI + AML namespace,
+// APIC/IOAPIC/HPET, clocksource/timekeeper/tick, RTC + wall
+// clock, per-CPU BSP + topology, LBR, syscall-cap gate, Linux-ABI
+// syscall MSRs, sync-primitive + lockdep self-tests, periodic
+// timer + NMI watchdog, scheduler init + idle/reaper, and the
+// IPC/KObject/Win32/Linux-fd/soft-lockup self-tests. Inputs are
+// the boot cmdline string (init-wedge-panic parse) and the
+// Multiboot2 info pointer (AcpiInit); pure code motion otherwise.
+void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info);
+
 } // namespace duetos::core
