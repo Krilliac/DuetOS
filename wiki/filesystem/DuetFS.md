@@ -47,7 +47,7 @@ slice-defining workload makes them earn their complexity.
   - `src/ops_dir.rs` — directory + extent helpers (`find_in_dir / dir_add_child / dir_remove_child / grow_file`).
   - `src/path.rs` — path iterator (same shape as `kernel/fs/vfs.h`).
   - `src/mkfs.rs` — formats an empty image with a root dir.
-  - `src/ffi.rs` — C ABI surface (`duetfs_probe / duetfs_mkfs / duetfs_lookup / duetfs_lookup_follow / duetfs_read_file / duetfs_write_at / duetfs_create_path / duetfs_unlink_path / duetfs_truncate`).
+  - `src/ffi.rs` — C ABI surface (`duetfs_probe / duetfs_mkfs / duetfs_lookup / duetfs_lookup_follow / duetfs_read_file / duetfs_readdir / duetfs_write_at / duetfs_create_path / duetfs_unlink_path / duetfs_truncate`).
   - `include/duetfs.h` — hand-written C header (mirrored against `ffi.rs`).
 - `kernel/fs/duetfs.{h,cpp}` — kernel-side adapter, `DuetFsBoot`, `DuetFsSelfTest`.
 - `kernel/fs/duetfs_block_dev.cpp` — `Device` builder helpers (memory + block-handle backed).
@@ -195,6 +195,7 @@ side reads `src/ffi.rs`.
 | `duetfs_mkfs(dev)` | Format the device. Wipes superblock + bitmap + node table; creates the root dir. |
 | `duetfs_lookup(dev, path, path_max, out)` | Resolve a path; fill `LookupResult{kind, node_id, size_bytes, child_count}`. |
 | `duetfs_read_file(dev, node_id, off, dst, dst_max, out_copied)` | Copy file bytes into `dst`. |
+| `duetfs_readdir(dev, dir_node_id, start_index, out, out_max, out_count)` | Page a directory's children into `DirEntry[]{node_id, kind, size_bytes, name_len, name}`. Advance `start_index` by `out_count` until it returns 0. |
 | `duetfs_write_at(dev, node_id, off, src, src_max, out_written)` | Write bytes; auto-grow file if needed. |
 | `duetfs_create_path(dev, path, path_max, kind, out_node_id)` | Create a file or directory. Parent must exist. |
 | `duetfs_unlink_path(dev, path, path_max)` | Remove a file or empty directory. |

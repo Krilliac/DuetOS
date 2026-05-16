@@ -16,7 +16,8 @@ use crate::block_dev::{BlockDevice, ExternBlockDevice, ExternBlockDeviceOps};
 use crate::compress;
 use crate::crypto;
 use crate::format::{
-    BLOCK_SIZE, JOURNAL_LBA, NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID, SALT_BYTES, SUPERBLOCK_LBA,
+    BLOCK_SIZE, JOURNAL_LBA, NAME_MAX, NODE_KIND_DIR, NODE_KIND_FILE, NODE_KIND_UNUSED, ROOT_NODE_ID, SALT_BYTES,
+    SUPERBLOCK_LBA,
 };
 use crate::fs::{Fs, FsError};
 use crate::journal;
@@ -267,6 +268,96 @@ pub unsafe extern "C" fn duetfs_read_file(
         }
         Err(e) => err_to_status(e),
     }
+}
+
+/// One directory child, surfaced to the C++ side by `duetfs_readdir`.
+/// `name` is NUL-padded; `name_len` is the valid byte count.
+#[repr(C)]
+pub struct DuetFsDirEntry {
+    pub node_id: u32,
+    pub kind: u32,
+    pub size_bytes: u32,
+    pub name_len: u32,
+    pub name: [u8; NAME_MAX],
+}
+
+/// Enumerate the children of directory `dir_node_id`, starting at
+/// child slot `start_index`, filling up to `out_max` entries. Writes
+/// the number produced to `*out_count` (0 once `start_index` reaches
+/// `child_count`). The caller pages by advancing `start_index` by the
+/// returned count until it gets 0. Child slots [0, child_count) are
+/// dense — `dir_remove_child` swaps the tail down — so no UNUSED
+/// filtering is needed here.
+///
+/// # Safety
+/// Raw pointer arguments must satisfy the C ABI contract in `include/duetfs.h`
+/// for the duration of the call; DuetFS never retains them after returning.
+#[no_mangle]
+pub unsafe extern "C" fn duetfs_readdir(
+    desc: *const DuetFsDevice,
+    dir_node_id: u32,
+    start_index: u32,
+    out: *mut DuetFsDirEntry,
+    out_max: usize,
+    out_count: *mut usize,
+) -> c_uint {
+    if !out_count.is_null() {
+        unsafe { *out_count = 0 };
+    }
+    if out.is_null() || out_max == 0 {
+        return STATUS_INVALID;
+    }
+    let Some(mut dev) = (unsafe { make_dev(desc) }) else {
+        return STATUS_INVALID;
+    };
+    let fs = match Fs::open(&mut dev) {
+        Ok(f) => f,
+        Err(e) => return err_to_status(e),
+    };
+    let dir = match fs.read_node(dir_node_id) {
+        Ok(n) => n,
+        Err(e) => return err_to_status(e),
+    };
+    if dir.kind != NODE_KIND_DIR {
+        return STATUS_NOT_A_DIR;
+    }
+    if start_index >= dir.child_count {
+        return STATUS_OK; // past the end — count stays 0
+    }
+    let lba = match fs.dir_block(&dir) {
+        Ok(l) => l,
+        Err(e) => return err_to_status(e),
+    };
+    let mut block = [0u8; BLOCK_SIZE];
+    if let Err(e) = fs.read_data_block(lba, &mut block) {
+        return err_to_status(e);
+    }
+    let slots = unsafe { core::slice::from_raw_parts_mut(out, out_max) };
+    let end = core::cmp::min(dir.child_count, start_index + out_max as u32);
+    let mut written = 0usize;
+    for i in start_index..end {
+        let off = (i as usize) * 4;
+        let id = u32::from_le_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]]);
+        let child = match fs.read_node(id) {
+            Ok(n) => n,
+            Err(e) => return err_to_status(e),
+        };
+        let nb = child.name_bytes();
+        let mut name = [0u8; NAME_MAX];
+        name[..nb.len()].copy_from_slice(nb);
+        slots[written] = DuetFsDirEntry {
+            node_id: id,
+            kind: child.kind,
+            size_bytes: child.size_bytes,
+            name_len: nb.len() as u32,
+            name,
+        };
+        written += 1;
+    }
+    if !out_count.is_null() {
+        unsafe { *out_count = written };
+    }
+    STATUS_OK
 }
 
 /// # Safety

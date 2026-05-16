@@ -62,6 +62,11 @@ bool FilesFeedChar(char c);
 /// true iff consumed.
 bool FilesFeedArrow(bool up);
 
+/// Home / End / PageUp / PageDown handler for the active list.
+/// `code` is a VK navigation key (kKeyHome / kKeyEnd /
+/// kKeyPageUp / kKeyPageDown). Returns true iff consumed.
+bool FilesFeedListKey(duetos::u16 code);
+
 /// One-shot self-test: verifies the root has at least one
 /// child and that Enter on a directory updates the listing
 /// to that directory's children. Prints PASS/FAIL to COM1.
@@ -74,13 +79,13 @@ void FilesSelfTest();
 /// in sync if the layout changes.
 duetos::i32 FilesRowAt(duetos::u32 cx, duetos::u32 cy);
 
-/// Right-click handler. If the cursor is over a row in FAT32
-/// mode, opens the per-row context menu (Open / Rename / Delete /
-/// Properties) and returns true. In Trash or ramfs modes,
-/// returns false so the caller can fall through to the default
-/// window menu. Caller must not be holding the compositor lock
-/// when invoking — the menu itself doesn't touch it, but the
-/// caller's surrounding flow does.
+/// Right-click handler. FAT32 opens the rich per-row menu (Open /
+/// Rename / Delete / Properties / New / Refresh); the DuetFS,
+/// ramfs and Trash views open the shared generic menu (Open /
+/// Properties / Refresh). Always returns true for those views.
+/// Caller must not be holding the compositor lock when invoking —
+/// the menu itself doesn't touch it, but the caller's surrounding
+/// flow does.
 bool FilesOnRightClick(duetos::u32 cx, duetos::u32 cy);
 
 /// Mouse-wheel handler. `dz > 0` (wheel up) steps the selection

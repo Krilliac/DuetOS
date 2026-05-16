@@ -38,7 +38,9 @@
 #include "core/session_restore.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
+#include "drivers/video/dialog.h"
 #include "drivers/video/modal_input.h"
+#include "drivers/video/notify.h"
 #include "drivers/video/start_menu_apps.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -206,6 +208,50 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
         duetos::drivers::video::ConsoleSetOrigin(16, 16);
         duetos::drivers::video::ConsoleSetColours(duetos::drivers::video::ThemeCurrent().console_fg, 0x00000000);
         break;
+    case 7: // NEW TEXT FILE — prompt, then create an empty file on
+            // the FAT32 disk root (the user-visible writable volume
+            // the Files app's Disk view lists).
+    {
+        duetos::drivers::video::InputBoxOpen(
+            "NEW TEXT FILE", "Enter file name (8.3 form):", "NEW.TXT",
+            [](duetos::drivers::video::DialogResult r, const char* text, void*)
+            {
+                if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr || text[0] == '\0')
+                {
+                    duetos::drivers::video::NotifyShow("new file cancelled");
+                    return;
+                }
+                const duetos::fs::fat32::Volume* v = duetos::fs::fat32::Fat32Volume(0);
+                if (v == nullptr)
+                {
+                    duetos::drivers::video::NotifyShow("new file: no FAT32 volume");
+                    return;
+                }
+                char path[24];
+                path[0] = '/';
+                duetos::u32 pi = 1;
+                for (duetos::u32 i = 0; text[i] != '\0' && pi + 1 < sizeof(path); ++i)
+                    path[pi++] = text[i];
+                path[pi] = '\0';
+                const bool ok = duetos::fs::fat32::Fat32CreateAtPath(v, path, nullptr, 0) >= 0;
+                duetos::drivers::video::NotifyShow(ok ? "file created" : "create failed");
+                duetos::arch::SerialWrite("[desktop] new text file ");
+                duetos::arch::SerialWrite(ok ? "ok: " : "FAILED: ");
+                duetos::arch::SerialWrite(path);
+                duetos::arch::SerialWrite("\n");
+            },
+            nullptr);
+        break;
+    }
+    case 8: // REFRESH DESKTOP — recompose the wallpaper + windows.
+        duetos::drivers::video::DesktopCompose(duetos::drivers::video::ThemeCurrent().desktop_bg,
+                                               "WELCOME TO DUETOS   BOOT OK");
+        duetos::drivers::video::ConsoleWriteln("-> DESKTOP REFRESHED");
+        break;
+    case 9: // SHOW DESKTOP — toggle minimize-all / restore.
+        duetos::drivers::video::WindowShowDesktopToggle();
+        duetos::drivers::video::ConsoleWriteln("-> SHOW DESKTOP TOGGLED");
+        break;
     case 6: // HELP / SHORTCUTS
     {
         const duetos::drivers::video::WindowHandle hh =
@@ -353,10 +399,20 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
     // The Files app's own dispatcher knows what to do with each
     // row id; we route there. RENAME (31) is a known v0 GAP —
     // there's no text-input modal yet; it just notifies the user.
-    case 30: // FILES — OPEN
-    case 31: // FILES — RENAME (GAP)
-    case 32: // FILES — DELETE
-    case 33: // FILES — PROPERTIES
+    // Files context-action band 30..39: 30 OPEN, 31 RENAME, 32
+    // DELETE, 33 PROPERTIES, 34 REFRESH, 35 NEW FILE, 36 NEW
+    // FOLDER, 37 OPEN (non-FAT views), 38 PROPERTIES (non-FAT),
+    // 39 REFRESH (non-FAT). All route to the app's own dispatcher.
+    case 30:
+    case 31:
+    case 32:
+    case 33:
+    case 34:
+    case 35:
+    case 36:
+    case 37:
+    case 38:
+    case 39:
         duetos::apps::files::FilesDispatchContextAction(action, ctx);
         break;
     // Power / session band (40..49). 40/41 don't return.

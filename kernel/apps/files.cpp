@@ -4,6 +4,7 @@
 #include "apps/notes.h"
 #include "apps/trash.h"
 #include "arch/x86_64/serial.h"
+#include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/dialog.h"
@@ -13,6 +14,7 @@
 #include "drivers/video/scrollbar.h"
 #include "drivers/video/sound_cue.h"
 #include "drivers/video/theme.h"
+#include "fs/duetfs.h"
 #include "fs/fat32.h"
 #include "fs/ramfs.h"
 #include "mm/address_space.h"
@@ -41,6 +43,7 @@ enum class Mode : u8
     Ramfs = 0,
     Fat32 = 1,
     Trash = 2,
+    DuetFs = 3, // the native DuetFS "main drive", browsable + nested
 };
 
 // Pending two-step prompt. The X-then-Y convention generalises
@@ -108,6 +111,18 @@ struct State
     u32 trash_count;
     u32 trash_selection;
 
+    // DuetFS "main drive" view — a node-id navigation stack
+    // mirroring the ramfs view, populated through the
+    // duetfs_readdir FFI. duet_depth == 0 until the view is first
+    // entered, then >= 1 (stack[0] = root). duet_names carries the
+    // breadcrumb component per level for the header path.
+    duetos::fs::duetfs::DirEntry duet_entries[kFatMax];
+    u32 duet_count;
+    u32 duet_selection;
+    u32 duet_stack[kMaxDepth];
+    char duet_names[kMaxDepth][64];
+    u32 duet_depth;
+
     // Pending two-step prompt. `pending_idx` records the row the
     // arm targeted so a subsequent navigate / mode-switch can
     // disarm cleanly.
@@ -126,6 +141,12 @@ constinit State g_state = {duetos::drivers::video::kWindowInvalid,
                            0,
                            {},
                            0,
+                           0,
+                           {},
+                           0,
+                           0,
+                           {},
+                           {},
                            0,
                            Pending::None,
                            0};
@@ -259,12 +280,46 @@ void RescanTrash()
     SortTrashEntries();
 }
 
+// Page the current DuetFS directory (the node on top of the
+// navigation stack) into the entry cache via duetfs_readdir. The
+// boot DuetFS volume is mounted at /duetfs; we talk to it through
+// its boot block handle so the view tracks the same bytes the
+// shell's `ls /duetfs` sees.
+void RescanDuetFs()
+{
+    namespace df = duetos::fs::duetfs;
+    g_state.duet_count = 0;
+    if (g_state.duet_depth == 0)
+    {
+        g_state.duet_stack[0] = df::kRootNodeId;
+        g_state.duet_names[0][0] = '\0';
+        g_state.duet_depth = 1;
+    }
+    const df::Device dev = df::DeviceForMountHandle(df::BootHandle());
+    const u32 node = g_state.duet_stack[g_state.duet_depth - 1];
+    u32 start = 0;
+    for (;;)
+    {
+        df::DirEntry batch[16];
+        duetos::usize got = 0;
+        if (df::duetfs_readdir(&dev, node, start, batch, sizeof(batch) / sizeof(batch[0]), &got) != df::kStatusOk)
+            break;
+        if (got == 0)
+            break;
+        for (duetos::usize i = 0; i < got && g_state.duet_count < kFatMax; ++i)
+            g_state.duet_entries[g_state.duet_count++] = batch[i];
+        start += static_cast<u32>(got);
+    }
+}
+
 u32 ModeCount()
 {
     if (g_state.mode == Mode::Fat32)
         return g_state.fat_count;
     if (g_state.mode == Mode::Trash)
         return g_state.trash_count;
+    if (g_state.mode == Mode::DuetFs)
+        return g_state.duet_count;
     return CountChildren(RamfsCur());
 }
 
@@ -274,6 +329,8 @@ u32 ModeSelection()
         return g_state.fat_selection;
     if (g_state.mode == Mode::Trash)
         return g_state.trash_selection;
+    if (g_state.mode == Mode::DuetFs)
+        return g_state.duet_selection;
     return g_state.ramfs_selection;
 }
 
@@ -283,6 +340,8 @@ void ModeSelectionSet(u32 v)
         g_state.fat_selection = v;
     else if (g_state.mode == Mode::Trash)
         g_state.trash_selection = v;
+    else if (g_state.mode == Mode::DuetFs)
+        g_state.duet_selection = v;
     else
         g_state.ramfs_selection = v;
 }
@@ -333,6 +392,37 @@ void WriteU64Dec(char* dst, u32 cap, u64 v)
     for (u32 i = 0; i < n; ++i)
         dst[i] = tmp[n - 1 - i];
     dst[n] = '\0';
+}
+
+// Header line + item count, e.g. "DISK:/   (12 items)". Every
+// commodity file manager shows the count; this is the one place
+// all four views render it so the format stays consistent.
+// `sort_by` (nullable) appends ", by <mode>" so the user can see
+// the active sort order — only the FAT32 / Trash views sort, so
+// ramfs / DuetFS pass nullptr.
+void DrawListHeaderWithCount(u32 cx, u32 cy, const char* path, u32 count, u32 color, const char* sort_by = nullptr)
+{
+    char line[96];
+    u32 o = 0;
+    auto put = [&](const char* s)
+    {
+        for (u32 i = 0; s[i] != '\0' && o + 1 < sizeof(line); ++i)
+            line[o++] = s[i];
+    };
+    put(path);
+    put("   (");
+    char num[24];
+    WriteU64Dec(num, sizeof(num), count);
+    put(num);
+    put((count == 1) ? " item" : " items");
+    if (sort_by != nullptr)
+    {
+        put(", by ");
+        put(sort_by);
+    }
+    put(")");
+    line[o] = '\0';
+    duetos::drivers::video::FramebufferDrawString(cx + 4, cy + 2, line, color, kBg);
 }
 
 // Generic row painter — takes the type tag, name, and size; the
@@ -400,7 +490,7 @@ void DrawRamfs(u32 cx, u32 cy, u32 cw, u32 ch)
         }
     }
     header[h_off] = '\0';
-    FramebufferDrawString(cx + 4, cy + 2, header, 0x0080F088, kBg);
+    DrawListHeaderWithCount(cx, cy, header, CountChildren(RamfsCur()), 0x0080F088);
 
     const u32 list_top = cy + 2 + kRowH + 2;
     const u32 n = CountChildren(cur);
@@ -420,7 +510,7 @@ void DrawRamfs(u32 cx, u32 cy, u32 cw, u32 ch)
     }
     if (ch > kRowH + 2)
     {
-        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "UP/DN ENTER:OPEN B:BACK D:DISK", kInkDim, kBg);
+        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "UP/DN ENTER:OPEN B:BACK D:DISK F:DRIVE", kInkDim, kBg);
     }
 }
 
@@ -436,7 +526,7 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
     for (u32 i = 0; prefix[i] != '\0' && h_off + 1 < sizeof(header); ++i)
         header[h_off++] = prefix[i];
     header[h_off] = '\0';
-    FramebufferDrawString(cx + 4, cy + 2, header, 0x0080F088, kBg);
+    DrawListHeaderWithCount(cx, cy, header, g_state.fat_count, 0x0080F088, SortModeName(g_state.sort));
 
     if (g_state.fat_count == 0)
     {
@@ -512,7 +602,7 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
     }
     else if (ch > kRowH + 2)
     {
-        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "UP/DN ENTER:OPEN R:RESCAN X:TRASH T:TRASH M:RAM", kInkDim,
+        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "ENTER:OPEN R:RESCAN X:TRASH T:TRASH M:RAM F:DRIVE", kInkDim,
                               kBg);
     }
 }
@@ -522,7 +612,7 @@ void DrawTrash(u32 cx, u32 cy, u32 cw, u32 ch)
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
     FramebufferFillRect(cx, cy, cw, ch, kBg);
-    FramebufferDrawString(cx + 4, cy + 2, "TRASH:/", 0x00FFA060, kBg);
+    DrawListHeaderWithCount(cx, cy, "TRASH:/", g_state.trash_count, 0x00FFA060, SortModeName(g_state.sort));
 
     if (g_state.trash_count == 0)
     {
@@ -577,12 +667,92 @@ void DrawTrash(u32 cx, u32 cy, u32 cw, u32 ch)
     }
 }
 
+void DrawDuetFs(u32 cx, u32 cy, u32 cw, u32 ch)
+{
+    using duetos::drivers::video::FramebufferDrawString;
+    using duetos::drivers::video::FramebufferFillRect;
+    FramebufferFillRect(cx, cy, cw, ch, kBg);
+
+    // Header breadcrumb: "DRIVE:/a/b/" from the name stack.
+    char header[80];
+    u32 h = 0;
+    const char* prefix = "DRIVE:/";
+    for (u32 i = 0; prefix[i] != '\0' && h + 1 < sizeof(header); ++i)
+        header[h++] = prefix[i];
+    for (u32 d = 1; d < g_state.duet_depth && h + 1 < sizeof(header); ++d)
+    {
+        for (u32 i = 0; g_state.duet_names[d][i] != '\0' && h + 1 < sizeof(header); ++i)
+            header[h++] = g_state.duet_names[d][i];
+        if (h + 1 < sizeof(header))
+            header[h++] = '/';
+    }
+    header[h] = '\0';
+    DrawListHeaderWithCount(cx, cy, header, g_state.duet_count, 0x0080F088);
+
+    if (g_state.duet_count == 0)
+    {
+        FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(empty directory)", kInkDim, kBg);
+        if (ch > kRowH + 2)
+            FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "B:BACK  M:RAM  D:DISK", kInkDim, kBg);
+        return;
+    }
+
+    const u32 list_top = cy + 2 + kRowH + 2;
+    const u32 n = g_state.duet_count;
+    const u32 max_rows = (ch > (list_top - cy) + kRowH) ? (ch - (list_top - cy)) / kRowH : 0;
+    u32 first = 0;
+    if (n > max_rows && g_state.duet_selection >= max_rows)
+        first = g_state.duet_selection - (max_rows - 1);
+    const u32 list_w =
+        (cw > duetos::drivers::video::kScrollbarWidth + 2) ? cw - duetos::drivers::video::kScrollbarWidth - 2 : cw;
+    for (u32 i = 0; i < max_rows && first + i < n; ++i)
+    {
+        const u32 idx = first + i;
+        const auto& e = g_state.duet_entries[idx];
+        const bool is_dir = e.kind == duetos::fs::duetfs::kKindDir;
+        char nm[65];
+        const u32 nl = e.name_len < 64 ? e.name_len : 64;
+        for (u32 k = 0; k < nl; ++k)
+            nm[k] = static_cast<char>(e.name[k]);
+        nm[nl] = '\0';
+        DrawRowGeneric(cx, list_top + i * kRowH, list_w, is_dir, nm, e.size_bytes, idx == g_state.duet_selection);
+    }
+    if (max_rows > 0 && cw > duetos::drivers::video::kScrollbarWidth)
+    {
+        const duetos::u32 sb_x = cx + cw - duetos::drivers::video::kScrollbarWidth;
+        const duetos::u32 sb_y = list_top;
+        const duetos::u32 sb_w = duetos::drivers::video::kScrollbarWidth;
+        const duetos::u32 sb_h = max_rows * kRowH;
+        duetos::drivers::video::ScrollbarPaint(sb_x, sb_y, sb_w, sb_h, {n, max_rows, first});
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = true;
+        s.x = sb_x;
+        s.y = sb_y;
+        s.w = sb_w;
+        s.h = sb_h;
+        s.total = n;
+        s.visible = max_rows;
+        s.first = first;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
+    }
+    else
+    {
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = false;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
+    }
+    if (ch > kRowH + 2)
+        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "UP/DN ENTER:OPEN B:BACK M:RAM D:DISK", kInkDim, kBg);
+}
+
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
     if (g_state.mode == Mode::Fat32)
         DrawFat32(cx, cy, cw, ch);
     else if (g_state.mode == Mode::Trash)
         DrawTrash(cx, cy, cw, ch);
+    else if (g_state.mode == Mode::DuetFs)
+        DrawDuetFs(cx, cy, cw, ch);
     else
         DrawRamfs(cx, cy, cw, ch);
 }
@@ -1048,6 +1218,48 @@ bool FilesFeedArrow(bool up)
     return true;
 }
 
+// Visible list rows for the current window size. Mirrors the
+// max_rows formula in every Draw* path / FilesRowAt (title bar
+// 22 px + 2-px borders, header line at 2 + kRowH + 2). Used to
+// make PageUp/PageDown step exactly one screenful.
+u32 FilesListVisibleRows()
+{
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh) || wh < 26)
+        return 0;
+    const duetos::u32 content_y = wy + 22 + 2;
+    const duetos::u32 content_h = wh - 22 - 4;
+    const duetos::u32 list_top = content_y + 2 + kRowH + 2;
+    return (content_h > (list_top - content_y) + kRowH) ? (content_h - (list_top - content_y)) / kRowH : 0;
+}
+
+// Home / End / PageUp / PageDown for the active list. Matches the
+// list-navigation surface sibling apps (calendar, hexview,
+// notify-center) already expose. `code` is a VK navigation key.
+bool FilesFeedListKey(duetos::u16 code)
+{
+    g_state.pending = Pending::None;
+    const u32 n = ModeCount();
+    if (n == 0)
+        return true;
+    u32 sel = ModeSelection();
+    u32 page = FilesListVisibleRows();
+    if (page == 0)
+        page = 1;
+    if (code == duetos::drivers::input::kKeyHome)
+        sel = 0;
+    else if (code == duetos::drivers::input::kKeyEnd)
+        sel = n - 1;
+    else if (code == duetos::drivers::input::kKeyPageUp)
+        sel = (sel > page) ? sel - page : 0;
+    else if (code == duetos::drivers::input::kKeyPageDown)
+        sel = (sel + page < n) ? sel + page : n - 1;
+    else
+        return false;
+    ModeSelectionSet(sel);
+    return true;
+}
+
 bool FilesFeedChar(char c)
 {
     // Pending two-step prompts. 'Y' confirms whatever was armed,
@@ -1148,6 +1360,18 @@ bool FilesFeedChar(char c)
             g_state.trash_selection = 0;
             RescanTrash();
             duetos::drivers::video::NotifyShow("files: trash view");
+        }
+        return true;
+    }
+    if (c == 'f' || c == 'F')
+    {
+        if (g_state.mode != Mode::DuetFs)
+        {
+            g_state.mode = Mode::DuetFs;
+            g_state.duet_selection = 0;
+            g_state.duet_depth = 0; // RescanDuetFs re-seeds root
+            RescanDuetFs();
+            duetos::drivers::video::NotifyShow("files: main drive");
         }
         return true;
     }
@@ -1252,6 +1476,16 @@ bool FilesFeedChar(char c)
             }
             return true;
         }
+        if (g_state.mode == Mode::DuetFs)
+        {
+            if (g_state.duet_depth > 1)
+            {
+                --g_state.duet_depth;
+                g_state.duet_selection = 0;
+                RescanDuetFs();
+            }
+            return true;
+        }
         // Fat32 mode: Back is a no-op in v0 (root only).
         return true;
     }
@@ -1289,6 +1523,40 @@ bool FilesFeedChar(char c)
                     duetos::arch::SerialWrite(sel->name ? sel->name : "(unnamed)");
                     duetos::arch::SerialWrite("\n");
                 }
+            }
+            return true;
+        }
+        if (g_state.mode == Mode::DuetFs)
+        {
+            if (g_state.duet_selection >= g_state.duet_count)
+                return true;
+            const auto& e = g_state.duet_entries[g_state.duet_selection];
+            const u32 nl = e.name_len < 63 ? e.name_len : 63;
+            if (e.kind == duetos::fs::duetfs::kKindDir)
+            {
+                if (g_state.duet_depth < kMaxDepth)
+                {
+                    g_state.duet_stack[g_state.duet_depth] = e.node_id;
+                    u32 k = 0;
+                    for (; k < nl; ++k)
+                        g_state.duet_names[g_state.duet_depth][k] = static_cast<char>(e.name[k]);
+                    g_state.duet_names[g_state.duet_depth][k] = '\0';
+                    ++g_state.duet_depth;
+                    g_state.duet_selection = 0;
+                    RescanDuetFs();
+                }
+            }
+            else
+            {
+                char nm[64];
+                u32 k = 0;
+                for (; k < nl; ++k)
+                    nm[k] = static_cast<char>(e.name[k]);
+                nm[k] = '\0';
+                duetos::arch::SerialWrite("[files] open duetfs file name=");
+                duetos::arch::SerialWrite(nm);
+                duetos::arch::SerialWrite("\n");
+                duetos::drivers::video::NotifyShow(nm);
             }
             return true;
         }
@@ -1336,6 +1604,49 @@ void FilesSelfTest()
     if (g_state.mode != Mode::Ramfs)
         pass = false;
 
+    // DuetFS "main drive" view round-trip. The boot volume is
+    // mounted at /duetfs and seeded with /etc, so entering the
+    // view, descending into the first directory, and backing out
+    // must all hold. duet_depth tracks the navigation stack.
+    FilesFeedChar('f');
+    if (g_state.mode != Mode::DuetFs || g_state.duet_depth != 1)
+        pass = false;
+    {
+        u32 dir_row = kFatMax;
+        for (u32 i = 0; i < g_state.duet_count; ++i)
+        {
+            if (g_state.duet_entries[i].kind == duetos::fs::duetfs::kKindDir)
+            {
+                dir_row = i;
+                break;
+            }
+        }
+        if (dir_row != kFatMax)
+        {
+            g_state.duet_selection = dir_row;
+            FilesFeedChar('\n'); // descend
+            if (g_state.duet_depth != 2)
+                pass = false;
+            FilesFeedChar('b'); // back to root
+            if (g_state.duet_depth != 1)
+                pass = false;
+            // Generic context dispatch (37 OPEN / 39 REFRESH) must
+            // reach the handler — guards the menu_dispatch 30..39
+            // routing band and the shared non-FAT action path.
+            g_state.duet_selection = dir_row;
+            FilesDispatchContextAction(37, dir_row); // OPEN -> descend
+            if (g_state.duet_depth != 2)
+                pass = false;
+            FilesFeedChar('b');
+            FilesDispatchContextAction(39, 0); // REFRESH (no-op safe)
+            if (g_state.mode != Mode::DuetFs || g_state.duet_depth != 1)
+                pass = false;
+        }
+    }
+    FilesFeedChar('m');
+    if (g_state.mode != Mode::Ramfs)
+        pass = false;
+
     // Extension-match helper sanity (used by Files->ImageView dispatch
     // and Files->Notes dispatch).
     if (!EndsWithCi("SHOT0001.BMP", ".bmp"))
@@ -1369,10 +1680,25 @@ void FilesSelfTest()
     if (g_state.pending != Pending::None)
         pass = false;
 
+    // Home / End list navigation on the ramfs root listing.
+    g_state.mode = Mode::Ramfs;
+    g_state.ramfs_depth = 1;
+    if (ModeCount() > 1)
+    {
+        FilesFeedListKey(duetos::drivers::input::kKeyEnd);
+        if (ModeSelection() != ModeCount() - 1)
+            pass = false;
+        FilesFeedListKey(duetos::drivers::input::kKeyHome);
+        if (ModeSelection() != 0)
+            pass = false;
+    }
+
     g_state.ramfs_depth = saved_depth;
     g_state.ramfs_selection = saved_sel;
     g_state.mode = saved_mode;
-    SerialWrite(pass ? "[files] self-test OK (ramfs descend+back, mode toggle, ext match, delete-disarm)\n"
+    SerialWrite(pass ? "[files] self-test OK (ramfs descend+back, mode toggle, duetfs descend+back, ctx-dispatch, "
+                       "home/end, "
+                       "ext match, delete-disarm)\n"
                      : "[files] self-test FAILED\n");
 }
 
@@ -1382,16 +1708,45 @@ namespace
 // Per-row context menu items. Static so the menu primitive can
 // hold a borrowed pointer for the open lifetime.
 constinit duetos::drivers::video::MenuItem kFilesContextMenuItems[] = {
-    {"OPEN", 30, 0, nullptr, 0},       {"RENAME", 31, 0, nullptr, 0},  {"DELETE", 32, 0, nullptr, 0},
-    {"PROPERTIES", 33, 0, nullptr, 0}, {"REFRESH", 34, 0, nullptr, 0},
+    {"OPEN", 30, 0, nullptr, 0},       {"RENAME", 31, 0, nullptr, 0},        {"DELETE", 32, 0, nullptr, 0},
+    {"PROPERTIES", 33, 0, nullptr, 0}, {"NEW TEXT FILE", 35, 0, nullptr, 0}, {"NEW FOLDER", 36, 0, nullptr, 0},
+    {"REFRESH", 34, 0, nullptr, 0},
 };
+// Sentinel ctx for a right-click on empty space (no row under the
+// cursor): row-specific actions (OPEN/RENAME/DELETE/PROPERTIES)
+// no-op on it; the create/refresh actions still work.
+constexpr duetos::u32 kFilesNoRow = 0xFFFFFFFFu;
 constexpr duetos::u32 kFilesContextMenuItemsN = sizeof(kFilesContextMenuItems) / sizeof(kFilesContextMenuItems[0]);
+
+// Shared context menu for the non-FAT views (DuetFS main drive,
+// ramfs, Trash). Read-only OPEN / PROPERTIES / REFRESH — the
+// everyday gestures every file manager offers for a browse mount.
+constinit duetos::drivers::video::MenuItem kFilesGenericMenuItems[] = {
+    {"OPEN", 37, 0, nullptr, 0},
+    {"PROPERTIES", 38, 0, nullptr, 0},
+    {"REFRESH", 39, 0, nullptr, 0},
+};
+constexpr duetos::u32 kFilesGenericMenuItemsN = sizeof(kFilesGenericMenuItems) / sizeof(kFilesGenericMenuItems[0]);
+
+// Trash view: the primary action (37) is RESTORE, not OPEN —
+// opening a binned file is meaningless. Shares the 38/39
+// PROPERTIES/REFRESH slots with the generic menu.
+constinit duetos::drivers::video::MenuItem kFilesTrashMenuItems[] = {
+    {"RESTORE", 37, 0, nullptr, 0},
+    {"PROPERTIES", 38, 0, nullptr, 0},
+    {"REFRESH", 39, 0, nullptr, 0},
+};
+constexpr duetos::u32 kFilesTrashMenuItemsN = sizeof(kFilesTrashMenuItems) / sizeof(kFilesTrashMenuItems[0]);
 
 } // namespace
 
 duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
 {
-    if (g_state.mode != Mode::Fat32 || g_state.fat_count == 0)
+    // Mode-agnostic: every view (FAT32 / DuetFS / ramfs / Trash)
+    // draws its list with the same geometry, so the hit-test only
+    // needs the per-mode count + selection (via ModeCount /
+    // ModeSelection) — no per-mode whitelist.
+    if (ModeCount() == 0)
         return -1;
     duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
     if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
@@ -1410,14 +1765,15 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
     const duetos::u32 list_top = content_y + 2 + kRowH + 2;
     if (sy < list_top)
         return -1;
-    const duetos::u32 n = g_state.fat_count;
+    const duetos::u32 n = ModeCount();
     const duetos::u32 max_rows =
         (content_h > (list_top - content_y) + kRowH) ? (content_h - (list_top - content_y)) / kRowH : 0;
     if (max_rows == 0)
         return -1;
+    const duetos::u32 sel = ModeSelection();
     duetos::u32 first = 0;
-    if (n > max_rows && g_state.fat_selection >= max_rows)
-        first = g_state.fat_selection - (max_rows - 1);
+    if (n > max_rows && sel >= max_rows)
+        first = sel - (max_rows - 1);
     const duetos::u32 row_in_view = (sy - list_top) / kRowH;
     if (row_in_view >= max_rows)
         return -1;
@@ -1451,18 +1807,17 @@ bool FilesBeginDragSelection()
 
 bool FilesOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
 {
-    // FAT32 mode is the only mode with a click-to-row hit-test
-    // today. Trash / ramfs DC could be wired the same way — keep
-    // them GAP'd until those modes get a real RowAt helper, so a
-    // double-click in those modes simply doesn't open anything
-    // (it doesn't misfire).
-    if (g_state.mode != Mode::Fat32)
-        return false;
+    // Works in every view now that FilesRowAt is mode-agnostic.
+    // Select the clicked row then reuse the ENTER dispatch, which
+    // already does the right thing per mode (FAT32 open, DuetFS /
+    // ramfs descend-or-open). Trash has no open verb so the ENTER
+    // path is a no-op there — double-click simply does nothing,
+    // which is the correct behaviour.
     const duetos::i32 row = FilesRowAt(sx, sy);
     if (row < 0)
         return false;
-    g_state.fat_selection = static_cast<duetos::u32>(row);
-    OpenFat32Selected();
+    ModeSelectionSet(static_cast<duetos::u32>(row));
+    FilesFeedChar('\n');
     duetos::arch::SerialWrite("[files] double-click open row=");
     duetos::arch::SerialWriteHex(static_cast<duetos::u64>(row));
     duetos::arch::SerialWrite("\n");
@@ -1471,15 +1826,32 @@ bool FilesOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
 
 bool FilesOnRightClick(duetos::u32 sx, duetos::u32 sy)
 {
-    // Only FAT32 mode has a v0 context menu. Trash and ramfs fall
-    // through; caller will use the default kernel-window menu.
+    // Non-FAT views (DuetFS main drive, ramfs, Trash) share one
+    // generic OPEN / PROPERTIES / REFRESH menu so every view has
+    // the everyday right-click gestures. FilesRowAt is
+    // mode-agnostic; empty space falls back to the highlighted
+    // selection.
+    if (g_state.mode == Mode::DuetFs || g_state.mode == Mode::Ramfs || g_state.mode == Mode::Trash)
+    {
+        const duetos::i32 grow = FilesRowAt(sx, sy);
+        const duetos::u32 gctx = (grow < 0) ? ModeSelection() : static_cast<duetos::u32>(grow);
+        const bool tr = g_state.mode == Mode::Trash;
+        duetos::drivers::video::MenuOpen(tr ? kFilesTrashMenuItems : kFilesGenericMenuItems,
+                                         tr ? kFilesTrashMenuItemsN : kFilesGenericMenuItemsN, sx, sy, gctx);
+        duetos::arch::SerialWrite("[files] generic context menu opened ctx=");
+        duetos::arch::SerialWriteHex(gctx);
+        duetos::arch::SerialWrite("\n");
+        return true;
+    }
+    // FAT32 keeps its richer 30..36 menu.
     if (g_state.mode != Mode::Fat32)
         return false;
     const duetos::i32 row = FilesRowAt(sx, sy);
-    if (row < 0)
-        return false;
-    duetos::drivers::video::MenuOpen(kFilesContextMenuItems, kFilesContextMenuItemsN, sx, sy,
-                                     static_cast<duetos::u32>(row));
+    // Empty space still gets the menu so NEW TEXT FILE / NEW FOLDER
+    // are reachable without aiming at an existing entry — the
+    // everyday "right-click to create" gesture.
+    const duetos::u32 ctx = (row < 0) ? kFilesNoRow : static_cast<duetos::u32>(row);
+    duetos::drivers::video::MenuOpen(kFilesContextMenuItems, kFilesContextMenuItemsN, sx, sy, ctx);
     duetos::arch::SerialWrite("[files] context menu opened row=");
     duetos::arch::SerialWriteHex(static_cast<duetos::u64>(row));
     duetos::arch::SerialWrite(" name=");
@@ -1491,13 +1863,107 @@ bool FilesOnRightClick(duetos::u32 sx, duetos::u32 sy)
 
 void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
 {
+    // Generic non-FAT context actions (37 OPEN / 38 PROPERTIES /
+    // 39 REFRESH), shared by the DuetFS main-drive, ramfs and
+    // Trash views so every view offers the same everyday gestures.
+    if (action == 37 || action == 38 || action == 39)
+    {
+        if (g_state.mode == Mode::Fat32)
+            return;       // FAT32 has its own richer 30..36 menu
+        if (action == 39) // REFRESH
+        {
+            if (g_state.mode == Mode::DuetFs)
+                RescanDuetFs();
+            else if (g_state.mode == Mode::Trash)
+                RescanTrash();
+            const u32 c = ModeCount();
+            if (ModeSelection() >= c && c > 0)
+                ModeSelectionSet(c - 1);
+            duetos::drivers::video::NotifyShow("refreshed");
+            return;
+        }
+        if (ctx >= ModeCount())
+            return;
+        if (action == 37) // primary action: RESTORE in Trash, else OPEN
+        {
+            ModeSelectionSet(ctx);
+            if (g_state.mode == Mode::Trash)
+                RestoreSelectedTrash();
+            else
+                FilesFeedChar('\n');
+            return;
+        }
+        // action == 38: PROPERTIES. Pull (name, is_dir, size) from
+        // whichever backend this view is showing, then one dialog.
+        char nm[80] = {};
+        bool is_dir = false;
+        duetos::u64 size = 0;
+        if (g_state.mode == Mode::DuetFs)
+        {
+            const auto& e = g_state.duet_entries[ctx];
+            const u32 nl = e.name_len < sizeof(nm) - 1 ? e.name_len : sizeof(nm) - 1;
+            for (u32 i = 0; i < nl; ++i)
+                nm[i] = static_cast<char>(e.name[i]);
+            is_dir = e.kind == duetos::fs::duetfs::kKindDir;
+            size = e.size_bytes;
+        }
+        else if (g_state.mode == Mode::Trash)
+        {
+            const auto& e = g_state.trash_entries[ctx];
+            for (u32 i = 0; e.name[i] != '\0' && i + 1 < sizeof(nm); ++i)
+                nm[i] = e.name[i];
+            is_dir = (e.attributes & 0x10) != 0;
+            size = e.size_bytes;
+        }
+        else // Ramfs
+        {
+            const auto* cur = RamfsCur();
+            if (cur == nullptr || cur->children == nullptr)
+                return;
+            const auto* child = cur->children[ctx];
+            if (child == nullptr)
+                return;
+            for (u32 i = 0; child->name[i] != '\0' && i + 1 < sizeof(nm); ++i)
+                nm[i] = child->name[i];
+            is_dir = child->type == duetos::fs::RamfsNodeType::kDir;
+            size = is_dir ? 0 : child->file_size;
+        }
+        static char s_props[160];
+        u32 p = 0;
+        auto put = [&](const char* s)
+        {
+            for (u32 i = 0; s[i] != '\0' && p + 1 < sizeof(s_props); ++i)
+                s_props[p++] = s[i];
+        };
+        put("Name: ");
+        put(nm);
+        put("\nType: ");
+        put(is_dir ? "Folder" : "File");
+        put("\nSize: ");
+        char num[24];
+        WriteU64Dec(num, sizeof(num), size);
+        put(num);
+        put(" bytes");
+        s_props[p] = '\0';
+        duetos::arch::SerialWrite("[files] properties: ");
+        duetos::arch::SerialWrite(s_props);
+        duetos::arch::SerialWrite("\n");
+        duetos::drivers::video::MessageBoxOpen(
+            "PROPERTIES", s_props, [](duetos::drivers::video::DialogResult, const char*, void*) {}, nullptr);
+        return;
+    }
     // ctx is the row index captured at MenuOpen time. Validate
     // against the current fat_count — the listing could have
     // re-scanned between right-click and click-on-item.
     if (g_state.mode != Mode::Fat32)
         return;
-    if (ctx >= g_state.fat_count)
-        return;
+    // Row-specific actions need a valid row; create/refresh do
+    // not (ctx may be kFilesNoRow from an empty-space right-click).
+    if (action == 30 || action == 31 || action == 32 || action == 33)
+    {
+        if (ctx >= g_state.fat_count)
+            return;
+    }
     switch (action)
     {
     case 30: // OPEN
@@ -1585,17 +2051,31 @@ void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
         duetos::arch::SerialWrite("[files] delete-to-trash armed via context menu\n");
         break;
     }
-    case 33: // PROPERTIES — log + notify
+    case 33: // PROPERTIES — real info dialog (name / size / type / attr)
     {
         const auto& e = g_state.fat_entries[ctx];
-        duetos::arch::SerialWrite("[files] properties: name=");
-        duetos::arch::SerialWrite(e.name);
-        duetos::arch::SerialWrite(" size=");
-        char sb[24];
-        duetos::u32 si = 0;
+        const bool is_dir = (e.attributes & 0x10) != 0;
+        // MessageBoxOpen stores the body by reference until the
+        // callback fires, so it must outlive this scope — a
+        // file-scope static is safe given the dialog primitive is
+        // single-instance.
+        static char s_props[160];
+        u32 p = 0;
+        auto put = [&](const char* s)
+        {
+            for (u32 i = 0; s[i] != '\0' && p + 1 < sizeof(s_props); ++i)
+                s_props[p++] = s[i];
+        };
+        put("Name: ");
+        put(e.name);
+        put("\nType: ");
+        put(is_dir ? "Folder" : "File");
+        put("\nSize: ");
+        char num[24];
+        u32 ni = 0;
         duetos::u64 v = e.size_bytes;
         char tmp[24];
-        duetos::u32 ti = 0;
+        u32 ti = 0;
         if (v == 0)
             tmp[ti++] = '0';
         while (v != 0)
@@ -1604,13 +2084,105 @@ void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
             v /= 10;
         }
         while (ti > 0)
-            sb[si++] = tmp[--ti];
-        sb[si] = '\0';
-        duetos::arch::SerialWrite(sb);
-        duetos::arch::SerialWrite(" attr=");
-        duetos::arch::SerialWriteHex(e.attributes);
+            num[ni++] = tmp[--ti];
+        num[ni] = '\0';
+        put(num);
+        put(" bytes\nAttr: 0x");
+        const char* hexd = "0123456789ABCDEF";
+        char ah[3] = {hexd[(e.attributes >> 4) & 0xF], hexd[e.attributes & 0xF], '\0'};
+        put(ah);
+        s_props[p] = '\0';
+        duetos::arch::SerialWrite("[files] properties: ");
+        duetos::arch::SerialWrite(s_props);
         duetos::arch::SerialWrite("\n");
-        duetos::drivers::video::NotifyShow(e.name);
+        duetos::drivers::video::MessageBoxOpen(
+            "PROPERTIES", s_props, [](duetos::drivers::video::DialogResult, const char*, void*) {}, nullptr);
+        break;
+    }
+    case 35: // NEW TEXT FILE — prompt for a name, create empty file
+    {
+        duetos::drivers::video::InputBoxOpen(
+            "NEW TEXT FILE", "Enter file name (8.3 form):", "NEW.TXT",
+            [](duetos::drivers::video::DialogResult r, const char* text, void*)
+            {
+                if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr || text[0] == '\0')
+                {
+                    duetos::drivers::video::NotifyShow("new file cancelled");
+                    return;
+                }
+                namespace fat = duetos::fs::fat32;
+                const fat::Volume* v = fat::Fat32Volume(0);
+                if (v == nullptr)
+                {
+                    duetos::drivers::video::NotifyShow("new file: no FAT32 volume");
+                    return;
+                }
+                char path[24];
+                path[0] = '/';
+                u32 pi = 1;
+                for (u32 i = 0; text[i] != '\0' && pi + 1 < sizeof(path); ++i)
+                    path[pi++] = text[i];
+                path[pi] = '\0';
+                const bool ok = fat::Fat32CreateAtPath(v, path, nullptr, 0) >= 0;
+                if (ok)
+                {
+                    RescanFat32();
+                    duetos::drivers::video::NotifyShow("file created");
+                }
+                else
+                {
+                    duetos::drivers::video::NotifyShowKind("create failed", duetos::drivers::video::NotifyKind::Error);
+                    duetos::drivers::video::SoundCueError();
+                }
+                duetos::arch::SerialWrite("[files] new file ");
+                duetos::arch::SerialWrite(ok ? "ok: " : "FAILED: ");
+                duetos::arch::SerialWrite(path);
+                duetos::arch::SerialWrite("\n");
+            },
+            nullptr);
+        break;
+    }
+    case 36: // NEW FOLDER — prompt for a name, mkdir
+    {
+        duetos::drivers::video::InputBoxOpen(
+            "NEW FOLDER", "Enter folder name (8.3 form):", "NEWDIR",
+            [](duetos::drivers::video::DialogResult r, const char* text, void*)
+            {
+                if (r != duetos::drivers::video::DialogResult::Ok || text == nullptr || text[0] == '\0')
+                {
+                    duetos::drivers::video::NotifyShow("new folder cancelled");
+                    return;
+                }
+                namespace fat = duetos::fs::fat32;
+                const fat::Volume* v = fat::Fat32Volume(0);
+                if (v == nullptr)
+                {
+                    duetos::drivers::video::NotifyShow("new folder: no FAT32 volume");
+                    return;
+                }
+                char path[24];
+                path[0] = '/';
+                u32 pi = 1;
+                for (u32 i = 0; text[i] != '\0' && pi + 1 < sizeof(path); ++i)
+                    path[pi++] = text[i];
+                path[pi] = '\0';
+                const bool ok = fat::Fat32MkdirAtPath(v, path);
+                if (ok)
+                {
+                    RescanFat32();
+                    duetos::drivers::video::NotifyShow("folder created");
+                }
+                else
+                {
+                    duetos::drivers::video::NotifyShowKind("mkdir failed", duetos::drivers::video::NotifyKind::Error);
+                    duetos::drivers::video::SoundCueError();
+                }
+                duetos::arch::SerialWrite("[files] new folder ");
+                duetos::arch::SerialWrite(ok ? "ok: " : "FAILED: ");
+                duetos::arch::SerialWrite(path);
+                duetos::arch::SerialWrite("\n");
+            },
+            nullptr);
         break;
     }
     case 34: // REFRESH — re-scan FAT32 root, clamp selection.

@@ -1081,6 +1081,22 @@ bool NotesUndo()
     return true;
 }
 
+bool NotesNew()
+{
+    // Start a fresh blank document. Undoable (PushUndo snapshots
+    // the current buffer first) so an accidental Ctrl+N is one
+    // Ctrl+Z away. A brand-new empty doc is "clean" — there's
+    // nothing unsaved until the user types.
+    PushUndo();
+    g_len = 0;
+    g_cursor = 0;
+    g_sel_anchor = kNoSelection;
+    g_dirty = false;
+    AutoScrollIntoView();
+    duetos::drivers::video::NotifyShow("notes: new document");
+    return true;
+}
+
 bool NotesIsDirty()
 {
     return g_dirty;
@@ -1302,6 +1318,19 @@ void NotesSelfTest()
     check(!WordSnapAt(g_len));           // 28
     check(g_sel_anchor == kNoSelection); // 29
 
+    // NotesNew clears to a fresh, clean, empty document.
+    g_len = 0;
+    g_cursor = 0;
+    g_sel_anchor = kNoSelection;
+    for (const char* s = "scratch"; *s != '\0'; ++s)
+        InsertAtCursor(*s);
+    check(g_len == 7 && g_dirty); // 30: typed -> dirty
+    NotesNew();
+    check(g_len == 0);                   // 31
+    check(g_cursor == 0);                // 32
+    check(g_sel_anchor == kNoSelection); // 33
+    check(!g_dirty);                     // 34: fresh doc is clean
+
     // Restore pre-test state.
     g_len = saved_len;
     g_cursor = saved_cursor;
@@ -1313,7 +1342,7 @@ void NotesSelfTest()
 
     if (pass)
     {
-        SerialWrite("[notes] self-test OK (insert + nav + dirty flag + status counts)\n");
+        SerialWrite("[notes] self-test OK (insert + nav + dirty flag + status counts + new-doc)\n");
     }
     else
     {

@@ -3672,6 +3672,24 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorUnlock();
             }
 
+            // Ctrl+N — start a fresh blank Notes document (the
+            // everyday "new file"). !shift so it doesn't collide
+            // with Ctrl+Shift+N (notification-ring dump). Undoable
+            // inside Notes, so no confirmation dialog is needed.
+            if (ctrl && !alt && !shift && (ev.code == 'n' || ev.code == 'N'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    duetos::apps::notes::NotesNew();
+                    duetos::drivers::video::CompositorUnlock();
+                    SerialWrite("[ui] ^N notes new document\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
             // F1 (no modifiers) dumps the user-facing keyboard +
             // shortcut reference into the desktop console. Tested
             // BEFORE the Ctrl+Alt+F1 console-flip handler — bare
@@ -4279,6 +4297,12 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     {
                         app_consumed = duetos::apps::files::FilesFeedArrow(ev.code == kKeyArrowUp);
                     }
+                    else if (active == duetos::apps::files::FilesWindow() &&
+                             (ev.code == kKeyHome || ev.code == kKeyEnd || ev.code == kKeyPageUp ||
+                              ev.code == kKeyPageDown))
+                    {
+                        app_consumed = duetos::apps::files::FilesFeedListKey(static_cast<duetos::u16>(ev.code));
+                    }
                     else if (active == duetos::apps::imageview::ImageViewWindow() &&
                              (ev.code == kKeyArrowLeft || ev.code == kKeyArrowRight))
                     {
@@ -4805,9 +4829,23 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
         kStartItems[6] = {"POWER", 0, kMenuItemFlagSubmenu, kPowerItems, sizeof(kPowerItems) / sizeof(kPowerItems[0])};
         constexpr duetos::u32 start_items_count = sizeof(kStartItems) / sizeof(kStartItems[0]);
         static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
+            {"FILE MANAGER", 104, 0, nullptr, 0}, // 100 + ThemeRole::Files(4)
+            {"TERMINAL", 117, 0, nullptr, 0},     // 100 + ThemeRole::Terminal(17)
+            {"NEW TEXT FILE", 7, 0, nullptr, 0},    {"REFRESH DESKTOP", 8, 0, nullptr, 0},
+            {"SETTINGS", 107, 0, nullptr, 0}, // 100 + ThemeRole::Settings(7)
             {"HELP / SHORTCUTS", 6, 0, nullptr, 0}, {"ABOUT DUETOS", 1, 0, nullptr, 0},
             {"CYCLE WINDOWS", 2, 0, nullptr, 0},    {"LIST WINDOWS", 3, 0, nullptr, 0},
             {"SWITCH TO TTY", 5, 0, nullptr, 0},
+        };
+        // Taskbar right-click menu — the everyday "manage windows
+        // from the bar" gesture. TASK MANAGER uses the 100+role
+        // raise band (ThemeRole::TaskManager == 2 -> 102); the rest
+        // reuse the existing global window actions.
+        static const duetos::drivers::video::MenuItem kTaskbarMenuItems[] = {
+            {"TASK MANAGER", 102, 0, nullptr, 0},
+            {"CYCLE WINDOWS", 2, 0, nullptr, 0},
+            {"LIST WINDOWS", 3, 0, nullptr, 0},
+            {"SHOW DESKTOP", 9, 0, nullptr, 0},
         };
         // Window body menu (right-click on a native window's
         // client area). Enriches the original Raise/Close pair
@@ -4994,7 +5032,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     }
                     duetos::drivers::video::MenuClose();
                 }
-                else if (!duetos::drivers::video::TaskbarContains(cx, cy))
+                else if (duetos::drivers::video::TaskbarContains(cx, cy))
+                {
+                    duetos::drivers::video::MenuOpen(
+                        kTaskbarMenuItems, sizeof(kTaskbarMenuItems) / sizeof(kTaskbarMenuItems[0]), cx, cy, 0);
+                    SerialWrite("[ui] right-click target=taskbar\n");
+                }
+                else
                 {
                     const auto hit = duetos::drivers::video::WindowTopmostAt(cx, cy);
                     if (hit != duetos::drivers::video::kWindowInvalid)
@@ -5454,12 +5498,30 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                     duetos::drivers::video::CursorShow();
                     menu_handled = true; // taskbar ate the click
                 }
-                else if (!duetos::drivers::video::TaskbarIsLocked())
+                else
                 {
-                    // Empty-strip click on an unlocked taskbar -> begin
-                    // drag. Snap target is decided on release below.
-                    duetos::drivers::video::TaskbarBeginDrag();
-                    menu_handled = true;
+                    // Clock / date widget click -> open the Calendar
+                    // (everyday "click the clock to see the calendar"
+                    // gesture). 112 == 100 + ThemeRole::Calendar(12),
+                    // routed through the shared role-raise path.
+                    duetos::u32 clx = 0, cly = 0, clw = 0, clh = 0;
+                    duetos::drivers::video::TaskbarClockBounds(&clx, &cly, &clw, &clh);
+                    if (clw > 0 && clh > 0 && cx >= clx && cx < clx + clw && cy >= cly && cy < cly + clh)
+                    {
+                        duetos::core::DispatchMenuAction(112, 0);
+                        SerialWrite("[ui] taskbar clock click -> calendar\n");
+                        duetos::drivers::video::CursorHide();
+                        duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                        duetos::drivers::video::CursorShow();
+                        menu_handled = true;
+                    }
+                    else if (!duetos::drivers::video::TaskbarIsLocked())
+                    {
+                        // Empty-strip click on an unlocked taskbar ->
+                        // begin drag. Snap target decided on release.
+                        duetos::drivers::video::TaskbarBeginDrag();
+                        menu_handled = true;
+                    }
                 }
             }
 
@@ -5602,10 +5664,34 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
             }
             if (release_edge && drag.active)
             {
-                SerialWrite("[ui] drag end window=");
+                // Aero-style edge snap: dropping a dragged window
+                // against a screen edge snaps it (top = maximize,
+                // left/right = half). The snap APIs were already
+                // keyboard-wired; the mouse drag-to-edge gesture —
+                // what most users actually reach for — was the dead
+                // zone. Compositor lock is held here (loop acquires
+                // it at the top), so call the snap ops directly.
+                const auto fb_snap = duetos::drivers::video::FramebufferGet();
+                constexpr duetos::u32 kSnapEdge = 12;
+                bool snapped = true;
+                if (cy <= kSnapEdge)
+                    duetos::drivers::video::WindowMaximize(drag.window);
+                else if (cx <= kSnapEdge)
+                    duetos::drivers::video::WindowSnapLeft(drag.window);
+                else if (fb_snap.width > kSnapEdge && cx >= fb_snap.width - kSnapEdge)
+                    duetos::drivers::video::WindowSnapRight(drag.window);
+                else
+                    snapped = false;
+                SerialWrite(snapped ? "[ui] drag end (edge snap) window=" : "[ui] drag end window=");
                 SerialWriteHex(drag.window);
                 SerialWrite("\n");
                 drag.active = false;
+                if (snapped)
+                {
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::CursorShow();
+                }
             }
             if (release_edge && sb_drag.active)
             {

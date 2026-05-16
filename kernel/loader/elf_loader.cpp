@@ -213,7 +213,29 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
     const u64 start = seg.vaddr & ~page_mask;
     const u64 end = (seg.vaddr + seg.memsz + page_mask) & ~page_mask;
     if (end <= start)
-        return; // zero-length memsz: nothing to do
+        return; // zero-length memsz: nothing to do (also catches
+                // a vaddr+memsz wrap that drove end below start)
+
+    // Defensive span bound. ElfValidate (the Rust crate) checks
+    // p_filesz against the file but a *valid* ELF may still declare
+    // an enormous p_memsz (legitimate .bss is small; a malformed or
+    // hostile header is not). Without this guard the loop below
+    // calls AllocateFrame per page until the physical pool is dry,
+    // and the AS walker then hard-PANICS (PanicAs "AllocateFrame
+    // returned null inside AS walker") instead of failing the load.
+    // 256 MiB is orders of magnitude above any real test/userland
+    // image yet far below the frame pool, so a pathological segment
+    // now takes the graceful ctx.ok=false bail the rest of the
+    // loader already handles.
+    constexpr u64 kMaxSegmentSpanBytes = 256ULL * 1024 * 1024;
+    if (end - start > kMaxSegmentSpanBytes)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Loader, "elf-loader",
+                     "segment span exceeds sanity bound — rejecting load", end - start);
+        KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, end - start);
+        ctx.ok = false;
+        return;
+    }
 
     // Derive page-level flags from the ELF PF_* bits. Always set
     // Present + User. Writable iff PF_W. Non-exec iff !PF_X — EFER.NXE
