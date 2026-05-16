@@ -253,9 +253,16 @@ SmokeProfile SmokeProfileInit(const char* cmdline)
     }
     // Unknown values fall through to None — full boot. Logged below.
 
-    arch::SerialWrite("[smoke] profile=");
-    arch::SerialWrite(SmokeProfileName(g_profile));
-    arch::SerialWrite(" selected\n");
+    {
+        // Structural sentinel CI greps for as a single line — emit
+        // the whole "[smoke] profile=<name> selected\n" under one
+        // SerialLineGuard so a concurrent klog write can't interleave
+        // at a SerialWrite call boundary and split the line.
+        arch::SerialLineGuard line;
+        arch::SerialWrite("[smoke] profile=");
+        arch::SerialWrite(SmokeProfileName(g_profile));
+        arch::SerialWrite(" selected\n");
+    }
     return g_profile;
 }
 
@@ -473,17 +480,31 @@ void SmokeProfileSleepAndExit()
     // Sentinel that the CI script greps for. The "complete" suffix
     // is the only thing the assertion list checks under a smoke
     // profile — every other expected line came from the scenario.
-    arch::SerialWrite("[smoke] profile=");
-    arch::SerialWrite(SmokeProfileName(g_profile));
-    arch::SerialWrite(" complete\n");
+    //
+    // Emit the sentinel, the TestExit announcement, and the exit
+    // itself under ONE SerialLineGuard. Without it the sentinel is a
+    // 3-call SerialWrite chain; between the calls a timer IRQ can
+    // preempt this task and another task's klog (e.g. a lockdep WARN)
+    // interleaves mid-line, so CI's exact-line grep misses
+    // "[smoke] profile=<name> complete" and the smoke gate flakes.
+    // Holding the guard through TestExit also closes the window for
+    // any output after the sentinel — once we declare complete we
+    // terminate QEMU with nothing else able to run.
+    {
+        arch::SerialLineGuard line;
+        arch::SerialWrite("[smoke] profile=");
+        arch::SerialWrite(SmokeProfileName(g_profile));
+        arch::SerialWrite(" complete\n");
 
-    // Hand off to QEMU's isa-debug-exit device. Writing 0x10 to
-    // port 0xf4 terminates QEMU with exit status (0x10<<1)|1 = 0x21.
-    // The smoke wrapper script treats QEMU's clean exit as the
-    // signal that the sentinel was reached; the signature-grep
-    // step then runs against the captured serial log.
-    arch::SerialWrite("[smoke] calling TestExit(0x10)\n");
-    arch::TestExit(0x10);
+        // Hand off to QEMU's isa-debug-exit device. Writing 0x10 to
+        // port 0xf4 terminates QEMU with exit status (0x10<<1)|1 =
+        // 0x21. The smoke wrapper script treats QEMU's clean exit as
+        // the signal that the sentinel was reached; the
+        // signature-grep step then runs against the captured serial
+        // log.
+        arch::SerialWrite("[smoke] calling TestExit(0x10)\n");
+        arch::TestExit(0x10);
+    }
 }
 
 } // namespace duetos::test
