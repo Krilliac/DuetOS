@@ -1171,6 +1171,21 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     proc->user_rsp_init = r.stack_top - 0x48;
     proc->user_gs_base = r.teb_va;
     proc->user_is_pe32 = r.is_pe32;
+    // T6-01 per-thread half: stash the static-TLS template so
+    // SYS_THREAD_CREATE can give each new thread its own TEB +
+    // TLS block + DLL_THREAD_ATTACH.
+    if (r.tls_present)
+    {
+        proc->tls_present = true;
+        proc->tls_tmpl_src_va = r.tls_tmpl_src_va;
+        proc->tls_tmpl_raw = r.tls_tmpl_raw;
+        proc->tls_tmpl_zerofill = r.tls_tmpl_zerofill;
+        proc->tls_index_va = r.tls_index_va;
+        proc->tls_cb_count = r.tls_cb_count;
+        for (u32 i = 0; i < r.tls_cb_count && i < Process::kTlsMaxCallbacks; ++i)
+            proc->tls_callbacks[i] = r.tls_callbacks[i];
+        proc->tls_thread_region_cursor = 0;
+    }
     /* Record the post-ASLR EXE base so SYS_DLL_BASE_BY_NAME
      * with an empty / NULL name can return it for
      * GetModuleHandleW(NULL). */

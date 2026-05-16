@@ -192,6 +192,18 @@ struct PeLoadResult
                 // imports — the freestanding hello.exe path).
                 // Non-zero value is the GSBASE to load before
                 // ring-3 entry.
+
+    // Static-TLS template descriptor (T6-01). Filled by
+    // SetupStaticTls when the image has a TLS directory; copied
+    // onto Process by the spawn path so SYS_THREAD_CREATE can
+    // replicate per-thread TEB + TLS block + DLL_THREAD_ATTACH.
+    bool tls_present;
+    u64 tls_tmpl_src_va;   // mapped (relocated) template start
+    u64 tls_tmpl_raw;      // bytes to copy
+    u64 tls_tmpl_zerofill; // zero tail bytes
+    u64 tls_index_va;      // *_tls_index VA (already 0 for v0)
+    u32 tls_cb_count;
+    u64 tls_callbacks[16]; // absolute (relocated) callback VAs
 };
 
 /// Load a validated PE into `as`. On failure, the AS may hold

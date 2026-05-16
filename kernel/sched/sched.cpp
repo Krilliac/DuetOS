@@ -206,6 +206,20 @@ struct Task
     // MSR_FS_BASE; the save/restore is a no-op for them.
     u64 fs_base;
 
+    // Per-task user GSBASE override (T6-01 per-thread half). 0 =
+    // "use this task's Process::user_gs_base" (the shared-TEB
+    // model — every existing PE main thread). A worker thread
+    // created by SYS_THREAD_CREATE for a TLS-using PE gets its
+    // OWN TEB and sets this to that per-thread TEB VA. The
+    // scheduler restores the resolved value into the
+    // KERNEL_GS_BASE MSR right after every ContextSwitch so the
+    // task's return-to-user swapgs loads the correct per-thread
+    // TEB regardless of what ran in between. (This also fixes a
+    // latent bug: previously KERNEL_GS_BASE retained whichever
+    // task last trapped from user, correct only because all
+    // threads of the single Win32 process shared one TEB.)
+    u64 user_gs_base_override;
+
     // Per-task IRQ nesting depth. Saved/restored across context
     // switch so the global g_irq_depth tracks "how deep is the
     // CURRENT task's nesting" correctly: a task A that blocks
@@ -1299,6 +1313,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->schedin_tick = 0;
     t->win32_last_error = 0; // ERROR_SUCCESS, per-thread Win32 slot
     t->fs_base = 0;
+    t->user_gs_base_override = 0;
     t->irq_depth = 0;
     // No breakpoints on a fresh task. DR7 = 0 disables every slot
     // (the architecture's MBS bit 10 flips to 1 on the first real
@@ -1439,6 +1454,15 @@ core::Process* TaskProcess(Task* t)
         return nullptr;
     }
     return t->process;
+}
+
+void SchedSetUserGsOverride(Task* t, u64 gs_base)
+{
+    if (t == nullptr)
+    {
+        return;
+    }
+    t->user_gs_base_override = gs_base;
 }
 
 bool TaskIsDead(const Task* t)
@@ -1746,6 +1770,27 @@ void Schedule()
         const u32 lo = static_cast<u32>(v);
         const u32 hi = static_cast<u32>(v >> 32);
         asm volatile("wrmsr" : : "c"(kMsrFsBase), "a"(lo), "d"(hi));
+    }
+    // Restore this task's user GSBASE into the KERNEL_GS_BASE MSR
+    // (0xC0000102). While in the kernel the user gs base is parked
+    // there (the entry swapgs put it there); the return-to-user
+    // swapgs loads it back. Writing it per-resume makes the TEB
+    // base correct per-task: the resolved value is the task's
+    // per-thread TEB override if set, else its Process's shared
+    // TEB (every existing PE main thread — unchanged behaviour),
+    // else 0 for native/Linux/kernel tasks (they enter with gs=0
+    // and never read a TEB, so 0 is the same value EnterUserMode
+    // already gives them). GSBASE itself (the kernel per-CPU
+    // pointer) is untouched.
+    {
+        constexpr u32 kMsrKernelGsBase = 0xC0000102;
+        Task* cur = Current();
+        u64 gs = cur->user_gs_base_override;
+        if (gs == 0 && cur->process != nullptr)
+            gs = cur->process->user_gs_base;
+        const u32 lo = static_cast<u32>(gs);
+        const u32 hi = static_cast<u32>(gs >> 32);
+        asm volatile("wrmsr" : : "c"(kMsrKernelGsBase), "a"(lo), "d"(hi));
     }
 }
 

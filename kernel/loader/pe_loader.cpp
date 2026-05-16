@@ -754,6 +754,14 @@ struct TlsSetupResult
     bool ok = false;           // false => hard failure, fail the load
     bool present = false;      // a TLS directory was present
     u64 entry_override_va = 0; // non-zero => jump here first (callback trampoline)
+    // Template descriptor for per-thread replication (T6-01
+    // per-thread half). Mapped/relocated VAs.
+    u64 tmpl_src_va = 0;
+    u64 tmpl_raw = 0;
+    u64 tmpl_zerofill = 0;
+    u64 index_va = 0;
+    u32 cb_count = 0;
+    u64 callbacks[16] = {};
 };
 
 // T6-01: static TLS + TLS-callback support.
@@ -985,6 +993,16 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
     arch::SerialWrite(" idx_va=");
     arch::SerialWriteHex(idx_va);
     arch::SerialWrite("\n");
+    // Hand the template out so SYS_THREAD_CREATE can replicate it
+    // per-thread (the source bytes are the same mapped, relocated
+    // template region the main-thread copy was taken from).
+    res.tmpl_src_va = start_va;
+    res.tmpl_raw = raw;
+    res.tmpl_zerofill = zerofill;
+    res.index_va = idx_va;
+    res.cb_count = ncb;
+    for (u32 i = 0; i < ncb && i < 16; ++i)
+        res.callbacks[i] = cbs[i];
     res.ok = true;
     return res;
 }
@@ -2340,6 +2358,17 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             return r;
         }
         tls_entry_override = tls.entry_override_va;
+        if (tls.present && tls.ok)
+        {
+            r.tls_present = true;
+            r.tls_tmpl_src_va = tls.tmpl_src_va;
+            r.tls_tmpl_raw = tls.tmpl_raw;
+            r.tls_tmpl_zerofill = tls.tmpl_zerofill;
+            r.tls_index_va = tls.index_va;
+            r.tls_cb_count = tls.cb_count;
+            for (u32 i = 0; i < tls.cb_count && i < 16; ++i)
+                r.tls_callbacks[i] = tls.callbacks[i];
+        }
     }
 
     SerialWrite("[pe-load] OK\n");

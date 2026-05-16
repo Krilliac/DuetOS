@@ -877,6 +877,30 @@ struct Process
     u64 tls_slot_in_use; // bitmap: bit N = slot N allocated
     u64 tls_slot_value[kWin32TlsCap];
 
+    // Static-TLS template descriptor (T6-01 per-thread half).
+    // Populated by the PE loader's SetupStaticTls when the image
+    // has an IMAGE_DIRECTORY_ENTRY_TLS. SYS_THREAD_CREATE uses it
+    // to give each new thread its own TEB + TLS data block (a
+    // fresh copy of the template) and to invoke DLL_THREAD_ATTACH
+    // callbacks on that thread before its start routine — the
+    // model multi-threaded __declspec(thread) code (Chrome) needs.
+    // The template SOURCE bytes live in the image at
+    // tls_tmpl_src_va (mapped, post-reloc); tls_tmpl_raw is the
+    // copied byte count, tls_tmpl_zerofill the zero tail. The
+    // callback VAs are absolute (already relocated).
+    static constexpr u64 kTlsMaxCallbacks = 16;
+    bool tls_present;
+    u64 tls_tmpl_src_va;
+    u64 tls_tmpl_raw;
+    u64 tls_tmpl_zerofill;
+    u64 tls_index_va; // *_tls_index lives here (already 0 for v0)
+    u32 tls_cb_count;
+    u64 tls_callbacks[kTlsMaxCallbacks];
+    // Per-thread TEB/TLS region cursor. Thread N's TEB +
+    // TLS-array + TLS-block are carved from a per-process window
+    // so they never collide with the main thread's fixed VAs.
+    u64 tls_thread_region_cursor;
+
     // Win32 VirtualAlloc bump arena — backs VirtualAlloc /
     // VirtualFree / VirtualProtect. Each SYS_VMAP
     // request rounds the size up to page multiples, allocates

@@ -43,6 +43,7 @@ ULONG _tls_index = 0xFFFFFFFFu;
 
 static volatile DWORD g_cb_ran = 0;
 static volatile DWORD g_cb_reason = 0xFFFFFFFFu;
+static volatile DWORD g_thread_attach = 0;
 
 static void __stdcall TlsCallback(PVOID inst, DWORD reason, PVOID resv)
 {
@@ -51,6 +52,8 @@ static void __stdcall TlsCallback(PVOID inst, DWORD reason, PVOID resv)
     g_cb_reason = reason;
     if (reason == DLL_PROCESS_ATTACH)
         g_cb_ran = 0xC0DEu;
+    else if (reason == DLL_THREAD_ATTACH)
+        g_thread_attach++;
 }
 
 /* Explicit NULL-terminated callback array. */
@@ -66,6 +69,41 @@ const IMAGE_TLS_DIRECTORY64 _tls_used = {
     0,                                        /* SizeOfZeroFill        */
     0                                         /* Characteristics       */
 };
+
+static unsigned char* tls_block(void)
+{
+    void** arr = (void**)__readgsqword(0x58);
+    if (arr == 0)
+        return 0;
+    return (unsigned char*)arr[_tls_index];
+}
+
+static unsigned int rd32(const unsigned char* p)
+{
+    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) | ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
+}
+static void wr32(unsigned char* p, unsigned int v)
+{
+    p[0] = (unsigned char)v;
+    p[1] = (unsigned char)(v >> 8);
+    p[2] = (unsigned char)(v >> 16);
+    p[3] = (unsigned char)(v >> 24);
+}
+
+static volatile int g_worker_ok = 0;
+
+static DWORD WINAPI Worker(LPVOID arg)
+{
+    (void)arg;
+    unsigned char* b = tls_block();
+    /* (a) this thread has its OWN block with the template copied. */
+    int ok = (b != 0) && (rd32(b) == 0xAABBCCDDu);
+    /* (b) write a worker-only marker into the per-thread tail. */
+    if (b != 0)
+        wr32(b + 4, 0x22222222u);
+    g_worker_ok = ok ? 1 : 0;
+    return 0;
+}
 
 void __cdecl mainCRTStartup(void)
 {
@@ -110,6 +148,53 @@ void __cdecl mainCRTStartup(void)
             else
             {
                 Out("[tls_pe] static-tls-template-copied: FAIL\r\n");
+                fail = 1;
+            }
+        }
+    }
+
+    /* 3. Per-thread static TLS: spawn a worker. It must get its
+     *    OWN TEB+block (template copied) and DLL_THREAD_ATTACH,
+     *    and its writes must not disturb this thread's block. */
+    {
+        unsigned char* mb = tls_block();
+        if (mb != 0)
+            wr32(mb + 4, 0x11111111u); /* main's per-thread marker */
+        DWORD tid = 0;
+        HANDLE th = CreateThread(0, 0, Worker, 0, 0, &tid);
+        if (th == 0)
+        {
+            Out("[tls_pe] per-thread-tls: FAIL (CreateThread)\r\n");
+            fail = 1;
+        }
+        else
+        {
+            WaitForSingleObject(th, 0xFFFFFFFFu);
+            if (!g_worker_ok)
+            {
+                Out("[tls_pe] per-thread-tls-template: FAIL (worker block/template)\r\n");
+                fail = 1;
+            }
+            else
+            {
+                Out("[tls_pe] per-thread-tls-template: PASS\r\n");
+            }
+            if (g_thread_attach >= 1u)
+            {
+                Out("[tls_pe] dll-thread-attach: PASS\r\n");
+            }
+            else
+            {
+                Out("[tls_pe] dll-thread-attach: FAIL\r\n");
+                fail = 1;
+            }
+            if (mb != 0 && rd32(mb + 4) == 0x11111111u)
+            {
+                Out("[tls_pe] per-thread-tls-independence: PASS\r\n");
+            }
+            else
+            {
+                Out("[tls_pe] per-thread-tls-independence: FAIL\r\n");
                 fail = 1;
             }
         }
