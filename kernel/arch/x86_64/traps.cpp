@@ -625,8 +625,9 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     //     Peers arrive here and must halt quietly so they don't
     //     fight the panicking CPU for the serial line.
     // Any non-watchdog NMI (external NMI pin, firmware-injected
-    // chipset error, etc.) also falls through to the halt path —
-    // conservative default: if we don't know why NMI fired, stop.
+    // chipset error, etc.) is decoded from port 0x61 (SERR#/IOCHK#)
+    // and reported, then falls through to the halt path —
+    // conservative default: if NMI fired, decode the source, stop.
     if (frame->vector == 2)
     {
         if (NmiWatchdogHandleNmi(frame->rip))
@@ -672,6 +673,40 @@ extern "C" void TrapDispatch(TrapFrame* frame)
                 p->gdb_frozen_frame = nullptr;
             }
             return; // resume the interrupted code on this peer
+        }
+
+        // Chipset / external NMI decode. A non-watchdog, non-GDB,
+        // non-panic-broadcast NMI on real hardware is almost always
+        // a hardware error reported through the NMI Status & Control
+        // register (port 0x61): bit 7 = PCI SERR# (system / bus
+        // parity error), bit 6 = IOCHK# (I/O-channel-check from an
+        // add-in card). Just halting left the operator blind to
+        // WHICH hardware source fired — the same gap the #MC bank
+        // decode closed for vector 18. Gate on !PanicInProgress() so
+        // panic-broadcast peers (which arrive here because a panic
+        // is already underway) stay quiet and don't fight the
+        // panicking CPU for the serial line. Raw serial only — NMI
+        // context, possibly-corrupt state, panic-mode serial bypass.
+        if (!PanicInProgress())
+        {
+            const u8 nmi_sc = Inb(0x61);
+            SerialWrite("\n** NMI (non-watchdog) **\n  port-0x61 : ");
+            SerialWriteHex(nmi_sc);
+            const bool serr = (nmi_sc & 0x80) != 0;
+            const bool iochk = (nmi_sc & 0x40) != 0;
+            if (serr)
+                SerialWrite(" SERR#(PCI-system/parity)");
+            if (iochk)
+                SerialWrite(" IOCHK#(I/O-channel-check)");
+            if (!serr && !iochk)
+                SerialWrite(" no-SERR/IOCHK — external NMI pin or unknown source");
+            SerialWrite("\n  verdict   : hardware error — halting (no NMI-recovery path)\n");
+            KLOG_ERROR_V("arch/nmi", "non-watchdog NMI — see ** NMI (non-watchdog) ** dump (port 0x61)",
+                         static_cast<u64>(nmi_sc));
+            if (serr || iochk)
+            {
+                KBP_PROBE_V(::duetos::debug::ProbeId::kChipsetNmi, static_cast<u64>(nmi_sc));
+            }
         }
 
         // Cross-CPU panic broadcast (or any unclaimed NMI). Capture

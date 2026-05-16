@@ -56,6 +56,12 @@ enum class ProbeId : u8
                           // failing bank in hand. ArmedLog: a clean boot
                           // never takes a #MC, so any fire is a real
                           // hardware fault worth a sentinel line.
+    kChipsetNmi,          // a non-watchdog NMI whose port-0x61 status
+                          // shows PCI SERR# and/or IOCHK# — a chipset /
+                          // bus / add-in-card hardware error. Caller
+                          // passes the raw 0x61 byte as `value`. ArmedLog:
+                          // a clean boot never takes a chipset NMI, so any
+                          // fire is a real hardware fault.
     kHeapAllocFail,       // KMalloc returned nullptr (kheap pool exhausted)
     kPhysAllocFail,       // AllocateFrame returned kNullFrame (physical OOM)
     kSmpApOnline,         // a secondary CPU finished bring-up; boot diagnostic

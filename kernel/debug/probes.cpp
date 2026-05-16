@@ -28,6 +28,7 @@ constexpr ProbeRow kProbeTable[] = {
     {ProbeId::kKernelGpf, "trap.kernel_gpf", ProbeArm::ArmedLog},
     {ProbeId::kKernelUd, "trap.kernel_ud", ProbeArm::ArmedLog},
     {ProbeId::kMachineCheck, "trap.machine_check", ProbeArm::ArmedLog},
+    {ProbeId::kChipsetNmi, "trap.chipset_nmi", ProbeArm::ArmedLog},
     {ProbeId::kHeapAllocFail, "mm.heap_alloc_fail", ProbeArm::ArmedLog},
     {ProbeId::kPhysAllocFail, "mm.phys_alloc_fail", ProbeArm::ArmedLog},
     {ProbeId::kSmpApOnline, "smp.ap_online", ProbeArm::ArmedLog},

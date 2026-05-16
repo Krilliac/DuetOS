@@ -312,6 +312,18 @@ bool IssueSlot0(volatile u8* port)
         const u32 is = Reg(port, kPortRegIs);
         if ((is & kIsTfes) != 0)
         {
+            // Task-file error. PxTFD carries the ATA Status (bits
+            // 7:0) and ATA Error (bits 15:8) registers; PxSERR
+            // carries the SATA-link error/diagnostic bits. A bare
+            // `return false` left a real-disk error (UNC / IDNF /
+            // ABRT, or a link CRC/PHY fault) completely undiagnosable
+            // — surface both so the failure is triageable, same
+            // principle as the #MC / NMI decodes. Caller still bails;
+            // v0 has no per-command COMRESET retry path (GAP).
+            const u32 tfd = Reg(port, kPortRegTfd);
+            const u32 serr = Reg(port, kPortRegSerr);
+            core::LogWith2Values(core::LogLevel::Error, "drivers/ahci", "slot0 task-file error (PxIS.TFES)", "PxTFD",
+                                 tfd, "PxSERR", serr);
             return false;
         }
         const u32 ci = Reg(port, kPortRegCi);

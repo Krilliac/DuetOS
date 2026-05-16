@@ -164,7 +164,10 @@ constexpr UsbClassDriver kClassDrivers[] = {
 // CAPLENGTH`:
 //
 //   USBCMD   u32 at opbase+0x00 — Run/Stop (bit 0), HCReset (bit 1)
-//   USBSTS   u32 at opbase+0x04 — Halted (bit 0), CNR "not ready" (bit 11)
+//   USBSTS   u32 at opbase+0x04 — Halted (bit 0), HSE host-system-
+//                                 error (bit 2), CNR "not ready"
+//                                 (bit 11), HCE host-controller-
+//                                 error (bit 12)
 //   PAGESIZE u32 at opbase+0x08 — supported page sizes bitmap
 //   CONFIG   u32 at opbase+0x38 — MaxSlotsEn (bits 7:0) — we don't write
 //
@@ -202,7 +205,13 @@ constexpr u64 kXhciPortRegStride = 0x10;
 
 // USBSTS bits.
 constexpr u32 kXhciStsHcHalted = 1u << 0;
+constexpr u32 kXhciStsHse = 1u << 2; // Host System Error — a host-bus
+                                     // / DMA fault during operation;
+                                     // the controller stops. Fatal.
 constexpr u32 kXhciStsCnr = 1u << 11;
+constexpr u32 kXhciStsHce = 1u << 12; // Host Controller Error —
+                                      // internal controller failure.
+                                      // Fatal.
 
 // PORTSC bits.
 constexpr u32 kXhciPortScCcs = 1u << 0;
@@ -288,6 +297,14 @@ void DecodeXhciCaps(const HostControllerInfo& h)
     arch::SerialWrite((usbsts & kXhciStsHcHalted) ? "halted" : "running");
     if (usbsts & kXhciStsCnr)
         arch::SerialWrite(",not-ready");
+    // Host-system / host-controller error bits — the xHCI hardware-
+    // failure indicators (analogous to NVMe CSTS.CFS). Previously
+    // unreported: a controller that stopped on a host-bus DMA fault
+    // looked indistinguishable from a benignly-halted one.
+    if (usbsts & kXhciStsHse)
+        arch::SerialWrite(",HOST-SYSTEM-ERROR");
+    if (usbsts & kXhciStsHce)
+        arch::SerialWrite(",HOST-CONTROLLER-ERROR");
     arch::SerialWrite(") pagesize=");
     arch::SerialWriteHex(pagesize);
     arch::SerialWrite(" slots_en=");
