@@ -68,6 +68,14 @@ i32 NamedPipeRegisterServer(const char* name, u32 pool_idx, bool server_is_write
 /// Returns true on hit, false on miss / not-yet-registered.
 bool NamedPipeConnectClient(const char* name, u32* out_pool_idx, bool* out_server_is_writer);
 
+/// Rollback for NamedPipeConnectClient: clears the client_connected
+/// flag for `name` so a caller that connected but then failed to
+/// finish opening (e.g. handle-table full) doesn't leave the
+/// registration looking connected — which would make
+/// NamedPipeOnServerClose skip the orphaned-reservation release and
+/// leak the pipe-pool slot. No-op on miss. Returns true on hit.
+bool NamedPipeUnconnectClient(const char* name);
+
 /// Server-side close hook. Called from the file-close path when a
 /// Win32FileHandle with `named_pipe_registry_slot >= 0` is closed.
 /// Drops the unused opposite-end reservation if no client connected,

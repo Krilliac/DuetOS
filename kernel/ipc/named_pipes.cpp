@@ -140,6 +140,23 @@ bool NamedPipeConnectClient(const char* name, u32* out_pool_idx, bool* out_serve
     return true;
 }
 
+bool NamedPipeUnconnectClient(const char* name)
+{
+    if (name == nullptr || name[0] == '\0')
+        return false;
+
+    auto flags = ::duetos::sync::SpinLockAcquire(g_table_lock);
+    const i32 slot = FindByName(name);
+    if (slot < 0)
+    {
+        ::duetos::sync::SpinLockRelease(g_table_lock, flags);
+        return false;
+    }
+    g_table[slot].client_connected = false;
+    ::duetos::sync::SpinLockRelease(g_table_lock, flags);
+    return true;
+}
+
 void NamedPipeOnServerClose(i32 slot)
 {
     if (slot < 0 || static_cast<u32>(slot) >= kNamedPipeSlots)

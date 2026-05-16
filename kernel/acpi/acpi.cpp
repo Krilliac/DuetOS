@@ -464,6 +464,15 @@ void ParseMadt(const Madt& madt)
         {
             PanicAcpi("MADT entry has zero length — malformed table");
         }
+        // The loop guard only proved the 2-byte header fits. Each
+        // per-type body (8+ bytes) is cast and fully dereferenced
+        // below, so reject an entry whose declared length runs past
+        // the table end before touching the body — a truncated final
+        // entry in malformed firmware would otherwise read OOB.
+        if (cursor + h->length > end)
+        {
+            PanicAcpi("MADT entry runs past table length — malformed table");
+        }
 
         switch (h->type)
         {

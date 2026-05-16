@@ -1117,7 +1117,12 @@ bool NvmePanicWriteDump(const u8* bytes, u64 len)
     const u64 reserved_bytes = u64(kNvmeDumpReservedSectors / 2) * g_ctrl.ns_sector_size;
     const u64 capped_len = (len > reserved_bytes) ? reserved_bytes : len;
     const u64 written = PanicWriteChunked(lba, bytes, capped_len);
-    return written == len;
+    // Compare against what was actually attempted (capped_len), not
+    // the uncapped len: an oversize-but-fully-persisted dump (len >
+    // reserved_bytes) writes capped_len bytes successfully and must
+    // report success, or the crash-dump caller falls back as if the
+    // persist failed.
+    return written == capped_len;
 }
 
 u64 NvmeFixJournalReservedLba()
@@ -1155,7 +1160,8 @@ bool NvmePanicWriteFixJournal(const u8* bytes, u64 len)
     const u64 written = PanicWriteChunked(lba, bytes, capped_len);
     g_panic_last_ok = prev_ok;
     g_panic_last_bytes = prev_bytes;
-    return written == len;
+    // See NvmePanicWriteDump: success is measured against capped_len.
+    return written == capped_len;
 }
 
 bool NvmePanicWriteSucceededLast()
