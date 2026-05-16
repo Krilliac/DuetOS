@@ -4,8 +4,8 @@
  *   setsockopt / getsockopt for: SO_BROADCAST, SO_KEEPALIVE,
  *   SO_RCVBUF, SO_SNDBUF, SO_LINGER
  */
-#include <windows.h>
 #include <winsock2.h>
+#include <windows.h>
 
 static void Out(const char* s)
 {

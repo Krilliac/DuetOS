@@ -7,6 +7,7 @@
  */
 #include <windows.h>
 #include <stdlib.h>
+#include <mbctype.h> /* _getmbcp / _setmbcp */
 
 static void Out(const char* s)
 {

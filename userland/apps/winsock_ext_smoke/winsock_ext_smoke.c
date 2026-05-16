@@ -6,9 +6,9 @@
  *   WSAAddressToStringA
  *   WSAEnumProtocolsA (skipped — heavy)
  */
-#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 
 static void Out(const char* s)
 {

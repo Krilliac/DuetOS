@@ -10,8 +10,8 @@
  *   ioctlsocket (FIONREAD / FIONBIO)
  *   bind on AF_INET (will likely STUB)
  */
-#include <windows.h>
 #include <winsock2.h>
+#include <windows.h>
 
 static void Out(const char* s)
 {

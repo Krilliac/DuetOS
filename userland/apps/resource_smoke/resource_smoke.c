@@ -56,14 +56,14 @@ void __cdecl mainCRTStartup(void)
 
     /* LoadCursorW(NULL, IDC_ARROW) — built-in cursor. */
     {
-        HCURSOR c = LoadCursorW(NULL, IDC_ARROW);
+        HCURSOR c = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
         Out("[resource_smoke] LoadCursorW(IDC_ARROW)= ");
         Out(c != NULL ? "PASS\r\n" : "FAIL/STUB\r\n");
     }
 
     /* LoadIconW(NULL, IDI_APPLICATION) — built-in icon. */
     {
-        HICON i = LoadIconW(NULL, IDI_APPLICATION);
+        HICON i = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
         Out("[resource_smoke] LoadIconW(IDI_APP)    = ");
         Out(i != NULL ? "PASS\r\n" : "FAIL/STUB\r\n");
     }

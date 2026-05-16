@@ -8,9 +8,9 @@
  * mini_browser already verified gethostbyname; this exercises
  * the modern getaddrinfo path that IPv6-aware code uses.
  */
-#include <windows.h>
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h>
 
 static void Out(const char* s)
 {
