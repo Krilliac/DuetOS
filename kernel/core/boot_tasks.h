@@ -16,4 +16,8 @@ namespace duetos::core
 // repaint / TTY clear).
 void UiTickerTask(void* arg);
 
+// Keyboard reader: Ps2 KeyEvent consumer, global shortcut +
+// window/app keyboard dispatch, console + COM1 mirroring.
+void KbdReaderTask(void* arg);
+
 } // namespace duetos::core
