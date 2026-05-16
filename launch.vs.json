@@ -1,0 +1,59 @@
+{
+  // Visual Studio (full IDE) "Open Folder" debug targets for DuetOS.
+  //
+  // DuetOS is a freestanding x86_64 kernel — it is NOT MSVC-buildable.
+  // Build stays in WSL (cmake --preset x86_64-debug). Visual Studio is
+  // used purely as a remote source debugger that attaches to the
+  // kernel's GDB stub exposed by QEMU on tcp:1234 (WSL2 forwards
+  // localhost, so Windows VS can reach it).
+  //
+  // Prerequisites:
+  //   * VS 2022 with "Linux and embedded development with C++".
+  //   * Open this repo as a WSL folder (\\wsl.localhost\Ubuntu-24.04\
+  //     home\natew\source\DuetOS) so VS uses the WSL /usr/bin/gdb.
+  //   * A debug build present: cmake --preset x86_64-debug &&
+  //     cmake --build build/x86_64-debug
+  //
+  // One-button flow: copy the tasks.vs.json snippet from the repo's
+  // IDE-debugging notes into .vs/tasks.vs.json (that dir is per-user,
+  // git-ignored) so the preLaunch starter runs automatically. Without
+  // it, first run `tools/debug/vs-start-qemu.sh demo` in a WSL shell,
+  // then pick a config below and hit F5 to attach.
+  "version": "0.2.1",
+  "defaults": {},
+  "configurations": [
+    {
+      "type": "cppdbg",
+      "name": "DuetOS: Attach (demo int3 — pauses at end of kernel_main)",
+      "project": "CMakeLists.txt",
+      "program": "${workspaceRoot}/build/x86_64-debug/kernel/duetos-kernel.elf",
+      "cwd": "${workspaceRoot}",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "miDebuggerServerAddress": "localhost:1234",
+      "stopAtConnect": true,
+      "externalConsole": false,
+      "setupCommands": [
+        { "text": "set confirm off", "ignoreFailures": true },
+        { "text": "set print pretty on", "ignoreFailures": true }
+      ]
+    },
+    {
+      "type": "cppdbg",
+      "name": "DuetOS: Attach (live, normal boot)",
+      "project": "CMakeLists.txt",
+      "program": "${workspaceRoot}/build/x86_64-debug/kernel/duetos-kernel.elf",
+      "cwd": "${workspaceRoot}",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "miDebuggerServerAddress": "localhost:1234",
+      "stopAtConnect": false,
+      "externalConsole": false,
+      "setupCommands": [
+        { "text": "set disable-randomization off", "ignoreFailures": true },
+        { "text": "set print pretty on", "ignoreFailures": true },
+        { "text": "set confirm off", "ignoreFailures": true }
+      ]
+    }
+  ]
+}
