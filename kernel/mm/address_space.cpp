@@ -94,14 +94,17 @@ inline void Invlpg(u64 v)
 }
 
 // Allocate a fresh page-table frame, zero it, return its kernel
-// virtual alias. Same as AllocateTable in paging.cpp; deliberately
-// duplicated for the same internal-namespace reason as above.
+// virtual alias, or nullptr when the physical frame pool is dry.
+// Returning null (instead of panicking) lets the failure propagate
+// up through WalkToPteIn to AddressSpaceMapUserPage, which fails
+// the single user mapping gracefully — a userland exec hitting the
+// frame ceiling must kill that process, never halt the kernel.
 u64* AllocateTable()
 {
     const PhysAddr frame = AllocateFrame();
     if (frame == kNullFrame)
     {
-        PanicAs("AllocateFrame returned null inside AS walker", 0);
+        return nullptr;
     }
     auto* table = static_cast<u64*>(PhysToVirt(frame));
     for (u64 i = 0; i < kEntriesPerTable; ++i)
@@ -126,6 +129,10 @@ u64* WalkToPteIn(u64* pml4, u64 virt, bool create)
             return nullptr;
         }
         u64* new_pdpt = AllocateTable();
+        if (new_pdpt == nullptr)
+        {
+            return nullptr; // frame pool dry — propagate, don't panic
+        }
         const PhysAddr phys = VirtToPhys(new_pdpt);
         // PML4 entry must carry kPageUser when it covers a user-
         // accessible PT — without it the CPU page walker rejects
@@ -144,6 +151,10 @@ u64* WalkToPteIn(u64* pml4, u64 virt, bool create)
             return nullptr;
         }
         u64* new_pd = AllocateTable();
+        if (new_pd == nullptr)
+        {
+            return nullptr; // frame pool dry — propagate, don't panic
+        }
         const PhysAddr phys = VirtToPhys(new_pd);
         pdpt_entry = phys | kPagePresent | kPageWritable | kPageUser;
     }
@@ -161,6 +172,10 @@ u64* WalkToPteIn(u64* pml4, u64 virt, bool create)
             return nullptr;
         }
         u64* new_pt = AllocateTable();
+        if (new_pt == nullptr)
+        {
+            return nullptr; // frame pool dry — propagate, don't panic
+        }
         const PhysAddr phys = VirtToPhys(new_pt);
         pd_entry = phys | kPagePresent | kPageWritable | kPageUser;
     }
@@ -367,19 +382,30 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
 
     if (as->region_count >= as->frame_budget)
     {
-        // Budget exhausted. For a trusted AS this means the hard
-        // region-table cap was hit; for a sandbox AS it means the
-        // much smaller per-profile budget was hit. Either way,
-        // refusing the mapping is the safe default — a runaway
-        // process cannot drain the frame allocator past this
-        // point. Panic in v0 because the only callers today are
-        // kernel-side spawn paths that shouldn't ever exceed
-        // budget; when a syscall-driven grow path lands, it'll
-        // need a non-fatal Result<> variant.
-        PanicAs("AddressSpaceMapUserPage: frame budget exhausted", as->region_count);
+        // Budget exhausted. Refusing the mapping is the safe
+        // default — a runaway process cannot drain the frame
+        // allocator past this point. NON-FATAL: leaving the page
+        // unmapped makes the offending user process fault on first
+        // access and get reaped by the ring-3 fault handler; the
+        // kernel must not halt because one userland exec hit its
+        // budget. (Previously a PanicAs — see the v0 note that
+        // anticipated this needing a non-fatal variant.)
+        KLOG_WARN_V("mm/as", "MapUserPage: frame budget exhausted — refusing mapping", as->region_count);
+        return;
     }
 
     u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/true);
+    if (pte == nullptr)
+    {
+        // Physical frame pool dry while building page tables for a
+        // user mapping. NON-FATAL for the same reason as the budget
+        // path: the unmapped page → user #PF → process reaped, not
+        // a kernel halt. This is the fix for the intermittent
+        // "AllocateFrame returned null inside AS walker" panic that
+        // tripped under heavy back-to-back PE/ELF spawns.
+        KLOG_WARN_V("mm/as", "MapUserPage: frame pool dry building page tables — refusing mapping", virt);
+        return;
+    }
     if (*pte & kPagePresent)
     {
         PanicAs("AddressSpaceMapUserPage: virt already mapped", virt);
@@ -508,6 +534,13 @@ bool AddressSpaceMapBorrowedPage(AddressSpace* as, u64 virt, PhysAddr frame, u64
         PanicAs("AddressSpaceMapBorrowedPage: kPageGlobal on user page", flags);
     }
     u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/true);
+    if (pte == nullptr)
+    {
+        // Frame pool dry building page tables — fail the borrow
+        // (caller already handles false) rather than null-deref.
+        KLOG_WARN_V("mm/as", "MapBorrowedPage: frame pool dry building page tables", virt);
+        return false;
+    }
     if (*pte & kPagePresent)
     {
         return false;
