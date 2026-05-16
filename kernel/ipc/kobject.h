@@ -56,7 +56,7 @@ namespace duetos::ipc
 /// Type tag stored in every KObject. The numeric values are stable
 /// — used by `inspect` / panic dumps. New types append at the end;
 /// never re-use a retired tag.
-enum class KObjectType : u32
+enum class KObjectType : u16
 {
     Invalid = 0,
     Mutex = 1,

@@ -1414,7 +1414,7 @@ void TlsSelfTest()
     const u8 record_salt[4] = {0xCA, 0xFE, 0xBA, 0xBE};
     const u8 record_pt[9] = {'H', 'e', 'l', 'l', 'o', ' ', 'T', 'L', 'S'};
     u8 record_wire[64];
-    const u32 record_wire_len = TlsEncryptRecord(record_key, record_salt, /*seq=*/42, kContentApplicationData,
+    const u32 record_wire_len = TlsEncryptRecord(record_key, record_salt, /*seq_num=*/42, kContentApplicationData,
                                                  record_pt, sizeof(record_pt), record_wire, sizeof(record_wire));
     if (record_wire_len != 5u + 8u + sizeof(record_pt) + 16u)
     {
@@ -1429,7 +1429,7 @@ void TlsSelfTest()
     u8 record_back[32];
     u32 record_back_len = 0;
     u8 record_back_type = 0;
-    if (!TlsDecryptRecord(record_key, record_salt, /*seq=*/42, record_wire, record_wire_len, record_back,
+    if (!TlsDecryptRecord(record_key, record_salt, /*seq_num=*/42, record_wire, record_wire_len, record_back,
                           sizeof(record_back), &record_back_len, &record_back_type))
     {
         SerialWrite("[tls] FAIL record-dec\n");
@@ -1459,7 +1459,7 @@ void TlsSelfTest()
     }
     record_wire[14] ^= 0x80; // restore
     // Wrong seq_num at decrypt -> AAD mismatch -> tag fail.
-    if (TlsDecryptRecord(record_key, record_salt, /*seq=*/43, record_wire, record_wire_len, record_back,
+    if (TlsDecryptRecord(record_key, record_salt, /*seq_num=*/43, record_wire, record_wire_len, record_back,
                          sizeof(record_back), &record_back_len, &record_back_type))
     {
         SerialWrite("[tls] FAIL record-dec-wrong-seq-accepted\n");
@@ -1505,7 +1505,7 @@ void TlsSelfTest()
     // Finished hasn't been mixed in yet) would expect to see
     // exactly this verify_data when it decrypts.
     u8 client_fin_wire[64];
-    const u32 client_fin_len = TlsBuildEncryptedFinished(test_ms, tr_client, test_key, test_salt, /*seq=*/0,
+    const u32 client_fin_len = TlsBuildEncryptedFinished(test_ms, tr_client, test_key, test_salt, /*seq_num=*/0,
                                                          /*is_client=*/true, client_fin_wire, sizeof(client_fin_wire));
     if (client_fin_len == 0)
     {
@@ -1518,7 +1518,7 @@ void TlsSelfTest()
     u8 fin_pt[32];
     u32 fin_pt_len = 0;
     u8 fin_pt_type = 0;
-    if (!TlsDecryptRecord(test_key, test_salt, /*seq=*/0, client_fin_wire, client_fin_len, fin_pt, sizeof(fin_pt),
+    if (!TlsDecryptRecord(test_key, test_salt, /*seq_num=*/0, client_fin_wire, client_fin_len, fin_pt, sizeof(fin_pt),
                           &fin_pt_len, &fin_pt_type))
     {
         SerialWrite("[tls] FAIL fin-decrypt\n");
@@ -1557,14 +1557,14 @@ void TlsSelfTest()
     TranscriptUpdate(&tr_client, client_fin_msg, sizeof(client_fin_msg));
 
     u8 server_fin_wire[64];
-    const u32 server_fin_len = TlsBuildEncryptedFinished(test_ms, tr_server, test_key, test_salt, /*seq=*/0,
+    const u32 server_fin_len = TlsBuildEncryptedFinished(test_ms, tr_server, test_key, test_salt, /*seq_num=*/0,
                                                          /*is_client=*/false, server_fin_wire, sizeof(server_fin_wire));
     if (server_fin_len == 0)
     {
         SerialWrite("[tls] FAIL srvfin-build\n");
         return;
     }
-    if (!TlsVerifyEncryptedServerFinished(test_ms, tr_client, test_key, test_salt, /*seq=*/0, server_fin_wire,
+    if (!TlsVerifyEncryptedServerFinished(test_ms, tr_client, test_key, test_salt, /*seq_num=*/0, server_fin_wire,
                                           server_fin_len))
     {
         SerialWrite("[tls] FAIL srvfin-verify\n");

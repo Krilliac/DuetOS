@@ -57,7 +57,6 @@ void DeriveSecurity(BeaconParsed* p)
         // family; WPA2 if PSK; otherwise still WPA2.
         bool has_sae = false;
         bool has_ent = false;
-        bool has_psk = false;
         for (u32 i = 0; i < p->rsn_akm_count; ++i)
         {
             const u8 type = static_cast<u8>(p->rsn_akm_suites[i] & 0xFFu);
@@ -66,16 +65,14 @@ void DeriveSecurity(BeaconParsed* p)
             else if (type == kAkm8021x || type == kAkm8021xSha256 || type == kAkmFt8021x || type == kAkmFt8021xSha384 ||
                      type == kAkmFils)
                 has_ent = true;
-            else if (type == kAkmPsk || type == kAkmPskSha256 || type == kAkmFtPsk)
-                has_psk = true;
         }
         if (has_sae)
             p->security = has_ent ? WirelessSecurity::Wpa3Ent : WirelessSecurity::Wpa3;
         else if (has_ent)
             p->security = WirelessSecurity::Wpa2Ent;
-        else if (has_psk)
-            p->security = WirelessSecurity::Wpa2;
         else
+            // PSK, or an RSN IE with no AKM we recognise: an RSN IE
+            // present implies at least WPA2-class security either way.
             p->security = WirelessSecurity::Wpa2;
         return;
     }

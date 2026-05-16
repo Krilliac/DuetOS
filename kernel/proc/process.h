@@ -68,6 +68,10 @@ struct RamfsNode;
 namespace duetos::core
 {
 
+// u32 is a deliberate, ABI-adjacent width for this security-critical cap
+// enum (see the "capability number is ABI" note above) — not a footprint
+// choice worth narrowing.
+// NOLINTNEXTLINE(performance-enum-size)
 enum Cap : u32
 {
     // Reserved. A process with kCapNone set explicitly still has

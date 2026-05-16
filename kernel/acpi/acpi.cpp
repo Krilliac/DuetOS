@@ -33,6 +33,7 @@
 #include "core/panic.h"
 #include "mm/multiboot2.h"
 #include "mm/page.h"
+#include "mm/paging.h"
 #include "acpi/aml.h"
 #include "acpi/srat.h"
 #include "acpi/acpi_rust/include/acpi_rust.h"
@@ -365,13 +366,61 @@ const Rsdp* FindRsdpInMultiboot(uptr info_phys)
     return new_rsdp != nullptr ? new_rsdp : old_rsdp;
 }
 
+// Map `len` bytes of ACPI physical memory and return a readable virtual
+// pointer. ACPI tables can live anywhere in physical RAM: QEMU/OVMF parks
+// them low (inside the 1 GiB direct map) so the fast PhysToVirt path is
+// used; VirtualBox places the XSDT near the top of 2 GiB RAM, outside the
+// direct map, so we fall back to an MMIO mapping. Mappings are cached by
+// physical base (a handful of distinct ACPI pages) so the repeated XSDT
+// walks across the ~6 FindTable calls don't exhaust the MMIO arena, and
+// kept for the kernel's lifetime (matching the prior PhysToVirt-forever
+// assumption — the DSDT/SSDT scanners reuse these addresses post-boot).
+struct AcpiMapEntry
+{
+    u64 phys;
+    u64 len;
+    void* virt;
+};
+constinit AcpiMapEntry g_acpi_maps[24] = {};
+constinit u64 g_acpi_map_count = 0;
+
+void* AcpiMapPhys(u64 phys, u64 len)
+{
+    if (len == 0)
+    {
+        len = 1;
+    }
+    if (phys + len <= mm::kDirectMapBytes)
+    {
+        return mm::PhysToVirt(phys);
+    }
+    for (u64 i = 0; i < g_acpi_map_count; ++i)
+    {
+        if (g_acpi_maps[i].phys == phys && g_acpi_maps[i].len >= len)
+        {
+            return g_acpi_maps[i].virt;
+        }
+    }
+    void* v = mm::MapMmio(phys, len);
+    if (v == nullptr)
+    {
+        PanicAcpi("ACPI table mapping failed (MMIO arena exhausted)");
+    }
+    if (g_acpi_map_count < 24)
+    {
+        g_acpi_maps[g_acpi_map_count++] = AcpiMapEntry{phys, len, v};
+    }
+    return v;
+}
+
 const SdtHeader* PhysToHeader(u64 phys)
 {
-    // All ACPI tables live below 1 GiB on the machines we target today
-    // (see scope note in acpi.h). PhysToVirt panics if that assumption
-    // breaks, which is the diagnostic we want — silent corruption is
-    // worse than a clear "ACPI table out of direct-map range".
-    return static_cast<const SdtHeader*>(mm::PhysToVirt(phys));
+    // Read the fixed 36-byte header first to learn the table length,
+    // then ensure the whole table is mapped. AcpiMapPhys picks the
+    // direct map or an MMIO fallback depending on where the firmware
+    // placed the table.
+    const auto* probe = static_cast<const SdtHeader*>(AcpiMapPhys(phys, sizeof(SdtHeader)));
+    return static_cast<const SdtHeader*>(AcpiMapPhys(phys, probe->length));
 }
 
 // XSDT entries are 8-byte physical pointers stored right after the
@@ -582,7 +631,7 @@ void ParseFadt(const Fadt& fadt)
     if (fadt.dsdt != 0)
     {
         g_dsdt_address = fadt.dsdt;
-        const auto* dsdt_hdr = static_cast<const SdtHeader*>(mm::PhysToVirt(fadt.dsdt));
+        const auto* dsdt_hdr = PhysToHeader(fadt.dsdt);
         if (dsdt_hdr != nullptr)
         {
             g_dsdt_length = dsdt_hdr->length;
@@ -1104,13 +1153,13 @@ bool AmlContainsName(const char* name4)
         return false;
     if (g_dsdt_address != 0 && g_dsdt_length > 0)
     {
-        const auto* buf = static_cast<const u8*>(mm::PhysToVirt(g_dsdt_address));
+        const auto* buf = static_cast<const u8*>(AcpiMapPhys(g_dsdt_address, g_dsdt_length));
         if (buf != nullptr && ContainsName4(buf, g_dsdt_length, name4))
             return true;
     }
     for (u64 i = 0; i < g_ssdt_count; ++i)
     {
-        const auto* buf = static_cast<const u8*>(mm::PhysToVirt(g_ssdt_address[i]));
+        const auto* buf = static_cast<const u8*>(AcpiMapPhys(g_ssdt_address[i], g_ssdt_length[i]));
         if (buf != nullptr && ContainsName4(buf, g_ssdt_length[i], name4))
             return true;
     }

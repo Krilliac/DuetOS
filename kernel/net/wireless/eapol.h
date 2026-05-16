@@ -111,7 +111,7 @@ struct EapolKeyFrame
 /// number of bytes written via `out_len`. The MIC field is left
 /// zero — the caller computes HMAC-SHA1(KCK, eapol_body) and
 /// patches it back in via `EapolMicPatch`.
-::duetos::core::Result<void> EapolKeyBuild(const EapolKeyFrame& frame, u8* out_buf, u32 out_buf_capacity, u32* out_len);
+::duetos::core::Result<void> EapolKeyBuild(const EapolKeyFrame& f, u8* out_buf, u32 cap, u32* out_len);
 
 /// Compute and patch the MIC into a pre-built EAPOL-Key frame.
 /// `kdv` selects the algorithm: kKdvHmacSha1 (HMAC-SHA1, truncated

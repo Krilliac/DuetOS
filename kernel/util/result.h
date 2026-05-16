@@ -54,7 +54,7 @@
 namespace duetos::core
 {
 
-enum class ErrorCode : u32
+enum class ErrorCode : u8
 {
     Ok = 0,           // sentinel; never appears in Result::error() on a non-value result
     OutOfMemory,      // frame allocator / kheap / fixed pool exhausted
@@ -179,4 +179,5 @@ void ResultSelfTest();
     auto _resta_##__LINE__ = (expr);                                                                                   \
     if (!_resta_##__LINE__)                                                                                            \
         return ::duetos::core::Err{_resta_##__LINE__.error()};                                                         \
-    decl = _resta_##__LINE__.take()
+    /* `decl` is a declarator ("u64 n", "auto x"), not an expression — it cannot be parenthesized. */                \
+    decl = _resta_##__LINE__.take() // NOLINT(bugprone-macro-parentheses)

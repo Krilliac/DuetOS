@@ -41,7 +41,12 @@ struct EnvSlot
     char value[kEnvValueMax];
 };
 
-extern EnvSlot g_env[kEnvSlotCount];
+// `extern` decls; definitions in shell_state.cpp / shell_dispatch.cpp are
+// `constinit`, so no dynamic (.init_array) init is relied on — the
+// freestanding hazard this check guards is eliminated at the definition.
+// The check still flags the header decl (can't see constinit from here).
+// NOLINTNEXTLINE(bugprone-dynamic-static-initializers)
+extern constinit EnvSlot g_env[kEnvSlotCount];
 
 inline bool EnvNameEq(const char* a, const char* b)
 {
@@ -119,7 +124,8 @@ struct AliasSlot
     char expansion[kAliasExpansionMax];
 };
 
-extern AliasSlot g_aliases[kAliasSlotCount];
+// NOLINTNEXTLINE(bugprone-dynamic-static-initializers) — see g_env note above
+extern constinit AliasSlot g_aliases[kAliasSlotCount];
 
 AliasSlot* AliasFind(const char* name);
 bool AliasSet(const char* name, const char* expansion);
@@ -144,10 +150,12 @@ bool AliasUnset(const char* name);
 inline constexpr u32 kInputMax = 64;
 inline constexpr u32 kHistoryCap = 8;
 
-extern char g_history[kHistoryCap][kInputMax];
-extern u32 g_history_head;
-extern u32 g_history_count;
-extern u32 g_history_cursor;
+// NOLINTBEGIN(bugprone-dynamic-static-initializers) — see g_env note above
+extern constinit char g_history[kHistoryCap][kInputMax];
+extern constinit u32 g_history_head;
+extern constinit u32 g_history_count;
+extern constinit u32 g_history_cursor;
+// NOLINTEND(bugprone-dynamic-static-initializers)
 
 void HistoryPush(const char* line);
 const char* HistoryAt(u32 n);
@@ -163,9 +171,11 @@ const char* HistoryExpand(const char* line);
 // `text` (or clears it if `text == nullptr`). Used by the
 // history Prev / Next handlers and by the interactive completer.
 // ---------------------------------------------------------------
-extern char g_input[kInputMax];
-extern u32 g_len;
-extern bool g_interrupt;
+// NOLINTBEGIN(bugprone-dynamic-static-initializers) — see g_env note above
+extern constinit char g_input[kInputMax];
+extern constinit u32 g_len;
+extern constinit bool g_interrupt;
+// NOLINTEND(bugprone-dynamic-static-initializers)
 
 void ReplaceLine(const char* text);
 
@@ -204,8 +214,10 @@ void Prompt();
 // by the dispatcher (`which` matches against it) and the
 // tab-completer (CompleteCommandName uses it for prefix walk).
 // Definition lives in shell_dispatch.cpp.
-extern const char* const kCommandSet[];
-extern const u32 kCommandCount;
+// NOLINTBEGIN(bugprone-dynamic-static-initializers) — see g_env note above
+extern constinit const char* const kCommandSet[];
+extern constinit const u32 kCommandCount;
+// NOLINTEND(bugprone-dynamic-static-initializers)
 
 // ---------------------------------------------------------------
 // Pure path / parse helpers (shell_pathutil.cpp). Used across the
