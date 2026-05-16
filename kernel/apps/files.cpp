@@ -1728,6 +1728,16 @@ constinit duetos::drivers::video::MenuItem kFilesGenericMenuItems[] = {
 };
 constexpr duetos::u32 kFilesGenericMenuItemsN = sizeof(kFilesGenericMenuItems) / sizeof(kFilesGenericMenuItems[0]);
 
+// Trash view: the primary action (37) is RESTORE, not OPEN —
+// opening a binned file is meaningless. Shares the 38/39
+// PROPERTIES/REFRESH slots with the generic menu.
+constinit duetos::drivers::video::MenuItem kFilesTrashMenuItems[] = {
+    {"RESTORE", 37, 0, nullptr, 0},
+    {"PROPERTIES", 38, 0, nullptr, 0},
+    {"REFRESH", 39, 0, nullptr, 0},
+};
+constexpr duetos::u32 kFilesTrashMenuItemsN = sizeof(kFilesTrashMenuItems) / sizeof(kFilesTrashMenuItems[0]);
+
 } // namespace
 
 duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
@@ -1825,7 +1835,9 @@ bool FilesOnRightClick(duetos::u32 sx, duetos::u32 sy)
     {
         const duetos::i32 grow = FilesRowAt(sx, sy);
         const duetos::u32 gctx = (grow < 0) ? ModeSelection() : static_cast<duetos::u32>(grow);
-        duetos::drivers::video::MenuOpen(kFilesGenericMenuItems, kFilesGenericMenuItemsN, sx, sy, gctx);
+        const bool tr = g_state.mode == Mode::Trash;
+        duetos::drivers::video::MenuOpen(tr ? kFilesTrashMenuItems : kFilesGenericMenuItems,
+                                         tr ? kFilesTrashMenuItemsN : kFilesGenericMenuItemsN, sx, sy, gctx);
         duetos::arch::SerialWrite("[files] generic context menu opened ctx=");
         duetos::arch::SerialWriteHex(gctx);
         duetos::arch::SerialWrite("\n");
@@ -1872,10 +1884,13 @@ void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
         }
         if (ctx >= ModeCount())
             return;
-        if (action == 37) // OPEN — reuse the ENTER dispatch per mode
+        if (action == 37) // primary action: RESTORE in Trash, else OPEN
         {
             ModeSelectionSet(ctx);
-            FilesFeedChar('\n');
+            if (g_state.mode == Mode::Trash)
+                RestoreSelectedTrash();
+            else
+                FilesFeedChar('\n');
             return;
         }
         // action == 38: PROPERTIES. Pull (name, is_dir, size) from
