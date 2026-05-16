@@ -8,9 +8,9 @@
  *
  * A cap-gated way to exercise the kernel's panic / page-fault / slab
  * recovery paths from inside the running kernel. The harness has
- * exactly three v0 fault classes (NullDeref, Panic, OomSlab); each
- * has a known caller (the `fault-inject` kernel shell command and a
- * boot self-test for the recoverable case).
+ * exactly four v0 fault classes (NullDeref, Panic, OomSlab,
+ * MachineCheck); each has a known caller (the `fault-inject` kernel
+ * shell command and a boot self-test for the recoverable case).
  *
  * Why this module exists: panic-path bugs and slab exhaustion bugs
  * are some of the cheapest to introduce and the most expensive to
@@ -21,8 +21,8 @@
  * What it is NOT:
  *   - Not a fuzzer. It triggers ONE fault per call; it does not pick
  *     fault classes randomly.
- *   - Not a recovery mechanism. The Panic / NullDeref classes do not
- *     return; halts and reboots are the cure.
+ *   - Not a recovery mechanism. The Panic / NullDeref / MachineCheck
+ *     classes do not return; halts and reboots are the cure.
  *   - Not configurable. The class set is closed at compile time; no
  *     runtime registration, no pluggable backends.
  *
@@ -41,23 +41,31 @@ namespace duetos::diag::fault_inject
 
 enum class FaultClass : ::duetos::u32
 {
-    NullDeref = 1, // load from a guaranteed-unmapped kernel VA; exercises
-                   // the kernel #PF handler. Does not return.
-    Panic = 2,     // calls core::Panic with a message that starts with
-                   // "[fault-inject] forced panic"; exercises the panic
-                   // path end-to-end. Does not return.
-    OomSlab = 3,   // drain one small-class slab cache until SlabAlloc
-                   // returns nullptr; exercises the recoverable OOM
-                   // path. Returns Ok on a clean drain, an ErrorCode
-                   // otherwise.
+    NullDeref = 1,    // load from a guaranteed-unmapped kernel VA; exercises
+                      // the kernel #PF handler. Does not return.
+    Panic = 2,        // calls core::Panic with a message that starts with
+                      // "[fault-inject] forced panic"; exercises the panic
+                      // path end-to-end. Does not return.
+    OomSlab = 3,      // drain one small-class slab cache until SlabAlloc
+                      // returns nullptr; exercises the recoverable OOM
+                      // path. Returns Ok on a clean drain, an ErrorCode
+                      // otherwise.
+    MachineCheck = 4, // raise vector 18 (#MC) via `int $18`; exercises
+                      // the machine-check trap wiring + MCA bank decode
+                      // in arch/x86_64/machine_check.cpp end-to-end.
+                      // Software-raised #MC leaves the MCi_STATUS banks
+                      // clean, so the decode reports the "NO BANK VALID"
+                      // verdict and the dispatcher panics. Proves the
+                      // path routes + decodes + halts without itself
+                      // triple-faulting. Does not return.
 };
 
 /// Trigger one of the v0 fault classes.
 ///
-/// NullDeref and Panic are non-returning by construction; the
-/// return type is preserved so the call site has uniform shape (a
-/// caller that holds the trigger behind another gate sees the same
-/// Result<...> independent of class).
+/// NullDeref, Panic, and MachineCheck are non-returning by
+/// construction; the return type is preserved so the call site has
+/// uniform shape (a caller that holds the trigger behind another
+/// gate sees the same Result<...> independent of class).
 ///
 /// OomSlab returns:
 ///   - Ok                                          when the drain
@@ -89,7 +97,7 @@ enum class FaultClass : ::duetos::u32
 duetos::core::Result<void, duetos::core::ErrorCode> Trigger(FaultClass fc);
 
 /// Boot self-test — exercises ONLY the OomSlab class because the
-/// other two are non-returning. On success emits one
+/// other three are non-returning. On success emits one
 /// `[fault-inject-selftest] PASS` line via `arch::SerialWrite`; on
 /// failure fires `kBootSelftestFail` with a sub-check encoding and
 /// logs a `[fault-inject-selftest] FAIL` warn. See

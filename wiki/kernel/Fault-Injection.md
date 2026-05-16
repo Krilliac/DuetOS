@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel — `Trigger()` is callable from any kernel context that may take a sleeping mutex (the OomSlab path uses one). NOT safe from IRQ context.
 >
-> **Maturity:** v0 — three fault classes (NullDeref, Panic, OomSlab); single-TU harness
+> **Maturity:** v0 — four fault classes (NullDeref, Panic, OomSlab, MachineCheck); single-TU harness
 
 ## Overview
 
@@ -21,7 +21,7 @@ It **is**:
 
 It **isn't**:
 - A fuzzer. One call → one fault. Classes are picked by name, not at random.
-- A recovery mechanism. `NullDeref` and `Panic` halt the box; reboot is the cure.
+- A recovery mechanism. `NullDeref`, `Panic`, and `MachineCheck` halt the box; reboot is the cure.
 - Pluggable. The class set is closed at compile time.
 
 ## Fault classes (v0)
@@ -31,6 +31,7 @@ It **isn't**:
 | `NullDeref` | 1 | No | Volatile load from `0xFFFFFFFFEDEAD000` — a kernel VA the paging layout reserves for future use ([`kernel/mm/paging.h`](../../kernel/mm/paging.h)). | Kernel `#PF` trap dispatcher in [`kernel/arch/x86_64/traps.cpp`](../../kernel/arch/x86_64/traps.cpp). |
 | `Panic` | 2 | No | Calls `core::Panic("diag/fault_inject", "[fault-inject] forced panic")`. | Full panic banner + diagnostic dump + halt in [`kernel/core/panic.cpp`](../../kernel/core/panic.cpp). |
 | `OomSlab` | 3 | `Result<void, ErrorCode>` | Creates a private 64 B slab cache and drains it via an intrusive freelist until `SlabAlloc` returns `nullptr`, then frees every object and destroys the cache. | Recoverable OOM path in [`kernel/mm/slab.cpp`](../../kernel/mm/slab.cpp). |
+| `MachineCheck` | 4 | No | Raises vector 18 (`int $18`). Software-raised, so the `MCi_STATUS` banks are clean and the decode reports the `NO BANK VALID` verdict before the dispatcher panics. Proves the #MC path routes → decodes → halts without itself triple-faulting. | #MC trap wiring in [`kernel/arch/x86_64/traps.cpp`](../../kernel/arch/x86_64/traps.cpp) → MCA bank decode in [`kernel/arch/x86_64/machine_check.cpp`](../../kernel/arch/x86_64/machine_check.cpp). |
 
 `OomSlab` is capped at `1 << 20` allocations (~64 MiB of kheap-backed storage) as a safety net against runaway loops. On a host whose kheap is bigger than the cap, the trigger returns `Err{ErrorCode::BadState}` — the cap was reached without observing exhaustion.
 
@@ -42,7 +43,7 @@ One probe fires every time `Trigger()` runs — **before** the trigger itself, s
 
 | Probe name | Default arm | Value field |
 |------------|-------------|-------------|
-| `diag.fault_inject_fired` | `ArmedLog` | `FaultClass` enum value (1 / 2 / 3) |
+| `diag.fault_inject_fired` | `ArmedLog` | `FaultClass` enum value (1 / 2 / 3 / 4) |
 
 An attached GDB can `b duetos::debug::ProbeFire` to break at the harness frame; the trigger lives one stack frame up. See [Debugging](../tooling/Debugging.md) for the attach flow.
 
@@ -81,20 +82,21 @@ FAULT-INJECT: USAGE:
     FAULT-INJECT NULL-DEREF   KERNEL #PF FROM AN UNMAPPED VA
     FAULT-INJECT PANIC        DELIBERATE KERNEL PANIC
     FAULT-INJECT OOM-SLAB     DRAIN A SLAB TO SlabAlloc==nullptr
+    FAULT-INJECT MCE          RAISE #MC (VECTOR 18) + DECODE MCA BANKS
 ```
 
-The `null-deref` and `panic` arguments halt the box; `oom-slab` returns to the shell with a recoverable status line.
+The `null-deref`, `panic`, and `mce` arguments halt the box; `oom-slab` returns to the shell with a recoverable status line.
 
 ## Syscall surface
 
 ```c
 // User-mode contract (eq. of the kernel-shell command):
-//   rdi = FaultClass (1 = NullDeref, 2 = Panic, 3 = OomSlab)
+//   rdi = FaultClass (1 = NullDeref, 2 = Panic, 3 = OomSlab, 4 = MachineCheck)
 // Returns:
 //    0   on a clean OomSlab drain
 //  -EINVAL  for an out-of-range FaultClass
 //  -EACCES  if kCapDiag is missing
-//  (no return)  for NullDeref / Panic
+//  (no return)  for NullDeref / Panic / MachineCheck
 syscall(SYS_DIAG_FAULT_INJECT /* = 204 */, fc);
 ```
 
@@ -104,7 +106,7 @@ syscall(SYS_DIAG_FAULT_INJECT /* = 204 */, fc);
 
 `FaultInjectSelfTest()` is registered as the `fault-inject-selftest` initcall in [`kernel/core/main.cpp`](../../kernel/core/main.cpp), in `Phase::Sched` (alongside `SlabSelfTest()`) — the harness needs the slab subsystem online.
 
-Only the recoverable `OomSlab` class is exercised at boot; the other two halt the box and cannot run from a self-test context. CI greps for the PASS line:
+Only the recoverable `OomSlab` class is exercised at boot; the other three halt the box and cannot run from a self-test context. CI greps for the PASS line:
 
 ```bash
 grep -nE "\[fault-inject-selftest\] PASS" /tmp/duetos-*.log

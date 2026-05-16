@@ -33,6 +33,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/lbr.h"
+#include "arch/x86_64/machine_check.h"
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/serial.h"
 
@@ -397,6 +398,16 @@ void WriteLabelledRflags(const char* label, duetos::u64 value)
 
 TrapResponse TrapResponseFor(u64 vector, bool from_user)
 {
+    // #MC (vector 18) is a system-level hardware fault, not a
+    // per-task bug — a bad DIMM / cache parity / bus error taken
+    // while ring 3 happened to be current does NOT mean only that
+    // task is affected. It must never be IsolateTask'd or delivered
+    // to user-mode SEH; decode-then-Panic regardless of ring. The
+    // decode itself runs from the Panic dump path below.
+    if (vector == 18)
+    {
+        return TrapResponse::Panic;
+    }
     // Ring 3 is always Isolate. The faulting task dies, the kernel
     // continues. This is the existing user-mode fault contract.
     if (from_user)
@@ -1112,6 +1123,17 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // a snapshot we can dump after our own diagnostics.
     PanicBroadcastNmi();
     SerialWrite("\n** CPU EXCEPTION **\n");
+
+    // #MC: decode the Machine Check Architecture banks before the
+    // generic register dump so the operator sees *which hardware*
+    // failed (bank, MCA error class, faulting physical address,
+    // PCC/RIPV recoverability) up-front. Pure MSR read-back + raw
+    // serial; safe on the IST2 machine-check stack. The standard
+    // crash-dump record (registers, stack walk) still follows.
+    if (frame->vector == 18)
+    {
+        (void)arch::MachineCheckReport(frame);
+    }
 
     // Bracket the record so host-side tooling can extract a .dump file
     // from the serial capture, matching the panic path's contract. The

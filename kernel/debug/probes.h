@@ -49,6 +49,13 @@ enum class ProbeId : u8
     kKernelPageFault,     // #PF from ring 0 — always a bug, always logged
     kKernelGpf,           // #GP from ring 0 — always a bug, always logged
     kKernelUd,            // #UD from ring 0 — invalid opcode, always a bug
+    kMachineCheck,        // #MC (vector 18) — uncorrected hardware error.
+                          // Caller passes (worst_bank | verdict<<32) so an
+                          // attached GDB can `b duetos::debug::ProbeFire`
+                          // and halt at the exact #MC frame with the
+                          // failing bank in hand. ArmedLog: a clean boot
+                          // never takes a #MC, so any fire is a real
+                          // hardware fault worth a sentinel line.
     kHeapAllocFail,       // KMalloc returned nullptr (kheap pool exhausted)
     kPhysAllocFail,       // AllocateFrame returned kNullFrame (physical OOM)
     kSmpApOnline,         // a secondary CPU finished bring-up; boot diagnostic

@@ -4107,7 +4107,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         const u64 fc_raw = frame->rdi;
         using ::duetos::diag::fault_inject::FaultClass;
         if (fc_raw != static_cast<u64>(FaultClass::NullDeref) && fc_raw != static_cast<u64>(FaultClass::Panic) &&
-            fc_raw != static_cast<u64>(FaultClass::OomSlab))
+            fc_raw != static_cast<u64>(FaultClass::OomSlab) && fc_raw != static_cast<u64>(FaultClass::MachineCheck))
         {
             frame->rax = static_cast<u64>(kSysErrnoEINVAL);
             return;
