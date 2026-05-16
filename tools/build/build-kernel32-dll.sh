@@ -29,30 +29,48 @@ fi
 REPO_ROOT="$1"
 OUT_HEADER="$2"
 SRC_DIR="${REPO_ROOT}/userland/libs/kernel32"
-SRC_C="${SRC_DIR}/kernel32.c"
 EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
+
+# kernel32.dll is split into per-domain translation units (see
+# kernel32_internal.h). Compile each *.c to its own .obj and
+# lld-link them all into one DLL.
+SRC_FILES=(
+    "${SRC_DIR}/kernel32.c"
+    "${SRC_DIR}/kernel32_interlocked.c"
+    "${SRC_DIR}/kernel32_strmem.c"
+    "${SRC_DIR}/kernel32_env.c"
+    "${SRC_DIR}/kernel32_locale.c"
+    "${SRC_DIR}/kernel32_io.c"
+    "${SRC_DIR}/kernel32_sync.c"
+    "${SRC_DIR}/kernel32_fs.c"
+    "${SRC_DIR}/kernel32_psapi.c"
+)
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/kernel32"
 mkdir -p "${WORK_DIR}"
-OBJ="${WORK_DIR}/kernel32.obj"
 DLL="${WORK_DIR}/kernel32.dll"
 
 CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"
 
-"${CLANG}" \
-    --target=x86_64-pc-windows-msvc \
-    -c \
-    -ffreestanding \
-    -nostdlib \
-    -fno-stack-protector \
-    -fno-builtin \
-    -mno-red-zone \
-    -fno-asynchronous-unwind-tables \
-    -O2 \
-    -Wall -Wextra \
-    "${SRC_C}" \
-    -o "${OBJ}"
+OBJS=()
+for src in "${SRC_FILES[@]}"; do
+    obj="${WORK_DIR}/$(basename "${src}" .c).obj"
+    "${CLANG}" \
+        --target=x86_64-pc-windows-msvc \
+        -c \
+        -ffreestanding \
+        -nostdlib \
+        -fno-stack-protector \
+        -fno-builtin \
+        -mno-red-zone \
+        -fno-asynchronous-unwind-tables \
+        -O2 \
+        -Wall -Wextra \
+        "${src}" \
+        -o "${obj}"
+    OBJS+=("${obj}")
+done
 
 rm -f "${DLL}"
 
@@ -336,7 +354,7 @@ set +e
     /export:OpenProcess \
     /export:GenerateConsoleCtrlEvent \
     /out:"${DLL}" \
-    "${OBJ}" 2>&1 | grep -v "align specified without /driver"
+    "${OBJS[@]}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e
 if [[ ${LINK_RC} -ne 0 ]]; then
