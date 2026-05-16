@@ -853,7 +853,16 @@ duetos_embed_blob(generated_msvcrt_dll.h
 duetos_embed_blob(generated_ntdll_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-ntdll-dll.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll.c"
-    COMMENT "Compiling + embedding ntdll.dll (Nt* / Zw* / Rtl* / Ldr* retirement)")
+    EXTRA_DEPS
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_internal.h"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_rtl.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_seh.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_reg.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_info.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_facades.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_token.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_bulk.c"
+    COMMENT "Compiling + embedding ntdll.dll (split into per-domain TUs)")
 
 duetos_embed_blob(generated_dbghelp_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-dbghelp-dll.sh"

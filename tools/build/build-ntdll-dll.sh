@@ -22,33 +22,50 @@ fi
 REPO_ROOT="$1"
 OUT_HEADER="$2"
 SRC_DIR="${REPO_ROOT}/userland/libs/ntdll"
-SRC_C="${SRC_DIR}/ntdll.c"
 EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
+
+# ntdll.dll is split into per-domain translation units (see
+# ntdll_internal.h). Compile each *.c to its own .obj and
+# lld-link them all into one DLL.
+SRC_FILES=(
+    "${SRC_DIR}/ntdll.c"
+    "${SRC_DIR}/ntdll_rtl.c"
+    "${SRC_DIR}/ntdll_seh.c"
+    "${SRC_DIR}/ntdll_reg.c"
+    "${SRC_DIR}/ntdll_info.c"
+    "${SRC_DIR}/ntdll_facades.c"
+    "${SRC_DIR}/ntdll_token.c"
+    "${SRC_DIR}/ntdll_bulk.c"
+)
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/ntdll"
 mkdir -p "${WORK_DIR}"
-OBJ="${WORK_DIR}/ntdll.obj"
 DLL="${WORK_DIR}/ntdll.dll"
 
 CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"
 
-"${CLANG}" \
-    --target=x86_64-pc-windows-msvc \
-    -c \
-    -ffreestanding \
-    -nostdlib \
-    -fno-stack-protector \
-    -fno-builtin \
-    -fno-builtin-memset \
-    -fno-builtin-memcpy \
-    -fno-builtin-memmove \
-    -mno-red-zone \
-    -fno-asynchronous-unwind-tables \
-    -O2 \
-    -Wall -Wextra \
-    "${SRC_C}" \
-    -o "${OBJ}"
+OBJS=()
+for src in "${SRC_FILES[@]}"; do
+    obj="${WORK_DIR}/$(basename "${src}" .c).obj"
+    "${CLANG}" \
+        --target=x86_64-pc-windows-msvc \
+        -c \
+        -ffreestanding \
+        -nostdlib \
+        -fno-stack-protector \
+        -fno-builtin \
+        -fno-builtin-memset \
+        -fno-builtin-memcpy \
+        -fno-builtin-memmove \
+        -mno-red-zone \
+        -fno-asynchronous-unwind-tables \
+        -O2 \
+        -Wall -Wextra \
+        "${src}" \
+        -o "${obj}"
+    OBJS+=("${obj}")
+done
 
 rm -f "${DLL}"
 
@@ -758,7 +775,7 @@ set +e
     /export:RtlIpv4AddressToStringA \
     /export:RtlIpv4AddressToStringW \
     /out:"${DLL}" \
-    "${OBJ}" 2>&1 | grep -v "align specified without /driver"
+    "${OBJS[@]}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e
 if [[ ${LINK_RC} -ne 0 ]]; then
