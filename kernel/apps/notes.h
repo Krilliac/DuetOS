@@ -142,6 +142,12 @@ bool NotesSave();
 /// Caller MUST hold the compositor lock.
 bool NotesLoad();
 
+/// Start a fresh, empty document (the everyday Ctrl+N). Undoable:
+/// the prior buffer is pushed onto the undo stack first, so an
+/// accidental New is one Ctrl+Z away. Clears the dirty flag (an
+/// empty doc has nothing unsaved). Always returns true.
+bool NotesNew();
+
 /// Same as NotesLoad but reads from an arbitrary FAT32 path
 /// (used by the Files app's Enter-on-`.TXT` dispatch). The
 /// path is interpreted by Fat32LookupPath, so a leading '/'

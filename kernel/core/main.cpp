@@ -3672,6 +3672,24 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                 duetos::drivers::video::CompositorUnlock();
             }
 
+            // Ctrl+N — start a fresh blank Notes document (the
+            // everyday "new file"). !shift so it doesn't collide
+            // with Ctrl+Shift+N (notification-ring dump). Undoable
+            // inside Notes, so no confirmation dialog is needed.
+            if (ctrl && !alt && !shift && (ev.code == 'n' || ev.code == 'N'))
+            {
+                duetos::drivers::video::CompositorLock();
+                const auto active = duetos::drivers::video::WindowActive();
+                if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::notes::NotesWindow())
+                {
+                    duetos::apps::notes::NotesNew();
+                    duetos::drivers::video::CompositorUnlock();
+                    SerialWrite("[ui] ^N notes new document\n");
+                    continue;
+                }
+                duetos::drivers::video::CompositorUnlock();
+            }
+
             // F1 (no modifiers) dumps the user-facing keyboard +
             // shortcut reference into the desktop console. Tested
             // BEFORE the Ctrl+Alt+F1 console-flip handler — bare
