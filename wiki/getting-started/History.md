@@ -1050,6 +1050,101 @@ What's still GAP:
   slice lands these the same time the 64-bit set gets its FS
   routing.
 
+## Phase 6.17 — x64 SEH: kernel fault → user exception dispatch (2026-05-16)
+
+Slices 1-2 had built the x64 unwinder (capture / `.pdata` lookup /
+`RtlVirtualUnwind`) but a CPU fault in a Win32 PE still just
+task-killed it. Phase 6.17 closes the loop: a ring-3 #DE/#UD/#GP/#PF
+in a PE that has our ntdll mapped is no longer terminated on sight.
+`kernel/subsystems/win32/seh_dispatch.cpp` builds a Microsoft
+`EXCEPTION_RECORD` + `CONTEXT` (with a valid seeded FXSAVE image) on
+the faulting thread's own user stack and rewrites the trap frame to
+resume at `ntdll!KiUserExceptionDispatcher` — the same shape Windows
+uses. ntdll's new `ntdll_dispatch.c` is the user-mode engine: it runs
+the Vectored Exception Handler chain first, then the frame-based
+`__C_specific_handler` → `RtlUnwindEx` → `RtlRestoreContext` walk;
+`NtContinue` and `NtRaiseException` became real, and
+`RtlLookupFunctionEntry` went cross-module (`SYS_MODULE_BASE_BY_VA`)
+so a stack that crosses the EXE↔kernel32↔ntdll boundary resolves
+every frame.
+
+Two things shaped the slice:
+
+- **The high-risk part is the trap-path rewrite**, so it fails safe:
+  if ntdll isn't mapped, the user stack can't be written, or the same
+  instruction keeps re-faulting into a wedged dispatcher, the kernel
+  falls back to the original task-kill. A per-task backstop
+  (`SchedSehDeliveryAllowed`) bounds a dispatcher that faults on
+  itself; a genuinely unhandled exception terminates in *user* mode
+  via the dispatcher's no-handler path, not by spinning the kernel.
+
+- **mingw-w64 GCC has no MSVC `__try`/`__except` in C** (only the
+  degenerate `__try1` macros), so the literal `__try` acceptance
+  couldn't be smoke-tested under the existing toolchain. The
+  frame-based engine ships exported and correct-by-construction for
+  real MSVC-toolchain PEs (Chrome's vcruntime); the `seh_pe` smoke
+  proves the *identical* kernel→user delivery + `RtlRestoreContext`
+  machinery via a Vectored Exception Handler that catches a null
+  write and a divide-by-zero, edits the CONTEXT, and continues —
+  repeatably.
+
+- **The `__try` smoke gap was then closed in the same effort.**
+  `userland/apps/seh_try_pe` is compiled with
+  `clang --target=x86_64-pc-windows-msvc -fasync-exceptions` (the
+  flag that makes clang emit `.pdata`/`.xdata` + the
+  `__C_specific_handler` personality over hardware faults) and
+  linked by `lld-link` against our *own* `kernel32.lib` /
+  `ntdll.lib` import libraries — no MSVC SDK, no CRT. It exercises
+  the real frame-based path (`__C_specific_handler` scope-table
+  walk → `RtlUnwindEx` → `RtlRestoreContext`): a null-write #PF and
+  a divide-by-zero #DE caught by `__except` with the right
+  `_exception_code()`, a `__finally` that runs while `RtlUnwindEx`
+  walks out to the handler frame, and a repeatable case — all PASS.
+  The clang `-fasync-exceptions` requirement was the catch: without
+  it clang silently elides `__try` over faults and emits no unwind
+  data. C++ EH (`__CxxFrameHandler*`) is still a separate slice.
+
+## Phase 6.18 — Win32 synchronization + api-set host resolution (2026-05-16)
+
+The first concrete Win10-API-breadth slice toward real Chrome. V8
+and Chrome's thread pools are built on `WaitOnAddress` + condition
+variables; DuetOS had SRW locks but no condition variables, no
+`WaitOnAddress`, and the explicit `InitOnce` form was a no-op
+thunk. This slice put a real futex underneath all of it: the
+kernel gained `SYS_WAIT_ON_ADDRESS` / `SYS_WAKE_BY_ADDRESS`
+(`kernel/subsystems/win32/waitaddr_syscall.cpp`) — address-hashed
+wait queues where a bucket collision is at worst a spurious
+wakeup, never a lost one (the wake side wakes the whole bucket and
+each waiter re-checks its own word). Userland `kernel32` got real
+`WaitOnAddress` / `WakeByAddress*`, the condition-variable family
+(sequence-counter algorithm: the sleeper samples the sequence
+under the lock before releasing, so a wake in the gap returns
+immediately), and a real `InitOnceBeginInitialize` /
+`InitOnceComplete` state machine.
+
+The interesting blocker was binding. mingw's `-lsynchronization`
+(and Chrome) import these not from `kernel32.dll` but from the
+API-set contract `api-ms-win-core-synch-l1-2-0.dll`, which the
+loader had no way to resolve — there is no such DLL. The fix is
+the api-set host resolver in `pe_loader.cpp`: an `api-ms-win-*` /
+`ext-ms-win-*` import is a *name contract*, so the function is
+resolved by name against whichever preloaded base DLL (kernel32 /
+kernelbase / ntdll / …) actually exports it. That single change
+unblocks the whole modern synch contract surface for Chrome, not
+just these functions — the boot log now shows
+`[pe-resolve] via-apiset api-ms-win-core-synch-l1-2-0.dll!WaitOnAddress`.
+
+Two build-robustness lessons landed alongside: clang's `-O1`/`-O2`
+optimizer + `-fasync-exceptions` wedges *nondeterministically* on
+`seh_try_pe.c` (one clang PID spinning 99% CPU for minutes in SEH
+codegen — sometimes a fresh process is unlucky, sometimes not), so
+that build dropped to `-O0` (deterministic, fast, same SEH output)
+with a timeout+retry guard. Verified by `userland/apps/sync_smoke`
+(`smoke=pe-hello`): a cross-thread `CONDITION_VARIABLE` +
+`CRITICAL_SECTION` producer/consumer, a `WaitOnAddress` /
+`WakeByAddressSingle` handshake, and the two-call `InitOnce` all
+PASS, with zero SEH or browser regression.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

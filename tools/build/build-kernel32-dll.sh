@@ -328,6 +328,16 @@ set +e
     /export:ReleaseSRWLockShared \
     /export:TryAcquireSRWLockShared \
     /export:InitOnceExecuteOnce \
+    /export:InitOnceBeginInitialize \
+    /export:InitOnceComplete \
+    /export:WaitOnAddress \
+    /export:WakeByAddressSingle \
+    /export:WakeByAddressAll \
+    /export:InitializeConditionVariable \
+    /export:SleepConditionVariableCS \
+    /export:SleepConditionVariableSRW \
+    /export:WakeConditionVariable \
+    /export:WakeAllConditionVariable \
     /export:CreateThread \
     /export:ResumeThread \
     /export:SetThreadStackGuarantee \

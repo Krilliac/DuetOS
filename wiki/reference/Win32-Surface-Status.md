@@ -301,8 +301,27 @@ syscall routing shows up immediately.
   `LeaveCriticalSection`, `InitializeCriticalSection`,
   `DeleteCriticalSection`, `TryEnterCriticalSection`,
   `InitializeSRWLock`, `AcquireSRWLockExclusive` /
-  `Shared`, `ReleaseSRWLockExclusive` / `Shared`. Named
-  primitives use a process-local name table — second
+  `Shared`, `ReleaseSRWLockExclusive` / `Shared`.
+  Condition variables (`InitializeConditionVariable`,
+  `SleepConditionVariableCS` / `SRW`, `WakeConditionVariable`,
+  `WakeAllConditionVariable`), address-keyed wait
+  (`WaitOnAddress`, `WakeByAddressSingle` / `All`) and the
+  explicit one-time-init form (`InitOnceBeginInitialize`,
+  `InitOnceComplete`) are real, built on the kernel
+  `SYS_WAIT_ON_ADDRESS` / `SYS_WAKE_BY_ADDRESS` futex
+  (`kernel/subsystems/win32/waitaddr_syscall.cpp`,
+  address-hashed wait queues; bucket collisions degrade to
+  spurious wakeups, never lost ones). The condition-variable
+  sleep samples the sequence under the lock before releasing,
+  so a wake in the gap returns immediately — no lost wakeup.
+  These bind via the new api-set host resolver: an
+  `api-ms-win-*` / `ext-ms-win-*` import (mingw's
+  `-lsynchronization`, and Chrome) is a name contract resolved
+  against whichever preloaded base DLL hosts it. Verified by
+  `userland/apps/sync_smoke` (`smoke=pe-hello`): a
+  cross-thread CV producer/consumer, a WaitOnAddress handshake
+  and the two-call InitOnce all PASS. SRW shared still aliases
+  exclusive in v0. Named
   Create with the same name returns the existing handle;
   Open* succeeds for names registered in this process and
   fails (NULL) otherwise. Cross-process named-namespace is
@@ -598,15 +617,15 @@ syscall routing shows up immediately.
 | `HeapFree` | REAL | `kOffHeapFree` |
 | `HeapReAlloc` | REAL | `kOffHeapRealloc` |
 | `HeapSize` | REAL | `kOffHeapSize` |
-| `InitializeConditionVariable` | REAL | `kOffPinVoidNop` |
+| `InitializeConditionVariable` | REAL | kernel32 export (futex-backed; thunk `kOffPinVoidNop` is dead fallback) |
 | `InitializeCriticalSection` | REAL | `kOffInitCritSec` |
 | `InitializeCriticalSectionAndSpinCount` | REAL | `kOffInitCritSec` |
 | `InitializeCriticalSectionEx` | REAL | `kOffInitCritSec` |
 | `InitializeInitOnce` | REAL | `kOffPinVoidNop` |
 | `InitializeSListHead` | REAL | `kOffInitSListHead` |
 | `InitializeSRWLock` | REAL | `kOffSrwInit` |
-| `InitOnceBeginInitialize` | REAL | `kOffPinReturn1` |
-| `InitOnceComplete` | REAL | `kOffPinReturn1` |
+| `InitOnceBeginInitialize` | REAL | kernel32 export (real state machine; thunk `kOffPinReturn1` is dead fallback) |
+| `InitOnceComplete` | REAL | kernel32 export (real state machine; thunk `kOffPinReturn1` is dead fallback) |
 | `InitOnceExecuteOnce` | REAL | `kOffInitOnceExec` |
 | `InitOnceInitialize` | REAL | `kOffSrwInit` |
 | `InterlockedAnd` | REAL | `kOffInterlockedAnd` |

@@ -31,6 +31,7 @@ SRC_FILES=(
     "${SRC_DIR}/ntdll.c"
     "${SRC_DIR}/ntdll_rtl.c"
     "${SRC_DIR}/ntdll_seh.c"
+    "${SRC_DIR}/ntdll_dispatch.c"
     "${SRC_DIR}/ntdll_reg.c"
     "${SRC_DIR}/ntdll_info.c"
     "${SRC_DIR}/ntdll_facades.c"
@@ -774,15 +775,21 @@ set +e
     /export:RtlIpv4StringToAddressW \
     /export:RtlIpv4AddressToStringA \
     /export:RtlIpv4AddressToStringW \
-    `# SEH unwinder foundation (T6-02). RtlCaptureContext +` \
-    `# RtlLookupFunctionEntry are real; the rest keep their` \
-    `# safe v0 contract until the fault-dispatch slice lands.` \
+    `# SEH engine (T6-02 slice 3). Real kernel-fault → user` \
+    `# dispatch: KiUserExceptionDispatcher is the kernel resume` \
+    `# target; __C_specific_handler walks __try/__except;` \
+    `# RtlUnwindEx + RtlRestoreContext transfer control.` \
     /export:RtlCaptureContext \
     /export:RtlLookupFunctionEntry \
     /export:RtlVirtualUnwind \
     /export:RtlCaptureStackBackTrace \
     /export:RtlUnwind \
     /export:RtlUnwindEx \
+    /export:RtlRestoreContext \
+    /export:KiUserExceptionDispatcher \
+    /export:__C_specific_handler \
+    /export:RtlAddVectoredExceptionHandler \
+    /export:RtlRemoveVectoredExceptionHandler \
     /out:"${DLL}" \
     "${OBJS[@]}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}

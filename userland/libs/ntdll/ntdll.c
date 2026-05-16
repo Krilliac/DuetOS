@@ -192,13 +192,19 @@ __declspec(dllexport) NTSTATUS NtTerminateThread(HANDLE hThread, NTSTATUS exit_s
     return (NTSTATUS)status;
 }
 
-/* NtContinue — restores a CONTEXT. v0 can't actually do it;
- * fall through to termination (matching the flat stub which
- * forwards to kOffExitProcess). */
+/* NtContinue — resume execution from a Microsoft CONTEXT. With
+ * the T6-02 SEH engine this is real: RtlRestoreContext loads every
+ * register and jumps to context->Rip. Used by exception handlers
+ * (and KiUserExceptionDispatcher's ContinueExecution path) to
+ * return to the interrupted code. Does not return. bTestAlert
+ * (deliver a pending APC first) is a no-op — no alertable APC
+ * delivery on this path in v0. */
 __declspec(dllexport) NTDLL_NORETURN NTSTATUS NtContinue(void* context, BOOL bTestAlert)
 {
-    (void)context;
     (void)bTestAlert;
+    if (context != (void*)0)
+        RtlRestoreContext(context, (void*)0); /* noreturn */
+    /* Null context: nothing to resume — terminate. */
     __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)0));
     DUET_USER_TRAP_UNREACHABLE();
 }

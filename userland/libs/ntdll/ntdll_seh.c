@@ -23,6 +23,18 @@ static unsigned long long ntdll_exe_base(void)
     return (unsigned long long)rv;
 }
 
+/* SYS_MODULE_BASE_BY_VA = 207 — reverse-map a code VA to the load
+ * base of the module (EXE or any preloaded DLL) that contains it.
+ * This is what makes RtlLookupFunctionEntry cross-module: an SEH
+ * frame walk that steps from the EXE into kernel32 / ntdll still
+ * resolves each frame's .pdata. 0 = VA in no known module. */
+static unsigned long long ntdll_module_base_by_va(unsigned long long va)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)207), "D"(va) : "memory");
+    return (unsigned long long)rv;
+}
+
 /* x64 IMAGE_RUNTIME_FUNCTION_ENTRY — three RVAs. */
 typedef struct
 {
@@ -33,15 +45,21 @@ typedef struct
 
 /* Real table-based RtlLookupFunctionEntry: find the
  * RUNTIME_FUNCTION whose [Begin,End) covers ControlPc by reading
- * the module's in-memory .pdata (IMAGE_DIRECTORY_ENTRY_EXCEPTION).
- * v0 resolves only the main EXE module (Chrome's primary case +
- * every single-module PE); DLL .pdata is the follow-on. Pure
- * reads of the already-mapped image — no control-flow effect. */
+ * the owning module's in-memory .pdata
+ * (IMAGE_DIRECTORY_ENTRY_EXCEPTION). Cross-module: the kernel
+ * resolves which image (EXE or any preloaded DLL) maps ControlPc,
+ * so an SEH walk that crosses the EXE↔kernel32↔ntdll boundary
+ * resolves every frame. Falls back to the EXE base when the
+ * kernel can't classify the VA (keeps single-module PEs working
+ * even pre-registration). Pure reads of the already-mapped
+ * image — no control-flow effect. */
 __declspec(dllexport) void* RtlLookupFunctionEntry(unsigned long long ControlPc, unsigned long long* ImageBase,
                                                    void* HistoryTable)
 {
     (void)HistoryTable;
-    const unsigned long long base = ntdll_exe_base();
+    unsigned long long base = ntdll_module_base_by_va(ControlPc);
+    if (base == 0)
+        base = ntdll_exe_base();
     if (ImageBase != (unsigned long long*)0)
         *ImageBase = base;
     if (base == 0 || ControlPc < base)
@@ -280,27 +298,8 @@ __declspec(dllexport) unsigned short RtlCaptureStackBackTrace(unsigned long Fram
     return n;
 }
 
-__declspec(dllexport) void RtlUnwind(void* TargetFrame, void* TargetIp, void* ExceptionRecord, void* ReturnValue)
-{
-    (void)TargetFrame;
-    (void)TargetIp;
-    (void)ExceptionRecord;
-    (void)ReturnValue;
-    /* Can't unwind; terminate. */
-    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
-}
-
-__declspec(dllexport) void RtlUnwindEx(void* TargetFrame, void* TargetIp, void* ExceptionRecord, void* ReturnValue,
-                                       void* ContextRecord, void* HistoryTable)
-{
-    (void)TargetFrame;
-    (void)TargetIp;
-    (void)ExceptionRecord;
-    (void)ReturnValue;
-    (void)ContextRecord;
-    (void)HistoryTable;
-    __asm__ volatile("int $0x80" : : "a"((long long)0), "D"((long long)3));
-}
+/* RtlUnwind / RtlUnwindEx now live in ntdll_dispatch.c (real
+ * frame-walking unwinder, T6-02 slice 3). */
 
 /* RtlGetVersion / RtlVerifyVersionInfo — same v0 build as
  * kernel32 GetVersionEx, but with NTSTATUS returns. Used by

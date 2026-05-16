@@ -58,6 +58,7 @@
 #include "mm/kstack.h"
 #include "sched/sched.h"
 #include "subsystems/win32/vmap_syscall.h"
+#include "subsystems/win32/seh_dispatch.h"
 #include "arch/x86_64/smp.h"
 
 // user_copy.S labels, exposed to the trap dispatcher for the
@@ -883,6 +884,50 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // at reap time.
     if (policy == TrapResponse::IsolateTask)
     {
+        // T6-02: before tearing the task down, try to deliver the
+        // fault to the faulting Win32 PE as a structured exception.
+        // A PE with a covering __try/__except (or a vectored
+        // handler) catches it and continues; only #DE/#UD/#GP/#PF
+        // are dispatchable, and only when the process has our ntdll
+        // mapped. On success the trap frame now resumes at
+        // ntdll!KiUserExceptionDispatcher — just return so iretq
+        // lands there. Any failure (no ntdll, unwritable user
+        // stack, re-fault loop) falls through to the legacy
+        // task-kill path unchanged.
+        {
+            u32 seh_status = 0;
+            bool seh_is_pf = false;
+            bool seh_pf_write = false;
+            u64 seh_fault_va = 0;
+            bool seh_dispatchable = true;
+            switch (frame->vector)
+            {
+            case 0: // #DE
+                seh_status = 0xC0000094;
+                break;
+            case 6: // #UD
+                seh_status = 0xC000001D;
+                break;
+            case 13: // #GP
+                seh_status = 0xC0000005;
+                break;
+            case 14: // #PF
+                seh_status = 0xC0000005;
+                seh_is_pf = true;
+                seh_pf_write = (frame->error_code & 0x2) != 0;
+                seh_fault_va = ReadCr2();
+                break;
+            default:
+                seh_dispatchable = false;
+                break;
+            }
+            if (seh_dispatchable && ::duetos::subsystems::win32::Win32DeliverException(frame, seh_status, seh_is_pf,
+                                                                                       seh_pf_write, seh_fault_va))
+            {
+                return;
+            }
+        }
+
         const char* vec_name = (frame->vector < 32) ? kVectorNames[frame->vector] : "user-vector-oor";
         SerialWrite("\n[task-kill] ring-3 task took ");
         SerialWrite(vec_name);

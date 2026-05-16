@@ -90,6 +90,7 @@
 #include "subsystems/win32/thread_syscall.h"
 #include "subsystems/win32/mutex_syscall.h"
 #include "subsystems/win32/event_syscall.h"
+#include "subsystems/win32/waitaddr_syscall.h"
 #include "subsystems/win32/apc_syscall.h"
 #include "subsystems/win32/named_kobj_syscall.h"
 #include "subsystems/win32/named_pipe_syscall.h"
@@ -3573,6 +3574,28 @@ void SyscallDispatch(arch::TrapFrame* frame)
         frame->rax = ProcessFindDllBaseByName(proc, kname);
         return;
     }
+
+    case SYS_MODULE_BASE_BY_VA:
+    {
+        // rdi = absolute user VA. Returns the owning module's load
+        // base (EXE or preloaded DLL), or 0 if no module matches.
+        Process* proc = CurrentProcess();
+        if (proc == nullptr)
+        {
+            frame->rax = 0;
+            return;
+        }
+        frame->rax = ProcessFindModuleBaseByVa(proc, frame->rdi);
+        return;
+    }
+
+    case SYS_WAIT_ON_ADDRESS:
+        ::duetos::subsystems::win32::DoWaitOnAddress(frame);
+        return;
+
+    case SYS_WAKE_BY_ADDRESS:
+        ::duetos::subsystems::win32::DoWakeByAddress(frame);
+        return;
 
     case SYS_DLL_LOAD_FROM_PATH:
     {

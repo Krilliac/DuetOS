@@ -291,6 +291,21 @@ struct Task
     // dumper doesn't walk into pre-init zeros).
     u32 trail_head;
     u32 trail_count;
+
+    // T6-02 kernel→user SEH delivery recursion guard.
+    // `seh_last_rip` is the faulting RIP the previous kernel-built
+    // EXCEPTION_RECORD was delivered for; `seh_repeat` counts
+    // consecutive deliveries at the SAME faulting RIP. A handler
+    // that legitimately catches a fault resumes at a *different*
+    // RIP (the __except block), so a rising `seh_repeat` means the
+    // dispatcher or a handler is wedged re-faulting the identical
+    // instruction. Once it crosses kSehMaxRepeat the trap path
+    // stops delivering and falls back to task-kill — the unhandled
+    // path must terminate, not loop forever in ntdll. Reset to zero
+    // on a distinct fault RIP.
+    u64 seh_last_rip;
+    u32 seh_repeat;
+    u32 _pad_seh;
 };
 
 namespace
@@ -1314,6 +1329,9 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->win32_last_error = 0; // ERROR_SUCCESS, per-thread Win32 slot
     t->fs_base = 0;
     t->user_gs_base_override = 0;
+    t->seh_last_rip = 0;
+    t->seh_repeat = 0;
+    t->_pad_seh = 0;
     t->irq_depth = 0;
     // No breakpoints on a fresh task. DR7 = 0 disables every slot
     // (the architecture's MBS bit 10 flips to 1 on the first real
@@ -1454,6 +1472,38 @@ core::Process* TaskProcess(Task* t)
         return nullptr;
     }
     return t->process;
+}
+
+bool SchedSehDeliveryAllowed(Task* t, u64 fault_rip)
+{
+    // Backstop bound on consecutive kernel SEH deliveries at the
+    // SAME faulting instruction. An *unhandled* exception already
+    // terminates in user mode (KiUserExceptionDispatcher's
+    // no-handler path calls SYS_EXIT), so this guard is not what
+    // ends a normal unhandled fault — it only catches the
+    // pathological case where the dispatcher / RtlRestoreContext
+    // ITSELF faults (broken ntdll, corrupt user stack): that loop
+    // re-faults at one constant RIP as fast as the CPU spins and
+    // blows the bound in microseconds. A legitimate program that
+    // faults-and-handles at the same RIP does real work between
+    // faults and recurs far slower, so a high bound never trips on
+    // it (the seh_pe veh-repeatable case does 3). A distinct fault
+    // RIP resets the counter.
+    static constexpr u32 kSehMaxRepeat = 4096;
+    if (t == nullptr)
+    {
+        return false;
+    }
+    if (fault_rip == t->seh_last_rip)
+    {
+        ++t->seh_repeat;
+    }
+    else
+    {
+        t->seh_last_rip = fault_rip;
+        t->seh_repeat = 0;
+    }
+    return t->seh_repeat < kSehMaxRepeat;
 }
 
 void SchedSetUserGsOverride(Task* t, u64 gs_base)

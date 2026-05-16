@@ -1456,6 +1456,20 @@ u64 ProcessResolveDllExportByBase(const Process* proc, u64 base_va, const char* 
 /// to match in form). Returns 0 on miss.
 u64 ProcessFindDllBaseByName(const Process* proc, const char* dll_name);
 
+/// Reverse map: given an absolute user VA, return the load base of
+/// the module (main EXE image or any preloaded DLL) whose mapped
+/// range contains it, or 0 if the VA lies in no known module.
+/// Backs the cross-module `RtlLookupFunctionEntry` (SEH frame walk
+/// crossing the EXE↔kernel32↔ntdll boundary) — ntdll asks the
+/// kernel "which image owns this RIP?" so it can read that
+/// module's in-memory `.pdata`. DLL ranges are matched by the
+/// recorded `[base_va, base_va+size)`; the EXE has no recorded
+/// size, so a VA at/above `pe_image_base` that matched no DLL
+/// falls back to the EXE base (the ntdll side re-validates the
+/// MZ/PE header before trusting it, so an over-broad EXE guess
+/// fails safe to "no function entry").
+u64 ProcessFindModuleBaseByVa(const Process* proc, u64 va);
+
 /// Current count of live Process objects. Diagnostic-only; the
 /// scheduler's task counters remain the source of truth for thread
 /// counts, while this exposes the process-lifetime counter maintained

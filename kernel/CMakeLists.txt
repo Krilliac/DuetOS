@@ -590,6 +590,7 @@ duetos_embed_smoke_pe(wininet_smoke  kBinWininetSmokeBytes)
 duetos_embed_smoke_pe(browser_pe     kBinBrowserPeBytes)
 duetos_embed_smoke_pe(tls_pe         kBinTlsPeBytes)
 duetos_embed_smoke_pe(seh_pe         kBinSehPeBytes)
+duetos_embed_smoke_pe(sync_smoke     kBinSyncSmokeBytes)
 duetos_embed_smoke_pe(iphlpapi_smoke kBinIphlpapiSmokeBytes)
 duetos_embed_smoke_pe(string_smoke   kBinStringSmokeBytes)
 duetos_embed_smoke_pe(mem_smoke      kBinMemSmokeBytes)
@@ -865,6 +866,19 @@ duetos_embed_blob(generated_ntdll_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_token.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_bulk.c"
     COMMENT "Compiling + embedding ntdll.dll (split into per-domain TUs)")
+
+# seh_try_pe.exe — real MSVC __try/__except/__finally over CPU
+# faults, built with clang-windows-msvc -fasync-exceptions and
+# linked against our own kernel32.lib / ntdll.lib import libs (the
+# mingw smoke toolchain can't express MSVC __try in C). Depends on
+# the kernel32 + ntdll embed outputs so their .lib files exist.
+duetos_embed_blob(generated_seh_try_pe.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-seh-try-pe.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/apps/seh_try_pe/seh_try_pe.c"
+    EXTRA_DEPS
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_kernel32_dll.h"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h"
+    COMMENT "Compiling + embedding seh_try_pe.exe (clang-windows __try/__except)")
 
 duetos_embed_blob(generated_dbghelp_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-dbghelp-dll.sh"

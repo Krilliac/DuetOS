@@ -1664,18 +1664,53 @@ __declspec(dllexport) DWORD GetThreadId(HANDLE t)
     return (DWORD)rv;
 }
 
-/* AddVectoredExceptionHandler — sentinel handle. */
+/* AddVectoredExceptionHandler / RemoveVectoredExceptionHandler —
+ * Windows keeps the VEH chain in ntdll; kernel32 is a forwarder.
+ * We can't emit a PE forwarder, and kernel32 doesn't import ntdll,
+ * so resolve ntdll's Rtl{Add,Remove}VectoredExceptionHandler at
+ * call time via the loader syscalls (SYS_DLL_BASE_BY_NAME = 172,
+ * SYS_DLL_PROC_ADDRESS = 57) and tail through. Resolution is
+ * cached after the first successful lookup. */
+static void* k32_resolve_ntdll(const char* name, unsigned long name_len)
+{
+    static const char k_ntdll[] = "ntdll";
+    long long base;
+    __asm__ volatile("int $0x80"
+                     : "=a"(base)
+                     : "a"((long long)172), "D"((long long)(unsigned long long)k_ntdll), "S"((long long)5)
+                     : "memory");
+    if (base == 0)
+        return (void*)0;
+    long long fn;
+    __asm__ volatile("int $0x80"
+                     : "=a"(fn)
+                     : "a"((long long)57), "D"(base), "S"((long long)(unsigned long long)name)
+                     : "memory");
+    (void)name_len;
+    return (void*)(unsigned long long)fn;
+}
+
+typedef void*(__attribute__((ms_abi)) * k32_add_veh_t)(unsigned long, void*);
+typedef unsigned long(__attribute__((ms_abi)) * k32_rm_veh_t)(void*);
+
 __declspec(dllexport) void* AddVectoredExceptionHandler(unsigned long first, void* h)
 {
-    (void)first;
-    (void)h;
-    return (void*)(unsigned long long)0xE7000001ULL;
+    static k32_add_veh_t fn;
+    if (fn == (k32_add_veh_t)0)
+        fn = (k32_add_veh_t)k32_resolve_ntdll("RtlAddVectoredExceptionHandler", 30);
+    if (fn == (k32_add_veh_t)0)
+        return (void*)0;
+    return fn(first, h);
 }
 
 __declspec(dllexport) unsigned long RemoveVectoredExceptionHandler(void* h)
 {
-    (void)h;
-    return 1;
+    static k32_rm_veh_t fn;
+    if (fn == (k32_rm_veh_t)0)
+        fn = (k32_rm_veh_t)k32_resolve_ntdll("RtlRemoveVectoredExceptionHandler", 33);
+    if (fn == (k32_rm_veh_t)0)
+        return 0;
+    return fn(h);
 }
 
 /* GetThreadPriorityBoost — TRUE, no boost. */

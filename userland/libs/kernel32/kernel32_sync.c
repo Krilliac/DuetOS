@@ -1165,6 +1165,213 @@ __declspec(dllexport) BOOL InitOnceExecuteOnce(void* InitOnce, InitOnceFn InitFn
 }
 
 /* ------------------------------------------------------------------
+ * Address-keyed wait — WaitOnAddress / WakeByAddress*.
+ *
+ * The futex-shaped primitive V8 / Chrome build SRW + condition
+ * variables on. SYS_WAIT_ON_ADDRESS = 208 (rdi=addr, rsi=expected
+ * value, rdx=size, r10=timeout-ms), SYS_WAKE_BY_ADDRESS = 209
+ * (rdi=addr, rsi=0 single / 1 all). The kernel allows spurious
+ * wakeups, exactly as Win32 documents, so every caller that needs
+ * an exact predicate loops.
+ * ------------------------------------------------------------------ */
+
+static long long waitaddr_load(const volatile void* p, unsigned long long size)
+{
+    switch (size)
+    {
+    case 1:
+        return (long long)*(const volatile unsigned char*)p;
+    case 2:
+        return (long long)*(const volatile unsigned short*)p;
+    case 4:
+        return (long long)*(const volatile unsigned int*)p;
+    case 8:
+        return (long long)*(const volatile unsigned long long*)p;
+    default:
+        return 0;
+    }
+}
+
+__declspec(dllexport) BOOL WaitOnAddress(volatile void* Address, void* CompareAddress, SIZE_T AddressSize,
+                                         DWORD dwMilliseconds)
+{
+    if (Address == (void*)0 || CompareAddress == (void*)0)
+        return 0;
+    long long expected = waitaddr_load(CompareAddress, (unsigned long long)AddressSize);
+    register long long _r10 asm("r10") = (long long)(unsigned long long)dwMilliseconds;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)208), /* SYS_WAIT_ON_ADDRESS */
+                       "D"((long long)(unsigned long long)(UINT_PTR)Address), "S"(expected),
+                       "d"((long long)(unsigned long long)AddressSize), "r"(_r10)
+                     : "memory");
+    return rv ? 1 : 0; /* 0 == timed out */
+}
+
+__declspec(dllexport) void WakeByAddressSingle(void* Address)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)209), /* SYS_WAKE_BY_ADDRESS */
+                       "D"((long long)(unsigned long long)(UINT_PTR)Address), "S"((long long)0)
+                     : "memory");
+    (void)rv;
+}
+
+__declspec(dllexport) void WakeByAddressAll(void* Address)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)209), "D"((long long)(unsigned long long)(UINT_PTR)Address), "S"((long long)1)
+                     : "memory");
+    (void)rv;
+}
+
+/* ------------------------------------------------------------------
+ * Condition variables — the standard sequence-counter algorithm
+ * over WaitOnAddress. CONDITION_VARIABLE is pointer-sized; we use
+ * its low 32 bits as a wake sequence. A sleeper samples the
+ * sequence WHILE holding the associated lock, drops the lock, then
+ * WaitOnAddress(&seq, sampled): if a waker bumped the sequence in
+ * the gap, WaitOnAddress returns immediately — no lost wakeup. The
+ * lock is always re-acquired before returning, in the same mode.
+ *
+ * SRW shared-vs-exclusive is still aliased to exclusive in v0
+ * (pre-existing), so SleepConditionVariableSRW re-takes exclusive
+ * regardless of flags — correct, just not maximally concurrent.
+ * ------------------------------------------------------------------ */
+
+/* EnterCriticalSection / LeaveCriticalSection / the SRW lock
+ * helpers are all defined earlier in this TU, so they're already
+ * in scope here — no forward declaration needed. */
+
+#define CONDITION_VARIABLE_LOCKMODE_SHARED 0x1u
+
+__declspec(dllexport) void InitializeConditionVariable(void* cv)
+{
+    if (cv != (void*)0)
+        *(volatile unsigned*)cv = 0;
+}
+
+__declspec(dllexport) BOOL SleepConditionVariableCS(void* cv, void* cs, DWORD dwMilliseconds)
+{
+    if (cv == (void*)0 || cs == (void*)0)
+        return 0;
+    unsigned seq = *(volatile unsigned*)cv;
+    LeaveCriticalSection(cs);
+    BOOL woken = WaitOnAddress(cv, &seq, 4, dwMilliseconds);
+    EnterCriticalSection(cs);
+    return woken;
+}
+
+__declspec(dllexport) BOOL SleepConditionVariableSRW(void* cv, void* srw, DWORD dwMilliseconds, unsigned long Flags)
+{
+    if (cv == (void*)0 || srw == (void*)0)
+        return 0;
+    unsigned seq = *(volatile unsigned*)cv;
+    const int shared = (Flags & CONDITION_VARIABLE_LOCKMODE_SHARED) != 0;
+    if (shared)
+        ReleaseSRWLockShared(srw);
+    else
+        ReleaseSRWLockExclusive(srw);
+    BOOL woken = WaitOnAddress(cv, &seq, 4, dwMilliseconds);
+    if (shared)
+        AcquireSRWLockShared(srw);
+    else
+        AcquireSRWLockExclusive(srw);
+    return woken;
+}
+
+__declspec(dllexport) void WakeConditionVariable(void* cv)
+{
+    if (cv == (void*)0)
+        return;
+    __atomic_add_fetch((volatile unsigned*)cv, 1u, __ATOMIC_SEQ_CST);
+    WakeByAddressSingle(cv);
+}
+
+__declspec(dllexport) void WakeAllConditionVariable(void* cv)
+{
+    if (cv == (void*)0)
+        return;
+    __atomic_add_fetch((volatile unsigned*)cv, 1u, __ATOMIC_SEQ_CST);
+    WakeByAddressAll(cv);
+}
+
+/* ------------------------------------------------------------------
+ * InitOnceBeginInitialize / InitOnceComplete — the explicit
+ * two-call form of one-time init (InitOnceExecuteOnce above is the
+ * callback form). Synchronous subset only: the INIT_ONCE word is
+ * 0 = untouched, 1 = initialiser running, 2 = done. Losers block
+ * on WaitOnAddress(slot) until the winner completes.
+ *
+ * GAP: the per-INIT_ONCE context pointer is not preserved (the
+ * single word holds the state) and INIT_ONCE_ASYNC is treated as
+ * the synchronous path — revisit if a real caller needs pending
+ * async init or the context slot.
+ * ------------------------------------------------------------------ */
+
+#define INIT_ONCE_CHECK_ONLY 0x1u
+#define INIT_ONCE_INIT_FAILED 0x4u
+
+__declspec(dllexport) BOOL InitOnceBeginInitialize(void* InitOnce, unsigned long dwFlags, BOOL* fPending,
+                                                   void** lpContext)
+{
+    if (InitOnce == (void*)0 || fPending == (BOOL*)0)
+        return 0;
+    volatile unsigned* slot = (volatile unsigned*)InitOnce;
+    for (;;)
+    {
+        unsigned cur = __atomic_load_n(slot, __ATOMIC_SEQ_CST);
+        if (cur == 2)
+        {
+            *fPending = 0;
+            if (lpContext != (void**)0)
+                *lpContext = (void*)0;
+            return 1;
+        }
+        if (dwFlags & INIT_ONCE_CHECK_ONLY)
+        {
+            /* Not finished and caller only wants a peek. */
+            return 0;
+        }
+        if (cur == 0)
+        {
+            unsigned expected = 0;
+            if (__atomic_compare_exchange_n(slot, &expected, 1u, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+            {
+                *fPending = 1; /* caller is the initialiser */
+                if (lpContext != (void**)0)
+                    *lpContext = (void*)0;
+                return 1;
+            }
+            continue; /* lost the race — re-evaluate */
+        }
+        /* cur == 1: another thread is initialising. Park until it
+         * bumps the slot, then loop to observe the new state. */
+        unsigned running = 1u;
+        WaitOnAddress(slot, &running, 4, 0xFFFFFFFFu);
+    }
+}
+
+__declspec(dllexport) BOOL InitOnceComplete(void* InitOnce, unsigned long dwFlags, void* lpContext)
+{
+    (void)lpContext;
+    if (InitOnce == (void*)0)
+        return 0;
+    volatile unsigned* slot = (volatile unsigned*)InitOnce;
+    if (dwFlags & INIT_ONCE_INIT_FAILED)
+        __atomic_store_n(slot, 0u, __ATOMIC_SEQ_CST); /* let another thread retry */
+    else
+        __atomic_store_n(slot, 2u, __ATOMIC_SEQ_CST); /* done */
+    WakeByAddressAll(InitOnce);
+    return 1;
+}
+
+/* ------------------------------------------------------------------
  * Thread management
  *
  * SYS_THREAD_CREATE = 45 (rdi=start_va, rsi=param) -> handle

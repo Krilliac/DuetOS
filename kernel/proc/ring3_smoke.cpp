@@ -127,6 +127,8 @@
 #include "generated_browser_pe_pe.h"
 #include "generated_tls_pe_pe.h"
 #include "generated_seh_pe_pe.h"
+#include "generated_seh_try_pe.h"
+#include "generated_sync_smoke_pe.h"
 #include "generated_pe32_smoke_pe.h"
 #include "generated_iphlpapi_smoke_pe.h"
 #include "generated_mem_smoke_pe.h"
@@ -2280,6 +2282,19 @@ void StartRing3SmokeTask()
         // (.pdata parse). Prints [seh_pe] RESULT PASS on success.
         SpawnPeFile("ring3-seh-pe", fs::generated::kBinSehPeBytes, fs::generated::kBinSehPeBytes_len, CapSetTrusted(),
                     fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // T6-02 slice 3: real MSVC __try/__except/__finally over
+        // CPU faults (clang-windows-msvc -fasync-exceptions). Drives
+        // the frame-based __C_specific_handler / RtlUnwindEx /
+        // RtlRestoreContext path the mingw seh_pe smoke can't
+        // express. Prints [seh_try] RESULT PASS on success.
+        SpawnPeFile("ring3-seh-try-pe", fs::generated::kBinSehTryPeBytes, fs::generated::kBinSehTryPeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // Win10 API breadth (synchronization): CONDITION_VARIABLE +
+        // CRITICAL_SECTION, WaitOnAddress/WakeByAddress (kernel
+        // SYS_WAIT_ON_ADDRESS futex), InitOnceBeginInitialize across
+        // real threads. Prints [sync_smoke] RESULT PASS on success.
+        SpawnPeFile("ring3-sync-smoke", fs::generated::kBinSyncSmokeBytes, fs::generated::kBinSyncSmokeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
     // First Win32 PE that gets RESOLVED (not just reported)
     // by the kernel. Imports kernel32.dll!ExitProcess, hits
