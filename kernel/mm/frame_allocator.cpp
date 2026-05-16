@@ -1211,6 +1211,20 @@ void FreeFrame(PhysAddr frame)
         if (cpu < acpi::kMaxCpus)
         {
             FramePool& p = g_frame_pools[cpu];
+            // The bitmap-based double-free panic above cannot see a
+            // frame already parked in this pool (pool entries keep
+            // the bitmap bit set by design). Scan the pool so a
+            // double-free of a still-pooled frame halts loudly here
+            // instead of being pushed twice and later handed to two
+            // distinct owners.
+            for (u32 j = 0; j < p.count; ++j)
+            {
+                if (p.frames[j] == frame)
+                {
+                    core::PanicWithValue("mm/frame_allocator",
+                                         "FreeFrame on frame already in per-CPU pool (double-free?)", frame);
+                }
+            }
             if (p.count < kFramePoolDepth)
             {
                 p.frames[p.count++] = frame;

@@ -381,7 +381,12 @@ i64 DoOpen(arch::TrapFrame* frame)
     u64 root_sentinel = 0;
     const char* parent_path = "";
     char concat_buf[256];
-    if (parent >= kHkeyClassesRoot && parent <= kHkeyCurrentConfig)
+    // Explicit set, not a [kHkeyClassesRoot, kHkeyCurrentConfig]
+    // range: 0x80000004 (HKEY_PERFORMANCE_DATA) falls inside that
+    // range but has no mapping in the static tree, so a range test
+    // would wrongly accept it as a valid predefined root.
+    if (parent == kHkeyClassesRoot || parent == kHkeyCurrentUser || parent == kHkeyLocalMachine ||
+        parent == kHkeyUsers || parent == kHkeyCurrentConfig)
     {
         // Predefined HKEY: the subkey path is the lookup path
         // verbatim, root is the sentinel.

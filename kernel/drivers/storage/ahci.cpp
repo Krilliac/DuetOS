@@ -1016,7 +1016,11 @@ bool AhciPanicWriteDump(const u8* bytes, u64 len)
     const u64 reserved_bytes = reserved_count * kSectorSize;
     const u64 capped_len = (len > reserved_bytes) ? reserved_bytes : len;
     const u64 written = PanicWriteChunked(*p, base_lba, bytes, capped_len, base_lba, reserved_last);
-    return written == len;
+    // Compare against what was actually attempted (capped_len), not
+    // the uncapped len: an oversize-but-fully-persisted dump writes
+    // capped_len bytes successfully and must report success, or the
+    // crash-dump caller falls back as if the persist failed.
+    return written == capped_len;
 }
 
 bool AhciPanicWriteSucceededLast()

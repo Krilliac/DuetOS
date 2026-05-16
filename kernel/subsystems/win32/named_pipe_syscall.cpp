@@ -178,6 +178,12 @@ void DoNamedPipeOpen(arch::TrapFrame* frame)
     const u64 file_slot = FindFreeFileSlot(proc);
     if (file_slot == Process::kWin32HandleCap)
     {
+        // NamedPipeConnectClient already flipped client_connected.
+        // The opposite-end retain below has NOT happened yet, so the
+        // only state to roll back is that flag — leaving it set would
+        // make NamedPipeOnServerClose treat the reservation as
+        // consumed and skip the orphan release, leaking the slot.
+        NamedPipeUnconnectClient(name);
         frame->rax = kBadResult;
         return;
     }

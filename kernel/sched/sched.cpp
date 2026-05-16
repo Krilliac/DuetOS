@@ -1411,6 +1411,18 @@ Task* SchedCreateUser(TaskEntry entry, void* arg, const char* name, core::Proces
     // the new task then enters Ring3UserEntry, hits the
     // `CurrentProcess() == nullptr` gate, and panics.
     Task* t = SchedCreateInternal(entry, arg, name, TaskPriority::Normal, process->as, process);
+    if (t == nullptr)
+    {
+        // SchedCreateInternal failed (Task/kstack OOM — warn, not
+        // panic, in release). The caller handed us its Process ref
+        // expecting the Task to absorb it; no Task exists to do so,
+        // so release it here or the whole AS + Process + PID slot
+        // leaks forever — and the trigger is memory pressure, so the
+        // leak would compound the very condition that caused it.
+        KLOG_WARN_S("sched", "SchedCreateUser: task alloc failed, releasing process ref", "name", name);
+        core::ProcessRelease(process);
+        return nullptr;
+    }
     KBP_PROBE_V(::duetos::debug::ProbeId::kRing3Spawn, process->pid);
     // Refcount discipline: ProcessCreate returned refcount=1 (one
     // for the creating caller). The caller hands that reference off
@@ -1757,7 +1769,11 @@ void SchedSleepTicks(u64 ticks)
     arch::Cli();
     Task* current = Current();
     current->state = TaskState::Sleeping;
-    current->wake_tick = g_tick_now + ticks;
+    // Saturate (same idiom as WaitQueueBlockTimeout): an unclamped
+    // sum can wrap to 0, which is the "not a timed waiter" sentinel
+    // and would make the sleeper wake immediately instead of after
+    // the requested interval.
+    current->wake_tick = (ticks > (~u64(0) - g_tick_now)) ? ~u64(0) : (g_tick_now + ticks);
     {
         sync::SpinLockGuard guard(g_sched_lock);
         SleepqueueInsert(current);
@@ -3796,7 +3812,14 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
         Task* t = Current();
         t->state = TaskState::Blocked;
         t->next = nullptr;
-        t->wake_tick = g_tick_now + ticks;
+        // Saturate exactly like WaitQueueBlockTimeout (line ~3417):
+        // an unclamped g_tick_now + ticks can wrap to 0 for a huge
+        // (Linux-ABI-reachable) timeout, and wake_tick == 0 is the
+        // "not a timed waiter" sentinel — WaitQueueWakeOneLocked
+        // would then skip the sleep-queue unlink and leave this task
+        // linked on the sleep list while it runs, corrupting the
+        // intrusive sleep_next/sleep_prev chain.
+        t->wake_tick = (ticks > (~u64(0) - g_tick_now)) ? ~u64(0) : (g_tick_now + ticks);
         t->waiting_on = &cv->waiters;
         t->wake_by_timeout = false;
         if (cv->waiters.tail == nullptr)

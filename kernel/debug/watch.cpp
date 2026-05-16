@@ -298,14 +298,17 @@ bool WatchSelfTest()
         arch::SerialWrite("[watch] selftest FAILED — write didn't land\n");
         return false;
     }
-    // Snapshot to confirm the hit counter advanced.
-    WatchInfo info{};
-    const usize n = WatchList(&info, 1);
-    bool ok = (n == 1) && (info.hit_count >= 1);
+    // Confirm the hit counter advanced. Look the entry up by name —
+    // WatchList(&info, 1) returns the FIRST live row, which is only
+    // ours when the table is otherwise empty; any pre-installed
+    // watchpoint (e.g. a user `watch` before a re-run) would make
+    // slot 0 the wrong row and produce a false PASS/FAIL.
+    const Entry* self = FindByName(kName);
+    bool ok = (self != nullptr) && (self->hit_count >= 1);
     if (!ok)
     {
         arch::SerialWrite("[watch] selftest FAILED — hit_count=");
-        arch::SerialWriteHex(n == 1 ? info.hit_count : 0);
+        arch::SerialWriteHex(self != nullptr ? self->hit_count : 0);
         arch::SerialWrite(" (expected >= 1)\n");
     }
     if (!WatchRemove(kName))

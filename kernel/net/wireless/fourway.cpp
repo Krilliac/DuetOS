@@ -274,8 +274,14 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
         {
             ++ctx.mic_failures;
             ctx.state = FourWayState::Failed;
-            KLOG_ERROR_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
-                         "M3 MIC verify FAILED — handshake aborted");
+            // WARN, not ERROR: a failed M3 MIC is a normal
+            // remote-input protocol rejection (wrong PSK is the
+            // common case). The Err return + ctx.state=Failed +
+            // RecordErr are the real notification channels; an [E]
+            // sentinel here floods the error log on every wrong
+            // password and trips the boot-log [E] CI grep.
+            KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                        "M3 MIC verify FAILED — handshake aborted");
             diag::RecordErr(diag::Layer::Eapol, "4way-m3-mic", static_cast<u32>(vr.error()), 0, 0, 0);
             return vr;
         }
@@ -298,8 +304,8 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
             {
                 ++ctx.mic_failures;
                 ctx.state = FourWayState::Failed;
-                KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
-                              "M3 encrypted key-data length invalid", static_cast<u64>(f.key_data_len));
+                KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                             "M3 encrypted key-data length invalid", static_cast<u64>(f.key_data_len));
                 diag::RecordErr(diag::Layer::Eapol, "4way-m3-keydata-len",
                                 static_cast<u32>(::duetos::core::ErrorCode::Corrupt), f.key_data_len, 0, 0);
                 return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
@@ -308,8 +314,8 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
             if (plain_len > kUnwrapScratchMax)
             {
                 ctx.state = FourWayState::Failed;
-                KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
-                              "M3 encrypted key-data exceeds unwrap scratch — refusing", static_cast<u64>(plain_len));
+                KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                             "M3 encrypted key-data exceeds unwrap scratch — refusing", static_cast<u64>(plain_len));
                 diag::RecordErr(diag::Layer::Eapol, "4way-m3-keydata-too-big",
                                 static_cast<u32>(::duetos::core::ErrorCode::Corrupt), plain_len, 0, 0);
                 return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
@@ -320,8 +326,8 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
             {
                 ++ctx.mic_failures;
                 ctx.state = FourWayState::Failed;
-                KLOG_ERROR_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
-                             "M3 AES-KW unwrap integrity check FAILED — handshake aborted");
+                KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                            "M3 AES-KW unwrap integrity check FAILED — handshake aborted");
                 diag::RecordErr(diag::Layer::Eapol, "4way-m3-kw-fail",
                                 static_cast<u32>(::duetos::core::ErrorCode::Corrupt), f.key_data_len, 0, 0);
                 return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
@@ -340,8 +346,8 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
             {
                 ++ctx.mic_failures;
                 ctx.state = FourWayState::Failed;
-                KLOG_ERROR_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
-                             "M3 KeyData GTK KDE corrupt — handshake aborted");
+                KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                            "M3 KeyData GTK KDE corrupt — handshake aborted");
                 diag::RecordErr(diag::Layer::Eapol, "4way-m3-gtk-corrupt",
                                 static_cast<u32>(::duetos::core::ErrorCode::Corrupt), keydata_len, 0, 0);
                 return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};

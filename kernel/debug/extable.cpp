@@ -130,11 +130,14 @@ void ExtableSelfTest()
     {
         core::PanicWithValue("debug/extable", "SelfTest: out-of-range should miss", miss);
     }
-    // Roll back the synthetic entry so it doesn't leak a bogus
-    // rip range into the trap handler. Safe because nobody else
-    // has touched the table since we added it.
-    if (g_entry_count == before + 1)
-        g_entry_count = before;
+    // Roll back the synthetic entry so it doesn't leak a bogus rip
+    // range into the trap handler. The boot self-test is
+    // single-threaded and every registration since `before` was
+    // panic-checked, so restoring to the captured count is exactly a
+    // LIFO pop — done unconditionally rather than gated on a count
+    // equality that silently no-ops (leaving the bogus range armed)
+    // if the invariant is ever perturbed.
+    g_entry_count = before;
 
     // Domain-id round-trip: a row registered with a domain id
     // should report that id back via FindEntry. Use 0x12345678 —
@@ -158,8 +161,9 @@ void ExtableSelfTest()
     {
         core::PanicWithValue("debug/extable", "SelfTest: domain_id round-trip mismatch", found->domain_id);
     }
-    if (g_entry_count == before + 1)
-        g_entry_count = before;
+    // Same unconditional LIFO pop as the synthetic-entry rollback
+    // above (single-threaded boot, panic-checked registration).
+    g_entry_count = before;
 
     arch::SerialWrite("[extable-selftest] PASS (register + hit + miss + domain-id; ");
     arch::SerialWriteHex(g_entry_count);
