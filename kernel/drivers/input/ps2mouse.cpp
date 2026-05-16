@@ -57,8 +57,18 @@ constexpr u8 kMouseCmdEnableReporting = 0xF4;
 
 constexpr u8 kMouseAck = 0xFA;
 
-// Same poll cap shape the keyboard driver uses — 1M reads ≈ tens of ms.
-constexpr u64 kPollSpinLimit = 1'000'000;
+// Poll cap for the 8042 status waits. On bare metal an `Inb` is a few
+// cycles, so a large cap is cheap. Under hardware virtualization (VBox,
+// VMware, KVM) every `Inb` on the 8042 ports is a VM-exit (~0.5-1 us),
+// so the old 1'000'000 cap meant ~1 second PER wait when the device is
+// silent — and a mouse-absent VBox aux channel makes every wait spin to
+// the full cap, stacking dozens of them into a ~30 s apparent boot hang
+// before the "no PS/2 mouse" bail. A present mouse ACKs in microseconds
+// (a handful of reads), so 50k keeps an ample margin for real hardware
+// while bounding the mouse-absent path to a fraction of a second per
+// wait. (Mirrors the VM-exit-cost reasoning behind the auth-pentest
+// debug-skip.)
+constexpr u64 kPollSpinLimit = 50'000;
 
 // ISA IRQ 12 on the 8042 aux channel.
 constexpr u8 kMouseIsaIrq = 12;
@@ -410,6 +420,9 @@ void Ps2MouseInit()
     duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2mouse", "  gsi", gsi);
     duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2mouse", "  vector", kMouseVector);
     duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2mouse", "  lapic_id", bsp_id);
+    // Kept (gated at Debug): mouse device ACKed enable-reporting? 0 here
+    // means VBox presented no PS/2 aux device — visible in a debug build.
+    duetos::core::LogWithValue(duetos::core::LogLevel::Debug, "drivers/ps2mouse", "  available", g_available ? 1u : 0u);
 }
 
 MousePacket Ps2MouseReadPacket()
