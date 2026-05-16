@@ -71,6 +71,14 @@ struct InterruptOverride
 /// lying about something critical.
 void AcpiInit(uptr multiboot_info_phys);
 
+/// Map `len` bytes of an ACPI table's physical memory and return a
+/// readable virtual pointer. Uses the kernel direct map when the table
+/// is below it, an MMIO mapping (cached, kept for kernel lifetime)
+/// otherwise — firmware (VirtualBox, real UEFI) frequently parks ACPI
+/// tables above the 1 GiB direct map. Every ACPI TU must resolve table
+/// addresses through this, never mm::PhysToVirt directly.
+const void* AcpiMapTable(u64 phys, u64 len);
+
 /// LAPIC base physical address from the MADT header. Typically
 /// 0xFEE00000 but firmware can relocate it. Callers should prefer this
 /// over the IA32_APIC_BASE MSR when the two disagree — the MADT is

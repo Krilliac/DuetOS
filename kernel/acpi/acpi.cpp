@@ -444,8 +444,13 @@ inline u64 XsdtEntryAt(const SdtHeader* xsdt, u64 i)
 
 const SdtHeader* FindTable(const Rsdp& rsdp, const char* sig4)
 {
-    // Prefer XSDT (64-bit entry pointers) on ACPI 2.0+ firmware. Fall back
-    // to RSDT (32-bit pointers) on ACPI 1.0 or when no XSDT is present.
+    // Prefer the XSDT (64-bit entry pointers) on ACPI 2.0+ firmware,
+    // then fall back to the RSDT (32-bit pointers) — used on ACPI 1.0,
+    // when no XSDT is present, OR when the XSDT is present but does not
+    // list the requested table. The last case is real: VirtualBox ships
+    // an incomplete XSDT (only FADT + SSDT) and lists the MADT and the
+    // rest only in the legacy RSDT. The spec says the two tables should
+    // agree; firmware in the wild does not always honour that.
     if (rsdp.revision >= 2 && rsdp.xsdt_address != 0)
     {
         const auto* xsdt = PhysToHeader(rsdp.xsdt_address);
@@ -472,9 +477,16 @@ const SdtHeader* FindTable(const Rsdp& rsdp, const char* sig4)
                 return h;
             }
         }
-        return nullptr;
+        // Not found in the XSDT. Do NOT give up here — fall through to
+        // the RSDT scan below (incomplete-XSDT firmware, see header
+        // comment). A genuinely-absent table is reported by returning
+        // nullptr only after both roots have been searched.
     }
 
+    if (rsdp.rsdt_address == 0)
+    {
+        return nullptr;
+    }
     const auto* rsdt = PhysToHeader(rsdp.rsdt_address);
     if (!BytesEqual(rsdt->signature, "RSDT", 4))
     {
@@ -497,6 +509,62 @@ const SdtHeader* FindTable(const Rsdp& rsdp, const char* sig4)
         }
     }
     return nullptr;
+}
+
+// One-shot boot diagnostic: dump the RSDP + root system table + every
+// entry's physical address and 4-char signature. WARN-level so it lands
+// in a serial capture by default. Kept (gated by the once-at-boot call
+// site) because non-QEMU firmware — VirtualBox, real UEFI — lays the
+// ACPI tables out differently than the QEMU/OVMF path the parser was
+// written against, and this is the cheapest way to see that layout when
+// a table lookup fails on a machine we can't introspect any other way.
+void AcpiDiagDumpRoot(const char* tag, u64 root_phys, bool entries_are_64bit)
+{
+    if (root_phys == 0)
+    {
+        KLOG_WARN_S("acpi", "diag root absent", "which", tag);
+        return;
+    }
+    const auto* root = PhysToHeader(root_phys);
+    char rsig[5] = {root->signature[0], root->signature[1], root->signature[2], root->signature[3], 0};
+    KLOG_WARN_S("acpi", "diag root which", "which", tag);
+    KLOG_WARN_S("acpi", "diag root signature", "sig", rsig);
+    KLOG_WARN_2V("acpi", "diag root phys/length", "phys", root_phys, "length", root->length);
+
+    const u64 esz = entries_are_64bit ? sizeof(u64) : sizeof(u32);
+    const u64 count = (root->length >= sizeof(SdtHeader)) ? (root->length - sizeof(SdtHeader)) / esz : 0;
+    KLOG_WARN_V("acpi", "diag root entry count", count);
+    for (u64 i = 0; i < count; ++i)
+    {
+        u64 ep = 0;
+        if (entries_are_64bit)
+        {
+            ep = XsdtEntryAt(root, i);
+        }
+        else
+        {
+            const auto* e32 = reinterpret_cast<const u32*>(reinterpret_cast<uptr>(root) + sizeof(SdtHeader));
+            ep = e32[i];
+        }
+        const auto* th = PhysToHeader(ep);
+        char s[5] = {th->signature[0], th->signature[1], th->signature[2], th->signature[3], 0};
+        KLOG_WARN_2V("acpi", "diag entry", "idx", i, "phys", ep);
+        KLOG_WARN_S("acpi", "diag entry signature", "sig", s);
+    }
+}
+
+void AcpiDiagDumpTables(const Rsdp& rsdp)
+{
+    KLOG_WARN_2V("acpi", "diag RSDP", "revision", rsdp.revision, "rsdt_address", rsdp.rsdt_address);
+    KLOG_WARN_V("acpi", "diag RSDP xsdt_address", rsdp.xsdt_address);
+    // Dump BOTH roots — VirtualBox ships an incomplete XSDT and the
+    // MADT may live only in the RSDT (or vice versa), so we need to
+    // see exactly what each one lists.
+    if (rsdp.revision >= 2 && rsdp.xsdt_address != 0)
+    {
+        AcpiDiagDumpRoot("XSDT", rsdp.xsdt_address, /*entries_are_64bit=*/true);
+    }
+    AcpiDiagDumpRoot("RSDT", static_cast<u64>(rsdp.rsdt_address), /*entries_are_64bit=*/false);
 }
 
 void ParseMadt(const Madt& madt)
@@ -756,6 +824,17 @@ void ParseMcfg(const McfgTable& mcfg)
 
 } // namespace
 
+// Shared ACPI physical→virtual mapper. Thin named wrapper around the
+// file-local AcpiMapPhys so other ACPI TUs (aml.cpp) resolve table
+// addresses through the same direct-map / MapMmio fallback + cache
+// instead of calling mm::PhysToVirt directly (which panics for the
+// >1 GiB tables VirtualBox/real-UEFI firmware hands us). One source of
+// truth for ACPI table mapping.
+const void* AcpiMapTable(u64 phys, u64 len)
+{
+    return AcpiMapPhys(phys, len);
+}
+
 void AcpiInit(uptr multiboot_info_phys)
 {
     KLOG_TRACE_SCOPE("acpi", "AcpiInit");
@@ -778,6 +857,8 @@ void AcpiInit(uptr multiboot_info_phys)
             PanicAcpi("RSDP failed Rust signature/checksum validation");
         }
     }
+
+    AcpiDiagDumpTables(*rsdp);
 
     const SdtHeader* madt_hdr = FindTable(*rsdp, "APIC");
     if (madt_hdr == nullptr)
