@@ -118,7 +118,8 @@ bool SendTile(DrshTransport& t, DrshSession& s, u8 channel_id, u16 x, u16 y, u16
     // pastes back into its own surface with its own pitch.
     for (u32 row = 0; row < h; ++row)
     {
-        const u8* src = fb_base + (static_cast<u32>(y) + row) * fb_pitch + static_cast<u32>(x) * 4u;
+        const u8* src = fb_base + static_cast<u64>(static_cast<u32>(y) + row) * fb_pitch +
+                        static_cast<u64>(static_cast<u32>(x)) * 4u;
         for (u32 i = 0; i < static_cast<u32>(w) * 4u; ++i)
             payload[off + i] = src[i];
         off += static_cast<u32>(w) * 4u;
@@ -133,9 +134,7 @@ void HandleInputKey(const u8* p, u32 plen)
     duetos::drivers::input::KeyEvent ev{};
     ev.code = static_cast<u16>((static_cast<u16>(p[1]) << 8) | static_cast<u16>(p[0])); // LE on the wire
     ev.modifiers = p[2];
-    ev.is_release = (p[3] != 0) ? false : false; // press=1, release=0 in this encoding
-    // Wait — re-read: payload[3] is "press" (1) or "release" (0).
-    // is_release should be the inverse: is_release = (p[3] == 0).
+    // payload[3] is "press" (1) or "release" (0); is_release is the inverse.
     ev.is_release = (p[3] == 0);
     duetos::drivers::input::KeyboardInjectEvent(ev);
 }

@@ -41,6 +41,9 @@ inline constexpr u32 kDuetFwPackageDigestBytes = crypto::kSha256DigestBytes;
 // can generate it without C struct packing assumptions.
 inline constexpr u32 kDuetFwPackageHeaderBytes = 160;
 
+// u16 is the serialized field width (LE16 at header offset 12, see
+// firmware_package.cpp) — deliberate, not a footprint choice.
+// NOLINTNEXTLINE(performance-enum-size)
 enum class FwPackageFamily : u16
 {
     Unknown = 0,
@@ -61,6 +64,9 @@ enum class FwPackageSourceKind : u8
     PatchFramework = 4,
 };
 
+// u32 is the serialized field width (LE32 bitflag set at header offset 16,
+// see firmware_package.cpp) — deliberate, not a footprint choice.
+// NOLINTNEXTLINE(performance-enum-size)
 enum FwPackageFlags : u32
 {
     kFwPackageFlagSourceRebuildable = 1u << 0,

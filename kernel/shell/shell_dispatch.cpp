@@ -642,7 +642,7 @@ u32 Tokenize(char* buf, char** argv)
 // by CmdWhich and the tab-completer's CompleteCommandName.
 // New commands added here + dispatched in Dispatch — keeping
 // the two in sync is the price of not having reflection.
-const char* const kCommandSet[] = {
+constinit const char* const kCommandSet[] = {
     "help",      "about",     "version",     "clear",        "console",  "panic-test", "uptime",     "date",
     "windows",   "mode",      "ls",          "cat",          "touch",    "rm",         "echo",       "cp",
     "mv",        "wc",        "head",        "tail",         "dmesg",    "stats",      "mem",        "history",
@@ -674,7 +674,7 @@ const char* const kCommandSet[] = {
     "pe-triage", "caplog",    "live-update", "fault-inject", "suspend",  "resume",     "affinity",   "vtop",
     "logclock",  "dpms",      "wrmsr",       "io",           "peek",     "poke",
 };
-const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
+constinit const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
 void Prompt()
 {

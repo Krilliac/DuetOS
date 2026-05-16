@@ -16,10 +16,11 @@
  *     14 or 15. No EBDA / low-1MiB fallback scan — GRUB always hands it
  *     over, and anything booted via a loader that doesn't is a config
  *     bug, not a runtime recoverable one.
- *   - Assumes every ACPI table lives in the first 1 GiB of physical
- *     RAM (reachable via the boot direct map). Panics otherwise. The
- *     fix is to MapMmio the out-of-range range; deferred until a real
- *     machine makes us care.
+ *   - ACPI tables below the 1 GiB direct map (QEMU/OVMF) are read
+ *     directly via PhysToVirt; tables the firmware parks higher
+ *     (VirtualBox puts the XSDT near the top of 2 GiB RAM) are reached
+ *     through a cached MapMmio fallback in AcpiMapPhys(). Mappings are
+ *     kept for the kernel lifetime (the DSDT/SSDT scanners reuse them).
  *   - FADT parsing is minimal — only RESET_REG + RESET_VALUE + SCI_INT
  *     are cached. The rest (PM1a/PM1b event/control blocks, PM timer,
  *     GPE blocks, preferred CPU C-state hints) lands when a consumer
@@ -69,6 +70,14 @@ struct InterruptOverride
 /// x86_64 machine, and a corrupt table at boot means the firmware is
 /// lying about something critical.
 void AcpiInit(uptr multiboot_info_phys);
+
+/// Map `len` bytes of an ACPI table's physical memory and return a
+/// readable virtual pointer. Uses the kernel direct map when the table
+/// is below it, an MMIO mapping (cached, kept for kernel lifetime)
+/// otherwise — firmware (VirtualBox, real UEFI) frequently parks ACPI
+/// tables above the 1 GiB direct map. Every ACPI TU must resolve table
+/// addresses through this, never mm::PhysToVirt directly.
+const void* AcpiMapTable(u64 phys, u64 len);
 
 /// LAPIC base physical address from the MADT header. Typically
 /// 0xFEE00000 but firmware can relocate it. Callers should prefer this

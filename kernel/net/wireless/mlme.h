@@ -83,18 +83,17 @@ struct MlmeConnectRequest
 
 /// Build a Class-1 Authentication frame body (Auth Algorithm =
 /// Open, Sequence = 1, Status = 0). Returns bytes written.
-::duetos::core::Result<u32> MlmeBuildAuthOpenFrame(const u8 sta_mac[6], const u8 ap_mac[6], u8* out_buf,
-                                                   u32 out_buf_capacity);
+::duetos::core::Result<u32> MlmeBuildAuthOpenFrame(const u8 sta_mac[6], const u8 ap_mac[6], u8* out, u32 cap);
 
 /// Build an Association Request frame body. Includes RSN IE if
 /// `rsn_ie_len > 0`. Returns bytes written.
 ::duetos::core::Result<u32> MlmeBuildAssocReqFrame(const u8 sta_mac[6], const u8 ap_mac[6], const char* ssid,
                                                    u8 ssid_len, const u8 supp_rates[8], u8 supp_rates_count,
-                                                   const u8* rsn_ie, u32 rsn_ie_len, u8* out_buf, u32 out_buf_capacity);
+                                                   const u8* rsn_ie, u32 rsn_ie_len, u8* out, u32 cap);
 
 /// Build a Deauthentication frame body.
-::duetos::core::Result<u32> MlmeBuildDeauthFrame(const u8 sta_mac[6], const u8 ap_mac[6], u16 reason_code, u8* out_buf,
-                                                 u32 out_buf_capacity);
+::duetos::core::Result<u32> MlmeBuildDeauthFrame(const u8 sta_mac[6], const u8 ap_mac[6], u16 reason_code, u8* out,
+                                                 u32 cap);
 
 /// Default RSN IE for WPA2-PSK with CCMP-128. Writes 22 bytes.
 u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap);

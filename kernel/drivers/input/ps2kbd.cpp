@@ -77,6 +77,11 @@ constexpr u8 kResponseTestPort1Pass = 0x00;
 constexpr u8 kConfigPort1IrqEnable = 1U << 0;
 constexpr u8 kConfigPort2IrqEnable = 1U << 1;
 constexpr u8 kConfigPort1ClockDisable = 1U << 4;
+// Bit 6: first-port scancode translation (8042 rewrites the keyboard's
+// Set 2 codes into Set 1 for the host). We put the keyboard explicitly
+// into Set 1 (step 8), so this MUST be off — with it on, the controller
+// runs Set-1 codes through the Set-2→Set-1 table and mangles every key.
+constexpr u8 kConfigPort1Translation = 1U << 6;
 
 // Bounded spin count for controller-response polling. 1M reads is
 // ~tens of milliseconds on a modern CPU — well past any legitimate
@@ -488,11 +493,14 @@ void ControllerInit()
     Drain();
 
     // Step 3: pull the current config byte, turn OFF both IRQ enables
-    // (we'll re-enable port 1 last), and leave translation whatever
-    // firmware set it to — our scan-code translator expects set 1 +
-    // translation on, which is the PC-AT default every BIOS honours.
+    // (we'll re-enable port 1 last), and explicitly turn OFF first-port
+    // translation. Step 8 forces the keyboard into Set 1, so the 8042
+    // must NOT also run a Set-2→Set-1 translation pass or every key is
+    // mangled. SeaBIOS/OVMF happen to leave translation off; VirtualBox
+    // firmware leaves it on, which previously wrecked the keymap — so
+    // make it deterministic instead of inheriting the firmware default.
     u8 config = ReadConfigByte();
-    config = static_cast<u8>(config & ~(kConfigPort1IrqEnable | kConfigPort2IrqEnable));
+    config = static_cast<u8>(config & ~(kConfigPort1IrqEnable | kConfigPort2IrqEnable | kConfigPort1Translation));
     WriteConfigByte(config);
 
     // Step 4: controller self-test. Some buggy firmware resets the

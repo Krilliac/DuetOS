@@ -109,7 +109,7 @@ void VfsSelfTest();
 // callers migrates.
 // =====================================================================
 
-enum class VfsBackend : u32
+enum class VfsBackend : u8
 {
     Invalid = 0, ///< default-constructed / "miss" sentinel
     Ramfs = 1,

@@ -705,7 +705,7 @@ void AmlNamespaceBuild()
     const u32 dsdt_len = DsdtLength();
     if (dsdt_phys != 0 && dsdt_len >= 36)
     {
-        const auto* sdt = static_cast<const u8*>(mm::PhysToVirt(dsdt_phys));
+        const auto* sdt = static_cast<const u8*>(AcpiMapTable(dsdt_phys, dsdt_len));
         if (sdt != nullptr)
             WalkTable(sdt, dsdt_len, /*source_idx=*/0);
     }
@@ -716,7 +716,7 @@ void AmlNamespaceBuild()
         const u32 len = SsdtLength(i);
         if (phys == 0 || len < 36)
             continue;
-        const auto* sdt = static_cast<const u8*>(mm::PhysToVirt(phys));
+        const auto* sdt = static_cast<const u8*>(AcpiMapTable(phys, len));
         if (sdt != nullptr)
             WalkTable(sdt, len, u8(i + 1));
     }
@@ -842,7 +842,7 @@ bool AmlReadS5(u8* slp_typa, u8* slp_typb)
         // table rather than underflowing the subtraction below.
         if (dsdt_len < 36)
             return false;
-        const auto* hdr = static_cast<const u8*>(mm::PhysToVirt(dsdt_phys));
+        const auto* hdr = static_cast<const u8*>(AcpiMapTable(dsdt_phys, dsdt_len));
         aml = hdr + 36; // skip SdtHeader
         aml_len = dsdt_len - 36;
     }
@@ -857,7 +857,7 @@ bool AmlReadS5(u8* slp_typa, u8* slp_typb)
         const u32 ssdt_len = SsdtLength(idx);
         if (ssdt_len < 36)
             return false;
-        const auto* hdr = static_cast<const u8*>(mm::PhysToVirt(ssdt_phys));
+        const auto* hdr = static_cast<const u8*>(AcpiMapTable(ssdt_phys, ssdt_len));
         aml = hdr + 36;
         aml_len = ssdt_len - 36;
     }

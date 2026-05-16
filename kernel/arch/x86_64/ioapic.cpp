@@ -201,6 +201,18 @@ void IoApicRoute(u32 gsi, u8 vector, u8 lapic_id, u8 isa_irq)
     const u32 entry = gsi - io->gsi_base;
     WriteRedir(*io, entry, static_cast<u64>(kRedirLowMask));
     WriteRedir(*io, entry, value);
+
+    // Diagnostic (Debug-gated, kept per the keep-it/gate-it discipline):
+    // read the entry back so a debug-build serial capture proves whether
+    // the IOAPIC actually latched the route — some emulated IOAPICs
+    // silently drop writes to certain entries. gsi/vector identify the
+    // device (GSI1 = PS/2 kbd, GSI12 = PS/2 mouse); bit 16 of the low
+    // dword set in the read-back means still masked = no IRQ will fire.
+    const u64 readback = ReadRedir(*io, entry);
+    core::LogWithValue(core::LogLevel::Debug, "arch/ioapic", "route gsi", gsi);
+    core::LogWithValue(core::LogLevel::Debug, "arch/ioapic", "  vector", vector);
+    core::LogWithValue(core::LogLevel::Debug, "arch/ioapic", "  wrote", value);
+    core::LogWithValue(core::LogLevel::Debug, "arch/ioapic", "  readback", readback);
 }
 
 void IoApicMask(u32 gsi)

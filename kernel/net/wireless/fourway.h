@@ -96,7 +96,7 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
 /// current state (M2 or M4). Returns Ok on success;
 /// FailedPrecondition if state doesn't expect an outgoing frame.
 ::duetos::core::Result<void> FourWayBuildOutgoing(const FourWayContext& ctx, const u8* rsn_ie, u32 rsn_ie_len,
-                                                  u8* out_buf, u32 out_buf_capacity, u32* out_len);
+                                                  u8* out_buf, u32 cap, u32* out_len);
 
 /// PTK split helpers — view the PTK without copying.
 inline const u8* FourWayKck(const FourWayContext& ctx)

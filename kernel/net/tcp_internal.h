@@ -161,11 +161,19 @@ struct Tcb
     OoSegment oo_queue[kReassQueueMax];
 };
 
-extern Tcb g_tcbs[kTcbCap];
-extern u8 g_buckets[kTcbBuckets];
-extern Stats g_stats;
-extern bool g_initialised;
-extern u16 g_ephemeral_cursor;
+// These are `extern` declarations; the definitions in tcp.cpp are
+// `constinit`, so the kernel never relies on dynamic (.init_array)
+// initialization for them — the freestanding-kernel hazard this check
+// guards against is already eliminated at the definition site. The check
+// still flags the header declaration because it can't see the constinit
+// definition from here; suppress with that rationale.
+// NOLINTBEGIN(bugprone-dynamic-static-initializers)
+extern constinit Tcb g_tcbs[kTcbCap];
+extern constinit u8 g_buckets[kTcbBuckets];
+extern constinit Stats g_stats;
+extern constinit bool g_initialised;
+extern constinit u16 g_ephemeral_cursor;
+// NOLINTEND(bugprone-dynamic-static-initializers)
 
 // Helpers shared across the TCP TUs. All assume the caller holds
 // arch::Cli (single-CPU stand-in for a per-bucket lock).

@@ -32,14 +32,17 @@ namespace duetos::net::tcp
 namespace internal
 {
 
-Tcb g_tcbs[kTcbCap];
-u8 g_buckets[kTcbBuckets];
-Stats g_stats;
-bool g_initialised = false;
+// constinit: these live in a header (tcp_internal.h) and are touched on
+// early boot paths; constant (zero) initialization is required because the
+// kernel only walks .init_array after the heap is online.
+constinit Tcb g_tcbs[kTcbCap] = {};
+constinit u8 g_buckets[kTcbBuckets] = {};
+constinit Stats g_stats = {};
+constinit bool g_initialised = false;
 
 // Ephemeral port pool — kicked off above the well-known + reserved
 // range. Wraps in RFC-6056 dynamic range. Allocated under Cli.
-u16 g_ephemeral_cursor = 49152;
+constinit u16 g_ephemeral_cursor = 49152;
 
 u64 NowTicks()
 {
@@ -713,14 +716,11 @@ void Release(TcbId id)
         --t->refs;
     if (t->refs == 0)
     {
-        // Listener: tear down immediately. Connected TCB: trigger a
-        // close so the four-way handshake runs first; the timer +
-        // segment paths eventually call DropTcb.
-        if (t->is_listener)
-        {
-            DropTcb(u32(t - &g_tcbs[0]));
-        }
-        else if (t->state == State::Closed || t->state == State::TimeWait)
+        // Listener, or a connection already past the handshake
+        // (Closed/TimeWait): tear down immediately. An otherwise-live
+        // connected TCB triggers a close so the four-way handshake
+        // runs first; the timer + segment paths eventually call DropTcb.
+        if (t->is_listener || t->state == State::Closed || t->state == State::TimeWait)
         {
             DropTcb(u32(t - &g_tcbs[0]));
         }

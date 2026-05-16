@@ -117,7 +117,7 @@ HttpGetResult DoHttpGet(Ipv4Address dst, const char* host_header, u32& out_statu
     const i32 sock = SocketAlloc(kSocketDomainInet, kSocketTypeStream);
     if (sock < 0)
         return HttpGetResult::SendRejected;
-    if (!SocketConnect(static_cast<u32>(sock), dst, /*dst_port=*/80))
+    if (!SocketConnect(static_cast<u32>(sock), dst, /*peer_port=*/80))
     {
         SocketRelease(static_cast<u32>(sock));
         return HttpGetResult::SendRejected;
@@ -191,7 +191,7 @@ void NetSmokeEntry(void*)
     arch::SerialWrite("[net-smoke] step 1: ping gateway ");
     WriteIp(lease.router);
     arch::SerialWrite("\n");
-    if (DoIcmpEcho(lease.router, /*id=*/0xCAFE, /*timeout=*/200))
+    if (DoIcmpEcho(lease.router, /*id=*/0xCAFE, /*timeout_ticks=*/200))
         arch::SerialWrite("[net-smoke] step 1: PASS — gateway replied to ICMP echo\n");
     else
         arch::SerialWrite("[net-smoke] step 1: FAIL — no reply within 2s\n");
@@ -205,7 +205,7 @@ void NetSmokeEntry(void*)
     arch::SerialWrite("[net-smoke] step 2: DNS A www.google.com via ");
     WriteIp(lease.dns);
     arch::SerialWrite("\n");
-    if (DoDnsLookup(lease.dns, "www.google.com", google_ip, /*timeout=*/300))
+    if (DoDnsLookup(lease.dns, "www.google.com", google_ip, /*timeout_ticks=*/300))
     {
         dns_ok = true;
         arch::SerialWrite("[net-smoke] step 2: PASS — www.google.com -> ");
@@ -224,7 +224,7 @@ void NetSmokeEntry(void*)
     // as "skipped" rather than FAIL so a non-root QEMU run isn't
     // flagged as broken.
     arch::SerialWrite("[net-smoke] step 3: ping 8.8.8.8 (public)\n");
-    if (DoIcmpEcho({{8, 8, 8, 8}}, /*id=*/0xBEEF, /*timeout=*/200))
+    if (DoIcmpEcho({{8, 8, 8, 8}}, /*id=*/0xBEEF, /*timeout_ticks=*/200))
         arch::SerialWrite("[net-smoke] step 3: PASS — 8.8.8.8 replied (real ICMP path)\n");
     else
         arch::SerialWrite("[net-smoke] step 3: skipped — no reply (SLIRP without raw-ICMP, or no public route)\n");
@@ -238,7 +238,7 @@ void NetSmokeEntry(void*)
         WriteIp(google_ip);
         arch::SerialWrite(":80\n");
         u32 status = 0;
-        const auto rc = DoHttpGet(google_ip, "www.google.com", status, /*timeout=*/500);
+        const auto rc = DoHttpGet(google_ip, "www.google.com", status, /*timeout_ticks=*/500);
         switch (rc)
         {
         case HttpGetResult::Ok:
