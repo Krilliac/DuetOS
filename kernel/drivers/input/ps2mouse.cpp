@@ -345,14 +345,20 @@ void IrqHandler()
     duetos::sched::WaitQueueWakeOne(&g_readers);
 }
 
-} // namespace
-
-void Ps2MouseInit()
+// Polled 8042 controller + aux-device bring-up (steps 1-5). Split
+// out so Ps2MouseInit can run the WHOLE dialogue under a single
+// interrupts-disabled window with one clean exit. This matters:
+// Ps2MouseInit runs AFTER Ps2KeyboardInit has already unmasked
+// IRQ 1, so every non-aux controller response we poll for here
+// (the 0xA9 test result, ReadConfigByte's reply, device ACKs)
+// also raises the keyboard IRQ — the keyboard ISR then reads
+// port 0x60 first and our poll loop spins to its cap forever.
+// On QEMU the race window happened not to bite; on VirtualBox
+// the controller's IRQ timing makes the steal deterministic,
+// which is exactly the "port-2 self-test no response" boot bail.
+// Returns true iff the mouse ACKed enable-reporting.
+bool Ps2MouseControllerBringup()
 {
-    static constinit bool s_initialised = false;
-    KASSERT(!s_initialised, "drivers/ps2mouse", "Ps2MouseInit called twice");
-    s_initialised = true;
-
     // Step 1: enable the aux channel. The keyboard driver's
     // ControllerInit disabled it during its bring-up; re-enable
     // before anything else.
@@ -370,13 +376,13 @@ void Ps2MouseInit()
     if (!TryWaitOutputFull(&port2_test))
     {
         core::Log(core::LogLevel::Warn, "drivers/ps2mouse", "port-2 self-test no response (no PS/2 mouse?)");
-        return;
+        return false;
     }
     if (port2_test != kResponseTestPort2Pass)
     {
         core::LogWithValue(core::LogLevel::Warn, "drivers/ps2mouse", "port-2 self-test failed (no PS/2 mouse?)",
                            port2_test);
-        return;
+        return false;
     }
 
     // Step 3: device reset + set defaults. The mouse's "set defaults"
@@ -387,7 +393,7 @@ void Ps2MouseInit()
     if (!MouseSendAndAck(kMouseCmdSetDefaults))
     {
         core::Log(core::LogLevel::Warn, "drivers/ps2mouse", "set-defaults (0xF6) not ACKed — mouse disabled");
-        return;
+        return false;
     }
 
     // Step 4: enable data reporting. Without this, the mouse stays
@@ -395,7 +401,7 @@ void Ps2MouseInit()
     if (!MouseSendAndAck(kMouseCmdEnableReporting))
     {
         core::Log(core::LogLevel::Warn, "drivers/ps2mouse", "enable-reporting (0xF4) not ACKed — mouse disabled");
-        return;
+        return false;
     }
 
     // Step 5: flip on the aux-channel IRQ + active clock in the
@@ -404,10 +410,44 @@ void Ps2MouseInit()
     config |= kConfigPort2IrqEnable;
     config = static_cast<u8>(config & ~kConfigPort2ClockDisable);
     WriteConfigByte(config);
+    return true;
+}
+
+} // namespace
+
+void Ps2MouseInit()
+{
+    static constinit bool s_initialised = false;
+    KASSERT(!s_initialised, "drivers/ps2mouse", "Ps2MouseInit called twice");
+    s_initialised = true;
+
+    // Run steps 1-6 with interrupts disabled. Ps2KeyboardInit has
+    // already unmasked IRQ 1, so without this the live keyboard ISR
+    // races every non-aux controller byte we poll for below and the
+    // mouse never initialises (the VirtualBox "port-2 self-test no
+    // response" bail). Save/restore IF rather than unconditionally
+    // STI so a future caller that runs with interrupts already off
+    // isn't surprised. The whole dialogue is bounded spin-polls +
+    // register writes — no sleep / block — so a CLI window is safe.
+    constexpr u64 kRflagsIf = 1ULL << 9;
+    const bool irqs_were_on = (arch::ReadRflags() & kRflagsIf) != 0;
+    arch::Cli();
+
+    if (!Ps2MouseControllerBringup())
+    {
+        if (irqs_were_on)
+        {
+            arch::Sti();
+        }
+        return;
+    }
 
     // Step 6: route through the IOAPIC + IDT. Identical shape to
     // the keyboard. Note that IRQ 12 may or may not have a MADT
-    // override on real hardware — IsaIrqToGsi handles that.
+    // override on real hardware — IsaIrqToGsi handles that. Still
+    // under CLI: these are IDT / IOAPIC register writes, and the
+    // mouse IRQ can't be delivered until the route below lands
+    // anyway.
     arch::IdtSetGate(kMouseVector, reinterpret_cast<u64>(&isr_44));
     arch::IrqInstall(kMouseVector, &IrqHandler);
     const u32 gsi = acpi::IsaIrqToGsi(kMouseIsaIrq);
@@ -415,6 +455,14 @@ void Ps2MouseInit()
     arch::IoApicRoute(gsi, kMouseVector, bsp_id, kMouseIsaIrq);
 
     g_available = true;
+
+    // Route is live; the polled dialogue is done. Re-enable
+    // interrupts (if the caller had them on) before the logging
+    // tail so the CLI window stays as tight as the bug fix needs.
+    if (irqs_were_on)
+    {
+        arch::Sti();
+    }
 
     duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2mouse", "routed isa_irq", kMouseIsaIrq);
     duetos::core::LogWithValue(duetos::core::LogLevel::Info, "drivers/ps2mouse", "  gsi", gsi);
