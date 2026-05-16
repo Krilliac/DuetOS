@@ -8,6 +8,7 @@
 
 #include "core/panic.h"
 #include "debug/probes.h"
+#include "diag/boot_observe.h"
 #include "log/klog.h"
 #include "sched/sched.h"
 
@@ -158,6 +159,14 @@ void TimerHandler()
                     SerialWriteHex(byte_count_before);
                     SerialWrite("\n");
                     duetos::debug::ProbeFire(duetos::debug::ProbeId::kBootInitWedge, 0, g_silent_heartbeats * 5);
+                    // Attribute the wedge to the boot phase that was
+                    // active and, under a smoke profile, fail fast
+                    // with the structured HungInPhase exit code. This
+                    // rides the existing, env-independent
+                    // no-serial-progress heuristic — no second
+                    // watchdog, no wall-clock budget to false-fire on
+                    // a chatty-but-slow phase under TCG.
+                    ::duetos::diag::BootWatchdogOnWedge();
                 }
                 // Escalation: if the operator armed the panic path
                 // via `init-wedge-panic=<N>` on the kernel cmdline,

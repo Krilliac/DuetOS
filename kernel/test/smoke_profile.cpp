@@ -3,6 +3,8 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
+#include "core/init.h"
+#include "diag/boot_observe.h"
 #include "diag/fix_journal.h"
 #include "sched/sched.h"
 #include "subsystems/translation/translate.h"
@@ -26,6 +28,11 @@ bool g_initialised = false;
 // boot back IN to running the smokes (debug / regression workflow).
 bool g_desktop_boot = false;
 bool g_force_pe_smokes = false;
+
+// Debug injection: `boot-stall=smoke-tail` makes SmokeProfileSleepAndExit
+// busy-spin instead of sleeping, to prove the init-wedge → structured
+// STUCK + TestExit path end-to-end (see SmokeProfileInit).
+bool g_stall_smoke_tail = false;
 
 /// Match a `key=value` token in `cmdline`. Same semantics as
 /// kernel/core/main.cpp's CmdlineMatches but the result is the
@@ -155,6 +162,47 @@ SmokeProfile SmokeProfileInit(const char* cmdline)
     if (pe_val != nullptr && pe_val[0] == '1')
     {
         g_force_pe_smokes = true;
+    }
+
+    // `boot-stall=<phase>` — debug injection. Two flavours, both
+    // reusing the existing cmdline helpers (no new parser):
+    //   * `<phase>` (earlycon..userland): wedge that phase's
+    //     BootPhaseEnter. Demonstrates ladder localisation — the log
+    //     stops at `[boot] phase=<phase> begin` with no `complete`.
+    //   * `smoke-tail`: spin in SmokeProfileSleepAndExit instead of
+    //     sleeping. This is the watchdog proof: it is post-`sti` and
+    //     the init-wedge detector is still armed (a smoke profile
+    //     never reaches MarkInitComplete), so ~15 s of no serial
+    //     progress trips diag::BootWatchdogOnWedge → structured STUCK
+    //     + TestExit. (A plain `<phase>` can't prove the watchdog: no
+    //     post-`sti` phase is reached before the smoke sentinel.)
+    const char* stall_val = CmdlineFindValue(cmdline, "boot-stall");
+    if (stall_val != nullptr)
+    {
+        const char* stall_end = stall_val;
+        while (*stall_end != '\0' && *stall_end != ' ' && *stall_end != '\t')
+        {
+            ++stall_end;
+        }
+        if (TokenMatches(stall_val, stall_end, "smoke-tail"))
+        {
+            g_stall_smoke_tail = true;
+            arch::SerialWrite("[smoke] boot-stall armed for smoke-tail\n");
+        }
+        else
+        {
+            for (u32 i = 0; i < static_cast<u32>(core::Phase::kPhaseCount); ++i)
+            {
+                if (TokenMatches(stall_val, stall_end, core::PhaseName(static_cast<core::Phase>(i))))
+                {
+                    diag::BootObserveSetStallPhase(static_cast<core::Phase>(i));
+                    arch::SerialWrite("[smoke] boot-stall armed for phase=");
+                    arch::SerialWrite(core::PhaseName(static_cast<core::Phase>(i)));
+                    arch::SerialWrite("\n");
+                    break;
+                }
+            }
+        }
     }
 
     const char* value = CmdlineFindValue(cmdline, "smoke");
@@ -312,6 +360,21 @@ void SmokeProfileSleepAndExit()
     arch::SerialWrite(SmokeProfileName(g_profile));
     arch::SerialWrite("\n");
 
+    // Debug injection (boot-stall=smoke-tail): spin here instead of
+    // sleeping. This point is post-`sti` and the init-wedge detector
+    // is still armed (a smoke profile never reaches MarkInitComplete),
+    // so ~15 s of no serial progress trips diag::BootWatchdogOnWedge,
+    // which emits the structured STUCK line + TestExits with the
+    // HungInPhase code. Proves the wedge → structured-exit path.
+    if (g_stall_smoke_tail)
+    {
+        arch::SerialWrite("[smoke] boot-stall=smoke-tail: spinning to exercise init-wedge\n");
+        for (;;)
+        {
+            asm volatile("pause" ::: "memory");
+        }
+    }
+
     // Log the live scheduler stats AT entry so a CI failure
     // shows what state we were in. Intentionally verbose —
     // latent uninit-state bugs manifest as silent hangs that
@@ -379,6 +442,12 @@ void SmokeProfileSleepAndExit()
     // Cheap (a few atomic reads); useful for catching unexpected
     // miss-spikes or pathological per-call overheads between runs.
     ::duetos::subsystems::translation::TranslatorBootSummaryEmit();
+
+    // Machine-readable boot report: one structured artifact that
+    // replaces the harness's fragile multi-signature grep. Emitted
+    // here so it sits right after the fix-journal / translator
+    // summaries and just before the sentinel.
+    ::duetos::diag::BootReportEmit();
 
     // Sentinel that the CI script greps for. The "complete" suffix
     // is the only thing the assertion list checks under a smoke

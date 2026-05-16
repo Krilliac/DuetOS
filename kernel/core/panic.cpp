@@ -12,6 +12,7 @@
 #include "cpu/percpu.h"
 #include "debug/probes.h"
 #include "net/wireless/wifi_diag.h"
+#include "diag/boot_observe.h"
 #include "diag/bsod.h"
 #include "diag/diag_decode.h"
 #include "diag/event_trace.h"
@@ -24,6 +25,7 @@
 #include "mm/address_space.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "test/smoke_profile.h"
 #include "util/build_config.h"
 #include "util/symbols.h"
 
@@ -918,6 +920,15 @@ void Panic(const char* subsystem, const char* message)
                              arch::ReadRbp(), 0, /*has_value=*/false);
 
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
+    // Under a smoke profile, hand QEMU a structured exit code keyed
+    // to the boot phase that was active, so CI fails fast with
+    // "panic in phase=<name>" instead of waiting out the full wall
+    // timeout. Bare-metal / interactive keeps BSoD-and-halt (the
+    // minidump + serial dump above are the real-HW forensic record).
+    if (duetos::test::SmokeProfileGet() != duetos::test::SmokeProfile::None)
+    {
+        arch::TestExit(duetos::diag::EncodeExit(duetos::diag::BootExitCode::Panic, duetos::diag::BootPhaseCurrent()));
+    }
     arch::Halt();
 }
 
@@ -990,6 +1001,10 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
                              arch::ReadRbp(), value, /*has_value=*/true);
 
     arch::SerialWrite("[panic] CPU halted — no recovery.\n");
+    if (duetos::test::SmokeProfileGet() != duetos::test::SmokeProfile::None)
+    {
+        arch::TestExit(duetos::diag::EncodeExit(duetos::diag::BootExitCode::Panic, duetos::diag::BootPhaseCurrent()));
+    }
     arch::Halt();
 }
 

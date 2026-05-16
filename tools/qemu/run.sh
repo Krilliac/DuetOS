@@ -147,11 +147,19 @@ if [[ -n "${SMOKE_PROFILE}" ]]; then
     # into the smoke kernel cmdline. boot=desktop is preserved so the
     # post-bringup composite path still runs (compositor init, etc.);
     # the kernel routes into the smoke profile after bringup-complete.
+    # Optional watchdog-proof injection: DUETOS_BOOT_STALL=<phase>
+    # bakes `boot-stall=<phase>` so kernel/diag/boot_observe.cpp wedges
+    # that phase and the hang watchdog can be demonstrated to fire +
+    # TestExit. Off by default; debug/CI proof only.
+    BOOT_STALL_ARG=""
+    if [[ -n "${DUETOS_BOOT_STALL:-}" ]]; then
+        BOOT_STALL_ARG=" boot-stall=${DUETOS_BOOT_STALL}"
+    fi
     cat > "${SMOKE_ISO_STAGE}/boot/grub/grub.cfg" <<EOF
 set timeout=0
 set default=0
 menuentry "DuetOS — smoke ${SMOKE_PROFILE}" {
-    multiboot2 /boot/duetos-kernel.elf boot=desktop smoke=${SMOKE_PROFILE} autologin=1
+    multiboot2 /boot/duetos-kernel.elf boot=desktop smoke=${SMOKE_PROFILE} autologin=1${BOOT_STALL_ARG}
     boot
 }
 EOF
@@ -294,11 +302,25 @@ if [[ -n "${DUETOS_SMP:-}" ]]; then
     SMP_ARGS=(-smp "${DUETOS_SMP}")
 fi
 
+# QMP control socket. A host-side unix socket, fully orthogonal to
+# COM1 (-serial stdio), COM2 (the GDB transport), and the
+# isa-debug-exit device — so it never disturbs the serial log or a
+# live GDB session. Lets tools/qemu/qmp.sh poll guest status, grab a
+# framebuffer screendump, or quit the VM cleanly without SIGKILL.
+# Disable with DUETOS_QMP=0.
+QMP_ARGS=()
+QMP_SOCK="${BUILD_DIR}/qmp.sock"
+if [[ "${DUETOS_QMP:-1}" != "0" ]]; then
+    rm -f "${QMP_SOCK}"
+    QMP_ARGS=(-qmp "unix:${QMP_SOCK},server=on,wait=off")
+fi
+
 QEMU_ARGS=(
     -machine  "q35,accel=${ACCEL}"
     -cpu      "${CPU_MODEL}"
     "${SMP_ARGS[@]}"
     -m        "${RAM_SIZE}"
+    "${QMP_ARGS[@]}"
     -display  "${DISPLAY_MODE}"
     -serial   stdio
     # COM2 → GDB transport. Default is a TCP server on

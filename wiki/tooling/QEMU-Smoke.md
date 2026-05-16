@@ -50,6 +50,20 @@ DUETOS_TIMEOUT=30 tools/test/ctest-boot-smoke.sh build/x86_64-debug
   (5/6 for Classic/Slate10, 10/11 for Amber/Duet) to skip the
   login gate and capture the composed desktop.
 
+- `DUETOS_QMP=0` — disable the QMP control socket (default on). When
+  on, `run.sh` exposes `build/<preset>/qmp.sock`; query it without
+  disturbing the serial log or a live GDB session via
+  `tools/qemu/qmp.sh status | screenshot <out.ppm> | quit`.
+- `DUETOS_BOOT_STALL=<phase>|smoke-tail` — debug injection: `run.sh`
+  bakes `boot-stall=<value>`. A `<phase>` value (`earlycon physmem
+  paging heap idt apic time percpubsp sched smp drivers vfs userland`)
+  wedges that `core::Phase`'s `BootPhaseEnter` — demonstrates ladder
+  localisation (the log stops at `[boot] phase=<phase> begin`).
+  `smoke-tail` is the watchdog proof: it spins in the post-`sti`,
+  init-wedge-armed smoke settle path (see the watchdog GAP below for
+  why a `<phase>` value cannot prove the watchdog under a smoke
+  profile).
+
 See the script header for the full env-var list.
 
 ## Emulator boot speed
@@ -69,12 +83,96 @@ prioritise interactive use on emulators:
   `pe-smokes=1` on the cmdline to re-enable them (CLI debug /
   regression workflow).
 
+## Boot Observability
+
+`kernel/diag/boot_observe.{h,cpp}` instruments the single
+`core::RunPhase` choke point so every boot emits an ordered, parseable
+phase ladder and, just before the smoke sentinel, a machine-readable
+report. This replaces the old `diag::BootProgress` RDTSC-cycle markers
+(deleted) and lets the harness localise a failure to a phase instead
+of grepping a fragile multi-line signature list.
+
+### Serial line ABI (stable; harness greps these)
+
+```
+[boot] phase=<name> begin
+[boot] phase=<name> complete t=<ms> dur=<ms|unknown>
+[boot] phase=<name> FAIL ec=<hexbyte> err=<hex>
+[boot] phase=<name> STUCK ec=<hexbyte> (init-wedge: no serial progress)
+[boot-report] begin
+[boot-report] phase=<name> dur_ms=<n|unknown>     (one per entered phase)
+[boot-report] selftests pass=<n> fail=<n>
+[boot-report] total_ms=<n|unknown>
+[boot-report] result=pass
+[boot-report] end
+```
+
+`t=0` / `dur=unknown` is the explicit "monotonic clock not online
+yet" sentinel for phases that ran before `Phase::Time`
+(`time::MonotonicNs()` returns 0 until `TimekeeperInit`). A phase is
+"active" from its `begin` until the next phase's `begin`; the last
+phase is finalised by the report. The fix-journal / translator
+structured summaries are emitted immediately above the report and
+stay independently greppable.
+
+### Hierarchical exit codes
+
+`arch::TestExit(b)` makes QEMU exit `(b<<1)|1`; `b` stays ≤ 0x7F.
+Top nibble = class, low nibble = `core::Phase` ordinal (0..12).
+`profile-boot-smoke.sh` decodes `b=(rc-1)>>1` and prints a
+phase-named message instead of timing out the full wall budget.
+
+| Class | byte `b`   | QEMU exit     | Meaning                          |
+|-------|------------|---------------|----------------------------------|
+| Pass  | `0x10`     | `0x21` (33)   | smoke sentinel reached           |
+| Hung  | `0x20\|ord`| `0x41`..`0x59`| watchdog: phase exceeded budget  |
+| Fail  | `0x40\|ord`| `0x81`..`0x99`| a `RunPhase` callback returned Err |
+| Panic | `0x70\|ord`| `0xE1`..`0xF9`| kernel panic (incl. boot selftest) |
+
+Hung / Fail / Panic only `TestExit` under a smoke profile; bare-metal
+/ interactive boots keep BSoD-and-halt and the existing init-wedge
+escalation.
+
+### Hang watchdog
+
+There is **no separate wall-clock budget** — the RunPhase boundaries
+are too coarse and emulation-speed-dependent (the Sched→Smp span is
+most of a boot), so a per-phase budget false-fires under TCG. Instead
+the structured exit rides the **existing** init-wedge detector in
+`kernel/arch/x86_64/timer.cpp`, which uses an environment-independent
+*no-serial-progress* heuristic (~15 s of silent heartbeats while the
+timer IRQ keeps firing). When that detector concludes the boot is
+wedged it calls `diag::BootWatchdogOnWedge()`, which attributes the
+wedge to the active phase, emits the `STUCK` line, and — under a
+smoke profile — `TestExit`s with the HungInPhase code. No second
+watchdog, no false positives on a chatty-but-slow phase.
+
+**GAP:** the init-wedge detector only arms once the timer IRQ is
+firing (~`Phase::Apic` onward); a hang strictly before that stays
+owned by the triple-fault domain and the early-console path. A
+`<phase>`-valued stall also cannot prove the watchdog: under a smoke
+profile `SmokeProfileSleepAndExit` `TestExit`s before the post-`sti`
+phases (`smp`/`userland`) are ever entered, and the last reachable
+phase (`sched`) is entered with interrupts still masked (spinning
+there freezes the timer IRQ too). Hence the dedicated `smoke-tail`
+injection, which spins at a point that is post-`sti` and still
+init-wedge-armed (a smoke profile never reaches `MarkInitComplete`).
+
+```bash
+DUETOS_BOOT_STALL=smoke-tail DUETOS_TIMEOUT=300 \
+  tools/test/profile-boot-smoke.sh bringup build/x86_64-debug
+# → [boot] phase=<last> STUCK ec=0x2? (init-wedge: no serial progress)
+#   harness: BOOT PHASE FAILURE (qemu_rc=..., decoded=hung phase=...);
+#   exit 1
+```
+
 ## isa-debug-exit + Serial Spinlock
 
 The smoke harness uses QEMU's `isa-debug-exit` device — a write to a
-specific I/O port lets the kernel exit QEMU with a chosen exit code.
-Combined with a serial-output spinlock for ordered prints, this gives
-deterministic pass/fail outcomes from in-kernel tests.
+specific I/O port lets the kernel exit QEMU with a chosen exit code
+(see the hierarchical scheme above). Combined with a serial-output
+spinlock for ordered prints, this gives deterministic, phase-attributed
+pass/fail outcomes from in-kernel tests.
 
 ## Hosted Unit Tests
 

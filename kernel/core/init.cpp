@@ -15,6 +15,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "diag/boot_observe.h"
 #include "log/klog.h"
 #include "util/result.h"
 #include "util/types.h"
@@ -136,6 +137,11 @@ Result<void> RunPhase(Phase phase)
         return Err{ErrorCode::InvalidArgument};
     }
 
+    // Single choke point: every phase boundary in the boot path runs
+    // through here, so instrumenting RunPhase gives the full phase
+    // ladder + watchdog + report without 13 edits in main.cpp.
+    diag::BootPhaseEnter(phase);
+
     KLOG_INFO_2V("init", "RunPhase begin", "phase", static_cast<u64>(phase), "callbacks",
                  static_cast<u64>(InitcallCountForPhase(phase)));
 
@@ -155,6 +161,7 @@ Result<void> RunPhase(Phase phase)
         if (!rec.ran_ok)
         {
             KLOG_ERROR_V("init", "callback failed", static_cast<u64>(r.error()));
+            diag::BootPhaseFailed(phase, static_cast<u32>(r.error()));
             return r;
         }
     }
@@ -206,6 +213,11 @@ Result<void> SelfTestFailing()
 void InitSelfTest()
 {
     arch::SerialWrite("[init] self-test: registering 3 callbacks across 3 phases.\n");
+
+    // These RunPhase calls (incl. the deliberate Userland Err below)
+    // exercise the registry, not the real boot path — keep them out
+    // of the boot-observability ladder / exit-code machinery.
+    diag::BootObserveSuppress(true);
 
     const u32 baseline_count = g_initcall_count;
 
@@ -271,6 +283,8 @@ void InitSelfTest()
     {
         Panic("init self-test", "InitcallUnregister failed to retire the failing row");
     }
+
+    diag::BootObserveSuppress(false);
 
     arch::SerialWrite("[init] self-test: 3 phases x 1 callback ran in order; failure path surfaces error. OK.\n");
 }
