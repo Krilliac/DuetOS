@@ -96,10 +96,79 @@ __attribute__((noinline)) static int capture_and_check(void)
     return fail;
 }
 
+/* Nested non-leaf frames so the unwinder has real RUNTIME_FUNCTIONs
+ * to walk. Each does a little volatile work to keep a prologue. */
+static DWORD64 g_base_for_check;
+
+/* Walk this EXE's own call chain with RtlLookupFunctionEntry +
+ * RtlVirtualUnwind, starting from a context captured *here* (so
+ * the first Rip is in seh_pe, not kernel32 — cross-module
+ * RtlCaptureStackBackTrace is a documented follow-on). Expect to
+ * unwind bt_leaf -> bt_b -> bt_a -> mainCRTStartup, i.e. >=3
+ * frames, each Rip staying inside the EXE image and strictly
+ * moving. */
+__attribute__((noinline)) static int bt_leaf(void)
+{
+    volatile int s = 0;
+    for (int i = 0; i < 8; ++i)
+        s += i;
+    CONTEXT c;
+    RtlCaptureContext(&c);
+    int frames = 0;
+    int sane = 1;
+    for (int k = 0; k < 12; ++k)
+    {
+        DWORD64 ib = 0;
+        PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(c.Rip, &ib, NULL);
+        if (fe == NULL)
+            break; /* left the EXE .pdata (CRT/loader frame) — stop */
+        DWORD64 prev = c.Rip, est = 0;
+        RtlVirtualUnwind(0, ib, c.Rip, fe, &c, NULL, &est, NULL);
+        if (c.Rip == 0 || c.Rip == prev)
+            break;
+        if (c.Rip < g_base_for_check)
+            break; /* unwound out of the image — fine, stop counting */
+        ++frames;
+    }
+    Out("[seh_pe] virtual-unwind frames=");
+    OutHex((unsigned long long)frames);
+    Out("\r\n");
+    if (frames < 3)
+        sane = 0;
+    Out(sane ? "[seh_pe] virtual-unwind-depth: PASS\r\n" : "[seh_pe] virtual-unwind-depth: FAIL\r\n");
+    (void)s;
+    return sane ? 0 : 1;
+}
+__attribute__((noinline)) static int bt_b(void)
+{
+    volatile int t = 1;
+    int r = bt_leaf();
+    return r + (t - 1);
+}
+__attribute__((noinline)) static int bt_a(void)
+{
+    volatile int u = 2;
+    int r = bt_b();
+    return r + (u - 2);
+}
+
 void __cdecl mainCRTStartup(void)
 {
     Out("[seh_pe] starting\r\n");
     int fail = capture_and_check();
+
+    /* Establish the EXE base for the backtrace sanity bound. */
+    {
+        CONTEXT c;
+        RtlCaptureContext(&c);
+        DWORD64 ib = 0;
+        (void)RtlLookupFunctionEntry(c.Rip, &ib, NULL);
+        g_base_for_check = ib;
+    }
+    int bt = bt_a();
+    Out(bt ? "[seh_pe] virtual-unwind-walk: FAIL\r\n" : "[seh_pe] virtual-unwind-walk: PASS\r\n");
+    fail |= bt;
+
     Out(fail ? "[seh_pe] RESULT FAIL\r\n" : "[seh_pe] RESULT PASS\r\n");
     Out("[seh_pe] done\r\n");
     ExitProcess(fail ? 1u : 0u);

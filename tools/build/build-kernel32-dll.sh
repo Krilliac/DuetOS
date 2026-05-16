@@ -94,6 +94,8 @@ set +e
     `# resolve path binds them instead of the no-op SEH thunk.` \
     /export:RtlCaptureContext \
     /export:RtlLookupFunctionEntry \
+    /export:RtlVirtualUnwind \
+    /export:RtlCaptureStackBackTrace \
     /export:TerminateProcess \
     /export:IsDebuggerPresent \
     /export:IsProcessorFeaturePresent \

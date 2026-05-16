@@ -3,13 +3,14 @@
 /* ------------------------------------------------------------------
  * SEH unwind helpers
  *
- * RtlCaptureContext (real register snapshot) and
- * RtlLookupFunctionEntry (real table-based .pdata lookup for the
- * main EXE) are implemented — the T6-02 unwinder foundation.
- * RtlVirtualUnwind / RtlUnwindEx and the kernel fault -> user
- * dispatch are the next slice and still stub (return "no match" /
- * terminate) so callers along the un-handled path degrade
- * gracefully rather than mis-unwind.
+ * RtlCaptureContext (real register snapshot), RtlLookupFunctionEntry
+ * (real table-based .pdata lookup for the main EXE), and
+ * RtlVirtualUnwind (real UNWIND_INFO unwind-code interpreter) are
+ * implemented — the T6-02 unwinder. RtlCaptureStackBackTrace uses
+ * them but only resolves EXE frames (cross-module lookup is a
+ * follow-on). RtlUnwindEx and the kernel fault -> user exception
+ * dispatch are the next slice and still stub (terminate) so the
+ * un-handled path fails safe rather than mis-unwinding.
  * ------------------------------------------------------------------ */
 
 /* SYS_DLL_BASE_BY_NAME = 172, empty name => calling EXE's base
@@ -80,22 +81,132 @@ __declspec(dllexport) void* RtlLookupFunctionEntry(unsigned long long ControlPc,
     return (void*)0;
 }
 
+/* CONTEXT GPR offsets by x64 unwind register number (RSP=4). */
+static const unsigned short k_ctx_gpr_off[16] = {0x78, 0x80, 0x88, 0x90, 0x98, 0xA0, 0xA8, 0xB0,
+                                                 0xB8, 0xC0, 0xC8, 0xD0, 0xD8, 0xE0, 0xE8, 0xF0};
+static unsigned long long* nt_reg(void* c, int i)
+{
+    return (unsigned long long*)((unsigned char*)c + k_ctx_gpr_off[i & 15]);
+}
+static unsigned long long* nt_rsp(void* c)
+{
+    return (unsigned long long*)((unsigned char*)c + 0x98);
+}
+static unsigned long long* nt_rip(void* c)
+{
+    return (unsigned long long*)((unsigned char*)c + 0xF8);
+}
+
+/* Real x64 table-based RtlVirtualUnwind — see the matching
+ * kernel32 copy for the full commentary (Windows forwards this
+ * kernel32 -> ntdll; we carry both). Pure: interprets UNWIND_INFO
+ * codes to lift ContextRecord to the caller frame, then pops the
+ * return address into Rip. */
 __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned long long ImageBase,
                                              unsigned long long ControlPc, void* FunctionEntry, void* ContextRecord,
                                              void** HandlerData, unsigned long long* EstablisherFrame,
                                              void* ContextPointers)
 {
     (void)HandlerType;
-    (void)ImageBase;
     (void)ControlPc;
-    (void)FunctionEntry;
-    (void)ContextRecord;
     (void)ContextPointers;
     if (HandlerData != (void**)0)
         *HandlerData = (void*)0;
+    if (FunctionEntry == (void*)0 || ContextRecord == (void*)0)
+        return (void*)0;
+    const RUNTIME_FUNCTION* rf = (const RUNTIME_FUNCTION*)FunctionEntry;
+    for (int g = 0; g < 32; ++g)
+    {
+        const unsigned char* ui = (const unsigned char*)(ImageBase + rf->UnwindInfoAddress);
+        const unsigned char flags = (unsigned char)(ui[0] >> 3);
+        const unsigned char count = ui[2];
+        const unsigned char frreg = (unsigned char)(ui[3] & 0x0F);
+        const unsigned char froff = (unsigned char)(ui[3] >> 4);
+        const unsigned short* codes = (const unsigned short*)(ui + 4);
+        unsigned long long fb =
+            frreg ? (*nt_reg(ContextRecord, frreg) - (unsigned long long)froff * 16ULL) : *nt_rsp(ContextRecord);
+        unsigned i = 0;
+        while (i < count)
+        {
+            const unsigned short cw = codes[i];
+            const unsigned op = (cw >> 8) & 0x0F, info = (cw >> 12) & 0x0F;
+            unsigned long long* rsp = nt_rsp(ContextRecord);
+            if (op == 0)
+            {
+                *nt_reg(ContextRecord, (int)info) = *(unsigned long long*)(*rsp);
+                *rsp += 8;
+                i += 1;
+            }
+            else if (op == 1)
+            {
+                if (info == 0)
+                {
+                    *rsp += (unsigned long long)codes[i + 1] * 8ULL;
+                    i += 2;
+                }
+                else
+                {
+                    *rsp += (unsigned long long)(*(const unsigned int*)&codes[i + 1]);
+                    i += 3;
+                }
+            }
+            else if (op == 2)
+            {
+                *rsp += (unsigned long long)info * 8ULL + 8ULL;
+                i += 1;
+            }
+            else if (op == 3)
+            {
+                *rsp = *nt_reg(ContextRecord, (int)frreg) - (unsigned long long)froff * 16ULL;
+                i += 1;
+            }
+            else if (op == 4)
+            {
+                *nt_reg(ContextRecord, (int)info) =
+                    *(unsigned long long*)(fb + (unsigned long long)codes[i + 1] * 8ULL);
+                i += 2;
+            }
+            else if (op == 5)
+            {
+                *nt_reg(ContextRecord, (int)info) =
+                    *(unsigned long long*)(fb + (unsigned long long)(*(const unsigned int*)&codes[i + 1]));
+                i += 3;
+            }
+            else if (op == 8)
+            {
+                i += 2;
+            }
+            else if (op == 9)
+            {
+                i += 3;
+            }
+            else if (op == 10)
+            {
+                const unsigned long long b = *rsp + (info ? 8ULL : 0ULL);
+                *nt_rip(ContextRecord) = *(unsigned long long*)b;
+                *rsp = *(unsigned long long*)(b + 24ULL);
+                if (EstablisherFrame != (unsigned long long*)0)
+                    *EstablisherFrame = fb;
+                return (void*)0;
+            }
+            else
+            {
+                i += 1;
+            }
+        }
+        if (flags & 0x4)
+        {
+            rf = (const RUNTIME_FUNCTION*)(codes + (unsigned)((count + 1) & ~1u));
+            continue;
+        }
+        break;
+    }
+    unsigned long long* rsp = nt_rsp(ContextRecord);
+    *nt_rip(ContextRecord) = *(unsigned long long*)(*rsp);
+    *rsp += 8;
     if (EstablisherFrame != (unsigned long long*)0)
-        *EstablisherFrame = 0;
-    return (void*)0; /* No exception handler found. */
+        *EstablisherFrame = *rsp;
+    return (void*)0;
 }
 
 /* Real RtlCaptureContext: snapshot the caller's register state
@@ -136,12 +247,37 @@ __attribute__((naked)) __declspec(dllexport) void RtlCaptureContext(void* Contex
 __declspec(dllexport) unsigned short RtlCaptureStackBackTrace(unsigned long FramesToSkip, unsigned long FramesToCapture,
                                                               void** BackTrace, unsigned long* BackTraceHash)
 {
-    (void)FramesToSkip;
-    (void)FramesToCapture;
-    (void)BackTrace;
+    if (BackTrace == (void**)0 || FramesToCapture == 0)
+        return 0;
+    unsigned char ctxbuf[1232];
+    for (int z = 0; z < 1232; ++z)
+        ctxbuf[z] = 0;
+    RtlCaptureContext(ctxbuf);
+    unsigned long hash = 0;
+    unsigned short n = 0;
+    for (unsigned long d = 0; d < FramesToSkip + FramesToCapture && n < 0xFFFF; ++d)
+    {
+        unsigned long long pc = *nt_rip(ctxbuf);
+        if (pc == 0)
+            break;
+        unsigned long long ib = 0;
+        void* fe = RtlLookupFunctionEntry(pc, &ib, (void*)0);
+        if (fe == (void*)0)
+            break;
+        unsigned long long est = 0;
+        RtlVirtualUnwind(0, ib, pc, fe, ctxbuf, (void**)0, &est, (void*)0);
+        unsigned long long npc = *nt_rip(ctxbuf);
+        if (npc == 0 || npc == pc)
+            break;
+        if (d >= FramesToSkip)
+        {
+            BackTrace[n++] = (void*)npc;
+            hash += (unsigned long)npc;
+        }
+    }
     if (BackTraceHash != (unsigned long*)0)
-        *BackTraceHash = 0;
-    return 0; /* No frames captured. */
+        *BackTraceHash = hash;
+    return n;
 }
 
 __declspec(dllexport) void RtlUnwind(void* TargetFrame, void* TargetIp, void* ExceptionRecord, void* ReturnValue)
