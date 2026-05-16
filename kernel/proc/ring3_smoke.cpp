@@ -126,6 +126,7 @@
 #include "generated_handle_smoke_pe.h"
 #include "generated_browser_pe_pe.h"
 #include "generated_tls_pe_pe.h"
+#include "generated_seh_pe_pe.h"
 #include "generated_pe32_smoke_pe.h"
 #include "generated_iphlpapi_smoke_pe.h"
 #include "generated_mem_smoke_pe.h"
@@ -2273,6 +2274,11 @@ void StartRing3SmokeTask()
         // callback-before-entry trampoline. Prints
         // [tls_pe] RESULT PASS on success.
         SpawnPeFile("ring3-tls-pe", fs::generated::kBinTlsPeBytes, fs::generated::kBinTlsPeBytes_len, CapSetTrusted(),
+                    fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // T6-02 slice 1: SEH foundation. Exercises real
+        // RtlCaptureContext + table-based RtlLookupFunctionEntry
+        // (.pdata parse). Prints [seh_pe] RESULT PASS on success.
+        SpawnPeFile("ring3-seh-pe", fs::generated::kBinSehPeBytes, fs::generated::kBinSehPeBytes_len, CapSetTrusted(),
                     fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
     }
     // First Win32 PE that gets RESOLVED (not just reported)

@@ -418,3 +418,91 @@ __declspec(dllexport) void InitializeSListHead(void* head)
             b[i] = 0;
     }
 }
+
+/* ------------------------------------------------------------------
+ * SEH unwinder foundation (T6-02). Windows forwards these from
+ * kernel32 to ntdll; we can't emit PE forwarders, so kernel32
+ * carries its own copy (ntdll exports the same — whichever the
+ * PE imports resolves via-dll). RtlCaptureContext is a real
+ * register snapshot; RtlLookupFunctionEntry is a real
+ * table-based .pdata lookup for the main EXE. Pure routines —
+ * no kernel fault dispatch yet (that is the next slice).
+ * ------------------------------------------------------------------ */
+
+__attribute__((naked)) __declspec(dllexport) void RtlCaptureContext(void* ContextRecord)
+{
+    __asm__ volatile("movq %%rax, 0x78(%%rcx)\n\t"
+                     "movq %%rdx, 0x88(%%rcx)\n\t"
+                     "movq %%rbx, 0x90(%%rcx)\n\t"
+                     "movq %%rbp, 0xA0(%%rcx)\n\t"
+                     "movq %%rsi, 0xA8(%%rcx)\n\t"
+                     "movq %%rdi, 0xB0(%%rcx)\n\t"
+                     "movq %%r8,  0xB8(%%rcx)\n\t"
+                     "movq %%r9,  0xC0(%%rcx)\n\t"
+                     "movq %%r10, 0xC8(%%rcx)\n\t"
+                     "movq %%r11, 0xD0(%%rcx)\n\t"
+                     "movq %%r12, 0xD8(%%rcx)\n\t"
+                     "movq %%r13, 0xE0(%%rcx)\n\t"
+                     "movq %%r14, 0xE8(%%rcx)\n\t"
+                     "movq %%r15, 0xF0(%%rcx)\n\t"
+                     "movq %%rcx, 0x80(%%rcx)\n\t"
+                     "leaq 8(%%rsp), %%rax\n\t"
+                     "movq %%rax, 0x98(%%rcx)\n\t"
+                     "movq (%%rsp), %%rax\n\t"
+                     "movq %%rax, 0xF8(%%rcx)\n\t"
+                     "pushfq\n\t"
+                     "popq %%rax\n\t"
+                     "movl %%eax, 0x44(%%rcx)\n\t"
+                     "movl $0x0010000F, 0x30(%%rcx)\n\t"
+                     "movq 0x78(%%rcx), %%rax\n\t"
+                     "ret\n\t" ::
+                         : "memory");
+}
+
+typedef struct
+{
+    unsigned int BeginAddress;
+    unsigned int EndAddress;
+    unsigned int UnwindInfoAddress;
+} K32_RUNTIME_FUNCTION;
+
+__declspec(dllexport) void* RtlLookupFunctionEntry(unsigned long long ControlPc, unsigned long long* ImageBase,
+                                                   void* HistoryTable)
+{
+    (void)HistoryTable;
+    const unsigned long long base = sys_dll_base_by_name("");
+    if (ImageBase != (unsigned long long*)0)
+        *ImageBase = base;
+    if (base == 0 || ControlPc < base)
+        return (void*)0;
+    const unsigned char* img = (const unsigned char*)base;
+    if (img[0] != 'M' || img[1] != 'Z')
+        return (void*)0;
+    const unsigned int e_lfanew = *(const unsigned int*)(img + 0x3C);
+    const unsigned char* nt = img + e_lfanew;
+    if (nt[0] != 'P' || nt[1] != 'E' || nt[2] != 0 || nt[3] != 0)
+        return (void*)0;
+    const unsigned char* opt = nt + 0x18;
+    if (*(const unsigned short*)opt != 0x20B)
+        return (void*)0;
+    const unsigned int* dd = (const unsigned int*)(opt + 0x70 + 3 * 8);
+    const unsigned int pdata_rva = dd[0];
+    const unsigned int pdata_sz = dd[1];
+    if (pdata_rva == 0 || pdata_sz < sizeof(K32_RUNTIME_FUNCTION))
+        return (void*)0;
+    const K32_RUNTIME_FUNCTION* fns = (const K32_RUNTIME_FUNCTION*)(img + pdata_rva);
+    const unsigned int n = pdata_sz / (unsigned int)sizeof(K32_RUNTIME_FUNCTION);
+    const unsigned int off = (unsigned int)(ControlPc - base);
+    unsigned int lo = 0, hi = n;
+    while (lo < hi)
+    {
+        const unsigned int mid = lo + (hi - lo) / 2;
+        if (off < fns[mid].BeginAddress)
+            hi = mid;
+        else if (off >= fns[mid].EndAddress)
+            lo = mid + 1;
+        else
+            return (void*)&fns[mid];
+    }
+    return (void*)0;
+}

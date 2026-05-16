@@ -3,20 +3,81 @@
 /* ------------------------------------------------------------------
  * SEH unwind helpers
  *
- * Real ntdll walks .pdata RUNTIME_FUNCTION tables to support
- * unwinding and stack traces. v0 has no unwind machinery; all
- * of these return "no match" / zero so callers (typically CRT
- * crash handlers) gracefully give up.
+ * RtlCaptureContext (real register snapshot) and
+ * RtlLookupFunctionEntry (real table-based .pdata lookup for the
+ * main EXE) are implemented — the T6-02 unwinder foundation.
+ * RtlVirtualUnwind / RtlUnwindEx and the kernel fault -> user
+ * dispatch are the next slice and still stub (return "no match" /
+ * terminate) so callers along the un-handled path degrade
+ * gracefully rather than mis-unwind.
  * ------------------------------------------------------------------ */
 
+/* SYS_DLL_BASE_BY_NAME = 172, empty name => calling EXE's base
+ * (post-ASLR). Same trampoline kernel32 GetModuleHandleW(NULL)
+ * uses; ntdll issues it directly to stay the bottom layer. */
+static unsigned long long ntdll_exe_base(void)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)172), "D"((long long)0), "S"((long long)0) : "memory");
+    return (unsigned long long)rv;
+}
+
+/* x64 IMAGE_RUNTIME_FUNCTION_ENTRY — three RVAs. */
+typedef struct
+{
+    unsigned int BeginAddress;
+    unsigned int EndAddress;
+    unsigned int UnwindInfoAddress;
+} RUNTIME_FUNCTION;
+
+/* Real table-based RtlLookupFunctionEntry: find the
+ * RUNTIME_FUNCTION whose [Begin,End) covers ControlPc by reading
+ * the module's in-memory .pdata (IMAGE_DIRECTORY_ENTRY_EXCEPTION).
+ * v0 resolves only the main EXE module (Chrome's primary case +
+ * every single-module PE); DLL .pdata is the follow-on. Pure
+ * reads of the already-mapped image — no control-flow effect. */
 __declspec(dllexport) void* RtlLookupFunctionEntry(unsigned long long ControlPc, unsigned long long* ImageBase,
                                                    void* HistoryTable)
 {
-    (void)ControlPc;
     (void)HistoryTable;
+    const unsigned long long base = ntdll_exe_base();
     if (ImageBase != (unsigned long long*)0)
-        *ImageBase = 0;
-    return (void*)0; /* No RUNTIME_FUNCTION found. */
+        *ImageBase = base;
+    if (base == 0 || ControlPc < base)
+        return (void*)0;
+    const unsigned char* img = (const unsigned char*)base;
+    if (img[0] != 'M' || img[1] != 'Z')
+        return (void*)0;
+    const unsigned int e_lfanew = *(const unsigned int*)(img + 0x3C);
+    const unsigned char* nt = img + e_lfanew;
+    if (nt[0] != 'P' || nt[1] != 'E' || nt[2] != 0 || nt[3] != 0)
+        return (void*)0;
+    const unsigned char* opt = nt + 0x18;
+    if (*(const unsigned short*)opt != 0x20B) /* PE32+ only */
+        return (void*)0;
+    /* DataDirectory[3] = IMAGE_DIRECTORY_ENTRY_EXCEPTION. PE32+
+     * optional header: DataDirectory begins at opt+0x70. */
+    const unsigned int* dd = (const unsigned int*)(opt + 0x70 + 3 * 8);
+    const unsigned int pdata_rva = dd[0];
+    const unsigned int pdata_sz = dd[1];
+    if (pdata_rva == 0 || pdata_sz < sizeof(RUNTIME_FUNCTION))
+        return (void*)0;
+    const RUNTIME_FUNCTION* fns = (const RUNTIME_FUNCTION*)(img + pdata_rva);
+    const unsigned int n = pdata_sz / (unsigned int)sizeof(RUNTIME_FUNCTION);
+    const unsigned int off = (unsigned int)(ControlPc - base);
+    /* .pdata is sorted by BeginAddress — binary search. */
+    unsigned int lo = 0, hi = n;
+    while (lo < hi)
+    {
+        const unsigned int mid = lo + (hi - lo) / 2;
+        if (off < fns[mid].BeginAddress)
+            hi = mid;
+        else if (off >= fns[mid].EndAddress)
+            lo = mid + 1;
+        else
+            return (void*)&fns[mid];
+    }
+    return (void*)0;
 }
 
 __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned long long ImageBase,
@@ -37,17 +98,39 @@ __declspec(dllexport) void* RtlVirtualUnwind(unsigned long HandlerType, unsigned
     return (void*)0; /* No exception handler found. */
 }
 
-/* RtlCaptureContext captures the current thread's register
- * state to a CONTEXT struct (1232 bytes on x64). We zero the
- * caller's struct; crash handlers that walk it see an "empty"
- * context. */
-__declspec(dllexport) void RtlCaptureContext(void* ContextRecord)
+/* Real RtlCaptureContext: snapshot the caller's register state
+ * into the Microsoft x64 CONTEXT (rcx = record, MS ABI). Rip =
+ * return address, Rsp = the caller's rsp *after* this returns.
+ * Naked so the prologue can't perturb the captured state.
+ * CONTEXT field offsets are the fixed Windows x64 layout. */
+__attribute__((naked)) __declspec(dllexport) void RtlCaptureContext(void* ContextRecord)
 {
-    if (ContextRecord == (void*)0)
-        return;
-    unsigned char* b = (unsigned char*)ContextRecord;
-    for (int i = 0; i < 1232; ++i)
-        b[i] = 0;
+    __asm__ volatile("movq %%rax, 0x78(%%rcx)\n\t"
+                     "movq %%rdx, 0x88(%%rcx)\n\t"
+                     "movq %%rbx, 0x90(%%rcx)\n\t"
+                     "movq %%rbp, 0xA0(%%rcx)\n\t"
+                     "movq %%rsi, 0xA8(%%rcx)\n\t"
+                     "movq %%rdi, 0xB0(%%rcx)\n\t"
+                     "movq %%r8,  0xB8(%%rcx)\n\t"
+                     "movq %%r9,  0xC0(%%rcx)\n\t"
+                     "movq %%r10, 0xC8(%%rcx)\n\t"
+                     "movq %%r11, 0xD0(%%rcx)\n\t"
+                     "movq %%r12, 0xD8(%%rcx)\n\t"
+                     "movq %%r13, 0xE0(%%rcx)\n\t"
+                     "movq %%r14, 0xE8(%%rcx)\n\t"
+                     "movq %%r15, 0xF0(%%rcx)\n\t"
+                     "movq %%rcx, 0x80(%%rcx)\n\t" /* captured Rcx = record ptr */
+                     "leaq 8(%%rsp), %%rax\n\t"
+                     "movq %%rax, 0x98(%%rcx)\n\t" /* Rsp after return */
+                     "movq (%%rsp), %%rax\n\t"
+                     "movq %%rax, 0xF8(%%rcx)\n\t" /* Rip = return addr */
+                     "pushfq\n\t"
+                     "popq %%rax\n\t"
+                     "movl %%eax, 0x44(%%rcx)\n\t"       /* EFlags */
+                     "movl $0x0010000F, 0x30(%%rcx)\n\t" /* ContextFlags */
+                     "movq 0x78(%%rcx), %%rax\n\t"       /* restore rax */
+                     "ret\n\t" ::
+                         : "memory");
 }
 
 __declspec(dllexport) unsigned short RtlCaptureStackBackTrace(unsigned long FramesToSkip, unsigned long FramesToCapture,
