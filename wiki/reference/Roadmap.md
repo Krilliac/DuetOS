@@ -435,15 +435,20 @@ In rough priority:
   HCI command/event codec in `kernel/net/bluetooth/hci.{h,cpp}`;
   and the HID **keyboard** upper stack in
   `kernel/net/bluetooth/hid.{h,cpp}` — ACL fragment reassembly,
-  L2CAP B-frame decode, BLE HOGP ATT-notification + classic HIDP
+  L2CAP B-frame decode, BLE HOGP ATT-notification / ATT-indication
+  (the latter answered with an ATT Handle Value Confirmation pushed
+  back through the `BtHidSetAclSink` egress, which btusb wires to
+  its bulk-OUT endpoint) + classic HIDP
   DATA/Input → the shared input-layer boot-keyboard decoder
   (`kernel/drivers/input/hid_keyboard.{h,cpp}`, also used by USB
   HID); the btusb USB transport driver
   `kernel/drivers/usb/btusb.{h,cpp}` — finds the controller, parses
   endpoints, configures the bulk + interrupt-IN endpoints, sends
-  HCI bring-up commands over EP0, and runs an ACL RX pump into
+  HCI bring-up commands over EP0, runs an ACL RX pump into
   `BtHidDeliverAcl` plus an HCI-event RX pump (diag stamping,
-  Disconnection_Complete → `BtHidUnregister`); and an additive
+  Disconnection_Complete → `BtHidUnregister`), and registers a
+  bulk-OUT `AclTxSink` so the HID layer's ATT confirmations reach
+  the controller; and an additive
   public xHCI interrupt-IN transfer primitive
   (`XhciConfigureInterruptInEndpoint` / `XhciInterruptInSubmit` /
   `XhciInterruptInPoll`) on independent `DeviceState` fields so no

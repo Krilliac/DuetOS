@@ -120,11 +120,22 @@ HCI ACL packet  →  BtHidDeliverAcl   (transport driver IRQ ingress)
   └─ per-connection fragment reassembly (ACL PB flag)
      └─ L2CAP B-frame  {len, CID, payload}
         ├─ CID 0x0004  → ATT  : Handle Value Notification → HID report  (BLE HOGP)
+        │                       Handle Value Indication   → HID report
+        │                         + ATT Handle Value Confirmation (0x1E)
+        │                           pushed back via BtHidSetAclSink egress
         └─ dynamic CID → HIDP : DATA/Input transaction      → HID report  (classic)
      └─ 8-byte boot keyboard report (optional Report-ID prefix stripped)
         └─ drivers::input::HidKeyboardDiffAndInject
            (the SAME decoder + inject queue USB HID uses)
 ```
+
+The ACL egress is symmetric to the ingress: `BtHidSetAclSink`
+registers the transport's bulk-OUT submit (btusb wires
+`AclTxSink` at bring-up). The HID layer uses it only to answer
+every received ATT Handle Value Indication with the 1-byte
+Confirmation the GATT server stalls on until it arrives — the
+confirmation is built and submitted outside the connection-table
+spinlock.
 
 The connection table is bounded (`kBtHidMaxConnections`) and keyed
 on the 12-bit ACL handle. `BtHidRegisterLeKeyboard` /
@@ -214,8 +225,10 @@ choice is tracked in
   reassembles ACL fragments and decodes L2CAP B-frames for the HID
   keyboard path. No SCO (voice) path; no other ACL consumer.
 - **L2CAP / GATT: HID slice only.** L2CAP B-frame decode + ATT
-  Handle Value Notification (BLE HOGP) + classic HIDP DATA/Input
-  are implemented for keyboards. No L2CAP signalling channel, no
+  Handle Value Notification / Indication (BLE HOGP; an Indication
+  is answered with an ATT Handle Value Confirmation through the
+  transport ACL egress sink) + classic HIDP DATA/Input are
+  implemented for keyboards. No L2CAP signalling channel, no
   GATT service discovery (the report handle is supplied at
   connection setup), no RFCOMM, no SDP.
 - **No pairing / SMP.** The Security Manager Protocol is not yet

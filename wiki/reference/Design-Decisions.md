@@ -9127,6 +9127,24 @@ endpoint.
   proven by boot self-tests driving synthetic packets end-to-end
   (`[hid-kbd]` / `[bt-hid]` / `[btusb]` selftest pass), asserting
   the decode/dispatch boundary rather than faking hardware.
+- **ATT indication egress is a symmetric seam, not an inline
+  reply.** A received ATT Handle Value Indication owes a 1-byte
+  Handle Value Confirmation or the GATT server stalls all further
+  indications. Rather than teach the HID layer about the
+  transport, the confirmation goes out a `BtHidSetAclSink`
+  function-pointer egress — the exact mirror of the
+  `BtHidDeliverAcl` ingress seam — which btusb wires to its
+  bulk-OUT endpoint at bring-up. Two consequences fixed here:
+  (1) the confirmation is owed for *any* indication on the ATT
+  bearer regardless of which attribute it carried or whether the
+  HID layer decodes the value (it acknowledges receipt at the
+  ATT layer, not the HID layer), so the dispatcher keys off the
+  opcode independent of the report-handle match; (2) the sink is
+  invoked *after* `g_hid_lock` is dropped, because a transport
+  bulk-OUT submit may poll/block and must never run under the
+  connection-table spinlock. The seam is null until a transport
+  registers it — consistent with the ingress, which is likewise
+  inert until btusb pumps it.
 - **Related roadmap track(s):** Bluetooth. Keyboard transport +
   upper stack + event endpoint graduate; connection manager
   (LE scan/connect), SMP pairing, GATT-HOGP discovery, and the

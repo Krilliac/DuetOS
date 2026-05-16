@@ -1918,6 +1918,8 @@ void BtPrintBtusb()
     WriteU64Dec(s.acl_short_drops);
     ConsoleWrite(" hci_cmds=");
     WriteU64Dec(s.hci_cmds_sent);
+    ConsoleWrite(" acl tx pkts=");
+    WriteU64Dec(s.acl_packets_tx);
     ConsoleWriteln("");
 }
 

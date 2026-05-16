@@ -81,6 +81,7 @@ struct BtusbStats
     u64 acl_bytes_rx;
     u64 acl_short_drops;
     u64 hci_cmds_sent;
+    u64 acl_packets_tx; // host->controller ACL (ATT confirmations)
 };
 
 /// Probe + bring up a USB Bluetooth controller and start the ACL

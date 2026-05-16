@@ -69,6 +69,8 @@ struct BtusbState
     u8* rx_buf_virt;
     mm::PhysAddr evt_buf_phys;
     u8* evt_buf_virt;
+    mm::PhysAddr tx_buf_phys;
+    u8* tx_buf_virt;
     BtusbStats stats;
 };
 
@@ -164,6 +166,26 @@ bool SendHciCommand(u8 slot_id, const u8* cmd, u16 cmd_len)
     if (ok)
         ++g_state.stats.hci_cmds_sent;
     return ok;
+}
+
+// ACL egress sink registered with the HID stack: ship one host->
+// controller ACL packet (today only the small ATT Handle Value
+// Confirmation) out the bulk-OUT endpoint. Called from the single
+// ACL RX pump task (BtHidDeliverAcl), so the shared tx buffer needs
+// no extra serialisation; the short poll bounds the RX-pump stall.
+void AclTxSink(const u8* pkt, u32 len)
+{
+    if (pkt == nullptr || len == 0 || g_state.tx_buf_virt == nullptr || !g_state.online)
+        return;
+    if (len > mm::kPageSize)
+        return; // confirmations are ~9 bytes; never near a page
+    for (u32 i = 0; i < len; ++i)
+        g_state.tx_buf_virt[i] = pkt[i];
+    const u64 trb = xhci::XhciBulkSubmit(g_state.slot_id, g_state.acl_out_ep, g_state.tx_buf_phys, len);
+    if (trb == 0)
+        return;
+    if (xhci::XhciBulkPoll(g_state.slot_id, g_state.acl_out_ep, trb, nullptr, /*timeout_us=*/50000))
+        ++g_state.stats.acl_packets_tx;
 }
 
 // Parse + act on one HCI event packet from the interrupt-IN
@@ -328,6 +350,16 @@ bool BringUp(u8 slot_id)
         return false;
     g_state.rx_buf_virt = static_cast<u8*>(mm::PhysToVirt(g_state.rx_buf_phys));
 
+    g_state.tx_buf_phys = mm::AllocateFrame();
+    if (g_state.tx_buf_phys == mm::kNullFrame)
+    {
+        mm::FreeFrame(g_state.rx_buf_phys);
+        g_state.rx_buf_phys = mm::kNullFrame;
+        g_state.rx_buf_virt = nullptr;
+        return false;
+    }
+    g_state.tx_buf_virt = static_cast<u8*>(mm::PhysToVirt(g_state.tx_buf_phys));
+
     g_state.slot_id = slot_id;
     g_state.acl_in_ep = acl_in;
     g_state.acl_in_mps = acl_in_mps;
@@ -388,6 +420,11 @@ bool BringUp(u8 slot_id)
     g_state.stats.acl_in_ep = acl_in;
     g_state.stats.acl_out_ep = acl_out;
     g_state.stats.event_in_ep = evt_in;
+
+    // Wire the HID stack's ACL egress (ATT Handle Value Confirmation
+    // for indication-type keyboards) to the bulk-OUT endpoint before
+    // the RX pump can deliver an indication.
+    duetos::net::bluetooth::BtHidSetAclSink(AclTxSink);
 
     if (evt_ok)
         duetos::sched::SchedCreate(EvtRxEntry, nullptr, "btusb-evt-rx");

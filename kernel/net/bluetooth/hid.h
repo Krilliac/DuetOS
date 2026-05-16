@@ -35,6 +35,8 @@
  *   - ACL fragment reassembly + L2CAP B-frame decode.
  *   - BLE HOGP: ATT Handle Value Notification / Indication carrying
  *     an 8-byte boot keyboard report (optionally Report-ID-prefixed).
+ *     An Indication is answered with an ATT Handle Value Confirmation
+ *     pushed back through the transport's ACL egress sink.
  *   - Classic HID: HIDP DATA/Input frame carrying the same report.
  *   - Bounded connection table; register/unregister keyed on the
  *     12-bit ACL connection handle.
@@ -70,6 +72,11 @@ inline constexpr u16 kL2capCidAtt = 0x0004;
 // ATT opcodes carrying a server-pushed value (Vol 3 Part F §3.4.7).
 inline constexpr u8 kAttHandleValueNotification = 0x1B;
 inline constexpr u8 kAttHandleValueIndication = 0x1D;
+
+// ATT Handle Value Confirmation (Vol 3 Part F §3.4.7.3): the client
+// MUST answer every Handle Value Indication with this 1-byte PDU or
+// the server stalls and stops sending further indications.
+inline constexpr u8 kAttHandleValueConfirmation = 0x1E;
 
 // HIDP header for a classic-HID DATA transaction carrying an Input
 // report: transaction type DATA (0xA0) | report type Input (0x01).
@@ -124,6 +131,16 @@ void BtHidUnregister(u16 acl_handle);
 /// kernel input queue. Unknown handles / non-keyboard CIDs are
 /// silently ignored.
 void BtHidDeliverAcl(const u8* acl_pkt, u32 len);
+
+/// ACL egress sink: the transport driver's bulk-OUT submit. The HID
+/// layer uses it to push host→controller ACL packets (today: the ATT
+/// Handle Value Confirmation owed for every received Indication). The
+/// symmetric counterpart of the `BtHidDeliverAcl` ingress seam — the
+/// same future btusb/btuart transport is the sole producer/consumer.
+/// `sink` may be one fully-formed HCI ACL packet's worth of bytes;
+/// pass nullptr to detach (self-test teardown).
+using BtHidAclSink = void (*)(const u8* acl_pkt, u32 len);
+void BtHidSetAclSink(BtHidAclSink sink);
 
 // ---- Pure parse helpers (no state; exposed for the self-test) ----
 
