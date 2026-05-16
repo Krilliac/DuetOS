@@ -143,6 +143,25 @@ constexpr u64 kPageMask = kPageAlign - 1;
 // earliest TEB reads; anything later (TLS slot lookup, PEB
 // traversal) will fault visibly so we can fill it in incrementally.
 constexpr u64 kV0TebVa = 0x70000000ULL;
+
+// Static-TLS region (T6-01). A PE with an IMAGE_DIRECTORY_ENTRY_TLS
+// gets:
+//   - kV0TlsArrayVa : one page holding the ThreadLocalStoragePointer
+//     array. TEB+0x58 points here; slot[_tls_index] -> the data
+//     block. MSVC __declspec(thread) access is
+//     `mov rax, gs:[0x58]; mov ecx,[_tls_index]; mov rax,[rax+rcx*8]`.
+//   - kV0TlsBlockVa : the per-process main-thread TLS data block —
+//     a copy of the .tls template (Start..End) plus SizeOfZeroFill
+//     zero bytes. Sized up to kV0TlsBlockMaxPages.
+//   - kV0TlsTrampVa : an R-X page holding a generated trampoline
+//     that invokes each TLS callback (rcx=base, rdx=DLL_PROCESS_
+//     ATTACH, r8=0) before jumping to the real entry point.
+constexpr u64 kV0TlsArrayVa = 0x71000000ULL;
+constexpr u64 kV0TlsBlockVa = 0x72000000ULL;
+constexpr u64 kV0TlsTrampVa = 0x73000000ULL;
+constexpr u64 kV0TlsBlockMaxPages = 64; // 256 KiB template+zerofill cap
+constexpr u64 kTebOffTlsPointer = 0x58; // TEB.ThreadLocalStoragePointer (x64)
+constexpr u32 kDllProcessAttach = 1;
 constexpr u64 kTebOffSelf = 0x30;
 
 struct PeHeaders
@@ -700,62 +719,274 @@ void StagedMissAppend(u64 slot_va, const char* name)
     ++g_staged_miss_count;
 }
 
-// Count non-null TLS callback VAs in the callbacks array
-// pointed at by the TLS directory's `AddressOfCallBacks` field.
-// Returns 0 for an empty / absent callback array, (-1) when the
-// callbacks VA points outside any mapped section (caller treats
-// this as malformed; fail the load).
-//
-// The callback array is a NULL-terminated array of u64 VAs. We
-// walk at most `kMaxCb` entries — a hostile TLS directory with
-// a missing terminator can't then spin the loader forever.
-//
-// Reads through the FILE image (not the mapped image) because
-// this runs before the thunk that would actually invoke the
-// callbacks exists. The TLS directory's `AddressOfCallBacks` is
-// a VA in the mapped image; we convert back via
-// `(VA - ImageBase) → RVA → file offset`. That round-trip is
-// identical to `ReportTls` in the same file — v0 could share
-// helpers, but this call path has to be cheap (it runs once per
-// spawn) so we open-code it.
-u64 CountTlsCallbacks(const u8* file, u64 file_len, const PeHeaders& h)
+// Byte-wise read/write through an inactive AddressSpace's user
+// mappings (same frame-lookup + PhysToVirt round-trip
+// ApplyRelocations uses). Returns false if any page is unmapped.
+bool AsRead(duetos::mm::AddressSpace* as, u64 va, void* dst, u64 len)
 {
-    const PeDataDir tls = ReadDataDir(file, h, kDirEntryTls);
-    if (tls.rva == 0 || tls.size == 0)
-        return 0;
-    const u64 tls_off = RvaToFile(file, h, tls.rva);
-    if (tls_off == ~u64(0) || tls_off + 40 > file_len)
-        return 0;
-    const u64 cb_va = LeU64(file + tls_off + 24);
-    // The preferred base still lives in h.image_base (set by
-    // ParseHeaders); callers that applied an aslr_delta already
-    // updated h.image_base at that point too, but we normalise
-    // here against whatever h.image_base happens to hold.
-    if (cb_va == 0 || cb_va < h.image_base)
-        return 0;
-    // PE RVAs are u32. A hostile TLS directory with cb_va more than 4
-    // GiB above image_base would silently truncate the difference and
-    // land RvaToFile on a wrong section. Refuse such images instead.
-    const u64 cb_va_delta = cb_va - h.image_base;
-    if (cb_va_delta > 0xFFFFFFFFULL)
-        return 0;
-    const u32 cb_rva = static_cast<u32>(cb_va_delta);
-    const u64 cb_off = RvaToFile(file, h, cb_rva);
-    if (cb_off == ~u64(0))
-        return 0;
-    constexpr u32 kMaxCb = 16;
-    u32 count = 0;
-    for (u32 i = 0; i < kMaxCb; ++i)
+    auto* d = static_cast<u8*>(dst);
+    for (u64 i = 0; i < len; ++i)
     {
-        const u64 ent_off = cb_off + u64(i) * 8;
-        if (ent_off + 8 > file_len)
-            break;
-        const u64 ent = LeU64(file + ent_off);
-        if (ent == 0)
-            break;
-        ++count;
+        const u64 cur = va + i;
+        const duetos::mm::PhysAddr fr = duetos::mm::AddressSpaceLookupUserFrame(as, cur & ~0xFFFULL);
+        if (fr == duetos::mm::kNullFrame)
+            return false;
+        d[i] = static_cast<const u8*>(duetos::mm::PhysToVirt(fr))[cur & 0xFFFULL];
     }
-    return count;
+    return true;
+}
+bool AsWrite(duetos::mm::AddressSpace* as, u64 va, const void* src, u64 len)
+{
+    const auto* s = static_cast<const u8*>(src);
+    for (u64 i = 0; i < len; ++i)
+    {
+        const u64 cur = va + i;
+        const duetos::mm::PhysAddr fr = duetos::mm::AddressSpaceLookupUserFrame(as, cur & ~0xFFFULL);
+        if (fr == duetos::mm::kNullFrame)
+            return false;
+        static_cast<u8*>(duetos::mm::PhysToVirt(fr))[cur & 0xFFFULL] = s[i];
+    }
+    return true;
+}
+
+struct TlsSetupResult
+{
+    bool ok = false;           // false => hard failure, fail the load
+    bool present = false;      // a TLS directory was present
+    u64 entry_override_va = 0; // non-zero => jump here first (callback trampoline)
+};
+
+// T6-01: static TLS + TLS-callback support.
+//
+// Builds the per-process main-thread TLS data block (a copy of the
+// .tls template Start..End plus SizeOfZeroFill zero bytes), points
+// TEB.ThreadLocalStoragePointer (gs:[0x58]) at a slot array whose
+// slot 0 is that block, writes the module's _tls_index (0), and —
+// if the image registers TLS callbacks — generates an R-X
+// trampoline that invokes each callback with the Win64
+// (rcx=image_base, rdx=DLL_PROCESS_ATTACH, r8=0) ABI before
+// jumping to the real entry point. Returns ok=false only on a
+// structural failure (malformed dir / OOM / unmapped template);
+// a PE with no TLS directory returns ok=true, present=false.
+TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm::AddressSpace* as,
+                              u64 teb_va, LoaderUnwindGuard& guard)
+{
+    TlsSetupResult res;
+    const PeDataDir tls_dir = ReadDataDir(file, h, kDirEntryTls);
+    if (tls_dir.rva == 0 || tls_dir.size == 0)
+    {
+        res.ok = true; // no TLS — nothing to do
+        return res;
+    }
+    res.present = true;
+    (void)file;
+    (void)file_len;
+    // Read the IMAGE_TLS_DIRECTORY64 from the MAPPED image, not the
+    // file. The data-directory RVA is base-independent, but the
+    // dir's Start/End/Index/Callbacks fields are absolute VAs that
+    // base-relocation already fixed up in the mapped image (this
+    // runs after ApplyRelocations). Reading the file copy would
+    // yield preferred-base VAs and be wrong whenever the spawn
+    // applied an ASLR delta (it does — h.image_base = load base).
+    const u64 dir_va = h.image_base + tls_dir.rva;
+    u8 dir[40];
+    if (!AsRead(as, dir_va, dir, sizeof(dir)))
+    {
+        arch::SerialWrite("[pe-tls] FAIL TLS directory unmapped va=");
+        arch::SerialWriteHex(dir_va);
+        arch::SerialWrite("\n");
+        return res;
+    }
+    const u64 start_va = LeU64(dir + 0x00);
+    const u64 end_va = LeU64(dir + 0x08);
+    const u64 idx_va = LeU64(dir + 0x10);
+    const u64 cb_arr_va = LeU64(dir + 0x18);
+    const u32 zerofill = LeU32(dir + 0x20);
+    if (end_va < start_va)
+    {
+        arch::SerialWrite("[pe-tls] FAIL End<Start\n");
+        return res;
+    }
+    const u64 raw = end_va - start_va;
+    const u64 total = raw + zerofill;
+    if (total > kV0TlsBlockMaxPages * duetos::mm::kPageSize)
+    {
+        arch::SerialWrite("[pe-tls] FAIL TLS block too large size=");
+        arch::SerialWriteHex(total);
+        arch::SerialWrite("\n");
+        return res;
+    }
+
+    // 1. Map a zeroed TLS data block, then copy the template.
+    const u64 npages = total == 0 ? 1 : ((total + duetos::mm::kPageSize - 1) / duetos::mm::kPageSize);
+    for (u64 p = 0; p < npages; ++p)
+    {
+        const mm::PhysAddr f = mm::AllocateFrame();
+        if (f == mm::kNullFrame)
+        {
+            arch::SerialWrite("[pe-tls] FAIL block frame alloc\n");
+            return res;
+        }
+        auto* d = static_cast<u8*>(duetos::mm::PhysToVirt(f));
+        for (u64 i = 0; i < duetos::mm::kPageSize; ++i)
+            d[i] = 0;
+        const u64 va = kV0TlsBlockVa + p * duetos::mm::kPageSize;
+        duetos::mm::AddressSpaceMapUserPage(as, va, f,
+                                            mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute);
+        guard.Track(va);
+    }
+    if (raw != 0)
+    {
+        u8 buf[256];
+        u64 done = 0;
+        while (done < raw)
+        {
+            u64 chunk = raw - done;
+            if (chunk > sizeof(buf))
+                chunk = sizeof(buf);
+            if (!AsRead(as, start_va + done, buf, chunk))
+            {
+                arch::SerialWrite("[pe-tls] FAIL template read (unmapped .tls)\n");
+                return res;
+            }
+            if (!AsWrite(as, kV0TlsBlockVa + done, buf, chunk))
+            {
+                arch::SerialWrite("[pe-tls] FAIL block write\n");
+                return res;
+            }
+            done += chunk;
+        }
+    }
+
+    // 2. Slot array page; slot[0] -> block.
+    {
+        const mm::PhysAddr f = mm::AllocateFrame();
+        if (f == mm::kNullFrame)
+        {
+            arch::SerialWrite("[pe-tls] FAIL array frame alloc\n");
+            return res;
+        }
+        auto* d = static_cast<u8*>(duetos::mm::PhysToVirt(f));
+        for (u64 i = 0; i < duetos::mm::kPageSize; ++i)
+            d[i] = 0;
+        for (u64 b = 0; b < 8; ++b)
+            d[b] = static_cast<u8>((kV0TlsBlockVa >> (b * 8)) & 0xFF);
+        duetos::mm::AddressSpaceMapUserPage(as, kV0TlsArrayVa, f,
+                                            mm::kPagePresent | mm::kPageUser | mm::kPageWritable | mm::kPageNoExecute);
+        guard.Track(kV0TlsArrayVa);
+    }
+
+    // 3. TEB.ThreadLocalStoragePointer = array VA.
+    {
+        const u64 ptr = kV0TlsArrayVa;
+        if (!AsWrite(as, teb_va + kTebOffTlsPointer, &ptr, 8))
+        {
+            arch::SerialWrite("[pe-tls] FAIL TEB+0x58 write\n");
+            return res;
+        }
+    }
+
+    // 4. *_tls_index = 0 (single module). Best-effort: a stripped
+    //    image may point this outside a writable section.
+    if (idx_va != 0)
+    {
+        const u32 zero = 0;
+        if (!AsWrite(as, idx_va, &zero, 4))
+            arch::SerialWrite("[pe-tls] WARN _tls_index VA unmapped — skipped\n");
+    }
+
+    // 5. Callbacks -> generated R-X trampoline. The callback array
+    //    is a NULL-terminated list of absolute VAs; read it from
+    //    the mapped image (relocated) at cb_arr_va. Cap the walk so
+    //    a missing terminator can't spin the loader.
+    u64 cbs[16];
+    u32 ncb = 0;
+    if (cb_arr_va != 0)
+    {
+        for (u32 i = 0; i < 16; ++i)
+        {
+            u64 ent = 0;
+            if (!AsRead(as, cb_arr_va + u64(i) * 8, &ent, 8) || ent == 0)
+                break;
+            cbs[ncb++] = ent;
+        }
+    }
+    if (ncb != 0)
+    {
+        const mm::PhysAddr f = mm::AllocateFrame();
+        if (f == mm::kNullFrame)
+        {
+            arch::SerialWrite("[pe-tls] FAIL trampoline frame alloc\n");
+            return res;
+        }
+        auto* code = static_cast<u8*>(duetos::mm::PhysToVirt(f));
+        for (u64 i = 0; i < duetos::mm::kPageSize; ++i)
+            code[i] = 0;
+        u64 n = 0;
+        auto emit = [&](u8 b) { code[n++] = b; };
+        auto emit_u64 = [&](u64 v)
+        {
+            for (int i = 0; i < 8; ++i)
+                emit(static_cast<u8>((v >> (i * 8)) & 0xFF));
+        };
+        // sub rsp,0x28  (32B shadow + 8 to keep 16-byte alignment
+        // across the calls; entry rsp is 16-aligned per the kernel).
+        emit(0x48);
+        emit(0x81);
+        emit(0xEC);
+        emit(0x28);
+        emit(0x00);
+        emit(0x00);
+        emit(0x00);
+        for (u32 i = 0; i < ncb; ++i)
+        {
+            emit(0x48); // mov rcx, image_base
+            emit(0xB9);
+            emit_u64(h.image_base);
+            emit(0x31); // xor edx,edx
+            emit(0xD2);
+            emit(0xB2); // mov dl,1  (DLL_PROCESS_ATTACH)
+            emit(static_cast<u8>(kDllProcessAttach));
+            emit(0x45); // xor r8d,r8d
+            emit(0x31);
+            emit(0xC0);
+            emit(0x48); // mov rax, cb
+            emit(0xB8);
+            emit_u64(cbs[i]);
+            emit(0xFF); // call rax
+            emit(0xD0);
+        }
+        emit(0x48); // add rsp,0x28
+        emit(0x81);
+        emit(0xC4);
+        emit(0x28);
+        emit(0x00);
+        emit(0x00);
+        emit(0x00);
+        emit(0x48); // mov rax, real_entry
+        emit(0xB8);
+        emit_u64(h.image_base + h.entry_rva);
+        emit(0xFF); // jmp rax
+        emit(0xE0);
+        // R-X (no writable, no NX) — W^X for generated code.
+        duetos::mm::AddressSpaceMapUserPage(as, kV0TlsTrampVa, f, mm::kPagePresent | mm::kPageUser);
+        guard.Track(kV0TlsTrampVa);
+        res.entry_override_va = kV0TlsTrampVa;
+        arch::SerialWrite("[pe-tls] callbacks=");
+        arch::SerialWriteHex(ncb);
+        arch::SerialWrite(" trampoline armed va=");
+        arch::SerialWriteHex(kV0TlsTrampVa);
+        arch::SerialWrite("\n");
+    }
+    arch::SerialWrite("[pe-tls] static TLS ready raw=");
+    arch::SerialWriteHex(raw);
+    arch::SerialWrite(" zerofill=");
+    arch::SerialWriteHex(zerofill);
+    arch::SerialWrite(" idx_va=");
+    arch::SerialWriteHex(idx_va);
+    arch::SerialWrite("\n");
+    res.ok = true;
+    return res;
 }
 
 // Seed the per-image /GS stack cookie (T9-02 follow-on).
@@ -1804,39 +2035,13 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     //     no-load-config / pre-/GS layout / unmapped cookie VA).
     (void)SeedSecurityCookie(file, file_len, h, as);
 
-    // 3b. TLS callback gate. MSVC-built PEs frequently ship a
-    //     .tls section with an EMPTY callback array — the CRT
-    //     reserves the directory for "just in case" TLS callback
-    //     registration but the binary we're loading doesn't
-    //     actually register any. We let those through (the
-    //     callback array walk below finds 0 entries and PeLoad
-    //     proceeds to entry).
-    //
-    //     Non-empty callback arrays, by contrast, mean the PE is
-    //     relying on code that runs BEFORE its main entry point
-    //     — TLS static initializers, static destructors-by-way-of
-    //     DllMain, Microsoft's /GS cookie init, etc. Running them
-    //     correctly requires a per-process x64 thunk that calls
-    //     each with (rcx=image_base, rdx=DLL_PROCESS_ATTACH,
-    //     r8=nullptr) and 32 bytes of shadow space, then jumps to
-    //     the real entry. That thunk is a separate slice. Until
-    //     it lands, silently skipping the callbacks would mean
-    //     the PE's main() could dereference an uninitialized
-    //     static and crash with a misleading traceback. Reject
-    //     with a clear diagnostic instead.
-    const PeDataDir tls_dir = ReadDataDir(file, h, kDirEntryTls);
-    const bool tls_directory_present = (tls_dir.rva != 0 && tls_dir.size != 0);
-    const u64 tls_cb_count = tls_directory_present ? CountTlsCallbacks(file, file_len, h) : 0;
-    if (tls_cb_count > 0)
-    {
-        SerialWrite("[pe-load] FAIL TlsCallbacksUnsupported count=");
-        SerialWriteHex(tls_cb_count);
-        SerialWrite(" — v0 cannot invoke TLS callbacks; a follow-up "
-                    "injects a per-process thunk to call them before entry\n");
-        return r;
-    }
-    if (tls_directory_present)
-        SerialWrite("[pe-load] step3b tls directory present, callbacks=0 (ok)\n");
+    // 3b. TLS (T6-01) is now fully supported: static-TLS template
+    //     copy, TEB.ThreadLocalStoragePointer wiring, and a
+    //     generated R-X trampoline that invokes any registered TLS
+    //     callbacks before entry. The actual setup runs at step
+    //     4b' (after the TEB page exists and imports are resolved,
+    //     since a callback may call into an imported DLL). No
+    //     pre-gate / reject here any more.
 
     // 4. Stack: kV0StackPages pages, writable + NX, mapped
     //    ending at kV0StackTop. MSVC's __chkstk probes the
@@ -2116,12 +2321,33 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         }
         SerialWrite("[pe-load] step5 pe32 imports resolved\n");
     }
+
+    // 4b'. Static TLS + TLS callbacks (T6-01). 64-bit Win32 PEs
+    //      only — the 32-bit TLS array lives at a different TEB
+    //      offset and the i386 user path isn't executable yet.
+    //      Runs after the TEB exists and imports are resolved
+    //      (a callback may call an imported DLL).
+    u64 tls_entry_override = 0;
+    if (!h.is_pe32 && teb_va != 0)
+    {
+        const TlsSetupResult tls = SetupStaticTls(file, file_len, h, as, teb_va, guard);
+        if (!tls.ok)
+        {
+            // present-but-failed is a hard error: the PE would run
+            // with uninitialised thread-locals. guard unwinds the
+            // partial mappings.
+            SerialWrite("[pe-load] FAIL static-TLS setup\n");
+            return r;
+        }
+        tls_entry_override = tls.entry_override_va;
+    }
+
     SerialWrite("[pe-load] OK\n");
 
     r.ok = true;
     r.imports_resolved = (ps == PeStatus::ImportsPresent);
     r.is_pe32 = h.is_pe32;
-    r.entry_va = h.image_base + h.entry_rva;
+    r.entry_va = tls_entry_override != 0 ? tls_entry_override : (h.image_base + h.entry_rva);
     r.stack_va = kV0StackVa;
     r.stack_top = kV0StackTop;
     r.image_base = h.image_base;
