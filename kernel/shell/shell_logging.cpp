@@ -364,6 +364,7 @@ void CmdFaultInject(u32 argc, char** argv)
         ConsoleWriteln("    FAULT-INJECT NULL-DEREF   KERNEL #PF FROM AN UNMAPPED VA");
         ConsoleWriteln("    FAULT-INJECT PANIC        DELIBERATE KERNEL PANIC");
         ConsoleWriteln("    FAULT-INJECT OOM-SLAB     DRAIN A SLAB TO SlabAlloc==nullptr");
+        ConsoleWriteln("    FAULT-INJECT MCE          RAISE #MC (VECTOR 18) + DECODE MCA BANKS");
         return;
     }
     const char* arg = argv[1];
@@ -380,6 +381,10 @@ void CmdFaultInject(u32 argc, char** argv)
     else if (StrEq(arg, "oom-slab"))
     {
         fc = FaultClass::OomSlab;
+    }
+    else if (StrEq(arg, "mce"))
+    {
+        fc = FaultClass::MachineCheck;
     }
     else
     {

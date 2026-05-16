@@ -33,6 +33,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/lbr.h"
+#include "arch/x86_64/machine_check.h"
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/serial.h"
 
@@ -397,6 +398,16 @@ void WriteLabelledRflags(const char* label, duetos::u64 value)
 
 TrapResponse TrapResponseFor(u64 vector, bool from_user)
 {
+    // #MC (vector 18) is a system-level hardware fault, not a
+    // per-task bug — a bad DIMM / cache parity / bus error taken
+    // while ring 3 happened to be current does NOT mean only that
+    // task is affected. It must never be IsolateTask'd or delivered
+    // to user-mode SEH; decode-then-Panic regardless of ring. The
+    // decode itself runs from the Panic dump path below.
+    if (vector == 18)
+    {
+        return TrapResponse::Panic;
+    }
     // Ring 3 is always Isolate. The faulting task dies, the kernel
     // continues. This is the existing user-mode fault contract.
     if (from_user)
@@ -614,8 +625,9 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     //     Peers arrive here and must halt quietly so they don't
     //     fight the panicking CPU for the serial line.
     // Any non-watchdog NMI (external NMI pin, firmware-injected
-    // chipset error, etc.) also falls through to the halt path —
-    // conservative default: if we don't know why NMI fired, stop.
+    // chipset error, etc.) is decoded from port 0x61 (SERR#/IOCHK#)
+    // and reported, then falls through to the halt path —
+    // conservative default: if NMI fired, decode the source, stop.
     if (frame->vector == 2)
     {
         if (NmiWatchdogHandleNmi(frame->rip))
@@ -661,6 +673,40 @@ extern "C" void TrapDispatch(TrapFrame* frame)
                 p->gdb_frozen_frame = nullptr;
             }
             return; // resume the interrupted code on this peer
+        }
+
+        // Chipset / external NMI decode. A non-watchdog, non-GDB,
+        // non-panic-broadcast NMI on real hardware is almost always
+        // a hardware error reported through the NMI Status & Control
+        // register (port 0x61): bit 7 = PCI SERR# (system / bus
+        // parity error), bit 6 = IOCHK# (I/O-channel-check from an
+        // add-in card). Just halting left the operator blind to
+        // WHICH hardware source fired — the same gap the #MC bank
+        // decode closed for vector 18. Gate on !PanicInProgress() so
+        // panic-broadcast peers (which arrive here because a panic
+        // is already underway) stay quiet and don't fight the
+        // panicking CPU for the serial line. Raw serial only — NMI
+        // context, possibly-corrupt state, panic-mode serial bypass.
+        if (!PanicInProgress())
+        {
+            const u8 nmi_sc = Inb(0x61);
+            SerialWrite("\n** NMI (non-watchdog) **\n  port-0x61 : ");
+            SerialWriteHex(nmi_sc);
+            const bool serr = (nmi_sc & 0x80) != 0;
+            const bool iochk = (nmi_sc & 0x40) != 0;
+            if (serr)
+                SerialWrite(" SERR#(PCI-system/parity)");
+            if (iochk)
+                SerialWrite(" IOCHK#(I/O-channel-check)");
+            if (!serr && !iochk)
+                SerialWrite(" no-SERR/IOCHK — external NMI pin or unknown source");
+            SerialWrite("\n  verdict   : hardware error — halting (no NMI-recovery path)\n");
+            KLOG_ERROR_V("arch/nmi", "non-watchdog NMI — see ** NMI (non-watchdog) ** dump (port 0x61)",
+                         static_cast<u64>(nmi_sc));
+            if (serr || iochk)
+            {
+                KBP_PROBE_V(::duetos::debug::ProbeId::kChipsetNmi, static_cast<u64>(nmi_sc));
+            }
         }
 
         // Cross-CPU panic broadcast (or any unclaimed NMI). Capture
@@ -1112,6 +1158,17 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // a snapshot we can dump after our own diagnostics.
     PanicBroadcastNmi();
     SerialWrite("\n** CPU EXCEPTION **\n");
+
+    // #MC: decode the Machine Check Architecture banks before the
+    // generic register dump so the operator sees *which hardware*
+    // failed (bank, MCA error class, faulting physical address,
+    // PCC/RIPV recoverability) up-front. Pure MSR read-back + raw
+    // serial; safe on the IST2 machine-check stack. The standard
+    // crash-dump record (registers, stack walk) still follows.
+    if (frame->vector == 18)
+    {
+        (void)arch::MachineCheckReport(frame);
+    }
 
     // Bracket the record so host-side tooling can extract a .dump file
     // from the serial capture, matching the panic path's contract. The

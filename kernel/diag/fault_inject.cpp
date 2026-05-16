@@ -2,14 +2,14 @@
  * DuetOS — deliberate kernel fault injection.
  *
  * See fault_inject.h for the contract; this TU is the entire
- * implementation. v0 ships exactly three classes (NullDeref, Panic,
- * OomSlab), each with a single named caller (the `fault-inject`
- * kernel shell command in shell_debug.cpp, plus the boot self-test
- * for the recoverable OomSlab case).
+ * implementation. v0 ships exactly four classes (NullDeref, Panic,
+ * OomSlab, MachineCheck), each with a single named caller (the
+ * `fault-inject` kernel shell command in shell_logging.cpp, plus the
+ * boot self-test for the recoverable OomSlab case).
  *
  * Design notes:
  *   - No fault registry, no plugin surface. The control flow is a
- *     switch over three enum values; the brief explicitly forbids
+ *     switch over the enum values; the brief explicitly forbids
  *     abstraction.
  *   - Every reach fires `kFaultInjectFired` BEFORE the trigger so
  *     an attached GDB can break at the harness frame and the
@@ -151,6 +151,21 @@ Result<void, ErrorCode> TriggerOomSlab()
     }
 }
 
+[[noreturn]] void TriggerMachineCheck()
+{
+    // Software-raise vector 18. The IDT gate for #MC is present and
+    // routes through the IST2 machine-check stack; the trap
+    // dispatcher hands the frame to arch::MachineCheckReport, which
+    // decodes the (clean, software-raised) MCA banks and the
+    // dispatcher panics. Non-returning by the same contract as
+    // NullDeref / Panic.
+    asm volatile("int $18");
+    for (;;)
+    {
+        asm volatile("hlt");
+    }
+}
+
 [[noreturn]] void TriggerPanic()
 {
     // Subsystem tag + message together produce a panic banner whose
@@ -183,6 +198,10 @@ Result<void, ErrorCode> Trigger(FaultClass fc)
 
     case FaultClass::OomSlab:
         return TriggerOomSlab();
+
+    case FaultClass::MachineCheck:
+        KLOG_DEBUG_S("diag/fault_inject", "MachineCheck raising", "vec", "int $18");
+        TriggerMachineCheck();
     }
 
     // Out-of-range enum value reaches here. Surface it; the caller's

@@ -190,8 +190,46 @@ its self-test belongs in the appropriate block.
 - **Hot-patch** modifies executable text. It quiesces with stop-the-world
   before applying the JMP overlay.
 
+## Machine Check (#MC) Decode
+
+DuetOS has two MCA touch points. The **passive** path is
+`runtime_checker`'s periodic bank scan, which clears + reports
+*corrected* errors that accumulate silently in `MCi_STATUS` without
+ever raising an exception. The **active** path is
+[`kernel/arch/x86_64/machine_check.cpp`](../../kernel/arch/x86_64/machine_check.cpp):
+when an *uncorrected* error raises a real `#MC` (vector 18), the trap
+dispatcher routes the frame to `arch::MachineCheckReport` *before* the
+generic register dump. `#MC` is special-cased in `TrapResponseFor` to
+`Panic` regardless of ring — a bad DIMM / cache parity / bus error
+taken while ring 3 was current is a system-level event, never an
+`IsolateTask` or user-SEH delivery.
+
+The decode reads `IA32_MCG_CAP` / `MCG_STATUS` and walks every
+`VAL`-set `MCi_STATUS` bank, printing the decoded flags
+(`UC`/`EN`/`PCC`/`ADDRV`/…), the MCA error class (TLB / cache / bus /
+memory-controller / internal), and `MCi_ADDR` / `MCi_MISC` when valid.
+It returns a recoverability verdict:
+
+| Verdict | Condition | Meaning |
+|---------|-----------|---------|
+| `NoError` | no bank `VAL` | spurious / software-raised / firmware-injected #MC |
+| `ContextCorrupt` | a bank has `PCC=1` | processor state gone — unrecoverable |
+| `ContextLost` | `MCG_STATUS.RIPV=0` | cannot resume the interrupted flow — unrecoverable |
+| `RestartableInfo` | `RIPV=1`, no `PCC` | restartable in principle (see GAP below) |
+
+Runtime-exercisable via `fault-inject mce` (or `FaultClass::MachineCheck`)
+— a software `int $18` leaves the banks clean, so the path proves it
+routes → decodes → halts without itself triple-faulting on the IST2
+machine-check stack. See [Fault Injection](Fault-Injection.md).
+
 ## Known Limits / GAPs
 
+- **No #MC recovery path.** Even when the bank decode returns
+  `RestartableInfo` (`RIPV=1`, no `PCC` — restartable in principle),
+  the dispatcher still halts: DuetOS v0 has no page-poison / SRAR
+  recovery (no per-frame poison list, no kill-just-the-poisoned-page
+  handler). Conservative contract — data integrity over liveness.
+  Revisit when `mm` grows a poison list.
 - **UBSAN off by default.** Enable with `ubsan=on` cmdline; rate-limited
   reports otherwise drown the log.
 - **`blake2b.cpp` type-mismatch on the auth path (open).** Running
