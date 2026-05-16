@@ -58,6 +58,12 @@ bool VirtioBlkProbe(const VirtioPciLayout& L);
 bool VirtioNetProbe(const VirtioPciLayout& L);
 bool VirtioConsoleProbe(const VirtioPciLayout& L);
 bool VirtioBalloonProbe(const VirtioPciLayout& L);
+bool VirtioInputProbe(const VirtioPciLayout& L);
+
+/// Boot-time self-test for the virtio-input evdev → KeyEvent
+/// decoder. Pure translation (capture seam, no device); panics on
+/// mismatch and logs `[virtio-input] selftest pass`.
+void VirtioInputSelfTest();
 
 /// Forward a byte buffer over the attached virtio-console TX
 /// queue. No-op if the device wasn't found (returns false). The

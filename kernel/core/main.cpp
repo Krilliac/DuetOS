@@ -2576,6 +2576,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     SerialWrite("[boot] Probing VirtIO PCI devices.\n");
     duetos::drivers::virtio::VirtioInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::virtio::VirtioInputSelfTest());
 
     SerialWrite("[boot] Detecting Intel MEI/HECI devices.\n");
     duetos::drivers::mei::MeiInit();

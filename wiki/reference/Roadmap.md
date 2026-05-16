@@ -1447,6 +1447,14 @@ it."
     the receiveq via `VirtioConsolePollByte`.
   - virtio-balloon negotiates + installs inflateq +
     deflateq; the device sees a fully-configured driver.
+  - virtio-input drives the keyboard eventq: a dedicated
+    10 ms-cadence `virtio-input-evt-poll` task drains
+    `virtio_input_event` records, translates `EV_KEY`
+    through the shared active PS/2 keymap (Linux keycodes
+    == set-1 scancodes for the AT block), and injects via
+    `KeyboardInjectEvent` — the same input queue PS/2 /
+    xHCI HID / Bluetooth HID feed. `ID_NAME` config read
+    for the boot sentinel.
 - **Lands:**
   - **virtio-blk concurrency + IRQ** (see entry above).
   - **virtio-console multiport** —
@@ -1456,8 +1464,12 @@ it."
     hands PFNs back on inflate requests. The harder half
     is the "when do we agree to give up memory?" policy;
     spec-pure dispatch is straightforward.
+  - **virtio-input pointer + statusq** — EV_REL / EV_ABS
+    (virtio-mouse / virtio-tablet) decoded into the mouse
+    injection path, plus the statusq for LED / force-
+    feedback. v0 is keyboard-eventq only.
   - IRQ wire-up across the board (rng, blk, net, console,
-    balloon).
+    balloon, input).
 
 ### IOCP — primitive consolidation
 

@@ -73,8 +73,10 @@ void VirtioInit()
         case VirtioClass::kBalloon:
             attached = VirtioBalloonProbe(L);
             break;
-        case VirtioClass::kScsi:
         case VirtioClass::kInput:
+            attached = VirtioInputProbe(L);
+            break;
+        case VirtioClass::kScsi:
         case VirtioClass::kSocket:
             // STUB: per-class probes for these aren't in tree yet.
             // They surface in the stats and the shell so a future
@@ -83,7 +85,7 @@ void VirtioInit()
             KLOG_INFO_V("drivers/virtio", "class present but no driver yet", static_cast<u64>(cls_idx));
             (void)::duetos::diag::FixJournalRecord(
                 ::duetos::diag::FixDetector::StubMarker, "drivers/virtio/virtio.cpp:UnprobedClass",
-                "land scsi/input/socket virtio class probe", static_cast<u64>(cls_idx), static_cast<u64>(d.device_id));
+                "land scsi/socket virtio class probe", static_cast<u64>(cls_idx), static_cast<u64>(d.device_id));
             break;
         case VirtioClass::kInvalid:
         default:

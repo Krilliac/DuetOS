@@ -107,7 +107,7 @@ userland. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 | `storage` | 3 | `kernel/drivers/storage/` |
 | `usb` | 21 | `kernel/drivers/usb/` |
 | `video` | 25 | `kernel/drivers/video/` |
-| `virtio` | 8 | `kernel/drivers/virtio/` |
+| `virtio` | 9 | `kernel/drivers/virtio/` |
 <!-- /AUTO:driver_list -->
 
 _The driver inventory above is auto-synced by `docs/sync-wiki.sh sync`

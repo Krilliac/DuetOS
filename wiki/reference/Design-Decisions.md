@@ -9150,3 +9150,47 @@ endpoint.
   (LE scan/connect), SMP pairing, GATT-HOGP discovery, and the
   general L2CAP-signalling / RFCOMM / SDP layers for non-keyboard
   profiles remain open and SMP-gated.
+
+## 2026-05-16 — virtio-input keyboard: reuse the PS/2 keymap, don't add an evdev table
+
+The `kInput` virtio class was detected-but-unprobed (a `// STUB:`
+in the fabric dispatch). virtio-input is the highest-leverage
+unclaimed class: every QEMU/cloud guest can attach
+`virtio-keyboard-pci`, and it has a clear in-kernel consumer (the
+shared input queue) and a clear test path.
+
+- **Decode reuses the active PS/2 keymap; no new evdev table.**
+  Linux evdev keycodes for the AT 101/104 block (1..0x58) are
+  numerically identical to PS/2 set-1 scancodes by historical
+  design. So `EvdevToKeyCode` indexes the *same*
+  `Ps2KeyboardActiveLowerMap()` / `UpperMap()` the PS/2 and
+  USB-HID decoders already use, with a small switch for the
+  specials that diverge (Esc, F1–F12, the extended nav block at
+  102–111). This is the deliberate alternative to shipping a
+  parallel ~110-entry evdev→char table: a second table would be
+  a second source of truth for keyboard layout and would silently
+  drift on a runtime layout switch. The next slice must extend the
+  switch / shared keymap, NOT add an evdev table. (CLAUDE.md rule
+  6 — one source of truth per resource.)
+- **eventq mirrors the proven virtio-net RX shape.** N device-
+  write descriptors, one `virtio_input_event` per buffer, drained
+  by a dedicated 10 ms-cadence `virtio-input-evt-poll` task,
+  re-posted per slot. No new queue primitive; the wire plumbing
+  is the verbatim virtio-net/console pattern. IRQ-driven eventq
+  is the next layer, exactly as it is for net/console.
+- **Keyboard only, single device.** The statusq (LED/FF) is not
+  installed (no consumer) and EV_REL/EV_ABS pointer events decode
+  to nothing — virtio-mouse/tablet is a separate slice into the
+  mouse injection path, GAP-marked. A second virtio-input
+  function is rejected, matching virtio-console's v0 single-device
+  stance. These are deliberate boundaries, not omissions.
+- **Validation model.** A pure capture-seam self-test
+  (`VirtioInputSelfTest`, `DUETOS_BOOT_SELFTEST`) drives synthetic
+  evdev records and asserts the decoded KeyEvents
+  (`[virtio-input] selftest pass`); a headless boot with
+  `-device virtio-keyboard-pci` confirms the real device-probe /
+  config-name / queue-setup / poll-task path attaches cleanly.
+- **Related roadmap track(s):** VirtIO per-class polish.
+  virtio-input keyboard graduates; pointer (EV_REL/EV_ABS) +
+  statusq + IRQ delivery remain open. The fabric `// STUB:` now
+  covers scsi/socket only.
