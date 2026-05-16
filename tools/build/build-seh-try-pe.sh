@@ -42,19 +42,32 @@ for lib in "${KERNEL32_LIB}" "${NTDLL_LIB}"; do
     fi
 done
 
-"${CLANG}" \
-    --target=x86_64-pc-windows-msvc \
-    -c \
-    -ffreestanding \
-    -nostdlib \
-    -fno-stack-protector \
-    -fno-builtin \
-    -mno-red-zone \
-    -fasync-exceptions \
-    -O2 \
-    -Wall -Wextra \
-    "${SRC}" \
-    -o "${OBJ}"
+# clang's -O1/-O2 optimizer + -fasync-exceptions wedges
+# nondeterministically on this TU (observed >6 min, 99% CPU, one
+# clang PID spinning in SEH codegen — sometimes a fresh process
+# gets unlucky, sometimes not). -O0 is deterministic and fast
+# across repeated runs and still emits the full .pdata/.xdata +
+# __C_specific_handler (the test needs no optimization). The
+# timeout+retry is belt-and-suspenders against any residual
+# nondeterministic stall: a fresh clang process re-rolls the
+# internal ordering and converges.
+CLANG_ARGS=(--target=x86_64-pc-windows-msvc -c -ffreestanding -nostdlib -fno-stack-protector -fno-builtin
+            -mno-red-zone -fasync-exceptions -O0 -Wall -Wextra "${SRC}" -o "${OBJ}")
+
+_seh_try_ok=0
+for _attempt in 1 2 3 4; do
+    rm -f "${OBJ}"
+    if timeout 120 "${CLANG}" "${CLANG_ARGS[@]}" 2>/dev/null && [[ -s "${OBJ}" ]]; then
+        _seh_try_ok=1
+        break
+    fi
+    echo "build-seh-try-pe.sh: clang attempt ${_attempt} stalled/failed — retrying" >&2
+done
+if [[ "${_seh_try_ok}" -ne 1 ]]; then
+    # Last attempt without the timeout wrapper so a genuine compile
+    # error surfaces with its diagnostic rather than being masked.
+    "${CLANG}" "${CLANG_ARGS[@]}"
+fi
 
 rm -f "${EXE}"
 "${LLD_LINK}" \

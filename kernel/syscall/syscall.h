@@ -2088,6 +2088,30 @@ enum SyscallNumber : u64
     // EXE↔kernel32↔ntdll boundary still resolves each frame's
     // `.pdata`. ABI stable from this commit.
     SYS_MODULE_BASE_BY_VA = 207,
+
+    // SYS_WAIT_ON_ADDRESS — address-keyed wait (the Win32
+    // WaitOnAddress primitive; the foundation V8/Chrome build
+    // SRW locks + condition variables on). Args: rdi = user VA of
+    // the watched word, rsi = the expected value (by value, low
+    // `size` bytes significant), rdx = size in bytes (1/2/4/8),
+    // r10 = timeout in ms (0xFFFFFFFF = infinite). The kernel
+    // compares *addr against the expected value under a lock; if
+    // they already differ it returns immediately, otherwise it
+    // blocks the caller on an address-hashed wait queue until a
+    // SYS_WAKE_BY_ADDRESS or the timeout. Returns 1 if woken or
+    // the value already differed (caller must re-check — spurious
+    // wakeups are allowed, exactly as Win32 documents), 0 on
+    // timeout. No cap gated. ABI stable from this commit.
+    SYS_WAIT_ON_ADDRESS = 208,
+
+    // SYS_WAKE_BY_ADDRESS — wake waiters parked on a VA via
+    // SYS_WAIT_ON_ADDRESS. Args: rdi = user VA, rsi = 0 for
+    // WakeByAddressSingle (best effort), 1 for WakeByAddressAll.
+    // The kernel wakes the waiters in the address's hash bucket;
+    // each re-checks its watched word and re-waits if unchanged,
+    // so a bucket collision is at worst a spurious wakeup, never a
+    // lost one. No cap gated. ABI stable from this commit.
+    SYS_WAKE_BY_ADDRESS = 209,
 };
 
 // Stable bit assignments for SYS_COMPAT_QUERY's return value.

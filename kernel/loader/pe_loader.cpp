@@ -1535,6 +1535,73 @@ bool TryResolveViaPreloadedDllsByOrdinal(const char* dll_name, u32 ordinal, cons
     return TryResolveViaPreloadedDllsByOrdinalImpl(dll_name, ordinal, dlls, count, /*depth=*/0, out_va);
 }
 
+// True if `dll_name` is a Windows API-set contract name —
+// "api-ms-win-..." or "ext-ms-win-..." (case-insensitive). These
+// are not real DLLs: they are name contracts whose implementation
+// lives in one of the base DLLs the loader already preloads
+// (kernel32 / kernelbase / ntdll / ...). mingw's import libs
+// (e.g. -lsynchronization) emit imports against these contract
+// names for modern APIs (WaitOnAddress, condition variables, …),
+// and Chrome links the same way.
+bool IsApiSetContract(const char* dll_name)
+{
+    if (dll_name == nullptr)
+        return false;
+    auto lc = [](char c) -> char { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c; };
+    const char* a = "api-ms-win-";
+    const char* e = "ext-ms-win-";
+    bool ma = true, me = true;
+    for (u64 i = 0; a[i] != '\0'; ++i)
+    {
+        if (lc(dll_name[i]) != a[i])
+        {
+            ma = false;
+            break;
+        }
+    }
+    if (ma)
+        return true;
+    for (u64 i = 0; e[i] != '\0'; ++i)
+    {
+        if (lc(dll_name[i]) != e[i])
+        {
+            me = false;
+            break;
+        }
+    }
+    return me;
+}
+
+// Resolve `fn_name` by NAME across every preloaded DLL, ignoring
+// the (contract) DLL name. This is the api-set host-resolution
+// model: the contract names a function, the host is whichever
+// preloaded base DLL exports it. First match wins — for the
+// api-set surface that is unambiguous in practice (a given
+// contract function is exported by exactly one base DLL we
+// preload). Forwarders are chased through the normal path.
+//
+// GAP: "first preloaded export by name" is a heuristic, not a
+// real api-set schema. If two preloaded base DLLs ever export the
+// same name with different semantics this could mis-host;
+// revisit with a real api-set map if that collision shows up.
+bool TryResolveViaPreloadedDllsAnyName(const char* fn_name, const DllImage* dlls, u64 count, u64* out_va)
+{
+    if (fn_name == nullptr || dlls == nullptr || count == 0 || out_va == nullptr)
+        return false;
+    for (u64 i = 0; i < count; ++i)
+    {
+        const DllImage& img = dlls[i];
+        if (!img.has_exports)
+            continue;
+        const char* host = PeExportsDllName(img.exports);
+        if (host == nullptr)
+            continue;
+        if (TryResolveViaPreloadedDllsImpl(host, fn_name, dlls, count, /*depth=*/0, out_va))
+            return true;
+    }
+    return false;
+}
+
 bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm::AddressSpace* as,
                     const DllImage* preloaded_dlls, u64 preloaded_dll_count)
 {
@@ -1690,11 +1757,30 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             //
             // For ordinal imports we ask the EAT directly; the
             // flat stub table is name-keyed and won't match.
-            const bool resolved_via_dll =
+            bool resolved_via_dll =
                 is_ordinal_import
                     ? TryResolveViaPreloadedDllsByOrdinal(dll_name, import_ordinal, preloaded_dlls, preloaded_dll_count,
                                                           &stub_va)
                     : TryResolveViaPreloadedDlls(dll_name, fn_name, preloaded_dlls, preloaded_dll_count, &stub_va);
+            // API-set fallback: an "api-ms-win-*" / "ext-ms-win-*"
+            // import names a contract, not a real DLL, so the exact
+            // (dll,fn) match above misses. Resolve the function by
+            // name against whichever preloaded base DLL hosts it
+            // (kernel32 / kernelbase / ntdll / …). This is how
+            // modern APIs (WaitOnAddress, condition variables, …)
+            // — and Chrome — bind.
+            if (!resolved_via_dll && !is_ordinal_import && IsApiSetContract(dll_name))
+            {
+                if (TryResolveViaPreloadedDllsAnyName(fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
+                {
+                    resolved_via_dll = true;
+                    SerialWrite("[pe-resolve] via-apiset ");
+                    SerialWrite(dll_name);
+                    SerialWrite("!");
+                    SerialWrite(fn_name);
+                    SerialWrite("\n");
+                }
+            }
             if (resolved_via_dll)
             {
                 SerialWrite("[pe-resolve] via-dll ");

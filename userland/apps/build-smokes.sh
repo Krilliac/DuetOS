@@ -44,6 +44,7 @@ declare -A APPS=(
     [browser_pe]="-lkernel32 -lwininet"
     [tls_pe]="-lkernel32"
     [seh_pe]="-lkernel32 -lntdll"
+    [sync_smoke]="-lkernel32 -lsynchronization"
     [crypto_smoke]="-lkernel32 -lbcrypt -ladvapi32"
     [paths_smoke]="-lkernel32 -lshlwapi"
     [time_smoke]="-lkernel32 -lwinmm"

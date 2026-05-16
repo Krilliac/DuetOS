@@ -1104,6 +1104,47 @@ Two things shaped the slice:
   it clang silently elides `__try` over faults and emits no unwind
   data. C++ EH (`__CxxFrameHandler*`) is still a separate slice.
 
+## Phase 6.18 — Win32 synchronization + api-set host resolution (2026-05-16)
+
+The first concrete Win10-API-breadth slice toward real Chrome. V8
+and Chrome's thread pools are built on `WaitOnAddress` + condition
+variables; DuetOS had SRW locks but no condition variables, no
+`WaitOnAddress`, and the explicit `InitOnce` form was a no-op
+thunk. This slice put a real futex underneath all of it: the
+kernel gained `SYS_WAIT_ON_ADDRESS` / `SYS_WAKE_BY_ADDRESS`
+(`kernel/subsystems/win32/waitaddr_syscall.cpp`) — address-hashed
+wait queues where a bucket collision is at worst a spurious
+wakeup, never a lost one (the wake side wakes the whole bucket and
+each waiter re-checks its own word). Userland `kernel32` got real
+`WaitOnAddress` / `WakeByAddress*`, the condition-variable family
+(sequence-counter algorithm: the sleeper samples the sequence
+under the lock before releasing, so a wake in the gap returns
+immediately), and a real `InitOnceBeginInitialize` /
+`InitOnceComplete` state machine.
+
+The interesting blocker was binding. mingw's `-lsynchronization`
+(and Chrome) import these not from `kernel32.dll` but from the
+API-set contract `api-ms-win-core-synch-l1-2-0.dll`, which the
+loader had no way to resolve — there is no such DLL. The fix is
+the api-set host resolver in `pe_loader.cpp`: an `api-ms-win-*` /
+`ext-ms-win-*` import is a *name contract*, so the function is
+resolved by name against whichever preloaded base DLL (kernel32 /
+kernelbase / ntdll / …) actually exports it. That single change
+unblocks the whole modern synch contract surface for Chrome, not
+just these functions — the boot log now shows
+`[pe-resolve] via-apiset api-ms-win-core-synch-l1-2-0.dll!WaitOnAddress`.
+
+Two build-robustness lessons landed alongside: clang's `-O1`/`-O2`
+optimizer + `-fasync-exceptions` wedges *nondeterministically* on
+`seh_try_pe.c` (one clang PID spinning 99% CPU for minutes in SEH
+codegen — sometimes a fresh process is unlucky, sometimes not), so
+that build dropped to `-O0` (deterministic, fast, same SEH output)
+with a timeout+retry guard. Verified by `userland/apps/sync_smoke`
+(`smoke=pe-hello`): a cross-thread `CONDITION_VARIABLE` +
+`CRITICAL_SECTION` producer/consumer, a `WaitOnAddress` /
+`WakeByAddressSingle` handshake, and the two-call `InitOnce` all
+PASS, with zero SEH or browser regression.
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,
