@@ -1,11 +1,13 @@
 #include "arch/x86_64/timer.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/ioapic.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
 
+#include "acpi/acpi.h"
 #include "core/panic.h"
 #include "debug/probes.h"
 #include "diag/boot_observe.h"
@@ -46,6 +48,15 @@ constexpr u16 kPitGatePort = 0x61;
 constexpr u8 kPitChan2Mode0 = 0xB0; // chan 2 | lobyte/hibyte | mode 0 | binary
 constexpr u8 kPitGateOut2Mask = 1U << 5;
 
+// Channel 0 — the PIT-tick-fallback source (see
+// TimerVerifyDeliveryOrFallback). Channel 0's OUT is hardwired to
+// ISA IRQ 0; no gate port. Mode 3 (square wave) is the conventional
+// periodic-tick mode. The calibration path above uses channel 2 in
+// mode 0 and never touches channel 0, so there is no conflict.
+constexpr u16 kPitChannel0Port = 0x40;
+constexpr u8 kPitChan0Mode3 = 0x36;                                         // chan 0 | lobyte/hibyte | mode 3 | binary
+constexpr u16 kPitCh0Divisor = static_cast<u16>(kPitHz / kTickFrequencyHz); // ~11931 @ 100 Hz
+
 // Single-CPU world: the IRQ handler runs on the same core as any reader,
 // so a plain u64 is fine — 8-byte loads are atomic on x86_64 and the
 // handler can't race with itself. SMP bring-up will swap this for
@@ -60,6 +71,14 @@ constexpr u8 kPitGateOut2Mask = 1U << 5;
 // observing the fresh value across loop iterations.
 constinit volatile u64 g_ticks = 0;
 constinit u64 g_lapic_ticks_per_period = 0;
+
+// Set true by TimerVerifyDeliveryOrFallback when the LAPIC timer is
+// armed but its IRQ is never delivered (observed under VirtualBox:
+// the timer counts down but the underflow interrupt is not raised),
+// and the scheduler tick has been switched to the IOAPIC-routed PIT
+// channel-0 periodic source instead. Read by LapicTimerStartOnCurrent
+// to avoid arming a known-dead LVT on APs.
+constinit bool g_pit_fallback_active = false;
 
 // Init-wedge watchdog state. The timer IRQ samples the running serial
 // byte count at every 5 s heartbeat and compares to the previous
@@ -293,6 +312,41 @@ u32 CalibrateLapicTimer()
     return 0xFFFFFFFFU - residual;
 }
 
+// Switch the scheduler tick off the (non-delivering) LAPIC timer and
+// onto PIT channel 0 in periodic mode, routed through the IOAPIC as
+// ISA IRQ 0 to kTimerVector — the SAME vector TimerHandler is already
+// installed on (TimerInit's IrqInstall), so the handler, LAPIC EOI,
+// and preemption path in TrapDispatch are entirely unchanged; only
+// the interrupt *source* differs. Order matters: mask the LVT first
+// so the two sources can't both target kTimerVector during the
+// switch (on the VBox failure path the LVT never delivers anyway,
+// but stay correct for any platform).
+void StartPitPeriodicTickFallback()
+{
+    // 1. Silence the LAPIC timer LVT (it was counting but never
+    //    delivering; mask it so it's unambiguously not a source).
+    LapicWrite(kLapicRegLvtTimer, kLvtTimerMaskBit | kTimerVector);
+
+    // 2. Program PIT channel 0: mode 3 (square wave), lobyte then
+    //    hibyte. Writing the high byte commits the count and starts
+    //    periodic counting; OUT0 is hardwired to ISA IRQ 0.
+    Outb(kPitControlPort, kPitChan0Mode3);
+    Outb(kPitChannel0Port, static_cast<u8>(kPitCh0Divisor & 0xFF));
+    Outb(kPitChannel0Port, static_cast<u8>((kPitCh0Divisor >> 8) & 0xFF));
+
+    // 3. Route ISA IRQ 0 through the IOAPIC to kTimerVector. Passing
+    //    isa_irq=0 lets IoApicRoute honour any MADT "IRQ0→GSI2"
+    //    override and pick the right polarity/trigger; it unmasks the
+    //    pin itself. Same recipe ps2mouse uses for ISA IRQ 12.
+    const u32 gsi = acpi::IsaIrqToGsi(0);
+    const u8 bsp_id = static_cast<u8>(LapicRead(kLapicRegId) >> 24);
+    IoApicRoute(gsi, kTimerVector, bsp_id, /*isa_irq=*/0);
+
+    g_pit_fallback_active = true;
+    KLOG_WARN("arch/timer", "LAPIC timer IRQ not delivered in verify window — "
+                            "scheduler tick switched to IOAPIC-routed PIT ch0 periodic");
+}
+
 } // namespace
 
 void TimerInit()
@@ -326,6 +380,67 @@ void TimerInit()
     core::LogWithValue(core::LogLevel::Info, "arch/timer", "periodic LAPIC timer armed, vector", kTimerVector);
 }
 
+void TimerVerifyDeliveryOrFallback()
+{
+    // Must run with interrupts LIVE and AFTER TimerInit armed the
+    // LAPIC timer (TimerInit itself runs IRQs-off during calibration,
+    // so it cannot observe delivery). Snapshot the tick counter, wait
+    // a fixed wall window, and re-check: if it never advanced, the
+    // LAPIC timer is armed-but-not-delivering (VirtualBox) and we
+    // switch the tick to the PIT. No-op on QEMU / real hardware.
+    //
+    // The wall reference is PIT channel 2 (mode-0 one-shot), NOT the
+    // TSC. Under QEMU TCG the TSC is decoupled from wall time, so a
+    // TSC-cycle window can elapse in far less than one 10 ms tick
+    // period and produce a FALSE fallback on a perfectly healthy
+    // timer. The PIT is the one clock proven reliable on every
+    // platform we run — LAPIC calibration already depends on it and
+    // succeeds on both QEMU and VirtualBox — so it is the correct
+    // independent reference here. `WaitPitTerminal` keeps its own
+    // large TSC backstop so a (separately-handled) absent PIT can't
+    // hang this.
+    constexpr u64 kRflagsIf = 1ULL << 9;
+    if ((ReadRflags() & kRflagsIf) == 0)
+    {
+        // Defensive: the documented call site runs with IRQs on, but
+        // a dead timer is unrecoverable if we also spin with IF=0.
+        Sti();
+    }
+
+    const u64 ticks_before = g_ticks;
+
+    // Arm PIT channel 2 (mode 0, one-shot) for ~50 ms — five 100 Hz
+    // tick periods, comfortably long for a delivering timer to bump
+    // g_ticks at least once. 50 ms = 59659 PIT counts, inside the
+    // 16-bit channel. Same gate/control sequence CalibrateLapicTimer
+    // uses; calibration has long finished so channel 2 is free.
+    constexpr u16 kVerifyPitCount = static_cast<u16>((kPitHz * 50) / 1000); // ~50 ms
+    const u8 gate = static_cast<u8>((Inb(kPitGatePort) & 0xFC) | 0x01);
+    Outb(kPitGatePort, gate);
+    Outb(kPitControlPort, kPitChan2Mode0);
+    Outb(kPitChannel2Port, static_cast<u8>(kVerifyPitCount & 0xFF));
+    Outb(kPitChannel2Port, static_cast<u8>((kVerifyPitCount >> 8) & 0xFF));
+
+    // Block ~50 ms wall. On the healthy path the LAPIC timer fires
+    // during this window (and may even preempt us — fine, the
+    // post-wait g_ticks check still observes the advance). On the
+    // failing path there is no preemption, so this returns after the
+    // full PIT countdown with g_ticks untouched.
+    (void)WaitPitTerminal();
+
+    if (g_ticks != ticks_before)
+    {
+        // LAPIC timer delivers — common path. Silent at Info; one
+        // Debug line for driver-bringup tracing.
+        core::LogWithValue(core::LogLevel::Debug, "arch/timer", "LAPIC timer delivery verified, ticks", g_ticks);
+        return;
+    }
+
+    // g_ticks never moved across the whole window: the armed LAPIC
+    // timer is not delivering its IRQ. Switch to the PIT tick source.
+    StartPitPeriodicTickFallback();
+}
+
 u64 TimerTicks()
 {
     return g_ticks;
@@ -333,6 +448,20 @@ u64 TimerTicks()
 
 void LapicTimerStartOnCurrent()
 {
+    // GAP: SMP — if the BSP fell back to the IOAPIC-routed PIT tick
+    // (g_pit_fallback_active), arming this AP's LAPIC timer LVT is
+    // pointless: on this platform the LVT counts but never delivers,
+    // and the PIT IRQ0 is routed only to the BSP's LAPIC id. APs
+    // would get no tick from either source. DuetOS boots 1 CPU
+    // today, so this is currently unreachable; a real SMP bring-up
+    // needs either (a) an IPI-broadcast of the BSP's PIT-derived
+    // tick to APs, or (b) a per-AP TSC-deadline timer. Until then,
+    // don't arm a known-dead LVT — warn once and return.
+    if (g_pit_fallback_active)
+    {
+        KLOG_ONCE_WARN("arch/timer", "AP LAPIC timer skipped — BSP is on PIT-tick fallback (SMP tick GAP)");
+        return;
+    }
     KASSERT(g_lapic_ticks_per_period != 0, "arch/timer", "LapicTimerStartOnCurrent before TimerInit");
     const u64 ticks_per_kernel_tick = (g_lapic_ticks_per_period * 1000) / (kCalibrationMs * kTickFrequencyHz);
     LapicWrite(kLapicRegTimerDivide, kLapicTimerDivBy16);
