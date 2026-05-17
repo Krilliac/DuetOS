@@ -145,6 +145,12 @@ class SerialLineGuard
 
   private:
     duetos::u64 m_flags;
+    // True only when THIS guard actually acquired g_serial_lock. A
+    // guard constructed while serial output is already in progress on
+    // this CPU (outer SerialLineGuard / SerialWrite* critical section,
+    // or panic raw-mode) is a re-entrant no-op — it must NOT acquire
+    // (self-deadlock) and its destructor must NOT release/clear.
+    bool m_owned;
 };
 
 } // namespace duetos::arch
