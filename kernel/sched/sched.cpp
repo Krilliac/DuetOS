@@ -578,6 +578,13 @@ void RunqueuePushOn(cpu::PerCpu* target, Task* t)
     t->next = nullptr;
     Task*& head = (t->priority == TaskPriority::Idle) ? RunqHeadIdle(target) : RunqHeadNormal(target);
     Task*& tail = (t->priority == TaskPriority::Idle) ? RunqTailIdle(target) : RunqTailNormal(target);
+    // Singly-linked-list invariant: head and tail are null together
+    // or non-null together. If only one is null the table is already
+    // corrupt — taking the `tail == nullptr` branch below would
+    // orphan the existing chain (every queued Task silently lost).
+    // O(1), debug-only: the always-on KASSERTs above already cover
+    // the security-critical bad-task cases.
+    DEBUG_ASSERT((head == nullptr) == (tail == nullptr), "sched", "runqueue head/tail nullness disagree");
     if (tail == nullptr)
     {
         head = tail = t;

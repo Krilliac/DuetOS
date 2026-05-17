@@ -435,6 +435,15 @@ namespace
 // step.
 void UnmapUserPageByIndex(AddressSpace* as, u16 idx)
 {
+    // Precondition the header comment describes but nothing
+    // enforced: idx must address a live row. With region_count==0
+    // the `u16(region_count - 1)` below wraps to 0xFFFF and the
+    // compaction line writes 64 KiB past the table — silent heap
+    // corruption. Always-on (not DEBUG_ASSERT): an OOB write into
+    // the region table is a stability/security hole.
+    KASSERT(as->region_count > 0, "mm/as", "UnmapUserPageByIndex on empty region table");
+    KASSERT(idx < as->region_count, "mm/as", "UnmapUserPageByIndex idx out of range");
+
     const u64 virt = as->regions[idx].vaddr;
     const PhysAddr frame = as->regions[idx].frame;
 
