@@ -376,6 +376,21 @@ QEMU_ARGS=(
     # `-device e1000` would fall back to polling.
     -netdev   "user,id=net0"
     -device   "e1000e,netdev=net0,mac=52:54:00:12:34:56"
+    # virtio transport coverage. Without at least one virtio-pci
+    # device QEMU never instantiates the virtio bus, so the whole
+    # virtio driver tree (transport + rng/blk/net/balloon/console/
+    # input probes) probes nothing and rots untested. virtio-rng
+    # needs no backing file and exercises the single-queue
+    # negotiate -> queue-setup -> DRIVER_OK -> entropy-pull path;
+    # virtio-balloon (also file-less) exercises the dual-queue
+    # DRIVER_OK path. Neither collides with the nvme/ahci/e1000e
+    # devices above.
+    # disable-legacy=on forces the modern (virtio-1.0,
+    # non-transitional) PCI presentation; our transport is
+    # modern-only (requires VIRTIO_F_VERSION_1) and skips
+    # transitional device IDs (0x1000-0x103f).
+    -device   "virtio-rng-pci,disable-legacy=on"
+    -device   "virtio-balloon-pci,disable-legacy=on"
     "${UEFI_ARGS[@]}"
     "${BOOT_SOURCE[@]}"
 )
