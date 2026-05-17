@@ -292,15 +292,19 @@ CPU_MODEL="${DUETOS_CPU:-max}"
 # Optional knobs for stress testing the live kernel:
 #   DUETOS_RAM   — sets `-m` (default 512M). Useful for forcing the
 #                  memory stress driver to hit the heap ceiling early.
-#   DUETOS_SMP   — sets `-smp` (default unset = single-CPU). On a
-#                  multi-CPU build, raising this exercises the per-CPU
-#                  runqueues + APIC routing under sustained load.
+#   DUETOS_SMP   — sets `-smp` (default 4). Every boot now brings
+#                  up APs and exercises the per-CPU runqueues +
+#                  work-stealing + reschedule-IPI paths; without a
+#                  multi-vCPU guest QEMU never instantiates them and
+#                  the whole SMP stack rots untested (the serial
+#                  path is spinlock-protected, all boot self-tests
+#                  pass under SMP, and structural sentinels stay
+#                  intact, so this is safe as the default). Set
+#                  DUETOS_SMP=1 to force a single-CPU regression
+#                  boot.
 RAM_SIZE="${DUETOS_RAM:-512M}"
 
-SMP_ARGS=()
-if [[ -n "${DUETOS_SMP:-}" ]]; then
-    SMP_ARGS=(-smp "${DUETOS_SMP}")
-fi
+SMP_ARGS=(-smp "${DUETOS_SMP:-4}")
 
 # QMP control socket. A host-side unix socket, fully orthogonal to
 # COM1 (-serial stdio), COM2 (the GDB transport), and the
