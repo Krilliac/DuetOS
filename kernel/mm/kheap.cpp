@@ -233,6 +233,16 @@ void FreelistInsertAndCoalesce(ChunkHeader* chunk)
         prev = cursor;
     }
 
+    // Address-ordered-freelist invariant, in O(1) local form:
+    // prev < chunk < chunk->next. The entire coalescing scheme
+    // (and the insertion walk itself) assumes strict address
+    // ordering; a mis-ordered insert silently corrupts the heap.
+    // Debug-only — the always-on magic checks below catch the
+    // corruption that ordering breakage usually rides in on.
+    DEBUG_ASSERT(prev == nullptr || prev < chunk, "mm/kheap", "freelist not address-ordered (prev >= chunk)");
+    DEBUG_ASSERT(chunk->next == nullptr || chunk < chunk->next, "mm/kheap",
+                 "freelist not address-ordered (chunk >= next)");
+
     // Coalesce forward (chunk + next). Verify magic before folding —
     // if the "free" successor got its magic clobbered we'd silently
     // absorb corrupt bytes into `chunk`'s size.

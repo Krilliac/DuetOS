@@ -135,6 +135,12 @@ void TearDownStackPages(u32 slot_index)
 // Returns false if the freelist is empty.
 bool FreelistPop(u32* out_slot)
 {
+    // Documented-but-unenforced precondition (comment above). A
+    // missed g_kstack_lock races a concurrent Pop/Push and hands
+    // the SAME slot to two callers — two threads sharing one kernel
+    // stack, silent and catastrophic. Same kind/severity as the
+    // sched runqueue-funnel guards: debug-panic / release-warn.
+    sync::SpinLockAssertHeld(g_kstack_lock);
     if (g_free_count == 0)
     {
         return false;
@@ -147,6 +153,9 @@ bool FreelistPop(u32* out_slot)
 // Push a slot index onto the freelist. Caller holds g_kstack_lock.
 void FreelistPush(u32 slot_index)
 {
+    // Same g_kstack_lock precondition as FreelistPop — an unlocked
+    // push races a concurrent pop and corrupts g_free_count.
+    sync::SpinLockAssertHeld(g_kstack_lock);
     if (g_free_count >= kKernelStackMaxSlots)
     {
         PanicKstack("freelist overflow (double-free?)", g_free_count);

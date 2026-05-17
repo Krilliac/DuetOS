@@ -567,6 +567,12 @@ cpu::PerCpu* TargetPerCpuFor(Task* t)
 
 void RunqueuePushOn(cpu::PerCpu* target, Task* t)
 {
+    // Documented-but-unchecked precondition (see the "Caller holds
+    // g_sched_lock" block above): every enqueue funnels here, so a
+    // caller that forgot the lock corrupts a per-CPU runqueue
+    // race-silently. Debug-panic / release-warn — a missed lock is
+    // a development-time concurrency bug, not a security hole.
+    sync::SpinLockAssertHeld(g_sched_lock);
     // A null task on the runqueue would panic Schedule() later with
     // a less informative call site. Catch the bad caller here.
     KASSERT(t != nullptr, "sched", "RunqueuePush(nullptr)");
@@ -578,6 +584,13 @@ void RunqueuePushOn(cpu::PerCpu* target, Task* t)
     t->next = nullptr;
     Task*& head = (t->priority == TaskPriority::Idle) ? RunqHeadIdle(target) : RunqHeadNormal(target);
     Task*& tail = (t->priority == TaskPriority::Idle) ? RunqTailIdle(target) : RunqTailNormal(target);
+    // Singly-linked-list invariant: head and tail are null together
+    // or non-null together. If only one is null the table is already
+    // corrupt — taking the `tail == nullptr` branch below would
+    // orphan the existing chain (every queued Task silently lost).
+    // O(1), debug-only: the always-on KASSERTs above already cover
+    // the security-critical bad-task cases.
+    DEBUG_ASSERT((head == nullptr) == (tail == nullptr), "sched", "runqueue head/tail nullness disagree");
     if (tail == nullptr)
     {
         head = tail = t;
@@ -722,6 +735,9 @@ template <typename F> bool ForEachRunqueueTask(F&& fn)
 // CPU has no work and falls through to its idle task.
 Task* RunqueuePop()
 {
+    // Dequeue funnel — same documented g_sched_lock precondition as
+    // RunqueuePushOn; an unlocked pop races every concurrent push.
+    sync::SpinLockAssertHeld(g_sched_lock);
     cpu::PerCpu* p = cpu::CurrentCpu();
     Task* t = RunqHeadNormal(p);
     if (t != nullptr)
@@ -835,6 +851,10 @@ bool SuspendedListRemove(Task* t)
 // fallback iteration order to avoid AB/BA deadlock.
 Task* StealNormalFromPeer()
 {
+    // Cross-CPU runqueue mutator: reaches into a peer CPU's queue.
+    // The "Caller must hold g_sched_lock" contract above is what
+    // makes that safe today; enforce it rather than just document.
+    sync::SpinLockAssertHeld(g_sched_lock);
     cpu::PerCpu* self = cpu::CurrentCpu();
     if (self == nullptr)
     {
@@ -965,6 +985,9 @@ u32 PickBalanceVictim(u32 self_cpu, u16 self_cluster, u32 self_len)
 // update) stay identical to the existing steal path.
 Task* BalancePullOnce(cpu::PerCpu* self)
 {
+    // Cross-CPU runqueue mutator (mirrors StealNormalFromPeer's
+    // pop/push contract). Same documented g_sched_lock precondition.
+    sync::SpinLockAssertHeld(g_sched_lock);
     if (self == nullptr)
     {
         return nullptr;
@@ -3609,6 +3632,10 @@ namespace
 // to splice the mutex hand-off + self-enqueue atomically.
 Task* WaitQueueWakeOneLocked(WaitQueue* wq)
 {
+    // "Caller must hold g_sched_lock" (above): this does a runqueue
+    // push as part of the wake, so an unlocked call races the
+    // scheduler. The _Locked suffix is the contract — assert it.
+    sync::SpinLockAssertHeld(g_sched_lock);
     Task* t = wq->head;
     if (t == nullptr)
     {
@@ -3707,6 +3734,24 @@ void MutexLock(Mutex* m)
     ::duetos::sync::LockdepBeforeAcquire(m->class_id);
 
     arch::Cli();
+    // Self-deadlock guard (the owning-re-entry check sched.h's Mutex
+    // doc explicitly asks for). Recursion is unsupported: if the
+    // caller already owns `m`, the else-branch below blocks it on
+    // m->waiters waiting for an unlock that only it could issue —
+    // that task never runs again, and anything waiting on it cascades
+    // into a system-wide hang. Always-on (KASSERT, like the null
+    // check above): an unrecoverable hang is catastrophic in release
+    // too, so a panic banner is strictly better in every build. The
+    // read is race-free for the case it fires on — only the running
+    // task can equal Current(), and IRQs are now off.
+    // Predicate is owner==nullptr || owner!=Current — NOT
+    // owner!=Current alone: during early boot Current() is nullptr
+    // and the uncontended owner is also nullptr, so the naive form
+    // would panic every pre-scheduler mutex acquire (slab uses a
+    // sched::Mutex before tasks exist). A self-deadlock requires a
+    // non-null owner equal to the running task.
+    KASSERT(m->owner == nullptr || m->owner != Current(), "sched",
+            "self-deadlock: MutexLock of a mutex this task already owns");
     if (m->owner == nullptr)
     {
         // Fast path: uncontended acquire.
@@ -3765,6 +3810,16 @@ bool MutexLockTimed(Mutex* m, u64 ticks)
     ::duetos::sync::LockdepBeforeAcquire(m->class_id);
 
     arch::Cli();
+    // Same self-deadlock guard as MutexLock: an owner that re-enters
+    // here skips the fast path and blocks on m->waiters waiting for
+    // its own unlock — best case it burns the full timeout and then
+    // wrongly returns false for a mutex it actually holds. Recursion
+    // is unsupported (sched.h Mutex doc); make the contract uniform
+    // across every blocking acquire entry point.
+    // owner==nullptr || owner!=Current — see the MutexLock guard for
+    // why the nullptr disjunct is load-bearing (early-boot Current()).
+    KASSERT(m->owner == nullptr || m->owner != Current(), "sched",
+            "self-deadlock: MutexLockTimed of a mutex this task already owns");
     if (m->owner == nullptr)
     {
         // Fast path: uncontended acquire.

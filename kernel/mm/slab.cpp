@@ -8,10 +8,14 @@
  *   - the slab chain (head pointer per cache),
  *   - the boot self-test.
  *
- * State invariants (held under `c->lock`):
+ * State invariants (checked by SlabCheckInvariants at quiescent
+ * points — self-test and post-magazine-drain in Destroy):
  *   - obj_in_use + obj_free == slabs * objects_per_slab
  *   - alloc_count >= free_count (lifetime monotonic)
- *   - free_head reachable in N hops where N == obj_free
+ *   - (global freelist hops) + (sum of per-CPU magazine counts)
+ *     == obj_free. NOTE: obj_free spans BOTH the global freelist
+ *     and the magazines — the pre-magazine "free_head reachable
+ *     in obj_free hops" form was stale and is not the invariant.
  *
  * The freelist is intrusive: a free object's first 8 bytes hold
  * the `next` pointer (cast through SlabFreeNode). This is safe
@@ -30,6 +34,7 @@
 #include "mm/kheap.h"
 #include "mm/poison.h"
 #include "sched/sched.h"
+#include "util/debug_assert.h"
 #include "util/saturating.h"
 #include "util/string.h"
 #include "util/types.h"
@@ -211,6 +216,50 @@ SlabFreeNode* PopGlobalFreelist(SlabCache* c)
     return node;
 }
 
+// Verify the three documented state invariants. Debug-only:
+// compiled out in release (DEBUG_ASSERT). MUST be called with
+// c->lock held AND at a quiescent point — no concurrent
+// fast-path magazine activity — because the fast path mutates
+// the counters and magazines outside c->lock. The self-test and
+// the post-drain leg of SlabCacheDestroy satisfy both.
+void SlabCheckInvariants(SlabCache* c)
+{
+    // [[maybe_unused]]: in release builds DEBUG_ASSERT compiles
+    // out, leaving these loads (and the freelist walk below)
+    // unused — the optimizer then DCEs the whole body, but the
+    // attribute keeps -Werror=unused quiet in the meantime.
+    [[maybe_unused]] const u64 in_use = __atomic_load_n(&c->obj_in_use, __ATOMIC_RELAXED);
+    [[maybe_unused]] const u64 free = __atomic_load_n(&c->obj_free, __ATOMIC_RELAXED);
+    [[maybe_unused]] const u64 slabs = __atomic_load_n(&c->slabs, __ATOMIC_RELAXED);
+    [[maybe_unused]] const u64 allocs = __atomic_load_n(&c->alloc_count, __ATOMIC_RELAXED);
+    [[maybe_unused]] const u64 frees = __atomic_load_n(&c->free_count, __ATOMIC_RELAXED);
+
+    // (1) Conservation: every object carved into a slab is either
+    // in use or free; none vanish, none are double-counted.
+    DEBUG_ASSERT_VAL(in_use + free == slabs * c->objects_per_slab, "mm/slab",
+                     "conservation: in_use + free != slabs * per_slab", in_use + free);
+
+    // (2) Lifetime monotonicity: you cannot have freed more than
+    // you ever allocated.
+    DEBUG_ASSERT_VAL(allocs >= frees, "mm/slab", "lifetime: free_count > alloc_count", frees);
+
+    // (3) Free-object accounting: the global freelist plus every
+    // per-CPU magazine must hold exactly obj_free objects. Walk
+    // both. A short/long walk means a lost or duplicated slot —
+    // the lost-slot-collision class.
+    [[maybe_unused]] u64 reachable = 0;
+    for (SlabFreeNode* n = c->free_head; n != nullptr; n = n->next)
+    {
+        ++reachable;
+        DEBUG_ASSERT_VAL(reachable <= free, "mm/slab", "freelist longer than obj_free (cycle or leak)", reachable);
+    }
+    for (u32 cpu = 0; cpu < acpi::kMaxCpus; ++cpu)
+    {
+        reachable += c->magazines[cpu].count;
+    }
+    DEBUG_ASSERT_VAL(reachable == free, "mm/slab", "freelist+magazines != obj_free (lost slot)", reachable);
+}
+
 } // namespace
 
 SlabCache* SlabCacheCreate(const char* name, u32 obj_size, u32 alignment)
@@ -280,6 +329,10 @@ void SlabCacheDestroy(SlabCache* c)
             c->free_head = node;
         }
     }
+
+    // Magazines are now empty and the lock is held — a quiescent
+    // point where the full invariant set must hold.
+    SlabCheckInvariants(c);
 
     const u64 in_use = __atomic_load_n(&c->obj_in_use, __ATOMIC_RELAXED);
     KASSERT(in_use == 0, "slab", "Destroy with live allocations");
@@ -584,6 +637,13 @@ void SlabSelfTest()
         KASSERT(s.obj_in_use == 0, "slab", "self-test: in_use != 0 after drain");
         KASSERT(s.free_count == kAllocCount + 1, "slab", "self-test: free_count mismatch");
     }
+
+    // Single-threaded here: take the lock to satisfy the
+    // SlabCheckInvariants contract, then verify all three
+    // documented invariants hold after a full alloc/free cycle.
+    sched::MutexLock(&c->lock);
+    SlabCheckInvariants(c);
+    sched::MutexUnlock(&c->lock);
 
     SlabCacheDestroy(c);
     KLOG_INFO("slab", "self-test: passed");
