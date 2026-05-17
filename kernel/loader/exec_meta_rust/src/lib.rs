@@ -444,6 +444,22 @@ fn pe_validate_image(buf: &[u8], out: &mut DuetosPeImage) -> DuetosPeImageStatus
     out.entry_rva = load_u32_le(buf, opt + PE_OPT_OFF_ADDRESS_OF_ENTRY_POINT);
     out.image_size = load_u32_le(buf, opt + PE_OPT_OFF_SIZE_OF_IMAGE);
     out.number_of_rva_and_sizes = load_u32_le(buf, opt + n_rva_off);
+    // The data-directory array (NumberOfRvaAndSizes entries, 8 bytes
+    // each) is part of the optional header. The C++ ReadDataDir
+    // trusts `idx < number_of_rva_and_sizes` and reads
+    // opt + data_dir_offset + idx*8. Only opt_header_size >=
+    // n_rva_off+4 and opt_end <= file are enforced above — for a
+    // PE32+ with the minimal 112-byte optional header that bound
+    // ends exactly where the data-directory array begins, so a
+    // large NumberOfRvaAndSizes drives those reads past opt_end and
+    // off the end of the file (kernel OOB read). Require the
+    // declared array to fit inside the declared optional header,
+    // which opt_end already pins to the file buffer.
+    let dd_bytes = (out.number_of_rva_and_sizes as u64).saturating_mul(8);
+    let dd_end = (out.opt_base as u64) + (dd_off as u64) + dd_bytes;
+    if dd_end > opt_end {
+        return DuetosPeImageStatus::OptHeaderOutOfBounds;
+    }
     // ImageBase + SizeOfImage must fit in canonical low half — a
     // malicious PE with a kernel-half ImageBase would otherwise
     // drive AddressSpaceMapUserPage into PanicAs and DoS the kernel.
@@ -699,9 +715,21 @@ mod tests {
     #[test]
     fn pe_bad_machine_rejects() {
         let mut buf = make_min_pe();
-        buf[0x44..0x46].copy_from_slice(&0x014Cu16.to_le_bytes()); // i386
+        // ARM64 (0xAA64) — neither AMD64 nor i386, so the prefix
+        // walker must reject it. i386 used to live here but PE32
+        // (i386) execution landed and the validator now accepts it;
+        // see pe_i386_machine_accepted for the positive side.
+        buf[0x44..0x46].copy_from_slice(&0xAA64u16.to_le_bytes());
         let mut prefix = DuetosPePrefix::default();
         assert_eq!(pe_validate_prefix(&buf, &mut prefix), DuetosPePrefixStatus::BadMachine);
+    }
+
+    #[test]
+    fn pe_i386_machine_accepted() {
+        let mut buf = make_min_pe();
+        buf[0x44..0x46].copy_from_slice(&0x014Cu16.to_le_bytes()); // i386
+        let mut prefix = DuetosPePrefix::default();
+        assert_eq!(pe_validate_prefix(&buf, &mut prefix), DuetosPePrefixStatus::Ok);
     }
 
     #[test]
@@ -778,11 +806,14 @@ mod tests {
     }
 
     #[test]
-    fn pe_image_pe32_not_plus_rejects() {
+    fn pe_image_unknown_opt_magic_rejects() {
         let mut buf = make_min_pe_image();
         // OptionalHeader.Magic at opt_base = nt_base + 24 = 0x58.
-        // PE32 (not PE32+) magic is 0x010B.
-        buf[0x58..0x5A].copy_from_slice(&0x010Bu16.to_le_bytes());
+        // 0x0107 is the ROM-image magic — neither PE32 (0x010B) nor
+        // PE32+ (0x020B), so it must reject as NotPe32Plus. PE32
+        // itself is now accepted (i386 execution landed), so 0x010B
+        // no longer rejects here.
+        buf[0x58..0x5A].copy_from_slice(&0x0107u16.to_le_bytes());
         let mut image = DuetosPeImage::default();
         assert_eq!(pe_validate_image(&buf, &mut image), DuetosPeImageStatus::NotPe32Plus);
     }
@@ -844,6 +875,24 @@ mod tests {
         // SizeOfOptionalHeader at nt_base+4+16 = 0x54. Force <
         // NumberOfRvaAndSizes_offset+4 = 112.
         buf[0x54..0x56].copy_from_slice(&100u16.to_le_bytes());
+        let mut image = DuetosPeImage::default();
+        assert_eq!(
+            pe_validate_image(&buf, &mut image),
+            DuetosPeImageStatus::OptHeaderOutOfBounds
+        );
+    }
+
+    #[test]
+    fn pe_image_data_dir_array_past_opt_header_rejects() {
+        let mut buf = make_min_pe_image();
+        // opt_base = nt_base(0x40) + 4 + 20 = 0x58; NumberOfRvaAndSizes
+        // for PE32+ sits at opt_base + 108 = 0xC4. The fixture's
+        // opt_header_size is the minimal 112, so the declared
+        // data-directory array begins exactly at opt_end. A non-zero
+        // count therefore claims entries past the optional header /
+        // file — without the dd_end bound C++ ReadDataDir would read
+        // off the end of the buffer.
+        buf[0xC4..0xC8].copy_from_slice(&16u32.to_le_bytes());
         let mut image = DuetosPeImage::default();
         assert_eq!(
             pe_validate_image(&buf, &mut image),
