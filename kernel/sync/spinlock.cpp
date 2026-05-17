@@ -107,6 +107,57 @@ void HeldLocksPop(SpinLock& lock)
     p->held_locks_count = new_count;
 }
 
+// Raw-serial breadcrumb naming the self-deadlocked lock and BOTH
+// call sites, emitted just before the panic. core::Panic's
+// recursive-panic guard suppresses the rich dump precisely when the
+// panic path itself would need a lock (which is exactly the
+// self-deadlock case), so without this the operator gets only
+// "self-deadlock" with no lock identity, class, or RIPs — undebuggable
+// post-mortem. Raw serial, not klog: the klog sink and the symbol
+// resolver can themselves take spinlocks, and we are mid-deadlock.
+void EmitSelfDeadlockDiag(const SpinLock& lock, u64 recursive_rip)
+{
+    arch::SerialWrite("[spinlock] SELF-DEADLOCK lock=");
+    arch::SerialWriteHex(reinterpret_cast<u64>(&lock));
+    arch::SerialWrite(" class_id=");
+    arch::SerialWriteHex(lock.class_id);
+    arch::SerialWrite(" class=\"");
+    const char* cn = LockdepClassName(lock.class_id);
+    arch::SerialWrite((cn != nullptr) ? cn : "unclassified");
+    arch::SerialWrite("\" owner_cpu=");
+    arch::SerialWriteHex(lock.owner_cpu);
+    arch::SerialWrite(" recursive_acquire_rip=");
+    arch::SerialWriteHex(recursive_rip);
+
+    // Walk THIS CPU's held-locks stack for the RIP where the lock was
+    // originally acquired (the still-held instance we're colliding
+    // with). Same guards as HeldLocksPush — no PerCpu yet ⇒ skip.
+    u64 orig_rip = 0;
+    if (cpu::BspInstalled())
+    {
+        cpu::PerCpu* p = cpu::CurrentCpu();
+        if (p != nullptr)
+        {
+            u32 n = p->held_locks_count;
+            if (n > cpu::kPerCpuMaxHeldLocks)
+            {
+                n = cpu::kPerCpuMaxHeldLocks;
+            }
+            for (u32 i = 0; i < n; ++i)
+            {
+                if (p->held_locks[i] == &lock)
+                {
+                    orig_rip = p->held_lock_rips[i];
+                    break;
+                }
+            }
+        }
+    }
+    arch::SerialWrite(" original_acquire_rip=");
+    arch::SerialWriteHex(orig_rip);
+    arch::SerialWrite("\n");
+}
+
 } // namespace
 
 // True iff the lock is currently held by SOME CPU. A ticket lock
@@ -153,6 +204,7 @@ IrqFlags SpinLockAcquire(SpinLock& lock)
     // instead of panicking.
     if (HeldBySelf(lock))
     {
+        EmitSelfDeadlockDiag(lock, reinterpret_cast<u64>(__builtin_return_address(0)));
         PanicSpinlock("self-deadlock: SpinLockAcquire of a lock this CPU already holds");
     }
 
