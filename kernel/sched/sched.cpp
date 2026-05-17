@@ -1841,7 +1841,8 @@ void Schedule()
     // top of SchedFinishTaskSwitch. The trailing kLockClassSched
     // entry (g_sched_lock, acquired by this Schedule()) rides
     // along and is balanced by the release in SchedFinishTaskSwitch.
-    prev->lockdep_held_depth = ::duetos::sync::LockdepHeldSnapshot(prev->lockdep_held, ::duetos::sync::kLockdepHeldMax);
+    prev->lockdep_held_depth =
+        ::duetos::sync::LockdepHeldSnapshot(prev->lockdep_held, ::duetos::sync::kLockdepHeldMax);
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, we're executing on a DIFFERENT task's
     // stack — whichever task got switched in to run us. The local
