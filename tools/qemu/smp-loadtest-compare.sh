@@ -39,9 +39,12 @@ run_one() {
     local csv="/tmp/smp-load-${smp}.csv"
     : > "$log"; : > "$csv"
 
-    # TCG boot bring-up dominates wall time; be generous so the
-    # kernel-time load window actually completes before the cap.
-    DUETOS_PRESET="$PRESET" DUETOS_SMP="$smp" DUETOS_TIMEOUT=$((SECS + 150)) \
+    # TCG boot bring-up dominates wall time, and emulating -smp 4
+    # multiplies it (4 vCPUs of guest instructions on the host's
+    # TCG threads), so the cap must clear the worst case (4-vCPU
+    # boot + the kernel-time load window expanded by the TCG
+    # slowdown factor), not just SECS.
+    DUETOS_PRESET="$PRESET" DUETOS_SMP="$smp" DUETOS_TIMEOUT=$((SECS * 40 + 200)) \
         tools/qemu/run-stress.sh cpu "$SECS" "$WORKERS" > "$log" 2>&1 &
     local outer=$!
 
