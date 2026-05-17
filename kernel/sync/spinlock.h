@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sync/lockdep.h"
+#include "util/result.h"
 #include "util/types.h"
 
 /*
@@ -106,6 +107,32 @@ void SpinLockRelease(SpinLock& lock, IrqFlags flags);
 /// top of a function that assumes a caller grabbed the lock.
 void SpinLockAssertHeld(const SpinLock& lock);
 
+/// Default spin budget for `SpinLockTryAcquireFor`. Sized for the
+/// "spinlocks are held briefly" contract above — long enough to ride
+/// out a short critical section on another CPU, short enough that a
+/// genuinely stuck lock fails fast instead of masking the bug.
+constexpr u32 kSpinTryDefaultSpins = 4096;
+
+/// Non-blocking acquire. Never spins and never panics: returns the
+/// same `IrqFlags` as `SpinLockAcquire` on success (pass it back to
+/// `SpinLockRelease` exactly as for a blocking acquire), or an error
+/// the caller can back off on instead of deadlocking:
+///   - `ErrorCode::Deadlock` — THIS CPU already holds the lock; a
+///     blocking acquire here would self-deadlock (and panic).
+///     Retrying will never help. This is the graceful "self-unlock"
+///     escape: control returns to the caller instead of hanging.
+///   - `ErrorCode::Busy`     — the lock is held by another ticket /
+///     CPU right now; a later retry may succeed.
+/// Interrupt state is fully restored before any error return.
+[[nodiscard]] core::Result<IrqFlags> SpinLockTryAcquire(SpinLock& lock);
+
+/// Bounded ("stricter") try-acquire. As `SpinLockTryAcquire`, but on
+/// a Busy lock it retries up to `max_spins` `pause`-spaced attempts
+/// before giving up with `ErrorCode::Timeout`. A self-held lock still
+/// returns `ErrorCode::Deadlock` immediately — spinning can never
+/// clear a lock this CPU is itself holding.
+[[nodiscard]] core::Result<IrqFlags> SpinLockTryAcquireFor(SpinLock& lock, u32 max_spins = kSpinTryDefaultSpins);
+
 /// RAII guard — acquires on construction, releases on destruction. The
 /// guard is non-copyable / non-movable so it always releases on the
 /// same scope level it acquired on.
@@ -123,6 +150,42 @@ class SpinLockGuard
   private:
     SpinLock& m_lock;
     IrqFlags m_flags;
+};
+
+/// RAII guard for the try path. Attempts the (optionally bounded)
+/// try-acquire on construction; releases on destruction ONLY if it
+/// succeeded — a declined acquire makes scope exit a clean no-op.
+/// Non-copyable / non-movable so the release pairs with the acquire
+/// on the same scope level. Test `held()` / `bool(guard)` before
+/// touching the protected data; `reason()` gives the failure code.
+class SpinLockTryGuard
+{
+  public:
+    explicit SpinLockTryGuard(SpinLock& lock) : m_lock(lock), m_result(SpinLockTryAcquire(lock)) {}
+    SpinLockTryGuard(SpinLock& lock, u32 max_spins) : m_lock(lock), m_result(SpinLockTryAcquireFor(lock, max_spins)) {}
+
+    ~SpinLockTryGuard()
+    {
+        if (m_result.has_value())
+        {
+            SpinLockRelease(m_lock, m_result.value());
+        }
+    }
+
+    SpinLockTryGuard(const SpinLockTryGuard&) = delete;
+    SpinLockTryGuard& operator=(const SpinLockTryGuard&) = delete;
+    SpinLockTryGuard(SpinLockTryGuard&&) = delete;
+    SpinLockTryGuard& operator=(SpinLockTryGuard&&) = delete;
+
+    bool held() const { return m_result.has_value(); }
+    explicit operator bool() const { return m_result.has_value(); }
+
+    /// Failure code when `!held()`. Undefined to call when held.
+    core::ErrorCode reason() const { return m_result.error(); }
+
+  private:
+    SpinLock& m_lock;
+    core::Result<IrqFlags> m_result;
 };
 
 /// Acquire/release round-trip + ownership assertions on a local lock.

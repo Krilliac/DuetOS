@@ -72,6 +72,7 @@ enum class ErrorCode : u8
     Corrupt,          // on-disk / on-wire data failed a sanity check
     NotReady,         // device is still initialising
     Busy,             // resource is in use by another owner
+    Deadlock,         // acquiring would deadlock the caller (self-held / cycle)
     NoDevice,         // no hardware of the required kind is present
     Unknown,
 };

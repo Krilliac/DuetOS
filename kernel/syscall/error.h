@@ -33,6 +33,7 @@ inline constexpr i64 kSysErrnoEEXIST = -17;
 inline constexpr i64 kSysErrnoENODEV = -19;
 inline constexpr i64 kSysErrnoEINVAL = -22;
 inline constexpr i64 kSysErrnoERANGE = -34;
+inline constexpr i64 kSysErrnoEDEADLK = -35;
 inline constexpr i64 kSysErrnoENOSYS = -38;
 inline constexpr i64 kSysErrnoEOVERFLOW = -75;
 inline constexpr i64 kSysErrnoEOPNOTSUPP = -95;

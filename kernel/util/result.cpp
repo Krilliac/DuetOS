@@ -43,6 +43,8 @@ const char* ErrorCodeName(ErrorCode c)
         return "NotReady";
     case ErrorCode::Busy:
         return "Busy";
+    case ErrorCode::Deadlock:
+        return "Deadlock";
     case ErrorCode::NoDevice:
         return "NoDevice";
     case ErrorCode::Unknown:
