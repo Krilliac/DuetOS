@@ -370,6 +370,10 @@ bool VirtioInputProbe(const VirtioPciLayout& L)
     g_input.layout = layout;
     g_input.up = true;
 
+    // Spec §3.1.1 step 8 — eventq is configured; finalise the
+    // device before pre-posting buffers it will write into.
+    VirtioMarkDriverOk(&layout);
+
     // Pre-post every eventq descriptor; from here the device can
     // write input events into our buffers.
     for (u16 i = 0; i < kNumEvtSlots; ++i)

@@ -21,8 +21,10 @@
  *   - VirtioPciProbe   — walk a PCI device's caps list, map each
  *                        cap region, reset + ack the device,
  *                        snapshot num_queues + device_features.
- *   - VirtioNegotiate  — drive the FEATURES_OK + DRIVER_OK status
- *                        bits with a caller-supplied feature mask.
+ *   - VirtioNegotiate  — drive the device through FEATURES_OK with
+ *                        a caller-supplied feature mask. DRIVER_OK
+ *                        is left to the per-device probe via
+ *                        VirtioMarkDriverOk (spec §3.1.1 ordering).
  *   - VirtioDeviceIdFor*  — convenience: the modern (0x1040+id)
  *                        and transitional device IDs by class.
  *
@@ -114,10 +116,12 @@ struct VirtioPciLayout
 VirtioPciLayout VirtioPciProbe(pci::DeviceAddress addr);
 
 /// Negotiate `driver_features` with the device. Writes the
-/// requested mask + sets FEATURES_OK; on success sets DRIVER_OK
-/// and returns true. Caller must include `kFeatureVersion1` to
-/// stay on the modern path. Returns false if the device clears
-/// FEATURES_OK (i.e. it doesn't accept the offered subset).
+/// requested mask + sets FEATURES_OK and returns true. DRIVER_OK
+/// is NOT set here — the caller installs its virtqueues and then
+/// calls `VirtioMarkDriverOk` (spec §3.1.1 step 7 before step 8).
+/// Caller must include `kFeatureVersion1` to stay on the modern
+/// path. Returns false if the device clears FEATURES_OK (i.e. it
+/// doesn't accept the offered subset).
 bool VirtioNegotiate(VirtioPciLayout* L, u64 driver_features);
 
 /// Map a virtio class enum to the modern PCI device-id (virtio
@@ -214,13 +218,10 @@ struct VirtioQueue
 /// true on success, false if alloc failed or the device rejected.
 bool VirtioQueueSetup(VirtioPciLayout* L, VirtioQueue* q, u16 queue_index, u16 want_size);
 
-/// Final DRIVER_OK transition. Some drivers want to set up
-/// several queues before flipping the bit; `VirtioNegotiate` sets
-/// DRIVER_OK eagerly for the transport-only path, so callers that
-/// install queues should pass `defer_driver_ok=true` to
-/// `VirtioNegotiate` and then invoke this once the queues are up.
-/// (v0 transport sets DRIVER_OK eagerly — this helper is the seam
-/// for the deferred path.)
+/// Final DRIVER_OK transition (spec §3.1.1 step 8). Every probe
+/// calls this exactly once, after all its `VirtioQueueSetup`
+/// calls have succeeded and before it issues any I/O. Idempotent
+/// (ORs the status bit).
 void VirtioMarkDriverOk(VirtioPciLayout* L);
 
 /// Publish one descriptor (or chain) into the queue and notify the

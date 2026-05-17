@@ -230,14 +230,11 @@ bool VirtioNegotiate(VirtioPciLayout* L, u64 driver_features)
         KLOG_WARN("drivers/virtio", "device rejected driver feature subset");
         return false;
     }
-    // Queue setup is the next step in a real driver; with no
-    // queues set up the device sees DRIVER_OK with no rings.
-    // Per-device probes that need I/O will install queues before
-    // they call this — for the v0 transport-only path we still
-    // set DRIVER_OK so the device leaves the negotiation state.
-    // STUB: queue setup is owned by per-device drivers, not the
-    // shared transport — virtio-rng is the first call site.
-    WrStatus(L, static_cast<u8>(reread | kStatusDriverOk));
+    // Negotiation ends at FEATURES_OK. DRIVER_OK is deliberately
+    // NOT set here: spec §3.1.1 requires virtqueue configuration
+    // (step 7) to complete BEFORE the DRIVER_OK transition (step
+    // 8). Each per-device probe owns its queue setup and calls
+    // `VirtioMarkDriverOk` once its rings are up.
     return true;
 }
 

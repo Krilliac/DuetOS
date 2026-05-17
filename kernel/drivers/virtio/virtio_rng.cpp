@@ -101,13 +101,9 @@ bool VirtioRngProbe(const VirtioPciLayout& L)
         KLOG_WARN("drivers/virtio/rng", "requestq setup failed");
         return false;
     }
-    // VirtioNegotiate already set DRIVER_OK for the transport-only
-    // path. Future drivers that set up queues BEFORE finalising
-    // negotiation should defer DRIVER_OK and call
-    // `VirtioMarkDriverOk` here — for v0 the eager path is fine
-    // because the device tolerates a queue installed post-
-    // DRIVER_OK (QEMU's virtio-rng accepts requests as soon as
-    // the queue is enabled).
+    // Queues are up — make the spec §3.1.1 step-8 DRIVER_OK
+    // transition before issuing any requests.
+    VirtioMarkDriverOk(&layout);
 
     if (PullEntropy(&layout, &g_rng_q))
         g_entropy_pulled = true;

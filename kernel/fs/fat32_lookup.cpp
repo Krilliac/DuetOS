@@ -28,6 +28,92 @@ using namespace internal;
 
 namespace
 {
+// --- Path-lookup result cache (see fat32_internal.h contract) ---
+//
+// Direct-mapped, generation-validated. An entry is a hit only when
+// the volume pointer, the exact path bytes, AND the generation all
+// match — so a missed invalidation degrades to a re-walk on the
+// next gen bump, never to a wrong answer. Both positive and
+// negative (component-not-found) resolutions are memoized; the
+// boot self-test storm is dominated by repeated negative probes
+// (NOTES.TXT / TEST.* / TRTEST.BIN) and repeated positive ones
+// (KERNEL.FIX between flushes).
+constexpr u32 kPathCacheSlots = 32;
+constexpr u32 kPathCacheKeyMax = 128; // matches the 127-char LFN component cap
+
+struct PathCacheEntry
+{
+    const Volume* v;
+    u64 gen;
+    bool valid;
+    bool found;
+    char path[kPathCacheKeyMax];
+    DirEntry entry;
+};
+
+constinit PathCacheEntry g_path_cache[kPathCacheSlots] = {};
+constinit u64 g_path_cache_gen = 1; // 0 reserved for "never filled"
+
+u64 PathHash(const Volume* v, const char* p)
+{
+    // FNV-1a over the volume pointer bytes + path string.
+    u64 h = 1469598103934665603ULL;
+    const auto* vb = reinterpret_cast<const u8*>(&v);
+    for (u32 i = 0; i < sizeof(v); ++i)
+    {
+        h = (h ^ vb[i]) * 1099511628211ULL;
+    }
+    for (const char* s = p; *s != 0; ++s)
+    {
+        h = (h ^ static_cast<u8>(*s)) * 1099511628211ULL;
+    }
+    return h;
+}
+
+bool PathStrEqual(const char* a, const char* b)
+{
+    for (u32 i = 0; i < kPathCacheKeyMax; ++i)
+    {
+        if (a[i] != b[i])
+            return false;
+        if (a[i] == 0)
+            return true;
+    }
+    return false; // key longer than the cap — treat as miss
+}
+
+// Returns true and fills *out / *found_out on a live cache hit.
+bool PathCacheGet(const Volume* v, const char* path, DirEntry* out, bool* found_out)
+{
+    const PathCacheEntry& e = g_path_cache[PathHash(v, path) % kPathCacheSlots];
+    if (!e.valid || e.gen != g_path_cache_gen || e.v != v || !PathStrEqual(e.path, path))
+        return false;
+    *found_out = e.found;
+    if (e.found)
+        CopyEntry(*out, e.entry);
+    return true;
+}
+
+void PathCachePut(const Volume* v, const char* path, bool found, const DirEntry* entry)
+{
+    u32 n = 0;
+    while (path[n] != 0)
+    {
+        if (n >= kPathCacheKeyMax - 1)
+            return; // un-cacheable key length; lookups still correct, just uncached
+        ++n;
+    }
+    PathCacheEntry& e = g_path_cache[PathHash(v, path) % kPathCacheSlots];
+    e.v = v;
+    e.gen = g_path_cache_gen;
+    e.valid = true;
+    e.found = found;
+    for (u32 i = 0; i <= n; ++i)
+        e.path[i] = path[i];
+    if (found && entry != nullptr)
+        CopyEntry(e.entry, *entry);
+}
+
 // Path walker context: "looking for `want`; when the visitor sees
 // it, stash the entry in `match` and stop."
 struct FindCtx
@@ -60,6 +146,15 @@ bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
     }
     KDBG_S(Fat32Lookup, "fs/fat32", "lookup", "path", path);
     KLOG_DEBUG_AS(::duetos::core::LogArea::FS, "fs/fat32", "lookup", "path", path);
+
+    // Memoized result? (Stable key = the caller's original path
+    // bytes, before slash-stripping / component descent.)
+    const char* const orig_path = path;
+    {
+        bool cached_found = false;
+        if (PathCacheGet(v, orig_path, out, &cached_found))
+            return cached_found;
+    }
 
     // Synthetic "root" entry: directory at v->root_cluster.
     DirEntry cur;
@@ -122,13 +217,27 @@ bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
         if (!ctx.found)
         {
             KLOG_DEBUG_AS(::duetos::core::LogArea::FS, "fs/fat32", "lookup: component not found", "comp", comp);
+            PathCachePut(v, orig_path, /*found=*/false, nullptr); // negative cache
             return false;
         }
         CopyEntry(cur, ctx.match);
     }
 
     CopyEntry(*out, cur);
+    PathCachePut(v, orig_path, /*found=*/true, &cur);
     return true;
 }
+
+namespace internal
+{
+void Fat32InvalidatePathCache()
+{
+    // O(1): bump the generation so every cached slot fails its
+    // gen check on the next lookup. No array walk needed.
+    ++g_path_cache_gen;
+    if (g_path_cache_gen == 0)
+        g_path_cache_gen = 1; // skip the "never filled" sentinel on wrap
+}
+} // namespace internal
 
 } // namespace duetos::fs::fat32

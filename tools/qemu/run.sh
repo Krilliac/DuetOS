@@ -292,15 +292,19 @@ CPU_MODEL="${DUETOS_CPU:-max}"
 # Optional knobs for stress testing the live kernel:
 #   DUETOS_RAM   — sets `-m` (default 512M). Useful for forcing the
 #                  memory stress driver to hit the heap ceiling early.
-#   DUETOS_SMP   — sets `-smp` (default unset = single-CPU). On a
-#                  multi-CPU build, raising this exercises the per-CPU
-#                  runqueues + APIC routing under sustained load.
+#   DUETOS_SMP   — sets `-smp` (default 4). Every boot now brings
+#                  up APs and exercises the per-CPU runqueues +
+#                  work-stealing + reschedule-IPI paths; without a
+#                  multi-vCPU guest QEMU never instantiates them and
+#                  the whole SMP stack rots untested (the serial
+#                  path is spinlock-protected, all boot self-tests
+#                  pass under SMP, and structural sentinels stay
+#                  intact, so this is safe as the default). Set
+#                  DUETOS_SMP=1 to force a single-CPU regression
+#                  boot.
 RAM_SIZE="${DUETOS_RAM:-512M}"
 
-SMP_ARGS=()
-if [[ -n "${DUETOS_SMP:-}" ]]; then
-    SMP_ARGS=(-smp "${DUETOS_SMP}")
-fi
+SMP_ARGS=(-smp "${DUETOS_SMP:-4}")
 
 # QMP control socket. A host-side unix socket, fully orthogonal to
 # COM1 (-serial stdio), COM2 (the GDB transport), and the
@@ -376,6 +380,21 @@ QEMU_ARGS=(
     # `-device e1000` would fall back to polling.
     -netdev   "user,id=net0"
     -device   "e1000e,netdev=net0,mac=52:54:00:12:34:56"
+    # virtio transport coverage. Without at least one virtio-pci
+    # device QEMU never instantiates the virtio bus, so the whole
+    # virtio driver tree (transport + rng/blk/net/balloon/console/
+    # input probes) probes nothing and rots untested. virtio-rng
+    # needs no backing file and exercises the single-queue
+    # negotiate -> queue-setup -> DRIVER_OK -> entropy-pull path;
+    # virtio-balloon (also file-less) exercises the dual-queue
+    # DRIVER_OK path. Neither collides with the nvme/ahci/e1000e
+    # devices above.
+    # disable-legacy=on forces the modern (virtio-1.0,
+    # non-transitional) PCI presentation; our transport is
+    # modern-only (requires VIRTIO_F_VERSION_1) and skips
+    # transitional device IDs (0x1000-0x103f).
+    -device   "virtio-rng-pci,disable-legacy=on"
+    -device   "virtio-balloon-pci,disable-legacy=on"
     "${UEFI_ARGS[@]}"
     "${BOOT_SOURCE[@]}"
 )

@@ -95,7 +95,7 @@ void UiTickerTask(void*)
         // have been added since the last flush could be cheaply
         // detected via stats but the rewrite itself is small
         // enough that we just always write.
-        duetos::diag::FixJournalPersistFlush();
+        duetos::diag::FixJournalPersistPeriodicTick();
         // Autosave the theme + window-position session state.
         // Internally throttled — bytewise-equal payloads skip
         // the FAT32 write, so a stable session writes once
@@ -338,6 +338,11 @@ void KbdReaderTask(void*)
             duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
+            // Fire any resolved dialog callback OUTSIDE the
+            // compositor lock — it may do FAT32 I/O, and nesting
+            // fat32 under compositor is the compositor<->fat32
+            // lockdep cycle this defers to break.
+            duetos::drivers::video::DialogDrainResolved();
             continue;
         }
 
@@ -2147,6 +2152,9 @@ void MouseReaderTask(void*)
             duetos::drivers::video::CursorHide();
             duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
             duetos::drivers::video::CursorShow();
+            // Same contract as the keyboard path: fire the
+            // resolved callback with no compositor lock held.
+            duetos::drivers::video::DialogDrainResolved();
             menu_handled = true; // suppress every downstream press path
         }
         if (press_edge && duetos::drivers::video::MenuIsOpen())

@@ -19,6 +19,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "log/klog.h"
+#include "util/symbols.h" // TEMP: inversion-site diagnostic
 #include "util/saturating.h"
 #include "util/types.h"
 
@@ -86,6 +87,55 @@ inline void SetEdge(LockClass from, LockClass to)
     {
         g_edges[from][to / 8] |= u8(1u << (to & 7));
         ++g_edges_recorded;
+    }
+}
+
+// Symbolized one-shot backtrace for a detected inversion, bounded
+// to one dump per ordered (held,id) class pair. The class names in
+// the WARN above say WHICH locks crossed; the stack says WHERE.
+// Kept (not stripped after the compositor/fat32 investigation):
+// the next lock-order regression in any subsystem gets a free
+// first-occurrence stack with zero operator setup. Raw SerialWrite
+// is deliberate — an inversion is serious and the bound makes it
+// flood-proof, so it must not be lost to log-level demotion.
+constexpr u32 kInversionSeenMax = 32;
+constinit u16 g_inv_seen_held[kInversionSeenMax] = {};
+constinit u16 g_inv_seen_id[kInversionSeenMax] = {};
+constinit u32 g_inv_seen_count = 0;
+
+void MaybeDumpInversionStack(LockClass held, LockClass id)
+{
+    for (u32 i = 0; i < g_inv_seen_count; ++i)
+    {
+        if (g_inv_seen_held[i] == held && g_inv_seen_id[i] == id)
+            return; // already dumped this ordered pair
+    }
+    if (g_inv_seen_count < kInversionSeenMax)
+    {
+        g_inv_seen_held[g_inv_seen_count] = held;
+        g_inv_seen_id[g_inv_seen_count] = id;
+        ++g_inv_seen_count;
+    }
+    arch::SerialWrite("[lockdep] inversion backtrace (held=");
+    arch::SerialWrite(LockdepClassName(held));
+    arch::SerialWrite(" id=");
+    arch::SerialWrite(LockdepClassName(id));
+    arch::SerialWrite("):\n");
+    u64 rbp = reinterpret_cast<u64>(__builtin_frame_address(0));
+    for (u32 f = 0; f < 16; ++f)
+    {
+        if (rbp < 0xffff800000000000ULL || (rbp & 0x7) != 0)
+            break;
+        const u64 ret = *reinterpret_cast<const u64*>(rbp + 8);
+        const u64 next = *reinterpret_cast<const u64*>(rbp);
+        if (ret < 0xffff800000000000ULL)
+            break;
+        arch::SerialWrite("  ");
+        duetos::core::WriteAddressWithSymbol(ret);
+        arch::SerialWrite("\n");
+        if (next <= rbp)
+            break;
+        rbp = next;
     }
 }
 
@@ -180,6 +230,14 @@ void LockdepBeforeAcquire(LockClass id)
             ++g_inversions;
             KLOG_WARN_S("lockdep", "inversion detected", "newly-acquired", LockdepClassName(id));
             KLOG_WARN_S("lockdep", "  vs already-held", "class", LockdepClassName(held));
+            // One-shot-per-class-pair symbolized backtrace. An
+            // inversion's class names alone rarely identify the
+            // offending path (many call sites take the same lock);
+            // the stack at first occurrence does. Bounded to one
+            // dump per ordered (held,id) pair via a small seen-set
+            // so a hot inversion can't flood the console — the
+            // first dump carries all the diagnostic value.
+            MaybeDumpInversionStack(held, id);
             if (g_promote_to_panic)
             {
                 // Re-entry guard above keeps this Panic from

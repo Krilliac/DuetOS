@@ -247,6 +247,9 @@ bool VirtioNetProbe(const VirtioPciLayout& L)
         return false;
     }
 
+    // Spec §3.1.1 step 8 — both queues are up, finalise the device.
+    VirtioMarkDriverOk(&layout);
+
     // TX header page (12 bytes, all-zero, reused across transmits).
     const mm::PhysAddr hdr_phys = mm::AllocateFrame();
     if (hdr_phys == mm::kNullFrame)

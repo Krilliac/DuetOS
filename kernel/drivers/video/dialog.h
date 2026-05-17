@@ -90,6 +90,15 @@ bool DialogFeedKey(u16 keycode, bool is_release, u8 modifiers);
 /// Returns true if consumed.
 bool DialogFeedChar(char c);
 
+/// Fire the callback for a dialog that a feed/press handler
+/// resolved. The feed/press handlers only RECORD the resolution
+/// (they run under the caller's CompositorLock); this drains it.
+/// MUST be called with no global lock held — the callback may
+/// take any lock (e.g. FAT32). Returns true if a callback fired.
+/// Call it after CompositorUnlock on every input path that may
+/// have fed a dialog.
+bool DialogDrainResolved();
+
 /// Feed a press-edge mouse click. (cx, cy) is in framebuffer
 /// coords. Returns true if the click landed inside the dialog
 /// (panel or its OK / Cancel buttons) — caller suppresses its

@@ -1890,6 +1890,12 @@ void BootBringupDevices(bool force_net_smoke)
     duetos::fs::ntfs::NtfsScanAll();
     duetos::fs::exfat::ExfatScanAll();
 
+    // Steady-state begins here. Arm the heartbeat-cadence fix-journal
+    // persist now — deferring it past the boot self-test storm avoids
+    // a measured ~1 s full-core CPU spike from repeated KERNEL.FIX
+    // rewrites colliding with the storage self-tests.
+    duetos::diag::FixJournalPersistEnablePeriodic();
+
     // Metrics checkpoint: everything above is bringup overhead; what
     // the system consumes from here on is steady-state.
     KLOG_METRICS("boot", "bringup-complete");
