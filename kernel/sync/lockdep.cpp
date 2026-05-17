@@ -301,6 +301,33 @@ void LockdepBeforeRelease(LockClass id)
     KLOG_WARN_S("lockdep", "release with no matching held entry", "class", LockdepClassName(id));
 }
 
+u32 LockdepHeldSnapshot(LockClass* out, u32 cap)
+{
+    if (out == nullptr)
+        return 0;
+    LockdepCriticalSection cs;
+    if (cs.already_inside())
+        return 0;
+    u32 d = g_held_depth;
+    if (d > cap)
+        d = cap;
+    for (u32 i = 0; i < d; ++i)
+        out[i] = g_held_stack[i];
+    return d;
+}
+
+void LockdepHeldRestore(const LockClass* in, u32 depth)
+{
+    LockdepCriticalSection cs;
+    if (cs.already_inside())
+        return;
+    if (depth > kLockdepHeldMax)
+        depth = kLockdepHeldMax;
+    for (u32 i = 0; i < depth; ++i)
+        g_held_stack[i] = (in != nullptr) ? in[i] : kLockClassUnclassified;
+    g_held_depth = depth;
+}
+
 u64 LockdepInversionsDetected()
 {
     return g_inversions;

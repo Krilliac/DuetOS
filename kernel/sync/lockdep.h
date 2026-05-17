@@ -205,6 +205,30 @@ void LockdepAfterAcquire(LockClass id);
 /// holding another. `kLockClassUnclassified` is a no-op.
 void LockdepBeforeRelease(LockClass id);
 
+/// Per-task held-set support. A sleeping `sched::Mutex` is held
+/// ACROSS context switches; with a single global held stack, two
+/// tasks independently and correctly holding two different
+/// mutexes get reported as a lock-order inversion (the classic
+/// compositor↔fat32 false positive — see wiki Roadmap). The
+/// scheduler snapshots the running task's held stack into the
+/// outgoing Task immediately before `ContextSwitch`, and restores
+/// the resumed task's on the way back in (in `SchedFinishTaskSwitch`,
+/// AFTER the fresh-AP guard and only for a Running task — attempt 1
+/// restored at the very top, before that guard, and an
+/// intermittent AP-bringup race dereferenced a not-yet-armed
+/// `Current()`). Spinlocks are never live across a switch except
+/// the scheduler-lock handoff, which is symmetric and absorbed by
+/// `LockdepBeforeRelease`'s not-found no-op, so no per-class tag
+/// is needed. Both run under lockdep's own cli critical section;
+/// a fresh task's zero-initialised buffer (depth 0) is the
+/// correct empty held-set.
+///
+/// `LockdepHeldSnapshot` copies up to `cap` entries into `out`
+/// and returns the depth written. `LockdepHeldRestore` overwrites
+/// the global held stack with `in[0..depth)`.
+u32 LockdepHeldSnapshot(LockClass* out, u32 cap);
+void LockdepHeldRestore(const LockClass* in, u32 depth);
+
 /// Total inversions detected since boot. Cheap to read (one u64
 /// load). The runtime checker / `inspect locks` (future) reports
 /// this; non-zero is a kernel bug to triage.
