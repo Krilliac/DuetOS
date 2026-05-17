@@ -1452,4 +1452,7 @@ _Auto-generated coverage matrix; do not edit by hand._
 | 204 | `SYS_DIAG_FAULT_INJECT` | `rdi` = FaultClass enum value (1 = NullDeref | -EACCES and the call is recorded as a sandbox denial |
 | 205 | `SYS_DLL_LOAD_FROM_PATH` | `rdi` = user pointer to NUL-terminated ASCII basename (e; `rsi` = name length in bytes (excluding NUL) | the base VA |
 | 206 | `SYS_COMPAT_QUERY` | — | the per-process app-compat policy flags as a packed bitmask |
+| 207 | `SYS_MODULE_BASE_BY_VA` | `rdi` = VA | the module base VA, or 0 if the VA lies in no known module |
+| 208 | `SYS_WAIT_ON_ADDRESS` | `rdi` = user VA of the watched word; `rsi` = the expected value (by value; `rdx` = size in bytes (1/2/4/8); `r10` = timeout in ms (0xFFFFFFFF = infinite) | immediately, otherwise it blocks the caller on an address-hashed wait queue u... |
+| 209 | `SYS_WAKE_BY_ADDRESS` | `rdi` = user VA; `rsi` = 0 for WakeByAddressSingle (best effort) | — |
 <!-- /AUTO:syscall_args -->

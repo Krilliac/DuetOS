@@ -61,7 +61,14 @@ done
 
 echo
 echo "=== per-run table ($SUM) ==="
-column -t -s$'\t' "$SUM"
+# `column` lives in bsdmainutils/util-linux and is not guaranteed on
+# a minimal dev host; fall back to a tab-expanding pretty-printer so
+# the sweep still prints its table instead of dying mid-report.
+if command -v column >/dev/null 2>&1; then
+    column -t -s$'\t' "$SUM"
+else
+    sed 's/\t/  |  /g' "$SUM"
+fi
 echo
 echo "=== determinism verdict ==="
 flag=0
