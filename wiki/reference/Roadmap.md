@@ -30,7 +30,13 @@ the same commit** that delivers the code.
   one global `g_sched_lock`. Splitting the lock per-CPU drops the
   steady-state contention to local-only Schedule() calls. Wake
   paths take target CPU's lock briefly; work-stealing uses
-  try-lock to avoid AB/BA deadlock.
+  try-lock to avoid AB/BA deadlock. The try-lock primitive this
+  needs now exists — `SpinLockTryAcquire` /
+  `SpinLockTryAcquireFor` / `SpinLockTryGuard`
+  (`kernel/sync/spinlock.h`), fail-fast `Busy` and bounded
+  `Timeout` with graceful `Deadlock` self-detection. Only the
+  per-CPU lock split itself remains, still deferred until
+  contention shows.
 - **Blocks on:** nothing technical; defer until profiles show
   contention on `g_sched_lock`.
 - **Cascading items unlocked when this lands:**

@@ -39,6 +39,8 @@ i64 ErrorCodeToNativeErrno(ErrorCode code)
         return kSysErrnoEAGAIN;
     case ErrorCode::Busy:
         return kSysErrnoEBUSY;
+    case ErrorCode::Deadlock:
+        return kSysErrnoEDEADLK;
     case ErrorCode::NoDevice:
         return kSysErrnoENODEV;
     case ErrorCode::Unknown:

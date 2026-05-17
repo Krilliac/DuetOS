@@ -62,6 +62,47 @@ Properties:
 `SpinLock` is the workhorse — every allocator, runqueue, handle table, and
 driver IRQ tail uses it.
 
+### Deadlock-aware try-acquire
+
+The blocking `SpinLockAcquire` has exactly two outcomes on a lock it can't
+take: it spins (contended) or it **panics** (the calling CPU already holds
+it — an otherwise-silent self-deadlock). Callers that can recover instead of
+hanging use the try API:
+
+```cpp
+core::Result<IrqFlags> r = SpinLockTryAcquire(lock);   // never spins, never panics
+if (r.has_value())
+{
+    // hold it — pass r.value() back to SpinLockRelease as usual
+}
+else if (r.error() == core::ErrorCode::Deadlock)
+{
+    // THIS CPU already holds `lock`; retry is futile — restructure / back off
+}
+// else core::ErrorCode::Busy — another CPU holds it; a later retry may win
+```
+
+Return-code contract:
+
+- **`Deadlock`** — this CPU already holds the lock. The shared `HeldBySelf`
+  predicate is the same one the blocking path panics on; the try path returns
+  it as a typed error instead (the "self-unlock" escape — control returns to
+  the caller, no hang, no panic banner).
+- **`Busy`** — held by another ticket/CPU right now (`SpinLockTryAcquire`,
+  fail-fast).
+- **`Timeout`** — `SpinLockTryAcquireFor(lock, max_spins)` exhausted its
+  `pause`-spaced spin budget (default `kSpinTryDefaultSpins`). A self-held
+  lock still returns `Deadlock` immediately — spinning can never clear a lock
+  this CPU holds.
+
+`SpinLockTryGuard` is the RAII form: it attempts the (optionally bounded)
+acquire on construction, releases on scope exit **only if** it succeeded
+(`held()` / `bool(guard)`), and exposes the failure code via `reason()`. A
+declined guard makes scope exit a clean no-op. Lockdep edges are recorded
+only on the success path, so a declined attempt never pollutes the
+locking-order graph. This is the AB/BA-safe primitive the per-CPU
+work-stealing path is specified to use.
+
 ## Mutex (KMutex)
 
 Sleeping mutex. The kernel object lives in [`kernel/ipc/kmutex.h`](../../kernel/ipc/kmutex.h)

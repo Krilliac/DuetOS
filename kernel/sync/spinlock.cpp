@@ -119,6 +119,19 @@ inline bool LockIsHeld(const SpinLock& lock)
     return ns != nt;
 }
 
+// True iff the lock is held AND the current CPU is its holder — i.e.
+// a blocking acquire from here would claim a fresh ticket and spin on
+// now_serving forever (we'd never advance it; with IF off, fatally).
+// owner_cpu is only meaningful while held, and while WE hold it no
+// other CPU can change it, so this read is race-free for the case it
+// reports true on (a stale read from a just-released foreign lock
+// names that CPU's id, never ours — no false positive). Shared by
+// the blocking acquire (panics) and the try path (returns Deadlock).
+inline bool HeldBySelf(const SpinLock& lock)
+{
+    return LockIsHeld(lock) && lock.owner_cpu == cpu::CurrentCpuIdOrBsp();
+}
+
 IrqFlags SpinLockAcquire(SpinLock& lock)
 {
     const u64 flags = ReadRflags();
@@ -134,12 +147,11 @@ IrqFlags SpinLockAcquire(SpinLock& lock)
     // turning it into a panic banner is strictly better in every
     // build. Lockdep does NOT cover this — it tracks lock CLASSES
     // (the AA self-edge is not an inversion) and skips untagged
-    // locks entirely. owner_cpu is only meaningful while the lock
-    // is held; if WE are the holder no other CPU can change it, so
-    // the LockIsHeld()+owner_cpu read is race-free for the case it
-    // fires on (a stale read from a just-released foreign lock
-    // reports that CPU's id, never ours — no false positive).
-    if (LockIsHeld(lock) && lock.owner_cpu == cpu::CurrentCpuIdOrBsp())
+    // locks entirely. Callers that can recover should use
+    // SpinLockTryAcquire, which detects the same condition via the
+    // shared HeldBySelf predicate but returns ErrorCode::Deadlock
+    // instead of panicking.
+    if (HeldBySelf(lock))
     {
         PanicSpinlock("self-deadlock: SpinLockAcquire of a lock this CPU already holds");
     }
@@ -234,6 +246,82 @@ void SpinLockAssertHeld(const SpinLock& lock)
     }
 }
 
+namespace
+{
+
+// Shared core for both try variants. Disables IRQs, refuses a
+// self-held lock (Deadlock), then makes up to `attempts`
+// non-blocking ticket claims. A ticket lock is free iff
+// next_ticket == now_serving; we CAS next_ticket from that value to
+// +1, which both reserves the ticket and — because it equalled
+// now_serving — leaves us already being served, so we hold the lock
+// with zero spin. On give-up, IRQ state is fully restored and
+// `on_exhausted` (Busy for fail-fast, Timeout for the bounded form)
+// is returned. The lockdep edge-walk fires ONLY on the success
+// path, mirroring RwLockTryAcquire* — a declined attempt must not
+// record a held→this edge it never actually took.
+core::Result<IrqFlags> TryAcquireImpl(SpinLock& lock, u32 attempts, core::ErrorCode on_exhausted, u64 caller_rip)
+{
+    const u64 flags = ReadRflags();
+    arch::Cli();
+
+    auto restore_irq = [&]
+    {
+        if ((flags & kRflagsIfBit) != 0)
+        {
+            arch::Sti();
+        }
+    };
+
+    if (HeldBySelf(lock))
+    {
+        restore_irq();
+        KLOG_DEBUG_V("sync/spinlock", "try-acquire declined: self-held", static_cast<u64>(core::ErrorCode::Deadlock));
+        return core::Err{core::ErrorCode::Deadlock};
+    }
+
+    for (u32 i = 0; i < attempts; ++i)
+    {
+        u32 expected = __atomic_load_n(&lock.now_serving, __ATOMIC_RELAXED);
+        if (__atomic_load_n(&lock.next_ticket, __ATOMIC_RELAXED) == expected &&
+            __atomic_compare_exchange_n(&lock.next_ticket, &expected, expected + 1, false, __ATOMIC_ACQUIRE,
+                                        __ATOMIC_RELAXED))
+        {
+            // Won the ticket; it already equals now_serving, so the
+            // lock is ours with no spin. Bookkeeping mirrors the
+            // tail of SpinLockAcquire.
+            lock.owner_cpu = cpu::CurrentCpuIdOrBsp();
+            LockdepBeforeAcquire(lock.class_id);
+            HeldLocksPush(lock, caller_rip);
+            LockdepAfterAcquire(lock.class_id);
+            return IrqFlags{.rflags = flags};
+        }
+        if (i + 1 < attempts)
+        {
+            asm volatile("pause" ::: "memory");
+        }
+    }
+
+    restore_irq();
+    KLOG_DEBUG_V("sync/spinlock", "try-acquire declined: contended", static_cast<u64>(on_exhausted));
+    return core::Err{on_exhausted};
+}
+
+} // namespace
+
+core::Result<IrqFlags> SpinLockTryAcquire(SpinLock& lock)
+{
+    return TryAcquireImpl(lock, 1, core::ErrorCode::Busy, reinterpret_cast<u64>(__builtin_return_address(0)));
+}
+
+core::Result<IrqFlags> SpinLockTryAcquireFor(SpinLock& lock, u32 max_spins)
+{
+    // At least one attempt even if the caller passes 0 — "try with a
+    // zero budget" still means "try once".
+    return TryAcquireImpl(lock, max_spins == 0 ? 1 : max_spins, core::ErrorCode::Timeout,
+                          reinterpret_cast<u64>(__builtin_return_address(0)));
+}
+
 void SpinLockSelfTest()
 {
     KLOG_TRACE_SCOPE("sync/spinlock", "SpinLockSelfTest");
@@ -326,6 +414,82 @@ void SpinLockSelfTest()
         {
             PanicSpinlock("held_locks_count did not return to baseline on outer release");
         }
+    }
+
+    // Try-lock paths. The Busy (held-by-another-CPU) leg can't be
+    // exercised on a single CPU before AP bring-up — like the
+    // RwLock / SeqLock contention self-tests, this is a
+    // cooperative-single-CPU form that covers the self-held and
+    // free-lock legs; the cross-CPU Busy leg lands with the
+    // SMP-stress sweep.
+    {
+        SpinLock t{};
+
+        // Free lock → fail-fast try succeeds and actually holds it.
+        core::Result<IrqFlags> r = SpinLockTryAcquire(t);
+        if (!r.has_value())
+        {
+            PanicSpinlock("SpinLockTryAcquire failed on a free lock");
+        }
+        if (!LockIsHeld(t))
+        {
+            PanicSpinlock("SpinLockTryAcquire did not mark the lock held");
+        }
+
+        // Held by THIS CPU → both try variants must decline with
+        // Deadlock (graceful self-unlock; no panic, no hang).
+        core::Result<IrqFlags> self = SpinLockTryAcquire(t);
+        if (self.has_value() || self.error() != core::ErrorCode::Deadlock)
+        {
+            PanicSpinlock("SpinLockTryAcquire on self-held lock did not return Deadlock");
+        }
+        core::Result<IrqFlags> self_for = SpinLockTryAcquireFor(t, 64);
+        if (self_for.has_value() || self_for.error() != core::ErrorCode::Deadlock)
+        {
+            PanicSpinlock("SpinLockTryAcquireFor on self-held lock did not return Deadlock");
+        }
+        SpinLockRelease(t, r.value());
+        if (LockIsHeld(t))
+        {
+            PanicSpinlock("try-acquired lock still held after release");
+        }
+
+        // Bounded try on a now-free lock → success.
+        core::Result<IrqFlags> rb = SpinLockTryAcquireFor(t, 64);
+        if (!rb.has_value())
+        {
+            PanicSpinlock("SpinLockTryAcquireFor failed on a free lock");
+        }
+        SpinLockRelease(t, rb.value());
+
+        // Guard: acquires on a free lock, auto-releases on scope exit.
+        {
+            SpinLockTryGuard g(t);
+            if (!g || !g.held() || !LockIsHeld(t))
+            {
+                PanicSpinlock("SpinLockTryGuard did not acquire a free lock");
+            }
+        }
+        if (LockIsHeld(t))
+        {
+            PanicSpinlock("SpinLockTryGuard did not release on scope exit");
+        }
+
+        // Guard on a self-held lock: declines, scope exit is a no-op,
+        // the original holder's lock stays held until WE release it.
+        const IrqFlags hold = SpinLockAcquire(t);
+        {
+            SpinLockTryGuard g(t);
+            if (g || g.held() || g.reason() != core::ErrorCode::Deadlock)
+            {
+                PanicSpinlock("SpinLockTryGuard on self-held lock did not decline with Deadlock");
+            }
+        }
+        if (!LockIsHeld(t))
+        {
+            PanicSpinlock("declined SpinLockTryGuard wrongly released the held lock");
+        }
+        SpinLockRelease(t, hold);
     }
 
     arch::SerialWrite("[sync] spinlock self-test OK\n");
