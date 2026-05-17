@@ -3862,7 +3862,29 @@ void MutexUnlock(Mutex* m)
         // interrupts, and return without mutating m — touching
         // owner / waiters from the wrong task would corrupt the
         // mutex's view for whoever actually holds it.
+        //
+        // The generic "non-owner" line alone is undebuggable for an
+        // intermittent boot race (release gives no stack). Emit a
+        // raw-serial breadcrumb naming the mutex, its lockdep class,
+        // the task that actually owns it, the bad caller, and the
+        // caller's return address — the same detector pattern that
+        // cracked the #283 spinlock self-deadlock. Additive only:
+        // this does NOT change mutex behaviour, it just makes the
+        // pre-existing fault self-identifying on the next boot.
+        Task* const bad_owner = m->owner;
+        const u64 caller_rip = reinterpret_cast<u64>(__builtin_return_address(0));
         arch::Sti();
+        arch::SerialWrite("[sched] MUTEX-NONOWNER m=");
+        arch::SerialWriteHex(reinterpret_cast<u64>(m));
+        arch::SerialWrite(" class=");
+        arch::SerialWriteHex(static_cast<u64>(m->class_id));
+        arch::SerialWrite(" actual_owner_tid=");
+        arch::SerialWriteHex((bad_owner != nullptr) ? bad_owner->id : 0);
+        arch::SerialWrite(" caller_tid=");
+        arch::SerialWriteHex(CurrentTaskId());
+        arch::SerialWrite(" caller_rip=");
+        arch::SerialWriteHex(caller_rip);
+        arch::SerialWrite("\n");
         core::DebugPanicOrWarn("sched", "MutexUnlock by non-owner");
         return;
     }
