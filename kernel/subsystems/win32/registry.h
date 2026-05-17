@@ -116,6 +116,17 @@ void RegistryHiveSave();
 /// Prints PASS / FAIL / SKIP to COM1.
 void RegistryHiveSelfTest();
 
+/// Read-only introspection accessor for the debug `monitor`
+/// surface (kernel/diag/gdb_monitor). Renders the static key at
+/// (`root`, `path`) — its values and immediate child key names —
+/// as human-readable text into `out` (NUL-terminated, bounded by
+/// `out_cap`). `root` is a kHkey* sentinel; `path` is the
+/// backslash-separated subkey path with no leading root (pass ""
+/// for a root-level prefix key). Returns false if the key is not
+/// in the static tree. No internal pointers escape the subsystem —
+/// rendered text only, one source of truth for the registry tree.
+bool RegistryQuery(u64 root, const char* path, char* out, u32 out_cap);
+
 namespace detail
 {
 

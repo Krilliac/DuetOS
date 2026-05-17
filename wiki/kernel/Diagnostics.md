@@ -37,7 +37,8 @@ The contract every module follows:
 | Module | Header | What it does | Self-test |
 |--------|--------|--------------|-----------|
 | `kdbg` | [`kdbg.h`](../../kernel/diag/kdbg.h) | Per-channel debug enable (32 named channels). `KDBG_PRINTF(ch, …)` only fires if the channel is on. | none |
-| `gdb_server` | [`gdb_server.h`](../../kernel/diag/gdb_server.h) | GDB remote serial protocol stub (g, m, M, s, c, ?, X packets). | `GdbServerSelfTest()` |
+| `gdb_server` | [`gdb_server.h`](../../kernel/diag/gdb_server.h) | GDB remote serial protocol server (g, m, M, s, c, ?, X, Z/z, vCont, qRcmd). | `GdbServerSelfTest()` |
+| `gdb_monitor` | [`gdb_monitor.h`](../../kernel/diag/gdb_monitor.h) | DuetOS-aware `monitor` (`qRcmd`) surface: `duet ps/caps/threads/handles/vm/mods/win/win32/reg/probe/kdbg/watch/trip/dump`. Read-only introspection + kernel-owned debug-facility control; reached via `monitor duet …` from stock gdb or `tools/debug/duetos-gdb-monitor.py`. | `GdbMonitorSelfTest()` → `[gdb-monitor-selftest] PASS` |
 | `recovery` | [`recovery.h`](../../kernel/diag/recovery.h) | Runtime recovery taxonomy (classes A–F) + `RetryWithBackoff<Fn>` template. | none |
 | `minidump` | [`minidump.h`](../../kernel/diag/minidump.h) | Emits Windows-format `.dmp` over debugcon port 0xE9. Persists to NVMe + FAT32. | `MinidumpSelfTest()`, `DiskPersistSelfTest()` |
 | `leak_detector` | [`leak_detector.h`](../../kernel/diag/leak_detector.h) | Aggregates per-subsystem resource counters; fires `kLeakAttributable` on process exit if any pinned. | none (read-only of existing counters) |
@@ -245,7 +246,13 @@ machine-check stack. See [Fault Injection](Fault-Injection.md).
 - **PMU sampling wiring deferred.** `perf_profile` rings are present and
   exercised by the self-test, but no `OvfInterrupt → PerfRecord` path
   yet.
-- **GDB server is stop-only**, no step/cont over SMP.
+- **GDB server is stop-only**, no step/cont over SMP. The
+  `monitor` (`qRcmd`) `duet …` surface is likewise stop-only —
+  commands dispatch from inside the stop loop, so the target must
+  be stopped (a breakpoint, Ctrl-C, or the `DUETOS_GDB_DEMO`
+  int3), exactly like stock-gdb `monitor`. Reply is a single
+  packet, hard-truncated with a `[truncated]` sentinel;
+  `O`-packet streaming is deferred.
 - **Hot-patch single-target.** No staged rollouts; an apply patches every
   matching `patchable_function_entry` at once.
 - **Soft-lockup is single-CPU**; no per-CPU watchdog yet. Adequate while

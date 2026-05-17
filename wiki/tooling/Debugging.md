@@ -87,6 +87,11 @@ A violation raises a panic with the failing invariant named.
 - **`duetos-gdb-attach.sh`** + **`duetos-gdb-cmd.sh`** — attach to
   the in-kernel GDB server (TCP, QEMU pty / software null-modem, or
   USB-UART to real iron).
+- **`duetos-gdb-monitor.py`** — DuetOS-aware `monitor` client.
+  Speaks raw GDB-remote and drives the `duet <verb>` surface via
+  `qRcmd` (capability bitsets, IPC handles, the Win32 window list,
+  probe/kdbg/watch control, …). Boots with `DUETOS_GDB_DEMO=ON`
+  for a guaranteed stop, runs the command(s), detaches.
 
 ## Live Debug — In-kernel GDB Server
 
@@ -108,6 +113,36 @@ resume verb all landed.
 VSCode one-click attach via `.vscode/launch.json` +
 `tools/debug/vscode-{start,stop}-qemu.sh`. The only deferred item is
 `vCont;s` step on a peer thread — see [Roadmap](../reference/Roadmap.md#gdb-stub-completion-peer-thread-step).
+
+### DuetOS `monitor` (qRcmd) — `duet …` command surface
+
+Stock GDB sees raw registers/memory; it cannot express DuetOS
+state. The kernel answers the standard GDB `monitor` (`qRcmd`)
+packet with a `duet <verb>` command surface, so the SAME
+transport/stop-loop carries DuetOS-aware introspection + control.
+Use it from stock gdb (`monitor duet ps`) or
+`tools/debug/duetos-gdb-monitor.py ps`.
+
+Verbs (read-only introspection): `ps`, `caps <pid>`, `threads`,
+`handles <pid>`, `vm <pid>`, `mods <pid>`, `win`, `win32 <pid>`,
+`reg <HKLM|HKCU> <path>`. Control (kernel-owned debug
+facilities only): `probe list|arm|disarm`, `kdbg list|mask|on|off`,
+`watch list|add|del`, `trip list|del`, `dump` (minidump from the
+stop-point context). `duet help` lists them.
+
+**Stop-only**, exactly like stock `monitor`: commands dispatch
+from inside the stop loop, so the target must be stopped (a
+breakpoint, Ctrl-C, or the `DUETOS_GDB_DEMO` int3) first. The
+reply is a single packet, hard-truncated with a `[truncated]`
+sentinel if a report overflows; `O`-packet streaming is deferred.
+
+**Trust model.** The surface inherits the same boundary as the
+`M`/`G` write packets — physical-serial access to a stopped
+target. No `kCapDebug` check is added (there is no authenticated
+principal on a raw serial line). Read verbs route through public
+kernel APIs; mutating verbs touch only kernel-owned debug
+facilities — never subsystem internals. Boot self-test sentinel:
+`[gdb-monitor-selftest] PASS`.
 
 ## Crash Dump
 
