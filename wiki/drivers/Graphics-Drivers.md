@@ -246,6 +246,41 @@ their writes for the next present.
 `FramebufferReadDamage()` snapshots the current union without
 clearing it — used by tests + diagnostics.
 
+### Content-diff frame elision
+
+The primitive-accumulated damage rect bounds where pixels *could*
+have changed, but the desktop compositor (`DesktopCompose`)
+unconditionally repaints the whole scene every pass — gradient,
+wallpaper, console, windows, chrome — so its primitive damage is
+always full-screen. That defeats the partial pipeline: the 1 Hz
+ui-ticker recompose used to flush the entire surface every second,
+which on virtio-gpu (VirtualBox) is the visible flicker and the
+compositor-lock contention that made the mouse feel slow.
+
+`FramebufferBeginCompose` allocates a second framebuffer-sized
+buffer — the **presented-frame snapshot** — alongside the shadow.
+`FramebufferEndCompose` compares the freshly-composed shadow
+against the snapshot *within* the primitive-damage bound and
+derives the **exact** changed bounding box, then blits / syncs /
+presents only that. A recompose that lands pixel-identical output
+(an idle desktop: same gradient, same clock minute, no caret
+phase change) produces an empty diff — the blit and the
+virtio-gpu round-trip are both skipped, and the snapshot already
+mirrors the screen.
+
+The decision is **content-derived**, so it cannot freeze: a
+paint path can never "forget" to mark itself dirty, because a
+pixel that genuinely changed is found by the compare and one that
+did not is correctly skipped. `DesktopCompose` is unchanged — the
+elision lives entirely in the framebuffer compose path. (This is
+why the earlier hand-set-dirty-bit gate, which froze PE apps that
+repaint via the periodic tick, was reverted: PR #286 → #288.) The
+first frame after (re)alloc syncs the whole surface into the
+snapshot and presents in full so the "snapshot == live screen"
+invariant holds unconditionally thereafter; if the snapshot
+allocation fails the compositor degrades gracefully to a full
+present every frame.
+
 ## Render statistics
 
 `kernel/drivers/video/render_stats.{h,cpp}` accumulates per-frame
@@ -253,7 +288,10 @@ counters that the `gfx` shell command surfaces:
 
 - `frames_composed` / `frames_presented` — totals.
 - `frames_clean` — present passes that skipped the flush because
-  the compositor wrote nothing.
+  the compositor wrote nothing **or** the content-diff found the
+  recompose pixel-identical to the presented frame. On an idle
+  desktop this climbs ~once/second — the runtime signal that the
+  flicker-elision is working.
 - `frames_full` / `frames_partial` — split by ≥95% surface
   coverage. Heavy chrome frames (full window redraw) land in
   "full"; cursor / clock / hover frames in "partial".

@@ -44,6 +44,30 @@ constinit void* g_shadow_base = nullptr;
 constinit u32 g_shadow_pitch = 0;
 constinit bool g_compose_active = false;
 
+// Presented-frame snapshot — the pixels currently on the live
+// framebuffer (== frame N-1's composite), kept in normal RAM with
+// the same tightly-packed `width * 4` layout as the shadow. Allocated
+// lazily alongside the shadow.
+//
+// `FramebufferEndCompose` diffs the freshly-composed shadow against
+// this snapshot to derive the *exact* changed bounding box, then
+// blits / presents only that. An idle desktop recomposes the whole
+// surface into the shadow (DesktopCompose is unconditional by
+// design — gating it on a hand-set dirty bit froze PE apps that
+// repaint via the periodic tick; see #286/#288), but if the result
+// is byte-identical to what's already on screen the diff is empty,
+// the blit + present are skipped, and the virtio-gpu host round-trip
+// (the visible 1 Hz VBox flicker + the mouse-lag lock contention)
+// never happens. The decision is content-derived, so no paint path
+// can "forget" to mark itself dirty — a pixel that genuinely changed
+// is found by the compare; one that didn't is correctly skipped.
+//
+// `g_presented_valid` is false until the first full sync (snapshot
+// pages are not guaranteed zeroed, and the very first frame must
+// reach the screen in full regardless of their contents).
+constinit void* g_presented_base = nullptr;
+constinit bool g_presented_valid = false;
+
 // Damage union. Every pixel-write primitive routes its post-clip
 // rect through `MarkDamage` so the compose-end blit and the present
 // hook can flush only the dirty region. The math lives on
@@ -224,6 +248,13 @@ void FramebufferTeardown()
     g_shadow_base = nullptr;
     g_shadow_pitch = 0;
     g_compose_active = false;
+    // Presented-frame snapshot — drop it too. Its backing pages
+    // leak with the shadow's (same documented "cheap" tradeoff);
+    // the next BeginCompose re-allocates at the new geometry, and
+    // g_presented_valid=false forces a full first present so the
+    // content-diff invariant rebuilds from scratch.
+    g_presented_base = nullptr;
+    g_presented_valid = false;
     // Damage union — reset so a Reinit at different geometry
     // doesn't carry forward a rect that's now off-surface.
     g_damage.Reset();
@@ -406,46 +437,170 @@ void FramebufferBeginCompose()
         SerialWrite(" virt=");
         SerialWriteHex(reinterpret_cast<u64>(g_shadow_base));
         SerialWrite("\n");
+
+        // Presented-frame snapshot — same size + layout as the
+        // shadow. Failure here is non-fatal: the compositor still
+        // works, it just can't elide unchanged frames, so every
+        // present goes full (g_presented_valid stays false and the
+        // EndCompose full-sync path runs each frame). Don't fail
+        // the whole compose for it.
+        const auto snap_phys = mm::AllocateContiguousFrames(frames);
+        if (snap_phys == mm::kNullFrame)
+        {
+            SerialWrite("[video/fb] presented-snapshot alloc failed (frames=");
+            SerialWriteHex(frames);
+            SerialWrite(") — diff-elision disabled, full present each frame\n");
+        }
+        else
+        {
+            g_presented_base = mm::PhysToVirt(snap_phys);
+            g_presented_valid = false; // not yet synced to the screen
+            SerialWrite("[video/fb] presented-snapshot online virt=");
+            SerialWriteHex(reinterpret_cast<u64>(g_presented_base));
+            SerialWrite("\n");
+        }
     }
     g_compose_active = true;
 }
+
+namespace
+{
+
+// Copy the inclusive-exclusive rect [bx, bx_end) x [by, by_end) from
+// the shadow surface to the live framebuffer. Pitches differ in
+// general (live may have padding); the shadow is tightly packed.
+inline void BlitShadowRectToLive(u32 bx, u32 by, u32 bx_end, u32 by_end)
+{
+    const auto* src_bytes = reinterpret_cast<const u8*>(g_shadow_base);
+    auto* dst_bytes = reinterpret_cast<u8*>(g_info.virt);
+    for (u32 yi = by; yi < by_end; ++yi)
+    {
+        const auto* src_row = reinterpret_cast<const u32*>(src_bytes + static_cast<u64>(yi) * g_shadow_pitch);
+        auto* dst_row = reinterpret_cast<volatile u32*>(dst_bytes + static_cast<u64>(yi) * g_info.pitch);
+        for (u32 xi = bx; xi < bx_end; ++xi)
+        {
+            dst_row[xi] = src_row[xi];
+        }
+    }
+}
+
+// Copy the same rect from the shadow to the presented-frame snapshot.
+// Both buffers use the tightly-packed `g_shadow_pitch` layout, so the
+// snapshot stays a faithful mirror of what is on screen.
+inline void SyncShadowRectToSnapshot(u32 bx, u32 by, u32 bx_end, u32 by_end)
+{
+    const auto* src_bytes = reinterpret_cast<const u8*>(g_shadow_base);
+    auto* snap_bytes = reinterpret_cast<u8*>(g_presented_base);
+    for (u32 yi = by; yi < by_end; ++yi)
+    {
+        const u64 off = static_cast<u64>(yi) * g_shadow_pitch;
+        const auto* src_row = reinterpret_cast<const u32*>(src_bytes + off);
+        auto* snap_row = reinterpret_cast<u32*>(snap_bytes + off);
+        for (u32 xi = bx; xi < bx_end; ++xi)
+        {
+            snap_row[xi] = src_row[xi];
+        }
+    }
+}
+
+} // namespace
 
 void FramebufferEndCompose()
 {
     if (!g_compose_active)
         return;
-    // Flush the shadow surface to the live framebuffer. Pitches
-    // differ in general (live may have padding), so the copy is
-    // row-by-row rather than a single memcpy.
-    //
-    // If the compose pass accumulated a damage union, copy only
-    // those rows + columns. The compose buffer holds last frame's
-    // pixels outside the damage rect, so a partial copy preserves
-    // unchanged regions on screen (which is exactly what we want
-    // — they were already correct). When `g_damage.valid` is false
-    // the frame painted nothing, and the copy below short-circuits
-    // before touching the live framebuffer at all.
+
+    // Nothing was painted at all this pass — leave the screen as-is.
+    // `g_damage.valid == false` also makes FramebufferPresent skip
+    // the backend round-trip, so an idle tick costs nothing.
     if (!g_damage.valid)
     {
         g_compose_active = false;
         RenderStatsOnComposeEnd();
         return;
     }
+
+    // The primitive-accumulated `g_damage` bounds where pixels COULD
+    // have changed: everything outside it was untouched this pass and
+    // is, by induction, already identical between the shadow, the
+    // live screen, and the snapshot. We never need to look past it.
     const u32 cx = g_damage.x;
     const u32 cy = g_damage.y;
     const u32 cx_end = g_damage.x + g_damage.w;
     const u32 cy_end = g_damage.y + g_damage.h;
-    auto* src_bytes = reinterpret_cast<const u8*>(g_shadow_base);
-    auto* dst_bytes = reinterpret_cast<u8*>(g_info.virt);
+
+    // No snapshot (alloc failed) or snapshot not yet representative of
+    // the whole screen: take the conservative full path — blit the
+    // entire primitive-damage rect, then make the snapshot mirror the
+    // ENTIRE surface so the content-diff invariant ("snapshot == live
+    // screen everywhere") holds for every subsequent frame regardless
+    // of what this first pass painted. `g_damage` is left as the full
+    // primitive rect so FramebufferPresent flushes it in full — the
+    // first real frame must reach the display unconditionally.
+    if (g_presented_base == nullptr || !g_presented_valid)
+    {
+        BlitShadowRectToLive(cx, cy, cx_end, cy_end);
+        if (g_presented_base != nullptr)
+        {
+            SyncShadowRectToSnapshot(0, 0, g_info.width, g_info.height);
+            g_presented_valid = true;
+        }
+        g_compose_active = false;
+        RenderStatsOnComposeEnd();
+        return;
+    }
+
+    // Content diff: within the primitive-damage rect, find the EXACT
+    // changed bounding box by comparing the freshly-composed shadow
+    // against the snapshot of what is currently on screen. This is a
+    // CPU-only linear scan with no host round-trip — far cheaper than
+    // the virtio-gpu TRANSFER_TO_HOST_2D + RESOURCE_FLUSH it elides,
+    // and it is the entire reason the 1 Hz full recompose no longer
+    // flickers VBox: a recompose that lands the same pixels produces
+    // an empty diff and presents nothing.
+    const auto* shadow_bytes = reinterpret_cast<const u8*>(g_shadow_base);
+    const auto* snap_bytes = reinterpret_cast<const u8*>(g_presented_base);
+    DamageRect d = {};
     for (u32 yi = cy; yi < cy_end; ++yi)
     {
-        const auto* src_row = reinterpret_cast<const u32*>(src_bytes + static_cast<u64>(yi) * g_shadow_pitch);
-        auto* dst_row = reinterpret_cast<volatile u32*>(dst_bytes + static_cast<u64>(yi) * g_info.pitch);
+        const u64 off = static_cast<u64>(yi) * g_shadow_pitch;
+        const auto* srow = reinterpret_cast<const u32*>(shadow_bytes + off);
+        const auto* prow = reinterpret_cast<const u32*>(snap_bytes + off);
+        u32 first = cx_end;
+        u32 last = cx;
         for (u32 xi = cx; xi < cx_end; ++xi)
         {
-            dst_row[xi] = src_row[xi];
+            if (srow[xi] != prow[xi])
+            {
+                if (xi < first)
+                    first = xi;
+                last = xi;
+            }
         }
+        if (first <= last)
+            d.Extend(first, yi, (last - first) + 1U, 1U);
     }
+
+    if (!d.valid)
+    {
+        // Recompose produced a pixel-identical frame — the screen and
+        // the snapshot are already correct. Drop the damage union so
+        // FramebufferPresent skips the backend flush entirely (this is
+        // the frame that RenderStats counts as `frames_clean`).
+        g_damage.Reset();
+        g_compose_active = false;
+        RenderStatsOnComposeEnd();
+        return;
+    }
+
+    // Push only the genuinely changed sub-rect to the screen and keep
+    // the snapshot in lock-step, then narrow the damage union to it so
+    // the present hook flushes exactly that region.
+    const u32 dx_end = d.x + d.w;
+    const u32 dy_end = d.y + d.h;
+    BlitShadowRectToLive(d.x, d.y, dx_end, dy_end);
+    SyncShadowRectToSnapshot(d.x, d.y, dx_end, dy_end);
+    g_damage = d;
     g_compose_active = false;
     RenderStatsOnComposeEnd();
 }
