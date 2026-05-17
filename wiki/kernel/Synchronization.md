@@ -136,6 +136,22 @@ tries `(B, A)`. The contract:
   Adequate for kernel-of-DuetOS scale; revisit if the lock graph crosses 30+
   nodes.
 
+- **Per-task held-set.** The held-class stack is logically per-task, not
+  global. A sleeping `sched::Mutex` is held across context switches; with a
+  single shared stack, two tasks independently and correctly holding two
+  different mutexes were reported as a false AB-BA inversion (the
+  compositor↔fat32 case, ~40×/boot). The scheduler snapshots the running
+  task's held set into the outgoing `Task` immediately before
+  `ContextSwitch` (`LockdepHeldSnapshot`) and restores the resumed task's
+  in `SchedFinishTaskSwitch` (`LockdepHeldRestore`) — placed *after* the
+  fresh-AP guard and gated on `state == Running`, because restoring at the
+  top of that function raced an unarmed AP's `current_task` and crashed
+  intermittently during AP bring-up. Fresh tasks are seeded
+  `[kLockClassSched]` so the trampoline's first `g_sched_lock` release is
+  balanced. Verified false-positive-free across an 8-boot determinism
+  sweep; this is the precondition for the fail-stop `g_promote_to_panic`
+  gate.
+
 `LockdepReset()` is wired to the boot self-test and to the panic path so a
 late-boot crash doesn't poison subsequent test runs.
 
