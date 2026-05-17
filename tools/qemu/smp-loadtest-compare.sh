@@ -25,6 +25,20 @@
 # Reusable rig (CLAUDE.md "Reusable Tooling"): re-run after any
 # scheduler / runqueue / lock-granularity change to catch a
 # scaling regression.
+#
+# ACCELERATOR CAVEAT — read before trusting the scaling ratio:
+# A meaningful throughput-scaling number requires KVM (run.sh
+# auto-selects `kvm:tcg` when /dev/kvm is read/writable). Under
+# pure TCG (no /dev/kvm — typical in unprivileged containers),
+# QEMU binary-translates every guest vCPU, so adding vCPUs
+# INCREASES total emulated work and wall time for the same
+# guest-time window — the inverse of real hardware. Host %CPU
+# still proves the vCPU threads run in parallel (≈N×100% under
+# -smp N), and the -smp 1 numbers are a valid single-core
+# baseline, but the 4cpu/1cpu iteration ratio is only physically
+# meaningful on a KVM-capable host / bare-metal CI runner. On
+# TCG the larger run may not even finish its window inside the
+# cap; that is a tooling limit, not a guest scheduler defect.
 
 SECS="${1:-8}"
 WORKERS="${2:-8}"

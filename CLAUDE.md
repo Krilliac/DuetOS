@@ -365,7 +365,7 @@ The discipline:
   signal**, not just the one you started with. The signals are
   cheap; running them is cheap; the cost of letting one rot is
   high. Concretely:
-  - Live boot log: `grep -nE "\[E\] |PANIC|TRIPLE|FAIL|out of range|task-kill|kernel oops" /tmp/duetos-*.log`
+  - Live boot log: `tools/test/boot-log-analyze.sh <log>` — the canonical triage entrypoint (consolidates the regression scan, phase timings, self-test PASS/FAIL, lockdep pairs, stress summary, hypervisor/SMP banner; exits non-zero on a non-deliberate failure so it doubles as a gate; launcher-agnostic — works on QEMU stdout, a VMware/VBox serial-to-file, or a real-HW UART capture). Raw fallback: `grep -nE "\[E\] |PANIC|TRIPLE|FAIL|out of range|task-kill|kernel oops" /tmp/duetos-*.log`
   - Build: `cmake --build build/<preset>` — every `warning:` line is a fix target, every error is.
   - Hosted tests: `cd build/<preset> && ctest --output-on-failure` — every non-PASS is a fix target.
   - clang-format: `find kernel userland \( -name '*.h' -o -name '*.cpp' \) | xargs clang-format --dry-run --Werror` — every violation is a fix target.
