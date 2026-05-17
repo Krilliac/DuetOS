@@ -102,11 +102,18 @@ the same commit** that delivers the code.
   compositor↔fat32 false positives 0; no spurious
   release-no-match WARN). But a 6-boot **determinism sweep**
   (`tools/test/boot-determinism-sweep.sh`) caught an
-  **intermittent** crash (3 of 6 boots): UBSAN null-deref
-  member-access on `PerCpu` / `u32` / `Task` during AP bring-up,
-  then `KASSERT failed: WaitQueueBlock on non-Running task`
-  (`sched.cpp` `WaitQueueBlock+0x132`). Causal: 8/8 sweeps clean
-  immediately before the commit, 3/6 crash immediately after.
+  **intermittent** hard panic on the AP-bring-up path:
+  `[panic] sched: KASSERT failed: WaitQueueBlock on non-Running
+  task` (`sched.cpp` `WaitQueueBlock+0x132`) with a full register
+  dump. Causal and precise: the `[panic]` + `WaitQueueBlock`
+  KASSERT signature is **0 across the pre-lockdep baseline AND 0
+  across 6 reverted-tree boots, present only with the commit
+  applied**. (Red herring excluded: the `[ubsan] tm-detail
+  null-deref ty='PerCpu'/'u32'/'Task'` lines that appear nearby
+  are pre-existing benign UBSAN noise — an AP reading its
+  `PerCpu` before it is fully armed — and occur ~4×/boot in
+  known-clean boots too. The regression signal is strictly the
+  `WaitQueueBlock` KASSERT panic, not the UBSAN lines.)
   Root hypothesis: `Current()` (= `cpu::CurrentCpu()->current_task`)
   evaluated at the very top of `SchedFinishTaskSwitch` is unsafe
   on the fresh-AP entry path — the existing code below that point
