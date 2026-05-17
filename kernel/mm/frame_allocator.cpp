@@ -73,6 +73,15 @@ using arch::SerialWriteHex;
 constinit u8* g_bitmap = nullptr;
 constinit u64 g_bitmap_frames = 0; // number of frames covered
 constinit u64 g_bitmap_bytes = 0;
+// Highest frame index the allocator will HAND OUT (exclusive). The
+// bitmap is sized to the top of RAM so reserved-region bits exist for
+// MMIO holes the bootloader didn't describe (e.g. the LAPIC window on
+// a >4 GiB box), but every frame actually returned must be reachable
+// through the 1 GiB kernel direct map: AllocateFrame* zeroes each
+// frame via PhysToVirt before handout, and PhysToVirt panics above
+// the direct map. Set once in FrameAllocatorInit; see the init-site
+// comment for why this is a clean OOM rather than the old panic.
+constinit u64 g_alloc_ceiling_frames = 0;
 constinit u64 g_next_hint = 0; // search hint for AllocateFrame
 constinit u64 g_free_count = 0;
 constinit u64 g_total_frames = 0;
@@ -443,6 +452,19 @@ void FrameAllocatorInit(uptr multiboot_info_phys)
     g_bitmap_frames = (highest + kPageSize - 1) >> kPageSizeLog2;
     g_bitmap_bytes = (g_bitmap_frames + 7) >> 3;
 
+    // Clamp the allocation ceiling to the direct map. A box with more
+    // than 1 GiB of RAM (every non-trivial VirtualBox/VMware VM, real
+    // hardware) would otherwise: fill the first GiB during boot, have
+    // a scan pick the first free frame above it, then hard-panic in
+    // PhysToVirt the instant the allocator tried to zero it. The
+    // single-frame path already enforced this contract by *panicking*
+    // (AllocateFrameAtIndex "frame past direct map, cannot zero"); we
+    // now enforce it by *not scanning there*, so the over-1-GiB case
+    // degrades to a clean kNullFrame the existing callers already
+    // handle instead of taking down the box.
+    constexpr u64 kDirectMapFrames = kDirectMapBytes >> kPageSizeLog2;
+    g_alloc_ceiling_frames = (g_bitmap_frames < kDirectMapFrames) ? g_bitmap_frames : kDirectMapFrames;
+
     const auto* info = reinterpret_cast<const MultibootInfoHeader*>(multiboot_info_phys);
     const u64 info_size = info->total_size;
 
@@ -620,8 +642,8 @@ u64 BitmapFindFreeLinear(u64 lo, u64 hi)
 
 u64 BitmapFindFreeBelow(u64 max_frames)
 {
-    if (max_frames > g_bitmap_frames)
-        max_frames = g_bitmap_frames;
+    if (max_frames > g_alloc_ceiling_frames)
+        max_frames = g_alloc_ceiling_frames;
     if (max_frames == 0)
         return g_bitmap_frames;
     const u64 start = (g_next_hint < max_frames) ? g_next_hint : 0;
@@ -644,10 +666,10 @@ u64 BitmapFindFreeBelow(u64 max_frames)
 // NUMA-biased path so the calling CPU's local node gets first dibs.
 u64 BitmapFindFreeInRange(u64 lo, u64 hi, u64 hint)
 {
-    if (lo >= g_bitmap_frames)
+    if (lo >= g_alloc_ceiling_frames)
         return g_bitmap_frames;
-    if (hi > g_bitmap_frames)
-        hi = g_bitmap_frames;
+    if (hi > g_alloc_ceiling_frames)
+        hi = g_alloc_ceiling_frames;
     if (hi <= lo)
         return g_bitmap_frames;
     if (hint < lo || hint >= hi)
@@ -961,11 +983,11 @@ PhysAddr AllocateFrameNode(u8 node)
     }
     // Global linear scan (UMA fallback). Identical semantics to the
     // pre-NUMA AllocateFrame loop.
-    for (u64 i = 0; i < g_bitmap_frames; ++i)
+    for (u64 i = 0; i < g_alloc_ceiling_frames; ++i)
     {
         u64 frame = g_next_hint + i;
-        if (frame >= g_bitmap_frames)
-            frame -= g_bitmap_frames;
+        if (frame >= g_alloc_ceiling_frames)
+            frame -= g_alloc_ceiling_frames;
         if (!BitmapIsUsed(frame))
         {
             return ProcessAndReturnFrame(frame, /*node=*/acpi::srat::kNoNode);
@@ -1053,10 +1075,10 @@ PhysAddr AllocateFrame()
         }
         --g_fail_after;
     }
-    for (u64 i = 0; i < g_bitmap_frames; ++i)
+    for (u64 i = 0; i < g_alloc_ceiling_frames; ++i)
     {
         const u64 frame = g_next_hint + i;
-        if (frame >= g_bitmap_frames)
+        if (frame >= g_alloc_ceiling_frames)
         {
             // Wrap the hint and try from 0.
             g_next_hint = 0;
@@ -1266,7 +1288,7 @@ void FrameAllocatorDrainPools()
 
 PhysAddr AllocateContiguousFrames(u64 count)
 {
-    if (count == 0 || count > g_bitmap_frames)
+    if (count == 0 || count > g_alloc_ceiling_frames)
     {
         return kNullFrame;
     }
@@ -1297,7 +1319,7 @@ PhysAddr AllocateContiguousFrames(u64 count)
     // demand it (i.e., when we see the cost in profiles, not before).
     u64 run_start = 0;
     u64 run_len = 0;
-    for (u64 frame = 0; frame < g_bitmap_frames; ++frame)
+    for (u64 frame = 0; frame < g_alloc_ceiling_frames; ++frame)
     {
         if (BitmapIsUsed(frame))
         {
@@ -1326,17 +1348,20 @@ PhysAddr AllocateContiguousFrames(u64 count)
 
 PhysAddr AllocateContiguousFramesInRange(u64 count, PhysAddr max_phys)
 {
-    if (count == 0 || count > g_bitmap_frames)
+    if (count == 0 || count > g_alloc_ceiling_frames)
     {
         return kNullFrame;
     }
     // max_phys == 0 == no upper bound, matching AllocateFrameInRange.
-    u64 max_frames = g_bitmap_frames;
+    // Either way the run must stay inside the direct map (the caller
+    // will PhysToVirt the result) — clamp to the allocation ceiling,
+    // not the full bitmap.
+    u64 max_frames = g_alloc_ceiling_frames;
     if (max_phys != 0)
     {
         max_frames = max_phys >> kPageSizeLog2;
-        if (max_frames > g_bitmap_frames)
-            max_frames = g_bitmap_frames;
+        if (max_frames > g_alloc_ceiling_frames)
+            max_frames = g_alloc_ceiling_frames;
     }
     if (count > max_frames)
         return kNullFrame;
