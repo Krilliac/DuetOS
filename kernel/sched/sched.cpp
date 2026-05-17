@@ -567,6 +567,12 @@ cpu::PerCpu* TargetPerCpuFor(Task* t)
 
 void RunqueuePushOn(cpu::PerCpu* target, Task* t)
 {
+    // Documented-but-unchecked precondition (see the "Caller holds
+    // g_sched_lock" block above): every enqueue funnels here, so a
+    // caller that forgot the lock corrupts a per-CPU runqueue
+    // race-silently. Debug-panic / release-warn — a missed lock is
+    // a development-time concurrency bug, not a security hole.
+    sync::SpinLockAssertHeld(g_sched_lock);
     // A null task on the runqueue would panic Schedule() later with
     // a less informative call site. Catch the bad caller here.
     KASSERT(t != nullptr, "sched", "RunqueuePush(nullptr)");
@@ -729,6 +735,9 @@ template <typename F> bool ForEachRunqueueTask(F&& fn)
 // CPU has no work and falls through to its idle task.
 Task* RunqueuePop()
 {
+    // Dequeue funnel — same documented g_sched_lock precondition as
+    // RunqueuePushOn; an unlocked pop races every concurrent push.
+    sync::SpinLockAssertHeld(g_sched_lock);
     cpu::PerCpu* p = cpu::CurrentCpu();
     Task* t = RunqHeadNormal(p);
     if (t != nullptr)
@@ -842,6 +851,10 @@ bool SuspendedListRemove(Task* t)
 // fallback iteration order to avoid AB/BA deadlock.
 Task* StealNormalFromPeer()
 {
+    // Cross-CPU runqueue mutator: reaches into a peer CPU's queue.
+    // The "Caller must hold g_sched_lock" contract above is what
+    // makes that safe today; enforce it rather than just document.
+    sync::SpinLockAssertHeld(g_sched_lock);
     cpu::PerCpu* self = cpu::CurrentCpu();
     if (self == nullptr)
     {
@@ -972,6 +985,9 @@ u32 PickBalanceVictim(u32 self_cpu, u16 self_cluster, u32 self_len)
 // update) stay identical to the existing steal path.
 Task* BalancePullOnce(cpu::PerCpu* self)
 {
+    // Cross-CPU runqueue mutator (mirrors StealNormalFromPeer's
+    // pop/push contract). Same documented g_sched_lock precondition.
+    sync::SpinLockAssertHeld(g_sched_lock);
     if (self == nullptr)
     {
         return nullptr;
@@ -3616,6 +3632,10 @@ namespace
 // to splice the mutex hand-off + self-enqueue atomically.
 Task* WaitQueueWakeOneLocked(WaitQueue* wq)
 {
+    // "Caller must hold g_sched_lock" (above): this does a runqueue
+    // push as part of the wake, so an unlocked call races the
+    // scheduler. The _Locked suffix is the contract — assert it.
+    sync::SpinLockAssertHeld(g_sched_lock);
     Task* t = wq->head;
     if (t == nullptr)
     {
