@@ -90,27 +90,54 @@ bool MountPrefixMatch(const char* path, u32 path_len, const char* mount_point, u
     return path[mount_len] == '\0' || path[mount_len] == '/';
 }
 
-// Dentry cache. Maps (parent, component_name) → child for ramfs
-// directory lookups. The ramfs trees are constexpr / `.rodata` so
-// we can't store hash links inside the nodes themselves; this is
-// a side table of cached hits (only successful FindChild results
-// land here). Subsequent lookups of the same component within
-// the same parent skip the linear scan.
+// Dentry cache. Maps (parent, component_name) → child (or
+// not-found) for ramfs directory lookups. The ramfs trees are
+// constexpr / `.rodata` so we can't store hash links inside the
+// nodes themselves; this is a side table.
 //
-// Size: 128 slots × 24 B = ~3 KiB. Single-bucket open addressing
-// — on collision the older entry is overwritten. Hit-only caching
-// keeps the eviction policy trivial; misses always pay the
-// linear scan, which is fine because the ramfs tree is small
-// and each missed name is unlikely to be repeated under the
-// same parent.
+// Both positive (resolved) AND negative (component-not-found)
+// results are memoized. Negative caching is what kills the
+// repeated-probe storm: loader / DLL-search / shell-completion
+// callers probe the same absent name under the same parent over
+// and over, and every miss was paying the full O(children)
+// linear scan. The FAT32 path cache memoizes negatives for the
+// identical reason; this brings the ramfs layer to parity.
+//
+// CONTRACT — why negatives need no invalidation: the ramfs tree
+// *topology* (the set of child names reachable under any node) is
+// immutable for the kernel's lifetime. `RamfsInit` is a no-op and
+// `RamfsTeardown` only rewinds /proc · /sys snapshot file_size —
+// it never adds, removes, or renames a node. So a negative answer
+// for (parent, name) stays true forever and the cache needs no
+// generation counter. If a future slice makes the ramfs tree
+// mutable at runtime, it MUST flush this cache (add a generation
+// bump here and call it from the mutator) — a stale negative is a
+// correctness bug, not just a perf miss.
+//
+// Size: 128 slots × ~88 B = ~11 KiB. Single-bucket open
+// addressing — on collision the older entry is overwritten,
+// keeping eviction trivial. A negative entry stores the probed
+// name inline (positives recover it from `child->name`); names
+// longer than the inline cap simply aren't negatively cached
+// (still correct, just an uncached re-scan), mirroring the FAT32
+// path cache's key-length degradation.
 constexpr u32 kDentryCacheSize = 128;
 static_assert((kDentryCacheSize & (kDentryCacheSize - 1)) == 0, "dentry cache size must be a power of two");
 
+// Inline storage for a negatively-cached component name. Generous
+// vs. real ramfs component names ("boottrace", "syscalls", …).
+constexpr u32 kDentryNegNameCap = 64;
+
 struct DentryCacheEntry
 {
-    const RamfsNode* parent; ///< nullptr = empty slot
+    // Slot state is encoded by (parent, child):
+    //   parent == nullptr               → empty slot
+    //   parent != nullptr, child != null → positive (verify via child->name)
+    //   parent != nullptr, child == null → negative (verify via neg_name)
+    const RamfsNode* parent;
     const RamfsNode* child;
-    u32 name_hash; ///< Full hash; used as a quick tiebreaker against same-bucket misses.
+    u32 name_hash;                    ///< Full hash; quick tiebreaker against same-bucket misses.
+    char neg_name[kDentryNegNameCap]; ///< NUL-terminated; meaningful only for negative entries.
 };
 
 constinit DentryCacheEntry g_dentry_cache[kDentryCacheSize] = {};
@@ -131,23 +158,42 @@ inline u32 DentryHash(const RamfsNode* parent, const char* name, u64 name_len)
     return h;
 }
 
-const RamfsNode* DentryCacheLookup(const RamfsNode* parent, const char* name, u64 name_len)
+enum class DentryProbe
+{
+    Miss,     ///< not in cache — caller must scan
+    Positive, ///< resolved; *out_child set
+    Negative, ///< cached not-found; caller returns nullptr without scanning
+};
+
+// Tri-state cache probe. A negative hit short-circuits the
+// O(children) scan exactly like a positive one, so it counts as a
+// cache hit for stats purposes.
+DentryProbe DentryCacheProbe(const RamfsNode* parent, const char* name, u64 name_len, const RamfsNode** out_child)
 {
     const u32 hash = DentryHash(parent, name, name_len);
-    const u32 bucket = hash & (kDentryCacheSize - 1);
-    const DentryCacheEntry& e = g_dentry_cache[bucket];
-    if (e.parent != parent || e.name_hash != hash || e.child == nullptr)
+    const DentryCacheEntry& e = g_dentry_cache[hash & (kDentryCacheSize - 1)];
+    if (e.parent != parent || e.name_hash != hash)
     {
-        return nullptr;
+        return DentryProbe::Miss;
     }
-    // Verify the actual name bytes match — the hash + parent equality
-    // is necessary but not sufficient (32-bit hash collisions exist).
-    if (!StrEqN(name, name_len, e.child->name))
+    // hash + parent equality is necessary but not sufficient
+    // (32-bit hash collisions exist) — verify the name bytes.
+    if (e.child != nullptr)
     {
-        return nullptr;
+        if (!StrEqN(name, name_len, e.child->name))
+        {
+            return DentryProbe::Miss;
+        }
+        ++g_dentry_cache_hits;
+        *out_child = e.child;
+        return DentryProbe::Positive;
+    }
+    if (!StrEqN(name, name_len, e.neg_name))
+    {
+        return DentryProbe::Miss;
     }
     ++g_dentry_cache_hits;
-    return e.child;
+    return DentryProbe::Negative;
 }
 
 void DentryCacheInsert(const RamfsNode* parent, const RamfsNode* child)
@@ -158,10 +204,28 @@ void DentryCacheInsert(const RamfsNode* parent, const RamfsNode* child)
     }
     const u64 name_len = CStrLen(child->name);
     const u32 hash = DentryHash(parent, child->name, name_len);
-    const u32 bucket = hash & (kDentryCacheSize - 1);
-    g_dentry_cache[bucket].parent = parent;
-    g_dentry_cache[bucket].child = child;
-    g_dentry_cache[bucket].name_hash = hash;
+    DentryCacheEntry& e = g_dentry_cache[hash & (kDentryCacheSize - 1)];
+    e.parent = parent;
+    e.child = child;
+    e.name_hash = hash;
+}
+
+void DentryCacheInsertNegative(const RamfsNode* parent, const char* name, u64 name_len)
+{
+    if (parent == nullptr || name == nullptr || name_len >= kDentryNegNameCap)
+    {
+        return; // un-cacheable: lookups still correct, just an uncached re-scan
+    }
+    const u32 hash = DentryHash(parent, name, name_len);
+    DentryCacheEntry& e = g_dentry_cache[hash & (kDentryCacheSize - 1)];
+    e.parent = parent;
+    e.child = nullptr; // negative marker
+    e.name_hash = hash;
+    for (u64 i = 0; i < name_len; ++i)
+    {
+        e.neg_name[i] = name[i];
+    }
+    e.neg_name[name_len] = '\0';
 }
 
 // Locate a child named [name, name+name_len) inside `dir`. Hits the
@@ -174,9 +238,15 @@ const RamfsNode* FindChild(const RamfsNode* dir, const char* name, u64 name_len)
     {
         return nullptr;
     }
-    if (const RamfsNode* hit = DentryCacheLookup(dir, name, name_len))
+    const RamfsNode* hit = nullptr;
+    switch (DentryCacheProbe(dir, name, name_len, &hit))
     {
+    case DentryProbe::Positive:
         return hit;
+    case DentryProbe::Negative:
+        return nullptr;
+    case DentryProbe::Miss:
+        break;
     }
     ++g_dentry_cache_misses;
     for (u64 i = 0; dir->children[i] != nullptr; ++i)
@@ -188,6 +258,7 @@ const RamfsNode* FindChild(const RamfsNode* dir, const char* name, u64 name_len)
             return c;
         }
     }
+    DentryCacheInsertNegative(dir, name, name_len);
     return nullptr;
 }
 
@@ -593,6 +664,20 @@ void VfsSelfTest()
     Expect(VfsLookup(trusted, "/nope", 64) == nullptr, "missing top-level rejected");
     Expect(VfsLookup(trusted, "/etc/nope", 64) == nullptr, "missing leaf rejected");
     Expect(VfsLookup(trusted, "/nope/version", 64) == nullptr, "missing intermediate rejected");
+
+    // ----- Negative dentry cache: a memoized not-found stays
+    // not-found, and must not poison a real sibling under the same
+    // parent (StrEqN verification guards same-bucket collisions).
+    // The first probe seeds the negative entry; the second is the
+    // cached path; the interleaved real lookups prove the negative
+    // entry doesn't shadow a true child.
+    Expect(VfsLookup(trusted, "/etc/absent", 64) == nullptr, "neg-cache: first miss");
+    Expect(VfsLookup(trusted, "/etc/absent", 64) == nullptr, "neg-cache: cached miss still missing");
+    Expect(VfsLookup(trusted, "/etc/version", 64) == version, "neg-cache: real sibling unaffected after miss");
+    Expect(VfsLookup(trusted, "/etc/absent", 64) == nullptr, "neg-cache: miss survives a real lookup");
+    Expect(VfsLookup(trusted, "/absent_top", 64) == nullptr, "neg-cache: top-level first miss");
+    Expect(VfsLookup(trusted, "/absent_top", 64) == nullptr, "neg-cache: top-level cached miss");
+    Expect(VfsLookup(trusted, "/etc", 64) == etc, "neg-cache: real top-level unaffected");
 
     // ----- path_max truncation: a short cap stops the scan early -----
     // "/etc/version" = 12 bytes; cap at 4 chars sees "/etc" only and resolves to the dir.

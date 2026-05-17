@@ -39,6 +39,18 @@ cannot name `/etc/version` even if the global VFS contains it. The
 boot-time VFS self-test asserts this (`"JAIL BROKEN"` in the panic if
 it regresses).
 
+Ramfs component lookups go through a 128-slot direct-mapped **dentry
+cache** keyed on `(parent, name)`. Both resolved *and* not-found
+results are memoized — negative caching kills the repeated-absent-name
+probe storm (loader / DLL-search / shell-completion) that otherwise
+re-pays an O(children) linear scan every call. Because the ramfs tree
+topology is immutable for the kernel's lifetime (`RamfsInit` is a
+no-op; `RamfsTeardown` only rewinds /proc·/sys snapshot sizes, never
+adds/removes/renames a node), negative entries need **no invalidation
+or generation counter**. A future mutable-ramfs slice must flush this
+cache — the in-code `CONTRACT` comment in `vfs.cpp` pins the
+invariant.
+
 ## Backends
 
 | Backend | Path | Status |
