@@ -26,6 +26,14 @@
  *   - SYSCALL, SYSRET
  *   - NOP (single-byte + multi-byte 0F 1F variants)
  *   - HLT, CLI, STI, CLD, STD, IRETQ, LEAVE
+ *   - SSE/SSE2 two-XMM-operand subset: MOV{UP,AP,DQ}{S,D} /
+ *     MOV{SS,SD}, the scalar+packed arith family (ADD/SUB/MUL/
+ *     DIV/MIN/MAX/SQRT/CVT, prefix-selected ss/sd/ps/pd),
+ *     U/COMIS{S,D}, AND/ANDN/OR/XORP{S,D}, P{XOR,AND,ANDN,OR},
+ *     UNPCKL/H P{S,D}
+ *   - SSE XMM<->GPR forms: MOVD/MOVQ, CVTSI2SS/SD,
+ *     CVT(T)SS2SI/SD2SI, MOVNTI
+ *   - MOV{L,H}PS / MOV{L,H}PD / MOVLHPS / MOVHLPS
  *
  * Bytes outside the covered set decode as `db 0xXX` with the
  * `inspect::ClassifyByte` hint stitched into the operands field
@@ -34,7 +42,9 @@
  * covered set; for `db` rows we conservatively consume one byte.
  *
  * Out of scope (deliberate, marked `// GAP:` at sites):
- *   - SIMD / AVX / VEX / EVEX / x87
+ *   - The integer-SIMD PUNPCK/PSHUF/PADD/PCMP/PMOVMSKB family,
+ *     the SSE3 dup moves (MOVDDUP / MOVS[LH]DUP), x87,
+ *     AVX/VEX/EVEX
  *   - The full string-op family (REP MOVS / SCAS / CMPS)
  *   - Far calls / jumps, segment-prefix-modulated mem operands
  *   - Privileged op decoding beyond what the kernel itself uses

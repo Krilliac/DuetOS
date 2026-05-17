@@ -2,10 +2,10 @@
 #include "drivers/virtio/virtio.h"
 #include "drivers/virtio/virtio_pci.h"
 
-#include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
+#include "sched/sched.h"
 
 /*
  * virtio-blk — block device.
@@ -35,11 +35,18 @@
  * 512 unless `VIRTIO_BLK_F_BLK_SIZE` is offered (read from
  * `device_cfg + 20` in that case).
  *
- * Per-process / multi-queue locking is GAP: v0 assumes a
- * single in-flight request at a time, which holds for the
- * boot path (one shell, no parallel I/O). A real driver gates
- * the request chain on a spinlock and uses multiple chains
- * concurrently.
+ * Concurrent callers are serialised on a per-device sleeping
+ * `req_lock`: the shared header page + the single descriptor
+ * chain (descriptors 0..2) are reused per request, so two
+ * callers racing would corrupt each other's chain. The lock
+ * is a sched::Mutex rather than a SpinLock because the holder
+ * busy-polls the device for completion (up to ~5M `pause`
+ * iterations) — spinning with IRQs disabled across that window
+ * would starve the timer/scheduler; a contending caller sleeps
+ * instead. GAP: still one in-flight request at a time (one
+ * descriptor chain). A throughput slice that wants real
+ * parallelism needs multiple chains + IRQ-driven completion;
+ * correctness under concurrency is no longer the blocker.
  */
 
 namespace duetos::drivers::virtio
@@ -86,6 +93,12 @@ struct DeviceState
 
     u32 sector_size;
     u64 sector_count;
+
+    // Serialises the shared header page + the reused descriptor
+    // chain across concurrent BlockDeviceRead/Write/Flush callers.
+    // Uncontended fast path is a single CAS — no cost on the
+    // single-threaded boot path.
+    duetos::sched::Mutex req_lock;
 };
 
 constinit DeviceState g_blk = {};
@@ -108,6 +121,14 @@ i32 VirtioBlkBlockRequest(DeviceState* dev, u64 lba, u32 count, void* buf, bool 
         KLOG_WARN("drivers/virtio/blk", "VirtToPhys returned 0; buf not in direct map?");
         return -1;
     }
+
+    // The shared header page + the single descriptor chain are
+    // reused per request — serialise concurrent callers. Lock is
+    // taken AFTER the cheap argument validation above (which
+    // touches no shared state) so a bad call returns without ever
+    // contending. Single return point below keeps lock/unlock
+    // balanced across every exit.
+    duetos::sched::MutexLock(&dev->req_lock);
 
     // Populate header at offset 0, status at offset 16 of the
     // shared scratch page. Status is reset to a sentinel the
@@ -140,6 +161,7 @@ i32 VirtioBlkBlockRequest(DeviceState* dev, u64 lba, u32 count, void* buf, bool 
     d[2].next = 0;
 
     VirtioQueuePublish(&dev->layout, &dev->q, /*desc_head=*/0);
+    i32 rc = -1;
     for (u32 spin = 0; spin < 5000000; ++spin)
     {
         u32 head = 0;
@@ -147,13 +169,16 @@ i32 VirtioBlkBlockRequest(DeviceState* dev, u64 lba, u32 count, void* buf, bool 
         if (VirtioQueueTryPop(&dev->q, &head, &used_len))
         {
             if (*status == kBlkStatusOk)
-                return 0;
-            KLOG_WARN_V("drivers/virtio/blk", "request completed non-OK", static_cast<u64>(*status));
-            return -1;
+                rc = 0;
+            else
+                KLOG_WARN_V("drivers/virtio/blk", "request completed non-OK", static_cast<u64>(*status));
+            duetos::sched::MutexUnlock(&dev->req_lock);
+            return rc;
         }
         asm volatile("pause" ::: "memory");
     }
     KLOG_WARN("drivers/virtio/blk", "request poll timed out");
+    duetos::sched::MutexUnlock(&dev->req_lock);
     return -1;
 }
 
@@ -178,6 +203,12 @@ i32 VirtioBlkBlockFlush(void* cookie)
     auto* dev = static_cast<DeviceState*>(cookie);
     if (dev == nullptr || !dev->up)
         return -1;
+
+    // Shares the header page + descriptor chain with the read/write
+    // path — same per-device serialisation, same single-exit
+    // lock/unlock discipline.
+    duetos::sched::MutexLock(&dev->req_lock);
+
     // VIRTIO_BLK_T_FLUSH: header.sector is ignored, no data
     // descriptor — the chain is header + status only. Reuse the
     // shared scratch page; sector field set to 0 for cleanliness.
@@ -204,10 +235,15 @@ i32 VirtioBlkBlockFlush(void* cookie)
         u32 head = 0;
         u32 used_len = 0;
         if (VirtioQueueTryPop(&dev->q, &head, &used_len))
-            return (*status == kBlkStatusOk) ? 0 : -1;
+        {
+            const i32 rc = (*status == kBlkStatusOk) ? 0 : -1;
+            duetos::sched::MutexUnlock(&dev->req_lock);
+            return rc;
+        }
         asm volatile("pause" ::: "memory");
     }
     KLOG_WARN("drivers/virtio/blk", "flush poll timed out");
+    duetos::sched::MutexUnlock(&dev->req_lock);
     return -1;
 }
 
@@ -313,16 +349,12 @@ bool VirtioBlkProbe(const VirtioPciLayout& L)
 
     KLOG_INFO_2V("drivers/virtio/blk", "attached as block device", "sectors", capacity, "sector-size",
                  static_cast<u64>(sector_size));
-    // GAP: single-in-flight request assumption — the shared
-    // header page + no per-call locking means concurrent
-    // BlockDeviceRead / Write / Flush calls would corrupt each
-    // other's descriptors. Boot-smoke workload is single-thread,
-    // so this is observed-safe for v0; a future slice that
-    // issues concurrent I/O needs either a per-call header alloc
-    // or a serialising mutex around the request path. Read /
-    // Write / Flush are all wired through the BlockOps vtable
-    // today.
-    FIX_NOTE_GAP("drivers/virtio/virtio_blk.cpp:SingleInflight", "serialise concurrent virtio-blk req descriptors");
+    // Concurrent BlockDeviceRead / Write / Flush are now safe —
+    // each serialises on g_blk.req_lock around the shared header
+    // page + descriptor chain. Read / Write / Flush are all wired
+    // through the BlockOps vtable. Higher throughput (multiple
+    // in-flight chains + IRQ-driven completion instead of the
+    // bounded poll) is a roadmap item, not a correctness GAP.
     return true;
 }
 

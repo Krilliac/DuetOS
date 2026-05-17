@@ -1517,13 +1517,17 @@ it."
   through `VIRTIO_BLK_T_FLUSH` via the same shared scratch
   page; the other registered backends (RAM disk, partition
   view, NVMe, AHCI) declare `flush = nullptr` until their
-  own flush primitives wire up.
+  own flush primitives wire up. Concurrent
+  read/write/flush callers are serialised on a per-device
+  `sched::Mutex` around the shared header page + descriptor
+  chain — concurrency safety is no longer the blocker.
 - **Lands:**
-  - Per-call locking once concurrent I/O matters (today's
-    single-in-flight model is observed-safe on the boot
-    path).
   - IRQ wire-up so consumers don't pay a busy-poll for I/O
     that's already serviced by the host.
+  - Throughput: multiple in-flight descriptor chains so a
+    second caller isn't fully serialised behind the first
+    (depends on IRQ-driven completion landing first — the
+    poll model can only track one chain).
 
 ### VirtIO — per-class polish
 
@@ -1543,14 +1547,16 @@ it."
     the receiveq via `VirtioConsolePollByte`.
   - virtio-balloon negotiates + installs inflateq +
     deflateq; the device sees a fully-configured driver.
-  - virtio-input drives the keyboard eventq: a dedicated
+  - virtio-input drives the eventq: a dedicated
     10 ms-cadence `virtio-input-evt-poll` task drains
-    `virtio_input_event` records, translates `EV_KEY`
-    through the shared active PS/2 keymap (Linux keycodes
-    == set-1 scancodes for the AT block), and injects via
-    `KeyboardInjectEvent` — the same input queue PS/2 /
-    xHCI HID / Bluetooth HID feed. `ID_NAME` config read
-    for the boot sentinel.
+    `virtio_input_event` records. `EV_KEY` keyboard codes
+    translate through the shared active PS/2 keymap (Linux
+    keycodes == set-1 scancodes for the AT block) and
+    inject via `KeyboardInjectEvent`; `EV_REL` deltas +
+    `BTN_*` mouse buttons accumulate per frame and flush a
+    `MousePacket` on `EV_SYN` via `MouseInjectPacket` —
+    the same input queues PS/2 / xHCI HID / Bluetooth HID
+    feed. `ID_NAME` config read for the boot sentinel.
 - **Lands:**
   - **virtio-blk concurrency + IRQ** (see entry above).
   - **virtio-console multiport** —
@@ -1560,10 +1566,11 @@ it."
     hands PFNs back on inflate requests. The harder half
     is the "when do we agree to give up memory?" policy;
     spec-pure dispatch is straightforward.
-  - **virtio-input pointer + statusq** — EV_REL / EV_ABS
-    (virtio-mouse / virtio-tablet) decoded into the mouse
-    injection path, plus the statusq for LED / force-
-    feedback. v0 is keyboard-eventq only.
+  - **virtio-input EV_ABS + statusq** — EV_REL pointer
+    (virtio-mouse) landed; EV_ABS (virtio-tablet absolute
+    coordinates) still needs an absolute injection path
+    (the unified `MousePacket` API is relative-only), plus
+    the statusq for LED / force-feedback.
   - IRQ wire-up across the board (rng, blk, net, console,
     balloon, input).
 

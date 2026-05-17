@@ -4,6 +4,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/input/ps2mouse.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -32,10 +33,18 @@
  * `KeyboardInjectEvent`, the same kernel input queue PS/2 / xHCI
  * HID / Bluetooth HID feed.
  *
- * GAP: pointer devices (EV_REL / EV_ABS — virtio-mouse /
- * virtio-tablet) decode to nothing here; the mouse injection path
- * is a separate slice. GAP: single device — a second virtio-input
- * function is rejected (matches virtio-console's v0 stance).
+ * Pointer devices (virtio-mouse) are decoded too: EV_REL deltas
+ * (REL_X / REL_Y / REL_WHEEL) and the mouse-button EV_KEY codes
+ * (BTN_LEFT / RIGHT / MIDDLE / SIDE / EXTRA) accumulate across a
+ * frame and flush as one `MousePacket` on the EV_SYN terminator,
+ * through `MouseInjectPacket` — the same kernel pointer queue
+ * PS/2 / xHCI-HID mice feed (CLAUDE.md rule 6, one source of
+ * truth). GAP: EV_ABS (virtio-tablet absolute coordinates) is not
+ * wired — the unified `MousePacket` API is relative-only, matching
+ * the PS/2 stance that the absolute path lands with USB HID.
+ *
+ * GAP: single device — a second virtio-input function is rejected
+ * (matches virtio-console's v0 stance).
  *
  * Context: kernel. Probe runs at boot (no IRQ); a dedicated poll
  * task drains the eventq on the same 10 ms cadence virtio-net's
@@ -50,11 +59,29 @@ namespace
 
 using duetos::drivers::input::KeyboardInjectEvent;
 using duetos::drivers::input::KeyEvent;
+using duetos::drivers::input::MouseInjectPacket;
+using duetos::drivers::input::MousePacket;
 namespace input = duetos::drivers::input;
 
 // evdev event types (linux/input-event-codes.h).
 inline constexpr u16 kEvSyn = 0x00;
 inline constexpr u16 kEvKey = 0x01;
+inline constexpr u16 kEvRel = 0x02;
+
+// evdev relative axes.
+inline constexpr u16 kRelX = 0x00;
+inline constexpr u16 kRelY = 0x01;
+inline constexpr u16 kRelWheel = 0x08;
+
+// evdev mouse-button keycodes. BTN_* codes start at 0x100; any
+// EV_KEY whose code is in this range is pointer-domain, not a
+// keyboard key, and never reaches the keymap.
+inline constexpr u16 kBtnFirst = 0x100;
+inline constexpr u16 kBtnLeft = 0x110;
+inline constexpr u16 kBtnRight = 0x111;
+inline constexpr u16 kBtnMiddle = 0x112;
+inline constexpr u16 kBtnSide = 0x113;
+inline constexpr u16 kBtnExtra = 0x114;
 
 // evdev modifier keycodes.
 inline constexpr u16 kKeyLeftCtrl = 29;
@@ -86,6 +113,14 @@ struct InputState
     bool alt;
     bool meta;
     bool caps;
+    // Pointer accumulator. dx/dy/dz collect EV_REL deltas within a
+    // frame and reset on flush; buttons hold level state (evdev
+    // reports a button only on its press/release edge).
+    i32 ptr_dx;
+    i32 ptr_dy;
+    i32 ptr_dz;
+    u8 ptr_buttons;
+    bool ptr_dirty; // a pointer event arrived since the last EV_SYN
     VirtioPciLayout layout;
     VirtioQueue evtq;
     mm::PhysAddr evt_buf_phys;
@@ -105,6 +140,8 @@ inline constexpr u32 kEvtPollBudget = 32;
 constinit bool g_cap_active = false;
 constinit KeyEvent g_cap_buf[16] = {};
 constinit u32 g_cap_count = 0;
+constinit MousePacket g_cap_mouse_buf[8] = {};
+constinit u32 g_cap_mouse_count = 0;
 
 void EmitEvent(const KeyEvent& ev)
 {
@@ -116,6 +153,18 @@ void EmitEvent(const KeyEvent& ev)
         return;
     }
     KeyboardInjectEvent(ev);
+}
+
+void EmitMouse(const MousePacket& p)
+{
+    if (g_cap_active)
+    {
+        const u32 cap = sizeof(g_cap_mouse_buf) / sizeof(g_cap_mouse_buf[0]);
+        if (g_cap_mouse_count < cap)
+            g_cap_mouse_buf[g_cap_mouse_count++] = p;
+        return;
+    }
+    MouseInjectPacket(p);
 }
 
 u8 ModMask()
@@ -227,15 +276,103 @@ u16 EvdevToKeyCode(u16 code)
     return u16(input::kKeyNone);
 }
 
-// Process one fully-decoded evdev record. EV_KEY drives the
-// keyboard path; EV_SYN and everything else (EV_REL/EV_ABS — see
-// the pointer GAP) are ignored.
+// Accumulate one EV_REL delta into the frame's pending packet.
+// evdev sign conventions already match MousePacket: REL_Y positive
+// = down (screen-space), REL_WHEEL positive = scroll up. REL_HWHEEL
+// and other axes have no MousePacket field and are dropped (mirrors
+// the USB-HID horizontal-tilt stance).
+void HandleRel(u16 code, i32 delta)
+{
+    switch (code)
+    {
+    case kRelX:
+        g_input.ptr_dx += delta;
+        break;
+    case kRelY:
+        g_input.ptr_dy += delta;
+        break;
+    case kRelWheel:
+        g_input.ptr_dz += delta;
+        break;
+    default:
+        return; // unmapped axis — no frame activity
+    }
+    g_input.ptr_dirty = true;
+}
+
+// Update level-state for a mouse button (BTN_* EV_KEY code). Unknown
+// BTN_* codes (joystick / tool) are pointer-domain but unmapped, so
+// they neither toggle a button nor leak into the keymap.
+void HandleButton(u16 code, bool down)
+{
+    u8 bit = 0;
+    switch (code)
+    {
+    case kBtnLeft:
+        bit = input::kMouseButtonLeft;
+        break;
+    case kBtnRight:
+        bit = input::kMouseButtonRight;
+        break;
+    case kBtnMiddle:
+        bit = input::kMouseButtonMiddle;
+        break;
+    case kBtnSide:
+        bit = input::kMouseButton4;
+        break;
+    case kBtnExtra:
+        bit = input::kMouseButton5;
+        break;
+    default:
+        return;
+    }
+    if (down)
+        g_input.ptr_buttons |= bit;
+    else
+        g_input.ptr_buttons &= static_cast<u8>(~bit);
+    g_input.ptr_dirty = true;
+}
+
+// EV_SYN terminator: emit one MousePacket if any pointer event
+// arrived this frame. Deltas reset; button level-state persists.
+void FlushPointer()
+{
+    if (!g_input.ptr_dirty)
+        return;
+    MousePacket p{};
+    p.dx = g_input.ptr_dx;
+    p.dy = g_input.ptr_dy;
+    p.dz = g_input.ptr_dz;
+    p.buttons = g_input.ptr_buttons;
+    EmitMouse(p);
+    g_input.ptr_dx = 0;
+    g_input.ptr_dy = 0;
+    g_input.ptr_dz = 0;
+    g_input.ptr_dirty = false;
+}
+
+// Process one fully-decoded evdev record. EV_KEY (keyboard codes)
+// drives the keyboard path; EV_REL and the BTN_* EV_KEY codes drive
+// the pointer accumulator, flushed on EV_SYN. EV_ABS is GAPped.
 void TranslateRecord(const virtio_input_event& e)
 {
     if (e.type == kEvSyn)
+    {
+        FlushPointer();
         return;
+    }
+    if (e.type == kEvRel)
+    {
+        HandleRel(e.code, static_cast<i32>(e.value));
+        return;
+    }
     if (e.type != kEvKey)
-        return; // GAP: EV_REL / EV_ABS pointer events not wired.
+        return; // GAP: EV_ABS (virtio-tablet) — no absolute MousePacket path
+    if (e.code >= kBtnFirst)
+    {
+        HandleButton(e.code, e.value != 0);
+        return;
+    }
 
     const bool pressed = (e.value != 0);    // 1 press, 2 autorepeat
     const bool is_release = (e.value == 0); // 0 release
@@ -382,9 +519,9 @@ bool VirtioInputProbe(const VirtioPciLayout& L)
     duetos::sched::SchedCreate(VirtioInputPollEntry, nullptr, "virtio-input-evt-poll");
 
     if (name[0] != 0)
-        KLOG_INFO_S("drivers/virtio/input", "attached (keyboard, eventq)", "name", name);
+        KLOG_INFO_S("drivers/virtio/input", "attached (keyboard/pointer, eventq)", "name", name);
     else
-        KLOG_INFO("drivers/virtio/input", "attached (keyboard, eventq)");
+        KLOG_INFO("drivers/virtio/input", "attached (keyboard/pointer, eventq)");
     return true;
 }
 
@@ -407,6 +544,22 @@ virtio_input_event MkKey(u16 code, u32 value)
     e.type = kEvKey;
     e.code = code;
     e.value = value;
+    return e;
+}
+
+virtio_input_event MkRel(u16 code, i32 value)
+{
+    virtio_input_event e{};
+    e.type = kEvRel;
+    e.code = code;
+    e.value = static_cast<u32>(value);
+    return e;
+}
+
+virtio_input_event MkSyn()
+{
+    virtio_input_event e{};
+    e.type = kEvSyn;
     return e;
 }
 
@@ -455,22 +608,59 @@ void VirtioInputSelfTest()
     TranslateRecord(MkKey(103, 1));
     Expect(g_cap_count == 1 && g_cap_buf[0].code == u16(input::kKeyArrowUp), "Up maps to kKeyArrowUp");
 
-    // EV_SYN frame terminator and an unmapped EV_REL produce nothing.
+    // A bare EV_SYN with no preceding pointer activity emits nothing
+    // on either queue.
     g_cap_count = 0;
-    virtio_input_event syn{};
-    syn.type = kEvSyn;
-    TranslateRecord(syn);
-    virtio_input_event rel{};
-    rel.type = 0x02; // EV_REL
-    rel.code = 0;
-    rel.value = 1;
-    TranslateRecord(rel);
-    Expect(g_cap_count == 0, "EV_SYN + EV_REL yield no events");
+    g_cap_mouse_count = 0;
+    TranslateRecord(MkSyn());
+    Expect(g_cap_count == 0 && g_cap_mouse_count == 0, "lone EV_SYN yields nothing");
+
+    // Pointer: REL_X=+5, REL_Y=-3 then EV_SYN → one MousePacket.
+    g_cap_mouse_count = 0;
+    TranslateRecord(MkRel(kRelX, 5));
+    TranslateRecord(MkRel(kRelY, -3));
+    Expect(g_cap_mouse_count == 0, "REL deltas do not emit before EV_SYN");
+    TranslateRecord(MkSyn());
+    Expect(g_cap_mouse_count == 1, "EV_SYN flushes one MousePacket");
+    Expect(g_cap_mouse_buf[0].dx == 5 && g_cap_mouse_buf[0].dy == -3, "REL deltas decoded (dy down-positive)");
+    Expect(g_cap_mouse_buf[0].buttons == 0, "no buttons held");
+
+    // Button level-state: BTN_LEFT down persists across frames; the
+    // delta resets after the previous flush.
+    g_cap_mouse_count = 0;
+    TranslateRecord(MkKey(kBtnLeft, 1));
+    TranslateRecord(MkSyn());
+    Expect(g_cap_mouse_count == 1 && (g_cap_mouse_buf[0].buttons & input::kMouseButtonLeft) != 0,
+           "BTN_LEFT press surfaces");
+    Expect(g_cap_mouse_buf[0].dx == 0 && g_cap_mouse_buf[0].dy == 0, "deltas reset after prior flush");
+    g_cap_mouse_count = 0;
+    TranslateRecord(MkRel(kRelWheel, 1));
+    TranslateRecord(MkSyn());
+    Expect(g_cap_mouse_count == 1 && g_cap_mouse_buf[0].dz == 1, "REL_WHEEL +1 decoded (up-positive)");
+    Expect((g_cap_mouse_buf[0].buttons & input::kMouseButtonLeft) != 0, "held button persists across frames");
+    // Release BTN_LEFT and flush its frame so the pending edge does
+    // not leak into the next sub-test.
+    g_cap_mouse_count = 0;
+    TranslateRecord(MkKey(kBtnLeft, 0));
+    TranslateRecord(MkSyn());
+    Expect(g_cap_mouse_count == 1 && g_cap_mouse_buf[0].buttons == 0, "BTN_LEFT release clears the bit");
+
+    // An unmapped BTN_* code is pointer-domain: it neither toggles a
+    // button nor reaches the keymap, so the frame stays empty.
+    g_cap_count = 0;
+    g_cap_mouse_count = 0;
+    TranslateRecord(MkKey(0x120, 1)); // BTN_TRIGGER (joystick)
+    TranslateRecord(MkSyn());
+    Expect(g_cap_count == 0 && g_cap_mouse_count == 0, "unmapped BTN_* yields nothing");
 
     // Teardown: leave decoder state pristine for production.
     g_input.shift = g_input.ctrl = g_input.alt = g_input.meta = g_input.caps = false;
+    g_input.ptr_dx = g_input.ptr_dy = g_input.ptr_dz = 0;
+    g_input.ptr_buttons = 0;
+    g_input.ptr_dirty = false;
     g_cap_active = false;
     g_cap_count = 0;
+    g_cap_mouse_count = 0;
     arch::SerialWrite("[virtio-input] selftest pass\n");
 }
 

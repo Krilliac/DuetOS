@@ -85,12 +85,19 @@ device is skipped (with a `KLOG_WARN` for the operator).
   device-read), data (caller-supplied, device-read or -write), status
   (1 B, device-write).
 - **Features negotiated**: `SEG_MAX`, `GEOMETRY`, `RO`.
-- **Read/write/flush**: read + write wired; flush is currently a
-  no-op (FLUSH-aware host treats it as a barrier; we don't yet flush
-  cache state on the driver side).
+- **Read/write/flush**: all three wired through the `BlockOps`
+  vtable. Flush routes a real `VIRTIO_BLK_T_FLUSH` request (header +
+  status chain, no data descriptor).
+- **Concurrency**: read/write/flush serialise on a per-device
+  `sched::Mutex` (`req_lock`) around the shared header page +
+  reused descriptor chain. A sleeping mutex (not a spinlock)
+  because the holder busy-polls the device for completion;
+  contending callers sleep rather than starve a CPU. The
+  uncontended boot path pays only a single CAS.
 
-GAP: single in-flight request — the next slice adds the multi-tag path
-so the block layer can issue multiple reads concurrently.
+GAP: still one in-flight request at a time (one descriptor chain).
+Higher throughput (multiple chains + IRQ-driven completion) is a
+roadmap item; concurrency *safety* is done.
 
 ### virtio-net — Network Interface
 
@@ -162,7 +169,7 @@ matters even when no other device of its class is in use — the
 entropy contribution is non-trivial on hosts that don't expose
 RDRAND to the guest.
 
-### virtio-input — Keyboard
+### virtio-input — Keyboard + Pointer
 
 [`virtio_input.cpp`](../../kernel/drivers/virtio/virtio_input.cpp).
 PCI class 18 (Input).
@@ -172,23 +179,32 @@ PCI class 18 (Input).
 - **Wire format**: a stream of `virtio_input_event {type, code,
   value}` records, one per used-ring buffer — the exact Linux
   evdev shape.
-- **Decode**: `EV_KEY` records translate to the shared kernel
-  `KeyEvent`. Linux keycodes for the AT 101/104 block are
-  numerically identical to PS/2 set-1 scancodes, so the printable
-  path reuses the **active PS/2 keymap** — the same layout source
-  the PS/2 and USB-HID decoders use (one source of truth). Decoded
-  events go through `KeyboardInjectEvent`, the same input queue
-  PS/2 / xHCI HID / Bluetooth HID feed.
+- **Keyboard decode**: `EV_KEY` keyboard codes translate to the
+  shared kernel `KeyEvent`. Linux keycodes for the AT 101/104
+  block are numerically identical to PS/2 set-1 scancodes, so the
+  printable path reuses the **active PS/2 keymap** — the same
+  layout source the PS/2 and USB-HID decoders use (one source of
+  truth). Decoded events go through `KeyboardInjectEvent`, the
+  same input queue PS/2 / xHCI HID / Bluetooth HID feed.
+- **Pointer decode**: `EV_REL` deltas (`REL_X` / `REL_Y` /
+  `REL_WHEEL`) and the `BTN_*` mouse-button `EV_KEY` codes
+  (`BTN_LEFT` / `RIGHT` / `MIDDLE` / `SIDE` / `EXTRA`) accumulate
+  across a frame and flush as one `MousePacket` on the `EV_SYN`
+  terminator, through `MouseInjectPacket` — the same kernel
+  pointer queue PS/2 / xHCI-HID mice feed. evdev sign conventions
+  already match `MousePacket` (REL_Y down-positive, wheel
+  up-positive). Button state is level-tracked across frames.
 - **Polling cadence**: a dedicated `virtio-input-evt-poll` task
   drains the eventq every 10 ms (same rhythm as `virtio-net-rx`).
 - **Boot sentinel**: the device's `ID_NAME` config string is read
-  and logged (`attached (keyboard, eventq) name="…"`).
+  and logged (`attached (keyboard/pointer, eventq) name="…"`).
 
-GAP: pointer devices (`EV_REL` / `EV_ABS` — virtio-mouse /
-virtio-tablet) are not decoded; mouse injection is a separate
-slice. GAP: single device — a second virtio-input function is
-rejected (matches virtio-console's v0 stance). GAP: IRQ-driven
-eventq delivery is the next layer beyond the poll task.
+GAP: `EV_ABS` (virtio-tablet absolute coordinates) is not wired —
+the unified `MousePacket` API is relative-only, matching the PS/2
+stance that the absolute path lands with USB HID. GAP: single
+device — a second virtio-input function is rejected (matches
+virtio-console's v0 stance). GAP: IRQ-driven eventq delivery is
+the next layer beyond the poll task.
 
 ### virtio-gpu — Display
 
@@ -242,8 +258,9 @@ gate (`kCapFsRead` on `read()` against a virtio-blk-backed file,
 ## Known Limits / GAPs
 
 - **All paths poll.** IRQ wiring deferred across all device classes.
-- **virtio-blk single in-flight.** Multi-tag queue is a near-term
-  follow-up.
+- **virtio-blk single in-flight.** Concurrent callers are
+  serialised (safe); multiple in-flight chains for throughput is a
+  near-term follow-up gated on IRQ-driven completion.
 - **virtio-net RX is polled.** Receiveq is posted and a dedicated
   `virtio-net-rx-poll` task drains it every 10 ms; IRQ-driven delivery
   is the next slice.
