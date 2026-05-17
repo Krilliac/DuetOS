@@ -9194,3 +9194,59 @@ shared input queue) and a clear test path.
   virtio-input keyboard graduates; pointer (EV_REL/EV_ABS) +
   statusq + IRQ delivery remain open. The fabric `// STUB:` now
   covers scsi/socket only.
+
+## 2026-05-17 — DuetOS debug surface rides GDB `qRcmd`, not a parallel protocol
+
+The in-kernel GDB server was already feature-complete for generic
+debugging, but stock GDB cannot express DuetOS-specific state
+(capability bitsets, IPC handle tables, the Win32 window manager,
+probes, kdbg channels). The requirement was "a server a client/
+specialized tool can connect to as a debugger" with full
+introspection + control.
+
+- **Extend the existing server via `qRcmd`; do NOT build a second
+  debug server.** A `duet <verb>` command surface is delivered
+  over the standard GDB `monitor` (`qRcmd,<hex>`) packet, so both
+  a specialized client and stock `gdb` (`monitor duet …`) work
+  against one transport / stop-loop / breakpoint implementation.
+  A parallel debug protocol would have been a new forever-ABI and
+  a second source of truth for "stop the box and inspect it"
+  (CLAUDE.md rule 6). The reviewable signal — "could a malicious
+  PE use this?" — is unchanged: every verb routes through the
+  same physical-serial stop loop the `M`/`G` packets already trust.
+- **Two new TUs, not inline.** `gdb_server.cpp` is already 1.9k
+  lines (over the ~500 threshold). The surface lives in
+  `kernel/diag/gdb_monitor.cpp` (dispatch + MonitorWriter +
+  control verbs + self-test) and `gdb_monitor_read.cpp` (read
+  verbs). The read-only subsystem-API consumers are isolated in
+  one TU for the isolation audit; each TU stays under threshold.
+- **Trust model is the honest one: no `kCapDebug` facade.** There
+  is no authenticated principal on a raw serial transport. The
+  monitor surface inherits the exact boundary the shipped `M`/`G`
+  write packets already have; adding a cap check that gates
+  nothing would be a probe-satisfying facade (CLAUDE.md-forbidden).
+  Documented in `gdb_monitor.h`.
+- **Single reply, hard-truncated; O-packet streaming deferred.**
+  Over-long reports are truncated by `MonitorWriter` with a
+  visible `[truncated]` sentinel — never a malformed/oversized
+  packet. `O<hex>` console-output streaming is a v2 item; the
+  Python client (`tools/debug/duetos-gdb-monitor.py`) already
+  tolerates `O` packets so v2 is client-compatible.
+- **Registry got the only new subsystem API.** Every other verb
+  reused an existing kernel-callable accessor. The Win32 registry
+  had no read-only kernel API, so a narrow `RegistryQuery` (renders
+  text out, no `kRegKeys` pointer escapes) was added to the
+  registry's own header — the same one-source-of-truth pattern
+  `widget.h`'s window accessors already follow. No
+  `Subsystem-Isolation.md` change needed: all reads go through
+  public subsystem APIs.
+- **DLL image names are not tracked.** `core::DllImage` carries no
+  name field, so `duet mods` lists base/size/entry_rva/file_len by
+  index. Naming is a follow-up if a real workload needs it.
+- **Verified:** clean `x86_64-debug` build; boot self-test emits
+  `[gdb-monitor-selftest] PASS`; `boot-log-analyze.sh` verdict OK
+  (0 non-deliberate failures); end-to-end `qRcmd` exercised via
+  the Python client against a `DUETOS_GDB_DEMO=ON` boot.
+- **Related roadmap track(s):** GDB stub completion (peer-thread
+  `vCont;s` remains the only deferred generic item; `qRcmd`
+  `O`-packet streaming is the deferred monitor item).

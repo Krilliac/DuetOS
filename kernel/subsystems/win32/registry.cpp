@@ -1045,6 +1045,95 @@ i64 DoEnumerateKey(arch::TrapFrame* frame)
 
 } // namespace
 
+bool RegistryQuery(u64 root, const char* path, char* out, u32 out_cap)
+{
+    if (out == nullptr || out_cap == 0)
+    {
+        return false;
+    }
+    out[0] = '\0';
+
+    const RegKey* key = LookupKey(root, (path == nullptr) ? "" : path);
+    if (key == nullptr)
+    {
+        return false;
+    }
+
+    u32 pos = 0;
+    auto put = [&](const char* s)
+    {
+        if (s == nullptr)
+        {
+            return;
+        }
+        for (u32 i = 0; s[i] != '\0' && pos + 1 < out_cap; ++i)
+        {
+            out[pos++] = s[i];
+        }
+    };
+    auto put_u32 = [&](u32 v)
+    {
+        char tmp[12];
+        u32 n = 0;
+        if (v == 0)
+        {
+            tmp[n++] = '0';
+        }
+        while (v != 0 && n < sizeof(tmp))
+        {
+            tmp[n++] = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        }
+        while (n != 0 && pos + 1 < out_cap)
+        {
+            out[pos++] = tmp[--n];
+        }
+    };
+
+    for (u32 i = 0; i < key->value_count; ++i)
+    {
+        const RegValue& v = key->values[i];
+        put("  ");
+        put(v.name);
+        put(" = ");
+        if (v.type == kRegSz || v.type == kRegExpandSz)
+        {
+            put(static_cast<const char*>(v.data));
+        }
+        else if (v.type == kRegDword)
+        {
+            put_u32(v.dword_imm);
+        }
+        else
+        {
+            put("(binary)");
+        }
+        put("\n");
+    }
+
+    for (u64 i = 0; i < kRegKeyCount; ++i)
+    {
+        if (kRegKeys[i].root != key->root)
+        {
+            continue;
+        }
+        const char* child = nullptr;
+        if (IsDirectChild(key->path, kRegKeys[i].path, &child))
+        {
+            put("  [");
+            put(child);
+            put("]\n");
+        }
+    }
+
+    if (pos == 0)
+    {
+        put("  (empty key)\n");
+    }
+    out[(pos < out_cap) ? pos : (out_cap - 1)] = '\0';
+    return true;
+}
+
 bool ReleaseHandleForCurrentProcess(u64 handle)
 {
     core::Process* proc = core::CurrentProcess();

@@ -175,6 +175,12 @@ enum class ResumeAction : duetos::u8
 };
 ResumeAction GdbServerLastResume();
 
+/// Read-only view of the running-CPU register snapshot the stop
+/// loop last published (RIP/RSP/RBP etc. at the stop point). Used
+/// by the `monitor duet dump` verb to emit a minidump from the
+/// stop-point context. Valid only while inside the stop loop.
+const GdbServerRegSnapshot& GdbServerTrapSnapshot();
+
 } // namespace duetos::diag::gdb
 
 namespace duetos::arch

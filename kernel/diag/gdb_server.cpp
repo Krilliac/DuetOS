@@ -9,6 +9,8 @@
 
 #include "diag/gdb_server.h"
 
+#include "diag/gdb_monitor.h"
+
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/traps.h"
@@ -483,6 +485,43 @@ void HandlePacket()
                                              "</feature>"
                                              "</target>";
         SendReply(kTargetXml, sizeof(kTargetXml) - 1);
+        return;
+    }
+    if (MatchPrefix(g_packet, g_packet_len, "qRcmd,"))
+    {
+        // GDB `monitor` → DuetOS-aware command surface. The
+        // command text is hex-encoded after "qRcmd,". Decode it,
+        // dispatch to GdbMonitorDispatch, then hex-encode the text
+        // report back (GDB renders a qRcmd reply as console text).
+        // Static scratch keeps this off the trap-path stack; the
+        // stop loop is single-CPU with IF=0 so reuse is safe.
+        // Reports longer than the buffer are truncated by
+        // MonitorWriter with a visible sentinel — never an
+        // oversized / malformed packet.
+        static char mon_cmd[1024];
+        static char mon_txt[1536];
+        static char mon_hex[2 * sizeof(mon_txt)];
+        const u32 hoff = 6; // strlen("qRcmd,")
+        u32 dn = 0;
+        for (u32 i = hoff; i + 1 < g_packet_len && dn + 1 < sizeof(mon_cmd); i += 2)
+        {
+            mon_cmd[dn++] = static_cast<char>((HexDigitValue(g_packet[i]) << 4) | HexDigitValue(g_packet[i + 1]));
+        }
+        mon_cmd[dn] = '\0';
+        ::duetos::diag::MonitorWriter w(mon_txt, sizeof(mon_txt));
+        if (!::duetos::diag::GdbMonitorDispatch(mon_cmd, dn, w))
+        {
+            SendCStr(""); // not a "duet" line — unsupported
+            return;
+        }
+        u32 ho = 0;
+        for (u32 i = 0; i < w.Len() && ho + 2 < sizeof(mon_hex); ++i)
+        {
+            const u8 b = static_cast<u8>(w.Data()[i]);
+            mon_hex[ho++] = HexDigitChar((b >> 4) & 0xF);
+            mon_hex[ho++] = HexDigitChar(b & 0xF);
+        }
+        SendReply(mon_hex, ho);
         return;
     }
     if (MatchPrefix(g_packet, g_packet_len, "qfThreadInfo"))
@@ -1547,6 +1586,11 @@ ResumeAction GdbServerLastResume()
     return g_last_resume;
 }
 
+const GdbServerRegSnapshot& GdbServerTrapSnapshot()
+{
+    return g_trap_snapshot;
+}
+
 namespace
 {
 
@@ -1662,6 +1706,9 @@ void GdbServerSelfTest()
     g_capture_len = 0;
 
     arch::SerialWrite("[gdb-stub] self-test OK (framing + qSupported + halt-reason + bad-csum NAK).\n");
+
+    // Exercise the DuetOS `monitor` (qRcmd) command surface.
+    ::duetos::diag::GdbMonitorSelfTest();
 }
 
 namespace
