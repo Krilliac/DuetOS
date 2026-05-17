@@ -930,6 +930,28 @@ void DesktopCompose(u32 desktop_rgb, const char* banner);
 void CompositorLock();
 void CompositorUnlock();
 
+/// Compositor dirty signal. The 1 Hz ui-ticker only runs a full
+/// `DesktopCompose` when something actually changed; an idle
+/// desktop must NOT repaint every second (that full-screen
+/// software recompose is the visible flicker, and the lock
+/// contention against it is what makes the mouse feel slow).
+///
+/// `CompositorMarkDirty()` — call from any task-context site that
+/// changes what the screen should show (window create/move/resize/
+/// raise/close/activate, app paint via WindowInvalidate, menu /
+/// dialog / notification show, theme change, input that mutates
+/// UI). Cheap; idempotent; safe to over-call (worst case is one
+/// extra compose). NEVER call from IRQ — UI mutation is task-only.
+///
+/// `CompositorTakeDirty()` — ui-ticker only: atomically reads and
+/// clears the flag, returning whether a full compose is due this
+/// tick. `CompositorPeriodicNeedsCompose()` reports periodic
+/// animators (a visible+shown text caret) that must keep the 1 Hz
+/// beat even with zero input so the caret doesn't freeze.
+void CompositorMarkDirty();
+bool CompositorTakeDirty();
+bool CompositorPeriodicNeedsCompose();
+
 // ---------------------------------------------------------------
 // Display mode — desktop (windows + taskbar + cursor) vs TTY
 // (fullscreen console only). Single flag; DesktopCompose branches

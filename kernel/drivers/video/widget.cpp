@@ -464,6 +464,12 @@ constinit WindowHandle g_focus_hwnd = kWindowInvalid;
 constinit Caret g_caret = {};
 constinit bool g_caret_on = false; // current blink phase
 
+// Compositor dirty signal — see widget.h. Default true so the
+// first ui-ticker tick paints the initial desktop. Accessed via
+// __atomic from multiple tasks (ui-ticker take, mouse/kbd/win-timer
+// readers + mutators mark); plain bool + builtins, no IRQ context.
+constinit bool g_compositor_dirty = true;
+
 // Text clipboard — CF_TEXT only for v1. Not split per-process:
 // matches Win32 in that the clipboard is a system singleton.
 constinit char g_clipboard[kWindowClipboardMax] = {};
@@ -2021,6 +2027,37 @@ void CompositorUnlock()
     duetos::sched::MutexUnlock(&g_compositor_mutex);
 }
 
+void CompositorMarkDirty()
+{
+    __atomic_store_n(&g_compositor_dirty, true, __ATOMIC_RELEASE);
+}
+
+bool CompositorTakeDirty()
+{
+    return __atomic_exchange_n(&g_compositor_dirty, false, __ATOMIC_ACQ_REL);
+}
+
+bool CompositorPeriodicNeedsCompose()
+{
+    // The blinking text caret is the only periodic animator that
+    // must keep the 1 Hz beat with zero user input — otherwise it
+    // freezes mid-blink. Everything else that changes (clock,
+    // sysmon sample, windows, menus) is driven by an explicit
+    // CompositorMarkDirty() from its own mutator, so an idle
+    // desktop with no focused text field does ZERO recompose (the
+    // whole point — that full-screen 1 Hz software recompose is the
+    // visible flicker). g_caret is task-context state; this is
+    // called by the ui-ticker before it takes the compositor lock,
+    // which is fine for a plain read.
+    //
+    // A live notification toast also needs the 1 Hz beat: its TTL
+    // is decremented only by NotifyRedraw (inside DesktopCompose),
+    // so without this the toast would never age out / dismiss once
+    // the desktop went idle. Keep composing while one is on screen
+    // (small, transient — at most a few seconds).
+    return (g_caret.visible && g_caret.shown) || NotifyIsActive();
+}
+
 void DesktopCompose(u32 desktop_rgb, const char* banner)
 {
     if (g_display_mode == DisplayMode::Tty)
@@ -3269,6 +3306,11 @@ void WindowInvalidate(WindowHandle h)
         return;
     }
     g_windows[h].dirty = true;
+    // A window asking to repaint (app GDI, sysmon's per-second
+    // sample, any content-draw refresh) is a compositor change —
+    // wake the dirty-gated ui-ticker so it actually recomposes.
+    // This single mark covers every app-driven repaint path.
+    CompositorMarkDirty();
 }
 
 void WindowValidate(WindowHandle h)
