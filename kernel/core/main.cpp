@@ -395,6 +395,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::core::BootBringupKernelServices(cmdline, multiboot_info);
     SerialWrite("[bringup-tail] kernel-services done\n");
 
+    // The LAPIC timer is armed and interrupts are live (the scheduler
+    // has been running since BootBringupKernelServices). Verify the
+    // tick is actually being delivered before any long-running ring-3
+    // task is spawned; on hypervisors where the LAPIC timer counts
+    // but never raises its IRQ (VirtualBox), this transparently
+    // switches the scheduler tick to an IOAPIC-routed PIT source so
+    // preemption works. No-op on QEMU / real hardware.
+    duetos::arch::TimerVerifyDeliveryOrFallback();
+
     duetos::core::BootBringupDevices(CmdlineMatches(cmdline, "netsmoke", "force"));
     SerialWrite("[bringup-tail] devices done\n");
 

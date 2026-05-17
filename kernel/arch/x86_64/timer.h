@@ -49,6 +49,19 @@ inline u64 TscRead()
 /// run `sti` (or enter IdleLoop) when ready to receive ticks.
 void TimerInit();
 
+/// Verify the armed LAPIC timer actually delivers its IRQ, and fall
+/// back to an IOAPIC-routed PIT channel-0 periodic tick if it does
+/// not. Call this AFTER interrupts are live and the LAPIC timer is
+/// armed (i.e. after `TimerInit()` and the scheduler/`sti`), and
+/// BEFORE any long-running / CPU-bound ring-3 task is spawned. It
+/// watches the tick counter across a short TSC-bounded window; if it
+/// never advances (observed under VirtualBox: the LAPIC timer counts
+/// but the underflow interrupt is never raised), it masks the LAPIC
+/// timer LVT and drives the scheduler tick from PIT ch0 (periodic,
+/// mode 3) routed via the IOAPIC as ISA IRQ 0 to `kTimerVector`.
+/// No-op on QEMU / real hardware where the LAPIC timer delivers.
+void TimerVerifyDeliveryOrFallback();
+
 /// Global tick counter, monotonically increasing. Safe to read from any
 /// context; incremented by the timer IRQ handler. Read-only snapshot,
 /// not a synchronised clock.
