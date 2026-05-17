@@ -112,25 +112,7 @@ void UiTickerTask(void*)
         // clobber the field bounds / title bar.
         if (duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui)
         {
-            // Login gate stays UNCONDITIONAL: it is a separate
-            // compose path (LoginRepaint/GuiRepaint) with no
-            // per-window dirty model; gating it risks a frozen
-            // login screen. Cheap relative to a full desktop
-            // recompose and only up while logged out.
             duetos::core::LoginRepaint();
-            duetos::drivers::video::CompositorUnlock();
-            continue;
-        }
-        // Dirty-gate the full desktop recompose. An idle desktop
-        // (no input, no window/menu/app/theme change, no blinking
-        // text caret) does NOT repaint every second — that
-        // full-screen software recompose was the visible 1 Hz
-        // flicker on VBox, and the per-second compositor-lock
-        // contention is what made the mouse feel unusable. Every
-        // real mutator calls CompositorMarkDirty(); the caret
-        // keeps its blink via CompositorPeriodicNeedsCompose().
-        if (!duetos::drivers::video::CompositorTakeDirty() && !duetos::drivers::video::CompositorPeriodicNeedsCompose())
-        {
             duetos::drivers::video::CompositorUnlock();
             continue;
         }
