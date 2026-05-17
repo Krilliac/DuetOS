@@ -306,6 +306,17 @@ struct Task
     u64 seh_last_rip;
     u32 seh_repeat;
     u32 _pad_seh;
+
+    // Lockdep held-class stack, parked here across ContextSwitch.
+    // A sleeping mutex is held across switches; a single global
+    // held stack conflated two tasks' independent mutexes into a
+    // false lock-order inversion. The scheduler snapshots the
+    // running task's held set into the outgoing Task just before
+    // ContextSwitch and restores the resumed task's at the top of
+    // SchedFinishTaskSwitch. memset-zero on alloc = empty set,
+    // which is the correct held state for a fresh task.
+    ::duetos::sync::LockClass lockdep_held[::duetos::sync::kLockdepHeldMax];
+    u32 lockdep_held_depth;
 };
 
 namespace
@@ -1192,6 +1203,21 @@ extern "C" [[noreturn]] void SchedExitC();
 // from PerCpuInitBsp / SmpStartAps initialisation).
 extern "C" void SchedFinishTaskSwitch()
 {
+    // First thing on every task's resume path (both the resumed
+    // case from Schedule() and the fresh-task case from
+    // SchedTaskTrampoline): reinstate THIS task's lockdep held
+    // set before anything (including the lock release just below,
+    // which pops kLockClassSched) touches the held stack. Current()
+    // is the just-resumed task — the scheduler wrote it before the
+    // stack flip. A fresh task's buffer is memset-zero (empty),
+    // and the upcoming kLockClassSched release no-ops harmlessly
+    // against it (LockdepBeforeRelease tolerates not-found).
+    {
+        Task* self = Current();
+        if (self != nullptr)
+            ::duetos::sync::LockdepHeldRestore(self->lockdep_held, self->lockdep_held_depth);
+    }
+
     cpu::PerCpu* pcpu = cpu::CurrentCpu();
     void* lock_ptr = pcpu->ctxsw_lock_to_release;
     if (lock_ptr == nullptr)
@@ -1350,6 +1376,17 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     // runqueue (in v0 same as spawn CPU since tasks don't migrate
     // until commit-6 work-stealing).
     t->last_cpu = cpu::CurrentCpu()->cpu_id;
+
+    // Seed the lockdep held set with the scheduler lock. This task
+    // will first run at SchedTaskTrampoline -> SchedFinishTaskSwitch,
+    // which releases the g_sched_lock the launching Schedule()
+    // acquired on its behalf (the lock-pass handshake). Modelling
+    // the fresh task as already "holding" kLockClassSched makes
+    // that first release balanced — without this the release would
+    // hit an empty held set and (harmlessly but noisily) WARN
+    // "release with no matching held entry" once per task spawn.
+    t->lockdep_held[0] = ::duetos::sync::kLockClassSched;
+    t->lockdep_held_depth = 1;
 
     // Build the initial stack. ContextSwitch pops r15, r14, r13, r12,
     // rbp, rbx and then rets. So from bottom to top of the pre-planted
@@ -1798,6 +1835,14 @@ void Schedule()
     // safe to do here because we've already done the runqueue
     // bookkeeping and are about to swap stacks.
     ::duetos::diag::EventTrace(::duetos::diag::kEventSchedSwitch, prev->id, next->id);
+    // Park the outgoing task's lockdep held set (sleeping mutexes
+    // held across this switch) so it doesn't pollute the next
+    // task's view on the shared stack. Restored per-task at the
+    // top of SchedFinishTaskSwitch. The trailing kLockClassSched
+    // entry (g_sched_lock, acquired by this Schedule()) rides
+    // along and is balanced by the release in SchedFinishTaskSwitch.
+    prev->lockdep_held_depth =
+        ::duetos::sync::LockdepHeldSnapshot(prev->lockdep_held, ::duetos::sync::kLockdepHeldMax);
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, we're executing on a DIFFERENT task's
     // stack — whichever task got switched in to run us. The local
