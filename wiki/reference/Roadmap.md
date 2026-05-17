@@ -47,6 +47,102 @@ the same commit** that delivers the code.
 - **When to land:** when a workload exposes lock contention. For
   most workloads the global lock is acceptable.
 
+### Lockdep held-set must be per-task, not global
+
+- **Status:** root-caused 2026-05-17. `kernel/sync/lockdep.cpp`
+  keeps the held-class stack in `g_per_cpu[0]` — a single global
+  array (`kLockdepCpuMax = 1`, `#define g_held_stack
+  g_per_cpu[0].stack`). This is correct for spinlocks (cannot be
+  held across a context switch) but **wrong for sleeping
+  `sched::Mutex`** classes. A task that holds a sleeping mutex
+  across a yield/sleep leaves its class on the shared stack while
+  other tasks run, so two tasks independently and correctly
+  holding two different sleeping mutexes are reported as a
+  lock-order inversion.
+- **Concrete evidence (boot smoke, virtio harness):** the
+  compositor↔fat32 inversion fired ~40×/boot. Per-pair
+  backtraces (now emitted automatically by lockdep's kept
+  first-occurrence diagnostic) show NO in-task nesting:
+  - `held=compositor id=fat32`: `UiTickerTask →
+    FixJournalPersistFlush → Fat32DeleteAtPath → Fat32Guard`
+    (acquires `g_fat32_mutex`; UiTicker does NOT hold compositor
+    here — it takes compositor *later*, at boot_tasks.cpp:108,
+    after the FAT32 flush at :98).
+  - `held=fat32 id=compositor`: `WinTimerTickerTask →
+    CompositorLock` (acquires `g_compositor_mutex` only; does NOT
+    hold fat32 — that class is on the global stack courtesy of
+    UiTickerTask running concurrently).
+  Neither task nests the two locks; there is no real deadlock
+  cycle. Both reported directions are instrumentation artefacts.
+- **Why "index by current-CPU ID" (the B2 cascading item above)
+  is insufficient:** a task holding a sleeping mutex can be
+  descheduled and resumed on a different CPU; the held-set must
+  follow the *task*, not the CPU. Per-CPU indexing fixes
+  spinlock tracking under SMP but not the sleeping-mutex
+  false-positive.
+- **Remaining scope:** give each `Task` its own held-stack and
+  swap it at the context-switch boundary (save outgoing, restore
+  incoming) — keeps lockdep's storage model but makes it
+  effectively per-task without threading a `Task*` through every
+  lockdep hook (which would reintroduce the lockdep↔sched
+  recursion the TU header explicitly avoids). Spinlock classes
+  stay on a per-CPU stack; mutex classes move to the per-task
+  one. The genuine in-task nesting found alongside this (the
+  modal-dialog callback doing FAT32 I/O under `CompositorLock`)
+  was a real latent hazard and is already fixed (dialog
+  resolution deferred to `DialogDrainResolved`, fired outside
+  the compositor lock).
+- **Attempt 1 (2026-05-17, reverted — `git revert` of commit
+  "lockdep: per-task held-set across context switch").** The
+  minimal form — `LockdepHeldSnapshot` into the outgoing `Task`
+  just before `ContextSwitch`, `LockdepHeldRestore(Current())` at
+  the TOP of `SchedFinishTaskSwitch`, fresh tasks seeded
+  `[kLockClassSched]` — was functionally correct on a single
+  long boot (deliberate selftest-A/B inversion still detected;
+  compositor↔fat32 false positives 0; no spurious
+  release-no-match WARN). But a 6-boot **determinism sweep**
+  (`tools/test/boot-determinism-sweep.sh`) caught an
+  **intermittent** hard panic on the AP-bring-up path:
+  `[panic] sched: KASSERT failed: WaitQueueBlock on non-Running
+  task` (`sched.cpp` `WaitQueueBlock+0x132`) with a full register
+  dump. Causal and precise: the `[panic]` + `WaitQueueBlock`
+  KASSERT signature is **0 across the pre-lockdep baseline AND 0
+  across 6 reverted-tree boots, present only with the commit
+  applied**. (Red herring excluded: the `[ubsan] tm-detail
+  null-deref ty='PerCpu'/'u32'/'Task'` lines that appear nearby
+  are pre-existing benign UBSAN noise — an AP reading its
+  `PerCpu` before it is fully armed — and occur ~4×/boot in
+  known-clean boots too. The regression signal is strictly the
+  `WaitQueueBlock` KASSERT panic, not the UBSAN lines.)
+  Root hypothesis: `Current()` (= `cpu::CurrentCpu()->current_task`)
+  evaluated at the very top of `SchedFinishTaskSwitch` is unsafe
+  on the fresh-AP entry path — the existing code below that point
+  is explicitly written to tolerate a not-yet-armed AP
+  (`lock_ptr == nullptr` early-out), but the restore was inserted
+  *above* that guard, so on an AP whose per-CPU/current_task is
+  not yet established it dereferences a NULL/partial `PerCpu` or a
+  non-Running `Task`. The `if (self != nullptr)` guard is
+  insufficient: the fault is inside `Current()` itself, and a
+  non-NULL-but-non-Running task still trips the WaitQueueBlock
+  assert once the perturbed timing reorders AP bring-up.
+- **Design constraints for attempt 2:** the restore must run
+  *after* `SchedFinishTaskSwitch` has established a known-good
+  context (i.e., gated by / placed after the same fresh-AP
+  condition the existing lock-release code uses), and must
+  validate task state (Running, non-NULL `cpu::CurrentCpu()`),
+  not just `self != nullptr`. The save side (before
+  `ContextSwitch`) appeared safe but was not isolated in the
+  repro. Re-verification MUST include a ≥6-boot determinism
+  sweep, not a single boot — the single long boot got a
+  benign AP-bring-up ordering and missed the race entirely. This
+  is the canonical example for the "one run is not enough for
+  intermittent symptoms" rule.
+- **Blocks on:** nothing technical; it touches the
+  context-switch path so it wants its own focused slice +
+  live-boot verification. `g_promote_to_panic` stays default-off
+  until this lands (a per-task held-set is the precondition for a
+  fail-stop lockdep gate).
+
 ### Topology-driven follow-ons (post-clustering v0)
 
 - **Status:** v0 clustering landed — `cpu::Topology` + SRAT parser
