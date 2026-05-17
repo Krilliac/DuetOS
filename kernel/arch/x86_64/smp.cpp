@@ -726,6 +726,48 @@ u64 SmpStartAps()
         ++g_cpus_online;
     }
 
+    // Structural sentinel — ONE atomic SerialWrite so it stays a
+    // clean, greppable line. The klog tally below renders as
+    // several SerialWrite fragments (timestamp/level/tag/msg/val)
+    // and the just-onlined APs print their own online/probe lines
+    // concurrently in this window, so the klog form reliably
+    // interleaves and is NOT reliably parseable. A single
+    // SerialWrite of a pre-built buffer takes g_serial_lock once
+    // for the whole line and cannot be split. CI + the boot-log /
+    // determinism rigs grep this for the authoritative SMP count.
+    {
+        const u64 online = g_cpus_online;
+        const u64 total = acpi::CpuCount();
+        char buf[40];
+        u32 n = 0;
+        // Lead with '\n' so a partial klog fragment another CPU
+        // left dangling (no newline yet) is terminated and this
+        // sentinel always starts at column 0 — whole-line greps,
+        // not just substring, then find it.
+        buf[n++] = '\n';
+        const char* p = "[smp] online=";
+        while (*p)
+            buf[n++] = *p++;
+        auto put = [&](u64 v)
+        {
+            char t[20];
+            u32 k = 0;
+            do
+            {
+                t[k++] = static_cast<char>('0' + (v % 10));
+                v /= 10;
+            } while (v != 0);
+            while (k > 0)
+                buf[n++] = t[--k];
+        };
+        put(online);
+        buf[n++] = '/';
+        put(total);
+        buf[n++] = '\n';
+        buf[n] = '\0';
+        SerialWrite(buf);
+    }
+
     core::LogWithValue(core::LogLevel::Info, "arch/smp", "SMP bring-up complete, cpus_online", g_cpus_online);
     return aps_started;
 }

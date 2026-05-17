@@ -54,8 +54,12 @@ echo "  size=$(wc -c < "$LOG") bytes   lines=$(wc -l < "$LOG")"
 accel=$(g 'qemu accel=' | tail -1 | sed 's/.*accel=//')
 hyp=$(g -i 'hypervisor.*(detected|vendor|kind)|HypervisorName|under (KVM|TCG|VMware|VirtualBox)' | tail -1)
 cpus=$(grep -aoE 'cpus=0x0*[0-9a-f]+' "$LOG" | tail -1)
-aps=$(gc 'smp\.ap_online|smp : starting AP')
-echo "  accel=${accel:-n/a}  acpi_${cpus:-cpus=?}  ap_bringup_lines=${aps}"
+# Authoritative SMP count: the single-write "[smp] online=N/M"
+# sentinel (arch/x86_64/smp.cpp). The per-AP smp.ap_online prints
+# interleave under concurrent multi-CPU serial and are NOT a
+# reliable count.
+smp=$(grep -aoE '\[smp\] online=[0-9]+/[0-9]+' "$LOG" | tail -1)
+echo "  accel=${accel:-n/a}  acpi_${cpus:-cpus=?}  ${smp:-[smp] online=?/? (sentinel absent)}"
 [ -n "$hyp" ] && echo "  $hyp"
 
 hr

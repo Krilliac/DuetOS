@@ -23,7 +23,10 @@
 
 set -u
 RUNS="${1:-8}"
-TMO="${2:-80}"
+# AP bring-up lands ~t=20000ms guest; wall time to there varies
+# run-to-run under TCG, so a tight cap truncates the slow boots
+# before the [smp] sentinel and skews the "aps varies" check.
+TMO="${2:-120}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "$REPO_ROOT"
@@ -37,7 +40,9 @@ for i in $(seq 1 "$RUNS"); do
     rep=$(tools/test/boot-log-analyze.sh "$log" 2>/dev/null)
     verdict=$(printf '%s' "$rep" | grep -aoE 'verdict: (OK|ATTENTION)' | awk '{print $2}')
     done=$(printf '%s' "$rep" | grep -aqE 'reached: boot : metrics bringup-complete' && echo yes || echo NO)
-    aps=$(grep -acE 'smp\.ap_online|smp : starting AP' "$log" 2>/dev/null)
+    # Authoritative, interleave-proof SMP count (single-write
+    # sentinel from arch/x86_64/smp.cpp), not the racy per-AP line.
+    aps=$(grep -aoE '\[smp\] online=[0-9]+/[0-9]+' "$log" 2>/dev/null | tail -1 | sed 's/\[smp\] online=//')
     ok=$(printf '%s' "$rep"   | sed -n 's/.*OK=\([0-9]*\).*/\1/p' | head -1)
     fail=$(printf '%s' "$rep" | sed -n 's/.*non-deliberate FAIL=\([0-9]*\).*/\1/p' | head -1)
     skip=$(printf '%s' "$rep" | sed -n 's/.*SKIP=\([0-9]*\).*/\1/p' | head -1)
