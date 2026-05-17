@@ -95,6 +95,9 @@ bool VirtioBalloonProbe(const VirtioPciLayout& L)
         KLOG_WARN("drivers/virtio/balloon", "deflateq setup failed");
         return false;
     }
+
+    // Spec §3.1.1 step 8 — both queues are up, finalise the device.
+    VirtioMarkDriverOk(&layout);
     g_balloon.layout = layout;
     g_balloon.up = true;
 

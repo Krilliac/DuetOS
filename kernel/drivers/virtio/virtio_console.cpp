@@ -141,6 +141,11 @@ bool VirtioConsoleProbe(const VirtioPciLayout& L)
         KLOG_WARN("drivers/virtio/console", "receiveq setup failed (TX-only)");
     }
 
+    // Spec §3.1.1 step 8 — queues configured (RX buffer is
+    // pre-posted above; the device only consumes it post-
+    // DRIVER_OK, which is exactly the spec-intended ordering).
+    VirtioMarkDriverOk(&layout);
+
     // Static TX scratch — one page is plenty for the line-at-a-
     // time write pattern. A consumer that wants to ship more
     // than 256 bytes per call splits the buffer at the caller.

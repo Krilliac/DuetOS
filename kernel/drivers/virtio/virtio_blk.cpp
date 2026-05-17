@@ -274,6 +274,9 @@ bool VirtioBlkProbe(const VirtioPciLayout& L)
         return false;
     }
 
+    // Spec §3.1.1 step 8 — queue is up, finalise the device.
+    VirtioMarkDriverOk(&layout);
+
     // One shared header + status page. Single in-flight request
     // (see file-level GAP comment) means we don't need per-call
     // allocation here.
