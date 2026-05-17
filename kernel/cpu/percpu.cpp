@@ -116,6 +116,28 @@ PerCpu* CurrentCpu()
     u32 lo, hi;
     asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000101u));
     p = reinterpret_cast<PerCpu*>((static_cast<u64>(hi) << 32) | lo);
+    // GS base can read 0 even AFTER BSP install: a ring-3 -> ring-0
+    // transition executes a few kernel instructions with the *user*
+    // GS base (0) before the entry stub's swapgs runs. Any per-CPU
+    // access in that window derefs null and #PFs — observed on
+    // VirtualBox in the nat_sysinfo time-syscall path, where the
+    // handler's serial-logging reached SpinLockRelease ->
+    // CurrentCpuIdOrBsp() -> CurrentCpu()->cpu_id with GSBASE == 0
+    // (CR2=0, the wedge-masked fault uncovered once the serial
+    // self-deadlock was fixed). DuetOS boots one CPU today, so the
+    // BSP static is unconditionally the correct PerCpu — fall back
+    // to it exactly as the pre-install path does, turning a hard
+    // #PF into correct behaviour.
+    //
+    // GAP: SMP — a GSBASE==0 kernel context on an AP is a genuine
+    // entry-stub swapgs bug, not a benign early window. This
+    // fallback keeps it non-fatal, but the syscall/IRQ entry paths
+    // must be audited for swapgs correctness before multi-CPU
+    // bring-up (an AP would silently mis-attribute to the BSP).
+    if (p == nullptr)
+    {
+        return &g_bsp_percpu;
+    }
     return p;
 }
 
