@@ -1517,13 +1517,17 @@ it."
   through `VIRTIO_BLK_T_FLUSH` via the same shared scratch
   page; the other registered backends (RAM disk, partition
   view, NVMe, AHCI) declare `flush = nullptr` until their
-  own flush primitives wire up.
+  own flush primitives wire up. Concurrent
+  read/write/flush callers are serialised on a per-device
+  `sched::Mutex` around the shared header page + descriptor
+  chain — concurrency safety is no longer the blocker.
 - **Lands:**
-  - Per-call locking once concurrent I/O matters (today's
-    single-in-flight model is observed-safe on the boot
-    path).
   - IRQ wire-up so consumers don't pay a busy-poll for I/O
     that's already serviced by the host.
+  - Throughput: multiple in-flight descriptor chains so a
+    second caller isn't fully serialised behind the first
+    (depends on IRQ-driven completion landing first — the
+    poll model can only track one chain).
 
 ### VirtIO — per-class polish
 

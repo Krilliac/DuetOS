@@ -85,12 +85,19 @@ device is skipped (with a `KLOG_WARN` for the operator).
   device-read), data (caller-supplied, device-read or -write), status
   (1 B, device-write).
 - **Features negotiated**: `SEG_MAX`, `GEOMETRY`, `RO`.
-- **Read/write/flush**: read + write wired; flush is currently a
-  no-op (FLUSH-aware host treats it as a barrier; we don't yet flush
-  cache state on the driver side).
+- **Read/write/flush**: all three wired through the `BlockOps`
+  vtable. Flush routes a real `VIRTIO_BLK_T_FLUSH` request (header +
+  status chain, no data descriptor).
+- **Concurrency**: read/write/flush serialise on a per-device
+  `sched::Mutex` (`req_lock`) around the shared header page +
+  reused descriptor chain. A sleeping mutex (not a spinlock)
+  because the holder busy-polls the device for completion;
+  contending callers sleep rather than starve a CPU. The
+  uncontended boot path pays only a single CAS.
 
-GAP: single in-flight request — the next slice adds the multi-tag path
-so the block layer can issue multiple reads concurrently.
+GAP: still one in-flight request at a time (one descriptor chain).
+Higher throughput (multiple chains + IRQ-driven completion) is a
+roadmap item; concurrency *safety* is done.
 
 ### virtio-net — Network Interface
 
@@ -251,8 +258,9 @@ gate (`kCapFsRead` on `read()` against a virtio-blk-backed file,
 ## Known Limits / GAPs
 
 - **All paths poll.** IRQ wiring deferred across all device classes.
-- **virtio-blk single in-flight.** Multi-tag queue is a near-term
-  follow-up.
+- **virtio-blk single in-flight.** Concurrent callers are
+  serialised (safe); multiple in-flight chains for throughput is a
+  near-term follow-up gated on IRQ-driven completion.
 - **virtio-net RX is polled.** Receiveq is posted and a dedicated
   `virtio-net-rx-poll` task drains it every 10 ms; IRQ-driven delivery
   is the next slice.
