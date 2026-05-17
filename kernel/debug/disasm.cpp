@@ -140,6 +140,9 @@ constexpr const char* k16[16] = {"ax",  "cx",  "dx",   "bx",   "sp",   "bp",   "
 constexpr const char* k8RexPresent[16] = {"al",  "cl",  "dl",   "bl",   "spl",  "bpl",  "sil",  "dil",
                                           "r8b", "r9b", "r10b", "r11b", "r12b", "r13b", "r14b", "r15b"};
 constexpr const char* k8NoRex[8] = {"al", "cl", "dl", "bl", "ah", "ch", "dh", "bh"};
+// SSE/SSE2 XMM register file (REX.R/B-extended 4-bit index).
+constexpr const char* kXmm[16] = {"xmm0", "xmm1", "xmm2",  "xmm3",  "xmm4",  "xmm5",  "xmm6",  "xmm7",
+                                  "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13", "xmm14", "xmm15"};
 
 // 16 condition-code mnemonics for Jcc / SETcc / CMOVcc. Indexed by
 // the low nibble of the opcode (0x70..0x7F for short Jcc).
@@ -153,7 +156,8 @@ enum class OpW : u8
     B8,
     W16,
     D32,
-    Q64
+    Q64,
+    X128 // XMM register / 128-bit SSE memory operand
 };
 
 const char* RegName(u8 idx, OpW w, bool rex_seen)
@@ -171,6 +175,8 @@ const char* RegName(u8 idx, OpW w, bool rex_seen)
         return k32[idx];
     case OpW::Q64:
         return k64[idx];
+    case OpW::X128:
+        return kXmm[idx];
     }
     return "?";
 }
@@ -188,6 +194,8 @@ const char* PtrKeyword(OpW w)
         return "dword ptr ";
     case OpW::Q64:
         return "qword ptr ";
+    case OpW::X128:
+        return "xmmword ptr ";
     }
     return "";
 }
@@ -1441,9 +1449,121 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
             record_bytes(cur);
             return cur;
         }
-        // GAP: remaining 0x0F-prefix opcodes (MOVNT*, SSE/AVX,
-        // PSHUF/PUNPCK etc.) decode as `db` until they earn a slice.
-        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-prefix", "decode MOVNT/SSE/AVX");
+        // ---- SSE / SSE2 two-XMM-operand subset ----
+        // Legacy-encoded (non-VEX) SSE/SSE2 instructions whose reg
+        // and r/m operands are both XMM (or xmm + memory). The
+        // mandatory prefix selects the mnemonic: none / 0x66 / 0xF3
+        // (scalar single) / 0xF2 (scalar double). `store` = true
+        // means the r/m is the destination (0F11/29/7F store forms),
+        // so operands print r/m-first. This covers the bulk of
+        // compiler-emitted SSE in kernel C++ (scalar double/float
+        // math, 16-byte struct moves, xorps/pxor zeroing). GPR-
+        // mixing forms and integer-SIMD stay GAP below.
+        {
+            struct SseRow
+            {
+                u8 op2;
+                const char* np;
+                const char* p66;
+                const char* pf3;
+                const char* pf2;
+                bool store;
+            };
+            static constexpr SseRow kSse[] = {
+                {0x10, "movups", "movupd", "movss", "movsd", false},
+                {0x11, "movups", "movupd", "movss", "movsd", true},
+                {0x14, "unpcklps", "unpcklpd", nullptr, nullptr, false},
+                {0x15, "unpckhps", "unpckhpd", nullptr, nullptr, false},
+                {0x28, "movaps", "movapd", nullptr, nullptr, false},
+                {0x29, "movaps", "movapd", nullptr, nullptr, true},
+                {0x2E, "ucomiss", "ucomisd", nullptr, nullptr, false},
+                {0x2F, "comiss", "comisd", nullptr, nullptr, false},
+                {0x51, "sqrtps", "sqrtpd", "sqrtss", "sqrtsd", false},
+                {0x54, "andps", "andpd", nullptr, nullptr, false},
+                {0x55, "andnps", "andnpd", nullptr, nullptr, false},
+                {0x56, "orps", "orpd", nullptr, nullptr, false},
+                {0x57, "xorps", "xorpd", nullptr, nullptr, false},
+                {0x58, "addps", "addpd", "addss", "addsd", false},
+                {0x59, "mulps", "mulpd", "mulss", "mulsd", false},
+                {0x5A, "cvtps2pd", "cvtpd2ps", "cvtss2sd", "cvtsd2ss", false},
+                {0x5C, "subps", "subpd", "subss", "subsd", false},
+                {0x5D, "minps", "minpd", "minss", "minsd", false},
+                {0x5E, "divps", "divpd", "divss", "divsd", false},
+                {0x5F, "maxps", "maxpd", "maxss", "maxsd", false},
+                {0x6F, nullptr, "movdqa", "movdqu", nullptr, false},
+                {0x7F, nullptr, "movdqa", "movdqu", nullptr, true},
+                {0xDB, nullptr, "pand", nullptr, nullptr, false},
+                {0xDF, nullptr, "pandn", nullptr, nullptr, false},
+                {0xEB, nullptr, "por", nullptr, nullptr, false},
+                {0xEF, nullptr, "pxor", nullptr, nullptr, false},
+            };
+            const SseRow* row = nullptr;
+            for (const SseRow& r : kSse)
+            {
+                if (r.op2 == op2)
+                {
+                    row = &r;
+                    break;
+                }
+            }
+            if (row != nullptr)
+            {
+                const char* mnem = row->np;
+                if (p.rep)
+                    mnem = row->pf3;
+                else if (p.repne)
+                    mnem = row->pf2;
+                else if (p.osize)
+                    mnem = row->p66;
+                if (mnem != nullptr)
+                {
+                    if (cur >= available)
+                        return fail_db(op);
+                    const ModRm mr = DecodeModRmByte(bytes[cur], p);
+                    ++cur;
+                    // Scalar single → dword mem, scalar double →
+                    // qword mem, packed / integer → xmmword. A
+                    // register r/m always prints as xmm (reg_w).
+                    OpW mem_w = OpW::X128;
+                    if (p.rep)
+                        mem_w = OpW::D32;
+                    else if (p.repne)
+                        mem_w = OpW::Q64;
+                    char rm_buf[48] = {0};
+                    const u8 rm_extra =
+                        FormatRmOperand(rm_buf, sizeof(rm_buf), mr, OpW::X128, mem_w, p, &bytes[cur], available - cur);
+                    if (rm_extra == 0xFF)
+                        return fail_db(op);
+                    cur += rm_extra;
+                    StrCopy(out->mnemonic, kBufMnem, mnem);
+                    const char* xreg = RegName(mr.reg_idx, OpW::X128, p.rex_seen);
+                    if (row->store)
+                    {
+                        StrAppend(out->operands, kBufOpr, rm_buf);
+                        StrAppend(out->operands, kBufOpr, ", ");
+                        StrAppend(out->operands, kBufOpr, xreg);
+                    }
+                    else
+                    {
+                        StrAppend(out->operands, kBufOpr, xreg);
+                        StrAppend(out->operands, kBufOpr, ", ");
+                        StrAppend(out->operands, kBufOpr, rm_buf);
+                    }
+                    out->len = cur;
+                    out->decoded = true;
+                    record_bytes(cur);
+                    return cur;
+                }
+            }
+        }
+        // GAP: remaining 0x0F SSE space — GPR-mixing forms
+        // (movd/movq with r32/64, cvtsi2*, cvt*2si, movnti), the
+        // movlps/movhps mem/reg-dual encodings, the integer-SIMD
+        // PUNPCK/PSHUF/PADD/PCMP family, and all VEX/EVEX
+        // (AVX/AVX-512) decode as `db` until they earn a slice.
+        // The two-XMM-operand SSE/SSE2 subset (moves, packed/scalar
+        // arithmetic, compares, bitwise) is decoded above.
+        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-sse-rest", "decode SSE GPR-mix + integer-SIMD + AVX");
         return fail_db(op);
     }
 
@@ -1526,7 +1646,17 @@ bool SelfTest()
         0x0F, 0x18, 0x0D, 0x00, 0x00, 0x00, 0x00, // prefetcht0 [rip+0]
         0xF3, 0x0F, 0xB8, 0xC1,                   // popcnt eax, ecx
         0xF3, 0x48, 0x0F, 0xBD, 0xD8,             // lzcnt rbx, rax
-        0xC4, 0xE3, 0x71, 0x60, 0xC1, 0x00,       // VEX-prefixed → must reject as `db`
+        // SSE / SSE2 two-XMM-operand subset:
+        0x0F, 0x28, 0xC1,                   // movaps xmm0, xmm1
+        0x0F, 0x11, 0x08,                   // movups [rax], xmm1 (store)
+        0xF3, 0x0F, 0x10, 0xC1,             // movss xmm0, xmm1
+        0xF2, 0x0F, 0x58, 0xC1,             // addsd xmm0, xmm1
+        0x66, 0x0F, 0x6F, 0xC1,             // movdqa xmm0, xmm1
+        0x0F, 0x57, 0xC1,                   // xorps xmm0, xmm1
+        0x66, 0x0F, 0xEF, 0xC1,             // pxor xmm0, xmm1
+        0x66, 0x0F, 0x2E, 0xC1,             // ucomisd xmm0, xmm1
+        0x44, 0x0F, 0x28, 0xC1,             // movaps xmm8, xmm1 (REX.R)
+        0xC4, 0xE3, 0x71, 0x60, 0xC1, 0x00, // VEX-prefixed → must reject as `db`
     };
     struct Expected
     {
@@ -1562,6 +1692,15 @@ bool SelfTest()
         {"prefetcht0", 7},
         {"popcnt", 4},
         {"lzcnt", 5},
+        {"movaps", 3},
+        {"movups", 3},
+        {"movss", 4},
+        {"addsd", 4},
+        {"movdqa", 4},
+        {"xorps", 3},
+        {"pxor", 4},
+        {"ucomisd", 4},
+        {"movaps", 4},
         // The VEX byte rejects as `db 0xC4`, then the decoder walks
         // forward one byte at a time through the rest until end.
         {"db", 1},
