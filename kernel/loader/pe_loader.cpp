@@ -2099,6 +2099,20 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // 1. Map PE headers (RO, NX) at ImageBase. Loader
     //    convention — makes __ImageBase usable from ring 3.
     const u64 sizeof_headers = LeU32(file + h.opt_base + kOptHeaderSizeOfHeaders);
+    // The Rust image validator bounds-checks the optional header,
+    // the section table and every section's raw extent against
+    // file_len, but it never reads SizeOfHeaders. Left unchecked,
+    // MapHeaders below copies `sizeof_headers` bytes out of file[]
+    // into a ring-3-readable page — a malicious PE that inflates
+    // SizeOfHeaders past the file leaks kernel memory after the
+    // image buffer into the guest. The hand-rolled DLL-loader
+    // parser already rejects this (dll_loader.cpp ParseHeaders);
+    // mirror that here so both PE entry points agree.
+    if (sizeof_headers > file_len)
+    {
+        SerialWrite("[pe-load] FAIL SizeOfHeaders exceeds file length\n");
+        return r;
+    }
     if (!MapHeaders(file, sizeof_headers, h.image_base, as, guard))
     {
         SerialWrite("[pe-load] FAIL MapHeaders\n");
