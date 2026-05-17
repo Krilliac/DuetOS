@@ -255,7 +255,7 @@ bool ParseU64(const char* s, u64* out)
 
 void Usage(MonitorWriter& out)
 {
-    out.Str("DuetOS monitor — verb namespace 'duet'\n"
+    out.Str("DuetOS monitor - verb namespace 'duet'\n"
             "  duet help                 this text\n"
             "  duet ps                   processes (pid name state ticks regions)\n"
             "  duet caps <pid>           decode the capability bitset\n"
@@ -466,7 +466,7 @@ void CmdDump(MonitorWriter& out)
     out.Hex(s.rip);
     out.Str(" rsp=0x");
     out.Hex(s.rsp);
-    out.Str(") — see QEMU debugcon → duetos.dmp\n");
+    out.Str(") - see QEMU debugcon -> duetos.dmp\n");
 }
 
 } // namespace
@@ -567,7 +567,7 @@ bool GdbMonitorDispatch(const char* cmd, u32 cmd_len, MonitorWriter& out)
     {
         out.Str("duet: unknown command '");
         out.Str(sub);
-        out.Str("' — try 'duet help'\n");
+        out.Str("' - try 'duet help'\n");
     }
 
     if (out.Truncated())

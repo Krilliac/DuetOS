@@ -118,7 +118,12 @@ def _cmake_demo(value: str) -> None:
     subprocess.run(["cmake", "--preset", PRESET, f"-DDUETOS_GDB_DEMO={value}"],
                    cwd=REPO_ROOT, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    subprocess.run(["cmake", "--build", BUILD_DIR, "--target", "duetos-kernel"],
+    # Build the default (ALL) target, NOT just duetos-kernel:
+    # run.sh boots ${BUILD_DIR}/duetos.iso, and the iso is a
+    # separate `duetos-iso ALL` custom target. Rebuilding only the
+    # kernel would leave a stale iso (no demo int3) and the stop
+    # wait would time out.
+    subprocess.run(["cmake", "--build", BUILD_DIR],
                    cwd=REPO_ROOT, check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
