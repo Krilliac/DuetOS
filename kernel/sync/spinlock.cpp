@@ -124,6 +124,26 @@ IrqFlags SpinLockAcquire(SpinLock& lock)
     const u64 flags = ReadRflags();
     arch::Cli();
 
+    // Self-deadlock guard. A ticket lock re-acquired by its own
+    // current holder claims a fresh ticket and then spins on
+    // now_serving forever — and we just did Cli(), so this CPU can
+    // never advance now_serving to free itself. That is an
+    // unrecoverable silent hang with zero output: the single
+    // hardest deadlock to diagnose post-mortem. Always-on (not
+    // DEBUG_ASSERT): a hang is catastrophic in release too, and
+    // turning it into a panic banner is strictly better in every
+    // build. Lockdep does NOT cover this — it tracks lock CLASSES
+    // (the AA self-edge is not an inversion) and skips untagged
+    // locks entirely. owner_cpu is only meaningful while the lock
+    // is held; if WE are the holder no other CPU can change it, so
+    // the LockIsHeld()+owner_cpu read is race-free for the case it
+    // fires on (a stale read from a just-released foreign lock
+    // reports that CPU's id, never ours — no false positive).
+    if (LockIsHeld(lock) && lock.owner_cpu == cpu::CurrentCpuIdOrBsp())
+    {
+        PanicSpinlock("self-deadlock: SpinLockAcquire of a lock this CPU already holds");
+    }
+
     // Lockdep edge-walk: BEFORE we even claim a ticket, so the
     // "held → this" edge is recorded against the locks already on
     // the stack. Untagged locks (class_id == kLockClassUnclassified)

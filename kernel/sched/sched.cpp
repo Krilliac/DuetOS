@@ -3734,6 +3734,24 @@ void MutexLock(Mutex* m)
     ::duetos::sync::LockdepBeforeAcquire(m->class_id);
 
     arch::Cli();
+    // Self-deadlock guard (the owning-re-entry check sched.h's Mutex
+    // doc explicitly asks for). Recursion is unsupported: if the
+    // caller already owns `m`, the else-branch below blocks it on
+    // m->waiters waiting for an unlock that only it could issue —
+    // that task never runs again, and anything waiting on it cascades
+    // into a system-wide hang. Always-on (KASSERT, like the null
+    // check above): an unrecoverable hang is catastrophic in release
+    // too, so a panic banner is strictly better in every build. The
+    // read is race-free for the case it fires on — only the running
+    // task can equal Current(), and IRQs are now off.
+    // Predicate is owner==nullptr || owner!=Current — NOT
+    // owner!=Current alone: during early boot Current() is nullptr
+    // and the uncontended owner is also nullptr, so the naive form
+    // would panic every pre-scheduler mutex acquire (slab uses a
+    // sched::Mutex before tasks exist). A self-deadlock requires a
+    // non-null owner equal to the running task.
+    KASSERT(m->owner == nullptr || m->owner != Current(), "sched",
+            "self-deadlock: MutexLock of a mutex this task already owns");
     if (m->owner == nullptr)
     {
         // Fast path: uncontended acquire.
@@ -3792,6 +3810,16 @@ bool MutexLockTimed(Mutex* m, u64 ticks)
     ::duetos::sync::LockdepBeforeAcquire(m->class_id);
 
     arch::Cli();
+    // Same self-deadlock guard as MutexLock: an owner that re-enters
+    // here skips the fast path and blocks on m->waiters waiting for
+    // its own unlock — best case it burns the full timeout and then
+    // wrongly returns false for a mutex it actually holds. Recursion
+    // is unsupported (sched.h Mutex doc); make the contract uniform
+    // across every blocking acquire entry point.
+    // owner==nullptr || owner!=Current — see the MutexLock guard for
+    // why the nullptr disjunct is load-bearing (early-boot Current()).
+    KASSERT(m->owner == nullptr || m->owner != Current(), "sched",
+            "self-deadlock: MutexLockTimed of a mutex this task already owns");
     if (m->owner == nullptr)
     {
         // Fast path: uncontended acquire.
