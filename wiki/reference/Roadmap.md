@@ -47,6 +47,57 @@ the same commit** that delivers the code.
 - **When to land:** when a workload exposes lock contention. For
   most workloads the global lock is acceptable.
 
+### Lockdep held-set must be per-task, not global
+
+- **Status:** root-caused 2026-05-17. `kernel/sync/lockdep.cpp`
+  keeps the held-class stack in `g_per_cpu[0]` — a single global
+  array (`kLockdepCpuMax = 1`, `#define g_held_stack
+  g_per_cpu[0].stack`). This is correct for spinlocks (cannot be
+  held across a context switch) but **wrong for sleeping
+  `sched::Mutex`** classes. A task that holds a sleeping mutex
+  across a yield/sleep leaves its class on the shared stack while
+  other tasks run, so two tasks independently and correctly
+  holding two different sleeping mutexes are reported as a
+  lock-order inversion.
+- **Concrete evidence (boot smoke, virtio harness):** the
+  compositor↔fat32 inversion fired ~40×/boot. Per-pair
+  backtraces (now emitted automatically by lockdep's kept
+  first-occurrence diagnostic) show NO in-task nesting:
+  - `held=compositor id=fat32`: `UiTickerTask →
+    FixJournalPersistFlush → Fat32DeleteAtPath → Fat32Guard`
+    (acquires `g_fat32_mutex`; UiTicker does NOT hold compositor
+    here — it takes compositor *later*, at boot_tasks.cpp:108,
+    after the FAT32 flush at :98).
+  - `held=fat32 id=compositor`: `WinTimerTickerTask →
+    CompositorLock` (acquires `g_compositor_mutex` only; does NOT
+    hold fat32 — that class is on the global stack courtesy of
+    UiTickerTask running concurrently).
+  Neither task nests the two locks; there is no real deadlock
+  cycle. Both reported directions are instrumentation artefacts.
+- **Why "index by current-CPU ID" (the B2 cascading item above)
+  is insufficient:** a task holding a sleeping mutex can be
+  descheduled and resumed on a different CPU; the held-set must
+  follow the *task*, not the CPU. Per-CPU indexing fixes
+  spinlock tracking under SMP but not the sleeping-mutex
+  false-positive.
+- **Remaining scope:** give each `Task` its own held-stack and
+  swap it at the context-switch boundary (save outgoing, restore
+  incoming) — keeps lockdep's storage model but makes it
+  effectively per-task without threading a `Task*` through every
+  lockdep hook (which would reintroduce the lockdep↔sched
+  recursion the TU header explicitly avoids). Spinlock classes
+  stay on a per-CPU stack; mutex classes move to the per-task
+  one. The genuine in-task nesting found alongside this (the
+  modal-dialog callback doing FAT32 I/O under `CompositorLock`)
+  was a real latent hazard and is already fixed (dialog
+  resolution deferred to `DialogDrainResolved`, fired outside
+  the compositor lock).
+- **Blocks on:** nothing technical; it touches the
+  context-switch path so it wants its own focused slice +
+  live-boot verification. `g_promote_to_panic` stays default-off
+  until this lands (a per-task held-set is the precondition for a
+  fail-stop lockdep gate).
+
 ### Topology-driven follow-ons (post-clustering v0)
 
 - **Status:** v0 clustering landed — `cpu::Topology` + SRAT parser

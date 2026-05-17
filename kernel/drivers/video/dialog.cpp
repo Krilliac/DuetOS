@@ -36,7 +36,9 @@ struct State
     void* user;
     char input_buf[kDialogInputMax];
     u32 input_len;
-    bool reentry_lock; // set while firing the callback so the cb can't reopen
+    bool reentry_lock;           // set while firing the callback so the cb can't reopen
+    bool pending;                // resolved, callback not yet fired
+    DialogResult pending_result; // result captured at Resolve(), fired at drain
 };
 
 constinit State g_state = {};
@@ -51,6 +53,8 @@ void ResetState()
     g_state.input_buf[0] = '\0';
     g_state.input_len = 0;
     g_state.reentry_lock = false;
+    g_state.pending = false;
+    g_state.pending_result = DialogResult::Cancel;
 }
 
 // Centre coordinates of the panel inside the framebuffer.
@@ -110,11 +114,19 @@ void FireCallback(DialogResult r)
     ResetState();
 }
 
+// Record the resolution but DO NOT fire the callback here. The
+// input handlers that call this (DialogFeedKey / DialogFeedChar /
+// DialogOnPress) run under the caller's CompositorLock; the
+// callback can do arbitrary work (e.g. FAT32 file I/O, which
+// takes g_fat32_mutex). Firing it here would nest fat32 under
+// compositor and form the compositor<->fat32 lockdep cycle.
+// `DialogDrainResolved` fires it later, outside any lock.
 void Resolve(DialogResult r)
 {
-    if (g_state.kind == DialogKind::None)
+    if (g_state.kind == DialogKind::None || g_state.pending)
         return;
-    FireCallback(r);
+    g_state.pending = true;
+    g_state.pending_result = r;
 }
 
 } // namespace
@@ -157,6 +169,21 @@ bool InputBoxOpen(const char* title, const char* prompt, const char* default_tex
 bool DialogIsActive()
 {
     return g_state.kind != DialogKind::None;
+}
+
+// Fire the deferred callback for a dialog that Resolve() marked
+// pending. MUST be called with NO global lock held (in
+// particular not CompositorLock) — the callback may take any
+// lock, including g_fat32_mutex. Idempotent / cheap when there
+// is nothing pending. Returns true if a callback was fired.
+bool DialogDrainResolved()
+{
+    if (!g_state.pending)
+        return false;
+    const DialogResult r = g_state.pending_result;
+    g_state.pending = false;
+    FireCallback(r); // reads input_buf, invokes cb, then ResetState()
+    return true;
 }
 
 bool DialogFeedKey(u16 keycode, bool is_release, u8 /*modifiers*/)
