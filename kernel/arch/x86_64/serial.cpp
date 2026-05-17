@@ -127,7 +127,7 @@ void SerialEnterPanicMode()
     g_serial_panic_mode = 1;
 }
 
-SerialLineGuard::SerialLineGuard() : m_flags(0)
+SerialLineGuard::SerialLineGuard() : m_flags(0), m_owned(false)
 {
     // Acquire the lock and mark in-progress so nested SerialWrite*
     // calls inside the guarded scope bypass their own per-call
@@ -137,24 +137,47 @@ SerialLineGuard::SerialLineGuard() : m_flags(0)
     // can have another task's output interleaved at every call
     // boundary, splitting one logical line into garbage that
     // signature-grep CI tests can't match.
-    if (g_serial_panic_mode)
+    //
+    // Re-entrancy: if serial output is ALREADY in progress on this
+    // CPU (an outer SerialLineGuard, or a SerialWrite* critical
+    // section that called into code which opens a guard — e.g. the
+    // nat-sysinfo structured report), this CPU already holds
+    // g_serial_lock. Acquiring it again self-deadlocks (caught by
+    // the ticket lock's HeldBySelf guard since sync/spinlock gained
+    // deadlock-aware detection). The outer holder already provides
+    // line atomicity, so the correct behaviour is to become a
+    // no-op: don't acquire, don't own, let nested SerialWrite* keep
+    // writing raw under the outer lock. This mirrors the existing
+    // `g_serial_in_progress` bypass every SerialWrite* already has —
+    // closing the asymmetry that was the actual VirtualBox boot
+    // wedge (a silent hang before the detector existed).
+    if (g_serial_panic_mode || g_serial_in_progress)
     {
         return;
     }
     auto irq = duetos::sync::SpinLockAcquire(g_serial_lock);
     m_flags = irq.rflags;
     g_serial_in_progress = 1;
+    m_owned = true;
 }
 
 SerialLineGuard::~SerialLineGuard()
 {
-    if (g_serial_panic_mode)
+    // Only the guard that actually acquired releases. A panic-mode
+    // or re-entrant no-op guard leaves the outer holder untouched.
+    if (!m_owned)
     {
         return;
     }
-    g_serial_in_progress = 0;
+    // Release the lock FIRST, then clear the in-progress flag. The
+    // reverse order (clear, then release) leaves a window where
+    // g_serial_lock is still held by this CPU but g_serial_in_progress
+    // reads 0 — an interrupt that logs in that window would take the
+    // non-bypass path and self-deadlock. Same ordering fix applied to
+    // the SerialWrite* family below.
     duetos::sync::IrqFlags flags{m_flags};
     duetos::sync::SpinLockRelease(g_serial_lock, flags);
+    g_serial_in_progress = 0;
 }
 
 void SerialWriteByte(u8 byte)
@@ -165,8 +188,10 @@ void SerialWriteByte(u8 byte)
         return;
     }
     g_serial_in_progress = 1;
-    duetos::sync::SpinLockGuard guard(g_serial_lock);
-    WriteByteRaw(byte);
+    {
+        duetos::sync::SpinLockGuard guard(g_serial_lock);
+        WriteByteRaw(byte);
+    }
     g_serial_in_progress = 0;
 }
 
@@ -187,10 +212,12 @@ void SerialWrite(const char* str)
     }
 
     g_serial_in_progress = 1;
-    duetos::sync::SpinLockGuard guard(g_serial_lock);
-    for (const char* p = str; *p != '\0'; ++p)
     {
-        WriteCharRaw(*p);
+        duetos::sync::SpinLockGuard guard(g_serial_lock);
+        for (const char* p = str; *p != '\0'; ++p)
+        {
+            WriteCharRaw(*p);
+        }
     }
     g_serial_in_progress = 0;
 }
@@ -212,10 +239,12 @@ void SerialWriteN(const char* data, u64 len)
     }
 
     g_serial_in_progress = 1;
-    duetos::sync::SpinLockGuard guard(g_serial_lock);
-    for (u64 i = 0; i < len; ++i)
     {
-        WriteCharRaw(data[i]);
+        duetos::sync::SpinLockGuard guard(g_serial_lock);
+        for (u64 i = 0; i < len; ++i)
+        {
+            WriteCharRaw(data[i]);
+        }
     }
     g_serial_in_progress = 0;
 }
@@ -236,12 +265,14 @@ void SerialWriteHex(u64 value)
     }
 
     g_serial_in_progress = 1;
-    duetos::sync::SpinLockGuard guard(g_serial_lock);
-    WriteByteRaw('0');
-    WriteByteRaw('x');
-    for (int shift = 60; shift >= 0; shift -= 4)
     {
-        WriteByteRaw(static_cast<u8>(kDigits[(value >> shift) & 0xF]));
+        duetos::sync::SpinLockGuard guard(g_serial_lock);
+        WriteByteRaw('0');
+        WriteByteRaw('x');
+        for (int shift = 60; shift >= 0; shift -= 4)
+        {
+            WriteByteRaw(static_cast<u8>(kDigits[(value >> shift) & 0xF]));
+        }
     }
     g_serial_in_progress = 0;
 }
