@@ -21,7 +21,8 @@
 #   DUETOS_PRESET   — build preset under build/<preset> (default x86_64-release)
 #   DUETOS_TIMEOUT  — outer wallclock cap in seconds (default secs + 30)
 #   DUETOS_RAM      — QEMU -m (default 512M)
-#   DUETOS_SMP      — QEMU -smp (default unset = single CPU)
+#   DUETOS_SMP      — QEMU -smp (default 4, via run.sh; set =1 for
+#                     a single-CPU regression run)
 #
 # Exits 0 if `[stress] done` appears in the serial log within the
 # timeout window; non-zero otherwise.
