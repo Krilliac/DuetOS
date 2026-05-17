@@ -117,6 +117,18 @@ void HeldLocksPop(SpinLock& lock)
 // resolver can themselves take spinlocks, and we are mid-deadlock.
 void EmitSelfDeadlockDiag(const SpinLock& lock, u64 recursive_rip)
 {
+    // CRITICAL: the lock we are self-deadlocked on may BE the serial
+    // lock (or a lock always taken while the serial lock is held) —
+    // the single most likely culprit for a panic-path self-deadlock.
+    // arch::SerialWrite normally acquires g_serial_lock, so emitting
+    // this diagnostic the normal way would re-enter the very deadlock
+    // we are reporting and produce nothing (observed: the rich line
+    // never appeared, only the terse recursive-panic). Force the
+    // lock-free raw serial path. SerialEnterPanicMode is idempotent
+    // and intentionally one-way (the kernel halts after a panic
+    // anyway), so this is safe to call here unconditionally.
+    arch::SerialEnterPanicMode();
+
     arch::SerialWrite("[spinlock] SELF-DEADLOCK lock=");
     arch::SerialWriteHex(reinterpret_cast<u64>(&lock));
     arch::SerialWrite(" class_id=");
