@@ -70,12 +70,13 @@ Full textual disassembly of the current target at the current cursor. Each row s
 - `HLT`, `CLI`, `STI`, `CLD`, `STD`, `NOP` (single + multi-byte)
 - SSE/SSE2 two-XMM-operand subset: `MOV{UP,AP,DQ}{S,D}`, `MOV{SS,SD}`, the scalar+packed arith family (`ADD`/`SUB`/`MUL`/`DIV`/`MIN`/`MAX`/`SQRT`/`CVT`, prefix-selected `ss`/`sd`/`ps`/`pd`), `U/COMIS{S,D}`, `AND`/`ANDN`/`OR`/`XORP{S,D}`, `P{XOR,AND,ANDN,OR}`, `UNPCKL/H P{S,D}`
 - SSE XMM↔GPR forms: `MOVD`/`MOVQ`, `CVTSI2SS`/`SD`, `CVT(T)SS2SI`/`SD2SI`, `MOVNTI`
+- `MOV{L,H}PS`/`MOV{L,H}PD`, `MOVLHPS`/`MOVHLPS`
 
 Bytes outside the covered set render as `db 0xXX  ; <class>` rows (where `<class>` is `vex` / `evex` / `x87` / `prefix` / `rex` / `unknown` / etc.). This keeps instruction boundaries honest — the operator sees what's actually there, not a fabricated guess.
 
 GAPs (not yet covered, marked in `disasm.cpp`):
 
-- `MOVLPS`/`MOVHPS` dual encodings, the integer-SIMD `PUNPCK`/`PSHUF`/`PADD`/`PCMP`/`PMOVMSKB` family
+- The integer-SIMD `PUNPCK`/`PSHUF`/`PADD`/`PCMP`/`PMOVMSKB` family, the SSE3 dup moves (`MOVDDUP`/`MOVS[LH]DUP`)
 - AVX / VEX / EVEX, x87
 - The full string-op family (`REP MOVS` / `SCAS` / `CMPS`)
 - Far calls / jumps

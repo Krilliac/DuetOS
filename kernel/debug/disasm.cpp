@@ -1656,14 +1656,65 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
                 return cur;
             }
         }
-        // GAP: remaining 0x0F SSE space — the MOVLPS/MOVHPS
-        // mem/reg-dual encodings (0F 12/13/16/17), the integer-SIMD
-        // PUNPCK/PSHUF/PADD/PCMP/PMOVMSKB family, and all VEX/EVEX
-        // (AVX/AVX-512) decode as `db` until they earn a slice. The
-        // two-XMM-operand subset and the XMM<->GPR move/conversion
-        // forms (movd/movq, cvtsi2*, cvt*2si, movnti) are decoded
-        // above.
-        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-sse-rest", "decode SSE integer-SIMD + movlps/movhps + AVX");
+        // ---- MOVLPS/MOVHPS/MOVLHPS/MOVHLPS ----
+        // 0F 12/13/16/17 (np / 0x66). For 0F 12 and 0F 16 the
+        // mnemonic depends on ModRM.mod: a register source is the
+        // MOVHLPS / MOVLHPS reg-reg shuffle, a memory source is the
+        // 64-bit MOVLPS / MOVHPS load. 13/17 are store-only (m64,
+        // xmm). The F2/F3-prefixed SSE3 dup variants (MOVDDUP /
+        // MOVSLDUP / MOVSHDUP) stay GAP.
+        if ((op2 == 0x12 || op2 == 0x13 || op2 == 0x16 || op2 == 0x17) && !p.rep && !p.repne)
+        {
+            if (cur >= available)
+                return fail_db(op);
+            const ModRm mr = DecodeModRmByte(bytes[cur], p);
+            const bool is_reg = (mr.mod == 3);
+            const bool store = (op2 == 0x13 || op2 == 0x17);
+            const char* mnem = nullptr;
+            if (op2 == 0x12)
+                mnem = is_reg ? (p.osize ? nullptr : "movhlps") : (p.osize ? "movlpd" : "movlps");
+            else if (op2 == 0x16)
+                mnem = is_reg ? (p.osize ? nullptr : "movlhps") : (p.osize ? "movhpd" : "movhps");
+            else if (op2 == 0x13)
+                mnem = is_reg ? nullptr : (p.osize ? "movlpd" : "movlps");
+            else // 0x17
+                mnem = is_reg ? nullptr : (p.osize ? "movhpd" : "movhps");
+            if (mnem != nullptr)
+            {
+                ++cur;
+                char rm_buf[48] = {0};
+                const u8 rm_extra =
+                    FormatRmOperand(rm_buf, sizeof(rm_buf), mr, OpW::X128, OpW::Q64, p, &bytes[cur], available - cur);
+                if (rm_extra == 0xFF)
+                    return fail_db(op);
+                cur += rm_extra;
+                StrCopy(out->mnemonic, kBufMnem, mnem);
+                const char* xreg = RegName(mr.reg_idx, OpW::X128, p.rex_seen);
+                if (store)
+                {
+                    StrAppend(out->operands, kBufOpr, rm_buf);
+                    StrAppend(out->operands, kBufOpr, ", ");
+                    StrAppend(out->operands, kBufOpr, xreg);
+                }
+                else
+                {
+                    StrAppend(out->operands, kBufOpr, xreg);
+                    StrAppend(out->operands, kBufOpr, ", ");
+                    StrAppend(out->operands, kBufOpr, rm_buf);
+                }
+                out->len = cur;
+                out->decoded = true;
+                record_bytes(cur);
+                return cur;
+            }
+        }
+        // GAP: remaining 0x0F SSE space — the integer-SIMD
+        // PUNPCK/PSHUF/PADD/PCMP/PMOVMSKB family, the SSE3 dup
+        // moves (MOVDDUP / MOVS[LH]DUP), and all VEX/EVEX
+        // (AVX/AVX-512) decode as `db` until they earn a slice.
+        // The two-XMM-operand subset, the XMM<->GPR move/conversion
+        // forms, and MOV{L,H}PS/MOV{L,H}LPS are decoded above.
+        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-sse-rest", "decode SSE integer-SIMD + SSE3 dup + AVX");
         return fail_db(op);
     }
 
@@ -1757,15 +1808,22 @@ bool SelfTest()
         0x66, 0x0F, 0x2E, 0xC1, // ucomisd xmm0, xmm1
         0x44, 0x0F, 0x28, 0xC1, // movaps xmm8, xmm1 (REX.R)
         // SSE/SSE2 GPR-mixing forms:
-        0x66, 0x0F, 0x6E, 0xC0,             // movd xmm0, eax
-        0x66, 0x48, 0x0F, 0x6E, 0xC0,       // movq xmm0, rax (REX.W)
-        0x66, 0x0F, 0x7E, 0xC0,             // movd eax, xmm0 (store)
-        0xF3, 0x0F, 0x7E, 0xC1,             // movq xmm0, xmm1
-        0x66, 0x0F, 0xD6, 0xC1,             // movq xmm1, xmm0 (store)
-        0xF2, 0x0F, 0x2A, 0xC0,             // cvtsi2sd xmm0, eax
-        0xF2, 0x0F, 0x2D, 0xC1,             // cvtsd2si eax, xmm1
-        0xF3, 0x0F, 0x2C, 0xC1,             // cvttss2si eax, xmm1
-        0x0F, 0xC3, 0x03,                   // movnti [rbx], eax
+        0x66, 0x0F, 0x6E, 0xC0,       // movd xmm0, eax
+        0x66, 0x48, 0x0F, 0x6E, 0xC0, // movq xmm0, rax (REX.W)
+        0x66, 0x0F, 0x7E, 0xC0,       // movd eax, xmm0 (store)
+        0xF3, 0x0F, 0x7E, 0xC1,       // movq xmm0, xmm1
+        0x66, 0x0F, 0xD6, 0xC1,       // movq xmm1, xmm0 (store)
+        0xF2, 0x0F, 0x2A, 0xC0,       // cvtsi2sd xmm0, eax
+        0xF2, 0x0F, 0x2D, 0xC1,       // cvtsd2si eax, xmm1
+        0xF3, 0x0F, 0x2C, 0xC1,       // cvttss2si eax, xmm1
+        0x0F, 0xC3, 0x03,             // movnti [rbx], eax
+        // MOVLPS/MOVHPS/MOVLHPS/MOVHLPS:
+        0x0F, 0x12, 0xC1,                   // movhlps xmm0, xmm1 (reg)
+        0x0F, 0x12, 0x00,                   // movlps xmm0, [rax] (mem)
+        0x0F, 0x16, 0xC1,                   // movlhps xmm0, xmm1 (reg)
+        0x0F, 0x13, 0x08,                   // movlps [rax], xmm1 (store)
+        0x66, 0x0F, 0x16, 0x00,             // movhpd xmm0, [rax]
+        0x0F, 0x17, 0x08,                   // movhps [rax], xmm1 (store)
         0xC4, 0xE3, 0x71, 0x60, 0xC1, 0x00, // VEX-prefixed → must reject as `db`
     };
     struct Expected
@@ -1820,6 +1878,12 @@ bool SelfTest()
         {"cvtsd2si", 4},
         {"cvttss2si", 4},
         {"movnti", 3},
+        {"movhlps", 3},
+        {"movlps", 3},
+        {"movlhps", 3},
+        {"movlps", 3},
+        {"movhpd", 4},
+        {"movhps", 3},
         // The VEX byte rejects as `db 0xC4`, then the decoder walks
         // forward one byte at a time through the rest until end.
         {"db", 1},
