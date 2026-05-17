@@ -1556,14 +1556,114 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
                 }
             }
         }
-        // GAP: remaining 0x0F SSE space — GPR-mixing forms
-        // (movd/movq with r32/64, cvtsi2*, cvt*2si, movnti), the
-        // movlps/movhps mem/reg-dual encodings, the integer-SIMD
-        // PUNPCK/PSHUF/PADD/PCMP family, and all VEX/EVEX
-        // (AVX/AVX-512) decode as `db` until they earn a slice.
-        // The two-XMM-operand SSE/SSE2 subset (moves, packed/scalar
-        // arithmetic, compares, bitwise) is decoded above.
-        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-sse-rest", "decode SSE GPR-mix + integer-SIMD + AVX");
+        // ---- SSE/SSE2 GPR-mixing forms ----
+        // The XMM<->GPR move + integer/float conversion encodings.
+        // Operand kinds vary per opcode, so each is resolved into a
+        // common (mnem, reg-kind, rm-kind, store) shape then emitted
+        // by the shared tail. `gw` is the GPR width: REX.W → 64,
+        // else 32 (0x66 here is a mandatory SSE prefix, NOT
+        // operand-size, so it must not narrow the GPR to 16-bit).
+        {
+            const OpW gw = p.rex_w ? OpW::Q64 : OpW::D32;
+            const char* mnem = nullptr;
+            char mbuf[12] = {0};
+            bool store = false;
+            OpW reg_w = OpW::X128;    // ModRM.reg operand kind
+            OpW rm_reg_w = OpW::X128; // r/m when mod==3 (register)
+            OpW rm_mem_w = OpW::X128; // r/m ptr-keyword when memory
+            if (op2 == 0x6E && p.osize)
+            {
+                // 66 0F 6E: MOVD xmm, r/m32  (MOVQ if REX.W)
+                mnem = p.rex_w ? "movq" : "movd";
+                rm_reg_w = gw;
+                rm_mem_w = gw;
+            }
+            else if (op2 == 0x7E && p.osize)
+            {
+                // 66 0F 7E: MOVD r/m32, xmm  (store; MOVQ if REX.W)
+                mnem = p.rex_w ? "movq" : "movd";
+                store = true;
+                rm_reg_w = gw;
+                rm_mem_w = gw;
+            }
+            else if (op2 == 0x7E && p.rep)
+            {
+                // F3 0F 7E: MOVQ xmm, xmm/m64
+                mnem = "movq";
+                rm_mem_w = OpW::Q64;
+            }
+            else if (op2 == 0xD6 && p.osize)
+            {
+                // 66 0F D6: MOVQ xmm/m64, xmm  (store)
+                mnem = "movq";
+                store = true;
+                rm_mem_w = OpW::Q64;
+            }
+            else if (op2 == 0x2A && (p.rep || p.repne))
+            {
+                // F3/F2 0F 2A: CVTSI2SS/SD xmm, r/m32 (r/m64 if W)
+                mnem = p.rep ? "cvtsi2ss" : "cvtsi2sd";
+                rm_reg_w = gw;
+                rm_mem_w = gw;
+            }
+            else if ((op2 == 0x2C || op2 == 0x2D) && (p.rep || p.repne))
+            {
+                // F3/F2 0F 2C/2D: CVT(T)SS2SI/SD2SI r32/64, xmm/m
+                StrAppend(mbuf, sizeof(mbuf), op2 == 0x2C ? "cvtt" : "cvt");
+                StrAppend(mbuf, sizeof(mbuf), p.rep ? "ss2si" : "sd2si");
+                mnem = mbuf;
+                reg_w = gw; // dest is a GPR
+                rm_mem_w = p.rep ? OpW::D32 : OpW::Q64;
+            }
+            else if (op2 == 0xC3 && !p.rep && !p.repne && !p.osize)
+            {
+                // 0F C3: MOVNTI m32/64, r32/64  (store)
+                mnem = "movnti";
+                store = true;
+                reg_w = gw;    // source is a GPR
+                rm_reg_w = gw; // (mem-only in practice)
+                rm_mem_w = gw;
+            }
+            if (mnem != nullptr)
+            {
+                if (cur >= available)
+                    return fail_db(op);
+                const ModRm mr = DecodeModRmByte(bytes[cur], p);
+                ++cur;
+                char rm_buf[48] = {0};
+                const u8 rm_extra =
+                    FormatRmOperand(rm_buf, sizeof(rm_buf), mr, rm_reg_w, rm_mem_w, p, &bytes[cur], available - cur);
+                if (rm_extra == 0xFF)
+                    return fail_db(op);
+                cur += rm_extra;
+                StrCopy(out->mnemonic, kBufMnem, mnem);
+                const char* reg = RegName(mr.reg_idx, reg_w, p.rex_seen);
+                if (store)
+                {
+                    StrAppend(out->operands, kBufOpr, rm_buf);
+                    StrAppend(out->operands, kBufOpr, ", ");
+                    StrAppend(out->operands, kBufOpr, reg);
+                }
+                else
+                {
+                    StrAppend(out->operands, kBufOpr, reg);
+                    StrAppend(out->operands, kBufOpr, ", ");
+                    StrAppend(out->operands, kBufOpr, rm_buf);
+                }
+                out->len = cur;
+                out->decoded = true;
+                record_bytes(cur);
+                return cur;
+            }
+        }
+        // GAP: remaining 0x0F SSE space — the MOVLPS/MOVHPS
+        // mem/reg-dual encodings (0F 12/13/16/17), the integer-SIMD
+        // PUNPCK/PSHUF/PADD/PCMP/PMOVMSKB family, and all VEX/EVEX
+        // (AVX/AVX-512) decode as `db` until they earn a slice. The
+        // two-XMM-operand subset and the XMM<->GPR move/conversion
+        // forms (movd/movq, cvtsi2*, cvt*2si, movnti) are decoded
+        // above.
+        FIX_NOTE_GAP("debug/disasm.cpp:0x0F-sse-rest", "decode SSE integer-SIMD + movlps/movhps + AVX");
         return fail_db(op);
     }
 
@@ -1647,15 +1747,25 @@ bool SelfTest()
         0xF3, 0x0F, 0xB8, 0xC1,                   // popcnt eax, ecx
         0xF3, 0x48, 0x0F, 0xBD, 0xD8,             // lzcnt rbx, rax
         // SSE / SSE2 two-XMM-operand subset:
-        0x0F, 0x28, 0xC1,                   // movaps xmm0, xmm1
-        0x0F, 0x11, 0x08,                   // movups [rax], xmm1 (store)
-        0xF3, 0x0F, 0x10, 0xC1,             // movss xmm0, xmm1
-        0xF2, 0x0F, 0x58, 0xC1,             // addsd xmm0, xmm1
-        0x66, 0x0F, 0x6F, 0xC1,             // movdqa xmm0, xmm1
-        0x0F, 0x57, 0xC1,                   // xorps xmm0, xmm1
-        0x66, 0x0F, 0xEF, 0xC1,             // pxor xmm0, xmm1
-        0x66, 0x0F, 0x2E, 0xC1,             // ucomisd xmm0, xmm1
-        0x44, 0x0F, 0x28, 0xC1,             // movaps xmm8, xmm1 (REX.R)
+        0x0F, 0x28, 0xC1,       // movaps xmm0, xmm1
+        0x0F, 0x11, 0x08,       // movups [rax], xmm1 (store)
+        0xF3, 0x0F, 0x10, 0xC1, // movss xmm0, xmm1
+        0xF2, 0x0F, 0x58, 0xC1, // addsd xmm0, xmm1
+        0x66, 0x0F, 0x6F, 0xC1, // movdqa xmm0, xmm1
+        0x0F, 0x57, 0xC1,       // xorps xmm0, xmm1
+        0x66, 0x0F, 0xEF, 0xC1, // pxor xmm0, xmm1
+        0x66, 0x0F, 0x2E, 0xC1, // ucomisd xmm0, xmm1
+        0x44, 0x0F, 0x28, 0xC1, // movaps xmm8, xmm1 (REX.R)
+        // SSE/SSE2 GPR-mixing forms:
+        0x66, 0x0F, 0x6E, 0xC0,             // movd xmm0, eax
+        0x66, 0x48, 0x0F, 0x6E, 0xC0,       // movq xmm0, rax (REX.W)
+        0x66, 0x0F, 0x7E, 0xC0,             // movd eax, xmm0 (store)
+        0xF3, 0x0F, 0x7E, 0xC1,             // movq xmm0, xmm1
+        0x66, 0x0F, 0xD6, 0xC1,             // movq xmm1, xmm0 (store)
+        0xF2, 0x0F, 0x2A, 0xC0,             // cvtsi2sd xmm0, eax
+        0xF2, 0x0F, 0x2D, 0xC1,             // cvtsd2si eax, xmm1
+        0xF3, 0x0F, 0x2C, 0xC1,             // cvttss2si eax, xmm1
+        0x0F, 0xC3, 0x03,                   // movnti [rbx], eax
         0xC4, 0xE3, 0x71, 0x60, 0xC1, 0x00, // VEX-prefixed → must reject as `db`
     };
     struct Expected
@@ -1701,13 +1811,22 @@ bool SelfTest()
         {"pxor", 4},
         {"ucomisd", 4},
         {"movaps", 4},
+        {"movd", 4},
+        {"movq", 5},
+        {"movd", 4},
+        {"movq", 4},
+        {"movq", 4},
+        {"cvtsi2sd", 4},
+        {"cvtsd2si", 4},
+        {"cvttss2si", 4},
+        {"movnti", 3},
         // The VEX byte rejects as `db 0xC4`, then the decoder walks
         // forward one byte at a time through the rest until end.
         {"db", 1},
     };
 
-    DecodedInsn rows[48];
-    const u64 n = DecodeStream(kFixture, sizeof(kFixture), 0x140000000ULL, rows, 48);
+    DecodedInsn rows[64];
+    const u64 n = DecodeStream(kFixture, sizeof(kFixture), 0x140000000ULL, rows, 64);
     if (n < sizeof(kExpected) / sizeof(kExpected[0]))
     {
         KLOG_WARN_V("dbg", "[smoke] disasm=FAIL too-few-rows", n);

@@ -31,6 +31,8 @@
  *     DIV/MIN/MAX/SQRT/CVT, prefix-selected ss/sd/ps/pd),
  *     U/COMIS{S,D}, AND/ANDN/OR/XORP{S,D}, P{XOR,AND,ANDN,OR},
  *     UNPCKL/H P{S,D}
+ *   - SSE XMM<->GPR forms: MOVD/MOVQ, CVTSI2SS/SD,
+ *     CVT(T)SS2SI/SD2SI, MOVNTI
  *
  * Bytes outside the covered set decode as `db 0xXX` with the
  * `inspect::ClassifyByte` hint stitched into the operands field
@@ -39,9 +41,8 @@
  * covered set; for `db` rows we conservatively consume one byte.
  *
  * Out of scope (deliberate, marked `// GAP:` at sites):
- *   - SSE GPR-mixing forms (MOVD/MOVQ r32/64, CVTSI2*, CVT*2SI,
- *     MOVNTI), MOVLPS/MOVHPS dual encodings, the integer-SIMD
- *     PUNPCK/PSHUF/PADD/PCMP family, x87, AVX/VEX/EVEX
+ *   - MOVLPS/MOVHPS dual encodings, the integer-SIMD
+ *     PUNPCK/PSHUF/PADD/PCMP/PMOVMSKB family, x87, AVX/VEX/EVEX
  *   - The full string-op family (REP MOVS / SCAS / CMPS)
  *   - Far calls / jumps, segment-prefix-modulated mem operands
  *   - Privileged op decoding beyond what the kernel itself uses
