@@ -4,6 +4,7 @@
 #include "core/panic.h"
 #include "log/klog.h"
 #include "mm/page.h"
+#include "mm/paging.h"
 #include "smbios_rust.h"
 
 namespace duetos::arch
@@ -155,12 +156,28 @@ void SmbiosInit()
     g_summary.major_version = ep.major_version;
     g_summary.minor_version = ep.minor_version;
 
-    // 2) Map the structure table through the direct map. The
-    // anchor parser already capped `table_length` at 1 MiB.
-    const auto* tbl_base = static_cast<const u8*>(mm::PhysToVirt(ep.table_phys));
+    // 2) Map the structure table. The anchor parser already capped
+    // `table_length` at 1 MiB. Use the fast direct map when the table
+    // sits below it; fall back to an MMIO mapping otherwise. An SMBIOS
+    // 3.x (64-bit) anchor is explicitly allowed to park its structure
+    // table above 4 GiB, and VirtualBox-EFI / real UEFI do exactly
+    // that — feeding such an address straight to PhysToVirt would
+    // hard-panic ("outside direct map") at boot, the same firmware-
+    // shape trap the ACPI parser hit. The MMIO mapping is kept for the
+    // kernel's lifetime (this runs once at boot, single table).
+    const u64 tbl_span = static_cast<u64>(ep.table_length);
+    const u8* tbl_base = nullptr;
+    if (ep.table_phys + tbl_span <= mm::kDirectMapBytes)
+    {
+        tbl_base = static_cast<const u8*>(mm::PhysToVirt(ep.table_phys));
+    }
+    else
+    {
+        tbl_base = static_cast<const u8*>(mm::MapMmio(ep.table_phys, tbl_span == 0 ? 1 : tbl_span));
+    }
     if (tbl_base == nullptr)
     {
-        core::Log(core::LogLevel::Warn, "arch/smbios", "SMBIOS table phys not in direct map");
+        core::Log(core::LogLevel::Warn, "arch/smbios", "SMBIOS table phys unmappable — skipping");
         return;
     }
 
