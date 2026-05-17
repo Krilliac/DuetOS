@@ -92,6 +92,44 @@ the same commit** that delivers the code.
   was a real latent hazard and is already fixed (dialog
   resolution deferred to `DialogDrainResolved`, fired outside
   the compositor lock).
+- **Attempt 1 (2026-05-17, reverted — `git revert` of commit
+  "lockdep: per-task held-set across context switch").** The
+  minimal form — `LockdepHeldSnapshot` into the outgoing `Task`
+  just before `ContextSwitch`, `LockdepHeldRestore(Current())` at
+  the TOP of `SchedFinishTaskSwitch`, fresh tasks seeded
+  `[kLockClassSched]` — was functionally correct on a single
+  long boot (deliberate selftest-A/B inversion still detected;
+  compositor↔fat32 false positives 0; no spurious
+  release-no-match WARN). But a 6-boot **determinism sweep**
+  (`tools/test/boot-determinism-sweep.sh`) caught an
+  **intermittent** crash (3 of 6 boots): UBSAN null-deref
+  member-access on `PerCpu` / `u32` / `Task` during AP bring-up,
+  then `KASSERT failed: WaitQueueBlock on non-Running task`
+  (`sched.cpp` `WaitQueueBlock+0x132`). Causal: 8/8 sweeps clean
+  immediately before the commit, 3/6 crash immediately after.
+  Root hypothesis: `Current()` (= `cpu::CurrentCpu()->current_task`)
+  evaluated at the very top of `SchedFinishTaskSwitch` is unsafe
+  on the fresh-AP entry path — the existing code below that point
+  is explicitly written to tolerate a not-yet-armed AP
+  (`lock_ptr == nullptr` early-out), but the restore was inserted
+  *above* that guard, so on an AP whose per-CPU/current_task is
+  not yet established it dereferences a NULL/partial `PerCpu` or a
+  non-Running `Task`. The `if (self != nullptr)` guard is
+  insufficient: the fault is inside `Current()` itself, and a
+  non-NULL-but-non-Running task still trips the WaitQueueBlock
+  assert once the perturbed timing reorders AP bring-up.
+- **Design constraints for attempt 2:** the restore must run
+  *after* `SchedFinishTaskSwitch` has established a known-good
+  context (i.e., gated by / placed after the same fresh-AP
+  condition the existing lock-release code uses), and must
+  validate task state (Running, non-NULL `cpu::CurrentCpu()`),
+  not just `self != nullptr`. The save side (before
+  `ContextSwitch`) appeared safe but was not isolated in the
+  repro. Re-verification MUST include a ≥6-boot determinism
+  sweep, not a single boot — the single long boot got a
+  benign AP-bring-up ordering and missed the race entirely. This
+  is the canonical example for the "one run is not enough for
+  intermittent symptoms" rule.
 - **Blocks on:** nothing technical; it touches the
   context-switch path so it wants its own focused slice +
   live-boot verification. `g_promote_to_panic` stays default-off
