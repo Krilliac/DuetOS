@@ -694,6 +694,7 @@ bool DirHasOnlyDots(const Volume& v, u32 dir_cluster)
 i64 Fat32CreateInRoot(const Volume* v, const char* name, const void* buf, u64 len)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr)
         return -1;
     return CreateInDir(v, v->root_cluster, name, buf, len);
@@ -702,6 +703,7 @@ i64 Fat32CreateInRoot(const Volume* v, const char* name, const void* buf, u64 le
 i64 Fat32CreateAtPath(const Volume* v, const char* path, const void* buf, u64 len)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr || path == nullptr)
         return -1;
     u32 parent_cluster = 0;
@@ -714,6 +716,7 @@ i64 Fat32CreateAtPath(const Volume* v, const char* path, const void* buf, u64 le
 bool Fat32DeleteInRoot(const Volume* v, const char* name)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr)
         return false;
     return DeleteInDir(v, v->root_cluster, name);
@@ -722,6 +725,7 @@ bool Fat32DeleteInRoot(const Volume* v, const char* name)
 bool Fat32DeleteAtPath(const Volume* v, const char* path)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr || path == nullptr)
         return false;
     u32 parent_cluster = 0;
@@ -734,6 +738,7 @@ bool Fat32DeleteAtPath(const Volume* v, const char* path)
 bool Fat32MkdirAtPath(const Volume* v, const char* path)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr || path == nullptr)
         return false;
     u32 parent_cluster = 0;
@@ -770,6 +775,7 @@ bool Fat32MkdirAtPath(const Volume* v, const char* path)
 bool Fat32RmdirAtPath(const Volume* v, const char* path)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr || path == nullptr)
         return false;
     u32 parent_cluster = 0;
@@ -805,6 +811,7 @@ constexpr u64 kRenameBounceMax = 256 * 1024;
 bool Fat32RenameAtPath(const Volume* v, const char* src_path, const char* dst_path)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr || src_path == nullptr || dst_path == nullptr)
         return false;
 

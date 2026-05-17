@@ -1,6 +1,7 @@
 #include "fs/fat32.h"
 
 #include "drivers/storage/block.h"
+#include "fs/fat32_internal.h"
 #include "log/klog.h"
 #include "mm/kheap.h"
 
@@ -147,6 +148,7 @@ void BuildFsInfo(u8 sec[kSectorSize], u32 free_count)
 
 bool Fat32Format(u32 block_handle, u64 partition_sector_count)
 {
+    internal::Fat32InvalidatePathCache(); // every prior path resolution is now void
     if (!drivers::storage::BlockDeviceIsWritable(block_handle))
     {
         core::Log(core::LogLevel::Warn, "fs/fat32", "Fat32Format: handle not writable");

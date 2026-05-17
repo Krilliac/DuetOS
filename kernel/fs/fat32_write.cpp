@@ -817,6 +817,7 @@ i64 TruncateInDir(const Volume* v, u32 dir_cluster, const char* name, u64 new_si
 i64 Fat32WriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void* buf, u64 len)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr || e == nullptr || buf == nullptr)
         return -1;
     if (len == 0)
@@ -1028,6 +1029,7 @@ i64 WriteInDir(const Volume* v, u32 dir_cluster, const char* name, u64 offset, c
 i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 len)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr)
         return -1;
     return AppendInDir(v, v->root_cluster, name, buf, len);
@@ -1036,6 +1038,7 @@ i64 Fat32AppendInRoot(const Volume* v, const char* name, const void* buf, u64 le
 i64 Fat32AppendAtPath(const Volume* v, const char* path, const void* buf, u64 len)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr || path == nullptr)
         return -1;
     u32 parent_cluster = 0;
@@ -1052,6 +1055,7 @@ i64 Fat32AppendAtPath(const Volume* v, const char* path, const void* buf, u64 le
 i64 Fat32WriteAtPath(const Volume* v, const char* path, u64 offset, const void* buf, u64 len)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr || path == nullptr)
         return -1;
     u32 parent_cluster = 0;
@@ -1064,6 +1068,7 @@ i64 Fat32WriteAtPath(const Volume* v, const char* path, u64 offset, const void* 
 i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr)
         return -1;
     return TruncateInDir(v, v->root_cluster, name, new_size);
@@ -1072,6 +1077,7 @@ i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
 i64 Fat32TruncateAtPath(const Volume* v, const char* path, u64 new_size)
 {
     Fat32Guard guard;
+    internal::Fat32InvalidatePathCache();
     if (v == nullptr || path == nullptr)
         return -1;
     u32 parent_cluster = 0;

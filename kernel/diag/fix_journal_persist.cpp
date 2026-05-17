@@ -29,6 +29,13 @@ namespace
 
 constinit bool g_installed = false;
 
+// Gate for the heartbeat-cadence persist. Off until
+// FixJournalPersistEnablePeriodic() runs at bringup-complete, so
+// the boot self-test storm doesn't get amplified by repeated
+// KERNEL.FIX rewrites. Explicit flushes (self-test, dfix, panic)
+// ignore this and go straight through FixJournalPersistFlush.
+constinit bool g_periodic_enabled = false;
+
 // Snapshot scratch — kFixJournalCapacity * sizeof(FixRecord) = 128 KiB,
 // way too large for a kernel stack. Static .bss is fine: the flush
 // path is heartbeat-single-threaded, so there is no contention.
@@ -214,6 +221,18 @@ void FixJournalPersistFlush()
         return;
     }
     (void)WriteRingSnapshot(v);
+}
+
+void FixJournalPersistPeriodicTick()
+{
+    if (!g_periodic_enabled)
+        return;
+    FixJournalPersistFlush();
+}
+
+void FixJournalPersistEnablePeriodic()
+{
+    g_periodic_enabled = true;
 }
 
 bool FixJournalPersistInstalled()

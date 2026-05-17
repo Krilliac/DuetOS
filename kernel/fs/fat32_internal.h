@@ -78,6 +78,21 @@ u32 ReadFatEntry(const Volume& v, u32 cluster);
 // pre-write copy.
 void Fat32InvalidateFatCache();
 
+// Path-lookup result cache. Fat32LookupPath walks a directory's
+// cluster chain per component (uncached sector reads); a boot
+// self-test storm or a polling caller repeats the same lookups
+// hundreds of times between mutations. The cache memoizes both
+// positive and negative resolutions; a single generation counter
+// makes invalidation O(1).
+//
+// CONTRACT: every public Fat32 API that mutates on-disk state
+// (create / delete / truncate / append / write / mkdir / rmdir /
+// rename / format) MUST call Fat32InvalidatePathCache() before it
+// returns. Reads never call it. Over-invalidation only costs a
+// re-walk; a MISSED invalidation returns a stale entry, so when
+// in doubt, invalidate.
+void Fat32InvalidatePathCache();
+
 // Name predicates used by every walker.
 bool IsDotEntry(const char* n);
 bool NameIEqual(const char* a, const char* b);

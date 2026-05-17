@@ -505,6 +505,18 @@ When diagnosing a bug you almost always end up adding fresh log lines to localis
 
 The contract: a clean boot stays quiet at default log levels; a regression boot leaves a WARN sentinel + a probe fire + DEBUG-gated detail behind it, all without an operator having to re-add print statements. If the diagnostic you're considering doesn't earn its place under those rules (one-shot value, not actionable, or already implied by an existing log), don't add it — but if it does, gate it and leave it in.
 
+## Reusable Tooling — Save It, Don't Re-Derive It
+
+When you (or a prior session) write a script, harness, or one-off tool that has value beyond the immediate task — a CPU/latency profiler, a log correlator, a repro driver, a measurement rig, a parser for some boot artefact — **commit it into the tree instead of leaving it in `/tmp`.** The next session that needs it should `ls tools/` and find it, not reverse-engineer it from a transcript (or, worse, not know it ever existed and re-derive it from scratch).
+
+The discipline:
+
+- **Where it goes:** `tools/qemu/` for boot/QEMU-driven rigs, `tools/test/` for test harnesses, `tools/build/` for build/codegen helpers, `tools/debug/` for debugger glue. Match the existing siblings' shape (header comment block: what it does, why, usage, env vars, quick-analysis one-liners).
+- **What qualifies:** anything you'd plausibly run again, or that another session investigating the same area would want. A profiler that found a real spike, a script that reproduced a race, a correlator that mapped host metrics to guest time — yes. A throwaway `grep | sort` you typed once — no.
+- **Make it reusable, not task-welded:** parameterise the hard-coded paths/timeouts you used during the investigation (env vars or `$1`), keep it dependency-light, and `bash -n` / syntax-check it before committing.
+- **Commit it with the work it supported.** The tool and the fix it measured belong in the same slice — the tool is the evidence the fix works and the means to re-verify it. Mention it in the commit body.
+- **This rule is the structural form of "no deferring":** re-deriving a measurement rig every session is the same wasted-interest cost as letting a signal rot. Pay it once.
+
 ## Documentation home
 
 The single canonical documentation home is [`wiki/`](wiki/). Subsystem pages, specifications, the design-decisions log, the shell-command surface, and the project history all live there. The [`Sidebar`](wiki/_Sidebar.md) is the table of contents.

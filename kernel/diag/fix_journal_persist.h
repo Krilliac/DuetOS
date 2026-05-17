@@ -63,8 +63,22 @@ bool FixJournalPersistInstall();
 
 /// Rewrite KERNEL.FIX from the current ring snapshot. No-op when
 /// the sink isn't installed or the ring is empty. Safe to call on
-/// the heartbeat tick.
+/// the heartbeat tick. Unconditional — used by the self-test, the
+/// `dfix flush` shell command, and the panic path.
 void FixJournalPersistFlush();
+
+/// Heartbeat-cadence wrapper around FixJournalPersistFlush. No-op
+/// until FixJournalPersistEnablePeriodic() has run. During bringup
+/// the storage self-test storm + this rewrite (lookup → delete →
+/// 9-slot rotate → create, several times/sec) was a measured ~1 s
+/// full-core CPU spike; deferring the *periodic* persist to
+/// steady-state removes it. The RAM ring keeps recording the whole
+/// time, so nothing is lost — only the on-disk mirror is delayed
+/// to the first post-bringup tick.
+void FixJournalPersistPeriodicTick();
+
+/// Arm the periodic persist. Called once, at bringup-complete.
+void FixJournalPersistEnablePeriodic();
 
 /// True iff the sink is currently installed and pointing at a live
 /// FAT32 volume.

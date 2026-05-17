@@ -95,7 +95,7 @@ void UiTickerTask(void*)
         // have been added since the last flush could be cheaply
         // detected via stats but the rewrite itself is small
         // enough that we just always write.
-        duetos::diag::FixJournalPersistFlush();
+        duetos::diag::FixJournalPersistPeriodicTick();
         // Autosave the theme + window-position session state.
         // Internally throttled — bytewise-equal payloads skip
         // the FAT32 write, so a stable session writes once
