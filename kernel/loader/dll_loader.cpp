@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
+#include "loader/image_patch.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
 #include "mm/page.h"
@@ -385,44 +386,27 @@ bool ApplyRelocations(const u8* file, u64 file_len, const DllHeaders& h, duetos:
                 continue;
             const u64 patch_va = base_va + u64(page_rva) + u64(offset);
             const u64 patch_bytes = is_highlow ? 4 : 8;
-            // page_rva/offset are from the untrusted .reloc blocks.
-            // The AddressSpaceLookupUserFrame guard below does not
-            // stop the write: it goes through PhysToVirt (kernel
-            // direct map), bypassing the PTE writable bit. A hostile
-            // DLL's crafted RVA could otherwise rewrite any mapped
-            // page of the shared guest AS — including the host EXE's
-            // R-X .text. Confine every patch to this DLL's mapped
-            // extent. page_rva u32, offset u16, patch_bytes <= 8 —
-            // the sum cannot overflow u64.
-            if (u64(page_rva) + u64(offset) + patch_bytes > h.image_size)
+            // page_rva/offset are from the untrusted .reloc blocks;
+            // bound the patch to this DLL's mapped extent. The
+            // helper's frame check alone cannot stop a direct-map
+            // write (PhysToVirt bypasses the PTE W bit) — see
+            // loader/image_patch.h, the single source of truth this
+            // shares with the PE loader.
+            if (!loader::ImageRangeInBounds(u64(page_rva) + u64(offset), patch_bytes, h.image_size))
             {
                 KLOG_ERROR_2V("loader/dll", "reloc target outside image", "page_rva", page_rva, "offset", offset);
                 return false;
             }
             u64 orig = 0;
-            for (u64 b = 0; b < patch_bytes; ++b)
+            if (!loader::ImageDirectReadLe(as, patch_va, patch_bytes, orig))
             {
-                const u64 va = patch_va + b;
-                const u64 page_va = va & ~0xFFFULL;
-                const PhysAddr frame = AddressSpaceLookupUserFrame(as, page_va);
-                if (frame == kNullFrame)
-                {
-                    SerialWrite("[dll-load] reloc patch va unmapped\n");
-                    return false;
-                }
-                const auto* direct = static_cast<const u8*>(PhysToVirt(frame));
-                orig |= u64(direct[va & 0xFFFULL]) << (b * 8);
+                SerialWrite("[dll-load] reloc patch va unmapped\n");
+                return false;
             }
             const u64 fixed = orig + delta;
-            for (u64 b = 0; b < patch_bytes; ++b)
+            if (!loader::ImageDirectWriteLe(as, patch_va, patch_bytes, fixed))
             {
-                const u64 va = patch_va + b;
-                const u64 page_va = va & ~0xFFFULL;
-                const PhysAddr frame = AddressSpaceLookupUserFrame(as, page_va);
-                if (frame == kNullFrame)
-                    return false;
-                auto* direct = static_cast<u8*>(PhysToVirt(frame));
-                direct[va & 0xFFFULL] = u8((fixed >> (b * 8)) & 0xFF);
+                return false;
             }
             ++applied;
         }

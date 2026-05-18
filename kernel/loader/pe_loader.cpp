@@ -57,6 +57,7 @@
 #include "diag/fix_journal.h"
 #include "diag/kdbg.h"
 #include "log/klog.h"
+#include "loader/image_patch.h"
 #include "loader/pe_exports.h"
 #include "proc/process.h"
 #include "util/random.h"
@@ -1220,18 +1221,14 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
 
             const u64 patch_va = h.image_base + u64(page_rva) + u64(offset);
             // HIGHLOW = 4 bytes, DIR64 = 8 bytes. Read, add delta, write
-            // back. Split across two frames if the write straddles a page.
+            // back (page-straddle handled by the helpers).
             const u64 patch_bytes = is_highlow ? 4 : 8;
             // page_rva/offset come straight from the untrusted .reloc
-            // blocks. The AddressSpaceLookupUserFrame check below is
-            // NOT sufficient: the patch is written through the kernel
-            // direct map (PhysToVirt), which bypasses the PTE writable
-            // bit, so a crafted RVA pointing at any mapped page of the
-            // guest AS (its stack, TEB, proc-env, or its own R-X .text)
-            // would be silently rewritten. Confine every patch to the
-            // image's own mapped extent. page_rva is u32, offset u16,
-            // patch_bytes <= 8 — the sum cannot overflow u64.
-            if (u64(page_rva) + u64(offset) + patch_bytes > h.image_size)
+            // blocks; bound the patch to the image's own mapped extent
+            // (the helpers' frame check alone can't stop a direct-map
+            // write — see loader/image_patch.h for the full rationale
+            // and the single source of truth for this invariant).
+            if (!loader::ImageRangeInBounds(u64(page_rva) + u64(offset), patch_bytes, h.image_size))
             {
                 SerialWrite("[pe-reloc] patch target outside image rva=");
                 SerialWriteHex(page_rva);
@@ -1241,37 +1238,23 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
                 return false;
             }
             u64 orig = 0;
-            for (u64 b = 0; b < patch_bytes; ++b)
+            if (!loader::ImageDirectReadLe(as, patch_va, patch_bytes, orig))
             {
-                const u64 va = patch_va + b;
-                const u64 page_va = va & ~0xFFFULL;
-                const mm::PhysAddr frame = mm::AddressSpaceLookupUserFrame(as, page_va);
-                if (frame == mm::kNullFrame)
-                {
-                    SerialWrite("[pe-reloc] patch va unmapped rva=");
-                    SerialWriteHex(page_rva);
-                    SerialWrite(" off=");
-                    SerialWriteHex(offset);
-                    SerialWrite("\n");
-                    return false;
-                }
-                const auto* direct = static_cast<const u8*>(mm::PhysToVirt(frame));
-                orig |= u64(direct[va & 0xFFFULL]) << (b * 8);
+                SerialWrite("[pe-reloc] patch va unmapped rva=");
+                SerialWriteHex(page_rva);
+                SerialWrite(" off=");
+                SerialWriteHex(offset);
+                SerialWrite("\n");
+                return false;
             }
             // HIGHLOW only patches the low 32 bits; the delta itself for
             // a 32-bit image lives in the low 32 bits too (ImageBase is
             // u32). Truncating after the add matches what a 32-bit
             // Windows loader does.
             const u64 fixed = orig + delta;
-            for (u64 b = 0; b < patch_bytes; ++b)
+            if (!loader::ImageDirectWriteLe(as, patch_va, patch_bytes, fixed))
             {
-                const u64 va = patch_va + b;
-                const u64 page_va = va & ~0xFFFULL;
-                const mm::PhysAddr frame = mm::AddressSpaceLookupUserFrame(as, page_va);
-                if (frame == mm::kNullFrame)
-                    return false; // can't happen — just read this frame.
-                auto* direct = static_cast<u8*>(mm::PhysToVirt(frame));
-                direct[va & 0xFFFULL] = u8((fixed >> (b * 8)) & 0xFF);
+                return false; // can't happen — just read these frames.
             }
             ++entries_applied;
         }
@@ -1901,14 +1884,10 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             const u64 iat_slot_off = u64(first_thunk) + u64(fn_idx) * ent_bytes;
             // first_thunk is the import descriptor's FirstThunk RVA —
             // attacker-controlled and, like the .reloc case above,
-            // only checked against AddressSpaceLookupUserFrame, which
-            // does not stop a direct-map write (PhysToVirt bypasses
-            // the PTE W bit). Without this bound a crafted FirstThunk
-            // points the IAT-slot write at any mapped guest page
-            // (stack return addresses, TEB, proc-env). Confine it to
-            // the image extent. first_thunk u32, fn_idx <= kMaxFnPerDll,
-            // ent_bytes <= 8 — the sum cannot overflow u64.
-            if (iat_slot_off + ent_bytes > h.image_size)
+            // bounded to the image extent (the helper's frame check
+            // alone does not stop a direct-map write; see
+            // loader/image_patch.h — single source of truth).
+            if (!loader::ImageRangeInBounds(iat_slot_off, ent_bytes, h.image_size))
             {
                 SerialWrite("[pe-resolve] ");
                 SerialWrite(dll_name);
@@ -1918,8 +1897,11 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 return false;
             }
             const u64 iat_slot_va = h.image_base + iat_slot_off;
-            const mm::PhysAddr iat_frame = mm::AddressSpaceLookupUserFrame(as, iat_slot_va);
-            if (iat_frame == mm::kNullFrame)
+            // Store little-endian; ImageDirectWriteLe resolves each
+            // byte's frame independently, so a slot that straddles a
+            // page boundary is handled correctly (the old single
+            // frame-lookup write here did not).
+            if (!loader::ImageDirectWriteLe(as, iat_slot_va, ent_bytes, stub_va))
             {
                 SerialWrite("[pe-resolve] ");
                 SerialWrite(dll_name);
@@ -1928,12 +1910,6 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 SerialWrite(": IAT slot VA not mapped\n");
                 return false;
             }
-            auto* iat_direct = static_cast<u8*>(mm::PhysToVirt(iat_frame));
-            const u64 page_off = iat_slot_va & 0xFFFULL;
-            // Store little-endian byte-by-byte; avoids any
-            // alignment assumption on the direct-map pointer.
-            for (u64 b = 0; b < ent_bytes; ++b)
-                iat_direct[page_off + b] = static_cast<u8>((stub_va >> (b * 8)) & 0xFF);
             ++resolved;
 
             // Structured klog: Info for real stubs, Warn for no-op
