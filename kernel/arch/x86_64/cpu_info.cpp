@@ -37,16 +37,16 @@ struct FeatureBitTag
 };
 
 constexpr FeatureBitTag kFeatures[] = {
-    {kCpuFeatFpu, "fpu"},        {kCpuFeatTsc, "tsc"},       {kCpuFeatMsr, "msr"},
-    {kCpuFeatApic, "apic"},      {kCpuFeatMmx, "mmx"},       {kCpuFeatSse, "sse"},
-    {kCpuFeatSse2, "sse2"},      {kCpuFeatSse3, "sse3"},     {kCpuFeatSsse3, "ssse3"},
-    {kCpuFeatSse4_1, "sse4.1"},  {kCpuFeatSse4_2, "sse4.2"}, {kCpuFeatAesNi, "aes"},
-    {kCpuFeatAvx, "avx"},        {kCpuFeatF16c, "f16c"},     {kCpuFeatRdrand, "rdrand"},
-    {kCpuFeatSmep, "smep"},      {kCpuFeatSmap, "smap"},     {kCpuFeatBmi1, "bmi1"},
-    {kCpuFeatBmi2, "bmi2"},      {kCpuFeatAvx2, "avx2"},     {kCpuFeatAvx512f, "avx512f"},
-    {kCpuFeatRdseed, "rdseed"},  {kCpuFeatNx, "nx"},         {kCpuFeatPdpe1Gb, "1g"},
-    {kCpuFeatLongMode, "lm"},    {kCpuFeatX2Apic, "x2apic"}, {kCpuFeatTscDeadline, "tscdl"},
-    {kCpuFeatHypervisor, "hyp"},
+    {kCpuFeatFpu, "fpu"},        {kCpuFeatTsc, "tsc"},         {kCpuFeatMsr, "msr"},
+    {kCpuFeatApic, "apic"},      {kCpuFeatMmx, "mmx"},         {kCpuFeatSse, "sse"},
+    {kCpuFeatSse2, "sse2"},      {kCpuFeatSse3, "sse3"},       {kCpuFeatSsse3, "ssse3"},
+    {kCpuFeatSse4_1, "sse4.1"},  {kCpuFeatSse4_2, "sse4.2"},   {kCpuFeatAesNi, "aes"},
+    {kCpuFeatAvx, "avx"},        {kCpuFeatF16c, "f16c"},       {kCpuFeatRdrand, "rdrand"},
+    {kCpuFeatSmep, "smep"},      {kCpuFeatSmap, "smap"},       {kCpuFeatBmi1, "bmi1"},
+    {kCpuFeatBmi2, "bmi2"},      {kCpuFeatAvx2, "avx2"},       {kCpuFeatAvx512f, "avx512f"},
+    {kCpuFeatRdseed, "rdseed"},  {kCpuFeatNx, "nx"},           {kCpuFeatPdpe1Gb, "1g"},
+    {kCpuFeatLongMode, "lm"},    {kCpuFeatX2Apic, "x2apic"},   {kCpuFeatTscDeadline, "tscdl"},
+    {kCpuFeatHypervisor, "hyp"}, {kCpuFeatMonitor, "monitor"},
 };
 
 // Pack 4 bytes of a u32 register into a char buffer (little-endian
@@ -93,6 +93,7 @@ void CpuInfoProbe()
     StoreBit(kCpuFeatSsse3, (r1.ecx >> 9) & 1);
     StoreBit(kCpuFeatSse4_1, (r1.ecx >> 19) & 1);
     StoreBit(kCpuFeatSse4_2, (r1.ecx >> 20) & 1);
+    StoreBit(kCpuFeatMonitor, (r1.ecx >> 3) & 1);
     StoreBit(kCpuFeatX2Apic, (r1.ecx >> 21) & 1);
     StoreBit(kCpuFeatTscDeadline, (r1.ecx >> 24) & 1);
     StoreBit(kCpuFeatAesNi, (r1.ecx >> 25) & 1);

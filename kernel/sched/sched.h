@@ -410,6 +410,14 @@ void AffinityMaskSelfTest();
 /// `[hybrid-placement-selftest] PASS`/`SKIP` line.
 void HybridPlacementSelfTest();
 
+/// Verifies the MWAIT-idle feature gate: the cached MONITOR
+/// feature bit must agree with a fresh CPUID.1:ECX[3], and
+/// CpuInfo must be initialised. Emits one
+/// `[idle-power-selftest] PASS (mwait|hlt-fallback)` line
+/// reporting the idle path actually selected. PASSes on every
+/// guest (no SKIP); panics on a feature-gate mismatch.
+void IdlePowerSelfTest();
+
 /// Top (high address) of the current task's kernel stack. Returns 0 for
 /// the boot task (it never had a scheduler-managed kernel stack — it
 /// runs on the boot.S stack, which is irrelevant for ring-3 RSP0

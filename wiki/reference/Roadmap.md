@@ -198,6 +198,15 @@ the same commit** that delivers the code.
   `SchedGetAffinityMask` back the Linux `sched_setaffinity` /
   `sched_getaffinity` thunks (previously accept-and-ignore
   no-ops). Self-test `affinity-mask-selftest` (Phase::Userland).
+- **MWAIT low-power idle landed:** `kCpuFeatMonitor` (CPUID.1:
+  ECX[3]) gates a `MONITOR`/`MWAIT` C1 idle in `IdleMain` and the
+  AP-join loop; falls back to `sti; hlt` verbatim when absent.
+  Wake semantics unchanged (an IRQ breaks `MWAIT` as it breaks
+  `HLT`); monitored cell is a per-CPU stack byte. Self-test
+  `idle-power-selftest` (Phase::Userland) verifies the feature
+  gate and reports the chosen path; it PASSes (not SKIPs) on
+  every guest. Deeper C-states / a cpuidle governor remain
+  deferred — no profile evidence and no consumer yet.
 - **Single-ICR broadcast landed (xAPIC):** kernel-AS TLB
   shootdowns (`as == nullptr`) provably target every online
   peer, so `SmpTlbShootdownBroadcast` now fans out in one ICR

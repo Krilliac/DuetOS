@@ -38,6 +38,7 @@
 #include "sched/sched.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/cpu_info.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
@@ -3188,6 +3189,33 @@ void HybridPlacementSelfTest()
     arch::SerialWrite("[hybrid-placement-selftest] PASS\n");
 }
 
+void IdlePowerSelfTest()
+{
+    // Wiring check: the CPU-feature table must be populated and
+    // the MONITOR bit must agree with a fresh CPUID.1:ECX[3], so
+    // the idle path's gate reflects reality. Then report which
+    // idle path every CPU's IdleMain selected. Unlike the
+    // topology self-tests this PASSes on QEMU (real signal, not a
+    // SKIP) — the boot-log analyzer greps the sentinel.
+    const arch::CpuInfo& ci = arch::CpuInfoGet();
+    KASSERT(ci.valid, "sched", "IdlePowerSelfTest: CpuInfo not initialised");
+
+    u32 eax = 1, ebx = 0, ecx = 0, edx = 0;
+    asm volatile("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    const bool cpuid_monitor = ((ecx >> 3) & 1u) != 0u;
+    const bool feat_monitor = arch::CpuHas(arch::kCpuFeatMonitor);
+    KASSERT(cpuid_monitor == feat_monitor, "sched", "IdlePowerSelfTest: MONITOR feature gate disagrees with CPUID");
+
+    if (feat_monitor)
+    {
+        arch::SerialWrite("[idle-power-selftest] PASS (mwait)\n");
+    }
+    else
+    {
+        arch::SerialWrite("[idle-power-selftest] PASS (hlt-fallback)\n");
+    }
+}
+
 void DumpCurrentTaskSyscallTrail()
 {
     Task* self = Current();
@@ -4026,8 +4054,36 @@ void SchedStartReaper()
 namespace
 {
 
+// Low-power idle. MONITOR/MWAIT lets the core drop into an
+// MWAIT-C1 power state that is at least as deep as a bare HLT
+// (and lower-power on most parts) while keeping identical wake
+// semantics: an IRQ — timer tick or reschedule IPI — breaks
+// MWAIT exactly as it breaks HLT, so the dispatcher runs on the
+// same events as before. The monitored cell lives on the idle
+// task's own (per-CPU) stack, so each CPU arms a distinct line;
+// nothing ever writes it (the wake source is the interrupt, not
+// a store), so there is no lost-wakeup window beyond the one
+// `sti; hlt` already has. EAX=0 selects the C1 hint (conservative
+// — no deep C-state latency); ECX bit0 makes a masked interrupt
+// also break MWAIT, closing the sti→mwait race defensively.
+// Falls back to HLT verbatim when MONITOR is unavailable.
+inline void CpuIdleLowPower(volatile u8* monitor_cell, bool use_mwait)
+{
+    if (use_mwait)
+    {
+        asm volatile("monitor" ::"a"(monitor_cell), "c"(0), "d"(0));
+        asm volatile("mwait" ::"a"(0), "c"(1));
+    }
+    else
+    {
+        asm volatile("hlt");
+    }
+}
+
 [[noreturn]] void IdleMain(void*)
 {
+    const bool use_mwait = arch::CpuHas(arch::kCpuFeatMonitor);
+    volatile u8 monitor_cell = 0; // per-idle-task (per-CPU) MONITOR line
     for (;;)
     {
         // Drain any RCU callbacks queued on THIS CPU before
@@ -4044,7 +4100,7 @@ namespace
         // across the box at zero scheduling cost.
         sync::RcuReclaimLocal();
         arch::Sti();
-        asm volatile("hlt");
+        CpuIdleLowPower(&monitor_cell, use_mwait);
     }
 }
 
@@ -4153,10 +4209,12 @@ void FormatIdleApName(char (&out)[16], u32 cpu_id)
     //    Schedule(), pulls a runnable task off this CPU's runqueue
     //    (or our just-spawned idle if no work is waiting), and
     //    never returns to this stack frame.
+    const bool use_mwait = arch::CpuHas(arch::kCpuFeatMonitor);
+    volatile u8 monitor_cell = 0;
     for (;;)
     {
         arch::Sti();
-        asm volatile("hlt");
+        CpuIdleLowPower(&monitor_cell, use_mwait);
     }
 }
 

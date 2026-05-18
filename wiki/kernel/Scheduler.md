@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel — `Schedule()` runs after IRQ EOI or in `cli` cooperative paths
 >
-> **Maturity:** SMP-online — per-CPU runqueues, work-stealing, reschedule-IPI, cluster-aware wake placement, periodic active load balancer, SMT-aware placement, hybrid P/E-core bias, hard CPU affinity; single global `g_sched_lock` (per-CPU lock split deferred)
+> **Maturity:** SMP-online — per-CPU runqueues, work-stealing, reschedule-IPI, cluster-aware wake placement, periodic active load balancer, SMT-aware placement, hybrid P/E-core bias, hard CPU affinity, MWAIT low-power idle; single global `g_sched_lock` (per-CPU lock split deferred)
 
 ## Overview
 
@@ -12,8 +12,15 @@ The DuetOS scheduler is preemptive, kernel-thread first, and SMP. Each
 CPU has its own runqueue (Normal + Idle bands) stored in `cpu::PerCpu`.
 `SchedInit` wraps `kernel_main` as task 0 (the boot task) on the BSP;
 `SchedStartIdle` spawns a per-CPU idle task (`idle-bsp` on the BSP,
-`idle-apN` on each AP) that loops on `sti; hlt` so each CPU's runqueue
-is never empty. `SchedCreate(entry, arg, name)` spawns a regular kernel
+`idle-apN` on each AP) that loops on a low-power idle so each CPU's
+runqueue is never empty. The idle uses `MONITOR`/`MWAIT` (C1 hint)
+when CPUID.1:ECX[3] is set — the core drops into an MWAIT-C1 power
+state that is at least as deep as a bare `HLT` — and falls back to
+`sti; hlt` verbatim otherwise. Wake semantics are unchanged: an IRQ
+(timer tick or reschedule IPI) breaks `MWAIT` exactly as it breaks
+`HLT`, and the monitored cell is a per-idle-task (per-CPU) stack
+byte nothing ever writes, so there is no lost-wakeup window beyond
+the one `sti; hlt` already had. `SchedCreate(entry, arg, name)` spawns a regular kernel
 thread with its own 64 KiB stack on the spawning CPU's runqueue. Sleep
 / wait queues / mutexes layer on top.
 
@@ -206,8 +213,11 @@ select a forbidden CPU while an unrestricted task routes identically
 to a no-task call; it SKIPs on <2-CPU guests.
 `hybrid-placement-selftest` verifies the E-core penalty applies
 only while an idle P-core exists and lifts when every P-core is
-busy; it SKIPs on non-hybrid guests (every QEMU guest). Each emits
-one `[<name>] PASS` (or `SKIP`) line so CI can grep for it.
+busy; it SKIPs on non-hybrid guests (every QEMU guest).
+`idle-power-selftest` checks the MWAIT feature gate (cached MONITOR
+bit vs a fresh CPUID, CpuInfo initialised) and reports the selected
+idle path; it PASSes on every guest (no SKIP). Each emits one
+`[<name>] PASS` (or `SKIP`) line so CI can grep for it.
 
 ## Blocking Primitives (sister doc)
 

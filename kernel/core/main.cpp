@@ -816,6 +816,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                            duetos::sched::HybridPlacementSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
+        // MWAIT-idle feature-gate test. PASSes on every guest
+        // (reports mwait vs hlt-fallback) — a real green signal.
+        duetos::core::InitcallRegister(duetos::core::Phase::Userland, "idle-power-selftest",
+                                       []()
+                                       {
+                                           duetos::sched::IdlePowerSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Userland);
 
