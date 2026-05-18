@@ -402,6 +402,13 @@ QEMU_ARGS=(
     # transitional device IDs (0x1000-0x103f).
     -device   "virtio-rng-pci,disable-legacy=on"
     -device   "virtio-balloon-pci,disable-legacy=on"
+    # Intel HDA controller + output codec so the audio backend's
+    # BDL/stream/DMA byte path is exercised every smoke. audiodev
+    # `none` = no host audio sink (silent, headless-safe) while the
+    # device model + stream DMA + LPIB counter still run.
+    -audiodev "none,id=duetsnd"
+    -device   "intel-hda"
+    -device   "hda-output,audiodev=duetsnd"
     "${UEFI_ARGS[@]}"
     "${BOOT_SOURCE[@]}"
 )

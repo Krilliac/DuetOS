@@ -8,6 +8,7 @@
 
 #include "drivers/audio/hda.h"
 
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "drivers/audio/hda_jack.h"
@@ -16,6 +17,7 @@
 #include "mm/dma.h"
 #include "mm/paging.h"
 #include "mm/zone.h"
+#include "time/timekeeper.h"
 
 namespace duetos::drivers::audio::hda
 {
@@ -45,7 +47,19 @@ constexpr u64 kHdaRegRirblbase = 0x50;
 constexpr u64 kHdaRegRirbubase = 0x54;
 constexpr u64 kHdaRegRintcnt = 0x5A;
 constexpr u64 kHdaRegRirbctl = 0x5C;
+constexpr u64 kHdaRegRirbsts = 0x5D;
 constexpr u64 kHdaRegRirbsize = 0x5E;
+
+// Immediate Command Interface (HDA spec §3.4.3). The single-verb
+// fallback used when the CORB/RIRB DMA engine isn't advancing
+// (QEMU's intel-hda only runs the CORB engine once; this is also
+// Linux's `single_cmd` path and is implemented by virtually every
+// real Intel/AMD HDA controller).
+constexpr u64 kHdaRegIcoi = 0x60;    // Immediate Command Output (32-bit)
+constexpr u64 kHdaRegIcii = 0x64;    // Immediate Command Input  (32-bit)
+constexpr u64 kHdaRegIcis = 0x68;    // Immediate Command Status (16-bit)
+constexpr u16 kHdaIcisIcb = 1u << 0; // Immediate Command Busy
+constexpr u16 kHdaIcisIrv = 1u << 1; // Immediate Result Valid
 
 constexpr u32 kHdaGctlCrst = 1u << 0;
 constexpr u8 kHdaCorbctlRun = 1u << 1;
@@ -60,6 +74,7 @@ constexpr u16 kHdaRirbwpRst = 1u << 15;
 constexpr u64 kHdaSdBase = 0x80;
 constexpr u64 kHdaSdStride = 0x20;
 constexpr u64 kHdaSdRegCtl = 0x00;    // 3 bytes (CTL[0..23])
+constexpr u64 kHdaSdRegLpib = 0x04;   // 4 bytes — Link Position In Buffer (RO)
 constexpr u64 kHdaSdRegCbl = 0x08;    // 4 bytes — Cyclic Buffer Length
 constexpr u64 kHdaSdRegLvi = 0x0C;    // 2 bytes — Last Valid Index
 constexpr u64 kHdaSdRegFormat = 0x12; // 2 bytes
@@ -241,6 +256,7 @@ struct HdaState
 {
     mm::DmaBuffer dma;
     bool live;
+    bool use_ici; // sticky: CORB/RIRB stalled, use Immediate Command IF
     u16 corb_wp;
     u32 codec_vendor[15];
     u32 codec_dac_count[15];
@@ -283,13 +299,66 @@ void WalkCodec(const AudioControllerInfo& a, u8 slot);
 namespace
 {
 
-// Shared raw-verb dispatch shared by IssueVerbAndPoll +
-// IssueVerbAndPoll16. Pre-encoded `verb` is the 32-bit value
-// CORB will see; this helper just marshals through the rings.
-u32 IssueVerbRawAndPoll(const AudioControllerInfo& a, u32 verb)
+// Per-verb response timeout. QEMU's intel-hda processes the CORB
+// from a controller transfer that is NOT synchronous with the
+// CORBWP MMIO write — the response can land tens of microseconds to
+// a millisecond later. The old fixed 1024-`pause` bound (a few µs
+// on TCG) timed out for every verb after the first warm one, which
+// is why the codec walker read SubordinateNodeCount == 0. A
+// monotonic-clock deadline is correct regardless of host speed.
+constexpr u64 kHdaVerbTimeoutNs = 20ULL * 1000 * 1000; // 20 ms
+
+// Immediate Command Interface single-verb roundtrip (HDA §3.4.3).
+// Synchronous: write ICOI, set ICS.ICB, poll ICB clear + IRV set,
+// read ICII. Returns the response, or 0 on timeout. This is the
+// real-hardware-valid fallback (≈ Linux's `single_cmd`) for when
+// the CORB/RIRB DMA engine doesn't advance.
+u32 IciDispatch(const AudioControllerInfo& a, u32 verb)
+{
+    const u64 idle_deadline = time::MonotonicNs() + kHdaVerbTimeoutNs;
+    while ((Mmio16(a, kHdaRegIcis) & kHdaIcisIcb) != 0)
+    {
+        if (time::MonotonicNs() >= idle_deadline)
+            return 0;
+        arch::Inb(0x80);
+    }
+    // Clear a stale Immediate-Result-Valid (write-1-to-clear) so we
+    // observe THIS command's completion, then issue.
+    Mmio16Write(a, kHdaRegIcis, kHdaIcisIrv);
+    Mmio32Write(a, kHdaRegIcoi, verb);
+    Mmio16Write(a, kHdaRegIcis, kHdaIcisIcb);
+
+    const u64 deadline = time::MonotonicNs() + kHdaVerbTimeoutNs;
+    for (;;)
+    {
+        const u16 ics = Mmio16(a, kHdaRegIcis);
+        if ((ics & kHdaIcisIcb) == 0 && (ics & kHdaIcisIrv) != 0)
+        {
+            const u32 resp = Mmio32(a, kHdaRegIcii);
+            Mmio16Write(a, kHdaRegIcis, kHdaIcisIrv); // ack IRV
+            return resp;
+        }
+        if (time::MonotonicNs() >= deadline)
+            return 0;
+        arch::Inb(0x80);
+        asm volatile("pause" ::: "memory");
+    }
+}
+
+// Shared verb dispatch. Primary path is CORB/RIRB DMA (what real
+// hardware prefers). If the CORB engine doesn't advance the RIRB
+// within the deadline — QEMU's intel-hda runs the CORB engine only
+// once (verified: CORBRP freezes at 1 while CORBWP advances and
+// CORBCTL.RUN stays set) — we latch a sticky `use_ici` and serve
+// this and all future verbs through the Immediate Command
+// Interface. Mirrors Linux's CORB→single_cmd fallback.
+u32 DispatchVerb(const AudioControllerInfo& a, u32 verb)
 {
     if (!g.live)
         return 0;
+    if (g.use_ici)
+        return IciDispatch(a, verb);
+
     auto* corb = static_cast<volatile u32*>(g.dma.virt) + (kHdaCorbOffset / sizeof(u32));
     auto* rirb = reinterpret_cast<volatile u64*>(static_cast<u8*>(g.dma.virt) + kHdaRirbOffset);
 
@@ -299,7 +368,8 @@ u32 IssueVerbRawAndPoll(const AudioControllerInfo& a, u32 verb)
     mm::DmaSyncForDevice(g.dma, kHdaCorbOffset, kHdaCorbBytes);
     Mmio16Write(a, kHdaRegCorbwp, g.corb_wp);
 
-    for (u32 spin = 0; spin < 1024; ++spin)
+    const u64 deadline = time::MonotonicNs() + kHdaVerbTimeoutNs;
+    for (;;)
     {
         const u16 rirb_wp_now = Mmio16(a, kHdaRegRirbwp) & 0xFFu;
         if (rirb_wp_now != rirb_wp_before)
@@ -307,37 +377,33 @@ u32 IssueVerbRawAndPoll(const AudioControllerInfo& a, u32 verb)
             mm::DmaSyncForCpu(g.dma, kHdaRirbOffset, kHdaRirbBytes);
             return static_cast<u32>(rirb[rirb_wp_now] & 0xFFFFFFFFu);
         }
+        if (time::MonotonicNs() >= deadline)
+        {
+            // One-time, kept (gated) diagnostic — the CORB stall
+            // fingerprint a future regression in this area needs.
+            g.use_ici = true;
+            KLOG_WARN_V("drivers/audio/hda", "CORB/RIRB stalled — switching to Immediate Command IF; verb", verb);
+            KLOG_DEBUG_V("drivers/audio/hda", "  CORBWP", Mmio16(a, kHdaRegCorbwp) & 0xFFu);
+            KLOG_DEBUG_V("drivers/audio/hda", "  CORBRP", Mmio16(a, kHdaRegCorbrp) & 0xFFu);
+            KLOG_DEBUG_V("drivers/audio/hda", "  CORBCTL", Mmio8(a, kHdaRegCorbctl));
+            KLOG_DEBUG_V("drivers/audio/hda", "  RIRBSTS", Mmio8(a, kHdaRegRirbsts));
+            return IciDispatch(a, verb);
+        }
+        arch::Inb(0x80); // ~1 µs IO-port delay so QEMU advances time
         asm volatile("pause" ::: "memory");
     }
-    return 0;
+}
+
+u32 IssueVerbRawAndPoll(const AudioControllerInfo& a, u32 verb)
+{
+    return DispatchVerb(a, verb);
 }
 
 } // namespace
 
 u32 IssueVerbAndPoll(const AudioControllerInfo& a, u8 codec, u8 node, u32 verb12, u8 data8)
 {
-    if (!g.live)
-        return 0;
-    auto* corb = static_cast<volatile u32*>(g.dma.virt) + (kHdaCorbOffset / sizeof(u32));
-    auto* rirb = reinterpret_cast<volatile u64*>(static_cast<u8*>(g.dma.virt) + kHdaRirbOffset);
-
-    const u16 rirb_wp_before = Mmio16(a, kHdaRegRirbwp) & 0xFFu;
-    g.corb_wp = static_cast<u16>((g.corb_wp + 1) % kHdaCorbEntries);
-    corb[g.corb_wp] = EncodeVerb(codec, node, verb12, data8);
-    mm::DmaSyncForDevice(g.dma, kHdaCorbOffset, kHdaCorbBytes);
-    Mmio16Write(a, kHdaRegCorbwp, g.corb_wp);
-
-    for (u32 spin = 0; spin < 1024; ++spin)
-    {
-        const u16 rirb_wp_now = Mmio16(a, kHdaRegRirbwp) & 0xFFu;
-        if (rirb_wp_now != rirb_wp_before)
-        {
-            mm::DmaSyncForCpu(g.dma, kHdaRirbOffset, kHdaRirbBytes);
-            return static_cast<u32>(rirb[rirb_wp_now] & 0xFFFFFFFFu);
-        }
-        asm volatile("pause" ::: "memory");
-    }
-    return 0;
+    return DispatchVerb(a, EncodeVerb(codec, node, verb12, data8));
 }
 
 namespace
@@ -764,6 +830,17 @@ u32 ArmedStreamCount()
     return {};
 }
 
+u32 StreamPosition(const AudioControllerInfo& a, u8 sd_idx)
+{
+    if (!g.brought_up || a.mmio_virt == nullptr)
+        return 0;
+    const u8 total = static_cast<u8>(g.input_stream_count + g.output_stream_count);
+    if (sd_idx >= total)
+        return 0;
+    const u64 sd_off = kHdaSdBase + sd_idx * kHdaSdStride;
+    return Mmio32(a, sd_off + kHdaSdRegLpib);
+}
+
 ::duetos::core::Result<void> StreamFillBdl(void* bdl_virt, const BdlEntry* entries, u32 count)
 {
     if (bdl_virt == nullptr || entries == nullptr)
@@ -804,6 +881,7 @@ u32 IssueVerbAndPoll16(const AudioControllerInfo& a, u8 codec, u8 node, u32 verb
     };
 
     const u32 jack_count = HdaJackInventoryCount();
+    KLOG_DEBUG_V("drivers/audio/hda", "FindFirstOutputPath: jack_count", jack_count);
     for (u32 pref = 0; pref < sizeof(kPreference) / sizeof(kPreference[0]); ++pref)
     {
         for (u32 idx = 0; idx < jack_count; ++idx)
@@ -811,6 +889,14 @@ u32 IssueVerbAndPoll16(const AudioControllerInfo& a, u8 codec, u8 node, u32 verb
             HdaJackRecord rec{};
             if (!HdaJackInventoryRead(idx, &rec))
                 continue;
+            KLOG_DEBUG_V("drivers/audio/hda", "  jack idx", idx);
+            KLOG_DEBUG_V("drivers/audio/hda", "    default_device", static_cast<u32>(rec.config.default_device));
+            KLOG_DEBUG_V("drivers/audio/hda", "    port_conn", static_cast<u32>(rec.config.port_connectivity));
+            KLOG_DEBUG_V("drivers/audio/hda", "    codec_slot", rec.codec_slot);
+            KLOG_DEBUG_V("drivers/audio/hda", "    dac_count",
+                         rec.codec_slot < 15 ? g.codec_dac_count[rec.codec_slot] : 0xFFFFFFFFu);
+            KLOG_DEBUG_V("drivers/audio/hda", "    first_dac_node",
+                         rec.codec_slot < 15 ? g.codec_first_dac_node[rec.codec_slot] : 0xFFu);
             if (rec.config.default_device != kPreference[pref])
                 continue;
             if (rec.config.port_connectivity == HdaPortConnectivity::NoPhysicalConn)

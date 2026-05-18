@@ -33,6 +33,17 @@ mkdir -p "${WORK_DIR}"
 OBJ="${WORK_DIR}/vcruntime140.obj"
 DLL="${WORK_DIR}/vcruntime140.dll"
 
+# ntdll import lib (built by build-ntdll-dll.sh into the sibling
+# ntdll/ work tree). vcruntime140's C++ EH personality imports the
+# real two-pass engine (RtlUnwindEx / NtRaiseException /
+# RtlCaptureContext / RtlLookupFunctionEntry) from ntdll. The CMake
+# dependency edge guarantees ntdll.lib exists first.
+NTDLL_LIB="$(dirname "${OUT_HEADER}")/ntdll/ntdll.lib"
+if [[ ! -s "${NTDLL_LIB}" ]]; then
+    echo "build-vcruntime140-dll.sh: missing import lib ${NTDLL_LIB}" >&2
+    exit 1
+fi
+
 CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"
 
@@ -82,8 +93,11 @@ set +e
     /export:__std_exception_destroy \
     /export:__vcrt_InitializeCriticalSectionEx \
     /export:__CxxUnwind \
+    /export:_fltused \
+    "/export:??_7type_info@@6B@" \
     /out:"${DLL}" \
-    "${OBJ}" 2>&1 | grep -v "align specified without /driver"
+    "${OBJ}" \
+    "${NTDLL_LIB}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e
 if [[ ${LINK_RC} -ne 0 ]]; then

@@ -1929,6 +1929,22 @@ enum SyscallNumber : u64
     // Returns the queried value, or 0 on bad op / no device.
     SYS_AUDIO_DEVICE_INFO = 198,
 
+    // SYS_AUDIO_WRITE — submit interleaved S16LE-stereo PCM to the
+    // in-kernel HDA audio backend and ensure the stream is running.
+    // Backs Win32 winmm `waveOutWrite`.
+    //   rdi = const i16* user pointer to PCM samples [L,R,L,R,...]
+    //   rsi = u64 byte length of the PCM buffer
+    // The kernel bounded-copies (CopyFromUser, capped at the
+    // backend ring size), writes from frame offset 0, and flips the
+    // stream RUN bit. Returns the number of frames accepted, or 0
+    // if no audio backend is active / bad arguments. Audible output
+    // additionally requires a routed codec path (see
+    // subsystems::audio::CodecRouted) — absent on QEMU virtual
+    // codecs, where the bytes are still DMA'd.
+    // (Value 210 — grouped here with SYS_AUDIO_DEVICE_INFO for
+    // readability; 199 was already taken by SYS_VIRTUAL_ALLOC.)
+    SYS_AUDIO_WRITE = 210,
+
     // SYS_VIRTUAL_ALLOC — region-tracking VirtualAlloc with
     // reserve/commit split (T5-01). Backs Win32
     // kernel32!VirtualAlloc.

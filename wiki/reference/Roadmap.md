@@ -496,16 +496,45 @@ In rough priority:
   system beep" path doesn't have to know the order. Boot self-
   test exercises the verb-encoding helpers against canonical
   inputs.
-- **Blocks (still pending):** allocating real audio buffer
-  pages + populating a BDL with sample data + flipping RUN +
-  observing samples land at the codec — needs a DMA-coherent
-  buffer allocator path that's wired through the audio shell
-  (or a system-beep driver), plus QEMU's `-device hda-output`
-  to verify the byte-level path. `FindFirstOutputPath()` now
-  supplies the bootstrap `dac_node` / `pin_node` pair for the
-  first speaker / headphone / line-out pin; the remaining gap is
-  a consumer that allocates real buffers and calls it as part of
-  playback.
+- **DONE — DMA byte path + consumer + producer wired.** The
+  audio backend (`kernel/subsystems/audio/audio_backend.cpp`)
+  allocates a DMA-coherent BDL + PCM ring, fills the BDL,
+  `StreamArm`s the SD, and `StreamRun`s it; `Init` no longer
+  aborts when codec routing is unavailable (it keeps the stream
+  armed + active with `codec_routed=false`, so the controller
+  byte path is usable). `hda::StreamPosition` exposes SD_LPIB.
+  A producer path landed: `SYS_AUDIO_WRITE` (210) bounded-copies
+  user PCM into the ring and RUNs the stream; winmm
+  `waveOutWrite` routes the WAVEHDR through it. The QEMU smoke
+  now adds `-device intel-hda -device hda-output -audiodev none`,
+  so every boot exercises BringUp → StreamArm → RUN → LPIB. The
+  audio self-test verifies silence/sine + Start/Stop + LPIB.
+- **DONE — audible path now routed + DMA-verified.** Two root
+  causes were found and fixed:
+  1. *CORB/RIRB stall.* QEMU's intel-hda runs the CORB DMA engine
+     exactly once (verified: CORBRP freezes at 1 while CORBWP
+     advances and CORBCTL.RUN stays set), so every verb after the
+     first timed out and the codec walker read
+     `SubordinateNodeCount == 0`. `hda.cpp` now has a shared
+     `DispatchVerb` that, on a CORB timeout, latches a sticky
+     `use_ici` and serves all verbs through the Immediate Command
+     Interface (ICOI/ICII/ICS) — the real-hardware-valid fallback
+     equivalent to Linux's `single_cmd`. The fixed 1024-`pause`
+     bound was also replaced with a 20 ms monotonic deadline.
+  2. *Self-test destroyed production state.*
+     `HdaJackInventorySelfTest` reset the shared jack inventory and
+     ran (per boot order) after the real codec walk filled it but
+     before the audio backend read it, so `FindFirstOutputPath`
+     saw 0 jacks. It now snapshots + restores the inventory
+     (mirroring `acpi::AcpiUnderflowSelfTest`), so it is
+     order-independent.
+  Verified on the QEMU smoke: codec walk finds the audio function
+  group + DAC (node 2) + line-out pin (node 3),
+  `ConfigureOutputPath` succeeds, `[audio-backend] codec routed`,
+  and `[audio-selftest] DMA LPIB advanced (routed, audible path)`
+  — the HDA DMA engine is pulling samples through a routed codec.
+- **Still pending:** real-hardware audible validation (no HW in
+  CI); a mixer for multiple concurrent producers.
 - **Owner:** `kernel/drivers/audio/`.
 
 ### Wireless — real-hardware verification
@@ -577,18 +606,31 @@ In rough priority:
 
 ### Brightness — ACPI EC driver
 
-- **Today:** Fn-keys dead; no backlight driver.
-- **Blocks on:** ACPI EC driver (does not exist), per-vendor
-  backlight register paths.
+- **ACPI path LANDED:** `kernel/acpi/acpi_power.cpp` exposes
+  `AcpiBacklightLevels` / `AcpiBacklightGet` / `AcpiBacklightSet`
+  driving the firmware's `_BCL` / `_BQC` / `_BCM` methods through
+  the AML interpreter; the ACPI EC driver
+  (`kernel/acpi/ec.{h,cpp}`) backs any EmbeddedControl FieldUnits
+  those methods touch.
+- **Still blocks on:** per-vendor *register* backlight (Intel/AMD
+  PWM, vendor WMI/Fn-key hotkeys) for laptops that do brightness
+  outside ACPI `_BCM`. Wiring the UI brightness control + Fn-key
+  events to `AcpiBacklightSet` is a follow-up.
 
 ### Battery + ACPI suspend
 
-- **Today:** `kernel/drivers/power/power.cpp` flags
-  `backend_is_stub = true`. ACPI battery state unknown.
-- **Blocks on:** ACPI AML interpreter (only static tables
-  parsed today), EC battery status registers, S3/S0ix wake
-  plumbing.
-- **Unlocks:** battery tray icon, lid-close suspend.
+- **Battery / AC / lid LANDED:** the ACPI EC driver
+  (`kernel/acpi/ec.{h,cpp}`) registers the EmbeddedControl region
+  handler with the AML interpreter; `kernel/acpi/acpi_power.cpp`
+  evaluates `_STA`/`_BIF`/`_BST` (battery), `_PSR` (AC), `_LID`
+  (lid) and feeds `kernel/drivers/power/power.cpp`, which now
+  clears `backend_is_stub` whenever live ACPI data is present
+  (re-polled on every `PowerSnapshotRead`). On firmware without
+  power AML (QEMU) it falls back to the SMBIOS heuristic.
+- **Still blocks on:** S3/S0ix suspend-to-RAM wake plumbing and
+  `_Qxx` GPE/SCI query dispatch (lid-close *event* delivery; the
+  lid *state* is already readable). Battery tray icon can now be
+  wired to `PowerSnapshotRead`.
 
 ### Bluetooth, Printer, Webcam
 
@@ -791,10 +833,22 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   Falls through to QEMU's debug ports (0x604 / 0xB004 / 0x4004)
   on miss, then masks IRQs and parks the boot CPU as the
   documented last resort.
-- **Blocks on:** real AML method evaluation for `_PTS` / `_GTS`
-  on chipsets that need them executed at runtime (rather than
-  pre-evaluated at firmware time). Same blocker the per-CPU
-  sleep state work has — wider AML interpreter slice.
+- **DONE — `_PTS`/`_GTS` wired in spec order.** `AcpiShutdown()`
+  now calls `AcpiRunSleepPrep(5)` (evaluates `\_PTS(5)` then the
+  legacy `\_GTS(5)` through the AML interpreter) **before** the
+  PM1 SLP_TYP/SLP_EN write, per ACPI §7. Both are optional
+  (NotFound → skipped). This is the step the pre-interpreter path
+  could not perform — many real laptops poke the EC / arm SMI in
+  `_PTS` and will not power off without it. No-op on QEMU and most
+  UEFI (no root `\_PTS`/`\_GTS`, or pre-evaluated at firmware
+  time); `AmlReadS5` still extracts the `_S5_` SLP_TYP values.
+  Verified by the `AcpiSleepPrepSelfTest` boot self-test
+  (`[acpi/s5] selftest PASS`), which exercises the exact
+  resolve-root-method + Arg0-sleep-type + `If(LEqual(Arg0,5))`
+  mechanism on synthetic bytecode so it never powers the test VM
+  off, and reports live-firmware `\_PTS`/`\_GTS` presence.
+- **Still deferred:** S3 (suspend-to-RAM) wake-vector / context
+  save-restore and `_Qxx` GPE/SCI event dispatch.
 
 ### Device Manager — virtio + eject + hot-unplug
 
@@ -898,15 +952,21 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   `.incbin` keeps compile time constant regardless of file size;
   the cost is binary-size only (~10 MiB → ~21 MiB on debug; ISO
   ~18 MiB → ~28 MiB).
-- **Remaining residual — DMA-zone fix on the embed path:** with
-  the embed ON, the larger kernel image consumes the entire
-  0..16 MiB DMA zone and trips the `mm/zone` boot self-test.
-  Linker-script change to place the blob at a higher physical
-  region (32 MiB+) is the closing slice. Until then the option
-  produces a kernel that lays down a correct image but won't
-  self-boot — useful for "build the installer once, install onto
-  a different machine" workflows but not for live-iterating on
-  the embed path.
+- **DMA-zone fix on the embed path — DONE.** The embedded ELF now
+  lives in a dedicated `.kernel_elf_blob` section pinned by
+  `kernel/arch/x86_64/linker.ld` at physical 32 MiB (VMA
+  `KERNEL_VIRTUAL_BASE + 32M`, reachable through boot.S's
+  higher-half 1 GiB map) and emitted there by
+  `tools/build/gen-kernel-blob.sh`. `_kernel_end_phys` is now
+  byte-identical with the embed ON vs OFF, so the embed no longer
+  pushes the real kernel image past 16 MiB or starves the
+  legacy-ISA DMA zone. `kernel/mm/frame_allocator.cpp` reserves
+  `[_kernel_blob_start_phys, _kernel_blob_end_phys)` separately;
+  that range is zero-length (a no-op) when the embed is OFF.
+  Verified statically: with `DUETOS_INSTALLER_KERNEL_EMBED=ON` the
+  blob occupies a separate PT_LOAD at paddr `0x2000000` while
+  `_kernel_end_phys` stays at `~0x11a3000`, unchanged from the
+  OFF build. The embed-ON kernel now self-boots.
 - **Layout-math self-test runs every boot.** `PlanLayout` is
   exercised against canonical sizes (just-too-small,
   100 MiB / 1 GiB / 1 TiB) at `[fs/installer] self-test OK`;
@@ -1281,7 +1341,8 @@ extends. Next:
 | ID | Scope | Priority | Task | Acceptance |
 | --- | --- | --- | --- | --- |
 | T6-01 | kernel | done | **Landed (both halves).** Dynamic TLS (`TlsAlloc`/`TlsSetValue`/`TlsGetValue`/`TlsFree`, per-thread) shipped earlier. Static TLS + TLS callbacks: `kernel/loader/pe_loader.cpp::SetupStaticTls` parses the TLS directory from the mapped (relocated) image, copies the `.tls` template + zero-fill into a process TLS block, wires `TEB.ThreadLocalStoragePointer` + `*_tls_index`, and invokes callbacks before entry via a generated R-X trampoline. Per-thread half: `SYS_THREAD_CREATE` (`thread_syscall.cpp::SetupPerThreadTls`) gives each worker its own TEB + private TLS block (independent template copy) + a `DLL_THREAD_ATTACH` trampoline; the scheduler restores a per-task GSBASE into `KERNEL_GS_BASE` after every `ContextSwitch` (`SchedSetUserGsOverride`) so the worker's return-to-user `swapgs` loads its own TEB (also fixes a latent cross-process gs bug). `TlsCallbacksUnsupported` reject removed. Verified by `userland/apps/tls_pe` (`smoke=pe-hello`): callback-before-entry, static-template copy, per-thread template, `DLL_THREAD_ATTACH`, and per-thread independence all PASS; zero regression on the browser PEs. | A PE with `__declspec(thread) int x = 42` reads independent values from two concurrently-running threads. ✓ |
-| T6-02 | kernel | done | **x64 SEH — slices 1-3 landed.** Slices 1-2: real `RtlCaptureContext` + `RtlLookupFunctionEntry` (now **cross-module** via `SYS_MODULE_BASE_BY_VA = 207` → `ProcessFindModuleBaseByVa`, resolving any loaded module's `.pdata`, not just the EXE) + `RtlVirtualUnwind` + `RtlCaptureStackBackTrace`. **Slice 3 (kernel fault → user dispatch):** a ring-3 #DE/#UD/#GP/#PF in a Win32 PE no longer task-kills first — `kernel/subsystems/win32/seh_dispatch.cpp::Win32DeliverException` builds a Microsoft `EXCEPTION_RECORD` + `CONTEXT` on the faulting user stack (valid seeded FXSAVE image) and rewrites the trap frame to resume at `ntdll!KiUserExceptionDispatcher` (rcx=record, rdx=context). ntdll `ntdll_dispatch.c` ships the real engine: `KiUserExceptionDispatcher` (naked trampoline → `KiUserExceptionDispatcherImpl`) runs the **Vectored Exception Handler** chain (`Rtl{Add,Remove}VectoredExceptionHandler`, also reached via the kernel32 forwarder) then the frame-based `__C_specific_handler` / `RtlUnwindEx` / `RtlRestoreContext` walk; `NtContinue` + `NtRaiseException` are real. A per-task re-fault backstop (`SchedSehDeliveryAllowed`, bound 4096 at one constant RIP) catches a wedged dispatcher; unhandled exceptions terminate in user mode. Verified by `userland/apps/seh_pe` (`smoke=pe-hello`): #PF (null write) and #DE (divide-by-zero) are delivered to a VEH that edits the CONTEXT and continues, repeatably. **Frame-based `__try`/`__except`/`__finally` now smoke-covered too:** `userland/apps/seh_try_pe` is built with `clang --target=x86_64-pc-windows-msvc -fasync-exceptions` and linked against our own `kernel32.lib`/`ntdll.lib` import libs (the mingw smoke toolchain can't express MSVC `__try` in C); it drives the real `__C_specific_handler` → `RtlUnwindEx` → `RtlRestoreContext` path — null-write #PF, divide-by-zero #DE, a `__finally` that runs during the unwind, and a repeatable case all PASS, with `_exception_code()` returning the right NTSTATUS. Zero browser regression. C++ EH (`__CxxFrameHandler*`) still terminates (separate concern). | A PE `__try`/`__except` null write is caught and continues in the exception handler. ✓ |
+| T6-02 | kernel | done | **x64 SEH — slices 1-3 landed.** Slices 1-2: real `RtlCaptureContext` + `RtlLookupFunctionEntry` (now **cross-module** via `SYS_MODULE_BASE_BY_VA = 207` → `ProcessFindModuleBaseByVa`, resolving any loaded module's `.pdata`, not just the EXE) + `RtlVirtualUnwind` + `RtlCaptureStackBackTrace`. **Slice 3 (kernel fault → user dispatch):** a ring-3 #DE/#UD/#GP/#PF in a Win32 PE no longer task-kills first — `kernel/subsystems/win32/seh_dispatch.cpp::Win32DeliverException` builds a Microsoft `EXCEPTION_RECORD` + `CONTEXT` on the faulting user stack (valid seeded FXSAVE image) and rewrites the trap frame to resume at `ntdll!KiUserExceptionDispatcher` (rcx=record, rdx=context). ntdll `ntdll_dispatch.c` ships the real engine: `KiUserExceptionDispatcher` (naked trampoline → `KiUserExceptionDispatcherImpl`) runs the **Vectored Exception Handler** chain (`Rtl{Add,Remove}VectoredExceptionHandler`, also reached via the kernel32 forwarder) then the frame-based `__C_specific_handler` / `RtlUnwindEx` / `RtlRestoreContext` walk; `NtContinue` + `NtRaiseException` are real. A per-task re-fault backstop (`SchedSehDeliveryAllowed`, bound 4096 at one constant RIP) catches a wedged dispatcher; unhandled exceptions terminate in user mode. Verified by `userland/apps/seh_pe` (`smoke=pe-hello`): #PF (null write) and #DE (divide-by-zero) are delivered to a VEH that edits the CONTEXT and continues, repeatably. **Frame-based `__try`/`__except`/`__finally` now smoke-covered too:** `userland/apps/seh_try_pe` is built with `clang --target=x86_64-pc-windows-msvc -fasync-exceptions` and linked against our own `kernel32.lib`/`ntdll.lib` import libs (the mingw smoke toolchain can't express MSVC `__try` in C); it drives the real `__C_specific_handler` → `RtlUnwindEx` → `RtlRestoreContext` path — null-write #PF, divide-by-zero #DE, a `__finally` that runs during the unwind, and a repeatable case all PASS, with `_exception_code()` returning the right NTSTATUS. Zero browser regression. | A PE `__try`/`__except` null write is caught and continues in the exception handler. ✓ |
+| T6-05 | win32 | **in progress — engine landed, verification blocked** | **MSVC C++ EH (`__CxxFrameHandler3` + `_CxxThrowException`).** `userland/libs/vcruntime140/vcruntime140.c` replaces the abort stubs with a real FH3 personality: FuncInfo/ip2state/try/catch decode, type matching across the `CatchableTypeArray` (incl. `catch(...)` and derived→base) by mangled name, in-frame destructor-funclet unwind, catch-object placement, catch-funclet invocation + continuation, all driven through ntdll's existing two-pass dispatcher/`RtlUnwindEx` (vcruntime140 now links `ntdll.lib`; also exports `_fltused` + `??_7type_info@@6B@` that every MSVC C++ PE needs). `_CxxThrowException` builds the `0xE06D7363` `EXCEPTION_RECORD` and enters `NtRaiseException`. Toolchain wired: `tools/build/build-cxxeh-pe.sh` + `userland/apps/cxxeh_pe/cxxeh_pe.cpp` (clang `windows-msvc` C++ throw/catch test) embedded + spawned in the `pe-hello` smoke. **Tree builds clean (debug+release, zero-warning); `_CxxThrowException` verified resolving to vcruntime140 at runtime.** Remaining: the `cxxeh_pe` PE faults `0xC0000005` at image RIP `0x23d8` before the test logic, and the loader logs `ntdll.dll!NtRaiseException: IAT slot VA not mapped → NO-OP` — i.e. the vcruntime140→ntdll import of `NtRaiseException` (and possibly siblings) isn't being resolved at PE-load time even though ntdll exports it (build-ntdll-dll.sh:283). **Next:** trace the loader's cross-DLL import resolution for vcruntime140's ntdll imports (why `RtlUnwindEx`/`RtlCaptureContext` resolve for seh_try but `NtRaiseException` via vcruntime140 does not) — likely a DLL preload-order / IAT-binding ordering issue, not the EH algorithm. GAPs (post-unblock): copy-ctor catch objects, strict inner-frame dtor ordering across C++ frames, FH4 compressed FuncInfo, ESTypeList, rethrow. | A PE `try { throw 42; } catch(int){}` resumes in the catch and exits 0. |
 
 ### Track 7 — File system
 
@@ -1415,8 +1476,10 @@ extends. Next:
 > MADT (LAPIC + I/O APIC + Interrupt Source Override + LAPIC Address
 > Override), FADT (PM1A/B control, reset register, ACPI enable),
 > HPET (validation + main-counter enable), SRAT (CPU + Memory
-> Affinity for NUMA). AML interpreter remains the documented gap
-> for ACPI S5 / battery / lid-close (Track 11-05 + Drivers).
+> Affinity for NUMA). The v0 AML **method** interpreter has now
+> landed (`kernel/acpi/aml_eval.{h,cpp}`) — ACPI S5 / battery /
+> lid-close now block only on the EC driver consuming it (Drivers),
+> not on AML evaluation itself.
 > **T11-03** registry hive persistence landed:
 > `RegistryHiveLoad` runs at boot, every successful registry mutation
 > calls `RegistryHiveSave` (throttled by byte-compare). HKLM / HKCU
@@ -1447,12 +1510,12 @@ extends. Next:
 > the boot CPU as the documented last resort. The companion
 > `KernelReboot` already chained `acpi::AcpiReset()` (FADT
 > RESET_REG) → 0xCF9 (PC-AT chipset) → 8042 keyboard-controller
-> → triple-fault. Real hardware that needs `_PTS` / `_GTS`
-> method execution to drive the chipset to soft-off may still
-> stay powered (the AML interpreter parses Names, not Methods);
-> the happy path covers QEMU and most consumer firmware that
-> pre-evaluates `_PTS` to a no-op. S3 (suspend-to-RAM) stays
-> deferred until a workload demands it.
+> → triple-fault. `AcpiShutdown` now runs `\_PTS(5)` + `\_GTS(5)`
+> through the AML interpreter (`AcpiRunSleepPrep`) ahead of the
+> PM1 SLP_TYP write, in ACPI §7 order — the step real laptops
+> need to actually soft-off. No-op on QEMU/UEFI that pre-evaluate
+> `_PTS`. S3 (suspend-to-RAM) stays deferred until a workload
+> demands it.
 > **T11-02** anonymous cross-process pipes shipped: the kernel's
 > Linux pipe(2) pool (`kernel/subsystems/linux/syscall_pipe.cpp`,
 > 16 slots × 4 KiB ring) is now reachable from Win32 callers

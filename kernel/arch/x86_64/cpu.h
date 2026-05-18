@@ -36,6 +36,18 @@ inline u16 Inw(u16 port)
     return value;
 }
 
+inline void Outl(u16 port, u32 value)
+{
+    asm volatile("outl %0, %1" : : "a"(value), "Nd"(port));
+}
+
+inline u32 Inl(u16 port)
+{
+    u32 value;
+    asm volatile("inl %1, %0" : "=a"(value) : "Nd"(port));
+    return value;
+}
+
 inline void Cli()
 {
     asm volatile("cli" ::: "memory");

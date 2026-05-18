@@ -16,25 +16,27 @@
  *   - PSU reachable (some server boards expose PSU over SMBus).
  *
  * Scope (v0):
- *   - SMBIOS says "this is a laptop chassis"? Then we EXPECT
- *     battery hardware. Otherwise treat as desktop.
+ *   - Live ACPI power data via the AML interpreter: battery
+ *     `_STA`/`_BIF`/`_BST`, AC `_PSR`, lid `_LID` — decoded by
+ *     `kernel/acpi/acpi_power.cpp`, with the ACPI EC driver
+ *     (`kernel/acpi/ec.cpp`) backing any EmbeddedControl
+ *     FieldUnits those methods read. `backend_is_stub` is cleared
+ *     whenever live data is present and re-polled each
+ *     `PowerSnapshotRead`.
+ *   - On firmware with no power AML (QEMU) we fall back to the
+ *     SMBIOS chassis heuristic for battery *presence* only.
  *   - MSR thermal reading (from arch::ThermalRead) folded in
  *     as the CPU thermal source.
- *   - Everything else is a stub with a log line explaining why
- *     real data needs an ACPI AML interpreter: battery state
- *     lives in _BIF / _BST methods in the DSDT/SSDT, AC state
- *     lives in _PSR. We don't have AML yet.
  *
- * Not in scope:
- *   - ACPI AML interpreter — the gate for real battery readings.
- *     See wiki/reference/Roadmap.md ("Battery + ACPI suspend").
- *   - Embedded Controller (EC) access — laptop-specific SMBus or
- *     direct-IO interface that many devices use instead of AML
- *     methods. Requires vendor-specific quirks per laptop model.
+ * Not in scope (still):
  *   - SMBus master driver — some PSUs expose smart-battery data
  *     over SMBus.
- *   - Power events (button presses, lid close) — needs AML
- *     general-purpose event (GPE) routing.
+ *   - Power *events* (button / lid-close interrupts) — needs ACPI
+ *     GPE / `_Qxx` SCI dispatch (lid *state* is already read via
+ *     `_LID`).
+ *   - S3/S0ix suspend-to-RAM wake plumbing.
+ *   - Per-vendor register backlight (the ACPI `_BCM` path is
+ *     handled by `kernel/acpi/acpi_power.cpp`).
  *
  * Context: kernel. `PowerInit` runs once at boot after SMBIOS
  * + thermal probes.
@@ -78,7 +80,9 @@ struct PowerSnapshot
     u8 package_temp_c;
     u8 tj_max_c;
     bool thermal_throttle_hit;
-    bool backend_is_stub; // true in v0 — AML not implemented yet
+    bool backend_is_stub; // true only when no live ACPI power data
+    bool lid_present;     // firmware declared a _LID method
+    bool lid_open;        // valid iff lid_present
 };
 
 /// Probe SMBIOS + MSR thermal, build the initial snapshot, log

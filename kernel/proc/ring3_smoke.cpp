@@ -127,6 +127,7 @@
 #include "generated_browser_pe_pe.h"
 #include "generated_tls_pe_pe.h"
 #include "generated_seh_pe_pe.h"
+#include "generated_cxxeh_pe.h"
 #include "generated_seh_try_pe.h"
 #include "generated_sync_smoke_pe.h"
 #include "generated_pe32_smoke_pe.h"
@@ -2288,6 +2289,12 @@ void StartRing3SmokeTask()
         // RtlRestoreContext path the mingw seh_pe smoke can't
         // express. Prints [seh_try] RESULT PASS on success.
         SpawnPeFile("ring3-seh-try-pe", fs::generated::kBinSehTryPeBytes, fs::generated::kBinSehTryPeBytes_len,
+                    CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
+        // Slice 6: real MSVC C++ EH. Drives vcruntime140's
+        // __CxxFrameHandler3 + _CxxThrowException over the ntdll
+        // two-pass dispatch/unwind engine: int/class throw+catch,
+        // destructor unwind, catch(...). Prints [cxxeh] RESULT PASS.
+        SpawnPeFile("ring3-cxxeh-pe", fs::generated::kBinCxxEhPeBytes, fs::generated::kBinCxxEhPeBytes_len,
                     CapSetTrusted(), fs::RamfsTrustedRoot(), mm::kFrameBudgetTrusted, kTickBudgetTrusted);
         // Win10 API breadth (synchronization): CONDITION_VARIABLE +
         // CRITICAL_SECTION, WaitOnAddress/WakeByAddress (kernel

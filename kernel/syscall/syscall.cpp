@@ -46,8 +46,6 @@
 #include "syscall/cap_gate.h"
 #include "syscall/error.h"
 #include "syscall/syscall.h"
-
-#include "drivers/audio/audio.h"
 #include "drivers/video/cursor.h"
 
 #include "arch/x86_64/cpu.h"
@@ -114,6 +112,7 @@
 #include "loader/compat_shim.h"
 #include "proc/process.h"
 #include "proc/spawn.h"
+#include "syscall/audio_syscall.h"
 #include "syscall/time_syscall.h"
 
 // Defined in exceptions.S (via `ISR_NOERR 128`) — the .global label for
@@ -983,40 +982,11 @@ void SyscallDispatch(arch::TrapFrame* frame)
         ::duetos::subsystems::win32::DoNamedPipeOpen(frame);
         return;
     case SYS_AUDIO_DEVICE_INFO:
-    {
-        // Count HDA-class controllers only — winmm waveOut has
-        // no AC'97 / legacy backend wired today, so reporting
-        // those would mislead the caller into opening a path
-        // that returns ENODEV downstream. The first-device
-        // capability questions answer the v0 canonical
-        // 48 kHz / stereo / 16-bit format that HDA streams
-        // ship with.
-        u64 hda_count = 0;
-        const u64 total = ::duetos::drivers::audio::AudioControllerCount();
-        for (u64 i = 0; i < total; ++i)
-        {
-            if (::duetos::drivers::audio::AudioController(i).kind == ::duetos::drivers::audio::AudioKind::Hda)
-                ++hda_count;
-        }
-        switch (frame->rdi)
-        {
-        case 0:
-            frame->rax = hda_count;
-            return;
-        case 1:
-            frame->rax = hda_count > 0 ? 48000ULL : 0ULL;
-            return;
-        case 2:
-            frame->rax = hda_count > 0 ? 2ULL : 0ULL;
-            return;
-        case 3:
-            frame->rax = hda_count > 0 ? 16ULL : 0ULL;
-            return;
-        default:
-            frame->rax = 0;
-            return;
-        }
-    }
+        DoAudioDeviceInfo(frame);
+        return;
+    case SYS_AUDIO_WRITE:
+        DoAudioWrite(frame);
+        return;
     case SYS_NOW_NS:
         DoNowNs(frame);
         return;

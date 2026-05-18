@@ -6,6 +6,7 @@
 #include "log/klog.h"
 #include "mm/dma.h"
 #include "mm/zone.h"
+#include "time/timekeeper.h"
 
 namespace duetos::subsystems::audio
 {
@@ -37,6 +38,7 @@ constexpr duetos::u8 kCodecChannel = 0; // lower channel of a stereo stream pair
 struct State
 {
     bool active;
+    bool codec_routed;   // true iff a DAC→pin speaker path was configured
     duetos::u8 sd_idx;   // HDA stream descriptor index armed by Init
     duetos::u8 codec;    // codec slot selected by FindFirstOutputPath
     duetos::u8 dac_node; // DAC node id
@@ -46,7 +48,7 @@ struct State
     mm::DmaBuffer pcm; // kBufferPages * 4 KiB; the audio ring
 };
 
-constinit State g = {false, 0, 0, 0, 0, {}, {}};
+constinit State g = {false, false, 0, 0, 0, 0, {}, {}};
 
 const drivers::audio::AudioControllerInfo* FindHdaController()
 {
@@ -161,44 +163,42 @@ void LogPhase(const char* msg)
     }
     g.sd_idx = arm_r.value();
 
-    // Pick the output path (Speaker preferred, then Headphone, then Line-out).
-    // This is where bring-up commonly halts on QEMU virtual codecs: the
-    // codec walker returns 0 function groups for hda-output / hda-duplex
-    // (a pre-existing limitation of the HDA walker tracked in
-    // wiki/drivers/Audio.md, not a bug introduced by this slice), so
-    // there is no DAC / pin pair to bind. The backend leaves the stream
-    // descriptor armed but disabled — the StreamArm path above is the
-    // useful verification on emulator. On real hardware with a working
-    // codec walk this branch finds a path and proceeds.
-    auto path_r = drivers::audio::hda::FindFirstOutputPath();
-    if (!path_r.has_value())
-    {
-        FreeDma();
-        LogPhase("FindFirstOutputPath returned no path — codec walker likely "
-                 "found 0 function groups (common on QEMU virtual codecs)");
-        return Err{path_r.error()};
-    }
-    g.codec = path_r.value().codec;
-    g.dac_node = path_r.value().dac_node;
-    g.pin_node = path_r.value().pin_node;
-
-    // Configure the codec to consume from our stream tag.
+    // Codec routing is best-effort. A missing DAC→pin path (the
+    // pre-existing HDA codec-walker limitation on QEMU virtual
+    // codecs — 0 function groups — tracked in wiki/drivers/Audio.md)
+    // means no *audible* speaker output, but it must NOT tear down
+    // the stream: the controller-side DMA byte path (BDL → SD →
+    // LPIB) is independent of codec routing and is exactly what a
+    // producer feeds and what the self-test verifies. So on a
+    // routing miss we keep the stream armed and active with
+    // codec_routed=false rather than failing Init.
+    g.codec_routed = false;
     const duetos::u8 stream_tag = static_cast<duetos::u8>(g.sd_idx + 1);
-    auto cfg_r =
-        drivers::audio::hda::ConfigureOutputPath(*ac, g.codec, g.dac_node, g.pin_node, stream_tag, kSdFormatWord);
-    if (!cfg_r.has_value())
+    auto path_r = drivers::audio::hda::FindFirstOutputPath();
+    if (path_r.has_value())
     {
-        FreeDma();
-        LogPhase("ConfigureOutputPath failed");
-        return Err{cfg_r.error()};
+        g.codec = path_r.value().codec;
+        g.dac_node = path_r.value().dac_node;
+        g.pin_node = path_r.value().pin_node;
+        auto cfg_r =
+            drivers::audio::hda::ConfigureOutputPath(*ac, g.codec, g.dac_node, g.pin_node, stream_tag, kSdFormatWord);
+        auto chr = cfg_r.has_value() ? drivers::audio::hda::CodecSetConverterStream(*ac, g.codec, g.dac_node,
+                                                                                    stream_tag, kCodecChannel)
+                                     : ::duetos::core::Result<void>{Err{cfg_r.error()}};
+        if (cfg_r.has_value() && chr.has_value())
+        {
+            g.codec_routed = true;
+            LogPhase("codec output path configured (audible)");
+        }
+        else
+        {
+            LogPhase("codec configure failed — DMA byte path still armed (no audible output)");
+        }
     }
-    // Codec's converter binds its channel index to our stream tag.
-    auto chr = drivers::audio::hda::CodecSetConverterStream(*ac, g.codec, g.dac_node, stream_tag, kCodecChannel);
-    if (!chr.has_value())
+    else
     {
-        FreeDma();
-        LogPhase("CodecSetConverterStream failed");
-        return Err{chr.error()};
+        LogPhase("no codec output path (QEMU codec-walker limit) — DMA byte "
+                 "path still armed (no audible output)");
     }
 
     // Initial state: silence in the ring, RUN clear. Whoever
@@ -207,8 +207,24 @@ void LogPhase(const char* msg)
     WriteSilence();
 
     g.active = true;
-    LogPhase("init complete — stream armed, codec configured, RUN=0");
+    LogPhase(g.codec_routed ? "init complete — stream armed, codec routed, RUN=0"
+                            : "init complete — stream armed, codec NOT routed, RUN=0");
     return {};
+}
+
+bool CodecRouted()
+{
+    return g.codec_routed;
+}
+
+duetos::u32 StreamPos()
+{
+    if (!g.active)
+        return 0;
+    const auto* ac = FindHdaController();
+    if (ac == nullptr)
+        return 0;
+    return drivers::audio::hda::StreamPosition(*ac, g.sd_idx);
 }
 
 bool IsActive()
@@ -455,10 +471,52 @@ void SelfTest()
         }
     }
 
-    // Leave the buffer in a known state (silence). v0 doesn't
-    // auto-play; the audio path stays armed but quiet until a
-    // future producer (winmm thunk, system-beep driver) calls
-    // Start with content in the ring.
+    // DMA byte-path verification: fill a tone, RUN the stream, and
+    // confirm the controller's DMA engine actually consumes bytes
+    // (SD_LPIB advances). This is the roadmap's "observe samples
+    // land at the codec" proof and does not require a speaker — it
+    // is silent on CI (audiodev=none, and/or codec not routed).
+    WriteSine(440, 0x4000);
+    if (Start().has_value())
+    {
+        const duetos::u32 pos0 = StreamPos();
+        const duetos::u64 deadline = time::MonotonicNs() + 50ull * 1000 * 1000; // 50 ms
+        duetos::u32 pos1 = pos0;
+        while (time::MonotonicNs() < deadline)
+        {
+            pos1 = StreamPos();
+            if (pos1 != pos0)
+                break;
+        }
+        (void)Stop();
+        const bool advanced = (pos1 != pos0);
+        if (CodecRouted())
+        {
+            // Routed path: a non-advancing LPIB is a real DMA
+            // regression — gate on it.
+            if (!advanced)
+            {
+                arch::SerialWrite("[audio-selftest] FAIL DMA LPIB did not advance (routed)\n");
+                ok = false;
+            }
+            else
+            {
+                arch::SerialWrite("[audio-selftest] DMA LPIB advanced (routed, audible path)\n");
+            }
+        }
+        else
+        {
+            // Unrouted: QEMU may not drain an unbound codec stream,
+            // so LPIB advancement is emulator-dependent — report,
+            // don't gate.
+            arch::SerialWrite(advanced ? "[audio-selftest] DMA LPIB advanced (unrouted byte path)\n"
+                                       : "[audio-selftest] DMA LPIB static (unrouted; codec-walker limit)\n");
+        }
+    }
+
+    // Leave the buffer in a known state (silence) with the stream
+    // stopped. A real producer (winmm waveOutWrite → SYS_AUDIO_WRITE)
+    // re-fills + Start()s on demand.
     WriteSilence();
 
     if (ok)

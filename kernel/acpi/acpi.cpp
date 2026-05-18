@@ -35,6 +35,7 @@
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "acpi/aml.h"
+#include "acpi/aml_eval.h"
 #include "acpi/srat.h"
 #include "acpi/acpi_rust/include/acpi_rust.h"
 
@@ -1281,6 +1282,26 @@ u32 Pm1bControlPort()
     return g_pm1b_cnt;
 }
 
+// Run the ACPI sleep-preparation control methods for `sleep_type`
+// in spec order: `\_PTS` (Prepare To Sleep) then `\_GTS` (Going To
+// Sleep). Both are optional and take the sleep type as Arg0; firmware
+// uses them to quiesce devices / poke the EC / arm SMI before the
+// SLP_TYP write. Missing methods are not an error (NotFound). Returns
+// the count actually executed (for the diagnostic line). Idempotent
+// only to the extent the firmware's own methods are.
+u32 AcpiRunSleepPrep(u8 sleep_type)
+{
+    u32 ran = 0;
+    AmlValue arg = AmlValue::Int(sleep_type);
+    AmlValue r;
+    if (AmlEvaluate("\\_PTS", &arg, 1, &r).has_value())
+        ++ran;
+    if (AmlEvaluate("\\_GTS", &arg, 1, &r).has_value())
+        ++ran;
+    KLOG_INFO_2V("acpi", "sleep-prep methods executed", "sleep_type", sleep_type, "ran", ran);
+    return ran;
+}
+
 bool AcpiShutdown()
 {
     u8 slp_typa = 0;
@@ -1293,6 +1314,14 @@ bool AcpiShutdown()
     {
         return false;
     }
+    // ACPI §7: the OS must execute `\_PTS(5)` (and legacy `\_GTS(5)`)
+    // BEFORE writing SLP_TYP/SLP_EN. Many real laptops poke the EC /
+    // arm SMI here and will NOT power off without it — this is the
+    // step the pre-interpreter path could not perform. Empty/absent
+    // on QEMU and most UEFI (pre-evaluated at firmware time), so this
+    // is a no-op there and a correctness fix on real hardware.
+    AcpiRunSleepPrep(5);
+
     // PM1 control register: bit 13 = SLP_EN (write-only, write 1
     // to initiate the sleep transition), bits 10..12 = SLP_TYP.
     // Per ACPI §4.8.3.2.1.
@@ -1356,6 +1385,35 @@ void AcpiUnderflowSelfTest()
     g_mcfg_end_bus = saved_end;
 
     arch::SerialWrite("[acpi-test] underflow guards PASS\n");
+}
+
+void AcpiSleepPrepSelfTest()
+{
+    // Synthetic _PTS-shaped body:
+    //   Method(_,1) { If (LEqual(Arg0,5)) { Return(0xAB) } Return(0) }
+    // This is the exact shape AcpiRunSleepPrep drives: a root method
+    // taking the sleep-type as Arg0 with an If(LEqual(Arg0,5)) gate.
+    // Running it on synthetic bytecode proves the mechanism without
+    // powering the test VM off.
+    static const u8 prog[] = {0xA0, 0x08, 0x93, 0x68, 0x0A, 0x05, 0xA4, 0x0A, 0xAB, 0xA4, 0x00};
+
+    AmlValue a5 = AmlValue::Int(5);
+    AmlValue a3 = AmlValue::Int(3);
+    AmlValue r;
+
+    if (!AmlEvaluateRaw(prog, sizeof(prog), &a5, 1, &r).has_value() || r.type != AmlType::Integer || r.integer != 0xAB)
+        core::PanicWithValue("acpi/s5", "selftest: sleep-prep S5-gated path wrong", r.integer);
+    if (!AmlEvaluateRaw(prog, sizeof(prog), &a3, 1, &r).has_value() || r.type != AmlType::Integer || r.integer != 0)
+        core::PanicWithValue("acpi/s5", "selftest: sleep-prep non-S5 path wrong", r.integer);
+
+    const bool has_pts = AmlNamespaceFind("\\_PTS") != nullptr;
+    const bool has_gts = AmlNamespaceFind("\\_GTS") != nullptr;
+    arch::SerialWrite("[acpi/s5] selftest PASS (sleep-prep arg-gating verified; firmware _PTS=");
+    arch::SerialWrite(has_pts ? "present" : "absent");
+    arch::SerialWrite(" _GTS=");
+    arch::SerialWrite(has_gts ? "present" : "absent");
+    arch::SerialWrite(")\n");
+    KLOG_INFO_2V("acpi/s5", "selftest PASS", "_PTS", has_pts ? 1 : 0, "_GTS", has_gts ? 1 : 0);
 }
 
 } // namespace duetos::acpi

@@ -168,6 +168,16 @@ bool HdaJackInventoryFindByDevice(HdaDefaultDevice target, u8* codec_slot_out, u
 
 void HdaJackInventorySelfTest()
 {
+    // This test scribbles + resets the SHARED production inventory —
+    // the same table the real codec walk fills and the audio backend
+    // reads to pick an output path. Snapshot it and restore on exit
+    // so the test is order-independent and never wipes the
+    // discovered jacks (mirrors acpi::AcpiUnderflowSelfTest's
+    // save/restore of live MCFG state). Without this, running the
+    // test after AudioInit's codec walk but before the audio backend
+    // leaves the inventory empty → "codec NOT routed".
+    const InventoryState saved = g_inv;
+
     HdaJackInventoryReset();
     EqU64(HdaJackInventoryCount(), 0, "empty count");
 
@@ -219,6 +229,13 @@ void HdaJackInventorySelfTest()
     // Reset clears everything.
     HdaJackInventoryReset();
     EqU64(HdaJackInventoryCount(), 0, "count after reset");
+
+    // Restore the production inventory captured on entry.
+    {
+        auto flags = duetos::sync::SpinLockAcquire(g_inv_lock);
+        g_inv = saved;
+        duetos::sync::SpinLockRelease(g_inv_lock, flags);
+    }
 
     arch::SerialWrite("[hda-inventory] selftest pass\n");
 }

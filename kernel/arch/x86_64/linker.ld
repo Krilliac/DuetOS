@@ -141,6 +141,32 @@ SECTIONS
     _kernel_end_virt  = .;
     _kernel_end_phys  = . - KERNEL_VIRTUAL_BASE;
 
+    /* Installer kernel-ELF embed blob (DUETOS_INSTALLER_KERNEL_EMBED).
+     *
+     * gen-kernel-blob.sh emits the embedded stage-1 ELF into the
+     * .kernel_elf_blob input section. Pin it at physical 32 MiB —
+     * well clear of the 0..16 MiB legacy-ISA DMA zone — so the
+     * ~10 MiB blob does NOT push _kernel_end_phys past 16 MiB and
+     * starve `mm/zone`'s Dma allocator. The real kernel image
+     * (_kernel_start_phys.._kernel_end_phys) stays low and small;
+     * frame_allocator.cpp reserves [_kernel_blob_start_phys,
+     * _kernel_blob_end_phys) separately.
+     *
+     * The VMA is fixed at KERNEL_VIRTUAL_BASE + 32 MiB so the runtime
+     * pointer (kBinKernelElfBytes) resolves through boot.S's
+     * higher-half 1 GiB map (VMA = KVB + phys for the first 1 GiB).
+     * When the embed is OFF the input is zero bytes: ld drops the
+     * empty output section, emits no extra PT_LOAD, and
+     * _kernel_blob_start_phys == _kernel_blob_end_phys == 32 MiB so
+     * the reservation is a no-op. */
+    .kernel_elf_blob (KERNEL_VIRTUAL_BASE + 32M) : AT(32M) ALIGN(4K)
+    {
+        _kernel_blob_start_phys = . - KERNEL_VIRTUAL_BASE;
+        KEEP(*(.kernel_elf_blob .kernel_elf_blob.*))
+        . = ALIGN(4K);
+        _kernel_blob_end_phys = . - KERNEL_VIRTUAL_BASE;
+    }
+
     /DISCARD/ :
     {
         *(.eh_frame)

@@ -44,8 +44,17 @@ The HDA driver:
   first DAC node walked on that codec. This is intentionally a
   bootstrap selector, not a full codec-topology solver.
 
-`winmm!waveOutWrite` still returns success with a `// STUB:`
-marker because no audio server consumes the armed stream.
+`winmm!waveOutWrite` now routes the WAVEHDR's PCM through the
+`SYS_AUDIO_WRITE` (210) syscall into the in-kernel audio backend,
+which bounded-copies it into the DMA ring and flips RUN. The
+backend's `Init` keeps the stream armed + active even when codec
+routing is unavailable (`codec_routed=false`), so the controller
+DMA byte path (`hda::StreamPosition` / SD_LPIB) is exercised and
+verified by the boot self-test; the QEMU smoke adds
+`-device intel-hda -device hda-output`. The codec walk + audible
+routing now work end to end on QEMU (DAC → line-out pin, LPIB
+advancing) via the Immediate-Command-Interface fallback — see the
+codec-walk note below.
 
 ## Audio Routing
 
@@ -85,17 +94,22 @@ sample-rate conversion when a producer demands a different format.
   `SYS_AUDIO_*` syscalls (separate slice). A native in-kernel
   beep producer (e.g. error tone on policy violation) is the
   most likely first consumer.
-- **HDA codec walker stops at 0 function groups on QEMU
-  virtual codecs.** Both `-device hda-output` and `-device
-  hda-duplex` advertise codecs that the DuetOS walker reads as
-  having zero function groups, so `FindFirstOutputPath` returns
-  no path and the backend logs `[audio-backend]
-  FindFirstOutputPath returned no path ...` and skips
-  initialisation. This is a pre-existing limitation of the
-  walker, surfaced by slice 2's diagnostic logging — fix tracked
-  outside this slice. The StreamArm path and codec verb framing
-  *do* succeed; the walker is the only thing blocking output on
-  emulator.
+- **HDA codec walk — FIXED (was: 0 function groups on QEMU).**
+  Root cause: QEMU's intel-hda runs the CORB DMA engine exactly
+  once (CORBRP freezes at 1 while CORBWP advances and CORBCTL.RUN
+  stays set), so every verb after the first timed out and the
+  walker read `SubordinateNodeCount == 0`. Fix: `DispatchVerb`
+  now falls back from CORB/RIRB to the **Immediate Command
+  Interface** (ICOI/ICII/ICS) on a timeout and latches a sticky
+  `use_ici` — the real-hardware-valid path equivalent to Linux's
+  `single_cmd`; the fixed `pause` bound was also replaced with a
+  20 ms monotonic deadline. A second bug (the codec self-test
+  reset the shared jack inventory after the real walk filled it)
+  was fixed by snapshotting/restoring the inventory in
+  `HdaJackInventorySelfTest`. The walk now finds the function
+  group, DAC and line-out pin; `ConfigureOutputPath` succeeds and
+  the boot self-test confirms `DMA LPIB advanced (routed, audible
+  path)`.
 - **No mixer.** Single producer / single stream in v0. Multiple
   concurrent producers would race on the ring; that's the next
   audio slice's first job.
