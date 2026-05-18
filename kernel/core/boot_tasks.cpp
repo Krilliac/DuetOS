@@ -2993,20 +2993,19 @@ void MouseReaderTask(void*)
 
         duetos::drivers::video::CompositorUnlock();
 
-        // Per-packet trace — debug-gated. This was an unconditional
-        // raw SerialWrite of every mouse packet: ~72% of a normal
-        // serial capture, and the blocking 115200-baud write under
-        // continuous motion starved this task enough to trip the
-        // soft-lockup detector. Now compiled out under a non-Trace
-        // klog floor and runtime-suppressed below Debug, so a clean
-        // boot stays quiet but `loglevel=debug` still gets the full
-        // stream for input bring-up. Packed into one value so it
-        // stays a single greppable line: [47:32]=dx16 [31:16]=dy16
-        // [7:0]=buttons.
-        const duetos::u64 mouse_pkt = (static_cast<duetos::u64>(static_cast<duetos::u16>(p.dx)) << 32) |
-                                      (static_cast<duetos::u64>(static_cast<duetos::u16>(p.dy)) << 16) |
-                                      static_cast<duetos::u64>(p.buttons);
-        KLOG_DEBUG_V("input/ps2mouse", "packet [47:32]=dx16 [31:16]=dy16 [7:0]=btn", mouse_pkt);
+        // No per-packet trace here. It was a one-shot bring-up aid;
+        // logging every PS/2 packet (raw serial, or KLOG_DEBUG which
+        // still emits in the debug build operators actually run) is a
+        // blocking 115200-baud write per packet. Under continuous
+        // motion that monopolised this task across enough consecutive
+        // scheduler ticks to trip the soft-lockup detector (val=<tid>
+        // of this reader; see kernel/diag/soft_lockup.cpp) and buried
+        // every other diagnostic. Continuous motion deltas have no
+        // standing diagnostic value; the actionable mouse faults
+        // (ring overflow, sync loss) are already KLOG_ONCE_WARN'd in
+        // kernel/drivers/input/ps2mouse.cpp, and button/click effects
+        // surface as `[ui] ...` events. Re-add a *throttled* trace
+        // locally only while actively debugging input.
     }
 }
 
