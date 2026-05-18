@@ -1013,6 +1013,10 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // registry. (A1-followup, 2026-04-28.)
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
     duetos::fs::RamfsInit();
+    // Frame-backed writable RAM volume. Heap + frame allocator are
+    // online by here; parses ramfs-mib= from the cmdline and builds
+    // the /run, /run/lock, /tmp directory skeleton.
+    duetos::fs::RamVolInit(multiboot_info);
     if constexpr (duetos::core::kBootSelfTests)
     {
         duetos::core::InitcallRegister(duetos::core::Phase::Vfs, "vfs-selftest",
@@ -1777,6 +1781,7 @@ void BootBringupDevices(bool force_net_smoke)
     DUETOS_BOOT_SELFTEST(duetos::security::PurpleTeamSelfTest());
 
     DUETOS_BOOT_SELFTEST(duetos::fs::TmpFsSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::fs::RamVolSelfTest());
 
     SerialWrite("[boot] Probing GPT on block devices.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::gpt::GptSelfTest());
