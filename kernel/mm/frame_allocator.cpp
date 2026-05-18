@@ -44,6 +44,7 @@
 #include "diag/kdbg.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "sync/spinlock.h"
 #include "util/debug_assert.h"
 #include "util/saturating.h"
 
@@ -86,6 +87,19 @@ constinit u64 g_next_hint = 0; // search hint for AllocateFrame
 constinit u64 g_free_count = 0;
 constinit u64 g_total_frames = 0;
 constinit u64 g_peak_used_frames = 0;
+
+// Cross-CPU mutual exclusion for the shared bitmap + counters +
+// NUMA ranges + per-CPU pool array. The bespoke FramePoolIrqOff
+// only did `cli`/`sti`, which serialises against IRQ re-entrancy
+// on the SAME CPU but gives ZERO exclusion across CPUs — so once
+// APs are online two CPUs could double-allocate a frame or corrupt
+// the free count. Reentrant so the public entry points can call
+// one another (AllocateContiguousFrames -> AllocateFrame, etc.)
+// without splitting every function into a *Locked worker. The
+// guard is irqsave, so it also subsumes the old FramePoolIrqOff
+// re-entrancy protection. Per-CPU lock-free fast paths (the B2
+// follow-up) are deferred — correctness first.
+constinit sync::SpinLock g_frame_lock{};
 
 // NUMA bias state. Built from SRAT memory-affinity records during
 // FrameAllocatorInit (or, if SRAT was parsed AFTER init, lazily on
@@ -726,6 +740,7 @@ u8 CurrentCpuNumaNode()
 
 PhysAddr AllocateFrameAtIndex(u64 frame)
 {
+    sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
     BitmapMarkUsed(frame);
     g_next_hint = frame + 1;
     const PhysAddr phys = frame << kPageSizeLog2;
@@ -744,6 +759,7 @@ PhysAddr AllocateFrameAtIndex(u64 frame)
 
 void FrameAllocatorNumaSelfTest()
 {
+    sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
     arch::SerialWrite("[mm/frame] numa self-test\n");
 
     // Path 1 — UMA fallback. AllocateFrameNode with a sentinel node
@@ -809,6 +825,7 @@ void FrameAllocatorNumaSelfTest()
 
 void FrameAllocatorBuildNumaRanges()
 {
+    sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
     KLOG_TRACE_SCOPE("mm/frame", "FrameAllocatorBuildNumaRanges");
     // Reset the per-node table. Idempotent across re-init paths
     // (the slab self-test re-runs SRAT parsing).
@@ -900,6 +917,7 @@ void FrameAllocatorBuildNumaRanges()
 
 PhysAddr AllocateFrameInRange(PhysAddr max_phys)
 {
+    sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
     u64 max_frames = g_bitmap_frames;
     if (max_phys != 0)
     {
@@ -1013,6 +1031,7 @@ PhysAddr AllocateFrameNode(u8 node)
 
 PhysAddr AllocateFrame()
 {
+    sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
     // ---- Per-CPU warm pool fast path ------------------------------
     // Skip when OOM injection is active so the test counter still
     // drives the failing leg the slow path is meant to exercise.
@@ -1157,6 +1176,7 @@ PhysAddr AllocateFrame()
 
 void FreeFrame(PhysAddr frame)
 {
+    sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
     if (frame == kNullFrame)
     {
         return; // Freeing a null pointer is a no-op, matches convention.
@@ -1265,6 +1285,7 @@ void FreeFrame(PhysAddr frame)
 
 void FrameAllocatorDrainPools()
 {
+    sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
     // Push every per-CPU pool entry back onto the bitmap. Visit each
     // pool in turn — the frame allocator is single-threaded today, so
     // walking peer pools without IPI/lock is fine. Once SMP makes
@@ -1288,6 +1309,7 @@ void FrameAllocatorDrainPools()
 
 PhysAddr AllocateContiguousFrames(u64 count)
 {
+    sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
     if (count == 0 || count > g_alloc_ceiling_frames)
     {
         return kNullFrame;
@@ -1348,6 +1370,7 @@ PhysAddr AllocateContiguousFrames(u64 count)
 
 PhysAddr AllocateContiguousFramesInRange(u64 count, PhysAddr max_phys)
 {
+    sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
     if (count == 0 || count > g_alloc_ceiling_frames)
     {
         return kNullFrame;
@@ -1396,6 +1419,7 @@ PhysAddr AllocateContiguousFramesInRange(u64 count, PhysAddr max_phys)
 
 void FreeContiguousFrames(PhysAddr base, u64 count)
 {
+    sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
     if (base == kNullFrame || count == 0)
     {
         return;

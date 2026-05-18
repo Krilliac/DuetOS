@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel — single CPU at boot, SMP-aware once spinlocks land
 >
-> **Maturity:** v0 stable (single-CPU); SMP locking pending
+> **Maturity:** v0 stable; allocators SMP-safe (frame/kheap reentrant spinlock, slab per-cache mutex). Per-CPU lock-free fast-path scaling deferred (B2-followup).
 
 ## Overview
 
@@ -98,18 +98,29 @@ First-fit + coalescing freelist over a 2 MiB pool.
 KMalloc/KFree are **IRQ-safe** (T5-04, 2026-05-10): every entry
 brackets the freelist + bin mutations with a `KheapIrqOff` RAII
 that disables interrupts and restores `IF` only if it was set on
-entry. Same shape the frame allocator's `FramePoolIrqOff` and the
-slab cache's `IrqOff` use. **Not yet SMP-safe** — adding the
-`spin_lock_irqsave` brace lands with the per-CPU scheduler-lock
-split (B2-followup).
+entry. **SMP-safe (landed):** the frame allocator and kheap now
+take a reentrant `sync::SpinLock` (`g_frame_lock` / `g_kheap_lock`)
+at every public entry via `SpinLockRecursiveGuard` — `cli`/`sti`
+alone gave zero cross-CPU exclusion, so concurrent
+`AllocateFrame`/`KMalloc` from APs could double-allocate or corrupt
+the freelist. The guard is irqsave (subsumes the old
+`FramePoolIrqOff`/`KheapIrqOff`) and reentrant (the public
+entries legitimately call one another, e.g.
+`AllocateContiguousFrames`→`AllocateFrame`, without splitting
+each into a `*Locked` worker). Slab was already SMP-safe via its
+per-cache `sched::Mutex`. **Deferred (B2-followup):** restoring
+the per-CPU lock-free fast paths (frame warm-pool / slab
+magazine) for *scalability* — correctness is now in place; the
+single global lock per allocator is the contention trade until a
+profile demands the per-CPU split.
 
 ### Allocator family — context contract
 
 | Allocator | Function | IRQ-safe | SMP-safe | Sleeps |
 |-----------|----------|----------|----------|--------|
-| Frame allocator | `AllocateFrame` / `FreeFrame` | yes (`FramePoolIrqOff`) | no | no |
-| Kernel heap | `KMalloc` / `KFree` | yes (`KheapIrqOff`) | no | no |
-| Slab cache | `SlabAlloc` / `SlabFree` | yes (`IrqOff`) | no (per-cache mutex held briefly) | no |
+| Frame allocator | `AllocateFrame` / `FreeFrame` | yes (irqsave guard) | yes (`g_frame_lock`, reentrant) | no |
+| Kernel heap | `KMalloc` / `KFree` | yes (irqsave guard) | yes (`g_kheap_lock`, reentrant) | no |
+| Slab cache | `SlabAlloc` / `SlabFree` | yes (`IrqOff`) | yes (per-cache `sched::Mutex`) | no |
 | Kernel stacks | `KStackAlloc` | no — caller must be in process context | no | no |
 
 Allocators that do NOT sleep are safe to call from any kernel

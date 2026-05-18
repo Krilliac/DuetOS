@@ -188,6 +188,61 @@ class SpinLockTryGuard
     core::Result<IrqFlags> m_result;
 };
 
+/// Reentrant RAII guard. Acquires on construction unless THIS CPU
+/// already holds the lock (a nested call under an outer guard), in
+/// which case it is a no-op that leaves ownership with the outer
+/// holder. Blocks (FIFO) when another CPU holds the lock. Releases
+/// on destruction ONLY if this guard performed the acquire.
+///
+/// Purpose: lets a subsystem wrap every PUBLIC entry point in one
+/// lock even when those entries legitimately call one another
+/// (e.g. AllocateContiguousFrames -> AllocateFrame), without
+/// splitting each function into a public + `*Locked` worker. A
+/// plain `SpinLockGuard` would self-deadlock on the nested call;
+/// this detects the self-held case via `SpinLockTryAcquire`'s
+/// `ErrorCode::Deadlock` and skips the re-acquire. IRQ state is
+/// owned by the outermost (acquiring) guard, matching the
+/// irqsave/irqrestore pairing of the non-reentrant guard.
+class SpinLockRecursiveGuard
+{
+  public:
+    explicit SpinLockRecursiveGuard(SpinLock& lock) : m_lock(lock), m_owned(false)
+    {
+        core::Result<IrqFlags> r = SpinLockTryAcquire(lock);
+        if (r.has_value())
+        {
+            m_flags = r.value();
+            m_owned = true;
+            return;
+        }
+        if (r.error() == core::ErrorCode::Deadlock)
+        {
+            return; // already held by this CPU — nested call, no-op
+        }
+        // Busy: another CPU holds it. Block FIFO like a plain guard.
+        m_flags = SpinLockAcquire(lock);
+        m_owned = true;
+    }
+
+    ~SpinLockRecursiveGuard()
+    {
+        if (m_owned)
+        {
+            SpinLockRelease(m_lock, m_flags);
+        }
+    }
+
+    SpinLockRecursiveGuard(const SpinLockRecursiveGuard&) = delete;
+    SpinLockRecursiveGuard& operator=(const SpinLockRecursiveGuard&) = delete;
+    SpinLockRecursiveGuard(SpinLockRecursiveGuard&&) = delete;
+    SpinLockRecursiveGuard& operator=(SpinLockRecursiveGuard&&) = delete;
+
+  private:
+    SpinLock& m_lock;
+    IrqFlags m_flags{};
+    bool m_owned;
+};
+
 /// Acquire/release round-trip + ownership assertions on a local lock.
 /// Called from kernel_main to catch gross breakage early. On a single
 /// CPU this only exercises the IF save/restore + xchg path; real SMP
