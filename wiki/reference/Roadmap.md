@@ -509,17 +509,32 @@ In rough priority:
   now adds `-device intel-hda -device hda-output -audiodev none`,
   so every boot exercises BringUp → StreamArm → RUN → LPIB. The
   audio self-test verifies silence/sine + Start/Stop + LPIB.
-- **Blocks (still pending) — audible output on QEMU:** the HDA
-  **codec walker** reads `SubordinateNodeCount == 0` for QEMU's
-  `hda-output` codec even though the node-0 VendorId verb
-  succeeds (`0x1af40012`), so `FindFirstOutputPath` finds no
-  DAC→pin path and nothing reaches a speaker. The DMA bytes are
-  still consumed on real hardware with a working codec walk.
-  Suspected root: RIRB poll bound / response timing in
-  `hda::IssueVerbAndPoll` for the 2nd+ verb (the vendor verb
-  works, the next returns 0). This is a pre-existing,
-  separately-tracked limitation in the CORB/RIRB ring path — its
-  own follow-up slice, not the buffer/BDL/producer scope above.
+- **DONE — audible path now routed + DMA-verified.** Two root
+  causes were found and fixed:
+  1. *CORB/RIRB stall.* QEMU's intel-hda runs the CORB DMA engine
+     exactly once (verified: CORBRP freezes at 1 while CORBWP
+     advances and CORBCTL.RUN stays set), so every verb after the
+     first timed out and the codec walker read
+     `SubordinateNodeCount == 0`. `hda.cpp` now has a shared
+     `DispatchVerb` that, on a CORB timeout, latches a sticky
+     `use_ici` and serves all verbs through the Immediate Command
+     Interface (ICOI/ICII/ICS) — the real-hardware-valid fallback
+     equivalent to Linux's `single_cmd`. The fixed 1024-`pause`
+     bound was also replaced with a 20 ms monotonic deadline.
+  2. *Self-test destroyed production state.*
+     `HdaJackInventorySelfTest` reset the shared jack inventory and
+     ran (per boot order) after the real codec walk filled it but
+     before the audio backend read it, so `FindFirstOutputPath`
+     saw 0 jacks. It now snapshots + restores the inventory
+     (mirroring `acpi::AcpiUnderflowSelfTest`), so it is
+     order-independent.
+  Verified on the QEMU smoke: codec walk finds the audio function
+  group + DAC (node 2) + line-out pin (node 3),
+  `ConfigureOutputPath` succeeds, `[audio-backend] codec routed`,
+  and `[audio-selftest] DMA LPIB advanced (routed, audible path)`
+  — the HDA DMA engine is pulling samples through a routed codec.
+- **Still pending:** real-hardware audible validation (no HW in
+  CI); a mixer for multiple concurrent producers.
 - **Owner:** `kernel/drivers/audio/`.
 
 ### Wireless — real-hardware verification
