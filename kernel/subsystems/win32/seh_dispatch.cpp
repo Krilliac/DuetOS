@@ -76,7 +76,21 @@ bool Win32DeliverException(arch::TrapFrame* frame, u32 ntstatus, bool is_pf, boo
     const u64 kidisp = core::ProcessResolveDllExport(proc, nullptr, "KiUserExceptionDispatcher");
     if (kidisp == 0)
     {
-        KLOG_WARN("win32/seh", "no ntdll!KiUserExceptionDispatcher — task-kill fallback");
+        // DEBUG, not WARN: reaching here means the faulting process
+        // has no ntdll!KiUserExceptionDispatcher, i.e. it isn't a
+        // Win32 PE with our ntdll mapped (native ELF, Linux ELF,
+        // bare ring-3 test stub, kernel32-only PE). For all of those
+        // the task-kill below is the CORRECT, by-design outcome — it
+        // is not an anomaly, so a WARN here just floods the log on a
+        // legitimate path (it fired repeatedly for the deliberate
+        // ring-3 fault-injection probes, which intentionally carry no
+        // ntdll). The real notification is the `return false` →
+        // caller task-kill. A genuine "PE app has ntdll but the
+        // dispatcher export is missing" is a loader/build defect that
+        // the seh_pe / seh_try_pe self-tests catch loudly; we don't
+        // rely on this per-fault line for it. (The re-fault-loop
+        // guard below stays WARN — that one IS an anomaly.)
+        KLOG_DEBUG("win32/seh", "no ntdll!KiUserExceptionDispatcher — non-Win32 process, task-kill (expected)");
         return false;
     }
 
