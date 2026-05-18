@@ -1427,6 +1427,11 @@ void Dispatch(char* line)
         CmdMei();
         return;
     }
+    if (StrEq(cmd, "npu") || StrEq(cmd, "ml"))
+    {
+        CmdNpu();
+        return;
+    }
     if (StrEq(cmd, "usbnet"))
     {
         CmdUsbNet(argc, argv);

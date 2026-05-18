@@ -24,6 +24,7 @@
 #include "drivers/audio/hda_jack.h"
 #include "drivers/audio/hda_jack_inventory.h"
 #include "drivers/mei/mei.h"
+#include "drivers/npu/npu.h"
 #include "drivers/gpu/bochs_vbe.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
@@ -1028,6 +1029,45 @@ void CmdMei()
         ConsoleWriteln("");
     }
     ConsoleWriteln("  (HECI bus protocol not yet implemented — driver is probe-only)");
+}
+
+void CmdNpu()
+{
+    namespace npu = duetos::drivers::npu;
+    const u32 count = npu::NpuDeviceCount();
+    if (count == 0)
+    {
+        ConsoleWriteln("NPU: no NPU / AI-accelerator device found");
+        ConsoleWriteln("    (looking for PCI class=0x12, or a known Intel NPU device-ID)");
+        return;
+    }
+    ConsoleWrite("NPU: ");
+    WriteU64Dec(count);
+    ConsoleWriteln(" device(s)");
+    for (u32 i = 0; i < count; ++i)
+    {
+        const auto& d = npu::NpuDevice(i);
+        ConsoleWrite("  [");
+        WriteU64Dec(i);
+        ConsoleWrite("] vendor=");
+        WriteU64Hex(d.vendor_id, 4);
+        ConsoleWrite(" device=");
+        WriteU64Hex(d.device_id, 4);
+        ConsoleWrite(" kind=");
+        ConsoleWrite(d.kind_tag);
+        ConsoleWrite(" bus=");
+        WriteU64Hex(d.bus, 2);
+        ConsoleWrite(":");
+        WriteU64Hex(d.device, 2);
+        ConsoleWrite(".");
+        WriteU64Hex(d.function, 1);
+        ConsoleWrite(" mmio_phys=");
+        WriteU64Hex(d.mmio_phys, 8);
+        ConsoleWrite(" size=");
+        WriteU64Hex(d.mmio_size, 4);
+        ConsoleWriteln("");
+    }
+    ConsoleWriteln("  (firmware / command-ring not yet implemented — driver is probe-only)");
 }
 
 

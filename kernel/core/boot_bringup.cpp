@@ -112,6 +112,7 @@
 #include "net/wireless/wdev.h"
 #include "net/wireless/wifi_diag.h"
 #include "drivers/mei/mei.h"
+#include "drivers/npu/npu.h"
 #include "drivers/pci/pci.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/power/power.h"
@@ -1562,6 +1563,10 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Detecting Intel MEI/HECI devices.\n");
     duetos::drivers::mei::MeiInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::mei::MeiSelfTest());
+
+    SerialWrite("[boot] Detecting NPU / AI-accelerator devices.\n");
+    duetos::drivers::npu::NpuInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::npu::NpuSelfTest());
 
     SerialWrite("[boot] Detecting GPUs.\n");
     duetos::drivers::gpu::GpuInit();

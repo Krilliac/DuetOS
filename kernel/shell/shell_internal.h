@@ -376,6 +376,7 @@ void CmdSmp();
 void CmdLspci();
 void CmdHdaJacks();
 void CmdMei();
+void CmdNpu();
 void CmdHeap(u32 argc, char** argv);
 void CmdPaging();
 void CmdVtop(u32 argc, char** argv);

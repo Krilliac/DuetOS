@@ -42,6 +42,7 @@
 #include "drivers/audio/hda_jack.h"
 #include "drivers/audio/hda_jack_inventory.h"
 #include "drivers/mei/mei.h"
+#include "drivers/npu/npu.h"
 #include "drivers/gpu/bochs_vbe.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
@@ -159,6 +160,8 @@ void PrintHardwareCaptureSummary(bool serial)
     WriteU64Dec(duetos::drivers::audio::AudioControllerCount());
     ConsoleWrite(" mei=");
     WriteU64Dec(duetos::drivers::mei::MeiDeviceCount());
+    ConsoleWrite(" npu=");
+    WriteU64Dec(duetos::drivers::npu::NpuDeviceCount());
     ConsoleWriteln("");
 
     ConsoleWrite("HW: usb-hc=");
@@ -218,6 +221,7 @@ void PrintHardwareCaptureSummary(bool serial)
     SerialWriteHexField("nic", duetos::drivers::net::NicCount());
     SerialWriteHexField("wifi", wifi.adapters_detected);
     SerialWriteHexField("mei", duetos::drivers::mei::MeiDeviceCount());
+    SerialWriteHexField("npu", duetos::drivers::npu::NpuDeviceCount());
     SerialWriteHexField("crtrace", duetos::core::CleanroomTraceCount());
     SerialWriteHexField("fix_unique", fix.records_unique);
     duetos::arch::SerialWrite("\n");
@@ -857,6 +861,7 @@ void CmdHw(u32 argc, char** argv)
         duetos::drivers::audio::AudioInit();
         duetos::drivers::net::NetInit();
         duetos::drivers::mei::MeiInit();
+        duetos::drivers::npu::NpuInit();
         duetos::drivers::storage::NvmeInit();
         duetos::drivers::storage::AhciInit();
         duetos::drivers::usb::xhci::XhciInit();
