@@ -60,6 +60,7 @@ constexpr u16 kHdaRirbwpRst = 1u << 15;
 constexpr u64 kHdaSdBase = 0x80;
 constexpr u64 kHdaSdStride = 0x20;
 constexpr u64 kHdaSdRegCtl = 0x00;    // 3 bytes (CTL[0..23])
+constexpr u64 kHdaSdRegLpib = 0x04;   // 4 bytes — Link Position In Buffer (RO)
 constexpr u64 kHdaSdRegCbl = 0x08;    // 4 bytes — Cyclic Buffer Length
 constexpr u64 kHdaSdRegLvi = 0x0C;    // 2 bytes — Last Valid Index
 constexpr u64 kHdaSdRegFormat = 0x12; // 2 bytes
@@ -762,6 +763,17 @@ u32 ArmedStreamCount()
     Mmio8Write(a, sd_off + kHdaSdRegCtl, ctl);
     KLOG_DEBUG_V("drivers/audio/hda", run ? "StreamRun: set RUN sd_idx" : "StreamRun: clear RUN sd_idx", sd_idx);
     return {};
+}
+
+u32 StreamPosition(const AudioControllerInfo& a, u8 sd_idx)
+{
+    if (!g.brought_up || a.mmio_virt == nullptr)
+        return 0;
+    const u8 total = static_cast<u8>(g.input_stream_count + g.output_stream_count);
+    if (sd_idx >= total)
+        return 0;
+    const u64 sd_off = kHdaSdBase + sd_idx * kHdaSdStride;
+    return Mmio32(a, sd_off + kHdaSdRegLpib);
 }
 
 ::duetos::core::Result<void> StreamFillBdl(void* bdl_virt, const BdlEntry* entries, u32 count)

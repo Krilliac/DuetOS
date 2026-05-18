@@ -78,6 +78,18 @@ inline constexpr duetos::u32 kBufferFrames = kBufferBytes / kBytesPerFrame;
 /// arm path if the controller advertises no output streams.
 ::duetos::core::Result<void> Init();
 
+/// True iff Init configured an audible DAC→pin codec path. When
+/// false the stream/DMA byte path is still armed and usable (a
+/// producer's samples are DMA'd) but nothing reaches a speaker —
+/// the pre-existing HDA codec-walker limitation on QEMU virtual
+/// codecs. Real hardware with a working codec walk returns true.
+bool CodecRouted();
+
+/// Current HDA stream Link Position In Buffer (bytes consumed by
+/// the DMA engine, wrapping at the buffer size). Advancing while
+/// the stream is running proves the controller is pulling samples.
+duetos::u32 StreamPos();
+
 /// True iff `Init` succeeded since the last `Shutdown`. Consumers
 /// check this before submitting samples; submitting to an inactive
 /// backend is a silent no-op (the caller's contract is "if active,

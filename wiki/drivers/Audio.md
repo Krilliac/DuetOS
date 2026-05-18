@@ -44,8 +44,15 @@ The HDA driver:
   first DAC node walked on that codec. This is intentionally a
   bootstrap selector, not a full codec-topology solver.
 
-`winmm!waveOutWrite` still returns success with a `// STUB:`
-marker because no audio server consumes the armed stream.
+`winmm!waveOutWrite` now routes the WAVEHDR's PCM through the
+`SYS_AUDIO_WRITE` (210) syscall into the in-kernel audio backend,
+which bounded-copies it into the DMA ring and flips RUN. The
+backend's `Init` keeps the stream armed + active even when codec
+routing is unavailable (`codec_routed=false`), so the controller
+DMA byte path (`hda::StreamPosition` / SD_LPIB) is exercised and
+verified by the boot self-test; the QEMU smoke adds
+`-device intel-hda -device hda-output`. Audible output still
+depends on the codec walker (see the known limitation below).
 
 ## Audio Routing
 

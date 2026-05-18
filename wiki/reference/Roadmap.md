@@ -496,16 +496,30 @@ In rough priority:
   system beep" path doesn't have to know the order. Boot self-
   test exercises the verb-encoding helpers against canonical
   inputs.
-- **Blocks (still pending):** allocating real audio buffer
-  pages + populating a BDL with sample data + flipping RUN +
-  observing samples land at the codec — needs a DMA-coherent
-  buffer allocator path that's wired through the audio shell
-  (or a system-beep driver), plus QEMU's `-device hda-output`
-  to verify the byte-level path. `FindFirstOutputPath()` now
-  supplies the bootstrap `dac_node` / `pin_node` pair for the
-  first speaker / headphone / line-out pin; the remaining gap is
-  a consumer that allocates real buffers and calls it as part of
-  playback.
+- **DONE — DMA byte path + consumer + producer wired.** The
+  audio backend (`kernel/subsystems/audio/audio_backend.cpp`)
+  allocates a DMA-coherent BDL + PCM ring, fills the BDL,
+  `StreamArm`s the SD, and `StreamRun`s it; `Init` no longer
+  aborts when codec routing is unavailable (it keeps the stream
+  armed + active with `codec_routed=false`, so the controller
+  byte path is usable). `hda::StreamPosition` exposes SD_LPIB.
+  A producer path landed: `SYS_AUDIO_WRITE` (210) bounded-copies
+  user PCM into the ring and RUNs the stream; winmm
+  `waveOutWrite` routes the WAVEHDR through it. The QEMU smoke
+  now adds `-device intel-hda -device hda-output -audiodev none`,
+  so every boot exercises BringUp → StreamArm → RUN → LPIB. The
+  audio self-test verifies silence/sine + Start/Stop + LPIB.
+- **Blocks (still pending) — audible output on QEMU:** the HDA
+  **codec walker** reads `SubordinateNodeCount == 0` for QEMU's
+  `hda-output` codec even though the node-0 VendorId verb
+  succeeds (`0x1af40012`), so `FindFirstOutputPath` finds no
+  DAC→pin path and nothing reaches a speaker. The DMA bytes are
+  still consumed on real hardware with a working codec walk.
+  Suspected root: RIRB poll bound / response timing in
+  `hda::IssueVerbAndPoll` for the 2nd+ verb (the vendor verb
+  works, the next returns 0). This is a pre-existing,
+  separately-tracked limitation in the CORB/RIRB ring path — its
+  own follow-up slice, not the buffer/BDL/producer scope above.
 - **Owner:** `kernel/drivers/audio/`.
 
 ### Wireless — real-hardware verification

@@ -140,6 +140,14 @@ u32 ArmedStreamCount();
 /// success.
 ::duetos::core::Result<void> StreamRun(const AudioControllerInfo& a, u8 sd_idx, bool run);
 
+/// Read stream descriptor `sd_idx`'s Link Position In Buffer
+/// (SD_LPIB) — the byte offset the DMA engine has consumed within
+/// the cyclic buffer, wrapping at CBL. A non-zero / advancing value
+/// while RUN=1 is the proof that the controller's DMA engine is
+/// actually pulling sample bytes (i.e. audio "lands at the codec"
+/// at the byte level). Returns 0 if not brought up / bad index.
+u32 StreamPosition(const AudioControllerInfo& a, u8 sd_idx);
+
 /// One BDL entry — see HDA spec §3.6.2. Each entry is 16
 /// bytes: 8-byte buffer phys address, 4-byte length, 4-byte
 /// flags (only IOC = bit 0 in v0).

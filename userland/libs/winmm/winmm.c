@@ -311,6 +311,21 @@ static long long winmm_audio_device_info(long long op)
     return rv;
 }
 
+/* SYS_AUDIO_WRITE: hand the kernel HDA backend a PCM buffer and let
+ * it DMA + RUN the stream. Returns frames accepted (0 if no backend
+ * / bad args). The kernel bounded-copies, so passing the app's own
+ * buffer pointer is safe. */
+static long long winmm_audio_write(const void* pcm, unsigned long bytes)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)210), /* SYS_AUDIO_WRITE */
+                       "D"(pcm), "S"((long long)bytes)
+                     : "memory");
+    return rv;
+}
+
 __declspec(dllexport) UINT waveOutGetNumDevs(void)
 {
     long long n = winmm_audio_device_info(0);
@@ -379,14 +394,21 @@ __declspec(dllexport) MMRESULT waveOutWrite(HANDLE h, void* hdr, UINT cb)
 {
     (void)h;
     (void)cb;
-    /* Stamp WHDR_DONE so a poll-for-completion loop terminates.
-     * Real Windows sets this after the device drains the buffer;
-     * v0 has no real playback, so we synthesise immediate
-     * completion. */
+    /* Route the WAVEHDR's PCM to the kernel HDA backend, then stamp
+     * WHDR_DONE so a poll-for-completion loop terminates. WAVEHDR
+     * (Win64): lpData @0 (8-byte ptr), dwBufferLength @8 (4 bytes),
+     * dwFlags @24. The kernel DMA's the bytes (audible only when a
+     * codec path is routed; always consumed on the byte path). */
     if (hdr != (void*)0)
     {
         unsigned char* p = (unsigned char*)hdr;
+        void* lp_data;
+        DWORD buf_len;
         DWORD f;
+        __builtin_memcpy(&lp_data, p + 0, sizeof(lp_data));
+        __builtin_memcpy(&buf_len, p + 8, sizeof(buf_len));
+        if (lp_data != (void*)0 && buf_len != 0)
+            (void)winmm_audio_write(lp_data, (unsigned long)buf_len);
         __builtin_memcpy(&f, p + 24, sizeof(f));
         f |= WHDR_DONE;
         __builtin_memcpy(p + 24, &f, sizeof(f));
