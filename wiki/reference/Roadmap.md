@@ -804,13 +804,22 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   Falls through to QEMU's debug ports (0x604 / 0xB004 / 0x4004)
   on miss, then masks IRQs and parks the boot CPU as the
   documented last resort.
-- **Unblocked:** the v0 AML method interpreter
-  (`kernel/acpi/aml_eval.{h,cpp}`) can now execute `_PTS` / `_GTS`
-  at runtime via `AmlEvaluate("\\_PTS", &arg, 1, &r)`. Remaining
-  work is wiring the shutdown/sleep path in `acpi.cpp` to call it
-  before the PM1 SLP_TYP write on chipsets that require it (a
-  follow-up slice; `AmlReadS5` still handles the common
-  pre-evaluated `_S5_` path).
+- **DONE — `_PTS`/`_GTS` wired in spec order.** `AcpiShutdown()`
+  now calls `AcpiRunSleepPrep(5)` (evaluates `\_PTS(5)` then the
+  legacy `\_GTS(5)` through the AML interpreter) **before** the
+  PM1 SLP_TYP/SLP_EN write, per ACPI §7. Both are optional
+  (NotFound → skipped). This is the step the pre-interpreter path
+  could not perform — many real laptops poke the EC / arm SMI in
+  `_PTS` and will not power off without it. No-op on QEMU and most
+  UEFI (no root `\_PTS`/`\_GTS`, or pre-evaluated at firmware
+  time); `AmlReadS5` still extracts the `_S5_` SLP_TYP values.
+  Verified by the `AcpiSleepPrepSelfTest` boot self-test
+  (`[acpi/s5] selftest PASS`), which exercises the exact
+  resolve-root-method + Arg0-sleep-type + `If(LEqual(Arg0,5))`
+  mechanism on synthetic bytecode so it never powers the test VM
+  off, and reports live-firmware `\_PTS`/`\_GTS` presence.
+- **Still deferred:** S3 (suspend-to-RAM) wake-vector / context
+  save-restore and `_Qxx` GPE/SCI event dispatch.
 
 ### Device Manager — virtio + eject + hot-unplug
 
@@ -1471,13 +1480,12 @@ extends. Next:
 > the boot CPU as the documented last resort. The companion
 > `KernelReboot` already chained `acpi::AcpiReset()` (FADT
 > RESET_REG) → 0xCF9 (PC-AT chipset) → 8042 keyboard-controller
-> → triple-fault. The v0 AML **method** interpreter has since
-> landed (`kernel/acpi/aml_eval.{h,cpp}`), so `_PTS` / `_GTS`
-> *can* now be executed via `AmlEvaluate`; wiring that into the
-> soft-off path ahead of the PM1 SLP_TYP write is a follow-up
-> slice. The current happy path still covers QEMU and consumer
-> firmware that pre-evaluates `_PTS` to a no-op. S3
-> (suspend-to-RAM) stays deferred until a workload demands it.
+> → triple-fault. `AcpiShutdown` now runs `\_PTS(5)` + `\_GTS(5)`
+> through the AML interpreter (`AcpiRunSleepPrep`) ahead of the
+> PM1 SLP_TYP write, in ACPI §7 order — the step real laptops
+> need to actually soft-off. No-op on QEMU/UEFI that pre-evaluate
+> `_PTS`. S3 (suspend-to-RAM) stays deferred until a workload
+> demands it.
 > **T11-02** anonymous cross-process pipes shipped: the kernel's
 > Linux pipe(2) pool (`kernel/subsystems/linux/syscall_pipe.cpp`,
 > 16 slots × 4 KiB ring) is now reachable from Win32 callers

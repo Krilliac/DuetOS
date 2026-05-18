@@ -215,4 +215,13 @@ bool AmlContainsName(const char* name4);
 /// idempotent. Panics on guard regression.
 void AcpiUnderflowSelfTest();
 
+/// Boot-time self-test for the S5 sleep-prep path. Exercises the
+/// exact mechanism `AcpiShutdown` uses — resolve a root method by
+/// absolute path, pass the sleep-type as Arg0, evaluate an
+/// `If(LEqual(Arg0,5))`-gated body — on synthetic bytecode (so it
+/// never powers the test VM off), and reports whether the live
+/// firmware declares `\_PTS` / `\_GTS`. Emits one
+/// `[acpi/s5] selftest PASS` line. Panics on a wrong result.
+void AcpiSleepPrepSelfTest();
+
 } // namespace duetos::acpi

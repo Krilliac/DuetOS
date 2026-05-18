@@ -89,7 +89,7 @@ acpi::McfgAddress();                       // PhysAddr or 0 (ECAM base)
 acpi::DsdtAddress() / .DsdtLength();       // for AML walker
 acpi::SsdtAddress(i) / .SsdtLength(i);     // per-SSDT
 acpi::AcpiReset();                         // writes RESET_REG if present
-acpi::AcpiShutdown();                      // S5 transition (uses AML S5 pkg)
+acpi::AcpiShutdown();                      // S5: _PTS(5)/_GTS(5) then PM1 SLP_TYP
 ```
 
 All accessors are read-only and IRQ-safe after `AcpiInit()` returns.
