@@ -1738,6 +1738,11 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Composing environment view.\n");
     duetos::env::EnvironmentInit();
     DUETOS_BOOT_SELFTEST(duetos::env::EnvironmentSelfTest());
+    // Spawn the env-monitor poller now that the scheduler is online
+    // and the first snapshot is published. It re-composes on a
+    // timed poll so cached state stays live (the "reactive" half);
+    // slice 3 will additionally wake it on an ACPI SCI.
+    duetos::env::EnvironmentMonitorStart();
 
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     duetos::net::NetStackInit();

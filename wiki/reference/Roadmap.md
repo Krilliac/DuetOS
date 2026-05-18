@@ -62,23 +62,28 @@ the same commit** that delivers the code.
   query API + `[env-selftest]`. Read-only aggregator (see
   Design-Decisions 2026-05-18). See
   [`Environment`](../kernel/Environment.md).
-- **Slice 2 — runtime monitor + reactive idle (pending):** an
-  `env-monitor` kernel thread (reaper pattern, timed poll)
-  re-composes the snapshot, emits a gated `KLOG_WARN` sentinel +
-  `KBP_PROBE` on policy transition, and biases the existing
-  MWAIT/HLT idle path (`sched.cpp` `CpuIdleLowPower`/`IdleMain`)
-  on `PowerSave`. Explicitly **not** tickless and **not** a
-  timeslice change — DD-009 stays deferred.
-- **Slice 3 — ACPI SCI/GPE power events (pending):** expose the
-  already-parsed FADT GPE0/GPE1 + PM1 event block via `acpi.h`
-  accessors; install the SCI handler (`IoApicRoute` +
-  `arch::IrqInstall`); extend `kernel/acpi/ec.cpp` with `_Qxx`
-  query dispatch; turn power-button / lid / AC-change into
-  interrupt-driven events that wake the monitor instantly
-  (power button → `acpi::AcpiShutdown`). This is the same
-  `_Qxx` GPE/SCI dispatch the "Battery + ACPI suspend" entry
-  blocks on — landing slice 3 retires that sub-item too. Revisit
-  DD-012 (FADT GPE now consumed) when it lands.
+- **Slice 2 LANDED — runtime monitor:** the `env-monitor` kernel
+  thread (`SchedCreate` worker, ~2 s poll) re-composes the
+  snapshot, publishes it under a spinlock (reads are
+  snapshot-by-value), and on a policy transition emits a gated
+  `KLOG_INFO` summary + `KLOG_DEBUG_V` detail and fires the
+  `env.policy_change` probe (`ProbeId::kEnvPolicyChange`,
+  ArmedLog). Cached state is now live, not boot-frozen. The
+  planned idle-path bias was **deferred to slice 3 by design**:
+  no safe real lever exists until deep C-states (DD 2026-05-18).
+  DD-009 (tickless) untouched.
+- **Slice 3 — ACPI SCI/GPE power events + idle reaction
+  (pending):** expose the already-parsed FADT GPE0/GPE1 + PM1
+  event block via `acpi.h` accessors; install the SCI handler
+  (`IoApicRoute` + `arch::IrqInstall`); extend `kernel/acpi/ec.cpp`
+  with `_Qxx` query dispatch; turn power-button / lid / AC-change
+  into interrupt-driven events that wake the monitor instantly
+  (power button → `acpi::AcpiShutdown`); and add the
+  now-meaningful idle-path C-state reaction (the real lever +
+  consumer arrive together here). This is the same `_Qxx`
+  GPE/SCI dispatch the "Battery + ACPI suspend" entry blocks on —
+  landing slice 3 retires that sub-item too. Revisit DD-012
+  (FADT GPE now consumed) when it lands.
 
 ### Lockdep held-set must be per-task, not global
 

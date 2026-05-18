@@ -9295,3 +9295,53 @@ API).
 - **Related roadmap track(s):** environment awareness slices 2–3
   (monitor task + ACPI SCI/GPE power events) — see Roadmap
   "Environment awareness — runtime monitor + power events".
+
+## 2026-05-18 — env-monitor: idle-path reaction deferred, not faked
+
+Slice 2 of the environment work adds the `env-monitor` poller.
+The approved plan also called for "bias the MWAIT/HLT idle path on
+`PowerSave`." Implementing that faithfully surfaced that there is
+**no safe real lever today**, so the decision is to deliver the
+monitor now and land the idle reaction with slice 3.
+
+- **No idle facade.** `sched::IdleMain` already issues MWAIT-C1
+  (`EAX=0`) whenever the CPU advertises it — the code documents
+  that as "at least as deep as a bare HLT and lower-power on most
+  parts" with identical IRQ-wake semantics. The only deeper lever
+  (the MWAIT EAX C-state hint / deep C-states + a cpuidle
+  governor) is explicitly deferred elsewhere with "no profile
+  evidence and no consumer yet." Wiring `EnvironmentPowerPolicy()`
+  into the hot idle loop where it would change nothing is a
+  probe-satisfying facade (CLAUDE.md rule). Rejected. The idle
+  C-state reaction lands in slice 3, where the real lever and a
+  consumer arrive together. User chose this over (a) a bounded
+  pre-halt spin-poll (perf tuning with no profile evidence —
+  anti-bloat) and (b) pulling deep-C-states forward. DD-009
+  (tickless) stays untouched.
+- **The reactive payoff is the live cache, not a knob.** Slice 1
+  froze the snapshot at boot; slice 2's monitor re-composes and
+  republishes every ~2 s, so every later reader sees current
+  state. That is the substantive "reactive" delta — a consumer
+  (shell, slice 3) acting on stale boot state was the actual gap.
+- **Policy transition is INFO, not WARN.** A power-source change
+  is a legitimate, expected event. Logging it at WARN would flood
+  on every unplug (CLAUDE.md "log-level abuse" class-of-bug). The
+  summary is `KLOG_INFO`, detail is `KLOG_DEBUG_V`, and the
+  GDB-breakable sentinel is the `env.policy_change` probe
+  (`ProbeId::kEnvPolicyChange`, ArmedLog: a clean steady boot
+  never transitions so the log stays quiet).
+- **Reads are snapshot-by-value under a spinlock.**
+  `EnvironmentGet()` changed from returning `const&` (slice 1,
+  write-once) to returning `SystemEnvironment` by value under
+  `g_env_lock`, because the monitor now mutates `g_env`
+  concurrently and a reference would tear. `EnvironmentDerivePolicy`
+  stays pure so monitor and self-test recompute identically.
+- **Verified:** clean `x86_64-release` build (zero warnings);
+  release full boot prints `[env]` + `boot-log-analyze.sh`
+  verdict OK; `x86_64-debug` `bringup-only` smoke emits
+  `[env-selftest] PASS` and `[I] env : environment monitor
+  online`, no spurious `env.policy_change` (policy stays
+  `balanced` on QEMU — clean boot stays quiet), analyzer OK
+  (119 self-tests, 0 non-deliberate failures).
+- **Related roadmap track(s):** environment awareness slice 3
+  (ACPI SCI/GPE power events + the now-meaningful idle reaction).

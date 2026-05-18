@@ -3,7 +3,7 @@
 #include "util/types.h"
 
 /*
- * DuetOS — unified system-environment view, v0 (slice 1 of 3).
+ * DuetOS — unified system-environment view, v0 (slice 2 of 3).
  *
  * The kernel already *detects* its environment, but the facts are
  * scattered across half a dozen subsystems and read ad-hoc:
@@ -24,15 +24,25 @@
  * exposes cached query accessors. The owning subsystems remain the
  * single source of truth for every field.
  *
- * Slice 2 adds a monitor task that re-composes the snapshot and
- * reacts to runtime changes; slice 3 adds the ACPI SCI/GPE
- * power-event path. The query API here is the stable seam both
- * later slices build on.
+ * Slice 2 (this revision) adds the `env-monitor` kernel thread:
+ * it re-composes the snapshot on a timed poll, publishes the new
+ * value under a spinlock, and on a power-policy transition leaves a
+ * gated KLOG sentinel + a `kEnvPolicyChange` probe. The cached
+ * state is therefore live, not frozen at boot — that is the
+ * "reactive" half. The idle-path C-state reaction is deferred to
+ * slice 3, where deep C-states (a real lever) and a consumer land
+ * together; wiring a no-op policy read into the hot idle loop now
+ * would be a facade.
+ *
+ * Slice 3 adds the ACPI SCI/GPE power-event path so the monitor
+ * wakes on a real interrupt instead of only on its poll.
  *
  * Context: kernel. `EnvironmentInit()` runs once at boot, after
  * `drivers::power::PowerInit()` (so AC/battery/thermal are live) and
- * after SMP AP bring-up (so the online census is final). Every query
- * thereafter is a cached read, safe from any context.
+ * after SMP AP bring-up (so the online census is final).
+ * `EnvironmentMonitorStart()` then spawns the poller. Reads are
+ * snapshot-by-value under a spinlock, safe from any context and
+ * concurrent with the monitor's writes.
  */
 
 namespace duetos::arch
@@ -108,13 +118,28 @@ struct SystemEnvironment
 /// `[env] ...` banner. Safe exactly once at boot.
 void EnvironmentInit();
 
-/// Cached read of the composed snapshot. `valid == false` until
-/// `EnvironmentInit()` has run.
-const SystemEnvironment& EnvironmentGet();
+/// Snapshot-by-value of the composed view, taken under the publish
+/// lock so it never tears against a concurrent monitor write.
+/// `valid == false` until `EnvironmentInit()` has run.
+SystemEnvironment EnvironmentGet();
 
-/// Cheap accessor for the derived policy. Slice 2's monitor and the
-/// scheduler idle path read this; today it is constant after boot.
+/// Cheap accessor for the derived policy (read under the publish
+/// lock). Live once the monitor is running — slice 3's idle path
+/// and the shell read this.
 EnvPowerPolicy EnvironmentPowerPolicy();
+
+/// Re-read every source, recompute the policy, and atomically
+/// publish the new snapshot. Returns true iff any observable field
+/// changed. Called by the `env-monitor` task; exposed for the
+/// self-test. Safe from task context (takes the publish lock; the
+/// underlying reads — PowerSnapshotRead etc. — are process-context
+/// safe).
+bool EnvironmentRecompose();
+
+/// Spawn the `env-monitor` kernel thread (timed poll → recompose →
+/// publish, with a gated KLOG + probe on policy transitions). Call
+/// once, after `EnvironmentInit()` and with the scheduler online.
+void EnvironmentMonitorStart();
 
 /// Pure derivation: policy implied by a given snapshot. Exposed so
 /// slice 2's monitor recomputes it identically on every poll. No
@@ -127,7 +152,10 @@ const char* EnvPowerPolicyName(EnvPowerPolicy p);
 
 /// Boot self-test: asserts the cached snapshot is valid and that
 /// `EnvironmentPowerPolicy()` equals `EnvironmentDerivePolicy()` of
-/// the live snapshot (the invariant slice 2 depends on). Emits one
+/// the live snapshot, exercises the `EnvironmentDerivePolicy()`
+/// decision matrix the monitor relies on against synthetic
+/// snapshots, and verifies `EnvironmentRecompose()` preserves the
+/// cached==derived invariant (recompose, then re-check). Emits one
 /// `[env-selftest] PASS` line. Panics on regression.
 void EnvironmentSelfTest();
 

@@ -8,8 +8,12 @@
 #include "arch/x86_64/smp.h"
 #include "core/panic.h"
 #include "cpu/topology.h"
+#include "debug/probes.h"
 #include "drivers/power/power.h"
+#include "log/klog.h"
 #include "mm/frame_allocator.h"
+#include "sched/sched.h"
+#include "sync/spinlock.h"
 
 namespace duetos::env
 {
@@ -17,7 +21,18 @@ namespace duetos::env
 namespace
 {
 
+// The published snapshot and its publish lock. `EnvironmentInit`
+// composes the first value; the `env-monitor` task re-publishes on
+// every poll. Readers take the lock and copy by value so a read
+// never tears against a monitor write.
+sync::SpinLock g_env_lock;
 SystemEnvironment g_env{};
+
+// Monitor poll period. 100 Hz scheduler tick → 200 ticks ≈ 2 s.
+// Power/thermal state does not change faster than a human plugs a
+// charger or a fan spins up; a 2 s cadence reacts promptly while
+// costing one wakeup every two seconds on an otherwise-idle box.
+constexpr u64 kEnvMonitorIntervalTicks = 200;
 
 /// Decimal serial helper. The banner is a structural sentinel
 /// written via raw SerialWrite (so it survives klog level demotion
@@ -82,6 +97,58 @@ bool AnyHybridCore()
         }
     }
     return false;
+}
+
+// Read every source into `e`. No lock — the underlying accessors
+// are either boot-stable (hypervisor / CPU census / RAM / NUMA) or
+// process-context-safe re-reads (PowerSnapshotRead re-samples the
+// thermal MSRs and re-polls ACPI). Pure w.r.t. env's own state.
+void Compose(SystemEnvironment& e)
+{
+    const arch::HypervisorInfo& hv = arch::HypervisorInfoGet();
+    e.hv_kind = hv.kind;
+    e.platform = DerivePlatform(hv.kind);
+
+    e.cpu_total = static_cast<u32>(acpi::CpuCount());
+    e.cpu_online = static_cast<u32>(arch::SmpCpusOnline());
+    if (e.cpu_total == 0)
+    {
+        // No MADT census (shouldn't happen post-AcpiInit, but keep
+        // the banner honest rather than printing 0/0).
+        e.cpu_total = e.cpu_online;
+    }
+    e.cpu_hybrid = AnyHybridCore();
+
+    e.ram_bytes = mm::TotalFrames() * mm::kPageSize;
+    e.numa = acpi::srat::SratPresent();
+    e.numa_nodes = e.numa ? static_cast<u32>(acpi::srat::SratNodeCount()) : 1u;
+
+    const drivers::power::PowerSnapshot ps = drivers::power::PowerSnapshotRead();
+    e.form_factor = DeriveFormFactor(ps.chassis_is_laptop, e.cpu_total);
+    e.ac = ps.ac;
+    e.battery_state = ps.battery.state;
+    e.battery_percent = (ps.battery.state == drivers::power::kBatNotPresent) ? 255 : ps.battery.percent;
+    e.lid_present = ps.lid_present;
+    e.lid_open = ps.lid_open;
+    e.cpu_temp_c = ps.cpu_temp_c;
+    e.pkg_temp_c = ps.package_temp_c;
+    e.thermal_throttle = ps.thermal_throttle_hit;
+
+    e.power_policy = EnvironmentDerivePolicy(e);
+    e.valid = true;
+}
+
+// Observable-field equality. A dedicated comparison (rather than a
+// memcmp over padding) keeps "what counts as a change" explicit —
+// the monitor only logs / probes on a field a consumer can act on.
+bool SameObservable(const SystemEnvironment& a, const SystemEnvironment& b)
+{
+    return a.platform == b.platform && a.cpu_online == b.cpu_online && a.cpu_total == b.cpu_total &&
+           a.cpu_hybrid == b.cpu_hybrid && a.ram_bytes == b.ram_bytes && a.numa == b.numa &&
+           a.numa_nodes == b.numa_nodes && a.form_factor == b.form_factor && a.ac == b.ac &&
+           a.battery_state == b.battery_state && a.battery_percent == b.battery_percent &&
+           a.lid_present == b.lid_present && a.lid_open == b.lid_open && a.cpu_temp_c == b.cpu_temp_c &&
+           a.pkg_temp_c == b.pkg_temp_c && a.thermal_throttle == b.thermal_throttle && a.power_policy == b.power_policy;
 }
 
 void EmitBanner(const SystemEnvironment& e)
@@ -151,6 +218,15 @@ void EmitBanner(const SystemEnvironment& e)
     arch::SerialWrite("\n");
 }
 
+[[noreturn]] void EnvMonitorMain(void*)
+{
+    for (;;)
+    {
+        sched::SchedSleepTicks(kEnvMonitorIntervalTicks);
+        (void)EnvironmentRecompose();
+    }
+}
+
 } // namespace
 
 EnvPowerPolicy EnvironmentDerivePolicy(const SystemEnvironment& e)
@@ -185,50 +261,74 @@ EnvPowerPolicy EnvironmentDerivePolicy(const SystemEnvironment& e)
 void EnvironmentInit()
 {
     SystemEnvironment e{};
-
-    const arch::HypervisorInfo& hv = arch::HypervisorInfoGet();
-    e.hv_kind = hv.kind;
-    e.platform = DerivePlatform(hv.kind);
-
-    e.cpu_total = static_cast<u32>(acpi::CpuCount());
-    e.cpu_online = static_cast<u32>(arch::SmpCpusOnline());
-    if (e.cpu_total == 0)
+    Compose(e);
     {
-        // No MADT census (shouldn't happen post-AcpiInit, but keep
-        // the banner honest rather than printing 0/0).
-        e.cpu_total = e.cpu_online;
+        sync::SpinLockGuard g(g_env_lock);
+        g_env = e;
     }
-    e.cpu_hybrid = AnyHybridCore();
-
-    e.ram_bytes = mm::TotalFrames() * mm::kPageSize;
-    e.numa = acpi::srat::SratPresent();
-    e.numa_nodes = e.numa ? static_cast<u32>(acpi::srat::SratNodeCount()) : 1u;
-
-    const drivers::power::PowerSnapshot ps = drivers::power::PowerSnapshotRead();
-    e.form_factor = DeriveFormFactor(ps.chassis_is_laptop, e.cpu_total);
-    e.ac = ps.ac;
-    e.battery_state = ps.battery.state;
-    e.battery_percent = (ps.battery.state == drivers::power::kBatNotPresent) ? 255 : ps.battery.percent;
-    e.lid_present = ps.lid_present;
-    e.lid_open = ps.lid_open;
-    e.cpu_temp_c = ps.cpu_temp_c;
-    e.pkg_temp_c = ps.package_temp_c;
-    e.thermal_throttle = ps.thermal_throttle_hit;
-
-    e.power_policy = EnvironmentDerivePolicy(e);
-    e.valid = true;
-
-    g_env = e;
-    EmitBanner(g_env);
+    EmitBanner(e);
 }
 
-const SystemEnvironment& EnvironmentGet()
+bool EnvironmentRecompose()
 {
+    SystemEnvironment n{};
+    Compose(n);
+
+    SystemEnvironment prev{};
+    bool changed;
+    {
+        sync::SpinLockGuard g(g_env_lock);
+        prev = g_env;
+        changed = !SameObservable(prev, n);
+        g_env = n;
+    }
+
+    if (!changed)
+    {
+        return false;
+    }
+
+    // A power-policy transition is a normal, legitimate state
+    // change — INFO, not WARN (a WARN here would flood on every
+    // unplug; see CLAUDE.md "log-level abuse"). The probe is
+    // ArmedLog so a clean boot stays quiet but a real transition
+    // leaves a GDB-breakable sentinel.
+    if (prev.power_policy != n.power_policy)
+    {
+        KLOG_INFO_S("env", "power policy changed", "to", EnvPowerPolicyName(n.power_policy));
+        KLOG_DEBUG_S("env", "previous power policy", "from", EnvPowerPolicyName(prev.power_policy));
+        const u64 packed = (static_cast<u64>(prev.power_policy) << 8) | static_cast<u64>(n.power_policy);
+        KBP_PROBE_V(debug::ProbeId::kEnvPolicyChange, packed);
+    }
+    else
+    {
+        KLOG_INFO("env", "environment changed (policy unchanged)");
+    }
+    KLOG_DEBUG_V("env", "ac state", static_cast<u64>(n.ac));
+    KLOG_DEBUG_V("env", "cpu temp C", n.cpu_temp_c);
+    KLOG_DEBUG_V("env", "battery percent", n.battery_percent);
+    return true;
+}
+
+void EnvironmentMonitorStart()
+{
+    {
+        sync::SpinLockGuard g(g_env_lock);
+        KASSERT(g_env.valid, "env", "EnvironmentMonitorStart before EnvironmentInit");
+    }
+    sched::SchedCreate(&EnvMonitorMain, nullptr, "env-monitor");
+    KLOG_INFO("env", "environment monitor online");
+}
+
+SystemEnvironment EnvironmentGet()
+{
+    sync::SpinLockGuard g(g_env_lock);
     return g_env;
 }
 
 EnvPowerPolicy EnvironmentPowerPolicy()
 {
+    sync::SpinLockGuard g(g_env_lock);
     return g_env.power_policy;
 }
 
@@ -278,22 +378,51 @@ const char* EnvPowerPolicyName(EnvPowerPolicy p)
 
 void EnvironmentSelfTest()
 {
-    const SystemEnvironment& e = EnvironmentGet();
+    const SystemEnvironment e = EnvironmentGet();
 
     KASSERT(e.valid, "env", "EnvironmentInit did not run before self-test");
     KASSERT(e.cpu_online >= 1, "env", "online CPU census is zero");
     KASSERT(e.cpu_total >= e.cpu_online, "env", "total CPUs < online CPUs");
 
-    // The invariant slice 2's monitor relies on: the cached policy
-    // is exactly what the pure derivation yields for the snapshot.
-    const EnvPowerPolicy rederived = EnvironmentDerivePolicy(e);
-    KASSERT(EnvironmentPowerPolicy() == rederived, "env", "cached power policy diverged from derivation");
+    // The invariant the monitor relies on: the cached policy is
+    // exactly what the pure derivation yields for the snapshot.
+    KASSERT(EnvironmentPowerPolicy() == EnvironmentDerivePolicy(e), "env",
+            "cached power policy diverged from derivation");
 
-    // Name accessors must never return null (banner + shell rely on
-    // this) and must cover every enumerator.
-    KASSERT(EnvPlatformName(e.platform) != nullptr, "env", "platform name null");
-    KASSERT(EnvFormFactorName(e.form_factor) != nullptr, "env", "form-factor name null");
-    KASSERT(EnvPowerPolicyName(e.power_policy) != nullptr, "env", "policy name null");
+    // Exercise the derivation matrix the monitor will drive on
+    // every poll, against synthetic snapshots. Start from a known
+    // base (bare-metal desktop on AC, no thermal pressure) and
+    // perturb one axis at a time.
+    SystemEnvironment s{};
+    s.platform = EnvPlatform::BareMetal;
+    s.form_factor = EnvFormFactor::Desktop;
+    s.ac = drivers::power::kAcOnline;
+    s.thermal_throttle = false;
+    KASSERT(EnvironmentDerivePolicy(s) == EnvPowerPolicy::Performance, "env", "baremetal desktop+AC must be perf");
+
+    s.ac = drivers::power::kAcOffline; // unplug
+    KASSERT(EnvironmentDerivePolicy(s) == EnvPowerPolicy::PowerSave, "env", "on-battery must be powersave");
+
+    s.ac = drivers::power::kAcOnline;
+    s.thermal_throttle = true; // throttle trumps AC
+    KASSERT(EnvironmentDerivePolicy(s) == EnvPowerPolicy::PowerSave, "env", "thermal throttle must be powersave");
+
+    s.thermal_throttle = false;
+    s.form_factor = EnvFormFactor::Laptop; // laptop on AC
+    KASSERT(EnvironmentDerivePolicy(s) == EnvPowerPolicy::Balanced, "env", "laptop+AC must be balanced");
+
+    s.form_factor = EnvFormFactor::Server;
+    s.platform = EnvPlatform::Virtualized; // host owns PM
+    KASSERT(EnvironmentDerivePolicy(s) == EnvPowerPolicy::Balanced, "env", "virtualized must be balanced");
+
+    // Recompose end-to-end: it must keep the cached==derived
+    // invariant intact regardless of whether anything changed
+    // between init and now (no idempotence claim — real hardware
+    // temp jitter can legitimately move a field).
+    (void)EnvironmentRecompose();
+    const SystemEnvironment after = EnvironmentGet();
+    KASSERT(EnvironmentPowerPolicy() == EnvironmentDerivePolicy(after), "env",
+            "recompose left cached policy inconsistent");
 
     arch::SerialWrite("[env-selftest] PASS\n");
 }

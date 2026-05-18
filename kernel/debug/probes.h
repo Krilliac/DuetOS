@@ -154,6 +154,16 @@ enum class ProbeId : u8
     // high 32 bits (seq << 32 | detector).
     kFixJournaled,
 
+    // Environment monitor — fires from the `env-monitor` task when
+    // the derived power policy transitions (e.g. AC→battery,
+    // thermal-throttle onset). ArmedLog by default: a clean steady
+    // boot never changes policy so the log stays quiet, but a real
+    // transition leaves a sentinel line + an attached GDB can
+    // `b duetos::debug::ProbeFire` and break at the exact recompose
+    // that flipped it. The packed value carries the previous
+    // EnvPowerPolicy in bits 8..15 and the new one in bits 0..7.
+    kEnvPolicyChange,
+
     kCount, // sentinel
 };
 
