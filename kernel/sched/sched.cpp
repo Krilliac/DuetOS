@@ -4057,22 +4057,43 @@ namespace
 // Low-power idle. MONITOR/MWAIT lets the core drop into an
 // MWAIT-C1 power state that is at least as deep as a bare HLT
 // (and lower-power on most parts) while keeping identical wake
-// semantics: an IRQ — timer tick or reschedule IPI — breaks
-// MWAIT exactly as it breaks HLT, so the dispatcher runs on the
-// same events as before. The monitored cell lives on the idle
-// task's own (per-CPU) stack, so each CPU arms a distinct line;
-// nothing ever writes it (the wake source is the interrupt, not
-// a store), so there is no lost-wakeup window beyond the one
-// `sti; hlt` already has. EAX=0 selects the C1 hint (conservative
-// — no deep C-state latency); ECX bit0 makes a masked interrupt
-// also break MWAIT, closing the sti→mwait race defensively.
-// Falls back to HLT verbatim when MONITOR is unavailable.
+// semantics: `Sti()` is issued before this, so a normal unmasked
+// IRQ (timer tick / reschedule IPI) breaks MWAIT exactly as it
+// breaks HLT and the dispatcher runs on the same events.
+//
+// MWAIT ECX MUST be 0: the only non-zero bit (bit0, "treat a
+// masked interrupt as a break-event") is an OPTIONAL extension
+// gated on CPUID.5:ECX[1]. Passing ECX=1 on a CPU/hypervisor
+// that doesn't implement the extension #GPs — and because the
+// fault handler returns to the same MWAIT, that recurses until
+// the idle task's kernel stack hits its guard page (the
+// idle-bsp#5 overflow this replaced). ECX=0 needs no leaf-5
+// feature and, with IF=1 from Sti(), is exactly HLT-equivalent.
+// EAX=0 = C1 hint (conservative, no deep-C-state latency). The
+// caller only sets use_mwait when CPUID leaf 5 actually exists.
+// Falls back to HLT verbatim when MWAIT is unavailable.
+// MWAIT is safe to use only if CPUID advertises MONITOR (leaf 1
+// ECX[3]) AND the MONITOR/MWAIT enumeration leaf (5) actually
+// exists. Some hypervisors set ECX[3] but expose no leaf 5; using
+// MWAIT there is undefined. Belt-and-suspenders with the ECX=0
+// fix above.
+inline bool MwaitUsable()
+{
+    if (!arch::CpuHas(arch::kCpuFeatMonitor))
+    {
+        return false;
+    }
+    u32 max_leaf, ebx, ecx, edx;
+    asm volatile("cpuid" : "=a"(max_leaf), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0));
+    return max_leaf >= 5u;
+}
+
 inline void CpuIdleLowPower(volatile u8* monitor_cell, bool use_mwait)
 {
     if (use_mwait)
     {
         asm volatile("monitor" ::"a"(monitor_cell), "c"(0), "d"(0));
-        asm volatile("mwait" ::"a"(0), "c"(1));
+        asm volatile("mwait" ::"a"(0), "c"(0));
     }
     else
     {
@@ -4082,7 +4103,7 @@ inline void CpuIdleLowPower(volatile u8* monitor_cell, bool use_mwait)
 
 [[noreturn]] void IdleMain(void*)
 {
-    const bool use_mwait = arch::CpuHas(arch::kCpuFeatMonitor);
+    const bool use_mwait = MwaitUsable();
     volatile u8 monitor_cell = 0; // per-idle-task (per-CPU) MONITOR line
     for (;;)
     {
@@ -4209,7 +4230,7 @@ void FormatIdleApName(char (&out)[16], u32 cpu_id)
     //    Schedule(), pulls a runnable task off this CPU's runqueue
     //    (or our just-spawned idle if no work is waiting), and
     //    never returns to this stack frame.
-    const bool use_mwait = arch::CpuHas(arch::kCpuFeatMonitor);
+    const bool use_mwait = MwaitUsable();
     volatile u8 monitor_cell = 0;
     for (;;)
     {
