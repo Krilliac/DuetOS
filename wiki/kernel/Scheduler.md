@@ -136,7 +136,27 @@ to 2, which equals `kClusterPlacementMargin` — the wake-side floor
 Cross-cluster active migration is intentionally absent: the cache
 penalty for crossing a NUMA / package boundary dwarfs the imbalance
 cost. Cross-cluster idle peers are handled by work-stealing's pass 1.
-Operator-pinned steady-state load uses `SchedSetAffinity`.
+
+**Hard CPU affinity**: each `Task` carries a `u32 affinity_mask`
+(bit `1u << cpu_id` = allowed). The default is the `kAffinityAll`
+(`~0u`) sentinel — `TaskAllowedOn` is then unconditionally true and
+every placement path is byte-for-byte identical to the pre-affinity
+scheduler. A narrowed mask (via `SchedSetAffinityMask`, or the Linux
+`sched_setaffinity` thunk which feeds it the low 32 bits of the user
+`cpu_set_t`) is a *hard* pin enforced at every decision point:
+`TargetPerCpuFor` retargets a forbidden routing hint to the lowest
+allowed CPU; `PickClusterPlacement` skips forbidden peers;
+`StealNormalFromPeer` and `BalancePullOnce` refuse to pull a task
+onto a CPU it may not run on; and `RunqueuePopRunnable` has a
+backstop that re-homes a task found on a now-forbidden runqueue
+(covers a runtime mask change). An all-online mask collapses back to
+`kAffinityAll` so "pin to every CPU" keeps the fast path.
+GAP: steal/balance inspect only the peer's queue *head*, so a
+pinned head can shadow a deeper stealable task — acceptable for v0,
+revisit on profile evidence. GAP: a task already *running* when its
+mask narrows migrates at its next reschedule, not instantly (no
+cross-CPU preemption kick in v0). `SchedSetAffinity(t, cpu)` remains
+as a one-CPU convenience wrapper over `SchedSetAffinityMask`.
 
 **SMT-aware placement**: `EffectiveLoad(p)` returns `p->runq_normal_len`
 plus `kSmtSiblingPenalty` (2) when an SMT sibling of `p` (a CPU with
@@ -164,7 +184,12 @@ threshold, UP short-circuit. `smt-placement-selftest` verifies the
 `EffectiveLoad` sibling penalty, that `PickClusterPlacement` prefers a
 fully-idle physical core over an SMT sibling of a busy core, the
 non-SMT identity, and the one-`smt_primary`-per-`core_group`
-invariant; it SKIPs on non-SMT guests. Each emits one
+invariant; it SKIPs on non-SMT guests. `affinity-mask-selftest`
+verifies the mask API (reject-empty/null, single-pin,
+all-mask→sentinel collapse, getaffinity round-trip, routing-hint
+retarget) and that `TargetPerCpuFor`/`PickClusterPlacement` never
+select a forbidden CPU while an unrestricted task routes identically
+to a no-task call; it SKIPs on <2-CPU guests. Each emits one
 `[<name>] PASS` (or `SKIP`) line so CI can grep for it.
 
 ## Blocking Primitives (sister doc)

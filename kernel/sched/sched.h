@@ -291,24 +291,36 @@ u64 TaskId(const Task* t);
 /// the crash-dump path to label the current task on a panic.
 const char* TaskName(const Task* t);
 
-/// Hint the scheduler to route the task's NEXT wake-side enqueue
-/// onto `cpu_id`. Stores `cpu_id` into the task's `last_cpu`
-/// field — the same routing primitive the existing wake path
-/// reads. Returns false if `t` is null or `cpu_id` is outside
-/// `[0, arch::SmpCpusOnline())`; otherwise returns true.
+/// Hard CPU affinity: `mask` bit (1u << cpu_id) set => the task
+/// may run on that CPU. The mask is intersected with the online
+/// CPU set; if the result selects no online CPU the call fails
+/// (returns false) and the task's affinity is unchanged. Returns
+/// false on a null task. An all-online mask is stored as the
+/// "unrestricted" sentinel so the scheduler's fast paths stay
+/// byte-for-byte identical to the pre-affinity behavior.
 ///
-/// This is a HINT, not a hard pin: once the task starts running,
-/// the context-switch hot path updates `last_cpu` to the CPU that
-/// actually scheduled it (preserving cache affinity on subsequent
-/// wakes). Use it to direct the FIRST wake of a freshly-spawned
-/// worker — typically a benchmark or a per-CPU service thread —
-/// onto a specific peer. For a hard pin (no migration ever), the
-/// per-task affinity-mask design lives behind Roadmap B3.
+/// This is a HARD pin, enforced at every placement decision:
+/// wake-side routing, work-stealing, the periodic balancer, and a
+/// backstop in the dispatch path all refuse to run the task on a
+/// CPU outside the mask. A task that is already running when its
+/// mask narrows finishes its current slice and migrates at its
+/// next reschedule (no cross-CPU preemption kick in v0).
 ///
-/// Threading: takes the scheduler's main spinlock for the single
-/// store, identical to how `Schedule()` / wake-side code mutates
-/// the same field. Safe from any kernel context.
+/// Threading: takes the scheduler's main spinlock for the mask
+/// store + routing-hint fixup, identical to how `Schedule()` /
+/// wake-side code mutates task fields. Safe from any kernel
+/// context.
+bool SchedSetAffinityMask(Task* t, u32 mask);
+
+/// Back-compat single-CPU pin — equivalent to
+/// `SchedSetAffinityMask(t, 1u << cpu_id)`. Returns false if `t`
+/// is null or `cpu_id` is out of range / not online.
 bool SchedSetAffinity(Task* t, u32 cpu_id);
+
+/// Current effective affinity mask for `t`. The internal
+/// "unrestricted" sentinel is expanded to the concrete online-CPU
+/// set so callers see real CPU bits. Returns 0 for a null task.
+u32 SchedGetAffinityMask(Task* t);
 
 // ---------------------------------------------------------------------------
 // Per-task syscall trail
@@ -379,6 +391,16 @@ void LoadBalanceSelfTest();
 /// on mismatch; emits one `[smt-placement-selftest] PASS` (or
 /// `SKIP`) line so CI can grep for it.
 void SmtPlacementSelfTest();
+
+/// Self-test for hard CPU affinity. Verifies the mask API
+/// (reject-empty / reject-null / single-pin / all-mask collapse /
+/// getaffinity round-trip / routing-hint retarget) and that
+/// placement honors a narrowed mask (TargetPerCpuFor and
+/// PickClusterPlacement never select a forbidden CPU) while an
+/// unrestricted task routes byte-for-byte identically to the
+/// pre-affinity path. SKIPs on <2-CPU guests. Panics on mismatch;
+/// emits one `[affinity-mask-selftest] PASS`/`SKIP` line.
+void AffinityMaskSelfTest();
 
 /// Top (high address) of the current task's kernel stack. Returns 0 for
 /// the boot task (it never had a scheduler-managed kernel stack — it

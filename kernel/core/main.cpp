@@ -798,6 +798,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                            duetos::sched::SmtPlacementSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
+        // Hard CPU affinity decision test. Same Phase::Userland
+        // rationale: needs SmpStartAps so >=2 CPUs exist for the
+        // forbidden-CPU placement checks (SKIPs otherwise).
+        duetos::core::InitcallRegister(duetos::core::Phase::Userland, "affinity-mask-selftest",
+                                       []()
+                                       {
+                                           duetos::sched::AffinityMaskSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Userland);
 
