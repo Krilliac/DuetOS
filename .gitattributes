@@ -1,0 +1,52 @@
+# DuetOS is primarily Linux-hosted; the build is driven by POSIX
+# shell scripts under tools/ whose shebangs MUST be LF (a CRLF
+# shebang makes the kernel `env: 'bash\r'` and the whole codegen
+# step fails). Without this file, a Windows checkout with the
+# default core.autocrlf=true mangles every text file to CRLF,
+# breaking the build and round-tripping CRLF back into the repo
+# (which clang-format CI then rejects). Force LF for all text and
+# normalize on commit. See CLAUDE.md "Style: LF line endings
+# everywhere".
+
+# Default: treat as text, normalize to LF in the repo, check out LF.
+* text=auto eol=lf
+
+# Source / build / docs — always LF, never CRLF.
+*.c     text eol=lf
+*.h     text eol=lf
+*.cpp   text eol=lf
+*.hpp   text eol=lf
+*.cc    text eol=lf
+*.rs    text eol=lf
+*.S     text eol=lf
+*.asm   text eol=lf
+*.sh    text eol=lf
+*.py    text eol=lf
+*.ld    text eol=lf
+*.toml  text eol=lf
+*.cmake text eol=lf
+*.md    text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+CMakeLists.txt text eol=lf
+
+# Binary assets — never touch.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.bmp   binary
+*.efi   binary
+*.bin   binary
+*.img   binary
+*.elf   binary
+*.exe   binary
+*.dll   binary
+*.o     binary
+*.a     binary
+*.so    binary
+*.ttf   binary
+*.wav   binary
