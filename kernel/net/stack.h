@@ -56,6 +56,13 @@ inline constexpr u16 kEtherTypeIpv4 = 0x0800;
 inline constexpr u16 kEtherTypeArp = 0x0806;
 inline constexpr u16 kEtherTypeIpv6 = 0x86DD;
 
+// Maximum Ethernet frame this v0 stack accepts: 14-byte header +
+// 1500-byte standard MTU payload. Used as the RX bounds clamp and
+// as the size of on-stack frame scratch buffers in the L3/TCP
+// paths. Single definition so the RX clamp, the ICMP reply cap,
+// and every `u8 frame[...]` scratch buffer cannot drift apart.
+inline constexpr u64 kEthFrameMaxBytes = 1514;
+
 // -------------------------------------------------------------------
 // L3: IPv4
 // -------------------------------------------------------------------
