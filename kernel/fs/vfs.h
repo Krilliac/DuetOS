@@ -115,6 +115,7 @@ enum class VfsBackend : u8
     Ramfs = 1,
     Fat32 = 2,
     DuetFs = 3,
+    RamVol = 4, ///< frame-backed writable RAM volume (fs::RamVol*, mounted at /run)
 };
 
 /// Resolved node — backend-tagged. Storage is by-value so the
@@ -143,6 +144,11 @@ struct VfsNode
     u32 duetfs_kind;
     u32 duetfs_size_bytes;
     u32 duetfs_child_count;
+    /// RamVol-backed nodes — the absolute in-volume path snapshot
+    /// (e.g. "/run/foo"). RamVol is path-addressed and its node
+    /// structs are module-private, so the path IS the stable
+    /// handle; reads re-resolve via fs::RamVolRead/Stat. NUL-term.
+    char ramvol_path[192];
 };
 
 /// True when `n` is a real resolved node (backend != Invalid).

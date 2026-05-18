@@ -39,6 +39,7 @@ enum class FsType : u32
     Ext4 = 2,
     Ntfs = 3,
     DuetFs = 4,
+    RamVol = 5, ///< frame-backed writable RAM volume; synth (block_handle == 0) like Ramfs
 };
 
 const char* FsTypeName(FsType t);

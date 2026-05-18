@@ -1017,6 +1017,11 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // online by here; parses ramfs-mib= from the cmdline and builds
     // the /run, /run/lock, /tmp directory skeleton.
     duetos::fs::RamVolInit(multiboot_info);
+    // Make the volume reachable from the path namespace at /run so
+    // the shell + file_route can read service files. Mount-failure
+    // is non-fatal: the direct fs::RamVol* API still works, only
+    // path-based access is unavailable.
+    (void)duetos::fs::VfsMount("/run", duetos::fs::FsType::RamVol, 0);
     if constexpr (duetos::core::kBootSelfTests)
     {
         duetos::core::InitcallRegister(duetos::core::Phase::Vfs, "vfs-selftest",

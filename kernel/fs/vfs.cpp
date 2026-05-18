@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "fs/mount.h"
+#include "fs/tmpfs.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "util/saturating.h"
@@ -486,6 +487,11 @@ bool VfsNodeIsDir(const VfsNode& n)
     {
         return n.duetfs_kind == 2; // duetfs::kKindDir
     }
+    if (n.backend == VfsBackend::RamVol)
+    {
+        bool is_dir = false;
+        return RamVolStat(n.ramvol_path, nullptr, &is_dir, nullptr) && is_dir;
+    }
     return false;
 }
 
@@ -503,6 +509,11 @@ bool VfsNodeIsFile(const VfsNode& n)
     {
         return n.duetfs_kind == 1; // duetfs::kKindFile
     }
+    if (n.backend == VfsBackend::RamVol)
+    {
+        bool is_dir = true;
+        return RamVolStat(n.ramvol_path, nullptr, &is_dir, nullptr) && !is_dir;
+    }
     return false;
 }
 
@@ -519,6 +530,11 @@ u64 VfsNodeSize(const VfsNode& n)
     if (n.backend == VfsBackend::DuetFs)
     {
         return n.duetfs_size_bytes;
+    }
+    if (n.backend == VfsBackend::RamVol)
+    {
+        u64 sz = 0;
+        return RamVolStat(n.ramvol_path, &sz, nullptr, nullptr) ? sz : 0;
     }
     return 0;
 }
@@ -739,6 +755,21 @@ void VfsSelfTest()
         Expect(!VfsNodeIsDir(z), "default VfsNode not dir");
         Expect(!VfsNodeIsFile(z), "default VfsNode not file");
         Expect(VfsNodeSize(z) == 0, "default VfsNode size=0");
+    }
+
+    // RamVol mount (/run) end-to-end: mount-resolve -> RamVolLookup
+    // -> the RamVol arms of VfsNodeIsDir/Size. The /run + /run/lock
+    // skeleton is created by RamVolInit before this runs.
+    {
+        VfsNode run = VfsResolve(trusted, "/run", 64);
+        Expect(VfsNodeIsValid(run), "VfsResolve /run valid");
+        Expect(run.backend == VfsBackend::RamVol, "VfsResolve /run is ramvol");
+        Expect(VfsNodeIsDir(run), "/run is a directory");
+        VfsNode lock = VfsResolve(trusted, "/run/lock", 64);
+        Expect(VfsNodeIsValid(lock) && lock.backend == VfsBackend::RamVol, "VfsResolve /run/lock is ramvol");
+        Expect(VfsNodeIsDir(lock), "/run/lock is a directory");
+        VfsNode miss = VfsResolve(trusted, "/run/definitely-absent", 64);
+        Expect(!VfsNodeIsValid(miss), "VfsResolve /run miss returns invalid (no ramfs pierce-through)");
     }
 
     arch::SerialWrite("[fs/vfs] self-test OK (lookup + jail + .. + path_max + VfsResolve)\n");
