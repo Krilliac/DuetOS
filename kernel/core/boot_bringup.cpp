@@ -19,6 +19,7 @@
 #include "util/vt_parser.h"
 #include "acpi/acpi.h"
 #include "acpi/acpi_power.h"
+#include "acpi/acpi_sci.h"
 #include "acpi/aml.h"
 #include "acpi/aml_eval.h"
 #include "acpi/ec.h"
@@ -1070,6 +1071,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiEcSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiPowerSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiSleepPrepSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiSciSelfTest());
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();

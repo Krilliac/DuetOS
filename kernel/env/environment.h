@@ -3,7 +3,7 @@
 #include "util/types.h"
 
 /*
- * DuetOS — unified system-environment view, v0 (slice 2 of 3).
+ * DuetOS — unified system-environment view, v0 (slice 3 of 3).
  *
  * The kernel already *detects* its environment, but the facts are
  * scattered across half a dozen subsystems and read ad-hoc:
@@ -34,8 +34,12 @@
  * together; wiring a no-op policy read into the hot idle loop now
  * would be a facade.
  *
- * Slice 3 adds the ACPI SCI/GPE power-event path so the monitor
- * wakes on a real interrupt instead of only on its poll.
+ * Slice 3 (this revision) wires the ACPI SCI: the monitor blocks
+ * on a WaitQueue the SCI handler wakes, so a power-button press
+ * (→ ACPI shutdown) or an AC/lid change reacts immediately instead
+ * of at poll latency. The 2 s poll remains as the fallback for
+ * state QEMU exposes without an SCI. GPE `_Qxx` (lid/AC via EC)
+ * is acked but not yet evaluated — see acpi_sci.h GAP.
  *
  * Context: kernel. `EnvironmentInit()` runs once at boot, after
  * `drivers::power::PowerInit()` (so AC/battery/thermal are live) and

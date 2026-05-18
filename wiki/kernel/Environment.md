@@ -1,6 +1,6 @@
 # System Environment View
 
-> **Maturity:** v0, slice 2 of 3 — boot-time aggregation + canonical banner + query API + the `env-monitor` runtime poller (cached state is live, policy transitions are logged + probed). The ACPI SCI/GPE power-event path (slice 3) is pending; see [Roadmap](../reference/Roadmap.md).
+> **Maturity:** v0, slices 1–3 complete — boot-time aggregation + canonical banner + query API + the `env-monitor` runtime poller + the ACPI SCI power-event path (power button → graceful shutdown, SCI-driven monitor wake). Known limits below: GPE `_Qxx` (lid/AC via EC) is acked but not yet evaluated, and the idle-path C-state reaction stays deferred (no safe lever exists yet). See [Roadmap](../reference/Roadmap.md).
 
 ## What this is
 
@@ -66,14 +66,27 @@ void EnvironmentSelfTest();                       // [env-selftest] PASS; panics
 
 The reactive payoff of slice 2 is that **cached state is live, not frozen at boot** — the banner is the boot snapshot, but every later reader (`EnvironmentGet`, `EnvironmentPowerPolicy`, the shell, slice 3) sees current state.
 
-### Idle-path reaction is deferred to slice 3 (deliberate)
+## ACPI SCI power events (slice 3)
 
-The plan floated biasing the scheduler's MWAIT/HLT idle path on `PowerSave`. On inspection there is **no safe real lever today**: `IdleMain` already uses MWAIT-C1 whenever available, documented as *"at least as deep as a bare HLT and lower-power on most parts"* with identical wake semantics. The only deeper lever (the MWAIT EAX C-state hint / deep C-states) is explicitly deferred — *"no profile evidence and no consumer yet"*. Wiring a policy read into the hot idle loop that changes nothing would be a probe-satisfying facade (CLAUDE.md-forbidden). The idle C-state reaction lands with slice 3, where a real lever and a consumer arrive together. See Design-Decisions 2026-05-18.
+`kernel/acpi/acpi_sci.{h,cpp}` owns the System Control Interrupt. `EnvMonitorMain` calls `AcpiSciInit(&g_env_wq)` on entry; it:
+
+1. latches the FADT PM1 event / GPE / SMI_CMD ports (new `acpi.h` accessors fed by the FADT parse in `acpi.cpp`);
+2. hands ACPI ownership SMM→OS if needed (`SMI_CMD`←`ACPI_ENABLE`, bounded poll on `PM1_CNT.SCI_EN`; QEMU/SeaBIOS already did this so it's a no-op there);
+3. clears stale `PWRBTN_STS` and arms `PWRBTN_EN`;
+4. `IoApicRoute` + `arch::IrqInstall` the SCI vector (`0x20 + SCI_INT`, MADT override honoured) and emits the raw `[acpi/sci] armed` milestone.
+
+The handler runs in **IRQ context** — no AML, no allocation: it read-/write-1-clears PM1 + GPE status, latches what fired into `SciPending`, and `WaitQueueWakeOne(&g_env_wq)`. The `env-monitor` task blocks on that WaitQueue (`WaitQueueBlockTimeout`, 2 s fallback); on wake it `AcpiSciTakePending()`, and on `power_button` it logs the raw `[env/sci]` sentinels and calls `acpi::AcpiShutdown()` (legal in task context). AC/lid/thermal still come through `EnvironmentRecompose()`.
+
+**GAP — GPE `_Qxx` not evaluated.** GPE status is acked (so a level-triggered SCI can't stay asserted) and the GPE is masked, but the per-GPE `_Qxx` AML query method is *not* run — that needs the AML interpreter in process context plus an EC `_Qxx` path that does not exist (`ec.h`). Power-button (the event QEMU can exercise) is fully handled; lid/AC via EC `_Qxx` remain a documented limit tracked by the "Battery + ACPI suspend" roadmap entry.
+
+### Idle-path C-state reaction: still deferred (honest status)
+
+Slices 1–2 said the idle reaction would land "with slice 3, where a real lever and a consumer arrive together." That framing was optimistic: **slice 3 added the SCI event path, not deep C-states.** There is still no safe non-speculative idle lever — `IdleMain` already uses MWAIT-C1 (equal-or-lower power than HLT, identical wake), and the only deeper knob (MWAIT EAX C-state hint / a cpuidle governor) remains explicitly deferred with "no profile evidence and no consumer yet." Wiring a policy read into the hot idle loop that changes nothing is still a facade. The substantive slice-3 reactivity is **event-driven** (instant power-button shutdown; SCI-driven monitor wake), which fulfils "reactive of its environment" without the facade. The C-state lever lands if/when deep C-states are implemented for their own reasons. See Design-Decisions 2026-05-18 (slice 3 entry).
+
+### Live-test caveat (QEMU)
+
+The full power-button → S5 chain could **not** be observed live on the available QEMU targets, and the script says so rather than claiming success. The `env-monitor` is a Normal-priority task that only gets CPU after the boot task winds down — ~coincident with a **pre-existing ~17 s automatic ACPI poweroff** in the headless CI boot (verified identical on the slice-2 build, so *not* a slice-3 regression). The SCI therefore arms just as the box powers itself off, leaving no window to land a QMP button press first. `tools/test/env-powerbtn-smoke.sh` gates on `[acpi/sci] armed`, presses the button, and reports **PASS** only on the `[env/sci] PWRBTN_STS latched` sentinel, **SKIP** when the pre-existing auto-shutdown races it, and **FAIL** only on a panic or an armed-but-ignored button. Correctness up to the hardware boundary is proven by `[acpi/sci-selftest] PASS` (synthetic PM1 decode + latch round-trip), the `[acpi/sci] armed` milestone, and a clean analyzer verdict.
 
 ## Boot wiring
 
-`EnvironmentInit()` runs inside `BootBringupDevices()` immediately after `drivers::power::PowerInit()` — so AC/battery/thermal are live — and after SMP AP bring-up, so the online census is final. `EnvironmentMonitorStart()` is called immediately after (scheduler is online by the devices phase, and the first snapshot is published). The self-test is `DUETOS_BOOT_SELFTEST`-gated (debug/self-test builds only); it asserts the cached==derived invariant, exercises the full derivation matrix against synthetic snapshots, and round-trips `EnvironmentRecompose()`.
-
-## Forward plan
-
-- **Slice 3:** expose the already-parsed FADT GPE0/GPE1 + PM1 event block, install the ACPI SCI handler (`IoApicRoute` + `arch::IrqInstall`), extend `kernel/acpi/ec.cpp` with `_Qxx` query dispatch, turn power-button / lid / AC-change into real interrupt-driven events that wake the monitor instantly (instead of only on its 2 s poll), and add the now-meaningful idle-path C-state reaction.
+`EnvironmentInit()` runs inside `BootBringupDevices()` immediately after `drivers::power::PowerInit()` — so AC/battery/thermal are live — and after SMP AP bring-up, so the online census is final. `EnvironmentMonitorStart()` is called immediately after (scheduler is online by the devices phase, and the first snapshot is published); the monitor task then runs `AcpiSciInit`. The self-test is `DUETOS_BOOT_SELFTEST`-gated (debug/self-test builds only); `AcpiSciSelfTest` (`[acpi/sci-selftest] PASS`) runs in the ACPI bring-up block, `EnvironmentSelfTest` (`[env-selftest] PASS`) in the devices block.

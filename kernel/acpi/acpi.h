@@ -21,10 +21,10 @@
  *     (VirtualBox puts the XSDT near the top of 2 GiB RAM) are reached
  *     through a cached MapMmio fallback in AcpiMapPhys(). Mappings are
  *     kept for the kernel lifetime (the DSDT/SSDT scanners reuse them).
- *   - FADT parsing is minimal — only RESET_REG + RESET_VALUE + SCI_INT
- *     are cached. The rest (PM1a/PM1b event/control blocks, PM timer,
- *     GPE blocks, preferred CPU C-state hints) lands when a consumer
- *     exists.
+ *   - FADT parsing covers RESET_REG/VALUE, SCI_INT, PM1a/b control
+ *     + event blocks, GPE0/GPE1 blocks, and the SMI_CMD/ACPI_ENABLE
+ *     handshake (consumed by acpi_sci.cpp for the SCI). PM timer +
+ *     preferred CPU C-state hints still land when a consumer exists.
  *   - MCFG (PCIe ECAM), HPET, SRAT are still untouched. Add a
  *     dispatcher when a consumer needs one.
  *   - No DSDT/SSDT bytecode interpreter. That's a multi-thousand-line
@@ -108,8 +108,8 @@ u16 IsaIrqFlags(u8 isa_irq);
 /// ACPI System Control Interrupt vector, as reported by the FADT.
 /// Returns 9 (the ACPI-spec default ISA IRQ) if the FADT was not
 /// found or didn't set a value. The SCI itself is an edge/level-
-/// triggered line that fires on power-management events; no handler
-/// is installed yet.
+/// triggered line that fires on power-management events;
+/// `kernel/acpi/acpi_sci.cpp` installs the handler on this vector.
 u16 SciVector();
 
 /// Issue a firmware-defined reboot via the FADT's RESET_REG. Returns
@@ -128,6 +128,32 @@ bool AcpiReset();
 /// soft-off on compliant hardware + QEMU.
 u32 Pm1aControlPort();
 u32 Pm1bControlPort();
+
+/// PM1 event block I/O port addresses from FADT (0 when absent).
+/// The block is `Pm1EventLen()` bytes: the PM1 *status* register
+/// at the base, the PM1 *enable* register at base + len/2. Bit 8
+/// of each is the power-button (PWRBTN_STS / PWRBTN_EN). Consumed
+/// by `kernel/acpi/acpi_sci.cpp` to arm + service the SCI.
+u32 Pm1aEventPort();
+u32 Pm1bEventPort();
+u8 Pm1EventLen();
+
+/// GPE0 / GPE1 register block I/O ports + lengths from FADT
+/// (0 when absent — common on QEMU, which exposes no GPEs). Each
+/// block is split half status / half enable like PM1. `Gpe1Base()`
+/// is the 0-based GPE index the GPE1 block starts at.
+u32 Gpe0Block();
+u8 Gpe0BlockLen();
+u32 Gpe1Block();
+u8 Gpe1BlockLen();
+u8 Gpe1Base();
+
+/// SMI command port + the value to write there to hand ACPI
+/// ownership from firmware SMM to the OS (FADT SMI_CMD /
+/// ACPI_ENABLE). Both 0 ⇒ no firmware handshake needed (already in
+/// ACPI mode / hardware-reduced) — the SCI installer skips it.
+u32 AcpiSmiCommandPort();
+u8 AcpiEnableValue();
 
 /// Trigger ACPI soft-off (S5) by reading SLP_TYP from AML `\_S5`
 /// and writing `(SLP_TYP << 10) | SLP_EN` to PM1a (and PM1b if

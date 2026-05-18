@@ -1,7 +1,9 @@
 #include "env/environment.h"
 
 #include "acpi/acpi.h"
+#include "acpi/acpi_sci.h"
 #include "acpi/srat.h"
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/cpu_info.h"
 #include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/serial.h"
@@ -27,6 +29,11 @@ namespace
 // never tears against a monitor write.
 sync::SpinLock g_env_lock;
 SystemEnvironment g_env{};
+
+// The env-monitor blocks here. The ACPI SCI handler
+// (`WaitQueueWakeOne`, IRQ-safe) wakes it on a power-management
+// event so reaction is immediate instead of poll-latency-bounded.
+sched::WaitQueue g_env_wq{};
 
 // Monitor poll period. 100 Hz scheduler tick → 200 ticks ≈ 2 s.
 // Power/thermal state does not change faster than a human plugs a
@@ -220,9 +227,38 @@ void EmitBanner(const SystemEnvironment& e)
 
 [[noreturn]] void EnvMonitorMain(void*)
 {
+    // Install the SCI service now: scheduler is online (we are a
+    // task) and the IOAPIC is up by the devices phase. It wakes
+    // g_env_wq on a power-management interrupt.
+    acpi::AcpiSciInit(&g_env_wq);
+
     for (;;)
     {
-        sched::SchedSleepTicks(kEnvMonitorIntervalTicks);
+        // Block until the SCI handler wakes us OR the poll period
+        // elapses. Same interrupt contract as the reaper: hold
+        // interrupts off across the block call, restore after.
+        arch::Cli();
+        (void)sched::WaitQueueBlockTimeout(&g_env_wq, kEnvMonitorIntervalTicks);
+        arch::Sti();
+
+        const acpi::SciPending sp = acpi::AcpiSciTakePending();
+        if (sp.power_button)
+        {
+            // The power/sleep button is a request to shut down.
+            // AcpiShutdown evaluates `\_S5` AML — legal here
+            // (task/process context). On QEMU this exits the
+            // guest; if it returns (no `\_S5`, missing PM1) we
+            // keep monitoring rather than spin.
+            // Raw structural sentinel (terminal, rare): the
+            // boot-log analyzer + the power-button smoke gate on
+            // this; a redundant KLOG line would just double it.
+            arch::SerialWrite("[env/sci] power button -> ACPI shutdown\n");
+            (void)acpi::AcpiShutdown();
+        }
+
+        // AC / lid / thermal may have moved (the SCI woke us, or
+        // the poll period elapsed). Recompose picks it up and
+        // republishes + logs/probes on a policy transition.
         (void)EnvironmentRecompose();
     }
 }

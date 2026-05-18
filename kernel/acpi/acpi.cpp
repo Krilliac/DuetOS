@@ -275,6 +275,21 @@ constinit u32 g_pm1a_cnt = 0;
 constinit u32 g_pm1b_cnt = 0;
 constinit u8 g_pm1_cnt_len = 0;
 
+// PM1 event block + GPE blocks + ACPI-enable handshake, from FADT.
+// All zero when the FADT didn't populate them (hardware-reduced
+// ACPI, or QEMU with no GPEs). Consumed by kernel/acpi/acpi_sci.cpp
+// to install the SCI handler and arm the power button.
+constinit u32 g_pm1a_evt = 0;
+constinit u32 g_pm1b_evt = 0;
+constinit u8 g_pm1_evt_len = 0;
+constinit u32 g_gpe0_blk = 0;
+constinit u8 g_gpe0_blk_len = 0;
+constinit u32 g_gpe1_blk = 0;
+constinit u8 g_gpe1_blk_len = 0;
+constinit u8 g_gpe1_base = 0;
+constinit u32 g_smi_cmd = 0;
+constinit u8 g_acpi_enable = 0;
+
 // HPET-derived cache. All zero if no HPET table was present — the
 // HPET driver treats that as "no HPET, fall back to PIT/LAPIC."
 constinit u64 g_hpet_address = 0;
@@ -692,6 +707,16 @@ void ParseFadt(const Fadt& fadt)
     g_pm1a_cnt = fadt.pm1a_cnt_blk;
     g_pm1b_cnt = fadt.pm1b_cnt_blk;
     g_pm1_cnt_len = fadt.pm1_cnt_len;
+    g_pm1a_evt = fadt.pm1a_evt_blk;
+    g_pm1b_evt = fadt.pm1b_evt_blk;
+    g_pm1_evt_len = fadt.pm1_evt_len;
+    g_gpe0_blk = fadt.gpe0_blk;
+    g_gpe0_blk_len = fadt.gpe0_blk_len;
+    g_gpe1_blk = fadt.gpe1_blk;
+    g_gpe1_blk_len = fadt.gpe1_blk_len;
+    g_gpe1_base = fadt.gpe1_base;
+    g_smi_cmd = fadt.smi_cmd;
+    g_acpi_enable = fadt.acpi_enable;
     // DSDT pointer is a 32-bit physical address in the legacy FADT;
     // modern firmware also populates X_DSDT (64-bit) further on.
     // Cache the 32-bit form — on every x86_64 box we target it's
@@ -1280,6 +1305,56 @@ u32 Pm1aControlPort()
 u32 Pm1bControlPort()
 {
     return g_pm1b_cnt;
+}
+
+u32 Pm1aEventPort()
+{
+    return g_pm1a_evt;
+}
+
+u32 Pm1bEventPort()
+{
+    return g_pm1b_evt;
+}
+
+u8 Pm1EventLen()
+{
+    return g_pm1_evt_len;
+}
+
+u32 Gpe0Block()
+{
+    return g_gpe0_blk;
+}
+
+u8 Gpe0BlockLen()
+{
+    return g_gpe0_blk_len;
+}
+
+u32 Gpe1Block()
+{
+    return g_gpe1_blk;
+}
+
+u8 Gpe1BlockLen()
+{
+    return g_gpe1_blk_len;
+}
+
+u8 Gpe1Base()
+{
+    return g_gpe1_base;
+}
+
+u32 AcpiSmiCommandPort()
+{
+    return g_smi_cmd;
+}
+
+u8 AcpiEnableValue()
+{
+    return g_acpi_enable;
 }
 
 // Run the ACPI sleep-preparation control methods for `sleep_type`

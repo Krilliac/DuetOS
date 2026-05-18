@@ -53,38 +53,6 @@ the same commit** that delivers the code.
 - **When to land:** when a workload exposes lock contention. For
   most workloads the global lock is acceptable.
 
-### Environment awareness — runtime monitor + power events
-
-- **Status:** slice 1 LANDED — `kernel/env/environment.{h,cpp}`
-  aggregates the already-detected environment into one
-  `SystemEnvironment` snapshot, derives a coarse `EnvPowerPolicy`,
-  prints the canonical `[env] …` banner, and exposes the cached
-  query API + `[env-selftest]`. Read-only aggregator (see
-  Design-Decisions 2026-05-18). See
-  [`Environment`](../kernel/Environment.md).
-- **Slice 2 LANDED — runtime monitor:** the `env-monitor` kernel
-  thread (`SchedCreate` worker, ~2 s poll) re-composes the
-  snapshot, publishes it under a spinlock (reads are
-  snapshot-by-value), and on a policy transition emits a gated
-  `KLOG_INFO` summary + `KLOG_DEBUG_V` detail and fires the
-  `env.policy_change` probe (`ProbeId::kEnvPolicyChange`,
-  ArmedLog). Cached state is now live, not boot-frozen. The
-  planned idle-path bias was **deferred to slice 3 by design**:
-  no safe real lever exists until deep C-states (DD 2026-05-18).
-  DD-009 (tickless) untouched.
-- **Slice 3 — ACPI SCI/GPE power events + idle reaction
-  (pending):** expose the already-parsed FADT GPE0/GPE1 + PM1
-  event block via `acpi.h` accessors; install the SCI handler
-  (`IoApicRoute` + `arch::IrqInstall`); extend `kernel/acpi/ec.cpp`
-  with `_Qxx` query dispatch; turn power-button / lid / AC-change
-  into interrupt-driven events that wake the monitor instantly
-  (power button → `acpi::AcpiShutdown`); and add the
-  now-meaningful idle-path C-state reaction (the real lever +
-  consumer arrive together here). This is the same `_Qxx`
-  GPE/SCI dispatch the "Battery + ACPI suspend" entry blocks on —
-  landing slice 3 retires that sub-item too. Revisit DD-012
-  (FADT GPE now consumed) when it lands.
-
 ### Lockdep held-set must be per-task, not global
 
 - **Status:** root-caused 2026-05-17. `kernel/sync/lockdep.cpp`
@@ -659,10 +627,19 @@ In rough priority:
   clears `backend_is_stub` whenever live ACPI data is present
   (re-polled on every `PowerSnapshotRead`). On firmware without
   power AML (QEMU) it falls back to the SMBIOS heuristic.
-- **Still blocks on:** S3/S0ix suspend-to-RAM wake plumbing and
-  `_Qxx` GPE/SCI query dispatch (lid-close *event* delivery; the
-  lid *state* is already readable). Battery tray icon can now be
-  wired to `PowerSnapshotRead`.
+- **SCI path LANDED (env slice 3):** `kernel/acpi/acpi_sci.cpp`
+  enters ACPI mode, arms the power button, installs the SCI IRQ
+  handler, and wakes the `env-monitor` (power button → graceful
+  `AcpiShutdown`). GPE status is read + acked + masked in the
+  handler. See [`Environment`](../kernel/Environment.md).
+- **Still blocks on:** S3/S0ix suspend-to-RAM wake plumbing, and
+  the GPE **`_Qxx` AML query method evaluation** — the SCI now
+  *detects + acks* a GPE, but dispatching the firmware's per-GPE
+  `_Qxx` handler (lid-close / AC *event* delivery) needs the AML
+  interpreter in process context off the woken worker plus an EC
+  `_Qxx` read path (`ec.h` has none). Lid/AC *state* is already
+  readable via `_LID`/`_PSR`; battery tray icon can be wired to
+  `PowerSnapshotRead`.
 
 ### Bluetooth, Printer, Webcam
 
