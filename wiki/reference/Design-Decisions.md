@@ -9472,3 +9472,50 @@ It also corrects an over-promise made in the slices 1–2 docs.
 - **Related roadmap track(s):** the neural-engine arc step 3
   (NPU firmware + submit gate, then learned policy behind
   `AutonomicEvaluate`).
+
+## 2026-05-18 — Oversized core TUs are cohesive by design; do not size-split syscall.cpp / sched.cpp / widget.cpp
+
+- **Context.** The CLAUDE.md bloat-check flags the five largest
+  TUs (`syscall.cpp` ~4.1k, `sched.cpp` ~4.9k,
+  `drivers/video/widget.cpp` ~3.4k, `userland/libs/user32/user32.c`
+  ~3.4k, `core/boot_tasks.cpp` ~3.1k) as over the ~500-line
+  guideline. A refactor pass investigated whether each should be
+  split into sibling TUs by responsibility.
+- **Decision.** Do **not** mechanically size-split the three that
+  are cohesive units. The anti-bloat rule is explicit that the
+  threshold is "pause and think," not a hard limit — "split if
+  doing multiple jobs; leave if one coherent unit," and "never
+  sacrifice readability to hit a line count." Evidence per file:
+  - `syscall.cpp` — a single deliberate `switch (num)` over 223
+    cases where (per the file's own banner) every handler shares
+    inline scratch state and the common early-exit / capability /
+    fault-domain paths *specifically to avoid per-handler
+    boilerplate*. A switch is one function; "splitting" it means
+    extracting 223 handlers and threading the shared scratch
+    through parameters — undoing a documented design choice and
+    adding ABI-critical risk for zero readability gain.
+  - `sched.cpp` — scheduler core: 16 file-static structures and
+    ~153 internal cross-references across ~128 functions. Maximal
+    cohesion; splitting exports scheduler internals across a TU
+    boundary (dangerous, low value).
+  - `widget.cpp` — desktop toolkit with bidirectional
+    window↔button↔tooltip state coupling interleaved across the
+    whole file (button code reads `g_windows`; window code reads
+    button/tooltip state). A window *contains* buttons; this is
+    one coherent subsystem.
+- **Rules out.** A future slice mechanically splitting these by
+  line count "because the bloat-check flagged them." It should
+  not: the flag warrants the investigation (done here), and the
+  investigation's answer is "cohesive — leave." Re-opening
+  requires a *genuine* multi-responsibility seam, not size alone.
+- **Open (not ruled out).** `boot_tasks.cpp` (28 file-statics,
+  few very large phase functions) and `user32.c` (42 file-statics,
+  flat Win32-API surface) *may* have real seams (boot-phase /
+  API-group), but each needs a dedicated careful per-file
+  partition analysis — explicitly NOT a rushed mechanical split.
+- **Verified:** analysis only; no code changed by this decision.
+  Conclusion backed by per-file file-static/cross-reference counts
+  and each file's own header banner.
+- **Related roadmap track(s):** refactor backlog "split oversized
+  TUs" — partially resolved (3 closed as cohesive; 2 deferred to
+  dedicated sessions with the seam analysis above as the brief).
