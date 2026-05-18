@@ -59,6 +59,7 @@ The contract every module follows:
 | `diag_decode` | [`diag_decode.h`](../../kernel/diag/diag_decode.h) | CR/RFLAGS/page-walk decoders + `ClassifyVa()` region tagger. | `VaRegionSelfTest()` |
 | `debugcon` | [`debugcon.h`](../../kernel/diag/debugcon.h) | Binary writer to port 0xE9 (QEMU debugcon). | none |
 | `runtime_checker` | [`runtime_checker.h`](../../kernel/diag/runtime_checker.h) | Invariant scanner (31 issue types). Periodic from heartbeat. Fires probes on heap corruption, CR drift, stack overflow, fs-write storm. | `RuntimeCheckerInit()` captures baseline |
+| `resmon` | [`resmon.h`](../../kernel/diag/resmon.h) | One-call CPU + memory + box utilisation roll-up (`ResmonSample()`). Single source of truth for the derived percentages (`cpu_busy_pct`, `phys_used_pct`, `heap_used_pct`) so `top` / `free` / `loadavg` and any future telemetry sink agree on the arithmetic. Lock-free, any context. Surfaced by the `resmon` shell command. | none (read-only of existing counters) |
 
 ## Diagnostic Modules — Active
 

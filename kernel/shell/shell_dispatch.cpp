@@ -182,6 +182,7 @@ void CmdHelp()
     ConsoleWriteln("  READ H LBA [C] HEXDUMP C SECTORS FROM BLOCK HANDLE H AT LBA");
     ConsoleWriteln("  GUARD [SUB]  SECURITY GUARD: STATUS OR ON/ENFORCE/OFF/TEST");
     ConsoleWriteln("  TOP          PER-TASK CPU% + SYSTEM IDLE FRACTION");
+    ConsoleWriteln("  RESMON       CPU + MEM + BOX UTILISATION (ONE SNAPSHOT)");
     ConsoleWriteln("  FATLS [VOL]  LIST ROOT DIR OF FAT32 VOLUME (default vol 0)");
     ConsoleWriteln("  FATCAT [VOL] NAME  READ FILE FROM FAT32 VOLUME TO CONSOLE");
     ConsoleWriteln("  FATWRITE PATH OFF BYTES  OVERWRITE EXISTING FILE BYTES IN-PLACE");
@@ -643,36 +644,36 @@ u32 Tokenize(char* buf, char** argv)
 // New commands added here + dispatched in Dispatch — keeping
 // the two in sync is the price of not having reflection.
 constinit const char* const kCommandSet[] = {
-    "help",      "about",     "version",     "clear",        "console",  "panic-test", "uptime",     "date",
-    "windows",   "mode",      "ls",          "cat",          "touch",    "rm",         "echo",       "cp",
-    "mv",        "wc",        "head",        "tail",         "dmesg",    "stats",      "mem",        "history",
-    "set",       "unset",     "env",         "alias",        "unalias",  "sysinfo",    "source",     "man",
-    "grep",      "find",      "time",        "which",        "seq",      "sort",       "uniq",       "cpuid",
-    "cr",        "rflags",    "tsc",         "hpet",         "ticks",    "msr",        "lapic",      "smp",
-    "lspci",     "heap",      "paging",      "fb",           "kbdstats", "mousestats", "loglevel",   "logcolor",
-    "logarea",   "kdbg",      "getenv",      "yield",        "reboot",   "halt",       "uname",      "whoami",
-    "hostname",  "pwd",       "true",        "false",        "mount",    "lsmod",      "lsblk",      "lsgpt",
-    "free",      "ps",        "spawn",       "readelf",      "hexdump",  "stat",       "basename",   "dirname",
-    "cal",       "sleep",     "reset",       "tac",          "nl",       "rev",        "expr",       "color",
-    "rand",      "flushtlb",  "checksum",    "repeat",       "kill",     "exec",       "unzip",      "wget",
-    "curl",      "sha256sum", "shasum",      "base64",       "xxd",      "wc",         "tr",         "dd",
-    "crc32",     "cmp",       "tee",         "metrics",      "trace",    "read",       "guard",      "top",
-    "fatcat",    "fatls",     "fatwrite",    "fatappend",    "fatnew",   "fatrm",      "fattrunc",   "fatmkdir",
-    "fatrmdir",  "linuxexec", "translate",   "smbios",       "power",    "battery",    "thermal",    "temp",
-    "hw",        "hardware",  "gpu",         "lsgpu",        "gfx",      "nic",        "lsnic",      "ip",
-    "arp",       "ipv4",      "uuid",        "uuidgen",      "health",   "checkup",    "attacksim",  "redteam",
-    "memdump",   "leakcheck", "ifconfig",    "netinfo",      "dhcp",     "route",      "netscan",    "wifi",
-    "firewall",  "fwpolicy",  "fwtrace",     "crtrace",      "crprobe",  "net",        "usbnet",     "instr",
-    "dumpstate", "bp",        "breakpoint",  "login",        "logout",   "passwd",     "useradd",    "userdel",
-    "users",     "who",       "su",          "idlelock",     "hwmon",    "vbe",        "ping",       "nslookup",
-    "ntp",       "http",      "shutdown",    "poweroff",     "beep",     "inspect",    "theme",      "addr2sym",
-    "cap-audit", "monitor",   "secevents",   "events",       "policy",   "purple",     "purpleteam", "mkdir",
-    "rmdir",     "truncate",  "realpath",    "id",           "groups",   "nproc",      "arch",       "tty",
-    "type",      "printenv",  "df",          "du",           "loadavg",  "clearhist",  "pause",      "yes",
-    "sync",      "port",      "assert",      "watch",        "script",   "exit",       "mkfs",       "mkfs.duetfs",
-    "install",   "lastdump",  "loadtest",    "stress",       "bench",    "dbg",        "dfix",       "drshd",
-    "pe-triage", "caplog",    "live-update", "fault-inject", "suspend",  "resume",     "affinity",   "vtop",
-    "logclock",  "dpms",      "wrmsr",       "io",           "peek",     "poke",
+    "help",        "about",     "version",   "clear",       "console",      "panic-test", "uptime",    "date",
+    "windows",     "mode",      "ls",        "cat",         "touch",        "rm",         "echo",      "cp",
+    "mv",          "wc",        "head",      "tail",        "dmesg",        "stats",      "mem",       "history",
+    "set",         "unset",     "env",       "alias",       "unalias",      "sysinfo",    "source",    "man",
+    "grep",        "find",      "time",      "which",       "seq",          "sort",       "uniq",      "cpuid",
+    "cr",          "rflags",    "tsc",       "hpet",        "ticks",        "msr",        "lapic",     "smp",
+    "lspci",       "heap",      "paging",    "fb",          "kbdstats",     "mousestats", "loglevel",  "logcolor",
+    "logarea",     "kdbg",      "getenv",    "yield",       "reboot",       "halt",       "uname",     "whoami",
+    "hostname",    "pwd",       "true",      "false",       "mount",        "lsmod",      "lsblk",     "lsgpt",
+    "free",        "ps",        "spawn",     "readelf",     "hexdump",      "stat",       "basename",  "dirname",
+    "cal",         "sleep",     "reset",     "tac",         "nl",           "rev",        "expr",      "color",
+    "rand",        "flushtlb",  "checksum",  "repeat",      "kill",         "exec",       "unzip",     "wget",
+    "curl",        "sha256sum", "shasum",    "base64",      "xxd",          "wc",         "tr",        "dd",
+    "crc32",       "cmp",       "tee",       "metrics",     "trace",        "read",       "guard",     "top",
+    "resmon",      "fatcat",    "fatls",     "fatwrite",    "fatappend",    "fatnew",     "fatrm",     "fattrunc",
+    "fatmkdir",    "fatrmdir",  "linuxexec", "translate",   "smbios",       "power",      "battery",   "thermal",
+    "temp",        "hw",        "hardware",  "gpu",         "lsgpu",        "gfx",        "nic",       "lsnic",
+    "ip",          "arp",       "ipv4",      "uuid",        "uuidgen",      "health",     "checkup",   "attacksim",
+    "redteam",     "memdump",   "leakcheck", "ifconfig",    "netinfo",      "dhcp",       "route",     "netscan",
+    "wifi",        "firewall",  "fwpolicy",  "fwtrace",     "crtrace",      "crprobe",    "net",       "usbnet",
+    "instr",       "dumpstate", "bp",        "breakpoint",  "login",        "logout",     "passwd",    "useradd",
+    "userdel",     "users",     "who",       "su",          "idlelock",     "hwmon",      "vbe",       "ping",
+    "nslookup",    "ntp",       "http",      "shutdown",    "poweroff",     "beep",       "inspect",   "theme",
+    "addr2sym",    "cap-audit", "monitor",   "secevents",   "events",       "policy",     "purple",    "purpleteam",
+    "mkdir",       "rmdir",     "truncate",  "realpath",    "id",           "groups",     "nproc",     "arch",
+    "tty",         "type",      "printenv",  "df",          "du",           "loadavg",    "clearhist", "pause",
+    "yes",         "sync",      "port",      "assert",      "watch",        "script",     "exit",      "mkfs",
+    "mkfs.duetfs", "install",   "lastdump",  "loadtest",    "stress",       "bench",      "dbg",       "dfix",
+    "drshd",       "pe-triage", "caplog",    "live-update", "fault-inject", "suspend",    "resume",    "affinity",
+    "vtop",        "logclock",  "dpms",      "wrmsr",       "io",           "peek",       "poke",
 };
 constinit const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1846,6 +1847,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "top"))
     {
         CmdTop();
+        return;
+    }
+    if (StrEq(cmd, "resmon"))
+    {
+        CmdResmon();
         return;
     }
     if (StrEq(cmd, "fatls"))

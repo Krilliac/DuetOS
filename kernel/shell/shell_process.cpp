@@ -12,8 +12,10 @@
 
 #include "drivers/video/console.h"
 #include "arch/x86_64/smp.h"
+#include "diag/resmon.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
+#include "sched/loadavg.h"
 #include "sched/sched.h"
 #include "proc/ring3_smoke.h"
 
@@ -182,6 +184,66 @@ void CmdFree()
     WriteU64Dec(h.used_bytes);
     ConsoleWrite("   ");
     WriteU64Dec(h.free_bytes);
+    ConsoleWriteChar('\n');
+}
+
+void CmdResmon()
+{
+    // One-screen CPU + memory + box rollup. Single snapshot so the
+    // three sections are mutually consistent (vs. running top, then
+    // free, then loadavg and getting three different epochs). Not a
+    // live refresh — re-run for a trend, or `watch 2 resmon`.
+    const auto s = duetos::diag::ResmonSample();
+
+    ConsoleWrite("CPU   busy ");
+    WriteU64Dec(s.cpu_busy_pct);
+    ConsoleWrite("%  cpus ");
+    WriteU64Dec(s.online_cpus);
+    ConsoleWrite("  uptime ");
+    WriteU64Dec(s.uptime_seconds);
+    ConsoleWrite("s  load ");
+    char lbuf[16];
+    duetos::sched::LoadavgFormat(lbuf, sizeof(lbuf), s.load_1m_q11);
+    ConsoleWrite(lbuf);
+    ConsoleWriteChar(' ');
+    duetos::sched::LoadavgFormat(lbuf, sizeof(lbuf), s.load_5m_q11);
+    ConsoleWrite(lbuf);
+    ConsoleWriteChar(' ');
+    duetos::sched::LoadavgFormat(lbuf, sizeof(lbuf), s.load_15m_q11);
+    ConsoleWriteln(lbuf);
+
+    ConsoleWrite("PHYS  ");
+    WriteU64Dec(s.phys_used_pct);
+    ConsoleWrite("% used  ");
+    WriteU64Dec(s.phys_used_kib);
+    ConsoleWrite("K / ");
+    WriteU64Dec(s.phys_total_kib);
+    ConsoleWrite("K  (peak ");
+    WriteU64Dec(s.phys_peak_kib);
+    ConsoleWriteln("K)");
+
+    ConsoleWrite("HEAP  ");
+    WriteU64Dec(s.heap_used_pct);
+    ConsoleWrite("% used  ");
+    WriteU64Dec(s.heap_used_bytes);
+    ConsoleWrite(" / ");
+    WriteU64Dec(s.heap_pool_bytes);
+    ConsoleWrite("  (largest free run ");
+    WriteU64Dec(s.heap_largest_run);
+    ConsoleWriteln(")");
+
+    ConsoleWrite("BOX   tasks live ");
+    WriteU64Dec(s.tasks_live);
+    ConsoleWrite(" sleep ");
+    WriteU64Dec(s.tasks_sleeping);
+    ConsoleWrite(" block ");
+    WriteU64Dec(s.tasks_blocked);
+    ConsoleWrite("  ctxsw ");
+    WriteU64Dec(s.context_switches);
+    ConsoleWrite("  created ");
+    WriteU64Dec(s.tasks_created);
+    ConsoleWrite("  exited ");
+    WriteU64Dec(s.tasks_exited);
     ConsoleWriteChar('\n');
 }
 
