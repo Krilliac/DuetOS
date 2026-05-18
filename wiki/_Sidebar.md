@@ -15,6 +15,7 @@
 - [Synchronization](kernel/Synchronization.md)
 - [Scheduler](kernel/Scheduler.md)
 - [CPU Topology](kernel/CPU-Topology.md)
+- [System Environment](kernel/Environment.md)
 - [Time](kernel/Time.md)
 - [ACPI](kernel/ACPI.md)
 - [Syscalls](kernel/Syscalls.md)

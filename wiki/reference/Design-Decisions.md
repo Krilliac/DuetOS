@@ -9250,3 +9250,48 @@ introspection + control.
 - **Related roadmap track(s):** GDB stub completion (peer-thread
   `vCont;s` remains the only deferred generic item; `qRcmd`
   `O`-packet streaming is the deferred monitor item).
+
+## 2026-05-18 — Unified environment view is a read-only aggregator, not a new detector
+
+The kernel already detected every environmental fact it needed
+(hypervisor kind, CPU census, RAM, NUMA, AC/battery/lid, thermal)
+but the detection was scattered and read ad-hoc — every consumer
+re-derived state from a different subsystem and re-checked
+`IsEmulator()` itself. The requirement was "allow the OS to be
+aware and reactive of its environment," delivered over three
+slices; this entry records slice 1 (aggregation + banner + query
+API).
+
+- **`kernel/env/` is a read-only aggregator; it never re-detects.**
+  `EnvironmentInit()` copies fields from the owning subsystems
+  (`arch::HypervisorInfoGet`, `acpi::CpuCount`,
+  `arch::SmpCpusOnline`, `cpu::TopologyForCpu`, `mm::TotalFrames`,
+  `acpi::srat::*`, `drivers::power::PowerSnapshotRead`). The
+  rejected alternative — moving detection *into* `env/` — would
+  have created a second source of truth per resource (CLAUDE.md
+  rule 6) and an isolation-audit hazard. The reviewable signal is
+  unchanged: `env` issues no new probes, takes no locks, and a
+  guest workload cannot reach anything through it that it couldn't
+  reach through the underlying subsystems.
+- **One canonical banner via raw `SerialWrite`, not klog.** The
+  `[env] …` line is a structural sentinel (like `[smoke] …`) so it
+  survives log-level demotion and `boot-log-analyze.sh` can grep
+  it. This is the consolidated hypervisor/SMP banner CLAUDE.md /
+  the analyzer expected; the scattered `[hv]`/`[smp]`/`[thermal]`
+  lines stay as their owners' detail.
+- **Power policy is a pure function.** `EnvironmentDerivePolicy()`
+  has no side effects so slice 2's monitor recomputes it
+  identically on every poll; the self-test pins the
+  cached-equals-derived invariant slice 2 depends on.
+- **No CMake edit.** `kernel/CMakeLists.txt` globs sources
+  `CONFIGURE_DEPENDS`, so `kernel/env/environment.cpp` is picked
+  up automatically — the plan's "add to CMake" step was a
+  non-issue once the glob was confirmed.
+- **Verified:** clean `x86_64-release` build (zero warnings);
+  `x86_64-release` full boot prints the `[env]` banner and
+  `boot-log-analyze.sh` verdict OK (0 non-deliberate failures);
+  `x86_64-debug` `bringup-only` smoke additionally emits
+  `[env-selftest] PASS` (analyzer OK, 119 self-tests).
+- **Related roadmap track(s):** environment awareness slices 2–3
+  (monitor task + ACPI SCI/GPE power events) — see Roadmap
+  "Environment awareness — runtime monitor + power events".

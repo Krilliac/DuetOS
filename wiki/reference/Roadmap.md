@@ -53,6 +53,33 @@ the same commit** that delivers the code.
 - **When to land:** when a workload exposes lock contention. For
   most workloads the global lock is acceptable.
 
+### Environment awareness — runtime monitor + power events
+
+- **Status:** slice 1 LANDED — `kernel/env/environment.{h,cpp}`
+  aggregates the already-detected environment into one
+  `SystemEnvironment` snapshot, derives a coarse `EnvPowerPolicy`,
+  prints the canonical `[env] …` banner, and exposes the cached
+  query API + `[env-selftest]`. Read-only aggregator (see
+  Design-Decisions 2026-05-18). See
+  [`Environment`](../kernel/Environment.md).
+- **Slice 2 — runtime monitor + reactive idle (pending):** an
+  `env-monitor` kernel thread (reaper pattern, timed poll)
+  re-composes the snapshot, emits a gated `KLOG_WARN` sentinel +
+  `KBP_PROBE` on policy transition, and biases the existing
+  MWAIT/HLT idle path (`sched.cpp` `CpuIdleLowPower`/`IdleMain`)
+  on `PowerSave`. Explicitly **not** tickless and **not** a
+  timeslice change — DD-009 stays deferred.
+- **Slice 3 — ACPI SCI/GPE power events (pending):** expose the
+  already-parsed FADT GPE0/GPE1 + PM1 event block via `acpi.h`
+  accessors; install the SCI handler (`IoApicRoute` +
+  `arch::IrqInstall`); extend `kernel/acpi/ec.cpp` with `_Qxx`
+  query dispatch; turn power-button / lid / AC-change into
+  interrupt-driven events that wake the monitor instantly
+  (power button → `acpi::AcpiShutdown`). This is the same
+  `_Qxx` GPE/SCI dispatch the "Battery + ACPI suspend" entry
+  blocks on — landing slice 3 retires that sub-item too. Revisit
+  DD-012 (FADT GPE now consumed) when it lands.
+
 ### Lockdep held-set must be per-task, not global
 
 - **Status:** root-caused 2026-05-17. `kernel/sync/lockdep.cpp`

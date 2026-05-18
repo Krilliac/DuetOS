@@ -111,6 +111,7 @@
 #include "drivers/pci/pci.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/power/power.h"
+#include "env/environment.h"
 #include "drivers/usb/btusb.h"
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/hid_descriptor.h"
@@ -1728,6 +1729,15 @@ void BootBringupDevices(bool force_net_smoke)
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");
     duetos::drivers::power::PowerInit();
+
+    // Compose the unified environment view now that hypervisor /
+    // CPU census / RAM / NUMA / power+thermal are all live. Emits
+    // the canonical `[env] ...` banner; later slices add the
+    // monitor task + ACPI SCI power-event path on top of the query
+    // API this establishes.
+    SerialWrite("[boot] Composing environment view.\n");
+    duetos::env::EnvironmentInit();
+    DUETOS_BOOT_SELFTEST(duetos::env::EnvironmentSelfTest());
 
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     duetos::net::NetStackInit();
