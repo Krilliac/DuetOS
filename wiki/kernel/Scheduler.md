@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel — `Schedule()` runs after IRQ EOI or in `cli` cooperative paths
 >
-> **Maturity:** SMP-online — per-CPU runqueues, work-stealing, reschedule-IPI, cluster-aware wake placement, periodic active load balancer, SMT-aware placement; single global `g_sched_lock` (per-CPU lock split deferred)
+> **Maturity:** SMP-online — per-CPU runqueues, work-stealing, reschedule-IPI, cluster-aware wake placement, periodic active load balancer, SMT-aware placement, hybrid P/E-core bias, hard CPU affinity; single global `g_sched_lock` (per-CPU lock split deferred)
 
 ## Overview
 
@@ -178,6 +178,20 @@ scheduler. The default QEMU smoke topology exposes SMT
 (`-smp 4,sockets=1,cores=2,threads=2`); `DUETOS_SMP=4` reproduces the
 flat non-SMT boot.
 
+**Hybrid P/E-core bias**: `EffectiveLoad` adds a second,
+independent penalty (`kHybridEcorePenalty`, also 2) when the CPU is
+an E-core (`cpu::Topology::core_class == kCoreClassEff`) *and* an
+idle P-core still exists. So latency-sensitive Normal-band work
+fills idle P-cores first, but once every P-core is busy the penalty
+lifts and E-cores are used normally — no E-core starvation. The two
+penalties stack (an E-core whose SMT sibling is also busy is the
+least preferred). On non-hybrid parts every `core_class` is
+`kCoreClassUnknown`, the predicate never fires, and the result is
+byte-for-byte identical to the pre-hybrid scheduler. QEMU does not
+model Intel hybrid, so the path is dormant in CI (the self-test
+SKIPs); the contract is locked by the decision-function test for
+real hardware.
+
 Boot self-tests (Phase::Userland): `sched-loadbalance-selftest`
 verifies the balancer decision function — same-cluster scoping, margin
 threshold, UP short-circuit. `smt-placement-selftest` verifies the
@@ -189,8 +203,11 @@ verifies the mask API (reject-empty/null, single-pin,
 all-mask→sentinel collapse, getaffinity round-trip, routing-hint
 retarget) and that `TargetPerCpuFor`/`PickClusterPlacement` never
 select a forbidden CPU while an unrestricted task routes identically
-to a no-task call; it SKIPs on <2-CPU guests. Each emits one
-`[<name>] PASS` (or `SKIP`) line so CI can grep for it.
+to a no-task call; it SKIPs on <2-CPU guests.
+`hybrid-placement-selftest` verifies the E-core penalty applies
+only while an idle P-core exists and lifts when every P-core is
+busy; it SKIPs on non-hybrid guests (every QEMU guest). Each emits
+one `[<name>] PASS` (or `SKIP`) line so CI can grep for it.
 
 ## Blocking Primitives (sister doc)
 

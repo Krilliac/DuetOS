@@ -807,6 +807,15 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                            duetos::sched::AffinityMaskSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
+        // Hybrid P/E-core placement bias decision test. SKIPs on
+        // every QEMU guest (no Intel-hybrid model); locks the
+        // decision-function contract for real hardware.
+        duetos::core::InitcallRegister(duetos::core::Phase::Userland, "hybrid-placement-selftest",
+                                       []()
+                                       {
+                                           duetos::sched::HybridPlacementSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Userland);
 

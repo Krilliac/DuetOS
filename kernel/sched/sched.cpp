@@ -697,41 +697,85 @@ constexpr u32 kClusterPlacementMargin = 2;
 // queued.
 constexpr u32 kSmtSiblingPenalty = 2;
 
+// Hybrid (P/E-core) bias. An E-core is treated as more loaded ONLY
+// while a P-core still has spare capacity, so latency-sensitive
+// Normal-band work fills idle P-cores first but E-cores are still
+// used once every P-core is busy (no E-core starvation). Equal to
+// kClusterPlacementMargin for the same no-oscillation equilibrium
+// argument as the SMT penalty. Zero on non-hybrid machines (every
+// core_class is kCoreClassUnknown), so the path is inert there.
+constexpr u32 kHybridEcorePenalty = 2;
+
+// True iff some online CPU is a P-core with an empty Normal queue.
+bool IdlePerfCoreExists()
+{
+    const u32 limit = arch::SmpCpuIdLimit();
+    for (u32 i = 0; i < limit; ++i)
+    {
+        const cpu::Topology* ti = cpu::TopologyForCpu(i);
+        if (ti == nullptr || ti->core_class != cpu::kCoreClassPerf)
+        {
+            continue;
+        }
+        cpu::PerCpu* pi = arch::SmpGetPercpu(i);
+        if (pi != nullptr && pi->runq_normal_len == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Effective Normal-band load for placement/balance decisions: the
-// raw runqueue length plus a penalty when an SMT sibling of `p`
-// already has Normal-band work. On non-SMT or undecoded-topology
-// CPUs every core_group is kTopologyUnknownCoreGroup (or the
-// sibling count is 0), no sibling ever matches, the penalty is
-// always 0, and this returns p->runq_normal_len verbatim — so
-// every caller stays byte-for-byte identical to the pre-SMT
-// scheduler on UMA / legacy boots.
+// raw runqueue length plus, independently:
+//   * kSmtSiblingPenalty when an SMT sibling of `p` already has
+//     Normal-band work, and
+//   * kHybridEcorePenalty when `p` is an E-core and an idle P-core
+//     is available.
+// On non-SMT / non-hybrid / undecoded-topology CPUs neither
+// predicate ever fires, the penalty is 0, and this returns
+// p->runq_normal_len verbatim — so every caller stays byte-for-byte
+// identical to the pre-topology scheduler on UMA / legacy boots.
 u32 EffectiveLoad(cpu::PerCpu* p)
 {
     const u32 base = p->runq_normal_len;
     const cpu::Topology* t = cpu::TopologyForCpu(p->cpu_id);
-    if (t == nullptr || t->core_group == cpu::kTopologyUnknownCoreGroup || t->smt_sibling_count == 0)
+    if (t == nullptr)
     {
         return base;
     }
-    const u32 limit = arch::SmpCpuIdLimit();
-    for (u32 i = 0; i < limit; ++i)
+
+    u32 smt_penalty = 0;
+    if (t->core_group != cpu::kTopologyUnknownCoreGroup && t->smt_sibling_count != 0)
     {
-        if (i == p->cpu_id)
+        const u32 limit = arch::SmpCpuIdLimit();
+        for (u32 i = 0; i < limit; ++i)
         {
-            continue;
-        }
-        const cpu::Topology* st = cpu::TopologyForCpu(i);
-        if (st == nullptr || st->core_group != t->core_group)
-        {
-            continue;
-        }
-        cpu::PerCpu* sib = arch::SmpGetPercpu(i);
-        if (sib != nullptr && sib->runq_normal_len > 0)
-        {
-            return base + kSmtSiblingPenalty; // sibling busy: treat this CPU as more loaded
+            if (i == p->cpu_id)
+            {
+                continue;
+            }
+            const cpu::Topology* st = cpu::TopologyForCpu(i);
+            if (st == nullptr || st->core_group != t->core_group)
+            {
+                continue;
+            }
+            cpu::PerCpu* sib = arch::SmpGetPercpu(i);
+            if (sib != nullptr && sib->runq_normal_len > 0)
+            {
+                smt_penalty = kSmtSiblingPenalty; // sibling busy
+                break;
+            }
         }
     }
-    return base;
+
+    u32 hybrid_penalty = 0;
+    if (t->core_class == cpu::kCoreClassEff && IdlePerfCoreExists())
+    {
+        hybrid_penalty = kHybridEcorePenalty;
+    }
+
+    return base + smt_penalty + hybrid_penalty;
 }
 
 // `t` (when non-null) lets the placement honor a hard affinity
@@ -3067,6 +3111,81 @@ void AffinityMaskSelfTest()
         }
     }
     arch::SerialWrite("[affinity-mask-selftest] PASS\n");
+}
+
+void HybridPlacementSelfTest()
+{
+    const u32 limit = arch::SmpCpuIdLimit();
+    u32 e_cpu = limit; // an E-core
+    u32 p_cpu = limit; // a P-core
+    for (u32 i = 0; i < limit; ++i)
+    {
+        const cpu::Topology* ti = cpu::TopologyForCpu(i);
+        if (ti == nullptr || arch::SmpGetPercpu(i) == nullptr)
+        {
+            continue;
+        }
+        if (ti->core_class == cpu::kCoreClassEff && e_cpu == limit)
+        {
+            e_cpu = i;
+        }
+        else if (ti->core_class == cpu::kCoreClassPerf && p_cpu == limit)
+        {
+            p_cpu = i;
+        }
+    }
+    if (e_cpu == limit || p_cpu == limit)
+    {
+        // QEMU never models Intel hybrid; this is the universal
+        // path here. Same honest SKIP contract as the SMT test.
+        arch::SerialWrite("[hybrid-placement-selftest] SKIP (non-hybrid guest)\n");
+        return;
+    }
+
+    constexpr u32 kMaxCpus = 64;
+    u32 saved_len[kMaxCpus] = {0};
+    sync::SpinLockGuard guard(g_sched_lock);
+    KASSERT(limit <= kMaxCpus, "sched", "HybridPlacementSelfTest: SmpCpuIdLimit > kMaxCpus");
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        saved_len[i] = (p != nullptr) ? p->runq_normal_len : 0;
+        if (p != nullptr)
+        {
+            p->runq_normal_len = 0;
+        }
+    }
+    cpu::PerCpu* pe = arch::SmpGetPercpu(e_cpu);
+    cpu::PerCpu* pp = arch::SmpGetPercpu(p_cpu);
+
+    // Idle P-core present => the E-core carries the hybrid penalty
+    // and the P-core does not.
+    KASSERT(EffectiveLoad(pe) == kHybridEcorePenalty, "sched",
+            "HybridPlacementSelfTest: E-core penalty not applied while P-core idle");
+    KASSERT(EffectiveLoad(pp) == 0, "sched", "HybridPlacementSelfTest: idle P-core penalized");
+
+    // Every P-core busy => no idle P-core, so the E-core penalty
+    // lifts (E-cores are used rather than starved).
+    for (u32 i = 0; i < limit; ++i)
+    {
+        const cpu::Topology* ti = cpu::TopologyForCpu(i);
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (ti != nullptr && p != nullptr && ti->core_class == cpu::kCoreClassPerf)
+        {
+            p->runq_normal_len = 1;
+        }
+    }
+    KASSERT(EffectiveLoad(pe) == 0, "sched", "HybridPlacementSelfTest: E-core penalized with no idle P-core");
+
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (p != nullptr)
+        {
+            p->runq_normal_len = saved_len[i];
+        }
+    }
+    arch::SerialWrite("[hybrid-placement-selftest] PASS\n");
 }
 
 void DumpCurrentTaskSyscallTrail()

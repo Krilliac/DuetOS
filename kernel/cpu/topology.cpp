@@ -167,6 +167,7 @@ void PopulateRow(u32 cpu_id, u32 starting_apic_id)
     row.smt_id = kTopologyUnknownSmt;
     row.numa_node = kTopologyUnknownNode;
     row.cluster_id = 0;
+    row.core_class = kCoreClassUnknown;
 
     const Cpuid r0 = DoCpuid(0);
     const u32 max_basic_leaf = r0.eax;
@@ -198,6 +199,30 @@ void PopulateRow(u32 cpu_id, u32 starting_apic_id)
     if (acpi::srat::SratNodeForApic(row.apic_id, &node))
     {
         row.numa_node = node;
+    }
+
+    // Hybrid core class. Each CPU runs PopulateRow on itself, so
+    // CPUID 0x1A returns THIS logical CPU's core type. Only valid
+    // when the part advertises hybrid (CPUID.7.0:EDX[15]) and the
+    // leaf exists; otherwise core_class stays Unknown and the
+    // scheduler's hybrid bias is inert (uniform machine).
+    if (max_basic_leaf >= 0x1A)
+    {
+        const Cpuid r7 = DoCpuid(7, 0);
+        const bool hybrid = ((r7.edx >> 15) & 1u) != 0u;
+        if (hybrid)
+        {
+            const Cpuid r1a = DoCpuid(0x1A);
+            const u32 core_type = (r1a.eax >> 24) & 0xFFu;
+            if (core_type == 0x40u)
+            {
+                row.core_class = kCoreClassPerf; // Intel Core (P)
+            }
+            else if (core_type == 0x20u)
+            {
+                row.core_class = kCoreClassEff; // Intel Atom (E)
+            }
+        }
     }
 }
 

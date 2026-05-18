@@ -402,6 +402,14 @@ void SmtPlacementSelfTest();
 /// emits one `[affinity-mask-selftest] PASS`/`SKIP` line.
 void AffinityMaskSelfTest();
 
+/// Self-test for hybrid (P/E-core) placement bias. Verifies an
+/// E-core carries kHybridEcorePenalty while an idle P-core exists
+/// and that the penalty lifts once every P-core is busy (no E-core
+/// starvation). SKIPs on non-hybrid guests (every guest under
+/// QEMU). Panics on mismatch; emits one
+/// `[hybrid-placement-selftest] PASS`/`SKIP` line.
+void HybridPlacementSelfTest();
+
 /// Top (high address) of the current task's kernel stack. Returns 0 for
 /// the boot task (it never had a scheduler-managed kernel stack — it
 /// runs on the boot.S stack, which is irrelevant for ring-3 RSP0

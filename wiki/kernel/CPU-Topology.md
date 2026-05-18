@@ -1,6 +1,6 @@
 # CPU Topology & Scheduler Clustering
 
-> **Maturity:** v0 — locality-aware work-stealing, NUMA-aware frame allocator, cluster-aware wake placement, periodic active load balancing, and SMT-aware placement (spreads across distinct physical cores before packing SMT siblings). Per-cluster runqueues and cluster-broadcast IPIs remain deferred follow-ups.
+> **Maturity:** v0 — locality-aware work-stealing, NUMA-aware frame allocator, cluster-aware wake placement, periodic active load balancing, SMT-aware placement, and hybrid P/E-core bias. Per-cluster runqueues and cluster-broadcast IPIs remain deferred follow-ups.
 
 ## What this is
 
@@ -13,6 +13,7 @@ Each CPU is decoded into a topology row at boot:
 - **core_group** — dense 0..N-1 index identifying the physical core (CPUs sharing `(package_id, core_id)`). `kTopologyUnknownCoreGroup` (0xFFFF) when SMT identity never decoded, so it can never match a sibling and the scheduler treats the CPU as plain non-SMT.
 - **smt_sibling_count** — number of *other* logical CPUs sharing this physical core (0 on non-SMT). Drives the scheduler's SMT penalty fast-path.
 - **smt_primary** — 1 iff this is the lowest `cpu_id` in its `core_group`. Exactly one per group; consumed by the SMT placement self-test.
+- **core_class** — hybrid performance class from CPUID 0x1A (gated on the CPUID.7.0:EDX[15] hybrid bit): `kCoreClassPerf` (P-core), `kCoreClassEff` (E-core), or `kCoreClassUnknown` on every non-hybrid CPU. Decoded per-CPU in `PopulateRow` (each CPU runs it on itself, so 0x1A reports its own core type). Drives the scheduler's hybrid bias; Unknown everywhere ⇒ bias inert.
 
 The cluster collapse rule is intentionally simple — the innermost meaningful grouping wins:
 

@@ -182,6 +182,22 @@ the same commit** that delivers the code.
   `smt-placement-selftest` (Phase::Userland) verifies it. See
   [CPU Topology](../kernel/CPU-Topology.md) and
   [Scheduler](../kernel/Scheduler.md).
+- **Hybrid P/E-core bias landed:** `cpu::Topology::core_class`
+  decoded from CPUID 0x1A (gated on CPUID.7.0:EDX[15]); a second
+  independent `EffectiveLoad` penalty makes an E-core look more
+  loaded only while an idle P-core exists, so work fills P-cores
+  first without starving E-cores. Stacks with the SMT penalty;
+  `kCoreClassUnknown` everywhere on non-hybrid ⇒ byte-for-byte
+  inert. QEMU has no Intel-hybrid model so
+  `hybrid-placement-selftest` SKIPs in CI; the decision-function
+  contract is locked for real hardware.
+- **Hard CPU affinity landed:** per-task `affinity_mask`
+  (default `kAffinityAll` ⇒ unrestricted, fast-path identical);
+  enforced at wake routing, work-steal, periodic balance, and a
+  dispatch-path backstop. `SchedSetAffinityMask` /
+  `SchedGetAffinityMask` back the Linux `sched_setaffinity` /
+  `sched_getaffinity` thunks (previously accept-and-ignore
+  no-ops). Self-test `affinity-mask-selftest` (Phase::Userland).
 - **Single-ICR broadcast landed (xAPIC):** kernel-AS TLB
   shootdowns (`as == nullptr`) provably target every online
   peer, so `SmpTlbShootdownBroadcast` now fans out in one ICR
