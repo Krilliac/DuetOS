@@ -864,15 +864,27 @@ void Log(LogLevel level, const char* subsystem, const char* message, const char*
     g_current_log_level = level;
     g_current_log_area = inferred_area;
     const char* tag = LevelTag(level);
-    WriteTimestampPrefix();
-    OpenColor(level);
-    arch::SerialWrite(tag);
-    CloseColor(level);
-    arch::SerialWrite(subsystem);
-    arch::SerialWrite(" : ");
-    arch::SerialWrite(message);
-    WriteAtLocation(file, line);
-    arch::SerialWrite("\n");
+    // One SerialLineGuard for the whole record so the multi-call
+    // sequence below cannot be spliced by another CPU's / IRQ's
+    // serial output (the cause of CI smoke-gate signature lines
+    // being broken mid-string). Scoped to ONLY the serial writes —
+    // it holds g_serial_lock with IRQs off, so it must NOT span the
+    // Tee()/PushEntry()/PostEmit() tail (console lock, ring lock,
+    // and a possibly disk-backed post-emit hook). Re-entrancy-safe:
+    // post-#283 the ctor no-ops when a guard/SerialWrite is already
+    // in progress.
+    {
+        arch::SerialLineGuard _slg;
+        WriteTimestampPrefix();
+        OpenColor(level);
+        arch::SerialWrite(tag);
+        CloseColor(level);
+        arch::SerialWrite(subsystem);
+        arch::SerialWrite(" : ");
+        arch::SerialWrite(message);
+        WriteAtLocation(file, line);
+        arch::SerialWrite("\n");
+    }
 
     // Tee to the secondary sink (framebuffer console etc.). No
     // timestamp or ANSI codes on this path — on-screen renderers
@@ -905,18 +917,21 @@ void LogWithValue(LogLevel level, const char* subsystem, const char* message, u6
     g_current_log_level = level;
     g_current_log_area = inferred_area;
     const char* tag = LevelTag(level);
-    WriteTimestampPrefix();
-    OpenColor(level);
-    arch::SerialWrite(tag);
-    CloseColor(level);
-    arch::SerialWrite(subsystem);
-    arch::SerialWrite(" : ");
-    arch::SerialWrite(message);
-    arch::SerialWrite("   val=");
-    WriteCompactHex(value);
-    MaybeAppendDecimal(value);
-    WriteAtLocation(file, line);
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard _slg; // whole-record atomic — see Log()
+        WriteTimestampPrefix();
+        OpenColor(level);
+        arch::SerialWrite(tag);
+        CloseColor(level);
+        arch::SerialWrite(subsystem);
+        arch::SerialWrite(" : ");
+        arch::SerialWrite(message);
+        arch::SerialWrite("   val=");
+        WriteCompactHex(value);
+        MaybeAppendDecimal(value);
+        WriteAtLocation(file, line);
+        arch::SerialWrite("\n");
+    }
 
     Tee(tag);
     Tee(subsystem);
@@ -955,20 +970,23 @@ void LogWithString(LogLevel level, const char* subsystem, const char* message, c
     g_current_log_level = level;
     g_current_log_area = inferred_area;
     const char* tag = LevelTag(level);
-    WriteTimestampPrefix();
-    OpenColor(level);
-    arch::SerialWrite(tag);
-    CloseColor(level);
-    arch::SerialWrite(subsystem);
-    arch::SerialWrite(" : ");
-    arch::SerialWrite(message);
-    arch::SerialWrite("   ");
-    arch::SerialWrite(label ? label : "str");
-    arch::SerialWrite("=\"");
-    arch::SerialWrite(value_str ? value_str : "(null)");
-    arch::SerialWrite("\"");
-    WriteAtLocation(file, line);
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard _slg; // whole-record atomic — see Log()
+        WriteTimestampPrefix();
+        OpenColor(level);
+        arch::SerialWrite(tag);
+        CloseColor(level);
+        arch::SerialWrite(subsystem);
+        arch::SerialWrite(" : ");
+        arch::SerialWrite(message);
+        arch::SerialWrite("   ");
+        arch::SerialWrite(label ? label : "str");
+        arch::SerialWrite("=\"");
+        arch::SerialWrite(value_str ? value_str : "(null)");
+        arch::SerialWrite("\"");
+        WriteAtLocation(file, line);
+        arch::SerialWrite("\n");
+    }
 
     Tee(tag);
     Tee(subsystem);
@@ -1013,25 +1031,28 @@ void LogWith2Values(LogLevel level, const char* subsystem, const char* message, 
     g_current_log_level = level;
     g_current_log_area = inferred_area;
     const char* tag = LevelTag(level);
-    WriteTimestampPrefix();
-    OpenColor(level);
-    arch::SerialWrite(tag);
-    CloseColor(level);
-    arch::SerialWrite(subsystem);
-    arch::SerialWrite(" : ");
-    arch::SerialWrite(message);
-    arch::SerialWrite("   ");
-    arch::SerialWrite(a_label ? a_label : "a");
-    arch::SerialWrite("=");
-    WriteCompactHex(a_value);
-    MaybeAppendDecimal(a_value);
-    arch::SerialWrite("   ");
-    arch::SerialWrite(b_label ? b_label : "b");
-    arch::SerialWrite("=");
-    WriteCompactHex(b_value);
-    MaybeAppendDecimal(b_value);
-    WriteAtLocation(file, line);
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard _slg; // whole-record atomic — see Log()
+        WriteTimestampPrefix();
+        OpenColor(level);
+        arch::SerialWrite(tag);
+        CloseColor(level);
+        arch::SerialWrite(subsystem);
+        arch::SerialWrite(" : ");
+        arch::SerialWrite(message);
+        arch::SerialWrite("   ");
+        arch::SerialWrite(a_label ? a_label : "a");
+        arch::SerialWrite("=");
+        WriteCompactHex(a_value);
+        MaybeAppendDecimal(a_value);
+        arch::SerialWrite("   ");
+        arch::SerialWrite(b_label ? b_label : "b");
+        arch::SerialWrite("=");
+        WriteCompactHex(b_value);
+        MaybeAppendDecimal(b_value);
+        WriteAtLocation(file, line);
+        arch::SerialWrite("\n");
+    }
 
     Tee(tag);
     Tee(subsystem);
@@ -1319,16 +1340,19 @@ TraceScope::~TraceScope()
     g_current_log_level = LogLevel::Trace;
     g_current_log_area = AreaFromSubsystemImpl(m_subsystem);
     const char* tag = LevelTag(LogLevel::Trace);
-    WriteTimestampPrefix();
-    OpenColor(LogLevel::Trace);
-    arch::SerialWrite(tag);
-    CloseColor(LogLevel::Trace);
-    arch::SerialWrite(m_subsystem);
-    arch::SerialWrite(" : < exit   fn=\"");
-    arch::SerialWrite(m_name);
-    arch::SerialWrite("\"   elapsed_us=");
-    WriteDecimal(elapsed);
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard _slg; // whole-record atomic — see Log()
+        WriteTimestampPrefix();
+        OpenColor(LogLevel::Trace);
+        arch::SerialWrite(tag);
+        CloseColor(LogLevel::Trace);
+        arch::SerialWrite(m_subsystem);
+        arch::SerialWrite(" : < exit   fn=\"");
+        arch::SerialWrite(m_name);
+        arch::SerialWrite("\"   elapsed_us=");
+        WriteDecimal(elapsed);
+        arch::SerialWrite("\n");
+    }
 
     Tee(tag);
     Tee(m_subsystem);
@@ -1394,24 +1418,27 @@ void LogMetrics(LogLevel level, const char* subsystem, const char* label)
     g_current_log_level = level;
     g_current_log_area = AreaFromSubsystemImpl(subsystem);
     const char* tag = LevelTag(level);
-    WriteTimestampPrefix();
-    OpenColor(level);
-    arch::SerialWrite(tag);
-    CloseColor(level);
-    arch::SerialWrite(subsystem);
-    arch::SerialWrite(" : metrics ");
-    arch::SerialWrite(label ? label : "");
-    arch::SerialWrite("   heap_used=");
-    WriteDecimal(heap.used_bytes);
-    arch::SerialWrite("   heap_free=");
-    WriteDecimal(heap.free_bytes);
-    arch::SerialWrite("   frames_free=");
-    WriteDecimal(free_frames);
-    arch::SerialWrite("   ctx_switches=");
-    WriteDecimal(sched_stats.context_switches);
-    arch::SerialWrite("   tasks_live=");
-    WriteDecimal(sched_stats.tasks_live);
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard _slg; // whole-record atomic — see Log()
+        WriteTimestampPrefix();
+        OpenColor(level);
+        arch::SerialWrite(tag);
+        CloseColor(level);
+        arch::SerialWrite(subsystem);
+        arch::SerialWrite(" : metrics ");
+        arch::SerialWrite(label ? label : "");
+        arch::SerialWrite("   heap_used=");
+        WriteDecimal(heap.used_bytes);
+        arch::SerialWrite("   heap_free=");
+        WriteDecimal(heap.free_bytes);
+        arch::SerialWrite("   frames_free=");
+        WriteDecimal(free_frames);
+        arch::SerialWrite("   ctx_switches=");
+        WriteDecimal(sched_stats.context_switches);
+        arch::SerialWrite("   tasks_live=");
+        WriteDecimal(sched_stats.tasks_live);
+        arch::SerialWrite("\n");
+    }
 
     Tee(tag);
     Tee(subsystem);
@@ -1472,15 +1499,18 @@ void LogA(LogLevel level, LogArea area, const char* subsystem, const char* messa
     g_current_log_level = level;
     g_current_log_area = area;
     const char* tag = LevelTag(level);
-    WriteTimestampPrefix();
-    OpenColor(level);
-    arch::SerialWrite(tag);
-    CloseColor(level);
-    arch::SerialWrite(subsystem);
-    arch::SerialWrite(" : ");
-    arch::SerialWrite(message);
-    WriteAtLocation(file, line);
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard _slg; // whole-record atomic — see Log()
+        WriteTimestampPrefix();
+        OpenColor(level);
+        arch::SerialWrite(tag);
+        CloseColor(level);
+        arch::SerialWrite(subsystem);
+        arch::SerialWrite(" : ");
+        arch::SerialWrite(message);
+        WriteAtLocation(file, line);
+        arch::SerialWrite("\n");
+    }
     Tee(tag);
     Tee(subsystem);
     Tee(" : ");
@@ -1502,18 +1532,21 @@ void LogAWithValue(LogLevel level, LogArea area, const char* subsystem, const ch
     g_current_log_level = level;
     g_current_log_area = area;
     const char* tag = LevelTag(level);
-    WriteTimestampPrefix();
-    OpenColor(level);
-    arch::SerialWrite(tag);
-    CloseColor(level);
-    arch::SerialWrite(subsystem);
-    arch::SerialWrite(" : ");
-    arch::SerialWrite(message);
-    arch::SerialWrite("   val=");
-    WriteCompactHex(value);
-    MaybeAppendDecimal(value);
-    WriteAtLocation(file, line);
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard _slg; // whole-record atomic — see Log()
+        WriteTimestampPrefix();
+        OpenColor(level);
+        arch::SerialWrite(tag);
+        CloseColor(level);
+        arch::SerialWrite(subsystem);
+        arch::SerialWrite(" : ");
+        arch::SerialWrite(message);
+        arch::SerialWrite("   val=");
+        WriteCompactHex(value);
+        MaybeAppendDecimal(value);
+        WriteAtLocation(file, line);
+        arch::SerialWrite("\n");
+    }
     Tee(tag);
     Tee(subsystem);
     Tee(" : ");
@@ -1539,20 +1572,23 @@ void LogAWithString(LogLevel level, LogArea area, const char* subsystem, const c
     g_current_log_level = level;
     g_current_log_area = area;
     const char* tag = LevelTag(level);
-    WriteTimestampPrefix();
-    OpenColor(level);
-    arch::SerialWrite(tag);
-    CloseColor(level);
-    arch::SerialWrite(subsystem);
-    arch::SerialWrite(" : ");
-    arch::SerialWrite(message);
-    arch::SerialWrite("   ");
-    arch::SerialWrite(label);
-    arch::SerialWrite("=\"");
-    arch::SerialWrite(value_str);
-    arch::SerialWrite("\"");
-    WriteAtLocation(file, line);
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard _slg; // whole-record atomic — see Log()
+        WriteTimestampPrefix();
+        OpenColor(level);
+        arch::SerialWrite(tag);
+        CloseColor(level);
+        arch::SerialWrite(subsystem);
+        arch::SerialWrite(" : ");
+        arch::SerialWrite(message);
+        arch::SerialWrite("   ");
+        arch::SerialWrite(label);
+        arch::SerialWrite("=\"");
+        arch::SerialWrite(value_str);
+        arch::SerialWrite("\"");
+        WriteAtLocation(file, line);
+        arch::SerialWrite("\n");
+    }
     Tee(tag);
     Tee(subsystem);
     Tee(" : ");
@@ -1578,25 +1614,28 @@ void LogAWith2Values(LogLevel level, LogArea area, const char* subsystem, const 
     g_current_log_level = level;
     g_current_log_area = area;
     const char* tag = LevelTag(level);
-    WriteTimestampPrefix();
-    OpenColor(level);
-    arch::SerialWrite(tag);
-    CloseColor(level);
-    arch::SerialWrite(subsystem);
-    arch::SerialWrite(" : ");
-    arch::SerialWrite(message);
-    arch::SerialWrite("   ");
-    arch::SerialWrite(a_label);
-    arch::SerialWrite("=");
-    WriteCompactHex(a_value);
-    MaybeAppendDecimal(a_value);
-    arch::SerialWrite("   ");
-    arch::SerialWrite(b_label);
-    arch::SerialWrite("=");
-    WriteCompactHex(b_value);
-    MaybeAppendDecimal(b_value);
-    WriteAtLocation(file, line);
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard _slg; // whole-record atomic — see Log()
+        WriteTimestampPrefix();
+        OpenColor(level);
+        arch::SerialWrite(tag);
+        CloseColor(level);
+        arch::SerialWrite(subsystem);
+        arch::SerialWrite(" : ");
+        arch::SerialWrite(message);
+        arch::SerialWrite("   ");
+        arch::SerialWrite(a_label);
+        arch::SerialWrite("=");
+        WriteCompactHex(a_value);
+        MaybeAppendDecimal(a_value);
+        arch::SerialWrite("   ");
+        arch::SerialWrite(b_label);
+        arch::SerialWrite("=");
+        WriteCompactHex(b_value);
+        MaybeAppendDecimal(b_value);
+        WriteAtLocation(file, line);
+        arch::SerialWrite("\n");
+    }
     Tee(tag);
     Tee(subsystem);
     Tee(" : ");
