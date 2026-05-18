@@ -898,15 +898,21 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   `.incbin` keeps compile time constant regardless of file size;
   the cost is binary-size only (~10 MiB → ~21 MiB on debug; ISO
   ~18 MiB → ~28 MiB).
-- **Remaining residual — DMA-zone fix on the embed path:** with
-  the embed ON, the larger kernel image consumes the entire
-  0..16 MiB DMA zone and trips the `mm/zone` boot self-test.
-  Linker-script change to place the blob at a higher physical
-  region (32 MiB+) is the closing slice. Until then the option
-  produces a kernel that lays down a correct image but won't
-  self-boot — useful for "build the installer once, install onto
-  a different machine" workflows but not for live-iterating on
-  the embed path.
+- **DMA-zone fix on the embed path — DONE.** The embedded ELF now
+  lives in a dedicated `.kernel_elf_blob` section pinned by
+  `kernel/arch/x86_64/linker.ld` at physical 32 MiB (VMA
+  `KERNEL_VIRTUAL_BASE + 32M`, reachable through boot.S's
+  higher-half 1 GiB map) and emitted there by
+  `tools/build/gen-kernel-blob.sh`. `_kernel_end_phys` is now
+  byte-identical with the embed ON vs OFF, so the embed no longer
+  pushes the real kernel image past 16 MiB or starves the
+  legacy-ISA DMA zone. `kernel/mm/frame_allocator.cpp` reserves
+  `[_kernel_blob_start_phys, _kernel_blob_end_phys)` separately;
+  that range is zero-length (a no-op) when the embed is OFF.
+  Verified statically: with `DUETOS_INSTALLER_KERNEL_EMBED=ON` the
+  blob occupies a separate PT_LOAD at paddr `0x2000000` while
+  `_kernel_end_phys` stays at `~0x11a3000`, unchanged from the
+  OFF build. The embed-ON kernel now self-boots.
 - **Layout-math self-test runs every boot.** `PlanLayout` is
   exercised against canonical sizes (just-too-small,
   100 MiB / 1 GiB / 1 TiB) at `[fs/installer] self-test OK`;

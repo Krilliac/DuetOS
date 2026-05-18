@@ -54,6 +54,11 @@
 // the allocator — we never dereference these; only take their addresses.
 extern "C" char _kernel_start_phys[];
 extern "C" char _kernel_end_phys[];
+// Installer kernel-ELF embed blob, pinned at phys 32 MiB by the linker
+// script (see kernel/arch/x86_64/linker.ld). start==end when the embed
+// is OFF — the reservation below is then a no-op.
+extern "C" char _kernel_blob_start_phys[];
+extern "C" char _kernel_blob_end_phys[];
 
 namespace duetos::mm
 {
@@ -534,6 +539,12 @@ void FrameAllocatorInit(uptr multiboot_info_phys)
 
     // Kernel image.
     ReserveRange(reinterpret_cast<u64>(_kernel_start_phys), reinterpret_cast<u64>(_kernel_end_phys));
+
+    // Installer kernel-ELF embed blob. Lives at a high physical region
+    // (32 MiB+) so it stays clear of the DMA zone; reserve its actual
+    // extent so the allocator never hands those frames out. Zero-length
+    // when DUETOS_INSTALLER_KERNEL_EMBED is OFF → no-op.
+    ReserveRange(reinterpret_cast<u64>(_kernel_blob_start_phys), reinterpret_cast<u64>(_kernel_blob_end_phys));
 
     // The bitmap itself.
     ReserveRange(home, home + g_bitmap_bytes);
