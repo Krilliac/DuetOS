@@ -4,14 +4,17 @@
 >
 > **Maturity:** Living document; edit when an item lands or a new gap is found
 
-This page consolidates every multi-session work item that is not
-yet in tree. Each entry names the surface that owns the gap so a
-contributor can pick one without re-deriving the field. Items that
-have landed are recorded in `wiki/reference/Design-Decisions.md`
-or [`History`](../getting-started/History.md), not here.
+This page consolidates every multi-session work item that is **not
+yet in tree**. Each entry names the surface that owns the gap and
+the residual that remains, so a contributor can pick one without
+re-deriving the field.
 
-When you land a roadmap item, **delete its entry from this page in
-the same commit** that delivers the code.
+**Policy:** when a roadmap item lands, **delete its entry here in
+the same commit that delivers the code**, record the landing in
+[`Design-Decisions`](Design-Decisions.md), and update the owning
+subsystem wiki page. Landed work does **not** live on this page —
+if you find a "shipped / landed / DONE" paragraph here, it is
+cleanup debt: move the residual up and delete the rest.
 
 ---
 
@@ -19,358 +22,141 @@ the same commit** that delivers the code.
 
 ### B2-followup — split `g_sched_lock` per-CPU
 
-- **Status:** SMP per-CPU runqueues + work-stealing + reschedule-IPI
-  + per-AP TSS/IST landed (see
-  [`SMP-AP-Bringup-Scope`](../advanced/SMP-AP-Bringup-Scope.md)).
-  APs run kernel tasks; cross-CPU wakes route via `last_cpu` and
-  fire `kReschedIpiVector` (0xF8); idle CPUs steal Normal-band
-  tasks from peers via `StealNormalFromPeer`.
-- **Remaining scope:** the per-CPU runqueue head/tail pointers
-  live in `cpu::PerCpu`, but every mutation still serialises on
-  one global `g_sched_lock`. Splitting the lock per-CPU drops the
-  steady-state contention to local-only Schedule() calls. Wake
-  paths take target CPU's lock briefly; work-stealing uses
-  try-lock to avoid AB/BA deadlock. The try-lock primitive this
-  needs now exists — `SpinLockTryAcquire` /
-  `SpinLockTryAcquireFor` / `SpinLockTryGuard`
-  (`kernel/sync/spinlock.h`), fail-fast `Busy` and bounded
-  `Timeout` with graceful `Deadlock` self-detection. Only the
-  per-CPU lock split itself remains, still deferred until
-  contention shows.
-- **Blocks on:** nothing technical; defer until profiles show
-  contention on `g_sched_lock`.
+- **Residual:** per-CPU runqueue head/tail live in `cpu::PerCpu`,
+  but every mutation still serialises on one global
+  `g_sched_lock`. Split it per-CPU so steady-state contention
+  drops to local-only `Schedule()` calls; wake paths take the
+  target CPU's lock briefly; work-stealing uses the existing
+  try-lock primitive (`SpinLockTryAcquire` /
+  `SpinLockTryAcquireFor` / `SpinLockTryGuard`,
+  `kernel/sync/spinlock.h`) to avoid AB/BA deadlock.
+- **Blocks on:** nothing technical — deferred until a profile
+  shows contention on `g_sched_lock`. For most workloads the
+  global lock is acceptable.
 - **Cascading items unlocked when this lands:**
-  - Index `g_per_cpu` lockdep array by current-CPU ID (currently
-    keyed on `g_per_cpu[0]` aliases).
-  - Index event-trace `g_per_cpu` by current-CPU ID.
-  - Index soft-lockup `g_per_cpu` by current-CPU ID.
+  - Index the lockdep / event-trace / soft-lockup `g_per_cpu`
+    arrays by current-CPU ID (currently keyed on `g_per_cpu[0]`
+    aliases).
   - SMP-stress versions of the RwLock + SeqLock + KMailbox
-    contention self-tests (current cooperative-single-CPU
-    forms cover the wakeup paths).
+    contention self-tests.
+  - MLFQ priority bands (the T8-01-followon row) — band-aware
+    enqueue/steal becomes a one-slice add-on once the lock is
+    per-CPU.
+  - Buddy coalescing + per-CPU lock-free allocator fast paths
+    (frame warm-pool / slab magazine) — correctness is already
+    in place under one global allocator lock; this is the
+    scalability follow-on.
   - Move LAPIC-divider + tick-frequency programming out of
     `arch::TimerInit` into `time::TimerConfigure(hz)` once an
     ARM64 / generic-timer backend justifies the abstraction.
-- **When to land:** when a workload exposes lock contention. For
-  most workloads the global lock is acceptable.
 
 ### Lockdep held-set must be per-task, not global
 
-- **Status:** root-caused 2026-05-17. `kernel/sync/lockdep.cpp`
-  keeps the held-class stack in `g_per_cpu[0]` — a single global
-  array (`kLockdepCpuMax = 1`, `#define g_held_stack
-  g_per_cpu[0].stack`). This is correct for spinlocks (cannot be
-  held across a context switch) but **wrong for sleeping
-  `sched::Mutex`** classes. A task that holds a sleeping mutex
-  across a yield/sleep leaves its class on the shared stack while
-  other tasks run, so two tasks independently and correctly
-  holding two different sleeping mutexes are reported as a
-  lock-order inversion.
-- **Concrete evidence (boot smoke, virtio harness):** the
-  compositor↔fat32 inversion fired ~40×/boot. Per-pair
-  backtraces (now emitted automatically by lockdep's kept
-  first-occurrence diagnostic) show NO in-task nesting:
-  - `held=compositor id=fat32`: `UiTickerTask →
-    FixJournalPersistFlush → Fat32DeleteAtPath → Fat32Guard`
-    (acquires `g_fat32_mutex`; UiTicker does NOT hold compositor
-    here — it takes compositor *later*, at boot_tasks.cpp:108,
-    after the FAT32 flush at :98).
-  - `held=fat32 id=compositor`: `WinTimerTickerTask →
-    CompositorLock` (acquires `g_compositor_mutex` only; does NOT
-    hold fat32 — that class is on the global stack courtesy of
-    UiTickerTask running concurrently).
-  Neither task nests the two locks; there is no real deadlock
-  cycle. Both reported directions are instrumentation artefacts.
-- **Why "index by current-CPU ID" (the B2 cascading item above)
-  is insufficient:** a task holding a sleeping mutex can be
-  descheduled and resumed on a different CPU; the held-set must
-  follow the *task*, not the CPU. Per-CPU indexing fixes
-  spinlock tracking under SMP but not the sleeping-mutex
-  false-positive.
-- **Remaining scope:** give each `Task` its own held-stack and
-  swap it at the context-switch boundary (save outgoing, restore
-  incoming) — keeps lockdep's storage model but makes it
-  effectively per-task without threading a `Task*` through every
-  lockdep hook (which would reintroduce the lockdep↔sched
-  recursion the TU header explicitly avoids). Spinlock classes
-  stay on a per-CPU stack; mutex classes move to the per-task
-  one. The genuine in-task nesting found alongside this (the
-  modal-dialog callback doing FAT32 I/O under `CompositorLock`)
-  was a real latent hazard and is already fixed (dialog
-  resolution deferred to `DialogDrainResolved`, fired outside
-  the compositor lock).
-- **Attempt 1 (2026-05-17, reverted — `git revert` of commit
-  "lockdep: per-task held-set across context switch").** The
-  minimal form — `LockdepHeldSnapshot` into the outgoing `Task`
-  just before `ContextSwitch`, `LockdepHeldRestore(Current())` at
-  the TOP of `SchedFinishTaskSwitch`, fresh tasks seeded
-  `[kLockClassSched]` — was functionally correct on a single
-  long boot (deliberate selftest-A/B inversion still detected;
-  compositor↔fat32 false positives 0; no spurious
-  release-no-match WARN). But a 6-boot **determinism sweep**
+- **Residual:** `kernel/sync/lockdep.cpp` keeps the held-class
+  stack in a single global array (`g_per_cpu[0]`). Correct for
+  spinlocks (can't be held across a context switch) but **wrong
+  for sleeping `sched::Mutex`**: two tasks each correctly holding
+  a different sleeping mutex across a yield are reported as a
+  lock-order inversion (observed: compositor↔fat32, ~40×/boot,
+  no real cycle). Per-CPU indexing (the B2 cascading item) does
+  not fix this — a task holding a sleeping mutex can resume on a
+  different CPU, so the held-set must follow the *task*.
+- **Approach:** give each `Task` its own held-stack and swap it
+  at the context-switch boundary; spinlock classes stay on a
+  per-CPU stack, mutex classes move to the per-task one. Avoid
+  threading a `Task*` through every lockdep hook (reintroduces
+  the lockdep↔sched recursion the TU header avoids).
+- **Attempt 1 reverted (2026-05-17):** the minimal form
+  (`LockdepHeldSnapshot` before `ContextSwitch`,
+  `LockdepHeldRestore` at the top of `SchedFinishTaskSwitch`)
+  was correct on one long boot but a 6-boot determinism sweep
   (`tools/test/boot-determinism-sweep.sh`) caught an
-  **intermittent** hard panic on the AP-bring-up path:
-  `[panic] sched: KASSERT failed: WaitQueueBlock on non-Running
-  task` (`sched.cpp` `WaitQueueBlock+0x132`) with a full register
-  dump. Causal and precise: the `[panic]` + `WaitQueueBlock`
-  KASSERT signature is **0 across the pre-lockdep baseline AND 0
-  across 6 reverted-tree boots, present only with the commit
-  applied**. (Red herring excluded: the `[ubsan] tm-detail
-  null-deref ty='PerCpu'/'u32'/'Task'` lines that appear nearby
-  are pre-existing benign UBSAN noise — an AP reading its
-  `PerCpu` before it is fully armed — and occur ~4×/boot in
-  known-clean boots too. The regression signal is strictly the
-  `WaitQueueBlock` KASSERT panic, not the UBSAN lines.)
-  Root hypothesis: `Current()` (= `cpu::CurrentCpu()->current_task`)
-  evaluated at the very top of `SchedFinishTaskSwitch` is unsafe
-  on the fresh-AP entry path — the existing code below that point
-  is explicitly written to tolerate a not-yet-armed AP
-  (`lock_ptr == nullptr` early-out), but the restore was inserted
-  *above* that guard, so on an AP whose per-CPU/current_task is
-  not yet established it dereferences a NULL/partial `PerCpu` or a
-  non-Running `Task`. The `if (self != nullptr)` guard is
-  insufficient: the fault is inside `Current()` itself, and a
-  non-NULL-but-non-Running task still trips the WaitQueueBlock
-  assert once the perturbed timing reorders AP bring-up.
-- **Design constraints for attempt 2:** the restore must run
-  *after* `SchedFinishTaskSwitch` has established a known-good
-  context (i.e., gated by / placed after the same fresh-AP
-  condition the existing lock-release code uses), and must
-  validate task state (Running, non-NULL `cpu::CurrentCpu()`),
-  not just `self != nullptr`. The save side (before
-  `ContextSwitch`) appeared safe but was not isolated in the
-  repro. Re-verification MUST include a ≥6-boot determinism
-  sweep, not a single boot — the single long boot got a
-  benign AP-bring-up ordering and missed the race entirely. This
-  is the canonical example for the "one run is not enough for
-  intermittent symptoms" rule.
-- **Blocks on:** nothing technical; it touches the
-  context-switch path so it wants its own focused slice +
+  **intermittent** hard panic on the AP-bring-up path
+  (`KASSERT WaitQueueBlock on non-Running task`). Root: the
+  restore was inserted *above* the existing not-yet-armed-AP
+  guard, so `Current()` deref'd a partial `PerCpu` on a fresh
+  AP. (The nearby `[ubsan] tm-detail PerCpu/u32/Task` lines are
+  pre-existing benign noise, ~4×/clean boot — not the signal.)
+- **Design constraints for attempt 2:** restore must run *after*
+  `SchedFinishTaskSwitch` establishes a known-good context
+  (gated by the same fresh-AP condition the lock-release code
+  uses) and must validate task state (Running, non-NULL
+  `cpu::CurrentCpu()`), not just `self != nullptr`.
+  Re-verification **must** include a ≥6-boot determinism sweep —
+  this is the canonical "one run is not enough for intermittent
+  symptoms" case.
+- **Blocks on:** nothing technical; wants its own focused slice +
   live-boot verification. `g_promote_to_panic` stays default-off
-  until this lands (a per-task held-set is the precondition for a
-  fail-stop lockdep gate).
+  until this lands (per-task held-set is the precondition for a
+  fail-stop lockdep gate). The genuine in-task nesting found
+  alongside this (modal-dialog FAT32 I/O under `CompositorLock`)
+  is already fixed.
 
-### Topology-driven follow-ons (post-clustering v0)
+### Topology — cluster-scoped IPI fan-out
 
-- **Status:** v0 clustering landed — `cpu::Topology` + SRAT parser
-  + cluster-aware two-pass `StealNormalFromPeer`. NUMA-aware
-  frame allocator landed (`acpi::srat` records Memory-Affinity
-  records; `FrameAllocatorBuildNumaRanges` consumes them;
-  `AllocateFrame` biases toward the calling CPU's local node).
-  UMA boots (no SRAT) keep the historical global linear-scan
-  path byte-for-byte. **Placement affinity at wake landed** —
-  `RunqueuePush` redirects from `last_cpu` to the least-loaded
-  same-cluster peer when the delta exceeds a 2-task margin.
-  **Periodic active load balancer landed** — `PeriodicBalanceTick`
-  fires from `OnTimerTick` every `kBalancePeriodTicks` per CPU,
-  phase-shifted by `cpu_id`; migrates one Ready task from the
-  heaviest same-cluster peer when the imbalance is ≥
-  `kBalanceMargin` (4). Covers the case where neither wake
-  placement nor work-stealing fires — two CPUs both busy with
-  long-running tasks, neither going idle, no new wake events.
-  Boot self-test `sched-loadbalance-selftest` (Phase::Userland)
-  verifies the decision function. **SMT-aware placement landed** —
-  `AssignCoreGroups` (tail of `TopologyAssignClusters`) derives
-  per-CPU `core_group` / `smt_sibling_count` / `smt_primary`;
-  `EffectiveLoad` penalizes a logical CPU whose SMT sibling has
-  Normal-band work by `kSmtSiblingPenalty` (= `kClusterPlacementMargin`),
-  consumed by `PickClusterPlacement` and `PickBalanceVictim` so
-  runnable threads spread across distinct physical cores before
-  packing SMT siblings. Idle-pull `StealNormalFromPeer` is
-  intentionally unweighted. Non-SMT CPUs collapse to the raw
-  length byte-for-byte. Default smoke topology now exposes SMT
-  (`-smp 4,sockets=1,cores=2,threads=2`); self-test
-  `smt-placement-selftest` (Phase::Userland) verifies it. See
-  [CPU Topology](../kernel/CPU-Topology.md) and
-  [Scheduler](../kernel/Scheduler.md).
-- **Hybrid P/E-core bias landed:** `cpu::Topology::core_class`
-  decoded from CPUID 0x1A (gated on CPUID.7.0:EDX[15]); a second
-  independent `EffectiveLoad` penalty makes an E-core look more
-  loaded only while an idle P-core exists, so work fills P-cores
-  first without starving E-cores. Stacks with the SMT penalty;
-  `kCoreClassUnknown` everywhere on non-hybrid ⇒ byte-for-byte
-  inert. QEMU has no Intel-hybrid model so
-  `hybrid-placement-selftest` SKIPs in CI; the decision-function
-  contract is locked for real hardware.
-- **Hard CPU affinity landed:** per-task `affinity_mask`
-  (default `kAffinityAll` ⇒ unrestricted, fast-path identical);
-  enforced at wake routing, work-steal, periodic balance, and a
-  dispatch-path backstop. `SchedSetAffinityMask` /
-  `SchedGetAffinityMask` back the Linux `sched_setaffinity` /
-  `sched_getaffinity` thunks (previously accept-and-ignore
-  no-ops). Self-test `affinity-mask-selftest` (Phase::Userland).
-- **MWAIT low-power idle landed:** `kCpuFeatMonitor` (CPUID.1:
-  ECX[3]) gates a `MONITOR`/`MWAIT` C1 idle in `IdleMain` and the
-  AP-join loop; falls back to `sti; hlt` verbatim when absent.
-  Wake semantics unchanged (an IRQ breaks `MWAIT` as it breaks
-  `HLT`); monitored cell is a per-CPU stack byte. Self-test
-  `idle-power-selftest` (Phase::Userland) verifies the feature
-  gate and reports the chosen path; it PASSes (not SKIPs) on
-  every guest. Deeper C-states / a cpuidle governor remain
-  deferred — no profile evidence and no consumer yet.
-- **Single-ICR broadcast landed (xAPIC):** kernel-AS TLB
-  shootdowns (`as == nullptr`) provably target every online
-  peer, so `SmpTlbShootdownBroadcast` now fans out in one ICR
-  write via the all-excluding-self destination shorthand
-  (`SmpSendBroadcastIpiAllExSelf`) — the same mechanism
-  `PanicBroadcastNmi` uses — instead of one `SmpSendIpi` per
-  peer. Per-AS shootdowns and the single-target reschedule IPI
-  are unchanged (the shorthand cannot be narrowed to a subset).
-- **x2APIC enablement landed:** `lapic.cpp` selects x2APIC
-  (MSR) whenever CPUID advertises it and falls back to xAPIC
-  (MMIO) otherwise. `LapicRead`/`LapicWrite` dispatch on mode
-  (`0x800 + (off>>4)`); the four ICR sites route through one
-  mode-aware `LapicSendIcr` (xAPIC ICR-hi/lo + delivery poll, or
-  one `wrmsr(0x830)`). `SmpSendIpi` now takes a full 32-bit
-  APIC ID (no `<<24`/`u8` truncation); `LapicCurrentId()`
-  normalises the ID read across modes. The old "panic if
-  firmware locked x2APIC on" hard-stop is **deleted** — that
-  configuration (common on server BIOSes) now boots. Self-test
-  `apic-mode-selftest` (Phase::Userland) PASSes on every guest,
-  reporting the active mode.
-- **Remaining scope:** the *cluster-scoped* fan-out (one ICR
-  write to the CPUs of one scheduler cluster, not all peers)
-  needs x2APIC *logical* destination mode (LDR/cluster
-  addressing) on top of the physical-mode x2APIC just landed,
-  and still has no current consumer (reschedule is
-  single-target; shootdown is kernel-AS-broadcast or
-  per-AS-targeted, never per-cluster).
+- **Residual:** the *cluster-scoped* fan-out (one ICR write to
+  the CPUs of one scheduler cluster, not all peers) needs x2APIC
+  *logical* destination mode (LDR/cluster addressing) on top of
+  the physical-mode x2APIC already in tree.
 - **Blocks on:** profile evidence that a per-cluster (not
-  all-peer) fan-out is workload-justified — pre-emptive build is
-  explicitly avoided. (The x2APIC-enablement prerequisite is
-  now satisfied.)
+  all-peer) fan-out is workload-justified — reschedule is
+  single-target, shootdown is kernel-AS-broadcast or
+  per-AS-targeted, never per-cluster. Pre-emptive build avoided.
+  (Clustering v0, NUMA frame allocator, wake/periodic balance,
+  SMT + hybrid P/E bias, hard affinity, MWAIT idle, single-ICR
+  broadcast, and x2APIC enablement all landed — see
+  [CPU Topology](../kernel/CPU-Topology.md) /
+  [Scheduler](../kernel/Scheduler.md).)
 
-### Slab allocator + freed-object poison + real KASAN
+### KMalloc slab routing + real KASAN
 
-- **Status:** **Slab allocator landed** — `kernel/mm/slab.{h,cpp}`.
-  Each `SlabCache` hands out fixed-size objects from 16 KiB
-  slabs carved out of the kheap, with a per-cache intrusive
-  freelist. O(1) alloc / free, zero per-object header.
-  Boot self-test runs in Phase::Sched.
-- **Freed-object poison landed** — `SlabFree` stamps
-  `kSlabFreedObjectPoison = 0xCC` across the trailing payload of
-  every freed slab object (skipping the first `sizeof(void*)`
-  bytes that hold the freelist link); fresh-slab carve uses the
-  same helper so every free object on the cache freelist looks
-  identical. `SlabAlloc` verifies the band before handing the
-  object out and panics on mismatch. Boot self-test checks that
-  re-allocated objects come back with the poison still present.
-  Helpers live in `mm/poison.h` (`PoisonSlabFreedObject` /
-  `CheckSlabFreedObjectPoison`).
-- **Remaining scope:**
-  - **KMalloc routing** — small KMalloc calls could route through
-    pre-built size-classed caches automatically. Existing call
-    sites are unchanged today; opt-in via direct `SlabAlloc`.
-  - **Real KASAN** — shadow-memory mapping, compiler plugin
-    integration, per-access shadow lookup. Big lift; defer.
+- **Residual:** (1) route small `KMalloc` calls through pre-built
+  size-classed slab caches automatically (today opt-in via direct
+  `SlabAlloc`); (2) **real KASAN** — shadow-memory mapping,
+  compiler-plugin integration, per-access shadow lookup. Big
+  lift; deferred until a use-after-free hunt needs it. (Slab
+  allocator + freed-object poison landed.)
 
-### Linux CVE audit — pre-landing invariants
+### Linux CVE audit — invariants to honour before the surface lands
 
-- **Status:** Audit log opened against the "Copy Fail" + "Dirty Frag"
-  disclosure wave (CVE-2026-31431, CVE-2026-43284, CVE-2026-43500).
-  See [`wiki/security/Linux-CVE-Audit.md`](../security/Linux-CVE-Audit.md)
-  for the eight-class verdict matrix.
-- **Landed items (2026-05-11):**
-  - **Class E — `SlabAllocZeroed()` helper** added in
-    `kernel/mm/slab.{h,cpp}`. New flag-bearing slab consumers
-    should prefer the zeroed variant; the raw `SlabAlloc` is left
-    in place because most existing callers do their own
-    field-by-field init.
-  - **Class M — AML `pkg_end` overflow** rewritten at all three
-    sites in `kernel/acpi/aml.cpp` to use `pkg_len > end - after_op`
-    (compare-the-difference). Structurally cannot wrap.
-  - **Class N — `MaskedIndex` Spectre-v1 helper** added in
-    `kernel/util/nospec.h` (32- and 64-bit forms) and applied
-    across every audited user-controlled dispatch site: Win32 NT
-    handle table (`ipc/handle_table.cpp` Lookup / LookupRef /
-    Remove), Win32 thread / process / GDI handle dispatch
-    (`syscall/syscall.cpp`, `subsystems/win32/gdi_objects.cpp`),
-    Win32 file handle resolver
-    (`fs/file_route.cpp::HandleToSlot`), and the full Linux fd
-    dispatch surface across `linux/syscall_io.cpp`,
-    `syscall_file.cpp`, `syscall_path.cpp`, `syscall_xattr.cpp`,
-    `pidfd_splice.cpp`, `syscall_fs_mut.cpp`, `syscall_fd.cpp`,
-    `syscall_socket.cpp`, `syscall_mm.cpp`,
-    `syscall_async_io.cpp`, `inotify.cpp`, `fanotify.cpp`,
-    `syscall_misc.cpp`, `extra_syscalls.cpp`, and
-    `syscall_stub.cpp`. Discipline for new code: after the
-    `if (idx >= kCap) return -EINVAL;` runtime check, mask the
-    index with `util::MaskedIndex(idx, kCap)` before the array
-    load — the check protects correctness, the mask bounds the
-    speculative window. KPTI remains independently deferred.
-  - **Class O — saturating refcount.** `KObjectAcquire` now uses
-    `util::RefcountIncSaturating`; refuses the increment at
-    `UINT32_MAX` and logs a panic-or-warn rather than wrapping.
-  - **Class CC — `-fstack-protector-strong`** is now explicit on
-    both `duetos-kernel` and `duetos-kernel-stage1` in
-    `kernel/CMakeLists.txt` (TU-level `-fno-stack-protector`
-    override on `security/stack_canary.cpp` preserved).
-  - **Class FF — TLB shootdown infrastructure.** New
-    `mm::TlbShootdownAddr` / `TlbShootdownRange` (declared in
-    `mm/address_space.h`), backed by
-    `arch::SmpTlbShootdownAddr / Range` and a new IPI vector
-    (`kTlbShootdownIpiVector = 0xF9`) installed alongside the
-    reschedule IPI. The unmap / protect / unmap-borrowed paths
-    in `address_space.cpp` now broadcast instead of doing only a
-    local `invlpg`. Uniprocessor today => helper short-circuits
-    to local-only; the day APs run, the broadcast lights up.
-  - **Class GG — lock hierarchy.** Full canonical hierarchy and
-    the absolute rules (no-sleep-with-spinlock, no-lock-across-CR3,
-    no-lock-across-shootdown) are documented in
-    `kernel/sync/lockdep.h`. Per-CPU-runqueue rule pre-flagged.
-  - **Class II — KASLR scaffolding.** New `kernel/security/kaslr.{h,cpp}`
-    computes a 2-MiB-aligned candidate slide from `core::RandomU64`
-    at boot and exposes it via `KaslrGetCandidateSlide`. The
-    slide-application stub (PIE-build + relocation pass) is the
-    follow-on; until then `KaslrGetKernelSlide` returns 0, but
-    every consumer reads from this single source of truth so the
-    flip is a one-line change.
-- **Still open** (each must be honoured **before** the matching surface
-  lands, not retrofitted after):
-  - **Class D — COW / `fork()`.** When demand-paged COW lands, the
-    dirty-bit clear-and-fault sequence must be atomic with respect
-    to any region-shrink primitive (`madvise(DONTNEED)` and friends).
-    Linux's Dirty COW fix gated this on `FOLL_WRITE`; mirror the
-    invariant in the v0 design, do not patch it in later.
-  - **Class C — zero-copy sendmsg / IPsec.** When skb-equivalent
-    fragments or any `MSG_SPLICE_PAGES`-style send path lands, every
-    externally-backed fragment must carry an ownership marker, and
-    every in-place transform (decryption, decompression, checksum
-    rewrite) must refuse to operate on a marked fragment. Bake into
-    the network-stack ABI from day one.
-  - **Class B — user-facing crypto API.** If a socket-style crypto
-    surface is ever added (AF_ALG-equivalent), it must refuse src/dst
-    aliasing on user-supplied scatterlists for any operation that
-    doesn't byte-copy the full output. Auth-tag-skip + in-place was
-    the Copy Fail root cause.
-  - **Class I — Bluetooth upper stack.** When L2CAP / RFCOMM / SDP
-    land, the protocol-parser invariants from class C apply.
-  - **Class L — IPv6 reassembly.** When IPv6 lands, every fragment
-    length/offset comparison uses `len > end - off`-style (never
-    `end - len` directly).
-  - **Class K — FS write paths.** When ext4 write, NTFS directory
-    parsing, or any filesystem write-remount path lands, re-audit
-    the class.
-  - **Class V — programmable kernel filters.** Do not adopt an
-    unprivileged-JIT BPF-equivalent. If a programmable filter
-    surface is needed (sockets, tracing), gate it behind a
-    capability or run it through a formally-verified interpreter.
-    The verifier-bypass CVE family (CVE-2020-8835 et al.) is
-    structural — patches do not retire the class.
-  - **Class W — GPU command submission.** Before any user-mode
-    surface submits a GPU command buffer, the design must
-    interpose a kernel translation step that produces a
-    verified-shape submission the user cannot edit after the
-    point of validation. Direct user→GPU IOCTL is the load-bearing
-    assumption behind NVIDIA / AMD / Intel GPU CVE families.
-  - **Class II follow-up (apply the slide).** The KASLR
-    candidate slide is computed at boot; the follow-on slice
-    builds the kernel as a PIE, emits a relocation table the
-    early-boot stub iterates, applies the slide, and flips
-    `KaslrGetKernelSlide` to return the candidate. Must land
-    before any multi-tenant deployment.
-- **When to revisit:** every time a high-impact public Linux/Windows
-  kernel CVE drops, walk the audit doc and update verdicts before
-  the next slice lands in the affected area.
+Each must be honoured **when the matching surface lands**, not
+retrofitted after. See
+[`Linux-CVE-Audit`](../security/Linux-CVE-Audit.md) for the
+verdict matrix. (Classes E, M, N, O, CC, FF, GG, II-scaffolding
+landed.)
+
+- **Class D — COW / `fork()`.** Dirty-bit clear-and-fault must be
+  atomic w.r.t. any region-shrink primitive (`madvise(DONTNEED)`).
+  Mirror Linux's `FOLL_WRITE` gate in the v0 design.
+- **Class C — zero-copy sendmsg / IPsec.** Every externally-backed
+  skb fragment carries an ownership marker; every in-place
+  transform refuses to operate on a marked fragment. Bake into
+  the network-stack ABI from day one.
+- **Class B — user-facing crypto API.** An AF_ALG-equivalent must
+  refuse src/dst aliasing on user scatterlists for any op that
+  doesn't byte-copy the full output.
+- **Class I — Bluetooth upper stack.** L2CAP / RFCOMM / SDP
+  parser invariants per class C.
+- **Class L — IPv6 reassembly.** Every fragment length/offset
+  comparison uses `len > end - off` form (never `end - len`).
+- **Class K — FS write paths.** Re-audit when ext4 write / NTFS
+  directory parsing / any write-remount path lands.
+- **Class V — programmable kernel filters.** Do **not** adopt an
+  unprivileged-JIT BPF-equivalent; gate any programmable filter
+  behind a capability or a formally-verified interpreter.
+- **Class W — GPU command submission.** Interpose a kernel
+  translation step producing a verified-shape submission the user
+  cannot edit post-validation, before any user-mode GPU
+  command-buffer surface.
+- **Class II follow-up (apply the KASLR slide).** Candidate slide
+  is computed at boot (`KaslrGetCandidateSlide`); the follow-on
+  builds the kernel PIE, emits a relocation table the early-boot
+  stub iterates, applies the slide, and flips
+  `KaslrGetKernelSlide` to return it. **Same work as T5-03.**
+  Must land before any multi-tenant deployment.
+- **When to revisit:** every time a high-impact public
+  Linux/Windows kernel CVE drops, walk the audit doc and update
+  verdicts before the next slice lands in the affected area.
 
 ### Intel CET enable
 
@@ -378,328 +164,155 @@ the same commit** that delivers the code.
   shadow stacks, recompile with `-fcf-protection=branch`.
 - **Blocks on:** kernel-image rebuild flag wiring + per-task
   shadow-stack allocator + per-IDT-vector ENDBR64 prologue.
-  Probe (`arch::CetGet`) is in place to gate the enable code on
-  a real signal.
-- **When to land:** when a target machine in the test fleet
-  advertises CET-SS / CET-IBT and a workload benefits from
-  software-enforced CFI on top of the silicon's built-in
-  protection.
+  Probe (`arch::CetGet`) is in place to gate the enable code.
+- **When to land:** when a test-fleet machine advertises
+  CET-SS / CET-IBT and a workload benefits from software-enforced
+  CFI on top of the silicon protection.
 
 ### KPTI enable (settled — DEFERRED)
 
-- **Status:** runtime probe (`arch::CpuMitigationsGet().needs_kpti`)
-  is in tree; on a `RDCL_NO=0` boot the probe emits a loud
-  serial WARN block stating the mitigation is not implemented.
-- **Why deferred:** every CPU in
-  [`hardware-target-matrix`](../advanced/Linux-Networking-Port-Opportunities.md)
+- **Status:** runtime probe
+  (`arch::CpuMitigationsGet().needs_kpti`) is in tree; on a
+  `RDCL_NO=0` boot it emits a loud serial WARN.
+- **Why deferred:** every CPU in the hardware-target matrix
   reports `RDCL_NO=1` in silicon, making KPTI a 5–30% syscall
-  cost mitigating an attack the hardware already prevents. See
-  [`WX-Enforcement`](../security/WX-Enforcement.md).
-- **Re-open triggers:** target-fleet CPU lacking `RDCL_NO=1`,
-  or a workload that crosses a trust boundary the hardware
-  can't enforce.
+  cost mitigating an attack the hardware already prevents.
+- **Re-open triggers:** a target-fleet CPU lacking `RDCL_NO=1`,
+  or a workload that crosses a trust boundary the hardware can't
+  enforce.
 
 ---
 
 ## Storage and filesystem
 
-### Stage 6 — per-process namespace roots
+### Stage 6 — per-process namespace roots (residual)
 
-- **Status (Stage 6 complete for the global namespace):**
-  `fs::VfsMount` registry + longest-prefix `VfsMountResolve`
-  + FAT32 auto-mount at `/disk/<idx>` landed first; the
-  cross-mount resolver (`fs::VfsResolve(root, path) -> VfsNode`)
-  + per-FsType `VfsBackendOps` vtable + boot-time cross-mount
-  self-test landed alongside this entry. Mount crossings now run
-  through `VfsMountVisibleFromRoot`: the trusted boot namespace can
-  see the global mount table, while sandbox/custom roots only see
-  mounts they explicitly materialise as ramfs graft directories.
-  Resolution picks the longest visible mount rather than the longest
-  global mount: hidden mounts are ignored instead of shadowing shorter
-  visible mounts or root-local ramfs paths. This keeps sandbox roots
-  from reaching global mounts merely by
-  spelling an absolute path without bloating the immutable ramfs tree
-  with synthetic mount directories. `cd /disk/0/SUB` and every other
-  "give me the resolved node" caller now goes through one VFS API;
-  backend dispatch is a vtable hop.
-- **Remaining scope:** teach `Process::root` to carry a
-  `VfsNode` (or a `VfsDir*` thin handle) so a sandboxed
-  process can be rooted at a non-ramfs subtree (e.g. `/disk/0/SANDBOX`).
-  Today every process root is a `const RamfsNode*`; trusted roots
-  see the global mount namespace by policy and custom roots can
-  expose individual graft points, but the root still cannot itself be
-  a non-ramfs backend node. The wider syscall surface (open / stat /
-  readdir) still lands in `RamfsNode*` for ramfs fall-through —
-  migrating those is a per-syscall follow-on once a workload demands
-  a non-ramfs sandbox root.
+- **Residual:** teach `Process::root` to carry a `VfsNode` (or a
+  thin `VfsDir*` handle) so a sandboxed process can be rooted at
+  a non-ramfs subtree (e.g. `/disk/0/SANDBOX`). Today every
+  process root is a `const RamfsNode*`; trusted roots see the
+  global mount namespace by policy and custom roots can expose
+  individual graft points, but the root itself can't be a
+  non-ramfs backend node. The wider syscall surface (open / stat
+  / readdir) still lands in `RamfsNode*` for ramfs fall-through —
+  migrating those is a per-syscall follow-on once a workload
+  demands a non-ramfs sandbox root. (Global-namespace VFS mount
+  registry + cross-mount resolver landed.)
 
-### Stage 7+ — Writable FS / native FS / NTFS read
+### Stage 7+ — writable / native FS / NTFS read
 
 In rough priority:
 
-1. **Native DuetOS FS** — our own design, journalled, ext-like.
-   Done in Rust from scratch (see Rust bring-up below).
-2. **NTFS read-only** — required by the Windows-PE pillar once
-   we want to load a `.exe` from a real NTFS partition.
+1. **Native DuetOS FS** — journalled, ext-like, done in Rust.
+   Partly landed (DuetFS v3) — see **DuetFS follow-ups** below.
+2. **NTFS read-only** — required by the Windows-PE pillar to load
+   a `.exe` from a real NTFS partition. (NTFS metadata walker
+   landed; the read path + NTFS *write* are separate items —
+   write is **T7-04** below.)
 
-### Crash-dump persistence — AHCI / GPT reservation
+### Crash-dump persistence — real-hardware verification
 
-- **Today:** Windows-format `.dmp` files are emitted byte-by-byte
-  over QEMU's debugcon (port 0xE9 → `${BUILD_DIR}/duetos.dmp`
-  host file). On systems with an NVMe namespace, the same
-  bytes are also persisted to the LAST
-  `kNvmeDumpReservedSectors` (4 MiB at 512B sectors) of
-  namespace 1 via `NvmePanicWriteDump` — a polled-completion
-  path that reuses the driver's existing staging buffer +
-  CQ phase-tag wait, with no scheduler / slab dependencies.
-  **AHCI/SATA fallback also landed:** `AhciPanicWriteDump` /
-  `AhciDumpReservedLba` / `AhciAvailable` provide the same
-  contract — polled completion via the existing per-port
-  command list + FIS receive area, no allocations, GPT-first
-  + tail-of-drive fallback for the reserved region.
-  `minidump.cpp` consults NVMe first and AHCI as the
-  fallback when no NVMe namespace is online. Both paths are
-  exercised at every boot via `DiskPersistSelfTest` so a
-  regression surfaces in the boot log instead of waiting for
-  a real panic. The `lastdump` shell command surfaces the
-  on-disk LBA + byte count alongside the in-RAM minidump
-  status.
-- **Installer integration shipped.** `install <handle> INSTALL`
-  reserves a 4 MiB tail partition typed `kDuetCrashDumpTypeGuid`.
-  Both `NvmePanicWriteDump` and `AhciPanicWriteDump` now consult
-  `fs::gpt::GptFindCrashDumpRegion` first — if the disk was
-  laid down by the installer, the dump lands on the reserved
-  partition; otherwise the tail-of-drive fallback runs.
-  Verified end-to-end at every boot via `DiskPersistSelfTest`.
-- **Real-hardware verification:** outstanding. The QEMU debugcon
-  + the in-RAM minidump buffer prove the encode + transport
-  layers; an unforced panic on an installed laptop is the last
-  step to graduate this row from "shipped" to "lived through
-  it once."
+- **Residual:** an unforced panic on an installed laptop is the
+  last step to graduate this from "shipped" to "lived through it
+  once." The encode + transport layers (QEMU debugcon + in-RAM
+  minidump + NVMe/AHCI reserved-region + installer
+  `kDuetCrashDumpTypeGuid` partition) are all in tree and
+  exercised every boot via `DiskPersistSelfTest`.
 
 ---
 
 ## Drivers
 
-### Audio — HDA codec / stream programming
+### Audio — real-hardware audible + mixer
 
-- **Today:** Intel HDA register probe + codec walker
-  (`kernel/drivers/audio/audio.cpp` + `hda.cpp`). Stream
-  descriptor `StreamArm` programs BDLPL/BDLPU/CBL/LVI/FORMAT;
-  RUN bit toggled via `StreamRun`. Codec configuration verbs
-  `CodecSetConverterFormat` / `CodecSetAmpGainMute` use the
-  4-bit-verb / 16-bit-payload encoding (verb 0x2 / 0x3) — the
-  full 16-bit format value reaches the codec instead of the
-  truncated 8-bit form. `ConfigureOutputPath` stitches the
-  five-verb sequence (DAC format → DAC amp → pin amp → pin
-  widget control → converter stream tag) so a future "play
-  system beep" path doesn't have to know the order. Boot self-
-  test exercises the verb-encoding helpers against canonical
-  inputs.
-- **DONE — DMA byte path + consumer + producer wired.** The
-  audio backend (`kernel/subsystems/audio/audio_backend.cpp`)
-  allocates a DMA-coherent BDL + PCM ring, fills the BDL,
-  `StreamArm`s the SD, and `StreamRun`s it; `Init` no longer
-  aborts when codec routing is unavailable (it keeps the stream
-  armed + active with `codec_routed=false`, so the controller
-  byte path is usable). `hda::StreamPosition` exposes SD_LPIB.
-  A producer path landed: `SYS_AUDIO_WRITE` (210) bounded-copies
-  user PCM into the ring and RUNs the stream; winmm
-  `waveOutWrite` routes the WAVEHDR through it. The QEMU smoke
-  now adds `-device intel-hda -device hda-output -audiodev none`,
-  so every boot exercises BringUp → StreamArm → RUN → LPIB. The
-  audio self-test verifies silence/sine + Start/Stop + LPIB.
-- **DONE — audible path now routed + DMA-verified.** Two root
-  causes were found and fixed:
-  1. *CORB/RIRB stall.* QEMU's intel-hda runs the CORB DMA engine
-     exactly once (verified: CORBRP freezes at 1 while CORBWP
-     advances and CORBCTL.RUN stays set), so every verb after the
-     first timed out and the codec walker read
-     `SubordinateNodeCount == 0`. `hda.cpp` now has a shared
-     `DispatchVerb` that, on a CORB timeout, latches a sticky
-     `use_ici` and serves all verbs through the Immediate Command
-     Interface (ICOI/ICII/ICS) — the real-hardware-valid fallback
-     equivalent to Linux's `single_cmd`. The fixed 1024-`pause`
-     bound was also replaced with a 20 ms monotonic deadline.
-  2. *Self-test destroyed production state.*
-     `HdaJackInventorySelfTest` reset the shared jack inventory and
-     ran (per boot order) after the real codec walk filled it but
-     before the audio backend read it, so `FindFirstOutputPath`
-     saw 0 jacks. It now snapshots + restores the inventory
-     (mirroring `acpi::AcpiUnderflowSelfTest`), so it is
-     order-independent.
-  Verified on the QEMU smoke: codec walk finds the audio function
-  group + DAC (node 2) + line-out pin (node 3),
-  `ConfigureOutputPath` succeeds, `[audio-backend] codec routed`,
-  and `[audio-selftest] DMA LPIB advanced (routed, audible path)`
-  — the HDA DMA engine is pulling samples through a routed codec.
-- **Still pending:** real-hardware audible validation (no HW in
-  CI); a mixer for multiple concurrent producers.
+- **Residual:** (1) real-hardware audible validation (no HW in
+  CI — the QEMU smoke proves the routed-codec DMA path:
+  `[audio-selftest] DMA LPIB advanced (routed, audible path)`);
+  (2) a mixer for multiple concurrent producers (today
+  `SYS_AUDIO_WRITE` / `winmm!waveOutWrite` is single-stream).
 - **Owner:** `kernel/drivers/audio/`.
 
 ### Wireless — real-hardware verification
 
-- **Today:** data-decode tier (envelope parsers + beacon walker)
-  AND control tier (crypto + EAPOL + 4-way handshake +
-  wdev/MLME + per-vendor upload + ring scaffolds + DMA-coherent
-  ring allocation + AES key wrap for encrypted M3 KeyData) all
-  landed. Firmware parsers cover iwlwifi / rtl88xx / b43 envelopes,
-  and the firmware-source policy matrix now classifies open firmware
-  (ath9k_htc, b43/OpenFWWF) vs runtime-only closed blobs (Intel
-  iwlwifi, Intel GPU GuC/HuC/DMC, Realtek) vs research-only patch
-  frameworks. The iwlwifi TLV image builder now emits `.ucode`-style
-  containers from caller-owned sections, and the DuetOS firmware
-  package envelope (`DUETFWPK`) carries source flags + SHA-256 payload
-  verification with explicit opt-in for custom/lab images. 16
-  wireless/firmware boot self-tests pass; ~95M libFuzzer executions
-  completed before the policy/package/builder slices with zero crashes.
-- **Blocks on:** real-hardware verification cycles. Firmware package
-  signing root / key IDs. IRQ wiring on per-vendor
-  MSI/MSI-X. iwlwifi TFD descriptor build / doorbell / per-RBD
-  data buffers. Installer integration for the offline Wi-Fi firmware kit
-  (`tools/firmware/prepare-wifi-firmware.py` output staged from install
-  media or USB before the network picker opens). The AR9271/AR7010
-  `ath9k_htc` open-firmware bring-up scaffold (USB ID match table,
-  HTC `FIRMWARE_DOWNLOAD` chunking, `FwLoad` open-firmware lookup,
-  three boot self-tests) is now in tree at
-  `kernel/drivers/net/ath9k_htc{,_fw,_upload}.{h,cpp}`; running it
-  end-to-end requires a physical AR9271/AR7010 USB dongle (open
-  firmware is not available for any on-board commodity Wi-Fi chip).
-  Returning to Intel iwlwifi after that loop is unchanged.
+- **Residual / blocks on:** real-hardware verification cycles;
+  firmware-package signing root / key IDs; per-vendor MSI/MSI-X
+  IRQ wiring; iwlwifi TFD descriptor build / doorbell / per-RBD
+  data buffers; installer integration for the offline Wi-Fi
+  firmware kit (`tools/firmware/prepare-wifi-firmware.py` output
+  staged from install media before the network picker opens).
+  The AR9271/AR7010 `ath9k_htc` open-firmware scaffold is in tree
+  (`kernel/drivers/net/ath9k_htc{,_fw,_upload}.{h,cpp}`) but
+  needs a physical dongle — open firmware exists for no on-board
+  commodity Wi-Fi chip. (Data-decode + control tier + crypto +
+  4-way handshake + per-vendor upload + ring scaffolds all
+  landed; 16 self-tests pass.)
 - **Unlocks:** Network flyout SSID picker, Settings → Network →
   Wi-Fi tab, captive-portal handler.
-- **Owner:** `kernel/drivers/net/wireless/` (per-vendor upload +
-  ring setup), `kernel/net/wireless/` (MLME state machine).
+- **Owner:** `kernel/drivers/net/wireless/`, `kernel/net/wireless/`.
 
-### USB mouse — high-DPI 16-bit XY (parser + injector landed)
+### USB mouse — high-DPI real-hardware verification
 
-- **Today:** descriptor-driven decoding is in tree and wired
-  into xHCI mouse bring-up. `HidExtractMouseLayout` walks a HID
-  report descriptor and records per-field bit offsets / sizes /
-  sign for X / Y / Wheel / AC Pan / Button-mask + the optional
-  Report ID byte. `ParseConfigForHidBoot` now captures the HID
-  class descriptor's Report descriptor length, and
-  `BringUpHidKeyboard` issues `GET_DESCRIPTOR(Report)`
-  (kDescTypeReport = 0x22) for boot mice before endpoint
-  configuration. On success, `dev.hid_mouse_layout` is populated
-  and the polling loop calls `HidMouseInjectWithLayout`; on
-  failure, it still falls back to boot-protocol `HidMouseInjectN`.
-- **Self-tested:** boot-keyboard / boot-mouse / a synthetic
-  high-DPI 5-button + 16-bit-XY + wheel + AC-Pan descriptor
-  all round-trip through `HidExtractMouseLayout` with the
-  expected bit offsets at boot. xHCI descriptor self-tests also
-  cover HID class-descriptor report-length extraction for mouse
-  and keyboard configuration trees.
-- **Remaining (gated on real hardware):** plug in a high-DPI USB
-  mouse and verify the device-supplied Report descriptor produces
-  the expected 12/16-bit X/Y layout, button mask, wheel, and AC
-  Pan fields on real interrupt-IN reports.
+- **Residual:** plug in a high-DPI USB mouse and verify the
+  device-supplied HID Report descriptor produces the expected
+  12/16-bit X/Y layout, button mask, wheel, and AC-Pan fields on
+  real interrupt-IN reports. (Descriptor-driven decoding +
+  injector + synthetic self-tests landed.)
 - **Owner:** `kernel/drivers/usb/`.
 
 ### Multi-monitor / runtime resolution change
 
-- **Today:** single linear framebuffer; mode set at boot via
-  Bochs VBE. EDID parser landed; hot-plug detect missing.
+- **Today:** single linear framebuffer, mode set at boot via
+  Bochs VBE; EDID parser landed, hot-plug detect missing.
 - **Blocks on:** per-vendor GPU drivers (Intel/AMD/NVIDIA all
   probe-only), mode-set negotiation.
 - **Owner:** `kernel/drivers/gpu/`.
 
-### Brightness — ACPI EC driver
+### Brightness — per-vendor register backlight
 
-- **ACPI path LANDED:** `kernel/acpi/acpi_power.cpp` exposes
-  `AcpiBacklightLevels` / `AcpiBacklightGet` / `AcpiBacklightSet`
-  driving the firmware's `_BCL` / `_BQC` / `_BCM` methods through
-  the AML interpreter; the ACPI EC driver
-  (`kernel/acpi/ec.{h,cpp}`) backs any EmbeddedControl FieldUnits
-  those methods touch.
-- **Still blocks on:** per-vendor *register* backlight (Intel/AMD
-  PWM, vendor WMI/Fn-key hotkeys) for laptops that do brightness
-  outside ACPI `_BCM`. Wiring the UI brightness control + Fn-key
-  events to `AcpiBacklightSet` is a follow-up.
+- **Residual:** per-vendor *register* backlight (Intel/AMD PWM,
+  vendor WMI / Fn-key hotkeys) for laptops that do brightness
+  outside ACPI `_BCM`; wire the UI brightness control + Fn-key
+  events to `AcpiBacklightSet`. (ACPI `_BCL`/`_BQC`/`_BCM` path +
+  EC driver landed.)
 
-### Battery + ACPI suspend
+### Battery + ACPI suspend (residual — shared with ACPI S5)
 
-- **Battery / AC / lid LANDED:** the ACPI EC driver
-  (`kernel/acpi/ec.{h,cpp}`) registers the EmbeddedControl region
-  handler with the AML interpreter; `kernel/acpi/acpi_power.cpp`
-  evaluates `_STA`/`_BIF`/`_BST` (battery), `_PSR` (AC), `_LID`
-  (lid) and feeds `kernel/drivers/power/power.cpp`, which now
-  clears `backend_is_stub` whenever live ACPI data is present
-  (re-polled on every `PowerSnapshotRead`). On firmware without
-  power AML (QEMU) it falls back to the SMBIOS heuristic.
-- **SCI path LANDED (env slice 3):** `kernel/acpi/acpi_sci.cpp`
-  enters ACPI mode, arms the power button, installs the SCI IRQ
-  handler, and wakes the `env-monitor` (power button → graceful
-  `AcpiShutdown`). GPE status is read + acked + masked in the
-  handler. See [`Environment`](../kernel/Environment.md).
-- **Still blocks on:** S3/S0ix suspend-to-RAM wake plumbing, and
-  the GPE **`_Qxx` AML query method evaluation** — the SCI now
-  *detects + acks* a GPE, but dispatching the firmware's per-GPE
-  `_Qxx` handler (lid-close / AC *event* delivery) needs the AML
-  interpreter in process context off the woken worker plus an EC
-  `_Qxx` read path (`ec.h` has none). Lid/AC *state* is already
-  readable via `_LID`/`_PSR`; battery tray icon can be wired to
-  `PowerSnapshotRead`.
+- **Residual:** (1) S3 / S0ix suspend-to-RAM wake-vector +
+  context save/restore; (2) GPE `_Qxx` AML query-method
+  evaluation — the SCI detects + acks a GPE but dispatching the
+  firmware's per-GPE `_Qxx` handler (lid-close / AC *event*
+  delivery) needs the AML interpreter in process context off the
+  woken worker plus an EC `_Qxx` read path (`ec.h` has none).
+  Lid/AC *state* is already readable via `_LID`/`_PSR`. (Battery
+  / AC / lid via EC + ACPI, SCI power-button path, and ACPI S5
+  soft-off incl. `_PTS`/`_GTS` all landed.)
 
 ### Bluetooth, Printer, Webcam
 
-- **Bluetooth:** btusb / btuart transport driver + general L2CAP
-  signalling / RFCOMM / SDP / full GATT + SMP pairing. (Landed:
-  HCI command/event codec in `kernel/net/bluetooth/hci.{h,cpp}`;
-  and the HID **keyboard** upper stack in
-  `kernel/net/bluetooth/hid.{h,cpp}` — ACL fragment reassembly,
-  L2CAP B-frame decode, BLE HOGP ATT-notification / ATT-indication
-  (the latter answered with an ATT Handle Value Confirmation pushed
-  back through the `BtHidSetAclSink` egress, which btusb wires to
-  its bulk-OUT endpoint) + classic HIDP
-  DATA/Input → the shared input-layer boot-keyboard decoder
-  (`kernel/drivers/input/hid_keyboard.{h,cpp}`, also used by USB
-  HID); the btusb USB transport driver
-  `kernel/drivers/usb/btusb.{h,cpp}` — finds the controller, parses
-  endpoints, configures the bulk + interrupt-IN endpoints, sends
-  HCI bring-up commands over EP0, runs an ACL RX pump into
-  `BtHidDeliverAcl` plus an HCI-event RX pump (diag stamping,
-  Disconnection_Complete → `BtHidUnregister`), and registers a
-  bulk-OUT `AclTxSink` so the HID layer's ATT confirmations reach
-  the controller; and an additive
-  public xHCI interrupt-IN transfer primitive
-  (`XhciConfigureInterruptInEndpoint` / `XhciInterruptInSubmit` /
-  `XhciInterruptInPoll`) on independent `DeviceState` fields so no
-  bulk/HID caller is perturbed. Invoked via `bt probe` (not
-  auto-claimed — same event-ring race as CdcEcmProbe). Boot
-  self-tests assert every shape end-to-end. **Remaining (SMP-gated
-  frontier):** the connection manager — LE scan/connect, SMP
-  pairing/bonding, GATT-HOGP service discovery — so a real BT
-  keyboard can associate on its own; plus general L2CAP signalling
-  / RFCOMM / SDP for non-keyboard profiles. See
-  [Design-Decisions](Design-Decisions.md) for why this is a
-  deliberate boundary.)
+- **Bluetooth residual (SMP-gated frontier):** the connection
+  manager — LE scan/connect, SMP pairing/bonding, GATT-HOGP
+  service discovery — so a real BT keyboard can associate on its
+  own; plus general L2CAP signalling / RFCOMM / SDP for
+  non-keyboard profiles. (HCI codec, HID-keyboard upper stack,
+  btusb transport, xHCI interrupt-IN primitive landed; invoked
+  via `bt probe`.)
 - **Printer:** USB printer-class driver + IPP / PostScript /
   raster pipeline.
 - **Webcam:** UVC USB-Video class driver.
 
 ### Source-tree GAP markers
 
-The following `// GAP:` markers in source code track edge
-cases that the v0 happy path skips:
+Live edge-case index — the v0 happy path skips these:
 
 - `kernel/drivers/net/iwlwifi_rings.cpp` — legacy <7000-series
-  RBD format. (TX completion polling landed via
-  `IwlRingsPollTxCompletions` / `IwlRingsApplyTxCompletions`;
-  **periodic-poll wiring landed** — the existing `iwlwifi-watch`
-  task calls the new `IwlRingsServicePending` hook on every
-  tick, which drains every TX queue and services RX
-  bookkeeping. No-op when rings aren't attached (firmware
-  loader hasn't called `IwlRingsActivate` yet); ready to
-  drain the moment a future Activate lands. Real MSI-X
-  interrupt-driven dispatch is the next layer beyond this
-  fallback.)
+  RBD format; real MSI-X interrupt-driven dispatch (TX-completion
+  polling + periodic-poll wiring landed).
 - `kernel/mm/dma.cpp` — ARM64 port (`dsb ishst` + per-line
   `dc cvac`).
 - `kernel/subsystems/translation/translate.cpp` — `rseq`
   (restartable sequences).
 
-Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
+Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ---
 
@@ -707,80 +320,43 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ### DirectX real device backends
 
-- **Today:** D3D9/11/12 DLLs ship real COM-vtable shapes at
-  canonical Win SDK ABI slot positions, with a shared software
-  rasterizer (`userland/libs/dx_raster.h`) honouring `Draw*` /
-  `DrawIndexed*` / `DrawPrimitive*`. Vertex/index buffers carry
-  real backing storage; input layouts pull POSITION + COLOR from
-  the bound VB; triangle list / strip / fan all rasterize.
-- **Compiler landed (frontend only):** `d3dcompiler.dll` lexes +
-  parses a tiny HLSL subset and emits a deterministic DXBC-shaped
-  blob (SHEX/ISGN/OSGN/STAT). The d3d11 / d3d12 draw path still
-  ignores the bytecode — execution is the next slice.
-- **Still gated:** HLSL bytecode execution, texture sampling,
-  geometry/hull/domain/compute shaders, multi-stream input,
-  Z-buffer, D3D9 fixed-function lighting, real GPU command-ring
-  submission.
-- **Blocks on:** per-vendor GPU drivers landing real command-
-  ring submission; D3D-to-Vulkan thunk wiring (the Vulkan ICD
-  v0 lifecycle landed on `claude/native-vulkan-graphics-eoh5N`
-  — the D3D side still returns `E_FAIL` and needs to redirect
-  through the Vulkan path).
+- **Still gated:** HLSL bytecode execution (the `d3dcompiler.dll`
+  frontend emits a DXBC-shaped blob the draw path ignores),
+  texture sampling, geometry/hull/domain/compute shaders,
+  multi-stream input, Z-buffer, D3D9 fixed-function lighting,
+  real GPU command-ring submission.
+- **Blocks on:** per-vendor GPU drivers landing real
+  command-ring submission; D3D→Vulkan thunk wiring (the Vulkan
+  ICD v0 lifecycle landed; the D3D side still returns `E_FAIL`
+  and must redirect through the Vulkan path). (D3D9/11/12 COM
+  vtables + shared software rasterizer + DXGI swap-chain present
+  into compositor windows landed.)
 
 ### Windowing — modal dialogs, common controls
 
-- Modal dialogs, common controls, scroll bars, outline fonts,
-  multi-threaded message queues remain unimplemented.
-  Per the [`Win32-DLLs`](../subsystems/Win32-DLLs.md) doc:
-  the DLL surface ships real EATs; behind each export the
-  implementation can be a doc-error sentinel today.
-- **Menus shipped (v0):** popup menus + WM_CONTEXTMENU
-  dispatch + the Win32 menu API surface land on
-  `claude/right-click-context-menu-mPDDD`. `TPM_*` flag
-  coverage now also includes `TPM_NONOTIFY` (suppresses the
-  WM_COMMAND post when RETURNCMD is clear) and the six
-  alignment bits (`TPM_LEFTALIGN` / `TPM_CENTERALIGN` /
-  `TPM_RIGHTALIGN` / `TPM_TOPALIGN` / `TPM_VCENTERALIGN` /
-  `TPM_BOTTOMALIGN`) — the menu primitive's fixed
-  240×(N·22+4) geometry is shifted before `MenuOpen` so the
-  panel lands where the SDK contract says it should.
-  Residual GAPs: interactive Move / Size (need modal-input
-  mode), submenu marshaling across `SYS_WIN_TRACK_POPUP`,
-  `TPM_LEFTBUTTON` / `TPM_RIGHTBUTTON` activation filtering,
-  Files-app rename UI (needs a text-input modal),
-  Trash / ramfs Files context menus, menubars +
+- **Residual:** common controls, scroll bars, outline fonts,
+  multi-threaded message queues. Menu GAPs: interactive
+  Move/Size (need a modal-input mode), submenu marshaling across
+  `SYS_WIN_TRACK_POPUP`, `TPM_LEFTBUTTON`/`TPM_RIGHTBUTTON`
+  activation filtering, Files-app rename UI (needs a text-input
+  modal), Trash / ramfs Files context menus, menubars +
   `LoadMenu` resource loading. See
-  [`Compositor`](../subsystems/Compositor.md) §"Popup Menus"
-  for the live state.
+  [`Compositor`](../subsystems/Compositor.md) §"Popup Menus" for
+  live state. (Message pump, GDI paint, popup menus +
+  `WM_CONTEXTMENU` + `TPM_*` flags, modal dialog primitive
+  landed.)
 
 ### Winsock async surface
 
-- **Today:** synchronous BSD-socket subset works. Async surface
-  v0 ships in `userland/libs/ws2_32/ws2_32.c`: `WSACreateEvent`
-  / `WSACloseEvent` / `WSASetEvent` / `WSAResetEvent` /
-  `WSAEventSelect` / `WSAEnumNetworkEvents` /
-  `WSAWaitForMultipleEvents` exist and route through a
-  process-local `WsaEventBinding[32]` table.
-  **Producer side shipped:** new kernel-side helper
-  `net::SocketPollEvents(idx)` returns the current
-  `FD_READ` / `FD_WRITE` / `FD_ACCEPT` / `FD_CLOSE`
-  bitmask for a socket (`kSockOpPollEvents = 14` on
-  SYS_SOCKET_OP). `WSAEnumNetworkEvents` queries the kernel
-  on every call and ORs the result into the binding's
-  `pending` mask masked by the user's subscribed events,
-  then resets the event handle to match the Win32 atomic-
-  reset contract. `WSAWaitForMultipleEvents` runs a 10 ms-
-  cadence polling loop: every iteration walks the bindings,
-  `SetEvent`s any whose socket has activity, then probes
-  each `lphEvents` entry with a 0 ms `SYS_EVENT_WAIT`;
-  returns the matching index on a signaled event or
-  `WSA_WAIT_TIMEOUT` after `dwTimeout` ms.
 - **Deferred:** Overlapped I/O + IOCP-backed socket reads
   (kernel32's IOCP plumbing exists but isn't wired into the
-  socket read path); kernel-direct event signaling at the
-  moment of socket activity (today's polling cadence is the
-  CPU-time tradeoff); `fWaitAll == TRUE` semantics (current
-  impl returns on first ready event regardless).
+  socket read path — see **IOCP consolidation** below);
+  kernel-direct event signaling at the moment of socket activity
+  (today's `WSAWaitForMultipleEvents` is a 10 ms polling loop);
+  `fWaitAll == TRUE` semantics (current impl returns on first
+  ready event). (Synchronous BSD subset + the `WSAEvent*` /
+  `WSAEventSelect` / `WSAEnumNetworkEvents` async surface +
+  kernel `SocketPollEvents` producer landed.)
 
 ---
 
@@ -788,1014 +364,215 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ### RBAC + elevation broker — v1 follow-ups
 
-- **Today:** v0 broker, role table, grace cache, CLI + GUI prompt
-  loop, and shell `elevate` / `roles` / `elevations` commands
-  shipping. Password hashes are PBKDF2-HMAC-SHA256; the broker
-  facade does not yet wire into Win32 NT privilege APIs; the role
-  + account tables are in-memory and reseed on every boot.
 - **v1 — Argon2id with lazy migration.** Blake2b primitive
-  (RFC 7693) shipping in `kernel/security/blake2b.{h,cpp}` —
-  passes the Appendix A test vectors at boot. Argon2id itself
-  (RFC 9106) sits on top: H_0 derivation, fill_block /
-  BlamkaRound P, hybrid data-independent/data-dependent
-  indexing, final tag, lazy migration on successful PBKDF2
-  verify. Blocked on a record-format extension — the current
-  56-byte `PasswordHashRecord` doesn't carry Argon2id's memory
-  /time/parallelism parameters; needs a V2 shape sized for
-  both old PBKDF2 + new Argon2id rows. See
-  [`wiki/security/RBAC-and-Elevation.md`](../security/RBAC-and-Elevation.md#argon2id-rollout).
-- **LANDED (v0.2) — Win32 facade routing.** `NtAdjustPrivilegesToken`'s
-  enable-but-not-held branch now routes to
-  `BrokerRequestElevation`. On grant, the cap is added to the
-  caller's `CapSet` and reflected in PreviousState; on cancel /
-  bad password / denied / single-flight contention, the legacy
-  `STATUS_NOT_ALL_ASSIGNED` return shape is preserved. Backed by
-  the deferred-prompt mechanism in `kernel/security/broker.cpp`.
-  See `wiki/security/RBAC-and-Elevation.md` → *Deferred-prompt
-  mechanism*.
-- **v1 — Persistence.** `/system/secrets/` holds the account
-  + role tables encrypted at rest. Argon2id-derived key wraps
-  the table; TPM driver (when it lands) seals the wrap key.
-  Until then `AuthInit` / `RbacInit` re-seed defaults on every
-  boot; runtime additions are lost. Tracked in
-  `wiki/security/RBAC-and-Elevation.md#persistence`.
-- **v1 — First-boot installer flow.** Replaces the hardcoded
+  (RFC 7693) is in tree and passes the Appendix-A vectors;
+  Argon2id (RFC 9106) sits on top. **Blocked on a record-format
+  extension** — the 56-byte `PasswordHashRecord` can't carry
+  Argon2id's memory/time/parallelism params; needs a V2 shape
+  sized for both old PBKDF2 + new Argon2id rows. See
+  [`RBAC-and-Elevation`](../security/RBAC-and-Elevation.md#argon2id-rollout).
+- **v1 — Persistence.** `/system/secrets/` holds the account +
+  role tables encrypted at rest; Argon2id-derived key wraps the
+  table; TPM seals the wrap key when that driver lands. Until
+  then `AuthInit` / `RbacInit` re-seed defaults every boot and
+  runtime additions are lost.
+- **v1 — First-boot installer flow.** Replace the hardcoded
   `admin / admin` seed with a userland install wizard launched
   by init when `/system/secrets/` is empty. Blocks on the
   persistence work above.
 - **v1 — Secure Attention Key.** Reserve Ctrl+Alt+Del at the
-  PS/2 driver level; trigger a kernel-drawn full-screen broker
-  prompt so a paranoid user can force a known-good prompt
-  rather than trusting the currently-drawn one. v0 modal is
-  drawn under the compositor lock above other windows but
-  doesn't pre-empt a focused full-screen surface.
+  PS/2 driver level → kernel-drawn full-screen broker prompt, so
+  a paranoid user can force a known-good prompt. The v0 modal is
+  drawn under the compositor lock but doesn't pre-empt a focused
+  full-screen surface. (v0 broker + role table + grace cache +
+  CLI/GUI prompt + `NtAdjustPrivilegesToken` facade routing
+  landed.)
 
-### ACPI S5 / soft-off shutdown
+### Suspend-to-RAM (S3 / S0ix) + GPE `_Qxx` dispatch
 
-- **Today:** Start menu's SHUT DOWN action calls `KernelHalt`,
-  which now tries `acpi::AcpiShutdown()` first. `AcpiShutdown`
-  reads SLP_TYPa / SLP_TYPb via `AmlReadS5`, which decodes both
-  the classic `Name(_S5_, Package(...))` form (UEFI / QEMU) AND
-  the `Method(_S5_) { Return(Package(...)) }` form (some
-  consumer firmware). On match it writes the SLP_TYP value into
-  PM1A_CNT + PM1B_CNT, transitioning the chipset to soft-off.
-  Falls through to QEMU's debug ports (0x604 / 0xB004 / 0x4004)
-  on miss, then masks IRQs and parks the boot CPU as the
-  documented last resort.
-- **DONE — `_PTS`/`_GTS` wired in spec order.** `AcpiShutdown()`
-  now calls `AcpiRunSleepPrep(5)` (evaluates `\_PTS(5)` then the
-  legacy `\_GTS(5)` through the AML interpreter) **before** the
-  PM1 SLP_TYP/SLP_EN write, per ACPI §7. Both are optional
-  (NotFound → skipped). This is the step the pre-interpreter path
-  could not perform — many real laptops poke the EC / arm SMI in
-  `_PTS` and will not power off without it. No-op on QEMU and most
-  UEFI (no root `\_PTS`/`\_GTS`, or pre-evaluated at firmware
-  time); `AmlReadS5` still extracts the `_S5_` SLP_TYP values.
-  Verified by the `AcpiSleepPrepSelfTest` boot self-test
-  (`[acpi/s5] selftest PASS`), which exercises the exact
-  resolve-root-method + Arg0-sleep-type + `If(LEqual(Arg0,5))`
-  mechanism on synthetic bytecode so it never powers the test VM
-  off, and reports live-firmware `\_PTS`/`\_GTS` presence.
-- **Still deferred:** S3 (suspend-to-RAM) wake-vector / context
-  save-restore and `_Qxx` GPE/SCI event dispatch.
+Consolidated single residual shared by the ACPI S5, Battery, and
+power-management surfaces: (1) S3 / S0ix wake-vector + context
+save/restore; (2) GPE `_Qxx` AML query-method evaluation off the
+woken worker + an EC `_Qxx` read path. (ACPI S5 soft-off incl.
+`_PTS`/`_GTS` in §7 order, reboot chain, and lid/AC/battery
+*state* reads all landed — see the Battery row above.)
 
-### Device Manager — virtio + eject + hot-unplug
+### Device Manager — eject + hot-unplug + virtio per-class I/O
 
-- **Today:** Device Manager renders two sections: a PCI
-  device table (vendor:device, class label) and a USB
-  device table that walks every xHCI controller's port
-  records (vendor:product, speed, class label,
-  HID kbd/mouse hint). Read-only.
-- **Blocks on:** `Eject` capability gating, and a
-  hot-unplug driver path that the AHCI / xHCI controllers
-  don't yet support. (The VirtIO bus walker landed —
-  `drivers/virtio::VirtioInit()` enumerates every modern
-  VirtIO PCI function and feeds `VirtioStats`; the Device
-  Manager can now read `GetStats()` to render the virtio
-  section. Per-class probes — rng / blk / net — are
-  attach-only in v0; queue-setup + I/O is the next slice.)
+- **Residual:** `Eject` capability gating; a hot-unplug driver
+  path (AHCI / xHCI don't support it yet); virtio per-class
+  queue-setup + I/O (rng/blk/net probes are attach-only in v0 —
+  see **VirtIO per-class polish** below). (PCI + USB + VirtIO
+  read-only device tables landed.)
 
-### Network Status — Wi-Fi scan
+### Network Status — real RF scan + multi-iface lease
 
-- **Today:** Iface table (index, MAC, IPv4, bound state),
-  rx/tx packet + byte counters, the firewall's per-iface
-  `tx_dropped_firewall` column, a routing/DNS section
-  (gateway + DNS resolver + DHCP server + lease seconds)
-  pulled from `DhcpLeaseRead()`, AND a `WI-FI SCAN`
-  section that calls `WifiScan(0, ...)` and renders the
-  resulting SSID / SEC / RSSI table. With no wireless
-  backend registered the section shows a placeholder hint.
-  All back the Start menu's NETWORK STATUS entry
-  (`kernel/apps/netstatus.cpp`).
-- **Blocks on:** real-hardware wireless backend (per the
-  Wireless roadmap row) so the SSID list reflects an actual
-  RF scan rather than the empty placeholder. Routing surface
-  is single-lease today — multi-iface lease tracking happens
-  when more than one DHCP transaction can be live at once.
+- **Residual:** a real wireless backend (per the Wireless row)
+  so the SSID list reflects an actual RF scan rather than the
+  empty placeholder; multi-iface DHCP lease tracking (single
+  lease today). (Iface table, rx/tx counters, firewall-drop
+  column, routing/DNS section, Wi-Fi-scan section UI landed.)
 
 ### Terminal emulator (windowed userland shell)
 
 - **Today:** `Ctrl+Alt+T` opens the kernel shell (ring-0).
-- **Blocks on:** console-multiplex refactor — kernel shell is
-  wired to a single global `ConsoleWrite`. A windowed terminal
-  needs the shell to take a per-session sink.
-- **Owner:** `userland/shell/`, plus a PTY layer.
+- **Blocks on:** console-multiplex refactor — the kernel shell
+  is wired to a single global `ConsoleWrite`; a windowed
+  terminal needs the shell to take a per-session sink.
+- **Owner:** `userland/shell/` + a PTY layer.
 
 ### PNG / JPEG / PDF / video viewers
 
-- **Today:** BMP works (`kernel/apps/imageview.cpp`); ImageView
-  dispatches by extension.
-- **Blocks on:** PNG needs a zlib port (none in tree). JPEG
-  needs a Huffman+IDCT decoder. PDF is huge. Video needs HDA.
+- **Today:** BMP works (`kernel/apps/imageview.cpp`).
+- **Blocks on:** PNG needs a zlib port (none in tree); JPEG
+  needs a Huffman+IDCT decoder; PDF is huge; video needs HDA.
 
 ### IME / non-Latin input
 
-- **Today:** PS/2 + xHCI HID drivers hardcode US layout.
-- **Blocks on:** input-method framework refactor.
+- PS/2 + xHCI HID drivers hardcode US layout. Blocks on an
+  input-method framework refactor.
 
 ### Locale / language switching
 
-- **Today:** UI strings are C++ literals in
-  `kernel/apps/*.cpp`.
-- **Blocks on:** string-table layer with id → text indirection.
-- **Effort:** refactor across all apps.
+- UI strings are C++ literals in `kernel/apps/*.cpp`. Blocks on
+  a string-table layer with id → text indirection; refactor
+  across all apps.
 
-### Disk installer
+### Disk installer — real-hardware boot verification
 
-- **Today:** orchestration layer shipped as the kernel-shell
-  `install <handle> INSTALL [--duetfs]` command, backed by
-  `kernel/fs/installer.{h,cpp}::Install`. Lays down a fresh GPT
-  with three partitions (ESP, 64 MiB; system, remainder; crash-
-  dump, 4 MiB tail with `kDuetCrashDumpTypeGuid`). ESP is always
-  FAT32 (UEFI-spec-mandated). The system partition is FAT32 by
-  default (interoperable with Windows / Linux fdisk) or DuetFS
-  with `--duetfs` (journalled, CRC-checked blocks, encryption /
-  compression / snapshots available; partition type
-  `kDuetFsTypeGuid`). Seeds `/esp/boot/grub/grub.cfg` with a
-  chainload stub pointing at `/system/boot/duetos-kernel.elf`,
-  stamps a real `BOOTX64.EFI` into `/esp/EFI/BOOT/`, mounts ESP
-  at `/esp` and system at `/system`. Admin-gated + literal
-  `INSTALL` confirmation token + 100 MiB minimum disk size.
-  UUID-v4-stamped GUIDs for the disk + each partition;
-  RFC-4122-canonical name strings.
-- **UEFI loader bytes shipped:** the installer now stamps a real
-  `BOOTX64.EFI` (the PE32+ image built by `boot/uefi/`) into
-  `/esp/EFI/BOOT/BOOTX64.EFI` — the canonical UEFI fall-back
-  removable-media path. Bytes come from an in-kernel ramfs blob
-  populated at build time by `kernel/CMakeLists.txt`'s embed
-  step (depends on the `duetos-uefi` CMake target produced by
-  `boot/uefi/`). Real-hardware UEFI firmware that boots a
-  removable disk without an explicit boot variable now finds the
-  loader by the spec-mandated path.
-- **Kernel-ELF embed shipped as opt-in:** new CMake option
-  `DUETOS_INSTALLER_KERNEL_EMBED` (default OFF) drives a
-  `.incbin` directive in a generated
-  `kernel_elf_blob.S` that pulls the stage-1 `duetos-kernel.elf`
-  bytes into stage 2's `.rodata`. New ramfs accessors
-  `RamfsKernelElfBytes()` / `RamfsKernelElfSize()` expose the
-  blob; the installer's `WriteSystemSentinel` writes
-  `/system/boot/duetos-kernel.elf` whenever the size is non-zero.
-  When the option is OFF (default — keeps build cost off the
-  iteration loop) the blob is a 0-byte stub and the installer
-  prints a one-line note pointing at out-of-band staging.
-  `.incbin` keeps compile time constant regardless of file size;
-  the cost is binary-size only (~10 MiB → ~21 MiB on debug; ISO
-  ~18 MiB → ~28 MiB).
-- **DMA-zone fix on the embed path — DONE.** The embedded ELF now
-  lives in a dedicated `.kernel_elf_blob` section pinned by
-  `kernel/arch/x86_64/linker.ld` at physical 32 MiB (VMA
-  `KERNEL_VIRTUAL_BASE + 32M`, reachable through boot.S's
-  higher-half 1 GiB map) and emitted there by
-  `tools/build/gen-kernel-blob.sh`. `_kernel_end_phys` is now
-  byte-identical with the embed ON vs OFF, so the embed no longer
-  pushes the real kernel image past 16 MiB or starves the
-  legacy-ISA DMA zone. `kernel/mm/frame_allocator.cpp` reserves
-  `[_kernel_blob_start_phys, _kernel_blob_end_phys)` separately;
-  that range is zero-length (a no-op) when the embed is OFF.
-  Verified statically: with `DUETOS_INSTALLER_KERNEL_EMBED=ON` the
-  blob occupies a separate PT_LOAD at paddr `0x2000000` while
-  `_kernel_end_phys` stays at `~0x11a3000`, unchanged from the
-  OFF build. The embed-ON kernel now self-boots.
-- **Layout-math self-test runs every boot.** `PlanLayout` is
-  exercised against canonical sizes (just-too-small,
-  100 MiB / 1 GiB / 1 TiB) at `[fs/installer] self-test OK`;
-  a regression in the partition planner surfaces immediately
-  rather than waiting for an operator to run `install` on a
-  real disk.
+- **Residual:** boot an installed disk on real UEFI hardware.
+  The orchestration layer (`install <handle> INSTALL [--duetfs]`
+  → GPT with ESP / system / crash-dump partitions, FAT32 or
+  DuetFS system partition, GRUB stub, real `BOOTX64.EFI` stamped
+  to the spec-mandated removable path, opt-in kernel-ELF embed
+  via `DUETOS_INSTALLER_KERNEL_EMBED`) is all in tree and the
+  layout math runs a boot self-test every boot.
 
 ### System updater
 
 - **Blocks on:** code-signing infrastructure + A/B kernel-slot
-  layout.
+  layout (state machine landed — see **A/B kernel slots** below).
 
-### Accessibility
+### Accessibility — screen reader + on-screen keyboard
 
-- **Today:** magnifier landed. Screen reader + on-screen
-  keyboard deferred.
-- **Blocks on:** AT-SPI-equivalent kernel surface for the screen
-  reader; widget-slot bump for the on-screen keyboard.
+- **Residual:** screen reader (blocks on an AT-SPI-equivalent
+  kernel surface); on-screen keyboard (blocks on a widget-slot
+  bump). (Magnifier landed.)
 
 ---
 
-## Rust bring-up — bootstrapped
+## Rust subsystems
 
-The Rust toolchain is **now wired into the kernel build** via the
-DuetFS slice (trigger #1 — on-disk filesystem parsing). See
-[`filesystem/DuetFS.md`](../filesystem/DuetFS.md). The toolchain is
-pinned in `/rust-toolchain.toml`; CMake builds drive cargo through
-each crate's leaf `CMakeLists.txt`.
-
-Thirteen production Rust subsystems are live: USB HID report-descriptor
-parsing (`kernel/drivers/usb/hid_rust/`), USB class configuration
-parsing (`kernel/drivers/usb/class_rust/`), DHCPv4 + DNSv1 + TCP-options
-walkers (`kernel/net/parsers_rust/`), USB MSC SCSI response parsers
-(`kernel/drivers/usb/msc_scsi_rust/`), PNG / BMP / TGA header
-validators (`kernel/util/img_meta_rust/`), ELF64 / PE-image
-validators (`kernel/loader/exec_meta_rust/`), NTFS metadata walker
-(`kernel/fs/ntfs_rust/`), exFAT metadata walker
-(`kernel/fs/exfat_rust/`), ext4 metadata walker
-(`kernel/fs/ext4_rust/`), ACPI table walker (`kernel/acpi/acpi_rust/`),
-IEEE 802.11 management-frame walker (`kernel/net/wifi80211_rust/`),
-and Bluetooth HCI walker (`kernel/net/hci_rust/`). All thirteen
-have current C++ callers; the canonical inventory lives at
-[`wiki/tooling/Rust-Subsystems.md`](../tooling/Rust-Subsystems.md).
-
-The six skeleton crates seeded in the 2026-05-12 slice (NTFS,
-exFAT, ext4, ACPI, 802.11, HCI) have all been **lifted to
-production** in a subsequent slice: each crate grew the next
-layer of parsers and a real C++ caller now goes through its FFI.
-
-The Rust-bring-up checklist is **closed out**. Future Rust work happens
-through one of two channels:
-
-1. **Existing production crates grow to cover their successor surface**
-   — `msc_scsi_rust` adds REQUEST SENSE when the bulk-transport
-   CBW-stall recovery path lands; `exec_meta_rust` absorbs the rest
-   of the PE data-directory walk when the C++ `ParseHeaders` state
-   machine gets split up; `duetos_ntfs` grows an INDX entry walker
-   when a directory-enumeration slice lands.
-2. **New crates land per the contract in
-   [`wiki/tooling/Rust-Subsystems.md`](../tooling/Rust-Subsystems.md)**
-   — one crate per subsystem, narrow C FFI, no Rust in the middle of
-   a C++ call chain. New crates land **with** their first real C++
-   caller.
-
-**Not** triggers (unchanged):
-
-- "Memory safety is cool" — needs a real lifetime problem.
-- "A library exists in Rust" — porting one subsystem so we can
-  use a single crate is a rewrite tax for a dependency.
-
-### Rules for new Rust crates
-
-- **One crate per subsystem.** No shared "rust-utils" until a
-  second subsystem actually needs the shared bits.
-- **No Rust in the middle of a C++ call chain.** Kernel C++ side
-  calls Rust through a narrow C FFI; never C++ → Rust → C++ → Rust.
-- **No `unsafe` outside the FFI wall.** Internal `unsafe` needs a
-  1-line comment explaining which kernel invariant justifies it.
-- **Header is hand-written.** Bindgen / cbindgen are forbidden —
-  the FFI contract should be readable from the header alone.
-- **Toolchain pin lives in `/rust-toolchain.toml`.** Bumping it is
-  its own PR.
-- **Workspace first.** Add the crate to `/Cargo.toml`; the root
-  workspace owns profiles and `/.cargo/config.toml` owns the
-  freestanding target / `build-std` defaults.
-- **One Rust staticlib link unit.** Subsystem crates are rlibs; add them
-  as dependencies of `/kernel/rust/Cargo.toml`. Only `/kernel/rust` calls
-  `duetos_add_rust_staticlib(...)`, preventing duplicate `core` / `alloc`
-  objects at the C++ kernel link.
-- **`panic = "abort"`** — kernel can't unwind. The aggregate crate owns
-  the single `#[panic_handler]`; subsystem rlibs must not define one.
-- **`lto = "thin"`** — fat LTO interacts badly with CMake.
-- **Forbidden:** Bazel / Nix / Meson; cbindgen; speculative deps.
+The Rust bring-up checklist is **closed out** — thirteen
+production crates are live with C++ callers. Future Rust work
+happens only through the two channels documented in
+[`Rust-Subsystems`](../tooling/Rust-Subsystems.md): existing
+crates growing to cover their successor surface, or a new
+crate landing **with** its first real C++ caller. Not triggers:
+"memory safety is cool" / "a library exists in Rust". The
+crate-authoring rules also live in that page.
 
 ### DuetFS follow-ups
 
-v3 ships per-block CRCs (fsck-verified), symbolic links, hard links
-with `link_count` refcount, fsck with link-count drift detection,
-and the same on-disk auto-mount path. Image cap dropped from 128 MiB
-to 4 MiB to make room for the single-block CRC table; future slice
-extends. Next:
+DuetFS v3 ships per-block CRCs, sym/hard links, fsck, on-disk
+auto-mount, userland syscall surface, auto-symlink resolution,
+and `mkfs.duetfs`. Image cap is 4 MiB (single-block CRC table).
+Pending, in rough priority:
 
-1. **Multi-block CRC table** — restore the 32 MiB / 128 MiB image cap.
-2. **CoW + journal** — durability / crash safety on file data writes.
-3. ~~**Userland syscall surface**~~ — landed. `kernel/fs/file_route.cpp`
-   recognises `/duetfs` and `/disks/duetfsN` mount paths via
-   `ParseDuetFsPath`, materialises a `duetfs::Device` per call,
-   and routes SYS_FILE_OPEN / SYS_FILE_READ / SYS_FILE_WRITE /
-   SYS_FILE_CREATE / SYS_OPEN / SYS_READ / SYS_FILE_LINK /
-   SYS_FILE_SYMLINK / SYS_FILE_READLINK through the matching
-   `duetfs_*` FFI calls. PE and ELF binaries see DuetFS volumes
-   through the same syscall surface as ramfs and FAT32 paths.
-4. **Separate dirent table** — decouples hard-link names from the
+1. **Multi-block CRC table** — restore the 32/128 MiB image cap.
+2. **CoW + journal** — durability / crash safety on file-data
+   writes.
+3. **Separate dirent table** — decouple hard-link names from the
    inode's `name` (today's v3 caveat).
-5. ~~**Auto-symlink resolution in `lookup_path`**~~ — landed.
-   POSIX-`lstat`-style: intermediate symlinks resolve transparently;
-   the final component is preserved so `readlink` callers still see
-   the symlink node. New `duetfs_lookup_follow` FFI follows the
-   final component too (POSIX-`stat`-style). Cycle detection caps
-   at `MAX_SYMLINK_HOPS = 8` and surfaces as `kStatusSymlinkLoop`;
-   verified by the self-test against a `/cycle → /cycle` self-loop.
-6. **Indirect extents** — files needing > 8 extents.
-7. **Multi-block dirs + B-tree directory index** — bump the 1024-child cap.
-8. ~~**Auto-mkfs of a blank disk via shell command**~~ — `mkfs.duetfs <handle> ERASE`
-   landed alongside the existing FAT32 `mkfs`. Same admin / confirmation-token
-   contract; uses `MakeBlockHandleDevice` to wrap the kernel block-device
-   handle and calls `duetfs_mkfs` followed by a probe re-validate. After a
-   successful format + re-probe the command also walks `/disks/duetfsN` for
-   the first free slot (`N` in `0..15`) and registers the volume through
-   `VfsMount` so the freshly formatted disk is usable without a reboot;
-   the operator still gets a one-line message if every slot is taken.
-9. **AES-XTS encryption + Argon2 KDF** — full-disk encryption tier.
-10. **LZ4 compression** — optional per-file compression.
+4. **Indirect extents** — files needing > 8 extents.
+5. **Multi-block dirs + B-tree directory index** — bump the
+   1024-child cap.
+6. **AES-XTS encryption + Argon2 KDF** — full-disk encryption
+   tier.
+7. **LZ4 compression** — optional per-file compression.
 
 ---
 
-## Full Project TODO import (2026-05-09)
+## Imported backlog — remaining rows
 
-> **Source:** maintainer-provided "DuetOS — Full Project TODO" handoff.
->
-> **Policy:** these entries are the canonical backlog index for the imported
-> task list. When a task lands, delete its row here, update the owning subsystem
-> wiki page, and add a design/history note when the change is project-visible.
-> Syscall numbers mentioned below are ABI; do not reuse retired numbers.
+The "Full Project TODO" import (2026-05-09) is closed except the
+rows below; everything else landed and is recorded in
+[`Design-Decisions`](Design-Decisions.md) /
+[`Win32-Surface-Status`](Win32-Surface-Status.md). Syscall numbers
+are ABI — do not reuse retired numbers.
 
-### Track 1 — Win32 windowing (message pump + GDI paint)
-
-> **T1-01** (per-window message queue + GetMessage/PeekMessage/PostMessage/
-> DispatchMessage) and **T1-02** (BeginPaint / EndPaint / TextOut /
-> InvalidateRect / UpdateWindow) landed and are exercised by
-> `windowed_hello` end-to-end + `msg_smoke` / `wndmsg_smoke` /
-> `gdi_smoke`. Syscalls 62/63/64 (`SYS_WIN_PEEK_MSG` /
-> `SYS_WIN_GET_MSG` / `SYS_WIN_POST_MSG`) carry messages;
-> `DispatchMessage` is pure-userland (calls the WNDPROC directly).
-> **T1-03** keyboard/mouse routing closed: the kernel mouse-reader
-> + kbd-reader in `kernel/core/main.cpp` post `WM_KEYDOWN` /
-> `WM_SYSKEYDOWN` / `WM_KEYUP` / `WM_SYSKEYUP` / `WM_CHAR` /
-> `WM_SYSCHAR` (Alt held flips KEYDOWN/KEYUP/CHAR to their SYS
-> variants and sets lParam bit 29) plus `WM_MOUSEMOVE` (0x0200) /
-> `WM_LBUTTONDOWN` (0x0201) / `WM_LBUTTONUP` (0x0202) /
-> `WM_LBUTTONDBLCLK` (0x0203) / `WM_MOUSEWHEEL` (0x020A) to the
-> focused PE, with client-coordinate lParam packing. The mouse
-> route consults `WindowGetCapture()` first so a `SetCapture()`d
-> window keeps receiving events after the cursor leaves;
-> `SetForegroundWindow` plumbs through `SetActiveWindow` →
-> `SYS_WIN_SET_ACTIVE` → `WindowRaise` and rewrites
-> `g_active_window`.
-> **T1-04** chrome interactions shipped: the kernel mouse-reader in
-> `kernel/core/main.cpp` posts `WindowRaise` on any in-window press
-> for Z-order, runs `WindowPointInMinBox` / `WindowPointInMaxBox` /
-> the close-glyph hit-test for click-to-min / click-to-max-restore /
-> click-to-close, double-click in the title-bar toggles
-> max ↔ restore, Alt+F4 closes (with the Notes dirty-prompt), and
-> Ctrl+Alt+Arrow drives the snap shortcuts (Left/Right halves, Up
-> maximize, Down restore-or-minimize). Title-bar press-and-drag
-> moves the window through `WindowMoveTo`. The system-menu (NC
-> right-click) Move / Size entries fall through `ModalInputBegin`
-> for the cursor-follow interactive forms.
-> **T1-05** memory-DC + BitBlt landed: `gdi32!CreateCompatibleDC` /
-> `CreateCompatibleBitmap` / `SelectObject` / `DeleteDC` /
-> `DeleteObject` / `BitBlt` route through SYS_GDI_CREATE_COMPAT_DC
-> (106) / SYS_GDI_CREATE_COMPAT_BITMAP (107) / SYS_GDI_SELECT_OBJECT
-> (110) / SYS_GDI_DELETE_DC (111) / SYS_GDI_DELETE_OBJECT (112) /
-> SYS_GDI_BITBLT_DC (113) into the per-process MemDC + Bitmap
-> tables in `kernel/subsystems/win32/gdi_objects.cpp`.
->
-> Track 1 has no remaining roadmap rows.
-
-### Track 2 — COM infrastructure
-
-> Path helpers (`SHGetSpecialFolderPath{A,W}`, `SHGetFolderPath{A,W}`),
-> `SHGetDesktopFolder`, and the IFileDialog / IFileOpenDialog /
-> IFileSaveDialog vtables on the FileOpenDialog / FileSaveDialog
-> factory registrations all ship — see
-> [`Win32-Surface-Status`](Win32-Surface-Status.md) §"shell32.dll"
-> and §"ole32.dll". `IFileDialog::Show` returns `S_FALSE` (user
-> cancelled) and `GetResult` fails cleanly so callers' fallback
-> branch runs without a real picker UI; setters succeed silently.
-> Track 2 has no remaining roadmap rows — a real picker UI is
-> Compositor.md follow-up work, not COM infrastructure.
-
-### Track 3 — Networking
-
-> **T3-02** DHCP client + iphlpapi exposure shipped: `kernel/net/stack.{h,cpp}`
-> runs `DhcpStart` against the e1000 iface at boot and stores the bound
-> lease (IP / router / DNS / lease seconds) in `DhcpLeaseRead`. New
-> `kSockOpGetLease = 13` op on `SYS_SOCKET_OP = 153` snapshots the
-> lease into a userland-supplied `SocketLeaseInfo` buffer (40 bytes —
-> see syscall.h for layout). `userland/libs/iphlpapi/iphlpapi.c::GetAdaptersInfo`
-> consumes the new op and emits a two-record chain: an ethernet
-> adapter populated from the live lease (IP / netmask / gateway /
-> DhcpEnabled / MAC) followed by the loopback adapter that callers
-> rely on for 127.0.0.1.
-> **T3-03** DNS resolver + cache shipped: kernel-side DNS already
-> routed through `kSockOpResolveA` (`NetDnsQueryA` against the
-> DHCP-supplied resolver). `userland/libs/ws2_32/ws2_32.c::getaddrinfo`
-> now resolves IP literals through `inet_addr`, special-cases
-> "localhost" → 127.0.0.1, and falls through a 16-entry LRU cache
-> + the kernel resolver for everything else; `freeaddrinfo` releases
-> the single-block addrinfo + sockaddr_in pair. The smaller
-> 16-slot cap (vs. the row's original "64-entry LRU" target) is
-> lifted on demand — the data structure is a flat scan, not a
-> hash, so growth is mechanical.
-> **T3-01** socket loopback round-trip shipped: `kernel/net/socket.cpp`
-> short-circuits `connect()` when peer_ip is in 127.0.0.0/8 — finds
-> a listening socket bound to the requested port, allocates two
-> kernel pipe pool slots (one ring per direction, reusing the
-> Linux pipe(2) infrastructure), wires both ends, and pairs the
-> connector with a freshly-allocated accepted socket. New
-> `SocketAcceptLoopback` non-blocking probe lets `accept()` service
-> loopback and on-wire arrivals from a single unified poll loop.
-> `SocketSendStream` / `SocketRecvStream` route paired sockets
-> through `PipeWrite` / `PipeRead` instead of the on-wire TCP
-> slot, so loopback works regardless of e1000 binding state.
-> `SocketRelease` drops the per-end pipe refcounts so EOF / EPIPE
-> propagate cleanly.
-> **T3-04** TCP v1 multi-connection state machine shipped (2026-05-12):
-> `kernel/net/tcp.{h,cpp}` hosts a 256-entry TCB table with hash-bucketed
-> 5-tuple lookup, real LISTEN backlog, full RFC-793 lifecycle, sliding
-> window flow control, out-of-order reassembly, RFC-6298 retransmit
-> with RTO backoff, Reno fast-retransmit + slow-start congestion
-> control, and RFC-7323 window-scale + timestamps. The v0 single-slot
-> machine that used to live in `stack.cpp` is gone — every direct
-> caller (browser app, shell HTTP command, net-smoke, syscall accept,
-> linux subsystem accept, DRSH) now reaches TCP through `net/socket.cpp`,
-> which holds a `tcp::TcbId` per stream socket. See
-> [`networking/TCP-State-Machine.md`](../networking/TCP-State-Machine.md)
-> for design + RFC mapping. The next Phase-1 follow-ons (SACK block
-> generation, CUBIC, SYN cookies) live as their own rows below.
-
-#### Follow-up rows on TCP v1
-
-- **T3-05** SACK block generation + RFC-6675 SACK-driven recovery.
-  SACK-permitted is already advertised on the SYN, so peers won't
-  renegotiate. Trigger: the first multi-gigabit bulk transfer in CI.
-- **T3-06** CUBIC congestion control over Reno. Needs a microsecond
-  clocksource — read directly from HPET or wire the LAPIC TSC-deadline
-  path. Trigger: long-haul throughput probe shows Reno's growth
-  curve dominating the pipe-fill time.
-- **T3-07** RFC-4987 SYN cookies for SYN-flood defence. Today the
-  backlog overflow drops SYNs silently. Trigger: the first inbound
-  service hits a sustained SYN flood.
-- **T3-08** Per-bucket TCB spinlocks for SMP. v1 uses one
-  `arch::Cli` window per public entry; the bucket structure is in
-  place for the swap. Trigger: SMP runqueues land and we start
-  seeing serialisation in TCP RX.
-- **T3-09** TCP_NODELAY / Nagle policy. Public `SetNoDelay` is
-  wired; the segment dispatch already coalesces under MSS but the
-  Nagle predicate ("hold small writes if data is in flight") needs
-  the v1 send buffer policy. Trigger: an interactive workload
-  (DRSH shell, SSH-2) shows the input-echo round-trip dominating.
-
-### Track 4 — DirectX / graphics
-
-> **T4-01** D3D11/DXGI swap-chain presentation into compositor windows
-> shipped: `userland/libs/d3d11/d3d11.c` (`d3d11sc_Present` /
-> `d3d11sc_GetBuffer` / `d3d11sc_ResizeBuffers`) and the matching
-> dxgi paths route through `dx_bb_present` / `dx_win_get_rect`
-> (the latter wraps `SYS_WIN_GET_RECT` = 70, the renamed
-> equivalent of the row's original `SYS_WIN_HWND_TO_RECT (68)`
-> reference). The screenshot-harness PE `dx_demo_window` renders
-> a 24-vertex cube into a real compositor window and Presents
-> it via SYS_GDI_BITBLT, exercising the full path.
-> **T4-02** Vulkan ICD v0 shipped: `kernel/subsystems/graphics/`
-> exposes the Vulkan entry-point table (`vkCreateInstance` /
-> `vkCreateDevice` / `vkAcquireNextImageKHR` / per-stage WSI
-> primitives) backed by a software device. Boot self-test
-> (`graphics_vk_selftest.cpp`) walks the create / queue / swap-
-> chain / present lifecycle without crashing; unimplemented paths
-> return `VK_ERROR_INITIALIZATION_FAILED`.
-> **T4-04** AMD / NVIDIA / Intel probes shipped with graceful
-> software fallback: `kernel/drivers/gpu/{amd,nvidia,intel}_gpu.cpp`
-> all probe their PCIe controllers, log vendor / device / probe
-> register state, and return `Err{Unsupported}` on the command-
-> submission path. The D3D11 / Vulkan layers stay on the
-> shared software rasterizer because nothing attempts to
-> submit a real command ring. The `// STUB:` markers on
-> `amd_gpu.cpp:CP_RB0` / `intel_gpu.cpp:RCS_TAIL` / `nvidia_gpu.cpp`
-> document the per-vendor next steps without breaking today's
-> degrade-to-software contract.
-
-| ID | Scope | Priority | Task | Acceptance |
+| ID | Scope | Pri | Task | Acceptance |
 | --- | --- | --- | --- | --- |
-| T4-03 | gfx | P2 | Implement Intel iGPU Gen9+/Xe driver basics: PCI probe, MMIO BAR, GTT setup, command ring, 2D blitter acceleration. (Probe + register peek landed; GTT, command ring, blitter still pending.) | BitBlt-heavy paths can use Intel blitter acceleration instead of framebuffer software fills. |
+| T4-03 | gfx | P2 | Intel iGPU Gen9+/Xe driver basics: GTT setup, command ring, 2D blitter acceleration (PCI probe + register peek + software fallback landed). | BitBlt-heavy paths use the Intel blitter instead of software fills. |
+| T5-01 | mm | P1 | Full `STATUS_GUARD_PAGE_VIOLATION` delivery to userland for `PAGE_GUARD` pages — **now unblocked** (T6-02 x64 SEH landed). v0 silently re-arms the guard (the next write succeeds); the reserve/commit split + protection bits + `VirtualQuery` already shipped. | A PE relying on the guard-page exception (not just silent stack-grow) sees `STATUS_GUARD_PAGE_VIOLATION`. |
+| T5-03 | mm | P2 | Real KASLR in the UEFI loader (memory-map scan, random 2 MiB-aligned base in a 64 MiB window, boot-info handoff, boot-log report). **Same work as Linux-CVE Class II follow-up.** | Two cold boots show different kernel `.text` load addresses. |
+| T6-05 | win32 | in progress — fault #1 fixed, fault #2 open | MSVC C++ EH (`__CxxFrameHandler3` + `_CxxThrowException`). Two distinct faults were conflated. **Fault #1 (FIXED 2026-05-18):** vcruntime140→ntdll imports (`NtRaiseException`/`RtlUnwindEx`/`RtlCaptureContext`) bound to a catch-all NO-OP because `kernel/proc/spawn.cpp` resolved each preloaded DLL's imports against only the DLLs loaded *before* it, and ntdll is listed after vcruntime140 in `preload_set[]`. Fixed by an order-independent cross-preload reconciliation pass (re-resolve every preloaded image against the full set once assembled). Verified: those imports now resolve via-dll; zero kernel regressions (120 self-tests pass, seh_try still PASS, boot-log-analyze OK). **Fault #2 (OPEN — real remaining blocker):** `cxxeh_pe` still faults `0xC0000005`, faulting RVA `0x23d8` — which is **inside `.rdata` C++ EH metadata** (ThrowInfo/CatchableType, RVA 0x2300–0x2568), i.e. the EH dispatch transferred RIP into EH *data*. This is an address-arithmetic error in the C++ EH engine (vcruntime140 `__CxxFrameHandler3` / ntdll `RtlUnwindEx` continuation/handler-address computation — an RVA-vs-VA / missing-ASLR'd-image-base class bug), **not** import resolution. **Next:** instrument FH3 continuation-address computation; the throw path is `call 0x1400013a0` → `jmp [_CxxThrowException IAT]`; the bad RIP is the catch-funclet/continuation target computed by the personality routine. GAPs (post-unblock): copy-ctor catch objects, strict inner-frame dtor ordering, FH4 compressed FuncInfo, ESTypeList, rethrow. | A PE `try { throw 42; } catch(int){}` resumes in the catch and exits 0. |
+| T7-04 | fs | P2 | Scoped NTFS write: create, write, truncate, delete, rename with MFT/index/journal/bitmap updates; no compression/encryption/ADS for v0. | PEs can perform basic writes to NTFS volumes. |
+| T8-01-followon | sched | P1 | MLFQ priority aging/decay + work-stealing priority behaviour. `Process::win32_priority_class` is wired today; the scheduler ignores it. Rides on the per-CPU `g_sched_lock` split (B2-followup). | A high-priority thread preempts a low-priority thread within one 10 ms tick. |
+| T10-04 | build | P2 | Extend hosted `ctest` to mirror the PE-parser contract (Result / string / syscall_error / cvt / text_hash / d3dcompiler / damage_rect / wild_address / disk_path / vfs_resolve / registry_path already wired). PE parser is kernel-only — use the algorithmic-contract pattern (re-state the routine inline, assert canonical cases) as primitives grow self-contained. | Host `ctest` covers Result + PE parser + VFS + registry + string helpers without QEMU. |
 
-### Track 5 — Memory manager
+---
 
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T5-01 | mm | P1 | Complete `NtAllocateVirtualMemory` / `VirtualAlloc` / `VirtualFree` / `VirtualProtect`: reserve/commit split, release, guard pages, correct protection flags, `VirtualQuery` / `NtQueryVirtualMemory`, and `MEM_WRITE_WATCH` rejection. (Reserve/commit split + protection-bit enforcement shipped — `Process::vmap_regions[16]` tracks (base_va, pages, committed_bitmap, protection, **guard_bitmap**) per region; new syscalls `SYS_VIRTUAL_ALLOC = 199` / `SYS_VIRTUAL_FREE = 200` / `SYS_VIRTUAL_PROTECT = 201` honour `MEM_RESERVE` / `MEM_COMMIT` / `MEM_DECOMMIT` / `MEM_RELEASE` and the `PAGE_*` protection bits via `AddressSpaceProtectUserPage`. `kernel32!VirtualAlloc / VirtualFree / VirtualProtect` route through the new ABI. `VirtualQuery` / `NtQueryVirtualMemory` + `MEM_WRITE_WATCH` rejection were already shipped. **Guard pages shipped (one-shot fault+resume):** PAGE_GUARD-combined protections (`PAGE_READWRITE \| PAGE_GUARD`, etc.) are accepted by `Win32ProtToPageFlags`; the guard-armed page is mapped without the Writable bit so the first write traps. The ring-3 #PF handler in `traps.cpp` calls `Win32VmapPageGuardClear(cr2)` BEFORE the IsolateTask policy fires — on a hit the guard bit is cleared, the underlying base protection is re-applied, and the faulting instruction is retried. Full STATUS_GUARD_PAGE_VIOLATION delivery to userland is still gated on T6-02 (x64 SEH); v0's silent re-arm still serves the common stack-grow probe pattern (the next write succeeds after the first fault).) | MSVC stack-probing apps survive first-thread stack setup. |
-> **T5-02** multi-heap process allocator shipped:
-> `Process::extra_heaps[4]` carries up-to-16-page secondary
-> heaps (1 MiB stride starting at 0x55000000). New syscalls
-> `SYS_HEAPEX_CREATE = 192` / `SYS_HEAPEX_DESTROY = 193` /
-> `SYS_HEAPEX_ALLOC = 194` / `SYS_HEAPEX_FREE = 195` /
-> `SYS_HEAPEX_SIZE = 196` / `SYS_HEAPEX_REALLOC = 197` route
-> by heap handle (handle 0 / `kWin32HeapVa = 0x50000000` resolve
-> to the default heap). The first-fit walker was refactored
-> through a new `Win32HeapBinding` (base, pages, free-head
-> pointer) so the same code-path serves both default and
-> secondary heaps. `kernel32!HeapCreate` / `HeapDestroy` /
-> `HeapAlloc` / `HeapFree` / `HeapSize` / `HeapReAlloc` route
-> through the new ABI; `dwFlags & HEAP_ZERO_MEMORY` is honoured
-> by zeroing the returned payload in user space.
-> CRT `malloc/free/realloc` continue routing through
-> `SYS_HEAP_ALLOC` (11) / `SYS_HEAP_FREE` (12) /
-> `SYS_HEAP_REALLOC` (15) on the default heap — backward
-> compatible. `HeapDestroy` on the default-heap sentinel
-> returns success (no-op) so CRT cleanup paths don't trip.
-| T5-03 | mm | P2 | Implement real KASLR in the UEFI loader: memory-map scan, random 2 MiB-aligned base within a 64 MiB window, boot-info handoff, and boot-log reporting. | Two cold boots show different kernel `.text` load addresses. |
-| T5-04 | mm | P2 | Audit/complete buddy + slab allocators: coalescing, slab freelists or magazines, IRQ-safe `kmalloc` / `kfree`, and documentation of IRQ/process context safety. (IRQ-safe `KMalloc` / `KFree` shipped. **Cross-CPU SMP safety shipped** — frame allocator + kheap now take a reentrant `sync::SpinLock` (`g_frame_lock` / `g_kheap_lock`) at every public entry via `SpinLockRecursiveGuard`; the prior `cli`/`sti`-only guards gave no cross-CPU exclusion, so concurrent `AllocateFrame`/`KMalloc` from APs could double-allocate / corrupt the freelist. Slab was already SMP-safe via its per-cache `sched::Mutex`. Verified: clean single-CPU boot (no self-deadlock from the reentrant guard) + clean default-SMP boot through the AP-bringup concurrent-allocation window. Allocator-family context contract updated in [`Memory-Management`](../kernel/Memory-Management.md). Buddy coalescing, and restoring the per-CPU lock-free fast paths for *scalability* (frame warm-pool / slab magazine), remain deferred to B2-followup — correctness is in place; the single global lock is the contention trade until a profile demands the per-CPU split.) | Allocator behavior and context guarantees are tested and documented. |
+## Tier-1/2 follow-ups (next-slice integration points)
 
-### Track 6 — Process and thread model
-
-> **T6-04** named mutex/event/semaphore namespace shipped:
-> `kernel/ipc/named_kobjects.{h,cpp}` carries a 32-slot
-> kernel-resident table with LRU eviction + spinlock
-> serialisation. New `SYS_NAMED_KOBJ_OPEN_OR_CREATE = 185`
-> syscall (handler in
-> `kernel/subsystems/win32/named_kobj_syscall.cpp`) takes
-> (type, name, init_state, open_only) and either inserts a
-> matching cached kobject into the caller's handle table or
-> creates a fresh one + registers the name. `userland/libs/
-> kernel32` `Create{Mutex,Event,Semaphore}{A,W}` + `Open*`
-> route named calls through the new syscall first, falling
-> back to the unnamed-create path on table-full / OOM.
-> `NamedKObjectSelfTest` runs at boot — register / find /
-> refcount-drift / type-mismatch checks. Out of scope:
-> hierarchical `Global\` vs `Local\` prefix handling (both
-> flatten into the same table); permission gating; refcount-
-> on-last-handle-close → unregister (entries stay in the
-> table until LRU eviction).
-
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-> **T6-03** stdio inheritance shipped: new `SYS_PROCESS_SPAWN_EX = 190`
-> takes a 24-byte `ProcessSpawnStdio` bundle (stdin / stdout / stderr
-> Win32 handles); the spawner duplicates each handle into the
-> child's `win32_handles` table at spawn time, retains pipe-pool
-> refcounts, and writes the inherited handles into the child's
-> `Process::std_handles[]`. `kernel32!CreateProcessA/W` decodes
-> `STARTUPINFO.dwFlags & STARTF_USESTDHANDLES` and routes the
-> three handle slots through the new syscall; non-inherit calls
-> still use `SYS_PROCESS_SPAWN`. New `SYS_GET_INHERITED_STD = 191`
-> + `kernel32!GetStdHandle` consult the per-process slot before
-> falling back to the legacy pseudo-handle. CreateProcessA/W +
-> waiting/exit (NtWaitForSingleObject on the process handle) +
-> NtTerminateProcess + duplicate-handle (NtDuplicateObject) all
-> work today; the parent-creates-child-waits-observes-exit-code
-> round-trip is exercised by the existing `pe_stress` smoke.
-
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T6-01 | kernel | done | **Landed (both halves).** Dynamic TLS (`TlsAlloc`/`TlsSetValue`/`TlsGetValue`/`TlsFree`, per-thread) shipped earlier. Static TLS + TLS callbacks: `kernel/loader/pe_loader.cpp::SetupStaticTls` parses the TLS directory from the mapped (relocated) image, copies the `.tls` template + zero-fill into a process TLS block, wires `TEB.ThreadLocalStoragePointer` + `*_tls_index`, and invokes callbacks before entry via a generated R-X trampoline. Per-thread half: `SYS_THREAD_CREATE` (`thread_syscall.cpp::SetupPerThreadTls`) gives each worker its own TEB + private TLS block (independent template copy) + a `DLL_THREAD_ATTACH` trampoline; the scheduler restores a per-task GSBASE into `KERNEL_GS_BASE` after every `ContextSwitch` (`SchedSetUserGsOverride`) so the worker's return-to-user `swapgs` loads its own TEB (also fixes a latent cross-process gs bug). `TlsCallbacksUnsupported` reject removed. Verified by `userland/apps/tls_pe` (`smoke=pe-hello`): callback-before-entry, static-template copy, per-thread template, `DLL_THREAD_ATTACH`, and per-thread independence all PASS; zero regression on the browser PEs. | A PE with `__declspec(thread) int x = 42` reads independent values from two concurrently-running threads. ✓ |
-| T6-02 | kernel | done | **x64 SEH — slices 1-3 landed.** Slices 1-2: real `RtlCaptureContext` + `RtlLookupFunctionEntry` (now **cross-module** via `SYS_MODULE_BASE_BY_VA = 207` → `ProcessFindModuleBaseByVa`, resolving any loaded module's `.pdata`, not just the EXE) + `RtlVirtualUnwind` + `RtlCaptureStackBackTrace`. **Slice 3 (kernel fault → user dispatch):** a ring-3 #DE/#UD/#GP/#PF in a Win32 PE no longer task-kills first — `kernel/subsystems/win32/seh_dispatch.cpp::Win32DeliverException` builds a Microsoft `EXCEPTION_RECORD` + `CONTEXT` on the faulting user stack (valid seeded FXSAVE image) and rewrites the trap frame to resume at `ntdll!KiUserExceptionDispatcher` (rcx=record, rdx=context). ntdll `ntdll_dispatch.c` ships the real engine: `KiUserExceptionDispatcher` (naked trampoline → `KiUserExceptionDispatcherImpl`) runs the **Vectored Exception Handler** chain (`Rtl{Add,Remove}VectoredExceptionHandler`, also reached via the kernel32 forwarder) then the frame-based `__C_specific_handler` / `RtlUnwindEx` / `RtlRestoreContext` walk; `NtContinue` + `NtRaiseException` are real. A per-task re-fault backstop (`SchedSehDeliveryAllowed`, bound 4096 at one constant RIP) catches a wedged dispatcher; unhandled exceptions terminate in user mode. Verified by `userland/apps/seh_pe` (`smoke=pe-hello`): #PF (null write) and #DE (divide-by-zero) are delivered to a VEH that edits the CONTEXT and continues, repeatably. **Frame-based `__try`/`__except`/`__finally` now smoke-covered too:** `userland/apps/seh_try_pe` is built with `clang --target=x86_64-pc-windows-msvc -fasync-exceptions` and linked against our own `kernel32.lib`/`ntdll.lib` import libs (the mingw smoke toolchain can't express MSVC `__try` in C); it drives the real `__C_specific_handler` → `RtlUnwindEx` → `RtlRestoreContext` path — null-write #PF, divide-by-zero #DE, a `__finally` that runs during the unwind, and a repeatable case all PASS, with `_exception_code()` returning the right NTSTATUS. Zero browser regression. | A PE `__try`/`__except` null write is caught and continues in the exception handler. ✓ |
-| T6-05 | win32 | **in progress — engine landed, verification blocked** | **MSVC C++ EH (`__CxxFrameHandler3` + `_CxxThrowException`).** `userland/libs/vcruntime140/vcruntime140.c` replaces the abort stubs with a real FH3 personality: FuncInfo/ip2state/try/catch decode, type matching across the `CatchableTypeArray` (incl. `catch(...)` and derived→base) by mangled name, in-frame destructor-funclet unwind, catch-object placement, catch-funclet invocation + continuation, all driven through ntdll's existing two-pass dispatcher/`RtlUnwindEx` (vcruntime140 now links `ntdll.lib`; also exports `_fltused` + `??_7type_info@@6B@` that every MSVC C++ PE needs). `_CxxThrowException` builds the `0xE06D7363` `EXCEPTION_RECORD` and enters `NtRaiseException`. Toolchain wired: `tools/build/build-cxxeh-pe.sh` + `userland/apps/cxxeh_pe/cxxeh_pe.cpp` (clang `windows-msvc` C++ throw/catch test) embedded + spawned in the `pe-hello` smoke. **Tree builds clean (debug+release, zero-warning); `_CxxThrowException` verified resolving to vcruntime140 at runtime.** Remaining: the `cxxeh_pe` PE faults `0xC0000005` at image RIP `0x23d8` before the test logic, and the loader logs `ntdll.dll!NtRaiseException: IAT slot VA not mapped → NO-OP` — i.e. the vcruntime140→ntdll import of `NtRaiseException` (and possibly siblings) isn't being resolved at PE-load time even though ntdll exports it (build-ntdll-dll.sh:283). **Next:** trace the loader's cross-DLL import resolution for vcruntime140's ntdll imports (why `RtlUnwindEx`/`RtlCaptureContext` resolve for seh_try but `NtRaiseException` via vcruntime140 does not) — likely a DLL preload-order / IAT-binding ordering issue, not the EH algorithm. GAPs (post-unblock): copy-ctor catch objects, strict inner-frame dtor ordering across C++ frames, FH4 compressed FuncInfo, ESTypeList, rethrow. | A PE `try { throw 42; } catch(int){}` resumes in the catch and exits 0. |
-
-### Track 7 — File system
-
-> **T7-01** (FindFirstFile{A,W}, FindNextFile{A,W}, FindClose,
-> wildcard matching, iterator handles, full WIN32_FIND_DATA)
-> landed. **T7-02** namespace + path APIs ship: GetLogicalDrives,
-> GetDriveType{A,W}, GetCurrentDirectory{A,W}, SetCurrentDirectory{A,W},
-> GetFullPathName{A,W}, GetDiskFreeSpace{A,W}, GetVolumeInformation{A,W}.
-> The `C:` drive maps onto the ramfs root and System32 DLL paths
-> resolve through the Win32 thunks page. **T7-05** (FAT32 LFN read +
-> write for VFAT 0x0F entries) shipped: `kernel/fs/fat32_dir.cpp`
-> walks LFN fragment chains and stitches the UTF-16 codepoints into
-> `DirEntry::name`; `kernel/fs/fat32_create.cpp` writes the
-> SFN-checksummed LFN sequence + 8.3 fallback for any name that
-> needs case preservation, lower-case characters, or > 8.3 length.
-> Mixed 8.3 / LFN reads round-trip; UTF-16 / UTF-8 conversion runs
-> through the shared LFN encode/decode helpers.
-> **T7-03** overlapped I/O via IOCP shipped: `kernel32!CreateIoCompletionPort`
-> registers a (file_handle → iocp_handle, completion_key) binding
-> (16-slot table) when called with a non-INVALID hFile;
-> `kernel32!ReadFile` / `WriteFile` honour `lpOverlapped` for
-> kernel file handles by seeking to `OVERLAPPED.Offset`, performing
-> the synchronous I/O, stamping `OVERLAPPED.Internal` (NTSTATUS) +
-> `InternalHigh` (bytes), and posting a completion packet to the
-> bound IOCP. `GetQueuedCompletionStatus` drains the packet. End-
-> to-end smoke PE (`userland/apps/iocp_overlapped_smoke/`) wires
-> the full path: write file, re-open, bind, read with
-> `OVERLAPPED`, drain. Out of scope: real `ERROR_IO_PENDING`
-> async completion (the I/O is synchronous + the packet is posted
-> before the syscall returns); share-mode enforcement on
-> `CreateFileA/W` (FILE_SHARE_* flags ignored — same as v0
-> single-handle-per-file contract); `OVERLAPPED.hEvent` signaling.
-
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T7-04 | fs | P2 | Add scoped NTFS write support: create, write, truncate, delete, rename with MFT/index/journal/bitmap updates; no compression/encryption/ADS for v0. | PEs can perform basic writes to NTFS volumes. |
-
-### Track 8 — Scheduler
-
-> **T8-02** kernel-resident APC queue + `NtQueueApcThread` shipped:
-> `Process::apc_slots[16]` carries
-> (target_tid, pfn, NormalContext, SystemArgument1, SystemArgument2)
-> tuples; syscalls `SYS_QUEUE_USER_APC = 187` + `SYS_DRAIN_USER_APC = 188`
-> insert/pop entries with cap-gating on `kCapSpawnThread` and
-> same-process restriction on the target tid. `kernel32!QueueUserAPC`
-> tries the kernel queue first (with SA1/SA2 zeroed for the
-> single-`ulData` PAPCFUNC shape) and falls back to the legacy
-> user-space queue on overflow; `kernel32!win32_drain_apc_queue`
-> reads the full 4-tuple from the kernel slot via the
-> rdi=&pfn / rsi=&data / rdx=&arg1 / r10=&arg2 sink quartet and
-> invokes the routine through a three-arg `PIO_APC_ROUTINE` shape
-> (`pfn(NormalContext, SA1, SA2)`). Microsoft x64 ABI ensures a
-> 1-arg PAPCFUNC callee ignores RDX / R8, so the wider shape is
-> wire-compatible with the legacy queue. `ntdll!NtQueueApcThread`
-> / `NtQueueApcThreadEx` now route ALL five SDK args
-> (Thread / Routine / NormalContext / SA1 / SA2) through the
-> kernel queue. SA1 / SA2 sinks on `SYS_DRAIN_USER_APC` are
-> NULL-tolerant, preserving the original 2-pointer ABI for any
-> binary built against it. Cross-process delivery is still GAP —
-> same-process targeting covers the workloads that depend on
-> APCs today; cross-process would require a target-side wakeup
-> IPI which lands with the per-thread kernel-side APC list. Boot
-> self-test (`ApcSelfTest`) exercises queue / drain / cross-tid
-> isolation / capacity overflow / SA1+SA2 round-trip on every boot.
-
-> **T8-01** Win32 priority class mapping shipped: new syscall
-> `SYS_PRIORITY_CLASS = 189` (op=get/set) on a per-process
-> `Process::win32_priority_class` field; `kernel32!SetPriorityClass`
-> + `GetPriorityClass` route through it. The scheduler is
-> single-band today, so the value is recorded for fidelity but
-> doesn't yet bias scheduling. Full MLFQ priority aging/decay
-> and work-stealing priority behaviour ride on the lock-split
-> (B2-followup row above) — once `g_sched_lock` is per-CPU the
-> band-aware enqueue / steal logic becomes a one-slice add-on.
-
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T8-01-followon | sched | P1 | MLFQ priority aging/decay + work-stealing priority behavior. The Win32 priority class field is wired today (`Process::win32_priority_class`); the scheduler still ignores it. Lands once the per-CPU scheduler-lock split lets the runqueue grow priority bands without inflating the global lock's hot path. | A high-priority thread preempts a low-priority thread within one 10 ms tick. |
-
-### Track 9 — Security
-
-> **T9-01** shipped: ring3 spawn checks `PeIsDynamicBase` on the
-> Optional Header DllCharacteristics; if set, picks a 64 KiB-aligned
-> delta in [0, 64 MiB) from `RandomU64`; otherwise loads at preferred
-> base. **Per-DLL randomisation also shipped** — every preloaded DLL
-> now draws its own `RandomU64`-derived 4 KiB-aligned delta in
-> [0, 1 MiB) when its DllCharacteristics has `IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE`,
-> and the DllLoad call passes that delta through. The smaller
-> per-DLL window keeps each DLL inside the gap between its preferred
-> base and the next DLL's preferred base (typical Windows DLLs are
-> spaced by tens of MiB) while still adding 8 bits of independent
-> entropy per DLL. Boot log surfaces both the resulting `base_va`
-> and `aslr_delta` for every DLL preload.
-> **T9-02** shipped: vcruntime140 ships `__security_cookie` /
-> `__security_check_cookie` / `__report_gsfailure` /
-> `__report_rangefailure`, AND the PE loader's
-> `SeedSecurityCookie` reads `IMAGE_LOAD_CONFIG_DIRECTORY.SecurityCookie`
-> and stamps a fresh per-image cookie from the kernel RNG before
-> ring-3 entry. PEs without a load config (or with a pre-/GS
-> layout) silently skip the seed — the compiler-emitted save/check
-> pair still holds because it compares the cookie to itself across
-> one function call.
->
-> **T9-03** (CFG no-op guard stubs) shipped: vcruntime140 exports
-> `_guard_check_icall`, `_guard_dispatch_icall`,
-> `_guard_xfg_check_icall`, and `_guard_xfg_dispatch_icall`. Bitmap
-> enforcement still GAP — see `// GAP: CFG not enforced` discipline
-> in the source.
-
-### Track 10 — Build and CI
-
-> **T10-01** GitHub Actions CI shipped — see
-> `.github/workflows/build.yml` (check-format + build-debug +
-> build-release + qemu-smoke jobs) and `.github/workflows/release.yml`
-> (rolling channel ISO publishing). README carries the build-flavors
-> + per-channel + lifetime-downloads badges.
-> **T10-02** `x86_64-kasan` preset shipped — `CMakePresets.json` defines
-> the configure preset (inherits `x86_64-debug`) with `DUETOS_KASAN=ON`
-> and the matching `x86_64-kasan` build preset.
-> **T10-03** ThinLTO release preset shipped — `CMakePresets.json` defines
-> `x86_64-release-lto` with `DUETOS_LTO=ON`; the kernel link succeeds
-> through lld.
-
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T10-04 | build | P2 | Extend the hosted `ctest` harness to cover the four listed pillars. (Result, string, syscall_error, cvt, text_hash, d3dcompiler, damage_rect, wild_address, disk_path, **vfs_resolve**, **registry_path** wired today — vfs_resolve covers the longest-prefix mount-point matcher in `kernel/fs/mount.cpp::VfsMountResolve` (component-boundary correct + longest-match-wins + inactive-entries-ignored), registry_path covers the case-insensitive `PathEqualCi` + the forgiving `ConcatRegPath` (trailing-slash trim + leading-slash strip + empty-sub reopens-parent + cap-bounded overflow rejection). PE parser is still kernel-only because it pulls in too many transitively-kernel headers to be worth shimming for the host build; the algorithmic-contract pattern (test re-states the kernel routine inline, asserts inputs/outputs against canonical cases) is what scales here. Add per-primitive tests as they grow self-contained enough to mirror.) | Host `ctest` runs without QEMU and covers Result + PE parser + VFS path resolution + registry lookup + string helpers. |
-
-### Track 11 — Kernel infrastructure gaps
-
-> **T11-01** ACPI parser coverage landed: RSDP/XSDT/RSDT discovery,
-> MADT (LAPIC + I/O APIC + Interrupt Source Override + LAPIC Address
-> Override), FADT (PM1A/B control, reset register, ACPI enable),
-> HPET (validation + main-counter enable), SRAT (CPU + Memory
-> Affinity for NUMA). The v0 AML **method** interpreter has now
-> landed (`kernel/acpi/aml_eval.{h,cpp}`) — ACPI S5 / battery /
-> lid-close now block only on the EC driver consuming it (Drivers),
-> not on AML evaluation itself.
-> **T11-03** registry hive persistence landed:
-> `RegistryHiveLoad` runs at boot, every successful registry mutation
-> calls `RegistryHiveSave` (throttled by byte-compare). HKLM / HKCU
-> / HKU + the full Reg* CRUD + enumeration surface advapi32 + the
-> in-kernel registry serialise to the configured FAT32 hive.
-> **T11-04** waitable + multimedia timers shipped:
-> `userland/libs/kernel32/kernel32.c` allocates a manual-reset Event
-> per `CreateWaitableTimer{A,W}` call and reserves a slot in the
-> per-process timer table; `SetWaitableTimer` records the absolute
-> due time + period and resets the event; a single lazily-spawned
-> service thread polls the table every 10 ms and fires `SetEvent`
-> for any timer whose due time has arrived. Periodic timers re-arm
-> from the fire instant. `userland/libs/winmm/winmm.c` mirrors the
-> same pattern for `timeSetEvent` — the registered TIMECALLBACK
-> fires from a winmm-owned service thread, with TIME_PERIODIC
-> re-arming and `timeKillEvent` deactivating the slot. Out of
-> scope: APC completion routines for waitable timers (Track 8-02
-> covers cross-thread APC delivery), TIME_CALLBACK_EVENT_SET /
-> EVENT_PULSE flags for `timeSetEvent`, sub-10 ms resolution.
-> **T11-05** power management shipped:
-> `kernel/power/reboot.cpp::KernelHalt` now tries
-> `acpi::AcpiShutdown()` first (parses AML `\_S5_` from DSDT/SSDT
-> via the existing AML namespace walker, then writes
-> `(SLP_TYP << 10) | SLP_EN` to PM1A_CNT + PM1B_CNT). On hardware
-> where the AML extractor or PM1 block is unavailable, falls
-> through to QEMU-known shutdown ports (0x604 / 0xB004 / 0x4004)
-> that the chipset model honours, then masks interrupts and parks
-> the boot CPU as the documented last resort. The companion
-> `KernelReboot` already chained `acpi::AcpiReset()` (FADT
-> RESET_REG) → 0xCF9 (PC-AT chipset) → 8042 keyboard-controller
-> → triple-fault. `AcpiShutdown` now runs `\_PTS(5)` + `\_GTS(5)`
-> through the AML interpreter (`AcpiRunSleepPrep`) ahead of the
-> PM1 SLP_TYP write, in ACPI §7 order — the step real laptops
-> need to actually soft-off. No-op on QEMU/UEFI that pre-evaluate
-> `_PTS`. S3 (suspend-to-RAM) stays deferred until a workload
-> demands it.
-> **T11-02** anonymous cross-process pipes shipped: the kernel's
-> Linux pipe(2) pool (`kernel/subsystems/linux/syscall_pipe.cpp`,
-> 16 slots × 4 KiB ring) is now reachable from Win32 callers
-> too. New `FsBackingKind::Pipe` variant on `Win32FileHandle`
-> with `pipe_pool_idx` + `pipe_is_write_end` fields;
-> `ReadForProcess` / `WriteForProcess` / `CloseForProcess`
-> dispatch pipe handles to the existing `PipeRead` /
-> `PipeWrite` / `PipeReleaseRead` / `PipeReleaseWrite` helpers.
-> New syscall `SYS_WIN32_CREATE_PIPE = 186` (handler in
-> `kernel/subsystems/win32/pipe_syscall.cpp`) allocates a pool
-> slot via `PipeAlloc()` (now public-namespace) and writes
-> two Win32-shaped file handles to user-supplied pointers.
-> `userland/libs/kernel32/kernel32.c::CreatePipe` routes
-> through the new syscall; the legacy in-process ring stays
-> as the fall-back for kernel-side OOM. Out of scope: named
-> pipes (`CreateNamedPipeW` / `ConnectNamedPipe`),
-> mailslots (`CreateMailslotW`), `CreateProcess` stdio
-> redirection (T6-03 prerequisite).
-
-### Track 12 — Userland infrastructure
-
-> **T12-01** (LoadLibrary / GetProcAddress / FreeLibrary /
-> GetModuleHandle / GetModuleFileName) and **T12-02** (Windows 10
-> 19041 system + version info via GetSystemInfo /
-> GetNativeSystemInfo / GetVersionEx{A,W} / RtlGetVersion /
-> IsWow64Process=FALSE) landed. **T12-04** prioritised stdio
-> (`sscanf`, `fprintf`, `setvbuf`, `setbuf`, `fflush`, `tmpfile`,
-> `tmpnam`, `tmpnam_s`) ships in `ucrtbase`; the long tail
-> (positional args, multi-byte format directives, file-stream
-> buffering) waits for a workload that exercises it.
-
-| ID | Scope | Priority | Task | Acceptance |
-| --- | --- | --- | --- | --- |
-| T12-03 | win32 | P2 | Implement `winmm` waveOut APIs over HDA/audio mixer: open, prepare/write/unprepare, close, and capabilities. (API surface partial — `winmm!waveOutGetNumDevs` returns 1 when an HDA codec is brought up via the new `SYS_AUDIO_DEVICE_INFO = 198` syscall; `waveOutOpen` returns a real sentinel handle so PEs that fall through to `MMSYSERR_NODRIVER` no longer get rejected at probe time. `waveOutPrepareHeader` stamps `WHDR_PREPARED`, `waveOutWrite` stamps `WHDR_DONE` synchronously, `waveOutUnprepareHeader` clears the flag — a poll-for-completion loop terminates. Real-playback path still gated on the DMA-coherent buffer pool + BDL programming under §"Audio — HDA codec / stream programming"; samples are accepted but silently dropped today.) | A PE can play 44.1/48 kHz 16-bit stereo through `waveOut*`. |
-
-### Track 13 — Documentation / wiki
-
-> **T13-01** Win32-Surface-Status audit shipped:
-> `wiki/reference/Win32-Surface-Status.md` carries per-DLL drilldowns
-> for all 46 directories under `userland/libs/` (real DLL bodies
-> + `dx_*.h` shared headers excluded), the `<!-- AUTO:thunks-by-dll -->`
-> auto-blocks list every kernel-fallback thunk per DLL with REAL /
-> NOOP / GAP status, and the manual prose section calls out
-> per-DLL Real / STUB / GAP / MISSING coverage. Live STUB / GAP
-> markers in `userland/libs/` + `kernel/subsystems/win32/` are 0
-> today (the discipline lives entirely in kernel TUs — gpu / iwlwifi
-> — and is greppable via `git grep -nE "// (STUB|GAP):"`).
-> **T13-02** Roadmap-population discipline shipped: this audit-driven
-> session itself satisfies the row. Each landed slice deletes its
-> imported-TODO entry (or shrinks it to its true residual) in the
-> same commit; `Design-Decisions.md` carries an entry per closure
-> recording what's deferred.
-> **T13-03** per-syscall args/return doc-gen shipped: new
-> `tools/build/gen-syscall-doc.py` parses the doc-comments above each
-> `SYS_NAME = N` entry in `kernel/syscall/syscall.h`, extracts the
-> `rdi=… rsi=… returns…` clauses, cross-checks numbers against
-> `kernel/syscall/syscall_names.def` (warns on drift), and emits a
-> markdown table with columns (#, name, args, returns) into the
-> `<!-- AUTO:syscall_args -->` block in
-> [`Syscall-ABI`](../specifications/Syscall-ABI.md).
-> `docs/sync-wiki.sh sync` calls the generator on every sync. Future
-> syscall additions land their docs in the source comment and the
-> table refreshes from `sync-wiki.sh` — no manual table maintenance.
-> Track 13 has no remaining roadmap rows.
-
-### Track 14 — Testing
-
-> **T14-02** (win32 pump test) is covered today by `windowed_hello`
-> (CreateWindowExA → ShowWindow → message pump → InvalidateRect →
-> WM_PAINT round-trip → SetTimer / WM_TIMER → SendMessage →
-> KillTimer) plus `msg_smoke`, `wndmsg_smoke`, and `gdi_smoke`. A
-> dedicated single-binary `win32_pump_test` would be a thin
-> consolidation of those probes — book that under T14-01 if a
-> regression-stress fixture is needed.
-> **T14-01** PE stress fixture shipped: `userland/apps/pe_stress/pe_stress.c`
-> spawns five worker threads exercising heap (HeapAlloc / HeapFree
-> with payload validation), mutex (Wait + Release), event (Set /
-> Reset / Wait round-trip), file (CreateFileW / WriteFile /
-> SetFilePointer / ReadFile / CloseHandle on `/tmp/pe_stress.tmp`),
-> and registry (RegCreateKeyEx + RegSetValueEx + RegQueryValueEx
-> on `HKCU\Software\DuetOS\PEStress`). Main thread services
-> printf via WriteConsoleA, sleeps for 2 seconds, signals stop,
-> joins workers, and exits 0 iff every worker made >= 16 loop
-> iterations. Embedded into the boot smoke corpus via
-> `duetos_embed_smoke_pe(pe_stress kBinPeStressBytes)` and
-> `SpawnPeFile("ring3-pe-stress", ...)`. Duration is 2 seconds
-> rather than the row's "30 seconds" target — a 30s soak would
-> balloon every CI cycle; operators wanting longer can run
-> `pe_stress.exe` standalone.
-> **T14-03** network loopback test shipped:
-> `userland/apps/net_loopback_smoke/net_loopback_smoke.c` opens a
-> listener on 127.0.0.1:7777, connects, accepts, spawns a recv
-> worker thread, sends 16 KiB of deterministic pseudo-random
-> bytes, joins, and verifies the per-byte folded checksum.
-> Embedded into the boot smoke corpus via
-> `duetos_embed_smoke_pe(net_loopback_smoke
-> kBinNetLoopbackSmokeBytes)` + `SpawnPeFile("ring3-net-loopback",
-> ...)`. Payload size is 16 KiB rather than the row's 1 MiB
-> target — the kernel pipe ring is 4 KiB and full 1 MiB stresses
-> cooperative scheduling more than v0 latency can handle in a
-> smoke window. Operators can crank `BUF_SIZE` for longer soak
-> runs.
-
-Track 14 has no remaining roadmap rows.
-
-### Imported quick wins
-
-All twelve imported quick wins (QW-01..QW-12) shipped — see
-[`Win32-Surface-Status`](Win32-Surface-Status.md) for the per-DLL
-inventory and [`Design-Decisions`](Design-Decisions.md) for the
-landing notes. The table is removed; future regressions surface
-through the per-DLL smoke tests in `userland/apps/*_smoke/`.
-
-## Tier-1/2 follow-ups (next-slice gaps from the suggest-additions branch)
-
-Tracking the explicit GAPs / STUBs the recent multi-slice feature
-additions left behind. Each one is a clean integration point — the
-kernel-side primitive is in tree; what's missing is the per-call
-wiring that turns "infrastructure exists" into "real callers using
-it."
+The kernel-side primitive is in tree for each; what's missing is
+the per-call wiring.
 
 ### VirtIO — virtio-blk concurrency + IRQ
 
-- **Today:** read, write, AND flush paths all land. The
-  `BlockOps` vtable grew a `flush` slot;
-  `BlockDeviceFlush(handle)` calls through (returns 0 for
-  backends with no flush hook). virtio-blk routes the flush
-  through `VIRTIO_BLK_T_FLUSH` via the same shared scratch
-  page; the other registered backends (RAM disk, partition
-  view, NVMe, AHCI) declare `flush = nullptr` until their
-  own flush primitives wire up. Concurrent
-  read/write/flush callers are serialised on a per-device
-  `sched::Mutex` around the shared header page + descriptor
-  chain — concurrency safety is no longer the blocker.
-- **Lands:**
-  - IRQ wire-up so consumers don't pay a busy-poll for I/O
-    that's already serviced by the host.
-  - Throughput: multiple in-flight descriptor chains so a
-    second caller isn't fully serialised behind the first
-    (depends on IRQ-driven completion landing first — the
-    poll model can only track one chain).
+- **Lands:** (1) IRQ wire-up so consumers don't busy-poll for
+  already-serviced I/O; (2) multiple in-flight descriptor chains
+  so a second caller isn't fully serialised behind the first
+  (depends on IRQ-driven completion first — the poll model
+  tracks one chain). (Read/write/flush + per-device serialising
+  mutex landed.)
 
 ### VirtIO — per-class polish
 
-- **Today:** every per-class probe v0 ships.
-  - virtio-rng pulls entropy into the kernel pool via
-    `RandomMix`.
-  - virtio-blk drives read + write + flush through
-    `BlockDevice`.
-  - virtio-net transmits frames via `VirtioNetTransmit` AND
-    drains inbound frames off the receiveq into
-    `NetStackInjectRx` from a dedicated 10 ms-cadence
-    `virtio-net-rx-poll` task; `NetStackBindInterface`
-    registers the device at iface index 2 with DHCP kicked
-    off at probe time.
-  - virtio-console writes to the host via
-    `VirtioConsoleWrite` AND drains host-typed bytes from
-    the receiveq via `VirtioConsolePollByte`.
-  - virtio-balloon negotiates + installs inflateq +
-    deflateq; the device sees a fully-configured driver.
-  - virtio-input drives the eventq: a dedicated
-    10 ms-cadence `virtio-input-evt-poll` task drains
-    `virtio_input_event` records. `EV_KEY` keyboard codes
-    translate through the shared active PS/2 keymap (Linux
-    keycodes == set-1 scancodes for the AT block) and
-    inject via `KeyboardInjectEvent`; `EV_REL` deltas +
-    `BTN_*` mouse buttons accumulate per frame and flush a
-    `MousePacket` on `EV_SYN` via `MouseInjectPacket` —
-    the same input queues PS/2 / xHCI HID / Bluetooth HID
-    feed. `ID_NAME` config read for the boot sentinel.
-- **Lands:**
-  - **virtio-blk concurrency + IRQ** (see entry above).
-  - **virtio-console multiport** —
-    `VIRTIO_CONSOLE_F_MULTIPORT` + the control-queue
-    protocol.
-  - **virtio-balloon inflate/deflate policy** — driver
-    hands PFNs back on inflate requests. The harder half
-    is the "when do we agree to give up memory?" policy;
-    spec-pure dispatch is straightforward.
-  - **virtio-input EV_ABS + statusq** — EV_REL pointer
-    (virtio-mouse) landed; EV_ABS (virtio-tablet absolute
-    coordinates) still needs an absolute injection path
-    (the unified `MousePacket` API is relative-only), plus
-    the statusq for LED / force-feedback.
-  - IRQ wire-up across the board (rng, blk, net, console,
-    balloon, input).
+- **Lands:** virtio-blk concurrency + IRQ (above);
+  virtio-console multiport (`VIRTIO_CONSOLE_F_MULTIPORT` +
+  control-queue protocol); virtio-balloon inflate/deflate policy
+  (the "when do we agree to give up memory?" half — spec
+  dispatch is straightforward); virtio-input EV_ABS + statusq
+  (absolute injection path — the unified `MousePacket` API is
+  relative-only — plus statusq for LED / force-feedback);
+  IRQ wire-up across rng/blk/net/console/balloon/input. (Every
+  per-class probe v0 + RX/TX poll tasks landed.)
 
 ### IOCP — primitive consolidation
 
-- **Today:** two parallel IOCP infrastructures still exist
-  in tree but the newer one is now feature-complete:
-  - The legacy `kernel/subsystems/win32/iocp_job.{h,cpp}`
-    impl provides `SYS_IOCP_CREATE/SET/REMOVE/CLOSE`
-    (numbers 159–162) — wire-compatible with the Win32
-    ABI shape the existing Win32 DLLs expect.
-  - The newer `kernel/ipc/iocp.{h,cpp}` KObject-compliant
-    primitive — `IocpPort` embeds a `KObject base` (type
-    `KObjectType::Iocp = 7`); `IocpCreate` allocates via
-    kheap + `KObjectInit`; destroy callback frees on last
-    release. `IocpPort` now carries an embedded
-    `sched::Mutex` + `sched::Condvar not_empty`; every
-    post / pop / wait serialises through the mutex, and
-    `IocpWait(port, out, timeout_ticks)` provides the
-    `GetQueuedCompletionStatus`-shaped blocking variant
-    (`0` = probe, `kIocpTimeoutInfinite` = block
-    indefinitely, any other value = block at most N
-    ticks). `IocpClose` flips a `closed` flag and
-    broadcasts `not_empty` so blocked consumers wake and
-    return false. Boot self-test covers FIFO + overflow +
-    KObject round-trip + `closed`-rejects-post + the
-    three IocpWait paths (probe, drain-after-post,
-    finite-timeout on empty). Self-test moved to
-    `Phase::Sched` because the new mutex/condvar paths
-    require the scheduler online.
-- **Lands:**
-  - **Consolidation:** migrate `iocp_job.cpp` onto the
-    new KObject-shaped `IocpPort` so the per-process
-    storage sits in `kobj_handles` alongside KMutex /
-    KEvent (uniform handle-table semantics). The new
-    primitive is wire-compatible with the
-    `SetIoCompletion` / `RemoveIoCompletion[Ex]` shapes
-    the legacy `iocp_job` ports expose — every per-call
-    field has a slot on `IocpCompletion`, and the
-    blocking-wait semantics line up directly with
-    `IocpWait`. The migration is a re-routing patch in
-    the four `SysIocp*` syscalls.
-  - A `SYS_IOCP_POST` (synthetic completion injection,
-    `PostQueuedCompletionStatus`) to round out the
-    Win32 ABI — the legacy `iocp_job` surface doesn't
-    expose this yet; the new `IocpTryPost` already does
-    the right thing from kernel context and the
-    syscall is a thin Win32-shaped wrapper.
+- **Lands:** (1) migrate the legacy
+  `kernel/subsystems/win32/iocp_job.{h,cpp}`
+  (`SYS_IOCP_CREATE/SET/REMOVE/CLOSE` 159–162) onto the newer
+  KObject-shaped `IocpPort` (`kernel/ipc/iocp.{h,cpp}`) so
+  per-process storage sits in `kobj_handles` alongside KMutex /
+  KEvent — a re-routing patch in the four `SysIocp*` syscalls,
+  the shapes are wire-compatible; (2) add `SYS_IOCP_POST`
+  (`PostQueuedCompletionStatus`) — a thin Win32-shaped wrapper
+  over the existing `IocpTryPost`. (The new KObject primitive +
+  blocking `IocpWait` + self-test landed.)
 
 ### A/B kernel slots — installer + GRUB cfg
 
-- **Today:** state machine, parser/writer, in-RAM
-  `CurrentState`, path helpers, boot-time hand-off,
-  heartbeat-driven watchdog mark-healthy, AND
-  callback-based persistence helpers (`LoadVia` /
-  `SaveVia`) all landed. The persistence helpers take
-  caller-supplied I/O callbacks so the FAT32 / ramfs /
-  DuetFS integrations plug in without coupling
-  `boot_slot` to any specific FS. The self-test exercises
-  the round-trip through an in-memory buffer.
-- **Lands:**
-  - **Installer:** `CmdInstall` writes the new kernel to
-    `SlotKernelPath(Other(active))`, validates, then
-    `BeginInstall(state, Other(active))` +
-    `SaveVia(<fat32-writer>, &state)` so the new state
-    persists on the ESP. The FAT32 writer callback is the
-    only new code — `boot_slot` handles the rest.
-  - **GRUB cfg:** two menuentries, one per slot; the
-    install path writes the current `active` as the GRUB
-    default (`set default=a`/`b`) and embeds the matching
-    `slot=a` / `slot=b` in each menuentry's `multiboot2`
-    line. Limine / direct-load flavours pick the same
-    convention.
+- **Lands:** (1) installer — `CmdInstall` writes the new kernel
+  to `SlotKernelPath(Other(active))`, validates, then
+  `BeginInstall` + `SaveVia(<fat32-writer>, &state)` so the new
+  state persists on the ESP (the FAT32 writer callback is the
+  only new code); (2) GRUB cfg — two menuentries, one per slot,
+  with the active slot as `set default` and the matching
+  `slot=a`/`slot=b` on each `multiboot2` line. (State machine,
+  parser/writer, watchdog mark-healthy, callback-based
+  persistence helpers landed.)
 
 ### PE-compat smoke — per-PE structured pass/fail
 
-- **Today:** the battery emits per-API PASS/FAIL on serial;
-  one anchor line `[pe-compat-smoke] battery complete`
-  proves the queueing path ran. ctest greps for the anchor.
-- **Lands:** a kernel-side aggregator that counts per-PE
-  PASS lines and emits a final `[pe-compat-smoke]
-  passed=N failed=M skipped=K` summary. Requires every
-  smoke PE to standardise its PASS line shape
-  (`[ring3-<n>-smoke] PASS` / `... FAIL <reason>`). One
-  small per-PE source edit per shape; the aggregator
-  watches the serial stream from the kernel side via the
-  klog ring.
+- **Lands:** a kernel-side aggregator that counts per-PE PASS
+  lines and emits `[pe-compat-smoke] passed=N failed=M
+  skipped=K`. Requires every smoke PE to standardise its PASS
+  line (`[ring3-<n>-smoke] PASS` / `... FAIL <reason>`) — one
+  small per-PE source edit; the aggregator watches the serial
+  stream via the klog ring. (Per-API PASS/FAIL + the
+  `[pe-compat-smoke] battery complete` anchor landed.)
 
 ---
 
@@ -1803,16 +580,13 @@ it."
 
 When a roadmap item lands:
 
-1. Delete its section from this page.
-2. Add a Design Decisions entry in
-   [`Design-Decisions`](Design-Decisions.md) (one per
-   non-trivial commit).
+1. **Delete its entry from this page** in the same commit.
+2. Add a [`Design-Decisions`](Design-Decisions.md) entry (one
+   per non-trivial commit).
 3. Update [`History`](../getting-started/History.md) if the
    landing changes a project-level milestone.
-4. Update the relevant subsystem wiki page's "Known Limits"
-   section.
+4. Update the owning subsystem wiki page's "Known Limits".
 
-If an item turns out to be wrong-sized for a single commit,
-write a slice plan into the relevant wiki page (e.g. an SMP
-plan section under [`Scheduler`](../kernel/Scheduler.md)) and
-keep this entry as the index pointer.
+If an item is wrong-sized for a single commit, write a slice plan
+into the relevant subsystem page and keep a one-line index
+pointer here — **not** a landed-work paragraph.
