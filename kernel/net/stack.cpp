@@ -2104,6 +2104,18 @@ void NetStackInjectRx(u32 iface_index, const void* frame, u64 len)
 {
     if (frame == nullptr || len < 14)
         return;
+    // Upper-bound the frame at the bus boundary. Device RX paths
+    // (e1000 / virtio-net / cdc-ecm / rndis) pass a length the
+    // device DMA-wrote; a non-conforming or hostile NIC can report
+    // past the driver's per-slot buffer. Clamping here — at the one
+    // chokepoint every driver funnels through — stops the L3
+    // parsers (ARP / IPv4 and everything they reach) from reading
+    // off the end of whatever buffer the driver handed up, for the
+    // whole class of callers at once. 1514 = the max ethernet frame
+    // this v0 stack accepts everywhere else (see ICMP/TCP paths).
+    constexpr u64 kMaxFrame = 1514;
+    if (len > kMaxFrame)
+        return;
     // Drop frames from interfaces outside our table — every L3
     // handler indexes g_interfaces[iface_index] and the per-handler
     // checks vary (ICMP guards, UDP newly guards, ARP relies on

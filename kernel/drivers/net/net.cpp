@@ -271,6 +271,7 @@ struct E1000Ctx
     u32 tx_tail;
     u64 rx_packets;
     u64 rx_bytes;
+    u64 rx_dropped; // RX descriptors dropped for out-of-range length
     u64 tx_packets;
     u64 tx_bytes;
     NicInfo* nic;
@@ -457,6 +458,21 @@ u32 E1000DrainRx(u32 budget_packets)
         if ((d.status & kE1000RxStatusDd) == 0)
             break;
         const u16 len = d.length;
+        // The NIC DMA-writes `length`; a non-conforming or hostile
+        // device can report past the 2 KiB per-slot buffer. The 256
+        // RX buffers are one contiguous allocation, so trusting an
+        // over-length descriptor lets the L3 parsers read across
+        // slots (cross-frame info leak) or off the end of the whole
+        // RX region on the last slot. Drop + recycle out-of-range
+        // descriptors instead of injecting them.
+        if (len == 0 || len > kE1000RxBufBytes)
+        {
+            ++g_e1000.rx_dropped;
+            d.status = 0;
+            g_e1000.rx_tail = slot;
+            E1000Write(kE1000RegRdt, slot);
+            continue;
+        }
         u8* buf = g_e1000.rx_buf_base_virt + u64(slot) * kE1000RxBufBytes;
         ++g_e1000.rx_packets;
         g_e1000.rx_bytes += len;

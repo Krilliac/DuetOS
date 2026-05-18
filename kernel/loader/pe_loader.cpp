@@ -1222,6 +1222,24 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
             // HIGHLOW = 4 bytes, DIR64 = 8 bytes. Read, add delta, write
             // back. Split across two frames if the write straddles a page.
             const u64 patch_bytes = is_highlow ? 4 : 8;
+            // page_rva/offset come straight from the untrusted .reloc
+            // blocks. The AddressSpaceLookupUserFrame check below is
+            // NOT sufficient: the patch is written through the kernel
+            // direct map (PhysToVirt), which bypasses the PTE writable
+            // bit, so a crafted RVA pointing at any mapped page of the
+            // guest AS (its stack, TEB, proc-env, or its own R-X .text)
+            // would be silently rewritten. Confine every patch to the
+            // image's own mapped extent. page_rva is u32, offset u16,
+            // patch_bytes <= 8 — the sum cannot overflow u64.
+            if (u64(page_rva) + u64(offset) + patch_bytes > h.image_size)
+            {
+                SerialWrite("[pe-reloc] patch target outside image rva=");
+                SerialWriteHex(page_rva);
+                SerialWrite(" off=");
+                SerialWriteHex(offset);
+                SerialWrite("\n");
+                return false;
+            }
             u64 orig = 0;
             for (u64 b = 0; b < patch_bytes; ++b)
             {
@@ -1880,7 +1898,26 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             // entry size we just read. For PE32 the resolved VA
             // must fit in 32 bits; we asserted this implicitly by
             // mapping the 32-bit DLL set into the low 4 GiB.
-            const u64 iat_slot_va = h.image_base + u64(first_thunk) + u64(fn_idx) * ent_bytes;
+            const u64 iat_slot_off = u64(first_thunk) + u64(fn_idx) * ent_bytes;
+            // first_thunk is the import descriptor's FirstThunk RVA —
+            // attacker-controlled and, like the .reloc case above,
+            // only checked against AddressSpaceLookupUserFrame, which
+            // does not stop a direct-map write (PhysToVirt bypasses
+            // the PTE W bit). Without this bound a crafted FirstThunk
+            // points the IAT-slot write at any mapped guest page
+            // (stack return addresses, TEB, proc-env). Confine it to
+            // the image extent. first_thunk u32, fn_idx <= kMaxFnPerDll,
+            // ent_bytes <= 8 — the sum cannot overflow u64.
+            if (iat_slot_off + ent_bytes > h.image_size)
+            {
+                SerialWrite("[pe-resolve] ");
+                SerialWrite(dll_name);
+                SerialWrite("!");
+                SerialWrite(fn_name);
+                SerialWrite(": IAT slot outside image\n");
+                return false;
+            }
+            const u64 iat_slot_va = h.image_base + iat_slot_off;
             const mm::PhysAddr iat_frame = mm::AddressSpaceLookupUserFrame(as, iat_slot_va);
             if (iat_frame == mm::kNullFrame)
             {

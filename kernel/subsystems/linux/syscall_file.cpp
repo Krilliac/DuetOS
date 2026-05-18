@@ -131,6 +131,11 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
     {
         return kENOENT;
     }
+    core::Process* p = core::CurrentProcess();
+    if (p == nullptr)
+    {
+        return kEIO;
+    }
     fs::fat32::DirEntry entry;
     const char* leaf = StripFatPrefix(path);
     bool exists = fs::fat32::Fat32LookupPath(v, leaf, &entry);
@@ -140,6 +145,24 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         if ((flags & kO_CREAT) == 0)
         {
             return kENOENT;
+        }
+        // Subsystem isolation: O_CREAT mutates the filesystem, so
+        // it requires kCapFsWrite — the same gate the native ABI's
+        // SYS_FILE_CREATE enforces up front. A cap-less Linux ELF
+        // does not get to advance the create (consume an fd slot,
+        // run the persistence side-effect path, mark pending-create)
+        // by entering through its ABI front-end. Previously this was
+        // only enforced later in DoWrite, letting a cap-less guest
+        // get further than a native process would. See
+        // wiki/kernel/Subsystem-Isolation.md.
+        if (!core::CapSetHas(p->caps, core::kCapFsWrite))
+        {
+            // RecordSandboxDenial is the structured denial channel
+            // (same one native SYS_FILE_CREATE and Linux write() use);
+            // this TU has no klog facility and the recorder is the
+            // signal a triage path consults — no extra log line.
+            core::RecordSandboxDenial(core::kCapFsWrite);
+            return kEACCES;
         }
         // Canary wall: O_CREAT means "create this path". Same
         // policy as Win32 SYS_FILE_CREATE — refuse if the path
@@ -156,8 +179,9 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
         // 0-byte create followed by a write would fail with -EIO.
         // Mark the fd as pending-create; DoWrite then routes the
         // FIRST extending write through Fat32CreateAtPath, which
-        // allocates clusters as part of the create. cap_gate gated
-        // kCapFsWrite at the syscall entry; the caller is allowed.
+        // allocates clusters as part of the create. kCapFsWrite was
+        // verified above (mirrors native SYS_FILE_CREATE); DoWrite
+        // re-checks it as defence in depth on the actual mutation.
         pending_create = true;
         // Synthesise a dir-entry shape so the fd-bind code below
         // sees zero size + zero first_cluster.
@@ -176,11 +200,7 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
     // a TruncateAtPath but it can't shrink past first_cluster<2
     // either. Real callers rarely combine O_TRUNC with non-empty
     // existing files in synxtest/synfs scope; revisit when one does.
-    core::Process* p = core::CurrentProcess();
-    if (p == nullptr)
-    {
-        return kEIO;
-    }
+    // (`p` was resolved above for the O_CREAT cap gate.)
     if (entry.attributes & 0x10)
     {
         // Directory open — allocate a snapshot via the win32 dir

@@ -83,6 +83,13 @@ void KMailboxDestroy(KObject* obj)
 
 void KMailboxPost(KMailbox* mb, const KMailboxMessage& msg)
 {
+    // Pin during the (possibly blocking) wait so closing every
+    // handle while this producer is parked on not_full cannot run
+    // KMailboxDestroy and KFree mb->slots/mb out from under us. Same
+    // pattern as KEventWait/KSemaphoreAcquire/KMutexAcquire. The
+    // Release after the unlock may itself be the final drop that
+    // fires KMailboxDestroy — that is the correct outcome.
+    KObjectAcquire(&mb->base);
     sched::MutexLock(&mb->inner);
     while (mb->count == mb->capacity)
     {
@@ -94,6 +101,7 @@ void KMailboxPost(KMailbox* mb, const KMailboxMessage& msg)
     // Wake one blocked consumer if any.
     sched::CondvarSignal(&mb->not_empty);
     sched::MutexUnlock(&mb->inner);
+    KObjectRelease(&mb->base);
 }
 
 bool KMailboxTryPost(KMailbox* mb, const KMailboxMessage& msg)
@@ -114,6 +122,8 @@ bool KMailboxTryPost(KMailbox* mb, const KMailboxMessage& msg)
 
 void KMailboxReceive(KMailbox* mb, KMailboxMessage* out)
 {
+    // Pin during the (possibly blocking) wait — see KMailboxPost.
+    KObjectAcquire(&mb->base);
     sched::MutexLock(&mb->inner);
     while (mb->count == 0)
     {
@@ -125,6 +135,7 @@ void KMailboxReceive(KMailbox* mb, KMailboxMessage* out)
     // Wake one blocked producer if any.
     sched::CondvarSignal(&mb->not_full);
     sched::MutexUnlock(&mb->inner);
+    KObjectRelease(&mb->base);
 }
 
 bool KMailboxTryReceive(KMailbox* mb, KMailboxMessage* out)

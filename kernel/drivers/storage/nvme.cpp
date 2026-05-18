@@ -382,6 +382,23 @@ bool QueueInit(Queue& q, u32 entries, u32 id)
     return true;
 }
 
+// Set for the entire duration of any panic-time write (the single
+// chokepoint PanicWriteChunked, which both NvmePanicWriteDump and
+// NvmePanicWriteFixJournal funnel through). SubmitAndWait consults
+// this to force the CQ busy-wait path instead of WaitQueueBlock:
+// in panic/trap context the scheduler is not running and the
+// MSI-X completion ISR cannot make forward progress, so blocking
+// on the wait queue would wedge the box inside the panic handler
+// and silently lose the crash dump. Honoured even when MSI-X is
+// bound — matching the contract documented in the header.
+constinit bool g_panic_write_active = false;
+
+struct PanicWriteScope
+{
+    PanicWriteScope() { g_panic_write_active = true; }
+    ~PanicWriteScope() { g_panic_write_active = false; }
+};
+
 // Submit one command into `q` and poll its completion. `entry.cdw0`
 // must carry opcode; this helper fills in CID and returns true iff
 // the completion status field is zero. On failure the split SC/SCT
@@ -491,7 +508,10 @@ bool SubmitAndWait(Queue& q, SqEntry entry)
         // bring-up, and blocking on a wait queue before the task
         // scheduler is fully running would deadlock. Lost-wakeup
         // guard: re-check the phase bit under Cli before blocking.
-        if (g_ctrl.irq_vector != 0 && q.id != 0)
+        // Panic-time writes must NEVER block here: the scheduler is
+        // not running and the completion ISR cannot wake us, so we
+        // fall through to the CpuPause() busy-wait path instead.
+        if (g_ctrl.irq_vector != 0 && q.id != 0 && !g_panic_write_active)
         {
             duetos::arch::Cli();
             const u32 dw3_recheck = cq_slot.cid_phase_status;
@@ -957,6 +977,11 @@ bool RegisterAsBlockDevice()
 // successfully landed; sets the global ok flag.
 u64 PanicWriteChunked(u64 base_lba, const u8* bytes, u64 len)
 {
+    // Force SubmitAndWait onto the busy-wait completion path for
+    // every command issued under this call, regardless of return
+    // point (RAII so the early-return ladder below can't leak the
+    // flag set).
+    PanicWriteScope panic_scope;
     g_panic_last_ok = false;
     g_panic_last_bytes = 0;
     if (!g_ctrl.online || bytes == nullptr || len == 0)

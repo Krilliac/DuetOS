@@ -17,6 +17,7 @@
 #include "mm/kheap.h"
 #include "mm/page.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 
 // Linker-emitted symbols for the trampoline image (see ap_trampoline.S).
 // Declared at file scope (outside any namespace) so the linker matches
@@ -237,11 +238,12 @@ void ReschedIpiHandler()
 
 // TLB-shootdown IPI request. Filled by SmpTlbShootdown{Addr,Range} on
 // the requesting CPU, read by every target CPU's IPI handler. A simple
-// "current request" model is fine for v0: shootdown is rare, the
-// requesting CPU holds the page-table mutation atomic with a brief lock
-// in the caller, and overlapping shootdowns from different CPUs would
-// be serialised by that same lock. If contention shows up, swap to a
-// per-CPU mailbox.
+// "current request" model is fine for v0 (shootdown is rare), but it
+// is a SINGLE global slot, so concurrent requestors must be serialised
+// explicitly — g_tlb_shootdown_lock below does that. (The earlier
+// assumption that the caller's page-table lock serialises them was
+// wrong: that lock is per-AS, so cross-AS shootdowns race.) If
+// contention shows up, swap to a per-CPU mailbox.
 struct TlbShootdownRequest
 {
     mm::AddressSpace* as;
@@ -250,6 +252,28 @@ struct TlbShootdownRequest
     volatile u64 acks; // bumped by each target CPU when done
 };
 volatile TlbShootdownRequest* g_tlb_request = nullptr;
+
+// Serialises the whole publish/IPI/wait/clear window in
+// SmpTlbShootdownBroadcast. The original "current request" model
+// assumed concurrent shootdowns are serialised by the caller's
+// page-table lock — but that lock is PER-ADDRESS-SPACE
+// (as->regions_lock), so two CPUs unmapping pages in DIFFERENT
+// address spaces concurrently both overwrite the single global
+// g_tlb_request. Targets servicing the first requestor's IPI then
+// ack the second request, the first requestor's ack count never
+// completes, it times out and proceeds with a STALE WRITABLE TLB
+// entry on a peer — pointing at a frame that may already be
+// recycled into another process. A dedicated global lock (not the
+// per-AS one) is the correct serialisation scope.
+constinit duetos::sync::SpinLock g_tlb_shootdown_lock{};
+
+// The shootdown target mask (and AddressSpace::active_cpu_mask it
+// is built from) is a u32 indexed by `1u << (cpu_id & 31u)`. At
+// the current cap there is no aliasing, but the day kMaxCpus is
+// bumped past 32, CPU N and CPU N+32 would alias the same bit —
+// silently reintroducing the stale-TLB hole with no other signal.
+// Fail the build instead.
+static_assert(acpi::kMaxCpus <= 32, "TLB-shootdown CPU mask is u32; widen the mask if kMaxCpus > 32");
 
 // TLB-shootdown IPI handler. Runs with IF=0 on the target CPU. Flushes
 // the requested range if the target's current AS matches, then acks.
@@ -320,6 +344,14 @@ void SmpTlbShootdownBroadcast(mm::AddressSpace* as, u64 virt_start, u64 virt_end
     {
         return; // single CPU: no peers
     }
+
+    // Serialise the entire publish→IPI→wait→clear window against
+    // any other CPU running a shootdown for a different AS. RAII so
+    // every early return below (mask == 0, etc.) releases it; IRQs
+    // are saved/disabled for the duration, which is required anyway
+    // (the requestor must not be preempted between publishing the
+    // request and clearing it). The wait is bounded by kSpinLimit.
+    duetos::sync::SpinLockGuard tlb_guard(g_tlb_shootdown_lock);
 
     // Build the request struct on this stack. Targets read it via the
     // global pointer; the requesting CPU owns the lifetime.

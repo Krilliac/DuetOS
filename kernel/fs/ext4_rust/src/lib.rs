@@ -341,6 +341,16 @@ fn parse_dirent(block: &[u8], byte_off: u32, out: &mut DuetosExt4DirEntry) -> u3
     if (rec_len & 0x3) != 0 {
         return 0;
     }
+    // The name must fit inside this record. Without this, a crafted
+    // image (e.g. rec_len=8 at the last 8 bytes of the block, but
+    // name_len=255) makes the C++ caller copy `name_len` bytes from
+    // `name_offset = off + 8`, reading past the directory block into
+    // adjacent kernel heap and leaking it to the guest via readdir.
+    // `rec_len + off <= block.len()` is already enforced above, so
+    // bounding the name by `rec_len` bounds it by the block.
+    if 8usize + (name_len as usize) > rec_len as usize {
+        return 0;
+    }
     out.inode = inode;
     out.rec_len = rec_len;
     out.name_len = name_len;

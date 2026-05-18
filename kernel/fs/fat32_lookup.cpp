@@ -197,6 +197,22 @@ bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
         while (*path == '/')
             ++path;
 
+        // "." — stay. ".." — REJECTED. Mirror VfsLookup
+        // (vfs.cpp:301-309): rejecting these here makes the
+        // no-escape guarantee independent of WalkDirChain's
+        // IsDotEntry filter, which runs on the decoded SFN BEFORE
+        // the LFN name override — so a crafted image with an
+        // innocuous SFN whose LFN assembles to ".." would otherwise
+        // be matched by FindVisitor and descend to an
+        // attacker-chosen cluster.
+        if (n == 1 && comp[0] == '.')
+            continue;
+        if (n == 2 && comp[0] == '.' && comp[1] == '.')
+        {
+            KLOG_WARN_A(::duetos::core::LogArea::FS, "fs/fat32", "lookup: '..' component rejected");
+            return false;
+        }
+
         if ((cur.attributes & kAttrDirectory) == 0)
         {
             KLOG_WARN_AS(::duetos::core::LogArea::FS, "fs/fat32",

@@ -70,6 +70,11 @@ void KWaitableDestroy(KObject* obj)
 
 u32 KWaitableWaitForAny(KWaitable* w)
 {
+    // Pin during the blocking wait so closing every handle while a
+    // waiter is parked on the condvar cannot run KWaitableDestroy
+    // and free w out from under us. Same pattern as
+    // KEventWait/KMailboxReceive.
+    KObjectAcquire(&w->base);
     sched::MutexLock(&w->inner);
     while (true)
     {
@@ -84,6 +89,7 @@ u32 KWaitableWaitForAny(KWaitable* w)
             if (w->preds[i].fn(w->preds[i].arg))
             {
                 sched::MutexUnlock(&w->inner);
+                KObjectRelease(&w->base);
                 return i;
             }
         }

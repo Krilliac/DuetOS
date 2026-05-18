@@ -854,11 +854,24 @@ void* MapMmio(PhysAddr phys, u64 bytes)
     {
         return nullptr;
     }
+    // A single MMIO mapping can never legitimately exceed the whole
+    // arena. Rejecting here also bounds `bytes` so the page-round-up
+    // below cannot integer-overflow: without this, a `bytes` near
+    // u64 max wraps `page_offset + bytes + kPageMask` to a tiny
+    // `total`, the arena check passes, and the caller gets a pointer
+    // addressing far less than it asked for (OOB into adjacent
+    // arena mappings). All current callers pass fixed driver sizes.
+    if (bytes > kMmioArenaBytes)
+    {
+        return nullptr;
+    }
     const u64 page_offset = phys & kPageMask;
     const PhysAddr base_phys = phys & ~kPageMask;
     const u64 total = (page_offset + bytes + kPageMask) & ~kPageMask;
     const u64 frames = total >> kPageSizeLog2;
 
+    // total <= kMmioArenaBytes + a page and g_mmio_cursor <=
+    // kMmioArenaBytes, so this sum cannot overflow u64.
     if (g_mmio_cursor + total > kMmioArenaBytes)
     {
         return nullptr; // arena exhausted
