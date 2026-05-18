@@ -42,6 +42,7 @@
 - [802.11 Wireless Stack](drivers/Wireless-80211.md)
 - [Bluetooth](drivers/Bluetooth.md)
 - [Graphics Drivers](drivers/Graphics-Drivers.md)
+- [Neural Engine (NPU)](drivers/Neural-Engine.md)
 - [Audio](drivers/Audio.md)
 - [Input](drivers/Input.md)
 - [VirtIO Devices](drivers/Virtio.md)
