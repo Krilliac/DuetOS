@@ -184,6 +184,82 @@ LoopbackDriver* DriverFromCtx(WirelessDevice* wdev)
     return ::duetos::core::Err{::duetos::core::ErrorCode::BadState};
 }
 
+// Post-association data path. The kernel IP stack hands us a
+// complete 802.3 frame; we GCMP-encrypt it (STA→AP), let the
+// software gateway behind the AP respond, GCMP-encrypt the
+// reply (AP→STA), and queue it for the next pump. This is the
+// TX-then-poll model a real NIC uses — no deep recursion.
+::duetos::core::Result<void> OpSendDataFrame(WirelessDevice* wdev, const u8* eth_frame, u32 frame_len)
+{
+    LoopbackDriver* drv = DriverFromCtx(wdev);
+    if (drv == nullptr || drv->netif == nullptr)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::BadState};
+    if (drv->sta_pairwise_key_len != 16)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::BadState};
+
+    const u8* tk = drv->sta_pairwise_key;
+    const u8* sta = drv->wdev->mac;
+    const u8* ap = drv->ap.mac;
+
+    static u8 wire[kWNetifMaxFrame];
+    u32 wire_len = 0;
+    auto er = WNetifEncap(tk, sta, ap, /*from_ds=*/false, ++drv->netif->tx_pn, eth_frame, frame_len, wire, sizeof(wire),
+                          &wire_len);
+    if (!er.has_value())
+    {
+        ++drv->data_frames_dropped;
+        return er;
+    }
+    ++drv->data_frames_tx;
+    ++drv->netif->tx_frames;
+    // Capture the encrypted bytes + cleartext for test assertions.
+    drv->last_tx_wire_len = (wire_len <= sizeof(drv->last_tx_wire)) ? wire_len : 0;
+    for (u32 i = 0; i < drv->last_tx_wire_len; ++i)
+        drv->last_tx_wire[i] = wire[i];
+    drv->last_tx_plain_len = (frame_len <= sizeof(drv->last_tx_plain)) ? frame_len : 0;
+    for (u32 i = 0; i < drv->last_tx_plain_len; ++i)
+        drv->last_tx_plain[i] = eth_frame[i];
+
+    // AP decrypts what it received off the air.
+    static u8 ap_eth[kWNetifMaxFrame];
+    u32 ap_eth_len = 0;
+    u64 pn = 0;
+    auto dr = WNetifDecap(tk, sta, ap, /*from_ds=*/false, wire, wire_len, &pn, ap_eth, sizeof(ap_eth), &ap_eth_len);
+    if (!dr.has_value())
+    {
+        ++drv->data_frames_dropped;
+        return dr;
+    }
+
+    // The gateway / ISP behind the AP answers.
+    static u8 reply[kWNetifMaxFrame];
+    u32 reply_len = 0;
+    auto gr = FakeGwHandle(drv->gw, ap_eth, ap_eth_len, reply, sizeof(reply), &reply_len);
+    if (!gr.has_value())
+        return gr;
+    if (reply_len == 0)
+        return ::duetos::core::Result<void>{}; // nothing to send back
+
+    if (drv->rx_q_count >= LoopbackDriver::kRxQueueDepth)
+    {
+        ++drv->data_frames_dropped;
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Busy};
+    }
+    u8* slot = drv->rx_queue[drv->rx_q_tail];
+    u32 slot_len = 0;
+    auto er2 =
+        WNetifEncap(tk, sta, ap, /*from_ds=*/true, ++drv->ap_tx_pn, reply, reply_len, slot, kWNetifMaxFrame, &slot_len);
+    if (!er2.has_value())
+    {
+        ++drv->data_frames_dropped;
+        return er2;
+    }
+    drv->rx_queue_len[drv->rx_q_tail] = slot_len;
+    drv->rx_q_tail = (drv->rx_q_tail + 1) % LoopbackDriver::kRxQueueDepth;
+    ++drv->rx_q_count;
+    return ::duetos::core::Result<void>{};
+}
+
 } // namespace
 
 ::duetos::core::Result<u32> LoopbackDriverRegister(LoopbackDriver* drv, const char* ssid, const char* passphrase,
@@ -212,6 +288,7 @@ LoopbackDriver* DriverFromCtx(WirelessDevice* wdev)
     proto.ops.InstallKey = OpInstallKey;
     proto.ops.SendMgmtFrame = OpSendMgmtFrame;
     proto.ops.SendEapolFrame = OpSendEapolFrame;
+    proto.ops.SendDataFrame = OpSendDataFrame;
 
     auto rr = WirelessDeviceRegister(proto);
     if (!rr.has_value())
@@ -270,6 +347,62 @@ LoopbackDriver* DriverFromCtx(WirelessDevice* wdev)
     if (!deliver_r.has_value())
         return deliver_r;
     return ::duetos::core::Result<void>{};
+}
+
+::duetos::core::Result<void> LoopbackDriverBindNetif(LoopbackDriver* drv, u32 iface_index, const u8 gw_ip[4],
+                                                     const u8 lease_ip[4])
+{
+    if (drv == nullptr || drv->wdev == nullptr || gw_ip == nullptr || lease_ip == nullptr)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    if (drv->wdev->op_state != WirelessOpState::Connected || drv->sta_pairwise_key_len != 16)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::BadState};
+
+    drv->ap_tx_pn = 0;
+    drv->rx_q_head = 0;
+    drv->rx_q_tail = 0;
+    drv->rx_q_count = 0;
+    drv->data_frames_tx = 0;
+    drv->data_frames_dropped = 0;
+    drv->last_tx_wire_len = 0;
+    drv->last_tx_plain_len = 0;
+
+    // The gateway/ISP behind the AP: gw_mac = AP MAC, client = STA.
+    drv->gw = FakeGwConfig{};
+    CopyBytes(drv->gw.gw_mac, drv->ap.mac, 6);
+    CopyBytes(drv->gw.client_mac, drv->wdev->mac, 6);
+    CopyBytes(drv->gw.gw_ip, gw_ip, 4);
+    CopyBytes(drv->gw.lease_ip, lease_ip, 4);
+    const u8 mask[4] = {255, 255, 255, 0};
+    CopyBytes(drv->gw.netmask, mask, 4);
+    drv->gw.lease_secs = 3600;
+
+    WNetifCtx* ctx = WNetifBind(drv->wdev, iface_index, drv->wdev->mac, drv->ap.mac, drv->sta_pairwise_key);
+    if (ctx == nullptr)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::IoError};
+    drv->netif = ctx;
+    diag::RecordOk(diag::Layer::Driver, "loop-netif-bind", iface_index, drv->wdev_id, 0);
+    return ::duetos::core::Result<void>{};
+}
+
+u32 LoopbackDriverPump(LoopbackDriver* drv)
+{
+    if (drv == nullptr || drv->netif == nullptr)
+        return 0;
+    u32 injected = 0;
+    // Snapshot the count so frames enqueued by re-entrant TX during
+    // injection are left for the next pump call (bounded recursion).
+    u32 to_drain = drv->rx_q_count;
+    while (to_drain-- > 0 && drv->rx_q_count > 0)
+    {
+        const u32 idx = drv->rx_q_head;
+        const u32 len = drv->rx_queue_len[idx];
+        drv->rx_q_head = (drv->rx_q_head + 1) % LoopbackDriver::kRxQueueDepth;
+        --drv->rx_q_count;
+        auto ir = WNetifInjectDecrypted(drv->netif, drv->rx_queue[idx], len);
+        if (ir.has_value())
+            ++injected;
+    }
+    return injected;
 }
 
 void LoopbackDriverReset(LoopbackDriver* drv)

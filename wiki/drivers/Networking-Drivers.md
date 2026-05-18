@@ -69,7 +69,11 @@ through a hover-preview popup.
 
 ## Known Limits / GAPs
 
-- **Wireless data plane** is not implemented — only chip discovery.
+- **Wireless data plane on live silicon** is not implemented — per-vendor
+  drivers do chip discovery only. A full software data plane (GCMP-128
+  802.11 ↔ 802.3 bridged into the IP stack, DHCP + ping over the
+  encrypted link) is functional against the fake-AP loopback harness;
+  see [Wireless 802.11](Wireless-80211.md).
 - **No NIC bonding / failover**.
 - **RNDIS bulk concurrency**: control plane is fine; bulk RX/TX
   serialization gap — control is single-threaded but RX can race

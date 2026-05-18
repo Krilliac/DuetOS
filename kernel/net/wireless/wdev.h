@@ -163,6 +163,13 @@ struct WirelessDeviceOps
     /// only — the driver wraps them in an 802.3 / 802.11 data
     /// frame as appropriate for the chip.
     ::duetos::core::Result<void> (*SendEapolFrame)(WirelessDevice* wdev, const u8* eapol_frame, u32 frame_len);
+
+    /// Transmit a post-association data frame. The kernel passes a
+    /// complete 802.3 (Ethernet II) frame; the driver converts it
+    /// to an 802.11 data frame, GCMP-encrypts the MSDU under the
+    /// negotiated TK, and queues it. Only valid in Connected
+    /// state. May be null on a control-only (no data plane) driver.
+    ::duetos::core::Result<void> (*SendDataFrame)(WirelessDevice* wdev, const u8* eth_frame, u32 frame_len);
 };
 
 struct WirelessDevice

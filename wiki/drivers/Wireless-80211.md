@@ -6,8 +6,11 @@
 > fires from the underlying NIC's IRQ tail
 >
 > **Maturity:** v0 — Open / WPA2-PSK / WPA3-SAE scan + associate + 4-way
-> handshake functional against the loopback test harness; live RX path
-> driver-specific
+> handshake functional against the loopback test harness; post-association
+> **data plane** (GCMP-128-encrypted 802.11 ↔ 802.3, bridged into the IP
+> stack) functional against the fake-AP + software-gateway harness — a
+> client acquires a DHCP lease and pings the gateway over the encrypted
+> link; live silicon RX path driver-specific
 
 ## Overview
 
@@ -47,11 +50,14 @@ connected through the `WirelessDeviceOps` vtable.
 | [`mlme.h`](../../kernel/net/wireless/mlme.h) / `.cpp` | MLME — `MlmeConnect`, `MlmeDisconnect`, `MlmeScan` |
 | [`fourway.h`](../../kernel/net/wireless/fourway.h) / `.cpp` | WPA / WPA2 4-way handshake (EAPOL-Key M1-M4) |
 | [`eapol.h`](../../kernel/net/wireless/eapol.h) / `.cpp` | EAPoL frame builder + parser |
+| [`gcmp.h`](../../kernel/net/wireless/gcmp.h) / `.cpp` | GCMP-128 MPDU protect/unprotect (AES-GCM AEAD) for the data plane |
+| [`wnetif.h`](../../kernel/net/wireless/wnetif.h) / `.cpp` | 802.3 ↔ 802.11+GCMP conversion + IP-stack netif binding |
+| [`mock_isp.h`](../../kernel/net/wireless/mock_isp.h) / `.cpp` | Live "mock ISP" `WifiBackendOps` — makes the SSID scannable + joinable on a normal boot, with a pump thread |
 | [`inventory.h`](../../kernel/net/wireless/inventory.h) / `.cpp` | Hardware inventory — walks PCI + USB NICs to emit a boot-log block |
 | [`wifi_diag.h`](../../kernel/net/wireless/wifi_diag.h) / `.cpp` | Wi-Fi diagnostic ring (state transitions, RX/TX, errors) |
 | [`wifi80211_rust/`](../../kernel/net/wifi80211_rust/) | Rust crate for fixed-shape decoders (see [Rust Subsystems](../tooling/Rust-Subsystems.md)) |
 | [`parsers_rust/`](../../kernel/net/parsers_rust/) | Rust crate for shared TLV / IE parsing used by both beacon and EAPOL paths |
-| `test/` | Loopback + fake-AP harness — see [Testing](../advanced/Testing.md) |
+| `test/` | Loopback + fake-AP + fake-gateway harness (control tier + GCMP data plane) — see [Testing](../advanced/Testing.md) |
 
 ## The `WirelessDevice` Abstraction
 
@@ -230,7 +236,19 @@ cannot scan or connect; elevation is required (see
   reject unprotected mgmt frames.
 - **Live driver RX path varies.** ath9k_htc / iwlwifi / rtl88xx
   driver-side RX completeness is per-driver; the test harness covers
-  the protocol layer end-to-end on a loopback.
+  the control tier *and* the post-association data plane end-to-end
+  on a software loopback (fake AP + fake gateway).
+- **Data plane is GCMP-128 only, 3-address frames.** The loopback
+  negotiates GCMP-128 (not CCMP) because the kernel already ships a
+  tested AES-GCM primitive; QoS-Data / A4 / WDS header shapes and an
+  upstream NAT beyond the fake gateway are not modelled (the gateway
+  is the whole reachable network, like SLIRP `restrict=on`).
+- **Live mock-ISP backend is one WPA2-PSK network.** `mock_isp`
+  registers `WifiBackendOps` at boot so `wifi scan` lists
+  `DuetOS-ISP` and `wifi connect DuetOS-ISP <psk>` runs the real
+  4-way handshake + DHCP (wrong PSK is rejected). Open / multi-SSID
+  live association is a follow-up — the data plane is GCMP-keyed, so
+  an unencrypted open data path is separate work.
 
 ## Related Pages
 

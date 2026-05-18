@@ -1,7 +1,9 @@
 #pragma once
 
 #include "net/wireless/test/fake_ap.h"
+#include "net/wireless/test/fake_gw.h"
 #include "net/wireless/wdev.h"
+#include "net/wireless/wnetif.h"
 #include "util/result.h"
 #include "util/types.h"
 
@@ -52,6 +54,27 @@ struct LoopbackDriver
     u32 keys_installed;
     u32 mgmt_frames_tx;
     u32 eapol_frames_tx;
+
+    // --- Post-association data plane ---
+    WNetifCtx* netif; // null until LoopbackDriverBindNetif
+    FakeGwConfig gw;  // the software gateway/ISP behind the AP
+    u64 ap_tx_pn;     // AP → STA packet number (for replies)
+
+    // AP→STA reply ring (TX-then-poll model, avoids deep recursion).
+    static constexpr u32 kRxQueueDepth = 8;
+    u8 rx_queue[kRxQueueDepth][kWNetifMaxFrame];
+    u32 rx_queue_len[kRxQueueDepth];
+    u32 rx_q_head;
+    u32 rx_q_tail;
+    u32 rx_q_count;
+
+    // Data-plane counters / last-frame capture for assertions.
+    u32 data_frames_tx;
+    u32 data_frames_dropped;
+    u8 last_tx_wire[kWNetifMaxFrame]; // last encrypted STA→AP frame
+    u32 last_tx_wire_len;
+    u8 last_tx_plain[kWNetifMaxFrame]; // its cleartext 802.3 form
+    u32 last_tx_plain_len;
 };
 
 /// Initialize + register the loopback driver. Builds a fake AP
@@ -69,5 +92,18 @@ struct LoopbackDriver
 /// Reset internal counters / handshake state without re-registering
 /// the wdev. Useful for the "wrong PSK" failure-mode subtest.
 void LoopbackDriverReset(LoopbackDriver* drv);
+
+/// Bind the post-association data plane: register the wireless
+/// netif into the IP stack at `iface_index` (using the negotiated
+/// pairwise TK) and stand up the software gateway behind the AP.
+/// Requires the handshake to have reached Connected. `gw_ip` /
+/// `lease_ip` are the dotted-quad addresses the gateway serves.
+::duetos::core::Result<void> LoopbackDriverBindNetif(LoopbackDriver* drv, u32 iface_index, const u8 gw_ip[4],
+                                                     const u8 lease_ip[4]);
+
+/// Drain queued AP→STA frames into the IP stack (one TX-then-poll
+/// cycle). Returns the number of frames injected. Call in a loop
+/// until it returns 0 to flush a multi-round exchange (DHCP, ARP).
+u32 LoopbackDriverPump(LoopbackDriver* drv);
 
 } // namespace duetos::net::wireless::test
