@@ -846,7 +846,9 @@ duetos_embed_32bit_stub_dll(bcrypt   0x10170000 kBinBcrypt_32DllBytes)
 duetos_embed_blob(generated_vcruntime140_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-vcruntime140-dll.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/vcruntime140.c"
-    COMMENT "Compiling + embedding vcruntime140.dll (memset/memcpy/memmove retirement)")
+    EXTRA_DEPS
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h"
+    COMMENT "Compiling + embedding vcruntime140.dll (C++ EH personality + memops; links ntdll.lib)")
 
 duetos_embed_blob(generated_msvcrt_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-msvcrt-dll.sh"
@@ -879,6 +881,20 @@ duetos_embed_blob(generated_seh_try_pe.h
         "${CMAKE_CURRENT_BINARY_DIR}/generated_kernel32_dll.h"
         "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h"
     COMMENT "Compiling + embedding seh_try_pe.exe (clang-windows __try/__except)")
+
+# cxxeh_pe.exe — real MSVC C++ throw/catch (clang-windows-msvc,
+# exceptions on). Exercises vcruntime140's __CxxFrameHandler3 +
+# _CxxThrowException over the ntdll two-pass engine. Depends on the
+# kernel32 + ntdll + vcruntime140 embeds so their .lib import libs
+# exist (the C++ EH personality/throw resolve to vcruntime140).
+duetos_embed_blob(generated_cxxeh_pe.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-cxxeh-pe.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/userland/apps/cxxeh_pe/cxxeh_pe.cpp"
+    EXTRA_DEPS
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_kernel32_dll.h"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated_vcruntime140_dll.h"
+    COMMENT "Compiling + embedding cxxeh_pe.exe (clang-windows C++ throw/catch)")
 
 duetos_embed_blob(generated_dbghelp_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-dbghelp-dll.sh"
