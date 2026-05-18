@@ -60,16 +60,16 @@ u64 SmpStartAps();
 u64 SmpCpusOnline();
 
 /// Send an arbitrary IPI via the LAPIC Interrupt Command Register.
-/// `target_apic_id` is the destination LAPIC ID (bits 24..31 of the
-/// ICR high half). `icr_low` carries the delivery mode + vector +
-/// level/trigger bits per Intel SDM Vol. 3A "LAPIC Interrupt Command
-/// Register." Blocks until the delivery-status bit clears; panics if
-/// it stays pending for ~1e6 spin iterations (indicates a broken
-/// LAPIC or a CPU that never accepted the IPI).
+/// `target_apic_id` is the full 32-bit destination APIC ID (no
+/// 8-bit truncation — required for x2APIC). `icr_low` carries the
+/// delivery mode + vector + level/trigger bits per Intel SDM Vol.
+/// 3A. Routes through `arch::LapicSendIcr`, which is mode-aware
+/// (xAPIC: ICR-hi/lo + bounded delivery-status spin; x2APIC: one
+/// `wrmsr(0x830)`, no poll).
 ///
-/// Exposed now so future callers (TLB shootdown, resched-IPI, AP
-/// wake-up) share the same ICR dance rather than reimplementing it.
-void SmpSendIpi(u8 target_apic_id, u32 icr_low);
+/// Shared by TLB shootdown, resched-IPI, and AP wake-up so they
+/// don't reimplement the ICR dance.
+void SmpSendIpi(u32 target_apic_id, u32 icr_low);
 
 /// Reschedule-IPI vector. Set by the wake path on a remote CPU's
 /// runqueue to prompt that CPU to call Schedule() promptly rather

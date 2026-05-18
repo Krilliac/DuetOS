@@ -76,7 +76,7 @@ void PerCpuInitBsp()
     // Stamp the LAPIC ID from the LAPIC register — the MADT also
     // reports LAPIC IDs, but the register is the authoritative source
     // for the CPU we're actually executing on.
-    g_bsp_percpu.lapic_id = static_cast<u32>(arch::LapicRead(arch::kLapicRegId) >> 24);
+    g_bsp_percpu.lapic_id = arch::LapicCurrentId();
 
     WriteMsr(kIa32GsBaseMsr, reinterpret_cast<u64>(&g_bsp_percpu));
     // BSP TSS pointer wired here (TssInit ran before PerCpuInitBsp,

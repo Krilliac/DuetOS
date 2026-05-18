@@ -56,14 +56,12 @@ constinit ApGdtBundle* g_ap_gdt_bundles[acpi::kMaxCpus] = {};
 constinit u64 g_cpus_online = 1;  // BSP always counted
 constinit u32 g_cpu_id_limit = 1; // 1 + max cpu_id ever bound (so iteration covers BSP + every AP slot used)
 
-// LAPIC ICR low-half fields.
-constexpr u64 kLapicRegIcrLow = 0x300;
-constexpr u64 kLapicRegIcrHigh = 0x310;
-
+// LAPIC ICR low-half fields. The ICR register layout itself
+// (offsets / the x2APIC MSR / delivery-status polling) is owned by
+// lapic.cpp's LapicSendIcr; smp.cpp only composes the command bits.
 constexpr u32 kIcrDeliveryInit = 5U << 8;
 constexpr u32 kIcrDeliveryStartup = 6U << 8;
 constexpr u32 kIcrLevelAssert = 1U << 14;
-constexpr u32 kIcrDeliveryPending = 1U << 12;
 
 inline void WriteMsrGsBase(u64 value)
 {
@@ -103,19 +101,6 @@ inline u32& TrampU32At(u64 offset)
     return *reinterpret_cast<u32*>(base + offset);
 }
 
-void WaitForIcrDelivery()
-{
-    for (u64 spin = 0; spin < 1'000'000; ++spin)
-    {
-        if ((LapicRead(kLapicRegIcrLow) & kIcrDeliveryPending) == 0)
-        {
-            return;
-        }
-        asm volatile("pause" ::: "memory");
-    }
-    core::Panic("arch/smp", "IPI delivery-status bit stuck");
-}
-
 // Busy-spin up to ~200 ms for the AP to flip its online flag.
 bool WaitForApOnline()
 {
@@ -134,11 +119,11 @@ bool WaitForApOnline()
 
 } // namespace
 
-void SmpSendIpi(u8 target_apic_id, u32 icr_low)
+void SmpSendIpi(u32 target_apic_id, u32 icr_low)
 {
-    LapicWrite(kLapicRegIcrHigh, static_cast<u32>(target_apic_id) << 24);
-    LapicWrite(kLapicRegIcrLow, icr_low);
-    WaitForIcrDelivery();
+    // Mode-aware (xAPIC ICR-hi/lo + poll, or one x2APIC MSR write).
+    // target_apic_id is the full 32-bit ID — no <<24 / u8 truncation.
+    LapicSendIcr(target_apic_id, icr_low);
 }
 
 void PanicBroadcastNmi()
@@ -161,28 +146,10 @@ void PanicBroadcastNmi()
     constexpr u32 kIcrDstShorthandAllExSelf = 3U << 18;
     constexpr u32 icr_low = kIcrDeliveryNmi | kIcrLevelAssert | kIcrDstShorthandAllExSelf;
 
-    // High half doesn't matter with the shorthand, but write it
-    // for cleanliness so peer-LAPIC-ID stales don't show up in a
-    // chipset-specific ICR latch.
-    LapicWrite(kLapicRegIcrHigh, 0);
-    LapicWrite(kLapicRegIcrLow, icr_low);
-
-    // Inline the delivery-wait — the normal helper panics on
-    // timeout, and recursing into Panic from Panic would be a
-    // funhouse-mirrors problem. Wait a bounded number of spins
-    // and return either way.
-    for (u64 spin = 0; spin < 1'000'000; ++spin)
-    {
-        if ((LapicRead(kLapicRegIcrLow) & kIcrDeliveryPending) == 0)
-        {
-            return;
-        }
-        asm volatile("pause" ::: "memory");
-    }
-    // Timed out. Log via raw serial (klog at panic time might be
-    // mid-format) and keep going — the calling CPU's halt still
-    // stops our own execution, which is the minimum guarantee.
-    core::Log(core::LogLevel::Warn, "arch/smp", "NMI broadcast ICR stuck; peer CPUs may keep running");
+    // Shorthand => destination ignored. LapicSendIcr is bounded and
+    // klog-free, so it is safe from the panic path (no Panic-in-
+    // Panic recursion, no klog re-entrancy).
+    LapicSendIcr(0, icr_low);
 }
 
 // GDB stop-rendezvous flag. Set by SmpStopBroadcastNmi, cleared
@@ -218,22 +185,7 @@ void SmpStopBroadcastNmi()
     constexpr u32 kIcrDstShorthandAllExSelf = 3U << 18;
     constexpr u32 icr_low = kIcrDeliveryNmi | kIcrLevelAssert | kIcrDstShorthandAllExSelf;
 
-    LapicWrite(kLapicRegIcrHigh, 0);
-    LapicWrite(kLapicRegIcrLow, icr_low);
-
-    // Bounded wait for delivery — same shape as PanicBroadcastNmi
-    // but we don't need to recursion-proof against a panic-in-panic
-    // funhouse here. If the IPI gets stuck, log and proceed anyway:
-    // the BSP-side stop loop will work with whatever peers froze.
-    for (u64 spin = 0; spin < 1'000'000; ++spin)
-    {
-        if ((LapicRead(kLapicRegIcrLow) & kIcrDeliveryPending) == 0)
-        {
-            return;
-        }
-        asm volatile("pause" ::: "memory");
-    }
-    core::Log(core::LogLevel::Warn, "arch/smp", "stop-NMI ICR stuck; peer CPUs may not have frozen");
+    LapicSendIcr(0, icr_low);
 }
 
 void SmpStopReleaseNmi()
@@ -352,12 +304,9 @@ void SmpSendBroadcastIpiAllExSelf(u8 vector)
 {
     constexpr u32 kIcrDeliveryFixed = 0U << 8;
     constexpr u32 kIcrDstShorthandAllExSelf = 3U << 18;
-    // High half is ignored under the shorthand; write 0 so a
-    // chipset-specific ICR latch doesn't surface a stale peer ID.
-    LapicWrite(kLapicRegIcrHigh, 0);
-    LapicWrite(kLapicRegIcrLow,
-               kIcrDeliveryFixed | kIcrLevelAssert | kIcrDstShorthandAllExSelf | static_cast<u32>(vector));
-    WaitForIcrDelivery();
+    // Shorthand => destination ignored; pass 0. One ICR write
+    // (xAPIC) or one MSR write (x2APIC) reaches every peer.
+    LapicSendIcr(0, kIcrDeliveryFixed | kIcrLevelAssert | kIcrDstShorthandAllExSelf | static_cast<u32>(vector));
 }
 
 // Helper: broadcast a TLB-shootdown IPI to every online CPU other than
@@ -444,7 +393,7 @@ void SmpTlbShootdownBroadcast(mm::AddressSpace* as, u64 virt_start, u64 virt_end
             cpu::PerCpu* peer = SmpGetPercpu(id);
             if (peer == nullptr)
                 continue;
-            SmpSendIpi(static_cast<u8>(peer->lapic_id), icr_low_base | kTlbShootdownIpiVector);
+            SmpSendIpi(peer->lapic_id, icr_low_base | kTlbShootdownIpiVector);
         }
     }
 
@@ -499,7 +448,7 @@ void SmpSendReschedIpi(u32 cpu_id)
     // this CPU's LAPIC ID.
     constexpr u32 kIcrDeliveryFixed = 0U << 8;
     constexpr u32 icr_low_base = kIcrDeliveryFixed | kIcrLevelAssert;
-    SmpSendIpi(static_cast<u8>(target->lapic_id), icr_low_base | kReschedIpiVector);
+    SmpSendIpi(target->lapic_id, icr_low_base | kReschedIpiVector);
 }
 
 // ---------------------------------------------------------------------------
@@ -617,7 +566,11 @@ u64 SmpStartAps()
     TrampU64At(kOffPml4) = ReadCr3() & ~0xFFFULL;
     TrampU64At(kOffEntry) = reinterpret_cast<u64>(&ApEntryFromTrampoline);
 
-    const u8 bsp_apic_id = static_cast<u8>(LapicRead(kLapicRegId) >> 24);
+    // GAP: legacy MADT LAPIC records carry only an 8-bit APIC ID,
+    // so AP matching below is on the low 8 bits. Fine for every
+    // current target (QEMU + <=255-thread boxes); x2APIC MADT
+    // (type 9) parsing for >255 IDs is a separate follow-on.
+    const u32 bsp_apic_id = LapicCurrentId();
     u64 aps_started = 0;
 
     for (u64 i = 0; i < acpi::CpuCount(); ++i)

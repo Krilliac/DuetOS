@@ -824,6 +824,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                            duetos::sched::IdlePowerSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
+        // APIC-mode consistency test (x2APIC vs xAPIC). PASSes on
+        // every guest, reporting the active mode — a real signal.
+        duetos::core::InitcallRegister(duetos::core::Phase::Userland, "apic-mode-selftest",
+                                       []()
+                                       {
+                                           duetos::arch::ApicModeSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Userland);
 

@@ -215,18 +215,29 @@ the same commit** that delivers the code.
   `PanicBroadcastNmi` uses — instead of one `SmpSendIpi` per
   peer. Per-AS shootdowns and the single-target reschedule IPI
   are unchanged (the shorthand cannot be narrowed to a subset).
+- **x2APIC enablement landed:** `lapic.cpp` selects x2APIC
+  (MSR) whenever CPUID advertises it and falls back to xAPIC
+  (MMIO) otherwise. `LapicRead`/`LapicWrite` dispatch on mode
+  (`0x800 + (off>>4)`); the four ICR sites route through one
+  mode-aware `LapicSendIcr` (xAPIC ICR-hi/lo + delivery poll, or
+  one `wrmsr(0x830)`). `SmpSendIpi` now takes a full 32-bit
+  APIC ID (no `<<24`/`u8` truncation); `LapicCurrentId()`
+  normalises the ID read across modes. The old "panic if
+  firmware locked x2APIC on" hard-stop is **deleted** — that
+  configuration (common on server BIOSes) now boots. Self-test
+  `apic-mode-selftest` (Phase::Userland) PASSes on every guest,
+  reporting the active mode.
 - **Remaining scope:** the *cluster-scoped* fan-out (one ICR
   write to the CPUs of one scheduler cluster, not all peers)
-  needs x2APIC logical/cluster destination mode. This kernel
-  deliberately runs xAPIC only — `lapic.cpp` forces the xAPIC
-  fallback and panics if firmware locks x2APIC on — so the
-  per-cluster variant is gated on a separate x2APIC-enablement
-  slice. It also has no current consumer: reschedule is
-  single-target and shootdown is kernel-AS-broadcast or
-  per-AS-targeted, never per-cluster.
-- **Blocks on:** (a) an x2APIC-enablement slice, and (b)
-  profile evidence that a per-cluster (not all-peer) fan-out is
-  workload-justified — pre-emptive build is explicitly avoided.
+  needs x2APIC *logical* destination mode (LDR/cluster
+  addressing) on top of the physical-mode x2APIC just landed,
+  and still has no current consumer (reschedule is
+  single-target; shootdown is kernel-AS-broadcast or
+  per-AS-targeted, never per-cluster).
+- **Blocks on:** profile evidence that a per-cluster (not
+  all-peer) fan-out is workload-justified — pre-emptive build is
+  explicitly avoided. (The x2APIC-enablement prerequisite is
+  now satisfied.)
 
 ### Slab allocator + freed-object poison + real KASAN
 

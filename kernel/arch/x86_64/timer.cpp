@@ -339,7 +339,11 @@ void StartPitPeriodicTickFallback()
     //    override and pick the right polarity/trigger; it unmasks the
     //    pin itself. Same recipe ps2mouse uses for ISA IRQ 12.
     const u32 gsi = acpi::IsaIrqToGsi(0);
-    const u8 bsp_id = static_cast<u8>(LapicRead(kLapicRegId) >> 24);
+    // IOAPIC RTE physical destination is an 8-bit APIC ID in both
+    // xAPIC and x2APIC (the IOAPIC itself is not x2APIC unless
+    // interrupt-remapping is on, which we don't use), so take the
+    // low 8 bits of the mode-normalised ID.
+    const u8 bsp_id = static_cast<u8>(LapicCurrentId());
     IoApicRoute(gsi, kTimerVector, bsp_id, /*isa_irq=*/0);
 
     g_pit_fallback_active = true;

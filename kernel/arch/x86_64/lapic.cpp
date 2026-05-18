@@ -4,6 +4,7 @@
 #include "arch/x86_64/cpu_info.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/serial.h"
+#include "cpu/percpu.h"
 
 #include "log/klog.h"
 #include "core/panic.h"
@@ -29,7 +30,19 @@ constexpr u32 kSvrSoftwareEnable = 1U << 8;
 
 constexpr u8 kSpuriousVector = 0xFF;
 
+// ICR offsets (xAPIC MMIO) and the single x2APIC ICR MSR.
+constexpr u64 kLapicRegIcrLow = 0x300;
+constexpr u64 kLapicRegIcrHigh = 0x310;
+constexpr u32 kX2ApicIcrMsr = 0x830;
+constexpr u32 kIcrDeliveryPending = 1U << 12; // xAPIC delivery-status bit
+
 constinit volatile u32* g_lapic_mmio = nullptr;
+// false = xAPIC (MMIO), true = x2APIC (MSR). Set once in LapicInit
+// before any LapicRead/Write/SendIcr; read-only thereafter.
+constinit bool g_x2apic = false;
+// Usable flag, mode-independent (g_lapic_mmio is always null in
+// x2APIC, so the old "mmio != null" readiness test would lie).
+constinit bool g_lapic_ready = false;
 
 // MSR helpers live in `arch/x86_64/cpu.h` now (same namespace);
 // the local copies that used to sit here would shadow-collide
@@ -52,22 +65,73 @@ bool CpuidApicPresent()
 
 u32 LapicRead(u64 reg_offset)
 {
+    if (g_x2apic)
+    {
+        // x2APIC: register N lives at MSR 0x800 + (offset >> 4).
+        // Holds for every register the kernel reads (ID, version,
+        // timer count, ESR). ICR never comes here — see LapicSendIcr.
+        return static_cast<u32>(ReadMsr(0x800u + static_cast<u32>(reg_offset >> 4)) & 0xFFFFFFFFu);
+    }
     return g_lapic_mmio[reg_offset / sizeof(u32)];
 }
 
 bool LapicIsReady()
 {
-    return g_lapic_mmio != nullptr;
+    return g_lapic_ready;
+}
+
+bool LapicIsX2apic()
+{
+    return g_x2apic;
 }
 
 void LapicWrite(u64 reg_offset, u32 value)
 {
+    if (g_x2apic)
+    {
+        WriteMsr(0x800u + static_cast<u32>(reg_offset >> 4), static_cast<u64>(value));
+        return;
+    }
     g_lapic_mmio[reg_offset / sizeof(u32)] = value;
 }
 
 void LapicEoi()
 {
     LapicWrite(kLapicRegEoi, 0);
+}
+
+void LapicSendIcr(u32 dest, u32 icr_low)
+{
+    if (g_x2apic)
+    {
+        // One 64-bit write: high half = 32-bit destination, low
+        // half = the command. No delivery-status bit in x2APIC —
+        // the write is self-completing, so there is nothing to
+        // poll.
+        WriteMsr(kX2ApicIcrMsr, (static_cast<u64>(dest) << 32) | static_cast<u64>(icr_low));
+        return;
+    }
+    // xAPIC: program destination (bits 31:24), then the command,
+    // then spin on the delivery-status bit. Bounded + klog-free so
+    // the panic / NMI-broadcast callers stay re-entrancy-safe.
+    g_lapic_mmio[kLapicRegIcrHigh / sizeof(u32)] = dest << 24;
+    g_lapic_mmio[kLapicRegIcrLow / sizeof(u32)] = icr_low;
+    for (u64 spin = 0; spin < 1'000'000; ++spin)
+    {
+        if ((g_lapic_mmio[kLapicRegIcrLow / sizeof(u32)] & kIcrDeliveryPending) == 0)
+        {
+            return;
+        }
+        asm volatile("pause" ::: "memory");
+    }
+}
+
+u32 LapicCurrentId()
+{
+    const u32 raw = LapicRead(kLapicRegId);
+    // xAPIC packs the 8-bit ID into bits 31:24; x2APIC's ID MSR
+    // (0x802) is the full 32-bit value with no shift.
+    return g_x2apic ? raw : (raw >> 24);
 }
 
 void LapicInit()
@@ -83,75 +147,88 @@ void LapicInit()
     u64 apic_base_msr = ReadMsr(kIa32ApicBaseMsr);
     const duetos::mm::PhysAddr base_phys = apic_base_msr & kApicBaseAddrMask;
 
-    // Real-hardware refusal path: if firmware booted the CPU in x2APIC
-    // mode (IA32_APIC_BASE bit 10 = EXTD set), the LAPIC's MMIO window
-    // is undefined per Intel SDM Vol 3 §10.12.5 — register reads return
-    // 0xFFFFFFFF and writes are silently dropped. Reaching this branch
-    // on a modern Xeon / EPYC server is common: many BIOSes enable
-    // x2APIC by default.
+    // x2APIC when the CPU advertises it (CPUID.1:ECX[21]). This is
+    // the standard OS choice (Linux/Windows do the same): the MSR
+    // interface is faster, needs no MMIO mapping, carries 32-bit
+    // APIC IDs, and — critically — is the ONLY mode that works when
+    // firmware already locked the CPU into x2APIC (EXTD set), which
+    // many server BIOSes do by default. The old code panicked on
+    // exactly that configuration; it is now a supported boot path.
     //
-    // For v0 the kernel only knows MMIO-based xAPIC. Per SDM §10.12.5
-    // we may transition x2APIC -> disabled -> xAPIC by writing EXTD=0
-    // AND EN=0, then setting EN=1. Some firmware locks the EXTD bit
-    // (IA32_APIC_BASE bit 11 is writable but bit 10 may be sticky on
-    // certain platforms once set, e.g. SMI'd EFI configurations) — in
-    // which case we panic with a clear message so the operator knows
-    // to disable x2APIC in firmware setup, or wait for the kernel's
-    // x2APIC bring-up slice. Far better than silently MMIO'ing into
-    // a window that does nothing.
-    if ((apic_base_msr & kApicBaseExtd) != 0)
+    // Entering x2APIC: set EN=1 and EXTD=1. xAPIC->x2APIC is a legal
+    // one-step transition (SDM Vol 3 §10.12.1); x2APIC->x2APIC (the
+    // firmware-already-enabled case) is idempotent. The reverse
+    // transition (the old disable->xAPIC dance) is no longer needed.
+    if (arch::CpuHas(arch::kCpuFeatX2Apic))
     {
-        core::Log(core::LogLevel::Warn, "arch/lapic", "firmware left CPU in x2APIC mode; attempting xAPIC fallback");
-        const u64 disabled = apic_base_msr & ~(kApicBaseExtd | kApicBaseEnable);
-        WriteMsr(kIa32ApicBaseMsr, disabled);
-        const u64 readback_disabled = ReadMsr(kIa32ApicBaseMsr);
-        // Re-enable in xAPIC mode (EN=1, EXTD=0).
-        WriteMsr(kIa32ApicBaseMsr, (readback_disabled & ~kApicBaseExtd) | kApicBaseEnable);
-        apic_base_msr = ReadMsr(kIa32ApicBaseMsr);
+        WriteMsr(kIa32ApicBaseMsr, apic_base_msr | kApicBaseEnable | kApicBaseExtd);
+        g_x2apic = true;
+        // No MMIO window in x2APIC mode (it is architecturally
+        // undefined); g_lapic_mmio stays null and every access
+        // routes through the MSR path in LapicRead/Write/SendIcr.
+    }
+    else
+    {
+        // Legacy xAPIC. If firmware somehow left EXTD set without
+        // advertising x2APIC in CPUID (not seen in practice — EXTD
+        // implies support) we cannot safely MMIO; that contradiction
+        // is a genuine hard stop.
         if ((apic_base_msr & kApicBaseExtd) != 0)
         {
-            // Firmware refused the transition — the box won't accept
-            // xAPIC mode at all. Panic loudly so the operator gets a
-            // clear remediation path: either disable x2APIC in
-            // firmware setup, or wait for the kernel's x2APIC slice.
-            core::PanicWithValue("arch/lapic",
-                                 "x2APIC mode is locked on by firmware; this kernel only supports xAPIC. "
-                                 "Disable x2APIC in BIOS/UEFI setup.",
+            core::PanicWithValue("arch/lapic", "EXTD set but CPUID lacks x2APIC — inconsistent APIC state",
                                  apic_base_msr);
         }
-        core::Log(core::LogLevel::Info, "arch/lapic", "successfully fell back to xAPIC mode");
+        if ((apic_base_msr & kApicBaseEnable) == 0)
+        {
+            apic_base_msr |= kApicBaseEnable;
+            WriteMsr(kIa32ApicBaseMsr, apic_base_msr);
+        }
+        // Map the 4 KiB register window with cache-disable. Cached
+        // MMIO would turn EOIs into NOPs and timer-init writes into
+        // "delivered eventually when the line gets evicted".
+        void* mmio = duetos::mm::MapMmio(base_phys, 0x1000);
+        if (mmio == nullptr)
+        {
+            PanicLapic("MapMmio failed for LAPIC window");
+        }
+        g_lapic_mmio = static_cast<volatile u32*>(mmio);
     }
-
-    // Set the global enable bit (writing the MSR back also locks-in any
-    // hardware-default settings the firmware may have left clear).
-    if ((apic_base_msr & kApicBaseEnable) == 0)
-    {
-        apic_base_msr |= kApicBaseEnable;
-        WriteMsr(kIa32ApicBaseMsr, apic_base_msr);
-    }
-
-    // Map the 4 KiB register window with cache-disable. Cached MMIO would
-    // turn EOIs into NOPs and timer-init writes into "delivered eventually
-    // when the line gets evicted" — i.e. nothing would work.
-    void* mmio = duetos::mm::MapMmio(base_phys, 0x1000);
-    if (mmio == nullptr)
-    {
-        PanicLapic("MapMmio failed for LAPIC window");
-    }
-    g_lapic_mmio = static_cast<volatile u32*>(mmio);
 
     // Install the spurious vector handler, then enable the LAPIC by
     // setting the SVR's software-enable bit. Vector goes in the low 8
     // bits; the low 4 bits are hard-wired to 1 on most CPUs, hence the
-    // conventional 0xFF.
+    // conventional 0xFF. SVR/TPR writes are now mode-aware.
     IdtSetGate(kSpuriousVector, reinterpret_cast<u64>(&isr_spurious));
+    g_lapic_ready = true;        // LapicWrite/Read are now safe in either mode
     LapicWrite(kLapicRegTpr, 0); // accept all
     LapicWrite(kLapicRegSvr, kSvrSoftwareEnable | kSpuriousVector);
 
     core::LogWithValue(core::LogLevel::Info, "arch/lapic", "base_phys", base_phys);
-    core::LogWithValue(core::LogLevel::Info, "arch/lapic", "mmio", reinterpret_cast<u64>(g_lapic_mmio));
-    core::LogWithValue(core::LogLevel::Info, "arch/lapic", "id", LapicRead(kLapicRegId));
+    core::Log(core::LogLevel::Info, "arch/lapic", g_x2apic ? "mode x2apic (MSR)" : "mode xapic (MMIO)");
+    core::LogWithValue(core::LogLevel::Info, "arch/lapic", "id", LapicCurrentId());
     core::LogWithValue(core::LogLevel::Info, "arch/lapic", "version", LapicRead(kLapicRegVersion));
+}
+
+void ApicModeSelfTest()
+{
+    const bool cpuid_x2 = arch::CpuHas(arch::kCpuFeatX2Apic);
+    const bool mode_x2 = LapicIsX2apic();
+    // We enable x2APIC whenever CPUID advertises it, so the two
+    // must agree exactly. A divergence means LapicInit's mode
+    // selection broke (or CpuInfo wasn't probed first).
+    if (cpuid_x2 != mode_x2)
+    {
+        core::PanicWithValue("arch/lapic", "ApicModeSelfTest: x2APIC CPUID/mode mismatch",
+                             (static_cast<u64>(cpuid_x2) << 1) | static_cast<u64>(mode_x2));
+    }
+    // The mode-normalised ID must match what PerCpu recorded for
+    // the CPU we're running on (stamped via LapicCurrentId()).
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self != nullptr && LapicCurrentId() != self->lapic_id)
+    {
+        core::PanicWithValue("arch/lapic", "ApicModeSelfTest: LAPIC id round-trip mismatch", LapicCurrentId());
+    }
+    SerialWrite(mode_x2 ? "[apic-mode-selftest] PASS (x2apic)\n" : "[apic-mode-selftest] PASS (xapic)\n");
 }
 
 } // namespace duetos::arch
