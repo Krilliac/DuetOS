@@ -717,5 +717,6 @@ bool ScriptExitRequested();
 void CmdPs();
 void CmdTop();
 void CmdFree();
+void CmdResmon();
 
 } // namespace duetos::core::shell::internal
