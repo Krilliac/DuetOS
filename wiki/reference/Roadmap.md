@@ -585,9 +585,11 @@ In rough priority:
 
 - **Today:** `kernel/drivers/power/power.cpp` flags
   `backend_is_stub = true`. ACPI battery state unknown.
-- **Blocks on:** ACPI AML interpreter (only static tables
-  parsed today), EC battery status registers, S3/S0ix wake
-  plumbing.
+- **Blocks on:** ~~ACPI AML interpreter~~ (LANDED — see
+  `kernel/acpi/aml_eval.{h,cpp}`: a v0 tree-walking method
+  interpreter with OperationRegion / FieldUnit access and a
+  registrable EmbeddedControl region handler); now blocks only on
+  the EC driver registering that handler + S3/S0ix wake plumbing.
 - **Unlocks:** battery tray icon, lid-close suspend.
 
 ### Bluetooth, Printer, Webcam
@@ -791,10 +793,13 @@ Find the live inventory with `git grep -nE "// (STUB|GAP):"`.
   Falls through to QEMU's debug ports (0x604 / 0xB004 / 0x4004)
   on miss, then masks IRQs and parks the boot CPU as the
   documented last resort.
-- **Blocks on:** real AML method evaluation for `_PTS` / `_GTS`
-  on chipsets that need them executed at runtime (rather than
-  pre-evaluated at firmware time). Same blocker the per-CPU
-  sleep state work has — wider AML interpreter slice.
+- **Unblocked:** the v0 AML method interpreter
+  (`kernel/acpi/aml_eval.{h,cpp}`) can now execute `_PTS` / `_GTS`
+  at runtime via `AmlEvaluate("\\_PTS", &arg, 1, &r)`. Remaining
+  work is wiring the shutdown/sleep path in `acpi.cpp` to call it
+  before the PM1 SLP_TYP write on chipsets that require it (a
+  follow-up slice; `AmlReadS5` still handles the common
+  pre-evaluated `_S5_` path).
 
 ### Device Manager — virtio + eject + hot-unplug
 
@@ -1421,8 +1426,10 @@ extends. Next:
 > MADT (LAPIC + I/O APIC + Interrupt Source Override + LAPIC Address
 > Override), FADT (PM1A/B control, reset register, ACPI enable),
 > HPET (validation + main-counter enable), SRAT (CPU + Memory
-> Affinity for NUMA). AML interpreter remains the documented gap
-> for ACPI S5 / battery / lid-close (Track 11-05 + Drivers).
+> Affinity for NUMA). The v0 AML **method** interpreter has now
+> landed (`kernel/acpi/aml_eval.{h,cpp}`) — ACPI S5 / battery /
+> lid-close now block only on the EC driver consuming it (Drivers),
+> not on AML evaluation itself.
 > **T11-03** registry hive persistence landed:
 > `RegistryHiveLoad` runs at boot, every successful registry mutation
 > calls `RegistryHiveSave` (throttled by byte-compare). HKLM / HKCU
@@ -1453,12 +1460,13 @@ extends. Next:
 > the boot CPU as the documented last resort. The companion
 > `KernelReboot` already chained `acpi::AcpiReset()` (FADT
 > RESET_REG) → 0xCF9 (PC-AT chipset) → 8042 keyboard-controller
-> → triple-fault. Real hardware that needs `_PTS` / `_GTS`
-> method execution to drive the chipset to soft-off may still
-> stay powered (the AML interpreter parses Names, not Methods);
-> the happy path covers QEMU and most consumer firmware that
-> pre-evaluates `_PTS` to a no-op. S3 (suspend-to-RAM) stays
-> deferred until a workload demands it.
+> → triple-fault. The v0 AML **method** interpreter has since
+> landed (`kernel/acpi/aml_eval.{h,cpp}`), so `_PTS` / `_GTS`
+> *can* now be executed via `AmlEvaluate`; wiring that into the
+> soft-off path ahead of the PM1 SLP_TYP write is a follow-up
+> slice. The current happy path still covers QEMU and consumer
+> firmware that pre-evaluates `_PTS` to a no-op. S3
+> (suspend-to-RAM) stays deferred until a workload demands it.
 > **T11-02** anonymous cross-process pipes shipped: the kernel's
 > Linux pipe(2) pool (`kernel/subsystems/linux/syscall_pipe.cpp`,
 > 16 slots × 4 KiB ring) is now reachable from Win32 callers

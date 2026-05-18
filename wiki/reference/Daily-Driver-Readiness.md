@@ -27,7 +27,7 @@ section) and the relevant subsystem page.
 | **Writable native FS** | DuetFS shipped with the full write surface: `duetfs_write_at`, `duetfs_create_path`, `duetfs_unlink_path`, `duetfs_truncate`, `duetfs_link`, `duetfs_create_symlink`, journal (`duetfs_journal_apply` / `duetfs_journal_state`), CRC-checked blocks, AES-XTS sector encryption + Argon2id KDF, LZ4 compression, snapshots. RAM-backed `/duetfs` mount is online on every boot; on-disk `/disks/duetfsN` mounts auto-register. The disk installer's `--duetfs` flag formats the system partition as DuetFS instead of FAT32 — gives operators a journalled, encryption-capable system filesystem out of the box. FAT32 read+write (LFN both directions) and ramfs also writable. ext4 / NTFS read-only. | Boot kernel directly from a DuetFS root rather than chainloading FAT32-then-DuetFS. Requires GRUB / UEFI to grow a DuetFS reader, OR a multi-stage handoff where a tiny FAT32 ESP boots a kernel that pivots to DuetFS as `/`. The pivot half is mechanical once the kernel-ELF embed lands on the installer (current installer caps at filesystem skeleton; kernel-ELF copy still pending). | Filesystem → DuetFS follow-ups |
 | **NTFS write** | NTFS read works for PE loading from a real NTFS partition. | Scoped NTFS write (create, write, truncate, delete, rename). | Track 7 → T7-04 |
 | **System updater** | None. | Code-signing infrastructure + A/B kernel-slot layout. The disk-installer ships the partition skeleton the A/B layout will hang off (ESP + system + crash-dump are mountable + addressable today). | End-user features → System updater |
-| **ACPI S5 / soft-off** | `AcpiShutdown()` parses both `Name(_S5_, Package(...))` AND `Method(_S5_) { Return(Package(...)) }` shapes via `AmlReadS5`; the QEMU path + consumer firmware that defines `_S5_` as a method both reach the PM1 control register write. Method bodies more complex than `Return(Package{...})` (sub-method calls, conditionals, integer expressions) are still beyond the AML walker. `_PTS` / `_GTS` Method evaluation is still pending — chipsets that pre-evaluate them at firmware time work; chipsets that require runtime evaluation may stay powered. | A small AML method interpreter — enough to evaluate `_PTS` / `_GTS` (and later `_PSW`, `_PRW`, `_STA`) on real hardware. Out of scope for v0. | End-user features → ACPI S5 / soft-off |
+| **ACPI S5 / soft-off** | `AcpiShutdown()` parses both `Name(_S5_, Package(...))` AND `Method(_S5_) { Return(Package(...)) }` shapes via `AmlReadS5`; the QEMU path + consumer firmware that defines `_S5_` as a method both reach the PM1 control register write. Method bodies more complex than `Return(Package{...})` (sub-method calls, conditionals, integer expressions) are still beyond the AML walker. `_PTS` / `_GTS` Method evaluation is still pending — chipsets that pre-evaluate them at firmware time work; chipsets that require runtime evaluation may stay powered. | The v0 AML method interpreter (`kernel/acpi/aml_eval.{h,cpp}`) now evaluates arbitrary method bodies (conditionals, integer expressions, sub-method calls, Field/Region access), so `_PTS`/`_GTS`/`_STA` *can* be executed via `AmlEvaluate`. Remaining: wire that call into `AcpiShutdown` ahead of the PM1 SLP_TYP write for chipsets that need runtime `_PTS`/`_GTS` (follow-up slice). | End-user features → ACPI S5 / soft-off |
 
 ## Tier 1 — basic hardware support (without these the laptop is unpleasant)
 
@@ -36,7 +36,7 @@ section) and the relevant subsystem page.
 | **Audio playback** | HDA register probe + codec walker + verb-encoding helpers. `winmm!waveOut*` API surface is partial: probes return a real handle, headers stamp `WHDR_PREPARED` / `WHDR_DONE`, samples are accepted and silently dropped. | DMA-coherent buffer pool + BDL programming + RUN-bit toggle so samples actually reach the codec. | Drivers → Audio; Track 12 → T12-03 |
 | **Wi-Fi on real hardware** | Data + control tier complete (parsers, 4-way handshake, MLME/WDEV state machine, ring scaffolds, AES key wrap, firmware envelope verification). All exercised by self-tests; libFuzzer corpus clean. NIC MMIO paths still log "mmio_virt is null". | Real-hardware verification cycles (recommended: AR9271/AR7010 `ath9k_htc` USB first, then Intel iwlwifi). IRQ wiring on per-vendor MSI/MSI-X. iwlwifi TFD descriptor build / doorbell / per-RBD data buffers. Installer integration for offline firmware kit. | Drivers → Wireless; End-user features → Network Status |
 | **Bluetooth** | HCI command/event packet parser. No transport. | btusb / btuart transport driver; L2CAP / RFCOMM / GATT stack. | Drivers → Bluetooth |
-| **Battery + suspend** | Power backend flagged `backend_is_stub`. No EC / battery state surfaced. | ACPI EC driver + AML method interpreter so battery / lid / S3 work. | Drivers → Battery + ACPI suspend |
+| **Battery + suspend** | Power backend flagged `backend_is_stub`. No EC / battery state surfaced. | AML method interpreter LANDED (`aml_eval.{h,cpp}`); now needs the ACPI EC driver to register an EmbeddedControl region handler + S3 plumbing so battery / lid work. | Drivers → Battery + ACPI suspend |
 | **Brightness / Fn-keys** | Dead. | ACPI EC driver + per-vendor backlight register paths. | Drivers → Brightness |
 | **Multi-monitor / hot-plug display** | Single linear framebuffer; mode set at boot via Bochs VBE. EDID parser landed; hot-plug detection missing. | Per-vendor GPU drivers + mode-set negotiation. | Drivers → Multi-monitor |
 | **Real GPU acceleration** | AMD/NVIDIA/Intel probe + register peek; D3D11/D3D12/Vulkan all fall back to a software rasterizer. | Per-vendor command-ring submission (Intel RCS, AMD CP, NVIDIA GSP). | Win32 → DirectX backends; Drivers → GPU |
@@ -93,9 +93,14 @@ section) and the relevant subsystem page.
 A handful of items unblock several tiers at once. Land them
 before the dependent rows:
 
-- **AML method interpreter** — unblocks ACPI S5, ACPI EC (battery
-  + brightness), per-CPU sleep states. Today's AML walker reads
-  Names; it doesn't evaluate Methods. (Tier 0, Tier 1.)
+- ~~**AML method interpreter**~~ — **LANDED**
+  (`kernel/acpi/aml_eval.{h,cpp}`): a v0 tree-walking interpreter
+  (operands / arithmetic / control flow / Field + OperationRegion
+  access / nested method calls) with a registrable
+  EmbeddedControl region handler and a boot self-test. ACPI EC
+  (battery + brightness), per-CPU sleep states, and `_PTS`/`_GTS`
+  now block only on their respective driver/wiring slices, not on
+  AML evaluation. (Tier 0, Tier 1.)
 - **Disk installer orchestration** — unblocks GPT partition
   reservation for crash dumps and the writable-FS rollout. (Tier 0,
   Tier 4.)

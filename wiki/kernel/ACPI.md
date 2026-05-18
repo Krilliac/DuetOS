@@ -2,11 +2,13 @@
 
 > **Audience:** Kernel hackers, driver authors, BIOS / firmware hackers
 >
-> **Execution context:** Kernel — init phase only; no runtime AML evaluation
-> in v0
+> **Execution context:** Kernel — table parse at init; AML **method**
+> evaluation (`AmlEvaluate`) runs in process context on demand
 >
-> **Maturity:** v0 — RSDP/XSDT/MADT/HPET/MCFG/SRAT parsed; minimal AML
-> walker; ACPICA-class evaluator deferred
+> **Maturity:** v0 — RSDP/XSDT/MADT/HPET/MCFG/SRAT parsed; namespace
+> walker + field/region index + v0 tree-walking method interpreter;
+> full ACPICA parity (CreateField, Mutex object semantics, GPIO/
+> GenericSerialBus regions) still deferred
 
 ## Overview
 
@@ -15,23 +17,38 @@ ACPI on DuetOS is two things:
 1. **Boot-time table parser** — RSDP discovery, XSDT walk, per-table
    structured decode. This is what makes the kernel SMP-aware, find IOAPICs,
    route legacy ISA IRQs, and find power-management ports.
-2. **AML namespace walker** — a minimal DSDT/SSDT bytecode walker that
-   answers structural questions (does `BAT0` exist? what's the byte stream
-   for `_S5_`?) without evaluating arbitrary AML. Used by the power
-   subsystem to detect battery presence and to find the shutdown package.
+2. **AML namespace walker + field/region index** — a DSDT/SSDT
+   bytecode walker that records every Name / Method / OperationRegion /
+   FieldUnit by canonical path, with constant region offsets/lengths
+   decoded so FieldUnits resolve to a backing address.
+3. **AML method interpreter** (`kernel/acpi/aml_eval.{h,cpp}`) — a v0
+   recursive tree-walker that actually *executes* a method body:
+   operands (Arg/Local/constants/Buffer/Package), arithmetic / bitwise
+   / logical ops, If/Else/While/Return/Break/Continue, Store /
+   Index / SizeOf / DerefOf, nested method invocation, Sleep/Stall,
+   and FieldUnit read/write through SystemIO / SystemMemory directly
+   or a registered handler for EmbeddedControl / SMBus / PCI_Config.
+   Entry points: `AmlEvaluate(path, args, argc, &out)` /
+   `AmlEvaluateInteger(...)`. A boot self-test
+   (`AmlEvalSelfTest`) drives synthetic bytecode and emits
+   `[acpi/aml-eval] selftest PASS`.
 
-Full ACPICA-class AML evaluation (running `_BIF`, `_BST`, EC traffic) is
-**not** in scope for v0. The wiki page for the power subsystem
-([Power Management](../drivers/Power-Management.md)) lists what bits of
-AML the runtime would need to gain to graduate that surface from "static
-inventory" to "live battery dashboard."
+Full ACPICA parity (CreateField/CreateByteField, real Mutex object
+semantics, GPIO / GenericSerialBus / IPMI region spaces, computed
+OperationRegion bounds, >256-byte Buffers) is **not** in scope for v0
+— these are the marked `// GAP:` boundaries in `aml_eval.cpp`. The
+EC driver registers an EmbeddedControl region handler via
+`AmlRegisterRegionHandler` so `_BIF` / `_BST` / `_Qxx` can run.
 
 Sources:
 
 - [`kernel/acpi/acpi.h`](../../kernel/acpi/acpi.h) +
   [`acpi.cpp`](../../kernel/acpi/acpi.cpp) — table discovery + decode
 - [`kernel/acpi/aml.h`](../../kernel/acpi/aml.h) +
-  [`aml.cpp`](../../kernel/acpi/aml.cpp) — namespace walker
+  [`aml.cpp`](../../kernel/acpi/aml.cpp) — namespace walker +
+  field/region index
+- [`kernel/acpi/aml_eval.h`](../../kernel/acpi/aml_eval.h) +
+  [`aml_eval.cpp`](../../kernel/acpi/aml_eval.cpp) — v0 method interpreter
 - [`kernel/acpi/srat.h`](../../kernel/acpi/srat.h) — NUMA topology
 - [`kernel/acpi/acpi_rust/`](../../kernel/acpi/acpi_rust/) — Rust crate
   for tightly-bounded decoders (see [Rust Subsystems](../tooling/Rust-Subsystems.md))

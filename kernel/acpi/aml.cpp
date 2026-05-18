@@ -43,6 +43,16 @@ namespace
 constinit AmlNamespaceEntry g_entries[kMaxAmlNsEntries] = {};
 constinit u32 g_entry_count = 0;
 
+// OperationRegion + FieldUnit index. Populated alongside the
+// namespace walk; consumed by the AML method interpreter
+// (aml_eval.cpp) to back FieldUnit reads/writes.
+inline constexpr u32 kMaxAmlRegions = 64;
+inline constexpr u32 kMaxAmlFields = 256;
+constinit AmlRegionInfo g_regions[kMaxAmlRegions] = {};
+constinit u32 g_region_count = 0;
+constinit AmlFieldInfo g_fields[kMaxAmlFields] = {};
+constinit u32 g_field_count = 0;
+
 // Module-scope so `AmlNamespaceShutdown` can clear it and a
 // subsequent `AmlNamespaceBuild` re-runs the walk. Was a
 // function-local `static constinit` while this subsystem was
@@ -290,6 +300,117 @@ bool RecordEntry(const char* path, AmlObjectKind kind, u8 method_args, u8 source
     return true;
 }
 
+// Decode a constant integer TermArg (the only RegionOffset / RegionLen
+// / NamedField-bitlength forms that appear on the EC / battery /
+// brightness path). Returns false for computed expressions — the
+// caller then leaves the region un-indexed (fields read back Ones).
+bool ReadConstInteger(const u8* p, u32 remaining, u64* val, u32* consumed)
+{
+    if (remaining == 0)
+        return false;
+    switch (p[0])
+    {
+    case 0x00:
+        *val = 0;
+        *consumed = 1;
+        return true;
+    case 0x01:
+        *val = 1;
+        *consumed = 1;
+        return true;
+    case 0xFF:
+        *val = ~0ULL;
+        *consumed = 1;
+        return true;
+    case 0x0A:
+        if (remaining < 2)
+            return false;
+        *val = p[1];
+        *consumed = 2;
+        return true;
+    case 0x0B:
+        if (remaining < 3)
+            return false;
+        *val = u64(p[1]) | u64(p[2]) << 8;
+        *consumed = 3;
+        return true;
+    case 0x0C:
+        if (remaining < 5)
+            return false;
+        *val = u64(p[1]) | u64(p[2]) << 8 | u64(p[3]) << 16 | u64(p[4]) << 24;
+        *consumed = 5;
+        return true;
+    case 0x0E:
+        if (remaining < 9)
+            return false;
+        *val = 0;
+        for (u32 i = 0; i < 8; ++i)
+            *val |= u64(p[1 + i]) << (i * 8);
+        *consumed = 9;
+        return true;
+    default:
+        return false;
+    }
+}
+
+void RecordRegion(const char* path, AmlRegionSpace space, u64 base, u64 length, u8 src)
+{
+    if (g_region_count >= kMaxAmlRegions)
+        return;
+    AmlRegionInfo& r = g_regions[g_region_count++];
+    u32 i = 0;
+    while (path[i] != '\0' && i + 1 < sizeof(r.path))
+    {
+        r.path[i] = path[i];
+        ++i;
+    }
+    r.path[i] = '\0';
+    r.space = space;
+    r.source_table_idx = src;
+    r.base = base;
+    r.length = length;
+}
+
+void RecordField(const char* unit, const char* region, u32 bit_off, u32 bit_w, u8 acc_bytes, u8 src)
+{
+    if (g_field_count >= kMaxAmlFields)
+        return;
+    AmlFieldInfo& f = g_fields[g_field_count++];
+    u32 i = 0;
+    while (unit[i] != '\0' && i + 1 < sizeof(f.path))
+    {
+        f.path[i] = unit[i];
+        ++i;
+    }
+    f.path[i] = '\0';
+    i = 0;
+    while (region[i] != '\0' && i + 1 < sizeof(f.region))
+    {
+        f.region[i] = region[i];
+        ++i;
+    }
+    f.region[i] = '\0';
+    f.bit_offset = bit_off;
+    f.bit_width = bit_w;
+    f.access_bytes = acc_bytes;
+    f.source_table_idx = src;
+}
+
+u8 AccessTypeToBytes(u8 field_flags)
+{
+    switch (field_flags & 0x0F)
+    {
+    case 2:
+        return 2; // WordAcc
+    case 3:
+        return 4; // DWordAcc
+    case 4:
+        return 8; // QWordAcc
+    default:
+        return 1; // AnyAcc / ByteAcc / BufferAcc
+    }
+}
+
 // Skip past a DataRefObject (common cases only). Returns the
 // number of bytes consumed, or 0 if we don't recognise the encoding
 // — the caller takes that as "stop the current TermList".
@@ -490,10 +611,14 @@ struct Walker
             return HandleContainer(start, after_op, end, scope, AmlObjectKind::ThermalZone, /*recurse=*/true);
         case kExtOpRegion:
         {
-            // OpRegion: NameString RegionSpace RegionOffset RegionLen
-            // RegionOffset/Len are TermArgs (arbitrary expressions).
-            // We record the name and then bail — calculating the
-            // size of arbitrary TermArgs needs the full interpreter.
+            // OpRegion: NameString RegionSpace(1) RegionOffset(TermArg)
+            // RegionLen(TermArg). Constant offset/length (the EC /
+            // battery / brightness path) is decoded and indexed so the
+            // interpreter can back FieldUnits; the walk then continues
+            // past the OpRegion. A computed offset/length is still
+            // recorded (base=0) but can't be skipped safely, so we
+            // stop this TermList (parent resumes at its PkgLength end).
+            // GAP: computed OperationRegion bounds.
             NameStringInfo ns;
             u32 consumed = 0;
             if (!ReadNameString(base + after_op, end - after_op, &ns, &consumed))
@@ -502,7 +627,21 @@ struct Walker
             if (!ComposePath(scope, ns, path))
                 return false;
             RecordEntry(path, AmlObjectKind::OpRegion, 0, source_idx, start);
-            // We can't reliably skip past the TermArgs; signal stop.
+            u32 q = after_op + consumed;
+            if (q >= end)
+                return false;
+            const u8 space_b = base[q++];
+            const AmlRegionSpace space = space_b <= 0x05 ? AmlRegionSpace(space_b) : AmlRegionSpace::Other;
+            u64 roff = 0, rlen = 0;
+            u32 c1 = 0, c2 = 0;
+            if (ReadConstInteger(base + q, end - q, &roff, &c1) &&
+                ReadConstInteger(base + q + c1, end - q - c1, &rlen, &c2))
+            {
+                RecordRegion(path, space, roff, rlen, source_idx);
+                next_pos_ = q + c1 + c2;
+                return true;
+            }
+            RecordRegion(path, space, 0, 0, source_idx);
             return false;
         }
         case kExtMutex:
@@ -534,10 +673,7 @@ struct Walker
             return true;
         }
         case kExtField:
-            // Field: PkgLength NameString FieldFlags FieldList
-            // FieldList contents are not nameable; just skip the
-            // package.
-            return SkipPackage(start, after_op, end);
+            return IndexFieldList(after_op, end, scope);
         default:
             return false;
         }
@@ -630,18 +766,88 @@ struct Walker
         return true;
     }
 
-    bool SkipPackage(u32 start, u32 after_op, u32 end)
+    // Field: PkgLength NameString(region) FieldFlags FieldList.
+    // Records each NamedField unit into the field index so the AML
+    // interpreter can read/write it. FieldUnits live in the SAME
+    // scope as the Field() declaration. Skips the package for the
+    // namespace walk regardless (always sets next_pos_ = pkg_end).
+    bool IndexFieldList(u32 after_op, u32 end, const char* scope)
     {
-        u32 pkg_len = 0;
-        u32 plen_consumed = 0;
+        u32 pkg_len = 0, plen_consumed = 0;
         if (!ReadPkgLength(base + after_op, end - after_op, &pkg_len, &plen_consumed))
             return false;
-        // Overflow-safe — see HandleContainer note above.
         if (pkg_len > end - after_op)
             return false;
         const u32 pkg_end = after_op + pkg_len;
-        (void)start;
-        next_pos_ = pkg_end;
+        next_pos_ = pkg_end; // walk continues here whatever we parse
+        u32 q = after_op + plen_consumed;
+        NameStringInfo rns;
+        u32 c = 0;
+        if (!ReadNameString(base + q, pkg_end - q, &rns, &c))
+            return true;
+        q += c;
+        char region_path[kPathCap];
+        if (!ComposePath(scope, rns, region_path))
+            return true;
+        if (q >= pkg_end)
+            return true;
+        u8 acc = AccessTypeToBytes(base[q++]);
+        u32 bit_off = 0;
+        while (q < pkg_end)
+        {
+            const u8 b = base[q];
+            if (b == 0x00) // ReservedField: 0x00 PkgLength(bits)
+            {
+                ++q;
+                u32 fl = 0, fc = 0;
+                if (!ReadPkgLength(base + q, pkg_end - q, &fl, &fc))
+                    break;
+                q += fc;
+                bit_off += fl;
+            }
+            else if (b == 0x01) // AccessField: 0x01 AccessType AccessAttrib
+            {
+                if (q + 3 > pkg_end)
+                    break;
+                acc = AccessTypeToBytes(base[q + 1]);
+                q += 3;
+            }
+            else if (b == 0x03) // ExtendedAccessField: 0x03 type attrib length
+            {
+                if (q + 4 > pkg_end)
+                    break;
+                acc = AccessTypeToBytes(base[q + 1]);
+                q += 4;
+            }
+            else if (b == 0x02) // ConnectField — GAP: GPIO/GenericSerialBus not modelled
+            {
+                break;
+            }
+            else // NamedField: NameSeg(4) PkgLength(bit width)
+            {
+                if (q + 4 > pkg_end)
+                    break;
+                NameStringInfo us{};
+                bool ok = true;
+                for (u32 i = 0; i < 4; ++i)
+                {
+                    const u8 ch = base[q + i];
+                    if (i == 0 ? !IsLeadNameChar(ch) : !IsNameChar(ch))
+                        ok = false;
+                    us.text[i] = char(ch);
+                }
+                us.text[4] = '\0';
+                q += 4;
+                u32 fl = 0, fc = 0;
+                if (!ReadPkgLength(base + q, pkg_end - q, &fl, &fc))
+                    break;
+                q += fc;
+                char unit_path[kPathCap];
+                if (ok && ComposePath(scope, us, unit_path))
+                    RecordField(unit_path, region_path, bit_off, fl, acc, source_idx);
+                bit_off += fl;
+            }
+        }
         return true;
     }
 };
@@ -689,6 +895,8 @@ const char* AmlObjectKindName(AmlObjectKind k)
         return "ThermalZone";
     case AmlObjectKind::PowerResource:
         return "PowerResource";
+    case AmlObjectKind::Field:
+        return "Field";
     default:
         return "?";
     }
@@ -754,6 +962,8 @@ void AmlNamespaceBuild()
     KLOG_TRACE_SCOPE("acpi/aml", "AmlNamespaceShutdown");
     const u32 dropped = g_entry_count;
     g_entry_count = 0;
+    g_region_count = 0;
+    g_field_count = 0;
     g_built = false;
     KLOG_INFO_V("acpi/aml", "namespace shutdown — dropped entries", dropped);
     arch::SerialWrite("[acpi/aml] shutdown: dropped ");
@@ -987,6 +1197,148 @@ bool AmlReadS5(u8* slp_typa, u8* slp_typb)
         return false;
     if (!read_byte(slp_typb))
         return false;
+    return true;
+}
+
+u32 AmlRegionCount()
+{
+    return g_region_count;
+}
+const AmlRegionInfo* AmlRegionAt(u32 i)
+{
+    return i < g_region_count ? &g_regions[i] : nullptr;
+}
+const AmlRegionInfo* AmlRegionFind(const char* path)
+{
+    if (path == nullptr)
+        return nullptr;
+    for (u32 i = 0; i < g_region_count; ++i)
+    {
+        const char* a = g_regions[i].path;
+        const char* b = path;
+        while (*a != '\0' && *a == *b)
+        {
+            ++a;
+            ++b;
+        }
+        if (*a == '\0' && *b == '\0')
+            return &g_regions[i];
+    }
+    return nullptr;
+}
+
+u32 AmlFieldCount()
+{
+    return g_field_count;
+}
+const AmlFieldInfo* AmlFieldAt(u32 i)
+{
+    return i < g_field_count ? &g_fields[i] : nullptr;
+}
+const AmlFieldInfo* AmlFieldFind(const char* path)
+{
+    if (path == nullptr)
+        return nullptr;
+    for (u32 i = 0; i < g_field_count; ++i)
+    {
+        const char* a = g_fields[i].path;
+        const char* b = path;
+        while (*a != '\0' && *a == *b)
+        {
+            ++a;
+            ++b;
+        }
+        if (*a == '\0' && *b == '\0')
+            return &g_fields[i];
+    }
+    return nullptr;
+}
+
+namespace
+{
+// Map a recorded entry's source table and return the AML body (past
+// the 36-byte SdtHeader) + its length. nullptr on unmappable.
+const u8* MapSourceAml(u8 source_table_idx, u32* aml_len)
+{
+    u64 phys = 0;
+    u32 len = 0;
+    if (source_table_idx == 0)
+    {
+        phys = DsdtAddress();
+        len = DsdtLength();
+    }
+    else
+    {
+        const u32 idx = source_table_idx - 1;
+        if (idx >= SsdtCount())
+            return nullptr;
+        phys = SsdtAddress(idx);
+        len = SsdtLength(idx);
+    }
+    if (phys == 0 || len < 36)
+        return nullptr;
+    const auto* hdr = static_cast<const u8*>(AcpiMapTable(phys, len));
+    if (hdr == nullptr)
+        return nullptr;
+    *aml_len = len - 36;
+    return hdr + 36;
+}
+} // namespace
+
+bool AmlMethodBody(const AmlNamespaceEntry* entry, const u8** body, u32* body_len, u8* argc)
+{
+    if (entry == nullptr || entry->kind != AmlObjectKind::Method)
+        return false;
+    u32 aml_len = 0;
+    const u8* aml = MapSourceAml(entry->source_table_idx, &aml_len);
+    if (aml == nullptr)
+        return false;
+    const u32 off = entry->aml_offset;
+    if (off >= aml_len || aml[off] != 0x14 /* MethodOp */)
+        return false;
+    u32 q = off + 1;
+    u32 pkg_len = 0, pc = 0;
+    if (!ReadPkgLength(aml + q, aml_len - q, &pkg_len, &pc))
+        return false;
+    if (pkg_len > aml_len - q)
+        return false;
+    const u32 pkg_end = q + pkg_len;
+    q += pc;
+    NameStringInfo ns;
+    u32 nc = 0;
+    if (!ReadNameString(aml + q, pkg_end - q, &ns, &nc))
+        return false;
+    q += nc;
+    if (q >= pkg_end)
+        return false;
+    const u8 flags = aml[q++];
+    *argc = flags & 0x07;
+    *body = aml + q;
+    *body_len = pkg_end - q;
+    return true;
+}
+
+bool AmlNameValue(const AmlNamespaceEntry* entry, const u8** data, u32* data_len)
+{
+    if (entry == nullptr || entry->kind != AmlObjectKind::Name)
+        return false;
+    u32 aml_len = 0;
+    const u8* aml = MapSourceAml(entry->source_table_idx, &aml_len);
+    if (aml == nullptr)
+        return false;
+    const u32 off = entry->aml_offset;
+    if (off >= aml_len || aml[off] != 0x08 /* NameOp */)
+        return false;
+    u32 q = off + 1;
+    NameStringInfo ns;
+    u32 nc = 0;
+    if (!ReadNameString(aml + q, aml_len - q, &ns, &nc))
+        return false;
+    q += nc;
+    if (q >= aml_len)
+        return false;
+    *data = aml + q;
+    *data_len = aml_len - q;
     return true;
 }
 

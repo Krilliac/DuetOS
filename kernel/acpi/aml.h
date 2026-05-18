@@ -61,7 +61,48 @@ enum class AmlObjectKind : u8
     Processor,
     ThermalZone,
     PowerResource,
+    Field,
     Unknown,
+};
+
+// ACPI region-space identifiers (ACPI 6.x §5.5.2.2 / Table 19-187).
+enum class AmlRegionSpace : u8
+{
+    SystemMemory = 0x00,
+    SystemIO = 0x01,
+    PciConfig = 0x02,
+    EmbeddedControl = 0x03,
+    SmBus = 0x04,
+    Cmos = 0x05,
+    Other = 0xFF,
+};
+
+// One OperationRegion with a constant offset/length. Regions whose
+// offset or length is a computed TermArg (rare on the EC / battery /
+// brightness path) are not indexed in v0 — see aml.cpp.
+struct AmlRegionInfo
+{
+    char path[64];
+    AmlRegionSpace space;
+    u8 source_table_idx;
+    u8 _pad[2];
+    u64 base;   // RegionOffset (constant)
+    u64 length; // RegionLen (constant)
+};
+
+// One named FieldUnit inside a region: bit offset + bit width + the
+// access width declared by the enclosing Field's FieldFlags. The
+// interpreter resolves a NameString to this and reads/writes the
+// backing region through a registered region handler.
+struct AmlFieldInfo
+{
+    char path[64];   // canonical "\_SB.PCI0.EC0.BAT0..." of the unit
+    char region[64]; // canonical path of the parent OperationRegion
+    u32 bit_offset;
+    u32 bit_width;
+    u8 access_bytes; // 1/2/4/8 — AccessType from FieldFlags
+    u8 source_table_idx;
+    u8 _pad[2];
 };
 
 const char* AmlObjectKindName(AmlObjectKind k);
@@ -109,5 +150,27 @@ u32 AmlNamespaceCountByKind(AmlObjectKind k);
 /// (ZeroOp / OneOp / BytePrefix). Callers on false stay in
 /// "ACPI shutdown unsupported" — we don't guess bits.
 bool AmlReadS5(u8* slp_typa, u8* slp_typb);
+
+// --- Region / Field index (populated by AmlNamespaceBuild) ----------
+
+u32 AmlRegionCount();
+const AmlRegionInfo* AmlRegionAt(u32 i);
+const AmlRegionInfo* AmlRegionFind(const char* path);
+
+u32 AmlFieldCount();
+const AmlFieldInfo* AmlFieldAt(u32 i);
+const AmlFieldInfo* AmlFieldFind(const char* path);
+
+// Locate a Method's body TermList inside its source table. `entry`
+// must be `kind == Method`. On success `*body`/`*body_len` bracket
+// the method's TermList (after PkgLength + NameString + MethodFlags)
+// and `*argc` is the declared argument count. Returns false on a
+// malformed / unmappable table.
+bool AmlMethodBody(const AmlNamespaceEntry* entry, const u8** body, u32* body_len, u8* argc);
+
+// For a `kind == Name` entry, point `*data`/`*data_len` at the
+// DataRefObject bytes following the recorded NameString. Returns
+// false on a malformed / unmappable table.
+bool AmlNameValue(const AmlNamespaceEntry* entry, const u8** data, u32* data_len);
 
 } // namespace duetos::acpi

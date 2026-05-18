@@ -19,6 +19,7 @@
 #include "util/vt_parser.h"
 #include "acpi/acpi.h"
 #include "acpi/aml.h"
+#include "acpi/aml_eval.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/cet.h"
 #include "arch/x86_64/cpu_info.h"
@@ -1061,6 +1062,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
         auto aml_teardown = []() -> duetos::core::Result<void> { return duetos::acpi::AmlNamespaceShutdown(); };
         duetos::security::RegisterDriverDomain("acpi/aml", aml_init, aml_teardown);
     }
+    DUETOS_BOOT_SELFTEST(duetos::acpi::AmlEvalSelfTest());
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();
