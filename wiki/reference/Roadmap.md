@@ -182,13 +182,26 @@ the same commit** that delivers the code.
   `smt-placement-selftest` (Phase::Userland) verifies it. See
   [CPU Topology](../kernel/CPU-Topology.md) and
   [Scheduler](../kernel/Scheduler.md).
-- **Remaining scope:** one profile-driven follow-on left:
-  - **Cluster-broadcast IPIs** — extend `arch::SmpSendIpi` with
-    cluster-scoped destination bits when x2APIC cluster mode is
-    in use; lets a wake or shootdown fan out within a cluster
-    in one ICR write.
-- **Blocks on:** profile evidence — workload-triggered, not
-  pre-emptive.
+- **Single-ICR broadcast landed (xAPIC):** kernel-AS TLB
+  shootdowns (`as == nullptr`) provably target every online
+  peer, so `SmpTlbShootdownBroadcast` now fans out in one ICR
+  write via the all-excluding-self destination shorthand
+  (`SmpSendBroadcastIpiAllExSelf`) — the same mechanism
+  `PanicBroadcastNmi` uses — instead of one `SmpSendIpi` per
+  peer. Per-AS shootdowns and the single-target reschedule IPI
+  are unchanged (the shorthand cannot be narrowed to a subset).
+- **Remaining scope:** the *cluster-scoped* fan-out (one ICR
+  write to the CPUs of one scheduler cluster, not all peers)
+  needs x2APIC logical/cluster destination mode. This kernel
+  deliberately runs xAPIC only — `lapic.cpp` forces the xAPIC
+  fallback and panics if firmware locks x2APIC on — so the
+  per-cluster variant is gated on a separate x2APIC-enablement
+  slice. It also has no current consumer: reschedule is
+  single-target and shootdown is kernel-AS-broadcast or
+  per-AS-targeted, never per-cluster.
+- **Blocks on:** (a) an x2APIC-enablement slice, and (b)
+  profile evidence that a per-cluster (not all-peer) fan-out is
+  workload-justified — pre-emptive build is explicitly avoided.
 
 ### Slab allocator + freed-object poison + real KASAN
 

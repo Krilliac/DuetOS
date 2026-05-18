@@ -341,6 +341,25 @@ void SmpInstallTlbShootdownIpiHandler()
 
 namespace
 {
+// Fixed-delivery IPI to every CPU except the sender in a SINGLE ICR
+// write, via the all-excluding-self destination shorthand. Same
+// mechanism PanicBroadcastNmi/SmpStopBroadcastNmi use, but with a
+// normal fixed vector instead of NMI delivery. Only correct when
+// the intended target set is provably "every online peer" — the
+// shorthand cannot be narrowed to a subset, so per-AS / per-cluster
+// scoped sends must still enumerate targets and use SmpSendIpi.
+void SmpSendBroadcastIpiAllExSelf(u8 vector)
+{
+    constexpr u32 kIcrDeliveryFixed = 0U << 8;
+    constexpr u32 kIcrDstShorthandAllExSelf = 3U << 18;
+    // High half is ignored under the shorthand; write 0 so a
+    // chipset-specific ICR latch doesn't surface a stale peer ID.
+    LapicWrite(kLapicRegIcrHigh, 0);
+    LapicWrite(kLapicRegIcrLow,
+               kIcrDeliveryFixed | kIcrLevelAssert | kIcrDstShorthandAllExSelf | static_cast<u32>(vector));
+    WaitForIcrDelivery();
+}
+
 // Helper: broadcast a TLB-shootdown IPI to every online CPU other than
 // the requestor whose current AS matches `as`. Sets up the request
 // struct, sends the IPI, and busy-waits for every target to ack.
@@ -376,6 +395,12 @@ void SmpTlbShootdownBroadcast(mm::AddressSpace* as, u64 virt_start, u64 virt_end
     // `as == nullptr` (kernel-AS shootdown) falls back to a full
     // broadcast since the boot PML4 has no per-AS tracking.
     u32 mask = 0;
+    // Kernel-AS shootdowns (as == nullptr) provably target every
+    // online peer, so they can fan out in one ICR write via the
+    // all-but-self shorthand instead of one SmpSendIpi per peer.
+    // Per-AS shootdowns stay targeted: the shorthand can't be
+    // narrowed to the subset that holds this AS.
+    const bool full_broadcast = (as == nullptr);
     if (as != nullptr)
     {
         mask = __atomic_load_n(&as->active_cpu_mask, __ATOMIC_ACQUIRE);
@@ -399,21 +424,28 @@ void SmpTlbShootdownBroadcast(mm::AddressSpace* as, u64 virt_start, u64 virt_end
 
     g_tlb_request = &req;
 
-    // Fire IPIs to each peer in the mask. Same fixed-delivery shape
-    // as the reschedule IPI — no destination shorthand, exact LAPIC
-    // IDs so we know which CPUs we asked.
-    constexpr u32 kIcrDeliveryFixed = 0U << 8;
-    constexpr u32 icr_low_base = kIcrDeliveryFixed | kIcrLevelAssert;
-    for (u32 id = 0; id < limit && mask != 0; ++id)
+    // Kernel-AS: one ICR write to all peers. Per-AS: one fixed
+    // IPI per peer in the mask (no shorthand — exact LAPIC IDs so
+    // the ack count matches exactly the CPUs we asked).
+    if (full_broadcast)
     {
-        const u32 bit = 1u << (id & 31u);
-        if ((mask & bit) == 0)
-            continue;
-        mask &= ~bit;
-        cpu::PerCpu* peer = SmpGetPercpu(id);
-        if (peer == nullptr)
-            continue;
-        SmpSendIpi(static_cast<u8>(peer->lapic_id), icr_low_base | kTlbShootdownIpiVector);
+        SmpSendBroadcastIpiAllExSelf(kTlbShootdownIpiVector);
+    }
+    else
+    {
+        constexpr u32 kIcrDeliveryFixed = 0U << 8;
+        constexpr u32 icr_low_base = kIcrDeliveryFixed | kIcrLevelAssert;
+        for (u32 id = 0; id < limit && mask != 0; ++id)
+        {
+            const u32 bit = 1u << (id & 31u);
+            if ((mask & bit) == 0)
+                continue;
+            mask &= ~bit;
+            cpu::PerCpu* peer = SmpGetPercpu(id);
+            if (peer == nullptr)
+                continue;
+            SmpSendIpi(static_cast<u8>(peer->lapic_id), icr_low_base | kTlbShootdownIpiVector);
+        }
     }
 
     // Spin until every target has acked. The handler runs with IF=0
