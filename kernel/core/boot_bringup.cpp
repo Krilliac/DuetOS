@@ -1835,6 +1835,7 @@ void BootBringupDevices(bool force_net_smoke)
 
     SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::routing::SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::fs::routing::RamVolFdSelfTest());
 
     // Notes save/load round-trip — runs here (post-FAT32-probe) so
     // the SKIP path stays only "no FAT32 volume" rather than "Notes

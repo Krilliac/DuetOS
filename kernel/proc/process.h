@@ -560,7 +560,8 @@ struct Process
         Ramfs,
         Fat32,
         DuetFs,
-        Pipe, // cross-process pipe end (Linux pipe pool slot)
+        RamVol, // frame-backed writable RAM volume (/run); path-addressed
+        Pipe,   // cross-process pipe end (Linux pipe pool slot)
     };
     struct Win32FileHandle
     {
@@ -598,6 +599,14 @@ struct Process
         // bounded in-place write.
         static constexpr u64 kFat32PathCap = 64;
         char fat32_path[kFat32PathCap];
+        // Absolute in-volume path (e.g. "/run/svc/state"), captured
+        // at open time when kind == RamVol. RamVol is path-addressed
+        // (its nodes are module-private), so every read/write
+        // re-resolves via fs::RamVolRead/RamVolWrite using this. 128
+        // covers /run/<service>/<file> depth; longer paths are
+        // refused at open.
+        static constexpr u64 kRamVolPathCap = 128;
+        char ramvol_path[kRamVolPathCap];
         // Pipe-backed handle. `pipe_pool_idx` indexes the kernel
         // pipe pool (kernel/subsystems/linux/syscall_pipe.cpp);
         // `pipe_is_write_end` distinguishes the write side from
