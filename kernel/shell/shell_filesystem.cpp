@@ -206,6 +206,35 @@ bool VfsCatNode(const duetos::fs::VfsNode& n)
         }
         return true;
     }
+    if (n.backend == VfsBackend::RamVol)
+    {
+        // Small fixed stack buffer + offset loop — never size a
+        // stack buffer by file size (the kstack-overflow class).
+        char buf[256];
+        u64 off = 0;
+        char last = '\n';
+        bool any = false;
+        while (true)
+        {
+            const duetos::i64 got = duetos::fs::RamVolRead(n.ramvol_path, off, buf, sizeof(buf));
+            if (got <= 0)
+            {
+                break;
+            }
+            for (duetos::i64 i = 0; i < got; ++i)
+            {
+                ConsoleWriteChar(buf[i]);
+            }
+            last = buf[got - 1];
+            any = true;
+            off += static_cast<u64>(got);
+        }
+        if (!any || last != '\n')
+        {
+            ConsoleWriteChar('\n');
+        }
+        return true;
+    }
     if (n.backend == VfsBackend::Fat32)
     {
         namespace fat = duetos::fs::fat32;
@@ -317,6 +346,38 @@ void VfsLsDir(const duetos::fs::VfsNode& n)
                 WriteU64Dec(c->file_size);
                 ConsoleWriteln(" BYTES");
             }
+        }
+        return;
+    }
+    if (n.backend == VfsBackend::RamVol)
+    {
+        struct LsCtx
+        {
+            bool any;
+        };
+        LsCtx ctx{false};
+        duetos::fs::RamVolReaddir(
+            n.ramvol_path,
+            [](const char* name, duetos::u64 size, bool is_dir, bool sealed, void* cookie)
+            {
+                static_cast<LsCtx*>(cookie)->any = true;
+                ConsoleWrite("  ");
+                ConsoleWrite(name);
+                if (is_dir)
+                {
+                    ConsoleWriteln("/");
+                }
+                else
+                {
+                    ConsoleWrite("   ");
+                    WriteU64Dec(size);
+                    ConsoleWrite(sealed ? " BYTES (SEALED)\n" : " BYTES\n");
+                }
+            },
+            &ctx);
+        if (!ctx.any)
+        {
+            ConsoleWriteln("(EMPTY DIRECTORY)");
         }
         return;
     }

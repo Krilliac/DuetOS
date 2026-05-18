@@ -517,8 +517,15 @@ void KlogPersistSelfTest()
     // a flush, DIAG.LOG must contain the marker — confirming per-
     // area routing actually placed the line in the diag file rather
     // than the legacy KERNEL.LOG aggregate.
+    //
+    // WARN, not INFO: the release-default klog runtime level
+    // suppresses INFO at the source, so an INFO marker never
+    // reached the persistence line-sink and this self-test FAILED
+    // ("marker missing from DIAG.LOG") on every release boot. WARN
+    // survives the release floor (one line, self-test-gated — the
+    // CLAUDE.md-sanctioned level for a must-surface marker).
     constexpr const char kMark[] = "[klog-persist] self-test marker\n";
-    KLOG_INFO("klog-persist", "self-test marker");
+    KLOG_WARN("klog-persist", "self-test marker");
     KlogPersistFlush();
 
     char target_path[kPathBytes];

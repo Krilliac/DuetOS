@@ -32,6 +32,7 @@
 #include "fs/fat32.h"
 #include "fs/mount.h"
 #include "fs/ramfs.h"
+#include "fs/tmpfs.h"
 #include "fs/vfs.h"
 #include "ipc/named_pipes.h"
 #include "subsystems/linux/syscall_pipe.h"
@@ -254,6 +255,11 @@ u64 HandleSize(const ::duetos::core::Process::Win32FileHandle& h)
         return h.fat32_entry.size_bytes;
     if (h.kind == Process::FsBackingKind::DuetFs)
         return h.duetfs_size_bytes;
+    if (h.kind == Process::FsBackingKind::RamVol)
+    {
+        u64 sz = 0;
+        return duetos::fs::RamVolStat(h.ramvol_path, &sz, nullptr, nullptr) ? sz : 0;
+    }
     return 0;
 }
 
@@ -391,6 +397,51 @@ u64 OpenForProcess(::duetos::core::Process* proc, const char* path)
         return handle;
     }
 
+    // RamVol (/run) — frame-backed writable RAM volume. Absolute
+    // paths under "/run" route here; the path itself is the stable
+    // handle (RamVol nodes are module-private).
+    if (path[0] == '/' && path[1] == 'r' && path[2] == 'u' && path[3] == 'n' && (path[4] == '\0' || path[4] == '/'))
+    {
+        bool rv_dir = false;
+        if (!duetos::fs::RamVolStat(path, nullptr, &rv_dir, nullptr))
+        {
+            SerialWrite("[fs/route] open: ramvol miss path=\"");
+            SerialWrite(path);
+            SerialWrite("\"\n");
+            return u64(-1);
+        }
+        if (rv_dir)
+        {
+            SerialWrite("[fs/route] open: refusing ramvol directory \"");
+            SerialWrite(path);
+            SerialWrite("\"\n");
+            return u64(-1);
+        }
+        u64 pl = 0;
+        while (path[pl] != '\0')
+            ++pl;
+        if (pl >= Process::Win32FileHandle::kRamVolPathCap)
+        {
+            SerialWrite("[fs/route] open: ramvol path too long\n");
+            return u64(-1);
+        }
+        h.kind = Process::FsBackingKind::RamVol;
+        h.ramfs_node = nullptr;
+        h.fat32_volume_idx = 0;
+        for (u64 i = 0; i <= pl; ++i)
+            h.ramvol_path[i] = path[i];
+        h.cursor = 0;
+        h.is_canary = false;
+        (void)CopyPathInto(h.fat32_path, nullptr);
+        const u64 handle = Process::kWin32HandleBase + slot;
+        SerialWrite("[fs/route] open ok pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" path=\"");
+        SerialWrite(path);
+        SerialWrite("\" backing=ramvol\n");
+        return handle;
+    }
+
     // Ramfs fall-through.
     const RamfsNode* n = VfsLookup(proc->root, path, kPathMax);
     if (n == nullptr || n->type != RamfsNodeType::kFile)
@@ -465,6 +516,17 @@ u64 ReadForProcess(::duetos::core::Process* proc, u64 handle, void* dst, u64 len
         return take;
     }
 
+    if (h.kind == Process::FsBackingKind::RamVol)
+    {
+        const u64 remaining = size - h.cursor;
+        const u64 take = (len < remaining) ? len : remaining;
+        const duetos::i64 got = duetos::fs::RamVolRead(h.ramvol_path, h.cursor, dst, take);
+        if (got < 0)
+            return u64(-1);
+        h.cursor += static_cast<u64>(got);
+        return static_cast<u64>(got);
+    }
+
     if (h.kind == Process::FsBackingKind::DuetFs)
     {
         const auto dev = DuetFsDeviceFor(h.duetfs_block_handle);
@@ -534,6 +596,19 @@ u64 WriteForProcess(::duetos::core::Process* proc, u64 handle, const void* src, 
 
     if (h.kind == Process::FsBackingKind::Ramfs)
         return u64(-1); // ramfs is .rodata
+
+    if (h.kind == Process::FsBackingKind::RamVol)
+    {
+        // Positioned write at the cursor; RamVolWrite grows the
+        // file + charges the quota and rejects a sealed file
+        // (-1 == EROFS/ENOSPC-equivalent, same shape as the other
+        // backends' failure return).
+        const duetos::i64 wrote = duetos::fs::RamVolWrite(h.ramvol_path, h.cursor, src, len);
+        if (wrote < 0)
+            return u64(-1);
+        h.cursor += static_cast<u64>(wrote);
+        return static_cast<u64>(wrote);
+    }
 
     if (h.kind == Process::FsBackingKind::DuetFs)
     {
@@ -1392,6 +1467,82 @@ void SelfTest()
 
     SerialWrite("[fs/route-selftest] PASS (open + read + EOF + seek + close + write + create + readback "
                 "on /disk/0/HELLO.TXT and /disk/0/RTNEW.TXT)\n");
+}
+
+void RamVolFdSelfTest()
+{
+    using arch::SerialWrite;
+    using ::duetos::core::Process;
+
+    auto fail = [&](const char* why)
+    {
+        SerialWrite("[fs/route-ramvol-selftest] FAIL (");
+        SerialWrite(why);
+        SerialWrite(")\n");
+        (void)duetos::fs::RamVolUnlink("/run/fdtest");
+    };
+
+    if (!duetos::fs::RamVolCreate("/run/fdtest"))
+    {
+        return fail("create");
+    }
+
+    static Process p = {};
+    p.pid = 0xFEEEU;
+    p.root = RamfsTrustedRoot();
+    for (u32 i = 0; i < Process::kWin32HandleCap; ++i)
+    {
+        p.win32_handles[i].kind = Process::FsBackingKind::None;
+        p.win32_handles[i].ramfs_node = nullptr;
+        p.win32_handles[i].fat32_volume_idx = 0;
+        p.win32_handles[i].cursor = 0;
+    }
+
+    const char msg[] = "ramvol-fd-roundtrip";
+    const u64 mlen = sizeof(msg) - 1;
+
+    u64 h = OpenForProcess(&p, "/run/fdtest");
+    if (h == u64(-1))
+    {
+        return fail("open");
+    }
+    if (WriteForProcess(&p, h, msg, mlen) != mlen)
+    {
+        CloseForProcess(&p, h);
+        return fail("write");
+    }
+    u64 sz = 0;
+    if (FstatForProcess(&p, h, &sz) != 0 || sz != mlen)
+    {
+        CloseForProcess(&p, h);
+        return fail("fstat size");
+    }
+    CloseForProcess(&p, h);
+
+    // Reopen so the cursor restarts at 0 (avoids depending on a
+    // particular SEEK_* whence constant — keeps the test minimal).
+    h = OpenForProcess(&p, "/run/fdtest");
+    if (h == u64(-1))
+    {
+        return fail("reopen");
+    }
+    char buf[32];
+    const u64 got = ReadForProcess(&p, h, buf, sizeof(buf));
+    CloseForProcess(&p, h);
+    if (got != mlen)
+    {
+        return fail("read len");
+    }
+    for (u64 i = 0; i < mlen; ++i)
+    {
+        if (buf[i] != msg[i])
+        {
+            return fail("read mismatch");
+        }
+    }
+
+    (void)duetos::fs::RamVolUnlink("/run/fdtest");
+    SerialWrite("[fs/route-ramvol-selftest] PASS\n");
 }
 
 } // namespace duetos::fs::routing

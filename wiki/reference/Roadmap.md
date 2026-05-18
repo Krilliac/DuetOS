@@ -168,16 +168,76 @@ the same commit** that delivers the code.
   placement nor work-stealing fires — two CPUs both busy with
   long-running tasks, neither going idle, no new wake events.
   Boot self-test `sched-loadbalance-selftest` (Phase::Userland)
-  verifies the decision function. See
+  verifies the decision function. **SMT-aware placement landed** —
+  `AssignCoreGroups` (tail of `TopologyAssignClusters`) derives
+  per-CPU `core_group` / `smt_sibling_count` / `smt_primary`;
+  `EffectiveLoad` penalizes a logical CPU whose SMT sibling has
+  Normal-band work by `kSmtSiblingPenalty` (= `kClusterPlacementMargin`),
+  consumed by `PickClusterPlacement` and `PickBalanceVictim` so
+  runnable threads spread across distinct physical cores before
+  packing SMT siblings. Idle-pull `StealNormalFromPeer` is
+  intentionally unweighted. Non-SMT CPUs collapse to the raw
+  length byte-for-byte. Default smoke topology now exposes SMT
+  (`-smp 4,sockets=1,cores=2,threads=2`); self-test
+  `smt-placement-selftest` (Phase::Userland) verifies it. See
   [CPU Topology](../kernel/CPU-Topology.md) and
   [Scheduler](../kernel/Scheduler.md).
-- **Remaining scope:** one profile-driven follow-on left:
-  - **Cluster-broadcast IPIs** — extend `arch::SmpSendIpi` with
-    cluster-scoped destination bits when x2APIC cluster mode is
-    in use; lets a wake or shootdown fan out within a cluster
-    in one ICR write.
-- **Blocks on:** profile evidence — workload-triggered, not
-  pre-emptive.
+- **Hybrid P/E-core bias landed:** `cpu::Topology::core_class`
+  decoded from CPUID 0x1A (gated on CPUID.7.0:EDX[15]); a second
+  independent `EffectiveLoad` penalty makes an E-core look more
+  loaded only while an idle P-core exists, so work fills P-cores
+  first without starving E-cores. Stacks with the SMT penalty;
+  `kCoreClassUnknown` everywhere on non-hybrid ⇒ byte-for-byte
+  inert. QEMU has no Intel-hybrid model so
+  `hybrid-placement-selftest` SKIPs in CI; the decision-function
+  contract is locked for real hardware.
+- **Hard CPU affinity landed:** per-task `affinity_mask`
+  (default `kAffinityAll` ⇒ unrestricted, fast-path identical);
+  enforced at wake routing, work-steal, periodic balance, and a
+  dispatch-path backstop. `SchedSetAffinityMask` /
+  `SchedGetAffinityMask` back the Linux `sched_setaffinity` /
+  `sched_getaffinity` thunks (previously accept-and-ignore
+  no-ops). Self-test `affinity-mask-selftest` (Phase::Userland).
+- **MWAIT low-power idle landed:** `kCpuFeatMonitor` (CPUID.1:
+  ECX[3]) gates a `MONITOR`/`MWAIT` C1 idle in `IdleMain` and the
+  AP-join loop; falls back to `sti; hlt` verbatim when absent.
+  Wake semantics unchanged (an IRQ breaks `MWAIT` as it breaks
+  `HLT`); monitored cell is a per-CPU stack byte. Self-test
+  `idle-power-selftest` (Phase::Userland) verifies the feature
+  gate and reports the chosen path; it PASSes (not SKIPs) on
+  every guest. Deeper C-states / a cpuidle governor remain
+  deferred — no profile evidence and no consumer yet.
+- **Single-ICR broadcast landed (xAPIC):** kernel-AS TLB
+  shootdowns (`as == nullptr`) provably target every online
+  peer, so `SmpTlbShootdownBroadcast` now fans out in one ICR
+  write via the all-excluding-self destination shorthand
+  (`SmpSendBroadcastIpiAllExSelf`) — the same mechanism
+  `PanicBroadcastNmi` uses — instead of one `SmpSendIpi` per
+  peer. Per-AS shootdowns and the single-target reschedule IPI
+  are unchanged (the shorthand cannot be narrowed to a subset).
+- **x2APIC enablement landed:** `lapic.cpp` selects x2APIC
+  (MSR) whenever CPUID advertises it and falls back to xAPIC
+  (MMIO) otherwise. `LapicRead`/`LapicWrite` dispatch on mode
+  (`0x800 + (off>>4)`); the four ICR sites route through one
+  mode-aware `LapicSendIcr` (xAPIC ICR-hi/lo + delivery poll, or
+  one `wrmsr(0x830)`). `SmpSendIpi` now takes a full 32-bit
+  APIC ID (no `<<24`/`u8` truncation); `LapicCurrentId()`
+  normalises the ID read across modes. The old "panic if
+  firmware locked x2APIC on" hard-stop is **deleted** — that
+  configuration (common on server BIOSes) now boots. Self-test
+  `apic-mode-selftest` (Phase::Userland) PASSes on every guest,
+  reporting the active mode.
+- **Remaining scope:** the *cluster-scoped* fan-out (one ICR
+  write to the CPUs of one scheduler cluster, not all peers)
+  needs x2APIC *logical* destination mode (LDR/cluster
+  addressing) on top of the physical-mode x2APIC just landed,
+  and still has no current consumer (reschedule is
+  single-target; shootdown is kernel-AS-broadcast or
+  per-AS-targeted, never per-cluster).
+- **Blocks on:** profile evidence that a per-cluster (not
+  all-peer) fan-out is workload-justified — pre-emptive build is
+  explicitly avoided. (The x2APIC-enablement prerequisite is
+  now satisfied.)
 
 ### Slab allocator + freed-object poison + real KASAN
 
@@ -1177,7 +1237,7 @@ extends. Next:
 > compatible. `HeapDestroy` on the default-heap sentinel
 > returns success (no-op) so CRT cleanup paths don't trip.
 | T5-03 | mm | P2 | Implement real KASLR in the UEFI loader: memory-map scan, random 2 MiB-aligned base within a 64 MiB window, boot-info handoff, and boot-log reporting. | Two cold boots show different kernel `.text` load addresses. |
-| T5-04 | mm | P2 | Audit/complete buddy + slab allocators: coalescing, slab freelists or magazines, IRQ-safe `kmalloc` / `kfree`, and documentation of IRQ/process context safety. (IRQ-safe `KMalloc` / `KFree` shipped — `KheapIrqOff` RAII brackets the freelist mutations, mirroring `FramePoolIrqOff` and the slab cache's `IrqOff`. Allocator-family context contract documented in [`Memory-Management`](../kernel/Memory-Management.md) §"Allocator family — context contract". Buddy coalescing on the kheap and per-CPU slab magazines remain deferred — both ride on real workload signals; the linear-scan freelist + per-cache freelist are sufficient for v0.) | Allocator behavior and context guarantees are tested and documented. |
+| T5-04 | mm | P2 | Audit/complete buddy + slab allocators: coalescing, slab freelists or magazines, IRQ-safe `kmalloc` / `kfree`, and documentation of IRQ/process context safety. (IRQ-safe `KMalloc` / `KFree` shipped. **Cross-CPU SMP safety shipped** — frame allocator + kheap now take a reentrant `sync::SpinLock` (`g_frame_lock` / `g_kheap_lock`) at every public entry via `SpinLockRecursiveGuard`; the prior `cli`/`sti`-only guards gave no cross-CPU exclusion, so concurrent `AllocateFrame`/`KMalloc` from APs could double-allocate / corrupt the freelist. Slab was already SMP-safe via its per-cache `sched::Mutex`. Verified: clean single-CPU boot (no self-deadlock from the reentrant guard) + clean default-SMP boot through the AP-bringup concurrent-allocation window. Allocator-family context contract updated in [`Memory-Management`](../kernel/Memory-Management.md). Buddy coalescing, and restoring the per-CPU lock-free fast paths for *scalability* (frame warm-pool / slab magazine), remain deferred to B2-followup — correctness is in place; the single global lock is the contention trade until a profile demands the per-CPU split.) | Allocator behavior and context guarantees are tested and documented. |
 
 ### Track 6 — Process and thread model
 

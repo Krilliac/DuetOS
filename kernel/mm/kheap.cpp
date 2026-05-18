@@ -10,6 +10,7 @@
 #include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "sync/spinlock.h"
 #include "util/cache.h"
 #include "util/debug_assert.h"
 #include "util/saturating.h"
@@ -113,6 +114,15 @@ inline void AssertMagic(const ChunkHeader* chunk, u64 expected, const char* cont
 constinit u8* g_pool_base = nullptr;
 constinit u64 g_pool_bytes = 0;
 constinit ChunkHeader* g_freelist = nullptr;
+// Cross-CPU lock for the freelist + size-class bins. KheapIrqOff
+// only did cli/sti (same-CPU IRQ re-entrancy) — no exclusion
+// across CPUs, so concurrent KMalloc/KFree from APs could corrupt
+// the freelist. Reentrant so KernelHeapSelfTest's nested
+// KMalloc/KFree don't self-deadlock; irqsave, so it subsumes the
+// old KheapIrqOff. Runtime path never calls the frame allocator
+// (the 2 MiB pool is carved once in KernelHeapInit, pre-SMP), so
+// the only cross-allocator order is slab-cache -> kheap, acyclic.
+constinit sync::SpinLock g_kheap_lock{};
 constinit util::SatU64 g_alloc_count = 0;
 constinit util::SatU64 g_free_count = 0;
 
@@ -302,6 +312,7 @@ void KernelHeapInit()
 
 void* KMalloc(u64 bytes)
 {
+    sync::SpinLockRecursiveGuard g_lock(g_kheap_lock);
     if (bytes == 0 || g_freelist == nullptr)
     {
         return nullptr;
@@ -450,6 +461,7 @@ void* KMalloc(u64 bytes)
 
 void KFree(void* ptr)
 {
+    sync::SpinLockRecursiveGuard g_lock(g_kheap_lock);
     if (ptr == nullptr)
     {
         return;
@@ -535,6 +547,7 @@ void KFree(void* ptr)
 
 KernelHeapStats KernelHeapStatsRead()
 {
+    sync::SpinLockRecursiveGuard g_lock(g_kheap_lock);
     KernelHeapStats stats{};
     stats.pool_bytes = g_pool_bytes;
     stats.alloc_count = g_alloc_count;
@@ -572,6 +585,7 @@ KernelHeapStats KernelHeapStatsRead()
 
 void KernelHeapDrainBins()
 {
+    sync::SpinLockRecursiveGuard g_lock(g_kheap_lock);
     for (u32 b = 0; b < kBinCount; ++b)
     {
         ChunkHeader* head = g_bins[b];
@@ -591,6 +605,7 @@ void KernelHeapDrainBins()
 
 u32 KernelHeapTopAllocators(HeapLeakEntry* out, u32 out_capacity)
 {
+    sync::SpinLockRecursiveGuard g_lock(g_kheap_lock);
     if (out == nullptr || out_capacity == 0 || g_pool_base == nullptr)
     {
         return 0;
@@ -691,6 +706,7 @@ u32 KernelHeapTopAllocators(HeapLeakEntry* out, u32 out_capacity)
 
 void KernelHeapSelfTest()
 {
+    sync::SpinLockRecursiveGuard g_lock(g_kheap_lock);
     KLOG_TRACE_SCOPE("mm/kheap", "KernelHeapSelfTest");
     SerialWrite("[mm] kernel heap self-test\n");
 

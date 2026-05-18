@@ -329,12 +329,16 @@ void NextAddresses(IdxState& s)
     // RFC §3.4.1.1: increment input.v[6], then:
     //   tmp = G(0, input)
     //   addresses = G(0, tmp)
+    // The "0" operand is a constant all-zero block. Sharing one
+    // read-only static (Compress takes it by const ref and never
+    // writes it) keeps a 1 KiB Block off this frame, which sits
+    // directly above two Compress frames in the deepest Argon2
+    // call chain — margin for the 64 KiB kernel task stack.
+    static const Block kZeroBlock = {};
     s.input.v[6] += 1;
-    Block zero;
-    BlockZero(zero);
     Block tmp;
-    Compress(tmp, zero, s.input);
-    Compress(s.addresses, zero, tmp);
+    Compress(tmp, kZeroBlock, s.input);
+    Compress(s.addresses, kZeroBlock, tmp);
 }
 
 void InitIdxState(IdxState& s, bool data_independent, u64 pass, u64 lane, u64 slice, u64 mem_blocks, u64 total_passes)

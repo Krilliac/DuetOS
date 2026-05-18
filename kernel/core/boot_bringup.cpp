@@ -1013,6 +1013,15 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // registry. (A1-followup, 2026-04-28.)
     SerialWrite("[boot] Seeding ramfs + VFS self-test.\n");
     duetos::fs::RamfsInit();
+    // Frame-backed writable RAM volume. Heap + frame allocator are
+    // online by here; parses ramfs-mib= from the cmdline and builds
+    // the /run, /run/lock, /tmp directory skeleton.
+    duetos::fs::RamVolInit(multiboot_info);
+    // Make the volume reachable from the path namespace at /run so
+    // the shell + file_route can read service files. Mount-failure
+    // is non-fatal: the direct fs::RamVol* API still works, only
+    // path-based access is unavailable.
+    (void)duetos::fs::VfsMount("/run", duetos::fs::FsType::RamVol, 0);
     if constexpr (duetos::core::kBootSelfTests)
     {
         duetos::core::InitcallRegister(duetos::core::Phase::Vfs, "vfs-selftest",
@@ -1777,6 +1786,7 @@ void BootBringupDevices(bool force_net_smoke)
     DUETOS_BOOT_SELFTEST(duetos::security::PurpleTeamSelfTest());
 
     DUETOS_BOOT_SELFTEST(duetos::fs::TmpFsSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::fs::RamVolSelfTest());
 
     SerialWrite("[boot] Probing GPT on block devices.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::gpt::GptSelfTest());
@@ -1825,6 +1835,7 @@ void BootBringupDevices(bool force_net_smoke)
 
     SerialWrite("[boot] Routing Win32 file syscalls through FAT32.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::routing::SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::fs::routing::RamVolFdSelfTest());
 
     // Notes save/load round-trip — runs here (post-FAT32-probe) so
     // the SKIP path stays only "no FAT32 volume" rather than "Notes

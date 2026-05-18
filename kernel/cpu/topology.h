@@ -48,17 +48,30 @@ inline constexpr u16 kTopologyUnknownCore = 0xFFFF;
 inline constexpr u8 kTopologyUnknownSmt = 0xFF;
 inline constexpr u8 kTopologyUnknownNode = 0xFF;
 inline constexpr u16 kTopologyUnknownCluster = 0xFFFF;
+inline constexpr u16 kTopologyUnknownCoreGroup = 0xFFFF;
+
+// Hybrid core performance class (Intel hybrid parts; CPUID 0x1A).
+// Unknown is the default and the value on every non-hybrid CPU, so
+// a uniform machine has all CPUs at kCoreClassUnknown and the
+// scheduler's hybrid bias is inert (byte-for-byte legacy path).
+inline constexpr u8 kCoreClassUnknown = 0; // non-hybrid or undecoded
+inline constexpr u8 kCoreClassPerf = 1;    // P-core (CPUID 0x1A core type 0x40)
+inline constexpr u8 kCoreClassEff = 2;     // E-core (CPUID 0x1A core type 0x20)
 
 struct alignas(util::kCpuCacheLineBytes) Topology
 {
     u32 cpu_id;
-    u32 apic_id;    // 32-bit value when CPUID 0x0B/0x1F is available
-    u16 package_id; // kTopologyUnknownPackage on decode failure
-    u16 core_id;    // index within package
-    u8 smt_id;      // index within core
-    u8 numa_node;   // dense node index, kTopologyUnknownNode if no SRAT entry
-    u16 cluster_id; // mirrors PerCpu.cluster_id once AssignClusters runs
-    u8 _pad[2];     // explicit pad to keep cache-line discipline
+    u32 apic_id;          // 32-bit value when CPUID 0x0B/0x1F is available
+    u16 package_id;       // kTopologyUnknownPackage on decode failure
+    u16 core_id;          // index within package
+    u8 smt_id;            // index within core
+    u8 numa_node;         // dense node index, kTopologyUnknownNode if no SRAT entry
+    u16 cluster_id;       // mirrors PerCpu.cluster_id once AssignClusters runs
+    u16 core_group;       // dense physical-core index; kTopologyUnknownCoreGroup when SMT unknown/absent
+    u8 smt_sibling_count; // other logical CPUs sharing this physical core (0 == non-SMT)
+    u8 smt_primary;       // 1 iff this is the lowest cpu_id in its core_group
+    u8 core_class;        // kCoreClass* — P/E/unknown (CPUID 0x1A); unknown on non-hybrid
+    u8 _pad[1];           // explicit pad to keep cache-line discipline
 };
 
 static_assert(sizeof(Topology) == util::kCpuCacheLineBytes, "Topology row must remain one cache line");

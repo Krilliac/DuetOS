@@ -167,6 +167,7 @@ void PopulateRow(u32 cpu_id, u32 starting_apic_id)
     row.smt_id = kTopologyUnknownSmt;
     row.numa_node = kTopologyUnknownNode;
     row.cluster_id = 0;
+    row.core_class = kCoreClassUnknown;
 
     const Cpuid r0 = DoCpuid(0);
     const u32 max_basic_leaf = r0.eax;
@@ -199,6 +200,30 @@ void PopulateRow(u32 cpu_id, u32 starting_apic_id)
     {
         row.numa_node = node;
     }
+
+    // Hybrid core class. Each CPU runs PopulateRow on itself, so
+    // CPUID 0x1A returns THIS logical CPU's core type. Only valid
+    // when the part advertises hybrid (CPUID.7.0:EDX[15]) and the
+    // leaf exists; otherwise core_class stays Unknown and the
+    // scheduler's hybrid bias is inert (uniform machine).
+    if (max_basic_leaf >= 0x1A)
+    {
+        const Cpuid r7 = DoCpuid(7, 0);
+        const bool hybrid = ((r7.edx >> 15) & 1u) != 0u;
+        if (hybrid)
+        {
+            const Cpuid r1a = DoCpuid(0x1A);
+            const u32 core_type = (r1a.eax >> 24) & 0xFFu;
+            if (core_type == 0x40u)
+            {
+                row.core_class = kCoreClassPerf; // Intel Core (P)
+            }
+            else if (core_type == 0x20u)
+            {
+                row.core_class = kCoreClassEff; // Intel Atom (E)
+            }
+        }
+    }
 }
 
 u32 ReadCurrentApicId()
@@ -209,6 +234,103 @@ u32 ReadCurrentApicId()
         return 0;
     }
     return self->lapic_id;
+}
+
+// Assign a dense physical-core index (core_group) to every
+// populated topology row, then derive each row's SMT sibling
+// count and "primary thread" flag. Runs once on the BSP at the
+// tail of TopologyAssignClusters, after every row is finalized.
+// Rows whose SMT identity never decoded (sentinel package / core
+// / smt) get core_group = kTopologyUnknownCoreGroup so they can
+// never match a sibling — the scheduler's EffectiveLoad then
+// treats them as plain non-SMT CPUs (byte-for-byte legacy path).
+void AssignCoreGroups()
+{
+    const u32 limit = arch::SmpCpuIdLimit();
+
+    // Dense (package_id, core_id) -> core_group map, built by
+    // walking populated rows in cpu_id order. Same bounded-stack
+    // idiom as the pkg_dense[] walk in TopologyAssignClusters;
+    // one slot per CPU bounds the distinct-physical-core count.
+    struct CoreKey
+    {
+        u16 package_id;
+        u16 core_id;
+    };
+    CoreKey keys[acpi::kMaxCpus] = {};
+    u16 group_n = 0;
+
+    for (u32 i = 0; i < limit && i < acpi::kMaxCpus; ++i)
+    {
+        Topology& row = k_topo[i];
+        if (arch::SmpGetPercpu(i) == nullptr && i != 0)
+        {
+            continue;
+        }
+        if (row.smt_id == kTopologyUnknownSmt || row.package_id == kTopologyUnknownPackage ||
+            row.core_id == kTopologyUnknownCore)
+        {
+            row.core_group = kTopologyUnknownCoreGroup;
+            row.smt_sibling_count = 0;
+            row.smt_primary = 1;
+            continue;
+        }
+        u16 group = kTopologyUnknownCoreGroup;
+        for (u16 d = 0; d < group_n; ++d)
+        {
+            if (keys[d].package_id == row.package_id && keys[d].core_id == row.core_id)
+            {
+                group = d;
+                break;
+            }
+        }
+        if (group == kTopologyUnknownCoreGroup && group_n < acpi::kMaxCpus)
+        {
+            keys[group_n] = CoreKey{row.package_id, row.core_id};
+            group = group_n;
+            ++group_n;
+        }
+        row.core_group = group;
+    }
+
+    // Second pass: per core_group, count the other members and
+    // flag the lowest cpu_id in the group as the primary thread.
+    for (u32 i = 0; i < limit && i < acpi::kMaxCpus; ++i)
+    {
+        Topology& row = k_topo[i];
+        if (arch::SmpGetPercpu(i) == nullptr && i != 0)
+        {
+            continue;
+        }
+        if (row.core_group == kTopologyUnknownCoreGroup)
+        {
+            continue; // finalized in pass 1
+        }
+        u8 members = 0;
+        bool is_lowest = true;
+        for (u32 j = 0; j < limit && j < acpi::kMaxCpus; ++j)
+        {
+            if (j == i)
+            {
+                continue;
+            }
+            if (arch::SmpGetPercpu(j) == nullptr && j != 0)
+            {
+                continue;
+            }
+            if (k_topo[j].core_group != row.core_group)
+            {
+                continue;
+            }
+            ++members;
+            if (j < i)
+            {
+                is_lowest = false;
+            }
+        }
+        row.smt_sibling_count = members;
+        row.smt_primary = is_lowest ? 1 : 0;
+    }
 }
 
 } // namespace
@@ -394,6 +516,12 @@ void TopologyAssignClusters()
     {
         KLOG_WARN_S("cpu/topo", "SRAT absent on multi-package box; clustering by package", "mode", "package");
     }
+
+    // Derive SMT sibling grouping from the now-finalized rows so
+    // the scheduler's wake/balance placement can spread across
+    // distinct physical cores before packing SMT siblings.
+    AssignCoreGroups();
+
     KLOG_WARN_2V("cpu/topo", "topology summary", "cpus", static_cast<u64>(limit), "clusters",
                  static_cast<u64>(g_cluster_count));
 }

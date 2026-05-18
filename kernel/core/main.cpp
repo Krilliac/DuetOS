@@ -788,6 +788,50 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                            duetos::sched::LoadBalanceSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
+        // SMT-aware placement decision test. Same Phase::Userland
+        // rationale: needs SmpStartAps + TopologyAssignClusters
+        // (which now also runs AssignCoreGroups) to have finalized
+        // the per-CPU core_group / sibling fields it asserts on.
+        duetos::core::InitcallRegister(duetos::core::Phase::Userland, "smt-placement-selftest",
+                                       []()
+                                       {
+                                           duetos::sched::SmtPlacementSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // Hard CPU affinity decision test. Same Phase::Userland
+        // rationale: needs SmpStartAps so >=2 CPUs exist for the
+        // forbidden-CPU placement checks (SKIPs otherwise).
+        duetos::core::InitcallRegister(duetos::core::Phase::Userland, "affinity-mask-selftest",
+                                       []()
+                                       {
+                                           duetos::sched::AffinityMaskSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // Hybrid P/E-core placement bias decision test. SKIPs on
+        // every QEMU guest (no Intel-hybrid model); locks the
+        // decision-function contract for real hardware.
+        duetos::core::InitcallRegister(duetos::core::Phase::Userland, "hybrid-placement-selftest",
+                                       []()
+                                       {
+                                           duetos::sched::HybridPlacementSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // MWAIT-idle feature-gate test. PASSes on every guest
+        // (reports mwait vs hlt-fallback) — a real green signal.
+        duetos::core::InitcallRegister(duetos::core::Phase::Userland, "idle-power-selftest",
+                                       []()
+                                       {
+                                           duetos::sched::IdlePowerSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
+        // APIC-mode consistency test (x2APIC vs xAPIC). PASSes on
+        // every guest, reporting the active mode — a real signal.
+        duetos::core::InitcallRegister(duetos::core::Phase::Userland, "apic-mode-selftest",
+                                       []()
+                                       {
+                                           duetos::arch::ApicModeSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Userland);
 

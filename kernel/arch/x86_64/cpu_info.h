@@ -66,6 +66,9 @@ enum CpuFeature : u32
     // by every popular hypervisor). Drives hypervisor-quirk paths
     // and toggles a few "is this a VM?" diagnostics.
     kCpuFeatHypervisor,
+    // CPUID leaf 1, ECX bit 3 — MONITOR/MWAIT. Gates the
+    // low-power MWAIT idle path; falls back to HLT when absent.
+    kCpuFeatMonitor,
     // Sentinel
     kCpuFeatCount,
 };

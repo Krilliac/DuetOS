@@ -11,11 +11,15 @@
  * register, and expose register read/write + EOI for downstream code
  * (timer, IPIs once SMP lands, IOAPIC-routed device IRQs).
  *
+ * Mode: x2APIC (MSR) is selected automatically whenever CPUID
+ * advertises it (the common case on modern HW and the only mode
+ * that works when firmware locks x2APIC on); otherwise legacy
+ * xAPIC (MMIO). LapicRead/Write/SendIcr are mode-transparent.
+ *
  * Scope limits that will be fixed in later commits:
- *   - BSP only. AP LAPICs come up with SMP.
- *   - xAPIC MMIO mode only. x2APIC (MSR-based) is straightforward to add
- *     and recommended on >256-thread systems; defer until it matters.
  *   - No TPR / priority management — runs with TPR=0 (accept all).
+ *   - >255 APIC IDs need x2APIC MADT (type 9) parsing — legacy
+ *     MADT LAPIC records are 8-bit; fine for all current targets.
  *
  * Context: kernel. Init runs once, after PagingInit (needs MapMmio) and
  * after PicDisable (so the 8259 can't sneak an IRQ in during bring-up).
@@ -53,9 +57,41 @@ void LapicInit();
 void LapicEoi();
 
 /// Raw register access. Caller is responsible for offset validity and
-/// register-specific semantics.
+/// register-specific semantics. Transparently dispatches to MMIO
+/// (xAPIC) or the corresponding MSR (x2APIC); the MSR address is
+/// `0x800 + (reg_offset >> 4)`, which is correct for every register
+/// the kernel touches EXCEPT the ICR — IPIs MUST go through
+/// `LapicSendIcr`, never `LapicWrite(kLapicRegIcr*)`, because x2APIC
+/// folds the ICR into a single 64-bit MSR with no delivery-status.
 u32 LapicRead(u64 reg_offset);
 void LapicWrite(u64 reg_offset, u32 value);
+
+/// Send an inter-processor interrupt. `dest` is the full APIC ID of
+/// the target (ignored when `icr_low` carries a destination
+/// shorthand). Mode-aware: xAPIC writes ICR-high then ICR-low and
+/// spins on delivery-status; x2APIC issues one `wrmsr(0x830)` with
+/// no poll. Bounded and klog-free so the panic / NMI-broadcast
+/// paths can use it.
+void LapicSendIcr(u32 dest, u32 icr_low);
+
+/// This CPU's APIC ID, normalised across modes: the full 32-bit
+/// x2APIC ID, or the xAPIC ID register shifted down out of bits
+/// 31:24. Use this instead of open-coding `LapicRead(kLapicRegId)
+/// >> 24`, which is wrong in x2APIC mode.
+u32 LapicCurrentId();
+
+/// True once the LAPIC is usable (xAPIC: MMIO window mapped;
+/// x2APIC: MSR interface enabled). Replaces the old "is the MMIO
+/// pointer non-null" check, which is always false in x2APIC mode.
+bool LapicIsX2apic();
+
+/// Boot self-test: the APIC mode must be consistent (x2APIC
+/// enabled iff CPUID advertises x2APIC) and the mode-normalised
+/// LAPIC ID must round-trip against this CPU's recorded
+/// `PerCpu::lapic_id`. Emits one
+/// `[apic-mode-selftest] PASS (x2apic|xapic)` line; panics on a
+/// mismatch. PASSes on every guest (no SKIP).
+void ApicModeSelfTest();
 
 /// True once LapicInit has mapped the MMIO window and enabled the
 /// APIC. Useful for paths that may run early in boot (notably the

@@ -86,4 +86,98 @@ void TmpFsEnumerate(TmpFsEnumCb cb, void* cookie);
 /// returning. Prints one PASS/FAIL line to COM1.
 void TmpFsSelfTest();
 
+// ---------------------------------------------------------------------------
+// RamVol — frame-backed, hierarchical, quota'd, sealable RAM volume.
+//
+// This is the writable RAM disk for file-based system services /
+// apps that benefit from direct-RAM I/O. It is ADDITIVE to (and
+// lives in the same module as) the legacy flat tmpfs above, whose
+// API + constants + behaviour are intentionally frozen byte-for-
+// byte: ~15 shell call sites do `char buf[kTmpFsContentMax]` on
+// the stack, so the legacy cap can never grow without overflowing
+// the kernel stack. RamVol is the un-capped path instead.
+//
+// Storage: file bytes live in whole 4 KiB physical frames from the
+// (now SMP-safe) frame allocator; directory/file metadata is
+// KMalloc'd. A global byte quota (default 64 MiB, override via the
+// `ramfs-mib=<N>` boot cmdline token, clamped at init to <= 25% of
+// free physical RAM) bounds total usage so a runaway service can
+// never exhaust kernel memory.
+//
+// Per-file SEAL: a one-way transition to immutable. A sealed file
+// rejects write / truncate / unlink — the "Static" purpose (drop a
+// service's working set in once, freeze it, read it fast + tamper-
+// safe). Unsealed files are normal mutable scratch ("Dynamic").
+//
+// Concurrency: every public op takes one reentrant SpinLock
+// (SMP-safe — APs are online; the reentrant guard lets the public
+// ops legitimately call one another without self-deadlock).
+//
+// This slice is the store + API + seal + quota + self-test only.
+// Mounting it into the VFS at /run and teaching `cat` / file_route
+// to read it is the agreed immediately-following slice.
+// ---------------------------------------------------------------------------
+
+constexpr u32 kRamVolNameMax = 64; // per-component name cap (incl. NUL)
+constexpr u64 kRamVolDefaultQuotaMib = 64;
+
+/// Initialise the volume: parse `ramfs-mib=`, clamp the quota to
+/// <= 25% of free RAM, create the root and the /run, /run/lock,
+/// /tmp directory skeleton. `mb_info_phys` is the Multiboot2 info
+/// pointer (for the cmdline). Idempotent; safe to call once at
+/// boot after the heap + frame allocator are up.
+void RamVolInit(uptr mb_info_phys);
+
+/// Create a directory (parents must already exist). Returns false
+/// if the path exists, a parent is missing, or the name is bad.
+bool RamVolMkdir(const char* path);
+
+/// Create an empty regular file (parent must exist). Idempotent if
+/// the file already exists and is not a directory.
+bool RamVolCreate(const char* path);
+
+/// Positioned write; grows the file (allocating frames against the
+/// quota) as needed. Creates the file if absent. Returns bytes
+/// written, or -1 on bad path / sealed file / quota exhaustion.
+i64 RamVolWrite(const char* path, u64 offset, const void* buf, u64 len);
+
+/// Append to end of file (creates if absent). Returns bytes
+/// written or -1 (sealed / quota / bad path).
+i64 RamVolAppend(const char* path, const void* buf, u64 len);
+
+/// Positioned read. Returns bytes read (0 at/after EOF), or -1 on
+/// bad path / not-a-file.
+i64 RamVolRead(const char* path, u64 offset, void* buf, u64 len);
+
+/// Shrink/grow a file to `new_size` (frees frames on shrink, zero-
+/// fills on grow). Returns false if sealed / missing / a dir.
+bool RamVolTruncate(const char* path, u64 new_size);
+
+/// Remove a regular file (frees its frames). False if sealed,
+/// missing, or a directory.
+bool RamVolUnlink(const char* path);
+
+/// Remove an empty directory. False if missing, not a dir, or
+/// non-empty.
+bool RamVolRmdir(const char* path);
+
+/// One-way seal: the file becomes permanently immutable (the
+/// "Static" mode). False if missing or a directory. Idempotent.
+bool RamVolSeal(const char* path);
+
+/// Stat. Any out-param may be null. Returns false if missing.
+bool RamVolStat(const char* path, u64* size_out, bool* is_dir_out, bool* sealed_out);
+
+using RamVolEnumCb = void (*)(const char* name, u64 size, bool is_dir, bool sealed, void* cookie);
+/// Enumerate the immediate children of a directory.
+void RamVolReaddir(const char* path, RamVolEnumCb cb, void* cookie);
+
+/// Volume accounting (bytes). Either out-param may be null.
+void RamVolStats(u64* used_bytes_out, u64* quota_bytes_out);
+
+/// One-shot self-test: mkdir/create/write/append/read/truncate,
+/// seal immutability, unlink/rmdir, and quota rejection. Cleans up
+/// after itself. Emits one `[ramvol] self-test: PASS|FAIL` line.
+void RamVolSelfTest();
+
 } // namespace duetos::fs

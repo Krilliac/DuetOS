@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel — `Schedule()` runs after IRQ EOI or in `cli` cooperative paths
 >
-> **Maturity:** SMP-online — per-CPU runqueues, work-stealing, reschedule-IPI, cluster-aware wake placement, periodic active load balancer; single global `g_sched_lock` (per-CPU lock split deferred)
+> **Maturity:** SMP-online — per-CPU runqueues, work-stealing, reschedule-IPI, cluster-aware wake placement, periodic active load balancer, SMT-aware placement, hybrid P/E-core bias, hard CPU affinity, MWAIT low-power idle; single global `g_sched_lock` (per-CPU lock split deferred)
 
 ## Overview
 
@@ -12,8 +12,15 @@ The DuetOS scheduler is preemptive, kernel-thread first, and SMP. Each
 CPU has its own runqueue (Normal + Idle bands) stored in `cpu::PerCpu`.
 `SchedInit` wraps `kernel_main` as task 0 (the boot task) on the BSP;
 `SchedStartIdle` spawns a per-CPU idle task (`idle-bsp` on the BSP,
-`idle-apN` on each AP) that loops on `sti; hlt` so each CPU's runqueue
-is never empty. `SchedCreate(entry, arg, name)` spawns a regular kernel
+`idle-apN` on each AP) that loops on a low-power idle so each CPU's
+runqueue is never empty. The idle uses `MONITOR`/`MWAIT` (C1 hint)
+when CPUID.1:ECX[3] is set — the core drops into an MWAIT-C1 power
+state that is at least as deep as a bare `HLT` — and falls back to
+`sti; hlt` verbatim otherwise. Wake semantics are unchanged: an IRQ
+(timer tick or reschedule IPI) breaks `MWAIT` exactly as it breaks
+`HLT`, and the monitored cell is a per-idle-task (per-CPU) stack
+byte nothing ever writes, so there is no lost-wakeup window beyond
+the one `sti; hlt` already had. `SchedCreate(entry, arg, name)` spawns a regular kernel
 thread with its own 64 KiB stack on the spawning CPU's runqueue. Sleep
 / wait queues / mutexes layer on top.
 
@@ -136,12 +143,81 @@ to 2, which equals `kClusterPlacementMargin` — the wake-side floor
 Cross-cluster active migration is intentionally absent: the cache
 penalty for crossing a NUMA / package boundary dwarfs the imbalance
 cost. Cross-cluster idle peers are handled by work-stealing's pass 1.
-Operator-pinned steady-state load uses `SchedSetAffinity`.
 
-Boot self-test: `sched-loadbalance-selftest` (Phase::Userland)
-verifies the decision function — same-cluster scoping, margin
-threshold, UP short-circuit. Emits one `[sched-loadbalance-selftest] PASS`
-line so CI can grep for it.
+**Hard CPU affinity**: each `Task` carries a `u32 affinity_mask`
+(bit `1u << cpu_id` = allowed). The default is the `kAffinityAll`
+(`~0u`) sentinel — `TaskAllowedOn` is then unconditionally true and
+every placement path is byte-for-byte identical to the pre-affinity
+scheduler. A narrowed mask (via `SchedSetAffinityMask`, or the Linux
+`sched_setaffinity` thunk which feeds it the low 32 bits of the user
+`cpu_set_t`) is a *hard* pin enforced at every decision point:
+`TargetPerCpuFor` retargets a forbidden routing hint to the lowest
+allowed CPU; `PickClusterPlacement` skips forbidden peers;
+`StealNormalFromPeer` and `BalancePullOnce` refuse to pull a task
+onto a CPU it may not run on; and `RunqueuePopRunnable` has a
+backstop that re-homes a task found on a now-forbidden runqueue
+(covers a runtime mask change). An all-online mask collapses back to
+`kAffinityAll` so "pin to every CPU" keeps the fast path.
+GAP: steal/balance inspect only the peer's queue *head*, so a
+pinned head can shadow a deeper stealable task — acceptable for v0,
+revisit on profile evidence. GAP: a task already *running* when its
+mask narrows migrates at its next reschedule, not instantly (no
+cross-CPU preemption kick in v0). `SchedSetAffinity(t, cpu)` remains
+as a one-CPU convenience wrapper over `SchedSetAffinityMask`.
+
+**SMT-aware placement**: `EffectiveLoad(p)` returns `p->runq_normal_len`
+plus `kSmtSiblingPenalty` (2) when an SMT sibling of `p` (a CPU with
+the same `cpu::Topology::core_group`) already has Normal-band work.
+`PickClusterPlacement` and `PickBalanceVictim` compare effective load
+instead of raw length, so under light load runnable threads spread
+across distinct physical cores before two land on the SMT siblings of
+one core. The penalty equals `kClusterPlacementMargin`, so an idle
+logical CPU on a busy core looks exactly as loaded as a logical CPU on
+an idle core that already has 2 queued tasks — the same equilibrium
+that keeps wake placement from oscillating. `StealNormalFromPeer` is
+**intentionally not SMT-weighted**: it is the idle-pull path (`self`
+is going idle), so giving it work can never produce a two-on-one-core
+result, and weighting it would only risk the byte-for-byte non-SMT
+ordering invariant. On non-SMT / undecoded CPUs the penalty is always
+0 (`core_group == kTopologyUnknownCoreGroup` or `smt_sibling_count ==
+0`), so every decision is byte-for-byte identical to the pre-SMT
+scheduler. The default QEMU smoke topology exposes SMT
+(`-smp 4,sockets=1,cores=2,threads=2`); `DUETOS_SMP=4` reproduces the
+flat non-SMT boot.
+
+**Hybrid P/E-core bias**: `EffectiveLoad` adds a second,
+independent penalty (`kHybridEcorePenalty`, also 2) when the CPU is
+an E-core (`cpu::Topology::core_class == kCoreClassEff`) *and* an
+idle P-core still exists. So latency-sensitive Normal-band work
+fills idle P-cores first, but once every P-core is busy the penalty
+lifts and E-cores are used normally — no E-core starvation. The two
+penalties stack (an E-core whose SMT sibling is also busy is the
+least preferred). On non-hybrid parts every `core_class` is
+`kCoreClassUnknown`, the predicate never fires, and the result is
+byte-for-byte identical to the pre-hybrid scheduler. QEMU does not
+model Intel hybrid, so the path is dormant in CI (the self-test
+SKIPs); the contract is locked by the decision-function test for
+real hardware.
+
+Boot self-tests (Phase::Userland): `sched-loadbalance-selftest`
+verifies the balancer decision function — same-cluster scoping, margin
+threshold, UP short-circuit. `smt-placement-selftest` verifies the
+`EffectiveLoad` sibling penalty, that `PickClusterPlacement` prefers a
+fully-idle physical core over an SMT sibling of a busy core, the
+non-SMT identity, and the one-`smt_primary`-per-`core_group`
+invariant; it SKIPs on non-SMT guests. `affinity-mask-selftest`
+verifies the mask API (reject-empty/null, single-pin,
+all-mask→sentinel collapse, getaffinity round-trip, routing-hint
+retarget) and that `TargetPerCpuFor`/`PickClusterPlacement` never
+select a forbidden CPU while an unrestricted task routes identically
+to a no-task call; it SKIPs on <2-CPU guests.
+`hybrid-placement-selftest` verifies the E-core penalty applies
+only while an idle P-core exists and lifts when every P-core is
+busy; it SKIPs on non-hybrid guests (every QEMU guest).
+`idle-power-selftest` checks the MWAIT feature gate (cached MONITOR
+bit vs a fresh CPUID, CpuInfo initialised) and reports the selected
+idle path; it PASSes on every guest (no SKIP). Each emits one
+`[<name>] PASS` (or `SKIP`) line so CI can grep for it.
 
 ## Blocking Primitives (sister doc)
 

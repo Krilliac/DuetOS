@@ -145,4 +145,13 @@ u64 ReadlinkForProcess(::duetos::core::Process* proc, const char* path, char* ds
 /// boots without a disk).
 void SelfTest();
 
+/// End-to-end fd-layer self-test for the RamVol (/run) backing:
+/// create -> OpenForProcess -> WriteForProcess -> reopen ->
+/// ReadForProcess round-trip -> Fstat size -> Close -> unlink.
+/// Pure RAM (no disk / no hypervisor gate) so it runs under QEMU
+/// in every config. Emits one `[fs/route-ramvol-selftest]
+/// PASS|FAIL` line; never panics (a FAIL is surfaced via the
+/// boot-log analyzer instead of halting the box).
+void RamVolFdSelfTest();
+
 } // namespace duetos::fs::routing

@@ -3,6 +3,7 @@
 #include "core/panic.h"
 #include "fs/duetfs.h"
 #include "fs/fat32.h"
+#include "fs/tmpfs.h"
 #include "fs/vfs.h"
 #include "log/klog.h"
 #include "util/string.h"
@@ -71,6 +72,8 @@ const char* FsTypeName(FsType t)
         return "ntfs";
     case FsType::DuetFs:
         return "duetfs";
+    case FsType::RamVol:
+        return "ramvol";
     }
     return "unknown";
 }
@@ -81,9 +84,10 @@ MountId VfsMount(const char* mount_point, FsType fs_type, u32 block_handle)
     {
         return kInvalidMountId;
     }
-    // ramfs is the in-tree synth backend — block_handle must be 0
-    // for it; every other backend must have a real block handle.
-    if (fs_type == FsType::Ramfs)
+    // ramfs and ramvol are in-tree synth backends — block_handle
+    // must be 0 for them; every other backend must have a real
+    // block handle.
+    if (fs_type == FsType::Ramfs || fs_type == FsType::RamVol)
     {
         if (block_handle != 0)
         {
@@ -323,6 +327,56 @@ bool DuetFsLookup(u32 block_handle, const char* subpath, void* out_node)
 
 constinit VfsBackendOps g_duetfs_ops = {&DuetFsLookup};
 
+// RamVol is path-addressed and mounted at the fixed point /run
+// (GAP: single fixed mount point — the lookup vtable receives only
+// the in-mount subpath, so the "/run" prefix is reconstructed here;
+// generalising needs the resolver to pass the mount point through).
+// The absolute path IS the stable handle (RamVol node structs are
+// module-private); reads re-resolve via fs::RamVolRead/Stat.
+bool RamVolLookup(u32 block_handle, const char* subpath, void* out_node)
+{
+    (void)block_handle; // synth backend — no block device
+    if (subpath == nullptr || out_node == nullptr)
+    {
+        return false;
+    }
+    char abspath[192];
+    const char pfx[] = "/run";
+    u32 w = 0;
+    for (; pfx[w] != '\0'; ++w)
+    {
+        abspath[w] = pfx[w];
+    }
+    // subpath always starts with '/' (or is exactly "/"); appending
+    // it after "/run" yields "/run", "/run/foo", ... A lone "/"
+    // becomes "/run/" which RamWalk treats as the /run dir.
+    u32 s = 0;
+    while (subpath[s] != '\0' && w < sizeof(abspath) - 1)
+    {
+        abspath[w++] = subpath[s++];
+    }
+    abspath[w] = '\0';
+    if (subpath[s] != '\0')
+    {
+        return false; // path longer than the snapshot buffer
+    }
+    if (!duetos::fs::RamVolStat(abspath, nullptr, nullptr, nullptr))
+    {
+        return false;
+    }
+    auto* out = static_cast<VfsNode*>(out_node);
+    out->backend = VfsBackend::RamVol;
+    out->ramfs = nullptr;
+    out->fat32_volume_idx = 0;
+    for (u32 i = 0; i <= w; ++i)
+    {
+        out->ramvol_path[i] = abspath[i];
+    }
+    return true;
+}
+
+constinit VfsBackendOps g_ramvol_ops = {&RamVolLookup};
+
 } // namespace
 
 const VfsBackendOps* VfsBackendForFsType(FsType t)
@@ -333,6 +387,8 @@ const VfsBackendOps* VfsBackendForFsType(FsType t)
         return &g_fat32_ops;
     case FsType::DuetFs:
         return &g_duetfs_ops;
+    case FsType::RamVol:
+        return &g_ramvol_ops;
     case FsType::Ramfs:
     case FsType::Ext4:
     case FsType::Ntfs:

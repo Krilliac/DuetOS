@@ -16,6 +16,7 @@
 #include "subsystems/linux/syscall_internal.h"
 
 #include "mm/address_space.h"
+#include "sched/sched.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -33,9 +34,14 @@ constexpr i64 kSchedIdle = 5;
 
 } // namespace
 
-// sched_setaffinity(pid, cpusetsize, mask): pin to CPU set.
-// SMP is BSP-only in v0; CPU 0 is the only valid affinity.
-// Accept any mask; the call is a no-op.
+// sched_setaffinity(pid, cpusetsize, mask): hard-pin the calling
+// thread to a CPU set. The kernel cpumask is 32 bits wide
+// (acpi::kMaxCpus); we consume the low 4 bytes of the user
+// cpu_set_t and hand them to the scheduler, which intersects with
+// the online set and rejects an empty result.
+// GAP: pid != 0 (another thread) is not resolved in v0 — affinity
+// always applies to the calling thread. Revisit when the Linux
+// pid→Task map lands.
 i64 DoSchedSetaffinity(u64 pid, u64 cpusetsize, u64 user_mask)
 {
     (void)pid;
@@ -43,39 +49,44 @@ i64 DoSchedSetaffinity(u64 pid, u64 cpusetsize, u64 user_mask)
         return kEFAULT;
     if (cpusetsize == 0)
         return kEINVAL;
-    // v0 has a single-CPU scheduler — accept any mask that has
-    // at least one bit set. Read up to 8 bytes (covers 64
-    // CPUs) and verify non-empty.
-    u8 mask[8] = {0};
-    const u64 to_copy = cpusetsize < sizeof(mask) ? cpusetsize : sizeof(mask);
-    if (!mm::CopyFromUser(mask, reinterpret_cast<const void*>(user_mask), to_copy))
+    u8 raw[8] = {0};
+    const u64 to_copy = cpusetsize < sizeof(raw) ? cpusetsize : sizeof(raw);
+    if (!mm::CopyFromUser(raw, reinterpret_cast<const void*>(user_mask), to_copy))
         return kEFAULT;
-    bool any_set = false;
-    for (u32 i = 0; i < to_copy; ++i)
-        if (mask[i] != 0)
-        {
-            any_set = true;
-            break;
-        }
-    if (!any_set)
+    u32 mask = 0;
+    for (u32 i = 0; i < to_copy && i < 4u; ++i)
+        mask |= static_cast<u32>(raw[i]) << (i * 8u);
+    if (mask == 0)
         return kEINVAL;
-    // Affinity is advisory in v0 (we don't actually pin to CPU N).
+    sched::Task* self = sched::CurrentTask();
+    if (self == nullptr)
+        return kEINVAL;
+    // SchedSetAffinityMask intersects with the online set and
+    // fails when nothing is left — surface that as -EINVAL, the
+    // errno Linux returns for a mask with no usable CPU.
+    if (!sched::SchedSetAffinityMask(self, mask))
+        return kEINVAL;
     return 0;
 }
 
-// sched_getaffinity: return a mask with only CPU 0 set. Linux's
-// returns the number of bytes actually written (usually 8).
+// sched_getaffinity: report the calling thread's effective mask.
+// Linux returns the number of bytes written into the user buffer.
 i64 DoSchedGetaffinity(u64 pid, u64 cpusetsize, u64 user_mask)
 {
     (void)pid;
     if (user_mask == 0)
         return kEFAULT;
-    // Write 8 bytes: bit 0 set for CPU 0, rest zero.
     const u64 bytes = (cpusetsize < 8) ? cpusetsize : 8;
     if (bytes == 0)
         return kEINVAL;
-    u8 mask[8] = {0x01, 0, 0, 0, 0, 0, 0, 0};
-    if (!mm::CopyToUser(reinterpret_cast<void*>(user_mask), mask, bytes))
+    sched::Task* self = sched::CurrentTask();
+    if (self == nullptr)
+        return kEINVAL;
+    const u32 m = sched::SchedGetAffinityMask(self);
+    u8 out[8] = {0};
+    for (u32 i = 0; i < 4u; ++i)
+        out[i] = static_cast<u8>((m >> (i * 8u)) & 0xFFu);
+    if (!mm::CopyToUser(reinterpret_cast<void*>(user_mask), out, bytes))
         return kEFAULT;
     return static_cast<i64>(bytes);
 }

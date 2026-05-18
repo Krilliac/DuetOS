@@ -38,6 +38,7 @@
 #include "sched/sched.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/cpu_info.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
@@ -53,6 +54,7 @@
 #include "proc/process.h"
 #include "diag/recovery.h"
 #include "cpu/percpu.h"
+#include "cpu/topology.h"
 #include "debug/probes.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
@@ -268,7 +270,15 @@ struct Task
     // CPU in SchedCreateInternal. Work-stealing in commit 6 may
     // override the routing decision when a peer CPU is idle.
     u32 last_cpu;
-    u32 _pad_last_cpu;
+
+    // Hard CPU affinity: bit (1u << cpu_id) set => the task is
+    // permitted to run on that CPU. kAffinityAll (~0u) means "no
+    // restriction" and is the default for every task, so every
+    // placement decision below is byte-for-byte identical to the
+    // pre-affinity scheduler unless a mask is explicitly narrowed
+    // via SchedSetAffinityMask / the Linux sched_setaffinity
+    // thunk. u32 covers acpi::kMaxCpus; widen with that cap.
+    u32 affinity_mask;
 
     // Per-task syscall trail. Ring of the most recent
     // kSyscallTrailSize syscalls (newest at trail_head - 1, mod
@@ -555,12 +565,62 @@ inline bool& NeedResched()
 // scenario where the task's previous CPU is gone). Both BSP and
 // any AP that has joined the scheduler have a live PerCpu
 // pointer registered in arch::SmpGetPercpu.
+// "No affinity restriction" sentinel. A task at this mask is
+// allowed on every CPU, so TaskAllowedOn is unconditionally true
+// and all placement paths collapse to their pre-affinity form.
+constexpr u32 kAffinityAll = ~0u;
+
+// True iff `t` is permitted to run on `cpu_id`. Always true for an
+// unrestricted task (the default), so the common path pays only a
+// shift + and.
+inline bool TaskAllowedOn(const Task* t, u32 cpu_id)
+{
+    if (t->affinity_mask == kAffinityAll)
+    {
+        return true;
+    }
+    if (cpu_id >= 32u)
+    {
+        return false; // mask is 32 bits wide (acpi::kMaxCpus)
+    }
+    return ((t->affinity_mask >> cpu_id) & 1u) != 0u;
+}
+
+// Lowest-indexed online CPU permitted by `t`'s mask, or nullptr if
+// the mask excludes every online CPU (caller-validated not to
+// happen for a live task; defensive only).
+cpu::PerCpu* FirstAllowedPerCpu(const Task* t)
+{
+    const u32 limit = arch::SmpCpuIdLimit();
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (p != nullptr && TaskAllowedOn(t, i))
+        {
+            return p;
+        }
+    }
+    return nullptr;
+}
+
 cpu::PerCpu* TargetPerCpuFor(Task* t)
 {
     cpu::PerCpu* p = arch::SmpGetPercpu(t->last_cpu);
     if (p == nullptr)
     {
         p = cpu::CurrentCpu();
+    }
+    // Honor a narrowed affinity mask: if last_cpu (or the
+    // CurrentCpu fallback) is not permitted, retarget to the
+    // lowest allowed online CPU. Unrestricted tasks skip this
+    // entirely, so the default routing is unchanged.
+    if (t->affinity_mask != kAffinityAll && (p == nullptr || !TaskAllowedOn(t, p->cpu_id)))
+    {
+        cpu::PerCpu* allowed = FirstAllowedPerCpu(t);
+        if (allowed != nullptr)
+        {
+            p = allowed;
+        }
     }
     return p;
 }
@@ -629,7 +689,101 @@ void RunqueuePushOn(cpu::PerCpu* target, Task* t)
 // try-lock probe instead.
 constexpr u32 kClusterPlacementMargin = 2;
 
-cpu::PerCpu* PickClusterPlacement(cpu::PerCpu* preferred)
+// SMT-spreading penalty. Set equal to kClusterPlacementMargin so a
+// fully-idle physical core always wins placement over a logical CPU
+// whose SMT sibling is busy, with the same no-oscillation
+// equilibrium the margin comment above relies on: an idle logical
+// CPU on a busy core then looks exactly as loaded as a logical CPU
+// on an idle core that already has kClusterPlacementMargin tasks
+// queued.
+constexpr u32 kSmtSiblingPenalty = 2;
+
+// Hybrid (P/E-core) bias. An E-core is treated as more loaded ONLY
+// while a P-core still has spare capacity, so latency-sensitive
+// Normal-band work fills idle P-cores first but E-cores are still
+// used once every P-core is busy (no E-core starvation). Equal to
+// kClusterPlacementMargin for the same no-oscillation equilibrium
+// argument as the SMT penalty. Zero on non-hybrid machines (every
+// core_class is kCoreClassUnknown), so the path is inert there.
+constexpr u32 kHybridEcorePenalty = 2;
+
+// True iff some online CPU is a P-core with an empty Normal queue.
+bool IdlePerfCoreExists()
+{
+    const u32 limit = arch::SmpCpuIdLimit();
+    for (u32 i = 0; i < limit; ++i)
+    {
+        const cpu::Topology* ti = cpu::TopologyForCpu(i);
+        if (ti == nullptr || ti->core_class != cpu::kCoreClassPerf)
+        {
+            continue;
+        }
+        cpu::PerCpu* pi = arch::SmpGetPercpu(i);
+        if (pi != nullptr && pi->runq_normal_len == 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Effective Normal-band load for placement/balance decisions: the
+// raw runqueue length plus, independently:
+//   * kSmtSiblingPenalty when an SMT sibling of `p` already has
+//     Normal-band work, and
+//   * kHybridEcorePenalty when `p` is an E-core and an idle P-core
+//     is available.
+// On non-SMT / non-hybrid / undecoded-topology CPUs neither
+// predicate ever fires, the penalty is 0, and this returns
+// p->runq_normal_len verbatim — so every caller stays byte-for-byte
+// identical to the pre-topology scheduler on UMA / legacy boots.
+u32 EffectiveLoad(cpu::PerCpu* p)
+{
+    const u32 base = p->runq_normal_len;
+    const cpu::Topology* t = cpu::TopologyForCpu(p->cpu_id);
+    if (t == nullptr)
+    {
+        return base;
+    }
+
+    u32 smt_penalty = 0;
+    if (t->core_group != cpu::kTopologyUnknownCoreGroup && t->smt_sibling_count != 0)
+    {
+        const u32 limit = arch::SmpCpuIdLimit();
+        for (u32 i = 0; i < limit; ++i)
+        {
+            if (i == p->cpu_id)
+            {
+                continue;
+            }
+            const cpu::Topology* st = cpu::TopologyForCpu(i);
+            if (st == nullptr || st->core_group != t->core_group)
+            {
+                continue;
+            }
+            cpu::PerCpu* sib = arch::SmpGetPercpu(i);
+            if (sib != nullptr && sib->runq_normal_len > 0)
+            {
+                smt_penalty = kSmtSiblingPenalty; // sibling busy
+                break;
+            }
+        }
+    }
+
+    u32 hybrid_penalty = 0;
+    if (t->core_class == cpu::kCoreClassEff && IdlePerfCoreExists())
+    {
+        hybrid_penalty = kHybridEcorePenalty;
+    }
+
+    return base + smt_penalty + hybrid_penalty;
+}
+
+// `t` (when non-null) lets the placement honor a hard affinity
+// mask — peers the task may not run on are skipped. Callers that
+// don't carry a task (e.g. the SMT self-test) pass nullptr and get
+// the unfiltered behavior.
+cpu::PerCpu* PickClusterPlacement(cpu::PerCpu* preferred, Task* t = nullptr)
 {
     if (preferred == nullptr)
     {
@@ -642,7 +796,7 @@ cpu::PerCpu* PickClusterPlacement(cpu::PerCpu* preferred)
     const u16 cluster = preferred->cluster_id;
     const u32 limit = arch::SmpCpuIdLimit();
     cpu::PerCpu* best = preferred;
-    u32 best_len = preferred->runq_normal_len;
+    u32 best_len = EffectiveLoad(preferred);
     for (u32 i = 0; i < limit; ++i)
     {
         cpu::PerCpu* peer = arch::SmpGetPercpu(i);
@@ -654,7 +808,11 @@ cpu::PerCpu* PickClusterPlacement(cpu::PerCpu* preferred)
         {
             continue; // cross-cluster routing handled by work-stealing
         }
-        const u32 peer_len = peer->runq_normal_len;
+        if (t != nullptr && !TaskAllowedOn(t, peer->cpu_id))
+        {
+            continue; // affinity mask forbids this CPU
+        }
+        const u32 peer_len = EffectiveLoad(peer);
         if (best_len - peer_len >= kClusterPlacementMargin && peer_len < best_len)
         {
             best = peer;
@@ -675,7 +833,7 @@ cpu::PerCpu* PickClusterPlacement(cpu::PerCpu* preferred)
 void RunqueuePush(Task* t)
 {
     cpu::PerCpu* preferred = TargetPerCpuFor(t);
-    cpu::PerCpu* target = (t->priority == TaskPriority::Idle) ? preferred : PickClusterPlacement(preferred);
+    cpu::PerCpu* target = (t->priority == TaskPriority::Idle) ? preferred : PickClusterPlacement(preferred, t);
     if (target != preferred)
     {
         // Routed away from last_cpu — update it so the next wake
@@ -892,6 +1050,16 @@ Task* StealNormalFromPeer()
             {
                 continue;
             }
+            if (!TaskAllowedOn(head, self_id))
+            {
+                // The peer's head task is pinned away from this
+                // CPU — we may not run it, so don't steal it.
+                // GAP: a runnable task deeper in the peer's queue
+                // that IS allowed here is not pulled (we only
+                // inspect the head). Acceptable for v0 — revisit
+                // if pinned-task starvation shows up in a profile.
+                continue;
+            }
             // Pop the head off the peer's Normal queue.
             RunqHeadNormal(peer) = head->next;
             if (RunqHeadNormal(peer) == nullptr)
@@ -967,7 +1135,12 @@ u32 PickBalanceVictim(u32 self_cpu, u16 self_cluster, u32 self_len)
         {
             continue;
         }
-        const u32 peer_len = peer->runq_normal_len;
+        // EffectiveLoad (not raw length) so an SMT-paired peer
+        // looks heavier and is drained first — that is the
+        // correct SMT-spreading direction. `self_len` stays raw
+        // (caller passes runq_normal_len); the asymmetry is
+        // deliberate and collapses to identity on non-SMT.
+        const u32 peer_len = EffectiveLoad(peer);
         if (peer_len > best_len)
         {
             best_id = i;
@@ -1004,6 +1177,13 @@ Task* BalancePullOnce(cpu::PerCpu* self)
     }
     Task* head = RunqHeadNormal(victim);
     KASSERT(head != nullptr, "sched", "BalancePullOnce: victim normal_len > 0 but head null");
+    if (!TaskAllowedOn(head, self->cpu_id))
+    {
+        // The heaviest peer's head is pinned away from us. Skip
+        // this balance tick rather than migrate onto a forbidden
+        // CPU. GAP: same head-only limitation as the steal path.
+        return nullptr;
+    }
     RunqHeadNormal(victim) = head->next;
     if (RunqHeadNormal(victim) == nullptr)
     {
@@ -1078,6 +1258,31 @@ Task* RunqueuePopRunnable()
             }
             // Stolen task is Ready — same state contract as a
             // local pop. Fall through to the suspend check.
+        }
+        // Affinity backstop. Enqueue/steal/balance paths already
+        // refuse to place a task on a forbidden CPU, but a runtime
+        // SchedSetAffinityMask can narrow the mask AFTER the task
+        // was queued here. Rather than run it on a now-forbidden
+        // CPU, re-home it to an allowed one and keep draining.
+        // Unrestricted tasks (the default) always pass, so this is
+        // a no-op on the common path. GAP: a task that is already
+        // *running* when its mask changes finishes its current
+        // slice here; it migrates at its next reschedule, not
+        // instantly (no cross-CPU preemption kick in v0).
+        cpu::PerCpu* self = cpu::CurrentCpu();
+        if (self != nullptr && !TaskAllowedOn(t, self->cpu_id))
+        {
+            cpu::PerCpu* tgt = TargetPerCpuFor(t);
+            if (tgt != nullptr && tgt != self)
+            {
+                t->last_cpu = tgt->cpu_id;
+                RunqueuePushOn(tgt, t);
+                arch::SmpSendReschedIpi(tgt->cpu_id);
+                continue;
+            }
+            // No distinct allowed CPU resolvable (shouldn't happen
+            // for a validated mask) — fall through and run it here
+            // rather than drop the task on the floor.
         }
         if (t->suspend_count == 0)
         {
@@ -1298,6 +1503,7 @@ void SchedInit()
     boot_task->suspend_count = 0;                    // boot/kernel tasks never get suspended
     boot_task->win32_last_error = 0;                 // ERROR_SUCCESS, per-thread Win32 slot
     boot_task->last_cpu = cpu::CurrentCpu()->cpu_id; // BSP pin — boot task only ever runs here
+    boot_task->affinity_mask = kAffinityAll;         // unrestricted by default
 
     Current() = boot_task;
     SchedCpuIncCreated();
@@ -1407,6 +1613,9 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     // runqueue (in v0 same as spawn CPU since tasks don't migrate
     // until commit-6 work-stealing).
     t->last_cpu = cpu::CurrentCpu()->cpu_id;
+    // Default: no affinity restriction. SchedSetAffinityMask /
+    // the Linux sched_setaffinity thunk narrow this later.
+    t->affinity_mask = kAffinityAll;
 
     // Seed the lockdep held set with the scheduler lock. This task
     // will first run at SchedTaskTrampoline -> SchedFinishTaskSwitch,
@@ -2327,32 +2536,90 @@ const char* TaskName(const Task* t)
     return (t->name != nullptr) ? t->name : "<noname>";
 }
 
-bool SchedSetAffinity(Task* t, u32 cpu_id)
+// Online-CPU bit window: bits [0, SmpCpusOnline()) set. Used to
+// reject masks that select no existing CPU and to clamp a caller
+// mask to CPUs that actually exist on this box.
+static u32 OnlineCpuMask()
+{
+    const u32 online = static_cast<u32>(arch::SmpCpusOnline());
+    if (online == 0)
+    {
+        return 0u;
+    }
+    if (online >= 32u)
+    {
+        return ~0u;
+    }
+    return (1u << online) - 1u;
+}
+
+bool SchedSetAffinityMask(Task* t, u32 mask)
 {
     if (t == nullptr)
     {
-        // SchedSetAffinity is exposed to the Win32/Linux affinity
-        // syscalls; a null Task is a kernel-side bug (ABI thunk
-        // failed to translate handle → Task*) rather than a
-        // user-mode mistake. Surface it once so the regression is
-        // visible.
-        KLOG_ONCE_WARN("sched", "SchedSetAffinity called with null task");
+        // Exposed to the Linux/Win32 affinity thunks; a null Task
+        // is a kernel-side translation bug, not a user mistake.
+        // Surface it once so the regression is visible.
+        KLOG_ONCE_WARN("sched", "SchedSetAffinityMask called with null task");
         return false;
     }
-    const u32 online = static_cast<u32>(arch::SmpCpusOnline());
-    if (cpu_id >= online)
+    const u32 online_bits = OnlineCpuMask();
+    const u32 effective = mask & online_bits;
+    if (effective == 0u)
     {
-        // Caller asked us to pin to a CPU that doesn't exist on
-        // this box. Either the user passed a bad mask (their bug,
-        // returned via the boolean) OR the thunk advertised the
-        // kernel's CPU count incorrectly (our bug). Log once with
-        // the offending id so a later audit can tell the two apart.
+        // The mask selects no CPU that exists on this box. Either
+        // a bad user mask (their bug, returned via the boolean) or
+        // the thunk advertised the wrong CPU count (our bug). Log
+        // once with the offending mask so an audit can tell apart.
+        KLOG_ONCE_WARN_V("sched", "SchedSetAffinityMask selects no online CPU", mask);
+        return false;
+    }
+
+    sync::SpinLockGuard guard(g_sched_lock);
+    // Store the all-online set as kAffinityAll so every placement
+    // path stays on its byte-for-byte unrestricted fast path when
+    // the caller didn't actually restrict anything.
+    t->affinity_mask = (effective == online_bits) ? kAffinityAll : effective;
+    // If the task's routing hint now points at a forbidden CPU,
+    // retarget it to the lowest allowed one so the next wake lands
+    // correctly. A task that is Ready on a now-forbidden runqueue
+    // is re-homed lazily by the RunqueuePopRunnable backstop.
+    if (!TaskAllowedOn(t, t->last_cpu))
+    {
+        for (u32 i = 0; i < 32u; ++i)
+        {
+            if ((effective >> i) & 1u)
+            {
+                t->last_cpu = i;
+                break;
+            }
+        }
+    }
+    return true;
+}
+
+u32 SchedGetAffinityMask(Task* t)
+{
+    if (t == nullptr)
+    {
+        return 0u;
+    }
+    sync::SpinLockGuard guard(g_sched_lock);
+    // Expand the "unrestricted" sentinel to the concrete online
+    // set so callers (the Linux sched_getaffinity thunk) see the
+    // CPUs the task can actually land on, not 0xFFFFFFFF.
+    return (t->affinity_mask == kAffinityAll) ? OnlineCpuMask() : t->affinity_mask;
+}
+
+bool SchedSetAffinity(Task* t, u32 cpu_id)
+{
+    // Back-compat single-CPU pin: a hard mask of exactly one CPU.
+    if (cpu_id >= 32u)
+    {
         KLOG_ONCE_WARN_V("sched", "SchedSetAffinity cpu_id out of range", cpu_id);
         return false;
     }
-    sync::SpinLockGuard guard(g_sched_lock);
-    t->last_cpu = cpu_id;
-    return true;
+    return SchedSetAffinityMask(t, 1u << cpu_id);
 }
 
 namespace
@@ -2543,6 +2810,410 @@ void LoadBalanceSelfTest()
     }
 
     arch::SerialWrite("[sched-loadbalance-selftest] PASS\n");
+}
+
+void SmtPlacementSelfTest()
+{
+    constexpr u32 kMaxCpus = 64;
+    u32 saved_len[kMaxCpus] = {0};
+
+    sync::SpinLockGuard guard(g_sched_lock);
+
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self == nullptr)
+    {
+        arch::SerialWrite("[smt-placement-selftest] SKIP (no CurrentCpu — pre-SchedInit)\n");
+        return;
+    }
+    const u32 limit = arch::SmpCpuIdLimit();
+    KASSERT(limit <= kMaxCpus, "sched", "SmtPlacementSelfTest: SmpCpuIdLimit > kMaxCpus");
+
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        saved_len[i] = (p != nullptr) ? p->runq_normal_len : 0;
+    }
+
+    // SKIP when the guest exposes no SMT siblings (the flat
+    // -smp N / single-CPU regression boots). Nothing to verify;
+    // the byte-for-byte non-SMT path is exercised by every other
+    // scheduler self-test on that topology.
+    bool any_smt = false;
+    for (u32 i = 0; i < limit; ++i)
+    {
+        const cpu::Topology* t = cpu::TopologyForCpu(i);
+        if (t != nullptr && t->smt_sibling_count > 0)
+        {
+            any_smt = true;
+            break;
+        }
+    }
+    if (!any_smt)
+    {
+        arch::SerialWrite("[smt-placement-selftest] SKIP (non-SMT guest)\n");
+        return;
+    }
+
+    // Locate an SMT pair (a, b) sharing a core_group, plus a CPU c
+    // on a *different* valid core_group in the same cluster as a
+    // (PickClusterPlacement only considers same-cluster peers).
+    u32 a_id = kBalanceNoVictim;
+    u32 b_id = kBalanceNoVictim;
+    u32 c_id = kBalanceNoVictim;
+    for (u32 i = 0; i < limit && a_id == kBalanceNoVictim; ++i)
+    {
+        const cpu::Topology* ti = cpu::TopologyForCpu(i);
+        cpu::PerCpu* pi = arch::SmpGetPercpu(i);
+        if (ti == nullptr || pi == nullptr || ti->core_group == cpu::kTopologyUnknownCoreGroup ||
+            ti->smt_sibling_count == 0)
+        {
+            continue;
+        }
+        for (u32 j = 0; j < limit; ++j)
+        {
+            if (j == i)
+            {
+                continue;
+            }
+            const cpu::Topology* tj = cpu::TopologyForCpu(j);
+            cpu::PerCpu* pj = arch::SmpGetPercpu(j);
+            if (tj == nullptr || pj == nullptr)
+            {
+                continue;
+            }
+            if (tj->core_group == ti->core_group && b_id == kBalanceNoVictim)
+            {
+                b_id = j; // SMT sibling of i
+            }
+            else if (tj->core_group != cpu::kTopologyUnknownCoreGroup && tj->core_group != ti->core_group &&
+                     pj->cluster_id == pi->cluster_id && c_id == kBalanceNoVictim)
+            {
+                c_id = j; // distinct physical core, same cluster
+            }
+        }
+        if (b_id != kBalanceNoVictim && c_id != kBalanceNoVictim)
+        {
+            a_id = i;
+        }
+        else
+        {
+            b_id = kBalanceNoVictim;
+            c_id = kBalanceNoVictim;
+        }
+    }
+    if (a_id == kBalanceNoVictim)
+    {
+        arch::SerialWrite("[smt-placement-selftest] SKIP (no sibling+distinct-core triple)\n");
+        return;
+    }
+
+    cpu::PerCpu* a = arch::SmpGetPercpu(a_id);
+    cpu::PerCpu* b = arch::SmpGetPercpu(b_id);
+    cpu::PerCpu* c = arch::SmpGetPercpu(c_id);
+
+    // Clean slate so the penalty arithmetic is unambiguous.
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (p != nullptr)
+        {
+            p->runq_normal_len = 0;
+        }
+    }
+
+    // Invariant 1 — sibling penalty: a idle but its sibling b
+    // busy makes a's effective load == kSmtSiblingPenalty, while
+    // c's physical core is fully idle so its effective load is 0.
+    a->runq_normal_len = 0;
+    b->runq_normal_len = 1;
+    KASSERT(EffectiveLoad(a) == kSmtSiblingPenalty, "sched", "SmtPlacementSelfTest: sibling penalty not applied");
+    KASSERT(EffectiveLoad(c) == 0, "sched", "SmtPlacementSelfTest: idle distinct core penalized");
+
+    // Invariant 2 — placement prefers a distinct physical core:
+    // with b busy and c idle, a fully-idle core must beat an SMT
+    // sibling of a busy core even when a sits exactly at the
+    // cluster-placement margin (so the raw short-circuit doesn't
+    // fire).
+    a->runq_normal_len = kClusterPlacementMargin;
+    b->runq_normal_len = 1;
+    c->runq_normal_len = 0;
+    {
+        cpu::PerCpu* picked = PickClusterPlacement(a);
+        KASSERT(picked == c, "sched", "SmtPlacementSelfTest: placement did not prefer distinct core");
+    }
+
+    // Invariant 3 — non-SMT identity: any core_group==unknown CPU
+    // must see EffectiveLoad == raw runq_normal_len (the legacy
+    // byte-for-byte path). Skipped when every CPU decoded SMT.
+    for (u32 i = 0; i < limit; ++i)
+    {
+        const cpu::Topology* t = cpu::TopologyForCpu(i);
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (t == nullptr || p == nullptr || t->core_group != cpu::kTopologyUnknownCoreGroup)
+        {
+            continue;
+        }
+        p->runq_normal_len = 7;
+        KASSERT(EffectiveLoad(p) == 7, "sched", "SmtPlacementSelfTest: non-SMT CPU not identity");
+        p->runq_normal_len = 0;
+        break;
+    }
+
+    // Invariant 4 — exactly one smt_primary per core_group.
+    for (u32 i = 0; i < limit; ++i)
+    {
+        const cpu::Topology* ti = cpu::TopologyForCpu(i);
+        if (ti == nullptr || ti->core_group == cpu::kTopologyUnknownCoreGroup)
+        {
+            continue;
+        }
+        // Only audit the group from its first occurrence.
+        bool first = true;
+        for (u32 k = 0; k < i; ++k)
+        {
+            const cpu::Topology* tk = cpu::TopologyForCpu(k);
+            if (tk != nullptr && tk->core_group == ti->core_group)
+            {
+                first = false;
+                break;
+            }
+        }
+        if (!first)
+        {
+            continue;
+        }
+        u32 primaries = 0;
+        for (u32 j = 0; j < limit; ++j)
+        {
+            const cpu::Topology* tj = cpu::TopologyForCpu(j);
+            if (tj != nullptr && tj->core_group == ti->core_group && tj->smt_primary == 1)
+            {
+                ++primaries;
+            }
+        }
+        KASSERT(primaries == 1, "sched", "SmtPlacementSelfTest: core_group lacks exactly one primary");
+    }
+
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (p != nullptr)
+        {
+            p->runq_normal_len = saved_len[i];
+        }
+    }
+
+    arch::SerialWrite("[smt-placement-selftest] PASS\n");
+}
+
+void AffinityMaskSelfTest()
+{
+    const u32 limit = arch::SmpCpuIdLimit();
+    if (limit < 2)
+    {
+        arch::SerialWrite("[affinity-mask-selftest] SKIP (need >=2 CPUs)\n");
+        return;
+    }
+
+    // Pick an allowed CPU A and a distinct forbidden CPU F that
+    // are both online.
+    u32 cpu_a = limit; // sentinel
+    u32 cpu_f = limit;
+    for (u32 i = 0; i < limit; ++i)
+    {
+        if (arch::SmpGetPercpu(i) == nullptr)
+        {
+            continue;
+        }
+        if (cpu_a == limit)
+        {
+            cpu_a = i;
+        }
+        else if (cpu_f == limit)
+        {
+            cpu_f = i;
+            break;
+        }
+    }
+    if (cpu_a == limit || cpu_f == limit)
+    {
+        arch::SerialWrite("[affinity-mask-selftest] SKIP (need 2 online CPUs)\n");
+        return;
+    }
+
+    // --- Phase A: mask API (these take g_sched_lock internally,
+    // so must run WITHOUT the lock held). ---
+    Task probe;
+    memset(&probe, 0, sizeof(Task));
+    probe.priority = TaskPriority::Normal;
+    probe.last_cpu = cpu_f;
+    probe.affinity_mask = kAffinityAll;
+
+    KASSERT(!SchedSetAffinityMask(&probe, 0u), "sched", "AffinityMaskSelfTest: empty mask accepted");
+    KASSERT(!SchedSetAffinityMask(nullptr, 1u), "sched", "AffinityMaskSelfTest: null task accepted");
+    KASSERT(SchedSetAffinityMask(&probe, 1u << cpu_a), "sched", "AffinityMaskSelfTest: valid pin rejected");
+    KASSERT(!TaskAllowedOn(&probe, cpu_f), "sched", "AffinityMaskSelfTest: forbidden CPU still allowed");
+    KASSERT(TaskAllowedOn(&probe, cpu_a), "sched", "AffinityMaskSelfTest: allowed CPU rejected");
+    // Pinning away from last_cpu must retarget the routing hint.
+    KASSERT(probe.last_cpu == cpu_a, "sched", "AffinityMaskSelfTest: last_cpu not retargeted");
+    // getaffinity expands the sentinel; a single-CPU pin reads back exactly.
+    KASSERT(SchedGetAffinityMask(&probe) == (1u << cpu_a), "sched", "AffinityMaskSelfTest: getaffinity mismatch");
+    // An all-online mask collapses to the unrestricted sentinel.
+    Task probe_all;
+    memset(&probe_all, 0, sizeof(Task));
+    probe_all.priority = TaskPriority::Normal;
+    KASSERT(SchedSetAffinityMask(&probe_all, ~0u), "sched", "AffinityMaskSelfTest: all-mask rejected");
+    KASSERT(TaskAllowedOn(&probe_all, cpu_f), "sched", "AffinityMaskSelfTest: all-mask not unrestricted");
+
+    // --- Phase B: placement honors the mask (lock held + runq
+    // snapshot, same idiom as the other scheduler self-tests). ---
+    constexpr u32 kMaxCpus = 64;
+    u32 saved_len[kMaxCpus] = {0};
+    sync::SpinLockGuard guard(g_sched_lock);
+    KASSERT(limit <= kMaxCpus, "sched", "AffinityMaskSelfTest: SmpCpuIdLimit > kMaxCpus");
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        saved_len[i] = (p != nullptr) ? p->runq_normal_len : 0;
+        if (p != nullptr)
+        {
+            p->runq_normal_len = 0;
+        }
+    }
+
+    // probe is pinned to cpu_a only, but its routing hint and a
+    // light forbidden CPU would otherwise attract placement.
+    cpu::PerCpu* pa = arch::SmpGetPercpu(cpu_a);
+    cpu::PerCpu* pf = arch::SmpGetPercpu(cpu_f);
+    pa->runq_normal_len = kClusterPlacementMargin; // not the early light-CPU short-circuit
+    pf->runq_normal_len = 0;                       // most attractive by load
+
+    cpu::PerCpu* tgt = TargetPerCpuFor(&probe);
+    KASSERT(tgt == pa, "sched", "AffinityMaskSelfTest: TargetPerCpuFor ignored mask");
+
+    cpu::PerCpu* placed = PickClusterPlacement(pa, &probe);
+    KASSERT(placed != pf, "sched", "AffinityMaskSelfTest: placement chose forbidden CPU");
+    KASSERT(placed != nullptr && TaskAllowedOn(&probe, placed->cpu_id), "sched",
+            "AffinityMaskSelfTest: placement result not allowed");
+
+    // Unrestricted identity: an all-mask task routes exactly as a
+    // null-task call (byte-for-byte pre-affinity behavior).
+    probe_all.last_cpu = cpu_f;
+    KASSERT(TargetPerCpuFor(&probe_all) == pf, "sched", "AffinityMaskSelfTest: unrestricted retargeted");
+    KASSERT(PickClusterPlacement(pa, &probe_all) == PickClusterPlacement(pa, nullptr), "sched",
+            "AffinityMaskSelfTest: unrestricted not identical to no-task");
+
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (p != nullptr)
+        {
+            p->runq_normal_len = saved_len[i];
+        }
+    }
+    arch::SerialWrite("[affinity-mask-selftest] PASS\n");
+}
+
+void HybridPlacementSelfTest()
+{
+    const u32 limit = arch::SmpCpuIdLimit();
+    u32 e_cpu = limit; // an E-core
+    u32 p_cpu = limit; // a P-core
+    for (u32 i = 0; i < limit; ++i)
+    {
+        const cpu::Topology* ti = cpu::TopologyForCpu(i);
+        if (ti == nullptr || arch::SmpGetPercpu(i) == nullptr)
+        {
+            continue;
+        }
+        if (ti->core_class == cpu::kCoreClassEff && e_cpu == limit)
+        {
+            e_cpu = i;
+        }
+        else if (ti->core_class == cpu::kCoreClassPerf && p_cpu == limit)
+        {
+            p_cpu = i;
+        }
+    }
+    if (e_cpu == limit || p_cpu == limit)
+    {
+        // QEMU never models Intel hybrid; this is the universal
+        // path here. Same honest SKIP contract as the SMT test.
+        arch::SerialWrite("[hybrid-placement-selftest] SKIP (non-hybrid guest)\n");
+        return;
+    }
+
+    constexpr u32 kMaxCpus = 64;
+    u32 saved_len[kMaxCpus] = {0};
+    sync::SpinLockGuard guard(g_sched_lock);
+    KASSERT(limit <= kMaxCpus, "sched", "HybridPlacementSelfTest: SmpCpuIdLimit > kMaxCpus");
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        saved_len[i] = (p != nullptr) ? p->runq_normal_len : 0;
+        if (p != nullptr)
+        {
+            p->runq_normal_len = 0;
+        }
+    }
+    cpu::PerCpu* pe = arch::SmpGetPercpu(e_cpu);
+    cpu::PerCpu* pp = arch::SmpGetPercpu(p_cpu);
+
+    // Idle P-core present => the E-core carries the hybrid penalty
+    // and the P-core does not.
+    KASSERT(EffectiveLoad(pe) == kHybridEcorePenalty, "sched",
+            "HybridPlacementSelfTest: E-core penalty not applied while P-core idle");
+    KASSERT(EffectiveLoad(pp) == 0, "sched", "HybridPlacementSelfTest: idle P-core penalized");
+
+    // Every P-core busy => no idle P-core, so the E-core penalty
+    // lifts (E-cores are used rather than starved).
+    for (u32 i = 0; i < limit; ++i)
+    {
+        const cpu::Topology* ti = cpu::TopologyForCpu(i);
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (ti != nullptr && p != nullptr && ti->core_class == cpu::kCoreClassPerf)
+        {
+            p->runq_normal_len = 1;
+        }
+    }
+    KASSERT(EffectiveLoad(pe) == 0, "sched", "HybridPlacementSelfTest: E-core penalized with no idle P-core");
+
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (p != nullptr)
+        {
+            p->runq_normal_len = saved_len[i];
+        }
+    }
+    arch::SerialWrite("[hybrid-placement-selftest] PASS\n");
+}
+
+void IdlePowerSelfTest()
+{
+    // Wiring check: the CPU-feature table must be populated and
+    // the MONITOR bit must agree with a fresh CPUID.1:ECX[3], so
+    // the idle path's gate reflects reality. Then report which
+    // idle path every CPU's IdleMain selected. Unlike the
+    // topology self-tests this PASSes on QEMU (real signal, not a
+    // SKIP) — the boot-log analyzer greps the sentinel.
+    const arch::CpuInfo& ci = arch::CpuInfoGet();
+    KASSERT(ci.valid, "sched", "IdlePowerSelfTest: CpuInfo not initialised");
+
+    u32 eax = 1, ebx = 0, ecx = 0, edx = 0;
+    asm volatile("cpuid" : "+a"(eax), "=b"(ebx), "+c"(ecx), "=d"(edx));
+    const bool cpuid_monitor = ((ecx >> 3) & 1u) != 0u;
+    const bool feat_monitor = arch::CpuHas(arch::kCpuFeatMonitor);
+    KASSERT(cpuid_monitor == feat_monitor, "sched", "IdlePowerSelfTest: MONITOR feature gate disagrees with CPUID");
+
+    if (feat_monitor)
+    {
+        arch::SerialWrite("[idle-power-selftest] PASS (mwait)\n");
+    }
+    else
+    {
+        arch::SerialWrite("[idle-power-selftest] PASS (hlt-fallback)\n");
+    }
 }
 
 void DumpCurrentTaskSyscallTrail()
@@ -3383,8 +4054,57 @@ void SchedStartReaper()
 namespace
 {
 
+// Low-power idle. MONITOR/MWAIT lets the core drop into an
+// MWAIT-C1 power state that is at least as deep as a bare HLT
+// (and lower-power on most parts) while keeping identical wake
+// semantics: `Sti()` is issued before this, so a normal unmasked
+// IRQ (timer tick / reschedule IPI) breaks MWAIT exactly as it
+// breaks HLT and the dispatcher runs on the same events.
+//
+// MWAIT ECX MUST be 0: the only non-zero bit (bit0, "treat a
+// masked interrupt as a break-event") is an OPTIONAL extension
+// gated on CPUID.5:ECX[1]. Passing ECX=1 on a CPU/hypervisor
+// that doesn't implement the extension #GPs — and because the
+// fault handler returns to the same MWAIT, that recurses until
+// the idle task's kernel stack hits its guard page (the
+// idle-bsp#5 overflow this replaced). ECX=0 needs no leaf-5
+// feature and, with IF=1 from Sti(), is exactly HLT-equivalent.
+// EAX=0 = C1 hint (conservative, no deep-C-state latency). The
+// caller only sets use_mwait when CPUID leaf 5 actually exists.
+// Falls back to HLT verbatim when MWAIT is unavailable.
+// MWAIT is safe to use only if CPUID advertises MONITOR (leaf 1
+// ECX[3]) AND the MONITOR/MWAIT enumeration leaf (5) actually
+// exists. Some hypervisors set ECX[3] but expose no leaf 5; using
+// MWAIT there is undefined. Belt-and-suspenders with the ECX=0
+// fix above.
+inline bool MwaitUsable()
+{
+    if (!arch::CpuHas(arch::kCpuFeatMonitor))
+    {
+        return false;
+    }
+    u32 max_leaf, ebx, ecx, edx;
+    asm volatile("cpuid" : "=a"(max_leaf), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0));
+    return max_leaf >= 5u;
+}
+
+inline void CpuIdleLowPower(volatile u8* monitor_cell, bool use_mwait)
+{
+    if (use_mwait)
+    {
+        asm volatile("monitor" ::"a"(monitor_cell), "c"(0), "d"(0));
+        asm volatile("mwait" ::"a"(0), "c"(0));
+    }
+    else
+    {
+        asm volatile("hlt");
+    }
+}
+
 [[noreturn]] void IdleMain(void*)
 {
+    const bool use_mwait = MwaitUsable();
+    volatile u8 monitor_cell = 0; // per-idle-task (per-CPU) MONITOR line
     for (;;)
     {
         // Drain any RCU callbacks queued on THIS CPU before
@@ -3401,7 +4121,7 @@ namespace
         // across the box at zero scheduling cost.
         sync::RcuReclaimLocal();
         arch::Sti();
-        asm volatile("hlt");
+        CpuIdleLowPower(&monitor_cell, use_mwait);
     }
 }
 
@@ -3440,6 +4160,7 @@ Task* CreateApBootSentinel(u32 cpu_id)
     t->name = "ap-boot";
     t->priority = TaskPriority::Normal;
     t->last_cpu = cpu_id;
+    t->affinity_mask = kAffinityAll;
     return t;
 }
 
@@ -3509,10 +4230,12 @@ void FormatIdleApName(char (&out)[16], u32 cpu_id)
     //    Schedule(), pulls a runnable task off this CPU's runqueue
     //    (or our just-spawned idle if no work is waiting), and
     //    never returns to this stack frame.
+    const bool use_mwait = MwaitUsable();
+    volatile u8 monitor_cell = 0;
     for (;;)
     {
         arch::Sti();
-        asm volatile("hlt");
+        CpuIdleLowPower(&monitor_cell, use_mwait);
     }
 }
 
