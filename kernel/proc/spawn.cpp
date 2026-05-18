@@ -1130,6 +1130,34 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         }
     }
 
+    // ----------------------------------------------------------
+    // Cross-preload reconciliation pass. The per-DLL resolve at
+    // load time above only sees the DLLs preloaded *before* it
+    // (`preloaded_count - 1`), so a preloaded DLL that imports
+    // from a preloaded DLL listed LATER in `preload_set[]` binds
+    // those slots to a catch-all NO-OP. Concretely: vcruntime140
+    // (EH engine) imports `ntdll!NtRaiseException` /
+    // `RtlUnwindEx` / `RtlCaptureContext`, but ntdll is loaded
+    // after vcruntime140 — so MSVC C++ `throw` no-op'd and the
+    // PE faulted (T6-05). Re-resolving every preloaded image
+    // against the now-complete set upgrades those slots to the
+    // real via-DLL stub. Order-independent by construction, so
+    // adding a new preloaded DLL never needs a hand-maintained
+    // dependency ordering. `PeResolveImportsForLoadedImage` is
+    // idempotent — it recomputes each stub VA and re-patches the
+    // IAT fresh, so a slot that already resolved correctly is
+    // rewritten with the identical value.
+    for (u64 i = 0; i < preloaded_count; ++i)
+    {
+        const DllImage& img = preloaded_dlls[i];
+        if (img.file == nullptr || img.file_len == 0)
+            continue;
+        (void)duetos::core::PeResolveImportsForLoadedImage(img.file, img.file_len, as, preloaded_dlls, preloaded_count);
+    }
+    SerialWrite("[ring3] preload cross-reconcile complete count=");
+    SerialWriteHex(preloaded_count);
+    SerialWrite("\n");
+
     const DllImage* dll_array = preloaded_count > 0 ? preloaded_dlls : nullptr;
     const PeLoadResult r = PeLoad(pe_bytes, pe_len, as, name, aslr_delta, dll_array, preloaded_count);
     if (!r.ok)
