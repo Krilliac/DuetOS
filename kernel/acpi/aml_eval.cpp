@@ -1266,6 +1266,60 @@ bool AmlEvaluateInteger(const char* path, u64* out, const AmlValue* args, u32 ar
     return true;
 }
 
+bool AmlEvaluatePackageInts(const char* path, u64* out, u32 cap, u32* count, const AmlValue* args, u32 argc)
+{
+    if (path == nullptr || out == nullptr || count == nullptr)
+        return false;
+    *count = 0;
+    const AmlNamespaceEntry* e = AmlNamespaceFind(path);
+    if (e == nullptr)
+        return false;
+
+    Arena arena;
+    AmlValue r{};
+    if (e->kind == AmlObjectKind::Method)
+    {
+        const u8* body = nullptr;
+        u32 blen = 0;
+        u8 margc = 0;
+        if (!AmlMethodBody(e, &body, &blen, &margc))
+            return false;
+        AmlValue ca[7] = {};
+        for (u8 i = 0; i < margc && i < 7; ++i)
+            ca[i] = (i < argc && args) ? args[i] : AmlValue{};
+        EvalState st{arena, path, ca, margc};
+        if (!ExecTermList(body, blen, 0, blen, st) || !st.returned)
+            return false;
+        r = st.retval;
+    }
+    else if (e->kind == AmlObjectKind::Name)
+    {
+        const u8* data = nullptr;
+        u32 dlen = 0;
+        if (!AmlNameValue(e, &data, &dlen))
+            return false;
+        EvalState st{arena, path, args, u8(argc > 7 ? 7 : argc)};
+        u32 sp = 0;
+        if (!EvalTermArg(data, dlen, sp, st, r))
+            return false;
+    }
+    else
+    {
+        return false;
+    }
+    if (r.type != AmlType::Package)
+        return false;
+    // Arena still alive here — flatten before it dies with this frame.
+    const u32 n = r.pkg_count < cap ? r.pkg_count : cap;
+    for (u32 i = 0; i < n; ++i)
+    {
+        const AmlValue& el = arena.nodes[r.pkg_first + i];
+        out[i] = (el.type == AmlType::Integer || el.type == AmlType::Buffer) ? AsInteger(el) : 0;
+    }
+    *count = n;
+    return true;
+}
+
 void AmlEvalSelfTest()
 {
     struct Case

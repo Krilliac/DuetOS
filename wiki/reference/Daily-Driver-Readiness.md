@@ -36,8 +36,8 @@ section) and the relevant subsystem page.
 | **Audio playback** | HDA register probe + codec walker + verb-encoding helpers. `winmm!waveOut*` API surface is partial: probes return a real handle, headers stamp `WHDR_PREPARED` / `WHDR_DONE`, samples are accepted and silently dropped. | DMA-coherent buffer pool + BDL programming + RUN-bit toggle so samples actually reach the codec. | Drivers → Audio; Track 12 → T12-03 |
 | **Wi-Fi on real hardware** | Data + control tier complete (parsers, 4-way handshake, MLME/WDEV state machine, ring scaffolds, AES key wrap, firmware envelope verification). All exercised by self-tests; libFuzzer corpus clean. NIC MMIO paths still log "mmio_virt is null". | Real-hardware verification cycles (recommended: AR9271/AR7010 `ath9k_htc` USB first, then Intel iwlwifi). IRQ wiring on per-vendor MSI/MSI-X. iwlwifi TFD descriptor build / doorbell / per-RBD data buffers. Installer integration for offline firmware kit. | Drivers → Wireless; End-user features → Network Status |
 | **Bluetooth** | HCI command/event packet parser. No transport. | btusb / btuart transport driver; L2CAP / RFCOMM / GATT stack. | Drivers → Bluetooth |
-| **Battery + suspend** | Power backend flagged `backend_is_stub`. No EC / battery state surfaced. | AML method interpreter LANDED (`aml_eval.{h,cpp}`); now needs the ACPI EC driver to register an EmbeddedControl region handler + S3 plumbing so battery / lid work. | Drivers → Battery + ACPI suspend |
-| **Brightness / Fn-keys** | Dead. | ACPI EC driver + per-vendor backlight register paths. | Drivers → Brightness |
+| **Battery + suspend** | ACPI EC driver (`kernel/acpi/ec.{h,cpp}`) registers the EmbeddedControl region handler; `kernel/acpi/acpi_power.cpp` decodes `_STA`/`_BIF`/`_BST` (battery), `_PSR` (AC), `_LID` (lid) through the AML interpreter and feeds `drivers/power` — `backend_is_stub` is cleared whenever live ACPI data exists, re-polled each `PowerSnapshotRead`. QEMU (no power AML) falls back to the SMBIOS heuristic. | S3/S0ix suspend-to-RAM wake plumbing; `_Qxx` GPE/SCI query dispatch for lid-close *events* (lid *state* already readable). EC port discovery uses the de-facto 0x66/0x62 rather than ECDT/`_CRS` (GAP). Real-hardware validation pending (no HW in CI). | Drivers → Battery + ACPI suspend |
+| **Brightness / Fn-keys** | ACPI path landed: `AcpiBacklight{Levels,Get,Set}` drive `_BCL`/`_BQC`/`_BCM` via the interpreter. | Per-vendor *register* backlight (Intel/AMD PWM, vendor WMI) for non-ACPI laptops; wiring the UI control + Fn-key hotkey events to `AcpiBacklightSet`. | Drivers → Brightness |
 | **Multi-monitor / hot-plug display** | Single linear framebuffer; mode set at boot via Bochs VBE. EDID parser landed; hot-plug detection missing. | Per-vendor GPU drivers + mode-set negotiation. | Drivers → Multi-monitor |
 | **Real GPU acceleration** | AMD/NVIDIA/Intel probe + register peek; D3D11/D3D12/Vulkan all fall back to a software rasterizer. | Per-vendor command-ring submission (Intel RCS, AMD CP, NVIDIA GSP). | Win32 → DirectX backends; Drivers → GPU |
 | **Printer / Webcam** | None. | USB printer-class driver + IPP pipeline; UVC USB-Video class driver. | Drivers → Bluetooth / Printer / Webcam |
@@ -97,10 +97,14 @@ before the dependent rows:
   (`kernel/acpi/aml_eval.{h,cpp}`): a v0 tree-walking interpreter
   (operands / arithmetic / control flow / Field + OperationRegion
   access / nested method calls) with a registrable
-  EmbeddedControl region handler and a boot self-test. ACPI EC
-  (battery + brightness), per-CPU sleep states, and `_PTS`/`_GTS`
-  now block only on their respective driver/wiring slices, not on
-  AML evaluation. (Tier 0, Tier 1.)
+  EmbeddedControl region handler and a boot self-test. (Tier 0,
+  Tier 1.)
+- ~~**ACPI EC driver + battery/AC/lid/brightness**~~ — **LANDED**
+  (`kernel/acpi/ec.{h,cpp}` + `kernel/acpi/acpi_power.{h,cpp}`):
+  EmbeddedControl handler registered; `_STA`/`_BIF`/`_BST`/`_PSR`/
+  `_LID`/`_BCL`/`_BQC`/`_BCM` decoded and surfaced through
+  `drivers/power`. Remaining: S3 suspend, `_Qxx` GPE events,
+  per-vendor register backlight, real-HW validation. (Tier 1.)
 - **Disk installer orchestration** — unblocks GPT partition
   reservation for crash dumps and the writable-FS rollout. (Tier 0,
   Tier 4.)

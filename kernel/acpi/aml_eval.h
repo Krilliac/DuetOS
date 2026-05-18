@@ -98,6 +98,17 @@ void AmlRegisterRegionHandler(AmlRegionSpace space, AmlRegionHandler handler, vo
 // result is not integer-coercible.
 bool AmlEvaluateInteger(const char* path, u64* out, const AmlValue* args = nullptr, u32 argc = 0);
 
+// Evaluate a method/name that returns a Package and flatten its
+// top-level elements into `out` as integers (non-integer elements —
+// e.g. the model/serial strings in `_BIF` — yield 0). This exists
+// because a returned Package references the per-evaluation arena,
+// which is destroyed when the evaluation returns; the flatten
+// happens while the arena is still alive. `*count` receives the
+// number of elements written (≤ cap). Returns false if the path is
+// missing / evaluation failed / the result is not a Package.
+bool AmlEvaluatePackageInts(const char* path, u64* out, u32 cap, u32* count, const AmlValue* args = nullptr,
+                            u32 argc = 0);
+
 // Run a raw method-body TermList directly (used by the boot
 // self-test to exercise the interpreter on synthetic bytecode
 // without depending on firmware DSDT contents). `aml`/`len`

@@ -49,6 +49,12 @@ Sources:
   field/region index
 - [`kernel/acpi/aml_eval.h`](../../kernel/acpi/aml_eval.h) +
   [`aml_eval.cpp`](../../kernel/acpi/aml_eval.cpp) — v0 method interpreter
+- [`kernel/acpi/ec.h`](../../kernel/acpi/ec.h) +
+  [`ec.cpp`](../../kernel/acpi/ec.cpp) — Embedded Controller driver +
+  EmbeddedControl region handler
+- [`kernel/acpi/acpi_power.h`](../../kernel/acpi/acpi_power.h) +
+  [`acpi_power.cpp`](../../kernel/acpi/acpi_power.cpp) — battery / AC /
+  lid / backlight method evaluators (consumed by `drivers/power`)
 - [`kernel/acpi/srat.h`](../../kernel/acpi/srat.h) — NUMA topology
 - [`kernel/acpi/acpi_rust/`](../../kernel/acpi/acpi_rust/) — Rust crate
   for tightly-bounded decoders (see [Rust Subsystems](../tooling/Rust-Subsystems.md))

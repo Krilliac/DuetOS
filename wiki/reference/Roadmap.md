@@ -577,20 +577,31 @@ In rough priority:
 
 ### Brightness — ACPI EC driver
 
-- **Today:** Fn-keys dead; no backlight driver.
-- **Blocks on:** ACPI EC driver (does not exist), per-vendor
-  backlight register paths.
+- **ACPI path LANDED:** `kernel/acpi/acpi_power.cpp` exposes
+  `AcpiBacklightLevels` / `AcpiBacklightGet` / `AcpiBacklightSet`
+  driving the firmware's `_BCL` / `_BQC` / `_BCM` methods through
+  the AML interpreter; the ACPI EC driver
+  (`kernel/acpi/ec.{h,cpp}`) backs any EmbeddedControl FieldUnits
+  those methods touch.
+- **Still blocks on:** per-vendor *register* backlight (Intel/AMD
+  PWM, vendor WMI/Fn-key hotkeys) for laptops that do brightness
+  outside ACPI `_BCM`. Wiring the UI brightness control + Fn-key
+  events to `AcpiBacklightSet` is a follow-up.
 
 ### Battery + ACPI suspend
 
-- **Today:** `kernel/drivers/power/power.cpp` flags
-  `backend_is_stub = true`. ACPI battery state unknown.
-- **Blocks on:** ~~ACPI AML interpreter~~ (LANDED — see
-  `kernel/acpi/aml_eval.{h,cpp}`: a v0 tree-walking method
-  interpreter with OperationRegion / FieldUnit access and a
-  registrable EmbeddedControl region handler); now blocks only on
-  the EC driver registering that handler + S3/S0ix wake plumbing.
-- **Unlocks:** battery tray icon, lid-close suspend.
+- **Battery / AC / lid LANDED:** the ACPI EC driver
+  (`kernel/acpi/ec.{h,cpp}`) registers the EmbeddedControl region
+  handler with the AML interpreter; `kernel/acpi/acpi_power.cpp`
+  evaluates `_STA`/`_BIF`/`_BST` (battery), `_PSR` (AC), `_LID`
+  (lid) and feeds `kernel/drivers/power/power.cpp`, which now
+  clears `backend_is_stub` whenever live ACPI data is present
+  (re-polled on every `PowerSnapshotRead`). On firmware without
+  power AML (QEMU) it falls back to the SMBIOS heuristic.
+- **Still blocks on:** S3/S0ix suspend-to-RAM wake plumbing and
+  `_Qxx` GPE/SCI query dispatch (lid-close *event* delivery; the
+  lid *state* is already readable). Battery tray icon can now be
+  wired to `PowerSnapshotRead`.
 
 ### Bluetooth, Printer, Webcam
 
