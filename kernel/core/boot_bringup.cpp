@@ -19,6 +19,7 @@
 #include "util/vt_parser.h"
 #include "acpi/acpi.h"
 #include "acpi/acpi_power.h"
+#include "acpi/acpi_sci.h"
 #include "acpi/aml.h"
 #include "acpi/aml_eval.h"
 #include "acpi/ec.h"
@@ -111,6 +112,7 @@
 #include "drivers/pci/pci.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/power/power.h"
+#include "env/environment.h"
 #include "drivers/usb/btusb.h"
 #include "drivers/usb/cdc_ecm.h"
 #include "drivers/usb/hid_descriptor.h"
@@ -1069,6 +1071,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiEcSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiPowerSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiSleepPrepSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiSciSelfTest());
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();
@@ -1728,6 +1731,20 @@ void BootBringupDevices(bool force_net_smoke)
 
     SerialWrite("[boot] Bringing up power / thermal shell.\n");
     duetos::drivers::power::PowerInit();
+
+    // Compose the unified environment view now that hypervisor /
+    // CPU census / RAM / NUMA / power+thermal are all live. Emits
+    // the canonical `[env] ...` banner; later slices add the
+    // monitor task + ACPI SCI power-event path on top of the query
+    // API this establishes.
+    SerialWrite("[boot] Composing environment view.\n");
+    duetos::env::EnvironmentInit();
+    DUETOS_BOOT_SELFTEST(duetos::env::EnvironmentSelfTest());
+    // Spawn the env-monitor poller now that the scheduler is online
+    // and the first snapshot is published. It re-composes on a
+    // timed poll so cached state stays live (the "reactive" half);
+    // slice 3 will additionally wake it on an ACPI SCI.
+    duetos::env::EnvironmentMonitorStart();
 
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     duetos::net::NetStackInit();

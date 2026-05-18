@@ -627,10 +627,19 @@ In rough priority:
   clears `backend_is_stub` whenever live ACPI data is present
   (re-polled on every `PowerSnapshotRead`). On firmware without
   power AML (QEMU) it falls back to the SMBIOS heuristic.
-- **Still blocks on:** S3/S0ix suspend-to-RAM wake plumbing and
-  `_Qxx` GPE/SCI query dispatch (lid-close *event* delivery; the
-  lid *state* is already readable). Battery tray icon can now be
-  wired to `PowerSnapshotRead`.
+- **SCI path LANDED (env slice 3):** `kernel/acpi/acpi_sci.cpp`
+  enters ACPI mode, arms the power button, installs the SCI IRQ
+  handler, and wakes the `env-monitor` (power button → graceful
+  `AcpiShutdown`). GPE status is read + acked + masked in the
+  handler. See [`Environment`](../kernel/Environment.md).
+- **Still blocks on:** S3/S0ix suspend-to-RAM wake plumbing, and
+  the GPE **`_Qxx` AML query method evaluation** — the SCI now
+  *detects + acks* a GPE, but dispatching the firmware's per-GPE
+  `_Qxx` handler (lid-close / AC *event* delivery) needs the AML
+  interpreter in process context off the woken worker plus an EC
+  `_Qxx` read path (`ec.h` has none). Lid/AC *state* is already
+  readable via `_LID`/`_PSR`; battery tray icon can be wired to
+  `PowerSnapshotRead`.
 
 ### Bluetooth, Printer, Webcam
 

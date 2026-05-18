@@ -9250,3 +9250,181 @@ introspection + control.
 - **Related roadmap track(s):** GDB stub completion (peer-thread
   `vCont;s` remains the only deferred generic item; `qRcmd`
   `O`-packet streaming is the deferred monitor item).
+
+## 2026-05-18 — Unified environment view is a read-only aggregator, not a new detector
+
+The kernel already detected every environmental fact it needed
+(hypervisor kind, CPU census, RAM, NUMA, AC/battery/lid, thermal)
+but the detection was scattered and read ad-hoc — every consumer
+re-derived state from a different subsystem and re-checked
+`IsEmulator()` itself. The requirement was "allow the OS to be
+aware and reactive of its environment," delivered over three
+slices; this entry records slice 1 (aggregation + banner + query
+API).
+
+- **`kernel/env/` is a read-only aggregator; it never re-detects.**
+  `EnvironmentInit()` copies fields from the owning subsystems
+  (`arch::HypervisorInfoGet`, `acpi::CpuCount`,
+  `arch::SmpCpusOnline`, `cpu::TopologyForCpu`, `mm::TotalFrames`,
+  `acpi::srat::*`, `drivers::power::PowerSnapshotRead`). The
+  rejected alternative — moving detection *into* `env/` — would
+  have created a second source of truth per resource (CLAUDE.md
+  rule 6) and an isolation-audit hazard. The reviewable signal is
+  unchanged: `env` issues no new probes, takes no locks, and a
+  guest workload cannot reach anything through it that it couldn't
+  reach through the underlying subsystems.
+- **One canonical banner via raw `SerialWrite`, not klog.** The
+  `[env] …` line is a structural sentinel (like `[smoke] …`) so it
+  survives log-level demotion and `boot-log-analyze.sh` can grep
+  it. This is the consolidated hypervisor/SMP banner CLAUDE.md /
+  the analyzer expected; the scattered `[hv]`/`[smp]`/`[thermal]`
+  lines stay as their owners' detail.
+- **Power policy is a pure function.** `EnvironmentDerivePolicy()`
+  has no side effects so slice 2's monitor recomputes it
+  identically on every poll; the self-test pins the
+  cached-equals-derived invariant slice 2 depends on.
+- **No CMake edit.** `kernel/CMakeLists.txt` globs sources
+  `CONFIGURE_DEPENDS`, so `kernel/env/environment.cpp` is picked
+  up automatically — the plan's "add to CMake" step was a
+  non-issue once the glob was confirmed.
+- **Verified:** clean `x86_64-release` build (zero warnings);
+  `x86_64-release` full boot prints the `[env]` banner and
+  `boot-log-analyze.sh` verdict OK (0 non-deliberate failures);
+  `x86_64-debug` `bringup-only` smoke additionally emits
+  `[env-selftest] PASS` (analyzer OK, 119 self-tests).
+- **Related roadmap track(s):** environment awareness slices 2–3
+  (monitor task + ACPI SCI/GPE power events) — see Roadmap
+  "Environment awareness — runtime monitor + power events".
+
+## 2026-05-18 — env-monitor: idle-path reaction deferred, not faked
+
+Slice 2 of the environment work adds the `env-monitor` poller.
+The approved plan also called for "bias the MWAIT/HLT idle path on
+`PowerSave`." Implementing that faithfully surfaced that there is
+**no safe real lever today**, so the decision is to deliver the
+monitor now and land the idle reaction with slice 3.
+
+- **No idle facade.** `sched::IdleMain` already issues MWAIT-C1
+  (`EAX=0`) whenever the CPU advertises it — the code documents
+  that as "at least as deep as a bare HLT and lower-power on most
+  parts" with identical IRQ-wake semantics. The only deeper lever
+  (the MWAIT EAX C-state hint / deep C-states + a cpuidle
+  governor) is explicitly deferred elsewhere with "no profile
+  evidence and no consumer yet." Wiring `EnvironmentPowerPolicy()`
+  into the hot idle loop where it would change nothing is a
+  probe-satisfying facade (CLAUDE.md rule). Rejected. The idle
+  C-state reaction lands in slice 3, where the real lever and a
+  consumer arrive together. User chose this over (a) a bounded
+  pre-halt spin-poll (perf tuning with no profile evidence —
+  anti-bloat) and (b) pulling deep-C-states forward. DD-009
+  (tickless) stays untouched.
+- **The reactive payoff is the live cache, not a knob.** Slice 1
+  froze the snapshot at boot; slice 2's monitor re-composes and
+  republishes every ~2 s, so every later reader sees current
+  state. That is the substantive "reactive" delta — a consumer
+  (shell, slice 3) acting on stale boot state was the actual gap.
+- **Policy transition is INFO, not WARN.** A power-source change
+  is a legitimate, expected event. Logging it at WARN would flood
+  on every unplug (CLAUDE.md "log-level abuse" class-of-bug). The
+  summary is `KLOG_INFO`, detail is `KLOG_DEBUG_V`, and the
+  GDB-breakable sentinel is the `env.policy_change` probe
+  (`ProbeId::kEnvPolicyChange`, ArmedLog: a clean steady boot
+  never transitions so the log stays quiet).
+- **Reads are snapshot-by-value under a spinlock.**
+  `EnvironmentGet()` changed from returning `const&` (slice 1,
+  write-once) to returning `SystemEnvironment` by value under
+  `g_env_lock`, because the monitor now mutates `g_env`
+  concurrently and a reference would tear. `EnvironmentDerivePolicy`
+  stays pure so monitor and self-test recompute identically.
+- **Verified:** clean `x86_64-release` build (zero warnings);
+  release full boot prints `[env]` + `boot-log-analyze.sh`
+  verdict OK; `x86_64-debug` `bringup-only` smoke emits
+  `[env-selftest] PASS` and `[I] env : environment monitor
+  online`, no spurious `env.policy_change` (policy stays
+  `balanced` on QEMU — clean boot stays quiet), analyzer OK
+  (119 self-tests, 0 non-deliberate failures).
+- **Related roadmap track(s):** environment awareness slice 3
+  (ACPI SCI/GPE power events + the now-meaningful idle reaction).
+
+## 2026-05-18 — env slice 3: ACPI SCI power events; idle reaction stays deferred (honest correction)
+
+Slice 3 wires the ACPI System Control Interrupt so the OS reacts
+to a real power-management interrupt instead of only a 2 s poll.
+It also corrects an over-promise made in the slices 1–2 docs.
+
+- **IRQ-context handler, process-context worker, WaitQueue seam.**
+  The SCI handler must not touch AML / allocate / block, but the
+  reaction (`AcpiShutdown` evaluates `\_S5` AML) is process-context
+  only. Split: `kernel/acpi/acpi_sci.cpp`'s handler read-/write-1-
+  clears PM1+GPE status, latches a `SciPending`, and
+  `WaitQueueWakeOne(&g_env_wq)` (the documented IRQ-safe wake);
+  the `env-monitor` task blocks on that queue
+  (`WaitQueueBlockTimeout`, 2 s fallback) and does the AML work.
+  ACPI owns the hardware (registers, enable handshake, handler);
+  env owns the policy (button ⇒ shutdown). No subsystem-boundary
+  violation.
+- **GPE `_Qxx` is a documented GAP, not built.** The handler acks
+  + masks GPE status (so a level-triggered SCI can't stay
+  asserted) but does not evaluate the firmware's per-GPE `_Qxx`
+  method. A full `_Qxx`/EC-query path is untestable on the only
+  available target (QEMU has no EC, no power AML) — building it
+  now would be speculative + unverifiable (anti-bloat). Power
+  button (the event QEMU *can* raise) is fully handled. The
+  "Battery + ACPI suspend" roadmap entry tracks the `_Qxx`
+  residual.
+- **Idle-path C-state reaction: still deferred — honest
+  correction.** Slices 1–2 said it would land "with slice 3,
+  where a real lever and a consumer arrive together." That was
+  optimistic: slice 3 added the SCI *event* path, not deep
+  C-states. There is still no safe non-speculative idle lever
+  (`IdleMain` already uses MWAIT-C1; the deeper hint / cpuidle
+  governor remains deferred with no profile evidence and no
+  consumer). Wiring a no-op policy read into the hot idle loop
+  remains a facade and is still rejected. The substantive
+  slice-3 reactivity is event-driven (instant power-button
+  shutdown + SCI-driven monitor wake), which fulfils the
+  requirement without the facade. The C-state lever lands only
+  if deep C-states are implemented for their own reasons.
+- **Pre-existing ~17 s CI auto-poweroff — bisected, NOT a slice-3
+  regression.** While testing, the release headless boot was
+  observed to ACPI-poweroff (~17 s) on its own. Building the
+  slice-2 commit and re-running the identical QMP-status probe
+  showed the **same ~17 s shutdown** — it predates this feature
+  (it is the CI/smoke boot's normal end; that is why
+  `boot-log-analyze` reports "completed"). Slice 3 introduced no
+  regression; the env/SCI sentinels never fired during it.
+- **Live power-button e2e is un-observable here — say so, don't
+  fake it.** The `env-monitor` (Normal priority) only gets CPU
+  after the boot task winds down, ~coincident with that
+  pre-existing auto-poweroff, so the SCI arms just as the box
+  powers itself off — no window to land a QMP button press
+  first. `tools/test/env-powerbtn-smoke.sh` (committed; `qmp.sh`
+  gained a `powerdown` verb) therefore reports **SKIP** (exit 0)
+  on that race, **PASS** only on the raw `[env/sci] PWRBTN_STS
+  latched` sentinel, **FAIL** only on panic or an armed-but-
+  ignored button. Correctness up to the hardware boundary is
+  proven by `[acpi/sci-selftest] PASS` (synthetic PM1 decode +
+  latch round-trip), the raw `[acpi/sci] armed` milestone
+  (verified in release), `[env-selftest] PASS`, and a clean
+  analyzer verdict.
+- **Sentinels are raw serial, by design.** `[acpi/sci] armed`
+  (one-time milestone, like the sibling `[acpi] sci_int=` line)
+  and `[env/sci] PWRBTN_STS latched` / `power button -> ACPI
+  shutdown` (rare, terminal) are raw `SerialWrite` so they
+  survive klog level demotion in release and the analyzer / smoke
+  can gate on them — same rationale as the `[env]` banner.
+  Redundant KLOG lines next to them were removed (anti-bloat).
+- **DD-012 revisited.** FADT GPE0/GPE1 + PM1 event blocks +
+  SMI_CMD/ACPI_ENABLE are now parsed and consumed (status + ack +
+  enable handshake). `_Qxx` AML evaluation and the PM timer
+  remain unconsumed.
+- **Verified:** clean `x86_64-release` build (zero warnings);
+  release boot prints `[env]` + `[acpi/sci] armed`,
+  `boot-log-analyze.sh` verdict OK; `x86_64-debug` `bringup-only`
+  emits `[acpi/sci-selftest] PASS`, `[env-selftest] PASS`,
+  `[acpi/sci] armed`, `environment monitor online`, analyzer OK
+  (120 self-tests, 0 non-deliberate failures, no spurious
+  PWRBTN); power-button smoke SKIPs cleanly per the race above.
+- **Related roadmap track(s):** "Battery + ACPI suspend" (`_Qxx`
+  AML query residual; S3/S0ix). Environment-awareness slices
+  1–3 are complete and removed from the Roadmap.

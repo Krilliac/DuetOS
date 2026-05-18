@@ -8,6 +8,7 @@
 #
 #   qmp.sh status                 — run-state (running / paused / ...)
 #   qmp.sh screenshot <out.ppm>   — dump the guest framebuffer
+#   qmp.sh powerdown              — raise the ACPI power button
 #   qmp.sh quit                   — ask QEMU to exit cleanly
 #
 # The socket path defaults to build/<preset>/qmp.sock; override with
@@ -22,7 +23,7 @@ PRESET="${DUETOS_PRESET:-x86_64-debug}"
 SOCK="${DUETOS_QMP_SOCK:-${REPO_ROOT}/build/${PRESET}/qmp.sock}"
 
 if [[ $# -lt 1 ]]; then
-    echo "usage: $0 status | screenshot <out.ppm> | quit" >&2
+    echo "usage: $0 status | screenshot <out.ppm> | powerdown | quit" >&2
     exit 2
 fi
 
@@ -38,6 +39,11 @@ shift || true
 case "${CMD}" in
     status)     QMP_EXEC='{"execute":"query-status"}' ;;
     quit)       QMP_EXEC='{"execute":"quit"}' ;;
+    # Raise the ACPI power button (PWRBTN_STS → SCI). Exercises the
+    # guest's ACPI SCI path end to end: a guest that services it
+    # powers off (QEMU exits); one that doesn't keeps running. Used
+    # by tools/test/env-powerbtn-smoke.sh.
+    powerdown)  QMP_EXEC='{"execute":"system_powerdown"}' ;;
     screenshot)
         if [[ $# -ne 1 ]]; then
             echo "usage: $0 screenshot <out.ppm>" >&2
