@@ -369,6 +369,17 @@ void SyscallTrailSelfTest();
 /// line on success so CI can grep for it.
 void LoadBalanceSelfTest();
 
+/// Decision-function self-test for SMT-aware placement. Verifies
+/// the EffectiveLoad sibling penalty, that PickClusterPlacement
+/// prefers a fully-idle physical core over an SMT sibling of a
+/// busy core, the non-SMT byte-for-byte identity, and the
+/// one-primary-per-core_group invariant. Takes g_sched_lock and
+/// snapshots/restores every runq length, so peer CPUs never
+/// observe the synthetic state. SKIPs on non-SMT guests. Panics
+/// on mismatch; emits one `[smt-placement-selftest] PASS` (or
+/// `SKIP`) line so CI can grep for it.
+void SmtPlacementSelfTest();
+
 /// Top (high address) of the current task's kernel stack. Returns 0 for
 /// the boot task (it never had a scheduler-managed kernel stack — it
 /// runs on the boot.S stack, which is irrelevant for ring-3 RSP0

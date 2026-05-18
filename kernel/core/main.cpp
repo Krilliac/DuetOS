@@ -788,6 +788,16 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                            duetos::sched::LoadBalanceSelfTest();
                                            return duetos::core::Result<void>{};
                                        });
+        // SMT-aware placement decision test. Same Phase::Userland
+        // rationale: needs SmpStartAps + TopologyAssignClusters
+        // (which now also runs AssignCoreGroups) to have finalized
+        // the per-CPU core_group / sibling fields it asserts on.
+        duetos::core::InitcallRegister(duetos::core::Phase::Userland, "smt-placement-selftest",
+                                       []()
+                                       {
+                                           duetos::sched::SmtPlacementSelfTest();
+                                           return duetos::core::Result<void>{};
+                                       });
     }
     (void)duetos::core::RunPhase(duetos::core::Phase::Userland);
 

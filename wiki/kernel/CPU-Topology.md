@@ -1,6 +1,6 @@
 # CPU Topology & Scheduler Clustering
 
-> **Maturity:** v0 — locality-aware work-stealing, NUMA-aware frame allocator, cluster-aware wake placement, and periodic active load balancing. Per-cluster runqueues and cluster-broadcast IPIs remain deferred follow-ups.
+> **Maturity:** v0 — locality-aware work-stealing, NUMA-aware frame allocator, cluster-aware wake placement, periodic active load balancing, and SMT-aware placement (spreads across distinct physical cores before packing SMT siblings). Per-cluster runqueues and cluster-broadcast IPIs remain deferred follow-ups.
 
 ## What this is
 
@@ -10,6 +10,9 @@ Each CPU is decoded into a topology row at boot:
 - **package_id / core_id / smt_id** — derived from CPUID 0x1F (preferred), 0x0B, or legacy leaf 4 + leaf 1.
 - **numa_node** — dense 0..N-1 index sourced from ACPI SRAT (subtypes 0 and 2). `kTopologyUnknownNode` if no SRAT entry exists for the APIC.
 - **cluster_id** — the scheduler-visible grouping. Assigned once at boot from the rule below.
+- **core_group** — dense 0..N-1 index identifying the physical core (CPUs sharing `(package_id, core_id)`). `kTopologyUnknownCoreGroup` (0xFFFF) when SMT identity never decoded, so it can never match a sibling and the scheduler treats the CPU as plain non-SMT.
+- **smt_sibling_count** — number of *other* logical CPUs sharing this physical core (0 on non-SMT). Drives the scheduler's SMT penalty fast-path.
+- **smt_primary** — 1 iff this is the lowest `cpu_id` in its `core_group`. Exactly one per group; consumed by the SMT placement self-test.
 
 The cluster collapse rule is intentionally simple — the innermost meaningful grouping wins:
 
@@ -44,6 +47,21 @@ Three scheduler paths consume `cluster_id`:
    Same-cluster only — see `kernel/sched/sched.cpp` `PickBalanceVictim`
    for the design rationale.
 
+4. **SMT-aware placement** (`EffectiveLoad`, consumed by
+   `PickClusterPlacement` and `PickBalanceVictim`). Effective load =
+   `runq_normal_len + kSmtSiblingPenalty (2)` when a CPU's SMT sibling
+   already has Normal-band work, else the raw length. Set equal to
+   `kClusterPlacementMargin` so a fully-idle physical core always wins
+   placement over an SMT sibling of a busy core with the same
+   no-oscillation equilibrium. **`StealNormalFromPeer` is intentionally
+   *not* SMT-weighted**: it is the idle-pull path, so `self` is going
+   idle and handing it work can never create a two-on-one-core
+   situation — weighting it would only risk the byte-for-byte non-SMT
+   ordering invariant for zero benefit. On non-SMT / undecoded CPUs
+   (`core_group == kTopologyUnknownCoreGroup` or `smt_sibling_count ==
+   0`) `EffectiveLoad` returns the raw length verbatim, so every
+   decision stays byte-for-byte identical to the pre-SMT scheduler.
+
 No new locks. `g_sched_lock` still covers all per-CPU runqueue access. `cluster_id` is a `u16` field on `cpu::PerCpu`, appended past the syscall-stub-relevant offsets (`kPerCpuKernelRsp = 32`, `kPerCpuUserRspScratch = 40` are guarded by `static_assert`s in `kernel/cpu/percpu.h`).
 
 ## Init order
@@ -54,6 +72,8 @@ No new locks. `g_sched_lock` still covers all per-CPU runqueue access. `cluster_
 | 2 | `kernel/core/main.cpp` after `PerCpuInitBsp()` | `cpu::TopologyInitBsp()` |
 | 3 | `kernel/arch/x86_64/smp.cpp` in `ApEntryFromTrampoline` **before** the `online_flag = 1` write | `cpu::TopologyInitAp(cpu_id)` |
 | 4 | `kernel/core/main.cpp` after `SmpStartAps()` returns | `cpu::TopologyAssignClusters(); cpu::TopologyDump();` |
+
+`TopologyAssignClusters` (step 4) also runs `AssignCoreGroups()` at its tail, after every row's `cluster_id` is finalized — the SMT `core_group` / `smt_sibling_count` / `smt_primary` fields are derived there. No new init step or rendezvous: it reuses the same one-shot-on-BSP point, so the order above is unchanged.
 
 The trampoline sets `online_flag = 1` only after the AP has populated its own `k_topo[cpu_id]` row. The BSP's `WaitForApOnline` poll inside `SmpStartAps` therefore doubles as the rendezvous on AP topology decode — no separate done flag, no race when `TopologyAssignClusters` runs.
 

@@ -292,19 +292,26 @@ CPU_MODEL="${DUETOS_CPU:-max}"
 # Optional knobs for stress testing the live kernel:
 #   DUETOS_RAM   — sets `-m` (default 512M). Useful for forcing the
 #                  memory stress driver to hit the heap ceiling early.
-#   DUETOS_SMP   — sets `-smp` (default 4). Every boot now brings
-#                  up APs and exercises the per-CPU runqueues +
-#                  work-stealing + reschedule-IPI paths; without a
-#                  multi-vCPU guest QEMU never instantiates them and
-#                  the whole SMP stack rots untested (the serial
-#                  path is spinlock-protected, all boot self-tests
-#                  pass under SMP, and structural sentinels stay
-#                  intact, so this is safe as the default). Set
-#                  DUETOS_SMP=1 to force a single-CPU regression
-#                  boot.
+#   DUETOS_SMP   — sets `-smp` (default
+#                  `4,sockets=1,cores=2,threads=2`). Same 4 vCPUs
+#                  as before (no extra host load) but now 2
+#                  physical cores x 2 SMT threads, so every boot
+#                  exercises the per-CPU runqueues + work-stealing
+#                  + reschedule-IPI paths AND the SMT-aware
+#                  placement path (`smt-placement-selftest`
+#                  PASSes). The value is passed to `-smp` as one
+#                  token, so overrides work verbatim:
+#                    DUETOS_SMP=4  -> flat 4-socket non-SMT boot
+#                                     (smt-placement-selftest SKIPs;
+#                                     verifies the byte-for-byte
+#                                     EffectiveLoad identity path)
+#                    DUETOS_SMP=1  -> single-CPU regression boot
+#                  All boot self-tests pass under SMP and the
+#                  structural sentinels stay intact, so the SMT
+#                  topology is safe as the default.
 RAM_SIZE="${DUETOS_RAM:-512M}"
 
-SMP_ARGS=(-smp "${DUETOS_SMP:-4}")
+SMP_ARGS=(-smp "${DUETOS_SMP:-4,sockets=1,cores=2,threads=2}")
 
 # QMP control socket. A host-side unix socket, fully orthogonal to
 # COM1 (-serial stdio), COM2 (the GDB transport), and the

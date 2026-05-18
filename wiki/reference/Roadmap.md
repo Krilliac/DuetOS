@@ -168,7 +168,18 @@ the same commit** that delivers the code.
   placement nor work-stealing fires — two CPUs both busy with
   long-running tasks, neither going idle, no new wake events.
   Boot self-test `sched-loadbalance-selftest` (Phase::Userland)
-  verifies the decision function. See
+  verifies the decision function. **SMT-aware placement landed** —
+  `AssignCoreGroups` (tail of `TopologyAssignClusters`) derives
+  per-CPU `core_group` / `smt_sibling_count` / `smt_primary`;
+  `EffectiveLoad` penalizes a logical CPU whose SMT sibling has
+  Normal-band work by `kSmtSiblingPenalty` (= `kClusterPlacementMargin`),
+  consumed by `PickClusterPlacement` and `PickBalanceVictim` so
+  runnable threads spread across distinct physical cores before
+  packing SMT siblings. Idle-pull `StealNormalFromPeer` is
+  intentionally unweighted. Non-SMT CPUs collapse to the raw
+  length byte-for-byte. Default smoke topology now exposes SMT
+  (`-smp 4,sockets=1,cores=2,threads=2`); self-test
+  `smt-placement-selftest` (Phase::Userland) verifies it. See
   [CPU Topology](../kernel/CPU-Topology.md) and
   [Scheduler](../kernel/Scheduler.md).
 - **Remaining scope:** one profile-driven follow-on left:

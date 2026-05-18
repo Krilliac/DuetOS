@@ -53,6 +53,7 @@
 #include "proc/process.h"
 #include "diag/recovery.h"
 #include "cpu/percpu.h"
+#include "cpu/topology.h"
 #include "debug/probes.h"
 #include "mm/address_space.h"
 #include "mm/frame_allocator.h"
@@ -629,6 +630,52 @@ void RunqueuePushOn(cpu::PerCpu* target, Task* t)
 // try-lock probe instead.
 constexpr u32 kClusterPlacementMargin = 2;
 
+// SMT-spreading penalty. Set equal to kClusterPlacementMargin so a
+// fully-idle physical core always wins placement over a logical CPU
+// whose SMT sibling is busy, with the same no-oscillation
+// equilibrium the margin comment above relies on: an idle logical
+// CPU on a busy core then looks exactly as loaded as a logical CPU
+// on an idle core that already has kClusterPlacementMargin tasks
+// queued.
+constexpr u32 kSmtSiblingPenalty = 2;
+
+// Effective Normal-band load for placement/balance decisions: the
+// raw runqueue length plus a penalty when an SMT sibling of `p`
+// already has Normal-band work. On non-SMT or undecoded-topology
+// CPUs every core_group is kTopologyUnknownCoreGroup (or the
+// sibling count is 0), no sibling ever matches, the penalty is
+// always 0, and this returns p->runq_normal_len verbatim — so
+// every caller stays byte-for-byte identical to the pre-SMT
+// scheduler on UMA / legacy boots.
+u32 EffectiveLoad(cpu::PerCpu* p)
+{
+    const u32 base = p->runq_normal_len;
+    const cpu::Topology* t = cpu::TopologyForCpu(p->cpu_id);
+    if (t == nullptr || t->core_group == cpu::kTopologyUnknownCoreGroup || t->smt_sibling_count == 0)
+    {
+        return base;
+    }
+    const u32 limit = arch::SmpCpuIdLimit();
+    for (u32 i = 0; i < limit; ++i)
+    {
+        if (i == p->cpu_id)
+        {
+            continue;
+        }
+        const cpu::Topology* st = cpu::TopologyForCpu(i);
+        if (st == nullptr || st->core_group != t->core_group)
+        {
+            continue;
+        }
+        cpu::PerCpu* sib = arch::SmpGetPercpu(i);
+        if (sib != nullptr && sib->runq_normal_len > 0)
+        {
+            return base + kSmtSiblingPenalty; // sibling busy: treat this CPU as more loaded
+        }
+    }
+    return base;
+}
+
 cpu::PerCpu* PickClusterPlacement(cpu::PerCpu* preferred)
 {
     if (preferred == nullptr)
@@ -642,7 +689,7 @@ cpu::PerCpu* PickClusterPlacement(cpu::PerCpu* preferred)
     const u16 cluster = preferred->cluster_id;
     const u32 limit = arch::SmpCpuIdLimit();
     cpu::PerCpu* best = preferred;
-    u32 best_len = preferred->runq_normal_len;
+    u32 best_len = EffectiveLoad(preferred);
     for (u32 i = 0; i < limit; ++i)
     {
         cpu::PerCpu* peer = arch::SmpGetPercpu(i);
@@ -654,7 +701,7 @@ cpu::PerCpu* PickClusterPlacement(cpu::PerCpu* preferred)
         {
             continue; // cross-cluster routing handled by work-stealing
         }
-        const u32 peer_len = peer->runq_normal_len;
+        const u32 peer_len = EffectiveLoad(peer);
         if (best_len - peer_len >= kClusterPlacementMargin && peer_len < best_len)
         {
             best = peer;
@@ -967,7 +1014,12 @@ u32 PickBalanceVictim(u32 self_cpu, u16 self_cluster, u32 self_len)
         {
             continue;
         }
-        const u32 peer_len = peer->runq_normal_len;
+        // EffectiveLoad (not raw length) so an SMT-paired peer
+        // looks heavier and is drained first — that is the
+        // correct SMT-spreading direction. `self_len` stays raw
+        // (caller passes runq_normal_len); the asymmetry is
+        // deliberate and collapses to identity on non-SMT.
+        const u32 peer_len = EffectiveLoad(peer);
         if (peer_len > best_len)
         {
             best_id = i;
@@ -2543,6 +2595,200 @@ void LoadBalanceSelfTest()
     }
 
     arch::SerialWrite("[sched-loadbalance-selftest] PASS\n");
+}
+
+void SmtPlacementSelfTest()
+{
+    constexpr u32 kMaxCpus = 64;
+    u32 saved_len[kMaxCpus] = {0};
+
+    sync::SpinLockGuard guard(g_sched_lock);
+
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    if (self == nullptr)
+    {
+        arch::SerialWrite("[smt-placement-selftest] SKIP (no CurrentCpu — pre-SchedInit)\n");
+        return;
+    }
+    const u32 limit = arch::SmpCpuIdLimit();
+    KASSERT(limit <= kMaxCpus, "sched", "SmtPlacementSelfTest: SmpCpuIdLimit > kMaxCpus");
+
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        saved_len[i] = (p != nullptr) ? p->runq_normal_len : 0;
+    }
+
+    // SKIP when the guest exposes no SMT siblings (the flat
+    // -smp N / single-CPU regression boots). Nothing to verify;
+    // the byte-for-byte non-SMT path is exercised by every other
+    // scheduler self-test on that topology.
+    bool any_smt = false;
+    for (u32 i = 0; i < limit; ++i)
+    {
+        const cpu::Topology* t = cpu::TopologyForCpu(i);
+        if (t != nullptr && t->smt_sibling_count > 0)
+        {
+            any_smt = true;
+            break;
+        }
+    }
+    if (!any_smt)
+    {
+        arch::SerialWrite("[smt-placement-selftest] SKIP (non-SMT guest)\n");
+        return;
+    }
+
+    // Locate an SMT pair (a, b) sharing a core_group, plus a CPU c
+    // on a *different* valid core_group in the same cluster as a
+    // (PickClusterPlacement only considers same-cluster peers).
+    u32 a_id = kBalanceNoVictim;
+    u32 b_id = kBalanceNoVictim;
+    u32 c_id = kBalanceNoVictim;
+    for (u32 i = 0; i < limit && a_id == kBalanceNoVictim; ++i)
+    {
+        const cpu::Topology* ti = cpu::TopologyForCpu(i);
+        cpu::PerCpu* pi = arch::SmpGetPercpu(i);
+        if (ti == nullptr || pi == nullptr || ti->core_group == cpu::kTopologyUnknownCoreGroup ||
+            ti->smt_sibling_count == 0)
+        {
+            continue;
+        }
+        for (u32 j = 0; j < limit; ++j)
+        {
+            if (j == i)
+            {
+                continue;
+            }
+            const cpu::Topology* tj = cpu::TopologyForCpu(j);
+            cpu::PerCpu* pj = arch::SmpGetPercpu(j);
+            if (tj == nullptr || pj == nullptr)
+            {
+                continue;
+            }
+            if (tj->core_group == ti->core_group && b_id == kBalanceNoVictim)
+            {
+                b_id = j; // SMT sibling of i
+            }
+            else if (tj->core_group != cpu::kTopologyUnknownCoreGroup && tj->core_group != ti->core_group &&
+                     pj->cluster_id == pi->cluster_id && c_id == kBalanceNoVictim)
+            {
+                c_id = j; // distinct physical core, same cluster
+            }
+        }
+        if (b_id != kBalanceNoVictim && c_id != kBalanceNoVictim)
+        {
+            a_id = i;
+        }
+        else
+        {
+            b_id = kBalanceNoVictim;
+            c_id = kBalanceNoVictim;
+        }
+    }
+    if (a_id == kBalanceNoVictim)
+    {
+        arch::SerialWrite("[smt-placement-selftest] SKIP (no sibling+distinct-core triple)\n");
+        return;
+    }
+
+    cpu::PerCpu* a = arch::SmpGetPercpu(a_id);
+    cpu::PerCpu* b = arch::SmpGetPercpu(b_id);
+    cpu::PerCpu* c = arch::SmpGetPercpu(c_id);
+
+    // Clean slate so the penalty arithmetic is unambiguous.
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (p != nullptr)
+        {
+            p->runq_normal_len = 0;
+        }
+    }
+
+    // Invariant 1 — sibling penalty: a idle but its sibling b
+    // busy makes a's effective load == kSmtSiblingPenalty, while
+    // c's physical core is fully idle so its effective load is 0.
+    a->runq_normal_len = 0;
+    b->runq_normal_len = 1;
+    KASSERT(EffectiveLoad(a) == kSmtSiblingPenalty, "sched", "SmtPlacementSelfTest: sibling penalty not applied");
+    KASSERT(EffectiveLoad(c) == 0, "sched", "SmtPlacementSelfTest: idle distinct core penalized");
+
+    // Invariant 2 — placement prefers a distinct physical core:
+    // with b busy and c idle, a fully-idle core must beat an SMT
+    // sibling of a busy core even when a sits exactly at the
+    // cluster-placement margin (so the raw short-circuit doesn't
+    // fire).
+    a->runq_normal_len = kClusterPlacementMargin;
+    b->runq_normal_len = 1;
+    c->runq_normal_len = 0;
+    {
+        cpu::PerCpu* picked = PickClusterPlacement(a);
+        KASSERT(picked == c, "sched", "SmtPlacementSelfTest: placement did not prefer distinct core");
+    }
+
+    // Invariant 3 — non-SMT identity: any core_group==unknown CPU
+    // must see EffectiveLoad == raw runq_normal_len (the legacy
+    // byte-for-byte path). Skipped when every CPU decoded SMT.
+    for (u32 i = 0; i < limit; ++i)
+    {
+        const cpu::Topology* t = cpu::TopologyForCpu(i);
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (t == nullptr || p == nullptr || t->core_group != cpu::kTopologyUnknownCoreGroup)
+        {
+            continue;
+        }
+        p->runq_normal_len = 7;
+        KASSERT(EffectiveLoad(p) == 7, "sched", "SmtPlacementSelfTest: non-SMT CPU not identity");
+        p->runq_normal_len = 0;
+        break;
+    }
+
+    // Invariant 4 — exactly one smt_primary per core_group.
+    for (u32 i = 0; i < limit; ++i)
+    {
+        const cpu::Topology* ti = cpu::TopologyForCpu(i);
+        if (ti == nullptr || ti->core_group == cpu::kTopologyUnknownCoreGroup)
+        {
+            continue;
+        }
+        // Only audit the group from its first occurrence.
+        bool first = true;
+        for (u32 k = 0; k < i; ++k)
+        {
+            const cpu::Topology* tk = cpu::TopologyForCpu(k);
+            if (tk != nullptr && tk->core_group == ti->core_group)
+            {
+                first = false;
+                break;
+            }
+        }
+        if (!first)
+        {
+            continue;
+        }
+        u32 primaries = 0;
+        for (u32 j = 0; j < limit; ++j)
+        {
+            const cpu::Topology* tj = cpu::TopologyForCpu(j);
+            if (tj != nullptr && tj->core_group == ti->core_group && tj->smt_primary == 1)
+            {
+                ++primaries;
+            }
+        }
+        KASSERT(primaries == 1, "sched", "SmtPlacementSelfTest: core_group lacks exactly one primary");
+    }
+
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (p != nullptr)
+        {
+            p->runq_normal_len = saved_len[i];
+        }
+    }
+
+    arch::SerialWrite("[smt-placement-selftest] PASS\n");
 }
 
 void DumpCurrentTaskSyscallTrail()

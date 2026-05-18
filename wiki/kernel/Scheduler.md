@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel — `Schedule()` runs after IRQ EOI or in `cli` cooperative paths
 >
-> **Maturity:** SMP-online — per-CPU runqueues, work-stealing, reschedule-IPI, cluster-aware wake placement, periodic active load balancer; single global `g_sched_lock` (per-CPU lock split deferred)
+> **Maturity:** SMP-online — per-CPU runqueues, work-stealing, reschedule-IPI, cluster-aware wake placement, periodic active load balancer, SMT-aware placement; single global `g_sched_lock` (per-CPU lock split deferred)
 
 ## Overview
 
@@ -138,10 +138,34 @@ penalty for crossing a NUMA / package boundary dwarfs the imbalance
 cost. Cross-cluster idle peers are handled by work-stealing's pass 1.
 Operator-pinned steady-state load uses `SchedSetAffinity`.
 
-Boot self-test: `sched-loadbalance-selftest` (Phase::Userland)
-verifies the decision function — same-cluster scoping, margin
-threshold, UP short-circuit. Emits one `[sched-loadbalance-selftest] PASS`
-line so CI can grep for it.
+**SMT-aware placement**: `EffectiveLoad(p)` returns `p->runq_normal_len`
+plus `kSmtSiblingPenalty` (2) when an SMT sibling of `p` (a CPU with
+the same `cpu::Topology::core_group`) already has Normal-band work.
+`PickClusterPlacement` and `PickBalanceVictim` compare effective load
+instead of raw length, so under light load runnable threads spread
+across distinct physical cores before two land on the SMT siblings of
+one core. The penalty equals `kClusterPlacementMargin`, so an idle
+logical CPU on a busy core looks exactly as loaded as a logical CPU on
+an idle core that already has 2 queued tasks — the same equilibrium
+that keeps wake placement from oscillating. `StealNormalFromPeer` is
+**intentionally not SMT-weighted**: it is the idle-pull path (`self`
+is going idle), so giving it work can never produce a two-on-one-core
+result, and weighting it would only risk the byte-for-byte non-SMT
+ordering invariant. On non-SMT / undecoded CPUs the penalty is always
+0 (`core_group == kTopologyUnknownCoreGroup` or `smt_sibling_count ==
+0`), so every decision is byte-for-byte identical to the pre-SMT
+scheduler. The default QEMU smoke topology exposes SMT
+(`-smp 4,sockets=1,cores=2,threads=2`); `DUETOS_SMP=4` reproduces the
+flat non-SMT boot.
+
+Boot self-tests (Phase::Userland): `sched-loadbalance-selftest`
+verifies the balancer decision function — same-cluster scoping, margin
+threshold, UP short-circuit. `smt-placement-selftest` verifies the
+`EffectiveLoad` sibling penalty, that `PickClusterPlacement` prefers a
+fully-idle physical core over an SMT sibling of a busy core, the
+non-SMT identity, and the one-`smt_primary`-per-`core_group`
+invariant; it SKIPs on non-SMT guests. Each emits one
+`[<name>] PASS` (or `SKIP`) line so CI can grep for it.
 
 ## Blocking Primitives (sister doc)
 
