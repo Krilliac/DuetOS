@@ -10,6 +10,7 @@
 #include "core/panic.h"
 #include "diag/fix_journal.h"
 #include "log/klog.h"
+#include "mm/kheap.h"
 #include "security/persistence.h"
 #include "util/string.h"
 #include "util/types.h"
@@ -660,11 +661,18 @@ void RbacSnapshotSelfTest()
     params.memory_kib = 32;
     params.time_cost = 2;
     params.parallelism = 1;
-    u8 envelope[4096];
+    // Heap-allocated, not a 4 KiB stack array: this self-test
+    // drives Rbac{Import,Export}Snapshot -> Argon2idDerive, a deep
+    // (~7 KiB) Block-scratch chain. A stack envelope (+ the `bad`
+    // twin) under it intermittently overflowed the 64 KiB kernel
+    // task stack. Mirrors the AuthSnapshotSelfTest fix.
+    constexpr u32 kEnvelopeBytes = 4096;
+    u8* envelope = static_cast<u8*>(duetos::mm::KMalloc(kEnvelopeBytes));
+    KASSERT(envelope != nullptr, "rbac/snapshot", "self-test: envelope alloc failed");
     u32 written = 0;
-    KASSERT(RbacExportSnapshot("rbac-snap-pw", params, envelope, sizeof(envelope), &written), "rbac/snapshot",
+    KASSERT(RbacExportSnapshot("rbac-snap-pw", params, envelope, kEnvelopeBytes, &written), "rbac/snapshot",
             "self-test: export failed");
-    KASSERT(written > 0 && written <= sizeof(envelope), "rbac/snapshot", "self-test: export wrote bogus length");
+    KASSERT(written > 0 && written <= kEnvelopeBytes, "rbac/snapshot", "self-test: export wrote bogus length");
 
     // Mutate live tables: remove the probe membership.
     KASSERT(RbacRemoveMembership("guest", dev), "rbac/snapshot", "self-test: remove probe membership failed");
@@ -686,12 +694,14 @@ void RbacSnapshotSelfTest()
             "self-test: wrong password accepted on import");
     // Tampered envelope rejects.
     {
-        u8 bad[sizeof(envelope)];
+        u8* bad = static_cast<u8*>(duetos::mm::KMalloc(kEnvelopeBytes));
+        KASSERT(bad != nullptr, "rbac/snapshot", "self-test: bad-buf alloc failed");
         for (u32 i = 0; i < written; ++i)
             bad[i] = envelope[i];
         bad[written - 1] ^= 0x01;
         KASSERT(!RbacImportSnapshot("rbac-snap-pw", bad, written), "rbac/snapshot",
                 "self-test: tampered envelope accepted on import");
+        duetos::mm::KFree(bad);
     }
 
     // Cleanup: if the probe membership wasn't there pre-export,
@@ -700,6 +710,7 @@ void RbacSnapshotSelfTest()
     if (!was_member)
         KASSERT(RbacRemoveMembership("guest", dev), "rbac/snapshot", "self-test: cleanup remove failed");
 
+    duetos::mm::KFree(envelope);
     arch::SerialWrite("[rbac-snapshot] self-test: PASS\n");
 }
 

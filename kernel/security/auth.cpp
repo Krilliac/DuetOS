@@ -2,6 +2,7 @@
 
 #include "core/panic.h"
 #include "log/klog.h"
+#include "mm/kheap.h"
 #include "security/event_ring.h"
 #include "security/password_hash.h"
 #include "security/persistence.h"
@@ -807,11 +808,21 @@ void AuthSnapshotSelfTest()
     params.memory_kib = 32;
     params.time_cost = 2;
     params.parallelism = 1;
-    u8 envelope[4096];
+    // Heap-allocated, not `u8 envelope[4096]` on the stack: this
+    // self-test calls AuthImport/ExportSnapshot, which run
+    // Argon2idDerive — a deep chain (IdxState + NextAddresses +
+    // Compress ≈ 7 KiB of Block scratch). A 4 KiB stack envelope
+    // (plus the `bad` twin below) under that chain intermittently
+    // overflowed the 64 KiB kernel task stack (guard-page panic in
+    // ComputeH0). Heaping the two buffers removes 8 KiB from the
+    // overflowing frame.
+    constexpr u32 kEnvelopeBytes = 4096;
+    u8* envelope = static_cast<u8*>(duetos::mm::KMalloc(kEnvelopeBytes));
+    KASSERT(envelope != nullptr, "auth/snapshot", "self-test: envelope alloc failed");
     u32 written = 0;
-    KASSERT(AuthExportSnapshot("snap-password", params, envelope, sizeof(envelope), &written), "auth/snapshot",
+    KASSERT(AuthExportSnapshot("snap-password", params, envelope, kEnvelopeBytes, &written), "auth/snapshot",
             "self-test: export failed");
-    KASSERT(written > 0 && written <= sizeof(envelope), "auth/snapshot", "self-test: export wrote bogus length");
+    KASSERT(written > 0 && written <= kEnvelopeBytes, "auth/snapshot", "self-test: export wrote bogus length");
 
     // Mutate live table: delete snapseed, add a different account.
     KASSERT(AuthDeleteUser("snapseed"), "auth/snapshot", "self-test: failed to delete snapseed");
@@ -837,18 +848,21 @@ void AuthSnapshotSelfTest()
 
     // Tampered envelope rejects.
     {
-        u8 bad[sizeof(envelope)];
+        u8* bad = static_cast<u8*>(duetos::mm::KMalloc(kEnvelopeBytes));
+        KASSERT(bad != nullptr, "auth/snapshot", "self-test: bad-buf alloc failed");
         for (u32 i = 0; i < written; ++i)
             bad[i] = envelope[i];
         bad[written - 1] ^= 0x01;
         KASSERT(!AuthImportSnapshot("snap-password", bad, written), "auth/snapshot",
                 "self-test: tampered envelope accepted on import");
+        duetos::mm::KFree(bad);
     }
 
     // Cleanup — restore the canonical seed state so subsequent
     // tests see what AuthInit produced.
     KASSERT(AuthDeleteUser("snapseed"), "auth/snapshot", "self-test: cleanup delete failed");
 
+    duetos::mm::KFree(envelope);
     KLOG_INFO("auth", "snapshot self-test OK");
 }
 
