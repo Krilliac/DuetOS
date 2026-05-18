@@ -105,6 +105,7 @@
 #include "net/wireless/eapol.h"
 #include "net/wireless/fourway.h"
 #include "net/wireless/gcmp.h"
+#include "net/wireless/mock_isp.h"
 #include "net/wireless/mlme.h"
 #include "net/wireless/test/wireless_dataplane_test.h"
 #include "net/wireless/test/wireless_e2e_test.h"
@@ -1757,6 +1758,12 @@ void BootBringupDevices(bool force_net_smoke)
     // over a GCMP-encrypted link. Runs here because it needs the
     // IP stack (NetStackInit, above) live.
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::test::WirelessDataPlaneSelfTest());
+    // Live "mock ISP" Wi-Fi backend: makes the SSID show up in
+    // `wifi scan` and joinable via `wifi connect` on a normal
+    // boot (not just the self-test). Needs WifiInit + the IP
+    // stack, both up by here.
+    duetos::net::wireless::MockIspInit();
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::MockIspSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::core::IdleLockSelfTest());
     // Smoke test runs in its own task. v1 TCP allows the smoke
     // probe and any other concurrent listener to coexist; the v0

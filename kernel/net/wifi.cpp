@@ -152,7 +152,11 @@ bool WifiConnect(u32 iface_index, const char* ssid, WifiSecurity security, const
 
     if (!ops.connect(ops.ctx, ssid, security, psk_or_null))
     {
-        KLOG_ERROR_S("net/wifi", "WifiConnect: backend connect failed", "ssid", ssid);
+        // Backend refused — most commonly a wrong PSK, which is a
+        // routine user-facing outcome, not a kernel error. The
+        // `return false` is the notification channel; WARN keeps a
+        // bad password from flooding the log at ERROR level.
+        KLOG_WARN_S("net/wifi", "WifiConnect: backend connect failed", "ssid", ssid);
         core::CleanroomTraceRecord("wifi", "connect-driver-fail", iface_index, static_cast<u64>(security), 0);
         return false;
     }

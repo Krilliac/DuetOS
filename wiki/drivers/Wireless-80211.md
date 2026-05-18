@@ -52,6 +52,7 @@ connected through the `WirelessDeviceOps` vtable.
 | [`eapol.h`](../../kernel/net/wireless/eapol.h) / `.cpp` | EAPoL frame builder + parser |
 | [`gcmp.h`](../../kernel/net/wireless/gcmp.h) / `.cpp` | GCMP-128 MPDU protect/unprotect (AES-GCM AEAD) for the data plane |
 | [`wnetif.h`](../../kernel/net/wireless/wnetif.h) / `.cpp` | 802.3 ↔ 802.11+GCMP conversion + IP-stack netif binding |
+| [`mock_isp.h`](../../kernel/net/wireless/mock_isp.h) / `.cpp` | Live "mock ISP" `WifiBackendOps` — makes the SSID scannable + joinable on a normal boot, with a pump thread |
 | [`inventory.h`](../../kernel/net/wireless/inventory.h) / `.cpp` | Hardware inventory — walks PCI + USB NICs to emit a boot-log block |
 | [`wifi_diag.h`](../../kernel/net/wireless/wifi_diag.h) / `.cpp` | Wi-Fi diagnostic ring (state transitions, RX/TX, errors) |
 | [`wifi80211_rust/`](../../kernel/net/wifi80211_rust/) | Rust crate for fixed-shape decoders (see [Rust Subsystems](../tooling/Rust-Subsystems.md)) |
@@ -242,6 +243,12 @@ cannot scan or connect; elevation is required (see
   tested AES-GCM primitive; QoS-Data / A4 / WDS header shapes and an
   upstream NAT beyond the fake gateway are not modelled (the gateway
   is the whole reachable network, like SLIRP `restrict=on`).
+- **Live mock-ISP backend is one WPA2-PSK network.** `mock_isp`
+  registers `WifiBackendOps` at boot so `wifi scan` lists
+  `DuetOS-ISP` and `wifi connect DuetOS-ISP <psk>` runs the real
+  4-way handshake + DHCP (wrong PSK is rejected). Open / multi-SSID
+  live association is a follow-up — the data plane is GCMP-keyed, so
+  an unencrypted open data path is separate work.
 
 ## Related Pages
 

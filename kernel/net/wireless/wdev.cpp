@@ -208,8 +208,13 @@ WirelessDevice* WirelessDeviceAt(u32 index)
         auto sr = wdev->ops.SendEapolFrame(wdev, m2, m2_len);
         if (!sr.has_value())
         {
-            KLOG_ERROR_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "M2 TX failed",
-                          static_cast<u64>(sr.error()));
+            // A wrong PSK fails the AP-side M2 MIC check — a normal
+            // authentication outcome, not a system error. The
+            // returned Err is the real notification channel; keep
+            // this at WARN so a mistyped Wi-Fi password doesn't
+            // flood the log at ERROR.
+            KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "M2 TX failed (bad PSK?)",
+                         static_cast<u64>(sr.error()));
             diag::RecordErr(diag::Layer::Eapol, "m2-tx-err", static_cast<u32>(sr.error()), 0, 0, 0);
             return sr;
         }
