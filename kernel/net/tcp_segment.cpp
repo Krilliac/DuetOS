@@ -183,14 +183,13 @@ bool SendSegment(Tcb& t, u8 flags, u32 seq, u32 ack, const u8* payload, u32 payl
 {
     if (payload_len > kSegmentBytes)
         return false;
-    constexpr u32 kMaxFrame = 1514;
     u8 opt_block[40];
     const u32 opt_len = BuildOptions(t, flags, opt_block);
     const u32 tcp_header_len = 20 + opt_len;
     const u32 frame_len = 14 + 20 + tcp_header_len + payload_len;
-    if (frame_len > kMaxFrame)
+    if (frame_len > kEthFrameMaxBytes)
         return false;
-    u8 frame[kMaxFrame];
+    u8 frame[kEthFrameMaxBytes];
     // Ethernet.
     for (u32 i = 0; i < 6; ++i)
         frame[i] = t.peer_mac.octets[i];

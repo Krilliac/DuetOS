@@ -1860,6 +1860,13 @@ static HRESULT d12dev_CreateCommittedResource(D12DeviceImpl* self, const void* h
     UINT64 w64 = *(const UINT64*)(d + 8);
     UINT h = *(const UINT*)(d + 16);
     UINT fmt = *(const UINT*)(d + 24);
+    /* Width is a 64-bit field. Truncating it to 32 bits silently
+     * under-allocates: a caller passing Width = 0x1_0000_0040 would
+     * get a 64-byte buffer, then overflow the userland heap when it
+     * Maps the resource and writes what it believes is a 4 GiB
+     * buffer. Reject anything that does not fit before truncating. */
+    if (w64 > 0xFFFFFFFFu)
+        return DX_E_OUTOFMEMORY;
     UINT w = (UINT)(w64 & 0xFFFFFFFFu);
     if (dim == 1)
     {

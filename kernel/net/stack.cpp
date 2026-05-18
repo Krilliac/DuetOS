@@ -1171,16 +1171,15 @@ bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
         ++g_icmp_stats.echo_requests_rx;
 
         // Build the reply into a stack buffer. Size = 14 (ethernet)
-        // + total_len (copy of IPv4 + ICMP). Cap at 1514 bytes
-        // (standard ethernet MTU + header) so we never overflow.
-        constexpr u64 kMaxReply = 1514;
-        if (u64(total_len) + 14 > kMaxReply)
+        // + total_len (copy of IPv4 + ICMP). Cap at the max ethernet
+        // frame (header + MTU) so we never overflow.
+        if (u64(total_len) + 14 > kEthFrameMaxBytes)
             break;
         // Deliberately uninitialized — the ethernet header, IPv4
         // header, and ICMP payload are all written below from the
         // 14 + total_len prefix. `= {}` would lower to a libc
         // memset call the freestanding linker can't resolve.
-        u8 reply[kMaxReply];
+        u8 reply[kEthFrameMaxBytes];
         const u64 reply_len = u64(total_len) + 14;
 
         // Ethernet: swap src/dst, ethertype = IPv4.
@@ -1359,9 +1358,8 @@ bool NetUdpSend(u32 iface_index, const MacAddress& dst_mac, Ipv4Address dst_ip, 
     if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
         return false;
     const Interface& ifc = g_interfaces[iface_index];
-    constexpr u64 kMaxFrame = 1514;
     const u64 frame_len = 14 + 20 + 8 + payload_len;
-    if (frame_len > kMaxFrame)
+    if (frame_len > kEthFrameMaxBytes)
     {
         ++g_udp_stats.tx_failures;
         return false;
@@ -1369,7 +1367,7 @@ bool NetUdpSend(u32 iface_index, const MacAddress& dst_mac, Ipv4Address dst_ip, 
     // Same stack-buffer trick as the ICMP reply: leave uninitialized
     // because every byte gets written below; `= {}` lowers to libc
     // memset in this freestanding TU.
-    u8 frame[kMaxFrame];
+    u8 frame[kEthFrameMaxBytes];
 
     // Ethernet.
     for (u64 i = 0; i < 6; ++i)
@@ -2103,6 +2101,16 @@ IfaceCounters InterfaceCountersRead(u32 iface_index)
 void NetStackInjectRx(u32 iface_index, const void* frame, u64 len)
 {
     if (frame == nullptr || len < 14)
+        return;
+    // Upper-bound the frame at the bus boundary. Device RX paths
+    // (e1000 / virtio-net / cdc-ecm / rndis) pass a length the
+    // device DMA-wrote; a non-conforming or hostile NIC can report
+    // past the driver's per-slot buffer. Clamping here — at the one
+    // chokepoint every driver funnels through — stops the L3
+    // parsers (ARP / IPv4 and everything they reach) from reading
+    // off the end of whatever buffer the driver handed up, for the
+    // whole class of callers at once.
+    if (len > kEthFrameMaxBytes)
         return;
     // Drop frames from interfaces outside our table — every L3
     // handler indexes g_interfaces[iface_index] and the per-handler

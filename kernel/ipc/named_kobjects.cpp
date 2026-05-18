@@ -144,14 +144,25 @@ bool NamedKObjectRegister(KObjectType type, const char* name, KObject* obj)
     // without recursive-lock issues).
     KObject* evicted = nullptr;
     const u32 slot = PickVictimSlot();
-    if (g_table[slot].valid)
+    // If the victim slot already holds the very object we're
+    // registering (same kobj re-homed under a different name/type
+    // that the dedup loop above didn't match), this is a re-home,
+    // NOT an eviction: the table already owns exactly one ref on
+    // `obj` via that slot. Taking a second ref and then releasing
+    // the "evicted" (== obj) one is net-zero but races the two
+    // operations across the lock boundary and silently drops the
+    // old name. Skip both halves and let the single existing ref
+    // carry over to the slot's new contents.
+    const bool victim_is_same_obj = (g_table[slot].valid && g_table[slot].obj == obj);
+    if (g_table[slot].valid && !victim_is_same_obj)
         evicted = g_table[slot].obj;
     StoreName(g_table[slot], name);
     g_table[slot].type = type;
     g_table[slot].obj = obj;
     g_table[slot].valid = true;
     g_table[slot].last_used_tick = ++g_next_tick;
-    KObjectAcquire(obj); // table-owned reference
+    if (!victim_is_same_obj)
+        KObjectAcquire(obj); // table-owned reference
     ::duetos::sync::SpinLockRelease(g_table_lock, flags);
 
     if (evicted != nullptr)

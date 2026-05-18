@@ -624,7 +624,20 @@ AddressSpace* AddressSpaceFork(const AddressSpace* parent)
         const void* src = PhysToVirt(parent_frame);
         void* dst = PhysToVirt(child_frame);
         memcpy(dst, src, kPageSize);
+        const u16 region_count_before = child->region_count;
         AddressSpaceMapUserPage(child, va, child_frame, flags);
+        if (child->region_count == region_count_before)
+        {
+            // Map refused (frame budget exhausted or page-table
+            // pool dry — both non-fatal paths in MapUserPage that
+            // return without installing). child_frame was allocated
+            // above but is not in child->regions[], so
+            // AddressSpaceRelease will never reclaim it. Free it
+            // here, otherwise a fork near the frame budget leaks one
+            // physical frame per skipped region under memory
+            // pressure.
+            FreeFrame(child_frame);
+        }
     }
     return child;
 }
