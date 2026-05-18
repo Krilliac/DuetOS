@@ -1847,7 +1847,7 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000001f entering ring 3 rip=0x0000000141461074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[mini_browser] starting
+[mini_browser] starting
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
@@ -2008,16 +2008,16 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded vcruntime140.dll base=0x0000000010030000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010040000 size=0x0000000000005000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000020 entering ring 3 rip=0x00000001402c10f9 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[crypto_smoke] starting
-[crypto_smoke] BCryptGenRandom = PASS bytes=3ea44d6f19154b68...
-[crypto_smoke] BCryptOpenAlgorithmProvider = PASS
-[crypto_smoke] BCryptCreateHash       = PASS
-[crypto_smoke] BCryptHashData         = PASS
-[crypto_smoke] BCryptFinishHash("abc")= PASS digest=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-[crypto_smoke]   expected   =ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-[crypto_smoke] CryptAcquireContextW   = PASS
-[crypto_smoke] CryptGenRandom         = PASS bytes=892b4f1b8cdfa428...
-[crypto_smoke] done
+[crypto_smoke] starting
+[crypto_smoke] BCryptGenRandom = PASS bytes=3ea44d6f19154b68...
+[crypto_smoke] BCryptOpenAlgorithmProvider = PASS
+[crypto_smoke] BCryptCreateHash       = PASS
+[crypto_smoke] BCryptHashData         = PASS
+[crypto_smoke] BCryptFinishHash("abc")= PASS digest=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+[crypto_smoke]   expected   =ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+[crypto_smoke] CryptAcquireContextW   = PASS
+[crypto_smoke] CryptGenRandom         = PASS bytes=892b4f1b8cdfa428...
+[crypto_smoke] done
 [t=7331.355ms] [I] sys : exit rc   val=0x0 (0)
 [t=7331.493ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -2183,14 +2183,14 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded vcruntime140.dll base=0x0000000010030000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010040000 size=0x0000000000005000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000021 entering ring 3 rip=0x00000001430d11c6 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[paths_smoke] starting
-[paths_smoke] PathFindExtensionA = PASS ".exe"
-[paths_smoke] PathFindFileNameA  = PASS "file.exe"
-[paths_smoke] PathFindExtensionW = PASS
-[paths_smoke] PathRemoveFileSpecW= PASS
-[paths_smoke] PathAddBackslashW  = PASS
-[paths_smoke] PathAppendW        = PASS
-[paths_smoke] PathCombineW       = PASS
+[paths_smoke] starting
+[paths_smoke] PathFindExtensionA = PASS ".exe"
+[paths_smoke] PathFindFileNameA  = PASS "file.exe"
+[paths_smoke] PathFindExtensionW = PASS
+[paths_smoke] PathRemoveFileSpecW= PASS
+[paths_smoke] PathAddBackslashW  = PASS
+[paths_smoke] PathAppendW        = PASS
+[paths_smoke] PathCombineW       = PASS
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
@@ -2356,7 +2356,7 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=[ring3] task pid=0x0000000000000022 entering ring 3 rip=0x00000001411110e7 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[time_smoke] starting
+[time_smoke] starting
 0x0000000000002022
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -2515,15 +2515,15 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000023 entering ring 3 rip=0x00000001419f1156 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[iphlpapi_smoke] starting
-[iphlpapi_smoke] GetAdaptersInfo    = PASS (no adapters reported)
-[iphlpapi_smoke] GetIpAddrTable     = PASS rows=1
-[iphlpapi_smoke] GetTcpTable        = PASS rows=0
-[iphlpapi_smoke] GetNetworkParams   = PASS host="duetos"
-[iphlpapi_smoke] done
+[iphlpapi_smoke] starting
+[iphlpapi_smoke] GetAdaptersInfo    = PASS (no adapters reported)
+[iphlpapi_smoke] GetIpAddrTable     = PASS rows=1
+[iphlpapi_smoke] GetTcpTable        = PASS rows=0
+[iphlpapi_smoke] GetNetworkParams   = PASS host="duetos"
+[iphlpapi_smoke] done
 [t=7481.444ms] [I] sys : exit rc   val=0x0 (0)
 [t=7481.577ms] [I] sched : SchedExit: task entering termination path
-[time_smoke] GetTickCount t0=0x0000000000001c84 t1=0x0000000000001cb6 PASS (advanced)
+[time_smoke] GetTickCount t0=0x0000000000001c84 t1=0x0000000000001cb6 PASS (advanced)
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
@@ -2588,7 +2588,7 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded winhttp.dll base=0x00000000101b0000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x00000000101f0000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
-[time_smoke] GetTickCount64 g0=0x0000000000001cb6 g1=0x0000000000001cca PASS
+[time_smoke] GetTickCount64 g0=0x0000000000001cb6 g1=0x0000000000001cca PASS
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded version.dll base=0x00000000101f0000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010200000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
@@ -2627,9 +2627,9 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [dll-load] begin base_va=0x00000000102c0000 size=0x0000000000005000 sections=0x0000000000000003 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded d2d1.dll base=0x00000000102c0000 (pre-PeLoad — visible to ResolveImports)
-[dll-load] begin base_va=0x00000000102d0000 size=0x0000000000004000 sections=0x0000000000000003 chars=0x0000000000002022[time_smoke] QueryPerformanceFrequency = PASS freq=0x000000003b9aca00
-[time_smoke] QueryPerformanceCounter   = PASS (monotonic)
-[time_smoke] GetSystemTimeAsFileTime   = PASS hi=0x0000000001dcd9ae lo=0x00000000ceb86480
+[dll-load] begin base_va=0x00000000102d0000 size=0x0000000000004000 sections=0x0000000000000003 chars=0x0000000000002022[time_smoke] QueryPerformanceFrequency = PASS freq=0x000000003b9aca00
+[time_smoke] QueryPerformanceCounter   = PASS (monotonic)
+[time_smoke] GetSystemTimeAsFileTime   = PASS hi=0x0000000001dcd9ae lo=0x00000000ceb86480
 
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded dwrite.dll base=0x00000000102d0000 (pre-PeLoad — visible to ResolveImports)
@@ -2677,16 +2677,16 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000024 entering ring 3 rip=0x0000000141321074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[wininet_smoke] starting
-[wininet_smoke] InternetOpenA      = PASS
-[wininet_smoke] InternetOpenUrlA   = PASS
-[wininet_smoke] InternetReadFile   = FAIL (no body)
-[wininet_smoke] done
+[wininet_smoke] starting
+[wininet_smoke] InternetOpenA      = PASS
+[wininet_smoke] InternetOpenUrlA   = PASS
+[wininet_smoke] InternetReadFile   = FAIL (no body)
+[wininet_smoke] done
 [t=7531.743ms] [I] sys : exit rc   val=0x0 (0)
 [t=7531.909ms] [I] sched : SchedExit: task entering termination path
-[time_smoke] timeGetTime m0=0x0000000000001cd4 m1=0x0000000000001ce8 PASS
-[time_smoke] timeBeginPeriod/EndPeriod = PASS
-[time_smoke] done
+[time_smoke] timeGetTime m0=0x0000000000001cd4 m1=0x0000000000001ce8 PASS
+[time_smoke] timeBeginPeriod/EndPeriod = PASS
+[time_smoke] done
 [t=7532.682ms] [I] sys : exit rc   val=0x0 (0)
 [t=7532.857ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -2871,23 +2871,23 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [dll-load] relocs blocks=[ring3] task pid=0x0000000000000025 entering ring 3 rip=0x0000000142aa1222 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[string_smoke] starting
-[string_smoke] lstrlenA("hello")     = PASS
-[string_smoke] lstrlenW(L"hello")    = PASS
-[string_smoke] lstrcmpA equal/diff   = PASS
-[string_smoke] lstrcmpW equal/diff   = PASS
-[string_smoke] lstrcpyA + lstrcatA   = PASS
-[string_smoke] lstrcpyW + lstrcatW   = PASS
-[string_smoke] MBtoWC CP_UTF8       = PASS
-[string_smoke] WCtoMB CP_UTF8       = PASS
-[string_smoke] CharLowerA            = PASS
-[string_smoke] CharUpperA            = PASS
-[string_smoke] CharLowerW            = PASS
-[string_smoke] CharUpperW            = PASS
-[string_smoke] CompareStringW equal  = PASS
-[string_smoke] IsCharAlphaA('a'/'1')  = PASS
-[string_smoke] IsCharAlphaNumericA    = PASS
-[string_smoke] done
+[string_smoke] starting
+[string_smoke] lstrlenA("hello")     = PASS
+[string_smoke] lstrlenW(L"hello")    = PASS
+[string_smoke] lstrcmpA equal/diff   = PASS
+[string_smoke] lstrcmpW equal/diff   = PASS
+[string_smoke] lstrcpyA + lstrcatA   = PASS
+[string_smoke] lstrcpyW + lstrcatW   = PASS
+[string_smoke] MBtoWC CP_UTF8       = PASS
+[string_smoke] WCtoMB CP_UTF8       = PASS
+[string_smoke] CharLowerA            = PASS
+[string_smoke] CharUpperA            = PASS
+[string_smoke] CharLowerW            = PASS
+[string_smoke] CharUpperW            = PASS
+[string_smoke] CompareStringW equal  = PASS
+[string_smoke] IsCharAlphaA('a'/'1')  = PASS
+[string_smoke] IsCharAlphaNumericA    = PASS
+[string_smoke] done
 [t=7594.741ms] [I] sys : exit rc   val=0x0 (0)
 [t=7594.899ms] [I] sched : SchedExit: task entering termination path
 0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -2995,9 +2995,9 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded d2d1.dll base=0x00000000102c0000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x00000000102d0000 size=0x0000000000004000 sections=0x0000000000000003 chars=0x0000000000002022
-[paths_smoke] PathFileExistsA(no)= PASS (not found, as expected)
-[paths_smoke] PathStripPathW     = PASS
-[paths_smoke] done
+[paths_smoke] PathFileExistsA(no)= PASS (not found, as expected)
+[paths_smoke] PathStripPathW     = PASS
+[paths_smoke] done
 [t=7652.706ms] [I] sys : exit rc   val=0x0 (0)
 [t=7652.842ms] [I] sched : SchedExit: task entering termination path
 [as] regions freed
@@ -3051,8 +3051,8 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [proc] destroy pid=0x000000000000000b name="ring3-time-smoke"
 [as] destroying pml4_phys=0x0000000000faf000 regions=0x00000000000000d8
 [t=7672.360ms] [I] net/socket : SocketConnect: TCP connect ok   idx=0x0 (0)   peer_port=0x50 (80)
-[mini_browser] connected
-[mini_browser] request sent
+[mini_browser] connected
+[mini_browser] request sent
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded dwrite.dll base=0x00000000102d0000 (pre-PeLoad — visible to ResolveImports)
 [guard] ALLOW kind=pe name="(pe)" findings=0x0000000000000000
@@ -3199,31 +3199,31 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [t=7720.517ms] [I] sched/reaper : reaped task id   val=0x18 (24)
 [proc] destroy pid=0x000000000000000c name="ring3-iphlpapi-smoke"
 [as] destroying pml4_phys=0x00000000010a4000 regions=0x00000000000000d8
-[mini_browser] reply: HTTP/1.1 426 Upgrade Required
-[mini_browser] done
+[mini_browser] reply: HTTP/1.1 426 Upgrade Required
+[mini_browser] done
 [t=7734.172ms] [I] sys : exit rc   val=0x0 (0)
 [t=7734.330ms] [I] sched : SchedExit: task entering termination path
 [ring3] task pid=0x0000000000000026 entering ring 3 rip=0x0000000140631074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[mem_smoke] starting
+[mem_smoke] starting
 [sys] vmap ok pid=0x000000000000000f va=0x0000000040000000 pages=0x0000000000000001
 [t=7735.150ms] [I] win32/vmap : DoVmap: ok   va=0x40000000 (1073741824)   pages=0x1 (1)
-[mem_smoke] VirtualAlloc(4K RW)   = PASS (round-trip)
-[mem_smoke] VirtualFree           = PASS
+[mem_smoke] VirtualAlloc(4K RW)   = PASS (round-trip)
+[mem_smoke] VirtualFree           = PASS
 [sys] vmap ok pid=0x000000000000000f va=0x0000000040001000 pages=0x0000000000000001
 [t=7735.789ms] [I] win32/vmap : DoVmap: ok   va=0x40001000 (1073745920)   pages=0x1 (1)
-[mem_smoke] VirtualProtect RW->R  = PASS
-[mem_smoke] VirtualProtect R->RW  = PASS
-[mem_smoke] HeapCreate            = PASS
+[mem_smoke] VirtualProtect RW->R  = PASS
+[mem_smoke] VirtualProtect R->RW  = PASS
+[mem_smoke] HeapCreate            = PASS
 [t=7736.307ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[mem_smoke] HeapAlloc(256)        = PASS (round-trip)
-[mem_smoke] GetProcessHeap        = PASS
+[mem_smoke] HeapAlloc(256)        = PASS (round-trip)
+[mem_smoke] GetProcessHeap        = PASS
 [t=7736.796ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[mem_smoke] HeapAlloc(processHeap)= PASS
+[mem_smoke] HeapAlloc(processHeap)= PASS
 [t=7737.107ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000060 (1342177376)
-[mem_smoke] GlobalAlloc(GMEM_FIXED)= PASS
+[mem_smoke] GlobalAlloc(GMEM_FIXED)= PASS
 [t=7737.564ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000060 (1342177376)
-[mem_smoke] LocalAlloc(LMEM_FIXED) = PASS
-[mem_smoke] done
+[mem_smoke] LocalAlloc(LMEM_FIXED) = PASS
+[mem_smoke] done
 [t=7737.927ms] [I] sys : exit rc   val=0x0 (0)
 [t=7738.094ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -3526,19 +3526,19 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000027 entering ring 3 rip=0x0000000140981164 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[fs_smoke] starting
+[fs_smoke] starting
 [fs/route] open ok pid=0x0000000000000010 path="/etc/version" backing=ramfs handle=0x0000000000000100 size=0x0000000000000019
-[fs_smoke] CreateFileW(/etc/version)  = PASS
-[fs_smoke] GetFileSizeEx              = PASS sz=25
-[fs_smoke] ReadFile                   = PASS got=25 content="DuetOS v0 (ramfs-seeded)"
-[fs_smoke] SetFilePointer(0,BEGIN)    = PASS
-[fs_smoke] CloseHandle                = PASS (returned)
-[fs_smoke] GetFileAttributesW         = FAIL
-[fs_smoke] GetCurrentDirectoryW     = PASS
-[fs_smoke] GetFullPathNameW         = PASS
+[fs_smoke] CreateFileW(/etc/version)  = PASS
+[fs_smoke] GetFileSizeEx              = PASS sz=25
+[fs_smoke] ReadFile                   = PASS got=25 content="DuetOS v0 (ramfs-seeded)"
+[fs_smoke] SetFilePointer(0,BEGIN)    = PASS
+[fs_smoke] CloseHandle                = PASS (returned)
+[fs_smoke] GetFileAttributesW         = FAIL
+[fs_smoke] GetCurrentDirectoryW     = PASS
+[fs_smoke] GetFullPathNameW         = PASS
 [win32/dir] open path="/etc" handle=0x0000000000000a00 entries=0x0000000000000004
-[fs_smoke] FindFirstFileW(/etc/*)   = PASS entries=4
-[fs_smoke] done
+[fs_smoke] FindFirstFileW(/etc/*)   = PASS entries=4
+[fs_smoke] done
 [t=7859.905ms] [I] sys : exit rc   val=0x0 (0)
 [t=7860.035ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -3710,10 +3710,10 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
     sys=0x0000000000000002 rip=0x0000000010025567 rdi=0x0000000000000001 t=0x00000001cd108aa0
     sys=0x0000000000000002 rip=0x0000000010025567 rdi=0x0000000000000001 t=0x00000001cd1200ba
     sys=0x000000000000001d rip=0x000000001002147f rdi=0x0000000040000000 t=0x00000001cd12cda6[ring3] task pid=0x0000000000000028 entering ring 3 rip=0x0000000141651164 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[registry_smoke] starting
-[registry_smoke] RegOpenKeyExW(HKLM\Software) = FAIL
-[registry_smoke] RegOpenKeyExW(...CurrentVersion) = FAIL
-[registry_smoke] done
+[registry_smoke] starting
+[registry_smoke] RegOpenKeyExW(HKLM\Software) = FAIL
+[registry_smoke] RegOpenKeyExW(...CurrentVersion) = FAIL
+[registry_smoke] done
 [t=7906.900ms] [I] sys : exit rc   val=0x0 (0)
 [t=7907.065ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -3873,10 +3873,10 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 
     sys=0x0000000000000002 rip=0x0000000010025567 rdi=0x0000000000000001 t=0x00000001cd1af044
     sys=0x0000000000000002[ring3] task pid=0x0000000000000029 entering ring 3 rip=0x00000001401f1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[handle_smoke] starting
+[handle_smoke] starting
 [sys] event_create ok pid=0x0000000000000012 handle=0x0000000000000300 manual=0x0000000000000001 signaled=0x0000000000000001
-[handle_smoke] CreateEventW(M, sig)    = PASS
-[handle_smoke] WaitForSingleObject sig = PASS
+[handle_smoke] CreateEventW(M, sig)    = PASS
+[handle_smoke] WaitForSingleObject sig = PASS
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded kernel32.dll base=0x0000000010020000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010030000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
@@ -3904,16 +3904,16 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x00000000100a0000 size=0x0000000000006000 sections=0x0000000000000004 chars=0x0000000000002022
  rip=0x0000000010025567 rdi=0x0000000000000001 t=0x00000001cd1be06c
-    sys=0x000000000000001d rip=0x000000001002147f rdi=0x0000000040001000 t=[handle_smoke] Wait after ResetEvent   = PASS (TIMEOUT)
-[handle_smoke] Wait after SetEvent     = PASS
+    sys=0x000000000000001d rip=0x000000001002147f rdi=0x0000000040001000 t=[handle_smoke] Wait after ResetEvent   = PASS (TIMEOUT)
+[handle_smoke] Wait after SetEvent     = PASS
 [sys] mutex_create ok pid=0x0000000000000012 handle=0x0000000000000200 initial_owner=0x0000000000000001
-[handle_smoke] CreateMutexW(owned)     = PASS
-[handle_smoke] Recursive WaitForMutex  = PASS
-[handle_smoke] ReleaseMutex (recur)    = PASS
-[handle_smoke] ReleaseMutex (final)    = PASS
+[handle_smoke] CreateMutexW(owned)     = PASS
+[handle_smoke] Recursive WaitForMutex  = PASS
+[handle_smoke] ReleaseMutex (recur)    = PASS
+[handle_smoke] ReleaseMutex (final)    = PASS
 [sys] sem_create ok pid=0x0000000000000012 handle=0x0000000000000500 init=0x0000000000000002 max=0x0000000000000004
-[handle_smoke] CreateSemaphoreW(2,4)   = PASS
-[handle_smoke] Wait x2 (drain)         = PASS
+[handle_smoke] CreateSemaphoreW(2,4)   = PASS
+[handle_smoke] Wait x2 (drain)         = PASS
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded advapi32.dll base=0x00000000100a0000 (pre-PeLoad — visible to ResolveImports)
@@ -3949,9 +3949,9 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 0x00000001cd1c4868
     sys=0x0000000000000002 rip=0x0000000010025567 rdi=0x0000000000000001 t=0x00000001cd1cbd16
     sys=0x0000000000000002 rip=0x0000000010025567 rdi=0x0000000000000001 t=0x00000001cd1d7742
-    sys=0x000000000000000b rip=0x000000001002587b rdi=0x0000000000000100 t=[handle_smoke] Wait #3 (drained)       = PASS (TIMEOUT)
-[handle_smoke] ReleaseSemaphore(+2)    = PASS
-[handle_smoke] done
+    sys=0x000000000000000b rip=0x000000001002587b rdi=0x0000000000000100 t=[handle_smoke] Wait #3 (drained)       = PASS (TIMEOUT)
+[handle_smoke] ReleaseSemaphore(+2)    = PASS
+[handle_smoke] done
 [t=7967.841ms] [I] sys : exit rc   val=0x0 (0)
 [t=7967.989ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -4069,20 +4069,20 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
     sys=0x0000000000000002 rip=0x0000000010025567 rdi=0x0000000000000001 t=0x00000001cd256cd6
     sys=0x000000000000000b rip=0x000000001002587b rdi=0x0000000000000040 t=0x00000001cd25f066
     sys=0x0000000000000002 rip=0x0000000010025567[ring3] task pid=0x000000000000002a entering ring 3 rip=0x0000000140d510e7 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[process_smoke] starting
-[process_smoke] GetCurrentProcess     = PASS
-[process_smoke] GetCurrentProcessId   = PASS pid=0x0000000000000013
-[process_smoke] GetCurrentThreadId    = PASS tid=0x000000000000002a
-[process_smoke] GetCommandLineA       = PASS "ring3-process-smoke"
-[process_smoke] GetCommandLineW       = PASS
-[process_smoke] GetEnvironmentVar PATH = FAIL/empty
-[process_smoke] GetEnvironmentStringsW = PASS
-[process_smoke] GetSystemInfo         = PASS pgsz=0x0000000000001000 cpus=0x0000000000000001
-[process_smoke] GetVersionExW         = PASS major=0x000000000000000a minor=0x0000000000000000
-[process_smoke] GetComputerNameW      = PASS
-[process_smoke] GetSystemDirectoryW   = PASS
-[process_smoke] GetWindowsDirectoryW  = PASS
-[process_smoke] done
+[process_smoke] starting
+[process_smoke] GetCurrentProcess     = PASS
+[process_smoke] GetCurrentProcessId   = PASS pid=0x0000000000000013
+[process_smoke] GetCurrentThreadId    = PASS tid=0x000000000000002a
+[process_smoke] GetCommandLineA       = PASS "ring3-process-smoke"
+[process_smoke] GetCommandLineW       = PASS
+[process_smoke] GetEnvironmentVar PATH = FAIL/empty
+[process_smoke] GetEnvironmentStringsW = PASS
+[process_smoke] GetSystemInfo         = PASS pgsz=0x0000000000001000 cpus=0x0000000000000001
+[process_smoke] GetVersionExW         = PASS major=0x000000000000000a minor=0x0000000000000000
+[process_smoke] GetComputerNameW      = PASS
+[process_smoke] GetSystemDirectoryW   = PASS
+[process_smoke] GetWindowsDirectoryW  = PASS
+[process_smoke] done
 [t=7999.856ms] [I] sys : exit rc   val=0x0 (0)
 [t=7999.991ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -4255,14 +4255,14 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded msvcrt.dll rip=0x0000000010025567 rdi=0x0000000000000001 t=0x00000001cd3086a2
     sys=0x000000000000000c rip=0x0000000010027ce0 rdi=0x0000000050000060[ring3] task pid=0x000000000000002b entering ring 3 rip=0x00000001436210e7 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[module_smoke] starting
-[module_smoke] GetModuleHandleW(NULL)  = PASS base=0x0000000143620000
-[module_smoke] GetModuleHandleW(k32)   = FAIL
-[module_smoke] GetModuleFileNameW(0) = PASS
-[module_smoke] LoadLibraryW(k32)      = FAIL
-[module_smoke] SetLastError + GetLast = PASS
-[module_smoke] FormatMessageW         = PASS
-[module_smoke] done
+[module_smoke] starting
+[module_smoke] GetModuleHandleW(NULL)  = PASS base=0x0000000143620000
+[module_smoke] GetModuleHandleW(k32)   = FAIL
+[module_smoke] GetModuleFileNameW(0) = PASS
+[module_smoke] LoadLibraryW(k32)      = FAIL
+[module_smoke] SetLastError + GetLast = PASS
+[module_smoke] FormatMessageW         = PASS
+[module_smoke] done
 [t=8049.485ms] [I] sys : exit rc   val=0x0 (0)
 [t=8049.619ms] [I] sched : SchedExit: task entering termination path
  base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
@@ -4504,15 +4504,15 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
     sys=0x0000000000000097 rip=0x00000000100b1238 rdi=0x000000007ffffcc0 t=0x00000001b7f28c90
     sys=0x0000000000000002 rip=0x0000000010025567 rdi=0x0000000000000001 t=0x00000001c81bbae2
     sys=0x0000000000000002 rip=0x0000000010025567[ring3] task pid=0x000000000000002c entering ring 3 rip=0x0000000142c61112 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[env_smoke] starting
-[env_smoke] SetEnvironmentVariableW   = PASS
-[env_smoke] GetEnvironmentVariableW   = PASS (round-trip)
-[env_smoke] SetEnvironmentVariableA   = PASS
-[env_smoke] GetEnvironmentVariableA   = PASS (round-trip)
-[env_smoke] GetEnvironmentVariableW(?)= PASS (not found)
-[env_smoke] GetEnvironmentStringsW   = PASS (terminated)
-[env_smoke] ExpandEnvironmentStringsW = PASS (literal preserved)
-[env_smoke] done
+[env_smoke] starting
+[env_smoke] SetEnvironmentVariableW   = PASS
+[env_smoke] GetEnvironmentVariableW   = PASS (round-trip)
+[env_smoke] SetEnvironmentVariableA   = PASS
+[env_smoke] GetEnvironmentVariableA   = PASS (round-trip)
+[env_smoke] GetEnvironmentVariableW(?)= PASS (not found)
+[env_smoke] GetEnvironmentStringsW   = PASS (terminated)
+[env_smoke] ExpandEnvironmentStringsW = PASS (literal preserved)
+[env_smoke] done
 [t=8131.352ms] [I] sys : exit rc   val=0x0 (0)
 [t=8131.490ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -4815,17 +4815,17 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [proc] destroy pid=0x0000000000000012 name="ring3-handle-smoke"
 [as] destroying pml4_phys=0x00000000010b4000 regions=0x00000000000000d8
 [ring3] task pid=0x000000000000002d entering ring 3 rip=0x0000000142bf1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[debug_smoke] starting
-[debug_smoke] IsDebuggerPresent       = PASS (FALSE, as expected)
-[debug_smoke] CheckRemoteDebuggerPresent = PASS (FALSE)
+[debug_smoke] starting
+[debug_smoke] IsDebuggerPresent       = PASS (FALSE, as expected)
+[debug_smoke] CheckRemoteDebuggerPresent = PASS (FALSE)
 [odbg] [odbg-A] hello from debug_smoke
-[debug_smoke] OutputDebugStringA      = PASS (returned)
+[debug_smoke] OutputDebugStringA      = PASS (returned)
 [odbg] [odbg-W] hello from debug_smoke
-[debug_smoke] OutputDebugStringW      = PASS (returned)
-[debug_smoke] GetProcessId == self    = FAIL
+[debug_smoke] OutputDebugStringW      = PASS (returned)
+[debug_smoke] GetProcessId == self    = FAIL
 [sys] dropcaps pid=0x0000000000000016 mask=0x0000000000000000(<none>) caps=0x00000000000000fe(SerialConsole|FsRead|Debug|FsWrite|SpawnThread|Net|Input)->0x00000000000000fe(SerialConsole|FsRead|Debug|FsWrite|SpawnThread|Net|Input)
-[debug_smoke] GetThreadId == self     = FAIL/different
-[debug_smoke] done
+[debug_smoke] GetThreadId == self     = FAIL/different
+[debug_smoke] done
 [t=8211.681ms] [I] sys : exit rc   val=0x0 (0)
 [t=8211.812ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -5149,16 +5149,16 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded msvcp140.dll base=0x0000000010080000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010090000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022[ring3] task pid=0x000000000000002e entering ring 3 rip=0x00000001406a1156 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[codepage_smoke] starting
-[codepage_smoke] GetACP                 = PASS cp=1252
-[codepage_smoke] GetOEMCP               = PASS cp=437
-[codepage_smoke] GetCPInfo(CP_ACP)      = PASS
-[codepage_smoke] IsValidCodePage(99999) = PASS (invalid, as expected)
-[codepage_smoke] IsValidCodePage(UTF8)  = PASS
-[codepage_smoke] MBtoWC sizing          = PASS
-[codepage_smoke] WCtoMB sizing          = PASS
-[codepage_smoke] LCMapStringW(LOWER)    = PASS
-[codepage_smoke] done
+[codepage_smoke] starting
+[codepage_smoke] GetACP                 = PASS cp=1252
+[codepage_smoke] GetOEMCP               = PASS cp=437
+[codepage_smoke] GetCPInfo(CP_ACP)      = PASS
+[codepage_smoke] IsValidCodePage(99999) = PASS (invalid, as expected)
+[codepage_smoke] IsValidCodePage(UTF8)  = PASS
+[codepage_smoke] MBtoWC sizing          = PASS
+[codepage_smoke] WCtoMB sizing          = PASS
+[codepage_smoke] LCMapStringW(LOWER)    = PASS
+[codepage_smoke] done
 [t=8313.149ms] [I] sys : exit rc   val=0x0 (0)
 [t=8313.305ms] [I] sched : SchedExit: task entering termination path
 
@@ -5432,11 +5432,11 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [proc] destroy pid=0x0000000000000016 name="ring3-debug-smoke"
 [as] destroying pml4_phys=0x0000000000cdc000 regions=0x00000000000000d8
 [ring3] task pid=0x000000000000002f entering ring 3 rip=0x0000000143b210d3 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[rng_smoke] starting
-[rng_smoke] BCryptGenRandom         = PASS (varies)
-[rng_smoke] SystemFunction036       = PASS (varies)
-[rng_smoke] cross-source non-zero   = PASS
-[rng_smoke] done
+[rng_smoke] starting
+[rng_smoke] BCryptGenRandom         = PASS (varies)
+[rng_smoke] SystemFunction036       = PASS (varies)
+[rng_smoke] cross-source non-zero   = PASS
+[rng_smoke] done
 [t=8393.925ms] [I] sys : exit rc   val=0x0 (0)
 [t=8394.110ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -5666,11 +5666,11 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded msvcp140.dll base=0x0000000010080000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010090000 size=0x0000000000003000 sections=[ring3] task pid=0x0000000000000030 entering ring 3 rip=0x0000000142f010e7 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[version_smoke] starting
-[version_smoke] GetVersion             = PASS v=0x000000004a6100aa
-[version_smoke] GetFileVersionInfoSizeW = FAIL/STUB (no resource)
-[version_smoke] VerifyVersionInfo(maj>=6) = PASS
-[version_smoke] done
+[version_smoke] starting
+[version_smoke] GetVersion             = PASS v=0x000000004a6100aa
+[version_smoke] GetFileVersionInfoSizeW = FAIL/STUB (no resource)
+[version_smoke] VerifyVersionInfo(maj>=6) = PASS
+[version_smoke] done
 [t=8454.663ms] [I] sys : exit rc   val=0x0 (0)
 [t=8454.800ms] [I] sched : SchedExit: task entering termination path
 0x0000000000000002 chars=0x0000000000002022
@@ -5838,20 +5838,20 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [as] created pml4_phys=0x0000000000c5b000 as=0xffffffff8090ec20
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000031 entering ring 3 rip=0x0000000140cd1164 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[psapi_smoke] starting
+[psapi_smoke] starting
 [t=8514.928ms] [I] debug/probes : win32.stub_miss   rip=0xffffffff8011e75e   val=0x140cd5090 (5382164624)
 [win32-miss] slot=0x0000000140cd5090 called fn="K32EnumProcesses"
-[psapi_smoke] EnumProcesses           = FAIL
+[psapi_smoke] EnumProcesses           = FAIL
 [t=8515.734ms] [I] debug/probes : win32.stub_miss   rip=0xffffffff8011e75e   val=0x140cd5088 (5382164616)
 [win32-miss] slot=0x0000000140cd5088 called fn="K32EnumProcessModules"
-[psapi_smoke] EnumProcessModules      = FAIL
+[psapi_smoke] EnumProcessModules      = FAIL
 [t=8516.163ms] [I] debug/probes : win32.stub_miss   rip=0xffffffff8011e75e   val=0x140cd50a0 (5382164640)
 [win32-miss] slot=0x0000000140cd50a0 called fn="K32GetProcessMemoryInfo"
-[psapi_smoke] GetProcessMemoryInfo    = FAIL
+[psapi_smoke] GetProcessMemoryInfo    = FAIL
 [t=8516.574ms] [I] debug/probes : win32.stub_miss   rip=0xffffffff8011e75e   val=0x140cd5098 (5382164632)
 [win32-miss] slot=0x0000000140cd5098 called fn="K32GetProcessImageFileNameW"
-[psapi_smoke] GetProcessImageFileNameW= FAIL
-[psapi_smoke] done
+[psapi_smoke] GetProcessImageFileNameW= FAIL
+[psapi_smoke] done
 [t=8516.947ms] [I] sys : exit rc   val=0x0 (0)
 [t=8517.050ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -6056,15 +6056,15 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000032 entering ring 3 rip=0x0000000142e610e7 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[com_smoke] starting
-[com_smoke] CoInitializeEx          = PASS hr=0x0000000000000000
+[com_smoke] starting
+[com_smoke] CoInitializeEx          = PASS hr=0x0000000000000000
 [t=8575.976ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[com_smoke] CoTaskMemAlloc(256)    = PASS
+[com_smoke] CoTaskMemAlloc(256)    = PASS
 [t=8576.422ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[com_smoke] StringFromCLSID         = PASS
-[com_smoke] CoCreateInstance(bogus) = PASS (failed cleanly)
-[com_smoke] CoUninitialize          = PASS (returned)
-[com_smoke] done
+[com_smoke] StringFromCLSID         = PASS
+[com_smoke] CoCreateInstance(bogus) = PASS (failed cleanly)
+[com_smoke] CoUninitialize          = PASS (returned)
+[com_smoke] done
 [t=8577.068ms] [I] sys : exit rc   val=0x0 (0)
 [t=8577.168ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -6246,13 +6246,13 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [as] created pml4_phys=0x0000000000c6e000 as=0xffffffff8090ec20
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000033 entering ring 3 rip=0x0000000142c51074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[dbghelp_smoke] starting
-[dbghelp_smoke] SymInitialize         = PASS
-[dbghelp_smoke] SymGetOptions         = PASS (returned)
-[dbghelp_smoke] SymSetOptions         = PASS (round-trip)
-[dbghelp_smoke] UnDecorateSymbolName  = PASS
-[dbghelp_smoke] SymCleanup            = PASS
-[dbghelp_smoke] done
+[dbghelp_smoke] starting
+[dbghelp_smoke] SymInitialize         = PASS
+[dbghelp_smoke] SymGetOptions         = PASS (returned)
+[dbghelp_smoke] SymSetOptions         = PASS (round-trip)
+[dbghelp_smoke] UnDecorateSymbolName  = PASS
+[dbghelp_smoke] SymCleanup            = PASS
+[dbghelp_smoke] done
 [t=8627.060ms] [I] sys : exit rc   val=0x0 (0)
 [t=8627.196ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -6445,14 +6445,14 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded kernel32.dll[ring3] task pid=0x0000000000000034 entering ring 3 rip=0x0000000142531074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[winhttp_smoke] starting
-[winhttp_smoke] WinHttpOpen          = PASS
-[winhttp_smoke] WinHttpConnect       = PASS
-[winhttp_smoke] WinHttpOpenRequest   = PASS
-[winhttp_smoke] WinHttpSendRequest   = PASS
-[winhttp_smoke] WinHttpReceiveResponse = PASS
-[winhttp_smoke] WinHttpReadData      = FAIL
-[winhttp_smoke] done
+[winhttp_smoke] starting
+[winhttp_smoke] WinHttpOpen          = PASS
+[winhttp_smoke] WinHttpConnect       = PASS
+[winhttp_smoke] WinHttpOpenRequest   = PASS
+[winhttp_smoke] WinHttpSendRequest   = PASS
+[winhttp_smoke] WinHttpReceiveResponse = PASS
+[winhttp_smoke] WinHttpReadData      = FAIL
+[winhttp_smoke] done
 [t=8688.181ms] [I] sys : exit rc   val=0x0 (0)
 [t=8688.388ms] [I] sched : SchedExit: task entering termination path
  base=0x0000000010020000 (pre-PeLoad — visible to ResolveImports)
@@ -6676,22 +6676,22 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000035 entering ring 3 rip=0x00000001433910b8 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[crt_smoke] starting
-[crt_smoke] memcpy + memcmp     = PASS
-[crt_smoke] memmove(overlap)    = PASS
-[crt_smoke] memset(0xAB)        = PASS
-[crt_smoke] strlen("hello")     = PASS
-[crt_smoke] strcmp eq/diff      = PASS
-[crt_smoke] strncmp 3 chars     = PASS
-[crt_smoke] strcpy + strcat     = PASS
-[crt_smoke] strchr('l')         = PASS
-[crt_smoke] strrchr('l')        = PASS
-[crt_smoke] strstr("lo wo")    = PASS
-[crt_smoke] atoi("-42")        = PASS
-[crt_smoke] abs(-7)             = PASS
-[crt_smoke] qsort               = PASS
-[crt_smoke] bsearch(4)          = PASS
-[crt_smoke] done
+[crt_smoke] starting
+[crt_smoke] memcpy + memcmp     = PASS
+[crt_smoke] memmove(overlap)    = PASS
+[crt_smoke] memset(0xAB)        = PASS
+[crt_smoke] strlen("hello")     = PASS
+[crt_smoke] strcmp eq/diff      = PASS
+[crt_smoke] strncmp 3 chars     = PASS
+[crt_smoke] strcpy + strcat     = PASS
+[crt_smoke] strchr('l')         = PASS
+[crt_smoke] strrchr('l')        = PASS
+[crt_smoke] strstr("lo wo")    = PASS
+[crt_smoke] atoi("-42")        = PASS
+[crt_smoke] abs(-7)             = PASS
+[crt_smoke] qsort               = PASS
+[crt_smoke] bsearch(4)          = PASS
+[crt_smoke] done
 [t=8750.585ms] [I] sys : exit rc   val=0x0 (0)
 [t=8750.754ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -6907,14 +6907,14 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [dll-load] begin base_va=0x0000000010080000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded msvcp140.dll base=0x0000000010080000[ring3] task pid=0x0000000000000036 entering ring 3 rip=0x00000001417e1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[critsec_smoke] starting
-[critsec_smoke] InitializeCriticalSection   = PASS (returned)
-[critsec_smoke] EnterCriticalSection x3     = PASS (no deadlock)
-[critsec_smoke] LeaveCriticalSection x3     = PASS (balanced)
-[critsec_smoke] TryEnterCriticalSection     = PASS
-[critsec_smoke] DeleteCriticalSection       = PASS (returned)
-[critsec_smoke] InitializeCSWithSpinCount   = PASS
-[critsec_smoke] done
+[critsec_smoke] starting
+[critsec_smoke] InitializeCriticalSection   = PASS (returned)
+[critsec_smoke] EnterCriticalSection x3     = PASS (no deadlock)
+[critsec_smoke] LeaveCriticalSection x3     = PASS (balanced)
+[critsec_smoke] TryEnterCriticalSection     = PASS
+[critsec_smoke] DeleteCriticalSection       = PASS (returned)
+[critsec_smoke] InitializeCSWithSpinCount   = PASS
+[critsec_smoke] done
 [t=8819.864ms] [I] sys : exit rc   val=0x0 (0)
 [t=8820.005ms] [I] sched : SchedExit: task entering termination path
  (pre-PeLoad — visible to ResolveImports)
@@ -7091,20 +7091,20 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000037 entering ring 3 rip=0x0000000142c110e7 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[tls_smoke] starting
+[tls_smoke] starting
 [t=8869.801ms] [2m[D] [0mwin32/tls : DoTlsAlloc: granted slot   val=0x0 (0)
-[tls_smoke] TlsAlloc            = PASS slot=0x0000000000000000
-[tls_smoke] TlsSetValue         = PASS
-[tls_smoke] TlsGetValue         = PASS (round-trip)
-[tls_smoke] TlsSetValue(NULL)   = PASS
+[tls_smoke] TlsAlloc            = PASS slot=0x0000000000000000
+[tls_smoke] TlsSetValue         = PASS
+[tls_smoke] TlsGetValue         = PASS (round-trip)
+[tls_smoke] TlsSetValue(NULL)   = PASS
 [t=8870.737ms] [2m[D] [0mwin32/tls : DoTlsFree: released slot   val=0x0 (0)
-[tls_smoke] TlsFree             = PASS
+[tls_smoke] TlsFree             = PASS
 [t=8871.512ms] [2m[D] [0mwin32/tls : DoTlsAlloc: granted slot   val=0x0 (0)
 [t=8871.985ms] [2m[D] [0mwin32/tls : DoTlsAlloc: granted slot   val=0x1 (1)
-[tls_smoke] TlsAlloc x2 distinct= PASS
+[tls_smoke] TlsAlloc x2 distinct= PASS
 [t=8872.395ms] [2m[D] [0mwin32/tls : DoTlsFree: released slot   val=0x0 (0)
 [t=8872.550ms] [2m[D] [0mwin32/tls : DoTlsFree: released slot   val=0x1 (1)
-[tls_smoke] done
+[tls_smoke] done
 [t=8872.788ms] [I] sys : exit rc   val=0x0 (0)
 [t=8872.917ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -7321,15 +7321,15 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded dbghelp.dll base=0x0000000010070000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010080000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000038 entering ring 3 rip=0x0000000142011112 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[atom_smoke] starting
-[atom_smoke] GlobalAddAtomA      = PASS
-[atom_smoke] GlobalFindAtomA     = PASS (matches)
-[atom_smoke] GlobalGetAtomNameA  = PASS (round-trip)
-[atom_smoke] GlobalDeleteAtom    = PASS
-[atom_smoke] AddAtomA            = PASS
-[atom_smoke] FindAtomA           = PASS
-[atom_smoke] GlobalFindAtomA(?)  = PASS (not found)
-[atom_smoke] done
+[atom_smoke] starting
+[atom_smoke] GlobalAddAtomA      = PASS
+[atom_smoke] GlobalFindAtomA     = PASS (matches)
+[atom_smoke] GlobalGetAtomNameA  = PASS (round-trip)
+[atom_smoke] GlobalDeleteAtom    = PASS
+[atom_smoke] AddAtomA            = PASS
+[atom_smoke] FindAtomA           = PASS
+[atom_smoke] GlobalFindAtomA(?)  = PASS (not found)
+[atom_smoke] done
 [t=8932.439ms] [I] sys : exit rc   val=0x0 (0)
 [t=8932.582ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -7505,15 +7505,15 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [guard] ALLOW kind=uthread name="ring3-console-smoke" findings=0x0000000000000000
 [sched] created task id=0x0000000000000039 name="ring3-console-smoke" rsp=0xffffffffe0010fc0 as=0xffffffff80912cd0
 [ring3] task pid=0x0000000000000039 entering ring 3 rip=0x0000000140961074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[console_smoke] starting
-[console_smoke] GetStdHandle in/out/err = PASS
-[console_smoke] GetConsoleMode(in)      = PASS
-[console_smoke] GetConsoleCP/OutputCP   = PASS
-[console_smoke] GetConsoleScreenBufferInfo = PASS
-[console_smoke] SetConsoleTitleA        = PASS
-[console_smoke] GetConsoleTitleA        = PASS
-[console_smoke] WriteConsoleW PASS
-[console_smoke] done
+[console_smoke] starting
+[console_smoke] GetStdHandle in/out/err = PASS
+[console_smoke] GetConsoleMode(in)      = PASS
+[console_smoke] GetConsoleCP/OutputCP   = PASS
+[console_smoke] GetConsoleScreenBufferInfo = PASS
+[console_smoke] SetConsoleTitleA        = PASS
+[console_smoke] GetConsoleTitleA        = PASS
+[console_smoke] WriteConsoleW PASS
+[console_smoke] done
 [t=8982.523ms] [I] sys : exit rc   val=0x0 (0)
 [t=8982.657ms] [I] sched : SchedExit: task entering termination path
 [as] created pml4_phys=0x0000000000c65000 as=0xffffffff8090ec20
@@ -7717,14 +7717,14 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [dll-load] relocs blocks=[ring3] task pid=0x000000000000003a entering ring 3 rip=0x0000000141c31164 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[datetime_smoke] starting
-[datetime_smoke] GetSystemTime         = PASS Y=2026 M=5 D=1
-[datetime_smoke] GetLocalTime          = PASS
-[datetime_smoke] SystemTimeToFileTime  = PASS
-[datetime_smoke] FileTimeToSystemTime  = PASS (round-trip)
-[datetime_smoke] CompareFileTime self  = PASS (equal)
-[datetime_smoke] GetTimeZoneInformation= PASS
-[datetime_smoke] done
+[datetime_smoke] starting
+[datetime_smoke] GetSystemTime         = PASS Y=2026 M=5 D=1
+[datetime_smoke] GetLocalTime          = PASS
+[datetime_smoke] SystemTimeToFileTime  = PASS
+[datetime_smoke] FileTimeToSystemTime  = PASS (round-trip)
+[datetime_smoke] CompareFileTime self  = PASS (equal)
+[datetime_smoke] GetTimeZoneInformation= PASS
+[datetime_smoke] done
 [t=9044.337ms] [I] sys : exit rc   val=0x0 (0)
 [t=9044.475ms] [I] sched : SchedExit: task entering termination path
 0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -7918,15 +7918,15 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [as] created pml4_phys=0x0000000000c7c000 as=0xffffffff8090ec20
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x000000000000003b entering ring 3 rip=0x0000000141d710e7 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[locale_smoke] starting
-[locale_smoke] GetUserDefaultLCID    = PASS lcid=0x0000000000000409
-[locale_smoke] GetSystemDefaultLCID  = PASS
-[locale_smoke] GetUserDefaultLangID  = PASS
-[locale_smoke] GetSystemDefaultLangID= PASS
-[locale_smoke] GetThreadLocale       = PASS
-[locale_smoke] GetLocaleInfoW(ISO639)= PASS
-[locale_smoke] IsValidLocale(user)   = PASS
-[locale_smoke] done
+[locale_smoke] starting
+[locale_smoke] GetUserDefaultLCID    = PASS lcid=0x0000000000000409
+[locale_smoke] GetSystemDefaultLCID  = PASS
+[locale_smoke] GetUserDefaultLangID  = PASS
+[locale_smoke] GetSystemDefaultLangID= PASS
+[locale_smoke] GetThreadLocale       = PASS
+[locale_smoke] GetLocaleInfoW(ISO639)= PASS
+[locale_smoke] IsValidLocale(user)   = PASS
+[locale_smoke] done
 [t=9104.188ms] [I] sys : exit rc   val=0x0 (0)
 [t=9104.355ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -8141,15 +8141,15 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000003c entering ring 3 rip=0x0000000140ba1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[gdi_smoke] starting
-[gdi_smoke] GetDC(NULL)         = FAIL/STUB
-[gdi_smoke] CreateCompatibleDC  = PASS
-[gdi_smoke] CreateCompatibleBitmap = PASS
-[gdi_smoke] SelectObject(bitmap)= PASS
-[gdi_smoke] GetStockObject(WHITE_BRUSH) = PASS
-[gdi_smoke] DeleteObject        = PASS
-[gdi_smoke] DeleteDC            = PASS
-[gdi_smoke] done
+[gdi_smoke] starting
+[gdi_smoke] GetDC(NULL)         = FAIL/STUB
+[gdi_smoke] CreateCompatibleDC  = PASS
+[gdi_smoke] CreateCompatibleBitmap = PASS
+[gdi_smoke] SelectObject(bitmap)= PASS
+[gdi_smoke] GetStockObject(WHITE_BRUSH) = PASS
+[gdi_smoke] DeleteObject        = PASS
+[gdi_smoke] DeleteDC            = PASS
+[gdi_smoke] done
 [t=9164.999ms] [I] sys : exit rc   val=0x0 (0)
 [t=9165.135ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -8330,15 +8330,15 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [as] created pml4_phys=0x0000000000c72000 as=0xffffffff8090ec20
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x000000000000003d entering ring 3 rip=0x0000000142351074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[msg_smoke] starting
-[msg_smoke] GetCurrentThreadId  = PASS
-[msg_smoke] PostThreadMessageA  = PASS
-[msg_smoke] PeekMessageA(PM_REMOVE) = FAIL/STUB
-[msg_smoke] PeekMessageA(empty) = PASS (empty, as expected)
-[msg_smoke] PostQuitMessage     = PASS (returned)
-[msg_smoke] TranslateMessage    = PASS (returned FALSE)
-[msg_smoke] DispatchMessageA    = PASS (returned)
-[msg_smoke] done
+[msg_smoke] starting
+[msg_smoke] GetCurrentThreadId  = PASS
+[msg_smoke] PostThreadMessageA  = PASS
+[msg_smoke] PeekMessageA(PM_REMOVE) = FAIL/STUB
+[msg_smoke] PeekMessageA(empty) = PASS (empty, as expected)
+[msg_smoke] PostQuitMessage     = PASS (returned)
+[msg_smoke] TranslateMessage    = PASS (returned FALSE)
+[msg_smoke] DispatchMessageA    = PASS (returned)
+[msg_smoke] done
 [t=9217.192ms] [I] sys : exit rc   val=0x0 (0)
 [t=9217.414ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -8557,12 +8557,12 @@ Windows Kill 1.1.4 | Windows Kill Library 3.1.3Not enough argument. Use -h for h
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000003e entering ring 3 rip=0x0000000140c81074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[pipe_smoke] starting
-[pipe_smoke] CreatePipe         = PASS
-abc[pipe_smoke] WriteFile(pipe)    = PASS
-[pipe_smoke] ReadFile(pipe)     = FAIL/STUB
-[pipe_smoke] WaitNamedPipeW(no) = PASS (FALSE, as expected)
-[pipe_smoke] done
+[pipe_smoke] starting
+[pipe_smoke] CreatePipe         = PASS
+abc[pipe_smoke] WriteFile(pipe)    = PASS
+[pipe_smoke] ReadFile(pipe)     = FAIL/STUB
+[pipe_smoke] WaitNamedPipeW(no) = PASS (FALSE, as expected)
+[pipe_smoke] done
 [t=9286.606ms] [I] sys : exit rc   val=0x0 (0)
 [t=9286.757ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -8766,13 +8766,13 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded dbghelp.dll base=0x0000000010070000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010080000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [ring3] task pid=0x000000000000003f entering ring 3 rip=0x00000001418e1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[resource_smoke] starting
-[resource_smoke] FindResourceW(missing)= PASS (NULL, as expected)
-[resource_smoke] LoadStringW(missing)  = PASS (0, as expected)
-[resource_smoke] SizeofResource(NULL)  = PASS
-[resource_smoke] LoadCursorW(IDC_ARROW)= PASS
-[resource_smoke] LoadIconW(IDI_APP)    = PASS
-[resource_smoke] done
+[resource_smoke] starting
+[resource_smoke] FindResourceW(missing)= PASS (NULL, as expected)
+[resource_smoke] LoadStringW(missing)  = PASS (0, as expected)
+[resource_smoke] SizeofResource(NULL)  = PASS
+[resource_smoke] LoadCursorW(IDC_ARROW)= PASS
+[resource_smoke] LoadIconW(IDI_APP)    = PASS
+[resource_smoke] done
 [t=9347.202ms] [I] sys : exit rc   val=0x0 (0)
 [t=9347.372ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -8944,12 +8944,12 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=[ring3] task pid=0x0000000000000040 entering ring 3 rip=0x0000000141eb1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[ntdll_smoke] starting
-[ntdll_smoke] RtlGetVersion         = PASS
-[ntdll_smoke] RtlSecureZeroMemory   = PASS
-[ntdll_smoke] RtlInitUnicodeString  = PASS (len=10)
-[ntdll_smoke] RtlNtStatusToDosError = PASS
-[ntdll_smoke] done
+[ntdll_smoke] starting
+[ntdll_smoke] RtlGetVersion         = PASS
+[ntdll_smoke] RtlSecureZeroMemory   = PASS
+[ntdll_smoke] RtlInitUnicodeString  = PASS (len=10)
+[ntdll_smoke] RtlNtStatusToDosError = PASS
+[ntdll_smoke] done
 [t=9398.488ms] [I] sys : exit rc   val=0x0 (0)
 [t=9398.636ms] [I] sched : SchedExit: task entering termination path
 0x0000000000000004 chars=0x0000000000002022
@@ -9138,12 +9138,12 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000041 entering ring 3 rip=0x0000000140dd1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[shell_smoke] starting
-[shell_smoke] SHGetFolderPathW(WIN) = PASS
-[shell_smoke] SHGetSpecialFolderPathW = PASS
+[shell_smoke] starting
+[shell_smoke] SHGetFolderPathW(WIN) = PASS
+[shell_smoke] SHGetSpecialFolderPathW = PASS
 [t=9458.737ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[shell_smoke] CommandLineToArgvW    = PASS (argc=3)
-[shell_smoke] done
+[shell_smoke] CommandLineToArgvW    = PASS (argc=3)
+[shell_smoke] done
 [t=9459.353ms] [I] sys : exit rc   val=0x0 (0)
 [t=9459.456ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -9322,11 +9322,11 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded vcruntime140.dll base=0x0000000010030000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010040000 size=0x0000000000005000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000042 entering ring 3 rip=0x0000000140571074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[userenv_smoke] starting
-[userenv_smoke] OpenProcessToken      = PASS
-[userenv_smoke] GetUserProfileDirectoryW = PASS
-[userenv_smoke] GetProfilesDirectoryW = PASS
-[userenv_smoke] done
+[userenv_smoke] starting
+[userenv_smoke] OpenProcessToken      = PASS
+[userenv_smoke] GetUserProfileDirectoryW = PASS
+[userenv_smoke] GetProfilesDirectoryW = PASS
+[userenv_smoke] done
 [t=9509.467ms] [I] sys : exit rc   val=0x0 (0)
 [t=9509.602ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -9495,15 +9495,15 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [as] created pml4_phys=0x0000000000c9b000 as=0xffffffff8090ec20
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000043 entering ring 3 rip=0x0000000143181074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[interlock_smoke] starting
-[interlock_smoke] InterlockedIncrement   = PASS
-[interlock_smoke] InterlockedDecrement   = PASS
-[interlock_smoke] InterlockedExchange    = PASS
-[interlock_smoke] InterlockedCmpXchg hit = PASS
-[interlock_smoke] InterlockedCmpXchg miss= PASS
-[interlock_smoke] InterlockedExchangeAdd = PASS
-[interlock_smoke] InterlockedCmpXchg64   = PASS
-[interlock_smoke] done
+[interlock_smoke] starting
+[interlock_smoke] InterlockedIncrement   = PASS
+[interlock_smoke] InterlockedDecrement   = PASS
+[interlock_smoke] InterlockedExchange    = PASS
+[interlock_smoke] InterlockedCmpXchg hit = PASS
+[interlock_smoke] InterlockedCmpXchg miss= PASS
+[interlock_smoke] InterlockedExchangeAdd = PASS
+[interlock_smoke] InterlockedCmpXchg64   = PASS
+[interlock_smoke] done
 [t=9560.378ms] [I] sys : exit rc   val=0x0 (0)
 [t=9560.515ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -9690,15 +9690,15 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [as] created pml4_phys=0x0000000000c83000 as=0xffffffff80912cd0
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000044 entering ring 3 rip=0x0000000140591074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[fiber_smoke] starting
-[fiber_smoke] IsThreadAFiber(no)  = PASS (FALSE)
+[fiber_smoke] starting
+[fiber_smoke] IsThreadAFiber(no)  = PASS (FALSE)
 [t=9610.405ms] [2m[D] [0mwin32/tls : DoTlsAlloc: granted slot   val=0x0 (0)
-[fiber_smoke] FlsAlloc             = PASS
-[fiber_smoke] FlsSetValue          = PASS
-[fiber_smoke] FlsGetValue          = PASS
+[fiber_smoke] FlsAlloc             = PASS
+[fiber_smoke] FlsSetValue          = PASS
+[fiber_smoke] FlsGetValue          = PASS
 [t=9610.934ms] [2m[D] [0mwin32/tls : DoTlsFree: released slot   val=0x0 (0)
-[fiber_smoke] FlsFree              = PASS
-[fiber_smoke] done
+[fiber_smoke] FlsFree              = PASS
+[fiber_smoke] done
 [t=9611.193ms] [I] sys : exit rc   val=0x0 (0)
 [t=9611.306ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -9886,11 +9886,11 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [as] created pml4_phys=0x0000000000c9c000 as=0xffffffff8090ec20
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000045 entering ring 3 rip=0x0000000141111074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[profile_smoke] starting
-[profile_smoke] GetPrivateProfileStringA = PASS
-[profile_smoke] GetPrivateProfileIntA    = PASS (default returned)
-[profile_smoke] GetProfileStringA        = PASS
-[profile_smoke] done
+[profile_smoke] starting
+[profile_smoke] GetPrivateProfileStringA = PASS
+[profile_smoke] GetPrivateProfileIntA    = PASS (default returned)
+[profile_smoke] GetProfileStringA        = PASS
+[profile_smoke] done
 [t=9671.681ms] [I] sys : exit rc   val=0x0 (0)
 [t=9671.816ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -10093,13 +10093,13 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010070000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [dll-load] OK entry_rva=[ring3] task pid=0x0000000000000046 entering ring 3 rip=0x0000000142b01074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[clipboard_smoke] starting
-[clipboard_smoke] OpenClipboard         = PASS
-[clipboard_smoke] IsClipboardFormatAvailable = PASS (no, as expected)
-[clipboard_smoke] CountClipboardFormats = PASS
-[clipboard_smoke] EmptyClipboard        = PASS (returned)
-[clipboard_smoke] CloseClipboard        = PASS (returned)
-[clipboard_smoke] done
+[clipboard_smoke] starting
+[clipboard_smoke] OpenClipboard         = PASS
+[clipboard_smoke] IsClipboardFormatAvailable = PASS (no, as expected)
+[clipboard_smoke] CountClipboardFormats = PASS
+[clipboard_smoke] EmptyClipboard        = PASS (returned)
+[clipboard_smoke] CloseClipboard        = PASS (returned)
+[clipboard_smoke] done
 [t=9732.845ms] [I] sys : exit rc   val=0x0 (0)
 [t=9732.993ms] [I] sched : SchedExit: task entering termination path
 0x0000000000000000 has_exports=0x0000000000000001
@@ -10281,12 +10281,12 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000047 entering ring 3 rip=0x0000000142d810b2 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[windowclass_smoke] starting
-[windowclass_smoke] RegisterClassW       = PASS
-[windowclass_smoke] GetClassInfoW (own)  = PASS
-[windowclass_smoke] GetClassInfoW(?)     = FAIL
-[windowclass_smoke] UnregisterClassW     = PASS
-[windowclass_smoke] done
+[windowclass_smoke] starting
+[windowclass_smoke] RegisterClassW       = PASS
+[windowclass_smoke] GetClassInfoW (own)  = PASS
+[windowclass_smoke] GetClassInfoW(?)     = FAIL
+[windowclass_smoke] UnregisterClassW     = PASS
+[windowclass_smoke] done
 [t=9783.668ms] [I] sys : exit rc   val=0x0 (0)
 [t=9783.820ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -10485,12 +10485,12 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x00000000100a0000 size=0x0000000000006000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000048 entering ring 3 rip=0x0000000140501074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[wow64_smoke] starting
-[wow64_smoke] IsWow64Process       = PASS (FALSE, native)
-[wow64_smoke] IsWow64Process2      = PASS native=0x8664
-[wow64_smoke] GetNativeSystemInfo  = PASS (AMD64)
-[wow64_smoke] IsProcessorFeaturePresent(SSE2) = PASS
-[wow64_smoke] done
+[wow64_smoke] starting
+[wow64_smoke] IsWow64Process       = PASS (FALSE, native)
+[wow64_smoke] IsWow64Process2      = PASS native=0x8664
+[wow64_smoke] GetNativeSystemInfo  = PASS (AMD64)
+[wow64_smoke] IsProcessorFeaturePresent(SSE2) = PASS
+[wow64_smoke] done
 [t=9844.305ms] [I] sys : exit rc   val=0x0 (0)
 [t=9844.445ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -10655,17 +10655,17 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000049 entering ring 3 rip=0x00000001435310d1 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[mathlib_smoke] starting
-[mathlib_smoke] 1.5 + 2.5 == 4.0    = PASS
-[mathlib_smoke] 10.0 - 3.5 == 6.5   = PASS
-[mathlib_smoke] 7.0 * 8.0 == 56.0   = PASS
-[mathlib_smoke] 1.0 / 4.0 == 0.25   = PASS
-[mathlib_smoke] 0.5 < 0.6           = PASS
-[mathlib_smoke] 1.0 == 1.0          = PASS
-[mathlib_smoke] (double)42 == 42.0   = PASS
-[mathlib_smoke] (int)3.7 == 3        = PASS
-[mathlib_smoke] DBL_MAX reciprocal   = PASS
-[mathlib_smoke] done
+[mathlib_smoke] starting
+[mathlib_smoke] 1.5 + 2.5 == 4.0    = PASS
+[mathlib_smoke] 10.0 - 3.5 == 6.5   = PASS
+[mathlib_smoke] 7.0 * 8.0 == 56.0   = PASS
+[mathlib_smoke] 1.0 / 4.0 == 0.25   = PASS
+[mathlib_smoke] 0.5 < 0.6           = PASS
+[mathlib_smoke] 1.0 == 1.0          = PASS
+[mathlib_smoke] (double)42 == 42.0   = PASS
+[mathlib_smoke] (int)3.7 == 3        = PASS
+[mathlib_smoke] DBL_MAX reciprocal   = PASS
+[mathlib_smoke] done
 [t=9895.621ms] [I] sys : exit rc   val=0x0 (0)
 [t=9895.778ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -10857,19 +10857,19 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded vcruntime140.dll base=0x0000000010030000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010040000 size=0x0000000000005000 sections=[ring3] task pid=0x000000000000004a entering ring 3 rip=0x0000000141ae1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[stdio_smoke] starting
+[stdio_smoke] starting
 [fs/route] open ok pid=0x0000000000000033 path="/etc/version" backing=ramfs handle=0x0000000000000100 size=0x0000000000000019
 [t=9945.233ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[stdio_smoke] fopen(/etc/version) = PASS
-[stdio_smoke] fread (32B)        = PASS
-[stdio_smoke] fseek + ftell      = PASS
-[stdio_smoke] rewind + ftell     = PASS
-[stdio_smoke] feof (start)       = PASS
-[stdio_smoke] fclose             = PASS (returned)
+[stdio_smoke] fopen(/etc/version) = PASS
+[stdio_smoke] fread (32B)        = PASS
+[stdio_smoke] fseek + ftell      = PASS
+[stdio_smoke] rewind + ftell     = PASS
+[stdio_smoke] feof (start)       = PASS
+[stdio_smoke] fclose             = PASS (returned)
 [fs/route] open: ramfs miss path="/does_not_exist.txt"
 [t=9946.570ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[stdio_smoke] fopen(missing)     = FAIL
-[stdio_smoke] done
+[stdio_smoke] fopen(missing)     = FAIL
+[stdio_smoke] done
 [t=9946.907ms] [I] sys : exit rc   val=0x0 (0)
 [t=9947.004ms] [I] sched : SchedExit: task entering termination path
 0x0000000000000003 chars=0x0000000000002022
@@ -11093,14 +11093,14 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded msvcp140.dll base=0x0000000010080000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=[ring3] task pid=0x000000000000004b entering ring 3 rip=0x0000000142711092 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[nls_smoke] starting
-[nls_smoke] GetUserDefaultUILanguage = PASS
-[nls_smoke] GetSystemDefaultUILanguage = PASS
-[nls_smoke] EnumSystemLocalesA = PASS
-[nls_smoke] GetDateFormatA      = PASS
-[nls_smoke] GetTimeFormatA      = PASS
-[nls_smoke] GetNumberFormatA    = PASS
-[nls_smoke] done
+[nls_smoke] starting
+[nls_smoke] GetUserDefaultUILanguage = PASS
+[nls_smoke] GetSystemDefaultUILanguage = PASS
+[nls_smoke] EnumSystemLocalesA = PASS
+[nls_smoke] GetDateFormatA      = PASS
+[nls_smoke] GetTimeFormatA      = PASS
+[nls_smoke] GetNumberFormatA    = PASS
+[nls_smoke] done
 [t=10007.389ms] [I] sys : exit rc   val=0x0 (0)
 [t=10007.526ms] [I] sched : SchedExit: task entering termination path
 0x0000000010090000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
@@ -11278,11 +11278,11 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000004c entering ring 3 rip=0x0000000142571074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[services_smoke] starting
-[services_smoke] OpenSCManagerW       = PASS
-[services_smoke] OpenServiceW(missing) = PASS (NULL, as expected)
-[services_smoke] CloseServiceHandle    = PASS
-[services_smoke] done
+[services_smoke] starting
+[services_smoke] OpenSCManagerW       = PASS
+[services_smoke] OpenServiceW(missing) = PASS (NULL, as expected)
+[services_smoke] CloseServiceHandle    = PASS
+[services_smoke] done
 [t=10067.145ms] [I] sys : exit rc   val=0x0 (0)
 [t=10067.301ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -11449,11 +11449,11 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [as] created pml4_phys=0x0000000000c8d000 as=0xffffffff8090ec20
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x000000000000004d entering ring 3 rip=0x0000000143821074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[eventlog_smoke] starting
-[eventlog_smoke] RegisterEventSourceW = PASS
-[eventlog_smoke] ReportEventW         = PASS
-[eventlog_smoke] DeregisterEventSource= PASS
-[eventlog_smoke] done
+[eventlog_smoke] starting
+[eventlog_smoke] RegisterEventSourceW = PASS
+[eventlog_smoke] ReportEventW         = PASS
+[eventlog_smoke] DeregisterEventSource= PASS
+[eventlog_smoke] done
 [t=10117.885ms] [I] sys : exit rc   val=0x0 (0)
 [t=10118.058ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -11639,12 +11639,12 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [t=10167.780ms] [2m[D] [0march/timer : tick   val=0x3e8 (1000)
 [tick-irq] g_ticks=0x00000000000003e8
 [ring3] task pid=0x000000000000004e entering ring 3 rip=0x00000001409f1156 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[sound_smoke] starting
-[sound_smoke] waveOutGetNumDevs   = PASS count=0
-[sound_smoke] midiOutGetNumDevs   = PASS count=0
-[sound_smoke] PlaySoundW(NULL)    = PASS (returned)
-[sound_smoke] sndPlaySoundA(NULL) = PASS (returned)
-[sound_smoke] done
+[sound_smoke] starting
+[sound_smoke] waveOutGetNumDevs   = PASS count=0
+[sound_smoke] midiOutGetNumDevs   = PASS count=0
+[sound_smoke] PlaySoundW(NULL)    = PASS (returned)
+[sound_smoke] sndPlaySoundA(NULL) = PASS (returned)
+[sound_smoke] done
 [t=10169.194ms] [I] sys : exit rc   val=0x0 (0)
 [t=10169.377ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -11849,13 +11849,13 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010070000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000[ring3] task pid=0x000000000000004f entering ring 3 rip=0x000000014305109e rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[multimon_smoke] starting
-[multimon_smoke] GetSystemMetrics(screen) = PASS
-[multimon_smoke] GetSystemMetrics(SM_CMONITORS) = PASS
-[multimon_smoke] EnumDisplayMonitors  = PASS
-[multimon_smoke] MonitorFromPoint     = PASS
-[multimon_smoke] EnumDisplayDevicesW  = PASS
-[multimon_smoke] done
+[multimon_smoke] starting
+[multimon_smoke] GetSystemMetrics(screen) = PASS
+[multimon_smoke] GetSystemMetrics(SM_CMONITORS) = PASS
+[multimon_smoke] EnumDisplayMonitors  = PASS
+[multimon_smoke] MonitorFromPoint     = PASS
+[multimon_smoke] EnumDisplayDevicesW  = PASS
+[multimon_smoke] done
 [t=10230.381ms] [I] sys : exit rc   val=0x0 (0)
 [t=10230.521ms] [I] sched : SchedExit: task entering termination path
  has_exports=0x0000000000000001
@@ -12034,11 +12034,11 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000050 entering ring 3 rip=0x00000001417b1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[power_smoke] starting
-[power_smoke] GetSystemPowerStatus= PASS
-[power_smoke] SetThreadExecutionState = PASS
-[power_smoke] IsSystemResumeAutomatic = PASS (FALSE, as expected)
-[power_smoke] done
+[power_smoke] starting
+[power_smoke] GetSystemPowerStatus= PASS
+[power_smoke] SetThreadExecutionState = PASS
+[power_smoke] IsSystemResumeAutomatic = PASS (FALSE, as expected)
+[power_smoke] done
 [t=10280.208ms] [I] sys : exit rc   val=0x0 (0)
 [t=10280.373ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -12229,16 +12229,16 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000051 entering ring 3 rip=0x0000000142a71074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[heap_smoke] starting
-[heap_smoke] GetProcessHeap     = PASS
+[heap_smoke] starting
+[heap_smoke] GetProcessHeap     = PASS
 [t=10340.916ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[heap_smoke] HeapAlloc(256)     = PASS
-[heap_smoke] HeapSize           = PASS
-[heap_smoke] HeapValidate       = PASS
-[heap_smoke] HeapReAlloc(1024)  = PASS
-[heap_smoke] HeapCompact        = PASS (returned)
-[heap_smoke] GetProcessHeaps    = PASS
-[heap_smoke] done
+[heap_smoke] HeapAlloc(256)     = PASS
+[heap_smoke] HeapSize           = PASS
+[heap_smoke] HeapValidate       = PASS
+[heap_smoke] HeapReAlloc(1024)  = PASS
+[heap_smoke] HeapCompact        = PASS (returned)
+[heap_smoke] GetProcessHeaps    = PASS
+[heap_smoke] done
 [t=10342.120ms] [I] sys : exit rc   val=0x0 (0)
 [t=10342.245ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -12448,14 +12448,14 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000052 entering ring 3 rip=0x00000001415110ba rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[thread2_smoke] starting
+[thread2_smoke] starting
 [t=10402.661ms] [I] sched : SchedCreateUser: ring-3 task   name="thread-3b-00"
 [guard] ALLOW kind=uthread name="thread-3b-00" findings=0x0000000000000000
 [sched] created task id=0x0000000000000053 name="thread-3b-00" rsp=0xffffffffe0120fc0 as=0xffffffff8090ec20
 [thread] create ok pid=0x000000000000003b slot=0x0000000000000000 handle=0x0000000000000400 start=0x0000000141511074 stack_base=0x0000000068000000
-[thread2_smoke] CreateThread          = PASS
-[thread2_smoke] GetThreadPriority     = PASS
-[thread2_smoke] SetThreadPriority     = PASS
+[thread2_smoke] CreateThread          = PASS
+[thread2_smoke] GetThreadPriority     = PASS
+[thread2_smoke] SetThreadPriority     = PASS
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
@@ -12632,10 +12632,10 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded dbghelp.dll base=0x0000000010070000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010080000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000054 entering ring 3 rip=0x00000001409d1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[ipc_smoke] starting
+[ipc_smoke] starting
 [t=10462.570ms] [33m[W] [0mwin32/heap : process heap exhausted (HeapAlloc returned NULL)
-[ipc_smoke] CreateFileMappingW    = FAIL/STUB
-[ipc_smoke] done
+[ipc_smoke] CreateFileMappingW    = FAIL/STUB
+[ipc_smoke] done
 [t=10463.073ms] [I] sys : exit rc   val=0x0 (0)
 [t=10463.210ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -12809,11 +12809,11 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000055 entering ring 3 rip=0x0000000143911074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[jobobj_smoke] starting
-[jobobj_smoke] CreateJobObjectW       = PASS
-[jobobj_smoke] IsProcessInJob (self)  = PASS
-[jobobj_smoke] AssignProcessToJobObject = PASS
-[jobobj_smoke] done
+[jobobj_smoke] starting
+[jobobj_smoke] CreateJobObjectW       = PASS
+[jobobj_smoke] IsProcessInJob (self)  = PASS
+[jobobj_smoke] AssignProcessToJobObject = PASS
+[jobobj_smoke] done
 [t=10513.867ms] [I] sys : exit rc   val=0x0 (0)
 [t=10514.059ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -12991,13 +12991,13 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded vcruntime140.dll base=0x0000000010030000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010040000 size=0x0000000000005000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000056 entering ring 3 rip=0x0000000143701074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[console2_smoke] starting
-[console2_smoke] SetConsoleCursorPosition = PASS
-[console2_smoke] GetConsoleCursorInfo  = PASS
-[console2_smoke] SetConsoleTextAttribute = PASS
-[console2_smoke] FillConsoleOutputAttribute = PASS
-[console2_smoke] GetNumberOfConsoleInputEvents = PASS
-[console2_smoke] done
+[console2_smoke] starting
+[console2_smoke] SetConsoleCursorPosition = PASS
+[console2_smoke] GetConsoleCursorInfo  = PASS
+[console2_smoke] SetConsoleTextAttribute = PASS
+[console2_smoke] FillConsoleOutputAttribute = PASS
+[console2_smoke] GetNumberOfConsoleInputEvents = PASS
+[console2_smoke] done
 [t=10564.586ms] [I] sys : exit rc   val=0x0 (0)
 [t=10564.723ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -13179,11 +13179,11 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [as] created pml4_phys=0x0000000000d76000 as=0xffffffff80918ea0
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000057 entering ring 3 rip=0x00000001429a1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[dns_smoke] starting
-[dns_smoke] WSAStartup            = PASS
-[dns_smoke] gethostname           = PASS
-[dns_smoke] getaddrinfo           = PASS (returned)
-[dns_smoke] done
+[dns_smoke] starting
+[dns_smoke] WSAStartup            = PASS
+[dns_smoke] gethostname           = PASS
+[dns_smoke] getaddrinfo           = PASS (returned)
+[dns_smoke] done
 [t=10625.173ms] [I] sys : exit rc   val=0x0 (0)
 [t=10625.406ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -13379,17 +13379,17 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [as] created pml4_phys=0x0000000000dc0000 as=0xffffffff8091cf50
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000058 entering ring 3 rip=0x0000000142c41074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[network2_smoke] starting
-[network2_smoke] WSAStartup            = PASS
-[network2_smoke] htons(0x1234)         = PASS
-[network2_smoke] ntohs round-trip      = PASS
-[network2_smoke] htonl(0x12345678)     = PASS
-[network2_smoke] inet_addr             = PASS
-[network2_smoke] socket(TCP)           = PASS
-[network2_smoke] setsockopt SO_REUSEADDR = PASS
-[network2_smoke] getsockopt SO_REUSEADDR = PASS
-[network2_smoke] ioctlsocket FIONBIO   = FAIL/STUB
-[network2_smoke] done
+[network2_smoke] starting
+[network2_smoke] WSAStartup            = PASS
+[network2_smoke] htons(0x1234)         = PASS
+[network2_smoke] ntohs round-trip      = PASS
+[network2_smoke] htonl(0x12345678)     = PASS
+[network2_smoke] inet_addr             = PASS
+[network2_smoke] socket(TCP)           = PASS
+[network2_smoke] setsockopt SO_REUSEADDR = PASS
+[network2_smoke] getsockopt SO_REUSEADDR = PASS
+[network2_smoke] ioctlsocket FIONBIO   = FAIL/STUB
+[network2_smoke] done
 [t=10686.904ms] [I] sys : exit rc   val=0x0 (0)
 [t=10687.046ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -13604,13 +13604,13 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded msvcp140.dll base=0x0000000010080000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010090000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000059 entering ring 3 rip=0x00000001429a1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[dxgi_smoke] starting
+[dxgi_smoke] starting
 [gfx] CreateDXGIFactory called (skeleton — no real driver)
 [t=10746.840ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[dxgi_smoke] CreateDXGIFactory      = PASS (returned)
+[dxgi_smoke] CreateDXGIFactory      = PASS (returned)
 [t=10747.224ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000030 (1342177328)
-[dxgi_smoke] CreateDXGIFactory1     = PASS (returned)
-[dxgi_smoke] done
+[dxgi_smoke] CreateDXGIFactory1     = PASS (returned)
+[dxgi_smoke] done
 [t=10747.559ms] [I] sys : exit rc   val=0x0 (0)
 [t=10747.657ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -13769,11 +13769,11 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [as] created pml4_phys=0x0000000000d57000 as=0xffffffff8091cf50
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x000000000000005a entering ring 3 rip=0x0000000140501074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[dwm_smoke] starting
-[dwm_smoke] DwmIsCompositionEnabled = PASS
-[dwm_smoke] DwmGetColorizationColor = PASS (returned)
-[dwm_smoke] DwmFlush               = PASS (returned)
-[dwm_smoke] done
+[dwm_smoke] starting
+[dwm_smoke] DwmIsCompositionEnabled = PASS
+[dwm_smoke] DwmGetColorizationColor = PASS (returned)
+[dwm_smoke] DwmFlush               = PASS (returned)
+[dwm_smoke] done
 [t=10797.863ms] [I] sys : exit rc   val=0x0 (0)
 [t=10798.110ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -13969,12 +13969,12 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000005b entering ring 3 rip=0x0000000142081074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[uxtheme_smoke] starting
-[uxtheme_smoke] IsAppThemed          = PASS (returned)
-[uxtheme_smoke] IsThemeActive        = PASS (returned)
-[uxtheme_smoke] GetCurrentThemeName  = PASS (returned)
-[uxtheme_smoke] GetThemeAppProperties= PASS (returned)
-[uxtheme_smoke] done
+[uxtheme_smoke] starting
+[uxtheme_smoke] IsAppThemed          = PASS (returned)
+[uxtheme_smoke] IsThemeActive        = PASS (returned)
+[uxtheme_smoke] GetCurrentThemeName  = PASS (returned)
+[uxtheme_smoke] GetThemeAppProperties= PASS (returned)
+[uxtheme_smoke] done
 [t=10858.981ms] [I] sys : exit rc   val=0x0 (0)
 [t=10859.123ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -14156,11 +14156,11 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000005c entering ring 3 rip=0x0000000141e91074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[token_smoke] starting
-[token_smoke] OpenProcessToken     = PASS
-[token_smoke] GetTokenInformation = PASS
-[token_smoke] GetUserNameA        = PASS
-[token_smoke] done
+[token_smoke] starting
+[token_smoke] OpenProcessToken     = PASS
+[token_smoke] GetTokenInformation = PASS
+[token_smoke] GetUserNameA        = PASS
+[token_smoke] done
 [t=10909.400ms] [I] sys : exit rc   val=0x0 (0)
 [t=10909.537ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -14336,12 +14336,12 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [guard] ALLOW kind=uthread name="ring3-security-smoke" findings=0x0000000000000000
 [sched] created task id=0x000000000000005d name="ring3-security-smoke" rsp=0xffffffffe0120fc0 as=0xffffffff8091cf50
 [ring3] task pid=0x000000000000005d entering ring 3 rip=0x0000000140a11074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[security_smoke] starting
-[security_smoke] InitializeSecurityDescriptor = PASS
-[security_smoke] IsValidSecurityDescriptor = PASS
-[security_smoke] AllocateAndInitializeSid = FAIL/STUB
-[security_smoke] InitializeAcl         = PASS
-[security_smoke] done
+[security_smoke] starting
+[security_smoke] InitializeSecurityDescriptor = PASS
+[security_smoke] IsValidSecurityDescriptor = PASS
+[security_smoke] AllocateAndInitializeSid = FAIL/STUB
+[security_smoke] InitializeAcl         = PASS
+[security_smoke] done
 [t=10959.944ms] [I] sys : exit rc   val=0x0 (0)
 [t=10960.085ms] [I] sched : SchedExit: task entering termination path
 [as] created pml4_phys=0x0000000000db3000 as=0xffffffff80918ea0
@@ -14550,14 +14550,14 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010070000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000[ring3] task pid=0x000000000000005e entering ring 3 rip=0x00000001412d10ae rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[perf_smoke] starting
-[perf_smoke] QueryPerformanceFrequency = PASS
-[perf_smoke] QPC monotonic       = PASS
-[perf_smoke] QueryProcessCycleTime = PASS
-[perf_smoke] QueryThreadCycleTime  = PASS
-[perf_smoke] GetProcessTimes       = PASS
-[perf_smoke] GetThreadTimes        = PASS
-[perf_smoke] done
+[perf_smoke] starting
+[perf_smoke] QueryPerformanceFrequency = PASS
+[perf_smoke] QPC monotonic       = PASS
+[perf_smoke] QueryProcessCycleTime = PASS
+[perf_smoke] QueryThreadCycleTime  = PASS
+[perf_smoke] GetProcessTimes       = PASS
+[perf_smoke] GetThreadTimes        = PASS
+[perf_smoke] done
 [t=11031.867ms] [I] sys : exit rc   val=0x0 (0)
 [t=11032.005ms] [I] sched : SchedExit: task entering termination path
  has_exports=0x0000000000000001
@@ -14740,11 +14740,11 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [ring3] task pid=0x000000000000005f entering ring 3 rip=0x0000000142941074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[accel_smoke] starting
-[accel_smoke] CreateAcceleratorTableW = PASS
-[accel_smoke] CopyAcceleratorTableW = PASS
-[accel_smoke] DestroyAcceleratorTable = PASS
-[accel_smoke] done
+[accel_smoke] starting
+[accel_smoke] CreateAcceleratorTableW = PASS
+[accel_smoke] CopyAcceleratorTableW = PASS
+[accel_smoke] DestroyAcceleratorTable = PASS
+[accel_smoke] done
 [t=11091.762ms] [I] sys : exit rc   val=0x0 (0)
 [t=11091.921ms] [I] sched : SchedExit: task entering termination path
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
@@ -14928,10 +14928,10 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010070000 size=0x0000000000003000[ring3] task pid=0x0000000000000060 entering ring 3 rip=0x0000000142621074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[wts_smoke] starting
-[wts_smoke] WTSGetActiveConsoleSessionId = PASS
-[wts_smoke] ProcessIdToSessionId = PASS
-[wts_smoke] done
+[wts_smoke] starting
+[wts_smoke] WTSGetActiveConsoleSessionId = PASS
+[wts_smoke] ProcessIdToSessionId = PASS
+[wts_smoke] done
 [t=11152.870ms] [I] sys : exit rc   val=0x0 (0)
 [t=11153.021ms] [I] sched : SchedExit: task entering termination path
  sections=0x0000000000000002 chars=0x0000000000002022
@@ -15110,12 +15110,12 @@ abc[pipe_smoke] WriteFile(pipe)    = PASS
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000061 entering ring 3 rip=0x0000000143f21074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[winerr_smoke] starting
-[winerr_smoke] SetLastError + Get  = PASS
-[winerr_smoke] FormatMessageA      = PASS
-[winerr_smoke] FormatMessageW      = PASS
-[winerr_smoke] SetErrorMode + Get  = PASS
-[winerr_smoke] done
+[winerr_smoke] starting
+[winerr_smoke] SetLastError + Get  = PASS
+[winerr_smoke] FormatMessageA      = PASS
+[winerr_smoke] FormatMessageW      = PASS
+[winerr_smoke] SetErrorMode + Get  = PASS
+[winerr_smoke] done
 [t=11203.685ms] [I] sys : exit rc   val=0x0 (0)
 [t=11203.824ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -15304,7 +15304,7 @@ shell32.dll base=0x00000000100c0000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000062 entering ring 3 rip=0x0000000142a61074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[sleep_smoke] starting
+[sleep_smoke] starting
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
@@ -15347,7 +15347,7 @@ shell32.dll base=0x00000000100c0000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded d3d11.dll base=0x0000000010130000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010140000 size=0x0000000000005000 sections=0x0000000000000003 chars=0x0000000000002022
-[sleep_smoke] Sleep(0)            = PASS (returned)
+[sleep_smoke] Sleep(0)            = PASS (returned)
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded d3d12.dll base=0x0000000010140000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010150000 size=0x0000000000006000 sections=0x0000000000000004 chars=0x0000000000002022
@@ -15446,12 +15446,12 @@ shell32.dll base=0x00000000100c0000 (pre-PeLoad — visible to ResolveImports)
 [as] created pml4_phys=0x0000000000eb5000 as=0xffffffff809271d0
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000063 entering ring 3 rip=0x0000000142191074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[nt_smoke] starting
-[nt_smoke] NtQuerySystemTime    = PASS
+[nt_smoke] starting
+[nt_smoke] NtQuerySystemTime    = PASS
 [t=11304.653ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[nt_smoke] RtlAllocateHeap     = PASS
-[nt_smoke] RtlFreeHeap         = PASS
-[nt_smoke] done
+[nt_smoke] RtlAllocateHeap     = PASS
+[nt_smoke] RtlFreeHeap         = PASS
+[nt_smoke] done
 [t=11305.134ms] [I] sys : exit rc   val=0x0 (0)
 [t=11305.232ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -15517,7 +15517,7 @@ shell32.dll base=0x00000000100c0000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded shlwapi.dll base=0x00000000100b0000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x00000000100c0000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
-[ring3] pre-loaded shell32.dll[sleep_smoke] Sleep(50) advanced  = PASS
+[ring3] pre-loaded shell32.dll[sleep_smoke] Sleep(50) advanced  = PASS
  base=0x00000000100c0000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x00000000100d0000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -15602,7 +15602,7 @@ shell32.dll base=0x00000000100c0000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x00000000102d0000 size=0x0000000000004000 sections=0x0000000000000003 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded dwrite.dll base=0x00000000102d0000 (pre-PeLoad — visible to ResolveImports)
-[sleep_smoke] SleepEx(20, FALSE)  = PASS
+[sleep_smoke] SleepEx(20, FALSE)  = PASS
 [guard] ALLOW kind=pe name="(pe)" findings=0x0000000000000000
 [pe-load] begin status=ImportsPresent preferred_base=0x0000000140000000 aslr_delta=0x0000000001520000 image_base=0x0000000141520000 sections=0x0000000000000005
 [pe-load] step1 headers mapped
@@ -15639,18 +15639,18 @@ shell32.dll base=0x00000000100c0000 (pre-PeLoad — visible to ResolveImports)
 [sched] created task id=0x0000000000000064 name="ring3-vol-smoke" rsp=0xffffffffe0043fc0 as=0xffffffff809271d0
 [as] created pml4_phys=0x0000000000e70000 as=0xffffffff80923120
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
-[sleep_smoke] SwitchToThread      = PASS (returned)
-[sleep_smoke] done
+[sleep_smoke] SwitchToThread      = PASS (returned)
+[sleep_smoke] done
 [t=11354.908ms] [I] sys : exit rc   val=0x0 (0)
 [t=11355.043ms] [I] sched : SchedExit: task entering termination path
 [ring3] task pid=0x0000000000000064 entering ring 3 rip=0x0000000141521074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[vol_smoke] starting
-[vol_smoke] GetLogicalDrives    = PASS
-[vol_smoke] GetLogicalDriveStringsA = PASS
-[vol_smoke] GetDriveTypeW       = PASS
-[vol_smoke] GetVolumeInformationW = PASS
-[vol_smoke] GetDiskFreeSpaceExW = PASS
-[vol_smoke] done
+[vol_smoke] starting
+[vol_smoke] GetLogicalDrives    = PASS
+[vol_smoke] GetLogicalDriveStringsA = PASS
+[vol_smoke] GetDriveTypeW       = PASS
+[vol_smoke] GetVolumeInformationW = PASS
+[vol_smoke] GetDiskFreeSpaceExW = PASS
+[vol_smoke] done
 [t=11356.314ms] [I] sys : exit rc   val=0x0 (0)
 [t=11356.419ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -15890,11 +15890,11 @@ shell32.dll base=0x00000000100c0000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded msvcp140.dll base=0x0000000010080000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010090000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000065 entering ring 3 rip=0x0000000141531074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[drive_smoke] starting
-[drive_smoke] GetTempPathW         = PASS
-[drive_smoke] GetTempFileNameW     = FAIL/STUB
-[drive_smoke] DeleteFileW(missing) = PASS (FALSE, as expected)
-[drive_smoke] done
+[drive_smoke] starting
+[drive_smoke] GetTempPathW         = PASS
+[drive_smoke] GetTempFileNameW     = FAIL/STUB
+[drive_smoke] DeleteFileW(missing) = PASS (FALSE, as expected)
+[drive_smoke] done
 [t=11428.152ms] [I] sys : exit rc   val=0x0 (0)
 [t=11428.322ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -16065,13 +16065,13 @@ shell32.dll base=0x00000000100c0000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000066 entering ring 3 rip=0x0000000141201074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[conio_smoke] starting
-[conio_smoke] _kbhit              = PASS (0, no key)
-X[conio_smoke] _putch              = PASS
+[conio_smoke] starting
+[conio_smoke] _kbhit              = PASS (0, no key)
+X[conio_smoke] _putch              = PASS
 
 [conio_smoke] _cputs hello
-[conio_smoke] _cputs              = PASS
-[conio_smoke] done
+[conio_smoke] _cputs              = PASS
+[conio_smoke] done
 [t=11477.238ms] [I] sys : exit rc   val=0x0 (0)
 [t=11477.400ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -16254,11 +16254,11 @@ X[conio_smoke] _putch              = PASS
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000067 entering ring 3 rip=0x00000001414e1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[mbcs_smoke] starting
-[mbcs_smoke] mbstowcs            = PASS
-[mbcs_smoke] wcstombs            = PASS
-[mbcs_smoke] _getmbcp            = PASS
-[mbcs_smoke] done
+[mbcs_smoke] starting
+[mbcs_smoke] mbstowcs            = PASS
+[mbcs_smoke] wcstombs            = PASS
+[mbcs_smoke] _getmbcp            = PASS
+[mbcs_smoke] done
 [t=11538.431ms] [I] sys : exit rc   val=0x0 (0)
 [t=11538.596ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -16425,10 +16425,10 @@ X[conio_smoke] _putch              = PASS
 [as] created pml4_phys=0x0000000000d9b000 as=0xffffffff8091cf50
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000068 entering ring 3 rip=0x00000001418f1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[fpcontrol_smoke] starting
-[fpcontrol_smoke] _statusfp         = PASS (returned)
-[fpcontrol_smoke] _clearfp          = PASS (returned)
-[fpcontrol_smoke] done
+[fpcontrol_smoke] starting
+[fpcontrol_smoke] _statusfp         = PASS (returned)
+[fpcontrol_smoke] _clearfp          = PASS (returned)
+[fpcontrol_smoke] done
 [t=11588.700ms] [I] sys : exit rc   val=0x0 (0)
 [t=11588.837ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -16608,12 +16608,12 @@ X[conio_smoke] _putch              = PASS
 [as] created pml4_phys=0x0000000000d7a000 as=0xffffffff80918ea0
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000069 entering ring 3 rip=0x00000001426b1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[locale2_smoke] starting
-[locale2_smoke] FoldStringW          = PASS
-[locale2_smoke] GetUserGeoID         = PASS
-[locale2_smoke] GetCalendarInfoA     = PASS
-[locale2_smoke] GetCurrencyFormatA   = PASS
-[locale2_smoke] done
+[locale2_smoke] starting
+[locale2_smoke] FoldStringW          = PASS
+[locale2_smoke] GetUserGeoID         = PASS
+[locale2_smoke] GetCalendarInfoA     = PASS
+[locale2_smoke] GetCurrencyFormatA   = PASS
+[locale2_smoke] done
 [t=11639.989ms] [I] sys : exit rc   val=0x0 (0)
 [t=11640.137ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -16808,11 +16808,11 @@ X[conio_smoke] _putch              = PASS
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000006a entering ring 3 rip=0x0000000142a01074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[gdiplus_smoke] starting
+[gdiplus_smoke] starting
 [t=11700.075ms] [I] debug/probes : win32.stub_miss   rip=0xffffffff8011e75e   val=0x142a05080 (5412769920)
 [win32-miss] slot=0x0000000142a05080 called fn="GdiplusStartup"
-[gdiplus_smoke] GdiplusStartup       = PASS (returned)
-[gdiplus_smoke] done
+[gdiplus_smoke] GdiplusStartup       = PASS (returned)
+[gdiplus_smoke] done
 [t=11700.557ms] [I] sys : exit rc   val=0x0 (0)
 [t=11700.659ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -16991,12 +16991,12 @@ d3d11.dll base=0x0000000010130000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000006b entering ring 3 rip=0x0000000143e0108d rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[dde_smoke] starting
-[dde_smoke] DdeInitializeA       = PASS
-[dde_smoke] DdeCreateStringHandleA = PASS
-[dde_smoke] DdeFreeStringHandle  = PASS
-[dde_smoke] DdeUninitialize      = PASS
-[dde_smoke] done
+[dde_smoke] starting
+[dde_smoke] DdeInitializeA       = PASS
+[dde_smoke] DdeCreateStringHandleA = PASS
+[dde_smoke] DdeFreeStringHandle  = PASS
+[dde_smoke] DdeUninitialize      = PASS
+[dde_smoke] done
 [t=11751.238ms] [I] sys : exit rc   val=0x0 (0)
 [t=11751.403ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -17176,11 +17176,11 @@ d3d11.dll base=0x0000000010130000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000006c entering ring 3 rip=0x0000000141151074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[stream_smoke] starting
-[stream_smoke] CreateIoCompletionPort = PASS
-[stream_smoke] PostQueuedCompletionStatus = PASS
-[stream_smoke] GetQueuedCompletionStatus = PASS
-[stream_smoke] done
+[stream_smoke] starting
+[stream_smoke] CreateIoCompletionPort = PASS
+[stream_smoke] PostQueuedCompletionStatus = PASS
+[stream_smoke] GetQueuedCompletionStatus = PASS
+[stream_smoke] done
 [t=11802.099ms] [I] sys : exit rc   val=0x0 (0)
 [t=11802.244ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -17352,11 +17352,11 @@ d3d11.dll base=0x0000000010130000 (pre-PeLoad — visible to ResolveImports)
 [as] created pml4_phys=0x0000000000d71000 as=0xffffffff80918ea0
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x000000000000006d entering ring 3 rip=0x0000000140651074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[setupapi_smoke] starting
-[setupapi_smoke] SetupDiGetClassDevsW = PASS
-[setupapi_smoke] SetupDiEnumDeviceInfo = PASS (returned)
-[setupapi_smoke] SetupDiDestroyDeviceInfoList = PASS
-[setupapi_smoke] done
+[setupapi_smoke] starting
+[setupapi_smoke] SetupDiGetClassDevsW = PASS
+[setupapi_smoke] SetupDiEnumDeviceInfo = PASS (returned)
+[setupapi_smoke] SetupDiDestroyDeviceInfoList = PASS
+[setupapi_smoke] done
 [t=11852.767ms] [I] sys : exit rc   val=0x0 (0)
 [t=11852.906ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -17563,13 +17563,13 @@ d3d11.dll base=0x0000000010130000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded msvcp140.dll base=0x0000000010080000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010090000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [ring3] task pid=0x000000000000006e entering ring 3 rip=0x0000000143ab1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[asyn_smoke] starting
+[asyn_smoke] starting
 [sys] event_wait bad_handle pid=0x0000000000000056 handle=0x0000000000000000
-[asyn_smoke] CreateWaitableTimerW = PASS
-[asyn_smoke] SetWaitableTimer    = PASS
-[asyn_smoke] WaitForSingleObject(timer) = PASS
-[asyn_smoke] CancelWaitableTimer = PASS
-[asyn_smoke] done
+[asyn_smoke] CreateWaitableTimerW = PASS
+[asyn_smoke] SetWaitableTimer    = PASS
+[asyn_smoke] WaitForSingleObject(timer) = PASS
+[asyn_smoke] CancelWaitableTimer = PASS
+[asyn_smoke] done
 [t=11923.915ms] [I] sys : exit rc   val=0x0 (0)
 [t=11924.047ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -17745,14 +17745,14 @@ d3d11.dll base=0x0000000010130000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded vcruntime140.dll base=0x0000000010030000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010040000 size=0x0000000000005000 sections=0x0000000000000003 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001[ring3] task pid=0x000000000000006f entering ring 3 rip=0x0000000141f31074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[wndmsg_smoke] starting
-[wndmsg_smoke] IsWindowVisible(NULL)= PASS (FALSE, as expected)
-[wndmsg_smoke] IsWindowEnabled(NULL)= PASS (FALSE, as expected)
-[wndmsg_smoke] GetParent(NULL)      = PASS (NULL)
-[wndmsg_smoke] IsWindow(NULL)       = PASS (FALSE)
-[wndmsg_smoke] SendMessageA(NULL)   = PASS (returned)
-[wndmsg_smoke] GetSystemMenu(NULL)  = PASS (returned)
-[wndmsg_smoke] done
+[wndmsg_smoke] starting
+[wndmsg_smoke] IsWindowVisible(NULL)= PASS (FALSE, as expected)
+[wndmsg_smoke] IsWindowEnabled(NULL)= PASS (FALSE, as expected)
+[wndmsg_smoke] GetParent(NULL)      = PASS (NULL)
+[wndmsg_smoke] IsWindow(NULL)       = PASS (FALSE)
+[wndmsg_smoke] SendMessageA(NULL)   = PASS (returned)
+[wndmsg_smoke] GetSystemMenu(NULL)  = PASS (returned)
+[wndmsg_smoke] done
 [t=11976.035ms] [I] sys : exit rc   val=0x0 (0)
 [t=11976.191ms] [I] sched : SchedExit: task entering termination path
 
@@ -17942,13 +17942,13 @@ d3d11.dll base=0x0000000010130000 (pre-PeLoad — visible to ResolveImports)
 [as] created pml4_phys=0x0000000000dc0000 as=0xffffffff8091cf50
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000070 entering ring 3 rip=0x0000000141111074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[scrap_smoke] starting
-[scrap_smoke] GetCaretBlinkTime    = PASS
-[scrap_smoke] AnyPopup             = PASS (FALSE)
-[scrap_smoke] SetCursor round-trip = PASS (returned)
-[scrap_smoke] GetCursor            = PASS (returned)
-[scrap_smoke] BlockInput(FALSE)    = PASS (returned)
-[scrap_smoke] done
+[scrap_smoke] starting
+[scrap_smoke] GetCaretBlinkTime    = PASS
+[scrap_smoke] AnyPopup             = PASS (FALSE)
+[scrap_smoke] SetCursor round-trip = PASS (returned)
+[scrap_smoke] GetCursor            = PASS (returned)
+[scrap_smoke] BlockInput(FALSE)    = PASS (returned)
+[scrap_smoke] done
 [t=12035.419ms] [I] sys : exit rc   val=0x0 (0)
 [t=12035.564ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -18149,11 +18149,11 @@ d3d11.dll base=0x0000000010130000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded [ring3] task pid=0x0000000000000071 entering ring 3 rip=0x0000000140131074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[trace_smoke] starting
-[trace_smoke] EventRegister        = PASS
-[trace_smoke] EventWrite           = PASS
-[trace_smoke] EventUnregister      = PASS
-[trace_smoke] done
+[trace_smoke] starting
+[trace_smoke] EventRegister        = PASS
+[trace_smoke] EventWrite           = PASS
+[trace_smoke] EventUnregister      = PASS
+[trace_smoke] done
 [t=12096.138ms] [I] sys : exit rc   val=0x0 (0)
 [t=12096.305ms] [I] sched : SchedExit: task entering termination path
 ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
@@ -18316,10 +18316,10 @@ ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
 [guard] ALLOW kind=uthread name="ring3-wmi-smoke" findings=0x0000000000000000
 [sched] created task id=0x0000000000000072 name="ring3-wmi-smoke" rsp=0xffffffffe0120fc0 as=0xffffffff80918ea0
 [ring3] task pid=0x0000000000000072 entering ring 3 rip=0x0000000142591074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[wmi_smoke] starting
-[wmi_smoke] CoInitializeEx        = PASS
-[wmi_smoke] CoInitializeSecurity  = PASS
-[wmi_smoke] done
+[wmi_smoke] starting
+[wmi_smoke] CoInitializeEx        = PASS
+[wmi_smoke] CoInitializeSecurity  = PASS
+[wmi_smoke] done
 [t=12146.595ms] [I] sys : exit rc   val=0x0 (0)
 [t=12146.732ms] [I] sched : SchedExit: task entering termination path
 [as] created pml4_phys=0x0000000000d60000 as=0xffffffff8091cf50
@@ -18522,10 +18522,10 @@ ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded msvcp140.dll base=0x0000000010080000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010090000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000073 entering ring 3 rip=0x00000001437a1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[enviro_smoke] starting
-[enviro_smoke] GetCurrentDirectoryA = PASS
-[enviro_smoke] GetComputerNameExW   = PASS
-[enviro_smoke] done
+[enviro_smoke] starting
+[enviro_smoke] GetCurrentDirectoryA = PASS
+[enviro_smoke] GetComputerNameExW   = PASS
+[enviro_smoke] done
 [t=12207.806ms] [I] sys : exit rc   val=0x0 (0)
 [t=12207.944ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -18700,15 +18700,15 @@ ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000074 entering ring 3 rip=0x0000000142691074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[select_smoke] starting
-[select_smoke] WSAStartup          = PASS
+[select_smoke] starting
+[select_smoke] WSAStartup          = PASS
 [select_smoke] FD_ZERO + FD_SET    = [t=12258.514ms] [I] debug/probes : win32.stub_miss   rip=0xffffffff8011e75e   val=0x1426950d8 (5409165528)
 [win32-miss] slot=0x00000001426950d8 called fn="__WSAFDIsSet"
-FAIL
-[select_smoke] select empty        = PASS (0)
-[select_smoke] WSACreateEvent      = PASS
-[select_smoke] WSACloseEvent       = PASS
-[select_smoke] done
+FAIL
+[select_smoke] select empty        = PASS (0)
+[select_smoke] WSACreateEvent      = PASS
+[select_smoke] WSACloseEvent       = PASS
+[select_smoke] done
 [t=12259.630ms] [I] sys : exit rc   val=0x0 (0)
 [t=12259.778ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -18900,12 +18900,12 @@ FAIL
 [ring3] pre-loaded ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010070000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001[ring3] task pid=0x0000000000000075 entering ring 3 rip=0x0000000140f51074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[proc2_smoke] starting
-[proc2_smoke] GetExitCodeProcess  = PASS (STILL_ACTIVE)
-[proc2_smoke] GetPriorityClass    = PASS
-[proc2_smoke] GetProcessAffinityMask = PASS
-[proc2_smoke] GetProcessHandleCount = PASS
-[proc2_smoke] done
+[proc2_smoke] starting
+[proc2_smoke] GetExitCodeProcess  = PASS (STILL_ACTIVE)
+[proc2_smoke] GetPriorityClass    = PASS
+[proc2_smoke] GetProcessAffinityMask = PASS
+[proc2_smoke] GetProcessHandleCount = PASS
+[proc2_smoke] done
 [t=12319.569ms] [I] sys : exit rc   val=0x0 (0)
 [t=12319.709ms] [I] sched : SchedExit: task entering termination path
 
@@ -19086,12 +19086,12 @@ FAIL
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000076 entering ring 3 rip=0x0000000141601156 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[find_smoke] starting
+[find_smoke] starting
 [win32/dir] open path="/etc" handle=0x0000000000000a00 entries=0x0000000000000004
-[find_smoke] FindFirstFileW(/etc) = PASS entries=4
-[find_smoke] FindFirstFileExW    = PASS
-[find_smoke] FindFirstFileW(?)    = PASS (INVALID, as expected)
-[find_smoke] done
+[find_smoke] FindFirstFileW(/etc) = PASS entries=4
+[find_smoke] FindFirstFileExW    = PASS
+[find_smoke] FindFirstFileW(?)    = PASS (INVALID, as expected)
+[find_smoke] done
 [t=12381.737ms] [I] sys : exit rc   val=0x0 (0)
 [t=12381.876ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -19284,11 +19284,11 @@ FAIL
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000077 entering ring 3 rip=0x0000000140431074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[iocp2_smoke] starting
-[iocp2_smoke] CreateIoCompletionPort = PASS
-[iocp2_smoke] Post x4              = PASS
-[iocp2_smoke] Get x4               = PASS
-[iocp2_smoke] done
+[iocp2_smoke] starting
+[iocp2_smoke] CreateIoCompletionPort = PASS
+[iocp2_smoke] Post x4              = PASS
+[iocp2_smoke] Get x4               = PASS
+[iocp2_smoke] done
 [t=12441.586ms] [I] sys : exit rc   val=0x0 (0)
 [t=12441.734ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -19475,11 +19475,11 @@ FAIL
 [ring3] pre-loaded msvcp140.dll base=0x0000000010080000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010090000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000078 entering ring 3 rip=0x000000014114107e rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[signal_smoke] starting
-[signal_smoke] signal(SIGTERM)      = PASS
-[signal_smoke] signal restore       = PASS (round-trip)
-[signal_smoke] signal(SIGABRT, IGN) = FAIL/STUB
-[signal_smoke] done
+[signal_smoke] starting
+[signal_smoke] signal(SIGTERM)      = PASS
+[signal_smoke] signal restore       = PASS (round-trip)
+[signal_smoke] signal(SIGABRT, IGN) = FAIL/STUB
+[signal_smoke] done
 [t=12502.101ms] [I] sys : exit rc   val=0x0 (0)
 [t=12502.320ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -19651,12 +19651,12 @@ FAIL
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000[ring3] task pid=0x0000000000000079 entering ring 3 rip=0x0000000142581074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[timer_smoke] starting
-[timer_smoke] SetTimer            = PASS
-[timer_smoke] KillTimer           = FAIL/STUB
-[timer_smoke] CreateTimerQueue    = PASS
-[timer_smoke] DeleteTimerQueue    = PASS
-[timer_smoke] done
+[timer_smoke] starting
+[timer_smoke] SetTimer            = PASS
+[timer_smoke] KillTimer           = FAIL/STUB
+[timer_smoke] CreateTimerQueue    = PASS
+[timer_smoke] DeleteTimerQueue    = PASS
+[timer_smoke] done
 [t=12563.311ms] [I] sys : exit rc   val=0x0 (0)
 [t=12563.454ms] [I] sched : SchedExit: task entering termination path
 
@@ -19843,14 +19843,14 @@ FAIL
 [dll-load] begin base_va=0x0000000010040000 size=0x0000000000005000 sections=0x0000000000000003 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000[ring3] task pid=0x000000000000007a entering ring 3 rip=0x0000000143641074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[winsock_ext_smoke] starting
-[winsock_ext_smoke] WSAStartup            = PASS
-[winsock_ext_smoke] WSACreateEvent        = PASS
-[winsock_ext_smoke] WSASetEvent           = PASS
-[winsock_ext_smoke] WSAResetEvent         = PASS
-[winsock_ext_smoke] WSACloseEvent         = PASS
-[winsock_ext_smoke] WSAGetLastError       = PASS (non-zero)
-[winsock_ext_smoke] done
+[winsock_ext_smoke] starting
+[winsock_ext_smoke] WSAStartup            = PASS
+[winsock_ext_smoke] WSACreateEvent        = PASS
+[winsock_ext_smoke] WSASetEvent           = PASS
+[winsock_ext_smoke] WSAResetEvent         = PASS
+[winsock_ext_smoke] WSACloseEvent         = PASS
+[winsock_ext_smoke] WSAGetLastError       = PASS (non-zero)
+[winsock_ext_smoke] done
 [t=12614.079ms] [I] sys : exit rc   val=0x0 (0)
 [t=12614.219ms] [I] sched : SchedExit: task entering termination path
  (pre-PeLoad — visible to ResolveImports)
@@ -20032,12 +20032,12 @@ FAIL
 [as] created pml4_phys=0x0000000000dc0000 as=0xffffffff80918ea0
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x000000000000007b entering ring 3 rip=0x0000000140491074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[key_smoke] starting
-[key_smoke] GetKeyState         = PASS (returned)
-[key_smoke] GetAsyncKeyState    = PASS (returned)
-[key_smoke] MapVirtualKeyW(A)   = PASS
-[key_smoke] GetKeyboardLayout   = PASS
-[key_smoke] done
+[key_smoke] starting
+[key_smoke] GetKeyState         = PASS (returned)
+[key_smoke] GetAsyncKeyState    = PASS (returned)
+[key_smoke] MapVirtualKeyW(A)   = PASS
+[key_smoke] GetKeyboardLayout   = PASS
+[key_smoke] done
 [t=12664.417ms] [I] sys : exit rc   val=0x0 (0)
 [t=12664.554ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -20221,11 +20221,11 @@ FAIL
 [sched] created task id=0x000000000000007c name="ring3-reg2-smoke" rsp=0xffffffffe0120fc0 as=0xffffffff80918ea0
 [as] created pml4_phys=0x0000000000d7e000 as=0xffffffff8091cf50
 [dll-load] begin base_va=[ring3] task pid=0x000000000000007c entering ring 3 rip=0x0000000140b41074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[reg2_smoke] starting
-[reg2_smoke] RegOpenKeyExW(HKCU)   = FAIL/STUB
-[reg2_smoke] RegOpenKeyExW(HKU)    = FAIL/STUB
-[reg2_smoke] RegOpenKeyExW(HKCR)   = FAIL/STUB
-[reg2_smoke] done
+[reg2_smoke] starting
+[reg2_smoke] RegOpenKeyExW(HKCU)   = FAIL/STUB
+[reg2_smoke] RegOpenKeyExW(HKU)    = FAIL/STUB
+[reg2_smoke] RegOpenKeyExW(HKCR)   = FAIL/STUB
+[reg2_smoke] done
 [t=12714.938ms] [I] sys : exit rc   val=0x0 (0)
 [t=12715.112ms] [I] sched : SchedExit: task entering termination path
 0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
@@ -20421,13 +20421,13 @@ FAIL
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000007d entering ring 3 rip=0x00000001402d1128 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[paths2_smoke] starting
-[paths2_smoke] PathIsRelativeW     = PASS
-[paths2_smoke] PathMatchSpecW(*.exe) = PASS
-[paths2_smoke] PathRemoveExtensionW = PASS
-[paths2_smoke] PathRenameExtensionW = PASS
-[paths2_smoke] Quote + Unquote     = PASS (round-trip)
-[paths2_smoke] done
+[paths2_smoke] starting
+[paths2_smoke] PathIsRelativeW     = PASS
+[paths2_smoke] PathMatchSpecW(*.exe) = PASS
+[paths2_smoke] PathRemoveExtensionW = PASS
+[paths2_smoke] PathRenameExtensionW = PASS
+[paths2_smoke] Quote + Unquote     = PASS (round-trip)
+[paths2_smoke] done
 [t=12776.409ms] [I] sys : exit rc   val=0x0 (0)
 [t=12776.546ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -20630,12 +20630,12 @@ FAIL
 [ring3] pre-loaded kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x00000000100a0000 size=0x0000000000006000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000007e entering ring 3 rip=0x0000000142bd1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[advapi_smoke] starting
-[advapi_smoke] RevertToSelf         = PASS
-[advapi_smoke] LookupPrivilegeValueW = PASS
+[advapi_smoke] starting
+[advapi_smoke] RevertToSelf         = PASS
+[advapi_smoke] LookupPrivilegeValueW = PASS
 [t=12836.470ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[advapi_smoke] ConvertStringSidToSidA = PASS
-[advapi_smoke] done
+[advapi_smoke] ConvertStringSidToSidA = PASS
+[advapi_smoke] done
 [t=12836.896ms] [I] sys : exit rc   val=0x0 (0)
 [t=12837.016ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -20806,15 +20806,15 @@ FAIL
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000007f entering ring 3 rip=0x0000000141cb1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[heap3_smoke] starting
+[heap3_smoke] starting
 [t=12886.944ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[heap3_smoke] calloc(64)          = PASS (zero-init)
+[heap3_smoke] calloc(64)          = PASS (zero-init)
 [t=12887.422ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[heap3_smoke] malloc(32)          = PASS
-[heap3_smoke] realloc(32→64)      = PASS
+[heap3_smoke] malloc(32)          = PASS
+[heap3_smoke] realloc(32→64)      = PASS
 [t=12887.874ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000060 (1342177376)
-[heap3_smoke] _aligned_malloc(32,16) = PASS (aligned)
-[heap3_smoke] done
+[heap3_smoke] _aligned_malloc(32,16) = PASS (aligned)
+[heap3_smoke] done
 [t=12888.244ms] [I] sys : exit rc   val=0x0 (0)
 [t=12888.364ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -21007,14 +21007,14 @@ FAIL
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded vcruntime140.dll base=0x0000000010030000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010040000 size=0x0000000000005000 sections=0x0000000000000003 chars=0x0000000000002022[ring3] task pid=0x0000000000000080 entering ring 3 rip=0x0000000142a41099 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[thread3_smoke] starting
-[thread3_smoke] OpenThread(self)      = PASS
+[thread3_smoke] starting
+[thread3_smoke] OpenThread(self)      = PASS
 [t=12948.483ms] [I] sched : SchedCreateUser: ring-3 task   name="thread-68-00"
 [guard] ALLOW kind=uthread name="thread-68-00" findings=0x0000000000000000
 [sched] created task id=0x0000000000000081 name="thread-68-00" rsp=0xffffffffe0043fc0 as=0xffffffff80918ea0
 [thread] create ok pid=0x0000000000000068 slot=0x0000000000000000 handle=0x0000000000000400 start=0x0000000142a41074 stack_base=0x0000000068000000
-[thread3_smoke] CreateThread(suspended)= PASS
-[thread3_smoke] ResumeThread          = PASS
+[thread3_smoke] CreateThread(suspended)= PASS
+[thread3_smoke] ResumeThread          = PASS
 
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
@@ -21197,13 +21197,13 @@ FAIL
 [ring3] pre-loaded ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010070000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000[ring3] task pid=0x0000000000000082 entering ring 3 rip=0x0000000143ee1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[wstr_smoke] starting
-[wstr_smoke] wcsncmp(eq,3)       = PASS
-[wstr_smoke] wcsstr             = PASS
-[wstr_smoke] wcsrchr            = PASS
-[wstr_smoke] StrCmpW            = PASS
-[wstr_smoke] StrCmpIW           = PASS
-[wstr_smoke] done
+[wstr_smoke] starting
+[wstr_smoke] wcsncmp(eq,3)       = PASS
+[wstr_smoke] wcsstr             = PASS
+[wstr_smoke] wcsrchr            = PASS
+[wstr_smoke] StrCmpW            = PASS
+[wstr_smoke] StrCmpIW           = PASS
+[wstr_smoke] done
 [t=12999.222ms] [I] sys : exit rc   val=0x0 (0)
 [t=12999.373ms] [I] sched : SchedExit: task entering termination path
  has_exports=0x0000000000000001
@@ -21383,11 +21383,11 @@ FAIL
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000083 entering ring 3 rip=0x0000000142911074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[intl_smoke] starting
-[intl_smoke] GetUserGeoID         = PASS
-[intl_smoke] GetGeoInfoW(ISO2)    = PASS
-[intl_smoke] GetCalendarInfoEx    = PASS
-[intl_smoke] done
+[intl_smoke] starting
+[intl_smoke] GetUserGeoID         = PASS
+[intl_smoke] GetGeoInfoW(ISO2)    = PASS
+[intl_smoke] GetCalendarInfoEx    = PASS
+[intl_smoke] done
 [t=13050.541ms] [I] sys : exit rc   val=0x0 (0)
 [t=13050.697ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -21576,10 +21576,10 @@ FAIL
 [dll-load] begin base_va=0x0000000010090000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded [ring3] task pid=0x0000000000000084 entering ring 3 rip=0x0000000140d41074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[disp_smoke] starting
-[disp_smoke] EnumDisplaySettingsW = PASS
-[disp_smoke] GetDpiForSystem      = PASS
-[disp_smoke] done
+[disp_smoke] starting
+[disp_smoke] EnumDisplaySettingsW = PASS
+[disp_smoke] GetDpiForSystem      = PASS
+[disp_smoke] done
 [t=13110.393ms] [I] sys : exit rc   val=0x0 (0)
 [t=13110.527ms] [I] sched : SchedExit: task entering termination path
 kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports)
@@ -21731,10 +21731,10 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [t=13150.447ms] [I] sched : SchedCreateUser: ring-3 task   name="ring3-svc-ctrl-smoke"
 [guard] ALLOW kind=uthread name="ring3-svc-ctrl-smoke" findings=0x0000000000000000
 [sched] created task id=[ring3] task pid=0x0000000000000085 entering ring 3 rip=0x0000000142231074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[svc_ctrl_smoke] starting
-[svc_ctrl_smoke] OpenSCManagerW      = PASS
-[svc_ctrl_smoke] OpenServiceW(missing) = PASS (NULL)
-[svc_ctrl_smoke] done
+[svc_ctrl_smoke] starting
+[svc_ctrl_smoke] OpenSCManagerW      = PASS
+[svc_ctrl_smoke] OpenServiceW(missing) = PASS (NULL)
+[svc_ctrl_smoke] done
 [t=13155.173ms] [I] sys : exit rc   val=0x0 (0)
 [t=13155.344ms] [I] sched : SchedExit: task entering termination path
 0x0000000000000085 name="ring3-svc-ctrl-smoke" rsp=0xffffffffe00415f8 as=0xffffffff809271d0
@@ -21918,12 +21918,12 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [t=13211.017ms] [2m[D] [0march/timer : tick   val=0x514 (1300)
 [tick-irq] g_ticks=0x0000000000000514
 [ring3] task pid=0x0000000000000086 entering ring 3 rip=0x0000000143dc1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[sysinfo_smoke] starting
-[sysinfo_smoke] GlobalMemoryStatusEx = PASS
-[sysinfo_smoke] GetPhysicallyInstalledSystemMemory = PASS
-[sysinfo_smoke] GetActiveProcessorCount = PASS
-[sysinfo_smoke] GetMaximumProcessorCount = PASS
-[sysinfo_smoke] done
+[sysinfo_smoke] starting
+[sysinfo_smoke] GlobalMemoryStatusEx = PASS
+[sysinfo_smoke] GetPhysicallyInstalledSystemMemory = PASS
+[sysinfo_smoke] GetActiveProcessorCount = PASS
+[sysinfo_smoke] GetMaximumProcessorCount = PASS
+[sysinfo_smoke] done
 [t=13212.524ms] [I] sys : exit rc   val=0x0 (0)
 [t=13212.660ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -22125,14 +22125,14 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000087 entering ring 3 rip=0x0000000141341074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[mem2_smoke] starting
+[mem2_smoke] starting
 [sys] vmap ok pid=0x000000000000006e va=0x0000000040000000 pages=0x0000000000000001
 [t=13272.662ms] [I] win32/vmap : DoVmap: ok   va=0x40000000 (1073741824)   pages=0x1 (1)
-[mem2_smoke] VirtualAlloc       = PASS
-[mem2_smoke] VirtualQuery       = PASS
-[mem2_smoke] VirtualLock        = PASS (returned)
-[mem2_smoke] VirtualUnlock      = PASS (returned)
-[mem2_smoke] done
+[mem2_smoke] VirtualAlloc       = PASS
+[mem2_smoke] VirtualQuery       = PASS
+[mem2_smoke] VirtualLock        = PASS (returned)
+[mem2_smoke] VirtualUnlock      = PASS (returned)
+[mem2_smoke] done
 [t=13273.438ms] [I] sys : exit rc   val=0x0 (0)
 [t=13273.543ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -22308,15 +22308,15 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [guard] ALLOW kind=uthread name="ring3-fs2-smoke" findings=0x0000000000000000
 [sched] created task id=0x0000000000000088 name="ring3-fs2-smoke" rsp=0xffffffffe0043fc0 as=0xffffffff80923120
 [ring3] task pid=0x0000000000000088 entering ring 3 rip=0x00000001406e1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[fs2_smoke] starting
+[fs2_smoke] starting
 [fs/route] open ok pid=0x000000000000006f path="/etc/version" backing=ramfs handle=0x0000000000000100 size=0x0000000000000019
-[fs2_smoke] CreateFileW         = PASS
-[fs2_smoke] GetFileType         = PASS
-[fs2_smoke] GetFileSize         = PASS
-[fs2_smoke] GetFileTime         = PASS
-[fs2_smoke] GetFileInformationByHandle = PASS
-[fs2_smoke] FlushFileBuffers    = PASS (returned)
-[fs2_smoke] done
+[fs2_smoke] CreateFileW         = PASS
+[fs2_smoke] GetFileType         = PASS
+[fs2_smoke] GetFileSize         = PASS
+[fs2_smoke] GetFileTime         = PASS
+[fs2_smoke] GetFileInformationByHandle = PASS
+[fs2_smoke] FlushFileBuffers    = PASS (returned)
+[fs2_smoke] done
 [t=13324.111ms] [I] sys : exit rc   val=0x0 (0)
 [t=13324.247ms] [I] sched : SchedExit: task entering termination path
 [as] created pml4_phys=0x0000000000e5f000 as=0xffffffff809271d0
@@ -22521,11 +22521,11 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000089 entering ring 3 rip=0x0000000143961074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[console3_smoke] starting
-[console3_smoke] FlushConsoleInputBuffer = PASS (returned)
-[console3_smoke] GetConsoleWindow      = PASS (returned)
-[console3_smoke] GetConsoleProcessList = PASS
-[console3_smoke] done
+[console3_smoke] starting
+[console3_smoke] FlushConsoleInputBuffer = PASS (returned)
+[console3_smoke] GetConsoleWindow      = PASS (returned)
+[console3_smoke] GetConsoleProcessList = PASS
+[console3_smoke] done
 [t=13384.387ms] [I] sys : exit rc   val=0x0 (0)
 [t=13384.524ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -22710,10 +22710,10 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [ring3] pre-loaded ntdll.dll base=0x0000000010060000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010070000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [ring3] task pid=0x000000000000008a entering ring 3 rip=0x00000001411a1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[xml_smoke] starting
-[xml_smoke] CoInitializeEx       = PASS
-[xml_smoke] CoCreateInstance(DOM) = PASS (failed cleanly)
-[xml_smoke] done
+[xml_smoke] starting
+[xml_smoke] CoInitializeEx       = PASS
+[xml_smoke] CoCreateInstance(DOM) = PASS (failed cleanly)
+[xml_smoke] done
 [t=13435.010ms] [I] sys : exit rc   val=0x0 (0)
 [t=13435.151ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -22891,12 +22891,12 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000008b entering ring 3 rip=0x0000000143451074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[reg3_smoke] starting
-[reg3_smoke] RegCreateKeyExW     = PASS
-[reg3_smoke] RegSetValueExW (DW) = PASS
-[reg3_smoke] RegQueryValueExW    = FAIL/STUB
-[reg3_smoke] RegDeleteKeyW       = PASS
-[reg3_smoke] done
+[reg3_smoke] starting
+[reg3_smoke] RegCreateKeyExW     = PASS
+[reg3_smoke] RegSetValueExW (DW) = PASS
+[reg3_smoke] RegQueryValueExW    = FAIL/STUB
+[reg3_smoke] RegDeleteKeyW       = PASS
+[reg3_smoke] done
 [t=13486.177ms] [I] sys : exit rc   val=0x0 (0)
 [t=13486.334ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -23067,11 +23067,11 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [as] created pml4_phys=0x0000000000e61000 as=0xffffffff809271d0
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x000000000000008c entering ring 3 rip=0x00000001410a1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[proc3_smoke] starting
-[proc3_smoke] OpenProcess(self)    = PASS
-[proc3_smoke] GetStartupInfoW      = PASS
-[proc3_smoke] GetCommandLineA      = PASS
-[proc3_smoke] done
+[proc3_smoke] starting
+[proc3_smoke] OpenProcess(self)    = PASS
+[proc3_smoke] GetStartupInfoW      = PASS
+[proc3_smoke] GetCommandLineA      = PASS
+[proc3_smoke] done
 [t=13546.945ms] [I] sys : exit rc   val=0x0 (0)
 [t=13547.095ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -23268,10 +23268,10 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000008d entering ring 3 rip=0x00000001435d1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[com2_smoke] starting
-[com2_smoke] StringFromGUID2     = PASS
-[com2_smoke] IsEqualGUID         = PASS
-[com2_smoke] done
+[com2_smoke] starting
+[com2_smoke] StringFromGUID2     = PASS
+[com2_smoke] IsEqualGUID         = PASS
+[com2_smoke] done
 [t=13607.854ms] [I] sys : exit rc   val=0x0 (0)
 [t=13608.015ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -23458,16 +23458,16 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000008e entering ring 3 rip=0x0000000142e61074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[advmem_smoke] starting
+[advmem_smoke] starting
 [t=13658.065ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[advmem_smoke] GlobalAlloc(MOVEABLE)= PASS
-[advmem_smoke] GlobalLock          = PASS
-[advmem_smoke] GlobalSize          = PASS
-[advmem_smoke] GlobalUnlock        = PASS (returned)
+[advmem_smoke] GlobalAlloc(MOVEABLE)= PASS
+[advmem_smoke] GlobalLock          = PASS
+[advmem_smoke] GlobalSize          = PASS
+[advmem_smoke] GlobalUnlock        = PASS (returned)
 [t=13658.792ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[advmem_smoke] LocalSize           = PASS
-[advmem_smoke] IsBadWritePtr(stack)= PASS (writable)
-[advmem_smoke] done
+[advmem_smoke] LocalSize           = PASS
+[advmem_smoke] IsBadWritePtr(stack)= PASS (writable)
+[advmem_smoke] done
 [t=13659.322ms] [I] sys : exit rc   val=0x0 (0)
 [t=13659.425ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -23661,12 +23661,12 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
 [dll-load] OK entry_rva=[ring3] task pid=0x000000000000008f entering ring 3 rip=0x0000000142781074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[wstr2_smoke] starting
-[wstr2_smoke] _wtoi(L"-42")    = PASS
-[wstr2_smoke] _wtol(L"123456") = PASS
-[wstr2_smoke] wcstoul(L"42")   = PASS
-[wstr2_smoke] wcstol(L"-7")    = PASS
-[wstr2_smoke] done
+[wstr2_smoke] starting
+[wstr2_smoke] _wtoi(L"-42")    = PASS
+[wstr2_smoke] _wtol(L"123456") = PASS
+[wstr2_smoke] wcstoul(L"42")   = PASS
+[wstr2_smoke] wcstol(L"-7")    = PASS
+[wstr2_smoke] done
 [t=13719.517ms] [I] sys : exit rc   val=0x0 (0)
 [t=13719.656ms] [I] sched : SchedExit: task entering termination path
 0x0000000000000000 has_exports=0x0000000000000001
@@ -23841,10 +23841,10 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [ring3] pre-loaded vcruntime140.dll base=0x0000000010030000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010040000 size=0x0000000000005000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000090 entering ring 3 rip=0x0000000140b81128 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[fs3_smoke] starting
-[fs3_smoke] GetCurrentDirectoryW = PASS
-[fs3_smoke] PathCanonicalizeW   = PASS
-[fs3_smoke] done
+[fs3_smoke] starting
+[fs3_smoke] GetCurrentDirectoryW = PASS
+[fs3_smoke] PathCanonicalizeW   = PASS
+[fs3_smoke] done
 [t=13770.153ms] [I] sys : exit rc   val=0x0 (0)
 [t=13770.309ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -24017,10 +24017,10 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded kernel32.dll base=0x0000000010020000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010030000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022[ring3] task pid=0x0000000000000091 entering ring 3 rip=0x0000000140d21074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[cap_smoke] starting
-[cap_smoke] ImpersonateSelf      = FAIL/STUB
-[cap_smoke] RevertToSelf         = PASS
-[cap_smoke] done
+[cap_smoke] starting
+[cap_smoke] ImpersonateSelf      = FAIL/STUB
+[cap_smoke] RevertToSelf         = PASS
+[cap_smoke] done
 [t=13820.542ms] [I] sys : exit rc   val=0x0 (0)
 [t=13820.677ms] [I] sched : SchedExit: task entering termination path
 
@@ -24195,11 +24195,11 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [as] created pml4_phys=0x0000000000e71000 as=0xffffffff809271d0
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000092 entering ring 3 rip=0x00000001415f1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[utf16_smoke] starting
-[utf16_smoke] MBtoWC(CP_ACP, 5)  = PASS
-[utf16_smoke] WCtoMB(CP_ACP, 5)  = PASS
-[utf16_smoke] GetStringTypeW     = PASS
-[utf16_smoke] done
+[utf16_smoke] starting
+[utf16_smoke] MBtoWC(CP_ACP, 5)  = PASS
+[utf16_smoke] WCtoMB(CP_ACP, 5)  = PASS
+[utf16_smoke] GetStringTypeW     = PASS
+[utf16_smoke] done
 [t=13871.528ms] [I] sys : exit rc   val=0x0 (0)
 [t=13871.667ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -24407,13 +24407,13 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
 [ring3] pre-loaded msvcp140.dll base=0x0000000010080000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010090000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022[ring3] task pid=0x0000000000000093 entering ring 3 rip=0x0000000140991074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[handle2_smoke] starting
+[handle2_smoke] starting
 [sys] event_create ok pid=0x000000000000007a handle=0x0000000000000300 manual=0x0000000000000001 signaled=0x0000000000000000
-[handle2_smoke] CreateEventW         = PASS
-[handle2_smoke] DuplicateHandle      = PASS
-[handle2_smoke] GetHandleInformation = PASS
-[handle2_smoke] SetHandleInformation = PASS
-[handle2_smoke] done
+[handle2_smoke] CreateEventW         = PASS
+[handle2_smoke] DuplicateHandle      = PASS
+[handle2_smoke] GetHandleInformation = PASS
+[handle2_smoke] SetHandleInformation = PASS
+[handle2_smoke] done
 [t=13943.842ms] [I] sys : exit rc   val=0x0 (0)
 [t=13944.009ms] [I] sched : SchedExit: task entering termination path
 
@@ -24581,12 +24581,12 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [as] created pml4_phys=0x0000000000e5f000 as=0xffffffff809271d0
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000094 entering ring 3 rip=0x0000000141871074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[sock_opt_smoke] starting
-[sock_opt_smoke] socket               = PASS
-[sock_opt_smoke] setsockopt SO_KEEPALIVE = PASS
-[sock_opt_smoke] setsockopt SO_RCVBUF = PASS
-[sock_opt_smoke] setsockopt SO_SNDBUF = PASS
-[sock_opt_smoke] done
+[sock_opt_smoke] starting
+[sock_opt_smoke] socket               = PASS
+[sock_opt_smoke] setsockopt SO_KEEPALIVE = PASS
+[sock_opt_smoke] setsockopt SO_RCVBUF = PASS
+[sock_opt_smoke] setsockopt SO_SNDBUF = PASS
+[sock_opt_smoke] done
 [t=13993.573ms] [I] sys : exit rc   val=0x0 (0)
 [t=13993.719ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -24785,11 +24785,11 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000095 entering ring 3 rip=0x0000000141a71074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[prio_smoke] starting
-[prio_smoke] GetPriorityClass     = PASS
-[prio_smoke] SetPriorityClass     = PASS
-[prio_smoke] GetThreadPriorityBoost = PASS
-[prio_smoke] done
+[prio_smoke] starting
+[prio_smoke] GetPriorityClass     = PASS
+[prio_smoke] SetPriorityClass     = PASS
+[prio_smoke] GetThreadPriorityBoost = PASS
+[prio_smoke] done
 [t=14054.060ms] [I] sys : exit rc   val=0x0 (0)
 [t=14054.200ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -24969,12 +24969,12 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000096 entering ring 3 rip=0x0000000141ed1092 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[debug2_smoke] starting
-[debug2_smoke] AddVectoredExceptionHandler = PASS
-[debug2_smoke] RemoveVectoredExceptionHandler = PASS
-[debug2_smoke] SetUnhandledExceptionFilter = PASS (returned)
-[debug2_smoke] GetCurrentProcessorNumber = PASS (returned)
-[debug2_smoke] done
+[debug2_smoke] starting
+[debug2_smoke] AddVectoredExceptionHandler = PASS
+[debug2_smoke] RemoveVectoredExceptionHandler = PASS
+[debug2_smoke] SetUnhandledExceptionFilter = PASS (returned)
+[debug2_smoke] GetCurrentProcessorNumber = PASS (returned)
+[debug2_smoke] done
 [t=14114.983ms] [I] sys : exit rc   val=0x0 (0)
 [t=14115.118ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -25151,25 +25151,25 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x0000000000000097 entering ring 3 rip=0x0000000141cd1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[d3d11_smoke] starting
+[d3d11_smoke] starting
 [gfx] D3D11CreateDevice called (skeleton — no real driver)
 [t=14165.514ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
 [t=14165.898ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000040 (1342177344)
 [t=14166.253ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000068 (1342177384)
 [t=14166.474ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000098 (1342177432)
 [t=14166.664ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x500000c8 (1342177480)
-[d3d11_smoke] CreateDeviceAndSwapChain = PASS
+[d3d11_smoke] CreateDeviceAndSwapChain = PASS
 [t=14167.128ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x500010d8 (1342181592)
-[d3d11_smoke] SwapChain::GetBuffer    = PASS
+[d3d11_smoke] SwapChain::GetBuffer    = PASS
 [t=14167.508ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50001108 (1342181640)
-[d3d11_smoke] Device::CreateRTV       = PASS
-[d3d11_smoke] Context::OMSetRT        = PASS (returned)
-[d3d11_smoke] Context::ClearRTV       = PASS (returned)
-[d3d11_smoke] SwapChain::Present      = PASS
-[d3d11_smoke] Device::GetFeatureLevel = PASS
-[d3d11_smoke] Device::CheckFmt(BGRA8) = PASS
-[d3d11_smoke] Release chain           = PASS
-[d3d11_smoke] done
+[d3d11_smoke] Device::CreateRTV       = PASS
+[d3d11_smoke] Context::OMSetRT        = PASS (returned)
+[d3d11_smoke] Context::ClearRTV       = PASS (returned)
+[d3d11_smoke] SwapChain::Present      = PASS
+[d3d11_smoke] Device::GetFeatureLevel = PASS
+[d3d11_smoke] Device::CheckFmt(BGRA8) = PASS
+[d3d11_smoke] Release chain           = PASS
+[d3d11_smoke] done
 [t=14169.130ms] [I] sys : exit rc   val=0x0 (0)
 [t=14169.239ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -25368,35 +25368,35 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [t=14225.504ms] [2m[D] [0march/timer : tick   val=0x578 (1400)
 [tick-irq] g_ticks=0x0000000000000578
 [ring3] task pid=0x0000000000000098 entering ring 3 rip=0x00000001409b1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[d3d12_smoke] starting
+[d3d12_smoke] starting
 [gfx] D3D12CreateDevice called (skeleton — no real driver)
 [t=14226.784ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[d3d12_smoke] CreateDevice          = PASS
+[d3d12_smoke] CreateDevice          = PASS
 [t=14227.397ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000030 (1342177328)
-[d3d12_smoke] CreateCommandQueue    = PASS
+[d3d12_smoke] CreateCommandQueue    = PASS
 [t=14227.726ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000050 (1342177360)
-[d3d12_smoke] CreateCommandAllocator= PASS
+[d3d12_smoke] CreateCommandAllocator= PASS
 [t=14228.163ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000070 (1342177392)
-[d3d12_smoke] CreateCommandList     = PASS
+[d3d12_smoke] CreateCommandList     = PASS
 [t=14228.533ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000098 (1342177432)
-[d3d12_smoke] CreateFence           = PASS
+[d3d12_smoke] CreateFence           = PASS
 [t=14228.870ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x500000c0 (1342177472)
 [t=14229.075ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x500000f0 (1342177520)
-[d3d12_smoke] CreateDescriptorHeap  = PASS
-[d3d12_smoke] GetDescIncSize        = PASS
+[d3d12_smoke] CreateDescriptorHeap  = PASS
+[d3d12_smoke] GetDescIncSize        = PASS
 [t=14229.620ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000110 (1342177552)
 [t=14229.833ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000148 (1342177608)
 [t=14230.098ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000178 (1342177656)
-[d3d12_smoke] CreateCommittedRes    = PASS
-[d3d12_smoke] Heap::GetCPUStart     = PASS
-[d3d12_smoke] CreateRTV             = PASS (returned)
-[d3d12_smoke] List::ClearRTV(green) = PASS (returned)
-[d3d12_smoke] List::Close           = PASS
-[d3d12_smoke] Queue::ExecLists      = PASS (returned)
-[d3d12_smoke] Queue::Signal(fence,1)= PASS
-[d3d12_smoke] Fence::GetVal         = PASS
-[d3d12_smoke] Release chain         = PASS
-[d3d12_smoke] done
+[d3d12_smoke] CreateCommittedRes    = PASS
+[d3d12_smoke] Heap::GetCPUStart     = PASS
+[d3d12_smoke] CreateRTV             = PASS (returned)
+[d3d12_smoke] List::ClearRTV(green) = PASS (returned)
+[d3d12_smoke] List::Close           = PASS
+[d3d12_smoke] Queue::ExecLists      = PASS (returned)
+[d3d12_smoke] Queue::Signal(fence,1)= PASS
+[d3d12_smoke] Fence::GetVal         = PASS
+[d3d12_smoke] Release chain         = PASS
+[d3d12_smoke] done
 [t=14232.043ms] [I] sys : exit rc   val=0x0 (0)
 [t=14232.149ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -25626,21 +25626,21 @@ kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports
 [ring3] pre-loaded dbghelp.dll base=0x0000000010070000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010080000 size=0x0000000000003000 sections=0x0000000000000002 chars=0x0000000000002022
 [dll-load] OK entry_rva=0x0000000000000000[ring3] task pid=0x0000000000000099 entering ring 3 rip=0x0000000140221074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[d3d9_smoke] starting
+[d3d9_smoke] starting
 [gfx] Direct3DCreate9 called (skeleton — no real driver)
 [t=14297.251ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[d3d9_smoke] Direct3DCreate9         = PASS
-[d3d9_smoke] IDirect3D9::AdapterCount = PASS
+[d3d9_smoke] Direct3DCreate9         = PASS
+[d3d9_smoke] IDirect3D9::AdapterCount = PASS
 [t=14297.908ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000030 (1342177328)
 [t=14298.166ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000060 (1342177376)
 [t=14298.397ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000090 (1342177424)
-[d3d9_smoke] IDirect3D9::CreateDevice = PASS
-[d3d9_smoke] Device::BeginScene       = PASS
-[d3d9_smoke] Device::Clear(red)       = PASS
-[d3d9_smoke] Device::EndScene         = PASS
-[d3d9_smoke] Device::Present          = PASS
-[d3d9_smoke] Release chain            = PASS
-[d3d9_smoke] done
+[d3d9_smoke] IDirect3D9::CreateDevice = PASS
+[d3d9_smoke] Device::BeginScene       = PASS
+[d3d9_smoke] Device::Clear(red)       = PASS
+[d3d9_smoke] Device::EndScene         = PASS
+[d3d9_smoke] Device::Present          = PASS
+[d3d9_smoke] Release chain            = PASS
+[d3d9_smoke] done
 [t=14300.411ms] [I] sys : exit rc   val=0x0 (0)
 [t=14300.557ms] [I] sched : SchedExit: task entering termination path
  has_exports=0x0000000000000001
@@ -25841,17 +25841,17 @@ setupapi.dll base=0x0000000010200000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded kernelbase.dll base=0x0000000010090000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x00000000100a0000 size=0x0000000000006000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000009a entering ring 3 rip=0x00000001415e1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[dinput8_smoke] starting
+[dinput8_smoke] starting
 [gfx] DirectInput8Create called (skeleton — no real driver)
 [t=14358.228ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[dinput8_smoke] DirectInput8Create  = PASS
+[dinput8_smoke] DirectInput8Create  = PASS
 [t=14358.707ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000030 (1342177328)
-[dinput8_smoke] CreateDevice        = PASS
-[dinput8_smoke] SetDataFormat       = PASS
-[dinput8_smoke] Acquire             = PASS
-[dinput8_smoke] GetDeviceState      = PASS
-[dinput8_smoke] Unacquire           = PASS
-[dinput8_smoke] done
+[dinput8_smoke] CreateDevice        = PASS
+[dinput8_smoke] SetDataFormat       = PASS
+[dinput8_smoke] Acquire             = PASS
+[dinput8_smoke] GetDeviceState      = PASS
+[dinput8_smoke] Unacquire           = PASS
+[dinput8_smoke] done
 [t=14360.063ms] [I] sys : exit rc   val=0x0 (0)
 [t=14360.208ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -26029,15 +26029,15 @@ setupapi.dll base=0x0000000010200000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded msvcrt.dll base=0x0000000010040000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010050000 size=0x0000000000008000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000009b entering ring 3 rip=0x0000000143c31074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[xinput_smoke] starting
+[xinput_smoke] starting
 [gfx] XInputGetState called (skeleton — no real driver)
-[xinput_smoke] XInputGetState(0)         = PASS
-[xinput_smoke] XInputSetState(0)         = PASS
-[xinput_smoke] XInputGetCapabilities(0)  = PASS
-[xinput_smoke] XInputGetBatteryInformation = PASS
-[xinput_smoke] XInputEnable(TRUE)        = PASS (returned)
-[xinput_smoke] All 4 slots not-connected = PASS
-[xinput_smoke] done
+[xinput_smoke] XInputGetState(0)         = PASS
+[xinput_smoke] XInputSetState(0)         = PASS
+[xinput_smoke] XInputGetCapabilities(0)  = PASS
+[xinput_smoke] XInputGetBatteryInformation = PASS
+[xinput_smoke] XInputEnable(TRUE)        = PASS (returned)
+[xinput_smoke] All 4 slots not-connected = PASS
+[xinput_smoke] done
 [t=14410.792ms] [I] sys : exit rc   val=0x0 (0)
 [t=14410.935ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -26227,22 +26227,22 @@ setupapi.dll base=0x0000000010200000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000009c entering ring 3 rip=0x0000000142f71074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[xaudio2_smoke] starting
+[xaudio2_smoke] starting
 [gfx] XAudio2Create called (skeleton — no real driver)
 [t=14479.962ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[xaudio2_smoke] XAudio2Create        = PASS
+[xaudio2_smoke] XAudio2Create        = PASS
 [t=14480.562ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000030 (1342177328)
-[xaudio2_smoke] CreateMasteringVoice = PASS
+[xaudio2_smoke] CreateMasteringVoice = PASS
 [t=14481.035ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000058 (1342177368)
-[xaudio2_smoke] CreateSourceVoice    = PASS
-[xaudio2_smoke] Source::SetVolume    = PASS
-[xaudio2_smoke] Source::GetVolume    = PASS
-[xaudio2_smoke] Source::Start        = PASS
-[xaudio2_smoke] Source::Stop         = PASS
-[xaudio2_smoke] Source::DestroyVoice = PASS (returned)
-[xaudio2_smoke] StartEngine          = PASS
-[xaudio2_smoke] StopEngine           = PASS (returned)
-[xaudio2_smoke] done
+[xaudio2_smoke] CreateSourceVoice    = PASS
+[xaudio2_smoke] Source::SetVolume    = PASS
+[xaudio2_smoke] Source::GetVolume    = PASS
+[xaudio2_smoke] Source::Start        = PASS
+[xaudio2_smoke] Source::Stop         = PASS
+[xaudio2_smoke] Source::DestroyVoice = PASS (returned)
+[xaudio2_smoke] StartEngine          = PASS
+[xaudio2_smoke] StopEngine           = PASS (returned)
+[xaudio2_smoke] done
 [t=14482.638ms] [I] sys : exit rc   val=0x0 (0)
 [t=14482.765ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -26436,20 +26436,20 @@ setupapi.dll base=0x0000000010200000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded ucrtbase.dll base=0x0000000010050000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010060000 size=0x0000000000010000 sections=0x0000000000000004 chars=0x0000000000002022
 [ring3] task pid=0x000000000000009d entering ring 3 rip=0x0000000140c91074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[dsound_smoke] starting
+[dsound_smoke] starting
 [gfx] DirectSoundCreate called (skeleton — no real driver)
 [t=14540.858ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[dsound_smoke] DirectSoundCreate8       = PASS
-[dsound_smoke] SetCooperativeLevel      = PASS
+[dsound_smoke] DirectSoundCreate8       = PASS
+[dsound_smoke] SetCooperativeLevel      = PASS
 [t=14541.575ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000030 (1342177328)
 [t=14541.810ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000060 (1342177376)
-[dsound_smoke] CreateSoundBuffer        = PASS
-[dsound_smoke] Buffer::Lock             = PASS
-[dsound_smoke] Buffer::Unlock           = PASS
-[dsound_smoke] Buffer::Play             = PASS
-[dsound_smoke] Buffer::GetCurrentPos    = PASS
-[dsound_smoke] Buffer::Stop             = PASS
-[dsound_smoke] done
+[dsound_smoke] CreateSoundBuffer        = PASS
+[dsound_smoke] Buffer::Lock             = PASS
+[dsound_smoke] Buffer::Unlock           = PASS
+[dsound_smoke] Buffer::Play             = PASS
+[dsound_smoke] Buffer::GetCurrentPos    = PASS
+[dsound_smoke] Buffer::Stop             = PASS
+[dsound_smoke] done
 [t=14543.800ms] [I] sys : exit rc   val=0x0 (0)
 [t=14543.956ms] [I] sched : SchedExit: task entering termination path
 [dll-load] relocs blocks=0x0000000000000001 applied=0x0000000000000000 delta=0x0000000000000000
@@ -26635,20 +26635,20 @@ setupapi.dll base=0x0000000010200000 (pre-PeLoad — visible to ResolveImports)
 [ring3] pre-loaded vcruntime140.dll base=0x0000000010030000 (pre-PeLoad — visible to ResolveImports)
 [dll-load] begin base_va=0x0000000010040000 size=0x0000000000005000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x000000000000009e entering ring 3 rip=0x0000000143e31074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[ddraw_smoke] starting
+[ddraw_smoke] starting
 [gfx] DirectDrawCreate called (skeleton — no real driver)
 [t=14601.898ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[ddraw_smoke] DirectDrawCreate         = PASS
-[ddraw_smoke] SetCooperativeLevel      = PASS
-[ddraw_smoke] SetDisplayMode(32x32)    = PASS
+[ddraw_smoke] DirectDrawCreate         = PASS
+[ddraw_smoke] SetCooperativeLevel      = PASS
+[ddraw_smoke] SetDisplayMode(32x32)    = PASS
 [t=14603.339ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000040 (1342177344)
 [t=14603.602ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000080 (1342177408)
 [t=14604.679ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x500000b0 (1342177456)
-[ddraw_smoke] CreateSurface            = PASS
-[ddraw_smoke] Surface::Lock            = PASS
-[ddraw_smoke] Surface::Unlock          = PASS
-[ddraw_smoke] Surface::Blt(COLORFILL)  = PASS
-[ddraw_smoke] done
+[ddraw_smoke] CreateSurface            = PASS
+[ddraw_smoke] Surface::Lock            = PASS
+[ddraw_smoke] Surface::Unlock          = PASS
+[ddraw_smoke] Surface::Blt(COLORFILL)  = PASS
+[ddraw_smoke] done
 [t=14607.072ms] [I] sys : exit rc   val=0x0 (0)
 [t=14607.204ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -26835,21 +26835,21 @@ setupapi.dll base=0x0000000010200000 (pre-PeLoad — visible to ResolveImports)
 [as] created pml4_phys=0x0000000000eba000 as=0xffffffff80923120
 [dll-load] begin base_va=0x0000000010020000 size=0x000000000000f000 sections=0x0000000000000003 chars=0x0000000000002022
 [ring3] task pid=0x000000000000009f entering ring 3 rip=0x0000000143de1074 rsp=0x000000007fffffb8 gs_base=0x0000000070000000
-[d2d1_smoke] starting
+[d2d1_smoke] starting
 [gfx] D2D1CreateFactory called (skeleton — no real driver)
 [t=14662.451ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[d2d1_smoke] D2D1CreateFactory       = PASS
+[d2d1_smoke] D2D1CreateFactory       = PASS
 [t=14663.489ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000030 (1342177328)
 [t=14663.710ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000058 (1342177368)
 [t=14663.911ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000088 (1342177416)
-[d2d1_smoke] CreateHwndRenderTarget = PASS
+[d2d1_smoke] CreateHwndRenderTarget = PASS
 [t=14664.392ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50001098 (1342181528)
-[d2d1_smoke] CreateSolidColorBrush  = PASS
-[d2d1_smoke] BeginDraw              = PASS (returned)
-[d2d1_smoke] Clear(dark blue)       = PASS (returned)
-[d2d1_smoke] FillRectangle          = PASS (returned)
-[d2d1_smoke] EndDraw                = PASS
-[d2d1_smoke] done
+[d2d1_smoke] CreateSolidColorBrush  = PASS
+[d2d1_smoke] BeginDraw              = PASS (returned)
+[d2d1_smoke] Clear(dark blue)       = PASS (returned)
+[d2d1_smoke] FillRectangle          = PASS (returned)
+[d2d1_smoke] EndDraw                = PASS
+[d2d1_smoke] done
 [t=14665.840ms] [I] sys : exit rc   val=0x0 (0)
 [t=14665.948ms] [I] sched : SchedExit: task entering termination path
 [dll-load] OK entry_rva=0x0000000000000000 has_exports=0x0000000000000001
@@ -27056,16 +27056,16 @@ setupapi.dll base=0x0000000010200000 (pre-PeLoad — visible to ResolveImports)
 [linux] ABI coverage: primary=0x0000000000000000 / 0x0000000000000176, effective=0x0000000000000000 / 0x0000000000000176 (generated primary=0x0000000000000000, generated effective=0x0000000000000000)
 [t=14726.093ms] [I] init : RunPhase begin   phase=0xc (12)   callbacks=0x3 (3)
 [t=14726.313ms] [I] init : invoke   name="init.selftest.fail"
-[dwrite_smoke] starting
+[dwrite_smoke] starting
 [gfx] DWriteCreateFactory called (skeleton — no real driver)
 [t=14727.248ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000010 (1342177296)
-[dwrite_smoke] DWriteCreateFactory  = PASS
+[dwrite_smoke] DWriteCreateFactory  = PASS
 [t=14728.355ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000030 (1342177328)
-[dwrite_smoke] CreateTextFormat     = PASS
-[dwrite_smoke] Format::GetFontSize  = PASS
+[dwrite_smoke] CreateTextFormat     = PASS
+[dwrite_smoke] Format::GetFontSize  = PASS
 [t=14729.799ms] [2m[D] [0mwin32/heap : DoHeapAlloc: granted user VA   val=0x50000050 (1342177360)
-[dwrite_smoke] CreateTextLayout     = PASS
-[dwrite_smoke] done
+[dwrite_smoke] CreateTextLayout     = PASS
+[dwrite_smoke] done
 [t=14731.834ms] [I] sys : exit rc   val=0x0 (0)
 [t=14731.952ms] [I] sched : SchedExit: task entering termination path
 [proc] destroy pid=0x0000000000000087 name="ring3-dwrite-smoke"
@@ -27111,11 +27111,11 @@ setupapi.dll base=0x0000000010200000 (pre-PeLoad — visible to ResolveImports)
 [t=14751.099ms] [I] sched/reaper : reaped task id   val=0x97 (151)
 [t=15240.005ms] [2m[D] [0march/timer : tick   val=0x5dc (1500)
 [tick-irq] g_ticks=0x00000000000005dc
-[thread2_smoke] WaitForSingleObject(t)= FAIL/STUB
-[thread2_smoke] GetExitCodeThread     = FAIL/STUB
-[thread2_smoke] SRWLock cycle         = PASS (returned)
-[thread2_smoke] InitOnceExecuteOnce   = PASS
-[thread2_smoke] done
+[thread2_smoke] WaitForSingleObject(t)= FAIL/STUB
+[thread2_smoke] GetExitCodeThread     = FAIL/STUB
+[thread2_smoke] SRWLock cycle         = PASS (returned)
+[thread2_smoke] InitOnceExecuteOnce   = PASS
+[thread2_smoke] done
 [t=15474.678ms] [I] sys : exit rc   val=0x0 (0)
 [t=15474.860ms] [I] sched : SchedExit: task entering termination path
 [proc] destroy pid=0x000000000000003b name="ring3-thread2-smoke"
@@ -27162,9 +27162,9 @@ setupapi.dll base=0x0000000010200000 (pre-PeLoad — visible to ResolveImports)
 [t=16508.070ms] [33m[W] [0mdiag/soft-lockup : soft-lockup   val=0xffffffff (4294967295)
 [t=17289.386ms] [2m[D] [0march/timer : tick   val=0x6a4 (1700)
 [tick-irq] g_ticks=0x00000000000006a4
-[thread3_smoke] Wait + finish         = FAIL/STUB
-[thread3_smoke] GetThreadIOPendingFlag= PASS
-[thread3_smoke] done
+[thread3_smoke] Wait + finish         = FAIL/STUB
+[thread3_smoke] GetThreadIOPendingFlag= PASS
+[thread3_smoke] done
 [t=18040.668ms] [I] sys : exit rc   val=0x0 (0)
 [t=18040.843ms] [I] sched : SchedExit: task entering termination path
 [proc] destroy pid=0x0000000000000068 name="ring3-thread3-smoke"
