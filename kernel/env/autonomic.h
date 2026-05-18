@@ -1,0 +1,144 @@
+#pragma once
+
+#include "util/types.h"
+
+/*
+ * DuetOS — env autonomic rule engine, v0.
+ *
+ * The "sense → decide → act" leg of the autonomic-OS arc (see
+ * wiki/drivers/Neural-Engine.md). The env-monitor task already
+ * SENSES (SystemEnvironment) and DECIDES a power policy
+ * (EnvironmentDerivePolicy). This engine adds ACT: on every
+ * monitor poll it evaluates a small, bounded rule table and
+ * invokes real, kernel-owned effects.
+ *
+ * Every rule reads a real telemetry source and every action calls
+ * a real, task-context-safe kernel mechanism — no stubs, no
+ * facades. The decision (`AutonomicEvaluate`) is a pure function
+ * of sensed inputs + retained edge state; that is the exact seam a
+ * future NPU-backed learned policy replaces (it never touches the
+ * actuators). The engine has no NPU dependency and runs entirely
+ * CPU-side.
+ *
+ * Rule table (id : if <real sensed> then <real action>):
+ *   1 MemPressure       free frames < 10%        → heap-drain + pool-drain
+ *   2 ThermalPower      thermal_throttle rising  → pool-drain + health scan
+ *   3 SecurityIntegrity health issues_total rose → guard Enforce + Production
+ *   4 CpuSaturation     loadavg > nCPU rising    → forced health scan
+ *   5 PowerTransition   EnvPowerPolicy changed   → scheduler power bias
+ *
+ * Edge-triggered: an action fires on the rising edge of its
+ * condition (and rule 5 on any policy change, restoring the
+ * scheduler bias on the way back up to Performance). Re-firing is
+ * suppressed while a latched condition stays true, so a contended
+ * box does not flood. Apply is idempotent.
+ *
+ * Threading: kernel task context only (the env-monitor poll, ~2 s
+ * cadence). Never call from IRQ.
+ *
+ * Subsystem isolation: freestanding kernel engine. No subsystem
+ * (Win32 / Linux ABI) reaches it; it issues no syscalls and grants
+ * no privilege — it drives kernel-owned levers the kernel already
+ * owns.
+ */
+
+namespace duetos::env
+{
+
+enum class AutoRule : u8
+{
+    None = 0,
+    MemPressure,
+    ThermalPower,
+    SecurityIntegrity,
+    CpuSaturation,
+    PowerTransition,
+};
+
+enum class AutoAction : u8
+{
+    None = 0,
+    MemReclaim,       // KernelHeapDrainBins + FrameAllocatorDrainPools
+    FootprintTrim,    // FrameAllocatorDrainPools (shrink resident set)
+    SecurityEscalate, // SetGuardMode(Enforce) + PolicySet(Production)
+    ForceHealthScan,  // RuntimeCheckerScan()
+    SchedPerformance, // SchedSetPowerBias(Performance)
+    SchedBalanced,    // SchedSetPowerBias(Balanced)
+    SchedPowerSave,   // SchedSetPowerBias(PowerSave)
+    Count,
+};
+
+// 10% free-frame floor; below it rule 1 reclaims.
+inline constexpr u64 kMemPressurePctFree = 10;
+
+/// Sensed inputs for one evaluation. Passed by value so the pure
+/// evaluator is testable without hardware. Q11 loadavg: 2048 == 1.0.
+struct AutoInputs
+{
+    u64 free_frames;
+    u64 total_frames;
+    bool thermal_throttle;
+    u64 health_issues_total;
+    u32 loadavg_1min_q11;
+    u32 cpu_online;
+    u8 power_policy; // EnvPowerPolicy as u8
+};
+
+/// Engine's retained edge-tracking state (one instance, owned by
+/// the engine; exposed so the self-test can drive the pure path).
+struct AutonomicState
+{
+    bool valid;
+    bool mem_pressure;
+    bool thermal_active;
+    bool cpu_saturated;
+    u64 health_total;
+    u8 last_power_policy;
+};
+
+/// Up to 4 actions can fire in one tick (independent rules).
+struct AutoActionSet
+{
+    AutoAction actions[4];
+    AutoRule rules[4];
+    u32 count;
+};
+
+struct AutonomicReport
+{
+    u64 ticks;
+    u64 actions_fired;
+    u64 per_action[static_cast<u32>(AutoAction::Count)];
+    AutoAction last;
+    AutoRule last_rule;
+};
+
+/// Pure decision: rising-edge rule evaluation. No side effects, no
+/// logging, no kernel calls. Updates `st` in place to the new
+/// latched state and returns the actions whose edge fired.
+AutoActionSet AutonomicEvaluate(AutonomicState& st, const AutoInputs& in);
+
+/// Perform the real effects of an action set (kernel calls + log +
+/// probe). Task context only. Not exercised by the self-test.
+void AutonomicApply(const AutoActionSet& set);
+
+/// One poll iteration: sense → AutonomicEvaluate → AutonomicApply →
+/// fold into the report. Called from the env-monitor loop.
+void AutonomicTick();
+
+/// Capture the baseline so the first tick does not false-fire on
+/// boot-time conditions. Call once after EnvironmentInit().
+void AutonomicInit();
+
+const AutonomicReport& AutonomicStatus();
+
+const char* AutoActionName(AutoAction a);
+const char* AutoRuleName(AutoRule r);
+
+/// Boot self-test: drives the pure evaluator through each rule's
+/// rising edge, asserts the action + idempotence (a held condition
+/// does not re-fire). Emits `[autonomic] selftest pass`. Never
+/// performs a real Apply.
+void AutonomicSelfTest();
+
+} // namespace duetos::env

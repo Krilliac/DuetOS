@@ -25,6 +25,7 @@
 #include "drivers/audio/hda_jack_inventory.h"
 #include "drivers/mei/mei.h"
 #include "drivers/npu/npu.h"
+#include "env/autonomic.h"
 #include "drivers/gpu/bochs_vbe.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
@@ -1068,6 +1069,42 @@ void CmdNpu()
         ConsoleWriteln("");
     }
     ConsoleWriteln("  (firmware / command-ring not yet implemented — driver is probe-only)");
+}
+
+void CmdAutonomic()
+{
+    namespace e = duetos::env;
+    const e::AutonomicReport& r = e::AutonomicStatus();
+    ConsoleWrite("AUTONOMIC: ticks=");
+    WriteU64Dec(r.ticks);
+    ConsoleWrite(" actions=");
+    WriteU64Dec(r.actions_fired);
+    ConsoleWrite(" sched-bias=");
+    ConsoleWrite(duetos::sched::SchedPowerBiasName(duetos::sched::SchedPowerBias()));
+    ConsoleWrite(" balance-period=");
+    WriteU64Dec(duetos::sched::SchedBalancePeriodTicks());
+    ConsoleWriteln(" ticks");
+    if (r.actions_fired == 0)
+    {
+        ConsoleWriteln("  (no rule has fired — clean run)");
+    }
+    else
+    {
+        ConsoleWrite("  last: ");
+        ConsoleWrite(e::AutoActionName(r.last));
+        ConsoleWrite(" by ");
+        ConsoleWriteln(e::AutoRuleName(r.last_rule));
+        for (u32 i = 1; i < static_cast<u32>(e::AutoAction::Count); ++i)
+        {
+            if (r.per_action[i] == 0)
+                continue;
+            ConsoleWrite("  ");
+            ConsoleWrite(e::AutoActionName(static_cast<e::AutoAction>(i)));
+            ConsoleWrite(" x");
+            WriteU64Dec(r.per_action[i]);
+            ConsoleWriteln("");
+        }
+    }
 }
 
 

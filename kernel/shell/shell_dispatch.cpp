@@ -1432,6 +1432,11 @@ void Dispatch(char* line)
         CmdNpu();
         return;
     }
+    if (StrEq(cmd, "autonomic") || StrEq(cmd, "auto"))
+    {
+        CmdAutonomic();
+        return;
+    }
     if (StrEq(cmd, "usbnet"))
     {
         CmdUsbNet(argc, argv);
