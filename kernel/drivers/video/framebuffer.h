@@ -455,11 +455,19 @@ bool FramebufferRebindExternal(void* virt, u64 phys, u32 width, u32 height, u32 
 // runs TRANSFER_TO_HOST_2D + RESOURCE_FLUSH so the host sees the
 // new guest pixels.
 //
-// The hook receives the current frame's accumulated damage rect.
+// The hook receives a damage rect already clipped to the surface.
 // If `damage.valid == false` the hook should skip the flush — the
 // compositor wrote nothing this pass, so re-uploading the whole
-// scanout would just burn PCIe bandwidth. The damage rect is
-// already clipped to the framebuffer surface.
+// scanout would just burn PCIe bandwidth.
+//
+// IMPORTANT: a single `FramebufferPresent()` may invoke the hook
+// MORE THAN ONCE — once per disjoint dirty rect when the content
+// diff found spatially-separated changes (e.g. the taskbar clock
+// and a centred widget land in different bands and flush as small
+// independent rects instead of one fused near-fullscreen rect).
+// Each call is a fully-formed, surface-clipped rect; the hook must
+// be safe to call repeatedly within one present and must not assume
+// it sees the whole frame's damage in one shot.
 using FramebufferPresentFn = void (*)(const DamageRect& damage);
 void FramebufferSetPresentHook(FramebufferPresentFn fn);
 void FramebufferPresent();

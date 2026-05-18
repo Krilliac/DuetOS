@@ -1647,7 +1647,25 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     //   rbp = arg                     (trampoline consumes as rdi)
     //   rbx = entry                   (trampoline calls as rbx)
     //   return address = SchedTaskTrampoline
-    //   padding quad                  (keep stack 16-aligned at entry)
+    //
+    // Stack-alignment contract (SysV x86-64): a `call` must execute
+    // with RSP % 16 == 0 so the callee is entered at RSP % 16 == 8.
+    // `SchedTaskTrampoline` is hand-written asm with NO realigning
+    // prologue — its first instruction after `endbr64` is a `call`.
+    // It must therefore be ENTERED with RSP % 16 == 0. ContextSwitch
+    // pops 6 quads (r15,r14,r13,r12,rbp,rbx) then `ret`s (a 7th pop)
+    // — an odd number of quads — so the trampoline is entered with
+    // the same 16-alignment phase the planted `ret`-target quad sits
+    // at. We align the top of stack to 16 and push an EVEN number of
+    // quads below the ret target (ret-target + 6 saved regs = 7;
+    // the ret-target quad itself lands on a 16-aligned slot). An
+    // extra "alignment pad" quad here would invert the phase: the
+    // trampoline would be entered at RSP % 16 == 8 and its `call`s
+    // would violate the ABI, leaving every task entry (and its whole
+    // call tree) 8 bytes out of phase — every 16-aligned stack local
+    // misaligned. (That was a real bug: UBSan misalign flood from
+    // TrayFlyoutRedraw's `Row rows[6]` on every compose with the
+    // tray flyout open.) So: NO pad quad.
     u8* sp = stack + kKernelStackBytes;
     // 16-byte align the top of the stack.
     sp = reinterpret_cast<u8*>(reinterpret_cast<uptr>(sp) & ~uptr{15});
@@ -1658,7 +1676,6 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
         *reinterpret_cast<u64*>(sp) = value;
     };
 
-    push_quad(0);                                           // alignment pad
     push_quad(reinterpret_cast<u64>(&SchedTaskTrampoline)); // ret target
     push_quad(reinterpret_cast<u64>(entry));                // rbx
     push_quad(reinterpret_cast<u64>(arg));                  // rbp

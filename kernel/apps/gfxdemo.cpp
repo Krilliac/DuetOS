@@ -169,6 +169,35 @@ void DrawFn(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void
     if (cw == 0 || ch == 0)
         return;
 
+    // Don't auto-run on the desktop. The demo only animates while
+    // its window is the active (user-raised) window — the same
+    // condition that already gates its keyboard input (boot_tasks
+    // routes keys to it only when `WindowActive() == GfxDemoWindow()`).
+    // When it is NOT active we paint a fixed idle card and return
+    // WITHOUT advancing g_frame / auto-cycling, so the client area
+    // is byte-identical on every compose. The compositor's
+    // content-diff then elides the whole window (no perpetual
+    // re-blit / virtio-gpu flush — that unconditional 1 Hz repaint
+    // was a dominant desktop-flicker source). Opening it from the
+    // Start menu makes it active and it runs normally.
+    if (duetos::drivers::video::WindowActive() != g_handle)
+    {
+        using duetos::drivers::video::FramebufferDrawString;
+        using duetos::drivers::video::FramebufferFillRect;
+        FramebufferFillRect(cx, cy, cw, ch, 0x00000000u);
+        const duetos::u32 mid_y = cy + ch / 2u;
+        if (cw >= 8u * 8u && ch >= 20u)
+        {
+            FramebufferDrawString(cx + (cw - 8u * 8u) / 2u, mid_y - 10u, "GFX DEMO", 0x00FFFFFFu, 0x00000000u);
+        }
+        if (cw >= 22u * 8u && ch >= 36u)
+        {
+            FramebufferDrawString(cx + (cw - 22u * 8u) / 2u, mid_y + 4u, "open from Start to run", 0x00808080u,
+                                  0x00000000u);
+        }
+        return;
+    }
+
     DispatchRender(g_mode, cx, cy, cw, ch, g_frame);
     DrawHud(cx, cy, cw, ch);
 
