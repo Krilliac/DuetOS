@@ -263,6 +263,29 @@ must transition `Ready` and re-enqueue.
   added TSS + IST stacks and CR3 swap on context switch where the
   target task's `AddressSpace` differs.
 
+## Runtime power bias
+
+`SchedSetPowerBias(PowerBias)` / `SchedPowerBias()` (sched.h) is a
+runtime hint, **not** a correctness input. It scales only how often
+the *active* load balancer fires: `PowerSave` stretches the period
+from `kBalancePeriodTicks` (8) to `8 × kPowerSaveBalanceFactor` (32
+ticks ≈ 320 ms), so a lightly-loaded battery box does far fewer
+cross-CPU spinlock walks, task migrations, and wakeup IPIs. The core
+`Schedule()` path is untouched — under-balancing costs some
+load-distribution optimality, never correctness. The per-tick cost
+is one byte read + one branch (no function call on the hot path);
+the bias byte is set rarely from one task (the env [autonomic
+engine](Environment.md#autonomic-rule-engine) on a power-policy
+transition) and read on every timer tick — the same racy-but-fine
+contract as `g_total_ticks`.
+
+This is deliberately a *balancer-cadence* lever, not a fake
+tick-rate or quantum knob: the 100 Hz tick and the round-robin
+quantum are compile constants with no safe runtime knob, so faking
+one would be a facade. Balancer cadence is a real, observable,
+reversible effect (boot log: `sched : power bias changed to=...`;
+shell: `autonomic`). See Design-Decisions 2026-05-18.
+
 ## Related Pages
 
 - [Memory Management](Memory-Management.md) — `Task` structs and stacks

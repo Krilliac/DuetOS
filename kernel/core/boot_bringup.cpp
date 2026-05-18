@@ -116,6 +116,7 @@
 #include "drivers/pci/pci.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/power/power.h"
+#include "env/autonomic.h"
 #include "env/environment.h"
 #include "drivers/usb/btusb.h"
 #include "drivers/usb/cdc_ecm.h"
@@ -1749,6 +1750,11 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Composing environment view.\n");
     duetos::env::EnvironmentInit();
     DUETOS_BOOT_SELFTEST(duetos::env::EnvironmentSelfTest());
+    // Autonomic engine: prime edge state + align the scheduler
+    // power bias to the boot-derived policy, then the env-monitor
+    // ticks it every poll (sense → decide → act).
+    duetos::env::AutonomicInit();
+    DUETOS_BOOT_SELFTEST(duetos::env::AutonomicSelfTest());
     // Spawn the env-monitor poller now that the scheduler is online
     // and the first snapshot is published. It re-composes on a
     // timed poll so cached state stays live (the "reactive" half);

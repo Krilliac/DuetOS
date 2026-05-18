@@ -98,12 +98,18 @@ This driver is brick #1 of a longer goal: an OS that senses its own
 internal and external environment, decides, and acts — an *autonomic*
 control loop, not a conscious one. The honest path:
 
-1. **NPU substrate** (this slice) — the kernel can find and own the
+1. **NPU substrate** (landed) — the kernel can find and own the
    inference silicon. Nothing learns without hardware to run on.
-2. **Sense → decide → act loop** — wire the existing
-   [`kernel/env/`](../../kernel/env/) env-monitor signals into a
-   kernel-owned policy point (today's "idle reaction deferred" TODO
-   is the embryo).
+2. **Sense → decide → act loop** (landed, CPU-first) — the
+   [autonomic engine](../kernel/Environment.md#autonomic-rule-engine)
+   (`kernel/env/autonomic.{h,cpp}`) runs every env-monitor poll: it
+   senses real telemetry (free frames, thermal, kernel-integrity
+   findings, loadavg, power policy) and acts via real kernel levers
+   (heap/pool reclaim, image-guard/policy escalation, forced health
+   scan, and a genuine runtime [scheduler power
+   bias](../kernel/Scheduler.md#runtime-power-bias)). The decision
+   is the pure `AutonomicEvaluate` — the exact seam step 3 swaps. No
+   NPU dependency: this is the honest "without the NPU" baseline.
 3. **Learned policy** — once the NPU has a firmware + submit path,
    that decision point can consult a small on-device model instead
    of hand-written heuristics. That is the realistic form of

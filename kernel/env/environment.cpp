@@ -12,6 +12,7 @@
 #include "cpu/topology.h"
 #include "debug/probes.h"
 #include "drivers/power/power.h"
+#include "env/autonomic.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "sched/sched.h"
@@ -260,6 +261,13 @@ void EmitBanner(const SystemEnvironment& e)
         // the poll period elapsed). Recompose picks it up and
         // republishes + logs/probes on a policy transition.
         (void)EnvironmentRecompose();
+
+        // Sense → decide → ACT. The autonomic engine runs every
+        // poll (memory / CPU / security conditions move without an
+        // observable env-field change, so it cannot hang off the
+        // recompose-changed branch). It reads its own telemetry and
+        // the freshly published env snapshot.
+        AutonomicTick();
     }
 }
 

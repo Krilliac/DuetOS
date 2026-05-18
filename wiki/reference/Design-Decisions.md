@@ -9428,3 +9428,47 @@ It also corrects an over-promise made in the slices 1–2 docs.
 - **Related roadmap track(s):** "Battery + ACPI suspend" (`_Qxx`
   AML query residual; S3/S0ix). Environment-awareness slices
   1–3 are complete and removed from the Roadmap.
+
+## 2026-05-18 — Autonomic engine acts CPU-side; scheduler knob is balancer-cadence, not a faked tick-rate
+
+- **Context.** The neural-engine arc's step 2 (sense → decide →
+  **act**) needed a real actuator. An inventory of the kernel
+  (`tools/` agent sweep) confirmed there is **no** runtime
+  scheduler tick-rate or quantum knob — `time::kTickHz` and the
+  round-robin quantum are compile constants. The earlier
+  "idle reaction deferred" entries already established there is
+  no safe idle-C-state lever either.
+- **Decision.** Do **not** fake a power knob. The autonomic
+  engine (`kernel/env/autonomic.{h,cpp}`) drives only real,
+  task-context-safe levers: `mm` reclaim/trim, `security`
+  guard/policy escalation, `RuntimeCheckerScan`, and one new
+  *genuine* scheduler lever — `SchedSetPowerBias`, which scales
+  the **active load-balancer cadence** (`PowerSave`: 8→32 ticks).
+  Balancer cadence is real, observable, reversible, and
+  hot-path-cheap (one byte read + branch); it is explicitly
+  *not* a tick-rate/quantum facade. Rules are rising-edge
+  latched; the decision (`AutonomicEvaluate`) is pure so the
+  future NPU-learned policy swaps it without touching actuators.
+- **Rules out.** A cpuidle governor / MWAIT C-state hint as the
+  power lever (no profile evidence, no consumer — same reasoning
+  as the slice-3 idle entry); a per-vendor whitelisted actuator
+  set (rule predicates are property tests, not allow-lists).
+- **Security posture.** Rule 3 deliberately auto-applies
+  `Production`/`Enforce` on a kernel-integrity finding from the
+  monitor poll — the user chose the full escalation (not the
+  alert-only variant). This closes the runtime-checker's
+  long-standing "no automatic escalation" gap.
+- **NPU independence.** The engine has zero NPU dependency and
+  runs entirely CPU-side — the honest "works without the NPU /
+  no firmware yet" baseline. The NPU later only replaces the
+  pure decision function.
+- **Verified:** zero-warning `x86_64-debug` **and**
+  `x86_64-release` builds; debug boot emits `[npu] selftest
+  pass`, `sched : power bias changed to="balanced"`,
+  `[autonomic] engine primed`, `[autonomic] selftest pass`;
+  `boot-log-analyze.sh` verdict OK (120 self-tests, 0
+  non-deliberate failures); `clang-format` clean; `ctest`
+  boot-smoke SKIPs cleanly under TCG (no `/dev/kvm`).
+- **Related roadmap track(s):** the neural-engine arc step 3
+  (NPU firmware + submit gate, then learned policy behind
+  `AutonomicEvaluate`).

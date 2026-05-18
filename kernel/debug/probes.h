@@ -164,6 +164,13 @@ enum class ProbeId : u8
     // EnvPowerPolicy in bits 8..15 and the new one in bits 0..7.
     kEnvPolicyChange,
 
+    // The env autonomic engine took a defensive/optimising action
+    // (memory reclaim, security escalation, scheduler power bias,
+    // forced health scan). A clean idle boot never fires this; a
+    // fire means a rule's condition went true. Packed value: rule
+    // id in bits 8..15, action id in bits 0..7 (see env/autonomic.h).
+    kAutonomicAction,
+
     kCount, // sentinel
 };
 

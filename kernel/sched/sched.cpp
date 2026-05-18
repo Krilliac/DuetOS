@@ -1105,6 +1105,15 @@ constexpr u32 kBalanceMargin = 4;
 constexpr u64 kBalancePeriodTicks = 8; // 80 ms at 100 Hz — cheap enough every CPU.
 constexpr u32 kBalanceNoVictim = ~0u;
 
+// PowerSave stretches the active-balancer period by this factor:
+// 8 → 32 ticks (320 ms). Fewer cross-CPU walks/migrations/IPIs on
+// a battery box; the cost is slower load convergence, never wrong
+// scheduling. Plain byte global (x86_64 byte load/store is atomic;
+// this is a hint set rarely from one task, read on every tick —
+// same racy-but-fine contract as g_total_ticks).
+constexpr u64 kPowerSaveBalanceFactor = 4;
+constinit u8 g_sched_power_bias = static_cast<u8>(PowerBias::Performance);
+
 // Pure decision: returns the cpu_id of the heaviest same-cluster
 // peer whose `runq_normal_len` strictly exceeds `self_len + margin
 // - 1` (i.e. by at least `kBalanceMargin`). Returns `kBalanceNoVictim`
@@ -2383,7 +2392,12 @@ void OnTimerTick(u64 now_ticks)
         if (tick_cpu != nullptr)
         {
             const u64 phase = static_cast<u64>(tick_cpu->cpu_id);
-            if ((now_ticks + phase) % kBalancePeriodTicks == 0)
+            // Effective period stretches under PowerSave (one byte
+            // read + branch; no function call on the hot path).
+            const u64 period = (g_sched_power_bias == static_cast<u8>(PowerBias::PowerSave))
+                                   ? (kBalancePeriodTicks * kPowerSaveBalanceFactor)
+                                   : kBalancePeriodTicks;
+            if ((now_ticks + phase) % period == 0)
             {
                 PeriodicBalanceTick();
             }
@@ -3279,6 +3293,41 @@ SchedStats SchedStatsRead()
         .total_ticks = g_total_ticks,
         .idle_ticks = g_idle_ticks,
     };
+}
+
+const char* SchedPowerBiasName(PowerBias b)
+{
+    switch (b)
+    {
+    case PowerBias::Performance:
+        return "performance";
+    case PowerBias::Balanced:
+        return "balanced";
+    case PowerBias::PowerSave:
+        return "powersave";
+    }
+    return "?";
+}
+
+PowerBias SchedPowerBias()
+{
+    return static_cast<PowerBias>(g_sched_power_bias);
+}
+
+u64 SchedBalancePeriodTicks()
+{
+    return (SchedPowerBias() == PowerBias::PowerSave) ? (kBalancePeriodTicks * kPowerSaveBalanceFactor)
+                                                      : kBalancePeriodTicks;
+}
+
+void SchedSetPowerBias(PowerBias b)
+{
+    if (static_cast<u8>(b) == g_sched_power_bias)
+    {
+        return;
+    }
+    g_sched_power_bias = static_cast<u8>(b);
+    KLOG_INFO_S("sched", "power bias changed", "to", SchedPowerBiasName(b));
 }
 
 namespace

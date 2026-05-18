@@ -458,6 +458,33 @@ struct SchedStats
 };
 SchedStats SchedStatsRead();
 
+/// Runtime power/performance bias for the scheduler. A hint, not a
+/// correctness input: it only scales how often the *active* load
+/// balancer fires (PowerSave balances less aggressively → fewer
+/// cross-CPU spinlock walks, task migrations, and wakeup IPIs on a
+/// lightly-loaded box). The core schedule path is unaffected;
+/// under-balancing only costs some load-distribution optimality,
+/// never correctness. Set from task context (the env autonomic
+/// engine on a power-policy transition); read on every timer tick.
+enum class PowerBias : u8
+{
+    Performance = 0, // balance every kBalancePeriodTicks (default)
+    Balanced,        // same cadence as Performance for now
+    PowerSave,       // balance kPowerSaveBalanceFactor× less often
+};
+
+/// Apply a new bias. Idempotent; logs only on an actual change.
+void SchedSetPowerBias(PowerBias b);
+
+/// Current bias (cheap byte read; no lock).
+PowerBias SchedPowerBias();
+
+/// Effective active-balancer period in ticks for the current bias.
+/// Exposed for the scheduler self-test and the `sched` shell line.
+u64 SchedBalancePeriodTicks();
+
+const char* SchedPowerBiasName(PowerBias b);
+
 // Read-only view of one task for ps-style enumeration. Fields
 // are snapshots copied at the moment SchedEnumerate visits the
 // task; no pointer-chasing across the boundary so callbacks can

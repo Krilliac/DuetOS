@@ -87,6 +87,45 @@ Slices 1–2 said the idle reaction would land "with slice 3, where a real lever
 
 The full power-button → S5 chain could **not** be observed live on the available QEMU targets, and the script says so rather than claiming success. The `env-monitor` is a Normal-priority task that only gets CPU after the boot task winds down — ~coincident with a **pre-existing ~17 s automatic ACPI poweroff** in the headless CI boot (verified identical on the slice-2 build, so *not* a slice-3 regression). The SCI therefore arms just as the box powers itself off, leaving no window to land a QMP button press first. `tools/test/env-powerbtn-smoke.sh` gates on `[acpi/sci] armed`, presses the button, and reports **PASS** only on the `[env/sci] PWRBTN_STS latched` sentinel, **SKIP** when the pre-existing auto-shutdown races it, and **FAIL** only on a panic or an armed-but-ignored button. Correctness up to the hardware boundary is proven by `[acpi/sci-selftest] PASS` (synthetic PM1 decode + latch round-trip), the `[acpi/sci] armed` milestone, and a clean analyzer verdict.
 
+## Autonomic rule engine
+
+`kernel/env/autonomic.{h,cpp}` closes the **act** leg of the
+sense → decide → act loop. `AutonomicTick()` runs every env-monitor
+poll (after `EnvironmentRecompose()`, unconditionally — memory / CPU
+/ security conditions move without an observable env-field change, so
+it cannot hang off the recompose-`changed` branch). It senses real
+telemetry and invokes real, task-context-safe kernel levers — no
+stubs:
+
+| Rule | If (real sensed) | Then (real action) |
+|------|------------------|--------------------|
+| 1 MemPressure | free frames < 10 % (`mm::FreeFramesCount`/`TotalFrames`) | `KernelHeapDrainBins` + `FrameAllocatorDrainPools` |
+| 2 ThermalPower | `thermal_throttle` rising edge | `FrameAllocatorDrainPools` + forced health scan |
+| 3 SecurityIntegrity | `RuntimeCheckerStatusRead().issues_found_total` rose | `SetGuardMode(Enforce)` + `PolicySet(Production)` |
+| 4 CpuSaturation | 1-min loadavg > online-CPU count (rising) | `RuntimeCheckerScan()` |
+| 5 PowerTransition | `EnvPowerPolicy` changed | `SchedSetPowerBias()` — a real [scheduler lever](Scheduler.md#runtime-power-bias) |
+
+Rules are **rising-edge** latched (a held condition does not
+re-fire; a contended box does not flood). The decision —
+`AutonomicEvaluate(state, inputs)` — is **pure** (no kernel calls,
+fully unit-tested by `AutonomicSelfTest` against synthetic inputs;
+the self-test never performs a real `AutonomicApply`). That purity
+is deliberate: it is the exact seam a future NPU-backed learned
+policy replaces, without touching the actuators. Every action fires
+a `kAutonomicAction` ArmedLog probe + an `[autonomic]` KLOG line; a
+clean idle boot stays silent. `AutonomicInit()` primes the edge
+state and aligns the scheduler bias to the boot-derived policy
+(observable at boot as `sched : power bias changed to=...` +
+`[autonomic] engine primed` / `[autonomic] selftest pass`). Shell:
+`autonomic` (alias `auto`).
+
+Rule 3 closes the "no automatic security escalation" gap the
+runtime-checker historically flagged: integrity tampering now
+clamps the box without an operator in the loop. This supersedes the
+older "idle reaction deferred" framing — the substantive **act** is
+no longer a deferred idle-C-state facade; it is this engine driving
+real memory / security / scheduler levers.
+
 ## Boot wiring
 
 `EnvironmentInit()` runs inside `BootBringupDevices()` immediately after `drivers::power::PowerInit()` — so AC/battery/thermal are live — and after SMP AP bring-up, so the online census is final. `EnvironmentMonitorStart()` is called immediately after (scheduler is online by the devices phase, and the first snapshot is published); the monitor task then runs `AcpiSciInit`. The self-test is `DUETOS_BOOT_SELFTEST`-gated (debug/self-test builds only); `AcpiSciSelfTest` (`[acpi/sci-selftest] PASS`) runs in the ACPI bring-up block, `EnvironmentSelfTest` (`[env-selftest] PASS`) in the devices block.

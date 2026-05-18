@@ -52,6 +52,7 @@ constexpr ProbeRow kProbeTable[] = {
     {ProbeId::kLeakAttributable, "diag.leak_attributable", ProbeArm::ArmedLog},
     {ProbeId::kFixJournaled, "diag.fix_journaled", ProbeArm::ArmedLog},
     {ProbeId::kEnvPolicyChange, "env.policy_change", ProbeArm::ArmedLog},
+    {ProbeId::kAutonomicAction, "env.autonomic_action", ProbeArm::ArmedLog},
 };
 static_assert(sizeof(kProbeTable) / sizeof(kProbeTable[0]) == static_cast<u64>(ProbeId::kCount),
               "kProbeTable size must match ProbeId::kCount — add a row for every enum entry");
