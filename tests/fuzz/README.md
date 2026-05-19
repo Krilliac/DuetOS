@@ -98,17 +98,17 @@ make -C tests/fuzz run-ntfs        # seeds the corpus first, then 60 s
 make -C tests/fuzz run-ext4        # seeds the corpus first, then 60 s
 make -C tests/fuzz run-net         # seeds the corpus first, then 60 s
 make -C tests/fuzz run-deflate     # 60 s (no seed gate — raw bitstream)
-make -C tests/fuzz run-gzip
-make -C tests/fuzz run-zip
-make -C tests/fuzz run-bmp
-make -C tests/fuzz run-tga
-make -C tests/fuzz run-jpeg
-make -C tests/fuzz run-png
-make -C tests/fuzz run-asn1
-make -C tests/fuzz run-x509
-make -C tests/fuzz run-fw_pkg
-make -C tests/fuzz run-pe_exports
-make -C tests/fuzz run-vt
+make -C tests/fuzz run-gzip        # 60 s (no seed gate)
+make -C tests/fuzz run-zip         # seeds the corpus first, then 60 s
+make -C tests/fuzz run-bmp         # seeds the corpus first, then 60 s
+make -C tests/fuzz run-tga         # seeds the corpus first, then 60 s
+make -C tests/fuzz run-jpeg        # seeds the corpus first, then 60 s
+make -C tests/fuzz run-png         # seeds the corpus first, then 60 s
+make -C tests/fuzz run-asn1        # 60 s (no seed gate)
+make -C tests/fuzz run-x509        # 60 s (no seed gate)
+make -C tests/fuzz run-fw_pkg      # seeds the corpus first, then 60 s
+make -C tests/fuzz run-pe_exports  # 60 s
+make -C tests/fuzz run-vt          # 60 s (no seed gate)
 ```
 
 Each `run-*` target creates `corpus/<name>/` and lets libFuzzer

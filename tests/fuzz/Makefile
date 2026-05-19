@@ -316,8 +316,13 @@ run-net: $(BIN)/fuzz_net
 	@python3 seeds/gen_net_seeds.py corpus/net
 	$(BIN)/fuzz_net -max_len=2048 -max_total_time=60 -print_final_stats=1 corpus/net
 
+# Generic runner for the harnesses without a bespoke run-* above.
+# Auto-seeds from seeds/gen_<name>_seeds.py when one exists (same
+# rule fuzz-all.sh applies) so `make run-png` etc. starts past the
+# format gate exactly like the explicit fs/exec targets do.
 run-%: $(BIN)/fuzz_%
 	@mkdir -p corpus/$*
+	@[ -f seeds/gen_$*_seeds.py ] && python3 seeds/gen_$*_seeds.py corpus/$* || true
 	$< -max_total_time=60 -print_final_stats=1 corpus/$*
 
 # Throw everything at the OS at once: build every harness and run
