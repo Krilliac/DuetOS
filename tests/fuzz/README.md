@@ -28,6 +28,7 @@ silently drop a parser from coverage.
 | `fuzz_fat32` | `Fat32Probe` — the FAT32 volume parser (`fs/fat32.cpp` + lookup/dir/read TUs): BPB sanity, FAT-chain walk, root-directory snapshot. Same read-only-disk shim as `fuzz_gpt`; `Fat32Shutdown()` resets the volume registry each input so coverage doesn't stall at `kMaxVolumes`. |
 | `fuzz_exfat` | `ExfatProbe` — the exFAT volume parser (`fs/exfat.cpp` + the no_std `duetos_exfat` Rust crate: boot sector, geometry, dirent-set decoder). Same read-only-disk shim; Rust linked via the same rlib + panic=abort staticlib recipe as `duetos_exec_meta`. |
 | `fuzz_ntfs` | `NtfsProbe` — the NTFS volume parser (`fs/ntfs.cpp` + the no_std `duetos_ntfs` Rust crate: boot sector, MFT record header, $FILE_NAME attribute walk). Same read-only-disk shim + Rust recipe as `fuzz_exfat`. |
+| `fuzz_ext4` | `Ext4Probe` — the ext4 volume parser (`fs/ext4.cpp` + the no_std `duetos_ext4` Rust crate: superblock, group descriptor, inode, extent tree, dir entries). Same read-only-disk shim + Rust recipe; seeded with a real `mkfs.ext4` image so the deep inode/extent/dir walkers are reached. |
 
 `fuzz_pe` links the real no_std `duetos_exec_meta` Rust crate (built as
 an rlib + a panic=abort staticlib wrapper, so a Rust-side overflow/index
@@ -80,6 +81,7 @@ make -C tests/fuzz run-gpt         # seeds the corpus first, then 60 s
 make -C tests/fuzz run-fat32       # seeds the corpus first, then 60 s
 make -C tests/fuzz run-exfat       # seeds the corpus first, then 60 s
 make -C tests/fuzz run-ntfs        # seeds the corpus first, then 60 s
+make -C tests/fuzz run-ext4        # seeds the corpus first, then 60 s
 ```
 
 Each `run-*` target creates `corpus/<name>/` and lets libFuzzer

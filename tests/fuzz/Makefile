@@ -43,10 +43,11 @@ UTIL     := $(KERNEL)/util
 
 EXFAT_RUST := $(FS)/exfat_rust
 NTFS_RUST := $(FS)/ntfs_rust
+EXT4_RUST := $(FS)/ext4_rust
 
 HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuzz_eapol \
              $(BIN)/fuzz_pe $(BIN)/fuzz_elf $(BIN)/fuzz_gpt $(BIN)/fuzz_fat32 \
-             $(BIN)/fuzz_exfat $(BIN)/fuzz_ntfs
+             $(BIN)/fuzz_exfat $(BIN)/fuzz_ntfs $(BIN)/fuzz_ext4
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -141,6 +142,20 @@ $(BIN)/fuzz_ntfs: fuzz_ntfs.cpp $(FS)/ntfs.cpp host_shim/fs_stubs.cpp \
 		$(BIN)/libduetos_ntfs_fuzz.a | $(BIN)
 	$(CXX) $(CXXFLAGS) -I $(NTFS_RUST)/include $^ -o $@
 
+# ext4 volume parser (read-only Linux-interop tier). Same recipe.
+$(BIN)/libduetos_ext4.rlib: $(EXT4_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_ext4 -O $< -o $@
+
+$(BIN)/libduetos_ext4_fuzz.a: host_shim/ext4_fuzz_shim.rs \
+		$(BIN)/libduetos_ext4.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_ext4=$(BIN)/libduetos_ext4.rlib $< -o $@
+
+$(BIN)/fuzz_ext4: fuzz_ext4.cpp $(FS)/ext4.cpp host_shim/fs_stubs.cpp \
+		$(BIN)/libduetos_ext4_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(EXT4_RUST)/include $^ -o $@
+
 # Each run-* keeps a persistent corpus and stops after 60 s.
 # run-pe seeds the corpus first (see seeds/gen_pe_seeds.py) so the
 # fuzzer starts past the DOS/COFF prefix gate.
@@ -173,6 +188,11 @@ run-ntfs: $(BIN)/fuzz_ntfs
 	@mkdir -p corpus/ntfs
 	@python3 seeds/gen_ntfs_seeds.py corpus/ntfs
 	$(BIN)/fuzz_ntfs -max_len=262144 -max_total_time=60 -print_final_stats=1 corpus/ntfs
+
+run-ext4: $(BIN)/fuzz_ext4
+	@mkdir -p corpus/ext4
+	@python3 seeds/gen_ext4_seeds.py corpus/ext4
+	$(BIN)/fuzz_ext4 -max_len=1048576 -max_total_time=60 -print_final_stats=1 corpus/ext4
 
 run-%: $(BIN)/fuzz_%
 	@mkdir -p corpus/$*

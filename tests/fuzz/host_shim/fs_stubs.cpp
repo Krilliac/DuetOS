@@ -35,6 +35,7 @@ bool DbgIsEnabled(DbgChannel)
 void DbgEmitS(DbgChannel, const char*, const char*, const char*, const char*) {}
 void InitcallAutoRegister(Phase, const char*, InitcallFn) {}
 void SerialWriteFatAttr(u64) {}
+void SerialWriteInodeMode(u64) {}
 } // namespace duetos::core
 
 namespace duetos::sched
