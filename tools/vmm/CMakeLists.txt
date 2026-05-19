@@ -80,3 +80,6 @@ if(MSVC)
     target_compile_definitions(duetos-vmm PRIVATE
         NOMINMAX WIN32_LEAN_AND_MEAN _CRT_SECURE_NO_WARNINGS)
 endif()
+
+enable_testing()
+add_subdirectory(tests)
