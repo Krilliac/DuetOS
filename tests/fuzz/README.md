@@ -2,8 +2,9 @@
 
 Compile and run libFuzzer-driven fuzzers against the DuetOS code paths
 that consume attacker-controlled bytes: the wireless data-decode parsers
-(EAPOL key parser, vendor firmware envelope parsers) and the PE/COFF
-executable loader's parse/validate/report surface. The fuzzers run on the
+(EAPOL key parser, vendor firmware envelope parsers), the PE/COFF and
+ELF64 executable loaders' parse/validate surface, and the GPT
+partition-table parser (untrusted disk/USB bytes). The fuzzers run on the
 host (Linux/macOS clang), not on the target — they exercise the same
 source files the kernel builds, with a small `host_shim/` providing stub
 implementations of the kernel-only headers (serial output, klog macros,
@@ -22,6 +23,7 @@ silently drop a parser from coverage.
 | `fuzz_bcm_fw` | `BcmFirmwareParse(blob, size, &out)` — Broadcom b43 record stream |
 | `fuzz_pe` | `PeValidate` / `PeReport` / `PeIsPe32` / `PeIsDynamicBase` / `PePreferredBaseOf` / `PeImageSizeOf` / `PeQuickSummaryTo` — the PE/COFF loader's pure parse/validate/diagnostic walkers (`pe_loader.cpp` + `pe_exports.cpp`), plus the `duetos_exec_meta` Rust prefix/image validator it delegates to |
 | `fuzz_elf` | `ElfValidate` / `ElfEntry` / `ElfProgramHeaderInfo` / `ElfForEachPtLoad` — the ELF64 loader's pure header + PT_LOAD walkers (`elf_loader.cpp`), plus the `duetos_exec_meta` Rust ELF validator. Reuses the PE harness's Rust staticlib + stub TU (ElfLoad's mm deps overlap PeLoad's). |
+| `fuzz_gpt` | `GptProbe` — the GPT partition-table parser (`fs/gpt.cpp`): Protective-MBR check, primary-header walk, CRC32 of header + 128×128 entry array, partition-entry / LBA-range loop. The libFuzzer input is served as a read-only disk via `host_shim/drivers/storage/block.h`; the real `util/crc32.cpp` is linked so both CRC gates are exercised. |
 
 `fuzz_pe` links the real no_std `duetos_exec_meta` Rust crate (built as
 an rlib + a panic=abort staticlib wrapper, so a Rust-side overflow/index
@@ -66,6 +68,7 @@ make -C tests/fuzz run-rtl_fw
 make -C tests/fuzz run-bcm_fw
 make -C tests/fuzz run-pe          # seeds the corpus first, then 60 s
 make -C tests/fuzz run-elf         # seeds the corpus first, then 60 s
+make -C tests/fuzz run-gpt         # seeds the corpus first, then 60 s
 ```
 
 Each `run-*` target creates `corpus/<name>/` and lets libFuzzer

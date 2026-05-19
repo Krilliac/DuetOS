@@ -38,8 +38,11 @@ RUSTC    := rustc
 RUST_EDITION := 2021
 
 BIN := build
+FS       := $(KERNEL)/fs
+UTIL     := $(KERNEL)/util
+
 HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuzz_eapol \
-             $(BIN)/fuzz_pe $(BIN)/fuzz_elf
+             $(BIN)/fuzz_pe $(BIN)/fuzz_elf $(BIN)/fuzz_gpt
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -90,6 +93,12 @@ $(BIN)/fuzz_elf: fuzz_elf.cpp $(LOADER)/elf_loader.cpp \
 		host_shim/pe_stubs.cpp $(BIN)/libduetos_exec_meta_fuzz.a | $(BIN)
 	$(CXX) $(CXXFLAGS) -I $(EXEC_META)/include $^ -o $@
 
+# GPT partition-table parser. Serves the fuzz input as a read-only
+# disk via host_shim/drivers/storage/block.h; links the real
+# CRC32 the parser validates headers + entry array against.
+$(BIN)/fuzz_gpt: fuzz_gpt.cpp $(FS)/gpt.cpp $(UTIL)/crc32.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
 # Each run-* keeps a persistent corpus and stops after 60 s.
 # run-pe seeds the corpus first (see seeds/gen_pe_seeds.py) so the
 # fuzzer starts past the DOS/COFF prefix gate.
@@ -102,6 +111,11 @@ run-elf: $(BIN)/fuzz_elf
 	@mkdir -p corpus/elf
 	@python3 seeds/gen_elf_seeds.py corpus/elf
 	$(BIN)/fuzz_elf -max_total_time=60 -print_final_stats=1 corpus/elf
+
+run-gpt: $(BIN)/fuzz_gpt
+	@mkdir -p corpus/gpt
+	@python3 seeds/gen_gpt_seeds.py corpus/gpt
+	$(BIN)/fuzz_gpt -max_len=262144 -max_total_time=60 -print_final_stats=1 corpus/gpt
 
 run-%: $(BIN)/fuzz_%
 	@mkdir -p corpus/$*

@@ -130,7 +130,7 @@ bool ValidateProtectiveMbr(const u8* sector, u32 sector_size)
     return false;
 }
 
-bool ValidateGptHeader(const GptHeader& h, u64 sector_count, u32 sector_size)
+bool ValidateGptHeader(const GptHeader& h, u64 sector_count)
 {
     if (h.signature != kGptSignature)
     {
@@ -142,9 +142,20 @@ bool ValidateGptHeader(const GptHeader& h, u64 sector_count, u32 sector_size)
         core::LogWithValue(core::LogLevel::Warn, "fs/gpt", "LBA 1: unsupported revision", h.revision);
         return false;
     }
-    if (h.header_size < kGptHeaderSize || h.header_size > sector_size)
+    // header_size must be EXACTLY the canonical 92. The struct is
+    // fixed at sizeof(GptHeader)==92 and only 92 bytes are copied
+    // out of the sector into `hdr`; the header CRC below runs over
+    // `header_size` bytes of that 92-byte buffer. The old bound
+    // (>= 92 && <= sector_size) let an attacker-supplied
+    // header_size up to the 512-byte sector drive Crc32 ~420 bytes
+    // off the end of the stack struct (the GPT fuzzer caught this
+    // as a stack-buffer-overflow). UEFI permits a larger header
+    // with zeroed reserved tail, but every real mkfs/parted emits
+    // exactly 92 and this v0 already rejects all other
+    // non-canonical layouts (entry count/size), so pin it here.
+    if (h.header_size != kGptHeaderSize)
     {
-        core::LogWithValue(core::LogLevel::Warn, "fs/gpt", "LBA 1: bad header_size", h.header_size);
+        core::LogWithValue(core::LogLevel::Warn, "fs/gpt", "LBA 1: non-canonical header_size", h.header_size);
         return false;
     }
     if (h.num_partition_entries != kGptEntryCountStd || h.partition_entry_size != kGptEntrySizeStd)
@@ -337,7 +348,7 @@ bool GptProbe(u32 block_handle, u32* out_index)
     }
     GptHeader hdr{};
     CopyBytes(reinterpret_cast<u8*>(&hdr), sector, sizeof(hdr));
-    if (!ValidateGptHeader(hdr, sector_count, sector_size))
+    if (!ValidateGptHeader(hdr, sector_count))
     {
         return false;
     }
