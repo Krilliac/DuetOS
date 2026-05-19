@@ -320,31 +320,45 @@ bool MenuContains(u32 x, u32 y)
     return PanelAt(x, y) >= 0;
 }
 
-void MenuTrackHoverAt(u32 x, u32 y)
+// Fold the whole open stack's highlight state into one value.
+// Any change here means the menu paints a different row somewhere,
+// so the caller must recompose; an unchanged value means the
+// motion was visually inert for the menu. depth is included so an
+// open/close of a submenu also counts as a change.
+// File-local: internal linkage (the TU's other helpers live in the
+// anonymous namespace above, which closed before the public API
+// block; `static` keeps this symbol from leaking the same way).
+static u64 HoverSignature()
+{
+    u64 sig = g_panel_depth;
+    for (u32 i = 0; i < kMenuMaxStack; ++i)
+    {
+        // +1 so the -1 "no hover" sentinel stays distinct from row 0.
+        sig = (sig << 8) | static_cast<u8>(g_panels[i].hovered_row + 1);
+    }
+    return sig;
+}
+
+bool MenuTrackHoverAt(u32 x, u32 y)
 {
     if (g_panel_depth == 0)
-        return;
+        return false;
+    const u64 before = HoverSignature();
     const i32 pi = PanelAt(x, y);
     if (pi < 0)
     {
         // Cursor outside every panel: clear hover on topmost.
         g_panels[g_panel_depth - 1].hovered_row = -1;
-        return;
     }
-    Panel& p = g_panels[pi];
-    const i32 row = RowInPanel(p, y);
-    if (row < 0)
+    else
     {
-        p.hovered_row = -1;
-        return;
+        Panel& p = g_panels[pi];
+        const i32 row = RowInPanel(p, y);
+        // Clear hover for a miss or a non-activatable (separator /
+        // disabled) row; otherwise land the hover on `row`.
+        p.hovered_row = (row < 0 || !ItemIsActivatable(p.items[row])) ? -1 : row;
     }
-    // Skip non-activatable rows so hover doesn't land on them.
-    if (!ItemIsActivatable(p.items[row]))
-    {
-        p.hovered_row = -1;
-        return;
-    }
-    p.hovered_row = row;
+    return HoverSignature() != before;
 }
 
 void MenuSetHover(i32 panel, i32 row)

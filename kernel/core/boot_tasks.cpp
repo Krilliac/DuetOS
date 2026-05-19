@@ -1699,6 +1699,74 @@ void KbdReaderTask(void*)
     }
 }
 
+// A packet a previous AcquireCoalescedPacket() stopped on because
+// it changed the button mask. Parked here so it's replayed as its
+// own discrete event before any further motion coalescing.
+struct PendingMousePacket
+{
+    bool valid;
+    duetos::drivers::input::MousePacket pkt;
+};
+
+// Fold a burst of queued same-button motion packets into one packet
+// so a single (expensive, full-screen) DesktopCompose covers the
+// whole burst instead of running once per PS/2 packet. That
+// one-compose-per-packet pattern is the root cause of the start-menu
+// mouse lag: a full recompose cannot keep up with the ~100 Hz PS/2
+// packet rate, so the driver's 32-slot ring overflows, motion deltas
+// are dropped (drop-oldest), and the cursor crawls / skips.
+//
+// CONTRACT — why this is NOT just "sum every delta":
+//   Button transitions are DISCRETE events. The reader body below
+//   resolves press / release / right-press edges one packet at a
+//   time (drag begin/end, menu item dispatch, click-to-raise). If a
+//   press and its release both land inside one drain and we coalesce
+//   across them, the click is silently lost. So the drain MUST stop
+//   the instant a queued packet's button mask differs from what has
+//   been accumulated, and hand that packet back (via `pending`) to
+//   be processed on its own next iteration.
+duetos::drivers::input::MousePacket AcquireCoalescedPacket(PendingMousePacket& pending)
+{
+    using duetos::drivers::input::MousePacket;
+
+    // A button-change packet parked last iteration takes priority
+    // and is returned untouched so its edge is handled discretely.
+    if (pending.valid)
+    {
+        pending.valid = false;
+        return pending.pkt;
+    }
+
+    MousePacket acc = duetos::drivers::input::Ps2MouseReadPacket(); // blocks until 1 packet
+
+    // Drain queued packets, folding motion while the button mask is
+    // unchanged. The stop condition is the whole correctness story:
+    // we coalesce as long as `buttons` matches what we've
+    // accumulated — which deliberately INCLUDES a held-button drag
+    // (buttons stay equal for the whole drag, so a fast drag's
+    // motion still coalesces into one compose; that was the
+    // explicit ask, and it's safe because no press/release EDGE
+    // occurs while the mask is constant). The instant the mask
+    // differs, that packet is a press/release/right-press edge: the
+    // reader body resolves those one at a time, so we park it and
+    // stop, replaying it discretely next iteration.
+    MousePacket next;
+    while (duetos::drivers::input::Ps2MouseTryReadPacket(&next))
+    {
+        if (next.buttons == acc.buttons)
+        {
+            acc.dx += next.dx;
+            acc.dy += next.dy;
+            acc.dz += next.dz;
+            continue;
+        }
+        pending = {true, next};
+        break;
+    }
+
+    return acc;
+}
+
 // Mouse reader task: Ps2 packet consumer driving window
 // focus/drag/resize/snap, menu + taskbar + tray interaction,
 // scrollbar drag and the desktop context menu.
@@ -1869,9 +1937,13 @@ void MouseReaderTask(void*)
         {"MINIMIZE", 23, 0, nullptr, 0}, {"MAXIMIZE", 24, 0, nullptr, 0}, {"CLOSE", 25, 0, nullptr, 0},
     };
 
+    // Carries a button-change packet across iterations when the
+    // coalescing drain stops on an edge (see AcquireCoalescedPacket).
+    static PendingMousePacket pending{false, {}};
+
     for (;;)
     {
-        const auto p = duetos::drivers::input::Ps2MouseReadPacket();
+        const auto p = AcquireCoalescedPacket(pending);
 
         // In TTY mode the cursor is hidden and windows aren't
         // painted — ignore UI-side mouse handling entirely.
@@ -1925,9 +1997,12 @@ void MouseReaderTask(void*)
 
         // Track menu hover. Cheap when no menu is open. When
         // open, this updates the highlighted row so the next
-        // compose paints it. The recompose itself is forced
-        // below if the cursor moved while a menu was open.
-        duetos::drivers::video::MenuTrackHoverAt(cx, cy);
+        // compose paints it. `menu_hover_changed` drives the
+        // forced recompose below: only repaint when the
+        // highlighted row actually moved, not on every cursor
+        // jiggle within a row (the cursor sprite itself is
+        // already repainted by CursorMove above).
+        const bool menu_hover_changed = duetos::drivers::video::MenuTrackHoverAt(cx, cy);
 
         // Tooltip hover tracker. Records widget-under-cursor
         // + first-hover tick so a 1-second linger can promote
@@ -2979,12 +3054,17 @@ void MouseReaderTask(void*)
         }
 
         // Hover responsiveness: when a menu is open and the
-        // cursor moved this frame, force an immediate recompose
-        // so the highlighted row tracks the mouse without
-        // waiting for the 1 Hz ui-ticker. Skipped during drag
-        // (drag has its own compose) and when the menu was
+        // highlighted row changed this frame, force an immediate
+        // recompose so the highlight tracks the mouse without
+        // waiting for the 1 Hz ui-ticker. Gated on an actual
+        // hover-row change (not raw motion): a packet that only
+        // jiggles the cursor inside one row produces an identical
+        // menu and the cursor sprite is already repainted by
+        // CursorMove — a full-screen recompose there is the
+        // wasted work that overran the PS/2 ring. Skipped during
+        // drag (drag has its own compose) and when the menu was
         // already handled (the dispatch path composes too).
-        if (!drag.active && !menu_handled && duetos::drivers::video::MenuIsOpen() && (p.dx != 0 || p.dy != 0))
+        if (!drag.active && !menu_handled && duetos::drivers::video::MenuIsOpen() && menu_hover_changed)
         {
             duetos::drivers::video::CursorHide();
             duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
