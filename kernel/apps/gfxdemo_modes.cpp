@@ -1,6 +1,7 @@
 #include "apps/gfxdemo_modes.h"
 
 #include "drivers/video/framebuffer.h"
+#include "util/compiler.h"
 
 namespace duetos::apps::gfxdemo
 {
@@ -138,7 +139,7 @@ duetos::i32 FxMul(duetos::i32 a, duetos::i32 b)
     return static_cast<duetos::i32>(shifted);
 }
 
-duetos::u32 PrngNext(duetos::u32* state)
+DUETOS_NO_SANITIZE_WRAP duetos::u32 PrngNext(duetos::u32* state)
 {
     duetos::u32 z = (*state += 0x9E3779B9u);
     z = (z ^ (z >> 16)) * 0x85EBCA6Bu;

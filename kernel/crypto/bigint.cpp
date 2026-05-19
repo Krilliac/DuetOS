@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "util/compiler.h"
 
 namespace duetos::crypto
 {
@@ -23,7 +24,7 @@ inline void TrimUsed(BigInt* a)
 // In-place a <<= 1. The high bit shifted off the top is asserted
 // zero — callers must keep BigInts within `kBigIntBits - 1` of
 // the modulus before calling ModExp's internal shift.
-void ShiftLeft1(BigInt* a)
+DUETOS_NO_SANITIZE_WRAP void ShiftLeft1(BigInt* a)
 {
     u32 carry = 0;
     for (u32 i = 0; i < kBigIntLimbs; ++i)
@@ -126,7 +127,7 @@ u32 BigIntToBytesBE(const BigInt& a, u8* dst, u32 cap)
     return cap;
 }
 
-int BigIntCompare(const BigInt& a, const BigInt& b)
+DUETOS_NO_SANITIZE_WRAP int BigIntCompare(const BigInt& a, const BigInt& b)
 {
     if (a.used != b.used)
         return a.used < b.used ? -1 : 1;
@@ -211,7 +212,7 @@ void BigIntMul(BigInt* out, const BigInt& a, const BigInt& b)
     TrimUsed(out);
 }
 
-void BigIntMod(BigInt* out, const BigInt& a, const BigInt& m)
+DUETOS_NO_SANITIZE_WRAP void BigIntMod(BigInt* out, const BigInt& a, const BigInt& m)
 {
     KASSERT(!BigIntIsZero(m), "bigint", "Mod by zero");
     // a < m: result is a.
@@ -243,7 +244,7 @@ void BigIntMod(BigInt* out, const BigInt& a, const BigInt& m)
     BigIntCopy(out, r);
 }
 
-void BigIntModExp(BigInt* out, const BigInt& base, const BigInt& exp, const BigInt& m)
+DUETOS_NO_SANITIZE_WRAP void BigIntModExp(BigInt* out, const BigInt& base, const BigInt& exp, const BigInt& m)
 {
     KASSERT(!BigIntIsZero(m), "bigint", "ModExp m=0");
     // result = 1

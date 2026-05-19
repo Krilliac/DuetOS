@@ -38,6 +38,7 @@
 #include "util/saturating.h"
 #include "util/string.h"
 #include "util/types.h"
+#include "util/compiler.h"
 
 namespace duetos::mm
 {
@@ -148,7 +149,7 @@ namespace
 // `objects_per_slab` objects threaded onto a brand-new freelist.
 // Returns the head of that freelist (caller-of-this-helper splices
 // it onto `c->free_head` under the cache lock).
-SlabFreeNode* GrowOneSlab(SlabCache* c)
+DUETOS_NO_SANITIZE_WRAP SlabFreeNode* GrowOneSlab(SlabCache* c)
 {
     void* block = KMalloc(kSlabBytes);
     if (block == nullptr)

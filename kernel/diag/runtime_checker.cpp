@@ -50,6 +50,7 @@
 #include "core/panic.h"
 #include "security/fault_domain.h"
 #include "util/symbols.h"
+#include "util/compiler.h"
 
 // __stack_chk_guard symbol is C-linkage.
 extern "C" duetos::u64 __stack_chk_guard;
@@ -860,7 +861,7 @@ bool CheckGdt()
 extern "C" const u8 _text_start[];
 extern "C" const u8 _text_end[];
 
-u64 ComputeTextSpotHash()
+DUETOS_NO_SANITIZE_WRAP u64 ComputeTextSpotHash()
 {
     constexpr u64 kFnvOffset = 0xcbf29ce484222325ULL;
     constexpr u64 kFnvPrime = 0x100000001b3ULL;
@@ -890,7 +891,7 @@ u64 ComputeTextSpotHash()
 // `_text_end`. Only called from `CheckKernelText` (once per scan),
 // so the ~1 ms it costs per ~1 MiB pays straight against the
 // detection-gap that the spot-hash version cannot close.
-u64 ComputeTextFullHash()
+DUETOS_NO_SANITIZE_WRAP u64 ComputeTextFullHash()
 {
     constexpr u64 kFnvOffset = 0xcbf29ce484222325ULL;
     constexpr u64 kFnvPrime = 0x100000001b3ULL;

@@ -99,7 +99,12 @@ set +o pipefail
 "${SCRIPT_DIR}/run.sh" 2>&1 | tee "${SERIAL_LOG}" || true
 set -o pipefail
 
-if grep -q "^\[stress\] done" "${SERIAL_LOG}"; then
+# Not line-anchored: COM1 is written by every CPU, so another
+# subsystem's log line can land immediately before the sentinel
+# on the same physical line (e.g. "...table =[stress] done").
+# The sentinel is emitted exactly once by the driver-completion
+# path, so an unanchored match is unambiguous.
+if grep -q "\[stress\] done" "${SERIAL_LOG}"; then
     echo "[run-stress] OK — stress driver completed cleanly"
     exit 0
 fi

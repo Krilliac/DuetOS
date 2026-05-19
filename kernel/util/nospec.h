@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/compiler.h"
 #include "util/types.h"
 
 /*
@@ -53,13 +54,13 @@ namespace duetos::util
 /// the wrapped difference stayed in the top half and the mask
 /// resolved to all-1s, letting the speculator carry the bad idx
 /// through.
-[[nodiscard]] constexpr u64 MaskedIndex(u64 idx, u64 bound)
+[[nodiscard]] DUETOS_NO_SANITIZE_WRAP constexpr u64 MaskedIndex(u64 idx, u64 bound)
 {
     const u64 mask = 0ULL - static_cast<u64>(idx < bound);
     return idx & mask;
 }
 
-[[nodiscard]] constexpr u32 MaskedIndex32(u32 idx, u32 bound)
+[[nodiscard]] DUETOS_NO_SANITIZE_WRAP constexpr u32 MaskedIndex32(u32 idx, u32 bound)
 {
     const u32 mask = 0U - static_cast<u32>(idx < bound);
     return idx & mask;

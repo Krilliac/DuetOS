@@ -218,8 +218,11 @@ void StringSelfTest()
         Expect(BytesAll(buf, 0x55, 64), "memset wrote pattern across full buffer");
 
         // memset takes `int` for the value but only the low byte
-        // is used. 0xCAFEBABE truncates to 0xBE.
-        memset(buf, 0xCAFEBABE, 16);
+        // is used. 0xCAFEBABE truncates to 0xBE. The cast is
+        // explicit so -fsanitize=implicit-conversion doesn't flag
+        // the (deliberate) unsigned→int narrowing this test exists
+        // to exercise.
+        memset(buf, static_cast<int>(0xCAFEBABEu), 16);
         Expect(BytesAll(buf, 0xBE, 16), "memset masks value to low byte");
     }
 

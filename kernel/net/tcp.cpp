@@ -25,6 +25,7 @@
 #include "sched/sched.h"
 #include "time/tick.h"
 #include "util/string.h"
+#include "util/compiler.h"
 
 namespace duetos::net::tcp
 {
@@ -67,7 +68,8 @@ bool IpZero(Ipv4Address a)
     return a.octets[0] == 0 && a.octets[1] == 0 && a.octets[2] == 0 && a.octets[3] == 0;
 }
 
-u32 BucketHash(u32 iface, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip, u16 peer_port)
+DUETOS_NO_SANITIZE_WRAP u32 BucketHash(u32 iface, Ipv4Address local_ip, u16 local_port, Ipv4Address peer_ip,
+                                       u16 peer_port)
 {
     u32 h = 5381u;
     h = ((h << 5) + h) + iface;

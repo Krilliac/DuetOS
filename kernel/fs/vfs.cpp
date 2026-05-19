@@ -6,6 +6,7 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "util/saturating.h"
+#include "util/compiler.h"
 
 namespace duetos::fs
 {
@@ -147,7 +148,7 @@ constinit DentryCacheEntry g_dentry_cache[kDentryCacheSize] = {};
 constinit util::SatU64 g_dentry_cache_hits = 0;
 constinit util::SatU64 g_dentry_cache_misses = 0;
 
-inline u32 DentryHash(const RamfsNode* parent, const char* name, u64 name_len)
+DUETOS_NO_SANITIZE_WRAP inline u32 DentryHash(const RamfsNode* parent, const char* name, u64 name_len)
 {
     // Mix the parent pointer into the seed so identical component
     // names under different parents land in different buckets.

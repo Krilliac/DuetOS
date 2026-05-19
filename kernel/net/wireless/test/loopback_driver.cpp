@@ -3,6 +3,7 @@
 #include "core/panic.h"
 #include "net/wireless/mlme.h"
 #include "net/wireless/wifi_diag.h"
+#include "util/compiler.h"
 
 namespace duetos::net::wireless::test
 {
@@ -384,7 +385,7 @@ LoopbackDriver* DriverFromCtx(WirelessDevice* wdev)
     return ::duetos::core::Result<void>{};
 }
 
-u32 LoopbackDriverPump(LoopbackDriver* drv)
+DUETOS_NO_SANITIZE_WRAP u32 LoopbackDriverPump(LoopbackDriver* drv)
 {
     if (drv == nullptr || drv->netif == nullptr)
         return 0;

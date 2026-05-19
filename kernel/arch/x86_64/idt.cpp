@@ -4,6 +4,7 @@
 
 #include "core/panic.h"
 #include "log/klog.h"
+#include "util/compiler.h"
 
 /*
  * The exception + IRQ stubs in exceptions.S publish their addresses
@@ -149,7 +150,7 @@ u8* IdtRawBase()
     return reinterpret_cast<u8*>(g_idt);
 }
 
-u64 IdtHash()
+DUETOS_NO_SANITIZE_WRAP u64 IdtHash()
 {
     // FNV-1a over the raw IDT bytes. 4096 bytes -> ~1 µs per
     // call on modern CPUs. Not cryptographic (an attacker who

@@ -23,6 +23,7 @@
 #include "fs/fat32_internal.h"
 #include "fs/fat32_write_internal.h"
 #include "mm/kheap.h"
+#include "util/compiler.h"
 
 namespace duetos::fs::fat32
 {
@@ -161,7 +162,7 @@ u8 SfnChecksum(const u8* sfn11)
 // name within `dir_cluster`. Picks up to 6 SFN-legal characters
 // of the base and up to 3 of the extension, then tries numeric
 // tails 1..9. Returns false if no free tail in that range.
-bool GenerateUniqueSfn(const Volume& v, u32 dir_cluster, const char* long_name, u8* out_sfn_11)
+DUETOS_NO_SANITIZE_WRAP bool GenerateUniqueSfn(const Volume& v, u32 dir_cluster, const char* long_name, u8* out_sfn_11)
 {
     auto sfn_safe = [](char c) -> int
     {

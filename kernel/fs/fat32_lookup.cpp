@@ -20,6 +20,7 @@
 #include "diag/kdbg.h"
 #include "fs/fat32_internal.h"
 #include "log/klog.h"
+#include "util/compiler.h"
 
 namespace duetos::fs::fat32
 {
@@ -54,7 +55,7 @@ struct PathCacheEntry
 constinit PathCacheEntry g_path_cache[kPathCacheSlots] = {};
 constinit u64 g_path_cache_gen = 1; // 0 reserved for "never filled"
 
-u64 PathHash(const Volume* v, const char* p)
+DUETOS_NO_SANITIZE_WRAP u64 PathHash(const Volume* v, const char* p)
 {
     // FNV-1a over the volume pointer bytes + path string.
     u64 h = 1469598103934665603ULL;

@@ -2,6 +2,7 @@
 
 #include "log/klog.h"
 #include "time/tick.h"
+#include "util/compiler.h"
 
 namespace duetos::net::firewall
 {
@@ -35,7 +36,7 @@ constexpr u32 Ipv4ToHost(Ipv4Address a)
     return (u32(a.octets[0]) << 24) | (u32(a.octets[1]) << 16) | (u32(a.octets[2]) << 8) | u32(a.octets[3]);
 }
 
-constexpr u32 PrefixMask(u8 mask_bits)
+DUETOS_NO_SANITIZE_WRAP constexpr u32 PrefixMask(u8 mask_bits)
 {
     if (mask_bits == 0)
     {

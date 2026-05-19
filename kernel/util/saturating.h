@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/compiler.h"
 #include "util/types.h"
 
 /*
@@ -68,7 +69,7 @@ void SatLogClamp(const char* tag, u64 attempted, u64 clamped, void* caller_rip);
 // Free-function operations on plain primitives.
 // ---------------------------------------------------------------
 
-template <typename T> [[nodiscard]] inline T SatAdd(T a, T b)
+template <typename T> [[nodiscard]] DUETOS_NO_SANITIZE_WRAP inline T SatAdd(T a, T b)
 {
     static_assert(sizeof(T) <= 8, "SatAdd: T too wide");
     T result;
@@ -94,7 +95,7 @@ template <typename T> [[nodiscard]] inline T SatSub(T a, T b)
     return result;
 }
 
-template <typename T> [[nodiscard]] inline T SatMul(T a, T b)
+template <typename T> [[nodiscard]] DUETOS_NO_SANITIZE_WRAP inline T SatMul(T a, T b)
 {
     static_assert(sizeof(T) <= 8, "SatMul: T too wide");
     T result;
@@ -137,7 +138,7 @@ template <typename T> [[nodiscard]] inline T SatMul(T a, T b)
 //   diagnostic / liveness — the only invariant is "monotonic and
 //   bounded." If a future caller needs ordering against unrelated
 //   memory, take SEQ_CST locally around it.
-template <typename T> inline T SatAtomicAdd(T* p, T n)
+template <typename T> DUETOS_NO_SANITIZE_WRAP inline T SatAtomicAdd(T* p, T n)
 {
     static_assert(sizeof(T) <= 8, "SatAtomicAdd: T too wide");
     const T maxv = static_cast<T>(~static_cast<T>(0));

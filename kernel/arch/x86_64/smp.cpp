@@ -19,6 +19,7 @@
 #include "mm/page.h"
 #include "sched/sched.h"
 #include "sync/spinlock.h"
+#include "util/string.h"
 
 // Linker-emitted symbols for the trampoline image (see ap_trampoline.S).
 // Declared at file scope (outside any namespace) so the linker matches
@@ -664,6 +665,16 @@ u64 SmpStartAps()
             core::DebugPanicOrWarn("arch/smp", "KMalloc failed for AP PerCpu");
             continue;
         }
+        // KMalloc does not zero. Zero the whole struct up front so
+        // every PerCpu field has a defined (0/nullptr/false) initial
+        // value — the explicit field assignments below then set the
+        // ones that need a non-zero value. This makes the init a
+        // property ("all of PerCpu starts zeroed") rather than a
+        // hand-maintained whitelist: a newly-added PerCpu field can
+        // no longer be silently left as KMalloc garbage (this is
+        // exactly how sched_tasks_reaped was being read uninitialised
+        // by SchedSumReaped).
+        memset(ap_pcpu, 0, sizeof(cpu::PerCpu));
         ap_pcpu->cpu_id = cpu_id;
         ap_pcpu->lapic_id = rec.apic_id;
         ap_pcpu->current_task = nullptr;
@@ -671,9 +682,11 @@ u64 SmpStartAps()
         ap_pcpu->need_resched = false;
         ap_pcpu->kernel_rsp = 0;
         ap_pcpu->user_rsp_scratch = 0;
-        // Zero the snapshot + held-lock bookkeeping. KMalloc doesn't
-        // zero, and a stale `panic_snapshot_valid` would make a peer
-        // CPU look snapshotted when it actually hasn't been NMI'd.
+        // Snapshot + held-lock bookkeeping. Already zeroed by the
+        // memset above; kept explicit because a stale
+        // `panic_snapshot_valid` making a peer CPU look snapshotted
+        // when it hasn't been NMI'd is the highest-consequence field
+        // here and is worth documenting at the init site.
         ap_pcpu->panic_snapshot_valid = 0;
         ap_pcpu->panic_snapshot_rip = 0;
         ap_pcpu->panic_snapshot_rsp = 0;

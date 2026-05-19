@@ -7,6 +7,7 @@
 #include "time/tick.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "util/compiler.h"
 
 // Image-base symbols from the linker script — used as a last-ditch
 // non-constant input to the splitmix seed when every clock reads
@@ -31,7 +32,7 @@ RandomStats g_stats = {};
 // Classic splitmix64. Cheap + decent distribution for a
 // fallback PRNG — matches what Go, Java, and D use internally.
 // NOT cryptographic.
-u64 Splitmix64(u64& state)
+DUETOS_NO_SANITIZE_WRAP u64 Splitmix64(u64& state)
 {
     state += 0x9E3779B97F4A7C15ULL;
     u64 z = state;

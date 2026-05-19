@@ -381,9 +381,15 @@ bool FillBits(Decoder& d, u32 want)
                 d.cursor -= 2;
                 // Top up the accumulator with zero bits so a
                 // partial decode at marker boundary doesn't read
-                // stale state.
-                d.bit_buf <<= (32 - d.bit_count);
-                d.bit_buf >>= (32 - d.bit_count);
+                // stale state. Keep only the low `bit_count` valid
+                // bits. The old `<<=(32-n); >>=(32-n)` pair is UB
+                // when n==0 (shift of a u32 by 32) and a no-op on
+                // x86 (count masked to 0) — leaving stale high bits.
+                // Mask explicitly instead.
+                if (d.bit_count == 0)
+                    d.bit_buf = 0;
+                else if (d.bit_count < 32)
+                    d.bit_buf &= (0xFFFFFFFFu >> (32 - d.bit_count));
                 while (d.bit_count < want)
                 {
                     d.bit_buf = (d.bit_buf << 8);

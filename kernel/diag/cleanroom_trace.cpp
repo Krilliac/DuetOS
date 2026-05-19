@@ -4,6 +4,7 @@
 #include "sync/spinlock.h"
 #include "diag/log_names.h"
 #include "util/result.h"
+#include "util/compiler.h"
 
 namespace duetos::core
 {
@@ -361,7 +362,7 @@ void CleanroomTraceWriteDecoded(const CleanroomTraceEntry& e)
     }
 }
 
-u64 CleanroomTraceHashToken(const char* text)
+DUETOS_NO_SANITIZE_WRAP u64 CleanroomTraceHashToken(const char* text)
 {
     // FNV-1a 64-bit. The earlier revision of this function used a
     // truncated offset basis (1469598103934665603, missing the

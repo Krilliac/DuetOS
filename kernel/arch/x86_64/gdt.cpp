@@ -3,6 +3,7 @@
 #include "cpu/percpu.h"
 #include "log/klog.h"
 #include "mm/kheap.h"
+#include "util/compiler.h"
 
 namespace duetos::arch
 {
@@ -344,7 +345,7 @@ u64* GdtRawBase()
     return g_gdt;
 }
 
-u64 GdtHash()
+DUETOS_NO_SANITIZE_WRAP u64 GdtHash()
 {
     // FNV-1a over the code/data descriptors, with two
     // legitimate CPU-mutated bits masked:

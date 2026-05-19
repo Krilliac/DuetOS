@@ -18,6 +18,7 @@
 #include "log/klog.h"
 #include "mm/kheap.h"
 #include "security/blake2b.h"
+#include "util/compiler.h"
 #include "util/types.h"
 
 namespace duetos::security
@@ -30,7 +31,7 @@ namespace
 // Little-endian encoders. Argon2 uses LE32 + LE64 throughout.
 // ---------------------------------------------------------------------
 
-inline void StoreLE32(u8* p, u32 v)
+DUETOS_NO_SANITIZE_WRAP inline void StoreLE32(u8* p, u32 v)
 {
     p[0] = static_cast<u8>(v);
     p[1] = static_cast<u8>(v >> 8);
@@ -38,7 +39,7 @@ inline void StoreLE32(u8* p, u32 v)
     p[3] = static_cast<u8>(v >> 24);
 }
 
-inline u64 LoadLE64(const u8* p)
+DUETOS_NO_SANITIZE_WRAP inline u64 LoadLE64(const u8* p)
 {
     u64 r = 0;
     for (u32 i = 0; i < 8; ++i)
@@ -46,7 +47,7 @@ inline u64 LoadLE64(const u8* p)
     return r;
 }
 
-inline void StoreLE64(u8* p, u64 v)
+DUETOS_NO_SANITIZE_WRAP inline void StoreLE64(u8* p, u64 v)
 {
     for (u32 i = 0; i < 8; ++i)
         p[i] = static_cast<u8>(v >> (8u * i));
@@ -162,7 +163,7 @@ inline u64 Trunc32(u64 x)
     return x & 0xFFFFFFFFull;
 }
 
-inline u64 RotR64(u64 x, u32 n)
+DUETOS_NO_SANITIZE_WRAP inline u64 RotR64(u64 x, u32 n)
 {
     // Mask both shift amounts to [0,63]. Bit-identical to the naive
     // form for every n the callers use (16/24/32/63); the mask
@@ -172,7 +173,7 @@ inline u64 RotR64(u64 x, u32 n)
     return (x >> (n & 63)) | (x << ((64u - n) & 63));
 }
 
-inline void GB(u64& a, u64& b, u64& c, u64& d)
+DUETOS_NO_SANITIZE_WRAP inline void GB(u64& a, u64& b, u64& c, u64& d)
 {
     a = a + b + 2ull * Trunc32(a) * Trunc32(b);
     d = RotR64(d ^ a, 32);
@@ -184,7 +185,7 @@ inline void GB(u64& a, u64& b, u64& c, u64& d)
     b = RotR64(b ^ c, 63);
 }
 
-inline void Round(u64 v[16])
+DUETOS_NO_SANITIZE_WRAP inline void Round(u64 v[16])
 {
     GB(v[0], v[4], v[8], v[12]);
     GB(v[1], v[5], v[9], v[13]);
@@ -207,7 +208,7 @@ inline void Round(u64 v[16])
 // (i.e. 8 rows of 16 u64s = 128 bytes per row).
 // ---------------------------------------------------------------------
 
-void Compress(Block& dst, const Block& x, const Block& y)
+DUETOS_NO_SANITIZE_WRAP void Compress(Block& dst, const Block& x, const Block& y)
 {
     Block r;
     for (u32 i = 0; i < kQWordsPerBlock; ++i)
@@ -246,7 +247,7 @@ void Compress(Block& dst, const Block& x, const Block& y)
 }
 
 // XOR-into-dst variant for pass>0 mixing: dst ^= G(x, y).
-void CompressXor(Block& dst, const Block& x, const Block& y)
+DUETOS_NO_SANITIZE_WRAP void CompressXor(Block& dst, const Block& x, const Block& y)
 {
     Block tmp;
     Compress(tmp, x, y);
