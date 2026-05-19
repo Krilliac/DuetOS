@@ -4,6 +4,8 @@
 add_executable(vmm-tests
     test_main.cpp
     test_smoke.cpp
+    test_mb2_fb.cpp
+    ../src/multiboot2.cpp
 )
 target_include_directories(vmm-tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
