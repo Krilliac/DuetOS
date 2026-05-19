@@ -48,6 +48,27 @@ Vmm::Vmm(VmConfig cfg)
     mp.ramBytes    = m_cfg.ramBytes;
     mp.reservedEnd = reservedEnd;
     mp.rsdp        = acpi.rsdp;
+
+    // Reserve framebuffer region BEFORE building the MB2 mmap so the
+    // reserved split in BuildMultiboot2Info sees the FB span and marks
+    // it reserved (not available RAM). Order is critical: this must
+    // precede BuildMultiboot2Info.
+    if (!m_cfg.noWindow)
+    {
+        uint64_t fbGpa  = m_mem->ReserveFramebuffer(m_cfg.fbW, m_cfg.fbH);
+        mp.fbAddr       = fbGpa;
+        mp.fbWidth      = m_cfg.fbW;
+        mp.fbHeight     = m_cfg.fbH;
+        mp.fbPitch      = m_cfg.fbW * 4;
+        mp.fbBpp        = 32;
+        std::printf("[vmm] framebuffer: gpa=0x%llx %ux%u 32bpp "
+                    "pitch=%u bytes=%llu\n",
+                    (unsigned long long)fbGpa,
+                    m_cfg.fbW, m_cfg.fbH,
+                    m_cfg.fbW * 4,
+                    (unsigned long long)m_mem->FramebufferBytes());
+    }
+
     std::vector<uint8_t> mbi = BuildMultiboot2Info(mp);
     m_mem->Write(kMbInfoGpa, mbi.data(), mbi.size());
 
@@ -204,6 +225,9 @@ Vmm::~Vmm()
 {
     m_stop.store(true);
     m_part.CancelRun(0);
+    // Stop the window before guest memory is torn down — FbWindow
+    // holds a raw pointer into the guest RAM framebuffer region.
+    m_window.Stop();
     // The stdin reader is parked in a blocking getchar() that m_stop
     // can't interrupt; detach it (it dies with the process) rather
     // than hang the dtor on join(). The timer/watchdog threads poll
@@ -403,6 +427,23 @@ int Vmm::Run()
     std::printf("[vmm] booting DuetOS guest (1 vCPU, %llu MiB)\n",
                 (unsigned long long)(m_cfg.ramBytes >> 20));
     std::fflush(stdout);
+
+    // Open the framebuffer window before the vCPU loop so the kernel
+    // can render to it from the first frame. The close callback sets
+    // m_stop, which the exit loop checks at the top of each iteration.
+    if (!m_cfg.noWindow)
+    {
+        InputSink sink;
+        sink.onKey   = [](uint32_t, bool, bool) {};
+        sink.onMouse = [](int, int, uint32_t, int) {};
+        m_window.Start(m_mem->FramebufferHost(),
+                       m_cfg.fbW * 4,
+                       m_cfg.fbW, m_cfg.fbH,
+                       "DuetOS - booting",
+                       sink,
+                       [this] { m_stop.store(true); });
+    }
+
     StartHelperThreads();
 
     if (m_gdb)

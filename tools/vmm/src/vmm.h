@@ -16,6 +16,7 @@
 #include "devices/ioapic.h"
 #include "devices/pit8254.h"
 #include "devices/serial16550.h"
+#include "display/window.h"
 #include "guest_memory.h"
 #include "whp.h"
 
@@ -43,6 +44,13 @@ struct VmConfig
     // granularity — see debug/record.h).
     std::string recordPath;
     std::string replayPath;
+
+    // Framebuffer window. fbW/fbH default to the primary monitor
+    // resolution (set by main.cpp after arg-parse). noWindow skips
+    // the FB reservation and window entirely (headless/CI path).
+    uint32_t    fbW       = 0;
+    uint32_t    fbH       = 0;
+    bool        noWindow  = false;
 };
 
 // Fixed guest-physical homes for the synthesised firmware blobs.
@@ -84,6 +92,7 @@ private:
     VmConfig                       m_cfg;
     Partition                      m_part;
     std::unique_ptr<GuestMemory>   m_mem;
+    FbWindow                       m_window;
     Serial16550                    m_com1;
     Pit8254                        m_pit;
     IoApic                         m_ioapic;
