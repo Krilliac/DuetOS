@@ -1,12 +1,16 @@
-# DuetOS — wireless parser fuzz harness
+# DuetOS — untrusted-input parser fuzz harness
 
-Compile and run libFuzzer-driven fuzzers against the wireless data-decode
-parsers (EAPOL key parser, vendor firmware envelope parsers). The fuzzers
-run on the host (Linux/macOS clang), not on the target — they exercise the
-same source files the kernel builds, with a small `host_shim/` providing
-stub implementations of the kernel-only headers (serial output, klog
-macros, KASSERT, spinlock). The shim's klog macros are variadic no-ops so
-a kernel-side arity change cannot silently drop a parser from coverage.
+Compile and run libFuzzer-driven fuzzers against the DuetOS code paths
+that consume attacker-controlled bytes: the wireless data-decode parsers
+(EAPOL key parser, vendor firmware envelope parsers) and the PE/COFF
+executable loader's parse/validate/report surface. The fuzzers run on the
+host (Linux/macOS clang), not on the target — they exercise the same
+source files the kernel builds, with a small `host_shim/` providing stub
+implementations of the kernel-only headers (serial output, klog macros,
+KASSERT, spinlock, and the PeLoad-only mm/proc/win32 surface). The shim's
+klog macros are variadic no-ops covering every `KLOG_*` the real
+`kernel/log/klog.h` defines, so a kernel-side arity change cannot
+silently drop a parser from coverage.
 
 ## What's covered
 
@@ -16,6 +20,17 @@ a kernel-side arity change cannot silently drop a parser from coverage.
 | `fuzz_iwl_fw` | `IwlFirmwareParse(blob, size, &out)` — Intel iwlwifi TLV envelope walker |
 | `fuzz_rtl_fw` | `RtlFirmwareParse(blob, size, &out)` — Realtek rtlwifi/rtw88/rtw89 32-byte header |
 | `fuzz_bcm_fw` | `BcmFirmwareParse(blob, size, &out)` — Broadcom b43 record stream |
+| `fuzz_pe` | `PeValidate` / `PeReport` / `PeIsPe32` / `PeIsDynamicBase` / `PePreferredBaseOf` / `PeImageSizeOf` / `PeQuickSummaryTo` — the PE/COFF loader's pure parse/validate/diagnostic walkers (`pe_loader.cpp` + `pe_exports.cpp`), plus the `duetos_exec_meta` Rust prefix/image validator it delegates to |
+
+`fuzz_pe` links the real no_std `duetos_exec_meta` Rust crate (built as
+an rlib + a panic=abort staticlib wrapper, so a Rust-side overflow/index
+bug also aborts as a libFuzzer crash) and `host_shim/pe_stubs.cpp`, which
+resolves the PeLoad-only kernel symbols — each stub aborts, so if a
+"pure" validator ever reaches a kernel sink that divergence is itself a
+recorded crash. `make run-pe` seeds the corpus from
+`seeds/gen_pe_seeds.py` (minimal valid PE32+/PE32 images + the shipped
+`windows-kill.exe`) so the fuzzer starts past the DOS/COFF prefix gate
+and actually exercises the deep import/reloc/TLS/load-config/EAT walkers.
 
 The IEEE 802.11 management-frame walker (`BeaconParse`) is **not** a
 C++ harness here: its byte-level parsing now lives in the memory-safe
@@ -25,24 +40,30 @@ fuzz at this layer; the Rust walker is fuzzed via cargo-fuzz.
 
 ## Why these parsers
 
-These four C++ parsers (plus the Rust beacon walker) are the only
-DuetOS code paths that consume bytes from external sources (vendor
-firmware blobs from `/lib/firmware/`, on-air management frames from
-a wireless driver). Everything else
-inside `kernel/net/wireless/` consumes parsed structures, not raw
-bytes. Fuzzing the parsers catches OOB reads / pointer arithmetic
-mistakes / length-overflow bugs in exactly the places where a
-malicious blob or rogue AP could deliver an attack surface.
+The wireless parsers and the PE/COFF loader are the DuetOS code paths
+that consume bytes from external sources: vendor firmware blobs from
+`/lib/firmware/`, on-air management frames from a wireless driver, and —
+the project's pillar #1 — arbitrary Windows `.exe`/`.dll` images a guest
+hands the loader. The PE diagnostic walkers (`PeReport`) run on
+*rejected* images too, so a truncated/hostile PE reaches them before
+`PeValidate` gates the heavyweight `PeLoad` path. Fuzzing these catches
+OOB reads / pointer-arithmetic mistakes / length-overflow bugs in
+exactly the places where a malicious blob, rogue AP, or crafted PE could
+deliver an attack surface.
 
 ## Build and run
 
 ```bash
 sudo apt-get install -y clang libclang-rt-dev   # clang ≥ 14 + libFuzzer/ASan rt
-make -C tests/fuzz                # build all four C++ fuzzers
+# fuzz_pe additionally needs `rustc` (the PE prefix/image gate is the
+# no_std duetos_exec_meta Rust crate); the workspace's pinned nightly
+# is fine.
+make -C tests/fuzz                # build every C++ harness (incl. fuzz_pe)
 make -C tests/fuzz run-eapol      # fuzz one for 60 s
 make -C tests/fuzz run-iwl_fw
 make -C tests/fuzz run-rtl_fw
 make -C tests/fuzz run-bcm_fw
+make -C tests/fuzz run-pe          # seeds the corpus first, then 60 s
 ```
 
 Each `run-*` target creates `corpus/<name>/` and lets libFuzzer

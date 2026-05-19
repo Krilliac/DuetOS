@@ -260,13 +260,24 @@ const char* BoundedCString(const u8* file, u64 file_len, u64 off)
 // PE directories (Import, BaseReloc, TLS) point to RVAs, and
 // those RVAs must land inside one of the sections we've
 // already bounds-checked.
-u64 RvaToFile(const u8* file, const PeHeaders& h, u32 rva)
+u64 RvaToFile(const u8* file, u64 file_len, const PeHeaders& h, u32 rva)
 {
     if (file == nullptr)
         return ~u64(0);
     for (u16 i = 0; i < h.section_count; ++i)
     {
-        const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
+        // h.section_count / h.section_base come from an
+        // attacker-controlled header and RvaToFile runs on the
+        // PeReport path for rejected/truncated PEs too, so bound
+        // every 40-byte section header against the file buffer
+        // before reading its VA/size words — the PE fuzzer hits
+        // this as a heap-buffer-overflow otherwise. A header past
+        // EOF means the rest of the (contiguous) table is too:
+        // give up the translation rather than scan garbage.
+        const u64 sec_off = u64(h.section_base) + u64(i) * kSectionHeaderSize;
+        if (sec_off + kSectionHeaderSize > file_len)
+            return ~u64(0);
+        const u8* sec = file + sec_off;
         const u32 va = LeU32(sec + kSectionHeaderVirtualAddress);
         const u32 raw_size = LeU32(sec + kSectionHeaderSizeOfRawData);
         const u32 virt_size = LeU32(sec + kSectionHeaderVirtualSize);
@@ -292,7 +303,7 @@ struct PeDataDir
     u32 rva;
     u32 size;
 };
-PeDataDir ReadDataDir(const u8* file, const PeHeaders& h, u64 idx)
+PeDataDir ReadDataDir(const u8* file, u64 file_len, const PeHeaders& h, u64 idx)
 {
     if (file == nullptr)
         return {0, 0};
@@ -302,10 +313,23 @@ PeDataDir ReadDataDir(const u8* file, const PeHeaders& h, u64 idx)
     // PE32+. ParseHeaders precomputes the correct offset and count
     // via the Rust validator; use those instead of the hardcoded
     // PE32+ constants which only work for AMD64 images.
-    const u8* opt = file + h.opt_base;
     if (idx >= h.number_of_rva_and_sizes)
         return {0, 0};
-    const u8* e = opt + h.data_dir_offset + idx * kDataDirEntrySize;
+    // The declared NumberOfRvaAndSizes is attacker-controlled and
+    // is NOT cross-checked against the actual file length by the
+    // Rust prefix/image validator (it only bounds the array
+    // against SizeOfOptionalHeader). A truncated PE whose header
+    // claims a directory entry that lies past EOF would otherwise
+    // drive LeU32 off the end of the buffer — caught by the PE
+    // fuzzer as a heap-buffer-overflow in the PeReport walkers.
+    // Bound the 8-byte entry against both the file buffer and the
+    // optional-header extent before reading either word.
+    const u64 entry_off = u64(h.opt_base) + u64(h.data_dir_offset) + idx * kDataDirEntrySize;
+    if (entry_off + kDataDirEntrySize > file_len)
+        return {0, 0};
+    if (u64(h.data_dir_offset) + idx * kDataDirEntrySize + kDataDirEntrySize > h.opt_header_size)
+        return {0, 0};
+    const u8* e = file + entry_off;
     return {LeU32(e + 0), LeU32(e + 4)};
 }
 
@@ -781,7 +805,7 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
                               u64 teb_va, LoaderUnwindGuard& guard)
 {
     TlsSetupResult res;
-    const PeDataDir tls_dir = ReadDataDir(file, h, kDirEntryTls);
+    const PeDataDir tls_dir = ReadDataDir(file, file_len, h, kDirEntryTls);
     if (tls_dir.rva == 0 || tls_dir.size == 0)
     {
         res.ok = true; // no TLS — nothing to do
@@ -1037,10 +1061,10 @@ bool SeedSecurityCookie(const u8* file, u64 file_len, const PeHeaders& h, duetos
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    const PeDataDir lc = ReadDataDir(file, h, kDirEntryLoadConfig);
+    const PeDataDir lc = ReadDataDir(file, file_len, h, kDirEntryLoadConfig);
     if (lc.rva == 0 || lc.size == 0)
         return true; // No load config — nothing to seed.
-    const u64 lc_off = RvaToFile(file, h, lc.rva);
+    const u64 lc_off = RvaToFile(file, file_len, h, lc.rva);
     if (lc_off == ~u64(0) || lc_off + 4 > file_len)
         return true; // Malformed — silently skip.
     const u32 cfg_size = LeU32(file + lc_off + kLoadConfigSizeOffset);
@@ -1110,14 +1134,14 @@ bool ApplyRelocations(const u8* file, u64 file_len, const PeHeaders& h, duetos::
     using arch::SerialWrite;
     using arch::SerialWriteHex;
     KDBG_2V(PeReloc, "pe-reloc", "ApplyRelocations enter", "delta", delta, "file_len", file_len);
-    const PeDataDir br = ReadDataDir(file, h, kDirEntryBaseReloc);
+    const PeDataDir br = ReadDataDir(file, file_len, h, kDirEntryBaseReloc);
     if (br.rva == 0 || br.size == 0)
     {
         KDBG(PeReloc, "pe-reloc", "no reloc table — nothing to do");
         return true;
     }
 
-    const u64 tbl_off = RvaToFile(file, h, br.rva);
+    const u64 tbl_off = RvaToFile(file, file_len, h, br.rva);
     if (tbl_off == ~u64(0) || tbl_off + br.size > file_len)
     {
         // Either the data dir's reloc-table RVA didn't resolve to a
@@ -1610,14 +1634,14 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
     using arch::SerialWrite;
     using arch::SerialWriteHex;
     KDBG_V(PeImport, "pe-resolve", "ResolveImports enter; preloaded_dll_count", preloaded_dll_count);
-    const PeDataDir imp = ReadDataDir(file, h, kDirEntryImport);
+    const PeDataDir imp = ReadDataDir(file, file_len, h, kDirEntryImport);
     if (imp.rva == 0 || imp.size == 0)
     {
         KDBG(PeImport, "pe-resolve", "no import directory — skipping");
         return true; // no imports, nothing to do
     }
 
-    const u64 tbl_off = RvaToFile(file, h, imp.rva);
+    const u64 tbl_off = RvaToFile(file, file_len, h, imp.rva);
     // Subtractive bound: `tbl_off + imp.size > file_len` wraps on
     // hostile inputs where tbl_off is near UINT64_MAX. Compare via
     // subtraction so wraparound can't bracket the buffer end.
@@ -1644,7 +1668,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
         if (orig_thunk == 0 && name_rva == 0 && first_thunk == 0)
             break; // terminator
 
-        const u64 name_off = RvaToFile(file, h, name_rva);
+        const u64 name_off = RvaToFile(file, file_len, h, name_rva);
         const char* dll_name = (name_off == ~u64(0)) ? nullptr : BoundedCString(file, file_len, name_off);
         if (dll_name == nullptr)
         {
@@ -1670,7 +1694,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             SerialWrite(": descriptor missing IAT or INT\n");
             return false;
         }
-        const u64 int_off = RvaToFile(file, h, int_rva);
+        const u64 int_off = RvaToFile(file, file_len, h, int_rva);
         if (int_off == ~u64(0))
         {
             SerialWrite("[pe-resolve] ");
@@ -1728,7 +1752,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             else
             {
                 const u32 ibn_rva = static_cast<u32>(ent & 0x7FFFFFFF);
-                const u64 ibn_off = RvaToFile(file, h, ibn_rva);
+                const u64 ibn_off = RvaToFile(file, file_len, h, ibn_rva);
                 if (ibn_off == ~u64(0) || ibn_off + 2 >= file_len)
                 {
                     SerialWrite("[pe-resolve] ");
@@ -2538,7 +2562,7 @@ void PeLoadDrainIatMisses(Process* proc)
 namespace
 {
 
-void ReportSections(const u8* file, const PeHeaders& h)
+void ReportSections(const u8* file, u64 file_len, const PeHeaders& h)
 {
     using arch::SerialWrite;
     using arch::SerialWriteByte;
@@ -2548,7 +2572,20 @@ void ReportSections(const u8* file, const PeHeaders& h)
     SerialWrite(")\n");
     for (u16 i = 0; i < h.section_count; ++i)
     {
-        const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
+        // PeReport is called on rejected/malformed PEs too (it
+        // runs BEFORE PeValidate on the spawn path), so
+        // h.section_count / h.section_base are attacker-controlled
+        // and may describe a section table that runs past EOF on a
+        // truncated image. Bound every 40-byte header against the
+        // file buffer before touching it — caught by the PE fuzzer
+        // as a heap-buffer-overflow here otherwise.
+        const u64 sec_off = u64(h.section_base) + u64(i) * kSectionHeaderSize;
+        if (sec_off + kSectionHeaderSize > file_len)
+        {
+            SerialWrite("    [section table truncated past EOF]\n");
+            break;
+        }
+        const u8* sec = file + sec_off;
         SerialWrite("    [");
         // Section name is 8 bytes, NOT NUL-terminated when full.
         // Emit char-by-char until first zero byte.
@@ -2575,7 +2612,7 @@ void ReportImports(const u8* file, u64 file_len, const PeHeaders& h)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    const PeDataDir imp = ReadDataDir(file, h, kDirEntryImport);
+    const PeDataDir imp = ReadDataDir(file, file_len, h, kDirEntryImport);
     if (imp.rva == 0 || imp.size == 0)
     {
         SerialWrite("  imports: (empty)\n");
@@ -2588,7 +2625,7 @@ void ReportImports(const u8* file, u64 file_len, const PeHeaders& h)
     //   u32 Name                 (RVA of NUL-terminated DLL name)
     //   u32 FirstThunk           (RVA of IAT)
     // Terminated by an all-zero descriptor.
-    const u64 tbl_off = RvaToFile(file, h, imp.rva);
+    const u64 tbl_off = RvaToFile(file, file_len, h, imp.rva);
     if (tbl_off == ~u64(0) || tbl_off + imp.size > file_len)
     {
         SerialWrite("  imports: <bad rva>\n");
@@ -2619,7 +2656,7 @@ void ReportImports(const u8* file, u64 file_len, const PeHeaders& h)
 
         ++dll_count;
         SerialWrite("    needs ");
-        const u64 name_off = RvaToFile(file, h, name_rva);
+        const u64 name_off = RvaToFile(file, file_len, h, name_rva);
         const char* dll_name = (name_off == ~u64(0)) ? nullptr : BoundedCString(file, file_len, name_off);
         SerialWrite(dll_name ? dll_name : "<bad dll name>");
         SerialWrite(":\n");
@@ -2631,7 +2668,7 @@ void ReportImports(const u8* file, u64 file_len, const PeHeaders& h)
         const u32 int_rva = orig_thunk ? orig_thunk : first_thunk;
         if (int_rva == 0)
             continue;
-        const u64 int_off = RvaToFile(file, h, int_rva);
+        const u64 int_off = RvaToFile(file, file_len, h, int_rva);
         if (int_off == ~u64(0))
         {
             SerialWrite("      <bad INT rva>\n");
@@ -2655,7 +2692,7 @@ void ReportImports(const u8* file, u64 file_len, const PeHeaders& h)
                 continue;
             }
             const u32 ibn_rva = static_cast<u32>(ent & 0x7FFFFFFF);
-            const u64 ibn_off = RvaToFile(file, h, ibn_rva);
+            const u64 ibn_off = RvaToFile(file, file_len, h, ibn_rva);
             if (ibn_off == ~u64(0) || ibn_off + 2 >= file_len)
             {
                 SerialWrite("<bad name rva>\n");
@@ -2677,13 +2714,13 @@ void ReportRelocs(const u8* file, u64 file_len, const PeHeaders& h)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    const PeDataDir br = ReadDataDir(file, h, kDirEntryBaseReloc);
+    const PeDataDir br = ReadDataDir(file, file_len, h, kDirEntryBaseReloc);
     if (br.rva == 0 || br.size == 0)
     {
         SerialWrite("  relocs: (empty)\n");
         return;
     }
-    const u64 tbl_off = RvaToFile(file, h, br.rva);
+    const u64 tbl_off = RvaToFile(file, file_len, h, br.rva);
     if (tbl_off == ~u64(0) || tbl_off + br.size > file_len)
     {
         SerialWrite("  relocs: <bad rva>\n");
@@ -2721,13 +2758,13 @@ void ReportTls(const u8* file, u64 file_len, const PeHeaders& h)
 {
     using arch::SerialWrite;
     using arch::SerialWriteHex;
-    const PeDataDir tls = ReadDataDir(file, h, kDirEntryTls);
+    const PeDataDir tls = ReadDataDir(file, file_len, h, kDirEntryTls);
     if (tls.rva == 0 || tls.size == 0)
     {
         SerialWrite("  tls: (empty)\n");
         return;
     }
-    const u64 tls_off = RvaToFile(file, h, tls.rva);
+    const u64 tls_off = RvaToFile(file, file_len, h, tls.rva);
     // PE32+ TLS directory layout:
     //   u64 StartAddressOfRawData
     //   u64 EndAddressOfRawData
@@ -2758,7 +2795,7 @@ void ReportTls(const u8* file, u64 file_len, const PeHeaders& h)
     if (cb_va != 0 && cb_va >= h.image_base)
     {
         const u32 cb_rva = static_cast<u32>(cb_va - h.image_base);
-        const u64 cb_off = RvaToFile(file, h, cb_rva);
+        const u64 cb_off = RvaToFile(file, file_len, h, cb_rva);
         if (cb_off != ~u64(0))
         {
             constexpr u32 kMaxCb = 16;
@@ -2809,7 +2846,7 @@ void PeReport(const u8* file, u64 file_len)
     SerialWrite(" image_size=");
     SerialWriteHex(h.image_size);
     SerialWrite("\n");
-    ReportSections(file, h);
+    ReportSections(file, file_len, h);
     ReportImports(file, file_len, h);
     ReportRelocs(file, file_len, h);
     ReportTls(file, file_len, h);

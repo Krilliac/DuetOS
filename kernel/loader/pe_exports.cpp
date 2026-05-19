@@ -112,12 +112,17 @@ struct PeHeaderShape
     u32 num_rva_and_sizes;
     bool is_pe32;
     u64 data_dir_offset;
+    // Carried so RvaToFile can bound the (attacker-controlled)
+    // section table against the file buffer without threading an
+    // extra parameter through every call site.
+    u64 file_len;
 };
 
 bool ParsePeShape(const u8* file, u64 file_len, PeHeaderShape& out)
 {
     if (file == nullptr || file_len < 0x40)
         return false;
+    out.file_len = file_len;
     if (LeU16(file) != kDosMagic)
         return false;
     const u32 e_lfanew = LeU32(file + 0x3C);
@@ -135,6 +140,13 @@ bool ParsePeShape(const u8* file, u64 file_len, PeHeaderShape& out)
     out.opt_header_size = LeU16(fh + 16);
     out.opt_base = u64(e_lfanew) + 4 + kFileHeaderSize;
     if (out.opt_base + out.opt_header_size > file_len)
+        return false;
+    // A declared SizeOfOptionalHeader < 2 (or == 0) slips past the
+    // bound above when opt_base sits at EOF, then LeU16(opt) reads
+    // off the end. Require the header to physically hold at least
+    // the 2-byte magic before touching it — the PE fuzzer hits
+    // this as a heap-buffer-overflow on a truncated image.
+    if (out.opt_header_size < 2)
         return false;
     const u8* opt = file + out.opt_base;
     const u16 opt_magic = LeU16(opt);
@@ -169,12 +181,24 @@ u64 RvaToFile(const u8* file, const PeHeaderShape& h, u32 rva)
 {
     for (u16 i = 0; i < h.section_count; ++i)
     {
-        const u8* sec = file + h.section_base + u64(i) * kSectionHeaderSize;
+        // section_count / section_base are attacker-controlled and
+        // this runs from PeReport on rejected/truncated PEs, so
+        // bound each 40-byte header against the file buffer before
+        // reading it (heap-buffer-overflow otherwise). A header
+        // past EOF means the rest of the contiguous table is too.
+        const u64 sec_off = h.section_base + u64(i) * kSectionHeaderSize;
+        if (sec_off + kSectionHeaderSize > h.file_len)
+            return ~u64(0);
+        const u8* sec = file + sec_off;
         const u32 va = LeU32(sec + kSectionHeaderVirtualAddress);
         const u32 raw_size = LeU32(sec + kSectionHeaderSizeOfRawData);
         const u32 virt_size = LeU32(sec + kSectionHeaderVirtualSize);
         const u32 extent = raw_size > virt_size ? raw_size : virt_size;
-        if (rva >= va && rva < va + extent)
+        // Subtractive bound: a hostile section with va near
+        // UINT32_MAX and a non-zero extent would wrap `va + extent`
+        // past zero and bracket every RVA. Mirrors the guard in
+        // pe_loader.cpp's RvaToFile.
+        if (rva >= va && extent > 0 && rva - va < extent)
         {
             const u32 raw_off = LeU32(sec + kSectionHeaderPointerToRawData);
             return u64(raw_off) + u64(rva - va);
