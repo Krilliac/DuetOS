@@ -215,14 +215,20 @@ ZipStatus ZipExtractEntry(const ZipReader& reader, u32 index, u8* dst, u32 dst_c
     // data offset. Cannot trust the central-directory's filename
     // length to match the local header (extra-field length almost
     // always differs).
-    if (info.local_offset + kLocalHeaderMinSize > reader.file_len)
+    // local_offset is read verbatim from the central directory —
+    // an attacker controls all 32 bits. Range-check by subtraction
+    // (file_len is the trusted bound) so a huge offset can't wrap
+    // `local_offset + kLocalHeaderMinSize` back under file_len.
+    if (info.local_offset > reader.file_len || reader.file_len - info.local_offset < kLocalHeaderMinSize)
         return ZipStatus::DataOutOfRange;
     const u8* lh = reader.file + info.local_offset;
     if (LeU32(lh) != kLocalMagic)
         return ZipStatus::BadLocalMagic;
     const u16 lh_name_len = LeU16(lh + kLocalOffNameLen);
     const u16 lh_extra_len = LeU16(lh + kLocalOffExtraLen);
-    const u32 data_off = info.local_offset + kLocalHeaderMinSize + lh_name_len + lh_extra_len;
+    // Sum in u64: every addend is attacker-influenced, so the u32
+    // sum (and the later `+ compressed_size`) would otherwise wrap.
+    const u64 data_off = u64(info.local_offset) + kLocalHeaderMinSize + lh_name_len + lh_extra_len;
     if (data_off + info.compressed_size > reader.file_len)
         return ZipStatus::DataOutOfRange;
     const u8* compressed = reader.file + data_off;
