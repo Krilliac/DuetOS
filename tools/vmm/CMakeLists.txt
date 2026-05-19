@@ -67,6 +67,7 @@ add_executable(duetos-vmm
     src/debug/exit_trace.cpp
     src/debug/introspect.cpp
     src/debug/record.cpp
+    src/display/window.cpp
 )
 
 target_include_directories(duetos-vmm PRIVATE src)
@@ -74,7 +75,7 @@ target_include_directories(duetos-vmm PRIVATE src)
 # WinHvPlatform.lib ships with the Windows SDK; the loader resolves
 # WinHvPlatform.dll from System32 at runtime. Onecore covers the
 # umbrella import lib on recent SDKs; WinHvPlatform is the explicit one.
-target_link_libraries(duetos-vmm PRIVATE WinHvPlatform ws2_32)
+target_link_libraries(duetos-vmm PRIVATE WinHvPlatform ws2_32 user32 gdi32)
 
 if(MSVC)
     target_compile_options(duetos-vmm PRIVATE /W4 /permissive- /EHsc)
