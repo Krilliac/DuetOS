@@ -41,8 +41,11 @@ BIN := build
 FS       := $(KERNEL)/fs
 UTIL     := $(KERNEL)/util
 
+EXFAT_RUST := $(FS)/exfat_rust
+
 HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuzz_eapol \
-             $(BIN)/fuzz_pe $(BIN)/fuzz_elf $(BIN)/fuzz_gpt $(BIN)/fuzz_fat32
+             $(BIN)/fuzz_pe $(BIN)/fuzz_elf $(BIN)/fuzz_gpt $(BIN)/fuzz_fat32 \
+             $(BIN)/fuzz_exfat
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -105,6 +108,23 @@ $(BIN)/fuzz_fat32: fuzz_fat32.cpp $(FS)/fat32.cpp $(FS)/fat32_lookup.cpp \
 		$(FS)/fat32_dir.cpp $(FS)/fat32_read.cpp host_shim/fs_stubs.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
+# exFAT volume parser. Byte parsing is the no_std duetos_exfat
+# Rust crate (rlib + panic=abort staticlib wrapper, same recipe
+# as duetos_exec_meta) so a Rust-side bounds/overflow bug also
+# aborts as a libFuzzer crash.
+$(BIN)/libduetos_exfat.rlib: $(EXFAT_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_exfat -O $< -o $@
+
+$(BIN)/libduetos_exfat_fuzz.a: host_shim/exfat_fuzz_shim.rs \
+		$(BIN)/libduetos_exfat.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_exfat=$(BIN)/libduetos_exfat.rlib $< -o $@
+
+$(BIN)/fuzz_exfat: fuzz_exfat.cpp $(FS)/exfat.cpp host_shim/fs_stubs.cpp \
+		$(BIN)/libduetos_exfat_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(EXFAT_RUST)/include $^ -o $@
+
 # Each run-* keeps a persistent corpus and stops after 60 s.
 # run-pe seeds the corpus first (see seeds/gen_pe_seeds.py) so the
 # fuzzer starts past the DOS/COFF prefix gate.
@@ -127,6 +147,11 @@ run-fat32: $(BIN)/fuzz_fat32
 	@mkdir -p corpus/fat32
 	@python3 seeds/gen_fat32_seeds.py corpus/fat32
 	$(BIN)/fuzz_fat32 -max_len=262144 -max_total_time=60 -print_final_stats=1 corpus/fat32
+
+run-exfat: $(BIN)/fuzz_exfat
+	@mkdir -p corpus/exfat
+	@python3 seeds/gen_exfat_seeds.py corpus/exfat
+	$(BIN)/fuzz_exfat -max_len=262144 -max_total_time=60 -print_final_stats=1 corpus/exfat
 
 run-%: $(BIN)/fuzz_%
 	@mkdir -p corpus/$*

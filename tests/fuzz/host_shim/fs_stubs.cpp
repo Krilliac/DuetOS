@@ -12,6 +12,13 @@
 #include "util/result.h"
 #include "util/types.h"
 
+// The duetos_exfat staticlib pulls precompiled `core`, which
+// references the unwind personality even though the shim is
+// panic=abort. Nothing unwinds (the panic handler abort()s), so
+// an empty personality satisfies the linker. (Same shim as
+// pe_stubs.cpp's; harmless if both link — they never do.)
+extern "C" void rust_eh_personality() {}
+
 namespace duetos::core
 {
 // Mangling depends on the enum-class name + namespace only, not
@@ -50,3 +57,13 @@ namespace duetos::security
     return 0;
 }
 } // namespace duetos::security
+
+namespace duetos::util
+{
+// exFAT name filter. The fuzzer never inspects the rendered
+// string — a fixed safe glyph keeps the parser path exercised.
+char Utf16CpToSafeAscii(u32)
+{
+    return '?';
+}
+} // namespace duetos::util

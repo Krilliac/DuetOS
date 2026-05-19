@@ -25,6 +25,7 @@ silently drop a parser from coverage.
 | `fuzz_elf` | `ElfValidate` / `ElfEntry` / `ElfProgramHeaderInfo` / `ElfForEachPtLoad` — the ELF64 loader's pure header + PT_LOAD walkers (`elf_loader.cpp`), plus the `duetos_exec_meta` Rust ELF validator. Reuses the PE harness's Rust staticlib + stub TU (ElfLoad's mm deps overlap PeLoad's). |
 | `fuzz_gpt` | `GptProbe` — the GPT partition-table parser (`fs/gpt.cpp`): Protective-MBR check, primary-header walk, CRC32 of header + 128×128 entry array, partition-entry / LBA-range loop. The libFuzzer input is served as a read-only disk via `host_shim/drivers/storage/block.h`; the real `util/crc32.cpp` is linked so both CRC gates are exercised. |
 | `fuzz_fat32` | `Fat32Probe` — the FAT32 volume parser (`fs/fat32.cpp` + lookup/dir/read TUs): BPB sanity, FAT-chain walk, root-directory snapshot. Same read-only-disk shim as `fuzz_gpt`; `Fat32Shutdown()` resets the volume registry each input so coverage doesn't stall at `kMaxVolumes`. |
+| `fuzz_exfat` | `ExfatProbe` — the exFAT volume parser (`fs/exfat.cpp` + the no_std `duetos_exfat` Rust crate: boot sector, geometry, dirent-set decoder). Same read-only-disk shim; Rust linked via the same rlib + panic=abort staticlib recipe as `duetos_exec_meta`. |
 
 `fuzz_pe` links the real no_std `duetos_exec_meta` Rust crate (built as
 an rlib + a panic=abort staticlib wrapper, so a Rust-side overflow/index
@@ -44,16 +45,20 @@ fuzz at this layer; the Rust walker is fuzzed via cargo-fuzz.
 
 ## Why these parsers
 
-The wireless parsers and the PE/COFF loader are the DuetOS code paths
-that consume bytes from external sources: vendor firmware blobs from
-`/lib/firmware/`, on-air management frames from a wireless driver, and —
-the project's pillar #1 — arbitrary Windows `.exe`/`.dll` images a guest
-hands the loader. The PE diagnostic walkers (`PeReport`) run on
-*rejected* images too, so a truncated/hostile PE reaches them before
-`PeValidate` gates the heavyweight `PeLoad` path. Fuzzing these catches
-OOB reads / pointer-arithmetic mistakes / length-overflow bugs in
-exactly the places where a malicious blob, rogue AP, or crafted PE could
-deliver an attack surface.
+These are the DuetOS code paths that consume bytes from external,
+attacker-controlled sources: vendor firmware blobs from `/lib/firmware/`,
+on-air management frames from a wireless driver, arbitrary Windows
+`.exe`/`.dll` and ELF images a guest hands the loaders (pillar #1), and
+the partition table + filesystem on any disk/USB stick plugged in. The
+loader/FS diagnostic + probe paths run on *rejected* inputs too — e.g.
+`PeReport` walks a truncated PE before `PeValidate` gates the heavyweight
+`PeLoad`, and `GptProbe`/`Fat32Probe` parse a hostile sector before any
+mount. Fuzzing these catches OOB reads / pointer-arithmetic mistakes /
+length-overflow bugs exactly where a malicious blob, rogue AP, crafted
+executable, or doctored disk could deliver an attack surface. Several of
+the byte-level walkers (PE/ELF prefix, exFAT, 802.11) are memory-safe
+Rust crates; the harnesses link the real crates so a Rust panic
+(overflow/index) also surfaces as a libFuzzer crash.
 
 ## Build and run
 
@@ -71,6 +76,7 @@ make -C tests/fuzz run-pe          # seeds the corpus first, then 60 s
 make -C tests/fuzz run-elf         # seeds the corpus first, then 60 s
 make -C tests/fuzz run-gpt         # seeds the corpus first, then 60 s
 make -C tests/fuzz run-fat32       # seeds the corpus first, then 60 s
+make -C tests/fuzz run-exfat       # seeds the corpus first, then 60 s
 ```
 
 Each `run-*` target creates `corpus/<name>/` and lets libFuzzer
