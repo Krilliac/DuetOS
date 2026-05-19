@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <stdexcept>
 
 #include "acpi.h"
 #include "elf64.h"
@@ -75,6 +76,79 @@ Vmm::Vmm(VmConfig cfg)
                                             m_cfg.gdbPort);
         m_gdb->SetMonitor(
             [this](const std::string& c) { return Monitor(c); });
+    }
+
+    if (!m_cfg.recordPath.empty())
+    {
+        if (!m_log.OpenRecord(m_cfg.recordPath))
+        {
+            throw std::runtime_error("cannot open record file");
+        }
+        std::printf("[vmm] recording host inputs -> %s\n",
+                    m_cfg.recordPath.c_str());
+    }
+    else if (!m_cfg.replayPath.empty())
+    {
+        if (!m_log.OpenReplay(m_cfg.replayPath))
+        {
+            throw std::runtime_error(
+                "cannot open/parse replay file");
+        }
+        m_pit.SetReplay(true);
+        std::printf("[vmm] replaying host inputs <- %s "
+                    "(exit-seq deterministic)\n",
+                    m_cfg.replayPath.c_str());
+    }
+}
+
+void Vmm::RaiseGuestLine(uint32_t irq)
+{
+    if (m_log.mode() == RecMode::Replay)
+    {
+        return; // the replay pump owns line raises
+    }
+    if (m_log.mode() == RecMode::Record)
+    {
+        m_log.Put(m_trace.total(), EvKind::RaiseLine, irq);
+    }
+    m_ioapic.RaiseLine(irq);
+}
+
+void Vmm::DeliverSerial(uint8_t byte)
+{
+    m_com1.PushRx(byte);
+    if (m_log.mode() == RecMode::Record)
+    {
+        m_log.Put(m_trace.total(), EvKind::SerialRx, byte);
+    }
+    if (m_com1.RxIrqPending())
+    {
+        RaiseGuestLine(4); // COM1 = ISA IRQ4
+    }
+}
+
+void Vmm::PumpReplay()
+{
+    if (m_log.mode() != RecMode::Replay)
+    {
+        return;
+    }
+    Event ev;
+    while (m_log.Peek(ev) && ev.seq <= m_trace.total())
+    {
+        switch (ev.kind)
+        {
+        case EvKind::SerialRx:
+            m_com1.PushRx(static_cast<uint8_t>(ev.a));
+            break;
+        case EvKind::RaiseLine:
+            m_ioapic.RaiseLine(static_cast<uint32_t>(ev.a));
+            break;
+        case EvKind::Pit2Expire:
+            m_pit.ForceExpire();
+            break;
+        }
+        m_log.Pop();
     }
 }
 
@@ -232,6 +306,11 @@ void Vmm::HandleIoPort(const WHV_RUN_VP_EXIT_CONTEXT& exit)
         else if (isPit)
         {
             val = m_pit.In(port);
+            if (m_log.mode() == RecMode::Record &&
+                m_pit.TakeCh2ExpireEdge())
+            {
+                m_log.Put(m_trace.total(), EvKind::Pit2Expire, 0);
+            }
         }
         const uint32_t bytes = io.AccessInfo.AccessSize;
         uint64_t mask = (bytes >= 4) ? 0xFFFFFFFFull
@@ -250,7 +329,15 @@ void Vmm::StartHelperThreads()
 {
     m_lastTxNs.store(HostNanos());
 
-    // Host stdin -> COM1 RX, edge-injecting IRQ4 per byte.
+    // In replay the inputs come from the log, not the host — the
+    // pump (in the run loop) feeds them at the recorded exit-seq.
+    if (m_log.mode() == RecMode::Replay)
+    {
+        return;
+    }
+
+    // Host stdin -> COM1 RX (DeliverSerial logs the byte + raises
+    // IRQ4 through the record-aware funnel).
     m_stdinThread = std::thread([this] {
         while (!m_stop.load())
         {
@@ -259,11 +346,7 @@ void Vmm::StartHelperThreads()
             {
                 break;
             }
-            m_com1.PushRx(static_cast<uint8_t>(c));
-            if (m_com1.RxIrqPending())
-            {
-                m_ioapic.RaiseLine(4); // COM1 = ISA IRQ4
-            }
+            DeliverSerial(static_cast<uint8_t>(c));
         }
     });
 
@@ -281,7 +364,7 @@ void Vmm::StartHelperThreads()
             }
             std::this_thread::sleep_for(
                 std::chrono::nanoseconds(periodNs));
-            m_ioapic.RaiseLine(0); // PIT = ISA IRQ0
+            RaiseGuestLine(0); // PIT = ISA IRQ0
         }
     });
 
@@ -348,6 +431,7 @@ int Vmm::Run()
         }
         WHV_RUN_VP_EXIT_CONTEXT exit = m_part.Run(0);
         RecordExit(exit);
+        PumpReplay(); // feed recorded inputs due at this exit-seq
         switch (exit.ExitReason)
         {
         case WHvRunVpExitReasonX64IoPortAccess:

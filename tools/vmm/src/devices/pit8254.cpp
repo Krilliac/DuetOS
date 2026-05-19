@@ -19,10 +19,25 @@ uint32_t Pit8254::In(uint16_t port)
     if (port == kGate)
     {
         uint8_t v = m_gateOn ? 0x01 : 0x00;
-        if (m_ch2Armed &&
-            HostNanos() - m_ch2StartNs >= m_ch2IntervalNs)
+        bool expired;
+        if (m_replay)
+        {
+            // Driven by the recorded exit-seq, not the host clock.
+            expired = m_forcedExpire;
+        }
+        else
+        {
+            expired = m_ch2Armed &&
+                      HostNanos() - m_ch2StartNs >= m_ch2IntervalNs;
+        }
+        if (expired)
         {
             v |= 0x20; // OUT2 high = terminal count reached
+            if (!m_ch2Observed)
+            {
+                m_ch2Observed = true;
+                m_ch2EdgePending = true; // record logs this edge
+            }
         }
         return v;
     }
@@ -71,6 +86,10 @@ void Pit8254::Out(uint16_t port, uint32_t value)
                 m_ch2StartNs = HostNanos();
                 m_ch2IntervalNs = CountToNs(m_ch2Count);
                 m_ch2Armed = true;
+                // Re-arm: a fresh expiry edge will be recorded /
+                // replayed for this measurement window.
+                m_ch2Observed = false;
+                m_forcedExpire = false;
             }
         }
         break;
@@ -93,6 +112,13 @@ void Pit8254::Out(uint16_t port, uint32_t value)
     default:
         break;
     }
+}
+
+bool Pit8254::TakeCh2ExpireEdge()
+{
+    const bool e = m_ch2EdgePending;
+    m_ch2EdgePending = false;
+    return e;
 }
 
 uint64_t Pit8254::Channel0PeriodNs() const

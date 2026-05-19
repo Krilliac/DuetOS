@@ -27,10 +27,16 @@
 //   Slice 1: partition + vCPU + ELF + MB2/ACPI + COM1.
 //   Slice 2: IOAPIC MMIO + PIT + COM1 RX/IRQ4 + HLT resume.
 //   Slice 3: host-side GDB remote (--gdb <port>) for VS attach.
-//   Slice 4 (this commit): ELF-symbol introspection + always-on
-//   vmexit ring, exposed via gdb `monitor` (sym/lookup/read/rip/
-//   trace) and auto-dumped (symbolized) on a fatal exit. Slice 5
-//   (record/replay) follows.
+//   Slice 4: ELF-symbol introspection + vmexit ring via `monitor`.
+//   Slice 5 (this commit): record/replay of host-origin inputs
+//   (--record <f> / --replay <f>) keyed by exit-seq — serial RX,
+//   IOAPIC line raises, PIT-ch2 calibration edge. Reproduces the
+//   exit stream at exit-seq granularity (NOT cycle-exact: WHP owns
+//   the LAPIC timer internally). Framebuffer / virtio-blk are
+//   intentionally NOT built — the kernel boots headless with a
+//   baked ramfs, so they are unneeded for the run/test/debug goal
+//   and would be unwired bloat; revisit only if a GUI/disk
+//   workload actually needs them.
 // ===========================================================================
 #include <cstdio>
 #include <cstring>
@@ -48,7 +54,7 @@ void Usage(const char* argv0)
     std::fprintf(stderr,
                  "usage: %s --kernel <elf> [--mem <MiB>] "
                  "[--cmdline \"...\"] [--idle <secs>] "
-                 "[--gdb <port>]\n",
+                 "[--gdb <port>] [--record <f> | --replay <f>]\n",
                  argv0);
 }
 
@@ -92,6 +98,14 @@ int main(int argc, char** argv)
             cfg.gdbPort = static_cast<uint16_t>(
                 std::strtoul(next("--gdb"), nullptr, 10));
         }
+        else if (a == "--record")
+        {
+            cfg.recordPath = next("--record");
+        }
+        else if (a == "--replay")
+        {
+            cfg.replayPath = next("--replay");
+        }
         else if (a == "-h" || a == "--help")
         {
             Usage(argv[0]);
@@ -108,6 +122,12 @@ int main(int argc, char** argv)
     if (cfg.kernelPath.empty())
     {
         Usage(argv[0]);
+        return 2;
+    }
+    if (!cfg.recordPath.empty() && !cfg.replayPath.empty())
+    {
+        std::fprintf(stderr,
+                     "--record and --replay are mutually exclusive\n");
         return 2;
     }
 

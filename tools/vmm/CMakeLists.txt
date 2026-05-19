@@ -65,6 +65,7 @@ add_executable(duetos-vmm
     src/debug/elf_symbols.cpp
     src/debug/exit_trace.cpp
     src/debug/introspect.cpp
+    src/debug/record.cpp
 )
 
 target_include_directories(duetos-vmm PRIVATE src)

@@ -40,6 +40,15 @@ public:
     // tick period in nanoseconds. Polled by the VMM timer thread.
     uint64_t Channel0PeriodNs() const;
 
+    // Record/replay hooks. In replay the channel-2 OUT2 bit is
+    // driven by the recorded exit-seq (ForceExpire) instead of the
+    // host clock, so LAPIC calibration reproduces.
+    void SetReplay(bool on) { m_replay = on; }
+    void ForceExpire() { m_forcedExpire = true; }
+    // Record: returns true exactly once, when the guest first
+    // observes channel-2 expiry, so the VMM can log it.
+    bool TakeCh2ExpireEdge();
+
 private:
     // 8254 nominal input frequency (Hz).
     static constexpr uint64_t kPitHz = 1193182;
@@ -57,6 +66,12 @@ private:
     uint16_t m_ch0Count = 0;
     bool     m_ch0Lo    = true;
     bool     m_ch0Periodic = false;
+
+    // Record/replay.
+    bool m_replay = false;
+    bool m_forcedExpire = false;
+    bool m_ch2Observed = false;
+    bool m_ch2EdgePending = false;
 };
 
 } // namespace duetos::vmm

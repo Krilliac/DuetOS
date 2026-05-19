@@ -12,6 +12,7 @@
 #include "debug/elf_symbols.h"
 #include "debug/exit_trace.h"
 #include "debug/gdb_server.h"
+#include "debug/record.h"
 #include "devices/ioapic.h"
 #include "devices/pit8254.h"
 #include "devices/serial16550.h"
@@ -36,6 +37,12 @@ struct VmConfig
     // the guest stops before the first instruction so the client
     // can plant boot breakpoints; #DB/#BP exits are enabled.
     uint16_t    gdbPort   = 0;
+
+    // Mutually exclusive. recordPath captures host-origin inputs;
+    // replayPath feeds them back deterministically (exit-seq
+    // granularity — see debug/record.h).
+    std::string recordPath;
+    std::string replayPath;
 };
 
 // Fixed guest-physical homes for the synthesised firmware blobs.
@@ -68,6 +75,12 @@ private:
     std::string Monitor(const std::string& cmd);   // gdb `monitor`
     void DumpTrace(std::string& out) const;         // symbolized ring
 
+    // Central funnels so record/replay can intercept the two
+    // host-origin non-deterministic inputs.
+    void RaiseGuestLine(uint32_t irq);    // IOAPIC line (record-aware)
+    void DeliverSerial(uint8_t byte);     // stdin -> COM1 (record)
+    void PumpReplay();                    // feed recorded events
+
     VmConfig                       m_cfg;
     Partition                      m_part;
     std::unique_ptr<GuestMemory>   m_mem;
@@ -78,6 +91,7 @@ private:
     std::unique_ptr<GdbServer> m_gdb;
     ElfSymbols            m_symbols;
     ExitTrace             m_trace;
+    EventLog              m_log;
     bool                  m_continueAfterStepOff = false;
 
     std::atomic<bool>     m_stop{false};
