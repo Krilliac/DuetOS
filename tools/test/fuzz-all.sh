@@ -21,9 +21,10 @@
 #        FUZZ_JOBS     max harnesses in parallel     (default nproc)
 #        FUZZ_DIR      tests/fuzz location           (default repo tests/fuzz)
 #
-# Quick triage one-liners:
-#   ls tests/fuzz/build/crash-* tests/fuzz/corpus/*/crash-* 2>/dev/null
-#   tests/fuzz/build/fuzz_<name> <the crash artifact>   # replay
+# Quick triage one-liners (artifacts are per-harness under
+# build/art/<name>/ so a crash names its own harness):
+#   ls tests/fuzz/build/art/*/crash-* tests/fuzz/corpus/*/crash-* 2>/dev/null
+#   tests/fuzz/build/fuzz_<name> tests/fuzz/build/art/<name>/crash-*  # replay
 
 set -u
 
@@ -66,14 +67,19 @@ maxlen_for() {
 run_one() {
     local h="$1" name="${1#fuzz_}"
     local corpus="corpus/${name}" gen="seeds/gen_${name}_seeds.py"
-    mkdir -p "${corpus}"
+    mkdir -p "${corpus}" "build/art/${name}"
     [ -f "${gen}" ] && python3 "${gen}" "${corpus}" >/dev/null 2>&1
     # -timeout=20 turns a hung input into a recorded artifact
-    # instead of a wedged job; artifacts land next to the binary.
+    # instead of a wedged job. -artifact_prefix scopes the
+    # crash/timeout/oom/leak file to this harness's own dir —
+    # without it every harness shares build/ as CWD, so ONE
+    # crash (or a stale leftover) makes the results scan flag
+    # all 24 FAIL and you can't tell which harness fell over.
     ( cd build && "./${h}" \
         -max_total_time="${FUZZ_SECONDS}" \
         -max_len="$(maxlen_for "${h}")" \
         -timeout=20 \
+        -artifact_prefix="art/${name}/" \
         "../${corpus}" >"/tmp/fuzz-all-${name}.log" 2>&1 )
 }
 
@@ -92,7 +98,7 @@ fail=0
 printf '%-14s %-8s %s\n' "HARNESS" "VERDICT" "DETAIL"
 for h in "${HARNESSES[@]}"; do
     name="${h#fuzz_}"
-    art=$(find build "corpus/${name}" -maxdepth 1 -type f \
+    art=$(find "build/art/${name}" "corpus/${name}" -maxdepth 1 -type f \
         \( -name 'crash-*' -o -name 'timeout-*' -o -name 'oom-*' -o -name 'leak-*' \) \
         2>/dev/null | head -1)
     if [ -n "${art}" ]; then
@@ -107,7 +113,7 @@ done
 echo
 if [ "${fail}" -ne 0 ]; then
     echo "fuzz-all: FAIL — at least one harness produced a crash artifact." >&2
-    echo "Replay: tests/fuzz/build/fuzz_<name> <artifact>" >&2
+    echo "Replay: tests/fuzz/build/fuzz_<name> tests/fuzz/build/art/<name>/<artifact>" >&2
     exit 1
 fi
 echo "fuzz-all: PASS — every harness survived ${FUZZ_SECONDS}s clean."
