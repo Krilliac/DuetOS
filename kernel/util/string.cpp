@@ -80,8 +80,16 @@ extern "C" void* memmove(void* dst, const void* src, duetos::usize n)
         return dst;
     if (d < s)
     {
-        // Forward copy.
-        if (n < 8)
+        // Forward copy. The wide path below copies in fixed 64/8-
+        // byte units via __builtin_memcpy — valid only if those
+        // units don't self-overlap. When the buffers actually
+        // overlap (d < s and d + n > s, i.e. gap < n), a 64-byte
+        // memcpy whose src/dst overlap by 62 bytes is UB: the
+        // compiler may copy the chunk in any order and shred the
+        // tail (ASan flags it memcpy-param-overlap). An ascending
+        // byte copy is the correct order for a dst-below-src move,
+        // so take it whenever the ranges are not disjoint.
+        if (n < 8 || static_cast<duetos::usize>(s - d) < n)
         {
             for (duetos::usize i = 0; i < n; ++i)
                 d[i] = s[i];

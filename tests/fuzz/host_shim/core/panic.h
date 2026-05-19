@@ -7,12 +7,19 @@
 
 namespace duetos::core
 {
-inline void Panic(const char* /*subsystem*/, const char* /*message*/)
+// The real core/panic.h declares these [[noreturn]]; mirror that
+// so a [[noreturn]] caller (e.g. util/string.cpp's bounds-check
+// abort) doesn't warn "function should not return". assert() is
+// not noreturn under NDEBUG, so trap unconditionally afterwards.
+[[noreturn]] inline void Panic(const char* /*subsystem*/, const char* /*message*/)
 {
     assert(false);
+    __builtin_trap();
 }
-inline void PanicWithValue(const char* /*subsystem*/, const char* /*message*/, unsigned long long /*value*/)
+[[noreturn]] inline void PanicWithValue(const char* /*subsystem*/, const char* /*message*/,
+                                        unsigned long long /*value*/)
 {
     assert(false);
+    __builtin_trap();
 }
 } // namespace duetos::core

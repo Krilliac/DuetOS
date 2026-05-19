@@ -219,8 +219,7 @@ ZipStatus ZipExtractEntry(const ZipReader& reader, u32 index, u8* dst, u32 dst_c
     // an attacker controls all 32 bits. Range-check by subtraction
     // (file_len is the trusted bound) so a huge offset can't wrap
     // `local_offset + kLocalHeaderMinSize` back under file_len.
-    if (info.local_offset > reader.file_len ||
-        reader.file_len - info.local_offset < kLocalHeaderMinSize)
+    if (info.local_offset > reader.file_len || reader.file_len - info.local_offset < kLocalHeaderMinSize)
         return ZipStatus::DataOutOfRange;
     const u8* lh = reader.file + info.local_offset;
     if (LeU32(lh) != kLocalMagic)
