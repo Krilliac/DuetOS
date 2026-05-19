@@ -1391,6 +1391,20 @@ if(DUETOS_ENABLE_UBSAN)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_UBSAN=1)
 endif()
 
+# Debug builds upgrade the toolchain's -fstack-protector-strong to
+# -fstack-protector-all: a stack cookie on EVERY function, not just
+# the ones the strong heuristic flags (arrays / address-of-local /
+# alloca). clang takes the last -fstack-protector-* on the command
+# line, so appending here wins for the kernel targets without
+# touching the shared toolchain (release keeps -strong: an
+# every-function prologue/epilogue is real per-call overhead the
+# steady-state kernel shouldn't pay). The guard symbol and the
+# __stack_chk_fail → panic path are unchanged.
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_compile_options(duetos-kernel        PRIVATE -fstack-protector-all)
+    target_compile_options(duetos-kernel-stage1 PRIVATE -fstack-protector-all)
+endif()
+
 set_target_properties(duetos-kernel PROPERTIES
     OUTPUT_NAME "duetos-kernel.elf"
     C_STANDARD 17

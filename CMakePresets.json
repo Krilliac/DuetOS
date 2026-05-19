@@ -25,7 +25,9 @@
                 "CMAKE_BUILD_TYPE": "Debug",
                 "DUETOS_GDB_SERVER": "ON",
                 "DUETOS_ENABLE_UBSAN": "ON",
-                "DUETOS_KASAN": "ON"
+                "DUETOS_KASAN": "ON",
+                "DUETOS_CAP_AUDIT": "Full",
+                "DUETOS_SHELL_SELFTEST": "ON"
             }
         },
         {
@@ -62,6 +64,14 @@
                 "DUETOS_KASAN": "ON",
                 "DUETOS_LOCK_ORDER_AUDIT": "ON",
                 "DUETOS_CAP_AUDIT": "Full"
+            }
+        },
+        {
+            "name": "x86_64-debug-redteam",
+            "displayName": "x86_64 debug + AttackSim red-team suite (escalates guards; not a normal-boot build)",
+            "inherits": "x86_64-debug",
+            "cacheVariables": {
+                "DUETOS_ATTACK_SIM": "ON"
             }
         },
         {
@@ -142,6 +152,10 @@
         {
             "name": "x86_64-debug-san",
             "configurePreset": "x86_64-debug-san"
+        },
+        {
+            "name": "x86_64-debug-redteam",
+            "configurePreset": "x86_64-debug-redteam"
         },
         {
             "name": "x86_64-release-asserts",

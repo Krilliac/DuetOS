@@ -43,85 +43,85 @@ enum class ProbeId : u8
 {
     // Rare, high-signal events — armed-log by default. A clean
     // boot log will show most of these at least once.
-    kPanicEnter,          // core::Panic called — about to halt
-    kSandboxDenialCap,    // a capability-gated syscall was denied
-    kWin32StubMiss,       // an unresolved Win32 import got hit
-    kKernelPageFault,     // #PF from ring 0 — always a bug, always logged
-    kKernelGpf,           // #GP from ring 0 — always a bug, always logged
-    kKernelUd,            // #UD from ring 0 — invalid opcode, always a bug
-    kMachineCheck,        // #MC (vector 18) — uncorrected hardware error.
-                          // Caller passes (worst_bank | verdict<<32) so an
-                          // attached GDB can `b duetos::debug::ProbeFire`
-                          // and halt at the exact #MC frame with the
-                          // failing bank in hand. ArmedLog: a clean boot
-                          // never takes a #MC, so any fire is a real
-                          // hardware fault worth a sentinel line.
-    kChipsetNmi,          // a non-watchdog NMI whose port-0x61 status
-                          // shows PCI SERR# and/or IOCHK# — a chipset /
-                          // bus / add-in-card hardware error. Caller
-                          // passes the raw 0x61 byte as `value`. ArmedLog:
-                          // a clean boot never takes a chipset NMI, so any
-                          // fire is a real hardware fault.
-    kHeapAllocFail,       // KMalloc returned nullptr (kheap pool exhausted)
-    kPhysAllocFail,       // AllocateFrame returned kNullFrame (physical OOM)
-    kSmpApOnline,         // a secondary CPU finished bring-up; boot diagnostic
-    kBootSelftestFail,    // a boot-time self-test reported FAIL; armed-log so
-                          // GDB can `b duetos::debug::ProbeFire` and break
-                          // immediately when a smoke regression first appears
-    kAcpiMcfgTruncated,   // ACPI MCFG header.length too small for any entry —
-                          // firmware bug or hostile table; fire and skip
-    kPeLoaderOom,         // PeLoad ran out of frames partway through the
-                          // alloc ladder; the unwind guard freed everything
-    kElfLoaderOom,        // ElfLoad ran out of frames mid-segment; same
-    kProbeFail,           // a driver vendor probe returned false; device
-                          // skipped and any pre-probe MMIO mapping unwound
-    kTopologyParseFailed, // CPUID 0xB/0x1F decode or SRAT walk fell back
-                          // to cluster=0 for at least one CPU; locality-
-                          // aware steal degrades to round-robin for the
-                          // affected CPU
-    kBootInitWedge,       // boot init went silent for >N seconds while the
-                          // timer was still firing — a driver bring-up
-                          // wedge or non-progressing wait. Caller passes
-                          // the elapsed-silence tick count as `value`;
-                          // attached GDB can `b duetos::debug::ProbeFire`
-                          // to halt at the exact tick the wedge tripped.
-    kFaultInjectFired,    // diag::fault_inject::Trigger entered. Caller
-                          // passes the FaultClass enum value as `value`
-                          // so an attached GDB can break at the exact
-                          // frame the harness fired — the deliberate
-                          // panic / kernel PF / slab-OOM trigger lives
-                          // one stack frame up. ArmedLog by default so a
-                          // clean boot stays quiet (the harness is never
-                          // entered by accident) and any trigger leaves
-                          // a sentinel line + a fire count for triage.
-    kGpuRingBringupFail,  // a GPU vendor's command-ring bring-up did not
-                          // reach the live state its register protocol
-                          // requires (Intel RCS head/tail never converged,
-                          // AMD CP never came out of reset, NVIDIA PFIFO
-                          // never reported runlist online). Caller passes
-                          // the last-observed engine head/status word as
-                          // `value` so an attached GDB can break at the
-                          // exact frame the bring-up gave up. ArmedLog by
-                          // default: on hardware that ships a working
-                          // engine a clean boot stays quiet; a regression
-                          // (or an absence we hadn't catalogued — QEMU's
-                          // `-vga std` legitimately can't satisfy this) is
-                          // a single sentinel line + the recorded value.
+    kPanicEnter,               // core::Panic called — about to halt
+    kSandboxDenialCap,         // a capability-gated syscall was denied
+    kWin32StubMiss,            // an unresolved Win32 import got hit
+    kKernelPageFault,          // #PF from ring 0 — always a bug, always logged
+    kKernelGpf,                // #GP from ring 0 — always a bug, always logged
+    kKernelUd,                 // #UD from ring 0 — invalid opcode, always a bug
+    kMachineCheck,             // #MC (vector 18) — uncorrected hardware error.
+                               // Caller passes (worst_bank | verdict<<32) so an
+                               // attached GDB can `b duetos::debug::ProbeFire`
+                               // and halt at the exact #MC frame with the
+                               // failing bank in hand. ArmedLog: a clean boot
+                               // never takes a #MC, so any fire is a real
+                               // hardware fault worth a sentinel line.
+    kChipsetNmi,               // a non-watchdog NMI whose port-0x61 status
+                               // shows PCI SERR# and/or IOCHK# — a chipset /
+                               // bus / add-in-card hardware error. Caller
+                               // passes the raw 0x61 byte as `value`. ArmedLog:
+                               // a clean boot never takes a chipset NMI, so any
+                               // fire is a real hardware fault.
+    kHeapAllocFail,            // KMalloc returned nullptr (kheap pool exhausted)
+    kPhysAllocFail,            // AllocateFrame returned kNullFrame (physical OOM)
+    kSmpApOnline,              // a secondary CPU finished bring-up; boot diagnostic
+    kBootSelftestFail,         // a boot-time self-test reported FAIL; armed-log so
+                               // GDB can `b duetos::debug::ProbeFire` and break
+                               // immediately when a smoke regression first appears
+    kAcpiMcfgTruncated,        // ACPI MCFG header.length too small for any entry —
+                               // firmware bug or hostile table; fire and skip
+    kPeLoaderOom,              // PeLoad ran out of frames partway through the
+                               // alloc ladder; the unwind guard freed everything
+    kElfLoaderOom,             // ElfLoad ran out of frames mid-segment; same
+    kProbeFail,                // a driver vendor probe returned false; device
+                               // skipped and any pre-probe MMIO mapping unwound
+    kTopologyParseFailed,      // CPUID 0xB/0x1F decode or SRAT walk fell back
+                               // to cluster=0 for at least one CPU; locality-
+                               // aware steal degrades to round-robin for the
+                               // affected CPU
+    kBootInitWedge,            // boot init went silent for >N seconds while the
+                               // timer was still firing — a driver bring-up
+                               // wedge or non-progressing wait. Caller passes
+                               // the elapsed-silence tick count as `value`;
+                               // attached GDB can `b duetos::debug::ProbeFire`
+                               // to halt at the exact tick the wedge tripped.
+    kFaultInjectFired,         // diag::fault_inject::Trigger entered. Caller
+                               // passes the FaultClass enum value as `value`
+                               // so an attached GDB can break at the exact
+                               // frame the harness fired — the deliberate
+                               // panic / kernel PF / slab-OOM trigger lives
+                               // one stack frame up. ArmedLog by default so a
+                               // clean boot stays quiet (the harness is never
+                               // entered by accident) and any trigger leaves
+                               // a sentinel line + a fire count for triage.
+    kGpuRingBringupFail,       // a GPU vendor's command-ring bring-up did not
+                               // reach the live state its register protocol
+                               // requires (Intel RCS head/tail never converged,
+                               // AMD CP never came out of reset, NVIDIA PFIFO
+                               // never reported runlist online). Caller passes
+                               // the last-observed engine head/status word as
+                               // `value` so an attached GDB can break at the
+                               // exact frame the bring-up gave up. ArmedLog by
+                               // default: on hardware that ships a working
+                               // engine a clean boot stays quiet; a regression
+                               // (or an absence we hadn't catalogued — QEMU's
+                               // `-vga std` legitimately can't satisfy this) is
+                               // a single sentinel line + the recorded value.
     kCurrentCpuGsbaseFallback, // cpu::CurrentCpu() saw a non-kernel GSBASE
-                          // in a kernel context on a NON-BSP CPU and had to
-                          // resolve the real PerCpu via the LAPIC ID. The
-                          // pre-fix code silently returned the BSP slot here,
-                          // mis-attributing an AP to the BSP — the per-CPU
-                          // state corruption behind the intermittent SMP
-                          // double-run (MUTEX-NONOWNER / spinlock
-                          // release-out-of-order under gui-fuzz). Recovered
-                          // (the LAPIC resolves the correct CPU) but a fire
-                          // still marks a swapgs / AP-GS-reestablishment gap
-                          // worth catching: a clean SMP boot hits this
-                          // rarely; a flood is an entry-stub swapgs
-                          // regression. Caller passes the LAPIC ID as
-                          // `value`. ArmedLog so an attached GDB can
-                          // `b duetos::debug::ProbeFire`.
+                               // in a kernel context on a NON-BSP CPU and had to
+                               // resolve the real PerCpu via the LAPIC ID. The
+                               // pre-fix code silently returned the BSP slot here,
+                               // mis-attributing an AP to the BSP — the per-CPU
+                               // state corruption behind the intermittent SMP
+                               // double-run (MUTEX-NONOWNER / spinlock
+                               // release-out-of-order under gui-fuzz). Recovered
+                               // (the LAPIC resolves the correct CPU) but a fire
+                               // still marks a swapgs / AP-GS-reestablishment gap
+                               // worth catching: a clean SMP boot hits this
+                               // rarely; a flood is an entry-stub swapgs
+                               // regression. Caller passes the LAPIC ID as
+                               // `value`. ArmedLog so an attached GDB can
+                               // `b duetos::debug::ProbeFire`.
 
     // Medium-frequency events — disarmed by default, the
     // operator arms these when hunting a specific issue.

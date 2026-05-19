@@ -33,8 +33,24 @@ other source-indexing tools after configuration.
 
 ### Sanitizers in the debug build
 
-The default `x86_64-debug` preset turns **both** sanitizer families on,
-the same way:
+The default `x86_64-debug` preset is the **maximum-diagnostics** build:
+every check that can be on without making the kernel unbootable or
+drowning its own signal is on. Beyond the build-type defaults (KASSERT,
+boot self-tests, lock-order audit, klog compiled down to Trace, KASLR,
+GDB server) it adds:
+
+- `DUETOS_CAP_AUDIT=Full` — a trace hook on **every** cap-gated
+  syscall (not the default every-1024th sample).
+- `DUETOS_SHELL_SELFTEST=ON` — bakes `/etc/selftest.sh` into ramfs
+  and auto-sources it on boot, so a headless boot exercises the
+  shell scripting surface and emits grep-able PASS/FAIL markers.
+- `-fstack-protector-all` (debug-scoped, applied in
+  `kernel/CMakeLists.txt`) — a stack cookie on **every** function,
+  not just the `-fstack-protector-strong` heuristic set. Release
+  keeps `-strong` (the every-function prologue/epilogue is real
+  per-call overhead the steady-state kernel shouldn't pay).
+
+…plus **both** sanitizer families, the same way:
 
 - `DUETOS_ENABLE_UBSAN=ON` — every kernel TU is built with
   `-fsanitize=undefined,nullability,float-divide-by-zero`
@@ -58,13 +74,28 @@ Dedicated single-axis presets mirror this:
 | `x86_64-debug-ubsan` | re-asserts `DUETOS_ENABLE_UBSAN` only |
 | `x86_64-debug-asan`  | re-asserts `DUETOS_KASAN` only |
 | `x86_64-debug-san`   | the **full suite**: `-fsanitize=integer` family on (`DUETOS_ENABLE_UBSAN_INTEGER`), KASAN, lock-order audit, full cap audit |
+| `x86_64-debug-redteam` | `DUETOS_ATTACK_SIM=ON` — runs the AttackSim red-team suite at end of `kernel_main`. Escalates the security guard to Enforce and the block write-guard to Deny, which poisons every subsequent image-load / sensitive-LBA write for the session — **not a normal-boot build**. |
 
-The integer family (`unsigned-integer-overflow`,
-`implicit-conversion`, …) is kept OUT of the default debug build: the
-kernel deliberately relies on unsigned wraparound (hashing, ring
-indices, PRNGs), so on-by-default it is mostly false positives that
-drown the real UB signal. Use `x86_64-debug-san` when specifically
-hunting conversion/truncation bugs.
+Knobs deliberately **not** in the default debug preset, because they
+make the build unbootable or unusable rather than more-checked:
+
+- The integer family (`unsigned-integer-overflow`,
+  `implicit-conversion`, …). The kernel deliberately relies on
+  unsigned wraparound; on the crypto paths (`blake2b`, `argon2id`,
+  …) this is *thousands* of false-positive incidents per boot —
+  enough to prevent the boot from completing inside the QEMU
+  smoke window. Lives in `x86_64-debug-san` for targeted
+  conversion/truncation hunts.
+- `DUETOS_KLOG_DEFAULT=0` (Trace **runtime** default). The
+  compile floor is already Trace in debug, so `loglevel t` at
+  runtime exposes every trace site on demand; making Trace the
+  *boot* default emits ~80 k lines before steady state and the
+  smoke never finishes. Verbosity is not a check.
+- `DUETOS_PANIC_DEMO` / `CANARY_DEMO` / `TRAP_DEMO` /
+  `GDB_DEMO` — deliberate-crash injectors that panic/halt at end
+  of `kernel_main`; driven per-invocation by their
+  `tools/debug/test-*.sh` scripts, not a preset.
+- `DUETOS_ATTACK_SIM` — see `x86_64-debug-redteam` above.
 
 The `x86_64-kasan` preset is the heavier forensic variant (KASAN +
 UBSAN + lock-order audit + **full** capability-gate audit);

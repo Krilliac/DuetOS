@@ -234,6 +234,16 @@ machine-check stack. See [Fault Injection](Fault-Injection.md).
   Revisit when `mm` grows a poison list.
 - **UBSAN off by default.** Enable with `ubsan=on` cmdline; rate-limited
   reports otherwise drown the log.
+- **`blake2b.cpp` / `argon2id.cpp` `RotR64` shift-exponent UB
+  (fixed).** Under the max-diagnostics debug build the auth/hash
+  path tripped `[ubsan] shift-out-of-bounds at blake2b.cpp:38`
+  thousands of times per boot: `RotR64` wrote `x << (64 - n)`,
+  which is `x << 64` UB when an inlined/folded specialisation
+  reaches `n == 0`. Both definitions now mask the shift amount
+  (`x >> (n & 63)) | (x << ((64u - n) & 63)`) — bit-identical for
+  every rotation the callers use (16/24/32/63), well-defined at
+  `n == 0`, so the check can never trip there. Blake2b/Argon2id
+  KAT self-tests still PASS, confirming no crypto regression.
 - **`blake2b.cpp` type-mismatch on the auth path (open).** Running
   `su` / any password verify trips `[ubsan] type-mismatch at
   blake2b.cpp` with `tm-detail … fault=misaligned need-align=0x10
