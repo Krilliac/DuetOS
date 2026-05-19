@@ -226,5 +226,14 @@ run-%: $(BIN)/fuzz_%
 	@mkdir -p corpus/$*
 	$< -max_total_time=60 -print_final_stats=1 corpus/$*
 
+# Throw everything at the OS at once: build every harness and run
+# them all in parallel, aggregating crashes into one exit code.
+# FUZZ_SECONDS / FUZZ_JOBS env vars tune the budget (see the
+# script header). Non-zero exit iff any harness crashed — usable
+# as a CI gate unmodified.
+.PHONY: fuzz-all
+fuzz-all:
+	../../tools/test/fuzz-all.sh
+
 clean:
 	rm -rf $(BIN)
