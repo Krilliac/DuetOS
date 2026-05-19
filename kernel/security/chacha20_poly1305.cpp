@@ -10,6 +10,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "util/compiler.h"
 #include "util/types.h"
 
 namespace duetos::security
@@ -18,13 +19,13 @@ namespace duetos::security
 namespace
 {
 
-inline u32 LoadLE32(const u8* p)
+DUETOS_NO_SANITIZE_WRAP inline u32 LoadLE32(const u8* p)
 {
     return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) |
            (static_cast<u32>(p[3]) << 24);
 }
 
-inline void StoreLE32(u8* p, u32 v)
+DUETOS_NO_SANITIZE_WRAP inline void StoreLE32(u8* p, u32 v)
 {
     p[0] = static_cast<u8>(v);
     p[1] = static_cast<u8>(v >> 8);
@@ -32,19 +33,19 @@ inline void StoreLE32(u8* p, u32 v)
     p[3] = static_cast<u8>(v >> 24);
 }
 
-inline void StoreLE64(u8* p, u64 v)
+DUETOS_NO_SANITIZE_WRAP inline void StoreLE64(u8* p, u64 v)
 {
     for (u32 i = 0; i < 8; ++i)
         p[i] = static_cast<u8>(v >> (8u * i));
 }
 
-inline u32 RotL32(u32 x, u32 n)
+DUETOS_NO_SANITIZE_WRAP inline u32 RotL32(u32 x, u32 n)
 {
     return (x << n) | (x >> (32u - n));
 }
 
 // RFC 8439 §2.1 — quarter round.
-inline void QR(u32& a, u32& b, u32& c, u32& d)
+DUETOS_NO_SANITIZE_WRAP inline void QR(u32& a, u32& b, u32& c, u32& d)
 {
     a += b;
     d ^= a;
@@ -66,7 +67,8 @@ inline void QR(u32& a, u32& b, u32& c, u32& d)
 //        || counter (1 LE32)
 //        || nonce (3 LE32)
 // 20 rounds = 10 (column-round + diagonal-round) iterations.
-void ChaChaBlock(const u8 key[kChaCha20KeyBytes], u32 counter, const u8 nonce[kChaCha20NonceBytes], u8 out[64])
+DUETOS_NO_SANITIZE_WRAP void ChaChaBlock(const u8 key[kChaCha20KeyBytes], u32 counter,
+                                         const u8 nonce[kChaCha20NonceBytes], u8 out[64])
 {
     u32 state[16];
     state[0] = 0x61707865;
@@ -147,7 +149,7 @@ struct Poly1305Ctx
     bool finalised;
 };
 
-inline void Clamp(u32 r[5], const u8 key16[16])
+DUETOS_NO_SANITIZE_WRAP inline void Clamp(u32 r[5], const u8 key16[16])
 {
     // Per §2.5.1: clamp r before use.
     // r &= 0x0FFFFFFC0FFFFFFC0FFFFFFC0FFFFFFF (little-endian),
@@ -188,7 +190,7 @@ void Poly1305Init(Poly1305Ctx& c, const u8 key[32])
     c.finalised = false;
 }
 
-void Poly1305AbsorbBlock(Poly1305Ctx& c, const u8 block[16], u32 block_len, bool is_full)
+DUETOS_NO_SANITIZE_WRAP void Poly1305AbsorbBlock(Poly1305Ctx& c, const u8 block[16], u32 block_len, bool is_full)
 {
     // Compose 5-limb representation of (block || 0x01 for full, or
     // block padded to len then 0x01 byte appended at position
@@ -292,7 +294,7 @@ void Poly1305Update(Poly1305Ctx& c, const u8* in, u32 len)
     }
 }
 
-void Poly1305Finish(Poly1305Ctx& c, u8 tag[kPoly1305TagBytes])
+DUETOS_NO_SANITIZE_WRAP void Poly1305Finish(Poly1305Ctx& c, u8 tag[kPoly1305TagBytes])
 {
     if (c.buf_len > 0)
     {

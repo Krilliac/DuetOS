@@ -126,6 +126,8 @@ void AdvanceCursor()
 
 void NewLine()
 {
+    if (g_state.cols == 0 || g_state.rows == 0)
+        return;
     g_state.cur_x = 0;
     g_state.cur_y++;
     if (g_state.cur_y >= g_state.rows)

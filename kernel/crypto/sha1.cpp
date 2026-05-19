@@ -1,6 +1,7 @@
 #include "crypto/sha1.h"
 
 #include "core/panic.h"
+#include "util/compiler.h"
 
 namespace duetos::crypto
 {
@@ -8,12 +9,12 @@ namespace duetos::crypto
 namespace
 {
 
-u32 RotL(u32 v, u32 n)
+DUETOS_NO_SANITIZE_WRAP u32 RotL(u32 v, u32 n)
 {
     return (v << n) | (v >> (32u - n));
 }
 
-void Sha1ProcessBlock(Sha1Ctx& ctx, const u8* block)
+DUETOS_NO_SANITIZE_WRAP void Sha1ProcessBlock(Sha1Ctx& ctx, const u8* block)
 {
     u32 w[80];
     for (u32 i = 0; i < 16; ++i)

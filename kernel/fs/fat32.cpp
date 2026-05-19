@@ -66,7 +66,6 @@ namespace internal
 // kobject) across a FAT32 call — that would invert the
 // canonical "filesystem locks below subsystem locks" order.
 constinit sched::Mutex g_fat32_mutex = {.owner = nullptr, .waiters = {}, .class_id = duetos::sync::kLockClassFat32};
-constinit u64 g_fat32_recursion = 0;
 
 // Scratch buffer for the BPB sector + any single cluster read.
 // v0 assumes 512 B sectors and ≤ 4 KiB clusters — fits in one
@@ -79,7 +78,10 @@ Fat32Guard::Fat32Guard()
     sched::Task* me = sched::CurrentTask();
     if (me != nullptr && g_fat32_mutex.owner == me)
     {
-        ++g_fat32_recursion;
+        // Recursive re-entry: the owning task already holds the
+        // mutex. Skip re-locking; ~Fat32Guard must NOT unlock
+        // (owns_ stays false) so the outermost guard owns the
+        // unlock.
         owns_ = false;
         return;
     }
@@ -98,12 +100,11 @@ Fat32Guard::Fat32Guard()
 
 Fat32Guard::~Fat32Guard()
 {
-    if (!owns_)
-    {
-        --g_fat32_recursion;
-        return;
-    }
-    sched::MutexUnlock(&g_fat32_mutex);
+    // Only the guard that actually took the lock unlocks it.
+    // Recursive-entry and early-boot (pre-scheduler) guards set
+    // owns_ = false and have nothing to release.
+    if (owns_)
+        sched::MutexUnlock(&g_fat32_mutex);
 }
 
 // Volatile-zero / volatile-copy — same rationale as the guard

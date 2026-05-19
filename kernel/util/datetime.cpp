@@ -100,8 +100,13 @@ IsoWeekDate IsoYearWeek(i32 year, u8 month, u8 day)
     const u64 jdn = JulianDayFromYmd(year, month, day);
     // ISO day-of-week 1=Mon..7=Sun.
     u8 dow = u8((jdn % 7) + 1); // jdn 0 is Monday → 1
-    // The Thursday of the week containing this date:
-    const u64 jdn_thu = jdn + (4 - dow);
+    // The Thursday of the week containing this date. Written as
+    // `jdn + 4 - dow` (not `jdn + (4 - dow)`): dow is 1..7, so the
+    // parenthesised form computes a negative int for dow>4 and
+    // relies on the int→u64 wrap. This form keeps every
+    // intermediate a well-defined u64 (jdn is ~2.4M, never
+    // underflows) and is bit-identical.
+    const u64 jdn_thu = jdn + 4 - dow;
     i32 thu_y;
     u8 thu_m, thu_d;
     YmdFromJulianDay(jdn_thu, thu_y, thu_m, thu_d);

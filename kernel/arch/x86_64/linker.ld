@@ -152,14 +152,27 @@ SECTIONS
      * frame_allocator.cpp reserves [_kernel_blob_start_phys,
      * _kernel_blob_end_phys) separately.
      *
-     * The VMA is fixed at KERNEL_VIRTUAL_BASE + 32 MiB so the runtime
+     * The VMA floors at KERNEL_VIRTUAL_BASE + 32 MiB so the runtime
      * pointer (kBinKernelElfBytes) resolves through boot.S's
      * higher-half 1 GiB map (VMA = KVB + phys for the first 1 GiB).
+     * It is a FLOOR, not a hard pin: instrumented builds (KASAN
+     * shadow + UBSAN tables) inflate .bss past 32 MiB, so a hard
+     * `AT(32M)` would overlap the tail of .bss and ld aborts with
+     * "section .bss load address range overlaps". Take the max of
+     * 32 MiB and the current (post-.bss) location instead — the
+     * non-instrumented kernel still lands the blob at exactly
+     * 32 MiB (.bss ends well below it), and instrumented kernels
+     * float it just above .bss. Either way LMA == VMA - KVB stays
+     * well inside the first 1 GiB higher-half map, and
+     * _kernel_end_phys (computed above, before this section) is
+     * unaffected so the DMA-zone reservation logic is unchanged.
      * When the embed is OFF the input is zero bytes: ld drops the
      * empty output section, emits no extra PT_LOAD, and
-     * _kernel_blob_start_phys == _kernel_blob_end_phys == 32 MiB so
-     * the reservation is a no-op. */
-    .kernel_elf_blob (KERNEL_VIRTUAL_BASE + 32M) : AT(32M) ALIGN(4K)
+     * _kernel_blob_start_phys == _kernel_blob_end_phys so the
+     * reservation is a no-op. */
+    . = ALIGN(4K);
+    . = (. < KERNEL_VIRTUAL_BASE + 32M) ? (KERNEL_VIRTUAL_BASE + 32M) : .;
+    .kernel_elf_blob . : AT(. - KERNEL_VIRTUAL_BASE) ALIGN(4K)
     {
         _kernel_blob_start_phys = . - KERNEL_VIRTUAL_BASE;
         KEEP(*(.kernel_elf_blob .kernel_elf_blob.*))

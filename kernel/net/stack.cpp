@@ -47,6 +47,7 @@
 #include "drivers/net/net.h"
 #include "sched/sched.h"
 #include "util/string.h"
+#include "util/compiler.h"
 
 namespace duetos::net
 {
@@ -688,7 +689,7 @@ namespace
 // mixed against a Knuth-derived multiplier so adjacent IPs spread
 // across buckets instead of clustering. With kArpHashSize a power
 // of two we mask off the high bits.
-inline u32 ArpHash(u32 iface, Ipv4Address ip)
+DUETOS_NO_SANITIZE_WRAP inline u32 ArpHash(u32 iface, Ipv4Address ip)
 {
     u32 h = (static_cast<u32>(ip.octets[0]) << 24) | (static_cast<u32>(ip.octets[1]) << 16) |
             (static_cast<u32>(ip.octets[2]) << 8) | static_cast<u32>(ip.octets[3]);

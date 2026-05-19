@@ -23,6 +23,7 @@
 #include "drivers/storage/block.h"
 #include "fs/fat32_internal.h"
 #include "fs/fat32_write_internal.h"
+#include "util/compiler.h"
 
 namespace duetos::fs::fat32
 {
@@ -323,7 +324,7 @@ bool ResolveParentDir(const Volume& v, const char* path, u32* out_parent_cluster
 //   "/A/B/FILE"      -> parent="A/B",     base="FILE"
 //   "/"              -> returns false (no basename)
 // Trailing slashes are stripped.
-bool SplitPath(const char* path, char* parent_out, u32 parent_cap, char* base_out, u32 base_cap)
+DUETOS_NO_SANITIZE_WRAP bool SplitPath(const char* path, char* parent_out, u32 parent_cap, char* base_out, u32 base_cap)
 {
     if (path == nullptr || parent_out == nullptr || base_out == nullptr)
         return false;

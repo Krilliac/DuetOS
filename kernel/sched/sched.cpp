@@ -66,6 +66,7 @@
 #include "time/tick.h"
 #include "util/debug_assert.h"
 #include "util/string.h"
+#include "util/compiler.h"
 
 namespace duetos::sched
 {
@@ -826,7 +827,12 @@ cpu::PerCpu* PickClusterPlacement(cpu::PerCpu* preferred, Task* t = nullptr)
             continue; // affinity mask forbids this CPU
         }
         const u32 peer_len = EffectiveLoad(peer);
-        if (best_len - peer_len >= kClusterPlacementMargin && peer_len < best_len)
+        // `peer_len < best_len` first so the unsigned `best_len -
+        // peer_len` only evaluates when it can't underflow (&& short-
+        // circuits). The old operand order computed the wrapped
+        // difference before the guard, a benign-result but real
+        // unsigned underflow (-fsanitize=integer sub-overflow).
+        if (peer_len < best_len && best_len - peer_len >= kClusterPlacementMargin)
         {
             best = peer;
             best_len = peer_len;
@@ -1415,7 +1421,7 @@ void WaitQueueUnlink(WaitQueue* wq, Task* t)
 
 // Wrap-safe tick deadline compare. Works as long as nobody sleeps for more
 // than 2^63-1 ticks in one call (orders of magnitude beyond practical use).
-bool TickReached(u64 now, u64 deadline)
+DUETOS_NO_SANITIZE_WRAP bool TickReached(u64 now, u64 deadline)
 {
     return static_cast<i64>(now - deadline) >= 0;
 }
@@ -4447,6 +4453,17 @@ void WaitQueueBlockCurrentLocked(WaitQueue* wq)
 {
     sync::SpinLockAssertHeld(g_sched_lock);
     Task* t = Current();
+    // No current task means there is nothing to block (the
+    // bootstrap / idle-handoff window before a real task is
+    // installed). Bail before dereferencing — mirrors the
+    // `if (t == nullptr) return;` guard every other Current()
+    // consumer in this file uses. Without it, `t->state` below is
+    // a NULL member-access (caught by -fsanitize=undefined's
+    // type-mismatch as a null-deref of `Task`).
+    if (t == nullptr)
+    {
+        return;
+    }
     // The currently-executing task is necessarily Running. A
     // caller that reached this path with state already flipped
     // to Blocked / Sleeping / Dead would be re-enqueued on this

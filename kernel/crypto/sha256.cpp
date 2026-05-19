@@ -1,6 +1,7 @@
 #include "crypto/sha256.h"
 
 #include "core/panic.h"
+#include "util/compiler.h"
 
 namespace duetos::crypto
 {
@@ -18,12 +19,12 @@ const u32 k_round[64] = {
     0x19A4C116u, 0x1E376C08u, 0x2748774Cu, 0x34B0BCB5u, 0x391C0CB3u, 0x4ED8AA4Au, 0x5B9CCA4Fu, 0x682E6FF3u,
     0x748F82EEu, 0x78A5636Fu, 0x84C87814u, 0x8CC70208u, 0x90BEFFFAu, 0xA4506CEBu, 0xBEF9A3F7u, 0xC67178F2u};
 
-u32 RotR(u32 v, u32 n)
+DUETOS_NO_SANITIZE_WRAP u32 RotR(u32 v, u32 n)
 {
     return (v >> n) | (v << (32u - n));
 }
 
-void Sha256ProcessBlock(Sha256Ctx& ctx, const u8* block)
+DUETOS_NO_SANITIZE_WRAP void Sha256ProcessBlock(Sha256Ctx& ctx, const u8* block)
 {
     u32 w[64];
     for (u32 i = 0; i < 16; ++i)

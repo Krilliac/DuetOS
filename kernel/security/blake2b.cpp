@@ -10,6 +10,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "util/compiler.h"
 #include "util/types.h"
 
 namespace duetos::security
@@ -33,7 +34,7 @@ constexpr u8 kSigma[12][16] = {
     {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}, {14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3},
 };
 
-inline u64 RotR64(u64 x, u32 n)
+DUETOS_NO_SANITIZE_WRAP inline u64 RotR64(u64 x, u32 n)
 {
     // Mask both shift amounts to [0,63]. For every n the callers
     // actually use (16/24/32/63) this is bit-identical to the
@@ -45,7 +46,7 @@ inline u64 RotR64(u64 x, u32 n)
 }
 
 // Load a little-endian u64 from 8 bytes.
-inline u64 LoadLE64(const u8* p)
+DUETOS_NO_SANITIZE_WRAP inline u64 LoadLE64(const u8* p)
 {
     u64 r = 0;
     for (u32 i = 0; i < 8; ++i)
@@ -53,14 +54,14 @@ inline u64 LoadLE64(const u8* p)
     return r;
 }
 
-inline void StoreLE64(u8* p, u64 v)
+DUETOS_NO_SANITIZE_WRAP inline void StoreLE64(u8* p, u64 v)
 {
     for (u32 i = 0; i < 8; ++i)
         p[i] = static_cast<u8>(v >> (8u * i));
 }
 
 // RFC 7693 §3.1 — G mixing function.
-inline void G(u64* v, u32 a, u32 b, u32 c, u32 d, u64 x, u64 y)
+DUETOS_NO_SANITIZE_WRAP inline void G(u64* v, u32 a, u32 b, u32 c, u32 d, u64 x, u64 y)
 {
     v[a] = v[a] + v[b] + x;
     v[d] = RotR64(v[d] ^ v[a], 32);
@@ -73,7 +74,7 @@ inline void G(u64* v, u32 a, u32 b, u32 c, u32 d, u64 x, u64 y)
 }
 
 // RFC 7693 §3.2 — compression function F.
-void Compress(Blake2bState& s, const u8 block[kBlake2bBlockBytes], bool last)
+DUETOS_NO_SANITIZE_WRAP void Compress(Blake2bState& s, const u8 block[kBlake2bBlockBytes], bool last)
 {
     u64 m[16];
     for (u32 i = 0; i < 16; ++i)
@@ -106,7 +107,7 @@ void Compress(Blake2bState& s, const u8 block[kBlake2bBlockBytes], bool last)
         s.h[i] ^= v[i] ^ v[i + 8];
 }
 
-void IncrementCounter(Blake2bState& s, u64 inc)
+DUETOS_NO_SANITIZE_WRAP void IncrementCounter(Blake2bState& s, u64 inc)
 {
     s.t[0] += inc;
     if (s.t[0] < inc)

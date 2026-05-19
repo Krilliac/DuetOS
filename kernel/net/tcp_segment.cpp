@@ -25,6 +25,7 @@
 #include "sched/sched.h"
 #include "time/tick.h"
 #include "util/string.h"
+#include "util/compiler.h"
 
 namespace duetos::net::tcp
 {
@@ -441,7 +442,7 @@ void DropTcb(u32 idx)
 // Compute the SEQ field of an inbound ACK relative to snd_una/snd_nxt.
 // Returns false on a duplicate or out-of-window ACK (i.e. caller
 // should drop the ACK without advancing state).
-bool AckInWindow(u32 ack, u32 snd_una, u32 snd_nxt)
+DUETOS_NO_SANITIZE_WRAP bool AckInWindow(u32 ack, u32 snd_una, u32 snd_nxt)
 {
     // unsigned wrap: ack is "newer" iff (ack - snd_una) <
     // (snd_nxt - snd_una) inclusive on both ends.
