@@ -109,7 +109,13 @@ bool MenuContains(u32 x, u32 y);
 /// open one, intermediate panels stay open (caller can use
 /// MenuPopSubmenu to retreat). If the cursor is outside every
 /// panel, the topmost panel's hover is cleared. Idempotent.
-void MenuTrackHoverAt(u32 x, u32 y);
+///
+/// Returns true iff this call changed the highlighted row of any
+/// open panel (i.e. the menu would now paint differently). The
+/// mouse reader uses this to skip a full-screen recompose when a
+/// motion packet only jiggles the cursor within the same row —
+/// pure cursor travel is already repainted by CursorMove.
+bool MenuTrackHoverAt(u32 x, u32 y);
 
 /// Direct hover poke. `panel` is a stack index (0 = root); -1
 /// clears the hover on the topmost panel. `row` is the row index

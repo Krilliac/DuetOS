@@ -105,6 +105,39 @@ a link is up the ACL→keystroke path is live and self-tested.
 PS/2 mouse handling is wired alongside the keyboard. USB HID mouse is
 planned but not yet implemented.
 
+The mouse is a **producer/consumer pipeline with bounded
+backpressure**. The IRQ handler (`kernel/drivers/input/ps2mouse.cpp`)
+assembles the 3-byte protocol and pushes *decoded* `MousePacket`s
+into a 32-slot ring; on overflow it drops the **oldest** packet and
+fires a `KLOG_ONCE_WARN` ("mouse packet ring full — consumer too
+slow"). The consumer is the `mouse-reader` task
+(`kernel/core/boot_tasks.cpp`), which drives all desktop chrome
+(focus, drag, resize, menus, tray, scrollbars).
+
+Because chrome interaction can force a full-screen `DesktopCompose()`
+and that cannot complete within the ~100 Hz PS/2 packet interval, the
+reader **coalesces input** to keep the consume rate decoupled from
+the producer rate:
+
+- `AcquireCoalescedPacket()` drains every queued packet per wake,
+  folding consecutive **same-button-mask** motion into one packet so
+  a single compose covers a whole motion burst. This deliberately
+  spans a held-button drag (the mask is constant for the whole drag,
+  so no press/release edge is hidden). The first packet whose button
+  mask differs is a discrete press/release edge: it is parked and
+  replayed on its own next iteration, so the per-edge chrome logic is
+  unchanged and no click is ever coalesced away.
+- The menu-open hover recompose is gated on `MenuTrackHoverAt()`
+  reporting an actual highlighted-row change (a whole-stack
+  `HoverSignature`), not raw motion — the cursor sprite itself is
+  repainted by `CursorMove()` independently of the compositor, so a
+  packet that only jiggles within one row does zero compose work.
+
+Together these are why sustained motion over an open Start menu no
+longer overflows the ring. Regression harness:
+`tools/test/mouse-menu-lag-repro.sh` (asserts the ring once-warn
+never appears under sustained menu-hover motion).
+
 ## Compositor Routing
 
 The compositor's focused window receives keyboard + mouse events

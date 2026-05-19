@@ -9578,3 +9578,51 @@ heavy scheduler churn"; updated "Lockdep held-set must be
 per-task" (the SMP `release out-of-order` symptom was this root,
 now resolved; the spinlock-vs-mutex held-stack split remains as
 architectural cleanup with no live failure).
+
+## Mouse input is coalesced; compose-rate is decoupled from packet-rate
+
+The `mouse-reader` task may force a full-screen `DesktopCompose()`
+in response to a packet (menu hover, drag, resize). A full compose
+cannot complete within the ~100 Hz PS/2 packet interval, so a
+one-compose-per-packet design makes the consumer fall behind the
+IRQ producer; the 32-slot decoded-packet ring overflows
+(drop-oldest), motion deltas are lost, and the cursor visibly
+crawls — most noticeably navigating the Start menu.
+
+**Decision:** the reader coalesces consecutive **same-button-mask**
+motion packets into one before acting (`AcquireCoalescedPacket`),
+and the menu-open recompose is gated on an actual highlighted-row
+change (`MenuTrackHoverAt` → whole-stack `HoverSignature`), not raw
+motion.
+
+**Rejected alternatives, and why they stay rejected:**
+
+- *One compose per packet (the original).* Structurally cannot keep
+  up with the PS/2 rate; the ring overflow is not a tuning problem.
+- *Just enlarge the ring.* Treats the symptom: a bigger ring delays
+  overflow under sustained motion, it doesn't prevent it, and it
+  adds latency (stale deltas) when it finally drains.
+- *Coalesce across button transitions / "only when no button is
+  held".* Either loses a fast press+release that lands within one
+  drain, or refuses to coalesce during a held-button drag (so drag
+  lag survives). Coalescing spans a held-button drag specifically
+  because the mask is constant there — no edge is hidden — while
+  any mask change ends the batch and is replayed discretely.
+
+**Verified:** clean build on both x86_64-release and
+x86_64-debug-ubsan (UBSan live). Runtime, x86_64-debug-ubsan:
+`tools/test/mouse-motion-soak.sh` injected **1411** HMP mouse
+moves over 30 s; the coalesced reader processed them end-to-end
+(post-bringup `[ui] netpanel hover preview` recomposes fired —
+the *same* expensive-recompose-per-motion mechanism as the menu
+bug), and the ps2mouse ring once-warn ("consumer too slow")
+fired **0** times, with 0 non-deliberate soft-lockups / UBSan /
+panics. This is the load-bearing positive evidence. The
+menu-specific repro `tools/test/mouse-menu-lag-repro.sh` is
+committed but currently **inconclusive headlessly**: opening the
+Start menu needs a pixel-precise HMP click on a theme-dependent
+START rect, which this QEMU rig can't place reliably (it exits
+75/INCONCLUSIVE, not FAIL — a tooling limit, not a regression).
+The netpanel-hover path above is the proven stand-in.
+
+**Related roadmap track(s):** none (defect fix; no roadmap item).
