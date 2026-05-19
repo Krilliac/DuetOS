@@ -42,7 +42,7 @@ FS       := $(KERNEL)/fs
 UTIL     := $(KERNEL)/util
 
 HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuzz_eapol \
-             $(BIN)/fuzz_pe $(BIN)/fuzz_elf $(BIN)/fuzz_gpt
+             $(BIN)/fuzz_pe $(BIN)/fuzz_elf $(BIN)/fuzz_gpt $(BIN)/fuzz_fat32
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -99,6 +99,12 @@ $(BIN)/fuzz_elf: fuzz_elf.cpp $(LOADER)/elf_loader.cpp \
 $(BIN)/fuzz_gpt: fuzz_gpt.cpp $(FS)/gpt.cpp $(UTIL)/crc32.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
+# FAT32 volume parser. Same read-only-disk shim as fuzz_gpt; the
+# probe spans fat32.cpp plus the lookup/dir/read companion TUs.
+$(BIN)/fuzz_fat32: fuzz_fat32.cpp $(FS)/fat32.cpp $(FS)/fat32_lookup.cpp \
+		$(FS)/fat32_dir.cpp $(FS)/fat32_read.cpp host_shim/fs_stubs.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
 # Each run-* keeps a persistent corpus and stops after 60 s.
 # run-pe seeds the corpus first (see seeds/gen_pe_seeds.py) so the
 # fuzzer starts past the DOS/COFF prefix gate.
@@ -116,6 +122,11 @@ run-gpt: $(BIN)/fuzz_gpt
 	@mkdir -p corpus/gpt
 	@python3 seeds/gen_gpt_seeds.py corpus/gpt
 	$(BIN)/fuzz_gpt -max_len=262144 -max_total_time=60 -print_final_stats=1 corpus/gpt
+
+run-fat32: $(BIN)/fuzz_fat32
+	@mkdir -p corpus/fat32
+	@python3 seeds/gen_fat32_seeds.py corpus/fat32
+	$(BIN)/fuzz_fat32 -max_len=262144 -max_total_time=60 -print_final_stats=1 corpus/fat32
 
 run-%: $(BIN)/fuzz_%
 	@mkdir -p corpus/$*
