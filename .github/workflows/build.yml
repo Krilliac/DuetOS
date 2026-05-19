@@ -154,6 +154,43 @@ jobs:
             build/x86_64-release/kernel/duetos-kernel.elf
           retention-days: 7
 
+  # Fuzz gate: build every libFuzzer harness in tests/fuzz and run
+  # them all in parallel via tools/test/fuzz-all.sh. The script
+  # exits non-zero on any crash/timeout/oom/leak artifact, so it is
+  # the CI gate unmodified — no wrapper logic. Toolchain mirrors
+  # check-rust (pinned nightly rustc for the fuzz_pe/elf + every
+  # Rust-backed parser's rlib + panic=abort staticlib) plus the
+  # clang-18 + libclang-rt sanitizer runtime libFuzzer needs.
+  # FUZZ_SECONDS=90 is the PR budget; the optional cron long-run
+  # (Roadmap follow-up) can raise it with a persisted corpus cache.
+  fuzz:
+    name: fuzz-all
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain
+        run: |
+          for attempt in 1 2 3 4; do sudo apt-get update && break; sleep $((attempt*5)); done
+          sudo apt-get install -y clang-18 lld-18 llvm-18 libclang-rt-18-dev python3 e2fsprogs
+          sudo ln -sf /usr/bin/clang-18 /usr/local/bin/clang
+          sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - name: Sync toolchain
+        run: rustup show
+      - name: Fuzz everything (CI gate)
+        run: FUZZ_SECONDS=90 tools/test/fuzz-all.sh
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            tests/fuzz/build/crash-*
+            tests/fuzz/corpus/*/crash-*
+
   # Build-flavor matrix: each non-default preset that exposes a
   # distinct build axis (asserts, full audit, LTO, fast-debug).
   # Each matrix entry builds AND smoke-boots its preset.
