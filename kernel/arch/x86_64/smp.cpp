@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/gdt.h"
+#include "arch/x86_64/idt.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
@@ -501,16 +502,6 @@ void SmpSendReschedIpi(u32 cpu_id)
 extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
 {
     cpu::PerCpu* pcpu = g_ap_percpus[cpu_id];
-    WriteMsrGsBase(reinterpret_cast<u64>(pcpu));
-    // ALSO program IA32_KERNEL_GS_BASE to the same per-CPU pointer.
-    // This is the value `swapgs` will load into GS_BASE on the first
-    // ring-3 -> ring-0 transition (SYSCALL/syscall_entry's `swapgs`).
-    // Without this, a swapgs on this AP loads zero into GS_BASE and
-    // the next `gs:[per_cpu_offset]` read faults at a kernel-mode RIP
-    // — a confusing failure whose root cause (KERNEL_GS_BASE=0) is
-    // hard to spot from the resulting crash dump. Match the BSP path
-    // in linux::SyscallInit which programs this same MSR.
-    WriteMsrKernelGsBase(reinterpret_cast<u64>(pcpu));
 
     // Install this AP's own GDT + TSS so NMI / #DF / #MC trap entries
     // resolve to the AP's IST stacks (not the BSP's, which would race
@@ -528,6 +519,43 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // stack — far worse than halting cleanly.
     KASSERT(bundle != nullptr, "arch/smp", "AP entered ApEntryFromTrampoline without an allocated GDT bundle");
     LoadGdtForCurrent(bundle);
+
+    // Establish this CPU's GSBASE *after* LoadGdtForCurrent — not
+    // before. LoadGdtForCurrent reloads the segment registers, and
+    // its `mov %ax, %gs` reloads GS's hidden base from the kernel-
+    // data descriptor (whose base is 0): the instruction ZEROES
+    // IA32_GS_BASE as a side effect. Programming the per-CPU pointer
+    // before the GDT load (as an earlier revision did) is therefore
+    // dead — it is clobbered before any gs-relative read — and every
+    // cpu::CurrentCpu() on this AP then saw GSBASE=0. The pre-fix
+    // CurrentCpu() silently returned the BSP slot for a non-kernel
+    // GSBASE, so the AP read/wrote the BSP's current_task /
+    // ctxsw_lock_to_release / per-CPU runqueue selection: the
+    // per-CPU-state corruption behind the intermittent SMP double-run
+    // (MUTEX-NONOWNER / sync-spinlock release-out-of-order under
+    // tools/qemu/gui-fuzz.sh). The BSP is correct for the mirror-
+    // image reason: PerCpuInitBsp programs GSBASE *after* GdtInit.
+    // Orders match now.
+    WriteMsrGsBase(reinterpret_cast<u64>(pcpu));
+    // IA32_KERNEL_GS_BASE is the swapgs shadow — `mov %gs` does NOT
+    // touch it — but program it here too (co-located with the GSBASE
+    // write) so the first ring-3 -> ring-0 swapgs on this AP loads
+    // the per-CPU pointer, not 0, into GS_BASE. Mirrors the BSP path
+    // in linux::SyscallInit which programs this same MSR.
+    WriteMsrKernelGsBase(reinterpret_cast<u64>(pcpu));
+
+    // Point THIS CPU's IDTR at the shared IDT. IDTR is per-CPU; the
+    // SMP trampoline only loads a transition GDT (no lidt), and the
+    // BSP's IdtInit lidt'd only the BSP. Without this an AP has no
+    // valid IDT, so the first interrupt it takes — the LAPIC timer
+    // tick after SchedEnterOnAp's idle loop runs `sti` — #GPs reading
+    // a bogus gate, escalates #GP -> #DF -> triple fault, and the AP
+    // resets silently (no serial PANIC; the run just looks "hung").
+    // qemu.log showed exactly this: v=0d e=0102 (IDT, vector 0x20)
+    // -> v=08 -> Triple fault at the MWAIT idle loop. Must follow
+    // LoadGdtForCurrent (gate CS = kKernelCodeSelector must resolve
+    // in the now-active GDT) and precede the LAPIC enable below.
+    IdtLoadForCurrent();
 
     // Enable the AP's LAPIC. IA32_APIC_BASE MSR bit 11 is the global
     // enable; the LAPIC MMIO window is already mapped in the shared

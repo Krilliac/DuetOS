@@ -19,8 +19,16 @@ namespace duetos::arch
 {
 
 /// Install the IDT and load it with lidt. Depends on `kKernelCodeSelector`
-/// from gdt.h already being the active CS.
+/// from gdt.h already being the active CS. BSP-only: builds the global
+/// gate table once, then loads this CPU's IDTR.
 void IdtInit();
+
+/// Load THIS CPU's IDTR with the already-built global IDT. IDTR is a
+/// per-CPU register but the table is shared, so each AP calls this
+/// during bring-up (after its GDT load, before enabling interrupts).
+/// Without it an AP has no valid IDT and the first interrupt triple-
+/// faults. No-op-safe only after IdtInit() has run on the BSP.
+void IdtLoadForCurrent();
 
 /// Late-bound gate install for vectors that don't have a matching slot in
 /// `isr_stub_table` (e.g. the LAPIC spurious vector at 0xFF). The handler

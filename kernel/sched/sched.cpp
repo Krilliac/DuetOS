@@ -2530,6 +2530,36 @@ void OnTimerTick(u64 now_ticks)
             ::duetos::sched::LoadavgUpdate(runnable);
         }
     }
+
+    // One-shot SMP-health sentinel. cpu::CurrentCpu() now recovers a
+    // non-kernel GSBASE on a non-BSP CPU by LAPIC-ID resolution
+    // instead of the old "assume BSP" mis-attribution that drove the
+    // intermittent SMP double-run (an AP reading/writing the BSP's
+    // current_task / ctxsw lock-pass slot). A clean boot never trips
+    // this; the first trip leaves a gated WARN + probe so a future
+    // swapgs / AP-GS-reestablishment regression is caught without an
+    // operator re-adding prints. Checked here rather than at the
+    // detection site because klog tags every line via
+    // CurrentCpuIdOrBsp(), which would re-enter CurrentCpu() while
+    // GSBASE is still stale (unbounded recursion). The timer handler
+    // runs post-entry-swapgs, so GSBASE is kernel-valid here. One
+    // volatile read + branch on the hot path until it trips once.
+    {
+        static volatile bool s_gsbase_warned = false;
+        if (!s_gsbase_warned)
+        {
+            const u64 fc = cpu::CurrentCpuGsbaseFallbackCount();
+            if (fc != 0)
+            {
+                s_gsbase_warned = true;
+                KBP_PROBE_V(::duetos::debug::ProbeId::kCurrentCpuGsbaseFallback, fc);
+                KLOG_WARN_V("cpu/percpu",
+                            "CurrentCpu LAPIC-resolved a non-kernel GSBASE on a non-BSP "
+                            "CPU (swapgs / AP-GS gap; recovered) — REGRESSION, count",
+                            fc);
+            }
+        }
+    }
 }
 
 Task* CurrentTask()

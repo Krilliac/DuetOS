@@ -3,6 +3,7 @@
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/smp.h"
 #include "log/klog.h"
 
 namespace duetos::cpu
@@ -60,6 +61,14 @@ constinit PerCpu g_bsp_percpu = {
 // PerCpuInitBsp has run. Without it, reading GSBASE would return 0
 // and CurrentCpu() would dereference a null pointer.
 constinit bool g_bsp_installed = false;
+
+// Count of times CurrentCpu() saw a non-kernel GSBASE in a kernel
+// context on a NON-BSP CPU and recovered via LAPIC-ID resolution.
+// A clean SMP boot stays at (or near) zero; a non-zero value marks
+// a swapgs / AP-GS-reestablishment gap. Surfaced from SmpStartAps
+// (kernel-GSBASE-safe context) — NOT logged from inside CurrentCpu()
+// itself, which would recurse through klog's CurrentCpuIdOrBsp tag.
+constinit u64 g_gsbase_fallback_nonbsp = 0;
 
 inline void WriteMsr(u32 msr, u64 value)
 {
@@ -129,19 +138,59 @@ PerCpu* CurrentCpu()
     // kernel half, >= 0xffff800000000000). So validating "is this a
     // kernel-canonical pointer" — not merely "is it non-null" —
     // catches BOTH stale forms (and any future user-range leak).
-    // DuetOS boots one CPU today, so the BSP static is
-    // unconditionally the correct PerCpu; fall back to it exactly as
-    // the pre-install path does, turning a hard #PF into correct
-    // behaviour.
-    //
-    // GAP: SMP — a non-kernel GSBASE in a kernel context on an AP is
-    // a genuine entry-stub swapgs bug, not a benign early window.
-    // This fallback keeps it non-fatal, but the syscall/IRQ entry
-    // paths must be audited for swapgs correctness before multi-CPU
-    // bring-up (an AP would silently mis-attribute to the BSP).
     constexpr u64 kKernelHalfBase = 0xffff800000000000ULL;
     if (reinterpret_cast<u64>(p) < kKernelHalfBase)
     {
+        // GSBASE holds a stale / user value: a ring3->ring0 swapgs
+        // window, or an AP that has not (yet / again) re-established
+        // its kernel GS. Returning &g_bsp_percpu here was correct
+        // ONLY while DuetOS booted a single CPU. On SMP it silently
+        // mis-attributes an AP to the BSP, so the AP then reads and
+        // writes the BSP's current_task / ctxsw_lock_to_release /
+        // per-CPU runqueue selection. That cross-CPU per-CPU-state
+        // corruption is the root of the intermittent SMP double-run
+        // (MUTEX-NONOWNER / sync-spinlock release-out-of-order under
+        // tools/qemu/gui-fuzz.sh): an AP sentinel / idle-range TID
+        // ends up Current() on the CPU running a real worker's
+        // stack, so that worker's MutexUnlock fails the owner test.
+        //
+        // The LAPIC ID is hardware-authoritative and independent of
+        // GSBASE, so resolve the REAL executing CPU from it. Every
+        // online PerCpu has its lapic_id stamped before the CPU runs
+        // any code (BSP in PerCpuInitBsp, each AP in SmpStartAps
+        // before SIPI), so the scan is valid for any caller that got
+        // here. Fall back to the BSP slot only when no CPU matches —
+        // genuine single-CPU boot, where the BSP is the only and
+        // therefore correct answer. SmpGetPercpu(id) for id>=1 reads
+        // g_ap_percpus[id] directly and SmpGetPercpu(0) returns
+        // &g_bsp_percpu, so this never recurses back into
+        // CurrentCpu(); likewise LapicCurrentId() reads LAPIC MMIO,
+        // not GSBASE.
+        const u32 lapic = arch::LapicCurrentId();
+        const u32 limit = arch::SmpCpuIdLimit();
+        for (u32 id = 0; id < limit; ++id)
+        {
+            PerCpu* cand = arch::SmpGetPercpu(id);
+            if (cand != nullptr && cand->lapic_id == lapic)
+            {
+                if (cand != &g_bsp_percpu)
+                {
+                    // A non-BSP CPU reached kernel C++ with a
+                    // non-kernel GSBASE — a real swapgs / AP-GS gap
+                    // on THIS cpu. Recovered (correct CPU resolved),
+                    // but count it: a clean boot must stay at zero
+                    // now the AP-bring-up GS ordering + AP lidt are
+                    // fixed; a non-zero value is a regression.
+                    // No klog / probe here — klog tags lines via
+                    // CurrentCpuIdOrBsp() which would re-enter this
+                    // path while GSBASE is still stale (unbounded
+                    // recursion). The count is surfaced + probed from
+                    // OnTimerTick, a kernel-GSBASE-safe site.
+                    __atomic_add_fetch(&g_gsbase_fallback_nonbsp, 1, __ATOMIC_RELAXED);
+                }
+                return cand;
+            }
+        }
         return &g_bsp_percpu;
     }
     return p;
@@ -164,6 +213,11 @@ bool BspInstalled()
 PerCpu* BspPercpu()
 {
     return &g_bsp_percpu;
+}
+
+u64 CurrentCpuGsbaseFallbackCount()
+{
+    return __atomic_load_n(&g_gsbase_fallback_nonbsp, __ATOMIC_RELAXED);
 }
 
 } // namespace duetos::cpu

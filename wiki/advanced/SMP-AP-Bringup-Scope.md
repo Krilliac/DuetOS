@@ -48,6 +48,31 @@ landed" section reflects current reality.
   arms the local LAPIC timer on the calling CPU using the cached
   calibration from BSP's `TimerInit`.
 
+### AP per-CPU register-state ordering (2026-05-19, resolved)
+
+Three per-CPU **registers** (not tables) must be set up on each AP
+in this order during `ApEntryFromTrampoline`, or the AP corrupts
+shared state / triple-faults — see Design-Decisions 2026-05-19:
+
+1. `LoadGdtForCurrent(bundle)` first. Its `mov %ax, %gs` reloads
+   GS's hidden base from the kernel-data descriptor (base 0),
+   which **zeroes `IA32_GS_BASE`** as a side effect.
+2. **Then** `WriteMsrGsBase` / `WriteMsrKernelGsBase` — writing the
+   AP's per-CPU pointer before step 1 is dead (clobbered before any
+   gs-relative read; every `cpu::CurrentCpu()` then saw GSBASE=0).
+3. **Then** `IdtLoadForCurrent()` — IDTR is per-CPU; the trampoline
+   only loads a transition GDT and `IdtInit` lidt'd only the BSP,
+   so without this the AP's first timer tick #GP → #DF → triple
+   fault (silent on serial). Must precede LAPIC enable / `sti`.
+
+`cpu::CurrentCpu()` additionally resolves the real CPU by LAPIC ID
+when GSBASE is non-kernel, instead of assuming BSP — a gated
+`kCurrentCpuGsbaseFallback` probe + `OnTimerTick` count sentinel
+catches any regression (clean boot stays at zero). This closed the
+intermittent SMP "task double-run" (`MUTEX-NONOWNER` /
+`release-out-of-order` under `gui-fuzz.sh 18`) and the silent
+AP triple fault in one slice.
+
 ## Known limitations / GAPs
 
 1. **`g_sched_lock` is still global.** Every per-CPU runqueue is
