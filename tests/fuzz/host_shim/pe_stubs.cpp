@@ -48,6 +48,14 @@ PhysAddr AddressSpaceLookupUserFrame(const AddressSpace*, u64) { Trap("AddressSp
 PhysAddr AllocateFrame() { Trap("AllocateFrame"); }
 PhysAddr AllocateContiguousFrames(u64) { Trap("AllocateContiguousFrames"); }
 void* PhysToVirt(PhysAddr) { Trap("PhysToVirt"); }
+// ElfLoad path (fuzz_elf reuses this TU). Never reached by the
+// pure ElfValidate/ElfForEachPtLoad surface the harness drives.
+AddressSpace* AddressSpaceCreate(u64) { Trap("AddressSpaceCreate"); }
+void AddressSpaceRelease(AddressSpace*) { Trap("AddressSpaceRelease"); }
+u64 FreeFramesCount() { return 0; }
+void FrameAllocatorDrainPools() {}
+void FrameAllocatorSetFailAfter(u64) {}
+u64 FrameAllocatorGetFailAfter() { return 0; }
 } // namespace duetos::mm
 
 namespace duetos::core

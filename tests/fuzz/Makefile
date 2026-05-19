@@ -39,7 +39,7 @@ RUST_EDITION := 2021
 
 BIN := build
 HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuzz_eapol \
-             $(BIN)/fuzz_pe
+             $(BIN)/fuzz_pe $(BIN)/fuzz_elf
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -83,6 +83,13 @@ $(BIN)/fuzz_pe: fuzz_pe.cpp $(LOADER)/pe_loader.cpp $(LOADER)/pe_exports.cpp \
 		host_shim/pe_stubs.cpp $(BIN)/libduetos_exec_meta_fuzz.a | $(BIN)
 	$(CXX) $(CXXFLAGS) -I $(EXEC_META)/include $^ -o $@
 
+# ELF64 loader: native peer of the PE loader. Shares the Rust
+# exec_meta validator and the kernel-symbol stub TU (ElfLoad's
+# mm/security deps overlap PeLoad's).
+$(BIN)/fuzz_elf: fuzz_elf.cpp $(LOADER)/elf_loader.cpp \
+		host_shim/pe_stubs.cpp $(BIN)/libduetos_exec_meta_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(EXEC_META)/include $^ -o $@
+
 # Each run-* keeps a persistent corpus and stops after 60 s.
 # run-pe seeds the corpus first (see seeds/gen_pe_seeds.py) so the
 # fuzzer starts past the DOS/COFF prefix gate.
@@ -90,6 +97,11 @@ run-pe: $(BIN)/fuzz_pe
 	@mkdir -p corpus/pe
 	@python3 seeds/gen_pe_seeds.py corpus/pe
 	$(BIN)/fuzz_pe -max_len=131072 -max_total_time=60 -print_final_stats=1 corpus/pe
+
+run-elf: $(BIN)/fuzz_elf
+	@mkdir -p corpus/elf
+	@python3 seeds/gen_elf_seeds.py corpus/elf
+	$(BIN)/fuzz_elf -max_total_time=60 -print_final_stats=1 corpus/elf
 
 run-%: $(BIN)/fuzz_%
 	@mkdir -p corpus/$*
