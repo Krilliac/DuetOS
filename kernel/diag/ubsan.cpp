@@ -119,6 +119,40 @@ struct AlignmentAssumptionData
     const TypeDescriptor* type;
 };
 
+// Emitted by `-fsanitize=integer` (implicit-conversion /
+// implicit-integer-truncation / implicit-integer-sign-change).
+struct ImplicitConversionData
+{
+    SourceLocation loc;
+    const TypeDescriptor* from_type;
+    const TypeDescriptor* to_type;
+    u8 kind;
+};
+
+// `-fsanitize=nullability-return` / `-fsanitize=returns-nonnull`.
+// The real source location is passed as the handler's SECOND
+// argument (a SourceLocation*), not embedded in this struct.
+struct NonNullReturnData
+{
+    SourceLocation attr_loc;
+};
+
+// `-fsanitize=vla-bound` (part of -fsanitize=undefined).
+struct VLABoundData
+{
+    SourceLocation loc;
+    const TypeDescriptor* type;
+};
+
+// `-fsanitize=float-cast-overflow` (part of -fsanitize=undefined).
+// LLVM >= 5 (toolchain baseline is clang 18+) puts `loc` first.
+struct FloatCastOverflowData
+{
+    SourceLocation loc;
+    const TypeDescriptor* from_type;
+    const TypeDescriptor* to_type;
+};
+
 // Centralised report path. Keeps every handler down to one line of
 // glue and ensures every report increments the counter, so a future
 // runtime checker can ask "any UB since boot?" in O(1) (see
@@ -354,15 +388,19 @@ extern "C"
 {
 
     using ::duetos::diag::AlignmentAssumptionData;
+    using ::duetos::diag::FloatCastOverflowData;
+    using ::duetos::diag::ImplicitConversionData;
     using ::duetos::diag::InvalidBuiltinData;
     using ::duetos::diag::InvalidValueData;
     using ::duetos::diag::NonNullArgData;
+    using ::duetos::diag::NonNullReturnData;
     using ::duetos::diag::OutOfBoundsData;
     using ::duetos::diag::OverflowData;
     using ::duetos::diag::PointerOverflowData;
     using ::duetos::diag::ShiftOutOfBoundsData;
     using ::duetos::diag::TypeMismatchData;
     using ::duetos::diag::UnreachableData;
+    using ::duetos::diag::VLABoundData;
 
     // Re-introduce the kernel typedef inside the extern "C" block —
     // `using` works through the language-linkage block, and avoids
@@ -443,6 +481,52 @@ extern "C"
         // Compiler-emitted "we proved this can't happen" landed at
         // runtime — the strongest "we have a bug" signal in the set.
         Emit("builtin-unreachable", &reinterpret_cast<UnreachableData*>(data)->loc);
+    }
+
+    // ---------------------------------------------------------------
+    // Handlers below close the link for every recoverable check the
+    // broadened sanitizer flag set can emit. The first four
+    // (float-cast-overflow, missing-return, returns-nonnull,
+    // vla-bound) are reachable under plain `-fsanitize=undefined`
+    // too — without these symbols a single trigger under the
+    // existing ubsan preset would be an undefined-symbol link
+    // error. implicit-conversion + nullability-arg come in with
+    // `-fsanitize=integer,nullability`.
+    // ---------------------------------------------------------------
+
+    void __ubsan_handle_float_cast_overflow(void* data, u64)
+    {
+        Emit("float-cast-overflow", &reinterpret_cast<FloatCastOverflowData*>(data)->loc);
+    }
+    void __ubsan_handle_missing_return(void* data)
+    {
+        // Control fell off the end of a value-returning function —
+        // the caller is about to use a garbage return value. Always
+        // a real bug (UB), never a false positive.
+        Emit("missing-return", &reinterpret_cast<UnreachableData*>(data)->loc);
+    }
+    void __ubsan_handle_vla_bound_not_positive(void* data, u64)
+    {
+        Emit("vla-bound-not-positive", &reinterpret_cast<VLABoundData*>(data)->loc);
+    }
+    void __ubsan_handle_implicit_conversion(void* data, u64, u64)
+    {
+        Emit("implicit-conversion", &reinterpret_cast<ImplicitConversionData*>(data)->loc);
+    }
+    void __ubsan_handle_nullability_arg(void* data)
+    {
+        Emit("nullability-arg", &reinterpret_cast<NonNullArgData*>(data)->loc);
+    }
+    // returns-nonnull / nullability-return: the source location is
+    // the SECOND argument (the NonNullReturnData only carries the
+    // attribute's location), so pass `loc` straight through.
+    void __ubsan_handle_nonnull_return_v1(void*, void* loc)
+    {
+        Emit("nonnull-return-violated", reinterpret_cast<::duetos::diag::SourceLocation*>(loc));
+    }
+    void __ubsan_handle_nullability_return_v1(void*, void* loc)
+    {
+        Emit("nullability-return", reinterpret_cast<::duetos::diag::SourceLocation*>(loc));
     }
 
 } // extern "C"

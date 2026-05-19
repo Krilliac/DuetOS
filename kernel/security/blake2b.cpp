@@ -35,7 +35,13 @@ constexpr u8 kSigma[12][16] = {
 
 inline u64 RotR64(u64 x, u32 n)
 {
-    return (x >> n) | (x << (64 - n));
+    // Mask both shift amounts to [0,63]. For every n the callers
+    // actually use (16/24/32/63) this is bit-identical to the
+    // naive `x << (64 - n)`; the mask additionally makes n==0
+    // well-defined (identity) instead of `x << 64` UB, so
+    // -fsanitize=undefined's shift-exponent check can never trip
+    // here regardless of how RotR64 gets inlined/folded.
+    return (x >> (n & 63)) | (x << ((64u - n) & 63));
 }
 
 // Load a little-endian u64 from 8 bytes.

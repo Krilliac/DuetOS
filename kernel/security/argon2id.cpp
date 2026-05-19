@@ -164,7 +164,12 @@ inline u64 Trunc32(u64 x)
 
 inline u64 RotR64(u64 x, u32 n)
 {
-    return (x >> n) | (x << (64u - n));
+    // Mask both shift amounts to [0,63]. Bit-identical to the naive
+    // form for every n the callers use (16/24/32/63); the mask
+    // makes n==0 well-defined (identity) instead of `x << 64` UB,
+    // so -fsanitize=undefined's shift-exponent check can never trip
+    // here regardless of how RotR64 gets inlined/folded.
+    return (x >> (n & 63)) | (x << ((64u - n) & 63));
 }
 
 inline void GB(u64& a, u64& b, u64& c, u64& d)

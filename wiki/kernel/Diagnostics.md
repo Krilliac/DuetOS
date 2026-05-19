@@ -44,7 +44,7 @@ The contract every module follows:
 | `leak_detector` | [`leak_detector.h`](../../kernel/diag/leak_detector.h) | Aggregates per-subsystem resource counters; fires `kLeakAttributable` on process exit if any pinned. | none (read-only of existing counters) |
 | `soft_lockup` | [`soft_lockup.h`](../../kernel/diag/soft_lockup.h) | Single-task CPU hog detector (100 ticks ≈ 1 s default). | `SoftLockupSelfTest()` |
 | `stress_driver` | [`stress_driver.h`](../../kernel/diag/stress_driver.h) | Boot-time stress harness driven by `stress=` cmdline. | none |
-| `ubsan` | [`ubsan.h`](../../kernel/diag/ubsan.h) | UBSAN runtime — 14 handler classes (overflow, shift, OOB, alignment, …). Each incident emits one `[W] diag/ubsan : <kind>` klog line carrying the failing class as the ring-entry message (so the BSOD recent-log tail shows the actual UB class, not a generic placeholder). `type-mismatch` additionally emits one deduped `[ubsan]   tm-detail …` line per call site decoding the access kind (load/store/…), the failing pointer, the required alignment, and which fault it is (`null-deref` / `misaligned` / `obj-too-small`) — the source line alone is misleading when the UB is a misaligned wide access whose attributed line is a plain scalar op. Off by default. | `UbsanSelfTest()` |
+| `ubsan` | [`ubsan.h`](../../kernel/diag/ubsan.h) | Sanitizer runtime — 21 handler classes (overflow, shift, OOB, alignment, float-cast-overflow, missing-return, vla-bound, implicit-conversion, nullability-arg/return, …) covering `-fsanitize=undefined,nullability,float-divide-by-zero` and (under `x86_64-debug-san`) the `integer` family. Each incident emits one `[W] diag/ubsan : <kind>` klog line carrying the failing class as the ring-entry message (so the BSOD recent-log tail shows the actual UB class, not a generic placeholder). `type-mismatch` additionally emits one deduped `[ubsan]   tm-detail …` line per call site decoding the access kind (load/store/…), the failing pointer, the required alignment, and which fault it is (`null-deref` / `misaligned` / `obj-too-small`) — the source line alone is misleading when the UB is a misaligned wide access whose attributed line is a plain scalar op. ON in `x86_64-debug`; the in-tree KASAN-equivalent (`DUETOS_KASAN`) is the co-equal ASan stand-in (real `-fsanitize=address`/`kernel-address` is infeasible on the freestanding target). | `UbsanSelfTest()` |
 | `fault_react` | [`fault_react.h`](../../kernel/diag/fault_react.h) | Self-defensive fault dispatcher (`FaultKind` × `FaultSeverity` → `FaultReaction`). Trap-safe deferred drain. | `FaultReactSelfTest()` |
 | `fix_journal` | [`fix_journal.h`](../../kernel/diag/fix_journal.h) | Record-and-defer for STUB/GAP hits at runtime — 1024×128B ring. Macros `FIX_NOTE_STUB()` / `FIX_NOTE_GAP()`. | `FixJournalSelfTest()` |
 | `fix_journal_persist` | [`fix_journal_persist.h`](../../kernel/diag/fix_journal_persist.h) | Tier-2/3 persistence to FAT32 `/KERNEL.FIX` and NVMe reserved LBAs. | `FixJournalPersistSelfTest()` |
@@ -234,6 +234,16 @@ machine-check stack. See [Fault Injection](Fault-Injection.md).
   Revisit when `mm` grows a poison list.
 - **UBSAN off by default.** Enable with `ubsan=on` cmdline; rate-limited
   reports otherwise drown the log.
+- **`blake2b.cpp` / `argon2id.cpp` `RotR64` shift-exponent UB
+  (fixed).** Under the max-diagnostics debug build the auth/hash
+  path tripped `[ubsan] shift-out-of-bounds at blake2b.cpp:38`
+  thousands of times per boot: `RotR64` wrote `x << (64 - n)`,
+  which is `x << 64` UB when an inlined/folded specialisation
+  reaches `n == 0`. Both definitions now mask the shift amount
+  (`x >> (n & 63)) | (x << ((64u - n) & 63)`) — bit-identical for
+  every rotation the callers use (16/24/32/63), well-defined at
+  `n == 0`, so the check can never trip there. Blake2b/Argon2id
+  KAT self-tests still PASS, confirming no crypto regression.
 - **`blake2b.cpp` type-mismatch on the auth path (open).** Running
   `su` / any password verify trips `[ubsan] type-mismatch at
   blake2b.cpp` with `tm-detail … fault=misaligned need-align=0x10
