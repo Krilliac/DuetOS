@@ -29,8 +29,27 @@ CXXFLAGS := -std=c++23 -g -O1 -fno-omit-frame-pointer -DDUETOS_HOST_TEST \
             -fsanitize=fuzzer,address,undefined \
             -I host_shim -I $(KERNEL)
 
+LOADER   := $(KERNEL)/loader
+EXEC_META := $(LOADER)/exec_meta_rust
+
+# rustc is only needed for fuzz_pe (the PE validator delegates its
+# prefix/image gate to the no_std duetos_exec_meta Rust crate).
+RUSTC    := rustc
+RUST_EDITION := 2021
+
 BIN := build
-HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuzz_eapol
+FS       := $(KERNEL)/fs
+UTIL     := $(KERNEL)/util
+
+EXFAT_RUST := $(FS)/exfat_rust
+NTFS_RUST := $(FS)/ntfs_rust
+EXT4_RUST := $(FS)/ext4_rust
+NET := $(KERNEL)/net
+NET_PARSERS_RUST := $(NET)/parsers_rust
+
+HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuzz_eapol \
+             $(BIN)/fuzz_pe $(BIN)/fuzz_elf $(BIN)/fuzz_gpt $(BIN)/fuzz_fat32 \
+             $(BIN)/fuzz_exfat $(BIN)/fuzz_ntfs $(BIN)/fuzz_ext4 $(BIN)/fuzz_net
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -52,10 +71,169 @@ $(BIN)/fuzz_eapol: fuzz_eapol.cpp $(WIRELESS)/eapol.cpp \
 		$(CRYPTO)/hmac.cpp $(CRYPTO)/sha1.cpp $(CRYPTO)/sha256.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
+# --- PE/COFF loader fuzzer ---------------------------------------
+#
+# pe_loader.cpp is one TU pulling the whole mm/proc/win32 surface;
+# host_shim/pe_stubs.cpp resolves the PeLoad-only symbols (they
+# abort if the pure validate/report path ever reaches them). The
+# DOS/COFF prefix + opt-header gate lives in the no_std
+# duetos_exec_meta Rust crate — built here as an rlib + a
+# panic=abort staticlib wrapper so a Rust-side overflow/index bug
+# also aborts as a libFuzzer crash.
+$(BIN)/libduetos_exec_meta.rlib: $(EXEC_META)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_exec_meta -O $< -o $@
+
+$(BIN)/libduetos_exec_meta_fuzz.a: host_shim/exec_meta_fuzz_shim.rs \
+		$(BIN)/libduetos_exec_meta.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_exec_meta=$(BIN)/libduetos_exec_meta.rlib $< -o $@
+
+$(BIN)/fuzz_pe: fuzz_pe.cpp $(LOADER)/pe_loader.cpp $(LOADER)/pe_exports.cpp \
+		host_shim/pe_stubs.cpp $(BIN)/libduetos_exec_meta_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(EXEC_META)/include $^ -o $@
+
+# ELF64 loader: native peer of the PE loader. Shares the Rust
+# exec_meta validator and the kernel-symbol stub TU (ElfLoad's
+# mm/security deps overlap PeLoad's).
+$(BIN)/fuzz_elf: fuzz_elf.cpp $(LOADER)/elf_loader.cpp \
+		host_shim/pe_stubs.cpp $(BIN)/libduetos_exec_meta_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(EXEC_META)/include $^ -o $@
+
+# GPT partition-table parser. Serves the fuzz input as a read-only
+# disk via host_shim/drivers/storage/block.h; links the real
+# CRC32 the parser validates headers + entry array against.
+$(BIN)/fuzz_gpt: fuzz_gpt.cpp $(FS)/gpt.cpp $(UTIL)/crc32.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# FAT32 volume parser. Same read-only-disk shim as fuzz_gpt; the
+# probe spans fat32.cpp plus the lookup/dir/read companion TUs.
+$(BIN)/fuzz_fat32: fuzz_fat32.cpp $(FS)/fat32.cpp $(FS)/fat32_lookup.cpp \
+		$(FS)/fat32_dir.cpp $(FS)/fat32_read.cpp host_shim/fs_stubs.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# exFAT volume parser. Byte parsing is the no_std duetos_exfat
+# Rust crate (rlib + panic=abort staticlib wrapper, same recipe
+# as duetos_exec_meta) so a Rust-side bounds/overflow bug also
+# aborts as a libFuzzer crash.
+$(BIN)/libduetos_exfat.rlib: $(EXFAT_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_exfat -O $< -o $@
+
+$(BIN)/libduetos_exfat_fuzz.a: host_shim/exfat_fuzz_shim.rs \
+		$(BIN)/libduetos_exfat.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_exfat=$(BIN)/libduetos_exfat.rlib $< -o $@
+
+$(BIN)/fuzz_exfat: fuzz_exfat.cpp $(FS)/exfat.cpp host_shim/fs_stubs.cpp \
+		$(BIN)/libduetos_exfat_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(EXFAT_RUST)/include $^ -o $@
+
+# NTFS volume parser. Same recipe as fuzz_exfat — byte parsing is
+# the no_std duetos_ntfs Rust crate.
+$(BIN)/libduetos_ntfs.rlib: $(NTFS_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_ntfs -O $< -o $@
+
+$(BIN)/libduetos_ntfs_fuzz.a: host_shim/ntfs_fuzz_shim.rs \
+		$(BIN)/libduetos_ntfs.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_ntfs=$(BIN)/libduetos_ntfs.rlib $< -o $@
+
+$(BIN)/fuzz_ntfs: fuzz_ntfs.cpp $(FS)/ntfs.cpp host_shim/fs_stubs.cpp \
+		$(BIN)/libduetos_ntfs_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(NTFS_RUST)/include $^ -o $@
+
+# ext4 volume parser (read-only Linux-interop tier). Same recipe.
+$(BIN)/libduetos_ext4.rlib: $(EXT4_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_ext4 -O $< -o $@
+
+$(BIN)/libduetos_ext4_fuzz.a: host_shim/ext4_fuzz_shim.rs \
+		$(BIN)/libduetos_ext4.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_ext4=$(BIN)/libduetos_ext4.rlib $< -o $@
+
+$(BIN)/fuzz_ext4: fuzz_ext4.cpp $(FS)/ext4.cpp host_shim/fs_stubs.cpp \
+		$(BIN)/libduetos_ext4_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(EXT4_RUST)/include $^ -o $@
+
+# Network L2/L3 ingest: NetStackInjectRx -> ARP / IPv4 / ICMP /
+# UDP / TCP byte walkers. The DHCP-option / DNS-name parsing is
+# the no_std duetos_net_parsers Rust crate (same rlib +
+# panic=abort staticlib recipe). net_stubs.cpp resolves the
+# NIC/Wi-Fi/scheduler/pipe symbols the socket TU drags in but the
+# RX parse path never reaches.
+$(BIN)/libduetos_net_parsers.rlib: $(NET_PARSERS_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_net_parsers -O $< -o $@
+
+$(BIN)/libduetos_net_parsers_fuzz.a: host_shim/net_parsers_fuzz_shim.rs \
+		$(BIN)/libduetos_net_parsers.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_net_parsers=$(BIN)/libduetos_net_parsers.rlib $< -o $@
+
+$(BIN)/fuzz_net: fuzz_net.cpp $(NET)/stack.cpp $(NET)/firewall.cpp \
+		$(NET)/socket.cpp $(NET)/tcp.cpp $(NET)/tcp_segment.cpp $(NET)/tcp_timer.cpp \
+		host_shim/net_stubs.cpp host_shim/fs_stubs.cpp \
+		$(BIN)/libduetos_net_parsers_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(NET_PARSERS_RUST)/include $^ -o $@
+
 # Each run-* keeps a persistent corpus and stops after 60 s.
+# run-pe seeds the corpus first (see seeds/gen_pe_seeds.py) so the
+# fuzzer starts past the DOS/COFF prefix gate.
+run-pe: $(BIN)/fuzz_pe
+	@mkdir -p corpus/pe
+	@python3 seeds/gen_pe_seeds.py corpus/pe
+	$(BIN)/fuzz_pe -max_len=131072 -max_total_time=60 -print_final_stats=1 corpus/pe
+
+run-elf: $(BIN)/fuzz_elf
+	@mkdir -p corpus/elf
+	@python3 seeds/gen_elf_seeds.py corpus/elf
+	$(BIN)/fuzz_elf -max_total_time=60 -print_final_stats=1 corpus/elf
+
+run-gpt: $(BIN)/fuzz_gpt
+	@mkdir -p corpus/gpt
+	@python3 seeds/gen_gpt_seeds.py corpus/gpt
+	$(BIN)/fuzz_gpt -max_len=262144 -max_total_time=60 -print_final_stats=1 corpus/gpt
+
+run-fat32: $(BIN)/fuzz_fat32
+	@mkdir -p corpus/fat32
+	@python3 seeds/gen_fat32_seeds.py corpus/fat32
+	$(BIN)/fuzz_fat32 -max_len=262144 -max_total_time=60 -print_final_stats=1 corpus/fat32
+
+run-exfat: $(BIN)/fuzz_exfat
+	@mkdir -p corpus/exfat
+	@python3 seeds/gen_exfat_seeds.py corpus/exfat
+	$(BIN)/fuzz_exfat -max_len=262144 -max_total_time=60 -print_final_stats=1 corpus/exfat
+
+run-ntfs: $(BIN)/fuzz_ntfs
+	@mkdir -p corpus/ntfs
+	@python3 seeds/gen_ntfs_seeds.py corpus/ntfs
+	$(BIN)/fuzz_ntfs -max_len=262144 -max_total_time=60 -print_final_stats=1 corpus/ntfs
+
+run-ext4: $(BIN)/fuzz_ext4
+	@mkdir -p corpus/ext4
+	@python3 seeds/gen_ext4_seeds.py corpus/ext4
+	$(BIN)/fuzz_ext4 -max_len=1048576 -max_total_time=60 -print_final_stats=1 corpus/ext4
+
+run-net: $(BIN)/fuzz_net
+	@mkdir -p corpus/net
+	@python3 seeds/gen_net_seeds.py corpus/net
+	$(BIN)/fuzz_net -max_len=2048 -max_total_time=60 -print_final_stats=1 corpus/net
+
 run-%: $(BIN)/fuzz_%
 	@mkdir -p corpus/$*
 	$< -max_total_time=60 -print_final_stats=1 corpus/$*
+
+# Throw everything at the OS at once: build every harness and run
+# them all in parallel, aggregating crashes into one exit code.
+# FUZZ_SECONDS / FUZZ_JOBS env vars tune the budget (see the
+# script header). Non-zero exit iff any harness crashed — usable
+# as a CI gate unmodified.
+.PHONY: fuzz-all
+fuzz-all:
+	../../tools/test/fuzz-all.sh
 
 clean:
 	rm -rf $(BIN)

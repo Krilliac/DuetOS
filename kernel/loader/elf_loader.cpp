@@ -101,17 +101,40 @@ void ElfProgramHeaderInfo(const u8* file, u64* phoff_out, u16* phnum_out, u16* p
         *phnum_out = LeU16(file + 56);
 }
 
-u32 ElfForEachPtLoad(const u8* file, u64 /*file_len*/, ElfSegmentCb cb, void* cookie)
+u32 ElfForEachPtLoad(const u8* file, u64 file_len, ElfSegmentCb cb, void* cookie)
 {
     if (file == nullptr || cb == nullptr)
+        return 0;
+    // file_len was previously ignored and the header / program
+    // headers were read unconditionally — a caller that invokes
+    // this directly (the public signature takes file_len, and
+    // `readelf` / `exec` can) on a short or empty buffer drove
+    // LeU64 off the end. The fuzz harness hits this on a 0-byte
+    // input. Honour the length: need the full 64-byte ELF64 ehdr
+    // before touching e_phoff/e_phentsize/e_phnum, and 56 readable
+    // bytes per program header (the largest field read is
+    // p_align at p+48..p+55).
+    constexpr u64 kElf64EhdrSize = 64;
+    constexpr u64 kPhdrReadSpan = 56;
+    if (file_len < kElf64EhdrSize)
         return 0;
     const u64 e_phoff = LeU64(file + 32);
     const u16 e_phentsize = LeU16(file + 54);
     const u16 e_phnum = LeU16(file + 56);
+    if (e_phoff > file_len)
+        return 0;
     u32 visited = 0;
     for (u16 i = 0; i < e_phnum; ++i)
     {
         const u64 off = e_phoff + static_cast<u64>(i) * e_phentsize;
+        // No u64 wrap: e_phoff <= file_len and i*e_phentsize is
+        // bounded by 2^32, so off stays well below U64_MAX for any
+        // sane file_len. A header whose 56-byte read would run
+        // past EOF ends the walk (entries only move outward when
+        // e_phentsize > 0; when it is 0 every entry shares this
+        // out-of-bounds offset).
+        if (off > file_len - kPhdrReadSpan)
+            break;
         const u8* p = file + off;
         if (LeU32(p) != kPtLoad)
             continue;
