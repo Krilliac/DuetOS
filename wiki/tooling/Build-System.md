@@ -20,17 +20,54 @@ toolchain. The build produces:
 ## Presets
 
 ```bash
-cmake --preset x86_64-debug       # Kernel + userland, debug
+cmake --preset x86_64-debug       # Kernel + userland, debug (UBSAN + ASAN-equiv on)
 cmake --preset x86_64-release     # Kernel + userland, release
-cmake --preset x86_64-kasan       # Debug + KASAN-equivalent diagnostics
+cmake --preset x86_64-debug-san   # Debug + full sanitizer suite (incl. integer family)
+cmake --preset x86_64-kasan       # Debug + KASAN-equivalent + full audits
 ```
 
 Presets live in `CMakePresets.json` at the repo root. All configure
 presets inherit `CMAKE_EXPORT_COMPILE_COMMANDS=ON`, so each build tree
 contains a `compile_commands.json` database for clangd, clang-tidy, and
-other source-indexing tools after configuration. The `x86_64-kasan`
-preset enables the in-tree KASAN-equivalent diagnostics (`DUETOS_KASAN`)
-plus UBSAN, lock-order audit, and full capability-gate audit;
+other source-indexing tools after configuration.
+
+### Sanitizers in the debug build
+
+The default `x86_64-debug` preset turns **both** sanitizer families on,
+the same way:
+
+- `DUETOS_ENABLE_UBSAN=ON` — every kernel TU is built with
+  `-fsanitize=undefined,nullability,float-divide-by-zero`
+  `-fno-sanitize=function -fno-sanitize-trap=all`. The emitted
+  `__ubsan_handle_*` calls resolve to the in-tree runtime in
+  `kernel/diag/ubsan.cpp` (one klog WARN + serial line per incident,
+  then execution continues — visibility, not enforcement).
+- `DUETOS_KASAN=ON` — the in-tree **ASAN-equivalent** diagnostics
+  (heap trailer canaries, freed-payload / freed-page poison, plus the
+  `+kasan` boot banner). Real `-fsanitize=address` /
+  `-fsanitize=kernel-address` cannot run in this freestanding
+  `x86_64-unknown-elf` kernel (no shadow memory, no host-style
+  runtime; clang rejects the flag for the target), so the in-tree
+  layer is the ASan stand-in. TSan / MSan are infeasible for the same
+  reason and are not provided.
+
+Dedicated single-axis presets mirror this:
+
+| Preset | What it adds over `x86_64-debug` |
+|--------|----------------------------------|
+| `x86_64-debug-ubsan` | re-asserts `DUETOS_ENABLE_UBSAN` only |
+| `x86_64-debug-asan`  | re-asserts `DUETOS_KASAN` only |
+| `x86_64-debug-san`   | the **full suite**: `-fsanitize=integer` family on (`DUETOS_ENABLE_UBSAN_INTEGER`), KASAN, lock-order audit, full cap audit |
+
+The integer family (`unsigned-integer-overflow`,
+`implicit-conversion`, …) is kept OUT of the default debug build: the
+kernel deliberately relies on unsigned wraparound (hashing, ring
+indices, PRNGs), so on-by-default it is mostly false positives that
+drown the real UB signal. Use `x86_64-debug-san` when specifically
+hunting conversion/truncation bugs.
+
+The `x86_64-kasan` preset is the heavier forensic variant (KASAN +
+UBSAN + lock-order audit + **full** capability-gate audit);
 `x86_64-debug-kasan` remains as a compatibility alias.
 
 ## Local Preflight Tools

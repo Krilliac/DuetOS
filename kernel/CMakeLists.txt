@@ -1339,23 +1339,52 @@ if(DUETOS_LTO)
     message(STATUS "DUETOS_LTO=ON — building kernel with -flto=thin")
 endif()
 
-# UBSAN runtime (plan D5 + D5-followup). When ON, every kernel TU
-# is built with `-fsanitize=undefined -fno-sanitize-trap=all`. The
-# `__ubsan_handle_*` symbols the compiler emits resolve to the
-# in-tree runtime in `kernel/diag/ubsan.cpp` — each handler logs
-# one structured klog warning + serial line and returns. Use the
-# `x86_64-debug-ubsan` preset to enable.
-option(DUETOS_ENABLE_UBSAN "Build the kernel with -fsanitize=undefined for UB diagnostics" OFF)
+# Compiler-instrumented sanitizer suite (plan D5 + D5-followup).
+#
+# Only the diagnostic sanitizers whose `__ubsan_handle_*` call sites
+# resolve to the in-tree runtime in `kernel/diag/ubsan.cpp` are
+# usable here. ASan / TSan / MSan need shadow memory and a large
+# host-style runtime the freestanding x86_64-unknown-elf kernel
+# cannot host (clang also rejects `-fsanitize=kernel-address` for
+# this target — see the top-level `DUETOS_KASAN` option); the
+# in-tree KASAN-equivalent diagnostics (`DUETOS_KASAN`) are the
+# ASan stand-in and are wired through the debug preset, not here.
+#
+# When ON, every kernel TU is built with the sanitizer flag set
+# below. Each emitted handler logs one structured klog warning +
+# serial line and returns ("visibility, not enforcement"). Use the
+# `x86_64-debug-ubsan` preset for the default set, or the heavier
+# `x86_64-debug-san` preset (adds the integer family) for
+# adversarial runs.
+option(DUETOS_ENABLE_UBSAN "Build the kernel with the diagnostic sanitizer suite (UBSan + nullability + float-divide-by-zero)" OFF)
+# Opt-in for the integer family (`unsigned-integer-overflow`,
+# `implicit-conversion`, …). OFF by default and NOT in the default
+# debug preset: the kernel deliberately relies on unsigned
+# wraparound (hashing, ring indices, PRNGs), so this set is mostly
+# false positives in steady state and would drown the real UB
+# signal. The `x86_64-debug-san` preset turns it on for runs that
+# specifically hunt conversion/truncation bugs.
+option(DUETOS_ENABLE_UBSAN_INTEGER "Also enable the noisy -fsanitize=integer family (opt-in; x86_64-debug-san)" OFF)
 if(DUETOS_ENABLE_UBSAN)
     # `-fno-sanitize=function` suppresses the call-through-mismatched-
     # function-pointer-type check (`__ubsan_handle_function_type_mismatch`).
     # That check uses RTTI metadata the kernel deliberately does not
     # build; with it on, every callback dispatch (sched task entry,
     # IRQ handler, syscall thunk) emits a handler symbol the runtime
-    # has no use for and the link fails. The remaining UBSAN classes
-    # (signed overflow, OOB, divrem, alignment, …) cover what we want
-    # without dragging in the C++-RTTI-shaped CFI surface.
-    set(DUETOS_UBSAN_FLAGS -fsanitize=undefined -fno-sanitize=function -fno-sanitize-trap=all)
+    # has no use for and the link fails. The remaining classes
+    # (signed overflow, OOB, divrem, alignment, nullability,
+    # float-divide-by-zero, …) cover what we want without dragging
+    # in the C++-RTTI-shaped CFI surface. Every recoverable
+    # `__ubsan_handle_*` these can emit has a handler in
+    # `kernel/diag/ubsan.cpp`, so the link stays closed regardless
+    # of which checks fire.
+    set(DUETOS_UBSAN_FLAGS
+        -fsanitize=undefined,nullability,float-divide-by-zero
+        -fno-sanitize=function
+        -fno-sanitize-trap=all)
+    if(DUETOS_ENABLE_UBSAN_INTEGER)
+        list(APPEND DUETOS_UBSAN_FLAGS -fsanitize=integer)
+    endif()
     target_compile_options(duetos-kernel        PRIVATE ${DUETOS_UBSAN_FLAGS})
     target_compile_options(duetos-kernel-stage1 PRIVATE ${DUETOS_UBSAN_FLAGS})
     target_compile_definitions(duetos-kernel          PRIVATE DUETOS_UBSAN=1)

@@ -24,7 +24,8 @@
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Debug",
                 "DUETOS_GDB_SERVER": "ON",
-                "DUETOS_ENABLE_UBSAN": "ON"
+                "DUETOS_ENABLE_UBSAN": "ON",
+                "DUETOS_KASAN": "ON"
             }
         },
         {
@@ -41,6 +42,26 @@
             "inherits": "x86_64-debug",
             "cacheVariables": {
                 "DUETOS_ENABLE_UBSAN": "ON"
+            }
+        },
+        {
+            "name": "x86_64-debug-asan",
+            "displayName": "x86_64 kernel + userland, debug + ASAN-equivalent (in-tree KASAN diagnostics)",
+            "inherits": "x86_64-debug",
+            "cacheVariables": {
+                "DUETOS_KASAN": "ON"
+            }
+        },
+        {
+            "name": "x86_64-debug-san",
+            "displayName": "x86_64 debug + full sanitizer suite (UBSAN + integer family + ASAN-equiv + audits)",
+            "inherits": "x86_64-debug",
+            "cacheVariables": {
+                "DUETOS_ENABLE_UBSAN": "ON",
+                "DUETOS_ENABLE_UBSAN_INTEGER": "ON",
+                "DUETOS_KASAN": "ON",
+                "DUETOS_LOCK_ORDER_AUDIT": "ON",
+                "DUETOS_CAP_AUDIT": "Full"
             }
         },
         {
@@ -113,6 +134,14 @@
         {
             "name": "x86_64-debug-ubsan",
             "configurePreset": "x86_64-debug-ubsan"
+        },
+        {
+            "name": "x86_64-debug-asan",
+            "configurePreset": "x86_64-debug-asan"
+        },
+        {
+            "name": "x86_64-debug-san",
+            "configurePreset": "x86_64-debug-san"
         },
         {
             "name": "x86_64-release-asserts",
