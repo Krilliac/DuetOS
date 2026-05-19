@@ -49,6 +49,24 @@ public:
     // exit.ExitReason.
     WHV_RUN_VP_EXIT_CONTEXT Run(uint32_t vp);
 
+    // Asks WHP to make a thread-safe out-of-band run cancellation so
+    // the host can break a guest that wedged with interrupts off.
+    void CancelRun(uint32_t vp);
+
+    // Injects an interrupt via the emulated LAPIC (xApic mode). Used
+    // for IOAPIC-routed lines (serial IRQ4, PIT-ch0 IRQ0). The LAPIC
+    // timer itself is delivered by WHP's own emulation.
+    void RequestInterrupt(uint32_t vector, uint32_t destApicId,
+                          bool levelTriggered);
+
+    // General-purpose register access by x86 encoding index
+    // (0=RAX,1=RCX,2=RDX,3=RBX,4=RSP,5=RBP,6=RSI,7=RDI,8..15=R8..R15).
+    // Used by the MMIO instruction emulator.
+    uint64_t GetGpr(uint32_t vp, uint32_t idx) const;
+    void SetGpr(uint32_t vp, uint32_t idx, uint64_t value);
+    uint64_t GetRip(uint32_t vp) const;
+    void SetRip(uint32_t vp, uint64_t rip);
+
 private:
     WHV_PARTITION_HANDLE m_handle = nullptr;
     uint32_t             m_cpuCount = 0;

@@ -104,4 +104,65 @@ WHV_RUN_VP_EXIT_CONTEXT Partition::Run(uint32_t vp)
     return exit;
 }
 
+void Partition::CancelRun(uint32_t vp)
+{
+    WHvCancelRunVirtualProcessor(m_handle, vp, 0);
+}
+
+void Partition::RequestInterrupt(uint32_t vector, uint32_t destApicId,
+                                 bool levelTriggered)
+{
+    WHV_INTERRUPT_CONTROL ic = {};
+    ic.Type = WHvX64InterruptTypeFixed;
+    ic.DestinationMode = WHvX64InterruptDestinationModePhysical;
+    ic.TriggerMode = levelTriggered ? WHvX64InterruptTriggerModeLevel
+                                    : WHvX64InterruptTriggerModeEdge;
+    ic.Destination = destApicId;
+    ic.Vector = vector;
+    ThrowIfFailed(WHvRequestInterrupt(m_handle, &ic, sizeof(ic)),
+                  "WHvRequestInterrupt");
+}
+
+namespace
+{
+// x86 GPR encoding order -> WHP register name.
+constexpr WHV_REGISTER_NAME kGpr[16] = {
+    WHvX64RegisterRax, WHvX64RegisterRcx, WHvX64RegisterRdx,
+    WHvX64RegisterRbx, WHvX64RegisterRsp, WHvX64RegisterRbp,
+    WHvX64RegisterRsi, WHvX64RegisterRdi, WHvX64RegisterR8,
+    WHvX64RegisterR9,  WHvX64RegisterR10, WHvX64RegisterR11,
+    WHvX64RegisterR12, WHvX64RegisterR13, WHvX64RegisterR14,
+    WHvX64RegisterR15};
+} // namespace
+
+uint64_t Partition::GetGpr(uint32_t vp, uint32_t idx) const
+{
+    WHV_REGISTER_VALUE v = {};
+    GetRegisters(vp, &kGpr[idx & 15], 1, &v);
+    return v.Reg64;
+}
+
+void Partition::SetGpr(uint32_t vp, uint32_t idx, uint64_t value)
+{
+    WHV_REGISTER_VALUE v = {};
+    v.Reg64 = value;
+    SetRegisters(vp, &kGpr[idx & 15], 1, &v);
+}
+
+uint64_t Partition::GetRip(uint32_t vp) const
+{
+    WHV_REGISTER_NAME n = WHvX64RegisterRip;
+    WHV_REGISTER_VALUE v = {};
+    GetRegisters(vp, &n, 1, &v);
+    return v.Reg64;
+}
+
+void Partition::SetRip(uint32_t vp, uint64_t rip)
+{
+    WHV_REGISTER_NAME n = WHvX64RegisterRip;
+    WHV_REGISTER_VALUE v = {};
+    v.Reg64 = rip;
+    SetRegisters(vp, &n, 1, &v);
+}
+
 } // namespace duetos::vmm

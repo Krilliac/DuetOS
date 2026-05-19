@@ -1,10 +1,13 @@
 #include "vmm.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 
 #include "acpi.h"
 #include "elf64.h"
+#include "host_clock.h"
+#include "mmio_emulator.h"
 #include "multiboot2.h"
 
 namespace duetos::vmm
@@ -13,6 +16,10 @@ namespace duetos::vmm
 namespace
 {
 uint64_t Align2M(uint64_t x) { return (x + 0x1FFFFF) & ~uint64_t(0x1FFFFF); }
+
+// BSP APIC id. The synthesised MADT advertises exactly one LAPIC
+// with id 0, so every IOAPIC-routed line targets APIC 0.
+constexpr uint32_t kBspApicId = 0;
 } // namespace
 
 Vmm::Vmm(VmConfig cfg) : m_cfg(std::move(cfg)), m_part(/*cpuCount=*/1)
@@ -41,7 +48,37 @@ Vmm::Vmm(VmConfig cfg) : m_cfg(std::move(cfg)), m_part(/*cpuCount=*/1)
     std::vector<uint8_t> mbi = BuildMultiboot2Info(mp);
     m_mem->Write(kMbInfoGpa, mbi.data(), mbi.size());
 
+    // IOAPIC-routed lines inject into the WHP-emulated LAPIC. This
+    // is thread-safe (WHvRequestInterrupt may be called off the vCPU
+    // thread), so the stdin/timer threads can raise lines directly.
+    m_ioapic.SetInjector(
+        [this](uint32_t vec, uint32_t dest, bool level) {
+            m_part.RequestInterrupt(vec, dest ? dest : kBspApicId,
+                                    level);
+        });
+
     SetupVcpu(img.entry, kMbInfoGpa);
+}
+
+Vmm::~Vmm()
+{
+    m_stop.store(true);
+    m_part.CancelRun(0);
+    // The stdin reader is parked in a blocking getchar() that m_stop
+    // can't interrupt; detach it (it dies with the process) rather
+    // than hang the dtor on join(). The timer/watchdog threads poll
+    // m_stop and exit promptly, so they are joined.
+    if (m_stdinThread.joinable())
+    {
+        m_stdinThread.detach();
+    }
+    for (std::thread* t : {&m_timerThread, &m_watchdogThread})
+    {
+        if (t->joinable())
+        {
+            t->join();
+        }
+    }
 }
 
 void Vmm::SetupVcpu(uint64_t entry, uint64_t mbInfoGpa)
@@ -94,38 +131,122 @@ void Vmm::SetupVcpu(uint64_t entry, uint64_t mbInfoGpa)
     m_part.SetRegisters(0, n, i, v);
 }
 
-bool Vmm::HandleIoPort(const WHV_RUN_VP_EXIT_CONTEXT& exit)
+void Vmm::HandleIoPort(const WHV_RUN_VP_EXIT_CONTEXT& exit)
 {
     const auto& io = exit.IoPortAccess;
     const uint16_t port = static_cast<uint16_t>(io.PortNumber);
-    const bool claimed = m_com1.Handles(port);
+    const bool isCom1 = m_com1.Handles(port);
+    const bool isPit  = m_pit.Handles(port);
 
-    // Unclaimed ports behave like a bus with no decoder: reads see
-    // all-ones, writes are dropped.
     uint64_t rax = io.Rax;
     if (io.AccessInfo.IsWrite)
     {
-        if (claimed)
+        const uint32_t val = static_cast<uint32_t>(rax);
+        if (isCom1)
         {
-            m_com1.Out(port, static_cast<uint32_t>(rax));
+            m_com1.Out(port, val);
+            if (port == Serial16550::kBase)
+            {
+                m_lastTxNs.store(HostNanos());
+            }
         }
+        else if (isPit)
+        {
+            m_pit.Out(port, val);
+        }
+        // Unclaimed port writes are dropped (no bus decoder).
     }
     else
     {
-        uint32_t val = claimed ? m_com1.In(port) : 0xFFFFFFFFu;
+        uint32_t val = 0xFFFFFFFFu;
+        if (isCom1)
+        {
+            val = m_com1.In(port);
+        }
+        else if (isPit)
+        {
+            val = m_pit.In(port);
+        }
         const uint32_t bytes = io.AccessInfo.AccessSize;
         uint64_t mask = (bytes >= 4) ? 0xFFFFFFFFull
                                      : ((1ull << (bytes * 8)) - 1);
         rax = (rax & ~mask) | (val & mask);
     }
 
-    // Retire the IN/OUT: write back RAX and step RIP past it.
     WHV_REGISTER_NAME n[2] = {WHvX64RegisterRax, WHvX64RegisterRip};
     WHV_REGISTER_VALUE vv[2] = {};
     vv[0].Reg64 = rax;
     vv[1].Reg64 = exit.VpContext.Rip + exit.VpContext.InstructionLength;
     m_part.SetRegisters(0, n, 2, vv);
-    return true;
+}
+
+void Vmm::StartHelperThreads()
+{
+    m_lastTxNs.store(HostNanos());
+
+    // Host stdin -> COM1 RX, edge-injecting IRQ4 per byte.
+    m_stdinThread = std::thread([this] {
+        while (!m_stop.load())
+        {
+            int c = std::getchar();
+            if (c == EOF)
+            {
+                break;
+            }
+            m_com1.PushRx(static_cast<uint8_t>(c));
+            if (m_com1.RxIrqPending())
+            {
+                m_ioapic.RaiseLine(4); // COM1 = ISA IRQ4
+            }
+        }
+    });
+
+    // PIT channel-0 periodic IRQ0 — only live if the kernel fell
+    // back from the LAPIC timer (g_pit_fallback_active).
+    m_timerThread = std::thread([this] {
+        while (!m_stop.load())
+        {
+            uint64_t periodNs = m_pit.Channel0PeriodNs();
+            if (periodNs == 0)
+            {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(2));
+                continue;
+            }
+            std::this_thread::sleep_for(
+                std::chrono::nanoseconds(periodNs));
+            m_ioapic.RaiseLine(0); // PIT = ISA IRQ0
+        }
+    });
+
+    // Idle watchdog (opt-in via --idle, for headless/CI). A healthy
+    // guest idle-HLTs between timer ticks but produces serial output
+    // as it boots; prolonged COM1 silence in a headless run means
+    // wedged. Disabled by default so an interactive shell parked at
+    // a prompt is never killed.
+    if (m_cfg.idleSecs == 0)
+    {
+        return;
+    }
+    m_watchdogThread = std::thread([this] {
+        const uint64_t idleNs =
+            uint64_t(m_cfg.idleSecs) * 1000000000ull;
+        while (!m_stop.load())
+        {
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(500));
+            if (HostNanos() - m_lastTxNs.load() > idleNs)
+            {
+                std::printf("\n[vmm] COM1 idle %us — breaking run "
+                            "(guest wedged or halted)\n",
+                            m_cfg.idleSecs);
+                std::fflush(stdout);
+                m_stop.store(true);
+                m_part.CancelRun(0);
+                return;
+            }
+        }
+    });
 }
 
 int Vmm::Run()
@@ -133,49 +254,62 @@ int Vmm::Run()
     std::printf("[vmm] booting DuetOS guest (1 vCPU, %llu MiB)\n",
                 (unsigned long long)(m_cfg.ramBytes >> 20));
     std::fflush(stdout);
+    StartHelperThreads();
 
+    uint64_t haltSpins = 0;
     for (;;)
     {
+        if (m_stop.load())
+        {
+            return 0;
+        }
         WHV_RUN_VP_EXIT_CONTEXT exit = m_part.Run(0);
         switch (exit.ExitReason)
         {
         case WHvRunVpExitReasonX64IoPortAccess:
             if (exit.IoPortAccess.AccessInfo.StringOp)
             {
-                std::printf("\n[vmm] string I/O at port 0x%x "
-                            "(unimplemented in v0)\n",
+                std::printf("\n[vmm] string I/O port 0x%x "
+                            "unimplemented\n",
                             exit.IoPortAccess.PortNumber);
                 return 2;
             }
             HandleIoPort(exit);
+            haltSpins = 0;
             break;
 
-        case WHvRunVpExitReasonX64Halt:
-            // No timer/IRQ source until slice 2, so a HLT here means
-            // the kernel reached an idle/wait with nothing to wake
-            // it. For slice 1 that IS the success terminus: the
-            // serial banner has already streamed to stdout above.
-            std::printf("\n[vmm] guest HLT — slice-1 terminus "
-                        "(timer/IRQ lands in slice 2)\n");
-            return 0;
-
         case WHvRunVpExitReasonMemoryAccess:
-            std::printf("\n[vmm] unhandled MMIO @ 0x%llx — slice-1 "
-                        "boundary (IOAPIC/fb land in slice 2)\n",
-                        (unsigned long long)
-                            exit.MemoryAccess.Gpa);
-            return 0;
-
-        case WHvRunVpExitReasonX64InterruptWindow:
-            break; // nothing to inject yet (slice 2)
-
-        case WHvRunVpExitReasonCanceled:
-            std::printf("\n[vmm] run canceled\n");
+            if (m_ioapic.Handles(exit.MemoryAccess.Gpa))
+            {
+                EmulateMmio(m_part, 0, exit.MemoryAccess, m_ioapic);
+                haltSpins = 0;
+                break;
+            }
+            std::printf("\n[vmm] unhandled MMIO @ 0x%llx rip=0x%llx\n",
+                        (unsigned long long)exit.MemoryAccess.Gpa,
+                        (unsigned long long)exit.VpContext.Rip);
             return 1;
 
+        case WHvRunVpExitReasonX64Halt:
+            // The LAPIC timer (WHP-emulated) or an IOAPIC-routed
+            // line wakes the guest; just resume. If nothing is
+            // arming interrupts the run spins here — back off so the
+            // idle watchdog can fire instead of pinning a core.
+            if (++haltSpins > 4096)
+            {
+                std::this_thread::sleep_for(
+                    std::chrono::milliseconds(1));
+            }
+            break;
+
+        case WHvRunVpExitReasonX64InterruptWindow:
+            break;
+
+        case WHvRunVpExitReasonCanceled:
+            return m_stop.load() ? 0 : 1;
+
         default:
-            std::printf("\n[vmm] unexpected exit reason %d "
-                        "(rip=0x%llx)\n",
+            std::printf("\n[vmm] unexpected exit %d rip=0x%llx\n",
                         (int)exit.ExitReason,
                         (unsigned long long)exit.VpContext.Rip);
             return 1;

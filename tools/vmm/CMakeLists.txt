@@ -57,7 +57,10 @@ add_executable(duetos-vmm
     src/elf64.cpp
     src/multiboot2.cpp
     src/acpi.cpp
+    src/mmio_emulator.cpp
     src/devices/serial16550.cpp
+    src/devices/pit8254.cpp
+    src/devices/ioapic.cpp
 )
 
 target_include_directories(duetos-vmm PRIVATE src)

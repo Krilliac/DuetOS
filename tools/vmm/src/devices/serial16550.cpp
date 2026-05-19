@@ -19,25 +19,49 @@ uint32_t Serial16550::In(uint16_t port)
     switch (off)
     {
     case 0: // RBR / DLL
+    {
         if (m_lcr & LCR_DLAB)
         {
             return m_divisor & 0xFF;
         }
-        return 0; // no RX in v0
+        std::lock_guard<std::mutex> g(m_rxLock);
+        if (m_rx.empty())
+        {
+            return 0;
+        }
+        uint8_t b = m_rx.front();
+        m_rx.pop_front();
+        return b;
+    }
     case 1: // IER / DLM
         if (m_lcr & LCR_DLAB)
         {
             return (m_divisor >> 8) & 0xFF;
         }
         return m_ier;
-    case 2:  // IIR: no interrupt pending
+    case 2:  // IIR: bit0=0 => interrupt pending; 0x04 => RX data
+    {
+        std::lock_guard<std::mutex> g(m_rxLock);
+        if ((m_ier & 0x01) && !m_rx.empty())
+        {
+            return 0x04;
+        }
         return 0x01;
+    }
     case 3:  // LCR
         return m_lcr;
     case 4:  // MCR
         return m_mcr;
-    case 5:  // LSR: always ready to transmit, never any RX byte
-        return LSR_THRE | LSR_TEMT;
+    case 5:  // LSR: always ready to TX; DR set when an RX byte waits
+    {
+        std::lock_guard<std::mutex> g(m_rxLock);
+        uint32_t lsr = LSR_THRE | LSR_TEMT;
+        if (!m_rx.empty())
+        {
+            lsr |= LSR_DR;
+        }
+        return lsr;
+    }
     case 6:  // MSR: carrier/DSR/CTS asserted
         return 0xB0;
     case 7:  // scratch
@@ -87,6 +111,18 @@ void Serial16550::Out(uint16_t port, uint32_t value)
     default:
         break; // FCR / writes to LSR/MSR: ignore
     }
+}
+
+void Serial16550::PushRx(uint8_t byte)
+{
+    std::lock_guard<std::mutex> g(m_rxLock);
+    m_rx.push_back(byte);
+}
+
+bool Serial16550::RxIrqPending()
+{
+    std::lock_guard<std::mutex> g(m_rxLock);
+    return (m_ier & 0x01) && !m_rx.empty();
 }
 
 } // namespace duetos::vmm
