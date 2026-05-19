@@ -620,6 +620,86 @@ the per-call wiring.
 
 ---
 
+## Testing / fuzzing
+
+### Fuzz harness — CI wiring (residual)
+
+- **Residual:** `tests/fuzz/` builds 12 libFuzzer harnesses and
+  `tools/test/fuzz-all.sh` (= `make -C tests/fuzz fuzz-all`) runs
+  them all in parallel with one CI-gate exit code, but **no CI
+  job invokes it**. `.github/workflows/build.yml` has
+  `check-format`, `check-rust`, `build-debug/release`,
+  `build-flavor-matrix` — add a sibling `fuzz` job:
+  - `runs-on: ubuntu-24.04`; install `clang-18 lld-18 llvm-18
+    libclang-rt-dev python3` + the pinned rust nightly (mirror
+    the `check-rust` toolchain step — `fuzz_pe/elf` and every
+    `fuzz_*` over a Rust-backed parser need `rustc` for the
+    rlib + panic=abort staticlib build), and `mkfs.ext4`
+    (`e2fsprogs`, already on ubuntu-24.04 images) for the ext4
+    seed.
+  - Step: `FUZZ_SECONDS=90 tools/test/fuzz-all.sh` (PR budget;
+    push/nightly can raise it). The script already exits
+    non-zero on any crash/timeout/oom/leak artifact and prints a
+    per-harness table, so no wrapper logic is needed.
+  - Upload `tests/fuzz/build/crash-*` +
+    `tests/fuzz/corpus/*/crash-*` as an artifact on failure so a
+    maintainer can `tests/fuzz/build/fuzz_<name> <artifact>`
+    locally.
+  - Optional follow-up: a scheduled (cron) long-run job with
+    `FUZZ_SECONDS=900` and a persisted corpus cache
+    (`actions/cache` keyed on the harness set) so coverage
+    compounds across runs instead of restarting cold.
+- **Blocks on:** nothing — the runner script and gate semantics
+  are in tree; this is one workflow-file edit.
+
+### Fuzz harness — next parser targets (residual)
+
+Untrusted-input byte parsers still **without** a harness, in
+rough bug-probability order (hand-written C++ bit/TLV parsers
+first — that is where every memory-safety bug found so far
+lived; the Rust-backed parsers held up). All follow the
+established `tests/fuzz/` pattern (host harness + `host_shim/`
+stubs + a `seeds/gen_*_seeds.py`); the codec/cert ones are pure
+`bytes → struct` and need *less* shimming than the FS probes.
+
+- **DEFLATE / gzip / zip** — `kernel/util/deflate.{h,cpp}`,
+  `gzip.h`, `zip.h`. Decompressors are the single richest fuzz
+  surface (bit-level Huffman over attacker data, window
+  arithmetic, decompression-bomb ratios). Highest priority.
+- **ASN.1 / X.509** — `kernel/crypto/asn1.{h,cpp}`,
+  `x509.{h,cpp}`. TLV length/recursion parsing of untrusted TLS
+  certificates — classic OOB / stack-recursion territory.
+- **TLS records/handshake** — `kernel/net/tls.cpp`
+  (`TlsPeekRecord`, `TlsParseServerHello`,
+  `TlsParseCertificateLeaf`, `TlsPeekHandshake`). Untrusted
+  network bytes; feeds the ASN.1/X.509 path.
+- **Image decoders** — `kernel/util/jpeg.cpp`, `png` (+
+  `deflate`), `tga.h`. Untrusted file bytes; wallpaper / asset
+  load path.
+- **EDID / CEA-861** — `kernel/drivers/gpu/edid.cpp`,
+  `cea861.cpp`. Untrusted monitor-supplied descriptor bytes;
+  both already have `*_selftest.cpp` so a harness entrypoint is
+  trivial.
+- **AML interpreter** — `kernel/acpi/aml.cpp`, `aml_eval.cpp`.
+  Firmware-provided bytecode the kernel *executes*; large
+  attack surface, heavier harness (needs an ACPI namespace
+  stub).
+- **USB descriptors** — `kernel/drivers/usb/usb_class_desc.cpp`,
+  `hid_descriptor.h`, `cdc_ecm.cpp`, `rndis.cpp`. Device-
+  supplied (untrusted peripheral) configuration/HID-report
+  descriptors.
+- **Bluetooth HCI/HID** — `kernel/net/bluetooth/hci.h`,
+  `hid.h`. Untrusted radio peer.
+- **Disassembler** — `kernel/debug/disasm.cpp`. Decodes
+  arbitrary code bytes on the crash-dump path; a decode bug
+  there faults the post-mortem.
+
+**Blocks on:** nothing — independent slices, one parser each,
+same recipe. Pick the top unstruck bullet, land harness +
+(any) fix, strike the bullet in the same commit.
+
+---
+
 ## How to graduate an item
 
 When a roadmap item lands:
