@@ -14,11 +14,40 @@
   //   * A debug build present: cmake --preset x86_64-debug &&
   //     cmake --build build/x86_64-debug
   //
-  // One-button flow: copy the tasks.vs.json snippet from the repo's
-  // IDE-debugging notes into .vs/tasks.vs.json (that dir is per-user,
-  // git-ignored) so the preLaunch starter runs automatically. Without
-  // it, first run `tools/debug/vs-start-qemu.sh demo` in a WSL shell,
-  // then pick a config below and hit F5 to attach.
+  // One-button flow (QEMU configs): copy the tasks.vs.json snippet
+  // from the repo's IDE-debugging notes into .vs/tasks.vs.json (that
+  // dir is per-user, git-ignored) so the preLaunch starter runs
+  // automatically. Without it, first run
+  // `tools/debug/vs-start-qemu.sh demo` in a WSL shell, then pick a
+  // config below and hit F5 to attach.
+  //
+  // One-button flow (in-house VMM config): the VMM is a native
+  // Windows process (WinHvPlatform), so its starter is a PowerShell
+  // script, not the WSL bash one. Drop this into .vs/tasks.vs.json:
+  //
+  //   {
+  //     "version": "0.2.1",
+  //     "tasks": [
+  //       {
+  //         "taskLabel": "start-duetos-vmm",
+  //         "appliesTo": "launch.vs.json",
+  //         "type": "default",
+  //         "command": "powershell.exe",
+  //         "args": [
+  //           "-ExecutionPolicy", "Bypass", "-File",
+  //           "${workspaceRoot}\\tools\\vmm\\vs-start-vmm.ps1",
+  //           "-BuildKernel"
+  //         ]
+  //       }
+  //     ]
+  //   }
+  //
+  // then add  "preLaunchTask": "start-duetos-vmm"  to the in-house
+  // VMM config below. Without it, run
+  // `tools\vmm\vs-start-vmm.ps1 -BuildKernel` in a PowerShell window
+  // first, then F5 that config. The script builds the kernel (WSL),
+  // builds the VMM (MSVC), launches it with --gdb, and returns once
+  // the port is accepting so the attach is race-free.
   "version": "0.2.1",
   "defaults": {},
   "configurations": [
@@ -57,28 +86,32 @@
     },
     {
       // Attach to the bespoke in-house VMM (tools/vmm) instead of
-      // QEMU. The VMM is a native Windows .exe; run it with the
-      // host-side GDB stub enabled:
+      // QEMU. Easiest: wire the start-duetos-vmm preLaunchTask
+      // (see the header) so F5 builds + launches the VMM for you;
+      // otherwise start it by hand first:
       //
-      //   duetos-vmm.exe --kernel build\x86_64-debug\kernel\
-      //       duetos-kernel.elf --gdb 1234
+      //   tools\vmm\vs-start-vmm.ps1 -BuildKernel      (recommended)
+      //   - or -  duetos-vmm.exe --kernel <...>.elf --gdb 1234
       //
       // It stops before the first guest instruction (like QEMU -S),
       // so this config uses stopAtConnect:true — set kernel
       // breakpoints, then continue. The stub serves the amd64 core
       // register set + memory via the guest page tables, so normal
       // source-level stepping works against duetos-kernel.elf's
-      // DWARF. Point miDebuggerPath at a gdb that can reach the
-      // VMM's localhost port (a Windows/MSYS2 gdb when the VMM runs
-      // on the Windows host; the WSL /usr/bin/gdb when both sides
-      // are inside WSL2).
+      // DWARF.
+      //
+      // miDebuggerPath: the VMM is a native Windows process, so its
+      // gdb port is on Windows localhost. Use a Windows/MSYS2
+      // gdb.exe (NOT the WSL /usr/bin/gdb — WSL2 cannot reach the
+      // Windows host via "localhost"). Set the path below to your
+      // gdb.exe; the placeholder will not resolve as-is.
       "type": "cppdbg",
       "name": "DuetOS: Attach (in-house VMM, tcp:1234)",
       "project": "CMakeLists.txt",
       "program": "${workspaceRoot}/build/x86_64-debug/kernel/duetos-kernel.elf",
       "cwd": "${workspaceRoot}",
       "MIMode": "gdb",
-      "miDebuggerPath": "/usr/bin/gdb",
+      "miDebuggerPath": "gdb.exe",
       "miDebuggerServerAddress": "localhost:1234",
       "stopAtConnect": true,
       "externalConsole": false,

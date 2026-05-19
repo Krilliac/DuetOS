@@ -47,6 +47,14 @@ and trap into our kernel. No VM, no emulator, no host OS underneath.
 
 ## Build & Run
 
+### Can I run/debug DuetOS on Windows?
+
+Yes — there is a bespoke in-house VMM (`tools/vmm/`, native MSVC +
+Windows Hypervisor Platform) that boots the unmodified kernel and
+supports Visual Studio source-level kernel debugging, host-side
+introspection, and record/replay. See
+[In-House Windows VMM](../tooling/Windows-VMM.md).
+
 ### What compiler do I need?
 
 Clang 18+, used as both the freestanding kernel compiler and the
