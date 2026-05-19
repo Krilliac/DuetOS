@@ -82,7 +82,17 @@ std::vector<uint8_t> BuildMultiboot2Info(const Mb2Params& p)
         };
         // type 2 = reserved, type 1 = available RAM.
         entry(0, p.reservedEnd, 2);
-        entry(p.reservedEnd, p.ramBytes - p.reservedEnd, 1);
+        if (p.fbAddr != 0)
+        {
+            // Framebuffer sits flush at the top of RAM; mark [fbAddr, ramTop)
+            // reserved so the kernel frame allocator never reclaims it.
+            entry(p.reservedEnd, p.fbAddr - p.reservedEnd, 1);
+            entry(p.fbAddr, p.ramBytes - p.fbAddr, 2);
+        }
+        else
+        {
+            entry(p.reservedEnd, p.ramBytes - p.reservedEnd, 1);
+        }
         EndTag(v, s);
     }
 

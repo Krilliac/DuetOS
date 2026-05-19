@@ -54,6 +54,7 @@ add_executable(duetos-vmm
     src/vmm.cpp
     src/whp.cpp
     src/guest_memory.cpp
+    src/guest_memory_fb.cpp
     src/elf64.cpp
     src/multiboot2.cpp
     src/acpi.cpp

@@ -6,6 +6,42 @@
 namespace duetos::vmm
 {
 
+uint64_t GuestMemory::ReserveFramebuffer(uint32_t width, uint32_t height)
+{
+    if (m_fbGpa != 0)
+    {
+        return m_fbGpa;
+    }
+    uint64_t gpa   = 0;
+    uint64_t bytes = 0;
+    if (!ComputeFbRegion(m_bytes, width, height, gpa, bytes))
+    {
+        throw std::runtime_error("ReserveFramebuffer: region does not fit in guest RAM");
+    }
+    m_fbGpa   = gpa;
+    m_fbBytes = bytes;
+    return m_fbGpa;
+}
+
+uint8_t* GuestMemory::FramebufferHost()
+{
+    if (m_fbGpa == 0)
+    {
+        return nullptr;
+    }
+    return static_cast<uint8_t*>(HostPtr(m_fbGpa, m_fbBytes));
+}
+
+uint64_t GuestMemory::FramebufferGpa() const
+{
+    return m_fbGpa;
+}
+
+uint64_t GuestMemory::FramebufferBytes() const
+{
+    return m_fbBytes;
+}
+
 GuestMemory::GuestMemory(Partition& part, uint64_t bytes) : m_bytes(bytes)
 {
     m_base = static_cast<uint8_t*>(

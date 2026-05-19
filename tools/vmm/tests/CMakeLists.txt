@@ -5,7 +5,9 @@ add_executable(vmm-tests
     test_main.cpp
     test_smoke.cpp
     test_mb2_fb.cpp
+    test_fb_region.cpp
     ../src/multiboot2.cpp
+    ../src/guest_memory_fb.cpp
 )
 target_include_directories(vmm-tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
