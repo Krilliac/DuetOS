@@ -44,10 +44,12 @@ UTIL     := $(KERNEL)/util
 EXFAT_RUST := $(FS)/exfat_rust
 NTFS_RUST := $(FS)/ntfs_rust
 EXT4_RUST := $(FS)/ext4_rust
+NET := $(KERNEL)/net
+NET_PARSERS_RUST := $(NET)/parsers_rust
 
 HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuzz_eapol \
              $(BIN)/fuzz_pe $(BIN)/fuzz_elf $(BIN)/fuzz_gpt $(BIN)/fuzz_fat32 \
-             $(BIN)/fuzz_exfat $(BIN)/fuzz_ntfs $(BIN)/fuzz_ext4
+             $(BIN)/fuzz_exfat $(BIN)/fuzz_ntfs $(BIN)/fuzz_ext4 $(BIN)/fuzz_net
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -156,6 +158,27 @@ $(BIN)/fuzz_ext4: fuzz_ext4.cpp $(FS)/ext4.cpp host_shim/fs_stubs.cpp \
 		$(BIN)/libduetos_ext4_fuzz.a | $(BIN)
 	$(CXX) $(CXXFLAGS) -I $(EXT4_RUST)/include $^ -o $@
 
+# Network L2/L3 ingest: NetStackInjectRx -> ARP / IPv4 / ICMP /
+# UDP / TCP byte walkers. The DHCP-option / DNS-name parsing is
+# the no_std duetos_net_parsers Rust crate (same rlib +
+# panic=abort staticlib recipe). net_stubs.cpp resolves the
+# NIC/Wi-Fi/scheduler/pipe symbols the socket TU drags in but the
+# RX parse path never reaches.
+$(BIN)/libduetos_net_parsers.rlib: $(NET_PARSERS_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_net_parsers -O $< -o $@
+
+$(BIN)/libduetos_net_parsers_fuzz.a: host_shim/net_parsers_fuzz_shim.rs \
+		$(BIN)/libduetos_net_parsers.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_net_parsers=$(BIN)/libduetos_net_parsers.rlib $< -o $@
+
+$(BIN)/fuzz_net: fuzz_net.cpp $(NET)/stack.cpp $(NET)/firewall.cpp \
+		$(NET)/socket.cpp $(NET)/tcp.cpp $(NET)/tcp_segment.cpp $(NET)/tcp_timer.cpp \
+		host_shim/net_stubs.cpp host_shim/fs_stubs.cpp \
+		$(BIN)/libduetos_net_parsers_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(NET_PARSERS_RUST)/include $^ -o $@
+
 # Each run-* keeps a persistent corpus and stops after 60 s.
 # run-pe seeds the corpus first (see seeds/gen_pe_seeds.py) so the
 # fuzzer starts past the DOS/COFF prefix gate.
@@ -193,6 +216,11 @@ run-ext4: $(BIN)/fuzz_ext4
 	@mkdir -p corpus/ext4
 	@python3 seeds/gen_ext4_seeds.py corpus/ext4
 	$(BIN)/fuzz_ext4 -max_len=1048576 -max_total_time=60 -print_final_stats=1 corpus/ext4
+
+run-net: $(BIN)/fuzz_net
+	@mkdir -p corpus/net
+	@python3 seeds/gen_net_seeds.py corpus/net
+	$(BIN)/fuzz_net -max_len=2048 -max_total_time=60 -print_final_stats=1 corpus/net
 
 run-%: $(BIN)/fuzz_%
 	@mkdir -p corpus/$*

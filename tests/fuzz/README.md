@@ -3,9 +3,10 @@
 Compile and run libFuzzer-driven fuzzers against the DuetOS code paths
 that consume attacker-controlled bytes: the wireless data-decode parsers
 (EAPOL key parser, vendor firmware envelope parsers), the PE/COFF and
-ELF64 executable loaders' parse/validate surface, and the on-disk
+ELF64 executable loaders' parse/validate surface, the on-disk
 parsers for untrusted disk/USB bytes (GPT partition table; FAT32,
-exFAT, NTFS volumes). The fuzzers run on the
+exFAT, NTFS, ext4 volumes), and the network L2/L3/L4 RX ingest
+path (Ethernet/ARP/IPv4/ICMP/UDP/TCP). The fuzzers run on the
 host (Linux/macOS clang), not on the target — they exercise the same
 source files the kernel builds, with a small `host_shim/` providing stub
 implementations of the kernel-only headers (serial output, klog macros,
@@ -29,6 +30,7 @@ silently drop a parser from coverage.
 | `fuzz_exfat` | `ExfatProbe` — the exFAT volume parser (`fs/exfat.cpp` + the no_std `duetos_exfat` Rust crate: boot sector, geometry, dirent-set decoder). Same read-only-disk shim; Rust linked via the same rlib + panic=abort staticlib recipe as `duetos_exec_meta`. |
 | `fuzz_ntfs` | `NtfsProbe` — the NTFS volume parser (`fs/ntfs.cpp` + the no_std `duetos_ntfs` Rust crate: boot sector, MFT record header, $FILE_NAME attribute walk). Same read-only-disk shim + Rust recipe as `fuzz_exfat`. |
 | `fuzz_ext4` | `Ext4Probe` — the ext4 volume parser (`fs/ext4.cpp` + the no_std `duetos_ext4` Rust crate: superblock, group descriptor, inode, extent tree, dir entries). Same read-only-disk shim + Rust recipe; seeded with a real `mkfs.ext4` image so the deep inode/extent/dir walkers are reached. |
+| `fuzz_net` | `NetStackInjectRx` — the L2/L3/L4 ingest chokepoint every NIC driver funnels RX frames through (`net/stack.cpp` + `firewall`/`socket`/`tcp`/`tcp_segment`/`tcp_timer` + the no_std `duetos_net_parsers` Rust DHCP/DNS option walkers): Ethernet → ARP / IPv4 → ICMP / UDP / TCP state machine. The libFuzzer input is the raw frame; seeded with valid ARP / IPv4+ICMP / +UDP / +TCP-SYN frames (correct IP/ICMP checksums). The harness runs `NetStackInit()` once at startup, exactly as kernel boot does, so the ARP/TCP hash buckets carry their empty sentinels (a never-initialised table makes the lookup walkers loop forever — that is a boot-order invariant, not a parser bug). |
 
 `fuzz_pe` links the real no_std `duetos_exec_meta` Rust crate (built as
 an rlib + a panic=abort staticlib wrapper, so a Rust-side overflow/index
@@ -82,6 +84,7 @@ make -C tests/fuzz run-fat32       # seeds the corpus first, then 60 s
 make -C tests/fuzz run-exfat       # seeds the corpus first, then 60 s
 make -C tests/fuzz run-ntfs        # seeds the corpus first, then 60 s
 make -C tests/fuzz run-ext4        # seeds the corpus first, then 60 s
+make -C tests/fuzz run-net         # seeds the corpus first, then 60 s
 ```
 
 Each `run-*` target creates `corpus/<name>/` and lets libFuzzer
