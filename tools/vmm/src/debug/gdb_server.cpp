@@ -332,6 +332,22 @@ GdbServer::Resume GdbServer::ServeStopped(int sig)
         {
             SendPacket(std::string("l") + kTargetXml);
         }
+        else if (pkt.rfind("qRcmd,", 0) == 0)
+        {
+            std::string cmd;
+            for (size_t i = 6; i + 1 < pkt.size(); i += 2)
+            {
+                cmd += static_cast<char>(
+                    (Unhex(pkt[i]) << 4) | Unhex(pkt[i + 1]));
+            }
+            std::string out =
+                m_monitor ? m_monitor(cmd)
+                          : std::string("no introspector\n");
+            std::string hexed;
+            for (unsigned char ch : out) HexByte(hexed, ch);
+            SendPacket("O" + hexed); // console output
+            SendPacket("OK");
+        }
         else if (cmd == 'g')
         {
             SendPacket(ReadRegisters(0));

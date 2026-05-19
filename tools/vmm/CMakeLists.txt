@@ -62,6 +62,9 @@ add_executable(duetos-vmm
     src/devices/pit8254.cpp
     src/devices/ioapic.cpp
     src/debug/gdb_server.cpp
+    src/debug/elf_symbols.cpp
+    src/debug/exit_trace.cpp
+    src/debug/introspect.cpp
 )
 
 target_include_directories(duetos-vmm PRIVATE src)

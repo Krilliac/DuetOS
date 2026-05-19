@@ -9,6 +9,8 @@
 #include <string>
 #include <thread>
 
+#include "debug/elf_symbols.h"
+#include "debug/exit_trace.h"
 #include "debug/gdb_server.h"
 #include "devices/ioapic.h"
 #include "devices/pit8254.h"
@@ -62,6 +64,10 @@ private:
     // step-off-breakpoint dance). Returns false on detach.
     bool ApplyResume(GdbServer::Resume r);
 
+    void RecordExit(const WHV_RUN_VP_EXIT_CONTEXT& exit);
+    std::string Monitor(const std::string& cmd);   // gdb `monitor`
+    void DumpTrace(std::string& out) const;         // symbolized ring
+
     VmConfig                       m_cfg;
     Partition                      m_part;
     std::unique_ptr<GuestMemory>   m_mem;
@@ -70,6 +76,8 @@ private:
     IoApic                         m_ioapic;
 
     std::unique_ptr<GdbServer> m_gdb;
+    ElfSymbols            m_symbols;
+    ExitTrace             m_trace;
     bool                  m_continueAfterStepOff = false;
 
     std::atomic<bool>     m_stop{false};

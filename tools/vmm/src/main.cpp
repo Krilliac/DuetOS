@@ -26,11 +26,11 @@
 // SLICE STATUS
 //   Slice 1: partition + vCPU + ELF + MB2/ACPI + COM1.
 //   Slice 2: IOAPIC MMIO + PIT + COM1 RX/IRQ4 + HLT resume.
-//   Slice 3 (this commit): host-side GDB remote (--gdb <port>) —
-//   target.xml, g/G, m/M via WHvTranslateGva, Z0/z0 software
-//   breakpoints, c/s with the step-off-breakpoint dance. Visual
-//   Studio attaches via the launch.vs.json "in-house VMM" config.
-//   Slices 4-5 (DWARF introspection, record/replay) follow.
+//   Slice 3: host-side GDB remote (--gdb <port>) for VS attach.
+//   Slice 4 (this commit): ELF-symbol introspection + always-on
+//   vmexit ring, exposed via gdb `monitor` (sym/lookup/read/rip/
+//   trace) and auto-dumped (symbolized) on a fatal exit. Slice 5
+//   (record/replay) follows.
 // ===========================================================================
 #include <cstdio>
 #include <cstring>

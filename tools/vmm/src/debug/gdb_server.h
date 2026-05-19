@@ -14,6 +14,7 @@
 #include <winsock2.h>
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 
@@ -35,6 +36,11 @@ public:
         Step,
         Detach
     };
+
+    // `monitor <cmd>` (gdb qRcmd) handler — the introspection
+    // surface. Returns the text to show in the client console.
+    using MonitorFn = std::function<std::string(const std::string&)>;
+    void SetMonitor(MonitorFn fn) { m_monitor = std::move(fn); }
 
     // Blocks until a debugger connects (call before the guest runs
     // so breakpoints can be set at boot).
@@ -80,6 +86,7 @@ private:
     SOCKET       m_listen = INVALID_SOCKET;
     SOCKET       m_conn   = INVALID_SOCKET;
 
+    MonitorFn m_monitor;
     std::map<uint64_t, uint8_t> m_bps;   // gva -> shadowed orig byte
     uint64_t m_stepOverBp = 0;           // bp lifted for step-off
     bool     m_haveStepOver = false;

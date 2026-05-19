@@ -61,10 +61,20 @@ Vmm::Vmm(VmConfig cfg)
 
     SetupVcpu(img.entry, kMbInfoGpa);
 
+    // Symbols power introspection AND the on-fatal trace dump, so
+    // load them whether or not gdb is enabled. Non-fatal if absent.
+    if (!m_symbols.Load(m_cfg.kernelPath))
+    {
+        std::printf("[vmm] no kernel symbols (introspection by "
+                    "address only)\n");
+    }
+
     if (m_cfg.gdbPort != 0)
     {
         m_gdb = std::make_unique<GdbServer>(m_part, *m_mem,
                                             m_cfg.gdbPort);
+        m_gdb->SetMonitor(
+            [this](const std::string& c) { return Monitor(c); });
     }
 }
 
@@ -320,6 +330,15 @@ int Vmm::Run()
         ApplyResume(m_gdb->ServeStopped(5));
     }
 
+    auto dumpFatal = [&] {
+        std::string t;
+        DumpTrace(t);
+        std::printf("[vmm] exit-trace (last <= %u exits):\n%s",
+                    ExitTrace::kCap,
+                    t.empty() ? "  (none)\n" : t.c_str());
+        std::fflush(stdout);
+    };
+
     uint64_t haltSpins = 0;
     for (;;)
     {
@@ -328,6 +347,7 @@ int Vmm::Run()
             return 0;
         }
         WHV_RUN_VP_EXIT_CONTEXT exit = m_part.Run(0);
+        RecordExit(exit);
         switch (exit.ExitReason)
         {
         case WHvRunVpExitReasonX64IoPortAccess:
@@ -336,6 +356,7 @@ int Vmm::Run()
                 std::printf("\n[vmm] string I/O port 0x%x "
                             "unimplemented\n",
                             exit.IoPortAccess.PortNumber);
+                dumpFatal();
                 return 2;
             }
             HandleIoPort(exit);
@@ -349,9 +370,11 @@ int Vmm::Run()
                 haltSpins = 0;
                 break;
             }
-            std::printf("\n[vmm] unhandled MMIO @ 0x%llx rip=0x%llx\n",
+            std::printf("\n[vmm] unhandled MMIO @ 0x%llx rip=%s\n",
                         (unsigned long long)exit.MemoryAccess.Gpa,
-                        (unsigned long long)exit.VpContext.Rip);
+                        m_symbols.Symbolize(exit.VpContext.Rip)
+                            .c_str());
+            dumpFatal();
             return 1;
 
         case WHvRunVpExitReasonX64Halt:
@@ -372,9 +395,11 @@ int Vmm::Run()
             if (!m_gdb)
             {
                 std::printf("\n[vmm] exception %u with no debugger "
-                            "rip=0x%llx\n",
+                            "rip=%s\n",
                             et,
-                            (unsigned long long)exit.VpContext.Rip);
+                            m_symbols.Symbolize(exit.VpContext.Rip)
+                                .c_str());
+                dumpFatal();
                 return 1;
             }
             SetTrapFlag(false); // the TF single-step has completed
@@ -413,9 +438,11 @@ int Vmm::Run()
             return m_stop.load() ? 0 : 1;
 
         default:
-            std::printf("\n[vmm] unexpected exit %d rip=0x%llx\n",
+            std::printf("\n[vmm] unexpected exit %d rip=%s\n",
                         (int)exit.ExitReason,
-                        (unsigned long long)exit.VpContext.Rip);
+                        m_symbols.Symbolize(exit.VpContext.Rip)
+                            .c_str());
+            dumpFatal();
             return 1;
         }
     }
