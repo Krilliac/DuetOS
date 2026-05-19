@@ -622,35 +622,12 @@ the per-call wiring.
 
 ## Testing / fuzzing
 
-### Fuzz harness — CI wiring (residual)
-
-- **Residual:** `tests/fuzz/` builds 12 libFuzzer harnesses and
-  `tools/test/fuzz-all.sh` (= `make -C tests/fuzz fuzz-all`) runs
-  them all in parallel with one CI-gate exit code, but **no CI
-  job invokes it**. `.github/workflows/build.yml` has
-  `check-format`, `check-rust`, `build-debug/release`,
-  `build-flavor-matrix` — add a sibling `fuzz` job:
-  - `runs-on: ubuntu-24.04`; install `clang-18 lld-18 llvm-18
-    libclang-rt-dev python3` + the pinned rust nightly (mirror
-    the `check-rust` toolchain step — `fuzz_pe/elf` and every
-    `fuzz_*` over a Rust-backed parser need `rustc` for the
-    rlib + panic=abort staticlib build), and `mkfs.ext4`
-    (`e2fsprogs`, already on ubuntu-24.04 images) for the ext4
-    seed.
-  - Step: `FUZZ_SECONDS=90 tools/test/fuzz-all.sh` (PR budget;
-    push/nightly can raise it). The script already exits
-    non-zero on any crash/timeout/oom/leak artifact and prints a
-    per-harness table, so no wrapper logic is needed.
-  - Upload `tests/fuzz/build/crash-*` +
-    `tests/fuzz/corpus/*/crash-*` as an artifact on failure so a
-    maintainer can `tests/fuzz/build/fuzz_<name> <artifact>`
-    locally.
-  - Optional follow-up: a scheduled (cron) long-run job with
-    `FUZZ_SECONDS=900` and a persisted corpus cache
-    (`actions/cache` keyed on the harness set) so coverage
-    compounds across runs instead of restarting cold.
-- **Blocks on:** nothing — the runner script and gate semantics
-  are in tree; this is one workflow-file edit.
+> **CI wiring landed.** `.github/workflows/build.yml` now has a
+> `fuzz` job (sibling of `check-rust`/`build-debug`) that runs
+> `FUZZ_SECONDS=90 tools/test/fuzz-all.sh` on every push/PR,
+> uploading `crash-*` artifacts on failure. The optional cron
+> long-run (`FUZZ_SECONDS=900` + persisted corpus cache) remains
+> a future follow-up, not a blocker.
 
 ### Fuzz harness — next parser targets (residual)
 
