@@ -102,6 +102,7 @@
 - [Debugger](tooling/Debugger.md)
 - [QEMU Smoke Tests](tooling/QEMU-Smoke.md)
 - [Running on VMs](tooling/Running-on-VMs.md)
+- [In-House Windows VMM](tooling/Windows-VMM.md)
 - [Wiki Auto-Sections](tooling/Wiki-Auto-Sections.md)
 - [duet-pkg (package manager)](tooling/Duet-Pkg.md)
 - [Portable Native Apps](tooling/Native-Apps.md)

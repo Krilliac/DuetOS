@@ -6,6 +6,10 @@
 >
 > **Maturity:** v0 — config matrix derived from in-tree driver + hypervisor-detection coverage
 
+> **See also:** to run/debug DuetOS on **Windows** via the bespoke
+> in-house hypervisor (no QEMU, with Visual Studio source-level
+> kernel debugging), see [In-House Windows VMM](Windows-VMM.md).
+
 ## TL;DR
 
 DuetOS needs **no hypervisor-specific code** to boot — it already
