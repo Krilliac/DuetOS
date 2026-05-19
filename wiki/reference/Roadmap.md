@@ -77,20 +77,111 @@ cleanup debt: move the residual up and delete the rest.
   guard, so `Current()` deref'd a partial `PerCpu` on a fresh
   AP. (The nearby `[ubsan] tm-detail PerCpu/u32/Task` lines are
   pre-existing benign noise, ~4×/clean boot — not the signal.)
-- **Design constraints for attempt 2:** restore must run *after*
-  `SchedFinishTaskSwitch` establishes a known-good context
-  (gated by the same fresh-AP condition the lock-release code
-  uses) and must validate task state (Running, non-NULL
-  `cpu::CurrentCpu()`), not just `self != nullptr`.
-  Re-verification **must** include a ≥6-boot determinism sweep —
-  this is the canonical "one run is not enough for intermittent
-  symptoms" case.
-- **Blocks on:** nothing technical; wants its own focused slice +
-  live-boot verification. `g_promote_to_panic` stays default-off
-  until this lands (per-task held-set is the precondition for a
-  fail-stop lockdep gate). The genuine in-task nesting found
-  alongside this (modal-dialog FAT32 I/O under `CompositorLock`)
-  is already fixed.
+- **Attempt 2 — LANDED (snapshot/restore half):** the per-task
+  carry is now wired per the constraints above. `Task` owns
+  `lockdep_held[kLockdepHeldMax]` + `lockdep_held_depth`
+  (`kernel/sched/sched.cpp`); `ScheduleLockedHandoff` snapshots the
+  outgoing task's held set just before `ContextSwitch`;
+  `SchedFinishTaskSwitch` restores the resumed task's set *after*
+  the fresh-AP `lock_ptr == nullptr` guard, gated on
+  `self != nullptr && self->state == TaskState::Running` (exactly
+  the attempt-2 design constraint — the held-set now follows the
+  *task* across a cross-CPU resume, so the compositor↔fat32 false
+  inversion from a sleeping mutex held across a yield no longer
+  fires). Fresh tasks are seeded `[kLockClassSched], depth=1` so
+  the first `SchedFinishTaskSwitch` pop balances.
+- **Residual (the real remaining work):** the held-stack *storage*
+  is still the single global `g_per_cpu[0]` alias
+  (`#define g_held_stack g_per_cpu[0].stack`, `kLockdepCpuMax = 1`
+  in `kernel/sync/lockdep.cpp`) and it does **not** separate
+  spinlock classes from sleeping-mutex classes. Spinlock classes
+  must NOT follow the task (a spinlock is never held across a
+  normal switch; the one deliberate exception — `g_sched_lock`
+  riding `ContextSwitch` via the `ctxsw_lock_to_release`
+  lock-pass — is released by `SchedFinishTaskSwitch`, not by
+  lockdep). Carrying `kLockClassSched` on the per-task snapshot is
+  what still produces the occasional `sync/spinlock : release
+  out-of-order` line under SMP churn (≤1×/clean 4-CPU boot now;
+  see the "SMP task double-run" entry — same root surface). The
+  prescribed split: a **per-CPU** stack for spinlock classes
+  (indexed by `cpu::CurrentCpu()->cpu_id`, the B2 cascading item)
+  and the **per-task** stack (already in place) for mutex classes;
+  needs a spinlock-vs-mutex class tag (`LockClass` is currently an
+  untyped `u16` with no acquire-API distinction).
+- **Blocks on:** the per-CPU `g_held_stack` indexing is the B2
+  "split `g_sched_lock` per-CPU" cascading item (lockdep must not
+  reintroduce the lockdep↔sched recursion the TU header avoids).
+  Wants its own focused slice + a ≥6-boot determinism sweep
+  (`tools/test/boot-determinism-sweep.sh`) — the canonical "one run
+  is not enough for intermittent symptoms" case.
+  `g_promote_to_panic` stays default-off until the spinlock/mutex
+  split lands. The genuine in-task nesting found alongside this
+  (modal-dialog FAT32 I/O under `CompositorLock`) is already fixed.
+
+### SMP task double-run under heavy scheduler churn (gui-fuzz repro)
+
+- **Symptom:** under sustained multi-CPU scheduler pressure a task
+  briefly executes on two CPUs at once. It surfaces as an
+  intermittent `[sched] MUTEX-NONOWNER` (a second copy of a task
+  unlocks a mutex the live copy still owns) or a `sync/spinlock :
+  SELF-DEADLOCK` / `release out-of-order`. The bad-unlock caller is
+  consistently an AP-idle-range TID running real task code
+  (`SchedDemoWorkerTask` / `KbdReaderTask` / `UiTickerTask`), i.e.
+  `Current()` / the per-CPU `current_task` disagrees with the stack
+  actually executing on an AP.
+- **Pre-existing:** reproduces on unmodified `origin/main` (the
+  first gui-fuzz run, before any scheduler edit, hit
+  `SELF-DEADLOCK` + `release out-of-order`; a plain 4-CPU boot of
+  the unmodified tree shows 1 `release out-of-order` `[E]` line).
+  Not introduced by the fixes below.
+- **Reproduce:** `tools/qemu/gui-fuzz.sh 18` (default 4-CPU SMP) —
+  fails several runs out of six. `DUETOS_SMP=1
+  tools/qemu/gui-fuzz.sh 20` runs **100 % clean** (≥46 000
+  randomised keyboard/mouse/hotkey/drag/menu events across three
+  seeds, zero fault) — i.e. the GUI itself has no crash bug; this
+  is purely an SMP scheduler defect the fuzzer exposes.
+- **Fixes already landed (reduce frequency + severity, do not fully
+  close it):**
+  - `MutexLock` / `MutexTryLock` / `MutexUnlock` owner test +
+    hand-off now serialise under `g_sched_lock` (was bare
+    `arch::Cli()` — no cross-CPU exclusion).
+  - All six blocking primitives (`WaitQueueBlock`,
+    `WaitQueueBlockTimeout`, `SchedSleepTicks`, `SchedSleepUntil`,
+    `CondvarWait`, `CondvarWaitTimeout`) route the deschedule
+    through the new `ScheduleLockedHandoff`, holding `g_sched_lock`
+    continuously from "mark self Blocked/Sleeping + enqueue"
+    through the context switch — the lock-passing discipline
+    `Schedule()` already used internally, now with no pre-`Schedule`
+    gap a peer-CPU waker could exploit.
+  - `CreateApBootSentinel` marks the throwaway AP-boot context
+    `no_requeue`; `Schedule()` abandons it instead of
+    `RunqueueOrSuspendPush`-ing a fake task (placeholder
+    `rsp`/`stack_base`) onto the global runqueue.
+  - Per-CPU idle tasks (`SchedStartIdle`) are now affinity-pinned
+    to their owning CPU (were `kAffinityAll`, contradicting the
+    "idle tasks are per-CPU" assumption the steal/balance paths
+    already make).
+  - Net: a plain 4-CPU boot went from a guaranteed
+    `MUTEX-NONOWNER` / `SELF-DEADLOCK` under load to **0–1**
+    occasional `release out-of-order` lines (the same residual the
+    "Lockdep held-set must be per-task" item already tracks);
+    `DUETOS_SMP=1` is perfect.
+- **Residual / approach for a focused slice:** the remaining
+  double-run only triggers under the synthetic extreme churn of the
+  fuzzer on ≥2 CPUs and points at the AP bring-up / context-switch
+  boundary (`SchedEnterOnAp` → first `Schedule()`, AP kernel-GSBASE
+  / `cpu::CurrentCpu()` establishment, work-steal / periodic
+  balance picking a task that has not fully descheduled). Wants its
+  own slice with a ≥6-boot determinism sweep
+  (`tools/test/boot-determinism-sweep.sh`) plus the gui-fuzz SMP
+  matrix as the gate — the canonical "one run is not enough for an
+  intermittent symptom" case. Shares root surface with the
+  "Lockdep held-set must be per-task" and "split `g_sched_lock`
+  per-CPU" items above; sequencing those first may subsume part of
+  this.
+- **Blocks on:** nothing technical; needs a dedicated
+  scheduler/AP-bring-up slice + live-boot soak validation (high
+  blast radius — `Schedule()` is on every task's path).
 
 ### Topology — cluster-scoped IPI fan-out
 
