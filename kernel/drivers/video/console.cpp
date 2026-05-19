@@ -170,6 +170,18 @@ void WriteCharImpl(ConsoleState& cs, char c)
         cs.cursor_col = 0;
         return;
     }
+    // Defensive bound before any buffer[] index. ConsoleWrite* take
+    // no lock, so the klog slot is written from every CPU
+    // concurrently; a racing non-atomic cursor RMW can transiently
+    // leave cursor_row/col past the array extent. AdvanceCursor and
+    // the \n path each re-clamp, but the window between a torn
+    // update and the next clamp is exactly where the write below
+    // lands — clamp here so a lost race garbles a valid cell instead
+    // of corrupting memory past `buffer` (-fsanitize=bounds OOB).
+    if (cs.cursor_row >= kConsoleRows)
+        cs.cursor_row = kConsoleRows - 1;
+    if (cs.cursor_col >= kConsoleCols)
+        cs.cursor_col = 0;
     if (c == '\b')
     {
         if (cs.cursor_col > 0)

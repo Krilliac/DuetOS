@@ -12,6 +12,7 @@
 #include "mm/kheap.h"
 #include "sched/sched.h"
 #include "security/login.h"
+#include "util/compiler.h"
 
 namespace duetos::security
 {
@@ -153,7 +154,7 @@ bool ParseU32Dec(const char* s, duetos::u32* out)
 // xorshift64* — deterministic so a crashing run reproduces from
 // the logged seed.
 duetos::u64 g_rng = 0;
-duetos::u64 Rng()
+DUETOS_NO_SANITIZE_WRAP duetos::u64 Rng()
 {
     duetos::u64 x = g_rng;
     x ^= x >> 12;

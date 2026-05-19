@@ -450,9 +450,12 @@ Result<TtfGlyph> TtfDecodeGlyph(const TtfFont& font, u16 glyph_index, TtfPoint* 
         {
             if (cur >= g_len)
                 return Err{ErrorCode::Corrupt};
-            u8 reps = g[cur++];
-            while (reps-- > 0 && fi < total_pts)
+            u32 reps = g[cur++];
+            while (reps > 0 && fi < total_pts)
+            {
                 flags_buf[fi++] = flag;
+                --reps;
+            }
         }
     }
     if (fi != total_pts)

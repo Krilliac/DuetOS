@@ -82,7 +82,10 @@ set +o pipefail
 set -o pipefail
 
 rc=0
-if ! grep -q "^\[gui-fuzz\] complete" "${SERIAL_LOG}"; then
+# Not line-anchored: concurrent COM1 writers can prefix the
+# sentinel on its physical line. It is emitted exactly once, so
+# an unanchored match is unambiguous.
+if ! grep -q "\[gui-fuzz\] complete" "${SERIAL_LOG}"; then
     echo "[gui-fuzz] FAIL — '[gui-fuzz] complete' sentinel not seen" >&2
     rc=1
 fi

@@ -414,27 +414,27 @@ constinit u64 g_context_switches = 0;
 // scheduler paths compact; cpu::CurrentCpu() lowers to a single
 // gs:[0] load on x86, so this is byte-equivalent to the prior
 // global increment.
-inline void SchedCpuIncLive()
+DUETOS_NO_SANITIZE_WRAP inline void SchedCpuIncLive()
 {
     ++cpu::CurrentCpu()->sched_tasks_live;
 }
-inline void SchedCpuDecLive()
+DUETOS_NO_SANITIZE_WRAP inline void SchedCpuDecLive()
 {
     --cpu::CurrentCpu()->sched_tasks_live;
 }
-inline void SchedCpuIncSleeping()
+DUETOS_NO_SANITIZE_WRAP inline void SchedCpuIncSleeping()
 {
     ++cpu::CurrentCpu()->sched_tasks_sleeping;
 }
-inline void SchedCpuDecSleeping()
+DUETOS_NO_SANITIZE_WRAP inline void SchedCpuDecSleeping()
 {
     --cpu::CurrentCpu()->sched_tasks_sleeping;
 }
-inline void SchedCpuIncBlocked()
+DUETOS_NO_SANITIZE_WRAP inline void SchedCpuIncBlocked()
 {
     ++cpu::CurrentCpu()->sched_tasks_blocked;
 }
-inline void SchedCpuDecBlocked()
+DUETOS_NO_SANITIZE_WRAP inline void SchedCpuDecBlocked()
 {
     --cpu::CurrentCpu()->sched_tasks_blocked;
 }
@@ -450,7 +450,7 @@ inline void SchedCpuIncReaped()
 // Cross-CPU sum walks for read-side. Used by SchedStatsRead; cold
 // path (operator runs `top` or `ps`), no atomic ops needed since
 // caller observes a snapshot whose precision is best-effort.
-inline u64 SchedSumLive()
+DUETOS_NO_SANITIZE_WRAP inline u64 SchedSumLive()
 {
     u64 sum = 0;
     const u32 limit = arch::SmpCpuIdLimit();
@@ -462,7 +462,7 @@ inline u64 SchedSumLive()
     }
     return sum;
 }
-inline u64 SchedSumSleeping()
+DUETOS_NO_SANITIZE_WRAP inline u64 SchedSumSleeping()
 {
     u64 sum = 0;
     const u32 limit = arch::SmpCpuIdLimit();
@@ -474,7 +474,7 @@ inline u64 SchedSumSleeping()
     }
     return sum;
 }
-inline u64 SchedSumBlocked()
+DUETOS_NO_SANITIZE_WRAP inline u64 SchedSumBlocked()
 {
     u64 sum = 0;
     const u32 limit = arch::SmpCpuIdLimit();

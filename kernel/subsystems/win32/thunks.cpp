@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "subsystems/win32/proc_env.h"
+#include "util/compiler.h"
 
 namespace duetos::win32
 {
@@ -493,7 +494,7 @@ constexpr char AsciiToLower(char c)
     return c;
 }
 
-constexpr u64 Fnv1a64Append(u64 hash, char c)
+DUETOS_NO_SANITIZE_WRAP constexpr u64 Fnv1a64Append(u64 hash, char c)
 {
     constexpr u64 kFnvPrime = 1099511628211ULL;
     return (hash ^ static_cast<u8>(c)) * kFnvPrime;

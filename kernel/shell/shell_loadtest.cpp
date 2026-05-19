@@ -52,6 +52,7 @@
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
 #include "sched/sched.h"
+#include "util/compiler.h"
 
 namespace duetos::core::shell::internal
 {
@@ -107,7 +108,7 @@ inline volatile bool* StopFlag(u32 i)
     return reinterpret_cast<volatile bool*>(&g_workers[i].stop);
 }
 
-void CpuBurnerEntry(void* arg)
+DUETOS_NO_SANITIZE_WRAP void CpuBurnerEntry(void* arg)
 {
     const u32 idx = static_cast<u32>(reinterpret_cast<uptr>(arg));
     if (g_workers == nullptr || idx >= g_workers_count)
@@ -568,7 +569,7 @@ void RunMemLoad(u32 mib, u32 secs)
 // Spin mode — busy-loop the shell task itself for `secs` seconds,
 // polling ^C every iteration.
 // ------------------------------------------------------------------
-void RunSpin(u32 secs)
+DUETOS_NO_SANITIZE_WRAP void RunSpin(u32 secs)
 {
     secs = NormaliseSecs(secs);
     const u64 t_start = duetos::sched::SchedNowTicks();
