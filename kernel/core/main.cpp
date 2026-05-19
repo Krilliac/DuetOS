@@ -322,6 +322,7 @@
 #include "security/canary.h"
 #include "security/event_ring.h"
 #include "security/guard.h"
+#include "security/gui_fuzz.h"
 #include "security/ir_runbook.h"
 #include "security/password_hash.h"
 #include "security/pentest_gui.h"
@@ -448,6 +449,13 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // so a normal boot pays nothing. Optional tunables come from the
     // same cmdline: stress-secs=N, stress-workers=N, stress-mib=N.
     duetos::core::diag::StressDriverArm(cmdline);
+
+    // `gui-fuzz[=secs]` arms the self-driving GUI stress harness in
+    // kernel/security/gui_fuzz.cpp. Like pentest=gui it must come
+    // up after the kbd-reader/mouse-reader are live so the
+    // injection rings have a drainer. No-op when the token is
+    // absent. Pair with autologin=1 so events land on the desktop.
+    duetos::security::GuiFuzzArm(cmdline);
 
     // Idle-timeout auto-lock watcher. Wakes once a second and
     // calls LoginLock when the active session has been idle past

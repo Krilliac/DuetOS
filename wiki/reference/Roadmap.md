@@ -77,20 +77,64 @@ cleanup debt: move the residual up and delete the rest.
   guard, so `Current()` deref'd a partial `PerCpu` on a fresh
   AP. (The nearby `[ubsan] tm-detail PerCpu/u32/Task` lines are
   pre-existing benign noise, ~4×/clean boot — not the signal.)
-- **Design constraints for attempt 2:** restore must run *after*
-  `SchedFinishTaskSwitch` establishes a known-good context
-  (gated by the same fresh-AP condition the lock-release code
-  uses) and must validate task state (Running, non-NULL
-  `cpu::CurrentCpu()`), not just `self != nullptr`.
-  Re-verification **must** include a ≥6-boot determinism sweep —
-  this is the canonical "one run is not enough for intermittent
-  symptoms" case.
-- **Blocks on:** nothing technical; wants its own focused slice +
-  live-boot verification. `g_promote_to_panic` stays default-off
-  until this lands (per-task held-set is the precondition for a
-  fail-stop lockdep gate). The genuine in-task nesting found
-  alongside this (modal-dialog FAT32 I/O under `CompositorLock`)
-  is already fixed.
+- **Attempt 2 — LANDED (snapshot/restore half):** the per-task
+  carry is now wired per the constraints above. `Task` owns
+  `lockdep_held[kLockdepHeldMax]` + `lockdep_held_depth`
+  (`kernel/sched/sched.cpp`); `ScheduleLockedHandoff` snapshots the
+  outgoing task's held set just before `ContextSwitch`;
+  `SchedFinishTaskSwitch` restores the resumed task's set *after*
+  the fresh-AP `lock_ptr == nullptr` guard, gated on
+  `self != nullptr && self->state == TaskState::Running` (exactly
+  the attempt-2 design constraint — the held-set now follows the
+  *task* across a cross-CPU resume, so the compositor↔fat32 false
+  inversion from a sleeping mutex held across a yield no longer
+  fires). Fresh tasks are seeded `[kLockClassSched], depth=1` so
+  the first `SchedFinishTaskSwitch` pop balances.
+- **SMP `release out-of-order` symptom — RESOLVED (2026-05-19):**
+  the occasional `sync/spinlock : release out-of-order` line under
+  4-CPU churn was NOT caused by the held-stack storage design — it
+  was a symptom of the SMP cross-CPU corruption that also drove the
+  "SMP task double-run" item (now deleted, fixed in the same
+  slice). Root: an AP ran kernel code with a non-kernel GSBASE
+  (`LoadGdtForCurrent`'s `mov %gs` zeroed `IA32_GS_BASE` and the
+  AP's per-CPU pointer was written *before* that, not after), so
+  `cpu::CurrentCpu()` silently returned the BSP slot and the AP
+  read/wrote the BSP's `g_per_cpu[0]` held-stack alias (plus
+  `current_task` / the `ctxsw_lock_to_release` lock-pass slot).
+  Compounded by APs never executing `lidt` (no per-CPU IDTR), which
+  triple-faulted them on the first timer tick. Fixes: GSBASE +
+  KERNEL_GS_BASE now programmed *after* `LoadGdtForCurrent`;
+  `IdtLoadForCurrent()` added to the AP path; `cpu::CurrentCpu()`
+  resolves the real CPU by LAPIC ID instead of assuming BSP, with a
+  gated `kCurrentCpuGsbaseFallback` probe + count sentinel
+  (`OnTimerTick`) so any future swapgs/AP-GS regression is caught.
+  Gated by a 6-boot determinism sweep (3/3 APs online, byte-stable,
+  zero panic/triple/fallback) + a 6/6-clean `gui-fuzz.sh 18` SMP
+  matrix. `g_promote_to_panic` may now be reconsidered.
+- **Residual (the real remaining work — architectural cleanup, no
+  live failure):** the held-stack *storage* is still the single
+  global `g_per_cpu[0]` alias (`#define g_held_stack
+  g_per_cpu[0].stack`, `kLockdepCpuMax = 1` in
+  `kernel/sync/lockdep.cpp`) and it does **not** separate spinlock
+  classes from sleeping-mutex classes. With the GSBASE/lidt root
+  fixed this no longer produces a runtime symptom, but the design
+  is still wrong in principle: spinlock classes must NOT follow the
+  task (a spinlock is never held across a normal switch; the one
+  deliberate exception — `g_sched_lock` riding `ContextSwitch` via
+  the `ctxsw_lock_to_release` lock-pass — is released by
+  `SchedFinishTaskSwitch`, not by lockdep). The prescribed split: a
+  **per-CPU** stack for spinlock classes (indexed by
+  `cpu::CurrentCpu()->cpu_id`, the B2 cascading item) and the
+  **per-task** stack (already in place) for mutex classes; needs a
+  spinlock-vs-mutex class tag (`LockClass` is currently an untyped
+  `u16` with no acquire-API distinction).
+- **Blocks on:** the per-CPU `g_held_stack` indexing is the B2
+  "split `g_sched_lock` per-CPU" cascading item (lockdep must not
+  reintroduce the lockdep↔sched recursion the TU header avoids).
+  Wants its own focused slice + a ≥6-boot determinism sweep
+  (`tools/test/boot-determinism-sweep.sh`). The genuine in-task
+  nesting found alongside this (modal-dialog FAT32 I/O under
+  `CompositorLock`) is already fixed.
 
 ### Topology — cluster-scoped IPI fan-out
 

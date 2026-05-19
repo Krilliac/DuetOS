@@ -260,4 +260,11 @@ bool BspInstalled();
 /// fields via CurrentCpu(), peer fields via this enumerator.
 PerCpu* BspPercpu();
 
+/// Number of times CurrentCpu() recovered from a non-kernel GSBASE
+/// on a NON-BSP CPU by resolving the real PerCpu via the LAPIC ID
+/// (instead of the old, incorrect, "assume BSP" fallback). Zero on
+/// a clean SMP boot; non-zero marks a swapgs / AP-GS-reestablishment
+/// gap. Read from a kernel-GSBASE-safe context only (SmpStartAps).
+u64 CurrentCpuGsbaseFallbackCount();
+
 } // namespace duetos::cpu

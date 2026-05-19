@@ -158,6 +158,19 @@ struct Task
     // when kill_requested is true.
     KillReason kill_reason;
 
+    // One-shot boot context: this Task exists ONLY to give a CPU's
+    // first Schedule() a non-null `prev`; its rsp / stack_base are
+    // placeholders and it must NEVER go on a runqueue. The AP boot
+    // sentinel (CreateApBootSentinel) sets this. Schedule() drops
+    // such a task instead of re-enqueuing it — otherwise a peer CPU
+    // pops the fake task and ContextSwitches into garbage on the AP
+    // trampoline stack: an SMP task double-run that surfaces as
+    // intermittent MUTEX-NONOWNER / sched-class spinlock
+    // self-deadlock (reproduced by tools/qemu/gui-fuzz.sh). Zeroed
+    // by the memset every Task allocation runs, so normal tasks
+    // default to false.
+    bool no_requeue;
+
     // CPU-time accounting. `ticks_run` accumulates one tick per
     // OnTimerTick call where this task was the current task; it
     // is the authoritative "how much CPU time has this consumed
@@ -1912,6 +1925,12 @@ const char* KillReasonName(KillReason r)
     }
 }
 
+// Core scheduler step with g_sched_lock ALREADY HELD by the caller
+// (lock_flags is the value the caller's SpinLockAcquire returned).
+// Defined immediately after Schedule(); forward-declared here so
+// Schedule() and the blocking primitives below can route through it.
+void ScheduleLockedHandoff(sync::IrqFlags lock_flags);
+
 void Schedule()
 {
     if (Current() == nullptr)
@@ -1923,14 +1942,34 @@ void Schedule()
         return;
     }
 
-    Task* prev = nullptr;
-    Task* next = nullptr;
     // Acquire the scheduler lock manually (rather than via SpinLockGuard)
     // so we can hand it off across ContextSwitch — see the lock-passing
     // dance below. The lock covers the pick + state transitions; all
     // per-CPU register handoffs (TSS.RSP0, AS activate, FS_BASE, IRQ
     // depth, DR*) can correctly run while it's held.
     sync::IrqFlags lock_flags = sync::SpinLockAcquire(g_sched_lock);
+    ScheduleLockedHandoff(lock_flags);
+}
+
+// Same scheduler step as Schedule(), but the caller already holds
+// g_sched_lock (and passes the flags its SpinLockAcquire returned).
+// This is the SMP-correct blocking primitive: a task that wants to
+// sleep marks itself Blocked + enqueues onto its wait queue AND
+// deschedules under ONE continuous g_sched_lock hold — no gap. The
+// old `{ SpinLockGuard g(g_sched_lock); enqueue; } Schedule();`
+// shape released the lock between the enqueue and Schedule()'s
+// re-acquire; on SMP a peer CPU could pop+wake the task into a
+// runqueue in that gap, and a third CPU could then dispatch it
+// while it was still executing this stack — two live copies of one
+// task, surfacing as intermittent MUTEX-NONOWNER / sched-class
+// spinlock self-deadlock (reliably reproduced by tools/qemu/
+// gui-fuzz.sh). The lock rides the existing ctxsw_lock_to_release
+// hand-off and is dropped by SchedFinishTaskSwitch on the resumed
+// task, exactly as for a Schedule()-initiated switch.
+void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
+{
+    Task* prev = nullptr;
+    Task* next = nullptr;
 
     next = RunqueuePopRunnable();
     if (next == nullptr)
@@ -1979,6 +2018,20 @@ void Schedule()
             // itself acquires g_sched_lock — but we already hold
             // it. Use the _Locked variant to avoid recursive lock.
             WaitQueueWakeOneLocked(&g_reaper_wq);
+        }
+        else if (prev->no_requeue)
+        {
+            // One-shot boot context (AP boot sentinel). It exists
+            // only so THIS first Schedule() had a valid `prev`;
+            // from here the CPU runs real tasks and never returns
+            // to the trampoline stack. Abandon it: NOT requeued
+            // (a peer CPU popping it would ContextSwitch into a
+            // placeholder rsp — the SMP double-run), NOT zombied
+            // (never on g_zombies, so the reaper never frees it;
+            // one tiny Task struct per AP, by design "never
+            // inspected"). Flip to Dead so any later state read is
+            // consistent.
+            prev->state = TaskState::Dead;
         }
         else
         {
@@ -2171,7 +2224,15 @@ void SchedSleepTicks(u64 ticks)
         return;
     }
 
-    arch::Cli();
+    // State flip + sleep-queue insert + deschedule under ONE
+    // continuous g_sched_lock hold (see ScheduleLockedHandoff). The
+    // old shape released the lock between SleepqueueInsert and
+    // Schedule()'s re-acquire; a peer CPU's OnTimerTick could fire
+    // the wake in that gap and a third CPU dispatch this task while
+    // it was still executing this stack — the double-run that
+    // surfaced as MUTEX-NONOWNER under gui-fuzz (SchedSleepTicks is
+    // the hottest blocking path: every worker / reader / ticker).
+    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
     Task* current = Current();
     current->state = TaskState::Sleeping;
     // Saturate (same idiom as WaitQueueBlockTimeout): an unclamped
@@ -2179,13 +2240,9 @@ void SchedSleepTicks(u64 ticks)
     // and would make the sleeper wake immediately instead of after
     // the requested interval.
     current->wake_tick = (ticks > (~u64(0) - g_tick_now)) ? ~u64(0) : (g_tick_now + ticks);
-    {
-        sync::SpinLockGuard guard(g_sched_lock);
-        SleepqueueInsert(current);
-        SchedCpuIncSleeping();
-    }
-    Schedule();
-    arch::Sti();
+    SleepqueueInsert(current);
+    SchedCpuIncSleeping();
+    ScheduleLockedHandoff(f);
 }
 
 void SchedSleepUntil(u64 deadline_tick)
@@ -2202,17 +2259,18 @@ void SchedSleepUntil(u64 deadline_tick)
         SchedYield();
         return;
     }
+    arch::Sti();
 
+    // Same no-gap discipline as SchedSleepTicks: hold g_sched_lock
+    // from the state flip through the deschedule so a peer-CPU
+    // timer wake can't double-run this task.
+    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
     Task* current = Current();
     current->state = TaskState::Sleeping;
     current->wake_tick = deadline_tick;
-    {
-        sync::SpinLockGuard guard(g_sched_lock);
-        SleepqueueInsert(current);
-        SchedCpuIncSleeping();
-    }
-    Schedule();
-    arch::Sti();
+    SleepqueueInsert(current);
+    SchedCpuIncSleeping();
+    ScheduleLockedHandoff(f);
 }
 
 u64 SchedNowTicks()
@@ -2470,6 +2528,36 @@ void OnTimerTick(u64 now_ticks)
                 }
             }
             ::duetos::sched::LoadavgUpdate(runnable);
+        }
+    }
+
+    // One-shot SMP-health sentinel. cpu::CurrentCpu() now recovers a
+    // non-kernel GSBASE on a non-BSP CPU by LAPIC-ID resolution
+    // instead of the old "assume BSP" mis-attribution that drove the
+    // intermittent SMP double-run (an AP reading/writing the BSP's
+    // current_task / ctxsw lock-pass slot). A clean boot never trips
+    // this; the first trip leaves a gated WARN + probe so a future
+    // swapgs / AP-GS-reestablishment regression is caught without an
+    // operator re-adding prints. Checked here rather than at the
+    // detection site because klog tags every line via
+    // CurrentCpuIdOrBsp(), which would re-enter CurrentCpu() while
+    // GSBASE is still stale (unbounded recursion). The timer handler
+    // runs post-entry-swapgs, so GSBASE is kernel-valid here. One
+    // volatile read + branch on the hot path until it trips once.
+    {
+        static volatile bool s_gsbase_warned = false;
+        if (!s_gsbase_warned)
+        {
+            const u64 fc = cpu::CurrentCpuGsbaseFallbackCount();
+            if (fc != 0)
+            {
+                s_gsbase_warned = true;
+                KBP_PROBE_V(::duetos::debug::ProbeId::kCurrentCpuGsbaseFallback, fc);
+                KLOG_WARN_V("cpu/percpu",
+                            "CurrentCpu LAPIC-resolved a non-kernel GSBASE on a non-BSP "
+                            "CPU (swapgs / AP-GS gap; recovered) — REGRESSION, count",
+                            fc);
+            }
         }
     }
 }
@@ -4196,7 +4284,29 @@ inline void CpuIdleLowPower(volatile u8* monitor_cell, bool use_mwait)
 void SchedStartIdle(const char* name)
 {
     KASSERT(name != nullptr, "sched", "SchedStartIdle null name");
-    SchedCreate(&IdleMain, nullptr, name, TaskPriority::Idle);
+    Task* idle = SchedCreate(&IdleMain, nullptr, name, TaskPriority::Idle);
+    // Pin the idle task to the CPU that is starting it. The rest of
+    // the scheduler treats idle tasks as strictly per-CPU ("Idle
+    // tasks are per-CPU and not eligible to steal"), but SchedCreate
+    // defaults affinity_mask to kAffinityAll — an unpinned idle task
+    // can then be popped / load-balanced onto a DIFFERENT CPU. When
+    // two CPUs end up sharing one idle task's stack / Task struct
+    // the result is a task running on two CPUs at once, surfacing
+    // as the intermittent MUTEX-NONOWNER the gui-fuzz harness
+    // reproduces under SMP. SchedStartIdle runs on the owning CPU
+    // (BSP from SchedInit, each AP from SchedEnterOnAp), so
+    // CurrentCpu() is the correct home. Direct mask store (not
+    // SchedSetAffinityMask) — the task was just created, nothing
+    // is contending it yet, and the heavier re-home path is
+    // needless this early.
+    if (idle != nullptr)
+    {
+        cpu::PerCpu* self = cpu::CurrentCpu();
+        if (self != nullptr)
+        {
+            idle->affinity_mask = (1u << self->cpu_id);
+        }
+    }
     core::Log(core::LogLevel::Info, "sched/idle", "idle task online");
 }
 
@@ -4220,6 +4330,14 @@ Task* CreateApBootSentinel(u32 cpu_id)
     memset(t, 0, sizeof(Task));
     t->id = g_next_task_id++;
     t->state = TaskState::Running;
+    // NEVER re-enqueue this fake task. Without this, the AP's first
+    // Schedule() sees prev==sentinel in state Running and
+    // RunqueueOrSuspendPush()es it onto the GLOBAL runqueue; a peer
+    // CPU then pops it and ContextSwitches into a placeholder rsp on
+    // the AP trampoline stack — two CPUs executing one stack, the
+    // SMP double-run behind the intermittent MUTEX-NONOWNER / sched
+    // spinlock self-deadlock.
+    t->no_requeue = true;
     t->rsp = 0;              // populated by ContextSwitch's first store
     t->stack_base = nullptr; // sentinel is on the trampoline stack — never inspected
     t->stack_size = 0;
@@ -4313,38 +4431,61 @@ void FormatIdleApName(char (&out)[16], u32 cpu_id)
 // race is closed against IRQ-context wakers. See sched.h for the contract.
 // ---------------------------------------------------------------------------
 
+namespace
+{
+
+// Caller must hold g_sched_lock. Enqueue Current() on `wq` (FIFO)
+// and flip it Blocked — the exact critical section WaitQueueBlock
+// runs, minus the lock acquire. Factored out (mirrors why
+// WaitQueueWakeOneLocked exists) so a caller that already holds
+// g_sched_lock can splice "decide to wait" together with another
+// state mutation — e.g. the mutex owner-check — into ONE
+// indivisible region. Without that splice, MutexLock's owner test
+// and its enqueue straddle a lock gap that a hand-off on another
+// CPU races (the #-gui-fuzz MUTEX-NONOWNER / sched self-deadlock).
+void WaitQueueBlockCurrentLocked(WaitQueue* wq)
+{
+    sync::SpinLockAssertHeld(g_sched_lock);
+    Task* t = Current();
+    // The currently-executing task is necessarily Running. A
+    // caller that reached this path with state already flipped
+    // to Blocked / Sleeping / Dead would be re-enqueued on this
+    // wait queue while still on another list (runqueue, sleep
+    // queue, or zombies), corrupting whichever list holds it.
+    KASSERT(t->state == TaskState::Running, "sched", "WaitQueueBlockCurrentLocked on non-Running task");
+    t->state = TaskState::Blocked;
+    t->next = nullptr;
+    t->waiting_on = wq;
+    t->wake_by_timeout = false;
+    if (wq->tail == nullptr)
+    {
+        wq->head = wq->tail = t;
+    }
+    else
+    {
+        wq->tail->next = t;
+        wq->tail = t;
+    }
+    SchedCpuIncBlocked();
+}
+
+} // namespace
+
 void WaitQueueBlock(WaitQueue* wq)
 {
     KASSERT(wq != nullptr, "sched", "WaitQueueBlock null queue");
 
-    {
-        sync::SpinLockGuard guard(g_sched_lock);
-        Task* t = Current();
-        // The currently-executing task is necessarily Running. A
-        // caller that reached this path with state already flipped
-        // to Blocked / Sleeping / Dead would be re-enqueued on this
-        // wait queue while still on another list (runqueue, sleep
-        // queue, or zombies), corrupting whichever list holds it.
-        KASSERT(t->state == TaskState::Running, "sched", "WaitQueueBlock on non-Running task");
-        t->state = TaskState::Blocked;
-        t->next = nullptr;
-        t->waiting_on = wq;
-        t->wake_by_timeout = false;
-        if (wq->tail == nullptr)
-        {
-            wq->head = wq->tail = t;
-        }
-        else
-        {
-            wq->tail->next = t;
-            wq->tail = t;
-        }
-        SchedCpuIncBlocked();
-    }
-
-    Schedule();
-    // Woken. Our state was flipped back to Running by Schedule() + the
-    // waker pushed us onto the runqueue before we got here.
+    // Acquire manually + hold the lock straight through the
+    // deschedule. The old guard-scope-then-Schedule() shape left an
+    // SMP gap between the enqueue and Schedule()'s re-acquire (see
+    // ScheduleLockedHandoff). The lock is handed off across the
+    // context switch and released by SchedFinishTaskSwitch when this
+    // task is later resumed.
+    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
+    WaitQueueBlockCurrentLocked(wq);
+    ScheduleLockedHandoff(f);
+    // Woken. Our state was flipped back to Running by the scheduler +
+    // the waker pushed us onto the runqueue before we got here.
 }
 
 bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
@@ -4360,8 +4501,13 @@ bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
         return false;
     }
 
+    // Continuous g_sched_lock hold from the state flip + dual
+    // enqueue THROUGH the deschedule (see ScheduleLockedHandoff).
+    // Both wake arms (WaitQueueWakeOne, OnTimerTick) take
+    // g_sched_lock, so neither can fire until this task is genuinely
+    // off-CPU — closing the SMP double-run window.
+    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
     {
-        sync::SpinLockGuard guard(g_sched_lock);
         Task* t = Current();
         // Same invariant as WaitQueueBlock: the caller is the
         // currently-executing task, so state must be Running. A
@@ -4401,7 +4547,7 @@ bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
         SchedCpuIncSleeping();
     }
 
-    Schedule();
+    ScheduleLockedHandoff(f);
 
     // Woken by one of two paths. `wake_by_timeout` was written by
     // whichever path fired first (OnTimerTick sets true,
@@ -4522,17 +4668,35 @@ void MutexLock(Mutex* m)
     // already holds. Untagged mutexes short-circuit inside the hook.
     ::duetos::sync::LockdepBeforeAcquire(m->class_id);
 
-    arch::Cli();
-    // Self-deadlock guard (the owning-re-entry check sched.h's Mutex
-    // doc explicitly asks for). Recursion is unsupported: if the
-    // caller already owns `m`, the else-branch below blocks it on
-    // m->waiters waiting for an unlock that only it could issue —
-    // that task never runs again, and anything waiting on it cascades
-    // into a system-wide hang. Always-on (KASSERT, like the null
-    // check above): an unrecoverable hang is catastrophic in release
-    // too, so a panic banner is strictly better in every build. The
-    // read is race-free for the case it fires on — only the running
-    // task can equal Current(), and IRQs are now off.
+    // Owner test + (fast acquire | slow-path enqueue) MUST be one
+    // indivisible region with respect to MutexUnlock's hand-off. A
+    // bare arch::Cli() only masks IRQs on THIS CPU — on SMP it is
+    // not mutual exclusion, so a concurrent MutexUnlock on another
+    // CPU could clear m->owner (its `m->owner = nullptr` step),
+    // letting this CPU's owner==nullptr test take the fast path and
+    // claim the lock, only for the unlocker's hand-off to then
+    // overwrite m->owner with a woken waiter — two tasks believing
+    // they hold it, surfacing later as MUTEX-NONOWNER / a
+    // sched-class spinlock self-deadlock. Holding g_sched_lock
+    // across the decision (the same lock the hand-off and the
+    // wait-queue enqueue take) closes that window — exactly the
+    // pattern CondvarWait already uses.
+    // Acquire g_sched_lock manually (not via SpinLockGuard): on the
+    // contended path the lock must ride the context switch via
+    // ScheduleLockedHandoff, so it is NOT released here — it is
+    // dropped by SchedFinishTaskSwitch when this task is resumed
+    // owning the mutex. On the fast path we release it ourselves.
+    // The owner test + the (fast claim | slow enqueue) decision +
+    // the deschedule are now ONE continuous hold, with no gap an
+    // Unlock hand-off or a peer-CPU waker can slip into.
+    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
+    // Self-deadlock guard (the owning-re-entry check sched.h's
+    // Mutex doc explicitly asks for). Recursion is unsupported: if
+    // the caller already owns `m`, the else-branch would block it
+    // on m->waiters waiting for an unlock that only it could issue
+    // — that task never runs again, and anything waiting on it
+    // cascades into a system-wide hang. Always-on (KASSERT): an
+    // unrecoverable hang is catastrophic in release too.
     // Predicate is owner==nullptr || owner!=Current — NOT
     // owner!=Current alone: during early boot Current() is nullptr
     // and the uncontended owner is also nullptr, so the naive form
@@ -4545,15 +4709,20 @@ void MutexLock(Mutex* m)
     {
         // Fast path: uncontended acquire.
         m->owner = Current();
+        sync::SpinLockRelease(g_sched_lock, f);
     }
     else
     {
-        // Slow path: block on the waiters queue. Unlock's hand-off sets
-        // m->owner = us BEFORE waking us, so there's nothing to redo
-        // here — the lock is already ours when WaitQueueBlock returns.
-        WaitQueueBlock(&m->waiters);
+        // Slow path: enqueue self on the waiters queue and
+        // deschedule under the SAME hold the owner test ran under,
+        // so neither an Unlock hand-off nor a peer-CPU waker can
+        // slip between "decide to wait" and "actually off-CPU".
+        // Unlock's hand-off sets m->owner = us BEFORE waking us, so
+        // there's nothing to redo here — the lock is already ours
+        // when ScheduleLockedHandoff returns (on our resumed stack).
+        WaitQueueBlockCurrentLocked(&m->waiters);
+        ScheduleLockedHandoff(f);
     }
-    arch::Sti();
 
     // After successful acquire — push onto the lockdep held stack.
     ::duetos::sync::LockdepAfterAcquire(m->class_id);
@@ -4568,13 +4737,18 @@ bool MutexTryLock(Mutex* m)
 {
     KASSERT(m != nullptr, "sched", "MutexTryLock null mutex");
 
-    arch::Cli();
-    const bool ok = (m->owner == nullptr);
-    if (ok)
+    // Same SMP rationale as MutexLock: the owner test + claim must
+    // run under g_sched_lock or a concurrent hand-off on another
+    // CPU races the read-modify-write of m->owner.
+    bool ok = false;
     {
-        m->owner = Current();
+        sync::SpinLockGuard guard(g_sched_lock);
+        ok = (m->owner == nullptr);
+        if (ok)
+        {
+            m->owner = Current();
+        }
     }
-    arch::Sti();
     if (ok)
     {
         // Treat a successful try-lock as a full acquire for lockdep —
@@ -4643,26 +4817,57 @@ void MutexUnlock(Mutex* m)
     // mirrors the SpinLockRelease ordering.
     ::duetos::sync::LockdepBeforeRelease(m->class_id);
 
-    arch::Cli();
-    if (m->owner != Current())
+    // The owner test, the m->owner clear, and the hand-off
+    // (wake-one + ownership transfer) are ONE region under
+    // g_sched_lock. A bare arch::Cli() was insufficient on SMP:
+    // between `m->owner = nullptr` and the hand-off's
+    // `m->owner = next`, a MutexLock on another CPU saw owner ==
+    // nullptr and claimed the lock via the fast path, so the
+    // hand-off then handed the SAME mutex to a second task. The
+    // surviving symptom was an intermittent MUTEX-NONOWNER (the
+    // double-claimer's later Unlock) or a sched-class spinlock
+    // self-deadlock — both reproduced by the gui-fuzz harness.
+    // WaitQueueWakeOneLocked (vs the public WaitQueueWakeOne)
+    // keeps the wake inside the same hold instead of dropping and
+    // retaking g_sched_lock mid-transfer.
+    bool nonowner = false;
+    Task* bad_owner = nullptr;
+    bool handed_off = false;
+    {
+        sync::SpinLockGuard guard(g_sched_lock);
+        if (m->owner != Current())
+        {
+            nonowner = true;
+            bad_owner = m->owner;
+        }
+        else
+        {
+            m->owner = nullptr;
+            // Hand-off: wake the longest waiter AND transfer
+            // ownership directly. Without hand-off a freshly-woken
+            // waiter would re-acquire a lock we just cleared,
+            // racing any Lock in the gap; hand-off guarantees FIFO
+            // progress.
+            Task* next = WaitQueueWakeOneLocked(&m->waiters);
+            if (next != nullptr)
+            {
+                m->owner = next;
+                handed_off = true;
+            }
+        }
+    }
+
+    if (nonowner)
     {
         // Caller-side contract violation. Debug builds panic so the
-        // bad caller is found; release builds log, re-enable
-        // interrupts, and return without mutating m — touching
-        // owner / waiters from the wrong task would corrupt the
-        // mutex's view for whoever actually holds it.
-        //
-        // The generic "non-owner" line alone is undebuggable for an
-        // intermittent boot race (release gives no stack). Emit a
-        // raw-serial breadcrumb naming the mutex, its lockdep class,
-        // the task that actually owns it, the bad caller, and the
-        // caller's return address — the same detector pattern that
-        // cracked the #283 spinlock self-deadlock. Additive only:
-        // this does NOT change mutex behaviour, it just makes the
-        // pre-existing fault self-identifying on the next boot.
-        Task* const bad_owner = m->owner;
+        // bad caller is found; release builds log and return
+        // without having mutated m. Kept OUT of the g_sched_lock
+        // region: serial writes + the panic path must not run with
+        // the scheduler lock held. The raw-serial breadcrumb names
+        // the mutex, its lockdep class, the actual owner, the bad
+        // caller and its return address — the detector pattern that
+        // cracked the #283 spinlock self-deadlock.
         const u64 caller_rip = reinterpret_cast<u64>(__builtin_return_address(0));
-        arch::Sti();
         arch::SerialWrite("[sched] MUTEX-NONOWNER m=");
         arch::SerialWriteHex(reinterpret_cast<u64>(m));
         arch::SerialWrite(" class=");
@@ -4677,18 +4882,16 @@ void MutexUnlock(Mutex* m)
         core::DebugPanicOrWarn("sched", "MutexUnlock by non-owner");
         return;
     }
-    m->owner = nullptr;
 
-    // Hand-off: if there's a waiter, wake one AND transfer ownership to it
-    // directly. Without hand-off, a freshly-woken waiter would have to re-
-    // acquire a lock we just cleared, racing against any task that calls
-    // Lock in the gap. Hand-off guarantees FIFO progress.
-    Task* next = WaitQueueWakeOne(&m->waiters);
-    if (next != nullptr)
+    // A non-IRQ-context wake leaves need_resched set so the next
+    // timer tick preempts into the woken waiter; from IRQ context
+    // the dispatcher already re-checks it after EOI. need_resched
+    // is per-CPU, so setting it outside the lock is safe — this
+    // mirrors what the public WaitQueueWakeOne did for us before.
+    if (handed_off)
     {
-        m->owner = next;
+        NeedResched() = true;
     }
-    arch::Sti();
 
     ::duetos::diag::EventTrace(::duetos::diag::kEventMutexRelease, reinterpret_cast<u64>(m), CurrentTaskId());
 }
@@ -4741,9 +4944,14 @@ void CondvarWait(Condvar* cv, Mutex* m)
     // "release with no matching held entry" warnings much later.
     ::duetos::sync::LockdepBeforeRelease(m->class_id);
 
+    // Mutex hand-off + self-enqueue + deschedule under ONE
+    // continuous g_sched_lock hold (see ScheduleLockedHandoff). The
+    // old guard-scope-then-Schedule() shape reopened the SMP
+    // double-run gap that the hand-off was specifically written to
+    // avoid; routing the deschedule through ScheduleLockedHandoff
+    // keeps the whole sequence indivisible from a peer CPU's view.
+    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
     {
-        sync::SpinLockGuard guard(g_sched_lock);
-
         // Atomic mutex hand-off: wake the longest-waiting contender
         // and transfer ownership directly to it. Same FIFO-fairness
         // semantics as MutexUnlock; inlined so no sched_lock
@@ -4770,7 +4978,7 @@ void CondvarWait(Condvar* cv, Mutex* m)
         SchedCpuIncBlocked();
     }
 
-    Schedule();
+    ScheduleLockedHandoff(f);
     // Woken by CondvarSignal / CondvarBroadcast. Interrupts are
     // still disabled; re-enable before re-acquiring the mutex so
     // MutexLock's slow path doesn't run with IF=0 across a
@@ -4812,9 +5020,11 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
     // re-push.
     ::duetos::sync::LockdepBeforeRelease(m->class_id);
 
+    // One continuous g_sched_lock hold across hand-off + dual
+    // enqueue + deschedule, same SMP rationale as CondvarWait /
+    // WaitQueueBlockTimeout.
+    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
     {
-        sync::SpinLockGuard guard(g_sched_lock);
-
         // Atomic mutex hand-off (identical to CondvarWait).
         Task* successor = WaitQueueWakeOneLocked(&m->waiters);
         m->owner = successor;
@@ -4850,7 +5060,7 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
         SchedCpuIncSleeping();
     }
 
-    Schedule();
+    ScheduleLockedHandoff(f);
     // Woken. Read the timeout flag once — it's only valid for
     // this one wait and will be overwritten on the next block.
     const bool timed_out = Current()->wake_by_timeout;

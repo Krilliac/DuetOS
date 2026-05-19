@@ -115,6 +115,23 @@ drains the slot and releases. Mirrors Linux's `prepare_task_switch`
 / `finish_task_switch`. Closes the SMP race where a peer CPU could
 wake `prev` between an early lock release and the actual stack swap.
 
+**`ScheduleLockedHandoff(flags)`**: the same scheduler step, entered
+with `g_sched_lock` *already held* by the caller. Every blocking
+primitive (`WaitQueueBlock`, `WaitQueueBlockTimeout`,
+`SchedSleepTicks`, `SchedSleepUntil`, `CondvarWait`,
+`CondvarWaitTimeout`, and `MutexLock`'s contended path) acquires the
+lock, marks the caller Blocked/Sleeping + enqueues it, then calls
+this — so "decide to wait" and "actually leave the CPU" are one
+indivisible region. The previous `{ SpinLockGuard g(g_sched_lock);
+enqueue; } Schedule();` shape reopened a gap (lock dropped before
+`Schedule()` re-acquired) that a peer-CPU waker could exploit to
+dispatch a not-yet-descheduled task on a second CPU. The AP boot
+sentinel is created `no_requeue` (never `RunqueueOrSuspendPush`-ed —
+its `rsp`/`stack_base` are placeholders) and per-CPU idle tasks are
+affinity-pinned to their owning CPU. A residual heavy-churn SMP
+double-run remains — see the Roadmap entry "SMP task double-run
+under heavy scheduler churn".
+
 **Work-stealing**: when `RunqueuePopRunnable` finds the local
 runqueue empty, `StealNormalFromPeer` walks peer CPUs round-robin
 (starting from `cpu_id+1`) and lifts the head of the first non-empty

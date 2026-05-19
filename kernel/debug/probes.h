@@ -107,6 +107,21 @@ enum class ProbeId : u8
                           // (or an absence we hadn't catalogued — QEMU's
                           // `-vga std` legitimately can't satisfy this) is
                           // a single sentinel line + the recorded value.
+    kCurrentCpuGsbaseFallback, // cpu::CurrentCpu() saw a non-kernel GSBASE
+                          // in a kernel context on a NON-BSP CPU and had to
+                          // resolve the real PerCpu via the LAPIC ID. The
+                          // pre-fix code silently returned the BSP slot here,
+                          // mis-attributing an AP to the BSP — the per-CPU
+                          // state corruption behind the intermittent SMP
+                          // double-run (MUTEX-NONOWNER / spinlock
+                          // release-out-of-order under gui-fuzz). Recovered
+                          // (the LAPIC resolves the correct CPU) but a fire
+                          // still marks a swapgs / AP-GS-reestablishment gap
+                          // worth catching: a clean SMP boot hits this
+                          // rarely; a flood is an entry-stub swapgs
+                          // regression. Caller passes the LAPIC ID as
+                          // `value`. ArmedLog so an attached GDB can
+                          // `b duetos::debug::ProbeFire`.
 
     // Medium-frequency events — disarmed by default, the
     // operator arms these when hunting a specific issue.

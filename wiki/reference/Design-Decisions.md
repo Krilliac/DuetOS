@@ -9519,3 +9519,62 @@ It also corrects an over-promise made in the slices 1–2 docs.
 - **Related roadmap track(s):** refactor backlog "split oversized
   TUs" — partially resolved (3 closed as cohesive; 2 deferred to
   dedicated sessions with the seam analysis above as the brief).
+
+## 2026-05-19 — AP per-CPU register state is established AFTER segment/IDT load, and `CurrentCpu()` never assumes BSP
+
+The intermittent SMP "task double-run" (`MUTEX-NONOWNER` /
+`sync/spinlock release-out-of-order` under `gui-fuzz.sh 18` on
+4 CPUs) and the silent AP-bring-up triple fault were one root cause
+in two parts, both on the AP bring-up path:
+
+1. **GSBASE was programmed before the GDT load, not after.**
+   `LoadGdtForCurrent`'s `mov %ax, %gs` reloads GS's hidden base
+   from the kernel-data descriptor (base 0) — it ZEROES
+   `IA32_GS_BASE` as a side effect. `ApEntryFromTrampoline` wrote
+   the AP's per-CPU pointer *before* that, so it was dead on
+   arrival and every `cpu::CurrentCpu()` on the AP saw GSBASE=0.
+2. **`cpu::CurrentCpu()` "fell back to the BSP slot" for a
+   non-kernel GSBASE.** Correct single-CPU; on SMP it silently
+   mis-attributed an AP to the BSP, so the AP read/wrote the BSP's
+   `current_task`, `ctxsw_lock_to_release` lock-pass slot, per-CPU
+   runqueue, and the `g_per_cpu[0]` lockdep held-stack alias — the
+   cross-CPU corruption behind every observed symptom.
+3. **APs never executed `lidt`.** IDTR is per-CPU; the trampoline
+   only loads a transition GDT and `IdtInit` lidt'd only the BSP.
+   The first timer tick on an AP #GP'd reading a bogus gate ->
+   #DF -> triple fault, silent on serial (looked like a hang).
+
+**Decisions (rule out the alternatives):**
+
+- The kernel per-CPU MSR pair (`IA32_GS_BASE` /
+  `IA32_KERNEL_GS_BASE`) is established **after** `LoadGdtForCurrent`
+  on every CPU that loads a GDT, mirroring the BSP (`PerCpuInitBsp`
+  writes GSBASE after `GdtInit`). Writing it before a segment
+  reload is rejected: the reload clobbers it.
+- `cpu::CurrentCpu()`, when GSBASE is non-kernel, resolves the
+  **real** CPU via the hardware-authoritative LAPIC ID, never by
+  assuming BSP. The "assume BSP" shortcut is rejected for SMP: a
+  wrong-but-kernel-looking PerCpu is worse than a fault because it
+  corrupts silently. A gated `kCurrentCpuGsbaseFallback` probe +
+  `OnTimerTick` count sentinel turns any future swapgs/AP-GS
+  regression into a single WARN + probe instead of silent
+  corruption (clean boot stays at zero).
+- IDTR is per-CPU: every CPU that runs kernel code must `lidt`
+  the shared global IDT during its own bring-up
+  (`IdtLoadForCurrent()`), after its GDT load and before it
+  unmasks interrupts. Sharing the *table* does not share the
+  *register*.
+
+**Verified:** 6/6 clean `tools/qemu/gui-fuzz.sh 18` SMP runs
+(complete, ~11k–13k iters, no crash signature) + a 6-boot
+determinism sweep (all 3 APs join every boot, byte-stable,
+zero panic / triple-fault / GSBASE fallback). Plain SMP boot now
+runs steady-state past AP bring-up (previously triple-faulted
+~t=500 ms). qemu.log `-d int,cpu_reset` shows no exception
+escalation.
+
+**Related roadmap track(s):** deleted "SMP task double-run under
+heavy scheduler churn"; updated "Lockdep held-set must be
+per-task" (the SMP `release out-of-order` symptom was this root,
+now resolved; the spinlock-vs-mutex held-stack split remains as
+architectural cleanup with no live failure).

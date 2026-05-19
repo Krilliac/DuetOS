@@ -93,6 +93,26 @@ void IdtInit()
     KLOG_INFO_V("arch/idt", "lidt loaded, base=", g_idt_pointer.base);
 }
 
+void IdtLoadForCurrent()
+{
+    // IDTR is a per-CPU register; the IDT *contents* (g_idt) are
+    // global and were populated once by the BSP's IdtInit (which
+    // runs in early boot, long before SMP bring-up). Each AP must
+    // still execute its own `lidt` so its IDTR points at the shared
+    // table — without this an AP runs with whatever IDTR the SMP
+    // trampoline left (effectively none), and the first interrupt
+    // it takes (the LAPIC timer tick after the idle loop's `sti`)
+    // #GPs reading a bogus gate -> #DF -> triple fault. That was the
+    // silent AP-bring-up triple fault (qemu.log: v=0d e=0102 ->
+    // v=08 -> Triple fault at SchedEnterOnAp's MWAIT idle loop) the
+    // double-run crash + GSBASE mis-attribution previously masked.
+    // Must be called AFTER LoadGdtForCurrent so the gate selectors
+    // (CS = kKernelCodeSelector) resolve in the AP's active GDT, and
+    // BEFORE the AP enables its LAPIC / unmasks interrupts.
+    KASSERT(g_idt_pointer.base != 0, "arch/idt", "IdtLoadForCurrent before IdtInit");
+    asm volatile("lidt %0" : : "m"(g_idt_pointer) : "memory");
+}
+
 void IdtSetGate(u8 vector, u64 handler)
 {
     // Reject a null handler — silently installing one would turn every
