@@ -1,0 +1,57 @@
+// WHP partition + virtual-processor lifecycle, thin RAII over the
+// Windows Hypervisor Platform C API. No DuetOS specifics here — this
+// is a reusable hypervisor handle.
+#pragma once
+
+#include <windows.h>
+#include <WinHvPlatform.h>
+
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+
+namespace duetos::vmm
+{
+
+// Throws std::runtime_error with a decoded message on FAILED(hr).
+void ThrowIfFailed(HRESULT hr, const char* what);
+
+// Returns true iff the Windows hypervisor is present and WHP is usable.
+// Call before constructing a Partition so the failure is a clean
+// diagnostic, not a deep WHvCreatePartition error.
+bool HypervisorPresent();
+
+class Partition
+{
+public:
+    // Creates + sets up a partition with `cpuCount` vCPUs and the
+    // local-APIC emulation mode required for timer/IRQ delivery.
+    explicit Partition(uint32_t cpuCount);
+    ~Partition();
+
+    Partition(const Partition&) = delete;
+    Partition& operator=(const Partition&) = delete;
+
+    WHV_PARTITION_HANDLE handle() const { return m_handle; }
+
+    // Maps `bytes` of host memory at `hostBase` into the guest physical
+    // address space at `gpa`, read/write/execute.
+    void MapGpaRange(void* hostBase, uint64_t gpa, uint64_t bytes);
+
+    // Register get/set for vCPU 0 (single-vCPU v0; index is explicit so
+    // SMP slices can widen it without an API change).
+    void GetRegisters(uint32_t vp, const WHV_REGISTER_NAME* names,
+                       uint32_t count, WHV_REGISTER_VALUE* out) const;
+    void SetRegisters(uint32_t vp, const WHV_REGISTER_NAME* names,
+                      uint32_t count, const WHV_REGISTER_VALUE* in);
+
+    // Runs vCPU `vp` until the next exit. Caller dispatches on
+    // exit.ExitReason.
+    WHV_RUN_VP_EXIT_CONTEXT Run(uint32_t vp);
+
+private:
+    WHV_PARTITION_HANDLE m_handle = nullptr;
+    uint32_t             m_cpuCount = 0;
+};
+
+} // namespace duetos::vmm
