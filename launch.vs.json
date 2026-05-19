@@ -54,6 +54,38 @@
         { "text": "set print pretty on", "ignoreFailures": true },
         { "text": "set confirm off", "ignoreFailures": true }
       ]
+    },
+    {
+      // Attach to the bespoke in-house VMM (tools/vmm) instead of
+      // QEMU. The VMM is a native Windows .exe; run it with the
+      // host-side GDB stub enabled:
+      //
+      //   duetos-vmm.exe --kernel build\x86_64-debug\kernel\
+      //       duetos-kernel.elf --gdb 1234
+      //
+      // It stops before the first guest instruction (like QEMU -S),
+      // so this config uses stopAtConnect:true — set kernel
+      // breakpoints, then continue. The stub serves the amd64 core
+      // register set + memory via the guest page tables, so normal
+      // source-level stepping works against duetos-kernel.elf's
+      // DWARF. Point miDebuggerPath at a gdb that can reach the
+      // VMM's localhost port (a Windows/MSYS2 gdb when the VMM runs
+      // on the Windows host; the WSL /usr/bin/gdb when both sides
+      // are inside WSL2).
+      "type": "cppdbg",
+      "name": "DuetOS: Attach (in-house VMM, tcp:1234)",
+      "project": "CMakeLists.txt",
+      "program": "${workspaceRoot}/build/x86_64-debug/kernel/duetos-kernel.elf",
+      "cwd": "${workspaceRoot}",
+      "MIMode": "gdb",
+      "miDebuggerPath": "/usr/bin/gdb",
+      "miDebuggerServerAddress": "localhost:1234",
+      "stopAtConnect": true,
+      "externalConsole": false,
+      "setupCommands": [
+        { "text": "set confirm off", "ignoreFailures": true },
+        { "text": "set print pretty on", "ignoreFailures": true }
+      ]
     }
   ]
 }

@@ -26,7 +26,8 @@ bool HypervisorPresent()
     return SUCCEEDED(hr) && written == sizeof(present) && present;
 }
 
-Partition::Partition(uint32_t cpuCount) : m_cpuCount(cpuCount)
+Partition::Partition(uint32_t cpuCount, bool debugExits)
+    : m_cpuCount(cpuCount)
 {
     ThrowIfFailed(WHvCreatePartition(&m_handle), "WHvCreatePartition");
 
@@ -36,6 +37,25 @@ Partition::Partition(uint32_t cpuCount) : m_cpuCount(cpuCount)
                       m_handle, WHvPartitionPropertyCodeProcessorCount,
                       &prop, sizeof(prop)),
                   "SetPartitionProperty(ProcessorCount)");
+
+    if (debugExits)
+    {
+        WHV_PARTITION_PROPERTY ex = {};
+        ex.ExtendedVmExits.ExceptionExit = 1;
+        ThrowIfFailed(WHvSetPartitionProperty(
+                          m_handle,
+                          WHvPartitionPropertyCodeExtendedVmExits,
+                          &ex, sizeof(ex)),
+                      "SetPartitionProperty(ExtendedVmExits)");
+        WHV_PARTITION_PROPERTY bm = {};
+        bm.ExceptionExitBitmap =
+            (1u << 1) | (1u << 3); // #DB (single-step), #BP (int3)
+        ThrowIfFailed(WHvSetPartitionProperty(
+                          m_handle,
+                          WHvPartitionPropertyCodeExceptionExitBitmap,
+                          &bm, sizeof(bm)),
+                      "SetPartitionProperty(ExceptionExitBitmap)");
+    }
 
     // Built-in xAPIC emulation: needed so the guest's LAPIC timer / IPI
     // path works without us emulating the whole APIC by hand. Slice 2
@@ -163,6 +183,23 @@ void Partition::SetRip(uint32_t vp, uint64_t rip)
     WHV_REGISTER_VALUE v = {};
     v.Reg64 = rip;
     SetRegisters(vp, &n, 1, &v);
+}
+
+bool Partition::TranslateGva(uint32_t vp, uint64_t gva,
+                             uint64_t& gpa) const
+{
+    WHV_TRANSLATE_GVA_RESULT res = {};
+    WHV_GUEST_PHYSICAL_ADDRESS out = 0;
+    HRESULT hr = WHvTranslateGva(m_handle, vp, gva,
+                                 WHvTranslateGvaFlagValidateRead,
+                                 &res, &out);
+    if (FAILED(hr) || res.ResultCode != WHvTranslateGvaResultSuccess)
+    {
+        return false;
+    }
+    // WHP returns the page base; preserve the intra-page offset.
+    gpa = (out & ~uint64_t(0xFFF)) | (gva & 0xFFF);
+    return true;
 }
 
 } // namespace duetos::vmm

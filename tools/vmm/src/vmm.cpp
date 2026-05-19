@@ -22,7 +22,9 @@ uint64_t Align2M(uint64_t x) { return (x + 0x1FFFFF) & ~uint64_t(0x1FFFFF); }
 constexpr uint32_t kBspApicId = 0;
 } // namespace
 
-Vmm::Vmm(VmConfig cfg) : m_cfg(std::move(cfg)), m_part(/*cpuCount=*/1)
+Vmm::Vmm(VmConfig cfg)
+    : m_cfg(std::move(cfg)),
+      m_part(/*cpuCount=*/1, /*debugExits=*/m_cfg.gdbPort != 0)
 {
     m_mem = std::make_unique<GuestMemory>(m_part, m_cfg.ramBytes);
 
@@ -58,6 +60,60 @@ Vmm::Vmm(VmConfig cfg) : m_cfg(std::move(cfg)), m_part(/*cpuCount=*/1)
         });
 
     SetupVcpu(img.entry, kMbInfoGpa);
+
+    if (m_cfg.gdbPort != 0)
+    {
+        m_gdb = std::make_unique<GdbServer>(m_part, *m_mem,
+                                            m_cfg.gdbPort);
+    }
+}
+
+void Vmm::SetTrapFlag(bool on)
+{
+    WHV_REGISTER_NAME n = WHvX64RegisterRflags;
+    WHV_REGISTER_VALUE v = {};
+    m_part.GetRegisters(0, &n, 1, &v);
+    if (on)
+    {
+        v.Reg64 |= (1ull << 8);  // EFLAGS.TF
+    }
+    else
+    {
+        v.Reg64 &= ~(1ull << 8);
+    }
+    m_part.SetRegisters(0, &n, 1, &v);
+}
+
+bool Vmm::ApplyResume(GdbServer::Resume r)
+{
+    switch (r)
+    {
+    case GdbServer::Resume::Detach:
+        m_gdb.reset();
+        SetTrapFlag(false);
+        return false;
+    case GdbServer::Resume::Step:
+        if (m_gdb->RipAtBreakpoint(0))
+        {
+            m_gdb->StepOffBegin(0); // lift the 0xCC under RIP
+        }
+        SetTrapFlag(true);
+        return true;
+    case GdbServer::Resume::Continue:
+    default:
+        if (m_gdb->RipAtBreakpoint(0))
+        {
+            // Single-step off the planted 0xCC, then free-run.
+            m_gdb->StepOffBegin(0);
+            m_continueAfterStepOff = true;
+            SetTrapFlag(true);
+        }
+        else
+        {
+            SetTrapFlag(false);
+        }
+        return true;
+    }
 }
 
 Vmm::~Vmm()
@@ -256,6 +312,14 @@ int Vmm::Run()
     std::fflush(stdout);
     StartHelperThreads();
 
+    if (m_gdb)
+    {
+        // Stop before the first instruction so the client can plant
+        // boot breakpoints (matches the QEMU `-S` flow VS expects).
+        m_gdb->WaitForConnection();
+        ApplyResume(m_gdb->ServeStopped(5));
+    }
+
     uint64_t haltSpins = 0;
     for (;;)
     {
@@ -301,6 +365,46 @@ int Vmm::Run()
                     std::chrono::milliseconds(1));
             }
             break;
+
+        case WHvRunVpExitReasonException:
+        {
+            const uint8_t et = exit.VpException.ExceptionType;
+            if (!m_gdb)
+            {
+                std::printf("\n[vmm] exception %u with no debugger "
+                            "rip=0x%llx\n",
+                            et,
+                            (unsigned long long)exit.VpContext.Rip);
+                return 1;
+            }
+            SetTrapFlag(false); // the TF single-step has completed
+            const bool wasStepOff = m_gdb->stepOffPending();
+            if (wasStepOff)
+            {
+                m_gdb->StepOffEnd(); // re-plant the lifted 0xCC
+            }
+            if (m_continueAfterStepOff && et == 1)
+            {
+                // Finished stepping off a breakpoint for `continue`.
+                m_continueAfterStepOff = false;
+                ApplyResume(GdbServer::Resume::Continue);
+                haltSpins = 0;
+                break;
+            }
+            // GAP: a #BP not in m_bps is a guest-originated int3
+            // (the kernel's own KBP probes). With a host debugger
+            // attached the host owns #BP, so these surface to the
+            // client as an unexpected SIGTRAP instead of reaching
+            // the kernel handler. Re-injection into the guest needs
+            // the WHP pending-event path — revisit when kernel-probe
+            // coexistence matters; for now run with probes disarmed
+            // while gdb is attached.
+            const int sig = m_gdb->OnException(0, et);
+            const GdbServer::Resume r = m_gdb->ServeStopped(sig);
+            ApplyResume(r); // Detach drops m_gdb and free-runs
+            haltSpins = 0;
+            break;
+        }
 
         case WHvRunVpExitReasonX64InterruptWindow:
             break;

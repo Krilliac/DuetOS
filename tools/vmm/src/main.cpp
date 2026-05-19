@@ -25,11 +25,12 @@
 //
 // SLICE STATUS
 //   Slice 1: partition + vCPU + ELF + MB2/ACPI + COM1.
-//   Slice 2 (this commit): IOAPIC MMIO + PIT (LAPIC-timer
-//   calibration reference + ch0 fallback) + COM1 RX/IRQ4 + HLT
-//   resume + idle watchdog → scheduler runs, interactive shell over
-//   stdin/stdout. Slices 3-5 (GDB-remote, DWARF introspection,
-//   record/replay) follow.
+//   Slice 2: IOAPIC MMIO + PIT + COM1 RX/IRQ4 + HLT resume.
+//   Slice 3 (this commit): host-side GDB remote (--gdb <port>) —
+//   target.xml, g/G, m/M via WHvTranslateGva, Z0/z0 software
+//   breakpoints, c/s with the step-off-breakpoint dance. Visual
+//   Studio attaches via the launch.vs.json "in-house VMM" config.
+//   Slices 4-5 (DWARF introspection, record/replay) follow.
 // ===========================================================================
 #include <cstdio>
 #include <cstring>
@@ -46,7 +47,8 @@ void Usage(const char* argv0)
 {
     std::fprintf(stderr,
                  "usage: %s --kernel <elf> [--mem <MiB>] "
-                 "[--cmdline \"...\"] [--idle <secs>]\n",
+                 "[--cmdline \"...\"] [--idle <secs>] "
+                 "[--gdb <port>]\n",
                  argv0);
 }
 
@@ -84,6 +86,11 @@ int main(int argc, char** argv)
         {
             cfg.idleSecs = static_cast<uint32_t>(
                 std::strtoul(next("--idle"), nullptr, 10));
+        }
+        else if (a == "--gdb")
+        {
+            cfg.gdbPort = static_cast<uint16_t>(
+                std::strtoul(next("--gdb"), nullptr, 10));
         }
         else if (a == "-h" || a == "--help")
         {

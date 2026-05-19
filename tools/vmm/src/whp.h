@@ -26,7 +26,10 @@ class Partition
 public:
     // Creates + sets up a partition with `cpuCount` vCPUs and the
     // local-APIC emulation mode required for timer/IRQ delivery.
-    explicit Partition(uint32_t cpuCount);
+    // When `debugExits` is set, #DB/#BP raise Exception exits so the
+    // GDB stub can own them — left OFF otherwise so the kernel's own
+    // int3-based probes keep trapping into the kernel, not the VMM.
+    Partition(uint32_t cpuCount, bool debugExits);
     ~Partition();
 
     Partition(const Partition&) = delete;
@@ -66,6 +69,11 @@ public:
     void SetGpr(uint32_t vp, uint32_t idx, uint64_t value);
     uint64_t GetRip(uint32_t vp) const;
     void SetRip(uint32_t vp, uint64_t rip);
+
+    // Walks the vCPU's active page tables. Returns true and sets
+    // `gpa` (page offset preserved) on success; false if the GVA is
+    // not mapped — used by the GDB stub's m/M packets.
+    bool TranslateGva(uint32_t vp, uint64_t gva, uint64_t& gpa) const;
 
 private:
     WHV_PARTITION_HANDLE m_handle = nullptr;

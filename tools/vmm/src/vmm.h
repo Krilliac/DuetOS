@@ -9,6 +9,7 @@
 #include <string>
 #include <thread>
 
+#include "debug/gdb_server.h"
 #include "devices/ioapic.h"
 #include "devices/pit8254.h"
 #include "devices/serial16550.h"
@@ -28,6 +29,11 @@ struct VmConfig
     // legitimately silent while waiting at a prompt). Headless/CI
     // runs pass a positive value to bound a wedged boot.
     uint32_t    idleSecs  = 0;
+
+    // TCP port for the host-side GDB stub. 0 = disabled. When set,
+    // the guest stops before the first instruction so the client
+    // can plant boot breakpoints; #DB/#BP exits are enabled.
+    uint16_t    gdbPort   = 0;
 };
 
 // Fixed guest-physical homes for the synthesised firmware blobs.
@@ -51,6 +57,10 @@ private:
     void SetupVcpu(uint64_t entry, uint64_t mbInfoGpa);
     void HandleIoPort(const WHV_RUN_VP_EXIT_CONTEXT& exit);
     void StartHelperThreads();
+    void SetTrapFlag(bool on);
+    // Applies a GDB resume decision (sets/clears TF, handles the
+    // step-off-breakpoint dance). Returns false on detach.
+    bool ApplyResume(GdbServer::Resume r);
 
     VmConfig                       m_cfg;
     Partition                      m_part;
@@ -58,6 +68,9 @@ private:
     Serial16550                    m_com1;
     Pit8254                        m_pit;
     IoApic                         m_ioapic;
+
+    std::unique_ptr<GdbServer> m_gdb;
+    bool                  m_continueAfterStepOff = false;
 
     std::atomic<bool>     m_stop{false};
     std::atomic<uint64_t> m_lastTxNs{0}; // last COM1 output, for watchdog
