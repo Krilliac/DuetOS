@@ -46,10 +46,15 @@ NTFS_RUST := $(FS)/ntfs_rust
 EXT4_RUST := $(FS)/ext4_rust
 NET := $(KERNEL)/net
 NET_PARSERS_RUST := $(NET)/parsers_rust
+IMG_META_RUST := $(UTIL)/img_meta_rust
 
 HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuzz_eapol \
              $(BIN)/fuzz_pe $(BIN)/fuzz_elf $(BIN)/fuzz_gpt $(BIN)/fuzz_fat32 \
-             $(BIN)/fuzz_exfat $(BIN)/fuzz_ntfs $(BIN)/fuzz_ext4 $(BIN)/fuzz_net
+             $(BIN)/fuzz_exfat $(BIN)/fuzz_ntfs $(BIN)/fuzz_ext4 $(BIN)/fuzz_net \
+             $(BIN)/fuzz_deflate $(BIN)/fuzz_gzip $(BIN)/fuzz_zip \
+             $(BIN)/fuzz_bmp $(BIN)/fuzz_tga $(BIN)/fuzz_jpeg $(BIN)/fuzz_png \
+             $(BIN)/fuzz_asn1 $(BIN)/fuzz_x509 $(BIN)/fuzz_fw_pkg \
+             $(BIN)/fuzz_pe_exports $(BIN)/fuzz_vt
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -178,6 +183,95 @@ $(BIN)/fuzz_net: fuzz_net.cpp $(NET)/stack.cpp $(NET)/firewall.cpp \
 		host_shim/net_stubs.cpp host_shim/fs_stubs.cpp \
 		$(BIN)/libduetos_net_parsers_fuzz.a | $(BIN)
 	$(CXX) $(CXXFLAGS) -I $(NET_PARSERS_RUST)/include $^ -o $@
+
+# --- util decompression / container parsers ----------------------
+#
+# Pure functions over a (ptr,len) buffer that consume bytes from
+# inside a PNG IDAT / gzip-initramfs / ZIP on a USB stick. No Rust
+# side; host_shim/core/panic.h + serial.h resolve the only kernel
+# deps. The static output ceilings live in the harness sources.
+$(BIN)/fuzz_deflate: fuzz_deflate.cpp $(UTIL)/deflate.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+$(BIN)/fuzz_gzip: fuzz_gzip.cpp $(UTIL)/gzip.cpp $(UTIL)/deflate.cpp \
+		$(UTIL)/adler32.cpp $(UTIL)/crc32.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+$(BIN)/fuzz_zip: fuzz_zip.cpp $(UTIL)/zip.cpp $(UTIL)/deflate.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# --- image decoders ----------------------------------------------
+#
+# bmp/tga/jpeg/png delegate header validation to the no_std
+# duetos_img_meta Rust crate (rlib + panic=abort staticlib
+# wrapper, same recipe as duetos_exec_meta) so a Rust-side
+# bounds/overflow bug in the header walker also aborts as a
+# libFuzzer crash. The C++ side keeps the heavy decode (zlib /
+# scanline filter / pixel copy).
+$(BIN)/libduetos_img_meta.rlib: $(IMG_META_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_img_meta -O $< -o $@
+
+$(BIN)/libduetos_img_meta_fuzz.a: host_shim/img_meta_fuzz_shim.rs \
+		$(BIN)/libduetos_img_meta.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_img_meta=$(BIN)/libduetos_img_meta.rlib $< -o $@
+
+$(BIN)/fuzz_bmp: fuzz_bmp.cpp $(UTIL)/bmp.cpp \
+		$(BIN)/libduetos_img_meta_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(IMG_META_RUST)/include $^ -o $@
+
+$(BIN)/fuzz_tga: fuzz_tga.cpp $(UTIL)/tga.cpp \
+		$(BIN)/libduetos_img_meta_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(IMG_META_RUST)/include $^ -o $@
+
+$(BIN)/fuzz_jpeg: fuzz_jpeg.cpp $(UTIL)/jpeg.cpp \
+		$(BIN)/libduetos_img_meta_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(IMG_META_RUST)/include $^ -o $@
+
+# PNG pulls the real util/gzip + util/deflate + util/crc32 +
+# util/adler32 — the IDAT zlib stream is exercised for free.
+$(BIN)/fuzz_png: fuzz_png.cpp $(UTIL)/png.cpp $(UTIL)/gzip.cpp \
+		$(UTIL)/deflate.cpp $(UTIL)/adler32.cpp $(UTIL)/crc32.cpp \
+		$(BIN)/libduetos_img_meta_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(IMG_META_RUST)/include $^ -o $@
+
+# --- crypto DER / X.509 ------------------------------------------
+#
+# asn1::Read is a pure TLV walker; x509::Parse sits on top of it.
+# The bytes are DER from a TLS handshake / on-disk cert.
+$(BIN)/fuzz_asn1: fuzz_asn1.cpp $(CRYPTO)/asn1.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# x509.cpp pulls bigint/rsa (RsaPublicKeyFromBE on the parse path,
+# BigIntToBytesBE in the in-TU self-test) — link both.
+$(BIN)/fuzz_x509: fuzz_x509.cpp $(CRYPTO)/x509.cpp $(CRYPTO)/asn1.cpp \
+		$(CRYPTO)/bigint.cpp $(CRYPTO)/rsa.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# --- firmware-package envelope -----------------------------------
+#
+# FwPackageParse validates a 160-byte header + SHA-256 payload
+# digest; the real crypto/sha256 is linked so the digest gate is
+# exercised (host_shim/util/result.h supplies Result).
+$(BIN)/fuzz_fw_pkg: fuzz_fw_pkg.cpp $(LOADER)/firmware_package.cpp \
+		$(CRYPTO)/sha256.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# --- PE export-directory walker ----------------------------------
+#
+# Distinct entry point from the PE loader (fuzz_pe): PeParseExports
+# walks the EAT/ENT/EOT arrays directly on raw file bytes.
+$(BIN)/fuzz_pe_exports: fuzz_pe_exports.cpp $(LOADER)/pe_exports.cpp \
+		$(UTIL)/string.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# --- VT/ANSI terminal escape parser ------------------------------
+#
+# ParserFeed runs the DEC ANSI state machine over a PTY byte
+# stream; util/unicode does the UTF-8 join.
+$(BIN)/fuzz_vt: fuzz_vt.cpp $(UTIL)/vt_parser.cpp $(UTIL)/unicode.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
 
 # Each run-* keeps a persistent corpus and stops after 60 s.
 # run-pe seeds the corpus first (see seeds/gen_pe_seeds.py) so the

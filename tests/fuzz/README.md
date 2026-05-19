@@ -31,6 +31,18 @@ silently drop a parser from coverage.
 | `fuzz_ntfs` | `NtfsProbe` — the NTFS volume parser (`fs/ntfs.cpp` + the no_std `duetos_ntfs` Rust crate: boot sector, MFT record header, $FILE_NAME attribute walk). Same read-only-disk shim + Rust recipe as `fuzz_exfat`. |
 | `fuzz_ext4` | `Ext4Probe` — the ext4 volume parser (`fs/ext4.cpp` + the no_std `duetos_ext4` Rust crate: superblock, group descriptor, inode, extent tree, dir entries). Same read-only-disk shim + Rust recipe; seeded with a real `mkfs.ext4` image so the deep inode/extent/dir walkers are reached. |
 | `fuzz_net` | `NetStackInjectRx` — the L2/L3/L4 ingest chokepoint every NIC driver funnels RX frames through (`net/stack.cpp` + `firewall`/`socket`/`tcp`/`tcp_segment`/`tcp_timer` + the no_std `duetos_net_parsers` Rust DHCP/DNS option walkers): Ethernet → ARP / IPv4 → ICMP / UDP / TCP state machine. The libFuzzer input is the raw frame; seeded with valid ARP / IPv4+ICMP / +UDP / +TCP-SYN frames (correct IP/ICMP checksums). The harness runs `NetStackInit()` once at startup, exactly as kernel boot does, so the ARP/TCP hash buckets carry their empty sentinels (a never-initialised table makes the lookup walkers loop forever — that is a boot-order invariant, not a parser bug). |
+| `fuzz_deflate` | `DeflateInflate(src, src_len, dst, dst_cap)` — the RFC 1951 inflater (`util/deflate.cpp`): stored / fixed-Huffman / dynamic-Huffman bit-stream, Huffman-table build, LZ77 back-reference window. Input is a raw DEFLATE stream (from a PNG IDAT / gzip / ZIP entry). Fixed output ceiling so a decompression bomb can't wedge the run. |
+| `fuzz_gzip` | `GzipInflate` / `ZlibInflate` (`util/gzip.cpp` + `deflate`/`crc32`/`adler32`) — the RFC 1952 / RFC 1950 variable-length header walkers + CRC-32 / Adler-32 tail gates around the inflater. First input byte selects the wrapper so one corpus covers both. |
+| `fuzz_zip` | `ZipOpen` / `ZipReadEntry` / `ZipExtractEntry` (`util/zip.cpp` + `deflate`) — EOCD scan, central-directory walk, local-file-header chase, stored/deflate extraction. Input is a whole in-memory ZIP archive. |
+| `fuzz_bmp` | `BmpParseHeader` (`util/bmp.cpp` + the no_std `duetos_img_meta` Rust crate) — BITMAPFILEHEADER + DIB header (signature, DIB size, dimension cap, top-down flag). Rust linked via the same rlib + panic=abort staticlib recipe as `duetos_exec_meta`. |
+| `fuzz_tga` | `TgaParseHeader` + `TgaDecodeUncompressed` (`util/tga.cpp` + `duetos_img_meta`) — 18-byte Truevision header walk then bounded uncompressed 24/32-bpp pixel copy + bottom-up row flip. |
+| `fuzz_jpeg` | `JpegParseHeader` + `JpegDecode` (`util/jpeg.cpp` + `duetos_img_meta`) — SOI/segment hop to first SOF (Rust), then C++ DHT/DQT/SOS walk + baseline-DCT MCU reconstruction into bounded scratch + pixel buffers. |
+| `fuzz_png` | `PngParseHeader` + `PngDecode` (`util/png.cpp` + `duetos_img_meta` + the real `gzip`/`deflate`/`crc32`/`adler32`) — signature + IHDR + IHDR-CRC (Rust), then IDAT chunk walk, zlib inflate, per-scanline filter unwind. Re-exercises the DEFLATE inflater on PNG-shaped input. |
+| `fuzz_asn1` | `asn1::Read` / `ForEachInSequence` / `IntegerToBytesBE` / `OidEquals` (`crypto/asn1.cpp`) — DER TLV walker: tag + short/long-form length decode, child-overruns-parent check, one level of constructed recursion. Input is DER from a cert / RSA blob. |
+| `fuzz_x509` | `x509::Parse` (`crypto/x509.cpp` + `asn1`/`bigint`/`rsa`) — DER X.509 v3: TBSCertificate, validity, subject CN, RSA SubjectPublicKeyInfo. Sits on the ASN.1 reader along the cert-shaped path. |
+| `fuzz_fw_pkg` | `FwPackageLooksLike` + `FwPackageParse` (`loader/firmware_package.cpp` + the real `crypto/sha256`) — the 160-byte DuetOS firmware envelope (magic/version/family/flags/length + SHA-256 payload digest) wrapping a vendor blob. The digest gate is exercised, not stubbed. |
+| `fuzz_pe_exports` | `PeParseExports` + `PeExportAt` / `PeExportLookupOrdinal` (`loader/pe_exports.cpp` + `util/string`) — IMAGE_EXPORT_DIRECTORY + EAT/ENT/EOT array walk, forwarder classification, name-table binary search. A distinct entry point from the PE loader (`fuzz_pe`). |
+| `fuzz_vt` | `ParserFeed` (`util/vt_parser.cpp` + `util/unicode`) — the DEC ANSI state machine over a PTY byte stream: C0 controls, UTF-8 multi-byte join, bounded CSI param array, bounded OSC string with truncation flag. Non-null no-op callbacks installed so the CSI/OSC dispatch arms are reached. |
 
 `fuzz_pe` links the real no_std `duetos_exec_meta` Rust crate (built as
 an rlib + a panic=abort staticlib wrapper, so a Rust-side overflow/index
@@ -85,11 +97,28 @@ make -C tests/fuzz run-exfat       # seeds the corpus first, then 60 s
 make -C tests/fuzz run-ntfs        # seeds the corpus first, then 60 s
 make -C tests/fuzz run-ext4        # seeds the corpus first, then 60 s
 make -C tests/fuzz run-net         # seeds the corpus first, then 60 s
+make -C tests/fuzz run-deflate     # 60 s (no seed gate — raw bitstream)
+make -C tests/fuzz run-gzip
+make -C tests/fuzz run-zip
+make -C tests/fuzz run-bmp
+make -C tests/fuzz run-tga
+make -C tests/fuzz run-jpeg
+make -C tests/fuzz run-png
+make -C tests/fuzz run-asn1
+make -C tests/fuzz run-x509
+make -C tests/fuzz run-fw_pkg
+make -C tests/fuzz run-pe_exports
+make -C tests/fuzz run-vt
 ```
 
 Each `run-*` target creates `corpus/<name>/` and lets libFuzzer
 populate it with interesting inputs. Re-running picks up where the
-previous run left off (corpus persistence).
+previous run left off (corpus persistence). The single command that
+builds **every** harness and runs them all in parallel — the CI
+gate — is `make -C tests/fuzz fuzz-all` (or
+`tools/test/fuzz-all.sh` directly; `FUZZ_SECONDS` / `FUZZ_JOBS`
+tune the budget). Harnesses with a `seeds/gen_<name>_seeds.py`
+get their corpus pre-seeded; the rest start cold.
 
 ## What the fuzzers will and won't catch
 

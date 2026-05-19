@@ -11,4 +11,8 @@ inline void Panic(const char* /*subsystem*/, const char* /*message*/)
 {
     assert(false);
 }
+inline void PanicWithValue(const char* /*subsystem*/, const char* /*message*/, unsigned long long /*value*/)
+{
+    assert(false);
+}
 } // namespace duetos::core
