@@ -186,19 +186,24 @@ This is what the F5 default sets you up for. One `duetos-vmm.exe` process; two V
 
 The F5 default args already include `--gdb 1234 --break`. So:
 
-1. **VS instance #1** — Open the repo, F5 the `duetos-vmm` target (CMake Open Folder mode). The VMM launches, halts at `__debugbreak()` in `main.cpp`. Native-attach session is live.
+1. **VS instance #1** — Open the **DuetOS repo root** (`C:\Users\natew\source\repos\DuetOS`), F5 the `duetos-vmm` target (CMake Open Folder mode). The VMM launches, halts at `__debugbreak()` in `main.cpp`. Native-attach session is live.
 
 2. From the Immediate window of instance #1, optionally plant any *host-side* C++ breakpoints you want in VMM code, then F5 to continue past the trap.
 
 3. The VMM constructs `Vmm`, calls `Run()`, and blocks at `m_gdb->WaitForConnection()` waiting for a gdb client. (Console shows `[vmm] gdb: waiting for a client on tcp:1234 (VS: F5 the attach config)`.)
 
-4. **VS instance #2** — Open the same repo in a second VS window (`File → New Window`, then `File → Open Folder`). Pick the **"DuetOS: Attach (in-house VMM, tcp:1234)"** launch config. F5.
+4. **VS instance #2** — open a **new VS window** (`File → New Window`), then **`File → Open → Open a Local Folder…`** and pick **`C:\Users\natew\source\repos\DuetOS\tools\vmm`** (NOT the repo root). This loads the VMM's self-contained CMake project — no root-CMake failure, launch dropdown populates cleanly. Wait for "CMake generation finished" in the status bar.
 
-5. Instance #2's gdb attaches, downloads symbols, halts the guest before its first instruction. From here:
+5. In instance #2's toolbar, click the **▾** arrow next to the green Start button. Pick **"DuetOS: Attach (in-house VMM kernel, tcp:1234)"** (defined in [`tools/vmm/launch.vs.json`](../../tools/vmm/launch.vs.json)). F5.
+
+6. Instance #2's gdb attaches, downloads kernel symbols, halts the guest before its first instruction. From here:
    - Click breakpoints in kernel C++ files (instance #2).
    - Inspect or write any guest global via instance #1's Immediate window using `vmm_dbg::*`.
    - F5 instance #2 to run the guest; if a kernel breakpoint fires, instance #2 halts and shows the kernel call stack with full Locals.
    - At the same time, you can Break-All instance #1 to peek at VMM-host state, then continue.
+
+> **Why open `tools/vmm/` not the repo root in instance #2?**
+> The DuetOS repo root's `CMakeLists.txt` is the freestanding kernel's, which intentionally fails to configure on Windows (`clang++ not on PATH`). VS shows "CMake Generation Failed" and can refuse to populate launch entries cleanly. Opening `tools/vmm/` directly bypasses the kernel CMake — its own `CMakeLists.txt` is Windows-MSVC-buildable and configures in under a second. The repo-root `launch.vs.json` also works if you dismiss the CMake error, but `tools/vmm/launch.vs.json` is the recommended clean path.
 
 ### Coordination notes
 
@@ -355,6 +360,19 @@ Path C. F5 instance #1, continue past `--break`, then F5 instance #2's *Attach (
 ---
 
 ## Troubleshooting
+
+### Second VS instance shows "CMake Generation Failed" and the launch dropdown is empty
+
+You opened the **DuetOS repo root** in the second VS. The root `CMakeLists.txt` is the freestanding kernel's — it FATAL_ERRORs on Windows by design (`clang++ not on PATH`). VS may refuse to populate `launch.vs.json` entries until the configure failure is dismissed.
+
+Fix:
+
+1. **Close the second VS instance.**
+2. Open VS again, `File → Open → Open a Local Folder…`, navigate to **`C:\Users\natew\source\repos\DuetOS\tools\vmm`** (the VMM subfolder, NOT the repo root).
+3. VS configures the VMM's own `CMakeLists.txt` cleanly (it's MSVC-buildable). The launch dropdown should now contain **"DuetOS: Attach (in-house VMM kernel, tcp:1234)"** from [`tools/vmm/launch.vs.json`](../../tools/vmm/launch.vs.json).
+4. F5 it. gdb attaches to the running first-instance VMM via tcp:1234.
+
+If you really want to use the repo root in instance #2, you can — just dismiss the yellow CMake-failure banner first, then click the **▾** dropdown arrow next to the green Start button. The launch entries should be there alongside the CMake targets.
 
 ### Watch / Locals / Memory / Call Stack are all empty after F5
 
