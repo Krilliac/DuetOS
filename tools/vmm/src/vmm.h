@@ -12,6 +12,7 @@
 #include "debug/elf_symbols.h"
 #include "debug/exit_trace.h"
 #include "debug/gdb_server.h"
+#include "debug/guest_view.h"
 #include "debug/record.h"
 #include "devices/ioapic.h"
 #include "devices/pit8254.h"
@@ -83,6 +84,13 @@ public:
     void* DbgHostPtr(uint64_t gpa, uint64_t len) const;
     const ElfSymbols::Sym* DbgFindSym(const char* name) const;
     const ElfSymbols& DbgSymbols() const;
+
+    // Typed live view of curated guest kernel globals. Populated
+    // lazily on each guest exit via RefreshGuestView(). Inspect in
+    // the VS Watch window as `vmm.kernel.g_ticks` — the pointer
+    // dereferences directly into WHP-mapped guest RAM, so the value
+    // updates every time you step/resume in the debugger.
+    GuestKernelView kernel;
 
 private:
     void SetupVcpu(uint64_t entry, uint64_t mbInfoGpa);

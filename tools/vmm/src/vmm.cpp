@@ -532,6 +532,7 @@ int Vmm::Run()
         }
         WHV_RUN_VP_EXIT_CONTEXT exit = m_part.Run(0);
         RecordExit(exit);
+        RefreshGuestView(kernel, *this);
         PumpReplay(); // feed recorded inputs due at this exit-seq
         switch (exit.ExitReason)
         {
