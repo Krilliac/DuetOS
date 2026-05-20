@@ -55,7 +55,7 @@
       "program": "${workspaceRoot}/../../build/x86_64-debug/kernel/duetos-kernel.elf",
       "cwd": "${workspaceRoot}/../..",
       "MIMode": "gdb",
-      "miDebuggerPath": "C:/msys64/ucrt64/bin/gdb.exe",
+      "miDebuggerPath": "gdb.exe",
       "miDebuggerServerAddress": "localhost:1234",
       "stopAtConnect": true,
       "externalConsole": false,
