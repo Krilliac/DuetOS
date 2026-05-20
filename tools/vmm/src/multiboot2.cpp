@@ -82,7 +82,17 @@ std::vector<uint8_t> BuildMultiboot2Info(const Mb2Params& p)
         };
         // type 2 = reserved, type 1 = available RAM.
         entry(0, p.reservedEnd, 2);
-        entry(p.reservedEnd, p.ramBytes - p.reservedEnd, 1);
+        if (p.fbAddr != 0)
+        {
+            // Framebuffer sits flush at the top of RAM; mark [fbAddr, ramTop)
+            // reserved so the kernel frame allocator never reclaims it.
+            entry(p.reservedEnd, p.fbAddr - p.reservedEnd, 1);
+            entry(p.fbAddr, p.ramBytes - p.fbAddr, 2);
+        }
+        else
+        {
+            entry(p.reservedEnd, p.ramBytes - p.reservedEnd, 1);
+        }
         EndTag(v, s);
     }
 
@@ -91,6 +101,39 @@ std::vector<uint8_t> BuildMultiboot2Info(const Mb2Params& p)
         size_t s = BeginTag(v, 15);
         v.insert(v.end(), p.rsdp.begin(), p.rsdp.end());
         EndTag(v, s);
+    }
+
+    // --- Tag 8: framebuffer (32bpp direct RGB, BGRA layout) ---
+    // Emitted only when the caller provides a framebuffer address.
+    // Layout: type(4) size(4) addr(8) pitch(4) width(4) height(4)
+    //         bpp(1) fb_type(1) reserved(1)
+    //         red_pos(1) red_size(1) green_pos(1) green_size(1)
+    //         blue_pos(1) blue_size(1)  → 30 bytes payload + 8 header = 38
+    if (p.fbAddr != 0)
+    {
+        size_t base = v.size();
+        Align8(v);
+        base = v.size();
+        Push32(v, 8);   // type
+        Push32(v, 38);  // size (fixed — no variable payload)
+        Push64(v, p.fbAddr);
+        Push32(v, p.fbPitch);
+        Push32(v, p.fbWidth);
+        Push32(v, p.fbHeight);
+        v.push_back(p.fbBpp);
+        v.push_back(1);  // framebuffer_type = direct RGB
+        v.push_back(0);  // reserved
+        // Direct-colour channel descriptors: pos then size for R, G, B.
+        // 32bpp BGRA: blue at bit 0, green at bit 8, red at bit 16.
+        v.push_back(16); // red_field_position
+        v.push_back(8);  // red_mask_size
+        v.push_back(8);  // green_field_position
+        v.push_back(8);  // green_mask_size
+        v.push_back(0);  // blue_field_position
+        v.push_back(8);  // blue_mask_size
+        // Pad to 8-byte boundary so the end tag stays aligned.
+        while ((v.size() - base) % 8 != 0)
+            v.push_back(0);
     }
 
     // --- Tag 0: end ---

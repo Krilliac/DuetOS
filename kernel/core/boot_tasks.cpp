@@ -1995,6 +1995,18 @@ void MouseReaderTask(void*)
         duetos::u32 cx = 0, cy = 0;
         duetos::drivers::video::CursorPosition(&cx, &cy);
 
+        // Topmost window under the cursor. Used twice below — once
+        // by the cursor-shape hit-test (assigned to `over_resize`)
+        // and once by the right-click target lookup (assigned to
+        // `hit`). The window list cannot mutate during this
+        // iteration (we hold the compositor lock acquired above),
+        // so one walk is correct for both. On a debug build with
+        // KASAN this halves the dominant per-packet cost — the
+        // walk is shadow-checked on every pointer chase, and the
+        // ring-3 smoke battery puts 13+ windows on the list.
+        const auto cached_topmost_under_cursor =
+            duetos::drivers::video::WindowTopmostAt(cx, cy);
+
         // Track menu hover. Cheap when no menu is open. When
         // open, this updates the highlighted row so the next
         // compose paints it. `menu_hover_changed` drives the
@@ -2034,7 +2046,7 @@ void MouseReaderTask(void*)
             using duetos::drivers::video::CursorShape;
             using duetos::drivers::video::WindowResizeEdge;
             CursorShape want = CursorShape::Arrow;
-            const auto over_resize = duetos::drivers::video::WindowTopmostAt(cx, cy);
+            const auto over_resize = cached_topmost_under_cursor;
             WindowResizeEdge edge = WindowResizeEdge::None;
             if (over_resize != duetos::drivers::video::kWindowInvalid)
             {
@@ -2119,7 +2131,7 @@ void MouseReaderTask(void*)
             }
             else
             {
-                const auto hit = duetos::drivers::video::WindowTopmostAt(cx, cy);
+                const auto hit = cached_topmost_under_cursor;
                 if (hit != duetos::drivers::video::kWindowInvalid)
                 {
                     const bool in_title = duetos::drivers::video::WindowPointInTitle(hit, cx, cy);

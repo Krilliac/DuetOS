@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 
 #include "whp.h"
 
@@ -37,5 +38,20 @@ public:
 // std::runtime_error on an instruction form outside the scoped set.
 void EmulateMmio(Partition& part, uint32_t vp,
                  const WHV_MEMORY_ACCESS_CONTEXT& mem, MmioDevice& dev);
+
+// Pure decode + apply core (NO WHP dependency — unit-testable). Decodes
+// the supported instruction at `p` (legacy prefixes, optional REX,
+// opcode, ModRM, SIB, displacement, immediate), applies its memory
+// effect against `dev` at `gpa`, and uses `getReg`/`setReg` for the
+// register operand. Returns the TRUE instruction length in bytes:
+// WHP's InstructionByteCount is only the fetch-window size and is NOT
+// reliable for forms its own decoder doesn't recognise (it over-reports
+// 16 for the IOAPIC RMW path), so RIP advance must use this, not `len`.
+// `len` bounds the readable byte window. Throws std::runtime_error on
+// any form outside the supported set.
+uint32_t DecodeAndApplyMmio(
+    const uint8_t* p, uint32_t len, uint64_t gpa, MmioDevice& dev,
+    const std::function<uint64_t(uint32_t)>& getReg,
+    const std::function<void(uint32_t, uint64_t)>& setReg);
 
 } // namespace duetos::vmm

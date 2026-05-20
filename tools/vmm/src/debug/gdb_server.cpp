@@ -334,14 +334,14 @@ GdbServer::Resume GdbServer::ServeStopped(int sig)
         }
         else if (pkt.rfind("qRcmd,", 0) == 0)
         {
-            std::string cmd;
+            std::string rcmd;
             for (size_t i = 6; i + 1 < pkt.size(); i += 2)
             {
-                cmd += static_cast<char>(
+                rcmd += static_cast<char>(
                     (Unhex(pkt[i]) << 4) | Unhex(pkt[i + 1]));
             }
             std::string out =
-                m_monitor ? m_monitor(cmd)
+                m_monitor ? m_monitor(rcmd)
                           : std::string("no introspector\n");
             std::string hexed;
             for (unsigned char ch : out) HexByte(hexed, ch);

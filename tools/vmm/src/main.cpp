@@ -43,6 +43,8 @@
 #include <exception>
 #include <string>
 
+#include <windows.h>
+
 #include "vmm.h"
 #include "whp.h"
 
@@ -54,7 +56,8 @@ void Usage(const char* argv0)
     std::fprintf(stderr,
                  "usage: %s --kernel <elf> [--mem <MiB>] "
                  "[--cmdline \"...\"] [--idle <secs>] "
-                 "[--gdb <port>] [--record <f> | --replay <f>]\n",
+                 "[--gdb <port>] [--record <f> | --replay <f>] "
+                 "[--res WxH] [--no-window]\n",
                  argv0);
 }
 
@@ -106,6 +109,21 @@ int main(int argc, char** argv)
         {
             cfg.replayPath = next("--replay");
         }
+        else if (a == "--res")
+        {
+            const char* v = next("--res");
+            if (std::sscanf(v, "%ux%u", &cfg.fbW, &cfg.fbH) != 2 ||
+                cfg.fbW == 0 || cfg.fbH == 0)
+            {
+                std::fprintf(stderr,
+                             "--res requires WxH (e.g. 1280x1024)\n");
+                return 2;
+            }
+        }
+        else if (a == "--no-window")
+        {
+            cfg.noWindow = true;
+        }
         else if (a == "-h" || a == "--help")
         {
             Usage(argv[0]);
@@ -123,6 +141,20 @@ int main(int argc, char** argv)
     {
         Usage(argv[0]);
         return 2;
+    }
+
+    // If no explicit --res was given and we are not headless, query the
+    // primary monitor. Fall back to 1280x1024 if the API returns 0
+    // (e.g. running in a service/session-0 context with no display).
+    if (!cfg.noWindow && cfg.fbW == 0)
+    {
+        cfg.fbW = static_cast<uint32_t>(GetSystemMetrics(SM_CXSCREEN));
+        cfg.fbH = static_cast<uint32_t>(GetSystemMetrics(SM_CYSCREEN));
+        if (cfg.fbW == 0 || cfg.fbH == 0)
+        {
+            cfg.fbW = 1280;
+            cfg.fbH = 1024;
+        }
     }
     if (!cfg.recordPath.empty() && !cfg.replayPath.empty())
     {

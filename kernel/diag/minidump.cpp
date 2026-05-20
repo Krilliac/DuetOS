@@ -181,9 +181,10 @@ bool ReadableKernelAddr(u64 va)
 
 // Read up to `n` bytes from `va` into `dst`. Returns the count
 // actually safe-to-read (probed via SnapshotPageWalk per page).
-// Bytes that fall in unmapped pages are zero-filled in `dst`
-// but still counted toward the length so the offset math in
-// the dump stays predictable.
+// Bytes that fall in unmapped pages — OR in user-mode pages a
+// kernel-mode load couldn't reach under SMAP — are zero-filled
+// in `dst` but still counted toward the length so the offset
+// math in the dump stays predictable.
 u64 SafeReadInto(u64 va, u8* dst, u64 n)
 {
     u64 i = 0;
@@ -195,9 +196,26 @@ u64 SafeReadInto(u64 va, u8* dst, u64 n)
         const bool present = walk.stop == ::duetos::mm::PageWalkStop::FourKiB ||
                              walk.stop == ::duetos::mm::PageWalkStop::TwoMiB ||
                              walk.stop == ::duetos::mm::PageWalkStop::OneGiB;
+        // SMAP: a kernel-mode load from a US-bit-set page #PFs even
+        // when the page IS present. The `< 0x40000000` arm of
+        // ReadableKernelAddr is for the kernel's low identity map
+        // (ACPI / MMIO / firmware tables) — those entries have US=0
+        // and pass. A user task that #PF'd in the same VA range
+        // (e.g. ring3-nx-probe at 0x14010000) has US=1 in the leaf
+        // PTE; reading it from this kernel-side capture path would
+        // re-enter the trap handler mid-dump and cascade-panic.
+        // Treat user pages as unmapped here — zero-fill — rather
+        // than detour through a STAC window during a panic. If a
+        // future caller really wants user bytes, route through
+        // CopyFromUser (which already STAC/CLAC-gates).
+        const u64 leaf = walk.stop == ::duetos::mm::PageWalkStop::FourKiB ? walk.entry_pt
+                       : walk.stop == ::duetos::mm::PageWalkStop::TwoMiB  ? walk.entry_pd
+                       : walk.stop == ::duetos::mm::PageWalkStop::OneGiB  ? walk.entry_pdpt
+                                                                          : 0ULL;
+        const bool user_page = (leaf & (1ULL << 2)) != 0;
         const u64 in_page = 0x1000 - (cur & 0xFFFULL);
         const u64 chunk = (in_page < (n - i)) ? in_page : (n - i);
-        if (present && ReadableKernelAddr(cur))
+        if (present && !user_page && ReadableKernelAddr(cur))
         {
             const u8* src = reinterpret_cast<const u8*>(cur);
             for (u64 j = 0; j < chunk; ++j)
