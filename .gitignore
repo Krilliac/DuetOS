@@ -17,6 +17,7 @@
 # fix.)
 /build/
 /build-*/
+/tools/vmm/build/
 out/
 cmake-build-*/
 
@@ -189,3 +190,4 @@ localdev.ps1
 *.rar
 
 # End of DuetOS .gitignore
+/docs/example-boot-log-debug.txt

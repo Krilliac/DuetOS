@@ -1,11 +1,33 @@
 #include "display/window.h"
 #include <windows.h>
 #include <windowsx.h>
+#include <chrono>
 #include <cstring>
 
 namespace duetos::vmm
 {
 static FbWindow* g_self = nullptr; // one VMM window per process
+
+// PS/2 mouse motion coalescing window. Real PS/2 hardware delivers
+// packets at ~40 Hz; modern hosts emit WM_MOUSEMOVE at 60-240 Hz
+// matching their pointer polling rate. Pushing a 3-byte packet per
+// Win32 event saturates the kernel's mouse-reader on a debug build
+// (see the runaway-cpu / ring-full / soft-lockup chain we saw on
+// 2026-05-19). Coalesce by accumulating dx/dy and only emitting on
+// a button/wheel transition or once this many milliseconds have
+// elapsed since the last emit.
+//
+// We deliberately throttle BELOW the PS/2 hardware rate (40 Hz) on
+// debug builds — the kernel's per-packet dispatch + cursor update
+// path on a software-FB Clang/UBSan/KASAN build costs ~25 ms per
+// packet, so at 40 Hz mouse-reader saturates (98% of scheduler
+// budget) and the compositor is left with no cycles to redraw
+// (the "1 frame per 30 s" symptom from 2026-05-19 testing). 100 ms
+// (10 Hz) leaves the compositor and other tasks comfortable headroom.
+// Cursor lag is ~100 ms behind physical motion — fine for dev use.
+constexpr int kMouseCoalesceMs = 100; // 10 Hz — sub-PS/2 cadence
+                                      // matched to the debug
+                                      // build's per-packet cost
 
 static uint32_t MouseButtons(WPARAM w)
 {
@@ -20,6 +42,15 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     FbWindow* s = g_self;
     static int lastX = -1, lastY = -1;
+    // Coalesced PS/2 motion state — accumulates dx/dy across
+    // WM_MOUSEMOVE events, flushes at kMouseCoalesceMs cadence OR
+    // immediately on a button transition (so click position
+    // matches release timing). See note at file scope.
+    static int      accumDx     = 0;
+    static int      accumDy     = 0;
+    static uint32_t lastButtons = 0;
+    using mouseClock = std::chrono::steady_clock;
+    static auto     lastEmit    = mouseClock::now();
     switch (m)
     {
     case WM_TIMER:
@@ -53,20 +84,65 @@ static LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l)
     {
         int x = GET_X_LPARAM(l), y = GET_Y_LPARAM(l);
         if (lastX < 0) { lastX = x; lastY = y; }
-        if (s) s->Sink().onMouse(x - lastX, y - lastY,
-                                 MouseButtons(w), 0);
+        accumDx += x - lastX;
+        accumDy += y - lastY;
         lastX = x; lastY = y;
+
+        const uint32_t btns = MouseButtons(w);
+        const bool     btnChanged = (btns != lastButtons);
+        const auto     now = mouseClock::now();
+        const auto     elapsedMs = std::chrono::duration_cast<
+            std::chrono::milliseconds>(now - lastEmit).count();
+
+        // Flush on either: cadence boundary (and there's motion to
+        // emit) OR a button state transition (must emit immediately
+        // so click position lines up with the user's intent).
+        if (btnChanged ||
+            (elapsedMs >= kMouseCoalesceMs && (accumDx || accumDy)))
+        {
+            if (s) s->Sink().onMouse(accumDx, accumDy, btns, 0);
+            accumDx = 0; accumDy = 0;
+            lastButtons = btns;
+            lastEmit = now;
+        }
         return 0;
     }
     case WM_LBUTTONDOWN: case WM_LBUTTONUP:
     case WM_RBUTTONDOWN: case WM_RBUTTONUP:
     case WM_MBUTTONDOWN: case WM_MBUTTONUP:
-        if (s) s->Sink().onMouse(0, 0, MouseButtons(w), 0);
+    {
+        // Flush any pending motion so the click delta arrives with
+        // the button transition (not in a stale frame after it).
+        const uint32_t btns = MouseButtons(w);
+        if (s) s->Sink().onMouse(accumDx, accumDy, btns, 0);
+        accumDx = 0; accumDy = 0;
+        lastButtons = btns;
+        lastEmit = mouseClock::now();
         return 0;
+    }
     case WM_MOUSEWHEEL:
-        if (s) s->Sink().onMouse(0, 0, MouseButtons(GET_KEYSTATE_WPARAM(w)),
-                                 GET_WHEEL_DELTA_WPARAM(w) / WHEEL_DELTA);
+    {
+        const uint32_t btns = MouseButtons(GET_KEYSTATE_WPARAM(w));
+        const int      wheel = GET_WHEEL_DELTA_WPARAM(w) / WHEEL_DELTA;
+        if (s) s->Sink().onMouse(accumDx, accumDy, btns, wheel);
+        accumDx = 0; accumDy = 0;
+        lastButtons = btns;
+        lastEmit = mouseClock::now();
         return 0;
+    }
+    case WM_SETCURSOR:
+        // Hide the host cursor while it's over the framebuffer
+        // client area — the guest draws its own software cursor,
+        // and two overlapping arrows is visually confusing. The
+        // non-client frame (titlebar, resize edges) keeps the
+        // default cursor so the operator can still drag / resize
+        // the window normally.
+        if (LOWORD(l) == HTCLIENT)
+        {
+            SetCursor(nullptr);
+            return TRUE;
+        }
+        break; // fall through to DefWindowProcW for non-client
     case WM_CLOSE:
         if (s) s->FireClose();
         DestroyWindow(h);
