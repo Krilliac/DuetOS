@@ -82,4 +82,70 @@ struct Resolver
 
 void SetTestResolver(Resolver* r);
 
+// ---------------------------------------------------------------------------
+// Layer C — Host-attach session control (Immediate-window entrypoints).
+//
+// These functions let the developer claim exclusive ownership of the VMM's
+// exception-exit path from a Visual Studio native-debugger session, plant
+// software breakpoints in the guest kernel, and resume the guest one step
+// or one run at a time.
+//
+// USAGE (VS Immediate window while duetos-vmm.exe is paused):
+//   vmm_dbg::Claim()            // take over from the GDB stub
+//   vmm_dbg::Bp("SchedulerTick") // plant 0xCC at the symbol's GVA
+//   vmm_dbg::Run()              // resume free-run (re-plants all BPs)
+//   vmm_dbg::Step()             // single-step (TF); re-plant on next stop
+//   vmm_dbg::Clr("SchedulerTick") // remove the BP
+//   vmm_dbg::Release()          // hand control back to the GDB stub
+//
+// THREADING
+//   Claim/Release/Bp/Clr are called from the VS Immediate thread while the
+//   vCPU thread is stopped at a native __debugbreak().  They are NOT
+//   re-entrant across threads (the guest is paused; mutual exclusion is
+//   ensured by the stopped atomic).
+//   Step/Run unblock the vCPU thread; do NOT call them from a context where
+//   the vCPU is still running.
+//
+// KNOWN LIMIT
+//   A layer-C BP planted while Claim is active routes to HandleHostStop.
+//   If the user calls Clr() while a BP is still live and then calls
+//   Release(), the 0xCC byte is restored before control returns to the GDB
+//   stub, so the GDB stub will not trip on it.  However, if the user calls
+//   Release() WITHOUT first calling Clr() for every live BP, those bytes
+//   remain 0xCC and the GDB stub will receive the #BP — it will not know
+//   about the shadow entry and may mis-handle the stop.  Best practice:
+//   Clr() all layer-C BPs before Release().
+// ---------------------------------------------------------------------------
+
+// Claim() atomically flips the exception-exit arbiter to host-attach mode.
+// Returns "gdb-or-none" (prior owner was the GDB stub or no debugger) to
+// confirm.  Prints a one-time warning to stderr if IsDebuggerPresent() is
+// false — Claim() in a headless run would cause a hang on the first stop.
+const char* Claim();
+
+// Release() flips the arbiter back.  Returns "host" to confirm the prior
+// owner.  Does NOT automatically clear planted BPs — call Clr() first.
+const char* Release();
+
+// Bp() plants a software breakpoint (0xCC) at the GVA of the named symbol.
+// Uses the same exact→suffix symbol lookup as ReadQ/WriteQ.
+// Returns true if the BP was planted; false if the symbol was not found or
+// its GVA could not be translated.  On failure, outputs a note via
+// OutputDebugStringA (visible in the VS Output window).
+bool Bp(const char* name);
+
+// Clr() removes a layer-C breakpoint planted by Bp(), restoring the
+// original byte.  Returns true if the BP was found and removed.
+bool Clr(const char* name);
+
+// Step() arms single-step (EFLAGS.TF) and unblocks the vCPU for exactly
+// one instruction.  Only acts if g_stop_state.stopped is true.
+// If a layer-C BP sits at the current RIP, it is temporarily lifted (the
+// shadow is kept so it is re-planted on the next stop).
+void Step();
+
+// Run() re-plants all layer-C BPs and unblocks the vCPU for free-run.
+// Only acts if g_stop_state.stopped is true.
+void Run();
+
 } // namespace duetos::vmm::vmm_dbg

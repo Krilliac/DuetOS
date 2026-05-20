@@ -84,6 +84,7 @@ public:
     void* DbgHostPtr(uint64_t gpa, uint64_t len) const;
     const ElfSymbols::Sym* DbgFindSym(const char* name) const;
     const ElfSymbols& DbgSymbols() const;
+    Partition& DbgPartition() { return m_part; }
 
     // Typed live view of curated guest kernel globals. Populated
     // lazily on each guest exit via RefreshGuestView(). Inspect in

@@ -8,6 +8,10 @@
 // The LiveResolver body includes vmm.h (which drags in WHP headers).
 // Gate it so the test binary (VMM_DBG_NO_LIVE) compiles without WHP.
 #ifndef VMM_DBG_NO_LIVE
+#include <map>
+#include <mutex>
+#include <windows.h>
+#include "debug/host_stop.h"
 #include "vmm.h"
 #endif
 
@@ -275,5 +279,244 @@ void SetTestResolver(Resolver* r)
 {
     g_testResolver = r;
 }
+
+// ---------------------------------------------------------------------------
+// Layer C — host-attach session control
+// ---------------------------------------------------------------------------
+
+#ifndef VMM_DBG_NO_LIVE
+
+namespace
+{
+
+// Layer-C breakpoint table: guestVA -> original byte.
+// Independent of GdbServer::m_bps — the two tables coexist and never share
+// entries.  Protected by g_layerCBpsMutex.
+std::map<uint64_t, uint8_t> g_layerCBps;
+std::mutex                  g_layerCBpsMutex;
+
+// Plant a single 0xCC at gva, shadowing the original byte in g_layerCBps.
+// Must be called with g_layerCBpsMutex held (or during single-threaded
+// guest-paused context — the mutex is still taken for correctness).
+void PlantBpAtGva(uint64_t gva)
+{
+    Vmm* v = Vmm::Active();
+    if (!v)
+    {
+        return;
+    }
+    // Already planted — don't clobber the shadow.
+    if (g_layerCBps.count(gva))
+    {
+        return;
+    }
+    uint64_t gpa = 0;
+    if (!v->DbgResolveGpa(gva, gpa))
+    {
+        return;
+    }
+    uint8_t* p = static_cast<uint8_t*>(v->DbgHostPtr(gpa, 1));
+    if (!p)
+    {
+        return;
+    }
+    g_layerCBps[gva] = *p;
+    *p = 0xCC;
+}
+
+// Restore the original byte at gva and remove it from the table.
+// Caller must hold g_layerCBpsMutex.
+void ClearBpAtGva(uint64_t gva)
+{
+    auto it = g_layerCBps.find(gva);
+    if (it == g_layerCBps.end())
+    {
+        return;
+    }
+    Vmm* v = Vmm::Active();
+    if (v)
+    {
+        uint64_t gpa = 0;
+        if (v->DbgResolveGpa(gva, gpa))
+        {
+            uint8_t* p = static_cast<uint8_t*>(v->DbgHostPtr(gpa, 1));
+            if (p)
+            {
+                *p = it->second;
+            }
+        }
+    }
+    g_layerCBps.erase(it);
+}
+
+// Re-plant 0xCC for every entry in the table (used by Run()).
+// Caller must hold g_layerCBpsMutex.
+void ReinsertAllLayerC()
+{
+    Vmm* v = Vmm::Active();
+    if (!v)
+    {
+        return;
+    }
+    for (auto& kv : g_layerCBps)
+    {
+        uint64_t gpa = 0;
+        if (v->DbgResolveGpa(kv.first, gpa))
+        {
+            uint8_t* p = static_cast<uint8_t*>(v->DbgHostPtr(gpa, 1));
+            if (p)
+            {
+                *p = 0xCC;
+            }
+        }
+    }
+}
+
+} // namespace
+
+const char* Claim()
+{
+    // Safety guard: Claim() in a headless run with no debugger attached
+    // would cause the first guest stop to hang forever in the spin-wait.
+    if (!IsDebuggerPresent())
+    {
+        std::fprintf(stderr,
+                     "[vmm/host-stop] WARNING: vmm_dbg::Claim() called "
+                     "without a debugger attached — guest will hang on the "
+                     "first breakpoint stop.  Attach a native debugger "
+                     "before calling Claim().\n");
+        std::fflush(stderr);
+    }
+    bool prev = g_hostAttachOwns.exchange(true, std::memory_order_acq_rel);
+    return prev ? "host" : "gdb-or-none";
+}
+
+const char* Release()
+{
+    bool prev = g_hostAttachOwns.exchange(false, std::memory_order_acq_rel);
+    return prev ? "host" : "gdb-or-none";
+}
+
+bool Bp(const char* name)
+{
+    Resolver* r = ActiveResolver();
+    if (!r)
+    {
+        OutputDebugStringA("vmm_dbg::Bp: no active resolver\n");
+        return false;
+    }
+    uint64_t va = 0, sz = 0;
+    if (!r->FindSym(name, va, sz))
+    {
+        char msg[256];
+        std::snprintf(msg, sizeof(msg),
+                      "vmm_dbg::Bp: symbol not found: %s\n", name);
+        OutputDebugStringA(msg);
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(g_layerCBpsMutex);
+    PlantBpAtGva(va);
+    return g_layerCBps.count(va) != 0;
+}
+
+bool Clr(const char* name)
+{
+    Resolver* r = ActiveResolver();
+    if (!r)
+    {
+        return false;
+    }
+    uint64_t va = 0, sz = 0;
+    if (!r->FindSym(name, va, sz))
+    {
+        return false;
+    }
+    std::lock_guard<std::mutex> lk(g_layerCBpsMutex);
+    if (!g_layerCBps.count(va))
+    {
+        return false;
+    }
+    ClearBpAtGva(va);
+    return true;
+}
+
+void Step()
+{
+    if (!g_stop_state.stopped.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    Vmm* v = Vmm::Active();
+    if (!v)
+    {
+        return;
+    }
+
+    // If a layer-C BP sits at RIP, lift the 0xCC so the instruction can
+    // execute.  Keep the shadow in the table — it is re-planted on next stop
+    // via ReinsertAllLayerC() called from Run().
+    {
+        std::lock_guard<std::mutex> lk(g_layerCBpsMutex);
+        uint64_t rip = g_stop_state.rip;
+        auto     it  = g_layerCBps.find(rip);
+        if (it != g_layerCBps.end())
+        {
+            uint64_t gpa = 0;
+            if (v->DbgResolveGpa(rip, gpa))
+            {
+                uint8_t* p =
+                    static_cast<uint8_t*>(v->DbgHostPtr(gpa, 1));
+                if (p)
+                {
+                    *p = it->second; // restore; keep shadow
+                }
+            }
+        }
+    }
+
+    // Arm EFLAGS.TF for single-step.
+    {
+        WHV_REGISTER_NAME  n = WHvX64RegisterRflags;
+        WHV_REGISTER_VALUE val = {};
+        v->DbgPartition().GetRegisters(0, &n, 1, &val);
+        val.Reg64 |= (1ull << 8); // TF
+        v->DbgPartition().SetRegisters(0, &n, 1, &val);
+    }
+
+    // Unblock the vCPU. TF was armed on the partition above, so the vCPU
+    // thread's next WHvRunVirtualProcessor will single-step and raise #DB,
+    // which re-enters HandleHostStop with reason=1.
+    g_stop_state.stopped.store(false, std::memory_order_release);
+}
+
+void Run()
+{
+    if (!g_stop_state.stopped.load(std::memory_order_acquire))
+    {
+        return;
+    }
+
+    // Re-plant all layer-C BPs before letting the guest run so it hits
+    // them on future passes.
+    {
+        std::lock_guard<std::mutex> lk(g_layerCBpsMutex);
+        ReinsertAllLayerC();
+    }
+
+    // Unblock the vCPU.
+    g_stop_state.stopped.store(false, std::memory_order_release);
+}
+
+#else // VMM_DBG_NO_LIVE — stubs so the test binary links cleanly
+
+const char* Claim()   { return "gdb-or-none"; }
+const char* Release() { return "host"; }
+bool        Bp(const char* /*name*/) { return false; }
+bool        Clr(const char* /*name*/) { return false; }
+void        Step() {}
+void        Run()  {}
+
+#endif // VMM_DBG_NO_LIVE
 
 } // namespace duetos::vmm::vmm_dbg

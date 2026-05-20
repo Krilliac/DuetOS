@@ -69,6 +69,7 @@ add_executable(duetos-vmm
     src/debug/exit_trace.cpp
     src/debug/gdb_server.cpp
     src/debug/guest_view.cpp
+    src/debug/host_stop.cpp
     src/debug/introspect.cpp
     src/debug/record.cpp
     src/debug/vmm_dbg.cpp

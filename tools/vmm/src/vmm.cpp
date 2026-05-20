@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <stdexcept>
 
+#include "debug/host_stop.h"
 #include "debug/vmm_dbg.h"
 
 #include "acpi.h"
@@ -577,6 +578,20 @@ int Vmm::Run()
 
         case WHvRunVpExitReasonException:
         {
+            // Arbiter: if the host-attach session has claimed ownership,
+            // give it first crack.  HandleHostStop returns true for #BP/#DB
+            // and blocks until the host calls Step() or Run().  Any other
+            // exception type returns false, falling through to the GDB stub.
+            if (HostAttachOwnsDebug())
+            {
+                if (HandleHostStop(*this, exit))
+                {
+                    haltSpins = 0;
+                    break;
+                }
+                // Fall through to legacy handling if arbiter declined.
+            }
+
             const uint8_t et = exit.VpException.ExceptionType;
             if (!m_gdb)
             {
@@ -652,6 +667,13 @@ volatile void* const g_vmmDbgKeepalive[] = {
     reinterpret_cast<volatile void*>(&vmm_dbg::WriteB),
     reinterpret_cast<volatile void*>(&vmm_dbg::Sym),
     reinterpret_cast<volatile void*>(&vmm_dbg::Dump),
+    // Layer C — host-attach session control
+    reinterpret_cast<volatile void*>(&vmm_dbg::Claim),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Release),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Bp),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Clr),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Step),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Run),
 };
 } // namespace
 
