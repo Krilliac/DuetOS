@@ -30,7 +30,11 @@ Debugging an OS that runs as a guest under a hypervisor has a fundamental bounda
 - VS 2022 (Community or higher) with the **Desktop development with C++** workload.
 - Windows feature **Windows Hypervisor Platform** enabled (Settings → Optional features → "Windows Hypervisor Platform").
 - The kernel ELF built in WSL via the project's clang preset: `cmake --preset x86_64-debug && cmake --build build/x86_64-debug`. VS cannot build the freestanding kernel; this stays on the Linux side.
-- A **Windows-side gdb** for Path A — MSYS2's `gdb.exe`, MinGW's, or whichever you have on `PATH`. **Not** the WSL `/usr/bin/gdb` — WSL2 cannot reach the Windows host's `localhost`, and the VMM's GDB stub is a Windows-side socket.
+- A **Windows-side gdb** for Path A — on `PATH` so the `"gdb.exe"` placeholder in `launch.vs.json` resolves. **Not** the WSL `/usr/bin/gdb` — WSL2 cannot reach the Windows host's `localhost`, and the VMM's GDB stub is a Windows-side socket. If you don't have one yet, the simplest install (no admin, adds itself to user PATH automatically):
+   ```powershell
+   winget install BrechtSanders.WinLibs.POSIX.UCRT --source winget
+   ```
+   Then **relaunch any open VS** instance so it picks up the new PATH. Alternatives: `scoop install gdb`, `choco install gdb` (admin), or `pacman -S mingw-w64-ucrt-x86_64-gdb` inside MSYS2.
 - Optional: PowerShell helper [`tools/vmm/vs-start-vmm.ps1`](../../tools/vmm/vs-start-vmm.ps1) for orchestrating the WSL kernel build → VMM build → launch chain.
 
 ### Configure VS
@@ -406,7 +410,17 @@ Both the GDB stub's `m`/`M` packets and the bridge's `Bp`/`ReadQ` use `Partition
 
 ### `gdb.exe` not found / can't attach via Path A
 
-The `miDebuggerPath` in `launch.vs.json` must point at a real Windows-side gdb. Common installs: MSYS2 (`C:\msys64\ucrt64\bin\gdb.exe`), MinGW (`C:\mingw-w64\...\bin\gdb.exe`), winlibs builds. **WSL's `/usr/bin/gdb` does not work** — `localhost` from WSL2 doesn't reach the Windows host.
+`launch.vs.json` ships with `"miDebuggerPath": "gdb.exe"` so VS resolves it from your user PATH. If you don't have a Windows gdb installed, run:
+
+```powershell
+winget install BrechtSanders.WinLibs.POSIX.UCRT --source winget
+```
+
+That adds `.../mingw64/bin` to your user PATH automatically. **Relaunch VS** so it inherits the new PATH (a running VS won't see env changes). Alternatives: `scoop install gdb`, `choco install gdb` (admin), or `pacman -S mingw-w64-ucrt-x86_64-gdb` from inside MSYS2.
+
+**WSL's `/usr/bin/gdb` does not work** — `localhost` from WSL2 doesn't reach the Windows host. Must be a native Windows gdb.
+
+If your gdb lives at a non-PATH location, edit `tools/vmm/launch.vs.json` locally (don't commit a user-specific absolute path — keep that change out of git).
 
 ### `[vmm] gdb: bind/listen failed`
 

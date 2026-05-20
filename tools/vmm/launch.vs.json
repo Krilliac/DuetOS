@@ -28,16 +28,23 @@
   //      to localhost:1234, the guest halts pre-first-instruction.
   //      Source-level kernel debugging is now live in this window.
   //
-  // GDB.EXE LOCATION (one-time setup)
-  //   The VMM is a native Windows process so its GDB port is on
-  //   Windows localhost — point miDebuggerPath at a **Windows** gdb,
-  //   NOT WSL's /usr/bin/gdb (WSL2 cannot reach the Windows host via
-  //   localhost). Common installs:
-  //     C:/msys64/ucrt64/bin/gdb.exe        (MSYS2 ucrt64)
-  //     C:/msys64/mingw64/bin/gdb.exe       (MSYS2 mingw64)
-  //     C:/mingw-w64/<...>/bin/gdb.exe      (winlibs / manual)
-  //   Install via:  scoop install gdb   or   choco install gdb
-  //   Edit the miDebuggerPath below to point at your gdb.exe.
+  // GDB.EXE — needs to be a **Windows** gdb on PATH (NOT WSL's
+  // /usr/bin/gdb — WSL2 cannot reach the Windows host via localhost).
+  // miDebuggerPath below is set to bare "gdb.exe" so VS resolves it
+  // from user PATH; that keeps this file portable across machines.
+  //
+  // If you don't have a Windows gdb yet, the simplest install:
+  //   winget install BrechtSanders.WinLibs.POSIX.UCRT --source winget
+  //   (adds .../mingw64/bin to user PATH automatically; relaunch VS)
+  //
+  // Other common installs that put gdb on PATH:
+  //   scoop install gdb
+  //   choco install gdb        (admin)
+  //   pacman -S mingw-w64-ucrt-x86_64-gdb   (inside MSYS2)
+  //
+  // If your gdb isn't on PATH for some reason, edit miDebuggerPath
+  // locally (don't commit a user-specific absolute path — it would
+  // break this file for everyone else who clones the repo).
   //
   // See wiki/tooling/VMM-Debugging.md for the full debugging guide.
   "version": "0.2.1",
