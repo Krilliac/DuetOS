@@ -59,6 +59,7 @@ add_executable(duetos-vmm
     src/multiboot2.cpp
     src/acpi.cpp
     src/mmio_emulator.cpp
+    src/mmio_decode.cpp
     src/devices/serial16550.cpp
     src/devices/pit8254.cpp
     src/devices/ioapic.cpp

@@ -8,10 +8,12 @@ add_executable(vmm-tests
     test_fb_region.cpp
     test_ps2_encode.cpp
     test_i8042.cpp
+    test_mmio_decode.cpp
     ../src/multiboot2.cpp
     ../src/guest_memory_fb.cpp
     ../src/input/ps2_encode.cpp
     ../src/devices/ps2_i8042.cpp
+    ../src/mmio_decode.cpp
 )
 target_include_directories(vmm-tests PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
