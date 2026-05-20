@@ -131,15 +131,23 @@ if(CMAKE_GENERATOR MATCHES "Visual Studio")
     # 2 GiB matches the user's typical VBox config and leaves
     # plenty of headroom for the PE-compat / windowed_hello /
     # ring3-smoke batteries the kernel runs at boot.
-    # --break: bridge-debugger convenience — halt in main() under VS
-    # native attach so the Immediate window is live BEFORE the vCPU
-    # starts running. The user typically continues with
-    # `duetos::vmm::vmm_dbg::Claim()` / `vmm_dbg::Bp("kernel_main")` to
-    # plant guest breakpoints, then F5 again. IsDebuggerPresent() gates
-    # the __debugbreak so a non-VS invocation of the same exe is a no-op.
+    # Two-window-debug default: F5 launches the VMM under the native
+    # debugger with BOTH the host-attach bridge surface AND the GDB
+    # stub enabled. The user gets full coverage by opening a second
+    # VS instance and F5'ing the "DuetOS: Attach (in-house VMM,
+    # tcp:1234)" launch.vs.json config — that one drives kernel-side
+    # source-level debugging via the GDB stub. The two sessions
+    # coexist (vmm_dbg::Claim() defaults off; GDB stub owns exceptions
+    # until the host-attach session explicitly claims).
+    #   --break  : __debugbreak in main() so the native-attach window's
+    #              Immediate is live before the vCPU runs (see wiki).
+    #   --gdb 1234 : open the host-side GDB remote on tcp:1234 for the
+    #              second VS instance to attach.
+    # IsDebuggerPresent() gates the --break trap, so an accidental
+    # plain `duetos-vmm.exe` invocation is a no-op on that flag.
     set_target_properties(duetos-vmm PROPERTIES
         VS_DEBUGGER_COMMAND_ARGUMENTS
-            "--kernel \"${_duetos_kernel_elf}\" --mem 2048 --break"
+            "--kernel \"${_duetos_kernel_elf}\" --mem 2048 --gdb 1234 --break"
         VS_DEBUGGER_WORKING_DIRECTORY
             "${_duetos_repo_root}")
 endif()
