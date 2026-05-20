@@ -34,10 +34,15 @@ namespace duetos::mm
 /// same 16-byte payload slot.
 inline constexpr u64 kHeapAlignment = 16;
 
-/// Initial heap pool size. 2 MiB (= 512 contiguous 4 KiB frames). Generous
-/// for boot-era data structures; far smaller than typical OOM headroom on
-/// any machine that meets our minimums.
-inline constexpr u64 kKernelHeapBytes = 2ULL * 1024 * 1024;
+/// Kernel heap pool size. 64 MiB (= 16384 contiguous 4 KiB frames). The
+/// original 2 MiB sizing was a "boot-era data structures only" budget that
+/// the boot-time self-test battery (ring3-smoke, pe-compat, linux-smoke)
+/// outgrew once the kernel actually runs the full battery on a healthy
+/// boot — `AddressSpaceCreate` alone is 128 KiB per ring-3 task and the
+/// linux-smoke batch queues ~13 tasks (panic site: kernel/mm/kheap.cpp:445
+/// "KMalloc OOM - pool exhausted, request size 0x20080"). 64 MiB leaves
+/// plenty of headroom and is still trivial against any modern minimum.
+inline constexpr u64 kKernelHeapBytes = 64ULL * 1024 * 1024;
 
 struct KernelHeapStats
 {
