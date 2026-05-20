@@ -8,6 +8,7 @@
 #include "acpi.h"
 #include "elf64.h"
 #include "host_clock.h"
+#include "input/ps2_encode.h"
 #include "mmio_emulator.h"
 #include "multiboot2.h"
 
@@ -301,6 +302,7 @@ void Vmm::HandleIoPort(const WHV_RUN_VP_EXIT_CONTEXT& exit)
     const uint16_t port = static_cast<uint16_t>(io.PortNumber);
     const bool isCom1 = m_com1.Handles(port);
     const bool isPit  = m_pit.Handles(port);
+    const bool isPs2  = (port == 0x60 || port == 0x64);
 
     uint64_t rax = io.Rax;
     if (io.AccessInfo.IsWrite)
@@ -317,6 +319,10 @@ void Vmm::HandleIoPort(const WHV_RUN_VP_EXIT_CONTEXT& exit)
         else if (isPit)
         {
             m_pit.Out(port, val);
+        }
+        else if (isPs2)
+        {
+            m_ps2.Out(port, static_cast<uint8_t>(val));
         }
         // Unclaimed port writes are dropped (no bus decoder).
     }
@@ -335,6 +341,10 @@ void Vmm::HandleIoPort(const WHV_RUN_VP_EXIT_CONTEXT& exit)
             {
                 m_log.Put(m_trace.total(), EvKind::Pit2Expire, 0);
             }
+        }
+        else if (isPs2)
+        {
+            val = m_ps2.In(port);
         }
         const uint32_t bytes = io.AccessInfo.AccessSize;
         uint64_t mask = (bytes >= 4) ? 0xFFFFFFFFull
@@ -434,8 +444,17 @@ int Vmm::Run()
     if (!m_cfg.noWindow)
     {
         InputSink sink;
-        sink.onKey   = [](uint32_t, bool, bool) {};
-        sink.onMouse = [](int, int, uint32_t, int) {};
+        sink.onKey = [this](uint32_t vk, bool down, bool ext) {
+            auto s = VkToSet1(vk, down, ext);
+            if (!s.empty())
+            {
+                m_ps2.PushKey(s.data(), s.size());
+            }
+        };
+        sink.onMouse = [this](int dx, int dy, uint32_t btn, int wheel) {
+            auto p = MousePacket(dx, dy, btn, wheel, /*intelliMouse=*/false);
+            m_ps2.PushAux(p.data(), p.size());
+        };
         m_window.Start(m_mem->FramebufferHost(),
                        m_cfg.fbW * 4,
                        m_cfg.fbW, m_cfg.fbH,

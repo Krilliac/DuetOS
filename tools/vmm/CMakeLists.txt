@@ -62,6 +62,8 @@ add_executable(duetos-vmm
     src/devices/serial16550.cpp
     src/devices/pit8254.cpp
     src/devices/ioapic.cpp
+    src/devices/ps2_i8042.cpp
+    src/input/ps2_encode.cpp
     src/debug/gdb_server.cpp
     src/debug/elf_symbols.cpp
     src/debug/exit_trace.cpp

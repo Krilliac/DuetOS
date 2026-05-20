@@ -57,6 +57,7 @@ void Ps2I8042::Out(uint16_t port, uint8_t v)
     case 0xA7: m_cfg |=  0x20; break;                    // disable port 2
     case 0xA8: m_cfg &= ~0x20; break;                    // enable port 2 (unmute aux)
     case 0xAA: m_kbd.push_back(0x55); Refill(); break;   // controller self-test → pass
+    case 0xA9: m_kbd.push_back(0x00); Refill(); break;   // port 2 interface test → pass
     case 0xAB: m_kbd.push_back(0x00); Refill(); break;   // port 1 interface test → pass
     case 0xAD: break;                                     // disable port 1 (no response)
     case 0xAE: break;                                     // enable port 1 (no response)

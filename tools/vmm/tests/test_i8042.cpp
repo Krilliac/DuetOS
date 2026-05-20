@@ -24,6 +24,20 @@ TEST(i8042_self_test_and_kbd_byte_flow)
     CHECK((c.In(0x64) & 0x01) == 0);
 }
 
+// The kernel ps2mouse driver issues 0xA9 (test second PS/2 port) and
+// requires 0x00 (pass) or it concludes "no PS/2 mouse" and never
+// processes AUX bytes — defeating window mouse input. Mirrors the
+// existing 0xAB port-1 test contract.
+TEST(i8042_port2_interface_test_passes)
+{
+    std::vector<uint32_t> irqs;
+    Ps2I8042 c([&](uint32_t i){ irqs.push_back(i); });
+
+    c.Out(0x64, 0xA9);
+    CHECK((c.In(0x64) & 0x01) != 0);     // output buffer full
+    CHECK_EQ((int)c.In(0x60), 0x00);     // 0x00 == port 2 OK
+}
+
 TEST(i8042_aux_routes_to_irq12_and_sets_bit5)
 {
     std::vector<uint32_t> irqs;

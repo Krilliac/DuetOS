@@ -15,6 +15,7 @@
 #include "debug/record.h"
 #include "devices/ioapic.h"
 #include "devices/pit8254.h"
+#include "devices/ps2_i8042.h"
 #include "devices/serial16550.h"
 #include "display/window.h"
 #include "guest_memory.h"
@@ -96,6 +97,7 @@ private:
     Serial16550                    m_com1;
     Pit8254                        m_pit;
     IoApic                         m_ioapic;
+    Ps2I8042                       m_ps2{[this](uint32_t irq) { RaiseGuestLine(irq); }};
 
     std::unique_ptr<GdbServer> m_gdb;
     ElfSymbols            m_symbols;
