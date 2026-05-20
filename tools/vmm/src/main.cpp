@@ -43,6 +43,7 @@
 #include <exception>
 #include <string>
 
+#include <intrin.h>   // __debugbreak (used by --break)
 #include <windows.h>
 
 #include "vmm.h"
@@ -57,7 +58,7 @@ void Usage(const char* argv0)
                  "usage: %s --kernel <elf> [--mem <MiB>] "
                  "[--cmdline \"...\"] [--idle <secs>] "
                  "[--gdb <port>] [--record <f> | --replay <f>] "
-                 "[--res WxH] [--no-window]\n",
+                 "[--res WxH] [--no-window] [--break]\n",
                  argv0);
 }
 
@@ -66,6 +67,17 @@ void Usage(const char* argv0)
 int main(int argc, char** argv)
 {
     duetos::vmm::VmConfig cfg;
+
+    // --break: fire __debugbreak() right after arg-parse, before any
+    // VMM construction. Under VS native F5 attach, this halts the
+    // debugger inside main() — so the Immediate window is live and
+    // the user can plant guest breakpoints (e.g.
+    // duetos::vmm::vmm_dbg::Claim();
+    // duetos::vmm::vmm_dbg::Bp("kernel_main");) before continuing.
+    // Outside a debugger (headless / CI), the flag is a no-op —
+    // IsDebuggerPresent() guards the trap, so an accidentally
+    // baked-in --break never crashes a script run.
+    bool breakAtStart = false;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -124,6 +136,10 @@ int main(int argc, char** argv)
         {
             cfg.noWindow = true;
         }
+        else if (a == "--break")
+        {
+            breakAtStart = true;
+        }
         else if (a == "-h" || a == "--help")
         {
             Usage(argv[0]);
@@ -170,6 +186,33 @@ int main(int argc, char** argv)
                      "\"Windows Hypervisor Platform\" Windows feature "
                      "and ensure virtualization is on in firmware.\n");
         return 1;
+    }
+
+    // Bridge-debugger convenience: halt here under VS native attach so
+    // the Immediate window is live BEFORE the vCPU starts running. The
+    // user typically continues with:
+    //   duetos::vmm::vmm_dbg::Claim();
+    //   duetos::vmm::vmm_dbg::Bp("kernel_main");
+    // (or any guest symbol via FindBySuffix), then F5 again. The guest
+    // breakpoint then halts the VMM at HandleHostStop's __debugbreak.
+    // No effect when no debugger is attached — IsDebuggerPresent gates
+    // the trap, so an accidental --break in a CI script is a no-op.
+    if (breakAtStart)
+    {
+        if (IsDebuggerPresent())
+        {
+            std::fprintf(stderr,
+                         "[vmm] --break: halting before Vmm ctor "
+                         "(Immediate-window setup point)\n");
+            std::fflush(stderr);
+            __debugbreak();
+        }
+        else
+        {
+            std::fprintf(stderr,
+                         "[vmm] --break: no debugger attached, "
+                         "continuing\n");
+        }
     }
 
     try
