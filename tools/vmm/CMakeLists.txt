@@ -70,6 +70,7 @@ add_executable(duetos-vmm
     src/debug/exit_trace.cpp
     src/debug/introspect.cpp
     src/debug/record.cpp
+    src/debug/vmm_dbg.cpp
     src/display/window.cpp
 )
 

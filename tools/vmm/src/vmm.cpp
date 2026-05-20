@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <stdexcept>
 
+#include "debug/vmm_dbg.h"
+
 #include "acpi.h"
 #include "elf64.h"
 #include "host_clock.h"
@@ -22,7 +24,36 @@ uint64_t Align2M(uint64_t x) { return (x + 0x1FFFFF) & ~uint64_t(0x1FFFFF); }
 // BSP APIC id. The synthesised MADT advertises exactly one LAPIC
 // with id 0, so every IOAPIC-routed line targets APIC 0.
 constexpr uint32_t kBspApicId = 0;
+
+// Singleton pointer — set in Vmm ctor, cleared in dtor.
+Vmm* g_activeVmm = nullptr;
 } // namespace
+
+// static
+Vmm* Vmm::Active()
+{
+    return g_activeVmm;
+}
+
+bool Vmm::DbgResolveGpa(uint64_t gva, uint64_t& gpa) const
+{
+    return m_part.TranslateGva(0, gva, gpa);
+}
+
+void* Vmm::DbgHostPtr(uint64_t gpa, uint64_t len) const
+{
+    return m_mem->HostPtr(gpa, len);
+}
+
+const ElfSymbols::Sym* Vmm::DbgFindSym(const char* name) const
+{
+    return m_symbols.Find(name);
+}
+
+const ElfSymbols& Vmm::DbgSymbols() const
+{
+    return m_symbols;
+}
 
 Vmm::Vmm(VmConfig cfg)
     : m_cfg(std::move(cfg)),
@@ -121,6 +152,15 @@ Vmm::Vmm(VmConfig cfg)
                     "(exit-seq deterministic)\n",
                     m_cfg.replayPath.c_str());
     }
+
+    // Publish the singleton AFTER all members are constructed (this is the
+    // last statement of the ctor body). vmm_dbg::* is only reachable from
+    // the VS Immediate window while the vCPU thread is stopped at a
+    // native debugger breakpoint — by which time construction has long
+    // completed. If a future helper thread ever calls a vmm_dbg:: function
+    // before the ctor returns, move this publication to the very end of
+    // the function body AND add an std::atomic_thread_fence(release).
+    g_activeVmm = this;
 }
 
 void Vmm::RaiseGuestLine(uint32_t irq)
@@ -224,6 +264,7 @@ bool Vmm::ApplyResume(GdbServer::Resume r)
 
 Vmm::~Vmm()
 {
+    g_activeVmm = nullptr;
     m_stop.store(true);
     m_part.CancelRun(0);
     // Stop the window before guest memory is torn down — FbWindow
@@ -591,5 +632,26 @@ int Vmm::Run()
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Keepalive table — prevents MSVC /OPT:REF from stripping vmm_dbg::*
+// symbols that are only ever called from the VS Immediate window (i.e.
+// never from a normal call-graph edge the linker can see).
+// ---------------------------------------------------------------------------
+namespace
+{
+volatile void* const g_vmmDbgKeepalive[] = {
+    reinterpret_cast<volatile void*>(&vmm_dbg::ReadQ),
+    reinterpret_cast<volatile void*>(&vmm_dbg::ReadD),
+    reinterpret_cast<volatile void*>(&vmm_dbg::ReadW),
+    reinterpret_cast<volatile void*>(&vmm_dbg::ReadB),
+    reinterpret_cast<volatile void*>(&vmm_dbg::WriteQ),
+    reinterpret_cast<volatile void*>(&vmm_dbg::WriteD),
+    reinterpret_cast<volatile void*>(&vmm_dbg::WriteW),
+    reinterpret_cast<volatile void*>(&vmm_dbg::WriteB),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Sym),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Dump),
+};
+} // namespace
 
 } // namespace duetos::vmm
