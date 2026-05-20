@@ -78,6 +78,15 @@ add_executable(duetos-vmm
 
 target_include_directories(duetos-vmm PRIVATE src)
 
+# Visual Studio Natvis visualisers for the bridge-debugger types
+# (GuestKernelView, GuestStopState, ElfSymbols::Sym). Listed in
+# target_sources so the .vcxproj picks them up automatically — VS
+# then loads them whenever a developer attaches to duetos-vmm.exe.
+# Listed AFTER the main source list so MSBuild marks them as a
+# Natvis item type (CMake VS_TOOL_OVERRIDE), not as a compile input.
+target_sources(duetos-vmm PRIVATE vmm.natvis)
+set_source_files_properties(vmm.natvis PROPERTIES VS_TOOL_OVERRIDE "Natvis")
+
 # WinHvPlatform.lib ships with the Windows SDK; the loader resolves
 # WinHvPlatform.dll from System32 at runtime. Onecore covers the
 # umbrella import lib on recent SDKs; WinHvPlatform is the explicit one.
