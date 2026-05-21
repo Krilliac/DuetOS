@@ -1471,9 +1471,10 @@ void KbdReaderTask(void*)
                     app_consumed = duetos::apps::files::FilesFeedListKey(static_cast<duetos::u16>(ev.code));
                 }
                 else if (active == duetos::apps::imageview::ImageViewWindow() &&
-                         (ev.code == kKeyArrowLeft || ev.code == kKeyArrowRight))
+                         (ev.code == kKeyArrowLeft || ev.code == kKeyArrowRight || ev.code == kKeyArrowUp ||
+                          ev.code == kKeyArrowDown))
                 {
-                    app_consumed = duetos::apps::imageview::ImageViewFeedArrow(ev.code == kKeyArrowLeft);
+                    app_consumed = duetos::apps::imageview::ImageViewFeedArrow(static_cast<duetos::u16>(ev.code));
                 }
                 else if (active == duetos::apps::browser::BrowserWindow() &&
                          (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown))

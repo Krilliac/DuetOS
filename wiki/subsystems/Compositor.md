@@ -377,7 +377,11 @@ Action-id allocation:
 | 1–6 | Desktop menu |
 | 10–11 | Window menu (Raise / Close legacy) |
 | 20–25 | System menu (NC) — Restore / Move / Size / Min / Max / Close |
-| 30–33 | Files app row menu |
+| 30–39 | Files app FAT32 + non-FAT generic menus (30–33 OPEN / RENAME / DELETE / PROPERTIES, 34 REFRESH, 35–36 NEW FILE / FOLDER, 37–39 generic OPEN / PROPERTIES / REFRESH reused by DuetFS + ramfs) |
+| 40–43 | Power / session (REBOOT / SHUTDOWN / LOCK / LOGOUT) |
+| 44–47 | Files app Trash + ramfs row menus (44 OPEN trash / 45 RESTORE / 46 DELETE FOREVER / 47 ramfs DELETE — disabled placeholder) |
+| 50–59 | System shortcuts (50 SCREENSHOT, …) |
+| 60–69 | Bespoke viewer windows (Net Status / Device Manager / Firewall) |
 | 100–199 | ThemeRole launchers (Calculator, Notes, …) |
 | 200+ | `/APPS/*.MNF` shortcuts |
 | ≥ 0x10000 | PE-app dynamic ids (opaque to kernel) |
@@ -400,11 +404,16 @@ Action-id allocation:
   shape via `CursorSetShape`, but PE apps have no
   `SYS_GDI_SETCURSOR` to request a shape change. Cursor shape
   is owned entirely by the kernel hit-test today.
-- **ImageView zoom**: Ctrl+wheel and `+` / `-` keys zoom by
-  resizing the window; `FitThumbnail` reflows the image into
-  the new content area on next decode. No independent
-  zoom-without-resize state — pan is implicit through window
-  position.
+- **ImageView zoom + pan**: independent of window size. Ctrl+wheel
+  and `+` / `-` / `=` / `_` step `zoom_percent` by 25 percentage
+  points each (clamped to [25, 400]); `0` resets to fit-to-window.
+  Arrow keys pan by 32 px when zoomed past 100% (Left/Right at
+  100% fall back to prev/next image, Up/Down become no-ops). The
+  decoded thumbnail buffer is sized to the content rect once;
+  zoom is applied at blit time by nearest-neighbour-scaling that
+  buffer, so changing zoom doesn't trigger a re-decode. Resizing
+  the window changes how much of the image is visible at 100% but
+  does NOT change `zoom_percent`.
 - **Drag-and-drop between windows**: shipped via
   `kernel/drivers/video/dnd.{h,cpp}`. Single in-flight payload
   (`DndPayload { kind, text[31] }`) with `DndKind::FileEntry` /

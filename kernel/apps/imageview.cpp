@@ -22,6 +22,7 @@ namespace
 using duetos::drivers::video::FramebufferBlit;
 using duetos::drivers::video::FramebufferDrawString;
 using duetos::drivers::video::FramebufferFillRect;
+using duetos::drivers::video::FramebufferPutPixel;
 using duetos::drivers::video::kWindowInvalid;
 using duetos::drivers::video::WindowContentFn;
 using duetos::drivers::video::WindowHandle;
@@ -51,6 +52,22 @@ inline BmpInfo ParseBmpHeader(const u8* hdr)
     return duetos::util::BmpParseHeader(hdr);
 }
 
+// Zoom is independent of window size. The decoded thumbnail is
+// sized to the *content area* (fit-to-window via FitThumbnail);
+// `zoom_percent` then scales that fitted buffer at blit time, so
+// the user can crank past 1:1 without re-decoding and without
+// resizing the window. At zoom == 100% the blit path matches v0
+// byte-for-byte (FramebufferBlit of the pre-fit buffer). For
+// zoom > 100% we walk destination pixels and NN-sample the
+// already-decoded source. Pan is applied as a destination
+// top-left offset and only does work when the scaled image
+// overhangs the content rect.
+constexpr u32 kZoomMin = 25;
+constexpr u32 kZoomMax = 400;
+constexpr u32 kZoomFit = 100;
+constexpr u32 kZoomStepPct = 25; // Ctrl+wheel and '+/-' grain
+constexpr i32 kPanStepPx = 32;
+
 struct State
 {
     WindowHandle handle;
@@ -66,9 +83,18 @@ struct State
     u32 alloc_h;
     char status[kStatusCap];
     bool needs_decode; // re-decode on next draw
+
+    // Independent zoom + pan. 100 = fit-to-window (1:1 with the
+    // decoded thumbnail); 25..400 is the user-reachable range.
+    // Pan offsets are content-rect pixels (positive = shift the
+    // image right / down inside the rect). Reset by '0' and
+    // implicitly by a re-decode (next image / rescan).
+    u32 zoom_percent;
+    i32 pan_x;
+    i32 pan_y;
 };
 
-constinit State g_state = {kWindowInvalid, {}, 0, 0, nullptr, 0, 0, 0, 0, {}, false};
+constinit State g_state = {kWindowInvalid, {}, 0, 0, nullptr, 0, 0, 0, 0, {}, false, kZoomFit, 0, 0};
 
 void StatusSet(const char* msg)
 {
@@ -984,12 +1010,64 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     const u32 is_err = (g_state.pixels == nullptr) ? 1u : 0u;
     FramebufferDrawString(cx + 4, cy + 1 + kRowH, g_state.status, is_err ? kInkErr : kInkFg, kBg);
 
-    // Image area.
+    // Image area. At zoom == 100% we use the direct FramebufferBlit
+    // path (matches v0 byte-for-byte — the thumbnail is already
+    // sized to fit the content rect, no upscaling). At any other
+    // zoom we walk destination pixels and nearest-neighbour-sample
+    // the decoded buffer; pan_x/pan_y shifts the scaled image's
+    // top-left inside the content rect. The blit buffer is never
+    // re-decoded for zoom — only the per-frame walk grows / shrinks.
     if (g_state.pixels != nullptr && img_w > 0 && img_h > 0)
     {
-        const u32 ox = (img_w > g_state.disp_w) ? (img_w - g_state.disp_w) / 2 : 0;
-        const u32 oy = (img_h > g_state.disp_h) ? (img_h - g_state.disp_h) / 2 : 0;
-        FramebufferBlit(img_x + ox, img_y + oy, g_state.pixels, g_state.disp_w, g_state.disp_h, g_state.disp_w);
+        if (g_state.zoom_percent == kZoomFit)
+        {
+            // Fast path: centred fit-blit, identical to v0.
+            const u32 ox = (img_w > g_state.disp_w) ? (img_w - g_state.disp_w) / 2 : 0;
+            const u32 oy = (img_h > g_state.disp_h) ? (img_h - g_state.disp_h) / 2 : 0;
+            FramebufferBlit(img_x + ox, img_y + oy, g_state.pixels, g_state.disp_w, g_state.disp_h, g_state.disp_w);
+        }
+        else
+        {
+            // Scaled path. Compute the painted image's pixel size,
+            // then for each destination pixel inside the content
+            // rect that the (scaled, panned) image covers, sample
+            // the decoded buffer via NN.
+            const u64 z = static_cast<u64>(g_state.zoom_percent);
+            const u32 painted_w = static_cast<u32>((static_cast<u64>(g_state.disp_w) * z) / 100);
+            const u32 painted_h = static_cast<u32>((static_cast<u64>(g_state.disp_h) * z) / 100);
+            if (painted_w > 0 && painted_h > 0)
+            {
+                // Centring offset when the painted image is smaller
+                // than the content rect (small image, modest zoom);
+                // pan adds on top. When the painted image is larger
+                // than the rect, the centring offset is 0 and pan
+                // moves which slice of the image is visible.
+                const i32 base_ox = (img_w > painted_w) ? static_cast<i32>((img_w - painted_w) / 2) : 0;
+                const i32 base_oy = (img_h > painted_h) ? static_cast<i32>((img_h - painted_h) / 2) : 0;
+                const i32 origin_x = base_ox + g_state.pan_x;
+                const i32 origin_y = base_oy + g_state.pan_y;
+                // Iterate the dst pixels that intersect the content
+                // rect. NN sample dst (dx, dy) → src (dx * disp_w /
+                // painted_w, dy * disp_h / painted_h).
+                for (u32 dy = 0; dy < painted_h; ++dy)
+                {
+                    const i32 sy_dst = origin_y + static_cast<i32>(dy);
+                    if (sy_dst < 0 || sy_dst >= static_cast<i32>(img_h))
+                        continue;
+                    const u32 sy = (static_cast<u64>(dy) * g_state.disp_h) / painted_h;
+                    const u32* srow = g_state.pixels + static_cast<u64>(sy) * g_state.disp_w;
+                    for (u32 dx = 0; dx < painted_w; ++dx)
+                    {
+                        const i32 sx_dst = origin_x + static_cast<i32>(dx);
+                        if (sx_dst < 0 || sx_dst >= static_cast<i32>(img_w))
+                            continue;
+                        const u32 sx = (static_cast<u64>(dx) * g_state.disp_w) / painted_w;
+                        FramebufferPutPixel(img_x + static_cast<u32>(sx_dst), img_y + static_cast<u32>(sy_dst),
+                                            srow[sx]);
+                    }
+                }
+            }
+        }
     }
     else if (img_w > 0 && img_h > 0 && g_state.count == 0)
     {
@@ -1002,8 +1080,21 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // Footer hint.
     if (ch > kRowH + 2)
     {
-        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "N:NEXT  P:PREV  R:RESCAN", kInkDim, kBg);
+        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "N:NEXT  P:PREV  R:RESCAN  +/-:ZOOM  0:RESET  ARROWS:PAN",
+                              kInkDim, kBg);
     }
+}
+
+// Reset the zoom/pan triple to fit-to-window. Called whenever the
+// user switches images, rescans, or hits '0' explicitly — anything
+// where carrying the previous image's zoom into the new one would
+// be surprising (a 4×4 icon at 400% zoom would render as a 16×16
+// smear after switching to a 1024×768 screenshot).
+void ZoomReset()
+{
+    g_state.zoom_percent = kZoomFit;
+    g_state.pan_x = 0;
+    g_state.pan_y = 0;
 }
 
 void StepIndex(bool forward)
@@ -1019,6 +1110,35 @@ void StepIndex(bool forward)
         g_state.index = (g_state.index == 0) ? (g_state.count - 1) : (g_state.index - 1);
     }
     g_state.needs_decode = true;
+    ZoomReset();
+}
+
+// Apply a signed delta to zoom_percent, clamping to [kZoomMin,
+// kZoomMax]. Returns true if zoom actually changed. Used by the
+// Ctrl+wheel path and the '+'/'-' keys so the clamp + recentre
+// behaviour is identical between input sources.
+bool ApplyZoomDelta(duetos::i32 delta_pct)
+{
+    const duetos::i32 cur = static_cast<duetos::i32>(g_state.zoom_percent);
+    duetos::i32 next = cur + delta_pct;
+    if (next < static_cast<duetos::i32>(kZoomMin))
+        next = static_cast<duetos::i32>(kZoomMin);
+    if (next > static_cast<duetos::i32>(kZoomMax))
+        next = static_cast<duetos::i32>(kZoomMax);
+    if (next == cur)
+        return false;
+    g_state.zoom_percent = static_cast<duetos::u32>(next);
+    // When zoom drops back to fit (or below it visually — the
+    // painted image will fit the rect again), pan offsets no
+    // longer have anywhere to push to. Recentre so a user who
+    // panned at high zoom doesn't end up with the image shoved
+    // off-screen after zooming back out.
+    if (g_state.zoom_percent <= kZoomFit)
+    {
+        g_state.pan_x = 0;
+        g_state.pan_y = 0;
+    }
+    return true;
 }
 
 } // namespace
@@ -1033,6 +1153,9 @@ void ImageViewInit(WindowHandle handle)
     g_state.disp_h = 0;
     g_state.status[0] = '\0';
     g_state.needs_decode = true;
+    g_state.zoom_percent = kZoomFit;
+    g_state.pan_x = 0;
+    g_state.pan_y = 0;
     RescanRoot();
     WindowSetContentDraw(handle, DrawFn, nullptr);
     duetos::drivers::video::WindowSetWheelHandler(handle, ImageViewOnWheel);
@@ -1063,21 +1186,14 @@ void ImageViewOnWheel(duetos::i32 dz, duetos::u8 modifiers)
     using duetos::drivers::input::kKeyModCtrl;
     if ((modifiers & kKeyModCtrl) != 0)
     {
-        // Ctrl+wheel — zoom by resizing the window. The image
-        // auto-fits to the client area via FitThumbnail, so
-        // resizing the window naturally rescales the image.
-        // 32 px per tick reads as a comfortable zoom step.
-        constexpr duetos::u32 kZoomStep = 32;
-        duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
-        if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
-            return;
+        // Ctrl+wheel — zoom the image without touching window
+        // geometry. Each wheel tick moves zoom_percent by one
+        // kZoomStepPct grain; clamping happens inside
+        // ApplyZoomDelta. The decoded thumbnail buffer is left
+        // alone; DrawFn rescales it on the next compose tick.
         const duetos::i32 steps = (dz > 0) ? dz : -dz;
-        const duetos::i32 delta = static_cast<duetos::i32>(kZoomStep) * steps;
         const duetos::i32 sign = (dz > 0) ? 1 : -1;
-        duetos::drivers::video::WindowResizeFromEdge(g_state.handle,
-                                                     duetos::drivers::video::WindowResizeEdge::BottomRight,
-                                                     /*ax*/ 0, /*ay*/ 0, ww, wh, sign * delta, sign * delta);
-        g_state.needs_decode = true;
+        ApplyZoomDelta(sign * static_cast<duetos::i32>(kZoomStepPct) * steps);
         return;
     }
     // Plain wheel — step image. Wheel down advances; wheel up
@@ -1111,36 +1227,73 @@ bool ImageViewFeedChar(char c)
     {
         RescanRoot();
         g_state.needs_decode = true;
+        ZoomReset();
         drivers::video::NotifyShow("image: root rescan");
         return true;
     }
     if (c == '+' || c == '=' || c == '-' || c == '_')
     {
-        // Keyboard zoom: '+' / '=' grows the window; '-' / '_'
-        // shrinks. Mirrors the Ctrl+wheel path which already
-        // resizes via WindowResizeFromEdge — FitThumbnail
-        // refreshes the image to match the new client area.
-        constexpr duetos::u32 kZoomStep = 32;
-        duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
-        if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
-            return true;
+        // Keyboard zoom: '+' / '=' enlarges, '-' / '_' shrinks.
+        // Mirrors the Ctrl+wheel grain (kZoomStepPct) and the
+        // same clamp; window geometry is left alone — only
+        // zoom_percent changes, and DrawFn rescales the
+        // existing decoded buffer at the new factor.
         const duetos::i32 sign = (c == '+' || c == '=') ? 1 : -1;
-        const duetos::i32 delta = static_cast<duetos::i32>(kZoomStep);
-        duetos::drivers::video::WindowResizeFromEdge(g_state.handle,
-                                                     duetos::drivers::video::WindowResizeEdge::BottomRight,
-                                                     /*ax*/ 0, /*ay*/ 0, ww, wh, sign * delta, sign * delta);
-        g_state.needs_decode = true;
+        ApplyZoomDelta(sign * static_cast<duetos::i32>(kZoomStepPct));
+        return true;
+    }
+    if (c == '0')
+    {
+        // Reset zoom + pan to fit-to-window. No re-decode is
+        // needed — the thumbnail buffer is already sized for
+        // the content rect; DrawFn picks the fast Blit path on
+        // the next compose tick because zoom_percent ==
+        // kZoomFit.
+        ZoomReset();
         return true;
     }
     return false;
 }
 
-bool ImageViewFeedArrow(bool left)
+bool ImageViewFeedArrow(duetos::u16 keycode)
 {
-    if (g_state.count == 0)
-        return false;
-    StepIndex(!left);
-    return true;
+    using duetos::drivers::input::kKeyArrowDown;
+    using duetos::drivers::input::kKeyArrowLeft;
+    using duetos::drivers::input::kKeyArrowRight;
+    using duetos::drivers::input::kKeyArrowUp;
+    // When the user has zoomed past fit-to-window, arrows pan
+    // the visible slice. At fit-to-window there's nothing to
+    // pan; Left/Right fall back to prev/next image (preserving
+    // the v0 behaviour) and Up/Down become no-ops (they had no
+    // meaning at fit anyway).
+    if (g_state.zoom_percent > kZoomFit)
+    {
+        switch (keycode)
+        {
+        case kKeyArrowLeft:
+            g_state.pan_x += kPanStepPx;
+            return true;
+        case kKeyArrowRight:
+            g_state.pan_x -= kPanStepPx;
+            return true;
+        case kKeyArrowUp:
+            g_state.pan_y += kPanStepPx;
+            return true;
+        case kKeyArrowDown:
+            g_state.pan_y -= kPanStepPx;
+            return true;
+        default:
+            return false;
+        }
+    }
+    if (keycode == kKeyArrowLeft || keycode == kKeyArrowRight)
+    {
+        if (g_state.count == 0)
+            return false;
+        StepIndex(keycode == kKeyArrowRight);
+        return true;
+    }
+    return false;
 }
 
 bool ImageViewSelectByName(const char* name)
@@ -1162,6 +1315,7 @@ bool ImageViewSelectByName(const char* name)
         {
             g_state.index = i;
             g_state.needs_decode = true;
+            ZoomReset();
             return true;
         }
     }
