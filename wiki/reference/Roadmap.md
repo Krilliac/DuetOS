@@ -378,17 +378,16 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ### Windowing — modal dialogs, common controls
 
-- **Residual:** common controls, scroll bars, outline fonts,
-  multi-threaded message queues. Menu GAPs: interactive
-  Move/Size (need a modal-input mode), submenu marshaling across
-  `SYS_WIN_TRACK_POPUP`, `TPM_LEFTBUTTON`/`TPM_RIGHTBUTTON`
-  activation filtering, Files-app rename UI (needs a text-input
-  modal), Trash / ramfs Files context menus, menubars +
-  `LoadMenu` resource loading. See
+- **Residual:** common controls, multi-threaded message queues.
+  Menu GAPs: submenu marshaling across `SYS_WIN_TRACK_POPUP`,
+  `TPM_LEFTBUTTON`/`TPM_RIGHTBUTTON` activation filtering,
+  menubars + `LoadMenu` resource loading. See
   [`Compositor`](../subsystems/Compositor.md) §"Popup Menus" for
   live state. (Message pump, GDI paint, popup menus +
-  `WM_CONTEXTMENU` + `TPM_*` flags, modal dialog primitive
-  landed.)
+  `WM_CONTEXTMENU` + `TPM_*` flags, modal dialog primitive,
+  native scroll bars with drag-the-thumb + click-on-track,
+  interactive Move/Size via `modal_input.{h,cpp}`, Files-app
+  rename UI, Trash + ramfs Files per-row context menus landed.)
 
 ### Winsock async surface
 
