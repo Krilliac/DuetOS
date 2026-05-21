@@ -523,16 +523,17 @@ and `mkfs.duetfs`. Image cap is 4 MiB (single-block CRC table).
 Pending, in rough priority:
 
 1. **Multi-block CRC table** — restore the 32/128 MiB image cap.
-2. **CoW + journal** — durability / crash safety on file-data
-   writes.
+2. **CoW** — copy-on-write file-data writes on top of the existing
+   journal (journal already lands per `journal.rs`).
 3. **Separate dirent table** — decouple hard-link names from the
    inode's `name` (today's v3 caveat).
 4. **Indirect extents** — files needing > 8 extents.
 5. **Multi-block dirs + B-tree directory index** — bump the
    1024-child cap.
-6. **AES-XTS encryption + Argon2 KDF** — full-disk encryption
-   tier.
-7. **LZ4 compression** — optional per-file compression.
+
+(AES-XTS + Argon2 KDF encryption tier in `crypto.rs`, LZ4
+compression in `compress.rs`, and snapshots in `snapshot.rs`
+all landed.)
 
 ---
 
