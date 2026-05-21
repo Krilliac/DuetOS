@@ -2,6 +2,7 @@
 
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/sound_cue.h"
 #include "drivers/video/theme.h"
 
 namespace duetos::drivers::video
@@ -142,6 +143,11 @@ bool MessageBoxOpen(const char* title, const char* body, DialogResultFn cb, void
     g_state.user = user;
     g_state.input_buf[0] = '\0';
     g_state.input_len = 0;
+    // Non-intrusive attention chime so an unattended operator hears
+    // a dialog appear. Matches the existing screenshot / files
+    // convention of pairing user-visible state changes with a cue;
+    // SoundCueChime is no-op when the master mute is off.
+    SoundCueChime();
     return true;
 }
 
@@ -163,6 +169,8 @@ bool InputBoxOpen(const char* title, const char* prompt, const char* default_tex
         }
     }
     g_state.input_buf[g_state.input_len] = '\0';
+    // InputBox opens with the same attention chime as MessageBox.
+    SoundCueChime();
     return true;
 }
 
@@ -181,7 +189,16 @@ bool DialogDrainResolved()
     if (!g_state.pending)
         return false;
     const DialogResult r = g_state.pending_result;
+    const DialogKind k = g_state.kind;
     g_state.pending = false;
+    // Reject buzz on MessageBox cancel — operator dismissed an
+    // attention prompt without confirming. InputBox cancel is a
+    // normal escape (the user is just abandoning a rename / edit)
+    // so no cue there. This branch runs with NO compositor lock
+    // held per the contract above, so the 150 ms blocking beep
+    // doesn't stall any compose pass.
+    if (k == DialogKind::Message && r == DialogResult::Cancel)
+        SoundCueError();
     FireCallback(r); // reads input_buf, invokes cb, then ResetState()
     return true;
 }
