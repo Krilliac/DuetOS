@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel — compositor runs in the focused-window's draw pass
 >
-> **Maturity:** v0 painting + windowing; popup menus shipped, modal dialogs deferred
+> **Maturity:** v0 painting + windowing; popup menus + modal dialogs shipped
 
 ## Overview
 
@@ -155,6 +155,60 @@ before the press is dispatched so Z-order tracks the click in
 addition to explicit `BringWindowToTop` / `SetForegroundWindow`
 syscalls.
 
+## Window Transition Animations
+
+`WindowMaximize`, `WindowMinimize`, `WindowRestore`, and the
+`WindowSnap*` family (Left / Right / Top / Bottom + four corners)
+route their rect change through the `WindowAnimate` primitive in
+`widget.{h,cpp}` instead of jumping in a single frame. Default
+tween: 10 ticks of ease-out (`t' = 1 - (1 - t)^2`) at the 100 Hz
+`WinTimerTicker` cadence ≈ 100 ms. Math is integer fixed-point
+(q10) — no FPU in kernel context.
+
+State (`anim_active`, `anim_start_*`, `anim_target_*`,
+`anim_remaining_ticks`, `anim_ease`, `anim_post_action`) lives on
+the per-window struct; no dynamic allocation. The animator only
+walks `chrome.x/y/w/h` — flags (`maximized`, `visible`, focus)
+are set immediately by the calling op so observers
+(`WindowIsMaximized`, hit-testing, the chrome max / restore
+glyph) see the new state before the tween finishes. The Restore
+target is still `saved_*` so Restore returns to the exact
+pre-maximize bounds.
+
+Skip rules: identical source / target rect, in-flight animation
+for the same window (the in-flight one wins; the new request is
+dropped). `WindowMinimize` carries a `hide-on-complete`
+post-action — the window stays visible through the tween then
+rolls back to its pre-anim rect and clears `visible`, so the next
+`SW_SHOW` lands where the user left it. Drag-move
+(`WindowMoveTo` per motion packet) deliberately bypasses the
+animator — animating live input would lag the cursor.
+
+## Snap Zones
+
+While dragging a window the mouse loop hit-tests the cursor
+against 32-px screen-edge bands and 32×32-px corner boxes
+(`SnapPreviewHitTest` in `widget.cpp`). When the cursor enters
+a zone, `SnapPreviewArm` records the target and `DesktopCompose`
+paints a translucent `taskbar_accent` rect (~25 % alpha) at the
+exact rect the snap would commit — read as "preview" not real
+chrome. Releasing inside a zone commits the matching
+`WindowSnap*` / `WindowMaximize`; releasing outside leaves the
+window at the cursor position.
+
+| Zone | Snap | Primitive |
+|---|---|---|
+| Top edge | Maximise | `WindowMaximize` |
+| Left / right edge | Half | `WindowSnapLeft` / `WindowSnapRight` |
+| Top-left / top-right corner | Quarter | `WindowSnapTopLeft` / `WindowSnapTopRight` |
+| Bottom-left / bottom-right corner | Quarter | `WindowSnapBottomLeft` / `WindowSnapBottomRight` |
+| Bare bottom edge | none — owned by taskbar drag-snap | — |
+
+Corners take precedence over edges (a cursor 8 px from the
+top-left resolves to `TopLeft`, not `Maximize`). Esc during the
+drag clears the preview without aborting the move; the rest of
+the drag behaves normally.
+
 ## Double-Click
 
 Press-edge double-click detection lives in
@@ -220,14 +274,23 @@ replaces the prior two-step Alt+F4 prompt).
 
 ## Scrollbar
 
-`scrollbar.{h,cpp}` is a pure visual indicator. Apps call
-`ScrollbarPaint(x, y, w, h, {total, visible, first})` from
-their `DrawFn`; the painter draws a track + proportional
-thumb. v1 doesn't implement drag-the-thumb interactivity —
-wheel dispatch covers the common scroll case; click-on-track
-jump-to is deferred. Files (FAT32 list) and Browser (body
-view) integrate today; Notes / Help skipped because their
-content fits the typical render area.
+`scrollbar.{h,cpp}` paints a track + thumb and provides pure-function
+hit-test / drag math (`ScrollbarHitTest`, `ScrollbarDragTo`,
+`ScrollbarThumbY`, `ScrollbarThumbH`). Apps call `ScrollbarPaint(x, y,
+w, h, {total, visible, first})` from their `DrawFn` and register the
+same geometry with the widget system via `WindowSetScrollbar(handle,
+WindowScrollbarSurface{...})`. Apps also register a scroll callback
+via `WindowSetScrollHandler(handle, fn)` to receive the new `first`
+value.
+
+The kernel mouse loop in `boot_tasks.cpp` consults the per-window
+scrollbar surface on every press-edge: track click pages by `visible`
+and fires the callback via `WindowDispatchScroll`; thumb click arms an
+`sb_drag` that follows the cursor through subsequent motion via
+`ScrollbarDragTo` + `WindowDispatchScroll`. Wheel dispatch remains the
+incremental fast path. v1 consumers: Files (FAT32 list), Browser
+(body), HexView (grid), Notification Center. Notes / Help skip the
+scrollbar because their content fits the typical render area.
 
 ## Tooltips
 
@@ -353,7 +416,7 @@ Right-click dispatch in the mouse-reader (`kernel/core/main.cpp`):
 | Title bar of any window | System menu (Restore / Move / Size / Min / Max / Close) |
 | Body of a kernel-app window | Enriched window menu (Raise + Min/Max/Restore/Close) |
 | Body of a PE window | No kernel menu — `WM_CONTEXTMENU` (0x007B) is posted to the PE |
-| Body of the Files app | Per-row context menu (Open / Rename(GAP) / Delete / Properties) |
+| Body of the Files app | Per-row context menu tuned to the active mode (FAT32: Open / Rename / Delete / Properties / Refresh / New File / New Folder; DuetFS: Open / Properties / Refresh; Trash: Open / Restore / Delete Forever / Properties / Refresh; Ramfs: Open / Delete (disabled) / Properties / Refresh) |
 | Desktop background | Desktop menu (Help / About / Cycle / List / TTY) |
 
 PE apps process `WM_CONTEXTMENU` in their `WndProc` — `wparam` is
@@ -368,7 +431,11 @@ Action-id allocation:
 | 1–6 | Desktop menu |
 | 10–11 | Window menu (Raise / Close legacy) |
 | 20–25 | System menu (NC) — Restore / Move / Size / Min / Max / Close |
-| 30–33 | Files app row menu |
+| 30–39 | Files app FAT32 + non-FAT generic menus (30–33 OPEN / RENAME / DELETE / PROPERTIES, 34 REFRESH, 35–36 NEW FILE / FOLDER, 37–39 generic OPEN / PROPERTIES / REFRESH reused by DuetFS + ramfs) |
+| 40–43 | Power / session (REBOOT / SHUTDOWN / LOCK / LOGOUT) |
+| 44–47 | Files app Trash + ramfs row menus (44 OPEN trash / 45 RESTORE / 46 DELETE FOREVER / 47 ramfs DELETE — disabled placeholder) |
+| 50–59 | System shortcuts (50 SCREENSHOT, …) |
+| 60–69 | Bespoke viewer windows (Net Status / Device Manager / Firewall) |
 | 100–199 | ThemeRole launchers (Calculator, Notes, …) |
 | 200+ | `/APPS/*.MNF` shortcuts |
 | ≥ 0x10000 | PE-app dynamic ids (opaque to kernel) |
@@ -381,32 +448,87 @@ Action-id allocation:
 - **Per-window message queues**: `GetMessage` / `PeekMessage` return
   `WM_QUIT` for unhandled paths so event-driven programs exit their
   pump immediately.
-- **Submenu marshaling across `SYS_WIN_TRACK_POPUP`**: GAP. PE
-  apps that need nested menus call `TrackPopupMenu` recursively
-  from their `WM_COMMAND` handler.
+- **Submenu marshaling across `SYS_WIN_TRACK_POPUP`**: live. The
+  userland `TrackPopupMenu` thunk walks the HMENU tree depth-first
+  and packs it into a single flat array (`TpItemWire[32]`); each
+  submenu-flagged row carries `child_index` / `child_count`
+  back-pointers into the same array, and `child_index == -1` marks
+  a leaf row. The kernel rejects negative-index-with-children,
+  out-of-bounds ranges, non-forward references (which also kills
+  cycles), per-panel overflow, orphan slots, and any tree deeper
+  than `kMenuMaxStack = 4` panels. Patching submenu pointers
+  happens in a second pass after every slot is populated so the
+  menu primitive's `MenuItem::submenu` pointers land on stable
+  storage.
 - **Concurrent `TrackPopupMenu` from two PE processes**: serialise
   on the single-instance kernel menu — the second caller cancels
   with action_id = 0 and returns immediately.
-- **PE `SetCursor`**: GAP. Native windows can change cursor
-  shape via `CursorSetShape`, but PE apps have no
-  `SYS_GDI_SETCURSOR` to request a shape change. Cursor shape
-  is owned entirely by the kernel hit-test today.
-- **ImageView zoom**: Ctrl+wheel and `+` / `-` keys zoom by
-  resizing the window; `FitThumbnail` reflows the image into
-  the new content area on next decode. No independent
-  zoom-without-resize state — pan is implicit through window
-  position.
-- **Drag-and-drop between windows**: not in scope. Needs a
-  per-window drop-target registry, a `kDraggingItem` global,
-  and ghost-image rendering during drag — more invasive than
-  any single-app feature.
+- **PE `SetCursor`**: live. Win32 PEs request a cursor shape via
+  `user32!SetCursor(LoadCursor(NULL, IDC_*))`, which marshals
+  through `SYS_GDI_SET_CURSOR` (174). The handler stamps the
+  requested `GdiCursorShape` on every alive window owned by the
+  caller's pid (`requested_cursor` slot on `RegisteredWindow`).
+  The mouse-loop hit-test consults that slot after its
+  kernel-priority rules (resize bands, Hand-on-button widgets,
+  native IBeam over Notes / Browser) and uses it in place of the
+  unconditional Arrow fallback when the cursor is over a
+  client-area pixel of one of those windows. Title-bar hits keep
+  the Arrow fallback so window chrome stays predictable. Custom
+  sprite registration (`SYS_GDI_CREATE_CURSOR`, 175) accepts a
+  12×20 PE-supplied mask + hotspot and returns a sentinel HCURSOR
+  ≥ 256 the PE then hands to `SetCursor`; custom shapes bypass
+  the per-window slot and stamp the global cursor directly. Known
+  limits: shape is per-process, not per-thread (Win32 spec is
+  per-thread), and a shape request from a process that owns no
+  windows only takes effect via the global path while no PE
+  window is under the cursor.
+- **ImageView zoom + pan**: independent of window size. Ctrl+wheel
+  and `+` / `-` / `=` / `_` step `zoom_percent` by 25 percentage
+  points each (clamped to [25, 400]); `0` resets to fit-to-window.
+  Arrow keys pan by 32 px when zoomed past 100% (Left/Right at
+  100% fall back to prev/next image, Up/Down become no-ops). The
+  decoded thumbnail buffer is sized to the content rect once;
+  zoom is applied at blit time by nearest-neighbour-scaling that
+  buffer, so changing zoom doesn't trigger a re-decode. Resizing
+  the window changes how much of the image is visible at 100% but
+  does NOT change `zoom_percent`.
+- **Drag-and-drop between windows**: shipped via
+  `kernel/drivers/video/dnd.{h,cpp}`. Single in-flight payload
+  (`DndPayload { kind, text[31] }`) with `DndKind::FileEntry` /
+  `Bookmark` / `Text`. Sources call `DndBegin` from a press-edge;
+  targets register via `DndRegisterDropTarget(hwnd, cb,
+  accepted_mask)`. The mouse loop feeds motion into
+  `DndUpdateCursor`; release calls `DndResolveAt(cx, cy)` which
+  walks alive targets top-down. `DndCompose` paints the ghost
+  image after chrome but before tooltips. v1 consumers: Files
+  (source), Notes / ImageView (targets). Future gap: full
+  OLE/IDataObject COM marshalling for Win32 PE source apps
+  (`userland/libs/ole32/ole32.c` ships the loader-resolvable
+  surface but `DoDragDrop` is a stub).
 - **Audio feedback / system sounds**: gated on HDA codec
   programming (Roadmap.md). PC speaker exists but is not
   wired to any UI event.
-- **Settings GUIs (Display / Sound / Keyboard / Mouse /
-  Date-Time)**: each is its own slice per CLAUDE.md.
-- **Trash / ramfs mode in Files**: only FAT32 mode has a v0
-  context menu; other modes fall through to the kernel-window menu.
+- **Settings GUI**: shipped as a unified windowed app
+  (`kernel/apps/settings.{h,cpp}`) with sub-panels for General
+  (theme + active-window opacity + clock + version banner), Display,
+  Sound, Keyboard, Mouse, and DateTime
+  (`kernel/apps/settings_<panel>.cpp`). Number keys 0..5 switch
+  panels; the General panel includes the theme picker that
+  `Ctrl+Alt+Y` also drives.
+- **Trash / ramfs mode in Files**: every Files mode now ships its
+  own per-row right-click menu tuned to what the backing store
+  supports. FAT32 keeps the rich 30..36 surface (Open / Rename /
+  Delete / Properties / Refresh / New File / New Folder). DuetFS
+  (read-only browse mount) shows Open / Properties / Refresh
+  (action ids 37/38/39). Trash shows Open / Restore / Delete
+  Forever / Properties / Refresh (Open is action 44 and notifies
+  "restore to open" — the FAT32 openers look up by name in root,
+  so opening a binned file in-place is a GAP pending an opener
+  refactor; Delete Forever shares the same Y-confirm prompt the
+  X keybind triggers). Ramfs shows Open / Delete / Properties /
+  Refresh, with Delete flagged disabled because the trusted
+  ramfs is constinit `.rodata` and there is no unlink primitive
+  to route through.
 - **Win32 common controls, outline fonts, multi-threaded
   message queues**: still on the windowing track's deferred
   list. (Native modal dialogs ship via `dialog.{h,cpp}` —

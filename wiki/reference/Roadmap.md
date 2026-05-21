@@ -378,17 +378,15 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ### Windowing — modal dialogs, common controls
 
-- **Residual:** common controls, scroll bars, outline fonts,
-  multi-threaded message queues. Menu GAPs: interactive
-  Move/Size (need a modal-input mode), submenu marshaling across
-  `SYS_WIN_TRACK_POPUP`, `TPM_LEFTBUTTON`/`TPM_RIGHTBUTTON`
-  activation filtering, Files-app rename UI (needs a text-input
-  modal), Trash / ramfs Files context menus, menubars +
-  `LoadMenu` resource loading. See
+- **Residual:** common controls, multi-threaded message queues.
+  Menu GAPs: `TPM_LEFTBUTTON`/`TPM_RIGHTBUTTON` activation
+  filtering, menubars + `LoadMenu` resource loading. See
   [`Compositor`](../subsystems/Compositor.md) §"Popup Menus" for
   live state. (Message pump, GDI paint, popup menus +
-  `WM_CONTEXTMENU` + `TPM_*` flags, modal dialog primitive
-  landed.)
+  `WM_CONTEXTMENU` + `TPM_*` flags, modal dialog primitive,
+  native scroll bars with drag-the-thumb + click-on-track,
+  interactive Move/Size via `modal_input.{h,cpp}`, Files-app
+  rename UI, Trash + ramfs Files per-row context menus landed.)
 
 ### Winsock async surface
 
@@ -524,16 +522,17 @@ and `mkfs.duetfs`. Image cap is 4 MiB (single-block CRC table).
 Pending, in rough priority:
 
 1. **Multi-block CRC table** — restore the 32/128 MiB image cap.
-2. **CoW + journal** — durability / crash safety on file-data
-   writes.
+2. **CoW** — copy-on-write file-data writes on top of the existing
+   journal (journal already lands per `journal.rs`).
 3. **Separate dirent table** — decouple hard-link names from the
    inode's `name` (today's v3 caveat).
 4. **Indirect extents** — files needing > 8 extents.
 5. **Multi-block dirs + B-tree directory index** — bump the
    1024-child cap.
-6. **AES-XTS encryption + Argon2 KDF** — full-disk encryption
-   tier.
-7. **LZ4 compression** — optional per-file compression.
+
+(AES-XTS + Argon2 KDF encryption tier in `crypto.rs`, LZ4
+compression in `compress.rs`, and snapshots in `snapshot.rs`
+all landed.)
 
 ---
 

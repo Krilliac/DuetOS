@@ -45,6 +45,18 @@
  *   - 'n' / 'N' / Right     — next image
  *   - 'p' / 'P' / Left      — previous image
  *   - 'r' / 'R'             — re-scan root for new images
+ *   - '+' / '=' / '-' / '_' — zoom in / out by 25 percentage points
+ *   - '0'                   — reset zoom to fit-to-window + pan to 0,0
+ *   - Ctrl + mouse wheel    — zoom in / out by 25 percentage points
+ *   - Left / Right          — at fit-to-window: prev / next image.
+ *                             Zoomed in (> 100%): pan left / right
+ *   - Up / Down             — pan up / down when zoomed in (no-op
+ *                             at fit-to-window)
+ *
+ * Zoom + pan are state on the app, NOT the window. Resizing the
+ * window changes how much of the image fits on screen at 100%
+ * but does NOT change the zoom factor — that's owned by the
+ * '+/-/0' keys and Ctrl+wheel. Zoom is clamped to [25, 400]%.
  *
  * Context: kernel. Caller MUST hold the compositor lock — same
  * discipline as the other content-draw apps (Notes, Calculator,
@@ -71,9 +83,15 @@ duetos::drivers::video::WindowHandle ImageViewWindow();
 bool ImageViewFeedChar(char c);
 
 /// Arrow-key handler. The keyboard reader dispatches arrows
-/// separately because they're not ASCII. Returns true iff
-/// consumed (i.e. we have at least one image to navigate).
-bool ImageViewFeedArrow(bool left);
+/// separately because they're not ASCII. `keycode` is one of
+/// `kKeyArrow{Left,Right,Up,Down}` (any other keycode is a no-op
+/// returning false). Semantics depend on the current zoom:
+///   - At fit-to-window (zoom == 100%): Left / Right step prev /
+///     next image; Up / Down are no-ops.
+///   - Zoomed in (zoom > 100%): all four arrows pan the visible
+///     slice of the image by 32 px.
+/// Returns true iff the key was consumed.
+bool ImageViewFeedArrow(duetos::u16 keycode);
 
 /// Mouse-wheel handler. Each wheel tick steps to the next /
 /// previous image — wheel-down advances forward (matches the

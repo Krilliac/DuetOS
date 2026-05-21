@@ -278,6 +278,49 @@ bool WindowIsMaximized(WindowHandle h);
 /// No-op for invalid handles. Mirrors Win10's Win+Left tile.
 void WindowSnapLeft(WindowHandle h);
 
+// ---------------------------------------------------------------
+// Window transition animations.
+//
+// `WindowMaximize` / `WindowMinimize` / `WindowRestore` / the
+// `WindowSnap*` family route their rect change through
+// `WindowAnimate` so the user sees the window slide / scale to
+// its new position over ~100 ms instead of jumping in one frame.
+// `WindowAnimateStepAll` is driven by the 100 Hz `WinTimerTicker`
+// task; each tick advances every armed window one step toward
+// its target and snaps to the exact target rect on completion.
+//
+// Drag-move (`WindowMoveTo` per motion packet) does NOT route
+// through this primitive — animating live input would lag the
+// cursor. The animator is for one-shot rect commits only.
+// ---------------------------------------------------------------
+
+enum class WindowAnimEase : u8
+{
+    Linear = 0,
+    EaseOut = 1, // recommended default — quadratic ease-out
+};
+
+/// Arm an animation from `h`'s current bounds to (target_x,
+/// target_y, target_w, target_h) spread across `ticks` compose
+/// ticks. `ease` picks the interpolation curve. Skipped (no-op)
+/// when the source and target rects are already identical, when
+/// the handle is invalid, OR when an animation is already in
+/// flight for `h` (the in-flight one is allowed to complete; the
+/// new request is dropped). Caps `ticks` at 255.
+void WindowAnimate(WindowHandle h, u32 target_x, u32 target_y, u32 target_w, u32 target_h, u32 ticks,
+                   WindowAnimEase ease = WindowAnimEase::EaseOut);
+
+/// True iff `h` currently has an animation in flight.
+bool WindowAnimateActive(WindowHandle h);
+
+/// Advance every armed window's animation by one tick. Called
+/// from the 100 Hz `WinTimerTicker` task under the compositor
+/// lock. Returns true iff at least one window was stepped this
+/// call (the caller can use this to gate a follow-up
+/// `DesktopCompose` — no animations active means no extra
+/// recompose work is needed).
+bool WindowAnimateStepAll();
+
 /// Snap `h` to the right half. Mirrors Win10's Win+Right.
 void WindowSnapRight(WindowHandle h);
 
@@ -286,6 +329,73 @@ void WindowSnapRight(WindowHandle h);
 /// gives a complete four-direction tile keyboard surface.
 void WindowSnapTop(WindowHandle h);
 void WindowSnapBottom(WindowHandle h);
+
+/// Quarter-screen snap to the four corners of the work area
+/// (framebuffer minus the taskbar strip). Mirrors Win11's
+/// Snap-Layouts corner tiles — what the cursor-distance
+/// snap-zone preview commits when the cursor parks in one of
+/// the four corner hit bands during a drag. Clears the
+/// maximized flag; no-op on invalid handles.
+void WindowSnapTopLeft(WindowHandle h);
+void WindowSnapTopRight(WindowHandle h);
+void WindowSnapBottomLeft(WindowHandle h);
+void WindowSnapBottomRight(WindowHandle h);
+
+// ---------------------------------------------------------------
+// Snap-zone hover preview (Aero Snap-style).
+//
+// While the mouse loop is mid-drag, if the cursor enters one of
+// the screen-edge / corner hit bands the loop arms a translucent
+// preview rectangle painted at the snap target's geometry. The
+// preview lands AFTER all windows but BEFORE tooltips / dialogs
+// so it reads as "what would happen on release" without
+// occluding interaction surfaces. On drag-release with an armed
+// preview, the loop commits the matching `WindowSnap*` op
+// instead of leaving the window at the cursor-released position.
+// Escape during the drag clears the preview.
+//
+// The mouse loop owns transitions; the compositor owns the
+// paint. Both share state through the three accessors below.
+// ---------------------------------------------------------------
+
+enum class SnapZone : u8
+{
+    None = 0,
+    Maximize,    // top edge → full work area
+    Left,        // left edge → left half
+    Right,       // right edge → right half
+    TopLeft,     // top-left corner → top-left quarter
+    TopRight,    // top-right corner → top-right quarter
+    BottomLeft,  // bottom-left corner → bottom-left quarter
+    BottomRight, // bottom-right corner → bottom-right quarter
+};
+
+/// Arm the snap-zone preview for `zone`. `zone == SnapZone::None`
+/// clears the preview. The compositor reads the armed state in
+/// `DesktopCompose` after windows and paints a translucent
+/// `taskbar_accent` rect at the corresponding target geometry.
+/// Idempotent — re-arming the same zone does not flicker (the
+/// rect is recomputed each compose from `WorkArea`).
+void SnapPreviewArm(SnapZone zone);
+
+/// Read the currently-armed snap zone. `SnapZone::None` if
+/// nothing is armed. Used by the mouse-loop release branch to
+/// pick which `WindowSnap*` op (if any) to commit.
+SnapZone SnapPreviewArmed();
+
+/// Hit-test the cursor position against the screen-edge /
+/// corner hit bands and return the corresponding snap zone.
+/// Corners take precedence over edges (a cursor 8 px from the
+/// top-left corner resolves to `TopLeft`, not `Maximize`).
+/// `SnapZone::None` when the cursor is outside every hit band.
+SnapZone SnapPreviewHitTest(u32 cursor_x, u32 cursor_y);
+
+/// Compute the screen-space rect a snap zone would commit. Used
+/// by the mouse loop to suppress an arm when the dragged window
+/// is already exactly at that rect (no visual point — and no
+/// useful commit). Writes zeros for `SnapZone::None` or unknown
+/// values. Any of the out pointers may be null.
+void SnapZoneGetRect(SnapZone zone, u32* x_out, u32* y_out, u32* w_out, u32* h_out);
 
 /// Per-window opacity, 0..255. 0xFF = fully opaque (default).
 /// Lower values fade the window via a post-paint black-alpha
@@ -309,6 +419,28 @@ void WindowClose(WindowHandle h);
 /// `0 .. WindowRegistryCount() - 1`; iterate and filter by
 /// `WindowIsAlive` for the live set.
 u32 WindowRegistryCount();
+
+/// Record a PE-requested cursor shape for `h`. `shape` is the
+/// `CursorShape` enum value (cast to u8 so the header has no
+/// cursor.h dependency). Called by the SYS_GDI_SET_CURSOR
+/// handler after it has located the window under the cursor
+/// that the calling PE owns. Sets the per-window flag so the
+/// mouse-loop hit-test consults the slot on the next motion
+/// packet. No-op on invalid handle.
+void WindowSetRequestedCursorShape(WindowHandle h, u8 shape);
+
+/// Drop the per-window cursor-shape request, reverting `h` to
+/// the kernel-owned hit-test defaults (Arrow / Hand over
+/// buttons / etc.). Idempotent; no-op on invalid handle.
+void WindowClearRequestedCursorShape(WindowHandle h);
+
+/// Read back the PE-requested cursor shape for `h`. Returns
+/// false (and leaves `*shape_out` untouched) if the handle is
+/// invalid OR the PE never called SetCursor for this window,
+/// so callers can distinguish "PE wants Arrow" from "PE never
+/// asked." On success writes the stored `CursorShape` value to
+/// `*shape_out` (when non-null) and returns true.
+bool WindowGetRequestedCursorShape(WindowHandle h, u8* shape_out);
 
 /// True iff `h` is a valid registered slot AND the window has not
 /// been closed.

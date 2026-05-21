@@ -47,6 +47,7 @@
 #include "syscall/error.h"
 #include "syscall/syscall.h"
 #include "drivers/video/cursor.h"
+#include "drivers/video/widget.h"
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/hpet.h"
@@ -3740,6 +3741,21 @@ void SyscallDispatch(arch::TrapFrame* frame)
         // to the kernel's CursorShape enum and return the
         // previous shape so user32 can implement the standard
         // SetCursor "previous handle" return.
+        //
+        // Storage: per-window, applied per-process. Each alive
+        // PE window owned by the calling pid receives the same
+        // requested shape. The mouse-loop's hit-test (see
+        // kernel/core/boot_tasks.cpp) consults the requested
+        // slot on the window the cursor is currently over, AFTER
+        // its kernel-priority rules (resize bands, Hand on
+        // buttons, IBeam over native text fields), so PE's
+        // explicit shape wins where the kernel had no opinion.
+        // Custom HCURSOR (slot id ≥ 256) bypasses the per-window
+        // path and stamps the global cursor directly — custom
+        // sprites are loud one-shots (apps explicitly
+        // CreateCursor + SetCursor on every WM_SETCURSOR), and
+        // the mouse loop's change-gate keeps the per-packet cost
+        // pinned to zero once the shape is stable.
         const u32 req = static_cast<u32>(frame->rdi);
         using duetos::drivers::video::CursorGetShape;
         using duetos::drivers::video::CursorSetShape;
@@ -3787,10 +3803,40 @@ void SyscallDispatch(arch::TrapFrame* frame)
             want = CursorShape::Arrow;
             break;
         }
-        // Skip the change if Wait is currently active — long-op
-        // holders own the shape; the PE's request is parked
-        // until the wait pops.
-        if (prev != CursorShape::Wait)
+        // Stamp the requested shape on every alive window owned
+        // by the caller's pid. Per-process semantics: the next
+        // mouse-loop tick that lands on any of those windows
+        // applies `want` before the unconditional Arrow fallback.
+        // Kernel-owned hit-test rules (resize bands, Hand over
+        // buttons) still win — they're checked first in the
+        // mouse loop and only fall through to the per-window
+        // request when none matched.
+        const Process* proc = CurrentProcess();
+        const u64 pid = (proc != nullptr) ? proc->pid : 0;
+        if (pid != 0)
+        {
+            using duetos::drivers::video::WindowIsAlive;
+            using duetos::drivers::video::WindowOwnerPid;
+            using duetos::drivers::video::WindowRegistryCount;
+            using duetos::drivers::video::WindowSetRequestedCursorShape;
+            const u32 nwin = WindowRegistryCount();
+            for (u32 i = 0; i < nwin; ++i)
+            {
+                if (WindowIsAlive(i) && WindowOwnerPid(i) == pid)
+                {
+                    WindowSetRequestedCursorShape(i, static_cast<u8>(want));
+                }
+            }
+        }
+        // Also stamp the live cursor immediately when (a) Wait
+        // is not active (long-op holders own the shape) AND
+        // (b) the caller has no PE windows the mouse-loop can
+        // bind the request to — e.g. a console-style PE that
+        // wants the hourglass during a background scan but never
+        // called CreateWindow. The mouse-loop's per-packet
+        // hit-test will overwrite this on the next motion if it
+        // disagrees, which is the correct fallback.
+        if (prev != CursorShape::Wait && pid == 0)
         {
             CursorSetShape(want);
         }

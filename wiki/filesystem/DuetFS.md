@@ -26,8 +26,10 @@ first Rust subsystem in the kernel. v3 ships:
 - **on-disk auto-mount**: every kernel block-device handle holding a v3 superblock is mounted at `/disks/duetfs<N>`
 - routed through the standard VFS (`VfsResolve("/duetfs/...")` returns a `VfsNode` with `backend == VfsBackend::DuetFs`)
 
-CoW / journal, multi-block CRC tables, encryption, compression, and
-B-tree directory indexes land in later slices.
+CoW, multi-block CRC tables, and B-tree directory indexes land in
+later slices. (Journal in `journal.rs`, AES-XTS + Argon2 KDF in
+`crypto.rs`, LZ4 compression in `compress.rs`, snapshots in
+`snapshot.rs` all landed.)
 
 The lineage is **clean-room from RedoxFS** ([redox-os/redoxfs](https://github.com/redox-os/redoxfs),
 MIT). RedoxFS uses a B-tree and AES-XTS encryption; DuetFS v1 keeps

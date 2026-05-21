@@ -2276,7 +2276,10 @@ __declspec(dllexport) BOOL Beep(DWORD freq, DWORD dur)
 /* --- Menu API ---
  * HMENU is a userland-allocated struct held in the per-process
  * bump pool below. Submenu marshaling across the SYS_WIN_TRACK_POPUP
- * syscall is a v0 GAP — submenu rows fall through as no-op clicks.
+ * syscall flattens the HMENU tree (depth-first) into the kernel's
+ * fixed-size flat array, with parent rows carrying child_index /
+ * child_count back-references into the same array. Depth is capped
+ * at the kernel's kMenuMaxStack (4 panels).
  * GetMenu/SetMenu/DrawMenuBar/LoadMenu/GetSystemMenu remain stubs
  * because menubars and resource-loaded menus are out of scope. */
 
@@ -2680,25 +2683,99 @@ __declspec(dllexport) BOOL ModifyMenuW(HANDLE menu, UINT pos, UINT flags, unsign
 }
 
 /* Wire format the kernel expects (mirror of TpReqWire / TpItemWire
- * in kernel/subsystems/win32/window_syscall.cpp). MUST match. */
+ * in kernel/subsystems/win32/window_syscall.cpp). MUST match.
+ *
+ * Flat-array submenu marshaling: items are laid out as one flat
+ * array. The first `root_count` items are the root menu; subsequent
+ * items are the depth-first-flattened children of submenu rows.
+ * Each submenu-flagged item carries `child_index` (start of its
+ * children in the same flat array; -1 means none) and `child_count`.
+ *
+ * Depth cap mirrors the kernel's kMenuMaxStack = 4 panels (root +
+ * 3 submenus); any HMENU nested deeper is rejected by the thunk
+ * before issuing the syscall. */
 #define USER32_TP_LABEL_CAP 32
-#define USER32_TP_MAX_ITEMS 12
+#define USER32_TP_MAX_ITEMS 32
+#define USER32_TP_MAX_DEPTH 4
 
 struct user32_tp_item
 {
     unsigned action_id;
     unsigned flags;
+    int child_index; /* -1 = no children */
+    unsigned child_count;
     char label[USER32_TP_LABEL_CAP];
 };
 
 struct user32_tp_req
 {
-    unsigned count;
+    unsigned count;      /* total items in the flat array */
+    unsigned root_count; /* first `root_count` items form the root menu */
     unsigned flags;
     int screen_x, screen_y;
     unsigned long long hwnd_biased;
     struct user32_tp_item items[USER32_TP_MAX_ITEMS];
 };
+
+/* Depth-first flatten of a userland menu tree into the wire array.
+ *
+ * Lays the input HMENU's items at `out_start` first, then for every
+ * row with a submenu, recursively appends its children to the tail
+ * and patches the parent's child_index back to that tail offset.
+ * Forward-only layout matches the kernel's "child_index > parent"
+ * validation.
+ *
+ * Returns 1 on success, 0 if the layout would exceed the flat-array
+ * cap or the depth cap. `*out_used` is the total items emitted so
+ * far; the caller seeds it with the root count and the function
+ * grows it as submenus get appended.
+ */
+static int user32_tp_flatten(struct user32_menu* m, struct user32_tp_req* req, unsigned out_start, unsigned* out_used,
+                             unsigned depth)
+{
+    if (depth > USER32_TP_MAX_DEPTH)
+        return 0;
+    /* Copy this panel's items into the slots reserved by the caller. */
+    for (unsigned i = 0; i < m->count; ++i)
+    {
+        const unsigned slot = out_start + i;
+        if (slot >= USER32_TP_MAX_ITEMS)
+            return 0;
+        req->items[slot].action_id = m->items[i].action_id;
+        req->items[slot].flags = m->items[i].flags;
+        req->items[slot].child_index = -1;
+        req->items[slot].child_count = 0;
+        unsigned j = 0;
+        for (; j + 1 < USER32_TP_LABEL_CAP && m->items[i].label[j]; ++j)
+            req->items[slot].label[j] = m->items[i].label[j];
+        req->items[slot].label[j] = '\0';
+    }
+    /* Now walk again to emit children depth-first. We do this in a
+     * second pass so all of THIS panel's slots are stable before any
+     * recursion bumps `*out_used`. */
+    for (unsigned i = 0; i < m->count; ++i)
+    {
+        struct user32_menu* child = m->items[i].submenu ? user32_menu_resolve(m->items[i].submenu) : 0;
+        if (!child || child->count == 0)
+        {
+            /* MF_POPUP set without a real submenu (null pointer,
+             * dangling HMENU, or zero-row child) — strip the flag
+             * so the kernel doesn't see a submenu row that points
+             * nowhere. */
+            req->items[out_start + i].flags &= ~USER32_KMENU_FLAG_SUBMENU;
+            continue;
+        }
+        const unsigned child_at = *out_used;
+        if (child_at + child->count > USER32_TP_MAX_ITEMS)
+            return 0;
+        req->items[out_start + i].child_index = (int)child_at;
+        req->items[out_start + i].child_count = child->count;
+        *out_used += child->count;
+        if (!user32_tp_flatten(child, req, child_at, out_used, depth + 1))
+            return 0;
+    }
+    return 1;
+}
 
 __declspec(dllexport) BOOL TrackPopupMenu(HANDLE menu, UINT flags, int x, int y, int reserved, HANDLE hwnd, void* rect)
 {
@@ -2710,24 +2787,23 @@ __declspec(dllexport) BOOL TrackPopupMenu(HANDLE menu, UINT flags, int x, int y,
     if (m->count > USER32_TP_MAX_ITEMS)
         return 0;
     struct user32_tp_req req;
-    /* Zero unused tail items so non-debug kernels can't fault on
-     * stale stack bytes. */
+    /* Zero the whole request so kernel-side validation sees
+     * child_index = 0 / child_count = 0 for any slot we don't
+     * touch (the kernel rejects 0 < self, so unwritten slots can't
+     * masquerade as valid back-pointers). */
     for (unsigned i = 0; i < sizeof(req); ++i)
         ((unsigned char*)&req)[i] = 0;
-    req.count = m->count;
+    req.root_count = m->count;
     req.flags = flags;
     req.screen_x = x;
     req.screen_y = y;
     req.hwnd_biased = (unsigned long long)hwnd;
-    for (unsigned i = 0; i < m->count; ++i)
-    {
-        req.items[i].action_id = m->items[i].action_id;
-        req.items[i].flags = m->items[i].flags;
-        unsigned j = 0;
-        for (; j + 1 < USER32_TP_LABEL_CAP && m->items[i].label[j]; ++j)
-            req.items[i].label[j] = m->items[i].label[j];
-        req.items[i].label[j] = '\0';
-    }
+    /* Seed `count` with the root population, then let the
+     * depth-first walker grow it as it emits each submenu. */
+    unsigned used = m->count;
+    if (!user32_tp_flatten(m, &req, 0, &used, 1))
+        return 0;
+    req.count = used;
     long long rv;
     __asm__ volatile("int $0x80"
                      : "=a"(rv)

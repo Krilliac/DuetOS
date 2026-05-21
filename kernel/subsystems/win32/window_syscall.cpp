@@ -2209,7 +2209,14 @@ void DoWinSetText(arch::TrapFrame* frame)
 namespace
 {
 
-constexpr u32 kTpMaxItems = duetos::drivers::video::kMenuMaxStack > 0 ? 12u : 12u;
+// Flat-array popup-menu wire format holds the root menu followed by every
+// submenu's children, all in one fixed-size array. A v0 PE pop-up rarely
+// exceeds a couple of submenus of a few items each, so 32 slots covers
+// the realistic worst case (e.g. a 6-row root with three 6-row
+// submenus = 24 items) while keeping the static label arena cheap.
+// Bumped from 12 → 32 when submenu marshaling landed (see
+// `wiki/subsystems/Compositor.md` §Popup Menus).
+constexpr u32 kTpMaxItems = 32;
 constexpr u32 kTpLabelMax = 32;
 constexpr u32 kTpFlagReturnCmd = 0x0100; // matches Win32 TPM_RETURNCMD
 constexpr u32 kTpFlagNoNotify = 0x0080;  // matches Win32 TPM_NONOTIFY
@@ -2233,16 +2240,32 @@ constexpr u32 kMenuVPadding = 4;
 // caller's stack and passes via rdi. Fixed-size to keep the
 // kernel-side copy a single CopyFromUser. Layout is part of the
 // SYS_WIN_TRACK_POPUP ABI.
+//
+// Submenu marshaling: items are laid out as a single flat array.
+// `root_count` items at the start form the root menu; subsequent
+// items are the flattened children of submenu-flagged rows. An item
+// with `flags & kMenuItemFlagSubmenu` sets `child_index` to the
+// index of the first child in the same flat array and `child_count`
+// to the number of children at that index. `child_index == -1`
+// means "no children" (flat item, ignored even if the submenu bit
+// is incidentally set). The kernel rejects:
+//   - child_index < 0 with child_count > 0
+//   - child_index + child_count > count
+//   - child_index <= self_index (forward-only — also kills cycles)
+//   - effective panel depth > kMenuMaxStack
 struct TpItemWire
 {
     u32 action_id;
-    u32 flags; // mirrors kMenuItemFlag* (low 4 bits)
+    u32 flags;       // mirrors kMenuItemFlag* (low 4 bits)
+    i32 child_index; // -1 = no children; otherwise index into the same flat array
+    u32 child_count; // number of children at child_index (0 if no children)
     char label[kTpLabelMax];
 };
 
 struct TpReqWire
 {
-    u32 count;
+    u32 count;      // total items in the flat array (root + every submenu's children)
+    u32 root_count; // first `root_count` items form the root menu; bounded by kTpMaxItems
     u32 flags;
     i32 screen_x;
     i32 screen_y;
@@ -2304,10 +2327,122 @@ void DoWinTrackPopup(arch::TrapFrame* frame)
         frame->rax = 0;
         return;
     }
+    // `count` is the TOTAL flat-array population (root + every nested
+    // submenu's children); `root_count` is what gets passed to MenuOpen.
+    // Root must fit the kernel menu primitive's per-panel cap (also
+    // bounded by kTpMaxItems for the same reason).
     if (req.count == 0 || req.count > max_count || req.count > kTpMaxItems)
     {
         frame->rax = 0;
         return;
+    }
+    if (req.root_count == 0 || req.root_count > req.count ||
+        req.root_count > duetos::drivers::video::kMenuMaxItemsPerPanel)
+    {
+        // Per-panel cap mirrors the menu primitive — anything longer
+        // would get silently truncated inside MenuOpen, which is a
+        // worse failure mode than a refused syscall.
+        frame->rax = 0;
+        return;
+    }
+
+    // Pass 1: validate every item's child range before we touch the
+    // shared kernel state. Reject malformed layouts (negative index
+    // with non-zero count, out-of-bounds child range, non-forward /
+    // self-overlapping reference) and any item whose label exceeds
+    // the wire cap. Also compute effective panel depth via a simple
+    // BFS from the root range and reject deeper than kMenuMaxStack
+    // (matches the menu primitive's own cap).
+    for (u32 i = 0; i < req.count; ++i)
+    {
+        const TpItemWire& w = req.items[i];
+        const bool wants_submenu = (w.flags & kMenuItemFlagSubmenu) != 0;
+        if (w.child_index < 0)
+        {
+            if (w.child_count != 0)
+            {
+                frame->rax = 0;
+                return;
+            }
+            // Submenu bit without children: tolerated as a flat item
+            // (we strip the bit below) — matches Win32 USER which
+            // ignores MF_POPUP if the item has no submenu attached.
+            (void)wants_submenu;
+        }
+        else
+        {
+            const u32 idx = static_cast<u32>(w.child_index);
+            // Forward-only reference catches self-loops and any
+            // cycle in one check: a child range that starts at or
+            // before its parent's own slot would let a cycle close.
+            if (idx <= i)
+            {
+                frame->rax = 0;
+                return;
+            }
+            if (w.child_count == 0)
+            {
+                frame->rax = 0;
+                return;
+            }
+            if (idx >= req.count || w.child_count > req.count || idx + w.child_count > req.count)
+            {
+                frame->rax = 0;
+                return;
+            }
+            // Per-panel cap: each submenu also has to fit the menu
+            // primitive's per-panel slot count, otherwise children
+            // would silently vanish inside MenuOpenSubmenu.
+            if (w.child_count > duetos::drivers::video::kMenuMaxItemsPerPanel)
+            {
+                frame->rax = 0;
+                return;
+            }
+        }
+    }
+
+    // BFS the panel tree starting at the root range. Each item with a
+    // valid child range bumps the depth of its children by 1. We track
+    // the deepest level reached and reject if it exceeds kMenuMaxStack.
+    // Cycles are already impossible (forward-only check above), so a
+    // single linear scan with per-item depth memo terminates.
+    {
+        u32 depth[kTpMaxItems] = {};
+        for (u32 i = 0; i < req.root_count; ++i)
+            depth[i] = 1; // root panel is depth 1
+        u32 max_depth_reached = req.root_count > 0 ? 1u : 0u;
+        for (u32 i = 0; i < req.count; ++i)
+        {
+            if (depth[i] == 0)
+                continue; // unreachable from root; will get rejected as orphan below
+            const TpItemWire& w = req.items[i];
+            if (w.child_index < 0 || (w.flags & kMenuItemFlagSubmenu) == 0)
+                continue;
+            const u32 child_depth = depth[i] + 1;
+            if (child_depth > duetos::drivers::video::kMenuMaxStack)
+            {
+                frame->rax = 0;
+                return;
+            }
+            const u32 base = static_cast<u32>(w.child_index);
+            for (u32 c = 0; c < w.child_count; ++c)
+                depth[base + c] = child_depth;
+            if (child_depth > max_depth_reached)
+                max_depth_reached = child_depth;
+        }
+        // Every item must be reachable — otherwise the caller wired
+        // extra slots that nothing references, which is either a bug
+        // or a leak vector (e.g. probing the kernel's static label
+        // arena). Refuse rather than silently waste a slot.
+        for (u32 i = 0; i < req.count; ++i)
+        {
+            if (depth[i] == 0)
+            {
+                frame->rax = 0;
+                return;
+            }
+        }
+        (void)max_depth_reached;
     }
 
     // Acquire the popup lock. Single-instance: a second caller
@@ -2330,10 +2465,12 @@ void DoWinTrackPopup(arch::TrapFrame* frame)
     g_tp_caller_flags = req.flags;
     g_tp_hwnd_biased = req.hwnd_biased;
 
-    // Build the label arena + MenuItem table while holding the
-    // popup lock — the mouse-reader's MenuFeedKey path won't fire
-    // until MenuOpen runs below, so g_tp_items can't be observed
-    // mid-write.
+    // Pass 2: build the label arena + MenuItem table while holding
+    // the popup lock — the mouse-reader's MenuFeedKey path won't
+    // fire until MenuOpen runs below, so g_tp_items can't be
+    // observed mid-write. We populate every slot first (so submenu
+    // back-pointers land in fully-initialised MenuItems), then walk
+    // the array a third time to patch parent → child pointers.
     for (u32 i = 0; i < req.count; ++i)
     {
         const TpItemWire& w = req.items[i];
@@ -2355,12 +2492,30 @@ void DoWinTrackPopup(arch::TrapFrame* frame)
         g_tp_labels[i][kTpLabelMax] = '\0';
         g_tp_items[i].label = g_tp_labels[i];
         g_tp_items[i].action_id = w.action_id;
-        // Translate caller flags. Submenu marshaling is a v0 GAP
-        // — strip the bit so the kernel never tries to follow
-        // a null submenu pointer.
-        g_tp_items[i].flags = w.flags & (kMenuItemFlagDisabled | kMenuItemFlagChecked | kMenuItemFlagSeparator);
+        // Translate caller flags. Submenu bit is preserved only
+        // when this item actually points at a non-empty child
+        // range (validated above); otherwise it's stripped so the
+        // kernel never tries to follow a null pointer.
+        u32 base_flags = w.flags & (kMenuItemFlagDisabled | kMenuItemFlagChecked | kMenuItemFlagSeparator);
+        const bool has_children = (w.flags & kMenuItemFlagSubmenu) != 0 && w.child_index >= 0 && w.child_count > 0;
+        if (has_children)
+            base_flags |= kMenuItemFlagSubmenu;
+        g_tp_items[i].flags = base_flags;
         g_tp_items[i].submenu = nullptr;
         g_tp_items[i].submenu_count = 0;
+    }
+    // Pass 3: patch parent → child pointers. Safe to take the
+    // address of `g_tp_items[child_index]` now that every slot is
+    // populated and the array's storage is stable.
+    for (u32 i = 0; i < req.count; ++i)
+    {
+        const TpItemWire& w = req.items[i];
+        if ((g_tp_items[i].flags & kMenuItemFlagSubmenu) == 0)
+            continue;
+        // Validated above: child_index >= 0, child_count > 0,
+        // child_index + child_count <= req.count.
+        g_tp_items[i].submenu = &g_tp_items[static_cast<u32>(w.child_index)];
+        g_tp_items[i].submenu_count = w.child_count;
     }
     duetos::sched::MutexUnlock(&g_tp_lock);
 
@@ -2375,7 +2530,9 @@ void DoWinTrackPopup(arch::TrapFrame* frame)
     //   TPM_RIGHTALIGN   → menu right edge at screen_x (shift left by w)
     //   TPM_VCENTERALIGN → menu centred on screen_y (shift up by h/2)
     //   TPM_BOTTOMALIGN  → menu bottom edge at screen_y (shift up by h)
-    const u32 menu_h = req.count * kMenuRowHeight + kMenuVPadding;
+    // Anchor math uses the root panel's height — submenus open
+    // adjacent to their parent rows and don't grow the root.
+    const u32 menu_h = req.root_count * kMenuRowHeight + kMenuVPadding;
     i32 ax = req.screen_x;
     i32 ay = req.screen_y;
     if ((req.flags & kTpFlagCenterAlign) != 0)
@@ -2393,7 +2550,7 @@ void DoWinTrackPopup(arch::TrapFrame* frame)
         ax = 0;
     if (ay < 0)
         ay = 0;
-    MenuOpen(g_tp_items, req.count, static_cast<u32>(ax), static_cast<u32>(ay), kTrackPopupSentinelCtx);
+    MenuOpen(g_tp_items, req.root_count, static_cast<u32>(ax), static_cast<u32>(ay), kTrackPopupSentinelCtx);
     DesktopCompose(ThemeCurrent().desktop_bg, "WELCOME TO DUETOS   BOOT OK");
     CompositorUnlock();
 
@@ -2401,6 +2558,8 @@ void DoWinTrackPopup(arch::TrapFrame* frame)
     SerialWriteHex(req.hwnd_biased);
     SerialWrite(" count=");
     SerialWriteHex(req.count);
+    SerialWrite(" root=");
+    SerialWriteHex(req.root_count);
     SerialWrite(" flags=");
     SerialWriteHex(req.flags);
     SerialWrite("\n");

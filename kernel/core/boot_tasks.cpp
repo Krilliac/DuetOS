@@ -310,6 +310,27 @@ void KbdReaderTask(void*)
             continue;
         }
 
+        // Esc during a snap-zone hover preview clears the
+        // preview without affecting the in-flight drag-move —
+        // the user keeps holding LMB, the translucent target
+        // overlay vanishes, and a subsequent release commits
+        // the window at the cursor position (no snap). The
+        // mouse loop owns the drag state machine so we just
+        // drop the preview state here and force a recompose;
+        // the keystroke is NOT consumed (no `continue;`) so
+        // other Esc-listeners downstream still get a chance.
+        if (ev.code == kKeyEsc && !ev.is_release &&
+            duetos::drivers::video::SnapPreviewArmed() != duetos::drivers::video::SnapZone::None)
+        {
+            duetos::drivers::video::CompositorLock();
+            duetos::drivers::video::SnapPreviewArm(duetos::drivers::video::SnapZone::None);
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+            duetos::drivers::video::CompositorUnlock();
+            continue;
+        }
+
         // Modal-dialog gate: when a MessageBox / InputBox is
         // up, route every keystroke into the dialog and skip
         // every downstream branch (menus, shortcuts, app
@@ -1471,9 +1492,10 @@ void KbdReaderTask(void*)
                     app_consumed = duetos::apps::files::FilesFeedListKey(static_cast<duetos::u16>(ev.code));
                 }
                 else if (active == duetos::apps::imageview::ImageViewWindow() &&
-                         (ev.code == kKeyArrowLeft || ev.code == kKeyArrowRight))
+                         (ev.code == kKeyArrowLeft || ev.code == kKeyArrowRight || ev.code == kKeyArrowUp ||
+                          ev.code == kKeyArrowDown))
                 {
-                    app_consumed = duetos::apps::imageview::ImageViewFeedArrow(ev.code == kKeyArrowLeft);
+                    app_consumed = duetos::apps::imageview::ImageViewFeedArrow(static_cast<duetos::u16>(ev.code));
                 }
                 else if (active == duetos::apps::browser::BrowserWindow() &&
                          (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown))
@@ -2038,14 +2060,27 @@ void MouseReaderTask(void*)
         // Cursor-shape hit-test. Skipped while Wait is active
         // (the long-op holder owns the shape). Otherwise:
         // hovering a button widget → Hand; hovering Notes /
-        // Browser editable client area → IBeam; everywhere
-        // else → Arrow. The CursorSetShape change-gate keeps
-        // per-packet calls cheap when the shape doesn't move.
+        // Browser editable client area → IBeam; PE-owned window
+        // with a Win32 SetCursor-requested shape → that shape;
+        // everywhere else → Arrow. The CursorSetShape change-gate
+        // keeps per-packet calls cheap when the shape doesn't
+        // move.
+        //
+        // Priority order: kernel-owned chrome rules (resize bands,
+        // Hand-on-button, native IBeam) win over the PE-requested
+        // shape. The PE request replaces the unconditional Arrow
+        // fallback for windows whose owning process has called
+        // user32!SetCursor (see SYS_GDI_SET_CURSOR handler) — so
+        // a PE drawing its own text-edit area can set IBeam and
+        // have it honored on every motion packet, but the kernel
+        // still wins when the cursor is over a resize band or a
+        // button-widget on top of the PE window.
         if (duetos::drivers::video::CursorGetShape() != duetos::drivers::video::CursorShape::Wait)
         {
             using duetos::drivers::video::CursorShape;
             using duetos::drivers::video::WindowResizeEdge;
             CursorShape want = CursorShape::Arrow;
+            bool want_chosen = false; // gates the PE-request fallback
             const auto over_resize = cached_topmost_under_cursor;
             WindowResizeEdge edge = WindowResizeEdge::None;
             if (over_resize != duetos::drivers::video::kWindowInvalid)
@@ -2055,22 +2090,27 @@ void MouseReaderTask(void*)
             if (edge == WindowResizeEdge::Left || edge == WindowResizeEdge::Right)
             {
                 want = CursorShape::ResizeEW;
+                want_chosen = true;
             }
             else if (edge == WindowResizeEdge::Top || edge == WindowResizeEdge::Bottom)
             {
                 want = CursorShape::ResizeNS;
+                want_chosen = true;
             }
             else if (edge == WindowResizeEdge::TopLeft || edge == WindowResizeEdge::BottomRight)
             {
                 want = CursorShape::ResizeNWSE;
+                want_chosen = true;
             }
             else if (edge == WindowResizeEdge::TopRight || edge == WindowResizeEdge::BottomLeft)
             {
                 want = CursorShape::ResizeNESW;
+                want_chosen = true;
             }
             else if (duetos::drivers::video::WidgetCursorOverButton(cx, cy))
             {
                 want = CursorShape::Hand;
+                want_chosen = true;
             }
             else if (over_resize != duetos::drivers::video::kWindowInvalid &&
                      !duetos::drivers::video::WindowPointInTitle(over_resize, cx, cy) &&
@@ -2078,6 +2118,32 @@ void MouseReaderTask(void*)
                       over_resize == duetos::apps::browser::BrowserWindow()))
             {
                 want = CursorShape::IBeam;
+                want_chosen = true;
+            }
+            // No kernel-owned rule matched — consult the
+            // per-window PE-requested cursor shape (set via
+            // SYS_GDI_SET_CURSOR). Only honored when the cursor is
+            // over a window that called SetCursor; otherwise the
+            // Arrow default falls through. Title-bar hits keep the
+            // Arrow fallback so window chrome stays predictable
+            // even when the PE requests something for the client
+            // area.
+            if (!want_chosen && over_resize != duetos::drivers::video::kWindowInvalid &&
+                !duetos::drivers::video::WindowPointInTitle(over_resize, cx, cy))
+            {
+                duetos::u8 pe_shape = 0;
+                if (duetos::drivers::video::WindowGetRequestedCursorShape(over_resize, &pe_shape))
+                {
+                    // Clamp to the known enum range. Out-of-range
+                    // values (a future enum extension a stale
+                    // kernel doesn't recognise) collapse to Arrow
+                    // so the cursor never paints uninitialised
+                    // sprite memory.
+                    if (pe_shape <= static_cast<duetos::u8>(CursorShape::ResizeNWSE))
+                    {
+                        want = static_cast<CursorShape>(pe_shape);
+                    }
+                }
             }
             duetos::drivers::video::CursorSetShape(want);
         }
@@ -2757,28 +2823,51 @@ void MouseReaderTask(void*)
         }
         if (release_edge && drag.active)
         {
-            // Aero-style edge snap: dropping a dragged window
-            // against a screen edge snaps it (top = maximize,
-            // left/right = half). The snap APIs were already
-            // keyboard-wired; the mouse drag-to-edge gesture —
-            // what most users actually reach for — was the dead
-            // zone. Compositor lock is held here (loop acquires
-            // it at the top), so call the snap ops directly.
-            const auto fb_snap = duetos::drivers::video::FramebufferGet();
-            constexpr duetos::u32 kSnapEdge = 12;
+            // Aero-style snap commit: if the drag-motion path
+            // armed a snap-zone preview (translucent overlay
+            // visible), commit the matching snap operation
+            // instead of leaving the window at the cursor-
+            // released position. No armed zone → the drag ends
+            // wherever the cursor landed, exactly as before.
+            // The compositor lock is held here (loop acquires
+            // it at the top of the body), so call the snap ops
+            // directly. Always clear the preview on release so a
+            // re-drag starts from a clean slate.
+            const duetos::drivers::video::SnapZone zone = duetos::drivers::video::SnapPreviewArmed();
             bool snapped = true;
-            if (cy <= kSnapEdge)
+            switch (zone)
+            {
+            case duetos::drivers::video::SnapZone::Maximize:
                 duetos::drivers::video::WindowMaximize(drag.window);
-            else if (cx <= kSnapEdge)
+                break;
+            case duetos::drivers::video::SnapZone::Left:
                 duetos::drivers::video::WindowSnapLeft(drag.window);
-            else if (fb_snap.width > kSnapEdge && cx >= fb_snap.width - kSnapEdge)
+                break;
+            case duetos::drivers::video::SnapZone::Right:
                 duetos::drivers::video::WindowSnapRight(drag.window);
-            else
+                break;
+            case duetos::drivers::video::SnapZone::TopLeft:
+                duetos::drivers::video::WindowSnapTopLeft(drag.window);
+                break;
+            case duetos::drivers::video::SnapZone::TopRight:
+                duetos::drivers::video::WindowSnapTopRight(drag.window);
+                break;
+            case duetos::drivers::video::SnapZone::BottomLeft:
+                duetos::drivers::video::WindowSnapBottomLeft(drag.window);
+                break;
+            case duetos::drivers::video::SnapZone::BottomRight:
+                duetos::drivers::video::WindowSnapBottomRight(drag.window);
+                break;
+            case duetos::drivers::video::SnapZone::None:
+            default:
                 snapped = false;
-            SerialWrite(snapped ? "[ui] drag end (edge snap) window=" : "[ui] drag end window=");
+                break;
+            }
+            SerialWrite(snapped ? "[ui] drag end (snap-zone) window=" : "[ui] drag end window=");
             SerialWriteHex(drag.window);
             SerialWrite("\n");
             drag.active = false;
+            duetos::drivers::video::SnapPreviewArm(duetos::drivers::video::SnapZone::None);
             if (snapped)
             {
                 duetos::drivers::video::CursorHide();
@@ -3010,6 +3099,29 @@ void MouseReaderTask(void*)
             const duetos::u32 nx = (cx > drag.grab_offset_x) ? cx - drag.grab_offset_x : 0;
             const duetos::u32 ny = (cy > drag.grab_offset_y) ? cy - drag.grab_offset_y : 0;
             duetos::drivers::video::WindowMoveTo(drag.window, nx, ny);
+            // Aero-style snap-zone hover preview. Hit-test the
+            // cursor against the screen-edge / corner bands and
+            // arm the preview rect. Re-arming the same zone is a
+            // no-op (cheap scalar write); leaving every band
+            // clears the armed state so the overlay disappears
+            // when the user steers back to the interior.
+            duetos::drivers::video::SnapZone zone = duetos::drivers::video::SnapPreviewHitTest(cx, cy);
+            if (zone != duetos::drivers::video::SnapZone::None)
+            {
+                // Suppress the arm when the dragged window
+                // already occupies exactly the target rect —
+                // the preview would just sit on top of the
+                // window's own chrome with nothing to suggest.
+                duetos::u32 zx = 0, zy = 0, zw = 0, zh = 0;
+                duetos::drivers::video::SnapZoneGetRect(zone, &zx, &zy, &zw, &zh);
+                duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+                if (duetos::drivers::video::WindowGetBounds(drag.window, &wx, &wy, &ww, &wh) && wx == zx &&
+                    wy == zy && ww == zw && wh == zh)
+                {
+                    zone = duetos::drivers::video::SnapZone::None;
+                }
+            }
+            duetos::drivers::video::SnapPreviewArm(zone);
             duetos::drivers::video::CursorHide();
             duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
             duetos::drivers::video::CursorShow();
@@ -3103,13 +3215,40 @@ void MouseReaderTask(void*)
 
 // Win32 timer ticker: walks the per-window timer table every
 // scheduler tick and posts WM_TIMER under the compositor lock.
+// Doubles as the 100 Hz driver for `WindowAnimateStepAll` — the
+// min / max / restore / snap tweens advance one step per call
+// here (the only path in the kernel that runs at 100 Hz under
+// the compositor lock). When a tween is actively stepping, the
+// task forces a `DesktopCompose` so the user sees the motion;
+// the 1 Hz `UiTickerTask`'s cadence is too coarse to render
+// a ~100 ms transition smoothly.
 void WinTimerTickerTask(void*)
 {
+    auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
     for (;;)
     {
         duetos::sched::SchedSleepTicks(1);
         duetos::drivers::video::CompositorLock();
         duetos::drivers::video::WindowTimerTick();
+        const bool anim_stepped = duetos::drivers::video::WindowAnimateStepAll();
+        if (anim_stepped)
+        {
+            // Skip recompose while the login gate owns the
+            // framebuffer or in TTY mode — animations are a
+            // desktop-only affordance and the gate / TTY paths
+            // would clobber their own state if we composed
+            // here.
+            const bool gate_active = duetos::core::LoginIsActive() &&
+                                     duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui;
+            const bool is_tty =
+                duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty;
+            if (!gate_active && !is_tty)
+            {
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+            }
+        }
         duetos::drivers::video::CompositorUnlock();
     }
 }

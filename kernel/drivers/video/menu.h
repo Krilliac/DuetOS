@@ -42,6 +42,12 @@ constexpr u32 kMenuItemFlagSeparator = 1u << 3;
 /// the kernel rejects deeper opens.
 constexpr u32 kMenuMaxStack = 4;
 
+/// Maximum items per panel. Each panel (root or submenu) holds at
+/// most this many rows; MenuOpen / MenuOpenSubmenu silently truncate
+/// anything longer. Exposed so syscall marshals can reject early
+/// instead of letting items vanish at the primitive boundary.
+constexpr u32 kMenuMaxItemsPerPanel = 12;
+
 struct MenuItem
 {
     const char* label;       // nullptr OK if separator flag set

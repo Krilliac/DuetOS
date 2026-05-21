@@ -9,7 +9,9 @@ namespace duetos::drivers::video
 namespace
 {
 
-constexpr u32 kMaxItems = 12;
+// Alias of the public cap (kept local for the brevity of the
+// hot-path indices below). Changing the cap goes in menu.h.
+constexpr u32 kMaxItems = kMenuMaxItemsPerPanel;
 constexpr u32 kRowHeight = 22;
 constexpr u32 kMenuWidth = 240;
 constexpr u32 kPaddingX = 8;

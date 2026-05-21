@@ -1689,22 +1689,37 @@ enum SyscallNumber : u64
     // until the user picks an item (or dismisses). Backs USER32's
     // TrackPopupMenu / TrackPopupMenuEx for PE apps.
     //   rdi = user pointer to a TrackPopupReq struct (see below):
-    //         u32 count;            // <= kMenuMaxItems (12)
+    //         u32 count;            // total items in flat array
+    //                               //  (root + every submenu's
+    //                               //  flattened children); <= 32
+    //         u32 root_count;       // items[0..root_count) form
+    //                               //  the root menu; <= 12
     //         u32 flags;            // TPM_RETURNCMD = 0x0100;
     //                               //  cleared = also post WM_COMMAND
     //         i32 screen_x, screen_y;
     //         u64 hwnd_biased;      // owner; receives WM_COMMAND
     //         struct {
-    //             u32 action_id;    // nonzero
-    //             u32 flags;        // disabled/checked/separator
-    //                               //  (submenu = GAP v0)
+    //             u32 action_id;    // nonzero on leaf rows;
+    //                               //  ignored on submenu rows
+    //             u32 flags;        // disabled/checked/separator/
+    //                               //  submenu (kMenuItemFlag*)
+    //             i32 child_index;  // -1 = leaf row, else index
+    //                               //  into items[] where this
+    //                               //  row's submenu begins
+    //                               //  (must be > self_index;
+    //                               //  forward-only kills cycles)
+    //             u32 child_count;  // children at child_index;
+    //                               //  0 iff child_index == -1
     //             char label[32];   // ASCII, NUL-terminated;
     //                               //  non-ASCII -> '?'
-    //         } items[count];
+    //         } items[32];
     //   rsi = u32 max_count          // sanity cap; reject larger
-    //   rax = chosen action_id (0 = cancelled / nothing selected).
-    // Single-instance: a second concurrent call blocks on the
-    // first dismissing.
+    //   rax = chosen action_id (0 = cancelled / nothing selected
+    //         or a submenu-row click — submenu rows open their
+    //         child panel instead of firing an action).
+    // Single-instance: a second concurrent call cancels with
+    // action_id = 0. Effective panel depth (root + nested
+    // submenus) is capped at kMenuMaxStack = 4.
     SYS_WIN_TRACK_POPUP = 173,
 
     // SYS_GDI_SET_CURSOR — request a cursor-shape change for the

@@ -5571,7 +5571,10 @@ doc helps future readers audit the trail.
   [Scheduler](../kernel/Scheduler.md), Roadmap entry "Bench
   follow-ups".
 
-## Single-bbox damage tracking, not a rect list, for the v0 framebuffer present pipeline (2026-05-06)
+## Single-bbox damage tracking, not a rect list, for the v0 framebuffer present pipeline (2026-05-06) — SUPERSEDED
+
+> **Superseded by the disjoint-rect banded path in `FramebufferPresent`** (see `kernel/drivers/video/framebuffer.cpp` around `g_damage_rect_count` / `g_damage_rects[]`). The accumulator is still single-bbox per the original decision, but `FramebufferEndCompose`'s content diff promotes spatially-separated changes into a list that the present hook fires once per rect, removing the "D1 flicker" caused by a caret-blink + clock-tick fusing into one fullscreen union. The original decision below stands as a v0 record of WHY single-bbox accumulation was chosen; the disjoint-rect promotion at present time was the right escape hatch and lands without changing the accumulator's cost or shape.
+
 
 - **Decision:** the framebuffer driver
   (`kernel/drivers/video/framebuffer.{h,cpp}`) accumulates one

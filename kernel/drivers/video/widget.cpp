@@ -376,6 +376,23 @@ struct RegisteredWindow
     // time so WindowRestore can put the window back where it
     // was. Only meaningful when `maximized == true`.
     u32 saved_x, saved_y, saved_w, saved_h;
+    // Window transition animation state. `anim_active` gates
+    // the rest. `anim_post_action` runs at the moment the
+    // animation lands on its final rect:
+    //   0 = none — chrome stays at the target rect.
+    //   1 = hide-on-complete (minimize) — at completion the
+    //       rect is rolled back to `anim_start_*` so the next
+    //       SW_SHOW restores to the pre-minimize geometry, and
+    //       `visible` is cleared.
+    // See `WindowAnimate` / `WindowAnimateStepAll` for the
+    // interpolation math.
+    u32 anim_start_x, anim_start_y, anim_start_w, anim_start_h;
+    u32 anim_target_x, anim_target_y, anim_target_w, anim_target_h;
+    u8 anim_remaining_ticks;
+    u8 anim_total_ticks;
+    u8 anim_ease;        // WindowAnimEase value
+    u8 anim_post_action; // 0 = none, 1 = hide on completion
+    bool anim_active;
     bool alive;
     bool visible;
     bool dirty;     // set by InvalidateRect; cleared by BeginPaint / WindowDrainPaints
@@ -389,7 +406,23 @@ struct RegisteredWindow
     // ink rather than the surface beneath, but the visual
     // "fading window" cue still reads correctly.
     u8 opacity;
-    u8 _pad[2];
+    // Per-window PE-requested cursor shape. When a Win32 PE app
+    // calls `SetCursor(hCursor)`, the SYS_GDI_SET_CURSOR handler
+    // resolves which of the caller's windows the cursor is over
+    // and writes the requested shape here. The mouse-loop hit-test
+    // in `boot_tasks.cpp` consults this slot before falling back
+    // to its default Arrow when no kernel-owned shape rule (resize
+    // band / Hand-button / Notes IBeam) matched. `requested_set`
+    // gates the lookup so a window that never called SetCursor
+    // doesn't accidentally pin Arrow — kernel hit-test rules
+    // (Hand, IBeam, resize) still win over an explicit Arrow when
+    // the slot is unset, but lose to a PE's explicit Arrow when
+    // it is set. Cleared on WindowClose so a reused slot (when
+    // dynamic re-use lands) doesn't carry stale state. Encoded as
+    // `u8` matching `CursorShape` enum width so the field stays
+    // a single byte and the surrounding `_pad` accounts for it.
+    u8 requested_cursor;     // CursorShape value
+    bool requested_cursor_set;
 };
 
 constinit RegisteredWindow g_windows[kMaxWindows] = {};
@@ -819,12 +852,27 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].visible = true;
     g_windows[h].dirty = false;
     g_windows[h].opacity = 0xFF; // fully opaque by default
+    g_windows[h].requested_cursor = 0; // CursorShape::Arrow sentinel
+    g_windows[h].requested_cursor_set = false;
     g_windows[h].maximized = false;
     g_windows[h].pinned = false;
     g_windows[h].saved_x = 0;
     g_windows[h].saved_y = 0;
     g_windows[h].saved_w = 0;
     g_windows[h].saved_h = 0;
+    g_windows[h].anim_active = false;
+    g_windows[h].anim_remaining_ticks = 0;
+    g_windows[h].anim_total_ticks = 0;
+    g_windows[h].anim_ease = 0;
+    g_windows[h].anim_post_action = 0;
+    g_windows[h].anim_start_x = 0;
+    g_windows[h].anim_start_y = 0;
+    g_windows[h].anim_start_w = 0;
+    g_windows[h].anim_start_h = 0;
+    g_windows[h].anim_target_x = 0;
+    g_windows[h].anim_target_y = 0;
+    g_windows[h].anim_target_w = 0;
+    g_windows[h].anim_target_h = 0;
     g_windows[h].owner_pid = 0;
     g_windows[h].parent = kWindowInvalid;
     g_windows[h].msgs.head = 0;
@@ -1230,15 +1278,238 @@ bool WindowPointInMinBox(WindowHandle h, u32 x, u32 y)
     return x >= min_x && x < min_x + btn_w && y >= btn_y && y < btn_y + btn_h;
 }
 
+namespace
+{
+
+// Default tween length for chrome-state transitions (min / max /
+// restore / snap). 10 ticks @ 100 Hz ≈ 100 ms — perceptible as
+// motion, short enough to feel snappy. Centralised so tuning is
+// one edit.
+constexpr u8 kWindowAnimDefaultTicks = 10;
+
+// Minimize target rect: a small "card" centered on the taskbar
+// strip the user would have clicked. Picks a per-window slot
+// width so multi-window minimize animations don't visually
+// collapse to the same point. The window is restored to its
+// pre-anim rect on completion (visibility flips to hidden), so
+// this rect is purely the "vanish into the taskbar" cue.
+void MinimizeTargetRect(WindowHandle h, u32* tx, u32* ty, u32* tw, u32* th)
+{
+    const auto info = FramebufferGet();
+    const u32 fb_w = info.width ? info.width : 1024u;
+    const u32 fb_h = info.height ? info.height : 768u;
+    const u32 reserve = TaskbarHeight();
+    const u32 taskbar_h = (reserve != 0) ? reserve : 28u;
+    // 80 x 24 card centred on the strip the click would land
+    // in. `slot_stride` keeps each window's vanish point inside
+    // its own visual lane on the taskbar.
+    constexpr u32 kCardW = 80u;
+    constexpr u32 kCardH = 24u;
+    const u32 slot_stride = (kMaxWindows != 0) ? (fb_w / kMaxWindows) : kCardW;
+    const u32 slot_centre = (slot_stride * h) + (slot_stride / 2u);
+    const u32 card_x = (slot_centre > kCardW / 2u) ? slot_centre - (kCardW / 2u) : 0u;
+    const u32 card_y = (fb_h > taskbar_h) ? fb_h - taskbar_h : 0u;
+    if (tx)
+        *tx = card_x;
+    if (ty)
+        *ty = card_y;
+    if (tw)
+        *tw = kCardW;
+    if (th)
+        *th = kCardH;
+}
+
+} // namespace
+
+// Arm a window-rect animation. The animator writes chrome each
+// 100 Hz tick from `WindowAnimateStepAll`; the chrome jumps to
+// the exact target on the last step. `WindowAnimate` itself does
+// NOT touch chrome — flags the caller cares about (maximized /
+// visible / focus) are set by the calling op so observers
+// (`WindowIsMaximized`, hit-testing) see the new state
+// immediately. Skip cases:
+//   - invalid handle
+//   - identical source / target rect (nothing to animate)
+//   - animation already in flight for `h` (don't restart mid-flight)
+void WindowAnimate(WindowHandle h, u32 target_x, u32 target_y, u32 target_w, u32 target_h, u32 ticks, WindowAnimEase ease)
+{
+    if (!WindowValid(h))
+        return;
+    auto& w = g_windows[h];
+    if (w.anim_active)
+        return; // in-flight one wins; new request dropped
+    const auto& c = w.chrome;
+    if (c.x == target_x && c.y == target_y && c.w == target_w && c.h == target_h)
+        return; // nothing to animate — already on target
+    if (ticks == 0)
+    {
+        // Zero-tick request degrades to a hard set; preserves the
+        // primitive's contract of "after the call the rect is the
+        // target" without needing a step pass.
+        auto& cm = w.chrome;
+        cm.x = target_x;
+        cm.y = target_y;
+        cm.w = target_w;
+        cm.h = target_h;
+        return;
+    }
+    if (ticks > 255u)
+        ticks = 255u;
+    w.anim_start_x = c.x;
+    w.anim_start_y = c.y;
+    w.anim_start_w = c.w;
+    w.anim_start_h = c.h;
+    w.anim_target_x = target_x;
+    w.anim_target_y = target_y;
+    w.anim_target_w = target_w;
+    w.anim_target_h = target_h;
+    w.anim_total_ticks = static_cast<u8>(ticks);
+    w.anim_remaining_ticks = static_cast<u8>(ticks);
+    w.anim_ease = static_cast<u8>(ease);
+    w.anim_post_action = 0;
+    w.anim_active = true;
+}
+
+bool WindowAnimateActive(WindowHandle h)
+{
+    return WindowValid(h) && g_windows[h].anim_active;
+}
+
+namespace
+{
+
+// Apply the per-tick interpolation for one armed window. Returns
+// true iff the window's chrome was touched this tick (always
+// true while `anim_active`). On the final step snaps to the
+// exact target rect and runs `anim_post_action`.
+//
+// Math: `t = (total - remaining) / total` in [0, 1]. For ease-
+// out we apply `t' = 1 - (1 - t)^2`. We stay in fixed point
+// (multiply by 1024 then divide) to keep the math integer-only —
+// freestanding kernel context has no FPU we can lean on.
+bool WindowAnimateStepOne(RegisteredWindow& w)
+{
+    if (!w.anim_active)
+        return false;
+    // Decrement before computing `t` so the first step lands at
+    // remaining = total - 1 (a non-zero `t`) and the last step
+    // (remaining = 0) lands exactly on the target.
+    if (w.anim_remaining_ticks > 0)
+        --w.anim_remaining_ticks;
+    if (w.anim_remaining_ticks == 0)
+    {
+        // Final step — land on the exact target rect to avoid
+        // any fixed-point rounding residual.
+        w.chrome.x = w.anim_target_x;
+        w.chrome.y = w.anim_target_y;
+        w.chrome.w = w.anim_target_w;
+        w.chrome.h = w.anim_target_h;
+        w.anim_active = false;
+        // Post-action: minimize rolls back to the snapshot
+        // rect + hides; the snapshot is the original pre-anim
+        // bounds so a follow-up SW_SHOW lands the user back
+        // where they were.
+        if (w.anim_post_action == 1)
+        {
+            w.chrome.x = w.anim_start_x;
+            w.chrome.y = w.anim_start_y;
+            w.chrome.w = w.anim_start_w;
+            w.chrome.h = w.anim_start_h;
+            w.visible = false;
+            w.anim_post_action = 0;
+        }
+        return true;
+    }
+    // Fixed-point interpolation. `t_q10` is t * 1024 in [0, 1024).
+    // total >= 1 here because `anim_active && remaining > 0`.
+    const u32 total = w.anim_total_ticks;
+    const u32 elapsed = total - w.anim_remaining_ticks;
+    u32 t_q10 = (elapsed * 1024u) / total;
+    if (w.anim_ease == static_cast<u8>(WindowAnimEase::EaseOut))
+    {
+        // t' = 1 - (1 - t)^2 — quadratic ease-out. Inverse stays
+        // in q10; (1 - t)^2 = inv * inv / 1024 keeps the result
+        // in q10 too.
+        const u32 inv = 1024u - t_q10;
+        const u32 inv_sq = (inv * inv) / 1024u;
+        t_q10 = 1024u - inv_sq;
+    }
+    auto lerp_q10 = [](u32 start, u32 target, u32 t) -> u32 {
+        // Sign-aware lerp without floats. Branch on which end
+        // is larger so the intermediate subtraction stays u32.
+        if (target >= start)
+        {
+            const u32 delta = target - start;
+            return start + (delta * t) / 1024u;
+        }
+        const u32 delta = start - target;
+        return start - (delta * t) / 1024u;
+    };
+    w.chrome.x = lerp_q10(w.anim_start_x, w.anim_target_x, t_q10);
+    w.chrome.y = lerp_q10(w.anim_start_y, w.anim_target_y, t_q10);
+    w.chrome.w = lerp_q10(w.anim_start_w, w.anim_target_w, t_q10);
+    w.chrome.h = lerp_q10(w.anim_start_h, w.anim_target_h, t_q10);
+    return true;
+}
+
+} // namespace
+
+bool WindowAnimateStepAll()
+{
+    bool any_stepped = false;
+    for (u32 i = 0; i < g_window_count; ++i)
+    {
+        if (!g_windows[i].alive)
+            continue;
+        if (WindowAnimateStepOne(g_windows[i]))
+            any_stepped = true;
+    }
+    return any_stepped;
+}
+
 void WindowMinimize(WindowHandle h)
 {
     if (!WindowValid(h))
         return;
-    g_windows[h].visible = false;
-    // De-activate so the next compose doesn't try to draw a
-    // selected-but-hidden chrome. Promote the topmost remaining
-    // alive+visible window to active so keyboard input still
-    // flows somewhere.
+    // Already-hidden windows have no rect change to animate;
+    // run the original de-activation path so a no-op minimize
+    // doesn't leave focus stuck on a hidden window.
+    if (!g_windows[h].visible)
+        return;
+    // Animate from current rect to a small "card" on the
+    // taskbar strip. Post-action 1 rolls the chrome rect back
+    // to the start bounds and clears `visible` on completion,
+    // so the next ShowWindow(SW_SHOW) restores the pre-minimize
+    // geometry.
+    //
+    // If another animation is already in flight for `h` (e.g.
+    // user mashed Minimize during the Maximize tween) the new
+    // request is dropped per the documented WindowAnimate
+    // contract — we still hide-immediately so the user's click
+    // isn't lost, and leave the in-flight animation alone (it
+    // would just compete with the hide cue otherwise).
+    const bool had_anim_in_flight = g_windows[h].anim_active;
+    u32 tx = 0, ty = 0, tw = 0, th = 0;
+    MinimizeTargetRect(h, &tx, &ty, &tw, &th);
+    WindowAnimate(h, tx, ty, tw, th, kWindowAnimDefaultTicks);
+    // The animation was armed by US iff there was no in-flight
+    // animation at entry AND the call wasn't rejected for an
+    // identical rect (anim_active goes true on a successful arm).
+    const bool we_armed = !had_anim_in_flight && g_windows[h].anim_active;
+    if (we_armed)
+    {
+        g_windows[h].anim_post_action = 1; // hide-on-complete
+    }
+    else
+    {
+        // No new animation: hide immediately so the user's
+        // click registers visually even if we couldn't animate.
+        g_windows[h].visible = false;
+    }
+    // Promote the topmost remaining alive+visible window to
+    // active so keyboard input flows somewhere — same logic as
+    // the pre-animation path, run immediately so input stays
+    // responsive while the tween plays out.
     if (g_active_window == h)
     {
         g_active_window = kWindowInvalid;
@@ -1275,23 +1546,24 @@ void WindowMaximize(WindowHandle h)
     const u32 reserve = TaskbarHeight();
     const u32 reserved_for_taskbar = (reserve != 0) ? reserve : 28u;
     const u32 max_h = (info.height > reserved_for_taskbar) ? info.height - reserved_for_taskbar : info.height;
-    c.x = 0;
-    c.y = 0;
-    c.w = info.width;
-    c.h = max_h;
+    // Flag the state-change immediately so observers
+    // (`WindowIsMaximized`, the chrome max/restore glyph) see
+    // the new state before the tween finishes. The animator
+    // walks chrome.x/y/w/h to the target rect over ~100 ms.
     g_windows[h].maximized = true;
+    WindowAnimate(h, 0u, 0u, info.width, max_h, kWindowAnimDefaultTicks);
 }
 
 void WindowRestore(WindowHandle h)
 {
     if (!WindowValid(h) || !g_windows[h].maximized)
         return;
-    auto& c = g_windows[h].chrome;
-    c.x = g_windows[h].saved_x;
-    c.y = g_windows[h].saved_y;
-    c.w = g_windows[h].saved_w;
-    c.h = g_windows[h].saved_h;
+    // Flag the state-change first so observers see the restored
+    // state immediately; chrome rect tweens to the saved bounds
+    // over ~100 ms.
     g_windows[h].maximized = false;
+    WindowAnimate(h, g_windows[h].saved_x, g_windows[h].saved_y, g_windows[h].saved_w, g_windows[h].saved_h,
+                  kWindowAnimDefaultTicks);
 }
 
 bool WindowIsMaximized(WindowHandle h)
@@ -1331,12 +1603,8 @@ void WindowSnapLeft(WindowHandle h)
         return;
     u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
     WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
-    auto& c = g_windows[h].chrome;
-    c.x = wa_x;
-    c.y = wa_y;
-    c.w = wa_w / 2u;
-    c.h = wa_h;
     g_windows[h].maximized = false;
+    WindowAnimate(h, wa_x, wa_y, wa_w / 2u, wa_h, kWindowAnimDefaultTicks);
 }
 
 void WindowSnapRight(WindowHandle h)
@@ -1345,13 +1613,10 @@ void WindowSnapRight(WindowHandle h)
         return;
     u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
     WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
-    auto& c = g_windows[h].chrome;
     const u32 half = wa_w / 2u;
-    c.x = wa_x + half;
-    c.y = wa_y;
-    c.w = wa_w - half; // pick up the odd column on odd-width framebuffers
-    c.h = wa_h;
     g_windows[h].maximized = false;
+    // `wa_w - half` picks up the odd column on odd-width framebuffers.
+    WindowAnimate(h, wa_x + half, wa_y, wa_w - half, wa_h, kWindowAnimDefaultTicks);
 }
 
 void WindowSnapTop(WindowHandle h)
@@ -1360,12 +1625,8 @@ void WindowSnapTop(WindowHandle h)
         return;
     u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
     WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
-    auto& c = g_windows[h].chrome;
-    c.x = wa_x;
-    c.y = wa_y;
-    c.w = wa_w;
-    c.h = wa_h / 2u;
     g_windows[h].maximized = false;
+    WindowAnimate(h, wa_x, wa_y, wa_w, wa_h / 2u, kWindowAnimDefaultTicks);
 }
 
 void WindowSnapBottom(WindowHandle h)
@@ -1374,13 +1635,246 @@ void WindowSnapBottom(WindowHandle h)
         return;
     u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
     WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
-    auto& c = g_windows[h].chrome;
     const u32 half = wa_h / 2u;
-    c.x = wa_x;
-    c.y = wa_y + half;
-    c.w = wa_w;
-    c.h = wa_h - half;
     g_windows[h].maximized = false;
+    WindowAnimate(h, wa_x, wa_y + half, wa_w, wa_h - half, kWindowAnimDefaultTicks);
+}
+
+// Quarter-screen corner snaps. Same WorkArea reserve as the
+// half-snaps; the right / bottom halves pick up the odd
+// row / column on odd-sized framebuffers so the four quarters
+// tile exactly with no gap.
+void WindowSnapTopLeft(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    g_windows[h].maximized = false;
+    WindowAnimate(h, wa_x, wa_y, wa_w / 2u, wa_h / 2u, kWindowAnimDefaultTicks);
+}
+
+void WindowSnapTopRight(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    const u32 half_w = wa_w / 2u;
+    g_windows[h].maximized = false;
+    WindowAnimate(h, wa_x + half_w, wa_y, wa_w - half_w, wa_h / 2u, kWindowAnimDefaultTicks);
+}
+
+void WindowSnapBottomLeft(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    const u32 half_h = wa_h / 2u;
+    g_windows[h].maximized = false;
+    WindowAnimate(h, wa_x, wa_y + half_h, wa_w / 2u, wa_h - half_h, kWindowAnimDefaultTicks);
+}
+
+void WindowSnapBottomRight(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    const u32 half_w = wa_w / 2u;
+    const u32 half_h = wa_h / 2u;
+    g_windows[h].maximized = false;
+    WindowAnimate(h, wa_x + half_w, wa_y + half_h, wa_w - half_w, wa_h - half_h, kWindowAnimDefaultTicks);
+}
+
+// ---------------------------------------------------------------
+// Snap-zone hover preview.
+//
+// `g_snap_preview` is the single source of truth for "what would
+// happen if the user released the drag right now." The mouse
+// loop (kernel/core/boot_tasks.cpp) writes it via SnapPreviewArm
+// on every drag-motion packet; DesktopCompose reads it via
+// SnapPreviewArmed and paints a translucent rectangle at the
+// snap target's geometry between the windows layer and the
+// tooltip layer. Cleared on drag-release (by the release branch
+// after committing the snap) and on Esc-during-drag.
+//
+// Cursor-distance hit bands (px from each screen edge):
+//   - Corner: 32 × 32 box from each corner (precedence over
+//     edges so a cursor 8 px from top-left resolves to TopLeft,
+//     not Maximize or Left).
+//   - Top edge: cursor_y <= kSnapEdgePx → Maximize.
+//   - Left edge: cursor_x <= kSnapEdgePx → SnapLeft.
+//   - Right edge: cursor_x >= fb.width - kSnapEdgePx → SnapRight.
+//   - Bottom edge: no snap. The bottom strip is owned by the
+//     taskbar's drag-snap (TaskbarBeginDrag / TaskbarEndDrag),
+//     and stealing it for a window-snap would compete with the
+//     existing gesture. Documented in wiki/subsystems/Compositor.md
+//     "Snap Zones."
+// ---------------------------------------------------------------
+
+namespace
+{
+
+// Hit-band width / corner box edge in pixels. 32 px matches
+// Win10/11's Aero snap zone, large enough that a quick drag-
+// to-edge doesn't require pixel-perfect aim.
+constexpr u32 kSnapEdgePx = 32;
+constexpr u32 kSnapCornerPx = 32;
+
+// Armed snap zone. Compositor-locked: the mouse loop already
+// holds the compositor lock around drag motion / drag release,
+// and DesktopCompose reads under the same lock, so a plain
+// scalar is safe — no separate spinlock.
+SnapZone g_snap_preview_zone = SnapZone::None;
+
+// Compute the screen-space rect a given snap zone would
+// produce. Mirrors the geometry inside WindowSnap* / WindowMaximize
+// so the preview rectangle is pixel-identical to what the
+// commit would land. `zone == None` writes zeros.
+void SnapZoneRect(SnapZone zone, u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    const u32 half_w = wa_w / 2u;
+    const u32 half_h = wa_h / 2u;
+    u32 rx = 0, ry = 0, rw = 0, rh = 0;
+    switch (zone)
+    {
+    case SnapZone::Maximize:
+        rx = wa_x;
+        ry = wa_y;
+        rw = wa_w;
+        rh = wa_h;
+        break;
+    case SnapZone::Left:
+        rx = wa_x;
+        ry = wa_y;
+        rw = half_w;
+        rh = wa_h;
+        break;
+    case SnapZone::Right:
+        rx = wa_x + half_w;
+        ry = wa_y;
+        rw = wa_w - half_w;
+        rh = wa_h;
+        break;
+    case SnapZone::TopLeft:
+        rx = wa_x;
+        ry = wa_y;
+        rw = half_w;
+        rh = half_h;
+        break;
+    case SnapZone::TopRight:
+        rx = wa_x + half_w;
+        ry = wa_y;
+        rw = wa_w - half_w;
+        rh = half_h;
+        break;
+    case SnapZone::BottomLeft:
+        rx = wa_x;
+        ry = wa_y + half_h;
+        rw = half_w;
+        rh = wa_h - half_h;
+        break;
+    case SnapZone::BottomRight:
+        rx = wa_x + half_w;
+        ry = wa_y + half_h;
+        rw = wa_w - half_w;
+        rh = wa_h - half_h;
+        break;
+    case SnapZone::None:
+    default:
+        break;
+    }
+    if (x_out)
+        *x_out = rx;
+    if (y_out)
+        *y_out = ry;
+    if (w_out)
+        *w_out = rw;
+    if (h_out)
+        *h_out = rh;
+}
+
+// Paint the armed preview as a translucent taskbar_accent rect.
+// Called from DesktopCompose between WindowDrawAllOrdered and
+// the tooltip / dialog layers. The ~25% alpha (0x40) reads as
+// "this is a preview, not real chrome" without washing out the
+// underlying windows.
+void SnapPreviewCompose()
+{
+    if (g_snap_preview_zone == SnapZone::None)
+        return;
+    u32 x = 0, y = 0, w = 0, h = 0;
+    SnapZoneRect(g_snap_preview_zone, &x, &y, &w, &h);
+    if (w == 0 || h == 0)
+        return;
+    const u32 accent_rgb = ThemeCurrent().taskbar_accent & 0x00FFFFFFu;
+    // 0x40 = 25 % alpha. ARGB packing matches FramebufferFillRectAlpha.
+    const u32 argb = (0x40u << 24) | accent_rgb;
+    FramebufferFillRectAlpha(x, y, w, h, argb);
+}
+
+} // namespace
+
+void SnapPreviewArm(SnapZone zone)
+{
+    g_snap_preview_zone = zone;
+}
+
+SnapZone SnapPreviewArmed()
+{
+    return g_snap_preview_zone;
+}
+
+void SnapZoneGetRect(SnapZone zone, u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    SnapZoneRect(zone, x_out, y_out, w_out, h_out);
+}
+
+SnapZone SnapPreviewHitTest(u32 cursor_x, u32 cursor_y)
+{
+    const auto fb = FramebufferGet();
+    if (fb.width == 0 || fb.height == 0)
+        return SnapZone::None;
+    // WorkArea bounds the bottom edge — we ignore the taskbar
+    // strip for the snap-zone hit-test so a cursor parked over
+    // the taskbar doesn't arm a phantom preview.
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    const u32 wa_right = wa_x + wa_w; // exclusive
+    const u32 wa_bot = wa_y + wa_h;   // exclusive — clamps out the taskbar
+    if (cursor_y >= wa_bot)
+        return SnapZone::None;
+
+    const bool near_top = (cursor_y - wa_y) < kSnapCornerPx;
+    const bool near_left = (cursor_x - wa_x) < kSnapCornerPx;
+    const bool near_right = (wa_right > kSnapCornerPx) && (cursor_x >= wa_right - kSnapCornerPx);
+    const bool near_bottom = (wa_bot > kSnapCornerPx) && (cursor_y >= wa_bot - kSnapCornerPx);
+
+    // Corners take precedence over edges. Bottom corners ARE
+    // exposed (they produce the bottom-left / bottom-right
+    // quarter snaps) even though the bare bottom edge isn't.
+    if (near_top && near_left)
+        return SnapZone::TopLeft;
+    if (near_top && near_right)
+        return SnapZone::TopRight;
+    if (near_bottom && near_left)
+        return SnapZone::BottomLeft;
+    if (near_bottom && near_right)
+        return SnapZone::BottomRight;
+
+    // Edges. Top → Maximize, sides → half-snap. Bottom edge has
+    // no half-snap (the taskbar drag-snap owns that strip).
+    if ((cursor_y - wa_y) < kSnapEdgePx)
+        return SnapZone::Maximize;
+    if ((cursor_x - wa_x) < kSnapEdgePx)
+        return SnapZone::Left;
+    if (wa_right > kSnapEdgePx && cursor_x >= wa_right - kSnapEdgePx)
+        return SnapZone::Right;
+    return SnapZone::None;
 }
 
 void WindowSetOpacity(WindowHandle h, u8 opacity)
@@ -1416,6 +1910,13 @@ void WindowClose(WindowHandle h)
         return;
     }
     g_windows[h].alive = false;
+    // Clear the PE-requested cursor shape so the next-allocated
+    // window starting in this slot (if/when dynamic re-use lands)
+    // doesn't observe stale state. Cheap, deterministic; the
+    // mouse-loop's per-packet hit-test relies on this flag being
+    // false-by-default for kernel-owned windows.
+    g_windows[h].requested_cursor_set = false;
+    g_windows[h].requested_cursor = 0;
     if (g_active_window == h)
     {
         // Promote the next topmost alive window, if any, so
@@ -2117,6 +2618,12 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
         FramebufferDrawStringScaled(17, 9, banner, 0x00000000, desktop_rgb, scale);
         FramebufferDrawStringScaled(16, 8, banner, 0x00FFFFFF, desktop_rgb, scale);
     }
+    // Snap-zone hover preview — translucent target rect painted
+    // after every window so the preview lays on top of normal
+    // chrome but under taskbar / menus / dialogs (the user is
+    // looking at the desktop snap target, not staring at a
+    // covered taskbar). No-op when no zone is armed.
+    SnapPreviewCompose();
     TaskbarRedraw();
     MenuRedraw();
     CalendarRedraw();
@@ -3402,6 +3909,39 @@ void WindowResizeTo(WindowHandle h, u32 w, u32 hgt)
         }
         c.h = hgt;
     }
+}
+
+void WindowSetRequestedCursorShape(WindowHandle h, u8 shape)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].requested_cursor = shape;
+    g_windows[h].requested_cursor_set = true;
+}
+
+void WindowClearRequestedCursorShape(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].requested_cursor_set = false;
+    g_windows[h].requested_cursor = 0;
+}
+
+bool WindowGetRequestedCursorShape(WindowHandle h, u8* shape_out)
+{
+    if (!WindowValid(h) || !g_windows[h].requested_cursor_set)
+    {
+        return false;
+    }
+    if (shape_out != nullptr)
+    {
+        *shape_out = g_windows[h].requested_cursor;
+    }
+    return true;
 }
 
 } // namespace duetos::drivers::video

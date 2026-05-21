@@ -220,11 +220,23 @@ See [DirectX v0 Path](../subsystems/DirectX.md).
 ## Damage tracking + present pipeline
 
 `kernel/drivers/video/framebuffer.{h,cpp}` accumulates a
-single-bbox **damage rect** as primitives write pixels. The
-compose-end blit copies only the damage union from the shadow
-surface to the live framebuffer; `FramebufferPresent` hands the
-same rect to the registered present hook so a backend can flush
-only the changed region.
+**single-bbox damage union** as primitives write pixels — every
+pixel-write routes through `MarkDamage` which calls
+`DamageRect::Extend` (the union math is shared with the host unit
+test in `tests/host/test_damage_rect.cpp` via `constexpr`). The
+compose-end blit copies only that union from the shadow surface to
+the live framebuffer.
+
+**At present time the union is promoted to a disjoint-rect list
+when spatially-separated changes are detected.** `FramebufferEndCompose`
+runs the content diff over the union; when it finds that the actual
+changed pixels split into spatially-separated regions, it populates
+`g_damage_rects[]` (count → `g_damage_rect_count`). `FramebufferPresent`
+then takes the banded path: when `g_damage_rect_count > 0` it walks
+the list and fires the registered present hook once per disjoint
+rect; when the count is 0 it falls back to firing the hook once with
+the bbox union. A frame with nothing painted (`damage.valid == false`)
+short-circuits the hook entirely.
 
 - **Direct backends** (firmware passthrough, Bochs VBE) — present
   hook is null; pixels are already on screen as soon as the shadow
@@ -233,18 +245,21 @@ only the changed region.
   of 2 megapixels.
 - **virtio-gpu** — present hook calls `VirtioGpuFlushScanout(x, y,
   w, h)` with the damage rect, which runs `TRANSFER_TO_HOST_2D` +
-  `RESOURCE_FLUSH` on just that subrect. A frame with no draws
-  (`damage.valid == false`) skips the round-trip entirely; the
-  host repaints from its prior scanout cache.
+  `RESOURCE_FLUSH` on just that subrect. The banded path is what
+  removed the "D1 flicker": before it landed, a caret blink + clock
+  tick on opposite ends of the taskbar coalesced into one fullscreen
+  union and re-uploaded the entire scanout every frame; now each
+  small region transfers independently.
 
-After every `FramebufferPresent` call the damage union is reset.
-Callers that paint straight into the framebuffer behind the
-primitive API (rare: virtio-gpu's boot test pattern is the only
-one today) can call `FramebufferAddDamage(x, y, w, h)` to cover
-their writes for the next present.
+After every `FramebufferPresent` call the damage union AND the
+banded rect list are reset. Callers that paint straight into the
+framebuffer behind the primitive API (rare: virtio-gpu's boot test
+pattern is the only one today) can call `FramebufferAddDamage(x, y,
+w, h)` to cover their writes for the next present.
 
-`FramebufferReadDamage()` snapshots the current union without
-clearing it — used by tests + diagnostics.
+`FramebufferReadDamage()` snapshots the current bbox union without
+clearing it — used by tests + diagnostics. The banded-rect list is
+internal and not exposed via a stable accessor today.
 
 ### Content-diff frame elision
 
@@ -554,11 +569,17 @@ recompose. Four themes ship:
   only — see [Vulkan ICD](../subsystems/Vulkan-ICD.md)); attribute
   interpolation, depth, and indexed draws are still gated on
   the SPIR-V execution slice.
-- **Damage tracking is single-bbox.** A frame that touches the
-  top-left and bottom-right corners flushes the whole surface. A
-  list-of-rects damage tracker would help for chrome-heavy frames
-  with non-contiguous writes (e.g. caret blink + clock tick on
-  opposite ends of the taskbar).
+- **Damage tracking promotes to a disjoint-rect list at present
+  time.** `FramebufferAddDamage` accumulates a single union bbox
+  per the existing `DamageRect::Extend` math, but `FramebufferPresent`
+  has a banded path: when `g_damage_rect_count > 0` it walks
+  `g_damage_rects[]` and fires the registered present hook once per
+  disjoint rect (see `framebuffer.cpp` `FramebufferPresent`). The
+  content diff in `FramebufferEndCompose` is what populates the
+  rect list when it finds spatially-separated changes, so a frame
+  with a caret blink + clock tick on opposite ends flushes two
+  small rects instead of one near-fullscreen rect. The "D1 flicker"
+  was the prior collapse this path fixes.
 
 ## Related Pages
 

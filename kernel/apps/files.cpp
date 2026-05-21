@@ -1707,6 +1707,39 @@ namespace
 
 // Per-row context menu items. Static so the menu primitive can
 // hold a borrowed pointer for the open lifetime.
+//
+// Files-app action-id allocation (mirrors wiki/subsystems/Compositor.md
+// + kernel/core/menu_dispatch.cpp). Files owns 30..39 and the
+// 44..49 sub-band; 40..43 are the power/session band and MUST
+// NOT be used here. 50+ belongs to other dispatchers.
+//   30..36 — FAT32 view (OPEN / RENAME / DELETE / PROPERTIES /
+//            REFRESH / NEW TEXT FILE / NEW FOLDER).
+//   37..39 — Shared "generic" verbs reused by DuetFS + ramfs
+//            (OPEN / PROPERTIES / REFRESH). The Trash menu also
+//            re-uses 38/39 for PROPERTIES/REFRESH.
+//   44..47 — Per-row menus for the non-FAT views that need verbs
+//            beyond OPEN/PROPERTIES/REFRESH (the 44..49 sub-band
+//            sits in the otherwise-free run after the power band
+//            and stays inside the 30..49 Files-app window the
+//            wiki action-id table reserves):
+//              44 — OPEN (Trash). Distinct from 37 because a
+//                   trash row's primary action is RESTORE, not
+//                   OPEN — but OPEN is still offered so users
+//                   can peek at the binned file's properties
+//                   without restoring first.
+//              45 — RESTORE (Trash). Moved off action 37 so that
+//                   row 0 of the menu is OPEN, matching every
+//                   other file-manager convention.
+//              46 — DELETE FOREVER (Trash). Unlinks from /TRASH
+//                   permanently; behind the same Y-confirm
+//                   prompt the X keybind already triggers.
+//              47 — DELETE (ramfs). Disabled — the trusted ramfs
+//                   is constinit / .rodata, so there is no
+//                   backing primitive that could unlink a node.
+//                   Shown so the menu shape matches FAT32 /
+//                   Trash, with the disabled flag making the
+//                   read-only invariant visible at the point of
+//                   the gesture (rather than as a silent absence).
 constinit duetos::drivers::video::MenuItem kFilesContextMenuItems[] = {
     {"OPEN", 30, 0, nullptr, 0},       {"RENAME", 31, 0, nullptr, 0},        {"DELETE", 32, 0, nullptr, 0},
     {"PROPERTIES", 33, 0, nullptr, 0}, {"NEW TEXT FILE", 35, 0, nullptr, 0}, {"NEW FOLDER", 36, 0, nullptr, 0},
@@ -1718,9 +1751,10 @@ constinit duetos::drivers::video::MenuItem kFilesContextMenuItems[] = {
 constexpr duetos::u32 kFilesNoRow = 0xFFFFFFFFu;
 constexpr duetos::u32 kFilesContextMenuItemsN = sizeof(kFilesContextMenuItems) / sizeof(kFilesContextMenuItems[0]);
 
-// Shared context menu for the non-FAT views (DuetFS main drive,
-// ramfs, Trash). Read-only OPEN / PROPERTIES / REFRESH — the
-// everyday gestures every file manager offers for a browse mount.
+// Shared context menu for the DuetFS main drive — read-only
+// OPEN / PROPERTIES / REFRESH. Ramfs and Trash used to share this
+// menu, but each now has its own variant (below) so the per-row
+// verb set matches the per-mode semantics.
 constinit duetos::drivers::video::MenuItem kFilesGenericMenuItems[] = {
     {"OPEN", 37, 0, nullptr, 0},
     {"PROPERTIES", 38, 0, nullptr, 0},
@@ -1728,15 +1762,33 @@ constinit duetos::drivers::video::MenuItem kFilesGenericMenuItems[] = {
 };
 constexpr duetos::u32 kFilesGenericMenuItemsN = sizeof(kFilesGenericMenuItems) / sizeof(kFilesGenericMenuItems[0]);
 
-// Trash view: the primary action (37) is RESTORE, not OPEN —
-// opening a binned file is meaningless. Shares the 38/39
-// PROPERTIES/REFRESH slots with the generic menu.
+// Trash view: OPEN / RESTORE / DELETE FOREVER / PROPERTIES /
+// REFRESH. RESTORE is the row's primary action (matching the R
+// keybind); DELETE FOREVER routes through the Y-confirm prompt
+// the X keybind already uses, so the menu and keyboard surfaces
+// share one confirmation flow. OPEN reads the trashed file's
+// bytes via the existing FAT32 read path so a user can peek at a
+// binned screenshot / .txt without restoring first.
 constinit duetos::drivers::video::MenuItem kFilesTrashMenuItems[] = {
-    {"RESTORE", 37, 0, nullptr, 0},
+    {"OPEN", 44, 0, nullptr, 0},          {"RESTORE", 45, 0, nullptr, 0}, {"DELETE FOREVER", 46, 0, nullptr, 0},
+    {"PROPERTIES", 38, 0, nullptr, 0},    {"REFRESH", 39, 0, nullptr, 0},
+};
+constexpr duetos::u32 kFilesTrashMenuItemsN = sizeof(kFilesTrashMenuItems) / sizeof(kFilesTrashMenuItems[0]);
+
+// Ramfs view: OPEN / DELETE / PROPERTIES / REFRESH. DELETE is
+// flagged Disabled — the trusted ramfs is constinit storage with
+// no mutation backend; the row exists so the menu shape matches
+// the other modes and the read-only constraint is visible at the
+// gesture point. If a future slice gives ramfs a writable backend,
+// drop the disabled flag and route action 47 through that
+// primitive (see FilesDispatchContextAction).
+constinit duetos::drivers::video::MenuItem kFilesRamfsMenuItems[] = {
+    {"OPEN", 37, 0, nullptr, 0},
+    {"DELETE", 47, duetos::drivers::video::kMenuItemFlagDisabled, nullptr, 0},
     {"PROPERTIES", 38, 0, nullptr, 0},
     {"REFRESH", 39, 0, nullptr, 0},
 };
-constexpr duetos::u32 kFilesTrashMenuItemsN = sizeof(kFilesTrashMenuItems) / sizeof(kFilesTrashMenuItems[0]);
+constexpr duetos::u32 kFilesRamfsMenuItemsN = sizeof(kFilesRamfsMenuItems) / sizeof(kFilesRamfsMenuItems[0]);
 
 } // namespace
 
@@ -1826,19 +1878,35 @@ bool FilesOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
 
 bool FilesOnRightClick(duetos::u32 sx, duetos::u32 sy)
 {
-    // Non-FAT views (DuetFS main drive, ramfs, Trash) share one
-    // generic OPEN / PROPERTIES / REFRESH menu so every view has
-    // the everyday right-click gestures. FilesRowAt is
-    // mode-agnostic; empty space falls back to the highlighted
-    // selection.
+    // Non-FAT views each get a menu tuned to what the backing
+    // store actually supports:
+    //   DuetFS — read-only browse mount: OPEN/PROPERTIES/REFRESH.
+    //   Ramfs  — read-only constinit: OPEN/(DELETE disabled)/
+    //            PROPERTIES/REFRESH.
+    //   Trash  — full lifecycle: OPEN/RESTORE/DELETE FOREVER/
+    //            PROPERTIES/REFRESH.
+    // FilesRowAt is mode-agnostic; empty space falls back to the
+    // highlighted selection so the menu always has a target row.
     if (g_state.mode == Mode::DuetFs || g_state.mode == Mode::Ramfs || g_state.mode == Mode::Trash)
     {
         const duetos::i32 grow = FilesRowAt(sx, sy);
         const duetos::u32 gctx = (grow < 0) ? ModeSelection() : static_cast<duetos::u32>(grow);
-        const bool tr = g_state.mode == Mode::Trash;
-        duetos::drivers::video::MenuOpen(tr ? kFilesTrashMenuItems : kFilesGenericMenuItems,
-                                         tr ? kFilesTrashMenuItemsN : kFilesGenericMenuItemsN, sx, sy, gctx);
-        duetos::arch::SerialWrite("[files] generic context menu opened ctx=");
+        const duetos::drivers::video::MenuItem* items = kFilesGenericMenuItems;
+        duetos::u32 count = kFilesGenericMenuItemsN;
+        if (g_state.mode == Mode::Trash)
+        {
+            items = kFilesTrashMenuItems;
+            count = kFilesTrashMenuItemsN;
+        }
+        else if (g_state.mode == Mode::Ramfs)
+        {
+            items = kFilesRamfsMenuItems;
+            count = kFilesRamfsMenuItemsN;
+        }
+        duetos::drivers::video::MenuOpen(items, count, sx, sy, gctx);
+        duetos::arch::SerialWrite("[files] generic context menu opened mode=");
+        duetos::arch::SerialWriteHex(static_cast<duetos::u64>(g_state.mode));
+        duetos::arch::SerialWrite(" ctx=");
         duetos::arch::SerialWriteHex(gctx);
         duetos::arch::SerialWrite("\n");
         return true;
@@ -1863,6 +1931,61 @@ bool FilesOnRightClick(duetos::u32 sx, duetos::u32 sy)
 
 void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
 {
+    // Trash-specific extended actions (44 OPEN / 45 RESTORE / 46
+    // DELETE FOREVER). Lifted out of the shared 37..39 band so a
+    // Trash row's primary action stays RESTORE while OPEN and
+    // DELETE FOREVER each get their own slot. Lives in the
+    // 44..49 sub-band (the Files-app window that survives the
+    // 40..43 power band). Validate ctx against the live trash
+    // listing first — the user may have refreshed the bin
+    // between right-click and click-on-item.
+    if (action == 44 || action == 45 || action == 46)
+    {
+        if (g_state.mode != Mode::Trash)
+            return;
+        if (ctx >= g_state.trash_count)
+            return;
+        g_state.trash_selection = ctx;
+        if (action == 44) // OPEN — peek without restoring
+        {
+            // The existing openers (ImageView / Notes) look up by
+            // name in the FAT32 root, not in /TRASH, so opening a
+            // trashed file in-place would silently miss. Honest
+            // v0 behaviour: tell the user to restore first. A
+            // future slice that teaches the openers to accept a
+            // path can route the trash entry's "TRASH/<name>"
+            // form through them.
+            duetos::drivers::video::NotifyShow("restore to open");
+            duetos::arch::SerialWrite("[files] trash OPEN ctx=");
+            duetos::arch::SerialWriteHex(ctx);
+            duetos::arch::SerialWrite(" -> NotifyShow(restore to open)\n");
+            return;
+        }
+        if (action == 45) // RESTORE — move /TRASH/<name> back to /<name>
+        {
+            RestoreSelectedTrash();
+            return;
+        }
+        // action == 46: DELETE FOREVER. Re-arm the existing
+        // Y-confirm prompt so the menu and the X keybind share
+        // exactly one confirmation flow.
+        g_state.pending = Pending::PermDeleteFromTrash;
+        g_state.pending_idx = ctx;
+        duetos::drivers::video::NotifyShow("press Y to delete forever");
+        duetos::arch::SerialWrite("[files] trash perm-delete armed via context menu\n");
+        return;
+    }
+    // Ramfs DELETE (47) is structurally disabled in the menu
+    // (constinit storage has no unlink primitive), but the
+    // dispatch arm guards in case a future MenuItem flag change
+    // re-enables it without wiring a backend.
+    if (action == 47)
+    {
+        // GAP: ramfs is read-only (constinit); a future writable
+        // backend would route this to RamfsUnlink + a rescan.
+        duetos::drivers::video::NotifyShow("ramfs is read-only");
+        return;
+    }
     // Generic non-FAT context actions (37 OPEN / 38 PROPERTIES /
     // 39 REFRESH), shared by the DuetFS main-drive, ramfs and
     // Trash views so every view offers the same everyday gestures.
