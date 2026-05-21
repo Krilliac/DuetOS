@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Visual Studio Natvis visualisers for duetos-vmm.
+
+  Loaded automatically when VS attaches to a process built with this
+  file in target_sources (see tools/vmm/CMakeLists.txt). Lets the user
+  hover or watch the bridge-debugger types and see meaningful values
+  without manually expanding every field.
+
+  We deliberately do NOT crack open std::atomic<bool> internals here —
+  those member names (_Storage._Value, _My_val, ...) differ across
+  MSVC STL versions. The atomic fields stay as their default display
+  ("0" / "1") and the user expands them as needed.
+-->
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+
+  <!-- ===========================================================
+       GuestKernelView - typed live view of curated guest globals.
+       Slice 2 wires up g_ticks; future slices add more fields.
+       =========================================================== -->
+  <Type Name="duetos::vmm::GuestKernelView">
+    <DisplayString Condition="g_ticks == nullptr">guest view (unpopulated — no guest exit yet)</DisplayString>
+    <DisplayString>guest view: ticks={*g_ticks,d}</DisplayString>
+    <Expand>
+      <Item Name="[g_ticks (host ptr)]">g_ticks</Item>
+      <Item Name="g_ticks (value)" Condition="g_ticks != nullptr">*g_ticks,d</Item>
+    </Expand>
+  </Type>
+
+  <!-- ===========================================================
+       GuestStopState - snapshot of guest CPU at a Layer-C stop.
+       Surfaces rip_sym prominently; full regs available on expand.
+       =========================================================== -->
+  <Type Name="duetos::vmm::GuestStopState">
+    <DisplayString>guest @ {rip_sym,s} (reason={stop_reason,d})</DisplayString>
+    <Expand>
+      <Item Name="rip_sym">rip_sym,s</Item>
+      <Item Name="rip">rip,X</Item>
+      <Item Name="reason (1=#DB 3=#BP)">stop_reason,d</Item>
+      <Item Name="stopped">stopped</Item>
+      <Synthetic Name="[GPRs]">
+        <DisplayString>rax..r15</DisplayString>
+        <Expand>
+          <Item Name="rax">rax,X</Item>
+          <Item Name="rbx">rbx,X</Item>
+          <Item Name="rcx">rcx,X</Item>
+          <Item Name="rdx">rdx,X</Item>
+          <Item Name="rsi">rsi,X</Item>
+          <Item Name="rdi">rdi,X</Item>
+          <Item Name="rbp">rbp,X</Item>
+          <Item Name="rsp">rsp,X</Item>
+          <Item Name="r8" >r8 ,X</Item>
+          <Item Name="r9" >r9 ,X</Item>
+          <Item Name="r10">r10,X</Item>
+          <Item Name="r11">r11,X</Item>
+          <Item Name="r12">r12,X</Item>
+          <Item Name="r13">r13,X</Item>
+          <Item Name="r14">r14,X</Item>
+          <Item Name="r15">r15,X</Item>
+        </Expand>
+      </Synthetic>
+      <Synthetic Name="[control]">
+        <DisplayString>rflags / cr2 / cr3</DisplayString>
+        <Expand>
+          <Item Name="rflags">rflags,X</Item>
+          <Item Name="cr2">cr2,X</Item>
+          <Item Name="cr3">cr3,X</Item>
+        </Expand>
+      </Synthetic>
+    </Expand>
+  </Type>
+
+  <!-- ===========================================================
+       ElfSymbols::Sym - the {name, addr, size} triples that back
+       the bridge debugger's name lookups. Default tree view is
+       fine; this just makes the inline display informative.
+       =========================================================== -->
+  <Type Name="duetos::vmm::ElfSymbols::Sym">
+    <DisplayString>{name,s} @ {addr,X} ({size,d}B)</DisplayString>
+  </Type>
+
+</AutoVisualizer>

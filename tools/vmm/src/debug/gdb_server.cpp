@@ -2,6 +2,7 @@
 
 #include <ws2tcpip.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <stdexcept>
@@ -88,6 +89,17 @@ GdbServer::GdbServer(Partition& part, GuestMemory& mem, uint16_t port)
 
 GdbServer::~GdbServer()
 {
+    // Tear down the watcher first. Order matters: set the shutdown
+    // flag, then shutdown(SD_BOTH) the socket to unblock any
+    // WSAPoll/recv the watcher is currently parked in, then join.
+    // Only THEN closesocket — closing while another thread is mid-
+    // recv on Windows yields WSAENOTSOCK with undefined ordering.
+    if (m_irqThread.joinable())
+    {
+        m_irqShutdown.store(true);
+        if (m_conn != INVALID_SOCKET) shutdown(m_conn, SD_BOTH);
+        m_irqThread.join();
+    }
     if (m_conn != INVALID_SOCKET) closesocket(m_conn);
     if (m_listen != INVALID_SOCKET) closesocket(m_listen);
     WSACleanup();
@@ -109,10 +121,21 @@ void GdbServer::WaitForConnection()
                reinterpret_cast<char*>(&nodelay), sizeof(nodelay));
     std::printf("[vmm] gdb: client attached\n");
     std::fflush(stdout);
+
+    // Spin up the async-interrupt watcher now that the socket is
+    // live. It runs until ~GdbServer; the m_inServeStopped flag
+    // keeps it dormant while ServeStopped owns the protocol so it
+    // never races the main thread's RecvPacket / SendPacket.
+    m_irqThread = std::thread(&GdbServer::IrqWatcherLoop, this);
 }
 
 std::string GdbServer::RecvPacket()
 {
+    // Hold m_socketMtx for the whole packet read so a concurrent
+    // IrqWatcherLoop iteration can't slice a byte out of the middle.
+    // The watcher uses try_lock so this is the back-pressure side of
+    // the pair — if main is reading, the watcher waits.
+    std::lock_guard<std::mutex> _lk(m_socketMtx);
     // Skip to '$', accumulate to '#', drop the 2 checksum chars.
     char c = 0;
     for (;;)
@@ -145,6 +168,9 @@ void GdbServer::SendAck()
 
 void GdbServer::SendPacket(const std::string& body)
 {
+    // Same locking rationale as RecvPacket — both send + ack-recv
+    // need to stay atomic w.r.t. the watcher's peek/consume.
+    std::lock_guard<std::mutex> _lk(m_socketMtx);
     uint8_t sum = 0;
     for (char ch : body) sum = static_cast<uint8_t>(sum + ch);
     std::string pkt = "$" + body + "#";
@@ -153,6 +179,68 @@ void GdbServer::SendPacket(const std::string& body)
     send(m_conn, pkt.data(), static_cast<int>(pkt.size()), 0);
     char ack = 0;
     recv(m_conn, &ack, 1, 0); // consume '+'/'-' (lenient)
+}
+
+void GdbServer::SendStopReply(int sig)
+{
+    char b[8];
+    std::snprintf(b, sizeof(b), "S%02x", sig);
+    SendPacket(b); // takes m_socketMtx
+}
+
+void GdbServer::IrqWatcherLoop()
+{
+    using namespace std::chrono_literals;
+    while (!m_irqShutdown.load())
+    {
+        // Dormant while ServeStopped owns the protocol. The in-band
+        // `\x03` handler inside ServeStopped already handles Pause
+        // when we're already stopped; touching the socket from here
+        // would only race with it.
+        if (m_inServeStopped.load())
+        {
+            std::this_thread::sleep_for(50ms);
+            continue;
+        }
+        // Cooperative: never block ServeStopped's RecvPacket /
+        // SendPacket. If main holds the socket lock, back off.
+        std::unique_lock<std::mutex> lk(m_socketMtx, std::try_to_lock);
+        if (!lk.owns_lock())
+        {
+            std::this_thread::sleep_for(10ms);
+            continue;
+        }
+        WSAPOLLFD pfd = {};
+        pfd.fd = m_conn;
+        pfd.events = POLLRDNORM;
+        const int r = WSAPoll(&pfd, 1, 100); // 100 ms wait
+        if (m_irqShutdown.load()) return;
+        if (r <= 0) continue;
+        if (!(pfd.revents & POLLRDNORM)) continue;
+        char c = 0;
+        const int n = recv(m_conn, &c, 1, MSG_PEEK);
+        if (n <= 0) return; // socket dead — let dtor join us
+        if (c != '\x03')
+        {
+            // Stray byte while guest is running. gdb shouldn't send
+            // packets while waiting for a stop reply, but if it does
+            // we leave the byte for the next ServeStopped read. Drop
+            // the lock and yield so main can drain it on the next
+            // stop without us spinning here.
+            lk.unlock();
+            std::this_thread::sleep_for(50ms);
+            continue;
+        }
+        // Consume the \x03 byte so ServeStopped's own \x03 handler
+        // doesn't double-fire after we report the stop.
+        recv(m_conn, &c, 1, 0);
+        m_irqPending.store(true);
+        // Drop the lock BEFORE the callback — Partition::CancelRun
+        // doesn't touch the socket, but keeping the lock released
+        // means a slow callback can't stall main thread I/O.
+        lk.unlock();
+        if (m_onInterrupt) m_onInterrupt();
+    }
 }
 
 std::string GdbServer::ReadRegisters(uint32_t vp)
@@ -265,10 +353,36 @@ void GdbServer::ReinsertAll()
 
 int GdbServer::OnException(uint32_t vp, uint8_t exceptionType)
 {
-    if (exceptionType == 3) // #BP — rewind RIP onto the int3 byte
+    if (exceptionType == 3) // #BP
     {
-        uint64_t rip = m_part.GetRip(vp);
-        m_part.SetRip(vp, rip - 1);
+        // Two flavours of #BP exit here, and the rewind is only
+        // correct for one of them:
+        //
+        // (1) Gdb-planted soft breakpoint. We replaced the original
+        //     instruction byte at bp_va with 0xCC. The CPU executed
+        //     0xCC and #BP'd; RIP now points just PAST the 0xCC
+        //     (= bp_va + 1). Gdb (and the step-off-bp dance in
+        //     ApplyResume() → StepOffBegin) both assume the reported
+        //     PC equals bp_va, so we rewind by one.
+        //
+        // (2) Source-hardcoded `int3` not owned by gdb — e.g. the
+        //     kernel's traps self-test in kernel/arch/x86_64/traps.cpp
+        //     ("[traps] self-test" sentinel) or any in-kernel KBP
+        //     probe. The byte at rip-1 IS 0xCC but WE didn't plant
+        //     it; we just want the client to see a one-shot SIGTRAP
+        //     and resume past it. Rewinding instead loops the int3
+        //     forever (each `c` resumes at the same 0xCC, re-traps,
+        //     rewinds again — the previous behaviour halted boot
+        //     permanently at the traps self-test under any attached
+        //     debugger).
+        //
+        // Distinguish by membership in m_bps. If rip-1 is one we
+        // planted, it's ours; otherwise hands off.
+        const uint64_t rip = m_part.GetRip(vp);
+        if (m_bps.count(rip - 1) != 0)
+        {
+            m_part.SetRip(vp, rip - 1);
+        }
     }
     return 5; // SIGTRAP for both #BP and #DB(single-step)
 }
@@ -307,6 +421,20 @@ void GdbServer::StepOffEnd()
 
 GdbServer::Resume GdbServer::ServeStopped(int sig)
 {
+    // Park the async-interrupt watcher for the duration. While we're
+    // stopped, gdb's in-band `\x03` is handled by the cmd == "\x03"
+    // arm in this function — the watcher would only race for the
+    // same byte. RAII so every return path clears the flag.
+    struct InServeStoppedGuard
+    {
+        std::atomic<bool>& flag;
+        explicit InServeStoppedGuard(std::atomic<bool>& f) : flag(f)
+        {
+            flag.store(true);
+        }
+        ~InServeStoppedGuard() { flag.store(false); }
+    } _guard(m_inServeStopped);
+
     for (;;)
     {
         std::string pkt = RecvPacket();

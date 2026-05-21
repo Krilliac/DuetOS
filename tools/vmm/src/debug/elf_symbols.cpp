@@ -136,4 +136,58 @@ const ElfSymbols::Sym* ElfSymbols::Find(const std::string& name) const
     return nullptr;
 }
 
+const ElfSymbols::Sym* ElfSymbols::FindBySuffix(const std::string& query) const
+{
+    if (query.empty())
+    {
+        return nullptr;
+    }
+
+    // Build the Itanium length-prefixed token we're looking for.
+    // e.g. query="g_ticks" (7 chars) → needle="7g_ticks"
+    std::string needle = std::to_string(query.size()) + query;
+
+    const Sym* best       = nullptr;
+    bool       bestIsAnon = false;
+
+    for (const Sym& s : m_syms)
+    {
+        if (s.name.find(needle) == std::string::npos)
+        {
+            continue;
+        }
+
+        bool isAnon = (s.name.find("_GLOBAL__N_") != std::string::npos);
+
+        if (best == nullptr)
+        {
+            best       = &s;
+            bestIsAnon = isAnon;
+            continue;
+        }
+
+        // Prefer named-namespace over anonymous-namespace.
+        if (isAnon && !bestIsAnon)
+        {
+            continue;
+        }
+        if (!isAnon && bestIsAnon)
+        {
+            best       = &s;
+            bestIsAnon = false;
+            continue;
+        }
+
+        // Both have the same anon status — prefer smaller address
+        // for determinism.
+        if (s.addr < best->addr)
+        {
+            best       = &s;
+            bestIsAnon = isAnon;
+        }
+    }
+
+    return best;
+}
+
 } // namespace duetos::vmm

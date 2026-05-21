@@ -12,6 +12,7 @@
 #include "debug/elf_symbols.h"
 #include "debug/exit_trace.h"
 #include "debug/gdb_server.h"
+#include "debug/guest_view.h"
 #include "debug/record.h"
 #include "devices/ioapic.h"
 #include "devices/pit8254.h"
@@ -70,6 +71,27 @@ public:
     // Boots the guest and runs the exit loop until the guest halts,
     // faults, or the idle watchdog fires. Returns a process exit code.
     int Run();
+
+    // Singleton accessor for the vmm_dbg:: layer. Set in ctor, cleared
+    // in dtor. Never null while the VMM is running; null before/after.
+    static Vmm* Active();
+
+    // Introspection accessors used by vmm_dbg::. These do not lock —
+    // callers must only be invoked while the guest is paused (i.e.
+    // from the VS Immediate window while the vCPU thread is stopped
+    // at a breakpoint in the VMM process).
+    bool DbgResolveGpa(uint64_t gva, uint64_t& gpa) const;
+    void* DbgHostPtr(uint64_t gpa, uint64_t len) const;
+    const ElfSymbols::Sym* DbgFindSym(const char* name) const;
+    const ElfSymbols& DbgSymbols() const;
+    Partition& DbgPartition() { return m_part; }
+
+    // Typed live view of curated guest kernel globals. Populated
+    // lazily on each guest exit via RefreshGuestView(). Inspect in
+    // the VS Watch window as `vmm.kernel.g_ticks` — the pointer
+    // dereferences directly into WHP-mapped guest RAM, so the value
+    // updates every time you step/resume in the debugger.
+    GuestKernelView kernel;
 
 private:
     void SetupVcpu(uint64_t entry, uint64_t mbInfoGpa);

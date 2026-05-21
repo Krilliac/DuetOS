@@ -65,15 +65,27 @@ add_executable(duetos-vmm
     src/devices/ioapic.cpp
     src/devices/ps2_i8042.cpp
     src/input/ps2_encode.cpp
-    src/debug/gdb_server.cpp
     src/debug/elf_symbols.cpp
     src/debug/exit_trace.cpp
+    src/debug/gdb_server.cpp
+    src/debug/guest_view.cpp
+    src/debug/host_stop.cpp
     src/debug/introspect.cpp
     src/debug/record.cpp
+    src/debug/vmm_dbg.cpp
     src/display/window.cpp
 )
 
 target_include_directories(duetos-vmm PRIVATE src)
+
+# Visual Studio Natvis visualisers for the bridge-debugger types
+# (GuestKernelView, GuestStopState, ElfSymbols::Sym). Listed in
+# target_sources so the .vcxproj picks them up automatically — VS
+# then loads them whenever a developer attaches to duetos-vmm.exe.
+# Listed AFTER the main source list so MSBuild marks them as a
+# Natvis item type (CMake VS_TOOL_OVERRIDE), not as a compile input.
+target_sources(duetos-vmm PRIVATE vmm.natvis)
+set_source_files_properties(vmm.natvis PROPERTIES VS_TOOL_OVERRIDE "Natvis")
 
 # WinHvPlatform.lib ships with the Windows SDK; the loader resolves
 # WinHvPlatform.dll from System32 at runtime. Onecore covers the
@@ -119,9 +131,23 @@ if(CMAKE_GENERATOR MATCHES "Visual Studio")
     # 2 GiB matches the user's typical VBox config and leaves
     # plenty of headroom for the PE-compat / windowed_hello /
     # ring3-smoke batteries the kernel runs at boot.
+    # Two-window-debug default: F5 launches the VMM under the native
+    # debugger with BOTH the host-attach bridge surface AND the GDB
+    # stub enabled. The user gets full coverage by opening a second
+    # VS instance and F5'ing the "DuetOS: Attach (in-house VMM,
+    # tcp:1234)" launch.vs.json config — that one drives kernel-side
+    # source-level debugging via the GDB stub. The two sessions
+    # coexist (vmm_dbg::Claim() defaults off; GDB stub owns exceptions
+    # until the host-attach session explicitly claims).
+    #   --break  : __debugbreak in main() so the native-attach window's
+    #              Immediate is live before the vCPU runs (see wiki).
+    #   --gdb 1234 : open the host-side GDB remote on tcp:1234 for the
+    #              second VS instance to attach.
+    # IsDebuggerPresent() gates the --break trap, so an accidental
+    # plain `duetos-vmm.exe` invocation is a no-op on that flag.
     set_target_properties(duetos-vmm PROPERTIES
         VS_DEBUGGER_COMMAND_ARGUMENTS
-            "--kernel \"${_duetos_kernel_elf}\" --mem 2048"
+            "--kernel \"${_duetos_kernel_elf}\" --mem 2048 --gdb 1234 --break"
         VS_DEBUGGER_WORKING_DIRECTORY
             "${_duetos_repo_root}")
 endif()

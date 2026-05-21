@@ -5,6 +5,9 @@
 #include <cstdio>
 #include <stdexcept>
 
+#include "debug/host_stop.h"
+#include "debug/vmm_dbg.h"
+
 #include "acpi.h"
 #include "elf64.h"
 #include "host_clock.h"
@@ -22,7 +25,36 @@ uint64_t Align2M(uint64_t x) { return (x + 0x1FFFFF) & ~uint64_t(0x1FFFFF); }
 // BSP APIC id. The synthesised MADT advertises exactly one LAPIC
 // with id 0, so every IOAPIC-routed line targets APIC 0.
 constexpr uint32_t kBspApicId = 0;
+
+// Singleton pointer — set in Vmm ctor, cleared in dtor.
+Vmm* g_activeVmm = nullptr;
 } // namespace
+
+// static
+Vmm* Vmm::Active()
+{
+    return g_activeVmm;
+}
+
+bool Vmm::DbgResolveGpa(uint64_t gva, uint64_t& gpa) const
+{
+    return m_part.TranslateGva(0, gva, gpa);
+}
+
+void* Vmm::DbgHostPtr(uint64_t gpa, uint64_t len) const
+{
+    return m_mem->HostPtr(gpa, len);
+}
+
+const ElfSymbols::Sym* Vmm::DbgFindSym(const char* name) const
+{
+    return m_symbols.Find(name);
+}
+
+const ElfSymbols& Vmm::DbgSymbols() const
+{
+    return m_symbols;
+}
 
 Vmm::Vmm(VmConfig cfg)
     : m_cfg(std::move(cfg)),
@@ -98,6 +130,15 @@ Vmm::Vmm(VmConfig cfg)
                                             m_cfg.gdbPort);
         m_gdb->SetMonitor(
             [this](const std::string& c) { return Monitor(c); });
+        // Wire VS Pause / Break-All to a WHP cancellation. The
+        // GdbServer watcher thread (started in WaitForConnection)
+        // calls this when it sees `\x03` on the gdb socket while the
+        // guest is running. CancelRun makes WHvRunVirtualProcessor
+        // return with reason=Canceled; the main loop below routes
+        // that to a stop-reply + ServeStopped when IrqPending is set,
+        // so VS's UI thread gets its expected stop reply instead of
+        // freezing the IDE.
+        m_gdb->SetOnInterrupt([this] { m_part.CancelRun(0); });
     }
 
     if (!m_cfg.recordPath.empty())
@@ -121,6 +162,15 @@ Vmm::Vmm(VmConfig cfg)
                     "(exit-seq deterministic)\n",
                     m_cfg.replayPath.c_str());
     }
+
+    // Publish the singleton AFTER all members are constructed (this is the
+    // last statement of the ctor body). vmm_dbg::* is only reachable from
+    // the VS Immediate window while the vCPU thread is stopped at a
+    // native debugger breakpoint — by which time construction has long
+    // completed. If a future helper thread ever calls a vmm_dbg:: function
+    // before the ctor returns, move this publication to the very end of
+    // the function body AND add an std::atomic_thread_fence(release).
+    g_activeVmm = this;
 }
 
 void Vmm::RaiseGuestLine(uint32_t irq)
@@ -224,6 +274,7 @@ bool Vmm::ApplyResume(GdbServer::Resume r)
 
 Vmm::~Vmm()
 {
+    g_activeVmm = nullptr;
     m_stop.store(true);
     m_part.CancelRun(0);
     // Stop the window before guest memory is torn down — FbWindow
@@ -491,6 +542,7 @@ int Vmm::Run()
         }
         WHV_RUN_VP_EXIT_CONTEXT exit = m_part.Run(0);
         RecordExit(exit);
+        RefreshGuestView(kernel, *this);
         PumpReplay(); // feed recorded inputs due at this exit-seq
         switch (exit.ExitReason)
         {
@@ -535,6 +587,20 @@ int Vmm::Run()
 
         case WHvRunVpExitReasonException:
         {
+            // Arbiter: if the host-attach session has claimed ownership,
+            // give it first crack.  HandleHostStop returns true for #BP/#DB
+            // and blocks until the host calls Step() or Run().  Any other
+            // exception type returns false, falling through to the GDB stub.
+            if (HostAttachOwnsDebug())
+            {
+                if (HandleHostStop(*this, exit))
+                {
+                    haltSpins = 0;
+                    break;
+                }
+                // Fall through to legacy handling if arbiter declined.
+            }
+
             const uint8_t et = exit.VpException.ExceptionType;
             if (!m_gdb)
             {
@@ -561,13 +627,16 @@ int Vmm::Run()
                 break;
             }
             // GAP: a #BP not in m_bps is a guest-originated int3
-            // (the kernel's own KBP probes). With a host debugger
-            // attached the host owns #BP, so these surface to the
-            // client as an unexpected SIGTRAP instead of reaching
-            // the kernel handler. Re-injection into the guest needs
-            // the WHP pending-event path — revisit when kernel-probe
-            // coexistence matters; for now run with probes disarmed
-            // while gdb is attached.
+            // (the kernel's traps self-test, or any in-kernel KBP
+            // probe). With a host debugger attached the host owns
+            // #BP, so these surface to the client as a one-shot
+            // SIGTRAP instead of reaching the kernel handler;
+            // pressing Continue in VS skips past the int3. (Before
+            // the OnException rewind-fix in gdb_server.cpp these
+            // looped forever — boot halted at "[traps] self-test".)
+            // Full re-injection into the guest so the kernel #BP
+            // handler runs needs the WHP pending-event path —
+            // revisit when probe-coverage under gdb matters.
             const int sig = m_gdb->OnException(0, et);
             const GdbServer::Resume r = m_gdb->ServeStopped(sig);
             ApplyResume(r); // Detach drops m_gdb and free-runs
@@ -579,6 +648,24 @@ int Vmm::Run()
             break;
 
         case WHvRunVpExitReasonCanceled:
+            // Two callers can drive Canceled:
+            //   (1) m_stop.store(true) + CancelRun — clean shutdown
+            //       (window close, /quit, helper-thread fatal). Fall
+            //       through to the existing return below.
+            //   (2) GdbServer's async-interrupt watcher consuming a
+            //       `\x03` from gdb (VS Pause / Break-All). The watcher
+            //       sets IrqPending before calling CancelRun, so we
+            //       can distinguish the two. Send the proactive S05
+            //       stop reply gdb is waiting for after `c`, then
+            //       enter ServeStopped just like a #BP exit would.
+            if (m_gdb && m_gdb->IrqPending())
+            {
+                m_gdb->ClearIrqPending();
+                m_gdb->SendStopReply(5);
+                ApplyResume(m_gdb->ServeStopped(5));
+                haltSpins = 0;
+                break;
+            }
             return m_stop.load() ? 0 : 1;
 
         default:
@@ -591,5 +678,33 @@ int Vmm::Run()
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Keepalive table — prevents MSVC /OPT:REF from stripping vmm_dbg::*
+// symbols that are only ever called from the VS Immediate window (i.e.
+// never from a normal call-graph edge the linker can see).
+// ---------------------------------------------------------------------------
+namespace
+{
+volatile void* const g_vmmDbgKeepalive[] = {
+    reinterpret_cast<volatile void*>(&vmm_dbg::ReadQ),
+    reinterpret_cast<volatile void*>(&vmm_dbg::ReadD),
+    reinterpret_cast<volatile void*>(&vmm_dbg::ReadW),
+    reinterpret_cast<volatile void*>(&vmm_dbg::ReadB),
+    reinterpret_cast<volatile void*>(&vmm_dbg::WriteQ),
+    reinterpret_cast<volatile void*>(&vmm_dbg::WriteD),
+    reinterpret_cast<volatile void*>(&vmm_dbg::WriteW),
+    reinterpret_cast<volatile void*>(&vmm_dbg::WriteB),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Sym),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Dump),
+    // Layer C — host-attach session control
+    reinterpret_cast<volatile void*>(&vmm_dbg::Claim),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Release),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Bp),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Clr),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Step),
+    reinterpret_cast<volatile void*>(&vmm_dbg::Run),
+};
+} // namespace
 
 } // namespace duetos::vmm

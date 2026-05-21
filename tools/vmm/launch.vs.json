@@ -1,0 +1,76 @@
+{
+  // Visual Studio "Open Folder" debug targets for the duetos-vmm folder.
+  //
+  // PURPOSE
+  //   The repo-root launch.vs.json works too, but opening the DuetOS root
+  //   folder in VS triggers a CMake configure against the freestanding
+  //   kernel's root CMakeLists.txt — which FATAL_ERRORs on Windows by
+  //   design (clang++ not on the Windows PATH). VS then refuses to
+  //   populate the launch dropdown until the configure failure is
+  //   dismissed.
+  //
+  //   This file lets you open tools/vmm/ DIRECTLY as the second-VS
+  //   folder (for the GDB-stub kernel-debug session). The CMake project
+  //   here is the VMM itself (Windows MSVC), so VS configures it
+  //   cleanly and the launch entries below appear in the toolbar
+  //   dropdown immediately.
+  //
+  // RECOMMENDED WORKFLOW (full-coverage two-window debug)
+  //   1. First VS instance — open the DuetOS repo root, F5 the
+  //      duetos-vmm CMake target. The VMM launches with --break and
+  //      --gdb 1234. Native-attach session is live for VMM + the
+  //      vmm_dbg:: bridge. Continue past the __debugbreak to let the
+  //      VMM open its GDB stub.
+  //
+  //   2. Second VS instance — open tools/vmm/ (THIS folder). Pick
+  //      "DuetOS: Attach (in-house VMM kernel, tcp:1234)" in the
+  //      launch dropdown, F5. The kernel ELF is loaded, gdb connects
+  //      to localhost:1234, the guest halts pre-first-instruction.
+  //      Source-level kernel debugging is now live in this window.
+  //
+  // GDB.EXE — needs to be a **Windows** gdb on PATH (NOT WSL's
+  // /usr/bin/gdb — WSL2 cannot reach the Windows host via localhost).
+  // miDebuggerPath below is set to bare "gdb.exe" so VS resolves it
+  // from user PATH; that keeps this file portable across machines.
+  //
+  // If you don't have a Windows gdb yet, the simplest install:
+  //   winget install BrechtSanders.WinLibs.POSIX.UCRT --source winget
+  //   (adds .../mingw64/bin to user PATH automatically; relaunch VS)
+  //
+  // Other common installs that put gdb on PATH:
+  //   scoop install gdb
+  //   choco install gdb        (admin)
+  //   pacman -S mingw-w64-ucrt-x86_64-gdb   (inside MSYS2)
+  //
+  // If your gdb isn't on PATH for some reason, edit miDebuggerPath
+  // locally (don't commit a user-specific absolute path — it would
+  // break this file for everyone else who clones the repo).
+  //
+  // See wiki/tooling/VMM-Debugging.md for the full debugging guide.
+  "version": "0.2.1",
+  "defaults": {},
+  "configurations": [
+    {
+      // Attach to the kernel ELF via the VMM's GDB stub on tcp:1234.
+      // The first VS instance must already have launched duetos-vmm.exe
+      // with --gdb 1234 (the F5 default in tools/vmm/CMakeLists.txt).
+      // stopAtConnect:true makes the guest halt before its first
+      // instruction so you can plant boot breakpoints first.
+      "type": "cppdbg",
+      "name": "DuetOS: Attach (in-house VMM kernel, tcp:1234)",
+      "project": "CMakeLists.txt",
+      "program": "${workspaceRoot}/../../build/x86_64-debug/kernel/duetos-kernel.elf",
+      "cwd": "${workspaceRoot}/../..",
+      "MIMode": "gdb",
+      "miDebuggerPath": "gdb.exe",
+      "miDebuggerServerAddress": "localhost:1234",
+      "stopAtConnect": true,
+      "externalConsole": false,
+      "setupCommands": [
+        { "text": "set confirm off", "ignoreFailures": true },
+        { "text": "set print pretty on", "ignoreFailures": true },
+        { "text": "set disable-randomization off", "ignoreFailures": true }
+      ]
+    }
+  ]
+}

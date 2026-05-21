@@ -34,7 +34,22 @@ public:
     // Exact-name lookup. Returns nullptr if absent.
     const Sym* Find(const std::string& name) const;
 
+    // Suffix-match lookup against mangled Itanium names. Searches for
+    // `<len><query>` in each mangled name (Itanium length-prefixed
+    // identifier). If multiple symbols match, prefer the one without
+    // `_GLOBAL__N_` (anonymous namespace); break remaining ties by
+    // smallest address. Returns nullptr if nothing matches.
+    //
+    // Used by both the live LiveResolver path and unit tests (the matching
+    // AddSymForTest test seam below is gated; FindBySuffix is not).
+    const Sym* FindBySuffix(const std::string& query) const;
+
     size_t count() const { return m_syms.size(); }
+
+#ifdef VMM_DBG_NO_LIVE
+    // Test-only seam: inject a synthesised symbol without loading an ELF.
+    void AddSymForTest(const Sym& s) { m_syms.push_back(s); }
+#endif
 
 private:
     std::vector<Sym> m_syms; // sorted by addr
