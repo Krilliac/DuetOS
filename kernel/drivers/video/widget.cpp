@@ -1401,6 +1401,259 @@ void WindowSnapBottom(WindowHandle h)
     g_windows[h].maximized = false;
 }
 
+// Quarter-screen corner snaps. Same WorkArea reserve as the
+// half-snaps; the right / bottom halves pick up the odd
+// row / column on odd-sized framebuffers so the four quarters
+// tile exactly with no gap.
+void WindowSnapTopLeft(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    auto& c = g_windows[h].chrome;
+    c.x = wa_x;
+    c.y = wa_y;
+    c.w = wa_w / 2u;
+    c.h = wa_h / 2u;
+    g_windows[h].maximized = false;
+}
+
+void WindowSnapTopRight(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    auto& c = g_windows[h].chrome;
+    const u32 half_w = wa_w / 2u;
+    c.x = wa_x + half_w;
+    c.y = wa_y;
+    c.w = wa_w - half_w;
+    c.h = wa_h / 2u;
+    g_windows[h].maximized = false;
+}
+
+void WindowSnapBottomLeft(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    auto& c = g_windows[h].chrome;
+    const u32 half_h = wa_h / 2u;
+    c.x = wa_x;
+    c.y = wa_y + half_h;
+    c.w = wa_w / 2u;
+    c.h = wa_h - half_h;
+    g_windows[h].maximized = false;
+}
+
+void WindowSnapBottomRight(WindowHandle h)
+{
+    if (!WindowValid(h))
+        return;
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    auto& c = g_windows[h].chrome;
+    const u32 half_w = wa_w / 2u;
+    const u32 half_h = wa_h / 2u;
+    c.x = wa_x + half_w;
+    c.y = wa_y + half_h;
+    c.w = wa_w - half_w;
+    c.h = wa_h - half_h;
+    g_windows[h].maximized = false;
+}
+
+// ---------------------------------------------------------------
+// Snap-zone hover preview.
+//
+// `g_snap_preview` is the single source of truth for "what would
+// happen if the user released the drag right now." The mouse
+// loop (kernel/core/boot_tasks.cpp) writes it via SnapPreviewArm
+// on every drag-motion packet; DesktopCompose reads it via
+// SnapPreviewArmed and paints a translucent rectangle at the
+// snap target's geometry between the windows layer and the
+// tooltip layer. Cleared on drag-release (by the release branch
+// after committing the snap) and on Esc-during-drag.
+//
+// Cursor-distance hit bands (px from each screen edge):
+//   - Corner: 32 × 32 box from each corner (precedence over
+//     edges so a cursor 8 px from top-left resolves to TopLeft,
+//     not Maximize or Left).
+//   - Top edge: cursor_y <= kSnapEdgePx → Maximize.
+//   - Left edge: cursor_x <= kSnapEdgePx → SnapLeft.
+//   - Right edge: cursor_x >= fb.width - kSnapEdgePx → SnapRight.
+//   - Bottom edge: no snap. The bottom strip is owned by the
+//     taskbar's drag-snap (TaskbarBeginDrag / TaskbarEndDrag),
+//     and stealing it for a window-snap would compete with the
+//     existing gesture. Documented in wiki/subsystems/Compositor.md
+//     "Snap Zones."
+// ---------------------------------------------------------------
+
+namespace
+{
+
+// Hit-band width / corner box edge in pixels. 32 px matches
+// Win10/11's Aero snap zone, large enough that a quick drag-
+// to-edge doesn't require pixel-perfect aim.
+constexpr u32 kSnapEdgePx = 32;
+constexpr u32 kSnapCornerPx = 32;
+
+// Armed snap zone. Compositor-locked: the mouse loop already
+// holds the compositor lock around drag motion / drag release,
+// and DesktopCompose reads under the same lock, so a plain
+// scalar is safe — no separate spinlock.
+SnapZone g_snap_preview_zone = SnapZone::None;
+
+// Compute the screen-space rect a given snap zone would
+// produce. Mirrors the geometry inside WindowSnap* / WindowMaximize
+// so the preview rectangle is pixel-identical to what the
+// commit would land. `zone == None` writes zeros.
+void SnapZoneRect(SnapZone zone, u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    const u32 half_w = wa_w / 2u;
+    const u32 half_h = wa_h / 2u;
+    u32 rx = 0, ry = 0, rw = 0, rh = 0;
+    switch (zone)
+    {
+    case SnapZone::Maximize:
+        rx = wa_x;
+        ry = wa_y;
+        rw = wa_w;
+        rh = wa_h;
+        break;
+    case SnapZone::Left:
+        rx = wa_x;
+        ry = wa_y;
+        rw = half_w;
+        rh = wa_h;
+        break;
+    case SnapZone::Right:
+        rx = wa_x + half_w;
+        ry = wa_y;
+        rw = wa_w - half_w;
+        rh = wa_h;
+        break;
+    case SnapZone::TopLeft:
+        rx = wa_x;
+        ry = wa_y;
+        rw = half_w;
+        rh = half_h;
+        break;
+    case SnapZone::TopRight:
+        rx = wa_x + half_w;
+        ry = wa_y;
+        rw = wa_w - half_w;
+        rh = half_h;
+        break;
+    case SnapZone::BottomLeft:
+        rx = wa_x;
+        ry = wa_y + half_h;
+        rw = half_w;
+        rh = wa_h - half_h;
+        break;
+    case SnapZone::BottomRight:
+        rx = wa_x + half_w;
+        ry = wa_y + half_h;
+        rw = wa_w - half_w;
+        rh = wa_h - half_h;
+        break;
+    case SnapZone::None:
+    default:
+        break;
+    }
+    if (x_out)
+        *x_out = rx;
+    if (y_out)
+        *y_out = ry;
+    if (w_out)
+        *w_out = rw;
+    if (h_out)
+        *h_out = rh;
+}
+
+// Paint the armed preview as a translucent taskbar_accent rect.
+// Called from DesktopCompose between WindowDrawAllOrdered and
+// the tooltip / dialog layers. The ~25% alpha (0x40) reads as
+// "this is a preview, not real chrome" without washing out the
+// underlying windows.
+void SnapPreviewCompose()
+{
+    if (g_snap_preview_zone == SnapZone::None)
+        return;
+    u32 x = 0, y = 0, w = 0, h = 0;
+    SnapZoneRect(g_snap_preview_zone, &x, &y, &w, &h);
+    if (w == 0 || h == 0)
+        return;
+    const u32 accent_rgb = ThemeCurrent().taskbar_accent & 0x00FFFFFFu;
+    // 0x40 = 25 % alpha. ARGB packing matches FramebufferFillRectAlpha.
+    const u32 argb = (0x40u << 24) | accent_rgb;
+    FramebufferFillRectAlpha(x, y, w, h, argb);
+}
+
+} // namespace
+
+void SnapPreviewArm(SnapZone zone)
+{
+    g_snap_preview_zone = zone;
+}
+
+SnapZone SnapPreviewArmed()
+{
+    return g_snap_preview_zone;
+}
+
+void SnapZoneGetRect(SnapZone zone, u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    SnapZoneRect(zone, x_out, y_out, w_out, h_out);
+}
+
+SnapZone SnapPreviewHitTest(u32 cursor_x, u32 cursor_y)
+{
+    const auto fb = FramebufferGet();
+    if (fb.width == 0 || fb.height == 0)
+        return SnapZone::None;
+    // WorkArea bounds the bottom edge — we ignore the taskbar
+    // strip for the snap-zone hit-test so a cursor parked over
+    // the taskbar doesn't arm a phantom preview.
+    u32 wa_x = 0, wa_y = 0, wa_w = 0, wa_h = 0;
+    WorkArea(&wa_x, &wa_y, &wa_w, &wa_h);
+    const u32 wa_right = wa_x + wa_w; // exclusive
+    const u32 wa_bot = wa_y + wa_h;   // exclusive — clamps out the taskbar
+    if (cursor_y >= wa_bot)
+        return SnapZone::None;
+
+    const bool near_top = (cursor_y - wa_y) < kSnapCornerPx;
+    const bool near_left = (cursor_x - wa_x) < kSnapCornerPx;
+    const bool near_right = (wa_right > kSnapCornerPx) && (cursor_x >= wa_right - kSnapCornerPx);
+    const bool near_bottom = (wa_bot > kSnapCornerPx) && (cursor_y >= wa_bot - kSnapCornerPx);
+
+    // Corners take precedence over edges. Bottom corners ARE
+    // exposed (they produce the bottom-left / bottom-right
+    // quarter snaps) even though the bare bottom edge isn't.
+    if (near_top && near_left)
+        return SnapZone::TopLeft;
+    if (near_top && near_right)
+        return SnapZone::TopRight;
+    if (near_bottom && near_left)
+        return SnapZone::BottomLeft;
+    if (near_bottom && near_right)
+        return SnapZone::BottomRight;
+
+    // Edges. Top → Maximize, sides → half-snap. Bottom edge has
+    // no half-snap (the taskbar drag-snap owns that strip).
+    if ((cursor_y - wa_y) < kSnapEdgePx)
+        return SnapZone::Maximize;
+    if ((cursor_x - wa_x) < kSnapEdgePx)
+        return SnapZone::Left;
+    if (wa_right > kSnapEdgePx && cursor_x >= wa_right - kSnapEdgePx)
+        return SnapZone::Right;
+    return SnapZone::None;
+}
+
 void WindowSetOpacity(WindowHandle h, u8 opacity)
 {
     if (!WindowValid(h))
@@ -2142,6 +2395,12 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
         FramebufferDrawStringScaled(17, 9, banner, 0x00000000, desktop_rgb, scale);
         FramebufferDrawStringScaled(16, 8, banner, 0x00FFFFFF, desktop_rgb, scale);
     }
+    // Snap-zone hover preview — translucent target rect painted
+    // after every window so the preview lays on top of normal
+    // chrome but under taskbar / menus / dialogs (the user is
+    // looking at the desktop snap target, not staring at a
+    // covered taskbar). No-op when no zone is armed.
+    SnapPreviewCompose();
     TaskbarRedraw();
     MenuRedraw();
     CalendarRedraw();

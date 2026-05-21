@@ -310,6 +310,27 @@ void KbdReaderTask(void*)
             continue;
         }
 
+        // Esc during a snap-zone hover preview clears the
+        // preview without affecting the in-flight drag-move —
+        // the user keeps holding LMB, the translucent target
+        // overlay vanishes, and a subsequent release commits
+        // the window at the cursor position (no snap). The
+        // mouse loop owns the drag state machine so we just
+        // drop the preview state here and force a recompose;
+        // the keystroke is NOT consumed (no `continue;`) so
+        // other Esc-listeners downstream still get a chance.
+        if (ev.code == kKeyEsc && !ev.is_release &&
+            duetos::drivers::video::SnapPreviewArmed() != duetos::drivers::video::SnapZone::None)
+        {
+            duetos::drivers::video::CompositorLock();
+            duetos::drivers::video::SnapPreviewArm(duetos::drivers::video::SnapZone::None);
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::CursorShow();
+            duetos::drivers::video::CompositorUnlock();
+            continue;
+        }
+
         // Modal-dialog gate: when a MessageBox / InputBox is
         // up, route every keystroke into the dialog and skip
         // every downstream branch (menus, shortcuts, app
@@ -2802,28 +2823,51 @@ void MouseReaderTask(void*)
         }
         if (release_edge && drag.active)
         {
-            // Aero-style edge snap: dropping a dragged window
-            // against a screen edge snaps it (top = maximize,
-            // left/right = half). The snap APIs were already
-            // keyboard-wired; the mouse drag-to-edge gesture —
-            // what most users actually reach for — was the dead
-            // zone. Compositor lock is held here (loop acquires
-            // it at the top), so call the snap ops directly.
-            const auto fb_snap = duetos::drivers::video::FramebufferGet();
-            constexpr duetos::u32 kSnapEdge = 12;
+            // Aero-style snap commit: if the drag-motion path
+            // armed a snap-zone preview (translucent overlay
+            // visible), commit the matching snap operation
+            // instead of leaving the window at the cursor-
+            // released position. No armed zone → the drag ends
+            // wherever the cursor landed, exactly as before.
+            // The compositor lock is held here (loop acquires
+            // it at the top of the body), so call the snap ops
+            // directly. Always clear the preview on release so a
+            // re-drag starts from a clean slate.
+            const duetos::drivers::video::SnapZone zone = duetos::drivers::video::SnapPreviewArmed();
             bool snapped = true;
-            if (cy <= kSnapEdge)
+            switch (zone)
+            {
+            case duetos::drivers::video::SnapZone::Maximize:
                 duetos::drivers::video::WindowMaximize(drag.window);
-            else if (cx <= kSnapEdge)
+                break;
+            case duetos::drivers::video::SnapZone::Left:
                 duetos::drivers::video::WindowSnapLeft(drag.window);
-            else if (fb_snap.width > kSnapEdge && cx >= fb_snap.width - kSnapEdge)
+                break;
+            case duetos::drivers::video::SnapZone::Right:
                 duetos::drivers::video::WindowSnapRight(drag.window);
-            else
+                break;
+            case duetos::drivers::video::SnapZone::TopLeft:
+                duetos::drivers::video::WindowSnapTopLeft(drag.window);
+                break;
+            case duetos::drivers::video::SnapZone::TopRight:
+                duetos::drivers::video::WindowSnapTopRight(drag.window);
+                break;
+            case duetos::drivers::video::SnapZone::BottomLeft:
+                duetos::drivers::video::WindowSnapBottomLeft(drag.window);
+                break;
+            case duetos::drivers::video::SnapZone::BottomRight:
+                duetos::drivers::video::WindowSnapBottomRight(drag.window);
+                break;
+            case duetos::drivers::video::SnapZone::None:
+            default:
                 snapped = false;
-            SerialWrite(snapped ? "[ui] drag end (edge snap) window=" : "[ui] drag end window=");
+                break;
+            }
+            SerialWrite(snapped ? "[ui] drag end (snap-zone) window=" : "[ui] drag end window=");
             SerialWriteHex(drag.window);
             SerialWrite("\n");
             drag.active = false;
+            duetos::drivers::video::SnapPreviewArm(duetos::drivers::video::SnapZone::None);
             if (snapped)
             {
                 duetos::drivers::video::CursorHide();
@@ -3055,6 +3099,29 @@ void MouseReaderTask(void*)
             const duetos::u32 nx = (cx > drag.grab_offset_x) ? cx - drag.grab_offset_x : 0;
             const duetos::u32 ny = (cy > drag.grab_offset_y) ? cy - drag.grab_offset_y : 0;
             duetos::drivers::video::WindowMoveTo(drag.window, nx, ny);
+            // Aero-style snap-zone hover preview. Hit-test the
+            // cursor against the screen-edge / corner bands and
+            // arm the preview rect. Re-arming the same zone is a
+            // no-op (cheap scalar write); leaving every band
+            // clears the armed state so the overlay disappears
+            // when the user steers back to the interior.
+            duetos::drivers::video::SnapZone zone = duetos::drivers::video::SnapPreviewHitTest(cx, cy);
+            if (zone != duetos::drivers::video::SnapZone::None)
+            {
+                // Suppress the arm when the dragged window
+                // already occupies exactly the target rect —
+                // the preview would just sit on top of the
+                // window's own chrome with nothing to suggest.
+                duetos::u32 zx = 0, zy = 0, zw = 0, zh = 0;
+                duetos::drivers::video::SnapZoneGetRect(zone, &zx, &zy, &zw, &zh);
+                duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+                if (duetos::drivers::video::WindowGetBounds(drag.window, &wx, &wy, &ww, &wh) && wx == zx &&
+                    wy == zy && ww == zw && wh == zh)
+                {
+                    zone = duetos::drivers::video::SnapZone::None;
+                }
+            }
+            duetos::drivers::video::SnapPreviewArm(zone);
             duetos::drivers::video::CursorHide();
             duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
             duetos::drivers::video::CursorShow();

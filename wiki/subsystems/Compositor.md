@@ -155,6 +155,31 @@ before the press is dispatched so Z-order tracks the click in
 addition to explicit `BringWindowToTop` / `SetForegroundWindow`
 syscalls.
 
+## Snap Zones
+
+While dragging a window the mouse loop hit-tests the cursor
+against 32-px screen-edge bands and 32×32-px corner boxes
+(`SnapPreviewHitTest` in `widget.cpp`). When the cursor enters
+a zone, `SnapPreviewArm` records the target and `DesktopCompose`
+paints a translucent `taskbar_accent` rect (~25 % alpha) at the
+exact rect the snap would commit — read as "preview" not real
+chrome. Releasing inside a zone commits the matching
+`WindowSnap*` / `WindowMaximize`; releasing outside leaves the
+window at the cursor position.
+
+| Zone | Snap | Primitive |
+|---|---|---|
+| Top edge | Maximise | `WindowMaximize` |
+| Left / right edge | Half | `WindowSnapLeft` / `WindowSnapRight` |
+| Top-left / top-right corner | Quarter | `WindowSnapTopLeft` / `WindowSnapTopRight` |
+| Bottom-left / bottom-right corner | Quarter | `WindowSnapBottomLeft` / `WindowSnapBottomRight` |
+| Bare bottom edge | none — owned by taskbar drag-snap | — |
+
+Corners take precedence over edges (a cursor 8 px from the
+top-left resolves to `TopLeft`, not `Maximize`). Esc during the
+drag clears the preview without aborting the move; the rest of
+the drag behaves normally.
+
 ## Double-Click
 
 Press-edge double-click detection lives in
