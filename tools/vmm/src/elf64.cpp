@@ -82,6 +82,51 @@ LoadedImage LoadElf64(const std::string& path, GuestMemory& mem)
     img.entry = eh.entry;
     img.lowPaddr = UINT64_MAX;
 
+    // Pre-flight pass: compute the highest paddr+memsz across all
+    // PT_LOAD segments and compare to guest RAM size. Without this
+    // check, a too-small --mem dies deep inside mem.Write() on the
+    // first overflowing segment with a generic "past end of RAM" —
+    // a single-error message naming the kernel's actual size
+    // requirement is much more useful, and firing it BEFORE any
+    // partial load happens means we don't leave guest RAM in a
+    // half-written state.
+    {
+        uint64_t needed = 0;
+        for (uint16_t i = 0; i < eh.phnum; ++i)
+        {
+            const uint64_t off = eh.phoff + uint64_t(i) * eh.phentsize;
+            if (off + sizeof(Elf64Phdr) > buf.size())
+            {
+                throw std::runtime_error("program header out of file");
+            }
+            Elf64Phdr ph;
+            std::memcpy(&ph, buf.data() + off, sizeof(ph));
+            if (ph.type != PT_LOAD || ph.memsz == 0)
+            {
+                continue;
+            }
+            const uint64_t end = ph.paddr + ph.memsz;
+            if (end > needed) needed = end;
+        }
+        if (needed > mem.size())
+        {
+            const unsigned long long needMiB =
+                static_cast<unsigned long long>((needed + (1ULL << 20) - 1) >> 20);
+            const unsigned long long haveMiB =
+                static_cast<unsigned long long>(mem.size() >> 20);
+            char msg[256];
+            std::snprintf(msg, sizeof(msg),
+                          "kernel ELF needs >= %llu MiB of guest RAM "
+                          "(highest paddr+memsz = 0x%llx); --mem %llu "
+                          "is too small. Try --mem %llu or higher.",
+                          needMiB,
+                          static_cast<unsigned long long>(needed),
+                          haveMiB,
+                          needMiB);
+            throw std::runtime_error(msg);
+        }
+    }
+
     for (uint16_t i = 0; i < eh.phnum; ++i)
     {
         const uint64_t off = eh.phoff + uint64_t(i) * eh.phentsize;

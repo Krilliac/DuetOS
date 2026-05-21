@@ -1,5 +1,6 @@
 #include "guest_memory.h"
 
+#include <cstdio>
 #include <cstring>
 #include <stdexcept>
 
@@ -76,7 +77,22 @@ void GuestMemory::Write(uint64_t gpa, const void* src, uint64_t len)
     void* dst = HostPtr(gpa, len);
     if (dst == nullptr)
     {
-        throw std::out_of_range("GuestMemory::Write past end of RAM");
+        // Include the actual write range + the configured RAM size in
+        // the message — when the user picks `--mem` too small for the
+        // kernel ELF the bare "past end of RAM" string is too generic
+        // to act on. With these numbers, `gpa+len > ram` is obvious
+        // and the next step (increase --mem) is implied.
+        char buf[192];
+        std::snprintf(buf, sizeof(buf),
+                      "GuestMemory::Write past end of RAM "
+                      "(gpa=0x%llx len=0x%llx end=0x%llx ram=0x%llx). "
+                      "If loading a kernel ELF, --mem is too small; "
+                      "increase it.",
+                      static_cast<unsigned long long>(gpa),
+                      static_cast<unsigned long long>(len),
+                      static_cast<unsigned long long>(gpa + len),
+                      static_cast<unsigned long long>(m_bytes));
+        throw std::out_of_range(buf);
     }
     std::memcpy(dst, src, static_cast<size_t>(len));
 }
