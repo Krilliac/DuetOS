@@ -130,6 +130,15 @@ Vmm::Vmm(VmConfig cfg)
                                             m_cfg.gdbPort);
         m_gdb->SetMonitor(
             [this](const std::string& c) { return Monitor(c); });
+        // Wire VS Pause / Break-All to a WHP cancellation. The
+        // GdbServer watcher thread (started in WaitForConnection)
+        // calls this when it sees `\x03` on the gdb socket while the
+        // guest is running. CancelRun makes WHvRunVirtualProcessor
+        // return with reason=Canceled; the main loop below routes
+        // that to a stop-reply + ServeStopped when IrqPending is set,
+        // so VS's UI thread gets its expected stop reply instead of
+        // freezing the IDE.
+        m_gdb->SetOnInterrupt([this] { m_part.CancelRun(0); });
     }
 
     if (!m_cfg.recordPath.empty())
@@ -618,13 +627,16 @@ int Vmm::Run()
                 break;
             }
             // GAP: a #BP not in m_bps is a guest-originated int3
-            // (the kernel's own KBP probes). With a host debugger
-            // attached the host owns #BP, so these surface to the
-            // client as an unexpected SIGTRAP instead of reaching
-            // the kernel handler. Re-injection into the guest needs
-            // the WHP pending-event path — revisit when kernel-probe
-            // coexistence matters; for now run with probes disarmed
-            // while gdb is attached.
+            // (the kernel's traps self-test, or any in-kernel KBP
+            // probe). With a host debugger attached the host owns
+            // #BP, so these surface to the client as a one-shot
+            // SIGTRAP instead of reaching the kernel handler;
+            // pressing Continue in VS skips past the int3. (Before
+            // the OnException rewind-fix in gdb_server.cpp these
+            // looped forever — boot halted at "[traps] self-test".)
+            // Full re-injection into the guest so the kernel #BP
+            // handler runs needs the WHP pending-event path —
+            // revisit when probe-coverage under gdb matters.
             const int sig = m_gdb->OnException(0, et);
             const GdbServer::Resume r = m_gdb->ServeStopped(sig);
             ApplyResume(r); // Detach drops m_gdb and free-runs
@@ -636,6 +648,24 @@ int Vmm::Run()
             break;
 
         case WHvRunVpExitReasonCanceled:
+            // Two callers can drive Canceled:
+            //   (1) m_stop.store(true) + CancelRun — clean shutdown
+            //       (window close, /quit, helper-thread fatal). Fall
+            //       through to the existing return below.
+            //   (2) GdbServer's async-interrupt watcher consuming a
+            //       `\x03` from gdb (VS Pause / Break-All). The watcher
+            //       sets IrqPending before calling CancelRun, so we
+            //       can distinguish the two. Send the proactive S05
+            //       stop reply gdb is waiting for after `c`, then
+            //       enter ServeStopped just like a #BP exit would.
+            if (m_gdb && m_gdb->IrqPending())
+            {
+                m_gdb->ClearIrqPending();
+                m_gdb->SendStopReply(5);
+                ApplyResume(m_gdb->ServeStopped(5));
+                haltSpins = 0;
+                break;
+            }
             return m_stop.load() ? 0 : 1;
 
         default:

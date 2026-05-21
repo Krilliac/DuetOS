@@ -7,16 +7,34 @@
 // Supported: qSupported, qXfer:features:read:target.xml (declares
 // the amd64 core register set so gdb expects exactly our 164-byte
 // 'g' block), ?, g/G, m/M, Z0/z0 (software breakpoints), c, s,
-// detach/kill. Hardware watchpoints and fully-async ^C interrupt
-// are documented GAPs (you can still stop by hitting a breakpoint).
+// detach/kill, async ^C interrupt (Pause / Break-All).
+// Hardware watchpoints are still a documented GAP.
+//
+// Async-interrupt design: a background watcher thread (m_irqThread)
+// polls the gdb socket while the guest is running. When `\x03`
+// arrives, it consumes the byte, sets m_irqPending, and invokes the
+// caller-supplied m_onInterrupt callback (Vmm wires this to
+// Partition::CancelRun(0)). The blocking WHvRunVirtualProcessor
+// returns with Canceled; the main loop sees IrqPending, sends a
+// proactive stop reply, and enters ServeStopped.
+//
+// Thread-safety: all socket I/O on m_conn is serialised by
+// m_socketMtx. The watcher uses try_lock so a long RecvPacket /
+// SendPacket from the main thread never starves it; it goes dormant
+// (via m_inServeStopped) while ServeStopped owns the protocol,
+// because while we're stopped the existing in-band `\x03` handler in
+// ServeStopped already serves Pause correctly.
 #pragma once
 
 #include <winsock2.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "guest_memory.h"
 #include "whp.h"
@@ -42,8 +60,32 @@ public:
     using MonitorFn = std::function<std::string(const std::string&)>;
     void SetMonitor(MonitorFn fn) { m_monitor = std::move(fn); }
 
+    // Callback fired from the async-interrupt watcher thread when
+    // gdb's `\x03` (Pause / Break-All) arrives while the guest is
+    // running. Vmm wires this to Partition::CancelRun(0) so the
+    // blocking WHvRunVirtualProcessor returns with Canceled.
+    using InterruptFn = std::function<void()>;
+    void SetOnInterrupt(InterruptFn fn) { m_onInterrupt = std::move(fn); }
+
+    // Async-interrupt status. Vmm's WHvRunVpExitReasonCanceled
+    // handler uses IrqPending() to distinguish a user-initiated
+    // Pause (consume + SendStopReply + ServeStopped) from a normal
+    // shutdown-driven cancel (which falls through to the m_stop
+    // check the way it always has).
+    bool IrqPending() const { return m_irqPending.load(); }
+    void ClearIrqPending() { m_irqPending.store(false); }
+
+    // Proactively send an `S<sig>` stop reply. Used by Vmm for an
+    // async-interrupt-induced stop, where gdb is waiting for a stop
+    // reply after a `c` and won't speak first. Standard #BP stops
+    // happen to work without this because cppdbg / MIEngine sends
+    // `?` after the resume — see comment in vmm.cpp's exception
+    // exit handler.
+    void SendStopReply(int sig);
+
     // Blocks until a debugger connects (call before the guest runs
-    // so breakpoints can be set at boot).
+    // so breakpoints can be set at boot). Starts the async-interrupt
+    // watcher thread as a side effect.
     void WaitForConnection();
 
     // Guest is stopped with the given signal (5 = TRAP). Services
@@ -71,6 +113,10 @@ private:
     void SendPacket(const std::string& body);
     void SendAck();
 
+    // Background poll loop that consumes a `\x03` from the gdb
+    // socket while the guest is running. Runs on m_irqThread.
+    void IrqWatcherLoop();
+
     std::string ReadRegisters(uint32_t vp);
     void WriteRegisters(uint32_t vp, const std::string& hex);
     std::string ReadMem(uint64_t gva, uint64_t len);
@@ -90,6 +136,19 @@ private:
     std::map<uint64_t, uint8_t> m_bps;   // gva -> shadowed orig byte
     uint64_t m_stepOverBp = 0;           // bp lifted for step-off
     bool     m_haveStepOver = false;
+
+    // Async-interrupt state. The watcher reads m_conn while the
+    // guest is running; ServeStopped owns m_conn while it doesn't.
+    // m_socketMtx serialises ALL recv/send on m_conn so the two
+    // paths never race; m_inServeStopped lets the watcher go fully
+    // dormant during ServeStopped (avoids ever stealing a byte the
+    // protocol's in-band `\x03` handler would otherwise process).
+    std::mutex          m_socketMtx;
+    std::atomic<bool>   m_inServeStopped{false};
+    std::atomic<bool>   m_irqPending{false};
+    std::atomic<bool>   m_irqShutdown{false};
+    std::thread         m_irqThread;
+    InterruptFn         m_onInterrupt;
 };
 
 } // namespace duetos::vmm

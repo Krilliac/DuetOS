@@ -83,28 +83,51 @@ That means **a single F5 already opens both bridges**: the GDB stub on tcp:1234 
 
 This is what you use when you want to debug the **kernel** as if it were a normal program: kernel source open in VS, click breakpoints in `kernel/*.cpp` files, F10/F11 step through kernel code, see kernel variables in Locals.
 
-### How to use
+### How to use — `debug-kernel.ps1` (recommended)
 
-1. From a PowerShell window, run the VMM with `--gdb 1234` (or use the F5 default which now includes it). The VMM blocks on `accept()` until a gdb client connects:
+The reliable one-action path. From PowerShell at the repo root:
 
-   ```powershell
-   tools\vmm\build\Debug\duetos-vmm.exe `
-     --kernel build\x86_64-debug\kernel\duetos-kernel.elf `
-     --mem 2048 --gdb 1234
-   ```
+```powershell
+tools\vmm\debug-kernel.ps1
+```
 
-2. In VS (Open Folder mode), pick **"DuetOS: Attach (in-house VMM, tcp:1234)"** in the launch dropdown, F5. VS's cppdbg launches gdb, which connects to tcp:1234. gdb downloads the target XML (amd64 core register set), reads `duetos-kernel.elf`'s DWARF, and reports the guest stopped before its first instruction (`stopAtConnect: true`).
+The script (see [`tools/vmm/debug-kernel.ps1`](../../tools/vmm/debug-kernel.ps1)) launches the VMM with `--gdb 1234`, polls its stdout for the gdb-stub-ready sentinel (`[vmm] gdb: waiting for a client on tcp:`), then spawns `gdb.exe` in a new console window with the kernel ELF's symbols loaded, WSL→Windows DWARF source-path substitution wired up, and the guest halted pre-first-instruction. Source-level kernel debugging happens in the gdb TUI window — `b kernel_main`, `c`, `bt`, `info reg`, `step`, `next`, `print`. The TUI is more keyboard-driven than a GUI debugger but resolves symbols, sources, and DWARF the same way.
 
-3. **Set kernel breakpoints**. Open any kernel source file (`kernel/sched/sched.cpp`, etc.), click in the gutter at any line. Standard VS F9. They're real breakpoints — the GDB stub plants `0xCC` at the resolved guest VA.
+Drop a desktop shortcut on this for genuine one-click:
 
-4. F5 to continue. The guest runs until your breakpoint fires.
+```
+Target:   powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\path\to\DuetOS\tools\vmm\debug-kernel.ps1
+Start in: C:\path\to\DuetOS
+```
 
-5. When stopped:
-   - **Call Stack** shows the guest's kernel call stack with symbol names.
-   - **Locals/Autos** show kernel C++ variables in scope.
-   - **Registers** window shows guest CPU registers.
-   - **Watch** evaluates any kernel C++ expression.
-   - F10 steps over, F11 steps into — at kernel C++ source line granularity.
+Flags:
+- `-NoGdb` — launch only the VMM (gdb stub open, no client attached). Use when you want to attach a different debugger (VS attach below, VS Code, command-line gdb).
+- `-GdbPort N` — non-default port.
+- `-NoWindow` — headless VMM.
+- `-MemMB N` — non-default guest RAM.
+
+**One stop during boot is normal:** the kernel runs a `[traps] self-test` that executes a hardcoded `int3` to exercise its own `#BP` handler. With gdb attached, the host stub catches that `#BP` (the kernel's IDT handler can't run while the host owns exception exits) and reports a one-shot SIGTRAP. Press `c` in gdb and boot proceeds.
+
+### How to use — VS editor attach (when launch.vs.json works)
+
+If you want kernel breakpoints in the VS editor UI instead of the gdb TUI, the [`tools/vmm/launch.vs.json`](../../tools/vmm/launch.vs.json) entry **"DuetOS: Attach (in-house VMM kernel, tcp:1234)"** drives the same gdb-remote attach inside VS's cppdbg debugger:
+
+1. From PowerShell: `tools\vmm\debug-kernel.ps1 -NoGdb` — launches just the VMM, gdb stub open, no client connected.
+2. In VS with `tools/vmm/` opened as a folder, pick that entry in the Startup Item dropdown, F5. VS's cppdbg attaches gdb internally to localhost:1234; click breakpoints in the gutter of any kernel `.cpp` file.
+
+> **Known fragility:** VS's launch.vs.json integration in CMake-Open-Folder mode sometimes silently invalidates the entry after CMake configure (entries flash in then vanish from the Startup Item dropdown). If this happens, use the `debug-kernel.ps1` flow above, or fall back to `Debug → Attach to Process...` with `Connection type: Microsoft GDB Adapter` and target `localhost:1234`. Symptom and unsuccessful root-cause hunt documented in commit history.
+
+> Use **Debug → Detach All** to end this session, not Stop Debugging. Stop will pop an E_FAIL "couldn't terminate duetos-kernel.elf" because the kernel is not a local Windows process — only the VMM (started separately) is.
+
+### After connect (either flow)
+
+1. **Set kernel breakpoints.** In the gdb TUI: `b kernel_main`, `b kernel/sched/sched.cpp:42`. In VS editor: click the gutter. They're real breakpoints — the GDB stub plants `0xCC` at the resolved guest VA.
+2. Continue: `c` in gdb, F5 in VS. The guest runs until a breakpoint fires.
+3. When stopped:
+   - **Call stack:** `bt` (gdb) or VS's Call Stack window.
+   - **Locals:** `info locals`, `info args`, `print <var>` (gdb) or VS's Locals/Autos.
+   - **Registers:** `info reg` (gdb) or VS's Registers window.
+   - **Step:** `n` (over), `s` (into), `fin` (out) in gdb. F10/F11/Shift-F11 in VS.
 
 ### `monitor` subcommands (gdb-side introspection)
 
@@ -124,9 +147,9 @@ These also work without VS — any gdb client (Eclipse, CLion, command-line gdb)
 ### Caveats
 
 - **Use Windows gdb, not WSL gdb.** WSL2 can't reach the Windows host via `localhost`.
-- **The kernel's own KBP probes** (in-kernel int3 instrumentation) surface as unexpected SIGTRAP to gdb while attached. Run with kernel probes disarmed or expect to step through them with `c`.
+- **Source-hardcoded `int3` (kernel traps self-test, in-kernel KBP probes)** surface as one-shot SIGTRAPs while gdb is attached — the host stub catches the `#BP` before the guest IDT does, so the kernel's own `#BP` handler can't run under gdb. Press Continue once per stop; the next instruction runs normally. (If you specifically need to validate the in-kernel `#BP` handler path itself, boot without `--gdb`.) Historical note: an earlier unconditional rewind in `OnException` turned these into infinite re-trap loops; that's fixed — see `tools/vmm/src/debug/gdb_server.cpp` `OnException` and `tools/vmm/src/vmm.cpp`'s exception-exit handler.
 - **No hardware watchpoints** in v0 of the stub. Software breakpoints (`Z0`/`z0`) only.
-- **Fully-async `^C` interrupt is not implemented** — stop the guest by hitting a breakpoint instead of Pause.
+- **Async Pause / Break-All works.** A background watcher thread in the stub (`GdbServer::IrqWatcherLoop` in `tools/vmm/src/debug/gdb_server.cpp`) consumes `\x03` from the gdb socket while the guest is running and calls `WHvCancelRunVirtualProcessor` to break the main thread out of the WHP run loop; the main loop sends a proactive `S05` and enters interactive stopped mode. Earlier versions of this stub did NOT implement this — the result was that hitting VS's Pause while the guest was running froze the IDE (UI thread blocked waiting for a stop reply that never came). If you're on an old build and see that symptom, rebuild.
 
 ---
 
