@@ -276,7 +276,45 @@ void WriteSilence()
         dst[i] = 0;
 }
 
+namespace
+{
+
+// S16 saturating add. Used by the mixer path so two producers
+// writing into the same ring slot compose by sum instead of
+// stomping each other. Stays well within the S16 envelope; the
+// clip-to-INT16_MIN/MAX caps prevent the classic two-loud-streams
+// wrap-around to noise.
+inline duetos::i16 SatAddS16(duetos::i16 a, duetos::i16 b)
+{
+    duetos::i32 s = static_cast<duetos::i32>(a) + static_cast<duetos::i32>(b);
+    if (s > 32767)
+        s = 32767;
+    if (s < -32768)
+        s = -32768;
+    return static_cast<duetos::i16>(s);
+}
+
+} // namespace
+
 duetos::u32 WritePcmS16Stereo(const duetos::i16* samples, duetos::u32 frame_count, duetos::u32 frame_offset)
+{
+    if (g.pcm.virt == nullptr || samples == nullptr || frame_count == 0)
+        return 0;
+    auto* dst = static_cast<duetos::i16*>(g.pcm.virt);
+    const duetos::u32 total_samples = kBufferFrames * kChannels;
+    duetos::u32 cursor = (frame_offset % kBufferFrames) * kChannels;
+    for (duetos::u32 f = 0; f < frame_count; ++f)
+    {
+        for (duetos::u32 c = 0; c < kChannels; ++c)
+        {
+            dst[cursor] = SatAddS16(dst[cursor], samples[f * kChannels + c]);
+            cursor = (cursor + 1) % total_samples;
+        }
+    }
+    return frame_count;
+}
+
+duetos::u32 WritePcmS16StereoOverwrite(const duetos::i16* samples, duetos::u32 frame_count, duetos::u32 frame_offset)
 {
     if (g.pcm.virt == nullptr || samples == nullptr || frame_count == 0)
         return 0;
@@ -379,6 +417,12 @@ void WriteSine(duetos::u32 freq_hz, duetos::u16 amplitude_q15)
         (static_cast<duetos::u64>(freq_hz) * kBufferFrames + kSampleRateHz / 2) / kSampleRateHz;
     const duetos::u32 cycles = (cycles64 == 0) ? 1u : static_cast<duetos::u32>(cycles64);
 
+    // Sine fills the ENTIRE ring with one tone; that's an
+    // overwrite semantic by design (each sample is the single
+    // tone-generator's value, not a contribution to a mix). Using
+    // the overwrite path keeps a `WriteSine(440)` after a
+    // `WriteSine(880)` from compounding into a louder square-ish
+    // waveform.
     auto* dst = static_cast<duetos::i16*>(g.pcm.virt);
     for (duetos::u32 f = 0; f < kBufferFrames; ++f)
     {
@@ -511,6 +555,50 @@ void SelfTest()
             // don't gate.
             arch::SerialWrite(advanced ? "[audio-selftest] DMA LPIB advanced (unrouted byte path)\n"
                                        : "[audio-selftest] DMA LPIB static (unrouted; codec-walker limit)\n");
+        }
+    }
+
+    // Mixer behaviour — two `WritePcmS16Stereo` calls at the same
+    // offset must SUM (saturating-add) instead of overwrite, so
+    // two PEs writing concurrently compose rather than stomp.
+    // `WritePcmS16StereoOverwrite` retains the legacy replace
+    // semantic for fill-the-buffer producers (WriteSine).
+    {
+        WriteSilence();
+        // Two contributors of equal magnitude at frame 0; result
+        // should be 2× one of them, saturating-capped if needed.
+        const duetos::i16 a[2] = {1000, 2000};
+        const duetos::i16 b[2] = {500, -3000};
+        WritePcmS16Stereo(a, 1, 0);
+        WritePcmS16Stereo(b, 1, 0);
+        const auto* mix = static_cast<const duetos::i16*>(g.pcm.virt);
+        const bool sum_ok = (mix[0] == 1500 && mix[1] == -1000);
+        if (!sum_ok)
+        {
+            arch::SerialWrite("[audio-selftest] FAIL mixer sum\n");
+            ok = false;
+        }
+        // Saturation: two writes that would overflow stay clamped.
+        WriteSilence();
+        const duetos::i16 loud[2] = {30000, -30000};
+        WritePcmS16Stereo(loud, 1, 0);
+        WritePcmS16Stereo(loud, 1, 0);
+        const bool sat_ok = (mix[0] == 32767 && mix[1] == -32768);
+        if (!sat_ok)
+        {
+            arch::SerialWrite("[audio-selftest] FAIL mixer saturation\n");
+            ok = false;
+        }
+        // Overwrite path: same two writes via the overwrite entry
+        // must yield only the SECOND set of samples.
+        WriteSilence();
+        WritePcmS16StereoOverwrite(a, 1, 0);
+        WritePcmS16StereoOverwrite(b, 1, 0);
+        const bool ow_ok = (mix[0] == 500 && mix[1] == -3000);
+        if (!ow_ok)
+        {
+            arch::SerialWrite("[audio-selftest] FAIL overwrite replaces\n");
+            ok = false;
         }
     }
 

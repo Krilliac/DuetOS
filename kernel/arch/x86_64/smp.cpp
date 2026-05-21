@@ -558,16 +558,29 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // in the now-active GDT) and precede the LAPIC enable below.
     IdtLoadForCurrent();
 
-    // Enable the AP's LAPIC. IA32_APIC_BASE MSR bit 11 is the global
-    // enable; the LAPIC MMIO window is already mapped in the shared
-    // PML4 (BSP's MapMmio for 0xFEE00000), so LapicRead/Write just
-    // works on every CPU.
+    // Enable the AP's LAPIC. IA32_APIC_BASE MSR bit 11 (EN) is the
+    // global enable; bit 10 (EXTD) selects x2APIC mode. The BSP
+    // already programmed EN|EXTD when it ran LapicInit and set
+    // g_x2apic = true — every AP must match, or LapicWrite() (which
+    // routes through the x2APIC MSR range 0x800.. when g_x2apic is
+    // true) will #GP on the first TPR/SVR write below.
+    //
+    // The historic intermittency: QEMU's SIPI hand-off left the AP's
+    // IA32_APIC_BASE in different states across runs — sometimes bit
+    // 10 stayed set from the BSP-side configuration, sometimes it
+    // didn't. The old "only set bit 11" path worked when EXTD happened
+    // to be preserved and #GPd on the wrmsr 0x808 (TPR) when it
+    // didn't. Now we unconditionally OR in the bits g_x2apic says
+    // this kernel needs — idempotent if firmware already set them,
+    // corrective if not. The LAPIC MMIO window is mapped in the
+    // shared PML4 for the legacy xAPIC fallback.
     u32 lo, hi;
     asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x1Bu));
     const u64 apic_base = (static_cast<u64>(hi) << 32) | lo;
-    if ((apic_base & (1ULL << 11)) == 0)
+    const u64 want_bits = LapicIsX2apic() ? ((1ULL << 11) | (1ULL << 10)) : (1ULL << 11);
+    if ((apic_base & want_bits) != want_bits)
     {
-        const u64 enabled = apic_base | (1ULL << 11);
+        const u64 enabled = apic_base | want_bits;
         const u32 elo = static_cast<u32>(enabled & 0xFFFFFFFF);
         const u32 ehi = static_cast<u32>(enabled >> 32);
         asm volatile("wrmsr" : : "c"(0x1Bu), "a"(elo), "d"(ehi));

@@ -40,6 +40,7 @@
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/rtc.h"
+#include "arch/x86_64/msr_safe.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/timer.h"
@@ -573,6 +574,11 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     SerialWrite("[boot] Bringing up kernel extable.\n");
     duetos::arch::TrapsRegisterExtable();
     DUETOS_BOOT_SELFTEST(duetos::debug::ExtableSelfTest());
+    // Fault-recoverable wrmsr — covers the wrmsr inside
+    // `arch::WriteMsrSafe`, used by the LAPIC IPI path so an
+    // intermittent KVM/QEMU #GP on the x2APIC ICR doesn't
+    // recursive-halt the BSP. See arch/x86_64/msr_safe.{h,cpp,S}.
+    duetos::arch::RegisterMsrSafeExtable();
 
     // Fault-domain registry self-test. Registers a toy domain,
     // restarts it twice, checks counters. Real driver domains are

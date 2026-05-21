@@ -205,6 +205,37 @@ struct PerCpu
     u64 sched_tasks_created;
     u64 sched_tasks_reaped;
 
+    // This CPU's idle task. Set by `SchedStartIdle` (BSP via
+    // `SchedInit`, each AP via `SchedEnterOnAp`). Read by
+    // `ScheduleLockedHandoff` as a last-resort fallback when the
+    // runqueue's Normal AND Idle bands are both empty AND the
+    // current task is no longer Running — without this safety net
+    // the schedule path panics ("no runnable task available").
+    // The intermittent symptom: an SMP race where the idle band
+    // briefly shows empty between the previous Schedule() pop and
+    // the next preemption re-enqueueing prev. Treating this slot
+    // as the per-CPU safety net is the smallest correct fix; the
+    // proper long-term shape (per-CPU runqueue + atomic idle
+    // dispatch) lives behind the global g_sched_lock split (see
+    // wiki Roadmap "B2-followup — split g_sched_lock per-CPU").
+    sched::Task* idle_task;
+
+    // Per-CPU "scheduler ready" gate. False after PerCpu alloc /
+    // memset, flipped to true at the end of `SchedStartIdle` once
+    // `idle_task` is published. Wake-side routing
+    // (`PickClusterPlacement`), periodic balance
+    // (`PickBalanceVictim`), and work-steal (`StealNormalFromPeer`)
+    // all skip a CPU whose flag is false — this closes the AP-
+    // bringup race where the BSP would otherwise push tasks onto
+    // an AP that hasn't yet published `idle_task` and finished
+    // `SchedEnterOnAp`. Without this gate the AP could dispatch a
+    // routed task on its first timer IRQ, the task could sleep
+    // before its own `idle_task` was visible, and
+    // `ScheduleLockedHandoff` would panic "no runnable task
+    // available" (observed: 3/10 debug-preset boots).
+    bool scheduler_ready;
+    u8 _pad_sched_ready[7];
+
     // Everything below this line will grow as SMP matures:
     //   - per-CPU runqueue spinlock (today: shared g_sched_lock)
     //   - per-CPU heap magazine (when the heap grows per-CPU caching)

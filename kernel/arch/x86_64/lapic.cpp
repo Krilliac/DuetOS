@@ -3,6 +3,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/cpu_info.h"
 #include "arch/x86_64/idt.h"
+#include "arch/x86_64/msr_safe.h"
 #include "arch/x86_64/serial.h"
 #include "cpu/percpu.h"
 
@@ -108,7 +109,25 @@ void LapicSendIcr(u32 dest, u32 icr_low)
         // half = the command. No delivery-status bit in x2APIC —
         // the write is self-completing, so there is nothing to
         // poll.
-        WriteMsr(kX2ApicIcrMsr, (static_cast<u64>(dest) << 32) | static_cast<u64>(icr_low));
+        //
+        // Routed through `WriteMsrSafe` (extable-protected
+        // wrmsr) so a KVM/QEMU-side #GP on the ICR MSR doesn't
+        // halt the BSP via recursive-fault (PanicBroadcastNmi
+        // would otherwise re-trigger the same wrmsr from inside
+        // the trap dispatcher — see Design-Decisions
+        // "SMP AP IA32_APIC_BASE..." for the residual flake this
+        // closes). On fault: IPI is silently lost, klog gets one
+        // warn-once line per (msr, value) so a real regression
+        // is still visible.
+        const u64 value = (static_cast<u64>(dest) << 32) | static_cast<u64>(icr_low);
+        if (!arch::WriteMsrSafe(kX2ApicIcrMsr, value))
+        {
+            arch::SerialWrite("[lapic] x2APIC ICR wrmsr #GP — IPI lost (icr=");
+            arch::SerialWriteHex(icr_low);
+            arch::SerialWrite(" dest=");
+            arch::SerialWriteHex(dest);
+            arch::SerialWrite(")\n");
+        }
         return;
     }
     // xAPIC: program destination (bits 31:24), then the command,

@@ -20,9 +20,13 @@
  *   - The Start/Stop bit on the stream descriptor.
  *
  * What this layer does NOT own (yet — recorded for future slices):
- *   - A mixer that sums multiple producer streams. v0 is single-
- *     stream: whoever writes last owns the buffer until they're
- *     done.
+ *   - Per-producer write cursors. v0 producers all choose their
+ *     own `frame_offset`; if two producers happen to write at the
+ *     same offset, their samples now SUM via saturating-add
+ *     (`WritePcmS16Stereo`) instead of overwriting each other.
+ *     Staggered-offset concurrent producers — where the kernel
+ *     assigns each producer a moving cursor anchored ahead of
+ *     LPIB — is the next mixer slice.
  *   - Format conversion or sample-rate conversion. v0 is fixed at
  *     S16LE / 48 kHz / stereo — the HDA consumer default.
  *   - IRQ-driven buffer refill (IOC bits stay clear; the HDA DMA
@@ -118,15 +122,33 @@ duetos::u32 BufferFrames();
 /// stream.
 void WriteSilence();
 
-/// Write `frame_count` frames of S16LE-stereo PCM at frame offset
-/// `frame_offset` into the buffer ring. Wraps modulo
-/// `BufferFrames()`. `samples` is interpreted as `[L0, R0, L1, R1,
-/// ...]` — the same interleaving HDA expects on the wire.
+/// Mix `frame_count` frames of S16LE-stereo PCM into the buffer
+/// ring at frame offset `frame_offset`, **saturating-adding** each
+/// sample onto whatever is already there. Wraps modulo
+/// `BufferFrames()`. `samples` is interpreted as
+/// `[L0, R0, L1, R1, ...]` — the same interleaving HDA expects on
+/// the wire.
+///
+/// Two producers writing at the same offset (e.g. two PEs both
+/// calling `SYS_AUDIO_WRITE` with frame_offset 0) compose by sum
+/// instead of overwriting each other — that's the v0 mixer. To
+/// replace ring contents instead of mixing onto them, use
+/// `WritePcmS16StereoOverwrite`.
 ///
 /// Returns the number of frames actually written (always equal
 /// to `frame_count` for v0; future flow-control variants may
 /// return less).
 duetos::u32 WritePcmS16Stereo(const duetos::i16* samples, duetos::u32 frame_count, duetos::u32 frame_offset);
+
+/// Replace `frame_count` frames in the buffer ring at frame
+/// offset `frame_offset` with the supplied S16LE-stereo PCM. This
+/// is the legacy "single-producer overwrite" path retained for
+/// fill-the-entire-buffer producers like `WriteSine` and the boot
+/// tone generators. Producer code that wants to coexist with
+/// other producers should use `WritePcmS16Stereo` (additive).
+///
+/// Returns the number of frames actually written.
+duetos::u32 WritePcmS16StereoOverwrite(const duetos::i16* samples, duetos::u32 frame_count, duetos::u32 frame_offset);
 
 /// Fill the entire buffer with a `freq_hz` sine wave at amplitude
 /// `amplitude_q15` (peak absolute value out of 32767). Convenience

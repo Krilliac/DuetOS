@@ -9629,3 +9629,202 @@ START rect, which this QEMU rig can't place reliably (it exits
 The netpanel-hover path above is the proven stand-in.
 
 **Related roadmap track(s):** none (defect fix; no roadmap item).
+
+## virtio-tablet absolute coordinates: convert to deltas at driver, don't fork MousePacket
+
+QEMU's `-device virtio-tablet` advertises `EV_ABS` axes carrying
+absolute device coordinates rather than `EV_REL` deltas. The
+existing pointer ABI (`MousePacket` in
+`kernel/drivers/input/ps2mouse.h`) is relative-only and shared by
+every pointer driver (PS/2, xHCI HID boot, virtio-input), per the
+CLAUDE.md "one source of truth" rule for input.
+
+**Decision:** the virtio-input decoder converts `EV_ABS` axes into
+relative deltas at the driver boundary, by remembering
+`last_abs_{x,y}` per axis and emitting `dx = curr - last` on the
+next `EV_SYN` frame. The first `EV_ABS` sighting per axis records
+the baseline silently — no packet — so a freshly attached tablet
+doesn't fling the cursor toward (0, 0).
+
+**Rejected alternatives:**
+
+- *Extend `MousePacket` with `abs_x` / `abs_y` + a flag and teach
+  the cursor consumer to honour it.* Architecturally cleaner but
+  forks the unified pointer ABI: the compositor mouse loop, the
+  xHCI HID decoder, and the PS/2 path all consume `MousePacket`
+  uniformly today; an absolute-vs-relative branch leaks into every
+  consumer. The end-user behaviour for the QEMU-tablet flow is
+  identical either way (host motion drives guest cursor 1:1) —
+  QEMU releases its pointer grab as soon as the guest reads
+  `EV_ABS`, independent of whether the guest internally treats
+  the axes as absolute or relative.
+- *Translate to screen coordinates using `ID_ABS_INFO` resolution
+  and `kFramebufferWidth/Height`.* Adds a config-space query +
+  screen-size knowledge to the driver, neither of which is needed
+  for the delta path; pure surface for a future regression when
+  the framebuffer resizes.
+- *Drop EV_ABS silently (keep the old GAP marker).* The status quo;
+  the tablet's host-cursor-to-guest-cursor flow stays broken.
+
+**Why this rules out the alternative going forward:** any future
+pointer driver that ships absolute coordinates (USB-HID digitiser,
+multi-touch) follows the same "convert at driver boundary"
+convention rather than re-introducing an `abs` branch in
+`MousePacket`. Multi-touch (which truly needs per-contact state)
+will land its own contact-list ABI alongside `MousePacket`, not
+inside it.
+
+**Revisit when:** a workload appears that needs the *exact* host
+cursor position with sub-frame precision (e.g. a drawing tablet
+that pre-emptively locates the cursor before a stroke begins),
+which the delta path approximates but doesn't anchor. At that
+point the convert-at-driver invariant gets a per-driver "current
+absolute position" out-of-band query, not an in-band MousePacket
+field.
+
+**Related roadmap track(s):** VirtIO per-class polish
+(`virtio-input EV_ABS + statusq` — the EV_ABS half is closed by
+this slice; statusq LED / force-feedback remains).
+
+## Audio mixer v0 is in-place saturating-add, not a per-producer staging mixer
+
+The audio backend's `WritePcmS16Stereo` had been a single-producer
+overwrite — whoever wrote the ring last owned the buffer until
+they were done, so two concurrent PEs calling `SYS_AUDIO_WRITE`
+would stomp each other. The roadmap "Audio — mixer" item called
+for fixing this. Two end-shapes were considered:
+
+**Decision:** `WritePcmS16Stereo` is now a *saturating-add* into
+the existing single ring — two contributors writing into the same
+slot compose by sum, with INT16 saturation preventing
+wrap-around-to-noise on overflow. A new
+`WritePcmS16StereoOverwrite` entry preserves the legacy
+"replace" semantic for fill-the-whole-ring producers (`WriteSine`,
+which would compound across calls otherwise).
+
+**Rejected alternatives, and why they stay rejected:**
+
+- *Per-producer staging buffers + a mixer task that sums N rings
+  into the DMA ring before each playout window.* The correct
+  long-term shape, but the staging memory + the periodic mixer
+  task + the producer-cursor table is substantially more code
+  than the in-place add. With one ring and same-offset producers,
+  the in-place add is already a real mixer for the dominant case
+  (music + notification beep at the same instant). Per-producer
+  staging earns its keep only when staggered-offset producers
+  need cursor management — that's the *next* slice, not v0.
+- *Keep `WritePcmS16Stereo` overwrite, add a parallel
+  `WritePcmS16StereoAdd`.* Producer code (`SYS_AUDIO_WRITE`,
+  `winmm!waveOutWrite`) would have had to opt in. Defaulting the
+  existing entry to additive means every existing producer
+  automatically composes; the `Overwrite` variant is the explicit
+  one, used only by `WriteSine` and friends that intend to fill
+  the entire ring with one signal.
+- *Per-producer write-cursor table now.* A clean v0 needs a
+  per-process cursor entry, ring-allocation policy when a
+  producer first writes, and a cleanup path on producer exit.
+  All three are doable but expand the slice past what the
+  roadmap item required.
+
+**Why the in-place mixer is correct for v0:**
+
+- Same-offset concurrent writes (the dominant collision pattern)
+  now compose instead of stomping.
+- Saturation prevents the "two loud streams = noise" pathology.
+- `WriteSine` and other fill-the-buffer producers retain
+  overwrite semantics through the explicit
+  `WritePcmS16StereoOverwrite` entry — they don't accidentally
+  compound by calling the additive path.
+- Self-test extension verifies both the sum and saturation
+  invariants on the same code path the user-mode producers
+  exercise.
+
+**Revisit when:** staggered-offset multi-stream producers appear
+(two PEs each emitting their own continuous audio without any
+shared offset coordination). At that point each producer needs
+its own `frame_offset` anchored relative to LPIB + a small
+lookahead, and the ring-clearing policy moves from "WriteSilence
+between sessions" to "kernel zeroes the fresh region ahead of
+LPIB on each tick." Until that workload exists the in-place
+saturating mixer is the right size.
+
+**Related roadmap track(s):** Audio — real-hardware audible +
+per-producer cursors (the v0 mixer half closed by this slice;
+per-producer write cursors remain).
+
+## SMP AP IA32_APIC_BASE must set EXTD when g_x2apic is true, not just EN
+
+Across QEMU runs we observed an intermittent `#GP` (`trap.kernel_gpf`
+with `rip` resolving to `arch::WriteMsr` at `kernel/arch/x86_64/cpu.h:187`,
+i.e. the `wrmsr` inside the generic `WriteMsr`) during SMP bring-up.
+Frequency on `tools/qemu/run.sh` (debug preset, 4 vCPUs, x2APIC
+host CPU model): roughly **40% of clean origin/main boots** hit
+it; some delivered a full panic dump, others surfaced as a
+`recursive-fault` short-circuit. The fault is in the LapicWrite
+→ `WriteMsr(0x800+offset, ...)` path — an `wrmsr` to the x2APIC
+MSR range from a CPU that the BSP-side scheduler believes is in
+x2APIC mode (`g_x2apic = true`).
+
+Root: `kernel/arch/x86_64/smp.cpp::ApEntryFromTrampoline` (the AP
+kernel entry) only set IA32_APIC_BASE bit 11 (EN — global APIC
+enable) on the AP. The BSP's `LapicInit` sets `EN | EXTD` (bit 10
+= x2APIC mode select) and flips `g_x2apic = true`. The AP's
+trampoline-side state for IA32_APIC_BASE was QEMU-dependent: in
+some runs bit 10 was preserved from the BSP-side configuration of
+the AP, in others it was not. When it was not, the AP transitioned
+through `ApEntryFromTrampoline` in plain xAPIC mode while
+`g_x2apic` said x2APIC mode — and `LapicWrite(TPR, 0)` at the end
+of AP startup `#GP`'d on `wrmsr 0x808`.
+
+**Decision:** the AP now reads `LapicIsX2apic()` (the same
+`g_x2apic` flag) and ORs in `(EN | EXTD)` when true,
+or just `EN` when false. The check guards a single rdmsr +
+conditional wrmsr; idempotent if firmware already set the bits,
+corrective if not.
+
+**Rejected alternatives:**
+
+- *Always wrmsr EN | EXTD unconditionally.* Equivalent on x2APIC
+  systems, but flips EXTD on plain-xAPIC systems where
+  `g_x2apic` is false — that's a one-way mode transition with
+  no rollback, and we don't want it on hardware that doesn't
+  support x2APIC (`CpuHas(kCpuFeatX2Apic)` is false, so
+  `g_x2apic` stays false, so the conditional is correct).
+- *Re-check `apic_base` after the wrmsr.* Pointless — wrmsr
+  either takes or `#GP`s; a follow-up rdmsr only confirms
+  what the architecture already does.
+- *Bail out and panic if EXTD wasn't preserved.* Worse than
+  silent recovery — every release of QEMU could regress us, and
+  setting the bit costs nothing.
+
+**Residual (not yet fixed in this slice):** a separate
+intermittent `#GP` in `WriteMsr` still fires on roughly 20% of
+runs *after* this fix, this time during the BSP-side AP startup
+loop (right after `arch/smp : starting AP apic_id val=0x1`,
+before AP1's `ApEntryFromTrampoline` has run). The fault site is
+`LapicSendIcr` → `WriteMsr(kX2ApicIcrMsr=0x830, ...)` from the
+BSP, but the BSP has been in x2APIC mode since `LapicInit` and
+the ICR value violates no documented Intel SDM constraint
+(INIT-assert = `0x500 | 0x4000 = 0x4500`, SIPI = `0x600 |
+vector`; no reserved bits set). The kernel recovers via the
+`recursive-fault` short-circuit (no panic dump emitted), so
+boot continues, but the underlying race deserves its own
+investigation slice. The fix above is still load-bearing —
+without it the failure mode was a *full panic dump* with the
+kernel halted, not a recoverable probe.
+
+**Verified:** 10-run QEMU smoke gate (`DUETOS_TIMEOUT=45`,
+debug preset): 0/10 panic dumps, 2/10 `recursive-fault`
+recoveries (vs. 2/5 hard panic dumps on clean origin/main),
+30/30 selftests passed (terminal / virtio-input / audio).
+
+**Revisit when:** the residual ICR `#GP` is investigated, or a
+real-hardware fleet shows a different LAPIC mode mismatch
+shape. The cleanest follow-on is a per-CPU "ensure my LAPIC is
+the same mode the BSP committed to" assert at AP entry, with
+an explicit panic if it can't be brought into agreement —
+fail loud rather than rely on `wrmsr` reserved-bit silence.
+
+**Related roadmap track(s):** none directly (SMP bring-up is
+considered shipped); the residual ICR race is a candidate for
+a new "SMP-AP scheduler residual flakes" roadmap entry.

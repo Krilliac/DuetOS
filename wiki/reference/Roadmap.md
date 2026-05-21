@@ -267,14 +267,20 @@ In rough priority:
 
 ## Drivers
 
-### Audio — real-hardware audible + mixer
+### Audio — real-hardware audible + per-producer cursors
 
 - **Residual:** (1) real-hardware audible validation (no HW in
   CI — the QEMU smoke proves the routed-codec DMA path:
   `[audio-selftest] DMA LPIB advanced (routed, audible path)`);
-  (2) a mixer for multiple concurrent producers (today
-  `SYS_AUDIO_WRITE` / `winmm!waveOutWrite` is single-stream).
-- **Owner:** `kernel/drivers/audio/`.
+  (2) per-producer write cursors — today producers all choose
+  their own `frame_offset` and the additive `WritePcmS16Stereo`
+  path composes (saturating-add) when two writes hit the same
+  offset, but staggered-offset multi-stream needs a per-producer
+  cursor table anchored ahead of LPIB. (Saturating-add mixer +
+  explicit `WritePcmS16StereoOverwrite` for fill-the-buffer
+  producers landed.)
+- **Owner:** `kernel/drivers/audio/`,
+  `kernel/subsystems/audio/`.
 
 ### Wireless — real-hardware verification
 
@@ -576,9 +582,11 @@ the per-call wiring.
   virtio-console multiport (`VIRTIO_CONSOLE_F_MULTIPORT` +
   control-queue protocol); virtio-balloon inflate/deflate policy
   (the "when do we agree to give up memory?" half — spec
-  dispatch is straightforward); virtio-input EV_ABS + statusq
-  (absolute injection path — the unified `MousePacket` API is
-  relative-only — plus statusq for LED / force-feedback);
+  dispatch is straightforward); virtio-input statusq for LED /
+  force-feedback delivery (eventq + EV_REL + EV_ABS already
+  landed — virtio-tablet absolute coordinates are converted to
+  `MousePacket` deltas at the driver boundary so the unified
+  one-source-of-truth pointer API stays intact);
   IRQ wire-up across rng/blk/net/console/balloon/input. (Every
   per-class probe v0 + RX/TX poll tasks landed.)
 

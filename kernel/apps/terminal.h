@@ -39,19 +39,34 @@
  *   - C0 controls: BS, HT, LF (with implicit CR), CR (BEL is
  *     ignored).
  *   - CSI 'H' / 'f' (CUP), 'A'/'B'/'C'/'D' (cursor motion),
- *     'J' (ED), 'K' (EL), 'm' (SGR; bold / underline / reverse).
+ *     'J' (ED), 'K' (EL), 'm' (SGR; bold / underline / reverse;
+ *     16-colour fg/bg via SGR 30..37 / 40..47 / 90..97 / 100..107
+ *     and 38;5;N / 38;2;R;G;B consumption so trailing attrs aren't
+ *     mis-parsed; 256-colour and 24-bit rendering remain deferred).
  *   - Live mirror of shell output via
  *     `ConsoleRegisterMirror(&MirrorFromConsole)`.
  *   - Keystroke → shell input via `ShellFeedChar` /
  *     `ShellBackspace` / `ShellSubmit`. Up/Down cycle shell
  *     history.
+ *   - Scrollback ring (128 retired rows): PgUp / PgDn move the
+ *     viewport by one screen, Home / End jump to oldest / live,
+ *     wheel notches scroll one row each. Any shell input snaps
+ *     back to the live viewport.
+ *   - Viewport-to-clipboard copy via `TerminalCopyVisibleViewport`
+ *     (Ctrl+Shift+C from the kernel keyboard dispatcher). Whatever
+ *     the painter would render right now lands in the clipboard,
+ *     trailing whitespace trimmed per row.
  *
  * Out of scope (recorded in Toaru-Port-Plan, not as `// GAP:`
  * markers — no callers today):
  *   - Routing Win32 console PEs through the widget. Slice 3+.
- *   - Mouse selection / clipboard / scrollback navigation
- *     beyond what the cell grid holds.
- *   - Full SGR colour palette (monochrome v0).
+ *   - Drag-selection. The widget layer has no per-window in-content
+ *     mouse-press hook yet; landing one is a kernel-wide plumbing
+ *     change. The Ctrl+Shift+C "copy visible viewport" path above
+ *     is the substitute until that hook exists.
+ *   - 256-colour and 24-bit SGR colour rendering (params are
+ *     consumed so they don't corrupt trailing SGR codes, but
+ *     the cell only stores the 16-colour palette index today).
  *   - ESC ( / ) charset switching, DCS, OSC 52 clipboard.
  *
  * Context: kernel. DrawFn runs under the compositor lock from
@@ -97,6 +112,15 @@ void TerminalFeedBytes(const duetos::u8* bytes, duetos::u32 len);
 /// upstream session restarts (slice-2 will call this on shell
 /// re-launch). Currently exposed for the self-test only.
 void TerminalReset();
+
+/// Snapshot the currently visible viewport (live grid mixed with
+/// any active scrollback) into the system clipboard via
+/// `WindowClipboardSetText`. Trailing whitespace per row is
+/// trimmed before the row is appended; rows are joined with '\n'.
+/// Bound to Ctrl+Shift+C in the kernel keyboard dispatcher — the
+/// stop-gap until the widget API grows a per-window in-content
+/// mouse-press hook for true drag-selection.
+void TerminalCopyVisibleViewport();
 
 /// Boot self-test. Drives the parser through the FeedBytes
 /// path and verifies cursor placement + cell contents. Pure
