@@ -39,9 +39,20 @@
  * frame and flush as one `MousePacket` on the EV_SYN terminator,
  * through `MouseInjectPacket` — the same kernel pointer queue
  * PS/2 / xHCI-HID mice feed (CLAUDE.md rule 6, one source of
- * truth). GAP: EV_ABS (virtio-tablet absolute coordinates) is not
- * wired — the unified `MousePacket` API is relative-only, matching
- * the PS/2 stance that the absolute path lands with USB HID.
+ * truth).
+ *
+ * Tablets (virtio-tablet) advertise EV_ABS axes ABS_X / ABS_Y that
+ * carry absolute device coordinates rather than deltas. To keep the
+ * one-source-of-truth invariant — `MousePacket` is relative-only,
+ * fed by every pointer driver — the decoder converts absolute axes
+ * into deltas at the driver boundary: it remembers the last raw
+ * ABS_X / ABS_Y per device and the next frame's packet carries
+ * `dx = curr - last`. The first frame after an EV_ABS axis appears
+ * anchors the baseline and emits no movement (so a freshly attached
+ * tablet doesn't fling the cursor to (0,0)). End-user behaviour
+ * matches QEMU `-device virtio-tablet`: host motion drives guest
+ * cursor 1:1, the host releases its pointer grab once it sees the
+ * guest read EV_ABS.
  *
  * GAP: single device — a second virtio-input function is rejected
  * (matches virtio-console's v0 stance).
@@ -67,11 +78,18 @@ namespace input = duetos::drivers::input;
 inline constexpr u16 kEvSyn = 0x00;
 inline constexpr u16 kEvKey = 0x01;
 inline constexpr u16 kEvRel = 0x02;
+inline constexpr u16 kEvAbs = 0x03;
 
 // evdev relative axes.
 inline constexpr u16 kRelX = 0x00;
 inline constexpr u16 kRelY = 0x01;
 inline constexpr u16 kRelWheel = 0x08;
+
+// evdev absolute axes. ABS_X / ABS_Y carry tablet coordinates in
+// the device-supplied range (queried via virtio config-space
+// ID_ABS_INFO §5.8.5 — we don't need the range to compute deltas).
+inline constexpr u16 kAbsX = 0x00;
+inline constexpr u16 kAbsY = 0x01;
 
 // evdev mouse-button keycodes. BTN_* codes start at 0x100; any
 // EV_KEY whose code is in this range is pointer-domain, not a
@@ -115,12 +133,20 @@ struct InputState
     bool caps;
     // Pointer accumulator. dx/dy/dz collect EV_REL deltas within a
     // frame and reset on flush; buttons hold level state (evdev
-    // reports a button only on its press/release edge).
+    // reports a button only on its press/release edge). EV_ABS axes
+    // (virtio-tablet) are converted to deltas via last_abs_{x,y};
+    // the first EV_ABS sighting anchors the baseline (abs_seen)
+    // without emitting a packet, so a freshly attached tablet
+    // doesn't fling the cursor.
     i32 ptr_dx;
     i32 ptr_dy;
     i32 ptr_dz;
     u8 ptr_buttons;
     bool ptr_dirty; // a pointer event arrived since the last EV_SYN
+    i32 last_abs_x;
+    i32 last_abs_y;
+    bool abs_seen_x;
+    bool abs_seen_y;
     VirtioPciLayout layout;
     VirtioQueue evtq;
     mm::PhysAddr evt_buf_phys;
@@ -300,6 +326,49 @@ void HandleRel(u16 code, i32 delta)
     g_input.ptr_dirty = true;
 }
 
+// Convert one EV_ABS axis report into the frame's accumulator. The
+// first sighting of an axis stores its raw value as the baseline
+// without contributing to the packet; subsequent reports turn into
+// (curr - last) deltas. evdev's ABS_Y sign convention matches
+// MousePacket: positive = down. Axes other than ABS_X / ABS_Y
+// (multitouch slots, tilt, pressure) have no MousePacket field
+// today and are dropped here — the USB-HID stance for the same
+// classes.
+void HandleAbs(u16 code, i32 value)
+{
+    switch (code)
+    {
+    case kAbsX:
+        if (g_input.abs_seen_x)
+        {
+            const i32 delta = value - g_input.last_abs_x;
+            g_input.ptr_dx += delta;
+            g_input.ptr_dirty = true;
+        }
+        else
+        {
+            g_input.abs_seen_x = true;
+        }
+        g_input.last_abs_x = value;
+        break;
+    case kAbsY:
+        if (g_input.abs_seen_y)
+        {
+            const i32 delta = value - g_input.last_abs_y;
+            g_input.ptr_dy += delta;
+            g_input.ptr_dirty = true;
+        }
+        else
+        {
+            g_input.abs_seen_y = true;
+        }
+        g_input.last_abs_y = value;
+        break;
+    default:
+        return;
+    }
+}
+
 // Update level-state for a mouse button (BTN_* EV_KEY code). Unknown
 // BTN_* codes (joystick / tool) are pointer-domain but unmapped, so
 // they neither toggle a button nor leak into the keymap.
@@ -352,8 +421,9 @@ void FlushPointer()
 }
 
 // Process one fully-decoded evdev record. EV_KEY (keyboard codes)
-// drives the keyboard path; EV_REL and the BTN_* EV_KEY codes drive
-// the pointer accumulator, flushed on EV_SYN. EV_ABS is GAPped.
+// drives the keyboard path; EV_REL, EV_ABS (virtio-tablet) and the
+// BTN_* EV_KEY codes drive the pointer accumulator, flushed on
+// EV_SYN.
 void TranslateRecord(const virtio_input_event& e)
 {
     if (e.type == kEvSyn)
@@ -366,8 +436,13 @@ void TranslateRecord(const virtio_input_event& e)
         HandleRel(e.code, static_cast<i32>(e.value));
         return;
     }
+    if (e.type == kEvAbs)
+    {
+        HandleAbs(e.code, static_cast<i32>(e.value));
+        return;
+    }
     if (e.type != kEvKey)
-        return; // GAP: EV_ABS (virtio-tablet) — no absolute MousePacket path
+        return; // ignore unmapped event types (EV_MSC timestamp, EV_LED, ...)
     if (e.code >= kBtnFirst)
     {
         HandleButton(e.code, e.value != 0);
@@ -556,6 +631,15 @@ virtio_input_event MkRel(u16 code, i32 value)
     return e;
 }
 
+virtio_input_event MkAbs(u16 code, i32 value)
+{
+    virtio_input_event e{};
+    e.type = kEvAbs;
+    e.code = code;
+    e.value = static_cast<u32>(value);
+    return e;
+}
+
 virtio_input_event MkSyn()
 {
     virtio_input_event e{};
@@ -653,11 +737,48 @@ void VirtioInputSelfTest()
     TranslateRecord(MkSyn());
     Expect(g_cap_count == 0 && g_cap_mouse_count == 0, "unmapped BTN_* yields nothing");
 
+    // virtio-tablet (EV_ABS) path. The first frame anchors the
+    // baseline silently; the second emits the delta. ABS_Y down-
+    // positive matches MousePacket dy down-positive.
+    g_input.last_abs_x = 0;
+    g_input.last_abs_y = 0;
+    g_input.abs_seen_x = false;
+    g_input.abs_seen_y = false;
+    g_cap_mouse_count = 0;
+    TranslateRecord(MkAbs(kAbsX, 100));
+    TranslateRecord(MkAbs(kAbsY, 50));
+    TranslateRecord(MkSyn());
+    Expect(g_cap_mouse_count == 0, "first EV_ABS frame anchors baseline silently");
+    Expect(g_input.last_abs_x == 100 && g_input.last_abs_y == 50, "baseline recorded");
+    g_cap_mouse_count = 0;
+    TranslateRecord(MkAbs(kAbsX, 110));
+    TranslateRecord(MkAbs(kAbsY, 45));
+    TranslateRecord(MkSyn());
+    Expect(g_cap_mouse_count == 1, "second EV_ABS frame emits delta packet");
+    Expect(g_cap_mouse_buf[0].dx == 10 && g_cap_mouse_buf[0].dy == -5,
+           "EV_ABS delta decoded (dy down-positive)");
+
+    // Tablet + button works the same as relative + button.
+    g_cap_mouse_count = 0;
+    TranslateRecord(MkKey(kBtnLeft, 1));
+    TranslateRecord(MkAbs(kAbsX, 115));
+    TranslateRecord(MkSyn());
+    Expect(g_cap_mouse_count == 1 && g_cap_mouse_buf[0].dx == 5 &&
+               (g_cap_mouse_buf[0].buttons & input::kMouseButtonLeft) != 0,
+           "EV_ABS + BTN_LEFT compose one packet");
+    // Release the held button so it doesn't leak past selftest.
+    TranslateRecord(MkKey(kBtnLeft, 0));
+    TranslateRecord(MkSyn());
+
     // Teardown: leave decoder state pristine for production.
     g_input.shift = g_input.ctrl = g_input.alt = g_input.meta = g_input.caps = false;
     g_input.ptr_dx = g_input.ptr_dy = g_input.ptr_dz = 0;
     g_input.ptr_buttons = 0;
     g_input.ptr_dirty = false;
+    g_input.last_abs_x = 0;
+    g_input.last_abs_y = 0;
+    g_input.abs_seen_x = false;
+    g_input.abs_seen_y = false;
     g_cap_active = false;
     g_cap_count = 0;
     g_cap_mouse_count = 0;

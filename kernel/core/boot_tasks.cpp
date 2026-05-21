@@ -414,8 +414,10 @@ void KbdReaderTask(void*)
         // DesktopCompose here — the long-running command
         // holding the shell will notice next time it polls.
         // Skipped entirely if Alt is also held (that's a
-        // different shortcut like Ctrl+Alt+T).
-        if (ctrl && !alt && (ev.code == 'c' || ev.code == 'C'))
+        // different shortcut like Ctrl+Alt+T) or if Shift is
+        // held (Ctrl+Shift+C is the terminal viewport-copy
+        // shortcut handled separately below).
+        if (ctrl && !alt && !shift && (ev.code == 'c' || ev.code == 'C'))
         {
             // If the active window is Notes, treat Ctrl+C as
             // "copy entire buffer to the kernel clipboard" so
@@ -480,6 +482,28 @@ void KbdReaderTask(void*)
             }
             SerialWrite("[ui] ^+V clipboard rotate\n");
             continue;
+        }
+        // Ctrl+Shift+C — when the terminal window is active, copy
+        // its currently visible viewport to the clipboard. This is
+        // the substitute for drag-selection while the widget layer
+        // lacks an in-content mouse-press hook: scroll back via
+        // PgUp / wheel to whatever output you want, then Ctrl+Shift+C
+        // grabs it. No-op anywhere else (the shell's ^C path is
+        // !shift above; ^Shift+C here is unambiguous).
+        if (ctrl && shift && !alt && (ev.code == 'c' || ev.code == 'C'))
+        {
+            duetos::drivers::video::CompositorLock();
+            const auto active = duetos::drivers::video::WindowActive();
+            if (active != duetos::drivers::video::kWindowInvalid &&
+                active == duetos::apps::terminal::TerminalWindow())
+            {
+                duetos::apps::terminal::TerminalCopyVisibleViewport();
+                duetos::drivers::video::CompositorUnlock();
+                duetos::drivers::video::NotifyShow("copied viewport to clipboard");
+                SerialWrite("[ui] ^+C terminal copy viewport\n");
+                continue;
+            }
+            duetos::drivers::video::CompositorUnlock();
         }
         // Ctrl+V — paste the kernel clipboard into Notes when
         // Notes is the active window. No-op anywhere else
@@ -1534,7 +1558,8 @@ void KbdReaderTask(void*)
                 }
                 else if (active == duetos::apps::terminal::TerminalWindow() &&
                          (ev.code == kKeyArrowUp || ev.code == kKeyArrowDown || ev.code == kKeyArrowLeft ||
-                          ev.code == kKeyArrowRight))
+                          ev.code == kKeyArrowRight || ev.code == kKeyPageUp || ev.code == kKeyPageDown ||
+                          ev.code == kKeyHome || ev.code == kKeyEnd))
                 {
                     app_consumed = duetos::apps::terminal::TerminalFeedArrow(static_cast<duetos::u16>(ev.code));
                 }

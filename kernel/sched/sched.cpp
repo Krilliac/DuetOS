@@ -1982,13 +1982,66 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
     {
         if (Current()->state != TaskState::Running)
         {
-            // Release the lock before panic so any post-mortem walker
-            // sees a consistent state. PanicSched is [[noreturn]].
-            sync::SpinLockRelease(g_sched_lock, lock_flags);
-            PanicSched("no runnable task available");
+            // Last-resort fallback: this CPU's idle task is always
+            // available, even when the runqueue's Idle band has
+            // momentarily emptied. The race we close: a polling
+            // task (e1000-rx-poll, mock-isp-pump, reaper) wakes on
+            // an AP, runs briefly, calls SchedSleepTicks; between
+            // the previous Schedule() popping idle and the next
+            // preemption re-enqueueing the previous task, the
+            // runqueue can show all-empty. Without this fallback
+            // we'd panic "no runnable task available" — observed
+            // intermittently under SMP (~3/10 debug-preset boots).
+            cpu::PerCpu* self = cpu::CurrentCpu();
+            Task* idle = (self != nullptr) ? self->idle_task : nullptr;
+            // One-line probe (raw serial, lock-safe) before deciding
+            // whether to dispatch idle or escalate to panic. Lets a
+            // post-mortem distinguish "fallback fired" (idle dispatched
+            // silently — no log) from "fallback whiffed" (one of the
+            // guards rejected the idle pointer — line emitted).
+            if (idle == nullptr || idle == Current() || idle->state == TaskState::Dead)
+            {
+                // Diagnostic line so the AP-bringup race window is
+                // visible in the boot log (the standard fallback below
+                // is silent on the happy path). Captures the failing
+                // CPU's `self`, its idle pointer, and the offending
+                // state — exactly the four values needed to tell
+                // "idle_task was never published" from "idle drifted
+                // to Dead" from "current is idle and we'd loop". Do
+                // NOT attempt a foreign-CPU idle here: idle tasks own
+                // their home CPU's stack (per CLAUDE.md "Idle tasks
+                // are per-CPU and not eligible to steal"), and
+                // dispatching one across CPUs reproduces the SMP
+                // double-run + DEBUG_ASSERT chain that the per-CPU
+                // pinning fixes in the first place.
+                arch::SerialWrite("[sched-fallback] no idle available — self=");
+                arch::SerialWriteHex(reinterpret_cast<u64>(self));
+                arch::SerialWrite(" cpu_id=");
+                arch::SerialWriteHex(self != nullptr ? static_cast<u64>(self->cpu_id) : 0xFFFFFFFFu);
+                arch::SerialWrite(" idle=");
+                arch::SerialWriteHex(reinterpret_cast<u64>(idle));
+                arch::SerialWrite(" idle_state=");
+                arch::SerialWriteHex(idle != nullptr ? static_cast<u64>(idle->state) : 0xFFFFFFFFu);
+                arch::SerialWrite(" cur=");
+                arch::SerialWriteHex(reinterpret_cast<u64>(Current()));
+                arch::SerialWrite("\n");
+                sync::SpinLockRelease(g_sched_lock, lock_flags);
+                PanicSched("no runnable task available");
+            }
+            // Standard fallback: dispatch this CPU's own idle. The
+            // idle task may have been popped earlier (state Running
+            // or Ready depending on where the scheduler last left
+            // it). Force it to Ready so the rest of the handoff
+            // sees a clean state machine; the bottom of this
+            // function flips it to Running.
+            idle->state = TaskState::Ready;
+            next = idle;
         }
-        sync::SpinLockRelease(g_sched_lock, lock_flags);
-        return;
+        else
+        {
+            sync::SpinLockRelease(g_sched_lock, lock_flags);
+            return;
+        }
     }
     // Documentation-of-invariant: a task pulled off the runqueue
     // must have been Ready (the only state RunqueuePush accepts).
@@ -4311,6 +4364,16 @@ void SchedStartIdle(const char* name)
         if (self != nullptr)
         {
             idle->affinity_mask = (1u << self->cpu_id);
+            // Publish the per-CPU idle task pointer. Read by
+            // ScheduleLockedHandoff as a last-resort dispatch
+            // target — see PerCpu::idle_task in cpu/percpu.h for
+            // the race this closes.
+            self->idle_task = idle;
+            // Open the wake/balance/steal gate: from here on,
+            // peer CPUs may route tasks to this CPU. This MUST
+            // be the last write before the Log call below — see
+            // PerCpu::scheduler_ready in cpu/percpu.h.
+            self->scheduler_ready = true;
         }
     }
     core::Log(core::LogLevel::Info, "sched/idle", "idle task online");
