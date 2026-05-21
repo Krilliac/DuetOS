@@ -310,6 +310,28 @@ void WindowClose(WindowHandle h);
 /// `WindowIsAlive` for the live set.
 u32 WindowRegistryCount();
 
+/// Record a PE-requested cursor shape for `h`. `shape` is the
+/// `CursorShape` enum value (cast to u8 so the header has no
+/// cursor.h dependency). Called by the SYS_GDI_SET_CURSOR
+/// handler after it has located the window under the cursor
+/// that the calling PE owns. Sets the per-window flag so the
+/// mouse-loop hit-test consults the slot on the next motion
+/// packet. No-op on invalid handle.
+void WindowSetRequestedCursorShape(WindowHandle h, u8 shape);
+
+/// Drop the per-window cursor-shape request, reverting `h` to
+/// the kernel-owned hit-test defaults (Arrow / Hand over
+/// buttons / etc.). Idempotent; no-op on invalid handle.
+void WindowClearRequestedCursorShape(WindowHandle h);
+
+/// Read back the PE-requested cursor shape for `h`. Returns
+/// false (and leaves `*shape_out` untouched) if the handle is
+/// invalid OR the PE never called SetCursor for this window,
+/// so callers can distinguish "PE wants Arrow" from "PE never
+/// asked." On success writes the stored `CursorShape` value to
+/// `*shape_out` (when non-null) and returns true.
+bool WindowGetRequestedCursorShape(WindowHandle h, u8* shape_out);
+
 /// True iff `h` is a valid registered slot AND the window has not
 /// been closed.
 bool WindowIsAlive(WindowHandle h);

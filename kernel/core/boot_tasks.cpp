@@ -2039,14 +2039,27 @@ void MouseReaderTask(void*)
         // Cursor-shape hit-test. Skipped while Wait is active
         // (the long-op holder owns the shape). Otherwise:
         // hovering a button widget → Hand; hovering Notes /
-        // Browser editable client area → IBeam; everywhere
-        // else → Arrow. The CursorSetShape change-gate keeps
-        // per-packet calls cheap when the shape doesn't move.
+        // Browser editable client area → IBeam; PE-owned window
+        // with a Win32 SetCursor-requested shape → that shape;
+        // everywhere else → Arrow. The CursorSetShape change-gate
+        // keeps per-packet calls cheap when the shape doesn't
+        // move.
+        //
+        // Priority order: kernel-owned chrome rules (resize bands,
+        // Hand-on-button, native IBeam) win over the PE-requested
+        // shape. The PE request replaces the unconditional Arrow
+        // fallback for windows whose owning process has called
+        // user32!SetCursor (see SYS_GDI_SET_CURSOR handler) — so
+        // a PE drawing its own text-edit area can set IBeam and
+        // have it honored on every motion packet, but the kernel
+        // still wins when the cursor is over a resize band or a
+        // button-widget on top of the PE window.
         if (duetos::drivers::video::CursorGetShape() != duetos::drivers::video::CursorShape::Wait)
         {
             using duetos::drivers::video::CursorShape;
             using duetos::drivers::video::WindowResizeEdge;
             CursorShape want = CursorShape::Arrow;
+            bool want_chosen = false; // gates the PE-request fallback
             const auto over_resize = cached_topmost_under_cursor;
             WindowResizeEdge edge = WindowResizeEdge::None;
             if (over_resize != duetos::drivers::video::kWindowInvalid)
@@ -2056,22 +2069,27 @@ void MouseReaderTask(void*)
             if (edge == WindowResizeEdge::Left || edge == WindowResizeEdge::Right)
             {
                 want = CursorShape::ResizeEW;
+                want_chosen = true;
             }
             else if (edge == WindowResizeEdge::Top || edge == WindowResizeEdge::Bottom)
             {
                 want = CursorShape::ResizeNS;
+                want_chosen = true;
             }
             else if (edge == WindowResizeEdge::TopLeft || edge == WindowResizeEdge::BottomRight)
             {
                 want = CursorShape::ResizeNWSE;
+                want_chosen = true;
             }
             else if (edge == WindowResizeEdge::TopRight || edge == WindowResizeEdge::BottomLeft)
             {
                 want = CursorShape::ResizeNESW;
+                want_chosen = true;
             }
             else if (duetos::drivers::video::WidgetCursorOverButton(cx, cy))
             {
                 want = CursorShape::Hand;
+                want_chosen = true;
             }
             else if (over_resize != duetos::drivers::video::kWindowInvalid &&
                      !duetos::drivers::video::WindowPointInTitle(over_resize, cx, cy) &&
@@ -2079,6 +2097,32 @@ void MouseReaderTask(void*)
                       over_resize == duetos::apps::browser::BrowserWindow()))
             {
                 want = CursorShape::IBeam;
+                want_chosen = true;
+            }
+            // No kernel-owned rule matched — consult the
+            // per-window PE-requested cursor shape (set via
+            // SYS_GDI_SET_CURSOR). Only honored when the cursor is
+            // over a window that called SetCursor; otherwise the
+            // Arrow default falls through. Title-bar hits keep the
+            // Arrow fallback so window chrome stays predictable
+            // even when the PE requests something for the client
+            // area.
+            if (!want_chosen && over_resize != duetos::drivers::video::kWindowInvalid &&
+                !duetos::drivers::video::WindowPointInTitle(over_resize, cx, cy))
+            {
+                duetos::u8 pe_shape = 0;
+                if (duetos::drivers::video::WindowGetRequestedCursorShape(over_resize, &pe_shape))
+                {
+                    // Clamp to the known enum range. Out-of-range
+                    // values (a future enum extension a stale
+                    // kernel doesn't recognise) collapse to Arrow
+                    // so the cursor never paints uninitialised
+                    // sprite memory.
+                    if (pe_shape <= static_cast<duetos::u8>(CursorShape::ResizeNWSE))
+                    {
+                        want = static_cast<CursorShape>(pe_shape);
+                    }
+                }
             }
             duetos::drivers::video::CursorSetShape(want);
         }

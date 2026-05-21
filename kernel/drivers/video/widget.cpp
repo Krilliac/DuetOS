@@ -389,7 +389,23 @@ struct RegisteredWindow
     // ink rather than the surface beneath, but the visual
     // "fading window" cue still reads correctly.
     u8 opacity;
-    u8 _pad[2];
+    // Per-window PE-requested cursor shape. When a Win32 PE app
+    // calls `SetCursor(hCursor)`, the SYS_GDI_SET_CURSOR handler
+    // resolves which of the caller's windows the cursor is over
+    // and writes the requested shape here. The mouse-loop hit-test
+    // in `boot_tasks.cpp` consults this slot before falling back
+    // to its default Arrow when no kernel-owned shape rule (resize
+    // band / Hand-button / Notes IBeam) matched. `requested_set`
+    // gates the lookup so a window that never called SetCursor
+    // doesn't accidentally pin Arrow — kernel hit-test rules
+    // (Hand, IBeam, resize) still win over an explicit Arrow when
+    // the slot is unset, but lose to a PE's explicit Arrow when
+    // it is set. Cleared on WindowClose so a reused slot (when
+    // dynamic re-use lands) doesn't carry stale state. Encoded as
+    // `u8` matching `CursorShape` enum width so the field stays
+    // a single byte and the surrounding `_pad` accounts for it.
+    u8 requested_cursor;     // CursorShape value
+    bool requested_cursor_set;
 };
 
 constinit RegisteredWindow g_windows[kMaxWindows] = {};
@@ -819,6 +835,8 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].visible = true;
     g_windows[h].dirty = false;
     g_windows[h].opacity = 0xFF; // fully opaque by default
+    g_windows[h].requested_cursor = 0; // CursorShape::Arrow sentinel
+    g_windows[h].requested_cursor_set = false;
     g_windows[h].maximized = false;
     g_windows[h].pinned = false;
     g_windows[h].saved_x = 0;
@@ -1416,6 +1434,13 @@ void WindowClose(WindowHandle h)
         return;
     }
     g_windows[h].alive = false;
+    // Clear the PE-requested cursor shape so the next-allocated
+    // window starting in this slot (if/when dynamic re-use lands)
+    // doesn't observe stale state. Cheap, deterministic; the
+    // mouse-loop's per-packet hit-test relies on this flag being
+    // false-by-default for kernel-owned windows.
+    g_windows[h].requested_cursor_set = false;
+    g_windows[h].requested_cursor = 0;
     if (g_active_window == h)
     {
         // Promote the next topmost alive window, if any, so
@@ -3402,6 +3427,39 @@ void WindowResizeTo(WindowHandle h, u32 w, u32 hgt)
         }
         c.h = hgt;
     }
+}
+
+void WindowSetRequestedCursorShape(WindowHandle h, u8 shape)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].requested_cursor = shape;
+    g_windows[h].requested_cursor_set = true;
+}
+
+void WindowClearRequestedCursorShape(WindowHandle h)
+{
+    if (!WindowValid(h))
+    {
+        return;
+    }
+    g_windows[h].requested_cursor_set = false;
+    g_windows[h].requested_cursor = 0;
+}
+
+bool WindowGetRequestedCursorShape(WindowHandle h, u8* shape_out)
+{
+    if (!WindowValid(h) || !g_windows[h].requested_cursor_set)
+    {
+        return false;
+    }
+    if (shape_out != nullptr)
+    {
+        *shape_out = g_windows[h].requested_cursor;
+    }
+    return true;
 }
 
 } // namespace duetos::drivers::video
