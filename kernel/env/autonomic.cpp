@@ -12,6 +12,7 @@
 #include "sched/sched.h"
 #include "security/guard.h"
 #include "security/policy.h"
+#include "test/smoke_profile.h"
 
 namespace duetos::env
 {
@@ -189,6 +190,23 @@ void AutonomicApply(const AutoActionSet& set)
             // checker — clamp the box: enforce image guard, apply
             // the Production policy profile. Both are idempotent
             // and log their own transition. actor_pid 0 = kernel.
+            //
+            // Smoke-profile gate: a headless smoke run can't answer
+            // the interactive `Allow [y] / Deny [n]` prompt that a
+            // Warn-verdict image fires under Enforce. With
+            // escalation on, smoke profiles like pe-hello reach the
+            // guard prompt, default-deny after 10s, and qemu's
+            // outer timeout kills the VM before the smoke sentinel
+            // emits — surfaces as `qemu smoke (pe-hello)` red on
+            // every PR (regression from PR #314's autonomic engine
+            // landing, traced via smoke-pe-hello.log tail showing
+            // SECURITY GUARD PROMPT mid-wait when qemu killed it).
+            // Once-warn so the silenced action stays auditable.
+            if (::duetos::test::SmokeProfileGet() != ::duetos::test::SmokeProfile::None)
+            {
+                KLOG_ONCE_WARN("autonomic", "security-escalate suppressed under smoke profile (would block hello-pe)");
+                break;
+            }
             security::SetGuardMode(security::Mode::Enforce);
             security::PolicySet(security::PolicyProfile::Production, 0);
             KLOG_WARN("autonomic", "kernel-integrity finding — escalated to Production/Enforce");
