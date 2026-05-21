@@ -208,10 +208,10 @@ u64 SafeReadInto(u64 va, u8* dst, u64 n)
         // than detour through a STAC window during a panic. If a
         // future caller really wants user bytes, route through
         // CopyFromUser (which already STAC/CLAC-gates).
-        const u64 leaf = walk.stop == ::duetos::mm::PageWalkStop::FourKiB ? walk.entry_pt
-                       : walk.stop == ::duetos::mm::PageWalkStop::TwoMiB  ? walk.entry_pd
-                       : walk.stop == ::duetos::mm::PageWalkStop::OneGiB  ? walk.entry_pdpt
-                                                                          : 0ULL;
+        const u64 leaf = walk.stop == ::duetos::mm::PageWalkStop::FourKiB  ? walk.entry_pt
+                         : walk.stop == ::duetos::mm::PageWalkStop::TwoMiB ? walk.entry_pd
+                         : walk.stop == ::duetos::mm::PageWalkStop::OneGiB ? walk.entry_pdpt
+                                                                           : 0ULL;
         const bool user_page = (leaf & (1ULL << 2)) != 0;
         const u64 in_page = 0x1000 - (cur & 0xFFFULL);
         const u64 chunk = (in_page < (n - i)) ? in_page : (n - i);

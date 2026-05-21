@@ -421,7 +421,7 @@ struct RegisteredWindow
     // dynamic re-use lands) doesn't carry stale state. Encoded as
     // `u8` matching `CursorShape` enum width so the field stays
     // a single byte and the surrounding `_pad` accounts for it.
-    u8 requested_cursor;     // CursorShape value
+    u8 requested_cursor; // CursorShape value
     bool requested_cursor_set;
 };
 
@@ -851,7 +851,7 @@ WindowHandle WindowRegister(const WindowChrome& chrome, const char* title)
     g_windows[h].alive = true;
     g_windows[h].visible = true;
     g_windows[h].dirty = false;
-    g_windows[h].opacity = 0xFF; // fully opaque by default
+    g_windows[h].opacity = 0xFF;       // fully opaque by default
     g_windows[h].requested_cursor = 0; // CursorShape::Arrow sentinel
     g_windows[h].requested_cursor_set = false;
     g_windows[h].maximized = false;
@@ -1331,7 +1331,8 @@ void MinimizeTargetRect(WindowHandle h, u32* tx, u32* ty, u32* tw, u32* th)
 //   - invalid handle
 //   - identical source / target rect (nothing to animate)
 //   - animation already in flight for `h` (don't restart mid-flight)
-void WindowAnimate(WindowHandle h, u32 target_x, u32 target_y, u32 target_w, u32 target_h, u32 ticks, WindowAnimEase ease)
+void WindowAnimate(WindowHandle h, u32 target_x, u32 target_y, u32 target_w, u32 target_h, u32 ticks,
+                   WindowAnimEase ease)
 {
     if (!WindowValid(h))
         return;
@@ -1434,7 +1435,8 @@ bool WindowAnimateStepOne(RegisteredWindow& w)
         const u32 inv_sq = (inv * inv) / 1024u;
         t_q10 = 1024u - inv_sq;
     }
-    auto lerp_q10 = [](u32 start, u32 target, u32 t) -> u32 {
+    auto lerp_q10 = [](u32 start, u32 target, u32 t) -> u32
+    {
         // Sign-aware lerp without floats. Branch on which end
         // is larger so the intermediate subtraction stays u32.
         if (target >= start)

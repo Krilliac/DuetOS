@@ -1770,8 +1770,8 @@ constexpr duetos::u32 kFilesGenericMenuItemsN = sizeof(kFilesGenericMenuItems) /
 // bytes via the existing FAT32 read path so a user can peek at a
 // binned screenshot / .txt without restoring first.
 constinit duetos::drivers::video::MenuItem kFilesTrashMenuItems[] = {
-    {"OPEN", 44, 0, nullptr, 0},          {"RESTORE", 45, 0, nullptr, 0}, {"DELETE FOREVER", 46, 0, nullptr, 0},
-    {"PROPERTIES", 38, 0, nullptr, 0},    {"REFRESH", 39, 0, nullptr, 0},
+    {"OPEN", 44, 0, nullptr, 0},       {"RESTORE", 45, 0, nullptr, 0}, {"DELETE FOREVER", 46, 0, nullptr, 0},
+    {"PROPERTIES", 38, 0, nullptr, 0}, {"REFRESH", 39, 0, nullptr, 0},
 };
 constexpr duetos::u32 kFilesTrashMenuItemsN = sizeof(kFilesTrashMenuItems) / sizeof(kFilesTrashMenuItems[0]);
 

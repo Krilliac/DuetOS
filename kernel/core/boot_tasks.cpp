@@ -494,8 +494,7 @@ void KbdReaderTask(void*)
         {
             duetos::drivers::video::CompositorLock();
             const auto active = duetos::drivers::video::WindowActive();
-            if (active != duetos::drivers::video::kWindowInvalid &&
-                active == duetos::apps::terminal::TerminalWindow())
+            if (active != duetos::drivers::video::kWindowInvalid && active == duetos::apps::terminal::TerminalWindow())
             {
                 duetos::apps::terminal::TerminalCopyVisibleViewport();
                 duetos::drivers::video::CompositorUnlock();
@@ -2051,8 +2050,7 @@ void MouseReaderTask(void*)
         // KASAN this halves the dominant per-packet cost — the
         // walk is shadow-checked on every pointer chase, and the
         // ring-3 smoke battery puts 13+ windows on the list.
-        const auto cached_topmost_under_cursor =
-            duetos::drivers::video::WindowTopmostAt(cx, cy);
+        const auto cached_topmost_under_cursor = duetos::drivers::video::WindowTopmostAt(cx, cy);
 
         // Track menu hover. Cheap when no menu is open. When
         // open, this updates the highlighted row so the next
@@ -3140,8 +3138,8 @@ void MouseReaderTask(void*)
                 duetos::u32 zx = 0, zy = 0, zw = 0, zh = 0;
                 duetos::drivers::video::SnapZoneGetRect(zone, &zx, &zy, &zw, &zh);
                 duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
-                if (duetos::drivers::video::WindowGetBounds(drag.window, &wx, &wy, &ww, &wh) && wx == zx &&
-                    wy == zy && ww == zw && wh == zh)
+                if (duetos::drivers::video::WindowGetBounds(drag.window, &wx, &wy, &ww, &wh) && wx == zx && wy == zy &&
+                    ww == zw && wh == zh)
                 {
                     zone = duetos::drivers::video::SnapZone::None;
                 }
@@ -3263,10 +3261,9 @@ void WinTimerTickerTask(void*)
             // desktop-only affordance and the gate / TTY paths
             // would clobber their own state if we composed
             // here.
-            const bool gate_active = duetos::core::LoginIsActive() &&
-                                     duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui;
-            const bool is_tty =
-                duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty;
+            const bool gate_active =
+                duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui;
+            const bool is_tty = duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty;
             if (!gate_active && !is_tty)
             {
                 duetos::drivers::video::CursorHide();

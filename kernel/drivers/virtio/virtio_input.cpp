@@ -755,8 +755,7 @@ void VirtioInputSelfTest()
     TranslateRecord(MkAbs(kAbsY, 45));
     TranslateRecord(MkSyn());
     Expect(g_cap_mouse_count == 1, "second EV_ABS frame emits delta packet");
-    Expect(g_cap_mouse_buf[0].dx == 10 && g_cap_mouse_buf[0].dy == -5,
-           "EV_ABS delta decoded (dy down-positive)");
+    Expect(g_cap_mouse_buf[0].dx == 10 && g_cap_mouse_buf[0].dy == -5, "EV_ABS delta decoded (dy down-positive)");
 
     // Tablet + button works the same as relative + button.
     g_cap_mouse_count = 0;
