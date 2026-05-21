@@ -123,8 +123,8 @@ See [History](../getting-started/History.md) for the full evolution.
 - **COM apartments**, real `CoInitialize` / `CoCreateInstance`.
 - **DirectX rendering** beyond Clear + Present (`Draw*` returns
   `E_NOTIMPL`).
-- **Modal dialogs, menus, common controls, scroll bars, outline
-  fonts, multi-threaded message queues**.
+- **Common controls, scroll bars, outline fonts, multi-threaded
+  message queues**.
 - **Most of `winsock2`'s asynchronous surface** (synchronous BSD
   socket subset works).
 - **Arbitrary file writes** through the FS write paths.
