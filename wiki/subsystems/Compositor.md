@@ -220,14 +220,23 @@ replaces the prior two-step Alt+F4 prompt).
 
 ## Scrollbar
 
-`scrollbar.{h,cpp}` is a pure visual indicator. Apps call
-`ScrollbarPaint(x, y, w, h, {total, visible, first})` from
-their `DrawFn`; the painter draws a track + proportional
-thumb. v1 doesn't implement drag-the-thumb interactivity —
-wheel dispatch covers the common scroll case; click-on-track
-jump-to is deferred. Files (FAT32 list) and Browser (body
-view) integrate today; Notes / Help skipped because their
-content fits the typical render area.
+`scrollbar.{h,cpp}` paints a track + thumb and provides pure-function
+hit-test / drag math (`ScrollbarHitTest`, `ScrollbarDragTo`,
+`ScrollbarThumbY`, `ScrollbarThumbH`). Apps call `ScrollbarPaint(x, y,
+w, h, {total, visible, first})` from their `DrawFn` and register the
+same geometry with the widget system via `WindowSetScrollbar(handle,
+WindowScrollbarSurface{...})`. Apps also register a scroll callback
+via `WindowSetScrollHandler(handle, fn)` to receive the new `first`
+value.
+
+The kernel mouse loop in `boot_tasks.cpp` consults the per-window
+scrollbar surface on every press-edge: track click pages by `visible`
+and fires the callback via `WindowDispatchScroll`; thumb click arms an
+`sb_drag` that follows the cursor through subsequent motion via
+`ScrollbarDragTo` + `WindowDispatchScroll`. Wheel dispatch remains the
+incremental fast path. v1 consumers: Files (FAT32 list), Browser
+(body), HexView (grid), Notification Center. Notes / Help skip the
+scrollbar because their content fits the typical render area.
 
 ## Tooltips
 
@@ -396,15 +405,29 @@ Action-id allocation:
   the new content area on next decode. No independent
   zoom-without-resize state — pan is implicit through window
   position.
-- **Drag-and-drop between windows**: not in scope. Needs a
-  per-window drop-target registry, a `kDraggingItem` global,
-  and ghost-image rendering during drag — more invasive than
-  any single-app feature.
+- **Drag-and-drop between windows**: shipped via
+  `kernel/drivers/video/dnd.{h,cpp}`. Single in-flight payload
+  (`DndPayload { kind, text[31] }`) with `DndKind::FileEntry` /
+  `Bookmark` / `Text`. Sources call `DndBegin` from a press-edge;
+  targets register via `DndRegisterDropTarget(hwnd, cb,
+  accepted_mask)`. The mouse loop feeds motion into
+  `DndUpdateCursor`; release calls `DndResolveAt(cx, cy)` which
+  walks alive targets top-down. `DndCompose` paints the ghost
+  image after chrome but before tooltips. v1 consumers: Files
+  (source), Notes / ImageView (targets). Future gap: full
+  OLE/IDataObject COM marshalling for Win32 PE source apps
+  (`userland/libs/ole32/ole32.c` ships the loader-resolvable
+  surface but `DoDragDrop` is a stub).
 - **Audio feedback / system sounds**: gated on HDA codec
   programming (Roadmap.md). PC speaker exists but is not
   wired to any UI event.
-- **Settings GUIs (Display / Sound / Keyboard / Mouse /
-  Date-Time)**: each is its own slice per CLAUDE.md.
+- **Settings GUI**: shipped as a unified windowed app
+  (`kernel/apps/settings.{h,cpp}`) with sub-panels for General
+  (theme + active-window opacity + clock + version banner), Display,
+  Sound, Keyboard, Mouse, and DateTime
+  (`kernel/apps/settings_<panel>.cpp`). Number keys 0..5 switch
+  panels; the General panel includes the theme picker that
+  `Ctrl+Alt+Y` also drives.
 - **Trash / ramfs mode in Files**: only FAT32 mode has a v0
   context menu; other modes fall through to the kernel-window menu.
 - **Win32 common controls, outline fonts, multi-threaded

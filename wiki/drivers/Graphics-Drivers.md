@@ -554,11 +554,17 @@ recompose. Four themes ship:
   only — see [Vulkan ICD](../subsystems/Vulkan-ICD.md)); attribute
   interpolation, depth, and indexed draws are still gated on
   the SPIR-V execution slice.
-- **Damage tracking is single-bbox.** A frame that touches the
-  top-left and bottom-right corners flushes the whole surface. A
-  list-of-rects damage tracker would help for chrome-heavy frames
-  with non-contiguous writes (e.g. caret blink + clock tick on
-  opposite ends of the taskbar).
+- **Damage tracking promotes to a disjoint-rect list at present
+  time.** `FramebufferAddDamage` accumulates a single union bbox
+  per the existing `DamageRect::Extend` math, but `FramebufferPresent`
+  has a banded path: when `g_damage_rect_count > 0` it walks
+  `g_damage_rects[]` and fires the registered present hook once per
+  disjoint rect (see `framebuffer.cpp` `FramebufferPresent`). The
+  content diff in `FramebufferEndCompose` is what populates the
+  rect list when it finds spatially-separated changes, so a frame
+  with a caret blink + clock tick on opposite ends flushes two
+  small rects instead of one near-fullscreen rect. The "D1 flicker"
+  was the prior collapse this path fixes.
 
 ## Related Pages
 
