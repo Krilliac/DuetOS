@@ -3215,13 +3215,40 @@ void MouseReaderTask(void*)
 
 // Win32 timer ticker: walks the per-window timer table every
 // scheduler tick and posts WM_TIMER under the compositor lock.
+// Doubles as the 100 Hz driver for `WindowAnimateStepAll` — the
+// min / max / restore / snap tweens advance one step per call
+// here (the only path in the kernel that runs at 100 Hz under
+// the compositor lock). When a tween is actively stepping, the
+// task forces a `DesktopCompose` so the user sees the motion;
+// the 1 Hz `UiTickerTask`'s cadence is too coarse to render
+// a ~100 ms transition smoothly.
 void WinTimerTickerTask(void*)
 {
+    auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
     for (;;)
     {
         duetos::sched::SchedSleepTicks(1);
         duetos::drivers::video::CompositorLock();
         duetos::drivers::video::WindowTimerTick();
+        const bool anim_stepped = duetos::drivers::video::WindowAnimateStepAll();
+        if (anim_stepped)
+        {
+            // Skip recompose while the login gate owns the
+            // framebuffer or in TTY mode — animations are a
+            // desktop-only affordance and the gate / TTY paths
+            // would clobber their own state if we composed
+            // here.
+            const bool gate_active = duetos::core::LoginIsActive() &&
+                                     duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui;
+            const bool is_tty =
+                duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty;
+            if (!gate_active && !is_tty)
+            {
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::CursorShow();
+            }
+        }
         duetos::drivers::video::CompositorUnlock();
     }
 }

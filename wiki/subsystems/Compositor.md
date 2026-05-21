@@ -155,6 +155,35 @@ before the press is dispatched so Z-order tracks the click in
 addition to explicit `BringWindowToTop` / `SetForegroundWindow`
 syscalls.
 
+## Window Transition Animations
+
+`WindowMaximize`, `WindowMinimize`, `WindowRestore`, and the
+`WindowSnap*` family (Left / Right / Top / Bottom + four corners)
+route their rect change through the `WindowAnimate` primitive in
+`widget.{h,cpp}` instead of jumping in a single frame. Default
+tween: 10 ticks of ease-out (`t' = 1 - (1 - t)^2`) at the 100 Hz
+`WinTimerTicker` cadence ≈ 100 ms. Math is integer fixed-point
+(q10) — no FPU in kernel context.
+
+State (`anim_active`, `anim_start_*`, `anim_target_*`,
+`anim_remaining_ticks`, `anim_ease`, `anim_post_action`) lives on
+the per-window struct; no dynamic allocation. The animator only
+walks `chrome.x/y/w/h` — flags (`maximized`, `visible`, focus)
+are set immediately by the calling op so observers
+(`WindowIsMaximized`, hit-testing, the chrome max / restore
+glyph) see the new state before the tween finishes. The Restore
+target is still `saved_*` so Restore returns to the exact
+pre-maximize bounds.
+
+Skip rules: identical source / target rect, in-flight animation
+for the same window (the in-flight one wins; the new request is
+dropped). `WindowMinimize` carries a `hide-on-complete`
+post-action — the window stays visible through the tween then
+rolls back to its pre-anim rect and clears `visible`, so the next
+`SW_SHOW` lands where the user left it. Drag-move
+(`WindowMoveTo` per motion packet) deliberately bypasses the
+animator — animating live input would lag the cursor.
+
 ## Snap Zones
 
 While dragging a window the mouse loop hit-tests the cursor

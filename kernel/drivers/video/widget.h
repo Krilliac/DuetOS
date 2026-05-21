@@ -278,6 +278,49 @@ bool WindowIsMaximized(WindowHandle h);
 /// No-op for invalid handles. Mirrors Win10's Win+Left tile.
 void WindowSnapLeft(WindowHandle h);
 
+// ---------------------------------------------------------------
+// Window transition animations.
+//
+// `WindowMaximize` / `WindowMinimize` / `WindowRestore` / the
+// `WindowSnap*` family route their rect change through
+// `WindowAnimate` so the user sees the window slide / scale to
+// its new position over ~100 ms instead of jumping in one frame.
+// `WindowAnimateStepAll` is driven by the 100 Hz `WinTimerTicker`
+// task; each tick advances every armed window one step toward
+// its target and snaps to the exact target rect on completion.
+//
+// Drag-move (`WindowMoveTo` per motion packet) does NOT route
+// through this primitive — animating live input would lag the
+// cursor. The animator is for one-shot rect commits only.
+// ---------------------------------------------------------------
+
+enum class WindowAnimEase : u8
+{
+    Linear = 0,
+    EaseOut = 1, // recommended default — quadratic ease-out
+};
+
+/// Arm an animation from `h`'s current bounds to (target_x,
+/// target_y, target_w, target_h) spread across `ticks` compose
+/// ticks. `ease` picks the interpolation curve. Skipped (no-op)
+/// when the source and target rects are already identical, when
+/// the handle is invalid, OR when an animation is already in
+/// flight for `h` (the in-flight one is allowed to complete; the
+/// new request is dropped). Caps `ticks` at 255.
+void WindowAnimate(WindowHandle h, u32 target_x, u32 target_y, u32 target_w, u32 target_h, u32 ticks,
+                   WindowAnimEase ease = WindowAnimEase::EaseOut);
+
+/// True iff `h` currently has an animation in flight.
+bool WindowAnimateActive(WindowHandle h);
+
+/// Advance every armed window's animation by one tick. Called
+/// from the 100 Hz `WinTimerTicker` task under the compositor
+/// lock. Returns true iff at least one window was stepped this
+/// call (the caller can use this to gate a follow-up
+/// `DesktopCompose` — no animations active means no extra
+/// recompose work is needed).
+bool WindowAnimateStepAll();
+
 /// Snap `h` to the right half. Mirrors Win10's Win+Right.
 void WindowSnapRight(WindowHandle h);
 
