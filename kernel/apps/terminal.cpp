@@ -610,14 +610,13 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
             u8 fg_idx = c.fg;
             if ((c.attr & kAttrBold) && has_fg && fg_idx < 8)
                 fg_idx = static_cast<u8>(fg_idx + 8);
-            u32 fg = has_fg ? kPalette[fg_idx]
-                            : ((c.attr & kAttrBold) ? ink_default_bold : ink_default);
+            u32 fg = has_fg ? kPalette[fg_idx] : ((c.attr & kAttrBold) ? ink_default_bold : ink_default);
             u32 bg = has_bg ? kPalette[c.bg] : bg_default;
             // Cursor lives at grid (cur_x, cur_y); only paint it
             // when the viewport is live AND we're rendering from
             // the live grid (row_src == nullptr).
-            const bool is_cursor = cursor_eligible && (row_src == nullptr) &&
-                                   (x == g_state.cur_x && grid_y == g_state.cur_y);
+            const bool is_cursor =
+                cursor_eligible && (row_src == nullptr) && (x == g_state.cur_x && grid_y == g_state.cur_y);
             if (c.attr & kAttrReverse)
             {
                 const u32 tmp = fg;
@@ -1130,8 +1129,8 @@ void TerminalSelfTest()
             vp[vp_len++] = '\n';
     }
     vp[vp_len] = 0;
-    const bool vp_ok = (vp_len == 6 && vp[0] == 'B' && vp[1] == 'B' && vp[2] == '\n' && vp[3] == 'C' &&
-                       vp[4] == 'C' && vp[5] == '\n');
+    const bool vp_ok =
+        (vp_len == 6 && vp[0] == 'B' && vp[1] == 'B' && vp[2] == '\n' && vp[3] == 'C' && vp[4] == 'C' && vp[5] == '\n');
     if (!vp_ok)
     {
         arch::SerialWrite("[terminal-selftest] FAIL viewport-copy-shape\n");
