@@ -4,7 +4,7 @@
 >
 > **Execution context:** Kernel — compositor runs in the focused-window's draw pass
 >
-> **Maturity:** v0 painting + windowing; popup menus shipped, modal dialogs deferred
+> **Maturity:** v0 painting + windowing; popup menus + modal dialogs shipped
 
 ## Overview
 
