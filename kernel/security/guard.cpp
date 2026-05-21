@@ -32,6 +32,8 @@
 #include "security/ir_runbook.h"
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
+#include "time/tick.h"
 #include "crypto/sha256.h"
 #include "log/klog.h"
 #include "util/string.h"
@@ -688,7 +690,20 @@ bool PromptUser(const ImageDescriptor& desc, const Report& r)
 
     DrawModal(desc, r);
 
-    const u64 start = arch::HpetReadCounter();
+    // Timeout source: arch::TimerTicks() (scheduler-tick counter),
+    // NOT HpetReadCounter(). HPET is OPTIONAL hardware — VirtualBox
+    // omits it by default, and on absent-HPET systems
+    // HpetReadCounter() returns 0 forever, leaving the previous
+    // `HpetTicksToMs(now - start) >= 10'000` predicate false on
+    // every iteration and trapping kboot in this loop indefinitely
+    // (observed 2026-05-21: 66+ seconds of `[soft-lockup] task stuck
+    // tid=0x4 name="kboot"` because the guard prompt never timed
+    // out). TimerTicks is always advancing — driven by either LAPIC
+    // timer or the PIT fallback — so the deadline math works on
+    // every platform regardless of HPET presence. At kTickHz = 100,
+    // 10s == 1000 ticks.
+    const u64 start_ticks = arch::TimerTicks();
+    const u64 deadline_ticks = start_ticks + 10ULL * ::duetos::time::kTickHz;
     for (;;)
     {
         if (SerialRxReady())
@@ -720,13 +735,18 @@ bool PromptUser(const ImageDescriptor& desc, const Report& r)
             DrawModalDecision("*** DENIED BY USER ***", 0xEE6666);
             return false;
         }
-        const u64 now = arch::HpetReadCounter();
-        if (HpetTicksToMs(now - start) >= 10'000)
+        if (arch::TimerTicks() >= deadline_ticks)
         {
             SerialWrite("\n[guard] prompt timeout: default-deny\n");
             DrawModalDecision("*** TIMEOUT: DEFAULT-DENY ***", 0xEE6666);
             return false;
         }
+        // `pause` not SchedYield: this loop runs in kboot context
+        // (during early image-load gates), and kboot must NEVER
+        // voluntarily yield — its `.bss.boot` low-VA stack becomes
+        // unreachable the moment Schedule() flips CR3 to a
+        // per-process AS (PML4[0..255] zeroed). The timer IRQ still
+        // preempts us, which is what advances TimerTicks() above.
         asm volatile("pause" ::: "memory");
     }
 }

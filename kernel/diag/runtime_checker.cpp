@@ -1117,7 +1117,19 @@ bool CheckMonotonicCounters()
     // nanosecond, timer ticks every 10 ms. If either is
     // unchanged across a 5-second heartbeat, the timer IRQ
     // path or the HPET MMIO window is broken.
-    if (hpet_now == g_prev_hpet_counter)
+    //
+    // HPET stall check is gated on HpetPeriodFemtoseconds() != 0
+    // (the surrogate for "HpetInit landed"). Without this gate,
+    // an absent-HPET platform (VirtualBox is the common case —
+    // boot log shows `[acpi] hpet=absent` whenever this fires)
+    // looks exactly like a stalled counter: HpetReadCounter()
+    // returns 0 forever, so `hpet_now == g_prev_hpet_counter` is
+    // true on every scan and we get a [W] health line ~once per
+    // heartbeat (~20 lines per 45 seconds in the 2026-05-21 VBox
+    // capture). The LAPIC tick check below stays unguarded — that
+    // counter is always present (LAPIC timer or PIT fallback).
+    const bool hpet_present = arch::HpetPeriodFemtoseconds() != 0;
+    if (hpet_present && hpet_now == g_prev_hpet_counter)
     {
         arch::SerialWrite("[health] HPET counter stalled at ");
         arch::SerialWriteHex(hpet_now);

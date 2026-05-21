@@ -38,9 +38,20 @@ u64 g_system_default_policy = kPolicyAutoOnDefault;
 
 u64 NowNs()
 {
-    const u64 counter = arch::HpetReadCounter();
+    // Prefer HPET (nanosecond resolution). Fall back to scheduler-
+    // tick counter when HPET is absent (VBox default — every
+    // [acpi] hpet=absent boot). Without the fallback, this would
+    // return 0 forever, freezing every Win32 timing API (GetTickCount,
+    // QueryPerformanceCounter, GetSystemTimeAsFileTime) at the
+    // epoch. TimerTicks gives 10 ms resolution at kTickHz=100 —
+    // coarse but monotonic and never gets stuck.
     const u64 period_fs = arch::HpetPeriodFemtoseconds();
-    return (counter * period_fs) / 1'000'000ULL;
+    if (period_fs != 0)
+    {
+        return (arch::HpetReadCounter() * period_fs) / 1'000'000ULL;
+    }
+    constexpr u64 kNsPerTick = 1'000'000'000ULL / ::duetos::time::kTickHz;
+    return arch::TimerTicks() * kNsPerTick;
 }
 
 void ZeroBytes(void* dst, u64 n)

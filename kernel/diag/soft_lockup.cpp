@@ -62,23 +62,23 @@ constinit bool g_self_test_in_progress = false;
 // the timer-driven gates; the self-test calls the internal one
 // directly so its synthetic tids reach the state machine
 // regardless of whether the timer-driven path is gated.
-void TickInternal(u64 now_ticks, u64 current_tid);
+void TickInternal(u64 now_ticks, u64 current_tid, const char* current_name);
 
 } // namespace
 
-void SoftLockupTick(u64 now_ticks, u64 current_tid)
+void SoftLockupTick(u64 now_ticks, u64 current_tid, const char* current_name)
 {
     if (!g_enabled || g_self_test_in_progress)
     {
         return;
     }
-    TickInternal(now_ticks, current_tid);
+    TickInternal(now_ticks, current_tid, current_name);
 }
 
 namespace
 {
 
-void TickInternal(u64 now_ticks, u64 current_tid)
+void TickInternal(u64 now_ticks, u64 current_tid, const char* current_name)
 {
     (void)now_ticks; // future use: include in the warning line
 
@@ -118,6 +118,25 @@ void TickInternal(u64 now_ticks, u64 current_tid)
         // gate stays at this layer to keep rate-limiting cheap.
         ++g_warnings_total;
         g_state.warned_for_tid = current_tid;
+
+        // Identity line — emitted BEFORE FaultReactDispatch's
+        // bare `val=<tid>` warning so a log reader sees task
+        // name and stuck-ticks count next to each other. Raw
+        // SerialWrite (not klog) because we are inside the timer
+        // IRQ tail: klog's spinlock would deadlock if the hot
+        // task happens to be holding it, and raw UART bytes get
+        // out even when the rest of the world is wedged. One
+        // line per first-crossing of the threshold (rate-limited
+        // by `warned_for_tid` above) — costs ~120 UART bytes per
+        // distinct lockup, zero cost when no lockup happens.
+        arch::SerialWrite("[soft-lockup] task stuck tid=");
+        arch::SerialWriteHex(current_tid);
+        arch::SerialWrite(" name=\"");
+        arch::SerialWrite(current_name != nullptr ? current_name : "<unknown>");
+        arch::SerialWrite("\" ticks_in_run=");
+        arch::SerialWriteHex(g_state.same_tid_count);
+        arch::SerialWrite("\n");
+
         ::duetos::diag::FaultEvidence ev = {};
         ev.source = "diag/soft-lockup";
         ev.kind = ::duetos::diag::FaultKind::SoftLockup;
@@ -179,7 +198,7 @@ void SoftLockupSelfTest()
     // and assert no warning.
     for (u64 i = 0; i < 200; ++i)
     {
-        TickInternal(i, 0);
+        TickInternal(i, 0, "selftest-idle");
     }
     if (g_warnings_total != saved_warnings)
     {
@@ -190,7 +209,7 @@ void SoftLockupSelfTest()
     // one warning.
     for (u64 i = 0; i <= kSoftLockupThresholdTicks; ++i)
     {
-        TickInternal(1000 + i, 42);
+        TickInternal(1000 + i, 42, "selftest-42");
     }
     if (g_warnings_total != saved_warnings + 1)
     {
@@ -200,7 +219,7 @@ void SoftLockupSelfTest()
     // (3) Continuing on the same TID does NOT re-warn (rate limit).
     for (u64 i = 0; i < kSoftLockupThresholdTicks * 2; ++i)
     {
-        TickInternal(2000 + i, 42);
+        TickInternal(2000 + i, 42, "selftest-42");
     }
     if (g_warnings_total != saved_warnings + 1)
     {
@@ -209,7 +228,7 @@ void SoftLockupSelfTest()
 
     // (4) TID change resets the state — short subsequent run
     // does not warn.
-    TickInternal(3000, 99); // single tick on TID 99; counter = 1
+    TickInternal(3000, 99, "selftest-99"); // single tick on TID 99; counter = 1
     if (g_warnings_total != saved_warnings + 1)
     {
         core::Panic("diag/soft-lockup", "self-test: TID change spuriously warned");
@@ -218,7 +237,7 @@ void SoftLockupSelfTest()
     // (5) Holding TID 99 long enough now warns (separate gate).
     for (u64 i = 0; i < kSoftLockupThresholdTicks; ++i)
     {
-        TickInternal(3001 + i, 99);
+        TickInternal(3001 + i, 99, "selftest-99");
     }
     if (g_warnings_total != saved_warnings + 2)
     {

@@ -61,7 +61,16 @@ inline constexpr u64 kSoftLockupThresholdTicks = 100;
 /// `sched::OnTimerTick`. `current_tid == 0` means "kernel boot
 /// task / idle" and is excluded from the lockup count — those
 /// are legitimate "always-running" tasks.
-void SoftLockupTick(u64 now_ticks, u64 current_tid);
+///
+/// `current_name` is the running task's name pointer (nullptr is
+/// fine — emitter substitutes `"<unknown>"`). Captured so the
+/// first-cross-threshold warning can identify the offending task
+/// by name, since TIDs are reused after reaping and the bare TID
+/// alone is opaque (a TID reaped early in boot is later assigned
+/// to a totally different task). The pointer is read at most
+/// once per warning, never dereferenced for write — the caller's
+/// ownership semantics are unchanged.
+void SoftLockupTick(u64 now_ticks, u64 current_tid, const char* current_name);
 
 /// Hard-disable the detector. Idempotent. Called from the panic
 /// path so a final warning log doesn't drown out the crash dump.

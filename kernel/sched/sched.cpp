@@ -2446,7 +2446,15 @@ void OnTimerTick(u64 now_ticks)
     // every idle task as the legitimate "always on-CPU" case
     // rather than warning every time the BSP idles for 1s.
     const bool cur_is_idle = (cur != nullptr) && (cur->priority == TaskPriority::Idle);
-    diag::SoftLockupTick(now_ticks, (cur != nullptr && !cur_is_idle) ? TaskId(cur) : 0);
+    // Pass the task name so the soft-lockup warning can identify the
+    // offender by name rather than just by TID — TIDs are reused
+    // after reaping (a TID killed early in boot gets reassigned
+    // later), and `val=<tid>` alone is opaque in the log. The
+    // detector substitutes "<unknown>" when name is nullptr, so
+    // passing nullptr for the idle slot is harmless even though
+    // that path early-returns inside the detector anyway.
+    const char* cur_name = (cur != nullptr) ? cur->name : nullptr;
+    diag::SoftLockupTick(now_ticks, (cur != nullptr && !cur_is_idle) ? TaskId(cur) : 0, cur_name);
     sync::RcuTick();
     // D2 instrumentation. arg0 = vector (32 = LAPIC timer),
     // arg1 = current_tid. Tagging IRQs lets a tracer dump
