@@ -234,7 +234,10 @@ The window-system integration is where the ICD meets the compositor:
    compositor will present.
 3. `vkAcquireNextImageKHR` — returns the next image index.
 4. The app records draws into a command buffer targeting that image;
-   submits via `vkQueueSubmit`. Today only `Clear` produces pixels.
+   submits via `vkQueueSubmit`. `vkCmdClearColorImage` and
+   `vkCmdDraw` / `vkCmdDrawIndexed` (CPU edge-function rasterizer
+   with Gouraud interpolation, scissor, software 16-bit depth)
+   both produce real pixels into the scanout image.
 5. `vkQueuePresentKHR` — flushes the damage rect through the
    compositor.
 
