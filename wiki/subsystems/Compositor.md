@@ -362,7 +362,7 @@ Right-click dispatch in the mouse-reader (`kernel/core/main.cpp`):
 | Title bar of any window | System menu (Restore / Move / Size / Min / Max / Close) |
 | Body of a kernel-app window | Enriched window menu (Raise + Min/Max/Restore/Close) |
 | Body of a PE window | No kernel menu — `WM_CONTEXTMENU` (0x007B) is posted to the PE |
-| Body of the Files app | Per-row context menu (Open / Rename(GAP) / Delete / Properties) |
+| Body of the Files app | Per-row context menu tuned to the active mode (FAT32: Open / Rename / Delete / Properties / Refresh / New File / New Folder; DuetFS: Open / Properties / Refresh; Trash: Open / Restore / Delete Forever / Properties / Refresh; Ramfs: Open / Delete (disabled) / Properties / Refresh) |
 | Desktop background | Desktop menu (Help / About / Cycle / List / TTY) |
 
 PE apps process `WM_CONTEXTMENU` in their `WndProc` — `wparam` is
@@ -400,10 +400,25 @@ Action-id allocation:
 - **Concurrent `TrackPopupMenu` from two PE processes**: serialise
   on the single-instance kernel menu — the second caller cancels
   with action_id = 0 and returns immediately.
-- **PE `SetCursor`**: GAP. Native windows can change cursor
-  shape via `CursorSetShape`, but PE apps have no
-  `SYS_GDI_SETCURSOR` to request a shape change. Cursor shape
-  is owned entirely by the kernel hit-test today.
+- **PE `SetCursor`**: live. Win32 PEs request a cursor shape via
+  `user32!SetCursor(LoadCursor(NULL, IDC_*))`, which marshals
+  through `SYS_GDI_SET_CURSOR` (174). The handler stamps the
+  requested `GdiCursorShape` on every alive window owned by the
+  caller's pid (`requested_cursor` slot on `RegisteredWindow`).
+  The mouse-loop hit-test consults that slot after its
+  kernel-priority rules (resize bands, Hand-on-button widgets,
+  native IBeam over Notes / Browser) and uses it in place of the
+  unconditional Arrow fallback when the cursor is over a
+  client-area pixel of one of those windows. Title-bar hits keep
+  the Arrow fallback so window chrome stays predictable. Custom
+  sprite registration (`SYS_GDI_CREATE_CURSOR`, 175) accepts a
+  12×20 PE-supplied mask + hotspot and returns a sentinel HCURSOR
+  ≥ 256 the PE then hands to `SetCursor`; custom shapes bypass
+  the per-window slot and stamp the global cursor directly. Known
+  limits: shape is per-process, not per-thread (Win32 spec is
+  per-thread), and a shape request from a process that owns no
+  windows only takes effect via the global path while no PE
+  window is under the cursor.
 - **ImageView zoom + pan**: independent of window size. Ctrl+wheel
   and `+` / `-` / `=` / `_` step `zoom_percent` by 25 percentage
   points each (clamped to [25, 400]); `0` resets to fit-to-window.
@@ -437,8 +452,20 @@ Action-id allocation:
   (`kernel/apps/settings_<panel>.cpp`). Number keys 0..5 switch
   panels; the General panel includes the theme picker that
   `Ctrl+Alt+Y` also drives.
-- **Trash / ramfs mode in Files**: only FAT32 mode has a v0
-  context menu; other modes fall through to the kernel-window menu.
+- **Trash / ramfs mode in Files**: every Files mode now ships its
+  own per-row right-click menu tuned to what the backing store
+  supports. FAT32 keeps the rich 30..36 surface (Open / Rename /
+  Delete / Properties / Refresh / New File / New Folder). DuetFS
+  (read-only browse mount) shows Open / Properties / Refresh
+  (action ids 37/38/39). Trash shows Open / Restore / Delete
+  Forever / Properties / Refresh (Open is action 44 and notifies
+  "restore to open" — the FAT32 openers look up by name in root,
+  so opening a binned file in-place is a GAP pending an opener
+  refactor; Delete Forever shares the same Y-confirm prompt the
+  X keybind triggers). Ramfs shows Open / Delete / Properties /
+  Refresh, with Delete flagged disabled because the trusted
+  ramfs is constinit `.rodata` and there is no unlink primitive
+  to route through.
 - **Win32 common controls, outline fonts, multi-threaded
   message queues**: still on the windowing track's deferred
   list. (Native modal dialogs ship via `dialog.{h,cpp}` —

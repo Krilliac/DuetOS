@@ -16,8 +16,17 @@
  *            maximize, close. ctx = target HWND.
  *   30..33   Files-app row context menu — open, rename (GAP),
  *            delete, properties. ctx = row index.
+ *   34..39   Files-app row context menu (extended FAT32) —
+ *            refresh, new file, new folder, plus the shared
+ *            generic non-FAT verbs (37 open / 38 properties /
+ *            39 refresh) reused by the DuetFS / ramfs views.
  *   40..43   power / session — reboot, shutdown, lock, logout.
  *            40/41 don't return.
+ *   44..47   Files-app row context menu (Trash / ramfs) —
+ *            44 open (trash), 45 restore, 46 delete forever,
+ *            47 delete (ramfs, disabled). Lives just after the
+ *            power band so the Files surface fits inside the
+ *            30..49 window reserved in Compositor.md.
  *   50..59   system shortcuts — screenshot, ...
  *   60..69   bespoke viewer windows — net status, device manager,
  *            firewall, ...
@@ -394,15 +403,19 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
         SerialWriteHex(ctx);
         SerialWrite("\n");
         break;
-    // Files-app row context menu (action ids 30..33). ctx = the
-    // row index in the FAT32 listing, captured at MenuOpen time.
-    // The Files app's own dispatcher knows what to do with each
-    // row id; we route there. RENAME (31) is a known v0 GAP —
-    // there's no text-input modal yet; it just notifies the user.
+    // Files-app row context menu. ctx = the row index in the
+    // active listing, captured at MenuOpen time. The Files app's
+    // own dispatcher knows what to do with each row id; we route
+    // every Files action here.
     // Files context-action band 30..39: 30 OPEN, 31 RENAME, 32
     // DELETE, 33 PROPERTIES, 34 REFRESH, 35 NEW FILE, 36 NEW
     // FOLDER, 37 OPEN (non-FAT views), 38 PROPERTIES (non-FAT),
     // 39 REFRESH (non-FAT). All route to the app's own dispatcher.
+    // The 44..47 sub-band carries the Trash / ramfs row verbs
+    // that don't fit in 37..39 (OPEN / RESTORE / DELETE FOREVER
+    // / ramfs-DELETE), placed just after the power band so the
+    // Files surface still fits inside the 30..49 window the
+    // wiki action-id table reserves.
     case 30:
     case 31:
     case 32:
@@ -413,6 +426,10 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
     case 37:
     case 38:
     case 39:
+    case 44:
+    case 45:
+    case 46:
+    case 47:
         duetos::apps::files::FilesDispatchContextAction(action, ctx);
         break;
     // Power / session band (40..49). 40/41 don't return.

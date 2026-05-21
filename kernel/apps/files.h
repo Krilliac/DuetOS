@@ -79,13 +79,22 @@ void FilesSelfTest();
 /// in sync if the layout changes.
 duetos::i32 FilesRowAt(duetos::u32 cx, duetos::u32 cy);
 
-/// Right-click handler. FAT32 opens the rich per-row menu (Open /
-/// Rename / Delete / Properties / New / Refresh); the DuetFS,
-/// ramfs and Trash views open the shared generic menu (Open /
-/// Properties / Refresh). Always returns true for those views.
-/// Caller must not be holding the compositor lock when invoking —
-/// the menu itself doesn't touch it, but the caller's surrounding
-/// flow does.
+/// Right-click handler. Each Files mode opens a menu tuned to its
+/// backing store:
+///   FAT32  — rich per-row menu (Open / Rename / Delete /
+///            Properties / Refresh / New File / New Folder).
+///   DuetFS — shared generic browse menu (Open / Properties /
+///            Refresh).
+///   Trash  — Open / Restore / Delete Forever / Properties /
+///            Refresh. Open notifies "restore to open" (GAP: the
+///            openers look up by name in root); Delete Forever
+///            shares the X-keybind Y-confirm prompt.
+///   Ramfs  — Open / Delete (disabled) / Properties / Refresh.
+///            Delete is shown disabled because the trusted ramfs
+///            is constinit / .rodata.
+/// Always returns true for the non-FAT views. Caller must not be
+/// holding the compositor lock when invoking — the menu itself
+/// doesn't touch it, but the caller's surrounding flow does.
 bool FilesOnRightClick(duetos::u32 cx, duetos::u32 cy);
 
 /// Mouse-wheel handler. `dz > 0` (wheel up) steps the selection
@@ -109,8 +118,9 @@ bool FilesBeginDragSelection();
 
 /// Dispatch a Files-app context-menu action. Called from the
 /// shared menu dispatcher in main.cpp once the menu fires. The
-/// action ids are 30..33; ctx is the row index captured at
-/// MenuOpen time.
+/// action ids span 30..39 (FAT32 + generic non-FAT verbs) and
+/// 44..47 (Trash extended + ramfs delete); ctx is the row index
+/// captured at MenuOpen time. See files.cpp for the per-id table.
 void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx);
 
 } // namespace duetos::apps::files
