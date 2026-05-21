@@ -866,11 +866,22 @@ void AcpiInit(uptr multiboot_info_phys)
     KLOG_TRACE_SCOPE("acpi", "AcpiInit");
     KASSERT(multiboot_info_phys != 0, "acpi", "AcpiInit null multiboot info");
 
+    // Structural step sentinels. Raw SerialWrite so they emit even
+    // in a fault-loop context (klog could deadlock on the spinlock
+    // we already hold, or its formatting could re-page-fault). A
+    // clean boot adds ~13 short lines; a fault loop pins the last
+    // line printed to the failing step.
+    arch::SerialWrite("[acpi] step=enter\n");
+
+    arch::SerialWrite("[acpi] step=find-rsdp\n");
     const Rsdp* rsdp = FindRsdpInMultiboot(multiboot_info_phys);
     if (rsdp == nullptr)
     {
         PanicAcpi("no ACPI RSDP tag in Multiboot2 info");
     }
+    arch::SerialWrite("[acpi] step=rsdp-found rev=");
+    SerialWriteHex(rsdp->revision);
+    arch::SerialWrite("\n");
     // Delegate signature + checksum validation to the Rust walker
     // (`duetos_acpi_parse_rsdp`). The bytes-walker layer does both
     // v1 and v2 in one call.
@@ -883,19 +894,24 @@ void AcpiInit(uptr multiboot_info_phys)
             PanicAcpi("RSDP failed Rust signature/checksum validation");
         }
     }
+    arch::SerialWrite("[acpi] step=rsdp-validated\n");
 
     AcpiDiagDumpTables(*rsdp);
+    arch::SerialWrite("[acpi] step=diag-dumped\n");
 
     const SdtHeader* madt_hdr = FindTable(*rsdp, "APIC");
     if (madt_hdr == nullptr)
     {
         PanicAcpi("MADT (APIC signature) not found in RSDT/XSDT");
     }
+    arch::SerialWrite("[acpi] step=madt-found\n");
     if (!ChecksumOk(madt_hdr, madt_hdr->length))
     {
         PanicAcpi("MADT checksum failed");
     }
+    arch::SerialWrite("[acpi] step=madt-checksummed\n");
     ParseMadt(*reinterpret_cast<const Madt*>(madt_hdr));
+    arch::SerialWrite("[acpi] step=madt-parsed\n");
 
     // FADT is optional — a missing one leaves reset unsupported and
     // the SCI vector at the ACPI default (9). Every PC firmware we
@@ -909,6 +925,7 @@ void AcpiInit(uptr multiboot_info_phys)
     // "absent" is consistent with the optional-FADT contract above
     // — the reset register and SCI overrides simply stay at their
     // ACPI defaults, same as if no FADT at all were published.
+    arch::SerialWrite("[acpi] step=find-fadt\n");
     const SdtHeader* fadt_hdr = FindTable(*rsdp, "FACP");
     if (fadt_hdr != nullptr)
     {
@@ -926,10 +943,12 @@ void AcpiInit(uptr multiboot_info_phys)
             ParseFadt(*reinterpret_cast<const Fadt*>(fadt_hdr));
         }
     }
+    arch::SerialWrite("[acpi] step=fadt-done\n");
 
     // HPET is optional — QEMU q35 provides it, older boards may
     // not. Missing is fine; present-but-malformed panics so we
     // don't silently drift past a firmware bug.
+    arch::SerialWrite("[acpi] step=find-hpet\n");
     const SdtHeader* hpet_hdr = FindTable(*rsdp, "HPET");
     if (hpet_hdr != nullptr)
     {
@@ -943,6 +962,7 @@ void AcpiInit(uptr multiboot_info_phys)
         }
         ParseHpet(*reinterpret_cast<const HpetTable*>(hpet_hdr));
     }
+    arch::SerialWrite("[acpi] step=hpet-done\n");
 
     // DSDT was discovered via FADT.dsdt (above). SSDTs are
     // separate XSDT/RSDT entries — walk once more and cache
@@ -950,11 +970,14 @@ void AcpiInit(uptr multiboot_info_phys)
     // itself is deferred (see wiki/reference/Roadmap.md, "Battery
     // + ACPI suspend"), but surfacing the addresses at boot lets
     // follow-on slices land without re-walking.
+    arch::SerialWrite("[acpi] step=collect-ssdts\n");
     CollectSsdts(*rsdp);
+    arch::SerialWrite("[acpi] step=ssdts-collected\n");
 
     // MCFG is optional — QEMU q35 provides it, legacy platforms
     // without PCIe do not. PCI drivers use the cached base to enable
     // ECAM config access; missing means "fall back to port IO."
+    arch::SerialWrite("[acpi] step=find-mcfg\n");
     const SdtHeader* mcfg_hdr = FindTable(*rsdp, "MCFG");
     if (mcfg_hdr != nullptr)
     {
@@ -968,14 +991,18 @@ void AcpiInit(uptr multiboot_info_phys)
         }
         ParseMcfg(*reinterpret_cast<const McfgTable*>(mcfg_hdr));
     }
+    arch::SerialWrite("[acpi] step=mcfg-done\n");
 
     // SRAT — optional. UMA-only firmware may omit it entirely; the
     // parser treats null + bad-checksum tables as "absent" without
     // panicking. Consumed by `cpu/topology.cpp` to assign cluster
     // IDs in the scheduler. ParseSrat doesn't reach into our file-
     // local types — it's a flat byte-walk in `acpi/srat.cpp`.
+    arch::SerialWrite("[acpi] step=find-srat\n");
     const SdtHeader* srat_hdr = FindTable(*rsdp, "SRAT");
+    arch::SerialWrite("[acpi] step=srat-init\n");
     srat::SratInit(srat_hdr);
+    arch::SerialWrite("[acpi] step=srat-done\n");
 
     SerialWrite("[acpi] srat=");
     if (srat::SratPresent())
