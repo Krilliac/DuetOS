@@ -448,9 +448,18 @@ Action-id allocation:
 - **Per-window message queues**: `GetMessage` / `PeekMessage` return
   `WM_QUIT` for unhandled paths so event-driven programs exit their
   pump immediately.
-- **Submenu marshaling across `SYS_WIN_TRACK_POPUP`**: GAP. PE
-  apps that need nested menus call `TrackPopupMenu` recursively
-  from their `WM_COMMAND` handler.
+- **Submenu marshaling across `SYS_WIN_TRACK_POPUP`**: live. The
+  userland `TrackPopupMenu` thunk walks the HMENU tree depth-first
+  and packs it into a single flat array (`TpItemWire[32]`); each
+  submenu-flagged row carries `child_index` / `child_count`
+  back-pointers into the same array, and `child_index == -1` marks
+  a leaf row. The kernel rejects negative-index-with-children,
+  out-of-bounds ranges, non-forward references (which also kills
+  cycles), per-panel overflow, orphan slots, and any tree deeper
+  than `kMenuMaxStack = 4` panels. Patching submenu pointers
+  happens in a second pass after every slot is populated so the
+  menu primitive's `MenuItem::submenu` pointers land on stable
+  storage.
 - **Concurrent `TrackPopupMenu` from two PE processes**: serialise
   on the single-instance kernel menu — the second caller cancels
   with action_id = 0 and returns immediately.

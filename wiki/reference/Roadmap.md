@@ -379,9 +379,8 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 ### Windowing — modal dialogs, common controls
 
 - **Residual:** common controls, multi-threaded message queues.
-  Menu GAPs: submenu marshaling across `SYS_WIN_TRACK_POPUP`,
-  `TPM_LEFTBUTTON`/`TPM_RIGHTBUTTON` activation filtering,
-  menubars + `LoadMenu` resource loading. See
+  Menu GAPs: `TPM_LEFTBUTTON`/`TPM_RIGHTBUTTON` activation
+  filtering, menubars + `LoadMenu` resource loading. See
   [`Compositor`](../subsystems/Compositor.md) §"Popup Menus" for
   live state. (Message pump, GDI paint, popup menus +
   `WM_CONTEXTMENU` + `TPM_*` flags, modal dialog primitive,

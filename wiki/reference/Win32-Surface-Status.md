@@ -1329,12 +1329,16 @@ WinDbg client API, `SymLoadModuleEx`.
   primitive and blocks until the user picks (or cancels). PE
   apps receive `WM_CONTEXTMENU` (0x007B) on right-click-up in
   the client area.
-- Menus — GAPs: nested submenus aren't marshaled across the
-  syscall (apps call `TrackPopupMenu` recursively from their
-  `WM_COMMAND` handler instead); `TPM_RIGHTBUTTON` /
-  `TPM_HORIZONTAL` / `TPMPARAMS` exclude-rect ignored;
-  concurrent TrackPopupMenu from two PE processes serialise
-  on the single-instance kernel menu (second caller cancels).
+- Menus — submenu marshaling: nested HMENU trees are flattened
+  depth-first into a single `TpItemWire[32]` array by the
+  userland thunk; each submenu-flagged row carries
+  `child_index` / `child_count` back-pointers into the same
+  array, validated by the kernel (forward-only, in-bounds, no
+  orphans, per-panel cap, depth <= `kMenuMaxStack`).
+- Menus — GAPs: `TPM_RIGHTBUTTON` / `TPM_HORIZONTAL` /
+  `TPMPARAMS` exclude-rect ignored; concurrent TrackPopupMenu
+  from two PE processes serialise on the single-instance kernel
+  menu (second caller cancels).
 - Menus: `LoadMenuW`, `GetSystemMenu`, `GetMenu`, `SetMenu`,
   `DrawMenuBar` — STUB (menubars and resource-loaded menus
   out of scope for v0)
