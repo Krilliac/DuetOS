@@ -358,8 +358,19 @@ void FlushArea(AreaFile* a)
         }
     }
 
-    fat::Fat32AppendAtPath(v, live_path, a->buf, a->used);
-    a->size_on_disk += a->used;
+    // Check the append return value: on success it's the number of
+    // bytes appended (== a->used here); on failure it's -1. If the
+    // FAT layer reported failure (e.g. cluster-chain extension OK
+    // but dir-entry size patch failed — a v0 hazard with no
+    // journal to roll back), don't advance size_on_disk because the
+    // on-disk file didn't actually grow. Still clear `used` so the
+    // next line has a fresh buffer rather than retrying the same
+    // bytes forever.
+    const i64 wrote = fat::Fat32AppendAtPath(v, live_path, a->buf, a->used);
+    if (wrote >= 0)
+    {
+        a->size_on_disk += static_cast<u64>(wrote);
+    }
     a->used = 0;
 }
 

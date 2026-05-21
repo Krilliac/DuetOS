@@ -127,8 +127,27 @@ bool WalkDirOnDisk(const Volume& v, u32 first_cluster, OnDiskSfnVisitor visit, v
     // this, delete/truncate that target a long-named file would
     // compare against the SFN fallback (e.g. "MIXEDC~1.MD") and
     // never match the caller's long-form name.
+    //
+    // ALSO mirrors WalkDirChain's LFN-checksum validation: every
+    // LFN fragment carries the trailing SFN's 11-byte checksum,
+    // and we must verify they all agree AND match the SFN
+    // ComputeLfnChecksum before adopting the long name. Without
+    // this validation an orphan LFN run (left behind by a partial
+    // rename, or stale bytes preceding a freshly-seeded SFN like
+    // KERNEL.LOG) silently renames the following SFN entry — so
+    // FindInDirByName (via WalkDirChain, which validates) finds a
+    // file by its real name, but FindEntryLbaInDir (via this
+    // walker) compares against the bogus LFN-overwritten name and
+    // misses. Symptom: append succeeds in writing data + extending
+    // the cluster chain, then "dir entry size update failed" with
+    // perfectly valid on-disk state. Matches the "Sentinel
+    // divergence" class-of-bug pattern in CLAUDE.md (two paths
+    // that claim the same view but diverge on a corner case).
     char pending_long[260];
     bool pending_any = false;
+    u8 pending_checksum = 0;
+    bool pending_checksum_set = false;
+    bool pending_checksum_consistent = true;
     VZero(pending_long, sizeof(pending_long));
 
     u32 cluster = first_cluster;
@@ -149,6 +168,8 @@ bool WalkDirOnDisk(const Volume& v, u32 first_cluster, OnDiskSfnVisitor visit, v
                 if (e[0] == 0xE5)
                 {
                     pending_any = false;
+                    pending_checksum_set = false;
+                    pending_checksum_consistent = true;
                     continue;
                 }
                 const u8 attr = e[11];
@@ -158,7 +179,20 @@ bool WalkDirOnDisk(const Volume& v, u32 first_cluster, OnDiskSfnVisitor visit, v
                     if (ord == 0 || ord > 20)
                     {
                         pending_any = false;
+                        pending_checksum_set = false;
+                        pending_checksum_consistent = true;
                         continue;
+                    }
+                    const u8 frag_chk = e[13];
+                    if (!pending_checksum_set)
+                    {
+                        pending_checksum = frag_chk;
+                        pending_checksum_set = true;
+                        pending_checksum_consistent = true;
+                    }
+                    else if (frag_chk != pending_checksum)
+                    {
+                        pending_checksum_consistent = false;
                     }
                     char chars[13];
                     for (u32 i = 0; i < 13; ++i)
@@ -174,6 +208,8 @@ bool WalkDirOnDisk(const Volume& v, u32 first_cluster, OnDiskSfnVisitor visit, v
                 if (attr & kAttrVolumeId)
                 {
                     pending_any = false;
+                    pending_checksum_set = false;
+                    pending_checksum_consistent = true;
                     continue;
                 }
                 DirEntry decoded;
@@ -181,19 +217,29 @@ bool WalkDirOnDisk(const Volume& v, u32 first_cluster, OnDiskSfnVisitor visit, v
                 if (IsDotEntry(decoded.name))
                 {
                     pending_any = false;
+                    pending_checksum_set = false;
+                    pending_checksum_consistent = true;
                     continue;
                 }
                 if (pending_any)
                 {
-                    u32 n = 0;
-                    while (n + 1 < sizeof(decoded.name) && pending_long[n] != 0)
+                    bool lfn_ok = pending_checksum_set && pending_checksum_consistent;
+                    if (lfn_ok && ComputeLfnChecksum(e) != pending_checksum)
+                        lfn_ok = false;
+                    if (lfn_ok)
                     {
-                        decoded.name[n] = pending_long[n];
-                        ++n;
+                        u32 n = 0;
+                        while (n + 1 < sizeof(decoded.name) && pending_long[n] != 0)
+                        {
+                            decoded.name[n] = pending_long[n];
+                            ++n;
+                        }
+                        decoded.name[n] = 0;
                     }
-                    decoded.name[n] = 0;
                 }
                 pending_any = false;
+                pending_checksum_set = false;
+                pending_checksum_consistent = true;
                 VZero(pending_long, sizeof(pending_long));
                 if (!visit(lba, off, e, decoded, ctx))
                     return true;
