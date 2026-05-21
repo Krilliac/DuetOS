@@ -2008,7 +2008,15 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // (CreateRemoteThread + WriteProcessMemory), the suspicious-API
     // multi-match, and packed/no-import PEs. Advisory mode (default)
     // always allows; Enforce mode prompts the user.
-    duetos::security::ImageDescriptor gd{duetos::security::ImageKind::WindowsPE, "(pe)", file, file_len};
+    //
+    // Thread `program_name` through to the descriptor instead of the
+    // historical "(pe)" placeholder so the guard prompt actually
+    // identifies WHICH PE is being gated — operators can't make an
+    // informed allow/deny decision when every prompt looks identical.
+    // Fall back to the placeholder if the caller didn't pass a name
+    // (defensive; every current caller passes one).
+    duetos::security::ImageDescriptor gd{duetos::security::ImageKind::WindowsPE,
+                                         program_name != nullptr ? program_name : "(pe)", file, file_len};
     if (!duetos::security::Gate(gd))
     {
         arch::SerialWrite("[pe-loader] security guard blocked PE load\n");
