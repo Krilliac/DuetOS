@@ -78,6 +78,34 @@ extern "C" duetos::u8 __copy_user_fault_fixup[];
 extern "C" duetos::u8 _text_start[];
 extern "C" duetos::u8 _text_end[];
 
+// Called from isr_common (kernel/arch/x86_64/exceptions.S) when the
+// kernel-mode iretq target — the trap-frame's saved RIP — fell
+// outside [_text_start, _text_end). Catches the iretq-frame-RIP-
+// corruption shape: a C handler scribbled the saved RIP slot in
+// the trap frame, the unconditional iretq below would load that
+// wild value, and the CPU faults at the wild target with no
+// indirect-call site to attribute it to. The per-call validators
+// (sched/trampoline, sync/rcu DrainQueue, arch/traps IrqHandler,
+// __llvm_retpoline_r11) all stay silent for this shape because
+// the wild value never went through them. Caller is in rdi (the
+// wild RIP that iretq would have jumped to).
+extern "C" [[noreturn]] void IretqFrameWildCallback(void* target)
+{
+    using namespace duetos;
+    const u64 fn = reinterpret_cast<u64>(target);
+    KBP_PROBE_V(::duetos::debug::ProbeId::kIretqFrameWild, fn);
+    arch::SerialWrite("[arch/iretq] WILD iretq target — refusing return  cpu=");
+    arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
+    arch::SerialWrite("  rip=");
+    arch::SerialWriteHex(fn);
+    arch::SerialWrite("  text=[");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_text_start));
+    arch::SerialWrite("..");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_text_end));
+    arch::SerialWrite(")\n");
+    core::PanicWithValue("arch/iretq", "iretq frame RIP out of kernel text range", fn);
+}
+
 // Called from __llvm_retpoline_r11 (kernel/arch/x86_64/retpoline_thunks.S)
 // when the retpoline detects r11 — the indirect-call target — fell
 // outside [_text_start, _text_end). The retpoline thunk intercepts

@@ -58,6 +58,7 @@ constexpr ProbeRow kProbeTable[] = {
     {ProbeId::kSchedTrampolineWildEntry, "sched.trampoline_wild_entry", ProbeArm::ArmedLog},
     {ProbeId::kIrqHandlerWild, "arch.irq_handler_wild", ProbeArm::ArmedLog},
     {ProbeId::kRetpolineWild, "arch.retpoline_wild", ProbeArm::ArmedLog},
+    {ProbeId::kIretqFrameWild, "arch.iretq_frame_wild", ProbeArm::ArmedLog},
 };
 static_assert(sizeof(kProbeTable) / sizeof(kProbeTable[0]) == static_cast<u64>(ProbeId::kCount),
               "kProbeTable size must match ProbeId::kCount — add a row for every enum entry");

@@ -236,6 +236,15 @@ enum class ProbeId : u8
     // halt frame for GDB attach via ProbeFire.
     kRetpolineWild,
 
+    // isr_common detected the iretq target — the trap-frame's saved
+    // RIP — out of kernel `.text` on a kernel-mode return. Catches
+    // the trap-frame-RIP-corruption shape: a C handler scribbled
+    // the saved RIP slot in the trap frame, the unconditional iretq
+    // would have loaded that wild value, and the CPU would fault
+    // at the wild target with no indirect-call site to attribute
+    // it to. ArmedLog; caller passes the wild iretq target.
+    kIretqFrameWild,
+
     kCount, // sentinel
 };
 
