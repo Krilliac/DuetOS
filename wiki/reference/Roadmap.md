@@ -299,24 +299,49 @@ landed.)
      debug lines fire hundreds of times per second per worker,
      each round-tripping through `MutexLock` / `MutexUnlock` and
      the per-task held-stack snapshot/restore.
-- **Smallest concrete fix (to land before the rewrite):** split
-  `g_scratch[4096]` into a **per-CPU** scratch buffer so the
-  block-IO staging step doesn't have to be inside the mutex.
-  Metadata walks (BPB cache, FAT entry cache, path cache) still
-  serialize, but the dominant block-read body releases the lock
-  for the I/O wait. Estimated 50-line change; covers the
-  livelock corner without changing semantics.
+- **Lock-free path-cache fast path — LANDED (2026-05-22).** The
+  smallest-concrete-fix bullet's original "per-CPU `g_scratch`"
+  approach turned out to be invasive (the buffer is read
+  throughout the parsers, not just by `ReadSector`), so the
+  actually-smallest fix that helps shipped instead: a
+  seqlock-guarded `PathCacheGetSeqlock` probed BEFORE
+  `Fat32Guard` in `Fat32LookupPath`. Every cache-hit lookup —
+  the boot-storm pattern of repeated NOTES.TXT / TEST.* /
+  TRTEST.BIN / KERNEL.FIX probes — now skips the mutex acquire
+  + held-stack push + cli/sti + release entirely. Writers
+  (under the mutex) bump a per-entry `write_seq` to odd before
+  fields, back to even after; readers (lock-free) snapshot the
+  seq before + after their copy and bail on any mismatch. The
+  generation counter store became `__ATOMIC_RELEASE` so
+  concurrent invalidation downgrades to a miss instead of a
+  stale entry. Saves a `MutexLock`/`MutexUnlock` round-trip per
+  cache hit — observable on `tools/test/fat32-concurrent.sh`
+  contention metric.
+- **Residual (per-CPU `g_scratch` + lock-drop during block-IO):**
+  the actual "release the mutex during the slow block read"
+  win still needs the buffer split. Audit-wise that's:
+  thread a `scratch_ptr` parameter through ReadSector /
+  ReadCluster and the BPB / DirEntry parsers in fat32.cpp,
+  fat32_dir.cpp, fat32_lookup.cpp, fat32_read.cpp,
+  fat32_write.cpp, fat32_create.cpp — about 40 call sites and
+  every consumer line that reads `g_scratch[N]`. With the
+  buffer per-CPU, the mutex can be dropped around the
+  `BlockDeviceRead` itself (the slow path). Larger but
+  mechanical; gated until a workload shows the path-cache
+  fast-path doesn't already absorb the contention.
 - **Larger refactor (deferred):** split into per-volume mutex +
-  per-cache RwLock + lock-free FAT entry cache (seqlock around
-  the cache-entry pointer). Wants its own slice.
+  per-cache RwLock + lock-free FAT entry cache. Wants its own
+  slice once the path-cache fast path + per-CPU scratch are
+  measured.
 - **Saturation harness:** `tools/test/fat32-concurrent.sh`
-  (this slice) spawns the linux-smoke synfs + win32 PE smokes
-  concurrently and captures the boot log. Look for `fs/fat32 :
-  lookup` line-rate vs `MutexLock waiter` parking lines as
-  the contention signal.
-- **Blocks on:** evidence that the per-CPU scratch split fixes
-  the livelock corner under saturation. Once landed, the
-  per-volume-mutex follow-on can be measured against it.
+  spawns the linux-smoke synfs + win32 PE smokes concurrently
+  and captures the boot log. Look for `fs/fat32 : lookup`
+  line-rate vs `MutexLock waiter` parking lines as the
+  contention signal.
+- **Blocks on:** evidence that the path-cache fast path didn't
+  close the live livelock corner. If a fat32-concurrent.sh run
+  still shows the symptom, the per-CPU scratch + lock-drop
+  refactor lands next.
 
 ### Stage 6 — per-process namespace roots (residual)
 
