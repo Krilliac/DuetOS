@@ -9,6 +9,7 @@
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
+#include "mm/kstack.h"
 #include "sched/sched.h"
 #include "time/tick.h"
 #include "util/build_config.h"
@@ -220,12 +221,19 @@ u32 DrawDecU32(u32 x, u32 y, u32 v, u32 fg, u32 bg)
 // Mirror of panic.cpp::PlausibleStackPointer — local copy so the
 // BSOD has no cross-TU coupling to internal helpers. Walks the
 // same "either higher-half kernel or boot-stack low 1 GiB"
-// taxonomy used by the serial backtrace.
+// taxonomy used by the serial backtrace. Kernel-stack arena
+// guard pages are excluded for the same reason as the panic-side
+// helper: blind forward scans (DrawStackTop) would otherwise
+// #PF into the guard page just past the slot top and re-enter
+// the trap dispatcher as a "kernel stack overflow" — burying
+// the original cause.
 bool PlausibleStackPointer(u64 addr)
 {
     if (addr == 0)
         return false;
     if ((addr & 0x7) != 0)
+        return false;
+    if (::duetos::mm::IsKernelStackGuardFault(addr))
         return false;
     if (addr >= 0xFFFF800000000000ULL)
         return true;

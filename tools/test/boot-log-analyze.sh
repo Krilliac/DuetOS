@@ -87,7 +87,16 @@ echo "HEALTH (CLAUDE.md regression scan)"
 # 2026-05-22 in sweep-3 (stack canary corruption during boot-tail
 # kheartbeat task creation) — the sweep summary's panic column
 # said 0 because the grep was case-sensitive PANIC.
-hard_pat='PANIC|TRIPLE|kernel oops|task-kill|#GP at|#PF at|#UD at|unhandled exception|triple fault|recursive-panic|canary corrupted'
+# Also catches the post-fix shape (2026-05-22) where the original
+# panic banner finally streams completely now that the dump path
+# no longer recurses into the guard page: `[panic-summary]`,
+# `** CPU EXCEPTION **`, `#UD Invalid opcode` / `#GP General
+# protection` / `#PF Page fault` trap messages, and the
+# `[panic] CPU halted` post-dump marker. Without these patterns
+# the analyzer silently passed a boot whose `#UD` on an idle
+# task dumped a full crash record but never tripped a regression
+# signal.
+hard_pat='PANIC|TRIPLE|kernel oops|task-kill|#GP at|#PF at|#UD at|unhandled exception|triple fault|recursive-panic|canary corrupted|\[panic-summary\]|\*\* CPU EXCEPTION \*\*|#UD Invalid opcode|#GP General protection|#PF Page fault|\[panic\] CPU halted'
 hard=$(g "$hard_pat" \
        | grep -avE 'selftest|self-test|deliberately|injected|expected|sanity line' | head -5)
 hardn=$(g "$hard_pat" \

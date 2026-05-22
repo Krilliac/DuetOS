@@ -46,7 +46,15 @@ for i in $(seq 1 "$RUNS"); do
     ok=$(printf '%s' "$rep"   | sed -n 's/.*OK=\([0-9]*\).*/\1/p' | head -1)
     fail=$(printf '%s' "$rep" | sed -n 's/.*non-deliberate FAIL=\([0-9]*\).*/\1/p' | head -1)
     skip=$(printf '%s' "$rep" | sed -n 's/.*SKIP=\([0-9]*\).*/\1/p' | head -1)
-    panic=$(grep -aE 'PANIC|TRIPLE|kernel oops|task-kill' "$log" 2>/dev/null \
+    # Mirror boot-log-analyze.sh's hard_pat: also catches the post-
+    # panic-dump-bound shape (`[panic-summary]` / `** CPU EXCEPTION
+    # **` / `#UD Invalid opcode` / `#GP General protection` / `#PF
+    # Page fault` / `[panic] CPU halted` / `recursive-panic`).
+    # Without these the sweep summary's panic column read 0 even on
+    # boots where a `#UD` dumped a full crash record. Verified
+    # 2026-05-22: panic count now matches the analyzer's
+    # ATTENTION verdict on the same logs.
+    panic=$(grep -aE 'PANIC|TRIPLE|kernel oops|task-kill|\[panic-summary\]|\*\* CPU EXCEPTION \*\*|#UD Invalid opcode|#GP General protection|#PF Page fault|\[panic\] CPU halted|recursive-panic' "$log" 2>/dev/null \
             | grep -acvE 'selftest|self-test|deliberately|injected|sanity line' 2>/dev/null)
     elines=$(printf '%s' "$rep" | sed -n 's/.*non-deliberate \[E\] lines: \([0-9]*\).*/\1/p' | head -1)
     ldn=$(grep -acE 'inversion detected' "$log" 2>/dev/null)

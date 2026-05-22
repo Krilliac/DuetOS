@@ -141,7 +141,13 @@ fi
 
     echo "## REGRESSION SCAN"
     echo "Panic / oops / triple-fault / task-kill matches:"
-    grep -aE 'PANIC|TRIPLE|kernel oops|task-kill|#GP at|#PF at|#UD at' "$BOOT_LOG" \
+    # Aligned with boot-log-analyze.sh's hard_pat post 2026-05-22:
+    # also catches `[panic-summary]`, `** CPU EXCEPTION **`, trap
+    # messages (`#UD Invalid opcode` etc), `recursive-panic`, and
+    # the `[panic] CPU halted` post-dump marker so the report
+    # never silently misses the full original banner now that the
+    # dump path no longer recurses into the guard page.
+    grep -aE 'PANIC|TRIPLE|kernel oops|task-kill|#GP at|#PF at|#UD at|\[panic-summary\]|\*\* CPU EXCEPTION \*\*|#UD Invalid opcode|#GP General protection|#PF Page fault|\[panic\] CPU halted|recursive-panic' "$BOOT_LOG" \
         | head -10 | sed 's/^/  /' || echo "  (none)"
     echo
 

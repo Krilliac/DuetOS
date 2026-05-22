@@ -23,6 +23,7 @@
 #include "loader/pe_exports.h"
 #include "log/klog.h"
 #include "mm/address_space.h"
+#include "mm/kstack.h"
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "test/smoke_profile.h"
@@ -169,6 +170,22 @@ void WriteLabelledVa(const char* label, u64 value)
 //      which lives below 1 MiB physical and is identity-mapped.
 // Once userland lands the low-half check will be replaced with
 // something more precise (per-process address-space range).
+//
+// Kernel-stack arena guard pages are EXCLUDED. The arena lays one
+// deliberately-unmapped page below every 64 KiB usable stack slot;
+// touching one #PFs into the trap dispatcher's
+// IsKernelStackGuardFault → "kernel stack overflow" panic path. When
+// the panicking RSP is close to the slot top, the dump's forward
+// scans (DumpStack 16 quads, DumpReturnAddressPointers 0x80 quads)
+// would otherwise read into the NEXT slot's guard page on iteration
+// N = (slot_top - rsp) / 8, taking a secondary fault DURING the
+// dump — the recursive-panic short-circuit then truncates the
+// banner and we lose the original cause. Rejecting guard-page
+// addresses here bails out cleanly at the slot boundary so every
+// scan loop in this file (and the BSOD mirror) honours the bound
+// without per-call-site changes. Observed 2026-05-22: ~13% of
+// SMP=8 boots hit this when an idle-task #UD fired with rsp <
+// 0x200 bytes from the stack top.
 bool PlausibleStackPointer(u64 addr)
 {
     if (addr == 0)
@@ -176,6 +193,10 @@ bool PlausibleStackPointer(u64 addr)
         return false;
     }
     if ((addr & 0x7) != 0)
+    {
+        return false;
+    }
+    if (::duetos::mm::IsKernelStackGuardFault(addr))
     {
         return false;
     }
@@ -271,9 +292,12 @@ void DumpStack(u64 rsp, int count)
 //   - an investigator wants the slot pointer itself to correlate
 //     against rsp+offset for tampering analysis.
 //
-// 0x80 quads = 1 KiB, comfortably within a 16 KiB kernel stack;
-// PlausibleStackPointer halts the scan cleanly if rsp is wild
-// instead of dereffing into an unmapped page.
+// 0x80 quads = 1 KiB, comfortably within a 64 KiB kernel stack
+// slot. PlausibleStackPointer halts the scan cleanly if rsp is
+// wild — and (post 2026-05-22) bails out as soon as the scan
+// would cross into the kstack-arena guard page above the current
+// slot, so a near-top rsp doesn't trip a secondary #PF that
+// recursive-panics the dump.
 void DumpReturnAddressPointers(u64 rsp)
 {
     constexpr int kScanQuads = 0x80;

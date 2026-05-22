@@ -20,45 +20,54 @@ cleanup debt: move the residual up and delete the rest.
 
 ## Kernel / runtime
 
-### Boot-tail stack canary corruption — intermittent
+### Boot-tail #UD at RIP=0x101e on a fresh AP idle task — intermittent
 
-- **Symptom:** ~1/6 SMP=8 release determinism-sweep boots fire a
-  `[recursive-panic] security/stack: stack canary corrupted —
-  overflow detected — short-circuiting` at the end of boot, right
-  after `[sched] created task id=0x22 name="kheartbeat"`. The
-  recursive-panic guard fires because an earlier panic was already
-  in progress (the original Panic banner was truncated by the
-  short-circuit halt, so the root cause isn't visible in the log).
-  Confirmed surfacing 2026-05-22 in sweep-3 of the post-fix
-  determinism sweep (`/tmp/sweep-3.log`).
-- **Pre-existing:** This was hidden before the SmpStartAps
-  `aps=?` fix landed (boots never reached past AP bring-up, so
-  post-bringup behaviour was invisible). It is NOT a regression
-  introduced by the predicate / iteration-key / Delay10msApproximate
-  triple-fix — verified by 28 individual single-boot runs all
-  clean across the multi-commit progression (n1..n15, d1..d5,
-  op1..op3, final1..final5).
-- **Approach:**
-  1. Capture more boots into `/tmp/canary-*.log` and grep for the
-     exact task whose stack canary tripped (the recursive guard
-     reports the subsystem; the original Panic's PanicWithValue
-     would print the corrupted canary bytes).
-  2. The reaper's pre-free canary check at `sched.cpp:4360` is
-     one site; the periodic per-task canary scanner at
-     `security/stack_canary.cpp:72` is another. Identifying which
-     fires first via probe-injection isolates the offender.
-  3. Likely candidates: kheartbeat (just created when the panic
-     fires), a fresh AP idle task, or a boot-tail spawn that
-     under-sized its stack. None of which were rare before SMP
-     came up.
-- **Blocks on:** willing follow-up slice — the SMP fix it
-  surfaces from is otherwise complete (6/6 determinism sweeps,
-  zero non-AP-timeout failures, byte-stable per-CPU online).
-- **Detection landed (2026-05-22):** `boot-log-analyze.sh` now
-  catches `recursive-panic` + `canary corrupted` in its HEALTH
-  regression scan (the prior shape was case-sensitive PANIC and
-  missed both the lowercase recursive-panic line and the
-  canary-corruption message even though it was a real fault).
+- **Symptom:** ~1/15 SMP=8 release boots take a `#UD Invalid
+  opcode` trap on a fresh AP idle task (id 0x18..0x20 anonymous
+  name), with `rip=0x000000000000101e [region=low-id-map]`. The
+  panicking CPU is inside `ScheduleLockedHandoff` holding
+  `g_sched_lock` (acquire-rip `Schedule+0xed`); every peer CPU is
+  parked in `SpinLockAcquire` for the same lock. The wild RIP is
+  *systematic* (identical 0x101e across runs) — likely a callback
+  / function-pointer dispatch that lands on a low-id-map page
+  whose bytes decode as #UD.
+- **Pre-existing:** Was hidden until the SmpStartAps `aps=?` fix
+  landed and SMP=8 boots actually reached post-bring-up. NOT a
+  regression introduced by that fix.
+- **Recursive-panic shape closed (2026-05-22):** The original
+  capture shape (`[recursive-panic] sched/kstack: guard-page hit
+  — kernel stack overflow` or `security/stack: stack canary
+  corrupted — short-circuiting`) was a *secondary* fault inside
+  the panic-dump path itself: `DumpStack` and
+  `DumpReturnAddressPointers` blindly scanned 16 / 0x80 quads
+  forward from `rsp`, walking past the slot's stack top into the
+  next slot's guard page → kernel-stack overflow → recursive
+  panic short-circuit → original banner truncated. Fixed by
+  rejecting `mm::IsKernelStackGuardFault(addr)` addresses inside
+  `PlausibleStackPointer` in both `kernel/core/panic.cpp` and
+  `kernel/diag/bsod.cpp`. Pre-fix 15-boot sweep showed 2/15
+  recursive-panic short-circuits; post-fix 15-boot sweep shows
+  0/15 short-circuits AND 1/15 with the full original `#UD`
+  banner streaming (rec=0, guard=0, canary=0, panic-summary
+  present). The original #UD's full diagnostic — peer CPU
+  snapshots, held locks, log ring tail — is now visible in the
+  serial log + minidump.
+- **Approach for the underlying #UD:**
+  1. With the full banner now visible, the next step is to
+     bisect which indirect call inside `ScheduleLockedHandoff` /
+     `AddressSpaceActivate` / `ContextSwitch` / `RcuReclaimLocal`
+     reaches a function pointer of `0x101e`. The
+     `trap.kernel_ud` probe armed at panic time fires exactly
+     once per occurrence — pair it with `ProbeArm::Halt` under
+     `DUETOS_GDB_SERVER=ON` to break in `ProbeFire` and read
+     the offending caller's registers + saved RIPs.
+  2. If the RIP-vs-rax low-byte relationship (run-10: rip-rax =
+     0x1000; run-7: 0xffe) is meaningful, the source is a
+     `call [table+rax*?]` or `call *low_func_ptr` whose target
+     lives in the conventional-memory identity map (firmware /
+     ACPI / SIPI scratch at phys 0x1000-ish).
+- **Blocks on:** willing follow-up slice. Underlying #UD is
+  observable but not a regression introduced this session.
 
 ### B2-followup — split `g_sched_lock` per-CPU
 

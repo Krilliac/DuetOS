@@ -93,8 +93,14 @@ fi
 # boot path legitimately logs "arch/thermal : ... would #GP,
 # skipping" on a non-Intel vendor, which is informational, not a
 # fault. Real faults surface as PANIC / TRIPLE / oops / a lockdep
-# or mutex-ownership violation.
-CRASH_RE='PANIC|TRIPLE FAULT|TRIPLE-FAULT|kernel oops|task-kill|MUTEX-NONOWNER|SELF-DEADLOCK|release out-of-order|popped task was not Ready|no runnable task available'
+# or mutex-ownership violation, OR (post panic-dump-bound fix,
+# 2026-05-22) as `[panic-summary]` + `** CPU EXCEPTION **` with
+# the trap-class message (`#UD Invalid opcode` etc). Pre-fix the
+# panic dump short-circuited into a recursive guard-page hit
+# before the panic-summary line streamed; with the dump now
+# bounded at the kstack-arena slot top, the full banner is
+# what we have to grep for.
+CRASH_RE='PANIC|TRIPLE FAULT|TRIPLE-FAULT|kernel oops|task-kill|MUTEX-NONOWNER|SELF-DEADLOCK|release out-of-order|popped task was not Ready|no runnable task available|\[panic-summary\]|\*\* CPU EXCEPTION \*\*|#UD Invalid opcode|#GP General protection|#PF Page fault|\[panic\] CPU halted|recursive-panic'
 if grep -anE "${CRASH_RE}" "${SERIAL_LOG}" >/dev/null; then
     echo "[gui-fuzz] FAIL — crash signature in serial log:" >&2
     grep -anE "${CRASH_RE}" "${SERIAL_LOG}" | head -20 >&2

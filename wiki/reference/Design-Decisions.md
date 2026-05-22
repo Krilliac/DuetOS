@@ -9828,3 +9828,78 @@ fail loud rather than rely on `wrmsr` reserved-bit silence.
 **Related roadmap track(s):** none directly (SMP bring-up is
 considered shipped); the residual ICR race is a candidate for
 a new "SMP-AP scheduler residual flakes" roadmap entry.
+
+## 2026-05-22 — Panic dump stack scans must stop at the kstack-arena guard page
+
+**Decision:** `kernel/core/panic.cpp::PlausibleStackPointer`
+(and its mirror in `kernel/diag/bsod.cpp`) reject any address
+that falls inside a kernel-stack-arena guard page (via
+`mm::IsKernelStackGuardFault`). Every dump-side stack scan
+(`DumpStack`, `DumpReturnAddressPointers`, `DumpBacktrace`,
+`DrawStackTop`, `DrawBacktrace`) is gated by this predicate, so
+the bound is enforced once per process rather than per loop.
+
+**Why:** when the panicking task's `rsp` sat near the top of
+its 64 KiB stack slot, `DumpReturnAddressPointers`'s 0x80-quad
+forward scan would walk past the slot top and read into the
+**next** slot's deliberately-unmapped guard page on iteration
+`N = (slot_top - rsp) / 8`. That read #PF'd; the trap
+dispatcher recognised the address via `IsKernelStackGuardFault`
+and called `Panic("sched/kstack", "guard-page hit — kernel
+stack overflow")` — which hit the recursive-panic short-circuit
+in `Panic()` because the original panic had already set
+`PanicInProgress`. Net effect: the original panic banner
+truncated mid-dump (`[panic] --- diagnostics ---` started but
+the BSOD, minidump, and peer-CPU snapshots never streamed) and
+the post-mortem only had the one-line recursive-panic marker.
+
+Observed shape pre-fix in 2026-05-22 SMP=8 release loop (15
+boots): 2/15 ended with
+`[recursive-panic] sched/kstack: guard-page hit — kernel stack
+overflow value=0xffffffffe018N000` truncating an underlying
+`#UD` on a fresh AP idle task. Same root for the user-reported
+`[recursive-panic] security/stack: stack canary corrupted —
+short-circuiting` shape (compiler-emitted `__stack_chk_fail`
+firing because the dump path's deep frames blew their own
+prologue stash before reaching the guard page).
+
+**Rejected alternatives:**
+
+- *Bound each scan loop manually (per-call-site).*
+  `DumpStack` + `DumpReturnAddressPointers` + the two BSOD
+  mirrors all walk forward; bound-them-each meant four diffs +
+  four chances to forget. Gating at the predicate fans out for
+  free and catches future scan helpers that route through the
+  same check.
+- *Pre-compute `slot_top` from `Current()->stack_base +
+  stack_size` and clamp the loop.* Wrong for the boot task
+  (stack from `boot.S`, not in the arena) and for AP bootstrap
+  stacks (`KMalloc`-allocated). The `IsKernelStackGuardFault`
+  check naturally excludes both (returns `false` outside the
+  arena VA range).
+- *Page-bound the scan (`hexdump.cpp` shape — "stay in the
+  starting page").* Already shipped for `hexdump.cpp` earlier
+  this session, but tighter than necessary — `DumpStack`
+  legitimately wants to scan a few pages of stack when the
+  task's locals span multiple frames. Slot-bounding (one full
+  64 KiB) is the right granularity for dump readers without
+  cutting into legitimate scans.
+
+**Verified:** post-fix 15-boot SMP=8 release loop showed 0/15
+recursive-panic short-circuits (down from 2/15 baseline) AND
+1/15 emitted the full original `#UD` panic banner (with
+`probe trap.kernel_ud` armed, peer-CPU snapshots, held-lock
+table, log-ring tail, dump end marker) instead of being
+truncated. The underlying `#UD` on `rip=0x101e` is unchanged —
+it's a separate latent issue now visible enough to triage in a
+follow-up slice (Roadmap: "Boot-tail #UD at RIP=0x101e on a
+fresh AP idle task").
+
+**Revisit when:** the kernel-stack arena layout changes
+(stride, guard-page count, or arena base move), since
+`IsKernelStackGuardFault`'s implementation closes that contract
+in `mm/kstack.h`. The dump-side predicate just routes through it.
+
+**Related roadmap track(s):** "Boot-tail #UD at RIP=0x101e on
+a fresh AP idle task — intermittent" carries the residual
+investigation now that the panic banner streams cleanly.
