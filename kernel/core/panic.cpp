@@ -882,6 +882,15 @@ void Panic(const char* subsystem, const char* message)
     // `panic_snapshot_*` — see DumpPeerCpuSnapshots later in this
     // routine. No-op pre-LapicInit.
     arch::PanicBroadcastNmi();
+    // Bounded wait for peer NMI ack BEFORE the dump streams to
+    // serial: NMI delivery latency leaves a window where a peer
+    // can be mid-SerialWrite under `g_serial_lock`, while we
+    // bypass that lock via `g_serial_panic_mode` and emit raw
+    // bytes — the streams interleave at the UART and corrupt the
+    // dump. See PanicWaitPeersHalt for the underlying reasoning
+    // (toaruos's `arch_fatal_prepare` pattern: halt peers, THEN
+    // proceed with panic output).
+    arch::PanicWaitPeersHalt(50'000);
 
     arch::SerialWrite("\n[panic] ");
     arch::SerialWrite(subsystem);
@@ -961,6 +970,11 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     // here on.
     arch::SerialEnterPanicMode();
     arch::PanicBroadcastNmi();
+    // Bounded wait: let peers actually halt before we start
+    // streaming bytes — otherwise their in-flight SerialWrite
+    // critical sections interleave with our raw panic-mode writes
+    // at the UART. See PanicWaitPeersHalt header for rationale.
+    arch::PanicWaitPeersHalt(50'000);
 
     arch::SerialWrite("\n[panic] ");
     arch::SerialWrite(subsystem);

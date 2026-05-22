@@ -499,11 +499,29 @@ void HaltOnRecursiveFault(u64 vector, u64 rip)
     // mode flag set by the first dump path makes it bypass its
     // spinlock — and skip every heavy primitive (symbol resolve,
     // VA region tag, page walk). One line, then halt.
-    SerialWrite("\n[recursive-fault] vec=");
-    SerialWriteHex(vector);
-    SerialWrite(" rip=");
-    SerialWriteHex(rip);
-    SerialWrite(" — short-circuiting panic dump\n");
+    //
+    // SMP-correctness: under multi-CPU saturation (observed
+    // 2026-05-22 on x86_64-debug SMP=8), N peer CPUs can hit
+    // their own kernel-mode fault concurrently and all land here
+    // while the FIRST panicking CPU is still mid-dump. If each
+    // peer writes the recursive-fault line, the hex digits
+    // interleave at the UART and the operator sees corruption
+    // (`vec=0x   __  rip=0x   __` — mostly spaces with the
+    // occasional surviving digit). An atomic test-and-set lets
+    // the FIRST peer here actually emit the line; subsequent
+    // peers halt silently. Lossy by design — one line of
+    // diagnostic per cluster of recursive faults is what's
+    // useful; further lines just corrupt the first.
+    static volatile u32 s_recursive_dump_owner = 0;
+    u32 expected = 0;
+    if (__atomic_compare_exchange_n(&s_recursive_dump_owner, &expected, 1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    {
+        SerialWrite("\n[recursive-fault] vec=");
+        SerialWriteHex(vector);
+        SerialWrite(" rip=");
+        SerialWriteHex(rip);
+        SerialWrite(" — short-circuiting panic dump\n");
+    }
     Halt();
 }
 
@@ -1155,8 +1173,15 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // Halt peer CPUs the same way `core::Panic` does — they're
     // running against potentially-corrupt shared state once we've
     // taken a fault in kernel mode, and their NMI handlers commit
-    // a snapshot we can dump after our own diagnostics.
+    // a snapshot we can dump after our own diagnostics. Wait for
+    // peers to actually reach the NMI halt-spin (snapshot flag
+    // flipped) before starting the serial dump — see
+    // PanicWaitPeersHalt for why an immediate dump corrupts
+    // output on SMP. Budget: ~50k pause-iters is a few-ms on TCG
+    // (LAPIC IPI delivery + handler entry latency), bounded so a
+    // dropped IPI / wedged peer never traps the dumper forever.
     PanicBroadcastNmi();
+    arch::PanicWaitPeersHalt(50'000);
     SerialWrite("\n** CPU EXCEPTION **\n");
 
     // #MC: decode the Machine Check Architecture banks before the

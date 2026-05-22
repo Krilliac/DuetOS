@@ -15,9 +15,11 @@
 
 #include "sync/lockdep.h"
 
+#include "acpi/acpi.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "cpu/percpu.h"
 #include "log/klog.h"
 #include "util/symbols.h" // TEMP: inversion-site diagnostic
 #include "util/saturating.h"
@@ -37,28 +39,62 @@ constinit u8 g_edges[kLockClassMax][kLockClassMax / 8] = {};
 // pointers; nullptr means "not registered".
 constinit const char* g_class_names[kLockClassMax] = {};
 
-// Held-class stack — restructured to per-CPU shape (D1-followup,
-// 2026-04-28). v0 the array has one slot since only the BSP runs
-// at boot. Each AP gets its own `PerCpuHeld` slot once SMP per-
-// CPU storage exposes the current-CPU ID; structural change here
-// keeps the existing single-CPU code paths readable through the
-// `g_held_stack` / `g_held_depth` macro aliases.
+// Held-class stack — per-CPU storage indexed by current-CPU id.
+// 2026-05-22 follow-on to the SMP=8 audit: the prior shape kept
+// `kLockdepCpuMax = 1` and aliased `g_held_stack` / `g_held_depth`
+// to `g_per_cpu[0]`, which was correct for one CPU but RACED on
+// SMP — two CPUs concurrently calling LockdepBeforeAcquire each
+// took their own `Cli/Sti` critical section and then mutated the
+// shared stack and `g_in_lockdep` flag, producing
+// false-inversion lines and held-stack overflows that the
+// 2026-05-19 GSBASE/lidt fix masked but didn't repair (per-task
+// snapshot/restore moves the SLEEPING-mutex half across CPUs;
+// the SPINLOCK half is still per-CPU). Now sized to acpi::kMaxCpus
+// so every online CPU indexes its own slot — `Cli` keeps IRQ
+// preemption out of one CPU's mutation, and a single per-CPU
+// reentrancy flag (formerly `g_in_lockdep`) keeps nested hooks
+// out. Cross-CPU writers no longer touch each other's storage.
+//
+// The shared edge graph + counters DO still need cross-CPU
+// safety; `SetEdge` and the saturating counters below now use
+// atomic RMW.
 struct PerCpuHeld
 {
     LockClass stack[kLockdepHeldMax];
     u32 depth;
+    u32 in_lockdep; // re-entry guard, per CPU not global
+    u8 _pad[8];     // keep distinct cache lines for false-sharing-free updates
 };
 
-constexpr u32 kLockdepCpuMax = 1;
+constexpr u32 kLockdepCpuMax = ::duetos::acpi::kMaxCpus;
 constinit PerCpuHeld g_per_cpu[kLockdepCpuMax] = {};
-#define g_held_stack g_per_cpu[0].stack
-#define g_held_depth g_per_cpu[0].depth
+
+// Current-CPU slot accessor. Falls back to slot 0 (BSP) until the
+// per-CPU machinery is installed — pre-BSP-install callers are
+// single-threaded by construction (frame allocator, early init),
+// so the fallback is correct, not a workaround.
+inline u32 CurrentLockdepSlot()
+{
+    const u32 id = ::duetos::cpu::CurrentCpuIdOrBsp();
+    return (id < kLockdepCpuMax) ? id : 0u;
+}
+inline PerCpuHeld& CurrentHeld()
+{
+    return g_per_cpu[CurrentLockdepSlot()];
+}
 
 // Counters — saturating per class BB. A noisy workload that keeps
 // finding fresh inversion candidates cannot wrap g_inversions to
 // zero and fool the post-boot audit into reporting a clean graph.
-constinit util::SatU64 g_inversions = 0;
-constinit util::SatU64 g_edges_recorded = 0;
+//
+// SMP-safety: `util::SatU64`'s `operator++` is NOT atomic (load,
+// inc, store). Updated below via `SatAtomicAdd` (CAS loop) so two
+// CPUs setting a fresh edge concurrently both contribute, and the
+// inversion counter doesn't lose increments under a contention
+// storm. Plain u64 storage is fine — the wrapper only adds the
+// clamp-at-max semantics.
+constinit u64 g_inversions = 0;
+constinit u64 g_edges_recorded = 0;
 
 // Inversion-warnings-promote-to-panic knob (plan D1-followup).
 // Default false: a kernel boot under instrumentation can complete
@@ -67,9 +103,9 @@ constinit util::SatU64 g_edges_recorded = 0;
 // this to true via the shell so any new inversion is fail-stop.
 constinit bool g_promote_to_panic = false;
 
-// Re-entry guard: when lockdep itself runs, ignore any nested
-// hook calls that might come from logging / panic paths.
-constinit bool g_in_lockdep = false;
+// Re-entry guard moved into `PerCpuHeld::in_lockdep` (see the
+// comment on the structure above). Kept as a comment marker so
+// `git blame` keeps a hand on the lifecycle.
 
 inline bool ValidClass(LockClass id)
 {
@@ -78,15 +114,26 @@ inline bool ValidClass(LockClass id)
 
 inline bool HasEdge(LockClass from, LockClass to)
 {
-    return (g_edges[from][to / 8] & (1u << (to & 7))) != 0;
+    // Atomic load on the byte that holds the bit so a concurrent
+    // SetEdge from another CPU is fully observed (not torn).
+    const u8 byte = __atomic_load_n(&g_edges[from][to / 8], __ATOMIC_ACQUIRE);
+    return (byte & (1u << (to & 7))) != 0;
 }
 
 inline void SetEdge(LockClass from, LockClass to)
 {
-    if (!HasEdge(from, to))
+    // Atomic OR — two CPUs each calling SetEdge with bits in the
+    // SAME byte must both win. A plain `|=` does load, OR, store,
+    // and one of the writes could clobber the other under SMP.
+    // Use the `__atomic_fetch_or` builtin so the byte's other bits
+    // survive. Then check the post-OR value to decide whether to
+    // bump the recorded-edge counter (counter is "edges set this
+    // boot", not "edges set per call").
+    const u8 mask = u8(1u << (to & 7));
+    const u8 prev = __atomic_fetch_or(&g_edges[from][to / 8], mask, __ATOMIC_ACQ_REL);
+    if ((prev & mask) == 0)
     {
-        g_edges[from][to / 8] |= u8(1u << (to & 7));
-        ++g_edges_recorded;
+        (void)util::SatAtomicAdd<u64>(&g_edges_recorded, 1);
     }
 }
 
@@ -142,23 +189,37 @@ void MaybeDumpInversionStack(LockClass held, LockClass id)
 // IF bit in RFLAGS; if set on entry, restore-on-exit re-enables.
 inline constexpr u64 kRflagsIf = 0x200ULL;
 
-// Tiny RAII for cli/sti + re-entry flag. NOT a SpinLock — see
-// header rationale (the eventual integration target IS SpinLock).
+// Tiny RAII for cli/sti + per-CPU re-entry flag. NOT a SpinLock —
+// see header rationale (the eventual integration target IS SpinLock,
+// so reentering through it would recurse). Each CPU has its OWN
+// `in_lockdep` flag in its `PerCpuHeld` slot; cli keeps an IRQ on
+// the same CPU from preempting mid-mutation, and slot-per-CPU keeps
+// peer CPUs out of each other's stack.
+//
+// IMPORTANT: read `CurrentLockdepSlot()` AFTER `Cli` so the cpu-id
+// can't change mid-construction (a thread migration between the
+// flag check and the flag set would corrupt a peer's slot). The
+// matching destructor uses the saved slot so an interrupt that
+// snuck in just before the cli (and migrated us — impossible with
+// IF=1 but defensive) still releases the correct slot.
 class LockdepCriticalSection
 {
   public:
-    LockdepCriticalSection() : m_was_busy(g_in_lockdep)
+    LockdepCriticalSection()
     {
         u64 f;
         asm volatile("pushfq; pop %0" : "=r"(f)::"memory");
         m_rflags = f;
         arch::Cli();
-        g_in_lockdep = true;
+        m_slot = CurrentLockdepSlot();
+        PerCpuHeld& slot = g_per_cpu[m_slot];
+        m_was_busy = (slot.in_lockdep != 0);
+        slot.in_lockdep = 1;
     }
 
     ~LockdepCriticalSection()
     {
-        g_in_lockdep = m_was_busy;
+        g_per_cpu[m_slot].in_lockdep = m_was_busy ? 1u : 0u;
         if ((m_rflags & kRflagsIf) != 0)
         {
             arch::Sti();
@@ -166,13 +227,15 @@ class LockdepCriticalSection
     }
 
     bool already_inside() const { return m_was_busy; }
+    u32 slot() const { return m_slot; }
 
     LockdepCriticalSection(const LockdepCriticalSection&) = delete;
     LockdepCriticalSection& operator=(const LockdepCriticalSection&) = delete;
 
   private:
     u64 m_rflags = 0;
-    bool m_was_busy;
+    u32 m_slot = 0;
+    bool m_was_busy = false;
 };
 
 } // namespace
@@ -207,10 +270,11 @@ void LockdepBeforeAcquire(LockClass id)
     {
         return; // Recursive entry — ignore.
     }
+    PerCpuHeld& slot = g_per_cpu[cs.slot()];
 
-    for (u32 i = 0; i < g_held_depth; ++i)
+    for (u32 i = 0; i < slot.depth; ++i)
     {
-        const LockClass held = g_held_stack[i];
+        const LockClass held = slot.stack[i];
         if (held == id)
         {
             // Same class re-acquired. Either recursive (which the
@@ -227,7 +291,7 @@ void LockdepBeforeAcquire(LockClass id)
         // that's an inversion.
         if (HasEdge(id, held))
         {
-            ++g_inversions;
+            (void)util::SatAtomicAdd<u64>(&g_inversions, 1);
             // Raw serial (not KLOG_*) for the same reason as
             // LockdepBeforeRelease's warning: LockdepBeforeAcquire is
             // called from inside SpinLockAcquire / MutexLock with the
@@ -274,8 +338,9 @@ void LockdepAfterAcquire(LockClass id)
     {
         return;
     }
+    PerCpuHeld& slot = g_per_cpu[cs.slot()];
 
-    if (g_held_depth >= kLockdepHeldMax)
+    if (slot.depth >= kLockdepHeldMax)
     {
         // Raw serial + one-shot via a static flag — same rationale as
         // the other lockdep warnings: KLOG_ONCE_WARN would cycle
@@ -290,7 +355,7 @@ void LockdepAfterAcquire(LockClass id)
         }
         return;
     }
-    g_held_stack[g_held_depth++] = id;
+    slot.stack[slot.depth++] = id;
 }
 
 void LockdepBeforeRelease(LockClass id)
@@ -304,18 +369,19 @@ void LockdepBeforeRelease(LockClass id)
     {
         return;
     }
+    PerCpuHeld& slot = g_per_cpu[cs.slot()];
 
     // Find topmost match and remove. Allows out-of-order release
     // (lock A held longer than lock B but A released first).
-    for (i32 i = static_cast<i32>(g_held_depth) - 1; i >= 0; --i)
+    for (i32 i = static_cast<i32>(slot.depth) - 1; i >= 0; --i)
     {
-        if (g_held_stack[i] == id)
+        if (slot.stack[i] == id)
         {
-            for (u32 j = static_cast<u32>(i); j + 1 < g_held_depth; ++j)
+            for (u32 j = static_cast<u32>(i); j + 1 < slot.depth; ++j)
             {
-                g_held_stack[j] = g_held_stack[j + 1];
+                slot.stack[j] = slot.stack[j + 1];
             }
-            --g_held_depth;
+            --slot.depth;
             return;
         }
     }
@@ -349,11 +415,12 @@ u32 LockdepHeldSnapshot(LockClass* out, u32 cap)
     LockdepCriticalSection cs;
     if (cs.already_inside())
         return 0;
-    u32 d = g_held_depth;
+    PerCpuHeld& slot = g_per_cpu[cs.slot()];
+    u32 d = slot.depth;
     if (d > cap)
         d = cap;
     for (u32 i = 0; i < d; ++i)
-        out[i] = g_held_stack[i];
+        out[i] = slot.stack[i];
     return d;
 }
 
@@ -362,11 +429,12 @@ void LockdepHeldRestore(const LockClass* in, u32 depth)
     LockdepCriticalSection cs;
     if (cs.already_inside())
         return;
+    PerCpuHeld& slot = g_per_cpu[cs.slot()];
     if (depth > kLockdepHeldMax)
         depth = kLockdepHeldMax;
     for (u32 i = 0; i < depth; ++i)
-        g_held_stack[i] = (in != nullptr) ? in[i] : kLockClassUnclassified;
-    g_held_depth = depth;
+        slot.stack[i] = (in != nullptr) ? in[i] : kLockClassUnclassified;
+    slot.depth = depth;
 }
 
 u64 LockdepInversionsDetected()
@@ -406,6 +474,9 @@ void LockdepReset()
 {
     // Wipe the per-CPU held-class stacks first so an in-flight
     // acquire doesn't try to release into a half-cleared state.
+    // Also clear the re-entry flag in case a previous panic left
+    // it stuck (the destructor would have restored it, but a
+    // hard-halt path can skip the destructor).
     for (u32 cpu = 0; cpu < kLockdepCpuMax; ++cpu)
     {
         for (u32 i = 0; i < kLockdepHeldMax; ++i)
@@ -413,6 +484,7 @@ void LockdepReset()
             g_per_cpu[cpu].stack[i] = kLockClassUnclassified;
         }
         g_per_cpu[cpu].depth = 0;
+        g_per_cpu[cpu].in_lockdep = 0;
     }
     // Clear the edge matrix and counters.
     for (u32 i = 0; i < kLockClassMax; ++i)
@@ -465,7 +537,7 @@ void LockdepSelfTest()
     }
     LockdepBeforeRelease(kStB);
     LockdepBeforeRelease(kStA);
-    if (g_held_depth != 0)
+    if (g_per_cpu[CurrentLockdepSlot()].depth != 0)
     {
         PanicLd("Held depth not zero after balanced release");
     }
@@ -499,7 +571,7 @@ void LockdepSelfTest()
     {
         PanicLd("Unclassified acquire recorded edges");
     }
-    if (g_held_depth != 0)
+    if (g_per_cpu[CurrentLockdepSlot()].depth != 0)
     {
         PanicLd("Unclassified acquire pushed onto held stack");
     }
@@ -514,14 +586,14 @@ void LockdepSelfTest()
         LockdepBeforeAcquire(cid);
         LockdepAfterAcquire(cid);
     }
-    if (g_held_depth != kLockdepHeldMax)
+    if (g_per_cpu[CurrentLockdepSlot()].depth != kLockdepHeldMax)
     {
         PanicLd("Held stack did not fill to kLockdepHeldMax");
     }
     const auto overflow_cid = static_cast<LockClass>(0x40 + kLockdepHeldMax);
     LockdepBeforeAcquire(overflow_cid);
     LockdepAfterAcquire(overflow_cid); // Should warn + skip.
-    if (g_held_depth != kLockdepHeldMax)
+    if (g_per_cpu[CurrentLockdepSlot()].depth != kLockdepHeldMax)
     {
         PanicLd("Overflow push silently exceeded held-stack cap");
     }
@@ -531,7 +603,7 @@ void LockdepSelfTest()
         const auto cid = static_cast<LockClass>(0x40 + i);
         LockdepBeforeRelease(cid);
     }
-    if (g_held_depth != 0)
+    if (g_per_cpu[CurrentLockdepSlot()].depth != 0)
     {
         PanicLd("Held stack not empty after drain");
     }
