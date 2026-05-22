@@ -72,6 +72,36 @@ extern "C" duetos::u8 __copy_user_to_start[];
 extern "C" duetos::u8 __copy_user_to_end[];
 extern "C" duetos::u8 __copy_user_fault_fixup[];
 
+// Linker-emitted bounds of kernel `.text` (set by the linker script).
+// Used by RetpolineWildCallback below + the in-TrapDispatch
+// g_irq_handlers validator earlier.
+extern "C" duetos::u8 _text_start[];
+extern "C" duetos::u8 _text_end[];
+
+// Called from __llvm_retpoline_r11 (kernel/arch/x86_64/retpoline_thunks.S)
+// when the retpoline detects r11 — the indirect-call target — fell
+// outside [_text_start, _text_end). The retpoline thunk intercepts
+// every `call *%r11` shape the compiler emits under -mretpoline, so
+// this catches indirect dispatches that aren't covered by the three
+// site-specific validators (sched/trampoline, sync/rcu DrainQueue,
+// arch/traps IrqHandler). Caller is in rdi (the original r11 value).
+extern "C" [[noreturn]] void RetpolineWildCallback(void* target)
+{
+    using namespace duetos;
+    const u64 fn = reinterpret_cast<u64>(target);
+    KBP_PROBE_V(::duetos::debug::ProbeId::kRetpolineWild, fn);
+    arch::SerialWrite("[retpoline] WILD indirect call — refusing dispatch  cpu=");
+    arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
+    arch::SerialWrite("  target=");
+    arch::SerialWriteHex(fn);
+    arch::SerialWrite("  text=[");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_text_start));
+    arch::SerialWrite("..");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_text_end));
+    arch::SerialWrite(")\n");
+    core::PanicWithValue("arch/retpoline", "indirect call target out of kernel text range", fn);
+}
+
 namespace duetos::arch
 {
 

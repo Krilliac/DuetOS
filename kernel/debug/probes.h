@@ -226,6 +226,16 @@ enum class ProbeId : u8
     // hand.
     kIrqHandlerWild,
 
+    // The retpoline thunk __llvm_retpoline_r11 (compiler emits this
+    // for every `call *%r11` shape under -mretpoline) detected r11
+    // — the indirect-call target — out of kernel text. Catches every
+    // indirect dispatch the per-site validators (sched/trampoline,
+    // sync/rcu, arch/traps IrqHandler) didn't already cover. Caller
+    // passes the wild target as `value`. ArmedLog: clean boot stays
+    // quiet; a regression leaves one sentinel line + the validator
+    // halt frame for GDB attach via ProbeFire.
+    kRetpolineWild,
+
     kCount, // sentinel
 };
 
