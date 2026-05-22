@@ -100,31 +100,25 @@ cleanup debt: move the residual up and delete the rest.
       its frame into the saved RIP slot, unconditional iretq
       then loads the wild value). Probe:
       `arch.iretq_frame_wild` / `kIretqFrameWild`.
-- **Validator-coverage gap (still open):** A 20-boot sweep with
-  all five armed (commit 74c0118, canary10) caught 1 panic with
-  EVERY validator silent — `rip=0xffffffff8132a520 [region=k.bss]`
-  on AP3's idle task, NX_VIOLATION on instruction fetch from
-  the lockdep `g_per_cpu` array, return-address-pointers chain
-  shows `SchedTaskTrampoline+0x17` (return from `call rbx`)
-  meaning rbx was validated as `&IdleMain` and IdleMain ran
-  normally. So the wild jump happens DEEPER inside IdleMain's
-  call tree, through a control transfer the five validators
-  don't cover. Candidates:
-    1. A `ret` whose return address on the stack was scribbled
-       between push and pop (every kernel `ret` would need a
-       per-frame guard to catch — impractical statically).
-    2. A `jmp *%rN` (direct, non-retpoline indirect jump) — but
-       the objdump survey lists only 12 such sites and none in
-       the IRQ / idle path.
-    3. A retpoline through a register OTHER than r11 — but
-       `nm` shows `__llvm_retpoline_r11` is the ONLY thunk in
-       the binary (other `__x86_indirect_thunk_*` symbols are
-       linker-gc'd as no callers exist).
-    4. A trap-frame corruption from one of the OTHER 6 iretq
-       sites (syscall entry, EnterUserMode variants). Most
-       return to ring 3 so the kernel-mode-only iretq gate
-       skips them — but their iretq frames are STILL kernel-
-       mode-owned mid-handler and could carry corruption.
+- **6th validator landed (2026-05-22):** `TrapDispatch`'s RAII
+  `RipIntegrityGuard` snapshots `frame->rip` at entry and panics
+  with the diff if it differs at exit, for any kernel-mode return
+  outside the legitimate-rewrite vectors (syscall=0x80, #BP=3,
+  #DB=1). Probe: `arch.trap_rip_scribble` /
+  `kTrapDispatchRipScribble`.
+- **Validator-coverage gap (STILL open after 6 validators):**
+  Latest canary13 sweep: 25 boots, 2 panics, ALL SIX validators
+  silent. The wild RIP now lands INSIDE the kstack arena itself:
+  `rip=0xffffffffe0142fe7 [region=k.stack-arena]`, NX_VIOLATION
+  on instruction fetch. Notably the wild RIP has a consistent
+  `0xfe7` low-12-bit pattern across runs (offset 0x10fe7 within
+  the panicking task's slot, near top-of-stack). This rules out
+  trap-frame RIP scribble (the iretq-frame RIP isn't being
+  changed — the wild jump happens AFTER iretq, deeper in the
+  call tree). The dispatch shape is a `ret` instruction popping
+  a corrupted stack return-address slot — i.e. some C call tree
+  on the AP-idle path overwrites its caller's saved-RIP
+  in-place, and the caller's `ret` jumps wild.
 - **Next-slice approach:**
   1. Add the iretq frame-RIP gate to the remaining 6 iretq
      sites (native_syscall_entry, EnterUserMode*, linux_syscall_entry,
@@ -140,6 +134,15 @@ cleanup debt: move the residual up and delete the rest.
      code is taking `&g_per_cpu[cpu].stack[idx]` and stashing
      it as a function pointer somewhere, those addresses will
      show up.
+  4. **Stack-write tracing:** The current evidence (wild RIP
+     consistently at slot offset 0x10fe7, IN the kstack arena
+     itself) points squarely at a `ret` popping a scribbled
+     return-address slot. A useful diagnostic would set a
+     hardware watchpoint on `slot_top - 0x19` (=
+     `t->stack_base + kKernelStackBytes - 0x19`) for the
+     panicking task's stack — that quad must NEVER be written
+     after `SchedCreate` plants it. The writer is the bug.
+     Heavy-weight; consider only when GDB attach is available.
 - **Blocks on:** willing follow-up slice. Underlying #UD is
   observable but not a regression introduced this session.
 
