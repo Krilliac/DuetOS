@@ -66,6 +66,48 @@ cleanup debt: move the residual up and delete the rest.
      `call [table+rax*?]` or `call *low_func_ptr` whose target
      lives in the conventional-memory identity map (firmware /
      ACPI / SIPI scratch at phys 0x1000-ish).
+- **Indirect-call validators landed (2026-05-22):** Three
+  ArmedLog probes attribute the corruption to its dispatcher
+  the moment the wild value is loaded — pre-fix the only
+  evidence was the wild RIP itself, with no caller / vector /
+  CPU in the banner. Each refuses the dispatch + panics with a
+  real subsystem so an attached GDB at `ProbeFire` reads the
+  call site directly:
+    * `sync/rcu`: `DrainQueue` validates `cb.fn ∈
+      [_text_start, _text_end)` before the `__llvm_retpoline_r11`
+      thunk (`kernel/sync/rcu.cpp`). Probe:
+      `rcu.wild_callback` / `kRcuWildCallback`.
+    * `sched/trampoline`: `SchedTaskTrampolineValidateEntry`
+      called from the trampoline asm between the
+      `SchedFinishTaskSwitch` return and `call *%rbx`
+      (`kernel/sched/sched.cpp` +
+      `kernel/sched/context_switch.S`). Probe:
+      `sched.trampoline_wild_entry` /
+      `kSchedTrampolineWildEntry`.
+    * `arch/traps`: `TrapDispatch` validates
+      `g_irq_handlers[v]` before `h()`
+      (`kernel/arch/x86_64/traps.cpp`). Probe:
+      `arch.irq_handler_wild` / `kIrqHandlerWild`.
+- **Validator-coverage gap (open):** A post-validator 20-boot
+  sweep with all three armed showed 1/20 still panics with
+  `rip=0xffffffff8132f0d0 [region=k.bss]` and 0/20 validator
+  fires — so the wild dispatch comes through a 4th indirect
+  call/jump site not yet covered. The captured shape:
+  `rbp=0xffffffff8012811a [region=k.text, inside isr_common]`,
+  `r14=rip` (so the wild value was loaded into `r14` and then
+  jumped to), and the stack contains a lockdep `g_per_cpu`
+  slot address at `rsp+0x18` and the wild RIP itself at
+  `rsp+0x28`. The next slice should: (a) add a validator at
+  any other `call/jmp *%rN` in the IRQ / trap-dispatch / idle
+  path (grep `objdump -d ... | grep -E 'jmpq?\s*\*%r|callq?\s*\*%r'`
+  showed 11 indirect calls + 12 indirect jumps in the kernel
+  image; eliminate one by one), OR (b) attach gdb at first
+  `trap.kernel_pagefault` probe fire and single-step backward
+  to identify the load instruction. Likely candidate: an
+  IRQ-handler tree's vtable / function-pointer table whose
+  entry was scribbled, OR an IRET-frame RIP corruption (the
+  CPU was inside `isr_common` per the rbp value, suggesting
+  the trap dispatcher's stack frame was the carrier).
 - **Blocks on:** willing follow-up slice. Underlying #UD is
   observable but not a regression introduced this session.
 
