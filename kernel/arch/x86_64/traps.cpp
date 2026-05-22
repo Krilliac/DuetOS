@@ -1301,8 +1301,13 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     // Stack window starting at RSP. Distinct from the RBP backtrace
     // in DumpDiagnostics — this is raw quads on the stack, symbol-
     // annotated so saved return addresses auto-label even when the
-    // RBP chain walked off into garbage. 16 quads = 128 bytes.
-    core::DumpStackWindow("fault-stack", frame->rsp, 16);
+    // RBP chain walked off into garbage. 32 quads = 256 bytes —
+    // bumped from 16 (2026-05-22) so a deeper call chain remains
+    // visible when the RBP chain itself was clobbered (the typical
+    // shape of the SMP-saturation UAF: rbp = 0xdedede..., rip in
+    // freed-poison; the stack quads above rsp still carry the real
+    // return addresses).
+    core::DumpStackWindow("fault-stack", frame->rsp, 32);
 
     // Rich diagnostics from the faulting frame — backtrace climbs
     // the stack from rbp AT THE POINT OF THE FAULT (not from the

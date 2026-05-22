@@ -20,8 +20,25 @@ namespace
 // user RIP, panic dumping a corrupt RBP) from triggering a nested
 // fault. Boot-era kernel addresses are always already higher-half by
 // the time anything that calls these dumpers can run.
+// Range covers the direct map + MMIO arena + kernel stack arena.
+// The original upper bound (0xFFFFFFFFE0000000) cut off EXACTLY at
+// the start of the kernel stack arena (see kKernelStackArenaBase in
+// mm/kstack.h), which meant the panic dump's `[fault-stack]` window
+// reported `<unreadable>` for every task whose fault rsp lived in
+// the kstack arena — i.e. every task other than the boot task.
+// Observed 2026-05-22 on the SMP=8 saturation UAF as
+// `[fault-stack] stack@0xffffffffe0120fc0 (0x10 quads):
+//     0xffffffffe0120fc0 : <unreadable>` — the bug's call chain
+// was sitting right there in memory; the bound just wouldn't let
+// us read it.
+//
+// Extending to 0xFFFFFFFFFFFFFFFF covers the entire higher-half
+// canonical range; the kernel never maps anything outside it, so
+// no false-positive: any read above kHigherHalfStart either hits a
+// kernel-mapped page (succeeds) or an unmapped page (legitimate
+// #PF, classifier downgrades the fault, no recursive trap).
 constexpr u64 kHigherHalfStart = 0xFFFFFFFF80000000ULL; // direct map
-constexpr u64 kHigherHalfEnd = 0xFFFFFFFFE0000000ULL;   // past MMIO arena
+constexpr u64 kHigherHalfEnd = 0xFFFFFFFFFFFFFFFFULL;   // through end of canonical higher half
 constexpr u64 kPageSize = 4096;
 constexpr u64 kPageMask = ~(kPageSize - 1);
 
@@ -46,7 +63,12 @@ bool PlausibleKernelAddress(u64 va)
     {
         return false;
     }
-    if (va >= kHigherHalfStart && va < kHigherHalfEnd)
+    // Use <= so the very last byte of the canonical higher half
+    // (0xFFFFFFFFFFFFFFFF as kHigherHalfEnd) is still considered
+    // plausible — single u64 reads at that edge are rare but
+    // legitimate (e.g. an instruction RIP near the end of the
+    // canonical range).
+    if (va >= kHigherHalfStart && va <= kHigherHalfEnd)
     {
         return true;
     }
@@ -190,19 +212,25 @@ void HexdumpSelfTest()
     Expect(!PlausibleKernelAddress(0xFFFFFFFE), "32-bit max rejected");
 
     // Higher-half boundary: namespace-anonymous kHigherHalfStart inclusive,
-    // kHigherHalfEnd exclusive. Asserting against the canonical values
-    // (re-stated as locals to make the test self-documenting without
-    // shadowing the file-scope constants).
+    // kHigherHalfEnd inclusive (the predicate uses <=). Asserting against
+    // the canonical values (re-stated as locals to make the test
+    // self-documenting without shadowing the file-scope constants).
+    // Extended upward 2026-05-22 to include the kernel stack arena
+    // (0xFFFFFFFFE0000000+), which was previously rejected — the panic
+    // dump's stack window emitted `<unreadable>` for every fault
+    // whose rsp landed in the kstack arena (every non-boot task).
     constexpr u64 kHigherHalfStartCanonical = 0xFFFFFFFF80000000ULL;
-    constexpr u64 kHigherHalfEndCanonical = 0xFFFFFFFFE0000000ULL;
+    constexpr u64 kHigherHalfEndCanonical = 0xFFFFFFFFFFFFFFFFULL;
+    constexpr u64 kKstackArenaBaseCanonical = 0xFFFFFFFFE0000000ULL;
     static_assert(kHigherHalfStart == kHigherHalfStartCanonical, "higher-half start drifted");
     static_assert(kHigherHalfEnd == kHigherHalfEndCanonical, "higher-half end drifted");
     Expect(!PlausibleKernelAddress(kHigherHalfStartCanonical - 1), "below higher half rejected");
     Expect(PlausibleKernelAddress(kHigherHalfStartCanonical), "higher-half start accepted");
     Expect(PlausibleKernelAddress(kHigherHalfStartCanonical + 0x10000), "kernel direct map accepted");
-    Expect(PlausibleKernelAddress(kHigherHalfEndCanonical - 1), "MMIO arena cap accepted");
-    Expect(!PlausibleKernelAddress(kHigherHalfEndCanonical), "above MMIO arena rejected");
-    Expect(!PlausibleKernelAddress(0xFFFFFFFFFFFFFFFFULL), "u64 max rejected");
+    Expect(PlausibleKernelAddress(0xFFFFFFFFDFFFFFFFULL), "MMIO arena cap accepted");
+    Expect(PlausibleKernelAddress(kKstackArenaBaseCanonical), "kstack arena base accepted");
+    Expect(PlausibleKernelAddress(kKstackArenaBaseCanonical + 0x120000), "kstack arena mid accepted");
+    Expect(PlausibleKernelAddress(kHigherHalfEndCanonical), "u64 max accepted (top of canonical)");
 
     // ----- DumpInstructionBytes against a known-mapped kernel symbol -----
     // `&HexdumpSelfTest` itself sits in .text, which is mapped R+X
