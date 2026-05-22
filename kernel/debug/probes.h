@@ -186,6 +186,20 @@ enum class ProbeId : u8
     // id in bits 8..15, action id in bits 0..7 (see env/autonomic.h).
     kAutonomicAction,
 
+    // An RCU callback queue slot dispatched a `cb.fn` that fell
+    // outside the higher-half kernel text range — a confirmed
+    // queue corruption (uninitialised slot dispatched with
+    // q.count > 0, slab class collision, lost write across CPUs).
+    // The pre-fix dispatch path went through the retpoline thunk
+    // unchecked and landed at a low-id-map / .bss byte that
+    // decoded as `#UD Invalid opcode` — trap RIP was the wild
+    // address, not the call site, so the dump banner named neither
+    // RCU nor the CPU. Caller passes the offending fn pointer as
+    // `value`; ArmedLog by default so a clean boot stays quiet and
+    // an attached GDB can `b duetos::debug::ProbeFire` to break at
+    // the exact `DrainQueue` frame the corruption surfaced.
+    kRcuWildCallback,
+
     kCount, // sentinel
 };
 

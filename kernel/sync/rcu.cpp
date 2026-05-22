@@ -21,12 +21,20 @@
 
 #include "acpi/acpi.h"
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "cpu/percpu.h"
+#include "debug/probes.h"
 #include "log/klog.h"
 #include "sync/spinlock.h"
 #include "util/saturating.h"
 #include "util/types.h"
+
+// Linker-emitted bounds of the kernel `.text` section. Used by
+// DrainQueue's sanity check below to refuse dispatch of a callback
+// whose `cb.fn` fell outside executable kernel code.
+extern "C" duetos::u8 _text_start[];
+extern "C" duetos::u8 _text_end[];
 
 namespace duetos::sync
 {
@@ -98,6 +106,47 @@ u32 DrainQueue(RcuPerCpuQueue& q)
         // Callbacks may KFree, take other locks, or do bounded
         // work that's not safe under arch::Cli. The grace contract
         // already guarantees no reader is mid-walk.
+        //
+        // Sanity-check `cb.fn` before the retpoline call: a queue
+        // slot whose fn fell out of kernel TEXT range is a confirmed
+        // queue corruption (uninitialised slot dispatched while
+        // q.count was non-zero, slab class collision with another
+        // structure, etc). The retpoline transparently jumps to
+        // whatever value r11 carries, so a wild fn lands at a
+        // low-id-map / .bss / heap byte and faults either as
+        // `#UD Invalid opcode` (low identity-map bytes decoding as
+        // an invalid opcode) or `#PF NX_VIOLATION` (higher-half
+        // .bss page, NX-set) — in BOTH cases the trap's RIP is the
+        // wild address, not the call site, so the dump banner never
+        // names RCU. Catching here names the offender (CPU, fn,
+        // arg) and halts with a real banner. Observed 2026-05-22:
+        // ~1/15 SMP=8 boots hit one of those shapes on a fresh AP
+        // idle's first RcuReclaimLocal dispatch.
+        //
+        // Bound: kernel `.text` is `[_text_start, _text_end)`.
+        // Anything outside that range as a function pointer is a
+        // confirmed corruption — never a valid callback target.
+        const u64 fn_addr = reinterpret_cast<u64>(cb.fn);
+        const u64 text_lo = reinterpret_cast<u64>(::_text_start);
+        const u64 text_hi = reinterpret_cast<u64>(::_text_end);
+        if (fn_addr < text_lo || fn_addr >= text_hi)
+        {
+            KBP_PROBE_V(::duetos::debug::ProbeId::kRcuWildCallback, fn_addr);
+            arch::SerialWrite("[rcu] WILD callback fn — refusing dispatch  cpu=");
+            arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
+            arch::SerialWrite("  fn=");
+            arch::SerialWriteHex(fn_addr);
+            arch::SerialWrite("  arg=");
+            arch::SerialWriteHex(reinterpret_cast<u64>(cb.arg));
+            arch::SerialWrite("  enqueue_tick=");
+            arch::SerialWriteHex(cb.enqueue_tick);
+            arch::SerialWrite("  text_range=[");
+            arch::SerialWriteHex(text_lo);
+            arch::SerialWrite("..");
+            arch::SerialWriteHex(text_hi);
+            arch::SerialWrite(")\n");
+            core::PanicWithValue("sync/rcu", "callback fn out of kernel text range", fn_addr);
+        }
         cb.fn(cb.arg);
         ++invoked;
         __atomic_add_fetch(&g_calls_completed, 1, __ATOMIC_RELAXED);
