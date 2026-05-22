@@ -183,8 +183,11 @@ Adjacent races fixed in the same slice:
   `g_sched_lock` for consistency with the deferred-zombie
   producer.
 
-Verified with `tools/test/smp-stress-sweep.sh 8 8 5`. The
-panic-dump path itself was also hardened in the same slice
+Verified with a 20-repeat UAF-hunt harness
+(`/tmp/uaf-hunt.sh 20 5 8 60`): zero panics. Pre-fix rate was
+~1/5-1/15 (the panic-dump cleanup that landed earlier in the
+slice made the bug VISIBLE; this commit makes it not happen).
+The panic-dump path itself was also hardened in the same slice
 (`WriteCurrentTaskLabel` defensive guards, `DumpStackWindow`
 page-clamp, `PlausibleKernelAddress` upper bound extended
 through the kstack arena) so a future regression in the same
