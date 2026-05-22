@@ -228,8 +228,22 @@ void LockdepBeforeAcquire(LockClass id)
         if (HasEdge(id, held))
         {
             ++g_inversions;
-            KLOG_WARN_S("lockdep", "inversion detected", "newly-acquired", LockdepClassName(id));
-            KLOG_WARN_S("lockdep", "  vs already-held", "class", LockdepClassName(held));
+            // Raw serial (not KLOG_*) for the same reason as
+            // LockdepBeforeRelease's warning: LockdepBeforeAcquire is
+            // called from inside SpinLockAcquire / MutexLock with the
+            // held-set already populated, and a KLOG warn here would
+            // route through Tee -> klog_persist -> Fat32 ->
+            // sched::MutexLock and self-deadlock on whichever held
+            // lock the inversion is being reported against. The diag
+            // stays visible without re-entering any lock-taking
+            // subsystem.
+            const char* id_name = LockdepClassName(id);
+            const char* held_name = LockdepClassName(held);
+            arch::SerialWrite("[W] lockdep : inversion detected newly-acquired=");
+            arch::SerialWrite(id_name != nullptr ? id_name : "<unnamed>");
+            arch::SerialWrite(" vs already-held=");
+            arch::SerialWrite(held_name != nullptr ? held_name : "<unnamed>");
+            arch::SerialWrite("\n");
             // One-shot-per-class-pair symbolized backtrace. An
             // inversion's class names alone rarely identify the
             // offending path (many call sites take the same lock);
@@ -263,7 +277,17 @@ void LockdepAfterAcquire(LockClass id)
 
     if (g_held_depth >= kLockdepHeldMax)
     {
-        KLOG_ONCE_WARN("lockdep", "held-stack overflow; dropping deepest lock");
+        // Raw serial + one-shot via a static flag — same rationale as
+        // the other lockdep warnings: KLOG_ONCE_WARN would cycle
+        // through klog persistence + FAT32 + sched::MutexLock while
+        // the just-attempted spinlock acquire is still claiming the
+        // ticket on this CPU, deadlocking on g_sched_lock.
+        static constinit bool s_warned = false;
+        if (!s_warned)
+        {
+            s_warned = true;
+            arch::SerialWrite("[W] lockdep : held-stack overflow; dropping deepest lock\n");
+        }
         return;
     }
     g_held_stack[g_held_depth++] = id;
@@ -295,10 +319,27 @@ void LockdepBeforeRelease(LockClass id)
             return;
         }
     }
-    // Release without prior acquire — likely a missed
-    // BeforeAcquire hook on the matching path. Warn but don't
-    // panic; lockdep regressions shouldn't take down the kernel.
-    KLOG_WARN_S("lockdep", "release with no matching held entry", "class", LockdepClassName(id));
+    // Release without prior acquire — likely a missed BeforeAcquire
+    // hook on the matching path, OR the held-stack lost the entry to
+    // the documented per-task vs global-storage hazard (see Roadmap
+    // "Lockdep held-set must be per-task"). MUST use raw serial here:
+    // we are called from inside SpinLockRelease BEFORE the ticket
+    // advances, with g_sched_lock still held by THIS CPU on the
+    // hot path (release of the lock-pass g_sched_lock by
+    // SchedFinishTaskSwitch is the loudest example). A KLOG_WARN_S
+    // would route through Tee -> klog_persist -> Fat32CreateAtPath
+    // -> Fat32Guard -> sched::MutexLock -> SpinLockAcquire(g_sched_lock)
+    // and self-deadlock on the still-held sched lock — repro'd by
+    // gui-fuzz.sh ~10% of debug-preset runs as
+    //     [spinlock] SELF-DEADLOCK lock=... class="sched"
+    //     recursive_acquire_rip=MutexLock+...
+    //     original_acquire_rip=SchedSleepTicks+...
+    // The raw-serial form keeps the diagnostic visible without
+    // re-entering any lock-taking subsystem.
+    arch::SerialWrite("[W] lockdep : release with no matching held entry class=");
+    const char* name = LockdepClassName(id);
+    arch::SerialWrite(name != nullptr ? name : "<unnamed>");
+    arch::SerialWrite("\n");
 }
 
 u32 LockdepHeldSnapshot(LockClass* out, u32 cap)
