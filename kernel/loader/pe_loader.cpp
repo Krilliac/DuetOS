@@ -1631,6 +1631,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                     const DllImage* preloaded_dlls, u64 preloaded_dll_count)
 {
     KLOG_TRACE_SCOPE("pe-resolve", "ResolveImports");
+    using arch::SerialLineGuard;
     using arch::SerialWrite;
     using arch::SerialWriteHex;
     KDBG_V(PeImport, "pe-resolve", "ResolveImports enter; preloaded_dll_count", preloaded_dll_count);
@@ -1672,9 +1673,12 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
         const char* dll_name = (name_off == ~u64(0)) ? nullptr : BoundedCString(file, file_len, name_off);
         if (dll_name == nullptr)
         {
-            SerialWrite("[pe-resolve] descriptor ");
-            SerialWriteHex(d);
-            SerialWrite(": bad dll name rva\n");
+            {
+                SerialLineGuard guard;
+                SerialWrite("[pe-resolve] descriptor ");
+                SerialWriteHex(d);
+                SerialWrite(": bad dll name rva\n");
+            }
             return false;
         }
 
@@ -1689,17 +1693,23 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
         const u32 int_rva = orig_thunk ? orig_thunk : first_thunk;
         if (int_rva == 0 || first_thunk == 0)
         {
-            SerialWrite("[pe-resolve] ");
-            SerialWrite(dll_name);
-            SerialWrite(": descriptor missing IAT or INT\n");
+            {
+                SerialLineGuard guard;
+                SerialWrite("[pe-resolve] ");
+                SerialWrite(dll_name);
+                SerialWrite(": descriptor missing IAT or INT\n");
+            }
             return false;
         }
         const u64 int_off = RvaToFile(file, file_len, h, int_rva);
         if (int_off == ~u64(0))
         {
-            SerialWrite("[pe-resolve] ");
-            SerialWrite(dll_name);
-            SerialWrite(": INT rva out of bounds\n");
+            {
+                SerialLineGuard guard;
+                SerialWrite("[pe-resolve] ");
+                SerialWrite(dll_name);
+                SerialWrite(": INT rva out of bounds\n");
+            }
             return false;
         }
 
@@ -1755,17 +1765,23 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 const u64 ibn_off = RvaToFile(file, file_len, h, ibn_rva);
                 if (ibn_off == ~u64(0) || ibn_off + 2 >= file_len)
                 {
-                    SerialWrite("[pe-resolve] ");
-                    SerialWrite(dll_name);
-                    SerialWrite(": IBN rva out of bounds\n");
+                    {
+                        SerialLineGuard guard;
+                        SerialWrite("[pe-resolve] ");
+                        SerialWrite(dll_name);
+                        SerialWrite(": IBN rva out of bounds\n");
+                    }
                     return false;
                 }
                 fn_name = BoundedCString(file, file_len, ibn_off + 2);
                 if (fn_name == nullptr)
                 {
-                    SerialWrite("[pe-resolve] ");
-                    SerialWrite(dll_name);
-                    SerialWrite(": IBN name unterminated\n");
+                    {
+                        SerialLineGuard guard;
+                        SerialWrite("[pe-resolve] ");
+                        SerialWrite(dll_name);
+                        SerialWrite(": IBN name unterminated\n");
+                    }
                     return false;
                 }
             }
@@ -1799,6 +1815,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                 if (TryResolveViaPreloadedDllsAnyName(fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
                 {
                     resolved_via_dll = true;
+                    SerialLineGuard guard;
                     SerialWrite("[pe-resolve] via-apiset ");
                     SerialWrite(dll_name);
                     SerialWrite("!");
@@ -1808,6 +1825,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             }
             if (resolved_via_dll)
             {
+                SerialLineGuard guard;
                 SerialWrite("[pe-resolve] via-dll ");
                 SerialWrite(dll_name);
                 SerialWrite("!");
@@ -1913,11 +1931,14 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             // loader/image_patch.h — single source of truth).
             if (!loader::ImageRangeInBounds(iat_slot_off, ent_bytes, h.image_size))
             {
-                SerialWrite("[pe-resolve] ");
-                SerialWrite(dll_name);
-                SerialWrite("!");
-                SerialWrite(fn_name);
-                SerialWrite(": IAT slot outside image\n");
+                {
+                    SerialLineGuard guard;
+                    SerialWrite("[pe-resolve] ");
+                    SerialWrite(dll_name);
+                    SerialWrite("!");
+                    SerialWrite(fn_name);
+                    SerialWrite(": IAT slot outside image\n");
+                }
                 return false;
             }
             const u64 iat_slot_va = h.image_base + iat_slot_off;
@@ -1927,11 +1948,14 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
             // frame-lookup write here did not).
             if (!loader::ImageDirectWriteLe(as, iat_slot_va, ent_bytes, stub_va))
             {
-                SerialWrite("[pe-resolve] ");
-                SerialWrite(dll_name);
-                SerialWrite("!");
-                SerialWrite(fn_name);
-                SerialWrite(": IAT slot VA not mapped\n");
+                {
+                    SerialLineGuard guard;
+                    SerialWrite("[pe-resolve] ");
+                    SerialWrite(dll_name);
+                    SerialWrite("!");
+                    SerialWrite(fn_name);
+                    SerialWrite(": IAT slot VA not mapped\n");
+                }
                 return false;
             }
             ++resolved;

@@ -137,6 +137,47 @@ cleanup debt: move the residual up and delete the rest.
   per-CPU + per-task pair doesn't already absorb. None
   observed since 2026-05-22.
 
+### SmpStartAps offline-AP routing hang — LANDED (2026-05-22)
+
+Under SMP=8 release, `boot-determinism-sweep.sh` consistently
+reported `aps=?` for every run — the post-AP-bringup
+`[smp] online=N/M` structural sentinel never fired, even though
+the boot reached `bringup-complete` cleanly. Tracing pinned the
+hang inside `SmpStartAps`'s per-AP loop:
+
+  1. The BSP runs the loop body for AP[1]: kmallocs its PerCpu,
+     allocates GDT/TSS/IST stacks via `AllocateApGdt`, kmallocs a
+     stack, registers the slot at `g_ap_percpus[cpu_id]`, bumps
+     `g_cpu_id_limit` to cover it, then sends INIT IPI.
+  2. The 10ms INIT→SIPI delay called `sched::SchedSleepTicks(1)`,
+     parking the BSP boot task on the sleep queue.
+  3. Timer IRQ at `g_tick_now + 1` woke the task. The wake-side
+     `RunqueuePush` → `PickClusterPlacement` looked across
+     in-cluster peers and saw `g_ap_percpus[1]` (just allocated,
+     runq_normal_len == 0) — a "less loaded" target. Routed the
+     BSP boot task to AP[1]'s runqueue.
+  4. AP[1] hadn't actually started yet (no SIPI). Its runqueue
+     was a memory address; nothing was draining it.
+  5. BSP went idle; init-wedge eventually fired but `[smp] online=`
+     was never emitted, so the determinism rig reported the
+     ambiguous `aps=?`.
+
+Fix: defer the `g_cpu_id_limit` bump until **after**
+`WaitForApOnline` confirms the AP signalled itself online
+(`kernel/arch/x86_64/smp.cpp`). The slot in `g_ap_percpus[]`
+still has to be written before the AP runs (the AP reads it
+during early bringup), but the scheduler's wake-side iteration
+key (`SmpCpuIdLimit()`) only advances once the AP is actually
+running — so `PickClusterPlacement` never considers a runqueue
+nobody will service. Also added a one-shot `[smp] online=1/?`
+emission on the trampoline-bloat early-return path so the
+determinism sweep's `aps` column always reports a real count
+instead of `?`.
+
+Verified: 15/15 single boots clean (`[smp] online=8/8`),
+6/6 determinism sweep boots OK (post-fix run preserved as
+`/tmp/sweep3.log`).
+
 ### SMP=8 saturation use-after-free — LANDED (2026-05-22)
 
 The intermittent SMP=8 release-stress `#GP at
@@ -385,6 +426,23 @@ landed.)
   `BlockDeviceRead` itself (the slow path). Larger but
   mechanical; gated until a workload shows the path-cache
   fast-path doesn't already absorb the contention.
+- **Baseline measurement (2026-05-22 — gates the refactor):**
+  `tools/test/fat32-concurrent.sh 30` on x86_64-release reports
+  zero `fs/fat32 : lookup` debug lines, zero `MutexLock waiter`
+  parking sentinels, zero non-deliberate lockdep inversions,
+  and zero `fs/fat32 [E]` lines over the 30 s window. The
+  path-cache fast path is doing its job — boot-storm probes
+  (NOTES.TXT / TEST.* / TRTEST.BIN / KERNEL.FIX et al.) all
+  retire lock-free before the slow walker is consulted, so the
+  driver-wide mutex never serialises under the present
+  workload. Per the gate below, the per-CPU `g_scratch` +
+  lock-drop refactor stays deferred — the cost (≈ 120
+  reference-site edits across 5 TUs, in the same area as the
+  just-landed SMP=8 UAF fix) does not buy a measurable win
+  today. Revisit when a workload shows the seqlock probe
+  missing (e.g. write-heavy + sustained eviction beyond the
+  32-slot cache) or when a profile attributes wall-time to
+  the in-mutex `BlockDeviceRead`.
 - **Larger refactor (deferred):** split into per-volume mutex +
   per-cache RwLock + lock-free FAT entry cache. Wants its own
   slice once the path-cache fast path + per-CPU scratch are
@@ -393,11 +451,17 @@ landed.)
   spawns the linux-smoke synfs + win32 PE smokes concurrently
   and captures the boot log. Look for `fs/fat32 : lookup`
   line-rate vs `MutexLock waiter` parking lines as the
-  contention signal.
+  contention signal. (Script-side fix landed 2026-05-22 — the
+  `|| echo 0` fall-back was chained onto `grep -c`, which
+  already prints 0 on no-match and exits 1, so on a clean run
+  the variable captured "0\n0" and the arithmetic below it
+  bombed with "syntax error in expression". Replaced with `;
+  true` so a clean baseline run completes its report.)
 - **Blocks on:** evidence that the path-cache fast path didn't
-  close the live livelock corner. If a fat32-concurrent.sh run
-  still shows the symptom, the per-CPU scratch + lock-drop
-  refactor lands next.
+  close the live livelock corner. The 2026-05-22 baseline run
+  above shows it HAS closed it under the present workload, so
+  this entry stays gated until a future workload shows the
+  symptom.
 
 ### Stage 6 — per-process namespace roots (residual)
 

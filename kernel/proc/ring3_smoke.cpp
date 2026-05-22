@@ -750,11 +750,14 @@ void SpawnDropcapsProbe()
     {
         Panic("core/ring3", "ProcessCreate failed for dropcaps probe");
     }
-    SerialWrite("[ring3] queued dropcaps-demo pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" code_va=");
-    SerialWriteHex(code_va);
-    SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued dropcaps-demo pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" code_va=");
+        SerialWriteHex(code_va);
+        SerialWrite("\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-dropcaps-demo", proc);
 }
 
@@ -843,9 +846,12 @@ void SpawnHostileProbe()
     {
         Panic("core/ring3", "ProcessCreate failed for hostile probe");
     }
-    SerialWrite("[ring3] queued hostile-syscall probe pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued hostile-syscall probe pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite("\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-hostile-syscall", proc);
 }
 
@@ -930,9 +936,12 @@ void SpawnCrossPidProbe()
     {
         Panic("core/ring3", "ProcessCreate failed for cross-pid probe");
     }
-    SerialWrite("[ring3] queued cross-pid probe pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" (SYS_PROCESS_OPEN flood, expect kCapDebug denials)\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued cross-pid probe pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" (SYS_PROCESS_OPEN flood, expect kCapDebug denials)\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-cross-pid-probe", proc);
 }
 
@@ -994,11 +1003,14 @@ void SpawnCpuHogProbe()
     {
         Panic("core/ring3", "ProcessCreate failed for cpu-hog");
     }
-    SerialWrite("[ring3] queued cpu-hog task pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" tick_budget=");
-    SerialWriteHex(kTickBudgetHog);
-    SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued cpu-hog task pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" tick_budget=");
+        SerialWriteHex(kTickBudgetHog);
+        SerialWrite("\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-cpu-hog", proc);
 }
 
@@ -1081,9 +1093,12 @@ void SpawnSyscallStormProbeTask()
     {
         Panic("core/ring3", "ProcessCreate failed for syscall-storm");
     }
-    SerialWrite("[ring3] queued syscall-storm probe pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" (expect tick-budget kill after sustained int 0x80)\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued syscall-storm probe pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" (expect tick-budget kill after sustained int 0x80)\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-syscall-storm", proc);
 }
 
@@ -1161,13 +1176,16 @@ void SpawnNxProbeTask()
         Panic("core/ring3", "ProcessCreate failed for nx probe");
     }
 
-    SerialWrite("[ring3] queued nx-probe task pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" code_va=");
-    SerialWriteHex(code_va);
-    SerialWrite(" stack_va=");
-    SerialWriteHex(stack_va);
-    SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued nx-probe task pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" code_va=");
+        SerialWriteHex(code_va);
+        SerialWrite(" stack_va=");
+        SerialWriteHex(stack_va);
+        SerialWrite("\n");
+    }
 
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-nx-probe", proc);
 }
@@ -1258,13 +1276,16 @@ void SpawnJailProbeTask()
         Panic("core/ring3", "ProcessCreate failed for jail probe");
     }
 
-    SerialWrite("[ring3] queued jail-probe task pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" code_va=");
-    SerialWriteHex(code_va);
-    SerialWrite(" stack_va=");
-    SerialWriteHex(stack_va);
-    SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued jail-probe task pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" code_va=");
+        SerialWriteHex(code_va);
+        SerialWrite(" stack_va=");
+        SerialWriteHex(stack_va);
+        SerialWrite("\n");
+    }
 
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-jail-probe", proc);
 }
@@ -1339,11 +1360,14 @@ void SpawnPrivProbeTask()
     {
         Panic("core/ring3", "ProcessCreate failed for priv probe");
     }
-    SerialWrite("[ring3] queued priv-probe task pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" code_va=");
-    SerialWriteHex(code_va);
-    SerialWrite(" (expect #GP on cli)\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued priv-probe task pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" code_va=");
+        SerialWriteHex(code_va);
+        SerialWrite(" (expect #GP on cli)\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-priv-probe", proc);
 }
 
@@ -1414,11 +1438,14 @@ void SpawnBadIntProbeTask()
     {
         Panic("core/ring3", "ProcessCreate failed for bad-int probe");
     }
-    SerialWrite("[ring3] queued bad-int-probe task pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" code_va=");
-    SerialWriteHex(code_va);
-    SerialWrite(" (expect #GP/#NP on int 0x81)\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued bad-int-probe task pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" code_va=");
+        SerialWriteHex(code_va);
+        SerialWrite(" (expect #GP/#NP on int 0x81)\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-badint-probe", proc);
 }
 
@@ -1497,11 +1524,14 @@ void SpawnKernelReadProbeTask()
     {
         Panic("core/ring3", "ProcessCreate failed for kernel-read probe");
     }
-    SerialWrite("[ring3] queued kread-probe task pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" code_va=");
-    SerialWriteHex(code_va);
-    SerialWrite(" (expect #PF on kernel-half read)\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued kread-probe task pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" code_va=");
+        SerialWriteHex(code_va);
+        SerialWrite(" (expect #PF on kernel-half read)\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-kread-probe", proc);
 }
 
@@ -1675,11 +1705,14 @@ void SpawnPtrFuzzProbeTask()
     {
         Panic("core/ring3", "ProcessCreate failed for ptrfuzz probe");
     }
-    SerialWrite("[ring3] queued ptrfuzz-probe task pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" code_va=");
-    SerialWriteHex(code_va);
-    SerialWrite(" (expect 4× -1 then [ptrfuzz] passed)\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued ptrfuzz-probe task pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" code_va=");
+        SerialWriteHex(code_va);
+        SerialWrite(" (expect 4× -1 then [ptrfuzz] passed)\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-ptrfuzz-probe", proc);
 }
 
@@ -1841,11 +1874,14 @@ void SpawnWriteFuzzProbeTask()
     {
         Panic("core/ring3", "ProcessCreate failed for writefuzz probe");
     }
-    SerialWrite("[ring3] queued writefuzz-probe task pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" code_va=");
-    SerialWriteHex(code_va);
-    SerialWrite(" (expect 4× -1 then [writefuzz] passed)\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued writefuzz-probe task pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" code_va=");
+        SerialWriteHex(code_va);
+        SerialWrite(" (expect 4× -1 then [writefuzz] passed)\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-writefuzz-probe", proc);
 }
 
@@ -1976,11 +2012,14 @@ void SpawnBpProbeTask()
     {
         Panic("core/ring3", "ProcessCreate failed for bp-probe");
     }
-    SerialWrite("[ring3] queued bp-probe task pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" code_va=");
-    SerialWriteHex(code_va);
-    SerialWrite(" (expect HW BP hit then [bp-probe] passed)\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] queued bp-probe task pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" code_va=");
+        SerialWriteHex(code_va);
+        SerialWrite(" (expect HW BP hit then [bp-probe] passed)\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, "ring3-bp-probe", proc);
 }
 

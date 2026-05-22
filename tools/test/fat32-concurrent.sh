@@ -89,16 +89,21 @@ fi
 
 echo
 echo "=== FAT32 CONTENTION REPORT (${LOG}) ==="
-lookup_count=$(grep -ac "fs/fat32 : lookup" "${LOG}" 2>/dev/null || echo 0)
+# grep -c always prints a count (0 if none) on stdout; it exits 1
+# on zero matches. Do NOT chain `|| echo 0` — bash would then run
+# both grep's "0" output AND echo's "0", giving the arithmetic
+# below a two-line string that bombs with "syntax error in
+# expression". Same gotcha boot-log-analyze.sh's gc() documents.
+lookup_count=$(grep -ac "fs/fat32 : lookup" "${LOG}" 2>/dev/null; true)
 distinct_paths=$(grep -aoE 'fs/fat32 : lookup[^"]+"[^"]+"' "${LOG}" \
                  | grep -oE '"[^"]+"' | sort -u | wc -l)
-mutex_wait=$(grep -ac "mutex.*wait\|MutexLock.*block\|waiter" "${LOG}" 2>/dev/null || echo 0)
-inv_count=$(grep -ac "inversion detected" "${LOG}" 2>/dev/null || echo 0)
+mutex_wait=$(grep -ac "mutex.*wait\|MutexLock.*block\|waiter" "${LOG}" 2>/dev/null; true)
+inv_count=$(grep -ac "inversion detected" "${LOG}" 2>/dev/null; true)
 # Selftest-A/B is the deliberate lockdep self-test; deduct it.
 expected_selftest_inv=1
 real_inv=$((inv_count - expected_selftest_inv))
 [ "$real_inv" -lt 0 ] && real_inv=0
-err_fat32=$(grep -acE '\[E\] .*fs/fat32' "${LOG}" 2>/dev/null || echo 0)
+err_fat32=$(grep -acE '\[E\] .*fs/fat32' "${LOG}" 2>/dev/null; true)
 
 echo "  fs/fat32 lookup line-rate:      ${lookup_count} over ${SECS}s = $(( lookup_count / (SECS > 0 ? SECS : 1) ))/sec"
 echo "  distinct path strings:          ${distinct_paths}"

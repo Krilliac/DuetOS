@@ -702,6 +702,12 @@ u64 SmpStartAps()
         // the BSP keeps running uniprocessor instead of halting
         // the whole machine over an SMP-only feature.
         core::DebugPanicOrWarnWithValue("arch/smp", "trampoline image larger than 4 KiB", tramp_len);
+        // Always emit the structural sentinel — the determinism /
+        // boot-log rigs grep this for the authoritative SMP count
+        // and report `aps=?` (with the noise that entails) if it
+        // never fires. Even on the trampoline-bloat early return,
+        // BSP is online and that's a count.
+        SerialWrite("\n[smp] online=1/?\n");
         return 0;
     }
     auto* dst = static_cast<u8*>(TrampVirt());
@@ -821,10 +827,14 @@ u64 SmpStartAps()
         }
         g_ap_gdt_bundles[cpu_id] = bundle;
         g_ap_percpus[cpu_id] = ap_pcpu;
-        if (cpu_id + 1 > g_cpu_id_limit)
-        {
-            g_cpu_id_limit = cpu_id + 1;
-        }
+        // NOTE: g_cpu_id_limit is NOT bumped here — the scheduler's
+        // wake-side routing (`PickClusterPlacement`, `TargetPerCpuFor`)
+        // iterates up to `SmpCpuIdLimit()`, and exposing this AP's
+        // slot before it has actually flipped online would route
+        // wakeable tasks (like THIS task, the BSP boot task, after
+        // SchedSleepTicks below) to a runqueue with no AP to run
+        // them. Set the limit AFTER the AP signals online via
+        // `g_cpus_online` below.
 
         // Per-AP 16 KiB stack. The trampoline loads RSP with stack_top
         // (= stack_base + size) so we pass that.
@@ -845,14 +855,45 @@ u64 SmpStartAps()
         TrampU32At(kOffCpuId) = cpu_id;
         TrampU32At(kOffOnlineFlag) = 0;
 
-        core::LogWithValue(core::LogLevel::Info, "arch/smp", "starting AP apic_id", static_cast<u64>(rec.apic_id));
+        // Compose the "starting AP" log as one atomic SerialWrite
+        // instead of going through klog's multi-fragment path. The
+        // klog form (timestamp/level/tag/msg/val) is structurally
+        // splittable under the same race as the existing
+        // `[smp] online=` sentinel — see the post-loop builder
+        // below for the same rationale. Composing one buffer also
+        // lets the next post-mortem grep for `[arch/smp] starting`
+        // as a single line.
+        {
+            char buf[64];
+            u32 n = 0;
+            const char* p = "[arch/smp] starting AP apic_id=0x";
+            while (*p)
+                buf[n++] = *p++;
+            // Render rec.apic_id as zero-padded 2-digit hex (8-bit
+            // MADT field).
+            const u32 aid = rec.apic_id;
+            const char hex[] = "0123456789abcdef";
+            buf[n++] = hex[(aid >> 4) & 0xF];
+            buf[n++] = hex[aid & 0xF];
+            buf[n++] = '\n';
+            buf[n] = '\0';
+            SerialWrite(buf);
+        }
 
         // INIT IPI (assert). Per Intel SDM Vol. 3A §8.4.4.
         SmpSendIpi(rec.apic_id, kIcrDeliveryInit | kIcrLevelAssert);
 
-        // 10 ms wait — SchedSleepTicks(1) at 100 Hz. Interrupts must
-        // be enabled for this (the wait path uses the timer-driven
-        // sleep queue); SmpStartAps runs after TimerInit so that's fine.
+        // 10 ms wait between INIT and SIPI per Intel SDM. Yielding
+        // to the scheduler used to wedge under SMP=8 release: the
+        // wake-side `PickClusterPlacement` saw the freshly-allocated
+        // `g_ap_percpus[cpu_id]` slot (above) and routed the BSP
+        // boot task onto an AP that hadn't actually started yet,
+        // so the task sat on an empty runqueue until the boot
+        // watchdog fired (`[smp] online=N/M` sentinel never emitted,
+        // `aps=?` in boot-determinism-sweep — 2026-05-22). Closed
+        // at its source by deferring the `g_cpu_id_limit` bump
+        // until AFTER `WaitForApOnline` succeeds, so the scheduler
+        // can't see — let alone route to — an offline slot.
         sched::SchedSleepTicks(1);
 
         // SIPI with vector = trampoline_phys >> 12 = 0x08.
@@ -873,6 +914,16 @@ u64 SmpStartAps()
 
         ++aps_started;
         ++g_cpus_online;
+        // NOW the scheduler may safely route work to this AP. Bumping
+        // the limit AFTER the AP confirms online (rather than after
+        // `g_ap_percpus[cpu_id]` is written, as the prior shape
+        // did) closes the routing-to-offline-AP race that wedged
+        // the BSP boot task inside SchedSleepTicks (above) under
+        // SMP=8 release.
+        if (cpu_id + 1 > g_cpu_id_limit)
+        {
+            g_cpu_id_limit = cpu_id + 1;
+        }
     }
 
     // Structural sentinel — ONE atomic SerialWrite so it stays a
