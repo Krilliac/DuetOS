@@ -1,199 +1,21 @@
 # DuetOS
 
-[![Release channel](https://img.shields.io/github/v/release/krilliac/duetos?display_name=tag&filter=latest-release&label=release%20channel)](https://github.com/krilliac/duetos/releases/tag/latest-release)
-[![Download release ISO](https://img.shields.io/github/downloads/krilliac/duetos/latest-release/duetos-release.iso?label=release%20iso%20%E2%86%93%20this%20release&color=blue)](https://github.com/krilliac/duetos/releases/download/latest-release/duetos-release.iso)
-[![Debug channel](https://img.shields.io/github/v/release/krilliac/duetos?include_prereleases&display_name=tag&filter=latest-debug&label=debug%20channel)](https://github.com/krilliac/duetos/releases/tag/latest-debug)
-[![Download debug ISO](https://img.shields.io/github/downloads/krilliac/duetos/latest-debug/duetos-debug.iso?label=debug%20iso%20%E2%86%93%20this%20release&color=orange)](https://github.com/krilliac/duetos/releases/download/latest-debug/duetos-debug.iso)
-[![Build flavors](https://img.shields.io/github/v/release/krilliac/duetos?include_prereleases&display_name=tag&filter=latest-flavors&label=build%20flavors&color=lightgrey)](https://github.com/krilliac/duetos/releases/tag/latest-flavors)
-[![Lifetime downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fkrilliac%2Fduetos%2Fstats%2Flifetime-downloads.json)](https://github.com/krilliac/duetos/releases)
+**A from-scratch operating system that boots on real PC hardware and runs Windows `.exe` files natively** — not under a VM, not through Wine, not as an emulator on top of Linux. The PE loader, the NT syscall layer, and 44 reimplemented Win32 DLLs (`kernel32`, `ntdll`, `user32`, `gdi32`, `ucrtbase`, `msvcp140`, `d3d11`, …) live in this repo as a peer ABI alongside the native one.
 
-**Front-runner downloads:** [release ISO](https://github.com/krilliac/duetos/releases/download/latest-release/duetos-release.iso) for production / shipping; [debug ISO](https://github.com/krilliac/duetos/releases/download/latest-debug/duetos-debug.iso) for development. Specialized variants (release-asserts, release-audit for forensic post-incident capture, release-lto, debug-fast) live in the [`latest-flavors`](https://github.com/krilliac/duetos/releases/tag/latest-flavors) channel — see the per-preset notes there or the [build system guide](wiki/tooling/Build-System.md).
+![DuetOS desktop, Duet theme — Calculator, Notepad, Files, Task Manager, Kernel Log, Clock, GFX Demo, System Monitor, themed taskbar](docs/screenshots/06-desktop-duet.png)
 
-Click a **channel** badge to open the release page, or an **iso ↓** badge to download the ISO directly. The "this release" counter resets when CI re-publishes the rolling channel; "lifetime downloads" sums every asset download across all channels and never resets.
+Everything in that screenshot is painted in a single compose pass by our kernel-side compositor:
 
-Channel releases are refreshed continuously by CI on every push to `main`, and re-published from **tag builds** (`v*` tags) when a version is cut. The ephemeral per-run uploads in the Actions tab are kept for 7 days for debugging and do not populate the Releases page.
-
-A general-purpose operating system, written from scratch, that runs
-Windows PE executables natively — not via a VM, not via Wine, not as an
-emulator bolted onto another host OS. The PE loader, the NT syscall
-surface, the full set of user-mode DLLs (`kernel32`, `ntdll`, `user32`,
-`gdi32`, `ucrtbase`, `msvcp140`, …) all live in this repo, co-equal with
-the native ABI.
-
-Currently runs x86_64. UEFI boot on commodity hardware. The
-project's live-verified fact:
-
-```
-Windows Kill 1.1.4 | Windows Kill Library 3.1.3
-Not enough argument. Use -h for help.
-```
-
-That's a real MSVC-built third-party Windows PE printing to our serial
-console after going through our PE loader, our 44 production userland
-DLLs (38 preloaded into every Win32 PE process), our scheduler, and
-our syscalls. Bits as shipped, running on DuetOS.
+- **Calculator, Notepad, Files, Task Manager, Kernel Log, Clock** — native DuetOS apps.
+- **GFX Demo** (top right) — a native app computing every pixel in its client area on every frame; the same `FramebufferPutPixel` / `FramebufferFillRect` primitive set our `d3d11` / `d3d12` / `dxgi` DLLs call into when a Windows PE goes `D3D11CreateDeviceAndSwapChain → ClearRenderTargetView → Present`.
+- **System Monitor** — live heap usage, fragmentation, syscalls/sec, FPS, window count — taken straight from kernel counters.
+- **Taskbar** — Start menu, pinned apps, tray, clock, Duet theme. `Ctrl+Alt+Y` hot-swaps to Classic / Slate10 / Amber. `theme=<name>` on the kernel cmdline picks one at boot.
 
 ---
 
-## Documentation
-
-The full reference is in the [**wiki**](wiki/Home.md). Quick entry
-points:
-
-| You want to | Start at |
-|-------------|----------|
-| Build + boot DuetOS | [Getting Started](wiki/getting-started/Getting-Started.md) |
-| Understand the layering | [Architecture Overview](wiki/getting-started/Architecture-Overview.md) |
-| Trace the project's evolution | [History](wiki/getting-started/History.md) |
-| Find a syscall number | [Syscall ABI](wiki/specifications/Syscall-ABI.md) |
-| Hack on the kernel | [Boot](wiki/kernel/Boot.md) → [Memory](wiki/kernel/Memory-Management.md) → [Scheduler](wiki/kernel/Scheduler.md) |
-| Ship a Win32 PE | [Win32 PE Subsystem](wiki/subsystems/Win32-PE-Subsystem.md) → [PE Loader](wiki/subsystems/PE-Loader.md) |
-| Understand security model | [Sandboxing](wiki/security/Sandboxing.md) → [Capabilities](wiki/security/Capabilities.md) |
-
-The wiki is populated and refreshed by `docs/sync-wiki.sh`. Validate
-navigation with `tools/check-wiki-nav.sh`.
-
-## What's here
-
-- **Kernel** (`kernel/`) — Multiboot2 boot, 4-level paging, per-process
-  address spaces, SMP-aware round-robin scheduler, W^X + SMEP/SMAP +
-  ASLR + stack canaries + retpoline, capability-based IPC,
-  `int 0x80` native syscall ABI (~190 numbered calls). PCIe, NVMe,
-  AHCI, xHCI/USB, PS/2, HDA, e1000. HPET-calibrated LAPIC timer.
-  Kernel-mode breakpoint subsystem with hardware DR gates. Live crash
-  dump with inline symbol resolution.
-- **PE loader** (`kernel/loader/pe_loader.cpp`, `pe_exports.cpp`,
-  `dll_loader.cpp`) — validates DOS + NT + PE32+ headers, maps
-  sections with characteristic-driven flags, applies DIR64 base
-  relocations, walks the Export Address Table, resolves imports
-  against preloaded DLLs with forwarder chasing, falls through to a
-  legacy stubs path for anything not yet ported.
-- **Win32 translator DLLs** (`userland/libs/`) — 44 production userland
-  DLLs totalling ~1100 exports (38 preloaded into every Win32 PE
-  process; remainder load on demand). `kernel32`, `ntdll`, `ucrtbase`,
-  `user32`, `gdi32`, `kernelbase`, plus `msvcrt`, `msvcp140`,
-  `vcruntime140`, `dbghelp`, `advapi32`, `shell32`, `shlwapi`, `ole32`,
-  `oleaut32`, `winmm`, `bcrypt`, `psapi`, `crypt32`, `comctl32`,
-  `comdlg32`, `version`, `setupapi`, `iphlpapi`, `userenv`, `wtsapi32`,
-  `dwmapi`, `uxtheme`, `secur32`, `ws2_32`, `wininet`, `winhttp`,
-  `d3d9`/`11`/`12`, `dxgi`, `d2d1`, `dwrite`, `dinput8`, `xinput1_4`,
-  `xaudio2_8`, `dsound`, `ddraw`, `d3dcompiler`. Per-DLL implementation
-  status drilldown lives in
-  [`Win32-Surface-Status`](wiki/reference/Win32-Surface-Status.md).
-- **Real implementations** — registry, `fopen`/`fread`/`fseek`/`fgets`,
-  `printf` formatting, `getenv`, heap (`malloc`/`HeapAlloc`), atomics,
-  critical sections, SRW locks, InitOnce, time, threads, mutexes,
-  events, semaphores, TLS slots.
-- **Inspect tooling** (`kernel/debug/inspect.h`) — shell-driven
-  disassembly and reverse-engineering surface that predates the PE
-  loader. First-byte opcode histograms, syscall-site recovery, spawn-
-  time image scanning.
-
----
-
-## The layering, in one diagram
+## Running real Windows binaries
 
 ```
-Windows PE applications
-        ↓ imports
-Win32 translator DLLs  (userland/libs/, 44 production DLLs)
-        ↓ int 0x80
-Native DuetOS kernel
-        ↓
-Kernel-mode drivers (PCIe, NVMe, AHCI, USB, NIC, GPU, audio, input)
-```
-
-The Win32 DLLs are **translators**, not parallel subsystems. There is
-one TCP stack in the kernel, one compositor, one VFS, one registry —
-each reachable from two entry ABIs (native and Win32). See the
-[Architecture Overview](wiki/getting-started/Architecture-Overview.md)
-in the wiki for the full picture, including how `ws2_32!send` reaches
-the e1000 transmit ring.
-
-> **Subsystem isolation rule.** Win32 and Linux are *facades for
-> executing PE/ELF binaries*. They never drive DuetOS. Every effect a
-> guest binary has on the system goes through the same kernel-mediated,
-> capability-gated syscall a native DuetOS program does. Auth, the
-> capability set, the scheduler, address-space ownership, and FS
-> mediation are kernel-owned and not reachable past the syscall
-> boundary. NT/Linux thunks translate ABI shapes; they do not extend
-> the kernel's authority. See
-> [Subsystem Isolation](wiki/kernel/Subsystem-Isolation.md) for the full
-> rule set and the audit checklist.
-
----
-
-## Build + run
-
-```bash
-# Configure (x86_64-debug or x86_64-release)
-cmake --preset x86_64-debug
-
-# Build kernel + all userland DLLs + ISO
-cmake --build build/x86_64-debug --parallel $(nproc)
-
-# Boot in QEMU — watches the serial log on stdout
-DUETOS_TIMEOUT=30 tools/qemu/run.sh build/x86_64-debug/duetos.iso
-```
-
-Tools required for the ISO path:
-`qemu-system-x86`, `ovmf`, `grub-common`, `grub-pc-bin`,
-`grub-efi-amd64-bin`, `xorriso`, `mtools`. Compiler baseline:
-Clang 18+ (used as both the freestanding kernel compiler and the
-host cross-compiler for the userland Windows PE toolchain).
-
-### Build flavors
-
-The two main presets (`x86_64-debug`, `x86_64-release`) are the
-defaults; five derived presets exercise specific instrumentation
-axes. See [`wiki/tooling/Build-System.md`](wiki/tooling/Build-System.md)
-for the per-knob matrix.
-
-| Preset | Use when |
-|--------|----------|
-| `x86_64-debug` | Default development. Full instrumentation: assertions on, lock-order audit on, boot self-tests on, klog at Debug, Trace call sites compiled in. |
-| `x86_64-release` | Production / shipping. Optimizer at `-O3`, instrumentation off, klog at Info, Trace call sites elided. |
-| `x86_64-debug-ubsan` | Debug build + `-fsanitize=undefined`. Catches signed overflow, OOB, divrem, alignment. |
-| `x86_64-debug-fast` | Debug binary with cheaper instrumentation (sample-only cap-audit, no lock-order audit). Faster boot, still debug-identifiable RIPs. |
-| `x86_64-release-asserts` | Release optimizer + `DEBUG_ASSERT` invocations + UBSAN runtime. Paranoid production: pay one branch per assert site for early invariant trip detection. |
-| `x86_64-release-audit` | Release + Full cap-gate audit + lock-order audit + boot selftests + klog Trace floor. Forensic post-incident capture build. |
-| `x86_64-release-lto` | Release + ThinLTO. Inlines across TU boundaries; slower link, faster runtime. |
-
-Granular knobs (`DUETOS_BOOT_SELFTESTS`, `DUETOS_ASSERTS`,
-`DUETOS_LOCK_ORDER_AUDIT`, `DUETOS_CAP_AUDIT`, `DUETOS_KLOG_DEFAULT`,
-`DUETOS_KLOG_COMPILE_FLOOR`, `DUETOS_KASLR`, `DUETOS_LTO`) can be
-overridden per-preset or on the cmake command line. The boot
-banner reflects the active set:
-
-```text
-[boot] DuetOS build flavor: debug +asserts +selftests +lockaudit +capaudit=sample +kaslr +trace
-[boot] DuetOS build flavor: release +capaudit=sample +kaslr
-```
-
-## CI + release automation
-
-All release automation is in-repo under [`.github/workflows/`](.github/workflows/):
-
-- [`build.yml`](.github/workflows/build.yml) runs format + debug/release builds, builds and smoke-boots every non-default flavor (release-asserts, release-audit, release-lto, debug-fast), and uploads each flavor's ISO + kernel ELF as a per-run artifact alongside the debug/release artifacts.
-- [`release.yml`](.github/workflows/release.yml) publishes rolling channels (`latest-release` + `latest-debug` as front-runners; `latest-flavors` for the specialized presets — release-asserts, release-audit, release-lto, debug-fast) from `main` and from `v*` tags.
-
-Local validation of release logic (same core commands used by CI):
-
-```bash
-cmake --preset x86_64-debug
-cmake --build build/x86_64-debug --parallel $(nproc)
-
-cmake --preset x86_64-release
-cmake --build build/x86_64-release --parallel $(nproc)
-
-# Optional smoke gate equivalent
-DUETOS_TIMEOUT=30 tools/test/ctest-boot-smoke.sh build/x86_64-debug
-```
-
-A healthy boot ends with something like:
-
-```
-[ring3] registered 0x26 DLL(s) pid=0x13
 [reg-fopen-test] ProductName="DuetOS" (type=1, size=7)
 [reg-fopen-test] /bin/hello.exe first two bytes: 0x4d 0x5a
 [reg-fopen-test] all checks passed
@@ -202,225 +24,85 @@ Not enough argument. Use -h for help.
 [I] sys : exit rc val=0x1234
 ```
 
+The "Windows Kill" line is **not ours**. It's `windows-kill.exe` — a third-party 80 KB MSVC-built PE with **52 imports across 6 DLLs**, downloaded as-shipped from its release page. Our PE loader maps it, our import resolver binds every call against the preloaded DLLs' export tables, and the program runs to a clean exit through our `ucrtbase` / `kernel32` / `ntdll` / `advapi32` surface. No source patches, no relinking, no recompile.
+
+Windows binaries that open windows work too. `/bin/windowed_hello.exe` imports `CreateWindowExA`, `ShowWindow`, and `MessageBoxA` from our `user32.dll`, then issues `int 0x80` with `SYS_WIN_CREATE` (58) / `SYS_WIN_SHOW` (60) / `SYS_WIN_MSGBOX` (61); the kernel handlers land a real window in the compositor next to Calculator and Notepad. See [`docs/screenshots/07-windowed-hello.png`](docs/screenshots/07-windowed-hello.png).
+
 ---
 
-## Screenshots
+## How it fits together
 
-Captured live from QEMU. See [`docs/screenshots/`](docs/screenshots/)
-for the PNGs. Reproduce any of them with:
+```
+Windows PE applications
+        ↓ imports
+44 Win32 translator DLLs  (userland/libs/, ~1100 exports total)
+        ↓ int 0x80
+DuetOS kernel  (one VFS, one TCP stack, one compositor, one registry)
+        ↓
+Kernel-mode drivers  (PCIe, NVMe, AHCI, xHCI/USB, e1000, HDA, GPU)
+```
+
+The Win32 DLLs are **translators**, not a parallel subsystem. A native DuetOS app and a Windows PE both make the same syscalls to the same kernel, walk the same address-space tables, and paint into the same compositor. There is no second TCP stack, no shadow VFS, no parallel registry. Subsystem isolation rules and the audit checklist live in [`wiki/kernel/Subsystem-Isolation.md`](wiki/kernel/Subsystem-Isolation.md).
+
+Kernel: UEFI boot on x86_64, 4-level paging, SMP-aware scheduler, W^X + SMEP/SMAP + ASLR + stack canaries + retpoline, capability-based IPC, ~190 numbered syscalls. PCIe enumeration, NVMe, AHCI, xHCI/USB, PS/2, Intel HDA, e1000 NIC. HPET-calibrated LAPIC timer. Kernel-mode breakpoint subsystem with hardware DR gates. Live crash dump with inline symbol resolution.
+
+No Linux kernel under this tree, no GNU userland, no Wine vendoring, no ReactOS fork. The kernel is written from scratch and booted directly by GRUB/UEFI into long mode.
+
+---
+
+## Try it
+
+**Pre-built ISO** — boot in QEMU in 30 seconds, no toolchain needed:
 
 ```bash
+wget https://github.com/krilliac/duetos/releases/download/latest-release/duetos-release.iso
+qemu-system-x86_64 -bios /usr/share/ovmf/OVMF.fd -cdrom duetos-release.iso -serial stdio
+```
+
+**From source** — clone, configure, build, boot:
+
+```bash
+git clone https://github.com/krilliac/duetos.git && cd duetos
 cmake --preset x86_64-debug
 cmake --build build/x86_64-debug --parallel $(nproc)
-
-# Login gate — explicit entry 0 (no autologin) via the theme harness
-DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh  0 docs/screenshots/01-login-screen.png
-
-# Themed desktops by GRUB-entry index (see boot/grub/grub.cfg). The
-# harness drops a per-call sidecar grub.cfg with the requested
-# entry pinned as the default, so the canonical menu (and the
-# boot-smoke test's autologin default) stay untouched.
-DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh  5 docs/screenshots/02-desktop-classic.png
-DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh  6 docs/screenshots/03-desktop-slate10.png
-DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh 10 docs/screenshots/05-desktop-amber.png
-DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh 11 docs/screenshots/06-desktop-duet.png
-
-# TTY mode + native pixel-render demo
-DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh  2 docs/screenshots/04-terminal-tty.png
-DUETOS_SETTLE=12 tools/qemu/screenshot-theme.sh  5 docs/screenshots/08-gfxdemo-pixel-render.png
-DUETOS_SETTLE=12 tools/qemu/screenshot-theme.sh 11 docs/screenshots/09-duet-pixel-render.png
+DUETOS_TIMEOUT=30 tools/qemu/run.sh build/x86_64-debug/duetos.iso
 ```
 
-`Ctrl+Alt+Y` cycles themes at runtime: **Classic → Slate10 → Amber →
-Duet → (wraps)**.
-
-| Login gate | Terminal (TTY) |
-|------------|----------------|
-| ![login gate](docs/screenshots/01-login-screen.png) | ![fullscreen TTY](docs/screenshots/04-terminal-tty.png) |
-| Default boot. `USERNAME` / `PASSWORD` form, default accounts hinted at the bottom. | `boot=tty` entry. Fullscreen framebuffer console with the boot log, shell help, and login prompt. |
-
-### The four themes
-
-`Ctrl+Alt+Y` (or `theme=<name>` on the kernel cmdline / `theme <name>` in
-the kernel shell) hot-swaps every chrome colour. Same compose, same
-windows, same compositor — only the palette changes. Each theme is a
-flat token table in `kernel/drivers/video/theme.cpp` that the window
-registry, taskbar, console, and cursor backing all sample on every
-recompose.
-
-| Classic — teal / slate-blue (the original) | Slate10 — Win10 × Unreal Slate hybrid |
-|--------------------------------------------|----------------------------------------|
-| ![classic theme](docs/screenshots/02-desktop-classic.png) | ![slate10 theme](docs/screenshots/03-desktop-slate10.png) |
-| The palette the first GUI slice shipped with, preserved bit-for-bit. Calculator, Notepad, Files, Task Manager, Kernel Log, Clock widget, GFX Demo, taskbar with Start + pinned apps + tray + clock. | Dark charcoal chrome, flat Win10-blue accent, Slate-amber Notes title, Win10-red close button. Title bars stay role-coloured so apps remain distinguishable. |
-
-| Amber — single-hue retro-CRT tribute | **Duet — redesigned dual-accent** *(new)* |
-|---------------------------------------|--------------------------------------------|
-| ![amber theme](docs/screenshots/05-desktop-amber.png) | ![duet theme](docs/screenshots/06-desktop-duet.png) |
-| Every surface is a shade of warm amber on near-black, in the spirit of 1980s IBM / Wyse monochrome terminals. Doubles as a stress test for the theme system — anything that hard-coded a multi-hue assumption shows up here first. | Slate-charcoal canvas (`#0B0E13`) with **two accents**: teal `#2DD4BF` for native DuetOS surfaces, amber-warm hues for Win32 PE / document apps. Sourced from the React/Babel prototype under [`docs/duet-theme/prototype/`](docs/duet-theme/prototype/); per-token mapping documented in [Duet Theme Spec](wiki/specifications/Duet-Theme-Spec.md). |
-
-### Native pixel rendering — gfxdemo + DirectX v0 path
-
-| Classic theme — Mandelbrot mode | Duet theme — plasma mode |
-|---------------------------------|---------------------------|
-| ![mandelbrot pixel render](docs/screenshots/08-gfxdemo-pixel-render.png) | ![duet plasma pixel render](docs/screenshots/09-duet-pixel-render.png) |
-
-The **GFX DEMO** window in the upper right is a native DuetOS app
-(`kernel/apps/gfxdemo.cpp`) whose content-draw callback computes
-**every pixel** of its client area on each compose. The demo cycles
-through six modes (plasma / Mandelbrot / wirecube / particles /
-starfield / fire); both screenshots above are the same boot, captured
-at different settle times. Same compose, same compositor, same
-`SYS_GDI_BITBLT` pipeline as the Calculator / Notepad / Files / Task
-Manager / Kernel Log / Clock windows around it — just with the
-client filled by computed pixels rather than glyphs or chrome fills.
-
-The same `FramebufferPutPixel` / `FramebufferFillRect` / `FillRgba`
-primitive set is what the DirectX v0 DLLs (`d3d9` / `d3d11` /
-`d3d12` / `dxgi`) call into when an MSVC PE goes
-`D3D11CreateDeviceAndSwapChain → ClearRenderTargetView → Present`.
-See [`wiki/subsystems/DirectX.md`](wiki/subsystems/DirectX.md) for
-the COM-vtable layout and the Clear-and-Present plumbing.
-
-### Windows PE on the serial console
-
-[`docs/screenshots/pe-serial-excerpt.txt`](docs/screenshots/pe-serial-excerpt.txt)
-is the live excerpt for the PE-on-DuetOS evidence block: an MSVC-built
-fixture queries the registry (`ProductName="DuetOS"`, 7 bytes), `fopen`s
-`/bin/hello.exe` and reads `MZ`, then `windows-kill.exe` — a real
-third-party 80 KB PE with 52 imports across 6 DLLs — prints its
-signature line and exits cleanly through our Win32 DLL surface.
-
-### Windowed PE through user32!CreateWindowExA
-
-![windowed hello](docs/screenshots/07-windowed-hello.png)
-
-`/bin/windowed_hello.exe` (see [`userland/apps/windowed_hello/`](userland/apps/windowed_hello/))
-is a real Windows PE that imports `CreateWindowExA`, `ShowWindow`, and
-`MessageBoxA` from `user32.dll` plus `Sleep` and `ExitProcess` from
-`kernel32.dll`. On boot, the PE loader maps it, the import resolver
-binds each call against the preloaded `user32.dll`'s EAT, and the stub
-issues `int 0x80` with `SYS_WIN_CREATE` (58) / `SYS_WIN_SHOW` (60) /
-`SYS_WIN_MSGBOX` (61). The kernel-side handlers route into the
-compositor in `kernel/drivers/video/widget.cpp` — the blue-titled
-**WINDOWED HELLO** window bottom-right in the screenshot is the result,
-painted in the same pass as the native Calculator / Notepad / Files /
-Task Manager / Kernel Log windows. Serial log excerpt for the same
-run:
-
-```
-[msgbox] pid=0x16 caption="Windowed Hello" text="Running on DuetOS!"
-[win] create pid=0x16 hwnd=7 rect=(500,400 420x220) title="WINDOWED HELLO"
-[I] sys : exit rc val=0x57
-```
-
-Reproduce with:
-
-```bash
-DUETOS_SETTLE=10 tools/qemu/screenshot-theme.sh 5 docs/screenshots/07-windowed-hello.png
-```
+Toolchain: Clang 18+, CMake 3.25+, NASM 2.16+. ISO build needs `qemu-system-x86`, `ovmf`, `grub-common`, `grub-pc-bin`, `grub-efi-amd64-bin`, `xorriso`, `mtools`. Build flavors (release-asserts for paranoid production, release-audit for forensic capture, release-lto, debug-ubsan, debug-fast) are documented in [`wiki/tooling/Build-System.md`](wiki/tooling/Build-System.md).
 
 ---
 
-## What works today
+## What works · what doesn't (yet)
 
-Freestanding Win32 PEs (no CRT, direct `int 0x80`) — since early
-development. Console programs with CRT, threads, mutexes, events,
-atomics, `printf`, file I/O, registry queries — current. Real
-third-party Windows binary (`windows-kill.exe`) — running end-to-end
-through the DLL surface.
+| Working today | Skeleton / not yet |
+|---|---|
+| Freestanding PEs (no CRT, direct `int 0x80`) | `ws2_32!socket` returns `INVALID_SOCKET` — kernel net stack is a skeleton |
+| Console PEs with CRT — threads, mutexes, events, atomics, `printf`, file I/O | GDI paint APIs — chrome paints, client area stays blank |
+| Registry queries against a real Win32-shaped hive | Per-window message queues — `GetMessage` returns `WM_QUIT` so pumps exit immediately |
+| Windowing — `CreateWindowExA` / `ShowWindow` / `MessageBoxA` land in the compositor | Keyboard / mouse routing to the focused window (input still goes to the native console) |
+| DirectX v0 — `D3D11CreateDeviceAndSwapChain`, `ClearRenderTargetView`, `Present` BitBlt | Real `Draw*` calls, shaders, fences, cross-DLL DXGI ↔ D3D11/12 swap-chain marriage |
+| Real third-party PE (`windows-kill.exe`, 52 imports across 6 DLLs) end-to-end | `CoCreateInstance` returns `CLASS_E_CLASSNOTAVAILABLE` |
+| 44 production DLLs preloaded into every Win32 process, ~1100 exports | Vulkan ICD |
 
-## What doesn't work (yet)
-
-Windowing v0 landed (see screenshot above): `user32!CreateWindowExA/W`,
-`ShowWindow`, `DestroyWindow`, and `MessageBoxA/W` are now bridged to
-the in-kernel compositor (`kMaxWindows` = 16, four new syscalls in
-the 58..61 range). Still missing on the windowing track: GDI paint
-APIs (`BitBlt` / `TextOut` / `Rectangle` are still silent no-ops —
-the window chrome paints but the client area stays blank), per-window
-message queues (`GetMessage` / `PeekMessage` still return WM_QUIT so
-event-driven programs exit their pump immediately), and
-keyboard/mouse routing to the target window (input still goes to the
-native console).
-
-Networking — `ws2_32!socket` returns `INVALID_SOCKET`; the kernel
-net stack is a skeleton. DirectX v0 — `D3D11CreateDeviceAndSwapChain`,
-`IDXGIFactory*::CreateSwapChain*`, `D3D12CreateDevice`,
-`Direct3DCreate9` all hand out real COM objects with vtables;
-`ClearRenderTargetView` fills a BGRA8 back buffer in user-mode
-memory and `Present` BitBlts it to the owning HWND via
-`SYS_GDI_BITBLT`. Higher-level drawing (vertex/pixel shaders,
-real `Draw*` calls, fence-driven GPU sync, cross-DLL DXGI ↔ D3D11/12
-swap-chain marriage) is `E_NOTIMPL`. No Vulkan ICD yet. COM —
-returns `CLASS_E_CLASSNOTAVAILABLE`. Each of those is its own
-multi-slice implementation track; the DLL surface is the
-scaffolding that makes them possible.
-
-See the [project history](wiki/getting-started/History.md) for how the
-project got to this point and the
-[Architecture Overview](wiki/getting-started/Architecture-Overview.md)
-for the current layering model. [`CLAUDE.md`](CLAUDE.md) is the
-authoritative development guide — coding standards, anti-bloat
-guidelines, and the full architectural statement; the
-[wiki](wiki/Home.md) is the human-facing digest of the same material
-plus the per-subsystem reference pages.
+Per-DLL, per-function status: [`Win32-Surface-Status`](wiki/reference/Win32-Surface-Status.md).
 
 ---
 
-## Non-goals
+## More
 
-- **Not a Linux distribution, and not a Linux host.** There is no Linux
-  kernel under this tree. The kernel in `kernel/` is written from
-  scratch and booted directly by GRUB/UEFI into long mode; nothing
-  else runs below it. `subsystems/linux/` is a **guest ABI translator**
-  — the same shape as `subsystems/win32/`, a second entry ABI into our
-  kernel, so a Linux ELF binary can call `syscall` and hit a DuetOS
-  syscall via the translation unit. Win32 and Linux are peers; the
-  host is DuetOS.
-- Not a Wine fork. Wine is useful prior art; this repo does not vendor
-  it or link against it.
-- Not a ReactOS rewrite.
-- Not a research microkernel. Pragmatism over academic purity.
-- Not aiming at binary compatibility with specific Windows DLL
-  versions — we aim at *executable* compatibility (run the `.exe`).
+| You want to | Start at |
+|---|---|
+| Build, boot, hack on it | [Getting Started](wiki/getting-started/Getting-Started.md) |
+| Understand the layering | [Architecture Overview](wiki/getting-started/Architecture-Overview.md) |
+| Trace a Win32 call from PE → DLL → syscall → driver | [Win32 PE Subsystem](wiki/subsystems/Win32-PE-Subsystem.md) |
+| Find a syscall number | [Syscall ABI](wiki/specifications/Syscall-ABI.md) |
+| See all four themes and every gfxdemo mode | [`docs/screenshots/`](docs/screenshots/) |
+| Read the project's history slice-by-slice | [History](wiki/getting-started/History.md) |
+| Hack the kernel | [Boot](wiki/kernel/Boot.md) → [Memory](wiki/kernel/Memory-Management.md) → [Scheduler](wiki/kernel/Scheduler.md) |
 
----
+Downloads: [release ISO](https://github.com/krilliac/duetos/releases/download/latest-release/duetos-release.iso) · [debug ISO](https://github.com/krilliac/duetos/releases/download/latest-debug/duetos-debug.iso) · [specialized flavors](https://github.com/krilliac/duetos/releases/tag/latest-flavors). [`CLAUDE.md`](CLAUDE.md) is the authoritative development guide; the [wiki](wiki/Home.md) is the human-facing digest plus the per-subsystem reference pages.
 
-## Layout
+[![release](https://img.shields.io/github/v/release/krilliac/duetos?display_name=tag&filter=latest-release&label=release)](https://github.com/krilliac/duetos/releases/tag/latest-release)
+[![lifetime downloads](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fkrilliac%2Fduetos%2Fstats%2Flifetime-downloads.json)](https://github.com/krilliac/duetos/releases)
 
-```
-boot/          UEFI loader + boot protocol
-kernel/
-  arch/x86_64/ bootstrap, paging, GDT/IDT, traps, APIC, context switch
-  core/        entry, pe_loader, dll_loader, scheduler helpers, syscalls
-  debug/       breakpoints, inspect, syscall-site scanner
-  drivers/     pci, storage/, usb/, net/, gpu/, audio/, input/, video/
-  fs/          VFS, ramfs, FAT32, NTFS (read-only), GPT
-  mm/          frame allocator, paging, kheap, kstack, address_space
-  net/         protocol stacks (skeleton)
-  sched/       scheduler + blocking primitives
-  security/    guards, pentest probes
-  subsystems/
-    graphics/  compositor + Vulkan ICD (skeleton)
-    linux/     Linux-ABI syscall bridge
-    translation/ NT → Linux syscall translator
-    win32/     flat-stubs page (legacy fallback), syscall handlers
-  sync/        spinlock, waitqueue primitives
-userland/
-  apps/        test fixtures (hello_pe, hello_winapi, windows-kill,
-               thread_stress, syscall_stress, customdll_test,
-               reg_fopen_test, …)
-  libs/        44 production userland DLLs (38 preloaded into every
-               Win32-imports PE; remainder load on demand)
-tools/         build helpers, QEMU launcher, embed-blob, gen-symbols,
-               wiki check scripts
-docs/          screenshots, theme prototypes, ABI data files (csv/json),
-               sync-wiki.sh
-wiki/          canonical documentation home (start at wiki/Home.md)
-tests/         hosted + on-target tests
-```
-
----
-
-## License
-
-See [`LICENSE`](LICENSE).
+[`LICENSE`](LICENSE)
