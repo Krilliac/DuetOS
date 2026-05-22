@@ -20,6 +20,46 @@ cleanup debt: move the residual up and delete the rest.
 
 ## Kernel / runtime
 
+### Boot-tail stack canary corruption — intermittent
+
+- **Symptom:** ~1/6 SMP=8 release determinism-sweep boots fire a
+  `[recursive-panic] security/stack: stack canary corrupted —
+  overflow detected — short-circuiting` at the end of boot, right
+  after `[sched] created task id=0x22 name="kheartbeat"`. The
+  recursive-panic guard fires because an earlier panic was already
+  in progress (the original Panic banner was truncated by the
+  short-circuit halt, so the root cause isn't visible in the log).
+  Confirmed surfacing 2026-05-22 in sweep-3 of the post-fix
+  determinism sweep (`/tmp/sweep-3.log`).
+- **Pre-existing:** This was hidden before the SmpStartAps
+  `aps=?` fix landed (boots never reached past AP bring-up, so
+  post-bringup behaviour was invisible). It is NOT a regression
+  introduced by the predicate / iteration-key / Delay10msApproximate
+  triple-fix — verified by 28 individual single-boot runs all
+  clean across the multi-commit progression (n1..n15, d1..d5,
+  op1..op3, final1..final5).
+- **Approach:**
+  1. Capture more boots into `/tmp/canary-*.log` and grep for the
+     exact task whose stack canary tripped (the recursive guard
+     reports the subsystem; the original Panic's PanicWithValue
+     would print the corrupted canary bytes).
+  2. The reaper's pre-free canary check at `sched.cpp:4360` is
+     one site; the periodic per-task canary scanner at
+     `security/stack_canary.cpp:72` is another. Identifying which
+     fires first via probe-injection isolates the offender.
+  3. Likely candidates: kheartbeat (just created when the panic
+     fires), a fresh AP idle task, or a boot-tail spawn that
+     under-sized its stack. None of which were rare before SMP
+     came up.
+- **Blocks on:** willing follow-up slice — the SMP fix it
+  surfaces from is otherwise complete (6/6 determinism sweeps,
+  zero non-AP-timeout failures, byte-stable per-CPU online).
+- **Detection landed (2026-05-22):** `boot-log-analyze.sh` now
+  catches `recursive-panic` + `canary corrupted` in its HEALTH
+  regression scan (the prior shape was case-sensitive PANIC and
+  missed both the lowercase recursive-panic line and the
+  canary-corruption message even though it was a real fault).
+
 ### B2-followup — split `g_sched_lock` per-CPU
 
 - **Residual:** per-CPU runqueue head/tail live in `cpu::PerCpu`,

@@ -79,16 +79,25 @@ fi
 hr
 echo "HEALTH (CLAUDE.md regression scan)"
 # Hard failures — never deliberate.
-hard=$(g 'PANIC|TRIPLE|kernel oops|task-kill|#GP at|#PF at|#UD at|unhandled exception|triple fault' \
+# Includes `recursive-panic` (lowercase): the panic guard emits
+# `[recursive-panic] subsys: msg — short-circuiting` when a panic
+# fires while another panic is already in progress. The original
+# uppercase PANIC banner may have been truncated by the recursive-
+# panic halt, so catching only `PANIC` misses these. Observed
+# 2026-05-22 in sweep-3 (stack canary corruption during boot-tail
+# kheartbeat task creation) — the sweep summary's panic column
+# said 0 because the grep was case-sensitive PANIC.
+hard_pat='PANIC|TRIPLE|kernel oops|task-kill|#GP at|#PF at|#UD at|unhandled exception|triple fault|recursive-panic|canary corrupted'
+hard=$(g "$hard_pat" \
        | grep -avE 'selftest|self-test|deliberately|injected|expected|sanity line' | head -5)
-hardn=$(g 'PANIC|TRIPLE|kernel oops|task-kill|#GP at|#PF at|#UD at|unhandled exception|triple fault' \
+hardn=$(g "$hard_pat" \
         | grep -acvE 'selftest|self-test|deliberately|injected|expected|sanity line' 2>/dev/null)
 if [ "$hardn" -gt 0 ]; then
     echo "  !! $hardn hard fault line(s):"
     echo "$hard" | sed 's/^/     /'
     rc=1
 else
-    echo "  no panic / triple-fault / oops / task-kill"
+    echo "  no panic / triple-fault / oops / task-kill / recursive-panic"
 fi
 # Error-level lines, minus the known-deliberate self-test scaffolding.
 # elf-loader PT_LOAD line is the unwind-guard self-test's deliberate OOM
