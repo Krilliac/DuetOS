@@ -66,17 +66,15 @@ cleanup debt: move the residual up and delete the rest.
      `call [table+rax*?]` or `call *low_func_ptr` whose target
      lives in the conventional-memory identity map (firmware /
      ACPI / SIPI scratch at phys 0x1000-ish).
-- **Indirect-call validators landed (2026-05-22):** Three
-  ArmedLog probes attribute the corruption to its dispatcher
-  the moment the wild value is loaded — pre-fix the only
-  evidence was the wild RIP itself, with no caller / vector /
-  CPU in the banner. Each refuses the dispatch + panics with a
-  real subsystem so an attached GDB at `ProbeFire` reads the
-  call site directly:
+- **Indirect-control-flow validators landed (2026-05-22):** Five
+  ArmedLog probes — one per indirect dispatch shape — attribute
+  the corruption to its dispatcher the moment a wild target is
+  loaded. Each refuses dispatch + panics with a real subsystem
+  so an attached GDB at `ProbeFire` reads the call site directly:
     * `sync/rcu`: `DrainQueue` validates `cb.fn ∈
-      [_text_start, _text_end)` before the `__llvm_retpoline_r11`
-      thunk (`kernel/sync/rcu.cpp`). Probe:
-      `rcu.wild_callback` / `kRcuWildCallback`.
+      [_text_start, _text_end)` before the
+      `__llvm_retpoline_r11` thunk (`kernel/sync/rcu.cpp`).
+      Probe: `rcu.wild_callback` / `kRcuWildCallback`.
     * `sched/trampoline`: `SchedTaskTrampolineValidateEntry`
       called from the trampoline asm between the
       `SchedFinishTaskSwitch` return and `call *%rbx`
@@ -88,26 +86,60 @@ cleanup debt: move the residual up and delete the rest.
       `g_irq_handlers[v]` before `h()`
       (`kernel/arch/x86_64/traps.cpp`). Probe:
       `arch.irq_handler_wild` / `kIrqHandlerWild`.
-- **Validator-coverage gap (open):** A post-validator 20-boot
-  sweep with all three armed showed 1/20 still panics with
-  `rip=0xffffffff8132f0d0 [region=k.bss]` and 0/20 validator
-  fires — so the wild dispatch comes through a 4th indirect
-  call/jump site not yet covered. The captured shape:
-  `rbp=0xffffffff8012811a [region=k.text, inside isr_common]`,
-  `r14=rip` (so the wild value was loaded into `r14` and then
-  jumped to), and the stack contains a lockdep `g_per_cpu`
-  slot address at `rsp+0x18` and the wild RIP itself at
-  `rsp+0x28`. The next slice should: (a) add a validator at
-  any other `call/jmp *%rN` in the IRQ / trap-dispatch / idle
-  path (grep `objdump -d ... | grep -E 'jmpq?\s*\*%r|callq?\s*\*%r'`
-  showed 11 indirect calls + 12 indirect jumps in the kernel
-  image; eliminate one by one), OR (b) attach gdb at first
-  `trap.kernel_pagefault` probe fire and single-step backward
-  to identify the load instruction. Likely candidate: an
-  IRQ-handler tree's vtable / function-pointer table whose
-  entry was scribbled, OR an IRET-frame RIP corruption (the
-  CPU was inside `isr_common` per the rbp value, suggesting
-  the trap dispatcher's stack frame was the carrier).
+    * `arch/retpoline`: a strong override of
+      `__llvm_retpoline_r11` validates r11 (the indirect-call
+      target) before the safe-speculation ret
+      (`kernel/arch/x86_64/retpoline_thunks.S`). Catches every
+      `call *%r11` shape — i.e. the vast majority of
+      compiler-emitted indirect calls under -mretpoline. Probe:
+      `arch.retpoline_wild` / `kRetpolineWild`.
+    * `arch/iretq`: `isr_common`'s exit gate validates the
+      iretq frame's saved RIP for kernel-mode returns
+      (`kernel/arch/x86_64/exceptions.S`). Catches the
+      trap-frame-RIP-corruption shape (a C handler writes past
+      its frame into the saved RIP slot, unconditional iretq
+      then loads the wild value). Probe:
+      `arch.iretq_frame_wild` / `kIretqFrameWild`.
+- **Validator-coverage gap (still open):** A 20-boot sweep with
+  all five armed (commit 74c0118, canary10) caught 1 panic with
+  EVERY validator silent — `rip=0xffffffff8132a520 [region=k.bss]`
+  on AP3's idle task, NX_VIOLATION on instruction fetch from
+  the lockdep `g_per_cpu` array, return-address-pointers chain
+  shows `SchedTaskTrampoline+0x17` (return from `call rbx`)
+  meaning rbx was validated as `&IdleMain` and IdleMain ran
+  normally. So the wild jump happens DEEPER inside IdleMain's
+  call tree, through a control transfer the five validators
+  don't cover. Candidates:
+    1. A `ret` whose return address on the stack was scribbled
+       between push and pop (every kernel `ret` would need a
+       per-frame guard to catch — impractical statically).
+    2. A `jmp *%rN` (direct, non-retpoline indirect jump) — but
+       the objdump survey lists only 12 such sites and none in
+       the IRQ / idle path.
+    3. A retpoline through a register OTHER than r11 — but
+       `nm` shows `__llvm_retpoline_r11` is the ONLY thunk in
+       the binary (other `__x86_indirect_thunk_*` symbols are
+       linker-gc'd as no callers exist).
+    4. A trap-frame corruption from one of the OTHER 6 iretq
+       sites (syscall entry, EnterUserMode variants). Most
+       return to ring 3 so the kernel-mode-only iretq gate
+       skips them — but their iretq frames are STILL kernel-
+       mode-owned mid-handler and could carry corruption.
+- **Next-slice approach:**
+  1. Add the iretq frame-RIP gate to the remaining 6 iretq
+     sites (native_syscall_entry, EnterUserMode*, linux_syscall_entry,
+     nt_syscall_entry) — even ring-3 returns can be validated for
+     the kernel→user transition's RIP-fits-in-user-VA invariant.
+  2. Failing that, attach GDB at first `trap.kernel_pagefault`
+     probe fire under `DUETOS_GDB_SERVER=ON`, set a watchpoint
+     on the saved-RIP slot of every in-flight trap frame, and
+     wait for the writer.
+  3. Alternative root-cause investigation: instrument
+     `lockdep.cpp::AfterAcquire` / `BeforeRelease` to dump the
+     held-classes array address WHEN it's computed. If any
+     code is taking `&g_per_cpu[cpu].stack[idx]` and stashing
+     it as a function pointer somewhere, those addresses will
+     show up.
 - **Blocks on:** willing follow-up slice. Underlying #UD is
   observable but not a regression introduced this session.
 
