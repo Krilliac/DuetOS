@@ -137,6 +137,58 @@ cleanup debt: move the residual up and delete the rest.
   per-CPU + per-task pair doesn't already absorb. None
   observed since 2026-05-22.
 
+### SMP=8 saturation use-after-free (RIP=0xdededededededede)
+
+- **Symptom:** booting `tools/test/smp-stress-sweep.sh 8 8 5`
+  (release SMP=8) intermittently — about 1-2 of every 5 repeats —
+  hits a kernel-mode #GP at the freed-poison RIP pattern:
+
+  ```
+  [panic-summary] subsystem=arch/traps msg="#GP General protection"
+  rip       : 0xdededededededede  [wild: non-canonical ...]
+  rbx, rbp, r12, r14, r15 : 0xdededededededede (all freed-poison)
+  cs        : 0x08 (ring 0 kernel-code)
+  cpu_id    : 0x02
+  uptime    : 2.272s since boot
+  ```
+
+  The kernel jumped through a freed function pointer
+  (`0xDE` = `kHeapFreePoison`, see `kernel/mm/kheap.cpp:39`).
+  Several registers carry the same freed-poison pattern,
+  indicating the call/jmp went through a struct field that was
+  freed-then-poisoned but still referenced.
+- **What's known:** the fault site is BEFORE the stress driver's
+  workers do meaningful work — it lands just after
+  `LOADTEST: spawned 8 / 8` and a few `[sched] {A,B,C} i=...`
+  iterations from `SchedDemoWorkerTask`. So the use-after-free is
+  on the boot-tail spawn path, NOT in the stress workload itself.
+- **Reusable harness:** `tools/test/smp-stress-sweep.sh 8 8 10`
+  reproduces at ~20-40% rate. The discovery harness is the
+  panic-dump cleanup itself — without the serial-bypass +
+  `WriteCurrentTaskLabel` guards that landed in the 2026-05-22
+  slice, the RIP rendered as space-mixed bytes and the bug was
+  invisible. Future investigation should start with the panic
+  dump's kernel-stack trace (the dump prints
+  `[fault-stack] stack@... <unreadable>` today because the rsp
+  is in `k.stack-arena` but the dump-time AS doesn't have the
+  frame faulted in — fix that first to get the call chain).
+- **Likely shape:** a kobject / handle-table / iocp-style
+  object's callback pointer outliving its owner under SMP. The
+  surface-area suspects from the boot tail:
+  - HandleTableDrain / ProcessRelease running concurrently with
+    a peer that still has a handle in flight
+  - `SchedExit` reclaiming a Task whose pointer a peer's
+    runqueue still references
+  - workpool's `WorkerCtx` freed while a peer worker is
+    inside the callback
+  Each of these has refcount machinery; the bug is likely a
+  missing `KObjectAcquire` on one of the acquire paths.
+- **Blocks on:** dumping the stack frames at the fault rsp
+  (`tools/qemu/run.sh` can supply a GDB stub via COM2; attach
+  with `tools/debug/duetos-gdb-attach.sh` once the fault fires
+  and read the call chain). With the call chain visible the
+  owning subsystem becomes apparent.
+
 ### SMP=8 (4c × 2t) AP-bringup recursive fault under x86_64-debug
 
 - **Symptom:** booting `tools/qemu/run-stress.sh cpu` on
