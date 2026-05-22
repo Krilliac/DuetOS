@@ -624,15 +624,18 @@ extern "C" void TrapDispatch(TrapFrame* frame)
                 return;
             if (frame->rip == entry_rip)
                 return;
-            // RIP changed mid-handler on a kernel-mode return path.
-            // Could be an extable fixup we don't exempt; check
-            // legitimacy by validating it's still in kernel .text.
-            const ::duetos::u64 new_rip = frame->rip;
-            const ::duetos::u64 lo = reinterpret_cast<::duetos::u64>(::_text_start);
-            const ::duetos::u64 hi = reinterpret_cast<::duetos::u64>(::_text_end);
-            if (new_rip >= lo && new_rip < hi)
-                return;
-            KBP_PROBE_V(::duetos::debug::ProbeId::kTrapDispatchRipScribble, new_rip);
+            // RIP changed mid-handler on a kernel-mode return path
+            // outside the legitimate-rewrite vectors. Whether the
+            // new value is in kernel text or not, this is a bug:
+            // the IRQ / fault handler tree scribbled the saved RIP
+            // slot. The canary12 capture (2026-05-22) showed
+            // entry_rip = IdleMain+0x57 (post-MWAIT in the idle
+            // loop) and exit_rip = SchedTaskTrampoline+0x17 (post
+            // `call *rbx`) — both in kernel `.text`, so the
+            // text-range gate alone misses it. Fire on any
+            // mismatch and let the panic banner name the
+            // entry/exit pair.
+            KBP_PROBE_V(::duetos::debug::ProbeId::kTrapDispatchRipScribble, frame->rip);
             SerialWrite("[arch/traps] TRAP-FRAME RIP scribbled mid-handler  cpu=");
             SerialWriteHex(::duetos::cpu::CurrentCpuIdOrBsp());
             SerialWrite("  vector=");
@@ -640,19 +643,15 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             SerialWrite("  entry_rip=");
             SerialWriteHex(entry_rip);
             SerialWrite("  exit_rip=");
-            SerialWriteHex(new_rip);
+            SerialWriteHex(frame->rip);
             SerialWrite("  entry_r15=");
             SerialWriteHex(entry_r15);
             SerialWrite("  exit_r15=");
             SerialWriteHex(frame->r15);
             SerialWrite("  cs=");
             SerialWriteHex(entry_cs);
-            SerialWrite("  text=[");
-            SerialWriteHex(lo);
-            SerialWrite("..");
-            SerialWriteHex(hi);
-            SerialWrite(")\n");
-            ::duetos::core::PanicWithValue("arch/traps", "trap frame RIP scribbled mid-handler", new_rip);
+            SerialWrite("\n");
+            ::duetos::core::PanicWithValue("arch/traps", "trap frame RIP scribbled mid-handler", frame->rip);
         }
     };
     RipIntegrityGuard guard(frame);
