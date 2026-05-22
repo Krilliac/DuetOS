@@ -4,6 +4,7 @@
 #include "core/panic.h"
 #include "debug/probes.h"
 #include "diag/runtime_checker.h"
+#include "diag/stress_driver.h"
 #include "env/environment.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
@@ -202,9 +203,29 @@ void AutonomicApply(const AutoActionSet& set)
             // landing, traced via smoke-pe-hello.log tail showing
             // SECURITY GUARD PROMPT mid-wait when qemu killed it).
             // Once-warn so the silenced action stays auditable.
+            //
+            // Same applies to `stress=cpu|mem|mix|spin` headless
+            // runs: under x86_64-debug, UBSAN/KASAN/red-zone audit
+            // routinely produces a kernel-integrity finding that
+            // raises Rule 3 within ~30s of boot. Escalating to
+            // Enforce then traps ring3-hello-pe (PE_NO_IMPORTS
+            // warning) on the guard prompt for the full 10s
+            // default-deny, after which the stress driver task is
+            // still on its 30-tick settle sleep — the outer wall
+            // budget eats the entire stress window. Repro'd on
+            // 4-vCPU debug boot of `tools/qemu/run-stress.sh cpu 15 4`
+            // exiting with `qemu terminating on signal 15` and no
+            // `[stress] done` sentinel. Mirror the smoke-profile
+            // gate exactly: skip the escalation, emit one WARN so
+            // the suppress stays auditable.
             if (::duetos::test::SmokeProfileGet() != ::duetos::test::SmokeProfile::None)
             {
                 KLOG_ONCE_WARN("autonomic", "security-escalate suppressed under smoke profile (would block hello-pe)");
+                break;
+            }
+            if (::duetos::core::diag::StressDriverArmed())
+            {
+                KLOG_ONCE_WARN("autonomic", "security-escalate suppressed under stress driver (would block hello-pe)");
                 break;
             }
             security::SetGuardMode(security::Mode::Enforce);

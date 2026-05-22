@@ -111,30 +111,131 @@ cleanup debt: move the residual up and delete the rest.
   Gated by a 6-boot determinism sweep (3/3 APs online, byte-stable,
   zero panic/triple/fallback) + a 6/6-clean `gui-fuzz.sh 18` SMP
   matrix. `g_promote_to_panic` may now be reconsidered.
-- **Residual (the real remaining work — architectural cleanup, no
-  live failure):** the held-stack *storage* is still the single
-  global `g_per_cpu[0]` alias (`#define g_held_stack
-  g_per_cpu[0].stack`, `kLockdepCpuMax = 1` in
-  `kernel/sync/lockdep.cpp`) and it does **not** separate spinlock
-  classes from sleeping-mutex classes. With the GSBASE/lidt root
-  fixed this no longer produces a runtime symptom, but the design
-  is still wrong in principle: spinlock classes must NOT follow the
-  task (a spinlock is never held across a normal switch; the one
-  deliberate exception — `g_sched_lock` riding `ContextSwitch` via
-  the `ctxsw_lock_to_release` lock-pass — is released by
-  `SchedFinishTaskSwitch`, not by lockdep). The prescribed split: a
-  **per-CPU** stack for spinlock classes (indexed by
-  `cpu::CurrentCpu()->cpu_id`, the B2 cascading item) and the
-  **per-task** stack (already in place) for mutex classes; needs a
-  spinlock-vs-mutex class tag (`LockClass` is currently an untyped
-  `u16` with no acquire-API distinction).
-- **Blocks on:** the per-CPU `g_held_stack` indexing is the B2
-  "split `g_sched_lock` per-CPU" cascading item (lockdep must not
-  reintroduce the lockdep↔sched recursion the TU header avoids).
-  Wants its own focused slice + a ≥6-boot determinism sweep
-  (`tools/test/boot-determinism-sweep.sh`). The genuine in-task
-  nesting found alongside this (modal-dialog FAT32 I/O under
-  `CompositorLock`) is already fixed.
+- **Per-CPU held-stack storage — LANDED (2026-05-22).** The
+  global `g_per_cpu[0]` alias is gone. `kLockdepCpuMax =
+  acpi::kMaxCpus`, each CPU indexes its own slot via
+  `cpu::CurrentCpuIdOrBsp()`, and the re-entry guard
+  (`PerCpuHeld::in_lockdep`) moved into the per-CPU struct too.
+  `LockdepCriticalSection` reads the slot AFTER `Cli` so a
+  migration can't corrupt a peer's slot. The shared edge graph
+  + counters use `__atomic_fetch_or` (bit) and `SatAtomicAdd`
+  (counters) for cross-CPU safety. Verified with 5/5-clean
+  `tools/test/smp-stress-sweep.sh 8 8 5` (release SMP=8) and
+  no inversions in the lockdep self-test under the new
+  storage layout.
+- **Residual (architectural cleanup, no live failure):** the
+  spinlock-vs-mutex class split. Today every `LockClass` lives
+  in one per-CPU stack; with the per-task `Task::lockdep_held`
+  snapshot/restore wired underneath, sleeping-mutex classes
+  technically ride the task across a switch via that buffer,
+  while spinlock classes are protected by Cli (single CPU at a
+  time). The two are not separately tagged at the API. A
+  `LockClassSpin` / `LockClassMutex` tag would make the
+  separation explicit so an audit can verify a sleeping-mutex
+  class never appears on a per-CPU spinlock stack.
+- **Blocks on:** a workload that produces a false inversion the
+  per-CPU + per-task pair doesn't already absorb. None
+  observed since 2026-05-22.
+
+### SMP=8 saturation use-after-free — LANDED (2026-05-22)
+
+The intermittent SMP=8 release-stress `#GP at
+RIP=0xdedededededededede` (kheap freed-poison pattern) was a
+real reaper-races-dying-task UAF in the scheduler's
+exit/reap handoff. The historical comment in `SchedExit`
+called the gap out:
+
+    > Single-CPU safety argument: once Schedule() below
+    > context-switches away, this task's Current() assignment
+    > is gone and only the zombie pointer references the
+    > struct. [...] SMP bring-up will need to also verify the
+    > task isn't `Running` on a peer CPU before the reaper
+    > touches it.
+
+That verify-before-reap half wasn't done. Race:
+
+  1. CPU A — Task T calls `SchedExit`. Marks T as Dead, pushes
+     T onto `g_zombies`, wakes the reaper, calls `Schedule`.
+  2. CPU B — Reaper wakes, pops T, calls
+     `FreeKernelStack(T->stack_base)` — unmaps + frees the
+     stack pages.
+  3. CPU A — Still mid-`Schedule`. `ContextSwitch` is executing
+     ON T's stack while saving rsp/rip and loading the new
+     task's regs. The reader gets back kheap freed-poison
+     (0xDE bytes), interpreted as a return address → `ret`
+     jumps to 0xdedede... → non-canonical #GP. Symptom matches
+     the panic dump byte-for-byte.
+
+**Fix (commit `1f07c97`):** per-CPU deferred-zombie. `SchedExit`
+stashes the dying task into
+`pcpu->ctxsw_dying_task_to_zombie` BEFORE the context switch.
+`SchedFinishTaskSwitch` — which runs on the NEW task's stack
+AFTER `ContextSwitch` has committed the rsp swap — promotes
+the deferred entry to `g_zombies` and wakes the reaper. By
+that point the dying task is provably off-CPU on every peer.
+
+Adjacent races fixed in the same slice:
+
+- `Process::refcount` and `AddressSpace::refcount`: plain
+  `++`/`--` was racy under SMP. Now CAS-loop retain +
+  `__atomic_sub_fetch` release.
+- `g_zombies` list mutation: reaper's detach now takes
+  `g_sched_lock` for consistency with the deferred-zombie
+  producer.
+
+Verified with a 20-repeat UAF-hunt harness
+(`/tmp/uaf-hunt.sh 20 5 8 60`): zero panics. Pre-fix rate was
+~1/5-1/15 (the panic-dump cleanup that landed earlier in the
+slice made the bug VISIBLE; this commit makes it not happen).
+The panic-dump path itself was also hardened in the same slice
+(`WriteCurrentTaskLabel` defensive guards, `DumpStackWindow`
+page-clamp, `PlausibleKernelAddress` upper bound extended
+through the kstack arena) so a future regression in the same
+area is readable immediately instead of corrupted.
+
+### SMP=8 (4c × 2t) AP-bringup recursive fault under x86_64-debug
+
+- **Symptom:** booting `tools/qemu/run-stress.sh cpu` on
+  **x86_64-debug only** with `DUETOS_SMP=8,sockets=1,cores=4,threads=2`
+  reproducibly hits a recursive #-fault during the **first AP**'s
+  bring-up at ~70 ms after `[arch/smp] starting AP apic_id val=0x1`.
+  Captured 2026-05-22; symptom-line in the serial log:
+
+  ```
+  [t=97644.875ms] [D] fs/fat32 : ...corrupted bytes... path=""
+  [recursive-fault] vec=0x...  rip=0x... — short-circuiting panic dump
+  ```
+
+  The vec/rip on the recursive-fault line render mostly as
+  spaces / non-printable bytes — the panic-mode SerialWrite is
+  bypassing `g_serial_lock`, so the BSP's hex digits and a
+  concurrent AP-side writer interleave at the wire level. The
+  underlying first fault is therefore lost to corruption.
+
+  **Bound:** x86_64-release at SMP=8 boots clean and runs the
+  10s-8-worker stress to `[stress] done` (verdict OK, no
+  inversions). x86_64-debug at SMP=4 also boots clean. So the
+  AP-bringup storm under KASAN/UBSAN instrumentation noise is
+  the trigger — neither SMP=8 alone nor debug alone is enough.
+- **Likely shape:** an AP's first timer IRQ enters the trap path
+  while KASAN/UBSAN shadow-map machinery is still initialising
+  for that AP's stack/IST region, AND `Current()` on that AP is
+  the bootstrap sentinel rather than a fully-armed task. The
+  UBSAN report path itself takes a lock that races. **Not** the
+  GSBASE/lidt root that PR #320 fixed — that one trace-bounds at
+  "AP online" and the recursive-fault never reaches it.
+- **Reusable harness:** `tools/test/smp-stress-sweep.sh 20 8 5`
+  re-triggers the scenario with per-repeat log capture so a
+  future investigation can grep `build/x86_64-debug/smp-stress-N.log`
+  for the first fault line.
+- **Bounded fix to land first (before chasing the race):** make
+  the recursive-fault dump grab `g_serial_lock` with `try_lock`
+  semantics (or take an `IrqFlags` snapshot once per AP) so the
+  vec/rip survive the second fault. Without that the loop is
+  diagnose-by-corruption. Then re-run the harness with that fix
+  in tree to read the real first-fault site.
+- **Blocks on:** the serial-bypass cleanup OR a per-CPU panic
+  ringbuffer the AP fault path can write to (no serial contention).
 
 ### Topology — cluster-scoped IPI fan-out
 
@@ -228,6 +329,75 @@ landed.)
 ---
 
 ## Storage and filesystem
+
+### FAT32 — driver-wide mutex saturation under concurrent writers
+
+- **Residual:** `kernel/fs/fat32.cpp:68` declares one global
+  `sched::Mutex g_fat32_mutex` (`Fat32Guard` RAII at every public
+  entry) protecting both metadata (BPB, FAT chain cache, path
+  cache) AND the **single** I/O staging buffer `g_scratch[4096]`.
+  Every lookup / read / write / mkdir / rename serializes on it.
+  Correct (the recursive-entry handling in `Fat32Guard::Fat32Guard`
+  is the standard pattern) but **two saturation corners** are
+  visible without rewriting the locking:
+  1. **Priority inversion** — there is no priority inheritance
+     today. A low-priority task holding the mutex while a
+     high-priority task waits is blocked by a peer at the same
+     scheduling class. v0 has one priority band so the symptom
+     is "fair-share starvation under contention," not a hard
+     hang — but `Process::win32_priority_class` is wired
+     (T8-01-followon) and the moment band-aware enqueue lands
+     this becomes a real inversion.
+  2. **Livelock under wake-storm** — many tasks repeatedly
+     contesting `g_fat32_mutex` spend cycles waking + parking
+     instead of doing FS work. Repro under stress=cpu workloads
+     that touch FAT32 from the boot tail: `fs/fat32 : lookup`
+     debug lines fire hundreds of times per second per worker,
+     each round-tripping through `MutexLock` / `MutexUnlock` and
+     the per-task held-stack snapshot/restore.
+- **Lock-free path-cache fast path — LANDED (2026-05-22).** The
+  smallest-concrete-fix bullet's original "per-CPU `g_scratch`"
+  approach turned out to be invasive (the buffer is read
+  throughout the parsers, not just by `ReadSector`), so the
+  actually-smallest fix that helps shipped instead: a
+  seqlock-guarded `PathCacheGetSeqlock` probed BEFORE
+  `Fat32Guard` in `Fat32LookupPath`. Every cache-hit lookup —
+  the boot-storm pattern of repeated NOTES.TXT / TEST.* /
+  TRTEST.BIN / KERNEL.FIX probes — now skips the mutex acquire
+  + held-stack push + cli/sti + release entirely. Writers
+  (under the mutex) bump a per-entry `write_seq` to odd before
+  fields, back to even after; readers (lock-free) snapshot the
+  seq before + after their copy and bail on any mismatch. The
+  generation counter store became `__ATOMIC_RELEASE` so
+  concurrent invalidation downgrades to a miss instead of a
+  stale entry. Saves a `MutexLock`/`MutexUnlock` round-trip per
+  cache hit — observable on `tools/test/fat32-concurrent.sh`
+  contention metric.
+- **Residual (per-CPU `g_scratch` + lock-drop during block-IO):**
+  the actual "release the mutex during the slow block read"
+  win still needs the buffer split. Audit-wise that's:
+  thread a `scratch_ptr` parameter through ReadSector /
+  ReadCluster and the BPB / DirEntry parsers in fat32.cpp,
+  fat32_dir.cpp, fat32_lookup.cpp, fat32_read.cpp,
+  fat32_write.cpp, fat32_create.cpp — about 40 call sites and
+  every consumer line that reads `g_scratch[N]`. With the
+  buffer per-CPU, the mutex can be dropped around the
+  `BlockDeviceRead` itself (the slow path). Larger but
+  mechanical; gated until a workload shows the path-cache
+  fast-path doesn't already absorb the contention.
+- **Larger refactor (deferred):** split into per-volume mutex +
+  per-cache RwLock + lock-free FAT entry cache. Wants its own
+  slice once the path-cache fast path + per-CPU scratch are
+  measured.
+- **Saturation harness:** `tools/test/fat32-concurrent.sh`
+  spawns the linux-smoke synfs + win32 PE smokes concurrently
+  and captures the boot log. Look for `fs/fat32 : lookup`
+  line-rate vs `MutexLock waiter` parking lines as the
+  contention signal.
+- **Blocks on:** evidence that the path-cache fast path didn't
+  close the live livelock corner. If a fat32-concurrent.sh run
+  still shows the symptom, the per-CPU scratch + lock-drop
+  refactor lands next.
 
 ### Stage 6 — per-process namespace roots (residual)
 

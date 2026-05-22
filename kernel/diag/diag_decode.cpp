@@ -350,8 +350,30 @@ void WriteCurrentTaskLabel()
         arch::SerialWrite("<idle> (pre-sched)");
         return;
     }
+    // Validate that `task` is a kernel-canonical pointer before
+    // deref'ing it. The panic dump path lands here on a possibly-
+    // corrupt CPU state (we got here BECAUSE something faulted),
+    // and reading `t->name` from a wild `task` re-faults inside
+    // `sched::TaskName` — triggering the recursive-fault halt
+    // path before the operator sees the original RIP. Observed
+    // 2026-05-22 under SMP=8 stress: first fault was a #GP
+    // somewhere, then the panic-dump re-faulted at
+    // `WriteCurrentTaskLabel + 0x...` on `name[0]` where `name`
+    // came from `task->name` and `task` was a torn read of
+    // `pcpu->current_task` on a peer-CPU's partially-updated
+    // PerCpu struct.
+    constexpr u64 kKernelHalfBase = 0xffff800000000000ULL;
+    if (reinterpret_cast<u64>(task) < kKernelHalfBase)
+    {
+        arch::SerialWrite("<task-ptr-non-canonical>");
+        return;
+    }
     const char* name = sched::TaskName(task);
-    if (name == nullptr || name[0] == 0)
+    if (name == nullptr || reinterpret_cast<u64>(name) < kKernelHalfBase)
+    {
+        name = "<noname-or-wild>";
+    }
+    else if (name[0] == 0)
     {
         name = "<noname>";
     }

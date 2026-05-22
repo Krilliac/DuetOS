@@ -276,15 +276,38 @@ void ProcessRetain(Process* p)
     {
         return;
     }
-    // A retain on a refcount==0 Process means somebody held a stale
-    // pointer to a structure the reaper already returned to the slab.
-    // Without this check the count would wrap from 0 to 1 and the
-    // process would silently rejoin the live set with corrupted state.
-    if (p->refcount == 0)
+    // CAS-loop retain: load → check non-zero → CAS(+1). Plain
+    // `++p->refcount` was a cross-CPU race that surfaced as the
+    // SMP=8 saturation UAF (RIP=0xdedede freed-poison): two CPUs
+    // each holding a stale handle could both read refcount=1,
+    // both `--` to 0, both enter the destruction path → double-
+    // free → garbage poisoned bytes ending up as a return-address
+    // slot on a recycled kstack. Atomic compare-exchange with
+    // ACQUIRE on the witness load + RELEASE on the increment
+    // means a peer's concurrent retain/release is observed
+    // before this CPU's increment, and only one CPU at a time
+    // gets to commit a witnessed transition.
+    //
+    // The refcount==0 panic stays as-is: a witnessed 0 means the
+    // structure was already reaped; incrementing from 0 (instead
+    // of panicking) would silently rejoin a corpse to the live
+    // set. Pre-CAS-loop check is racy by itself, but the
+    // CAS-from-0 fails and forces a retry that catches the same
+    // condition deterministically.
+    while (true)
     {
-        PanicWithValue("core/process", "ProcessRetain on refcount==0 (use-after-free?)", reinterpret_cast<u64>(p));
+        u64 cur = __atomic_load_n(&p->refcount, __ATOMIC_ACQUIRE);
+        if (cur == 0)
+        {
+            PanicWithValue("core/process", "ProcessRetain on refcount==0 (use-after-free?)", reinterpret_cast<u64>(p));
+        }
+        const u64 next = cur + 1;
+        if (__atomic_compare_exchange_n(&p->refcount, &cur, next, /*weak=*/false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+        {
+            return;
+        }
+        // CAS lost the race; cur has the fresh value. Loop and retry.
     }
-    ++p->refcount;
 }
 
 void ProcessRelease(Process* p)
@@ -293,12 +316,27 @@ void ProcessRelease(Process* p)
     {
         return;
     }
-    if (p->refcount == 0)
+    // Atomic decrement-and-test. Plain `--p->refcount` was the
+    // cross-CPU race source — two CPUs both observing refcount=1
+    // and both decrementing to 0 would both enter the destruction
+    // path, double-freeing the Process struct + its AS. Use
+    // `__atomic_sub_fetch` with ACQ_REL so the witness of "I'm
+    // the one who dropped it to 0" is well-defined across CPUs:
+    // exactly one CPU sees `new == 0` and runs the destructor;
+    // the others see `new > 0` and return early.
+    //
+    // ACQ_REL ordering: the destruction path below reads every
+    // owned field (windows, popup menus, AS, etc.); those reads
+    // must observe writes from prior retain/release pairs on
+    // peer CPUs (acquire side). The decrement itself is
+    // observable to peers as the release side.
+    const u64 prev = __atomic_load_n(&p->refcount, __ATOMIC_ACQUIRE);
+    if (prev == 0)
     {
         PanicWithValue("core/process", "ProcessRelease on refcount==0", reinterpret_cast<u64>(p));
     }
-    --p->refcount;
-    if (p->refcount != 0)
+    const u64 new_count = __atomic_sub_fetch(&p->refcount, 1, __ATOMIC_ACQ_REL);
+    if (new_count != 0)
     {
         return;
     }

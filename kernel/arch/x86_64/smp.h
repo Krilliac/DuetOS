@@ -106,6 +106,22 @@ void SmpInstallReschedIpiHandler();
 /// better than recursing into another panic.
 void PanicBroadcastNmi();
 
+/// Bounded busy-wait for peers to acknowledge the panic-broadcast
+/// NMI. Call AFTER `PanicBroadcastNmi` and BEFORE the panic-mode
+/// SerialWrite stream starts. Polls each online peer's
+/// `panic_snapshot_valid` flag (set by the vector-2 handler before
+/// it `cli; hlt`s) until it ticks 1 or `spin_budget` pause-iters
+/// expire — whichever first. Returns the count of peers that
+/// acked. Without this wait the LAPIC IPI delivery latency leaves
+/// a window where a peer is still in normal SerialWrite (holding
+/// `g_serial_lock`) while this CPU bypasses the lock via
+/// `g_serial_panic_mode` and writes raw bytes — the streams
+/// interleave at the UART and corrupt the panic dump. Ported
+/// pattern: toaruos's `arch_fatal_prepare` halts peers before
+/// proceeding with panic output; the bounded wait here is the
+/// "and don't proceed until they actually halted" half of that.
+u32 PanicWaitPeersHalt(u64 spin_budget);
+
 /// Look up a CPU's PerCpu struct by `cpu_id`. Returns the BSP for
 /// `cpu_id == 0` (always non-null after PerCpuInitBsp), the matching
 /// AP for higher ids, or nullptr if that slot was never allocated.

@@ -760,7 +760,25 @@ void AddressSpaceRetain(AddressSpace* as)
     {
         return;
     }
-    ++as->refcount;
+    // Atomic CAS-loop retain — see ProcessRetain for the rationale.
+    // Plain `++as->refcount` was a cross-CPU race that contributed
+    // to the SMP=8 saturation UAF: a peer dropping the AS to 0
+    // while this CPU was racing a retain could leave the AS
+    // double-freed.
+    while (true)
+    {
+        u64 cur = __atomic_load_n(&as->refcount.value, __ATOMIC_ACQUIRE);
+        if (cur == 0)
+        {
+            PanicAs("AddressSpaceRetain on AS with refcount==0", reinterpret_cast<u64>(as));
+        }
+        const u64 next = cur + 1;
+        if (__atomic_compare_exchange_n(&as->refcount.value, &cur, next, /*weak=*/false, __ATOMIC_ACQ_REL,
+                                        __ATOMIC_ACQUIRE))
+        {
+            return;
+        }
+    }
 }
 
 void AddressSpaceRelease(AddressSpace* as)
@@ -769,12 +787,18 @@ void AddressSpaceRelease(AddressSpace* as)
     {
         return;
     }
-    if (as->refcount == 0)
+    // Atomic decrement-and-test — see ProcessRelease for the
+    // rationale. Plain `--as->refcount` would let two CPUs both
+    // observe refcount=1, both decrement to 0, and both enter
+    // the page-table teardown path → double-free of every backing
+    // frame.
+    const u64 prev = __atomic_load_n(&as->refcount.value, __ATOMIC_ACQUIRE);
+    if (prev == 0)
     {
         PanicAs("AddressSpaceRelease on AS with refcount==0", reinterpret_cast<u64>(as));
     }
-    --as->refcount;
-    if (as->refcount != 0)
+    const u64 new_count = __atomic_sub_fetch(&as->refcount.value, 1, __ATOMIC_ACQ_REL);
+    if (new_count != 0)
     {
         return;
     }

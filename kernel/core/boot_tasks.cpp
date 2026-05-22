@@ -3296,13 +3296,22 @@ void SchedDemoWorkerTask(void* arg)
         }
         s_shared_counter = before + 1;
 
-        SerialWrite("[sched] ");
-        SerialWrite(name);
-        SerialWrite(" i=");
-        SerialWriteHex(i);
-        SerialWrite(" counter=");
-        SerialWriteHex(s_shared_counter);
-        SerialWrite("\n");
+        {
+            // Bracket the 7 Write*s so a peer worker / loadtest can't
+            // split the line. Mirrors the AP-bringup + stress-driver
+            // line-guard pattern from the 2026-05-22 SMP-saturation
+            // slice — `[sched] A i=... counter=...` was a top
+            // offender under SMP=8 stress (`LOADTEST: requesting 8
+            // CPU worker(s) for [sched] 8C i=0x...`).
+            arch::SerialLineGuard guard;
+            SerialWrite("[sched] ");
+            SerialWrite(name);
+            SerialWrite(" i=");
+            SerialWriteHex(i);
+            SerialWrite(" counter=");
+            SerialWriteHex(s_shared_counter);
+            SerialWrite("\n");
+        }
 
         duetos::sched::MutexUnlock(&s_demo_mutex);
         duetos::sched::SchedSleepTicks(1); // yield + 10 ms pause

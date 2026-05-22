@@ -155,6 +155,63 @@ void PanicBroadcastNmi()
     LapicSendIcr(0, icr_low);
 }
 
+// Bounded busy-wait for peer NMI ack after PanicBroadcastNmi.
+// LAPIC delivery is asynchronous and the receiving CPU takes a few
+// hundred-to-thousand cycles to enter the NMI handler, capture its
+// snapshot, and `cli; hlt`. Without this wait, the panicking CPU
+// starts writing the panic dump to serial IMMEDIATELY after the
+// ICR write — and peers still in flight to the NMI handler can
+// have legitimate SerialWrite traffic mid-call (under the lock,
+// not in panic-mode bypass). The bytes interleave at the UART. The
+// captured `g_serial_panic_mode` bypass on the panicking CPU then
+// writes raw bytes that race the peer's lock-protected bytes,
+// corrupting the dump (observed 2026-05-22 as the SMP=8 debug
+// recursive-fault: vec=/rip= rendered as a mix of hex digits and
+// spaces — toaruos's `arch_fatal_prepare` pattern, ported).
+//
+// Returns the count of peers that acked (`panic_snapshot_valid == 1`
+// or recognisably-halted via the lock-held-set heuristic) within
+// the budget. Best-effort — exits early on the budget so a wedged
+// peer can never trap the panicking CPU forever. `spin_budget` is
+// in pause iterations; ~10k = a few ms of wall time on TCG, plenty
+// for LAPIC NMI delivery + handler entry but bounded enough that a
+// non-LAPIC / dropped-IPI case still completes the dump.
+u32 PanicWaitPeersHalt(u64 spin_budget)
+{
+    if (!LapicIsReady() || g_cpus_online <= 1)
+    {
+        return 0;
+    }
+    const u32 limit = g_cpu_id_limit;
+    cpu::PerCpu* self = cpu::CurrentCpu();
+    const u32 self_id = (self != nullptr) ? self->cpu_id : 0xFFFFFFFFu;
+
+    u32 acked = 0;
+    for (u32 id = 0; id < limit; ++id)
+    {
+        if (id == self_id)
+            continue;
+        cpu::PerCpu* peer = SmpGetPercpu(id);
+        if (peer == nullptr)
+            continue;
+        // Spin until peer's NMI handler flipped the snapshot flag
+        // (or the budget runs out). The NMI handler stores to
+        // `panic_snapshot_valid` with a compiler memory barrier
+        // before the `cli; hlt` loop, so this single-byte read is
+        // a sufficient happens-before for ack.
+        for (u64 spin = 0; spin < spin_budget; ++spin)
+        {
+            if (__atomic_load_n(&peer->panic_snapshot_valid, __ATOMIC_ACQUIRE) != 0)
+            {
+                ++acked;
+                break;
+            }
+            asm volatile("pause" ::: "memory");
+        }
+    }
+    return acked;
+}
+
 // GDB stop-rendezvous flag. Set by SmpStopBroadcastNmi, cleared
 // by SmpStopReleaseNmi. Read by the vector-2 NMI handler in
 // traps.cpp via SmpGdbStopActive(). Plain volatile + asm fence —
@@ -607,10 +664,19 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // racing the BSP's klog rotation. Each step is a structural
     // boot-log sentinel — a missing line localises which step
     // wedged. Pairs with "[sched/idle] armed cpu_id=..." emitted
-    // by SchedStartIdle on success.
-    arch::SerialWrite("[arch/smp] AP pre-enter cpu_id=");
-    arch::SerialWriteHex(static_cast<u64>(cpu_id));
-    arch::SerialWrite("\n");
+    // by SchedStartIdle on success. SerialLineGuard makes the
+    // three Write*s atomic at the line level: without it, a peer
+    // CPU's `LOADTEST:` / `[stress] pre  heap_used_KiB=` line could
+    // grab `g_serial_lock` between our `[arch/smp] AP pre-enter
+    // cpu_id=` and its hex/newline, splitting the line — observed
+    // 2026-05-22 on `smp-stress-sweep.sh 8 8 5` SMP=8 repeat 1
+    // as `LOADTEST:[arch/smp] AP pre-enter cpu_id= 0x...w[sched]`.
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[arch/smp] AP pre-enter cpu_id=");
+        arch::SerialWriteHex(static_cast<u64>(cpu_id));
+        arch::SerialWrite("\n");
+    }
 
     // Hand off to the scheduler. SchedEnterOnAp spawns this CPU's
     // idle task, mints a boot sentinel as current_task, arms this
@@ -730,6 +796,8 @@ u64 SmpStartAps()
         // Lock-pass slot — empty until this AP enters Schedule().
         ap_pcpu->ctxsw_lock_to_release = nullptr;
         ap_pcpu->ctxsw_lock_flags = 0;
+        // Deferred-zombie slot — empty until a task on this AP exits.
+        ap_pcpu->ctxsw_dying_task_to_zombie = nullptr;
         // Per-CPU runqueue heads — empty until SchedEnterOnAp spawns
         // this AP's idle task and tasks migrate here via wake routing.
         ap_pcpu->runq_head_normal = nullptr;

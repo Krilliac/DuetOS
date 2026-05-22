@@ -47,6 +47,7 @@
 #include "shell/shell_internal.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
 #include "drivers/video/console.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
@@ -270,11 +271,23 @@ void RunCpuLoad(u32 secs, u32 workers, bool also_mem, u32 mib)
         return;
     }
 
-    ConsoleWrite("LOADTEST: requesting ");
-    WriteU64Dec(workers);
-    ConsoleWrite(" CPU worker(s) for ");
-    WriteU64Dec(secs);
-    ConsoleWriteln(" s");
+    // SerialLineGuard so the LOADTEST status line emits atomically
+    // on COM1 — without it, peer CPUs spawning workers / sched-demo
+    // workers running concurrently split this line across multiple
+    // physical lines (observed 2026-05-22 under SMP=8 stress as
+    // `LOADTEST: requesting 8 CPU worker(s) for [sched] 8C i=0x...`).
+    // ConsoleWrite's framebuffer/capture/mirror paths run inside
+    // WriteCharImpl per-byte and aren't held to the guard — that's
+    // fine, those targets don't have a cross-CPU racy reader. Only
+    // the serial path does.
+    {
+        duetos::arch::SerialLineGuard guard;
+        ConsoleWrite("LOADTEST: requesting ");
+        WriteU64Dec(workers);
+        ConsoleWrite(" CPU worker(s) for ");
+        WriteU64Dec(secs);
+        ConsoleWriteln(" s");
+    }
 
     // Spawn workers one by one. Each SchedCreate allocates a kernel
     // stack — at some N the kstack allocator returns null and we
@@ -306,11 +319,14 @@ void RunCpuLoad(u32 secs, u32 workers, bool also_mem, u32 mib)
         }
         ++spawned;
     }
-    ConsoleWrite("LOADTEST: spawned ");
-    WriteU64Dec(spawned);
-    ConsoleWrite(" / ");
-    WriteU64Dec(workers);
-    ConsoleWriteln(" worker(s)");
+    {
+        duetos::arch::SerialLineGuard guard;
+        ConsoleWrite("LOADTEST: spawned ");
+        WriteU64Dec(spawned);
+        ConsoleWrite(" / ");
+        WriteU64Dec(workers);
+        ConsoleWriteln(" worker(s)");
+    }
 
     // Optional concurrent memory load. No soft cap — KMalloc OOM is
     // the natural ceiling. The chunk-pointer table itself goes through
@@ -406,29 +422,36 @@ void RunCpuLoad(u32 secs, u32 workers, bool also_mem, u32 mib)
     {
         total_iters += g_workers[i].iterations;
     }
-    ConsoleWriteln(aborted ? "LOADTEST: ^C — stopped early" : "LOADTEST: window complete");
-    ConsoleWrite("  workers spawned: ");
-    WriteU64Dec(spawned);
-    ConsoleWriteChar('\n');
-    ConsoleWrite("  elapsed ticks:   ");
-    WriteU64Dec(t_end - t_start);
-    ConsoleWriteChar('\n');
-    ConsoleWrite("  iterations:      ");
-    WriteU64Dec(total_iters);
-    ConsoleWrite(" (each = ");
-    WriteU64Dec(kCpuInnerLoop);
-    ConsoleWriteln(" inner ops)");
-    ConsoleWrite("  ctx switches:    ");
-    WriteU64Dec(after.context_switches - before.context_switches);
-    ConsoleWriteChar('\n');
-    ConsoleWrite("  idle ticks:      ");
-    WriteU64Dec(after.idle_ticks - before.idle_ticks);
-    ConsoleWriteChar('\n');
-    if (also_mem)
+    // Atomic summary block — `boot-log-analyze.sh`'s STRESS section
+    // greps each "workers spawned: N" / "iterations: N" / etc. line
+    // as a structural sentinel, so splitting any of them under
+    // peer-CPU contention breaks the analyzer's pattern match.
     {
-        ConsoleWrite("  mem held:        ");
-        WriteU64Dec(chunks_held * kMemChunkBytes / 1024);
-        ConsoleWriteln(" KiB");
+        duetos::arch::SerialLineGuard guard;
+        ConsoleWriteln(aborted ? "LOADTEST: ^C — stopped early" : "LOADTEST: window complete");
+        ConsoleWrite("  workers spawned: ");
+        WriteU64Dec(spawned);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("  elapsed ticks:   ");
+        WriteU64Dec(t_end - t_start);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("  iterations:      ");
+        WriteU64Dec(total_iters);
+        ConsoleWrite(" (each = ");
+        WriteU64Dec(kCpuInnerLoop);
+        ConsoleWriteln(" inner ops)");
+        ConsoleWrite("  ctx switches:    ");
+        WriteU64Dec(after.context_switches - before.context_switches);
+        ConsoleWriteChar('\n');
+        ConsoleWrite("  idle ticks:      ");
+        WriteU64Dec(after.idle_ticks - before.idle_ticks);
+        ConsoleWriteChar('\n');
+        if (also_mem)
+        {
+            ConsoleWrite("  mem held:        ");
+            WriteU64Dec(chunks_held * kMemChunkBytes / 1024);
+            ConsoleWriteln(" KiB");
+        }
     }
 
     // Free held memory + the chunk table.

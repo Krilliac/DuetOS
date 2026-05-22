@@ -133,6 +133,21 @@ struct PerCpu
     void* ctxsw_lock_to_release;
     u64 ctxsw_lock_flags;
 
+    // Deferred-zombie slot: a dying task pushed here by SchedExit
+    // BEFORE the context switch, then promoted to the global zombie
+    // list by SchedFinishTaskSwitch AFTER the switch has committed.
+    // Closes the SMP use-after-free race where the reaper on a peer
+    // CPU could pop the dying task off `g_zombies` and call
+    // `FreeKernelStack` on its stack pages WHILE the dying CPU was
+    // still mid-ContextSwitch, executing on those very pages. (See
+    // the comment in `sched::SchedExit` for the historical
+    // "SMP bring-up will need to ..." note that pre-dated this.)
+    //
+    // void* to keep cpu/percpu.h free of the sched::Task definition;
+    // sched.cpp casts back to Task*. nullptr = the previous task did
+    // not exit during the just-completed switch.
+    void* ctxsw_dying_task_to_zombie;
+
     // Per-CPU runqueues. Two priority bands (Normal + Idle), each a
     // FIFO with head + tail pointers. A task enqueued on this CPU's
     // runqueue is owned by THIS CPU until popped — no migration in
