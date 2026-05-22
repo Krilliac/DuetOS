@@ -602,6 +602,16 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     core::LogWithValue(core::LogLevel::Info, "arch/smp", "AP online cpu_id", static_cast<u64>(cpu_id));
     KBP_PROBE_V(::duetos::debug::ProbeId::kSmpApOnline, cpu_id);
 
+    // AP-bringup tracer. Raw SerialWrite so it's safe at the point
+    // where the AP has its scheduler context but might still be
+    // racing the BSP's klog rotation. Each step is a structural
+    // boot-log sentinel — a missing line localises which step
+    // wedged. Pairs with "[sched/idle] armed cpu_id=..." emitted
+    // by SchedStartIdle on success.
+    arch::SerialWrite("[arch/smp] AP pre-enter cpu_id=");
+    arch::SerialWriteHex(static_cast<u64>(cpu_id));
+    arch::SerialWrite("\n");
+
     // Hand off to the scheduler. SchedEnterOnAp spawns this CPU's
     // idle task, mints a boot sentinel as current_task, arms this
     // CPU's LAPIC timer, and never returns. The first timer IRQ on

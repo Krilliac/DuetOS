@@ -2960,6 +2960,30 @@ void LoadBalanceSelfTest()
     KASSERT(peer_id != kBalanceNoVictim, "sched", "LoadBalanceSelfTest: no same-cluster peer (bad topology)");
     cpu::PerCpu* peer = arch::SmpGetPercpu(peer_id);
 
+    // Force EVERY non-self CPU's length to 0 first, then set peer's
+    // length per sub-test. Without this, a CPU other than the chosen
+    // peer (typically CPU 2/3 with live tasks queued from the boot
+    // tail) carries its natural runq_normal_len through the test,
+    // and PickBalanceVictim — which scans ALL same-cluster peers and
+    // picks the heaviest — selects that incidental CPU instead of
+    // (or in addition to) the synthetic peer. Repro'd under
+    // gui-fuzz.sh as
+    //     [panic] sched: KASSERT failed: LoadBalanceSelfTest:
+    //     sub-margin peer selected
+    // (test 2b, where the synthetic peer is sub-margin so the
+    // expected outcome is "no victim", but an unrelated CPU's
+    // natural EffectiveLoad exceeded the margin). The saved_len[]
+    // snapshot at the top of the function already lets us restore
+    // every CPU at the tail; this just extends the "controlled
+    // environment" the test needs while it runs.
+    for (u32 i = 0; i < limit; ++i)
+    {
+        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+        if (p != nullptr && i != self->cpu_id && i != peer_id)
+        {
+            p->runq_normal_len = 0;
+        }
+    }
     // Force self's length to 0 so the margin arithmetic is unambiguous.
     self->runq_normal_len = 0;
 
@@ -4382,6 +4406,22 @@ void SchedStartIdle(const char* name)
             // be the last write before the Log call below — see
             // PerCpu::scheduler_ready in cpu/percpu.h.
             self->scheduler_ready = true;
+            // One-line raw-serial breadcrumb so a post-mortem can
+            // confirm which PerCpu slot got armed with which idle
+            // task. The "no runnable task available" panic on an
+            // SMP boot consistently shows `self->idle_task == 0` on
+            // one AP — this line lets us see whether SchedStartIdle
+            // wrote to that AP's slot (panic = race) or wrote to a
+            // peer's slot (panic = CurrentCpu mis-resolution).
+            // Raw serial because we hold no locks and want zero
+            // re-entry risk; klog routes through Tee.
+            arch::SerialWrite("[sched/idle] armed cpu_id=");
+            arch::SerialWriteHex(static_cast<u64>(self->cpu_id));
+            arch::SerialWrite(" perpcu=");
+            arch::SerialWriteHex(reinterpret_cast<u64>(self));
+            arch::SerialWrite(" idle=");
+            arch::SerialWriteHex(reinterpret_cast<u64>(idle));
+            arch::SerialWrite("\n");
         }
     }
     core::Log(core::LogLevel::Info, "sched/idle", "idle task online");
@@ -4465,13 +4505,25 @@ void FormatIdleApName(char (&out)[16], u32 cpu_id)
 
 [[noreturn]] void SchedEnterOnAp(u32 cpu_id)
 {
+    // AP-bringup tracer. Raw serial; pairs with the smp.cpp
+    // "[arch/smp] AP pre-enter" line above, and locates whether
+    // SchedStartIdle even started for a given cpu_id.
+    arch::SerialWrite("[sched/smp] SchedEnterOnAp begin cpu_id=");
+    arch::SerialWriteHex(static_cast<u64>(cpu_id));
+    arch::SerialWrite("\n");
     // 1. Spawn this CPU's idle task. The Ready→runqueue push routes
     //    via t->last_cpu; SchedCreate sets last_cpu to the spawning
     //    CPU (which is THIS AP), so the idle lands on the AP's own
     //    runqueue.
     char name[16];
     FormatIdleApName(name, cpu_id);
+    arch::SerialWrite("[sched/smp] calling SchedStartIdle cpu_id=");
+    arch::SerialWriteHex(static_cast<u64>(cpu_id));
+    arch::SerialWrite("\n");
     SchedStartIdle(name);
+    arch::SerialWrite("[sched/smp] SchedStartIdle returned cpu_id=");
+    arch::SerialWriteHex(static_cast<u64>(cpu_id));
+    arch::SerialWrite("\n");
 
     // 2. Mint a boot sentinel so Schedule() has a non-null `prev`
     //    on its first call. Install as current_task BEFORE arming

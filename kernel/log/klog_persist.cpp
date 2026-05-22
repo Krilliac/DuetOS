@@ -1,6 +1,7 @@
 #include "log/klog_persist.h"
 
 #include "arch/x86_64/serial.h"
+#include "cpu/percpu.h"
 #include "fs/fat32.h"
 #include "log/klog.h"
 
@@ -399,6 +400,44 @@ void LineSink(LogLevel /*level*/, LogArea area, const char* line, u32 line_len)
     if (g_in_flush || !g_installed || line == nullptr || line_len == 0)
     {
         return;
+    }
+    // Re-entry-safe drop. The persistence path eventually acquires
+    // `g_fat32_mutex` (a sleeping `sched::Mutex`), and MutexLock
+    // unconditionally acquires `g_sched_lock`. Two distinct call
+    // chains can wedge the kernel if we proceed unconditionally:
+    //   1. SpinLockRelease -> LockdepBeforeRelease -> KLOG (the
+    //      old shape — separately fixed by routing lockdep's own
+    //      warnings through raw serial).
+    //   2. WaitQueueBlock (holds g_sched_lock) -> visitor body
+    //      with a UBSan null-check -> __ubsan_handle_* -> Report
+    //      -> KLOG. UBSan can fire from inside ANY spinlock'd
+    //      section, so the cleanest fix is the consumer side:
+    //      drop the persist write when a spinlock is held by
+    //      this CPU.
+    //   3. AP early bring-up: smp.cpp's pre-SchedEnterOnAp
+    //      KLOG_INFO + KBP_PROBE_V on AP-online run on a CPU whose
+    //      `current_task` is still null. Reaching MutexLock here
+    //      derefs Current() (UBSan tm-detail Task null) and then,
+    //      under contention, would call ScheduleLockedHandoff on
+    //      a CPU with no runnable task and no published idle —
+    //      surfacing as "no runnable task available" on the AP
+    //      that wedged. Gating on `scheduler_ready` (set by
+    //      SchedStartIdle's tail) means a pre-bringup AP's klog
+    //      lines never reach the persist sink; they still land in
+    //      the in-memory ring, so BSOD tail / inspect log keep
+    //      them.
+    // The line still hits the klog ring (the producer side runs
+    // first and is lock-free), so dropping the persist write
+    // loses only the on-disk copy of that one line.
+    {
+        cpu::PerCpu* self = cpu::CurrentCpu();
+        if (self != nullptr)
+        {
+            if (self->held_locks_count != 0 || !self->scheduler_ready)
+            {
+                return;
+            }
+        }
     }
     AreaFile* a = SlotFor(area);
     if (a == nullptr || a->base == nullptr)
