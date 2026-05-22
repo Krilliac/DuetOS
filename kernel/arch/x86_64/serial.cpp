@@ -204,15 +204,29 @@ SerialLineGuard::~SerialLineGuard()
     {
         return;
     }
-    // Release the lock FIRST, then clear the in-progress flag. The
-    // reverse order (clear, then release) leaves a window where
-    // g_serial_lock is still held by this CPU but g_serial_in_progress
-    // reads 0 — an interrupt that logs in that window would take the
-    // non-bypass path and self-deadlock. Same ordering fix applied to
-    // the SerialWrite* family below.
+    // Clear the in-progress flag BEFORE releasing the lock. The
+    // ORIGINAL ordering — release-then-clear — was correct for the
+    // single-CPU bypass-vs-self-recursion case the old comment
+    // describes, but with the slot now PER-CPU it opened a
+    // cross-CPU race: after SpinLockRelease the lock is free + IF
+    // restored, but `slot=1` is still set. A peer CPU acquires the
+    // lock and writes lock-protected bytes; this CPU then takes an
+    // IRQ whose handler calls SerialWrite, sees `slot=1`, bypasses
+    // the lock, and writes raw bytes — the streams interleave at
+    // the UART (observed 2026-05-22 under SMP=8 stress as
+    // `[stress] pre  hea[sched]p_used_KiB=...`).
+    //
+    // Clearing the slot first, while IF is still 0 (the SpinLock
+    // acquire's cli is still in effect for this CPU until
+    // SpinLockRelease's sti at the very end), closes the window:
+    // any IRQ that fires AFTER the release sees `slot=0` and goes
+    // through the normal lock-acquire path; the original
+    // self-recursion concern is no longer applicable because slot
+    // is per-CPU and the same-CPU IRQ would see its own slot=0
+    // anyway.
+    *SerialInProgressSlot() = 0;
     duetos::sync::IrqFlags flags{m_flags};
     duetos::sync::SpinLockRelease(g_serial_lock, flags);
-    *SerialInProgressSlot() = 0;
 }
 
 void SerialWriteByte(u8 byte)
