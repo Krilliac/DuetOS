@@ -4508,22 +4508,35 @@ void FormatIdleApName(char (&out)[16], u32 cpu_id)
     // AP-bringup tracer. Raw serial; pairs with the smp.cpp
     // "[arch/smp] AP pre-enter" line above, and locates whether
     // SchedStartIdle even started for a given cpu_id.
-    arch::SerialWrite("[sched/smp] SchedEnterOnAp begin cpu_id=");
-    arch::SerialWriteHex(static_cast<u64>(cpu_id));
-    arch::SerialWrite("\n");
+    // SerialLineGuard around each multi-write sentinel: without it
+    // a peer CPU's loadtest/stress lines slip between our Write*
+    // calls and split the sentinel across two physical lines
+    // (observed 2026-05-22 under SMP=8 stress).
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[sched/smp] SchedEnterOnAp begin cpu_id=");
+        arch::SerialWriteHex(static_cast<u64>(cpu_id));
+        arch::SerialWrite("\n");
+    }
     // 1. Spawn this CPU's idle task. The Ready→runqueue push routes
     //    via t->last_cpu; SchedCreate sets last_cpu to the spawning
     //    CPU (which is THIS AP), so the idle lands on the AP's own
     //    runqueue.
     char name[16];
     FormatIdleApName(name, cpu_id);
-    arch::SerialWrite("[sched/smp] calling SchedStartIdle cpu_id=");
-    arch::SerialWriteHex(static_cast<u64>(cpu_id));
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[sched/smp] calling SchedStartIdle cpu_id=");
+        arch::SerialWriteHex(static_cast<u64>(cpu_id));
+        arch::SerialWrite("\n");
+    }
     SchedStartIdle(name);
-    arch::SerialWrite("[sched/smp] SchedStartIdle returned cpu_id=");
-    arch::SerialWriteHex(static_cast<u64>(cpu_id));
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[sched/smp] SchedStartIdle returned cpu_id=");
+        arch::SerialWriteHex(static_cast<u64>(cpu_id));
+        arch::SerialWrite("\n");
+    }
 
     // 2. Mint a boot sentinel so Schedule() has a non-null `prev`
     //    on its first call. Install as current_task BEFORE arming

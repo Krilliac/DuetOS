@@ -664,10 +664,19 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // racing the BSP's klog rotation. Each step is a structural
     // boot-log sentinel — a missing line localises which step
     // wedged. Pairs with "[sched/idle] armed cpu_id=..." emitted
-    // by SchedStartIdle on success.
-    arch::SerialWrite("[arch/smp] AP pre-enter cpu_id=");
-    arch::SerialWriteHex(static_cast<u64>(cpu_id));
-    arch::SerialWrite("\n");
+    // by SchedStartIdle on success. SerialLineGuard makes the
+    // three Write*s atomic at the line level: without it, a peer
+    // CPU's `LOADTEST:` / `[stress] pre  heap_used_KiB=` line could
+    // grab `g_serial_lock` between our `[arch/smp] AP pre-enter
+    // cpu_id=` and its hex/newline, splitting the line — observed
+    // 2026-05-22 on `smp-stress-sweep.sh 8 8 5` SMP=8 repeat 1
+    // as `LOADTEST:[arch/smp] AP pre-enter cpu_id= 0x...w[sched]`.
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[arch/smp] AP pre-enter cpu_id=");
+        arch::SerialWriteHex(static_cast<u64>(cpu_id));
+        arch::SerialWrite("\n");
+    }
 
     // Hand off to the scheduler. SchedEnterOnAp spawns this CPU's
     // idle task, mints a boot sentinel as current_task, arms this

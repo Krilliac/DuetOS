@@ -1,6 +1,8 @@
 #include "arch/x86_64/serial.h"
 
+#include "acpi/acpi.h"
 #include "arch/x86_64/cpu.h"
+#include "cpu/percpu.h"
 #include "sync/spinlock.h"
 
 namespace duetos::arch
@@ -42,10 +44,43 @@ volatile u32 g_serial_panic_mode = 0;
 // SpinLockAcquire call so a trap that fires mid-acquire still sees
 // the flag set and bypasses cleanly.
 //
-// Single-CPU under QEMU today: a global volatile is sufficient
-// because there's only one CPU writing at a time. When multi-CPU
-// boots land in the smoke matrix, this graduates to a per-CPU array.
-volatile u32 g_serial_in_progress = 0;
+// PER-CPU (2026-05-22). The original shape was a single global
+// volatile u32 with the comment "graduates to a per-CPU array
+// when multi-CPU boots land." That moment came and the comment
+// got stale: CPU A's SerialWrite would set the flag to 1, take
+// `g_serial_lock`, and start writing bytes. CPU B's SerialWrite
+// would observe `g_serial_in_progress=1` from A and take the
+// bypass path — emitting RAW bytes (no lock!) that interleaved
+// with A's lock-protected bytes at the UART. Observed 2026-05-22
+// on `tools/test/smp-stress-sweep.sh 8 8 5` (SMP=8 release) as
+// 3-of-5 repeats showing torn `[stress] pre  heap_used_KiB=` lines
+// with interleaved `flight (last X)` syscall-trail entries from a
+// peer's proc-release diagnostic. Per-CPU storage closes the
+// cross-CPU bypass: each CPU's slot is touched only by that CPU
+// (cli during the critical section keeps IRQs out), and a peer
+// CPU's flag has no effect on this CPU's decision to take the
+// lock. The flag still serves its original purpose — guarding
+// THIS CPU against its own recursive entry from a trap handler.
+//
+// Pre-BSP-install gating: CurrentCpuIdOrBsp() returns 0 before
+// BSP install completes; per-CPU storage at slot 0 is the BSP
+// slot post-install too, so the early-boot path sees the same
+// slot before and after install. Safe.
+constinit volatile u32 g_serial_in_progress_per_cpu[::duetos::acpi::kMaxCpus] = {};
+
+inline volatile u32* SerialInProgressSlot()
+{
+    const u32 id = ::duetos::cpu::CurrentCpuIdOrBsp();
+    return &g_serial_in_progress_per_cpu[(id < ::duetos::acpi::kMaxCpus) ? id : 0u];
+}
+
+// "Is THIS CPU currently inside a SerialWrite critical section?" —
+// the cross-CPU-safe replacement for the old `g_serial_in_progress`
+// global read. Reads only this CPU's slot.
+inline bool SerialInProgressOnThisCpu()
+{
+    return *SerialInProgressSlot() != 0;
+}
 
 // Monotonically-increasing byte counter, bumped on every byte that
 // reaches the UART. Used by the init-wedge watchdog in
@@ -151,13 +186,13 @@ SerialLineGuard::SerialLineGuard() : m_flags(0), m_owned(false)
     // `g_serial_in_progress` bypass every SerialWrite* already has —
     // closing the asymmetry that was the actual VirtualBox boot
     // wedge (a silent hang before the detector existed).
-    if (g_serial_panic_mode || g_serial_in_progress)
+    if (g_serial_panic_mode || SerialInProgressOnThisCpu())
     {
         return;
     }
     auto irq = duetos::sync::SpinLockAcquire(g_serial_lock);
     m_flags = irq.rflags;
-    g_serial_in_progress = 1;
+    *SerialInProgressSlot() = 1;
     m_owned = true;
 }
 
@@ -177,22 +212,23 @@ SerialLineGuard::~SerialLineGuard()
     // the SerialWrite* family below.
     duetos::sync::IrqFlags flags{m_flags};
     duetos::sync::SpinLockRelease(g_serial_lock, flags);
-    g_serial_in_progress = 0;
+    *SerialInProgressSlot() = 0;
 }
 
 void SerialWriteByte(u8 byte)
 {
-    if (g_serial_panic_mode || g_serial_in_progress)
+    if (g_serial_panic_mode || SerialInProgressOnThisCpu())
     {
         WriteByteRaw(byte);
         return;
     }
-    g_serial_in_progress = 1;
+    volatile u32* slot = SerialInProgressSlot();
+    *slot = 1;
     {
         duetos::sync::SpinLockGuard guard(g_serial_lock);
         WriteByteRaw(byte);
     }
-    g_serial_in_progress = 0;
+    *slot = 0;
 }
 
 void SerialWrite(const char* str)
@@ -202,7 +238,7 @@ void SerialWrite(const char* str)
         return;
     }
 
-    if (g_serial_panic_mode || g_serial_in_progress)
+    if (g_serial_panic_mode || SerialInProgressOnThisCpu())
     {
         for (const char* p = str; *p != '\0'; ++p)
         {
@@ -211,7 +247,8 @@ void SerialWrite(const char* str)
         return;
     }
 
-    g_serial_in_progress = 1;
+    volatile u32* slot = SerialInProgressSlot();
+    *slot = 1;
     {
         duetos::sync::SpinLockGuard guard(g_serial_lock);
         for (const char* p = str; *p != '\0'; ++p)
@@ -219,7 +256,7 @@ void SerialWrite(const char* str)
             WriteCharRaw(*p);
         }
     }
-    g_serial_in_progress = 0;
+    *slot = 0;
 }
 
 void SerialWriteN(const char* data, u64 len)
@@ -229,7 +266,7 @@ void SerialWriteN(const char* data, u64 len)
         return;
     }
 
-    if (g_serial_panic_mode || g_serial_in_progress)
+    if (g_serial_panic_mode || SerialInProgressOnThisCpu())
     {
         for (u64 i = 0; i < len; ++i)
         {
@@ -238,7 +275,8 @@ void SerialWriteN(const char* data, u64 len)
         return;
     }
 
-    g_serial_in_progress = 1;
+    volatile u32* slot = SerialInProgressSlot();
+    *slot = 1;
     {
         duetos::sync::SpinLockGuard guard(g_serial_lock);
         for (u64 i = 0; i < len; ++i)
@@ -246,14 +284,14 @@ void SerialWriteN(const char* data, u64 len)
             WriteCharRaw(data[i]);
         }
     }
-    g_serial_in_progress = 0;
+    *slot = 0;
 }
 
 void SerialWriteHex(u64 value)
 {
     static constexpr char kDigits[] = "0123456789abcdef";
 
-    if (g_serial_panic_mode || g_serial_in_progress)
+    if (g_serial_panic_mode || SerialInProgressOnThisCpu())
     {
         WriteByteRaw('0');
         WriteByteRaw('x');
@@ -264,7 +302,8 @@ void SerialWriteHex(u64 value)
         return;
     }
 
-    g_serial_in_progress = 1;
+    volatile u32* slot = SerialInProgressSlot();
+    *slot = 1;
     {
         duetos::sync::SpinLockGuard guard(g_serial_lock);
         WriteByteRaw('0');
@@ -274,7 +313,7 @@ void SerialWriteHex(u64 value)
             WriteByteRaw(static_cast<u8>(kDigits[(value >> shift) & 0xF]));
         }
     }
-    g_serial_in_progress = 0;
+    *slot = 0;
 }
 
 // ---------------------------------------------------------------------------

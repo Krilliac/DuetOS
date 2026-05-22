@@ -146,8 +146,14 @@ bool ParseU32(const char* s, u32* out)
     // ended clean" without scrolling through the per-mode body.
     const auto pre_heap = mm::KernelHeapStatsRead();
     const u64 pre_free_frames = mm::FreeFramesCount();
-    SerialWrite("[stress] pre  heap_used_KiB=");
+    // SerialLineGuard so the three Write*s emit as one logical
+    // line — without it a peer CPU's `[arch/smp] AP pre-enter` /
+    // worker-stat output slips between calls and corrupts the line
+    // (observed under SMP=8 stress as
+    // `[stress] pre  he ap_  used_KiB= sys=0x...`).
     {
+        arch::SerialLineGuard guard;
+        SerialWrite("[stress] pre  heap_used_KiB=");
         char buf[24];
         u32 n = 0;
         u64 v = pre_heap.used_bytes / 1024;
@@ -171,8 +177,8 @@ bool ParseU32(const char* s, u32* out)
         }
         buf[n] = '\0';
         SerialWrite(buf);
+        SerialWrite("\n");
     }
-    SerialWrite("\n");
 
     switch (g_cfg.mode)
     {
@@ -289,9 +295,12 @@ void StressDriverArm(const char* cmdline)
                             : (g_cfg.mode == Mode::Mix)  ? "mix"
                             : (g_cfg.mode == Mode::Spin) ? "spin"
                                                          : "?";
-    arch::SerialWrite("[stress] arming driver — mode=");
-    arch::SerialWrite(mode_name);
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[stress] arming driver — mode=");
+        arch::SerialWrite(mode_name);
+        arch::SerialWrite("\n");
+    }
 
     auto* t = sched::SchedCreate(&StressDriverEntry, nullptr, "stress-driver");
     if (t == nullptr)
