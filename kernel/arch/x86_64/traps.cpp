@@ -603,8 +603,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         const ::duetos::u64 entry_cs;
         const bool kernel_mode_return;
         RipIntegrityGuard(TrapFrame* f)
-            : frame(f), entry_rip(f->rip), entry_r15(f->r15), entry_cs(f->cs),
-              kernel_mode_return((f->cs & 0x3) == 0)
+            : frame(f), entry_rip(f->rip), entry_r15(f->r15), entry_cs(f->cs), kernel_mode_return((f->cs & 0x3) == 0)
         {
         }
         ~RipIntegrityGuard()

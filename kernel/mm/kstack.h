@@ -53,9 +53,12 @@
  *     from mm::KMalloc. APs today only run `cli; hlt` so they
  *     cannot overflow; swap to AllocateKernelStack when APs join
  *     the scheduler.
- *   - No TLB shootdown on FreeKernelStack — UnmapPage invalidates
- *     only the local core. Same gap as the existing MMIO arena;
- *     not introduced by this module.
+ *   - TLB shootdown on FreeKernelStack (fixed 2026-05-22):
+ *     after the UnmapPage loop, broadcast `SmpTlbShootdown` to
+ *     every online peer so stale TLB entries for the freed slot
+ *     can't read back the old physical page once the slot is
+ *     re-allocated. The boot-tail wild-RIP bug (Roadmap entry)
+ *     was caused by exactly this race.
  *   - Single slot size (16 KiB usable). If a task needs more,
  *     add a new size class; don't parameterise on the fly.
  *
