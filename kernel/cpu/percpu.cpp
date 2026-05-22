@@ -94,6 +94,10 @@ void PerCpuInitBsp()
     // here on go through cpu::CurrentCpu()->tss; the static BSP TSS
     // remains the same object — just routed via PerCpu now.
     g_bsp_percpu.tss = arch::BspTssPtr();
+    // BSP is online from boot — the wake-side routing predicate
+    // (`PickClusterPlacement`) honours this so the BSP slot is
+    // always a legal target.
+    g_bsp_percpu.online = true;
     g_bsp_installed = true;
 
     arch::SerialWrite("[cpu] BSP PerCpu installed: cpu_id=0 lapic_id=");

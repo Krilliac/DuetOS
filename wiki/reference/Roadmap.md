@@ -162,21 +162,60 @@ hang inside `SmpStartAps`'s per-AP loop:
      was never emitted, so the determinism rig reported the
      ambiguous `aps=?`.
 
-Fix: defer the `g_cpu_id_limit` bump until **after**
-`WaitForApOnline` confirms the AP signalled itself online
-(`kernel/arch/x86_64/smp.cpp`). The slot in `g_ap_percpus[]`
-still has to be written before the AP runs (the AP reads it
-during early bringup), but the scheduler's wake-side iteration
-key (`SmpCpuIdLimit()`) only advances once the AP is actually
-running — so `PickClusterPlacement` never considers a runqueue
-nobody will service. Also added a one-shot `[smp] online=1/?`
-emission on the trampoline-bloat early-return path so the
-determinism sweep's `aps` column always reports a real count
-instead of `?`.
+Fix landed in two layers (belt-and-braces):
+
+1. **`g_cpu_id_limit` deferred bump** — `SmpStartAps` now waits
+   to advance the scheduler's wake-side iteration key until
+   AFTER `WaitForApOnline` confirms the AP signalled itself
+   online. The slot in `g_ap_percpus[]` still has to be written
+   before the AP runs (the AP reads it during early bringup),
+   but the scheduler can't see it as a routing target until
+   it's actually serviceable.
+
+2. **`PerCpu::online` predicate** — new flag, set true for the
+   BSP in `PerCpuInitBsp`, flipped true for each AP at the
+   end of its `SmpStartAps` loop iteration. `PickClusterPlacement`
+   and `TargetPerCpuFor` skip slots with `online == false`,
+   so a future feature that brings a CPU offline at runtime
+   (hot-plug, power-management quiesce, watchdog kill) can flip
+   the flag and immediately stop the scheduler routing wakes
+   to it without having to coordinate `g_cpu_id_limit`.
+
+   Either layer alone closes the 2026-05-22 race; both together
+   survive a future reordering of the AP-bring-up sequence.
+
+Also added a one-shot `[smp] online=1/?` emission on the
+trampoline-bloat early-return path so the determinism sweep's
+`aps` column always reports a real count instead of `?`.
+
+**Infrastructure to catch the next one cheap.** Same slice
+landed several pieces of debug infrastructure so a future
+session investigating a similar regression doesn't repeat the
+six-rebuild manual probe-injection loop:
+
+- `kernel/arch/x86_64/delay.h::Delay10msApproximate()` — single
+  source of truth for short busy-waits that work under both
+  QEMU TCG (the emulator doesn't advance virtual-time inside a
+  bare `pause` loop with LTO) and real hardware. SmpStartAps's
+  INIT→SIPI wait now calls this instead of open-coding the recipe.
+- `DUETOS_SCHED_ROUTING_TRACE` build option — flag-gated
+  `KLOG_DEBUG` lines at every wake-side `RunqueuePush`
+  attributing the routing decision (source CPU, last_cpu hint,
+  preferred, target, task name, priority). Compiled out by
+  default; turn on to make a routing regression a single grep.
+- `tools/test/boot-progress-localizer.sh` — reads any boot log
+  and reports the LAST ordered sentinel reached vs the FIRST
+  not-reached. Catches "where did the boot stop?" in one
+  command instead of eyeballing the tail.
+- `tools/qemu/babysit-boot.sh` — wraps `run.sh`; on
+  timeout-without-completion auto-runs the localizer +
+  `boot-log-analyze.sh` and writes a single diagnosis report.
+  Canonical "run a boot and tell me if it broke" entry point.
 
 Verified: 15/15 single boots clean (`[smp] online=8/8`),
-6/6 determinism sweep boots OK (post-fix run preserved as
-`/tmp/sweep3.log`).
+6/6 determinism sweep boots OK (`/tmp/sweep3.log`), plus a
+re-run of the sweep after the `PerCpu::online` predicate +
+`Delay10msApproximate` infrastructure landed (`/tmp/sweep4.log`).
 
 ### SMP=8 saturation use-after-free — LANDED (2026-05-22)
 

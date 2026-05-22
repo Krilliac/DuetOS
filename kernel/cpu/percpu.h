@@ -187,7 +187,30 @@ struct PerCpu
     // and +40 stable; appending past line 159 doesn't disturb
     // kPerCpuKernelRsp / kPerCpuUserRspScratch.
     u16 cluster_id;
-    u8 _pad_topo[6];
+
+    // Liveness flag. The BSP's slot is true from boot (PerCpuInitBsp);
+    // each AP's slot stays false from KMalloc(PerCpu) all the way
+    // through INIT/SIPI bring-up, then flips to true at the end of
+    // `SmpStartAps`'s per-AP loop after `WaitForApOnline` succeeds
+    // (kernel/arch/x86_64/smp.cpp). Read by the wake-side routing
+    // (`PickClusterPlacement`, `TargetPerCpuFor`) to skip slots
+    // whose AP isn't actually servicing a runqueue yet — closes the
+    // 2026-05-22 SMP=8 boot-determinism `aps=?` hang at the
+    // predicate level (the matching fix at the iteration-key level
+    // is the `g_cpu_id_limit` deferred bump). Defence-in-depth: a
+    // future feature that brings a CPU offline at runtime (hot-plug,
+    // power-management quiesce, watchdog kill) can flip this flag
+    // false to immediately stop the scheduler routing wakes to it
+    // without having to coordinate the iteration limit.
+    //
+    // `bool` is fine; reads are unsynchronised — a stale `false`
+    // just costs one wake routed to a fresh-but-running AP, which
+    // the active load balancer corrects on the next periodic pass.
+    // Stale `true` only fires when the AP has already serviced one
+    // schedule (the flag flip races a one-tick gap), which means
+    // the runqueue is being drained — no deadlock risk.
+    bool online;
+    u8 _pad_topo[5];
 
     // Length of this CPU's Normal-band runqueue (does NOT count the
     // currently-running task). Maintained by the scheduler under

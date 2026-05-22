@@ -1,6 +1,7 @@
 #include "arch/x86_64/smp.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/delay.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/lapic.h"
@@ -813,6 +814,13 @@ u64 SmpStartAps()
         ap_pcpu->runq_normal_len = 0;
         // TSS slot wired by AllocateApGdt below, before the AP runs.
         ap_pcpu->tss = nullptr;
+        // Liveness flag — flipped to true at the END of this loop
+        // iteration, AFTER WaitForApOnline confirms the AP has
+        // signalled. Until then `PickClusterPlacement` skips this
+        // slot, so a wakeable task on the BSP can't be routed to
+        // an AP that isn't running yet. The memset above already
+        // zeroed it; explicit assignment documents the contract.
+        ap_pcpu->online = false;
 
         // Allocate this AP's GDT clone + TSS body + 3 IST stacks.
         // ApEntryFromTrampoline picks them up via g_ap_gdt_bundles
@@ -883,18 +891,20 @@ u64 SmpStartAps()
         // INIT IPI (assert). Per Intel SDM Vol. 3A §8.4.4.
         SmpSendIpi(rec.apic_id, kIcrDeliveryInit | kIcrLevelAssert);
 
-        // 10 ms wait between INIT and SIPI per Intel SDM. Yielding
-        // to the scheduler used to wedge under SMP=8 release: the
-        // wake-side `PickClusterPlacement` saw the freshly-allocated
-        // `g_ap_percpus[cpu_id]` slot (above) and routed the BSP
-        // boot task onto an AP that hadn't actually started yet,
-        // so the task sat on an empty runqueue until the boot
-        // watchdog fired (`[smp] online=N/M` sentinel never emitted,
-        // `aps=?` in boot-determinism-sweep — 2026-05-22). Closed
-        // at its source by deferring the `g_cpu_id_limit` bump
-        // until AFTER `WaitForApOnline` succeeds, so the scheduler
-        // can't see — let alone route to — an offline slot.
-        sched::SchedSleepTicks(1);
+        // 10 ms wait between INIT and SIPI per Intel SDM. Routed
+        // through the single-source-of-truth `Delay10msApproximate`
+        // helper instead of `SchedSleepTicks(1)` (yielding) or a
+        // bare `pause` loop (wedges under QEMU TCG with LTO — the
+        // emulator never advances the guest clock without a yield-
+        // virtual-time side effect like `hlt`). The
+        // routing-to-offline-AP race the original yielding shape
+        // surfaced under SMP=8 release (2026-05-22) is closed at the
+        // scheduler layer by `PerCpu::online` and the deferred
+        // `g_cpu_id_limit` bump below — but routing through
+        // `Delay10msApproximate` also keeps this caller off the
+        // scheduler entirely, so a future change to wake-side
+        // routing can't re-open the same trap.
+        Delay10msApproximate();
 
         // SIPI with vector = trampoline_phys >> 12 = 0x08.
         const u32 sipi = kIcrDeliveryStartup | (kTrampolinePhys >> 12);
@@ -914,12 +924,19 @@ u64 SmpStartAps()
 
         ++aps_started;
         ++g_cpus_online;
-        // NOW the scheduler may safely route work to this AP. Bumping
-        // the limit AFTER the AP confirms online (rather than after
-        // `g_ap_percpus[cpu_id]` is written, as the prior shape
-        // did) closes the routing-to-offline-AP race that wedged
-        // the BSP boot task inside SchedSleepTicks (above) under
-        // SMP=8 release.
+        // NOW the scheduler may safely route work to this AP. The
+        // belt-and-braces pair:
+        //   - `online = true` is the wake-side routing predicate
+        //     read by `PickClusterPlacement` / `TargetPerCpuFor`
+        //     to skip not-yet-running slots.
+        //   - `g_cpu_id_limit` bump is the iteration-key the same
+        //     routing functions use to bound their for-loop.
+        // Either alone would close the 2026-05-22 `aps=?` hang; we
+        // do both so a future feature that brings a CPU offline at
+        // runtime (hot-plug / power-management / watchdog kill) can
+        // flip `online = false` to immediately stop routing without
+        // having to coordinate `g_cpu_id_limit`.
+        ap_pcpu->online = true;
         if (cpu_id + 1 > g_cpu_id_limit)
         {
             g_cpu_id_limit = cpu_id + 1;

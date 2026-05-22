@@ -272,6 +272,18 @@ sudo apt-get install -y parted util-linux bsdmainutils vim-common
 # TSV output cleanly; `ripgrep` is faster than grep across the
 # tree under load and respects `.gitignore`.
 sudo apt-get install -y jq ripgrep
+# Script hygiene + diagnostic automation: `shellcheck` catches
+# the `grep -c file || echo 0` class of bugs that bombed
+# fat32-concurrent.sh on a clean run; `yamllint` keeps GitHub
+# Actions / CI configs honest. `expect` + `socat` automate
+# QEMU stdio / GDB-stub interactions for the babysit-boot rig.
+# `bear` produces a compile_commands.json from a build (clangd
+# / ide friendly). `universal-ctags` + `silversearcher-ag`
+# accelerate cross-tree navigation; `entr` watches files and
+# re-runs a command on change (useful with `find kernel | entr
+# -c cmake --build build/...`). `moreutils` adds `ts` for time-
+# stamping piped output and `sponge` for in-place edits.
+sudo apt-get install -y shellcheck yamllint expect socat bear universal-ctags silversearcher-ag entr moreutils
 ```
 
 Install the **full** toolbox up front, not just `qemu-system-x86`.

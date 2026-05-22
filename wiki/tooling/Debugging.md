@@ -93,6 +93,48 @@ A violation raises a panic with the failing invariant named.
   probe/kdbg/watch control, …). Boots with `DUETOS_GDB_DEMO=ON`
   for a guaranteed stop, runs the command(s), detaches.
 
+`tools/test/` + `tools/qemu/` ship the boot-time triage rigs:
+
+- **`boot-log-analyze.sh <log>`** — CLAUDE.md's full regression scan
+  (panics, oops, lockdep, self-test PASS/FAIL, phase timings,
+  stress summary). Doubles as a CI gate.
+- **`boot-progress-localizer.sh <log>`** — answers the narrower
+  question "where did this boot stop?" by walking a canonical
+  ordered list of boot sentinels and reporting the LAST reached vs
+  the FIRST not-reached. Two-line story when a hang surfaces.
+- **`babysit-boot.sh [timeout]`** — wraps `tools/qemu/run.sh`; on
+  hang, auto-runs the localizer + analyzer and writes a single
+  diagnosis report to `/tmp/babysit-<timestamp>.txt`. Use as the
+  canonical "run a boot and tell me whether anything broke"
+  entry point.
+- **`boot-determinism-sweep.sh [runs] [timeout]`** — boots N times
+  and diffs the per-boot signal across runs to catch INTERMITTENT
+  defects (ASLR / hash-order / work-steal-timing races).
+- **`smp-stress-sweep.sh [secs] [workers] [repeats]`** — SMP=8 stress
+  rig the 2026-05-22 saturation slice used to repro the UAF.
+- **`fat32-concurrent.sh [secs]`** — boot-time FAT32 contention
+  characteriser (lookup line-rate, mutex parking, lockdep).
+
+### Build-time scheduler routing trace (`DUETOS_SCHED_ROUTING_TRACE`)
+
+Cross-CPU wake routing is the surface that surfaced the 2026-05-22
+SmpStartAps `aps=?` hang: `PickClusterPlacement` was routing the
+BSP boot task onto a not-yet-online AP slot, and the diagnosis
+took an hour of probe injection. Configure with
+
+```bash
+cmake --preset x86_64-release -DDUETOS_SCHED_ROUTING_TRACE=ON
+```
+
+to emit a flag-gated `KLOG_DEBUG` line at every wake-side
+`RunqueuePush` attributing the routing decision (source CPU,
+last_cpu, preferred = `TargetPerCpuFor`, target =
+`PickClusterPlacement`, task name, priority class). Pairs with
+`loglevel d` on the kernel command line to actually surface the
+DEBUG-tier output. Compiled out by default — turn on when you
+suspect a wake is landing somewhere it shouldn't, turn back off
+once the investigation closes.
+
 ## Live Debug — In-kernel GDB Server
 
 `DUETOS_GDB_SERVER` (default-ON in `x86_64-debug`) exposes a feature-

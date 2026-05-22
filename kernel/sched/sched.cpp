@@ -624,6 +624,21 @@ cpu::PerCpu* TargetPerCpuFor(Task* t)
     {
         p = cpu::CurrentCpu();
     }
+    // If `last_cpu` points at a slot whose AP isn't actually
+    // servicing a runqueue yet (e.g. mid-SmpStartAps, between
+    // `g_ap_percpus[cpu_id] = ap_pcpu` and `WaitForApOnline`),
+    // re-home to a guaranteed-live slot. Walking forward to the
+    // BSP (slot 0, always online) is safe because the next active
+    // load balancer pass corrects any drift away from `last_cpu`.
+    // Same predicate `PickClusterPlacement` uses below.
+    if (p != nullptr && !p->online)
+    {
+        cpu::PerCpu* bsp = arch::SmpGetPercpu(0);
+        if (bsp != nullptr && bsp->online)
+        {
+            p = bsp;
+        }
+    }
     // Honor a narrowed affinity mask: if last_cpu (or the
     // CurrentCpu fallback) is not permitted, retarget to the
     // lowest allowed online CPU. Unrestricted tasks skip this
@@ -818,6 +833,17 @@ cpu::PerCpu* PickClusterPlacement(cpu::PerCpu* preferred, Task* t = nullptr)
         {
             continue;
         }
+        if (!peer->online)
+        {
+            // Slot is allocated (visible to SmpGetPercpu) but the
+            // AP hasn't signalled online yet — routing a wake here
+            // would park the task on a runqueue nobody drains.
+            // Belt-and-braces with the SmpStartAps `g_cpu_id_limit`
+            // deferred-bump; either alone closes the 2026-05-22
+            // SMP=8 `aps=?` race, both together survive a future
+            // online-after-allocation reordering.
+            continue;
+        }
         if (peer->cluster_id != cluster)
         {
             continue; // cross-cluster routing handled by work-stealing
@@ -853,6 +879,32 @@ void RunqueuePush(Task* t)
 {
     cpu::PerCpu* preferred = TargetPerCpuFor(t);
     cpu::PerCpu* target = (t->priority == TaskPriority::Idle) ? preferred : PickClusterPlacement(preferred, t);
+#if DUETOS_SCHED_ROUTING_TRACE
+    // Flag-gated routing trace. Attributes the wake-side decision
+    // (source CPU, last_cpu hint, preferred = TargetPerCpuFor's
+    // pick, target = PickClusterPlacement's pick) so an SMP routing
+    // regression — like the 2026-05-22 SmpStartAps-onto-offline-AP
+    // hang — is one grep away in the log instead of an hour of
+    // probe injection. Always DEBUG level so a release boot with
+    // the flag forgotten on doesn't flood. Note: `target` may
+    // legitimately be nullptr if every candidate failed the
+    // affinity / online checks; the trace renders that as cpu=~0
+    // so the line stays one-shot regardless.
+    {
+        cpu::PerCpu* self = cpu::CurrentCpu();
+        const u32 self_id = (self != nullptr) ? self->cpu_id : 0xFFFFFFFFu;
+        const u32 last_cpu = t->last_cpu;
+        const u32 preferred_id = (preferred != nullptr) ? preferred->cpu_id : 0xFFFFFFFFu;
+        const u32 target_id = (target != nullptr) ? target->cpu_id : 0xFFFFFFFFu;
+        const char* prio = (t->priority == TaskPriority::Idle) ? "idle" : "normal";
+        KLOG_DEBUG_V("sched/route", "wake src=", static_cast<u64>(self_id));
+        KLOG_DEBUG_V("sched/route", "  last_cpu=", static_cast<u64>(last_cpu));
+        KLOG_DEBUG_V("sched/route", "  preferred=", static_cast<u64>(preferred_id));
+        KLOG_DEBUG_V("sched/route", "  target=", static_cast<u64>(target_id));
+        KLOG_DEBUG_S("sched/route", "  task", "name", (t->name != nullptr) ? t->name : "<anon>");
+        KLOG_DEBUG_S("sched/route", "  prio", "class", prio);
+    }
+#endif
     if (target != preferred)
     {
         // Routed away from last_cpu — update it so the next wake
