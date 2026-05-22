@@ -111,30 +111,31 @@ cleanup debt: move the residual up and delete the rest.
   Gated by a 6-boot determinism sweep (3/3 APs online, byte-stable,
   zero panic/triple/fallback) + a 6/6-clean `gui-fuzz.sh 18` SMP
   matrix. `g_promote_to_panic` may now be reconsidered.
-- **Residual (the real remaining work — architectural cleanup, no
-  live failure):** the held-stack *storage* is still the single
-  global `g_per_cpu[0]` alias (`#define g_held_stack
-  g_per_cpu[0].stack`, `kLockdepCpuMax = 1` in
-  `kernel/sync/lockdep.cpp`) and it does **not** separate spinlock
-  classes from sleeping-mutex classes. With the GSBASE/lidt root
-  fixed this no longer produces a runtime symptom, but the design
-  is still wrong in principle: spinlock classes must NOT follow the
-  task (a spinlock is never held across a normal switch; the one
-  deliberate exception — `g_sched_lock` riding `ContextSwitch` via
-  the `ctxsw_lock_to_release` lock-pass — is released by
-  `SchedFinishTaskSwitch`, not by lockdep). The prescribed split: a
-  **per-CPU** stack for spinlock classes (indexed by
-  `cpu::CurrentCpu()->cpu_id`, the B2 cascading item) and the
-  **per-task** stack (already in place) for mutex classes; needs a
-  spinlock-vs-mutex class tag (`LockClass` is currently an untyped
-  `u16` with no acquire-API distinction).
-- **Blocks on:** the per-CPU `g_held_stack` indexing is the B2
-  "split `g_sched_lock` per-CPU" cascading item (lockdep must not
-  reintroduce the lockdep↔sched recursion the TU header avoids).
-  Wants its own focused slice + a ≥6-boot determinism sweep
-  (`tools/test/boot-determinism-sweep.sh`). The genuine in-task
-  nesting found alongside this (modal-dialog FAT32 I/O under
-  `CompositorLock`) is already fixed.
+- **Per-CPU held-stack storage — LANDED (2026-05-22).** The
+  global `g_per_cpu[0]` alias is gone. `kLockdepCpuMax =
+  acpi::kMaxCpus`, each CPU indexes its own slot via
+  `cpu::CurrentCpuIdOrBsp()`, and the re-entry guard
+  (`PerCpuHeld::in_lockdep`) moved into the per-CPU struct too.
+  `LockdepCriticalSection` reads the slot AFTER `Cli` so a
+  migration can't corrupt a peer's slot. The shared edge graph
+  + counters use `__atomic_fetch_or` (bit) and `SatAtomicAdd`
+  (counters) for cross-CPU safety. Verified with 5/5-clean
+  `tools/test/smp-stress-sweep.sh 8 8 5` (release SMP=8) and
+  no inversions in the lockdep self-test under the new
+  storage layout.
+- **Residual (architectural cleanup, no live failure):** the
+  spinlock-vs-mutex class split. Today every `LockClass` lives
+  in one per-CPU stack; with the per-task `Task::lockdep_held`
+  snapshot/restore wired underneath, sleeping-mutex classes
+  technically ride the task across a switch via that buffer,
+  while spinlock classes are protected by Cli (single CPU at a
+  time). The two are not separately tagged at the API. A
+  `LockClassSpin` / `LockClassMutex` tag would make the
+  separation explicit so an audit can verify a sleeping-mutex
+  class never appears on a per-CPU spinlock stack.
+- **Blocks on:** a workload that produces a false inversion the
+  per-CPU + per-task pair doesn't already absorb. None
+  observed since 2026-05-22.
 
 ### SMP=8 (4c × 2t) AP-bringup recursive fault under x86_64-debug
 
