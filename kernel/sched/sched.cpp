@@ -4230,14 +4230,27 @@ namespace
             WaitQueueBlock(&g_reaper_wq);
         }
 
-        // Detach the entire zombie list under CLI. Zombies are all
-        // off-CPU by construction (SchedExit enqueues only AFTER
-        // Schedule() has switched away from the dying task), so the
-        // order we free them in doesn't matter. Draining the list in
-        // one pass avoids N wake-up round trips when a burst of tasks
-        // exits at once.
-        Task* drained = g_zombies;
-        g_zombies = nullptr;
+        // Detach the entire zombie list. `SchedFinishTaskSwitch`
+        // adds new zombies under `g_sched_lock` (the SMP-safe
+        // deferred-zombie handoff that closes the reaper-frees-
+        // running-stack UAF), so the detach must hold the same
+        // lock to observe a consistent list head. Single-CPU
+        // boots are unaffected; SMP boots no longer race the
+        // producer.
+        //
+        // Zombies are now provably off-CPU by construction —
+        // `SchedFinishTaskSwitch` only promotes them AFTER the
+        // outgoing `ContextSwitch` has committed — so the order
+        // we free them in still doesn't matter. Draining the
+        // list in one pass avoids N wake-up round trips when a
+        // burst of tasks exits at once.
+        Task* drained = nullptr;
+        {
+            sync::IrqFlags lf = sync::SpinLockAcquire(g_sched_lock);
+            drained = g_zombies;
+            g_zombies = nullptr;
+            sync::SpinLockRelease(g_sched_lock, lf);
+        }
         arch::Sti();
 
         // KFree happens AFTER we Sti so the heap path is not running

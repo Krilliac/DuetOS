@@ -137,57 +137,58 @@ cleanup debt: move the residual up and delete the rest.
   per-CPU + per-task pair doesn't already absorb. None
   observed since 2026-05-22.
 
-### SMP=8 saturation use-after-free (RIP=0xdededededededede)
+### SMP=8 saturation use-after-free — LANDED (2026-05-22)
 
-- **Symptom:** booting `tools/test/smp-stress-sweep.sh 8 8 5`
-  (release SMP=8) intermittently — about 1-2 of every 5 repeats —
-  hits a kernel-mode #GP at the freed-poison RIP pattern:
+The intermittent SMP=8 release-stress `#GP at
+RIP=0xdedededededededede` (kheap freed-poison pattern) was a
+real reaper-races-dying-task UAF in the scheduler's
+exit/reap handoff. The historical comment in `SchedExit`
+called the gap out:
 
-  ```
-  [panic-summary] subsystem=arch/traps msg="#GP General protection"
-  rip       : 0xdededededededede  [wild: non-canonical ...]
-  rbx, rbp, r12, r14, r15 : 0xdededededededede (all freed-poison)
-  cs        : 0x08 (ring 0 kernel-code)
-  cpu_id    : 0x02
-  uptime    : 2.272s since boot
-  ```
+    > Single-CPU safety argument: once Schedule() below
+    > context-switches away, this task's Current() assignment
+    > is gone and only the zombie pointer references the
+    > struct. [...] SMP bring-up will need to also verify the
+    > task isn't `Running` on a peer CPU before the reaper
+    > touches it.
 
-  The kernel jumped through a freed function pointer
-  (`0xDE` = `kHeapFreePoison`, see `kernel/mm/kheap.cpp:39`).
-  Several registers carry the same freed-poison pattern,
-  indicating the call/jmp went through a struct field that was
-  freed-then-poisoned but still referenced.
-- **What's known:** the fault site is BEFORE the stress driver's
-  workers do meaningful work — it lands just after
-  `LOADTEST: spawned 8 / 8` and a few `[sched] {A,B,C} i=...`
-  iterations from `SchedDemoWorkerTask`. So the use-after-free is
-  on the boot-tail spawn path, NOT in the stress workload itself.
-- **Reusable harness:** `tools/test/smp-stress-sweep.sh 8 8 10`
-  reproduces at ~20-40% rate. The discovery harness is the
-  panic-dump cleanup itself — without the serial-bypass +
-  `WriteCurrentTaskLabel` guards that landed in the 2026-05-22
-  slice, the RIP rendered as space-mixed bytes and the bug was
-  invisible. Future investigation should start with the panic
-  dump's kernel-stack trace (the dump prints
-  `[fault-stack] stack@... <unreadable>` today because the rsp
-  is in `k.stack-arena` but the dump-time AS doesn't have the
-  frame faulted in — fix that first to get the call chain).
-- **Likely shape:** a kobject / handle-table / iocp-style
-  object's callback pointer outliving its owner under SMP. The
-  surface-area suspects from the boot tail:
-  - HandleTableDrain / ProcessRelease running concurrently with
-    a peer that still has a handle in flight
-  - `SchedExit` reclaiming a Task whose pointer a peer's
-    runqueue still references
-  - workpool's `WorkerCtx` freed while a peer worker is
-    inside the callback
-  Each of these has refcount machinery; the bug is likely a
-  missing `KObjectAcquire` on one of the acquire paths.
-- **Blocks on:** dumping the stack frames at the fault rsp
-  (`tools/qemu/run.sh` can supply a GDB stub via COM2; attach
-  with `tools/debug/duetos-gdb-attach.sh` once the fault fires
-  and read the call chain). With the call chain visible the
-  owning subsystem becomes apparent.
+That verify-before-reap half wasn't done. Race:
+
+  1. CPU A — Task T calls `SchedExit`. Marks T as Dead, pushes
+     T onto `g_zombies`, wakes the reaper, calls `Schedule`.
+  2. CPU B — Reaper wakes, pops T, calls
+     `FreeKernelStack(T->stack_base)` — unmaps + frees the
+     stack pages.
+  3. CPU A — Still mid-`Schedule`. `ContextSwitch` is executing
+     ON T's stack while saving rsp/rip and loading the new
+     task's regs. The reader gets back kheap freed-poison
+     (0xDE bytes), interpreted as a return address → `ret`
+     jumps to 0xdedede... → non-canonical #GP. Symptom matches
+     the panic dump byte-for-byte.
+
+**Fix (commit `1f07c97`):** per-CPU deferred-zombie. `SchedExit`
+stashes the dying task into
+`pcpu->ctxsw_dying_task_to_zombie` BEFORE the context switch.
+`SchedFinishTaskSwitch` — which runs on the NEW task's stack
+AFTER `ContextSwitch` has committed the rsp swap — promotes
+the deferred entry to `g_zombies` and wakes the reaper. By
+that point the dying task is provably off-CPU on every peer.
+
+Adjacent races fixed in the same slice:
+
+- `Process::refcount` and `AddressSpace::refcount`: plain
+  `++`/`--` was racy under SMP. Now CAS-loop retain +
+  `__atomic_sub_fetch` release.
+- `g_zombies` list mutation: reaper's detach now takes
+  `g_sched_lock` for consistency with the deferred-zombie
+  producer.
+
+Verified with `tools/test/smp-stress-sweep.sh 8 8 5`. The
+panic-dump path itself was also hardened in the same slice
+(`WriteCurrentTaskLabel` defensive guards, `DumpStackWindow`
+page-clamp, `PlausibleKernelAddress` upper bound extended
+through the kstack arena) so a future regression in the same
+area is readable immediately instead of corrupted.
 
 ### SMP=8 (4c × 2t) AP-bringup recursive fault under x86_64-debug
 
