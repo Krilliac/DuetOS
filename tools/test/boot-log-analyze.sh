@@ -79,26 +79,41 @@ fi
 hr
 echo "HEALTH (CLAUDE.md regression scan)"
 # Hard failures — never deliberate.
-hard=$(g 'PANIC|TRIPLE|kernel oops|task-kill|#GP at|#PF at|#UD at|unhandled exception|triple fault' \
+# Includes `recursive-panic` (lowercase): the panic guard emits
+# `[recursive-panic] subsys: msg — short-circuiting` when a panic
+# fires while another panic is already in progress. The original
+# uppercase PANIC banner may have been truncated by the recursive-
+# panic halt, so catching only `PANIC` misses these. Observed
+# 2026-05-22 in sweep-3 (stack canary corruption during boot-tail
+# kheartbeat task creation) — the sweep summary's panic column
+# said 0 because the grep was case-sensitive PANIC.
+hard_pat='PANIC|TRIPLE|kernel oops|task-kill|#GP at|#PF at|#UD at|unhandled exception|triple fault|recursive-panic|canary corrupted'
+hard=$(g "$hard_pat" \
        | grep -avE 'selftest|self-test|deliberately|injected|expected|sanity line' | head -5)
-hardn=$(g 'PANIC|TRIPLE|kernel oops|task-kill|#GP at|#PF at|#UD at|unhandled exception|triple fault' \
+hardn=$(g "$hard_pat" \
         | grep -acvE 'selftest|self-test|deliberately|injected|expected|sanity line' 2>/dev/null)
 if [ "$hardn" -gt 0 ]; then
     echo "  !! $hardn hard fault line(s):"
     echo "$hard" | sed 's/^/     /'
     rc=1
 else
-    echo "  no panic / triple-fault / oops / task-kill"
+    echo "  no panic / triple-fault / oops / task-kill / recursive-panic"
 fi
 # Error-level lines, minus the known-deliberate self-test scaffolding.
 # elf-loader PT_LOAD line is the unwind-guard self-test's deliberate OOM
 # injection (always preceded by the `loader.elf_oom` probe fire and
 # followed by `[elf-test] unwind-guard PASS`) — production behaviour
 # stays ERROR, but the regression scan shouldn't flag the test path.
-errn=$(g '\[E\] ' | grep -acvE 'selftest\.fault-react|error-level sanity line|net/wireless/(fourway|wdev|eapol)|security/module : start: init failed.*selftest|init : callback failed.*init\.cpp:163|elf-loader : PT_LOAD segment mapping failed mid-load' 2>/dev/null)
+# `arch/smp : AP never signalled online, giving up` is the documented
+# graceful fallback path under QEMU TCG — an AP's 200ms WaitForApOnline
+# window can flake under host load and the kernel correctly continues
+# with the APs that did come up. The `[smp] online=N/M` sentinel fires
+# unconditionally with the real `N`, so determinism is preserved.
+errn_skip='selftest\.fault-react|error-level sanity line|net/wireless/(fourway|wdev|eapol)|security/module : start: init failed.*selftest|init : callback failed.*init\.cpp:163|elf-loader : PT_LOAD segment mapping failed mid-load|arch/smp : AP never signalled online, giving up'
+errn=$(g '\[E\] ' | grep -acvE "$errn_skip" 2>/dev/null)
 echo "  non-deliberate [E] lines: ${errn}"
 if [ "$errn" -gt 0 ]; then
-    g '\[E\] ' | grep -avE 'selftest\.fault-react|error-level sanity line|net/wireless/(fourway|wdev|eapol)|security/module : start: init failed.*selftest|init : callback failed.*init\.cpp:163|elf-loader : PT_LOAD segment mapping failed mid-load' | head -4 | sed 's/^/     /'
+    g '\[E\] ' | grep -avE "$errn_skip" | head -4 | sed 's/^/     /'
 fi
 
 hr

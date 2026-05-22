@@ -248,6 +248,25 @@ if(DUETOS_LOCK_ORDER_AUDIT)
     add_compile_definitions(DUETOS_LOCK_ORDER_AUDIT=1)
 endif()
 
+# Cross-CPU wake routing trace. When ON, every wake-side enqueue
+# (RunqueuePush -> PickClusterPlacement -> RunqueuePushOn) emits a
+# DEBUG-level klog line attributing the routing decision: source
+# CPU, preferred CPU, picked CPU, and the "why" (last_cpu cache,
+# offline-AP skip, less-loaded peer, affinity override). Catches
+# the class of bug surfaced 2026-05-22 where the BSP boot task
+# was routed onto a not-yet-online AP slot mid-SmpStartAps. Off
+# by default — the trace lines fire on every wake (potentially
+# thousands per second under load), so they belong in the
+# investigation toolbox rather than the steady-state log. Turn
+# on with `-DDUETOS_SCHED_ROUTING_TRACE=ON` when chasing an SMP
+# routing regression; turn back off when the investigation closes.
+option(DUETOS_SCHED_ROUTING_TRACE
+    "Trace wake-side cross-CPU routing decisions to klog DEBUG"
+    OFF)
+if(DUETOS_SCHED_ROUTING_TRACE)
+    add_compile_definitions(DUETOS_SCHED_ROUTING_TRACE=1)
+endif()
+
 # Capability-gate audit mode. Every cap-gated syscall passes through a
 # trace hook that, depending on this knob, emits:
 #   Off    — no trace; the gate does the cap check and returns.

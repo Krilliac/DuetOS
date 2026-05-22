@@ -1,6 +1,7 @@
 #include "arch/x86_64/smp.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/delay.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/lapic.h"
@@ -702,6 +703,12 @@ u64 SmpStartAps()
         // the BSP keeps running uniprocessor instead of halting
         // the whole machine over an SMP-only feature.
         core::DebugPanicOrWarnWithValue("arch/smp", "trampoline image larger than 4 KiB", tramp_len);
+        // Always emit the structural sentinel — the determinism /
+        // boot-log rigs grep this for the authoritative SMP count
+        // and report `aps=?` (with the noise that entails) if it
+        // never fires. Even on the trampoline-bloat early return,
+        // BSP is online and that's a count.
+        SerialWrite("\n[smp] online=1/?\n");
         return 0;
     }
     auto* dst = static_cast<u8*>(TrampVirt());
@@ -807,6 +814,13 @@ u64 SmpStartAps()
         ap_pcpu->runq_normal_len = 0;
         // TSS slot wired by AllocateApGdt below, before the AP runs.
         ap_pcpu->tss = nullptr;
+        // Liveness flag — flipped to true at the END of this loop
+        // iteration, AFTER WaitForApOnline confirms the AP has
+        // signalled. Until then `PickClusterPlacement` skips this
+        // slot, so a wakeable task on the BSP can't be routed to
+        // an AP that isn't running yet. The memset above already
+        // zeroed it; explicit assignment documents the contract.
+        ap_pcpu->online = false;
 
         // Allocate this AP's GDT clone + TSS body + 3 IST stacks.
         // ApEntryFromTrampoline picks them up via g_ap_gdt_bundles
@@ -821,10 +835,14 @@ u64 SmpStartAps()
         }
         g_ap_gdt_bundles[cpu_id] = bundle;
         g_ap_percpus[cpu_id] = ap_pcpu;
-        if (cpu_id + 1 > g_cpu_id_limit)
-        {
-            g_cpu_id_limit = cpu_id + 1;
-        }
+        // NOTE: g_cpu_id_limit is NOT bumped here — the scheduler's
+        // wake-side routing (`PickClusterPlacement`, `TargetPerCpuFor`)
+        // iterates up to `SmpCpuIdLimit()`, and exposing this AP's
+        // slot before it has actually flipped online would route
+        // wakeable tasks (like THIS task, the BSP boot task, after
+        // SchedSleepTicks below) to a runqueue with no AP to run
+        // them. Set the limit AFTER the AP signals online via
+        // `g_cpus_online` below.
 
         // Per-AP 16 KiB stack. The trampoline loads RSP with stack_top
         // (= stack_base + size) so we pass that.
@@ -845,15 +863,48 @@ u64 SmpStartAps()
         TrampU32At(kOffCpuId) = cpu_id;
         TrampU32At(kOffOnlineFlag) = 0;
 
-        core::LogWithValue(core::LogLevel::Info, "arch/smp", "starting AP apic_id", static_cast<u64>(rec.apic_id));
+        // Compose the "starting AP" log as one atomic SerialWrite
+        // instead of going through klog's multi-fragment path. The
+        // klog form (timestamp/level/tag/msg/val) is structurally
+        // splittable under the same race as the existing
+        // `[smp] online=` sentinel — see the post-loop builder
+        // below for the same rationale. Composing one buffer also
+        // lets the next post-mortem grep for `[arch/smp] starting`
+        // as a single line.
+        {
+            char buf[64];
+            u32 n = 0;
+            const char* p = "[arch/smp] starting AP apic_id=0x";
+            while (*p)
+                buf[n++] = *p++;
+            // Render rec.apic_id as zero-padded 2-digit hex (8-bit
+            // MADT field).
+            const u32 aid = rec.apic_id;
+            const char hex[] = "0123456789abcdef";
+            buf[n++] = hex[(aid >> 4) & 0xF];
+            buf[n++] = hex[aid & 0xF];
+            buf[n++] = '\n';
+            buf[n] = '\0';
+            SerialWrite(buf);
+        }
 
         // INIT IPI (assert). Per Intel SDM Vol. 3A §8.4.4.
         SmpSendIpi(rec.apic_id, kIcrDeliveryInit | kIcrLevelAssert);
 
-        // 10 ms wait — SchedSleepTicks(1) at 100 Hz. Interrupts must
-        // be enabled for this (the wait path uses the timer-driven
-        // sleep queue); SmpStartAps runs after TimerInit so that's fine.
-        sched::SchedSleepTicks(1);
+        // 10 ms wait between INIT and SIPI per Intel SDM. Routed
+        // through the single-source-of-truth `Delay10msApproximate`
+        // helper instead of `SchedSleepTicks(1)` (yielding) or a
+        // bare `pause` loop (wedges under QEMU TCG with LTO — the
+        // emulator never advances the guest clock without a yield-
+        // virtual-time side effect like `hlt`). The
+        // routing-to-offline-AP race the original yielding shape
+        // surfaced under SMP=8 release (2026-05-22) is closed at the
+        // scheduler layer by `PerCpu::online` and the deferred
+        // `g_cpu_id_limit` bump below — but routing through
+        // `Delay10msApproximate` also keeps this caller off the
+        // scheduler entirely, so a future change to wake-side
+        // routing can't re-open the same trap.
+        Delay10msApproximate();
 
         // SIPI with vector = trampoline_phys >> 12 = 0x08.
         const u32 sipi = kIcrDeliveryStartup | (kTrampolinePhys >> 12);
@@ -873,6 +924,23 @@ u64 SmpStartAps()
 
         ++aps_started;
         ++g_cpus_online;
+        // NOW the scheduler may safely route work to this AP. The
+        // belt-and-braces pair:
+        //   - `online = true` is the wake-side routing predicate
+        //     read by `PickClusterPlacement` / `TargetPerCpuFor`
+        //     to skip not-yet-running slots.
+        //   - `g_cpu_id_limit` bump is the iteration-key the same
+        //     routing functions use to bound their for-loop.
+        // Either alone would close the 2026-05-22 `aps=?` hang; we
+        // do both so a future feature that brings a CPU offline at
+        // runtime (hot-plug / power-management / watchdog kill) can
+        // flip `online = false` to immediately stop routing without
+        // having to coordinate `g_cpu_id_limit`.
+        ap_pcpu->online = true;
+        if (cpu_id + 1 > g_cpu_id_limit)
+        {
+            g_cpu_id_limit = cpu_id + 1;
+        }
     }
 
     // Structural sentinel — ONE atomic SerialWrite so it stays a

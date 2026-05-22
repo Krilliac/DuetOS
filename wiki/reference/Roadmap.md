@@ -20,6 +20,46 @@ cleanup debt: move the residual up and delete the rest.
 
 ## Kernel / runtime
 
+### Boot-tail stack canary corruption — intermittent
+
+- **Symptom:** ~1/6 SMP=8 release determinism-sweep boots fire a
+  `[recursive-panic] security/stack: stack canary corrupted —
+  overflow detected — short-circuiting` at the end of boot, right
+  after `[sched] created task id=0x22 name="kheartbeat"`. The
+  recursive-panic guard fires because an earlier panic was already
+  in progress (the original Panic banner was truncated by the
+  short-circuit halt, so the root cause isn't visible in the log).
+  Confirmed surfacing 2026-05-22 in sweep-3 of the post-fix
+  determinism sweep (`/tmp/sweep-3.log`).
+- **Pre-existing:** This was hidden before the SmpStartAps
+  `aps=?` fix landed (boots never reached past AP bring-up, so
+  post-bringup behaviour was invisible). It is NOT a regression
+  introduced by the predicate / iteration-key / Delay10msApproximate
+  triple-fix — verified by 28 individual single-boot runs all
+  clean across the multi-commit progression (n1..n15, d1..d5,
+  op1..op3, final1..final5).
+- **Approach:**
+  1. Capture more boots into `/tmp/canary-*.log` and grep for the
+     exact task whose stack canary tripped (the recursive guard
+     reports the subsystem; the original Panic's PanicWithValue
+     would print the corrupted canary bytes).
+  2. The reaper's pre-free canary check at `sched.cpp:4360` is
+     one site; the periodic per-task canary scanner at
+     `security/stack_canary.cpp:72` is another. Identifying which
+     fires first via probe-injection isolates the offender.
+  3. Likely candidates: kheartbeat (just created when the panic
+     fires), a fresh AP idle task, or a boot-tail spawn that
+     under-sized its stack. None of which were rare before SMP
+     came up.
+- **Blocks on:** willing follow-up slice — the SMP fix it
+  surfaces from is otherwise complete (6/6 determinism sweeps,
+  zero non-AP-timeout failures, byte-stable per-CPU online).
+- **Detection landed (2026-05-22):** `boot-log-analyze.sh` now
+  catches `recursive-panic` + `canary corrupted` in its HEALTH
+  regression scan (the prior shape was case-sensitive PANIC and
+  missed both the lowercase recursive-panic line and the
+  canary-corruption message even though it was a real fault).
+
 ### B2-followup — split `g_sched_lock` per-CPU
 
 - **Residual:** per-CPU runqueue head/tail live in `cpu::PerCpu`,
@@ -136,6 +176,86 @@ cleanup debt: move the residual up and delete the rest.
 - **Blocks on:** a workload that produces a false inversion the
   per-CPU + per-task pair doesn't already absorb. None
   observed since 2026-05-22.
+
+### SmpStartAps offline-AP routing hang — LANDED (2026-05-22)
+
+Under SMP=8 release, `boot-determinism-sweep.sh` consistently
+reported `aps=?` for every run — the post-AP-bringup
+`[smp] online=N/M` structural sentinel never fired, even though
+the boot reached `bringup-complete` cleanly. Tracing pinned the
+hang inside `SmpStartAps`'s per-AP loop:
+
+  1. The BSP runs the loop body for AP[1]: kmallocs its PerCpu,
+     allocates GDT/TSS/IST stacks via `AllocateApGdt`, kmallocs a
+     stack, registers the slot at `g_ap_percpus[cpu_id]`, bumps
+     `g_cpu_id_limit` to cover it, then sends INIT IPI.
+  2. The 10ms INIT→SIPI delay called `sched::SchedSleepTicks(1)`,
+     parking the BSP boot task on the sleep queue.
+  3. Timer IRQ at `g_tick_now + 1` woke the task. The wake-side
+     `RunqueuePush` → `PickClusterPlacement` looked across
+     in-cluster peers and saw `g_ap_percpus[1]` (just allocated,
+     runq_normal_len == 0) — a "less loaded" target. Routed the
+     BSP boot task to AP[1]'s runqueue.
+  4. AP[1] hadn't actually started yet (no SIPI). Its runqueue
+     was a memory address; nothing was draining it.
+  5. BSP went idle; init-wedge eventually fired but `[smp] online=`
+     was never emitted, so the determinism rig reported the
+     ambiguous `aps=?`.
+
+Fix landed in two layers (belt-and-braces):
+
+1. **`g_cpu_id_limit` deferred bump** — `SmpStartAps` now waits
+   to advance the scheduler's wake-side iteration key until
+   AFTER `WaitForApOnline` confirms the AP signalled itself
+   online. The slot in `g_ap_percpus[]` still has to be written
+   before the AP runs (the AP reads it during early bringup),
+   but the scheduler can't see it as a routing target until
+   it's actually serviceable.
+
+2. **`PerCpu::online` predicate** — new flag, set true for the
+   BSP in `PerCpuInitBsp`, flipped true for each AP at the
+   end of its `SmpStartAps` loop iteration. `PickClusterPlacement`
+   and `TargetPerCpuFor` skip slots with `online == false`,
+   so a future feature that brings a CPU offline at runtime
+   (hot-plug, power-management quiesce, watchdog kill) can flip
+   the flag and immediately stop the scheduler routing wakes
+   to it without having to coordinate `g_cpu_id_limit`.
+
+   Either layer alone closes the 2026-05-22 race; both together
+   survive a future reordering of the AP-bring-up sequence.
+
+Also added a one-shot `[smp] online=1/?` emission on the
+trampoline-bloat early-return path so the determinism sweep's
+`aps` column always reports a real count instead of `?`.
+
+**Infrastructure to catch the next one cheap.** Same slice
+landed several pieces of debug infrastructure so a future
+session investigating a similar regression doesn't repeat the
+six-rebuild manual probe-injection loop:
+
+- `kernel/arch/x86_64/delay.h::Delay10msApproximate()` — single
+  source of truth for short busy-waits that work under both
+  QEMU TCG (the emulator doesn't advance virtual-time inside a
+  bare `pause` loop with LTO) and real hardware. SmpStartAps's
+  INIT→SIPI wait now calls this instead of open-coding the recipe.
+- `DUETOS_SCHED_ROUTING_TRACE` build option — flag-gated
+  `KLOG_DEBUG` lines at every wake-side `RunqueuePush`
+  attributing the routing decision (source CPU, last_cpu hint,
+  preferred, target, task name, priority). Compiled out by
+  default; turn on to make a routing regression a single grep.
+- `tools/test/boot-progress-localizer.sh` — reads any boot log
+  and reports the LAST ordered sentinel reached vs the FIRST
+  not-reached. Catches "where did the boot stop?" in one
+  command instead of eyeballing the tail.
+- `tools/qemu/babysit-boot.sh` — wraps `run.sh`; on
+  timeout-without-completion auto-runs the localizer +
+  `boot-log-analyze.sh` and writes a single diagnosis report.
+  Canonical "run a boot and tell me if it broke" entry point.
+
+Verified: 15/15 single boots clean (`[smp] online=8/8`),
+6/6 determinism sweep boots OK (`/tmp/sweep3.log`), plus a
+re-run of the sweep after the `PerCpu::online` predicate +
+`Delay10msApproximate` infrastructure landed (`/tmp/sweep4.log`).
 
 ### SMP=8 saturation use-after-free — LANDED (2026-05-22)
 
@@ -385,6 +505,23 @@ landed.)
   `BlockDeviceRead` itself (the slow path). Larger but
   mechanical; gated until a workload shows the path-cache
   fast-path doesn't already absorb the contention.
+- **Baseline measurement (2026-05-22 — gates the refactor):**
+  `tools/test/fat32-concurrent.sh 30` on x86_64-release reports
+  zero `fs/fat32 : lookup` debug lines, zero `MutexLock waiter`
+  parking sentinels, zero non-deliberate lockdep inversions,
+  and zero `fs/fat32 [E]` lines over the 30 s window. The
+  path-cache fast path is doing its job — boot-storm probes
+  (NOTES.TXT / TEST.* / TRTEST.BIN / KERNEL.FIX et al.) all
+  retire lock-free before the slow walker is consulted, so the
+  driver-wide mutex never serialises under the present
+  workload. Per the gate below, the per-CPU `g_scratch` +
+  lock-drop refactor stays deferred — the cost (≈ 120
+  reference-site edits across 5 TUs, in the same area as the
+  just-landed SMP=8 UAF fix) does not buy a measurable win
+  today. Revisit when a workload shows the seqlock probe
+  missing (e.g. write-heavy + sustained eviction beyond the
+  32-slot cache) or when a profile attributes wall-time to
+  the in-mutex `BlockDeviceRead`.
 - **Larger refactor (deferred):** split into per-volume mutex +
   per-cache RwLock + lock-free FAT entry cache. Wants its own
   slice once the path-cache fast path + per-CPU scratch are
@@ -393,11 +530,17 @@ landed.)
   spawns the linux-smoke synfs + win32 PE smokes concurrently
   and captures the boot log. Look for `fs/fat32 : lookup`
   line-rate vs `MutexLock waiter` parking lines as the
-  contention signal.
+  contention signal. (Script-side fix landed 2026-05-22 — the
+  `|| echo 0` fall-back was chained onto `grep -c`, which
+  already prints 0 on no-match and exits 1, so on a clean run
+  the variable captured "0\n0" and the arithmetic below it
+  bombed with "syntax error in expression". Replaced with `;
+  true` so a clean baseline run completes its report.)
 - **Blocks on:** evidence that the path-cache fast path didn't
-  close the live livelock corner. If a fat32-concurrent.sh run
-  still shows the symptom, the per-CPU scratch + lock-drop
-  refactor lands next.
+  close the live livelock corner. The 2026-05-22 baseline run
+  above shows it HAS closed it under the present workload, so
+  this entry stays gated until a future workload shows the
+  symptom.
 
 ### Stage 6 — per-process namespace roots (residual)
 

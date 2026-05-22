@@ -90,6 +90,31 @@ banner) and exits non-zero on a non-deliberate failure, so it works
 as both a human report and a CI/scripted gate — independent of
 whether the log came from QEMU, VMware, VirtualBox, or real silicon.
 
+For the narrower question "where did this boot stop?" — most
+useful when triaging a hang rather than a panic — there's a
+sibling consumer that reads the same log:
+
+```bash
+tools/test/boot-progress-localizer.sh path/to/duetos-serial.log
+```
+
+It walks a canonical ordered list of boot sentinels (QEMU banner →
+phase=earlycon → phase=physmem → … → bringup-complete → SmpStartAps
+entry → [smp] online → userland) and reports the LAST one reached
+plus the FIRST one NOT reached. Pairs with the "fix anything you
+surface" workflow: a single command tells you whether to look at
+the heap path or the SMP path next, instead of grepping by hand.
+
+For a live boot under your control (vs a captured log from
+somewhere else), `tools/qemu/babysit-boot.sh [timeout]` wraps the
+canonical `tools/qemu/run.sh` invocation: on timeout-without-
+completion, it auto-runs the localizer plus boot-log-analyze and
+writes a single diagnosis report to `/tmp/babysit-<timestamp>.txt`.
+Use it as the canonical "run a boot and tell me whether anything
+broke" entry point — the report contains everything a follow-up
+session needs to pick up the investigation without re-deriving the
+greps.
+
 For host-CPU profiling and SMP load scaling on QEMU specifically,
 see `tools/qemu/cpu-probe.sh` and
 `tools/qemu/smp-loadtest-compare.sh` (their headers document the

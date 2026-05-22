@@ -157,20 +157,23 @@ namespace duetos::core
     // stack shape has argc at a 16-aligned boundary).
     const u64 stack_top = (proc->user_rsp_init != 0) ? proc->user_rsp_init : (proc->user_stack_va + mm::kPageSize - 8);
 
-    SerialWrite("[ring3] task pid=");
-    SerialWriteHex(sched::CurrentTaskId());
-    SerialWrite(" entering ring 3 rip=");
-    SerialWriteHex(code_va);
-    SerialWrite(" rsp=");
-    SerialWriteHex(stack_top);
-    if (proc->user_is_pe32)
-        SerialWrite(" mode=pe32");
-    if (proc->user_gs_base != 0)
     {
-        SerialWrite(" gs_base=");
-        SerialWriteHex(proc->user_gs_base);
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] task pid=");
+        SerialWriteHex(sched::CurrentTaskId());
+        SerialWrite(" entering ring 3 rip=");
+        SerialWriteHex(code_va);
+        SerialWrite(" rsp=");
+        SerialWriteHex(stack_top);
+        if (proc->user_is_pe32)
+            SerialWrite(" mode=pe32");
+        if (proc->user_gs_base != 0)
+        {
+            SerialWrite(" gs_base=");
+            SerialWriteHex(proc->user_gs_base);
+        }
+        SerialWrite("\n");
     }
-    SerialWrite("\n");
 
     if (proc->user_is_pe32)
     {
@@ -229,15 +232,18 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
         AddressSpaceRelease(as);
         return 0;
     }
-    SerialWrite("[ring3] elf spawn name=\"");
-    SerialWrite(name);
-    SerialWrite("\" pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" entry=");
-    SerialWriteHex(r.entry_va);
-    SerialWrite(" stack_top=");
-    SerialWriteHex(r.stack_top);
-    SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] elf spawn name=\"");
+        SerialWrite(name);
+        SerialWrite("\" pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" entry=");
+        SerialWriteHex(r.entry_va);
+        SerialWrite(" stack_top=");
+        SerialWriteHex(r.stack_top);
+        SerialWrite("\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
     return proc->pid;
 }
@@ -343,15 +349,18 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
         proc->user_rsp_init = rsp_init;
     }
 
-    SerialWrite("[ring3] linux elf spawn name=\"");
-    SerialWrite(name);
-    SerialWrite("\" pid=");
-    SerialWriteHex(proc->pid);
-    SerialWrite(" entry=");
-    SerialWriteHex(r.entry_va);
-    SerialWrite(" stack_top=");
-    SerialWriteHex(r.stack_top);
-    SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] linux elf spawn name=\"");
+        SerialWrite(name);
+        SerialWrite("\" pid=");
+        SerialWriteHex(proc->pid);
+        SerialWrite(" entry=");
+        SerialWriteHex(r.entry_va);
+        SerialWrite(" stack_top=");
+        SerialWriteHex(r.stack_top);
+        SerialWrite("\n");
+    }
     sched::SchedCreateUser(&Ring3UserEntry, nullptr, name, proc);
     return proc->pid;
 }
@@ -385,9 +394,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     const bool emulator_pe_report = ::duetos::arch::IsEmulator();
     if (!emulator_pe_report)
     {
-        SerialWrite("[ring3] pe report name=\"");
-        SerialWrite(name);
-        SerialWrite("\"\n");
+        {
+            arch::SerialLineGuard guard;
+            SerialWrite("[ring3] pe report name=\"");
+            SerialWrite(name);
+            SerialWrite("\"\n");
+        }
         PeReport(pe_bytes, pe_len);
     }
 
@@ -401,11 +413,14 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     const PeStatus vs = PeValidate(pe_bytes, pe_len);
     if (vs != PeStatus::Ok && vs != PeStatus::ImportsPresent && vs != PeStatus::TlsPresent)
     {
-        SerialWrite("[ring3] pe reject name=\"");
-        SerialWrite(name);
-        SerialWrite("\" reason=");
-        SerialWrite(PeStatusName(vs));
-        SerialWrite("\n");
+        {
+            arch::SerialLineGuard guard;
+            SerialWrite("[ring3] pe reject name=\"");
+            SerialWrite(name);
+            SerialWrite("\" reason=");
+            SerialWrite(PeStatusName(vs));
+            SerialWrite("\n");
+        }
         return 0;
     }
     // Bitness probe: drives the preload-set pick below. PE32 (i386)
@@ -772,6 +787,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 // from N's exports crashes.
                 (void)duetos::core::PeResolveImportsForLoadedImage(dll.image.file, dll.image.file_len, as,
                                                                    preloaded_dlls, preloaded_count - 1);
+                arch::SerialLineGuard guard;
                 SerialWrite("[ring3] pre-loaded ");
                 SerialWrite(active_set[i].label);
                 SerialWrite(" base=");
@@ -782,6 +798,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             }
             else
             {
+                arch::SerialLineGuard guard;
                 SerialWrite("[ring3] ");
                 SerialWrite(active_set[i].label);
                 SerialWrite(" DllLoad failed for \"");
@@ -911,6 +928,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                     ++preloaded_count;
                     (void)duetos::core::PeResolveImportsForLoadedImage(dyn.image.file, dyn.image.file_len, as,
                                                                        preloaded_dlls, preloaded_count - 1);
+                    arch::SerialLineGuard guard;
                     SerialWrite("[ring3] /lib auto-preload ");
                     SerialWrite(child->name);
                     SerialWrite(" base=");
@@ -919,6 +937,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                 }
                 else
                 {
+                    arch::SerialLineGuard guard;
                     SerialWrite("[ring3] /lib skip ");
                     SerialWrite(child->name);
                     SerialWrite(" DllLoad failed: ");
@@ -1118,6 +1137,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
                             ++preloaded_count;
                             (void)duetos::core::PeResolveImportsForLoadedImage(dyn.image.file, dyn.image.file_len, as,
                                                                                preloaded_dlls, preloaded_count - 1);
+                            arch::SerialLineGuard guard;
                             SerialWrite("[ring3] /FAT32-lib auto-preload ");
                             SerialWrite(kid.name);
                             SerialWrite(" base=");
@@ -1154,9 +1174,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             continue;
         (void)duetos::core::PeResolveImportsForLoadedImage(img.file, img.file_len, as, preloaded_dlls, preloaded_count);
     }
-    SerialWrite("[ring3] preload cross-reconcile complete count=");
-    SerialWriteHex(preloaded_count);
-    SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[ring3] preload cross-reconcile complete count=");
+        SerialWriteHex(preloaded_count);
+        SerialWrite("\n");
+    }
 
     const DllImage* dll_array = preloaded_count > 0 ? preloaded_dlls : nullptr;
     const PeLoadResult r = PeLoad(pe_bytes, pe_len, as, name, aslr_delta, dll_array, preloaded_count);
@@ -1238,9 +1261,12 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     {
         if (!win32::Win32HeapInit(proc))
         {
-            SerialWrite("[ring3] win32 heap init failed for \"");
-            SerialWrite(name);
-            SerialWrite("\"\n");
+            {
+                arch::SerialLineGuard guard;
+                SerialWrite("[ring3] win32 heap init failed for \"");
+                SerialWrite(name);
+                SerialWrite("\"\n");
+            }
             AddressSpaceRelease(as);
             return 0;
         }
@@ -1256,6 +1282,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {
             if (!ProcessRegisterDllImage(proc, preloaded_dlls[i]))
             {
+                arch::SerialLineGuard guard;
                 SerialWrite("[ring3] DLL register failed for \"");
                 SerialWrite(name);
                 SerialWrite("\" (table full?)\n");
@@ -1264,6 +1291,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         }
         if (preloaded_count > 0)
         {
+            arch::SerialLineGuard guard;
             SerialWrite("[ring3] registered ");
             SerialWriteHex(preloaded_count);
             SerialWrite(" DLL(s) pid=");

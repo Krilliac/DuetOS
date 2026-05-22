@@ -252,19 +252,22 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
 
     ++g_live_processes;
 
-    arch::SerialWrite("[proc] create pid=");
-    arch::SerialWriteHex(p->pid);
-    arch::SerialWrite(" name=\"");
-    arch::SerialWrite(name);
-    arch::SerialWrite("\" caps=");
-    arch::SerialWriteHex(caps.bits);
-    arch::SerialWrite("(");
-    SerialWriteCapBits(caps.bits);
-    arch::SerialWrite(") code_va=");
-    arch::SerialWriteHex(user_code_va);
-    arch::SerialWrite(" stack_va=");
-    arch::SerialWriteHex(user_stack_va);
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[proc] create pid=");
+        arch::SerialWriteHex(p->pid);
+        arch::SerialWrite(" name=\"");
+        arch::SerialWrite(name);
+        arch::SerialWrite("\" caps=");
+        arch::SerialWriteHex(caps.bits);
+        arch::SerialWrite("(");
+        SerialWriteCapBits(caps.bits);
+        arch::SerialWrite(") code_va=");
+        arch::SerialWriteHex(user_code_va);
+        arch::SerialWrite(" stack_va=");
+        arch::SerialWriteHex(user_stack_va);
+        arch::SerialWrite("\n");
+    }
 
     KBP_PROBE_V(::duetos::debug::ProbeId::kProcessCreate, p->pid);
     return p;
@@ -358,6 +361,7 @@ void ProcessRelease(Process* p)
         {
             const duetos::drivers::video::Theme& theme = duetos::drivers::video::ThemeCurrent();
             duetos::drivers::video::DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            arch::SerialLineGuard guard;
             arch::SerialWrite("[proc] reap-windows pid=");
             arch::SerialWriteHex(p->pid);
             arch::SerialWrite(" count=");
@@ -372,11 +376,14 @@ void ProcessRelease(Process* p)
     // takes both locks itself (in lock order tp_lock → compositor).
     duetos::subsystems::win32::TrackPopupCancelByOwner(p->pid);
 
-    arch::SerialWrite("[proc] destroy pid=");
-    arch::SerialWriteHex(p->pid);
-    arch::SerialWrite(" name=\"");
-    arch::SerialWrite(p->name);
-    arch::SerialWrite("\"\n");
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[proc] destroy pid=");
+        arch::SerialWriteHex(p->pid);
+        arch::SerialWrite(" name=\"");
+        arch::SerialWrite(p->name);
+        arch::SerialWrite("\"\n");
+    }
 
     // Notify the Linux parent (if any) that this process has exited.
     // Parent is found by PID — pids are monotonically incrementing
@@ -863,11 +870,14 @@ bool ProcessRegisterDllImage(Process* proc, const DllImage& image)
         return false;
     if (proc->dll_image_count >= Process::kDllImageCap)
     {
-        arch::SerialWrite("[proc] dll-table FULL pid=");
-        arch::SerialWriteHex(proc->pid);
-        arch::SerialWrite(" cap=");
-        arch::SerialWriteHex(Process::kDllImageCap);
-        arch::SerialWrite("\n");
+        {
+            arch::SerialLineGuard guard;
+            arch::SerialWrite("[proc] dll-table FULL pid=");
+            arch::SerialWriteHex(proc->pid);
+            arch::SerialWrite(" cap=");
+            arch::SerialWriteHex(Process::kDllImageCap);
+            arch::SerialWrite("\n");
+        }
         return false;
     }
     proc->dll_images[proc->dll_image_count] = image;
