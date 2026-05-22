@@ -1339,6 +1339,23 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     duetos::sched::SchedStartIdle("idle-bsp");
     duetos::sched::SchedStartReaper();
 
+    // Pre-stage the boot-time stress driver mode (no task spawn yet
+    // — that happens later from kernel_main once the shell + ring3
+    // smokes are queued). Sets the `StressDriverArmed()` flag so the
+    // autonomic engine's first SecurityEscalate evaluation (the
+    // engine inits later in BootBringupDevices, then ticks from the
+    // env-monitor task) already sees stress mode active and
+    // suppresses the escalation. Without this pre-stage, on
+    // x86_64-debug the engine fires SecurityEscalate at ~t=30s
+    // (UBSAN / red-zone audit raises a kernel-integrity finding
+    // before the bringup-tail StressDriverArm call runs at ~t=50s),
+    // flips guard mode to Enforce, and the ring3-hello-pe smoke
+    // that follows traps on the 10s default-deny prompt — eating
+    // the entire stress window. Idempotent: the later
+    // StressDriverArm() call re-parses safely and only spawns the
+    // driver task once.
+    duetos::core::diag::StressDriverStageMode(cmdline);
+
     // Address-space isolation self-test — direct assertion that a
     // user page mapped in one AS is invisible in a sibling AS, and
     // that AddressSpaceActivate flips CR3 correctly. Routed through

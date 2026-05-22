@@ -136,6 +136,50 @@ cleanup debt: move the residual up and delete the rest.
   nesting found alongside this (modal-dialog FAT32 I/O under
   `CompositorLock`) is already fixed.
 
+### SMP=8 (4c × 2t) AP-bringup recursive fault under x86_64-debug
+
+- **Symptom:** booting `tools/qemu/run-stress.sh cpu` on
+  **x86_64-debug only** with `DUETOS_SMP=8,sockets=1,cores=4,threads=2`
+  reproducibly hits a recursive #-fault during the **first AP**'s
+  bring-up at ~70 ms after `[arch/smp] starting AP apic_id val=0x1`.
+  Captured 2026-05-22; symptom-line in the serial log:
+
+  ```
+  [t=97644.875ms] [D] fs/fat32 : ...corrupted bytes... path=""
+  [recursive-fault] vec=0x...  rip=0x... — short-circuiting panic dump
+  ```
+
+  The vec/rip on the recursive-fault line render mostly as
+  spaces / non-printable bytes — the panic-mode SerialWrite is
+  bypassing `g_serial_lock`, so the BSP's hex digits and a
+  concurrent AP-side writer interleave at the wire level. The
+  underlying first fault is therefore lost to corruption.
+
+  **Bound:** x86_64-release at SMP=8 boots clean and runs the
+  10s-8-worker stress to `[stress] done` (verdict OK, no
+  inversions). x86_64-debug at SMP=4 also boots clean. So the
+  AP-bringup storm under KASAN/UBSAN instrumentation noise is
+  the trigger — neither SMP=8 alone nor debug alone is enough.
+- **Likely shape:** an AP's first timer IRQ enters the trap path
+  while KASAN/UBSAN shadow-map machinery is still initialising
+  for that AP's stack/IST region, AND `Current()` on that AP is
+  the bootstrap sentinel rather than a fully-armed task. The
+  UBSAN report path itself takes a lock that races. **Not** the
+  GSBASE/lidt root that PR #320 fixed — that one trace-bounds at
+  "AP online" and the recursive-fault never reaches it.
+- **Reusable harness:** `tools/test/smp-stress-sweep.sh 20 8 5`
+  re-triggers the scenario with per-repeat log capture so a
+  future investigation can grep `build/x86_64-debug/smp-stress-N.log`
+  for the first fault line.
+- **Bounded fix to land first (before chasing the race):** make
+  the recursive-fault dump grab `g_serial_lock` with `try_lock`
+  semantics (or take an `IrqFlags` snapshot once per AP) so the
+  vec/rip survive the second fault. Without that the loop is
+  diagnose-by-corruption. Then re-run the harness with that fix
+  in tree to read the real first-fault site.
+- **Blocks on:** the serial-bypass cleanup OR a per-CPU panic
+  ringbuffer the AP fault path can write to (no serial contention).
+
 ### Topology — cluster-scoped IPI fan-out
 
 - **Residual:** the *cluster-scoped* fan-out (one ICR write to
@@ -228,6 +272,50 @@ landed.)
 ---
 
 ## Storage and filesystem
+
+### FAT32 — driver-wide mutex saturation under concurrent writers
+
+- **Residual:** `kernel/fs/fat32.cpp:68` declares one global
+  `sched::Mutex g_fat32_mutex` (`Fat32Guard` RAII at every public
+  entry) protecting both metadata (BPB, FAT chain cache, path
+  cache) AND the **single** I/O staging buffer `g_scratch[4096]`.
+  Every lookup / read / write / mkdir / rename serializes on it.
+  Correct (the recursive-entry handling in `Fat32Guard::Fat32Guard`
+  is the standard pattern) but **two saturation corners** are
+  visible without rewriting the locking:
+  1. **Priority inversion** — there is no priority inheritance
+     today. A low-priority task holding the mutex while a
+     high-priority task waits is blocked by a peer at the same
+     scheduling class. v0 has one priority band so the symptom
+     is "fair-share starvation under contention," not a hard
+     hang — but `Process::win32_priority_class` is wired
+     (T8-01-followon) and the moment band-aware enqueue lands
+     this becomes a real inversion.
+  2. **Livelock under wake-storm** — many tasks repeatedly
+     contesting `g_fat32_mutex` spend cycles waking + parking
+     instead of doing FS work. Repro under stress=cpu workloads
+     that touch FAT32 from the boot tail: `fs/fat32 : lookup`
+     debug lines fire hundreds of times per second per worker,
+     each round-tripping through `MutexLock` / `MutexUnlock` and
+     the per-task held-stack snapshot/restore.
+- **Smallest concrete fix (to land before the rewrite):** split
+  `g_scratch[4096]` into a **per-CPU** scratch buffer so the
+  block-IO staging step doesn't have to be inside the mutex.
+  Metadata walks (BPB cache, FAT entry cache, path cache) still
+  serialize, but the dominant block-read body releases the lock
+  for the I/O wait. Estimated 50-line change; covers the
+  livelock corner without changing semantics.
+- **Larger refactor (deferred):** split into per-volume mutex +
+  per-cache RwLock + lock-free FAT entry cache (seqlock around
+  the cache-entry pointer). Wants its own slice.
+- **Saturation harness:** `tools/test/fat32-concurrent.sh`
+  (this slice) spawns the linux-smoke synfs + win32 PE smokes
+  concurrently and captures the boot log. Look for `fs/fat32 :
+  lookup` line-rate vs `MutexLock waiter` parking lines as
+  the contention signal.
+- **Blocks on:** evidence that the per-CPU scratch split fixes
+  the livelock corner under saturation. Once landed, the
+  per-volume-mutex follow-on can be measured against it.
 
 ### Stage 6 — per-process namespace roots (residual)
 

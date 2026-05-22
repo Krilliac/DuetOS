@@ -34,4 +34,25 @@ namespace duetos::core::diag
 /// main.cpp once the scheduler + heap + shell are up.
 void StressDriverArm(const char* cmdline);
 
+/// Early cmdline pre-scan that only STAGES the stress mode (no task
+/// spawn). Called from boot_bringup before `env::AutonomicInit` so the
+/// autonomic engine sees `StressDriverArmed() == true` from its very
+/// first tick. Without this pre-stage, on x86_64-debug the autonomic
+/// engine fires SecurityEscalate at ~t=30s (UBSAN/red-zone audit
+/// raises a kernel-integrity finding before StressDriverArm runs in
+/// the bringup tail at ~t=50s), flips guard mode to Enforce, and the
+/// ring3-hello-pe smoke that follows traps on the 10s default-deny
+/// guard prompt — the outer wall budget then eats the stress window.
+/// Idempotent: a later StressDriverArm call sees `g_cfg.mode != None`
+/// and skips re-parsing.
+void StressDriverStageMode(const char* cmdline);
+
+/// True iff `StressDriverArm` (or `StressDriverStageMode`) accepted a
+/// stress= token this boot. Used by the autonomic engine to suppress
+/// interactive escalations (e.g. SecurityEscalate -> Enforce mode ->
+/// guard prompt) that would block a headless stress run on the
+/// `Allow [y] / Deny [n]` modal — same gate the smoke-profile path
+/// uses. Stays false on a normal boot.
+bool StressDriverArmed();
+
 } // namespace duetos::core::diag
