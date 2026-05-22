@@ -1712,15 +1712,23 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
         SchedCpuIncLive();
     }
 
-    SerialWrite("[sched] created task id=");
-    SerialWriteHex(t->id);
-    SerialWrite(" name=\"");
-    SerialWrite(name);
-    SerialWrite("\" rsp=");
-    SerialWriteHex(t->rsp);
-    SerialWrite(" as=");
-    SerialWriteHex(reinterpret_cast<u64>(as));
-    SerialWrite("\n");
+    // Multi-write sentinel — bracket so two concurrent SchedCreates
+    // on different CPUs don't split each other's lines at the UART
+    // (observed under SMP=8 stress as
+    // `[sched] created task id=[sched] created task id=0x...0x...
+    // name="" name=""`).
+    {
+        arch::SerialLineGuard guard;
+        SerialWrite("[sched] created task id=");
+        SerialWriteHex(t->id);
+        SerialWrite(" name=\"");
+        SerialWrite(name);
+        SerialWrite("\" rsp=");
+        SerialWriteHex(t->rsp);
+        SerialWrite(" as=");
+        SerialWriteHex(reinterpret_cast<u64>(as));
+        SerialWrite("\n");
+    }
 
     return t;
 }
