@@ -91,10 +91,14 @@ else
     echo "  no panic / triple-fault / oops / task-kill"
 fi
 # Error-level lines, minus the known-deliberate self-test scaffolding.
-errn=$(g '\[E\] ' | grep -acvE 'selftest\.fault-react|error-level sanity line|net/wireless/(fourway|wdev|eapol)|security/module : start: init failed.*selftest|init : callback failed.*init\.cpp:163' 2>/dev/null)
+# elf-loader PT_LOAD line is the unwind-guard self-test's deliberate OOM
+# injection (always preceded by the `loader.elf_oom` probe fire and
+# followed by `[elf-test] unwind-guard PASS`) — production behaviour
+# stays ERROR, but the regression scan shouldn't flag the test path.
+errn=$(g '\[E\] ' | grep -acvE 'selftest\.fault-react|error-level sanity line|net/wireless/(fourway|wdev|eapol)|security/module : start: init failed.*selftest|init : callback failed.*init\.cpp:163|elf-loader : PT_LOAD segment mapping failed mid-load' 2>/dev/null)
 echo "  non-deliberate [E] lines: ${errn}"
 if [ "$errn" -gt 0 ]; then
-    g '\[E\] ' | grep -avE 'selftest\.fault-react|error-level sanity line|net/wireless/(fourway|wdev|eapol)|security/module : start: init failed.*selftest|init : callback failed.*init\.cpp:163' | head -4 | sed 's/^/     /'
+    g '\[E\] ' | grep -avE 'selftest\.fault-react|error-level sanity line|net/wireless/(fourway|wdev|eapol)|security/module : start: init failed.*selftest|init : callback failed.*init\.cpp:163|elf-loader : PT_LOAD segment mapping failed mid-load' | head -4 | sed 's/^/     /'
 fi
 
 hr
