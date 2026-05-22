@@ -200,6 +200,32 @@ enum class ProbeId : u8
     // the exact `DrainQueue` frame the corruption surfaced.
     kRcuWildCallback,
 
+    // SchedTaskTrampoline's `call *%rbx` was about to dispatch a
+    // planted entry function that fell outside kernel `.text`. A
+    // corrupted plant (concurrent SchedCreate scribble, slot reuse
+    // without re-plant, slab class collision) lands here. The
+    // pre-fix path indirect-called blindly and faulted at the wild
+    // address, naming neither the trampoline nor the offending
+    // task. Caller passes the offending entry-function pointer as
+    // `value`; ArmedLog so a clean boot stays quiet and an
+    // attached GDB can `b duetos::debug::ProbeFire` to break at
+    // SchedTaskTrampolineValidateEntry's frame.
+    kSchedTrampolineWildEntry,
+
+    // TrapDispatch was about to indirect-call a `g_irq_handlers[v]`
+    // entry that fell outside kernel `.text`. A corrupted slot
+    // (concurrent IrqInstall scribble, table-adjacent overflow,
+    // slab class collision) lands here. The pre-fix path
+    // indirect-called blindly and faulted at the wild address
+    // (#PF NX_VIOLATION on a higher-half .bss page) — the trap RIP
+    // was the wild address, not TrapDispatch, so the banner never
+    // named the IRQ subsystem. Caller passes the offending fn
+    // pointer as `value`; ArmedLog so a clean boot stays quiet and
+    // an attached GDB can `b duetos::debug::ProbeFire` to break at
+    // TrapDispatch's frame with the corrupt vector + handler in
+    // hand.
+    kIrqHandlerWild,
+
     kCount, // sentinel
 };
 

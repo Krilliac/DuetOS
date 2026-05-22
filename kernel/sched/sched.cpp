@@ -1497,6 +1497,61 @@ extern "C" [[noreturn]] void SchedExitC();
 
 } // namespace
 
+// Linker-emitted bounds of the kernel `.text` section.
+// SchedTaskTrampolineValidateEntry compares against these to catch a
+// corrupted entry-function plant before the trampoline indirect-calls
+// it. Declared file-scope C-linkage so the validator below can refer
+// to them without re-importing through the anonymous namespace.
+extern "C" duetos::u8 _text_start[];
+extern "C" duetos::u8 _text_end[];
+
+// Called from SchedTaskTrampoline (kernel/sched/context_switch.S) on
+// the fresh-task first-run path, immediately before `call rbx` would
+// dispatch the planted entry function. The caller passes rbx as `entry`
+// — if it's not inside [_text_start, _text_end) the plant was
+// corrupted (concurrent SchedCreate scribble, slot reuse without
+// re-plant, slab class collision) and the impending indirect call
+// would land at a wild address. The trap path can't attribute that
+// fault back to the trampoline because the wild RIP is the only
+// thing the iretq frame carries. Catching here names the offender
+// (CPU, task ptr, planted entry, current rbp) and halts with a real
+// banner. Observed 2026-05-22: ~1/10 SMP=8 boots hit a fresh AP
+// idle's first dispatch with rbx pointing at low-id-map (0x101e) or
+// .bss (0xffffffff8132axxx) on the panicking CPU.
+extern "C" void SchedTaskTrampolineValidateEntry(void* entry)
+{
+    using namespace duetos;
+    const u64 fn = reinterpret_cast<u64>(entry);
+    const u64 lo = reinterpret_cast<u64>(_text_start);
+    const u64 hi = reinterpret_cast<u64>(_text_end);
+    if (fn >= lo && fn < hi)
+        return;
+    KBP_PROBE_V(::duetos::debug::ProbeId::kSchedTrampolineWildEntry, fn);
+    arch::SerialWrite("[sched/trampoline] WILD entry fn — refusing dispatch  cpu=");
+    arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
+    arch::SerialWrite("  task=");
+    {
+        sched::Task* self = sched::Current();
+        arch::SerialWriteHex(reinterpret_cast<u64>(self));
+        if (self != nullptr)
+        {
+            arch::SerialWrite("  id=");
+            arch::SerialWriteHex(self->id);
+            arch::SerialWrite("  name=\"");
+            arch::SerialWrite(self->name != nullptr ? self->name : "<null>");
+            arch::SerialWrite("\"");
+        }
+    }
+    arch::SerialWrite("  entry=");
+    arch::SerialWriteHex(fn);
+    arch::SerialWrite("  text=[");
+    arch::SerialWriteHex(lo);
+    arch::SerialWrite("..");
+    arch::SerialWriteHex(hi);
+    arch::SerialWrite(")\n");
+    core::PanicWithValue("sched/trampoline", "planted entry function out of kernel text range", fn);
+}
+
 // Lock-pass drain. Called from two places:
 //   1. Schedule(), immediately after ContextSwitch returns (we're on
 //      the resumed task's stack).

@@ -541,6 +541,41 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             ++g_irq_counts_per_cpu[cpu_id][v];
         }
         const IrqHandler h = g_irq_handlers[v];
+        // Sanity-check `h` is in kernel .text before the indirect call.
+        // A corrupted entry (concurrent IrqInstall scribble, table-
+        // adjacent overflow, slab class collision) lands here. The
+        // pre-fix path indirect-called blindly and faulted at the wild
+        // address (#PF NX_VIOLATION on a higher-half .bss page) — the
+        // trap RIP was the wild address, not TrapDispatch, so the
+        // banner never named the IRQ subsystem. Catching here names
+        // the offender (vector, fn, table base) and halts with a real
+        // banner. Observed 2026-05-22: ~1/10 SMP=8 boots faulted at
+        // a wild rip in lockdep g_per_cpu range during an idle AP's
+        // first timer IRQ dispatch.
+        if (h != nullptr)
+        {
+            extern duetos::u8 _text_start[];
+            extern duetos::u8 _text_end[];
+            const duetos::u64 fn = reinterpret_cast<duetos::u64>(h);
+            const duetos::u64 lo = reinterpret_cast<duetos::u64>(_text_start);
+            const duetos::u64 hi = reinterpret_cast<duetos::u64>(_text_end);
+            if (fn < lo || fn >= hi)
+            {
+                KBP_PROBE_V(::duetos::debug::ProbeId::kIrqHandlerWild, fn);
+                SerialWrite("[arch/traps] WILD irq handler — refusing dispatch  cpu=");
+                SerialWriteHex(cpu_id);
+                SerialWrite("  vector=");
+                SerialWriteHex(static_cast<duetos::u64>(v));
+                SerialWrite("  fn=");
+                SerialWriteHex(fn);
+                SerialWrite("  text=[");
+                SerialWriteHex(lo);
+                SerialWrite("..");
+                SerialWriteHex(hi);
+                SerialWrite(")\n");
+                ::duetos::core::PanicWithValue("arch/traps", "irq handler out of kernel text range", fn);
+            }
+        }
         if (h != nullptr)
         {
             h();

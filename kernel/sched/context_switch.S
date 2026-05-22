@@ -101,6 +101,21 @@ SchedTaskTrampoline:
      * iretq restores the saved RFLAGS, so this sti is only actually
      * meaningful on the first-run-ever path. */
     sti
+    /* Diagnostic: validate the planted entry function (rbx) is in
+     * kernel .text range BEFORE we indirect-call it. The trampoline
+     * is the ONLY indirect call to rbx on the fresh-task path, so a
+     * corrupted plant lands here. The validator (extern "C", no
+     * return value, first arg in rdi) panics with a real banner if
+     * rbx fell out of [_text_start, _text_end). rbx is callee-saved
+     * by SysV ABI and the validator is `extern "C"`, so rbx survives
+     * the call and `call rbx` below still dispatches the same value
+     * the validator just inspected. rdi gets clobbered (caller-saved)
+     * — re-set from rbp on the next instruction. Observed
+     * 2026-05-22: ~1/10 SMP=8 boots faulted at a wild rip
+     * (0x101e / 0xffffffff8132axxx) inside this trampoline path
+     * before this gate was added. */
+    mov     rdi, rbx
+    call    SchedTaskTrampolineValidateEntry
     mov     rdi, rbp
     call    rbx
     call    SchedExitC
