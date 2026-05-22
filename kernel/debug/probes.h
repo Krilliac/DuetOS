@@ -245,6 +245,16 @@ enum class ProbeId : u8
     // it to. ArmedLog; caller passes the wild iretq target.
     kIretqFrameWild,
 
+    // TrapDispatch's RAII RipIntegrityGuard detected that the
+    // trap-frame's saved RIP was mutated mid-handler from a
+    // kernel-mode value to something outside [_text_start,
+    // _text_end). Excludes the legitimate-rewrite vectors
+    // (syscall=0x80, #BP=3, #DB=1). Caller passes the offending
+    // exit-rip as `value`. ArmedLog; pairs with a probe-fire
+    // breakpoint to identify the C handler that scribbled
+    // the trap frame.
+    kTrapDispatchRipScribble,
+
     kCount, // sentinel
 };
 

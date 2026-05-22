@@ -585,6 +585,77 @@ void HaltOnRecursiveFault(u64 vector, u64 rip)
 
 extern "C" void TrapDispatch(TrapFrame* frame)
 {
+    // Diagnostic: snapshot the iretq-frame RIP at entry so the
+    // RAII guard below can detect a mid-handler scribble. The five
+    // dispatcher-site validators (sched/trampoline, sync/rcu,
+    // arch/traps IrqHandler, __llvm_retpoline_r11, isr_common
+    // iretq) all stay silent on the boot-tail #UD bug — meaning
+    // the wild value somehow ends up in the trap-frame's saved
+    // RIP slot without going through any indirect dispatch and
+    // without triggering the iretq gate. This guard captures the
+    // entry RIP, compares it at every exit path, and panics with
+    // the diff if a handler scribbled it.
+    struct RipIntegrityGuard
+    {
+        TrapFrame* frame;
+        const ::duetos::u64 entry_rip;
+        const ::duetos::u64 entry_r15;
+        const ::duetos::u64 entry_cs;
+        const bool kernel_mode_return;
+        RipIntegrityGuard(TrapFrame* f)
+            : frame(f), entry_rip(f->rip), entry_r15(f->r15), entry_cs(f->cs),
+              kernel_mode_return((f->cs & 0x3) == 0)
+        {
+        }
+        ~RipIntegrityGuard()
+        {
+            // Skip the check for handlers that legitimately rewrite
+            // the iretq target: syscall (vector 0x80), execve, signal
+            // delivery, breakpoint-redirect, extable fixup. The
+            // exempt set is the vectors where TrapDispatch's call
+            // tree is allowed to mutate frame->rip.
+            const ::duetos::u64 v = frame->vector;
+            const bool exempt = (v == 0x80) || (v == 3) || (v == 1);
+            if (exempt)
+                return;
+            // Only kernel-mode returns are checked — user-mode RIPs
+            // can be anywhere in the process VA range.
+            if (!kernel_mode_return)
+                return;
+            if (frame->rip == entry_rip)
+                return;
+            // RIP changed mid-handler on a kernel-mode return path.
+            // Could be an extable fixup we don't exempt; check
+            // legitimacy by validating it's still in kernel .text.
+            const ::duetos::u64 new_rip = frame->rip;
+            const ::duetos::u64 lo = reinterpret_cast<::duetos::u64>(::_text_start);
+            const ::duetos::u64 hi = reinterpret_cast<::duetos::u64>(::_text_end);
+            if (new_rip >= lo && new_rip < hi)
+                return;
+            KBP_PROBE_V(::duetos::debug::ProbeId::kTrapDispatchRipScribble, new_rip);
+            SerialWrite("[arch/traps] TRAP-FRAME RIP scribbled mid-handler  cpu=");
+            SerialWriteHex(::duetos::cpu::CurrentCpuIdOrBsp());
+            SerialWrite("  vector=");
+            SerialWriteHex(v);
+            SerialWrite("  entry_rip=");
+            SerialWriteHex(entry_rip);
+            SerialWrite("  exit_rip=");
+            SerialWriteHex(new_rip);
+            SerialWrite("  entry_r15=");
+            SerialWriteHex(entry_r15);
+            SerialWrite("  exit_r15=");
+            SerialWriteHex(frame->r15);
+            SerialWrite("  cs=");
+            SerialWriteHex(entry_cs);
+            SerialWrite("  text=[");
+            SerialWriteHex(lo);
+            SerialWrite("..");
+            SerialWriteHex(hi);
+            SerialWrite(")\n");
+            ::duetos::core::PanicWithValue("arch/traps", "trap frame RIP scribbled mid-handler", new_rip);
+        }
+    };
+    RipIntegrityGuard guard(frame);
     // Hardware IRQ path. Routes to the registered handler (if any), then
     // EOIs the LAPIC and returns to isr_common's iretq, which resumes the
     // interrupted code. No diagnostic spew per IRQ — the timer alone fires
