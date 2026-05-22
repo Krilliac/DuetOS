@@ -796,6 +796,8 @@ u64 SmpStartAps()
         // Lock-pass slot — empty until this AP enters Schedule().
         ap_pcpu->ctxsw_lock_to_release = nullptr;
         ap_pcpu->ctxsw_lock_flags = 0;
+        // Deferred-zombie slot — empty until a task on this AP exits.
+        ap_pcpu->ctxsw_dying_task_to_zombie = nullptr;
         // Per-CPU runqueue heads — empty until SchedEnterOnAp spawns
         // this AP's idle task and tasks migrate here via wake routing.
         ap_pcpu->runq_head_normal = nullptr;

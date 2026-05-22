@@ -1492,6 +1492,29 @@ extern "C" void SchedFinishTaskSwitch()
     pcpu->ctxsw_lock_to_release = nullptr;
     pcpu->ctxsw_lock_flags = 0;
     sync::SpinLockRelease(*static_cast<sync::SpinLock*>(lock_ptr), flags);
+
+    // SMP-safe zombie handoff. If the task we just switched AWAY
+    // from called `SchedExit`, it deferred its zombie-push to here
+    // — by now `ContextSwitch` has fully committed the rsp swap
+    // and the dying task is provably off-CPU on every peer, so the
+    // reaper can safely `FreeKernelStack` its pages. See
+    // `SchedExit`'s comment for the race this closes (SMP=8
+    // saturation UAF at RIP=0xdedede...).
+    //
+    // Acquire `g_sched_lock` for the list mutation + waitqueue
+    // wake — same lock the rest of the scheduler holds for these
+    // operations. The lock was released a few lines up via
+    // `SpinLockRelease`, so we're not nested; this re-acquire is
+    // legal.
+    Task* dying = static_cast<Task*>(pcpu->ctxsw_dying_task_to_zombie);
+    if (dying != nullptr)
+    {
+        pcpu->ctxsw_dying_task_to_zombie = nullptr;
+        sync::SpinLockGuard guard(g_sched_lock);
+        dying->next = g_zombies;
+        g_zombies = dying;
+        WaitQueueWakeOneLocked(&g_reaper_wq);
+    }
 }
 
 void SchedInit()
@@ -2367,21 +2390,30 @@ void SchedExit()
     // this to tear down address space / fds / caps / ipc.
     core::OnTaskExited();
 
-    // Push onto the zombie list. Important: we do NOT KFree ourselves
-    // here — we're still running on our own stack. The reaper does
-    // the free from ITS stack, after Schedule() puts us off-CPU.
+    // SMP-safe handoff to the reaper: stash `self` into the per-CPU
+    // `ctxsw_dying_task_to_zombie` slot instead of pushing to
+    // `g_zombies` directly. `SchedFinishTaskSwitch` — which runs on
+    // the NEW task's stack AFTER `ContextSwitch` has committed the
+    // rsp swap — promotes the deferred entry to `g_zombies` and
+    // wakes the reaper.
     //
-    // Single-CPU safety argument: once Schedule() below context-switches
-    // away, this task's Current() assignment is gone and only the
-    // zombie pointer references the struct. The reaper inspecting the
-    // zombie list after this point is safe — no other code can touch
-    // us. SMP bring-up will need to also verify the task isn't
-    // `Running` on a peer CPU before the reaper touches it.
-    self->next = g_zombies;
-    g_zombies = self;
-
-    // Wake the reaper if it's parked.
-    WaitQueueWakeOne(&g_reaper_wq);
+    // Without this defer, the reaper on a peer CPU could observe
+    // `self` in `g_zombies` and call `FreeKernelStack(self->stack_base)`
+    // WHILE this CPU was mid-`ContextSwitch`, still executing on the
+    // very stack pages the reaper just unmapped. Symptom: SMP=8
+    // saturation `#GP at RIP=0xdedede...` with every register/stack
+    // quad reading as kheap freed-poison — observed 2026-05-22 as
+    // the dominant intermittent panic shape.
+    //
+    // The historical comment here said "SMP bring-up will need to
+    // also verify the task isn't `Running` on a peer CPU before the
+    // reaper touches it." That moment came; this is the
+    // implementation. The defer slot is per-CPU and only mutated
+    // from the same CPU (here at exit, `SchedFinishTaskSwitch` on
+    // any subsequent switch), so no cross-CPU race on the slot
+    // itself.
+    cpu::PerCpu* pcpu = cpu::CurrentCpu();
+    pcpu->ctxsw_dying_task_to_zombie = self;
 
     // Schedule() will not re-enqueue a Dead task, so this is a one-way
     // switch. If the runqueue is empty we'll loop here, still on the

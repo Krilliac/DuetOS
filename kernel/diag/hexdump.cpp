@@ -265,9 +265,29 @@ void DumpStackWindow(const char* tag, u64 rsp, u32 quad_count)
     {
         rsp &= ~0x7ULL;
     }
+    // Page-clamp guard: a kernel-stack-arena slot is exactly one
+    // page of usable stack with an UNMAPPED guard page above the
+    // top byte (see mm/kstack.h). A `rsp` that's already near the
+    // top of its slot must not have the window run into the guard
+    // page — that would re-trap on a #PF and bury the dump in the
+    // recursive-panic short-circuit. Observed 2026-05-22 on the
+    // SMP=8 UAF: the rsp landed at offset 0xfc0 of a stack page,
+    // so quad 8 of the window would have crossed into 0xN000 (the
+    // guard page), which is exactly cr2 the recursive guard-page
+    // panic reported. Clamp to "stay in the starting page" — the
+    // most diagnostic-rich bytes are the first few quads anyway.
+    constexpr u64 kPageMaskLocal = ~(kPageSize - 1ULL);
+    const u64 page_top = (rsp & kPageMaskLocal) + kPageSize;
     for (u32 i = 0; i < quad_count; ++i)
     {
         const u64 va = rsp + static_cast<u64>(i) * 8;
+        if (va + 8 > page_top)
+        {
+            arch::SerialWrite("    ");
+            arch::SerialWriteHex(va);
+            arch::SerialWrite(" : <page-boundary: clamping window to stay off the kstack guard page>\n");
+            break;
+        }
         if (!PlausibleKernelAddress(va))
         {
             arch::SerialWrite("    ");

@@ -41,6 +41,7 @@ constinit PerCpu g_bsp_percpu = {
     .gdb_frozen_frame = nullptr,
     .ctxsw_lock_to_release = nullptr,
     .ctxsw_lock_flags = 0,
+    .ctxsw_dying_task_to_zombie = nullptr,
     .runq_head_normal = nullptr,
     .runq_tail_normal = nullptr,
     .runq_head_idle = nullptr,
