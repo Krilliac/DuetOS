@@ -7,6 +7,7 @@
 #include "util/crc32.h"
 #include "util/bmp.h"
 #include "util/saturating.h"
+#include "util/soft_float.h"
 #include "util/datetime.h"
 #include "util/deflate.h"
 #include "util/gzip.h"
@@ -134,6 +135,7 @@
 #include "net/tcp.h"
 #include "net/tls.h"
 #include "subsystems/graphics/graphics.h"
+#include "subsystems/graphics/graphics_vk_spirv.h"
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
 #include "drivers/storage/nvme.h"
@@ -502,6 +504,7 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::util::Base64SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::SaturatingSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::vt::VtParserSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::core::Sf32SelfTest());
 
     // KASLR — compute the candidate slide from the now-seeded entropy
     // pool. The slide isn't applied to the kernel image yet (that
@@ -1833,6 +1836,7 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Bringing up graphics ICD.\n");
     duetos::subsystems::graphics::GraphicsIcdInit();
     DUETOS_BOOT_SELFTEST(duetos::subsystems::graphics::GraphicsIcdSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::subsystems::graphics::spirv::SelfTest());
     duetos::subsystems::win32::GdiInit();
 
     SerialWrite("[boot] Bringing up block device layer.\n");

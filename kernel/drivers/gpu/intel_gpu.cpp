@@ -32,6 +32,18 @@ bool g_brought_up = false;
 // remains the live state.
 mm::DmaBuffer g_rcs_ring = {};
 
+// Scratch dword the MI_STORE_DWORD_IMM probe writes into. One
+// DMA-coherent page owned by the driver for the lifetime of the
+// boot. Lazily allocated by IntelRcsStoreImmProbe on first call.
+// The probe's success signal is the scratch dword reading back
+// the value the engine was told to store.
+mm::DmaBuffer g_rcs_scratch = {};
+
+// Hand-rolled remembered (driver, info) pointer used by the
+// store-imm probe so it doesn't re-walk `gpu.cpp`'s GpuInfo
+// records each time. Set by Bringup; consulted by the probe.
+const GpuInfo* g_intel_info = nullptr;
+
 u32 Mmio32(const GpuInfo& g, u64 offset)
 {
     if (g.mmio_virt == nullptr || offset + 4 > g.mmio_size)
@@ -267,6 +279,7 @@ void Probe(GpuInfo& g)
     }
 
     g_brought_up = true;
+    g_intel_info = &g;
     arch::SerialWrite("[gpu/intel/rcs] ring online head=tail=");
     arch::SerialWriteHex(head);
     arch::SerialWrite(" ctl=");
@@ -275,6 +288,102 @@ void Probe(GpuInfo& g)
     arch::SerialWriteHex(g_rcs_ring.phys);
     arch::SerialWrite("\n");
     return {};
+}
+
+u32 IntelRcsStoreImmProbe(u32 value)
+{
+    if (!g_brought_up || g_intel_info == nullptr || g_rcs_ring.virt == nullptr)
+        return 0xFFFFFFFFu;
+
+    // Lazy-alloc the scratch on first call. One DMA-coherent page;
+    // we only need a dword but page-granularity is the allocator's
+    // minimum and lets the GPU touch the address through a normal
+    // DMA path. Use Zone::Dma32 to match the ring's addressability
+    // constraint (RCS_START is 32-bit).
+    if (g_rcs_scratch.virt == nullptr)
+    {
+        auto r = mm::AllocDmaCoherent(0x1000u, mm::Zone::Dma32);
+        if (!r.has_value())
+        {
+            KLOG_WARN("drivers/gpu/intel", "RCS store-imm: scratch alloc failed");
+            return 0xFFFFFFFFu;
+        }
+        g_rcs_scratch = r.value();
+    }
+
+    // Build the MI_STORE_DWORD_IMM packet (4 dwords on Gen9+).
+    // Layout per Intel's "Render Engine Command Streamer" PRM:
+    //   dw0 = opcode (0x20 << 23) | (length=2)  (length is total
+    //         dwords minus 2 per Intel convention)
+    //   dw1 = address bits 31:0
+    //   dw2 = address bits 63:32  (zero for our 32-bit physical
+    //         scratch — no GGTT translation needed since we cleared
+    //         the use_global_gtt bit)
+    //   dw3 = data to store
+    const u32 phys_lo = static_cast<u32>(g_rcs_scratch.phys & 0xFFFFFFFFu);
+    const u32 phys_hi = static_cast<u32>((g_rcs_scratch.phys >> 32) & 0xFFFFFFFFu);
+    u32* ring = static_cast<u32*>(g_rcs_ring.virt);
+    const u64 ring_dwords = kIntelRingBytes / 4u;
+
+    // Write the packet starting at the position one after the
+    // previous TAIL. The bring-up advanced TAIL to kSubmitBytes
+    // (= 64 dwords). We append after that, wrapping if needed.
+    const u32 cur_tail = Mmio32(*g_intel_info, kIntelRcsTail);
+    u64 ofs_dw = (cur_tail / 4u) % ring_dwords;
+    if (ofs_dw + 4 > ring_dwords)
+    {
+        // Not enough room before wrap — pad with NOOPs to the end
+        // and start fresh at offset 0. This keeps the engine
+        // executing the right opcodes regardless of where we land
+        // in the ring.
+        while (ofs_dw < ring_dwords)
+            ring[ofs_dw++] = kIntelMiNoop;
+        ofs_dw = 0;
+    }
+    ring[ofs_dw + 0] = kIntelMiStoreDwordImm;
+    ring[ofs_dw + 1] = phys_lo;
+    ring[ofs_dw + 2] = phys_hi;
+    ring[ofs_dw + 3] = value;
+    const u32 new_tail = static_cast<u32>(((ofs_dw + 4u) * 4u) % kIntelRingBytes);
+
+    // Zero the scratch dword so a read-back of the old value
+    // doesn't mask a failed store.
+    auto* scratch = static_cast<volatile u32*>(g_rcs_scratch.virt);
+    *scratch = 0xDEADBEEFu;
+
+    mm::DmaSyncForDevice(g_rcs_ring, 0, kIntelRingBytes);
+    Mmio32Write(*g_intel_info, kIntelRcsTail, new_tail);
+
+    // Poll HEAD until it catches the new TAIL or 100 ms elapses.
+    constexpr u64 kTimeoutNs = 100ull * 1000ull * 1000ull;
+    constexpr u32 kIterCap = 1u << 20;
+    const u64 start_ns = ::duetos::time::MonotonicNs();
+    bool engine_advanced = false;
+    for (u32 iter = 0; iter < kIterCap; ++iter)
+    {
+        if (Mmio32(*g_intel_info, kIntelRcsHead) == new_tail)
+        {
+            engine_advanced = true;
+            break;
+        }
+        asm volatile("pause" ::: "memory");
+        if (start_ns != 0)
+        {
+            const u64 now = ::duetos::time::MonotonicNs();
+            if (now > start_ns && (now - start_ns) > kTimeoutNs)
+                break;
+        }
+    }
+    if (!engine_advanced)
+    {
+        KLOG_WARN("drivers/gpu/intel", "RCS store-imm: HEAD did not catch TAIL");
+        return 0xFFFFFFFFu;
+    }
+
+    // Sync the scratch back to the CPU and read it. If MI_STORE_DWORD_IMM
+    // executed correctly, the scratch holds `value`.
+    mm::DmaSyncForCpu(g_rcs_scratch, 0, 4u);
+    return *scratch;
 }
 
 bool IsBroughtUp()
@@ -310,7 +419,29 @@ void IntelRcsRingSelfTest()
 
     if (IsBroughtUp())
     {
-        arch::SerialWrite("[gpu/intel/rcs] selftest PASS (ring online, brought_up=true)\n");
+        // Fire one MI_STORE_DWORD_IMM through the ring and verify
+        // the scratch dword reads back the value. This goes beyond
+        // the MI_NOOP-only liveness check: a wedged-but-running
+        // engine could advance HEAD on MI_NOOPs without actually
+        // executing meaningful work, but it cannot store a chosen
+        // value to a chosen address without honouring the opcode.
+        constexpr u32 kStoreImmCookie = 0xC0DEFACEu;
+        const u32 readback = IntelRcsStoreImmProbe(kStoreImmCookie);
+        if (readback == kStoreImmCookie)
+        {
+            arch::SerialWrite("[gpu/intel/rcs] selftest PASS (ring online, MI_STORE_DWORD_IMM verified, "
+                              "scratch=0xC0DEFACE)\n");
+            return;
+        }
+        // The bring-up succeeded but the store-imm didn't land.
+        // On real Intel hardware that's a regression worth flagging
+        // (engine accepts NOOP, refuses or silently drops STORE).
+        // On QEMU / virtio (which we already filtered out via the
+        // "no Intel device" path earlier) we never get here.
+        KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, readback);
+        arch::SerialWrite("[gpu/intel/rcs] selftest FAIL (ring online but MI_STORE_DWORD_IMM readback=");
+        arch::SerialWriteHex(readback);
+        arch::SerialWrite(")\n");
         return;
     }
 

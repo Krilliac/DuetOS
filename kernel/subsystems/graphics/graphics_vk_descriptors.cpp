@@ -166,13 +166,20 @@ VkResult VkFreeDescriptorSets(VkDevice dev, VkDescriptorPool pool, u32 count, co
 
 VkResult VkUpdateDescriptorSet(VkDescriptorSet set, u32 binding, VkDescriptorType type, u64 resource_handle)
 {
-    (void)binding;
-    (void)type;
-    (void)resource_handle;
     if (!HandleInRange(set, kDescSetBase) || !PoolIsLive(g_desc_set_pool, SlotOf(set, kDescSetBase)))
         return VkResult::ErrorInitializationFailed;
-    ++g_desc_set_data[SlotOf(set, kDescSetBase)].writes;
+    const u32 slot = SlotOf(set, kDescSetBase);
+    ++g_desc_set_data[slot].writes;
     ++g_descriptor_writes;
+    // Record the (binding, type, handle) tuple so the shader-
+    // rasterizer hook can hand it to spirv::BindDescriptor at
+    // draw time. Out-of-range binding silently no-ops the write
+    // (keeps the existing counter behaviour).
+    if (binding < kMaxDescriptorBindings)
+    {
+        g_desc_set_data[slot].bindings[binding].type = static_cast<u32>(type);
+        g_desc_set_data[slot].bindings[binding].handle = resource_handle;
+    }
     return VkResult::Success;
 }
 
@@ -210,13 +217,24 @@ VkResult VkCmdBindDescriptorSets(VkCommandBuffer cb, VkPipelineBindPoint bind_po
     auto& rec = g_cmdbuf_data[SlotOf(cb, kCmdBufBase)];
     if (rec.state != CbState::Recording)
         return VkResult::ErrorInitializationFailed;
-    // Validate all sets up front; no opcode is recorded for the
-    // bind today (no shader to consume it) but we still want to
-    // catch a stale-handle bug at record time, not submit time.
+    // Validate every handle up front to catch a stale-handle bug
+    // at record time rather than at submit replay.
     for (u32 i = 0; i < set_count; ++i)
     {
         if (!HandleInRange(sets[i], kDescSetBase) || !PoolIsLive(g_desc_set_pool, SlotOf(sets[i], kDescSetBase)))
             return VkResult::ErrorInitializationFailed;
+    }
+    // Record the first bound set so the replay walker can stash
+    // it in RasterState and the shader-rasterizer hook can pull
+    // its (binding, handle) tuples into spirv::BindDescriptor.
+    // v0 only honours set 0 — the bindings array in
+    // DescriptorSetRecord handles up to kMaxDescriptorBindings.
+    if (set_count > 0)
+    {
+        CmdRecord op{};
+        op.op = CmdOp::BindDescriptorSets;
+        op.descriptor_set = sets[0];
+        return AppendOp(cb, op);
     }
     return VkResult::Success;
 }

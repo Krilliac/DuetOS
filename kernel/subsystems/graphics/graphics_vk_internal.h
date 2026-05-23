@@ -1,6 +1,7 @@
 #pragma once
 
 #include "subsystems/graphics/graphics.h"
+#include "subsystems/graphics/graphics_vk_spirv.h"
 
 #include "util/types.h"
 
@@ -138,12 +139,30 @@ struct ImageRecord
     VkExtent3D extent;
     u32 flags;
     bool memory_bound;
+    // Direct pointer into the bound DeviceMemory's host_ptr (when
+    // the memory is HOST_VISIBLE). Set by `VkBindImageMemory`; the
+    // texture-sample path reads through it to fetch texels.
+    // nullptr when no memory has been bound or the memory type
+    // isn't host-visible.
+    void* backing;
 };
 
 struct ShaderRecord
 {
     u64 byte_size;
     ShaderModuleInfo info;
+    // Owning copy of the SPIR-V word stream (we keep our own
+    // copy so the caller's pointer can go out of scope after
+    // VkCreateShaderModule). Allocated via mm::KMalloc; freed by
+    // VkDestroyShaderModule.
+    u32* code_copy;
+    u64 code_word_count;
+    // Parsed program — also owned, lazily allocated when the
+    // module is first bound to a pipeline that the rasterizer
+    // can execute. nullptr if the module's structure doesn't
+    // pass the v1 parser, in which case the rasterizer falls
+    // back to the fixed-function path.
+    spirv::Program* spirv_program;
 };
 
 struct BufferRecord
@@ -242,7 +261,9 @@ enum class CmdOp : u8
     ResetEvent2 = 63,
     WaitEvents2 = 64,
     PipelineBarrier2 = 65,
-    SetVertexFormatDuet = 66, // DuetOS extension: rasterizer vertex layout (0 = v0, 1 = v1)
+    SetVertexFormatDuet = 66,    // DuetOS extension: rasterizer vertex layout (0 = v0, 1 = v1)
+    BindDescriptorSets = 67,     // Records the first bound descriptor set so the rasterizer hook can
+                                 // walk its bindings + call spirv::BindDescriptor per draw.
 };
 
 struct CmdRecord
@@ -296,6 +317,7 @@ struct CmdRecord
     u32 attachment_count;
     u32 rect_count;
     VkCommandBuffer secondary_cb;
+    VkDescriptorSet descriptor_set; // first set on the BindDescriptorSets op
 };
 
 inline constexpr u32 kCmdTapeCapacity = 32;
@@ -315,6 +337,26 @@ struct CmdBufferRecord
     CmdRecord ops[kCmdTapeCapacity];
 };
 
+/// Per-pipeline record. Today only tracks the bound shader
+/// handles so the rasterizer can find the SPIR-V Program at
+/// replay time. Future extensions: vertex input bindings,
+/// rasterization state, blend state — each layer lands here
+/// as it becomes meaningful.
+struct PipelineRecord
+{
+    VkShaderModule vertex_shader;   // 0 if none (compute pipeline)
+    VkShaderModule fragment_shader; // 0 if none (compute pipeline)
+    VkShaderModule compute_shader;  // 0 if graphics
+    // Vertex input description (set by VkSetVertexInputDuet).
+    // When attribute_count > 0 the shader-rasterizer uses these
+    // tuples to fetch each VS Input; otherwise it falls back to
+    // the canonical 16-byte-per-Location layout.
+    u32 vertex_binding_count;
+    u32 vertex_attribute_count;
+    VkVertexBindingDuet vertex_bindings[kMaxVertexBindings];
+    VkVertexAttributeDuet vertex_attributes[kMaxVertexAttributes];
+};
+
 struct DescriptorSetLayoutRecord
 {
     u32 binding_count;
@@ -327,11 +369,26 @@ struct DescriptorPoolRecord
     u32 sets_allocated;
 };
 
+/// Per-binding entry inside a DescriptorSetRecord. Captures the
+/// type the binding was declared with + the resource handle the
+/// caller pinned via VkUpdateDescriptorSet (an image / image-view
+/// for sampled / storage types; a buffer for uniform / storage
+/// buffer types).
+struct DescriptorBinding
+{
+    u32 type;        // VkDescriptorType (Sampler / SampledImage / UniformBuffer / ...)
+    u64 handle;      // VkImage / VkImageView / VkBuffer handle, or 0
+};
+
 struct DescriptorSetRecord
 {
     VkDescriptorPool pool;
     VkDescriptorSetLayout layout;
     u32 writes;
+    // Per-binding state. v0 supports up to kMaxDescriptorBindings
+    // bindings per set; the shader-rasterizer hook walks this on
+    // each draw to populate the SPIR-V Program's descriptor table.
+    DescriptorBinding bindings[kMaxDescriptorBindings];
 };
 
 struct SwapchainRecord
@@ -422,6 +479,7 @@ extern PipelineCacheRecord g_pipeline_cache_data[kPoolCapacity];
 extern QueryPoolRecord g_query_pool_data[kPoolCapacity];
 extern PhysicalDeviceRecord g_phys_data[kPoolCapacity];
 extern QueueRecord g_queue_data[kPoolCapacity];
+extern PipelineRecord g_pipeline_data[kPoolCapacity];
 
 // -------------------------------------------------------------------
 // Aggregate counters.
@@ -454,6 +512,16 @@ extern u32 g_secondary_executes;
 extern u32 g_secondary_ops_replayed;
 extern u32 g_push_descriptor_writes;
 extern u32 g_triangles_drawn;
+
+// SPIR-V interpreter counters. Bump in graphics_vk_spirv_exec.cpp
+// (per ExecuteEntryPoint call + per step) and in
+// graphics_vk_shaderraster.cpp (per draw routed through shaders).
+extern u32 g_spirv_programs_built;         // VkCreateShaderModule that produced a parseable Program
+extern u32 g_spirv_program_build_failures; // VkCreateShaderModule that rejected at the v1 parser
+extern u32 g_spirv_entry_point_executions; // total ExecuteEntryPoint successes
+extern u32 g_spirv_step_budget_exhausted;  // ExecuteEntryPoint runs that hit kStepBudget
+extern u32 g_shader_raster_draws_painted;  // ShaderRasterizeDraw calls that actually painted
+extern u32 g_shader_raster_draws_skipped;  // ShaderRasterizeDraw calls that fell back to fixed-function
 
 // -------------------------------------------------------------------
 // Shared helper functions.
@@ -492,7 +560,94 @@ struct RasterState
     u32 front_face;    // VkFrontFace: 0=CounterClockwise, 1=Clockwise
     u32 fb_w;
     u32 fb_h;
+    VkPipeline bound_pipeline; // pipeline handle bound at the last `BindPipeline` op (0 if none)
+    VkDescriptorSet bound_descriptor_set; // first set bound at the last `BindDescriptorSets` op (0 if none)
+    // Multi-binding vertex buffers. binding N's buffer + offset
+    // sit in slots[N]. v0 supports 4 bindings; legacy
+    // single-binding callers use slot 0 (the existing
+    // vertex_buffer / vertex_offset fields above mirror slots[0]
+    // for back-compat).
+    static constexpr u32 kMaxVbBindings = 4;
+    VkBuffer vb_per_binding[kMaxVbBindings];
+    u64 vb_offset_per_binding[kMaxVbBindings];
 };
+
+/// Look up the cached SPIR-V Program of a shader handle (returns
+/// nullptr if the shader hasn't been loaded, the handle is bad,
+/// or the Program parse failed at module-create time).
+spirv::Program* ShaderProgram(VkShaderModule shader);
+
+/// Look up the (vs, fs) shader handles bound to a pipeline.
+/// Both can be 0 (compute pipeline / unknown).
+struct PipelineShaders
+{
+    VkShaderModule vs;
+    VkShaderModule fs;
+};
+PipelineShaders PipelineShaderHandles(VkPipeline pipe);
+
+/// Look up the (width, height, depth) of an image referenced by
+/// a VkImage or VkImageView handle (the same kinds
+/// `SampleImageRgba8` accepts). Writes width to out_w, height to
+/// out_h, depth to out_d (3D images aren't supported in v0;
+/// depth is always 1). Returns true on success, false when the
+/// handle doesn't resolve to a live image. Used by the SPIR-V
+/// executor's `OpImageQuerySize` / `OpImageQuerySizeLod`
+/// handlers so a shader that asks `textureSize(tex, 0)` gets
+/// the correct dimensions.
+bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
+
+/// Sampler addressing modes — passed to SampleImageRgba8 to
+/// control what happens at the [0, 1] UV boundary.
+enum class SamplerAddressMode : u8
+{
+    ClampToEdge = 0, // default — texel at the edge is replicated for out-of-range UV
+    Repeat = 1,      // UV wraps modulo 1.0 (Sf32 fract)
+    MirroredRepeat = 2, // UV wraps modulo 2.0 with reflection
+};
+
+/// Sample a 2D RGBA8 texel from an image bound via descriptor.
+/// `resource_handle` is a VkImage or VkImageView handle as
+/// returned by `spirv::LookupDescriptor`; both kinds resolve
+/// to the underlying image. u_bits / v_bits are Sf32 bit
+/// patterns (raw float values; the addressing mode determines
+/// how out-of-range UV gets folded). `mode` selects between
+/// clamp-to-edge / repeat / mirrored-repeat. Filtering is
+/// bilinear (the v0 sampler doesn't expose a separate
+/// Vk_SAMPLER_FILTER_NEAREST option yet). Returns the packed
+/// BGRA8 word (0xAARRGGBB). Returns 0xFF000000 (opaque black)
+/// on any lookup failure — caller treats it as a fallback.
+u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits,
+                     SamplerAddressMode mode = SamplerAddressMode::ClampToEdge);
+
+/// Run the SPIR-V shader-based rasterizer for the current draw.
+/// Returns true if the shader path actually painted (in which
+/// case the caller skips the fixed-function fallback). Returns
+/// false if the pipeline doesn't carry interpretable SPIR-V
+/// programs OR the input layout doesn't match the supported v1
+/// shape — caller falls back to RasterizeDuetDraw.
+bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_count);
+bool ShaderRasterizeDrawIndexed(const RasterState& st, u32 first_index, u32 index_count, i32 vertex_offset);
+
+/// Dispatch a compute shader. Looks up the bound compute
+/// pipeline's CS Program, reads its OpExecutionMode LocalSize
+/// (defaults 1,1,1), and runs the entry point once per (workgroup
+/// × local invocation) tuple — total invocations =
+/// `group_count_xyz * local_size_xyz`. gl_WorkGroupID,
+/// gl_LocalInvocationID, gl_GlobalInvocationID, gl_NumWorkgroups,
+/// and gl_LocalInvocationIndex are written to the matching Input
+/// builtins before each execution.
+///
+/// Returns true if the bound pipeline carried an interpretable
+/// compute shader and at least one invocation ran. Returns false
+/// for graphics-only pipelines or when no shader is bound — the
+/// caller treats false as "no-op dispatch" (the cmd-buffer
+/// counter still bumps).
+///
+/// Per-dispatch budget cap (kMaxInvocationsPerDispatch) bounds
+/// pathological 1024×1024×1024 dispatches; the CPU interpreter
+/// would otherwise saturate for minutes.
+bool ShaderDispatchCompute(const RasterState& st, u32 group_count_x, u32 group_count_y, u32 group_count_z);
 
 /// Lazy-allocated shared software depth buffer.
 ///

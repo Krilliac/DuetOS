@@ -644,16 +644,24 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 ### DirectX real device backends
 
 - **Still gated:** HLSL bytecode execution (the `d3dcompiler.dll`
-  frontend emits a DXBC-shaped blob the draw path ignores),
+  frontend emits a DXBC-shaped blob the draw path ignores; a
+  DXBC->SPIR-V transpiler would feed the now-live in-kernel
+  SPIR-V interpreter — see [Vulkan ICD](../subsystems/Vulkan-ICD.md)),
   texture sampling, geometry/hull/domain/compute shaders,
   multi-stream input, Z-buffer, D3D9 fixed-function lighting,
   real GPU command-ring submission.
 - **Blocks on:** per-vendor GPU drivers landing real
   command-ring submission; D3D→Vulkan thunk wiring (the Vulkan
-  ICD v0 lifecycle landed; the D3D side still returns `E_FAIL`
-  and must redirect through the Vulkan path). (D3D9/11/12 COM
-  vtables + shared software rasterizer + DXGI swap-chain present
-  into compositor windows landed.)
+  ICD v1 lifecycle + SPIR-V interpreter + userland `vulkan-1.dll`
+  thunk + `SYS_VK_CALL` syscall all landed; the D3D side still
+  returns `E_FAIL` and must redirect through the Vulkan path.
+  With shaders now executable in-kernel AND the userland
+  vulkan-1.dll bridge live, the thunk slice is "translate
+  D3D11/12 Clear+Draw+Present API into the matching VkCmd* +
+  bind a known-good SPIR-V pipeline" instead of the previous
+  "wait for shader execution to land first.")
+  (D3D9/11/12 COM vtables + shared software rasterizer + DXGI
+  swap-chain present into compositor windows landed.)
 
 ### Windowing — modal dialogs, common controls
 

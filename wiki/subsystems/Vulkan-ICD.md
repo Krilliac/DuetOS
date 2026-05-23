@@ -3,10 +3,13 @@
 > **Audience:** Graphics subsystem authors, DirectX-translation contributors
 >
 > **Execution context:** Kernel — currently CPU-side only; no real GPU
-> submission in v0
+> submission in v1
 >
-> **Maturity:** v0 — instance / device / queue / command-buffer lifecycle
-> + clear-to-scanout path; everything else recorded but inert
+> **Maturity:** v1 — instance / device / queue / command-buffer lifecycle
+> + clear-to-scanout + CPU triangle rasterizer + SPIR-V interpreter
+> (parser + executor for the canonical Vulkan subset; wired into
+> `vkCmdDraw` via the shader-rasterizer hook when a pipeline binds
+> parseable VS + FS modules)
 
 ## Overview
 
@@ -50,7 +53,14 @@ their commands.
 | [`graphics_vk_descriptors.cpp`](../../kernel/subsystems/graphics/graphics_vk_descriptors.cpp) | Descriptor sets, pools, layouts |
 | [`graphics_vk_misc.cpp`](../../kernel/subsystems/graphics/graphics_vk_misc.cpp) | Format conversions, image creation, memory mapping |
 | [`graphics_vk_wsi.cpp`](../../kernel/subsystems/graphics/graphics_vk_wsi.cpp) | WSI — surface, swapchain, present |
-| [`graphics_vk_selftest.cpp`](../../kernel/subsystems/graphics/graphics_vk_selftest.cpp) | Boot self-test |
+| [`graphics_vk_raster.cpp`](../../kernel/subsystems/graphics/graphics_vk_raster.cpp) | Fixed-function CPU triangle rasterizer (v0/v1 vertex format) |
+| [`graphics_vk_depth.cpp`](../../kernel/subsystems/graphics/graphics_vk_depth.cpp) | Software 16-bit depth surface |
+| [`graphics_vk_spirv.h`](../../kernel/subsystems/graphics/graphics_vk_spirv.h) | SPIR-V interpreter public interface |
+| [`graphics_vk_spirv_parse.cpp`](../../kernel/subsystems/graphics/graphics_vk_spirv_parse.cpp) | Module parser (types, constants, decorations, basic blocks) |
+| [`graphics_vk_spirv_exec.cpp`](../../kernel/subsystems/graphics/graphics_vk_spirv_exec.cpp) | Interpreter execution engine |
+| [`graphics_vk_spirv_selftest.cpp`](../../kernel/subsystems/graphics/graphics_vk_spirv_selftest.cpp) | Boot self-test (3 canonical SPIR-V modules) |
+| [`graphics_vk_shaderraster.cpp`](../../kernel/subsystems/graphics/graphics_vk_shaderraster.cpp) | Shader-based rasterizer hook (`vkCmdDraw` -> SPIR-V interpreter) |
+| [`graphics_vk_selftest.cpp`](../../kernel/subsystems/graphics/graphics_vk_selftest.cpp) | Boot self-test (lifecycle) |
 | [`graphics_vk_internal.h`](../../kernel/subsystems/graphics/graphics_vk_internal.h) | Shared per-handle structures |
 
 ## Handle Model
@@ -307,18 +317,247 @@ Vulkan-call level. Capability checks happen one layer up — at the
 syscalls that the Win32 thunks issue to reach the ICD. See
 [Capabilities](../security/Capabilities.md).
 
+## SPIR-V interpreter (v1)
+
+`graphics_vk_spirv_*.{h,cpp}` is a freestanding SPIR-V parser +
+executor inside the kernel. At `vkCreateShaderModule` time the
+module is parsed into a `Program` structure (types, constants,
+variables, basic blocks, instructions) and stored alongside the
+existing `ShaderModuleInfo`. The interpreter runs the program on
+demand — once per vertex (vertex shader) or once per pixel
+(fragment shader) — when the shader-rasterizer hook drives a
+`vkCmdDraw` against a pipeline that has parseable VS + FS
+modules bound.
+
+Float math goes through [`util/soft_float.{h,cpp}`](../../kernel/util/soft_float.h) —
+an IEEE 754 binary32 implementation in pure integer code, because
+the kernel is compiled `-mno-sse -mno-sse2` and cannot link any
+compiler-rt soft-float helpers. Sf32 covers Add / Sub / Mul / Div
+/ Sqrt / Neg / Abs / Min / Max / Clamp / Mix / Step + comparison
++ int<->float conversion, all with NaN-unordered IEEE
+semantics. 43-vector boot self-test validates the implementation.
+
+**Opcodes the executor dispatches today:**
+
+| Family | Opcodes |
+|--------|---------|
+| Memory | `OpLoad`, `OpStore`, `OpAccessChain` |
+| Composite | `OpVectorShuffle`, `OpCompositeConstruct`, `OpCompositeExtract` |
+| Arithmetic (int) | `OpSNegate`, `OpIAdd`, `OpISub`, `OpIMul`, `OpSDiv`, `OpUDiv` |
+| Arithmetic (float) | `OpFNegate`, `OpFAdd`, `OpFSub`, `OpFMul`, `OpFDiv` |
+| Vector ops | `OpVectorTimesScalar`, `OpMatrixTimesVector`, `OpDot` |
+| Conversion | `OpConvertSToF`, `OpConvertUToF`, `OpConvertFToS`, `OpBitcast` |
+| Comparison | `OpIEqual`, `OpINotEqual`, `OpSLessThan`, `OpFOrdLessThan` |
+| Control flow | `OpBranch`, `OpBranchConditional`, `OpPhi`, `OpReturn`, `OpReturnValue`, `OpLoopMerge`, `OpSelectionMerge` |
+| Extended | `OpExtInst` against `GLSL.std.450`: `Sqrt`, `Sin`, `Cos`, `Pow`, `FMin`, `FMax`, `FClamp`, `FMix`, `Step`, `Length`, `Normalize`, `Cross` |
+
+Per-shader step budget (`kStepBudget = 8192`) caps runaway loops.
+
+**Transcendental support:** `Sf32Sin` / `Sf32Cos` use a 7th-order
+minimax polynomial after [-pi/2, pi/2] range reduction (~3e-5 max
+error on the reduced range). `Sf32Exp` / `Sf32Log` use degree-5
+polynomial expansions with 2^n / log2 mantissa decomposition; `Sf32Pow`
+composes `exp(y * log(x))` for positive bases. The soft-float
+self-test asserts each with ULP-tolerance bounds — `Sf32SelfTest`
+emits `[util/soft_float] self-test PASS (55 vectors)` on clean
+boot.
+
+**Shader-rasterizer hook** (`graphics_vk_shaderraster.cpp`):
+
+- When `vkCmdDraw` replays and a graphics pipeline with VS + FS is
+  bound, `ShaderRasterizeDraw` runs the SPIR-V VS once per vertex
+  to compute `gl_Position`, then for each pixel inside the
+  resulting triangle runs the FS to compute the colour.
+- Vertex input layout: caller-supplied `VkVertexInputAttributeDescription`
+  via `VkSetVertexInputDuet` — each VS Input is fetched at the
+  declared (binding, offset) tuple with the right stride. Falls
+  back to a canonical 16-byte-per-Location layout when no
+  description is attached.
+- Fragment output: Location 0 vec4 RGBA, clamped to [0,1] and
+  packed BGRA8 for the framebuffer.
+- Topology: TriangleList only on the shader path; other
+  topologies fall back to the fixed-function rasterizer.
+- Painted-pixel cap (65k per draw) so a runaway fullscreen
+  shader cannot brick the boot.
+
+**Compute shader dispatch** (`ShaderDispatchCompute`):
+
+- `vkCmdDispatch` replay now routes through the SPIR-V interpreter
+  for compute pipelines. The parser captures
+  `OpExecutionMode LocalSize x y z`; the dispatcher runs the entry
+  point `group_count_xyz * local_size_xyz` times.
+- Per-invocation builtins set before each execution:
+  `gl_NumWorkgroups`, `gl_WorkgroupId`, `gl_LocalInvocationId`,
+  `gl_GlobalInvocationId`, `gl_LocalInvocationIndex`.
+- 65k-invocation cap per dispatch protects against pathological
+  `dispatch(1024,1024,1024)` runs.
+
+**Per-pixel varying interpolation** (v2):
+
+- After the VS runs per vertex, `RunVertexShader` snapshots every
+  Location-decorated Output variable into a `VaryingSnapshot[8]`
+  array (up to 8 varyings, each up to 16 Sf32 components).
+- `PaintTriangle` precomputes `1 / |area2|` as an Sf32 once per
+  triangle; per pixel it derives barycentric weights as
+  `|edge_i| * inv_area` (three Sf32 multiplies, no divides).
+- For each varying, the per-pixel value = `a*w0 + b*w1 + c*w2`
+  via `BaryLerp` (three multiplies + two adds per component).
+- The interpolated values are written to the matching FS Input
+  Location via `spirv::WriteInputLocation` before invoking the
+  FS. Result: a fragment shader that reads `in vec3 color` from
+  a Location varying sees a smoothly interpolated value, not
+  zero.
+
+**Perspective-correct interpolation** (v3):
+
+- When `gl_Position.w > 0` for every triangle vertex,
+  `ShaderRasterizeDraw` computes `1/w` per vertex and passes the
+  triple into `PaintTriangle`.
+- Per vertex, each varying value is pre-divided by `w`. Per
+  pixel, both `value/w` and `1/w` are barycentric-interpolated
+  linearly, then divided to recover the perspective-correct
+  varying.
+- Degenerate / orthographic projections (`w <= 0` or NaN) fall
+  back to the affine path — no artefacts on the cases where
+  perspective correction is meaningless.
+
+**Texture sampling primitives** (v3):
+
+- The parser recognises `OpTypeImage` / `OpTypeSampler` /
+  `OpTypeSampledImage` and decorates variables with
+  `DescriptorSet` / `Binding` indices.
+- `OpSampledImage` (combined image+sampler), `OpImageSampleImplicitLod`,
+  and `OpImageSampleExplicitLod` execute. Today they return the UV
+  coordinate as `(u, v, 0, 1)` — the "missing texture" diagnostic
+  pattern. A shader that samples a 2D texture now produces a
+  smooth gradient instead of zero; the descriptor-set fetch path
+  that replaces the fallback with real texel data lands in the
+  next slice.
+
+**Multi-format image support:**
+
+- `VkGetPhysicalDeviceFormatProperties` / `ImageFormatProperties`
+  now recognise six DuetOS-internal format ids:
+  `0 = B8G8R8A8_UNORM`, `1 = R8G8B8A8_UNORM`, `2 = R8_UNORM`,
+  `3 = R8G8_UNORM`, `4 = R16_UNORM`, `5 = R32G32B32A32_SFLOAT`.
+  All report the baseline feature set (sampled / color
+  attachment / transfer); format-aware sample + blit paths land
+  with the texel-fetch slice.
+
+**Boot self-tests:**
+
+- `[util/soft_float] self-test PASS (43 vectors)` — soft-float
+  primitives.
+- `[subsys/graphics/spirv] self-test PASS (3 modules executed)` —
+  three hand-crafted SPIR-V modules (constant vec4 fragment,
+  Sf32 add via OpFAdd, vec3*scalar via OpVectorTimesScalar) parse
+  and execute end-to-end with the expected outputs.
+
+The shader hook is OPT-IN — it returns false (no paint) when:
+
+- No pipeline is bound, or
+- The pipeline doesn't carry interpretable VS + FS Programs, or
+- The topology is anything other than TriangleList.
+
+In all "false" cases the existing fixed-function v0/v1 rasterizer
+runs, so the existing demos / DirectX clears / boot self-test see
+no behavioural change.
+
+## Userland bridge (`vulkan-1.dll` + `SYS_VK_CALL`)
+
+The in-kernel ICD is reachable from Win32 PE binaries via
+`vulkan-1.dll`, a freestanding userland PE library at
+[`userland/libs/vulkan_1/vulkan_1.c`](../../userland/libs/vulkan_1/vulkan_1.c).
+The DLL exports the canonical Vulkan entry-point set as thin
+thunks over `SYS_VK_CALL` (syscall 211), an op-code-dispatched
+syscall whose `rdi` argument selects which `VkOp` to invoke.
+
+| Userland entry | Kernel side (SYS_VK_CALL op) |
+|---|---|
+| `vkCreateInstance` | `kVkOpCreateInstance` |
+| `vkDestroyInstance` | `kVkOpDestroyInstance` |
+| `vkEnumeratePhysicalDevices` | `kVkOpEnumeratePhysicalDevices` |
+| `vkCreateDevice` | `kVkOpCreateDevice` |
+| `vkDestroyDevice` | `kVkOpDestroyDevice` |
+| `vkGetDeviceQueue` | `kVkOpGetDeviceQueue` |
+| `vkDeviceWaitIdle` | `kVkOpDeviceWaitIdle` |
+| `vkQueueWaitIdle` | `kVkOpQueueWaitIdle` |
+| `vkEnumerateInstanceVersion` | `kVkOpGetInstanceVersion` |
+| `vkGetInstanceProcAddr` | string -> function-pointer table |
+| `vkGetDeviceProcAddr` | same table |
+| `DuetOS_Vk_GetStatsCounter` | `kVkOpGetStatsCounter` (diagnostic) |
+| `DuetOS_Vk_ClearFramebufferRgba` | `kVkOpClearFramebufferRgba` (end-to-end clear-the-screen — same path `vkCmdClearColorImage` takes for a scanout image) |
+| `DuetOS_Vk_CreateSurface` | `kVkOpCreateSurfaceDuet` (the kernel's single platform-agnostic VkSurfaceKHR bound to the framebuffer) |
+| `DuetOS_Vk_DestroySurface` | `kVkOpDestroySurface` |
+| `DuetOS_Vk_Present` | `kVkOpPresent` (flushes framebuffer through the compositor present hook — equivalent to `vkQueuePresentKHR` on a single-image swapchain) |
+| `vkCreateShaderModule` / `vkDestroyShaderModule` | `kVkOpCreateShaderModule` / `kVkOpDestroyShaderModule` (kernel copies the SPIR-V word stream + invokes the v1 parser; module survives until destroyed) |
+| `vkAllocateMemory` / `vkFreeMemory` | `kVkOpAllocateMemory` / `kVkOpFreeMemory` (host-visible coherent memory type) |
+| `vkCreateBuffer` / `vkDestroyBuffer` | `kVkOpCreateBuffer` / `kVkOpDestroyBuffer` |
+| `vkBindBufferMemory` | `kVkOpBindBufferMemory` |
+| `vkMapMemory` / `vkUnmapMemory` | `kVkOpMapMemory` / `kVkOpUnmapMemory` (returns the kernel's kheap-backed host pointer; userland reads / writes directly since v0 has no per-process VM gate on this surface) |
+| `vkCreateImage` / `vkDestroyImage` / `vkBindImageMemory` | `kVkOpCreateImage` / `kVkOpDestroyImage` / `kVkOpBindImageMemory` (BGRA8 default format) |
+| `vkCreateCommandPool` / `vkDestroyCommandPool` | `kVkOpCreateCommandPool` / `kVkOpDestroyCommandPool` |
+| `vkAllocateCommandBuffers` | `kVkOpAllocateCommandBuffer` (v0 single buffer per call) |
+| `vkBeginCommandBuffer` / `vkEndCommandBuffer` | `kVkOpBeginCommandBuffer` / `kVkOpEndCommandBuffer` |
+| `vkCmdClearColorImage` | `kVkOpCmdClearColorImage` (packs the float-4 color into the canonical 0xAARRGGBB word; userland-side `_fltused` handles the float compare) |
+| `vkQueueSubmit` | `kVkOpQueueSubmit` (v0 single command buffer per submit) |
+| `vkCreatePipelineLayout` / `vkDestroyPipelineLayout` | `kVkOpCreatePipelineLayout` / `kVkOpDestroyPipelineLayout` |
+| `vkCreateRenderPass` / `vkDestroyRenderPass` | `kVkOpCreateRenderPass` / `kVkOpDestroyRenderPass` |
+| `vkCreateGraphicsPipelines` | `kVkOpCreateGraphicsPipeline` (extracts VS / FS shader modules from `pStages` by hand) |
+| `vkCreateComputePipelines` | `kVkOpCreateComputePipeline` |
+| `vkDestroyPipeline` | `kVkOpDestroyPipeline` |
+| `vkCmdBindPipeline` / `vkCmdDraw` / `vkCmdDispatch` | `kVkOpCmdBindPipeline` / `kVkOpCmdDraw` / `kVkOpCmdDispatch` |
+| `vkCmdBindVertexBuffers` / `vkCmdBindIndexBuffer` | `kVkOpCmdBindVertexBuffer` / `kVkOpCmdBindIndexBuffer` (v0 single-binding form) |
+| `vkUpdateDescriptorSets` | `kVkOpUpdateDescriptorSet` (walks the writeCount array, one syscall per entry; extracts the image-view handle from each VkDescriptorImageInfo) |
+| `vkCreateDescriptorSetLayout` / `vkDestroyDescriptorSetLayout` | `kVkOpCreateDescriptorSetLayout` / `kVkOpDestroyDescriptorSetLayout` (single binding-0 CombinedImageSampler in v0) |
+| `vkCreateDescriptorPool` / `vkDestroyDescriptorPool` | `kVkOpCreateDescriptorPool` / `kVkOpDestroyDescriptorPool` |
+| `vkAllocateDescriptorSets` | `kVkOpAllocateDescriptorSet` (v0 single set per call) |
+| `vkCmdBindDescriptorSets` | `kVkOpCmdBindDescriptorSet` (v0 single set per bind) |
+
+`SYS_VK_CALL` plus `VkOp` / `VkStatsCounter` enums are in
+[`kernel/syscall/syscall.h`](../../kernel/syscall/syscall.h);
+the dispatch lives in
+[`kernel/syscall/syscall_vk.cpp`](../../kernel/syscall/syscall_vk.cpp).
+One syscall + an op-code-dispatch keeps the syscall number space
+sane while preserving a stable per-op ABI value — once published,
+neither the syscall number nor the op-code may move.
+
+What a Vulkan-using Win32 PE can do today: load the DLL, resolve
+exports, walk the lifecycle (`vkCreateInstance` -> enumerate ->
+`vkCreateDevice` -> `vkGetDeviceQueue` -> wait/destroy), and
+read any of the 10 diagnostic stats counters. Buffer / image /
+memory creation, command-buffer record + submit, shader module
+create, and WSI surface / swapchain are deferred to the next
+op-code expansion — those need shared-memory marshalling that
+the v0 syscall surface doesn't provide.
+
 ## Known Limits / GAPs
 
 - **No real GPU submission.** Every device-side command is replayed
-  on the CPU; the visible effects are `Clear`, resource copies, and
+  on the CPU; the visible effects are `Clear`, resource copies,
   the CPU triangle rasterizer for `vkCmdDraw` / `vkCmdDrawIndexed`
   (TriangleList / TriangleStrip / TriangleFan; Gouraud-shaded with
   per-pixel src-over alpha; software Z-test when v1 vertex format
-  is selected).
-- **No SPIR-V execution.** Shader modules are parsed (entry points
-  enumerated, descriptor bindings counted) but not run. The
-  rasterizer is fixed-function; no per-fragment shader, no texture
-  sampling, no perspective-correct interpolation.
+  is selected), AND the SPIR-V shader rasterizer when a pipeline
+  binds parseable VS + FS modules (TriangleList only).
+- **SPIR-V texture sampling.** The interpreter recognises
+  `OpExtInst` and `OpFunctionCall` shapes but does not implement
+  `OpImageSample*` / `OpImageRead`. Descriptor-set fetch path is
+  not wired into the shader hook yet.
+- **SPIR-V perspective correction.** The shader rasterizer is
+  affine (linear pixel-space interpolation in pixel space).
+  Perspective-correct attribute interpolation needs a per-fragment
+  1/w divide which the v2 hook doesn't perform.
+- **Vertex input descriptions.** The shader hook uses a canonical
+  16-byte-per-Location layout instead of consuming the caller's
+  `VkVertexInputAttributeDescription` / `VkVertexInputBindingDescription`.
+  A caller whose vertex layout differs gets garbage values fed
+  into the VS Input variables.
+- **Userland buffer / image / submit.** `SYS_VK_CALL` v0 only
+  covers the lifecycle subset. Buffer / image / memory / command-
+  buffer / swapchain ops return `VK_ERROR_INITIALIZATION_FAILED`
+  to userland callers until the next op-code expansion adds
+  shared-memory marshalling.
 - **Single queue family.** No async compute, no transfer queue
   separation.
 - **No swapchain resize.** Recreating the swapchain is supported;

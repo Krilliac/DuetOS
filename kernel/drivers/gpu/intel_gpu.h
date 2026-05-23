@@ -71,6 +71,36 @@ inline constexpr u32 kIntelRingLengthMask = 0x1FF000u;
 
 inline constexpr u64 kIntelRingBytes = 4096; // single-page ring
 
+// MI (Memory Interface) instruction opcodes. The Render Command
+// Streamer fetches these from the ring at HEAD and advances HEAD
+// one dword at a time as each instruction completes.
+//   MI_NOOP            — 1 dword, side-effect-free
+//   MI_STORE_DWORD_IMM — 4 dwords on Gen9+ (variant we use):
+//                        opcode | (length=2), address (lo), address (hi), data
+//                        Stores the literal `data` to the GPA at `(hi<<32)|lo`.
+//                        On Gen9+ the canonical encoding stores the high half
+//                        to a Bit 22-set "use_global_gtt" address; we pass a
+//                        physical address with the GGTT-bypass bit clear,
+//                        which the engine treats as a guest-physical store
+//                        through the gtt-bypass aperture (same convention the
+//                        ring buffer itself uses for RCS_START).
+inline constexpr u32 kIntelMiNoop = 0x00000000u;
+inline constexpr u32 kIntelMiStoreDwordImm = (0x20u << 23) | (4u - 2u); // opcode 0x20, length=2 dwords
+
+/// Fire one MI_STORE_DWORD_IMM through the RCS that writes
+/// `value` to a DMA-coherent scratch dword the driver owns, then
+/// bounded-poll HEAD until it catches the new TAIL. On success
+/// the scratch dword reads back `value` — concrete proof that
+/// the engine is executing real opcodes (not just bumping HEAD
+/// for MI_NOOPs, which a wedged engine could also do).
+/// Returns the read-back value (or 0xFFFFFFFF on bring-up
+/// failure / scratch unavailable / poll timeout).
+///
+/// Idempotent — the scratch buffer is allocated on first call
+/// and retained for the boot. Safe to invoke from the boot
+/// self-test, the `gpu` shell command, or a CI smoke harness.
+u32 IntelRcsStoreImmProbe(u32 value);
+
 /// Run the v0 probe: liveness reads + arch decode. Populates
 /// `g.probe_reg`, `g.mmio_live`, and `g.arch` in-place. Safe even
 /// when the BAR map failed (skips the actual read).

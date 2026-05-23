@@ -2143,6 +2143,140 @@ enum SyscallNumber : u64
     // so a bucket collision is at worst a spurious wakeup, never a
     // lost one. No cap gated. ABI stable from this commit.
     SYS_WAKE_BY_ADDRESS = 209,
+
+    // SYS_VK_CALL — dispatch a Vulkan ICD call from userland into
+    // the in-kernel Vulkan ICD. One generic syscall with an
+    // opcode-based dispatch on the first argument: rdi selects the
+    // operation (VkOp enum below), rsi/rdx/r10/r8 carry per-op
+    // arguments, return is the per-op return value. This is the
+    // bridge that lets `userland/libs/vulkan_1/vulkan-1.dll`
+    // implement the standard Vulkan entry points (vkCreateInstance,
+    // vkGetInstanceProcAddr, vkCreateDevice, vkQueueSubmit, ...)
+    // as thin thunks that marshal arguments + invoke this syscall.
+    //
+    // Why one syscall instead of one per Vulkan call: the Vulkan
+    // ABI is ~600 entry points; baking each into a syscall number
+    // would burn the entire remaining slot space. Each op-code in
+    // VkOp is a forever-stable ABI value, but the syscall number
+    // stays at 211 for the whole subsystem.
+    //
+    // Capability gate: kCapGraphics (TODO when the cap lands;
+    // today the cap-gating happens one layer up, at the Win32
+    // dispatch entry — see Subsystem-Isolation.md for the rule).
+    SYS_VK_CALL = 211,
+};
+
+// Vulkan syscall op-codes. Used as the `rdi` value to SYS_VK_CALL
+// to select which Vulkan ICD entry the syscall should forward to.
+// Numbers are part of the ABI: once published, never change.
+enum VkOp : u64
+{
+    // Lifecycle
+    kVkOpCreateInstance = 0,  // rsi = VkInstance* out_handle (kernel returns 0/non-zero)
+    kVkOpDestroyInstance = 1, // rsi = VkInstance handle
+    kVkOpEnumeratePhysicalDevices =
+        2,                   // rsi = instance, rdx = u32* count, r10 = VkPhysicalDevice* out (or 0 to query count)
+    kVkOpCreateDevice = 3,   // rsi = phys, rdx = VkDevice* out
+    kVkOpDestroyDevice = 4,  // rsi = device handle
+    kVkOpGetDeviceQueue = 5, // rsi = device, rdx = VkQueue* out
+    kVkOpDeviceWaitIdle = 6, // rsi = device
+    kVkOpQueueWaitIdle = 7,  // rsi = queue
+    // Properties
+    kVkOpGetInstanceVersion = 8, // rsi = u32* version_out; returns 0/non-zero
+    // Diagnostic
+    kVkOpGetStatsCounter = 9, // rsi = counter id (see VkStatsCounter), returns the counter value
+    // End-to-end clear: routes a userland "clear the framebuffer"
+    // call through the Vulkan ICD's FramebufferFillRect path. Lets
+    // d3d11's ClearRenderTargetView (and any other v0 caller) drive
+    // a Vulkan clear without building the full
+    // Instance->Device->CmdBuf->Submit ladder by hand. rsi = packed
+    // 0xAARRGGBB color word.
+    kVkOpClearFramebufferRgba = 10,
+    // WSI ops — minimal "open a surface, present pixels" set so a
+    // userland Vulkan PE can drive the compositor without
+    // building a full swapchain ladder.
+    kVkOpCreateSurfaceDuet = 11, // rdx = instance, r10 = VkSurfaceKHR* out
+    kVkOpDestroySurface = 12,    // rdx = instance, r10 = surface
+    kVkOpPresent = 13,           // rdx = packed argb (currently ignored); flushes the framebuffer
+    // Memory / buffer / shader-module ops. Copy-based marshalling
+    // (the kernel takes its own copy of any caller-supplied
+    // payload) keeps the syscall ABI flat — no shared-memory
+    // mapping needed.
+    kVkOpCreateShaderModule = 14, // rdx = device, r10 = const u32* code, r8 = u64 code_size_bytes;
+                                  // rax = VkShaderModule handle on success, 0 on failure.
+    kVkOpAllocateMemory = 15,     // rdx = device, r10 = u64 size; rax = VkDeviceMemory handle.
+    kVkOpFreeMemory = 16,         // rdx = device, r10 = memory; rax = 1 on success.
+    kVkOpCreateBuffer = 17,       // rdx = device, r10 = u64 size; rax = VkBuffer handle.
+    kVkOpDestroyShaderModule = 18, // rdx = device, r10 = shader_module
+    kVkOpDestroyBuffer = 19,       // rdx = device, r10 = buffer
+    // Bind / map / image-create — the next layer after
+    // create-memory/buffer for a PE that wants to upload texture
+    // data or vertex data through the ICD.
+    kVkOpBindBufferMemory = 20, // rdx = device, r10 = (buffer<<8)|0, r8 = (memory<<8)|0, r9-ish (offset packed
+                                // into hi-bits of r10); simpler form: rdx=device, r10=buffer, r8=memory, r9=offset.
+                                // Returns rax=1 on success.
+    kVkOpMapMemory = 21,        // rdx = device, r10 = memory; rax = user pointer (kernel space-shared) or 0.
+                                // Since v0 has no per-process VM, the returned pointer is directly
+                                // dereferenceable by userland — the same address the kernel handed back
+                                // from vkMapMemory.
+    kVkOpUnmapMemory = 22,      // rdx = device, r10 = memory
+    kVkOpCreateImage = 23,      // rdx = device, r10 = u32 width, r8 = u32 height, r9 = u32 flags;
+                                // rax = VkImage handle. Format is hardcoded BGRA8 for v0.
+    kVkOpDestroyImage = 24,     // rdx = device, r10 = image
+    kVkOpBindImageMemory = 25,  // rdx = device, r10 = image, r8 = memory, r9 = offset
+    // Command buffer recording + submit. A userland PE that owns
+    // its own cmd buffer ladder + records draws can drive the
+    // full Vulkan path; the earlier DuetOS_Vk_ClearFramebufferRgba
+    // shortcut remains for the simple cases.
+    kVkOpCreateCommandPool = 26,    // rdx=device; rax = VkCommandPool
+    kVkOpDestroyCommandPool = 27,   // rdx=device, r10=pool
+    kVkOpAllocateCommandBuffer = 28, // rdx=device, r10=pool; rax = VkCommandBuffer
+    kVkOpBeginCommandBuffer = 29,   // rdx=cb; rax = 1
+    kVkOpEndCommandBuffer = 30,     // rdx=cb
+    kVkOpCmdClearColorImage = 31,   // rdx=cb, r10=image, r8=packed argb
+    kVkOpQueueSubmit = 32,          // rdx=queue, r10=cb
+    // Pipeline + render pass + draw — the rest of the v0 graphics
+    // ladder. Together with the cmd-buffer ops above, a Vulkan PE
+    // can build a complete graphics pipeline, bind a shader,
+    // record a draw, and submit it.
+    kVkOpCreatePipelineLayout = 33, // rdx=device; rax = VkPipelineLayout
+    kVkOpDestroyPipelineLayout = 34,
+    kVkOpCreateRenderPass = 35,     // rdx=device; rax = VkRenderPass (single-attachment v0)
+    kVkOpDestroyRenderPass = 36,
+    kVkOpCreateGraphicsPipeline = 37, // rdx=device, r10=layout, r8=vs, r9=fs; rax = VkPipeline
+    kVkOpCreateComputePipeline = 38, // rdx=device, r10=layout, r8=cs; rax = VkPipeline
+    kVkOpDestroyPipeline = 39,
+    kVkOpCmdBindPipeline = 40,      // rdx=cb, r10=pipeline
+    kVkOpCmdDraw = 41,              // rdx=cb, r10=(vertex_count<<32)|first_vertex
+    kVkOpCmdDispatch = 42,          // rdx=cb, r10=group_x, r8=group_y, r9=group_z
+    // Record-side bind ops + descriptor update.
+    kVkOpCmdBindVertexBuffer = 43, // rdx=cb, r10=binding, r8=buffer, r9=offset
+    kVkOpCmdBindIndexBuffer = 44,  // rdx=cb, r10=buffer, r8=offset, r9=index_type
+    kVkOpUpdateDescriptorSet = 45, // rdx=set, r10=binding, r8=type, r9=resource_handle
+    // Descriptor pool + set create/alloc.
+    kVkOpCreateDescriptorSetLayout = 46, // rdx=device; rax = VkDescriptorSetLayout
+    kVkOpDestroyDescriptorSetLayout = 47,
+    kVkOpCreateDescriptorPool = 48,      // rdx=device, r10=max_sets; rax = VkDescriptorPool
+    kVkOpDestroyDescriptorPool = 49,
+    kVkOpAllocateDescriptorSet = 50,     // rdx=device, r10=pool, r8=layout; rax = VkDescriptorSet
+    kVkOpCmdBindDescriptorSet = 51,      // rdx=cb, r10=layout, r8=first_set, r9=set
+};
+
+// Diagnostic counter IDs for kVkOpGetStatsCounter. Exposes the
+// existing GraphicsStats fields without dragging the full struct
+// across the syscall boundary. Numbers are ABI-stable.
+enum VkStatsCounter : u64
+{
+    kVkStatsInstanceLive = 0,
+    kVkStatsDeviceLive = 1,
+    kVkStatsCommandBufferLive = 2,
+    kVkStatsSpirvProgramsBuilt = 3,
+    kVkStatsSpirvEntryPointExecutions = 4,
+    kVkStatsShaderRasterDrawsPainted = 5,
+    kVkStatsShaderRasterDrawsSkipped = 6,
+    kVkStatsClearPixelsPainted = 7,
+    kVkStatsTrianglesDrawn = 8,
+    kVkStatsQueueSubmits = 9,
 };
 
 // Stable bit assignments for SYS_COMPAT_QUERY's return value.

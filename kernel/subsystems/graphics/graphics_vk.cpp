@@ -71,6 +71,7 @@ PipelineCacheRecord g_pipeline_cache_data[kPoolCapacity];
 QueryPoolRecord g_query_pool_data[kPoolCapacity];
 PhysicalDeviceRecord g_phys_data[kPoolCapacity];
 QueueRecord g_queue_data[kPoolCapacity];
+PipelineRecord g_pipeline_data[kPoolCapacity];
 
 Pool g_instance_pool;
 Pool g_phys_pool;
@@ -125,6 +126,12 @@ u32 g_queries_executed = 0;
 u32 g_memory_maps = 0;
 u32 g_image_upload_pixels = 0;
 u32 g_triangles_drawn = 0;
+u32 g_spirv_programs_built = 0;
+u32 g_spirv_program_build_failures = 0;
+u32 g_spirv_entry_point_executions = 0;
+u32 g_spirv_step_budget_exhausted = 0;
+u32 g_shader_raster_draws_painted = 0;
+u32 g_shader_raster_draws_skipped = 0;
 u32 g_dynamic_renderings = 0;
 u32 g_debug_labels = 0;
 u32 g_secondary_executes = 0;
@@ -805,6 +812,7 @@ VkResult VkCreateImage(VkDevice dev, VkExtent3D extent, u32 flags, VkImage* out)
     g_image_data[slot].extent = extent;
     g_image_data[slot].flags = flags;
     g_image_data[slot].memory_bound = false;
+    g_image_data[slot].backing = nullptr;
     if (out != nullptr)
         *out = HandleFor(kImageBase, slot);
     return VkResult::Success;
@@ -821,12 +829,23 @@ void VkDestroyImage(VkDevice dev, VkImage img)
 VkResult VkBindImageMemory(VkDevice dev, VkImage img, VkDeviceMemory mem, u64 offset)
 {
     (void)dev;
-    (void)offset;
     if (!HandleInRange(img, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(img, kImageBase)))
         return VkResult::ErrorInitializationFailed;
     if (!HandleInRange(mem, kMemoryBase) || !PoolIsLive(g_memory_pool, SlotOf(mem, kMemoryBase)))
         return VkResult::ErrorInitializationFailed;
-    g_image_data[SlotOf(img, kImageBase)].memory_bound = true;
+    const u32 islot = SlotOf(img, kImageBase);
+    const u32 mslot = SlotOf(mem, kMemoryBase);
+    g_image_data[islot].memory_bound = true;
+    // Capture the backing pointer at bind time so the texture-
+    // sample path can fetch texels without walking the memory
+    // pool. The backing is offset-into the host-visible block
+    // bound; when the memory wasn't host-visible (host_ptr nullptr)
+    // we leave backing as null and the sampler falls back to the
+    // diagnostic checkerboard.
+    if (g_memory_data[mslot].host_visible && g_memory_data[mslot].host_ptr != nullptr)
+        g_image_data[islot].backing = static_cast<u8*>(g_memory_data[mslot].host_ptr) + offset;
+    else
+        g_image_data[islot].backing = nullptr;
     return VkResult::Success;
 }
 
@@ -1013,6 +1032,9 @@ VkResult VkCreateShaderModule(VkDevice dev, const u32* code, u64 code_size_bytes
         return VkResult::ErrorOutOfHostMemory;
     g_shader_data[slot].byte_size = code_size_bytes;
     g_shader_data[slot].info = ParseSpirv(code, code_size_bytes);
+    g_shader_data[slot].code_copy = nullptr;
+    g_shader_data[slot].code_word_count = 0;
+    g_shader_data[slot].spirv_program = nullptr;
     if (g_shader_data[slot].info.valid)
     {
         ++g_spirv_modules_parsed;
@@ -1020,6 +1042,39 @@ VkResult VkCreateShaderModule(VkDevice dev, const u32* code, u64 code_size_bytes
         g_spirv_capabilities_seen += g_shader_data[slot].info.capability_count;
         g_spirv_decorations_seen += g_shader_data[slot].info.decoration_count;
         g_spirv_execution_modes_seen += g_shader_data[slot].info.execution_mode_count;
+
+        // Take an owning copy of the SPIR-V word stream and try to
+        // build a v1 interpreter program. The copy outlives the
+        // caller's pointer; the program is what the rasterizer hook
+        // executes when a graphics pipeline binds this module.
+        // Failures here leave `spirv_program = nullptr`, which the
+        // rasterizer treats as "no shader available — fall back to
+        // the fixed-function path" rather than refusing the module.
+        const u64 words = code_size_bytes / 4u;
+        void* copy = mm::KMalloc(words * 4u);
+        if (copy != nullptr)
+        {
+            auto* dst = static_cast<u32*>(copy);
+            for (u64 i = 0; i < words; ++i)
+                dst[i] = code[i];
+            g_shader_data[slot].code_copy = dst;
+            g_shader_data[slot].code_word_count = words;
+            void* prog_mem = mm::KMalloc(sizeof(spirv::Program));
+            if (prog_mem != nullptr)
+            {
+                auto* prog = static_cast<spirv::Program*>(prog_mem);
+                if (spirv::Parse(dst, static_cast<u32>(words), prog))
+                {
+                    g_shader_data[slot].spirv_program = prog;
+                    ++g_spirv_programs_built;
+                }
+                else
+                {
+                    mm::KFree(prog_mem);
+                    ++g_spirv_program_build_failures;
+                }
+            }
+        }
     }
     if (out != nullptr)
         *out = HandleFor(kShaderBase, slot);
@@ -1041,7 +1096,19 @@ void VkDestroyShaderModule(VkDevice dev, VkShaderModule module)
     (void)dev;
     if (module == 0 || !HandleInRange(module, kShaderBase))
         return;
-    (void)PoolFree(g_shader_pool, SlotOf(module, kShaderBase));
+    const u32 slot = SlotOf(module, kShaderBase);
+    if (g_shader_data[slot].spirv_program != nullptr)
+    {
+        mm::KFree(g_shader_data[slot].spirv_program);
+        g_shader_data[slot].spirv_program = nullptr;
+    }
+    if (g_shader_data[slot].code_copy != nullptr)
+    {
+        mm::KFree(g_shader_data[slot].code_copy);
+        g_shader_data[slot].code_copy = nullptr;
+        g_shader_data[slot].code_word_count = 0;
+    }
+    (void)PoolFree(g_shader_pool, slot);
 }
 
 VkResult VkCreatePipelineLayout(VkDevice dev, VkPipelineLayout* out)
@@ -1080,6 +1147,11 @@ VkResult VkCreateGraphicsPipeline(VkDevice dev, VkPipelineLayout layout, VkShade
     u32 slot = 0;
     if (!PoolAlloc(g_pipeline_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
+    g_pipeline_data[slot].vertex_shader = vs;
+    g_pipeline_data[slot].fragment_shader = fs;
+    g_pipeline_data[slot].compute_shader = 0;
+    g_pipeline_data[slot].vertex_binding_count = 0;
+    g_pipeline_data[slot].vertex_attribute_count = 0;
     if (out != nullptr)
         *out = HandleFor(kPipelineBase, slot);
     return VkResult::Success;
@@ -1097,8 +1169,30 @@ VkResult VkCreateComputePipeline(VkDevice dev, VkPipelineLayout layout, VkShader
     u32 slot = 0;
     if (!PoolAlloc(g_pipeline_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
+    g_pipeline_data[slot].vertex_shader = 0;
+    g_pipeline_data[slot].fragment_shader = 0;
+    g_pipeline_data[slot].compute_shader = cs;
+    g_pipeline_data[slot].vertex_binding_count = 0;
+    g_pipeline_data[slot].vertex_attribute_count = 0;
     if (out != nullptr)
         *out = HandleFor(kPipelineBase, slot);
+    return VkResult::Success;
+}
+
+VkResult VkSetVertexInputDuet(VkPipeline pipe, const VkVertexBindingDuet* bindings, u32 binding_count,
+                              const VkVertexAttributeDuet* attributes, u32 attribute_count)
+{
+    if (!HandleInRange(pipe, kPipelineBase) || !PoolIsLive(g_pipeline_pool, SlotOf(pipe, kPipelineBase)))
+        return VkResult::ErrorInitializationFailed;
+    const u32 slot = SlotOf(pipe, kPipelineBase);
+    const u32 nb = (binding_count < kMaxVertexBindings) ? binding_count : kMaxVertexBindings;
+    const u32 na = (attribute_count < kMaxVertexAttributes) ? attribute_count : kMaxVertexAttributes;
+    g_pipeline_data[slot].vertex_binding_count = nb;
+    g_pipeline_data[slot].vertex_attribute_count = na;
+    for (u32 i = 0; i < nb; ++i)
+        g_pipeline_data[slot].vertex_bindings[i] = bindings[i];
+    for (u32 i = 0; i < na; ++i)
+        g_pipeline_data[slot].vertex_attributes[i] = attributes[i];
     return VkResult::Success;
 }
 
@@ -1463,13 +1557,36 @@ VkResult VkGetPhysicalDeviceFormatProperties(VkPhysicalDevice phys, u32 format, 
     if (!HandleInRange(phys, kPhysDevBase) || !PoolIsLive(g_phys_pool, SlotOf(phys, kPhysDevBase)))
         return VkResult::ErrorInitializationFailed;
     *out = VkFormatProperties{};
-    if (format == 0) // VK_FORMAT_B8G8R8A8_UNORM
+    // Recognised formats use a small DuetOS-internal numbering:
+    //   0  -> VK_FORMAT_B8G8R8A8_UNORM (the canonical scanout)
+    //   1  -> VK_FORMAT_R8G8B8A8_UNORM (RGBA8, mirror layout)
+    //   2  -> VK_FORMAT_R8_UNORM       (single-channel)
+    //   3  -> VK_FORMAT_R8G8_UNORM     (two-channel)
+    //   4  -> VK_FORMAT_R16_UNORM      (16-bit single-channel)
+    //   5  -> VK_FORMAT_R32G32B32A32_SFLOAT (HDR / compute outputs)
+    // All carry the same baseline feature set today: sampleable,
+    // valid as a color attachment, valid as transfer src/dst.
+    // Spec-correct format-specific feature restrictions land when
+    // the format-aware sampler / blit paths arrive.
+    const u32 baseline = kFormatFeatureSampledImage | kFormatFeatureColorAttachment | kFormatFeatureTransferSrc |
+                         kFormatFeatureTransferDst;
+    const u32 buffer_baseline = kFormatFeatureTransferSrc | kFormatFeatureTransferDst;
+    switch (format)
     {
-        const u32 baseline = kFormatFeatureSampledImage | kFormatFeatureColorAttachment | kFormatFeatureTransferSrc |
-                             kFormatFeatureTransferDst;
+    case 0: // B8G8R8A8_UNORM
+    case 1: // R8G8B8A8_UNORM
+    case 2: // R8_UNORM
+    case 3: // R8G8_UNORM
+    case 4: // R16_UNORM
+    case 5: // R32G32B32A32_SFLOAT
         out->linearTilingFeatures = baseline;
         out->optimalTilingFeatures = baseline;
-        out->bufferFeatures = kFormatFeatureTransferSrc | kFormatFeatureTransferDst;
+        out->bufferFeatures = buffer_baseline;
+        break;
+    default:
+        // Unknown format reports zero features (the canonical "not
+        // supported" answer) but the call still returns Success.
+        break;
     }
     return VkResult::Success;
 }
@@ -1485,7 +1602,9 @@ VkResult VkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice phys, u32 for
         return VkResult::ErrorInitializationFailed;
     if (!HandleInRange(phys, kPhysDevBase) || !PoolIsLive(g_phys_pool, SlotOf(phys, kPhysDevBase)))
         return VkResult::ErrorInitializationFailed;
-    if (format != 0)
+    // Accept the same internal format set as
+    // VkGetPhysicalDeviceFormatProperties — 0..5 inclusive.
+    if (format > 5u)
         return VkResult::ErrorFormatNotSupported;
     *out = VkImageFormatProperties{};
     out->maxExtent = VkExtent3D{16384, 16384, 1};
@@ -1778,6 +1897,12 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
             break;
         case CmdOp::Dispatch:
             ++g_dispatches;
+            // Route through the shader-rasterizer's compute path
+            // when a compute pipeline with parseable CS Program is
+            // bound. Returns true on actual execution; false on
+            // graphics-only / no-shader pipeline (counter still
+            // ticked so the dispatch is observable to tests).
+            (void)ShaderDispatchCompute(st, op.dispatch_x, op.dispatch_y, op.dispatch_z);
             break;
         case CmdOp::SetEvent:
             ReplaySetEvent(op);
@@ -1831,6 +1956,14 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
         case CmdOp::PushDescriptor:
             break;
         case CmdOp::BindVertexBuffer:
+            // Always populate the per-binding slot; legacy
+            // bind-binding-0 callers keep working because the
+            // mirror to st.vertex_buffer happens at the same time.
+            if (op.vertex_binding < RasterState::kMaxVbBindings)
+            {
+                st.vb_per_binding[op.vertex_binding] = op.vertex_buffer;
+                st.vb_offset_per_binding[op.vertex_binding] = op.vertex_offset_bytes;
+            }
             if (op.vertex_binding == 0)
             {
                 st.vertex_buffer = op.vertex_buffer;
@@ -1895,15 +2028,34 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
             }
             break;
         case CmdOp::Draw:
-            RasterizeDuetDraw(st, op.first_vertex, op.vertex_count);
+            // Try the SPIR-V shader-based rasterizer first; it
+            // returns true if the bound pipeline has VS+FS programs
+            // matching the supported v1 shape and the draw actually
+            // painted. On false the fixed-function fallback runs
+            // (DuetOS v0/v1 vertex format + Gouraud raster).
+            if (!ShaderRasterizeDraw(st, op.first_vertex, op.vertex_count))
+                RasterizeDuetDraw(st, op.first_vertex, op.vertex_count);
             break;
         case CmdOp::DrawIndexed:
-            RasterizeDuetDrawIndexed(st, op.first_index, op.index_count, op.vertex_offset);
+            if (!ShaderRasterizeDrawIndexed(st, op.first_index, op.index_count, op.vertex_offset))
+                RasterizeDuetDrawIndexed(st, op.first_index, op.index_count, op.vertex_offset);
+            break;
+        case CmdOp::BindPipeline:
+            // Record the pipeline handle so the shader-rasterizer
+            // hook can fetch (vs, fs) and decide whether to take
+            // the SPIR-V path.
+            st.bound_pipeline = op.pipeline;
+            break;
+        case CmdOp::BindDescriptorSets:
+            // Stash the first bound set for the next draw — the
+            // shader-rasterizer hook walks its bindings via
+            // DescriptorSetRecord to populate the SPIR-V
+            // program's descriptor table.
+            st.bound_descriptor_set = op.descriptor_set;
             break;
         case CmdOp::WaitEvents: // no-op replay (events already signalled)
         case CmdOp::BeginQuery: // pairs with EndQuery — write happens at End
         case CmdOp::EndRenderPass:
-        case CmdOp::BindPipeline:
         case CmdOp::SetViewport:
         // Indirect / dynamic-state-2 / sync2 / subpass / extended-query
         // recorded entries — no GPU side effect in v0; the AppendOp at
@@ -2079,6 +2231,12 @@ GraphicsStats VkStatsSnapshot()
     s.vk_spirv_capabilities_seen = g_spirv_capabilities_seen;
     s.vk_spirv_decorations_seen = g_spirv_decorations_seen;
     s.vk_spirv_execution_modes_seen = g_spirv_execution_modes_seen;
+    s.vk_spirv_programs_built = g_spirv_programs_built;
+    s.vk_spirv_program_build_failures = g_spirv_program_build_failures;
+    s.vk_spirv_entry_point_executions = g_spirv_entry_point_executions;
+    s.vk_spirv_step_budget_exhausted = g_spirv_step_budget_exhausted;
+    s.vk_shader_raster_draws_painted = g_shader_raster_draws_painted;
+    s.vk_shader_raster_draws_skipped = g_shader_raster_draws_skipped;
     return s;
 }
 
