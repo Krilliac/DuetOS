@@ -4,6 +4,7 @@
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 #include "log/klog.h"
+#include "diag/fix_journal.h"
 
 namespace duetos::arch
 {
@@ -216,6 +217,8 @@ MachineCheckVerdict MachineCheckReport(const TrapFrame* frame)
         // revisit when the mm layer grows a poison list. Until then
         // the conservative contract (data integrity over liveness)
         // halts rather than resume into possibly-bad data.
+        FIX_NOTE_GAP("kernel/arch/x86_64/machine_check.cpp:213",
+                     "restartable in principle (RIPV=1, no PCC) but DuetOS");
         SerialWrite("RESTARTABLE in principle (RIPV=1, no PCC) — but v0 has "
                     "no page-poison recovery path; halting for data "
                     "integrity\n");

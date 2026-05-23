@@ -24,6 +24,7 @@
 #include "sched/sched.h"
 #include "sync/spinlock.h"
 #include "util/string.h"
+#include "diag/fix_journal.h"
 
 // Linker-emitted symbols for the trampoline image (see ap_trampoline.S).
 // Declared at file scope (outside any namespace) so the linker matches
@@ -762,6 +763,7 @@ u64 SmpStartAps()
     // so AP matching below is on the low 8 bits. Fine for every
     // current target (QEMU + <=255-thread boxes); x2APIC MADT
     // (type 9) parsing for >255 IDs is a separate follow-on.
+    FIX_NOTE_GAP("kernel/arch/x86_64/smp.cpp:761", "legacy MADT LAPIC records carry only an 8-bit APIC ID,");
     const u32 bsp_apic_id = LapicCurrentId();
     u64 aps_started = 0;
 

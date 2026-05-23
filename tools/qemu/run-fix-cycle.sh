@@ -13,6 +13,12 @@
 #   DUETOS_SMOKE_PROFILE=ring3 tools/qemu/run-fix-cycle.sh
 #   tools/qemu/run-fix-cycle.sh --baseline=fix-baseline.txt
 #
+#   # MAX coverage: chain every profile back-to-back (FAT32 KERNEL.FIX
+#   # rotation accumulates gaps across runs; pushes hot pins past the
+#   # marker-log threshold that a single-profile boot wouldn't reach).
+#   tools/qemu/run-fix-cycle.sh --chain
+#   tools/qemu/run-fix-cycle.sh --chain=ring3,pe-winkill,linux
+#
 # Pass-through env vars:
 #   DUETOS_PRESET            (default x86_64-debug)
 #   DUETOS_SMOKE_PROFILE     (default pe-winapi)
@@ -39,9 +45,12 @@ EXTRACTED_FIX="${BUILD_DIR}/KERNEL.FIX"
 MARKERS_JSON="${BUILD_DIR}/fix-markers.json"
 
 BASELINE_ARG=""
+CHAIN_PROFILES=""
 for arg in "$@"; do
     case "$arg" in
         --baseline=*) BASELINE_ARG="$arg" ;;
+        --chain=*) CHAIN_PROFILES="${arg#*=}" ;;
+        --chain) CHAIN_PROFILES="bringup ring3 pe-hello pe-winapi pe-winkill linux browser" ;;
         *) echo "warning: ignoring unknown arg '$arg'" >&2 ;;
     esac
 done
@@ -49,22 +58,40 @@ done
 echo "[fix-cycle] preset=${PRESET} profile=${PROFILE} timeout=${TIMEOUT}s" >&2
 echo "[fix-cycle] log=${LOG_FILE}" >&2
 
-# 1. Boot the smoke profile. Capture serial to the log file. The
-#    inner script handles QEMU lifecycle + timeout + isa-debug-exit.
-DUETOS_PRESET="${PRESET}" \
-DUETOS_SMOKE_PROFILE="${PROFILE}" \
-DUETOS_TIMEOUT="${TIMEOUT}" \
-"${SCRIPT_DIR}/run.sh" >"${LOG_FILE}" 2>&1 || {
-    rc=$?
-    # exit 33 is the sentinel-reached path under run.sh's KVM exit
-    # code mapping; treat it as success. Anything else is a real
-    # smoke failure and we abort the cycle.
-    if [[ "$rc" != "33" ]]; then
-        echo "[fix-cycle] smoke FAILED (exit=$rc); see ${LOG_FILE}" >&2
+if [[ -n "${CHAIN_PROFILES}" ]]; then
+    # Multi-profile chain — boots back-to-back so the FAT32 KERNEL.FIX
+    # rotates and the journal accumulates across profiles. Surfaces
+    # gaps that one profile alone wouldn't cross the marker-log
+    # threshold for.
+    echo "[fix-cycle] chain mode: ${CHAIN_PROFILES}" >&2
+    # Split CHAIN_PROFILES (comma- or space-separated) into an array.
+    IFS=', ' read -r -a chain_arr <<< "${CHAIN_PROFILES}"
+    DUETOS_PRESET="${PRESET}" \
+    DUETOS_TIMEOUT="${TIMEOUT}" \
+    "${SCRIPT_DIR}/chain-fix-boots.sh" "${chain_arr[@]}" >>"${LOG_FILE}" 2>&1 || {
+        rc=$?
+        echo "[fix-cycle] chain FAILED (exit=$rc); see ${LOG_FILE}" >&2
         tail -20 "${LOG_FILE}" >&2
         exit "$rc"
-    fi
-}
+    }
+else
+    # 1. Boot the smoke profile. Capture serial to the log file. The
+    #    inner script handles QEMU lifecycle + timeout + isa-debug-exit.
+    DUETOS_PRESET="${PRESET}" \
+    DUETOS_SMOKE_PROFILE="${PROFILE}" \
+    DUETOS_TIMEOUT="${TIMEOUT}" \
+    "${SCRIPT_DIR}/run.sh" >"${LOG_FILE}" 2>&1 || {
+        rc=$?
+        # exit 33 is the sentinel-reached path under run.sh's KVM exit
+        # code mapping; treat it as success. Anything else is a real
+        # smoke failure and we abort the cycle.
+        if [[ "$rc" != "33" ]]; then
+            echo "[fix-cycle] smoke FAILED (exit=$rc); see ${LOG_FILE}" >&2
+            tail -20 "${LOG_FILE}" >&2
+            exit "$rc"
+        fi
+    }
+fi
 
 # Print the smoke completion line + boot-summary block from the log.
 echo "" >&2
@@ -126,14 +153,21 @@ if not candidates:
     sys.exit(0)
 
 # Multiple valid blobs can exist in the reserved region or FAT archive
-# chain. Prefer the richest snapshot; break ties by later offset, which
-# is usually the latest overwrite in a raw block image scan.
-count, off, size = max(candidates, key=lambda c: (c[0], c[1]))
+# chain (especially under --chain mode where every boot rotates the
+# previous KERNEL.FIX to a KERNEL.F[0-3] sibling). Write the richest
+# to <out_path> and the rest to <out_path>.0, <out_path>.1, ... so
+# downstream tools can pass them all to gen-fix-{report,patches}.py
+# for cross-boot aggregation.
+candidates.sort(key=lambda c: (-c[0], -c[1]))  # richest first
+primary_count, primary_off, primary_size = candidates[0]
 with open(out_path, "wb") as fh:
-    fh.write(data[off : off + size])
+    fh.write(data[primary_off : primary_off + primary_size])
+for i, (cnt, off, sz) in enumerate(candidates[1:]):
+    with open(f"{out_path}.{i}", "wb") as fh:
+        fh.write(data[off : off + sz])
 print(
     f"[fix-cycle] found {len(candidates)} valid FIXJ candidate(s); "
-    f"selected offset {off} ({count} records, {size} bytes) -> {out_path}",
+    f"primary={primary_count} records, {primary_size} bytes -> {out_path}",
     file=sys.stderr,
 )
 PY
@@ -151,16 +185,26 @@ python3 "${REPO_ROOT}/tools/build/gen-fix-markers.py" \
     --root "${REPO_ROOT}" \
     --output "${MARKERS_JSON}" >&2
 
+# Gather all extracted FIXJ blobs (the rotation siblings the chain
+# mode produces) so we feed every record to the downstream report
+# and patch tools. Empty when chain mode is off.
+FIX_INPUTS=("${EXTRACTED_FIX}")
+shopt -s nullglob
+for f in "${EXTRACTED_FIX}".*; do
+    FIX_INPUTS+=("$f")
+done
+shopt -u nullglob
+
 # 4. Generate the markdown report.
 echo "" >&2
 echo "[fix-cycle] === fix journal report ===" >&2
 if [[ -n "${BASELINE_ARG}" ]]; then
     python3 "${REPO_ROOT}/tools/build/gen-fix-report.py" \
-        "${EXTRACTED_FIX}" "${BASELINE_ARG}" \
+        "${FIX_INPUTS[@]}" "${BASELINE_ARG}" \
         --markers "${MARKERS_JSON}"
 else
     python3 "${REPO_ROOT}/tools/build/gen-fix-report.py" \
-        "${EXTRACTED_FIX}" \
+        "${FIX_INPUTS[@]}" \
         --markers "${MARKERS_JSON}"
 fi
 
@@ -178,7 +222,7 @@ fi
 echo "" >&2
 echo "[fix-cycle] === patch generation ===" >&2
 python3 "${REPO_ROOT}/tools/build/gen-fix-patches.py" \
-    "${EXTRACTED_FIX}" \
+    "${FIX_INPUTS[@]}" \
     --markers "${MARKERS_JSON}" \
     "${KERNEL_ELF_FLAG[@]}" \
     --out="${FIX_OUT}"

@@ -217,6 +217,7 @@ u32 DuetFsBoot()
     // auto-mount of on-disk DuetFS volumes is gated. Re-enable
     // once a runtime probe localises the wedge.
     FIX_NOTE_GAP("fs/duetfs.cpp:EmulatorProbeSkip", "localise Rust duetfs_probe emulator boot-tail wedge");
+    KLOG_ONCE_WARN("fs", "fix-journal hot: localise Rust duetfs_probe emulator boo");
     if (arch::IsEmulator())
     {
         arch::SerialWrite("[duetfs/boot] emulator detected — skipping on-disk probe loop\n");

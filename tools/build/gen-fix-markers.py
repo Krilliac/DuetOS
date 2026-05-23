@@ -62,7 +62,14 @@ SOURCE_EXTS = {".h", ".hpp", ".c", ".cpp", ".cc", ".rs"}
 # Hard cap on how many lines past the marker we scan. Multi-line
 # marker comments (e.g. a 5-line // STUB: explanation) are skipped
 # transparently — the cap kicks in once we hit a non-comment line.
-LOOKAHEAD_HARD_CAP = 12
+#
+# Bumped from 12 → 40 on 2026-05-23: a GAP comment that documents an
+# enclosing function's failure mode often sits at namespace scope
+# above the function declaration, and the FIX_NOTE_GAP that
+# instruments the failure path lives inside the function body — past
+# the original 12-line window. The "stop at the next marker" gate
+# below still prevents bleed-over to a neighbouring marker.
+LOOKAHEAD_HARD_CAP = 40
 
 
 def find_sources(root: Path) -> list[Path]:

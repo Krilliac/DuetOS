@@ -1764,5 +1764,10 @@
     {"ucrtbase.dll", "_seh_filter_exe", kOffSehFilterExe},
 
     // ---- vcruntime140 — exception-handler aliases ----
-    {"vcruntime140.dll", "_purecall", kOffTerminate}, // pure-virtual call -> abort
-    {"vcruntime140.dll", "memchr", kOffPinReturn0},   // not-found
+    {"vcruntime140.dll", "_purecall", kOffTerminate},   // pure-virtual call -> abort
+    {"vcruntime140.dll", "memchr", kOffPinReturn0},     // not-found
+    {"ntdll.dll", "NtRaiseException", kOffMissLogger},  // GAP: auto-added from fix journal seq=24 — implement thunk
+    {"ntdll.dll", "RtlCaptureContext", kOffMissLogger}, // GAP: auto-added from fix journal seq=25 — implement thunk
+    {"ntdll.dll", "RtlLookupFunctionEntry",
+     kOffMissLogger},                             // GAP: auto-added from fix journal seq=26 — implement thunk
+    {"ntdll.dll", "RtlUnwindEx", kOffMissLogger}, // GAP: auto-added from fix journal seq=27 — implement thunk

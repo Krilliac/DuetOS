@@ -15,6 +15,7 @@
 
 #include "subsystems/linux/syscall_internal.h"
 
+#include "diag/fix_journal.h"
 #include "mm/address_space.h"
 #include "sched/sched.h"
 
@@ -44,6 +45,14 @@ constexpr i64 kSchedIdle = 5;
 // pid→Task map lands.
 i64 DoSchedSetaffinity(u64 pid, u64 cpusetsize, u64 user_mask)
 {
+    // Record only when the call asks for a non-self pid — the v0
+    // fallback (apply to caller) silently loses that semantic, and a
+    // future Linux pid→Task map should localise the fix here.
+    if (pid != 0)
+    {
+        FIX_NOTE_GAP("subsystems/linux/syscall_sched.cpp:DoSchedSetaffinity",
+                     "pid != 0 (another thread) is not resolved in v0");
+    }
     (void)pid;
     if (user_mask == 0)
         return kEFAULT;

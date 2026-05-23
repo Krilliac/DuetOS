@@ -110,6 +110,7 @@ bool VirtioBalloonProbe(const VirtioPciLayout& L)
     // inflateq descriptors. The policy ("when do we agree?")
     // lands with a real hypervisor workload.
     FIX_NOTE_GAP("drivers/virtio/virtio_balloon.cpp:InflateHandler", "wire inflate/deflate PFN dispatch + policy");
+    KLOG_ONCE_WARN("drivers/virtio", "fix-journal hot: wire inflate/deflate PFN dispatch + pol");
     return true;
 }
 

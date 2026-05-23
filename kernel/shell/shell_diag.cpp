@@ -28,6 +28,7 @@
 
 #include "diag/fix_journal.h"
 #include "diag/fix_journal_persist.h"
+#include "diag/introspect.h"
 #include "drivers/video/console.h"
 #include "shell/shell_internal.h"
 #include "util/symbols.h"
@@ -362,6 +363,141 @@ void CmdDfix(u32 argc, char** argv)
         DoFlush();
     else
         DfixUsage();
+}
+
+// ---------- dintro ----------
+//
+// `dintro` is the kernel's self-introspection surface. The fix
+// journal already records this boot's gaps; introspect compares the
+// in-RAM ring to the digest loaded from the prior boot's KERNEL.F0
+// snapshot and classifies each unique (detector, source_pin) tuple
+// as NEW (this boot only), PERSISTENT (both boots) or RESOLVED
+// (prior boot only). The contract mirrors the offline
+// `tools/build/gen-fix-trend.py` tool so a single command works
+// both at the qemu serial prompt and on a host-side dev workflow.
+//
+//   dintro stats   — counts only, one line each
+//   dintro list    — every classified row, NEW first
+//   dintro list new | persistent | resolved
+//                  — narrow the listing to one classification
+
+namespace
+{
+
+const char* KindTag(::duetos::diag::introspect::DeltaKind k)
+{
+    using K = ::duetos::diag::introspect::DeltaKind;
+    switch (k)
+    {
+    case K::New:
+        return "NEW       ";
+    case K::Persistent:
+        return "PERSISTENT";
+    case K::Resolved:
+        return "RESOLVED  ";
+    default:
+        return "?         ";
+    }
+}
+
+void DintroUsage()
+{
+    ConsoleWrite("usage:\n");
+    ConsoleWrite("  dintro stats                 — counters only\n");
+    ConsoleWrite("  dintro list                  — every row, NEW first\n");
+    ConsoleWrite("  dintro list new|persistent|resolved — filter to one classification\n");
+}
+
+void DintroStats()
+{
+    const auto s = ::duetos::diag::introspect::GetStats();
+    ConsoleWrite("introspect stats:\n");
+    ConsoleWrite("  prior_present : ");
+    WriteU64Dec(s.prior_present);
+    ConsoleWrite("  prior_loaded : ");
+    WriteU64Dec(s.prior_loaded);
+    ConsoleWrite("  prior_dropped : ");
+    WriteU64Dec(s.prior_dropped);
+    ConsoleWrite("\n  current_total : ");
+    WriteU64Dec(s.current_total);
+    ConsoleWrite("\n  new : ");
+    WriteU64Dec(s.new_count);
+    ConsoleWrite("  persistent : ");
+    WriteU64Dec(s.persistent);
+    ConsoleWrite("  resolved : ");
+    WriteU64Dec(s.resolved);
+    ConsoleWrite("\n  last_computed : ");
+    WriteU64Dec(s.last_computed);
+    ConsoleWrite("\n");
+}
+
+void DintroList(u32 argc, char** argv)
+{
+    // Optional filter on classification kind.
+    using K = ::duetos::diag::introspect::DeltaKind;
+    K filter = K::Unknown;
+    if (argc >= 3)
+    {
+        if (StrEq(argv[2], "new"))
+            filter = K::New;
+        else if (StrEq(argv[2], "persistent"))
+            filter = K::Persistent;
+        else if (StrEq(argv[2], "resolved"))
+            filter = K::Resolved;
+        else
+        {
+            DintroUsage();
+            return;
+        }
+    }
+
+    // Recompute first so the listing reflects the live state. The
+    // ComputeAndLog call also writes the structured `[introspect]
+    // delta new=...` line to klog, which is the audit trail for
+    // "we ran the diff at time T."
+    ::duetos::diag::introspect::IntrospectComputeAndLog();
+
+    ::duetos::diag::introspect::DeltaEntry rows[::duetos::diag::introspect::kPriorDigestCap] = {};
+    const u64 n = ::duetos::diag::introspect::Snapshot(rows, ::duetos::diag::introspect::kPriorDigestCap);
+    if (n == 0)
+    {
+        ConsoleWrite("(no records — prior digest empty or current ring empty)\n");
+        return;
+    }
+
+    ConsoleWrite("kind        det                cur prv pin\n");
+    for (u64 i = 0; i < n; ++i)
+    {
+        if (filter != K::Unknown && rows[i].kind != filter)
+            continue;
+        ConsoleWrite(KindTag(rows[i].kind));
+        ConsoleWrite("  ");
+        WritePadLeft(::duetos::diag::FixDetectorName(static_cast<::duetos::diag::FixDetector>(rows[i].detector)), 18);
+        WriteU64Dec(rows[i].cur_repeat);
+        ConsoleWrite(" ");
+        WriteU64Dec(rows[i].prev_repeat);
+        ConsoleWrite(" ");
+        ConsoleWrite(rows[i].source_pin);
+        ConsoleWrite("\n");
+    }
+}
+
+} // namespace
+
+void CmdDintro(u32 argc, char** argv)
+{
+    if (argc < 2)
+    {
+        DintroUsage();
+        return;
+    }
+    const char* sub = argv[1];
+    if (StrEq(sub, "stats"))
+        DintroStats();
+    else if (StrEq(sub, "list"))
+        DintroList(argc, argv);
+    else
+        DintroUsage();
 }
 
 } // namespace duetos::core::shell::internal

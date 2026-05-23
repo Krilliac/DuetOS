@@ -115,8 +115,18 @@ constexpr u32 kWindowInvalid = 0xFFFFFFFFu;
 // real-world Win32 program's window budget and small enough that
 // the kMaxWindows-sized static arrays still fit comfortably in
 // .bss. A future slice replaces this with a dynamic table when
-// some program legitimately needs more than 16.
-constexpr u32 kMaxWindows = 16;
+// some program legitimately needs more than this cap.
+//
+// Bumped from 16 → 40 on 2026-05-23: boot_bringup.cpp registers
+// 21 system windows (CALCULATOR, NOTEPAD, …, TERMINAL, NETWORK
+// STATUS, DEVICE MANAGER, FIREWALL, …) and apps/dbg.cpp adds the
+// debugger window. With kMaxWindows=16 the 17th and later registers
+// silently returned kWindowInvalid — TERMINAL itself, CHARACTER MAP,
+// NETWORK STATUS, DEVICE MANAGER and FIREWALL all failed to register,
+// and any PE that called CreateWindow afterward got "registry full"
+// from window_syscall.cpp. 40 = 21 system + debugger + sane headroom
+// for ring-3 PE windows without inflating the .bss footprint.
+constexpr u32 kMaxWindows = 40;
 
 using WindowHandle = u32;
 

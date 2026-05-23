@@ -32,6 +32,7 @@
 #include "security/canary.h"
 #include "subsystems/win32/dir_syscall.h"
 #include "util/nospec.h"
+#include "log/klog.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -109,6 +110,7 @@ i64 DoOpen(u64 user_path, u64 flags, u64 mode)
 {
     (void)mode;
     FIX_NOTE_GAP("subsystems/linux/syscall_file.cpp:DoOpen", "Linux fd via fs::routing mount-aware open");
+    KLOG_ONCE_WARN("subsystems/linux", "fix-journal hot: Linux fd via fs::routing mount-aware op");
     // Linux open flags we care about for the FAT32-backed v0 path.
     // kSysOpen and kSysOpenat both come through here, so the same
     // bits mean the same thing.
