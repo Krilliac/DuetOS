@@ -121,7 +121,7 @@ struct VaryingSnapshot
 // Returns false if the shader can't be run.
 bool RunVertexShader(spirv::Program* vs, const u8* vb, u64 vb_size, u64 stride, u32 vertex_index, u32* pos_out,
                      VaryingSnapshot* varying_out, u32 varying_cap, u32* varying_n_out,
-                     const PipelineRecord* pipe_rec)
+                     const PipelineRecord* pipe_rec, const RasterState& st_ref_for_attrs)
 {
     if (vs == nullptr || vb == nullptr || pos_out == nullptr)
         return false;
@@ -133,16 +133,16 @@ bool RunVertexShader(spirv::Program* vs, const u8* vb, u64 vb_size, u64 stride, 
     if (pipe_rec != nullptr && pipe_rec->vertex_attribute_count > 0)
     {
         // Explicit description path: walk the attribute table and
-        // fetch each entry from (binding-stride-anchored base +
-        // offset_bytes). v1 still honours binding 0 only; entries
-        // for other bindings are recorded but their data comes
-        // from the single bound buffer.
+        // fetch each entry from its declared (binding, offset).
+        // Now honours multi-binding: each attribute can reference
+        // a different VkBuffer via its `binding` field; the
+        // per-binding slots in RasterState provide the buffer
+        // pointers.
+        (void)vb;
+        (void)vb_size;
         for (u32 i = 0; i < pipe_rec->vertex_attribute_count; ++i)
         {
             const VkVertexAttributeDuet& a = pipe_rec->vertex_attributes[i];
-            // Anchor: the per-binding stride * vertex_index gives
-            // the start of this vertex within the bound buffer.
-            // Look up the matching binding to find its stride.
             u32 b_stride = static_cast<u32>(stride);
             for (u32 b = 0; b < pipe_rec->vertex_binding_count; ++b)
             {
@@ -152,11 +152,37 @@ bool RunVertexShader(spirv::Program* vs, const u8* vb, u64 vb_size, u64 stride, 
                     break;
                 }
             }
+            // Resolve the per-binding vertex buffer. Falls back to
+            // the legacy single-buffer path when the binding slot
+            // is unbound — that keeps single-binding callers
+            // working unchanged.
+            VkBuffer vb_handle = 0;
+            u64 vb_off = 0;
+            if (a.binding < RasterState::kMaxVbBindings)
+            {
+                vb_handle = st_ref_for_attrs.vb_per_binding[a.binding];
+                vb_off = st_ref_for_attrs.vb_offset_per_binding[a.binding];
+            }
+            if (vb_handle == 0)
+            {
+                vb_handle = st_ref_for_attrs.vertex_buffer;
+                vb_off = st_ref_for_attrs.vertex_offset;
+            }
+            if (vb_handle == 0 || !HandleInRange(vb_handle, kBufferBase))
+                continue;
+            const u32 bslot = SlotOf(vb_handle, kBufferBase);
+            if (!PoolIsLive(g_buffer_pool, bslot))
+                continue;
+            const BufferRecord& brec = g_buffer_data[bslot];
+            if (brec.backing == nullptr)
+                continue;
+            const u8* buf_base = static_cast<const u8*>(brec.backing) + brec.backing_offset + vb_off;
+            const u64 buf_size = (brec.size > vb_off) ? brec.size - vb_off : 0u;
             const u64 vbase = static_cast<u64>(vertex_index) * b_stride;
             const u64 off = vbase + a.offset_bytes;
-            if (off + a.byte_size > vb_size)
+            if (off + a.byte_size > buf_size)
                 continue;
-            (void)spirv::WriteInputLocation(vs, a.location, vb + off, a.byte_size);
+            (void)spirv::WriteInputLocation(vs, a.location, buf_base + off, a.byte_size);
         }
     }
     else
@@ -812,7 +838,7 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
         for (u32 v = 0; v < 3; ++v)
         {
             if (!RunVertexShader(vs, vb_base, vb_size, stride, first_vertex + t * 3u + v, pos[v],
-                                 &vary[v * kMaxVaryings], kMaxVaryings, &vary_n[v], pipe_rec))
+                                 &vary[v * kMaxVaryings], kMaxVaryings, &vary_n[v], pipe_rec, st))
                 return false;
         }
         i32 px[3], py[3];

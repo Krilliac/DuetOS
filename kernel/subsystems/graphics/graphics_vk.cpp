@@ -1956,6 +1956,14 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
         case CmdOp::PushDescriptor:
             break;
         case CmdOp::BindVertexBuffer:
+            // Always populate the per-binding slot; legacy
+            // bind-binding-0 callers keep working because the
+            // mirror to st.vertex_buffer happens at the same time.
+            if (op.vertex_binding < RasterState::kMaxVbBindings)
+            {
+                st.vb_per_binding[op.vertex_binding] = op.vertex_buffer;
+                st.vb_offset_per_binding[op.vertex_binding] = op.vertex_offset_bytes;
+            }
             if (op.vertex_binding == 0)
             {
                 st.vertex_buffer = op.vertex_buffer;

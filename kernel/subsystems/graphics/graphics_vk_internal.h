@@ -562,6 +562,14 @@ struct RasterState
     u32 fb_h;
     VkPipeline bound_pipeline; // pipeline handle bound at the last `BindPipeline` op (0 if none)
     VkDescriptorSet bound_descriptor_set; // first set bound at the last `BindDescriptorSets` op (0 if none)
+    // Multi-binding vertex buffers. binding N's buffer + offset
+    // sit in slots[N]. v0 supports 4 bindings; legacy
+    // single-binding callers use slot 0 (the existing
+    // vertex_buffer / vertex_offset fields above mirror slots[0]
+    // for back-compat).
+    static constexpr u32 kMaxVbBindings = 4;
+    VkBuffer vb_per_binding[kMaxVbBindings];
+    u64 vb_offset_per_binding[kMaxVbBindings];
 };
 
 /// Look up the cached SPIR-V Program of a shader handle (returns
