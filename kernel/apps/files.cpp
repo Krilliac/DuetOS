@@ -4,6 +4,7 @@
 #include "apps/notes.h"
 #include "apps/trash.h"
 #include "arch/x86_64/serial.h"
+#include "diag/fix_journal.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/cursor.h"
@@ -1983,6 +1984,7 @@ void FilesDispatchContextAction(duetos::u32 action, duetos::u32 ctx)
     {
         // GAP: ramfs is read-only (constinit); a future writable
         // backend would route this to RamfsUnlink + a rescan.
+        FIX_NOTE_GAP("apps/files.cpp:RamfsContextDelete", "writable ramfs backend + RamfsUnlink + rescan");
         duetos::drivers::video::NotifyShow("ramfs is read-only");
         return;
     }

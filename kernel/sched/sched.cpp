@@ -45,6 +45,7 @@
 #include "arch/x86_64/timer.h"
 #include "arch/x86_64/traps.h"
 #include "diag/event_trace.h"
+#include "diag/fix_journal.h"
 #include "diag/kdbg.h"
 #include "diag/soft_lockup.h"
 #include "sched/loadavg.h"
@@ -1143,6 +1144,7 @@ Task* StealNormalFromPeer()
                 // that IS allowed here is not pulled (we only
                 // inspect the head). Acceptable for v0 — revisit
                 // if pinned-task starvation shows up in a profile.
+                FIX_NOTE_GAP("sched/sched.cpp:StealNormalFromPeer", "scan past pinned head to next-allowed task");
                 continue;
             }
             // Pop the head off the peer's Normal queue.

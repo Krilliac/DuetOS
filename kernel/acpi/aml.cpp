@@ -29,6 +29,7 @@
 #include "acpi/aml.h"
 
 #include "arch/x86_64/serial.h"
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "mm/page.h"
@@ -641,6 +642,7 @@ struct Walker
                 next_pos_ = q + c1 + c2;
                 return true;
             }
+            FIX_NOTE_GAP("acpi/aml.cpp:HandleOpRegion", "evaluate computed OperationRegion bounds");
             RecordRegion(path, space, 0, 0, source_idx);
             return false;
         }
