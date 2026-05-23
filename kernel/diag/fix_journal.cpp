@@ -616,8 +616,12 @@ void FixJournalSelfTest()
 
     // Verify mark-done: pick the first injected seq from the
     // snapshot and flip its audited bit, confirm it sticks.
-    FixRecord snap[8] = {};
-    const u64 n = FixJournalSnapshot(snap, 8);
+    // Buffer is sized to kInjects so the count grows automatically
+    // when a new detector is appended above (regression 2026-05-23:
+    // the buffer was a fixed 8 from when there were 8 detectors and
+    // silently failed the snapshot check once the table grew to 10).
+    FixRecord snap[kInjects] = {};
+    const u64 n = FixJournalSnapshot(snap, kInjects);
     if (n < kInjects)
     {
         KLOG_ERROR_V("diag/fix_journal", "selftest: snapshot returned too few records, got", n);
