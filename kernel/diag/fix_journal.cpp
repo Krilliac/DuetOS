@@ -637,6 +637,40 @@ void FixJournalSelfTest()
         return;
     }
 
+    // Truncated-pin dedup: a source-side pin string at or above the
+    // on-disk field cap (39 chars) gets truncated by CopyTruncated.
+    // FindMatchLocked must compare against the truncated form rather
+    // than diverge at the truncation boundary, otherwise a workload
+    // that hits the same long-pin gap N times allocates N journal
+    // slots instead of N repeat-bumps on one slot. Regression
+    // 2026-05-23: the StrEqual-based match did diverge — a Linux
+    // smoke generated six separate `syscall_file.cpp:DoOpe` rows
+    // instead of one row with repeat=6.
+    //
+    // Pin chosen below is exactly 40 chars: CopyTruncated stores the
+    // first 39 chars + NUL, dropping byte 39. The two pins below are
+    // identical for bytes 0..38 and differ only at byte 39 — so they
+    // collapse to one stored slot under correct dedup, but a naive
+    // StrEqual against the caller's untruncated pointer diverges at
+    // byte 39 and inserts a fresh slot for each submission.
+    const char kPinCap_a[] = "selftest/trunc-dedup-cap40-pad-padpad-AY"; // 40-char source
+    const char kPinCap_b[] = "selftest/trunc-dedup-cap40-pad-padpad-AZ"; // differs at index 39
+    static_assert(sizeof(kPinCap_a) == sizeof(kPinCap_b), "trunc-dedup test pins must be same length");
+    static_assert(sizeof(kPinCap_a) - 1 == 40, "trunc-dedup test pin must be exactly 40 chars to exercise the cap");
+    const u64 trunc_unique_before = FixJournalGetStats().records_unique;
+    const u64 trunc_dedup_before = FixJournalGetStats().dedup_hits;
+    (void)FixJournalRecord(FixDetector::StubMarker, kPinCap_a, "trunc-dedup pin A", 0, 0);
+    (void)FixJournalRecord(FixDetector::StubMarker, kPinCap_b, "trunc-dedup pin B", 0, 0);
+    const FixJournalStats after_trunc = FixJournalGetStats();
+    if (after_trunc.records_unique != trunc_unique_before + 1 || after_trunc.dedup_hits != trunc_dedup_before + 1)
+    {
+        KLOG_ERROR_2V("diag/fix_journal", "selftest: trunc-pin dedup failed", "expected_unique+1",
+                      trunc_unique_before + 1, "got_unique", after_trunc.records_unique);
+        ::duetos::debug::ProbeFire(::duetos::debug::ProbeId::kBootSelftestFail,
+                                   reinterpret_cast<u64>(__builtin_return_address(0)), 7);
+        return;
+    }
+
     // Verify mark-done: pick the first injected seq from the
     // snapshot and flip its audited bit, confirm it sticks.
     // Buffer is sized to kInjects so the count grows automatically
