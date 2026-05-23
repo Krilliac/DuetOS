@@ -188,5 +188,10 @@ const u8* RamfsNatCalcBytes();
 u64 RamfsNatCalcSize();
 const u8* RamfsNatSysinfoBytes();
 u64 RamfsNatSysinfoSize();
+// `/bin/duet-pkg` — on-target package manager scaffold (slice A of
+// the self-sufficiency bundle). v0 ships a SHA-256 selftest + argv
+// parser; fetch / verify / install land in follow-on slices.
+const u8* RamfsDuetPkgBytes();
+u64 RamfsDuetPkgSize();
 
 } // namespace duetos::fs

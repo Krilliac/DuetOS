@@ -186,12 +186,53 @@ if (!repo_or) {
 set. Exit codes: 0 on success, 2 for argument / shape errors,
 1 for everything else.
 
+## On-target scaffold (`/bin/duet-pkg`)
+
+A ring-3 native ELF named `duet-pkg` ships in the DuetOS ramfs
+at `/bin/duet-pkg` (built from
+`userland/native-apps/duet-pkg/duet-pkg.c` via the existing
+`duetos_native_app()` CMake helper). v0 is a scaffold — it
+demonstrates the on-target architecture is live (boot spawn ->
+argv -> crypto -> exit code) without claiming feature parity
+with the host binary in `tools/pkg/`.
+
+Subcommands today:
+
+| Subcommand | Behaviour |
+|------------|-----------|
+| `selftest` | Runs SHA-256 against the three NIST test vectors plus a streaming-update / one-shot parity check. Emits `[duet-pkg-selftest] PASS` on success. Run automatically when spawned with no argv. |
+| `hash <string>` | Prints SHA-256 of an argv string. |
+| `version` / `--version` / `-V` | Prints version + tagline. |
+| `help` / `--help` / `-h` | Lists subcommands. |
+
+What's deferred (and why):
+
+- **Network fetch** — needs userland libc wrappers for
+  `connect()` / `send()` / `recv()` over `SYS_SOCKET_OP = 153`.
+  Tractable (~80 LOC of libc) but adds a runtime smoke
+  dependency on a reachable peer.
+- **RSA-PSS signature verify** — needs RSA + bigint primitives
+  in userland (~1.5k LOC reference impl) or a new
+  `SYS_CRYPTO_OP` syscall that exposes `kernel/crypto/rsa.cpp`.
+- **Manifest parser / resolver / installer** — the host-side TUs
+  in `tools/pkg/src/` are C++23 (`std::filesystem`,
+  `std::expected`, `std::span`) against a host STL. The DuetOS
+  userland libc is C-only; porting requires either a C rewrite
+  or landing libc++ on-target.
+
+The host-side `duet-pkg` in `tools/pkg/` remains the authoritative
+implementation until the on-target port reaches feature parity.
+
 ## What lands next
 
-All seven planned phases are complete. Future work:
+All seven planned host-side phases are complete. Future work:
 
-- Per-process syscall integration when DuetOS hosts duet-pkg
-  itself (the dev-host builds are the current verification).
+- Userland libc socket wrappers + HTTP/1.1 client in
+  `userland/native-apps/duet-pkg/` so the on-target binary can
+  fetch packages without TLS.
+- Wire `kernel/crypto/rsa.cpp` to userland via a syscall so
+  on-target signature verification can land without porting
+  bigint to userland.
 - A native HLSL-aware build system for DirectX-bearing packages
   (depends on the Win32 graphics track).
 - Mirror lists + per-package signature counts.

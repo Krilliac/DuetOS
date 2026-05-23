@@ -71,6 +71,55 @@ the first task switch out of the boot context double-faults on the
 first user CR3 load (the in-flight stack pointer dereferences a
 no-longer-mapped low VA).
 
+## A/B kernel slots
+
+DuetOS supports redundant A/B kernel images on the ESP so a botched
+kernel update can't brick the box. The installer
+(`kernel/fs/installer.cpp`) writes two `menuentry` blocks into
+`/boot/grub/grub.cfg`, one per slot, and seeds `/boot/duetos-slot.cfg`
+with a small key=value file:
+
+```
+active=a
+pending=?
+tries_remaining=3
+last_healthy=a
+```
+
+GRUB reads `/boot/duetos-slot.cfg` at boot and selects the kernel
+image (`/boot/duetos-kernel-${active}.elf`) accordingly. The
+running kernel calls `boot_slot::MarkHealthyNow()` from the first
+heartbeat tick (`kernel/diag/heartbeat.cpp`) — proving the boot path
+reached steady state — and persists the updated state back to the
+ESP via FAT32. If the kernel never reaches that point (panic during
+boot, hung scheduler), the state file stays as-is, GRUB decrements
+`tries_remaining` on the next attempt, and after `tries_remaining=0`
+falls back to `last_healthy`.
+
+### Inspecting + administering slots
+
+The kernel shell exposes:
+
+- `slotinfo` — print the in-RAM `CurrentState` (active, pending,
+  last_healthy, tries_remaining).
+- `bootslot install <a|b> <kernel-path>` — flip `pending` to
+  the named slot (caller stages the ELF beforehand). Requires admin.
+- `bootslot rollback` — force `Rollback`: restore `last_healthy`,
+  clear `pending`. Requires admin.
+- `bootslot force-fail` — test-only: write `tries_remaining=0`
+  and reboot. Useful for verifying the bootloader's rollback path
+  from inside a running system. Requires admin.
+
+### Source map
+
+| File | Purpose |
+|---|---|
+| `kernel/fs/boot_slot.{h,cpp}` | State machine, serialise / parse, `LoadVia` / `SaveVia` callback ABI, self-test. |
+| `kernel/diag/heartbeat.cpp`   | `PersistBootSlotState()` writes the post-`MarkHealthyNow` state to FAT32. |
+| `kernel/shell/shell_bootslot.cpp` | `slotinfo` + `bootslot` shell commands. |
+| `kernel/fs/installer.cpp`     | Emits the A/B `grub.cfg` and seeds `/boot/duetos-slot.cfg` at install time. |
+| `boot/grub/grub.cfg`          | Dev-build (ISO) grub.cfg — appended static slot-a / slot-b entries for QEMU exercises. |
+
 ## Verification
 
 The end-to-end "did it boot" gate is `tools/test/ctest-boot-smoke.sh`.

@@ -353,6 +353,12 @@ void CmdFattrunc(u32 argc, char** argv);
 void CmdFatmkdir(u32 argc, char** argv);
 void CmdFatrmdir(u32 argc, char** argv);
 
+// A/B boot-slot administration (shell_bootslot.cpp). slotinfo is
+// read-only; bootslot mutates the state file on the ESP and gates
+// behind RequireAdmin.
+void CmdSlotinfo();
+void CmdBootslot(u32 argc, char** argv);
+
 // ---------------------------------------------------------------
 // Hardware introspection commands (shell_hardware.cpp). Direct
 // readouts of x86 CPU state (CPUID / RFLAGS / TSC / MSR), local

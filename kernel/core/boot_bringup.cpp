@@ -2873,6 +2873,21 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         SerialWriteHex(pid);
         SerialWrite("\n");
     }
+    // /bin/duet-pkg — on-target package manager scaffold. Spawning
+    // it at boot with no argv runs its built-in selftest, so the
+    // boot log carries the `[duet-pkg-selftest] PASS` sentinel on
+    // every healthy boot. Once full subcommand support lands, the
+    // boot spawn can drop the selftest and gate the binary behind
+    // an explicit shell invocation.
+    {
+        const auto pid =
+            duetos::core::SpawnElfFile("/bin/duet-pkg", duetos::fs::RamfsDuetPkgBytes(), duetos::fs::RamfsDuetPkgSize(),
+                                       duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
+                                       duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
+        SerialWrite("[boot] duet-pkg pid=");
+        SerialWriteHex(pid);
+        SerialWrite("\n");
+    }
 
     // Login gate — blocks keyboard input from reaching the shell
     // until a valid session is open. TTY mode prints a classic

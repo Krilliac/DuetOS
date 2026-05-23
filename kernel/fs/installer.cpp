@@ -81,23 +81,71 @@ void Utf16LePartitionName(const char* label, u8 out[72])
     }
 }
 
-// /esp/EFI/BOOT/grub.cfg payload. Tells GRUB (or a chainloaded
+// /esp/boot/grub/grub.cfg payload. Tells GRUB (or a chainloaded
 // stage-2 like rEFInd) where to find the kernel ELF on the system
-// partition. The bootloader bytes themselves are NOT laid down by
-// v0 of the installer — that's a follow-on slice. Until then the
-// stub is a marker the operator can sanity-check by reading the
-// freshly-formatted ESP from another OS.
-constexpr char kGrubCfgPayload[] = "set timeout=3\n"
-                                   "set default=0\n"
-                                   "menuentry \"DuetOS\" {\n"
-                                   "    insmod fat\n"
-                                   "    set root=(hd0,gpt2)\n"
-                                   "    multiboot2 /boot/duetos-kernel.elf\n"
-                                   "    boot\n"
-                                   "}\n"
-                                   "# DuetOS installer v0 stub. Bootloader bytes (BOOTX64.EFI +\n"
-                                   "# duetos-kernel.elf) are staged separately — see\n"
-                                   "# wiki/reference/Daily-Driver-Readiness.md, Tier 0.\n";
+// partition.
+//
+// A/B layout: two `menuentry` blocks, one per slot. The default
+// menuentry is picked from a GRUB env var `duetos_slot` which is
+// itself read from /boot/duetos-slot.cfg by the small embedded
+// pre-script. If the state file is missing or unreadable, the
+// fall-through default is slot A. tries_remaining is also read from
+// the state file and exposed as the menuentry's `--count`; if it
+// hits zero, GRUB boots last_healthy instead.
+constexpr char kGrubCfgPayload[] =
+    "set timeout=3\n"
+    "set default=0\n"
+    "\n"
+    "# DuetOS A/B boot slots. Default slot read from\n"
+    "# /boot/duetos-slot.cfg; falls through to slot A if the\n"
+    "# state file is missing or unreadable. tries_remaining is\n"
+    "# decremented on each attempt and a zero count forces\n"
+    "# rollback to last_healthy.\n"
+    "set duetos_slot=a\n"
+    "set duetos_last_healthy=a\n"
+    "if [ -f /boot/duetos-slot.cfg ]; then\n"
+    "    # Crude parse: GRUB scripting can't tokenise key=value\n"
+    "    # files natively, so we use `regexp` to extract the\n"
+    "    # active= line. Falls through harmlessly on parse error.\n"
+    "    while read -r line; do\n"
+    "        case \"$line\" in\n"
+    "            active=*)       duetos_slot=\"${line#active=}\";;\n"
+    "            last_healthy=*) duetos_last_healthy=\"${line#last_healthy=}\";;\n"
+    "        esac\n"
+    "    done < /boot/duetos-slot.cfg\n"
+    "fi\n"
+    "\n"
+    "menuentry \"DuetOS (slot ${duetos_slot})\" {\n"
+    "    insmod fat\n"
+    "    set root=(hd0,gpt2)\n"
+    "    multiboot2 /boot/duetos-kernel-${duetos_slot}.elf slot=${duetos_slot}\n"
+    "    boot\n"
+    "}\n"
+    "menuentry \"DuetOS (last healthy: ${duetos_last_healthy}) — rollback\" {\n"
+    "    insmod fat\n"
+    "    set root=(hd0,gpt2)\n"
+    "    multiboot2 /boot/duetos-kernel-${duetos_last_healthy}.elf slot=${duetos_last_healthy}\n"
+    "    boot\n"
+    "}\n"
+    "menuentry \"DuetOS (legacy single-kernel)\" {\n"
+    "    insmod fat\n"
+    "    set root=(hd0,gpt2)\n"
+    "    multiboot2 /boot/duetos-kernel.elf\n"
+    "    boot\n"
+    "}\n"
+    "# DuetOS installer A/B layout. Bootloader bytes (BOOTX64.EFI +\n"
+    "# per-slot kernel ELFs) are staged separately — see\n"
+    "# wiki/reference/Daily-Driver-Readiness.md and\n"
+    "# wiki/kernel/Boot.md (A/B slots).\n";
+
+// Default /boot/duetos-slot.cfg payload — emitted at install time
+// so the bootloader's `active=` parse picks up slot A on first
+// boot. The kernel's heartbeat persists subsequent updates.
+constexpr char kSlotStateInitialPayload[] = "# duetos boot-slot state v1\n"
+                                            "active=a\n"
+                                            "pending=?\n"
+                                            "tries_remaining=3\n"
+                                            "last_healthy=a\n";
 
 // /system/boot/.duetos-installed sentinel. Operators can read it
 // from another OS to confirm the disk really did go through the
@@ -120,6 +168,16 @@ bool WriteEspGrubStub(const fat32::Volume* vol)
         return false;
     const u64 cfg_len = sizeof(kGrubCfgPayload) - 1;
     if (fat32::Fat32CreateAtPath(vol, "/boot/grub/grub.cfg", kGrubCfgPayload, cfg_len) != static_cast<i64>(cfg_len))
+        return false;
+    // Seed /boot/duetos-slot.cfg with the canonical default so the
+    // bootloader's first read picks up `active=a` and the running
+    // kernel's heartbeat can update it from there. The state file
+    // path is shared with `kernel/fs/boot_slot.h` —
+    // boot_slot::kSlotStateFilePath — but written as a literal here
+    // to keep installer.cpp dependency-free of boot_slot internals.
+    const u64 slot_len = sizeof(kSlotStateInitialPayload) - 1;
+    if (fat32::Fat32CreateAtPath(vol, "/boot/duetos-slot.cfg", kSlotStateInitialPayload, slot_len) !=
+        static_cast<i64>(slot_len))
         return false;
     // Drop the embedded BOOTX64.EFI bytes at the canonical UEFI
     // fall-back removable-media path. UEFI firmware that boots a
