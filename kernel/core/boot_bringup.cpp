@@ -209,6 +209,7 @@
 #include "diag/panic_wait.h"
 #include "diag/fix_journal.h"
 #include "diag/fix_journal_persist.h"
+#include "diag/introspect.h"
 #include "diag/gdb_server.h"
 #include "diag/minidump.h"
 #include "diag/perf_profile.h"
@@ -1974,6 +1975,16 @@ void BootBringupDevices(bool force_net_smoke)
     duetos::diag::FixJournalPersistInstall();
     DUETOS_BOOT_SELFTEST(duetos::diag::FixJournalPersistSelfTest());
 
+    // Cross-boot introspection: load the prior boot's journal
+    // (KERNEL.F0, which the persist install just rotated into
+    // place) into a small in-RAM digest. Subsequent calls to
+    // IntrospectComputeAndLog diff the digest against the current
+    // ring and emit a `[introspect] new=N persistent=P resolved=R`
+    // line. The selftest is observation-only; safe pre-flight if
+    // KERNEL.F0 doesn't exist yet (first boot).
+    duetos::diag::introspect::LoadPriorDigest();
+    DUETOS_BOOT_SELFTEST(duetos::diag::introspect::IntrospectSelfTest());
+
     // Session restore: read SESSION.CFG and apply the saved
     // theme + per-app window positions. No-op on first boot
     // (file doesn't exist) or if FAT32 isn't mounted.
@@ -2011,6 +2022,15 @@ void BootBringupDevices(bool force_net_smoke)
     // the system consumes from here on is steady-state.
     KLOG_METRICS("boot", "bringup-complete");
     SerialWrite("[bringup-tail] post-metrics\n");
+
+    // Late-boot introspection pass: by now all the boot-time gaps
+    // have fired into the in-RAM ring, so the diff against the
+    // prior-boot digest (loaded earlier from KERNEL.F0) shows a
+    // meaningful new/persistent/resolved split. The early pass at
+    // PersistInstall time only sees the selftest records — this
+    // pass is the one operators (and chain-fix-boots driven CI)
+    // will actually grep for.
+    duetos::diag::introspect::IntrospectComputeAndLog();
 
     // Sanity-check the tmpfs log sink — by now enough Info+ lines
     // have fired that /tmp/boot.log should be at its 512-byte cap.
