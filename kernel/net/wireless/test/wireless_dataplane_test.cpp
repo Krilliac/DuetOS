@@ -5,6 +5,7 @@
 #include "net/stack.h"
 #include "net/wireless/test/loopback_driver.h"
 #include "net/wireless/wnetif.h"
+#include "sched/sched.h"
 
 namespace duetos::net::wireless::test
 {
@@ -50,7 +51,10 @@ void WirelessDataPlaneSelfTest()
     const bool started = duetos::net::DhcpStart(kIface);
     KASSERT(started, "net/wireless/data", "DhcpStart refused (single g_dhcp still in flight on iface 0?)");
     for (u32 round = 0; round < 16 && !duetos::net::DhcpLeaseRead().valid; ++round)
+    {
         LoopbackDriverPump(&drv);
+        duetos::sched::SchedYield();
+    }
 
     const auto lease = duetos::net::DhcpLeaseRead();
     KASSERT(lease.valid, "net/wireless/data", "no DHCP lease after pumping the encrypted link");
@@ -63,7 +67,10 @@ void WirelessDataPlaneSelfTest()
     const bool sent = duetos::net::NetIcmpSendEcho(kIface, duetos::net::Ipv4Address{{10, 7, 0, 1}}, 0xBEEF, 1);
     KASSERT(sent, "net/wireless/data", "echo TX failed (no ARP entry for gateway?)");
     for (u32 round = 0; round < 8 && !duetos::net::NetPingRead().replied; ++round)
+    {
         LoopbackDriverPump(&drv);
+        duetos::sched::SchedYield();
+    }
     KASSERT(duetos::net::NetPingRead().replied, "net/wireless/data", "no ICMP echo reply over the encrypted link");
 
     // The link must actually be encrypted: the last STA→AP frame's

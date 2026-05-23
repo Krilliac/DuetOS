@@ -6,6 +6,7 @@
 #include "drivers/storage/block.h"
 #include "mm/paging.h"
 #include "proc/process.h"
+#include "sched/sched.h"
 #include "security/canary.h"
 #include "util/string.h"
 
@@ -114,6 +115,19 @@ AttackOutcome RunAttack(const char* name, core::HealthIssue expected, bool (*pre
         arch::SerialWrite("[attacksim]   SKIPPED — precheck refused (feature not on this CPU)\n");
         return AttackOutcome::Skipped;
     }
+    // Pin to BSP (CPU 0) across the attack+scan+restore window. The
+    // attacks scribble per-CPU state (GDT clone, control registers,
+    // syscall MSRs) on the CURRENT CPU; the detector reads `g_gdt`
+    // (the BSP's GDT) and the CURRENT CPU's CRs/MSRs. If the boot
+    // task migrates between `attack()` and the scan, the attack and
+    // the scan end up looking at different CPUs' state and the
+    // detector misses a real modification. Pinning eliminates that
+    // race without disabling preemption globally. Restoration of
+    // the original affinity happens after the post-restore scan.
+    sched::Task* self = sched::CurrentTask();
+    const u32 saved_mask = (self != nullptr) ? sched::SchedGetAffinityMask(self) : 0xFFFFFFFFu;
+    if (self != nullptr)
+        (void)sched::SchedSetAffinity(self, 0);
     const u64 before = IssueCount(expected);
     attack();
     (void)core::RuntimeCheckerScan();
@@ -123,6 +137,8 @@ AttackOutcome RunAttack(const char* name, core::HealthIssue expected, bool (*pre
     // again; without this the NEXT attack's baseline could be
     // contaminated by a still-pending "modified" state.
     (void)core::RuntimeCheckerScan();
+    if (self != nullptr)
+        (void)sched::SchedSetAffinityMask(self, saved_mask);
     if (after > before)
     {
         arch::SerialWrite("[attacksim]   PASS — detector fired (");
