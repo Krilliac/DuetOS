@@ -638,7 +638,7 @@ bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d)
     return true;
 }
 
-u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits)
+u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddressMode mode)
 {
     if (resource_handle == 0)
         return 0xFF000000u;
@@ -677,12 +677,31 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits)
     using ::duetos::core::Sf32Zero;
     using ::duetos::core::Sf32One;
 
+    // Apply the addressing mode to fold raw UV into [0, 1].
+    auto fold = [mode](u32 bits) -> Sf32 {
+        Sf32 v{bits};
+        switch (mode)
+        {
+        case SamplerAddressMode::Repeat:
+            // fract(uv) wraps mod 1.0.
+            return ::duetos::core::Sf32Fract(v);
+        case SamplerAddressMode::MirroredRepeat:
+        {
+            // |fract(uv * 0.5) - 0.5| * 2 — produces a 0..1..0 sawtooth.
+            const Sf32 half = Sf32{0x3F000000u};
+            const Sf32 two = ::duetos::core::Sf32FromU32(2u);
+            const Sf32 f = ::duetos::core::Sf32Fract(::duetos::core::Sf32Mul(v, half));
+            return ::duetos::core::Sf32Mul(::duetos::core::Sf32Abs(::duetos::core::Sf32Sub(f, half)), two);
+        }
+        case SamplerAddressMode::ClampToEdge:
+        default:
+            return Sf32Clamp(v, Sf32Zero(), Sf32One());
+        }
+    };
     // Bilinear filtering: sample the 4 texels around (u*w, v*h),
-    // blend by the sub-texel weights. Clamp UV to [0, 1] (the
-    // sampler's clamp-to-edge addressing mode; REPEAT addressing
-    // lands when the Sampler descriptor exposes a wrap mode).
-    const Sf32 u = Sf32Clamp(Sf32{u_bits}, Sf32Zero(), Sf32One());
-    const Sf32 v = Sf32Clamp(Sf32{v_bits}, Sf32Zero(), Sf32One());
+    // blend by the sub-texel weights.
+    const Sf32 u = fold(u_bits);
+    const Sf32 v = fold(v_bits);
     const Sf32 fx = Sf32Mul(u, Sf32FromU32(rec.extent.width - 1));
     const Sf32 fy = Sf32Mul(v, Sf32FromU32(rec.extent.height - 1));
     const i32 ix = Sf32ToI32(fx);

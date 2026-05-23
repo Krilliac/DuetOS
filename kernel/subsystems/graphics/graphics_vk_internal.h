@@ -597,15 +597,28 @@ PipelineShaders PipelineShaderHandles(VkPipeline pipe);
 /// the correct dimensions.
 bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
 
+/// Sampler addressing modes — passed to SampleImageRgba8 to
+/// control what happens at the [0, 1] UV boundary.
+enum class SamplerAddressMode : u8
+{
+    ClampToEdge = 0, // default — texel at the edge is replicated for out-of-range UV
+    Repeat = 1,      // UV wraps modulo 1.0 (Sf32 fract)
+    MirroredRepeat = 2, // UV wraps modulo 2.0 with reflection
+};
+
 /// Sample a 2D RGBA8 texel from an image bound via descriptor.
 /// `resource_handle` is a VkImage or VkImageView handle as
 /// returned by `spirv::LookupDescriptor`; both kinds resolve
 /// to the underlying image. u_bits / v_bits are Sf32 bit
-/// patterns in [0, 1]; nearest-neighbour sampling. Returns the
-/// packed BGRA8 word (0xAARRGGBB) ready to hand to the
-/// framebuffer. Returns 0xFF000000 (opaque black) on any lookup
-/// failure — caller treats it as a fallback.
-u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits);
+/// patterns (raw float values; the addressing mode determines
+/// how out-of-range UV gets folded). `mode` selects between
+/// clamp-to-edge / repeat / mirrored-repeat. Filtering is
+/// bilinear (the v0 sampler doesn't expose a separate
+/// Vk_SAMPLER_FILTER_NEAREST option yet). Returns the packed
+/// BGRA8 word (0xAARRGGBB). Returns 0xFF000000 (opaque black)
+/// on any lookup failure — caller treats it as a fallback.
+u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits,
+                     SamplerAddressMode mode = SamplerAddressMode::ClampToEdge);
 
 /// Run the SPIR-V shader-based rasterizer for the current draw.
 /// Returns true if the shader path actually painted (in which

@@ -2209,6 +2209,21 @@ enum VkOp : u64
     kVkOpCreateBuffer = 17,       // rdx = device, r10 = u64 size; rax = VkBuffer handle.
     kVkOpDestroyShaderModule = 18, // rdx = device, r10 = shader_module
     kVkOpDestroyBuffer = 19,       // rdx = device, r10 = buffer
+    // Bind / map / image-create — the next layer after
+    // create-memory/buffer for a PE that wants to upload texture
+    // data or vertex data through the ICD.
+    kVkOpBindBufferMemory = 20, // rdx = device, r10 = (buffer<<8)|0, r8 = (memory<<8)|0, r9-ish (offset packed
+                                // into hi-bits of r10); simpler form: rdx=device, r10=buffer, r8=memory, r9=offset.
+                                // Returns rax=1 on success.
+    kVkOpMapMemory = 21,        // rdx = device, r10 = memory; rax = user pointer (kernel space-shared) or 0.
+                                // Since v0 has no per-process VM, the returned pointer is directly
+                                // dereferenceable by userland — the same address the kernel handed back
+                                // from vkMapMemory.
+    kVkOpUnmapMemory = 22,      // rdx = device, r10 = memory
+    kVkOpCreateImage = 23,      // rdx = device, r10 = u32 width, r8 = u32 height, r9 = u32 flags;
+                                // rax = VkImage handle. Format is hardcoded BGRA8 for v0.
+    kVkOpDestroyImage = 24,     // rdx = device, r10 = image
+    kVkOpBindImageMemory = 25,  // rdx = device, r10 = image, r8 = memory, r9 = offset
 };
 
 // Diagnostic counter IDs for kVkOpGetStatsCounter. Exposes the

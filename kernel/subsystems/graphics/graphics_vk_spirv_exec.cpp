@@ -94,10 +94,12 @@ constexpr u16 kOpKill = 252; // fragment discard
 constexpr u16 kOpLoad = 61;
 constexpr u16 kOpStore = 62;
 constexpr u16 kOpAccessChain = 65;
+constexpr u16 kOpVectorExtractDynamic = 77;
+constexpr u16 kOpVectorInsertDynamic = 78;
 constexpr u16 kOpVectorShuffle = 79;
 constexpr u16 kOpCompositeConstruct = 80;
 constexpr u16 kOpCompositeExtract = 81;
-[[maybe_unused]] constexpr u16 kOpCompositeInsert = 82; // accepted at parse, not yet implemented
+constexpr u16 kOpCompositeInsert = 82;
 constexpr u16 kOpConvertFToS = 110;
 constexpr u16 kOpConvertSToF = 111;
 constexpr u16 kOpConvertUToF = 112;
@@ -1088,6 +1090,51 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
             if (wc >= 5)
                 DoCompositeExtract(ec, tid, rid, w[3], &w[4], wc - 4);
             break;
+        case kOpCompositeInsert:
+        {
+            // Operands: (T, R, object, composite, lit*-indices).
+            // Replace the indexed scalar in `composite` with
+            // `object`. v0 single-level only (matches the
+            // CompositeExtract limit).
+            if (wc >= 6)
+            {
+                u32 buf[16]{};
+                const u32 cn = LoadOperandComponents(ec, w[4], buf, 16);
+                const u32 obj_bits = GetScalarBits(ec, w[3]);
+                const u32 idx = w[5];
+                if (idx < cn)
+                    buf[idx] = obj_bits;
+                StoreResultComponents(ec, rid, tid, buf, cn);
+            }
+            break;
+        }
+        case kOpVectorExtractDynamic:
+        {
+            // Operands: (T, R, vector, index-id).
+            if (wc >= 5)
+            {
+                u32 buf[16]{};
+                const u32 cn = LoadOperandComponents(ec, w[3], buf, 16);
+                const u32 idx = GetScalarBits(ec, w[4]);
+                SetScalar(ec, rid, tid, (idx < cn) ? buf[idx] : 0u);
+            }
+            break;
+        }
+        case kOpVectorInsertDynamic:
+        {
+            // Operands: (T, R, vector, component, index-id).
+            if (wc >= 6)
+            {
+                u32 buf[16]{};
+                const u32 cn = LoadOperandComponents(ec, w[3], buf, 16);
+                const u32 comp = GetScalarBits(ec, w[4]);
+                const u32 idx = GetScalarBits(ec, w[5]);
+                if (idx < cn)
+                    buf[idx] = comp;
+                StoreResultComponents(ec, rid, tid, buf, cn);
+            }
+            break;
+        }
         case kOpCompositeConstruct:
             if (wc >= 4)
                 DoCompositeConstruct(ec, tid, rid, &w[3], wc - 3);
@@ -1169,13 +1216,16 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
                 {
                     // Real texture fetch via the descriptor handle.
                     // Resolves through ImageView->Image->backing
-                    // (set up by VkBindImageMemory). If the image
-                    // backing is host-visible, returns the actual
-                    // texel; otherwise SampleImageRgba8 returns
-                    // 0xFF000000 (opaque black) and the shader
-                    // sees that as the sample value.
-                    const u32 argb =
-                        ::duetos::subsystems::graphics::internal::SampleImageRgba8(bound, coord_buf[0], coord_buf[1]);
+                    // (set up by VkBindImageMemory). v0 defaults
+                    // to REPEAT addressing — matches what most
+                    // shader code expects for texture coords that
+                    // may go outside [0, 1] (procedural patterns,
+                    // tiled UV scrolling). When the Sampler
+                    // descriptor exposes an explicit mode the
+                    // OpImageSample handler will read it.
+                    const u32 argb = ::duetos::subsystems::graphics::internal::SampleImageRgba8(
+                        bound, coord_buf[0], coord_buf[1],
+                        ::duetos::subsystems::graphics::internal::SamplerAddressMode::Repeat);
                     // Decompose back to RGBA Sf32 components for
                     // the shader: bits 16..23 = R, 8..15 = G, 0..7 = B,
                     // 24..31 = A.

@@ -110,6 +110,20 @@ static DV_NO_BUILTIN inline long long vk_syscall4(long long op, long long a1, lo
     return rv;
 }
 
+static DV_NO_BUILTIN inline long long vk_syscall5(long long op, long long a1, long long a2, long long a3, long long a4,
+                                                  long long a5)
+{
+    long long rv;
+    register long long r10 __asm__("r10") = a3;
+    register long long r8 __asm__("r8") = a4;
+    register long long r9 __asm__("r9") = a5;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)211), "D"(op), "S"(a1), "d"(a2), "r"(r10), "r"(r8), "r"(r9)
+                     : "memory");
+    return rv;
+}
+
 /* SYS_VK_CALL op-codes — must stay in sync with VkOp in
  * kernel/syscall/syscall.h. */
 enum
@@ -134,12 +148,20 @@ enum
     VkOp_CreateBuffer = 17,
     VkOp_DestroyShaderModule = 18,
     VkOp_DestroyBuffer = 19,
+    VkOp_BindBufferMemory = 20,
+    VkOp_MapMemory = 21,
+    VkOp_UnmapMemory = 22,
+    VkOp_CreateImage = 23,
+    VkOp_DestroyImage = 24,
+    VkOp_BindImageMemory = 25,
 };
 
 /* Additional Vulkan types we need for the create paths. */
 typedef unsigned long long VkShaderModule;
 typedef unsigned long long VkDeviceMemory;
 typedef unsigned long long VkBuffer;
+typedef unsigned long long VkImage;
+typedef unsigned long long VkDeviceSize;
 
 /* ---------------------------------------------------------------- *
  * Vulkan entry points                                              *
@@ -243,6 +265,13 @@ VkResult vkAllocateMemory(VkDevice device, const void* pAllocateInfo, const void
 void vkFreeMemory(VkDevice device, VkDeviceMemory memory, const void* pAllocator);
 VkResult vkCreateBuffer(VkDevice device, const void* pCreateInfo, const void* pAllocator, VkBuffer* pBuffer);
 void vkDestroyBuffer(VkDevice device, VkBuffer buffer, const void* pAllocator);
+VkResult vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset);
+VkResult vkMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, DWORD flags,
+                     void** ppData);
+void vkUnmapMemory(VkDevice device, VkDeviceMemory memory);
+VkResult vkCreateImage(VkDevice device, const void* pCreateInfo, const void* pAllocator, VkImage* pImage);
+void vkDestroyImage(VkDevice device, VkImage image, const void* pAllocator);
+VkResult vkBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset);
 
 static DV_NO_BUILTIN inline int dv_streq(const char* a, const char* b)
 {
@@ -295,6 +324,18 @@ PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char* pName)
         return (PFN_vkVoidFunction)vkCreateBuffer;
     if (dv_streq(pName, "vkDestroyBuffer"))
         return (PFN_vkVoidFunction)vkDestroyBuffer;
+    if (dv_streq(pName, "vkBindBufferMemory"))
+        return (PFN_vkVoidFunction)vkBindBufferMemory;
+    if (dv_streq(pName, "vkMapMemory"))
+        return (PFN_vkVoidFunction)vkMapMemory;
+    if (dv_streq(pName, "vkUnmapMemory"))
+        return (PFN_vkVoidFunction)vkUnmapMemory;
+    if (dv_streq(pName, "vkCreateImage"))
+        return (PFN_vkVoidFunction)vkCreateImage;
+    if (dv_streq(pName, "vkDestroyImage"))
+        return (PFN_vkVoidFunction)vkDestroyImage;
+    if (dv_streq(pName, "vkBindImageMemory"))
+        return (PFN_vkVoidFunction)vkBindImageMemory;
     return NULL;
 }
 
@@ -438,4 +479,65 @@ void vkDestroyBuffer(VkDevice device, VkBuffer buffer, const void* pAllocator)
 {
     (void)pAllocator;
     (void)vk_syscall3(VkOp_DestroyBuffer, 0, (long long)device, (long long)buffer);
+}
+
+VkResult vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset)
+{
+    const long long ok = vk_syscall5(VkOp_BindBufferMemory, 0, (long long)device, (long long)buffer,
+                                     (long long)memory, (long long)memoryOffset);
+    return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VkResult vkMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, DWORD flags,
+                     void** ppData)
+{
+    (void)offset;
+    (void)size;
+    (void)flags;
+    if (ppData == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const long long p = vk_syscall3(VkOp_MapMemory, 0, (long long)device, (long long)memory);
+    if (p == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    *ppData = (void*)(SIZE_T)p;
+    return VK_SUCCESS;
+}
+
+void vkUnmapMemory(VkDevice device, VkDeviceMemory memory)
+{
+    (void)vk_syscall3(VkOp_UnmapMemory, 0, (long long)device, (long long)memory);
+}
+
+/* vkCreateImage — pCreateInfo VkImageCreateInfo: imageType at
+ * offset 24, format at offset 28, extent (3 uints) at offset 32,
+ * mipLevels at offset 44, arrayLayers at offset 48, samples at
+ * offset 52, tiling at offset 56, usage at offset 60. v0 only
+ * looks at extent.width / extent.height; everything else falls
+ * back to ICD defaults (2D, BGRA8, 1 mip, 1 layer, 1x sample). */
+VkResult vkCreateImage(VkDevice device, const void* pCreateInfo, const void* pAllocator, VkImage* pImage)
+{
+    (void)pAllocator;
+    if (pCreateInfo == NULL || pImage == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const BYTE* ci = (const BYTE*)pCreateInfo;
+    const UINT32 width = *(const UINT32*)(ci + 32);
+    const UINT32 height = *(const UINT32*)(ci + 36);
+    const long long h = vk_syscall5(VkOp_CreateImage, 0, (long long)device, (long long)width, (long long)height, 0);
+    if (h == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    *pImage = (VkImage)h;
+    return VK_SUCCESS;
+}
+
+void vkDestroyImage(VkDevice device, VkImage image, const void* pAllocator)
+{
+    (void)pAllocator;
+    (void)vk_syscall3(VkOp_DestroyImage, 0, (long long)device, (long long)image);
+}
+
+VkResult vkBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset)
+{
+    const long long ok =
+        vk_syscall5(VkOp_BindImageMemory, 0, (long long)device, (long long)image, (long long)memory, (long long)memoryOffset);
+    return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }

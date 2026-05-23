@@ -240,6 +240,48 @@ u64 OpDestroyBuffer(arch::TrapFrame* frame)
     return 1;
 }
 
+u64 OpBindBufferMemory(arch::TrapFrame* frame)
+{
+    return (vk::VkBindBufferMemory(frame->rdx, frame->r10, frame->r8, frame->r9) == vk::VkResult::Success) ? 1 : 0;
+}
+
+u64 OpMapMemory(arch::TrapFrame* frame)
+{
+    void* p = nullptr;
+    // size = 0 means "the rest of the allocation". The v0 ICD
+    // returns the kheap-backed host pointer; userland can read /
+    // write directly since v0 has no per-process VM separation
+    // between kernel and userland on this surface.
+    const vk::VkResult r = vk::VkMapMemory(frame->rdx, frame->r10, 0, 0, &p);
+    return (r == vk::VkResult::Success) ? reinterpret_cast<u64>(p) : 0;
+}
+
+u64 OpUnmapMemory(arch::TrapFrame* frame)
+{
+    vk::VkUnmapMemory(frame->rdx, frame->r10);
+    return 1;
+}
+
+u64 OpCreateImage(arch::TrapFrame* frame)
+{
+    vk::VkExtent3D extent{static_cast<u32>(frame->r10), static_cast<u32>(frame->r8), 1};
+    const u32 flags = static_cast<u32>(frame->r9);
+    vk::VkImage out = 0;
+    const vk::VkResult r = vk::VkCreateImage(frame->rdx, extent, flags, &out);
+    return (r == vk::VkResult::Success) ? out : 0;
+}
+
+u64 OpDestroyImage(arch::TrapFrame* frame)
+{
+    vk::VkDestroyImage(frame->rdx, frame->r10);
+    return 1;
+}
+
+u64 OpBindImageMemory(arch::TrapFrame* frame)
+{
+    return (vk::VkBindImageMemory(frame->rdx, frame->r10, frame->r8, frame->r9) == vk::VkResult::Success) ? 1 : 0;
+}
+
 u64 OpClearFramebufferRgba(arch::TrapFrame* frame)
 {
     // rsi = packed 0xAARRGGBB. Drive the same path that
@@ -312,18 +354,24 @@ void DoVkCall(arch::TrapFrame* frame)
     using ::duetos::core::kVkOpEnumeratePhysicalDevices;
     using ::duetos::core::kVkOpGetDeviceQueue;
     using ::duetos::core::kVkOpAllocateMemory;
+    using ::duetos::core::kVkOpBindBufferMemory;
+    using ::duetos::core::kVkOpBindImageMemory;
     using ::duetos::core::kVkOpClearFramebufferRgba;
     using ::duetos::core::kVkOpCreateBuffer;
+    using ::duetos::core::kVkOpCreateImage;
     using ::duetos::core::kVkOpCreateShaderModule;
     using ::duetos::core::kVkOpCreateSurfaceDuet;
     using ::duetos::core::kVkOpDestroyBuffer;
+    using ::duetos::core::kVkOpDestroyImage;
     using ::duetos::core::kVkOpDestroyShaderModule;
     using ::duetos::core::kVkOpDestroySurface;
     using ::duetos::core::kVkOpFreeMemory;
     using ::duetos::core::kVkOpGetInstanceVersion;
     using ::duetos::core::kVkOpGetStatsCounter;
+    using ::duetos::core::kVkOpMapMemory;
     using ::duetos::core::kVkOpPresent;
     using ::duetos::core::kVkOpQueueWaitIdle;
+    using ::duetos::core::kVkOpUnmapMemory;
     const u64 op = frame->rdi;
     switch (static_cast<::duetos::core::VkOp>(op))
     {
@@ -386,6 +434,24 @@ void DoVkCall(arch::TrapFrame* frame)
         return;
     case kVkOpDestroyBuffer:
         frame->rax = OpDestroyBuffer(frame);
+        return;
+    case kVkOpBindBufferMemory:
+        frame->rax = OpBindBufferMemory(frame);
+        return;
+    case kVkOpMapMemory:
+        frame->rax = OpMapMemory(frame);
+        return;
+    case kVkOpUnmapMemory:
+        frame->rax = OpUnmapMemory(frame);
+        return;
+    case kVkOpCreateImage:
+        frame->rax = OpCreateImage(frame);
+        return;
+    case kVkOpDestroyImage:
+        frame->rax = OpDestroyImage(frame);
+        return;
+    case kVkOpBindImageMemory:
+        frame->rax = OpBindImageMemory(frame);
         return;
     }
     frame->rax = kVkBadOp;
