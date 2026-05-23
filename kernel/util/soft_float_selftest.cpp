@@ -226,7 +226,22 @@ void Sf32SelfTest()
     // pow(x, 0) = 1
     ExpectBool(SoftEqualUlp(Sf32Pow(Sf32FromBits(0x40000000u), Sf32Zero()), Sf32One(), 4u), true, "pow(2,0)~=1");
 
-    arch::SerialWrite("[util/soft_float] self-test PASS (55 vectors)\n");
+    // Floor / Ceil / Round / Fract — exact rounding paths.
+    // floor(2.5) = 2, floor(-2.5) = -3
+    Expect(Sf32ToBits(Sf32Floor(Sf32FromBits(0x40200000u))), kBitTwo, "floor(2.5)=2");
+    Expect(Sf32ToBits(Sf32Floor(Sf32FromBits(0xC0200000u))), 0xC0400000u, "floor(-2.5)=-3");
+    // ceil(2.5) = 3, ceil(-2.5) = -2
+    Expect(Sf32ToBits(Sf32Ceil(Sf32FromBits(0x40200000u))), 0x40400000u, "ceil(2.5)=3");
+    Expect(Sf32ToBits(Sf32Ceil(Sf32FromBits(0xC0200000u))), 0xC0000000u, "ceil(-2.5)=-2");
+    // floor / ceil of integers is identity
+    Expect(Sf32ToBits(Sf32Floor(Sf32One())), kBitOne, "floor(1)=1");
+    Expect(Sf32ToBits(Sf32Ceil(Sf32FromBits(kBitThree))), kBitThree, "ceil(3)=3");
+    // round(2.5) -> 3 via half-to-nearest
+    Expect(Sf32ToBits(Sf32Round(Sf32FromBits(0x40200000u))), 0x40400000u, "round(2.5)=3");
+    // fract(2.5) = 0.5
+    Expect(Sf32ToBits(Sf32Fract(Sf32FromBits(0x40200000u))), kBitHalf, "fract(2.5)=0.5");
+
+    arch::SerialWrite("[util/soft_float] self-test PASS (63 vectors)\n");
 }
 
 } // namespace duetos::core

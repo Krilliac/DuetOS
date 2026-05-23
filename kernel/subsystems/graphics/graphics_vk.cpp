@@ -812,6 +812,7 @@ VkResult VkCreateImage(VkDevice dev, VkExtent3D extent, u32 flags, VkImage* out)
     g_image_data[slot].extent = extent;
     g_image_data[slot].flags = flags;
     g_image_data[slot].memory_bound = false;
+    g_image_data[slot].backing = nullptr;
     if (out != nullptr)
         *out = HandleFor(kImageBase, slot);
     return VkResult::Success;
@@ -828,12 +829,23 @@ void VkDestroyImage(VkDevice dev, VkImage img)
 VkResult VkBindImageMemory(VkDevice dev, VkImage img, VkDeviceMemory mem, u64 offset)
 {
     (void)dev;
-    (void)offset;
     if (!HandleInRange(img, kImageBase) || !PoolIsLive(g_image_pool, SlotOf(img, kImageBase)))
         return VkResult::ErrorInitializationFailed;
     if (!HandleInRange(mem, kMemoryBase) || !PoolIsLive(g_memory_pool, SlotOf(mem, kMemoryBase)))
         return VkResult::ErrorInitializationFailed;
-    g_image_data[SlotOf(img, kImageBase)].memory_bound = true;
+    const u32 islot = SlotOf(img, kImageBase);
+    const u32 mslot = SlotOf(mem, kMemoryBase);
+    g_image_data[islot].memory_bound = true;
+    // Capture the backing pointer at bind time so the texture-
+    // sample path can fetch texels without walking the memory
+    // pool. The backing is offset-into the host-visible block
+    // bound; when the memory wasn't host-visible (host_ptr nullptr)
+    // we leave backing as null and the sampler falls back to the
+    // diagnostic checkerboard.
+    if (g_memory_data[mslot].host_visible && g_memory_data[mslot].host_ptr != nullptr)
+        g_image_data[islot].backing = static_cast<u8*>(g_memory_data[mslot].host_ptr) + offset;
+    else
+        g_image_data[islot].backing = nullptr;
     return VkResult::Success;
 }
 

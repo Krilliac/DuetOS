@@ -187,6 +187,18 @@ Sf32 Sf32Log(Sf32 x);
 /// shader case where pow is used on already-positive bases).
 Sf32 Sf32Pow(Sf32 x, Sf32 y);
 
+/// Floor: largest integer <= x, returned as Sf32. NaN -> NaN.
+Sf32 Sf32Floor(Sf32 x);
+
+/// Ceil: smallest integer >= x. NaN -> NaN.
+Sf32 Sf32Ceil(Sf32 x);
+
+/// Round to nearest integer, ties to even (banker's rounding).
+Sf32 Sf32Round(Sf32 x);
+
+/// Fractional part: x - floor(x). Always in [0, 1). NaN -> NaN.
+Sf32 Sf32Fract(Sf32 x);
+
 // --------------------------------------------------------------
 // GLSL.std.450 helpers used by shaders
 // --------------------------------------------------------------

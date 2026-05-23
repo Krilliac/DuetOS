@@ -577,6 +577,52 @@ bool ResolveVertexBuffer(const RasterState& st, const u8** base, u64* size)
 // Public surface used by the executor + the cmd-buffer replay.
 // --------------------------------------------------------------
 
+u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits)
+{
+    if (resource_handle == 0)
+        return 0xFF000000u;
+    // The handle could be either a VkImage or a VkImageView.
+    // ImageView -> Image first; Image is what carries the backing.
+    VkImage img = 0;
+    if (HandleInRange(resource_handle, kImageViewBase))
+    {
+        const u32 slot = SlotOf(resource_handle, kImageViewBase);
+        if (!PoolIsLive(g_imageview_pool, slot))
+            return 0xFF000000u;
+        img = g_imageview_data[slot].image;
+    }
+    else if (HandleInRange(resource_handle, kImageBase))
+    {
+        img = resource_handle;
+    }
+    else
+    {
+        return 0xFF000000u;
+    }
+    if (!HandleInRange(img, kImageBase))
+        return 0xFF000000u;
+    const u32 islot = SlotOf(img, kImageBase);
+    if (!PoolIsLive(g_image_pool, islot))
+        return 0xFF000000u;
+    const ImageRecord& rec = g_image_data[islot];
+    if (rec.backing == nullptr || rec.extent.width == 0 || rec.extent.height == 0)
+        return 0xFF000000u;
+    // Clamp UV to [0, 1], multiply by extent, truncate -> texel.
+    using ::duetos::core::Sf32;
+    const Sf32 u = ::duetos::core::Sf32Clamp(Sf32{u_bits}, ::duetos::core::Sf32Zero(), ::duetos::core::Sf32One());
+    const Sf32 v = ::duetos::core::Sf32Clamp(Sf32{v_bits}, ::duetos::core::Sf32Zero(), ::duetos::core::Sf32One());
+    const i32 tx = ::duetos::core::Sf32ToI32(::duetos::core::Sf32Mul(u, ::duetos::core::Sf32FromU32(rec.extent.width - 1)));
+    const i32 ty = ::duetos::core::Sf32ToI32(::duetos::core::Sf32Mul(v, ::duetos::core::Sf32FromU32(rec.extent.height - 1)));
+    const u32 cx = (tx < 0) ? 0u : (tx >= static_cast<i32>(rec.extent.width) ? rec.extent.width - 1u : static_cast<u32>(tx));
+    const u32 cy = (ty < 0) ? 0u : (ty >= static_cast<i32>(rec.extent.height) ? rec.extent.height - 1u : static_cast<u32>(ty));
+    // 4 bytes per pixel (RGBA8); row stride = width * 4.
+    const u64 off = (static_cast<u64>(cy) * rec.extent.width + cx) * 4u;
+    const u8* p = static_cast<const u8*>(rec.backing) + off;
+    // Repack RGBA8 -> 0xAARRGGBB.
+    return (static_cast<u32>(p[3]) << 24) | (static_cast<u32>(p[0]) << 16) | (static_cast<u32>(p[1]) << 8) |
+           static_cast<u32>(p[2]);
+}
+
 spirv::Program* ShaderProgram(VkShaderModule shader)
 {
     if (shader == 0 || !HandleInRange(shader, kShaderBase))

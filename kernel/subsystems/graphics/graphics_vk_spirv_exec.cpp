@@ -3,6 +3,11 @@
 #include "subsystems/graphics/graphics_vk_internal.h"
 #include "util/soft_float.h"
 
+namespace duetos::subsystems::graphics::internal
+{
+u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits);
+}
+
 /*
  * DuetOS — SPIR-V interpreter, execution engine.
  *
@@ -77,6 +82,11 @@ constexpr u16 kOpFunctionCall = 57;
 constexpr u16 kOpSampledImage = 86;
 constexpr u16 kOpImageSampleImplicitLod = 87;
 constexpr u16 kOpImageSampleExplicitLod = 88;
+// Boolean + selection opcodes.
+constexpr u16 kOpAny = 154;
+constexpr u16 kOpAll = 155;
+constexpr u16 kOpSelect = 169;
+constexpr u16 kOpKill = 252; // fragment discard
 [[maybe_unused]] constexpr u16 kOpVariable = 59;
 constexpr u16 kOpLoad = 61;
 constexpr u16 kOpStore = 62;
@@ -119,6 +129,12 @@ constexpr u16 kOpReturnValue = 254;
 // GLSL.std.450 sub-opcodes. Sin/Cos/Pow dispatch through the
 // soft-float polynomial approximations in util/soft_float;
 // accuracy ~5e-4 max — plenty for shader work.
+constexpr u32 kGlslFAbs = 4;
+constexpr u32 kGlslSAbs = 5;
+constexpr u32 kGlslFloor = 8;
+constexpr u32 kGlslCeil = 9;
+constexpr u32 kGlslFract = 10;
+constexpr u32 kGlslRound = 1;
 constexpr u32 kGlslSin = 13;
 constexpr u32 kGlslCos = 14;
 constexpr u32 kGlslPow = 26;
@@ -713,6 +729,39 @@ void DoExtInst(ExecContext& ec, u32 type_id, u32 result_id, u32 sub_op, const u3
             r[i] = Sf32ToBits(::duetos::core::Sf32Sqrt(Sf32FromBits(a[i])));
         StoreResultComponents(ec, result_id, type_id, r, n);
         break;
+    case kGlslFAbs:
+        for (u32 i = 0; i < n; ++i)
+            r[i] = Sf32ToBits(::duetos::core::Sf32Abs(Sf32FromBits(a[i])));
+        StoreResultComponents(ec, result_id, type_id, r, n);
+        break;
+    case kGlslSAbs:
+        for (u32 i = 0; i < n; ++i)
+        {
+            const i32 v = static_cast<i32>(a[i]);
+            r[i] = static_cast<u32>(v < 0 ? -v : v);
+        }
+        StoreResultComponents(ec, result_id, type_id, r, n);
+        break;
+    case kGlslFloor:
+        for (u32 i = 0; i < n; ++i)
+            r[i] = Sf32ToBits(::duetos::core::Sf32Floor(Sf32FromBits(a[i])));
+        StoreResultComponents(ec, result_id, type_id, r, n);
+        break;
+    case kGlslCeil:
+        for (u32 i = 0; i < n; ++i)
+            r[i] = Sf32ToBits(::duetos::core::Sf32Ceil(Sf32FromBits(a[i])));
+        StoreResultComponents(ec, result_id, type_id, r, n);
+        break;
+    case kGlslFract:
+        for (u32 i = 0; i < n; ++i)
+            r[i] = Sf32ToBits(::duetos::core::Sf32Fract(Sf32FromBits(a[i])));
+        StoreResultComponents(ec, result_id, type_id, r, n);
+        break;
+    case kGlslRound:
+        for (u32 i = 0; i < n; ++i)
+            r[i] = Sf32ToBits(::duetos::core::Sf32Round(Sf32FromBits(a[i])));
+        StoreResultComponents(ec, result_id, type_id, r, n);
+        break;
     case kGlslSin:
         for (u32 i = 0; i < n; ++i)
             r[i] = Sf32ToBits(::duetos::core::Sf32Sin(Sf32FromBits(a[i])));
@@ -952,20 +1001,28 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
                 const u64 bound = LookupDescriptor(ec.prog, 0, 0);
                 if (bound != 0 && cn >= 2)
                 {
-                    // Procedural checkerboard. Scale UV by 8,
-                    // floor each axis, XOR the parities, output
-                    // white-or-grey vec4.
-                    const Sf32 u_v = Sf32FromBits(coord_buf[0]);
-                    const Sf32 v_v = Sf32FromBits(coord_buf[1]);
-                    const Sf32 eight = ::duetos::core::Sf32FromU32(8u);
-                    const i32 ui = ::duetos::core::Sf32ToI32(::duetos::core::Sf32Mul(u_v, eight));
-                    const i32 vi = ::duetos::core::Sf32ToI32(::duetos::core::Sf32Mul(v_v, eight));
-                    const bool white = ((ui ^ vi) & 1) == 0;
-                    const u32 c = white ? Sf32ToBits(::duetos::core::Sf32One())
-                                        : Sf32ToBits(::duetos::core::Sf32FromBits(0x3F000000u)); // 0.5
-                    r4[0] = c;
-                    r4[1] = c;
-                    r4[2] = c;
+                    // Real texture fetch via the descriptor handle.
+                    // Resolves through ImageView->Image->backing
+                    // (set up by VkBindImageMemory). If the image
+                    // backing is host-visible, returns the actual
+                    // texel; otherwise SampleImageRgba8 returns
+                    // 0xFF000000 (opaque black) and the shader
+                    // sees that as the sample value.
+                    const u32 argb =
+                        ::duetos::subsystems::graphics::internal::SampleImageRgba8(bound, coord_buf[0], coord_buf[1]);
+                    // Decompose back to RGBA Sf32 components for
+                    // the shader: bits 16..23 = R, 8..15 = G, 0..7 = B,
+                    // 24..31 = A.
+                    const u8 R = static_cast<u8>((argb >> 16) & 0xFFu);
+                    const u8 G = static_cast<u8>((argb >> 8) & 0xFFu);
+                    const u8 B = static_cast<u8>(argb & 0xFFu);
+                    const u8 A = static_cast<u8>((argb >> 24) & 0xFFu);
+                    const Sf32 inv255 = ::duetos::core::Sf32Div(::duetos::core::Sf32One(),
+                                                                ::duetos::core::Sf32FromU32(255u));
+                    r4[0] = Sf32ToBits(::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(R), inv255));
+                    r4[1] = Sf32ToBits(::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(G), inv255));
+                    r4[2] = Sf32ToBits(::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(B), inv255));
+                    r4[3] = Sf32ToBits(::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(A), inv255));
                 }
                 else
                 {
@@ -1013,6 +1070,64 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
                 return;
             }
             break;
+        case kOpSelect:
+        {
+            // Operands: (T, R, condition, true_value, false_value).
+            // GLSL `mix(a, b, bool(c))` lowers to OpSelect. v0
+            // handles scalar conditions only; vector-of-bool
+            // conditions need per-lane selection, deferred.
+            if (wc >= 6)
+            {
+                const u32 cond = GetScalarBits(ec, w[3]);
+                const u32 picked_id = (cond != 0) ? w[4] : w[5];
+                u32 buf[16]{};
+                const u32 mn = LoadOperandComponents(ec, picked_id, buf, 16);
+                StoreResultComponents(ec, rid, tid, buf, mn);
+            }
+            break;
+        }
+        case kOpAny:
+        {
+            // Operands: (T, R, vector-of-bool). Reduces to true
+            // if any lane is non-zero.
+            if (wc >= 4)
+            {
+                u32 buf[16]{};
+                const u32 mn = LoadOperandComponents(ec, w[3], buf, 16);
+                u32 any_set = 0;
+                for (u32 ai = 0; ai < mn; ++ai)
+                    if (buf[ai] != 0)
+                    {
+                        any_set = 1;
+                        break;
+                    }
+                SetScalar(ec, rid, tid, any_set);
+            }
+            break;
+        }
+        case kOpAll:
+        {
+            if (wc >= 4)
+            {
+                u32 buf[16]{};
+                const u32 mn = LoadOperandComponents(ec, w[3], buf, 16);
+                u32 all_set = 1;
+                for (u32 ai = 0; ai < mn; ++ai)
+                    if (buf[ai] == 0)
+                    {
+                        all_set = 0;
+                        break;
+                    }
+                SetScalar(ec, rid, tid, all_set);
+            }
+            break;
+        }
+        case kOpKill:
+            // Fragment discard. Treat as early-return; the shader
+            // hook drops the pixel.
+            ec.returned = true;
+            ec.jump_target = 0;
+            return;
         case kOpReturn:
             ec.returned = true;
             ec.jump_target = 0;

@@ -139,6 +139,12 @@ struct ImageRecord
     VkExtent3D extent;
     u32 flags;
     bool memory_bound;
+    // Direct pointer into the bound DeviceMemory's host_ptr (when
+    // the memory is HOST_VISIBLE). Set by `VkBindImageMemory`; the
+    // texture-sample path reads through it to fetch texels.
+    // nullptr when no memory has been bound or the memory type
+    // isn't host-visible.
+    void* backing;
 };
 
 struct ShaderRecord
@@ -552,6 +558,16 @@ struct PipelineShaders
     VkShaderModule fs;
 };
 PipelineShaders PipelineShaderHandles(VkPipeline pipe);
+
+/// Sample a 2D RGBA8 texel from an image bound via descriptor.
+/// `resource_handle` is a VkImage or VkImageView handle as
+/// returned by `spirv::LookupDescriptor`; both kinds resolve
+/// to the underlying image. u_bits / v_bits are Sf32 bit
+/// patterns in [0, 1]; nearest-neighbour sampling. Returns the
+/// packed BGRA8 word (0xAARRGGBB) ready to hand to the
+/// framebuffer. Returns 0xFF000000 (opaque black) on any lookup
+/// failure — caller treats it as a fallback.
+u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits);
 
 /// Run the SPIR-V shader-based rasterizer for the current draw.
 /// Returns true if the shader path actually painted (in which

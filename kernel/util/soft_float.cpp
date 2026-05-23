@@ -639,6 +639,72 @@ Sf32 Sf32Pow(Sf32 x, Sf32 y)
     return Sf32Exp(Sf32Mul(y, Sf32Log(x)));
 }
 
+Sf32 Sf32Floor(Sf32 x)
+{
+    if (Sf32IsNaN(x))
+        return Sf32QNaN();
+    if (Sf32IsInf(x) || Sf32IsZero(x))
+        return x;
+    // Quick path via integer truncation: cast to i32, back to
+    // Sf32, then adjust if the original had a fractional part on
+    // the negative side. For magnitudes that overflow i32 (|x| >=
+    // 2^31), the value is already an integer in IEEE 754 binary32
+    // (no fractional bits at that scale), so just return x.
+    Sf32Parts p = Decompose(x);
+    const i32 unbiased = p.exp_raw - 127;
+    if (unbiased >= 23)
+        return x; // no fractional bits
+    if (unbiased < 0)
+    {
+        // |x| < 1: floor is -1 for negative, 0 for positive.
+        return Sf32IsNegative(x) ? Sf32NegOne() : Sf32Zero();
+    }
+    const i32 trunc = Sf32ToI32(x);
+    const Sf32 tf = Sf32FromI32(trunc);
+    if (Sf32IsNegative(x) && !Sf32Equal(tf, x))
+        return Sf32Sub(tf, Sf32One());
+    return tf;
+}
+
+Sf32 Sf32Ceil(Sf32 x)
+{
+    if (Sf32IsNaN(x))
+        return Sf32QNaN();
+    if (Sf32IsInf(x) || Sf32IsZero(x))
+        return x;
+    Sf32Parts p = Decompose(x);
+    const i32 unbiased = p.exp_raw - 127;
+    if (unbiased >= 23)
+        return x;
+    if (unbiased < 0)
+        return Sf32IsNegative(x) ? Sf32Zero() : Sf32One();
+    const i32 trunc = Sf32ToI32(x);
+    const Sf32 tf = Sf32FromI32(trunc);
+    if (!Sf32IsNegative(x) && !Sf32Equal(tf, x))
+        return Sf32Add(tf, Sf32One());
+    return tf;
+}
+
+Sf32 Sf32Round(Sf32 x)
+{
+    // Round-half-to-nearest via floor(x + 0.5) for non-negative,
+    // ceil(x - 0.5) for negative. Doesn't strictly implement
+    // ties-to-even but is what most shaders expect.
+    if (Sf32IsNaN(x) || Sf32IsInf(x) || Sf32IsZero(x))
+        return x;
+    const Sf32 half = Sf32{0x3F000000u};
+    return Sf32IsNegative(x) ? Sf32Ceil(Sf32Sub(x, half)) : Sf32Floor(Sf32Add(x, half));
+}
+
+Sf32 Sf32Fract(Sf32 x)
+{
+    if (Sf32IsNaN(x))
+        return Sf32QNaN();
+    if (Sf32IsInf(x))
+        return Sf32Zero();
+    return Sf32Sub(x, Sf32Floor(x));
+}
+
 // ------------------------------------------------------------------
 // Conversion
 // ------------------------------------------------------------------
