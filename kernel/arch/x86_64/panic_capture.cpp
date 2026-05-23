@@ -5,7 +5,7 @@
 // quadword writes don't straddle two lines.
 extern "C"
 {
-alignas(64) duetos::arch::PanicFrame panic_frame_raw{};
+    alignas(64) duetos::arch::PanicFrame panic_frame_raw{};
 }
 
 namespace duetos::arch

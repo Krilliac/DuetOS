@@ -465,15 +465,11 @@ u8 SerialRxChar()
     return arch::Inb(arch::kCom1Port);
 }
 
-// Convert HPET ticks to milliseconds via the period (femtoseconds).
-u64 HpetTicksToMs(u64 ticks)
-{
-    const u64 period_fs = arch::HpetPeriodFemtoseconds();
-    if (period_fs == 0)
-        return 0;
-    // ticks * fs per tick = total fs; / 1e12 for ms.
-    return (ticks * period_fs) / 1'000'000'000'000ull;
-}
+// HpetTicksToMs lived here until the VBox/HPET-absent compat fix
+// moved the guard-prompt timeout off HPET onto TimerTicks. The
+// commented-out reference in the call site (search "HpetTicksToMs")
+// documents why HPET was abandoned for this path; the function
+// itself is dead.
 
 // ---------------------------------------------------------------
 // Persistent allowlist (tmpfs-backed).

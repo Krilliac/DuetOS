@@ -109,6 +109,20 @@ void NmiWatchdogInit()
     const u32 width = (eax >> 16) & 0xFF;
     if (version < 1 || n_counters < 1 || width == 0 || width > 64)
     {
+        // NmiWatchdogInit is called twice during boot (BSP early
+        // init + post-driver-domain re-arm). When PerfMon is
+        // unavailable, g_enabled stays false through both calls so
+        // the existing `if (g_enabled) return;` short-circuit at
+        // the top of the function does nothing — and without an
+        // additional guard, this whole "unavailable" emit path
+        // would fire twice. Gate on a one-shot flag so the
+        // operator sees one set of FALLBACK lines per boot, not
+        // two.
+        static bool s_unavail_emitted = false;
+        if (s_unavail_emitted)
+            return;
+        s_unavail_emitted = true;
+
         KLOG_WARN_2V("arch/nmi-watchdog", "perfmon unavailable — disabled", "version", u64(version), "width",
                      u64(width));
         SerialWrite("[nmi-watchdog] perfmon unavailable (version=");

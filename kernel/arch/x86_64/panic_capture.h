@@ -43,7 +43,7 @@ struct PanicFrame
     u64 rsi;
     u64 rdi;
     u64 rbp;
-    u64 rsp;        // caller's RSP, NOT the panic shim's
+    u64 rsp; // caller's RSP, NOT the panic shim's
     u64 r8;
     u64 r9;
     u64 r10;
@@ -58,7 +58,7 @@ struct PanicFrame
     u64 cr2;
     u64 cr3;
     u64 cr4;
-    u64 valid;      // 0 = not yet populated; 1 = populated this boot
+    u64 valid; // 0 = not yet populated; 1 = populated this boot
 };
 
 /// Pointer to the per-CPU panic frame. On the first panic on

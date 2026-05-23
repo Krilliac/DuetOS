@@ -508,7 +508,8 @@ void DumpProbeFires()
         };
         Ctx c{info, n};
         debug::ProbeRingWalk(
-            [](const debug::ProbeRingFrame& f, void* opaque) -> bool {
+            [](const debug::ProbeRingFrame& f, void* opaque) -> bool
+            {
                 Ctx* cx = static_cast<Ctx*>(opaque);
                 arch::SerialWrite("  [");
                 arch::SerialWriteHex(f.tick);

@@ -63,8 +63,8 @@ constinit PerCpu g_bsp_percpu = {
     .sched_tasks_blocked = 0,
     .sched_tasks_created = 0,
     .sched_tasks_reaped = 0,
-    .idle_task = nullptr,           // published by SchedStartIdle on each CPU
-    .scheduler_ready = false,       // flipped to true at the end of SchedStartIdle / SchedEnterOnAp
+    .idle_task = nullptr,     // published by SchedStartIdle on each CPU
+    .scheduler_ready = false, // flipped to true at the end of SchedStartIdle / SchedEnterOnAp
     ._pad_sched_ready = {},
 };
 

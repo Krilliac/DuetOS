@@ -521,7 +521,7 @@ void SmpTlbShootdownAddr(mm::AddressSpace* as, u64 virt)
         cpu::PerCpu* self = cpu::CurrentCpu();
         const u32 cpu_id = (self != nullptr) ? self->cpu_id : 0xFFFFFFFFu;
         ::duetos::diag::TlbHistoryRecord(reinterpret_cast<u64>(__builtin_return_address(0)), cpu_id,
-                                          reinterpret_cast<u64>(as), va_start, va_end);
+                                         reinterpret_cast<u64>(as), va_start, va_end);
     }
     SmpTlbShootdownBroadcast(as, virt, virt + 0x1000);
 }
@@ -535,7 +535,7 @@ void SmpTlbShootdownRange(mm::AddressSpace* as, u64 virt, u64 len)
         cpu::PerCpu* self = cpu::CurrentCpu();
         const u32 cpu_id = (self != nullptr) ? self->cpu_id : 0xFFFFFFFFu;
         ::duetos::diag::TlbHistoryRecord(reinterpret_cast<u64>(__builtin_return_address(0)), cpu_id,
-                                          reinterpret_cast<u64>(as), start, end);
+                                         reinterpret_cast<u64>(as), start, end);
     }
     SmpTlbShootdownBroadcast(as, start, end);
 }

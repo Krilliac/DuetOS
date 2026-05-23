@@ -35,13 +35,13 @@ inline constexpr u32 kTlbHistorySlots = 64;
 
 struct TlbHistoryEntry
 {
-    u64 tick;          // ::duetos::time::TickCount() at issue
-    u64 va_start;      // page-aligned
-    u64 va_end;        // exclusive, page-aligned
-    u64 src_rip;       // who issued the shootdown
-    u64 as_ptr;        // mm::AddressSpace* as u64 (avoids header pull-in)
-    u32 src_cpu;       // issuing CPU id
-    u32 valid;         // 0 = unused slot; 1 = populated
+    u64 tick;     // ::duetos::time::TickCount() at issue
+    u64 va_start; // page-aligned
+    u64 va_end;   // exclusive, page-aligned
+    u64 src_rip;  // who issued the shootdown
+    u64 as_ptr;   // mm::AddressSpace* as u64 (avoids header pull-in)
+    u32 src_cpu;  // issuing CPU id
+    u32 valid;    // 0 = unused slot; 1 = populated
 };
 
 /// Record a shootdown. Called from SmpTlbShootdownAddr /
