@@ -68,6 +68,7 @@ DETECTORS = {
     4: "unmapped_thunk",
     5: "soft_fault_recov",
     6: "loader_reject",
+    7: "cap_denial",
 }
 
 
@@ -1074,6 +1075,104 @@ def synth_loader_reject_brief(r: FixRecord, resolver: SymbolResolver | None = No
     return Action(kind="note", title=title, body="\n".join(lines), filename=None)
 
 
+def synth_cap_denial_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
+    """Generate a brief for a CapDenial record (cap-audit ring mirror).
+
+    Source pin shape is `cap.<MissingCapName>` (the kernel records
+    `CapName(event.missing)` after the `cap.` prefix). ctx_a carries
+    the syscall number that tripped the gate; ctx_b carries the proc
+    id of the caller. Repeat is the number of times THIS (cap,
+    syscall) pair was denied since the journal interned the row.
+
+    Cap denials are inherently policy questions — a brief is the
+    right artefact, not a patch. There are three legitimate fixes
+    the reviewer might land:
+
+      1. The caller is a sandboxed binary correctly being denied
+         (e.g. a Win32 PE asking for kCapFsWrite without grant). No
+         source change needed; the deny is the contract working.
+      2. The caller is a kernel helper that should hold the cap but
+         doesn't (proc spawn / boot RBAC dropped it). Fix the grant
+         at the spawn site or in `RbacInit`.
+      3. The cap surface itself is too coarse for the syscall —
+         split the cap or add a finer gate in the syscall handler.
+
+    The brief lays out which of the three this looks like, given
+    the repeat shape, and leaves the choice to the reviewer.
+    """
+    priority, priority_note = _priority_tier(r.repeat, kind_label="cap denial")
+    cap_name = ""
+    if r.source_pin.startswith("cap."):
+        cap_name = r.source_pin[len("cap."):]
+
+    lines: list[str] = []
+    lines.append(f"**Priority: {priority}** — {priority_note}")
+    lines.append("")
+    lines.append(
+        f"Capability `{cap_name or '(unknown)'}` was missing for "
+        f"syscall `0x{r.ctx_a:x}` issued by proc `{r.ctx_b}`. "
+        f"`{r.repeat}` denial(s) since boot for this (cap, syscall) pair."
+    )
+    lines.append("")
+    lines.append("**Choose the fix shape:**")
+    lines.append("")
+    lines.append(
+        "1. *Deny is correct.* The caller is sandboxed / untrusted "
+        "and lacks the cap by design. No source change — `dfix "
+        "mark-done` the record and move on. A recurring high-repeat "
+        "denial here is a signal the workload itself is misbehaving."
+    )
+    lines.append(
+        "2. *Grant is missing.* The caller is a kernel-spawned "
+        f"process that should hold `{cap_name or 'this cap'}` but "
+        f"doesn't. Inspect the spawn site (typically "
+        f"`kernel/proc/spawn.cpp` or `kernel/core/main.cpp`) and add "
+        f"the cap to the profile, OR extend the RBAC role at "
+        f"`kernel/security/rbac.cpp:RbacInit` to grant it."
+    )
+    lines.append(
+        f"3. *Cap is too coarse.* `{cap_name or 'This cap'}` covers "
+        f"more than this caller needs. Split into a finer gate at "
+        f"the syscall handler (`kernel/syscall/cap_gate.cpp` + the "
+        f"`Cap` enum in `kernel/proc/process.h`). ABI work — only "
+        f"warranted if a third-party binary needs the partial "
+        f"grant and won't accept the coarse one."
+    )
+
+    if r.repeat >= 100:
+        lines.append("")
+        lines.append(
+            f"**Deny storm ({r.repeat}× since boot)** — the caller "
+            f"is retrying. Cross-reference `kernel/security/cap_audit.cpp` "
+            f"`CapAuditCopyRecentDenials` for the per-call sequence + "
+            f"tick to localise the loop."
+        )
+
+    # Caller RIP — useful when the denial came from a kernel-helper
+    # spawn site (option 2) so the reviewer sees which thread.
+    if resolver is not None:
+        sym = resolver.resolve(r.caller_rip)
+        if sym and not sym.startswith("?? "):
+            lines.append("")
+            lines.append(f"Recorder site: `{sym}` (rip=`0x{r.caller_rip:016x}`)")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("Journal record:")
+    lines.append("```")
+    lines.append(f"seq         = {r.seq}")
+    lines.append(f"repeat      = {r.repeat}")
+    lines.append(f"caller_rip  = 0x{r.caller_rip:016x}")
+    lines.append(f"ctx_a       = 0x{r.ctx_a:016x}  (syscall number)")
+    lines.append(f"ctx_b       = 0x{r.ctx_b:016x}  (proc_id)")
+    lines.append(f"source_pin  = {r.source_pin!r}")
+    lines.append(f"hint        = {r.hint!r}")
+    lines.append("```")
+
+    title = f"Cap denial [{priority}]{_new_tag(r)} `{cap_name or r.source_pin}` (×{r.repeat})"
+    return Action(kind="note", title=title, body="\n".join(lines), filename=None)
+
+
 def synth_marker_hit_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
     """Generate a tier-aware brief for a StubMarker / GapMarker hit.
 
@@ -1667,6 +1766,8 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
                     )
         elif r.detector_name == "loader_reject":
             actions.append(synth_loader_reject_brief(r, resolver))
+        elif r.detector_name == "cap_denial":
+            actions.append(synth_cap_denial_brief(r, resolver))
     return actions
 
 

@@ -277,6 +277,8 @@ const char* FixDetectorName(FixDetector d)
         return "soft_fault_recov";
     case FixDetector::LoaderReject:
         return "loader_reject";
+    case FixDetector::CapDenial:
+        return "cap_denial";
     }
     return "unknown";
 }
@@ -411,14 +413,14 @@ void FixJournalEmitBootSummary()
     // counts + audited count. Counters are bounded by the ring
     // capacity so the loop is O(kFixJournalCapacity) — fine to call
     // at smoke completion.
-    u64 per_detector[7] = {0, 0, 0, 0, 0, 0, 0};
+    u64 per_detector[8] = {0, 0, 0, 0, 0, 0, 0, 0};
     u64 audited = 0;
     {
         ::duetos::sync::SpinLockGuard guard(g_lock);
         for (u64 i = 0; i < g_used; ++i)
         {
             const u8 d = static_cast<u8>(g_ring[i].detector);
-            if (d < 7)
+            if (d < 8)
                 ++per_detector[d];
             if ((g_ring[i].flags & 0x01) != 0)
                 ++audited;
@@ -437,7 +439,7 @@ void FixJournalEmitBootSummary()
     // Per-detector breakdown — six lines is verbose but trivially
     // greppable. The detector names match `FixDetectorName()` and
     // the python report's keys, so a CI script can join them.
-    for (u8 d = 1; d < 7; ++d)
+    for (u8 d = 1; d < 8; ++d)
     {
         KLOG_INFO_V("smoke", FixDetectorName(static_cast<FixDetector>(d)), per_detector[d]);
     }
@@ -471,6 +473,7 @@ void FixJournalSelfTest()
         {FixDetector::UnmappedThunk, "selftest!ThunkSelftest", "thunk selftest"},
         {FixDetector::SoftFaultRecov, "selftest/recov.cpp:1", "soft fault selftest"},
         {FixDetector::LoaderReject, "selftest/loader.cpp:1", "loader selftest"},
+        {FixDetector::CapDenial, "selftest/cap.SelftestCap", "cap denial selftest"},
     };
     constexpr u64 kInjects = sizeof(injects) / sizeof(injects[0]);
 

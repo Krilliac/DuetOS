@@ -62,6 +62,13 @@ enum class FixDetector : u8
     SoftFaultRecov = 5, // RetryWithBackoff success after >=1 retry, page-fault
                         // fixup recovered, OOM-after-evict succeeded, etc.
     LoaderReject = 6,   // PE/ELF loader rejected an image
+    CapDenial = 7,      // SyscallGate cap-set check denied a syscall.
+                        // ctx_a = syscall_number, ctx_b = proc_id,
+                        // source_pin = `cap.<MissingCap>`. Persists the
+                        // cap-audit ring's signal across boots so a
+                        // recurring deny pattern survives FAT32/NVMe
+                        // rotation. Dedups per (cap, syscall) pair —
+                        // a deny storm is one record with repeat=N.
 };
 
 /// Stable human label. Always returns a non-null pointer into .rodata.

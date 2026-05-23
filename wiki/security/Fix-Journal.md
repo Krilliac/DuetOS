@@ -37,6 +37,7 @@ Source: `kernel/diag/fix_journal.h` — the on-disk record format. These values 
 | 4 | `UnmappedThunk` | Win32ThunksLookupCatchAll hit (kOffMissLogger) |
 | 5 | `SoftFaultRecov` | RetryWithBackoff success after >=1 retry, page-fault |
 | 6 | `LoaderReject` | PE/ELF loader rejected an image |
+| 7 | `CapDenial` | SyscallGate cap-set check denied a syscall. |
 <!-- AUTO:journal-detectors END -->
 
 **Source pin shape per detector** (handwritten — the on-disk format
@@ -50,6 +51,7 @@ doesn't carry it; this is the convention each producer uses):
 | `UnmappedThunk` | `<dll>!<func>` | `kernel/loader/pe_loader.cpp` Win32 catch-all branch |
 | `SoftFaultRecov` | caller-supplied label | `RetryWithBackoff`, fault-react `RetryNow`/`RestartDomain`/`KillProcess`, kheap OOM, frame-allocator OOM, sandbox cap denial |
 | `LoaderReject` | `loader/pe:<status>` | PE rejected for `BadMachine`, `RelocsNonEmpty`, `TlsCallbacksUnsupported`, etc. |
+| `CapDenial` | `cap.<MissingCap>` | `kernel/security/cap_audit.cpp` `RingPushDenial` — mirrors the in-RAM 256-slot deny ring into the persistent journal. ctx_a = syscall number, ctx_b = proc id. Dedup keys on the missing cap kind so a wave of denies for one cap across many syscalls collapses to one row keyed by "this cap is chronically missing." |
 
 Dedup is keyed on `(detector, source_pin)`. A workload that hits the same gap 1000 times produces **one** record with `repeat_count=1000`, not 1000 records.
 
@@ -109,6 +111,7 @@ For each unique record:
 | `unmapped_thunk` (in table at `kOffReturnZero/One/CritSecNop/GetProcessHeap`) | YES | Emits a named-equivalent bytecode patch at a fresh `kOff*` offset and rewrites the row, suppressing repeat journal noise for accepted placeholders while preserving a reviewable diff |
 | `unknown_syscall` | No | Emits a markdown implementation brief with syscall number, repeat count, caller RIP, ctx fields, and hint; syscall semantics are ABI work and should not be mechanically converted into permanent `-ENOSYS` stubs |
 | `stub` / `gap` / `loader_reject` | No | Detector-specific implementation brief pointing at the source pin and captured runtime context |
+| `cap_denial` | No | Three-option policy brief — *deny is correct (sandbox working as intended)*, *grant is missing (spawn / RBAC fix)*, or *cap too coarse (split the gate)*. The choice between them is policy, not mechanical, so the brief lays out the three shapes and leaves the reviewer to pick. |
 | `soft_fault_recov` (fault-react producer) | YES (additive only) | Always emits the advisory brief, AND once per run emits a `fault-react-recover-probe.patch` that hardens the recovery dispatch (see below) |
 | `soft_fault_recov` (`trap.recov` / other) | No | Advisory brief only — the right fix is domain-specific and human-judged |
 | marker manifest rows without fix-journal instrumentation (via `--markers`) | YES, when safe | Adds `diag/fix_journal.h` and a `FIX_NOTE_STUB` / `FIX_NOTE_GAP` macro for in-function kernel `.c/.cc/.cpp` markers; unsafe header/userland/namespace-scope rows become review notes |
