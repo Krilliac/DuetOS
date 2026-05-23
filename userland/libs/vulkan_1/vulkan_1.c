@@ -128,7 +128,18 @@ enum
     VkOp_CreateSurfaceDuet = 11,
     VkOp_DestroySurface = 12,
     VkOp_Present = 13,
+    VkOp_CreateShaderModule = 14,
+    VkOp_AllocateMemory = 15,
+    VkOp_FreeMemory = 16,
+    VkOp_CreateBuffer = 17,
+    VkOp_DestroyShaderModule = 18,
+    VkOp_DestroyBuffer = 19,
 };
+
+/* Additional Vulkan types we need for the create paths. */
+typedef unsigned long long VkShaderModule;
+typedef unsigned long long VkDeviceMemory;
+typedef unsigned long long VkBuffer;
 
 /* ---------------------------------------------------------------- *
  * Vulkan entry points                                              *
@@ -222,6 +233,17 @@ VkResult vkQueueWaitIdle(VkQueue queue)
 
 typedef void (*PFN_vkVoidFunction)(void);
 
+/* Forward declarations for the resource-create functions defined
+ * after vkGetInstanceProcAddr — needed because the string-lookup
+ * table refers to them by symbol. */
+VkResult vkCreateShaderModule(VkDevice device, const void* pCreateInfo, const void* pAllocator,
+                              VkShaderModule* pShaderModule);
+void vkDestroyShaderModule(VkDevice device, VkShaderModule module, const void* pAllocator);
+VkResult vkAllocateMemory(VkDevice device, const void* pAllocateInfo, const void* pAllocator, VkDeviceMemory* pMemory);
+void vkFreeMemory(VkDevice device, VkDeviceMemory memory, const void* pAllocator);
+VkResult vkCreateBuffer(VkDevice device, const void* pCreateInfo, const void* pAllocator, VkBuffer* pBuffer);
+void vkDestroyBuffer(VkDevice device, VkBuffer buffer, const void* pAllocator);
+
 static DV_NO_BUILTIN inline int dv_streq(const char* a, const char* b)
 {
     if (a == NULL || b == NULL)
@@ -261,6 +283,18 @@ PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char* pName)
         return (PFN_vkVoidFunction)vkGetInstanceProcAddr;
     if (dv_streq(pName, "vkGetDeviceProcAddr"))
         return (PFN_vkVoidFunction)vkGetInstanceProcAddr; /* same table for v0 */
+    if (dv_streq(pName, "vkCreateShaderModule"))
+        return (PFN_vkVoidFunction)vkCreateShaderModule;
+    if (dv_streq(pName, "vkDestroyShaderModule"))
+        return (PFN_vkVoidFunction)vkDestroyShaderModule;
+    if (dv_streq(pName, "vkAllocateMemory"))
+        return (PFN_vkVoidFunction)vkAllocateMemory;
+    if (dv_streq(pName, "vkFreeMemory"))
+        return (PFN_vkVoidFunction)vkFreeMemory;
+    if (dv_streq(pName, "vkCreateBuffer"))
+        return (PFN_vkVoidFunction)vkCreateBuffer;
+    if (dv_streq(pName, "vkDestroyBuffer"))
+        return (PFN_vkVoidFunction)vkDestroyBuffer;
     return NULL;
 }
 
@@ -318,4 +352,90 @@ void DuetOS_Vk_DestroySurface(VkInstance instance, UINT64 surface)
 INT DuetOS_Vk_Present(void)
 {
     return (INT)vk_syscall1(VkOp_Present, 0);
+}
+
+/* ---------------------------------------------------------------- *
+ * Resource create / destroy thunks                                 *
+ * ---------------------------------------------------------------- */
+
+/* vkCreateShaderModule — copy the SPIR-V word stream in via a
+ * syscall argument; the kernel ICD takes its own copy and parses
+ * for the v1 interpreter. Returns VK_SUCCESS / a Vulkan error. */
+VkResult vkCreateShaderModule(VkDevice device, const void* pCreateInfo, const void* pAllocator,
+                              VkShaderModule* pShaderModule)
+{
+    (void)pAllocator;
+    if (pCreateInfo == NULL || pShaderModule == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    /* VkShaderModuleCreateInfo layout: sType(4), pNext(8 — pointer
+     * pad), flags(4), codeSize(8 — SIZE_T), pCode(8 — pointer).
+     * We pull the codeSize + pCode by hand to avoid pulling in the
+     * full Vulkan headers.
+     *
+     *   offset 0:  VkStructureType sType
+     *   offset 4:  padding (alignment to pNext)
+     *   offset 8:  const void* pNext
+     *   offset 16: VkShaderModuleCreateFlags flags
+     *   offset 24: size_t codeSize
+     *   offset 32: const u32* pCode
+     */
+    const BYTE* ci = (const BYTE*)pCreateInfo;
+    const SIZE_T code_size = *(const SIZE_T*)(ci + 24);
+    const void* code = *(const void* const*)(ci + 32);
+    const long long h = vk_syscall4(VkOp_CreateShaderModule, (long long)device, (long long)(SIZE_T)code,
+                                    (long long)code_size, 0);
+    if (h == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    *pShaderModule = (VkShaderModule)h;
+    return VK_SUCCESS;
+}
+
+void vkDestroyShaderModule(VkDevice device, VkShaderModule module, const void* pAllocator)
+{
+    (void)pAllocator;
+    (void)vk_syscall3(VkOp_DestroyShaderModule, 0, (long long)device, (long long)module);
+}
+
+/* vkAllocateMemory — fixed memory type 1 (host-visible coherent
+ * in the v0 ICD). pAllocateInfo's allocationSize is at offset 16
+ * in VkMemoryAllocateInfo. */
+VkResult vkAllocateMemory(VkDevice device, const void* pAllocateInfo, const void* pAllocator, VkDeviceMemory* pMemory)
+{
+    (void)pAllocator;
+    if (pAllocateInfo == NULL || pMemory == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const BYTE* ai = (const BYTE*)pAllocateInfo;
+    const UINT64 size = *(const UINT64*)(ai + 16);
+    const long long h = vk_syscall3(VkOp_AllocateMemory, (long long)device, (long long)size, 0);
+    if (h == 0)
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    *pMemory = (VkDeviceMemory)h;
+    return VK_SUCCESS;
+}
+
+void vkFreeMemory(VkDevice device, VkDeviceMemory memory, const void* pAllocator)
+{
+    (void)pAllocator;
+    (void)vk_syscall3(VkOp_FreeMemory, 0, (long long)device, (long long)memory);
+}
+
+/* vkCreateBuffer — pCreateInfo VkBufferCreateInfo: size at offset 24. */
+VkResult vkCreateBuffer(VkDevice device, const void* pCreateInfo, const void* pAllocator, VkBuffer* pBuffer)
+{
+    (void)pAllocator;
+    if (pCreateInfo == NULL || pBuffer == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const BYTE* ci = (const BYTE*)pCreateInfo;
+    const UINT64 size = *(const UINT64*)(ci + 24);
+    const long long h = vk_syscall3(VkOp_CreateBuffer, (long long)device, (long long)size, 0);
+    if (h == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    *pBuffer = (VkBuffer)h;
+    return VK_SUCCESS;
+}
+
+void vkDestroyBuffer(VkDevice device, VkBuffer buffer, const void* pAllocator)
+{
+    (void)pAllocator;
+    (void)vk_syscall3(VkOp_DestroyBuffer, 0, (long long)device, (long long)buffer);
 }

@@ -490,6 +490,9 @@ syscall whose `rdi` argument selects which `VkOp` to invoke.
 | `DuetOS_Vk_CreateSurface` | `kVkOpCreateSurfaceDuet` (the kernel's single platform-agnostic VkSurfaceKHR bound to the framebuffer) |
 | `DuetOS_Vk_DestroySurface` | `kVkOpDestroySurface` |
 | `DuetOS_Vk_Present` | `kVkOpPresent` (flushes framebuffer through the compositor present hook — equivalent to `vkQueuePresentKHR` on a single-image swapchain) |
+| `vkCreateShaderModule` / `vkDestroyShaderModule` | `kVkOpCreateShaderModule` / `kVkOpDestroyShaderModule` (kernel copies the SPIR-V word stream + invokes the v1 parser; module survives until destroyed) |
+| `vkAllocateMemory` / `vkFreeMemory` | `kVkOpAllocateMemory` / `kVkOpFreeMemory` (host-visible coherent memory type) |
+| `vkCreateBuffer` / `vkDestroyBuffer` | `kVkOpCreateBuffer` / `kVkOpDestroyBuffer` |
 
 `SYS_VK_CALL` plus `VkOp` / `VkStatsCounter` enums are in
 [`kernel/syscall/syscall.h`](../../kernel/syscall/syscall.h);

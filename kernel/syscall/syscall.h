@@ -2198,6 +2198,17 @@ enum VkOp : u64
     kVkOpCreateSurfaceDuet = 11, // rdx = instance, r10 = VkSurfaceKHR* out
     kVkOpDestroySurface = 12,    // rdx = instance, r10 = surface
     kVkOpPresent = 13,           // rdx = packed argb (currently ignored); flushes the framebuffer
+    // Memory / buffer / shader-module ops. Copy-based marshalling
+    // (the kernel takes its own copy of any caller-supplied
+    // payload) keeps the syscall ABI flat — no shared-memory
+    // mapping needed.
+    kVkOpCreateShaderModule = 14, // rdx = device, r10 = const u32* code, r8 = u64 code_size_bytes;
+                                  // rax = VkShaderModule handle on success, 0 on failure.
+    kVkOpAllocateMemory = 15,     // rdx = device, r10 = u64 size; rax = VkDeviceMemory handle.
+    kVkOpFreeMemory = 16,         // rdx = device, r10 = memory; rax = 1 on success.
+    kVkOpCreateBuffer = 17,       // rdx = device, r10 = u64 size; rax = VkBuffer handle.
+    kVkOpDestroyShaderModule = 18, // rdx = device, r10 = shader_module
+    kVkOpDestroyBuffer = 19,       // rdx = device, r10 = buffer
 };
 
 // Diagnostic counter IDs for kVkOpGetStatsCounter. Exposes the
