@@ -294,6 +294,7 @@ void RbacInit()
     // FS + the /system/secrets layout; tracked in
     // wiki/reference/Roadmap.md (RBAC v1 follow-ups).
     FIX_NOTE_GAP("security/rbac.cpp:RbacInit", "persist role + membership tables across boots");
+    KLOG_ONCE_WARN("security", "fix-journal hot: persist role + membership tables across");
     for (u32 i = 0; i < kRbacMaxRoles; ++i)
         g_roles[i].in_use = false;
     for (u32 i = 0; i < kRbacMaxMemberships; ++i)

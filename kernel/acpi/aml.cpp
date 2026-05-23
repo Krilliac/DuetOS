@@ -620,6 +620,8 @@ struct Walker
             // recorded (base=0) but can't be skipped safely, so we
             // stop this TermList (parent resumes at its PkgLength end).
             // GAP: computed OperationRegion bounds.
+            FIX_NOTE_GAP("kernel/acpi/aml.cpp:622", "computed OperationRegion bounds.");
+            KLOG_ONCE_WARN("kernel/acpi", "fix-journal hot: computed OperationRegion bounds.");
             NameStringInfo ns;
             u32 consumed = 0;
             if (!ReadNameString(base + after_op, end - after_op, &ns, &consumed))
