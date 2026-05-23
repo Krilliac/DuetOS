@@ -152,14 +152,23 @@ u32 PickEligible(::duetos::core::Process* p)
             continue;
         if ((slot.flags & kSaRestorer) == 0 || slot.restorer_va == 0)
         {
-            // No restorer — we'd never know how to return. Drop
-            // the pending bit with a warning so a one-off broken
-            // PE doesn't hang forever.
-            p->linux_pending_signals &= ~(1ULL << sig);
-            ::duetos::arch::SerialWrite("[linux/signal] missing SA_RESTORER for sig=");
-            ::duetos::arch::SerialWriteHex(sig);
-            ::duetos::arch::SerialWrite(" — pending bit cleared\n");
-            continue;
+            // No SA_RESTORER from the sigaction call. Fall back
+            // to the per-process vDSO __kernel_rt_sigreturn
+            // trampoline — same path real Linux takes when
+            // userland's libc hasn't supplied its own restorer.
+            // If the vDSO somehow didn't map (rare; only on frame
+            // OOM during spawn), drop the pending bit so a one-off
+            // broken PE doesn't hang forever.
+            if (p->linux_vdso_rt_sigreturn_va == 0)
+            {
+                p->linux_pending_signals &= ~(1ULL << sig);
+                ::duetos::arch::SerialWrite("[linux/signal] no SA_RESTORER and no vDSO for sig=");
+                ::duetos::arch::SerialWriteHex(sig);
+                ::duetos::arch::SerialWrite(" — pending bit cleared\n");
+                continue;
+            }
+            // Else fall through — Deliver() resolves the restorer
+            // VA from sa.restorer_va OR proc->linux_vdso_*.
         }
         return sig;
     }
@@ -193,7 +202,13 @@ bool LinuxSignalCheckAndDeliver(::duetos::arch::TrapFrame* frame)
     }
     const auto& sa = p->linux_sigactions[sig];
     const u64 handler_va = sa.handler_va;
-    const u64 restorer_va = sa.restorer_va;
+    // Restorer VA: prefer the one supplied via sigaction's
+    // SA_RESTORER pad; fall back to the per-process vDSO
+    // trampoline when the caller's sigaction omitted it. The
+    // PickEligible gate above guarantees the vDSO VA is non-zero
+    // when we reach this fallback.
+    const u64 restorer_va =
+        ((sa.flags & kSaRestorer) != 0 && sa.restorer_va != 0) ? sa.restorer_va : p->linux_vdso_rt_sigreturn_va;
     const u64 sa_mask = sa.mask;
     const u64 prev_mask = p->linux_signal_mask;
 

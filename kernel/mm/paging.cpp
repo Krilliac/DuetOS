@@ -1325,4 +1325,20 @@ void PagingSelfTest()
     SerialWrite("[mm] paging self-test OK\n");
 }
 
+// ----- SafeReadKernel — extable-protected kernel-to-kernel read --------------
+//
+// The actual byte-mover lives in mm/safe_read.S as SafeReadKernelBytes (rep
+// movsb between [start, end) labels). The trap dispatcher's startup hook
+// registers the [start, end, fixup) row alongside the CopyFromUser /
+// CopyToUser ones in TrapsRegisterExtable; on a #PF inside that range the
+// dispatcher redirects to __safe_read_kernel_fault_fixup, which returns 0.
+extern "C" int SafeReadKernelBytes(const void* src, void* dst, duetos::u64 len);
+
+bool SafeReadKernel(void* kernel_dst, const void* kernel_src, u64 len)
+{
+    if (kernel_dst == nullptr || kernel_src == nullptr || len == 0)
+        return false;
+    return SafeReadKernelBytes(kernel_src, kernel_dst, len) != 0;
+}
+
 } // namespace duetos::mm

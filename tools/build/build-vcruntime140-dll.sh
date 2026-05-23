@@ -26,11 +26,15 @@ REPO_ROOT="$1"
 OUT_HEADER="$2"
 SRC_DIR="${REPO_ROOT}/userland/libs/vcruntime140"
 SRC_C="${SRC_DIR}/vcruntime140.c"
+SRC_S_CHKSTK="${SRC_DIR}/chkstk.S"
+SRC_S_GUARD="${SRC_DIR}/guard_icall.S"
 EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/vcruntime140"
 mkdir -p "${WORK_DIR}"
-OBJ="${WORK_DIR}/vcruntime140.obj"
+OBJ_C="${WORK_DIR}/vcruntime140.obj"
+OBJ_S_CHKSTK="${WORK_DIR}/chkstk.obj"
+OBJ_S_GUARD="${WORK_DIR}/guard_icall.obj"
 DLL="${WORK_DIR}/vcruntime140.dll"
 
 # ntdll import lib (built by build-ntdll-dll.sh into the sibling
@@ -62,7 +66,14 @@ LLD_LINK="${LLD_LINK:-lld-link}"
     -O2 \
     -Wall -Wextra \
     "${SRC_C}" \
-    -o "${OBJ}"
+    -o "${OBJ_C}"
+
+# Assemble the .S files alongside the C compile. Same target;
+# clang's integrated assembler handles them.
+"${CLANG}" --target=x86_64-pc-windows-msvc -c -ffreestanding -nostdlib \
+    "${SRC_S_CHKSTK}" -o "${OBJ_S_CHKSTK}"
+"${CLANG}" --target=x86_64-pc-windows-msvc -c -ffreestanding -nostdlib \
+    "${SRC_S_GUARD}" -o "${OBJ_S_GUARD}"
 
 rm -f "${DLL}"
 
@@ -94,9 +105,14 @@ set +e
     /export:__vcrt_InitializeCriticalSectionEx \
     /export:__CxxUnwind \
     /export:_fltused \
+    /export:__chkstk \
+    /export:_guard_dispatch_icall \
+    /export:_guard_xfg_dispatch_icall \
     "/export:??_7type_info@@6B@" \
     /out:"${DLL}" \
-    "${OBJ}" \
+    "${OBJ_C}" \
+    "${OBJ_S_CHKSTK}" \
+    "${OBJ_S_GUARD}" \
     "${NTDLL_LIB}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e

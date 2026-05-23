@@ -4,145 +4,19 @@
 #include "log/klog.h"
 #include "core/panic.h"
 
-// Freestanding memset / memcpy / memmove. The Clang/GCC C++
-// codegen emits implicit calls to these for `T = {}`, struct
-// copies, and large literal initializers — even with
-// `-fno-builtin`. A kernel without them fails to link the
-// moment any subsystem zero-inits a ring-buffer entry.
+// memset / memcpy / memmove live in string_erms.S — ERMS-based
+// `rep movsb` / `rep stosb` paths that the Clang/GCC codegen
+// implicitly calls for struct copies, zero-init and large
+// literal initializers. The asm forms supersede the prior
+// scalar-unrolled C bodies (which only existed because earlier
+// kernels assumed pre-ERMS hardware was in scope; today every
+// commodity x86_64 CPU has it).
 //
-// The kernel runs `-mno-sse -mgeneral-regs-only`, so no SIMD —
-// but 64-bit integer regs (rax/rcx/...) are general-regs and
-// safe. These routines copy/fill in 64-byte unrolled chunks of
-// 8-byte stores, with a byte tail; for n < 8 they fall through
-// to a byte loop directly.
-//
-// `memcpy` forwards to `memmove` because the strict-no-overlap
-// guarantee isn't worth a duplicate body when the unrolled
-// forward path is already the common case.
-
-extern "C" void* memset(void* dst, int c, duetos::usize n)
-{
-    auto* p = static_cast<duetos::u8*>(dst);
-    const auto v = static_cast<duetos::u8>(c);
-    if (n < 8)
-    {
-        for (duetos::usize i = 0; i < n; ++i)
-            p[i] = v;
-        return dst;
-    }
-    // Build a 64-bit pattern from the byte value.
-    duetos::u64 pat = v;
-    pat |= pat << 8;
-    pat |= pat << 16;
-    pat |= pat << 32;
-    // Align destination to 8 bytes for the chunked store.
-    while ((reinterpret_cast<duetos::usize>(p) & 7u) != 0)
-    {
-        *p++ = v;
-        --n;
-    }
-    // 64-byte chunks (8x 8-byte stores).
-    while (n >= 64)
-    {
-        auto* q = reinterpret_cast<duetos::u64*>(p);
-        q[0] = pat;
-        q[1] = pat;
-        q[2] = pat;
-        q[3] = pat;
-        q[4] = pat;
-        q[5] = pat;
-        q[6] = pat;
-        q[7] = pat;
-        p += 64;
-        n -= 64;
-    }
-    // 8-byte tail.
-    while (n >= 8)
-    {
-        *reinterpret_cast<duetos::u64*>(p) = pat;
-        p += 8;
-        n -= 8;
-    }
-    // Sub-8 byte tail.
-    while (n != 0)
-    {
-        *p++ = v;
-        --n;
-    }
-    return dst;
-}
-
-extern "C" void* memmove(void* dst, const void* src, duetos::usize n)
-{
-    auto* d = static_cast<duetos::u8*>(dst);
-    const auto* s = static_cast<const duetos::u8*>(src);
-    if (d == s || n == 0)
-        return dst;
-    if (d < s)
-    {
-        // Forward copy. The wide path below copies in fixed 64/8-
-        // byte units via __builtin_memcpy — valid only if those
-        // units don't self-overlap. When the buffers actually
-        // overlap (d < s and d + n > s, i.e. gap < n), a 64-byte
-        // memcpy whose src/dst overlap by 62 bytes is UB: the
-        // compiler may copy the chunk in any order and shred the
-        // tail (ASan flags it memcpy-param-overlap). An ascending
-        // byte copy is the correct order for a dst-below-src move,
-        // so take it whenever the ranges are not disjoint.
-        if (n < 8 || static_cast<duetos::usize>(s - d) < n)
-        {
-            for (duetos::usize i = 0; i < n; ++i)
-                d[i] = s[i];
-            return dst;
-        }
-        // 64-byte unrolled chunks of 8-byte loads/stores. We
-        // don't require alignment — x86 tolerates unaligned
-        // 8-byte access at a small (cache-line-cross) cost
-        // that's still cheaper than per-byte work. The wide
-        // unit goes through __builtin_memcpy rather than a
-        // reinterpret_cast<u64*> deref: casting an arbitrarily-
-        // aligned u8* to u64* and dereferencing it is C++ UB
-        // (alignment), which -fsanitize=undefined flags on every
-        // call and drowns the real UBSan signal. clang lowers a
-        // fixed-size __builtin_memcpy to the same single unaligned
-        // movq under -mno-sse, so this is UB-free at zero cost.
-        while (n >= 64)
-        {
-            __builtin_memcpy(d, s, 64);
-            d += 64;
-            s += 64;
-            n -= 64;
-        }
-        while (n >= 8)
-        {
-            __builtin_memcpy(d, s, 8);
-            d += 8;
-            s += 8;
-            n -= 8;
-        }
-        while (n != 0)
-        {
-            *d++ = *s++;
-            --n;
-        }
-    }
-    else
-    {
-        // Backward copy for overlap where dst is above src.
-        // Keep this branch byte-oriented — overlapping moves
-        // are rare in the kernel and bulk throughput here
-        // doesn't merit the complexity of a reverse 8-byte
-        // unroll.
-        for (duetos::usize i = n; i > 0; --i)
-            d[i - 1] = s[i - 1];
-    }
-    return dst;
-}
-
-extern "C" void* memcpy(void* dst, const void* src, duetos::usize n)
-{
-    return memmove(dst, src, n);
-}
+// Forward decls so the self-test below can call them; the asm
+// definitions are the link-time providers.
+extern "C" void* memset(void* dst, int c, duetos::usize n);
+extern "C" void* memcpy(void* dst, const void* src, duetos::usize n);
+extern "C" void* memmove(void* dst, const void* src, duetos::usize n);
 
 namespace duetos::core
 {

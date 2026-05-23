@@ -8,8 +8,8 @@
  * ntdll.dll / __chkstk / Nt* / Zw* / Rtl* / Ldr*.
  *
  * Layout:
- *   1. __chkstk — x86_64 stack probe (no-op on v0: PeLoad
- *      maps the stack up front, so no page-crossing faults).
+ *   1. __chkstk — x86_64 stack probe. Lives in chkstk.S; the
+ *      page-walk mirrors the kernel-side bytecode thunk.
  *   2. Nt* primitives with real syscall bindings (NtClose,
  *      NtYield, NtDelay, NtQueryPerfCounter / SystemTime,
  *      NtTerminate{Process,Thread}, NtAllocateVirtualMemory,
@@ -51,19 +51,9 @@ typedef unsigned short wchar_t16;
     } while (0)
 
 /* ------------------------------------------------------------------
- * __chkstk — x86_64 stack probe
- *
- * MSVC emits a call to __chkstk at every function with a stack
- * frame ≥ 4 KiB. On real Windows it touches each intermediate
- * page so the OS can lazy-grow the stack. Our PE loader maps
- * the full stack region up front, so the probe is a no-op.
- * Return paths: ret (rax unchanged; msvcrt doesn't observe).
+ * __chkstk lives in chkstk.S — real x86_64 stack-probe per the
+ * Microsoft x64 ABI. Exported by the link script.
  * ------------------------------------------------------------------ */
-
-__declspec(dllexport) void __chkstk(void)
-{
-    /* Nothing to do. */
-}
 
 /* ------------------------------------------------------------------
  * STATUS_NOT_IMPLEMENTED sink — every Nt / Zw / Ldr entry

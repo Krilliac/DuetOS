@@ -10,7 +10,9 @@
 #include "arch/x86_64/traps.h"
 
 #include "acpi/acpi.h"
+#include "cpu/percpu.h"
 #include "debug/probes.h"
+#include "diag/tlb_history.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "cpu/percpu.h"
@@ -513,6 +515,14 @@ void SmpTlbShootdownBroadcast(mm::AddressSpace* as, u64 virt_start, u64 virt_end
 
 void SmpTlbShootdownAddr(mm::AddressSpace* as, u64 virt)
 {
+    const u64 va_start = virt & ~static_cast<u64>(0xFFF);
+    const u64 va_end = va_start + 0x1000;
+    {
+        cpu::PerCpu* self = cpu::CurrentCpu();
+        const u32 cpu_id = (self != nullptr) ? self->cpu_id : 0xFFFFFFFFu;
+        ::duetos::diag::TlbHistoryRecord(reinterpret_cast<u64>(__builtin_return_address(0)), cpu_id,
+                                         reinterpret_cast<u64>(as), va_start, va_end);
+    }
     SmpTlbShootdownBroadcast(as, virt, virt + 0x1000);
 }
 
@@ -521,6 +531,12 @@ void SmpTlbShootdownRange(mm::AddressSpace* as, u64 virt, u64 len)
     const u64 page = 0x1000;
     const u64 start = virt & ~(page - 1);
     const u64 end = (virt + len + page - 1) & ~(page - 1);
+    {
+        cpu::PerCpu* self = cpu::CurrentCpu();
+        const u32 cpu_id = (self != nullptr) ? self->cpu_id : 0xFFFFFFFFu;
+        ::duetos::diag::TlbHistoryRecord(reinterpret_cast<u64>(__builtin_return_address(0)), cpu_id,
+                                         reinterpret_cast<u64>(as), start, end);
+    }
     SmpTlbShootdownBroadcast(as, start, end);
 }
 

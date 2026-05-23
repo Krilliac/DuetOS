@@ -109,6 +109,20 @@ void NmiWatchdogInit()
     const u32 width = (eax >> 16) & 0xFF;
     if (version < 1 || n_counters < 1 || width == 0 || width > 64)
     {
+        // NmiWatchdogInit is called twice during boot (BSP early
+        // init + post-driver-domain re-arm). When PerfMon is
+        // unavailable, g_enabled stays false through both calls so
+        // the existing `if (g_enabled) return;` short-circuit at
+        // the top of the function does nothing — and without an
+        // additional guard, this whole "unavailable" emit path
+        // would fire twice. Gate on a one-shot flag so the
+        // operator sees one set of FALLBACK lines per boot, not
+        // two.
+        static bool s_unavail_emitted = false;
+        if (s_unavail_emitted)
+            return;
+        s_unavail_emitted = true;
+
         KLOG_WARN_2V("arch/nmi-watchdog", "perfmon unavailable — disabled", "version", u64(version), "width",
                      u64(width));
         SerialWrite("[nmi-watchdog] perfmon unavailable (version=");
@@ -118,6 +132,18 @@ void NmiWatchdogInit()
         SerialWrite(" width=");
         SerialWriteHex(u64(width));
         SerialWrite(") — disabled\n");
+        // Operator-visible fallback note. Hang detection is now
+        // limited to: (a) soft-lockup detector via scheduler-tick
+        // poll (catches stuck-task-with-IRQs-on), (b) the panic
+        // path's PanicBroadcastNmi (after a different fault
+        // surfaces). It does NOT catch "kernel stuck with IRQs
+        // off and no scheduler tick" — that needs an
+        // asynchronous-NMI source (HPET-routed-to-NMI is the
+        // next pillar slice; the HPET driver header lists
+        // per-timer comparator + IOAPIC routing as deferred).
+        SerialWrite("[nmi-watchdog] FALLBACK: hang detection via soft-lockup tick only.\n");
+        SerialWrite("[nmi-watchdog] FALLBACK: kernel-IRQ-off-wedge is NOT detected.\n");
+        SerialWrite("[nmi-watchdog] FALLBACK: see wiki/arch/Nmi-Watchdog-Hpet-Fallback for the next slice.\n");
         return;
     }
     KLOG_INFO_2V("arch/nmi-watchdog", "perfmon detected", "version", u64(version), "counters", u64(n_counters));

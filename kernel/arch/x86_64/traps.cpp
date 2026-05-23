@@ -72,6 +72,13 @@ extern "C" duetos::u8 __copy_user_to_start[];
 extern "C" duetos::u8 __copy_user_to_end[];
 extern "C" duetos::u8 __copy_user_fault_fixup[];
 
+// mm/safe_read.S — kernel-to-kernel safe read with fault fixup.
+// Same shape as the user_copy bracket; registered alongside the
+// CopyFromUser / CopyToUser rows in TrapsRegisterExtable.
+extern "C" duetos::u8 __safe_read_kernel_start[];
+extern "C" duetos::u8 __safe_read_kernel_end[];
+extern "C" duetos::u8 __safe_read_kernel_fault_fixup[];
+
 // Linker-emitted bounds of kernel `.text` (set by the linker script).
 // Used by RetpolineWildCallback below + the in-TrapDispatch
 // g_irq_handlers validator earlier.
@@ -941,6 +948,25 @@ extern "C" void TrapDispatch(TrapFrame* frame)
                 p->panic_snapshot_rip = frame->rip;
                 p->panic_snapshot_rsp = frame->rsp;
                 p->panic_snapshot_task = p->current_task;
+                // Extended state — captured at the SAME instant as
+                // rip/rsp/task so a cross-CPU view shows a
+                // consistent snapshot. None of these reads can
+                // fault (all are kernel-owned per-CPU memory).
+                p->panic_snapshot_cr2 = arch::ReadCr2();
+                p->panic_snapshot_rflags = frame->rflags;
+                p->panic_snapshot_irq_depth = static_cast<u32>(IrqNestDepthRaw());
+                p->panic_snapshot_held_lock_count = p->held_locks_count;
+                if (p->held_locks_count > 0)
+                {
+                    const u32 top = p->held_locks_count - 1;
+                    p->panic_snapshot_topmost_lock_acq_rip = p->held_lock_rips[top];
+                    p->panic_snapshot_topmost_lock_addr = p->held_locks[top];
+                }
+                else
+                {
+                    p->panic_snapshot_topmost_lock_acq_rip = 0;
+                    p->panic_snapshot_topmost_lock_addr = nullptr;
+                }
                 asm volatile("" ::: "memory");
                 p->panic_snapshot_valid = 1;
             }
@@ -949,6 +975,41 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         {
             asm volatile("cli; hlt");
         }
+    }
+
+    // #DF (Double Fault, vector 8). Runs on the dedicated IST1
+    // stack (configured by IdtSetIst(8, kIstDoubleFault) at boot),
+    // so even if the regular kernel stack is corrupt or
+    // exhausted we land here with a known-good RSP. A #DF means
+    // ANOTHER trap fired while we were trying to deliver an
+    // earlier trap — typically a #PF whose IRET frame couldn't
+    // be pushed because the kernel stack itself was unmapped /
+    // overflowed.
+    //
+    // We can't trust the normal Panic path here — even the
+    // serial spinlock might be held by the CPU that #DFed. Use
+    // panic-mode serial directly + halt. The error_code on #DF
+    // is always 0 (Intel SDM 6.15.1) so it's not worth printing.
+    if (frame->vector == 8)
+    {
+        arch::SerialEnterPanicMode();
+        arch::SerialWrite("\n[!!! DOUBLE FAULT (vec 8) — ist1 stack ]\n");
+        arch::SerialWrite("  rip=");
+        arch::SerialWriteHex(frame->rip);
+        arch::SerialWrite("\n  rsp=");
+        arch::SerialWriteHex(frame->rsp);
+        arch::SerialWrite("\n  rflags=");
+        arch::SerialWriteHex(frame->rflags);
+        arch::SerialWrite("\n  cr2=");
+        arch::SerialWriteHex(ReadCr2());
+        arch::SerialWrite("\n  cr3=");
+        arch::SerialWriteHex(ReadCr3());
+        arch::SerialWrite("\n[df] original trap stack likely overflowed or unmapped; halting.\n");
+        // Mark panic-in-progress so any recursive halt path
+        // short-circuits cleanly instead of trying to dump.
+        PanicInProgressMark();
+        for (;;)
+            asm volatile("cli; hlt");
     }
 
     // Kernel-stack guard-page hit. Runs BEFORE the extable lookup so
@@ -1622,6 +1683,15 @@ void TrapsRegisterExtable()
     const u64 fixup = reinterpret_cast<u64>(g_copy_user_fault_fixup);
     ::duetos::debug::KernelExtableRegister(from_s, from_e, fixup, "mm/CopyFromUser");
     ::duetos::debug::KernelExtableRegister(to_s, to_e, fixup, "mm/CopyToUser");
+    // mm/SafeReadKernel — kernel-to-kernel read with fault fixup.
+    // Used by the panic dump's DumpInstructionBytes to read bytes
+    // at addresses outside the kernel range (user VA in active
+    // AS, guard pages) without taking the box down on a stale
+    // pointer.
+    const u64 sr_s = reinterpret_cast<u64>(__safe_read_kernel_start);
+    const u64 sr_e = reinterpret_cast<u64>(__safe_read_kernel_end);
+    const u64 sr_fixup = reinterpret_cast<u64>(__safe_read_kernel_fault_fixup);
+    ::duetos::debug::KernelExtableRegister(sr_s, sr_e, sr_fixup, "mm/SafeReadKernel");
 }
 
 void TrapsSelfTest()

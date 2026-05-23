@@ -78,10 +78,10 @@ inline u32 CurrentLockdepSlot()
     const u32 id = ::duetos::cpu::CurrentCpuIdOrBsp();
     return (id < kLockdepCpuMax) ? id : 0u;
 }
-inline PerCpuHeld& CurrentHeld()
-{
-    return g_per_cpu[CurrentLockdepSlot()];
-}
+// Earlier slices had a CurrentHeld() inline helper. Every caller
+// now goes through CriticalSection::slot() + g_per_cpu[slot]
+// directly (so the busy-flag race is held across the whole
+// critical section), making the helper dead code — removed.
 
 // Counters — saturating per class BB. A noisy workload that keeps
 // finding fresh inversion candidates cannot wrap g_inversions to

@@ -226,6 +226,26 @@ const char* ClassifyWildAddress(u64 value)
         return "0xAA fill — kernel stack poison (kStackPoisonByte)";
     }
 
+    // DuetOS project-specific magic values. Cross-reference:
+    //   - mm/kheap.cpp:32 kHeapMagicLive
+    //   - mm/kheap.cpp:33 kHeapMagicFree
+    //   - sched/sched.cpp:369 kStackCanary
+    // Recognising these in the dump tells the operator "the
+    // value isn't garbage — it's an allocator/scheduler sentinel
+    // visible because its slot was misused as a pointer".
+    if (value == 0xDEADBEEFCAFEBABEULL)
+    {
+        return "kHeapMagicLive — kheap-chunk live-marker treated as pointer (UAF on freed chunk?)";
+    }
+    if (value == 0xFEEDFACE5A5A5A5AULL)
+    {
+        return "kHeapMagicFree — kheap-chunk free-marker (use-after-free of freed chunk)";
+    }
+    if (value == 0xC0DEB0B0CAFED00DULL)
+    {
+        return "kStackCanary — kernel-thread stack canary (overflow nudged it into a slot)";
+    }
+
     // Non-canonical addresses can't be dereferenced; surfacing this
     // explicitly avoids a confused reader assuming "valid 64-bit
     // pointer" when bits 47..63 don't sign-extend correctly.

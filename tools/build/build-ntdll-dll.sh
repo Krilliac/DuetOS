@@ -37,6 +37,9 @@ SRC_FILES=(
     "${SRC_DIR}/ntdll_facades.c"
     "${SRC_DIR}/ntdll_token.c"
     "${SRC_DIR}/ntdll_bulk.c"
+    "${SRC_DIR}/chkstk.S"
+    "${SRC_DIR}/seh_trampolines.S"
+    "${SRC_DIR}/ki_user_dispatchers.S"
 )
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/ntdll"
@@ -48,7 +51,14 @@ LLD_LINK="${LLD_LINK:-lld-link}"
 
 OBJS=()
 for src in "${SRC_FILES[@]}"; do
-    obj="${WORK_DIR}/$(basename "${src}" .c).obj"
+    # Strip both .c and .S to derive the object basename.
+    base="$(basename "${src}")"
+    base="${base%.c}"
+    base="${base%.S}"
+    obj="${WORK_DIR}/${base}.obj"
+    # .S files are preprocessed-assembly: clang's integrated assembler
+    # handles them with the same target flag — the C-only flags below
+    # are accepted and ignored for asm input.
     "${CLANG}" \
         --target=x86_64-pc-windows-msvc \
         -c \
@@ -787,6 +797,8 @@ set +e
     /export:RtlUnwindEx \
     /export:RtlRestoreContext \
     /export:KiUserExceptionDispatcher \
+    /export:KiUserApcDispatcher \
+    /export:KiUserCallbackDispatcher \
     /export:__C_specific_handler \
     /export:RtlAddVectoredExceptionHandler \
     /export:RtlRemoveVectoredExceptionHandler \

@@ -429,35 +429,13 @@ __declspec(dllexport) void InitializeSListHead(void* head)
  * no kernel fault dispatch yet (that is the next slice).
  * ------------------------------------------------------------------ */
 
-__attribute__((naked)) __declspec(dllexport) void RtlCaptureContext(void* ContextRecord)
-{
-    __asm__ volatile("movq %%rax, 0x78(%%rcx)\n\t"
-                     "movq %%rdx, 0x88(%%rcx)\n\t"
-                     "movq %%rbx, 0x90(%%rcx)\n\t"
-                     "movq %%rbp, 0xA0(%%rcx)\n\t"
-                     "movq %%rsi, 0xA8(%%rcx)\n\t"
-                     "movq %%rdi, 0xB0(%%rcx)\n\t"
-                     "movq %%r8,  0xB8(%%rcx)\n\t"
-                     "movq %%r9,  0xC0(%%rcx)\n\t"
-                     "movq %%r10, 0xC8(%%rcx)\n\t"
-                     "movq %%r11, 0xD0(%%rcx)\n\t"
-                     "movq %%r12, 0xD8(%%rcx)\n\t"
-                     "movq %%r13, 0xE0(%%rcx)\n\t"
-                     "movq %%r14, 0xE8(%%rcx)\n\t"
-                     "movq %%r15, 0xF0(%%rcx)\n\t"
-                     "movq %%rcx, 0x80(%%rcx)\n\t"
-                     "leaq 8(%%rsp), %%rax\n\t"
-                     "movq %%rax, 0x98(%%rcx)\n\t"
-                     "movq (%%rsp), %%rax\n\t"
-                     "movq %%rax, 0xF8(%%rcx)\n\t"
-                     "pushfq\n\t"
-                     "popq %%rax\n\t"
-                     "movl %%eax, 0x44(%%rcx)\n\t"
-                     "movl $0x0010000F, 0x30(%%rcx)\n\t"
-                     "movq 0x78(%%rcx), %%rax\n\t"
-                     "ret\n\t" ::
-                         : "memory");
-}
+/* RtlCaptureContext lives in seh_capture.S — same pattern as
+ * ntdll's seh_trampolines.S and for the same reason (string-
+ * literal asm body, hand-copied CONTEXT offsets per entry). Both
+ * DLLs ship a body so whichever the PE importer resolves to has
+ * a real export. They MUST stay byte-identical — audit on every
+ * change. */
+__declspec(dllexport) void RtlCaptureContext(void* ContextRecord);
 
 typedef struct
 {

@@ -18,7 +18,13 @@
 #include "diag/event_trace.h"
 #include "diag/soft_lockup.h"
 #include "diag/hexdump.h"
+#include "mm/paging.h"
 #include "diag/minidump.h"
+#include "diag/panic_wait.h"
+#include "diag/tlb_history.h"
+#include "arch/x86_64/panic_capture.h"
+
+extern "C" void duetos_arch_PanicCaptureShim();
 #include "loader/dll_loader.h"
 #include "loader/pe_exports.h"
 #include "log/klog.h"
@@ -298,12 +304,59 @@ void DumpStack(u64 rsp, int count)
 // would cross into the kstack-arena guard page above the current
 // slot, so a near-top rsp doesn't trip a secondary #PF that
 // recursive-panics the dump.
+// Heuristic check: is `value` plausibly the return address of a
+// call instruction? On x86_64 the immediate predecessor of a
+// return address is one of:
+//
+//   - `call rel32` (E8 xx xx xx xx) — 5 bytes; byte at value-5 = 0xE8
+//   - `call r/m64` (FF /2) — variable length; common encodings:
+//       FF D0       (call rax)        — value-2 = FF, value-1 = D0..D7
+//       FF 14 25 ...(call [abs32])    — value-7 = FF, etc.
+//       41 FF D0    (call r8..r15)    — value-3 = 41, value-2 = FF
+//   - `jmp rel32` (E9) — tail-call return; same offset shape as E8
+//
+// We check the cheapest two: byte at value-5 == 0xE8 (relative
+// call) and the FF-prefix family at value-2/-3/-7. Anything else
+// stays unknown — we don't reject, just don't endorse.
+//
+// Routed through SafeReadKernel so an unreadable RIP doesn't
+// fault the panic walker mid-dump.
+bool LooksLikeReturnAddress(u64 value)
+{
+    if (!PlausibleKernelAddress(value - 8))
+        return false;
+    u8 prev[8] = {};
+    if (!::duetos::mm::SafeReadKernel(prev, reinterpret_cast<const void*>(value - 8), 8))
+        return false;
+    // E8 (call rel32) → 5 bytes back
+    if (prev[3] == 0xE8)
+        return true;
+    // E9 (jmp rel32, tail-call) → 5 bytes back; same shape as E8
+    if (prev[3] == 0xE9)
+        return true;
+    // FF /2 (call r/m64). The 2-byte form is FF D0..D7; we check
+    // FF at value-2 with the next byte in the call-target ModR/M
+    // range D0..D7 (call r/m) or 14..17 (call [r/m, ...]).
+    if (prev[6] == 0xFF)
+    {
+        const u8 modrm = prev[7];
+        if ((modrm & 0xF8) == 0xD0)
+            return true;
+        if ((modrm & 0xF8) == 0x10)
+            return true;
+    }
+    // 41 FF D0..D7 (call r8..r15) → 3 bytes back. REX.B prefix.
+    if (prev[5] == 0x41 && prev[6] == 0xFF && (prev[7] & 0xF8) == 0xD0)
+        return true;
+    return false;
+}
+
 void DumpReturnAddressPointers(u64 rsp)
 {
     constexpr int kScanQuads = 0x80;
     arch::SerialWrite("  return-address pointers (scan of ");
     arch::SerialWriteHex(static_cast<u64>(kScanQuads));
-    arch::SerialWrite(" quads from rsp):\n");
+    arch::SerialWrite(" quads from rsp; '*' = preceded by call opcode):\n");
     int found = 0;
     for (int i = 0; i < kScanQuads; ++i)
     {
@@ -318,7 +371,14 @@ void DumpReturnAddressPointers(u64 rsp)
         {
             continue;
         }
-        arch::SerialWrite("    [");
+        // Tag this entry as a likely real return address if the
+        // byte before it is a call/jmp opcode. False positives
+        // are still possible (data that happens to symbolize +
+        // sits after an E8 byte) but the rate drops sharply.
+        // High-signal frames get a '*' so an investigator can
+        // skim past noise.
+        const bool likely = LooksLikeReturnAddress(value);
+        arch::SerialWrite(likely ? "  * [" : "    [");
         arch::SerialWriteHex(slot);
         arch::SerialWrite("] -> ");
         arch::SerialWriteHex(value);
@@ -430,6 +490,45 @@ void DumpProbeFires()
     if (emitted == 0)
     {
         arch::SerialWrite("  (no probes have fired)\n");
+    }
+
+    // Per-fire timeline. The aggregate count above tells the
+    // operator "probe X fired N times since boot"; the timeline
+    // tells them WHICH ones fired in the seconds before the
+    // crash. Critical when a count tripped to 1 in the last
+    // 100ms vs an hour ago.
+    const u64 total_fires = debug::ProbeRingTotalFires();
+    if (total_fires > 0)
+    {
+        arch::SerialWrite("[panic] --- probe-fire timeline (last 32, newest first) ---\n");
+        struct Ctx
+        {
+            const debug::ProbeInfo* info;
+            u64 info_n;
+        };
+        Ctx c{info, n};
+        debug::ProbeRingWalk(
+            [](const debug::ProbeRingFrame& f, void* opaque) -> bool
+            {
+                Ctx* cx = static_cast<Ctx*>(opaque);
+                arch::SerialWrite("  [");
+                arch::SerialWriteHex(f.tick);
+                arch::SerialWrite("] ");
+                const char* name = "<unknown>";
+                if (f.probe_id < cx->info_n && cx->info[f.probe_id].name != nullptr)
+                    name = cx->info[f.probe_id].name;
+                arch::SerialWrite(name);
+                arch::SerialWrite(" rip=");
+                WriteAddressWithSymbol(f.caller_rip);
+                if (f.value != 0)
+                {
+                    arch::SerialWrite(" val=");
+                    arch::SerialWriteHex(f.value);
+                }
+                arch::SerialWrite("\n");
+                return true;
+            },
+            &c);
     }
 }
 
@@ -642,6 +741,31 @@ void DumpPeerCpuSnapshots()
             arch::SerialWriteHex(reinterpret_cast<u64>(peer->panic_snapshot_task));
         }
         arch::SerialWrite("\n");
+        // Extended state captured at the same instant as
+        // rip/rsp/task. cr2 is the last-faulting VA the CPU
+        // latched — only meaningful if the peer was mid-#PF
+        // when the NMI hit. rflags shows IF / AC / IOPL. The
+        // IRQ depth tells you whether the peer was in nested
+        // IRQ context (>0 means it was) — useful for diagnosing
+        // a CPU that's IPI-spinning vs one in a clean task
+        // context. The held-lock summary points at the lock
+        // most likely to be involved in a deadlock-shaped
+        // panic; the full stack is dumped immediately below.
+        arch::SerialWrite("    cr2=");
+        arch::SerialWriteHex(peer->panic_snapshot_cr2);
+        arch::SerialWrite(" rflags=");
+        arch::SerialWriteHex(peer->panic_snapshot_rflags);
+        arch::SerialWrite(" irq_depth=");
+        arch::SerialWriteHex(static_cast<u64>(peer->panic_snapshot_irq_depth));
+        arch::SerialWrite("\n");
+        if (peer->panic_snapshot_held_lock_count != 0)
+        {
+            arch::SerialWrite("    topmost-lock addr=");
+            arch::SerialWriteHex(reinterpret_cast<u64>(peer->panic_snapshot_topmost_lock_addr));
+            arch::SerialWrite(" acq_rip=");
+            WriteAddressWithSymbol(peer->panic_snapshot_topmost_lock_acq_rip);
+            arch::SerialWrite("\n");
+        }
         // Held locks captured at NMI time — if the peer was holding
         // anything when the panicking CPU broadcast NMI, that's the
         // first thing to look at for a deadlock-shaped panic.
@@ -740,6 +864,22 @@ void BeginCrashDump(const char* subsystem, const char* message, const u64* optio
         WriteLabelled("value    ", *optional_value);
     }
     WriteLabelled("symtab_entries", SymbolTableSize());
+
+    // Reproducer sidecar — build identity inline in the crash
+    // dump so a host-side reader pairs the dump with the exact
+    // kernel binary that produced it. Three short lines: git
+    // commit hash (suffix `+` = locally modified), build date
+    // (UTC ISO 8601), kernel git branch. The full minidump
+    // format extension (custom DuetOS-stream with cmdline, RNG
+    // seed, etc.) is a separate slice — these serial lines are
+    // the cheap version that needs no format change.
+    arch::SerialWrite("  build.commit : ");
+    arch::SerialWrite(DUETOS_GIT_HASH);
+    arch::SerialWrite("\n  build.date   : ");
+    arch::SerialWrite(DUETOS_BUILD_DATE);
+    arch::SerialWrite("\n  build.branch : ");
+    arch::SerialWrite(DUETOS_GIT_BRANCH);
+    arch::SerialWrite("\n");
 }
 
 void EndCrashDump()
@@ -768,6 +908,39 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     WriteLabelledCode("rip      ", rip);
     WriteLabelledVa("rsp      ", rsp);
     WriteLabelledVa("rbp      ", rbp);
+
+    // Frozen-state GPRs captured by the .S shim at the FIRST
+    // instruction of Panic / PanicWithValue, before any C++
+    // prologue mutated the caller's registers. valid==0 means
+    // we got here via a path that doesn't run the shim (e.g.
+    // a kernel-mode trap that called DumpDiagnostics directly);
+    // in that case the section is silent rather than printing
+    // garbage zeroes.
+    {
+        const auto* pf = arch::PanicFrameLast();
+        if (pf != nullptr && pf->valid != 0)
+        {
+            arch::SerialWrite("[panic] --- frozen GPRs (pre-prologue) ---\n");
+            WriteLabelled("rax      ", pf->rax);
+            WriteLabelled("rbx      ", pf->rbx);
+            WriteLabelled("rcx      ", pf->rcx);
+            WriteLabelled("rdx      ", pf->rdx);
+            WriteLabelled("rsi      ", pf->rsi);
+            WriteLabelled("rdi      ", pf->rdi);
+            WriteLabelledVa("rbp.f    ", pf->rbp);
+            WriteLabelledVa("rsp.f    ", pf->rsp);
+            WriteLabelled("r8       ", pf->r8);
+            WriteLabelled("r9       ", pf->r9);
+            WriteLabelled("r10      ", pf->r10);
+            WriteLabelled("r11      ", pf->r11);
+            WriteLabelled("r12      ", pf->r12);
+            WriteLabelled("r13      ", pf->r13);
+            WriteLabelled("r14      ", pf->r14);
+            WriteLabelled("r15      ", pf->r15);
+            WriteLabelledCode("rip.call ", pf->rip_caller);
+            WriteLabelled("rflags.f ", pf->rflags);
+        }
+    }
 
     // Control + flags registers. Each line carries the raw hex
     // (existing schema) plus a bracket-list naming the bits that
@@ -846,6 +1019,14 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
 
 void Panic(const char* subsystem, const char* message)
 {
+    // Capture the caller's register state BEFORE anything else
+    // — no prior C++ statement, no Cli, no probe, no log. The
+    // shim writes panic_frame_raw via naked asm so the GPRs
+    // reflect the call-site state exactly. Subsequent diagnostic
+    // emission consults arch::PanicFrameLast() for the truthful
+    // GPR table.
+    duetos_arch_PanicCaptureShim();
+
     // Probe before disabling interrupts so the log line hits the
     // ring buffer with a valid timestamp. Armed-log by default —
     // `[probe] panic.enter rip=...` tells you who called Panic.
@@ -873,6 +1054,8 @@ void Panic(const char* subsystem, const char* message)
         arch::SerialWrite(": ");
         arch::SerialWrite(message);
         arch::SerialWrite(" — short-circuiting\n");
+        if (duetos::diag::PanicWaitArmed())
+            duetos::diag::PanicWaitForDebugger();
         arch::Halt();
     }
     arch::PanicInProgressMark();
@@ -929,6 +1112,7 @@ void Panic(const char* subsystem, const char* message)
     // walker then climbs up through the caller.
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
     DumpPeerCpuSnapshots();
+    duetos::diag::TlbHistoryDump();
     DumpEventTraceTail();
 
     EndCrashDump();
@@ -962,11 +1146,20 @@ void Panic(const char* subsystem, const char* message)
     {
         arch::TestExit(duetos::diag::EncodeExit(duetos::diag::BootExitCode::Panic, duetos::diag::BootPhaseCurrent()));
     }
+    // panic_wait=gdb cmdline: stop for GDB attach instead of
+    // halting silently. Smoke profiles skip this gate (they
+    // need the TestExit-driven CI fast-fail above) — the wait
+    // is for interactive / real-HW investigation only.
+    if (duetos::diag::PanicWaitArmed())
+        duetos::diag::PanicWaitForDebugger();
     arch::Halt();
 }
 
 void PanicWithValue(const char* subsystem, const char* message, u64 value)
 {
+    // Frozen-state capture — see Panic() for rationale.
+    duetos_arch_PanicCaptureShim();
+
     arch::Cli();
 
     // Recursive-panic short-circuit — see Panic() for rationale.
@@ -1012,6 +1205,7 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
 
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
     DumpPeerCpuSnapshots();
+    duetos::diag::TlbHistoryDump();
     DumpEventTraceTail();
 
     EndCrashDump();
@@ -1043,6 +1237,12 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     {
         arch::TestExit(duetos::diag::EncodeExit(duetos::diag::BootExitCode::Panic, duetos::diag::BootPhaseCurrent()));
     }
+    // panic_wait=gdb cmdline: stop for GDB attach instead of
+    // halting silently. Smoke profiles skip this gate (they
+    // need the TestExit-driven CI fast-fail above) — the wait
+    // is for interactive / real-HW investigation only.
+    if (duetos::diag::PanicWaitArmed())
+        duetos::diag::PanicWaitForDebugger();
     arch::Halt();
 }
 

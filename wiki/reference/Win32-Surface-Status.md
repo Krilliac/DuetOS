@@ -132,7 +132,7 @@ calls have backing.
   `RtlEnterCriticalSection`, `RtlLeaveCriticalSection`,
   `RtlInitializeCriticalSection`,
   `RtlGetVersion`, `RtlGetCurrentDirectory_U`
-- `__chkstk` (no-op — PeLoad maps the stack up front)
+- `__chkstk` (REAL — page-by-page probe in `userland/libs/ntdll/chkstk.S`; mirrors the kernel-side bytecode thunk `kOffChkStk`)
 
 **STUB / NOT_IMPL (covered by `NtReturnNotImpl` alias chain):**
 the long tail of NT (NtCreateFile, NtReadFile, NtWriteFile,
@@ -1052,10 +1052,11 @@ fresh value at load time.
 
 CFG / XFG facade (T9-03): `_guard_check_icall` /
 `_guard_xfg_check_icall` are no-op; `_guard_dispatch_icall`
-/ `_guard_xfg_dispatch_icall` are naked `jmp *%rax` so the
-indirect target the compiler placed in `rax` runs without
-guard enforcement. Bitmap enforcement is GAP — see the
-roadmap note.
+/ `_guard_xfg_dispatch_icall` live in
+`userland/libs/vcruntime140/guard_icall.S` — both are `jmpq
+*%rax` (trust-the-target). Bitmap enforcement is GAP — see
+the roadmap note. // GAP: per-image CFG/XFG bitmap walk —
+lands with the image-load-config slice.
 
 **Thunked imports (auto-generated from `kernel/subsystems/win32/thunks_table.inc`):**
 
@@ -2717,9 +2718,10 @@ What's still GAP for the i386 set:
   self-pointer) / `fs:[0x30]` (PEB) fault — fs base is the
   hidden GDT descriptor base, currently zero for PE32 user
   data.
-- No `__chkstk` for MSVC-built PE32s. The CRT probes the stack
-  page-by-page during startup; without an _alloca-style
-  trampoline the prologue faults at first `sub esp, large`.
+- 32-bit `_chkstk` / `__chkstk` / `_alloca_probe` are REAL —
+  `userland/libs/msvcrt_32/chkstk.S` walks ESP page by page,
+  probes each page, then adjusts ESP per MSVC's canonical
+  i386 chkstk algorithm.
 - File I/O surface stubbed throughout (`fopen` / `fread` /
   `CreateFileA` etc.). The VFS-aware PE32 spawn slice lands
   these the same time the 64-bit set gets its FS routing

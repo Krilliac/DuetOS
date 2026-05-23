@@ -44,6 +44,7 @@ SRC_FILES=(
     "${SRC_DIR}/kernel32_sync.c"
     "${SRC_DIR}/kernel32_fs.c"
     "${SRC_DIR}/kernel32_psapi.c"
+    "${SRC_DIR}/seh_capture.S"
 )
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/kernel32"
@@ -55,7 +56,14 @@ LLD_LINK="${LLD_LINK:-lld-link}"
 
 OBJS=()
 for src in "${SRC_FILES[@]}"; do
-    obj="${WORK_DIR}/$(basename "${src}" .c).obj"
+    # Strip both .c and .S to derive the object basename.
+    base="$(basename "${src}")"
+    base="${base%.c}"
+    base="${base%.S}"
+    obj="${WORK_DIR}/${base}.obj"
+    # .S files go through the same clang invocation — the
+    # integrated assembler handles them; the C-only flags below
+    # are accepted-and-ignored for assembly input.
     "${CLANG}" \
         --target=x86_64-pc-windows-msvc \
         -c \

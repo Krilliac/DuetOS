@@ -81,6 +81,12 @@ list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^mm/multiboot2_rust/(tar
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/wifi80211_rust/(target|cargo-target|wifi80211-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/hci_rust/(target|cargo-target|hci-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^rust/(target|cargo-target|duetos-kernel-rust-cargo-target)/")
+# AArch64 starter files (boot.S, exceptions.S, context_switch.S,
+# usermode.S, syscall_entry.S) — second-tier-pillar surface that
+# does not yet build into a runnable kernel. Exclude from the
+# x86_64 kernel image; the assemble-verify rule below proves the
+# files are valid AArch64 without trying to link a kernel.
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^arch/aarch64/")
 
 # security/stack_canary.cpp provides __stack_chk_fail and the
 # RandomizeStackCanary helper. The latter updates the cookie at
@@ -794,6 +800,7 @@ duetos_embed_blob(generated_kernel32_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_sync.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_fs.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_psapi.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/seh_capture.S"
     COMMENT "Compiling + embedding kernel32.dll (split into per-domain TUs)")
 
 # 32-bit kernel32 companion — PE32 (i386) DLL, preloaded into PE32
@@ -809,7 +816,22 @@ duetos_embed_blob(generated_kernel32_32_dll.h
 duetos_embed_blob(generated_msvcrt_32_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-msvcrt-32-dll.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/msvcrt_32.c"
+    EXTRA_DEPS
+        "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/msvcrt_32.def"
+        "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/chkstk.S"
     COMMENT "Compiling + embedding msvcrt_32.dll (i386 PE32 companion)")
+
+# Linux vDSO blob — one executable page mapped into every Linux
+# ELF process. Currently exports __kernel_rt_sigreturn at offset
+# 0 so the signal-delivery path has a fallback restorer when the
+# caller's sigaction omits SA_RESTORER. See
+# kernel/subsystems/linux/vdso/vdso.S for the full layout.
+duetos_embed_blob(generated_linux_vdso.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-linux-vdso.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/kernel/subsystems/linux/vdso/vdso.S"
+    EXTRA_DEPS
+        "${CMAKE_SOURCE_DIR}/kernel/subsystems/linux/vdso/vdso.lds"
+    COMMENT "Assembling + embedding Linux vDSO blob (rt_sigreturn trampoline)")
 
 # 32-bit stub DLLs. Each takes (dll_name, base_va, symbol_name) and
 # produces a PE32 (i386) DLL whose Export Name field matches the
@@ -847,6 +869,8 @@ duetos_embed_blob(generated_vcruntime140_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-vcruntime140-dll.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/vcruntime140.c"
     EXTRA_DEPS
+        "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/chkstk.S"
+        "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/guard_icall.S"
         "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h"
     COMMENT "Compiling + embedding vcruntime140.dll (C++ EH personality + memops; links ntdll.lib)")
 
@@ -867,6 +891,9 @@ duetos_embed_blob(generated_ntdll_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_facades.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_token.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_bulk.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/chkstk.S"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/seh_trampolines.S"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ki_user_dispatchers.S"
     COMMENT "Compiling + embedding ntdll.dll (split into per-domain TUs)")
 
 # seh_try_pe.exe — real MSVC __try/__except/__finally over CPU
@@ -1463,4 +1490,43 @@ if(GRUB_MKRESCUE AND XORRISO)
 else()
     message(STATUS "duetos-iso target disabled (grub-mkrescue or xorriso not found).")
     message(STATUS "  Install with: sudo apt-get install -y grub-common grub-pc-bin xorriso mtools")
+endif()
+
+# ----------------------------------------------------------------------------
+# AArch64 assemble-verify target.
+#
+# The second-tier-pillar starter set (kernel/arch/aarch64/*.S) does
+# not yet build into a runnable kernel — the C++ side that
+# AArch64UserSyncException / KernelMainAArch64 / AArch64SyscallDispatch
+# resolves to hasn't been written. But the .S files must stay
+# valid AArch64 asm so a future kernel slice picks up clean
+# code rather than rotted syntax. This rule assembles each
+# file with clang's built-in aarch64 backend (no system cross-
+# toolchain needed) and just checks the .o appears non-empty.
+# Drives off `make duetos-aarch64-asm-verify` or as a dependency
+# of `all`.
+# ----------------------------------------------------------------------------
+file(GLOB DUETOS_AARCH64_SOURCES CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/arch/aarch64/*.S")
+
+if(DUETOS_AARCH64_SOURCES)
+    set(_aarch64_objs)
+    foreach(_aa_src IN LISTS DUETOS_AARCH64_SOURCES)
+        get_filename_component(_aa_name "${_aa_src}" NAME_WE)
+        set(_aa_obj "${CMAKE_CURRENT_BINARY_DIR}/aarch64-verify/${_aa_name}.o")
+        add_custom_command(
+            OUTPUT  "${_aa_obj}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/aarch64-verify"
+            COMMAND ${CMAKE_C_COMPILER} --target=aarch64-elf
+                                        -ffreestanding -nostdinc
+                                        -c "${_aa_src}" -o "${_aa_obj}"
+            DEPENDS "${_aa_src}"
+            COMMENT "AArch64 assemble-verify: ${_aa_name}.S"
+            VERBATIM)
+        list(APPEND _aarch64_objs "${_aa_obj}")
+    endforeach()
+    add_custom_target(duetos-aarch64-asm-verify ALL
+        DEPENDS ${_aarch64_objs})
+else()
+    message(STATUS "duetos-aarch64-asm-verify target disabled (no kernel/arch/aarch64/*.S).")
 endif()

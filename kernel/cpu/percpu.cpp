@@ -29,6 +29,12 @@ constinit PerCpu g_bsp_percpu = {
     .panic_snapshot_rip = 0,
     .panic_snapshot_rsp = 0,
     .panic_snapshot_task = nullptr,
+    .panic_snapshot_cr2 = 0,
+    .panic_snapshot_rflags = 0,
+    .panic_snapshot_irq_depth = 0,
+    .panic_snapshot_held_lock_count = 0,
+    .panic_snapshot_topmost_lock_acq_rip = 0,
+    .panic_snapshot_topmost_lock_addr = nullptr,
     .held_locks_count = 0,
     ._pad3 = 0,
     .held_locks = {},
@@ -48,6 +54,7 @@ constinit PerCpu g_bsp_percpu = {
     .runq_tail_idle = nullptr,
     .tss = nullptr,
     .cluster_id = 0,
+    .online = false, // PerCpuInitBsp flips this to true after the BSP installs itself
     ._pad_topo = {},
     .runq_normal_len = 0,
     ._pad_runq_len = {},
@@ -56,6 +63,9 @@ constinit PerCpu g_bsp_percpu = {
     .sched_tasks_blocked = 0,
     .sched_tasks_created = 0,
     .sched_tasks_reaped = 0,
+    .idle_task = nullptr,     // published by SchedStartIdle on each CPU
+    .scheduler_ready = false, // flipped to true at the end of SchedStartIdle / SchedEnterOnAp
+    ._pad_sched_ready = {},
 };
 
 // One-shot flag so CurrentCpuIdOrBsp can return a sane value before

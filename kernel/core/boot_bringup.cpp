@@ -203,6 +203,7 @@
 #include "diag/event_trace.h"
 #include "diag/fault_inject.h"
 #include "diag/fault_react.h"
+#include "diag/panic_wait.h"
 #include "diag/fix_journal.h"
 #include "diag/fix_journal_persist.h"
 #include "diag/gdb_server.h"
@@ -2733,6 +2734,12 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         SerialWrite(cmdline);
         SerialWrite("\"\n");
     }
+    // panic_wait=gdb cmdline arms the panic-wait gate so a
+    // panic later in boot stops for GDB attach instead of
+    // halting. Cheap latch — bool write. Done here (right
+    // after the cmdline is logged) so anything in BootBringup*
+    // that can panic benefits from it.
+    duetos::diag::PanicWaitInitFromCmdline(cmdline);
     // Pick up the A/B boot-slot hand-off from the bootloader. `slot=a`
     // or `slot=b` overrides the default; absence is treated as
     // slot=a (the boot_slot::Default fallback). Once SetCurrentState
