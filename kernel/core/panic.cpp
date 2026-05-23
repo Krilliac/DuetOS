@@ -808,6 +808,22 @@ void BeginCrashDump(const char* subsystem, const char* message, const u64* optio
         WriteLabelled("value    ", *optional_value);
     }
     WriteLabelled("symtab_entries", SymbolTableSize());
+
+    // Reproducer sidecar — build identity inline in the crash
+    // dump so a host-side reader pairs the dump with the exact
+    // kernel binary that produced it. Three short lines: git
+    // commit hash (suffix `+` = locally modified), build date
+    // (UTC ISO 8601), kernel git branch. The full minidump
+    // format extension (custom DuetOS-stream with cmdline, RNG
+    // seed, etc.) is a separate slice — these serial lines are
+    // the cheap version that needs no format change.
+    arch::SerialWrite("  build.commit : ");
+    arch::SerialWrite(DUETOS_GIT_HASH);
+    arch::SerialWrite("\n  build.date   : ");
+    arch::SerialWrite(DUETOS_BUILD_DATE);
+    arch::SerialWrite("\n  build.branch : ");
+    arch::SerialWrite(DUETOS_GIT_BRANCH);
+    arch::SerialWrite("\n");
 }
 
 void EndCrashDump()
