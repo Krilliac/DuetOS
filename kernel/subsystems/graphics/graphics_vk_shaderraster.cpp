@@ -292,7 +292,8 @@ bool ClipToPixel(const u32 pos_bits[4], u32 fb_w, u32 fb_h, i32* px_out, i32* py
 // linearly via barycentric weights and hands the result to the
 // fragment shader as Input Location N.
 void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Program* fs, u32 fb_w, u32 fb_h,
-                   const VaryingSnapshot* varyings_per_vertex, u32 varying_n, const u32* inv_w_per_vertex_bits)
+                   const VaryingSnapshot* varyings_per_vertex, u32 varying_n, const u32* inv_w_per_vertex_bits,
+                   const u32* z_per_vertex_bits)
 {
     // Bounding box clipped to framebuffer extent.
     i32 minx = ax;
@@ -369,6 +370,22 @@ void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Progra
     // recover the correct attribute. Without inv_w, the path
     // falls back to affine (linear-in-screen-space) interpolation.
     const bool persp = (inv_w_per_vertex_bits != nullptr);
+
+    // Depth-test precompute. When `z_per_vertex_bits` is non-null
+    // and the shared software depth surface allocates cleanly,
+    // each fragment computes its barycentric-interpolated Z (in
+    // NDC space, [-1, 1]) and tests it against the surface
+    // before invoking the FS. v3 uses LessOrEqual + writes; a
+    // future slice can plumb the per-pipeline compare op.
+    DepthSurface* dsurf = (z_per_vertex_bits != nullptr) ? DepthSurfaceGetOrAlloc() : nullptr;
+    const bool depth_test = (dsurf != nullptr);
+    Sf32 z0{0}, z1{0}, z2{0};
+    if (depth_test)
+    {
+        z0 = Sf32FromBits(z_per_vertex_bits[0]);
+        z1 = Sf32FromBits(z_per_vertex_bits[1]);
+        z2 = Sf32FromBits(z_per_vertex_bits[2]);
+    }
     Sf32 inv_w0{0}, inv_w1{0}, inv_w2{0};
     VaryingSnapshot vdivw[3 * kMaxVaryings]{};
     if (persp)
@@ -406,6 +423,47 @@ void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Progra
                 continue;
             pixel_xy[0] = static_cast<u32>(px);
             pixel_xy[1] = static_cast<u32>(py);
+
+            // Depth test (when enabled): compute the interpolated
+            // Z, map from NDC [-1, 1] to depth surface [0, 0xFFFF],
+            // compare against the stored value, write on pass.
+            if (depth_test)
+            {
+                const u64 aw0 = (w0 < 0) ? static_cast<u64>(-w0) : static_cast<u64>(w0);
+                const u64 aw1 = (w1 < 0) ? static_cast<u64>(-w1) : static_cast<u64>(w1);
+                const u64 aw2 = (w2 < 0) ? static_cast<u64>(-w2) : static_cast<u64>(w2);
+                // Use a scaled-int barycentric without the Sf32 cost:
+                // sum(|w|) == |area2|.
+                if (abs_area == 0)
+                    continue;
+                // Z in NDC: linearly interpolate without perspective
+                // (Vulkan/GL depth is interpolated linearly in screen
+                // space — perspective-correct Z lands when the
+                // pipeline carries a real depth-range descriptor).
+                const Sf32 inv_a = inv_area;
+                const Sf32 bw0z =
+                    ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw0)), inv_a);
+                const Sf32 bw1z =
+                    ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw1)), inv_a);
+                const Sf32 bw2z =
+                    ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw2)), inv_a);
+                const Sf32 z_pix = BaryLerp(z0, z1, z2, bw0z, bw1z, bw2z);
+                // Map NDC [-1, 1] -> [0, 0xFFFF]. clamp first.
+                Sf32 z_clamped = ::duetos::core::Sf32Clamp(z_pix, ::duetos::core::Sf32NegOne(),
+                                                           ::duetos::core::Sf32One());
+                const Sf32 half = ::duetos::core::Sf32FromBits(0x3F000000u); // 0.5
+                const Sf32 mapped = ::duetos::core::Sf32Mul(
+                    ::duetos::core::Sf32Add(z_clamped, ::duetos::core::Sf32One()),
+                    ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(0xFFFFu), half));
+                const i32 z_int = ::duetos::core::Sf32ToI32(mapped);
+                u16 z_new = (z_int < 0) ? 0u : (z_int > 0xFFFF ? 0xFFFFu : static_cast<u16>(z_int));
+                const u64 zi = static_cast<u64>(py) * dsurf->w + px;
+                if (zi >= static_cast<u64>(dsurf->w) * dsurf->h)
+                    continue;
+                if (z_new > dsurf->data[zi])
+                    continue; // LessOrEqual fails
+                dsurf->data[zi] = z_new;
+            }
 
             // Normalise barycentric weights. The unsigned edge
             // magnitudes opposite each vertex sum to |area2|; dividing
@@ -629,6 +687,7 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
         // affine interpolation handles those cases without
         // introducing artefacts.
         u32 inv_w_bits[3]{};
+        u32 z_bits[3]{};
         bool ortho = false;
         for (u32 v = 0; v < 3; ++v)
         {
@@ -639,9 +698,17 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
                 break;
             }
             inv_w_bits[v] = Sf32ToBits(::duetos::core::Sf32Div(::duetos::core::Sf32One(), w));
+            // Z/W gives the perspective-divided depth in NDC space.
+            // The depth-test path maps NDC [-1, 1] -> the software
+            // depth surface's [0, 0xFFFF] range.
+            z_bits[v] =
+                Sf32ToBits(::duetos::core::Sf32Div(Sf32FromBits(pos[v][2]), w));
         }
+        // Pass z only when perspective is valid — orthographic
+        // projections can layer Z later via the v0 raster's depth
+        // path when needed.
         PaintTriangle(px[0], py[0], px[1], py[1], px[2], py[2], fs, fb_w, fb_h, packed, vary_n_use,
-                      ortho ? nullptr : inv_w_bits);
+                      ortho ? nullptr : inv_w_bits, ortho ? nullptr : z_bits);
     }
     ++g_shader_raster_draws_painted;
     return true;

@@ -156,6 +156,37 @@ u64 OpGetInstanceVersion(arch::TrapFrame* frame)
     return (r == vk::VkResult::Success) ? 1 : 0;
 }
 
+u64 OpCreateSurfaceDuet(arch::TrapFrame* frame)
+{
+    const u64 inst = frame->rdx;
+    const u64 out_ptr = frame->r10;
+    vk::VkSurfaceKHR surf = 0;
+    const vk::VkResult r = vk::VkCreateDuetSurfaceKHR(inst, &surf);
+    if (r != vk::VkResult::Success)
+        return 0;
+    UserStore<u64>(out_ptr, surf);
+    return 1;
+}
+
+u64 OpDestroySurface(arch::TrapFrame* frame)
+{
+    vk::VkDestroySurfaceKHR(frame->rdx, frame->r10);
+    return 1;
+}
+
+u64 OpPresent(arch::TrapFrame* frame)
+{
+    (void)frame;
+    // Flush whatever the userland has drawn into the framebuffer.
+    // The Vulkan vkQueuePresentKHR path normally does this via
+    // FramebufferPresent on the swapchain image; the simplified v0
+    // syscall just fires the present hook directly so a userland
+    // PE that wrote pixels via DuetOS_Vk_ClearFramebufferRgba can
+    // hand them off to the compositor for display.
+    ::duetos::drivers::video::FramebufferPresent();
+    return 1;
+}
+
 u64 OpClearFramebufferRgba(arch::TrapFrame* frame)
 {
     // rsi = packed 0xAARRGGBB. Drive the same path that
@@ -228,8 +259,11 @@ void DoVkCall(arch::TrapFrame* frame)
     using ::duetos::core::kVkOpEnumeratePhysicalDevices;
     using ::duetos::core::kVkOpGetDeviceQueue;
     using ::duetos::core::kVkOpClearFramebufferRgba;
+    using ::duetos::core::kVkOpCreateSurfaceDuet;
+    using ::duetos::core::kVkOpDestroySurface;
     using ::duetos::core::kVkOpGetInstanceVersion;
     using ::duetos::core::kVkOpGetStatsCounter;
+    using ::duetos::core::kVkOpPresent;
     using ::duetos::core::kVkOpQueueWaitIdle;
     const u64 op = frame->rdi;
     switch (static_cast<::duetos::core::VkOp>(op))
@@ -266,6 +300,15 @@ void DoVkCall(arch::TrapFrame* frame)
         return;
     case kVkOpClearFramebufferRgba:
         frame->rax = OpClearFramebufferRgba(frame);
+        return;
+    case kVkOpCreateSurfaceDuet:
+        frame->rax = OpCreateSurfaceDuet(frame);
+        return;
+    case kVkOpDestroySurface:
+        frame->rax = OpDestroySurface(frame);
+        return;
+    case kVkOpPresent:
+        frame->rax = OpPresent(frame);
         return;
     }
     frame->rax = kVkBadOp;

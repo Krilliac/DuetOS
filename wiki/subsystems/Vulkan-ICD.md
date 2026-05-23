@@ -487,6 +487,9 @@ syscall whose `rdi` argument selects which `VkOp` to invoke.
 | `vkGetDeviceProcAddr` | same table |
 | `DuetOS_Vk_GetStatsCounter` | `kVkOpGetStatsCounter` (diagnostic) |
 | `DuetOS_Vk_ClearFramebufferRgba` | `kVkOpClearFramebufferRgba` (end-to-end clear-the-screen — same path `vkCmdClearColorImage` takes for a scanout image) |
+| `DuetOS_Vk_CreateSurface` | `kVkOpCreateSurfaceDuet` (the kernel's single platform-agnostic VkSurfaceKHR bound to the framebuffer) |
+| `DuetOS_Vk_DestroySurface` | `kVkOpDestroySurface` |
+| `DuetOS_Vk_Present` | `kVkOpPresent` (flushes framebuffer through the compositor present hook — equivalent to `vkQueuePresentKHR` on a single-image swapchain) |
 
 `SYS_VK_CALL` plus `VkOp` / `VkStatsCounter` enums are in
 [`kernel/syscall/syscall.h`](../../kernel/syscall/syscall.h);

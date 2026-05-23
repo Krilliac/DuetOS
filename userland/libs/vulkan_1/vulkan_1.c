@@ -125,6 +125,9 @@ enum
     VkOp_GetInstanceVersion = 8,
     VkOp_GetStatsCounter = 9,
     VkOp_ClearFramebufferRgba = 10,
+    VkOp_CreateSurfaceDuet = 11,
+    VkOp_DestroySurface = 12,
+    VkOp_Present = 13,
 };
 
 /* ---------------------------------------------------------------- *
@@ -284,4 +287,35 @@ UINT64 DuetOS_Vk_GetStatsCounter(UINT32 counter_id)
 INT DuetOS_Vk_ClearFramebufferRgba(DWORD argb)
 {
     return (INT)vk_syscall1(VkOp_ClearFramebufferRgba, (long long)argb);
+}
+
+/* DuetOS-only WSI v0 thunks. The full vkCreateSwapchainKHR /
+ * vkAcquireNextImageKHR / vkQueuePresentKHR ladder needs
+ * shared-memory marshalling that v0 SYS_VK_CALL doesn't cover;
+ * for now the simpler "create a Duet-flavoured surface + flush
+ * the framebuffer" pair lets a Vulkan PE drive the compositor
+ * presentation path without building the full ladder. */
+
+/* Create a DuetOS Vulkan surface — the single platform-agnostic
+ * surface bound to the kernel framebuffer (see Vulkan-ICD wiki's
+ * WSI section). Returns 1 on success and writes the VkSurfaceKHR
+ * handle to *pSurfaceOut. */
+INT DuetOS_Vk_CreateSurface(VkInstance instance, UINT64* pSurfaceOut)
+{
+    if (pSurfaceOut == NULL)
+        return 0;
+    return (INT)vk_syscall3(VkOp_CreateSurfaceDuet, 0, (long long)instance, (long long)(SIZE_T)pSurfaceOut);
+}
+
+void DuetOS_Vk_DestroySurface(VkInstance instance, UINT64 surface)
+{
+    (void)vk_syscall3(VkOp_DestroySurface, 0, (long long)instance, (long long)surface);
+}
+
+/* Flush whatever's currently in the framebuffer through the
+ * compositor present hook. Equivalent to vkQueuePresentKHR on a
+ * single-image swapchain. */
+INT DuetOS_Vk_Present(void)
+{
+    return (INT)vk_syscall1(VkOp_Present, 0);
 }

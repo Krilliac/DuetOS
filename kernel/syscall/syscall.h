@@ -2192,6 +2192,12 @@ enum VkOp : u64
     // Instance->Device->CmdBuf->Submit ladder by hand. rsi = packed
     // 0xAARRGGBB color word.
     kVkOpClearFramebufferRgba = 10,
+    // WSI ops — minimal "open a surface, present pixels" set so a
+    // userland Vulkan PE can drive the compositor without
+    // building a full swapchain ladder.
+    kVkOpCreateSurfaceDuet = 11, // rdx = instance, r10 = VkSurfaceKHR* out
+    kVkOpDestroySurface = 12,    // rdx = instance, r10 = surface
+    kVkOpPresent = 13,           // rdx = packed argb (currently ignored); flushes the framebuffer
 };
 
 // Diagnostic counter IDs for kVkOpGetStatsCounter. Exposes the
