@@ -887,6 +887,7 @@ duetos_embed_blob(generated_ntdll_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_bulk.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/chkstk.S"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/seh_trampolines.S"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ki_user_dispatchers.S"
     COMMENT "Compiling + embedding ntdll.dll (split into per-domain TUs)")
 
 # seh_try_pe.exe — real MSVC __try/__except/__finally over CPU

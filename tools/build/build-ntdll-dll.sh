@@ -39,6 +39,7 @@ SRC_FILES=(
     "${SRC_DIR}/ntdll_bulk.c"
     "${SRC_DIR}/chkstk.S"
     "${SRC_DIR}/seh_trampolines.S"
+    "${SRC_DIR}/ki_user_dispatchers.S"
 )
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/ntdll"
@@ -796,6 +797,8 @@ set +e
     /export:RtlUnwindEx \
     /export:RtlRestoreContext \
     /export:KiUserExceptionDispatcher \
+    /export:KiUserApcDispatcher \
+    /export:KiUserCallbackDispatcher \
     /export:__C_specific_handler \
     /export:RtlAddVectoredExceptionHandler \
     /export:RtlRemoveVectoredExceptionHandler \
