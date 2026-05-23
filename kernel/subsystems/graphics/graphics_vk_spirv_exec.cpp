@@ -6,7 +6,8 @@
 namespace duetos::subsystems::graphics::internal
 {
 u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits);
-}
+bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
+} // namespace duetos::subsystems::graphics::internal
 
 /*
  * DuetOS — SPIR-V interpreter, execution engine.
@@ -82,6 +83,8 @@ constexpr u16 kOpFunctionCall = 57;
 constexpr u16 kOpSampledImage = 86;
 constexpr u16 kOpImageSampleImplicitLod = 87;
 constexpr u16 kOpImageSampleExplicitLod = 88;
+constexpr u16 kOpImageQuerySize = 104;
+constexpr u16 kOpImageQuerySizeLod = 103;
 // Boolean + selection opcodes.
 constexpr u16 kOpAny = 154;
 constexpr u16 kOpAll = 155;
@@ -115,8 +118,36 @@ constexpr u16 kOpMatrixTimesVector = 145;
 constexpr u16 kOpDot = 148;
 constexpr u16 kOpIEqual = 170;
 constexpr u16 kOpINotEqual = 171;
+constexpr u16 kOpULessThan = 176;
 constexpr u16 kOpSLessThan = 177;
+constexpr u16 kOpUGreaterThan = 172;
+constexpr u16 kOpSGreaterThan = 173;
+constexpr u16 kOpULessThanEqual = 178;
+constexpr u16 kOpSLessThanEqual = 179;
+constexpr u16 kOpUGreaterThanEqual = 174;
+constexpr u16 kOpSGreaterThanEqual = 175;
+constexpr u16 kOpFOrdEqual = 180;
+constexpr u16 kOpFOrdNotEqual = 182;
 constexpr u16 kOpFOrdLessThan = 184;
+constexpr u16 kOpFOrdGreaterThan = 186;
+constexpr u16 kOpFOrdLessThanEqual = 188;
+constexpr u16 kOpFOrdGreaterThanEqual = 190;
+// Bitwise / logical / shifts.
+constexpr u16 kOpShiftRightLogical = 194;
+constexpr u16 kOpShiftRightArithmetic = 195;
+constexpr u16 kOpShiftLeftLogical = 196;
+constexpr u16 kOpBitwiseOr = 197;
+constexpr u16 kOpBitwiseXor = 198;
+constexpr u16 kOpBitwiseAnd = 199;
+constexpr u16 kOpNot = 200; // ~x
+constexpr u16 kOpLogicalEqual = 164;
+constexpr u16 kOpLogicalNotEqual = 165;
+constexpr u16 kOpLogicalOr = 166;
+constexpr u16 kOpLogicalAnd = 167;
+constexpr u16 kOpLogicalNot = 168;
+constexpr u16 kOpUMod = 137;
+constexpr u16 kOpSMod = 139;
+constexpr u16 kOpSRem = 138;
 constexpr u16 kOpPhi = 245;
 constexpr u16 kOpLoopMerge = 246;
 constexpr u16 kOpSelectionMerge = 247;
@@ -349,8 +380,63 @@ void DoBinaryIntOp(ExecContext& ec, u16 op, u32 type_id, u32 result_id, u32 a_id
         case kOpUDiv:
             r[i] = (b[i] == 0) ? 0u : (a[i] / b[i]);
             break;
+        case kOpUMod:
+            r[i] = (b[i] == 0) ? 0u : (a[i] % b[i]);
+            break;
+        case kOpSMod:
+        {
+            if (bi == 0)
+            {
+                r[i] = 0;
+                break;
+            }
+            // GLSL `mod` semantics: result has same sign as divisor.
+            const i32 q = ai % bi;
+            const i32 m = ((q != 0) && ((q < 0) != (bi < 0))) ? q + bi : q;
+            r[i] = static_cast<u32>(m);
+            break;
+        }
+        case kOpSRem:
+            r[i] = (bi == 0) ? 0u : static_cast<u32>(ai % bi); // C remainder semantics
+            break;
         case kOpSNegate:
             r[i] = static_cast<u32>(-ai);
+            break;
+        case kOpNot:
+            r[i] = ~a[i];
+            break;
+        case kOpBitwiseAnd:
+            r[i] = a[i] & b[i];
+            break;
+        case kOpBitwiseOr:
+            r[i] = a[i] | b[i];
+            break;
+        case kOpBitwiseXor:
+            r[i] = a[i] ^ b[i];
+            break;
+        case kOpShiftLeftLogical:
+            r[i] = (b[i] >= 32u) ? 0u : (a[i] << b[i]);
+            break;
+        case kOpShiftRightLogical:
+            r[i] = (b[i] >= 32u) ? 0u : (a[i] >> b[i]);
+            break;
+        case kOpShiftRightArithmetic:
+            r[i] = (b[i] >= 32u) ? (ai < 0 ? 0xFFFFFFFFu : 0u) : static_cast<u32>(ai >> b[i]);
+            break;
+        case kOpLogicalEqual:
+            r[i] = ((a[i] != 0) == (b[i] != 0)) ? 1u : 0u;
+            break;
+        case kOpLogicalNotEqual:
+            r[i] = ((a[i] != 0) != (b[i] != 0)) ? 1u : 0u;
+            break;
+        case kOpLogicalAnd:
+            r[i] = ((a[i] != 0) && (b[i] != 0)) ? 1u : 0u;
+            break;
+        case kOpLogicalOr:
+            r[i] = ((a[i] != 0) || (b[i] != 0)) ? 1u : 0u;
+            break;
+        case kOpLogicalNot:
+            r[i] = (a[i] == 0) ? 1u : 0u;
             break;
         case kOpIEqual:
             r[i] = (a[i] == b[i]) ? 1u : 0u;
@@ -358,8 +444,29 @@ void DoBinaryIntOp(ExecContext& ec, u16 op, u32 type_id, u32 result_id, u32 a_id
         case kOpINotEqual:
             r[i] = (a[i] != b[i]) ? 1u : 0u;
             break;
+        case kOpULessThan:
+            r[i] = (a[i] < b[i]) ? 1u : 0u;
+            break;
         case kOpSLessThan:
             r[i] = (ai < bi) ? 1u : 0u;
+            break;
+        case kOpUGreaterThan:
+            r[i] = (a[i] > b[i]) ? 1u : 0u;
+            break;
+        case kOpSGreaterThan:
+            r[i] = (ai > bi) ? 1u : 0u;
+            break;
+        case kOpULessThanEqual:
+            r[i] = (a[i] <= b[i]) ? 1u : 0u;
+            break;
+        case kOpSLessThanEqual:
+            r[i] = (ai <= bi) ? 1u : 0u;
+            break;
+        case kOpUGreaterThanEqual:
+            r[i] = (a[i] >= b[i]) ? 1u : 0u;
+            break;
+        case kOpSGreaterThanEqual:
+            r[i] = (ai >= bi) ? 1u : 0u;
             break;
         default:
             r[i] = 0;
@@ -398,6 +505,21 @@ void DoBinaryFloatOp(ExecContext& ec, u16 op, u32 type_id, u32 result_id, u32 a_
             break;
         case kOpFOrdLessThan:
             r[i] = ::duetos::core::Sf32LessThan(af, bf) ? 1u : 0u;
+            continue;
+        case kOpFOrdGreaterThan:
+            r[i] = ::duetos::core::Sf32GreaterThan(af, bf) ? 1u : 0u;
+            continue;
+        case kOpFOrdLessThanEqual:
+            r[i] = ::duetos::core::Sf32LessOrEqual(af, bf) ? 1u : 0u;
+            continue;
+        case kOpFOrdGreaterThanEqual:
+            r[i] = ::duetos::core::Sf32GreaterOrEqual(af, bf) ? 1u : 0u;
+            continue;
+        case kOpFOrdEqual:
+            r[i] = ::duetos::core::Sf32Equal(af, bf) ? 1u : 0u;
+            continue;
+        case kOpFOrdNotEqual:
+            r[i] = ::duetos::core::Sf32NotEqual(af, bf) ? 1u : 0u;
             continue;
         default:
             break;
@@ -901,13 +1023,35 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
         case kOpIMul:
         case kOpSDiv:
         case kOpUDiv:
+        case kOpUMod:
+        case kOpSMod:
+        case kOpSRem:
         case kOpIEqual:
         case kOpINotEqual:
+        case kOpULessThan:
         case kOpSLessThan:
+        case kOpUGreaterThan:
+        case kOpSGreaterThan:
+        case kOpULessThanEqual:
+        case kOpSLessThanEqual:
+        case kOpUGreaterThanEqual:
+        case kOpSGreaterThanEqual:
+        case kOpBitwiseAnd:
+        case kOpBitwiseOr:
+        case kOpBitwiseXor:
+        case kOpShiftLeftLogical:
+        case kOpShiftRightLogical:
+        case kOpShiftRightArithmetic:
+        case kOpLogicalEqual:
+        case kOpLogicalNotEqual:
+        case kOpLogicalAnd:
+        case kOpLogicalOr:
             if (wc >= 5)
                 DoBinaryIntOp(ec, op, tid, rid, w[3], w[4]);
             break;
         case kOpSNegate:
+        case kOpNot:
+        case kOpLogicalNot:
             if (wc >= 4)
                 DoBinaryIntOp(ec, op, tid, rid, w[3], w[3]);
             break;
@@ -916,6 +1060,11 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
         case kOpFMul:
         case kOpFDiv:
         case kOpFOrdLessThan:
+        case kOpFOrdGreaterThan:
+        case kOpFOrdLessThanEqual:
+        case kOpFOrdGreaterThanEqual:
+        case kOpFOrdEqual:
+        case kOpFOrdNotEqual:
             if (wc >= 5)
                 DoBinaryFloatOp(ec, op, tid, rid, w[3], w[4]);
             break;
@@ -980,6 +1129,23 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
             if (wc >= 4)
                 SetScalar(ec, rid, tid, w[3]);
             break;
+        case kOpImageQuerySize:
+        case kOpImageQuerySizeLod:
+        {
+            // Operands: (T, R, image, [lod]). v0 ignores LOD (no
+            // mipmaps yet). Returns ivec2 / ivec3 of the image
+            // extent via descriptor lookup.
+            if (wc >= 4)
+            {
+                const u64 bound = LookupDescriptor(ec.prog, 0, 0);
+                u32 w_dim = 0, h_dim = 0, d_dim = 0;
+                if (bound != 0)
+                    ::duetos::subsystems::graphics::internal::QueryImageSize(bound, &w_dim, &h_dim, &d_dim);
+                u32 r3[3] = {w_dim, h_dim, d_dim};
+                StoreResultComponents(ec, rid, tid, r3, 3);
+            }
+            break;
+        }
         case kOpImageSampleImplicitLod:
         case kOpImageSampleExplicitLod:
         {

@@ -577,6 +577,41 @@ bool ResolveVertexBuffer(const RasterState& st, const u8** base, u64* size)
 // Public surface used by the executor + the cmd-buffer replay.
 // --------------------------------------------------------------
 
+bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d)
+{
+    if (resource_handle == 0)
+        return false;
+    VkImage img = 0;
+    if (HandleInRange(resource_handle, kImageViewBase))
+    {
+        const u32 slot = SlotOf(resource_handle, kImageViewBase);
+        if (!PoolIsLive(g_imageview_pool, slot))
+            return false;
+        img = g_imageview_data[slot].image;
+    }
+    else if (HandleInRange(resource_handle, kImageBase))
+    {
+        img = resource_handle;
+    }
+    else
+    {
+        return false;
+    }
+    if (!HandleInRange(img, kImageBase))
+        return false;
+    const u32 islot = SlotOf(img, kImageBase);
+    if (!PoolIsLive(g_image_pool, islot))
+        return false;
+    const ImageRecord& rec = g_image_data[islot];
+    if (out_w)
+        *out_w = rec.extent.width;
+    if (out_h)
+        *out_h = rec.extent.height;
+    if (out_d)
+        *out_d = rec.extent.depth;
+    return true;
+}
+
 u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits)
 {
     if (resource_handle == 0)
@@ -607,20 +642,79 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits)
     const ImageRecord& rec = g_image_data[islot];
     if (rec.backing == nullptr || rec.extent.width == 0 || rec.extent.height == 0)
         return 0xFF000000u;
-    // Clamp UV to [0, 1], multiply by extent, truncate -> texel.
     using ::duetos::core::Sf32;
-    const Sf32 u = ::duetos::core::Sf32Clamp(Sf32{u_bits}, ::duetos::core::Sf32Zero(), ::duetos::core::Sf32One());
-    const Sf32 v = ::duetos::core::Sf32Clamp(Sf32{v_bits}, ::duetos::core::Sf32Zero(), ::duetos::core::Sf32One());
-    const i32 tx = ::duetos::core::Sf32ToI32(::duetos::core::Sf32Mul(u, ::duetos::core::Sf32FromU32(rec.extent.width - 1)));
-    const i32 ty = ::duetos::core::Sf32ToI32(::duetos::core::Sf32Mul(v, ::duetos::core::Sf32FromU32(rec.extent.height - 1)));
-    const u32 cx = (tx < 0) ? 0u : (tx >= static_cast<i32>(rec.extent.width) ? rec.extent.width - 1u : static_cast<u32>(tx));
-    const u32 cy = (ty < 0) ? 0u : (ty >= static_cast<i32>(rec.extent.height) ? rec.extent.height - 1u : static_cast<u32>(ty));
-    // 4 bytes per pixel (RGBA8); row stride = width * 4.
-    const u64 off = (static_cast<u64>(cy) * rec.extent.width + cx) * 4u;
-    const u8* p = static_cast<const u8*>(rec.backing) + off;
-    // Repack RGBA8 -> 0xAARRGGBB.
-    return (static_cast<u32>(p[3]) << 24) | (static_cast<u32>(p[0]) << 16) | (static_cast<u32>(p[1]) << 8) |
-           static_cast<u32>(p[2]);
+    using ::duetos::core::Sf32FromU32;
+    using ::duetos::core::Sf32Mul;
+    using ::duetos::core::Sf32Sub;
+    using ::duetos::core::Sf32ToI32;
+    using ::duetos::core::Sf32Clamp;
+    using ::duetos::core::Sf32Zero;
+    using ::duetos::core::Sf32One;
+
+    // Bilinear filtering: sample the 4 texels around (u*w, v*h),
+    // blend by the sub-texel weights. Clamp UV to [0, 1] (the
+    // sampler's clamp-to-edge addressing mode; REPEAT addressing
+    // lands when the Sampler descriptor exposes a wrap mode).
+    const Sf32 u = Sf32Clamp(Sf32{u_bits}, Sf32Zero(), Sf32One());
+    const Sf32 v = Sf32Clamp(Sf32{v_bits}, Sf32Zero(), Sf32One());
+    const Sf32 fx = Sf32Mul(u, Sf32FromU32(rec.extent.width - 1));
+    const Sf32 fy = Sf32Mul(v, Sf32FromU32(rec.extent.height - 1));
+    const i32 ix = Sf32ToI32(fx);
+    const i32 iy = Sf32ToI32(fy);
+    // Sub-pixel offsets (the fractional parts) become the blend weights.
+    const Sf32 fxf = Sf32Sub(fx, Sf32FromU32(static_cast<u32>(ix)));
+    const Sf32 fyf = Sf32Sub(fy, Sf32FromU32(static_cast<u32>(iy)));
+
+    auto clamp_to_extent = [&](i32 x, u32 max_w) -> u32 {
+        if (x < 0)
+            return 0;
+        if (static_cast<u32>(x) >= max_w)
+            return max_w - 1u;
+        return static_cast<u32>(x);
+    };
+    const u32 x0 = clamp_to_extent(ix, rec.extent.width);
+    const u32 y0 = clamp_to_extent(iy, rec.extent.height);
+    const u32 x1 = clamp_to_extent(ix + 1, rec.extent.width);
+    const u32 y1 = clamp_to_extent(iy + 1, rec.extent.height);
+
+    auto fetch_texel = [&](u32 x, u32 y) -> u32 {
+        const u64 off = (static_cast<u64>(y) * rec.extent.width + x) * 4u;
+        const u8* p = static_cast<const u8*>(rec.backing) + off;
+        return (static_cast<u32>(p[3]) << 24) | (static_cast<u32>(p[0]) << 16) | (static_cast<u32>(p[1]) << 8) |
+               static_cast<u32>(p[2]);
+    };
+    const u32 t00 = fetch_texel(x0, y0);
+    const u32 t10 = fetch_texel(x1, y0);
+    const u32 t01 = fetch_texel(x0, y1);
+    const u32 t11 = fetch_texel(x1, y1);
+
+    // Per-channel bilinear blend in fixed point (channels are
+    // already u8 0..255; Sf32 weights mix fine).
+    auto lerp_chan = [](u8 a, u8 b, Sf32 t) -> u8 {
+        const Sf32 inv_t = Sf32Sub(Sf32One(), t);
+        const Sf32 fa = Sf32Mul(Sf32FromU32(a), inv_t);
+        const Sf32 fb = Sf32Mul(Sf32FromU32(b), t);
+        const i32 r = Sf32ToI32(::duetos::core::Sf32Add(fa, fb));
+        if (r < 0)
+            return 0;
+        if (r > 255)
+            return 255;
+        return static_cast<u8>(r);
+    };
+    auto blend = [&](u32 c00, u32 c10, u32 c01, u32 c11, u32 ch_shift) -> u8 {
+        const u8 a = static_cast<u8>((c00 >> ch_shift) & 0xFFu);
+        const u8 b = static_cast<u8>((c10 >> ch_shift) & 0xFFu);
+        const u8 c = static_cast<u8>((c01 >> ch_shift) & 0xFFu);
+        const u8 d = static_cast<u8>((c11 >> ch_shift) & 0xFFu);
+        const u8 top = lerp_chan(a, b, fxf);
+        const u8 bot = lerp_chan(c, d, fxf);
+        return lerp_chan(top, bot, fyf);
+    };
+    const u8 R = blend(t00, t10, t01, t11, 16);
+    const u8 G = blend(t00, t10, t01, t11, 8);
+    const u8 B = blend(t00, t10, t01, t11, 0);
+    const u8 A = blend(t00, t10, t01, t11, 24);
+    return (static_cast<u32>(A) << 24) | (static_cast<u32>(R) << 16) | (static_cast<u32>(G) << 8) | B;
 }
 
 spirv::Program* ShaderProgram(VkShaderModule shader)

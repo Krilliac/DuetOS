@@ -578,6 +578,17 @@ struct PipelineShaders
 };
 PipelineShaders PipelineShaderHandles(VkPipeline pipe);
 
+/// Look up the (width, height, depth) of an image referenced by
+/// a VkImage or VkImageView handle (the same kinds
+/// `SampleImageRgba8` accepts). Writes width to out_w, height to
+/// out_h, depth to out_d (3D images aren't supported in v0;
+/// depth is always 1). Returns true on success, false when the
+/// handle doesn't resolve to a live image. Used by the SPIR-V
+/// executor's `OpImageQuerySize` / `OpImageQuerySizeLod`
+/// handlers so a shader that asks `textureSize(tex, 0)` gets
+/// the correct dimensions.
+bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
+
 /// Sample a 2D RGBA8 texel from an image bound via descriptor.
 /// `resource_handle` is a VkImage or VkImageView handle as
 /// returned by `spirv::LookupDescriptor`; both kinds resolve
