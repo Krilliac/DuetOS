@@ -2038,6 +2038,13 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
             // the SPIR-V path.
             st.bound_pipeline = op.pipeline;
             break;
+        case CmdOp::BindDescriptorSets:
+            // Stash the first bound set for the next draw — the
+            // shader-rasterizer hook walks its bindings via
+            // DescriptorSetRecord to populate the SPIR-V
+            // program's descriptor table.
+            st.bound_descriptor_set = op.descriptor_set;
+            break;
         case CmdOp::WaitEvents: // no-op replay (events already signalled)
         case CmdOp::BeginQuery: // pairs with EndQuery — write happens at End
         case CmdOp::EndRenderPass:

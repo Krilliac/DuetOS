@@ -261,7 +261,9 @@ enum class CmdOp : u8
     ResetEvent2 = 63,
     WaitEvents2 = 64,
     PipelineBarrier2 = 65,
-    SetVertexFormatDuet = 66, // DuetOS extension: rasterizer vertex layout (0 = v0, 1 = v1)
+    SetVertexFormatDuet = 66,    // DuetOS extension: rasterizer vertex layout (0 = v0, 1 = v1)
+    BindDescriptorSets = 67,     // Records the first bound descriptor set so the rasterizer hook can
+                                 // walk its bindings + call spirv::BindDescriptor per draw.
 };
 
 struct CmdRecord
@@ -315,6 +317,7 @@ struct CmdRecord
     u32 attachment_count;
     u32 rect_count;
     VkCommandBuffer secondary_cb;
+    VkDescriptorSet descriptor_set; // first set on the BindDescriptorSets op
 };
 
 inline constexpr u32 kCmdTapeCapacity = 32;
@@ -366,11 +369,26 @@ struct DescriptorPoolRecord
     u32 sets_allocated;
 };
 
+/// Per-binding entry inside a DescriptorSetRecord. Captures the
+/// type the binding was declared with + the resource handle the
+/// caller pinned via VkUpdateDescriptorSet (an image / image-view
+/// for sampled / storage types; a buffer for uniform / storage
+/// buffer types).
+struct DescriptorBinding
+{
+    u32 type;        // VkDescriptorType (Sampler / SampledImage / UniformBuffer / ...)
+    u64 handle;      // VkImage / VkImageView / VkBuffer handle, or 0
+};
+
 struct DescriptorSetRecord
 {
     VkDescriptorPool pool;
     VkDescriptorSetLayout layout;
     u32 writes;
+    // Per-binding state. v0 supports up to kMaxDescriptorBindings
+    // bindings per set; the shader-rasterizer hook walks this on
+    // each draw to populate the SPIR-V Program's descriptor table.
+    DescriptorBinding bindings[kMaxDescriptorBindings];
 };
 
 struct SwapchainRecord
@@ -543,6 +561,7 @@ struct RasterState
     u32 fb_w;
     u32 fb_h;
     VkPipeline bound_pipeline; // pipeline handle bound at the last `BindPipeline` op (0 if none)
+    VkDescriptorSet bound_descriptor_set; // first set bound at the last `BindDescriptorSets` op (0 if none)
 };
 
 /// Look up the cached SPIR-V Program of a shader handle (returns

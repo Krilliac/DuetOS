@@ -663,6 +663,26 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
     }
     const u32 pslot = SlotOf(st.bound_pipeline, kPipelineBase);
     const PipelineRecord* pipe_rec = PoolIsLive(g_pipeline_pool, pslot) ? &g_pipeline_data[pslot] : nullptr;
+
+    // Hand the bound descriptor set's bindings to the SPIR-V
+    // program's descriptor table so OpImageSample / Load on
+    // descriptor-set resources resolves to a real handle. v0
+    // routes every binding into set 0 (since the executor only
+    // looks at descriptor_bindings[0][*]); future slices can
+    // walk multiple sets when the executor distinguishes them.
+    if (st.bound_descriptor_set != 0 && HandleInRange(st.bound_descriptor_set, kDescSetBase))
+    {
+        const u32 dsslot = SlotOf(st.bound_descriptor_set, kDescSetBase);
+        if (PoolIsLive(g_desc_set_pool, dsslot))
+        {
+            const DescriptorSetRecord& dsr = g_desc_set_data[dsslot];
+            for (u32 b = 0; b < kMaxDescriptorBindings && b < spirv::Program::kMaxBindingsPerSet; ++b)
+            {
+                spirv::BindDescriptor(vs, 0, b, dsr.bindings[b].handle);
+                spirv::BindDescriptor(fs, 0, b, dsr.bindings[b].handle);
+            }
+        }
+    }
     u32 fb_w = 0, fb_h = 0;
     if (!ResolveExtent(st, &fb_w, &fb_h))
         return false;
