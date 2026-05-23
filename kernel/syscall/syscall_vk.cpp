@@ -324,6 +324,75 @@ u64 OpCmdClearColorImage(arch::TrapFrame* frame)
     return (vk::VkCmdClearColorImage(frame->rdx, frame->r10, cv) == vk::VkResult::Success) ? 1 : 0;
 }
 
+u64 OpCreatePipelineLayout(arch::TrapFrame* frame)
+{
+    vk::VkPipelineLayout out = 0;
+    return (vk::VkCreatePipelineLayout(frame->rdx, &out) == vk::VkResult::Success) ? out : 0;
+}
+
+u64 OpDestroyPipelineLayout(arch::TrapFrame* frame)
+{
+    vk::VkDestroyPipelineLayout(frame->rdx, frame->r10);
+    return 1;
+}
+
+u64 OpCreateRenderPass(arch::TrapFrame* frame)
+{
+    vk::VkRenderPass out = 0;
+    return (vk::VkCreateRenderPass(frame->rdx, &out) == vk::VkResult::Success) ? out : 0;
+}
+
+u64 OpDestroyRenderPass(arch::TrapFrame* frame)
+{
+    vk::VkDestroyRenderPass(frame->rdx, frame->r10);
+    return 1;
+}
+
+u64 OpCreateGraphicsPipeline(arch::TrapFrame* frame)
+{
+    vk::VkPipeline out = 0;
+    const vk::VkResult r =
+        vk::VkCreateGraphicsPipeline(frame->rdx, frame->r10, frame->r8, frame->r9, &out);
+    return (r == vk::VkResult::Success) ? out : 0;
+}
+
+u64 OpCreateComputePipeline(arch::TrapFrame* frame)
+{
+    vk::VkPipeline out = 0;
+    const vk::VkResult r = vk::VkCreateComputePipeline(frame->rdx, frame->r10, frame->r8, &out);
+    return (r == vk::VkResult::Success) ? out : 0;
+}
+
+u64 OpDestroyPipeline(arch::TrapFrame* frame)
+{
+    vk::VkDestroyPipeline(frame->rdx, frame->r10);
+    return 1;
+}
+
+u64 OpCmdBindPipeline(arch::TrapFrame* frame)
+{
+    return (vk::VkCmdBindPipeline(frame->rdx, vk::VkPipelineBindPoint::Graphics, frame->r10) ==
+            vk::VkResult::Success)
+               ? 1
+               : 0;
+}
+
+u64 OpCmdDraw(arch::TrapFrame* frame)
+{
+    // r10 packs (vertex_count << 32) | first_vertex; instance_count=1.
+    const u32 vertex_count = static_cast<u32>(frame->r10 >> 32);
+    const u32 first_vertex = static_cast<u32>(frame->r10 & 0xFFFFFFFFull);
+    return (vk::VkCmdDraw(frame->rdx, vertex_count, 1, first_vertex, 0) == vk::VkResult::Success) ? 1 : 0;
+}
+
+u64 OpCmdDispatch(arch::TrapFrame* frame)
+{
+    return (vk::VkCmdDispatch(frame->rdx, static_cast<u32>(frame->r10), static_cast<u32>(frame->r8),
+                              static_cast<u32>(frame->r9)) == vk::VkResult::Success)
+               ? 1
+               : 0;
+}
+
 u64 OpQueueSubmit(arch::TrapFrame* frame)
 {
     vk::VkCommandBuffer cb = frame->r10;
@@ -409,9 +478,19 @@ void DoVkCall(arch::TrapFrame* frame)
     using ::duetos::core::kVkOpBeginCommandBuffer;
     using ::duetos::core::kVkOpBindBufferMemory;
     using ::duetos::core::kVkOpBindImageMemory;
+    using ::duetos::core::kVkOpCmdBindPipeline;
     using ::duetos::core::kVkOpCmdClearColorImage;
+    using ::duetos::core::kVkOpCmdDispatch;
+    using ::duetos::core::kVkOpCmdDraw;
     using ::duetos::core::kVkOpCreateCommandPool;
+    using ::duetos::core::kVkOpCreateComputePipeline;
+    using ::duetos::core::kVkOpCreateGraphicsPipeline;
+    using ::duetos::core::kVkOpCreatePipelineLayout;
+    using ::duetos::core::kVkOpCreateRenderPass;
     using ::duetos::core::kVkOpDestroyCommandPool;
+    using ::duetos::core::kVkOpDestroyPipeline;
+    using ::duetos::core::kVkOpDestroyPipelineLayout;
+    using ::duetos::core::kVkOpDestroyRenderPass;
     using ::duetos::core::kVkOpEndCommandBuffer;
     using ::duetos::core::kVkOpQueueSubmit;
     using ::duetos::core::kVkOpClearFramebufferRgba;
@@ -531,6 +610,36 @@ void DoVkCall(arch::TrapFrame* frame)
         return;
     case kVkOpQueueSubmit:
         frame->rax = OpQueueSubmit(frame);
+        return;
+    case kVkOpCreatePipelineLayout:
+        frame->rax = OpCreatePipelineLayout(frame);
+        return;
+    case kVkOpDestroyPipelineLayout:
+        frame->rax = OpDestroyPipelineLayout(frame);
+        return;
+    case kVkOpCreateRenderPass:
+        frame->rax = OpCreateRenderPass(frame);
+        return;
+    case kVkOpDestroyRenderPass:
+        frame->rax = OpDestroyRenderPass(frame);
+        return;
+    case kVkOpCreateGraphicsPipeline:
+        frame->rax = OpCreateGraphicsPipeline(frame);
+        return;
+    case kVkOpCreateComputePipeline:
+        frame->rax = OpCreateComputePipeline(frame);
+        return;
+    case kVkOpDestroyPipeline:
+        frame->rax = OpDestroyPipeline(frame);
+        return;
+    case kVkOpCmdBindPipeline:
+        frame->rax = OpCmdBindPipeline(frame);
+        return;
+    case kVkOpCmdDraw:
+        frame->rax = OpCmdDraw(frame);
+        return;
+    case kVkOpCmdDispatch:
+        frame->rax = OpCmdDispatch(frame);
         return;
     }
     frame->rax = kVkBadOp;

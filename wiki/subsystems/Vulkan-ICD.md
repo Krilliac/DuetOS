@@ -501,6 +501,12 @@ syscall whose `rdi` argument selects which `VkOp` to invoke.
 | `vkBeginCommandBuffer` / `vkEndCommandBuffer` | `kVkOpBeginCommandBuffer` / `kVkOpEndCommandBuffer` |
 | `vkCmdClearColorImage` | `kVkOpCmdClearColorImage` (packs the float-4 color into the canonical 0xAARRGGBB word; userland-side `_fltused` handles the float compare) |
 | `vkQueueSubmit` | `kVkOpQueueSubmit` (v0 single command buffer per submit) |
+| `vkCreatePipelineLayout` / `vkDestroyPipelineLayout` | `kVkOpCreatePipelineLayout` / `kVkOpDestroyPipelineLayout` |
+| `vkCreateRenderPass` / `vkDestroyRenderPass` | `kVkOpCreateRenderPass` / `kVkOpDestroyRenderPass` |
+| `vkCreateGraphicsPipelines` | `kVkOpCreateGraphicsPipeline` (extracts VS / FS shader modules from `pStages` by hand) |
+| `vkCreateComputePipelines` | `kVkOpCreateComputePipeline` |
+| `vkDestroyPipeline` | `kVkOpDestroyPipeline` |
+| `vkCmdBindPipeline` / `vkCmdDraw` / `vkCmdDispatch` | `kVkOpCmdBindPipeline` / `kVkOpCmdDraw` / `kVkOpCmdDispatch` |
 
 `SYS_VK_CALL` plus `VkOp` / `VkStatsCounter` enums are in
 [`kernel/syscall/syscall.h`](../../kernel/syscall/syscall.h);

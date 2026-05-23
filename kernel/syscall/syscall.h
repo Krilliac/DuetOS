@@ -2235,6 +2235,20 @@ enum VkOp : u64
     kVkOpEndCommandBuffer = 30,     // rdx=cb
     kVkOpCmdClearColorImage = 31,   // rdx=cb, r10=image, r8=packed argb
     kVkOpQueueSubmit = 32,          // rdx=queue, r10=cb
+    // Pipeline + render pass + draw — the rest of the v0 graphics
+    // ladder. Together with the cmd-buffer ops above, a Vulkan PE
+    // can build a complete graphics pipeline, bind a shader,
+    // record a draw, and submit it.
+    kVkOpCreatePipelineLayout = 33, // rdx=device; rax = VkPipelineLayout
+    kVkOpDestroyPipelineLayout = 34,
+    kVkOpCreateRenderPass = 35,     // rdx=device; rax = VkRenderPass (single-attachment v0)
+    kVkOpDestroyRenderPass = 36,
+    kVkOpCreateGraphicsPipeline = 37, // rdx=device, r10=layout, r8=vs, r9=fs; rax = VkPipeline
+    kVkOpCreateComputePipeline = 38, // rdx=device, r10=layout, r8=cs; rax = VkPipeline
+    kVkOpDestroyPipeline = 39,
+    kVkOpCmdBindPipeline = 40,      // rdx=cb, r10=pipeline
+    kVkOpCmdDraw = 41,              // rdx=cb, r10=(vertex_count<<32)|first_vertex
+    kVkOpCmdDispatch = 42,          // rdx=cb, r10=group_x, r8=group_y, r9=group_z
 };
 
 // Diagnostic counter IDs for kVkOpGetStatsCounter. Exposes the

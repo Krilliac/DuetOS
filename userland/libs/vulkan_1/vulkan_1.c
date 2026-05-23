@@ -166,6 +166,16 @@ enum
     VkOp_EndCommandBuffer = 30,
     VkOp_CmdClearColorImage = 31,
     VkOp_QueueSubmit = 32,
+    VkOp_CreatePipelineLayout = 33,
+    VkOp_DestroyPipelineLayout = 34,
+    VkOp_CreateRenderPass = 35,
+    VkOp_DestroyRenderPass = 36,
+    VkOp_CreateGraphicsPipeline = 37,
+    VkOp_CreateComputePipeline = 38,
+    VkOp_DestroyPipeline = 39,
+    VkOp_CmdBindPipeline = 40,
+    VkOp_CmdDraw = 41,
+    VkOp_CmdDispatch = 42,
 };
 
 /* Additional Vulkan types we need for the create paths. */
@@ -176,6 +186,9 @@ typedef unsigned long long VkImage;
 typedef unsigned long long VkDeviceSize;
 typedef unsigned long long VkCommandPool;
 typedef unsigned long long VkCommandBuffer;
+typedef unsigned long long VkPipelineLayout;
+typedef unsigned long long VkRenderPass;
+typedef unsigned long long VkPipeline;
 
 /* ---------------------------------------------------------------- *
  * Vulkan entry points                                              *
@@ -294,6 +307,20 @@ VkResult vkEndCommandBuffer(VkCommandBuffer cb);
 void vkCmdClearColorImage(VkCommandBuffer cb, VkImage image, DWORD imageLayout, const void* pColor, UINT32 rangeCount,
                           const void* pRanges);
 VkResult vkQueueSubmit(VkQueue queue, UINT32 submitCount, const void* pSubmits, UINT64 fence);
+VkResult vkCreatePipelineLayout(VkDevice device, const void* pCreateInfo, const void* pAllocator,
+                                VkPipelineLayout* pPipelineLayout);
+void vkDestroyPipelineLayout(VkDevice device, VkPipelineLayout layout, const void* pAllocator);
+VkResult vkCreateRenderPass(VkDevice device, const void* pCreateInfo, const void* pAllocator,
+                            VkRenderPass* pRenderPass);
+void vkDestroyRenderPass(VkDevice device, VkRenderPass renderPass, const void* pAllocator);
+VkResult vkCreateGraphicsPipelines(VkDevice device, UINT64 pipelineCache, UINT32 createInfoCount,
+                                   const void* pCreateInfos, const void* pAllocator, VkPipeline* pPipelines);
+VkResult vkCreateComputePipelines(VkDevice device, UINT64 pipelineCache, UINT32 createInfoCount,
+                                  const void* pCreateInfos, const void* pAllocator, VkPipeline* pPipelines);
+void vkDestroyPipeline(VkDevice device, VkPipeline pipeline, const void* pAllocator);
+void vkCmdBindPipeline(VkCommandBuffer cb, DWORD pipelineBindPoint, VkPipeline pipeline);
+void vkCmdDraw(VkCommandBuffer cb, UINT32 vertexCount, UINT32 instanceCount, UINT32 firstVertex, UINT32 firstInstance);
+void vkCmdDispatch(VkCommandBuffer cb, UINT32 groupCountX, UINT32 groupCountY, UINT32 groupCountZ);
 
 static DV_NO_BUILTIN inline int dv_streq(const char* a, const char* b)
 {
@@ -372,6 +399,26 @@ PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char* pName)
         return (PFN_vkVoidFunction)vkCmdClearColorImage;
     if (dv_streq(pName, "vkQueueSubmit"))
         return (PFN_vkVoidFunction)vkQueueSubmit;
+    if (dv_streq(pName, "vkCreatePipelineLayout"))
+        return (PFN_vkVoidFunction)vkCreatePipelineLayout;
+    if (dv_streq(pName, "vkDestroyPipelineLayout"))
+        return (PFN_vkVoidFunction)vkDestroyPipelineLayout;
+    if (dv_streq(pName, "vkCreateRenderPass"))
+        return (PFN_vkVoidFunction)vkCreateRenderPass;
+    if (dv_streq(pName, "vkDestroyRenderPass"))
+        return (PFN_vkVoidFunction)vkDestroyRenderPass;
+    if (dv_streq(pName, "vkCreateGraphicsPipelines"))
+        return (PFN_vkVoidFunction)vkCreateGraphicsPipelines;
+    if (dv_streq(pName, "vkCreateComputePipelines"))
+        return (PFN_vkVoidFunction)vkCreateComputePipelines;
+    if (dv_streq(pName, "vkDestroyPipeline"))
+        return (PFN_vkVoidFunction)vkDestroyPipeline;
+    if (dv_streq(pName, "vkCmdBindPipeline"))
+        return (PFN_vkVoidFunction)vkCmdBindPipeline;
+    if (dv_streq(pName, "vkCmdDraw"))
+        return (PFN_vkVoidFunction)vkCmdDraw;
+    if (dv_streq(pName, "vkCmdDispatch"))
+        return (PFN_vkVoidFunction)vkCmdDispatch;
     return NULL;
 }
 
@@ -679,4 +726,143 @@ VkResult vkQueueSubmit(VkQueue queue, UINT32 submitCount, const void* pSubmits, 
         return VK_ERROR_INITIALIZATION_FAILED;
     const long long ok = vk_syscall3(VkOp_QueueSubmit, 0, (long long)queue, (long long)cbs[0]);
     return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+/* Pipeline / render pass / draw. v0 ignores most of the
+ * pCreateInfo fields — only the handles in the per-op signature
+ * are honoured (descriptor set layouts, render pass attachments,
+ * shader stages, vertex input descriptions). The pipeline-layout
+ * + render-pass + pipeline handles still flow through so a real
+ * Vulkan PE's create chain compiles cleanly. */
+
+VkResult vkCreatePipelineLayout(VkDevice device, const void* pCreateInfo, const void* pAllocator,
+                                VkPipelineLayout* pPipelineLayout)
+{
+    (void)pCreateInfo;
+    (void)pAllocator;
+    if (pPipelineLayout == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const long long h = vk_syscall1(VkOp_CreatePipelineLayout, (long long)device);
+    if (h == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    *pPipelineLayout = (VkPipelineLayout)h;
+    return VK_SUCCESS;
+}
+
+void vkDestroyPipelineLayout(VkDevice device, VkPipelineLayout layout, const void* pAllocator)
+{
+    (void)pAllocator;
+    (void)vk_syscall3(VkOp_DestroyPipelineLayout, 0, (long long)device, (long long)layout);
+}
+
+VkResult vkCreateRenderPass(VkDevice device, const void* pCreateInfo, const void* pAllocator,
+                            VkRenderPass* pRenderPass)
+{
+    (void)pCreateInfo;
+    (void)pAllocator;
+    if (pRenderPass == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const long long h = vk_syscall1(VkOp_CreateRenderPass, (long long)device);
+    if (h == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    *pRenderPass = (VkRenderPass)h;
+    return VK_SUCCESS;
+}
+
+void vkDestroyRenderPass(VkDevice device, VkRenderPass renderPass, const void* pAllocator)
+{
+    (void)pAllocator;
+    (void)vk_syscall3(VkOp_DestroyRenderPass, 0, (long long)device, (long long)renderPass);
+}
+
+/* vkCreateGraphicsPipelines — v0 takes the first VkGraphicsPipelineCreateInfo
+ * out of the array and pulls VS/FS shader modules from its
+ * pStages[] array (VkPipelineShaderStageCreateInfo: module at
+ * offset 24, stage at offset 12 — 0x01=VS, 0x10=FS). */
+VkResult vkCreateGraphicsPipelines(VkDevice device, UINT64 pipelineCache, UINT32 createInfoCount,
+                                   const void* pCreateInfos, const void* pAllocator, VkPipeline* pPipelines)
+{
+    (void)pipelineCache;
+    (void)pAllocator;
+    if (pCreateInfos == NULL || pPipelines == NULL || createInfoCount == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const BYTE* ci = (const BYTE*)pCreateInfos;
+    /* VkGraphicsPipelineCreateInfo: stageCount at offset 20, pStages at 24,
+     * ..., layout at offset 0x88 (136 — Vulkan spec layout). */
+    const UINT32 stage_count = *(const UINT32*)(ci + 20);
+    const void* const* p_stages = *(const void* const* const*)(ci + 24);
+    const VkPipelineLayout layout = *(const VkPipelineLayout*)(ci + 0x88);
+    VkShaderModule vs = 0, fs = 0;
+    if (p_stages != NULL)
+    {
+        for (UINT32 i = 0; i < stage_count; ++i)
+        {
+            const BYTE* st = (const BYTE*)p_stages[i];
+            if (st == NULL)
+                continue;
+            const UINT32 stage_bits = *(const UINT32*)(st + 12);
+            const VkShaderModule m = *(const VkShaderModule*)(st + 24);
+            if (stage_bits == 0x01)
+                vs = m; // VERTEX
+            else if (stage_bits == 0x10)
+                fs = m; // FRAGMENT
+        }
+    }
+    const long long h =
+        vk_syscall5(VkOp_CreateGraphicsPipeline, 0, (long long)device, (long long)layout, (long long)vs, (long long)fs);
+    if (h == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    pPipelines[0] = (VkPipeline)h;
+    /* v0 only creates one pipeline per call — extra entries get
+     * 0 so the caller sees the create failed for those. */
+    for (UINT32 i = 1; i < createInfoCount; ++i)
+        pPipelines[i] = 0;
+    return VK_SUCCESS;
+}
+
+VkResult vkCreateComputePipelines(VkDevice device, UINT64 pipelineCache, UINT32 createInfoCount,
+                                  const void* pCreateInfos, const void* pAllocator, VkPipeline* pPipelines)
+{
+    (void)pipelineCache;
+    (void)pAllocator;
+    if (pCreateInfos == NULL || pPipelines == NULL || createInfoCount == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    /* VkComputePipelineCreateInfo: stage at offset 16 (inline VkPipelineShaderStageCreateInfo),
+     * layout at offset 96.  Stage's module at offset (16 + 24) = 40. */
+    const BYTE* ci = (const BYTE*)pCreateInfos;
+    const VkShaderModule cs = *(const VkShaderModule*)(ci + 40);
+    const VkPipelineLayout layout = *(const VkPipelineLayout*)(ci + 96);
+    const long long h = vk_syscall4(VkOp_CreateComputePipeline, (long long)device, (long long)layout, (long long)cs, 0);
+    if (h == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    pPipelines[0] = (VkPipeline)h;
+    for (UINT32 i = 1; i < createInfoCount; ++i)
+        pPipelines[i] = 0;
+    return VK_SUCCESS;
+}
+
+void vkDestroyPipeline(VkDevice device, VkPipeline pipeline, const void* pAllocator)
+{
+    (void)pAllocator;
+    (void)vk_syscall3(VkOp_DestroyPipeline, 0, (long long)device, (long long)pipeline);
+}
+
+void vkCmdBindPipeline(VkCommandBuffer cb, DWORD pipelineBindPoint, VkPipeline pipeline)
+{
+    (void)pipelineBindPoint;
+    (void)vk_syscall3(VkOp_CmdBindPipeline, 0, (long long)cb, (long long)pipeline);
+}
+
+void vkCmdDraw(VkCommandBuffer cb, UINT32 vertexCount, UINT32 instanceCount, UINT32 firstVertex, UINT32 firstInstance)
+{
+    (void)instanceCount;
+    (void)firstInstance;
+    const long long packed = ((long long)vertexCount << 32) | (long long)firstVertex;
+    (void)vk_syscall3(VkOp_CmdDraw, 0, (long long)cb, packed);
+}
+
+void vkCmdDispatch(VkCommandBuffer cb, UINT32 groupCountX, UINT32 groupCountY, UINT32 groupCountZ)
+{
+    (void)vk_syscall5(VkOp_CmdDispatch, 0, (long long)cb, (long long)groupCountX, (long long)groupCountY,
+                      (long long)groupCountZ);
 }
