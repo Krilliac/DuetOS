@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "diag/fix_journal.h"
 #include "drivers/pci/pci.h"
 #include "log/klog.h"
 #include "mm/paging.h"
@@ -43,6 +44,12 @@ NpuKind ClassifyByVendorDevice(u16 vendor_id, u16 device_id)
         case 0x643E:
             return NpuKind::IntelNpu40;
         default:
+            // Unrecognised Intel NPU SKU — the per-SKU table above
+            // needs updating. Record the (vendor, device) so a
+            // boot on new silicon surfaces in the journal.
+            FIX_NOTE_GAP("drivers/npu/npu.cpp:ClassifyByVendorDevice",
+                         "unknown Intel NPU device-id; extend per-SKU table");
+            KLOG_ONCE_WARN("drivers/npu", "fix-journal hot: unknown Intel NPU device-id; extend per");
             return NpuKind::Unknown;
         }
     }
@@ -55,6 +62,9 @@ NpuKind ClassifyByVendorDevice(u16 vendor_id, u16 device_id)
         case 0x17F0:
             return NpuKind::AmdXdna2;
         default:
+            // Unrecognised AMD XDNA SKU — same shape as Intel arm.
+            FIX_NOTE_GAP("drivers/npu/npu.cpp:ClassifyByVendorDevice",
+                         "unknown AMD XDNA device-id; extend per-SKU table");
             return NpuKind::Unknown;
         }
     }

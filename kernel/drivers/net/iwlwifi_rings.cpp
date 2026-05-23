@@ -143,6 +143,7 @@ void FreeAllRings()
 void PopulateRbdRing(IwlRxRing& rx, mm::PhysAddr data_pool_base)
 {
     FIX_NOTE_GAP("drivers/net/iwlwifi_rings.cpp:LegacyRbd32", "support legacy pre-7000 iwlwifi 32-bit RBD format");
+    KLOG_ONCE_WARN("drivers/net", "fix-journal hot: support legacy pre-7000 iwlwifi 32-bit");
     auto* rbd = static_cast<volatile u64*>(rx.virt_base);
     for (u32 i = 0; i < rx.size; ++i)
         rbd[i] = data_pool_base + static_cast<u64>(i) * kRxDataBufBytes;
