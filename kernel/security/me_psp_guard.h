@@ -129,6 +129,19 @@ const FencedDevice& MePspGuardDevice(u32 index);
 /// including the panic / trap path.
 bool MePspGuardIsForbiddenMmio(u64 phys, u64 bytes);
 
+/// Return true if (bus, device, function) names a fenced
+/// coprocessor PCI endpoint. Used by `PciConfigWrite32` to
+/// refuse config-space writes that would otherwise let a
+/// caller reach in via the legacy 0xCF8 / 0xCFC backdoor and
+/// reconfigure BARs, IRQs, or capability state on the fenced
+/// device. Reads remain allowed — they are observation only
+/// and a real attacker already knows the device exists.
+bool MePspGuardIsForbiddenBdf(u8 bus, u8 device, u8 function);
+
+/// Number of `PciConfigWrite32` calls refused for hitting a
+/// fenced BDF. Resets to 0 only by `MePspGuardInit`.
+u64 MePspGuardConfigWriteRefusalCount();
+
 /// Install AMT / vPro / IPMI port blocks into the kernel
 /// firewall. Idempotent — safe to call more than once; duplicate
 /// rules are detected and skipped. Returns the number of rules

@@ -1031,8 +1031,18 @@ void CmdMei()
         ConsoleWrite(" size=");
         WriteU64Hex(d.mmio_size, 4);
         ConsoleWriteln("");
+        ConsoleWrite("      hfs1=");
+        WriteU64Hex(d.hfs1, 8);
+        ConsoleWrite(" hfs2=");
+        WriteU64Hex(d.hfs2, 8);
+        ConsoleWrite(" mode=");
+        ConsoleWrite(d.mode_tag);
+        ConsoleWrite(" bme_cleared=");
+        ConsoleWrite(d.bme_cleared ? "yes" : "NO");
+        ConsoleWriteln("");
     }
     ConsoleWriteln("  (HECI bus protocol not yet implemented — driver is probe-only)");
+    ConsoleWriteln("  mode legend: normal-active = ME running; DISABLED-HAP = me_cleaner / HAP success");
 }
 
 void CmdMePsp()
@@ -1077,6 +1087,10 @@ void CmdMePsp()
 
     ConsoleWrite("  MapMmio refused: ");
     WriteU64Dec(sec::MePspGuardRefusalCount());
+    ConsoleWriteln(" calls");
+
+    ConsoleWrite("  PciConfigWrite refused: ");
+    WriteU64Dec(sec::MePspGuardConfigWriteRefusalCount());
     ConsoleWriteln(" calls");
 
     // Count the AMT/IPMI firewall rules currently in the table —

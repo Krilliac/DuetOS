@@ -138,6 +138,25 @@ void PspInit()
             info.mmio_virt = duetos::mm::MapMmio(bar0.address, map_bytes);
         }
 
+        // Clear Bus Master Enable on the device's PCI Command
+        // register BEFORE registering with the guard — once
+        // registered, config writes are denied. This closes the
+        // standard PCIe DMA initiator path on this BDF; AMD's
+        // private PSP-mailbox DMA paths still go through the
+        // chipset until IOMMU lands and remaps them.
+        constexpr u8 kCfgCmdSts = 0x04;
+        constexpr u32 kCmdBusMasterEnable = 1u << 2;
+        const u32 cmdsts = duetos::drivers::pci::PciConfigRead32(d.addr, kCfgCmdSts);
+        const u32 cmd_only = cmdsts & 0xFFFFu;
+        const u32 cmd_no_bme = cmd_only & ~kCmdBusMasterEnable;
+        bool bme_cleared = true;
+        if (cmd_only != cmd_no_bme)
+        {
+            duetos::drivers::pci::PciConfigWrite32(d.addr, kCfgCmdSts, cmd_no_bme);
+            const u32 readback = duetos::drivers::pci::PciConfigRead32(d.addr, kCfgCmdSts);
+            bme_cleared = ((readback & kCmdBusMasterEnable) == 0);
+        }
+
         arch::SerialWrite("[psp] device=");
         arch::SerialWriteHex(info.device_id);
         arch::SerialWrite(" role=");
@@ -148,7 +167,12 @@ void PspInit()
         arch::SerialWriteHex(info.mmio_phys);
         arch::SerialWrite(" mmio_size=");
         arch::SerialWriteHex(info.mmio_size);
+        arch::SerialWrite(" bme_cleared=");
+        arch::SerialWriteHex(bme_cleared ? 1u : 0u);
         arch::SerialWrite("\n");
+
+        KLOG_WARN("drivers/psp",
+                  "AMD PSP / SMU host interface detected — fenced (DMA-capable coprocessor with vendor firmware)");
 
         // Register with the central guard. The fence becomes
         // active immediately — any subsequent MapMmio that

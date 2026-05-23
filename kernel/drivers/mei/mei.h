@@ -70,6 +70,27 @@ enum class MeiRole : u8
     Sps,  // Server platform services (Xeon SP)
 };
 
+/// Decoded ME operating mode from the HFS1 register (bits 16:19).
+/// "Disabled-HAP" is the success signal an operator running
+/// `me_cleaner` is looking for — the ME ran BRINGUP, saw the HAP
+/// bit set in the firmware blob, and halted itself instead of
+/// loading the full management stack. "Normal" means the ME is
+/// fully active; everything else is a vendor-specific halt path
+/// that may or may not be honoured across firmware updates.
+enum class MeiOperatingMode : u8
+{
+    Unknown = 0,
+    Normal,          // 0x0 — ME fully operational
+    AltDisable,      // 0x1 — alternate disable mode
+    SoftTempDisable, // 0x2 — temp disable via SW
+    SecurityJumper,  // 0x3 — security override via jumper
+    SecurityMei,     // 0x4 — security override via MEI message
+    EnhancedDebug,   // 0x5 — enhanced debug mode
+    DisabledHap,     // 0x6/0x7 — HAP-driven disable (me_cleaner success)
+};
+
+const char* MeiOperatingModeTag(MeiOperatingMode m);
+
 struct MeiDeviceInfo
 {
     bool live;
@@ -83,6 +104,14 @@ struct MeiDeviceInfo
     u64 mmio_phys;
     u64 mmio_size;
     void* mmio_virt;
+    // Vendor state captured before fencing — once the device is
+    // registered with the guard, further config writes are denied,
+    // so these are observed exactly once at probe time.
+    u32 hfs1; // PCI config 0x40 — host firmware status 1
+    u32 hfs2; // PCI config 0x48 — host firmware status 2
+    MeiOperatingMode mode;
+    const char* mode_tag; // human-readable form of `mode`
+    bool bme_cleared;     // true if we successfully cleared Bus Master Enable
 };
 
 /// Walk the PCI cache, register every Intel MEI/HECI device, map

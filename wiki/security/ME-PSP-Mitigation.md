@@ -36,8 +36,11 @@ does not, and how to verify the posture on a given platform.
 | Userland process re-maps the MEI / PSP MMIO BAR and pokes at it | **Yes** | MapMmio deny-list, registered by the kernel-internal probe |
 | Compromised in-tree driver opportunistically `ioremap`s the management interface | **Yes** | Same MapMmio deny-list — kernel internals share the gate |
 | Win32 / Linux subsystem mediates access to the BAR | **Yes** | Subsystems never reach the BAR; they call kernel APIs that go through the same gate |
+| Compromised driver reaches in via legacy 0xCF8/0xCFC and rewrites BARs, IRQs, capabilities | **Yes** | `PciConfigWrite32` consults the guard's BDF deny-list and refuses |
+| Coprocessor DMAs into host RAM via the standard PCIe BME path | **Yes** | Bus Master Enable is cleared on the fenced BDF at probe time |
+| Coprocessor DMAs into host RAM via its own private chipset-internal route | **No, v0** | Needs IOMMU. Deferred — see "Deferred" below |
 | Remote attacker connects to AMT web UI / RAS over the host network stack | **Yes** | Kernel firewall drops AMT / vPro / IPMI ports in both directions |
-| ME / PSP itself snoops host RAM via DMA | **No, v0** | Needs IOMMU. Deferred — see "Deferred" below |
+| Operator can't tell if `me_cleaner` actually nerfed the chip | **Yes** | HFS1 register decoded at boot; `mode=DISABLED-HAP` is the success signal |
 | ME / PSP receives traffic delivered to it below the OS (transparent NIC interception) | **No** | Architecturally impossible at OS level — the coprocessor sees the wire before the host stack does |
 | ME firmware compromised at flash (vendor compromise, BadUSB-style flash attack) | **No** | Out of scope — the OS only sees what the platform exposes |
 
@@ -50,6 +53,18 @@ hardware without these coprocessors (e.g. Talos II / Raptor POWER9,
 some RISC-V dev boards).
 
 ## What DuetOS does
+
+### 0. Defense-in-depth stack at a glance
+
+| Layer | What it does | Stops |
+|---|---|---|
+| MMIO deny-list (§1) | Refuses every `MapMmio` whose physical range overlaps a fenced device's BAR | Drivers / userland / subsystems reaching the register file after the one legitimate probe map |
+| PCI config-write deny-list (§5) | Refuses every `PciConfigWrite32` whose BDF matches a fenced device | The legacy 0xCF8/0xCFC backdoor for re-enabling BARs, rerouting IRQs, flipping capabilities |
+| Bus-Master clear at probe (§6) | Clears the BME bit on the fenced device's PCI Command register | The standard PCIe DMA-initiator path the device uses |
+| AMT firewall blocks (§2) | Drops AMT / vPro / IPMI ports in both directions on every interface | Remote operators reaching AMT through the host network stack |
+| HFS observation (§7) | Decodes the ME's own state from HFS1 at probe time | Operators not being able to tell if `me_cleaner` worked |
+| Boot-log + selftest (§3) | Loud sentinels for every fenced device + a synthetic deny exercise | Silent posture drift across kernel changes |
+| Runtime status (§4) | `mepsp` shell command with hit counters | Lack of observability when something on the wire is probing AMT |
 
 ### 1. MMIO deny-list
 
@@ -135,6 +150,89 @@ The kernel shell exposes `mepsp` (alias `vpro`, `amt`). It prints:
 - Active AMT firewall rule count and total lifetime hits (hits are an
   intrusion signal — something on the wire is trying to reach AMT).
 - A reminder that IOMMU DMA fencing is not yet active.
+
+### 5. PCI config-write deny-list
+
+`mm::MapMmio` is the kernel's chokepoint for MMIO, but the legacy
+0xCF8/0xCFC config port pair and the MMCONFIG ECAM aperture are a
+separate path that lets any kernel caller reach into a device's
+config space without going through MMIO at all. A compromised driver
+that knows the fenced BDF could otherwise use `PciConfigWrite32` to:
+
+- Re-enable Bus Master Enable (re-opening the DMA initiator path we
+  closed at probe time).
+- Rewrite a BAR to a value the driver controls, then map THAT range
+  — the MapMmio fence would not match because the physical address
+  no longer matches the originally-fenced range.
+- Reroute interrupts by editing the MSI/MSI-X capability.
+- Disable / enable arbitrary capabilities.
+
+The guard's BDF deny-list ([`PciConfigWrite32`](../../kernel/drivers/pci/pci.cpp))
+refuses every config-space write whose `(bus, device, function)` matches
+a fenced device. Reads remain unconditionally allowed — they only
+observe, and a real attacker already knows the device exists from
+PCI enumeration.
+
+The MEI and PSP probes deliberately call us BEFORE registering with
+the guard, so they can do the one-time BME-clear (§6) and capture
+the HFS state (§7). After registration, every config write to that
+BDF is refused and counted.
+
+### 6. Bus Master clear at probe
+
+Each fenced probe does a read-modify-write on the device's PCI
+Command register at config offset 0x04 to clear bit 2 (Bus Master
+Enable). The status register's RW1C bits are preserved (we write
+0 to them, which is a no-op for sticky bits). A read-back confirms
+the clear actually took.
+
+What this stops: the standard PCIe DMA-initiator path on the fenced
+BDF. A device with BME=0 cannot initiate memory-write transactions
+on the bus.
+
+What this does NOT stop: ME and PSP have private DMA routes through
+the chipset that bypass the standard PCI device's BME bit. Those
+need IOMMU to fence; see "Deferred". The clear is the front door;
+IOMMU is the back door.
+
+The `bme_cleared=yes/NO` field in the `mei` and `psp` shell command
+output reports whether the read-back confirmed the clear took. On
+some Intel chipsets the ME silently re-asserts BME after a few
+hundred microseconds; the read-back catches that and reports `NO`.
+
+### 7. HFS observation — "did `me_cleaner` actually work?"
+
+Intel ME's HFS1 register (PCI config offset 0x40 on the MEI device)
+holds the ME's self-reported state. Bits 16:19 encode the operating
+mode:
+
+| Mode | Tag | Meaning |
+|------|-----|---------|
+| 0x0 | `normal-active` | ME is running, full management stack loaded |
+| 0x1 | `alt-disable` | Alternate disable mode (vendor-specific) |
+| 0x2 | `soft-temp-disable` | Soft temporary disable (re-enables on reboot) |
+| 0x3 | `security-jumper` | Security-override jumper engaged |
+| 0x4 | `security-mei` | Security override via MEI message |
+| 0x5 | `enhanced-debug` | Enhanced debug mode |
+| 0x6, 0x7 | `DISABLED-HAP` | **HAP bit honoured — ME halted after BRINGUP** |
+
+`DISABLED-HAP` is the operator's evidence that an external
+`me_cleaner` run worked. The ME firmware read the HAP bit in the
+flash region, ran BRINGUP, then halted itself instead of loading
+the full management stack. The chipset still exposes the MEI device
+(which is why we still probe and fence it), but the ME firmware
+inside is quiescent.
+
+`normal-active` is the loud signal: an active ME is a running
+coprocessor with DMA reach. The boot log emits a WARN line
+explicitly telling the operator to use `me_cleaner` or a vendor
+BIOS option to neutralise.
+
+We read HFS1 / HFS2 once, before fencing the BDF, and stash the
+raw values in `MeiDeviceInfo` for the shell to display. The fence
+prevents further config writes to the device but reads are allowed,
+so a future slice can re-read HFS at any time without giving up
+the fence.
 
 ## Deferred
 

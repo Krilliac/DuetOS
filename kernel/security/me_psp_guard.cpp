@@ -14,6 +14,7 @@ namespace
 constinit FencedDevice g_devices[kMaxFencedDevices] = {};
 constinit u32 g_count = 0;
 constinit u64 g_refused_calls = 0;
+constinit u64 g_refused_config_writes = 0;
 constinit bool g_init_done = false;
 constinit bool g_network_blocks_installed = false;
 constinit bool g_activated = false;
@@ -148,6 +149,7 @@ void MePspGuardInit()
         g_devices[i] = FencedDevice{};
     g_count = 0;
     g_refused_calls = 0;
+    g_refused_config_writes = 0;
     g_network_blocks_installed = false;
     g_activated = false;
     g_init_done = true;
@@ -241,6 +243,29 @@ bool MePspGuardIsForbiddenMmio(u64 phys, u64 bytes)
         }
     }
     return false;
+}
+
+bool MePspGuardIsForbiddenBdf(u8 bus, u8 device, u8 function)
+{
+    if (!g_init_done || g_count == 0)
+        return false;
+    for (u32 i = 0; i < g_count; ++i)
+    {
+        const auto& d = g_devices[i];
+        if (!d.live)
+            continue;
+        if (d.bus == bus && d.device == device && d.function == function)
+        {
+            ++g_refused_config_writes;
+            return true;
+        }
+    }
+    return false;
+}
+
+u64 MePspGuardConfigWriteRefusalCount()
+{
+    return g_refused_config_writes;
 }
 
 u32 MePspGuardInstallNetworkBlocks()
