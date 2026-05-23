@@ -935,23 +935,47 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
         case kOpImageSampleExplicitLod:
         {
             // Operands: (T, R, sampled-image, coord, [ImageOperands, ...]).
-            // v0 texture-sample: return the UV coordinate as
-            // (u, v, 0, 1). This is the "missing texture" diagnostic
-            // pattern — a shader that samples a 2D texture renders
-            // a smooth UV-checkerboard-able gradient instead of
-            // zero. When the descriptor-set fetch path lands the
-            // real sample replaces this fallback.
+            // v0 texture-sample tier:
+            //   When descriptor binding (0, 0) is set, return a
+            //   procedural checkerboard sampled at the UV coord:
+            //   `tile = (u * 8) ^ (v * 8) > 0.5 ? white : grey`.
+            //   The pattern is visually distinct from the UV
+            //   gradient — proves the descriptor-set lookup
+            //   fired AND the sample fed a real coord.
+            //   Otherwise return the UV coord as (u, v, 0, 1) —
+            //   the "missing texture" diagnostic.
             if (wc >= 5)
             {
                 u32 coord_buf[4]{};
                 const u32 cn = LoadOperandComponents(ec, w[4], coord_buf, 4);
                 u32 r4[4] = {0, 0, 0, Sf32ToBits(::duetos::core::Sf32One())};
-                if (cn >= 1)
-                    r4[0] = coord_buf[0];
-                if (cn >= 2)
-                    r4[1] = coord_buf[1];
-                if (cn >= 3)
-                    r4[2] = coord_buf[2];
+                const u64 bound = LookupDescriptor(ec.prog, 0, 0);
+                if (bound != 0 && cn >= 2)
+                {
+                    // Procedural checkerboard. Scale UV by 8,
+                    // floor each axis, XOR the parities, output
+                    // white-or-grey vec4.
+                    const Sf32 u_v = Sf32FromBits(coord_buf[0]);
+                    const Sf32 v_v = Sf32FromBits(coord_buf[1]);
+                    const Sf32 eight = ::duetos::core::Sf32FromU32(8u);
+                    const i32 ui = ::duetos::core::Sf32ToI32(::duetos::core::Sf32Mul(u_v, eight));
+                    const i32 vi = ::duetos::core::Sf32ToI32(::duetos::core::Sf32Mul(v_v, eight));
+                    const bool white = ((ui ^ vi) & 1) == 0;
+                    const u32 c = white ? Sf32ToBits(::duetos::core::Sf32One())
+                                        : Sf32ToBits(::duetos::core::Sf32FromBits(0x3F000000u)); // 0.5
+                    r4[0] = c;
+                    r4[1] = c;
+                    r4[2] = c;
+                }
+                else
+                {
+                    if (cn >= 1)
+                        r4[0] = coord_buf[0];
+                    if (cn >= 2)
+                        r4[1] = coord_buf[1];
+                    if (cn >= 3)
+                        r4[2] = coord_buf[2];
+                }
                 StoreResultComponents(ec, rid, tid, r4, 4);
             }
             break;

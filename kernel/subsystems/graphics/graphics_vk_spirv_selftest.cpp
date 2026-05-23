@@ -445,6 +445,39 @@ void TestComputeLocalSize()
         Fail("compute: ExecuteEntryPoint returned false", 0);
 }
 
+void TestDescriptorBinding()
+{
+    // Exercises the per-Program descriptor binding API without
+    // dragging in a full SPIR-V module — just creates a bare
+    // Program with parse_ok=true to satisfy the lookups, sets a
+    // binding, reads it back, validates the (set, binding) bounds
+    // checks behave.
+    static Program prog;
+    // Zero-initialise via the public Parse path against a minimal
+    // valid module (reuse the const-color frag — already verified
+    // to parse cleanly above).
+    const u32 wc = sizeof(const_color_frag) / sizeof(const_color_frag[0]);
+    if (!Parse(const_color_frag, wc, &prog))
+        Fail("descriptors: Parse failed", 0);
+    // Initial state: every binding zero.
+    if (LookupDescriptor(&prog, 0, 0) != 0)
+        Fail("descriptors: initial slot non-zero", static_cast<u32>(LookupDescriptor(&prog, 0, 0)));
+    // Set and read back.
+    BindDescriptor(&prog, 0, 0, 0xDEADBEEFCAFEBABEull);
+    if (LookupDescriptor(&prog, 0, 0) != 0xDEADBEEFCAFEBABEull)
+        Fail("descriptors: round-trip mismatch", 0);
+    // Out-of-bounds set/binding -> 0.
+    BindDescriptor(&prog, 99, 0, 0xAAAA); // bounds-check no-op
+    if (LookupDescriptor(&prog, 99, 0) != 0)
+        Fail("descriptors: OOB set should return 0", 0);
+    BindDescriptor(&prog, 0, 99, 0xBBBB);
+    if (LookupDescriptor(&prog, 0, 99) != 0)
+        Fail("descriptors: OOB binding should return 0", 0);
+    // Different set untouched by binding to set 0.
+    if (LookupDescriptor(&prog, 1, 0) != 0)
+        Fail("descriptors: cross-set leak", 0);
+}
+
 } // namespace
 
 void SelfTest()
@@ -453,7 +486,8 @@ void SelfTest()
     TestAddTwoFloats();
     TestMulVec3Scalar();
     TestComputeLocalSize();
-    arch::SerialWrite("[subsys/graphics/spirv] self-test PASS (4 modules executed)\n");
+    TestDescriptorBinding();
+    arch::SerialWrite("[subsys/graphics/spirv] self-test PASS (5 modules executed)\n");
 }
 
 } // namespace duetos::subsystems::graphics::spirv

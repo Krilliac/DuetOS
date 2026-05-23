@@ -268,6 +268,14 @@ struct Program
     StorageHeap uniform;
     StorageHeap push_constant;
     StorageHeap private_storage;
+
+    // Descriptor bindings. Keyed by (set, binding); v0 supports
+    // a single descriptor set with up to 8 bindings. Slot value
+    // 0 means "no binding"; non-zero values are resource handles
+    // the executor's OpImageSample path dereferences.
+    static constexpr u32 kMaxDescriptorSets = 2;
+    static constexpr u32 kMaxBindingsPerSet = 8;
+    u64 descriptor_bindings[kMaxDescriptorSets][kMaxBindingsPerSet];
 };
 
 // Parse a SPIR-V module into Program form. Returns true if the
@@ -308,6 +316,20 @@ bool WriteInputBuiltin(Program* prog, u32 builtin, const void* data, u32 byte_si
 // reparsing the program. Call once per vkCmdDraw replay before
 // the per-vertex/per-pixel loop.
 void ResetIO(Program* prog);
+
+/// Bind a resource handle (VkImage / VkBuffer cast to u64) to a
+/// (set, binding) tuple in the program. Subsequent OpImageSample*
+/// in the executor that resolves to a Variable with matching
+/// DescriptorSet + Binding decorations sees the bound handle as
+/// the SampledImage payload. Used by the shader-rasterizer hook
+/// to translate VkCmdBindDescriptorSets state into something the
+/// interpreter can dispatch on.
+void BindDescriptor(Program* prog, u32 set, u32 binding, u64 resource_handle);
+
+/// Look up the resource handle bound to (set, binding); returns 0
+/// when no binding has been recorded. Called by the executor's
+/// OpImageSample path to find the texture data source.
+u64 LookupDescriptor(const Program* prog, u32 set, u32 binding);
 
 /// Per-variable descriptor returned by `EnumerateLocationVars`:
 /// the Location number, the byte size of the variable's pointee,

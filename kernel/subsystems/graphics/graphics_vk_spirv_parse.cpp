@@ -928,6 +928,24 @@ void ResetIO(Program* prog)
         prog->output.bytes[i] = 0u;
 }
 
+void BindDescriptor(Program* prog, u32 set, u32 binding, u64 resource_handle)
+{
+    if (prog == nullptr)
+        return;
+    if (set >= Program::kMaxDescriptorSets || binding >= Program::kMaxBindingsPerSet)
+        return;
+    prog->descriptor_bindings[set][binding] = resource_handle;
+}
+
+u64 LookupDescriptor(const Program* prog, u32 set, u32 binding)
+{
+    if (prog == nullptr)
+        return 0;
+    if (set >= Program::kMaxDescriptorSets || binding >= Program::kMaxBindingsPerSet)
+        return 0;
+    return prog->descriptor_bindings[set][binding];
+}
+
 u32 EnumerateLocationVars(const Program* prog, StorageClass storage, LocationVar* out, u32 cap)
 {
     if (prog == nullptr || out == nullptr || cap == 0)
