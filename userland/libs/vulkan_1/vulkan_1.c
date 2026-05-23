@@ -176,6 +176,15 @@ enum
     VkOp_CmdBindPipeline = 40,
     VkOp_CmdDraw = 41,
     VkOp_CmdDispatch = 42,
+    VkOp_CmdBindVertexBuffer = 43,
+    VkOp_CmdBindIndexBuffer = 44,
+    VkOp_UpdateDescriptorSet = 45,
+    VkOp_CreateDescriptorSetLayout = 46,
+    VkOp_DestroyDescriptorSetLayout = 47,
+    VkOp_CreateDescriptorPool = 48,
+    VkOp_DestroyDescriptorPool = 49,
+    VkOp_AllocateDescriptorSet = 50,
+    VkOp_CmdBindDescriptorSet = 51,
 };
 
 /* Additional Vulkan types we need for the create paths. */
@@ -189,6 +198,9 @@ typedef unsigned long long VkCommandBuffer;
 typedef unsigned long long VkPipelineLayout;
 typedef unsigned long long VkRenderPass;
 typedef unsigned long long VkPipeline;
+typedef unsigned long long VkDescriptorSetLayout;
+typedef unsigned long long VkDescriptorPool;
+typedef unsigned long long VkDescriptorSet;
 
 /* ---------------------------------------------------------------- *
  * Vulkan entry points                                              *
@@ -321,6 +333,21 @@ void vkDestroyPipeline(VkDevice device, VkPipeline pipeline, const void* pAlloca
 void vkCmdBindPipeline(VkCommandBuffer cb, DWORD pipelineBindPoint, VkPipeline pipeline);
 void vkCmdDraw(VkCommandBuffer cb, UINT32 vertexCount, UINT32 instanceCount, UINT32 firstVertex, UINT32 firstInstance);
 void vkCmdDispatch(VkCommandBuffer cb, UINT32 groupCountX, UINT32 groupCountY, UINT32 groupCountZ);
+void vkCmdBindVertexBuffers(VkCommandBuffer cb, UINT32 firstBinding, UINT32 bindingCount, const VkBuffer* pBuffers,
+                            const UINT64* pOffsets);
+void vkCmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buffer, UINT64 offset, DWORD indexType);
+void vkUpdateDescriptorSets(VkDevice device, UINT32 writeCount, const void* pWrites, UINT32 copyCount,
+                            const void* pCopies);
+VkResult vkCreateDescriptorSetLayout(VkDevice device, const void* pCreateInfo, const void* pAllocator,
+                                     VkDescriptorSetLayout* pSetLayout);
+void vkDestroyDescriptorSetLayout(VkDevice device, VkDescriptorSetLayout layout, const void* pAllocator);
+VkResult vkCreateDescriptorPool(VkDevice device, const void* pCreateInfo, const void* pAllocator,
+                                VkDescriptorPool* pDescriptorPool);
+void vkDestroyDescriptorPool(VkDevice device, VkDescriptorPool pool, const void* pAllocator);
+VkResult vkAllocateDescriptorSets(VkDevice device, const void* pAllocateInfo, VkDescriptorSet* pDescriptorSets);
+void vkCmdBindDescriptorSets(VkCommandBuffer cb, DWORD pipelineBindPoint, VkPipelineLayout layout, UINT32 firstSet,
+                             UINT32 descriptorSetCount, const VkDescriptorSet* pDescriptorSets,
+                             UINT32 dynamicOffsetCount, const UINT32* pDynamicOffsets);
 
 static DV_NO_BUILTIN inline int dv_streq(const char* a, const char* b)
 {
@@ -419,6 +446,24 @@ PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char* pName)
         return (PFN_vkVoidFunction)vkCmdDraw;
     if (dv_streq(pName, "vkCmdDispatch"))
         return (PFN_vkVoidFunction)vkCmdDispatch;
+    if (dv_streq(pName, "vkCmdBindVertexBuffers"))
+        return (PFN_vkVoidFunction)vkCmdBindVertexBuffers;
+    if (dv_streq(pName, "vkCmdBindIndexBuffer"))
+        return (PFN_vkVoidFunction)vkCmdBindIndexBuffer;
+    if (dv_streq(pName, "vkUpdateDescriptorSets"))
+        return (PFN_vkVoidFunction)vkUpdateDescriptorSets;
+    if (dv_streq(pName, "vkCreateDescriptorSetLayout"))
+        return (PFN_vkVoidFunction)vkCreateDescriptorSetLayout;
+    if (dv_streq(pName, "vkDestroyDescriptorSetLayout"))
+        return (PFN_vkVoidFunction)vkDestroyDescriptorSetLayout;
+    if (dv_streq(pName, "vkCreateDescriptorPool"))
+        return (PFN_vkVoidFunction)vkCreateDescriptorPool;
+    if (dv_streq(pName, "vkDestroyDescriptorPool"))
+        return (PFN_vkVoidFunction)vkDestroyDescriptorPool;
+    if (dv_streq(pName, "vkAllocateDescriptorSets"))
+        return (PFN_vkVoidFunction)vkAllocateDescriptorSets;
+    if (dv_streq(pName, "vkCmdBindDescriptorSets"))
+        return (PFN_vkVoidFunction)vkCmdBindDescriptorSets;
     return NULL;
 }
 
@@ -865,4 +910,135 @@ void vkCmdDispatch(VkCommandBuffer cb, UINT32 groupCountX, UINT32 groupCountY, U
 {
     (void)vk_syscall5(VkOp_CmdDispatch, 0, (long long)cb, (long long)groupCountX, (long long)groupCountY,
                       (long long)groupCountZ);
+}
+
+/* vkCmdBindVertexBuffers — bind a single buffer at firstBinding;
+ * multi-binding callers go via the standard Vulkan API but only
+ * the first binding+buffer gets through the v0 thunk. */
+void vkCmdBindVertexBuffers(VkCommandBuffer cb, UINT32 firstBinding, UINT32 bindingCount, const VkBuffer* pBuffers,
+                            const UINT64* pOffsets)
+{
+    if (bindingCount == 0 || pBuffers == NULL)
+        return;
+    const UINT64 offset = (pOffsets != NULL) ? pOffsets[0] : 0u;
+    (void)vk_syscall5(VkOp_CmdBindVertexBuffer, 0, (long long)cb, (long long)firstBinding, (long long)pBuffers[0],
+                      (long long)offset);
+}
+
+void vkCmdBindIndexBuffer(VkCommandBuffer cb, VkBuffer buffer, UINT64 offset, DWORD indexType)
+{
+    (void)vk_syscall5(VkOp_CmdBindIndexBuffer, 0, (long long)cb, (long long)buffer, (long long)offset,
+                      (long long)indexType);
+}
+
+/* vkUpdateDescriptorSets — multi-write API; v0 walks the array
+ * and forwards one Update per entry. VkWriteDescriptorSet:
+ *   dstSet at offset 16, dstBinding at 24, descriptorType at 36,
+ *   pImageInfo at 40 (8-byte ptr), pBufferInfo at 48.
+ * v0 supports image-info (CombinedImageSampler) — extract the
+ * image-view from pImageInfo->imageView (at offset 8 of
+ * VkDescriptorImageInfo). */
+void vkUpdateDescriptorSets(VkDevice device, UINT32 writeCount, const void* pWrites, UINT32 copyCount,
+                            const void* pCopies)
+{
+    (void)device;
+    (void)copyCount;
+    (void)pCopies;
+    if (pWrites == NULL)
+        return;
+    const BYTE* w = (const BYTE*)pWrites;
+    for (UINT32 i = 0; i < writeCount; ++i)
+    {
+        const BYTE* this_w = w + i * 64u; /* VkWriteDescriptorSet is 64 bytes */
+        const VkDescriptorSet set = *(const VkDescriptorSet*)(this_w + 16);
+        const UINT32 binding = *(const UINT32*)(this_w + 24);
+        const UINT32 type = *(const UINT32*)(this_w + 36);
+        const void* p_image = *(const void* const*)(this_w + 40);
+        UINT64 handle = 0;
+        if (p_image != NULL)
+        {
+            /* VkDescriptorImageInfo: sampler at offset 0, imageView at offset 8, imageLayout at offset 16 */
+            handle = *(const UINT64*)((const BYTE*)p_image + 8);
+        }
+        (void)vk_syscall5(VkOp_UpdateDescriptorSet, 0, (long long)set, (long long)binding, (long long)type,
+                          (long long)handle);
+    }
+}
+
+VkResult vkCreateDescriptorSetLayout(VkDevice device, const void* pCreateInfo, const void* pAllocator,
+                                     VkDescriptorSetLayout* pSetLayout)
+{
+    (void)pCreateInfo;
+    (void)pAllocator;
+    if (pSetLayout == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const long long h = vk_syscall1(VkOp_CreateDescriptorSetLayout, (long long)device);
+    if (h == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    *pSetLayout = (VkDescriptorSetLayout)h;
+    return VK_SUCCESS;
+}
+
+void vkDestroyDescriptorSetLayout(VkDevice device, VkDescriptorSetLayout layout, const void* pAllocator)
+{
+    (void)pAllocator;
+    (void)vk_syscall3(VkOp_DestroyDescriptorSetLayout, 0, (long long)device, (long long)layout);
+}
+
+/* vkCreateDescriptorPool — maxSets at offset 24 in VkDescriptorPoolCreateInfo. */
+VkResult vkCreateDescriptorPool(VkDevice device, const void* pCreateInfo, const void* pAllocator,
+                                VkDescriptorPool* pDescriptorPool)
+{
+    (void)pAllocator;
+    if (pCreateInfo == NULL || pDescriptorPool == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const BYTE* ci = (const BYTE*)pCreateInfo;
+    const UINT32 max_sets = *(const UINT32*)(ci + 24);
+    const long long h = vk_syscall3(VkOp_CreateDescriptorPool, 0, (long long)device, (long long)max_sets);
+    if (h == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    *pDescriptorPool = (VkDescriptorPool)h;
+    return VK_SUCCESS;
+}
+
+void vkDestroyDescriptorPool(VkDevice device, VkDescriptorPool pool, const void* pAllocator)
+{
+    (void)pAllocator;
+    (void)vk_syscall3(VkOp_DestroyDescriptorPool, 0, (long long)device, (long long)pool);
+}
+
+/* vkAllocateDescriptorSets — VkDescriptorSetAllocateInfo:
+ *   descriptorPool at offset 16, descriptorSetCount at offset 24,
+ *   pSetLayouts (pointer to VkDescriptorSetLayout[]) at offset 32.
+ * v0 honors only the first layout / set. */
+VkResult vkAllocateDescriptorSets(VkDevice device, const void* pAllocateInfo, VkDescriptorSet* pDescriptorSets)
+{
+    if (pAllocateInfo == NULL || pDescriptorSets == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const BYTE* ai = (const BYTE*)pAllocateInfo;
+    const VkDescriptorPool pool = *(const VkDescriptorPool*)(ai + 16);
+    const VkDescriptorSetLayout* layouts = *(const VkDescriptorSetLayout* const*)(ai + 32);
+    if (layouts == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const long long h =
+        vk_syscall4(VkOp_AllocateDescriptorSet, (long long)device, (long long)pool, (long long)layouts[0], 0);
+    if (h == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    pDescriptorSets[0] = (VkDescriptorSet)h;
+    return VK_SUCCESS;
+}
+
+/* vkCmdBindDescriptorSets — bind one set at firstSet to the
+ * matching pipeline layout. dynamic offsets not honored in v0. */
+void vkCmdBindDescriptorSets(VkCommandBuffer cb, DWORD pipelineBindPoint, VkPipelineLayout layout, UINT32 firstSet,
+                             UINT32 descriptorSetCount, const VkDescriptorSet* pDescriptorSets,
+                             UINT32 dynamicOffsetCount, const UINT32* pDynamicOffsets)
+{
+    (void)pipelineBindPoint;
+    (void)dynamicOffsetCount;
+    (void)pDynamicOffsets;
+    if (descriptorSetCount == 0 || pDescriptorSets == NULL)
+        return;
+    (void)vk_syscall5(VkOp_CmdBindDescriptorSet, 0, (long long)cb, (long long)layout, (long long)firstSet,
+                      (long long)pDescriptorSets[0]);
 }

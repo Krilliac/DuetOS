@@ -507,6 +507,12 @@ syscall whose `rdi` argument selects which `VkOp` to invoke.
 | `vkCreateComputePipelines` | `kVkOpCreateComputePipeline` |
 | `vkDestroyPipeline` | `kVkOpDestroyPipeline` |
 | `vkCmdBindPipeline` / `vkCmdDraw` / `vkCmdDispatch` | `kVkOpCmdBindPipeline` / `kVkOpCmdDraw` / `kVkOpCmdDispatch` |
+| `vkCmdBindVertexBuffers` / `vkCmdBindIndexBuffer` | `kVkOpCmdBindVertexBuffer` / `kVkOpCmdBindIndexBuffer` (v0 single-binding form) |
+| `vkUpdateDescriptorSets` | `kVkOpUpdateDescriptorSet` (walks the writeCount array, one syscall per entry; extracts the image-view handle from each VkDescriptorImageInfo) |
+| `vkCreateDescriptorSetLayout` / `vkDestroyDescriptorSetLayout` | `kVkOpCreateDescriptorSetLayout` / `kVkOpDestroyDescriptorSetLayout` (single binding-0 CombinedImageSampler in v0) |
+| `vkCreateDescriptorPool` / `vkDestroyDescriptorPool` | `kVkOpCreateDescriptorPool` / `kVkOpDestroyDescriptorPool` |
+| `vkAllocateDescriptorSets` | `kVkOpAllocateDescriptorSet` (v0 single set per call) |
+| `vkCmdBindDescriptorSets` | `kVkOpCmdBindDescriptorSet` (v0 single set per bind) |
 
 `SYS_VK_CALL` plus `VkOp` / `VkStatsCounter` enums are in
 [`kernel/syscall/syscall.h`](../../kernel/syscall/syscall.h);

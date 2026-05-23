@@ -393,6 +393,84 @@ u64 OpCmdDispatch(arch::TrapFrame* frame)
                : 0;
 }
 
+u64 OpCmdBindVertexBuffer(arch::TrapFrame* frame)
+{
+    const u32 binding = static_cast<u32>(frame->r10);
+    vk::VkBuffer buffer = frame->r8;
+    const u64 offset = frame->r9;
+    return (vk::VkCmdBindVertexBuffers(frame->rdx, binding, 1, &buffer, &offset) == vk::VkResult::Success) ? 1 : 0;
+}
+
+u64 OpCmdBindIndexBuffer(arch::TrapFrame* frame)
+{
+    return (vk::VkCmdBindIndexBuffer(frame->rdx, frame->r10, frame->r8, static_cast<vk::VkIndexType>(frame->r9)) ==
+            vk::VkResult::Success)
+               ? 1
+               : 0;
+}
+
+u64 OpUpdateDescriptorSet(arch::TrapFrame* frame)
+{
+    return (vk::VkUpdateDescriptorSet(frame->rdx, static_cast<u32>(frame->r10),
+                                       static_cast<vk::VkDescriptorType>(frame->r8), frame->r9) ==
+            vk::VkResult::Success)
+               ? 1
+               : 0;
+}
+
+u64 OpCreateDescriptorSetLayout(arch::TrapFrame* frame)
+{
+    vk::VkDescriptorSetLayout out = 0;
+    // v0 single-binding-zero descriptor layout (CombinedImageSampler).
+    // A future syscall expansion can take a full bindings array.
+    vk::VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0;
+    binding.type = vk::VkDescriptorType::CombinedImageSampler;
+    binding.count = 1;
+    binding.stage_flags = 0x1F; // all stages
+    return (vk::VkCreateDescriptorSetLayout(frame->rdx, 1, &binding, &out) == vk::VkResult::Success) ? out : 0;
+}
+
+u64 OpDestroyDescriptorSetLayout(arch::TrapFrame* frame)
+{
+    vk::VkDestroyDescriptorSetLayout(frame->rdx, frame->r10);
+    return 1;
+}
+
+u64 OpCreateDescriptorPool(arch::TrapFrame* frame)
+{
+    vk::VkDescriptorPool out = 0;
+    vk::VkDescriptorPoolSize size{};
+    size.type = vk::VkDescriptorType::CombinedImageSampler;
+    size.count = static_cast<u32>(frame->r10) * 4u; // 4 bindings per set is plenty for v0
+    return (vk::VkCreateDescriptorPool(frame->rdx, static_cast<u32>(frame->r10), 1, &size, &out) ==
+            vk::VkResult::Success)
+               ? out
+               : 0;
+}
+
+u64 OpDestroyDescriptorPool(arch::TrapFrame* frame)
+{
+    vk::VkDestroyDescriptorPool(frame->rdx, frame->r10);
+    return 1;
+}
+
+u64 OpAllocateDescriptorSet(arch::TrapFrame* frame)
+{
+    vk::VkDescriptorSet out = 0;
+    vk::VkDescriptorSetLayout layout = frame->r8;
+    return (vk::VkAllocateDescriptorSets(frame->rdx, frame->r10, 1, &layout, &out) == vk::VkResult::Success) ? out : 0;
+}
+
+u64 OpCmdBindDescriptorSet(arch::TrapFrame* frame)
+{
+    vk::VkDescriptorSet set = frame->r9;
+    return (vk::VkCmdBindDescriptorSets(frame->rdx, vk::VkPipelineBindPoint::Graphics, frame->r10,
+                                        static_cast<u32>(frame->r8), 1, &set) == vk::VkResult::Success)
+               ? 1
+               : 0;
+}
+
 u64 OpQueueSubmit(arch::TrapFrame* frame)
 {
     vk::VkCommandBuffer cb = frame->r10;
@@ -474,25 +552,34 @@ void DoVkCall(arch::TrapFrame* frame)
     using ::duetos::core::kVkOpEnumeratePhysicalDevices;
     using ::duetos::core::kVkOpGetDeviceQueue;
     using ::duetos::core::kVkOpAllocateCommandBuffer;
+    using ::duetos::core::kVkOpAllocateDescriptorSet;
     using ::duetos::core::kVkOpAllocateMemory;
     using ::duetos::core::kVkOpBeginCommandBuffer;
     using ::duetos::core::kVkOpBindBufferMemory;
     using ::duetos::core::kVkOpBindImageMemory;
+    using ::duetos::core::kVkOpCmdBindDescriptorSet;
+    using ::duetos::core::kVkOpCmdBindIndexBuffer;
     using ::duetos::core::kVkOpCmdBindPipeline;
+    using ::duetos::core::kVkOpCmdBindVertexBuffer;
     using ::duetos::core::kVkOpCmdClearColorImage;
     using ::duetos::core::kVkOpCmdDispatch;
     using ::duetos::core::kVkOpCmdDraw;
     using ::duetos::core::kVkOpCreateCommandPool;
     using ::duetos::core::kVkOpCreateComputePipeline;
+    using ::duetos::core::kVkOpCreateDescriptorPool;
+    using ::duetos::core::kVkOpCreateDescriptorSetLayout;
     using ::duetos::core::kVkOpCreateGraphicsPipeline;
     using ::duetos::core::kVkOpCreatePipelineLayout;
     using ::duetos::core::kVkOpCreateRenderPass;
     using ::duetos::core::kVkOpDestroyCommandPool;
+    using ::duetos::core::kVkOpDestroyDescriptorPool;
+    using ::duetos::core::kVkOpDestroyDescriptorSetLayout;
     using ::duetos::core::kVkOpDestroyPipeline;
     using ::duetos::core::kVkOpDestroyPipelineLayout;
     using ::duetos::core::kVkOpDestroyRenderPass;
     using ::duetos::core::kVkOpEndCommandBuffer;
     using ::duetos::core::kVkOpQueueSubmit;
+    using ::duetos::core::kVkOpUpdateDescriptorSet;
     using ::duetos::core::kVkOpClearFramebufferRgba;
     using ::duetos::core::kVkOpCreateBuffer;
     using ::duetos::core::kVkOpCreateImage;
@@ -640,6 +727,33 @@ void DoVkCall(arch::TrapFrame* frame)
         return;
     case kVkOpCmdDispatch:
         frame->rax = OpCmdDispatch(frame);
+        return;
+    case kVkOpCmdBindVertexBuffer:
+        frame->rax = OpCmdBindVertexBuffer(frame);
+        return;
+    case kVkOpCmdBindIndexBuffer:
+        frame->rax = OpCmdBindIndexBuffer(frame);
+        return;
+    case kVkOpUpdateDescriptorSet:
+        frame->rax = OpUpdateDescriptorSet(frame);
+        return;
+    case kVkOpCreateDescriptorSetLayout:
+        frame->rax = OpCreateDescriptorSetLayout(frame);
+        return;
+    case kVkOpDestroyDescriptorSetLayout:
+        frame->rax = OpDestroyDescriptorSetLayout(frame);
+        return;
+    case kVkOpCreateDescriptorPool:
+        frame->rax = OpCreateDescriptorPool(frame);
+        return;
+    case kVkOpDestroyDescriptorPool:
+        frame->rax = OpDestroyDescriptorPool(frame);
+        return;
+    case kVkOpAllocateDescriptorSet:
+        frame->rax = OpAllocateDescriptorSet(frame);
+        return;
+    case kVkOpCmdBindDescriptorSet:
+        frame->rax = OpCmdBindDescriptorSet(frame);
         return;
     }
     frame->rax = kVkBadOp;

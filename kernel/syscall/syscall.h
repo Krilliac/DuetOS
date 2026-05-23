@@ -2249,6 +2249,17 @@ enum VkOp : u64
     kVkOpCmdBindPipeline = 40,      // rdx=cb, r10=pipeline
     kVkOpCmdDraw = 41,              // rdx=cb, r10=(vertex_count<<32)|first_vertex
     kVkOpCmdDispatch = 42,          // rdx=cb, r10=group_x, r8=group_y, r9=group_z
+    // Record-side bind ops + descriptor update.
+    kVkOpCmdBindVertexBuffer = 43, // rdx=cb, r10=binding, r8=buffer, r9=offset
+    kVkOpCmdBindIndexBuffer = 44,  // rdx=cb, r10=buffer, r8=offset, r9=index_type
+    kVkOpUpdateDescriptorSet = 45, // rdx=set, r10=binding, r8=type, r9=resource_handle
+    // Descriptor pool + set create/alloc.
+    kVkOpCreateDescriptorSetLayout = 46, // rdx=device; rax = VkDescriptorSetLayout
+    kVkOpDestroyDescriptorSetLayout = 47,
+    kVkOpCreateDescriptorPool = 48,      // rdx=device, r10=max_sets; rax = VkDescriptorPool
+    kVkOpDestroyDescriptorPool = 49,
+    kVkOpAllocateDescriptorSet = 50,     // rdx=device, r10=pool, r8=layout; rax = VkDescriptorSet
+    kVkOpCmdBindDescriptorSet = 51,      // rdx=cb, r10=layout, r8=first_set, r9=set
 };
 
 // Diagnostic counter IDs for kVkOpGetStatsCounter. Exposes the
