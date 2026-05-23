@@ -103,18 +103,18 @@ enum class StorageClass : u8
 struct TypeRecord
 {
     TypeKind kind;
-    u32 width;          // Int/Float: bit width (8/16/32/64). 32 only in v1.
-    u32 signedness;     // Int: 0=unsigned, 1=signed.
-    u32 component_id;   // Vector/Matrix/Array element type id. Pointer pointee id.
-    u32 component_count;// Vector dim, Matrix column count, Array length (resolved from OpConstant).
+    u32 width;              // Int/Float: bit width (8/16/32/64). 32 only in v1.
+    u32 signedness;         // Int: 0=unsigned, 1=signed.
+    u32 component_id;       // Vector/Matrix/Array element type id. Pointer pointee id.
+    u32 component_count;    // Vector dim, Matrix column count, Array length (resolved from OpConstant).
     StorageClass ptr_class; // Pointer storage class.
-    u32 member_count;   // Struct member count (max kMaxStructMembers).
-    u32 members[16];    // Struct member type ids.
+    u32 member_count;       // Struct member count (max kMaxStructMembers).
+    u32 members[16];        // Struct member type ids.
     u32 member_offsets[16]; // Decorated byte offsets (0 if undecorated).
-    u32 return_id;      // Function return type id (Function only).
-    u32 param_count;    // Function param count (max kMaxFnParams).
-    u32 params[8];      // Function param type ids.
-    u32 byte_size;      // Pre-computed total byte size for fast allocation.
+    u32 return_id;          // Function return type id (Function only).
+    u32 param_count;        // Function param count (max kMaxFnParams).
+    u32 params[8];          // Function param type ids.
+    u32 byte_size;          // Pre-computed total byte size for fast allocation.
 };
 
 // A single scalar value in the interpreter — either a 32-bit int
@@ -122,7 +122,7 @@ struct TypeRecord
 // stored as a stride of `Value`s in the SSA table.
 struct Value
 {
-    u32 bits;   // The actual data — interpret per associated type.
+    u32 bits; // The actual data — interpret per associated type.
 };
 
 // A constant is identified by a type-id + a vector of Values
@@ -178,8 +178,8 @@ struct FunctionRecord
     u32 type_id;
     u32 param_count;
     u32 params[8];
-    u32 bb_begin;       // Inclusive index into Program::blocks[].
-    u32 bb_end;         // Exclusive.
+    u32 bb_begin; // Inclusive index into Program::blocks[].
+    u32 bb_end;   // Exclusive.
 };
 
 // Entry-point manifest entry: matches one OpEntryPoint.
@@ -188,7 +188,7 @@ struct EntryPointRecord
     u32 function_id;
     u32 execution_model; // Vertex=0, TessControl=1, TessEvaluation=2, Geometry=3, Fragment=4, Compute=5.
     char name[32];
-    u32 interface_count;  // Number of Input/Output vars below.
+    u32 interface_count; // Number of Input/Output vars below.
     u32 interface_ids[16];
 };
 

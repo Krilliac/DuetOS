@@ -3,10 +3,13 @@
 > **Audience:** Graphics subsystem authors, DirectX-translation contributors
 >
 > **Execution context:** Kernel — currently CPU-side only; no real GPU
-> submission in v0
+> submission in v1
 >
-> **Maturity:** v0 — instance / device / queue / command-buffer lifecycle
-> + clear-to-scanout path; everything else recorded but inert
+> **Maturity:** v1 — instance / device / queue / command-buffer lifecycle
+> + clear-to-scanout + CPU triangle rasterizer + SPIR-V interpreter
+> (parser + executor for the canonical Vulkan subset; wired into
+> `vkCmdDraw` via the shader-rasterizer hook when a pipeline binds
+> parseable VS + FS modules)
 
 ## Overview
 
@@ -50,7 +53,14 @@ their commands.
 | [`graphics_vk_descriptors.cpp`](../../kernel/subsystems/graphics/graphics_vk_descriptors.cpp) | Descriptor sets, pools, layouts |
 | [`graphics_vk_misc.cpp`](../../kernel/subsystems/graphics/graphics_vk_misc.cpp) | Format conversions, image creation, memory mapping |
 | [`graphics_vk_wsi.cpp`](../../kernel/subsystems/graphics/graphics_vk_wsi.cpp) | WSI — surface, swapchain, present |
-| [`graphics_vk_selftest.cpp`](../../kernel/subsystems/graphics/graphics_vk_selftest.cpp) | Boot self-test |
+| [`graphics_vk_raster.cpp`](../../kernel/subsystems/graphics/graphics_vk_raster.cpp) | Fixed-function CPU triangle rasterizer (v0/v1 vertex format) |
+| [`graphics_vk_depth.cpp`](../../kernel/subsystems/graphics/graphics_vk_depth.cpp) | Software 16-bit depth surface |
+| [`graphics_vk_spirv.h`](../../kernel/subsystems/graphics/graphics_vk_spirv.h) | SPIR-V interpreter public interface |
+| [`graphics_vk_spirv_parse.cpp`](../../kernel/subsystems/graphics/graphics_vk_spirv_parse.cpp) | Module parser (types, constants, decorations, basic blocks) |
+| [`graphics_vk_spirv_exec.cpp`](../../kernel/subsystems/graphics/graphics_vk_spirv_exec.cpp) | Interpreter execution engine |
+| [`graphics_vk_spirv_selftest.cpp`](../../kernel/subsystems/graphics/graphics_vk_spirv_selftest.cpp) | Boot self-test (3 canonical SPIR-V modules) |
+| [`graphics_vk_shaderraster.cpp`](../../kernel/subsystems/graphics/graphics_vk_shaderraster.cpp) | Shader-based rasterizer hook (`vkCmdDraw` -> SPIR-V interpreter) |
+| [`graphics_vk_selftest.cpp`](../../kernel/subsystems/graphics/graphics_vk_selftest.cpp) | Boot self-test (lifecycle) |
 | [`graphics_vk_internal.h`](../../kernel/subsystems/graphics/graphics_vk_internal.h) | Shared per-handle structures |
 
 ## Handle Model
@@ -307,18 +317,105 @@ Vulkan-call level. Capability checks happen one layer up — at the
 syscalls that the Win32 thunks issue to reach the ICD. See
 [Capabilities](../security/Capabilities.md).
 
+## SPIR-V interpreter (v1)
+
+`graphics_vk_spirv_*.{h,cpp}` is a freestanding SPIR-V parser +
+executor inside the kernel. At `vkCreateShaderModule` time the
+module is parsed into a `Program` structure (types, constants,
+variables, basic blocks, instructions) and stored alongside the
+existing `ShaderModuleInfo`. The interpreter runs the program on
+demand — once per vertex (vertex shader) or once per pixel
+(fragment shader) — when the shader-rasterizer hook drives a
+`vkCmdDraw` against a pipeline that has parseable VS + FS
+modules bound.
+
+Float math goes through [`util/soft_float.{h,cpp}`](../../kernel/util/soft_float.h) —
+an IEEE 754 binary32 implementation in pure integer code, because
+the kernel is compiled `-mno-sse -mno-sse2` and cannot link any
+compiler-rt soft-float helpers. Sf32 covers Add / Sub / Mul / Div
+/ Sqrt / Neg / Abs / Min / Max / Clamp / Mix / Step + comparison
++ int<->float conversion, all with NaN-unordered IEEE
+semantics. 43-vector boot self-test validates the implementation.
+
+**Opcodes the executor dispatches today:**
+
+| Family | Opcodes |
+|--------|---------|
+| Memory | `OpLoad`, `OpStore`, `OpAccessChain` |
+| Composite | `OpVectorShuffle`, `OpCompositeConstruct`, `OpCompositeExtract` |
+| Arithmetic (int) | `OpSNegate`, `OpIAdd`, `OpISub`, `OpIMul`, `OpSDiv`, `OpUDiv` |
+| Arithmetic (float) | `OpFNegate`, `OpFAdd`, `OpFSub`, `OpFMul`, `OpFDiv` |
+| Vector ops | `OpVectorTimesScalar`, `OpMatrixTimesVector`, `OpDot` |
+| Conversion | `OpConvertSToF`, `OpConvertUToF`, `OpConvertFToS`, `OpBitcast` |
+| Comparison | `OpIEqual`, `OpINotEqual`, `OpSLessThan`, `OpFOrdLessThan` |
+| Control flow | `OpBranch`, `OpBranchConditional`, `OpPhi`, `OpReturn`, `OpReturnValue`, `OpLoopMerge`, `OpSelectionMerge` |
+| Extended | `OpExtInst` against `GLSL.std.450`: `Sqrt`, `FMin`, `FMax`, `FClamp`, `FMix`, `Step`, `Length`, `Normalize`, `Cross` |
+
+Per-shader step budget (`kStepBudget = 8192`) caps runaway loops.
+
+**Shader-rasterizer hook** (`graphics_vk_shaderraster.cpp`):
+
+- When `vkCmdDraw` replays and a graphics pipeline with VS + FS is
+  bound, `ShaderRasterizeDraw` runs the SPIR-V VS once per vertex
+  to compute `gl_Position`, then for each pixel inside the
+  resulting triangle runs the FS to compute the colour.
+- Vertex input layout: canonical 16-byte-per-Location convention
+  (vec2/vec3 fit in the first 16-byte slot; Location N starts at
+  `N * 16` bytes from the vertex base).
+- Fragment output: Location 0 vec4 RGBA, clamped to [0,1] and
+  packed BGRA8 for the framebuffer.
+- Topology: TriangleList only on the shader path; other
+  topologies fall back to the fixed-function rasterizer.
+- Painted-pixel cap (65k per draw) so a runaway fullscreen
+  shader cannot brick the boot.
+
+**Boot self-tests:**
+
+- `[util/soft_float] self-test PASS (43 vectors)` — soft-float
+  primitives.
+- `[subsys/graphics/spirv] self-test PASS (3 modules executed)` —
+  three hand-crafted SPIR-V modules (constant vec4 fragment,
+  Sf32 add via OpFAdd, vec3*scalar via OpVectorTimesScalar) parse
+  and execute end-to-end with the expected outputs.
+
+The shader hook is OPT-IN — it returns false (no paint) when:
+
+- No pipeline is bound, or
+- The pipeline doesn't carry interpretable VS + FS Programs, or
+- The topology is anything other than TriangleList.
+
+In all "false" cases the existing fixed-function v0/v1 rasterizer
+runs, so the existing demos / DirectX clears / boot self-test see
+no behavioural change.
+
 ## Known Limits / GAPs
 
 - **No real GPU submission.** Every device-side command is replayed
-  on the CPU; the visible effects are `Clear`, resource copies, and
+  on the CPU; the visible effects are `Clear`, resource copies,
   the CPU triangle rasterizer for `vkCmdDraw` / `vkCmdDrawIndexed`
   (TriangleList / TriangleStrip / TriangleFan; Gouraud-shaded with
   per-pixel src-over alpha; software Z-test when v1 vertex format
-  is selected).
-- **No SPIR-V execution.** Shader modules are parsed (entry points
-  enumerated, descriptor bindings counted) but not run. The
-  rasterizer is fixed-function; no per-fragment shader, no texture
-  sampling, no perspective-correct interpolation.
+  is selected), AND the SPIR-V shader rasterizer when a pipeline
+  binds parseable VS + FS modules (TriangleList only).
+- **SPIR-V varying interpolation.** The shader rasterizer feeds
+  the fragment shader `gl_FragCoord = (px, py, 0, 1)` but does
+  not interpolate vertex-shader Location-decorated Output
+  varyings to the fragment shader. A FS that reads a varying
+  Location sees zero. The v2 slice plumbs barycentric
+  interpolation through the per-pixel loop.
+- **SPIR-V texture sampling.** The interpreter recognises
+  `OpExtInst` and `OpFunctionCall` shapes but does not implement
+  `OpImageSample*` / `OpImageRead`. Descriptor-set fetch path is
+  not wired into the shader hook yet.
+- **SPIR-V perspective correction.** The shader rasterizer is
+  affine (linear pixel-space interpolation when interpolation
+  lands). Perspective-correct attribute interpolation needs a
+  per-fragment 1/w divide which the v1 hook doesn't perform.
+- **Vertex input descriptions.** The shader hook uses a canonical
+  16-byte-per-Location layout instead of consuming the caller's
+  `VkVertexInputAttributeDescription` / `VkVertexInputBindingDescription`.
+  A caller whose vertex layout differs gets garbage values fed
+  into the VS Input variables.
 - **Single queue family.** No async compute, no transfer queue
   separation.
 - **No swapchain resize.** Recreating the swapchain is supported;

@@ -229,9 +229,8 @@ void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Progra
     if (maxx < minx || maxy < miny)
         return;
 
-    auto edge = [](i32 x0, i32 y0, i32 x1, i32 y1, i32 px, i32 py) -> i64 {
-        return static_cast<i64>(x1 - x0) * (py - y0) - static_cast<i64>(y1 - y0) * (px - x0);
-    };
+    auto edge = [](i32 x0, i32 y0, i32 x1, i32 y1, i32 px, i32 py) -> i64
+    { return static_cast<i64>(x1 - x0) * (py - y0) - static_cast<i64>(y1 - y0) * (px - x0); };
     const i64 area2 = edge(ax, ay, bx, by, cx, cy);
     if (area2 == 0)
         return;
@@ -341,12 +340,18 @@ PipelineShaders PipelineShaderHandles(VkPipeline pipe)
 bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_count)
 {
     if (st.bound_pipeline == 0)
+    {
+        ++g_shader_raster_draws_skipped;
         return false;
+    }
     const PipelineShaders ps = PipelineShaderHandles(st.bound_pipeline);
     spirv::Program* vs = ShaderProgram(ps.vs);
     spirv::Program* fs = ShaderProgram(ps.fs);
     if (vs == nullptr || fs == nullptr)
+    {
+        ++g_shader_raster_draws_skipped;
         return false;
+    }
     u32 fb_w = 0, fb_h = 0;
     if (!ResolveExtent(st, &fb_w, &fb_h))
         return false;
@@ -385,6 +390,7 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
             continue;
         PaintTriangle(px[0], py[0], px[1], py[1], px[2], py[2], fs, fb_w, fb_h);
     }
+    ++g_shader_raster_draws_painted;
     return true;
 }
 

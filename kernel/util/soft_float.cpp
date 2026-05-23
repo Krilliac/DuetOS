@@ -233,8 +233,8 @@ Sf32 Sf32Mul(Sf32 a, Sf32 b)
     if (pa.exp_raw == 0 || pb.exp_raw == 0)
         return Sf32{sign << 31};
 
-    const u32 ma = pa.mantissa | 0x00800000u; // 24-bit
-    const u32 mb = pb.mantissa | 0x00800000u; // 24-bit
+    const u32 ma = pa.mantissa | 0x00800000u;      // 24-bit
+    const u32 mb = pb.mantissa | 0x00800000u;      // 24-bit
     const u64 product = static_cast<u64>(ma) * mb; // 48-bit max
     // PackNormal takes the UNBIASED exponent. ea_unbiased + eb_unbiased
     // = (ea_raw - 127) + (eb_raw - 127) = ea_raw + eb_raw - 254.

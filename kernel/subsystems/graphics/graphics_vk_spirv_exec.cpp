@@ -1,5 +1,6 @@
 #include "subsystems/graphics/graphics_vk_spirv.h"
 
+#include "subsystems/graphics/graphics_vk_internal.h"
 #include "util/soft_float.h"
 
 /*
@@ -143,7 +144,7 @@ struct ExecContext
     u32 type_of[kMaxIds]; // type_id per result-id; cached at first def
     u32 prev_block_label; // for Phi resolution
     u32 cur_block_label;
-    u32 jump_target;      // 0 = no jump
+    u32 jump_target; // 0 = no jump
     bool returned;
     u32 step_count;
 };
@@ -762,12 +763,12 @@ void DoExtInst(ExecContext& ec, u32 type_id, u32 result_id, u32 sub_op, const u3
         {
             const Sf32 ax = Sf32FromBits(a[0]), ay = Sf32FromBits(a[1]), az = Sf32FromBits(a[2]);
             const Sf32 bx = Sf32FromBits(b[0]), by = Sf32FromBits(b[1]), bz = Sf32FromBits(b[2]);
-            r[0] = Sf32ToBits(
-                ::duetos::core::Sf32Sub(::duetos::core::Sf32Mul(ay, bz), ::duetos::core::Sf32Mul(az, by)));
-            r[1] = Sf32ToBits(
-                ::duetos::core::Sf32Sub(::duetos::core::Sf32Mul(az, bx), ::duetos::core::Sf32Mul(ax, bz)));
-            r[2] = Sf32ToBits(
-                ::duetos::core::Sf32Sub(::duetos::core::Sf32Mul(ax, by), ::duetos::core::Sf32Mul(ay, bx)));
+            r[0] =
+                Sf32ToBits(::duetos::core::Sf32Sub(::duetos::core::Sf32Mul(ay, bz), ::duetos::core::Sf32Mul(az, by)));
+            r[1] =
+                Sf32ToBits(::duetos::core::Sf32Sub(::duetos::core::Sf32Mul(az, bx), ::duetos::core::Sf32Mul(ax, bz)));
+            r[2] =
+                Sf32ToBits(::duetos::core::Sf32Sub(::duetos::core::Sf32Mul(ax, by), ::duetos::core::Sf32Mul(ay, bx)));
             StoreResultComponents(ec, result_id, type_id, r, 3);
         }
         break;
@@ -799,6 +800,7 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
     {
         if (++ec.step_count > kStepBudget)
         {
+            ++::duetos::subsystems::graphics::internal::g_spirv_step_budget_exhausted;
             ec.returned = true;
             ec.jump_target = 0;
             return;
@@ -1037,6 +1039,7 @@ bool ExecuteEntryPoint(Program* prog, const char* name)
         cur_bb = static_cast<u32>(next);
         ec.jump_target = 0;
     }
+    ++::duetos::subsystems::graphics::internal::g_spirv_entry_point_executions;
     return true;
 }
 

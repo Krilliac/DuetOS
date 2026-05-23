@@ -481,6 +481,16 @@ extern u32 g_secondary_ops_replayed;
 extern u32 g_push_descriptor_writes;
 extern u32 g_triangles_drawn;
 
+// SPIR-V interpreter counters. Bump in graphics_vk_spirv_exec.cpp
+// (per ExecuteEntryPoint call + per step) and in
+// graphics_vk_shaderraster.cpp (per draw routed through shaders).
+extern u32 g_spirv_programs_built;         // VkCreateShaderModule that produced a parseable Program
+extern u32 g_spirv_program_build_failures; // VkCreateShaderModule that rejected at the v1 parser
+extern u32 g_spirv_entry_point_executions; // total ExecuteEntryPoint successes
+extern u32 g_spirv_step_budget_exhausted;  // ExecuteEntryPoint runs that hit kStepBudget
+extern u32 g_shader_raster_draws_painted;  // ShaderRasterizeDraw calls that actually painted
+extern u32 g_shader_raster_draws_skipped;  // ShaderRasterizeDraw calls that fell back to fixed-function
+
 // -------------------------------------------------------------------
 // Shared helper functions.
 // -------------------------------------------------------------------

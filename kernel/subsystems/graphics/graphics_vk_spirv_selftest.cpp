@@ -83,46 +83,102 @@ void Fail(const char* msg, u32 v)
 //   1: OpReturn
 //   1: OpFunctionEnd
 constexpr u32 const_color_frag[] = {
-    0x07230203, 0x00010000, 0x00000000, 17u, 0u,
+    0x07230203,
+    0x00010000,
+    0x00000000,
+    17u,
+    0u,
     // OpCapability Shader (wc=2, op=17): 17|2<<16 = 0x00020011
-    (2u << 16) | 17u, 1u, // Shader = 1
+    (2u << 16) | 17u,
+    1u, // Shader = 1
     // OpMemoryModel Logical(0) GLSL450(1) (wc=3, op=14)
-    (3u << 16) | 14u, 0u, 1u,
+    (3u << 16) | 14u,
+    0u,
+    1u,
     // OpEntryPoint Fragment(4) %4 "main" %9 (wc=5: opcode word + 3 fixed + 1 interface)
     // String "main" packed: 'm','a','i','n','\0','\0','\0','\0' -> 0x6E69616D 0x00000000
-    (6u << 16) | 15u, 4u, 4u, 0x6E69616Du, 0x00000000u, 9u,
+    (6u << 16) | 15u,
+    4u,
+    4u,
+    0x6E69616Du,
+    0x00000000u,
+    9u,
     // OpExecutionMode %4 OriginUpperLeft(7) (wc=3, op=16)
-    (3u << 16) | 16u, 4u, 7u,
+    (3u << 16) | 16u,
+    4u,
+    7u,
     // OpDecorate %9 Location(30) 0 (wc=4, op=71)
-    (4u << 16) | 71u, 9u, 30u, 0u,
+    (4u << 16) | 71u,
+    9u,
+    30u,
+    0u,
     // OpTypeVoid %2 (wc=2, op=19)
-    (2u << 16) | 19u, 2u,
+    (2u << 16) | 19u,
+    2u,
     // OpTypeFunction %3 %2 (wc=3, op=33)
-    (3u << 16) | 33u, 3u, 2u,
+    (3u << 16) | 33u,
+    3u,
+    2u,
     // OpTypeFloat %6 32 (wc=3, op=22)
-    (3u << 16) | 22u, 6u, 32u,
+    (3u << 16) | 22u,
+    6u,
+    32u,
     // OpTypeVector %7 %6 4 (wc=4, op=23)
-    (4u << 16) | 23u, 7u, 6u, 4u,
+    (4u << 16) | 23u,
+    7u,
+    6u,
+    4u,
     // OpTypePointer %8 Output(3) %7 (wc=4, op=32)
-    (4u << 16) | 32u, 8u, 3u, 7u,
+    (4u << 16) | 32u,
+    8u,
+    3u,
+    7u,
     // OpVariable %8 %9 Output(3) (wc=4, op=59)
-    (4u << 16) | 59u, 8u, 9u, 3u,
+    (4u << 16) | 59u,
+    8u,
+    9u,
+    3u,
     // OpConstant %6 %10 0.5 (= 0x3F000000) (wc=4, op=43)
-    (4u << 16) | 43u, 6u, 10u, 0x3F000000u,
+    (4u << 16) | 43u,
+    6u,
+    10u,
+    0x3F000000u,
     // OpConstant %6 %11 0.25 (= 0x3E800000)
-    (4u << 16) | 43u, 6u, 11u, 0x3E800000u,
+    (4u << 16) | 43u,
+    6u,
+    11u,
+    0x3E800000u,
     // OpConstant %6 %12 0.75 (= 0x3F400000)
-    (4u << 16) | 43u, 6u, 12u, 0x3F400000u,
+    (4u << 16) | 43u,
+    6u,
+    12u,
+    0x3F400000u,
     // OpConstant %6 %13 1.0 (= 0x3F800000)
-    (4u << 16) | 43u, 6u, 13u, 0x3F800000u,
+    (4u << 16) | 43u,
+    6u,
+    13u,
+    0x3F800000u,
     // OpConstantComposite %7 %14 %10 %11 %12 %13 (wc=7, op=44)
-    (7u << 16) | 44u, 7u, 14u, 10u, 11u, 12u, 13u,
+    (7u << 16) | 44u,
+    7u,
+    14u,
+    10u,
+    11u,
+    12u,
+    13u,
     // OpFunction %2 %4 None(0) %3 (wc=5, op=54)
-    (5u << 16) | 54u, 2u, 4u, 0u, 3u,
+    (5u << 16) | 54u,
+    2u,
+    4u,
+    0u,
+    3u,
     // OpLabel %15 (wc=2, op=248)
-    (2u << 16) | 248u, 15u,
+    (2u << 16) | 248u,
+    15u,
     // OpStore %9 %14 (wc=3, op=62)
-    (3u << 16) | 62u, 9u, 14u,
+    (3u << 16) | 62u,
+    9u,
+    14u,
     // OpReturn (wc=1, op=253)
     (1u << 16) | 253u,
     // OpFunctionEnd (wc=1, op=56)
@@ -171,30 +227,28 @@ void TestConstColor()
 //   layout(location = 0) out float r;
 //   void main() { r = a + b; }
 constexpr u32 add_two_floats[] = {
-    0x07230203, 0x00010000, 0u, 20u, 0u,
-    (2u << 16) | 17u, 1u,           // Capability Shader
-    (3u << 16) | 14u, 0u, 1u,       // MemoryModel Logical GLSL450
+    0x07230203, 0x00010000, 0u, 20u, 0u, (2u << 16) | 17u, 1u, // Capability Shader
+    (3u << 16) | 14u, 0u, 1u,                                  // MemoryModel Logical GLSL450
     // EntryPoint Vertex(0) %4 "main" %a %b %r — interface 3 vars (a=10, b=11, r=12)
-    (8u << 16) | 15u, 0u, 4u, 0x6E69616Du, 0u, 10u, 11u, 12u,
-    (4u << 16) | 71u, 10u, 30u, 0u, // Decorate %a Location 0
-    (4u << 16) | 71u, 11u, 30u, 1u, // Decorate %b Location 1
-    (4u << 16) | 71u, 12u, 30u, 0u, // Decorate %r Location 0
-    (2u << 16) | 19u, 2u,           // TypeVoid
-    (3u << 16) | 33u, 3u, 2u,       // TypeFunction () -> void
-    (3u << 16) | 22u, 6u, 32u,      // TypeFloat 32
-    (4u << 16) | 32u, 7u, 1u, 6u,   // TypePointer Input %6
-    (4u << 16) | 32u, 8u, 3u, 6u,   // TypePointer Output %6
-    (4u << 16) | 59u, 7u, 10u, 1u,  // Variable %a Input
-    (4u << 16) | 59u, 7u, 11u, 1u,  // Variable %b Input
-    (4u << 16) | 59u, 8u, 12u, 3u,  // Variable %r Output
-    (5u << 16) | 54u, 2u, 4u, 0u, 3u, // Function main
-    (2u << 16) | 248u, 15u,          // Label
-    (4u << 16) | 61u, 6u, 16u, 10u,  // %16 = Load %a
-    (4u << 16) | 61u, 6u, 17u, 11u,  // %17 = Load %b
-    (5u << 16) | 129u, 6u, 18u, 16u, 17u, // %18 = FAdd %16 %17
-    (3u << 16) | 62u, 12u, 18u,      // Store %r %18
-    (1u << 16) | 253u,               // Return
-    (1u << 16) | 56u,                // FunctionEnd
+    (8u << 16) | 15u, 0u, 4u, 0x6E69616Du, 0u, 10u, 11u, 12u, (4u << 16) | 71u, 10u, 30u, 0u, // Decorate %a Location 0
+    (4u << 16) | 71u, 11u, 30u, 1u,                                                           // Decorate %b Location 1
+    (4u << 16) | 71u, 12u, 30u, 0u,                                                           // Decorate %r Location 0
+    (2u << 16) | 19u, 2u,                                                                     // TypeVoid
+    (3u << 16) | 33u, 3u, 2u,                                                                 // TypeFunction () -> void
+    (3u << 16) | 22u, 6u, 32u,                                                                // TypeFloat 32
+    (4u << 16) | 32u, 7u, 1u, 6u,                                                             // TypePointer Input %6
+    (4u << 16) | 32u, 8u, 3u, 6u,                                                             // TypePointer Output %6
+    (4u << 16) | 59u, 7u, 10u, 1u,                                                            // Variable %a Input
+    (4u << 16) | 59u, 7u, 11u, 1u,                                                            // Variable %b Input
+    (4u << 16) | 59u, 8u, 12u, 3u,                                                            // Variable %r Output
+    (5u << 16) | 54u, 2u, 4u, 0u, 3u,                                                         // Function main
+    (2u << 16) | 248u, 15u,                                                                   // Label
+    (4u << 16) | 61u, 6u, 16u, 10u,                                                           // %16 = Load %a
+    (4u << 16) | 61u, 6u, 17u, 11u,                                                           // %17 = Load %b
+    (5u << 16) | 129u, 6u, 18u, 16u, 17u,                                                     // %18 = FAdd %16 %17
+    (3u << 16) | 62u, 12u, 18u,                                                               // Store %r %18
+    (1u << 16) | 253u,                                                                        // Return
+    (1u << 16) | 56u,                                                                         // FunctionEnd
 };
 
 void TestAddTwoFloats()
@@ -236,28 +290,84 @@ void TestAddTwoFloats()
 //   layout(location = 0) out vec3 r;
 //   void main() { r = v * 2.0; }
 constexpr u32 mul_vec3_scalar[] = {
-    0x07230203, 0x00010000, 0u, 25u, 0u,
-    (2u << 16) | 17u, 1u,
-    (3u << 16) | 14u, 0u, 1u,
-    (7u << 16) | 15u, 0u, 4u, 0x6E69616Du, 0u, 10u, 11u, // EntryPoint Vertex main %v %r
-    (4u << 16) | 71u, 10u, 30u, 0u,                       // Decorate %v Location 0
-    (4u << 16) | 71u, 11u, 30u, 0u,                       // Decorate %r Location 0
-    (2u << 16) | 19u, 2u,                                 // TypeVoid
-    (3u << 16) | 33u, 3u, 2u,                             // TypeFunction () -> void
-    (3u << 16) | 22u, 6u, 32u,                            // TypeFloat 32
-    (4u << 16) | 23u, 7u, 6u, 3u,                         // TypeVector vec3
-    (4u << 16) | 32u, 8u, 1u, 7u,                         // TypePointer Input vec3
-    (4u << 16) | 32u, 9u, 3u, 7u,                         // TypePointer Output vec3
-    (4u << 16) | 59u, 8u, 10u, 1u,                        // Variable %v Input
-    (4u << 16) | 59u, 9u, 11u, 3u,                        // Variable %r Output
-    (4u << 16) | 43u, 6u, 12u, 0x40000000u,               // Constant 2.0
-    (5u << 16) | 54u, 2u, 4u, 0u, 3u,                     // Function main
-    (2u << 16) | 248u, 15u,                               // Label
-    (4u << 16) | 61u, 7u, 16u, 10u,                       // %16 = Load %v
-    (5u << 16) | 142u, 7u, 17u, 16u, 12u,                 // %17 = VectorTimesScalar %16 %12
-    (3u << 16) | 62u, 11u, 17u,                           // Store %r %17
-    (1u << 16) | 253u,                                    // Return
-    (1u << 16) | 56u,                                     // FunctionEnd
+    0x07230203,
+    0x00010000,
+    0u,
+    25u,
+    0u,
+    (2u << 16) | 17u,
+    1u,
+    (3u << 16) | 14u,
+    0u,
+    1u,
+    (7u << 16) | 15u,
+    0u,
+    4u,
+    0x6E69616Du,
+    0u,
+    10u,
+    11u, // EntryPoint Vertex main %v %r
+    (4u << 16) | 71u,
+    10u,
+    30u,
+    0u, // Decorate %v Location 0
+    (4u << 16) | 71u,
+    11u,
+    30u,
+    0u, // Decorate %r Location 0
+    (2u << 16) | 19u,
+    2u, // TypeVoid
+    (3u << 16) | 33u,
+    3u,
+    2u, // TypeFunction () -> void
+    (3u << 16) | 22u,
+    6u,
+    32u, // TypeFloat 32
+    (4u << 16) | 23u,
+    7u,
+    6u,
+    3u, // TypeVector vec3
+    (4u << 16) | 32u,
+    8u,
+    1u,
+    7u, // TypePointer Input vec3
+    (4u << 16) | 32u,
+    9u,
+    3u,
+    7u, // TypePointer Output vec3
+    (4u << 16) | 59u,
+    8u,
+    10u,
+    1u, // Variable %v Input
+    (4u << 16) | 59u,
+    9u,
+    11u,
+    3u, // Variable %r Output
+    (4u << 16) | 43u,
+    6u,
+    12u,
+    0x40000000u, // Constant 2.0
+    (5u << 16) | 54u,
+    2u,
+    4u,
+    0u,
+    3u, // Function main
+    (2u << 16) | 248u,
+    15u, // Label
+    (4u << 16) | 61u,
+    7u,
+    16u,
+    10u, // %16 = Load %v
+    (5u << 16) | 142u,
+    7u,
+    17u,
+    16u,
+    12u, // %17 = VectorTimesScalar %16 %12
+    (3u << 16) | 62u,
+    11u,
+    17u,               // Store %r %17
+    (1u << 16) | 253u, // Return
+    (1u << 16) | 56u,  // FunctionEnd
 };
 
 void TestMulVec3Scalar()

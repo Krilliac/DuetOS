@@ -126,6 +126,12 @@ u32 g_queries_executed = 0;
 u32 g_memory_maps = 0;
 u32 g_image_upload_pixels = 0;
 u32 g_triangles_drawn = 0;
+u32 g_spirv_programs_built = 0;
+u32 g_spirv_program_build_failures = 0;
+u32 g_spirv_entry_point_executions = 0;
+u32 g_spirv_step_budget_exhausted = 0;
+u32 g_shader_raster_draws_painted = 0;
+u32 g_shader_raster_draws_skipped = 0;
 u32 g_dynamic_renderings = 0;
 u32 g_debug_labels = 0;
 u32 g_secondary_executes = 0;
@@ -1048,10 +1054,12 @@ VkResult VkCreateShaderModule(VkDevice dev, const u32* code, u64 code_size_bytes
                 if (spirv::Parse(dst, static_cast<u32>(words), prog))
                 {
                     g_shader_data[slot].spirv_program = prog;
+                    ++g_spirv_programs_built;
                 }
                 else
                 {
                     mm::KFree(prog_mem);
+                    ++g_spirv_program_build_failures;
                 }
             }
         }
@@ -2144,6 +2152,12 @@ GraphicsStats VkStatsSnapshot()
     s.vk_spirv_capabilities_seen = g_spirv_capabilities_seen;
     s.vk_spirv_decorations_seen = g_spirv_decorations_seen;
     s.vk_spirv_execution_modes_seen = g_spirv_execution_modes_seen;
+    s.vk_spirv_programs_built = g_spirv_programs_built;
+    s.vk_spirv_program_build_failures = g_spirv_program_build_failures;
+    s.vk_spirv_entry_point_executions = g_spirv_entry_point_executions;
+    s.vk_spirv_step_budget_exhausted = g_spirv_step_budget_exhausted;
+    s.vk_shader_raster_draws_painted = g_shader_raster_draws_painted;
+    s.vk_shader_raster_draws_skipped = g_shader_raster_draws_skipped;
     return s;
 }
 

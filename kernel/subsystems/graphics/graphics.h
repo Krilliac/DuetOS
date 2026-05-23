@@ -1210,6 +1210,14 @@ struct GraphicsStats
     u32 vk_spirv_capabilities_seen;    // sum
     u32 vk_spirv_decorations_seen;     // sum
     u32 vk_spirv_execution_modes_seen; // sum
+    u32 vk_spirv_programs_built;       // VkCreateShaderModule that produced an interpretable Program
+    u32 vk_spirv_program_build_failures; // VkCreateShaderModule the Program parser rejected (still loads the
+                                         // module — module-info + magic-word counters above stay; the
+                                         // bump only signals the v1 interpreter won't run for it)
+    u32 vk_spirv_entry_point_executions; // total ExecuteEntryPoint successes
+    u32 vk_spirv_step_budget_exhausted;  // shader runs that hit the per-invocation step budget
+    u32 vk_shader_raster_draws_painted;  // vkCmdDraw routes that actually ran via the shader rasterizer
+    u32 vk_shader_raster_draws_skipped;  // vkCmdDraw routes that fell back to the fixed-function path
     u32 d3d_create_calls;
     u32 dxgi_create_calls;
     u32 d3d9_create_calls;

@@ -5,12 +5,15 @@
 > **Execution context:** Kernel — IRQ + process; pixel ops in compositor pass
 >
 > **Maturity:** virtio-gpu v0 scanout; Intel Render Command Streamer
-> ring bring-up wired (MI_NOOP submission proven); AMD CP_RB0
+> ring bring-up wired (MI_NOOP submission proven, MI_STORE_DWORD_IMM
+> read-back verified on the boot self-test — concrete proof the
+> engine executes real opcodes, not just MI_NOOPs); AMD CP_RB0
 > register file programmed + read-back verified (firmware push is
 > the next gate); NVIDIA Turing+ diagnostic probe + GSP firmware
 > probe wired (PFIFO submission is gated on the multi-month GSP
-> RPC slice); Vulkan ICD v0 (CPU-side lifecycle, command tape
-> replay, scanout-backed clears)
+> RPC slice); Vulkan ICD v1 (CPU-side lifecycle, command tape
+> replay, scanout-backed clears, CPU triangle rasterizer, AND
+> SPIR-V interpreter wired into `vkCmdDraw` via the shader hook).
 
 ## Overview
 
@@ -73,12 +76,23 @@ Each tier-1 vendor now has a dedicated driver TU under
   boot and `[gpu/intel/rcs] ring online …` is emitted. On
   timeout the ring is disabled (CTL←0), a `kGpuRingBringupFail`
   probe fires with the last-seen `RCS_HEAD`, the buffer is freed,
-  and one `KLOG_WARN` summarises the failure. `IntelRcsRingSelfTest`
-  hooked to `DUETOS_BOOT_SELFTEST` emits a structural sentinel —
-  `[gpu/intel/rcs] selftest PASS …`, `selftest FAIL …`, or
-  `no Intel device — skipped` — that CI greps for. QEMU's
-  emulated `-vga std` / `-vga virtio` boots take the "skipped"
-  path (vendor IDs 0x1234 / 0x1AF4, not Intel's 0x8086).
+  and one `KLOG_WARN` summarises the failure.
+  **`IntelRcsStoreImmProbe`** then appends one `MI_STORE_DWORD_IMM`
+  packet (`opcode=0x20 << 23 | length=2`, address bits 31:0,
+  address bits 63:32, data) to the ring, bumps `RCS_TAIL` past
+  it, polls `RCS_HEAD` again, and reads back the 32-bit value
+  the engine was told to store into a DMA-coherent scratch
+  dword. On real Intel silicon a successful read-back is concrete
+  proof that the engine is executing the opcode stream — not
+  merely advancing past `MI_NOOP`s, which a wedged engine could
+  do without honouring real work.
+  `IntelRcsRingSelfTest` hooked to `DUETOS_BOOT_SELFTEST` emits a
+  structural sentinel — `[gpu/intel/rcs] selftest PASS (ring
+  online, MI_STORE_DWORD_IMM verified, scratch=0xC0DEFACE)`,
+  `selftest FAIL …`, or `no Intel device — skipped` — that CI
+  greps for. QEMU's emulated `-vga std` / `-vga virtio` boots
+  take the "skipped" path (vendor IDs 0x1234 / 0x1AF4, not
+  Intel's 0x8086).
 - `amd_gpu.{h,cpp}` — GFX9+ driver that opportunistically maps
   BAR5 (the register file lives there, not at BAR0 like Intel),
   reads `mmGRBM_STATUS` / `mmRLC_GPM_STAT`, probes the
@@ -596,13 +610,14 @@ recompose. Four themes ship:
 
 ## Known Limits / GAPs
 
-- **Intel RCS bring-up is `MI_NOOP`-only.** The Render Command
-  Streamer ring is now programmed and proven alive (head catches
-  tail) on Intel silicon, but the only opcode written through it
-  today is `MI_NOOP`. Real workloads need
-  `MI_STORE_DWORD_IMM` / `MI_BATCH_BUFFER_START` + a populated
-  GTT, plus GuC/HuC firmware push (the firmware files are
-  located via `intel::Probe` but never uploaded — there is no
+- **Intel RCS executes `MI_NOOP` + `MI_STORE_DWORD_IMM`.** The
+  Render Command Streamer ring is programmed, alive (head catches
+  tail after a 64-NOOP batch), AND verified to actually execute
+  by the boot self-test's `MI_STORE_DWORD_IMM` probe (writes a
+  cookie value into a DMA-coherent scratch dword and reads it
+  back). Real workloads still need `MI_BATCH_BUFFER_START` + a
+  populated GTT, plus GuC/HuC firmware push (the firmware files
+  are located via `intel::Probe` but never uploaded — there is no
   MEI driver to deliver them). On QEMU's emulated `-vga std` /
   `-vga virtio` the Intel RCS path is correctly inert: those
   devices report vendor IDs 0x1234 / 0x1AF4 and the
@@ -633,14 +648,21 @@ recompose. Four themes ship:
   kernel-side direct register writes (virtio-gpu's tiny command
   set; Intel's NOOP submitter). The Vulkan ICD is still CPU-only
   and does not route through the Intel ring yet.
-- **Vulkan ICD does not execute shaders.** SPIR-V blobs are
-  validated (magic-word check) + parsed (entry-point /
-  capability / decoration counts), but the bytecode is not
-  executed. `vkCmdDraw` now drives a CPU triangle rasterizer
-  (DuetOS v0 fixed vertex format, flat-shaded, TriangleList
-  only — see [Vulkan ICD](../subsystems/Vulkan-ICD.md)); attribute
-  interpolation, depth, and indexed draws are still gated on
-  the SPIR-V execution slice.
+- **Vulkan ICD now executes a SPIR-V subset.** SPIR-V blobs are
+  validated, parsed into a typed Program, AND executed via the
+  shader-rasterizer hook when `vkCmdDraw` runs against a pipeline
+  with parseable VS + FS modules. The interpreter handles
+  arithmetic (int + Sf32 float), vector/composite ops, memory
+  (Load/Store/AccessChain), control flow (Branch / Phi /
+  Return), the GLSL.std.450 subset (Sqrt, FMin/Max/Clamp/Mix,
+  Step, Length, Normalize, Cross). The fixed-function CPU
+  rasterizer (DuetOS v0/v1 vertex format, Gouraud-shaded,
+  TriangleList/Strip/Fan + Z-test) remains the path for any
+  pipeline that doesn't supply parseable SPIR-V or uses a
+  topology other than TriangleList. Still gated: varying
+  interpolation to the fragment shader, perspective-correct
+  attribute math, texture sampling, descriptor-set-driven
+  uniform reads — see [Vulkan ICD](../subsystems/Vulkan-ICD.md).
 - **Damage tracking promotes to a disjoint-rect list at present
   time.** `FramebufferAddDamage` accumulates a single union bbox
   per the existing `DamageRect::Extend` math, but `FramebufferPresent`
