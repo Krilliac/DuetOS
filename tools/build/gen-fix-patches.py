@@ -986,6 +986,13 @@ def synth_marker_log_upgrade_patch(r: FixRecord, repo_root: Path) -> str | None:
 # at module scope so the test harness can exercise the substitution
 # without re-deriving it. Indentation is 4 spaces (matches the existing
 # arms in kernel/syscall/syscall.cpp's main switch).
+#
+# The body uses `FixJournalRecord(...)` directly rather than the
+# parameterless `FIX_NOTE_STUB(...)` macro because the macro can't
+# carry detector-specific context — and the first two argument
+# registers (`rdi`, `rsi`) are exactly the context a reviewer needs to
+# triage the call. ctx_a = rdi, ctx_b = rsi. Higher args (rdx / r10 /
+# r8 / r9) drop into the journal's caller_rip resolution / GDB attach.
 _UNKNOWN_SYSCALL_STUB_BODY = """\
     case 0x{num:x}u:
     {{
@@ -994,7 +1001,14 @@ _UNKNOWN_SYSCALL_STUB_BODY = """\
         // to this site (not the catch-all `UnknownSyscall` arm) and so
         // a future implementer can flip the body to real semantics
         // without touching the dispatch table.
-        FIX_NOTE_STUB("syscall:0x{num:x}", "implement syscall 0x{num:x}");
+        //
+        // ctx_a / ctx_b capture the first two arg registers (rdi/rsi)
+        // so the reviewer sees what's being called with, not just
+        // that 0x{num:x} fired. Higher args reach the brief via
+        // caller_rip resolution.
+        (void)::duetos::diag::FixJournalRecord(
+            ::duetos::diag::FixDetector::StubMarker, "syscall:0x{num:x}",
+            "implement syscall 0x{num:x}", frame->rdi, frame->rsi);
         frame->rax = static_cast<u64>(kSysErrnoENOSYS);
         return;
     }}
