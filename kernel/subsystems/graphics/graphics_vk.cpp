@@ -1013,6 +1013,9 @@ VkResult VkCreateShaderModule(VkDevice dev, const u32* code, u64 code_size_bytes
         return VkResult::ErrorOutOfHostMemory;
     g_shader_data[slot].byte_size = code_size_bytes;
     g_shader_data[slot].info = ParseSpirv(code, code_size_bytes);
+    g_shader_data[slot].code_copy = nullptr;
+    g_shader_data[slot].code_word_count = 0;
+    g_shader_data[slot].spirv_program = nullptr;
     if (g_shader_data[slot].info.valid)
     {
         ++g_spirv_modules_parsed;
@@ -1020,6 +1023,37 @@ VkResult VkCreateShaderModule(VkDevice dev, const u32* code, u64 code_size_bytes
         g_spirv_capabilities_seen += g_shader_data[slot].info.capability_count;
         g_spirv_decorations_seen += g_shader_data[slot].info.decoration_count;
         g_spirv_execution_modes_seen += g_shader_data[slot].info.execution_mode_count;
+
+        // Take an owning copy of the SPIR-V word stream and try to
+        // build a v1 interpreter program. The copy outlives the
+        // caller's pointer; the program is what the rasterizer hook
+        // executes when a graphics pipeline binds this module.
+        // Failures here leave `spirv_program = nullptr`, which the
+        // rasterizer treats as "no shader available — fall back to
+        // the fixed-function path" rather than refusing the module.
+        const u64 words = code_size_bytes / 4u;
+        void* copy = mm::KMalloc(words * 4u);
+        if (copy != nullptr)
+        {
+            auto* dst = static_cast<u32*>(copy);
+            for (u64 i = 0; i < words; ++i)
+                dst[i] = code[i];
+            g_shader_data[slot].code_copy = dst;
+            g_shader_data[slot].code_word_count = words;
+            void* prog_mem = mm::KMalloc(sizeof(spirv::Program));
+            if (prog_mem != nullptr)
+            {
+                auto* prog = static_cast<spirv::Program*>(prog_mem);
+                if (spirv::Parse(dst, static_cast<u32>(words), prog))
+                {
+                    g_shader_data[slot].spirv_program = prog;
+                }
+                else
+                {
+                    mm::KFree(prog_mem);
+                }
+            }
+        }
     }
     if (out != nullptr)
         *out = HandleFor(kShaderBase, slot);
@@ -1041,7 +1075,19 @@ void VkDestroyShaderModule(VkDevice dev, VkShaderModule module)
     (void)dev;
     if (module == 0 || !HandleInRange(module, kShaderBase))
         return;
-    (void)PoolFree(g_shader_pool, SlotOf(module, kShaderBase));
+    const u32 slot = SlotOf(module, kShaderBase);
+    if (g_shader_data[slot].spirv_program != nullptr)
+    {
+        mm::KFree(g_shader_data[slot].spirv_program);
+        g_shader_data[slot].spirv_program = nullptr;
+    }
+    if (g_shader_data[slot].code_copy != nullptr)
+    {
+        mm::KFree(g_shader_data[slot].code_copy);
+        g_shader_data[slot].code_copy = nullptr;
+        g_shader_data[slot].code_word_count = 0;
+    }
+    (void)PoolFree(g_shader_pool, slot);
 }
 
 VkResult VkCreatePipelineLayout(VkDevice dev, VkPipelineLayout* out)

@@ -7,6 +7,7 @@
 #include "util/crc32.h"
 #include "util/bmp.h"
 #include "util/saturating.h"
+#include "util/soft_float.h"
 #include "util/datetime.h"
 #include "util/deflate.h"
 #include "util/gzip.h"
@@ -502,6 +503,7 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::util::Base64SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::SaturatingSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::util::vt::VtParserSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::core::Sf32SelfTest());
 
     // KASLR — compute the candidate slide from the now-seeded entropy
     // pool. The slide isn't applied to the kernel image yet (that

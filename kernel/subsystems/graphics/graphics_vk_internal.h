@@ -1,6 +1,7 @@
 #pragma once
 
 #include "subsystems/graphics/graphics.h"
+#include "subsystems/graphics/graphics_vk_spirv.h"
 
 #include "util/types.h"
 
@@ -144,6 +145,18 @@ struct ShaderRecord
 {
     u64 byte_size;
     ShaderModuleInfo info;
+    // Owning copy of the SPIR-V word stream (we keep our own
+    // copy so the caller's pointer can go out of scope after
+    // VkCreateShaderModule). Allocated via mm::KMalloc; freed by
+    // VkDestroyShaderModule.
+    u32* code_copy;
+    u64 code_word_count;
+    // Parsed program — also owned, lazily allocated when the
+    // module is first bound to a pipeline that the rasterizer
+    // can execute. nullptr if the module's structure doesn't
+    // pass the v1 parser, in which case the rasterizer falls
+    // back to the fixed-function path.
+    spirv::Program* spirv_program;
 };
 
 struct BufferRecord
