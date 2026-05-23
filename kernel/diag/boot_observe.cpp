@@ -88,6 +88,14 @@ void FinalisePhase(u32 ord, u64 now_ms)
     g_slots[ord].dur_ms = dur;
     g_slots[ord].dur_known = known;
 
+    // Hold g_serial_lock for the whole sentinel so a concurrent AP-
+    // bringup / klog / stress line can't slice it. Pre-fix: an AP's
+    // `[sched/smp] calling SchedStartIdle ...` (which IS line-guarded)
+    // landed BETWEEN our `[boot] phase=` and the phase name, producing
+    // `[boot] phase=[sched/smp] calling SchedStartIdle ...` (observed
+    // 2026-05-22 on claude/assembly-files-review-ju0dI, hid the actual
+    // order of events when chasing an intermittent #PF).
+    arch::SerialLineGuard guard;
     arch::SerialWrite("[boot] phase=");
     arch::SerialWrite(core::PhaseName(static_cast<core::Phase>(ord)));
     arch::SerialWrite(" complete t=");
@@ -141,9 +149,12 @@ void BootPhaseEnter(core::Phase phase)
     g_active = static_cast<i32>(ord);
     g_last_entered = static_cast<i32>(ord);
 
-    arch::SerialWrite("[boot] phase=");
-    arch::SerialWrite(core::PhaseName(phase));
-    arch::SerialWrite(" begin\n");
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[boot] phase=");
+        arch::SerialWrite(core::PhaseName(phase));
+        arch::SerialWrite(" begin\n");
+    }
 
     // Debug injection: prove the wedge path. Spinning here produces no
     // serial progress, so the existing init-wedge detector in
@@ -151,9 +162,12 @@ void BootPhaseEnter(core::Phase phase)
     // BootWatchdogOnWedge() → structured STUCK + TestExit under smoke.
     if (g_stall_phase == ord)
     {
-        arch::SerialWrite("[boot] phase=");
-        arch::SerialWrite(core::PhaseName(phase));
-        arch::SerialWrite(" STALL-INJECTED (debug boot-stall=)\n");
+        {
+            arch::SerialLineGuard guard;
+            arch::SerialWrite("[boot] phase=");
+            arch::SerialWrite(core::PhaseName(phase));
+            arch::SerialWrite(" STALL-INJECTED (debug boot-stall=)\n");
+        }
         for (;;)
         {
             asm volatile("pause" ::: "memory");
@@ -168,13 +182,16 @@ void BootPhaseFailed(core::Phase phase, u32 errcode)
         return;
     }
     const u8 ec = EncodeExit(BootExitCode::PhaseInitFail, phase);
-    arch::SerialWrite("[boot] phase=");
-    arch::SerialWrite(core::PhaseName(phase));
-    arch::SerialWrite(" FAIL ec=");
-    arch::SerialWriteHex(ec);
-    arch::SerialWrite(" err=");
-    arch::SerialWriteHex(errcode);
-    arch::SerialWrite("\n");
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[boot] phase=");
+        arch::SerialWrite(core::PhaseName(phase));
+        arch::SerialWrite(" FAIL ec=");
+        arch::SerialWriteHex(ec);
+        arch::SerialWrite(" err=");
+        arch::SerialWriteHex(errcode);
+        arch::SerialWrite("\n");
+    }
 
     // Bare-metal / interactive boots keep their current behaviour: the
     // imperative path already `(void)`-discards the RunPhase Result, so
@@ -200,11 +217,14 @@ void BootWatchdogOnWedge()
     }
     const core::Phase phase = static_cast<core::Phase>(g_active);
     const u8 ec = EncodeExit(BootExitCode::HungInPhase, phase);
-    arch::SerialWrite("[boot] phase=");
-    arch::SerialWrite(core::PhaseName(phase));
-    arch::SerialWrite(" STUCK ec=");
-    arch::SerialWriteHex(ec);
-    arch::SerialWrite(" (init-wedge: no serial progress)\n");
+    {
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[boot] phase=");
+        arch::SerialWrite(core::PhaseName(phase));
+        arch::SerialWrite(" STUCK ec=");
+        arch::SerialWriteHex(ec);
+        arch::SerialWrite(" (init-wedge: no serial progress)\n");
+    }
 
     // Under a smoke profile, fail fast with the structured code. On
     // real hardware we only warn — the existing init-wedge mechanism

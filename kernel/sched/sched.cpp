@@ -172,6 +172,20 @@ struct Task
     // default to false.
     bool no_requeue;
 
+    // First-run flag. True from SchedCreate until SchedFinishTaskSwitch
+    // runs for the first time on this task — i.e. true while the
+    // SchedCreate-primed stack layout (planted &SchedTaskTrampoline at
+    // slot_top-8, planted entry-fn at slot_top-16) is still intact and
+    // about to be consumed by ContextSwitch's pop sequence. Flipped to
+    // false by SchedFinishTaskSwitch on the trampoline's first-entry
+    // path — past that point, the rbx slot at slot_top-16 is general
+    // stack memory the task may write through.
+    //
+    // ScheduleLockedHandoff's proactive rbx-slot validator gates on
+    // this flag: with it true, the slot MUST hold a kernel-text
+    // function pointer; with it false, the slot is anything.
+    bool first_run;
+
     // CPU-time accounting. `ticks_run` accumulates one tick per
     // OnTimerTick call where this task was the current task; it
     // is the authoritative "how much CPU time has this consumed
@@ -1580,6 +1594,17 @@ extern "C" void SchedFinishTaskSwitch()
         // pcpu is established (the existing release code below relies
         // on exactly that) and lock_ptr == &g_sched_lock, i.e. a
         // real task is resuming.
+        //
+        // BEFORE returning, mark current_task (if any) as past first-
+        // run. The trampoline-first-entry path on a fresh AP idle
+        // arrives here with no lock-pass slot and would otherwise
+        // leave first_run=true forever — the proactive rbx-slot
+        // validator would then false-fire on the idle task's SECOND
+        // switch-in (slot already consumed by the first run, content
+        // is general stack memory). Idempotent on resume (already
+        // false).
+        if (pcpu->current_task != nullptr)
+            pcpu->current_task->first_run = false;
         return;
     }
     // Reinstate THIS task's lockdep held set BEFORE the
@@ -1594,6 +1619,17 @@ extern "C" void SchedFinishTaskSwitch()
         Task* self = pcpu->current_task;
         if (self != nullptr && self->state == TaskState::Running)
             ::duetos::sync::LockdepHeldRestore(self->lockdep_held, self->lockdep_held_depth);
+        // Trampoline first-entry consumed the planted SchedCreate
+        // stack frame — past this point, slot_top-16 (rbx slot) and
+        // slot_top-24 (rbp slot) are general stack memory and the
+        // proactive validator in ScheduleLockedHandoff stops looking
+        // at them. Idempotent on resume (already false). Lives here
+        // and not later in the function so an early-return path
+        // before the SpinLockRelease can't leave it stuck-true; lives
+        // INSIDE the `current_task != nullptr` arm so the fresh-AP
+        // early-return path (no current_task) doesn't NPE.
+        if (self != nullptr)
+            self->first_run = false;
     }
     sync::IrqFlags flags{.rflags = pcpu->ctxsw_lock_flags};
     pcpu->ctxsw_lock_to_release = nullptr;
@@ -1731,6 +1767,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
 
     t->id = g_next_task_id++;
     t->state = TaskState::Ready;
+    t->first_run = true; // SchedFinishTaskSwitch flips this to false on first entry
     t->stack_base = stack;
     t->stack_size = kKernelStackBytes;
     t->wake_tick = 0;
@@ -2395,6 +2432,7 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
         const u64 tramp_base = reinterpret_cast<u64>(&SchedTaskTrampoline);
         if (observed != tramp_base)
         {
+            arch::SerialLineGuard guard;
             arch::SerialWrite("[sched] TRAMPOLINE RA SLOT scribbled  cpu=");
             arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
             arch::SerialWrite("  next_task=");
@@ -2411,6 +2449,94 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
             arch::SerialWriteHex(observed);
             arch::SerialWrite("\n");
             core::PanicWithValue("sched", "trampoline RA slot scribbled — wild RIP precursor", observed);
+        }
+
+        // Sibling check: rbx slot at slot_top - 16 holds the planted
+        // entry function pointer for a never-first-run task. SchedCreate
+        // writes it as a full u64 (push_quad(reinterpret_cast<u64>(entry))
+        // in SchedCreateInternal). A 32-bit truncation / partial scribble
+        // is silently dispatched by the trampoline's `call *%rbx` —
+        // the trampoline-side validator (SchedTaskTrampolineValidateEntry)
+        // checks rbx-the-REGISTER after the pop, not the slot it came
+        // from, so a corruption that happens DURING the pop sequence's
+        // 8-byte read window or that lingered from an earlier scribble
+        // we caught the RA slot for but not the rbx slot is silent.
+        //
+        // Observed once on `claude/assembly-files-review-ju0dI` as a
+        // #PF at instruction fetch of 0x00000000803b9ae3 — the exact
+        // low-canonical mirror of a high-half kernel symbol — with
+        // CS=0x08 (kernel) and no preceding `[sched/trampoline] WILD
+        // entry fn` banner: the validator never ran because the bad
+        // value got into rbx via the pop, not via a corruption between
+        // validate and `call rbx`.
+        //
+        // Gate: check the rbx slot ONLY when this is provably the
+        // task's first dispatch (the SchedCreate-primed stack layout
+        // is still in place). Two independent indicators must agree:
+        //
+        //   1. next->first_run is true (SchedFinishTaskSwitch hasn't
+        //      run on this task yet).
+        //   2. next->rsp == slot_top - 56, the exact value
+        //      SchedCreate planted (7 pushed quads at the top of the
+        //      stack, last push = r15 slot). Any subsequent
+        //      ContextSwitch save overwrites this with a much lower
+        //      value (deep into the task's actual frames).
+        //
+        // Requiring both eliminates the false-positive class observed
+        // during this slice's first dry run: an early-boot task
+        // (seq-writer / e1000-rx-poll) whose first dispatch happened
+        // via a path where first_run hadn't yet flipped to false but
+        // whose top-of-stack memory had already been touched, leaving
+        // a stale value at slot_top-16. The rsp-match check anchors
+        // the validator to "literally just-primed, never run" so a
+        // log-only warning (below) is genuinely actionable.
+        //
+        // WARN + probe (not panic). The trampoline-side
+        // SchedTaskTrampolineValidateEntry catches the same wild rbx
+        // after ContextSwitch -> pop -> `call rbx` and HARD-PANICS,
+        // so a true-positive here would just panic one site later
+        // with the same actionable banner. Demoting this site to
+        // warn-only retires the boot-regression risk while still
+        // surfacing the corruption shape — the probe fires for the
+        // attached GDB stub, the warn line names the offender for
+        // the boot log, and the next session investigating an
+        // intermittent boot scribble has a structured starting
+        // point.
+        if (next->first_run && next->rsp == slot_top - 56)
+        {
+            u64* entry_slot = reinterpret_cast<u64*>(slot_top - 16);
+            const u64 entry_observed = *entry_slot;
+            const u64 lo = reinterpret_cast<u64>(_text_start);
+            const u64 hi = reinterpret_cast<u64>(_text_end);
+            if (entry_observed < lo || entry_observed >= hi)
+            {
+                KBP_PROBE_V(::duetos::debug::ProbeId::kSchedTrampolineWildEntry, entry_observed);
+                arch::SerialLineGuard guard;
+                arch::SerialWrite("[sched] TRAMPOLINE RBX SLOT pre-dispatch scribble  cpu=");
+                arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
+                arch::SerialWrite("  next_task=");
+                arch::SerialWriteHex(reinterpret_cast<u64>(next));
+                arch::SerialWrite("  id=");
+                arch::SerialWriteHex(next->id);
+                arch::SerialWrite("  name=\"");
+                arch::SerialWrite(next->name ? next->name : "<null>");
+                arch::SerialWrite("\"  slot=");
+                arch::SerialWriteHex(reinterpret_cast<u64>(entry_slot));
+                arch::SerialWrite("  text=[");
+                arch::SerialWriteHex(lo);
+                arch::SerialWrite("..");
+                arch::SerialWriteHex(hi);
+                arch::SerialWrite(")  observed=");
+                arch::SerialWriteHex(entry_observed);
+                arch::SerialWrite("  ra_slot=");
+                arch::SerialWriteHex(*reinterpret_cast<u64*>(slot_top - 8));
+                arch::SerialWrite("\n");
+                arch::SerialWrite("[sched]   trampoline-side validator will hard-panic on call *%rbx\n");
+                // No panic here: SchedTaskTrampolineValidateEntry
+                // panics on the actual `call rbx` site, which is
+                // the authoritative gate. This warn is the early-
+                // surfacing diagnostic; the panic is downstream.
+            }
         }
     }
 

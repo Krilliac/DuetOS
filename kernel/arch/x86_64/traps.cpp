@@ -130,6 +130,40 @@ extern "C" [[noreturn]] void RetpolineWildCallback(void* target)
     core::PanicWithValue("arch/retpoline", "indirect call target out of kernel text range", fn);
 }
 
+// Called from ContextSwitch's pre-ret range-check (kernel/sched/
+// context_switch.S) when the about-to-be-popped return target — the
+// value at [rsp] immediately before the trailing `ret` — fell
+// outside [_text_start, _text_end). Catches the planted-slot
+// truncation shape: SchedCreate / a previous Schedule() ContextSwitch
+// wrote a full-64-bit return address into that stack slot; something
+// then scribbled it (32-bit store; off-CPU memory corruption;
+// kstack slot-reuse race) to leave a low-canonical wild value.
+// Without this gate, `ret` would silently dispatch the wild value
+// and the CPU would fault with no indirect-call site to blame.
+//
+// Sibling of IretqFrameWildCallback (saved iretq RIP) and
+// RetpolineWildCallback (indirect call target). Caller passes the
+// wild ret target in rdi.
+extern "C" [[noreturn]] void SchedContextSwitchWildRetCallback(void* target)
+{
+    using namespace duetos;
+    const u64 fn = reinterpret_cast<u64>(target);
+    KBP_PROBE_V(::duetos::debug::ProbeId::kSchedContextSwitchWildRet, fn);
+    arch::SerialLineGuard guard;
+    arch::SerialWrite("[sched/ctxsw] WILD ret target — refusing switch-in  cpu=");
+    arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
+    arch::SerialWrite("  ret_target=");
+    arch::SerialWriteHex(fn);
+    arch::SerialWrite("  text=[");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_text_start));
+    arch::SerialWrite("..");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_text_end));
+    arch::SerialWrite(")  resuming_task_id=");
+    arch::SerialWriteHex(sched::CurrentTaskId());
+    arch::SerialWrite("\n");
+    core::PanicWithValue("sched/ctxsw", "context-switch ret target out of kernel text range", fn);
+}
+
 namespace duetos::arch
 {
 
