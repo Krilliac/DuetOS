@@ -349,9 +349,18 @@ semantics. 43-vector boot self-test validates the implementation.
 | Conversion | `OpConvertSToF`, `OpConvertUToF`, `OpConvertFToS`, `OpBitcast` |
 | Comparison | `OpIEqual`, `OpINotEqual`, `OpSLessThan`, `OpFOrdLessThan` |
 | Control flow | `OpBranch`, `OpBranchConditional`, `OpPhi`, `OpReturn`, `OpReturnValue`, `OpLoopMerge`, `OpSelectionMerge` |
-| Extended | `OpExtInst` against `GLSL.std.450`: `Sqrt`, `FMin`, `FMax`, `FClamp`, `FMix`, `Step`, `Length`, `Normalize`, `Cross` |
+| Extended | `OpExtInst` against `GLSL.std.450`: `Sqrt`, `Sin`, `Cos`, `Pow`, `FMin`, `FMax`, `FClamp`, `FMix`, `Step`, `Length`, `Normalize`, `Cross` |
 
 Per-shader step budget (`kStepBudget = 8192`) caps runaway loops.
+
+**Transcendental support:** `Sf32Sin` / `Sf32Cos` use a 7th-order
+minimax polynomial after [-pi/2, pi/2] range reduction (~3e-5 max
+error on the reduced range). `Sf32Exp` / `Sf32Log` use degree-5
+polynomial expansions with 2^n / log2 mantissa decomposition; `Sf32Pow`
+composes `exp(y * log(x))` for positive bases. The soft-float
+self-test asserts each with ULP-tolerance bounds — `Sf32SelfTest`
+emits `[util/soft_float] self-test PASS (55 vectors)` on clean
+boot.
 
 **Shader-rasterizer hook** (`graphics_vk_shaderraster.cpp`):
 
@@ -368,6 +377,22 @@ Per-shader step budget (`kStepBudget = 8192`) caps runaway loops.
   topologies fall back to the fixed-function rasterizer.
 - Painted-pixel cap (65k per draw) so a runaway fullscreen
   shader cannot brick the boot.
+
+**Per-pixel varying interpolation** (v2):
+
+- After the VS runs per vertex, `RunVertexShader` snapshots every
+  Location-decorated Output variable into a `VaryingSnapshot[8]`
+  array (up to 8 varyings, each up to 16 Sf32 components).
+- `PaintTriangle` precomputes `1 / |area2|` as an Sf32 once per
+  triangle; per pixel it derives barycentric weights as
+  `|edge_i| * inv_area` (three Sf32 multiplies, no divides).
+- For each varying, the per-pixel value = `a*w0 + b*w1 + c*w2`
+  via `BaryLerp` (three multiplies + two adds per component).
+- The interpolated values are written to the matching FS Input
+  Location via `spirv::WriteInputLocation` before invoking the
+  FS. Result: a fragment shader that reads `in vec3 color` from
+  a Location varying sees a smoothly interpolated value, not
+  zero.
 
 **Boot self-tests:**
 
@@ -388,6 +413,47 @@ In all "false" cases the existing fixed-function v0/v1 rasterizer
 runs, so the existing demos / DirectX clears / boot self-test see
 no behavioural change.
 
+## Userland bridge (`vulkan-1.dll` + `SYS_VK_CALL`)
+
+The in-kernel ICD is reachable from Win32 PE binaries via
+`vulkan-1.dll`, a freestanding userland PE library at
+[`userland/libs/vulkan_1/vulkan_1.c`](../../userland/libs/vulkan_1/vulkan_1.c).
+The DLL exports the canonical Vulkan entry-point set as thin
+thunks over `SYS_VK_CALL` (syscall 211), an op-code-dispatched
+syscall whose `rdi` argument selects which `VkOp` to invoke.
+
+| Userland entry | Kernel side (SYS_VK_CALL op) |
+|---|---|
+| `vkCreateInstance` | `kVkOpCreateInstance` |
+| `vkDestroyInstance` | `kVkOpDestroyInstance` |
+| `vkEnumeratePhysicalDevices` | `kVkOpEnumeratePhysicalDevices` |
+| `vkCreateDevice` | `kVkOpCreateDevice` |
+| `vkDestroyDevice` | `kVkOpDestroyDevice` |
+| `vkGetDeviceQueue` | `kVkOpGetDeviceQueue` |
+| `vkDeviceWaitIdle` | `kVkOpDeviceWaitIdle` |
+| `vkQueueWaitIdle` | `kVkOpQueueWaitIdle` |
+| `vkEnumerateInstanceVersion` | `kVkOpGetInstanceVersion` |
+| `vkGetInstanceProcAddr` | string -> function-pointer table |
+| `vkGetDeviceProcAddr` | same table |
+| `DuetOS_Vk_GetStatsCounter` | `kVkOpGetStatsCounter` (diagnostic) |
+
+`SYS_VK_CALL` plus `VkOp` / `VkStatsCounter` enums are in
+[`kernel/syscall/syscall.h`](../../kernel/syscall/syscall.h);
+the dispatch lives in
+[`kernel/syscall/syscall_vk.cpp`](../../kernel/syscall/syscall_vk.cpp).
+One syscall + an op-code-dispatch keeps the syscall number space
+sane while preserving a stable per-op ABI value — once published,
+neither the syscall number nor the op-code may move.
+
+What a Vulkan-using Win32 PE can do today: load the DLL, resolve
+exports, walk the lifecycle (`vkCreateInstance` -> enumerate ->
+`vkCreateDevice` -> `vkGetDeviceQueue` -> wait/destroy), and
+read any of the 10 diagnostic stats counters. Buffer / image /
+memory creation, command-buffer record + submit, shader module
+create, and WSI surface / swapchain are deferred to the next
+op-code expansion — those need shared-memory marshalling that
+the v0 syscall surface doesn't provide.
+
 ## Known Limits / GAPs
 
 - **No real GPU submission.** Every device-side command is replayed
@@ -397,25 +463,24 @@ no behavioural change.
   per-pixel src-over alpha; software Z-test when v1 vertex format
   is selected), AND the SPIR-V shader rasterizer when a pipeline
   binds parseable VS + FS modules (TriangleList only).
-- **SPIR-V varying interpolation.** The shader rasterizer feeds
-  the fragment shader `gl_FragCoord = (px, py, 0, 1)` but does
-  not interpolate vertex-shader Location-decorated Output
-  varyings to the fragment shader. A FS that reads a varying
-  Location sees zero. The v2 slice plumbs barycentric
-  interpolation through the per-pixel loop.
 - **SPIR-V texture sampling.** The interpreter recognises
   `OpExtInst` and `OpFunctionCall` shapes but does not implement
   `OpImageSample*` / `OpImageRead`. Descriptor-set fetch path is
   not wired into the shader hook yet.
 - **SPIR-V perspective correction.** The shader rasterizer is
-  affine (linear pixel-space interpolation when interpolation
-  lands). Perspective-correct attribute interpolation needs a
-  per-fragment 1/w divide which the v1 hook doesn't perform.
+  affine (linear pixel-space interpolation in pixel space).
+  Perspective-correct attribute interpolation needs a per-fragment
+  1/w divide which the v2 hook doesn't perform.
 - **Vertex input descriptions.** The shader hook uses a canonical
   16-byte-per-Location layout instead of consuming the caller's
   `VkVertexInputAttributeDescription` / `VkVertexInputBindingDescription`.
   A caller whose vertex layout differs gets garbage values fed
   into the VS Input variables.
+- **Userland buffer / image / submit.** `SYS_VK_CALL` v0 only
+  covers the lifecycle subset. Buffer / image / memory / command-
+  buffer / swapchain ops return `VK_ERROR_INITIALIZATION_FAILED`
+  to userland callers until the next op-code expansion adds
+  shared-memory marshalling.
 - **Single queue family.** No async compute, no transfer queue
   separation.
 - **No swapchain resize.** Recreating the swapchain is supported;

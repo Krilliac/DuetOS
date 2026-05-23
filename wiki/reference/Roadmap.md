@@ -652,12 +652,14 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
   real GPU command-ring submission.
 - **Blocks on:** per-vendor GPU drivers landing real
   command-ring submission; D3D→Vulkan thunk wiring (the Vulkan
-  ICD v1 lifecycle + SPIR-V interpreter landed; the D3D side
-  still returns `E_FAIL` and must redirect through the Vulkan
-  path. With shaders now executable in-kernel, the thunk slice
-  is "translate D3D11/12 Clear+Draw+Present API into the
-  matching VkCmd* + bind a known-good SPIR-V pipeline" instead
-  of the previous "wait for shader execution to land first.")
+  ICD v1 lifecycle + SPIR-V interpreter + userland `vulkan-1.dll`
+  thunk + `SYS_VK_CALL` syscall all landed; the D3D side still
+  returns `E_FAIL` and must redirect through the Vulkan path.
+  With shaders now executable in-kernel AND the userland
+  vulkan-1.dll bridge live, the thunk slice is "translate
+  D3D11/12 Clear+Draw+Present API into the matching VkCmd* +
+  bind a known-good SPIR-V pipeline" instead of the previous
+  "wait for shader execution to land first.")
   (D3D9/11/12 COM vtables + shared software rasterizer + DXGI
   swap-chain present into compositor windows landed.)
 
