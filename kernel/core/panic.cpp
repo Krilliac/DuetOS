@@ -18,6 +18,7 @@
 #include "diag/event_trace.h"
 #include "diag/soft_lockup.h"
 #include "diag/hexdump.h"
+#include "mm/paging.h"
 #include "diag/minidump.h"
 #include "diag/panic_wait.h"
 #include "diag/tlb_history.h"
@@ -303,12 +304,59 @@ void DumpStack(u64 rsp, int count)
 // would cross into the kstack-arena guard page above the current
 // slot, so a near-top rsp doesn't trip a secondary #PF that
 // recursive-panics the dump.
+// Heuristic check: is `value` plausibly the return address of a
+// call instruction? On x86_64 the immediate predecessor of a
+// return address is one of:
+//
+//   - `call rel32` (E8 xx xx xx xx) — 5 bytes; byte at value-5 = 0xE8
+//   - `call r/m64` (FF /2) — variable length; common encodings:
+//       FF D0       (call rax)        — value-2 = FF, value-1 = D0..D7
+//       FF 14 25 ...(call [abs32])    — value-7 = FF, etc.
+//       41 FF D0    (call r8..r15)    — value-3 = 41, value-2 = FF
+//   - `jmp rel32` (E9) — tail-call return; same offset shape as E8
+//
+// We check the cheapest two: byte at value-5 == 0xE8 (relative
+// call) and the FF-prefix family at value-2/-3/-7. Anything else
+// stays unknown — we don't reject, just don't endorse.
+//
+// Routed through SafeReadKernel so an unreadable RIP doesn't
+// fault the panic walker mid-dump.
+bool LooksLikeReturnAddress(u64 value)
+{
+    if (!PlausibleKernelAddress(value - 8))
+        return false;
+    u8 prev[8] = {};
+    if (!::duetos::mm::SafeReadKernel(prev, reinterpret_cast<const void*>(value - 8), 8))
+        return false;
+    // E8 (call rel32) → 5 bytes back
+    if (prev[3] == 0xE8)
+        return true;
+    // E9 (jmp rel32, tail-call) → 5 bytes back; same shape as E8
+    if (prev[3] == 0xE9)
+        return true;
+    // FF /2 (call r/m64). The 2-byte form is FF D0..D7; we check
+    // FF at value-2 with the next byte in the call-target ModR/M
+    // range D0..D7 (call r/m) or 14..17 (call [r/m, ...]).
+    if (prev[6] == 0xFF)
+    {
+        const u8 modrm = prev[7];
+        if ((modrm & 0xF8) == 0xD0)
+            return true;
+        if ((modrm & 0xF8) == 0x10)
+            return true;
+    }
+    // 41 FF D0..D7 (call r8..r15) → 3 bytes back. REX.B prefix.
+    if (prev[5] == 0x41 && prev[6] == 0xFF && (prev[7] & 0xF8) == 0xD0)
+        return true;
+    return false;
+}
+
 void DumpReturnAddressPointers(u64 rsp)
 {
     constexpr int kScanQuads = 0x80;
     arch::SerialWrite("  return-address pointers (scan of ");
     arch::SerialWriteHex(static_cast<u64>(kScanQuads));
-    arch::SerialWrite(" quads from rsp):\n");
+    arch::SerialWrite(" quads from rsp; '*' = preceded by call opcode):\n");
     int found = 0;
     for (int i = 0; i < kScanQuads; ++i)
     {
@@ -323,7 +371,14 @@ void DumpReturnAddressPointers(u64 rsp)
         {
             continue;
         }
-        arch::SerialWrite("    [");
+        // Tag this entry as a likely real return address if the
+        // byte before it is a call/jmp opcode. False positives
+        // are still possible (data that happens to symbolize +
+        // sits after an E8 byte) but the rate drops sharply.
+        // High-signal frames get a '*' so an investigator can
+        // skim past noise.
+        const bool likely = LooksLikeReturnAddress(value);
+        arch::SerialWrite(likely ? "  * [" : "    [");
         arch::SerialWriteHex(slot);
         arch::SerialWrite("] -> ");
         arch::SerialWriteHex(value);
