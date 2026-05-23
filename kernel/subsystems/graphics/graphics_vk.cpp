@@ -1545,13 +1545,36 @@ VkResult VkGetPhysicalDeviceFormatProperties(VkPhysicalDevice phys, u32 format, 
     if (!HandleInRange(phys, kPhysDevBase) || !PoolIsLive(g_phys_pool, SlotOf(phys, kPhysDevBase)))
         return VkResult::ErrorInitializationFailed;
     *out = VkFormatProperties{};
-    if (format == 0) // VK_FORMAT_B8G8R8A8_UNORM
+    // Recognised formats use a small DuetOS-internal numbering:
+    //   0  -> VK_FORMAT_B8G8R8A8_UNORM (the canonical scanout)
+    //   1  -> VK_FORMAT_R8G8B8A8_UNORM (RGBA8, mirror layout)
+    //   2  -> VK_FORMAT_R8_UNORM       (single-channel)
+    //   3  -> VK_FORMAT_R8G8_UNORM     (two-channel)
+    //   4  -> VK_FORMAT_R16_UNORM      (16-bit single-channel)
+    //   5  -> VK_FORMAT_R32G32B32A32_SFLOAT (HDR / compute outputs)
+    // All carry the same baseline feature set today: sampleable,
+    // valid as a color attachment, valid as transfer src/dst.
+    // Spec-correct format-specific feature restrictions land when
+    // the format-aware sampler / blit paths arrive.
+    const u32 baseline = kFormatFeatureSampledImage | kFormatFeatureColorAttachment | kFormatFeatureTransferSrc |
+                         kFormatFeatureTransferDst;
+    const u32 buffer_baseline = kFormatFeatureTransferSrc | kFormatFeatureTransferDst;
+    switch (format)
     {
-        const u32 baseline = kFormatFeatureSampledImage | kFormatFeatureColorAttachment | kFormatFeatureTransferSrc |
-                             kFormatFeatureTransferDst;
+    case 0: // B8G8R8A8_UNORM
+    case 1: // R8G8B8A8_UNORM
+    case 2: // R8_UNORM
+    case 3: // R8G8_UNORM
+    case 4: // R16_UNORM
+    case 5: // R32G32B32A32_SFLOAT
         out->linearTilingFeatures = baseline;
         out->optimalTilingFeatures = baseline;
-        out->bufferFeatures = kFormatFeatureTransferSrc | kFormatFeatureTransferDst;
+        out->bufferFeatures = buffer_baseline;
+        break;
+    default:
+        // Unknown format reports zero features (the canonical "not
+        // supported" answer) but the call still returns Success.
+        break;
     }
     return VkResult::Success;
 }
@@ -1567,7 +1590,9 @@ VkResult VkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice phys, u32 for
         return VkResult::ErrorInitializationFailed;
     if (!HandleInRange(phys, kPhysDevBase) || !PoolIsLive(g_phys_pool, SlotOf(phys, kPhysDevBase)))
         return VkResult::ErrorInitializationFailed;
-    if (format != 0)
+    // Accept the same internal format set as
+    // VkGetPhysicalDeviceFormatProperties — 0..5 inclusive.
+    if (format > 5u)
         return VkResult::ErrorFormatNotSupported;
     *out = VkImageFormatProperties{};
     out->maxExtent = VkExtent3D{16384, 16384, 1};

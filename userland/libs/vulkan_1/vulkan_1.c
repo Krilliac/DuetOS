@@ -124,6 +124,7 @@ enum
     VkOp_QueueWaitIdle = 7,
     VkOp_GetInstanceVersion = 8,
     VkOp_GetStatsCounter = 9,
+    VkOp_ClearFramebufferRgba = 10,
 };
 
 /* ---------------------------------------------------------------- *
@@ -272,4 +273,15 @@ PFN_vkVoidFunction vkGetDeviceProcAddr(VkDevice device, const char* pName)
 UINT64 DuetOS_Vk_GetStatsCounter(UINT32 counter_id)
 {
     return (UINT64)vk_syscall1(VkOp_GetStatsCounter, (long long)counter_id);
+}
+
+/* DuetOS-only proof-of-concept thunk: clear the framebuffer to
+ * a packed 0xAARRGGBB color via the Vulkan ICD's same path that
+ * vkCmdClearColorImage takes for scanout-backed images. Lets
+ * d3d11's ClearRenderTargetView route through Vulkan without
+ * building the full Instance->Device->CmdBuf->Submit ladder.
+ * Returns 1 on success, 0 if the framebuffer is unavailable. */
+INT DuetOS_Vk_ClearFramebufferRgba(DWORD argb)
+{
+    return (INT)vk_syscall1(VkOp_ClearFramebufferRgba, (long long)argb);
 }

@@ -2185,6 +2185,13 @@ enum VkOp : u64
     kVkOpGetInstanceVersion = 8, // rsi = u32* version_out; returns 0/non-zero
     // Diagnostic
     kVkOpGetStatsCounter = 9, // rsi = counter id (see VkStatsCounter), returns the counter value
+    // End-to-end clear: routes a userland "clear the framebuffer"
+    // call through the Vulkan ICD's FramebufferFillRect path. Lets
+    // d3d11's ClearRenderTargetView (and any other v0 caller) drive
+    // a Vulkan clear without building the full
+    // Instance->Device->CmdBuf->Submit ladder by hand. rsi = packed
+    // 0xAARRGGBB color word.
+    kVkOpClearFramebufferRgba = 10,
 };
 
 // Diagnostic counter IDs for kVkOpGetStatsCounter. Exposes the

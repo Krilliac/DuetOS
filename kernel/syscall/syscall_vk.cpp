@@ -1,5 +1,7 @@
 #include "syscall/syscall_vk.h"
 
+#include "drivers/video/display_info.h"
+#include "drivers/video/framebuffer.h"
 #include "subsystems/graphics/graphics.h"
 #include "syscall/syscall.h"
 
@@ -154,6 +156,24 @@ u64 OpGetInstanceVersion(arch::TrapFrame* frame)
     return (r == vk::VkResult::Success) ? 1 : 0;
 }
 
+u64 OpClearFramebufferRgba(arch::TrapFrame* frame)
+{
+    // rsi = packed 0xAARRGGBB. Drive the same path that
+    // `vkCmdClearColorImage` against a scanout-backed image
+    // already does: FramebufferFillRect on the full extent +
+    // FramebufferAddDamage to mark the present rect. This is
+    // what the userland D3D11 ClearRenderTargetView call sites
+    // can route through to get end-to-end Vulkan flow without
+    // building a full command-buffer ladder.
+    const u32 argb = static_cast<u32>(frame->rdx & 0xFFFFFFFFull);
+    const auto di = ::duetos::drivers::video::Query();
+    if (!di.available || di.width == 0 || di.height == 0)
+        return 0;
+    ::duetos::drivers::video::FramebufferFillRect(0, 0, di.width, di.height, argb);
+    ::duetos::drivers::video::FramebufferAddDamage(0, 0, di.width, di.height);
+    return 1;
+}
+
 u64 OpGetStatsCounter(arch::TrapFrame* frame)
 {
     const u64 cid = frame->rdx;
@@ -207,6 +227,7 @@ void DoVkCall(arch::TrapFrame* frame)
     using ::duetos::core::kVkOpDeviceWaitIdle;
     using ::duetos::core::kVkOpEnumeratePhysicalDevices;
     using ::duetos::core::kVkOpGetDeviceQueue;
+    using ::duetos::core::kVkOpClearFramebufferRgba;
     using ::duetos::core::kVkOpGetInstanceVersion;
     using ::duetos::core::kVkOpGetStatsCounter;
     using ::duetos::core::kVkOpQueueWaitIdle;
@@ -242,6 +263,9 @@ void DoVkCall(arch::TrapFrame* frame)
         return;
     case kVkOpGetStatsCounter:
         frame->rax = OpGetStatsCounter(frame);
+        return;
+    case kVkOpClearFramebufferRgba:
+        frame->rax = OpClearFramebufferRgba(frame);
         return;
     }
     frame->rax = kVkBadOp;

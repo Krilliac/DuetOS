@@ -368,15 +368,29 @@ boot.
   bound, `ShaderRasterizeDraw` runs the SPIR-V VS once per vertex
   to compute `gl_Position`, then for each pixel inside the
   resulting triangle runs the FS to compute the colour.
-- Vertex input layout: canonical 16-byte-per-Location convention
-  (vec2/vec3 fit in the first 16-byte slot; Location N starts at
-  `N * 16` bytes from the vertex base).
+- Vertex input layout: caller-supplied `VkVertexInputAttributeDescription`
+  via `VkSetVertexInputDuet` — each VS Input is fetched at the
+  declared (binding, offset) tuple with the right stride. Falls
+  back to a canonical 16-byte-per-Location layout when no
+  description is attached.
 - Fragment output: Location 0 vec4 RGBA, clamped to [0,1] and
   packed BGRA8 for the framebuffer.
 - Topology: TriangleList only on the shader path; other
   topologies fall back to the fixed-function rasterizer.
 - Painted-pixel cap (65k per draw) so a runaway fullscreen
   shader cannot brick the boot.
+
+**Compute shader dispatch** (`ShaderDispatchCompute`):
+
+- `vkCmdDispatch` replay now routes through the SPIR-V interpreter
+  for compute pipelines. The parser captures
+  `OpExecutionMode LocalSize x y z`; the dispatcher runs the entry
+  point `group_count_xyz * local_size_xyz` times.
+- Per-invocation builtins set before each execution:
+  `gl_NumWorkgroups`, `gl_WorkgroupId`, `gl_LocalInvocationId`,
+  `gl_GlobalInvocationId`, `gl_LocalInvocationIndex`.
+- 65k-invocation cap per dispatch protects against pathological
+  `dispatch(1024,1024,1024)` runs.
 
 **Per-pixel varying interpolation** (v2):
 
@@ -393,6 +407,42 @@ boot.
   FS. Result: a fragment shader that reads `in vec3 color` from
   a Location varying sees a smoothly interpolated value, not
   zero.
+
+**Perspective-correct interpolation** (v3):
+
+- When `gl_Position.w > 0` for every triangle vertex,
+  `ShaderRasterizeDraw` computes `1/w` per vertex and passes the
+  triple into `PaintTriangle`.
+- Per vertex, each varying value is pre-divided by `w`. Per
+  pixel, both `value/w` and `1/w` are barycentric-interpolated
+  linearly, then divided to recover the perspective-correct
+  varying.
+- Degenerate / orthographic projections (`w <= 0` or NaN) fall
+  back to the affine path — no artefacts on the cases where
+  perspective correction is meaningless.
+
+**Texture sampling primitives** (v3):
+
+- The parser recognises `OpTypeImage` / `OpTypeSampler` /
+  `OpTypeSampledImage` and decorates variables with
+  `DescriptorSet` / `Binding` indices.
+- `OpSampledImage` (combined image+sampler), `OpImageSampleImplicitLod`,
+  and `OpImageSampleExplicitLod` execute. Today they return the UV
+  coordinate as `(u, v, 0, 1)` — the "missing texture" diagnostic
+  pattern. A shader that samples a 2D texture now produces a
+  smooth gradient instead of zero; the descriptor-set fetch path
+  that replaces the fallback with real texel data lands in the
+  next slice.
+
+**Multi-format image support:**
+
+- `VkGetPhysicalDeviceFormatProperties` / `ImageFormatProperties`
+  now recognise six DuetOS-internal format ids:
+  `0 = B8G8R8A8_UNORM`, `1 = R8G8B8A8_UNORM`, `2 = R8_UNORM`,
+  `3 = R8G8_UNORM`, `4 = R16_UNORM`, `5 = R32G32B32A32_SFLOAT`.
+  All report the baseline feature set (sampled / color
+  attachment / transfer); format-aware sample + blit paths land
+  with the texel-fetch slice.
 
 **Boot self-tests:**
 
@@ -436,6 +486,7 @@ syscall whose `rdi` argument selects which `VkOp` to invoke.
 | `vkGetInstanceProcAddr` | string -> function-pointer table |
 | `vkGetDeviceProcAddr` | same table |
 | `DuetOS_Vk_GetStatsCounter` | `kVkOpGetStatsCounter` (diagnostic) |
+| `DuetOS_Vk_ClearFramebufferRgba` | `kVkOpClearFramebufferRgba` (end-to-end clear-the-screen — same path `vkCmdClearColorImage` takes for a scanout image) |
 
 `SYS_VK_CALL` plus `VkOp` / `VkStatsCounter` enums are in
 [`kernel/syscall/syscall.h`](../../kernel/syscall/syscall.h);
