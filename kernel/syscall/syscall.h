@@ -2143,6 +2143,65 @@ enum SyscallNumber : u64
     // so a bucket collision is at worst a spurious wakeup, never a
     // lost one. No cap gated. ABI stable from this commit.
     SYS_WAKE_BY_ADDRESS = 209,
+
+    // SYS_VK_CALL — dispatch a Vulkan ICD call from userland into
+    // the in-kernel Vulkan ICD. One generic syscall with an
+    // opcode-based dispatch on the first argument: rdi selects the
+    // operation (VkOp enum below), rsi/rdx/r10/r8 carry per-op
+    // arguments, return is the per-op return value. This is the
+    // bridge that lets `userland/libs/vulkan_1/vulkan-1.dll`
+    // implement the standard Vulkan entry points (vkCreateInstance,
+    // vkGetInstanceProcAddr, vkCreateDevice, vkQueueSubmit, ...)
+    // as thin thunks that marshal arguments + invoke this syscall.
+    //
+    // Why one syscall instead of one per Vulkan call: the Vulkan
+    // ABI is ~600 entry points; baking each into a syscall number
+    // would burn the entire remaining slot space. Each op-code in
+    // VkOp is a forever-stable ABI value, but the syscall number
+    // stays at 211 for the whole subsystem.
+    //
+    // Capability gate: kCapGraphics (TODO when the cap lands;
+    // today the cap-gating happens one layer up, at the Win32
+    // dispatch entry — see Subsystem-Isolation.md for the rule).
+    SYS_VK_CALL = 211,
+};
+
+// Vulkan syscall op-codes. Used as the `rdi` value to SYS_VK_CALL
+// to select which Vulkan ICD entry the syscall should forward to.
+// Numbers are part of the ABI: once published, never change.
+enum VkOp : u64
+{
+    // Lifecycle
+    kVkOpCreateInstance = 0,  // rsi = VkInstance* out_handle (kernel returns 0/non-zero)
+    kVkOpDestroyInstance = 1, // rsi = VkInstance handle
+    kVkOpEnumeratePhysicalDevices =
+        2,                   // rsi = instance, rdx = u32* count, r10 = VkPhysicalDevice* out (or 0 to query count)
+    kVkOpCreateDevice = 3,   // rsi = phys, rdx = VkDevice* out
+    kVkOpDestroyDevice = 4,  // rsi = device handle
+    kVkOpGetDeviceQueue = 5, // rsi = device, rdx = VkQueue* out
+    kVkOpDeviceWaitIdle = 6, // rsi = device
+    kVkOpQueueWaitIdle = 7,  // rsi = queue
+    // Properties
+    kVkOpGetInstanceVersion = 8, // rsi = u32* version_out; returns 0/non-zero
+    // Diagnostic
+    kVkOpGetStatsCounter = 9, // rsi = counter id (see VkStatsCounter), returns the counter value
+};
+
+// Diagnostic counter IDs for kVkOpGetStatsCounter. Exposes the
+// existing GraphicsStats fields without dragging the full struct
+// across the syscall boundary. Numbers are ABI-stable.
+enum VkStatsCounter : u64
+{
+    kVkStatsInstanceLive = 0,
+    kVkStatsDeviceLive = 1,
+    kVkStatsCommandBufferLive = 2,
+    kVkStatsSpirvProgramsBuilt = 3,
+    kVkStatsSpirvEntryPointExecutions = 4,
+    kVkStatsShaderRasterDrawsPainted = 5,
+    kVkStatsShaderRasterDrawsSkipped = 6,
+    kVkStatsClearPixelsPainted = 7,
+    kVkStatsTrianglesDrawn = 8,
+    kVkStatsQueueSubmits = 9,
 };
 
 // Stable bit assignments for SYS_COMPAT_QUERY's return value.

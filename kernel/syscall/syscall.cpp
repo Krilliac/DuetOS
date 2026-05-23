@@ -90,6 +90,7 @@
 #include "subsystems/win32/mutex_syscall.h"
 #include "subsystems/win32/event_syscall.h"
 #include "subsystems/win32/waitaddr_syscall.h"
+#include "syscall/syscall_vk.h"
 #include "subsystems/win32/apc_syscall.h"
 #include "subsystems/win32/named_kobj_syscall.h"
 #include "subsystems/win32/named_pipe_syscall.h"
@@ -3566,6 +3567,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
     case SYS_WAKE_BY_ADDRESS:
         ::duetos::subsystems::win32::DoWakeByAddress(frame);
+        return;
+
+    case SYS_VK_CALL:
+        ::duetos::syscall::DoVkCall(frame);
         return;
 
     case SYS_DLL_LOAD_FROM_PATH:

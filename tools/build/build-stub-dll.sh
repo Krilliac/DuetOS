@@ -15,8 +15,16 @@
 
 set -euo pipefail
 
-if [[ $# -ne 5 ]]; then
-    echo "usage: $0 <repo_root> <out_header> <dll_name> <base_va> <export_list>" >&2
+# 6th arg is optional: the basename to use for the embedded DLL
+# file (and therefore the PE export-directory "Name" field). When
+# omitted it defaults to DLL_NAME. Useful when the on-disk
+# directory / source name must avoid a character the standard
+# DLL filename includes - e.g. vulkan-1.dll lives in
+# userland/libs/vulkan_1/vulkan_1.c because the build script's
+# bash-variable expansions don't tolerate dashes, but the PE
+# loader needs to see "vulkan-1.dll" as the import target.
+if [[ $# -lt 5 || $# -gt 6 ]]; then
+    echo "usage: $0 <repo_root> <out_header> <dll_name> <base_va> <export_list> [<out_basename>]" >&2
     exit 2
 fi
 
@@ -25,6 +33,7 @@ OUT_HEADER="$2"
 DLL_NAME="$3"
 BASE_VA="$4"
 EXPORTS="$5"
+OUT_BASENAME="${6:-${DLL_NAME}}"
 
 SRC_DIR="${REPO_ROOT}/userland/libs/${DLL_NAME}"
 SRC_C="${SRC_DIR}/${DLL_NAME}.c"
@@ -77,7 +86,7 @@ esac
 WORK_DIR="$(dirname "${OUT_HEADER}")/${DLL_NAME}"
 mkdir -p "${WORK_DIR}"
 OBJ="${WORK_DIR}/${DLL_NAME}.obj"
-DLL="${WORK_DIR}/${DLL_NAME}.dll"
+DLL="${WORK_DIR}/${OUT_BASENAME}.dll"
 
 CLANG="${CLANG:-clang}"
 LLD_LINK="${LLD_LINK:-lld-link}"

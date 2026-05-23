@@ -67,6 +67,7 @@
 #include "generated_d3d12_dll.h"
 #include "generated_d3d9_dll.h"
 #include "generated_d3dcompiler_dll.h"
+#include "generated_vulkan_1_dll.h"
 #include "generated_dbghelp_dll.h"
 #include "generated_ddraw_dll.h"
 #include "generated_dinput8_dll.h"
@@ -657,6 +658,15 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
         {"dxgi.dll", fs::generated::kBinDxgiDllBytes, fs::generated::kBinDxgiDllBytes_len,
          /*essential=*/true},
         {"d3dcompiler.dll", fs::generated::kBinD3dcompilerDllBytes, fs::generated::kBinD3dcompilerDllBytes_len,
+         /*essential=*/false},
+        // vulkan-1.dll — Win32 PE library that any Vulkan-using
+        // game / app imports. Thunks to the in-kernel ICD via
+        // SYS_VK_CALL (syscall 211). v0 only covers the lifecycle
+        // subset; binders that need buffer / image / submit will
+        // see VK_ERROR_INITIALIZATION_FAILED until the follow-on
+        // slice extends the op-code dispatch. Marked non-
+        // essential — most boots don't spawn a Vulkan PE.
+        {"vulkan-1.dll", fs::generated::kBinVulkan_1DllBytes, fs::generated::kBinVulkan_1DllBytes_len,
          /*essential=*/false},
         {"user32.dll", fs::generated::kBinUser32DllBytes, fs::generated::kBinUser32DllBytes_len,
          /*essential=*/true},

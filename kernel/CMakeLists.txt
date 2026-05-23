@@ -961,10 +961,18 @@ set(DUETOS_STUB_DLL_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build/build-stub-dll.sh")
 macro(duetos_stub_dll name base_va exports)
     set(_src "${CMAKE_SOURCE_DIR}/userland/libs/${name}/${name}.c")
     set(_header "${CMAKE_CURRENT_BINARY_DIR}/generated_${name}_dll.h")
+    # Optional 4th positional arg: a different basename for the
+    # embedded DLL file (overrides the default "${name}.dll").
+    # Lets a directory like vulkan_1/ produce vulkan-1.dll
+    # so the PE loader sees the canonical Windows import name.
+    set(_extra_args "")
+    if(${ARGC} GREATER 3)
+        set(_extra_args "${ARGV3}")
+    endif()
     add_custom_command(
         OUTPUT "${_header}"
         COMMAND "${DUETOS_STUB_DLL_SCRIPT}"
-                "${CMAKE_SOURCE_DIR}" "${_header}" "${name}" "${base_va}" "${exports}"
+                "${CMAKE_SOURCE_DIR}" "${_header}" "${name}" "${base_va}" "${exports}" ${_extra_args}
         DEPENDS "${_src}" "${DUETOS_STUB_DLL_SCRIPT}" "${DUETOS_EMBED_BLOB_SCRIPT}"
         COMMENT "Compiling + embedding ${name}.dll"
         VERBATIM
@@ -1022,6 +1030,17 @@ duetos_stub_dll(dwrite 0x102D0000 "DWriteCreateFactory")
 # of a tiny HLSL subset; produces a deterministic DXBC-shaped blob.
 # See userland/libs/d3dcompiler/d3dcompiler.c.
 duetos_stub_dll(d3dcompiler 0x102E0000 "D3DCompile,D3DCompile2,D3DCreateBlob,D3DReflect,D3DDisassemble,DuetOS_D3DCompiler_PeekBlobMagic")
+
+# vulkan-1.dll - Win32 PE library that any Vulkan-using game / app
+# imports as `vulkan-1.dll`. The directory + .c basename use the
+# underscore form (`vulkan_1`) because bash dollar-substitution in
+# build-stub-dll.sh chokes on dashes; the 4th arg to the macro
+# overrides the OUTPUT BASENAME so the embedded PE file is named
+# `vulkan-1.dll` exactly. v0 surface: lifecycle (Create/Destroy
+# instance/device, GetDeviceQueue, *WaitIdle), enumeration, version
+# query, GetInstanceProcAddr / GetDeviceProcAddr string lookup,
+# DuetOS_Vk_GetStatsCounter diagnostic accessor.
+duetos_stub_dll(vulkan_1 0x102F0000 "vkCreateInstance,vkDestroyInstance,vkEnumeratePhysicalDevices,vkCreateDevice,vkDestroyDevice,vkGetDeviceQueue,vkDeviceWaitIdle,vkQueueWaitIdle,vkEnumerateInstanceVersion,vkGetInstanceProcAddr,vkGetDeviceProcAddr,DuetOS_Vk_GetStatsCounter" "vulkan-1")
 
 
 set(DUETOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
