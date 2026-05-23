@@ -92,13 +92,31 @@ u32 PackArgb(Sf32 r, Sf32 g, Sf32 b, Sf32 a)
     return (static_cast<u32>(A) << 24) | (static_cast<u32>(R) << 16) | (static_cast<u32>(G) << 8) | static_cast<u32>(B);
 }
 
+// Per-varying snapshot taken once per vertex after the VS runs.
+// `data[]` holds the Sf32 bit pattern for each scalar component of
+// the VS Output at this Location, packed in natural order. The
+// fragment-side interpolation pass reads the same Location off
+// each of the 3 vertices' snapshots and writes the interpolated
+// value into the matching FS Input.
+constexpr u32 kMaxVaryingComponents = 16; // up to vec4 + a few extras
+constexpr u32 kMaxVaryings = 8;
+struct VaryingSnapshot
+{
+    u32 location;
+    u32 component_count;
+    u32 data[kMaxVaryingComponents];
+};
+
 // Run a vertex shader for one vertex. Reads the vertex's
 // per-attribute data from `vertex_buffer + vertex_index * stride`
 // according to the shader's Input Locations, then executes the
 // "main" entry point. Writes the gl_Position output components
-// into `pos_out[0..3]` (vec4). Returns false if the shader
-// can't be run or fails.
-bool RunVertexShader(spirv::Program* vs, const u8* vb, u64 vb_size, u64 stride, u32 vertex_index, u32* pos_out)
+// into `pos_out[0..3]` (vec4). If `varying_out` is non-null,
+// also snapshots every Location-decorated Output the VS wrote
+// (up to `varying_cap` entries) so the rasterizer can interpolate
+// them per-pixel. Returns false if the shader can't be run.
+bool RunVertexShader(spirv::Program* vs, const u8* vb, u64 vb_size, u64 stride, u32 vertex_index, u32* pos_out,
+                     VaryingSnapshot* varying_out, u32 varying_cap, u32* varying_n_out)
 {
     if (vs == nullptr || vb == nullptr || pos_out == nullptr)
         return false;
@@ -131,13 +149,31 @@ bool RunVertexShader(spirv::Program* vs, const u8* vb, u64 vb_size, u64 stride, 
         if (!spirv::ReadOutputLocation(vs, 0, pos_out, 16u))
             return false;
     }
+    if (varying_out != nullptr && varying_n_out != nullptr)
+    {
+        spirv::LocationVar locs[kMaxVaryings]{};
+        const u32 n = spirv::EnumerateLocationVars(vs, spirv::StorageClass::Output, locs, kMaxVaryings);
+        const u32 nb = (n < varying_cap) ? n : varying_cap;
+        for (u32 i = 0; i < nb; ++i)
+        {
+            varying_out[i].location = locs[i].location;
+            varying_out[i].component_count =
+                (locs[i].component_count < kMaxVaryingComponents) ? locs[i].component_count : kMaxVaryingComponents;
+            const u32 byte_size = varying_out[i].component_count * 4u;
+            (void)spirv::ReadOutputLocation(vs, locs[i].location, varying_out[i].data, byte_size);
+        }
+        *varying_n_out = nb;
+    }
     return true;
 }
 
 // Run a fragment shader for one pixel. Sets gl_FragCoord then
 // executes the entry point; reads the Location 0 vec4 colour and
-// returns the packed BGRA8 word in `argb_out`.
-bool RunFragmentShader(spirv::Program* fs, const u32 pixel_xy[2], u32* argb_out)
+// returns the packed BGRA8 word in `argb_out`. If `varyings` is
+// non-null, writes the interpolated values to each matching FS
+// Input Location before executing.
+bool RunFragmentShader(spirv::Program* fs, const u32 pixel_xy[2], const VaryingSnapshot* varyings, u32 varying_n,
+                       u32* argb_out)
 {
     if (fs == nullptr || argb_out == nullptr)
         return false;
@@ -145,11 +181,20 @@ bool RunFragmentShader(spirv::Program* fs, const u32 pixel_xy[2], u32* argb_out)
     // gl_FragCoord is a vec4 (x, y, z, 1/w). v1 supplies (px, py,
     // 0, 1) so a shader that derives anything from gl_FragCoord
     // sees the right pixel-space coordinate. Z and 1/w are zero
-    // because the v1 raster doesn't have per-pixel interpolation.
+    // because the v1 raster doesn't yet plumb perspective-correct
+    // interpolation.
     Sf32 fc[4] = {::duetos::core::Sf32FromU32(pixel_xy[0]), ::duetos::core::Sf32FromU32(pixel_xy[1]),
                   ::duetos::core::Sf32Zero(), ::duetos::core::Sf32One()};
     u32 fc_bits[4] = {Sf32ToBits(fc[0]), Sf32ToBits(fc[1]), Sf32ToBits(fc[2]), Sf32ToBits(fc[3])};
     (void)spirv::WriteInputBuiltin(fs, spirv::builtins::kFragCoord, fc_bits, sizeof(fc_bits));
+    // Plumb interpolated varyings. The rasterizer already
+    // packed `varyings[i].data[]` with the linearly-interpolated
+    // Sf32 components for the FS Input at `varyings[i].location`.
+    for (u32 i = 0; i < varying_n; ++i)
+    {
+        const u32 bytes = varyings[i].component_count * 4u;
+        (void)spirv::WriteInputLocation(fs, varyings[i].location, varyings[i].data, bytes);
+    }
     if (!spirv::ExecuteEntryPoint(fs, "main"))
         return false;
     u32 color_bits[4] = {0, 0, 0, Sf32ToBits(::duetos::core::Sf32One())};
@@ -158,6 +203,17 @@ bool RunFragmentShader(spirv::Program* fs, const u32 pixel_xy[2], u32* argb_out)
     *argb_out = PackArgb(Sf32FromBits(color_bits[0]), Sf32FromBits(color_bits[1]), Sf32FromBits(color_bits[2]),
                          Sf32FromBits(color_bits[3]));
     return true;
+}
+
+// Sf32 helper: a*w0 + b*w1 + c*w2 where w0+w1+w2 = 1. Used by
+// the per-pixel varying interpolation. No clamping — varyings
+// can legitimately be negative or > 1.
+Sf32 BaryLerp(Sf32 a, Sf32 b, Sf32 c, Sf32 w0, Sf32 w1, Sf32 w2)
+{
+    const Sf32 t0 = ::duetos::core::Sf32Mul(a, w0);
+    const Sf32 t1 = ::duetos::core::Sf32Mul(b, w1);
+    const Sf32 t2 = ::duetos::core::Sf32Mul(c, w2);
+    return ::duetos::core::Sf32Add(::duetos::core::Sf32Add(t0, t1), t2);
 }
 
 // Convert a vec4 clip-space position into pixel coordinates by
@@ -195,7 +251,16 @@ bool ClipToPixel(const u32 pos_bits[4], u32 fb_w, u32 fb_h, i32* px_out, i32* py
 // integer edge-function test from `graphics_vk_raster.cpp` —
 // inlined here so the shader path doesn't depend on the v0
 // raster's internal helpers (which take a different signature).
-void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Program* fs, u32 fb_w, u32 fb_h)
+//
+// `varyings_per_vertex` is an array of length `3 * varying_n`:
+// vertex 0's varyings at [0..varying_n), vertex 1's at
+// [varying_n..2*varying_n), vertex 2's at [2*varying_n..3*varying_n).
+// Each entry's `data[]` holds the Sf32 components for that VS
+// Output at that vertex. The per-pixel loop interpolates them
+// linearly via barycentric weights and hands the result to the
+// fragment shader as Input Location N.
+void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Program* fs, u32 fb_w, u32 fb_h,
+                   const VaryingSnapshot* varyings_per_vertex, u32 varying_n)
 {
     // Bounding box clipped to framebuffer extent.
     i32 minx = ax;
@@ -246,6 +311,23 @@ void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Progra
     u64 painted = 0;
     u32 pixel_xy[2];
     u32 argb = 0;
+
+    // Precompute the inverse of |area2| as Sf32 so the per-pixel
+    // barycentric-weight normalisation is a single multiply
+    // instead of a per-pixel Sf32Div (which is the slowest soft-
+    // float op). For a degenerate area we'd have returned above.
+    const u64 abs_area = (area2 < 0) ? static_cast<u64>(-area2) : static_cast<u64>(area2);
+    const Sf32 inv_area =
+        ::duetos::core::Sf32Div(::duetos::core::Sf32One(), ::duetos::core::Sf32FromU32(static_cast<u32>(abs_area)));
+
+    // Per-pixel scratch for the interpolated varyings the FS reads.
+    VaryingSnapshot interp[kMaxVaryings]{};
+    for (u32 i = 0; i < varying_n; ++i)
+    {
+        interp[i].location = varyings_per_vertex[i].location;
+        interp[i].component_count = varyings_per_vertex[i].component_count;
+    }
+
     for (i32 py = miny; py <= maxy; ++py)
     {
         for (i32 px = minx; px <= maxx; ++px)
@@ -259,7 +341,33 @@ void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Progra
                 continue;
             pixel_xy[0] = static_cast<u32>(px);
             pixel_xy[1] = static_cast<u32>(py);
-            if (!RunFragmentShader(fs, pixel_xy, &argb))
+
+            // Normalise barycentric weights. The unsigned edge
+            // magnitudes opposite each vertex sum to |area2|; dividing
+            // gives weights in [0, 1] that interpolate v0->v1->v2.
+            // For a CW triangle the sign flips but the magnitudes are
+            // still correct; |w_i| / |area2| is the right weight either
+            // way.
+            const u64 aw0 = (w0 < 0) ? static_cast<u64>(-w0) : static_cast<u64>(w0);
+            const u64 aw1 = (w1 < 0) ? static_cast<u64>(-w1) : static_cast<u64>(w1);
+            const u64 aw2 = (w2 < 0) ? static_cast<u64>(-w2) : static_cast<u64>(w2);
+            const Sf32 bw0 = ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw0)), inv_area);
+            const Sf32 bw1 = ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw1)), inv_area);
+            const Sf32 bw2 = ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw2)), inv_area);
+
+            for (u32 vi = 0; vi < varying_n; ++vi)
+            {
+                const VaryingSnapshot& a_ss = varyings_per_vertex[0 * varying_n + vi];
+                const VaryingSnapshot& b_ss = varyings_per_vertex[1 * varying_n + vi];
+                const VaryingSnapshot& c_ss = varyings_per_vertex[2 * varying_n + vi];
+                for (u32 cc = 0; cc < interp[vi].component_count && cc < kMaxVaryingComponents; ++cc)
+                {
+                    const Sf32 lerped = BaryLerp(Sf32FromBits(a_ss.data[cc]), Sf32FromBits(b_ss.data[cc]),
+                                                 Sf32FromBits(c_ss.data[cc]), bw0, bw1, bw2);
+                    interp[vi].data[cc] = Sf32ToBits(lerped);
+                }
+            }
+            if (!RunFragmentShader(fs, pixel_xy, interp, varying_n, &argb))
                 continue;
             drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py), argb);
             ++painted;
@@ -374,12 +482,20 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
         return false;
     const u32 tri_count = vertex_count / 3u;
 
+    // Per-vertex varying snapshots: kMaxVaryings entries per
+    // vertex, 3 vertices per triangle. Packed `[vert][var]` so a
+    // single base + (vert * varying_n + var) addresses the right
+    // entry inside PaintTriangle's interpolation loop.
+    VaryingSnapshot vary[3 * kMaxVaryings]{};
+    u32 vary_n[3] = {0, 0, 0};
+
     for (u32 t = 0; t < tri_count; ++t)
     {
         u32 pos[3][4]{};
         for (u32 v = 0; v < 3; ++v)
         {
-            if (!RunVertexShader(vs, vb_base, vb_size, stride, first_vertex + t * 3u + v, pos[v]))
+            if (!RunVertexShader(vs, vb_base, vb_size, stride, first_vertex + t * 3u + v, pos[v],
+                                 &vary[v * kMaxVaryings], kMaxVaryings, &vary_n[v]))
                 return false;
         }
         i32 px[3], py[3];
@@ -388,7 +504,26 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
             ok = ok && ClipToPixel(pos[v], fb_w, fb_h, &px[v], &py[v]);
         if (!ok)
             continue;
-        PaintTriangle(px[0], py[0], px[1], py[1], px[2], py[2], fs, fb_w, fb_h);
+        // The three vertices' VS Output sets ought to share the
+        // same Location layout (they came from the same VS). Use
+        // vertex 0's count as the authority — if vertex 1 or 2
+        // produced more, the extras get ignored; fewer is
+        // impossible because the VS is deterministic on the same
+        // shader.
+        const u32 vary_n_use = vary_n[0];
+
+        // Pack into the contiguous form PaintTriangle expects:
+        // varyings_per_vertex[vert * vary_n_use + var]. The
+        // RunVertexShader call wrote to &vary[v * kMaxVaryings],
+        // so we'd need to repack — but PaintTriangle indexes as
+        // `[vert][var]` with vary_n_use stride, so just pass the
+        // pointer and trust the layout matches when vary_n_use
+        // <= kMaxVaryings, which it always is.
+        VaryingSnapshot packed[3 * kMaxVaryings]{};
+        for (u32 v = 0; v < 3; ++v)
+            for (u32 i = 0; i < vary_n_use; ++i)
+                packed[v * vary_n_use + i] = vary[v * kMaxVaryings + i];
+        PaintTriangle(px[0], py[0], px[1], py[1], px[2], py[2], fs, fb_w, fb_h, packed, vary_n_use);
     }
     ++g_shader_raster_draws_painted;
     return true;

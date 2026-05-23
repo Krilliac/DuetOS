@@ -295,6 +295,26 @@ bool WriteInputBuiltin(Program* prog, u32 builtin, const void* data, u32 byte_si
 // the per-vertex/per-pixel loop.
 void ResetIO(Program* prog);
 
+/// Per-variable descriptor returned by `EnumerateLocationVars`:
+/// the Location number, the byte size of the variable's pointee,
+/// and the number of 32-bit components (size / 4 for the common
+/// case but tracked separately so the interpolation loop knows
+/// how many lanes to walk).
+struct LocationVar
+{
+    u32 location;
+    u32 byte_size;
+    u32 component_count;
+};
+
+/// Enumerate Variable records that match a storage class (Input
+/// or Output) AND carry an explicit Location decoration. Writes
+/// up to `cap` entries into `out`; returns the count actually
+/// written. Used by the rasterizer hook to discover the
+/// vertex/fragment varying layout without re-walking the SPIR-V
+/// word stream.
+u32 EnumerateLocationVars(const Program* prog, StorageClass storage, LocationVar* out, u32 cap);
+
 // Execute the named entry point. Returns true on a clean
 // completion (OpReturn reached), false on out-of-budget /
 // malformed instruction / unsupported opcode.

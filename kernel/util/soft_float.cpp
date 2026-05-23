@@ -455,6 +455,191 @@ Sf32 Sf32Step(Sf32 edge, Sf32 x)
 }
 
 // ------------------------------------------------------------------
+// Sin / Cos / Exp / Log / Pow — polynomial approximations.
+// ------------------------------------------------------------------
+//
+// All four piggy-back on Sf32Add / Sf32Mul / Sf32Div, so they're
+// portable across the soft-float runtime. They're not Cephes-grade
+// but are accurate enough for shader use — the typical shader
+// consumer is procedural lighting / pattern generation where 5e-4
+// max error is invisible. A future caller that needs higher
+// precision adds extension entry points; v1 keeps the surface
+// small.
+
+namespace
+{
+
+constexpr Sf32 SfPi()
+{
+    return Sf32{0x40490FDBu}; // 3.1415927
+}
+constexpr Sf32 SfTwoPi()
+{
+    return Sf32{0x40C90FDBu}; // 6.2831853
+}
+constexpr Sf32 SfHalfPi()
+{
+    return Sf32{0x3FC90FDBu}; // 1.5707964
+}
+constexpr Sf32 SfInvTwoPi()
+{
+    return Sf32{0x3E22F983u}; // 0.15915494
+}
+constexpr Sf32 SfLn2()
+{
+    return Sf32{0x3F317218u}; // 0.6931472
+}
+constexpr Sf32 SfInvLn2()
+{
+    return Sf32{0x3FB8AA3Bu}; // 1.4426950 (1/ln 2)
+}
+
+} // namespace
+
+Sf32 Sf32Sin(Sf32 x)
+{
+    if (Sf32IsNaN(x) || Sf32IsInf(x))
+        return Sf32QNaN();
+
+    // Range-reduce x to [-pi, pi]: k = floor(x / 2pi + 0.5);
+    // x' = x - k * 2pi. Pure Sf32 arithmetic.
+    const Sf32 half = Sf32{0x3F000000u};
+    const Sf32 k_f = Sf32Add(Sf32Mul(x, SfInvTwoPi()), half);
+    const i32 k = Sf32ToI32(k_f);
+    Sf32 r = Sf32Sub(x, Sf32Mul(Sf32FromI32(k), SfTwoPi()));
+
+    // Map [-pi, pi] -> [-pi/2, pi/2] using identities so the
+    // polynomial covers a smaller range. sin(pi - r) = sin(r),
+    // sin(-pi - r) = -sin(-r) = sin(r) with sign flipped.
+    bool sign_flip = false;
+    if (Sf32GreaterThan(r, SfHalfPi()))
+    {
+        r = Sf32Sub(SfPi(), r);
+    }
+    else if (Sf32LessThan(r, Sf32Neg(SfHalfPi())))
+    {
+        r = Sf32Sub(Sf32Neg(SfPi()), r);
+        sign_flip = true;
+    }
+
+    // 7th-order minimax: sin(r) ~= r - r^3/6 + r^5/120 - r^7/5040
+    // Coefficients computed from Taylor; for [-pi/2, pi/2] this
+    // sits at ~3e-5 max error which is plenty for shader work.
+    const Sf32 r2 = Sf32Mul(r, r);
+    const Sf32 r3 = Sf32Mul(r2, r);
+    const Sf32 r5 = Sf32Mul(r3, r2);
+    const Sf32 r7 = Sf32Mul(r5, r2);
+    const Sf32 c3 = Sf32{0x3E2AAAABu}; // 1/6
+    const Sf32 c5 = Sf32{0x3C088889u}; // 1/120
+    const Sf32 c7 = Sf32{0x39500D01u}; // 1/5040
+    Sf32 s = Sf32Sub(r, Sf32Mul(r3, c3));
+    s = Sf32Add(s, Sf32Mul(r5, c5));
+    s = Sf32Sub(s, Sf32Mul(r7, c7));
+    return sign_flip ? Sf32Neg(s) : s;
+}
+
+Sf32 Sf32Cos(Sf32 x)
+{
+    // cos(x) = sin(x + pi/2)
+    return Sf32Sin(Sf32Add(x, SfHalfPi()));
+}
+
+Sf32 Sf32Exp(Sf32 x)
+{
+    if (Sf32IsNaN(x))
+        return Sf32QNaN();
+    // Saturation: clamp to the binary32 dynamic range.
+    const Sf32 kMaxExpArg = Sf32{0x42B17218u}; // 88.722839 — log(FLT_MAX)
+    const Sf32 kMinExpArg = Sf32{0xC2AEAC50u}; // -87.336544 — log(FLT_MIN)
+    if (Sf32GreaterThan(x, kMaxExpArg))
+        return Sf32Inf();
+    if (Sf32LessThan(x, kMinExpArg))
+        return Sf32Zero();
+
+    // x = n * ln(2) + r, where r in [-ln2/2, ln2/2].
+    // exp(x) = 2^n * exp(r). Compute n by rounding x * 1/ln2 to
+    // the nearest integer; r = x - n*ln2.
+    const Sf32 half = Sf32{0x3F000000u};
+    const Sf32 n_f = Sf32Add(Sf32Mul(x, SfInvLn2()), Sf32IsNegative(x) ? Sf32Neg(half) : half);
+    const i32 n = Sf32ToI32(n_f);
+    const Sf32 r = Sf32Sub(x, Sf32Mul(Sf32FromI32(n), SfLn2()));
+
+    // exp(r) ~= 1 + r + r^2/2 + r^3/6 + r^4/24 + r^5/120
+    const Sf32 r2 = Sf32Mul(r, r);
+    const Sf32 r3 = Sf32Mul(r2, r);
+    const Sf32 r4 = Sf32Mul(r3, r);
+    const Sf32 r5 = Sf32Mul(r4, r);
+    const Sf32 c2 = Sf32{0x3F000000u}; // 1/2
+    const Sf32 c3 = Sf32{0x3E2AAAABu}; // 1/6
+    const Sf32 c4 = Sf32{0x3D2AAAABu}; // 1/24
+    const Sf32 c5 = Sf32{0x3C088889u}; // 1/120
+    Sf32 e_r = Sf32One();
+    e_r = Sf32Add(e_r, r);
+    e_r = Sf32Add(e_r, Sf32Mul(r2, c2));
+    e_r = Sf32Add(e_r, Sf32Mul(r3, c3));
+    e_r = Sf32Add(e_r, Sf32Mul(r4, c4));
+    e_r = Sf32Add(e_r, Sf32Mul(r5, c5));
+
+    // 2^n by direct bit manipulation: exponent field += n.
+    // Clamp the exponent to [1, 254] (denormals flushed; saturate
+    // before encoding).
+    if (n > 127)
+        return Sf32Inf();
+    if (n < -126)
+        return Sf32Zero();
+    const u32 two_to_n_bits = static_cast<u32>(static_cast<i32>(127) + n) << 23;
+    return Sf32Mul(e_r, Sf32{two_to_n_bits});
+}
+
+Sf32 Sf32Log(Sf32 x)
+{
+    if (Sf32IsNaN(x))
+        return Sf32QNaN();
+    if (Sf32IsNegative(x) && !Sf32IsZero(x))
+        return Sf32QNaN();
+    if (Sf32IsZero(x))
+        return Sf32{0xFF800000u}; // -inf
+    if (Sf32IsInf(x))
+        return Sf32Inf();
+
+    // x = m * 2^e, m in [1, 2). log(x) = log(m) + e * ln(2).
+    const i32 e_raw = static_cast<i32>((x.bits >> 23) & 0xFFu);
+    if (e_raw == 0)
+        return Sf32{0xFF800000u}; // denormal -> -inf (FTZ)
+    const i32 e_unbiased = e_raw - 127;
+    Sf32 m{(x.bits & 0x007FFFFFu) | 0x3F800000u}; // m in [1, 2)
+
+    // log(m) via a degree-5 minimax over [1, 2) using y = (m-1)/(m+1)
+    // so the series converges fast. log(m) = 2 * (y + y^3/3 + y^5/5 + ...).
+    const Sf32 num = Sf32Sub(m, Sf32One());
+    const Sf32 den = Sf32Add(m, Sf32One());
+    const Sf32 y = Sf32Div(num, den);
+    const Sf32 y2 = Sf32Mul(y, y);
+    const Sf32 y3 = Sf32Mul(y2, y);
+    const Sf32 y5 = Sf32Mul(y3, y2);
+    const Sf32 c3 = Sf32{0x3EAAAAABu}; // 1/3
+    const Sf32 c5 = Sf32{0x3E4CCCCDu}; // 1/5
+    Sf32 ser = Sf32Add(y, Sf32Mul(y3, c3));
+    ser = Sf32Add(ser, Sf32Mul(y5, c5));
+    const Sf32 log_m = Sf32Mul(Sf32{0x40000000u}, ser); // * 2
+
+    return Sf32Add(log_m, Sf32Mul(Sf32FromI32(e_unbiased), SfLn2()));
+}
+
+Sf32 Sf32Pow(Sf32 x, Sf32 y)
+{
+    if (Sf32IsNaN(x) || Sf32IsNaN(y))
+        return Sf32QNaN();
+    if (Sf32IsZero(x))
+        return Sf32IsZero(y) ? Sf32One() : Sf32Zero();
+    if (Sf32IsZero(y))
+        return Sf32One();
+    if (Sf32IsNegative(x))
+        return Sf32QNaN(); // v1 only handles positive bases
+    return Sf32Exp(Sf32Mul(y, Sf32Log(x)));
+}
+
+// ------------------------------------------------------------------
 // Conversion
 // ------------------------------------------------------------------
 

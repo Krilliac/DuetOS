@@ -845,4 +845,28 @@ void ResetIO(Program* prog)
         prog->output.bytes[i] = 0u;
 }
 
+u32 EnumerateLocationVars(const Program* prog, StorageClass storage, LocationVar* out, u32 cap)
+{
+    if (prog == nullptr || out == nullptr || cap == 0)
+        return 0;
+    u32 n = 0;
+    for (u32 i = 0; i < prog->variable_count && n < cap; ++i)
+    {
+        const VariableRecord& v = prog->variables[i];
+        if (v.storage != storage)
+            continue;
+        if (v.location == 0xFFFFFFFFu)
+            continue;
+        out[n].location = v.location;
+        out[n].byte_size = v.byte_size;
+        // Component count = round-up of byte_size / 4. The
+        // interpolation loop walks one Sf32 lane per 4 bytes;
+        // this works for scalar floats, vec2/3/4, mat columns,
+        // any 32-bit-component composite.
+        out[n].component_count = (v.byte_size + 3u) / 4u;
+        ++n;
+    }
+    return n;
+}
+
 } // namespace duetos::subsystems::graphics::spirv

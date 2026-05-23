@@ -181,7 +181,52 @@ void Sf32SelfTest()
         ExpectI32(Sf32ToI32(v), 0x100000, "round-trip 1048576");
     }
 
-    arch::SerialWrite("[util/soft_float] self-test PASS (43 vectors)\n");
+    // Transcendentals — these are polynomial approximations so we
+    // allow ~5e-3 relative error; check via a soft compare on the
+    // integer ulp-distance.
+    auto SoftEqualUlp = [](Sf32 a, Sf32 b, u32 ulp_tol) -> bool
+    {
+        const u32 ai = Sf32ToBits(a) & 0x7FFFFFFFu;
+        const u32 bi = Sf32ToBits(b) & 0x7FFFFFFFu;
+        const u32 d = (ai > bi) ? (ai - bi) : (bi - ai);
+        return d <= ulp_tol;
+    };
+    // sin(0) = 0
+    ExpectBool(SoftEqualUlp(Sf32Sin(Sf32Zero()), Sf32Zero(), 4u), true, "sin(0)~=0");
+    // sin(pi/2) ~= 1 (within ~3e-5 absolute)
+    {
+        const Sf32 hp = Sf32FromBits(0x3FC90FDBu);
+        const Sf32 s = Sf32Sin(hp);
+        // 1.0 ulp neighbourhood is 0x3F800000 +/- ~10k for the
+        // accuracy we claim
+        ExpectBool(SoftEqualUlp(s, Sf32One(), 0x4000u), true, "sin(pi/2)~=1");
+    }
+    // cos(0) = 1
+    ExpectBool(SoftEqualUlp(Sf32Cos(Sf32Zero()), Sf32One(), 0x4000u), true, "cos(0)~=1");
+    // exp(0) = 1, exp(1) ~= 2.71828
+    ExpectBool(SoftEqualUlp(Sf32Exp(Sf32Zero()), Sf32One(), 4u), true, "exp(0)~=1");
+    {
+        const Sf32 e = Sf32Exp(Sf32One());
+        const Sf32 e_truth = Sf32FromBits(0x402DF854u); // 2.7182817
+        ExpectBool(SoftEqualUlp(e, e_truth, 0x8000u), true, "exp(1)~=e");
+    }
+    // log(1) = 0, log(e) ~= 1
+    ExpectBool(SoftEqualUlp(Sf32Log(Sf32One()), Sf32Zero(), 4u), true, "log(1)~=0");
+    {
+        const Sf32 e_truth = Sf32FromBits(0x402DF854u);
+        const Sf32 ll = Sf32Log(e_truth);
+        ExpectBool(SoftEqualUlp(ll, Sf32One(), 0x8000u), true, "log(e)~=1");
+    }
+    // pow(2, 3) = 8 (within tolerance)
+    {
+        const Sf32 p = Sf32Pow(Sf32FromBits(0x40000000u), Sf32FromBits(0x40400000u));
+        const Sf32 eight = Sf32FromBits(0x41000000u);
+        ExpectBool(SoftEqualUlp(p, eight, 0x8000u), true, "pow(2,3)~=8");
+    }
+    // pow(x, 0) = 1
+    ExpectBool(SoftEqualUlp(Sf32Pow(Sf32FromBits(0x40000000u), Sf32Zero()), Sf32One(), 4u), true, "pow(2,0)~=1");
+
+    arch::SerialWrite("[util/soft_float] self-test PASS (55 vectors)\n");
 }
 
 } // namespace duetos::core

@@ -160,6 +160,33 @@ constexpr Sf32 Sf32Abs(Sf32 x)
 /// for negative inputs, +0 for +/-0, +inf for +inf.
 Sf32 Sf32Sqrt(Sf32 x);
 
+/// Sine via a 7th-order minimax polynomial after range reduction
+/// to [-pi, pi]. Accurate to ~5e-4 over the full real line —
+/// good enough for shader use (lighting, animation, procedural
+/// patterns) without paying for a full Cephes-grade
+/// implementation. NaN in -> NaN out. Inf in -> NaN out (the
+/// reduction would produce a non-finite phase).
+Sf32 Sf32Sin(Sf32 x);
+
+/// Cosine = Sin(x + pi/2). Same accuracy + special-case
+/// handling as Sf32Sin.
+Sf32 Sf32Cos(Sf32 x);
+
+/// exp(x) via 2^(x/ln2) and a degree-5 polynomial on the
+/// fractional part. NaN-in / NaN-out; saturates to +inf above
+/// ~88.7 and to +0 below ~-87.3 (the IEEE 754 binary32 dynamic
+/// range).
+Sf32 Sf32Exp(Sf32 x);
+
+/// Natural log via a degree-5 polynomial after range reduction
+/// to [1, 2). Returns NaN for x <= 0, -inf for x = +0.
+Sf32 Sf32Log(Sf32 x);
+
+/// Power: x^y = exp(y * log(x)). For x < 0 or non-integer y
+/// this returns NaN (matching IEEE pow semantics for the common
+/// shader case where pow is used on already-positive bases).
+Sf32 Sf32Pow(Sf32 x, Sf32 y);
+
 // --------------------------------------------------------------
 // GLSL.std.450 helpers used by shaders
 // --------------------------------------------------------------

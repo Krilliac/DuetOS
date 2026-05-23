@@ -112,14 +112,12 @@ constexpr u16 kOpBranchConditional = 250;
 constexpr u16 kOpReturn = 253;
 constexpr u16 kOpReturnValue = 254;
 
-// GLSL.std.450 sub-opcodes. Sin/Cos/Pow are recognised
-// constants but not yet dispatched — they need polynomial
-// approximations on top of Sf32 that haven't landed; for v1 the
-// switch falls through to the "zero-fill output" default so the
-// shader still produces a deterministic value.
-[[maybe_unused]] constexpr u32 kGlslSin = 13;
-[[maybe_unused]] constexpr u32 kGlslCos = 14;
-[[maybe_unused]] constexpr u32 kGlslPow = 26;
+// GLSL.std.450 sub-opcodes. Sin/Cos/Pow dispatch through the
+// soft-float polynomial approximations in util/soft_float;
+// accuracy ~5e-4 max — plenty for shader work.
+constexpr u32 kGlslSin = 13;
+constexpr u32 kGlslCos = 14;
+constexpr u32 kGlslPow = 26;
 constexpr u32 kGlslSqrt = 31;
 constexpr u32 kGlslFMin = 37;
 constexpr u32 kGlslFMax = 40;
@@ -706,6 +704,21 @@ void DoExtInst(ExecContext& ec, u32 type_id, u32 result_id, u32 sub_op, const u3
     case kGlslSqrt:
         for (u32 i = 0; i < n; ++i)
             r[i] = Sf32ToBits(::duetos::core::Sf32Sqrt(Sf32FromBits(a[i])));
+        StoreResultComponents(ec, result_id, type_id, r, n);
+        break;
+    case kGlslSin:
+        for (u32 i = 0; i < n; ++i)
+            r[i] = Sf32ToBits(::duetos::core::Sf32Sin(Sf32FromBits(a[i])));
+        StoreResultComponents(ec, result_id, type_id, r, n);
+        break;
+    case kGlslCos:
+        for (u32 i = 0; i < n; ++i)
+            r[i] = Sf32ToBits(::duetos::core::Sf32Cos(Sf32FromBits(a[i])));
+        StoreResultComponents(ec, result_id, type_id, r, n);
+        break;
+    case kGlslPow:
+        for (u32 i = 0; i < n; ++i)
+            r[i] = Sf32ToBits(::duetos::core::Sf32Pow(Sf32FromBits(a[i]), Sf32FromBits(b[i])));
         StoreResultComponents(ec, result_id, type_id, r, n);
         break;
     case kGlslFMin:
