@@ -273,6 +273,26 @@ PageWalkSnapshot SnapshotPageWalk(u64 virt);
 bool CopyFromUser(void* kernel_dst, const void* user_src, u64 len);
 bool CopyToUser(void* user_dst, const void* kernel_src, u64 len);
 
+/// Read up to `len` bytes from `kernel_src` into `kernel_dst`,
+/// surviving a #PF on the source. Returns true if all bytes
+/// were copied; false if the load faulted (in which case the
+/// destination buffer may contain partial data — caller must
+/// not trust it).
+///
+/// Implemented via the same extable mechanism as CopyFromUser:
+/// the load instruction is bracketed by labels and the trap
+/// dispatcher redirects to a fixup that zeros rax. Cheap on
+/// the happy path (one rep movsb + ret); recovery path is a
+/// trap → extable scan → iretq.
+///
+/// Use for: peeking at an unmapped guard page during panic
+/// dump, walking a pointer of unknown provenance from a debug
+/// probe, reading a kernel data structure that might be in a
+/// half-torn-down region. NOT for user-mode reads (those are
+/// CopyFromUser — gates on SMAP + uses the current process's
+/// AS view).
+bool SafeReadKernel(void* kernel_dst, const void* kernel_src, u64 len);
+
 /// Result for bounded NUL-terminated user-string copies.
 enum class UserStringCopyStatus : u8
 {

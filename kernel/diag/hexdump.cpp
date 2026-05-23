@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "mm/paging.h"
 #include "util/symbols.h"
 
 namespace duetos::core
@@ -86,29 +87,61 @@ void DumpInstructionBytes(const char* tag, u64 addr, u32 len)
     arch::SerialWrite("] instr@");
     arch::SerialWriteHex(addr);
     arch::SerialWrite(" :");
-    if (!PlausibleKernelAddress(addr))
-    {
-        arch::SerialWrite(" <skipped: address not in kernel range>\n");
-        return;
-    }
-    // If the range crosses a page boundary, only dump the bytes in
-    // the starting page — the next page may be unmapped or outside
-    // kernel range, and stopping mid-instruction is better than
-    // faulting on the dump.
+    // If the range crosses a page boundary, cap len to bytes
+    // remaining in the starting page — the next page may be
+    // unmapped, and stopping mid-instruction is better than
+    // faulting on the dump even with SafeReadKernel's fixup
+    // (we don't want the fixup path triggering for every
+    // multi-byte dump that straddles a page).
     const u64 page_of_start = addr & kPageMask;
-    const auto* p = reinterpret_cast<const u8*>(addr);
-    for (u32 i = 0; i < len; ++i)
+    const u64 end_of_page = (page_of_start + kPageSize) - addr;
+    if (len > end_of_page)
+        len = static_cast<u32>(end_of_page);
+
+    u8 buf[kMaxInstructionDumpBytes];
+    const bool kernel_range = PlausibleKernelAddress(addr);
+    if (kernel_range)
     {
-        const u64 byte_va = addr + i;
-        if ((byte_va & kPageMask) != page_of_start)
+        // Direct read — kernel-mapped, no fault expected. The
+        // SafeReadKernel path would also work but adds a function
+        // call + extable scan overhead per byte; the direct read
+        // is what the panic dump used to do.
+        const auto* p = reinterpret_cast<const u8*>(addr);
+        for (u32 i = 0; i < len; ++i)
+            buf[i] = p[i];
+        for (u32 i = 0; i < len; ++i)
         {
-            arch::SerialWrite(" ..");
-            break;
+            arch::SerialWrite(" ");
+            WriteHexByte(buf[i]);
         }
-        arch::SerialWrite(" ");
-        WriteHexByte(p[i]);
+        if (len < kMaxInstructionDumpBytes && (addr + len) % kPageSize == 0)
+            arch::SerialWrite(" ..");
+        arch::SerialWrite("\n");
     }
-    arch::SerialWrite("\n");
+    else
+    {
+        // Outside the kernel range. Could be a user VA mapped in
+        // the active address space, an unmapped kernel guard, or
+        // a wild pointer. Try a fault-protected read; if it
+        // succeeds, dump the bytes. If it faults, surface that
+        // distinctly from the "outside kernel range" reason —
+        // operator can tell whether the address was unreachable
+        // vs unmapped.
+        if (::duetos::mm::SafeReadKernel(buf, reinterpret_cast<const void*>(addr), len))
+        {
+            arch::SerialWrite(" (safe-read)");
+            for (u32 i = 0; i < len; ++i)
+            {
+                arch::SerialWrite(" ");
+                WriteHexByte(buf[i]);
+            }
+            arch::SerialWrite("\n");
+        }
+        else
+        {
+            arch::SerialWrite(" <unreadable: faulted on read>\n");
+        }
+    }
 }
 
 void DumpHexRegion(const char* tag, u64 addr, u32 len)

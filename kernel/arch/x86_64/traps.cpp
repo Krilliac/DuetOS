@@ -72,6 +72,13 @@ extern "C" duetos::u8 __copy_user_to_start[];
 extern "C" duetos::u8 __copy_user_to_end[];
 extern "C" duetos::u8 __copy_user_fault_fixup[];
 
+// mm/safe_read.S — kernel-to-kernel safe read with fault fixup.
+// Same shape as the user_copy bracket; registered alongside the
+// CopyFromUser / CopyToUser rows in TrapsRegisterExtable.
+extern "C" duetos::u8 __safe_read_kernel_start[];
+extern "C" duetos::u8 __safe_read_kernel_end[];
+extern "C" duetos::u8 __safe_read_kernel_fault_fixup[];
+
 // Linker-emitted bounds of kernel `.text` (set by the linker script).
 // Used by RetpolineWildCallback below + the in-TrapDispatch
 // g_irq_handlers validator earlier.
@@ -1622,6 +1629,15 @@ void TrapsRegisterExtable()
     const u64 fixup = reinterpret_cast<u64>(g_copy_user_fault_fixup);
     ::duetos::debug::KernelExtableRegister(from_s, from_e, fixup, "mm/CopyFromUser");
     ::duetos::debug::KernelExtableRegister(to_s, to_e, fixup, "mm/CopyToUser");
+    // mm/SafeReadKernel — kernel-to-kernel read with fault fixup.
+    // Used by the panic dump's DumpInstructionBytes to read bytes
+    // at addresses outside the kernel range (user VA in active
+    // AS, guard pages) without taking the box down on a stale
+    // pointer.
+    const u64 sr_s = reinterpret_cast<u64>(__safe_read_kernel_start);
+    const u64 sr_e = reinterpret_cast<u64>(__safe_read_kernel_end);
+    const u64 sr_fixup = reinterpret_cast<u64>(__safe_read_kernel_fault_fixup);
+    ::duetos::debug::KernelExtableRegister(sr_s, sr_e, sr_fixup, "mm/SafeReadKernel");
 }
 
 void TrapsSelfTest()
