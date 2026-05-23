@@ -529,6 +529,85 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
     return true;
 }
 
+bool ShaderDispatchCompute(const RasterState& st, u32 group_count_x, u32 group_count_y, u32 group_count_z)
+{
+    if (st.bound_pipeline == 0)
+        return false;
+    if (group_count_x == 0 || group_count_y == 0 || group_count_z == 0)
+        return false;
+    // Look up the compute pipeline's CS shader. PipelineShaderHandles
+    // returns (vs, fs); compute pipelines stash their CS in
+    // g_pipeline_data[slot].compute_shader, so fetch directly.
+    if (!HandleInRange(st.bound_pipeline, kPipelineBase))
+        return false;
+    const u32 pslot = SlotOf(st.bound_pipeline, kPipelineBase);
+    if (!PoolIsLive(g_pipeline_pool, pslot))
+        return false;
+    const VkShaderModule cs_handle = g_pipeline_data[pslot].compute_shader;
+    spirv::Program* cs = ShaderProgram(cs_handle);
+    if (cs == nullptr)
+        return false;
+    // Find the entry point and its declared LocalSize.
+    if (cs->entry_point_count == 0)
+        return false;
+    spirv::EntryPointRecord ep = cs->entry_points[0];
+    // First entry point is the canonical "main"; if a future
+    // shader uses multiple entries the caller will need to pass
+    // a name — for v1 we honour the first.
+
+    const u64 total_invocations = static_cast<u64>(group_count_x) * group_count_y * group_count_z *
+                                  static_cast<u64>(ep.local_size_x) * ep.local_size_y * ep.local_size_z;
+    constexpr u64 kMaxInvocationsPerDispatch = 65536;
+    const u64 cap = (total_invocations < kMaxInvocationsPerDispatch) ? total_invocations : kMaxInvocationsPerDispatch;
+    if (cap == 0)
+        return false;
+
+    // gl_NumWorkgroups (uvec3) is the same for every invocation; the
+    // SPIR-V `Input`-storage builtin is what shaders read. We write
+    // it once before the loop and rely on ResetIO not zeroing
+    // builtin-decorated inputs — actually ResetIO DOES wipe input
+    // storage between calls, so we re-write per invocation.
+    const u32 num_wg[3] = {group_count_x, group_count_y, group_count_z};
+
+    u64 painted = 0;
+    for (u32 gz = 0; gz < group_count_z; ++gz)
+    {
+        for (u32 gy = 0; gy < group_count_y; ++gy)
+        {
+            for (u32 gx = 0; gx < group_count_x; ++gx)
+            {
+                const u32 wg[3] = {gx, gy, gz};
+                for (u32 lz = 0; lz < ep.local_size_z; ++lz)
+                {
+                    for (u32 ly = 0; ly < ep.local_size_y; ++ly)
+                    {
+                        for (u32 lx = 0; lx < ep.local_size_x; ++lx)
+                        {
+                            if (painted >= cap)
+                                return true;
+                            const u32 li[3] = {lx, ly, lz};
+                            const u32 gi[3] = {gx * ep.local_size_x + lx, gy * ep.local_size_y + ly,
+                                               gz * ep.local_size_z + lz};
+                            const u32 li_index = lz * ep.local_size_x * ep.local_size_y + ly * ep.local_size_x + lx;
+                            spirv::ResetIO(cs);
+                            (void)spirv::WriteInputBuiltin(cs, spirv::builtins::kNumWorkgroups, num_wg, sizeof(num_wg));
+                            (void)spirv::WriteInputBuiltin(cs, spirv::builtins::kWorkgroupId, wg, sizeof(wg));
+                            (void)spirv::WriteInputBuiltin(cs, spirv::builtins::kLocalInvocationId, li, sizeof(li));
+                            (void)spirv::WriteInputBuiltin(cs, spirv::builtins::kGlobalInvocationId, gi, sizeof(gi));
+                            (void)spirv::WriteInputBuiltin(cs, spirv::builtins::kLocalInvocationIndex, &li_index,
+                                                           sizeof(li_index));
+                            if (!spirv::ExecuteEntryPoint(cs, "main"))
+                                return painted > 0;
+                            ++painted;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
 bool ShaderRasterizeDrawIndexed(const RasterState& st, u32 first_index, u32 index_count, i32 vertex_offset)
 {
     // v1 indexed-draw shader path: fall back to the fixed-function

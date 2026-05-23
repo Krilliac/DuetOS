@@ -397,6 +397,54 @@ void TestMulVec3Scalar()
         Fail("mul_vec3: r.z should be 6.0", r_bits[2]);
 }
 
+// ------------------------------------------------------------------
+// Module 4: compute shader with declared LocalSize.
+//
+// GLSL equivalent:
+//   #version 450
+//   layout(local_size_x = 4, local_size_y = 2, local_size_z = 1) in;
+//   void main() { }
+//
+// Validates that the parser recognises ExecutionModel=Compute (5),
+// captures OpExecutionMode LocalSize 4 2 1 into the EntryPointRecord,
+// and the executor can step through a trivial empty body. Tests for
+// the dispatch-side workgroup loop are deferred to runtime (would
+// need a full pipeline scaffold).
+constexpr u32 compute_local_size[] = {
+    0x07230203, 0x00010000, 0u, 10u, 0u,
+    (2u << 16) | 17u, 1u,                      // Capability Shader
+    (3u << 16) | 14u, 0u, 1u,                  // MemoryModel Logical GLSL450
+    (5u << 16) | 15u, 5u, 4u, 0x6E69616Du, 0u, // EntryPoint GLCompute(5) %4 "main" (no interface vars)
+    (6u << 16) | 16u, 4u, 17u, 4u, 2u, 1u,     // ExecutionMode %4 LocalSize 4 2 1
+    (2u << 16) | 19u, 2u,             // TypeVoid
+    (3u << 16) | 33u, 3u, 2u,         // TypeFunction () -> void
+    (5u << 16) | 54u, 2u, 4u, 0u, 3u, // Function main
+    (2u << 16) | 248u, 5u,            // Label
+    (1u << 16) | 253u,                // Return
+    (1u << 16) | 56u,                 // FunctionEnd
+};
+
+void TestComputeLocalSize()
+{
+    static Program prog;
+    const u32 wc = sizeof(compute_local_size) / sizeof(compute_local_size[0]);
+    if (!Parse(compute_local_size, wc, &prog))
+        Fail("compute: Parse rejected", wc);
+    if (prog.entry_point_count != 1)
+        Fail("compute: wrong entry point count", prog.entry_point_count);
+    if (prog.entry_points[0].execution_model != execution_models::kGLCompute)
+        Fail("compute: wrong execution model", prog.entry_points[0].execution_model);
+    if (prog.entry_points[0].local_size_x != 4)
+        Fail("compute: local_size_x mismatch", prog.entry_points[0].local_size_x);
+    if (prog.entry_points[0].local_size_y != 2)
+        Fail("compute: local_size_y mismatch", prog.entry_points[0].local_size_y);
+    if (prog.entry_points[0].local_size_z != 1)
+        Fail("compute: local_size_z mismatch", prog.entry_points[0].local_size_z);
+    ResetIO(&prog);
+    if (!ExecuteEntryPoint(&prog, "main"))
+        Fail("compute: ExecuteEntryPoint returned false", 0);
+}
+
 } // namespace
 
 void SelfTest()
@@ -404,7 +452,8 @@ void SelfTest()
     TestConstColor();
     TestAddTwoFloats();
     TestMulVec3Scalar();
-    arch::SerialWrite("[subsys/graphics/spirv] self-test PASS (3 modules executed)\n");
+    TestComputeLocalSize();
+    arch::SerialWrite("[subsys/graphics/spirv] self-test PASS (4 modules executed)\n");
 }
 
 } // namespace duetos::subsystems::graphics::spirv

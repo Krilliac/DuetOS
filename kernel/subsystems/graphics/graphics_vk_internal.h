@@ -554,6 +554,26 @@ PipelineShaders PipelineShaderHandles(VkPipeline pipe);
 bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_count);
 bool ShaderRasterizeDrawIndexed(const RasterState& st, u32 first_index, u32 index_count, i32 vertex_offset);
 
+/// Dispatch a compute shader. Looks up the bound compute
+/// pipeline's CS Program, reads its OpExecutionMode LocalSize
+/// (defaults 1,1,1), and runs the entry point once per (workgroup
+/// × local invocation) tuple — total invocations =
+/// `group_count_xyz * local_size_xyz`. gl_WorkGroupID,
+/// gl_LocalInvocationID, gl_GlobalInvocationID, gl_NumWorkgroups,
+/// and gl_LocalInvocationIndex are written to the matching Input
+/// builtins before each execution.
+///
+/// Returns true if the bound pipeline carried an interpretable
+/// compute shader and at least one invocation ran. Returns false
+/// for graphics-only pipelines or when no shader is bound — the
+/// caller treats false as "no-op dispatch" (the cmd-buffer
+/// counter still bumps).
+///
+/// Per-dispatch budget cap (kMaxInvocationsPerDispatch) bounds
+/// pathological 1024×1024×1024 dispatches; the CPU interpreter
+/// would otherwise saturate for minutes.
+bool ShaderDispatchCompute(const RasterState& st, u32 group_count_x, u32 group_count_y, u32 group_count_z);
+
 /// Lazy-allocated shared software depth buffer.
 ///
 /// Storage: 16-bit unorm depth, `width * height * 2` bytes, one

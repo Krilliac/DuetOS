@@ -1839,6 +1839,12 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
             break;
         case CmdOp::Dispatch:
             ++g_dispatches;
+            // Route through the shader-rasterizer's compute path
+            // when a compute pipeline with parseable CS Program is
+            // bound. Returns true on actual execution; false on
+            // graphics-only / no-shader pipeline (counter still
+            // ticked so the dispatch is observable to tests).
+            (void)ShaderDispatchCompute(st, op.dispatch_x, op.dispatch_y, op.dispatch_z);
             break;
         case CmdOp::SetEvent:
             ReplaySetEvent(op);

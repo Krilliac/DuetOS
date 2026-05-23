@@ -52,7 +52,12 @@ constexpr u16 kOpExtInstImport = 11;
 [[maybe_unused]] constexpr u16 kOpExtInst = 12;
 [[maybe_unused]] constexpr u16 kOpMemoryModel = 14;
 constexpr u16 kOpEntryPoint = 15;
-[[maybe_unused]] constexpr u16 kOpExecutionMode = 16;
+constexpr u16 kOpExecutionMode = 16;
+
+// ExecutionMode enum values we recognise. LocalSize carries the
+// compute-shader workgroup dimensions; everything else is parsed
+// for entry-point inventory only.
+constexpr u32 kExecutionModeLocalSize = 17;
 [[maybe_unused]] constexpr u16 kOpCapability = 17;
 constexpr u16 kOpTypeVoid = 19;
 constexpr u16 kOpTypeBool = 20;
@@ -535,6 +540,33 @@ bool BuildVariablesAndEntries(Program* p)
             ep.interface_count = (iface_n > 16) ? 16 : iface_n;
             for (u32 j = 0; j < ep.interface_count; ++j)
                 ep.interface_ids[j] = p->words[iface_start + j];
+            ep.local_size_x = 1;
+            ep.local_size_y = 1;
+            ep.local_size_z = 1;
+            break;
+        }
+        case kOpExecutionMode:
+        {
+            // Operands: (entry-id, execution-mode, lit*). We only
+            // act on LocalSize (3 literals: x, y, z); other modes
+            // are recorded for stats by the existing parse counter
+            // but ignored here.
+            if (wc < 3)
+                break;
+            const u32 entry_id = p->words[i + 1];
+            const u32 mode = p->words[i + 2];
+            if (mode != kExecutionModeLocalSize || wc < 6)
+                break;
+            for (u32 e = 0; e < ep_idx; ++e)
+            {
+                if (p->entry_points[e].function_id == entry_id)
+                {
+                    p->entry_points[e].local_size_x = p->words[i + 3];
+                    p->entry_points[e].local_size_y = p->words[i + 4];
+                    p->entry_points[e].local_size_z = p->words[i + 5];
+                    break;
+                }
+            }
             break;
         }
         default:

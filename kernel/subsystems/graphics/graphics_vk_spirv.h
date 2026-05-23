@@ -190,6 +190,12 @@ struct EntryPointRecord
     char name[32];
     u32 interface_count; // Number of Input/Output vars below.
     u32 interface_ids[16];
+    // Compute-shader workgroup size from OpExecutionMode LocalSize.
+    // Default 1,1,1 when the shader doesn't declare it (or for
+    // non-compute entry points where the field is unused).
+    u32 local_size_x;
+    u32 local_size_y;
+    u32 local_size_z;
 };
 
 // Fixed-size capacity for the parser. SPIR-V modules from a
@@ -330,6 +336,12 @@ inline constexpr u32 kFragCoord = 15;
 inline constexpr u32 kFragDepth = 22;
 inline constexpr u32 kVertexIndex = 42;
 inline constexpr u32 kInstanceIndex = 43;
+// Compute-shader builtins (BuiltIn enum from SPIR-V spec).
+inline constexpr u32 kNumWorkgroups = 24;
+inline constexpr u32 kWorkgroupId = 26;
+inline constexpr u32 kLocalInvocationId = 27;
+inline constexpr u32 kGlobalInvocationId = 28;
+inline constexpr u32 kLocalInvocationIndex = 29;
 } // namespace builtins
 
 namespace execution_models
