@@ -132,6 +132,40 @@ bool VbeSetMode(u16 width, u16 height, u16 bpp)
     return got_x == width && got_y == height && got_bpp == bpp;
 }
 
+bool VbeSetEnabled(bool enable)
+{
+    const u16 id = Read(kVbeIdxId);
+    if (!IdIsBochs(id))
+        return false;
+
+    // Preserve every other ENABLE bit (LFB aperture, NO_CLEAR_MEM,
+    // 8BIT_DAC, GETCAPS) — we only toggle the ENABLED bit itself.
+    // GETCAPS in particular must stay clear during a normal blank;
+    // setting it makes the dimension registers return maxima instead
+    // of the live mode, which corrupts the next VbeQuery.
+    const u16 cur = Read(kVbeIdxEnable);
+    u16 next = cur;
+    if (enable)
+        next |= kVbeEnEnabled;
+    else
+        next &= u16(~kVbeEnEnabled);
+
+    if (next == cur)
+        return true; // idempotent
+
+    Write(kVbeIdxEnable, next);
+    const u16 got = Read(kVbeIdxEnable);
+
+    arch::SerialWrite("[bochs-vbe] set-enabled requested=");
+    arch::SerialWrite(enable ? "on" : "off");
+    arch::SerialWrite(" enable_reg=");
+    arch::SerialWriteHex(got);
+    arch::SerialWrite("\n");
+
+    const u16 want_bit = enable ? u16(kVbeEnEnabled) : u16(0);
+    return (got & kVbeEnEnabled) == want_bit;
+}
+
 void VbeSelfTest()
 {
     KLOG_TRACE_SCOPE("drivers/gpu/bochs-vbe", "VbeSelfTest");

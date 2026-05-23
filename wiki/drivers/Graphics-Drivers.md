@@ -507,6 +507,49 @@ The `gfx` shell command surfaces every per-kind `*_live`
 counter plus submit / record / replay totals plus the SPIR-V
 validator's rejection count.
 
+## DPMS (Display Power Management)
+
+`kernel/drivers/gpu/dpms.{h,cpp}` is the VESA Display Power
+Management state-machine bookkeeper — four states (On / Standby /
+Suspend / Off) plus a single-hook integration seam that drivers
+register against.
+
+`kernel/drivers/gpu/display_power.{h,cpp}` is the canonical hook
+implementation that drives the two emulated backends DuetOS ships
+today:
+
+- **Bochs VBE** — `VbeSetEnabled(bool)` toggles the `ENABLE.ENABLED`
+  bit via the legacy port pair (0x1CE / 0x1CF). Other ENABLE flags
+  (LFB aperture, NO_CLEAR_MEM, 8BIT_DAC) are preserved across the
+  toggle so the framebuffer survives the blank.
+- **virtio-gpu** — `VirtioGpuSetScanoutEnabled(bool)` issues
+  `SET_SCANOUT(scanout=0, resource_id=0, rect)` to detach; per
+  virtio-gpu 1.0 §5.7.6.7.5 a zero `resource_id` makes the host
+  stop compositing the framebuffer into the display surface. The
+  guest backing keeps its pixels. Re-enable re-binds the original
+  resource and pushes one full-resource flush so the display
+  catches up. `VirtioGpuFlushScanout` silently no-ops while
+  detached so the compositor doesn't pump round-trips at a host
+  that isn't displaying.
+
+The hook collapses Standby / Suspend / Off to "scanout off"
+because neither emulated backend models the spec's separate
+H-sync / V-sync power levels. A future real-hardware driver
+(Intel DDI, AMD DCN, panel-power-pin) can register a richer hook
+that walks the VESA H-sync / V-sync ladder using the `from` /
+`to` arguments.
+
+Wiring: `display_power.cpp` self-registers via
+`KERNEL_INITCALL(Drivers, "drivers/gpu.dpms-hook", …)`, so the
+hook is live by the time the kernel shell, the settings app, or
+the screensaver issues `DpmsSetState`. `DisplayPowerSelfTest`
+runs as a Drivers-phase boot self-test (after `RunPhase(Drivers)`)
+and drives one Off→On cycle through the hook, emitting the
+structural sentinel CI greps for —
+`[gpu/display-power] selftest PASS (hook commits On/Off,
+bookkeeper bumped)` — on success and
+`[gpu/display-power] selftest FAIL` on regression.
+
 ## Themes
 
 `kernel/drivers/video/theme.cpp` is a flat token table the window

@@ -72,6 +72,22 @@ VbeCaps VbeQuery();
 /// for re-running the paint path against the new dimensions.
 bool VbeSetMode(u16 width, u16 height, u16 bpp);
 
+/// Toggle the controller's ENABLED bit. `enable == true` sets
+/// the LFB-enabled state (without changing mode / dimensions);
+/// `enable == false` clears it, which makes the BGA stop driving
+/// pixel data — the equivalent of a hardware blank for QEMU
+/// std-vga. Other ENABLE flags (LFB aperture, no-clear-mem) are
+/// preserved across the toggle. Returns true iff the controller
+/// is present and the writeback observed the requested bit;
+/// silent + returns false if the BGA isn't decoded. The kernel
+/// framebuffer surface is *not* freed — the next `VbeSetEnabled
+/// (true)` brings the same pixels back without a re-paint.
+///
+/// Used by the DPMS dispatcher (drivers/gpu/display_power.cpp)
+/// to drive the QEMU std-vga path through Off / Standby /
+/// Suspend transitions.
+bool VbeSetEnabled(bool enable);
+
 /// Boot-time self-test: query the controller, log its
 /// capabilities + the current mode, confirm the VBE ID register
 /// reads as expected. No-op (silent return) when the hypervisor
