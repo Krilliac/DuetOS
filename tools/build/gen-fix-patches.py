@@ -816,6 +816,265 @@ def plan_marker_actions(markers: list[FixMarker], repo_root: Path) -> list[Actio
 _SYSCALL_PATH = "kernel/syscall/syscall.cpp"
 
 
+# Default minimum repeat_count before the marker-log-upgrade patch
+# generator considers a STUB/GAP hit "hot" enough to add a
+# KLOG_ONCE_WARN line next to its FIX_NOTE_*. Tunable via
+# `--marker-log-threshold N` on the CLI.
+DEFAULT_MARKER_LOG_THRESHOLD = 10
+
+
+def _subsys_label_from_pin(pin_path: str) -> str:
+    """Derive a klog subsys label from the path component of a source pin.
+
+    Examples (pin is the leading `path/file.cpp` of `path/file.cpp:Func`):
+      `sched/sched.cpp` -> `sched`
+      `acpi/aml.cpp` -> `acpi`
+      `drivers/net/iwlwifi_rings.cpp` -> `drivers/net`
+      `arch/x86_64/timer.cpp` -> `arch/x86_64`
+
+    The result is what `KLOG_ONCE_WARN(<subsys>, ...)` expects: a short,
+    grep-able identifier for the area. Not perfect (the codebase uses
+    several conventions — `arch/timer` in some places, `arch/x86_64` in
+    others — but the generated label is stable per-pin and the reviewer
+    can edit before applying.
+    """
+    parts = pin_path.rsplit("/", 1)
+    if len(parts) == 1:
+        # Bare filename — fall back to the stem.
+        return Path(parts[0]).stem
+    return parts[0]
+
+
+def _try_resolve_pin_to_file(pin: str, repo_root: Path) -> tuple[Path, str] | None:
+    """Resolve a FixRecord source_pin to (absolute_path, function_name).
+
+    The pin format used by FIX_NOTE_* call sites is `<path>:<Function>`.
+    `<path>` may be either fully-qualified (`kernel/foo/bar.cpp`) or
+    kernel-relative (`foo/bar.cpp` — the bulk of the codebase). Returns
+    None on parse / lookup failure.
+    """
+    if ":" not in pin:
+        return None
+    path_part, _, func = pin.partition(":")
+    if not path_part or not func:
+        return None
+    # `func+0xOFF` is the auto-pin fallback — not a real function name.
+    if re.search(r"\+0x[0-9a-fA-F]+$", func):
+        return None
+    candidate = repo_root / path_part
+    if not candidate.exists():
+        candidate = repo_root / "kernel" / path_part
+        if not candidate.exists():
+            return None
+    return candidate, func
+
+
+def synth_marker_log_upgrade_patch(r: FixRecord, repo_root: Path) -> str | None:
+    """Insert a `KLOG_ONCE_WARN` next to a hot FIX_NOTE_STUB/GAP call.
+
+    Triggered for a StubMarker / GapMarker record whose `repeat_count`
+    is high enough to justify promoting the silent dfix-only record
+    into a serial-visible "this gap is being hit hard" line on the
+    *next* boot. The patch is additive observability — no control-flow
+    change, idempotent (a second pass is a no-op once the KLOG_ONCE_WARN
+    already lives next to the FIX_NOTE_*).
+
+    The discipline mirrors CLAUDE.md "Diagnostic Logging — Keep It,
+    Gate It, Probe It": KLOG_ONCE_WARN fires once per call site per
+    boot, so even a 10000x deny storm produces one log line, not a
+    firehose.
+
+    Returns the unified diff, or None if:
+      * pin doesn't parse / file not found
+      * no `FIX_NOTE_*` call with this pin string was found in the file
+      * a `KLOG_ONCE_WARN` already exists in the 4-line window after
+        the FIX_NOTE_* (idempotency)
+    """
+    pin = r.source_pin
+    resolved = _try_resolve_pin_to_file(pin, repo_root)
+    if resolved is None:
+        return None
+    path, _func = resolved
+    if path.suffix not in _MARKER_SOURCE_SUFFIXES:
+        return None
+
+    file_rel = path.relative_to(repo_root).as_posix()
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines(keepends=True)
+
+    # Locate the FIX_NOTE_*("...pin...", ...) line. The pin string in
+    # the record was captured verbatim from the macro call, so a
+    # substring match against the quoted pin in source is reliable.
+    # Use the pin as it appears in the record; clang-format may have
+    # wrapped the call across two lines, so look for the quoted pin
+    # specifically rather than the whole `FIX_NOTE_*(` token.
+    quoted = f'"{pin}"'
+    fix_line_idx = -1
+    for i, ln in enumerate(lines):
+        if quoted in ln and ("FIX_NOTE_STUB" in ln or "FIX_NOTE_GAP" in ln or
+                             # clang-format may have left the macro name
+                             # on the previous line and only the pin on
+                             # this line. Detect by walking back one.
+                             (i > 0 and ("FIX_NOTE_STUB" in lines[i - 1] or
+                                         "FIX_NOTE_GAP" in lines[i - 1]))):
+            fix_line_idx = i
+            break
+    if fix_line_idx < 0:
+        return None
+
+    # Walk forward to the end of the FIX_NOTE_* statement (line ending
+    # in `);`). The macro is a `do { ... } while (0)` so the closing
+    # `;` is unambiguous.
+    end_idx = fix_line_idx
+    while end_idx < len(lines):
+        if lines[end_idx].rstrip().endswith(");"):
+            break
+        end_idx += 1
+    if end_idx >= len(lines):
+        return None
+
+    insert_at = end_idx + 1
+
+    # Idempotency: if the next 4 lines already contain a KLOG_ONCE_WARN
+    # or any klog macro that names this pin, skip. The check is
+    # deliberately loose — we want to avoid stacking duplicate logs
+    # even if the operator hand-edited a related KLOG_WARN.
+    for j in range(insert_at, min(insert_at + 4, len(lines))):
+        if "KLOG_ONCE_WARN" in lines[j] or "KLOG_ONCE_INFO" in lines[j]:
+            return None
+
+    indent = _leading_spaces(lines[fix_line_idx])
+    if indent == 0:
+        return None
+
+    # Build the new line. Subsys derived from pin's path component;
+    # hint kept short (FIX_NOTE_*'s hint was already 39 chars max so
+    # any further trimming preserves the operator's original wording).
+    pin_path = pin.split(":", 1)[0] if ":" in pin else pin
+    subsys = _subsys_label_from_pin(pin_path)
+    hint = (r.hint or pin).strip()
+    msg = f"fix-journal hot: {hint}"
+    # KLOG_ONCE_WARN signature: (subsys, msg). String escaping uses the
+    # same _escape_cpp_string helper that synth_marker_observability_patch
+    # already uses for inserted macros.
+    new_line = (
+        " " * indent
+        + f'KLOG_ONCE_WARN("{_escape_cpp_string(subsys)}", "{_escape_cpp_string(msg)}");\n'
+    )
+
+    # Insert + add the klog.h include if missing.
+    klog_include = '#include "log/klog.h"\n'
+    include_hunk = ""
+    if not any('"log/klog.h"' in ln for ln in lines):
+        include_indices = [i for i, ln in enumerate(lines) if ln.startswith("#include ")]
+        if include_indices:
+            include_insert_at = include_indices[-1] + 1
+            include_hunk = _hunk_insert_lines(file_rel, lines, include_insert_at, [klog_include])
+            # Adjust insert_at to account for the include hunk shifting
+            # the line numbers downward — but since `_hunk_insert_lines`
+            # operates on the live `lines` list passed by reference, we
+            # need to refetch the index after the include is virtually
+            # added. Easier: build the two hunks against the same
+            # original `lines` since the line numbers are computed from
+            # the pre-insertion file content (which is what `git apply`
+            # also wants on `--- a/...` side).
+    macro_hunk = _hunk_insert_lines(file_rel, lines, insert_at, [new_line])
+    return include_hunk + macro_hunk
+
+
+# `case 0xNN:` body template for the unknown-syscall stub patch. Lives
+# at module scope so the test harness can exercise the substitution
+# without re-deriving it. Indentation is 4 spaces (matches the existing
+# arms in kernel/syscall/syscall.cpp's main switch).
+_UNKNOWN_SYSCALL_STUB_BODY = """\
+    case 0x{num:x}u:
+    {{
+        // STUB: syscall 0x{num:x} observed via fix-journal but not yet
+        // implemented. The arm exists so dedup attributes future hits
+        // to this site (not the catch-all `UnknownSyscall` arm) and so
+        // a future implementer can flip the body to real semantics
+        // without touching the dispatch table.
+        FIX_NOTE_STUB("syscall:0x{num:x}", "implement syscall 0x{num:x}");
+        frame->rax = static_cast<u64>(kSysErrnoENOSYS);
+        return;
+    }}
+
+"""
+
+
+def synth_unknown_syscall_stub_patch(r: FixRecord, num: int, repo_root: Path) -> str | None:
+    """Insert a per-syscall stub arm before the unknown-syscall default.
+
+    The arm records a `StubMarker` with pin `syscall:0xNN` (specific to
+    this number, distinct from the catch-all `UnknownSyscall:syscall#NN`
+    record) so a future boot's report shows the reviewer has
+    *acknowledged* the syscall without yet implementing it. The return
+    value (`-ENOSYS`) is identical to the catch-all's, so there's no
+    semantic delta for the calling EXE; only the journal record kind
+    and dedup key change.
+
+    Why this is safer than the typical "auto-add a switch arm" pattern:
+      * The arm body is a NAMED placeholder, not a guessed implementation.
+      * It returns the same error code the catch-all already returned,
+        so applying the patch can't break a workload that was previously
+        getting consistent `-ENOSYS`.
+      * The FIX_NOTE_STUB marker keeps the gap visible in dfix and in
+        the next boot's report — the patch doesn't pretend the syscall
+        is handled.
+
+    Returns None if the dispatch file isn't in the expected shape (no
+    recognisable default arm, or the arm already exists).
+    """
+    path = repo_root / _SYSCALL_PATH
+    if not path.exists():
+        return None
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines(keepends=True)
+
+    # Idempotency: refuse to add an arm whose case constant already
+    # exists. The catch-all default + the per-arm `case 0xNN:` line are
+    # both candidates — match either form.
+    case_decimal = f"case {num}:"
+    case_hex = f"case 0x{num:x}u:"
+    case_hex_upper = f"case 0x{num:X}u:"
+    for ln in lines:
+        s = ln.strip()
+        if case_decimal in s or case_hex in s or case_hex_upper in s:
+            return None
+        # Also detect `case SYS_FOO:` resolving to this number — we
+        # can't evaluate the macro, but the catch-all's
+        # `FixJournalRecord(UnknownSyscall, ...)` only fires when the
+        # number falls past every named arm, so if the journal saw
+        # an UnknownSyscall for this `num` then by definition there
+        # is no SYS_* arm for it. No further check needed.
+
+    # Locate the catch-all default arm — the one with the
+    # `FixDetector::UnknownSyscall` call. There are several `default:`
+    # cases in the file (in inner switches), so pin specifically on
+    # the one that records the UnknownSyscall detector.
+    target_idx = -1
+    for i, ln in enumerate(lines):
+        if "FixDetector::UnknownSyscall" in ln:
+            # Walk backwards to the enclosing `default:` line. The
+            # default arm holds a substantial pin-building block above
+            # the FixJournalRecord call (~60 lines in the current
+            # syscall.cpp), so the search window is wide.
+            for j in range(i, max(i - 200, -1), -1):
+                if lines[j].lstrip().startswith("default:"):
+                    target_idx = j
+                    break
+            if target_idx > 0:
+                break
+    if target_idx < 0:
+        return None
+
+    # Insert the new case arm right before the `default:` line. Use 4
+    # spaces of indent (matching the existing arms).
+    insertion = _UNKNOWN_SYSCALL_STUB_BODY.format(num=num).splitlines(keepends=True)
+    file_rel = path.relative_to(repo_root).as_posix()
+    return _hunk_insert_lines(file_rel, lines, target_idx, insertion)
+
+
 def synth_syscall_brief(r: FixRecord, num: int) -> str:
     """Generate a markdown implementation brief for an unknown syscall.
 
@@ -1650,7 +1909,10 @@ class Action:
 
 
 def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
-                 resolver: SymbolResolver | None = None) -> list[Action]:
+                 resolver: SymbolResolver | None = None,
+                 marker_log_threshold: int = DEFAULT_MARKER_LOG_THRESHOLD,
+                 enable_syscall_stub: bool = True,
+                 enable_marker_log: bool = True) -> list[Action]:
     actions: list[Action] = []
     seen: set[tuple[str, str]] = set()
     fault_react_probe_done = False
@@ -1738,9 +2000,52 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
                     filename=None,
                 )
             )
+            # Additive observability patch: per-syscall stub arm so the
+            # next boot's record kind flips from `UnknownSyscall` (the
+            # catch-all) to `StubMarker:syscall:0xNN` (this acknowledged
+            # arm). Same -ENOSYS return; the reviewer flips the body to
+            # real semantics later. Skipped if disabled or if the
+            # synthesiser couldn't locate the catch-all default arm.
+            if enable_syscall_stub:
+                stub_diff = synth_unknown_syscall_stub_patch(r, num, repo_root)
+                if stub_diff:
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                f"Add stub arm for syscall 0x{num:x}"
+                                f" (acknowledged; returns -ENOSYS){_new_tag(r)}"
+                            ),
+                            body=stub_diff,
+                            filename=f"syscall-stub-0x{num:x}.patch",
+                        )
+                    )
 
         elif r.detector_name in ("stub", "gap"):
             actions.append(synth_marker_hit_brief(r, resolver))
+            # Additive observability patch: for a hot marker (>=N hits)
+            # add a `KLOG_ONCE_WARN` line next to the existing
+            # `FIX_NOTE_*` so the gap is visible at serial level on the
+            # NEXT boot, without operators needing to dfix-poll. Skipped
+            # if disabled, if repeat is below the threshold, or if the
+            # synthesiser couldn't resolve the pin / find the macro
+            # call / detected an existing KLOG_ONCE_*.
+            if enable_marker_log and r.repeat >= marker_log_threshold:
+                log_diff = synth_marker_log_upgrade_patch(r, repo_root)
+                if log_diff:
+                    safe_pin = re.sub(r"[^A-Za-z0-9_.-]+", "-", r.source_pin)
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                f"Add KLOG_ONCE_WARN next to hot "
+                                f"{r.detector_name} at `{r.source_pin}` "
+                                f"(×{r.repeat}){_new_tag(r)}"
+                            ),
+                            body=log_diff,
+                            filename=f"marker-log-{safe_pin}.patch",
+                        )
+                    )
         elif r.detector_name == "soft_fault_recov":
             actions.append(synth_soft_fault_recov_brief(r, resolver))
             # A fault-react recovery record IS a detected runtime
@@ -1904,6 +2209,38 @@ def main() -> int:
             "raw hex and a symbolize.sh hint."
         ),
     )
+    ap.add_argument(
+        "--marker-log-threshold",
+        type=int,
+        default=DEFAULT_MARKER_LOG_THRESHOLD,
+        help=(
+            f"min repeat_count for the marker-log-upgrade patch "
+            f"(KLOG_ONCE_WARN next to a FIX_NOTE_*) to fire on a "
+            f"hot stub/gap marker. Default: {DEFAULT_MARKER_LOG_THRESHOLD}. "
+            f"Lower to surface less-hot gaps; raise to keep the patch "
+            f"set focused on the noisiest."
+        ),
+    )
+    ap.add_argument(
+        "--no-syscall-stub",
+        action="store_true",
+        help=(
+            "disable per-syscall stub-arm generation for unknown-syscall "
+            "records. Brief is still emitted. Use when a smoke profile "
+            "is exercising a known-experimental syscall range and the "
+            "extra arms would mask the ABI work in progress."
+        ),
+    )
+    ap.add_argument(
+        "--no-marker-log",
+        action="store_true",
+        help=(
+            "disable the KLOG_ONCE_WARN auto-upgrade patches for hot "
+            "stub/gap markers. Brief is still emitted. Use to keep "
+            "the patch set minimal for a docs-only or refactor-only "
+            "review cycle."
+        ),
+    )
     args = ap.parse_args()
 
     repo_root = find_repo_root()
@@ -1966,7 +2303,15 @@ def main() -> int:
                 rips.append(r.ctx_a)
         resolver.prime(rips)
 
-    actions = plan_actions(all_records, thunks_index, repo_root, resolver)
+    actions = plan_actions(
+        all_records,
+        thunks_index,
+        repo_root,
+        resolver,
+        marker_log_threshold=args.marker_log_threshold,
+        enable_syscall_stub=not args.no_syscall_stub,
+        enable_marker_log=not args.no_marker_log,
+    )
     if args.markers:
         markers = load_markers(args.markers)
         marker_actions = plan_marker_actions(markers, repo_root)
