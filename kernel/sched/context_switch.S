@@ -86,6 +86,25 @@ SchedTaskTrampoline:
      * scheduler switch INTO a fresh task would raise #CP instead of
      * running the trampoline. */
     endbr64
+    /* Reserve 16 bytes so RSP never sits at slot_top while IRQs are
+     * enabled. After ContextSwitch's `ret` (which consumes the
+     * planted &SchedTaskTrampoline at slot_top-8), RSP=slot_top. If
+     * an IRQ fires while RSP=slot_top, hardware pushes a 40-byte
+     * iretq frame whose top quad (SS) lands at slot_top-8 — the
+     * planted RA slot — overwriting it with kKernelDataSelector
+     * (= 0x10). The slot-validator in Schedule() then panics on the
+     * task's next switch-in with `observed=0x10`. (~60% on SMP=8
+     * release boots, traced 2026-05-22: every reproduction has
+     * exactly observed=0x10, value of kKernelDataSelector.)
+     *
+     * `sub rsp, 16` keeps the planted RA slot below RSP for the
+     * entire trampoline lifetime, so IRQ-frame SS pushes land at
+     * slot_top-24 (= RSP-8 = (slot_top-16)-8) and the planted RA at
+     * slot_top-8 is preserved. 16 (not 8) keeps RSP 16-aligned per
+     * SysV — calls expect (RSP+8) mod 16 == 0 on entry. The
+     * reserved 8 bytes between RSP and the planted RA are dead —
+     * never read, never written by trampoline code. */
+    sub     rsp, 16
     /* Drain this CPU's lock-pass slot. The Schedule() call that
      * switched INTO this fresh task left g_sched_lock held; we own
      * the release. SchedFinishTaskSwitch is callee-saved-clean
