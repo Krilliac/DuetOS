@@ -41,6 +41,20 @@ constinit bool g_periodic_enabled = false;
 // path is heartbeat-single-threaded, so there is no contention.
 FixRecord g_snapshot_scratch[kFixJournalCapacity] = {};
 
+// Persistent-failure back-off. Without this, an underlying FAT32
+// volume that's structurally damaged (e.g. corrupt FAT chain from
+// a prior boot, missing free clusters, a bad sector under the
+// directory cluster) gets hammered every periodic tick — the
+// boot log fills with the same "create KERNEL.FIX payload
+// failed" warning indefinitely. After kMaxConsecutiveFailures
+// the sink quiesces; one warning fires explaining why, and the
+// periodic flush short-circuits to a no-op. Explicit flush
+// callers (panic, dfix, self-test) still attempt one final
+// write — the back-off is only on the autonomic flush path.
+constinit u32 g_consecutive_failures = 0;
+constexpr u32 kMaxConsecutiveFailures = 3;
+constinit bool g_back_off_logged = false;
+
 // File header — 16 bytes, prepended once before the FixRecord
 // concatenation. Format documented in fix_journal_persist.h.
 struct FixFileHeader
@@ -171,7 +185,11 @@ bool WriteRingSnapshot(const fs::fat32::Volume* v)
     const u64 file_len = sizeof(hdr) + n * sizeof(FixRecord);
     if (fat::Fat32CreateAtPath(v, kFixJournalPath, file, file_len) < 0)
     {
-        KLOG_WARN("diag/fix-journal-persist", "create KERNEL.FIX payload failed");
+        // Only emit the WARN on the first few failures — repeated
+        // failures get swallowed once the back-off kicks in so the
+        // boot log isn't flooded.
+        if (g_consecutive_failures < kMaxConsecutiveFailures)
+            KLOG_WARN("diag/fix-journal-persist", "create KERNEL.FIX payload failed");
         return false;
     }
     return true;
@@ -227,7 +245,39 @@ void FixJournalPersistPeriodicTick()
 {
     if (!g_periodic_enabled)
         return;
-    FixJournalPersistFlush();
+    // Back-off: after kMaxConsecutiveFailures the volume is
+    // structurally damaged (or its FAT chain is corrupted from a
+    // prior boot). Stop the autonomic flush rather than fill the
+    // boot log with the same warning every tick. The sink
+    // re-arms on the next explicit flush attempt (panic / dfix /
+    // self-test) — those callers ignore the back-off.
+    if (g_consecutive_failures >= kMaxConsecutiveFailures)
+    {
+        if (!g_back_off_logged)
+        {
+            KLOG_WARN("diag/fix-journal-persist",
+                      "periodic flush quiesced after consecutive failures — FAT32 volume likely damaged");
+            g_back_off_logged = true;
+        }
+        return;
+    }
+    if (!g_installed)
+        return;
+    namespace fat = fs::fat32;
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+        return;
+    if (WriteRingSnapshot(v))
+    {
+        // Successful write resets the failure window so a transient
+        // FAT hiccup doesn't permanently disable the sink.
+        g_consecutive_failures = 0;
+        g_back_off_logged = false;
+    }
+    else
+    {
+        ++g_consecutive_failures;
+    }
 }
 
 void FixJournalPersistEnablePeriodic()
