@@ -1816,6 +1816,398 @@ def synth_trap_capture_brief(r: FixRecord, resolver: SymbolResolver | None = Non
     return Action(kind="note", title=title, body="\n".join(out), filename=None)
 
 
+# =================================================================
+# Real semantic-change patch generators for runtime-observed faults.
+# =================================================================
+#
+# Every generator in this block follows the same discipline:
+#   1. Resolve caller_rip / source_pin to a real `(file, line)`.
+#   2. Read the source line to confirm the expected pattern (a
+#      pointer deref, an allocation assignment, a division, etc.).
+#   3. Generate a unified diff that REPLACES that line with a
+#      guarded version, wrapping the change in `#if 0 ... #endif`
+#      so applying the patch is BEHAVIOURALLY a no-op until the
+#      reviewer affirmatively flips the gate.
+#   4. Refuse to fire (return None) when the source line doesn't
+#      match the expected shape — the patch generator MUST NOT
+#      produce a wrong candidate; a brief-only fallback is always
+#      strictly better than a confidently-wrong diff.
+#
+# The `#if 0` brake is the same shape as synth_kassert_demote_patch:
+# applying the patch makes the proposal visible in source review,
+# without changing kernel behaviour. The reviewer then flips it.
+
+
+# Regex to extract the dereferenced pointer name from a faulting
+# source line. Matches `foo->bar`, `(*foo).bar`, `*foo`, and the
+# write variants. Captures the bare identifier so the guard can
+# reference it. Conservative: only matches simple identifiers, not
+# expressions — a complex faulting line falls through to brief-only.
+_DEREF_PTR_RE = re.compile(
+    r"\b(?P<ptr>[A-Za-z_][A-Za-z0-9_]*)\s*"
+    r"(?:->|\[\s*[^\]]+\s*\]\s*=|\.[A-Za-z_])"
+)
+_STAR_DEREF_RE = re.compile(
+    r"\*\(?\s*(?P<ptr>[A-Za-z_][A-Za-z0-9_]*)"
+)
+
+# Regex to find the divisor side of a division expression. The kernel
+# style uses `a / b` or `a % b` with whitespace; we extract the rhs
+# identifier. Won't recognise complex expressions like `a / (b + c)`;
+# those fall through to brief-only.
+_DIV_OP_RE = re.compile(
+    r"[/%]\s*(?P<div>[A-Za-z_][A-Za-z0-9_]*)\b"
+)
+
+
+def _detect_return_type(lines: list[str], statement_idx: int) -> str | None:
+    """Walk backwards from `statement_idx` to the enclosing function
+    header line. Return one of:
+      'result'   — function returns Result<...>
+      'void'     — function returns void
+      'pointer'  — function returns T*
+      'integer'  — function returns int / u32 / i64 / errno-like
+      None       — couldn't tell
+    The classification picks the right "graceful return" shape for
+    the guard the synthesiser emits.
+    """
+    for j in range(statement_idx, max(statement_idx - 80, -1), -1):
+        ln = lines[j]
+        stripped_no_comment = re.sub(r"//.*$", "", ln).rstrip()
+        if "Result<" in ln:
+            return "result"
+        if re.match(r"^\s*void\s+\w+\s*\(", ln) or re.match(r"^void\s+\w+\s*\(", ln):
+            return "void"
+        # Pointer return: `T* funcname(` at column 0
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_:<>]*\s*\*\s+\w+\s*\(", ln):
+            return "pointer"
+        # Integer return: `int funcname(` / `i64 funcname(` / `u32 funcname(`
+        if re.match(r"^(int|i32|i64|u32|u64|i8|i16|u8|u16|long|short|size_t|ssize_t)\s+\w+\s*\(", ln):
+            return "integer"
+        if stripped_no_comment.endswith("}") and j != statement_idx and _leading_spaces(ln) == 0:
+            return None  # Walked out of enclosing function.
+    return None
+
+
+def _guard_return_for(return_type: str | None, comment: str) -> str | None:
+    """Return the "graceful return" statement matching the function's
+    return type. None when there's no safe equivalent."""
+    if return_type == "result":
+        return "        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidState};"
+    if return_type == "void":
+        return f"        return;  // {comment}"
+    if return_type == "pointer":
+        return f"        return nullptr;  // {comment}"
+    if return_type == "integer":
+        return f"        return -1;  // {comment}"
+    return None
+
+
+def _gated_guard_diff(
+    file_rel: str,
+    lines: list[str],
+    line_idx: int,
+    cond_expr: str,
+    return_stmt: str,
+    klog_subsys: str,
+    klog_msg: str,
+    review_header: list[str],
+) -> str:
+    """Build a `#if 0 ... #endif`-gated guard block REPLACING the
+    line at `line_idx`. Same shape across detector kinds — the
+    only thing that varies is the condition + return statement.
+    """
+    indent = _leading_spaces(lines[line_idx])
+    sp = " " * indent
+    target_line = lines[line_idx]
+    new_block: list[str] = []
+    for header in review_header:
+        new_block.append(f"{sp}// {header}\n")
+    new_block.append(f"{sp}#if 0\n")
+    new_block.append(f"{sp}if ({cond_expr})\n")
+    new_block.append(f"{sp}{{\n")
+    new_block.append(
+        f'{sp}    KLOG_ONCE_WARN("{_escape_cpp_string(klog_subsys)}", '
+        f'"{_escape_cpp_string(klog_msg)}");\n'
+    )
+    new_block.append(f"{return_stmt}\n")
+    new_block.append(f"{sp}}}\n")
+    new_block.append(target_line if target_line.endswith("\n") else target_line + "\n")
+    new_block.append(f"{sp}#else\n")
+    new_block.append(target_line if target_line.endswith("\n") else target_line + "\n")
+    new_block.append(f"{sp}#endif\n")
+    return _hunk_replace_with_block(file_rel, lines, line_idx, new_block)
+
+
+def synth_trap_null_deref_patch(r: FixRecord, resolver: SymbolResolver | None,
+                                repo_root: Path) -> str | None:
+    """Generate a real applicable patch that inserts a null-pointer
+    guard BEFORE the source line that took a #PF null-dereference.
+
+    Pattern recognition:
+      * detector == trap_capture
+      * vector == 14 (#PF)
+      * CR2 in the low page (< 0x1000)
+      * source line contains a recognisable pointer dereference
+
+    The patch wraps the change in `#if 0` (the brake) and renders:
+      if (ptr == nullptr) {
+          KLOG_ONCE_WARN("<subsys>", "<msg>");
+          return <type-appropriate graceful>;
+      }
+      <original line>
+
+    Refuses to fire when:
+      * Source line doesn't parse to a single dereferenced identifier
+      * The enclosing function's return type isn't one of
+        {Result, void, pointer, integer} (no safe graceful return)
+      * A KLOG_ONCE_WARN with this subsys already exists nearby
+        (idempotency — re-running won't stack)
+    """
+    if resolver is None:
+        return None
+    vector = int((r.ctx_a >> 32) & 0xff)
+    cr2 = r.ctx_b
+    if vector != 14 or cr2 >= 0x1000:
+        return None
+
+    sym = resolver.resolve(r.caller_rip)
+    if not sym or sym.startswith("?? "):
+        return None
+    m = re.search(r"\(([^)]+):(\d+)\)|\bat\s+(\S+):(\d+)", sym)
+    if not m:
+        return None
+    file_part = m.group(1) or m.group(3) or ""
+    try:
+        line_part = int(m.group(2) or m.group(4))
+    except (TypeError, ValueError):
+        return None
+    if not file_part or line_part <= 0:
+        return None
+
+    path = _resolve_source_path(file_part, repo_root)
+    if path is None or path.suffix not in _MARKER_SOURCE_SUFFIXES:
+        return None
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines(keepends=True)
+    if line_part > len(lines):
+        return None
+
+    target = lines[line_part - 1]
+    ptr_match = _DEREF_PTR_RE.search(target) or _STAR_DEREF_RE.search(target)
+    if ptr_match is None:
+        return None
+    ptr_name = ptr_match.group("ptr")
+
+    rt = _detect_return_type(lines, line_part - 1)
+    return_stmt = _guard_return_for(rt, f"null-deref guard from fix-journal")
+    if return_stmt is None:
+        return None
+
+    # Idempotency check.
+    klog_subsys = file_part.rsplit("/", 1)[0] if "/" in file_part else Path(file_part).stem
+    win_start = max(0, line_part - 5)
+    win_end = min(len(lines), line_part + 5)
+    for j in range(win_start, win_end):
+        if "KLOG_ONCE_WARN" in lines[j] and ptr_name in lines[j]:
+            return None
+
+    file_rel = path.relative_to(repo_root).as_posix()
+    review_header = [
+        f"REVIEW: null-deref guard synthesised by fix-journal cycle.",
+        f"Trap #PF at CR2=0x{cr2:x} (repeat={r.repeat}). The guard below",
+        f"covers the case `{ptr_name} == nullptr`. Flip the `#if 0` to `#if 1`",
+        f"to activate; the legitimate-null caller may need a different shape.",
+    ]
+    return _gated_guard_diff(
+        file_rel, lines, line_part - 1,
+        cond_expr=f"{ptr_name} == nullptr",
+        return_stmt=return_stmt,
+        klog_subsys=klog_subsys,
+        klog_msg=f"null-deref guard fired: {ptr_name} was null",
+        review_header=review_header,
+    )
+
+
+def synth_trap_div_zero_patch(r: FixRecord, resolver: SymbolResolver | None,
+                              repo_root: Path) -> str | None:
+    """Generate a real applicable patch that inserts a divisor != 0
+    guard BEFORE the source line that took a #DE divide-by-zero.
+
+    Same #if 0-gated discipline as synth_trap_null_deref_patch.
+    Refuses to fire when the source line doesn't expose a single
+    identifier on the rhs of `/` or `%`.
+    """
+    if resolver is None:
+        return None
+    vector = int((r.ctx_a >> 32) & 0xff)
+    if vector != 0:  # #DE only
+        return None
+
+    sym = resolver.resolve(r.caller_rip)
+    if not sym or sym.startswith("?? "):
+        return None
+    m = re.search(r"\(([^)]+):(\d+)\)|\bat\s+(\S+):(\d+)", sym)
+    if not m:
+        return None
+    file_part = m.group(1) or m.group(3) or ""
+    try:
+        line_part = int(m.group(2) or m.group(4))
+    except (TypeError, ValueError):
+        return None
+    if not file_part or line_part <= 0:
+        return None
+
+    path = _resolve_source_path(file_part, repo_root)
+    if path is None or path.suffix not in _MARKER_SOURCE_SUFFIXES:
+        return None
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines(keepends=True)
+    if line_part > len(lines):
+        return None
+
+    target = lines[line_part - 1]
+    div_match = _DIV_OP_RE.search(target)
+    if div_match is None:
+        return None
+    div_name = div_match.group("div")
+
+    rt = _detect_return_type(lines, line_part - 1)
+    return_stmt = _guard_return_for(rt, f"div-zero guard from fix-journal")
+    if return_stmt is None:
+        return None
+
+    klog_subsys = file_part.rsplit("/", 1)[0] if "/" in file_part else Path(file_part).stem
+    win_start = max(0, line_part - 5)
+    win_end = min(len(lines), line_part + 5)
+    for j in range(win_start, win_end):
+        if "KLOG_ONCE_WARN" in lines[j] and div_name in lines[j]:
+            return None
+
+    file_rel = path.relative_to(repo_root).as_posix()
+    review_header = [
+        f"REVIEW: divide-zero guard synthesised by fix-journal cycle.",
+        f"Trap #DE (repeat={r.repeat}). Guard below covers `{div_name} == 0`.",
+        f"Flip the `#if 0` to `#if 1` to activate; a legitimate zero may",
+        f"need a different shape (saturation, alternative computation).",
+    ]
+    return _gated_guard_diff(
+        file_rel, lines, line_part - 1,
+        cond_expr=f"{div_name} == 0",
+        return_stmt=return_stmt,
+        klog_subsys=klog_subsys,
+        klog_msg=f"div-zero guard fired: {div_name} was 0",
+        review_header=review_header,
+    )
+
+
+# Regex matching a kernel allocation assignment like:
+#   auto* p = KMalloc(...);
+#   Foo* f = static_cast<Foo*>(KMalloc(...));
+#   void* mem = KMallocAligned(...);
+# Captures the variable name so the synthesised guard can reference it.
+_ALLOC_ASSIGN_RE = re.compile(
+    r"^\s*(?:[A-Za-z_][\w:<>\s,]*?\*\s*|auto\s*\*?\s*)"
+    r"(?P<var>[A-Za-z_]\w*)\s*=\s*[^;]*\b"
+    r"(?:KMalloc|KMallocAligned|KCalloc|AllocateFrame|AllocateFrameNode|KZalloc)\s*\("
+)
+
+
+def synth_oom_nullcheck_patch(r: FixRecord, resolver: SymbolResolver | None,
+                              repo_root: Path) -> str | None:
+    """Generate a real applicable patch that inserts a nullcheck AFTER
+    an allocation site whose primitive returned null (recorded by
+    kheap.cpp / frame_allocator.cpp via FixJournalRecordAtCaller).
+
+    The new FixJournalRecordAtCaller wiring means `caller_rip` is now
+    the upstream `auto* p = KMalloc(...);` line — addr2line resolves
+    to that statement and the synthesiser inserts:
+
+      auto* p = KMalloc(...);
+      #if 0
+      if (p == nullptr) {
+          KLOG_ONCE_WARN("subsys", "OOM nullcheck fired: p");
+          return Err{OutOfMemory};
+      }
+      #endif
+
+    Refuses to fire when:
+      * Source line doesn't match the allocation-assignment shape.
+      * Function return type isn't `Result<...>` (the only graceful
+        return for an OOM is propagating ErrorCode::OutOfMemory).
+      * A nullcheck already follows the allocation within 4 lines.
+    """
+    if resolver is None:
+        return None
+    if r.source_pin not in ("mm/kheap", "mm/frame-alloc"):
+        return None
+
+    sym = resolver.resolve(r.caller_rip)
+    if not sym or sym.startswith("?? "):
+        return None
+    m = re.search(r"\(([^)]+):(\d+)\)|\bat\s+(\S+):(\d+)", sym)
+    if not m:
+        return None
+    file_part = m.group(1) or m.group(3) or ""
+    try:
+        line_part = int(m.group(2) or m.group(4))
+    except (TypeError, ValueError):
+        return None
+    if not file_part or line_part <= 0:
+        return None
+
+    path = _resolve_source_path(file_part, repo_root)
+    if path is None or path.suffix not in _MARKER_SOURCE_SUFFIXES:
+        return None
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines(keepends=True)
+    if line_part > len(lines):
+        return None
+
+    target = lines[line_part - 1]
+    alloc = _ALLOC_ASSIGN_RE.match(target)
+    if alloc is None:
+        return None
+    var = alloc.group("var")
+
+    rt = _detect_return_type(lines, line_part - 1)
+    if rt != "result":
+        return None  # OOM nullcheck only safe in Result-returning fns
+
+    # Idempotency: skip if the next 4 lines already check var for null.
+    for j in range(line_part, min(line_part + 4, len(lines))):
+        if re.search(rf"\b{re.escape(var)}\b\s*==\s*nullptr", lines[j]):
+            return None
+        if re.search(rf"!\s*{re.escape(var)}\b", lines[j]):
+            return None
+
+    indent = _leading_spaces(target)
+    sp = " " * indent
+    new_block = []
+    new_block.append(target if target.endswith("\n") else target + "\n")
+    new_block.append(f"{sp}// REVIEW: OOM nullcheck synthesised by fix-journal cycle.\n")
+    new_block.append(
+        f"{sp}// `{r.source_pin}` returned null at this call site (repeat={r.repeat}).\n"
+    )
+    new_block.append(f"{sp}// Flip the `#if 0` to `#if 1` to activate the check.\n")
+    new_block.append(f"{sp}#if 0\n")
+    new_block.append(f"{sp}if ({var} == nullptr)\n")
+    new_block.append(f"{sp}{{\n")
+    new_block.append(
+        f'{sp}    KLOG_ONCE_WARN("{_escape_cpp_string(r.source_pin)}", '
+        f'"OOM nullcheck fired: {var} == nullptr");\n'
+    )
+    new_block.append(
+        f"{sp}    return ::duetos::core::Err{{::duetos::core::ErrorCode::OutOfMemory}};\n"
+    )
+    new_block.append(f"{sp}}}\n")
+    new_block.append(f"{sp}#endif\n")
+
+    file_rel = path.relative_to(repo_root).as_posix()
+    # Replace the allocation line with [original + nullcheck block].
+    return _hunk_replace_with_block(file_rel, lines, line_part - 1, new_block)
+
+
 def synth_user_fault_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
     """Generate a brief for a ring-3 UserFault record.
 
@@ -2791,7 +3183,9 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
                  enable_marker_log: bool = True,
                  elf_path: Path | None = None,
                  kassert_demote_threshold: int = DEFAULT_KASSERT_DEMOTE_THRESHOLD,
-                 enable_kassert_demote: bool = False) -> list[Action]:
+                 enable_kassert_demote: bool = False,
+                 enable_trap_guards: bool = False,
+                 enable_oom_nullcheck: bool = False) -> list[Action]:
     actions: list[Action] = []
     seen: set[tuple[str, str]] = set()
     fault_react_probe_done = False
@@ -2951,12 +3345,68 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
                             filename="fault-react-recover-probe.patch",
                         )
                     )
+            # OOM nullcheck patch — only for OOM-shaped soft_fault
+            # records (kheap / frame-allocator), gated by
+            # --enable-oom-nullcheck. The new
+            # FixJournalRecordAtCaller wiring on kheap.cpp /
+            # frame_allocator.cpp captures the UPSTREAM allocation
+            # site as caller_rip, so addr2line resolves to the
+            # `auto* p = KMalloc(...)` line the synthesiser keys
+            # off. Gated `#if 0` so applying is a no-op.
+            if enable_oom_nullcheck and r.source_pin in ("mm/kheap", "mm/frame-alloc"):
+                oom_diff = synth_oom_nullcheck_patch(r, resolver, repo_root)
+                if oom_diff:
+                    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", r.source_pin)
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                f"Insert OOM nullcheck after `{r.source_pin}` "
+                                f"allocation site (×{r.repeat}; gated "
+                                f"`#if 0`){_new_tag(r)}"
+                            ),
+                            body=oom_diff,
+                            filename=f"oom-nullcheck-{safe}.patch",
+                        )
+                    )
         elif r.detector_name == "loader_reject":
             actions.append(synth_loader_reject_brief(r, resolver))
         elif r.detector_name == "cap_denial":
             actions.append(synth_cap_denial_brief(r, resolver))
         elif r.detector_name == "trap_capture":
             actions.append(synth_trap_capture_brief(r, resolver, elf_path, repo_root))
+            # Real applicable patches gated behind --enable-trap-guards.
+            # Each one wraps the change in `#if 0 ... #endif` so applying
+            # is a no-op until the reviewer flips the gate.
+            if enable_trap_guards:
+                null_diff = synth_trap_null_deref_patch(r, resolver, repo_root)
+                if null_diff:
+                    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", r.source_pin)
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                f"Insert null-deref guard at `{r.source_pin}` "
+                                f"(×{r.repeat}; gated `#if 0`){_new_tag(r)}"
+                            ),
+                            body=null_diff,
+                            filename=f"trap-null-guard-{safe}.patch",
+                        )
+                    )
+                div_diff = synth_trap_div_zero_patch(r, resolver, repo_root)
+                if div_diff:
+                    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", r.source_pin)
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                f"Insert divide-zero guard at `{r.source_pin}` "
+                                f"(×{r.repeat}; gated `#if 0`){_new_tag(r)}"
+                            ),
+                            body=div_diff,
+                            filename=f"trap-divzero-guard-{safe}.patch",
+                        )
+                    )
         elif r.detector_name == "user_fault":
             actions.append(synth_user_fault_brief(r, resolver))
         elif r.detector_name == "kassert_fail":
@@ -3180,7 +3630,54 @@ def main() -> int:
             f"requires --enable-kassert-demote."
         ),
     )
+    ap.add_argument(
+        "--enable-trap-guards",
+        action="store_true",
+        help=(
+            "OPT-IN: also emit `trap-null-guard-*.patch` and "
+            "`trap-divzero-guard-*.patch` files for TrapCapture records "
+            "whose source line matches a recognisable pointer-deref / "
+            "division pattern. Each generated patch wraps a guard "
+            "(`if (ptr == nullptr) { ... }` or `if (divisor == 0) { ... }`) "
+            "behind `#if 0 ... #endif` so applying the patch is "
+            "behaviourally a no-op until the reviewer flips the gate. "
+            "Off by default because the guard inserted may not match "
+            "the surrounding control-flow's expectations (a legitimate "
+            "null deref under a debug assert, a divisor that's a "
+            "compile-time constant, etc.)."
+        ),
+    )
+    ap.add_argument(
+        "--enable-oom-nullcheck",
+        action="store_true",
+        help=(
+            "OPT-IN: also emit `oom-nullcheck-*.patch` files for "
+            "soft_fault_recov records with mm/kheap or mm/frame-alloc "
+            "source pins. The synthesiser uses the upstream caller_rip "
+            "(captured by FixJournalRecordAtCaller from inside the "
+            "primitive's OOM path) to locate the `auto* p = KMalloc(...)` "
+            "site and inserts an `if (p == nullptr) { return Err{OutOfMemory}; }` "
+            "block behind `#if 0` immediately after the assignment. "
+            "Only fires when the enclosing function is Result-returning."
+        ),
+    )
+    ap.add_argument(
+        "--enable-all-patches",
+        action="store_true",
+        help=(
+            "shortcut: equivalent to passing every --enable-* flag "
+            "(--enable-kassert-demote --enable-trap-guards "
+            "--enable-oom-nullcheck). Use when running the full "
+            "automation cycle: run OS -> journal records -> "
+            "gen-fix-patches with everything on -> review the .patch "
+            "files -> apply + flip the per-patch `#if 0` brake."
+        ),
+    )
     args = ap.parse_args()
+    if args.enable_all_patches:
+        args.enable_kassert_demote = True
+        args.enable_trap_guards = True
+        args.enable_oom_nullcheck = True
 
     repo_root = find_repo_root()
     thunks_index = load_thunks_table(repo_root)
@@ -3253,6 +3750,8 @@ def main() -> int:
         elf_path=args.kernel_elf,
         kassert_demote_threshold=args.kassert_demote_threshold,
         enable_kassert_demote=args.enable_kassert_demote,
+        enable_trap_guards=args.enable_trap_guards,
+        enable_oom_nullcheck=args.enable_oom_nullcheck,
     )
     if args.markers:
         markers = load_markers(args.markers)

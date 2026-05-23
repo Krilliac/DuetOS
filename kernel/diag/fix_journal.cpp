@@ -322,6 +322,19 @@ void FixJournalInit()
     return RecordCommon(detector, source_pin, hint, ctx_a, ctx_b, severity, caller);
 }
 
+::duetos::core::Result<void> FixJournalRecordAtCaller(FixDetector detector, const char* source_pin, const char* hint,
+                                                      u64 ctx_a, u64 ctx_b, u16 severity, u64 upstream_caller_rip)
+{
+    // Explicit-RIP variant: skip the __builtin_return_address(0)
+    // capture and use the caller-supplied rip directly. Used by
+    // primitives like KMalloc / AllocateFrame whose OOM-recording
+    // site is INSIDE the primitive — the standard auto-capture
+    // would attribute the OOM to "KMalloc+0xOFF" instead of the
+    // upstream `auto* p = KMalloc(...)` call site the reviewer
+    // actually wants for an auto-generated nullcheck patch.
+    return RecordCommon(detector, source_pin, hint, ctx_a, ctx_b, severity, upstream_caller_rip);
+}
+
 void FixJournalRecordFromTrap(FixDetector detector, u64 ctx_a, u64 caller_rip)
 {
     // Trap-context: cannot take the SpinLock (would re-disable IRQs

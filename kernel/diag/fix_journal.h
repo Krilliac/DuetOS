@@ -189,6 +189,20 @@ void FixJournalInit();
 ::duetos::core::Result<void> FixJournalRecordSev(FixDetector detector, const char* source_pin, const char* hint,
                                                  u64 ctx_a, u64 ctx_b, u16 severity);
 
+/// Variant of `FixJournalRecordSev` that takes the `caller_rip`
+/// explicitly. Useful at primitives (KMalloc, AllocateFrame) where
+/// the standard `__builtin_return_address(0)` capture inside
+/// FixJournalRecord yields the address INSIDE the primitive, not
+/// the upstream caller — the upstream is what a reviewer wants
+/// for an OOM nullcheck patch. Pass `__builtin_return_address(0)`
+/// from inside the primitive's OOM path to capture the caller of
+/// the primitive (one frame up from the recorder).
+///
+/// All other behaviour matches `FixJournalRecordSev` — dedup,
+/// auto-pin fallback, severity stamping.
+::duetos::core::Result<void> FixJournalRecordAtCaller(FixDetector detector, const char* source_pin, const char* hint,
+                                                      u64 ctx_a, u64 ctx_b, u16 severity, u64 upstream_caller_rip);
+
 /// Trap-handler-safe deferred record. Stores the (detector, ctx_a,
 /// rip) triple into a small per-CPU pending slot. Drained on the
 /// next `FixJournalDrainTrapPending()` call from the heartbeat

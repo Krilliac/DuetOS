@@ -1033,10 +1033,15 @@ PhysAddr AllocateFrameNode(u8 node)
     // failures). ctx_a is the frames-free-at-fail count so the off-line
     // tooling can see whether the request was just outsized vs. the
     // bitmap was actually exhausted.
-    (void)::duetos::diag::FixJournalRecordSev(
+    // Capture the UPSTREAM caller (one frame up) so the offline
+    // OOM nullcheck patch generator has the actual allocation
+    // site to insert a check after, not the address inside this
+    // function.
+    const auto upstream = reinterpret_cast<u64>(__builtin_return_address(0));
+    (void)::duetos::diag::FixJournalRecordAtCaller(
         ::duetos::diag::FixDetector::SoftFaultRecov, "mm/frame-alloc",
         "physical OOM: AllocateFrameNode returned kNullFrame; investigate caller's null-handling and frame budget",
-        FreeFramesCount(), /*ctx_b=*/0, /*severity=*/2);
+        FreeFramesCount(), /*ctx_b=*/0, /*severity=*/2, upstream);
     return kNullFrame;
 }
 

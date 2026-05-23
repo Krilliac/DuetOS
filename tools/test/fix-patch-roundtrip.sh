@@ -226,6 +226,16 @@ run_variant "--no-marker-log --no-syscall-stub" --no-marker-log --no-syscall-stu
 # generate, so the count stays the same as default. This verifies
 # the safety gate isn't accidentally bypassed.
 run_variant "--enable-kassert-demote (safe-refuse)" --enable-kassert-demote >&2
+# --enable-trap-guards / --enable-oom-nullcheck / --enable-all-patches
+# all open additional opt-in patch classes. The safety gates suppress
+# generation against the synthetic records used here (the trap-capture
+# record has caller_rip=0xffffffff80abcdef which doesn't symbolize
+# against any kernel ELF supplied here; the OOM nullcheck only fires
+# for SoftFaultRecov records, none of which we synthesise). So the
+# counts stay at the default — confirming the safety gates hold.
+run_variant "--enable-trap-guards (safe-refuse)" --enable-trap-guards >&2
+run_variant "--enable-oom-nullcheck (safe-refuse)" --enable-oom-nullcheck >&2
+run_variant "--enable-all-patches (safe-refuse)" --enable-all-patches >&2
 
 # ---------------------------------------------------------------------
 # 5. Optional: apply, build, revert. Only runs with --build because
