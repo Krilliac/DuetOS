@@ -211,9 +211,8 @@ namespace
 bool MapLinuxVdso(::duetos::mm::AddressSpace* as, Process* proc, u64 base_va)
 {
     using namespace ::duetos::mm;
-    using ::duetos::subsystems::linux::vdso::generated::kBinLinuxVdsoBytes;
-
-    constexpr u64 kVdsoEntryRtSigreturn = 0; // see vdso.S layout
+    namespace vdso_gen = ::duetos::subsystems::linux::vdso::generated;
+    using vdso_gen::kBinLinuxVdsoBytes;
 
     static_assert(sizeof(kBinLinuxVdsoBytes) <= kPageSize, "Linux vDSO blob must fit in one 4 KiB page");
 
@@ -233,7 +232,11 @@ bool MapLinuxVdso(::duetos::mm::AddressSpace* as, Process* proc, u64 base_va)
     AddressSpaceMapUserPage(as, base_va, frame, flags);
 
     proc->linux_vdso_base = base_va;
-    proc->linux_vdso_rt_sigreturn_va = base_va + kVdsoEntryRtSigreturn;
+    proc->linux_vdso_rt_sigreturn_va = base_va + vdso_gen::kOffLinuxVdsoRtSigreturn;
+    proc->linux_vdso_clock_gettime_va = base_va + vdso_gen::kOffLinuxVdsoClockGettime;
+    proc->linux_vdso_gettimeofday_va = base_va + vdso_gen::kOffLinuxVdsoGettimeofday;
+    proc->linux_vdso_time_va = base_va + vdso_gen::kOffLinuxVdsoTime;
+    proc->linux_vdso_getcpu_va = base_va + vdso_gen::kOffLinuxVdsoGetcpu;
     return true;
 }
 

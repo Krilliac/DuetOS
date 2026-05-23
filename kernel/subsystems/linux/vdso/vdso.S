@@ -1,53 +1,67 @@
 /*
  * kernel/subsystems/linux/vdso/vdso.S
  *
- * DuetOS Linux-ABI vDSO blob — v0.
+ * DuetOS Linux-ABI vDSO blob — v1.
  *
- * A single page of executable code mapped into every Linux ELF
- * process at a kernel-chosen VA. The kernel records the entry-
- * point offsets in linux_vdso.h (mirrored to vdso_offsets.h via
- * the build script) and Process::vdso_*_va after the mapping
- * lands, so the signal-delivery path can route handler returns
- * through __kernel_rt_sigreturn without dropping the signal.
+ * One executable page mapped into every Linux ELF process at a
+ * kernel-chosen VA. The build script records per-export offsets
+ * in a generated header (kOffLinuxVdso*) which spawn.cpp reads
+ * to compute absolute VAs for each entry on each spawn. Today's
+ * exports:
  *
- * Current exports (offset 0 first; reserved 0x40-aligned slots
- * for future entries):
+ *   __kernel_rt_sigreturn   — signal-handler return trampoline.
+ *                             Used by LinuxSignalCheckAndDeliver
+ *                             when the caller's sigaction omitted
+ *                             SA_RESTORER. Issues SYS_rt_sigreturn
+ *                             (nr 15). Never returns.
  *
- *   0x00 — __kernel_rt_sigreturn
- *          Issues Linux SYS_rt_sigreturn (nr 15). The kernel
- *          pops the on-stack LinuxSignalFrame and resumes the
- *          interrupted RIP. If the syscall somehow returns,
- *          ud2 makes the misbehaviour loud rather than silent.
+ *   __vdso_clock_gettime    — clock_gettime(clk_id, ts).
+ *                             RDI/RSI in, RAX out. SYS_clock_gettime
+ *                             (nr 228).
  *
- * Calling convention for __kernel_rt_sigreturn: nothing — RSP
- * already points at the LinuxSignalFrame and the kernel
- * recognises the frame by its magic word. The trampoline never
- * returns to its caller (the caller is the dispatched signal
- * handler, which expects its own `ret` to drop into the
- * restorer).
+ *   __vdso_gettimeofday     — gettimeofday(tv, tz).
+ *                             RDI/RSI in, RAX out. SYS_gettimeofday
+ *                             (nr 96).
  *
- * GAP: this is not yet a real ELF shared object. There is no
- * ELF header on the blob, no dynamic symbol table, no
- * AT_SYSINFO_EHDR hookup. Static-linked ELFs that only need a
- * sa_restorer-style trampoline (everything currently exercised
- * in the Linux subsystem) work fine: the kernel hands them the
- * absolute VA of the trampoline directly. Dynamic-linked glibc
- * binaries that scan AT_SYSINFO_EHDR for __vdso_clock_gettime
- * etc. will see nothing here — promoting this to a proper
- * shared object with a hash table is a follow-up slice. The
- * 0x40-byte reservation per export below leaves room for those
- * symbols to land without reflowing the offset table the
- * kernel records.
+ *   __vdso_time             — time(t_out).
+ *                             RDI in, RAX out (seconds since epoch).
+ *                             SYS_time (nr 201).
  *
- * NOTE: This is assembled for x86_64 Linux ABI (System V), NOT
- * the Windows x64 ABI used by the userland libs DLLs. Linux
- * SYS_rt_sigreturn = 15. Syscall number goes in RAX, the
- * `syscall` instruction transitions to ring 0.
+ *   __vdso_getcpu           — getcpu(cpu_out, node_out, ...).
+ *                             RDI/RSI/RDX in, RAX out.
+ *                             SYS_getcpu (nr 309).
+ *
+ * The __vdso_* entries are all "trap to syscall" today — same cost
+ * as a direct `syscall` from user code, just routed through the
+ * vDSO page so the export shape is correct and a future
+ * shared-memory fast-path slice can swap the body without
+ * changing the ABI.
+ *
+ * NO real ELF header / PT_LOAD / dynamic symbol table / hash
+ * table yet. Static-linked binaries that hardcode the entry VA
+ * (or get it via the kernel-recorded Process::linux_vdso_*_va
+ * fields) work. Dynamic glibc that scans AT_SYSINFO_EHDR for
+ * __vdso_* via the SysV hash table sees nothing — promoting
+ * to a real .so is the next slice.
+ *
+ * GAP: AT_SYSINFO_EHDR auxv entry + real ELF wrapper — lands
+ * with the dynamic-glibc support slice. Until then the
+ * __vdso_* exports are reachable only via direct VA recorded
+ * by the kernel (Process::linux_vdso_*_va) or by hardcoded
+ * offsets in the build-time embedded blob.
+ *
+ * Assembled for x86_64 Linux ABI (System V) — RDI/RSI/RDX/R10/
+ * R8/R9 are the integer argument registers; RAX is the syscall
+ * number; `syscall` transitions to ring 0.
  */
 
     .section .vdso.text, "ax", @progbits
 
-    /* ---------------- 0x00 ---------------- */
+    /* ---------------- __kernel_rt_sigreturn ---------------- */
+    /* Stays at offset 0 by convention (chronological — this was
+     * the v0 export). Build script records the offset anyway,
+     * so the spawn-time VA computation doesn't depend on the
+     * file ordering. */
     .globl  __kernel_rt_sigreturn
     .balign 16
 __kernel_rt_sigreturn:
@@ -55,24 +69,59 @@ __kernel_rt_sigreturn:
     syscall
     ud2                         /* unreachable on success */
 
-    .balign 64                  /* reserve slot to 0x40 */
+    /* ---------------- __vdso_clock_gettime ---------------- */
+    /* clock_gettime(clk_id, struct timespec* ts). Returns 0 on
+     * success or -errno on failure (which the syscall encodes
+     * as a negative RAX in the SysV-Linux convention; vDSO
+     * passes it through unchanged). */
+    .globl  __vdso_clock_gettime
+    .balign 16
+__vdso_clock_gettime:
+    movq    $228, %rax          /* Linux SYS_clock_gettime */
+    syscall
+    retq
 
-    /* ---------------- 0x40 ---------------- */
-    /* Reserved for __vdso_clock_gettime when it lands. Today
-     * a no-op + fallback into the syscall path. Future
-     * __vdso_* entries get 0x40-aligned slots in sequence
-     * (0x80, 0xC0, …) so the kernel's offset table stays
-     * append-only. */
+    /* ---------------- __vdso_gettimeofday ---------------- */
+    /* gettimeofday(struct timeval* tv, struct timezone* tz).
+     * Same return convention as above. */
+    .globl  __vdso_gettimeofday
+    .balign 16
+__vdso_gettimeofday:
+    movq    $96, %rax           /* Linux SYS_gettimeofday */
+    syscall
+    retq
 
-    .balign 64
+    /* ---------------- __vdso_time ---------------- */
+    /* time(time_t* t). Returns seconds since epoch in RAX; if
+     * t != NULL the kernel also writes the value through the
+     * pointer. */
+    .globl  __vdso_time
+    .balign 16
+__vdso_time:
+    movq    $201, %rax          /* Linux SYS_time */
+    syscall
+    retq
+
+    /* ---------------- __vdso_getcpu ---------------- */
+    /* getcpu(unsigned* cpu, unsigned* node, struct getcpu_cache*
+     * unused). Returns 0 on success. The third arg is ignored
+     * by real Linux (the cache field was for the v2.6 LSCALL
+     * fast-path, deprecated). */
+    .globl  __vdso_getcpu
+    .balign 16
+__vdso_getcpu:
+    movq    $309, %rax          /* Linux SYS_getcpu */
+    syscall
+    retq
+
+    .balign 16
 __duetos_vdso_end:
 
     .size   __kernel_rt_sigreturn, __duetos_vdso_end - __kernel_rt_sigreturn
 
-/* Non-executable .note section so future tooling that wants to
- * stamp a version / build-id into the blob has somewhere to put
- * it. Filtered out of the raw-binary export by the linker
- * script, but keeps the ELF intermediate properly typed. */
+/* Non-executable .note section for future build-id / version
+ * stamping. Filtered out of the raw-binary export by the linker
+ * script; keeps the intermediate ELF properly typed. */
     .section .note.duetos.vdso, "a", @note
     .long   1f - 0f             /* namesz */
     .long   0                   /* descsz */

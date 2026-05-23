@@ -120,6 +120,10 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->linux_mmap_cursor = 0;
     p->linux_vdso_base = 0;
     p->linux_vdso_rt_sigreturn_va = 0;
+    p->linux_vdso_clock_gettime_va = 0;
+    p->linux_vdso_gettimeofday_va = 0;
+    p->linux_vdso_time_va = 0;
+    p->linux_vdso_getcpu_va = 0;
     p->abi_flavor = kAbiNative; // loaders flip to kAbiLinux if appropriate
     for (u32 i = 0; i < sizeof(p->_abi_pad); ++i)
         p->_abi_pad[i] = 0;

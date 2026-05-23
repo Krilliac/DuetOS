@@ -470,14 +470,21 @@ struct Process
 
     // Linux vDSO mapping. linux_vdso_base is the user VA where
     // the kernel painted the embedded vDSO blob at spawn time
-    // (one R-X page); linux_vdso_rt_sigreturn_va is the absolute
-    // VA of __kernel_rt_sigreturn within that page. Signal
-    // delivery routes the handler retaddr through this VA when
-    // the caller's sigaction omitted SA_RESTORER, instead of
-    // dropping the signal. Both are 0 until the loader maps the
-    // blob (PE / native processes leave them 0).
+    // (one R-X page); the per-export VAs are
+    // linux_vdso_base + the kOffLinuxVdso* constant emitted by
+    // the build script. Signal delivery uses
+    // linux_vdso_rt_sigreturn_va when the caller's sigaction
+    // omitted SA_RESTORER, instead of dropping the signal. The
+    // __vdso_* clock/cpu entries are exposed to user code via
+    // direct VA today (AT_SYSINFO_EHDR auxv hookup is the
+    // dynamic-glibc support slice). All fields are 0 until the
+    // loader maps the blob (PE / native processes leave them 0).
     u64 linux_vdso_base;
     u64 linux_vdso_rt_sigreturn_va;
+    u64 linux_vdso_clock_gettime_va;
+    u64 linux_vdso_gettimeofday_va;
+    u64 linux_vdso_time_va;
+    u64 linux_vdso_getcpu_va;
 
     // ABI flavor — which kernel syscall entry path this process's
     // tasks will route through at ring-3 boundary.
