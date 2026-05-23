@@ -1089,30 +1089,60 @@ def synth_unknown_syscall_stub_patch(r: FixRecord, num: int, repo_root: Path) ->
     return _hunk_insert_lines(file_rel, lines, target_idx, insertion)
 
 
-def synth_syscall_brief(r: FixRecord, num: int) -> str:
+def synth_syscall_brief(r: FixRecord, num: int, stub_patch_planned: bool = False) -> str:
     """Generate a markdown implementation brief for an unknown syscall.
 
-    Unlike thunks-table misses, syscall semantics cannot be safely
-    repaired with a mechanical source patch. A new switch arm changes
-    the kernel ABI surface and must be implemented from the intended NT
-    or native contract, so the self-fix output stays advisory and carries
-    all journal context needed for a reviewer to write the real fix.
+    Syscall semantics are ABI work — a switch arm with a real body
+    changes the kernel/userland contract and must be designed from the
+    intended NT or native specification. This brief carries the journal
+    context the reviewer needs to start that work.
+
+    When `stub_patch_planned` is True (the synthesiser also produced an
+    additive observability arm via `synth_unknown_syscall_stub_patch`),
+    the brief points at that patch as the FIRST step — apply it to get
+    arg-aware records on the next boot, then design the real
+    implementation against the captured rdi/rsi values.
     """
-    return (
-        f"Runtime reached syscall `0x{num:x}` with no dispatcher arm. "
-        f"Do not auto-scaffold a permanent `-ENOSYS` case: that only "
-        f"turns an unknown ABI gap into a known stub. Implement the "
-        f"intended syscall contract in `{_SYSCALL_PATH}` near the main "
-        f"switch default arm that records `UnknownSyscall`.\n\n"
-        f"Journal context:\n"
-        f"- seq: `{r.seq}`\n"
-        f"- repeat: `{r.repeat}`\n"
-        f"- source_pin: `{r.source_pin}`\n"
-        f"- caller_rip: `0x{r.caller_rip:016x}`\n"
-        f"- ctx_a: `0x{r.ctx_a:016x}`\n"
-        f"- ctx_b: `0x{r.ctx_b:016x}`\n"
-        f"- hint: `{r.hint or '(none)'}`\n"
-    )
+    out: list[str] = []
+    out.append(f"Runtime reached syscall `0x{num:x}` with no dispatcher arm.")
+    if stub_patch_planned:
+        out.append("")
+        out.append(
+            f"**A companion patch (`syscall-stub-0x{num:x}.patch`) is "
+            f"included alongside this brief.** Apply it to add an "
+            f"acknowledged `case 0x{num:x}u:` arm that records "
+            f"`StubMarker:syscall:0x{num:x}` with the first two arg "
+            f"registers (`rdi`, `rsi`) captured as ctx_a/ctx_b. The arm "
+            f"returns the same `-ENOSYS` the catch-all already did — "
+            f"applying the patch is **observation-only**, not a "
+            f"semantic fix. With it landed, the next boot's record "
+            f"shows what the caller is passing, which is the missing "
+            f"context for designing the real implementation."
+        )
+        out.append("")
+        out.append(
+            "Then implement the real syscall contract by flipping the "
+            "arm's body. No further dispatch-table work is needed."
+        )
+    else:
+        out.append("")
+        out.append(
+            f"Implement the intended syscall contract in "
+            f"`{_SYSCALL_PATH}` near the main switch default arm that "
+            f"records `UnknownSyscall`. (The companion auto-patch was "
+            f"either suppressed via `--no-syscall-stub` or the "
+            f"synthesiser couldn't locate the default arm.)"
+        )
+    out.append("")
+    out.append("Journal context:")
+    out.append(f"- seq: `{r.seq}`")
+    out.append(f"- repeat: `{r.repeat}`")
+    out.append(f"- source_pin: `{r.source_pin}`")
+    out.append(f"- caller_rip: `0x{r.caller_rip:016x}`")
+    out.append(f"- ctx_a: `0x{r.ctx_a:016x}`")
+    out.append(f"- ctx_b: `0x{r.ctx_b:016x}`")
+    out.append(f"- hint: `{r.hint or '(none)'}`")
+    return "\n".join(out) + "\n"
 
 
 @dataclass
@@ -2006,11 +2036,16 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
             num = parse_syscall_pin(r.source_pin)
             if num is None:
                 continue
+            # Try the additive observability patch first so the brief
+            # can reflect whether it's coming.
+            stub_diff = None
+            if enable_syscall_stub:
+                stub_diff = synth_unknown_syscall_stub_patch(r, num, repo_root)
             actions.append(
                 Action(
                     kind="note",
                     title=f"Implement syscall #0x{num:x}{_new_tag(r)}",
-                    body=synth_syscall_brief(r, num),
+                    body=synth_syscall_brief(r, num, stub_patch_planned=stub_diff is not None),
                     filename=None,
                 )
             )
@@ -2020,20 +2055,18 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
             # arm). Same -ENOSYS return; the reviewer flips the body to
             # real semantics later. Skipped if disabled or if the
             # synthesiser couldn't locate the catch-all default arm.
-            if enable_syscall_stub:
-                stub_diff = synth_unknown_syscall_stub_patch(r, num, repo_root)
-                if stub_diff:
-                    actions.append(
-                        Action(
-                            kind="patch",
-                            title=(
-                                f"Add stub arm for syscall 0x{num:x}"
-                                f" (acknowledged; returns -ENOSYS){_new_tag(r)}"
-                            ),
-                            body=stub_diff,
-                            filename=f"syscall-stub-0x{num:x}.patch",
-                        )
+            if stub_diff:
+                actions.append(
+                    Action(
+                        kind="patch",
+                        title=(
+                            f"Add stub arm for syscall 0x{num:x}"
+                            f" (acknowledged; returns -ENOSYS){_new_tag(r)}"
+                        ),
+                        body=stub_diff,
+                        filename=f"syscall-stub-0x{num:x}.patch",
                     )
+                )
 
         elif r.detector_name in ("stub", "gap"):
             actions.append(synth_marker_hit_brief(r, resolver))
