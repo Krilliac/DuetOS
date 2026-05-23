@@ -75,6 +75,7 @@ While a boot is running:
 
 ```sh
 $ dfix list                       # tail the last 20 un-audited records
+$ dfix list --detector=cap_denial # narrow to one detector kind
 $ dfix show 42                    # one record by seq, with caller_rip symbolized
 $ dfix stats                      # counters + per-detector tally
 $ dfix mark-done 42               # filter seq=42 from default `list`
