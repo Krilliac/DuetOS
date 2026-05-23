@@ -794,6 +794,7 @@ duetos_embed_blob(generated_kernel32_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_sync.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_fs.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/kernel32_psapi.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/kernel32/seh_capture.S"
     COMMENT "Compiling + embedding kernel32.dll (split into per-domain TUs)")
 
 # 32-bit kernel32 companion — PE32 (i386) DLL, preloaded into PE32
@@ -863,6 +864,7 @@ duetos_embed_blob(generated_vcruntime140_dll.h
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/vcruntime140.c"
     EXTRA_DEPS
         "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/chkstk.S"
+        "${CMAKE_SOURCE_DIR}/userland/libs/vcruntime140/guard_icall.S"
         "${CMAKE_CURRENT_BINARY_DIR}/generated_ntdll_dll.h"
     COMMENT "Compiling + embedding vcruntime140.dll (C++ EH personality + memops; links ntdll.lib)")
 

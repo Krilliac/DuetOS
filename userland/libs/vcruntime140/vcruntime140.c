@@ -660,22 +660,13 @@ __declspec(dllexport) void _guard_check_icall(void* target)
     (void)target;
 }
 
-/* `_guard_dispatch_icall` must do `jmp rax` (the indirect target
- * the compiler placed in rax pre-call). Naked function so the
- * prologue / epilogue don't clobber the register. */
-__declspec(dllexport) __attribute__((naked)) void _guard_dispatch_icall(void)
-{
-    __asm__ volatile("jmpq *%rax");
-}
-
-/* XFG (eXtended Flow Guard) — same shape as CFG but with a
- * type-hash check. Same v0 stance: trust the call. */
+/* _guard_dispatch_icall / _guard_xfg_dispatch_icall live in
+ * guard_icall.S — both are single-instruction tail-jumps through
+ * rax. _guard_xfg_check_icall stays in C because it's a regular
+ * (non-naked) function that takes the target pointer and would
+ * eventually consult the per-image XFG bitmap (currently a no-op
+ * v0 stance). */
 __declspec(dllexport) void _guard_xfg_check_icall(void* target)
 {
     (void)target;
-}
-
-__declspec(dllexport) __attribute__((naked)) void _guard_xfg_dispatch_icall(void)
-{
-    __asm__ volatile("jmpq *%rax");
 }
