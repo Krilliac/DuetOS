@@ -19,6 +19,10 @@
 #include "diag/soft_lockup.h"
 #include "diag/hexdump.h"
 #include "diag/minidump.h"
+#include "diag/panic_wait.h"
+#include "arch/x86_64/panic_capture.h"
+
+extern "C" void duetos_arch_PanicCaptureShim();
 #include "loader/dll_loader.h"
 #include "loader/pe_exports.h"
 #include "log/klog.h"
@@ -769,6 +773,39 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     WriteLabelledVa("rsp      ", rsp);
     WriteLabelledVa("rbp      ", rbp);
 
+    // Frozen-state GPRs captured by the .S shim at the FIRST
+    // instruction of Panic / PanicWithValue, before any C++
+    // prologue mutated the caller's registers. valid==0 means
+    // we got here via a path that doesn't run the shim (e.g.
+    // a kernel-mode trap that called DumpDiagnostics directly);
+    // in that case the section is silent rather than printing
+    // garbage zeroes.
+    {
+        const auto* pf = arch::PanicFrameLast();
+        if (pf != nullptr && pf->valid != 0)
+        {
+            arch::SerialWrite("[panic] --- frozen GPRs (pre-prologue) ---\n");
+            WriteLabelled("rax      ", pf->rax);
+            WriteLabelled("rbx      ", pf->rbx);
+            WriteLabelled("rcx      ", pf->rcx);
+            WriteLabelled("rdx      ", pf->rdx);
+            WriteLabelled("rsi      ", pf->rsi);
+            WriteLabelled("rdi      ", pf->rdi);
+            WriteLabelledVa("rbp.f    ", pf->rbp);
+            WriteLabelledVa("rsp.f    ", pf->rsp);
+            WriteLabelled("r8       ", pf->r8);
+            WriteLabelled("r9       ", pf->r9);
+            WriteLabelled("r10      ", pf->r10);
+            WriteLabelled("r11      ", pf->r11);
+            WriteLabelled("r12      ", pf->r12);
+            WriteLabelled("r13      ", pf->r13);
+            WriteLabelled("r14      ", pf->r14);
+            WriteLabelled("r15      ", pf->r15);
+            WriteLabelledCode("rip.call ", pf->rip_caller);
+            WriteLabelled("rflags.f ", pf->rflags);
+        }
+    }
+
     // Control + flags registers. Each line carries the raw hex
     // (existing schema) plus a bracket-list naming the bits that
     // are set, so a reader doesn't have to decode `0x80050033` in
@@ -846,6 +883,14 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
 
 void Panic(const char* subsystem, const char* message)
 {
+    // Capture the caller's register state BEFORE anything else
+    // — no prior C++ statement, no Cli, no probe, no log. The
+    // shim writes panic_frame_raw via naked asm so the GPRs
+    // reflect the call-site state exactly. Subsequent diagnostic
+    // emission consults arch::PanicFrameLast() for the truthful
+    // GPR table.
+    duetos_arch_PanicCaptureShim();
+
     // Probe before disabling interrupts so the log line hits the
     // ring buffer with a valid timestamp. Armed-log by default —
     // `[probe] panic.enter rip=...` tells you who called Panic.
@@ -873,6 +918,8 @@ void Panic(const char* subsystem, const char* message)
         arch::SerialWrite(": ");
         arch::SerialWrite(message);
         arch::SerialWrite(" — short-circuiting\n");
+        if (duetos::diag::PanicWaitArmed())
+            duetos::diag::PanicWaitForDebugger();
         arch::Halt();
     }
     arch::PanicInProgressMark();
@@ -962,11 +1009,20 @@ void Panic(const char* subsystem, const char* message)
     {
         arch::TestExit(duetos::diag::EncodeExit(duetos::diag::BootExitCode::Panic, duetos::diag::BootPhaseCurrent()));
     }
+    // panic_wait=gdb cmdline: stop for GDB attach instead of
+    // halting silently. Smoke profiles skip this gate (they
+    // need the TestExit-driven CI fast-fail above) — the wait
+    // is for interactive / real-HW investigation only.
+    if (duetos::diag::PanicWaitArmed())
+        duetos::diag::PanicWaitForDebugger();
     arch::Halt();
 }
 
 void PanicWithValue(const char* subsystem, const char* message, u64 value)
 {
+    // Frozen-state capture — see Panic() for rationale.
+    duetos_arch_PanicCaptureShim();
+
     arch::Cli();
 
     // Recursive-panic short-circuit — see Panic() for rationale.
@@ -1043,6 +1099,12 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
     {
         arch::TestExit(duetos::diag::EncodeExit(duetos::diag::BootExitCode::Panic, duetos::diag::BootPhaseCurrent()));
     }
+    // panic_wait=gdb cmdline: stop for GDB attach instead of
+    // halting silently. Smoke profiles skip this gate (they
+    // need the TestExit-driven CI fast-fail above) — the wait
+    // is for interactive / real-HW investigation only.
+    if (duetos::diag::PanicWaitArmed())
+        duetos::diag::PanicWaitForDebugger();
     arch::Halt();
 }
 
