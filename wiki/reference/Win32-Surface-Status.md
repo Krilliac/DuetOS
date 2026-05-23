@@ -1052,10 +1052,11 @@ fresh value at load time.
 
 CFG / XFG facade (T9-03): `_guard_check_icall` /
 `_guard_xfg_check_icall` are no-op; `_guard_dispatch_icall`
-/ `_guard_xfg_dispatch_icall` are naked `jmp *%rax` so the
-indirect target the compiler placed in `rax` runs without
-guard enforcement. Bitmap enforcement is GAP — see the
-roadmap note.
+/ `_guard_xfg_dispatch_icall` live in
+`userland/libs/vcruntime140/guard_icall.S` — both are `jmpq
+*%rax` (trust-the-target). Bitmap enforcement is GAP — see
+the roadmap note. // GAP: per-image CFG/XFG bitmap walk —
+lands with the image-load-config slice.
 
 **Thunked imports (auto-generated from `kernel/subsystems/win32/thunks_table.inc`):**
 
