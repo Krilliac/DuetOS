@@ -72,6 +72,64 @@ extern "C" duetos::u8 __copy_user_to_start[];
 extern "C" duetos::u8 __copy_user_to_end[];
 extern "C" duetos::u8 __copy_user_fault_fixup[];
 
+// Linker-emitted bounds of kernel `.text` (set by the linker script).
+// Used by RetpolineWildCallback below + the in-TrapDispatch
+// g_irq_handlers validator earlier.
+extern "C" duetos::u8 _text_start[];
+extern "C" duetos::u8 _text_end[];
+
+// Called from isr_common (kernel/arch/x86_64/exceptions.S) when the
+// kernel-mode iretq target — the trap-frame's saved RIP — fell
+// outside [_text_start, _text_end). Catches the iretq-frame-RIP-
+// corruption shape: a C handler scribbled the saved RIP slot in
+// the trap frame, the unconditional iretq below would load that
+// wild value, and the CPU faults at the wild target with no
+// indirect-call site to attribute it to. The per-call validators
+// (sched/trampoline, sync/rcu DrainQueue, arch/traps IrqHandler,
+// __llvm_retpoline_r11) all stay silent for this shape because
+// the wild value never went through them. Caller is in rdi (the
+// wild RIP that iretq would have jumped to).
+extern "C" [[noreturn]] void IretqFrameWildCallback(void* target)
+{
+    using namespace duetos;
+    const u64 fn = reinterpret_cast<u64>(target);
+    KBP_PROBE_V(::duetos::debug::ProbeId::kIretqFrameWild, fn);
+    arch::SerialWrite("[arch/iretq] WILD iretq target — refusing return  cpu=");
+    arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
+    arch::SerialWrite("  rip=");
+    arch::SerialWriteHex(fn);
+    arch::SerialWrite("  text=[");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_text_start));
+    arch::SerialWrite("..");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_text_end));
+    arch::SerialWrite(")\n");
+    core::PanicWithValue("arch/iretq", "iretq frame RIP out of kernel text range", fn);
+}
+
+// Called from __llvm_retpoline_r11 (kernel/arch/x86_64/retpoline_thunks.S)
+// when the retpoline detects r11 — the indirect-call target — fell
+// outside [_text_start, _text_end). The retpoline thunk intercepts
+// every `call *%r11` shape the compiler emits under -mretpoline, so
+// this catches indirect dispatches that aren't covered by the three
+// site-specific validators (sched/trampoline, sync/rcu DrainQueue,
+// arch/traps IrqHandler). Caller is in rdi (the original r11 value).
+extern "C" [[noreturn]] void RetpolineWildCallback(void* target)
+{
+    using namespace duetos;
+    const u64 fn = reinterpret_cast<u64>(target);
+    KBP_PROBE_V(::duetos::debug::ProbeId::kRetpolineWild, fn);
+    arch::SerialWrite("[retpoline] WILD indirect call — refusing dispatch  cpu=");
+    arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
+    arch::SerialWrite("  target=");
+    arch::SerialWriteHex(fn);
+    arch::SerialWrite("  text=[");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_text_start));
+    arch::SerialWrite("..");
+    arch::SerialWriteHex(reinterpret_cast<u64>(_text_end));
+    arch::SerialWrite(")\n");
+    core::PanicWithValue("arch/retpoline", "indirect call target out of kernel text range", fn);
+}
+
 namespace duetos::arch
 {
 
@@ -527,6 +585,75 @@ void HaltOnRecursiveFault(u64 vector, u64 rip)
 
 extern "C" void TrapDispatch(TrapFrame* frame)
 {
+    // Diagnostic: snapshot the iretq-frame RIP at entry so the
+    // RAII guard below can detect a mid-handler scribble. The five
+    // dispatcher-site validators (sched/trampoline, sync/rcu,
+    // arch/traps IrqHandler, __llvm_retpoline_r11, isr_common
+    // iretq) all stay silent on the boot-tail #UD bug — meaning
+    // the wild value somehow ends up in the trap-frame's saved
+    // RIP slot without going through any indirect dispatch and
+    // without triggering the iretq gate. This guard captures the
+    // entry RIP, compares it at every exit path, and panics with
+    // the diff if a handler scribbled it.
+    struct RipIntegrityGuard
+    {
+        TrapFrame* frame;
+        const ::duetos::u64 entry_rip;
+        const ::duetos::u64 entry_r15;
+        const ::duetos::u64 entry_cs;
+        const bool kernel_mode_return;
+        RipIntegrityGuard(TrapFrame* f)
+            : frame(f), entry_rip(f->rip), entry_r15(f->r15), entry_cs(f->cs), kernel_mode_return((f->cs & 0x3) == 0)
+        {
+        }
+        ~RipIntegrityGuard()
+        {
+            // Skip the check for handlers that legitimately rewrite
+            // the iretq target: syscall (vector 0x80), execve, signal
+            // delivery, breakpoint-redirect, extable fixup. The
+            // exempt set is the vectors where TrapDispatch's call
+            // tree is allowed to mutate frame->rip.
+            const ::duetos::u64 v = frame->vector;
+            const bool exempt = (v == 0x80) || (v == 3) || (v == 1);
+            if (exempt)
+                return;
+            // Only kernel-mode returns are checked — user-mode RIPs
+            // can be anywhere in the process VA range.
+            if (!kernel_mode_return)
+                return;
+            if (frame->rip == entry_rip)
+                return;
+            // RIP changed mid-handler on a kernel-mode return path
+            // outside the legitimate-rewrite vectors. Whether the
+            // new value is in kernel text or not, this is a bug:
+            // the IRQ / fault handler tree scribbled the saved RIP
+            // slot. The canary12 capture (2026-05-22) showed
+            // entry_rip = IdleMain+0x57 (post-MWAIT in the idle
+            // loop) and exit_rip = SchedTaskTrampoline+0x17 (post
+            // `call *rbx`) — both in kernel `.text`, so the
+            // text-range gate alone misses it. Fire on any
+            // mismatch and let the panic banner name the
+            // entry/exit pair.
+            KBP_PROBE_V(::duetos::debug::ProbeId::kTrapDispatchRipScribble, frame->rip);
+            SerialWrite("[arch/traps] TRAP-FRAME RIP scribbled mid-handler  cpu=");
+            SerialWriteHex(::duetos::cpu::CurrentCpuIdOrBsp());
+            SerialWrite("  vector=");
+            SerialWriteHex(v);
+            SerialWrite("  entry_rip=");
+            SerialWriteHex(entry_rip);
+            SerialWrite("  exit_rip=");
+            SerialWriteHex(frame->rip);
+            SerialWrite("  entry_r15=");
+            SerialWriteHex(entry_r15);
+            SerialWrite("  exit_r15=");
+            SerialWriteHex(frame->r15);
+            SerialWrite("  cs=");
+            SerialWriteHex(entry_cs);
+            SerialWrite("\n");
+            ::duetos::core::PanicWithValue("arch/traps", "trap frame RIP scribbled mid-handler", frame->rip);
+        }
+    };
+    RipIntegrityGuard guard(frame);
     // Hardware IRQ path. Routes to the registered handler (if any), then
     // EOIs the LAPIC and returns to isr_common's iretq, which resumes the
     // interrupted code. No diagnostic spew per IRQ — the timer alone fires
@@ -541,6 +668,41 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             ++g_irq_counts_per_cpu[cpu_id][v];
         }
         const IrqHandler h = g_irq_handlers[v];
+        // Sanity-check `h` is in kernel .text before the indirect call.
+        // A corrupted entry (concurrent IrqInstall scribble, table-
+        // adjacent overflow, slab class collision) lands here. The
+        // pre-fix path indirect-called blindly and faulted at the wild
+        // address (#PF NX_VIOLATION on a higher-half .bss page) — the
+        // trap RIP was the wild address, not TrapDispatch, so the
+        // banner never named the IRQ subsystem. Catching here names
+        // the offender (vector, fn, table base) and halts with a real
+        // banner. Observed 2026-05-22: ~1/10 SMP=8 boots faulted at
+        // a wild rip in lockdep g_per_cpu range during an idle AP's
+        // first timer IRQ dispatch.
+        if (h != nullptr)
+        {
+            extern duetos::u8 _text_start[];
+            extern duetos::u8 _text_end[];
+            const duetos::u64 fn = reinterpret_cast<duetos::u64>(h);
+            const duetos::u64 lo = reinterpret_cast<duetos::u64>(_text_start);
+            const duetos::u64 hi = reinterpret_cast<duetos::u64>(_text_end);
+            if (fn < lo || fn >= hi)
+            {
+                KBP_PROBE_V(::duetos::debug::ProbeId::kIrqHandlerWild, fn);
+                SerialWrite("[arch/traps] WILD irq handler — refusing dispatch  cpu=");
+                SerialWriteHex(cpu_id);
+                SerialWrite("  vector=");
+                SerialWriteHex(static_cast<duetos::u64>(v));
+                SerialWrite("  fn=");
+                SerialWriteHex(fn);
+                SerialWrite("  text=[");
+                SerialWriteHex(lo);
+                SerialWrite("..");
+                SerialWriteHex(hi);
+                SerialWrite(")\n");
+                ::duetos::core::PanicWithValue("arch/traps", "irq handler out of kernel text range", fn);
+            }
+        }
         if (h != nullptr)
         {
             h();

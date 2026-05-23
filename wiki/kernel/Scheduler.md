@@ -84,6 +84,26 @@ A previously-run task is resumed via the IRQ path, which `iretq`s with
 plain `ContextSwitch`, which does not touch `RFLAGS`, so it would run
 with interrupts disabled forever.
 
+## Trampoline RSP Reservation (sub rsp, 16)
+
+The very first instruction of `SchedTaskTrampoline` after `endbr64` is
+`sub $0x10, %rsp` — a 16-byte stack reservation that keeps RSP below
+`slot_top` for the entire trampoline lifetime. Without it, a kernel-mode
+IRQ landing in the trampoline's narrow `RSP == slot_top` windows pushes a
+40-byte iretq frame whose top quad (SS = `kKernelDataSelector` = `0x10`)
+lands at `slot_top - 8`, overwriting the planted `&SchedTaskTrampoline`
+return address. The proactive RA-slot validator in `Schedule()` then
+panics the task on its next switch-in with `observed=0x10`; the pre-
+validator shape was a wild `ret` jumping to `0xffffffffe014Nfe7`
+(NX_VIOLATION inside the kstack arena). Pre-fix rate: ~60% on SMP=8
+release boots. Post-fix rate: 0/30. See
+[`Design-Decisions.md`](../reference/Design-Decisions.md) entry
+"2026-05-23 — SchedTaskTrampoline reserves 16 bytes so RSP never sits at
+slot_top" for the full rationale and rejected alternatives.
+
+`16` (not `8`) keeps RSP 16-aligned per SysV. The 8 dead bytes between
+RSP and the planted RA are never read or written by trampoline code.
+
 ## Runqueue
 
 Per-CPU singly-linked FIFO, head + tail, in two priority bands

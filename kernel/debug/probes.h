@@ -186,6 +186,75 @@ enum class ProbeId : u8
     // id in bits 8..15, action id in bits 0..7 (see env/autonomic.h).
     kAutonomicAction,
 
+    // An RCU callback queue slot dispatched a `cb.fn` that fell
+    // outside the higher-half kernel text range — a confirmed
+    // queue corruption (uninitialised slot dispatched with
+    // q.count > 0, slab class collision, lost write across CPUs).
+    // The pre-fix dispatch path went through the retpoline thunk
+    // unchecked and landed at a low-id-map / .bss byte that
+    // decoded as `#UD Invalid opcode` — trap RIP was the wild
+    // address, not the call site, so the dump banner named neither
+    // RCU nor the CPU. Caller passes the offending fn pointer as
+    // `value`; ArmedLog by default so a clean boot stays quiet and
+    // an attached GDB can `b duetos::debug::ProbeFire` to break at
+    // the exact `DrainQueue` frame the corruption surfaced.
+    kRcuWildCallback,
+
+    // SchedTaskTrampoline's `call *%rbx` was about to dispatch a
+    // planted entry function that fell outside kernel `.text`. A
+    // corrupted plant (concurrent SchedCreate scribble, slot reuse
+    // without re-plant, slab class collision) lands here. The
+    // pre-fix path indirect-called blindly and faulted at the wild
+    // address, naming neither the trampoline nor the offending
+    // task. Caller passes the offending entry-function pointer as
+    // `value`; ArmedLog so a clean boot stays quiet and an
+    // attached GDB can `b duetos::debug::ProbeFire` to break at
+    // SchedTaskTrampolineValidateEntry's frame.
+    kSchedTrampolineWildEntry,
+
+    // TrapDispatch was about to indirect-call a `g_irq_handlers[v]`
+    // entry that fell outside kernel `.text`. A corrupted slot
+    // (concurrent IrqInstall scribble, table-adjacent overflow,
+    // slab class collision) lands here. The pre-fix path
+    // indirect-called blindly and faulted at the wild address
+    // (#PF NX_VIOLATION on a higher-half .bss page) — the trap RIP
+    // was the wild address, not TrapDispatch, so the banner never
+    // named the IRQ subsystem. Caller passes the offending fn
+    // pointer as `value`; ArmedLog so a clean boot stays quiet and
+    // an attached GDB can `b duetos::debug::ProbeFire` to break at
+    // TrapDispatch's frame with the corrupt vector + handler in
+    // hand.
+    kIrqHandlerWild,
+
+    // The retpoline thunk __llvm_retpoline_r11 (compiler emits this
+    // for every `call *%r11` shape under -mretpoline) detected r11
+    // — the indirect-call target — out of kernel text. Catches every
+    // indirect dispatch the per-site validators (sched/trampoline,
+    // sync/rcu, arch/traps IrqHandler) didn't already cover. Caller
+    // passes the wild target as `value`. ArmedLog: clean boot stays
+    // quiet; a regression leaves one sentinel line + the validator
+    // halt frame for GDB attach via ProbeFire.
+    kRetpolineWild,
+
+    // isr_common detected the iretq target — the trap-frame's saved
+    // RIP — out of kernel `.text` on a kernel-mode return. Catches
+    // the trap-frame-RIP-corruption shape: a C handler scribbled
+    // the saved RIP slot in the trap frame, the unconditional iretq
+    // would have loaded that wild value, and the CPU would fault
+    // at the wild target with no indirect-call site to attribute
+    // it to. ArmedLog; caller passes the wild iretq target.
+    kIretqFrameWild,
+
+    // TrapDispatch's RAII RipIntegrityGuard detected that the
+    // trap-frame's saved RIP was mutated mid-handler from a
+    // kernel-mode value to something outside [_text_start,
+    // _text_end). Excludes the legitimate-rewrite vectors
+    // (syscall=0x80, #BP=3, #DB=1). Caller passes the offending
+    // exit-rip as `value`. ArmedLog; pairs with a probe-fire
+    // breakpoint to identify the C handler that scribbled
+    // the trap frame.
+    kTrapDispatchRipScribble,
+
     kCount, // sentinel
 };
 

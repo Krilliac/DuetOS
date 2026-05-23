@@ -1497,6 +1497,61 @@ extern "C" [[noreturn]] void SchedExitC();
 
 } // namespace
 
+// Linker-emitted bounds of the kernel `.text` section.
+// SchedTaskTrampolineValidateEntry compares against these to catch a
+// corrupted entry-function plant before the trampoline indirect-calls
+// it. Declared file-scope C-linkage so the validator below can refer
+// to them without re-importing through the anonymous namespace.
+extern "C" duetos::u8 _text_start[];
+extern "C" duetos::u8 _text_end[];
+
+// Called from SchedTaskTrampoline (kernel/sched/context_switch.S) on
+// the fresh-task first-run path, immediately before `call rbx` would
+// dispatch the planted entry function. The caller passes rbx as `entry`
+// — if it's not inside [_text_start, _text_end) the plant was
+// corrupted (concurrent SchedCreate scribble, slot reuse without
+// re-plant, slab class collision) and the impending indirect call
+// would land at a wild address. The trap path can't attribute that
+// fault back to the trampoline because the wild RIP is the only
+// thing the iretq frame carries. Catching here names the offender
+// (CPU, task ptr, planted entry, current rbp) and halts with a real
+// banner. Observed 2026-05-22: ~1/10 SMP=8 boots hit a fresh AP
+// idle's first dispatch with rbx pointing at low-id-map (0x101e) or
+// .bss (0xffffffff8132axxx) on the panicking CPU.
+extern "C" void SchedTaskTrampolineValidateEntry(void* entry)
+{
+    using namespace duetos;
+    const u64 fn = reinterpret_cast<u64>(entry);
+    const u64 lo = reinterpret_cast<u64>(_text_start);
+    const u64 hi = reinterpret_cast<u64>(_text_end);
+    if (fn >= lo && fn < hi)
+        return;
+    KBP_PROBE_V(::duetos::debug::ProbeId::kSchedTrampolineWildEntry, fn);
+    arch::SerialWrite("[sched/trampoline] WILD entry fn — refusing dispatch  cpu=");
+    arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
+    arch::SerialWrite("  task=");
+    {
+        sched::Task* self = sched::Current();
+        arch::SerialWriteHex(reinterpret_cast<u64>(self));
+        if (self != nullptr)
+        {
+            arch::SerialWrite("  id=");
+            arch::SerialWriteHex(self->id);
+            arch::SerialWrite("  name=\"");
+            arch::SerialWrite(self->name != nullptr ? self->name : "<null>");
+            arch::SerialWrite("\"");
+        }
+    }
+    arch::SerialWrite("  entry=");
+    arch::SerialWriteHex(fn);
+    arch::SerialWrite("  text=[");
+    arch::SerialWriteHex(lo);
+    arch::SerialWrite("..");
+    arch::SerialWriteHex(hi);
+    arch::SerialWrite(")\n");
+    core::PanicWithValue("sched/trampoline", "planted entry function out of kernel text range", fn);
+}
+
 // Lock-pass drain. Called from two places:
 //   1. Schedule(), immediately after ContextSwitch returns (we're on
 //      the resumed task's stack).
@@ -2303,6 +2358,62 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
     // (g_sched_lock, acquired by this Schedule()) rides along and
     // is balanced by the release in SchedFinishTaskSwitch.
     prev->lockdep_held_depth = ::duetos::sync::LockdepHeldSnapshot(prev->lockdep_held, ::duetos::sync::kLockdepHeldMax);
+
+    // Trampoline-RA slot integrity check. SchedCreate plants
+    // `&SchedTaskTrampoline` at the highest 8 bytes of every fresh
+    // task's stack (slot_top - 8 = stack_base + 0xfff8 within the
+    // 64 KiB usable region of the 68 KiB slot). For a KERNEL-ONLY
+    // task, that slot must hold &SchedTaskTrampoline for the
+    // task's entire lifetime. The trampoline asm reserves 16 bytes
+    // at entry (`sub rsp, 16`) so RSP never sits at slot_top while
+    // IRQs are enabled — every IRQ frame's SS push therefore lands
+    // at slot_top - 24, never at slot_top - 8. The planted RA is
+    // preserved across the whole trampoline.
+    //
+    // (Ring-3 tasks legitimately have it overwritten by syscall
+    // entry pushes — RSP0 = slot_top, the saved-SS slot at
+    // slot_top-8 lands exactly on the planted RA slot. False
+    // positive: 0x33 (= user SS) is what we'd see, observed in
+    // the smoke test that prompted this scope-narrowing.)
+    //
+    // The canary13 wild-RIP shape (rip inside the task's own
+    // kstack at offset 0x10fe7) was the same family of bug: a
+    // hardware IRQ-frame SS push (= kKernelDataSelector = 0x10)
+    // scribbled the planted RA when an IRQ fired with RSP=slot_top
+    // inside the trampoline. Restricting to `next->as == nullptr`
+    // keeps the check on the right suspects while shedding the
+    // syscall-entry false positives.
+    //
+    // Validate the slot on every switch-in: if the current value
+    // isn't &SchedTaskTrampoline, the trampoline's RSP-protection
+    // regressed or something else wrote to the slot.
+    if (next->stack_base != nullptr && next->stack_size == kKernelStackBytes && next->as == nullptr)
+    {
+        const u64 slot_top = reinterpret_cast<u64>(next->stack_base) + kKernelStackBytes;
+        u64* trampoline_ra_slot = reinterpret_cast<u64*>(slot_top - 8);
+        const u64 observed = *trampoline_ra_slot;
+        const u64 tramp_base = reinterpret_cast<u64>(&SchedTaskTrampoline);
+        if (observed != tramp_base)
+        {
+            arch::SerialWrite("[sched] TRAMPOLINE RA SLOT scribbled  cpu=");
+            arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
+            arch::SerialWrite("  next_task=");
+            arch::SerialWriteHex(reinterpret_cast<u64>(next));
+            arch::SerialWrite("  id=");
+            arch::SerialWriteHex(next->id);
+            arch::SerialWrite("  name=\"");
+            arch::SerialWrite(next->name ? next->name : "<null>");
+            arch::SerialWrite("\"  slot=");
+            arch::SerialWriteHex(reinterpret_cast<u64>(trampoline_ra_slot));
+            arch::SerialWrite("  tramp_base=");
+            arch::SerialWriteHex(tramp_base);
+            arch::SerialWrite("  observed=");
+            arch::SerialWriteHex(observed);
+            arch::SerialWrite("\n");
+            core::PanicWithValue("sched", "trampoline RA slot scribbled — wild RIP precursor", observed);
+        }
+    }
+
     ContextSwitch(&prev->rsp, next->rsp);
     // When we return here, we're executing on a DIFFERENT task's
     // stack — whichever task got switched in to run us. The local

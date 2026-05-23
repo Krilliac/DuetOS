@@ -4,6 +4,7 @@
 #include "mm/paging.h"
 
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/smp.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "sync/spinlock.h"
@@ -129,6 +130,33 @@ void TearDownStackPages(u32 slot_index)
         FreeFrame(phys);
         g_slot_frames[slot_index][i] = kNullFrame;
     }
+    // Cross-CPU TLB shootdown. UnmapPage above invalidates only the
+    // CPU running this code; peer CPUs that ran the previous owner
+    // of this slot still have TLB entries pointing at the freed
+    // physical frames. Without this broadcast, the bug shape was:
+    //
+    //   1. Task X runs on AP7, populates AP7's TLB for slot N's VAs.
+    //   2. Task X exits; reaper on BSP calls FreeKernelStack. BSP's
+    //      TLB is invalidated for slot N; AP7's TLB stays stale.
+    //   3. SchedCreate allocates slot N to a NEW task and plants
+    //      `&SchedTaskTrampoline` at slot_top - 8 (via BSP's fresh
+    //      TLB → new physical page).
+    //   4. Scheduler dispatches the new task on AP7. AP7's
+    //      ContextSwitch reads slot N's VAs through stale TLB → old
+    //      physical page → garbage (the OLD task's leftover data).
+    //   5. The pop sequence loads garbage into r15..rbx, ret jumps
+    //      to whatever value was at the trampoline-RA slot of the
+    //      OLD task's stack (often a syscall-entry's SS=0x33 push
+    //      for ring-3 tasks, or trampoline tail addrs for kernel-
+    //      only tasks).
+    //   6. CPU lands at the wild value → #UD / #PF NX_VIOLATION /
+    //      self-deadlock — the canary13 boot-tail wild-RIP shape
+    //      with all six in-tree validators silent.
+    //
+    // The kstack-arena VAs are kernel-owned (PML4 high half), so
+    // `as=nullptr` does a full broadcast — every online peer's TLB
+    // gets the targeted slot invalidated.
+    arch::SmpTlbShootdownRange(nullptr, base, kKernelStackPages * kPageSize);
 }
 
 // Pop a slot index from the freelist. Caller holds g_kstack_lock.

@@ -336,7 +336,52 @@ isr_common:
     jz      2f
     swapgs
 2:
+    /* Iretq-frame RIP validator (kernel-mode return only). For a
+     * ring-0 → ring-0 return, the popped RIP must be inside kernel
+     * `.text` or the CPU will execute random .bss / .data bytes —
+     * what we caught as `#PF NX_VIOLATION at rip=0xffffffff8132axxx`
+     * in the lockdep g_per_cpu region during boot-tail SMP=8 sweeps.
+     * The per-call validators (sched/trampoline, sync/rcu DrainQueue,
+     * arch/traps IrqHandler, __llvm_retpoline_r11) all stay silent
+     * because the wild value never went through them — the trap-
+     * frame's saved RIP was scribbled while the C handler was
+     * running and the unconditional iretq below loaded it. Catching
+     * here names the offender (current trap-frame snapshot, rip)
+     * and halts before the silent control transfer.
+     *
+     * Ring-3 returns are skipped: a user-mode RIP is anywhere in
+     * the process VA range. The kernel doesn't bound those.
+     *
+     * rax + rcx are clobbered by the cmp, but iretq pops a fresh
+     * register file from [rsp..rsp+24] (or +40 cross-ring); the
+     * GPRs we touch here aren't part of that frame.
+     */
+    test    qword ptr [rsp + 8], 3
+    jnz     3f                  /* user-mode return — skip the gate */
+    push    rax
+    push    rcx
+    movabs  rax, offset _text_start
+    movabs  rcx, offset _text_end
+    cmp     qword ptr [rsp + 16], rax  /* [rsp+0]/+8 are our pushes; iretq RIP at +16 now */
+    jb      .Liretq_wild
+    cmp     qword ptr [rsp + 16], rcx
+    jae     .Liretq_wild
+    pop     rcx
+    pop     rax
+3:
     iretq
+
+.Liretq_wild:
+    /* Pass the wild RIP (the iretq target) to a C helper for the
+     * panic banner. The helper does NOT return. Restore the pushed
+     * rax/rcx so the helper sees a clean stack — but rdi/rsi (the
+     * SysV arg regs) need the wild RIP; load before restoring. */
+    mov     rdi, qword ptr [rsp + 16]
+    pop     rcx
+    pop     rax
+    call    IretqFrameWildCallback
+    cli
+    hlt
 
 
 /* -------------------------------------------------------------------------

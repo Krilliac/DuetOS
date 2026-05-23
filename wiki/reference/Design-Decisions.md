@@ -9828,3 +9828,184 @@ fail loud rather than rely on `wrmsr` reserved-bit silence.
 **Related roadmap track(s):** none directly (SMP bring-up is
 considered shipped); the residual ICR race is a candidate for
 a new "SMP-AP scheduler residual flakes" roadmap entry.
+
+## 2026-05-22 — Panic dump stack scans must stop at the kstack-arena guard page
+
+**Decision:** `kernel/core/panic.cpp::PlausibleStackPointer`
+(and its mirror in `kernel/diag/bsod.cpp`) reject any address
+that falls inside a kernel-stack-arena guard page (via
+`mm::IsKernelStackGuardFault`). Every dump-side stack scan
+(`DumpStack`, `DumpReturnAddressPointers`, `DumpBacktrace`,
+`DrawStackTop`, `DrawBacktrace`) is gated by this predicate, so
+the bound is enforced once per process rather than per loop.
+
+**Why:** when the panicking task's `rsp` sat near the top of
+its 64 KiB stack slot, `DumpReturnAddressPointers`'s 0x80-quad
+forward scan would walk past the slot top and read into the
+**next** slot's deliberately-unmapped guard page on iteration
+`N = (slot_top - rsp) / 8`. That read #PF'd; the trap
+dispatcher recognised the address via `IsKernelStackGuardFault`
+and called `Panic("sched/kstack", "guard-page hit — kernel
+stack overflow")` — which hit the recursive-panic short-circuit
+in `Panic()` because the original panic had already set
+`PanicInProgress`. Net effect: the original panic banner
+truncated mid-dump (`[panic] --- diagnostics ---` started but
+the BSOD, minidump, and peer-CPU snapshots never streamed) and
+the post-mortem only had the one-line recursive-panic marker.
+
+Observed shape pre-fix in 2026-05-22 SMP=8 release loop (15
+boots): 2/15 ended with
+`[recursive-panic] sched/kstack: guard-page hit — kernel stack
+overflow value=0xffffffffe018N000` truncating an underlying
+`#UD` on a fresh AP idle task. Same root for the user-reported
+`[recursive-panic] security/stack: stack canary corrupted —
+short-circuiting` shape (compiler-emitted `__stack_chk_fail`
+firing because the dump path's deep frames blew their own
+prologue stash before reaching the guard page).
+
+**Rejected alternatives:**
+
+- *Bound each scan loop manually (per-call-site).*
+  `DumpStack` + `DumpReturnAddressPointers` + the two BSOD
+  mirrors all walk forward; bound-them-each meant four diffs +
+  four chances to forget. Gating at the predicate fans out for
+  free and catches future scan helpers that route through the
+  same check.
+- *Pre-compute `slot_top` from `Current()->stack_base +
+  stack_size` and clamp the loop.* Wrong for the boot task
+  (stack from `boot.S`, not in the arena) and for AP bootstrap
+  stacks (`KMalloc`-allocated). The `IsKernelStackGuardFault`
+  check naturally excludes both (returns `false` outside the
+  arena VA range).
+- *Page-bound the scan (`hexdump.cpp` shape — "stay in the
+  starting page").* Already shipped for `hexdump.cpp` earlier
+  this session, but tighter than necessary — `DumpStack`
+  legitimately wants to scan a few pages of stack when the
+  task's locals span multiple frames. Slot-bounding (one full
+  64 KiB) is the right granularity for dump readers without
+  cutting into legitimate scans.
+
+**Verified:** post-fix 15-boot SMP=8 release loop showed 0/15
+recursive-panic short-circuits (down from 2/15 baseline) AND
+1/15 emitted the full original `#UD` panic banner (with
+`probe trap.kernel_ud` armed, peer-CPU snapshots, held-lock
+table, log-ring tail, dump end marker) instead of being
+truncated. The underlying `#UD` on `rip=0x101e` is unchanged —
+it's a separate latent issue now visible enough to triage in a
+follow-up slice (Roadmap: "Boot-tail #UD at RIP=0x101e on a
+fresh AP idle task").
+
+**Revisit when:** the kernel-stack arena layout changes
+(stride, guard-page count, or arena base move), since
+`IsKernelStackGuardFault`'s implementation closes that contract
+in `mm/kstack.h`. The dump-side predicate just routes through it.
+
+**Related roadmap track(s):** "Boot-tail #UD at RIP=0x101e on
+a fresh AP idle task — intermittent" carries the residual
+investigation now that the panic banner streams cleanly.
+
+## 2026-05-23 — SchedTaskTrampoline reserves 16 bytes so RSP never sits at slot_top
+
+**Decision:** `kernel/sched/context_switch.S::SchedTaskTrampoline`
+emits `sub $0x10, %rsp` as its first instruction after `endbr64`
+and keeps RSP at `slot_top - 16` (or deeper) for the rest of the
+trampoline's lifetime. The planted `&SchedTaskTrampoline` at
+`slot_top - 8` is therefore preserved across every IRQ that
+fires while the trampoline is running. The validator in
+`Schedule()` (kernel/sched/sched.cpp:2386) is tightened to
+accept ONLY `&SchedTaskTrampoline` at that slot — the
+`+0x17` / `+0x1c` (return-from-`call rbx` / `call SchedExitC`)
+acceptances are removed because those return addresses now land
+at `slot_top - 24`, not `slot_top - 8`.
+
+**Why:** x86_64 hardware unconditionally pushes a 40-byte iretq
+frame on every interrupt taken from kernel mode — SS, RSP,
+RFLAGS, CS, RIP, in that order, top-to-bottom. The TOP quad
+(SS = `kKernelDataSelector` = `0x10`) lands at `<RSP at time of
+IRQ> - 8`. If an IRQ fires while RSP = slot_top inside the
+trampoline (the window between ContextSwitch's `ret` and the
+trampoline's first `call`, and again between every internal
+`ret` and the next `call`), the SS push overwrites the planted
+RA with `0x10`. After iretq, RSP returns to slot_top but the
+bytes at slot_top-8 keep the `0x10` value. The next push at
+slot_top-8 (inside the next `call`) overwrites it back to a
+valid return-address shape; but if the task is preempted in
+the meantime, its saved-state slot_top-8 retains `0x10`, and
+the next switch-back-in either (a) trips the proactive
+validator (observed shape, ~60% on SMP=8 release boots) or
+(b) eventually pops `0x10` via some `ret` and faults wild
+(observed shape pre-2026-05-22, before the validator landed —
+`rip=0xffffffffe014Nfe7` NX_VIOLATION inside the kstack arena).
+
+The `sub $0x10, %rsp` shifts the trampoline's RSP one full
+16-byte ABI alignment frame below slot_top for the entire
+trampoline lifetime. IRQ frames now land at `slot_top - 24`
+and below, never at `slot_top - 8`. The planted RA is intact
+across every preemption-and-resume cycle, the validator
+goes silent, and the wild-RIP shape stops reproducing.
+
+`16` (not `8`) keeps RSP 16-aligned per SysV — calls expect
+`(RSP+8) mod 16 == 0` on entry. With slot_top 16-aligned,
+slot_top - 16 is also 16-aligned. The 8 dead bytes between
+RSP and the planted RA are never read or written by trampoline
+code.
+
+**Rejected alternatives:**
+
+- *Move `sti` to immediately before `call rbx` and rely on the
+  one-instruction sti-shadow to protect that single push.*
+  Covers only one of three vulnerable windows (between the
+  Validator's `ret` and `call rbx`). The other two — between
+  ContextSwitch's `ret` and the first trampoline `call`, and
+  between the entry function's `ret` (if it returns) and
+  `call SchedExitC` — still hit the SS-scribble. Two-phase
+  cli/sti gymnastics would patch them individually, but at the
+  cost of a fragile audit surface every time the trampoline
+  gains an instruction.
+- *Plant the trampoline RA at slot_top - 16 instead of
+  slot_top - 8.* Would require an extra padding push in
+  `SchedCreate`'s primer and a 7-quad pop in ContextSwitch
+  (currently 6); doesn't generalise to other situations where
+  RSP must not equal slot_top (e.g. a future ring-0-only
+  trampoline variant); and the validator would still have to
+  watch wherever the new "topmost legitimate quad" lives.
+- *Memset the stack to zero in `AllocateKernelStack` (defensive
+  hygiene against stale frame content).* Ruled out by
+  experiment 2026-05-23: a 30-boot sweep with the full-stack
+  memset still showed ~60% scribble rate, identical to the
+  pre-fix baseline. The 0x10 was being WRITTEN to slot_top-8
+  by an active hardware push, not leaked from a previous
+  use of the physical frame.
+- *Broadcast an IPI to clear slot_top-8 after the trampoline's
+  first call.* Catches the bug AFTER it has already happened
+  (the proactive validator already does so without the IPI
+  cost); doesn't prevent the wild-RIP shape from manifesting
+  in the window between the SS push and the next push.
+- *Add a kernel-side hardware watchpoint on the planted RA
+  slot.* `kernel/debug/watch.h` exists but per-task DR state
+  doesn't broadcast across CPUs (and the SS push originates
+  from the IRQ hardware path, before any C code that would
+  consult DR0..DR3 runs). Only useful as a regression
+  detector, not a fix.
+
+**Verified:** post-fix 30-boot SMP=8 release sweep (via
+`tools/test/trampoline-scribble-sweep.sh`) shows 0/30 scribble
+fires (down from 3/5 = 60% pre-fix baseline on the same
+sweep harness, same kernel modulo the trampoline patch and
+the validator tightening). Boot-tail #UD shape last observed
+pre-fix is now structurally impossible — the SS push that fed
+it has nowhere damaging to land.
+
+**Revisit when:** the trampoline gains a new `call` site that
+moves RSP back to slot_top transiently (any `add rsp, 16` /
+`pop r…` that walks the reservation back up); when the
+kernel-data selector value moves out of GDT slot 2 (= 0x10)
+and into a value that happens to be a valid kernel text RIP
+shape; or when DuetOS adopts a CPU architecture whose IRQ frame
+ordering differs from x86_64's "top quad = saved SS."
+
+**Related roadmap track(s):** "Boot-tail #UD at RIP=0x101e on
+a fresh AP idle task — intermittent" — closes the underlying
+shape that the 6 indirect-control-flow validators kept silent
+on. Validator suite stays in place as regression armour for
+unrelated wild-target dispatch shapes.

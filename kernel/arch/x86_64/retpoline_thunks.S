@@ -68,5 +68,70 @@ RETPOLINE_THUNK r13
 RETPOLINE_THUNK r14
 RETPOLINE_THUNK r15
 
+/*
+ * __llvm_retpoline_r11 — diagnostic override for clang's auto-emitted
+ * retpoline thunk. The compiler emits `call __llvm_retpoline_r11` for
+ * every `call *%r11` shape (which, post -mretpoline, is almost every
+ * indirect call in the kernel: function-pointer fields, vtables,
+ * lambda captures, retpoline-mediated tail-calls). By providing a
+ * strong definition here we intercept ALL such dispatches and
+ * validate the target before transferring control.
+ *
+ * Validates r11 ∈ [_text_start, _text_end). On a wild value, raw-
+ * SerialWrite a `[retpoline] WILD ...` line + tail-call into the C
+ * panic helper RetpolineWildCallback. On a clean value, fall through
+ * to the standard retpoline body (mirror of __x86_indirect_thunk_r11
+ * above) so the indirect call retains its Spectre v2 mitigation.
+ *
+ * Observed 2026-05-22: ~1/10 SMP=8 boots hit a fresh AP idle's first
+ * IRQ-handler dispatch with r11 = lockdep/rcu g_per_cpu .bss address
+ * (NX page → #PF NX_VIOLATION) — without this gate the panic banner
+ * named the wild RIP, not the calling site or the corrupt loader.
+ * Targeted, ArmedLog-style: a clean boot stays quiet, a regression
+ * emits ONE sentinel line + halts cleanly.
+ */
+.global __llvm_retpoline_r11
+.type __llvm_retpoline_r11, @function
+.align 16
+__llvm_retpoline_r11:
+    endbr64
+    /* Range-check r11 against [_text_start, _text_end). lo and hi
+     * are loaded with the absolute symbol addresses; lld resolves
+     * them at link time. We use scratch reg rax + rcx (both
+     * caller-saved by SysV — clobbered by the impending indirect
+     * call anyway). */
+    push    rax
+    push    rcx
+    movabs  rax, offset _text_start
+    movabs  rcx, offset _text_end
+    cmp     r11, rax
+    jb      .Lretpoline_wild
+    cmp     r11, rcx
+    jae     .Lretpoline_wild
+    pop     rcx
+    pop     rax
+    /* Standard retpoline body — speculation trap + safe ret. */
+    call    .Lretpoline_launch_r11
+.Lretpoline_capture_r11:
+    pause
+    lfence
+    jmp     .Lretpoline_capture_r11
+.Lretpoline_launch_r11:
+    mov     [rsp], r11
+    ret
+.Lretpoline_wild:
+    /* Restore stack from the cmp pushes so RetpolineWildCallback
+     * sees a stack pointer matching the original indirect-call
+     * site's frame. rax/rcx values don't matter — they're caller-
+     * saved and the callee never returns anyway. */
+    pop     rcx
+    pop     rax
+    mov     rdi, r11
+    call    RetpolineWildCallback
+    /* Belt-and-braces — RetpolineWildCallback is [[noreturn]]. */
+    cli
+    hlt
+    .size __llvm_retpoline_r11, . - __llvm_retpoline_r11
+
 /* NX stack — silence lld's PT_GNU_STACK warning. */
 .section .note.GNU-stack, "", @progbits
