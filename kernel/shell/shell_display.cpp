@@ -25,6 +25,9 @@
 #include "drivers/audio/hda_jack_inventory.h"
 #include "drivers/mei/mei.h"
 #include "drivers/npu/npu.h"
+#include "drivers/psp/psp.h"
+#include "net/firewall.h"
+#include "security/me_psp_guard.h"
 #include "env/autonomic.h"
 #include "drivers/gpu/bochs_vbe.h"
 #include "drivers/gpu/cea861.h"
@@ -1030,6 +1033,78 @@ void CmdMei()
         ConsoleWriteln("");
     }
     ConsoleWriteln("  (HECI bus protocol not yet implemented — driver is probe-only)");
+}
+
+void CmdMePsp()
+{
+    namespace sec = duetos::security;
+    namespace fw = duetos::net::firewall;
+
+    ConsoleWriteln("ME / PSP guard:");
+
+    const u32 fenced = sec::MePspGuardCount();
+    ConsoleWrite("  fenced devices : ");
+    WriteU64Dec(fenced);
+    ConsoleWriteln("");
+
+    for (u32 i = 0; i < fenced; ++i)
+    {
+        const auto& d = sec::MePspGuardDevice(i);
+        ConsoleWrite("    [");
+        WriteU64Dec(i);
+        ConsoleWrite("] ");
+        ConsoleWrite(sec::CoProcessorTag(d.kind));
+        ConsoleWrite(" vendor=");
+        WriteU64Hex(d.vendor_id, 4);
+        ConsoleWrite(" device=");
+        WriteU64Hex(d.device_id, 4);
+        ConsoleWrite(" bdf=");
+        WriteU64Hex(d.bus, 2);
+        ConsoleWrite(":");
+        WriteU64Hex(d.device, 2);
+        ConsoleWrite(".");
+        WriteU64Hex(d.function, 1);
+        ConsoleWrite(" mmio=");
+        WriteU64Hex(d.mmio_phys, 8);
+        ConsoleWrite("+");
+        WriteU64Hex(d.mmio_size, 4);
+        ConsoleWriteln("");
+    }
+    if (fenced == 0)
+    {
+        ConsoleWriteln("    (no Intel ME or AMD PSP host interface detected)");
+    }
+
+    ConsoleWrite("  MapMmio refused: ");
+    WriteU64Dec(sec::MePspGuardRefusalCount());
+    ConsoleWriteln(" calls");
+
+    // Count the AMT/IPMI firewall rules currently in the table —
+    // a quick way to confirm the activation step actually
+    // installed them.
+    fw::Rule snap[fw::kFwMaxRules];
+    const u32 nrules = fw::FwSnapshot(snap, fw::kFwMaxRules);
+    u32 amt_rules = 0;
+    u64 amt_hits = 0;
+    for (u32 i = 0; i < nrules; ++i)
+    {
+        if (!snap[i].active || snap[i].action != fw::Action::Deny)
+            continue;
+        const u16 lo = snap[i].dst_port.lo;
+        const bool is_amt = (lo == 16992 || lo == 16993 || lo == 16994 || lo == 16995 || lo == 623 || lo == 664);
+        if (!is_amt)
+            continue;
+        ++amt_rules;
+        amt_hits += snap[i].hits;
+    }
+    ConsoleWrite("  AMT firewall rules: ");
+    WriteU64Dec(amt_rules);
+    ConsoleWrite(" active (");
+    WriteU64Dec(amt_hits);
+    ConsoleWriteln(" lifetime hits)");
+
+    ConsoleWriteln("  IOMMU DMA fencing: NOT YET ACTIVE (waiting for VT-d / AMD-Vi)");
+    ConsoleWriteln("  (see wiki/security/ME-PSP-Mitigation.md)");
 }
 
 void CmdNpu()

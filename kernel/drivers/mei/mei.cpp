@@ -5,6 +5,7 @@
 #include "drivers/pci/pci.h"
 #include "log/klog.h"
 #include "mm/paging.h"
+#include "security/me_psp_guard.h"
 
 namespace duetos::drivers::mei
 {
@@ -152,6 +153,40 @@ void MeiInit()
         arch::SerialWrite(" mmio_size=");
         arch::SerialWriteHex(info.mmio_size);
         arch::SerialWrite("\n");
+
+        // Hand the BAR + BDF to the central ME/PSP fence. From
+        // this point on, any further `MapMmio` of this physical
+        // range — from any driver, subsystem, or diagnostic
+        // path — is refused. The probe-time map above succeeded
+        // because the guard hadn't been told yet; that single
+        // mapping is the only kernel-side window into this
+        // device's register file.
+        duetos::security::FencedDevice fenced{};
+        switch (info.role)
+        {
+        case MeiRole::Gsc:
+            fenced.kind = duetos::security::CoProcessor::IntelMeGsc;
+            break;
+        case MeiRole::Txe:
+            fenced.kind = duetos::security::CoProcessor::IntelMeTxe;
+            break;
+        case MeiRole::Sps:
+            fenced.kind = duetos::security::CoProcessor::IntelMeSps;
+            break;
+        case MeiRole::Csme:
+        case MeiRole::Unknown:
+        default:
+            fenced.kind = duetos::security::CoProcessor::IntelMeCsme;
+            break;
+        }
+        fenced.vendor_id = info.vendor_id;
+        fenced.device_id = info.device_id;
+        fenced.bus = info.bus;
+        fenced.device = info.device;
+        fenced.function = info.function;
+        fenced.mmio_phys = info.mmio_phys;
+        fenced.mmio_size = info.mmio_size;
+        duetos::security::MePspGuardRegister(fenced);
 
         g_devices[g_count++] = info;
     }

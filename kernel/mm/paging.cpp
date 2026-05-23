@@ -43,6 +43,7 @@
 #include "diag/diag_decode.h"
 #include "log/klog.h"
 #include "core/panic.h"
+#include "security/me_psp_guard.h"
 #include "util/saturating.h"
 
 namespace duetos::mm
@@ -863,6 +864,24 @@ void* MapMmio(PhysAddr phys, u64 bytes)
     // arena mappings). All current callers pass fixed driver sizes.
     if (bytes > kMmioArenaBytes)
     {
+        return nullptr;
+    }
+    // Intel ME / AMD PSP MMIO fence. The MEI and PSP drivers each
+    // register their own BAR with the guard once, immediately
+    // after their own (successful) probe-time mapping. Every
+    // later mapping attempt at the same physical range — by any
+    // driver, subsystem, or diagnostic path — is refused. The
+    // refusal is logged loudly because attempted re-mapping of
+    // a coprocessor host interface is by definition a security-
+    // relevant event.
+    if (::duetos::security::MePspGuardIsForbiddenMmio(phys, bytes))
+    {
+        arch::SerialWrite("[me-psp] WARN MapMmio refused phys=");
+        arch::SerialWriteHex(phys);
+        arch::SerialWrite(" bytes=");
+        arch::SerialWriteHex(bytes);
+        arch::SerialWrite("\n");
+        KLOG_WARN("security/me-psp", "MapMmio refused — caller attempted to remap fenced coprocessor MMIO");
         return nullptr;
     }
     const u64 page_offset = phys & kPageMask;

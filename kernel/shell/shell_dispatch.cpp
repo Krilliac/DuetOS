@@ -1428,6 +1428,11 @@ void Dispatch(char* line)
         CmdMei();
         return;
     }
+    if (StrEq(cmd, "mepsp") || StrEq(cmd, "vpro") || StrEq(cmd, "amt"))
+    {
+        CmdMePsp();
+        return;
+    }
     if (StrEq(cmd, "npu") || StrEq(cmd, "ml"))
     {
         CmdNpu();
