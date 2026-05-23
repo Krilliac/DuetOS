@@ -158,13 +158,36 @@ u64 CopyTruncated(char* dst, u64 dst_cap, const char* src)
 // Linear scan — returns the slot index of an existing record
 // matching (detector, source_pin) or g_used (out-of-range) if no
 // match. Caller must hold g_lock.
+// Bounded string equality up to `cap` chars, treating a NUL on either
+// side as end-of-string. Used by FindMatchLocked below because the
+// ring stores pins after `CopyTruncated` (39 chars + NUL when the
+// source pin was longer), and the caller still passes the full
+// pre-truncation pointer. A plain StrEqual would stop at the ring's
+// NUL but find a non-NUL byte in the caller's string and report
+// mismatch — breaking dedup for any pin whose source-side length
+// reaches the field cap.
+bool PinEqualBounded(const char* a, const char* b, u64 cap)
+{
+    for (u64 i = 0; i < cap; ++i)
+    {
+        const char ca = a[i];
+        const char cb = b[i];
+        if (ca != cb)
+            return false;
+        if (ca == '\0')
+            return true;
+    }
+    return true; // both reached the cap without diverging
+}
+
 u64 FindMatchLocked(FixDetector detector, const char* source_pin)
 {
+    constexpr u64 kPinCap = sizeof(g_ring[0].source_pin) - 1;
     for (u64 i = 0; i < g_used; ++i)
     {
         if (g_ring[i].detector != static_cast<u8>(detector))
             continue;
-        if (duetos::core::StrEqual(g_ring[i].source_pin, source_pin))
+        if (PinEqualBounded(g_ring[i].source_pin, source_pin, kPinCap))
             return i;
     }
     return g_used; // sentinel: not found

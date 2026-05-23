@@ -986,15 +986,28 @@ def synth_marker_log_upgrade_patch(r: FixRecord, repo_root: Path) -> str | None:
     # Use the pin as it appears in the record; clang-format may have
     # wrapped the call across two lines, so look for the quoted pin
     # specifically rather than the whole `FIX_NOTE_*(` token.
+    #
+    # The on-disk source_pin field is 40 bytes (39 chars + NUL) — see
+    # `kernel/diag/fix_journal.h`. When the source-side pin string is
+    # exactly 39+ chars (e.g. "subsystems/linux/syscall_file.cpp:DoOpen"),
+    # the record stores a truncated copy ("...:DoOpe"). The exact closing-
+    # quote match won't find such pins because the source has more chars
+    # before the closing quote. Fall back to open-quote-prefix matching
+    # when the pin appears to be at the 39-char ceiling.
     quoted = f'"{pin}"'
+    quoted_prefix = f'"{pin}'  # open-quote-only; matches when pin was truncated
+    likely_truncated = len(pin) >= 39
     fix_line_idx = -1
     for i, ln in enumerate(lines):
-        if quoted in ln and ("FIX_NOTE_STUB" in ln or "FIX_NOTE_GAP" in ln or
-                             # clang-format may have left the macro name
-                             # on the previous line and only the pin on
-                             # this line. Detect by walking back one.
-                             (i > 0 and ("FIX_NOTE_STUB" in lines[i - 1] or
-                                         "FIX_NOTE_GAP" in lines[i - 1]))):
+        hit = quoted in ln
+        if not hit and likely_truncated:
+            hit = quoted_prefix in ln
+        if hit and ("FIX_NOTE_STUB" in ln or "FIX_NOTE_GAP" in ln or
+                    # clang-format may have left the macro name on the
+                    # previous line and only the pin on this line.
+                    # Detect by walking back one.
+                    (i > 0 and ("FIX_NOTE_STUB" in lines[i - 1] or
+                                "FIX_NOTE_GAP" in lines[i - 1]))):
             fix_line_idx = i
             break
     if fix_line_idx < 0:
