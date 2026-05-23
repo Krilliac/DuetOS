@@ -37,6 +37,7 @@ Source: `kernel/diag/fix_journal.h` — the on-disk record format. These values 
 | 4 | `UnmappedThunk` | Win32ThunksLookupCatchAll hit (kOffMissLogger) |
 | 5 | `SoftFaultRecov` | RetryWithBackoff success after >=1 retry, page-fault |
 | 6 | `LoaderReject` | PE/ELF loader rejected an image |
+| 7 | `CapDenial` | SyscallGate cap-set check denied a syscall. |
 <!-- AUTO:journal-detectors END -->
 
 **Source pin shape per detector** (handwritten — the on-disk format
@@ -50,6 +51,10 @@ doesn't carry it; this is the convention each producer uses):
 | `UnmappedThunk` | `<dll>!<func>` | `kernel/loader/pe_loader.cpp` Win32 catch-all branch |
 | `SoftFaultRecov` | caller-supplied label | `RetryWithBackoff`, fault-react `RetryNow`/`RestartDomain`/`KillProcess`, kheap OOM, frame-allocator OOM, sandbox cap denial |
 | `LoaderReject` | `loader/pe:<status>` | PE rejected for `BadMachine`, `RelocsNonEmpty`, `TlsCallbacksUnsupported`, etc. |
+| `CapDenial` | `cap.<MissingCap>` | `kernel/security/cap_audit.cpp` `RingPushDenial` — mirrors the in-RAM 256-slot deny ring into the persistent journal. ctx_a = syscall number, ctx_b = proc id. Dedup keys on the missing cap kind so a wave of denies for one cap across many syscalls collapses to one row keyed by "this cap is chronically missing." |
+| `TrapCapture` | auto-pin `func+0xOFF` | `kernel/arch/x86_64/traps.cpp` panic-bound CPU-exception arm. Recorded from trap context via `FixJournalRecordFromTrap2` BEFORE the panic so the FAT32 / NVMe panic-write tier persists the bytes even when the box halts. `caller_rip` = faulting RIP, `ctx_a` = `(vector << 32) \| error_code`, `ctx_b` = CR2 (for #PF; 0 otherwise). The offline patch generator resolves the RIP via addr2line, reads ±8 lines of source context, optionally disassembles the faulting instruction, classifies common fault patterns (null-deref, SMAP-bypass, stack-overflow, divide-by-zero, undefined-opcode, GP), and emits a per-trap brief with a *proposed* defensive shape. The proposed shape is REVIEW-framed in markdown, never auto-applied (Decision #016). |
+| `UserFault` | `user.fault` | `kernel/arch/x86_64/traps.cpp` ring-3 trap arm. Captures CPU exceptions in ring 3 (the user task is killed; the kernel keeps running). Same `ctx_a` / `ctx_b` shape as `TrapCapture` but `caller_rip` is a USER RIP — addr2line against the kernel ELF won't resolve it. The brief surfaces three triage paths (chronically-broken task vs vtable-smashing task vs broken shared DLL) and decodes the page-fault flag bits / sentinel CR2 values. |
+| `KassertFail` | subsystem name (first arg to `Panic`) | `kernel/core/panic.cpp` `Panic` + `PanicWithValue` entry points (which is where every `KASSERT` macro lands). Recorded after the recursive-panic short-circuit so a panic-during-panic doesn't re-enter. `hint` = assertion message; `caller_rip` = the `Panic` call site (addr2line resolves to the KASSERT statement); `ctx_b` = the value passed to `PanicWithValue` (0 for plain `Panic`). For recurring asserts (`repeat >= --kassert-demote-threshold`) the brief proposes converting the assertion to `if (!(cond)) { KLOG_ONCE_WARN(...); return Err{InvalidState}; }`; with `--enable-kassert-demote` the generator additionally emits a real `kassert-demote-<subsys>.patch` containing that demotion *gated behind `#if 0`* so the reviewer affirmatively flips the switch (a mechanical KASSERT demotion that shipped silently would convert an audible bug into a silent one — the `#if 0` is the safety brake). The synth refuses to generate the patch when the enclosing function isn't `Result<…>`-returning, since the demoted shape needs a typed `Err{}` and there's no safe equivalent for a void return. |
 
 Dedup is keyed on `(detector, source_pin)`. A workload that hits the same gap 1000 times produces **one** record with `repeat_count=1000`, not 1000 records.
 
@@ -73,6 +78,7 @@ While a boot is running:
 
 ```sh
 $ dfix list                       # tail the last 20 un-audited records
+$ dfix list --detector=cap_denial # narrow to one detector kind
 $ dfix show 42                    # one record by seq, with caller_rip symbolized
 $ dfix stats                      # counters + per-detector tally
 $ dfix mark-done 42               # filter seq=42 from default `list`
@@ -107,8 +113,16 @@ For each unique record:
 |----------|-------------|--------------|
 | `unmapped_thunk` (not in `thunks_table.inc`) | YES | Inserts a row pointing at `kOffMissLogger` (safe catch-all) so the next boot logs each call site instead of silently returning 0 |
 | `unmapped_thunk` (in table at `kOffReturnZero/One/CritSecNop/GetProcessHeap`) | YES | Emits a named-equivalent bytecode patch at a fresh `kOff*` offset and rewrites the row, suppressing repeat journal noise for accepted placeholders while preserving a reviewable diff |
-| `unknown_syscall` | No | Emits a markdown implementation brief with syscall number, repeat count, caller RIP, ctx fields, and hint; syscall semantics are ABI work and should not be mechanically converted into permanent `-ENOSYS` stubs |
-| `stub` / `gap` / `loader_reject` | No | Detector-specific implementation brief pointing at the source pin and captured runtime context |
+| `unknown_syscall` | Brief + YES (additive) | Emits the implementation brief AND a `syscall-stub-0xNN.patch` that inserts a `case 0xNNu:` arm before the catch-all `default:` in `kernel/syscall/syscall.cpp`. The arm calls `FIX_NOTE_STUB("syscall:0xNN", ...)` and returns the same `-ENOSYS` the catch-all already returned (no semantic delta). The next boot then records `StubMarker:syscall:0xNN` (acknowledged) instead of `UnknownSyscall:syscall#NN` (catch-all) — the reviewer flips the body to real semantics later. Suppress with `--no-syscall-stub`. |
+| `stub` / `gap` (`repeat >= --marker-log-threshold`, default 10) | Brief + YES (additive) | Emits the marker-hit brief AND a `marker-log-<pin>.patch` that inserts a `KLOG_ONCE_WARN("<subsys>", "fix-journal hot: <hint>")` line right after the existing `FIX_NOTE_*` call. The next boot then surfaces the gap at serial level (one fire per call site per boot, gated by the existing klog level system) without operators needing to dfix-poll. Suppress with `--no-marker-log` or by raising the threshold. |
+| `stub` / `gap` (below threshold) / `loader_reject` | No | Detector-specific implementation brief pointing at the source pin and captured runtime context |
+| `cap_denial` | No | Three-option policy brief — *deny is correct (sandbox working as intended)*, *grant is missing (spawn / RBAC fix)*, or *cap too coarse (split the gate)*. The choice between them is policy, not mechanical, so the brief lays out the three shapes and leaves the reviewer to pick. |
+| `trap_capture` | No (brief with proposed shape) | Fault-site brief that *pulls together* every layer of offline evidence: addr2line-resolved `function (file:line)`, ±8 lines of source context with the faulting line marked, decoded error-code bits, optional objdump-disassembled instructions, and — when the (vector, error_code, CR2) tuple matches a recognised pattern — a *proposed* defensive shape (null guard, divide-zero guard, CopyFromUser wrap, etc.) embedded as REVIEW-framed text. Decision #016 forbids auto-applying these guesses; the reviewer reads the proposal, decides if the pattern match is right, and writes the real fix manually. |
+| `user_fault` | No | Ring-3 crash brief — three triage paths (broken task / vtable smash / broken shared DLL) plus error-code decode and sentinel-CR2 recognition. Userland fixes live in the offending PE/ELF binary, not in the kernel, so no auto-patch is generated. Cross-reference with `unmapped_thunk` records when the triage suggests "broken shared DLL." |
+| `kassert_fail` | Brief + YES (opt-in, gated) | For recurring asserts (`repeat >= --kassert-demote-threshold`, default 3), the brief proposes converting the assertion to a defensive return + `KLOG_ONCE_WARN`. With `--enable-kassert-demote` the generator additionally emits a `kassert-demote-<subsys>.patch` containing that conversion, **wrapped in `#if 0 ... #endif`** so applying the patch does NOT change kernel behaviour until the reviewer also flips the `#if 0` to `#if 1`. Off by default because KASSERT demotion is a semantic change; the `#if 0` brake gates the actual semantic shift behind a second affirmative action by the reviewer. Synth safely refuses to fire when the enclosing function isn't `Result<…>`-returning (no safe `Err{}` to return). |
+| `trap_capture` (null deref) | YES (opt-in, gated) | With `--enable-trap-guards`, a `trap-null-guard-<pin>.patch` is emitted alongside the brief: a real diff that inserts `if (ptr == nullptr) { KLOG_ONCE_WARN(...); return <type-appropriate graceful>; }` immediately BEFORE the faulting source line, wrapped in `#if 0`. The synth recognises the dereferenced pointer name from the source line via `_DEREF_PTR_RE`, picks the graceful-return shape from the enclosing function's return type (`Result`/`void`/`pointer`/`integer`), and refuses to fire when neither parse succeeds. |
+| `trap_capture` (#DE divide-zero) | YES (opt-in, gated) | With `--enable-trap-guards`, a `trap-divzero-guard-<pin>.patch` inserts `if (divisor == 0) { ... }` before the faulting division, same `#if 0` brake + return-type detection as the null-deref guard. Refuses when the rhs of `/` or `%` isn't a single identifier (complex expressions need a different guard shape). |
+| `soft_fault_recov` (`mm/kheap` / `mm/frame-alloc`) | YES (opt-in, gated) | With `--enable-oom-nullcheck`, an `oom-nullcheck-<pin>.patch` inserts `if (p == nullptr) { return Err{OutOfMemory}; }` immediately AFTER the `auto* p = KMalloc(...);` site, wrapped in `#if 0`. Requires the new `FixJournalRecordAtCaller` API (added on the kheap / frame-allocator OOM paths) which captures the UPSTREAM caller_rip — addr2line resolves to the allocation statement the synth keys off, not to the address inside the primitive. Refuses to fire when the enclosing function isn't Result-returning. |
 | `soft_fault_recov` (fault-react producer) | YES (additive only) | Always emits the advisory brief, AND once per run emits a `fault-react-recover-probe.patch` that hardens the recovery dispatch (see below) |
 | `soft_fault_recov` (`trap.recov` / other) | No | Advisory brief only — the right fix is domain-specific and human-judged |
 | marker manifest rows without fix-journal instrumentation (via `--markers`) | YES, when safe | Adds `diag/fix_journal.h` and a `FIX_NOTE_STUB` / `FIX_NOTE_GAP` macro for in-function kernel `.c/.cc/.cpp` markers; unsafe header/userland/namespace-scope rows become review notes |
@@ -152,7 +166,56 @@ When a thunk row already exists at `kOffReturnZero/One/CritSecNop/GetProcessHeap
 
 Both patterns keep the audit trail intact — the journal continues to record any TRULY unimplemented gap, while suppressing entries the reviewer has already decided about.
 
-## Reviewer workflow
+## End-to-end automation workflow
+
+The full "run the OS → patches arrive → review and apply" cycle:
+
+```sh
+# 1. Run the OS. Any breakage class the journal can intercept
+#    (KASSERT, ring-3 fault, hard kernel trap, OOM, cap denial,
+#    unmapped thunk, unknown syscall, hot STUB/GAP marker, soft
+#    fault recovery) gets dedup-recorded into the in-RAM ring,
+#    flushed to FAT32 KERNEL.FIX on the heartbeat tick, and
+#    persisted to the NVMe panic-reserved LBA region on a hard
+#    crash.
+DUETOS_SMOKE_PROFILE=pe-winapi tools/qemu/run.sh
+
+# 2. Extract KERNEL.FIX from the NVMe image and run the offline
+#    patch generator with EVERY auto-patch class enabled. Each
+#    semantic-change patch is wrapped in `#if 0 ... #endif` so
+#    applying does NOT change kernel behaviour until step 4.
+tools/qemu/run-fix-cycle.sh                    # writes fix-patches/*.patch
+python3 tools/build/gen-fix-patches.py \
+    build/x86_64-debug/KERNEL.FIX \
+    --kernel-elf build/x86_64-debug/kernel/duetos-kernel.elf \
+    --enable-all-patches \
+    --out fix-patches/
+
+# 3. Review interactively: each patch is shown with y/N/e=edit/s/q.
+#    `e` opens $EDITOR — the modify step where the reviewer can
+#    rewrite the synthesised guard before applying. Accepted patches
+#    land as one commit each on a fresh branch.
+tools/qemu/dfix-apply-interactive.sh
+
+# 4. For each gated patch the reviewer wants to actually activate,
+#    flip the `#if 0` to `#if 1` in a SEPARATE commit so a revert
+#    is one `git revert <sha>`. Push when the branch is ready.
+$EDITOR <files-with-gated-changes>
+git commit -am "<feature>: activate fix-journal demote for X"
+git push -u origin <branch>
+```
+
+| What broke at runtime | What the auto-patch landed (gated `#if 0`) | What the reviewer does |
+|-----------------------|-------------------------------------------|------------------------|
+| Hard #PF on a null pointer | `if (ptr == nullptr) { KLOG_ONCE_WARN; return Err{...}; }` inserted before the deref | Decide if `nullptr` is a legitimate case, flip the `#if 0` |
+| Hard #DE divide-by-zero | `if (divisor == 0) { ... return; }` before the division | Decide if zero is a real case or a math bug, flip the `#if 0` |
+| `KMalloc(...) -> null` at a known site | `if (p == nullptr) { return Err{OutOfMemory}; }` after the allocation | Confirm the propagation up the call stack, flip the `#if 0` |
+| Recurring `KASSERT` in a `Result<>`-returning fn | `if (!(cond)) { return Err{InvalidState}; }` replacing the assert | Confirm the invariant can be relaxed, flip the `#if 0` |
+| Unknown syscall `0xNN` | `case 0xNNu:` arm with `FixJournalRecord(StubMarker, ...)` + `-ENOSYS` | Implement the real syscall body (the patch lands the arm; the body is yours) |
+| Hot stub/gap marker | `KLOG_ONCE_WARN("subsys", "fix-journal hot: <hint>");` next to the FIX_NOTE_* | Already active; no second-step flip needed (additive observability only) |
+| Unmapped Win32 thunk | `thunks_table.inc` row pointing at `kOffMissLogger` | Either accept the noop or write real x86-64 bytecode |
+
+## Reviewer workflow (manual triage path)
 
 1. **Pick a gap.** `dfix list` (or the markdown report) gives the un-audited rows. The highest-repeat row in each detector is the best ROI.
 2. **Open the source pin.** `path:Function` → open the file. `dll!fn` → check `wiki/reference/Win32-Surface-Status.md` for the DLL's REAL/STUB/GAP/MISSING table.

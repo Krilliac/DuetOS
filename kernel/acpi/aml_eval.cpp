@@ -22,6 +22,7 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "diag/fix_journal.h"
 #include "drivers/pci/pci.h"
 #include "log/klog.h"
 #include "mm/page.h"
@@ -244,7 +245,10 @@ bool DirectRegionAccess(AmlRegionSpace space, bool write, u64 addr, u32 width_bi
         // regions (rare on the EC/battery path) read back as Ones.
         // GAP: no >1 GiB SystemMemory — revisit if a real DSDT needs it.
         if (addr >= mm::kDirectMapBytes)
+        {
+            FIX_NOTE_GAP("acpi/aml_eval.cpp:SystemMemoryAccess", "map >1 GiB SystemMemory regions on demand");
             return false;
+        }
         volatile u8* base = static_cast<volatile u8*>(mm::PhysToVirt(addr));
         if (base == nullptr)
             return false;

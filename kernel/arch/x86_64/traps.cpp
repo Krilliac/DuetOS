@@ -1332,6 +1332,24 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         else if (frame->vector == 14)
             user_ntstatus = 0xC0000005;
         duetos::diag::minidump::EmitMinidumpFromTrapFrame(frame, user_ntstatus);
+        // UserFault: journal the ring-3 crash so a chronically-failing
+        // PE binary becomes visible in dfix list and the offline
+        // report. Dedups per (task_id, vector) — a single EXE
+        // wild-jumping on every spawn produces ONE record with
+        // repeat_count = crash count, not one per launch. Recording
+        // happens after the minidump emit so the .dmp is on disk
+        // even if the journal flush gets interrupted; the trap-
+        // pending slot is drained by the next heartbeat from the
+        // reaper. ctx_a same shape as TrapCapture
+        // ((vector << 32) | error_code); ctx_b = CR2 for #PF / 0
+        // otherwise.
+        {
+            const u64 uf_ctx_a =
+                (static_cast<u64>(frame->vector) << 32) | (static_cast<u64>(frame->error_code) & 0xffffffffULL);
+            const u64 uf_ctx_b = (frame->vector == 14) ? ReadCr2() : 0ULL;
+            ::duetos::diag::FixJournalRecordFromTrap2(::duetos::diag::FixDetector::UserFault, uf_ctx_a, uf_ctx_b,
+                                                      frame->rip);
+        }
         // SchedExit must NOT run with IF=0 forever; it ends in a
         // Schedule() that waits for the reaper, and the reaper needs
         // timer IRQs to make progress. SchedYield/SchedExit internally
@@ -1359,6 +1377,28 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         HaltOnRecursiveFault(frame->vector, frame->rip);
     }
     PanicInProgressMark();
+
+    // TrapCapture: deferred-slot record so the FAT32 / NVMe panic-
+    // write tier picks up a structured (faulting-RIP, vector, CR2)
+    // tuple for the offline patch generator. The drain in
+    // FixJournalDrainTrapPending promotes it into a full FixRecord
+    // with an auto-pinned `func+0xOFF` source pin keyed off the
+    // faulting RIP — the patch generator resolves that via
+    // addr2line to get file:line for a per-fault brief.
+    //
+    // ctx_a packs (vector << 32) | (error_code & 0xffffffff). ctx_b
+    // is CR2 for #PF (vector 14) and 0 for all other vectors.
+    // Recording here is BEFORE the dump emit so even if the dump
+    // path re-faults, the panic-tier persistence (which runs from
+    // EmitMinidumpFromTrapFrame and includes a fix-journal flush)
+    // already has the record.
+    {
+        const u64 cap_ctx_a =
+            (static_cast<u64>(frame->vector) << 32) | (static_cast<u64>(frame->error_code) & 0xffffffffULL);
+        const u64 cap_ctx_b = (frame->vector == 14) ? ReadCr2() : 0ULL;
+        ::duetos::diag::FixJournalRecordFromTrap2(::duetos::diag::FixDetector::TrapCapture, cap_ctx_a, cap_ctx_b,
+                                                  frame->rip);
+    }
 
     // Publish the trap-frame state to the GDB stub so a future
     // attach (or a stop-at-fault GDB session) sees the real

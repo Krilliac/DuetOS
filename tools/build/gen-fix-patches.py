@@ -68,7 +68,63 @@ DETECTORS = {
     4: "unmapped_thunk",
     5: "soft_fault_recov",
     6: "loader_reject",
+    7: "cap_denial",
+    8: "trap_capture",
+    9: "user_fault",
+    10: "kassert_fail",
 }
+
+# x86_64 trap vectors that fire as TrapCapture records. The kernel's
+# trap dispatcher only records the panic-bound vectors here — recovered
+# faults route through SoftFaultRecov instead.
+TRAP_VECTOR_NAMES = {
+    0: "#DE (divide by zero)",
+    1: "#DB (debug)",
+    3: "#BP (breakpoint)",
+    4: "#OF (overflow)",
+    5: "#BR (bound range)",
+    6: "#UD (undefined opcode)",
+    7: "#NM (device not available)",
+    8: "#DF (double fault)",
+    10: "#TS (invalid TSS)",
+    11: "#NP (segment not present)",
+    12: "#SS (stack-segment fault)",
+    13: "#GP (general protection)",
+    14: "#PF (page fault)",
+    16: "#MF (x87 FPE)",
+    17: "#AC (alignment check)",
+    18: "#MC (machine check)",
+    19: "#XM (SIMD FPE)",
+}
+
+# Page-fault error-code bit decode (vector 14 specifically). Bits
+# match the AMD64 SDM §8.2.15 / Intel SDM §6.15.
+PF_ERROR_BITS = [
+    (1 << 0, "PRESENT", "page was present"),
+    (1 << 1, "WRITE", "write access"),
+    (1 << 2, "USER", "ring-3 access"),
+    (1 << 3, "RSVD", "reserved bit set in PTE"),
+    (1 << 4, "INSTR", "instruction fetch"),
+    (1 << 5, "PK", "protection-key violation"),
+    (1 << 15, "SGX", "SGX violation"),
+]
+
+
+def decode_pf_error_code(err: int) -> tuple[str, str]:
+    """Return (short_flags, long_description) for a #PF error code.
+
+    short_flags is a compact letter set ('rwu' etc.) suitable for a
+    one-line label; long_description is a human sentence for the brief.
+    """
+    short: list[str] = []
+    long_parts: list[str] = []
+    for bit, label, desc in PF_ERROR_BITS:
+        if err & bit:
+            short.append(label[0].lower())
+            long_parts.append(desc)
+    if not short:
+        return ("?", "no decoded error-code bits")
+    return ("".join(short), ", ".join(long_parts))
 
 
 def is_selftest_record(source_pin: str) -> bool:
@@ -477,6 +533,29 @@ def _hunk_replace_line(file_rel: str, lines: list[str], idx: int, new_line: str)
     return "".join(out)
 
 
+def _hunk_replace_with_block(file_rel: str, lines: list[str], idx: int,
+                             new_lines: list[str]) -> str:
+    """Build a hunk that replaces `lines[idx]` with the multi-line block
+    `new_lines` (each entry already terminated with '\\n')."""
+    ctx_start = max(0, idx - 3)
+    pre = lines[ctx_start:idx]
+    post = lines[idx + 1 : idx + 4]
+    old_count = len(pre) + 1 + len(post)
+    new_count = len(pre) + len(new_lines) + len(post)
+    out: list[str] = []
+    out.append(f"--- a/{file_rel}\n")
+    out.append(f"+++ b/{file_rel}\n")
+    out.append(f"@@ -{ctx_start + 1},{old_count} +{ctx_start + 1},{new_count} @@\n")
+    for ln in pre:
+        out.append(" " + ln)
+    out.append("-" + lines[idx])
+    for ln in new_lines:
+        out.append("+" + ln)
+    for ln in post:
+        out.append(" " + ln)
+    return "".join(out)
+
+
 def _hunk_insert_lines(file_rel: str, lines: list[str], idx: int, inserts: list[str]) -> str:
     """Build a hunk that inserts `inserts` before `lines[idx]`."""
     ctx_start = max(0, idx - 3)
@@ -815,30 +894,333 @@ def plan_marker_actions(markers: list[FixMarker], repo_root: Path) -> list[Actio
 _SYSCALL_PATH = "kernel/syscall/syscall.cpp"
 
 
-def synth_syscall_brief(r: FixRecord, num: int) -> str:
+# Default minimum repeat_count before the marker-log-upgrade patch
+# generator considers a STUB/GAP hit "hot" enough to add a
+# KLOG_ONCE_WARN line next to its FIX_NOTE_*. Tunable via
+# `--marker-log-threshold N` on the CLI.
+DEFAULT_MARKER_LOG_THRESHOLD = 10
+
+
+def _subsys_label_from_pin(pin_path: str) -> str:
+    """Derive a klog subsys label from the path component of a source pin.
+
+    Examples (pin is the leading `path/file.cpp` of `path/file.cpp:Func`):
+      `sched/sched.cpp` -> `sched`
+      `acpi/aml.cpp` -> `acpi`
+      `drivers/net/iwlwifi_rings.cpp` -> `drivers/net`
+      `arch/x86_64/timer.cpp` -> `arch/x86_64`
+
+    The result is what `KLOG_ONCE_WARN(<subsys>, ...)` expects: a short,
+    grep-able identifier for the area. Not perfect (the codebase uses
+    several conventions — `arch/timer` in some places, `arch/x86_64` in
+    others — but the generated label is stable per-pin and the reviewer
+    can edit before applying.
+    """
+    parts = pin_path.rsplit("/", 1)
+    if len(parts) == 1:
+        # Bare filename — fall back to the stem.
+        return Path(parts[0]).stem
+    return parts[0]
+
+
+def _try_resolve_pin_to_file(pin: str, repo_root: Path) -> tuple[Path, str] | None:
+    """Resolve a FixRecord source_pin to (absolute_path, function_name).
+
+    The pin format used by FIX_NOTE_* call sites is `<path>:<Function>`.
+    `<path>` may be either fully-qualified (`kernel/foo/bar.cpp`) or
+    kernel-relative (`foo/bar.cpp` — the bulk of the codebase). Returns
+    None on parse / lookup failure.
+    """
+    if ":" not in pin:
+        return None
+    path_part, _, func = pin.partition(":")
+    if not path_part or not func:
+        return None
+    # `func+0xOFF` is the auto-pin fallback — not a real function name.
+    if re.search(r"\+0x[0-9a-fA-F]+$", func):
+        return None
+    candidate = repo_root / path_part
+    if not candidate.exists():
+        candidate = repo_root / "kernel" / path_part
+        if not candidate.exists():
+            return None
+    return candidate, func
+
+
+def synth_marker_log_upgrade_patch(r: FixRecord, repo_root: Path) -> str | None:
+    """Insert a `KLOG_ONCE_WARN` next to a hot FIX_NOTE_STUB/GAP call.
+
+    Triggered for a StubMarker / GapMarker record whose `repeat_count`
+    is high enough to justify promoting the silent dfix-only record
+    into a serial-visible "this gap is being hit hard" line on the
+    *next* boot. The patch is additive observability — no control-flow
+    change, idempotent (a second pass is a no-op once the KLOG_ONCE_WARN
+    already lives next to the FIX_NOTE_*).
+
+    The discipline mirrors CLAUDE.md "Diagnostic Logging — Keep It,
+    Gate It, Probe It": KLOG_ONCE_WARN fires once per call site per
+    boot, so even a 10000x deny storm produces one log line, not a
+    firehose.
+
+    Returns the unified diff, or None if:
+      * pin doesn't parse / file not found
+      * no `FIX_NOTE_*` call with this pin string was found in the file
+      * a `KLOG_ONCE_WARN` already exists in the 4-line window after
+        the FIX_NOTE_* (idempotency)
+    """
+    pin = r.source_pin
+    resolved = _try_resolve_pin_to_file(pin, repo_root)
+    if resolved is None:
+        return None
+    path, _func = resolved
+    if path.suffix not in _MARKER_SOURCE_SUFFIXES:
+        return None
+
+    file_rel = path.relative_to(repo_root).as_posix()
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines(keepends=True)
+
+    # Locate the FIX_NOTE_*("...pin...", ...) line. The pin string in
+    # the record was captured verbatim from the macro call, so a
+    # substring match against the quoted pin in source is reliable.
+    # Use the pin as it appears in the record; clang-format may have
+    # wrapped the call across two lines, so look for the quoted pin
+    # specifically rather than the whole `FIX_NOTE_*(` token.
+    quoted = f'"{pin}"'
+    fix_line_idx = -1
+    for i, ln in enumerate(lines):
+        if quoted in ln and ("FIX_NOTE_STUB" in ln or "FIX_NOTE_GAP" in ln or
+                             # clang-format may have left the macro name
+                             # on the previous line and only the pin on
+                             # this line. Detect by walking back one.
+                             (i > 0 and ("FIX_NOTE_STUB" in lines[i - 1] or
+                                         "FIX_NOTE_GAP" in lines[i - 1]))):
+            fix_line_idx = i
+            break
+    if fix_line_idx < 0:
+        return None
+
+    # Walk forward to the end of the FIX_NOTE_* statement (line ending
+    # in `);`). The macro is a `do { ... } while (0)` so the closing
+    # `;` is unambiguous.
+    end_idx = fix_line_idx
+    while end_idx < len(lines):
+        if lines[end_idx].rstrip().endswith(");"):
+            break
+        end_idx += 1
+    if end_idx >= len(lines):
+        return None
+
+    insert_at = end_idx + 1
+
+    # Idempotency: if the next 4 lines already contain a KLOG_ONCE_WARN
+    # or any klog macro that names this pin, skip. The check is
+    # deliberately loose — we want to avoid stacking duplicate logs
+    # even if the operator hand-edited a related KLOG_WARN.
+    for j in range(insert_at, min(insert_at + 4, len(lines))):
+        if "KLOG_ONCE_WARN" in lines[j] or "KLOG_ONCE_INFO" in lines[j]:
+            return None
+
+    indent = _leading_spaces(lines[fix_line_idx])
+    if indent == 0:
+        return None
+
+    # Build the new line. Subsys derived from pin's path component;
+    # hint kept short (FIX_NOTE_*'s hint was already 39 chars max so
+    # any further trimming preserves the operator's original wording).
+    pin_path = pin.split(":", 1)[0] if ":" in pin else pin
+    subsys = _subsys_label_from_pin(pin_path)
+    hint = (r.hint or pin).strip()
+    msg = f"fix-journal hot: {hint}"
+    # KLOG_ONCE_WARN signature: (subsys, msg). String escaping uses the
+    # same _escape_cpp_string helper that synth_marker_observability_patch
+    # already uses for inserted macros.
+    new_line = (
+        " " * indent
+        + f'KLOG_ONCE_WARN("{_escape_cpp_string(subsys)}", "{_escape_cpp_string(msg)}");\n'
+    )
+
+    # Insert + add the klog.h include if missing.
+    klog_include = '#include "log/klog.h"\n'
+    include_hunk = ""
+    if not any('"log/klog.h"' in ln for ln in lines):
+        include_indices = [i for i, ln in enumerate(lines) if ln.startswith("#include ")]
+        if include_indices:
+            include_insert_at = include_indices[-1] + 1
+            include_hunk = _hunk_insert_lines(file_rel, lines, include_insert_at, [klog_include])
+            # Adjust insert_at to account for the include hunk shifting
+            # the line numbers downward — but since `_hunk_insert_lines`
+            # operates on the live `lines` list passed by reference, we
+            # need to refetch the index after the include is virtually
+            # added. Easier: build the two hunks against the same
+            # original `lines` since the line numbers are computed from
+            # the pre-insertion file content (which is what `git apply`
+            # also wants on `--- a/...` side).
+    macro_hunk = _hunk_insert_lines(file_rel, lines, insert_at, [new_line])
+    return include_hunk + macro_hunk
+
+
+# `case 0xNN:` body template for the unknown-syscall stub patch. Lives
+# at module scope so the test harness can exercise the substitution
+# without re-deriving it. Indentation is 4 spaces (matches the existing
+# arms in kernel/syscall/syscall.cpp's main switch).
+#
+# The body uses `FixJournalRecord(...)` directly rather than the
+# parameterless `FIX_NOTE_STUB(...)` macro because the macro can't
+# carry detector-specific context — and the first two argument
+# registers (`rdi`, `rsi`) are exactly the context a reviewer needs to
+# triage the call. ctx_a = rdi, ctx_b = rsi. Higher args (rdx / r10 /
+# r8 / r9) drop into the journal's caller_rip resolution / GDB attach.
+_UNKNOWN_SYSCALL_STUB_BODY = """\
+    case 0x{num:x}u:
+    {{
+        // STUB: syscall 0x{num:x} observed via fix-journal but not yet
+        // implemented. The arm exists so dedup attributes future hits
+        // to this site (not the catch-all `UnknownSyscall` arm) and so
+        // a future implementer can flip the body to real semantics
+        // without touching the dispatch table.
+        //
+        // ctx_a / ctx_b capture the first two arg registers (rdi/rsi)
+        // so the reviewer sees what's being called with, not just
+        // that 0x{num:x} fired. Higher args reach the brief via
+        // caller_rip resolution.
+        (void)::duetos::diag::FixJournalRecord(
+            ::duetos::diag::FixDetector::StubMarker, "syscall:0x{num:x}",
+            "implement syscall 0x{num:x}", frame->rdi, frame->rsi);
+        frame->rax = static_cast<u64>(kSysErrnoENOSYS);
+        return;
+    }}
+
+"""
+
+
+def synth_unknown_syscall_stub_patch(r: FixRecord, num: int, repo_root: Path) -> str | None:
+    """Insert a per-syscall stub arm before the unknown-syscall default.
+
+    The arm records a `StubMarker` with pin `syscall:0xNN` (specific to
+    this number, distinct from the catch-all `UnknownSyscall:syscall#NN`
+    record) so a future boot's report shows the reviewer has
+    *acknowledged* the syscall without yet implementing it. The return
+    value (`-ENOSYS`) is identical to the catch-all's, so there's no
+    semantic delta for the calling EXE; only the journal record kind
+    and dedup key change.
+
+    Why this is safer than the typical "auto-add a switch arm" pattern:
+      * The arm body is a NAMED placeholder, not a guessed implementation.
+      * It returns the same error code the catch-all already returned,
+        so applying the patch can't break a workload that was previously
+        getting consistent `-ENOSYS`.
+      * The FIX_NOTE_STUB marker keeps the gap visible in dfix and in
+        the next boot's report — the patch doesn't pretend the syscall
+        is handled.
+
+    Returns None if the dispatch file isn't in the expected shape (no
+    recognisable default arm, or the arm already exists).
+    """
+    path = repo_root / _SYSCALL_PATH
+    if not path.exists():
+        return None
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines(keepends=True)
+
+    # Idempotency: refuse to add an arm whose case constant already
+    # exists. The catch-all default + the per-arm `case 0xNN:` line are
+    # both candidates — match either form.
+    case_decimal = f"case {num}:"
+    case_hex = f"case 0x{num:x}u:"
+    case_hex_upper = f"case 0x{num:X}u:"
+    for ln in lines:
+        s = ln.strip()
+        if case_decimal in s or case_hex in s or case_hex_upper in s:
+            return None
+        # Also detect `case SYS_FOO:` resolving to this number — we
+        # can't evaluate the macro, but the catch-all's
+        # `FixJournalRecord(UnknownSyscall, ...)` only fires when the
+        # number falls past every named arm, so if the journal saw
+        # an UnknownSyscall for this `num` then by definition there
+        # is no SYS_* arm for it. No further check needed.
+
+    # Locate the catch-all default arm — the one with the
+    # `FixDetector::UnknownSyscall` call. There are several `default:`
+    # cases in the file (in inner switches), so pin specifically on
+    # the one that records the UnknownSyscall detector.
+    target_idx = -1
+    for i, ln in enumerate(lines):
+        if "FixDetector::UnknownSyscall" in ln:
+            # Walk backwards to the enclosing `default:` line. The
+            # default arm holds a substantial pin-building block above
+            # the FixJournalRecord call (~60 lines in the current
+            # syscall.cpp), so the search window is wide.
+            for j in range(i, max(i - 200, -1), -1):
+                if lines[j].lstrip().startswith("default:"):
+                    target_idx = j
+                    break
+            if target_idx > 0:
+                break
+    if target_idx < 0:
+        return None
+
+    # Insert the new case arm right before the `default:` line. Use 4
+    # spaces of indent (matching the existing arms).
+    insertion = _UNKNOWN_SYSCALL_STUB_BODY.format(num=num).splitlines(keepends=True)
+    file_rel = path.relative_to(repo_root).as_posix()
+    return _hunk_insert_lines(file_rel, lines, target_idx, insertion)
+
+
+def synth_syscall_brief(r: FixRecord, num: int, stub_patch_planned: bool = False) -> str:
     """Generate a markdown implementation brief for an unknown syscall.
 
-    Unlike thunks-table misses, syscall semantics cannot be safely
-    repaired with a mechanical source patch. A new switch arm changes
-    the kernel ABI surface and must be implemented from the intended NT
-    or native contract, so the self-fix output stays advisory and carries
-    all journal context needed for a reviewer to write the real fix.
+    Syscall semantics are ABI work — a switch arm with a real body
+    changes the kernel/userland contract and must be designed from the
+    intended NT or native specification. This brief carries the journal
+    context the reviewer needs to start that work.
+
+    When `stub_patch_planned` is True (the synthesiser also produced an
+    additive observability arm via `synth_unknown_syscall_stub_patch`),
+    the brief points at that patch as the FIRST step — apply it to get
+    arg-aware records on the next boot, then design the real
+    implementation against the captured rdi/rsi values.
     """
-    return (
-        f"Runtime reached syscall `0x{num:x}` with no dispatcher arm. "
-        f"Do not auto-scaffold a permanent `-ENOSYS` case: that only "
-        f"turns an unknown ABI gap into a known stub. Implement the "
-        f"intended syscall contract in `{_SYSCALL_PATH}` near the main "
-        f"switch default arm that records `UnknownSyscall`.\n\n"
-        f"Journal context:\n"
-        f"- seq: `{r.seq}`\n"
-        f"- repeat: `{r.repeat}`\n"
-        f"- source_pin: `{r.source_pin}`\n"
-        f"- caller_rip: `0x{r.caller_rip:016x}`\n"
-        f"- ctx_a: `0x{r.ctx_a:016x}`\n"
-        f"- ctx_b: `0x{r.ctx_b:016x}`\n"
-        f"- hint: `{r.hint or '(none)'}`\n"
-    )
+    out: list[str] = []
+    out.append(f"Runtime reached syscall `0x{num:x}` with no dispatcher arm.")
+    if stub_patch_planned:
+        out.append("")
+        out.append(
+            f"**A companion patch (`syscall-stub-0x{num:x}.patch`) is "
+            f"included alongside this brief.** Apply it to add an "
+            f"acknowledged `case 0x{num:x}u:` arm that records "
+            f"`StubMarker:syscall:0x{num:x}` with the first two arg "
+            f"registers (`rdi`, `rsi`) captured as ctx_a/ctx_b. The arm "
+            f"returns the same `-ENOSYS` the catch-all already did — "
+            f"applying the patch is **observation-only**, not a "
+            f"semantic fix. With it landed, the next boot's record "
+            f"shows what the caller is passing, which is the missing "
+            f"context for designing the real implementation."
+        )
+        out.append("")
+        out.append(
+            "Then implement the real syscall contract by flipping the "
+            "arm's body. No further dispatch-table work is needed."
+        )
+    else:
+        out.append("")
+        out.append(
+            f"Implement the intended syscall contract in "
+            f"`{_SYSCALL_PATH}` near the main switch default arm that "
+            f"records `UnknownSyscall`. (The companion auto-patch was "
+            f"either suppressed via `--no-syscall-stub` or the "
+            f"synthesiser couldn't locate the default arm.)"
+        )
+    out.append("")
+    out.append("Journal context:")
+    out.append(f"- seq: `{r.seq}`")
+    out.append(f"- repeat: `{r.repeat}`")
+    out.append(f"- source_pin: `{r.source_pin}`")
+    out.append(f"- caller_rip: `0x{r.caller_rip:016x}`")
+    out.append(f"- ctx_a: `0x{r.ctx_a:016x}`")
+    out.append(f"- ctx_b: `0x{r.ctx_b:016x}`")
+    out.append(f"- hint: `{r.hint or '(none)'}`")
+    return "\n".join(out) + "\n"
 
 
 @dataclass
@@ -1071,6 +1453,1250 @@ def synth_loader_reject_brief(r: FixRecord, resolver: SymbolResolver | None = No
     lines.append("```")
 
     title = f"Loader reject [{priority}]{_new_tag(r)} `{status or r.source_pin}` (×{r.repeat})"
+    return Action(kind="note", title=title, body="\n".join(lines), filename=None)
+
+
+# ---------------------------------------------------------------- TrapCapture
+
+# Recognised fault-pattern signatures: (trap_kind, error_code_match,
+# faulting_addr_match) -> (label, defensive_fix_template).
+#
+# These match common kernel-fault classes the patch generator can
+# propose targeted defensive patches for. Each entry is intentionally
+# narrow: a pattern that's CONFIDENTLY recognisable, mapped to a fix
+# shape that's CONFIDENTLY additive (a guard added BEFORE the faulting
+# operation, never replacing it). The brief always presents the
+# proposed fix wrapped in a "REVIEW" framing so a human approves.
+#
+# Format of each fix template line:
+#   "<context>": [
+#       ("recognised condition",
+#        "before-line",
+#        "code suggestion (multi-line, '%s' substituted with the
+#         source line that faulted)"),
+#   ]
+TRAP_FIX_TEMPLATES = {
+    "null_deref_read": (
+        "Null-pointer dereference (read) — CR2 in the low page "
+        "(< 0x1000), error_code has PRESENT=0 and WRITE=0.",
+        "Add a null-pointer guard BEFORE the dereference. Common shape:",
+        "if (ptr == nullptr) { /* return / log / RESULT_TRY_OUT */ }\n"
+        "{faulting_line}",
+    ),
+    "null_deref_write": (
+        "Null-pointer dereference (write) — CR2 in the low page "
+        "(< 0x1000), error_code has WRITE=1 and PRESENT=0.",
+        "Add a null-pointer guard BEFORE the store. Common shape:",
+        "if (ptr == nullptr) { /* return / log / RESULT_TRY_OUT */ }\n"
+        "{faulting_line}",
+    ),
+    "stack_overflow": (
+        "Kernel stack overflow — CR2 within the guard-page region of "
+        "the per-task kstack. Usually caused by uncontrolled recursion "
+        "or a single large stack allocation.",
+        "Audit the call site for unbounded recursion. If a single "
+        "frame is huge, convert to heap allocation:",
+        "// REVIEW: convert large local to kheap allocation or smaller chunked I/O\n"
+        "{faulting_line}",
+    ),
+    "user_pointer_smap": (
+        "Kernel touched a user-space address directly. The fault is "
+        "SMAP catching the bypass; the right fix is to route through "
+        "CopyToUser / CopyFromUser.",
+        "Wrap the access in the user-pointer mediator:",
+        "// REVIEW: route through mm::CopyFromUser / CopyToUser\n"
+        "if (!mm::CopyFromUser(&kernel_buf, user_ptr, len)) {{ return -EFAULT; }}\n",
+    ),
+    "div_by_zero": (
+        "Divide by zero (#DE) — the divisor expression evaluated to 0.",
+        "Add a guard before the division. Common shape:",
+        "if (divisor == 0) { /* return / propagate ErrorCode::InvalidArgument */ }\n"
+        "{faulting_line}",
+    ),
+    "undefined_opcode": (
+        "Undefined opcode (#UD) — the byte sequence at RIP is not a "
+        "valid x86_64 instruction. Usually: (a) a wild branch into a "
+        "data region, (b) a function-pointer table corruption, or (c) "
+        "a deliberate ud2 from an assert / KASSERT macro that was meant "
+        "to fire.",
+        "Audit the call path. If (c), the surfaced assertion is the "
+        "real bug — fix the upstream invariant, not the trap site.",
+        "// REVIEW: #UD usually means a wild jump or a deliberate KASSERT/ud2 firing.\n"
+        "// If this code path was reached unexpectedly, audit the\n"
+        "// invariant the upstream caller is violating.\n",
+    ),
+    "general_protection": (
+        "General protection (#GP) — privileged instruction in ring 3, "
+        "non-canonical address load, segment-selector violation, or "
+        "MSR access denied.",
+        "GP fault classes vary widely. Common kernel triggers:",
+        "// REVIEW: #GP at this RIP — likely a non-canonical address\n"
+        "// (sign-extended high bits not matching), a privileged\n"
+        "// instruction in the wrong ring, or an invalid MSR\n"
+        "// number. Add a range/canonical check before the load.\n",
+    ),
+}
+
+
+def classify_trap(vector: int, error_code: int, cr2: int) -> str | None:
+    """Map a (vector, error_code, cr2) tuple to a fix-template key.
+
+    Returns the key into `TRAP_FIX_TEMPLATES`, or None if the pattern
+    isn't confidently recognised (in which case the brief still
+    surfaces all captured fields but doesn't propose a fix).
+    """
+    if vector == 14:  # #PF
+        write = bool(error_code & (1 << 1))
+        user = bool(error_code & (1 << 2))
+        present = bool(error_code & (1 << 0))
+        # Null deref: low-page CR2 (within first 4 KiB) AND
+        # PRESENT=0 (page wasn't mapped).
+        if cr2 < 0x1000 and not present and not user:
+            return "null_deref_write" if write else "null_deref_read"
+        # SMAP: ring-0 fault on a CR2 in canonical user range
+        # (< 0x0000800000000000). PRESENT=1 means the page existed
+        # but SMAP blocked the access.
+        if not user and cr2 != 0 and cr2 < 0x0000800000000000 and present:
+            return "user_pointer_smap"
+        # Stack overflow: CR2 near the kstack guard region. The
+        # kstack guard is one page below the kstack base; without
+        # the runtime layout the classifier can only flag "this
+        # looks like a guard-page hit" if CR2 is on a page boundary
+        # AND the trapping RIP is inside a leaf function. We
+        # conservatively flag based on guard alignment.
+        if not user and (cr2 & 0xFFF) == 0:
+            return "stack_overflow"
+        return None
+    if vector == 0:
+        return "div_by_zero"
+    if vector == 6:
+        return "undefined_opcode"
+    if vector == 13:
+        return "general_protection"
+    return None
+
+
+def read_source_context(file_path: Path, line: int, window: int = 8) -> list[str]:
+    """Return ±window lines around `line` from `file_path`, with line
+    numbers prepended. Empty list on read failure.
+
+    The window is wider than the marker-observability synth uses (3)
+    because for a fault-site brief the reviewer benefits from seeing
+    the surrounding block / function context, not just the immediate
+    statement.
+    """
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    src_lines = text.splitlines()
+    if line < 1 or line > len(src_lines):
+        return []
+    start = max(0, line - 1 - window)
+    end = min(len(src_lines), line + window)
+    out: list[str] = []
+    width = len(str(end))
+    for i in range(start, end):
+        marker = ">>" if (i + 1) == line else "  "
+        out.append(f"{marker} {str(i + 1).rjust(width)} | {src_lines[i]}")
+    return out
+
+
+def _resolve_source_path(addr2line_path: str, repo_root: Path) -> Path | None:
+    """Convert an addr2line file path into a real on-disk path.
+
+    addr2line emits paths in several shapes depending on how the ELF
+    was built:
+      * absolute compile-time path (`/home/user/DuetOS/kernel/foo.cpp`)
+      * repo-relative path (`kernel/foo.cpp`)
+      * basename only (`foo.cpp`) — when DWARF was stripped of CWD
+    Try each form in order; for the basename-only case, glob the tree
+    once and cache the first hit. Returns None if no match.
+    """
+    if not addr2line_path:
+        return None
+    p = Path(addr2line_path)
+    if p.is_absolute() and p.exists():
+        return p
+    candidate = repo_root / addr2line_path
+    if candidate.exists():
+        return candidate
+    # Basename-only fall-back: walk the source-bearing roots looking
+    # for a unique match. Limited to known top-level dirs so a stray
+    # basename from a third-party include doesn't pull in a wrong
+    # match.
+    base = p.name
+    if "/" not in addr2line_path:
+        for top in ("kernel", "userland", "drivers", "subsystems", "boot"):
+            root = repo_root / top
+            if not root.exists():
+                continue
+            for hit in root.rglob(base):
+                if hit.is_file():
+                    return hit
+    return None
+
+
+def disassemble_at(elf_path: Path | None, rip: int, count: int = 4) -> list[str]:
+    """Disassemble `count` instructions starting at `rip` from the kernel
+    ELF via objdump. Empty list on failure or when no ELF was supplied.
+
+    Falls back gracefully — disassembly is a NICE-TO-HAVE in the brief;
+    the source-context excerpt + register fields stay useful without it.
+    """
+    if elf_path is None or not elf_path.exists():
+        return []
+    tool = shutil.which("objdump") or shutil.which("llvm-objdump")
+    if tool is None:
+        return []
+    try:
+        # objdump --disassemble=<symbol> doesn't take an address; we
+        # use --start-address / --stop-address to bound the window.
+        # 4 typical x86_64 instructions average ~12 bytes; 48 byte
+        # window is a safe upper bound.
+        stop = rip + max(16, count * 12)
+        res = subprocess.run(
+            [tool, "-d", "-M", "intel", "--no-show-raw-insn",
+             f"--start-address=0x{rip:x}", f"--stop-address=0x{stop:x}",
+             str(elf_path)],
+            check=False, capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    # Keep only the instruction lines (start with whitespace + hex addr).
+    out: list[str] = []
+    for ln in res.stdout.splitlines():
+        m = re.match(r"^\s+([0-9a-f]+):\s+(.+)$", ln)
+        if m:
+            out.append(f"  0x{m.group(1)}: {m.group(2)}")
+            if len(out) >= count:
+                break
+    return out
+
+
+def synth_trap_capture_brief(r: FixRecord, resolver: SymbolResolver | None = None,
+                             elf_path: Path | None = None,
+                             repo_root: Path | None = None) -> Action:
+    """Generate a fault-site brief for a TrapCapture record.
+
+    Pulls together every layer of evidence the offline pipeline can
+    extract for the trapping site:
+      * symbol (addr2line `function (file:line)`)
+      * ±8 lines of source context around the fault line
+      * 4 instructions disassembled at the faulting RIP
+      * decoded error_code bits (page-fault flag set, etc.)
+      * classified fix pattern + proposed defensive shape (when the
+        pattern is recognised)
+
+    Decision #016: the proposed shape is wrapped in REVIEW framing
+    and embedded as text in the brief — never auto-applied to the
+    source. A reviewer reads, decides if the guess is right, and
+    writes the real fix manually.
+    """
+    vector = int((r.ctx_a >> 32) & 0xff)
+    error_code = int(r.ctx_a & 0xffffffff)
+    cr2 = r.ctx_b
+    vec_name = TRAP_VECTOR_NAMES.get(vector, f"vector={vector}")
+
+    out: list[str] = []
+    repeat_label = "first occurrence" if r.repeat <= 1 else f"repeated {r.repeat}× (post-panic re-trap?)"
+    out.append(f"**Trap `{vec_name}` at RIP `0x{r.caller_rip:016x}`** — {repeat_label}.")
+    out.append("")
+
+    # Resolve RIP → file:line via addr2line.
+    sym_line = ""
+    file_part = ""
+    line_part = 0
+    if resolver is not None:
+        sym = resolver.resolve(r.caller_rip)
+        if sym and not sym.startswith("?? "):
+            sym_line = sym
+            out.append(f"Symbol: `{sym}`")
+            # Try to extract `(file:line)` from the addr2line output.
+            m = re.search(r"\(([^)]+):(\d+)\)|\bat\s+(\S+):(\d+)", sym)
+            if m:
+                file_part = m.group(1) or m.group(3) or ""
+                try:
+                    line_part = int(m.group(2) or m.group(4))
+                except (TypeError, ValueError):
+                    line_part = 0
+
+    # Decoded error code (#PF specifically; other vectors carry an
+    # error code with different bit semantics but we don't decode
+    # them here).
+    if vector == 14:
+        short, longd = decode_pf_error_code(error_code)
+        out.append(f"CR2: `0x{cr2:016x}`")
+        out.append(f"Error code: `0x{error_code:x}` ({short} — {longd})")
+    elif vector in (13, 17):  # #GP / #AC carry segment selectors
+        out.append(f"Error code: `0x{error_code:x}` (segment selector / index)")
+    else:
+        if error_code != 0:
+            out.append(f"Error code: `0x{error_code:x}`")
+    out.append("")
+
+    # Source context window.
+    resolved_source: Path | None = None
+    if file_part and line_part > 0 and repo_root is not None:
+        resolved_source = _resolve_source_path(file_part, repo_root)
+        if resolved_source is not None:
+            ctx = read_source_context(resolved_source, line_part, window=8)
+            if ctx:
+                rel = resolved_source.relative_to(repo_root) if resolved_source.is_relative_to(repo_root) else resolved_source
+                out.append(f"**Source context** (`{rel}:{line_part}`):")
+                out.append("")
+                out.append("```cpp")
+                out.extend(ctx)
+                out.append("```")
+                out.append("")
+
+    # Disassembly window.
+    disasm = disassemble_at(elf_path, r.caller_rip, count=4)
+    if disasm:
+        out.append("**Disassembly at fault RIP**:")
+        out.append("")
+        out.append("```asm")
+        out.extend(disasm)
+        out.append("```")
+        out.append("")
+
+    # Classified fault pattern + proposed shape.
+    pattern = classify_trap(vector, error_code, cr2)
+    if pattern is not None and pattern in TRAP_FIX_TEMPLATES:
+        condition, before_line, template = TRAP_FIX_TEMPLATES[pattern]
+        out.append(f"**Recognised pattern**: {condition}")
+        out.append("")
+        out.append(before_line)
+        out.append("")
+        out.append("```cpp")
+        # Substitute {faulting_line} with the actual faulting source
+        # line if we resolved one; else leave the placeholder.
+        sub = ""
+        if resolved_source is not None and line_part > 0:
+            try:
+                src = resolved_source.read_text(encoding="utf-8", errors="replace").splitlines()
+                if 0 < line_part <= len(src):
+                    sub = src[line_part - 1].strip()
+            except OSError:
+                pass
+        rendered = template.replace("{faulting_line}", sub or "<faulting expression>")
+        out.append(rendered)
+        out.append("```")
+        out.append("")
+        out.append(
+            "**REVIEW**: This is a *proposed* defensive shape, not an "
+            "auto-applied fix (Decision #016). Confirm the pattern "
+            "match is correct for this site before adopting the "
+            "guard — a `nullptr` may be the legitimate empty case "
+            "the caller relies on, a SMAP fault may be a legitimate "
+            "user-pointer access that needs a different fix, etc."
+        )
+    else:
+        out.append(
+            f"**No automatic fix-pattern match** for vector={vector}, "
+            f"err=0x{error_code:x}, cr2=0x{cr2:x}. The captured "
+            f"source + disassembly windows above are the reviewer's "
+            f"starting point."
+        )
+    out.append("")
+
+    out.append("---")
+    out.append("Journal record:")
+    out.append("```")
+    out.append(f"seq         = {r.seq}")
+    out.append(f"repeat      = {r.repeat}")
+    out.append(f"caller_rip  = 0x{r.caller_rip:016x}  (faulting RIP)")
+    out.append(f"ctx_a       = 0x{r.ctx_a:016x}  (vector<<32 | error_code)")
+    out.append(f"ctx_b       = 0x{r.ctx_b:016x}  (CR2 for #PF; 0 otherwise)")
+    out.append(f"source_pin  = {r.source_pin!r}")
+    out.append(f"hint        = {r.hint!r}")
+    out.append("```")
+
+    title = f"Trap `{vec_name}` at `{r.source_pin}`{_new_tag(r)}"
+    return Action(kind="note", title=title, body="\n".join(out), filename=None)
+
+
+# =================================================================
+# Real semantic-change patch generators for runtime-observed faults.
+# =================================================================
+#
+# Every generator in this block follows the same discipline:
+#   1. Resolve caller_rip / source_pin to a real `(file, line)`.
+#   2. Read the source line to confirm the expected pattern (a
+#      pointer deref, an allocation assignment, a division, etc.).
+#   3. Generate a unified diff that REPLACES that line with a
+#      guarded version, wrapping the change in `#if 0 ... #endif`
+#      so applying the patch is BEHAVIOURALLY a no-op until the
+#      reviewer affirmatively flips the gate.
+#   4. Refuse to fire (return None) when the source line doesn't
+#      match the expected shape — the patch generator MUST NOT
+#      produce a wrong candidate; a brief-only fallback is always
+#      strictly better than a confidently-wrong diff.
+#
+# The `#if 0` brake is the same shape as synth_kassert_demote_patch:
+# applying the patch makes the proposal visible in source review,
+# without changing kernel behaviour. The reviewer then flips it.
+
+
+# Regex to extract the dereferenced pointer name from a faulting
+# source line. Matches `foo->bar`, `(*foo).bar`, `*foo`, and the
+# write variants. Captures the bare identifier so the guard can
+# reference it. Conservative: only matches simple identifiers, not
+# expressions — a complex faulting line falls through to brief-only.
+_DEREF_PTR_RE = re.compile(
+    r"\b(?P<ptr>[A-Za-z_][A-Za-z0-9_]*)\s*"
+    r"(?:->|\[\s*[^\]]+\s*\]\s*=|\.[A-Za-z_])"
+)
+_STAR_DEREF_RE = re.compile(
+    r"\*\(?\s*(?P<ptr>[A-Za-z_][A-Za-z0-9_]*)"
+)
+
+# Regex to find the divisor side of a division expression. The kernel
+# style uses `a / b` or `a % b` with whitespace; we extract the rhs
+# identifier. Won't recognise complex expressions like `a / (b + c)`;
+# those fall through to brief-only.
+_DIV_OP_RE = re.compile(
+    r"[/%]\s*(?P<div>[A-Za-z_][A-Za-z0-9_]*)\b"
+)
+
+
+def _detect_return_type(lines: list[str], statement_idx: int) -> str | None:
+    """Walk backwards from `statement_idx` to the enclosing function
+    header line. Return one of:
+      'result'   — function returns Result<...>
+      'void'     — function returns void
+      'pointer'  — function returns T*
+      'integer'  — function returns int / u32 / i64 / errno-like
+      None       — couldn't tell
+    The classification picks the right "graceful return" shape for
+    the guard the synthesiser emits.
+    """
+    for j in range(statement_idx, max(statement_idx - 80, -1), -1):
+        ln = lines[j]
+        stripped_no_comment = re.sub(r"//.*$", "", ln).rstrip()
+        if "Result<" in ln:
+            return "result"
+        if re.match(r"^\s*void\s+\w+\s*\(", ln) or re.match(r"^void\s+\w+\s*\(", ln):
+            return "void"
+        # Pointer return: `T* funcname(` at column 0
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_:<>]*\s*\*\s+\w+\s*\(", ln):
+            return "pointer"
+        # Integer return: `int funcname(` / `i64 funcname(` / `u32 funcname(`
+        if re.match(r"^(int|i32|i64|u32|u64|i8|i16|u8|u16|long|short|size_t|ssize_t)\s+\w+\s*\(", ln):
+            return "integer"
+        if stripped_no_comment.endswith("}") and j != statement_idx and _leading_spaces(ln) == 0:
+            return None  # Walked out of enclosing function.
+    return None
+
+
+def _guard_return_for(return_type: str | None, comment: str) -> str | None:
+    """Return the "graceful return" statement matching the function's
+    return type. None when there's no safe equivalent."""
+    if return_type == "result":
+        return "        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidState};"
+    if return_type == "void":
+        return f"        return;  // {comment}"
+    if return_type == "pointer":
+        return f"        return nullptr;  // {comment}"
+    if return_type == "integer":
+        return f"        return -1;  // {comment}"
+    return None
+
+
+def _gated_guard_diff(
+    file_rel: str,
+    lines: list[str],
+    line_idx: int,
+    cond_expr: str,
+    return_stmt: str,
+    klog_subsys: str,
+    klog_msg: str,
+    review_header: list[str],
+) -> str:
+    """Build a `#if 0 ... #endif`-gated guard block REPLACING the
+    line at `line_idx`. Same shape across detector kinds — the
+    only thing that varies is the condition + return statement.
+    """
+    indent = _leading_spaces(lines[line_idx])
+    sp = " " * indent
+    target_line = lines[line_idx]
+    new_block: list[str] = []
+    for header in review_header:
+        new_block.append(f"{sp}// {header}\n")
+    new_block.append(f"{sp}#if 0\n")
+    new_block.append(f"{sp}if ({cond_expr})\n")
+    new_block.append(f"{sp}{{\n")
+    new_block.append(
+        f'{sp}    KLOG_ONCE_WARN("{_escape_cpp_string(klog_subsys)}", '
+        f'"{_escape_cpp_string(klog_msg)}");\n'
+    )
+    new_block.append(f"{return_stmt}\n")
+    new_block.append(f"{sp}}}\n")
+    new_block.append(target_line if target_line.endswith("\n") else target_line + "\n")
+    new_block.append(f"{sp}#else\n")
+    new_block.append(target_line if target_line.endswith("\n") else target_line + "\n")
+    new_block.append(f"{sp}#endif\n")
+    return _hunk_replace_with_block(file_rel, lines, line_idx, new_block)
+
+
+def synth_trap_null_deref_patch(r: FixRecord, resolver: SymbolResolver | None,
+                                repo_root: Path) -> str | None:
+    """Generate a real applicable patch that inserts a null-pointer
+    guard BEFORE the source line that took a #PF null-dereference.
+
+    Pattern recognition:
+      * detector == trap_capture
+      * vector == 14 (#PF)
+      * CR2 in the low page (< 0x1000)
+      * source line contains a recognisable pointer dereference
+
+    The patch wraps the change in `#if 0` (the brake) and renders:
+      if (ptr == nullptr) {
+          KLOG_ONCE_WARN("<subsys>", "<msg>");
+          return <type-appropriate graceful>;
+      }
+      <original line>
+
+    Refuses to fire when:
+      * Source line doesn't parse to a single dereferenced identifier
+      * The enclosing function's return type isn't one of
+        {Result, void, pointer, integer} (no safe graceful return)
+      * A KLOG_ONCE_WARN with this subsys already exists nearby
+        (idempotency — re-running won't stack)
+    """
+    if resolver is None:
+        return None
+    vector = int((r.ctx_a >> 32) & 0xff)
+    cr2 = r.ctx_b
+    if vector != 14 or cr2 >= 0x1000:
+        return None
+
+    sym = resolver.resolve(r.caller_rip)
+    if not sym or sym.startswith("?? "):
+        return None
+    m = re.search(r"\(([^)]+):(\d+)\)|\bat\s+(\S+):(\d+)", sym)
+    if not m:
+        return None
+    file_part = m.group(1) or m.group(3) or ""
+    try:
+        line_part = int(m.group(2) or m.group(4))
+    except (TypeError, ValueError):
+        return None
+    if not file_part or line_part <= 0:
+        return None
+
+    path = _resolve_source_path(file_part, repo_root)
+    if path is None or path.suffix not in _MARKER_SOURCE_SUFFIXES:
+        return None
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines(keepends=True)
+    if line_part > len(lines):
+        return None
+
+    target = lines[line_part - 1]
+    ptr_match = _DEREF_PTR_RE.search(target) or _STAR_DEREF_RE.search(target)
+    if ptr_match is None:
+        return None
+    ptr_name = ptr_match.group("ptr")
+
+    rt = _detect_return_type(lines, line_part - 1)
+    return_stmt = _guard_return_for(rt, f"null-deref guard from fix-journal")
+    if return_stmt is None:
+        return None
+
+    # Idempotency check.
+    klog_subsys = file_part.rsplit("/", 1)[0] if "/" in file_part else Path(file_part).stem
+    win_start = max(0, line_part - 5)
+    win_end = min(len(lines), line_part + 5)
+    for j in range(win_start, win_end):
+        if "KLOG_ONCE_WARN" in lines[j] and ptr_name in lines[j]:
+            return None
+
+    file_rel = path.relative_to(repo_root).as_posix()
+    review_header = [
+        f"REVIEW: null-deref guard synthesised by fix-journal cycle.",
+        f"Trap #PF at CR2=0x{cr2:x} (repeat={r.repeat}). The guard below",
+        f"covers the case `{ptr_name} == nullptr`. Flip the `#if 0` to `#if 1`",
+        f"to activate; the legitimate-null caller may need a different shape.",
+    ]
+    return _gated_guard_diff(
+        file_rel, lines, line_part - 1,
+        cond_expr=f"{ptr_name} == nullptr",
+        return_stmt=return_stmt,
+        klog_subsys=klog_subsys,
+        klog_msg=f"null-deref guard fired: {ptr_name} was null",
+        review_header=review_header,
+    )
+
+
+def synth_trap_div_zero_patch(r: FixRecord, resolver: SymbolResolver | None,
+                              repo_root: Path) -> str | None:
+    """Generate a real applicable patch that inserts a divisor != 0
+    guard BEFORE the source line that took a #DE divide-by-zero.
+
+    Same #if 0-gated discipline as synth_trap_null_deref_patch.
+    Refuses to fire when the source line doesn't expose a single
+    identifier on the rhs of `/` or `%`.
+    """
+    if resolver is None:
+        return None
+    vector = int((r.ctx_a >> 32) & 0xff)
+    if vector != 0:  # #DE only
+        return None
+
+    sym = resolver.resolve(r.caller_rip)
+    if not sym or sym.startswith("?? "):
+        return None
+    m = re.search(r"\(([^)]+):(\d+)\)|\bat\s+(\S+):(\d+)", sym)
+    if not m:
+        return None
+    file_part = m.group(1) or m.group(3) or ""
+    try:
+        line_part = int(m.group(2) or m.group(4))
+    except (TypeError, ValueError):
+        return None
+    if not file_part or line_part <= 0:
+        return None
+
+    path = _resolve_source_path(file_part, repo_root)
+    if path is None or path.suffix not in _MARKER_SOURCE_SUFFIXES:
+        return None
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines(keepends=True)
+    if line_part > len(lines):
+        return None
+
+    target = lines[line_part - 1]
+    div_match = _DIV_OP_RE.search(target)
+    if div_match is None:
+        return None
+    div_name = div_match.group("div")
+
+    rt = _detect_return_type(lines, line_part - 1)
+    return_stmt = _guard_return_for(rt, f"div-zero guard from fix-journal")
+    if return_stmt is None:
+        return None
+
+    klog_subsys = file_part.rsplit("/", 1)[0] if "/" in file_part else Path(file_part).stem
+    win_start = max(0, line_part - 5)
+    win_end = min(len(lines), line_part + 5)
+    for j in range(win_start, win_end):
+        if "KLOG_ONCE_WARN" in lines[j] and div_name in lines[j]:
+            return None
+
+    file_rel = path.relative_to(repo_root).as_posix()
+    review_header = [
+        f"REVIEW: divide-zero guard synthesised by fix-journal cycle.",
+        f"Trap #DE (repeat={r.repeat}). Guard below covers `{div_name} == 0`.",
+        f"Flip the `#if 0` to `#if 1` to activate; a legitimate zero may",
+        f"need a different shape (saturation, alternative computation).",
+    ]
+    return _gated_guard_diff(
+        file_rel, lines, line_part - 1,
+        cond_expr=f"{div_name} == 0",
+        return_stmt=return_stmt,
+        klog_subsys=klog_subsys,
+        klog_msg=f"div-zero guard fired: {div_name} was 0",
+        review_header=review_header,
+    )
+
+
+# Regex matching a kernel allocation assignment like:
+#   auto* p = KMalloc(...);
+#   Foo* f = static_cast<Foo*>(KMalloc(...));
+#   void* mem = KMallocAligned(...);
+# Captures the variable name so the synthesised guard can reference it.
+_ALLOC_ASSIGN_RE = re.compile(
+    r"^\s*(?:[A-Za-z_][\w:<>\s,]*?\*\s*|auto\s*\*?\s*)"
+    r"(?P<var>[A-Za-z_]\w*)\s*=\s*[^;]*\b"
+    r"(?:KMalloc|KMallocAligned|KCalloc|AllocateFrame|AllocateFrameNode|KZalloc)\s*\("
+)
+
+
+def synth_oom_nullcheck_patch(r: FixRecord, resolver: SymbolResolver | None,
+                              repo_root: Path) -> str | None:
+    """Generate a real applicable patch that inserts a nullcheck AFTER
+    an allocation site whose primitive returned null (recorded by
+    kheap.cpp / frame_allocator.cpp via FixJournalRecordAtCaller).
+
+    The new FixJournalRecordAtCaller wiring means `caller_rip` is now
+    the upstream `auto* p = KMalloc(...);` line — addr2line resolves
+    to that statement and the synthesiser inserts:
+
+      auto* p = KMalloc(...);
+      #if 0
+      if (p == nullptr) {
+          KLOG_ONCE_WARN("subsys", "OOM nullcheck fired: p");
+          return Err{OutOfMemory};
+      }
+      #endif
+
+    Refuses to fire when:
+      * Source line doesn't match the allocation-assignment shape.
+      * Function return type isn't `Result<...>` (the only graceful
+        return for an OOM is propagating ErrorCode::OutOfMemory).
+      * A nullcheck already follows the allocation within 4 lines.
+    """
+    if resolver is None:
+        return None
+    if r.source_pin not in ("mm/kheap", "mm/frame-alloc"):
+        return None
+
+    sym = resolver.resolve(r.caller_rip)
+    if not sym or sym.startswith("?? "):
+        return None
+    m = re.search(r"\(([^)]+):(\d+)\)|\bat\s+(\S+):(\d+)", sym)
+    if not m:
+        return None
+    file_part = m.group(1) or m.group(3) or ""
+    try:
+        line_part = int(m.group(2) or m.group(4))
+    except (TypeError, ValueError):
+        return None
+    if not file_part or line_part <= 0:
+        return None
+
+    path = _resolve_source_path(file_part, repo_root)
+    if path is None or path.suffix not in _MARKER_SOURCE_SUFFIXES:
+        return None
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines(keepends=True)
+    if line_part > len(lines):
+        return None
+
+    target = lines[line_part - 1]
+    alloc = _ALLOC_ASSIGN_RE.match(target)
+    if alloc is None:
+        return None
+    var = alloc.group("var")
+
+    rt = _detect_return_type(lines, line_part - 1)
+    if rt != "result":
+        return None  # OOM nullcheck only safe in Result-returning fns
+
+    # Idempotency: skip if the next 4 lines already check var for null.
+    for j in range(line_part, min(line_part + 4, len(lines))):
+        if re.search(rf"\b{re.escape(var)}\b\s*==\s*nullptr", lines[j]):
+            return None
+        if re.search(rf"!\s*{re.escape(var)}\b", lines[j]):
+            return None
+
+    indent = _leading_spaces(target)
+    sp = " " * indent
+    new_block = []
+    new_block.append(target if target.endswith("\n") else target + "\n")
+    new_block.append(f"{sp}// REVIEW: OOM nullcheck synthesised by fix-journal cycle.\n")
+    new_block.append(
+        f"{sp}// `{r.source_pin}` returned null at this call site (repeat={r.repeat}).\n"
+    )
+    new_block.append(f"{sp}// Flip the `#if 0` to `#if 1` to activate the check.\n")
+    new_block.append(f"{sp}#if 0\n")
+    new_block.append(f"{sp}if ({var} == nullptr)\n")
+    new_block.append(f"{sp}{{\n")
+    new_block.append(
+        f'{sp}    KLOG_ONCE_WARN("{_escape_cpp_string(r.source_pin)}", '
+        f'"OOM nullcheck fired: {var} == nullptr");\n'
+    )
+    new_block.append(
+        f"{sp}    return ::duetos::core::Err{{::duetos::core::ErrorCode::OutOfMemory}};\n"
+    )
+    new_block.append(f"{sp}}}\n")
+    new_block.append(f"{sp}#endif\n")
+
+    file_rel = path.relative_to(repo_root).as_posix()
+    # Replace the allocation line with [original + nullcheck block].
+    return _hunk_replace_with_block(file_rel, lines, line_part - 1, new_block)
+
+
+def synth_user_fault_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
+    """Generate a brief for a ring-3 UserFault record.
+
+    The caller_rip is a USER address; addr2line against the kernel
+    ELF won't resolve it. The brief captures the vector / error code
+    / CR2 decoding (same as TrapCapture) AND emits triage paths a
+    reviewer can take:
+
+    1. If the same task is firing repeatedly: the EXE is wild-jumping
+       on every spawn — investigate the binary itself or the PE
+       loader's relocation pass for the EXE.
+    2. If many distinct RIPs from one task: the EXE is heap-corrupting
+       a function-pointer table — investigate the heap allocator path
+       the EXE uses.
+    3. If many distinct tasks at the same RIP: a shared DLL is wrong
+       — investigate the DLL's exports / thunks_table.inc entries.
+
+    Patch generation here is deliberately conservative — generating
+    code in response to a userland crash would mean either changing
+    a USER binary (out of repo scope) or quirking the loader (a
+    semantic change requiring per-EXE analysis). Brief only.
+    """
+    vector = int((r.ctx_a >> 32) & 0xff)
+    error_code = int(r.ctx_a & 0xffffffff)
+    cr2 = r.ctx_b
+    vec_name = TRAP_VECTOR_NAMES.get(vector, f"vector={vector}")
+
+    out: list[str] = []
+    repeat_label = "first observation" if r.repeat <= 1 else f"{r.repeat} crashes since boot"
+    out.append(f"**Ring-3 `{vec_name}` at user RIP `0x{r.caller_rip:016x}`** — {repeat_label}.")
+    out.append("")
+    out.append(
+        "The kernel killed the offending ring-3 task (a .dmp was "
+        "egressed via debugcon and persisted to the NVMe crash-dump "
+        "reserved region — open it in WinDbg / VS Code for the full "
+        "GPR + stack frame). This record persists the *fact of the "
+        "crash* into the journal so a chronically-broken PE/ELF "
+        "binary is visible across boots."
+    )
+    out.append("")
+
+    if vector == 14:
+        short, longd = decode_pf_error_code(error_code)
+        out.append(f"CR2: `0x{cr2:016x}`")
+        out.append(f"Error code: `0x{error_code:x}` ({short} — {longd})")
+    elif error_code != 0:
+        out.append(f"Error code: `0x{error_code:x}`")
+    out.append("")
+
+    out.append("**Triage paths:**")
+    out.append("")
+    out.append(
+        "1. *Same task firing repeatedly.* The EXE is wild-jumping on "
+        "every spawn — wider context in `dmesg` ('task : '/'pid :' "
+        "fields next to each fault). Often a broken PE relocation, a "
+        "missing import that resolved to a wild address, or a CRT "
+        "init path that ran on a half-initialized heap."
+    )
+    out.append(
+        "2. *Many distinct user RIPs from one task.* The EXE is "
+        "heap-corrupting a function-pointer table — the most common "
+        "shape is a vtable smash from a `delete[]` on a malloc'd "
+        "buffer (or vice versa). Cross-reference with leak-detector "
+        "records."
+    )
+    out.append(
+        "3. *Many distinct tasks at the same user RIP.* A shared DLL "
+        "is wrong — the same call site in `kernel32` / `ntdll` / a "
+        "vendored DLL fails in every consumer. Likely a missing or "
+        "mis-implemented thunk; cross-reference UnmappedThunk "
+        "records in this journal."
+    )
+    out.append("")
+
+    # Pattern hints — if CR2 looks like a known wild-pointer
+    # sentinel, name it.
+    if vector == 14:
+        if cr2 == 0xFFFFFFFFFFFFFFFF or cr2 == 0xFFFFFFFF00000000:
+            out.append(
+                "**CR2 sentinel**: `0x{cr2:x}` is a wild `(u32)-1` "
+                "zero-extended — the EXE dereferenced a `(unsigned)-1` "
+                "that the caller didn't recognise as a 'no result' "
+                "sentinel.".format(cr2=cr2)
+            )
+            out.append("")
+        elif cr2 == 0xCCCCCCCCCCCCCCCC or cr2 == 0xDEADBEEFDEADBEEF:
+            out.append(
+                f"**CR2 sentinel**: `0x{cr2:x}` is a recognisable "
+                "uninitialized-memory poison value. The EXE read a "
+                "field that nothing wrote — investigate the heap "
+                "allocator path the EXE uses or a missing init in "
+                "the constructor."
+            )
+            out.append("")
+
+    out.append("---")
+    out.append("Journal record:")
+    out.append("```")
+    out.append(f"seq         = {r.seq}")
+    out.append(f"repeat      = {r.repeat}")
+    out.append(f"caller_rip  = 0x{r.caller_rip:016x}  (USER RIP — kernel ELF won't resolve)")
+    out.append(f"ctx_a       = 0x{r.ctx_a:016x}  (vector<<32 | error_code)")
+    out.append(f"ctx_b       = 0x{r.ctx_b:016x}  (CR2 for #PF; 0 otherwise)")
+    out.append(f"source_pin  = {r.source_pin!r}")
+    out.append(f"hint        = {r.hint!r}")
+    out.append("```")
+
+    title = f"User-fault `{vec_name}` (×{r.repeat}){_new_tag(r)}"
+    return Action(kind="note", title=title, body="\n".join(out), filename=None)
+
+
+# Repeat-count threshold above which a KASSERT brief proposes
+# converting the assertion to a graceful return — at this rate the
+# invariant is clearly not holding in practice and the right fix is
+# usually to handle the case explicitly rather than panic.
+DEFAULT_KASSERT_DEMOTE_THRESHOLD = 3
+
+
+def synth_kassert_brief(r: FixRecord, resolver: SymbolResolver | None = None,
+                        repo_root: Path | None = None,
+                        demote_threshold: int = DEFAULT_KASSERT_DEMOTE_THRESHOLD) -> Action:
+    """Generate a brief for a KassertFail record (a fired KASSERT or
+    explicit core::Panic call).
+
+    The caller_rip is the KASSERT statement (or the Panic call site).
+    addr2line typically resolves it to the exact line. The brief
+    captures the source context around the assert AND — for a
+    recurring assert (repeat >= demote_threshold) — proposes a
+    *defensive* conversion shape: replace the KASSERT with a graceful
+    return + a KLOG_ONCE_WARN. A recurring assert is by definition
+    an invariant the upstream caller violates; panicking on it
+    converts a recoverable miss into a halt.
+
+    Per Decision #016 the proposed shape is REVIEW-framed text in
+    the brief — the reviewer reads, decides whether the invariant
+    can legitimately be relaxed, and applies the demotion (or fixes
+    the upstream caller) by hand.
+    """
+    out: list[str] = []
+    repeat_label = "first observation" if r.repeat <= 1 else f"{r.repeat} fires since boot"
+    out.append(f"**KASSERT / Panic** in subsystem `{r.source_pin}` — {repeat_label}.")
+    out.append("")
+    out.append(f"Message: `{r.hint}`")
+    if r.ctx_b != 0:
+        out.append(f"Captured value (PanicWithValue ctx_b): `0x{r.ctx_b:x}` ({r.ctx_b})")
+    out.append("")
+
+    # Resolve caller_rip → file:line.
+    file_part = ""
+    line_part = 0
+    if resolver is not None:
+        sym = resolver.resolve(r.caller_rip)
+        if sym and not sym.startswith("?? "):
+            out.append(f"Assert site: `{sym}`")
+            m = re.search(r"\(([^)]+):(\d+)\)|\bat\s+(\S+):(\d+)", sym)
+            if m:
+                file_part = m.group(1) or m.group(3) or ""
+                try:
+                    line_part = int(m.group(2) or m.group(4))
+                except (TypeError, ValueError):
+                    line_part = 0
+
+    # Source context window — same shape as TrapCapture.
+    resolved_source: Path | None = None
+    if file_part and line_part > 0 and repo_root is not None:
+        resolved_source = _resolve_source_path(file_part, repo_root)
+        if resolved_source is not None:
+            ctx = read_source_context(resolved_source, line_part, window=8)
+            if ctx:
+                rel = (
+                    resolved_source.relative_to(repo_root)
+                    if resolved_source.is_relative_to(repo_root)
+                    else resolved_source
+                )
+                out.append("")
+                out.append(f"**Source context** (`{rel}:{line_part}`):")
+                out.append("")
+                out.append("```cpp")
+                out.extend(ctx)
+                out.append("```")
+                out.append("")
+
+    # Proposed conversion shape for recurring asserts.
+    if r.repeat >= demote_threshold:
+        # Extract the faulting line text for substitution.
+        sub = ""
+        if resolved_source is not None and line_part > 0:
+            try:
+                src = resolved_source.read_text(encoding="utf-8", errors="replace").splitlines()
+                if 0 < line_part <= len(src):
+                    sub = src[line_part - 1].strip()
+            except OSError:
+                pass
+
+        out.append(
+            f"**Recurring assert ({r.repeat}× since boot)** — the "
+            f"invariant is clearly not holding in practice. Proposed "
+            f"defensive conversion:"
+        )
+        out.append("")
+        out.append("```cpp")
+        out.append("// REVIEW: KASSERT is firing repeatedly; consider:")
+        out.append("//")
+        out.append(f"//   Before:  {sub or '<the KASSERT statement>'}")
+        out.append("//   After:   if (!(cond)) {")
+        out.append(
+            f"//                KLOG_ONCE_WARN(\"{_escape_cpp_string(r.source_pin)}\", "
+            f"\"demoted assert: {_escape_cpp_string(r.hint[:50])}\");"
+        )
+        out.append("//                /* graceful return / propagate an error code */")
+        out.append("//                return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidState};")
+        out.append("//            }")
+        out.append("```")
+        out.append("")
+        out.append(
+            "**REVIEW**: Demoting a KASSERT removes a kernel "
+            "invariant check — the call site that violates the "
+            "invariant may be relying on the panic to surface the "
+            "bug. Confirm the assert is genuinely too strict (the "
+            "case it catches is a *legitimate* condition the caller "
+            "can recover from) BEFORE demoting. The alternative — "
+            "fix the upstream caller so the invariant holds — is "
+            "almost always the right answer."
+        )
+        out.append("")
+
+    out.append("---")
+    out.append("Journal record:")
+    out.append("```")
+    out.append(f"seq         = {r.seq}")
+    out.append(f"repeat      = {r.repeat}")
+    out.append(f"caller_rip  = 0x{r.caller_rip:016x}  (Panic call site)")
+    out.append(f"ctx_a       = 0x{r.ctx_a:016x}  (= caller_rip)")
+    out.append(f"ctx_b       = 0x{r.ctx_b:016x}  (PanicWithValue value; 0 for plain Panic)")
+    out.append(f"source_pin  = {r.source_pin!r}  (subsystem)")
+    out.append(f"hint        = {r.hint!r}  (assertion message)")
+    out.append("```")
+
+    title = f"KASSERT [{r.source_pin}] (×{r.repeat}){_new_tag(r)} — `{r.hint[:60]}`"
+    return Action(kind="note", title=title, body="\n".join(out), filename=None)
+
+
+# Regex that locates a KASSERT / KASSERT_WITH_VALUE call. Captures
+# (full_call_text, condition, subsys, msg). The condition can span
+# commas inside (e.g. `foo(a, b) == 0`); we rely on the fact that
+# every KASSERT line ends with `, "subsys", "msg")` so we anchor on
+# the closing quoted args.
+_KASSERT_RE = re.compile(
+    r'\b(KASSERT(?:_WITH_VALUE)?)\s*\((.*?),\s*"([^"]*)"\s*,\s*"([^"]*)"'
+    r'(?:\s*,\s*([^)]+))?\)\s*;?'
+)
+
+
+def synth_kassert_demote_patch(r: FixRecord, resolver: SymbolResolver | None,
+                               repo_root: Path) -> str | None:
+    """Generate a unified diff that demotes a high-repeat KASSERT to a
+    KLOG_ONCE_WARN + graceful return.
+
+    This is the only place in the fix-journal pipeline that mutates
+    *kernel semantics* — every other auto-patch is additive
+    observability. The demotion is gated on:
+      * repeat_count >= the demote threshold (default 3; the user
+        asked for the threshold to be visible so it's --kassert-demote
+        on the CLI),
+      * the source line at caller_rip resolves to a single recognisable
+        KASSERT or KASSERT_WITH_VALUE call (we don't try to demote
+        macros nested inside ?:, function calls, etc.),
+      * the surrounding function returns a Result<T, E> or a similar
+        result-style type — we conservatively detect this by checking
+        that the enclosing function signature contains "Result<"
+        ANYWHERE on the line introducing the function. When we can't
+        confirm a Result return type the patch is suppressed (the
+        graceful-return shape needs a typed Err{...}; a void-return
+        function would need a different shape we don't try to guess).
+
+    The generated patch is wrapped in `// REVIEW:` comments AND the
+    actual demotion is gated behind `#if 0 ... #endif` so applying
+    the patch DOES NOT change behaviour until a reviewer also flips
+    the `#if 0` to `#if 1`. That's a deliberate brake: a mechanical
+    KASSERT demotion that silently shipped into the kernel would
+    convert an audible bug into a silent one.
+    """
+    if resolver is None:
+        return None
+
+    sym = resolver.resolve(r.caller_rip)
+    if not sym or sym.startswith("?? "):
+        return None
+    m = re.search(r"\(([^)]+):(\d+)\)|\bat\s+(\S+):(\d+)", sym)
+    if not m:
+        return None
+    file_part = m.group(1) or m.group(3) or ""
+    try:
+        line_part = int(m.group(2) or m.group(4))
+    except (TypeError, ValueError):
+        return None
+    if not file_part or line_part <= 0:
+        return None
+
+    path = _resolve_source_path(file_part, repo_root)
+    if path is None or not path.exists():
+        return None
+    if path.suffix not in _MARKER_SOURCE_SUFFIXES:
+        return None
+
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines(keepends=True)
+    if line_part > len(lines):
+        return None
+
+    target_line = lines[line_part - 1]
+    km = _KASSERT_RE.search(target_line)
+    if km is None:
+        # Try one line earlier — clang-format may have wrapped the
+        # KASSERT across two lines, in which case addr2line gives the
+        # statement's leading line.
+        if line_part >= 2:
+            target_line = lines[line_part - 2] + lines[line_part - 1]
+            km = _KASSERT_RE.search(target_line)
+            if km is None:
+                return None
+            line_part -= 1
+            target_line = lines[line_part - 1]
+        else:
+            return None
+
+    macro = km.group(1)
+    condition = km.group(2).strip()
+    subsys = km.group(3)
+    msg = km.group(4)
+    value_arg = (km.group(5) or "").strip() if macro == "KASSERT_WITH_VALUE" else ""
+
+    # Conservative Result-return check: scan back up to 80 lines for a
+    # function-header line containing `Result<` BEFORE the next
+    # outer `}` at column 0. If we don't see one, suppress.
+    returns_result = False
+    for j in range(line_part - 1, max(line_part - 80, -1), -1):
+        ln = lines[j]
+        # A function definition header is a non-indented line ending in `{`
+        # (after stripping `// ...` comments).
+        stripped = re.sub(r"//.*$", "", ln).rstrip()
+        if "Result<" in ln:
+            returns_result = True
+            break
+        if stripped.endswith("}") and j != line_part - 1 and _leading_spaces(ln) == 0:
+            # Walked past the enclosing function without seeing
+            # Result<. Stop.
+            break
+    if not returns_result:
+        return None
+
+    # Idempotency: if the source line ALREADY contains a sibling
+    # `KLOG_ONCE_WARN` for this subsys+msg, skip.
+    window_start = max(0, line_part - 5)
+    window_end = min(len(lines), line_part + 5)
+    for j in range(window_start, window_end):
+        if "KLOG_ONCE_WARN" in lines[j] and subsys in lines[j]:
+            return None
+
+    indent = _leading_spaces(target_line)
+    if indent == 0:
+        return None
+
+    # Build the demotion block. We wrap it in `#if 0` so applying the
+    # patch is safe — the reviewer must affirmatively flip the gate
+    # to take the new behaviour.
+    sp = " " * indent
+    err_code = "InvalidState"
+    new_block = []
+    new_block.append(f"{sp}// REVIEW: KASSERT demoted by fix-journal cycle (recurring assert,\n")
+    new_block.append(f"{sp}// repeat={r.repeat}). Flip the `#if 0` below to `#if 1` to\n")
+    new_block.append(f"{sp}// activate the demotion; leave it at `#if 0` to revert to the\n")
+    new_block.append(f"{sp}// original panicking behaviour. Verify the caller can recover\n")
+    new_block.append(f"{sp}// from a `{err_code}` error before activating.\n")
+    new_block.append(f"{sp}#if 0\n")
+    new_block.append(f"{sp}if (!({condition}))\n")
+    new_block.append(f"{sp}{{\n")
+    new_block.append(
+        f'{sp}    KLOG_ONCE_WARN("{_escape_cpp_string(subsys)}", '
+        f'"demoted KASSERT: {_escape_cpp_string(msg)}");\n'
+    )
+    new_block.append(
+        f"{sp}    return ::duetos::core::Err{{::duetos::core::ErrorCode::{err_code}}};\n"
+    )
+    new_block.append(f"{sp}}}\n")
+    new_block.append(f"{sp}#else\n")
+    # Reproduce the original line verbatim so the diff is balanced.
+    new_block.append(target_line if target_line.endswith("\n") else target_line + "\n")
+    new_block.append(f"{sp}#endif\n")
+
+    file_rel = path.relative_to(repo_root).as_posix()
+    return _hunk_replace_with_block(file_rel, lines, line_part - 1, new_block)
+
+
+def synth_cap_denial_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
+    """Generate a brief for a CapDenial record (cap-audit ring mirror).
+
+    Source pin shape is `cap.<MissingCapName>` (the kernel records
+    `CapName(event.missing)` after the `cap.` prefix). ctx_a carries
+    the syscall number that tripped the gate; ctx_b carries the proc
+    id of the caller. Repeat is the number of times THIS (cap,
+    syscall) pair was denied since the journal interned the row.
+
+    Cap denials are inherently policy questions — a brief is the
+    right artefact, not a patch. There are three legitimate fixes
+    the reviewer might land:
+
+      1. The caller is a sandboxed binary correctly being denied
+         (e.g. a Win32 PE asking for kCapFsWrite without grant). No
+         source change needed; the deny is the contract working.
+      2. The caller is a kernel helper that should hold the cap but
+         doesn't (proc spawn / boot RBAC dropped it). Fix the grant
+         at the spawn site or in `RbacInit`.
+      3. The cap surface itself is too coarse for the syscall —
+         split the cap or add a finer gate in the syscall handler.
+
+    The brief lays out which of the three this looks like, given
+    the repeat shape, and leaves the choice to the reviewer.
+    """
+    priority, priority_note = _priority_tier(r.repeat, kind_label="cap denial")
+    cap_name = ""
+    if r.source_pin.startswith("cap."):
+        cap_name = r.source_pin[len("cap."):]
+
+    lines: list[str] = []
+    lines.append(f"**Priority: {priority}** — {priority_note}")
+    lines.append("")
+    lines.append(
+        f"Capability `{cap_name or '(unknown)'}` was missing for "
+        f"syscall `0x{r.ctx_a:x}` issued by proc `{r.ctx_b}`. "
+        f"`{r.repeat}` denial(s) since boot for this (cap, syscall) pair."
+    )
+    lines.append("")
+    lines.append("**Choose the fix shape:**")
+    lines.append("")
+    lines.append(
+        "1. *Deny is correct.* The caller is sandboxed / untrusted "
+        "and lacks the cap by design. No source change — `dfix "
+        "mark-done` the record and move on. A recurring high-repeat "
+        "denial here is a signal the workload itself is misbehaving."
+    )
+    lines.append(
+        "2. *Grant is missing.* The caller is a kernel-spawned "
+        f"process that should hold `{cap_name or 'this cap'}` but "
+        f"doesn't. Inspect the spawn site (typically "
+        f"`kernel/proc/spawn.cpp` or `kernel/core/main.cpp`) and add "
+        f"the cap to the profile, OR extend the RBAC role at "
+        f"`kernel/security/rbac.cpp:RbacInit` to grant it."
+    )
+    lines.append(
+        f"3. *Cap is too coarse.* `{cap_name or 'This cap'}` covers "
+        f"more than this caller needs. Split into a finer gate at "
+        f"the syscall handler (`kernel/syscall/cap_gate.cpp` + the "
+        f"`Cap` enum in `kernel/proc/process.h`). ABI work — only "
+        f"warranted if a third-party binary needs the partial "
+        f"grant and won't accept the coarse one."
+    )
+
+    if r.repeat >= 100:
+        lines.append("")
+        lines.append(
+            f"**Deny storm ({r.repeat}× since boot)** — the caller "
+            f"is retrying. Cross-reference `kernel/security/cap_audit.cpp` "
+            f"`CapAuditCopyRecentDenials` for the per-call sequence + "
+            f"tick to localise the loop."
+        )
+
+    # Caller RIP — useful when the denial came from a kernel-helper
+    # spawn site (option 2) so the reviewer sees which thread.
+    if resolver is not None:
+        sym = resolver.resolve(r.caller_rip)
+        if sym and not sym.startswith("?? "):
+            lines.append("")
+            lines.append(f"Recorder site: `{sym}` (rip=`0x{r.caller_rip:016x}`)")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("Journal record:")
+    lines.append("```")
+    lines.append(f"seq         = {r.seq}")
+    lines.append(f"repeat      = {r.repeat}")
+    lines.append(f"caller_rip  = 0x{r.caller_rip:016x}")
+    lines.append(f"ctx_a       = 0x{r.ctx_a:016x}  (syscall number)")
+    lines.append(f"ctx_b       = 0x{r.ctx_b:016x}  (proc_id)")
+    lines.append(f"source_pin  = {r.source_pin!r}")
+    lines.append(f"hint        = {r.hint!r}")
+    lines.append("```")
+
+    title = f"Cap denial [{priority}]{_new_tag(r)} `{cap_name or r.source_pin}` (×{r.repeat})"
     return Action(kind="note", title=title, body="\n".join(lines), filename=None)
 
 
@@ -1551,7 +3177,15 @@ class Action:
 
 
 def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
-                 resolver: SymbolResolver | None = None) -> list[Action]:
+                 resolver: SymbolResolver | None = None,
+                 marker_log_threshold: int = DEFAULT_MARKER_LOG_THRESHOLD,
+                 enable_syscall_stub: bool = True,
+                 enable_marker_log: bool = True,
+                 elf_path: Path | None = None,
+                 kassert_demote_threshold: int = DEFAULT_KASSERT_DEMOTE_THRESHOLD,
+                 enable_kassert_demote: bool = False,
+                 enable_trap_guards: bool = False,
+                 enable_oom_nullcheck: bool = False) -> list[Action]:
     actions: list[Action] = []
     seen: set[tuple[str, str]] = set()
     fault_react_probe_done = False
@@ -1631,17 +3265,63 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
             num = parse_syscall_pin(r.source_pin)
             if num is None:
                 continue
+            # Try the additive observability patch first so the brief
+            # can reflect whether it's coming.
+            stub_diff = None
+            if enable_syscall_stub:
+                stub_diff = synth_unknown_syscall_stub_patch(r, num, repo_root)
             actions.append(
                 Action(
                     kind="note",
                     title=f"Implement syscall #0x{num:x}{_new_tag(r)}",
-                    body=synth_syscall_brief(r, num),
+                    body=synth_syscall_brief(r, num, stub_patch_planned=stub_diff is not None),
                     filename=None,
                 )
             )
+            # Additive observability patch: per-syscall stub arm so the
+            # next boot's record kind flips from `UnknownSyscall` (the
+            # catch-all) to `StubMarker:syscall:0xNN` (this acknowledged
+            # arm). Same -ENOSYS return; the reviewer flips the body to
+            # real semantics later. Skipped if disabled or if the
+            # synthesiser couldn't locate the catch-all default arm.
+            if stub_diff:
+                actions.append(
+                    Action(
+                        kind="patch",
+                        title=(
+                            f"Add stub arm for syscall 0x{num:x}"
+                            f" (acknowledged; returns -ENOSYS){_new_tag(r)}"
+                        ),
+                        body=stub_diff,
+                        filename=f"syscall-stub-0x{num:x}.patch",
+                    )
+                )
 
         elif r.detector_name in ("stub", "gap"):
             actions.append(synth_marker_hit_brief(r, resolver))
+            # Additive observability patch: for a hot marker (>=N hits)
+            # add a `KLOG_ONCE_WARN` line next to the existing
+            # `FIX_NOTE_*` so the gap is visible at serial level on the
+            # NEXT boot, without operators needing to dfix-poll. Skipped
+            # if disabled, if repeat is below the threshold, or if the
+            # synthesiser couldn't resolve the pin / find the macro
+            # call / detected an existing KLOG_ONCE_*.
+            if enable_marker_log and r.repeat >= marker_log_threshold:
+                log_diff = synth_marker_log_upgrade_patch(r, repo_root)
+                if log_diff:
+                    safe_pin = re.sub(r"[^A-Za-z0-9_.-]+", "-", r.source_pin)
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                f"Add KLOG_ONCE_WARN next to hot "
+                                f"{r.detector_name} at `{r.source_pin}` "
+                                f"(×{r.repeat}){_new_tag(r)}"
+                            ),
+                            body=log_diff,
+                            filename=f"marker-log-{safe_pin}.patch",
+                        )
+                    )
         elif r.detector_name == "soft_fault_recov":
             actions.append(synth_soft_fault_recov_brief(r, resolver))
             # A fault-react recovery record IS a detected runtime
@@ -1665,8 +3345,95 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
                             filename="fault-react-recover-probe.patch",
                         )
                     )
+            # OOM nullcheck patch — only for OOM-shaped soft_fault
+            # records (kheap / frame-allocator), gated by
+            # --enable-oom-nullcheck. The new
+            # FixJournalRecordAtCaller wiring on kheap.cpp /
+            # frame_allocator.cpp captures the UPSTREAM allocation
+            # site as caller_rip, so addr2line resolves to the
+            # `auto* p = KMalloc(...)` line the synthesiser keys
+            # off. Gated `#if 0` so applying is a no-op.
+            if enable_oom_nullcheck and r.source_pin in ("mm/kheap", "mm/frame-alloc"):
+                oom_diff = synth_oom_nullcheck_patch(r, resolver, repo_root)
+                if oom_diff:
+                    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", r.source_pin)
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                f"Insert OOM nullcheck after `{r.source_pin}` "
+                                f"allocation site (×{r.repeat}; gated "
+                                f"`#if 0`){_new_tag(r)}"
+                            ),
+                            body=oom_diff,
+                            filename=f"oom-nullcheck-{safe}.patch",
+                        )
+                    )
         elif r.detector_name == "loader_reject":
             actions.append(synth_loader_reject_brief(r, resolver))
+        elif r.detector_name == "cap_denial":
+            actions.append(synth_cap_denial_brief(r, resolver))
+        elif r.detector_name == "trap_capture":
+            actions.append(synth_trap_capture_brief(r, resolver, elf_path, repo_root))
+            # Real applicable patches gated behind --enable-trap-guards.
+            # Each one wraps the change in `#if 0 ... #endif` so applying
+            # is a no-op until the reviewer flips the gate.
+            if enable_trap_guards:
+                null_diff = synth_trap_null_deref_patch(r, resolver, repo_root)
+                if null_diff:
+                    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", r.source_pin)
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                f"Insert null-deref guard at `{r.source_pin}` "
+                                f"(×{r.repeat}; gated `#if 0`){_new_tag(r)}"
+                            ),
+                            body=null_diff,
+                            filename=f"trap-null-guard-{safe}.patch",
+                        )
+                    )
+                div_diff = synth_trap_div_zero_patch(r, resolver, repo_root)
+                if div_diff:
+                    safe = re.sub(r"[^A-Za-z0-9_.-]+", "-", r.source_pin)
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                f"Insert divide-zero guard at `{r.source_pin}` "
+                                f"(×{r.repeat}; gated `#if 0`){_new_tag(r)}"
+                            ),
+                            body=div_diff,
+                            filename=f"trap-divzero-guard-{safe}.patch",
+                        )
+                    )
+        elif r.detector_name == "user_fault":
+            actions.append(synth_user_fault_brief(r, resolver))
+        elif r.detector_name == "kassert_fail":
+            actions.append(synth_kassert_brief(r, resolver, repo_root,
+                                               demote_threshold=kassert_demote_threshold))
+            # Optional, opt-in: emit an actual demote patch (KASSERT
+            # -> if-guard + KLOG_ONCE_WARN + Err{...}, gated behind
+            # `#if 0` so applying the patch is safe and the
+            # reviewer affirmatively flips the gate). Only fires
+            # for recurring asserts AND only when a Result-return
+            # signature is detected nearby.
+            if enable_kassert_demote and r.repeat >= kassert_demote_threshold:
+                demote_diff = synth_kassert_demote_patch(r, resolver, repo_root)
+                if demote_diff:
+                    safe_subsys = re.sub(r"[^A-Za-z0-9_.-]+", "-", r.source_pin)
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                f"Demote recurring KASSERT in `{r.source_pin}` "
+                                f"to graceful return (×{r.repeat}; "
+                                f"gated behind `#if 0`){_new_tag(r)}"
+                            ),
+                            body=demote_diff,
+                            filename=f"kassert-demote-{safe_subsys}.patch",
+                        )
+                    )
     return actions
 
 
@@ -1803,7 +3570,114 @@ def main() -> int:
             "raw hex and a symbolize.sh hint."
         ),
     )
+    ap.add_argument(
+        "--marker-log-threshold",
+        type=int,
+        default=DEFAULT_MARKER_LOG_THRESHOLD,
+        help=(
+            f"min repeat_count for the marker-log-upgrade patch "
+            f"(KLOG_ONCE_WARN next to a FIX_NOTE_*) to fire on a "
+            f"hot stub/gap marker. Default: {DEFAULT_MARKER_LOG_THRESHOLD}. "
+            f"Lower to surface less-hot gaps; raise to keep the patch "
+            f"set focused on the noisiest."
+        ),
+    )
+    ap.add_argument(
+        "--no-syscall-stub",
+        action="store_true",
+        help=(
+            "disable per-syscall stub-arm generation for unknown-syscall "
+            "records. Brief is still emitted. Use when a smoke profile "
+            "is exercising a known-experimental syscall range and the "
+            "extra arms would mask the ABI work in progress."
+        ),
+    )
+    ap.add_argument(
+        "--no-marker-log",
+        action="store_true",
+        help=(
+            "disable the KLOG_ONCE_WARN auto-upgrade patches for hot "
+            "stub/gap markers. Brief is still emitted. Use to keep "
+            "the patch set minimal for a docs-only or refactor-only "
+            "review cycle."
+        ),
+    )
+    ap.add_argument(
+        "--enable-kassert-demote",
+        action="store_true",
+        help=(
+            "OPT-IN: also emit `kassert-demote-<subsys>.patch` files "
+            "for recurring KassertFail records. The generated patch "
+            "converts a `KASSERT(cond, ...)` into a defensive `if "
+            "(!(cond)) { KLOG_ONCE_WARN(...); return Err{...}; }` "
+            "block, gated behind `#if 0` so applying the patch does "
+            "NOT change behaviour until the reviewer also flips the "
+            "`#if 0` to `#if 1`. Off by default because KASSERT "
+            "demotion is a semantic change (a kernel invariant check "
+            "becomes a soft error), and even with the `#if 0` brake "
+            "it warrants explicit opt-in."
+        ),
+    )
+    ap.add_argument(
+        "--kassert-demote-threshold",
+        type=int,
+        default=DEFAULT_KASSERT_DEMOTE_THRESHOLD,
+        help=(
+            f"min repeat_count for the KASSERT demote patch + brief "
+            f"proposal to fire. Default: {DEFAULT_KASSERT_DEMOTE_THRESHOLD}. "
+            f"The brief always renders the recurring-assert proposal "
+            f"text at this threshold; the actual code patch additionally "
+            f"requires --enable-kassert-demote."
+        ),
+    )
+    ap.add_argument(
+        "--enable-trap-guards",
+        action="store_true",
+        help=(
+            "OPT-IN: also emit `trap-null-guard-*.patch` and "
+            "`trap-divzero-guard-*.patch` files for TrapCapture records "
+            "whose source line matches a recognisable pointer-deref / "
+            "division pattern. Each generated patch wraps a guard "
+            "(`if (ptr == nullptr) { ... }` or `if (divisor == 0) { ... }`) "
+            "behind `#if 0 ... #endif` so applying the patch is "
+            "behaviourally a no-op until the reviewer flips the gate. "
+            "Off by default because the guard inserted may not match "
+            "the surrounding control-flow's expectations (a legitimate "
+            "null deref under a debug assert, a divisor that's a "
+            "compile-time constant, etc.)."
+        ),
+    )
+    ap.add_argument(
+        "--enable-oom-nullcheck",
+        action="store_true",
+        help=(
+            "OPT-IN: also emit `oom-nullcheck-*.patch` files for "
+            "soft_fault_recov records with mm/kheap or mm/frame-alloc "
+            "source pins. The synthesiser uses the upstream caller_rip "
+            "(captured by FixJournalRecordAtCaller from inside the "
+            "primitive's OOM path) to locate the `auto* p = KMalloc(...)` "
+            "site and inserts an `if (p == nullptr) { return Err{OutOfMemory}; }` "
+            "block behind `#if 0` immediately after the assignment. "
+            "Only fires when the enclosing function is Result-returning."
+        ),
+    )
+    ap.add_argument(
+        "--enable-all-patches",
+        action="store_true",
+        help=(
+            "shortcut: equivalent to passing every --enable-* flag "
+            "(--enable-kassert-demote --enable-trap-guards "
+            "--enable-oom-nullcheck). Use when running the full "
+            "automation cycle: run OS -> journal records -> "
+            "gen-fix-patches with everything on -> review the .patch "
+            "files -> apply + flip the per-patch `#if 0` brake."
+        ),
+    )
     args = ap.parse_args()
+    if args.enable_all_patches:
+        args.enable_kassert_demote = True
+        args.enable_trap_guards = True
+        args.enable_oom_nullcheck = True
 
     repo_root = find_repo_root()
     thunks_index = load_thunks_table(repo_root)
@@ -1865,7 +3739,20 @@ def main() -> int:
                 rips.append(r.ctx_a)
         resolver.prime(rips)
 
-    actions = plan_actions(all_records, thunks_index, repo_root, resolver)
+    actions = plan_actions(
+        all_records,
+        thunks_index,
+        repo_root,
+        resolver,
+        marker_log_threshold=args.marker_log_threshold,
+        enable_syscall_stub=not args.no_syscall_stub,
+        enable_marker_log=not args.no_marker_log,
+        elf_path=args.kernel_elf,
+        kassert_demote_threshold=args.kassert_demote_threshold,
+        enable_kassert_demote=args.enable_kassert_demote,
+        enable_trap_guards=args.enable_trap_guards,
+        enable_oom_nullcheck=args.enable_oom_nullcheck,
+    )
     if args.markers:
         markers = load_markers(args.markers)
         marker_actions = plan_marker_actions(markers, repo_root)

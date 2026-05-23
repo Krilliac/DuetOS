@@ -30,6 +30,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "proc/process.h"
 #include "time/tick.h"
@@ -74,6 +75,32 @@ void RingPushDenial(const CapAuditEvent& event)
     slot.missing = event.missing;
     for (u32 i = 0; i < sizeof(slot._pad); ++i)
         slot._pad[i] = 0;
+
+    // Mirror the denial into the fix journal so a recurring deny
+    // pattern survives across boots (the 256-slot RAM ring above
+    // does not — it's overwritten by the next deny storm). The
+    // journal dedups per (cap, syscall) so a 1000-call storm
+    // becomes one record with repeat=1000.
+    //
+    // The pin shape is `cap.<CapName>` — dedup keys on the missing
+    // cap kind (not the syscall) so the same cap denied across
+    // many syscalls collapses to one row keyed by "this cap is
+    // chronically missing"; ctx_a / ctx_b preserve the first hit's
+    // syscall + proc_id for triage.
+    char pin[40] = "cap.";
+    const char* cap_name = duetos::core::CapName(event.missing);
+    u64 w = 4;
+    if (cap_name != nullptr)
+    {
+        while (w + 1 < sizeof(pin) && *cap_name != '\0')
+        {
+            pin[w++] = *cap_name++;
+        }
+    }
+    pin[w] = '\0';
+    (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::CapDenial, pin,
+                                           "review cap grant / deny policy for this caller", event.syscall_number,
+                                           event.proc_id);
 }
 
 // Runtime mode. Initialised from the compile-time constexpr at the

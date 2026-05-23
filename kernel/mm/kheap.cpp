@@ -452,10 +452,16 @@ void* KMalloc(u64 bytes)
     // total free bytes at fail time so the off-line tooling can see
     // whether the request was just outsized vs. pool was actually
     // exhausted.
-    (void)::duetos::diag::FixJournalRecordSev(
+    // Capture the UPSTREAM caller (the `auto* p = KMalloc(...)` site)
+    // rather than the address inside this function — that's the line
+    // the offline patch generator wants to insert a nullcheck after.
+    // __builtin_return_address(0) from inside this OOM path yields
+    // the return address into the immediate caller of KMalloc.
+    const auto upstream = reinterpret_cast<u64>(__builtin_return_address(0));
+    (void)::duetos::diag::FixJournalRecordAtCaller(
         ::duetos::diag::FixDetector::SoftFaultRecov, "mm/kheap",
         "kheap OOM: KMalloc returned null; investigate caller's null-handling and pool sizing", bytes,
-        KernelHeapStatsRead().free_bytes, /*severity=*/2);
+        KernelHeapStatsRead().free_bytes, /*severity=*/2, upstream);
     return nullptr;
 }
 

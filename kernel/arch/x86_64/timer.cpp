@@ -11,6 +11,7 @@
 #include "core/panic.h"
 #include "debug/probes.h"
 #include "diag/boot_observe.h"
+#include "diag/fix_journal.h"
 #include "log/klog.h"
 #include "sched/sched.h"
 
@@ -464,6 +465,8 @@ void LapicTimerStartOnCurrent()
     if (g_pit_fallback_active)
     {
         KLOG_ONCE_WARN("arch/timer", "AP LAPIC timer skipped — BSP is on PIT-tick fallback (SMP tick GAP)");
+        FIX_NOTE_GAP("arch/x86_64/timer.cpp:LapicTimerStartOnCurrent",
+                     "IPI-broadcast PIT tick OR per-AP TSC-deadline timer");
         return;
     }
     KASSERT(g_lapic_ticks_per_period != 0, "arch/timer", "LapicTimerStartOnCurrent before TimerInit");

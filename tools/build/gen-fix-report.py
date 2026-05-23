@@ -47,6 +47,10 @@ DETECTORS = {
     4: "unmapped_thunk",
     5: "soft_fault_recov",
     6: "loader_reject",
+    7: "cap_denial",
+    8: "trap_capture",
+    9: "user_fault",
+    10: "kassert_fail",
 }
 
 # struct.Struct format for the file header (16 bytes).

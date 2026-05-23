@@ -2,9 +2,12 @@
  * DuetOS — kernel shell: dfix command.
  *
  * Live-review surface for the fix journal. Reads the in-RAM ring
- * via `FixJournalSnapshot` and exposes it through three operations:
+ * via `FixJournalSnapshot` and exposes it through five operations:
  *
- *   dfix list [N]        — tail the last N records (default 20)
+ *   dfix list [N] [--all] [--detector=<name>]
+ *                        — tail the last N records (default 20);
+ *                          `--detector=cap_denial` (etc) narrows
+ *                          to one record kind for targeted triage
  *   dfix show <seq>      — full record dump for one seq
  *   dfix stats           — per-detector counts + lifetime stats
  *   dfix mark-done <seq> — flip the audited bit so future
@@ -77,25 +80,67 @@ bool ParseU32Dec(const char* str, u32* out)
     return true;
 }
 
+// Look up a FixDetector by the same name FixDetectorName() returns
+// ("stub" / "gap" / "unknown_syscall" / ...). Returns
+// FixDetector::None on miss — caller treats None as "no filter,"
+// which means an unrecognised name silently degrades to "show all"
+// rather than producing an empty result that looks like a clean run.
+duetos::diag::FixDetector ParseDetectorName(const char* str)
+{
+    if (str == nullptr || str[0] == '\0')
+        return duetos::diag::FixDetector::None;
+    // 7 real detectors plus None — small enough to linear-scan with
+    // a direct StrEq against the canonical names.
+    for (u8 i = 1; i <= 7; ++i)
+    {
+        const auto det = static_cast<duetos::diag::FixDetector>(i);
+        if (StrEq(str, duetos::diag::FixDetectorName(det)))
+            return det;
+    }
+    return duetos::diag::FixDetector::None;
+}
+
 void DfixUsage()
 {
     ConsoleWriteln("DFIX: USAGE:");
-    ConsoleWriteln("    DFIX LIST [N] [--ALL]   TAIL THE LAST N RECORDS (DEFAULT 20)");
+    ConsoleWriteln("    DFIX LIST [N] [--ALL] [--DETECTOR=<NAME>]");
+    ConsoleWriteln("                            TAIL THE LAST N RECORDS (DEFAULT 20)");
     ConsoleWriteln("    DFIX SHOW <SEQ>         DETAILED RECORD DUMP");
     ConsoleWriteln("    DFIX STATS              COUNTERS + PER-DETECTOR BREAKDOWN");
     ConsoleWriteln("    DFIX MARK-DONE <SEQ>    SET THE AUDITED BIT");
     ConsoleWriteln("    DFIX FLUSH              FORCE A KERNEL.FIX WRITE");
+    ConsoleWriteln("    DETECTOR NAMES: STUB GAP UNKNOWN_SYSCALL UNMAPPED_THUNK");
+    ConsoleWriteln("                    SOFT_FAULT_RECOV LOADER_REJECT CAP_DENIAL");
 }
+
+// Snapshot cap when filtering: we may have to walk past many
+// non-matching records to surface the requested N matches, so widen
+// the working buffer to the ring's full capacity. The shell already
+// budgets a 1024-record snapshot worst case in InspectRing-class
+// commands; same here.
+constexpr u64 kFilterSnapshotCap = 256;
 
 void DoList(u32 argc, char** argv)
 {
     u32 n = 20;
     bool show_all = false;
+    duetos::diag::FixDetector filter = duetos::diag::FixDetector::None;
     for (u32 i = 2; i < argc; ++i)
     {
         if (StrEq(argv[i], "--all") || StrEq(argv[i], "-a"))
         {
             show_all = true;
+        }
+        else if (StrStartsWith(argv[i], "--detector="))
+        {
+            const char* name = argv[i] + 11;
+            filter = ParseDetectorName(name);
+            if (filter == duetos::diag::FixDetector::None)
+            {
+                ConsoleWrite("DFIX: UNKNOWN DETECTOR '");
+                ConsoleWrite(name);
+                ConsoleWriteln("' — IGNORING FILTER (RUN 'DFIX' FOR NAMES)");
+            }
         }
         else
         {
@@ -104,11 +149,16 @@ void DoList(u32 argc, char** argv)
                 n = parsed;
         }
     }
-    if (n > kSnapshotCap)
-        n = kSnapshotCap;
+    if (n > kFilterSnapshotCap)
+        n = kFilterSnapshotCap;
 
-    duetos::diag::FixRecord buf[kSnapshotCap] = {};
-    const u64 got = duetos::diag::FixJournalSnapshot(buf, n);
+    // With a filter we need the wider walk window so the requested N
+    // matches actually surface even when the ring is dominated by
+    // other detector kinds. Without a filter we keep the original
+    // bounded behaviour.
+    const u64 walk_cap = (filter == duetos::diag::FixDetector::None) ? n : kFilterSnapshotCap;
+    duetos::diag::FixRecord buf[kFilterSnapshotCap] = {};
+    const u64 got = duetos::diag::FixJournalSnapshot(buf, walk_cap);
     if (got == 0)
     {
         ConsoleWriteln("DFIX: NO RECORDS");
@@ -117,11 +167,13 @@ void DoList(u32 argc, char** argv)
 
     ConsoleWriteln("DFIX:   SEQ   DETECTOR          REPEAT  AUDITED  SOURCE_PIN / HINT");
     u64 shown = 0;
-    for (u64 i = 0; i < got; ++i)
+    for (u64 i = 0; i < got && shown < n; ++i)
     {
         const auto& r = buf[i];
         const bool audited = (r.flags & duetos::diag::kFixFlagAudited) != 0;
         if (audited && !show_all)
+            continue;
+        if (filter != duetos::diag::FixDetector::None && static_cast<duetos::diag::FixDetector>(r.detector) != filter)
             continue;
         ConsoleWrite("  ");
         WriteU64Dec(r.seq);
@@ -143,7 +195,15 @@ void DoList(u32 argc, char** argv)
     }
     if (shown == 0)
     {
-        ConsoleWriteln("DFIX: ALL RECORDS AUDITED (PASS --ALL TO INCLUDE)");
+        if (filter != duetos::diag::FixDetector::None)
+        {
+            ConsoleWrite("DFIX: NO RECORDS MATCH DETECTOR=");
+            ConsoleWriteln(duetos::diag::FixDetectorName(filter));
+        }
+        else
+        {
+            ConsoleWriteln("DFIX: ALL RECORDS AUDITED (PASS --ALL TO INCLUDE)");
+        }
     }
 }
 
