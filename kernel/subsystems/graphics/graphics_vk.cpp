@@ -1138,6 +1138,8 @@ VkResult VkCreateGraphicsPipeline(VkDevice dev, VkPipelineLayout layout, VkShade
     g_pipeline_data[slot].vertex_shader = vs;
     g_pipeline_data[slot].fragment_shader = fs;
     g_pipeline_data[slot].compute_shader = 0;
+    g_pipeline_data[slot].vertex_binding_count = 0;
+    g_pipeline_data[slot].vertex_attribute_count = 0;
     if (out != nullptr)
         *out = HandleFor(kPipelineBase, slot);
     return VkResult::Success;
@@ -1158,8 +1160,27 @@ VkResult VkCreateComputePipeline(VkDevice dev, VkPipelineLayout layout, VkShader
     g_pipeline_data[slot].vertex_shader = 0;
     g_pipeline_data[slot].fragment_shader = 0;
     g_pipeline_data[slot].compute_shader = cs;
+    g_pipeline_data[slot].vertex_binding_count = 0;
+    g_pipeline_data[slot].vertex_attribute_count = 0;
     if (out != nullptr)
         *out = HandleFor(kPipelineBase, slot);
+    return VkResult::Success;
+}
+
+VkResult VkSetVertexInputDuet(VkPipeline pipe, const VkVertexBindingDuet* bindings, u32 binding_count,
+                              const VkVertexAttributeDuet* attributes, u32 attribute_count)
+{
+    if (!HandleInRange(pipe, kPipelineBase) || !PoolIsLive(g_pipeline_pool, SlotOf(pipe, kPipelineBase)))
+        return VkResult::ErrorInitializationFailed;
+    const u32 slot = SlotOf(pipe, kPipelineBase);
+    const u32 nb = (binding_count < kMaxVertexBindings) ? binding_count : kMaxVertexBindings;
+    const u32 na = (attribute_count < kMaxVertexAttributes) ? attribute_count : kMaxVertexAttributes;
+    g_pipeline_data[slot].vertex_binding_count = nb;
+    g_pipeline_data[slot].vertex_attribute_count = na;
+    for (u32 i = 0; i < nb; ++i)
+        g_pipeline_data[slot].vertex_bindings[i] = bindings[i];
+    for (u32 i = 0; i < na; ++i)
+        g_pipeline_data[slot].vertex_attributes[i] = attributes[i];
     return VkResult::Success;
 }
 

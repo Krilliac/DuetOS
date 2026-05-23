@@ -114,9 +114,14 @@ struct VaryingSnapshot
 // into `pos_out[0..3]` (vec4). If `varying_out` is non-null,
 // also snapshots every Location-decorated Output the VS wrote
 // (up to `varying_cap` entries) so the rasterizer can interpolate
-// them per-pixel. Returns false if the shader can't be run.
+// them per-pixel. When `pipe` carries an explicit vertex-input
+// description (via VkSetVertexInputDuet), each Input is fetched
+// at the (binding, offset) declared by the caller; otherwise the
+// canonical 16-byte-per-Location fallback layout applies.
+// Returns false if the shader can't be run.
 bool RunVertexShader(spirv::Program* vs, const u8* vb, u64 vb_size, u64 stride, u32 vertex_index, u32* pos_out,
-                     VaryingSnapshot* varying_out, u32 varying_cap, u32* varying_n_out)
+                     VaryingSnapshot* varying_out, u32 varying_cap, u32* varying_n_out,
+                     const PipelineRecord* pipe_rec)
 {
     if (vs == nullptr || vb == nullptr || pos_out == nullptr)
         return false;
@@ -124,19 +129,46 @@ bool RunVertexShader(spirv::Program* vs, const u8* vb, u64 vb_size, u64 stride, 
     if (base + stride > vb_size)
         return false;
     spirv::ResetIO(vs);
-    // Feed each Input Location with the bytes at its declared
-    // offset. We use a simple layout convention: Location N starts
-    // at `base + N * 16` bytes — covers vec2 / vec3 / vec4 in 16-
-    // byte slots, which matches `std140`-style alignment. A real
-    // implementation needs the VkVertexInputAttributeDescription
-    // bound at pipeline create; v1 punts on that and uses the
-    // canonical layout.
-    for (u32 loc = 0; loc < 4; ++loc)
+
+    if (pipe_rec != nullptr && pipe_rec->vertex_attribute_count > 0)
     {
-        const u64 off = base + static_cast<u64>(loc) * 16u;
-        if (off + 16u > vb_size)
-            break;
-        (void)spirv::WriteInputLocation(vs, loc, vb + off, 16u);
+        // Explicit description path: walk the attribute table and
+        // fetch each entry from (binding-stride-anchored base +
+        // offset_bytes). v1 still honours binding 0 only; entries
+        // for other bindings are recorded but their data comes
+        // from the single bound buffer.
+        for (u32 i = 0; i < pipe_rec->vertex_attribute_count; ++i)
+        {
+            const VkVertexAttributeDuet& a = pipe_rec->vertex_attributes[i];
+            // Anchor: the per-binding stride * vertex_index gives
+            // the start of this vertex within the bound buffer.
+            // Look up the matching binding to find its stride.
+            u32 b_stride = static_cast<u32>(stride);
+            for (u32 b = 0; b < pipe_rec->vertex_binding_count; ++b)
+            {
+                if (pipe_rec->vertex_bindings[b].binding == a.binding)
+                {
+                    b_stride = pipe_rec->vertex_bindings[b].stride_bytes;
+                    break;
+                }
+            }
+            const u64 vbase = static_cast<u64>(vertex_index) * b_stride;
+            const u64 off = vbase + a.offset_bytes;
+            if (off + a.byte_size > vb_size)
+                continue;
+            (void)spirv::WriteInputLocation(vs, a.location, vb + off, a.byte_size);
+        }
+    }
+    else
+    {
+        // Fallback canonical layout: Location N at offset N * 16.
+        for (u32 loc = 0; loc < 4; ++loc)
+        {
+            const u64 off = base + static_cast<u64>(loc) * 16u;
+            if (off + 16u > vb_size)
+                break;
+            (void)spirv::WriteInputLocation(vs, loc, vb + off, 16u);
+        }
     }
     // BuiltIn VertexIndex.
     (void)spirv::WriteInputBuiltin(vs, spirv::builtins::kVertexIndex, &vertex_index, sizeof(vertex_index));
@@ -460,6 +492,8 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
         ++g_shader_raster_draws_skipped;
         return false;
     }
+    const u32 pslot = SlotOf(st.bound_pipeline, kPipelineBase);
+    const PipelineRecord* pipe_rec = PoolIsLive(g_pipeline_pool, pslot) ? &g_pipeline_data[pslot] : nullptr;
     u32 fb_w = 0, fb_h = 0;
     if (!ResolveExtent(st, &fb_w, &fb_h))
         return false;
@@ -495,7 +529,7 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
         for (u32 v = 0; v < 3; ++v)
         {
             if (!RunVertexShader(vs, vb_base, vb_size, stride, first_vertex + t * 3u + v, pos[v],
-                                 &vary[v * kMaxVaryings], kMaxVaryings, &vary_n[v]))
+                                 &vary[v * kMaxVaryings], kMaxVaryings, &vary_n[v], pipe_rec))
                 return false;
         }
         i32 px[3], py[3];

@@ -338,6 +338,14 @@ struct PipelineRecord
     VkShaderModule vertex_shader;   // 0 if none (compute pipeline)
     VkShaderModule fragment_shader; // 0 if none (compute pipeline)
     VkShaderModule compute_shader;  // 0 if graphics
+    // Vertex input description (set by VkSetVertexInputDuet).
+    // When attribute_count > 0 the shader-rasterizer uses these
+    // tuples to fetch each VS Input; otherwise it falls back to
+    // the canonical 16-byte-per-Location layout.
+    u32 vertex_binding_count;
+    u32 vertex_attribute_count;
+    VkVertexBindingDuet vertex_bindings[kMaxVertexBindings];
+    VkVertexAttributeDuet vertex_attributes[kMaxVertexAttributes];
 };
 
 struct DescriptorSetLayoutRecord

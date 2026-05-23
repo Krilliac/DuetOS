@@ -546,6 +546,43 @@ VkResult VkCreateGraphicsPipeline(VkDevice dev, VkPipelineLayout layout, VkShade
 VkResult VkCreateComputePipeline(VkDevice dev, VkPipelineLayout layout, VkShaderModule cs, VkPipeline* out);
 void VkDestroyPipeline(VkDevice dev, VkPipeline pipe);
 
+/// Per-attribute description used by the shader rasterizer to
+/// fetch vertex input data. Mirrors the relevant fields of
+/// `VkVertexInputAttributeDescription` from the spec — location,
+/// binding, format (we recognise R32G32B32A32_SFLOAT / R32G32B32 /
+/// R32G32 / R32 as 16/12/8/4 byte widths and Sf32 components),
+/// offset within the vertex.
+struct VkVertexAttributeDuet
+{
+    u32 location;
+    u32 binding;
+    u32 offset_bytes;
+    u32 byte_size; // 4 / 8 / 12 / 16 — matches Sf32 vec1/2/3/4
+};
+
+/// Per-binding description: the binding index + the per-vertex
+/// stride. v0 only honours one binding at index 0; multi-binding
+/// is recorded in `PipelineRecord` for the future slice that
+/// extends the shader rasterizer to walk it.
+struct VkVertexBindingDuet
+{
+    u32 binding;
+    u32 stride_bytes;
+};
+
+inline constexpr u32 kMaxVertexAttributes = 8;
+inline constexpr u32 kMaxVertexBindings = 4;
+
+/// Attach a vertex-input description to a graphics pipeline.
+/// Called by the caller after `VkCreateGraphicsPipeline`; the
+/// shader-rasterizer hook reads the description to fetch each
+/// VS Input from the correct (binding, offset) tuple instead of
+/// the canonical 16-byte-per-Location layout. Returns success
+/// even when no attributes are provided — the rasterizer falls
+/// back to the canonical layout in that case.
+VkResult VkSetVertexInputDuet(VkPipeline pipe, const VkVertexBindingDuet* bindings, u32 binding_count,
+                              const VkVertexAttributeDuet* attributes, u32 attribute_count);
+
 // -------------------------------------------------------------------
 // Command pool + command buffer + recording
 // -------------------------------------------------------------------
