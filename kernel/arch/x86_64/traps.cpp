@@ -1332,6 +1332,24 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         else if (frame->vector == 14)
             user_ntstatus = 0xC0000005;
         duetos::diag::minidump::EmitMinidumpFromTrapFrame(frame, user_ntstatus);
+        // UserFault: journal the ring-3 crash so a chronically-failing
+        // PE binary becomes visible in dfix list and the offline
+        // report. Dedups per (task_id, vector) — a single EXE
+        // wild-jumping on every spawn produces ONE record with
+        // repeat_count = crash count, not one per launch. Recording
+        // happens after the minidump emit so the .dmp is on disk
+        // even if the journal flush gets interrupted; the trap-
+        // pending slot is drained by the next heartbeat from the
+        // reaper. ctx_a same shape as TrapCapture
+        // ((vector << 32) | error_code); ctx_b = CR2 for #PF / 0
+        // otherwise.
+        {
+            const u64 uf_ctx_a =
+                (static_cast<u64>(frame->vector) << 32) | (static_cast<u64>(frame->error_code) & 0xffffffffULL);
+            const u64 uf_ctx_b = (frame->vector == 14) ? ReadCr2() : 0ULL;
+            ::duetos::diag::FixJournalRecordFromTrap2(::duetos::diag::FixDetector::UserFault, uf_ctx_a, uf_ctx_b,
+                                                      frame->rip);
+        }
         // SchedExit must NOT run with IF=0 forever; it ends in a
         // Schedule() that waits for the reaper, and the reaper needs
         // timer IRQs to make progress. SchedYield/SchedExit internally

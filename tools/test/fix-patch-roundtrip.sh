@@ -118,9 +118,23 @@ records = [
     # kernel ELF for addr2line it just won't symbolize.
     rec(5, 8, "TrapCapture+0x40", "trap PF page fault", repeat=1,
         ctx_a=(14 << 32) | 0x02, ctx_b=0x10, rip=0xffffffff80abcdef),
+    # UserFault: a ring-3 #PF (vector 14, error_code=USER|WRITE=0x06)
+    # firing 25 times for the same task. Brief-only — no auto-patch
+    # for userland crashes.
+    rec(6, 9, "user.fault", "user trap #PF", repeat=25,
+        ctx_a=(14 << 32) | 0x06, ctx_b=0xcafebabe, rip=0x0000000000401234),
+    # KassertFail recurring assert (>= demote threshold). Pointing
+    # caller_rip at a real kernel symbol so the demote synthesizer
+    # has something to resolve; the assertion isn't in a
+    # Result-returning function so the patch will safely refuse to
+    # generate (only the brief is emitted, with the recurring-assert
+    # proposal text). This exercises the safety gate.
+    rec(7, 10, "net/wireless/fourway", "init not awaiting M1", repeat=5,
+        ctx_a=0xffffffff80abcdef, ctx_b=0, rip=0xffffffff80abcdef),
     # Selftest noise — must be filtered out cleanly.
-    rec(6, 1, "selftest/stub.cpp:1", "stub selftest"),
-    rec(7, 8, "selftest/trap.cpp:1", "trap capture selftest"),
+    rec(8, 1, "selftest/stub.cpp:1", "stub selftest"),
+    rec(9, 8, "selftest/trap.cpp:1", "trap capture selftest"),
+    rec(10, 10, "selftest/assert.subsys", "kassert selftest"),
 ]
 
 blob = HEADER.pack(FILE_MAGIC, 1, len(records), 0) + b"".join(records)
@@ -207,6 +221,11 @@ run_variant "--no-syscall-stub          " --no-syscall-stub >&2
 run_variant "--no-marker-log            " --no-marker-log >&2
 run_variant "--marker-log-threshold=100 " --marker-log-threshold=100 >&2
 run_variant "--no-marker-log --no-syscall-stub" --no-marker-log --no-syscall-stub >&2
+# --enable-kassert-demote opens the opt-in patch class; without a
+# real Result-returning anchor the synth still safely refuses to
+# generate, so the count stays the same as default. This verifies
+# the safety gate isn't accidentally bypassed.
+run_variant "--enable-kassert-demote (safe-refuse)" --enable-kassert-demote >&2
 
 # ---------------------------------------------------------------------
 # 5. Optional: apply, build, revert. Only runs with --build because

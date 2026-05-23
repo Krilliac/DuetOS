@@ -70,6 +70,8 @@ DETECTORS = {
     6: "loader_reject",
     7: "cap_denial",
     8: "trap_capture",
+    9: "user_fault",
+    10: "kassert_fail",
 }
 
 # x86_64 trap vectors that fire as TrapCapture records. The kernel's
@@ -526,6 +528,29 @@ def _hunk_replace_line(file_rel: str, lines: list[str], idx: int, new_line: str)
         out.append(" " + ln)
     out.append("-" + lines[idx])
     out.append("+" + new_line)
+    for ln in post:
+        out.append(" " + ln)
+    return "".join(out)
+
+
+def _hunk_replace_with_block(file_rel: str, lines: list[str], idx: int,
+                             new_lines: list[str]) -> str:
+    """Build a hunk that replaces `lines[idx]` with the multi-line block
+    `new_lines` (each entry already terminated with '\\n')."""
+    ctx_start = max(0, idx - 3)
+    pre = lines[ctx_start:idx]
+    post = lines[idx + 1 : idx + 4]
+    old_count = len(pre) + 1 + len(post)
+    new_count = len(pre) + len(new_lines) + len(post)
+    out: list[str] = []
+    out.append(f"--- a/{file_rel}\n")
+    out.append(f"+++ b/{file_rel}\n")
+    out.append(f"@@ -{ctx_start + 1},{old_count} +{ctx_start + 1},{new_count} @@\n")
+    for ln in pre:
+        out.append(" " + ln)
+    out.append("-" + lines[idx])
+    for ln in new_lines:
+        out.append("+" + ln)
     for ln in post:
         out.append(" " + ln)
     return "".join(out)
@@ -1791,6 +1816,400 @@ def synth_trap_capture_brief(r: FixRecord, resolver: SymbolResolver | None = Non
     return Action(kind="note", title=title, body="\n".join(out), filename=None)
 
 
+def synth_user_fault_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
+    """Generate a brief for a ring-3 UserFault record.
+
+    The caller_rip is a USER address; addr2line against the kernel
+    ELF won't resolve it. The brief captures the vector / error code
+    / CR2 decoding (same as TrapCapture) AND emits triage paths a
+    reviewer can take:
+
+    1. If the same task is firing repeatedly: the EXE is wild-jumping
+       on every spawn — investigate the binary itself or the PE
+       loader's relocation pass for the EXE.
+    2. If many distinct RIPs from one task: the EXE is heap-corrupting
+       a function-pointer table — investigate the heap allocator path
+       the EXE uses.
+    3. If many distinct tasks at the same RIP: a shared DLL is wrong
+       — investigate the DLL's exports / thunks_table.inc entries.
+
+    Patch generation here is deliberately conservative — generating
+    code in response to a userland crash would mean either changing
+    a USER binary (out of repo scope) or quirking the loader (a
+    semantic change requiring per-EXE analysis). Brief only.
+    """
+    vector = int((r.ctx_a >> 32) & 0xff)
+    error_code = int(r.ctx_a & 0xffffffff)
+    cr2 = r.ctx_b
+    vec_name = TRAP_VECTOR_NAMES.get(vector, f"vector={vector}")
+
+    out: list[str] = []
+    repeat_label = "first observation" if r.repeat <= 1 else f"{r.repeat} crashes since boot"
+    out.append(f"**Ring-3 `{vec_name}` at user RIP `0x{r.caller_rip:016x}`** — {repeat_label}.")
+    out.append("")
+    out.append(
+        "The kernel killed the offending ring-3 task (a .dmp was "
+        "egressed via debugcon and persisted to the NVMe crash-dump "
+        "reserved region — open it in WinDbg / VS Code for the full "
+        "GPR + stack frame). This record persists the *fact of the "
+        "crash* into the journal so a chronically-broken PE/ELF "
+        "binary is visible across boots."
+    )
+    out.append("")
+
+    if vector == 14:
+        short, longd = decode_pf_error_code(error_code)
+        out.append(f"CR2: `0x{cr2:016x}`")
+        out.append(f"Error code: `0x{error_code:x}` ({short} — {longd})")
+    elif error_code != 0:
+        out.append(f"Error code: `0x{error_code:x}`")
+    out.append("")
+
+    out.append("**Triage paths:**")
+    out.append("")
+    out.append(
+        "1. *Same task firing repeatedly.* The EXE is wild-jumping on "
+        "every spawn — wider context in `dmesg` ('task : '/'pid :' "
+        "fields next to each fault). Often a broken PE relocation, a "
+        "missing import that resolved to a wild address, or a CRT "
+        "init path that ran on a half-initialized heap."
+    )
+    out.append(
+        "2. *Many distinct user RIPs from one task.* The EXE is "
+        "heap-corrupting a function-pointer table — the most common "
+        "shape is a vtable smash from a `delete[]` on a malloc'd "
+        "buffer (or vice versa). Cross-reference with leak-detector "
+        "records."
+    )
+    out.append(
+        "3. *Many distinct tasks at the same user RIP.* A shared DLL "
+        "is wrong — the same call site in `kernel32` / `ntdll` / a "
+        "vendored DLL fails in every consumer. Likely a missing or "
+        "mis-implemented thunk; cross-reference UnmappedThunk "
+        "records in this journal."
+    )
+    out.append("")
+
+    # Pattern hints — if CR2 looks like a known wild-pointer
+    # sentinel, name it.
+    if vector == 14:
+        if cr2 == 0xFFFFFFFFFFFFFFFF or cr2 == 0xFFFFFFFF00000000:
+            out.append(
+                "**CR2 sentinel**: `0x{cr2:x}` is a wild `(u32)-1` "
+                "zero-extended — the EXE dereferenced a `(unsigned)-1` "
+                "that the caller didn't recognise as a 'no result' "
+                "sentinel.".format(cr2=cr2)
+            )
+            out.append("")
+        elif cr2 == 0xCCCCCCCCCCCCCCCC or cr2 == 0xDEADBEEFDEADBEEF:
+            out.append(
+                f"**CR2 sentinel**: `0x{cr2:x}` is a recognisable "
+                "uninitialized-memory poison value. The EXE read a "
+                "field that nothing wrote — investigate the heap "
+                "allocator path the EXE uses or a missing init in "
+                "the constructor."
+            )
+            out.append("")
+
+    out.append("---")
+    out.append("Journal record:")
+    out.append("```")
+    out.append(f"seq         = {r.seq}")
+    out.append(f"repeat      = {r.repeat}")
+    out.append(f"caller_rip  = 0x{r.caller_rip:016x}  (USER RIP — kernel ELF won't resolve)")
+    out.append(f"ctx_a       = 0x{r.ctx_a:016x}  (vector<<32 | error_code)")
+    out.append(f"ctx_b       = 0x{r.ctx_b:016x}  (CR2 for #PF; 0 otherwise)")
+    out.append(f"source_pin  = {r.source_pin!r}")
+    out.append(f"hint        = {r.hint!r}")
+    out.append("```")
+
+    title = f"User-fault `{vec_name}` (×{r.repeat}){_new_tag(r)}"
+    return Action(kind="note", title=title, body="\n".join(out), filename=None)
+
+
+# Repeat-count threshold above which a KASSERT brief proposes
+# converting the assertion to a graceful return — at this rate the
+# invariant is clearly not holding in practice and the right fix is
+# usually to handle the case explicitly rather than panic.
+DEFAULT_KASSERT_DEMOTE_THRESHOLD = 3
+
+
+def synth_kassert_brief(r: FixRecord, resolver: SymbolResolver | None = None,
+                        repo_root: Path | None = None,
+                        demote_threshold: int = DEFAULT_KASSERT_DEMOTE_THRESHOLD) -> Action:
+    """Generate a brief for a KassertFail record (a fired KASSERT or
+    explicit core::Panic call).
+
+    The caller_rip is the KASSERT statement (or the Panic call site).
+    addr2line typically resolves it to the exact line. The brief
+    captures the source context around the assert AND — for a
+    recurring assert (repeat >= demote_threshold) — proposes a
+    *defensive* conversion shape: replace the KASSERT with a graceful
+    return + a KLOG_ONCE_WARN. A recurring assert is by definition
+    an invariant the upstream caller violates; panicking on it
+    converts a recoverable miss into a halt.
+
+    Per Decision #016 the proposed shape is REVIEW-framed text in
+    the brief — the reviewer reads, decides whether the invariant
+    can legitimately be relaxed, and applies the demotion (or fixes
+    the upstream caller) by hand.
+    """
+    out: list[str] = []
+    repeat_label = "first observation" if r.repeat <= 1 else f"{r.repeat} fires since boot"
+    out.append(f"**KASSERT / Panic** in subsystem `{r.source_pin}` — {repeat_label}.")
+    out.append("")
+    out.append(f"Message: `{r.hint}`")
+    if r.ctx_b != 0:
+        out.append(f"Captured value (PanicWithValue ctx_b): `0x{r.ctx_b:x}` ({r.ctx_b})")
+    out.append("")
+
+    # Resolve caller_rip → file:line.
+    file_part = ""
+    line_part = 0
+    if resolver is not None:
+        sym = resolver.resolve(r.caller_rip)
+        if sym and not sym.startswith("?? "):
+            out.append(f"Assert site: `{sym}`")
+            m = re.search(r"\(([^)]+):(\d+)\)|\bat\s+(\S+):(\d+)", sym)
+            if m:
+                file_part = m.group(1) or m.group(3) or ""
+                try:
+                    line_part = int(m.group(2) or m.group(4))
+                except (TypeError, ValueError):
+                    line_part = 0
+
+    # Source context window — same shape as TrapCapture.
+    resolved_source: Path | None = None
+    if file_part and line_part > 0 and repo_root is not None:
+        resolved_source = _resolve_source_path(file_part, repo_root)
+        if resolved_source is not None:
+            ctx = read_source_context(resolved_source, line_part, window=8)
+            if ctx:
+                rel = (
+                    resolved_source.relative_to(repo_root)
+                    if resolved_source.is_relative_to(repo_root)
+                    else resolved_source
+                )
+                out.append("")
+                out.append(f"**Source context** (`{rel}:{line_part}`):")
+                out.append("")
+                out.append("```cpp")
+                out.extend(ctx)
+                out.append("```")
+                out.append("")
+
+    # Proposed conversion shape for recurring asserts.
+    if r.repeat >= demote_threshold:
+        # Extract the faulting line text for substitution.
+        sub = ""
+        if resolved_source is not None and line_part > 0:
+            try:
+                src = resolved_source.read_text(encoding="utf-8", errors="replace").splitlines()
+                if 0 < line_part <= len(src):
+                    sub = src[line_part - 1].strip()
+            except OSError:
+                pass
+
+        out.append(
+            f"**Recurring assert ({r.repeat}× since boot)** — the "
+            f"invariant is clearly not holding in practice. Proposed "
+            f"defensive conversion:"
+        )
+        out.append("")
+        out.append("```cpp")
+        out.append("// REVIEW: KASSERT is firing repeatedly; consider:")
+        out.append("//")
+        out.append(f"//   Before:  {sub or '<the KASSERT statement>'}")
+        out.append("//   After:   if (!(cond)) {")
+        out.append(
+            f"//                KLOG_ONCE_WARN(\"{_escape_cpp_string(r.source_pin)}\", "
+            f"\"demoted assert: {_escape_cpp_string(r.hint[:50])}\");"
+        )
+        out.append("//                /* graceful return / propagate an error code */")
+        out.append("//                return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidState};")
+        out.append("//            }")
+        out.append("```")
+        out.append("")
+        out.append(
+            "**REVIEW**: Demoting a KASSERT removes a kernel "
+            "invariant check — the call site that violates the "
+            "invariant may be relying on the panic to surface the "
+            "bug. Confirm the assert is genuinely too strict (the "
+            "case it catches is a *legitimate* condition the caller "
+            "can recover from) BEFORE demoting. The alternative — "
+            "fix the upstream caller so the invariant holds — is "
+            "almost always the right answer."
+        )
+        out.append("")
+
+    out.append("---")
+    out.append("Journal record:")
+    out.append("```")
+    out.append(f"seq         = {r.seq}")
+    out.append(f"repeat      = {r.repeat}")
+    out.append(f"caller_rip  = 0x{r.caller_rip:016x}  (Panic call site)")
+    out.append(f"ctx_a       = 0x{r.ctx_a:016x}  (= caller_rip)")
+    out.append(f"ctx_b       = 0x{r.ctx_b:016x}  (PanicWithValue value; 0 for plain Panic)")
+    out.append(f"source_pin  = {r.source_pin!r}  (subsystem)")
+    out.append(f"hint        = {r.hint!r}  (assertion message)")
+    out.append("```")
+
+    title = f"KASSERT [{r.source_pin}] (×{r.repeat}){_new_tag(r)} — `{r.hint[:60]}`"
+    return Action(kind="note", title=title, body="\n".join(out), filename=None)
+
+
+# Regex that locates a KASSERT / KASSERT_WITH_VALUE call. Captures
+# (full_call_text, condition, subsys, msg). The condition can span
+# commas inside (e.g. `foo(a, b) == 0`); we rely on the fact that
+# every KASSERT line ends with `, "subsys", "msg")` so we anchor on
+# the closing quoted args.
+_KASSERT_RE = re.compile(
+    r'\b(KASSERT(?:_WITH_VALUE)?)\s*\((.*?),\s*"([^"]*)"\s*,\s*"([^"]*)"'
+    r'(?:\s*,\s*([^)]+))?\)\s*;?'
+)
+
+
+def synth_kassert_demote_patch(r: FixRecord, resolver: SymbolResolver | None,
+                               repo_root: Path) -> str | None:
+    """Generate a unified diff that demotes a high-repeat KASSERT to a
+    KLOG_ONCE_WARN + graceful return.
+
+    This is the only place in the fix-journal pipeline that mutates
+    *kernel semantics* — every other auto-patch is additive
+    observability. The demotion is gated on:
+      * repeat_count >= the demote threshold (default 3; the user
+        asked for the threshold to be visible so it's --kassert-demote
+        on the CLI),
+      * the source line at caller_rip resolves to a single recognisable
+        KASSERT or KASSERT_WITH_VALUE call (we don't try to demote
+        macros nested inside ?:, function calls, etc.),
+      * the surrounding function returns a Result<T, E> or a similar
+        result-style type — we conservatively detect this by checking
+        that the enclosing function signature contains "Result<"
+        ANYWHERE on the line introducing the function. When we can't
+        confirm a Result return type the patch is suppressed (the
+        graceful-return shape needs a typed Err{...}; a void-return
+        function would need a different shape we don't try to guess).
+
+    The generated patch is wrapped in `// REVIEW:` comments AND the
+    actual demotion is gated behind `#if 0 ... #endif` so applying
+    the patch DOES NOT change behaviour until a reviewer also flips
+    the `#if 0` to `#if 1`. That's a deliberate brake: a mechanical
+    KASSERT demotion that silently shipped into the kernel would
+    convert an audible bug into a silent one.
+    """
+    if resolver is None:
+        return None
+
+    sym = resolver.resolve(r.caller_rip)
+    if not sym or sym.startswith("?? "):
+        return None
+    m = re.search(r"\(([^)]+):(\d+)\)|\bat\s+(\S+):(\d+)", sym)
+    if not m:
+        return None
+    file_part = m.group(1) or m.group(3) or ""
+    try:
+        line_part = int(m.group(2) or m.group(4))
+    except (TypeError, ValueError):
+        return None
+    if not file_part or line_part <= 0:
+        return None
+
+    path = _resolve_source_path(file_part, repo_root)
+    if path is None or not path.exists():
+        return None
+    if path.suffix not in _MARKER_SOURCE_SUFFIXES:
+        return None
+
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    lines = raw.splitlines(keepends=True)
+    if line_part > len(lines):
+        return None
+
+    target_line = lines[line_part - 1]
+    km = _KASSERT_RE.search(target_line)
+    if km is None:
+        # Try one line earlier — clang-format may have wrapped the
+        # KASSERT across two lines, in which case addr2line gives the
+        # statement's leading line.
+        if line_part >= 2:
+            target_line = lines[line_part - 2] + lines[line_part - 1]
+            km = _KASSERT_RE.search(target_line)
+            if km is None:
+                return None
+            line_part -= 1
+            target_line = lines[line_part - 1]
+        else:
+            return None
+
+    macro = km.group(1)
+    condition = km.group(2).strip()
+    subsys = km.group(3)
+    msg = km.group(4)
+    value_arg = (km.group(5) or "").strip() if macro == "KASSERT_WITH_VALUE" else ""
+
+    # Conservative Result-return check: scan back up to 80 lines for a
+    # function-header line containing `Result<` BEFORE the next
+    # outer `}` at column 0. If we don't see one, suppress.
+    returns_result = False
+    for j in range(line_part - 1, max(line_part - 80, -1), -1):
+        ln = lines[j]
+        # A function definition header is a non-indented line ending in `{`
+        # (after stripping `// ...` comments).
+        stripped = re.sub(r"//.*$", "", ln).rstrip()
+        if "Result<" in ln:
+            returns_result = True
+            break
+        if stripped.endswith("}") and j != line_part - 1 and _leading_spaces(ln) == 0:
+            # Walked past the enclosing function without seeing
+            # Result<. Stop.
+            break
+    if not returns_result:
+        return None
+
+    # Idempotency: if the source line ALREADY contains a sibling
+    # `KLOG_ONCE_WARN` for this subsys+msg, skip.
+    window_start = max(0, line_part - 5)
+    window_end = min(len(lines), line_part + 5)
+    for j in range(window_start, window_end):
+        if "KLOG_ONCE_WARN" in lines[j] and subsys in lines[j]:
+            return None
+
+    indent = _leading_spaces(target_line)
+    if indent == 0:
+        return None
+
+    # Build the demotion block. We wrap it in `#if 0` so applying the
+    # patch is safe — the reviewer must affirmatively flip the gate
+    # to take the new behaviour.
+    sp = " " * indent
+    err_code = "InvalidState"
+    new_block = []
+    new_block.append(f"{sp}// REVIEW: KASSERT demoted by fix-journal cycle (recurring assert,\n")
+    new_block.append(f"{sp}// repeat={r.repeat}). Flip the `#if 0` below to `#if 1` to\n")
+    new_block.append(f"{sp}// activate the demotion; leave it at `#if 0` to revert to the\n")
+    new_block.append(f"{sp}// original panicking behaviour. Verify the caller can recover\n")
+    new_block.append(f"{sp}// from a `{err_code}` error before activating.\n")
+    new_block.append(f"{sp}#if 0\n")
+    new_block.append(f"{sp}if (!({condition}))\n")
+    new_block.append(f"{sp}{{\n")
+    new_block.append(
+        f'{sp}    KLOG_ONCE_WARN("{_escape_cpp_string(subsys)}", '
+        f'"demoted KASSERT: {_escape_cpp_string(msg)}");\n'
+    )
+    new_block.append(
+        f"{sp}    return ::duetos::core::Err{{::duetos::core::ErrorCode::{err_code}}};\n"
+    )
+    new_block.append(f"{sp}}}\n")
+    new_block.append(f"{sp}#else\n")
+    # Reproduce the original line verbatim so the diff is balanced.
+    new_block.append(target_line if target_line.endswith("\n") else target_line + "\n")
+    new_block.append(f"{sp}#endif\n")
+
+    file_rel = path.relative_to(repo_root).as_posix()
+    return _hunk_replace_with_block(file_rel, lines, line_part - 1, new_block)
+
+
 def synth_cap_denial_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
     """Generate a brief for a CapDenial record (cap-audit ring mirror).
 
@@ -2370,7 +2789,9 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
                  marker_log_threshold: int = DEFAULT_MARKER_LOG_THRESHOLD,
                  enable_syscall_stub: bool = True,
                  enable_marker_log: bool = True,
-                 elf_path: Path | None = None) -> list[Action]:
+                 elf_path: Path | None = None,
+                 kassert_demote_threshold: int = DEFAULT_KASSERT_DEMOTE_THRESHOLD,
+                 enable_kassert_demote: bool = False) -> list[Action]:
     actions: list[Action] = []
     seen: set[tuple[str, str]] = set()
     fault_react_probe_done = False
@@ -2536,6 +2957,33 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
             actions.append(synth_cap_denial_brief(r, resolver))
         elif r.detector_name == "trap_capture":
             actions.append(synth_trap_capture_brief(r, resolver, elf_path, repo_root))
+        elif r.detector_name == "user_fault":
+            actions.append(synth_user_fault_brief(r, resolver))
+        elif r.detector_name == "kassert_fail":
+            actions.append(synth_kassert_brief(r, resolver, repo_root,
+                                               demote_threshold=kassert_demote_threshold))
+            # Optional, opt-in: emit an actual demote patch (KASSERT
+            # -> if-guard + KLOG_ONCE_WARN + Err{...}, gated behind
+            # `#if 0` so applying the patch is safe and the
+            # reviewer affirmatively flips the gate). Only fires
+            # for recurring asserts AND only when a Result-return
+            # signature is detected nearby.
+            if enable_kassert_demote and r.repeat >= kassert_demote_threshold:
+                demote_diff = synth_kassert_demote_patch(r, resolver, repo_root)
+                if demote_diff:
+                    safe_subsys = re.sub(r"[^A-Za-z0-9_.-]+", "-", r.source_pin)
+                    actions.append(
+                        Action(
+                            kind="patch",
+                            title=(
+                                f"Demote recurring KASSERT in `{r.source_pin}` "
+                                f"to graceful return (×{r.repeat}; "
+                                f"gated behind `#if 0`){_new_tag(r)}"
+                            ),
+                            body=demote_diff,
+                            filename=f"kassert-demote-{safe_subsys}.patch",
+                        )
+                    )
     return actions
 
 
@@ -2704,6 +3152,34 @@ def main() -> int:
             "review cycle."
         ),
     )
+    ap.add_argument(
+        "--enable-kassert-demote",
+        action="store_true",
+        help=(
+            "OPT-IN: also emit `kassert-demote-<subsys>.patch` files "
+            "for recurring KassertFail records. The generated patch "
+            "converts a `KASSERT(cond, ...)` into a defensive `if "
+            "(!(cond)) { KLOG_ONCE_WARN(...); return Err{...}; }` "
+            "block, gated behind `#if 0` so applying the patch does "
+            "NOT change behaviour until the reviewer also flips the "
+            "`#if 0` to `#if 1`. Off by default because KASSERT "
+            "demotion is a semantic change (a kernel invariant check "
+            "becomes a soft error), and even with the `#if 0` brake "
+            "it warrants explicit opt-in."
+        ),
+    )
+    ap.add_argument(
+        "--kassert-demote-threshold",
+        type=int,
+        default=DEFAULT_KASSERT_DEMOTE_THRESHOLD,
+        help=(
+            f"min repeat_count for the KASSERT demote patch + brief "
+            f"proposal to fire. Default: {DEFAULT_KASSERT_DEMOTE_THRESHOLD}. "
+            f"The brief always renders the recurring-assert proposal "
+            f"text at this threshold; the actual code patch additionally "
+            f"requires --enable-kassert-demote."
+        ),
+    )
     args = ap.parse_args()
 
     repo_root = find_repo_root()
@@ -2775,6 +3251,8 @@ def main() -> int:
         enable_syscall_stub=not args.no_syscall_stub,
         enable_marker_log=not args.no_marker_log,
         elf_path=args.kernel_elf,
+        kassert_demote_threshold=args.kassert_demote_threshold,
+        enable_kassert_demote=args.enable_kassert_demote,
     )
     if args.markers:
         markers = load_markers(args.markers)

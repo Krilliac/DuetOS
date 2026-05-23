@@ -84,6 +84,38 @@ enum class FixDetector : u8
                         // disassembles the faulting instruction, and
                         // emits a per-trap brief with the captured
                         // source context.
+    UserFault = 9,      // Ring-3 CPU exception (the user task is being
+                        // killed; the kernel keeps running). Same
+                        // record shape as TrapCapture (ctx_a packs
+                        // vector + error_code, ctx_b carries CR2 for
+                        // #PF) but the caller_rip is a USER RIP, which
+                        // doesn't symbolize against the kernel ELF.
+                        // source_pin = `user.<task_label>` so a single
+                        // chronically-crashing PE binary collapses to
+                        // one record with repeat_count = crash count.
+                        // The offline brief resolves the RIP against
+                        // the offending PE's debug info when possible
+                        // and falls back to "fault inside <DLL>" when
+                        // we know the import range. Useful for
+                        // spotting wild-jump / vtable-corruption
+                        // patterns in third-party EXEs that ship
+                        // without source.
+    KassertFail = 10,   // `core::Panic` / KASSERT site reached. The
+                        // kernel is on its way to halting — recording
+                        // here is the LAST observability window. Pin
+                        // = subsystem (the first arg to Panic). hint
+                        // = the assertion / panic message. caller_rip
+                        // = the call site of Panic, which addr2line
+                        // resolves to the KASSERT statement (or the
+                        // call that triggered Panic). The brief
+                        // synthesiser reads ±8 lines of source context
+                        // around the assertion AND proposes a
+                        // defensive "convert to graceful return" shape
+                        // for assertions that recur across boots — a
+                        // recurring assert is by definition an
+                        // invariant the upstream caller violates, and
+                        // the right fix is usually to demote the
+                        // assertion + handle the case explicitly.
 };
 
 /// Stable human label. Always returns a non-null pointer into .rodata.

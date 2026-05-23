@@ -25,6 +25,7 @@
 #include "arch/x86_64/panic_capture.h"
 
 extern "C" void duetos_arch_PanicCaptureShim();
+#include "diag/fix_journal.h"
 #include "loader/dll_loader.h"
 #include "loader/pe_exports.h"
 #include "log/klog.h"
@@ -1059,6 +1060,21 @@ void Panic(const char* subsystem, const char* message)
         arch::Halt();
     }
     arch::PanicInProgressMark();
+    // KassertFail journal record: capture the (subsystem, message,
+    // caller_rip) tuple BEFORE the diagnostic dump so the FAT32 /
+    // NVMe panic-write tier picks up a structured record for the
+    // offline brief synthesiser. Dedup keys on (subsystem,
+    // message) so the same KASSERT firing across N boots
+    // collapses to one row with repeat_count = N. caller_rip
+    // resolves via addr2line to the KASSERT statement source
+    // line, which the brief reads ±8 lines around. Uses the
+    // regular recorder (not the trap variant) because Panic
+    // runs in process context — IRQs are disabled but the
+    // spinlock is uncontended after PanicBroadcastNmi halts
+    // peers. The PanicInProgress short-circuit above means
+    // recursive panics skip this entirely.
+    (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::KassertFail, subsystem, message,
+                                           reinterpret_cast<u64>(__builtin_return_address(0)), 0);
     // Silence the NMI watchdog. The crash-dump path can take
     // longer than one watchdog interval (serial write is slow,
     // symbol resolution walks the embedded table) and we don't
@@ -1176,6 +1192,12 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
         arch::Halt();
     }
     arch::PanicInProgressMark();
+    // KassertFail journal record — same shape as Panic() above but
+    // with `value` captured into ctx_b so the offline brief can
+    // surface the OOB index / count / address that triggered the
+    // KASSERT_WITH_VALUE site.
+    (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::KassertFail, subsystem, message,
+                                           reinterpret_cast<u64>(__builtin_return_address(0)), value);
 
     arch::NmiWatchdogDisable();
     duetos::diag::SoftLockupDisable();

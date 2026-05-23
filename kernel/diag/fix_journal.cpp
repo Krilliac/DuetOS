@@ -282,6 +282,10 @@ const char* FixDetectorName(FixDetector d)
         return "cap_denial";
     case FixDetector::TrapCapture:
         return "trap_capture";
+    case FixDetector::UserFault:
+        return "user_fault";
+    case FixDetector::KassertFail:
+        return "kassert_fail";
     }
     return "unknown";
 }
@@ -400,6 +404,35 @@ void FixJournalDrainTrapPending()
             break;
         }
     }
+    else if (det == FixDetector::UserFault)
+    {
+        // Ring-3 RIP doesn't resolve against the kernel symbol
+        // table, so the auto-pin path would just emit "?+0xRIP".
+        // Use a fixed `user.fault` pin instead so dedup collapses
+        // every user crash into one record — the offline brief
+        // can split per task / per RIP / per PE from the captured
+        // ctx fields and caller_rip.
+        pin = "user.fault";
+        const u32 vector = static_cast<u32>(ctx_a >> 32);
+        switch (vector)
+        {
+        case 0:
+            hint = "user trap #DE";
+            break;
+        case 6:
+            hint = "user trap #UD";
+            break;
+        case 13:
+            hint = "user trap #GP";
+            break;
+        case 14:
+            hint = "user trap #PF";
+            break;
+        default:
+            hint = "user trap (vector in ctx_a)";
+            break;
+        }
+    }
     (void)RecordCommon(det, pin, hint, ctx_a, ctx_b, 0, rip);
 }
 
@@ -465,14 +498,14 @@ void FixJournalEmitBootSummary()
     // counts + audited count. Counters are bounded by the ring
     // capacity so the loop is O(kFixJournalCapacity) — fine to call
     // at smoke completion.
-    u64 per_detector[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+    u64 per_detector[11] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     u64 audited = 0;
     {
         ::duetos::sync::SpinLockGuard guard(g_lock);
         for (u64 i = 0; i < g_used; ++i)
         {
             const u8 d = static_cast<u8>(g_ring[i].detector);
-            if (d < 9)
+            if (d < 11)
                 ++per_detector[d];
             if ((g_ring[i].flags & 0x01) != 0)
                 ++audited;
@@ -491,7 +524,7 @@ void FixJournalEmitBootSummary()
     // Per-detector breakdown — six lines is verbose but trivially
     // greppable. The detector names match `FixDetectorName()` and
     // the python report's keys, so a CI script can join them.
-    for (u8 d = 1; d < 9; ++d)
+    for (u8 d = 1; d < 11; ++d)
     {
         KLOG_INFO_V("smoke", FixDetectorName(static_cast<FixDetector>(d)), per_detector[d]);
     }
@@ -527,6 +560,8 @@ void FixJournalSelfTest()
         {FixDetector::LoaderReject, "selftest/loader.cpp:1", "loader selftest"},
         {FixDetector::CapDenial, "selftest/cap.SelftestCap", "cap denial selftest"},
         {FixDetector::TrapCapture, "selftest/trap.cpp:1", "trap capture selftest"},
+        {FixDetector::UserFault, "selftest/user.task#0", "user fault selftest"},
+        {FixDetector::KassertFail, "selftest/assert.subsys", "kassert selftest"},
     };
     constexpr u64 kInjects = sizeof(injects) / sizeof(injects[0]);
 
