@@ -328,6 +328,18 @@ struct CmdBufferRecord
     CmdRecord ops[kCmdTapeCapacity];
 };
 
+/// Per-pipeline record. Today only tracks the bound shader
+/// handles so the rasterizer can find the SPIR-V Program at
+/// replay time. Future extensions: vertex input bindings,
+/// rasterization state, blend state — each layer lands here
+/// as it becomes meaningful.
+struct PipelineRecord
+{
+    VkShaderModule vertex_shader;   // 0 if none (compute pipeline)
+    VkShaderModule fragment_shader; // 0 if none (compute pipeline)
+    VkShaderModule compute_shader;  // 0 if graphics
+};
+
 struct DescriptorSetLayoutRecord
 {
     u32 binding_count;
@@ -435,6 +447,7 @@ extern PipelineCacheRecord g_pipeline_cache_data[kPoolCapacity];
 extern QueryPoolRecord g_query_pool_data[kPoolCapacity];
 extern PhysicalDeviceRecord g_phys_data[kPoolCapacity];
 extern QueueRecord g_queue_data[kPoolCapacity];
+extern PipelineRecord g_pipeline_data[kPoolCapacity];
 
 // -------------------------------------------------------------------
 // Aggregate counters.
@@ -505,7 +518,31 @@ struct RasterState
     u32 front_face;    // VkFrontFace: 0=CounterClockwise, 1=Clockwise
     u32 fb_w;
     u32 fb_h;
+    VkPipeline bound_pipeline; // pipeline handle bound at the last `BindPipeline` op (0 if none)
 };
+
+/// Look up the cached SPIR-V Program of a shader handle (returns
+/// nullptr if the shader hasn't been loaded, the handle is bad,
+/// or the Program parse failed at module-create time).
+spirv::Program* ShaderProgram(VkShaderModule shader);
+
+/// Look up the (vs, fs) shader handles bound to a pipeline.
+/// Both can be 0 (compute pipeline / unknown).
+struct PipelineShaders
+{
+    VkShaderModule vs;
+    VkShaderModule fs;
+};
+PipelineShaders PipelineShaderHandles(VkPipeline pipe);
+
+/// Run the SPIR-V shader-based rasterizer for the current draw.
+/// Returns true if the shader path actually painted (in which
+/// case the caller skips the fixed-function fallback). Returns
+/// false if the pipeline doesn't carry interpretable SPIR-V
+/// programs OR the input layout doesn't match the supported v1
+/// shape — caller falls back to RasterizeDuetDraw.
+bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_count);
+bool ShaderRasterizeDrawIndexed(const RasterState& st, u32 first_index, u32 index_count, i32 vertex_offset);
 
 /// Lazy-allocated shared software depth buffer.
 ///

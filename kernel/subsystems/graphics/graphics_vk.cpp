@@ -71,6 +71,7 @@ PipelineCacheRecord g_pipeline_cache_data[kPoolCapacity];
 QueryPoolRecord g_query_pool_data[kPoolCapacity];
 PhysicalDeviceRecord g_phys_data[kPoolCapacity];
 QueueRecord g_queue_data[kPoolCapacity];
+PipelineRecord g_pipeline_data[kPoolCapacity];
 
 Pool g_instance_pool;
 Pool g_phys_pool;
@@ -1126,6 +1127,9 @@ VkResult VkCreateGraphicsPipeline(VkDevice dev, VkPipelineLayout layout, VkShade
     u32 slot = 0;
     if (!PoolAlloc(g_pipeline_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
+    g_pipeline_data[slot].vertex_shader = vs;
+    g_pipeline_data[slot].fragment_shader = fs;
+    g_pipeline_data[slot].compute_shader = 0;
     if (out != nullptr)
         *out = HandleFor(kPipelineBase, slot);
     return VkResult::Success;
@@ -1143,6 +1147,9 @@ VkResult VkCreateComputePipeline(VkDevice dev, VkPipelineLayout layout, VkShader
     u32 slot = 0;
     if (!PoolAlloc(g_pipeline_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
+    g_pipeline_data[slot].vertex_shader = 0;
+    g_pipeline_data[slot].fragment_shader = 0;
+    g_pipeline_data[slot].compute_shader = cs;
     if (out != nullptr)
         *out = HandleFor(kPipelineBase, slot);
     return VkResult::Success;
@@ -1941,15 +1948,27 @@ void ReplayCommandBuffer(VkCommandBuffer cb)
             }
             break;
         case CmdOp::Draw:
-            RasterizeDuetDraw(st, op.first_vertex, op.vertex_count);
+            // Try the SPIR-V shader-based rasterizer first; it
+            // returns true if the bound pipeline has VS+FS programs
+            // matching the supported v1 shape and the draw actually
+            // painted. On false the fixed-function fallback runs
+            // (DuetOS v0/v1 vertex format + Gouraud raster).
+            if (!ShaderRasterizeDraw(st, op.first_vertex, op.vertex_count))
+                RasterizeDuetDraw(st, op.first_vertex, op.vertex_count);
             break;
         case CmdOp::DrawIndexed:
-            RasterizeDuetDrawIndexed(st, op.first_index, op.index_count, op.vertex_offset);
+            if (!ShaderRasterizeDrawIndexed(st, op.first_index, op.index_count, op.vertex_offset))
+                RasterizeDuetDrawIndexed(st, op.first_index, op.index_count, op.vertex_offset);
+            break;
+        case CmdOp::BindPipeline:
+            // Record the pipeline handle so the shader-rasterizer
+            // hook can fetch (vs, fs) and decide whether to take
+            // the SPIR-V path.
+            st.bound_pipeline = op.pipeline;
             break;
         case CmdOp::WaitEvents: // no-op replay (events already signalled)
         case CmdOp::BeginQuery: // pairs with EndQuery — write happens at End
         case CmdOp::EndRenderPass:
-        case CmdOp::BindPipeline:
         case CmdOp::SetViewport:
         // Indirect / dynamic-state-2 / sync2 / subpass / extended-query
         // recorded entries — no GPU side effect in v0; the AppendOp at
