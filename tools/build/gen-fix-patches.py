@@ -69,7 +69,60 @@ DETECTORS = {
     5: "soft_fault_recov",
     6: "loader_reject",
     7: "cap_denial",
+    8: "trap_capture",
 }
+
+# x86_64 trap vectors that fire as TrapCapture records. The kernel's
+# trap dispatcher only records the panic-bound vectors here — recovered
+# faults route through SoftFaultRecov instead.
+TRAP_VECTOR_NAMES = {
+    0: "#DE (divide by zero)",
+    1: "#DB (debug)",
+    3: "#BP (breakpoint)",
+    4: "#OF (overflow)",
+    5: "#BR (bound range)",
+    6: "#UD (undefined opcode)",
+    7: "#NM (device not available)",
+    8: "#DF (double fault)",
+    10: "#TS (invalid TSS)",
+    11: "#NP (segment not present)",
+    12: "#SS (stack-segment fault)",
+    13: "#GP (general protection)",
+    14: "#PF (page fault)",
+    16: "#MF (x87 FPE)",
+    17: "#AC (alignment check)",
+    18: "#MC (machine check)",
+    19: "#XM (SIMD FPE)",
+}
+
+# Page-fault error-code bit decode (vector 14 specifically). Bits
+# match the AMD64 SDM §8.2.15 / Intel SDM §6.15.
+PF_ERROR_BITS = [
+    (1 << 0, "PRESENT", "page was present"),
+    (1 << 1, "WRITE", "write access"),
+    (1 << 2, "USER", "ring-3 access"),
+    (1 << 3, "RSVD", "reserved bit set in PTE"),
+    (1 << 4, "INSTR", "instruction fetch"),
+    (1 << 5, "PK", "protection-key violation"),
+    (1 << 15, "SGX", "SGX violation"),
+]
+
+
+def decode_pf_error_code(err: int) -> tuple[str, str]:
+    """Return (short_flags, long_description) for a #PF error code.
+
+    short_flags is a compact letter set ('rwu' etc.) suitable for a
+    one-line label; long_description is a human sentence for the brief.
+    """
+    short: list[str] = []
+    long_parts: list[str] = []
+    for bit, label, desc in PF_ERROR_BITS:
+        if err & bit:
+            short.append(label[0].lower())
+            long_parts.append(desc)
+    if not short:
+        return ("?", "no decoded error-code bits")
+    return ("".join(short), ", ".join(long_parts))
 
 
 def is_selftest_record(source_pin: str) -> bool:
@@ -1378,6 +1431,366 @@ def synth_loader_reject_brief(r: FixRecord, resolver: SymbolResolver | None = No
     return Action(kind="note", title=title, body="\n".join(lines), filename=None)
 
 
+# ---------------------------------------------------------------- TrapCapture
+
+# Recognised fault-pattern signatures: (trap_kind, error_code_match,
+# faulting_addr_match) -> (label, defensive_fix_template).
+#
+# These match common kernel-fault classes the patch generator can
+# propose targeted defensive patches for. Each entry is intentionally
+# narrow: a pattern that's CONFIDENTLY recognisable, mapped to a fix
+# shape that's CONFIDENTLY additive (a guard added BEFORE the faulting
+# operation, never replacing it). The brief always presents the
+# proposed fix wrapped in a "REVIEW" framing so a human approves.
+#
+# Format of each fix template line:
+#   "<context>": [
+#       ("recognised condition",
+#        "before-line",
+#        "code suggestion (multi-line, '%s' substituted with the
+#         source line that faulted)"),
+#   ]
+TRAP_FIX_TEMPLATES = {
+    "null_deref_read": (
+        "Null-pointer dereference (read) — CR2 in the low page "
+        "(< 0x1000), error_code has PRESENT=0 and WRITE=0.",
+        "Add a null-pointer guard BEFORE the dereference. Common shape:",
+        "if (ptr == nullptr) { /* return / log / RESULT_TRY_OUT */ }\n"
+        "{faulting_line}",
+    ),
+    "null_deref_write": (
+        "Null-pointer dereference (write) — CR2 in the low page "
+        "(< 0x1000), error_code has WRITE=1 and PRESENT=0.",
+        "Add a null-pointer guard BEFORE the store. Common shape:",
+        "if (ptr == nullptr) { /* return / log / RESULT_TRY_OUT */ }\n"
+        "{faulting_line}",
+    ),
+    "stack_overflow": (
+        "Kernel stack overflow — CR2 within the guard-page region of "
+        "the per-task kstack. Usually caused by uncontrolled recursion "
+        "or a single large stack allocation.",
+        "Audit the call site for unbounded recursion. If a single "
+        "frame is huge, convert to heap allocation:",
+        "// REVIEW: convert large local to kheap allocation or smaller chunked I/O\n"
+        "{faulting_line}",
+    ),
+    "user_pointer_smap": (
+        "Kernel touched a user-space address directly. The fault is "
+        "SMAP catching the bypass; the right fix is to route through "
+        "CopyToUser / CopyFromUser.",
+        "Wrap the access in the user-pointer mediator:",
+        "// REVIEW: route through mm::CopyFromUser / CopyToUser\n"
+        "if (!mm::CopyFromUser(&kernel_buf, user_ptr, len)) {{ return -EFAULT; }}\n",
+    ),
+    "div_by_zero": (
+        "Divide by zero (#DE) — the divisor expression evaluated to 0.",
+        "Add a guard before the division. Common shape:",
+        "if (divisor == 0) { /* return / propagate ErrorCode::InvalidArgument */ }\n"
+        "{faulting_line}",
+    ),
+    "undefined_opcode": (
+        "Undefined opcode (#UD) — the byte sequence at RIP is not a "
+        "valid x86_64 instruction. Usually: (a) a wild branch into a "
+        "data region, (b) a function-pointer table corruption, or (c) "
+        "a deliberate ud2 from an assert / KASSERT macro that was meant "
+        "to fire.",
+        "Audit the call path. If (c), the surfaced assertion is the "
+        "real bug — fix the upstream invariant, not the trap site.",
+        "// REVIEW: #UD usually means a wild jump or a deliberate KASSERT/ud2 firing.\n"
+        "// If this code path was reached unexpectedly, audit the\n"
+        "// invariant the upstream caller is violating.\n",
+    ),
+    "general_protection": (
+        "General protection (#GP) — privileged instruction in ring 3, "
+        "non-canonical address load, segment-selector violation, or "
+        "MSR access denied.",
+        "GP fault classes vary widely. Common kernel triggers:",
+        "// REVIEW: #GP at this RIP — likely a non-canonical address\n"
+        "// (sign-extended high bits not matching), a privileged\n"
+        "// instruction in the wrong ring, or an invalid MSR\n"
+        "// number. Add a range/canonical check before the load.\n",
+    ),
+}
+
+
+def classify_trap(vector: int, error_code: int, cr2: int) -> str | None:
+    """Map a (vector, error_code, cr2) tuple to a fix-template key.
+
+    Returns the key into `TRAP_FIX_TEMPLATES`, or None if the pattern
+    isn't confidently recognised (in which case the brief still
+    surfaces all captured fields but doesn't propose a fix).
+    """
+    if vector == 14:  # #PF
+        write = bool(error_code & (1 << 1))
+        user = bool(error_code & (1 << 2))
+        present = bool(error_code & (1 << 0))
+        # Null deref: low-page CR2 (within first 4 KiB) AND
+        # PRESENT=0 (page wasn't mapped).
+        if cr2 < 0x1000 and not present and not user:
+            return "null_deref_write" if write else "null_deref_read"
+        # SMAP: ring-0 fault on a CR2 in canonical user range
+        # (< 0x0000800000000000). PRESENT=1 means the page existed
+        # but SMAP blocked the access.
+        if not user and cr2 != 0 and cr2 < 0x0000800000000000 and present:
+            return "user_pointer_smap"
+        # Stack overflow: CR2 near the kstack guard region. The
+        # kstack guard is one page below the kstack base; without
+        # the runtime layout the classifier can only flag "this
+        # looks like a guard-page hit" if CR2 is on a page boundary
+        # AND the trapping RIP is inside a leaf function. We
+        # conservatively flag based on guard alignment.
+        if not user and (cr2 & 0xFFF) == 0:
+            return "stack_overflow"
+        return None
+    if vector == 0:
+        return "div_by_zero"
+    if vector == 6:
+        return "undefined_opcode"
+    if vector == 13:
+        return "general_protection"
+    return None
+
+
+def read_source_context(file_path: Path, line: int, window: int = 8) -> list[str]:
+    """Return ±window lines around `line` from `file_path`, with line
+    numbers prepended. Empty list on read failure.
+
+    The window is wider than the marker-observability synth uses (3)
+    because for a fault-site brief the reviewer benefits from seeing
+    the surrounding block / function context, not just the immediate
+    statement.
+    """
+    try:
+        text = file_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    src_lines = text.splitlines()
+    if line < 1 or line > len(src_lines):
+        return []
+    start = max(0, line - 1 - window)
+    end = min(len(src_lines), line + window)
+    out: list[str] = []
+    width = len(str(end))
+    for i in range(start, end):
+        marker = ">>" if (i + 1) == line else "  "
+        out.append(f"{marker} {str(i + 1).rjust(width)} | {src_lines[i]}")
+    return out
+
+
+def _resolve_source_path(addr2line_path: str, repo_root: Path) -> Path | None:
+    """Convert an addr2line file path into a real on-disk path.
+
+    addr2line emits paths in several shapes depending on how the ELF
+    was built:
+      * absolute compile-time path (`/home/user/DuetOS/kernel/foo.cpp`)
+      * repo-relative path (`kernel/foo.cpp`)
+      * basename only (`foo.cpp`) — when DWARF was stripped of CWD
+    Try each form in order; for the basename-only case, glob the tree
+    once and cache the first hit. Returns None if no match.
+    """
+    if not addr2line_path:
+        return None
+    p = Path(addr2line_path)
+    if p.is_absolute() and p.exists():
+        return p
+    candidate = repo_root / addr2line_path
+    if candidate.exists():
+        return candidate
+    # Basename-only fall-back: walk the source-bearing roots looking
+    # for a unique match. Limited to known top-level dirs so a stray
+    # basename from a third-party include doesn't pull in a wrong
+    # match.
+    base = p.name
+    if "/" not in addr2line_path:
+        for top in ("kernel", "userland", "drivers", "subsystems", "boot"):
+            root = repo_root / top
+            if not root.exists():
+                continue
+            for hit in root.rglob(base):
+                if hit.is_file():
+                    return hit
+    return None
+
+
+def disassemble_at(elf_path: Path | None, rip: int, count: int = 4) -> list[str]:
+    """Disassemble `count` instructions starting at `rip` from the kernel
+    ELF via objdump. Empty list on failure or when no ELF was supplied.
+
+    Falls back gracefully — disassembly is a NICE-TO-HAVE in the brief;
+    the source-context excerpt + register fields stay useful without it.
+    """
+    if elf_path is None or not elf_path.exists():
+        return []
+    tool = shutil.which("objdump") or shutil.which("llvm-objdump")
+    if tool is None:
+        return []
+    try:
+        # objdump --disassemble=<symbol> doesn't take an address; we
+        # use --start-address / --stop-address to bound the window.
+        # 4 typical x86_64 instructions average ~12 bytes; 48 byte
+        # window is a safe upper bound.
+        stop = rip + max(16, count * 12)
+        res = subprocess.run(
+            [tool, "-d", "-M", "intel", "--no-show-raw-insn",
+             f"--start-address=0x{rip:x}", f"--stop-address=0x{stop:x}",
+             str(elf_path)],
+            check=False, capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    # Keep only the instruction lines (start with whitespace + hex addr).
+    out: list[str] = []
+    for ln in res.stdout.splitlines():
+        m = re.match(r"^\s+([0-9a-f]+):\s+(.+)$", ln)
+        if m:
+            out.append(f"  0x{m.group(1)}: {m.group(2)}")
+            if len(out) >= count:
+                break
+    return out
+
+
+def synth_trap_capture_brief(r: FixRecord, resolver: SymbolResolver | None = None,
+                             elf_path: Path | None = None,
+                             repo_root: Path | None = None) -> Action:
+    """Generate a fault-site brief for a TrapCapture record.
+
+    Pulls together every layer of evidence the offline pipeline can
+    extract for the trapping site:
+      * symbol (addr2line `function (file:line)`)
+      * ±8 lines of source context around the fault line
+      * 4 instructions disassembled at the faulting RIP
+      * decoded error_code bits (page-fault flag set, etc.)
+      * classified fix pattern + proposed defensive shape (when the
+        pattern is recognised)
+
+    Decision #016: the proposed shape is wrapped in REVIEW framing
+    and embedded as text in the brief — never auto-applied to the
+    source. A reviewer reads, decides if the guess is right, and
+    writes the real fix manually.
+    """
+    vector = int((r.ctx_a >> 32) & 0xff)
+    error_code = int(r.ctx_a & 0xffffffff)
+    cr2 = r.ctx_b
+    vec_name = TRAP_VECTOR_NAMES.get(vector, f"vector={vector}")
+
+    out: list[str] = []
+    repeat_label = "first occurrence" if r.repeat <= 1 else f"repeated {r.repeat}× (post-panic re-trap?)"
+    out.append(f"**Trap `{vec_name}` at RIP `0x{r.caller_rip:016x}`** — {repeat_label}.")
+    out.append("")
+
+    # Resolve RIP → file:line via addr2line.
+    sym_line = ""
+    file_part = ""
+    line_part = 0
+    if resolver is not None:
+        sym = resolver.resolve(r.caller_rip)
+        if sym and not sym.startswith("?? "):
+            sym_line = sym
+            out.append(f"Symbol: `{sym}`")
+            # Try to extract `(file:line)` from the addr2line output.
+            m = re.search(r"\(([^)]+):(\d+)\)|\bat\s+(\S+):(\d+)", sym)
+            if m:
+                file_part = m.group(1) or m.group(3) or ""
+                try:
+                    line_part = int(m.group(2) or m.group(4))
+                except (TypeError, ValueError):
+                    line_part = 0
+
+    # Decoded error code (#PF specifically; other vectors carry an
+    # error code with different bit semantics but we don't decode
+    # them here).
+    if vector == 14:
+        short, longd = decode_pf_error_code(error_code)
+        out.append(f"CR2: `0x{cr2:016x}`")
+        out.append(f"Error code: `0x{error_code:x}` ({short} — {longd})")
+    elif vector in (13, 17):  # #GP / #AC carry segment selectors
+        out.append(f"Error code: `0x{error_code:x}` (segment selector / index)")
+    else:
+        if error_code != 0:
+            out.append(f"Error code: `0x{error_code:x}`")
+    out.append("")
+
+    # Source context window.
+    resolved_source: Path | None = None
+    if file_part and line_part > 0 and repo_root is not None:
+        resolved_source = _resolve_source_path(file_part, repo_root)
+        if resolved_source is not None:
+            ctx = read_source_context(resolved_source, line_part, window=8)
+            if ctx:
+                rel = resolved_source.relative_to(repo_root) if resolved_source.is_relative_to(repo_root) else resolved_source
+                out.append(f"**Source context** (`{rel}:{line_part}`):")
+                out.append("")
+                out.append("```cpp")
+                out.extend(ctx)
+                out.append("```")
+                out.append("")
+
+    # Disassembly window.
+    disasm = disassemble_at(elf_path, r.caller_rip, count=4)
+    if disasm:
+        out.append("**Disassembly at fault RIP**:")
+        out.append("")
+        out.append("```asm")
+        out.extend(disasm)
+        out.append("```")
+        out.append("")
+
+    # Classified fault pattern + proposed shape.
+    pattern = classify_trap(vector, error_code, cr2)
+    if pattern is not None and pattern in TRAP_FIX_TEMPLATES:
+        condition, before_line, template = TRAP_FIX_TEMPLATES[pattern]
+        out.append(f"**Recognised pattern**: {condition}")
+        out.append("")
+        out.append(before_line)
+        out.append("")
+        out.append("```cpp")
+        # Substitute {faulting_line} with the actual faulting source
+        # line if we resolved one; else leave the placeholder.
+        sub = ""
+        if resolved_source is not None and line_part > 0:
+            try:
+                src = resolved_source.read_text(encoding="utf-8", errors="replace").splitlines()
+                if 0 < line_part <= len(src):
+                    sub = src[line_part - 1].strip()
+            except OSError:
+                pass
+        rendered = template.replace("{faulting_line}", sub or "<faulting expression>")
+        out.append(rendered)
+        out.append("```")
+        out.append("")
+        out.append(
+            "**REVIEW**: This is a *proposed* defensive shape, not an "
+            "auto-applied fix (Decision #016). Confirm the pattern "
+            "match is correct for this site before adopting the "
+            "guard — a `nullptr` may be the legitimate empty case "
+            "the caller relies on, a SMAP fault may be a legitimate "
+            "user-pointer access that needs a different fix, etc."
+        )
+    else:
+        out.append(
+            f"**No automatic fix-pattern match** for vector={vector}, "
+            f"err=0x{error_code:x}, cr2=0x{cr2:x}. The captured "
+            f"source + disassembly windows above are the reviewer's "
+            f"starting point."
+        )
+    out.append("")
+
+    out.append("---")
+    out.append("Journal record:")
+    out.append("```")
+    out.append(f"seq         = {r.seq}")
+    out.append(f"repeat      = {r.repeat}")
+    out.append(f"caller_rip  = 0x{r.caller_rip:016x}  (faulting RIP)")
+    out.append(f"ctx_a       = 0x{r.ctx_a:016x}  (vector<<32 | error_code)")
+    out.append(f"ctx_b       = 0x{r.ctx_b:016x}  (CR2 for #PF; 0 otherwise)")
+    out.append(f"source_pin  = {r.source_pin!r}")
+    out.append(f"hint        = {r.hint!r}")
+    out.append("```")
+
+    title = f"Trap `{vec_name}` at `{r.source_pin}`{_new_tag(r)}"
+    return Action(kind="note", title=title, body="\n".join(out), filename=None)
+
+
 def synth_cap_denial_brief(r: FixRecord, resolver: SymbolResolver | None = None) -> Action:
     """Generate a brief for a CapDenial record (cap-audit ring mirror).
 
@@ -1956,7 +2369,8 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
                  resolver: SymbolResolver | None = None,
                  marker_log_threshold: int = DEFAULT_MARKER_LOG_THRESHOLD,
                  enable_syscall_stub: bool = True,
-                 enable_marker_log: bool = True) -> list[Action]:
+                 enable_marker_log: bool = True,
+                 elf_path: Path | None = None) -> list[Action]:
     actions: list[Action] = []
     seen: set[tuple[str, str]] = set()
     fault_react_probe_done = False
@@ -2120,6 +2534,8 @@ def plan_actions(records: list[FixRecord], thunks_index: dict, repo_root: Path,
             actions.append(synth_loader_reject_brief(r, resolver))
         elif r.detector_name == "cap_denial":
             actions.append(synth_cap_denial_brief(r, resolver))
+        elif r.detector_name == "trap_capture":
+            actions.append(synth_trap_capture_brief(r, resolver, elf_path, repo_root))
     return actions
 
 
@@ -2358,6 +2774,7 @@ def main() -> int:
         marker_log_threshold=args.marker_log_threshold,
         enable_syscall_stub=not args.no_syscall_stub,
         enable_marker_log=not args.no_marker_log,
+        elf_path=args.kernel_elf,
     )
     if args.markers:
         markers = load_markers(args.markers)

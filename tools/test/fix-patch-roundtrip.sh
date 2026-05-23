@@ -112,8 +112,15 @@ records = [
     # only the brief, no marker-log-upgrade patch.
     rec(4, 2, "acpi/aml.cpp:HandleOpRegion",
         "evaluate computed OperationRegion bounds", repeat=3),
+    # TrapCapture: a #PF write at CR2=0x10 (null-page write). The
+    # brief synthesizer should recognise this as null_deref_write and
+    # propose a guard. caller_rip is a placeholder; without a real
+    # kernel ELF for addr2line it just won't symbolize.
+    rec(5, 8, "TrapCapture+0x40", "trap PF page fault", repeat=1,
+        ctx_a=(14 << 32) | 0x02, ctx_b=0x10, rip=0xffffffff80abcdef),
     # Selftest noise — must be filtered out cleanly.
-    rec(5, 1, "selftest/stub.cpp:1", "stub selftest"),
+    rec(6, 1, "selftest/stub.cpp:1", "stub selftest"),
+    rec(7, 8, "selftest/trap.cpp:1", "trap capture selftest"),
 ]
 
 blob = HEADER.pack(FILE_MAGIC, 1, len(records), 0) + b"".join(records)

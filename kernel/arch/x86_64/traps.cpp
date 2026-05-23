@@ -1360,6 +1360,28 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     }
     PanicInProgressMark();
 
+    // TrapCapture: deferred-slot record so the FAT32 / NVMe panic-
+    // write tier picks up a structured (faulting-RIP, vector, CR2)
+    // tuple for the offline patch generator. The drain in
+    // FixJournalDrainTrapPending promotes it into a full FixRecord
+    // with an auto-pinned `func+0xOFF` source pin keyed off the
+    // faulting RIP — the patch generator resolves that via
+    // addr2line to get file:line for a per-fault brief.
+    //
+    // ctx_a packs (vector << 32) | (error_code & 0xffffffff). ctx_b
+    // is CR2 for #PF (vector 14) and 0 for all other vectors.
+    // Recording here is BEFORE the dump emit so even if the dump
+    // path re-faults, the panic-tier persistence (which runs from
+    // EmitMinidumpFromTrapFrame and includes a fix-journal flush)
+    // already has the record.
+    {
+        const u64 cap_ctx_a =
+            (static_cast<u64>(frame->vector) << 32) | (static_cast<u64>(frame->error_code) & 0xffffffffULL);
+        const u64 cap_ctx_b = (frame->vector == 14) ? ReadCr2() : 0ULL;
+        ::duetos::diag::FixJournalRecordFromTrap2(::duetos::diag::FixDetector::TrapCapture, cap_ctx_a, cap_ctx_b,
+                                                  frame->rip);
+    }
+
     // Publish the trap-frame state to the GDB stub so a future
     // attach (or a stop-at-fault GDB session) sees the real
     // register values from the moment of fault. Single struct

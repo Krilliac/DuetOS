@@ -66,7 +66,8 @@ struct TrapPending
 {
     u8 valid;       // 0/1; only writer is the trap site, only reader is drain
     u8 detector;    // FixDetector cast
-    u64 ctx_a;      // detector-specific
+    u64 ctx_a;      // detector-specific (TrapCapture: (vector<<32) | err_code)
+    u64 ctx_b;      // detector-specific (TrapCapture: faulting addr / CR2)
     u64 caller_rip; // for the eventual record
 };
 TrapPending g_trap_pending = {};
@@ -279,6 +280,8 @@ const char* FixDetectorName(FixDetector d)
         return "loader_reject";
     case FixDetector::CapDenial:
         return "cap_denial";
+    case FixDetector::TrapCapture:
+        return "trap_capture";
     }
     return "unknown";
 }
@@ -323,6 +326,21 @@ void FixJournalRecordFromTrap(FixDetector detector, u64 ctx_a, u64 caller_rip)
     // contribute to trap_deferred only via the count.
     g_trap_pending.detector = static_cast<u8>(detector);
     g_trap_pending.ctx_a = ctx_a;
+    g_trap_pending.ctx_b = 0;
+    g_trap_pending.caller_rip = caller_rip;
+    g_trap_pending.valid = 1;
+    ++g_stats.trap_deferred;
+}
+
+void FixJournalRecordFromTrap2(FixDetector detector, u64 ctx_a, u64 ctx_b, u64 caller_rip)
+{
+    // Trap-context recorder variant that also carries ctx_b. Same
+    // constraints as the single-ctx form (no allocation, no klog, no
+    // SpinLock acquisition). Used by TrapCapture to carry the
+    // faulting-address (CR2) alongside the (vector, error_code) pack.
+    g_trap_pending.detector = static_cast<u8>(detector);
+    g_trap_pending.ctx_a = ctx_a;
+    g_trap_pending.ctx_b = ctx_b;
     g_trap_pending.caller_rip = caller_rip;
     g_trap_pending.valid = 1;
     ++g_stats.trap_deferred;
@@ -334,13 +352,18 @@ void FixJournalDrainTrapPending()
         return;
     const FixDetector det = static_cast<FixDetector>(g_trap_pending.detector);
     const u64 ctx_a = g_trap_pending.ctx_a;
+    const u64 ctx_b = g_trap_pending.ctx_b;
     const u64 rip = g_trap_pending.caller_rip;
     g_trap_pending.valid = 0;
 
     // Detector-aware source pin and hint. Trap-deferred records are
     // by definition synthesized from a single u64 of context, so
     // hints are coarse — the call-site rip in the record is the
-    // useful pivot.
+    // useful pivot. Leaving the pin nullptr / empty drives the
+    // auto-pin path in RecordCommon, which resolves `caller_rip`
+    // via the embedded symbol table — that's exactly the function +
+    // offset we want for trap-context faults, since "where in the
+    // kernel did the fault hit" is the question every reviewer asks.
     const char* pin = "trap.deferred";
     const char* hint = "trap-context fault deferred to drain";
     if (det == FixDetector::SoftFaultRecov)
@@ -348,7 +371,36 @@ void FixJournalDrainTrapPending()
         pin = "trap.recov";
         hint = "extable / canary / fixup recovered in trap";
     }
-    (void)RecordCommon(det, pin, hint, ctx_a, 0, 0, rip);
+    else if (det == FixDetector::TrapCapture)
+    {
+        // For TrapCapture the auto-pin (`func+0xOFF`) carries more
+        // signal than a fixed string would — every distinct faulting
+        // site dedups separately. Force the auto-pin path.
+        pin = nullptr;
+        // Decode vector from ctx_a's high 32 bits for the hint.
+        // Format: hint = "trap #PF" / "trap #GP" / "trap #UD" /
+        // "trap #DE" / "trap vec=NN".
+        const u32 vector = static_cast<u32>(ctx_a >> 32);
+        switch (vector)
+        {
+        case 0:
+            hint = "trap #DE — divide by zero";
+            break;
+        case 6:
+            hint = "trap #UD — undefined opcode";
+            break;
+        case 13:
+            hint = "trap #GP — general protection";
+            break;
+        case 14:
+            hint = "trap #PF — page fault";
+            break;
+        default:
+            hint = "trap (vector encoded in ctx_a)";
+            break;
+        }
+    }
+    (void)RecordCommon(det, pin, hint, ctx_a, ctx_b, 0, rip);
 }
 
 u64 FixJournalSnapshot(FixRecord* out, u64 cap)
@@ -413,14 +465,14 @@ void FixJournalEmitBootSummary()
     // counts + audited count. Counters are bounded by the ring
     // capacity so the loop is O(kFixJournalCapacity) — fine to call
     // at smoke completion.
-    u64 per_detector[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    u64 per_detector[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
     u64 audited = 0;
     {
         ::duetos::sync::SpinLockGuard guard(g_lock);
         for (u64 i = 0; i < g_used; ++i)
         {
             const u8 d = static_cast<u8>(g_ring[i].detector);
-            if (d < 8)
+            if (d < 9)
                 ++per_detector[d];
             if ((g_ring[i].flags & 0x01) != 0)
                 ++audited;
@@ -439,7 +491,7 @@ void FixJournalEmitBootSummary()
     // Per-detector breakdown — six lines is verbose but trivially
     // greppable. The detector names match `FixDetectorName()` and
     // the python report's keys, so a CI script can join them.
-    for (u8 d = 1; d < 8; ++d)
+    for (u8 d = 1; d < 9; ++d)
     {
         KLOG_INFO_V("smoke", FixDetectorName(static_cast<FixDetector>(d)), per_detector[d]);
     }
@@ -474,6 +526,7 @@ void FixJournalSelfTest()
         {FixDetector::SoftFaultRecov, "selftest/recov.cpp:1", "soft fault selftest"},
         {FixDetector::LoaderReject, "selftest/loader.cpp:1", "loader selftest"},
         {FixDetector::CapDenial, "selftest/cap.SelftestCap", "cap denial selftest"},
+        {FixDetector::TrapCapture, "selftest/trap.cpp:1", "trap capture selftest"},
     };
     constexpr u64 kInjects = sizeof(injects) / sizeof(injects[0]);
 

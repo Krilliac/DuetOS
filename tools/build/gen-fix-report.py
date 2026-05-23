@@ -48,6 +48,7 @@ DETECTORS = {
     5: "soft_fault_recov",
     6: "loader_reject",
     7: "cap_denial",
+    8: "trap_capture",
 }
 
 # struct.Struct format for the file header (16 bytes).

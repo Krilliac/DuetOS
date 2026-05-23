@@ -69,6 +69,21 @@ enum class FixDetector : u8
                         // recurring deny pattern survives FAT32/NVMe
                         // rotation. Dedups per (cap, syscall) pair —
                         // a deny storm is one record with repeat=N.
+    TrapCapture = 8,    // Hard kernel-mode CPU exception about to
+                        // halt the box (#PF / #GP / #UD / #DE / etc.).
+                        // Recorded from trap context BEFORE the panic
+                        // so the FAT32 / NVMe panic-write tier picks
+                        // up the bytes. caller_rip = the faulting RIP.
+                        // ctx_a = (vector << 32) | (error_code &
+                        // 0xffffffff). ctx_b = faulting address (CR2
+                        // for #PF; 0 for other vectors). source_pin =
+                        // auto-pinned from caller_rip so dedup keys
+                        // on the exact function + offset that took the
+                        // fault. The offline patch generator reads
+                        // these records, resolves the RIP to file:line,
+                        // disassembles the faulting instruction, and
+                        // emits a per-trap brief with the captured
+                        // source context.
 };
 
 /// Stable human label. Always returns a non-null pointer into .rodata.
@@ -147,6 +162,14 @@ void FixJournalInit();
 /// next `FixJournalDrainTrapPending()` call from the heartbeat
 /// thread. Safe from any context that can do plain stores.
 void FixJournalRecordFromTrap(FixDetector detector, u64 ctx_a, u64 caller_rip);
+
+/// Two-ctx variant of `FixJournalRecordFromTrap`. Same trap-safety
+/// constraints (no allocation, no klog, no SpinLock). Used by
+/// `TrapCapture` records to carry both the (vector << 32 | err_code)
+/// pack in `ctx_a` and the faulting address (CR2 for #PF; 0 for
+/// other vectors) in `ctx_b`. The drain promotes the slot into a
+/// full `FixRecord` with an auto-derived `func+0xOFF` source pin.
+void FixJournalRecordFromTrap2(FixDetector detector, u64 ctx_a, u64 ctx_b, u64 caller_rip);
 
 /// Heartbeat-side drain. Walks the deferred slot(s) and converts
 /// them to full records via the normal `FixJournalRecord` path.
