@@ -115,6 +115,7 @@
 #include "drivers/mei/mei.h"
 #include "drivers/npu/npu.h"
 #include "drivers/pci/pci.h"
+#include "drivers/psp/psp.h"
 #include "drivers/virtio/virtio.h"
 #include "drivers/power/power.h"
 #include "env/autonomic.h"
@@ -236,6 +237,7 @@
 #include "security/broker.h"
 #include "security/cap_audit.h"
 #include "security/grace.h"
+#include "security/me_psp_guard.h"
 #include "security/rbac.h"
 #include "security/kaslr.h"
 #include "loader/firmware_loader.h"
@@ -1584,9 +1586,19 @@ void BootBringupDevices(bool force_net_smoke)
     duetos::drivers::virtio::VirtioInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::virtio::VirtioInputSelfTest());
 
+    // Initialise the ME/PSP fence BEFORE the coprocessor probes
+    // so each probe can register its BAR + BDF immediately after
+    // its own probe-time mapping completes.
+    SerialWrite("[boot] Arming Intel ME / AMD PSP fence.\n");
+    duetos::security::MePspGuardInit();
+
     SerialWrite("[boot] Detecting Intel MEI/HECI devices.\n");
     duetos::drivers::mei::MeiInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::mei::MeiSelfTest());
+
+    SerialWrite("[boot] Detecting AMD PSP / SMU devices.\n");
+    duetos::drivers::psp::PspInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::psp::PspSelfTest());
 
     SerialWrite("[boot] Detecting NPU / AI-accelerator devices.\n");
     duetos::drivers::npu::NpuInit();
@@ -1787,6 +1799,15 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Bringing up network stack skeleton.\n");
     duetos::net::NetStackInit();
     DUETOS_BOOT_SELFTEST(duetos::net::firewall::FwSelfTest());
+
+    // Activate the ME/PSP fence now that the firewall is online:
+    // install AMT / vPro / IPMI port blocks and emit the boot-log
+    // summary of every coprocessor host interface the kernel has
+    // fenced. Selftest validates the deny path independently of
+    // whether a real ME/PSP device was detected on this platform.
+    SerialWrite("[boot] Activating ME/PSP guard (AMT / vPro firewall blocks).\n");
+    duetos::security::MePspGuardActivate();
+    DUETOS_BOOT_SELFTEST(duetos::security::MePspGuardSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::tcp::SelfTest());
     // Wireless data plane: full "join SSID → DHCP → ping gateway"
     // over a GCMP-encrypted link. Runs here because it needs the

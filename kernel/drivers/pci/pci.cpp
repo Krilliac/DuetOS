@@ -42,6 +42,7 @@
 #include "log/klog.h"
 #include "mm/paging.h"
 #include "pci_caps_rust.h"
+#include "security/me_psp_guard.h"
 #include "sync/spinlock.h"
 
 namespace duetos::drivers::pci
@@ -147,6 +148,29 @@ u8 PciConfigRead8(DeviceAddress addr, u8 offset)
 
 void PciConfigWrite32(DeviceAddress addr, u8 offset, u32 value)
 {
+    // Intel ME / AMD PSP fence — defense in depth. Once a
+    // coprocessor BDF is registered with the guard, every config
+    // write to that BDF (BARs, command register, capabilities, MSI
+    // routing) is refused. The MEI/PSP probes call us BEFORE
+    // registration to clear BME and capture HFS state, and reads
+    // are unconditionally allowed (they only observe). This
+    // closes the legacy 0xCF8/0xCFC reconfiguration path against a
+    // compromised driver that knows the BDF but has no other
+    // legitimate reason to touch the device.
+    if (::duetos::security::MePspGuardIsForbiddenBdf(addr.bus, addr.device, addr.function))
+    {
+        arch::SerialWrite("[me-psp] WARN PciConfigWrite32 refused bdf=");
+        arch::SerialWriteHex(addr.bus);
+        arch::SerialWrite(":");
+        arch::SerialWriteHex(addr.device);
+        arch::SerialWrite(".");
+        arch::SerialWriteHex(addr.function);
+        arch::SerialWrite(" offset=");
+        arch::SerialWriteHex(offset);
+        arch::SerialWrite("\n");
+        KLOG_WARN("security/me-psp", "PciConfigWrite32 refused — caller tried to reconfigure fenced coprocessor");
+        return;
+    }
     if (EcamCovers(addr))
     {
         const u64 off = EcamOffset(addr, u16(offset) & 0xFFCu);
