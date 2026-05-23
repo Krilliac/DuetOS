@@ -790,6 +790,14 @@ struct ResourceAttachBacking
 
 constinit VirtioScanoutInfo g_scanout = {};
 
+// Whether the scanout is currently bound to its real resource_id
+// (true, default after SetupScanout) or detached via a SET_SCANOUT
+// with resource_id=0 (false). Toggled by VirtioGpuSetScanoutEnabled
+// from the DPMS dispatcher; flush-scanout silently no-ops while
+// detached so the compositor doesn't pump round-trips at a host
+// that isn't displaying.
+constinit bool g_scanout_enabled = true;
+
 // GPU resource handles for the kernel-owned scanout. Registered
 // against `kPidKernel` (these outlive any user process) so the
 // leak detector's per-class snapshots include them and a future
@@ -949,6 +957,13 @@ bool VirtioGpuFlushScanout(u32 x, u32 y, u32 w, u32 h)
 {
     if (!g_scanout.ready)
         return false;
+    // When the scanout has been detached via SET_SCANOUT(resource=0)
+    // for DPMS-low-power, drop the transfer + flush silently. The
+    // compositor still bumps its damage rect; we just don't pump it
+    // to a host that isn't displaying. Re-enabling re-runs whatever
+    // pixels are in the backing on the first subsequent flush.
+    if (!g_scanout_enabled)
+        return true;
     // Clip to the resource extent — the host rejects rects outside.
     if (x >= g_scanout.width || y >= g_scanout.height)
         return false;
@@ -991,6 +1006,45 @@ bool VirtioGpuFlushScanout(u32 x, u32 y, u32 w, u32 h)
         if (!SubmitHeaderCommand(sizeof(ResourceFlush), "RESOURCE_FLUSH"))
             return false;
     }
+    return true;
+}
+
+bool VirtioGpuSetScanoutEnabled(bool enable)
+{
+    if (!g_scanout.ready)
+        return false;
+    if (g_scanout_enabled == enable)
+        return true; // idempotent
+
+    // SET_SCANOUT carries the same rect both for re-bind (the
+    // original resource extent) and for detach (per spec the rect
+    // is ignored when resource_id == 0, but we send the original
+    // extent anyway so a buggy host has consistent inputs).
+    ClearIoBuffers(sizeof(SetScanout), sizeof(GpuCtrlHdr));
+    auto* req = reinterpret_cast<volatile SetScanout*>(g_cq.req_buf);
+    FillCtrlHdr(&req->hdr, kCmdSetScanout);
+    req->r.x = 0;
+    req->r.y = 0;
+    req->r.width = g_scanout.width;
+    req->r.height = g_scanout.height;
+    req->scanout_id = g_scanout.scanout_id;
+    req->resource_id = enable ? g_scanout.resource_id : 0u;
+    if (!SubmitHeaderCommand(sizeof(SetScanout), enable ? "SET_SCANOUT(enable)" : "SET_SCANOUT(disable)"))
+        return false;
+
+    g_scanout_enabled = enable;
+    arch::SerialWrite("[virtio-gpu] scanout ");
+    arch::SerialWrite(enable ? "enabled" : "disabled");
+    arch::SerialWrite(" (resource_id=");
+    arch::SerialWriteHex(enable ? g_scanout.resource_id : 0u);
+    arch::SerialWrite(")\n");
+
+    // Re-binding the scanout shows a stale host-side composite
+    // until the next flush lands fresh pixels — push one full-
+    // resource flush so the operator sees current content the
+    // moment power comes back on.
+    if (enable)
+        (void)VirtioGpuFlushScanout(0, 0, g_scanout.width, g_scanout.height);
     return true;
 }
 

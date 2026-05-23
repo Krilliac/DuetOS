@@ -59,6 +59,7 @@
 #include "subsystems/audio/audio_backend.h"
 #include "drivers/gpu/cea861.h"
 #include "drivers/gpu/cvt.h"
+#include "drivers/gpu/display_power.h"
 #include "drivers/gpu/dpms.h"
 #include "drivers/gpu/edid.h"
 #include "drivers/gpu/gpu.h"
@@ -2115,6 +2116,14 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
                                        return duetos::core::Result<void>{};
                                    });
     (void)duetos::core::RunPhase(duetos::core::Phase::Drivers);
+
+    // Phase::Drivers ran the DPMS-hook initcall — by this point the
+    // canonical backend dispatcher is wired into the bookkeeper, so
+    // the self-test that exercises the full hook path is finally
+    // legal to run. (The bare `DpmsSelfTest()` earlier installed +
+    // tore down its own test hooks; it deliberately runs before
+    // any real hook is registered.)
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::DisplayPowerSelfTest());
 
     // GUI composition. Order for every paint pass:
     //   1. Desktop fill

@@ -169,4 +169,21 @@ const VirtioScanoutInfo& VirtioGpuScanoutInfo();
 /// scanout isn't set up or either command timed out.
 bool VirtioGpuFlushScanout(u32 x, u32 y, u32 w, u32 h);
 
+/// Toggle the scanout's host-side visibility via SET_SCANOUT.
+/// `enable == false` issues SET_SCANOUT(scanout=0, resource_id=0)
+/// — per virtio-gpu 1.0 §5.7.6.7.5 a zero resource_id detaches the
+/// scanout, so the host stops compositing the framebuffer into the
+/// display surface (the guest's `backing_va` keeps the pixels). On
+/// `enable == true` the scanout is re-bound to the original resource
+/// + extent established by `VirtioGpuSetupScanout`. Returns true on
+/// command-acked success; false if the scanout isn't set up or the
+/// controlq returns an unexpected response. Idempotent — repeated
+/// disables / enables are silently coalesced.
+///
+/// Used by the DPMS dispatcher (drivers/gpu/display_power.cpp) to
+/// drive the QEMU -vga virtio path through Off / Standby / Suspend
+/// transitions; virtio-gpu has only one "scanout off" state so all
+/// three low-power DPMS targets map to the same disable command.
+bool VirtioGpuSetScanoutEnabled(bool enable);
+
 } // namespace duetos::drivers::gpu
