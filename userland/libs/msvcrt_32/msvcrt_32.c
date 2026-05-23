@@ -497,77 +497,9 @@ __declspec(dllexport) long atol(const char* s)
 }
 
 /* ------------------------------------------------------------------
- * MSVC stack-probe primitives
- *
- * __chkstk / _alloca_probe / _chkstk are called by MSVC-built PEs
- * during a large-allocating function prologue (any function whose
- * locals exceed a single page, or that uses _alloca). The convention:
- *
- *   - EAX = bytes to allocate (positive integer)
- *   - The probe walks ESP downward in PAGE_SIZE strides, touching
- *     each page so the kernel page-faults them in. On Windows this
- *     paged-stack model lets the OS commit pages lazily.
- *   - On return: ESP is adjusted by EAX, EAX is preserved as it
- *     was on entry. (Different variants — Microsoft has multiple
- *     conventions; the common one preserves EAX.)
- *
- * On DuetOS the entire stack is mapped up front by the PE loader, so
- * the probe doesn't need to actually fault pages in. We just adjust
- * ESP and return. This is a v0 stub — the caller's prologue
- * pattern after the call is `mov [esp], eax` style writes that DO
- * touch the new stack pages, so absence of probing won't trip
- * anything that a stack-mapped-up-front kernel can't already handle.
- *
- * Naked function via inline asm because we need full control over
- * the prologue/epilogue — the caller did NOT push a return frame in
- * the usual way (this is a __cdecl-but-with-EAX-as-arg "fast call"
- * thing). The signature here is just for the .def export; the asm
- * body is what runs.
+ * MSVC stack-probe primitives — _chkstk / __chkstk / _alloca_probe
+ * live in chkstk.S. They share one body that walks ESP down a
+ * page at a time, probing each page (so a stack-guard hit faults
+ * at the probe instead of mid-prologue), then commits the new
+ * ESP. Exported via msvcrt_32.def.
  * ------------------------------------------------------------------ */
-
-/* Single naked implementation; the three exported names below all
- * point at this same code body via dllexport. MSVC emits whichever
- * name matches its stack-probe convention. */
-__declspec(dllexport, naked) void _chkstk(void)
-{
-    /* On entry:
-     *   EAX = bytes to subtract from ESP
-     *   [ESP] = return addr
-     *
-     * On exit:
-     *   ESP -= EAX (the new top-of-stack for the caller)
-     *   EAX preserved
-     *   Return to original [ESP]
-     *
-     * popl ecx (return addr) ; sub esp, eax ; push ecx (return addr
-     * at new esp) ; ret */
-    __asm__ volatile("popl %%ecx\n\t"
-                     "subl %%eax, %%esp\n\t"
-                     "pushl %%ecx\n\t"
-                     "ret"
-                     :
-                     :
-                     : "memory");
-}
-
-__declspec(dllexport, naked) void __chkstk(void)
-{
-    __asm__ volatile("popl %%ecx\n\t"
-                     "subl %%eax, %%esp\n\t"
-                     "pushl %%ecx\n\t"
-                     "ret"
-                     :
-                     :
-                     : "memory");
-}
-
-__declspec(dllexport, naked) void _alloca_probe(void)
-{
-    __asm__ volatile("popl %%ecx\n\t"
-                     "subl %%eax, %%esp\n\t"
-                     "pushl %%ecx\n\t"
-                     "ret"
-                     :
-                     :
-                     : "memory");
-}

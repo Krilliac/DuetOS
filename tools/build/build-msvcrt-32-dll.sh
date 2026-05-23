@@ -23,11 +23,13 @@ REPO_ROOT="$1"
 OUT_HEADER="$2"
 SRC_DIR="${REPO_ROOT}/userland/libs/msvcrt_32"
 SRC_C="${SRC_DIR}/msvcrt_32.c"
+SRC_S="${SRC_DIR}/chkstk.S"
 EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/msvcrt_32"
 mkdir -p "${WORK_DIR}"
-OBJ="${WORK_DIR}/msvcrt_32.obj"
+OBJ_C="${WORK_DIR}/msvcrt_32.obj"
+OBJ_S="${WORK_DIR}/chkstk.obj"
 DLL="${WORK_DIR}/msvcrt.dll"
 
 CLANG="${CLANG:-clang}"
@@ -39,7 +41,17 @@ LLD_LINK="${LLD_LINK:-lld-link}"
     -ffreestanding -nostdlib -fno-stack-protector -fno-builtin \
     -mno-red-zone -fno-asynchronous-unwind-tables \
     -O2 -Wall -Wextra \
-    "${SRC_C}" -o "${OBJ}"
+    "${SRC_C}" -o "${OBJ_C}"
+
+# Assemble the i386 chkstk family (real page-probing helper)
+# alongside the C source. clang's integrated assembler handles
+# the .S extension; the C-only flags above are accepted-and-
+# ignored for assembly input but we omit them here anyway for
+# clarity.
+"${CLANG}" \
+    --target=i686-pc-windows-msvc \
+    -c -ffreestanding -nostdlib \
+    "${SRC_S}" -o "${OBJ_S}"
 
 rm -f "${DLL}"
 set +e
@@ -47,7 +59,7 @@ set +e
     /dll /noentry /nodefaultlib /machine:x86 \
     /base:0x10040000 \
     /def:"${SRC_DIR}/msvcrt_32.def" \
-    /out:"${DLL}" "${OBJ}" 2>&1 | grep -v "align specified without /driver"
+    /out:"${DLL}" "${OBJ_C}" "${OBJ_S}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e
 if [[ ${LINK_RC} -ne 0 ]]; then
