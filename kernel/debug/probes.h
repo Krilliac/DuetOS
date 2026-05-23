@@ -255,6 +255,21 @@ enum class ProbeId : u8
     // the trap frame.
     kTrapDispatchRipScribble,
 
+    // ContextSwitch's pre-ret range-check detected that the
+    // about-to-be-popped return target — the value at [rsp]
+    // immediately before the trailing `ret` — fell outside
+    // [_text_start, _text_end). Catches the planted-slot
+    // truncation shape: a SchedCreate / SchedYield / Schedule
+    // ContextSwitch pushed a full-64-bit return address, then
+    // while the task was off-CPU SOMETHING wrote a 32-bit value
+    // to that stack slot, leaving the upper 32 bits zero. Sibling
+    // of canary13 (RA-slot scribble) and canary14 (TLB-stale
+    // slot-reuse); the kernel ret would otherwise silently
+    // dispatch a low-canonical wild RIP with no indirect-call
+    // site to attribute the trap to. Caller passes the wild ret
+    // target as `value`. ArmedLog; clean boot stays quiet.
+    kSchedContextSwitchWildRet,
+
     kCount, // sentinel
 };
 

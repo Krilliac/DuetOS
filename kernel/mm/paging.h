@@ -318,4 +318,22 @@ UserStringCopyResult CopyUserString16(u16* kernel_dst, u64 dst_cap, const void* 
 /// UTF-16LE sibling of CopyUserCStringTruncating.
 UserStringCopyResult CopyUserString16Truncating(u16* kernel_dst, u64 dst_cap, const void* user_src);
 
+/// Per-CPU kernel-protection bit setup: CR0.WP + CR4.SMEP + CR4.SMAP
+/// + CET/IBT (where CPUID reports support). Called once from the BSP
+/// inside PagingInit, and ONCE PER AP from ApEntryFromTrampoline.
+///
+/// Before this fix existed, `EnableKernelProtectionBits` ran only on
+/// the BSP, leaving every AP with CR4 unchanged from the SMP-trampoline
+/// state (typically just PAE | OSFXSR | OSXMMEXCPT). The release-build
+/// observation on `claude/assembly-files-review-ju0dI` showed cpu#2
+/// with CR4=0x620 (no SMEP, no SMAP) at fault time — confirming the
+/// gap. Per-CPU CR4 bits MUST be programmed on each CPU; there is no
+/// architectural broadcast.
+///
+/// The function reads CPUID leaf-7 each call, so a homogeneous SMP
+/// system converges every CPU to the same protection posture. It is
+/// idempotent: repeat calls re-OR the same bits and write CR4 only
+/// when something changed.
+void EnableKernelProtectionBitsForThisCpu(bool emit_log);
+
 } // namespace duetos::mm

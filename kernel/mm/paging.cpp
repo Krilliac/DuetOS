@@ -167,7 +167,11 @@ namespace
 // the copy helpers add). Both are present on any Intel CPU from
 // Broadwell (2014) and any AMD CPU from Zen+ onwards; on older
 // hardware we just stay in the pre-protection posture.
-void EnableKernelProtectionBits()
+//
+// `emit_log` gates the [mm] CR4 protection bits summary — BSP emits
+// it once during paging init; APs would otherwise N-spam it during
+// bring-up. Per-CPU CR4 writes still happen unconditionally.
+void EnableKernelProtectionBitsImpl(bool emit_log)
 {
     u32 leaf7_ebx = 0;
     u32 leaf7_edx = 0;
@@ -228,15 +232,29 @@ void EnableKernelProtectionBits()
         WriteCr4(cr4);
     }
 
-    SerialWrite("[mm] CR4 protection bits: SMEP=");
-    SerialWrite((cr4 & kCr4_Smep) ? "on" : "off");
-    SerialWrite(" SMAP=");
-    SerialWrite((cr4 & kCr4_Smap) ? "on" : "off");
-    SerialWrite(" CET/IBT=");
-    SerialWrite(cet_ibt_on ? "on" : "off");
-    SerialWrite(" CR0.WP=");
-    SerialWrite((arch::ReadCr0() & kCr0_Wp) ? "on" : "off");
-    SerialWrite("\n");
+    if (emit_log)
+    {
+        // Wrap in SerialLineGuard so a concurrent AP klog / stress
+        // line can't slice the multi-write summary at the per-call
+        // lock boundary (same interleave shape boot_observe.cpp's
+        // `[boot] phase=` lines exhibited 2026-05-22 under SMP=8).
+        arch::SerialLineGuard guard;
+        SerialWrite("[mm] CR4 protection bits: SMEP=");
+        SerialWrite((cr4 & kCr4_Smep) ? "on" : "off");
+        SerialWrite(" SMAP=");
+        SerialWrite((cr4 & kCr4_Smap) ? "on" : "off");
+        SerialWrite(" CET/IBT=");
+        SerialWrite(cet_ibt_on ? "on" : "off");
+        SerialWrite(" CR0.WP=");
+        SerialWrite((arch::ReadCr0() & kCr0_Wp) ? "on" : "off");
+        SerialWrite("\n");
+    }
+}
+
+// Anon-namespace wrapper preserved for PagingInit's existing call.
+void EnableKernelProtectionBits()
+{
+    EnableKernelProtectionBitsImpl(/*emit_log=*/true);
 }
 
 // Allocate a fresh page-table frame, zero it via the direct map, and return
@@ -332,6 +350,11 @@ u64* WalkToPte(u64* pml4, uptr virt, bool create)
 }
 
 } // namespace
+
+void EnableKernelProtectionBitsForThisCpu(bool emit_log)
+{
+    EnableKernelProtectionBitsImpl(emit_log);
+}
 
 // ---------------------------------------------------------------------------
 // Public API

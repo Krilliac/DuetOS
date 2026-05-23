@@ -60,9 +60,59 @@ ContextSwitch:
      *   - the return address of some previous ContextSwitch call on this
      *     task's stack, so we resume mid-Schedule() / mid-SchedYield(); or
      *   - the entry-function address planted by SchedCreate, plus one
-     *     quad of alignment padding above it. Either way, ret does the
-     *     right thing. */
+     *     quad of alignment padding above it.
+     *
+     * BUT only if the value at [rsp] is canonical kernel text. A 32-bit
+     * truncation / partial scribble of that slot (sibling shape of
+     * canary13's RA-slot bug + canary14's kstack-TLB-stale bug) would
+     * make this `ret` silently dispatch to a low-canonical wild RIP —
+     * the kernel jumps to a never-mapped user-half address and the
+     * faulting CPU has no indirect-call site to attribute the trap to.
+     *
+     * The kernel already gates every OTHER kernel control transfer
+     * through a target-range check:
+     *   - indirect calls / jmps  -> __llvm_retpoline_r11 (range-check r11)
+     *   - kernel-mode iretq      -> isr_common epilogue (range-check saved RIP)
+     *   - trampoline `call rbx`  -> SchedTaskTrampolineValidateEntry
+     *
+     * The one un-gated path was THIS `ret`. Close it: bounds-check the
+     * value at [rsp] against [_text_start, _text_end) before yielding
+     * control. Catches a primed-slot truncation BEFORE RIP is set, with
+     * a real banner naming the resuming task instead of a wild #PF whose
+     * RIP is the truncated value.
+     *
+     * Observed once on `claude/assembly-files-review-ju0dI`: #PF at
+     * instruction fetch of 0x00000000803b9ae3 (low-canonical mirror of
+     * a high-half symbol) with CS=0x08 and no preceding gate banner.
+     *
+     * rax + rcx are SysV caller-saved — clobbering them across this
+     * `ret` is invisible to the resumed code. Cost: 2 push, 2 movabs,
+     * 2 cmp, 2 pop on every switch-in. Negligible vs the
+     * ContextSwitch + TLB cost. */
+    push    rax
+    push    rcx
+    movabs  rax, offset _text_start
+    movabs  rcx, offset _text_end
+    cmp     qword ptr [rsp + 16], rax  /* ret target at [rsp+16] after our 2 pushes */
+    jb      .Lcs_wild_ret
+    cmp     qword ptr [rsp + 16], rcx
+    jae     .Lcs_wild_ret
+    pop     rcx
+    pop     rax
     ret
+
+.Lcs_wild_ret:
+    /* The about-to-be-popped return target is out of [_text_start,
+     * _text_end). Hand the wild value to a C helper that emits a
+     * real banner naming the resuming CPU + task and panics cleanly.
+     * SchedContextSwitchWildRetCallback is [[noreturn]]; cli/hlt
+     * below is belt-and-braces. */
+    mov     rdi, qword ptr [rsp + 16]
+    pop     rcx
+    pop     rax
+    call    SchedContextSwitchWildRetCallback
+    cli
+    hlt
 
 .size ContextSwitch, . - ContextSwitch
 

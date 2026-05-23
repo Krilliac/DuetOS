@@ -18,6 +18,7 @@
 #include "mm/address_space.h"
 #include "mm/kheap.h"
 #include "mm/page.h"
+#include "mm/paging.h"
 #include "sched/sched.h"
 #include "sync/spinlock.h"
 #include "util/string.h"
@@ -615,6 +616,24 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // LoadGdtForCurrent (gate CS = kKernelCodeSelector must resolve
     // in the now-active GDT) and precede the LAPIC enable below.
     IdtLoadForCurrent();
+
+    // Per-AP kernel-protection bit setup. CR0.WP, CR4.SMEP, CR4.SMAP,
+    // and CET/IBT are PER-CPU state — programming them on the BSP
+    // inside PagingInit does NOT propagate to APs, which would
+    // otherwise run with whatever CR4 the SMP trampoline left
+    // (typically just PAE | OSFXSR | OSXMMEXCPT — neither SMEP nor
+    // SMAP). Closes a hardening gap observed on
+    // `claude/assembly-files-review-ju0dI`: cpu#2 dumped CR4=0x620
+    // at #PF time, confirming the AP never raised SMEP. A kernel-
+    // mode instruction fetch from a user-canonical address therefore
+    // walked straight to the page-table miss instead of being caught
+    // by SMEP's "kernel-mode execute from user page" gate. Must
+    // happen AFTER IdtLoadForCurrent (so a spurious #PF from a
+    // miscompiled CR4 write lands in our IDT, not a stale BSP gate)
+    // and BEFORE we let the AP touch any user memory. emit_log=false
+    // suppresses the per-AP `[mm] CR4 protection bits:` summary;
+    // BSP's PagingInit already emitted it once.
+    mm::EnableKernelProtectionBitsForThisCpu(/*emit_log=*/false);
 
     // Enable the AP's LAPIC. IA32_APIC_BASE MSR bit 11 (EN) is the
     // global enable; bit 10 (EXTD) selects x2APIC mode. The BSP
