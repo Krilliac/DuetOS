@@ -309,11 +309,40 @@ counters that the `gfx` shell command surfaces:
   flicker-elision is working.
 - `frames_full` / `frames_partial` — split by ≥95% surface
   coverage. Heavy chrome frames (full window redraw) land in
-  "full"; cursor / clock / hover frames in "partial".
-- `dirty_pixels_total` / `surface_pixels_total` — per-mille
-  ratio is the average dirty fraction.
-- `last_damage_*` — the most recently presented damage rect,
-  for diagnosis.
+  "full"; cursor / clock / hover frames in "partial". The split
+  uses the TRUE dirty count, not the bbox area, so a banded
+  present with two small spatially-separated rects is correctly
+  classified `partial` even when its bbox would qualify as `full`.
+- `dirty_pixels_total` — sum of per-rect dirty pixels (true area
+  the GPU actually uploaded). For a banded present this is
+  `sum(rects[i].w * rects[i].h)`; for a coalesced (single-rect)
+  present it equals the bbox area. The earlier v0 path charged
+  the bbox area unconditionally, which overstated by `bbox -
+  sum(rects)` for spatially-separated changes.
+- `bbox_pixels_total` — sum of union-bbox areas. The ratio
+  `dirty_pixels_total / bbox_pixels_total` is the fraction of
+  the bbox a backend without the banded path would have
+  uploaded; the gap is what the banded path saves.
+- `surface_pixels_total` — denominator for the "avg dirty
+  fraction" per-mille the `gfx` command prints.
+- `presents_banded` / `presents_coalesced` — split of presents
+  by path. Excludes clean frames. `presents_coalesced > 0` +
+  `presents_banded == 0` means the content-diff never produced
+  a spatially-separated change set in the run (typical for a
+  single-app workload).
+- `max_band_count` — high-water mark of disjoint rects in any
+  single present. Caps at `kCoalesceBands` (6) before the
+  framebuffer falls back to a single bbox.
+- `last_damage_*` + `last_rect_count` — the most recently
+  presented damage bbox and the rect count behind it, for
+  diagnosis. `last_rect_count == 0` is a clean frame; `1` is
+  coalesced; `>1` is banded.
+
+Counter regressions are pinned by
+`tests/host/test_render_stats.cpp` — clean / coalesced /
+banded classification, full-vs-partial threshold under both
+paths, `max_band_count` as a high-water mark, and
+`RenderStatsReset` zeroing every field.
 
 Only the compose-end and present-end paths bump counters, never
 the per-pixel inner loops, so the per-frame cost is constant.

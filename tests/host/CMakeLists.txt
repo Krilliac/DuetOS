@@ -92,6 +92,10 @@ add_host_test(cvt)
 add_host_test(text_hash)
 add_host_test(d3dcompiler)
 add_host_test(damage_rect)
+add_host_test(render_stats)
+target_sources(test_render_stats PRIVATE
+    "${CMAKE_SOURCE_DIR}/../../kernel/drivers/video/render_stats.cpp"
+)
 add_host_test(wild_address)
 add_host_test(disk_path)
 add_host_test(nospec)

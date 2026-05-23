@@ -394,6 +394,30 @@ void FramebufferSetPresentHook(FramebufferPresentFn fn)
 void FramebufferPresent()
 {
     const DamageRect d = FramebufferReadDamage();
+    // True dirty pixel count + rect count for RenderStats. The
+    // banded path's per-rect sum is what the GPU actually uploads;
+    // the union bbox area overstates by `bbox - sum(rects)` when
+    // bands are spatially separated. Computed regardless of whether
+    // a present hook is registered so firmware-FB / Bochs-VBE
+    // boots (no hook) still see accurate dirty-pixel stats.
+    u64 dirty_pixels = 0;
+    u32 rect_count = 0;
+    if (d.valid)
+    {
+        if (g_damage_rect_count > 0)
+        {
+            rect_count = g_damage_rect_count;
+            for (u32 i = 0; i < g_damage_rect_count; ++i)
+            {
+                dirty_pixels += static_cast<u64>(g_damage_rects[i].w) * g_damage_rects[i].h;
+            }
+        }
+        else
+        {
+            rect_count = 1;
+            dirty_pixels = static_cast<u64>(d.w) * d.h;
+        }
+    }
     if (g_present_hook != nullptr)
     {
         if (g_damage_rect_count > 0)
@@ -418,7 +442,7 @@ void FramebufferPresent()
     // ratio reflects the compositor's behaviour rather than the
     // backend's. Recorded BEFORE damage reset so the snapshot is
     // accurate.
-    RenderStatsOnPresent(d, g_info.width, g_info.height);
+    RenderStatsOnPresent(d, dirty_pixels, rect_count, g_info.width, g_info.height);
     // Either way, the damage union belongs to the just-presented
     // frame — the next compose pass starts clean. Hooks that need
     // the rect take a snapshot above; running this unconditionally
