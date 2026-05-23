@@ -41,13 +41,26 @@ struct RenderStats
     u64 frames_clean;         // present passes with damage_valid == false (skipped)
     u64 frames_full;          // present passes whose damage covered ≥95% of surface
     u64 frames_partial;       // present passes with a sub-surface damage rect
-    u64 dirty_pixels_total;   // sum of damage.w * damage.h across every present
+    u64 dirty_pixels_total;   // sum of per-rect dirty pixels (true area painted,
+                              // NOT the union bbox area — banded presents flush
+                              // disjoint rects so the bbox overstates by
+                              // `bbox_area - sum(rect_area)`)
+    u64 bbox_pixels_total;    // sum of union-bbox area across every present. The
+                              // ratio `dirty_pixels_total / bbox_pixels_total`
+                              // tells you how much the banded path saves over a
+                              // naïve "flush the whole bbox" backend.
     u64 surface_pixels_total; // sum of width * height across every present (denominator
                               // for "average dirty fraction")
-    u32 last_damage_x;        // last presented damage rect, for debugging
+    u64 presents_banded;      // present passes flushed as N disjoint rects (N > 1)
+    u64 presents_coalesced;   // present passes flushed as a single bbox (N == 1).
+                              // Excludes clean passes (frames_clean).
+    u32 max_band_count;       // high-water mark of disjoint rects in any one present
+    u32 last_damage_x;        // last presented damage bbox, for debugging
     u32 last_damage_y;
     u32 last_damage_w;
     u32 last_damage_h;
+    u32 last_rect_count; // number of disjoint rects in the last present
+                         // (0 for clean, 1 for coalesced, >1 for banded)
     bool last_damage_valid;
 };
 
@@ -71,10 +84,25 @@ void RenderStatsReset();
 void RenderStatsOnComposeEnd();
 
 /// Mark "the compositor ran a present hook (or would have, if no
-/// hook was registered)." Pass the damage rect handed to the hook
-/// so the partial vs. full breakdown can be computed.
+/// hook was registered)." Pass:
+///   - `bbox`: the union damage rect (already-clipped). `valid==false`
+///     means a clean frame — counters tagged "clean" tick, no others.
+///   - `dirty_pixels`: the SUM of per-rect areas the hook actually
+///     flushed. For a banded present with N disjoint rects this is
+///     `sum(rects[i].w * rects[i].h)`, NOT the bbox area. For a
+///     coalesced (single-rect) present it equals `bbox.w * bbox.h`.
+///     `RenderStats::dirty_pixels_total` accumulates this so the
+///     reported avg-dirty-fraction reflects real GPU bandwidth.
+///   - `rect_count`: number of disjoint rects in the present. 0 for
+///     a clean frame, 1 for a single-bbox flush, >1 for the banded
+///     path. Drives `presents_banded` / `presents_coalesced` and
+///     `max_band_count`.
+///   - `surface_width` / `surface_height`: dimensions of the live
+///     surface, for the full-vs-partial classification and the
+///     `surface_pixels_total` denominator.
 /// `FramebufferPresent` calls this once per frame, immediately
 /// before the damage union is reset.
-void RenderStatsOnPresent(const DamageRect& damage, u32 surface_width, u32 surface_height);
+void RenderStatsOnPresent(const DamageRect& bbox, u64 dirty_pixels, u32 rect_count, u32 surface_width,
+                          u32 surface_height);
 
 } // namespace duetos::drivers::video

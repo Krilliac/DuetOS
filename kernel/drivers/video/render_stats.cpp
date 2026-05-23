@@ -27,11 +27,16 @@ constinit util::SatU64 g_frames_clean = 0;
 constinit util::SatU64 g_frames_full = 0;
 constinit util::SatU64 g_frames_partial = 0;
 constinit util::SatU64 g_dirty_pixels_total = 0;
+constinit util::SatU64 g_bbox_pixels_total = 0;
 constinit util::SatU64 g_surface_pixels_total = 0;
+constinit util::SatU64 g_presents_banded = 0;
+constinit util::SatU64 g_presents_coalesced = 0;
+constinit u32 g_max_band_count = 0;
 constinit u32 g_last_x = 0;
 constinit u32 g_last_y = 0;
 constinit u32 g_last_w = 0;
 constinit u32 g_last_h = 0;
+constinit u32 g_last_rect_count = 0;
 constinit bool g_last_valid = false;
 
 } // namespace
@@ -45,11 +50,16 @@ RenderStats RenderStatsRead()
         .frames_full = g_frames_full,
         .frames_partial = g_frames_partial,
         .dirty_pixels_total = g_dirty_pixels_total,
+        .bbox_pixels_total = g_bbox_pixels_total,
         .surface_pixels_total = g_surface_pixels_total,
+        .presents_banded = g_presents_banded,
+        .presents_coalesced = g_presents_coalesced,
+        .max_band_count = g_max_band_count,
         .last_damage_x = g_last_x,
         .last_damage_y = g_last_y,
         .last_damage_w = g_last_w,
         .last_damage_h = g_last_h,
+        .last_rect_count = g_last_rect_count,
         .last_damage_valid = g_last_valid,
     };
 }
@@ -62,11 +72,16 @@ void RenderStatsReset()
     g_frames_full = 0;
     g_frames_partial = 0;
     g_dirty_pixels_total = 0;
+    g_bbox_pixels_total = 0;
     g_surface_pixels_total = 0;
+    g_presents_banded = 0;
+    g_presents_coalesced = 0;
+    g_max_band_count = 0;
     g_last_x = 0;
     g_last_y = 0;
     g_last_w = 0;
     g_last_h = 0;
+    g_last_rect_count = 0;
     g_last_valid = false;
 }
 
@@ -75,29 +90,47 @@ void RenderStatsOnComposeEnd()
     ++g_frames_composed;
 }
 
-void RenderStatsOnPresent(const DamageRect& damage, u32 surface_width, u32 surface_height)
+void RenderStatsOnPresent(const DamageRect& bbox, u64 dirty_pixels, u32 rect_count, u32 surface_width,
+                          u32 surface_height)
 {
     ++g_frames_presented;
-    g_last_valid = damage.valid;
-    g_last_x = damage.x;
-    g_last_y = damage.y;
-    g_last_w = damage.w;
-    g_last_h = damage.h;
-    if (!damage.valid)
+    g_last_valid = bbox.valid;
+    g_last_x = bbox.x;
+    g_last_y = bbox.y;
+    g_last_w = bbox.w;
+    g_last_h = bbox.h;
+    g_last_rect_count = rect_count;
+    if (!bbox.valid)
     {
         ++g_frames_clean;
         return;
     }
-    const u64 dirty = static_cast<u64>(damage.w) * damage.h;
+    const u64 bbox_area = static_cast<u64>(bbox.w) * bbox.h;
     const u64 surface = static_cast<u64>(surface_width) * surface_height;
-    g_dirty_pixels_total += dirty;
+    g_dirty_pixels_total += dirty_pixels;
+    g_bbox_pixels_total += bbox_area;
     g_surface_pixels_total += surface;
-    // ≥95% of surface counts as "full"; below that, "partial".
-    // The damage tracker only ever produces a single bbox so a
-    // 99% fill is still a partial — but if chrome touched both
-    // the topmost and bottommost row, the bbox is effectively
-    // full-screen and counting it as such is the right call.
-    if (surface != 0 && dirty * 100 >= surface * 95)
+    if (rect_count > 1)
+    {
+        ++g_presents_banded;
+        if (rect_count > g_max_band_count)
+        {
+            g_max_band_count = rect_count;
+        }
+    }
+    else
+    {
+        ++g_presents_coalesced;
+        if (g_max_band_count < 1)
+        {
+            g_max_band_count = 1;
+        }
+    }
+    // Full vs. partial uses the TRUE dirty pixel count, not the bbox.
+    // A banded present where two small disjoint rects dirty 1% of the
+    // surface is partial; a single bbox covering 99% is full. Counting
+    // by true dirty matches what "the GPU actually had to upload".
+    if (surface != 0 && dirty_pixels * 100 >= surface * 95)
     {
         ++g_frames_full;
     }

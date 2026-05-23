@@ -467,6 +467,34 @@ void CmdGfx(u32 argc, char** argv)
         WriteU64Dec(rs.surface_pixels_total);
         ConsoleWrite(" px)\n");
     }
+    // Banded-vs-coalesced breakdown. The compositor's content diff
+    // produces N disjoint rects when spatially-separated widgets
+    // changed; >1 means the banded path elided a near-fullscreen
+    // host transfer. `bband savings` reports the fraction of the
+    // bbox area the banded path skipped — high values mean the
+    // banded path is paying off.
+    ConsoleWrite("  present path:      coalesced=");
+    WriteU64Dec(rs.presents_coalesced);
+    ConsoleWrite(" banded=");
+    WriteU64Dec(rs.presents_banded);
+    ConsoleWrite(" max-rects=");
+    WriteU64Dec(rs.max_band_count);
+    ConsoleWriteChar('\n');
+    if (rs.bbox_pixels_total > rs.dirty_pixels_total)
+    {
+        const u64 saved = rs.bbox_pixels_total - rs.dirty_pixels_total;
+        // Per-mille of what a naive bbox-flush backend would have
+        // uploaded. Zero means every present's bbox already equalled
+        // its true dirty area (no spatial separation found).
+        const u64 permille = (saved * 1000ULL) / rs.bbox_pixels_total;
+        ConsoleWrite("  banding savings:   ");
+        WriteU64Dec(permille);
+        ConsoleWrite("‰ (");
+        WriteU64Dec(saved);
+        ConsoleWrite(" / ");
+        WriteU64Dec(rs.bbox_pixels_total);
+        ConsoleWrite(" bbox px)\n");
+    }
     if (rs.last_damage_valid)
     {
         ConsoleWrite("  last damage rect: ");
@@ -477,7 +505,9 @@ void CmdGfx(u32 argc, char** argv)
         WriteU64Dec(rs.last_damage_x);
         ConsoleWrite(",");
         WriteU64Dec(rs.last_damage_y);
-        ConsoleWrite(")\n");
+        ConsoleWrite(") rects=");
+        WriteU64Dec(rs.last_rect_count);
+        ConsoleWriteChar('\n');
     }
 }
 
