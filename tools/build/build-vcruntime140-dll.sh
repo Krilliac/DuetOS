@@ -26,11 +26,13 @@ REPO_ROOT="$1"
 OUT_HEADER="$2"
 SRC_DIR="${REPO_ROOT}/userland/libs/vcruntime140"
 SRC_C="${SRC_DIR}/vcruntime140.c"
+SRC_S="${SRC_DIR}/chkstk.S"
 EMBED="${REPO_ROOT}/tools/build/embed-blob.py"
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/vcruntime140"
 mkdir -p "${WORK_DIR}"
-OBJ="${WORK_DIR}/vcruntime140.obj"
+OBJ_C="${WORK_DIR}/vcruntime140.obj"
+OBJ_S="${WORK_DIR}/chkstk.obj"
 DLL="${WORK_DIR}/vcruntime140.dll"
 
 # ntdll import lib (built by build-ntdll-dll.sh into the sibling
@@ -62,7 +64,13 @@ LLD_LINK="${LLD_LINK:-lld-link}"
     -O2 \
     -Wall -Wextra \
     "${SRC_C}" \
-    -o "${OBJ}"
+    -o "${OBJ_C}"
+
+# Assemble the page-probing __chkstk export. Same toolchain
+# target as the C compile; clang's integrated assembler handles
+# the .S file.
+"${CLANG}" --target=x86_64-pc-windows-msvc -c -ffreestanding -nostdlib \
+    "${SRC_S}" -o "${OBJ_S}"
 
 rm -f "${DLL}"
 
@@ -94,9 +102,11 @@ set +e
     /export:__vcrt_InitializeCriticalSectionEx \
     /export:__CxxUnwind \
     /export:_fltused \
+    /export:__chkstk \
     "/export:??_7type_info@@6B@" \
     /out:"${DLL}" \
-    "${OBJ}" \
+    "${OBJ_C}" \
+    "${OBJ_S}" \
     "${NTDLL_LIB}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
 set -e
