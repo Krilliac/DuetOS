@@ -135,6 +135,7 @@
 #include "net/tcp.h"
 #include "net/tls.h"
 #include "subsystems/graphics/graphics.h"
+#include "subsystems/graphics/graphics_vk_spirv.h"
 #include "drivers/storage/ahci.h"
 #include "drivers/storage/block.h"
 #include "drivers/storage/nvme.h"
@@ -1835,6 +1836,7 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Bringing up graphics ICD.\n");
     duetos::subsystems::graphics::GraphicsIcdInit();
     DUETOS_BOOT_SELFTEST(duetos::subsystems::graphics::GraphicsIcdSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::subsystems::graphics::spirv::SelfTest());
     duetos::subsystems::win32::GdiInit();
 
     SerialWrite("[boot] Bringing up block device layer.\n");

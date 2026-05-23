@@ -676,20 +676,20 @@ bool BuildFunctionsAndInstructions(Program* p)
                 ir.opcode = op;
                 ir.word_count = static_cast<u16>(wc);
                 ir.operands_word_offset = i;
-                ir.type_id = 0;
-                ir.result_id = 0;
-                // Most ops have <Type,Result>. Common exceptions: terminator ops,
-                // memory writes, control-flow merges. We capture both when wc >= 3
-                // by checking the result-id table.
-                if (wc >= 3 && p->id_kinds[p->words[i + 2]] != IdKind::None)
-                {
-                    ir.type_id = p->words[i + 1];
-                    ir.result_id = p->words[i + 2];
-                }
-                else if (wc >= 2 && p->id_kinds[p->words[i + 1]] != IdKind::None)
-                {
-                    ir.result_id = p->words[i + 1];
-                }
+                // For every opcode that takes the (type, result) prelude
+                // — the overwhelming majority of arithmetic / memory /
+                // composite / extension instructions — words[i+1] and
+                // words[i+2] are exactly those slots. The executor only
+                // reads `type_id` / `result_id` for ops where the prelude
+                // is meaningful (the switch case knows), so eagerly
+                // copying the bytes is safe even for the handful of ops
+                // (OpStore, OpBranch, OpBranchConditional, OpReturnValue)
+                // whose word[1] / word[2] mean something different —
+                // their cases use the operand words directly via
+                // `operands_word_offset` and never look at the prelude
+                // fields.
+                ir.type_id = (wc >= 2) ? p->words[i + 1] : 0;
+                ir.result_id = (wc >= 3) ? p->words[i + 2] : 0;
             }
             break;
         }

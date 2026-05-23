@@ -319,4 +319,13 @@ inline constexpr u32 kFragment = 4;
 inline constexpr u32 kGLCompute = 5;
 } // namespace execution_models
 
+/// Boot self-test. Parses + executes three canonical SPIR-V
+/// modules (constant fragment colour; scalar Float add;
+/// vec3 * scalar) and asserts the outputs. Panics on
+/// regression. Wired into boot_bringup.cpp behind
+/// DUETOS_BOOT_SELFTEST so it runs once at boot and emits
+/// `[subsys/graphics/spirv] self-test PASS (3 modules
+/// executed)`.
+void SelfTest();
+
 } // namespace duetos::subsystems::graphics::spirv

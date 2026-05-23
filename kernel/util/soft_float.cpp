@@ -236,7 +236,9 @@ Sf32 Sf32Mul(Sf32 a, Sf32 b)
     const u32 ma = pa.mantissa | 0x00800000u; // 24-bit
     const u32 mb = pb.mantissa | 0x00800000u; // 24-bit
     const u64 product = static_cast<u64>(ma) * mb; // 48-bit max
-    const i32 exp_sum = pa.exp_raw + pb.exp_raw - 127;
+    // PackNormal takes the UNBIASED exponent. ea_unbiased + eb_unbiased
+    // = (ea_raw - 127) + (eb_raw - 127) = ea_raw + eb_raw - 254.
+    const i32 exp_sum = pa.exp_raw + pb.exp_raw - 254;
 
     // The 48-bit product has its leading bit at position 47 OR 46.
     // Shift right so the leading 1 sits at bit 26 (i.e. 27-bit form
@@ -292,37 +294,30 @@ Sf32 Sf32Div(Sf32 a, Sf32 b)
     if (pa.exp_raw == 0 || pb.exp_raw == 0)
         return Sf32{sign << 31};
 
-    // Long-division: numerator into a 27-bit form, divide by 24-bit
-    // mantissa. The quotient is 27 bits with the leading 1 at bit
-    // 26 (or 25 — we renormalise after).
+    // Long-division. Both mantissas are Q1.23 (24-bit values with
+    // the implicit 1 at bit 23). We want the quotient in Q1.26 form
+    // (27 bits: 1 leading + 23 fraction + 3 GRS) so the
+    // RoundTiesToEven helper sees a leading 1 at bit 26.
+    //
+    // Fixed-point identity: (ma << 26) / mb yields a value of
+    // `(ma/mb) * 2^26`. With ma, mb in [2^23, 2^24), the ratio is
+    // in [0.5, 2), so the quotient is in [2^25, 2^27). Leading bit
+    // is at 25 (ratio < 1) or 26 (ratio >= 1); PackNormal handles
+    // both via its left-shift renormalisation loop, so we don't
+    // need a pre-shift here.
     const u32 ma = pa.mantissa | 0x00800000u;
     const u32 mb = pb.mantissa | 0x00800000u;
-    // Shift numerator left by 27 so the quotient is 27 bits.
-    const u64 num = static_cast<u64>(ma) << 27;
-    const u64 q = num / mb;
+    const u64 num = static_cast<u64>(ma) << 26;
+    u64 q = num / mb;
     const u64 rem = num % mb;
-    const i32 exp_diff = pa.exp_raw - pb.exp_raw;
+    const i32 e = pa.exp_raw - pb.exp_raw;
 
-    // Normalise: q is either 27 or 28 bits wide (mantissa ratio in
-    // [0.5, 2.0)).
-    u64 shifted = q;
-    i32 e = exp_diff;
-    if (shifted & (1ull << 27))
-    {
-        // 28-bit form, shift right by 1; pack sticky from LSB and
-        // remainder.
-        const u32 sticky = ((shifted & 1u) || rem != 0) ? 1u : 0u;
-        shifted = (shifted >> 1) | sticky;
-        e += 1;
-    }
-    else
-    {
-        // 27-bit form: sticky just from remainder.
-        if (rem != 0)
-            shifted |= 1u;
-    }
+    // Sticky from non-zero remainder so RoundTiesToEven sees the
+    // truncated low bits.
+    if (rem != 0)
+        q |= 1u;
 
-    const u32 rounded = RoundTiesToEven(static_cast<u32>(shifted));
+    const u32 rounded = RoundTiesToEven(static_cast<u32>(q));
     return PackNormal(sign, e, rounded);
 }
 
@@ -345,30 +340,33 @@ Sf32 Sf32Sqrt(Sf32 x)
     if (p.exp_raw == 0)
         return Sf32Zero(); // denormal -> 0 (FTZ)
 
-    // Integer-square-root on the mantissa. Bring mantissa to
-    // 48-bit form so the result is 24 bits wide. Exponent is
-    // halved; an odd exponent absorbs a factor of 2 into the
-    // mantissa first.
-    i32 unbiased = p.exp_raw - 127;
-    u64 m = static_cast<u64>(p.mantissa | 0x00800000u);
-    if (unbiased & 1)
-    {
-        m <<= 1; // absorb the odd 2 into the mantissa
-        --unbiased;
-    }
-    m <<= 24; // 48-bit form
+    // Integer-square-root on the mantissa.
+    //
+    // x = m * 2^e where m is Q1.23 (so m_real = m / 2^23, in [1,2))
+    // sqrt(x) = sqrt(m_real) * 2^(e/2). Treat even and odd exponents
+    // separately so the integer sqrt always lands a 24-bit result:
+    //   even e: M = m << 23  (= m_real * 2^46, in [2^46, 2^47));
+    //           int_sqrt(M) in [2^23, 2^23.5); result_exp = e/2.
+    //   odd  e: M = m << 24  (= m_real * 2^47, in [2^47, 2^48));
+    //           int_sqrt(M) in [2^23.5, 2^24); result_exp = (e-1)/2.
+    // Both cases give a 24-bit mantissa with the implicit 1 at bit 23.
+    const i32 unbiased = p.exp_raw - 127;
+    const u64 m24 = static_cast<u64>(p.mantissa | 0x00800000u);
+    const bool e_odd = (unbiased & 1) != 0;
+    u64 M = e_odd ? (m24 << 24) : (m24 << 23);
+    const i32 result_exp = e_odd ? ((unbiased - 1) / 2) : (unbiased / 2);
 
-    // Bit-by-bit integer sqrt (digit recurrence). For a 48-bit
-    // input the result is 24 bits.
+    // Bit-by-bit integer sqrt (digit recurrence). For an input
+    // in [2^46, 2^48) the result is 24 bits in [2^23, 2^24).
     u64 result = 0;
-    u64 bit = 1ull << 46; // highest even bit
-    while (bit > m)
+    u64 bit = 1ull << 46; // highest even bit covering [2^46, 2^48)
+    while (bit > M)
         bit >>= 2;
     while (bit != 0)
     {
-        if (m >= result + bit)
+        if (M >= result + bit)
         {
-            m -= result + bit;
+            M -= result + bit;
             result = (result >> 1) + bit;
         }
         else
@@ -377,18 +375,11 @@ Sf32 Sf32Sqrt(Sf32 x)
         }
         bit >>= 2;
     }
-    // result is the floor of the true sqrt. Round to nearest by
-    // comparing 2*result*remaining_x against the next-bit value.
-    // For our 24-bit accuracy needs the floor-rounded value is
-    // close enough; pin the rounding by checking the remainder.
-    if (m > result)
+    // result is the floor of the true sqrt. Round-to-nearest by
+    // comparing the remainder against 2*result+1.
+    if (2 * M > 2 * result + 1)
         ++result;
 
-    const i32 result_exp = unbiased / 2;
-    // PackNormal expects a 24-bit mantissa with the leading bit at
-    // position 23. Renormalise.
-    while (result >= (1ull << 24))
-        result >>= 1;
     return PackNormal(0u, result_exp, static_cast<u32>(result));
 }
 
