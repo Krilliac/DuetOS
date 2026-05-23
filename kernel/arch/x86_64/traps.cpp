@@ -977,6 +977,41 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         }
     }
 
+    // #DF (Double Fault, vector 8). Runs on the dedicated IST1
+    // stack (configured by IdtSetIst(8, kIstDoubleFault) at boot),
+    // so even if the regular kernel stack is corrupt or
+    // exhausted we land here with a known-good RSP. A #DF means
+    // ANOTHER trap fired while we were trying to deliver an
+    // earlier trap — typically a #PF whose IRET frame couldn't
+    // be pushed because the kernel stack itself was unmapped /
+    // overflowed.
+    //
+    // We can't trust the normal Panic path here — even the
+    // serial spinlock might be held by the CPU that #DFed. Use
+    // panic-mode serial directly + halt. The error_code on #DF
+    // is always 0 (Intel SDM 6.15.1) so it's not worth printing.
+    if (frame->vector == 8)
+    {
+        arch::SerialEnterPanicMode();
+        arch::SerialWrite("\n[!!! DOUBLE FAULT (vec 8) — ist1 stack ]\n");
+        arch::SerialWrite("  rip=");
+        arch::SerialWriteHex(frame->rip);
+        arch::SerialWrite("\n  rsp=");
+        arch::SerialWriteHex(frame->rsp);
+        arch::SerialWrite("\n  rflags=");
+        arch::SerialWriteHex(frame->rflags);
+        arch::SerialWrite("\n  cr2=");
+        arch::SerialWriteHex(ReadCr2());
+        arch::SerialWrite("\n  cr3=");
+        arch::SerialWriteHex(ReadCr3());
+        arch::SerialWrite("\n[df] original trap stack likely overflowed or unmapped; halting.\n");
+        // Mark panic-in-progress so any recursive halt path
+        // short-circuits cleanly instead of trying to dump.
+        PanicInProgressMark();
+        for (;;)
+            asm volatile("cli; hlt");
+    }
+
     // Kernel-stack guard-page hit. Runs BEFORE the extable lookup so
     // a stray fault-fixup entry that happened to register a RIP
     // range around this site can't shadow a real overflow. Scoped
