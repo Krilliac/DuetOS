@@ -493,6 +493,14 @@ syscall whose `rdi` argument selects which `VkOp` to invoke.
 | `vkCreateShaderModule` / `vkDestroyShaderModule` | `kVkOpCreateShaderModule` / `kVkOpDestroyShaderModule` (kernel copies the SPIR-V word stream + invokes the v1 parser; module survives until destroyed) |
 | `vkAllocateMemory` / `vkFreeMemory` | `kVkOpAllocateMemory` / `kVkOpFreeMemory` (host-visible coherent memory type) |
 | `vkCreateBuffer` / `vkDestroyBuffer` | `kVkOpCreateBuffer` / `kVkOpDestroyBuffer` |
+| `vkBindBufferMemory` | `kVkOpBindBufferMemory` |
+| `vkMapMemory` / `vkUnmapMemory` | `kVkOpMapMemory` / `kVkOpUnmapMemory` (returns the kernel's kheap-backed host pointer; userland reads / writes directly since v0 has no per-process VM gate on this surface) |
+| `vkCreateImage` / `vkDestroyImage` / `vkBindImageMemory` | `kVkOpCreateImage` / `kVkOpDestroyImage` / `kVkOpBindImageMemory` (BGRA8 default format) |
+| `vkCreateCommandPool` / `vkDestroyCommandPool` | `kVkOpCreateCommandPool` / `kVkOpDestroyCommandPool` |
+| `vkAllocateCommandBuffers` | `kVkOpAllocateCommandBuffer` (v0 single buffer per call) |
+| `vkBeginCommandBuffer` / `vkEndCommandBuffer` | `kVkOpBeginCommandBuffer` / `kVkOpEndCommandBuffer` |
+| `vkCmdClearColorImage` | `kVkOpCmdClearColorImage` (packs the float-4 color into the canonical 0xAARRGGBB word; userland-side `_fltused` handles the float compare) |
+| `vkQueueSubmit` | `kVkOpQueueSubmit` (v0 single command buffer per submit) |
 
 `SYS_VK_CALL` plus `VkOp` / `VkStatsCounter` enums are in
 [`kernel/syscall/syscall.h`](../../kernel/syscall/syscall.h);

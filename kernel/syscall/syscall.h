@@ -2224,6 +2224,17 @@ enum VkOp : u64
                                 // rax = VkImage handle. Format is hardcoded BGRA8 for v0.
     kVkOpDestroyImage = 24,     // rdx = device, r10 = image
     kVkOpBindImageMemory = 25,  // rdx = device, r10 = image, r8 = memory, r9 = offset
+    // Command buffer recording + submit. A userland PE that owns
+    // its own cmd buffer ladder + records draws can drive the
+    // full Vulkan path; the earlier DuetOS_Vk_ClearFramebufferRgba
+    // shortcut remains for the simple cases.
+    kVkOpCreateCommandPool = 26,    // rdx=device; rax = VkCommandPool
+    kVkOpDestroyCommandPool = 27,   // rdx=device, r10=pool
+    kVkOpAllocateCommandBuffer = 28, // rdx=device, r10=pool; rax = VkCommandBuffer
+    kVkOpBeginCommandBuffer = 29,   // rdx=cb; rax = 1
+    kVkOpEndCommandBuffer = 30,     // rdx=cb
+    kVkOpCmdClearColorImage = 31,   // rdx=cb, r10=image, r8=packed argb
+    kVkOpQueueSubmit = 32,          // rdx=queue, r10=cb
 };
 
 // Diagnostic counter IDs for kVkOpGetStatsCounter. Exposes the

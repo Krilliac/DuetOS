@@ -282,6 +282,57 @@ u64 OpBindImageMemory(arch::TrapFrame* frame)
     return (vk::VkBindImageMemory(frame->rdx, frame->r10, frame->r8, frame->r9) == vk::VkResult::Success) ? 1 : 0;
 }
 
+u64 OpCreateCommandPool(arch::TrapFrame* frame)
+{
+    vk::VkCommandPool out = 0;
+    return (vk::VkCreateCommandPool(frame->rdx, &out) == vk::VkResult::Success) ? out : 0;
+}
+
+u64 OpDestroyCommandPool(arch::TrapFrame* frame)
+{
+    vk::VkDestroyCommandPool(frame->rdx, frame->r10);
+    return 1;
+}
+
+u64 OpAllocateCommandBuffer(arch::TrapFrame* frame)
+{
+    vk::VkCommandBuffer out = 0;
+    return (vk::VkAllocateCommandBuffers(frame->rdx, frame->r10, 1, &out) == vk::VkResult::Success) ? out : 0;
+}
+
+u64 OpBeginCommandBuffer(arch::TrapFrame* frame)
+{
+    return (vk::VkBeginCommandBuffer(frame->rdx) == vk::VkResult::Success) ? 1 : 0;
+}
+
+u64 OpEndCommandBuffer(arch::TrapFrame* frame)
+{
+    return (vk::VkEndCommandBuffer(frame->rdx) == vk::VkResult::Success) ? 1 : 0;
+}
+
+u64 OpCmdClearColorImage(arch::TrapFrame* frame)
+{
+    // Repack the packed ARGB into a VkClearColorValue. The ICD
+    // uses the union form so the bits go in as uint32 to avoid
+    // pulling in soft-float on the kernel side.
+    vk::VkClearColorValue cv{};
+    const u32 argb = static_cast<u32>(frame->r8 & 0xFFFFFFFFull);
+    cv.uint32[0] = (argb >> 16) & 0xFFu; // R
+    cv.uint32[1] = (argb >> 8) & 0xFFu;  // G
+    cv.uint32[2] = argb & 0xFFu;         // B
+    cv.uint32[3] = (argb >> 24) & 0xFFu; // A
+    return (vk::VkCmdClearColorImage(frame->rdx, frame->r10, cv) == vk::VkResult::Success) ? 1 : 0;
+}
+
+u64 OpQueueSubmit(arch::TrapFrame* frame)
+{
+    vk::VkCommandBuffer cb = frame->r10;
+    // No fence for the v0 syscall path (the kernel ICD's submits
+    // are synchronous; the userland sees an immediately-signalled
+    // result regardless).
+    return (vk::VkQueueSubmit(frame->rdx, 1, &cb, 0) == vk::VkResult::Success) ? 1 : 0;
+}
+
 u64 OpClearFramebufferRgba(arch::TrapFrame* frame)
 {
     // rsi = packed 0xAARRGGBB. Drive the same path that
@@ -353,9 +404,16 @@ void DoVkCall(arch::TrapFrame* frame)
     using ::duetos::core::kVkOpDeviceWaitIdle;
     using ::duetos::core::kVkOpEnumeratePhysicalDevices;
     using ::duetos::core::kVkOpGetDeviceQueue;
+    using ::duetos::core::kVkOpAllocateCommandBuffer;
     using ::duetos::core::kVkOpAllocateMemory;
+    using ::duetos::core::kVkOpBeginCommandBuffer;
     using ::duetos::core::kVkOpBindBufferMemory;
     using ::duetos::core::kVkOpBindImageMemory;
+    using ::duetos::core::kVkOpCmdClearColorImage;
+    using ::duetos::core::kVkOpCreateCommandPool;
+    using ::duetos::core::kVkOpDestroyCommandPool;
+    using ::duetos::core::kVkOpEndCommandBuffer;
+    using ::duetos::core::kVkOpQueueSubmit;
     using ::duetos::core::kVkOpClearFramebufferRgba;
     using ::duetos::core::kVkOpCreateBuffer;
     using ::duetos::core::kVkOpCreateImage;
@@ -452,6 +510,27 @@ void DoVkCall(arch::TrapFrame* frame)
         return;
     case kVkOpBindImageMemory:
         frame->rax = OpBindImageMemory(frame);
+        return;
+    case kVkOpCreateCommandPool:
+        frame->rax = OpCreateCommandPool(frame);
+        return;
+    case kVkOpDestroyCommandPool:
+        frame->rax = OpDestroyCommandPool(frame);
+        return;
+    case kVkOpAllocateCommandBuffer:
+        frame->rax = OpAllocateCommandBuffer(frame);
+        return;
+    case kVkOpBeginCommandBuffer:
+        frame->rax = OpBeginCommandBuffer(frame);
+        return;
+    case kVkOpEndCommandBuffer:
+        frame->rax = OpEndCommandBuffer(frame);
+        return;
+    case kVkOpCmdClearColorImage:
+        frame->rax = OpCmdClearColorImage(frame);
+        return;
+    case kVkOpQueueSubmit:
+        frame->rax = OpQueueSubmit(frame);
         return;
     }
     frame->rax = kVkBadOp;

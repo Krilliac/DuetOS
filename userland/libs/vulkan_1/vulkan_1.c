@@ -33,6 +33,11 @@
  * tolerate dashes.
  */
 
+/* MSVC PE link-time marker: any TU that touches floating-point
+ * (vkCmdClearColorImage takes a float[4] color) must define
+ * `_fltused` for the linker to be happy. */
+__attribute__((used)) int _fltused = 0;
+
 /* ---------------------------------------------------------------- *
  * Minimal Win32 / Vulkan type aliases                              *
  * ---------------------------------------------------------------- */
@@ -154,6 +159,13 @@ enum
     VkOp_CreateImage = 23,
     VkOp_DestroyImage = 24,
     VkOp_BindImageMemory = 25,
+    VkOp_CreateCommandPool = 26,
+    VkOp_DestroyCommandPool = 27,
+    VkOp_AllocateCommandBuffer = 28,
+    VkOp_BeginCommandBuffer = 29,
+    VkOp_EndCommandBuffer = 30,
+    VkOp_CmdClearColorImage = 31,
+    VkOp_QueueSubmit = 32,
 };
 
 /* Additional Vulkan types we need for the create paths. */
@@ -162,6 +174,8 @@ typedef unsigned long long VkDeviceMemory;
 typedef unsigned long long VkBuffer;
 typedef unsigned long long VkImage;
 typedef unsigned long long VkDeviceSize;
+typedef unsigned long long VkCommandPool;
+typedef unsigned long long VkCommandBuffer;
 
 /* ---------------------------------------------------------------- *
  * Vulkan entry points                                              *
@@ -272,6 +286,14 @@ void vkUnmapMemory(VkDevice device, VkDeviceMemory memory);
 VkResult vkCreateImage(VkDevice device, const void* pCreateInfo, const void* pAllocator, VkImage* pImage);
 void vkDestroyImage(VkDevice device, VkImage image, const void* pAllocator);
 VkResult vkBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset);
+VkResult vkCreateCommandPool(VkDevice device, const void* pCreateInfo, const void* pAllocator, VkCommandPool* pPool);
+void vkDestroyCommandPool(VkDevice device, VkCommandPool pool, const void* pAllocator);
+VkResult vkAllocateCommandBuffers(VkDevice device, const void* pAllocateInfo, VkCommandBuffer* pCommandBuffers);
+VkResult vkBeginCommandBuffer(VkCommandBuffer cb, const void* pBeginInfo);
+VkResult vkEndCommandBuffer(VkCommandBuffer cb);
+void vkCmdClearColorImage(VkCommandBuffer cb, VkImage image, DWORD imageLayout, const void* pColor, UINT32 rangeCount,
+                          const void* pRanges);
+VkResult vkQueueSubmit(VkQueue queue, UINT32 submitCount, const void* pSubmits, UINT64 fence);
 
 static DV_NO_BUILTIN inline int dv_streq(const char* a, const char* b)
 {
@@ -336,6 +358,20 @@ PFN_vkVoidFunction vkGetInstanceProcAddr(VkInstance instance, const char* pName)
         return (PFN_vkVoidFunction)vkDestroyImage;
     if (dv_streq(pName, "vkBindImageMemory"))
         return (PFN_vkVoidFunction)vkBindImageMemory;
+    if (dv_streq(pName, "vkCreateCommandPool"))
+        return (PFN_vkVoidFunction)vkCreateCommandPool;
+    if (dv_streq(pName, "vkDestroyCommandPool"))
+        return (PFN_vkVoidFunction)vkDestroyCommandPool;
+    if (dv_streq(pName, "vkAllocateCommandBuffers"))
+        return (PFN_vkVoidFunction)vkAllocateCommandBuffers;
+    if (dv_streq(pName, "vkBeginCommandBuffer"))
+        return (PFN_vkVoidFunction)vkBeginCommandBuffer;
+    if (dv_streq(pName, "vkEndCommandBuffer"))
+        return (PFN_vkVoidFunction)vkEndCommandBuffer;
+    if (dv_streq(pName, "vkCmdClearColorImage"))
+        return (PFN_vkVoidFunction)vkCmdClearColorImage;
+    if (dv_streq(pName, "vkQueueSubmit"))
+        return (PFN_vkVoidFunction)vkQueueSubmit;
     return NULL;
 }
 
@@ -539,5 +575,108 @@ VkResult vkBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory
 {
     const long long ok =
         vk_syscall5(VkOp_BindImageMemory, 0, (long long)device, (long long)image, (long long)memory, (long long)memoryOffset);
+    return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+/* Command pool / buffer / submit ladder. */
+
+VkResult vkCreateCommandPool(VkDevice device, const void* pCreateInfo, const void* pAllocator, VkCommandPool* pPool)
+{
+    (void)pCreateInfo;
+    (void)pAllocator;
+    if (pPool == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const long long h = vk_syscall1(VkOp_CreateCommandPool, (long long)device);
+    if (h == 0)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    *pPool = (VkCommandPool)h;
+    return VK_SUCCESS;
+}
+
+void vkDestroyCommandPool(VkDevice device, VkCommandPool pool, const void* pAllocator)
+{
+    (void)pAllocator;
+    (void)vk_syscall3(VkOp_DestroyCommandPool, 0, (long long)device, (long long)pool);
+}
+
+/* vkAllocateCommandBuffers — pAllocateInfo VkCommandBufferAllocateInfo:
+ * commandPool at offset 16, commandBufferCount at offset 28.
+ * v0 honors only the first one (returns one VkCommandBuffer). */
+VkResult vkAllocateCommandBuffers(VkDevice device, const void* pAllocateInfo, VkCommandBuffer* pCommandBuffers)
+{
+    if (pAllocateInfo == NULL || pCommandBuffers == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const BYTE* ai = (const BYTE*)pAllocateInfo;
+    const VkCommandPool pool = *(const VkCommandPool*)(ai + 16);
+    const UINT32 count = *(const UINT32*)(ai + 28);
+    const UINT32 n = (count == 0) ? 1u : count;
+    for (UINT32 i = 0; i < n; ++i)
+    {
+        const long long h = vk_syscall3(VkOp_AllocateCommandBuffer, 0, (long long)device, (long long)pool);
+        if (h == 0)
+            return VK_ERROR_INITIALIZATION_FAILED;
+        pCommandBuffers[i] = (VkCommandBuffer)h;
+    }
+    return VK_SUCCESS;
+}
+
+VkResult vkBeginCommandBuffer(VkCommandBuffer cb, const void* pBeginInfo)
+{
+    (void)pBeginInfo;
+    const long long ok = vk_syscall1(VkOp_BeginCommandBuffer, (long long)cb);
+    return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+VkResult vkEndCommandBuffer(VkCommandBuffer cb)
+{
+    const long long ok = vk_syscall1(VkOp_EndCommandBuffer, (long long)cb);
+    return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
+}
+
+/* vkCmdClearColorImage — VkClearColorValue is a union; v0 takes
+ * the float32[4] components, scales to 0..255, and packs ARGB. */
+void vkCmdClearColorImage(VkCommandBuffer cb, VkImage image, DWORD /*VkImageLayout*/ imageLayout,
+                          const void* pColor, UINT32 rangeCount, const void* pRanges)
+{
+    (void)imageLayout;
+    (void)rangeCount;
+    (void)pRanges;
+    if (pColor == NULL)
+        return;
+    const float* color = (const float*)pColor;
+    /* clamp + pack */
+    UINT32 argb = 0;
+    for (int i = 0; i < 4; ++i)
+    {
+        float c = color[i];
+        if (c < 0.f)
+            c = 0.f;
+        else if (c > 1.f)
+            c = 1.f;
+        UINT32 q = (UINT32)(c * 255.f);
+        if (q > 255)
+            q = 255;
+        /* Order: R G B A -> shift positions 16 8 0 24 */
+        const int sh = (i == 0) ? 16 : (i == 1) ? 8 : (i == 2) ? 0 : 24;
+        argb |= (q << sh);
+    }
+    (void)vk_syscall4(VkOp_CmdClearColorImage, (long long)cb, (long long)image, (long long)argb, 0);
+}
+
+VkResult vkQueueSubmit(VkQueue queue, UINT32 submitCount, const void* pSubmits, UINT64 fence)
+{
+    (void)submitCount;
+    (void)pSubmits;
+    (void)fence;
+    /* v0 single-cmd-buffer path: pSubmits is a VkSubmitInfo with
+     * pCommandBuffers at offset 32 + commandBufferCount at offset 24.
+     * We honor the first command buffer of the first submit. */
+    if (pSubmits == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const BYTE* s = (const BYTE*)pSubmits;
+    const VkCommandBuffer* cbs = *(const VkCommandBuffer* const*)(s + 32);
+    if (cbs == NULL)
+        return VK_ERROR_INITIALIZATION_FAILED;
+    const long long ok = vk_syscall3(VkOp_QueueSubmit, 0, (long long)queue, (long long)cbs[0]);
     return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
