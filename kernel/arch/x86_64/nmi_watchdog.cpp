@@ -118,6 +118,18 @@ void NmiWatchdogInit()
         SerialWrite(" width=");
         SerialWriteHex(u64(width));
         SerialWrite(") — disabled\n");
+        // Operator-visible fallback note. Hang detection is now
+        // limited to: (a) soft-lockup detector via scheduler-tick
+        // poll (catches stuck-task-with-IRQs-on), (b) the panic
+        // path's PanicBroadcastNmi (after a different fault
+        // surfaces). It does NOT catch "kernel stuck with IRQs
+        // off and no scheduler tick" — that needs an
+        // asynchronous-NMI source (HPET-routed-to-NMI is the
+        // next pillar slice; the HPET driver header lists
+        // per-timer comparator + IOAPIC routing as deferred).
+        SerialWrite("[nmi-watchdog] FALLBACK: hang detection via soft-lockup tick only.\n");
+        SerialWrite("[nmi-watchdog] FALLBACK: kernel-IRQ-off-wedge is NOT detected.\n");
+        SerialWrite("[nmi-watchdog] FALLBACK: see wiki/arch/Nmi-Watchdog-Hpet-Fallback for the next slice.\n");
         return;
     }
     KLOG_INFO_2V("arch/nmi-watchdog", "perfmon detected", "version", u64(version), "counters", u64(n_counters));

@@ -17,6 +17,7 @@
 #include "diag/soft_lockup.h"
 
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/smp.h"
 #include "core/panic.h"
 #include "diag/fault_react.h"
 #include "log/klog.h"
@@ -136,6 +137,22 @@ void TickInternal(u64 now_ticks, u64 current_tid, const char* current_name)
         arch::SerialWrite("\" ticks_in_run=");
         arch::SerialWriteHex(g_state.same_tid_count);
         arch::SerialWrite("\n");
+
+        // Broadcast NMI to peer CPUs so they each capture their
+        // own panic_snapshot_* state. The peer NMI handler
+        // populates the snapshot and halts; the snapshots
+        // survive into a subsequent panic dump if this lockup
+        // escalates. If the lockup eventually clears on its
+        // own, the snapshots are just dead BSS — no cost. This
+        // is the "lightweight cross-CPU visibility" half of the
+        // NMI-watchdog HPET-fallback proposal — the full
+        // hardware-NMI-on-no-progress lands when the HPET driver
+        // gains per-timer comparator + IOAPIC routing.
+        //
+        // Skipped during self-test (the test exercises the state
+        // machine with synthetic TIDs and shouldn't broadcast).
+        if (!g_self_test_in_progress)
+            ::duetos::arch::PanicBroadcastNmi();
 
         ::duetos::diag::FaultEvidence ev = {};
         ev.source = "diag/soft-lockup";
