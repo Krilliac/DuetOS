@@ -1,6 +1,7 @@
 #include "debug/probes.h"
 
 #include "log/klog.h"
+#include "time/tick.h"
 #include "util/string.h"
 
 namespace duetos::debug
@@ -74,6 +75,28 @@ ProbeArm g_probe_arm[static_cast<u64>(ProbeId::kCount)] = {};
 u64 g_probe_fires[static_cast<u64>(ProbeId::kCount)] = {};
 bool g_inited = false;
 
+// Per-fire timeline ring. Tracks the LAST kProbeRingSlots fires
+// across all probes (not just per-probe-counter). Each panic dump
+// reads this back out so an investigator can see which probes
+// fired in the seconds before the crash. Newest-first walk.
+//
+// Slot layout: (tick, caller_rip, value, probe_id, cpu_id, valid).
+// Slot is filled lock-free via an atomic counter — collisions are
+// impossible because the counter is monotonic and the slot index
+// is unique per writer.
+inline constexpr u32 kProbeRingSlots = 32;
+struct ProbeRingEntry
+{
+    u64 tick;
+    u64 caller_rip;
+    u64 value;
+    u16 probe_id;
+    u16 cpu_id;
+    u32 valid;
+};
+alignas(64) constinit ProbeRingEntry g_probe_ring[kProbeRingSlots] = {};
+constinit u64 g_probe_ring_counter = 0;
+
 } // namespace
 
 void ProbeInit()
@@ -102,6 +125,21 @@ void ProbeFire(ProbeId id, u64 caller_rip, u64 value)
     // Armed — count + log. The table is in ProbeId order (enforced
     // by the static_assert above) so the name is a direct index.
     ++g_probe_fires[idx];
+    // Timeline ring entry. Cheap (one xadd + 4 stores) — adds
+    // ~20 cycles on the armed-fire path; the disarmed fast path
+    // is unaffected. Tick lookup uses TickCount() which is a
+    // single u64 load.
+    {
+        const u64 ridx = __atomic_fetch_add(&g_probe_ring_counter, 1, __ATOMIC_RELAXED) % kProbeRingSlots;
+        ProbeRingEntry* re = &g_probe_ring[ridx];
+        __atomic_store_n(&re->valid, 0u, __ATOMIC_RELEASE);
+        re->tick = ::duetos::time::TickCount();
+        re->caller_rip = caller_rip;
+        re->value = value;
+        re->probe_id = static_cast<u16>(idx);
+        re->cpu_id = 0; // SMP slice fills via CurrentCpu()->cpu_id once probes can call into cpu/percpu.h
+        __atomic_store_n(&re->valid, 1u, __ATOMIC_RELEASE);
+    }
     const char* name = kProbeTable[idx].name;
     if (value != 0)
     {
@@ -145,6 +183,39 @@ ProbeId ProbeByName(const char* name)
             return row.id;
     }
     return ProbeId::kCount;
+}
+
+u64 ProbeRingTotalFires()
+{
+    return __atomic_load_n(&g_probe_ring_counter, __ATOMIC_RELAXED);
+}
+
+u32 ProbeRingWalk(bool (*cb)(const ProbeRingFrame& f, void* ctx), void* ctx)
+{
+    if (cb == nullptr)
+        return 0;
+    const u64 total = ProbeRingTotalFires();
+    if (total == 0)
+        return 0;
+    const u64 newest = (total - 1) % kProbeRingSlots;
+    u32 visited = 0;
+    for (u32 i = 0; i < kProbeRingSlots; ++i)
+    {
+        const u64 idx = (newest + kProbeRingSlots - i) % kProbeRingSlots;
+        const ProbeRingEntry* e = &g_probe_ring[idx];
+        if (__atomic_load_n(&e->valid, __ATOMIC_ACQUIRE) == 0)
+            continue;
+        ProbeRingFrame f;
+        f.tick = e->tick;
+        f.caller_rip = e->caller_rip;
+        f.value = e->value;
+        f.probe_id = e->probe_id;
+        f.cpu_id = e->cpu_id;
+        ++visited;
+        if (!cb(f, ctx))
+            break;
+    }
+    return visited;
 }
 
 u64 ProbeList(ProbeInfo* out, u64 cap)

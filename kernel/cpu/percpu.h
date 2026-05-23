@@ -80,6 +80,20 @@ struct PerCpu
     u64 panic_snapshot_rip;
     u64 panic_snapshot_rsp;
     sched::Task* panic_snapshot_task;
+    // Extended state captured at the same instant as RIP/RSP/task.
+    // The trap dispatcher's NMI handler reads from existing per-CPU
+    // counters, so this costs only a few extra MOVs.
+    u64 panic_snapshot_cr2;             // last-faulting VA (#PF context)
+    u64 panic_snapshot_rflags;          // captures IF/IOPL/AC/etc.
+    u32 panic_snapshot_irq_depth;       // IrqNestDepthRaw at NMI entry
+    u32 panic_snapshot_held_lock_count; // value of held_locks_count
+    // For the topmost held lock (if any), capture the acquirer's
+    // RIP so the dump shows WHICH lock-acquiring function the peer
+    // was stuck inside. The full held-locks stack is per-CPU local
+    // and is already dumped by the peer itself; this gives the
+    // CROSS-CPU view a one-line summary.
+    u64 panic_snapshot_topmost_lock_acq_rip;
+    void* panic_snapshot_topmost_lock_addr;
 
     // Spinlock holder tracking for the panic dump's `held locks`
     // section. Push on SpinLockAcquire (with the acquirer's RIP),

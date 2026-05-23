@@ -20,6 +20,7 @@
 #include "diag/hexdump.h"
 #include "diag/minidump.h"
 #include "diag/panic_wait.h"
+#include "diag/tlb_history.h"
 #include "arch/x86_64/panic_capture.h"
 
 extern "C" void duetos_arch_PanicCaptureShim();
@@ -435,6 +436,44 @@ void DumpProbeFires()
     {
         arch::SerialWrite("  (no probes have fired)\n");
     }
+
+    // Per-fire timeline. The aggregate count above tells the
+    // operator "probe X fired N times since boot"; the timeline
+    // tells them WHICH ones fired in the seconds before the
+    // crash. Critical when a count tripped to 1 in the last
+    // 100ms vs an hour ago.
+    const u64 total_fires = debug::ProbeRingTotalFires();
+    if (total_fires > 0)
+    {
+        arch::SerialWrite("[panic] --- probe-fire timeline (last 32, newest first) ---\n");
+        struct Ctx
+        {
+            const debug::ProbeInfo* info;
+            u64 info_n;
+        };
+        Ctx c{info, n};
+        debug::ProbeRingWalk(
+            [](const debug::ProbeRingFrame& f, void* opaque) -> bool {
+                Ctx* cx = static_cast<Ctx*>(opaque);
+                arch::SerialWrite("  [");
+                arch::SerialWriteHex(f.tick);
+                arch::SerialWrite("] ");
+                const char* name = "<unknown>";
+                if (f.probe_id < cx->info_n && cx->info[f.probe_id].name != nullptr)
+                    name = cx->info[f.probe_id].name;
+                arch::SerialWrite(name);
+                arch::SerialWrite(" rip=");
+                WriteAddressWithSymbol(f.caller_rip);
+                if (f.value != 0)
+                {
+                    arch::SerialWrite(" val=");
+                    arch::SerialWriteHex(f.value);
+                }
+                arch::SerialWrite("\n");
+                return true;
+            },
+            &c);
+    }
 }
 
 void DumpTask()
@@ -646,6 +685,31 @@ void DumpPeerCpuSnapshots()
             arch::SerialWriteHex(reinterpret_cast<u64>(peer->panic_snapshot_task));
         }
         arch::SerialWrite("\n");
+        // Extended state captured at the same instant as
+        // rip/rsp/task. cr2 is the last-faulting VA the CPU
+        // latched — only meaningful if the peer was mid-#PF
+        // when the NMI hit. rflags shows IF / AC / IOPL. The
+        // IRQ depth tells you whether the peer was in nested
+        // IRQ context (>0 means it was) — useful for diagnosing
+        // a CPU that's IPI-spinning vs one in a clean task
+        // context. The held-lock summary points at the lock
+        // most likely to be involved in a deadlock-shaped
+        // panic; the full stack is dumped immediately below.
+        arch::SerialWrite("    cr2=");
+        arch::SerialWriteHex(peer->panic_snapshot_cr2);
+        arch::SerialWrite(" rflags=");
+        arch::SerialWriteHex(peer->panic_snapshot_rflags);
+        arch::SerialWrite(" irq_depth=");
+        arch::SerialWriteHex(static_cast<u64>(peer->panic_snapshot_irq_depth));
+        arch::SerialWrite("\n");
+        if (peer->panic_snapshot_held_lock_count != 0)
+        {
+            arch::SerialWrite("    topmost-lock addr=");
+            arch::SerialWriteHex(reinterpret_cast<u64>(peer->panic_snapshot_topmost_lock_addr));
+            arch::SerialWrite(" acq_rip=");
+            WriteAddressWithSymbol(peer->panic_snapshot_topmost_lock_acq_rip);
+            arch::SerialWrite("\n");
+        }
         // Held locks captured at NMI time — if the peer was holding
         // anything when the panicking CPU broadcast NMI, that's the
         // first thing to look at for a deadlock-shaped panic.
@@ -976,6 +1040,7 @@ void Panic(const char* subsystem, const char* message)
     // walker then climbs up through the caller.
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
     DumpPeerCpuSnapshots();
+    duetos::diag::TlbHistoryDump();
     DumpEventTraceTail();
 
     EndCrashDump();
@@ -1068,6 +1133,7 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
 
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
     DumpPeerCpuSnapshots();
+    duetos::diag::TlbHistoryDump();
     DumpEventTraceTail();
 
     EndCrashDump();

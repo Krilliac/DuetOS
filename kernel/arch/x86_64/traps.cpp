@@ -948,6 +948,25 @@ extern "C" void TrapDispatch(TrapFrame* frame)
                 p->panic_snapshot_rip = frame->rip;
                 p->panic_snapshot_rsp = frame->rsp;
                 p->panic_snapshot_task = p->current_task;
+                // Extended state — captured at the SAME instant as
+                // rip/rsp/task so a cross-CPU view shows a
+                // consistent snapshot. None of these reads can
+                // fault (all are kernel-owned per-CPU memory).
+                p->panic_snapshot_cr2 = arch::ReadCr2();
+                p->panic_snapshot_rflags = frame->rflags;
+                p->panic_snapshot_irq_depth = static_cast<u32>(IrqNestDepthRaw());
+                p->panic_snapshot_held_lock_count = p->held_locks_count;
+                if (p->held_locks_count > 0)
+                {
+                    const u32 top = p->held_locks_count - 1;
+                    p->panic_snapshot_topmost_lock_acq_rip = p->held_lock_rips[top];
+                    p->panic_snapshot_topmost_lock_addr = p->held_locks[top];
+                }
+                else
+                {
+                    p->panic_snapshot_topmost_lock_acq_rip = 0;
+                    p->panic_snapshot_topmost_lock_addr = nullptr;
+                }
                 asm volatile("" ::: "memory");
                 p->panic_snapshot_valid = 1;
             }

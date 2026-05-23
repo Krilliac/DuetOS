@@ -307,6 +307,30 @@ bool ProbeSetArm(ProbeId id, ProbeArm arm);
 /// kCount if no match. Used by the shell's `probe arm <name>`.
 ProbeId ProbeByName(const char* name);
 
+/// Recent-fire timeline ring. Entry captured at each armed probe
+/// fire. Walked by the panic dump (and the `probe ring` shell
+/// command) so an investigator can correlate probe fires with
+/// the crash window.
+struct ProbeRingFrame
+{
+    u64 tick;
+    u64 caller_rip;
+    u64 value;
+    u16 probe_id;
+    u16 cpu_id;
+};
+
+/// Walk the ring from newest to oldest, invoking `cb` with each
+/// populated entry. Stops early when `cb` returns false.
+/// Returns the number of entries visited. Safe to call from the
+/// panic path — no allocations, no locks.
+u32 ProbeRingWalk(bool (*cb)(const ProbeRingFrame& f, void* ctx), void* ctx);
+
+/// Total fires ever recorded (may exceed ring capacity). The
+/// panic dump prefixes the walk with this so an operator knows
+/// they're seeing a windowed tail vs the complete history.
+u64 ProbeRingTotalFires();
+
 /// Snapshot the probe table. `out` must hold at least
 /// `static_cast<u64>(ProbeId::kCount)` entries.
 u64 ProbeList(ProbeInfo* out, u64 cap);
