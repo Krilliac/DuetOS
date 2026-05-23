@@ -39,6 +39,12 @@
 #include "subsystems/win32/heap.h"
 #include "util/random.h"
 
+// Embedded Linux vDSO blob — kernel/subsystems/linux/vdso/vdso.S
+// assembled and stripped to raw bytes by build-linux-vdso.sh.
+// Currently 64 bytes: __kernel_rt_sigreturn at offset 0 plus
+// reserved slot. Mapped into every Linux ELF process at spawn.
+#include "generated_linux_vdso.h"
+
 // Win32 DLL preload table — every Win32-imports PE gets these
 // pre-loaded into its AS BEFORE PeLoad runs so ResolveImports
 // can walk their EATs. The list is authoritative; adding a new
@@ -187,6 +193,52 @@ namespace duetos::core
     arch::EnterUserModeWithGs(code_va, stack_top, proc->user_gs_base);
 }
 
+namespace
+{
+
+// Map the embedded Linux vDSO blob (one page) into `as` at
+// `base_va`, copy the blob bytes into the freshly-allocated
+// frame, and record both the base and the absolute VA of
+// __kernel_rt_sigreturn into `proc`. Returns false on failure
+// (frame OOM or AS region table full); proc->linux_vdso_*
+// remain zero in that case and the signal-delivery path falls
+// back to dropping signals without a restorer, same as before.
+//
+// The kernel write happens via PhysToVirt — `as` does NOT need
+// to be the active AS (it isn't yet; we're still in the spawning
+// task's context). The page is mapped R-X user (no write); the
+// blob is read-only at runtime.
+bool MapLinuxVdso(::duetos::mm::AddressSpace* as, Process* proc, u64 base_va)
+{
+    using namespace ::duetos::mm;
+    using ::duetos::subsystems::linux::vdso::generated::kBinLinuxVdsoBytes;
+
+    constexpr u64 kVdsoEntryRtSigreturn = 0; // see vdso.S layout
+
+    static_assert(sizeof(kBinLinuxVdsoBytes) <= kPageSize, "Linux vDSO blob must fit in one 4 KiB page");
+
+    const PhysAddr frame = AllocateFrame();
+    if (frame == kNullFrame)
+        return false;
+
+    auto* dst = static_cast<u8*>(PhysToVirt(frame));
+    for (u64 i = 0; i < kPageSize; ++i)
+        dst[i] = 0;
+    for (u64 i = 0; i < sizeof(kBinLinuxVdsoBytes); ++i)
+        dst[i] = kBinLinuxVdsoBytes[i];
+
+    // R-X user mapping. No write — the blob is read-only at
+    // runtime. No kPageGlobal — per-process mapping.
+    const u64 flags = kPagePresent | kPageUser;
+    AddressSpaceMapUserPage(as, base_va, frame, flags);
+
+    proc->linux_vdso_base = base_va;
+    proc->linux_vdso_rt_sigreturn_va = base_va + kVdsoEntryRtSigreturn;
+    return true;
+}
+
+} // namespace
+
 u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps, const fs::RamfsNode* root,
                  u64 frame_budget, u64 tick_budget)
 {
@@ -295,6 +347,24 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
     proc->linux_brk_base = 0x0000'0000'1000'0000ull; // 256 MiB
     proc->linux_brk_current = proc->linux_brk_base;
     proc->linux_mmap_cursor = 0x0000'7000'0000'0000ull;
+
+    // vDSO base sits between brk-end and mmap_cursor — well clear
+    // of both. Fixed VA today (no ASLR for the vDSO); randomising
+    // later requires aligning to an existing ASLR slot generator
+    // to keep the rest of the layout deterministic for the smoke
+    // probes. The 0x70000000 base is far enough below the v0
+    // PE32 TEB VA (0x70000000) to avoid colliding with anything
+    // a PE32 process would expect — but PE32 spawn never gets
+    // here (this is SpawnElfLinux), so the constant is safe.
+    constexpr u64 kLinuxVdsoBase = 0x0000'0000'5000'0000ull;
+    if (!MapLinuxVdso(as, proc, kLinuxVdsoBase))
+    {
+        // Frame OOM during vDSO mapping is non-fatal — the process
+        // still launches, signal delivery still works for tasks
+        // that supply SA_RESTORER. Log the miss so an operator can
+        // spot a tight-budget regression.
+        KLOG_WARN("ring3", "linux: vdso mapping failed (frame budget?)");
+    }
 
     // Populate the top of the user stack with a Linux-ABI initial
     // layout. Musl's _start reads from rsp; the layout is

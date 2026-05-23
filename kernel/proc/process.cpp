@@ -118,6 +118,8 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
     p->linux_brk_base = 0; // loader fills when abi_flavor = kAbiLinux
     p->linux_brk_current = 0;
     p->linux_mmap_cursor = 0;
+    p->linux_vdso_base = 0;
+    p->linux_vdso_rt_sigreturn_va = 0;
     p->abi_flavor = kAbiNative; // loaders flip to kAbiLinux if appropriate
     for (u32 i = 0; i < sizeof(p->_abi_pad); ++i)
         p->_abi_pad[i] = 0;

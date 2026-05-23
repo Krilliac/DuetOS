@@ -39,6 +39,28 @@ for a sample of code that could be lifted from the Linux kernel into
 DuetOS's net stack (with full attribution + license-compatible
 rewrites).
 
+## vDSO
+
+Every Linux ELF process gets a one-page vDSO blob mapped at a
+fixed VA (`0x50000000` today) at spawn time, painted from
+`kernel/subsystems/linux/vdso/vdso.S`. Current exports:
+
+| Offset | Symbol | Purpose |
+|-------:|--------|---------|
+| `0x00` | `__kernel_rt_sigreturn` | Trampoline that issues Linux SYS_rt_sigreturn (nr 15). Used by `LinuxSignalCheckAndDeliver` when the caller's `sigaction` omitted `SA_RESTORER` — same fallback path real Linux takes when libc didn't supply its own restorer. |
+
+`Process::linux_vdso_base` / `linux_vdso_rt_sigreturn_va` hold
+the per-process VA. PE / native processes leave them zero (the
+mapping is Linux-ABI specific). Frame OOM during spawn leaves
+the fields zero and logs a `[linux/signal] no SA_RESTORER and no
+vDSO` warning at the first signal delivery on that process.
+
+**GAP:** the blob is not yet a real ELF shared object — no PHT,
+no dynamic symbol table, no `AT_SYSINFO_EHDR` in the auxv. Static
+binaries that never dynamic-resolve vDSO symbols work fine.
+Dynamic glibc that scans `AT_SYSINFO_EHDR` for `__vdso_*` exports
+will skip the page; promoting to a proper ELF .so is a follow-up.
+
 ## Key Difference from Win32 Path
 
 - **No DLL preload set.** Linux ELFs use `glibc` / `musl` statically

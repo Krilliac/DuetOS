@@ -809,7 +809,22 @@ duetos_embed_blob(generated_kernel32_32_dll.h
 duetos_embed_blob(generated_msvcrt_32_dll.h
     SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-msvcrt-32-dll.sh"
     SRC     "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/msvcrt_32.c"
+    EXTRA_DEPS
+        "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/msvcrt_32.def"
+        "${CMAKE_SOURCE_DIR}/userland/libs/msvcrt_32/chkstk.S"
     COMMENT "Compiling + embedding msvcrt_32.dll (i386 PE32 companion)")
+
+# Linux vDSO blob — one executable page mapped into every Linux
+# ELF process. Currently exports __kernel_rt_sigreturn at offset
+# 0 so the signal-delivery path has a fallback restorer when the
+# caller's sigaction omits SA_RESTORER. See
+# kernel/subsystems/linux/vdso/vdso.S for the full layout.
+duetos_embed_blob(generated_linux_vdso.h
+    SCRIPT  "${CMAKE_SOURCE_DIR}/tools/build/build-linux-vdso.sh"
+    SRC     "${CMAKE_SOURCE_DIR}/kernel/subsystems/linux/vdso/vdso.S"
+    EXTRA_DEPS
+        "${CMAKE_SOURCE_DIR}/kernel/subsystems/linux/vdso/vdso.lds"
+    COMMENT "Assembling + embedding Linux vDSO blob (rt_sigreturn trampoline)")
 
 # 32-bit stub DLLs. Each takes (dll_name, base_va, symbol_name) and
 # produces a PE32 (i386) DLL whose Export Name field matches the
@@ -867,6 +882,7 @@ duetos_embed_blob(generated_ntdll_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_facades.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_token.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_bulk.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/chkstk.S"
     COMMENT "Compiling + embedding ntdll.dll (split into per-domain TUs)")
 
 # seh_try_pe.exe — real MSVC __try/__except/__finally over CPU
