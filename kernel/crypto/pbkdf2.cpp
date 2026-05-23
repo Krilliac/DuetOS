@@ -5,6 +5,7 @@
 #include "crypto/sha1.h"
 #include "crypto/sha256.h"
 #include "log/klog.h"
+#include "sched/sched.h"
 
 namespace duetos::crypto
 {
@@ -76,6 +77,14 @@ void Pbkdf2HmacSha1(const u8* password, u32 password_len, const u8* salt, u32 sa
             for (u32 i = 0; i < block_size; ++i)
                 u[i] = u_next[i];
             XorInto(t, u, block_size);
+            // WPA-PSK uses 4096 iterations; on TCG emulation each
+            // block takes ~1+ second of guest time, which trips the
+            // soft-lockup detector (threshold ~100 ticks). Periodic
+            // yield breaks the streak — the timer IRQ already fires
+            // unobstructed, but the runqueue picks up any deferred
+            // work between chunks and same_tid_count resets.
+            if ((j & 0x1FFu) == 0)
+                duetos::sched::SchedYield();
         }
 
         // Copy out into final buffer.
@@ -120,6 +129,8 @@ void Pbkdf2HmacSha256(const u8* password, u32 password_len, const u8* salt, u32 
             for (u32 i = 0; i < block_size; ++i)
                 u[i] = u_next[i];
             XorInto(t, u, block_size);
+            if ((j & 0x1FFu) == 0)
+                duetos::sched::SchedYield();
         }
 
         const u32 base = (block - 1u) * block_size;

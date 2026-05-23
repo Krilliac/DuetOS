@@ -4,6 +4,7 @@
 #include "log/klog.h"
 #include "crypto/pbkdf2.h"
 #include "net/wireless/wifi_diag.h"
+#include "sched/sched.h"
 #include "time/tick.h"
 
 namespace duetos::net::wireless
@@ -209,13 +210,20 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
         return sr;
     }
 
-    // Spin-wait for results. v0 polls TickCount; production should
-    // wait on a wakeup event from the driver.
+    // Wait for results. v0 polls TickCount; production should wait
+    // on a wakeup event from the driver. Yield each iteration so
+    // the calling task doesn't hog the CPU during the wait window
+    // — without this, the spin keeps the same TID on the runqueue
+    // and the soft-lockup detector eventually trips when other
+    // boot-time work doesn't preempt naturally. The completion
+    // check uses `>=` so a synchronous driver that finishes inside
+    // the same tick as scan_started_tick still breaks the loop.
     const u64 deadline = duetos::time::TickCount() + timeout_ticks;
     while (duetos::time::TickCount() < deadline)
     {
-        if (wdev->scan_completed_tick > wdev->scan_started_tick && wdev->scan_result_count > 0)
+        if (wdev->scan_completed_tick >= wdev->scan_started_tick && wdev->scan_result_count > 0)
             break;
+        duetos::sched::SchedYield();
     }
     KLOG_INFO_AV(::duetos::core::LogArea::Wireless, "net/wireless/mlme", "scan complete; results",
                  static_cast<u64>(wdev->scan_result_count));

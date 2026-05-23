@@ -109,7 +109,10 @@ bool MockConnect(void* /*ctx*/, const char* ssid, WifiSecurity security, const c
     // immediately; the pump thread then keeps the link serviced.
     duetos::net::DhcpStart(kNetIface);
     for (u32 round = 0; round < 16 && !duetos::net::DhcpLeaseRead().valid; ++round)
+    {
         test::LoopbackDriverPump(&g_drv);
+        duetos::sched::SchedYield();
+    }
 
     if (!g_pump_started)
     {
