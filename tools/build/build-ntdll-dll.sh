@@ -38,6 +38,7 @@ SRC_FILES=(
     "${SRC_DIR}/ntdll_token.c"
     "${SRC_DIR}/ntdll_bulk.c"
     "${SRC_DIR}/chkstk.S"
+    "${SRC_DIR}/seh_trampolines.S"
 )
 
 WORK_DIR="$(dirname "${OUT_HEADER}")/ntdll"

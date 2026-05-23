@@ -94,39 +94,10 @@ extern void* RtlVirtualUnwind(unsigned long HandlerType, unsigned long long Imag
                               void* FunctionEntry, void* ContextRecord, void** HandlerData,
                               unsigned long long* EstablisherFrame, void* ContextPointers);
 
-/* ---- RtlRestoreContext: load every register out of CONTEXT and
- * resume at ctx->Rip. Mirrors kernel/subsystems/win32/seh_unwind.S.
- * rcx = ctx, rdx = rec (rec ignored at this layer). Naked so no
- * prologue perturbs the restore. ---- */
-__attribute__((naked)) __declspec(dllexport) void RtlRestoreContext(void* ContextRecord, void* ExceptionRecord)
-{
-    __asm__ volatile("fxrstor64 0x100(%%rcx)\n\t"
-                     "movl 0x44(%%rcx), %%eax\n\t"
-                     "pushq %%rax\n\t"
-                     "popfq\n\t"
-                     "movq 0x90(%%rcx), %%rbx\n\t"
-                     "movq 0xA0(%%rcx), %%rbp\n\t"
-                     "movq 0xA8(%%rcx), %%rsi\n\t"
-                     "movq 0xB0(%%rcx), %%rdi\n\t"
-                     "movq 0xD8(%%rcx), %%r12\n\t"
-                     "movq 0xE0(%%rcx), %%r13\n\t"
-                     "movq 0xE8(%%rcx), %%r14\n\t"
-                     "movq 0xF0(%%rcx), %%r15\n\t"
-                     "movq 0xB8(%%rcx), %%r8\n\t"
-                     "movq 0xC0(%%rcx), %%r9\n\t"
-                     "movq 0xC8(%%rcx), %%r10\n\t"
-                     "movq 0xD0(%%rcx), %%r11\n\t"
-                     "movq 0xF8(%%rcx), %%rax\n\t" /* target rip */
-                     "movq 0x98(%%rcx), %%rdx\n\t" /* target rsp */
-                     "subq $8, %%rdx\n\t"
-                     "movq %%rax, (%%rdx)\n\t" /* [rsp-8] = rip (synthetic ret) */
-                     "movq %%rdx, %%rsp\n\t"
-                     "movq 0x78(%%rcx), %%rax\n\t"
-                     "movq 0x88(%%rcx), %%rdx\n\t"
-                     "movq 0x80(%%rcx), %%rcx\n\t"
-                     "ret\n\t" ::
-                         : "memory");
-}
+/* RtlRestoreContext lives in seh_trampolines.S — see the comment
+ * over RtlCaptureContext in ntdll_seh.c for the rationale on
+ * pulling the SEH trampolines out of C. */
+__declspec(dllexport) __attribute__((noreturn)) void RtlRestoreContext(void* ContextRecord, void* ExceptionRecord);
 
 /* Forward decls. */
 __declspec(dllexport) void RtlUnwindEx(void* TargetFrame, void* TargetIp, void* ExceptionRecord, void* ReturnValue,
@@ -343,17 +314,9 @@ __attribute__((noreturn)) void KiUserExceptionDispatcherImpl(void* ExceptionReco
     DUET_USER_TRAP_UNREACHABLE();
 }
 
-/* KiUserExceptionDispatcher: kernel resumes the faulting thread
- * here with rcx = EXCEPTION_RECORD, rdx = CONTEXT and rsp ≡ 8
- * (mod 16) (post-CALL shape). Naked: re-align + reserve shadow
- * space, then tail into the C core (which never returns). */
-__attribute__((naked)) __declspec(dllexport) void KiUserExceptionDispatcher(void)
-{
-    __asm__ volatile("subq $0x28, %%rsp\n\t" /* 0x20 shadow + 8 → 16-align before call */
-                     "call KiUserExceptionDispatcherImpl\n\t"
-                     "ud2\n\t" ::
-                         : "memory");
-}
+/* KiUserExceptionDispatcher lives in seh_trampolines.S. The
+ * trampoline tails into KiUserExceptionDispatcherImpl (this TU,
+ * above) which never returns. */
 
 /* RtlUnwindEx: unwind from the current context to TargetFrame,
  * running each frame's termination handler (__finally / SEH
