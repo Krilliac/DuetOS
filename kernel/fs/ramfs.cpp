@@ -52,6 +52,7 @@
 // moves the in-kernel apps under `kernel/apps/` out via the
 // same helper lives at `wiki/tooling/Native-Apps.md`.
 #include "generated_hello_native_native.h"
+#include "generated_duet-pkg_native.h"
 #include "generated_nat_calc_native.h"
 #include "generated_nat_sysinfo_native.h"
 
@@ -1026,6 +1027,16 @@ const u8* RamfsNatSysinfoBytes()
 u64 RamfsNatSysinfoSize()
 {
     return ::duetos::fs::generated::kBinNatSysinfoBytes_len;
+}
+
+const u8* RamfsDuetPkgBytes()
+{
+    return ::duetos::fs::generated::kBinDuetPkgBytes;
+}
+
+u64 RamfsDuetPkgSize()
+{
+    return ::duetos::fs::generated::kBinDuetPkgBytes_len;
 }
 
 namespace
