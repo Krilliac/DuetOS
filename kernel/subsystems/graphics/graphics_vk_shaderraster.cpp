@@ -292,7 +292,7 @@ bool ClipToPixel(const u32 pos_bits[4], u32 fb_w, u32 fb_h, i32* px_out, i32* py
 // linearly via barycentric weights and hands the result to the
 // fragment shader as Input Location N.
 void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Program* fs, u32 fb_w, u32 fb_h,
-                   const VaryingSnapshot* varyings_per_vertex, u32 varying_n)
+                   const VaryingSnapshot* varyings_per_vertex, u32 varying_n, const u32* inv_w_per_vertex_bits)
 {
     // Bounding box clipped to framebuffer extent.
     i32 minx = ax;
@@ -360,6 +360,39 @@ void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Progra
         interp[i].component_count = varyings_per_vertex[i].component_count;
     }
 
+    // Perspective-correct interpolation precompute. When
+    // `inv_w_per_vertex_bits` is non-null, the rasterizer
+    // divides each varying by its vertex's w at vertex-fetch time
+    // (here, just once before the per-pixel loop), interpolates
+    // those `v/w` values linearly, interpolates `1/w` linearly,
+    // then per-pixel multiplies `v/w` by the interpolated w to
+    // recover the correct attribute. Without inv_w, the path
+    // falls back to affine (linear-in-screen-space) interpolation.
+    const bool persp = (inv_w_per_vertex_bits != nullptr);
+    Sf32 inv_w0{0}, inv_w1{0}, inv_w2{0};
+    VaryingSnapshot vdivw[3 * kMaxVaryings]{};
+    if (persp)
+    {
+        inv_w0 = Sf32FromBits(inv_w_per_vertex_bits[0]);
+        inv_w1 = Sf32FromBits(inv_w_per_vertex_bits[1]);
+        inv_w2 = Sf32FromBits(inv_w_per_vertex_bits[2]);
+        const Sf32 invw_per_vert[3] = {inv_w0, inv_w1, inv_w2};
+        for (u32 v = 0; v < 3; ++v)
+        {
+            for (u32 vi = 0; vi < varying_n; ++vi)
+            {
+                vdivw[v * varying_n + vi].location = varyings_per_vertex[v * varying_n + vi].location;
+                vdivw[v * varying_n + vi].component_count = varyings_per_vertex[v * varying_n + vi].component_count;
+                for (u32 cc = 0; cc < varyings_per_vertex[v * varying_n + vi].component_count && cc < kMaxVaryingComponents; ++cc)
+                {
+                    vdivw[v * varying_n + vi].data[cc] = Sf32ToBits(
+                        ::duetos::core::Sf32Mul(Sf32FromBits(varyings_per_vertex[v * varying_n + vi].data[cc]),
+                                                invw_per_vert[v]));
+                }
+            }
+        }
+    }
+
     for (i32 py = miny; py <= maxy; ++py)
     {
         for (i32 px = minx; px <= maxx; ++px)
@@ -387,16 +420,48 @@ void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Progra
             const Sf32 bw1 = ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw1)), inv_area);
             const Sf32 bw2 = ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw2)), inv_area);
 
-            for (u32 vi = 0; vi < varying_n; ++vi)
+            // Perspective-correct path: interpolate v/w by bary
+            // weights, also interpolate 1/w, then per-pixel divide
+            // to recover v. Mathematically equivalent to the
+            // textbook formula, packaged for a single Sf32Div per
+            // pixel (which is the slow op).
+            if (persp)
             {
-                const VaryingSnapshot& a_ss = varyings_per_vertex[0 * varying_n + vi];
-                const VaryingSnapshot& b_ss = varyings_per_vertex[1 * varying_n + vi];
-                const VaryingSnapshot& c_ss = varyings_per_vertex[2 * varying_n + vi];
-                for (u32 cc = 0; cc < interp[vi].component_count && cc < kMaxVaryingComponents; ++cc)
+                const Sf32 invw_pix = BaryLerp(inv_w0, inv_w1, inv_w2, bw0, bw1, bw2);
+                // Avoid divide-by-zero pixel: skip the per-pixel
+                // perspective restore when interpolated 1/w
+                // collapses to zero (occurs only on degenerate
+                // homogeneous projections that wouldn't be visible
+                // anyway).
+                const Sf32 w_pix = ::duetos::core::Sf32IsZero(invw_pix)
+                                       ? ::duetos::core::Sf32One()
+                                       : ::duetos::core::Sf32Div(::duetos::core::Sf32One(), invw_pix);
+                for (u32 vi = 0; vi < varying_n; ++vi)
                 {
-                    const Sf32 lerped = BaryLerp(Sf32FromBits(a_ss.data[cc]), Sf32FromBits(b_ss.data[cc]),
-                                                 Sf32FromBits(c_ss.data[cc]), bw0, bw1, bw2);
-                    interp[vi].data[cc] = Sf32ToBits(lerped);
+                    const VaryingSnapshot& a_ss = vdivw[0 * varying_n + vi];
+                    const VaryingSnapshot& b_ss = vdivw[1 * varying_n + vi];
+                    const VaryingSnapshot& c_ss = vdivw[2 * varying_n + vi];
+                    for (u32 cc = 0; cc < interp[vi].component_count && cc < kMaxVaryingComponents; ++cc)
+                    {
+                        const Sf32 lerped_over_w = BaryLerp(Sf32FromBits(a_ss.data[cc]), Sf32FromBits(b_ss.data[cc]),
+                                                            Sf32FromBits(c_ss.data[cc]), bw0, bw1, bw2);
+                        interp[vi].data[cc] = Sf32ToBits(::duetos::core::Sf32Mul(lerped_over_w, w_pix));
+                    }
+                }
+            }
+            else
+            {
+                for (u32 vi = 0; vi < varying_n; ++vi)
+                {
+                    const VaryingSnapshot& a_ss = varyings_per_vertex[0 * varying_n + vi];
+                    const VaryingSnapshot& b_ss = varyings_per_vertex[1 * varying_n + vi];
+                    const VaryingSnapshot& c_ss = varyings_per_vertex[2 * varying_n + vi];
+                    for (u32 cc = 0; cc < interp[vi].component_count && cc < kMaxVaryingComponents; ++cc)
+                    {
+                        const Sf32 lerped = BaryLerp(Sf32FromBits(a_ss.data[cc]), Sf32FromBits(b_ss.data[cc]),
+                                                     Sf32FromBits(c_ss.data[cc]), bw0, bw1, bw2);
+                        interp[vi].data[cc] = Sf32ToBits(lerped);
+                    }
                 }
             }
             if (!RunFragmentShader(fs, pixel_xy, interp, varying_n, &argb))
@@ -557,7 +622,26 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
         for (u32 v = 0; v < 3; ++v)
             for (u32 i = 0; i < vary_n_use; ++i)
                 packed[v * vary_n_use + i] = vary[v * kMaxVaryings + i];
-        PaintTriangle(px[0], py[0], px[1], py[1], px[2], py[2], fs, fb_w, fb_h, packed, vary_n_use);
+        // Compute 1/w per vertex for perspective-correct
+        // interpolation. pos[v][3] is gl_Position.w from the VS.
+        // If any w is non-positive (orthographic projection or
+        // a degenerate output), skip the perspective path —
+        // affine interpolation handles those cases without
+        // introducing artefacts.
+        u32 inv_w_bits[3]{};
+        bool ortho = false;
+        for (u32 v = 0; v < 3; ++v)
+        {
+            const Sf32 w = Sf32FromBits(pos[v][3]);
+            if (::duetos::core::Sf32IsZero(w) || ::duetos::core::Sf32IsNaN(w) || ::duetos::core::Sf32IsNegative(w))
+            {
+                ortho = true;
+                break;
+            }
+            inv_w_bits[v] = Sf32ToBits(::duetos::core::Sf32Div(::duetos::core::Sf32One(), w));
+        }
+        PaintTriangle(px[0], py[0], px[1], py[1], px[2], py[2], fs, fb_w, fb_h, packed, vary_n_use,
+                      ortho ? nullptr : inv_w_bits);
     }
     ++g_shader_raster_draws_painted;
     return true;

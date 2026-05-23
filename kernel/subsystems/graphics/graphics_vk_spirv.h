@@ -82,6 +82,12 @@ enum class TypeKind : u8
     Struct,
     Pointer,
     Function,
+    // Texture-sampling tier: kept distinct from the data-type
+    // kinds so the executor can route OpImageSample* / Load on
+    // these types into the descriptor-set lookup path.
+    Image,
+    Sampler,
+    SampledImage,
 };
 
 // Storage class — matches the SPIR-V enum verbatim.
@@ -142,11 +148,13 @@ struct VariableRecord
 {
     u32 type_id;
     StorageClass storage;
-    u32 storage_offset; // Byte offset into the per-storage backing buffer.
+    u32 storage_offset;   // Byte offset into the per-storage backing buffer.
     u32 byte_size;
-    u32 initializer_id; // OpConstant id, or 0.
-    u32 location;       // -1 if undecorated; else the OpDecorate Location value.
-    u32 builtin;        // 0xFFFFFFFF if undecorated; else the BuiltIn enum value.
+    u32 initializer_id;   // OpConstant id, or 0.
+    u32 location;         // -1 if undecorated; else the OpDecorate Location value.
+    u32 builtin;          // 0xFFFFFFFF if undecorated; else the BuiltIn enum value.
+    u32 descriptor_set;   // -1 if undecorated; else the OpDecorate DescriptorSet value.
+    u32 descriptor_binding; // -1 if undecorated; else the OpDecorate Binding value.
 };
 
 // Basic block — a label id + a (begin, end) range into the

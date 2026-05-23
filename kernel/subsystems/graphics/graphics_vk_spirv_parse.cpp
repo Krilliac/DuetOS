@@ -69,6 +69,14 @@ constexpr u16 kOpTypeArray = 28;
 constexpr u16 kOpTypeStruct = 30;
 constexpr u16 kOpTypePointer = 32;
 constexpr u16 kOpTypeFunction = 33;
+// Image / sampler / sampled-image type opcodes — accepted at parse
+// time so OpImageSample* in the executor can route through the
+// descriptor-set lookup path. The image-format / dimensionality
+// operands are not yet honoured (v0 sampler treats every image
+// as a 2D RGBA8 texture).
+constexpr u16 kOpTypeImage = 25;
+constexpr u16 kOpTypeSampler = 26;
+constexpr u16 kOpTypeSampledImage = 27;
 constexpr u16 kOpConstantTrue = 41;
 constexpr u16 kOpConstantFalse = 42;
 constexpr u16 kOpConstant = 43;
@@ -91,8 +99,8 @@ constexpr u16 kOpLabel = 248;
 [[maybe_unused]] constexpr u32 kDecorationMatrixStride = 7;
 constexpr u32 kDecorationBuiltIn = 11;
 constexpr u32 kDecorationLocation = 30;
-[[maybe_unused]] constexpr u32 kDecorationBinding = 33;
-[[maybe_unused]] constexpr u32 kDecorationDescriptorSet = 34;
+constexpr u32 kDecorationBinding = 33;
+constexpr u32 kDecorationDescriptorSet = 34;
 constexpr u32 kDecorationOffset = 35;
 
 // Compare two SPIR-V LiteralString operands against a C string.
@@ -216,6 +224,15 @@ u32 ComputeByteSize(Program* p, u32 type_id)
     case TypeKind::Function:
         t.byte_size = 0;
         break;
+    case TypeKind::Image:
+    case TypeKind::Sampler:
+    case TypeKind::SampledImage:
+        // Opaque to the data path - the executor doesn't load/store
+        // these directly. Reserve 4 bytes so a Pointer to one of
+        // these still has a defined size and AccessChain doesn't
+        // divide by zero.
+        t.byte_size = 4;
+        break;
     }
     return t.byte_size;
 }
@@ -290,6 +307,9 @@ bool FirstPassScan(Program* p)
         case kOpTypeStruct:
         case kOpTypePointer:
         case kOpTypeFunction:
+        case kOpTypeImage:
+        case kOpTypeSampler:
+        case kOpTypeSampledImage:
             if (next_type_idx >= kMaxIds)
                 return false;
             RegisterId(p, p->words[i + 1], IdKind::Type, next_type_idx++);
@@ -434,6 +454,31 @@ bool BuildTypesAndConstants(Program* p)
                 t.params[m] = p->words[i + 3 + m];
             break;
         }
+        case kOpTypeImage:
+        {
+            // OpTypeImage operands: (result, sampled-type, Dim,
+            // Depth, Arrayed, MS, Sampled, Image-Format, ...).
+            // For v0 we record only the kind; the executor
+            // routes any sample through a single 2D-RGBA8 path.
+            TypeRecord& t = p->types[p->id_to_index[p->words[i + 1]]];
+            t.kind = TypeKind::Image;
+            t.component_id = (wc > 2) ? p->words[i + 2] : 0;
+            break;
+        }
+        case kOpTypeSampler:
+        {
+            TypeRecord& t = p->types[p->id_to_index[p->words[i + 1]]];
+            t.kind = TypeKind::Sampler;
+            break;
+        }
+        case kOpTypeSampledImage:
+        {
+            // Operands: (result, image-type-id).
+            TypeRecord& t = p->types[p->id_to_index[p->words[i + 1]]];
+            t.kind = TypeKind::SampledImage;
+            t.component_id = (wc > 2) ? p->words[i + 2] : 0;
+            break;
+        }
         case kOpConstantTrue:
         case kOpConstantFalse:
         {
@@ -506,6 +551,8 @@ bool BuildVariablesAndEntries(Program* p)
             v.initializer_id = (wc >= 5) ? p->words[i + 4] : 0u;
             v.location = 0xFFFFFFFFu;
             v.builtin = 0xFFFFFFFFu;
+            v.descriptor_set = 0xFFFFFFFFu;
+            v.descriptor_binding = 0xFFFFFFFFu;
             // Pointee type -> byte size.
             if (p->id_kinds[v.type_id] == IdKind::Type)
             {
@@ -597,6 +644,10 @@ void ApplyDecorations(Program* p)
                     v.location = p->words[i + 3];
                 else if (decoration == kDecorationBuiltIn && wc >= 4)
                     v.builtin = p->words[i + 3];
+                else if (decoration == kDecorationDescriptorSet && wc >= 4)
+                    v.descriptor_set = p->words[i + 3];
+                else if (decoration == kDecorationBinding && wc >= 4)
+                    v.descriptor_binding = p->words[i + 3];
             }
         }
         else if (op == kOpMemberDecorate)

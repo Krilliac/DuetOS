@@ -73,6 +73,10 @@ constexpr u32 kSsaHeapBytes = 8192;
 // SPIR-V opcodes the executor switches on. Numbering = SPIRV-Headers.
 constexpr u16 kOpExtInst = 12;
 constexpr u16 kOpFunctionCall = 57;
+// Texture sampling opcodes (Khronos numbering).
+constexpr u16 kOpSampledImage = 86;
+constexpr u16 kOpImageSampleImplicitLod = 87;
+constexpr u16 kOpImageSampleExplicitLod = 88;
 [[maybe_unused]] constexpr u16 kOpVariable = 59;
 constexpr u16 kOpLoad = 61;
 constexpr u16 kOpStore = 62;
@@ -184,6 +188,9 @@ u32 ComponentCount(const Program* p, u32 type_id)
     }
     case TypeKind::Pointer:
     case TypeKind::Function:
+    case TypeKind::Image:
+    case TypeKind::Sampler:
+    case TypeKind::SampledImage:
         return 1;
     }
     return 0;
@@ -916,6 +923,39 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
             if (wc >= 5 && w[3] == ec.prog->ext_inst_glsl_id)
                 DoExtInst(ec, tid, rid, w[4], (wc > 5) ? &w[5] : nullptr, (wc > 5) ? (wc - 5) : 0u);
             break;
+        case kOpSampledImage:
+            // Combines a SampledImage from an Image + Sampler.
+            // Operands: (T, R, image, sampler). v0 just records
+            // the image id as the result — the executor's sample
+            // path looks at the texture-side bits.
+            if (wc >= 4)
+                SetScalar(ec, rid, tid, w[3]);
+            break;
+        case kOpImageSampleImplicitLod:
+        case kOpImageSampleExplicitLod:
+        {
+            // Operands: (T, R, sampled-image, coord, [ImageOperands, ...]).
+            // v0 texture-sample: return the UV coordinate as
+            // (u, v, 0, 1). This is the "missing texture" diagnostic
+            // pattern — a shader that samples a 2D texture renders
+            // a smooth UV-checkerboard-able gradient instead of
+            // zero. When the descriptor-set fetch path lands the
+            // real sample replaces this fallback.
+            if (wc >= 5)
+            {
+                u32 coord_buf[4]{};
+                const u32 cn = LoadOperandComponents(ec, w[4], coord_buf, 4);
+                u32 r4[4] = {0, 0, 0, Sf32ToBits(::duetos::core::Sf32One())};
+                if (cn >= 1)
+                    r4[0] = coord_buf[0];
+                if (cn >= 2)
+                    r4[1] = coord_buf[1];
+                if (cn >= 3)
+                    r4[2] = coord_buf[2];
+                StoreResultComponents(ec, rid, tid, r4, 4);
+            }
+            break;
+        }
         case kOpPhi:
         {
             // PairIdRefIdRef: (value, parent-label) repeated. Pick
