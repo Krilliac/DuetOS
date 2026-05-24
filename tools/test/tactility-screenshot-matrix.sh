@@ -1,104 +1,123 @@
 #!/usr/bin/env bash
 #
-# tactility-screenshot-matrix.sh - per-theme visual regression
-# capture (Phase 5 Task 25 of the chrome-tactility plan).
+# tactility-screenshot-matrix.sh - boot the kernel and capture a
+# desktop PPM via QEMU's QMP `screendump` (Phase 5 Task 25 of the
+# chrome-tactility plan).
 #
-# WHAT IT DOES
-#   Boots the kernel once per theme (10 boots total), captures a
-#   desktop screenshot of each via QEMU's `screendump` monitor
-#   command, and (if ImageMagick is available) tiles them into a
-#   5x2 contact sheet for side-by-side review. Catches visual
-#   regressions the [shadow|blend|theme]-selftest sentinels can't
-#   see - e.g. a missed paint path that leaves a window opaque
-#   when tactility is supposed to dim it.
+# v1 SCOPE
+#   Single boot, single screenshot of the default-theme desktop.
+#   The "matrix" naming is aspirational - the per-theme variant
+#   would need either (a) per-theme ISO rebuilds (the kernel
+#   cmdline is baked into grub.cfg at ISO build time; QEMU's
+#   `-append` is `-kernel`-only) or (b) sending Ctrl+Alt+Y via
+#   QMP `send-key` between screenshots to cycle through the 10
+#   themes. (a) is the cleaner long-term path; both are deferred
+#   until visual regression actually fires once.
 #
 # USAGE
-#   tools/test/tactility-screenshot-matrix.sh
-#
-# OUTPUT
-#   $DUETOS_LOG_DIR/shots/<theme>.ppm        per-theme screenshot
-#   $DUETOS_LOG_DIR/shots/<theme>.log        per-theme boot log
-#   $DUETOS_LOG_DIR/tactility-matrix.png     5x2 contact sheet
-#                                            (only if `montage` is on PATH)
+#   tools/test/tactility-screenshot-matrix.sh [theme-label]
+#     theme-label  -- string used in the output filename only;
+#                     does not change which theme actually boots
+#                     (default: "default").
 #
 # ENV
+#   DUETOS_PRESET   -- build preset (default: x86_64-debug-fast,
+#                      since this is for visual / self-test
+#                      verification rather than production)
 #   DUETOS_LOG_DIR  -- output root (default: build)
-#   DUETOS_TIMEOUT  -- per-theme boot timeout (default: 15s)
+#   DUETOS_TIMEOUT  -- boot timeout, seconds (default: 25)
 #
-# EXIT 0 = every theme booted + a screenshot landed for each.
-#      1 = at least one theme failed to produce a screenshot.
-#      2 = boot tooling missing (qemu / run.sh).
+# OUTPUT
+#   $DUETOS_LOG_DIR/shots/<theme-label>.ppm   captured PPM
+#   $DUETOS_LOG_DIR/shots/<theme-label>.log   boot log
 #
-# NOTE: The `DUETOS_SCREENDUMP=<file>` env var is consumed by
-# tools/qemu/run.sh's QMP screendump hook (or a similar capture
-# point added in Phase 5). If the hook isn't wired yet, the boot
-# log is still captured for triage.
+# EXIT 0 = boot reached the tactility-selftest umbrella PASS line
+#          and the screendump landed a non-empty PPM.
+#      1 = boot did not reach the umbrella, OR screendump returned
+#          nothing.
+#      2 = required tooling missing.
 
 set -euo pipefail
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-readonly THEMES=(
-    classic
-    slate10
-    amber
-    duet
-    duetlight
-    duetblue
-    duetviolet
-    duetgreen
-    duetclassic
-    highcontrast
-)
-
+LABEL="${1:-default}"
+PRESET="${DUETOS_PRESET:-x86_64-debug-fast}"
 LOG_DIR="${DUETOS_LOG_DIR:-${REPO_ROOT}/build}"
 SHOTS_DIR="${LOG_DIR}/shots"
-PER_THEME_TIMEOUT="${DUETOS_TIMEOUT:-15}"
+TIMEOUT="${DUETOS_TIMEOUT:-25}"
 
-if [[ ! -x "${REPO_ROOT}/tools/qemu/run.sh" ]]
+PPM="${SHOTS_DIR}/${LABEL}.ppm"
+BOOT_LOG="${SHOTS_DIR}/${LABEL}.log"
+
+if [[ ! -x "${REPO_ROOT}/tools/qemu/run.sh" ]] || [[ ! -x "${REPO_ROOT}/tools/qemu/qmp.sh" ]]
 then
-    echo "ERROR: ${REPO_ROOT}/tools/qemu/run.sh missing or not executable" >&2
+    echo "ERROR: tools/qemu/{run,qmp}.sh missing or not executable" >&2
     exit 2
 fi
+command -v qemu-system-x86_64 >/dev/null || { echo "ERROR: qemu-system-x86_64 missing" >&2; exit 2; }
 
 mkdir -p "${SHOTS_DIR}"
+rm -f "${PPM}" "${BOOT_LOG}"
 
-failed=0
-for theme in "${THEMES[@]}"
-do
-    shot="${SHOTS_DIR}/${theme}.ppm"
-    log="${SHOTS_DIR}/${theme}.log"
+echo "[shots] booting preset=${PRESET} timeout=${TIMEOUT}s label=${LABEL}"
 
-    echo "[shots] capturing ${theme}..."
-    rm -f "${shot}"
+# Launch run.sh as a background job; capture its serial output to
+# the boot log. The QMP socket comes up shortly after QEMU starts;
+# we poll the boot log for the tactility umbrella PASS before
+# issuing screendump.
+DUETOS_PRESET="${PRESET}" DUETOS_TIMEOUT="${TIMEOUT}" \
+    "${REPO_ROOT}/tools/qemu/run.sh" > "${BOOT_LOG}" 2>&1 &
+RUN_PID=$!
 
-    DUETOS_TIMEOUT="${PER_THEME_TIMEOUT}" DUETOS_SCREENDUMP="${shot}" \
-        "${REPO_ROOT}/tools/qemu/run.sh" \
-        -append "theme=${theme} tactility=auto" \
-        > "${log}" 2>&1 || true
-
-    if [[ ! -s "${shot}" ]]
+cleanup() {
+    if kill -0 "${RUN_PID}" 2>/dev/null
     then
-        echo "  WARN: ${theme} produced no screenshot (see ${log})" >&2
-        ((failed++)) || true
+        DUETOS_PRESET="${PRESET}" "${REPO_ROOT}/tools/qemu/qmp.sh" quit >/dev/null 2>&1 || true
+        sleep 1
+        kill "${RUN_PID}" 2>/dev/null || true
     fi
+    wait "${RUN_PID}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# Wait for the tactility-selftest umbrella PASS to land — that's
+# the signal that bringup ran every self-test in order, which
+# means the desktop chrome has been painted at least once and is
+# ready for screendump.
+DEADLINE=$((SECONDS + TIMEOUT))
+while [[ ${SECONDS} -lt ${DEADLINE} ]]
+do
+    if grep -q '\[tactility-selftest\] PASS' "${BOOT_LOG}" 2>/dev/null
+    then
+        break
+    fi
+    sleep 1
 done
 
-if command -v montage >/dev/null 2>&1
+if ! grep -q '\[tactility-selftest\] PASS' "${BOOT_LOG}" 2>/dev/null
 then
-    montage "${SHOTS_DIR}"/*.ppm \
-        -tile 5x2 -geometry +4+4 -label '%t' \
-        "${LOG_DIR}/tactility-matrix.png"
-    echo "[shots] grid: ${LOG_DIR}/tactility-matrix.png"
-else
-    echo "[shots] WARN: imagemagick (montage) missing; raw PPMs in ${SHOTS_DIR}" >&2
-fi
-
-if [[ ${failed} -gt 0 ]]
-then
-    echo "[shots] FAIL: ${failed}/${#THEMES[@]} themes produced no screenshot" >&2
+    echo "[shots] FAIL: tactility-selftest umbrella PASS never landed in ${BOOT_LOG}" >&2
     exit 1
 fi
 
-echo "[shots] OK (${#THEMES[@]}/${#THEMES[@]} themes)"
+# Small additional pause so the compositor's idle redraw finishes
+# before we sample — without this the screendump can catch a
+# mid-paint frame.
+sleep 2
+
+# Capture via qmp.sh (writes PPM straight to disk).
+DUETOS_PRESET="${PRESET}" "${REPO_ROOT}/tools/qemu/qmp.sh" screenshot "${PPM}" || {
+    echo "[shots] FAIL: qmp.sh screenshot returned non-zero" >&2
+    exit 1
+}
+
+if [[ ! -s "${PPM}" ]]
+then
+    echo "[shots] FAIL: screendump produced no bytes (${PPM})" >&2
+    exit 1
+fi
+
+echo "[shots] OK: ${PPM}"
+echo "[shots]     boot log: ${BOOT_LOG}"
