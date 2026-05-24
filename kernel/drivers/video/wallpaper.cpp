@@ -1,6 +1,7 @@
 #include "drivers/video/wallpaper.h"
 
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 #include "debug/probes.h"
 #include "log/klog.h"
 #include "drivers/video/framebuffer.h"
@@ -597,20 +598,28 @@ void WallpaperTick()
         return; // master gate: cmdline motion=off or theme opts out
     }
 
-    // Derive monotonic time in milliseconds. MonotonicNs returns 0
-    // before the timekeeper is initialised — treat as "not ready yet"
-    // and skip the tick rather than accumulating a spurious base.
+    // Derive monotonic time in milliseconds. Prefer the clocksource
+    // (high-resolution, e.g. TSC-deadline / HPET) when it's registered;
+    // fall back to the scheduler tick counter (10 ms granularity, always
+    // populated by the LAPIC/PIT IRQ handler) when MonotonicNs returns
+    // 0. This mirrors the guard.cpp HPET-absent fix: VBox sometimes
+    // boots without a registered clocksource, so MonotonicNs returns 0
+    // forever and any consumer that requires it stalls. TimerTicks is
+    // always available post-boot and 10ms is well below our 70ms tick
+    // period — sufficient resolution for visible motion.
     const u64 now_ns = time::MonotonicNs();
-    if (now_ns == 0)
+    const u64 now_ms = (now_ns != 0)
+        ? (now_ns / 1'000'000ULL)
+        : (duetos::arch::TimerTicks() * 10ULL);
+    if (now_ms == 0)
     {
         if (!s_logged_now_ns_zero)
         {
             s_logged_now_ns_zero = true;
-            duetos::arch::SerialWrite("[wpm-diag] EXIT: now_ns==0 (clocksource not ready)\n");
+            duetos::arch::SerialWrite("[wpm-diag] EXIT: now_ms==0 (both clocksource AND TimerTicks unavailable)\n");
         }
         return;
     }
-    const u64 now_ms = now_ns / 1'000'000ULL;
 
     // Capture the monotonic base on the first tick that actually runs.
     // The phase wraps at its period, so theme switches don't reset motion —
