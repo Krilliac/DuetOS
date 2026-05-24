@@ -49,9 +49,17 @@ fi
 
 echo "[soak] theme=${THEME} seconds=${SECONDS_RUN} log=${LOG}"
 
+# Note: run.sh's default ISO+GRUB boot path bakes the kernel cmdline
+# into grub.cfg at ISO build time — QEMU's `-append` only works with
+# `-kernel`, not `-cdrom`. Per-theme cmdline override would need a
+# custom ISO build (see ctest-boot-smoke.sh's SMOKE_ISO_STAGE pattern).
+# For the soak, the default cmdline gets all four tactility self-tests
+# firing regardless of theme; THEME selects the active palette via the
+# `theme=` cmdline arg baked into the default grub.cfg (already
+# `theme=classic` per the canonical ISO). $THEME isn't read by run.sh
+# today — it's accepted for future per-theme ISO variants.
 DUETOS_TIMEOUT="${DUETOS_TIMEOUT:-${SECONDS_RUN}}" \
     "${REPO_ROOT}/tools/qemu/run.sh" \
-    -append "theme=${THEME} render_stats=on tactility=auto" \
     > "$LOG" 2>&1 || true
 
 # Extract render_stats lines into a per-phase TSV (one column per

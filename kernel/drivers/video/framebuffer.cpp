@@ -734,6 +734,23 @@ FramebufferInfo FramebufferGet()
     return g_info;
 }
 
+u32 FramebufferReadPixel(u32 x, u32 y)
+{
+    // Always sample from the LIVE framebuffer, not the compose
+    // shadow buffer — callers that need "what was just written this
+    // compose pass" have to issue an EndCompose first. The cursor
+    // backing-store sampler is the primary client and that's the
+    // semantic it has always relied on (it ran a private copy of
+    // this routine before chrome-tactility consolidated the API).
+    if (!g_available || x >= g_info.width || y >= g_info.height || g_info.virt == nullptr)
+    {
+        return 0;
+    }
+    const auto* row =
+        reinterpret_cast<const volatile u32*>(reinterpret_cast<const u8*>(g_info.virt) + static_cast<u64>(y) * g_info.pitch);
+    return row[x];
+}
+
 void FramebufferPutPixel(u32 x, u32 y, u32 rgb)
 {
     if (!g_available)
