@@ -126,6 +126,39 @@ inline i32 TopoDriftOffsetPx(u64 now_ms, i32 speed_px_per_s, i32 fb_w)
     return i32(mod);
 }
 
+// Returns true iff at least one alive, visible, fully-opaque window
+// whose bounding box completely contains (rx, ry, rw, rh) exists in
+// the window registry. Used by WallpaperTick to skip the arc dirty-
+// mark when a window fully occludes the arc region — the compositor's
+// content-diff layer would still gate the blit, but skipping the
+// dirty-mark avoids the per-frame motion math entirely for that region.
+//
+// "Fully opaque" = WindowGetOpacity == 0xFF (the default). Partially
+// transparent windows don't occlude — the wallpaper bleeds through.
+// "Fully contains" = window bbox covers all four corners of the rect.
+bool AnyOpaqueWindowCoversRect(u32 rx, u32 ry, u32 rw, u32 rh)
+{
+    if (rw == 0 || rh == 0)
+        return false;
+    const u32 rx1 = rx + rw;
+    const u32 ry1 = ry + rh;
+    const u32 count = WindowRegistryCount();
+    for (u32 h = 0; h < count; ++h)
+    {
+        if (!WindowIsAlive(h) || !WindowIsVisible(h))
+            continue;
+        if (WindowGetOpacity(h) < 0xFFU)
+            continue;
+        u32 wx, wy, ww, wh;
+        if (!WindowGetBounds(h, &wx, &wy, &ww, &wh))
+            continue;
+        // Window must fully contain the rect.
+        if (wx <= rx && wy <= ry && (wx + ww) >= rx1 && (wy + wh) >= ry1)
+            return true;
+    }
+    return false;
+}
+
 // Slate10 grid: a sparse Win10-style "subtle grid of dots"
 // pattern. Each dot is a single pixel at a regular interval —
 // the grid spacing is wide enough that the desktop reads as
@@ -515,20 +548,22 @@ void WallpaperTick()
     if (topo_moved)
         g_motion.topo_drift_px = new_drift;
 
-    // Dirty-rect notifications. There is no CompositorOpaqueRectIntersects
-    // equivalent in the current codebase — always mark the regions dirty
-    // and rely on the compositor's content-diff layer (Pass A) to elide
-    // the blit if the pixels didn't change. The arc bbox is a 340×340
-    // region centred on the Duet arc anchor (~48 % down from the top).
-    //
-    // NOTE: FramebufferAddDamage is the real dirty-mark API. There is no
-    // opaque-window intersection check available yet; if a window covers
-    // the arcs the compositor's damage diff will still skip the pixel blit
-    // because the shadow-buffer content won't differ. No wasted PCIe
-    // bandwidth in that path.
+    // Dirty-rect notifications. The arc bbox is a 340×340 region
+    // centred on the Duet arc anchor (~48 % down from the top).
+    // Skip the dirty-mark entirely when an opaque window fully covers
+    // the arc region — no wallpaper pixel is visible, so the motion
+    // math and damage bookkeeping are both wasted work. The check uses
+    // the public window registry API (WindowIsAlive / WindowIsVisible /
+    // WindowGetOpacity / WindowGetBounds) so no widget internals leak
+    // into this module. When the region IS visible the dirty-mark fires
+    // and the compositor's content-diff layer (Pass A) still elides the
+    // actual blit if the pixels didn't change.
     const u32 arcs_x = (info.width  > 170U) ? info.width  / 2U - 170U : 0U;
     const u32 arcs_y = (info.height > 170U) ? (info.height * 48U) / 100U - 170U : 0U;
-    FramebufferAddDamage(arcs_x, arcs_y, 340U, 340U);
+    if (!AnyOpaqueWindowCoversRect(arcs_x, arcs_y, 340U, 340U))
+    {
+        FramebufferAddDamage(arcs_x, arcs_y, 340U, 340U);
+    }
 
     if (topo_moved && info.height > 280U)
     {
