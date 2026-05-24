@@ -2244,6 +2244,21 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         {
             duetos::drivers::video::ThemeSetTactilityOverride(1);
         }
+        // Pass B: motion=on|off|auto runtime override. kAuto (default)
+        // honours the active theme's motion_intensity. tactility_enabled
+        // remains the master gate — motion=on under HighContrast still
+        // produces zero motion.
+        if (CmdlineMatches(early_cmdline, "motion", "off"))
+        {
+            duetos::drivers::video::ThemeSetMotionOverride(
+                duetos::drivers::video::MotionOverride::kOff);
+        }
+        else if (CmdlineMatches(early_cmdline, "motion", "on"))
+        {
+            duetos::drivers::video::ThemeSetMotionOverride(
+                duetos::drivers::video::MotionOverride::kOn);
+        }
+        // "auto" (or absent) leaves the default kAuto — no call needed.
     }
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::ThemeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::BlendSelfTest());

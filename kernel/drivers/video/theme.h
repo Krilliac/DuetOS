@@ -346,6 +346,21 @@ bool ThemeSelfTestPassed();
 i8 ThemeTactilityOverride();
 void ThemeSetTactilityOverride(i8 v);
 
+// ----- Motion runtime override (Pass B) -----
+//
+// Three-state: kAuto = honour active theme's motion_intensity,
+// kOff = force 0 (no motion), kOn = force 255 (full motion).
+// tactility_enabled is the master gate — kOn under HighContrast
+// still produces zero motion (see spec §7). Set via the `motion=`
+// kernel cmdline at boot.
+enum class MotionOverride : u8 { kAuto, kOn, kOff };
+void ThemeSetMotionOverride(MotionOverride o);
+
+/// Effective motion intensity (0..255) after applying the
+/// runtime override and the tactility_enabled master gate.
+/// Use this from every motion-aware paint path.
+u8 ThemeEffectiveMotionIntensity();
+
 /// Resolved tactility setting for the active theme. Equivalent to
 /// `(override == -1) ? current_theme.tactility_enabled
 ///                   : bool(override)`. Use this from every

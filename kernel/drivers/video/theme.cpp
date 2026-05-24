@@ -1325,6 +1325,14 @@ void ThemeSelfTest()
 //       be a debugging affordance only).
 constinit i8 g_tactility_override = -1;
 
+// ----- Motion runtime override (Pass B) -----
+//
+// kAuto = use the theme's configured motion_intensity.
+// kOn   = force 255 (full motion), still gated by tactility_enabled.
+// kOff  = force 0 (no motion). Parsed from the `motion=` cmdline
+//         argument in boot_bringup.cpp.
+static MotionOverride g_motion_override = MotionOverride::kAuto;
+
 i8 ThemeTactilityOverride()
 {
     return g_tactility_override;
@@ -1371,6 +1379,28 @@ u8 ThemeIntensityEffective(u8 raw)
 bool ThemeSelfTestPassed()
 {
     return s_theme_passed;
+}
+
+void ThemeSetMotionOverride(MotionOverride o)
+{
+    g_motion_override = o;
+}
+
+u8 ThemeEffectiveMotionIntensity()
+{
+    const Theme& t = ThemeCurrent();
+    if (!t.tactility_enabled)
+        return 0; // master gate wins — motion is always disabled when tactility is off
+    switch (g_motion_override)
+    {
+        case MotionOverride::kOff:
+            return 0;
+        case MotionOverride::kOn:
+            return 255;
+        case MotionOverride::kAuto:
+            return t.motion_intensity;
+    }
+    return t.motion_intensity;
 }
 
 } // namespace duetos::drivers::video
