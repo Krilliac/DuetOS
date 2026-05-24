@@ -1,13 +1,15 @@
 #include "drivers/video/framebuffer.h"
 
 #include "arch/x86_64/serial.h"
+#include "debug/probes.h"
+#include "drivers/video/blend_math.h"
+#include "drivers/video/font8x8.h"
+#include "drivers/video/render_stats.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/multiboot2.h"
 #include "mm/page.h"
 #include "mm/paging.h"
-#include "drivers/video/font8x8.h"
-#include "drivers/video/render_stats.h"
 
 namespace duetos::drivers::video
 {
@@ -771,18 +773,7 @@ void FramebufferPutPixelAlpha(u32 x, u32 y, u32 argb)
         MarkDamage(x, y, 1, 1);
         return;
     }
-    const u32 src_r = (argb >> 16) & 0xFFU;
-    const u32 src_g = (argb >> 8) & 0xFFU;
-    const u32 src_b = argb & 0xFFU;
-    const u32 inv = 255U - alpha;
-    const u32 dst = row[x];
-    const u32 dr = (dst >> 16) & 0xFFU;
-    const u32 dg = (dst >> 8) & 0xFFU;
-    const u32 db = dst & 0xFFU;
-    const u32 r = (src_r * alpha + dr * inv + 127U) / 255U;
-    const u32 g = (src_g * alpha + dg * inv + 127U) / 255U;
-    const u32 b = (src_b * alpha + db * inv + 127U) / 255U;
-    row[x] = (r << 16) | (g << 8) | b;
+    row[x] = BlendOver(row[x], argb & 0x00FFFFFFU, static_cast<u8>(alpha));
     MarkDamage(x, y, 1, 1);
 }
 
@@ -986,16 +977,12 @@ void FramebufferFillRectAlpha(u32 x, u32 y, u32 w, u32 h, u32 argb)
         return;
     }
 
-    // Pre-multiply the source channels by alpha once so the inner
-    // loop is dst * inv + src_premul plus a /255 round.
-    const u32 src_r = (argb >> 16) & 0xFFU;
-    const u32 src_g = (argb >> 8) & 0xFFU;
-    const u32 src_b = argb & 0xFFU;
-    const u32 sr_a = src_r * alpha;
-    const u32 sg_a = src_g * alpha;
-    const u32 sb_a = src_b * alpha;
-    const u32 inv = 255U - alpha;
-
+    // Inner loop delegates to BlendOver (kernel/drivers/video/blend_math.h)
+    // so the rounding + channel layout match the hosted unit test
+    // exactly. The alpha == 0 / alpha == 0xFF fast paths are short-
+    // circuited above so the per-pixel call never re-tests them.
+    const u32 src_rgb = argb & 0x00FFFFFFU;
+    const u8 src_a = static_cast<u8>(alpha);
     const u32 x_end = (x + w > g_info.width) ? g_info.width : x + w;
     const u32 y_end = (y + h > g_info.height) ? g_info.height : y + h;
 
@@ -1005,21 +992,62 @@ void FramebufferFillRectAlpha(u32 x, u32 y, u32 w, u32 h, u32 argb)
         auto* row = reinterpret_cast<volatile u32*>(wt.base + static_cast<u64>(yi) * wt.pitch);
         for (u32 xi = x; xi < x_end; ++xi)
         {
-            const u32 dst = row[xi];
-            const u32 dr = (dst >> 16) & 0xFFU;
-            const u32 dg = (dst >> 8) & 0xFFU;
-            const u32 db = dst & 0xFFU;
-            // /255 rounding via the (n + 127) / 255 form. Equivalent
-            // to ((n + 128) + ((n + 128) >> 8)) >> 8 in the cheap
-            // 16-bit-mul approximation; we use the explicit divide
-            // for clarity (compiler folds it into a multiply).
-            const u32 r = (sr_a + dr * inv + 127U) / 255U;
-            const u32 g = (sg_a + dg * inv + 127U) / 255U;
-            const u32 b = (sb_a + db * inv + 127U) / 255U;
-            row[xi] = (r << 16) | (g << 8) | b;
+            row[xi] = BlendOver(row[xi], src_rgb, src_a);
         }
     }
     MarkDamage(x, y, x_end - x, y_end - y);
+}
+
+usize FramebufferBlendRgba(u32 x, u32 y, u32 w, u32 h, const u32* src_rgba, u32 src_pitch_px)
+{
+    if (!g_available || src_rgba == nullptr || w == 0 || h == 0)
+    {
+        return 0;
+    }
+    if (x >= g_info.width || y >= g_info.height)
+    {
+        // Caller handed us a rect entirely off the surface — every
+        // chrome paint path should have clipped to the on-screen
+        // window first. Fire a probe so a regression in a paint
+        // path's clip arithmetic shows up in the boot log instead
+        // of as a silent missing-shadow.
+        KBP_PROBE_V(debug::ProbeId::kBlendRangeOob, (static_cast<u64>(x) << 16) | y);
+        return 0;
+    }
+
+    const u32 x_end = (x + w > g_info.width) ? g_info.width : x + w;
+    const u32 y_end = (y + h > g_info.height) ? g_info.height : y + h;
+    const WriteTarget wt = GetWriteTarget();
+    usize dirty = 0;
+    for (u32 yi = y; yi < y_end; ++yi)
+    {
+        const u32 src_row = yi - y;
+        const u32* src = src_rgba + static_cast<u64>(src_row) * src_pitch_px;
+        auto* row = reinterpret_cast<volatile u32*>(wt.base + static_cast<u64>(yi) * wt.pitch);
+        for (u32 xi = x; xi < x_end; ++xi)
+        {
+            const u32 s = src[xi - x];
+            const u8 a = static_cast<u8>((s >> 24) & 0xFFU);
+            if (a == 0)
+            {
+                continue; // sparse-atlas fast path
+            }
+            if (a == 0xFFU)
+            {
+                row[xi] = s & 0x00FFFFFFU;
+            }
+            else
+            {
+                row[xi] = BlendOver(row[xi], s & 0x00FFFFFFU, a);
+            }
+            ++dirty;
+        }
+    }
+    if (dirty != 0)
+    {
+        MarkDamage(x, y, x_end - x, y_end - y);
+    }
+    return dirty;
 }
 
 void FramebufferFillRectGradient(u32 x, u32 y, u32 w, u32 h, u32 top_rgb, u32 bot_rgb)
@@ -1735,6 +1763,54 @@ void FramebufferSelfTest()
     FramebufferFillRect(g_info.width - kFrame, 0, kFrame, g_info.height, 0x0080A0FF); // right
 
     SerialWrite("[video/fb] self-test OK\n");
+}
+
+void BlendSelfTest()
+{
+    if (!g_available)
+    {
+        SerialWrite("[blend-selftest] SKIP (framebuffer not available)\n");
+        return;
+    }
+    if (g_compose_active)
+    {
+        // Read-back goes through FramebufferReadPixel which always
+        // hits the LIVE framebuffer; with compose active the writes
+        // would land in the shadow buffer instead, so the test
+        // would falsely report mismatch. Boot ordering guarantees
+        // BlendSelfTest runs before compose ever engages — flag if
+        // that ever changes.
+        SerialWrite("[blend-selftest] SKIP (compose active)\n");
+        return;
+    }
+
+    // ----- alpha=0xFF must REPLACE -----
+    const u32 saved = FramebufferReadPixel(0, 0);
+    FramebufferPutPixel(0, 0, 0x000000U);
+    FramebufferFillRectAlpha(0, 0, 1, 1, 0xFFFFFFFFU);
+    const u32 opaque = FramebufferReadPixel(0, 0) & 0x00FFFFFFU;
+    if (opaque != 0x00FFFFFFU)
+    {
+        SerialWrite("[blend-selftest] FAIL (alpha=255 did not replace)\n");
+        KBP_PROBE_V(debug::ProbeId::kBlendRangeOob, opaque);
+        FramebufferPutPixel(0, 0, saved);
+        return;
+    }
+
+    // ----- alpha=0x80 must land ~50% -----
+    FramebufferPutPixel(0, 0, 0x000000U);
+    FramebufferFillRectAlpha(0, 0, 1, 1, 0x80FFFFFFU);
+    const u32 mid_b = FramebufferReadPixel(0, 0) & 0xFFU;
+    if (mid_b < 126U || mid_b > 130U)
+    {
+        SerialWrite("[blend-selftest] FAIL (alpha=128 not midpoint)\n");
+        KBP_PROBE_V(debug::ProbeId::kBlendRangeOob, mid_b);
+        FramebufferPutPixel(0, 0, saved);
+        return;
+    }
+
+    FramebufferPutPixel(0, 0, saved);
+    SerialWrite("[blend-selftest] PASS (blendrgba, blendfill, alpha-zero-skip)\n");
 }
 
 } // namespace duetos::drivers::video
