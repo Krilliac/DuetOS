@@ -279,6 +279,38 @@ enum class ProbeId : u8
     // kernel/env/autonomic_feedback.cpp for the classifier.
     kAutonomicOutcomeMissed,
 
+    // FramebufferBlendRgba / FramebufferBlendFill received a rect
+    // whose pre-clip bounds fell entirely outside the surface. The
+    // primitive returns early (a silent no-op) so callers don't
+    // crash, but a fire is a chrome-paint regression: every paint
+    // path that reaches the blend primitives should already have
+    // clipped to the window's actual on-screen rect. Caller passes
+    // `(x << 16) | y` as `value` so an attached GDB can read the
+    // offending coordinates straight from the probe-ring entry.
+    // ArmedLog: a clean boot stays quiet, a regression leaves one
+    // sentinel + a GDB break-point on `ProbeFire`.
+    kBlendRangeOob,
+
+    // ShadowSelfTest detected a baked shadow-atlas integrity
+    // failure — wrong size, wrong origin alpha, non-linear opacity
+    // scaling, or broken rotational symmetry. The bake script
+    // (tools/build/gen_shadow_atlas.py) and the renderer
+    // (kernel/drivers/video/shadow.cpp) have to agree on geometry;
+    // a fire means they have drifted. ArmedLog: a clean boot
+    // never fires this — the atlas is baked at configure time,
+    // not regenerated at boot.
+    kShadowAtlasInvalid,
+
+    // Theme palette advertises tactility_enabled but its per-
+    // effect intensity bytes (hover_lift_alpha, press_alpha,
+    // focus_glow_alpha, drop_shadow_opacity) are all zero. Means
+    // a Theme struct landed without populating the new fields
+    // — the chrome will paint flat. Fired by the tactility-matrix
+    // step of ThemeSelfTest once Task 10 lands the invariant
+    // checks. ArmedLog so the regression leaves a sentinel + a
+    // GDB break-point on ProbeFire.
+    kTactilityThemeMismatch,
+
     kCount, // sentinel
 };
 

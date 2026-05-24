@@ -5580,7 +5580,7 @@ doc helps future readers audit the trail.
   (`kernel/drivers/video/framebuffer.{h,cpp}`) accumulates one
   axis-aligned bounding box of dirty pixels per compose pass.
   Every primitive that writes pixels (`PutPixel`, `FillRect`,
-  `Blit`, `FillRectAlpha`, `FillRectGradient`) routes its post-
+  `Blit`, `BlendFill`, `FillRectGradient`) routes its post-
   clip rect through an internal `MarkDamage` helper that unions
   with the running bbox. `FramebufferEndCompose` copies only that
   bbox from the shadow buffer to the live framebuffer;

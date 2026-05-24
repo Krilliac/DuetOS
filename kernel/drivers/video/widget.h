@@ -159,6 +159,21 @@ struct WindowChrome
 /// Idempotent. No-op on zero dimensions or unavailable framebuffer.
 void WindowDraw(const WindowChrome& w);
 
+/// Paint a focus-glow ring around the rect `(x, y, w, h)`. The ring
+/// is a 4-px soft shadow + a 1-px accent stroke; colour comes from
+/// the active theme's `focus_glow_colour`, unless `is_pe_window` is
+/// true (Win32-role windows force the accent to amber so the
+/// dual-accent identity reads consistently across themes). No-op
+/// when tactility is disabled at runtime (ThemeTactilityEffective
+/// returns false) OR when the active theme advertises
+/// `focus_glow_colour == 0` (DuetClassic opts out of glow even
+/// though it enables tactility for shadows / hover).
+///
+/// Available for focused-input + button paint paths; not yet wired
+/// into any caller — the call site lands with whichever focus-aware
+/// widget needs it first (most likely the Settings app textbox).
+void WindowPaintFocusGlow(u32 x, u32 y, u32 w, u32 h, bool is_pe_window);
+
 /// Register a window + its title string. Returns a handle, or
 /// `kWindowInvalid` if the table is full. The title pointer is
 /// stored by reference — caller owns the memory and must keep it

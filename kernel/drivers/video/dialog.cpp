@@ -2,6 +2,7 @@
 
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/shadow.h"
 #include "drivers/video/sound_cue.h"
 #include "drivers/video/theme.h"
 
@@ -362,7 +363,7 @@ void DialogCompose()
     // Replaces the older "every-other-pixel dotted" approximation
     // that used the chrome's no-alpha era primitives.
     constexpr u32 kDimArgb = (0x66U << 24) | 0x00080810U;
-    FramebufferFillRectAlpha(0, 0, fb.width, fb.height, kDimArgb);
+    FramebufferBlendFill(0, 0, fb.width, fb.height, kDimArgb);
 
     u32 px = 0, py = 0;
     PanelOrigin(&px, &py);
@@ -371,6 +372,22 @@ void DialogCompose()
     const u32 ink = 0x00101020;
     const u32 dim_ink = 0x00606078;
     const u32 border = th.window_border;
+
+    // Tactility lift: paint a 50% larger soft shadow than the
+    // window's 24-active radius (40 here) at 75% of the active
+    // shadow intensity. Modals already command attention via the
+    // 40% scrim above, but the stronger shadow makes the panel
+    // physically read as floating on top of the dim, not painted
+    // onto it. No-op for tactility=off themes / runtime override.
+    if (ThemeTactilityEffective())
+    {
+        const u8 base = ThemeIntensityEffective(th.shadow_intensity_active);
+        const u8 opacity = static_cast<u8>((static_cast<u32>(base) * 3U) / 4U);
+        if (opacity > 0)
+        {
+            RenderSoftShadow(static_cast<i32>(px), static_cast<i32>(py), kPanelW, kPanelH, 40U, opacity, 0x00000000U);
+        }
+    }
 
     // Body fill + 1-px border.
     FramebufferFillRect(px, py, kPanelW, kPanelH, panel_bg);

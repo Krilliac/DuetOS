@@ -49,6 +49,7 @@
 #include "drivers/video/magnifier.h"
 #include "drivers/video/menu.h"
 #include "drivers/video/notify.h"
+#include "drivers/video/shadow.h"
 #include "drivers/video/ttf.h"
 #include "drivers/video/ttf_raster.h"
 #include "drivers/video/netpanel.h"
@@ -655,7 +656,7 @@ void WindowDraw(const WindowChrome& w)
     {
         const u32 shine_h = tbh_eff / 2;
         const u32 shine_argb = (0xA0U << 24) | (title_top & 0x00FFFFFFU);
-        FramebufferFillRectAlpha(w.x, w.y, w.w, shine_h, shine_argb);
+        FramebufferBlendFill(w.x, w.y, w.w, shine_h, shine_argb);
     }
     if (tbh_eff > 0)
     {
@@ -798,6 +799,25 @@ void WindowDraw(const WindowChrome& w)
     // there means every WindowDraw caller (currently only
     // WindowDrawAllOrdered) gets focus-aware depth without having
     // to thread an is_active flag down through the chrome paint.
+}
+
+void WindowPaintFocusGlow(u32 x, u32 y, u32 w, u32 h, bool is_pe_window)
+{
+    if (!ThemeTactilityEffective())
+    {
+        return;
+    }
+    const Theme& t = ThemeCurrent();
+    if (t.focus_glow_colour == 0U)
+    {
+        return;
+    }
+    // Win32-role windows force amber regardless of theme — preserves
+    // the dual-accent identity the chrome relies on to tell Win32
+    // apps apart from native DuetOS apps at a glance.
+    constexpr u32 kAmber = 0x00F5B73AU;
+    const u32 colour = is_pe_window ? kAmber : t.focus_glow_colour;
+    RenderSoftShadowWithStroke(static_cast<i32>(x), static_cast<i32>(y), w, h, 4U, 120U, colour, colour);
 }
 
 namespace
@@ -1814,9 +1834,20 @@ void SnapPreviewCompose()
     if (w == 0 || h == 0)
         return;
     const u32 accent_rgb = ThemeCurrent().taskbar_accent & 0x00FFFFFFu;
-    // 0x40 = 25 % alpha. ARGB packing matches FramebufferFillRectAlpha.
+    // 0x40 = 25 % alpha. ARGB packing matches FramebufferBlendFill.
     const u32 argb = (0x40u << 24) | accent_rgb;
-    FramebufferFillRectAlpha(x, y, w, h, argb);
+    FramebufferBlendFill(x, y, w, h, argb);
+
+    // Tactility lift: the preview gains an accent-tinted soft halo
+    // so it reads as "the window will hover here" instead of a flat
+    // filled rect. The translucent body fill above already implies
+    // preview-ness; the halo adds the depth cue without changing
+    // the affordance. No-op when tactility is disabled at runtime
+    // or off for the theme.
+    if (ThemeTactilityEffective())
+    {
+        RenderSoftShadow(static_cast<i32>(x), static_cast<i32>(y), w, h, 16U, 100U, accent_rgb);
+    }
 }
 
 } // namespace
@@ -2064,16 +2095,41 @@ void WindowDrawAllOrdered()
         // Focus-aware drop shadow. Painted BEFORE the chrome so the
         // window covers the inner shadow bands; only the right +
         // bottom fringe shows. The active window gets a deeper /
-        // stronger cast (6-px / α 0x88) so it visibly hovers above
-        // the desktop in the macOS / Win11 idiom; inactive windows
-        // get a shallow / faint cast (2-px / α 0x30) so they recede
-        // into the surface. Single-window scenes still get the
-        // active treatment regardless of the focus state — there's
-        // nothing else competing for the eye.
+        // stronger cast so it visibly hovers above the desktop in
+        // the macOS / Win11 idiom; inactive windows get a shallow /
+        // faint cast so they recede into the surface. Single-window
+        // scenes still get the active treatment regardless of the
+        // focus state — there's nothing else competing for the eye.
+        //
+        // When the active theme advertises tactility and the runtime
+        // override hasn't disabled it, route through the 9-slice
+        // atlas-based RenderSoftShadow (kernel/drivers/video/shadow.h,
+        // Task 5 of the chrome-tactility plan) so corners get the
+        // quadratic-falloff curve instead of the strip-only fringe
+        // FramebufferDropShadow paints. The shallow strip primitive
+        // remains the fallback for tactility=off themes (Amber,
+        // HighContrast) + the runtime `tactility off` override.
         const bool only_window = (g_window_count == 1);
-        const u32 shadow_depth = (is_active || only_window) ? 6U : 2U;
-        const u8 shadow_alpha = (is_active || only_window) ? 0x88U : 0x30U;
-        FramebufferDropShadow(drawn.x, drawn.y, drawn.w, drawn.h, shadow_depth, shadow_alpha);
+        const bool deep_cast = (is_active || only_window);
+        u8 atlas_opacity = 0;
+        if (ThemeTactilityEffective())
+        {
+            const Theme& t = ThemeCurrent();
+            atlas_opacity =
+                ThemeIntensityEffective(deep_cast ? t.shadow_intensity_active : t.shadow_intensity_inactive);
+        }
+        if (atlas_opacity > 0)
+        {
+            const u32 radius = deep_cast ? 24U : 16U;
+            RenderSoftShadow(static_cast<i32>(drawn.x), static_cast<i32>(drawn.y), drawn.w, drawn.h, radius,
+                             atlas_opacity, 0x000000U);
+        }
+        else
+        {
+            const u32 shadow_depth = deep_cast ? 6U : 2U;
+            const u8 shadow_alpha = deep_cast ? 0x88U : 0x30U;
+            FramebufferDropShadow(drawn.x, drawn.y, drawn.w, drawn.h, shadow_depth, shadow_alpha);
+        }
         WindowDraw(drawn);
         // Rounded-corner approximation for the Duet theme. The
         // chrome itself is painted as a rectangle; we then
@@ -2493,8 +2549,8 @@ void WindowDrawAllOrdered()
         if (!is_active && g_window_count > 1)
         {
             const u32 overlay = (0x18u << 24) | (g_compose_desktop_rgb & 0x00FFFFFFu);
-            FramebufferFillRectAlpha(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
-                                     g_windows[h].chrome.h, overlay);
+            FramebufferBlendFill(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
+                                 g_windows[h].chrome.h, overlay);
         }
         // Per-window opacity overlay. Lays a desktop-coloured rect
         // at alpha = (0xFF - opacity) over the whole window so
@@ -2508,8 +2564,8 @@ void WindowDrawAllOrdered()
         {
             const u32 overlay_alpha = static_cast<u32>(0xFFu - g_windows[h].opacity);
             const u32 overlay = (overlay_alpha << 24) | (g_compose_desktop_rgb & 0x00FFFFFFu);
-            FramebufferFillRectAlpha(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
-                                     g_windows[h].chrome.h, overlay);
+            FramebufferBlendFill(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
+                                 g_windows[h].chrome.h, overlay);
         }
     }
 }

@@ -33,16 +33,20 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Common warnings + treat-as-errors. Mirrors the kernel build's
 # discipline so a host test that compiles cleanly at home compiles
 # cleanly in CI.
-add_compile_options(
-    -Wall -Wextra -Wpedantic -Werror
-    -Wshadow -Wconversion -Wsign-conversion
-)
+if(MSVC)
+    add_compile_options(/W4 /WX)
+else()
+    add_compile_options(
+        -Wall -Wextra -Wpedantic -Werror
+        -Wshadow -Wconversion -Wsign-conversion
+    )
+endif()
 
 # Sanitizer toggle. CI runs each preset with sanitizers enabled
 # (ASan + UBSan together is well-supported by clang). Local devs
 # can opt out via -DDUETOS_HOST_TESTS_SANITIZERS=OFF.
 option(DUETOS_HOST_TESTS_SANITIZERS "Enable ASan + UBSan for host unit tests" ON)
-if(DUETOS_HOST_TESTS_SANITIZERS)
+if(DUETOS_HOST_TESTS_SANITIZERS AND NOT MSVC)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
 endif()
@@ -104,3 +108,5 @@ add_host_test(vfs_resolve)
 add_host_test(registry_path)
 add_host_test(forwarder)
 add_host_test(thunk_hash)
+add_host_test(blend)
+add_host_test(shadow_atlas)

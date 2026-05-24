@@ -28,6 +28,8 @@
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/console.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/shadow.h"
+#include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 #include "log/klog.h"
 #include "sched/sched.h"
@@ -48,6 +50,10 @@ using duetos::drivers::video::FramebufferEndCompose;
 using duetos::drivers::video::FramebufferFillRect;
 using duetos::drivers::video::FramebufferFillRectGradient;
 using duetos::drivers::video::FramebufferGet;
+using duetos::drivers::video::RenderSoftShadow;
+using duetos::drivers::video::ThemeCurrent;
+using duetos::drivers::video::ThemeIntensityEffective;
+using duetos::drivers::video::ThemeTactilityEffective;
 
 namespace
 {
@@ -355,8 +361,21 @@ void DrawBackground(const GuiLayout& l)
 void DrawPanel(const GuiLayout& l)
 {
     // Drop shadow first so the panel reads as raised relative to
-    // the gradient bg. Same depth + alpha as the desktop chrome.
-    FramebufferDropShadow(l.panel_x, l.panel_y, l.panel_w, l.panel_h, 5, 0x70);
+    // the gradient bg. Atlas-shadow under tactility; strip-shadow
+    // fallback preserves Amber/HighContrast bit-for-bit.
+    {
+        const u8 atlas_opacity =
+            ThemeTactilityEffective() ? ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active) : u8{0};
+        if (atlas_opacity > 0)
+        {
+            RenderSoftShadow(static_cast<i32>(l.panel_x), static_cast<i32>(l.panel_y), l.panel_w, l.panel_h, 20U,
+                             atlas_opacity, 0x00000000U);
+        }
+        else
+        {
+            FramebufferDropShadow(l.panel_x, l.panel_y, l.panel_w, l.panel_h, 5, 0x70);
+        }
+    }
 
     // Body fill + 1-px outer border (was 2-px slab).
     FramebufferFillRect(l.panel_x, l.panel_y, l.panel_w, l.panel_h, kPanel);

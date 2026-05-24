@@ -3,6 +3,8 @@
 #include "drivers/net/net.h"
 #include "net/stack.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/shadow.h"
+#include "drivers/video/theme.h"
 
 namespace duetos::drivers::video
 {
@@ -194,7 +196,17 @@ void DrawHeader(u32 ax, u32 ay, u32 w, const char* title)
 
 void DrawPreview()
 {
-    FramebufferDropShadow(g_ax, g_ay, kPreviewW, kPreviewH, 4, 0x60);
+    const u8 atlas_opacity =
+        ThemeTactilityEffective() ? ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active) : u8{0};
+    if (atlas_opacity > 0)
+    {
+        RenderSoftShadow(static_cast<i32>(g_ax), static_cast<i32>(g_ay), kPreviewW, kPreviewH, 12U, atlas_opacity,
+                         0x00000000U);
+    }
+    else
+    {
+        FramebufferDropShadow(g_ax, g_ay, kPreviewW, kPreviewH, 4, 0x60);
+    }
     FramebufferFillRectGradient(g_ax, g_ay, kPreviewW, kPreviewH, LightenRgb(g_body_rgb, 14), g_body_rgb);
     if (kPreviewW > 4)
     {
@@ -360,7 +372,17 @@ void DrawWiredSection(u32 ax, u32& y)
 void DrawFull()
 {
     g_height = ComputeFullHeight();
-    FramebufferDropShadow(g_ax, g_ay, kFullW, g_height, 4, 0x60);
+    const u8 atlas_opacity =
+        ThemeTactilityEffective() ? ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active) : u8{0};
+    if (atlas_opacity > 0)
+    {
+        RenderSoftShadow(static_cast<i32>(g_ax), static_cast<i32>(g_ay), kFullW, g_height, 16U, atlas_opacity,
+                         0x00000000U);
+    }
+    else
+    {
+        FramebufferDropShadow(g_ax, g_ay, kFullW, g_height, 4, 0x60);
+    }
     FramebufferFillRectGradient(g_ax, g_ay, kFullW, g_height, LightenRgb(g_body_rgb, 14), g_body_rgb);
     if (kFullW > 4)
     {

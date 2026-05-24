@@ -118,7 +118,7 @@ hardware-style depth test on the v1 vertex format.
 The format is per-command-buffer state. Defaults to v0;
 callers select v1 via the DuetOS extension
 `vkCmdSetVertexFormatDuet(cb, 1)`. `argb` is 0xAARRGGBB; the
-high byte drives `FramebufferPutPixelAlpha` (src-over blend)
+high byte drives `FramebufferBlendPixel` (src-over blend)
 when < 0xFF and `FramebufferPutPixel` (opaque) when == 0xFF.
 
 **Topologies (Vulkan spec values):**

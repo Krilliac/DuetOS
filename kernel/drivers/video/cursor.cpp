@@ -292,17 +292,14 @@ u32 ClampMove(u32 value, i32 delta, u32 max)
     return static_cast<u32>(sum);
 }
 
-u32 FramebufferReadPixel(u32 x, u32 y)
-{
-    const auto info = FramebufferGet();
-    if (info.virt == nullptr || x >= info.width || y >= info.height)
-    {
-        return g_desktop_rgb;
-    }
-    const auto* row = reinterpret_cast<const volatile u32*>(reinterpret_cast<const u8*>(info.virt) +
-                                                            static_cast<u64>(y) * info.pitch);
-    return row[x];
-}
+// FramebufferReadPixel used to live here as a static (anon-namespace)
+// helper that fell back to g_desktop_rgb on OOR coordinates. The
+// chrome-tactility work consolidated the API: the canonical external-
+// linkage definition is now in framebuffer.cpp (returns 0 on OOR /
+// unavailable). cursor.cpp's call sites resolve to the external one
+// via the framebuffer.h decl; the fallback colour difference is
+// invisible because RestoreAt for OOR coords no-ops in
+// FramebufferPutPixel anyway.
 
 // Save every pixel the cursor sprite covers so a later RestoreAt
 // can put them back exactly — even if a widget painted under the

@@ -1,6 +1,7 @@
 #include "drivers/video/theme.h"
 
 #include "arch/x86_64/serial.h"
+#include "debug/probes.h"
 #include "drivers/video/calendar.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
@@ -108,6 +109,15 @@ constexpr Theme kClassic = {
     .title_button_width = 0,
     .title_text_scale = 1,
     .font_kind = Theme::FontKind::Bitmap8x8,
+
+    // chrome tactility (Pass A) - per-theme matrix
+    .tactility_enabled = true,
+    .shadow_intensity_active = 80,
+    .shadow_intensity_inactive = 40,
+    .hover_lift_alpha = 100,
+    .press_alpha = 100,
+    .focus_glow_colour = 0x245EDC,
+    .cursor_microshadow_enabled = false,
 };
 
 // Amber is a deliberate retro exercise — a single-hue amber palette
@@ -189,6 +199,15 @@ constexpr Theme kAmber = {
     .title_button_width = 0,
     .title_text_scale = 1,
     .font_kind = Theme::FontKind::Bitmap8x8,
+
+    // chrome tactility (Pass A) - per-theme matrix
+    .tactility_enabled = false,
+    .shadow_intensity_active = 0,
+    .shadow_intensity_inactive = 0,
+    .hover_lift_alpha = 0,
+    .press_alpha = 0,
+    .focus_glow_colour = 0xF5B73A,
+    .cursor_microshadow_enabled = false,
 };
 
 constexpr Theme kSlate10 = {
@@ -273,6 +292,15 @@ constexpr Theme kSlate10 = {
     .title_button_width = 0,
     .title_text_scale = 1,
     .font_kind = Theme::FontKind::Bitmap8x8,
+
+    // chrome tactility (Pass A) - per-theme matrix
+    .tactility_enabled = true,
+    .shadow_intensity_active = 200,
+    .shadow_intensity_inactive = 100,
+    .hover_lift_alpha = 255,
+    .press_alpha = 255,
+    .focus_glow_colour = 0x0078D4,
+    .cursor_microshadow_enabled = true,
 };
 
 // Duet — the redesigned palette. Slate-charcoal canvas, dual-accent
@@ -365,6 +393,15 @@ constexpr Theme kDuet = {
     .title_button_width = 46,
     .title_text_scale = 2,
     .font_kind = Theme::FontKind::Ttf,
+
+    // chrome tactility (Pass A) - per-theme matrix
+    .tactility_enabled = true,
+    .shadow_intensity_active = 255,
+    .shadow_intensity_inactive = 128,
+    .hover_lift_alpha = 255,
+    .press_alpha = 255,
+    .focus_glow_colour = 0x2DD4BF,
+    .cursor_microshadow_enabled = true,
 };
 
 // DuetLight — light-mode sibling of Duet, sourced from the
@@ -449,6 +486,15 @@ constexpr Theme kDuetLight = {
     .title_button_width = 46,
     .title_text_scale = 2,
     .font_kind = Theme::FontKind::Ttf,
+
+    // chrome tactility (Pass A) - per-theme matrix
+    .tactility_enabled = true,
+    .shadow_intensity_active = 100,
+    .shadow_intensity_inactive = 50,
+    .hover_lift_alpha = 200,
+    .press_alpha = 200,
+    .focus_glow_colour = 0x0F9B8A,
+    .cursor_microshadow_enabled = true,
 };
 
 // Duet accent variants. Each one duplicates the slate Duet
@@ -518,6 +564,15 @@ constexpr Theme kDuetBlue = {
     .title_button_width = 46,
     .title_text_scale = 2,
     .font_kind = Theme::FontKind::Ttf,
+
+    // chrome tactility (Pass A) - per-theme matrix
+    .tactility_enabled = true,
+    .shadow_intensity_active = 255,
+    .shadow_intensity_inactive = 128,
+    .hover_lift_alpha = 255,
+    .press_alpha = 255,
+    .focus_glow_colour = 0x0078D4,
+    .cursor_microshadow_enabled = true,
 };
 
 constexpr Theme kDuetViolet = {
@@ -576,6 +631,15 @@ constexpr Theme kDuetViolet = {
     .title_button_width = 46,
     .title_text_scale = 2,
     .font_kind = Theme::FontKind::Ttf,
+
+    // chrome tactility (Pass A) - per-theme matrix
+    .tactility_enabled = true,
+    .shadow_intensity_active = 255,
+    .shadow_intensity_inactive = 128,
+    .hover_lift_alpha = 255,
+    .press_alpha = 255,
+    .focus_glow_colour = 0x9B59B6,
+    .cursor_microshadow_enabled = true,
 };
 
 constexpr Theme kDuetGreen = {
@@ -634,6 +698,15 @@ constexpr Theme kDuetGreen = {
     .title_button_width = 46,
     .title_text_scale = 2,
     .font_kind = Theme::FontKind::Ttf,
+
+    // chrome tactility (Pass A) - per-theme matrix
+    .tactility_enabled = true,
+    .shadow_intensity_active = 255,
+    .shadow_intensity_inactive = 128,
+    .hover_lift_alpha = 255,
+    .press_alpha = 255,
+    .focus_glow_colour = 0xF5B73A,
+    .cursor_microshadow_enabled = true,
 };
 
 // DuetClassic — the prototype's "classic mode" sibling.
@@ -724,6 +797,15 @@ constexpr Theme kDuetClassic = {
     .title_button_width = 0,
     .title_text_scale = 1,
     .font_kind = Theme::FontKind::Bitmap8x8,
+
+    // chrome tactility (Pass A) - per-theme matrix
+    .tactility_enabled = true,
+    .shadow_intensity_active = 160,
+    .shadow_intensity_inactive = 80,
+    .hover_lift_alpha = 200,
+    .press_alpha = 200,
+    .focus_glow_colour = 0,
+    .cursor_microshadow_enabled = false,
 };
 
 // HighContrast — accessibility-first theme. Pure black bg,
@@ -801,6 +883,15 @@ constexpr Theme kHighContrast = {
     .title_button_width = 0,
     .title_text_scale = 1,
     .font_kind = Theme::FontKind::Bitmap8x8,
+
+    // chrome tactility (Pass A) - per-theme matrix
+    .tactility_enabled = false,
+    .shadow_intensity_active = 0,
+    .shadow_intensity_inactive = 0,
+    .hover_lift_alpha = 0,
+    .press_alpha = 0,
+    .focus_glow_colour = 0xFFFFFF,
+    .cursor_microshadow_enabled = false,
 };
 
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
@@ -986,10 +1077,20 @@ void ThemeApplyToAll()
     }
 }
 
+namespace
+{
+// File-scope PASS tracker for the boot umbrella aggregator. Set
+// by the success branch of ThemeSelfTest; read by
+// ThemeSelfTestPassed(). Initially false so an absent or
+// FAILed self-test never lights up the umbrella line.
+bool s_theme_passed = false;
+} // namespace
+
 void ThemeSelfTest()
 {
     using duetos::arch::SerialWrite;
 
+    s_theme_passed = false;
     const ThemeId saved = g_current;
     bool pass = true;
     u32 failed_step = 0;
@@ -1078,9 +1179,55 @@ void ThemeSelfTest()
 
     g_current = saved;
 
+    // Tactility-matrix invariants (chrome tactility, Pass A spec §8.2).
+    // Every theme that advertises tactility_enabled must populate the
+    // shadow-intensity bytes (otherwise the chrome paints flat — a
+    // silent "I'm enabled but nothing happens" regression). Active
+    // shadow must be >= inactive (focused window should never look
+    // dimmer than a sibling on the same desktop). And HighContrast +
+    // Amber MUST stay opted out — the high-contrast use-case can't
+    // afford the legibility hit, the amber-CRT aesthetic breaks with
+    // soft shadows.
+    if (pass)
+    {
+        for (u32 i = 0; i < static_cast<u32>(ThemeId::kCount); ++i)
+        {
+            const Theme& t = *kThemes[i];
+            if (t.tactility_enabled)
+            {
+                if (t.shadow_intensity_active == 0)
+                {
+                    SerialWrite("[theme-selftest] FAIL (tactility enabled but shadow intensity zero)\n");
+                    KBP_PROBE_V(debug::ProbeId::kTactilityThemeMismatch, i);
+                    mark_fail(6);
+                    break;
+                }
+                if (t.shadow_intensity_active < t.shadow_intensity_inactive)
+                {
+                    SerialWrite("[theme-selftest] FAIL (active shadow dimmer than inactive)\n");
+                    KBP_PROBE_V(debug::ProbeId::kTactilityThemeMismatch, i);
+                    mark_fail(6);
+                    break;
+                }
+            }
+        }
+    }
+    if (pass)
+    {
+        if (kThemes[static_cast<u32>(ThemeId::HighContrast)]->tactility_enabled ||
+            kThemes[static_cast<u32>(ThemeId::Amber)]->tactility_enabled)
+        {
+            SerialWrite("[theme-selftest] FAIL (HighContrast/Amber must opt out)\n");
+            KBP_PROBE(debug::ProbeId::kTactilityThemeMismatch);
+            mark_fail(7);
+        }
+    }
+
     if (pass)
     {
         SerialWrite("[theme] self-test OK (palette table + name round-trip + cycle)\n");
+        SerialWrite("[theme-selftest] tactility-matrix PASS (10/10, hc-amber-opt-out=verified)\n");
+        s_theme_passed = true;
     }
     else
     {
@@ -1091,6 +1238,64 @@ void ThemeSelfTest()
         msg[o] = '\0';
         SerialWrite(msg);
     }
+}
+
+// ----- Tactility runtime override -----
+//
+// `-1` = follow active theme's compile-time tactility_enabled.
+// `0` = force OFF (every chrome path reads ThemeTactilityEffective
+//       as false, falls back to solid-colour paint).
+// `1` = force ON (overrides HighContrast / Amber opt-out — useful
+//       for screenshot capture but cosmetically wrong; expected to
+//       be a debugging affordance only).
+constinit i8 g_tactility_override = -1;
+
+i8 ThemeTactilityOverride()
+{
+    return g_tactility_override;
+}
+
+void ThemeSetTactilityOverride(i8 v)
+{
+    // Clamp to {-1, 0, 1}; any other value collapses to -1
+    // (the "follow theme default" state), so a typo in a
+    // cmdline never leaves the system in a wedged third state.
+    if (v == 0 || v == 1 || v == -1)
+    {
+        g_tactility_override = v;
+    }
+    else
+    {
+        g_tactility_override = -1;
+    }
+}
+
+bool ThemeTactilityEffective()
+{
+    const i8 ov = g_tactility_override;
+    if (ov == 0)
+    {
+        return false;
+    }
+    if (ov == 1)
+    {
+        return true;
+    }
+    return ThemeCurrent().tactility_enabled;
+}
+
+u8 ThemeIntensityEffective(u8 raw)
+{
+    if (raw == 0 && g_tactility_override == 1)
+    {
+        return kThemeForceOnDefaultIntensity;
+    }
+    return raw;
+}
+
+bool ThemeSelfTestPassed()
+{
+    return s_theme_passed;
 }
 
 } // namespace duetos::drivers::video

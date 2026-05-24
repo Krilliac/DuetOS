@@ -174,6 +174,13 @@ void FramebufferClear(u32 rgb);
 /// that care are expected to clip up front. No-op if !Available().
 void FramebufferPutPixel(u32 x, u32 y, u32 rgb);
 
+/// Read one pixel from the LIVE framebuffer at (x, y). Returns
+/// `0` for out-of-range coordinates or `!Available()`. Bypasses
+/// the compose shadow buffer — callers that need "what was just
+/// written this compose pass" must finish their pass + EndCompose
+/// first. The cursor backing-store sampler is the primary client.
+u32 FramebufferReadPixel(u32 x, u32 y);
+
 /// Alpha-blend one pixel using src-over. `argb` is 0xAARRGGBB. The
 /// high byte is the source alpha (0..255). Fast paths handle
 /// `alpha == 0` (no-op) and `alpha == 0xFF` (opaque write).
@@ -181,7 +188,7 @@ void FramebufferPutPixel(u32 x, u32 y, u32 rgb);
 /// The pixel-write goes through the same compose / direct-MMIO
 /// selector as `FramebufferPutPixel`, and the damage rect is
 /// extended to cover `(x, y, 1, 1)`.
-void FramebufferPutPixelAlpha(u32 x, u32 y, u32 argb);
+void FramebufferBlendPixel(u32 x, u32 y, u32 argb);
 
 /// Fill the axis-aligned rect [x, x+w) x [y, y+h) with `rgb`.
 /// Clipped to the surface; passing a rect that's entirely off-screen
@@ -210,7 +217,25 @@ void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness);
 /// (titlebar washes, hover tints, accent bars) the painted
 /// surface is small enough that the cost is negligible. Avoid
 /// blending the whole framebuffer in a hot loop.
-void FramebufferFillRectAlpha(u32 x, u32 y, u32 w, u32 h, u32 argb);
+void FramebufferBlendFill(u32 x, u32 y, u32 w, u32 h, u32 argb);
+
+/// Alpha-blend a `w × h` ARGB8888 source bitmap onto the live
+/// surface at `(x, y)`. `src_rgba` is row-major; `src_pitch_px`
+/// is the row stride in PIXELS (= u32 count, not bytes), allowing
+/// a clipped subrect of a larger source. The blend is Porter-Duff
+/// "src over dst" — pixels with `(src >> 24) & 0xFF == 0` are
+/// skipped entirely (the sparse-atlas fast path the soft-shadow
+/// renderer relies on). Returns the count of pixels actually
+/// blended (non-zero alpha after clipping); 0 on no-op.
+///
+/// Routes through the compose shadow when active, matching
+/// `FramebufferBlendFill`. Clipped to the surface; an entirely
+/// off-screen rect fires `KBP_PROBE(kBlendRangeOob)` and returns 0.
+///
+/// No-op if `!Available()` or `src_rgba == nullptr`. Long-term
+/// the shadow-atlas renderer is the only chrome caller; ad-hoc
+/// per-pixel work should still go through `FramebufferBlendPixel`.
+usize FramebufferBlendRgba(u32 x, u32 y, u32 w, u32 h, const u32* src_rgba, u32 src_pitch_px);
 
 /// Fill [x, x+w) x [y, y+h) with a vertical linear gradient
 /// from `top_rgb` at row y to `bot_rgb` at row y+h-1. Both
@@ -423,6 +448,23 @@ u32 StringPixelWidthScaled(const char* text, u32 scale);
 /// No-op if !Available().
 void FramebufferSelfTest();
 
+/// Boot-time round-trip self-test for the alpha-blend primitives.
+/// Paints a known pixel, blends a 100%-alpha fill (must replace),
+/// blends a 50%-alpha fill (must land near the midpoint), restores
+/// the saved pixel. PASS line emits to COM1; FAIL fires
+/// `KBP_PROBE(kBlendRangeOob)` and emits a sentinel so the boot-
+/// log analyzer can detect a blend-math regression without a visual
+/// inspection. SKIPs cleanly when `!Available()` or while a compose
+/// pass is active (live-FB read-back is the wrong target then).
+void BlendSelfTest();
+
+/// Returns true iff the last BlendSelfTest() call passed. Used by
+/// the boot bringup's tactility umbrella aggregator to emit a
+/// single [tactility-selftest] PASS line when every sub-test
+/// passed (spec §8.2). False until BlendSelfTest has run; false
+/// for SKIP or FAIL outcomes.
+bool BlendSelfTestPassed();
+
 /// Re-bind the framebuffer driver to a new physical base +
 /// dimensions. Called after a GPU-side mode-set (Bochs VBE,
 /// future Intel/AMD/NVIDIA modeset) so the compositor paints at
@@ -494,10 +536,10 @@ void FramebufferResetDamage();
 
 /// Begin an offscreen compose pass. While compose is active every
 /// pixel-write primitive in this header (`FramebufferPutPixel`,
-/// `FillRect`, `Blit`, `FillRectAlpha`, `FillRectGradient` and
-/// every primitive that lowers onto them) targets a shadow buffer in
-/// normal RAM instead of the live MMIO framebuffer. Reads inside
-/// `FillRectAlpha` likewise read the shadow, so per-pixel
+/// `FillRect`, `Blit`, `FramebufferBlendFill`, `FillRectGradient`
+/// and every primitive that lowers onto them) targets a shadow
+/// buffer in normal RAM instead of the live MMIO framebuffer. Reads
+/// inside `FramebufferBlendFill` likewise read the shadow, so per-pixel
 /// `src-over` blending finally composites against whatever was
 /// painted earlier in the same compose pass — which is what the
 /// "real compositor" calls in `widget.cpp::DesktopCompose` need to

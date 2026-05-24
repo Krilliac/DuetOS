@@ -144,6 +144,31 @@ if [ "$failn" -gt 0 ]; then
 fi
 
 hr
+echo "TACTILITY (chrome tactility Pass A)"
+# The chrome-tactility plan added four PASS sentinels: per-effect
+# self-tests for blend + shadow + theme-tactility-matrix, plus the
+# umbrella line that fires only when all three sub-tests passed.
+# Any associated probe fire is a regression even if everything else
+# in this section looks green.
+tact_blend=$(gc '\[blend-selftest\] PASS')
+tact_shadow=$(gc '\[shadow-selftest\] PASS')
+tact_matrix=$(gc '\[theme-selftest\] tactility-matrix PASS')
+tact_umbrella=$(gc '\[tactility-selftest\] PASS')
+tact_probes=$(gc 'blend-range-oob|shadow-atlas-invalid|tactility-theme-mismatch')
+echo "  blend=${tact_blend}  shadow=${tact_shadow}  theme-matrix=${tact_matrix}  umbrella=${tact_umbrella}"
+echo "  probe fires=${tact_probes}"
+if [ "$tact_probes" -gt 0 ]; then
+    g 'blend-range-oob|shadow-atlas-invalid|tactility-theme-mismatch' | head -3 | sed 's/^/  !! /'
+    rc=1
+fi
+# Umbrella requires all three sub-tests; if any sub PASS is zero but
+# umbrella > 0, that's a wiring bug in the bringup aggregator.
+if [ "$tact_umbrella" -gt 0 ] && { [ "$tact_blend" -eq 0 ] || [ "$tact_shadow" -eq 0 ] || [ "$tact_matrix" -eq 0 ]; }; then
+    echo "  !! umbrella PASS without all sub-tests (bringup aggregator wiring bug)"
+    rc=1
+fi
+
+hr
 echo "LOCKDEP"
 invn=$(gc 'inversion detected')
 if [ "$invn" -gt 0 ]; then

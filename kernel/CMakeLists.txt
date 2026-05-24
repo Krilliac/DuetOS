@@ -773,6 +773,17 @@ foreach(_svg_name duet-mark topo syscalls-grid)
     list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${_svg_header}")
 endforeach()
 
+# Shadow corner atlas — 32x32 quadratic falloff baked at configure time.
+# Consumed by kernel/drivers/video/shadow.cpp (RenderSoftShadow 9-slice).
+set(_shadow_atlas_header "${CMAKE_CURRENT_BINARY_DIR}/generated_shadow_atlas.h")
+add_custom_command(
+    OUTPUT "${_shadow_atlas_header}"
+    COMMAND python3 "${CMAKE_SOURCE_DIR}/tools/build/gen_shadow_atlas.py" "${_shadow_atlas_header}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/tools/build/gen_shadow_atlas.py"
+    COMMENT "Baking shadow atlas (32x32 quadratic falloff)"
+    VERBATIM)
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${_shadow_atlas_header}")
+
 # ----------------------------------------------------------------------------
 # Userland DLLs embedded into the kernel image. Each entry retires
 # a slice of the legacy flat-stub-page entries by providing real

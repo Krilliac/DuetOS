@@ -131,7 +131,61 @@ fi
 # parallel as a job matrix. Keeping the ISO sidecar means the
 # always-on boot=desktop / boot=tty entries stay unchanged for the
 # default `tools/qemu/run.sh` invocation (no profile -> full boot).
+# `DUETOS_EXTRA_CMDLINE` sidecar — when set, builds an ISO sidecar
+# that appends the given string to the multiboot2 cmdline. Lets a
+# caller select a non-default theme / cap-audit level / etc. without
+# touching the canonical grub.cfg. Mutually exclusive with
+# DUETOS_SMOKE_PROFILE (which has its own kernel-routing semantics);
+# if both are set, SMOKE_PROFILE wins. Default empty (no sidecar).
+EXTRA_CMDLINE="${DUETOS_EXTRA_CMDLINE:-}"
+
 SMOKE_PROFILE="${DUETOS_SMOKE_PROFILE:-}"
+if [[ -z "${SMOKE_PROFILE}" && -n "${EXTRA_CMDLINE}" ]]; then
+    if ! command -v grub-mkrescue >/dev/null 2>&1; then
+        echo "error: DUETOS_EXTRA_CMDLINE requires grub-mkrescue" >&2
+        exit 1
+    fi
+    EXTRA_TAG="$(printf '%s' "${EXTRA_CMDLINE}" | tr -c 'a-zA-Z0-9' '_' | cut -c1-32)"
+    EXTRA_ISO_STAGE="${BUILD_DIR}/extra-iso-stage-${EXTRA_TAG}"
+    EXTRA_ISO="${BUILD_DIR}/duetos-extra-${EXTRA_TAG}.iso"
+    rm -rf "${EXTRA_ISO_STAGE}"
+    mkdir -p "${EXTRA_ISO_STAGE}/boot/grub"
+    cp "${KERNEL_ELF}" "${EXTRA_ISO_STAGE}/boot/duetos-kernel.elf"
+    # Mirror the video-mode setup from the canonical boot/grub/grub.cfg
+    # so the multiboot2 framebuffer-request tag is honoured — without
+    # this GRUB skips the gfx mode set, no framebuffer tag reaches the
+    # kernel, and the compositor self-tests SKIP because
+    # FramebufferAvailable() is false.
+    cat > "${EXTRA_ISO_STAGE}/boot/grub/grub.cfg" <<EOF
+if loadfont unicode ; then
+    insmod gfxterm
+    if [ "\${feature_all_video_module}" = "y" ] ; then
+        insmod all_video
+    else
+        insmod vbe
+        insmod vga
+        insmod efi_gop
+        insmod efi_uga
+    fi
+    set gfxmode=1024x768x32
+    set gfxpayload=keep
+    terminal_output gfxterm
+fi
+set timeout=0
+set default=0
+menuentry "DuetOS — extra cmdline" {
+    multiboot2 /boot/duetos-kernel.elf boot=desktop autologin=1 ${EXTRA_CMDLINE}
+    boot
+}
+EOF
+    grub-mkrescue --compress=xz -o "${EXTRA_ISO}" "${EXTRA_ISO_STAGE}" >/dev/null 2>&1
+    [[ -f "${EXTRA_ISO}" ]] || { echo "error: failed to build extra-cmdline ISO ${EXTRA_ISO}" >&2; exit 1; }
+    ISO_IMAGE="${EXTRA_ISO}"
+    BOOT_SOURCE=(-cdrom "${ISO_IMAGE}" -boot d)
+    echo "[run.sh] extra cmdline ISO: ${ISO_IMAGE}"
+    echo "[run.sh] extra cmdline    : ${EXTRA_CMDLINE}"
+fi
+
 if [[ -n "${SMOKE_PROFILE}" ]]; then
     if ! command -v grub-mkrescue >/dev/null 2>&1; then
         echo "error: DUETOS_SMOKE_PROFILE=${SMOKE_PROFILE} requires grub-mkrescue" >&2
