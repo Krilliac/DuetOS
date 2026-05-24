@@ -351,8 +351,7 @@ u64 OpDestroyRenderPass(arch::TrapFrame* frame)
 u64 OpCreateGraphicsPipeline(arch::TrapFrame* frame)
 {
     vk::VkPipeline out = 0;
-    const vk::VkResult r =
-        vk::VkCreateGraphicsPipeline(frame->rdx, frame->r10, frame->r8, frame->r9, &out);
+    const vk::VkResult r = vk::VkCreateGraphicsPipeline(frame->rdx, frame->r10, frame->r8, frame->r9, &out);
     return (r == vk::VkResult::Success) ? out : 0;
 }
 
@@ -371,8 +370,7 @@ u64 OpDestroyPipeline(arch::TrapFrame* frame)
 
 u64 OpCmdBindPipeline(arch::TrapFrame* frame)
 {
-    return (vk::VkCmdBindPipeline(frame->rdx, vk::VkPipelineBindPoint::Graphics, frame->r10) ==
-            vk::VkResult::Success)
+    return (vk::VkCmdBindPipeline(frame->rdx, vk::VkPipelineBindPoint::Graphics, frame->r10) == vk::VkResult::Success)
                ? 1
                : 0;
 }
@@ -412,8 +410,7 @@ u64 OpCmdBindIndexBuffer(arch::TrapFrame* frame)
 u64 OpUpdateDescriptorSet(arch::TrapFrame* frame)
 {
     return (vk::VkUpdateDescriptorSet(frame->rdx, static_cast<u32>(frame->r10),
-                                       static_cast<vk::VkDescriptorType>(frame->r8), frame->r9) ==
-            vk::VkResult::Success)
+                                      static_cast<vk::VkDescriptorType>(frame->r8), frame->r9) == vk::VkResult::Success)
                ? 1
                : 0;
 }
@@ -544,19 +541,13 @@ void DoVkCall(arch::TrapFrame* frame)
 {
     if (frame == nullptr)
         return;
-    using ::duetos::core::kVkOpCreateDevice;
-    using ::duetos::core::kVkOpCreateInstance;
-    using ::duetos::core::kVkOpDestroyDevice;
-    using ::duetos::core::kVkOpDestroyInstance;
-    using ::duetos::core::kVkOpDeviceWaitIdle;
-    using ::duetos::core::kVkOpEnumeratePhysicalDevices;
-    using ::duetos::core::kVkOpGetDeviceQueue;
     using ::duetos::core::kVkOpAllocateCommandBuffer;
     using ::duetos::core::kVkOpAllocateDescriptorSet;
     using ::duetos::core::kVkOpAllocateMemory;
     using ::duetos::core::kVkOpBeginCommandBuffer;
     using ::duetos::core::kVkOpBindBufferMemory;
     using ::duetos::core::kVkOpBindImageMemory;
+    using ::duetos::core::kVkOpClearFramebufferRgba;
     using ::duetos::core::kVkOpCmdBindDescriptorSet;
     using ::duetos::core::kVkOpCmdBindIndexBuffer;
     using ::duetos::core::kVkOpCmdBindPipeline;
@@ -564,38 +555,44 @@ void DoVkCall(arch::TrapFrame* frame)
     using ::duetos::core::kVkOpCmdClearColorImage;
     using ::duetos::core::kVkOpCmdDispatch;
     using ::duetos::core::kVkOpCmdDraw;
+    using ::duetos::core::kVkOpCreateBuffer;
     using ::duetos::core::kVkOpCreateCommandPool;
     using ::duetos::core::kVkOpCreateComputePipeline;
     using ::duetos::core::kVkOpCreateDescriptorPool;
     using ::duetos::core::kVkOpCreateDescriptorSetLayout;
+    using ::duetos::core::kVkOpCreateDevice;
     using ::duetos::core::kVkOpCreateGraphicsPipeline;
+    using ::duetos::core::kVkOpCreateImage;
+    using ::duetos::core::kVkOpCreateInstance;
     using ::duetos::core::kVkOpCreatePipelineLayout;
     using ::duetos::core::kVkOpCreateRenderPass;
-    using ::duetos::core::kVkOpDestroyCommandPool;
-    using ::duetos::core::kVkOpDestroyDescriptorPool;
-    using ::duetos::core::kVkOpDestroyDescriptorSetLayout;
-    using ::duetos::core::kVkOpDestroyPipeline;
-    using ::duetos::core::kVkOpDestroyPipelineLayout;
-    using ::duetos::core::kVkOpDestroyRenderPass;
-    using ::duetos::core::kVkOpEndCommandBuffer;
-    using ::duetos::core::kVkOpQueueSubmit;
-    using ::duetos::core::kVkOpUpdateDescriptorSet;
-    using ::duetos::core::kVkOpClearFramebufferRgba;
-    using ::duetos::core::kVkOpCreateBuffer;
-    using ::duetos::core::kVkOpCreateImage;
     using ::duetos::core::kVkOpCreateShaderModule;
     using ::duetos::core::kVkOpCreateSurfaceDuet;
     using ::duetos::core::kVkOpDestroyBuffer;
+    using ::duetos::core::kVkOpDestroyCommandPool;
+    using ::duetos::core::kVkOpDestroyDescriptorPool;
+    using ::duetos::core::kVkOpDestroyDescriptorSetLayout;
+    using ::duetos::core::kVkOpDestroyDevice;
     using ::duetos::core::kVkOpDestroyImage;
+    using ::duetos::core::kVkOpDestroyInstance;
+    using ::duetos::core::kVkOpDestroyPipeline;
+    using ::duetos::core::kVkOpDestroyPipelineLayout;
+    using ::duetos::core::kVkOpDestroyRenderPass;
     using ::duetos::core::kVkOpDestroyShaderModule;
     using ::duetos::core::kVkOpDestroySurface;
+    using ::duetos::core::kVkOpDeviceWaitIdle;
+    using ::duetos::core::kVkOpEndCommandBuffer;
+    using ::duetos::core::kVkOpEnumeratePhysicalDevices;
     using ::duetos::core::kVkOpFreeMemory;
+    using ::duetos::core::kVkOpGetDeviceQueue;
     using ::duetos::core::kVkOpGetInstanceVersion;
     using ::duetos::core::kVkOpGetStatsCounter;
     using ::duetos::core::kVkOpMapMemory;
     using ::duetos::core::kVkOpPresent;
+    using ::duetos::core::kVkOpQueueSubmit;
     using ::duetos::core::kVkOpQueueWaitIdle;
     using ::duetos::core::kVkOpUnmapMemory;
+    using ::duetos::core::kVkOpUpdateDescriptorSet;
     const u64 op = frame->rdi;
     switch (static_cast<::duetos::core::VkOp>(op))
     {
