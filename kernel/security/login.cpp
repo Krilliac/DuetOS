@@ -32,6 +32,7 @@
 #include "drivers/video/theme.h"
 #include "drivers/video/shadow.h"
 #include "drivers/video/wallpaper.h"
+#include "drivers/video/widget.h"
 #include "log/klog.h"
 #include "sched/sched.h"
 #include "security/auth.h"
@@ -46,6 +47,7 @@ using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
 using duetos::drivers::video::FramebufferBeginCompose;
 using duetos::drivers::video::FramebufferDrawCircle;
+using duetos::drivers::video::FramebufferDrawRect;
 using duetos::drivers::video::FramebufferDrawString;
 using duetos::drivers::video::FramebufferDrawStringScaled;
 using duetos::drivers::video::FramebufferEndCompose;
@@ -55,6 +57,7 @@ using duetos::drivers::video::FramebufferGet;
 using duetos::drivers::video::RenderSoftShadowWithStroke;
 using duetos::drivers::video::ThemeCurrent;
 using duetos::drivers::video::WallpaperPaint;
+using duetos::drivers::video::WindowPaintFocusGlow;
 
 namespace
 {
@@ -425,10 +428,9 @@ void GuiRepaint()
     // Shadow colour is pure black (0x000000); stroke colour is the theme's
     // window_border — matches window chrome language. radius=16 / opacity=120
     // gives a soft, medium-lift halo consistent with the Pass A window chrome.
-    RenderSoftShadowWithStroke(
-        static_cast<i32>(card_x), static_cast<i32>(card_y), card_w, card_h,
-        /*radius=*/16, /*opacity=*/120, /*colour=*/0x000000u,
-        /*stroke_colour=*/ThemeCurrent().window_border);
+    RenderSoftShadowWithStroke(static_cast<i32>(card_x), static_cast<i32>(card_y), card_w, card_h,
+                               /*radius=*/16, /*opacity=*/120, /*colour=*/0x000000u,
+                               /*stroke_colour=*/ThemeCurrent().window_border);
 
     // 4. Avatar circle + monogram + username + role text.
     //    Pass B Task 14.
@@ -448,15 +450,11 @@ void GuiRepaint()
     // Scale the avatar centre to the actual framebuffer resolution.
     const u32 avatar_cx = card_x + 36u * fb.width / 1024u;
     const u32 avatar_cy = card_y + 40u * fb.height / 768u;
-    const u32 avatar_r  = 20u * fb.width / 1024u;
+    const u32 avatar_r = 20u * fb.width / 1024u;
 
     // Filled circle (card-body colour) then 1-px accent stroke ring.
-    FramebufferFillCircle(
-        static_cast<i32>(avatar_cx), static_cast<i32>(avatar_cy),
-        avatar_r, avatar_bg);
-    FramebufferDrawCircle(
-        static_cast<i32>(avatar_cx), static_cast<i32>(avatar_cy),
-        avatar_r, accent);
+    FramebufferFillCircle(static_cast<i32>(avatar_cx), static_cast<i32>(avatar_cy), avatar_r, avatar_bg);
+    FramebufferDrawCircle(static_cast<i32>(avatar_cx), static_cast<i32>(avatar_cy), avatar_r, accent);
 
     // Monogram — first character of the current username, uppercased.
     // Falls back to '?' if the username buffer is empty (shouldn't happen
@@ -476,9 +474,7 @@ void GuiRepaint()
     // Centre the 2x-scaled 8×8 bitmap glyph (16×16 rendered pixels)
     // inside the circle.  Offset by half the rendered glyph size so
     // the character visual centre lands on avatar_cx / avatar_cy.
-    FramebufferDrawStringScaled(
-        avatar_cx - 8u, avatar_cy - 8u,
-        mono_str, accent, avatar_bg, /*scale=*/2);
+    FramebufferDrawStringScaled(avatar_cx - 8u, avatar_cy - 8u, mono_str, accent, avatar_bg, /*scale=*/2);
 
     // Username and role text rendered to the right of the avatar.
     // name_x is avatar right-edge + 12 px of gap on the reference grid.
@@ -486,14 +482,56 @@ void GuiRepaint()
     const u32 name_y = card_y + 32u * fb.height / 768u;
     const u32 role_y = card_y + 48u * fb.height / 768u;
 
-    FramebufferDrawString(name_x, name_y,
-                          (user != nullptr && user[0] != '\0') ? user : "<no user>",
+    FramebufferDrawString(name_x, name_y, (user != nullptr && user[0] != '\0') ? user : "<no user>",
                           ThemeCurrent().banner_fg, ThemeCurrent().taskbar_bg);
 
     // GAP: role hardcoded — RBAC role-per-user lookup not wired into
     //      login.cpp yet, revisit when RBAC v1 persistence lands.
-    FramebufferDrawString(name_x, role_y, "Administrator",
-                          ThemeCurrent().banner_fg, ThemeCurrent().taskbar_bg);
+    FramebufferDrawString(name_x, role_y, "Administrator", ThemeCurrent().banner_fg, ThemeCurrent().taskbar_bg);
+
+    // 5. Password field — single-line accent-stroked rect with masked echo.
+    //    Pass B Task 15.
+    //
+    //    Positioned in the lower half of the card, below the avatar/name
+    //    block. On a 1024×768 reference: 20 px inset from the card left,
+    //    86 px down from the card top (below the 40-px avatar + 40-px gap),
+    //    spanning the card width minus 40 px of horizontal padding, 28 px tall.
+    const u32 pwd_x = card_x + 20u * fb.width / 1024u;
+    const u32 pwd_y = card_y + 86u * fb.height / 768u;
+    const u32 pwd_w = card_w - 40u * fb.width / 1024u;
+    const u32 pwd_h = 28u * fb.height / 768u;
+
+    // Field body: taskbar_bg gives the same elevated-panel surface used by the
+    // avatar fill — reads as a recessed input well inside the card.
+    FramebufferFillRect(pwd_x, pwd_y, pwd_w, pwd_h, ThemeCurrent().taskbar_bg);
+
+    // Focus indicator: Pass A WindowPaintFocusGlow when the password field has
+    // keyboard focus; thin window_border stroke otherwise (matches Task 13).
+    if (g_login.focus == Field::Password)
+    {
+        WindowPaintFocusGlow(pwd_x, pwd_y, pwd_w, pwd_h, /*is_pe_window=*/false);
+    }
+    else
+    {
+        FramebufferDrawRect(pwd_x, pwd_y, pwd_w, pwd_h, ThemeCurrent().window_border, 1u);
+    }
+
+    // Masked password echo: render one asterisk per typed character.
+    {
+        char masked[64];
+        const u32 cap = static_cast<u32>(sizeof(masked)) - 1u;
+        const u32 n = g_login.password_len < cap ? g_login.password_len : cap;
+        for (u32 i = 0; i < n; ++i)
+        {
+            masked[i] = '*';
+        }
+        masked[n] = '\0';
+        if (n > 0u)
+        {
+            FramebufferDrawString(pwd_x + 8u * fb.width / 1024u, pwd_y + 10u * fb.height / 768u, masked,
+                                  ThemeCurrent().banner_fg, ThemeCurrent().taskbar_bg);
+        }
+    }
 
     // Flush offscreen shadow → live framebuffer (no-op if BeginCompose
     // fell back to direct mode).
