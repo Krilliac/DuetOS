@@ -191,3 +191,9 @@ localdev.ps1
 
 # End of DuetOS .gitignore
 /docs/example-boot-log-debug.txt
+
+##########################
+# Brainstorm / spec tools #
+##########################
+
+.superpowers/
