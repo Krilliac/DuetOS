@@ -211,6 +211,8 @@
 #include "diag/fix_journal_persist.h"
 #include "diag/introspect.h"
 #include "diag/selfthink.h"
+#include "diag/selfthink_baselines.h"
+#include "env/autonomic_feedback.h"
 #include "diag/gdb_server.h"
 #include "diag/minidump.h"
 #include "diag/perf_profile.h"
@@ -1993,6 +1995,17 @@ void BootBringupDevices(bool force_net_smoke)
     // Runs after the introspect selftest so the SelfPortrait's
     // `introspect_*` fields have a populated source to copy.
     DUETOS_BOOT_SELFTEST(duetos::diag::selfthink::SelfthinkSelfTest());
+
+    // Autonomic feedback evaluator. Exercises the pre/post
+    // classification switch over every AutoAction enum value.
+    // Pure observation; does not enqueue or fire any actuator.
+    DUETOS_BOOT_SELFTEST(duetos::env::feedback::SelfTest());
+
+    // Rolling-baseline per-metric anomaly detector. Pushes a
+    // controlled inlier sample run + asserts the classifier's
+    // mean is not flagged. Reuses the FreeFrames metric channel;
+    // subsequent kselfthink ticks continue feeding it normally.
+    DUETOS_BOOT_SELFTEST(duetos::diag::selfthink::baselines::SelfTest());
 
     // Session restore: read SESSION.CFG and apply the saved
     // theme + per-app window positions. No-op on first boot

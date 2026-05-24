@@ -5,9 +5,9 @@
 > **Execution context:** Kernel — snapshot + ring reads are safe from any
 > context; the `kselfthink` thread runs in task context only
 >
-> **Maturity:** v0 (Slice A landed) — snapshot + causal ring + shell. The
-> closed-loop autonomic-feedback layer and the narrative writer ship in
-> follow-up slices.
+> **Maturity:** v0 (Slices A + B landed) — snapshot + causal ring + shell,
+> plus closed-loop autonomic feedback and rolling per-metric baselines.
+> The operator narrative + cross-boot persistence ship in Slice C.
 
 ## Overview
 
@@ -114,11 +114,74 @@ land on a pre-assembled snapshot.
 Pattern matches `kheartbeat` exactly — no global tick hook list, no new
 init phase.
 
+## Closed-loop autonomic feedback (Slice B)
+
+The autonomic engine [decides + acts](Environment.md), but until this
+slice it had no way to *verify* whether each action achieved its goal.
+`kernel/env/autonomic_feedback.{h,cpp}` adds the missing leg:
+
+- `AutonomicApply` calls `CapturePreMetrics()` once per action set
+  (heap %, physical %, runtime-checker issue total).
+- For every action in the set it enqueues a `FeedbackEntry` with the
+  pre-snapshot + `check_at_tick = now + 10` (100 ms at 100 Hz).
+- `kselfthink` calls `feedback::Tick()` on every wake. Entries whose
+  deadline has passed get classified:
+  - **Improved** — targeted metric moved expected direction by >2 %.
+  - **NoChange** — within ±2 % noise floor.
+  - **Worsened** — moved against expected direction; fires
+    `kAutonomicOutcomeMissed` so an attached GDB can break right at
+    the regression.
+  - **Diagnostic** — action class has no quantifiable single-metric
+    move (`SecurityEscalate`, `SchedPerformance` / `Balanced` /
+    `PowerSave`). Recorded for visibility only.
+- Every classified outcome appends a `CausalKind::AutoAction` entry
+  to the causal chain encoding `(outcome_code << 32) | rule_id`.
+
+The classification table per `AutoAction`:
+
+| Action | Watch | Direction |
+|--------|-------|-----------|
+| `MemReclaim` | `heap_used_pct` | should decrease |
+| `FootprintTrim` | `phys_used_pct` | should decrease |
+| `ForceHealthScan` | `health_issues_total` | any change visible |
+| `SecurityEscalate` | — | diagnostic only |
+| `SchedPerformance` / `SchedBalanced` / `SchedPowerSave` | — | diagnostic only |
+
+## Rolling per-metric baselines (Slice B)
+
+`kernel/diag/selfthink_baselines.{h,cpp}` adds a second leg of anomaly
+detection that complements the runtime_checker's hard-coded invariants.
+For each tracked metric:
+
+- 256-sample ring of values (recent history).
+- `Read(metric)` returns `count`, `last`, `mean`, `variance`, `stddev`
+  computed on demand via a two-pass integer walk (no FP, no Welford
+  precision drift).
+- `IsAnomaly(metric, value, k = 3)` returns true when
+  `|value - mean| > k * stddev`. Returns false until at least 8
+  samples are populated (insufficient history to call anomaly).
+- Anomalies append `CausalKind::Anomaly` entries to the causal chain
+  with the metric id and offending value, so the same chain dump
+  shows them alongside probe fires and autonomic actions.
+
+The v0 metric set is intentionally small:
+
+| MetricId | Source | Notes |
+|----------|--------|-------|
+| `FreeFrames` | `mm::FreeFramesCount()` | Sudden drops → leak or pressure spike |
+| `HeapUsedPct` | `ResmonSnapshot::heap_used_pct` | Sudden rises → allocator churn or leak |
+| `RunnableTasks` | `SchedStats::tasks_live` | Sudden rises → spawn storm |
+
+Adding a new metric is enum + sampler-callsite-only — the ring,
+classifier, and stats accessor are metric-agnostic.
+
 ## Shell command: `selfthink`
 
 ```text
 selfthink                  — print the current SelfPortrait
 selfthink causality [N]    — print the last N causal entries (default 32)
+selfthink baselines        — per-metric rolling mean / stddev / anomalies
+selfthink feedback         — autonomic action outcomes (recent + lifetime stats)
 ```
 
 The portrait dump is one section per `SelfPortrait` surface, each line
@@ -127,18 +190,22 @@ short enough for `grep` to extract a single field cleanly.
 Read-only; no cap gate (symmetric with `resmon`, `ps`, `free`, `dintro`,
 `probe list`).
 
-## Boot self-test
+## Boot self-tests
 
-`SelfthinkSelfTest()` runs inside the boot self-test battery
+Three tests run inside the boot self-test battery
 (`DUETOS_BOOT_SELFTEST`, see [build_config.h](../../kernel/util/build_config.h)):
 
-1. Snapshot completes without faulting and arithmetic is coherent.
-2. Causal ring round-trip — append a sentinel, walk to find it.
-3. Tag NUL-termination — append a 63-char tag, assert truncation.
+- **`SelfthinkSelfTest()`** — snapshot completes + arithmetic
+  coherent; causal-ring round-trip; tag NUL-termination.
+- **`env::feedback::SelfTest()`** — synthetic Enqueue +
+  EvaluateAction classification across Improved / Worsened /
+  NoChange / Diagnostic.
+- **`baselines::SelfTest()`** — push 16 inliers + assert mean is
+  not flagged + outlier flag holds on a clean ring + IntSqrt
+  sanity.
 
-Silent on PASS at default levels; emits one explicit
-`[I] diag/selfthink : selftest pass causal_total val=N` line so CI
-greps have positive evidence. On FAIL fires
+Each emits one explicit pass-line so CI greps have positive
+evidence; on FAIL fires
 [`kBootSelftestFail`](../../kernel/debug/probes.h) with a sub-check id
 so an attached GDB can break at the exact frame.
 
@@ -160,10 +227,10 @@ so an attached GDB can break at the exact frame.
 
 Layered slices, each independently shippable:
 
-- **Slice A (this page)** — Snapshot + causal ring + shell + self-test.
-- **Slice B** — Closed-loop autonomic feedback (pre/post telemetry
-  around each `AutoAction`, missed-outcome probe fire) + rolling
-  histogram baselines per metric for learned anomaly detection.
+- **Slice A (landed)** — Snapshot + causal ring + shell + self-test.
+- **Slice B (landed)** — Closed-loop autonomic feedback (pre/post
+  telemetry around each `AutoAction`, missed-outcome probe fire) +
+  rolling per-metric baselines for learned anomaly detection.
 - **Slice C** — Operator-facing narrative (`selfthink why` walks the
   recent chain + portrait and produces English) + cross-boot
   persistence of the causal ring (FAT32 / NVMe) so post-mortems

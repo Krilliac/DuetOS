@@ -298,6 +298,7 @@ void WriteU64Dec(u64 v);
 void WriteU8TwoDigits(u8 v);
 void WriteU64Hex(u64 v, u32 digits = 16);
 void WriteI64Dec(i64 v);
+void WritePadLeft(const char* s, u64 width);
 
 // ---------------------------------------------------------------
 // Trivial info / housekeeping commands (shell_core.cpp). Banner /

@@ -92,4 +92,17 @@ void WriteI64Dec(i64 v)
     }
 }
 
+void WritePadLeft(const char* s, u64 width)
+{
+    u64 len = 0;
+    while (s[len] != '\0')
+        ++len;
+    ConsoleWrite(s);
+    while (len < width)
+    {
+        ConsoleWriteChar(' ');
+        ++len;
+    }
+}
+
 } // namespace duetos::core::shell::internal

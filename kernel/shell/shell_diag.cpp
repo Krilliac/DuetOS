@@ -45,22 +45,6 @@ using duetos::drivers::video::ConsoleWriteln;
 
 constexpr u64 kSnapshotCap = 64; // bounded; matches the "tail N" expectations
 
-// Render `n` left-justified in `width` columns. Caller-supplied
-// counters must hold the printable text within the width — over-
-// long names just print without padding.
-void WritePadLeft(const char* s, u64 width)
-{
-    u64 len = 0;
-    while (s[len] != '\0')
-        ++len;
-    ConsoleWrite(s);
-    while (len < width)
-    {
-        ConsoleWriteChar(' ');
-        ++len;
-    }
-}
-
 // Parse a positive decimal integer from str. Returns true on
 // success; on failure leaves *out unchanged.
 bool ParseU32Dec(const char* str, u32* out)

@@ -19,7 +19,10 @@
 #include "shell/shell.h"
 
 #include "diag/selfthink.h"
+#include "diag/selfthink_baselines.h"
 #include "drivers/video/console.h"
+#include "env/autonomic.h"
+#include "env/autonomic_feedback.h"
 #include "shell/shell_internal.h"
 
 namespace duetos::core::shell::internal
@@ -61,6 +64,8 @@ void SelfthinkUsage()
     ConsoleWrite("usage:\n");
     ConsoleWrite("  selfthink                       — current SelfPortrait\n");
     ConsoleWrite("  selfthink causality [N]         — last N causal entries (default 32)\n");
+    ConsoleWrite("  selfthink baselines             — per-metric rolling mean/stddev/anomalies\n");
+    ConsoleWrite("  selfthink feedback              — autonomic action outcomes\n");
 }
 
 void PrintPortrait()
@@ -226,6 +231,84 @@ u32 ParseLimit(u32 argc, char** argv)
     return (v == 0) ? kDefaultCausalLimit : v;
 }
 
+void PrintBaselines()
+{
+    using duetos::diag::selfthink::baselines::MetricId;
+    using duetos::diag::selfthink::baselines::MetricName;
+    using duetos::diag::selfthink::baselines::Read;
+
+    ConsoleWrite("selfthink baselines (rolling 256-sample window)\n");
+    ConsoleWrite("  metric              count   last        mean        stddev    anomalies\n");
+    for (u32 i = 0; i < static_cast<u32>(MetricId::Count); ++i)
+    {
+        const MetricId id = static_cast<MetricId>(i);
+        const auto s = Read(id);
+        ConsoleWrite("  ");
+        WritePadLeft(MetricName(id), 18);
+        ConsoleWrite("  ");
+        WriteU64Dec(s.count);
+        ConsoleWrite("\t");
+        WriteU64Dec(s.last);
+        ConsoleWrite("\t");
+        WriteU64Dec(s.mean);
+        ConsoleWrite("\t");
+        WriteU64Dec(s.stddev);
+        ConsoleWrite("\t");
+        WriteU64Dec(s.anomalies_observed);
+        ConsoleWrite("\n");
+    }
+}
+
+void PrintFeedback()
+{
+    using duetos::env::AutoAction;
+    using duetos::env::AutoActionName;
+    using duetos::env::AutoRule;
+    using duetos::env::AutoRuleName;
+    using duetos::env::feedback::FeedbackEntry;
+    using duetos::env::feedback::Outcome;
+    using duetos::env::feedback::OutcomeName;
+
+    const auto stats = duetos::env::feedback::StatsRead();
+    ConsoleWrite("autonomic feedback stats: enqueued=");
+    WriteU64Dec(stats.enqueued_total);
+    ConsoleWrite(" evaluated=");
+    WriteU64Dec(stats.evaluated_total);
+    ConsoleWrite(" overflows=");
+    WriteU64Dec(stats.ring_overflows);
+    ConsoleWrite("\n  outcomes  improved=");
+    WriteU64Dec(stats.per_outcome[static_cast<u32>(Outcome::Improved)]);
+    ConsoleWrite(" nochange=");
+    WriteU64Dec(stats.per_outcome[static_cast<u32>(Outcome::NoChange)]);
+    ConsoleWrite(" worsened=");
+    WriteU64Dec(stats.per_outcome[static_cast<u32>(Outcome::Worsened)]);
+    ConsoleWrite(" diagnostic=");
+    WriteU64Dec(stats.per_outcome[static_cast<u32>(Outcome::Diagnostic)]);
+    ConsoleWrite("\n");
+
+    ConsoleWrite("recent entries (newest first):\n");
+    auto cb = +[](const FeedbackEntry& e, void* /*ctx*/) -> bool
+    {
+        if (e.live == 0 && e.tick_fired == 0)
+            return false; // unpopulated slot — stop walk
+        ConsoleWrite("  tick=");
+        WriteU64Dec(e.tick_fired);
+        ConsoleWrite("  rule=");
+        ConsoleWrite(AutoRuleName(static_cast<AutoRule>(e.rule)));
+        ConsoleWrite("  action=");
+        ConsoleWrite(AutoActionName(static_cast<AutoAction>(e.action)));
+        ConsoleWrite("  outcome=");
+        ConsoleWrite(OutcomeName(static_cast<Outcome>(e.outcome)));
+        ConsoleWrite("  pre.heap%=");
+        WriteU64Dec(e.pre.heap_used_pct);
+        ConsoleWrite("\n");
+        return true;
+    };
+    const u32 visited = duetos::env::feedback::RingWalk(cb, nullptr);
+    if (visited == 0)
+        ConsoleWrite("(no feedback entries yet)\n");
+}
+
 void PrintCausality(u32 argc, char** argv)
 {
     const u32 limit = ParseLimit(argc, argv);
@@ -255,6 +338,10 @@ void CmdSelfthink(u32 argc, char** argv)
     const char* sub = argv[1];
     if (StrEq(sub, "causality"))
         PrintCausality(argc, argv);
+    else if (StrEq(sub, "baselines"))
+        PrintBaselines();
+    else if (StrEq(sub, "feedback"))
+        PrintFeedback();
     else
         SelfthinkUsage();
 }

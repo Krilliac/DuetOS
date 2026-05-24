@@ -7,7 +7,9 @@
 #include "diag/fix_journal.h"
 #include "diag/introspect.h"
 #include "diag/runtime_checker.h"
+#include "diag/selfthink_baselines.h"
 #include "env/autonomic.h"
+#include "env/autonomic_feedback.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
@@ -202,6 +204,45 @@ namespace
         // pre-built snapshot rather than reassembling on every
         // call. Cheap — every underlying reader is lock-free.
         g_latest_portrait = SelfPortraitSnapshot();
+
+        // Drive the closed-loop autonomic-feedback evaluator:
+        // any feedback entry whose deadline has passed gets
+        // classified and recorded into the causal chain. Cheap
+        // when the ring is empty (one bounded scan).
+        ::duetos::env::feedback::Tick();
+
+        // Feed the rolling baselines and surface anomalies.
+        // Sample once per metric; check the new sample against
+        // the prior history; if it deviates beyond the
+        // configured k, append a CausalKind::Anomaly entry so
+        // the chain dump shows the deviation alongside probe
+        // fires + autonomic actions.
+        using baselines::MetricId;
+        const u64 free_frames = g_latest_portrait.mm_frames_free;
+        const u64 heap_pct = g_latest_portrait.resmon.heap_used_pct;
+        const u64 runnable = g_latest_portrait.resmon.tasks_live;
+
+        const struct
+        {
+            MetricId id;
+            u64 value;
+        } samples[] = {
+            {MetricId::FreeFrames, free_frames},
+            {MetricId::HeapUsedPct, heap_pct},
+            {MetricId::RunnableTasks, runnable},
+        };
+        for (const auto& s : samples)
+        {
+            // Check BEFORE Sample so the anomaly compares the
+            // new reading against the PRIOR window (current
+            // sample isn't included in its own baseline yet).
+            if (baselines::IsAnomaly(s.id, s.value))
+            {
+                baselines::RecordAnomaly(s.id);
+                CausalRecord(CausalKind::Anomaly, static_cast<u16>(s.id), s.value, 0, "baseline");
+            }
+            baselines::Sample(s.id, s.value);
+        }
     }
 }
 
