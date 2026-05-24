@@ -91,7 +91,7 @@ template <typename E> struct Err
 };
 template <typename E> Err(E) -> Err<E>;
 
-template <typename T, typename E = ErrorCode> class Result
+template <typename T, typename E = ErrorCode> class [[nodiscard]] Result
 {
     static_assert(__is_trivially_copyable(T), "Result<T,E>: T must be trivially copyable in the freestanding kernel");
     static_assert(__is_trivially_copyable(E), "Result<T,E>: E must be trivially copyable");
@@ -129,7 +129,7 @@ template <typename T, typename E = ErrorCode> class Result
 
 // Status-only specialisation — success carries no payload, just a
 // "did it work" flag.
-template <typename E> class Result<void, E>
+template <typename E> class [[nodiscard]] Result<void, E>
 {
     static_assert(__is_trivially_copyable(E), "Result<void,E>: E must be trivially copyable");
 

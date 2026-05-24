@@ -6,6 +6,7 @@
 #include "net/wireless/wifi_diag.h"
 #include "sched/sched.h"
 #include "time/tick.h"
+#include "util/result_check.h"
 
 namespace duetos::net::wireless
 {
@@ -365,7 +366,7 @@ u32 MlmeBuildDefaultRsnIe(u8* out, u32 cap)
     diag::RecordOk(diag::Layer::Mlme, "disconnect", reason, 0, wdev->wdev_id);
     WirelessSetState(wdev, WirelessOpState::Disconnecting);
     if (wdev->ops.Disconnect != nullptr)
-        wdev->ops.Disconnect(wdev, reason);
+        RESULT_LOG_AND_DROP(wdev->ops.Disconnect(wdev, reason), "net/wireless/mlme", "driver Disconnect op");
     WirelessSetState(wdev, WirelessOpState::Idle);
     return ::duetos::core::Result<void>{};
 }

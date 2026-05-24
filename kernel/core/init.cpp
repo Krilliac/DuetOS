@@ -75,6 +75,20 @@ Result<void> InitcallRegister(Phase phase, const char* name, InitcallFn fn)
     return {};
 }
 
+void InitcallRegisterOrPanic(Phase phase, const char* name, InitcallFn fn)
+{
+    auto r = InitcallRegister(phase, name, fn);
+    if (!r)
+    {
+        // Pick the most-specific panic message we can without an
+        // sprintf. The error code tells us which gate refused; the
+        // name (when it survived the null-check) ties the panic to a
+        // source-tree row that grep can find.
+        const char* err = ::duetos::core::ErrorCodeName(r.error());
+        ::duetos::core::Panic(name != nullptr ? name : "core/init", err);
+    }
+}
+
 bool InitcallUnregister(const char* name)
 {
     if (name == nullptr)

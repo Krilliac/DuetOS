@@ -96,12 +96,12 @@ WirelessDevice* WirelessDeviceAt(u32 index)
     return &g_devices[index];
 }
 
-::duetos::core::Result<void> WirelessSetState(WirelessDevice* wdev, WirelessOpState s)
+void WirelessSetState(WirelessDevice* wdev, WirelessOpState s)
 {
     if (wdev == nullptr)
     {
         KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/wdev", "SetState: null wdev");
-        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+        return;
     }
     const auto prev = wdev->op_state;
     wdev->op_state = s;
@@ -111,7 +111,6 @@ WirelessDevice* WirelessDeviceAt(u32 index)
                       static_cast<u64>(prev), "to", static_cast<u64>(s));
     }
     diag::RecordOk(diag::Layer::Wdev, "state-change", static_cast<u64>(prev), static_cast<u64>(s), wdev->wdev_id);
-    return ::duetos::core::Result<void>{};
 }
 
 ::duetos::core::Result<void> WirelessDeliverBeacon(WirelessDevice* wdev, const WirelessFrameRx& f)

@@ -94,6 +94,21 @@ inline constexpr u32 kMaxInitcalls = 64;
 /// should not rely on this for "register once" semantics.
 Result<void> InitcallRegister(Phase phase, const char* name, InitcallFn fn);
 
+/// Convenience wrapper around `InitcallRegister` for boot orchestrators
+/// that cannot meaningfully recover from a registration failure. All
+/// three error modes (null arg, bad phase, registry full) are kernel
+/// programmer bugs — the table size is fixed at compile time
+/// (`kMaxInitcalls`), and the boot bringup TUs hand-roll every
+/// registration with literal names and lambdas. On failure this halts
+/// via `core::Panic` so the bug surfaces during development rather
+/// than silently dropping a phase's worth of work.
+///
+/// Use this for fixed boot-time registrations only. Anything that may
+/// legitimately fail at runtime (an out-of-process registration RPC,
+/// a dynamically loaded module) should keep using `InitcallRegister`
+/// and handle the Err branch.
+void InitcallRegisterOrPanic(Phase phase, const char* name, InitcallFn fn);
+
 /// Remove the first row whose name matches `name`. Returns true if a
 /// row was removed, false otherwise. Pointer-equality match is the
 /// kernel idiom — every registrant passes a string literal, and the

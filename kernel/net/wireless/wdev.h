@@ -233,8 +233,13 @@ WirelessDevice* WirelessDeviceAt(u32 index);
 /// and, on M3, calls `ops.InstallKey` for both PTK and GTK.
 ::duetos::core::Result<void> WirelessDeliverEapol(WirelessDevice* wdev, const WirelessFrameRx& f);
 
-/// MLME-level state transitions.
-::duetos::core::Result<void> WirelessSetState(WirelessDevice* wdev, WirelessOpState s);
+/// MLME-level state transitions. Logs and drops a null-wdev arg
+/// rather than returning an error code — every real caller has
+/// already null-checked the device, so propagating the error would
+/// only force boilerplate `[[nodiscard]]` handling at every call
+/// site. A null arg here would still surface in the boot log as
+/// a `[W] net/wireless/wdev : SetState: null wdev` line.
+void WirelessSetState(WirelessDevice* wdev, WirelessOpState s);
 
 void WdevSelfTest();
 
