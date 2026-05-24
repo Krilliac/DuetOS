@@ -188,7 +188,7 @@ u32 FramebufferReadPixel(u32 x, u32 y);
 /// The pixel-write goes through the same compose / direct-MMIO
 /// selector as `FramebufferPutPixel`, and the damage rect is
 /// extended to cover `(x, y, 1, 1)`.
-void FramebufferPutPixelAlpha(u32 x, u32 y, u32 argb);
+void FramebufferBlendPixel(u32 x, u32 y, u32 argb);
 
 /// Fill the axis-aligned rect [x, x+w) x [y, y+h) with `rgb`.
 /// Clipped to the surface; passing a rect that's entirely off-screen
@@ -217,7 +217,7 @@ void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness);
 /// (titlebar washes, hover tints, accent bars) the painted
 /// surface is small enough that the cost is negligible. Avoid
 /// blending the whole framebuffer in a hot loop.
-void FramebufferFillRectAlpha(u32 x, u32 y, u32 w, u32 h, u32 argb);
+void FramebufferBlendFill(u32 x, u32 y, u32 w, u32 h, u32 argb);
 
 /// Alpha-blend a `w × h` ARGB8888 source bitmap onto the live
 /// surface at `(x, y)`. `src_rgba` is row-major; `src_pitch_px`
@@ -229,40 +229,13 @@ void FramebufferFillRectAlpha(u32 x, u32 y, u32 w, u32 h, u32 argb);
 /// blended (non-zero alpha after clipping); 0 on no-op.
 ///
 /// Routes through the compose shadow when active, matching
-/// FillRectAlpha. Clipped to the surface; an entirely off-screen
-/// rect fires `KBP_PROBE(kBlendRangeOob)` and returns 0.
+/// `FramebufferBlendFill`. Clipped to the surface; an entirely
+/// off-screen rect fires `KBP_PROBE(kBlendRangeOob)` and returns 0.
 ///
 /// No-op if `!Available()` or `src_rgba == nullptr`. Long-term
 /// the shadow-atlas renderer is the only chrome caller; ad-hoc
-/// per-pixel work should still go through PutPixelAlpha.
+/// per-pixel work should still go through `FramebufferBlendPixel`.
 usize FramebufferBlendRgba(u32 x, u32 y, u32 w, u32 h, const u32* src_rgba, u32 src_pitch_px);
-
-/// Thin forwarders that match the naming the chrome-tactility plan
-/// adopts for its paint paths. Both delegate to the existing
-/// FillRectAlpha / PutPixelAlpha primitives so there is exactly
-/// one implementation of the rect-blend / pixel-blend math — these
-/// inlines exist only so the caller surface reads as one consistent
-/// `FramebufferBlend*` family. `BlendFill` returns the clipped
-/// pixel area so a caller that wants to thread the blended-pixel
-/// count into a damage-budget calculation can do so without
-/// re-clipping; callers that don't care discard the return.
-inline usize FramebufferBlendFill(u32 x, u32 y, u32 w, u32 h, u32 argb)
-{
-    FramebufferFillRectAlpha(x, y, w, h, argb);
-    const auto info = FramebufferGet();
-    if (info.virt == nullptr || x >= info.width || y >= info.height || w == 0 || h == 0)
-    {
-        return 0;
-    }
-    const u32 cw = (x + w > info.width) ? info.width - x : w;
-    const u32 ch = (y + h > info.height) ? info.height - y : h;
-    return static_cast<usize>(cw) * static_cast<usize>(ch);
-}
-
-inline void FramebufferBlendPixel(u32 x, u32 y, u32 argb)
-{
-    FramebufferPutPixelAlpha(x, y, argb);
-}
 
 /// Fill [x, x+w) x [y, y+h) with a vertical linear gradient
 /// from `top_rgb` at row y to `bot_rgb` at row y+h-1. Both
@@ -563,10 +536,10 @@ void FramebufferResetDamage();
 
 /// Begin an offscreen compose pass. While compose is active every
 /// pixel-write primitive in this header (`FramebufferPutPixel`,
-/// `FillRect`, `Blit`, `FillRectAlpha`, `FillRectGradient` and
-/// every primitive that lowers onto them) targets a shadow buffer in
-/// normal RAM instead of the live MMIO framebuffer. Reads inside
-/// `FillRectAlpha` likewise read the shadow, so per-pixel
+/// `FillRect`, `Blit`, `FramebufferBlendFill`, `FillRectGradient`
+/// and every primitive that lowers onto them) targets a shadow
+/// buffer in normal RAM instead of the live MMIO framebuffer. Reads
+/// inside `FramebufferBlendFill` likewise read the shadow, so per-pixel
 /// `src-over` blending finally composites against whatever was
 /// painted earlier in the same compose pass — which is what the
 /// "real compositor" calls in `widget.cpp::DesktopCompose` need to

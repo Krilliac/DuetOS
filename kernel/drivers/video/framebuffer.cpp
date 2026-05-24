@@ -750,7 +750,7 @@ void FramebufferPutPixel(u32 x, u32 y, u32 rgb)
     MarkDamage(x, y, 1, 1);
 }
 
-void FramebufferPutPixelAlpha(u32 x, u32 y, u32 argb)
+void FramebufferBlendPixel(u32 x, u32 y, u32 argb)
 {
     if (!g_available)
     {
@@ -955,7 +955,7 @@ void FramebufferDrawRect(u32 x, u32 y, u32 w, u32 h, u32 rgb, u32 thickness)
     FramebufferFillRect(x + w - thickness, y, thickness, h, rgb); // right
 }
 
-void FramebufferFillRectAlpha(u32 x, u32 y, u32 w, u32 h, u32 argb)
+void FramebufferBlendFill(u32 x, u32 y, u32 w, u32 h, u32 argb)
 {
     if (!g_available || w == 0 || h == 0)
     {
@@ -1718,13 +1718,13 @@ void FramebufferDropShadow(u32 x, u32 y, u32 w, u32 h, u32 depth, u8 start_alpha
         // (x+w+d, y+h+d). The +d+1 vertical offset offsets the
         // shadow downward so it reads as cast from a light from
         // top-left, matching the chrome convention.
-        FramebufferFillRectAlpha(x + w + d, y + 1U + d, 1U, h, argb);
+        FramebufferBlendFill(x + w + d, y + 1U + d, 1U, h, argb);
         // Bottom band: 1px row from (x+d+1, y+h+d) across to
         // (x+w+d, y+h+d). Includes the corner pixel that the
         // right band already touched at (x+w+d, y+h+d) — the
         // double-blend is harmless (alpha blending is idempotent
         // at the same source colour for a single-pixel overlap).
-        FramebufferFillRectAlpha(x + 1U + d, y + h + d, w, 1U, argb);
+        FramebufferBlendFill(x + 1U + d, y + h + d, w, 1U, argb);
     }
 }
 
@@ -1798,7 +1798,7 @@ void BlendSelfTest()
     // ----- alpha=0xFF must REPLACE -----
     const u32 saved = FramebufferReadPixel(0, 0);
     FramebufferPutPixel(0, 0, 0x000000U);
-    FramebufferFillRectAlpha(0, 0, 1, 1, 0xFFFFFFFFU);
+    FramebufferBlendFill(0, 0, 1, 1, 0xFFFFFFFFU);
     const u32 opaque = FramebufferReadPixel(0, 0) & 0x00FFFFFFU;
     if (opaque != 0x00FFFFFFU)
     {
@@ -1810,7 +1810,7 @@ void BlendSelfTest()
 
     // ----- alpha=0x80 must land ~50% -----
     FramebufferPutPixel(0, 0, 0x000000U);
-    FramebufferFillRectAlpha(0, 0, 1, 1, 0x80FFFFFFU);
+    FramebufferBlendFill(0, 0, 1, 1, 0x80FFFFFFU);
     const u32 mid_b = FramebufferReadPixel(0, 0) & 0xFFU;
     if (mid_b < 126U || mid_b > 130U)
     {

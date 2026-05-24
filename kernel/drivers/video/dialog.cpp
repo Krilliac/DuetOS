@@ -363,7 +363,7 @@ void DialogCompose()
     // Replaces the older "every-other-pixel dotted" approximation
     // that used the chrome's no-alpha era primitives.
     constexpr u32 kDimArgb = (0x66U << 24) | 0x00080810U;
-    FramebufferFillRectAlpha(0, 0, fb.width, fb.height, kDimArgb);
+    FramebufferBlendFill(0, 0, fb.width, fb.height, kDimArgb);
 
     u32 px = 0, py = 0;
     PanelOrigin(&px, &py);

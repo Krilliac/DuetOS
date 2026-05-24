@@ -425,7 +425,7 @@ constinit u16 g_glyph_endpoints[64]{};
 
 // Composite `cover` (one u8 per pixel, alpha 0..255) into the
 // framebuffer at (`dx`, `dy`) using `fg` as the ink. Per-pixel
-// src-over via the existing `FramebufferFillRectAlpha` (1×1 rect).
+// src-over via the existing `FramebufferBlendFill` (1×1 rect).
 // Slow but correct; chrome paint paths can afford it. For larger
 // glyph counts a blit-coverage primitive in framebuffer.cpp would
 // be the optimisation hook (slice 4.1+).
@@ -446,7 +446,7 @@ void CompositeCoverage(i32 dx, i32 dy, const u8* cover, u32 w, u32 h, u32 fg)
             if (ox < 0)
                 continue;
             const u32 argb = (static_cast<u32>(a) << 24) | fg_rgb;
-            FramebufferFillRectAlpha(static_cast<u32>(ox), static_cast<u32>(oy), 1, 1, argb);
+            FramebufferBlendFill(static_cast<u32>(ox), static_cast<u32>(oy), 1, 1, argb);
         }
     }
 }

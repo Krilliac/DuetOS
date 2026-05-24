@@ -1066,7 +1066,7 @@ void TaskbarRedraw()
         const u32 rail_y = g_y + 4;
         const u32 rail_h = (g_h > 8) ? g_h - 8 : g_h;
         const u8 rail_alpha = WindowShowDesktopActive() ? 0xC0 : 0x60;
-        FramebufferFillRectAlpha(rail_x, rail_y, rail_w, rail_h,
+        FramebufferBlendFill(rail_x, rail_y, rail_w, rail_h,
                                  (static_cast<u32>(rail_alpha) << 24) | (g_accent & 0x00FFFFFFU));
         // 1-px brighter highlight on the inside edge so the
         // rail has visible structure when hovered.

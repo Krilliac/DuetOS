@@ -16,7 +16,7 @@
  *     triangles via integer barycentric weights. Lines and
  *     points are flat-shaded with the first vertex's colour.
  *   - Per-pixel alpha when the interpolated alpha is < 0xFF —
- *     blended through `FramebufferPutPixelAlpha` (src-over).
+ *     blended through `FramebufferBlendPixel` (src-over).
  *   - Scissor enforcement when the most-recent
  *     `vkCmdSetScissor` recorded a non-empty rect.
  *   - Front-face culling: `vkCmdSetCullMode` +
@@ -259,7 +259,7 @@ void RasterizePoint(const VertexV0& v, const RasterState& st, u32 rt_w, u32 rt_h
     if (a == 0xFFu)
         drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py), rgb);
     else if (a > 0)
-        drivers::video::FramebufferPutPixelAlpha(static_cast<u32>(px), static_cast<u32>(py), v.argb);
+        drivers::video::FramebufferBlendPixel(static_cast<u32>(px), static_cast<u32>(py), v.argb);
     drivers::video::FramebufferAddDamage(static_cast<u32>(px), static_cast<u32>(py), 1, 1);
 }
 
@@ -310,7 +310,7 @@ void RasterizeLine(const VertexV0& v0, const VertexV0& v1, const RasterState& st
             if (a == 0xFFu)
                 drivers::video::FramebufferPutPixel(static_cast<u32>(x0), static_cast<u32>(y0), rgb);
             else if (a > 0)
-                drivers::video::FramebufferPutPixelAlpha(static_cast<u32>(x0), static_cast<u32>(y0), v0.argb);
+                drivers::video::FramebufferBlendPixel(static_cast<u32>(x0), static_cast<u32>(y0), v0.argb);
         }
         if (x0 == x1 && y0 == y1)
             break;
@@ -459,7 +459,7 @@ void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, co
                     drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py),
                                                         flat_argb & 0x00FFFFFFu);
                 else
-                    drivers::video::FramebufferPutPixelAlpha(static_cast<u32>(px), static_cast<u32>(py), flat_argb);
+                    drivers::video::FramebufferBlendPixel(static_cast<u32>(px), static_cast<u32>(py), flat_argb);
                 continue;
             }
             const u32 r = LerpChannel(v0_r, v1_r, v2_r, w0, w1, w2, area_abs);
@@ -470,7 +470,7 @@ void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, co
                 drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py),
                                                     (r << 16) | (g << 8) | b);
             else if (a > 0)
-                drivers::video::FramebufferPutPixelAlpha(static_cast<u32>(px), static_cast<u32>(py),
+                drivers::video::FramebufferBlendPixel(static_cast<u32>(px), static_cast<u32>(py),
                                                          (a << 24) | (r << 16) | (g << 8) | b);
         }
     }

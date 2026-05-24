@@ -244,7 +244,7 @@ userland surfaces that the prototype assumes but DuetOS doesn't
 ship yet. Each is its own slice — none are inside this commit.
 
 - **Framebuffer primitives**
-  - `FramebufferFillRectAlpha(x, y, w, h, argb)` — pre-multiplied
+  - `FramebufferBlendFill(x, y, w, h, argb)` — pre-multiplied
     alpha-over composite, needed for all the prototype's
     `color-mix` accent washes.
   - `FramebufferFillRectGradient(x, y, w, h, top_rgb, bot_rgb)` —

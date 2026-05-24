@@ -656,7 +656,7 @@ void WindowDraw(const WindowChrome& w)
     {
         const u32 shine_h = tbh_eff / 2;
         const u32 shine_argb = (0xA0U << 24) | (title_top & 0x00FFFFFFU);
-        FramebufferFillRectAlpha(w.x, w.y, w.w, shine_h, shine_argb);
+        FramebufferBlendFill(w.x, w.y, w.w, shine_h, shine_argb);
     }
     if (tbh_eff > 0)
     {
@@ -1834,9 +1834,9 @@ void SnapPreviewCompose()
     if (w == 0 || h == 0)
         return;
     const u32 accent_rgb = ThemeCurrent().taskbar_accent & 0x00FFFFFFu;
-    // 0x40 = 25 % alpha. ARGB packing matches FramebufferFillRectAlpha.
+    // 0x40 = 25 % alpha. ARGB packing matches FramebufferBlendFill.
     const u32 argb = (0x40u << 24) | accent_rgb;
-    FramebufferFillRectAlpha(x, y, w, h, argb);
+    FramebufferBlendFill(x, y, w, h, argb);
 
     // Tactility lift: the preview gains an accent-tinted soft halo
     // so it reads as "the window will hover here" instead of a flat
@@ -2547,7 +2547,7 @@ void WindowDrawAllOrdered()
         if (!is_active && g_window_count > 1)
         {
             const u32 overlay = (0x18u << 24) | (g_compose_desktop_rgb & 0x00FFFFFFu);
-            FramebufferFillRectAlpha(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
+            FramebufferBlendFill(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
                                      g_windows[h].chrome.h, overlay);
         }
         // Per-window opacity overlay. Lays a desktop-coloured rect
@@ -2562,7 +2562,7 @@ void WindowDrawAllOrdered()
         {
             const u32 overlay_alpha = static_cast<u32>(0xFFu - g_windows[h].opacity);
             const u32 overlay = (overlay_alpha << 24) | (g_compose_desktop_rgb & 0x00FFFFFFu);
-            FramebufferFillRectAlpha(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
+            FramebufferBlendFill(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
                                      g_windows[h].chrome.h, overlay);
         }
     }

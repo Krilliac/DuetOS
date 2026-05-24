@@ -400,8 +400,8 @@ accent stroke for focus glow. Radius clamps to [8, 48]; opacity
 
 **Framebuffer alpha primitives** in
 `kernel/drivers/video/framebuffer.{h,cpp}` route Porter-Duff blends
-through the same `BlendOver` math: `FramebufferFillRectAlpha`
-(rect with one ARGB), `FramebufferPutPixelAlpha` (single pixel),
+through the same `BlendOver` math: `FramebufferBlendFill`
+(rect with one ARGB), `FramebufferBlendPixel` (single pixel),
 `FramebufferBlendRgba` (bitmap blit, sparse-atlas fast-path skips
 alpha=0 pixels). Inline forwarders `FramebufferBlendFill` /
 `FramebufferBlendPixel` give the chrome-tactility plan its naming

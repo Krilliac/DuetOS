@@ -5,12 +5,12 @@
 // Pure constexpr arithmetic with no kernel dependencies, so the hosted
 // unit test (tests/host/test_blend.cpp) can include this header
 // directly and exercise the math in milliseconds rather than booting
-// QEMU. The framebuffer alpha primitives (FillRectAlpha, PutPixelAlpha,
-// BlendRgba, the inline BlendFill/BlendPixel forwarders) all funnel
-// their inner loop through `BlendOver` so the math has exactly one
-// source of truth — if the test passes, every blend path in the chrome
-// uses the same rounding, the same fast paths, and the same channel
-// layout (0x00RRGGBB).
+// QEMU. The framebuffer alpha primitives (FramebufferBlendFill,
+// FramebufferBlendPixel, FramebufferBlendRgba) all funnel their
+// inner loop through `BlendOver` so the math has exactly one source
+// of truth — if the test passes, every blend path in the chrome uses
+// the same rounding, the same fast paths, and the same channel layout
+// (0x00RRGGBB).
 
 #include "util/types.h"
 
@@ -29,8 +29,8 @@ namespace duetos::drivers::video
 //
 // Intermediate channel math uses the (n + 127) / 255 rounding form so
 // 0x80 over a black background lands on 0x80 (±1) instead of 0x7F —
-// matches what the inline math in FillRectAlpha was doing before
-// blend_math.h existed.
+// matches what the inline math in `FramebufferBlendFill` was doing
+// before blend_math.h existed.
 constexpr u32 BlendOver(u32 dst_rgb, u32 src_rgb, u8 src_a)
 {
     if (src_a == 0)
