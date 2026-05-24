@@ -379,9 +379,10 @@ void DialogCompose()
     // 40% scrim above, but the stronger shadow makes the panel
     // physically read as floating on top of the dim, not painted
     // onto it. No-op for tactility=off themes / runtime override.
-    if (ThemeTactilityEffective() && th.shadow_intensity_active > 0)
+    if (ThemeTactilityEffective())
     {
-        const u8 opacity = static_cast<u8>((static_cast<u32>(th.shadow_intensity_active) * 3U) / 4U);
+        const u8 base = ThemeIntensityEffective(th.shadow_intensity_active);
+        const u8 opacity = static_cast<u8>((static_cast<u32>(base) * 3U) / 4U);
         if (opacity > 0)
         {
             RenderSoftShadow(static_cast<i32>(px), static_cast<i32>(py), kPanelW, kPanelH, 40U, opacity, 0x00000000U);

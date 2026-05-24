@@ -2111,16 +2111,18 @@ void WindowDrawAllOrdered()
         // HighContrast) + the runtime `tactility off` override.
         const bool only_window = (g_window_count == 1);
         const bool deep_cast = (is_active || only_window);
-        if (ThemeTactilityEffective() && ThemeCurrent().shadow_intensity_active > 0)
+        u8 atlas_opacity = 0;
+        if (ThemeTactilityEffective())
         {
             const Theme& t = ThemeCurrent();
+            atlas_opacity =
+                ThemeIntensityEffective(deep_cast ? t.shadow_intensity_active : t.shadow_intensity_inactive);
+        }
+        if (atlas_opacity > 0)
+        {
             const u32 radius = deep_cast ? 24U : 16U;
-            const u8 opacity = deep_cast ? t.shadow_intensity_active : t.shadow_intensity_inactive;
-            if (opacity > 0)
-            {
-                RenderSoftShadow(static_cast<i32>(drawn.x), static_cast<i32>(drawn.y), drawn.w, drawn.h, radius,
-                                 opacity, 0x000000U);
-            }
+            RenderSoftShadow(static_cast<i32>(drawn.x), static_cast<i32>(drawn.y), drawn.w, drawn.h, radius,
+                             atlas_opacity, 0x000000U);
         }
         else
         {
@@ -2548,7 +2550,7 @@ void WindowDrawAllOrdered()
         {
             const u32 overlay = (0x18u << 24) | (g_compose_desktop_rgb & 0x00FFFFFFu);
             FramebufferBlendFill(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
-                                     g_windows[h].chrome.h, overlay);
+                                 g_windows[h].chrome.h, overlay);
         }
         // Per-window opacity overlay. Lays a desktop-coloured rect
         // at alpha = (0xFF - opacity) over the whole window so
@@ -2563,7 +2565,7 @@ void WindowDrawAllOrdered()
             const u32 overlay_alpha = static_cast<u32>(0xFFu - g_windows[h].opacity);
             const u32 overlay = (overlay_alpha << 24) | (g_compose_desktop_rgb & 0x00FFFFFFu);
             FramebufferBlendFill(g_windows[h].chrome.x, g_windows[h].chrome.y, g_windows[h].chrome.w,
-                                     g_windows[h].chrome.h, overlay);
+                                 g_windows[h].chrome.h, overlay);
         }
     }
 }

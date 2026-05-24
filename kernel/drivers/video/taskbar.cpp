@@ -399,9 +399,10 @@ void TaskbarRedraw()
     // we just want depth, not weight. No-op for tactility=off
     // themes / runtime override + when the strip is already at the
     // top edge (g_y < 6).
-    if (ThemeTactilityEffective() && g_y >= 6U && ThemeCurrent().shadow_intensity_active > 0)
+    if (ThemeTactilityEffective() && g_y >= 6U)
     {
-        const u8 opacity = static_cast<u8>(ThemeCurrent().shadow_intensity_active / 2U);
+        const u8 base = ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active);
+        const u8 opacity = static_cast<u8>(base / 2U);
         if (opacity > 0)
         {
             RenderSoftShadow(0, static_cast<i32>(g_y) - 6, fbw, 6U, 8U, opacity, 0x00000000U);
@@ -555,19 +556,24 @@ void TaskbarRedraw()
         // refactor that surfaces per-widget pressed-bits will
         // light it up. Skip the lift for the active tab — its
         // accent gradient already reads as elevated.
-        if (!is_active && ThemeTactilityEffective() && ThemeCurrent().hover_lift_alpha > 0)
+        if (!is_active && ThemeTactilityEffective())
         {
-            u32 cursor_x = 0;
-            u32 cursor_y = 0;
-            CursorPosition(&cursor_x, &cursor_y);
-            const bool hovered =
-                cursor_x >= tab_x && cursor_x < tab_x + tab_w && cursor_y >= g_y + 4 && cursor_y < g_y + 4 + tab_h_eff;
-            if (hovered)
+            const u8 hover_alpha = ThemeIntensityEffective(ThemeCurrent().hover_lift_alpha);
+            if (hover_alpha > 0)
             {
-                const u32 wash = ScaleAlpha(0x1AFFFFFFU, ThemeCurrent().hover_lift_alpha);
-                FramebufferBlendFill(tab_x, g_y + 4, tab_w, tab_h_eff, wash);
-                RenderSoftShadow(static_cast<i32>(tab_x), static_cast<i32>(g_y + 4), tab_w, tab_h_eff, 8U,
-                                 static_cast<u8>(ThemeCurrent().shadow_intensity_active / 2U), 0x00000000U);
+                u32 cursor_x = 0;
+                u32 cursor_y = 0;
+                CursorPosition(&cursor_x, &cursor_y);
+                const bool hovered = cursor_x >= tab_x && cursor_x < tab_x + tab_w && cursor_y >= g_y + 4 &&
+                                     cursor_y < g_y + 4 + tab_h_eff;
+                if (hovered)
+                {
+                    const u32 wash = ScaleAlpha(0x1AFFFFFFU, hover_alpha);
+                    FramebufferBlendFill(tab_x, g_y + 4, tab_w, tab_h_eff, wash);
+                    const u8 shadow_base = ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active);
+                    RenderSoftShadow(static_cast<i32>(tab_x), static_cast<i32>(g_y + 4), tab_w, tab_h_eff, 8U,
+                                     static_cast<u8>(shadow_base / 2U), 0x00000000U);
+                }
             }
         }
         // 1-px highlight ridge across the top edge of the active

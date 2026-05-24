@@ -196,10 +196,12 @@ void DrawHeader(u32 ax, u32 ay, u32 w, const char* title)
 
 void DrawPreview()
 {
-    if (ThemeTactilityEffective() && ThemeCurrent().shadow_intensity_active > 0)
+    const u8 atlas_opacity =
+        ThemeTactilityEffective() ? ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active) : u8{0};
+    if (atlas_opacity > 0)
     {
-        RenderSoftShadow(static_cast<i32>(g_ax), static_cast<i32>(g_ay), kPreviewW, kPreviewH, 12U,
-                         ThemeCurrent().shadow_intensity_active, 0x00000000U);
+        RenderSoftShadow(static_cast<i32>(g_ax), static_cast<i32>(g_ay), kPreviewW, kPreviewH, 12U, atlas_opacity,
+                         0x00000000U);
     }
     else
     {
@@ -370,10 +372,12 @@ void DrawWiredSection(u32 ax, u32& y)
 void DrawFull()
 {
     g_height = ComputeFullHeight();
-    if (ThemeTactilityEffective() && ThemeCurrent().shadow_intensity_active > 0)
+    const u8 atlas_opacity =
+        ThemeTactilityEffective() ? ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active) : u8{0};
+    if (atlas_opacity > 0)
     {
-        RenderSoftShadow(static_cast<i32>(g_ax), static_cast<i32>(g_ay), kFullW, g_height, 16U,
-                         ThemeCurrent().shadow_intensity_active, 0x00000000U);
+        RenderSoftShadow(static_cast<i32>(g_ax), static_cast<i32>(g_ay), kFullW, g_height, 16U, atlas_opacity,
+                         0x00000000U);
     }
     else
     {

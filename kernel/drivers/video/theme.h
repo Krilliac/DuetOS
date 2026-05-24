@@ -345,4 +345,29 @@ void ThemeSetTactilityOverride(i8 v);
 /// effect uniformly.
 bool ThemeTactilityEffective();
 
+/// When the runtime tactility override is "force on" (override=1)
+/// but the active theme advertises an intensity byte of 0 (Amber /
+/// HighContrast opt out by zeroing every tactility intensity
+/// field), substitute a sensible default so the override actually
+/// renders visible chrome. Required for the documented
+/// `tactility on` screenshot / debug workflow — without this the
+/// override would set ThemeTactilityEffective() true but every
+/// paint site's intensity-driven opacity would still resolve to
+/// zero, making the force-on a silent no-op.
+///
+/// Passes through unchanged in every other case: with override=-1
+/// (follow theme) the theme's 0 is honoured (opt-out themes stay
+/// flat); with override=0 (force off) ThemeTactilityEffective()
+/// is already false and the caller's `effective` guard short-
+/// circuits before reaching here.
+///
+/// Default value 128 is a deliberate mid-intensity — strong
+/// enough to read as "tactility is on" but not so loud that an
+/// operator capturing a debug screenshot mistakes it for the
+/// theme's natural look. Mirrors the average of the per-theme
+/// matrix's non-zero intensities (Classic 80, Duet 255, DuetLight
+/// 100, DuetClassic 160).
+inline constexpr u8 kThemeForceOnDefaultIntensity = 128;
+u8 ThemeIntensityEffective(u8 raw);
+
 } // namespace duetos::drivers::video

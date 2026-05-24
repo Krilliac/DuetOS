@@ -228,10 +228,12 @@ void MenuRedraw()
         // smaller than the active window shadow (24) since menu
         // panels are smaller surfaces — keeps the depth read
         // proportional.
-        if (ThemeTactilityEffective() && ThemeCurrent().shadow_intensity_active > 0)
+        const u8 atlas_opacity =
+            ThemeTactilityEffective() ? ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active) : u8{0};
+        if (atlas_opacity > 0)
         {
             RenderSoftShadow(static_cast<i32>(p.anchor_x), static_cast<i32>(p.anchor_y), kMenuWidth, h, 12U,
-                             ThemeCurrent().shadow_intensity_active, 0x00000000U);
+                             atlas_opacity, 0x00000000U);
         }
         else
         {

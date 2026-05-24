@@ -163,14 +163,18 @@ void TrayFlyoutRedraw()
     // top to bottom gradient so it reads as a raised surface
     // against the taskbar's flat strip. Atlas-shadow under
     // tactility; strip-shadow fallback otherwise.
-    if (ThemeTactilityEffective() && ThemeCurrent().shadow_intensity_active > 0)
     {
-        RenderSoftShadow(static_cast<i32>(px), static_cast<i32>(py), kPanelW, kPanelH, 14U,
-                         ThemeCurrent().shadow_intensity_active, 0x00000000U);
-    }
-    else
-    {
-        FramebufferDropShadow(px, py, kPanelW, kPanelH, 5, 0x70);
+        const u8 atlas_opacity =
+            ThemeTactilityEffective() ? ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active) : u8{0};
+        if (atlas_opacity > 0)
+        {
+            RenderSoftShadow(static_cast<i32>(px), static_cast<i32>(py), kPanelW, kPanelH, 14U, atlas_opacity,
+                             0x00000000U);
+        }
+        else
+        {
+            FramebufferDropShadow(px, py, kPanelW, kPanelH, 5, 0x70);
+        }
     }
     FramebufferFillRectGradient(px, py, kPanelW, kPanelH, LightenRgb(g_body_rgb, 18), g_body_rgb);
     FramebufferDrawRoundRect(px, py, kPanelW, kPanelH, kRadius, g_border_rgb);

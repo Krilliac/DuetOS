@@ -1284,6 +1284,15 @@ bool ThemeTactilityEffective()
     return ThemeCurrent().tactility_enabled;
 }
 
+u8 ThemeIntensityEffective(u8 raw)
+{
+    if (raw == 0 && g_tactility_override == 1)
+    {
+        return kThemeForceOnDefaultIntensity;
+    }
+    return raw;
+}
+
 bool ThemeSelfTestPassed()
 {
     return s_theme_passed;

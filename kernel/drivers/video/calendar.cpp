@@ -179,14 +179,18 @@ void CalendarRedraw()
     // strip-shadow primitive otherwise (preserves Amber /
     // HighContrast bit-for-bit). Radius 12 matches the menu panel
     // for visual consistency across popup chrome.
-    if (ThemeTactilityEffective() && ThemeCurrent().shadow_intensity_active > 0)
     {
-        RenderSoftShadow(static_cast<i32>(g_ax), static_cast<i32>(g_ay), kPanelW, kPanelH, 12U,
-                         ThemeCurrent().shadow_intensity_active, 0x00000000U);
-    }
-    else
-    {
-        FramebufferDropShadow(g_ax, g_ay, kPanelW, kPanelH, 4, 0x60);
+        const u8 atlas_opacity =
+            ThemeTactilityEffective() ? ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active) : u8{0};
+        if (atlas_opacity > 0)
+        {
+            RenderSoftShadow(static_cast<i32>(g_ax), static_cast<i32>(g_ay), kPanelW, kPanelH, 12U, atlas_opacity,
+                             0x00000000U);
+        }
+        else
+        {
+            FramebufferDropShadow(g_ax, g_ay, kPanelW, kPanelH, 4, 0x60);
+        }
     }
 
     // Body: subtle vertical gradient from a lifted shade of the
