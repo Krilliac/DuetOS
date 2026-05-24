@@ -2181,6 +2181,25 @@ void MouseReaderTask(void*)
         const bool right_release = !right_down && prev_right;
         prev_right = right_down;
 
+        // Login gate — Pass B fix. While LoginIsActive() in Gui mode the
+        // desktop chrome (windows, taskbar, widget table) must NOT receive
+        // mouse events: clicking through to apps would bypass auth entirely.
+        // We still let CursorMove (above) update the sprite position so the
+        // cursor tracks visually, and we route a press-edge click on the
+        // sign-in button to LoginFeedKey(kKeyEnter) — same submit path as
+        // pressing Enter. Everything else (drag, widget routing, window
+        // hit-test, DesktopCompose) is skipped. The compositor lock taken
+        // above is released and the loop continues.
+        if (duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui)
+        {
+            if (press_edge && duetos::core::LoginHitTestSignInButton(cx, cy))
+            {
+                duetos::core::LoginFeedKey(duetos::drivers::input::kKeyEnter);
+            }
+            duetos::drivers::video::CompositorUnlock();
+            continue;
+        }
+
         // Right-click opens a context menu. Different item set
         // depending on what's under the cursor:
         //   - Taskbar: skip (no right-click menu there yet).

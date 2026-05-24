@@ -367,6 +367,27 @@ void LoginFormatDate(char* out, u32 cap)
     }
 }
 
+// Compute the sign-in button rect from the live framebuffer dimensions.
+// Mirrors the arithmetic chain in GuiRepaint (card → password field →
+// button), so any change to that layout MUST update this helper too.
+// Shared between GuiRepaint (paint) and LoginHitTestSignInButton (mouse).
+void ComputeSignInButtonRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h)
+{
+    const u32 card_x = 694u * fb_w / 1024u;
+    const u32 card_y = 540u * fb_h / 768u;
+    const u32 card_w = 280u * fb_w / 1024u;
+    const u32 pwd_x = card_x + 20u * fb_w / 1024u;
+    const u32 pwd_y = card_y + 86u * fb_h / 768u;
+    const u32 pwd_w = card_w - 40u * fb_w / 1024u;
+    const u32 pwd_h = 28u * fb_h / 768u;
+    const u32 btn_w = 170u * fb_w / 1024u;
+    const u32 btn_h = 28u * fb_h / 768u;
+    if (x) *x = pwd_x + pwd_w - btn_w;
+    if (y) *y = pwd_y + pwd_h + 14u * fb_h / 768u;
+    if (w) *w = btn_w;
+    if (h) *h = btn_h;
+}
+
 void GuiRepaint()
 {
     // Pass B corner-card layout. See spec §4.2 / §5.
@@ -758,6 +779,22 @@ void LoginRepaint()
     }
     // TTY login re-uses the console's own redraw path from
     // DesktopCompose; no dedicated work needed here.
+}
+
+bool LoginHitTestSignInButton(u32 cx, u32 cy)
+{
+    if (!g_login.active || g_login.mode != LoginMode::Gui)
+    {
+        return false;
+    }
+    if (!duetos::drivers::video::FramebufferAvailable())
+    {
+        return false;
+    }
+    const auto& fb = duetos::drivers::video::FramebufferGet();
+    u32 bx = 0, by = 0, bw = 0, bh = 0;
+    ComputeSignInButtonRect(fb.width, fb.height, &bx, &by, &bw, &bh);
+    return (cx >= bx) && (cx < bx + bw) && (cy >= by) && (cy < by + bh);
 }
 
 void LoginReopen()

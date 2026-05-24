@@ -77,6 +77,12 @@ bool LoginFeedKey(u16 code);
 /// when !LoginIsActive(). Caller holds the compositor lock.
 void LoginRepaint();
 
+/// Returns true if (cx, cy) is inside the sign-in button rect of the
+/// active GUI login layout. No-op (returns false) when LoginIsActive
+/// is false or LoginCurrentMode is not Gui. Used by the mouse reader
+/// to turn a click on the button into the same submit path as Enter.
+bool LoginHitTestSignInButton(u32 cx, u32 cy);
+
 /// External trigger for `logout` to re-open the gate. Clears
 /// the session, drops back to the mode last shown (or Gui if
 /// called before the first activation), re-paints.
