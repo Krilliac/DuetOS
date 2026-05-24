@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/debug_assert.h"
 #include "util/types.h"
 
 /*
@@ -108,15 +109,34 @@ template <typename T, typename E = ErrorCode> class [[nodiscard]] Result
     bool has_value() const { return has_value_; }
     explicit operator bool() const { return has_value_; }
 
-    const T& value() const { return storage_.value; }
-    T& value() { return storage_.value; }
+    // value() on an error-state Result returns the union's value
+    // field — which was never constructed, so reads are UB. The
+    // DEBUG_ASSERT catches misuse during development with zero
+    // release-build cost. Existing call sites that follow the
+    // `if (!r.has_value()) return Err{r.error()};` pattern stay
+    // correct; only sites that call value() on an unchecked Result
+    // trip the assertion.
+    const T& value() const
+    {
+        DEBUG_ASSERT(has_value_, "util/result", "Result::value() on error state");
+        return storage_.value;
+    }
+    T& value()
+    {
+        DEBUG_ASSERT(has_value_, "util/result", "Result::value() on error state");
+        return storage_.value;
+    }
 
     E error() const { return has_value_ ? E{} : storage_.error; }
 
     // Move-like "consume the value" — for callers that take
     // ownership (the Result instance is typically a temporary
     // inside RESULT_TRY_ASSIGN).
-    T take() { return storage_.value; }
+    T take()
+    {
+        DEBUG_ASSERT(has_value_, "util/result", "Result::take() on error state");
+        return storage_.value;
+    }
 
   private:
     bool has_value_;
