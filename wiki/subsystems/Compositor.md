@@ -369,9 +369,130 @@ Recent compositor work:
 - Taskbar gradient strip
 - Rounded START button + tabs
 - Active-tab accent
-- Drop shadow primitive
+- Drop shadow primitive (strip-based — fallback for tactility=off themes)
 - Round-rect outline primitive
 - Filled circle primitive
+
+## Chrome Tactility (Pass A)
+
+The chrome tactility lift (Pass A of a 4-pass UX initiative) adds
+depth + materiality to the surface: soft drop shadows on windows
++ modals + menu panels, hover lift on taskbar tabs, accent halo on
+snap previews, and an opt-in focus-glow ring helper for focused
+controls. The work spans Phases 1 - 5 of the implementation plan
+(`docs/superpowers/plans/2026-05-24-duetos-chrome-tactility.md`).
+
+**Per-pixel math** lives in `kernel/drivers/video/blend_math.h` -
+constexpr `BlendOver(dst_rgb, src_rgb, src_a)` Porter-Duff "src
+over dst" + `ScaleAlpha(argb, scale)` modulator. Pure - no kernel
+deps - so `tests/host/test_blend.cpp` exercises the rounding +
+fast-path math without a QEMU boot.
+
+**Atlas-based shadow renderer** lives in
+`kernel/drivers/video/shadow.{h,cpp}`. Reads the 32 x 32
+quadratic-falloff atlas baked at configure time
+(`tools/build/gen_shadow_atlas.py` -> `generated_shadow_atlas.h`)
+and paints a 9-slice soft shadow OUTSIDE the rect.
+`RenderSoftShadow(x, y, w, h, radius, opacity, colour)` for the
+basic case; `RenderSoftShadowWithStroke(...)` adds the 1-px inner
+accent stroke for focus glow. Radius clamps to [8, 48]; opacity
+== 0 is a no-op.
+
+**Framebuffer alpha primitives** in
+`kernel/drivers/video/framebuffer.{h,cpp}` route Porter-Duff blends
+through the same `BlendOver` math: `FramebufferFillRectAlpha`
+(rect with one ARGB), `FramebufferPutPixelAlpha` (single pixel),
+`FramebufferBlendRgba` (bitmap blit, sparse-atlas fast-path skips
+alpha=0 pixels). Inline forwarders `FramebufferBlendFill` /
+`FramebufferBlendPixel` give the chrome-tactility plan its naming
+convention without duplicating implementation.
+
+**Theme integration**: the `Theme` struct
+(`kernel/drivers/video/theme.h`) carries 7 new tactility fields -
+`tactility_enabled` master switch, `shadow_intensity_active` /
+`_inactive` (separate so focus state can dim sibling shadows),
+`hover_lift_alpha`, `press_alpha`, `focus_glow_colour` (0 = no
+glow opt-out for DuetClassic), and `cursor_microshadow_enabled`.
+The per-theme matrix in `theme.cpp` lights up the Duet family
+aggressively (255 active / 128 inactive shadow), keeps Classic
+moderate (80 / 40), and opts out HighContrast + Amber (the
+high-contrast use case can't afford the legibility hit, the
+amber-CRT aesthetic breaks with soft shadows).
+
+**Runtime override**: `ThemeTactilityOverride()` is `-1`
+("follow theme default"), `0` ("force off"), or `1` ("force on").
+Set via `tactility=on/off` kernel cmdline at boot or the
+`tactility on|off|default` shell command at runtime.
+`ThemeTactilityEffective()` is the single read accessor every
+tactility-aware paint path consults.
+
+**Chrome paint integration sites** (Phase 3):
+
+- `WindowDrawAllOrdered` (widget.cpp): swap from strip-based
+  `FramebufferDropShadow` to atlas-based `RenderSoftShadow` when
+  tactility is effective. Radius 24 active / 16 inactive, opacity
+  from theme intensity bytes. Strip shadow remains as fallback
+  for tactility=off themes so HighContrast / Amber chrome is
+  bit-for-bit identical to pre-spec.
+- `DialogCompose` (dialog.cpp): 40-px soft shadow + 75% intensity
+  around modal panel, on top of the existing 40% dim scrim. Modal
+  reads as floating ON the scrim instead of painted INTO it.
+- `SnapPreviewCompose` (widget.cpp): accent-coloured 16-px halo
+  added under the existing 25% translucent fill so the snap target
+  reads as "the window will hover here".
+- `TaskbarRedraw` (taskbar.cpp): 6-px shadow bleeds upward from
+  the strip's top edge (the bar floats above the desktop, not
+  pasted onto it); per-tab hover wash + 8-px soft shadow under
+  the hovered tab via `CursorPosition()` hit-test.
+- `MenuRedraw` (menu.cpp): swap from strip-shadow to atlas-shadow
+  for the menu panel itself (radius 12 — proportional to the
+  smaller surface).
+- `WindowPaintFocusGlow(x, y, w, h, is_pe_window)`: available for
+  focused-input + button paint paths; Win32-role windows force
+  the accent to amber so the dual-accent identity reads
+  consistently across themes. Not yet wired into a caller — the
+  call site lands with whichever focus-aware widget needs it
+  first.
+
+**Self-tests** run from `boot_bringup.cpp` after the existing
+ThemeSelfTest:
+- `BlendSelfTest` exercises the alpha-blend primitives'
+  round-trip math.
+- `ShadowSelfTest` exercises four atlas invariants: size=32,
+  origin=255, opacity-linearity within +/-2 LSB, rotational
+  symmetry within +/-1 LSB.
+- `ThemeSelfTest` (extended): tactility-matrix invariant guards -
+  every `tactility_enabled` theme must have
+  `shadow_intensity_active > 0` and `active >= inactive`,
+  HighContrast + Amber must stay opted out.
+- Umbrella aggregator emits `[tactility-selftest] PASS` only
+  when every sub-test passed. Each FAIL fires its own probe
+  (`kBlendRangeOob` / `kShadowAtlasInvalid` /
+  `kTactilityThemeMismatch`) so an attached GDB can break at
+  `duetos::debug::ProbeFire`.
+
+**Tooling**: `tools/test/tactility-soak.sh` (per-theme
+render_stats soak + probe-fire gate), `tactility-screenshot-
+matrix.sh` (per-theme PPM via QMP screendump + optional
+ImageMagick montage), and the `TACTILITY` section in
+`tools/test/boot-log-analyze.sh` (counts the 4 PASS sentinels +
+3 probe fires).
+
+**Deferred from Pass A** (intentionally — visual verification
+needed first):
+- Per-row hover wash in menu rows (existing solid accent fill
+  is already strong; wash on top would compound).
+- Menu scale-pop open animation (needs animation system
+  extension).
+- Cursor micro-shadow (plan-marked stretch; per-frame cost
+  weighed against a small visual lift).
+- Press overlay on taskbar tabs (per-tab pressed state isn't
+  surfaced at paint time; needs an input-state refactor).
+- Damage-rect halo inflation across every dirty-emit site - the
+  codebase's per-pixel `MarkDamage` in the paint primitives
+  already covers shadow regions, since each shadow pixel marks
+  itself dirty as it paints. The plan's `MarkDirty(window.bounds)`
+  pattern doesn't exist in this codebase.
 
 ## Network Flyout
 
