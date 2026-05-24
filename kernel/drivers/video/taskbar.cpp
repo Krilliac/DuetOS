@@ -6,7 +6,10 @@
 #include "mm/frame_allocator.h"
 #include "net/stack.h"
 #include "sched/sched.h"
+#include "drivers/video/blend_math.h"
+#include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/shadow.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 
@@ -388,6 +391,23 @@ void TaskbarRedraw()
     const auto info = FramebufferGet();
     const u32 fbw = info.width;
 
+    // Tactility lift: a faint 6-px shadow bleeds upward from the
+    // strip's top edge so the taskbar reads as a piece of chrome
+    // floating above the desktop instead of a coloured stripe
+    // pasted onto the bottom edge. Half the active shadow intensity
+    // — the strip already commands attention via its accent border,
+    // we just want depth, not weight. No-op for tactility=off
+    // themes / runtime override + when the strip is already at the
+    // top edge (g_y < 6).
+    if (ThemeTactilityEffective() && g_y >= 6U && ThemeCurrent().shadow_intensity_active > 0)
+    {
+        const u8 opacity = static_cast<u8>(ThemeCurrent().shadow_intensity_active / 2U);
+        if (opacity > 0)
+        {
+            RenderSoftShadow(0, static_cast<i32>(g_y) - 6, fbw, 6U, 8U, opacity, 0x00000000U);
+        }
+    }
+
     // Background strip with a subtle vertical gradient: a slightly
     // lifted shade at the top fades into the registered taskbar bg
     // at the bottom. Reads as a coherent toolbar surface rather
@@ -525,6 +545,31 @@ void TaskbarRedraw()
             FramebufferFillRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, tab_bg);
         }
         FramebufferDrawRoundRect(tab_x, g_y + 4, tab_w, tab_h_eff, tab_radius, g_border);
+
+        // Tactility lift: per-tab hover overlay + faint ambient
+        // shadow. Cursor-position hit-test mirrors the titlebar
+        // control buttons' inline `inside()` lambda (widget.cpp
+        // L748). No press-overlay yet — per-tab pressed state
+        // isn't tracked at paint time (the mouse loop transitions
+        // straight from press to dispatch); a future input-state
+        // refactor that surfaces per-widget pressed-bits will
+        // light it up. Skip the lift for the active tab — its
+        // accent gradient already reads as elevated.
+        if (!is_active && ThemeTactilityEffective() && ThemeCurrent().hover_lift_alpha > 0)
+        {
+            u32 cursor_x = 0;
+            u32 cursor_y = 0;
+            CursorPosition(&cursor_x, &cursor_y);
+            const bool hovered =
+                cursor_x >= tab_x && cursor_x < tab_x + tab_w && cursor_y >= g_y + 4 && cursor_y < g_y + 4 + tab_h_eff;
+            if (hovered)
+            {
+                const u32 wash = ScaleAlpha(0x1AFFFFFFU, ThemeCurrent().hover_lift_alpha);
+                FramebufferBlendFill(tab_x, g_y + 4, tab_w, tab_h_eff, wash);
+                RenderSoftShadow(static_cast<i32>(tab_x), static_cast<i32>(g_y + 4), tab_w, tab_h_eff, 8U,
+                                 static_cast<u8>(ThemeCurrent().shadow_intensity_active / 2U), 0x00000000U);
+            }
+        }
         // 1-px highlight ridge across the top edge of the active
         // tab. Matches the window-chrome highlight band so the
         // tab reads as a small piece of chrome lifted off the strip.

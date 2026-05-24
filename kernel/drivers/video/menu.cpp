@@ -2,6 +2,8 @@
 
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/shadow.h"
+#include "drivers/video/theme.h"
 
 namespace duetos::drivers::video
 {
@@ -219,7 +221,22 @@ void MenuRedraw()
         const Panel& p = g_panels[pi];
         const u32 h = PanelHeightFor(p.count);
 
-        FramebufferDropShadow(p.anchor_x, p.anchor_y, kMenuWidth, h, 4, 0x60);
+        // Atlas-based panel shadow when the theme supports tactility;
+        // FramebufferDropShadow remains the strip-based fallback so
+        // tactility=off themes (Amber, HighContrast) + the runtime
+        // override stay bit-for-bit identical. Radius 12 is slightly
+        // smaller than the active window shadow (24) since menu
+        // panels are smaller surfaces — keeps the depth read
+        // proportional.
+        if (ThemeTactilityEffective() && ThemeCurrent().shadow_intensity_active > 0)
+        {
+            RenderSoftShadow(static_cast<i32>(p.anchor_x), static_cast<i32>(p.anchor_y), kMenuWidth, h, 12U,
+                             ThemeCurrent().shadow_intensity_active, 0x00000000U);
+        }
+        else
+        {
+            FramebufferDropShadow(p.anchor_x, p.anchor_y, kMenuWidth, h, 4, 0x60);
+        }
         FramebufferFillRectGradient(p.anchor_x, p.anchor_y, kMenuWidth, h, LightenRgb(g_body_rgb, 14), g_body_rgb);
         FramebufferFillRect(p.anchor_x, p.anchor_y, 2, h, g_accent_rgb);
         if (kMenuWidth > 4)
