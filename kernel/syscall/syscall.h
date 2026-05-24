@@ -2202,11 +2202,11 @@ enum VkOp : u64
     // (the kernel takes its own copy of any caller-supplied
     // payload) keeps the syscall ABI flat — no shared-memory
     // mapping needed.
-    kVkOpCreateShaderModule = 14, // rdx = device, r10 = const u32* code, r8 = u64 code_size_bytes;
-                                  // rax = VkShaderModule handle on success, 0 on failure.
-    kVkOpAllocateMemory = 15,     // rdx = device, r10 = u64 size; rax = VkDeviceMemory handle.
-    kVkOpFreeMemory = 16,         // rdx = device, r10 = memory; rax = 1 on success.
-    kVkOpCreateBuffer = 17,       // rdx = device, r10 = u64 size; rax = VkBuffer handle.
+    kVkOpCreateShaderModule = 14,  // rdx = device, r10 = const u32* code, r8 = u64 code_size_bytes;
+                                   // rax = VkShaderModule handle on success, 0 on failure.
+    kVkOpAllocateMemory = 15,      // rdx = device, r10 = u64 size; rax = VkDeviceMemory handle.
+    kVkOpFreeMemory = 16,          // rdx = device, r10 = memory; rax = 1 on success.
+    kVkOpCreateBuffer = 17,        // rdx = device, r10 = u64 size; rax = VkBuffer handle.
     kVkOpDestroyShaderModule = 18, // rdx = device, r10 = shader_module
     kVkOpDestroyBuffer = 19,       // rdx = device, r10 = buffer
     // Bind / map / image-create — the next layer after
@@ -2228,27 +2228,27 @@ enum VkOp : u64
     // its own cmd buffer ladder + records draws can drive the
     // full Vulkan path; the earlier DuetOS_Vk_ClearFramebufferRgba
     // shortcut remains for the simple cases.
-    kVkOpCreateCommandPool = 26,    // rdx=device; rax = VkCommandPool
-    kVkOpDestroyCommandPool = 27,   // rdx=device, r10=pool
+    kVkOpCreateCommandPool = 26,     // rdx=device; rax = VkCommandPool
+    kVkOpDestroyCommandPool = 27,    // rdx=device, r10=pool
     kVkOpAllocateCommandBuffer = 28, // rdx=device, r10=pool; rax = VkCommandBuffer
-    kVkOpBeginCommandBuffer = 29,   // rdx=cb; rax = 1
-    kVkOpEndCommandBuffer = 30,     // rdx=cb
-    kVkOpCmdClearColorImage = 31,   // rdx=cb, r10=image, r8=packed argb
-    kVkOpQueueSubmit = 32,          // rdx=queue, r10=cb
+    kVkOpBeginCommandBuffer = 29,    // rdx=cb; rax = 1
+    kVkOpEndCommandBuffer = 30,      // rdx=cb
+    kVkOpCmdClearColorImage = 31,    // rdx=cb, r10=image, r8=packed argb
+    kVkOpQueueSubmit = 32,           // rdx=queue, r10=cb
     // Pipeline + render pass + draw — the rest of the v0 graphics
     // ladder. Together with the cmd-buffer ops above, a Vulkan PE
     // can build a complete graphics pipeline, bind a shader,
     // record a draw, and submit it.
     kVkOpCreatePipelineLayout = 33, // rdx=device; rax = VkPipelineLayout
     kVkOpDestroyPipelineLayout = 34,
-    kVkOpCreateRenderPass = 35,     // rdx=device; rax = VkRenderPass (single-attachment v0)
+    kVkOpCreateRenderPass = 35, // rdx=device; rax = VkRenderPass (single-attachment v0)
     kVkOpDestroyRenderPass = 36,
     kVkOpCreateGraphicsPipeline = 37, // rdx=device, r10=layout, r8=vs, r9=fs; rax = VkPipeline
-    kVkOpCreateComputePipeline = 38, // rdx=device, r10=layout, r8=cs; rax = VkPipeline
+    kVkOpCreateComputePipeline = 38,  // rdx=device, r10=layout, r8=cs; rax = VkPipeline
     kVkOpDestroyPipeline = 39,
-    kVkOpCmdBindPipeline = 40,      // rdx=cb, r10=pipeline
-    kVkOpCmdDraw = 41,              // rdx=cb, r10=(vertex_count<<32)|first_vertex
-    kVkOpCmdDispatch = 42,          // rdx=cb, r10=group_x, r8=group_y, r9=group_z
+    kVkOpCmdBindPipeline = 40, // rdx=cb, r10=pipeline
+    kVkOpCmdDraw = 41,         // rdx=cb, r10=(vertex_count<<32)|first_vertex
+    kVkOpCmdDispatch = 42,     // rdx=cb, r10=group_x, r8=group_y, r9=group_z
     // Record-side bind ops + descriptor update.
     kVkOpCmdBindVertexBuffer = 43, // rdx=cb, r10=binding, r8=buffer, r9=offset
     kVkOpCmdBindIndexBuffer = 44,  // rdx=cb, r10=buffer, r8=offset, r9=index_type
@@ -2256,10 +2256,10 @@ enum VkOp : u64
     // Descriptor pool + set create/alloc.
     kVkOpCreateDescriptorSetLayout = 46, // rdx=device; rax = VkDescriptorSetLayout
     kVkOpDestroyDescriptorSetLayout = 47,
-    kVkOpCreateDescriptorPool = 48,      // rdx=device, r10=max_sets; rax = VkDescriptorPool
+    kVkOpCreateDescriptorPool = 48, // rdx=device, r10=max_sets; rax = VkDescriptorPool
     kVkOpDestroyDescriptorPool = 49,
-    kVkOpAllocateDescriptorSet = 50,     // rdx=device, r10=pool, r8=layout; rax = VkDescriptorSet
-    kVkOpCmdBindDescriptorSet = 51,      // rdx=cb, r10=layout, r8=first_set, r9=set
+    kVkOpAllocateDescriptorSet = 50, // rdx=device, r10=pool, r8=layout; rax = VkDescriptorSet
+    kVkOpCmdBindDescriptorSet = 51,  // rdx=cb, r10=layout, r8=first_set, r9=set
 };
 
 // Diagnostic counter IDs for kVkOpGetStatsCounter. Exposes the

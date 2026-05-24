@@ -352,6 +352,11 @@ i64 DoClone(u64 flags, u64 child_stack, u64 ptid_user, u64 ctid_user, u64 tls)
     if ((flags & kCloneParentSettid) != 0 && ptid_user != 0)
     {
         u32 tid_u32 = static_cast<u32>(child_tid);
+        // ptid writeback failure is intentionally dropped — see the
+        // comment immediately above. A return-with-error here would
+        // leak the just-created child thread; the caller can still
+        // discover the tid through the syscall's positive return
+        // value (clone() returns the child tid to the parent).
         (void)mm::CopyToUser(reinterpret_cast<void*>(ptid_user), &tid_u32, sizeof(tid_u32));
     }
 

@@ -156,7 +156,13 @@ i64 DoCapget(u64 user_hdr, u64 user_data)
     if (hdr.version != kCapV3 && hdr.version != kCapV2 && hdr.version != kCapV1)
     {
         // Linux convention: rewrite header.version to current
-        // and return -EINVAL so libcap can probe + retry.
+        // and return -EINVAL so libcap can probe + retry. The
+        // writeback is informational (lets libcap learn which
+        // version IS supported on its next call); if the user's
+        // header pointer is bad the probe simply doesn't learn
+        // the version, but -EINVAL still tells it the call was
+        // refused. Returning -EFAULT here instead would break
+        // the libcap probe contract.
         const u32 fixed = kCapV3;
         (void)mm::CopyToUser(reinterpret_cast<void*>(user_hdr), &fixed, sizeof(fixed));
         return kEINVAL;

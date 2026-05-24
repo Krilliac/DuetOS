@@ -467,18 +467,42 @@ void Drain()
 // false on timeout or any other byte — callers log + continue
 // rather than panic, since USB-legacy emulated keyboards can
 // silently drop some device commands.
+//
+// Interrupt window: the keyboard IRQ handler (IrqHandler, below)
+// drains the data port as soon as IRQ1 fires. Without a CLI window
+// here, an IRQ delivered between `Outb(byte)` and our poll for
+// the ACK silently steals the 0xFA byte — the poll then spins for
+// kPollSpinLimit Inb iterations (~1s, matching the soft-lockup
+// `ticks_in_run=101` signature) before returning false. Intermittent
+// (~50% on GitHub runners; ~75% on this dev host under TCG) because
+// IRQ delivery timing varies. Mirror the established Ps2MouseInit
+// pattern: save IF, CLI for the handshake, restore. The window is
+// bounded spin-polls + register writes — no sleep / block — so a
+// CLI window is safe and short (microseconds when the controller
+// responds; bounded by kPollSpinLimit when it doesn't).
 bool KbdSendAndAck(u8 byte)
 {
+    constexpr u64 kRflagsIf = 1ULL << 9;
+    const bool irqs_were_on = (arch::ReadRflags() & kRflagsIf) != 0;
+    arch::Cli();
+
     WaitInputClear();
     Outb(kDataPort, byte);
+    bool acked = false;
     for (u64 i = 0; i < kPollSpinLimit; ++i)
     {
         if ((Inb(kStatusPort) & kStatusOutputFull) != 0)
         {
-            return Inb(kDataPort) == 0xFA;
+            acked = (Inb(kDataPort) == 0xFA);
+            break;
         }
     }
-    return false;
+
+    if (irqs_were_on)
+    {
+        arch::Sti();
+    }
+    return acked;
 }
 
 void ControllerInit()

@@ -120,8 +120,8 @@ struct VaryingSnapshot
 // canonical 16-byte-per-Location fallback layout applies.
 // Returns false if the shader can't be run.
 bool RunVertexShader(spirv::Program* vs, const u8* vb, u64 vb_size, u64 stride, u32 vertex_index, u32* pos_out,
-                     VaryingSnapshot* varying_out, u32 varying_cap, u32* varying_n_out,
-                     const PipelineRecord* pipe_rec, const RasterState& st_ref_for_attrs)
+                     VaryingSnapshot* varying_out, u32 varying_cap, u32* varying_n_out, const PipelineRecord* pipe_rec,
+                     const RasterState& st_ref_for_attrs)
 {
     if (vs == nullptr || vb == nullptr || pos_out == nullptr)
         return false;
@@ -426,11 +426,11 @@ void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Progra
             {
                 vdivw[v * varying_n + vi].location = varyings_per_vertex[v * varying_n + vi].location;
                 vdivw[v * varying_n + vi].component_count = varyings_per_vertex[v * varying_n + vi].component_count;
-                for (u32 cc = 0; cc < varyings_per_vertex[v * varying_n + vi].component_count && cc < kMaxVaryingComponents; ++cc)
+                for (u32 cc = 0;
+                     cc < varyings_per_vertex[v * varying_n + vi].component_count && cc < kMaxVaryingComponents; ++cc)
                 {
-                    vdivw[v * varying_n + vi].data[cc] = Sf32ToBits(
-                        ::duetos::core::Sf32Mul(Sf32FromBits(varyings_per_vertex[v * varying_n + vi].data[cc]),
-                                                invw_per_vert[v]));
+                    vdivw[v * varying_n + vi].data[cc] = Sf32ToBits(::duetos::core::Sf32Mul(
+                        Sf32FromBits(varyings_per_vertex[v * varying_n + vi].data[cc]), invw_per_vert[v]));
                 }
             }
         }
@@ -467,20 +467,17 @@ void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Progra
                 // space — perspective-correct Z lands when the
                 // pipeline carries a real depth-range descriptor).
                 const Sf32 inv_a = inv_area;
-                const Sf32 bw0z =
-                    ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw0)), inv_a);
-                const Sf32 bw1z =
-                    ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw1)), inv_a);
-                const Sf32 bw2z =
-                    ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw2)), inv_a);
+                const Sf32 bw0z = ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw0)), inv_a);
+                const Sf32 bw1z = ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw1)), inv_a);
+                const Sf32 bw2z = ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(static_cast<u32>(aw2)), inv_a);
                 const Sf32 z_pix = BaryLerp(z0, z1, z2, bw0z, bw1z, bw2z);
                 // Map NDC [-1, 1] -> [0, 0xFFFF]. clamp first.
-                Sf32 z_clamped = ::duetos::core::Sf32Clamp(z_pix, ::duetos::core::Sf32NegOne(),
-                                                           ::duetos::core::Sf32One());
+                Sf32 z_clamped =
+                    ::duetos::core::Sf32Clamp(z_pix, ::duetos::core::Sf32NegOne(), ::duetos::core::Sf32One());
                 const Sf32 half = ::duetos::core::Sf32FromBits(0x3F000000u); // 0.5
-                const Sf32 mapped = ::duetos::core::Sf32Mul(
-                    ::duetos::core::Sf32Add(z_clamped, ::duetos::core::Sf32One()),
-                    ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(0xFFFFu), half));
+                const Sf32 mapped =
+                    ::duetos::core::Sf32Mul(::duetos::core::Sf32Add(z_clamped, ::duetos::core::Sf32One()),
+                                            ::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(0xFFFFu), half));
                 const i32 z_int = ::duetos::core::Sf32ToI32(mapped);
                 u16 z_new = (z_int < 0) ? 0u : (z_int > 0xFFFF ? 0xFFFFu : static_cast<u16>(z_int));
                 const u64 zi = static_cast<u64>(py) * dsurf->w + px;
@@ -669,16 +666,17 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
     if (rec.backing == nullptr || rec.extent.width == 0 || rec.extent.height == 0)
         return 0xFF000000u;
     using ::duetos::core::Sf32;
+    using ::duetos::core::Sf32Clamp;
     using ::duetos::core::Sf32FromU32;
     using ::duetos::core::Sf32Mul;
+    using ::duetos::core::Sf32One;
     using ::duetos::core::Sf32Sub;
     using ::duetos::core::Sf32ToI32;
-    using ::duetos::core::Sf32Clamp;
     using ::duetos::core::Sf32Zero;
-    using ::duetos::core::Sf32One;
 
     // Apply the addressing mode to fold raw UV into [0, 1].
-    auto fold = [mode](u32 bits) -> Sf32 {
+    auto fold = [mode](u32 bits) -> Sf32
+    {
         Sf32 v{bits};
         switch (mode)
         {
@@ -710,7 +708,8 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
     const Sf32 fxf = Sf32Sub(fx, Sf32FromU32(static_cast<u32>(ix)));
     const Sf32 fyf = Sf32Sub(fy, Sf32FromU32(static_cast<u32>(iy)));
 
-    auto clamp_to_extent = [&](i32 x, u32 max_w) -> u32 {
+    auto clamp_to_extent = [&](i32 x, u32 max_w) -> u32
+    {
         if (x < 0)
             return 0;
         if (static_cast<u32>(x) >= max_w)
@@ -722,7 +721,8 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
     const u32 x1 = clamp_to_extent(ix + 1, rec.extent.width);
     const u32 y1 = clamp_to_extent(iy + 1, rec.extent.height);
 
-    auto fetch_texel = [&](u32 x, u32 y) -> u32 {
+    auto fetch_texel = [&](u32 x, u32 y) -> u32
+    {
         const u64 off = (static_cast<u64>(y) * rec.extent.width + x) * 4u;
         const u8* p = static_cast<const u8*>(rec.backing) + off;
         return (static_cast<u32>(p[3]) << 24) | (static_cast<u32>(p[0]) << 16) | (static_cast<u32>(p[1]) << 8) |
@@ -735,7 +735,8 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
 
     // Per-channel bilinear blend in fixed point (channels are
     // already u8 0..255; Sf32 weights mix fine).
-    auto lerp_chan = [](u8 a, u8 b, Sf32 t) -> u8 {
+    auto lerp_chan = [](u8 a, u8 b, Sf32 t) -> u8
+    {
         const Sf32 inv_t = Sf32Sub(Sf32One(), t);
         const Sf32 fa = Sf32Mul(Sf32FromU32(a), inv_t);
         const Sf32 fb = Sf32Mul(Sf32FromU32(b), t);
@@ -746,7 +747,8 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
             return 255;
         return static_cast<u8>(r);
     };
-    auto blend = [&](u32 c00, u32 c10, u32 c01, u32 c11, u32 ch_shift) -> u8 {
+    auto blend = [&](u32 c00, u32 c10, u32 c01, u32 c11, u32 ch_shift) -> u8
+    {
         const u8 a = static_cast<u8>((c00 >> ch_shift) & 0xFFu);
         const u8 b = static_cast<u8>((c10 >> ch_shift) & 0xFFu);
         const u8 c = static_cast<u8>((c01 >> ch_shift) & 0xFFu);
@@ -906,8 +908,7 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
             // Z/W gives the perspective-divided depth in NDC space.
             // The depth-test path maps NDC [-1, 1] -> the software
             // depth surface's [0, 0xFFFF] range.
-            z_bits[v] =
-                Sf32ToBits(::duetos::core::Sf32Div(Sf32FromBits(pos[v][2]), w));
+            z_bits[v] = Sf32ToBits(::duetos::core::Sf32Div(Sf32FromBits(pos[v][2]), w));
         }
         // Pass z only when perspective is valid — orthographic
         // projections can layer Z later via the v0 raster's depth

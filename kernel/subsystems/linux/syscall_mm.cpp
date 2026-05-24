@@ -110,6 +110,15 @@ i64 DoMadvise(u64 addr, u64 len, u64 advice)
         const u64 end = addr + len;
         while (va < end)
         {
+            // madvise(MADV_REMOVE/MADV_DONTNEED) is best-effort per
+            // Linux's contract — a partial zero is acceptable, and
+            // touching an unmapped page in the range is silently
+            // skipped (the comment above describes the rationale).
+            // The CopyToUser return is intentionally dropped because
+            // any single chunk failing simply means "that page wasn't
+            // present" — the next loop iteration handles the next
+            // page, and the syscall's success return reflects the
+            // overall best-effort attempt.
             const u64 chunk = (end - va < sizeof(zeros)) ? (end - va) : sizeof(zeros);
             (void)mm::CopyToUser(reinterpret_cast<void*>(va), zeros, chunk);
             va += chunk;

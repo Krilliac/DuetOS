@@ -274,14 +274,19 @@ void FixJournalSelfTest();
 #define FIX_NOTE_STUB(source_pin, hint) ((void)0)
 #define FIX_NOTE_GAP(source_pin, hint) ((void)0)
 #else
+// Discard policy: these are diagnostic markers. A ring-full failure must
+// NOT abort the surrounding code and must NOT log (the log sink itself
+// can route back through fix-journal-style diagnostics, risking
+// recursion). Explicit (void) on the Result is the intentional silent
+// drop; the [[nodiscard]] on Result<T,E> is satisfied here.
 #define FIX_NOTE_STUB(source_pin, hint)                                                                                \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::StubMarker, (source_pin), (hint), 0, 0);         \
+        (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::StubMarker, (source_pin), (hint), 0, 0);   \
     } while (0)
 #define FIX_NOTE_GAP(source_pin, hint)                                                                                 \
     do                                                                                                                 \
     {                                                                                                                  \
-        ::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::GapMarker, (source_pin), (hint), 0, 0);          \
+        (void)::duetos::diag::FixJournalRecord(::duetos::diag::FixDetector::GapMarker, (source_pin), (hint), 0, 0);    \
     } while (0)
 #endif

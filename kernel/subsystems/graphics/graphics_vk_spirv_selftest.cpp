@@ -411,17 +411,41 @@ void TestMulVec3Scalar()
 // the dispatch-side workgroup loop are deferred to runtime (would
 // need a full pipeline scaffold).
 constexpr u32 compute_local_size[] = {
-    0x07230203, 0x00010000, 0u, 10u, 0u,
-    (2u << 16) | 17u, 1u,                      // Capability Shader
-    (3u << 16) | 14u, 0u, 1u,                  // MemoryModel Logical GLSL450
-    (5u << 16) | 15u, 5u, 4u, 0x6E69616Du, 0u, // EntryPoint GLCompute(5) %4 "main" (no interface vars)
-    (6u << 16) | 16u, 4u, 17u, 4u, 2u, 1u,     // ExecutionMode %4 LocalSize 4 2 1
-    (2u << 16) | 19u, 2u,             // TypeVoid
-    (3u << 16) | 33u, 3u, 2u,         // TypeFunction () -> void
-    (5u << 16) | 54u, 2u, 4u, 0u, 3u, // Function main
-    (2u << 16) | 248u, 5u,            // Label
-    (1u << 16) | 253u,                // Return
-    (1u << 16) | 56u,                 // FunctionEnd
+    0x07230203,
+    0x00010000,
+    0u,
+    10u,
+    0u,
+    (2u << 16) | 17u,
+    1u, // Capability Shader
+    (3u << 16) | 14u,
+    0u,
+    1u, // MemoryModel Logical GLSL450
+    (5u << 16) | 15u,
+    5u,
+    4u,
+    0x6E69616Du,
+    0u, // EntryPoint GLCompute(5) %4 "main" (no interface vars)
+    (6u << 16) | 16u,
+    4u,
+    17u,
+    4u,
+    2u,
+    1u, // ExecutionMode %4 LocalSize 4 2 1
+    (2u << 16) | 19u,
+    2u, // TypeVoid
+    (3u << 16) | 33u,
+    3u,
+    2u, // TypeFunction () -> void
+    (5u << 16) | 54u,
+    2u,
+    4u,
+    0u,
+    3u, // Function main
+    (2u << 16) | 248u,
+    5u,                // Label
+    (1u << 16) | 253u, // Return
+    (1u << 16) | 56u,  // FunctionEnd
 };
 
 void TestComputeLocalSize()

@@ -106,6 +106,9 @@ jobs:
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
           sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
           sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
+          sudo ln -sf /usr/bin/llvm-objcopy-18 /usr/local/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-nm-18 /usr/local/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-addr2line-18 /usr/local/bin/llvm-addr2line
           sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
       - name: Configure
         run: cmake --preset x86_64-debug
@@ -139,6 +142,9 @@ jobs:
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
           sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
           sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
+          sudo ln -sf /usr/bin/llvm-objcopy-18 /usr/local/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-nm-18 /usr/local/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-addr2line-18 /usr/local/bin/llvm-addr2line
           sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
       - name: Configure
         run: cmake --preset x86_64-release
@@ -236,6 +242,9 @@ jobs:
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
           sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
           sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
+          sudo ln -sf /usr/bin/llvm-objcopy-18 /usr/local/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-nm-18 /usr/local/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-addr2line-18 /usr/local/bin/llvm-addr2line
           sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
       - name: Enable KVM access (~50× speedup vs TCG when present)
         run: |
@@ -353,6 +362,9 @@ jobs:
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
           sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
           sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
+          sudo ln -sf /usr/bin/llvm-objcopy-18 /usr/local/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-nm-18 /usr/local/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-addr2line-18 /usr/local/bin/llvm-addr2line
           sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
       - name: Enable KVM access (~50× speedup vs TCG)
         run: |
@@ -525,6 +537,9 @@ jobs:
           sudo ln -sf /usr/bin/clang++-18 /usr/local/bin/clang++
           sudo ln -sf /usr/bin/lld-link-18 /usr/local/bin/lld-link
           sudo ln -sf /usr/bin/llvm-dlltool-18 /usr/local/bin/llvm-dlltool
+          sudo ln -sf /usr/bin/llvm-objcopy-18 /usr/local/bin/llvm-objcopy
+          sudo ln -sf /usr/bin/llvm-nm-18 /usr/local/bin/llvm-nm
+          sudo ln -sf /usr/bin/llvm-addr2line-18 /usr/local/bin/llvm-addr2line
           sudo ln -sf /usr/bin/ld.lld-18 /usr/local/bin/ld.lld
       - name: Enable KVM access
         # KVM doesn't help the differential harness because every

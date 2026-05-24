@@ -261,9 +261,9 @@ enum class CmdOp : u8
     ResetEvent2 = 63,
     WaitEvents2 = 64,
     PipelineBarrier2 = 65,
-    SetVertexFormatDuet = 66,    // DuetOS extension: rasterizer vertex layout (0 = v0, 1 = v1)
-    BindDescriptorSets = 67,     // Records the first bound descriptor set so the rasterizer hook can
-                                 // walk its bindings + call spirv::BindDescriptor per draw.
+    SetVertexFormatDuet = 66, // DuetOS extension: rasterizer vertex layout (0 = v0, 1 = v1)
+    BindDescriptorSets = 67,  // Records the first bound descriptor set so the rasterizer hook can
+                              // walk its bindings + call spirv::BindDescriptor per draw.
 };
 
 struct CmdRecord
@@ -376,8 +376,8 @@ struct DescriptorPoolRecord
 /// buffer types).
 struct DescriptorBinding
 {
-    u32 type;        // VkDescriptorType (Sampler / SampledImage / UniformBuffer / ...)
-    u64 handle;      // VkImage / VkImageView / VkBuffer handle, or 0
+    u32 type;   // VkDescriptorType (Sampler / SampledImage / UniformBuffer / ...)
+    u64 handle; // VkImage / VkImageView / VkBuffer handle, or 0
 };
 
 struct DescriptorSetRecord
@@ -560,7 +560,7 @@ struct RasterState
     u32 front_face;    // VkFrontFace: 0=CounterClockwise, 1=Clockwise
     u32 fb_w;
     u32 fb_h;
-    VkPipeline bound_pipeline; // pipeline handle bound at the last `BindPipeline` op (0 if none)
+    VkPipeline bound_pipeline;            // pipeline handle bound at the last `BindPipeline` op (0 if none)
     VkDescriptorSet bound_descriptor_set; // first set bound at the last `BindDescriptorSets` op (0 if none)
     // Multi-binding vertex buffers. binding N's buffer + offset
     // sit in slots[N]. v0 supports 4 bindings; legacy
@@ -601,8 +601,8 @@ bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
 /// control what happens at the [0, 1] UV boundary.
 enum class SamplerAddressMode : u8
 {
-    ClampToEdge = 0, // default — texel at the edge is replicated for out-of-range UV
-    Repeat = 1,      // UV wraps modulo 1.0 (Sf32 fract)
+    ClampToEdge = 0,    // default — texel at the edge is replicated for out-of-range UV
+    Repeat = 1,         // UV wraps modulo 1.0 (Sf32 fract)
     MirroredRepeat = 2, // UV wraps modulo 2.0 with reflection
 };
 

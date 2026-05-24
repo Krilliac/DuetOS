@@ -1230,24 +1230,24 @@ struct GraphicsStats
     u32 vk_events_live;
     u32 vk_pipeline_caches_live;
     u32 vk_query_pools_live;
-    u32 vk_queries_executed;           // total CmdEndQuery / CmdWriteTimestamp replays
-    u32 vk_memory_maps;                // total VkMapMemory calls
-    u32 vk_dynamic_renderings;         // total CmdBeginRendering replays
-    u32 vk_debug_labels;               // total VkSetDebugUtilsObjectNameEXT calls
-    u32 vk_secondary_executes;         // total VkCmdExecuteCommands replays
-    u32 vk_secondary_ops_replayed;     // total ops replayed inside a secondary
-    u32 vk_push_descriptor_writes;     // total VkCmdPushDescriptorSetKHR writes
-    u32 vk_queue_submits;              // total VkQueueSubmit calls
-    u32 vk_command_recorded;           // total vkCmd* opcodes recorded
-    u32 vk_command_replayed;           // total vkCmd* opcodes replayed in submit
-    u32 vk_clear_pixels_painted;       // sum of pixels actually painted by scanout-backed clears
-    u32 vk_invalid_spirv_rejections;   // VkCreateShaderModule rejections (bad magic / 0 size)
-    u32 vk_spirv_modules_parsed;       // shaders successfully parsed by the v1 walker
-    u32 vk_spirv_entry_points_seen;    // sum across all parsed modules
-    u32 vk_spirv_capabilities_seen;    // sum
-    u32 vk_spirv_decorations_seen;     // sum
-    u32 vk_spirv_execution_modes_seen; // sum
-    u32 vk_spirv_programs_built;       // VkCreateShaderModule that produced an interpretable Program
+    u32 vk_queries_executed;             // total CmdEndQuery / CmdWriteTimestamp replays
+    u32 vk_memory_maps;                  // total VkMapMemory calls
+    u32 vk_dynamic_renderings;           // total CmdBeginRendering replays
+    u32 vk_debug_labels;                 // total VkSetDebugUtilsObjectNameEXT calls
+    u32 vk_secondary_executes;           // total VkCmdExecuteCommands replays
+    u32 vk_secondary_ops_replayed;       // total ops replayed inside a secondary
+    u32 vk_push_descriptor_writes;       // total VkCmdPushDescriptorSetKHR writes
+    u32 vk_queue_submits;                // total VkQueueSubmit calls
+    u32 vk_command_recorded;             // total vkCmd* opcodes recorded
+    u32 vk_command_replayed;             // total vkCmd* opcodes replayed in submit
+    u32 vk_clear_pixels_painted;         // sum of pixels actually painted by scanout-backed clears
+    u32 vk_invalid_spirv_rejections;     // VkCreateShaderModule rejections (bad magic / 0 size)
+    u32 vk_spirv_modules_parsed;         // shaders successfully parsed by the v1 walker
+    u32 vk_spirv_entry_points_seen;      // sum across all parsed modules
+    u32 vk_spirv_capabilities_seen;      // sum
+    u32 vk_spirv_decorations_seen;       // sum
+    u32 vk_spirv_execution_modes_seen;   // sum
+    u32 vk_spirv_programs_built;         // VkCreateShaderModule that produced an interpretable Program
     u32 vk_spirv_program_build_failures; // VkCreateShaderModule the Program parser rejected (still loads the
                                          // module — module-info + magic-word counters above stay; the
                                          // bump only signals the v1 interpreter won't run for it)

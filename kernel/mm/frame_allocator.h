@@ -36,6 +36,24 @@ inline constexpr PhysAddr kNullFrame = 0; // The zero frame is always reserved.
 /// (kernel image, bitmap itself, Multiboot2 info page, everything below 1 MiB).
 void FrameAllocatorInit(uptr multiboot_info_phys);
 
+/// Return the kernel-VA of the kernel-owned snapshot of the Multiboot2 info
+/// structure, or nullptr if FrameAllocatorInit has not yet captured one (or
+/// the bootloader's info_size exceeded the snapshot cap).
+///
+/// Late-boot consumers (acpi::AcpiInit's FindRsdpInMultiboot, etc.) MUST
+/// read through this accessor rather than dereferencing the raw multiboot_info_phys
+/// passed at kernel entry. The raw physical page is unreliable past
+/// MmFinalizePaging — the 2026-05-24 VBox boot capture (commit 9bc0c84e's
+/// FindRsdpInMultiboot diagnostic) showed total_size reading back as
+/// 0x80cc79b0 garbage despite the ReserveRange pin, and the walker
+/// returning a NULL RSDP that panicked AcpiInit with
+/// "no ACPI RSDP tag in Multiboot2 info".
+const void* MultibootInfoSnapshot();
+
+/// Size of the snapshot returned by MultibootInfoSnapshot(), in bytes.
+/// Zero if no snapshot was captured.
+u64 MultibootInfoSnapshotSize();
+
 /// Build the per-NUMA-node frame ranges from `acpi::srat`'s memory-
 /// affinity records (subtype 1). Must run after `acpi::srat::SratInit`
 /// has parsed the SRAT. Idempotent — re-callable when the SRAT

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/debug_assert.h"
 #include "util/types.h"
 
 /*
@@ -91,7 +92,7 @@ template <typename E> struct Err
 };
 template <typename E> Err(E) -> Err<E>;
 
-template <typename T, typename E = ErrorCode> class Result
+template <typename T, typename E = ErrorCode> class [[nodiscard]] Result
 {
     static_assert(__is_trivially_copyable(T), "Result<T,E>: T must be trivially copyable in the freestanding kernel");
     static_assert(__is_trivially_copyable(E), "Result<T,E>: E must be trivially copyable");
@@ -108,15 +109,34 @@ template <typename T, typename E = ErrorCode> class Result
     bool has_value() const { return has_value_; }
     explicit operator bool() const { return has_value_; }
 
-    const T& value() const { return storage_.value; }
-    T& value() { return storage_.value; }
+    // value() on an error-state Result returns the union's value
+    // field — which was never constructed, so reads are UB. The
+    // DEBUG_ASSERT catches misuse during development with zero
+    // release-build cost. Existing call sites that follow the
+    // `if (!r.has_value()) return Err{r.error()};` pattern stay
+    // correct; only sites that call value() on an unchecked Result
+    // trip the assertion.
+    const T& value() const
+    {
+        DEBUG_ASSERT(has_value_, "util/result", "Result::value() on error state");
+        return storage_.value;
+    }
+    T& value()
+    {
+        DEBUG_ASSERT(has_value_, "util/result", "Result::value() on error state");
+        return storage_.value;
+    }
 
     E error() const { return has_value_ ? E{} : storage_.error; }
 
     // Move-like "consume the value" — for callers that take
     // ownership (the Result instance is typically a temporary
     // inside RESULT_TRY_ASSIGN).
-    T take() { return storage_.value; }
+    T take()
+    {
+        DEBUG_ASSERT(has_value_, "util/result", "Result::take() on error state");
+        return storage_.value;
+    }
 
   private:
     bool has_value_;
@@ -129,7 +149,7 @@ template <typename T, typename E = ErrorCode> class Result
 
 // Status-only specialisation — success carries no payload, just a
 // "did it work" flag.
-template <typename E> class Result<void, E>
+template <typename E> class [[nodiscard]] Result<void, E>
 {
     static_assert(__is_trivially_copyable(E), "Result<void,E>: E must be trivially copyable");
 

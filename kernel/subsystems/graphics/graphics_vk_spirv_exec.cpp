@@ -1233,8 +1233,8 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
                     const u8 G = static_cast<u8>((argb >> 8) & 0xFFu);
                     const u8 B = static_cast<u8>(argb & 0xFFu);
                     const u8 A = static_cast<u8>((argb >> 24) & 0xFFu);
-                    const Sf32 inv255 = ::duetos::core::Sf32Div(::duetos::core::Sf32One(),
-                                                                ::duetos::core::Sf32FromU32(255u));
+                    const Sf32 inv255 =
+                        ::duetos::core::Sf32Div(::duetos::core::Sf32One(), ::duetos::core::Sf32FromU32(255u));
                     r4[0] = Sf32ToBits(::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(R), inv255));
                     r4[1] = Sf32ToBits(::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(G), inv255));
                     r4[2] = Sf32ToBits(::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(B), inv255));

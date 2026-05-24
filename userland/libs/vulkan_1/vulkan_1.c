@@ -551,8 +551,8 @@ VkResult vkCreateShaderModule(VkDevice device, const void* pCreateInfo, const vo
     const BYTE* ci = (const BYTE*)pCreateInfo;
     const SIZE_T code_size = *(const SIZE_T*)(ci + 24);
     const void* code = *(const void* const*)(ci + 32);
-    const long long h = vk_syscall4(VkOp_CreateShaderModule, (long long)device, (long long)(SIZE_T)code,
-                                    (long long)code_size, 0);
+    const long long h =
+        vk_syscall4(VkOp_CreateShaderModule, (long long)device, (long long)(SIZE_T)code, (long long)code_size, 0);
     if (h == 0)
         return VK_ERROR_INITIALIZATION_FAILED;
     *pShaderModule = (VkShaderModule)h;
@@ -611,8 +611,8 @@ void vkDestroyBuffer(VkDevice device, VkBuffer buffer, const void* pAllocator)
 
 VkResult vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize memoryOffset)
 {
-    const long long ok = vk_syscall5(VkOp_BindBufferMemory, 0, (long long)device, (long long)buffer,
-                                     (long long)memory, (long long)memoryOffset);
+    const long long ok = vk_syscall5(VkOp_BindBufferMemory, 0, (long long)device, (long long)buffer, (long long)memory,
+                                     (long long)memoryOffset);
     return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
@@ -665,8 +665,8 @@ void vkDestroyImage(VkDevice device, VkImage image, const void* pAllocator)
 
 VkResult vkBindImageMemory(VkDevice device, VkImage image, VkDeviceMemory memory, VkDeviceSize memoryOffset)
 {
-    const long long ok =
-        vk_syscall5(VkOp_BindImageMemory, 0, (long long)device, (long long)image, (long long)memory, (long long)memoryOffset);
+    const long long ok = vk_syscall5(VkOp_BindImageMemory, 0, (long long)device, (long long)image, (long long)memory,
+                                     (long long)memoryOffset);
     return (ok == 1) ? VK_SUCCESS : VK_ERROR_INITIALIZATION_FAILED;
 }
 
@@ -727,8 +727,8 @@ VkResult vkEndCommandBuffer(VkCommandBuffer cb)
 
 /* vkCmdClearColorImage — VkClearColorValue is a union; v0 takes
  * the float32[4] components, scales to 0..255, and packs ARGB. */
-void vkCmdClearColorImage(VkCommandBuffer cb, VkImage image, DWORD /*VkImageLayout*/ imageLayout,
-                          const void* pColor, UINT32 rangeCount, const void* pRanges)
+void vkCmdClearColorImage(VkCommandBuffer cb, VkImage image, DWORD /*VkImageLayout*/ imageLayout, const void* pColor,
+                          UINT32 rangeCount, const void* pRanges)
 {
     (void)imageLayout;
     (void)rangeCount;
@@ -800,8 +800,7 @@ void vkDestroyPipelineLayout(VkDevice device, VkPipelineLayout layout, const voi
     (void)vk_syscall3(VkOp_DestroyPipelineLayout, 0, (long long)device, (long long)layout);
 }
 
-VkResult vkCreateRenderPass(VkDevice device, const void* pCreateInfo, const void* pAllocator,
-                            VkRenderPass* pRenderPass)
+VkResult vkCreateRenderPass(VkDevice device, const void* pCreateInfo, const void* pAllocator, VkRenderPass* pRenderPass)
 {
     (void)pCreateInfo;
     (void)pAllocator;
