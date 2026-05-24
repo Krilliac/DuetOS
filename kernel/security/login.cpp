@@ -45,8 +45,11 @@ using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
 using duetos::drivers::video::FramebufferBeginCompose;
+using duetos::drivers::video::FramebufferDrawCircle;
+using duetos::drivers::video::FramebufferDrawString;
 using duetos::drivers::video::FramebufferDrawStringScaled;
 using duetos::drivers::video::FramebufferEndCompose;
+using duetos::drivers::video::FramebufferFillCircle;
 using duetos::drivers::video::FramebufferFillRect;
 using duetos::drivers::video::FramebufferGet;
 using duetos::drivers::video::RenderSoftShadowWithStroke;
@@ -406,8 +409,8 @@ void GuiRepaint()
     // 3. Corner card bottom-right — 280×160 at (694, 540) on a 1024×768
     //    reference; scaled to the actual framebuffer dimensions.
     //    Pass B Task 13: atlas-shadow halo + body fill + border stroke.
-    //    Card contents (avatar, name, password, button) land in Tasks 14–16;
-    //    this commit lays the card silhouette only.
+    //    Pass B Task 14: avatar circle + monogram + username + role text.
+    //    Card contents (password field, sign-in button) land in Tasks 15–16.
     const u32 card_x = 694u * fb.width / 1024u;
     const u32 card_y = 540u * fb.height / 768u;
     const u32 card_w = 280u * fb.width / 1024u;
@@ -426,6 +429,71 @@ void GuiRepaint()
         static_cast<i32>(card_x), static_cast<i32>(card_y), card_w, card_h,
         /*radius=*/16, /*opacity=*/120, /*colour=*/0x000000u,
         /*stroke_colour=*/ThemeCurrent().window_border);
+
+    // 4. Avatar circle + monogram + username + role text.
+    //    Pass B Task 14.
+    //
+    //    Avatar is a 40-px diameter circle (radius 20) positioned
+    //    36 px right and 40 px down from the card top-left corner
+    //    on a 1024×768 reference grid, scaled to actual fb dimensions.
+    //    accent_colour = taskbar_accent — the theme's primary accent,
+    //    used consistently for topo tint, start-button fill, and
+    //    highlighted tab borders across all themes.
+    const u32 accent = ThemeCurrent().taskbar_accent;
+    // Avatar background: use taskbar_bg (elevated panel surface) so the
+    // circle reads as an inset element inside the card rather than a
+    // flat sticker on top of it.
+    const u32 avatar_bg = ThemeCurrent().taskbar_bg;
+
+    // Scale the avatar centre to the actual framebuffer resolution.
+    const u32 avatar_cx = card_x + 36u * fb.width / 1024u;
+    const u32 avatar_cy = card_y + 40u * fb.height / 768u;
+    const u32 avatar_r  = 20u * fb.width / 1024u;
+
+    // Filled circle (card-body colour) then 1-px accent stroke ring.
+    FramebufferFillCircle(
+        static_cast<i32>(avatar_cx), static_cast<i32>(avatar_cy),
+        avatar_r, avatar_bg);
+    FramebufferDrawCircle(
+        static_cast<i32>(avatar_cx), static_cast<i32>(avatar_cy),
+        avatar_r, accent);
+
+    // Monogram — first character of the current username, uppercased.
+    // Falls back to '?' if the username buffer is empty (shouldn't happen
+    // at repaint time, but defensive for the autologin path).
+    char mono = '?';
+    const char* user = g_login.username;
+    if (user != nullptr && user[0] != '\0')
+    {
+        mono = user[0];
+        if (mono >= 'a' && mono <= 'z')
+        {
+            mono = static_cast<char>(mono - 'a' + 'A');
+        }
+    }
+    char mono_str[2] = {mono, '\0'};
+
+    // Centre the 2x-scaled 8×8 bitmap glyph (16×16 rendered pixels)
+    // inside the circle.  Offset by half the rendered glyph size so
+    // the character visual centre lands on avatar_cx / avatar_cy.
+    FramebufferDrawStringScaled(
+        avatar_cx - 8u, avatar_cy - 8u,
+        mono_str, accent, avatar_bg, /*scale=*/2);
+
+    // Username and role text rendered to the right of the avatar.
+    // name_x is avatar right-edge + 12 px of gap on the reference grid.
+    const u32 name_x = avatar_cx + avatar_r + 12u * fb.width / 1024u;
+    const u32 name_y = card_y + 32u * fb.height / 768u;
+    const u32 role_y = card_y + 48u * fb.height / 768u;
+
+    FramebufferDrawString(name_x, name_y,
+                          (user != nullptr && user[0] != '\0') ? user : "<no user>",
+                          ThemeCurrent().banner_fg, ThemeCurrent().taskbar_bg);
+
+    // GAP: role hardcoded — RBAC role-per-user lookup not wired into
+    //      login.cpp yet, revisit when RBAC v1 persistence lands.
+    FramebufferDrawString(name_x, role_y, "Administrator",
+                          ThemeCurrent().banner_fg, ThemeCurrent().taskbar_bg);
 
     // Flush offscreen shadow → live framebuffer (no-op if BeginCompose
     // fell back to direct mode).
