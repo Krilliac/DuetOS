@@ -3248,22 +3248,41 @@ void MouseReaderTask(void*)
 void WinTimerTickerTask(void*)
 {
     auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
+    // Wallpaper motion runs at ~15 FPS. This task fires every 10 ms
+    // (SchedSleepTicks(1) = 1 scheduler tick = 10 ms); every 7th call
+    // is 70 ms ≈ 14.3 FPS — well within the acceptable 10–25 FPS band.
+    static u32 s_wallpaper_sub = 0;
+    static constexpr u32 kWallpaperSubDiv = 7; // 10 ms × 7 = 70 ms ≈ 14.3 FPS
     for (;;)
     {
         duetos::sched::SchedSleepTicks(1);
         duetos::drivers::video::CompositorLock();
         duetos::drivers::video::WindowTimerTick();
         const bool anim_stepped = duetos::drivers::video::WindowAnimateStepAll();
-        if (anim_stepped)
+
+        // Advance ambient wallpaper motion at ~15 FPS. WallpaperTick()
+        // updates arc rotation, pulse, and topo drift phases then marks
+        // dirty rects. Skip during the login gate (LoginRepaint owns the
+        // framebuffer) and in TTY mode (no wallpaper is painted there).
+        const bool gate_active =
+            duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui;
+        const bool is_tty = duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty;
+        bool wallpaper_ticked = false;
+        if (!gate_active && !is_tty)
         {
-            // Skip recompose while the login gate owns the
-            // framebuffer or in TTY mode — animations are a
-            // desktop-only affordance and the gate / TTY paths
-            // would clobber their own state if we composed
-            // here.
-            const bool gate_active =
-                duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui;
-            const bool is_tty = duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty;
+            if (++s_wallpaper_sub >= kWallpaperSubDiv)
+            {
+                s_wallpaper_sub = 0;
+                duetos::drivers::video::WallpaperTick();
+                wallpaper_ticked = true;
+            }
+        }
+
+        if (anim_stepped || wallpaper_ticked)
+        {
+            // Skip recompose while the login gate owns the framebuffer or
+            // in TTY mode — desktop-only affordance; the gate / TTY paths
+            // would clobber their own state if we composed here.
             if (!gate_active && !is_tty)
             {
                 duetos::drivers::video::CursorHide();
