@@ -3,6 +3,8 @@
 #include "drivers/net/net.h"
 #include "net/stack.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/shadow.h"
+#include "drivers/video/theme.h"
 
 namespace duetos::drivers::video
 {
@@ -194,7 +196,15 @@ void DrawHeader(u32 ax, u32 ay, u32 w, const char* title)
 
 void DrawPreview()
 {
-    FramebufferDropShadow(g_ax, g_ay, kPreviewW, kPreviewH, 4, 0x60);
+    if (ThemeTactilityEffective() && ThemeCurrent().shadow_intensity_active > 0)
+    {
+        RenderSoftShadow(static_cast<i32>(g_ax), static_cast<i32>(g_ay), kPreviewW, kPreviewH, 12U,
+                         ThemeCurrent().shadow_intensity_active, 0x00000000U);
+    }
+    else
+    {
+        FramebufferDropShadow(g_ax, g_ay, kPreviewW, kPreviewH, 4, 0x60);
+    }
     FramebufferFillRectGradient(g_ax, g_ay, kPreviewW, kPreviewH, LightenRgb(g_body_rgb, 14), g_body_rgb);
     if (kPreviewW > 4)
     {
@@ -360,7 +370,15 @@ void DrawWiredSection(u32 ax, u32& y)
 void DrawFull()
 {
     g_height = ComputeFullHeight();
-    FramebufferDropShadow(g_ax, g_ay, kFullW, g_height, 4, 0x60);
+    if (ThemeTactilityEffective() && ThemeCurrent().shadow_intensity_active > 0)
+    {
+        RenderSoftShadow(static_cast<i32>(g_ax), static_cast<i32>(g_ay), kFullW, g_height, 16U,
+                         ThemeCurrent().shadow_intensity_active, 0x00000000U);
+    }
+    else
+    {
+        FramebufferDropShadow(g_ax, g_ay, kFullW, g_height, 4, 0x60);
+    }
     FramebufferFillRectGradient(g_ax, g_ay, kFullW, g_height, LightenRgb(g_body_rgb, 14), g_body_rgb);
     if (kFullW > 4)
     {

@@ -2,6 +2,8 @@
 
 #include "arch/x86_64/rtc.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/shadow.h"
+#include "drivers/video/theme.h"
 
 namespace duetos::drivers::video
 {
@@ -172,9 +174,20 @@ void CalendarRedraw()
         today = 0;
     }
 
-    // Drop shadow first so the popup reads as raised — same depth
-    // + alpha as window chrome / start menu for visual consistency.
-    FramebufferDropShadow(g_ax, g_ay, kPanelW, kPanelH, 4, 0x60);
+    // Drop shadow first so the popup reads as raised — atlas-based
+    // 9-slice shadow when tactility is effective, fallback to the
+    // strip-shadow primitive otherwise (preserves Amber /
+    // HighContrast bit-for-bit). Radius 12 matches the menu panel
+    // for visual consistency across popup chrome.
+    if (ThemeTactilityEffective() && ThemeCurrent().shadow_intensity_active > 0)
+    {
+        RenderSoftShadow(static_cast<i32>(g_ax), static_cast<i32>(g_ay), kPanelW, kPanelH, 12U,
+                         ThemeCurrent().shadow_intensity_active, 0x00000000U);
+    }
+    else
+    {
+        FramebufferDropShadow(g_ax, g_ay, kPanelW, kPanelH, 4, 0x60);
+    }
 
     // Body: subtle vertical gradient from a lifted shade of the
     // theme body to the body itself. Matches the menu / taskbar

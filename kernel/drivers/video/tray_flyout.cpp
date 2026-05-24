@@ -4,6 +4,8 @@
 #include "drivers/net/net.h"
 #include "drivers/power/power.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/shadow.h"
+#include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
 #include "mm/frame_allocator.h"
 #include "net/stack.h"
@@ -159,8 +161,17 @@ void TrayFlyoutRedraw()
 
     // Soft drop shadow + body. The flyout uses a slightly-lifted
     // top to bottom gradient so it reads as a raised surface
-    // against the taskbar's flat strip.
-    FramebufferDropShadow(px, py, kPanelW, kPanelH, 5, 0x70);
+    // against the taskbar's flat strip. Atlas-shadow under
+    // tactility; strip-shadow fallback otherwise.
+    if (ThemeTactilityEffective() && ThemeCurrent().shadow_intensity_active > 0)
+    {
+        RenderSoftShadow(static_cast<i32>(px), static_cast<i32>(py), kPanelW, kPanelH, 14U,
+                         ThemeCurrent().shadow_intensity_active, 0x00000000U);
+    }
+    else
+    {
+        FramebufferDropShadow(px, py, kPanelW, kPanelH, 5, 0x70);
+    }
     FramebufferFillRectGradient(px, py, kPanelW, kPanelH, LightenRgb(g_body_rgb, 18), g_body_rgb);
     FramebufferDrawRoundRect(px, py, kPanelW, kPanelH, kRadius, g_border_rgb);
 
