@@ -130,6 +130,13 @@
             "cacheVariables": {
                 "DUETOS_LTO": "ON"
             }
+        },
+        {
+            "name": "host-tests",
+            "displayName": "Hosted unit tests (arch-agnostic, native compiler)",
+            "generator": "Ninja",
+            "sourceDir": "${sourceDir}/tests/host",
+            "binaryDir": "${sourceDir}/build/host-tests"
         }
     ],
     "buildPresets": [
@@ -180,6 +187,10 @@
         {
             "name": "x86_64-release-lto",
             "configurePreset": "x86_64-release-lto"
+        },
+        {
+            "name": "host-tests",
+            "configurePreset": "host-tests"
         }
     ]
 }
