@@ -480,6 +480,8 @@ void WallpaperTick()
     const u64 now_ms = now_ns / 1'000'000ULL;
 
     // Capture the monotonic base on the first tick that actually runs.
+    // The phase wraps at its period, so theme switches don't reset motion —
+    // the wrap-around behaviour is the intended feature.
     if (g_motion.base_ms == 0)
         g_motion.base_ms = now_ms;
     const u64 t_ms = now_ms - g_motion.base_ms;
