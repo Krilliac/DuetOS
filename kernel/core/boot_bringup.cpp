@@ -2232,6 +2232,18 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
                 break;
             }
         }
+        // tactility=on / tactility=off / tactility=default — runtime
+        // override for the per-theme tactility_enabled flag. The
+        // "default" / unset path leaves the override at -1 (follow
+        // active theme).
+        if (CmdlineMatches(early_cmdline, "tactility", "off"))
+        {
+            duetos::drivers::video::ThemeSetTactilityOverride(0);
+        }
+        else if (CmdlineMatches(early_cmdline, "tactility", "on"))
+        {
+            duetos::drivers::video::ThemeSetTactilityOverride(1);
+        }
     }
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::ThemeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::BlendSelfTest());

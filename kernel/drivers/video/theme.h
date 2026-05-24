@@ -207,6 +207,46 @@ struct Theme
         Ttf = 1,
     };
     FontKind font_kind;
+
+    // ----- Chrome tactility (depth + materiality, Pass A) -----
+    //
+    // Master switch. When false, ALL alpha-blend chrome
+    // primitives (drop shadow, hover lift, press, focus glow,
+    // cursor microshadow) bypass and the theme falls back to
+    // the existing solid-colour paint paths. The HighContrast
+    // and Amber palettes set this false intentionally — the
+    // high-contrast use-case can't afford the legibility hit,
+    // and the amber-CRT aesthetic reads wrong with soft
+    // shadows. Duet variants inherit true.
+    bool tactility_enabled;
+
+    // Per-effect intensity bytes (0..255). 0 disables that
+    // effect even when tactility_enabled. Active vs inactive
+    // shadow intensity follows the chrome focus state — the
+    // active window casts a fuller shadow than the inactive
+    // siblings on the same desktop. See the per-theme matrix
+    // in docs/superpowers/specs/2026-05-24-duetos-chrome-
+    // tactility-design.md §7.2.
+    u8 shadow_intensity_active;
+    u8 shadow_intensity_inactive;
+    u8 hover_lift_alpha;
+    u8 press_alpha;
+
+    // Colour of the focus-glow ring (the 1-px inner stroke
+    // painted by RenderSoftShadowWithStroke). Most Duet
+    // variants set this to their primary accent; some route
+    // to a secondary (DuetGreen). Win32-role windows override
+    // to amber at paint time regardless. `0` is "no glow"
+    // (DuetClassic) — the paint path treats 0 as opt-out for
+    // the stroke independent of tactility_enabled.
+    u32 focus_glow_colour;
+
+    // Optional 2-px micro-shadow rendered under the cursor
+    // sprite. Subtle and theme-tuned; opt-out (false) for
+    // themes that already pay enough cursor-vs-bg contrast
+    // without it. Independent of tactility_enabled so a
+    // tactility=off boot still gets a crisp cursor.
+    bool cursor_microshadow_enabled;
 };
 
 /// Read-only snapshot of the active theme. Valid for as long as
@@ -284,5 +324,25 @@ void ThemeSelfTest();
 /// single [tactility-selftest] PASS line when every sub-test
 /// passed (spec §8.2). False until ThemeSelfTest has run.
 bool ThemeSelfTestPassed();
+
+// ----- Tactility runtime override -----
+//
+// The compile-time tactility settings live in each Theme literal
+// (tactility_enabled + the 5 intensity bytes). The runtime
+// override lets an operator force tactility off (e.g. when
+// debugging chrome regressions, or on a slow display where the
+// shadow paint is visibly slow). Three-state: -1 = "follow theme
+// default" (the boot default), 0 = "force off", 1 = "force on".
+// Set via the `tactility=` kernel cmdline at boot OR the
+// `tactility on|off|default` shell command at runtime.
+i8 ThemeTactilityOverride();
+void ThemeSetTactilityOverride(i8 v);
+
+/// Resolved tactility setting for the active theme. Equivalent to
+/// `(override == -1) ? current_theme.tactility_enabled
+///                   : bool(override)`. Use this from every
+/// tactility-aware chrome paint path so the override takes
+/// effect uniformly.
+bool ThemeTactilityEffective();
 
 } // namespace duetos::drivers::video
