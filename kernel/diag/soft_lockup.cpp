@@ -42,7 +42,23 @@ struct PerCpuState
     u64 last_tid;       ///< Most recently observed running TID.
     u64 same_tid_count; ///< Consecutive ticks with that TID.
     u64 warned_for_tid; ///< TID we've already warned about; rate-limit gate.
+    u64 warned_at_tick; ///< now_ticks of the most recent warn — used by the
+                        ///< per-TID time-based debounce below.
 };
+
+// Suppress repeat warns for the SAME TID within this many ticks of the
+// previous warn. The existing `warned_for_tid` gate only suppresses
+// while the task stays on CPU continuously; it resets the moment the
+// scheduler swaps to a different task and back. Under PE import
+// resolution (kboot runs ~1s of synchronous work, gets briefly preempted
+// by kbd-reader / timer-tick / etc., then resumes another ~1s stretch),
+// the bare gate fires a fresh warn every ~1s of guest wall time.
+// The 2026-05-24 VBox boot showed 10 such warns within a 20-second
+// PE-resolution window — same TID, same `ticks_in_run=101` — pure spam.
+// 500 ticks (~5s at 100Hz) was picked so a genuinely-stuck task still
+// gets one warn per 5s (loud enough for ops) but a CPU-hogging-but-
+// progressing task fires once per task burst.
+constexpr u64 kRewarmSuppressionTicks = 500;
 
 constexpr u32 kSoftLockupCpuMax = 1;
 constinit PerCpuState g_per_cpu[kSoftLockupCpuMax] = {};
@@ -81,8 +97,6 @@ namespace
 
 void TickInternal(u64 now_ticks, u64 current_tid, const char* current_name)
 {
-    (void)now_ticks; // future use: include in the warning line
-
     // Idle / boot task (TID 0) never counts as a lockup — those
     // are legitimately always-running.
     if (current_tid == 0)
@@ -95,17 +109,30 @@ void TickInternal(u64 now_ticks, u64 current_tid, const char* current_name)
     if (current_tid != g_state.last_tid)
     {
         // Scheduler swapped to a different task — reset the
-        // counter and clear the rate-limit gate so a future
-        // lockup of THIS new TID can warn even if we already
-        // warned about a different one.
+        // counter. NB: do NOT clear `warned_for_tid` /
+        // `warned_at_tick` here; those carry the per-TID
+        // time-based suppression across brief preemptions so a
+        // task that hogs the CPU in repeated 1s bursts doesn't
+        // spam a fresh warn after every preempt-and-resume cycle.
+        // Genuine independent lockups of different TIDs are still
+        // distinguished by the (warned_for_tid != current_tid)
+        // check below.
         g_state.last_tid = current_tid;
         g_state.same_tid_count = 1;
-        g_state.warned_for_tid = 0;
         return;
     }
 
     ++g_state.same_tid_count;
-    if (g_state.same_tid_count > kSoftLockupThresholdTicks && g_state.warned_for_tid != current_tid)
+    // Two-layer rate limit:
+    //   1. Already-warned-for-this-TID inside the current burst (existing).
+    //   2. Already-warned-for-this-TID within the past
+    //      kRewarmSuppressionTicks regardless of intermediate preempts.
+    // The second layer is what stops the PE-import-resolution spam
+    // documented in the 2026-05-24 VBox boot log.
+    const bool same_tid_recently_warned =
+        (g_state.warned_for_tid == current_tid) && (now_ticks - g_state.warned_at_tick < kRewarmSuppressionTicks);
+    if (g_state.same_tid_count > kSoftLockupThresholdTicks && g_state.warned_for_tid != current_tid &&
+        !same_tid_recently_warned)
     {
         // First crossing of the threshold for this run. Route
         // through diag::FaultReactDispatch so the dispatch
@@ -119,6 +146,7 @@ void TickInternal(u64 now_ticks, u64 current_tid, const char* current_name)
         // gate stays at this layer to keep rate-limiting cheap.
         ++g_warnings_total;
         g_state.warned_for_tid = current_tid;
+        g_state.warned_at_tick = now_ticks;
 
         // Identity line — emitted BEFORE FaultReactDispatch's
         // bare `val=<tid>` warning so a log reader sees task

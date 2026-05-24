@@ -182,18 +182,50 @@ void DrawFn(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void
     // Start menu makes it active and it runs normally.
     if (duetos::drivers::video::WindowActive() != g_handle)
     {
+        // Idle card. Previous version filled the whole client area
+        // with pure black + 8pt "GFX DEMO" text — at the default
+        // 340x280 window that read as a broken/empty window on the
+        // 1024x768 desktop (2026-05-24 screenshot inspection: user
+        // flagged the rectangle as "dark center window", not
+        // recognising it as the demo's idle state). Repaint the
+        // idle card so it CLEARLY communicates "idle, click to
+        // activate" — colored background, centered banner with a
+        // visible border, two stacked lines.
         using duetos::drivers::video::FramebufferDrawString;
         using duetos::drivers::video::FramebufferFillRect;
-        FramebufferFillRect(cx, cy, cw, ch, 0x00000000u);
-        const duetos::u32 mid_y = cy + ch / 2u;
-        if (cw >= 8u * 8u && ch >= 20u)
+        constexpr duetos::u32 kIdleBg = 0x00101830u;   // dark navy — clearly NOT broken/black
+        constexpr duetos::u32 kBannerBg = 0x00203858u; // slightly lighter banner strip
+        constexpr duetos::u32 kBannerFg = 0x00FFFFFFu;
+        constexpr duetos::u32 kHintFg = 0x00A0B0C0u;
+        constexpr duetos::u32 kBorderFg = 0x00405878u;
+        FramebufferFillRect(cx, cy, cw, ch, kIdleBg);
+        // 1-pixel inner border to make the window edge obvious even
+        // against the dark wallpaper, distinguishing "intentionally
+        // idle app" from "compositor lost this window".
+        FramebufferFillRect(cx, cy, cw, 1, kBorderFg);
+        FramebufferFillRect(cx, cy + ch - 1, cw, 1, kBorderFg);
+        FramebufferFillRect(cx, cy, 1, ch, kBorderFg);
+        FramebufferFillRect(cx + cw - 1, cy, 1, ch, kBorderFg);
+        // Banner strip across the vertical middle (24px tall, full width).
+        // The whole-strip background makes the text legible even when the
+        // window is partly off-screen or overlapped.
+        constexpr duetos::u32 kBannerH = 24u;
+        if (ch >= kBannerH + 4u)
         {
-            FramebufferDrawString(cx + (cw - 8u * 8u) / 2u, mid_y - 10u, "GFX DEMO", 0x00FFFFFFu, 0x00000000u);
-        }
-        if (cw >= 22u * 8u && ch >= 36u)
-        {
-            FramebufferDrawString(cx + (cw - 22u * 8u) / 2u, mid_y + 4u, "open from Start to run", 0x00808080u,
-                                  0x00000000u);
+            const duetos::u32 strip_y = cy + (ch - kBannerH) / 2u;
+            FramebufferFillRect(cx + 1, strip_y, cw - 2, kBannerH, kBannerBg);
+            const char* title = "GFX DEMO";
+            const duetos::u32 title_w = 8u * 8u; // 8 chars * 8px/char
+            if (cw >= title_w + 8u)
+            {
+                FramebufferDrawString(cx + (cw - title_w) / 2u, strip_y + 4u, title, kBannerFg, kBannerBg);
+            }
+            const char* hint = "press Enter from Start menu";
+            const duetos::u32 hint_w = 27u * 8u;
+            if (cw >= hint_w + 8u && ch >= kBannerH + 20u)
+            {
+                FramebufferDrawString(cx + (cw - hint_w) / 2u, strip_y + kBannerH + 4u, hint, kHintFg, kIdleBg);
+            }
         }
         return;
     }

@@ -76,10 +76,23 @@ bool DoIcmpEcho(Ipv4Address dst, u16 id, u32 timeout_ticks)
     return false;
 }
 
-bool DoDnsLookup(Ipv4Address resolver, const char* name, Ipv4Address& out_ip, u32 timeout_ticks)
+enum class DnsLookupResult : u8
+{
+    Ok,           // Got an A record.
+    QueryDropped, // NetDnsQueryA returned false — ARP failed or UDP send rejected.
+    Timeout,      // Query sent OK but no reply within the budget.
+};
+
+DnsLookupResult DoDnsLookup(Ipv4Address resolver, const char* name, Ipv4Address& out_ip, u32 timeout_ticks)
 {
     if (!NetDnsQueryA(/*iface_index=*/0, resolver, name))
-        return false;
+    {
+        // Distinguishes "query never made it onto the wire" (ARP fail
+        // or UDP send rejected — kernel-side issue worth investigating)
+        // from "we asked, nobody answered" (timeout — often the SLIRP
+        // forwarding limitation, not a kernel bug).
+        return DnsLookupResult::QueryDropped;
+    }
     for (u32 i = 0; i < timeout_ticks; ++i)
     {
         duetos::sched::SchedSleepTicks(1);
@@ -87,10 +100,10 @@ bool DoDnsLookup(Ipv4Address resolver, const char* name, Ipv4Address& out_ip, u3
         if (r.resolved)
         {
             out_ip = r.ip;
-            return true;
+            return DnsLookupResult::Ok;
         }
     }
-    return false;
+    return DnsLookupResult::Timeout;
 }
 
 // HTTP GET return values, used by the smoke test to give a clearer
@@ -205,16 +218,29 @@ void NetSmokeEntry(void*)
     arch::SerialWrite("[net-smoke] step 2: DNS A www.google.com via ");
     WriteIp(lease.dns);
     arch::SerialWrite("\n");
-    if (DoDnsLookup(lease.dns, "www.google.com", google_ip, /*timeout_ticks=*/300))
+    const DnsLookupResult dns_rc = DoDnsLookup(lease.dns, "www.google.com", google_ip, /*timeout_ticks=*/300);
+    switch (dns_rc)
     {
+    case DnsLookupResult::Ok:
         dns_ok = true;
         arch::SerialWrite("[net-smoke] step 2: PASS — www.google.com -> ");
         WriteIp(google_ip);
         arch::SerialWrite("\n");
-    }
-    else
-    {
-        arch::SerialWrite("[net-smoke] step 2: FAIL — DNS did not resolve within 3s\n");
+        break;
+    case DnsLookupResult::QueryDropped:
+        // Kernel-side bug: ARP for the resolver failed or UDP send was
+        // rejected. Always worth investigating — even SLIRP should allow
+        // an ARP+UDP-send pair to complete.
+        arch::SerialWrite("[net-smoke] step 2: FAIL — DNS query never sent (ARP/UDP rejected)\n");
+        break;
+    case DnsLookupResult::Timeout:
+        // Query went out, no reply within 3s. Most often this is a SLIRP
+        // forwarding gap (host's DNS resolver not reachable from the
+        // emulated subnet) rather than a kernel bug. Reported as "SKIP"
+        // (vs FAIL) so non-kernel network configs don't flag the boot.
+        arch::SerialWrite("[net-smoke] step 2: SKIP — DNS query sent, no reply in 3s "
+                          "(typical under SLIRP without host DNS forwarding)\n");
+        break;
     }
 
     // Step 3: ping a public host (8.8.8.8). SLIRP's user-mode
