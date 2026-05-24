@@ -32,6 +32,7 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "mm/multiboot2.h"
+#include "mm/frame_allocator.h"
 #include "mm/page.h"
 #include "mm/paging.h"
 #include "acpi/aml.h"
@@ -373,22 +374,33 @@ const Rsdp* FindRsdpInMultiboot(uptr info_phys)
     // 1 GiB of physical RAM (per kernel/mm/paging — the
     // k.directmap region 0xffffffff80000000..0xffffffffc0000000),
     // which is where every multiboot loader places the info struct.
-    const auto* info = reinterpret_cast<const mm::MultibootInfoHeader*>(mm::PhysToVirt(info_phys));
+    // Prefer the kernel-owned snapshot captured by FrameAllocatorInit
+    // (see kernel/mm/frame_allocator.h::MultibootInfoSnapshot). The
+    // raw multiboot_info_phys read goes through PhysToVirt which, per
+    // the 2026-05-24 VBox boot capture (commit 9bc0c84e diag), returns
+    // garbage total_size=0x80cc79b0 from a page that should still
+    // contain the multiboot info — something in the boot path
+    // clobbers the original page despite the line-557 ReserveRange
+    // pin. The snapshot is taken while the data is fresh in early
+    // FrameAllocatorInit, mirroring FindBootCmdline's caching
+    // strategy. Fall back to the raw read only if FrameAllocatorInit
+    // didn't capture a snapshot (info_size > 8 KiB cap, or AcpiInit
+    // called pre-FrameAllocatorInit — neither legitimate today).
+    const void* snap = ::duetos::mm::MultibootInfoSnapshot();
+    const u64 snap_size = ::duetos::mm::MultibootInfoSnapshotSize();
+    const auto* info = snap != nullptr
+                           ? reinterpret_cast<const mm::MultibootInfoHeader*>(snap)
+                           : reinterpret_cast<const mm::MultibootInfoHeader*>(mm::PhysToVirt(info_phys));
     const uptr base = reinterpret_cast<uptr>(info);
     uptr cursor = base + sizeof(mm::MultibootInfoHeader);
-    const uptr end = base + info->total_size;
+    const uptr end = base + (snap != nullptr ? snap_size : info->total_size);
 
-    // Boot-time diag: under VBox, e792bd2f's PhysToVirt fix unblocked
-    // the walk but the panic "no ACPI RSDP tag in Multiboot2 info"
-    // surfaced — the walker now WORKS but doesn't find tag-14 or
-    // tag-15. Distinguish "GRUB didn't pass ACPI tags" from "walk
-    // missed them" by emitting the structure header + every tag type
-    // seen. Cheap (~20 SerialWrite per boot) and leaves a permanent
-    // diagnostic trail per CLAUDE.md "Diagnostic Logging" rule.
-    arch::SerialWrite("[acpi/rsdp-walk] info_phys=");
+    arch::SerialWrite("[acpi/rsdp-walk] source=");
+    arch::SerialWrite(snap != nullptr ? "snapshot" : "phys-direct");
+    arch::SerialWrite(" info_phys=");
     SerialWriteHex(info_phys);
     arch::SerialWrite(" total_size=");
-    SerialWriteHex(info->total_size);
+    SerialWriteHex(snap != nullptr ? snap_size : info->total_size);
     arch::SerialWrite("\n");
 
     const Rsdp* old_rsdp = nullptr;

@@ -93,6 +93,16 @@ constinit u64 g_free_count = 0;
 constinit u64 g_total_frames = 0;
 constinit u64 g_peak_used_frames = 0;
 
+// Snapshot of the multiboot2 info structure taken in FrameAllocatorInit
+// while the bootloader's buffer is still fresh. Late-boot consumers
+// (acpi::AcpiInit's FindRsdpInMultiboot, future framebuffer re-walk,
+// etc.) read from this kernel-owned copy instead of dereferencing the
+// raw multiboot_info_phys, which is unreliable past MmFinalizePaging
+// for reasons documented in the init-site comment. 8 KiB cap is well
+// above every multiboot2 loader's observed total_size (GRUB ~1 KiB).
+constinit u8 g_multiboot_info_snapshot[8192] = {};
+constinit u64 g_multiboot_info_snapshot_size = 0;
+
 // Cross-CPU mutual exclusion for the shared bitmap + counters +
 // NUMA ranges + per-CPU pool array. The bespoke FramePoolIrqOff
 // only did `cli`/`sti`, which serialises against IRQ re-entrancy
@@ -486,6 +496,36 @@ void FrameAllocatorInit(uptr multiboot_info_phys)
 
     const auto* info = reinterpret_cast<const MultibootInfoHeader*>(multiboot_info_phys);
     const u64 info_size = info->total_size;
+
+    // Copy the multiboot info into kernel BSS so post-MmFinalizePaging
+    // consumers (acpi::AcpiInit, in particular) see a stable, kernel-
+    // owned snapshot. The line-557 ReserveRange below pins the original
+    // physical page, but per the 2026-05-24 VBox boot capture
+    // (OneDrive Desktop\\DuetOS Logs\\serial.txt, e792bd2f → 9bc0c84e),
+    // total_size read via PhysToVirt later returns 0x80cc79b0 — i.e.
+    // the page content is no longer the multiboot info. ReserveRange
+    // only marks the bitmap; nothing in the kernel actually re-reads
+    // the bitmap before allocating, so an init-path direct-write or
+    // a low-1-MiB BIOS scribble can clobber the page despite the
+    // reservation. Mirror FindBootCmdline's cached-cmdline pattern:
+    // snapshot once while the data is fresh, serve every later caller
+    // from the kernel-owned copy. Cap at 8 KiB — GRUB ships ~1 KiB and
+    // every multiboot2 loader we've surveyed stays well under 4 KiB.
+    if (info_size > 0 && info_size <= sizeof(g_multiboot_info_snapshot))
+    {
+        const auto* src = reinterpret_cast<const u8*>(multiboot_info_phys);
+        for (u64 i = 0; i < info_size; ++i)
+        {
+            g_multiboot_info_snapshot[i] = src[i];
+        }
+        g_multiboot_info_snapshot_size = info_size;
+    }
+    else
+    {
+        SerialWrite("[mm] multiboot info too large for snapshot; size=");
+        SerialWriteHex(info_size);
+        SerialWrite("\n");
+    }
 
     const u64 home = FindBitmapHome(multiboot_info_phys, info_size, g_bitmap_bytes);
     if (home == 0)
@@ -1477,6 +1517,16 @@ u64 FreeFramesCount()
 u64 PeakUsedFrames()
 {
     return g_peak_used_frames;
+}
+
+const void* MultibootInfoSnapshot()
+{
+    return g_multiboot_info_snapshot_size == 0 ? nullptr : g_multiboot_info_snapshot;
+}
+
+u64 MultibootInfoSnapshotSize()
+{
+    return g_multiboot_info_snapshot_size;
 }
 
 void FrameAllocatorSetFailAfter(u64 n_remaining)
