@@ -424,12 +424,20 @@ void WallpaperPaint(u32 desktop_rgb)
         if (g_svg_inited && g_svg_topo.shape_count > 0)
         {
             const i32 drift = g_motion.topo_drift_px;
-            SvgRender(g_svg_topo, -drift, 0, info.width, info.height);
+            // Pulse tint: blend topo curves toward the theme accent colour
+            // proportional to the current pulse_boost so the contour lines
+            // breathe in sync with the arc brightness. Alpha byte encodes
+            // pulse_boost [0, kPulsePeak=0.08] scaled to [0, 255*0.08≈20].
+            // When motion is off pulse_boost == 0.0 and tint_argb alpha == 0
+            // → SvgRender uses raw SVG stroke colours (no overhead).
+            const u32 pulse_alpha = static_cast<u32>(g_motion.pulse_boost * 255.0);
+            const u32 tint_argb = (pulse_alpha << 24) | (ThemeCurrent().taskbar_accent & 0x00FFFFFFU);
+            SvgRender(g_svg_topo, -drift, 0, info.width, info.height, tint_argb);
             // Wrap-around copy: covers the right-hand gap that
             // appears when the primary shifted render slides left.
             if (drift > 0)
             {
-                SvgRender(g_svg_topo, i32(info.width) - drift, 0, info.width, info.height);
+                SvgRender(g_svg_topo, i32(info.width) - drift, 0, info.width, info.height, tint_argb);
             }
         }
         PaintDuetArcs(desktop_rgb, info.width, info.height,
