@@ -705,22 +705,26 @@ for the subsystem summary.
 
 The residuals waiting on visual verification or follow-on work:
 
-- **Live QEMU/VBox verification** (Task 27 steps 2-6 of the
-  plan). Run `tools/test/tactility-soak.sh duet 30` and
-  `tools/test/tactility-screenshot-matrix.sh` against a host
-  with QEMU + OVMF installed; the 4 `*-selftest` PASS sentinels
-  should appear in the boot log and the screenshot matrix
-  should show visible soft shadows on the tactility-enabled
-  themes (Duet variants, Classic, Slate10, DuetClassic) and
-  unchanged flat chrome on HighContrast + Amber. VBox boot
-  also wanted per [`vbox-bringup-pr266`](../../docs/...) (LAPIC
-  / GS-base differences from QEMU sometimes catch what QEMU
-  doesn't).
+- **VBox boot verification** (Task 27 step 5 of the plan).
+  QEMU verification landed on 2026-05-24: all four
+  `*-selftest` PASS sentinels fire on the canonical
+  `x86_64-debug-fast` boot, the boot-log-analyzer TACTILITY
+  section reports `blend=1 shadow=1 theme-matrix=1 umbrella=1
+  probe fires=0`, and `tools/test/tactility-screenshot-matrix.sh
+  classic` produces a 2.3 MB 1024×768 PPM at
+  `build/shots/classic-debug-fast.ppm`. VBox still wanted per
+  the [`vbox-bringup-pr266`](../../docs/...) memory entry —
+  LAPIC / GS-base differences from QEMU sometimes catch what
+  QEMU doesn't.
 - **HighContrast pixel-diff invariant** (plan §8.5 step 6).
   Capture a HighContrast PPM pre-spec from `main`, post-spec
-  from this branch, run `compare -metric AE`; expect 0
+  from this branch via `tools/test/tactility-screenshot-matrix.sh
+  highcontrast` (needs a per-theme cmdline override —
+  `tactility=off` plus theme= via `boot=desktop theme=highcontrast`
+  custom ISO build), run `compare -metric AE`; expect 0
   differences (the fallback path preserves Amber + HighContrast
-  bit-for-bit). Needs the QEMU env above.
+  bit-for-bit). Requires per-theme ISO rebuild plumbing in the
+  screenshot script (currently single-theme v1).
 - **Menu scale-pop animation** (Task 18 full of the plan). The
   menu panel pop from 95% to 100% on open would need a per-
   panel scale factor threaded through `MenuRedraw` + the
