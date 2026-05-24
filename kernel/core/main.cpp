@@ -268,6 +268,7 @@
 #include "loader/firmware_loader.h"
 #include "loader/firmware_package.h"
 #include "diag/heartbeat.h"
+#include "diag/selfthink.h"
 #include "diag/stress_driver.h"
 #include "log/klog.h"
 #include "log/klog_persist.h"
@@ -844,6 +845,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     (void)duetos::core::RunPhase(duetos::core::Phase::Userland);
 
     duetos::core::StartHeartbeatThread();
+
+    // Cross-subsystem self-portrait + causal-chain ring. Mirrors
+    // kheartbeat's shape: a kthread on a steady tick cadence
+    // keeps the latest portrait fresh so shell queries don't
+    // rebuild on every read. The causal ring is appended to
+    // independently by the probe / autonomic / runtime-checker
+    // paths; the kthread just refreshes the snapshot.
+    duetos::diag::selfthink::StartSelfthinkThread();
 
     // Inform the init-wedge watchdog (in arch/timer.cpp) that
     // bring-up has fully finished. Steady-state quiet windows after

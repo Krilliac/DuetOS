@@ -5,6 +5,7 @@
 #include "debug/probes.h"
 #include "diag/runtime_checker.h"
 #include "diag/stress_driver.h"
+#include "env/autonomic_feedback.h"
 #include "env/environment.h"
 #include "log/klog.h"
 #include "mm/frame_allocator.h"
@@ -172,6 +173,14 @@ AutoActionSet AutonomicEvaluate(AutonomicState& st, const AutoInputs& in)
 
 void AutonomicApply(const AutoActionSet& set)
 {
+    // Capture pre-action metrics once for the whole set. Every
+    // action in `set` fires at the same logical instant, so they
+    // all share the same pre-snapshot. The feedback ring is
+    // walked by kselfthink's tick after the kFeedbackDelayTicks
+    // window has elapsed and the post-snapshot becomes
+    // meaningful.
+    const ::duetos::env::feedback::PreMetrics pre = ::duetos::env::feedback::CapturePreMetrics();
+
     for (u32 i = 0; i < set.count; ++i)
     {
         const AutoAction a = set.actions[i];
@@ -258,6 +267,11 @@ void AutonomicApply(const AutoActionSet& set)
         g_report.per_action[static_cast<u32>(a)]++;
         g_report.last = a;
         g_report.last_rule = r;
+
+        // Enqueue a feedback entry. The kselfthink kthread's
+        // Tick() will evaluate the outcome once the deadline
+        // elapses and write a CausalKind::AutoAction row.
+        ::duetos::env::feedback::Enqueue(r, a, pre);
     }
 }
 

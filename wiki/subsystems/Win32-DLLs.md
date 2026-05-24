@@ -109,7 +109,7 @@ The DLLs are not flat stubs. Real implementations land per slice:
    and refresh `docs/sync-wiki.sh` output.
 
 <!-- AUTO:dll_list -->
-*59 DLLs preloaded into every Win32 PE process.*
+*60 DLLs preloaded into every Win32 PE process.*
 
 | DLL | Exports (approx) | Path |
 |-----|------------------|------|
@@ -164,6 +164,7 @@ The DLLs are not flat stubs. Real implementations land per slice:
 | `uxtheme` | 0 | `userland/libs/uxtheme/` |
 | `vcruntime140` | 0 | `userland/libs/vcruntime140/` |
 | `version` | 0 | `userland/libs/version/` |
+| `vulkan_1` | 0 | `userland/libs/vulkan_1/` |
 | `winhttp` | 0 | `userland/libs/winhttp/` |
 | `wininet` | 0 | `userland/libs/wininet/` |
 | `winmm` | 0 | `userland/libs/winmm/` |

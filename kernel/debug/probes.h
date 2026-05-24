@@ -270,6 +270,15 @@ enum class ProbeId : u8
     // target as `value`. ArmedLog; clean boot stays quiet.
     kSchedContextSwitchWildRet,
 
+    // env::feedback::Tick classified an autonomic action's outcome as
+    // Worsened — the targeted metric moved AGAINST the expected
+    // direction after the action ran. Caller passes
+    // `(outcome << 32) | rule_id` as `value`. ArmedLog by default;
+    // a clean boot never produces a Worsened outcome, so any fire is
+    // a real regression worth a sentinel line. See
+    // kernel/env/autonomic_feedback.cpp for the classifier.
+    kAutonomicOutcomeMissed,
+
     kCount, // sentinel
 };
 

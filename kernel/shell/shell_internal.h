@@ -298,6 +298,7 @@ void WriteU64Dec(u64 v);
 void WriteU8TwoDigits(u8 v);
 void WriteU64Hex(u64 v, u32 digits = 16);
 void WriteI64Dec(i64 v);
+void WritePadLeft(const char* s, u64 width);
 
 // ---------------------------------------------------------------
 // Trivial info / housekeeping commands (shell_core.cpp). Banner /
@@ -461,6 +462,7 @@ void CmdLogclock(u32 argc, char** argv);
 void CmdKdbg(u32 argc, char** argv);
 void CmdDfix(u32 argc, char** argv);
 void CmdDintro(u32 argc, char** argv);
+void CmdSelfthink(u32 argc, char** argv);
 void CmdMetrics();
 void CmdFaultInject(u32 argc, char** argv);
 

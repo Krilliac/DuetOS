@@ -210,6 +210,11 @@
 #include "diag/fix_journal.h"
 #include "diag/fix_journal_persist.h"
 #include "diag/introspect.h"
+#include "diag/selfthink.h"
+#include "diag/selfthink_baselines.h"
+#include "diag/selfthink_narrative.h"
+#include "diag/selfthink_persist.h"
+#include "env/autonomic_feedback.h"
 #include "diag/gdb_server.h"
 #include "diag/minidump.h"
 #include "diag/perf_profile.h"
@@ -1984,6 +1989,40 @@ void BootBringupDevices(bool force_net_smoke)
     // KERNEL.F0 doesn't exist yet (first boot).
     duetos::diag::introspect::LoadPriorDigest();
     DUETOS_BOOT_SELFTEST(duetos::diag::introspect::IntrospectSelfTest());
+
+    // Cross-subsystem self-portrait + causal-chain self-test. Pure
+    // observation: snapshots the kernel state via every existing
+    // public stats accessor, exercises a CausalRecord round-trip,
+    // and asserts the resulting struct's arithmetic is coherent.
+    // Runs after the introspect selftest so the SelfPortrait's
+    // `introspect_*` fields have a populated source to copy.
+    DUETOS_BOOT_SELFTEST(duetos::diag::selfthink::SelfthinkSelfTest());
+
+    // Autonomic feedback evaluator. Exercises the pre/post
+    // classification switch over every AutoAction enum value.
+    // Pure observation; does not enqueue or fire any actuator.
+    DUETOS_BOOT_SELFTEST(duetos::env::feedback::SelfTest());
+
+    // Rolling-baseline per-metric anomaly detector. Pushes a
+    // controlled inlier sample run + asserts the classifier's
+    // mean is not flagged. Reuses the FreeFrames metric channel;
+    // subsequent kselfthink ticks continue feeding it normally.
+    DUETOS_BOOT_SELFTEST(duetos::diag::selfthink::baselines::SelfTest());
+
+    // Tier-1 selfthink persistence. Reads the prior boot's
+    // KERNEL.THK into the in-RAM prior buffer (best-effort —
+    // first boot has no prior file), then truncates KERNEL.THK
+    // so the kselfthink periodic flush starts from a known
+    // empty canvas. Safe pre-flight if no FAT32 volume is
+    // mounted (the prior buffer stays empty + flush no-ops).
+    DUETOS_BOOT_SELFTEST(duetos::diag::selfthink::persist::SelfTest());
+    duetos::diag::selfthink::persist::Install();
+
+    // Narrative writer selftest. Pure formatter exercise — injects
+    // a synthetic Worsened entry and asserts the highlight picker
+    // selects it. No actual narrative is written to the console
+    // (the live `selfthink why` command does that on demand).
+    DUETOS_BOOT_SELFTEST(duetos::diag::selfthink::narrative::SelfTest());
 
     // Session restore: read SESSION.CFG and apply the saved
     // theme + per-app window positions. No-op on first boot
