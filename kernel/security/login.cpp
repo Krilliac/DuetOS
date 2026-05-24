@@ -504,12 +504,23 @@ void GuiRepaint()
     const u32 name_y = card_y + 32u * fb.height / 768u;
     const u32 role_y = card_y + 48u * fb.height / 768u;
 
-    FramebufferDrawString(name_x, name_y, (user != nullptr && user[0] != '\0') ? user : "<no user>",
-                          ThemeCurrent().banner_fg, ThemeCurrent().taskbar_bg);
+    // Username row. Empty = placeholder hint in dim ink so the user knows
+    // a username is required; non-empty = the typed text in full ink.
+    const bool has_user = (user != nullptr && user[0] != '\0');
+    // Dim ink for placeholders: low-saturation grey that reads against any
+    // theme's taskbar_bg without depending on a per-theme dim field.
+    constexpr u32 kHintInk = 0x00808890u;
+    FramebufferDrawString(name_x, name_y,
+                          has_user ? user : "type username",
+                          has_user ? ThemeCurrent().banner_fg : kHintInk,
+                          ThemeCurrent().taskbar_bg);
 
-    // GAP: role hardcoded — RBAC role-per-user lookup not wired into
-    //      login.cpp yet, revisit when RBAC v1 persistence lands.
-    FramebufferDrawString(name_x, role_y, "Administrator", ThemeCurrent().banner_fg, ThemeCurrent().taskbar_bg);
+    // Default-account hint replaces the misleading hardcoded "Administrator"
+    // role label (which the v0 RBAC surface couldn't actually validate
+    // against — see the GAP marker history). Dim ink so it reads as a hint
+    // rather than a username candidate. Revisit when RBAC v1 persistence
+    // lands and we have a real role-per-user lookup.
+    FramebufferDrawString(name_x, role_y, "default: admin / admin", kHintInk, ThemeCurrent().taskbar_bg);
 
     // 5. Password field — single-line accent-stroked rect with masked echo.
     //    Pass B Task 15.
@@ -574,6 +585,19 @@ void GuiRepaint()
                           btn_label,
                           ThemeCurrent().desktop_bg,    // dark ink on accent fill
                           ThemeCurrent().taskbar_accent); // bg matches button so glyphs blend
+
+    // 7. Status line — render g_login.status below the card body if set.
+    //    Used for "LOGIN FAILED - CHECK USERNAME / PASSWORD",
+    //    "ENTER A USERNAME", "LOCKED — USE THE SAME USER..." etc.
+    //    Without this, auth failures were silent (set the field but never
+    //    drew it) and the user had no feedback on a wrong password.
+    if (g_login.status != nullptr)
+    {
+        constexpr u32 kWarnInk = 0x00E66060u; // soft warning red
+        const u32 status_y = btn_y + btn_h + 8u * fb.height / 768u;
+        FramebufferDrawString(card_x + 14u * fb.width / 1024u, status_y,
+                              g_login.status, kWarnInk, ThemeCurrent().desktop_bg);
+    }
 
     // Flush offscreen shadow → live framebuffer (no-op if BeginCompose
     // fell back to direct mode).
