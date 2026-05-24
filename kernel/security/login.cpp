@@ -533,6 +533,26 @@ void GuiRepaint()
         }
     }
 
+    // 6. Sign-in button — accent fill with dark "Sign in" label.
+    //    Pass B Task 16. Right-aligned under the password field.
+    //    Font8x8MeasureString does not exist; label width is approximated
+    //    from glyph count × 8 px (8×8 bitmap font, scale=1).
+    const u32 btn_w = 170u * fb.width / 1024u;
+    const u32 btn_h = 28u * fb.height / 768u;
+    const u32 btn_x = pwd_x + pwd_w - btn_w;
+    const u32 btn_y = pwd_y + pwd_h + 14u * fb.height / 768u;
+
+    FramebufferFillRect(btn_x, btn_y, btn_w, btn_h, ThemeCurrent().taskbar_accent);
+
+    // "Sign in" = 7 glyphs × 8 px wide = 56 px at scale 1.
+    constexpr u32 kLabelPxW = 7u * 8u;
+    const char* btn_label = "Sign in";
+    FramebufferDrawString(btn_x + (btn_w - kLabelPxW) / 2u,
+                          btn_y + 10u * fb.height / 768u,
+                          btn_label,
+                          ThemeCurrent().desktop_bg,    // dark ink on accent fill
+                          ThemeCurrent().taskbar_accent); // bg matches button so glyphs blend
+
     // Flush offscreen shadow → live framebuffer (no-op if BeginCompose
     // fell back to direct mode).
     FramebufferEndCompose();
