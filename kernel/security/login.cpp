@@ -24,17 +24,18 @@
 
 #include "security/login.h"
 
+#include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/console.h"
 #include "drivers/video/framebuffer.h"
-#include "drivers/video/shadow.h"
 #include "drivers/video/theme.h"
-#include "drivers/video/widget.h"
+#include "drivers/video/wallpaper.h"
 #include "log/klog.h"
 #include "sched/sched.h"
 #include "security/auth.h"
 #include "time/tick.h"
+#include "util/datetime.h"
 
 namespace duetos::core
 {
@@ -43,17 +44,11 @@ using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
 using duetos::drivers::video::FramebufferBeginCompose;
-using duetos::drivers::video::FramebufferDrawRect;
-using duetos::drivers::video::FramebufferDrawString;
-using duetos::drivers::video::FramebufferDropShadow;
+using duetos::drivers::video::FramebufferDrawStringScaled;
 using duetos::drivers::video::FramebufferEndCompose;
-using duetos::drivers::video::FramebufferFillRect;
-using duetos::drivers::video::FramebufferFillRectGradient;
 using duetos::drivers::video::FramebufferGet;
-using duetos::drivers::video::RenderSoftShadow;
 using duetos::drivers::video::ThemeCurrent;
-using duetos::drivers::video::ThemeIntensityEffective;
-using duetos::drivers::video::ThemeTactilityEffective;
+using duetos::drivers::video::WallpaperPaint;
 
 namespace
 {
@@ -90,22 +85,8 @@ struct State
 
 constinit State g_login = {};
 
-// Colours used by the GUI login screen. The top-to-bottom teal
-// gradient matches the desktop mode so the transition from
-// login → desktop is visually continuous.
-constexpr u32 kBgTop = 0x00204868;
-constexpr u32 kBgBottom = 0x00101828;
-constexpr u32 kPanel = 0x00E0E0D8;
-constexpr u32 kPanelBorder = 0x00101828;
-constexpr u32 kTitleBar = 0x00205080;
-constexpr u32 kTitleText = 0x00FFFFFF;
-constexpr u32 kFieldBg = 0x00FFFFFF;
-constexpr u32 kFieldFocusBg = 0x00FFF8C0;
-constexpr u32 kFieldBorder = 0x00404040;
-constexpr u32 kFieldText = 0x00101010;
-constexpr u32 kLabelText = 0x00101010;
-constexpr u32 kHint = 0x00606060;
-constexpr u32 kStatusError = 0x00801010;
+// Colours for the Pass B corner-card login screen.
+// T13+ will add corner-card palette constants here.
 
 void ClearField(char* buf, u32* len)
 {
@@ -284,233 +265,146 @@ bool TtySubmit()
 // the live framebuffer dimensions so it centres on any resolution.
 // ---------------------------------------------------------------
 
-struct GuiLayout
-{
-    u32 fb_w, fb_h;
-    u32 panel_x, panel_y, panel_w, panel_h;
-    u32 title_h;
-    u32 user_x, user_y, user_w, user_h;
-    u32 pass_x, pass_y, pass_w, pass_h;
-    u32 hint_y;
-    u32 status_y;
-};
 
-GuiLayout ComputeLayout()
+// ---------------------------------------------------------------
+// Pass B corner-card helpers — clock + date text for the big
+// clock left panel. Both read the RTC directly so they're
+// always wall-clock accurate (no separate tick-derived fallback
+// needed: RtcRead is cheap, ~1 ms max spin, fine for a 1 Hz
+// repaint).
+// ---------------------------------------------------------------
+
+// Write a two-digit decimal (with leading zero) at *pos in buf.
+// Helper for LoginFormatClock/Date — avoids a snprintf dependency.
+void AppendTwoDigit(char* buf, u32* pos, u32 cap, u32 val)
 {
-    const auto fb = FramebufferGet();
-    GuiLayout l = {};
-    l.fb_w = fb.width;
-    l.fb_h = fb.height;
-    l.panel_w = 440;
-    l.panel_h = 220;
-    if (l.panel_w > l.fb_w)
+    if (*pos + 1 < cap)
     {
-        l.panel_w = l.fb_w;
+        buf[(*pos)++] = static_cast<char>('0' + (val / 10) % 10);
     }
-    if (l.panel_h > l.fb_h)
+    if (*pos + 1 < cap)
     {
-        l.panel_h = l.fb_h;
+        buf[(*pos)++] = static_cast<char>('0' + val % 10);
     }
-    l.panel_x = (l.fb_w - l.panel_w) / 2;
-    l.panel_y = (l.fb_h - l.panel_h) / 2;
-    l.title_h = 28;
-    const u32 field_w = 260;
-    const u32 field_h = 22;
-    const u32 field_x = l.panel_x + 140;
-    l.user_x = field_x;
-    l.user_y = l.panel_y + l.title_h + 24;
-    l.user_w = field_w;
-    l.user_h = field_h;
-    l.pass_x = field_x;
-    l.pass_y = l.user_y + field_h + 14;
-    l.pass_w = field_w;
-    l.pass_h = field_h;
-    l.status_y = l.pass_y + field_h + 18;
-    l.hint_y = l.panel_y + l.panel_h - 14;
-    return l;
 }
 
-// Saturating per-channel lighten — file-local copy.
-u32 LightenRgb(u32 rgb, u32 amount)
+void LoginFormatClock(char* out, u32 cap)
 {
-    u32 r = ((rgb >> 16) & 0xFFU) + amount;
-    u32 g = ((rgb >> 8) & 0xFFU) + amount;
-    u32 b = (rgb & 0xFFU) + amount;
-    if (r > 0xFFU)
-        r = 0xFFU;
-    if (g > 0xFFU)
-        g = 0xFFU;
-    if (b > 0xFFU)
-        b = 0xFFU;
-    return (r << 16) | (g << 8) | b;
+    duetos::arch::RtcTime t = {};
+    duetos::arch::RtcRead(&t);
+    u32 pos = 0;
+    AppendTwoDigit(out, &pos, cap, t.hour);
+    if (pos + 1 < cap)
+    {
+        out[pos++] = ':';
+    }
+    AppendTwoDigit(out, &pos, cap, t.minute);
+    if (pos < cap)
+    {
+        out[pos] = '\0';
+    }
 }
 
-void DrawBackground(const GuiLayout& l)
+void LoginFormatDate(char* out, u32 cap)
 {
-    // Smooth full-height vertical gradient. Replaces the previous
-    // two-stripe approximation now that the framebuffer ships
-    // FillRectGradient — the same primitive the desktop compose
-    // uses, so the login → desktop transition reads as continuous
-    // colour rather than a band hand-off.
-    FramebufferFillRectGradient(0, 0, l.fb_w, l.fb_h, kBgTop, kBgBottom);
-    // Top banner text.
-    FramebufferDrawString(16, 12, "DUETOS", 0x00FFFFFF, kBgTop);
-    FramebufferDrawString(l.fb_w - 8 * 9, 12, "LOGIN v0", 0x00C0D0E0, kBgTop);
-}
+    duetos::arch::RtcTime t = {};
+    duetos::arch::RtcRead(&t);
 
-void DrawPanel(const GuiLayout& l)
-{
-    // Drop shadow first so the panel reads as raised relative to
-    // the gradient bg. Atlas-shadow under tactility; strip-shadow
-    // fallback preserves Amber/HighContrast bit-for-bit.
-    {
-        const u8 atlas_opacity =
-            ThemeTactilityEffective() ? ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active) : u8{0};
-        if (atlas_opacity > 0)
-        {
-            RenderSoftShadow(static_cast<i32>(l.panel_x), static_cast<i32>(l.panel_y), l.panel_w, l.panel_h, 20U,
-                             atlas_opacity, 0x00000000U);
-        }
-        else
-        {
-            FramebufferDropShadow(l.panel_x, l.panel_y, l.panel_w, l.panel_h, 5, 0x70);
-        }
-    }
+    static const char* kDay[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+    static const char* kMonth[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
 
-    // Body fill + 1-px outer border (was 2-px slab).
-    FramebufferFillRect(l.panel_x, l.panel_y, l.panel_w, l.panel_h, kPanel);
-    FramebufferDrawRect(l.panel_x, l.panel_y, l.panel_w, l.panel_h, kPanelBorder, 1);
+    const u8 dow = duetos::util::DayOfWeekFromYmd(i32(t.year), t.month, t.day);
+    const char* day_name = kDay[dow % 7];
+    const u8 m0 = (t.month >= 1 && t.month <= 12) ? u8(t.month - 1) : u8(0);
+    const char* month_name = kMonth[m0];
 
-    // Title bar with a vertical gradient + a 1-px ridge highlight
-    // along its top edge. Same chrome language as window titles.
-    FramebufferFillRectGradient(l.panel_x, l.panel_y, l.panel_w, l.title_h, LightenRgb(kTitleBar, 24), kTitleBar);
-    if (l.panel_w > 4)
+    u32 pos = 0;
+    // Write day name.
+    for (u32 i = 0; day_name[i] != '\0' && pos + 1 < cap; ++i)
     {
-        FramebufferFillRect(l.panel_x + 2, l.panel_y + 1, l.panel_w - 4, 1, LightenRgb(kTitleBar, 56));
+        out[pos++] = day_name[i];
     }
-    // 1-pixel divider where the title bar meets the panel body —
-    // matches the window-chrome divider.
-    if (l.panel_h > l.title_h + 2)
+    if (pos + 1 < cap)
     {
-        FramebufferFillRect(l.panel_x + 2, l.panel_y + l.title_h, l.panel_w - 4, 1, kPanelBorder);
+        out[pos++] = ',';
     }
-
-    FramebufferDrawString(l.panel_x + 10, l.panel_y + 10, "WELCOME TO DUETOS", kTitleText, kTitleBar);
-}
-
-void DrawField(u32 x, u32 y, u32 w, u32 h, const char* text, u32 len, bool mask, bool focus)
-{
-    const u32 bg = focus ? kFieldFocusBg : kFieldBg;
-    FramebufferFillRect(x, y, w, h, bg);
-    FramebufferDrawRect(x, y, w, h, kFieldBorder, 1);
-    // Draw text inside with a small left inset. Mask shows stars
-    // for password. 8-pixel glyph cells.
-    const u32 inset_x = x + 4;
-    const u32 inset_y = y + (h - 8) / 2;
-    const u32 max_chars = (w - 8) / 8;
-    const u32 shown = (len > max_chars) ? max_chars : len;
-    if (mask)
+    if (pos + 1 < cap)
     {
-        char stars[kFieldMax];
-        for (u32 i = 0; i < shown; ++i)
-        {
-            stars[i] = '*';
-        }
-        stars[shown] = '\0';
-        FramebufferDrawString(inset_x, inset_y, stars, kFieldText, bg);
+        out[pos++] = ' ';
     }
-    else
+    // Write abbreviated month name.
+    for (u32 i = 0; month_name[i] != '\0' && pos + 1 < cap; ++i)
     {
-        // Local NUL-terminated copy of the shown prefix.
-        char buf[kFieldMax];
-        for (u32 i = 0; i < shown; ++i)
-        {
-            buf[i] = text[i];
-        }
-        buf[shown] = '\0';
-        FramebufferDrawString(inset_x, inset_y, buf, kFieldText, bg);
+        out[pos++] = month_name[i];
     }
-    if (focus)
+    if (pos + 1 < cap)
     {
-        const u32 caret_x = inset_x + shown * 8;
-        if (caret_x + 8 < x + w)
-        {
-            FramebufferFillRect(caret_x, inset_y, 8, 2, kFieldText);
-        }
+        out[pos++] = ' ';
+    }
+    // Write day-of-month (1 or 2 digits, no leading zero).
+    const u32 d = t.day;
+    if (d >= 10 && pos + 1 < cap)
+    {
+        out[pos++] = static_cast<char>('0' + d / 10);
+    }
+    if (pos + 1 < cap)
+    {
+        out[pos++] = static_cast<char>('0' + d % 10);
+    }
+    if (pos < cap)
+    {
+        out[pos] = '\0';
     }
 }
 
 void GuiRepaint()
 {
-    const GuiLayout l = ComputeLayout();
-    // Compose the whole panel offscreen so the 1 Hz ui-ticker
-    // repaint lands in a single blit. Without this the full-screen
-    // gradient clear is visible on its own for a frame on
-    // un-coalesced host framebuffers (VBox), reading as a 1 Hz
-    // flicker. Mirrors DesktopCompose's BeginCompose/EndCompose/
-    // Present flow; no-op fallback to direct mode if the shadow
-    // allocator is unavailable.
+    // Pass B corner-card layout. See spec §4.2 / §5.
+    //
+    // Step 1 (Task 12): wallpaper backdrop + big clock left.
+    // Step 2 (Tasks 13-16 — pending): corner card bottom-right with
+    //   atlas-shadow, avatar/name, password field, sign-in button.
+    //
+    // The login form (centered winlogon-flavour box) is intentionally
+    // absent in this commit. Keyboard input is still wired through
+    // GuiFeedKey → GuiTrySubmit, but nothing on-screen reflects it
+    // until the corner card lands in T13-T16.
+
     FramebufferBeginCompose();
-    DrawBackground(l);
-    DrawPanel(l);
 
-    FramebufferDrawString(l.panel_x + 24, l.user_y + 6, "USERNAME:", kLabelText, kPanel);
-    FramebufferDrawString(l.panel_x + 24, l.pass_y + 6, "PASSWORD:", kLabelText, kPanel);
+    // 1. Backdrop — wallpaper pattern continuous from splash, repainted
+    //    here to recover pixels on every LoginRepaint / mode flip.
+    WallpaperPaint(ThemeCurrent().desktop_bg);
 
-    DrawField(l.user_x, l.user_y, l.user_w, l.user_h, g_login.username, g_login.username_len, false,
-              g_login.focus == Field::Username);
-    DrawField(l.pass_x, l.pass_y, l.pass_w, l.pass_h, g_login.password, g_login.password_len, true,
-              g_login.focus == Field::Password);
+    // 2. Big clock left — 84-px digit clock (scale=8 on the 8×8 font)
+    //    at (80, 560) baseline and 20-px date (scale=2) at (80, 660)
+    //    on a 1024×768 reference; scaled to the actual framebuffer.
+    const auto& fb = FramebufferGet();
+    const u32 clock_x = 80u * fb.width / 1024u;
+    const u32 clock_y = 560u * fb.height / 768u;
+    const u32 date_y = 660u * fb.height / 768u;
 
-    const char* status = g_login.status;
-    if (status != nullptr && status[0] != '\0')
-    {
-        FramebufferDrawString(l.panel_x + 24, l.status_y, status, kStatusError, kPanel);
-    }
+    char clock_buf[8]; // "HH:MM\0"
+    char date_buf[32]; // "Wednesday, May 24\0"
+    LoginFormatClock(clock_buf, sizeof(clock_buf));
+    LoginFormatDate(date_buf, sizeof(date_buf));
 
-    FramebufferDrawString(l.panel_x + 24, l.hint_y, "TAB TO SWITCH FIELD   ENTER TO LOG IN", kHint, kPanel);
+    // Text colour: banner_fg is the high-contrast overlay ink used for
+    // the desktop banner — correct tone for the large clock over the
+    // wallpaper backdrop regardless of active theme.
+    const u32 fg = ThemeCurrent().banner_fg;
+    // bg = transparent match: use desktop_bg so the scaled glyphs
+    // blend against the wallpaper tone rather than leaving a solid rect.
+    const u32 bg = ThemeCurrent().desktop_bg;
 
-    const u32 y_hint = l.fb_h - 22;
-    if (g_login.locked)
-    {
-        char locked_msg[96];
-        u32 o = 0;
-        const char* prefix = "LOCKED FOR ";
-        for (u32 i = 0; prefix[i] != '\0' && o + 1 < sizeof(locked_msg); ++i)
-        {
-            locked_msg[o++] = prefix[i];
-        }
-        for (u32 i = 0; g_login.locked_user[i] != '\0' && o + 1 < sizeof(locked_msg); ++i)
-        {
-            char c = g_login.locked_user[i];
-            if (c >= 'a' && c <= 'z')
-            {
-                c = static_cast<char>(c - 'a' + 'A');
-            }
-            locked_msg[o++] = c;
-        }
-        const char* suffix = "  -  CTRL+ALT+S TO SWITCH USER (LOGS OUT)";
-        for (u32 i = 0; suffix[i] != '\0' && o + 1 < sizeof(locked_msg); ++i)
-        {
-            locked_msg[o++] = suffix[i];
-        }
-        locked_msg[o] = '\0';
-        FramebufferDrawString(16, y_hint, locked_msg, 0x00FFC080, kBgBottom);
-    }
-    else
-    {
-        FramebufferDrawString(16, y_hint, "DEFAULT ACCOUNTS: ADMIN/ADMIN  GUEST/(EMPTY)", 0x00C0D0E0, kBgBottom);
-    }
+    FramebufferDrawStringScaled(clock_x, clock_y, clock_buf, fg, bg, /*scale=*/8);
+    FramebufferDrawStringScaled(clock_x, date_y, date_buf, fg, bg, /*scale=*/2);
 
-    // Flush the offscreen shadow surface to the live framebuffer in
-    // one row-by-row copy (no-op if BeginCompose fell back to direct
-    // mode).
+    // Flush offscreen shadow → live framebuffer (no-op if BeginCompose
+    // fell back to direct mode).
     FramebufferEndCompose();
-    // Push the freshly-painted login surface to the active backend
-    // (virtio-gpu TRANSFER_TO_HOST_2D + RESOURCE_FLUSH; no-op for
-    // direct firmware-handoff framebuffers). Without this the
-    // virtio-gpu host display stays at whatever the GPU init painted
-    // and the user never sees the login chrome.
+    // Push to the active backend (virtio-gpu TRANSFER_TO_HOST_2D +
+    // RESOURCE_FLUSH; no-op for direct firmware-handoff framebuffers).
     drivers::video::FramebufferPresent();
 }
 
