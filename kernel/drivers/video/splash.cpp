@@ -161,6 +161,14 @@ void SplashAdvancePhase(const char* name)
     }
     g_phase[i] = '\0';
 
+    // Re-paint the wallpaper backdrop on every phase advance. Subsystem
+    // init that runs between phases (console buffer paint, taskbar
+    // placeholder, kernel banner write, etc.) can poke through the
+    // splash backdrop because it paints directly to the framebuffer.
+    // Re-running WallpaperPaint wipes those artifacts and leaves the
+    // splash visually clean. Cost: ~6 wallpaper paints across boot,
+    // ~10 ms total — invisible against subsystem-bringup wall time.
+    WallpaperPaint(ThemeCurrent().desktop_bg);
     DrawTickerLine();
 }
 
