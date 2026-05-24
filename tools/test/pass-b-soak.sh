@@ -79,7 +79,15 @@ fi
 # ── Pass B specific checks ────────────────────────────────────────────────────
 # grep -c exits 1 on zero matches; || true keeps set -e from aborting.
 err_count=$(grep -caE 'wallpaper \[E\]|splash \[E\]|login \[E\]' "${LOG}" || true)
-lockups=$(grep -ca 'soft-lockup' "${LOG}" || true)
+# Count only WARN-level soft-lockup lines that are NOT from the deliberate
+# soft-lockup self-test (which uses sentinel task names selftest-42 /
+# selftest-99 and is always paired with a "self-test OK" line).
+# Pattern: the diag/ subsystem WARN is the canonical signal; the self-test
+# entries also match because they're logged by the same path, so subtract
+# those out explicitly.
+lockup_all=$(grep -caE 'diag/soft-lockup.*soft-lockup' "${LOG}" || true)
+lockup_deliberate=$(grep -caE 'selftest-(42|99)' "${LOG}" || true)
+lockups=$(( ${lockup_all:-0} - ${lockup_deliberate:-0} ))
 missed_ticks=$(grep -caE 'compositor.*missed.?tick' "${LOG}" || true)
 
 # Normalise to 0 in case grep returned empty (e.g. binary-detected file).
