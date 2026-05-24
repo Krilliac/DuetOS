@@ -493,6 +493,23 @@ void WallpaperPaint(u32 desktop_rgb)
         PaintClassicBubbles(desktop_rgb, info.width, info.height);
         break;
     case ThemeId::Slate10:
+        // Topo contour rings under the dot grid: same drift+tint path as Duet
+        // so all topo-bearing themes share one motion model. The topo renders
+        // first (lowest layer), the dot grid paints on top, and the
+        // syscalls-grid SVG floats above both. The pulse tint pushes topo
+        // curves toward the theme's Win10-blue accent — subtle at rest,
+        // breathes gently when motion is active.
+        if (g_svg_inited && g_svg_topo.shape_count > 0)
+        {
+            const i32 drift = g_motion.topo_drift_px;
+            const u32 pulse_alpha = static_cast<u32>(g_motion.pulse_boost * 255.0);
+            const u32 tint_argb = (pulse_alpha << 24) | (ThemeCurrent().taskbar_accent & 0x00FFFFFFU);
+            SvgRender(g_svg_topo, -drift, 0, info.width, info.height, tint_argb);
+            if (drift > 0)
+            {
+                SvgRender(g_svg_topo, i32(info.width) - drift, 0, info.width, info.height, tint_argb);
+            }
+        }
         PaintSlate10Grid(desktop_rgb, info.width, info.height);
         // Subtle syscalls-grid accent over the Slate10 grid — the
         // grid pattern fits the Win10/Unreal slate aesthetic.
@@ -502,6 +519,22 @@ void WallpaperPaint(u32 desktop_rgb)
         }
         break;
     case ThemeId::Amber:
+        // Topo contour rings under the phosphor scanlines: same drift+tint
+        // path as Duet and Slate10. The pulse tint pushes toward the amber
+        // accent so the contour lines breathe in the theme's own hue.
+        // Scanlines paint on top, preserving the CRT-phosphor identity while
+        // adding the subtle landscape texture below.
+        if (g_svg_inited && g_svg_topo.shape_count > 0)
+        {
+            const i32 drift = g_motion.topo_drift_px;
+            const u32 pulse_alpha = static_cast<u32>(g_motion.pulse_boost * 255.0);
+            const u32 tint_argb = (pulse_alpha << 24) | (ThemeCurrent().taskbar_accent & 0x00FFFFFFU);
+            SvgRender(g_svg_topo, -drift, 0, info.width, info.height, tint_argb);
+            if (drift > 0)
+            {
+                SvgRender(g_svg_topo, i32(info.width) - drift, 0, info.width, info.height, tint_argb);
+            }
+        }
         PaintAmberScanlines(desktop_rgb, info.width, info.height);
         break;
     default:
@@ -577,6 +610,7 @@ void WallpaperTick()
         // Topo contour band: rows 200–600 (or top-half of screen if
         // smaller). Marking the full width ensures the wrap-around
         // copy pass in WallpaperPaint covers its strip too.
+        // Fires for all themes that render topo (Duet*, Slate10, Amber).
         FramebufferAddDamage(0U, 200U, info.width, 400U);
     }
 
