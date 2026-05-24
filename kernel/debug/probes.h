@@ -291,6 +291,26 @@ enum class ProbeId : u8
     // sentinel + a GDB break-point on `ProbeFire`.
     kBlendRangeOob,
 
+    // ShadowSelfTest detected a baked shadow-atlas integrity
+    // failure — wrong size, wrong origin alpha, non-linear opacity
+    // scaling, or broken rotational symmetry. The bake script
+    // (tools/build/gen_shadow_atlas.py) and the renderer
+    // (kernel/drivers/video/shadow.cpp) have to agree on geometry;
+    // a fire means they have drifted. ArmedLog: a clean boot
+    // never fires this — the atlas is baked at configure time,
+    // not regenerated at boot.
+    kShadowAtlasInvalid,
+
+    // Theme palette advertises tactility_enabled but its per-
+    // effect intensity bytes (hover_lift_alpha, press_alpha,
+    // focus_glow_alpha, drop_shadow_opacity) are all zero. Means
+    // a Theme struct landed without populating the new fields
+    // — the chrome will paint flat. Fired by the tactility-matrix
+    // step of ThemeSelfTest once Task 10 lands the invariant
+    // checks. ArmedLog so the regression leaves a sentinel + a
+    // GDB break-point on ProbeFire.
+    kTactilityThemeMismatch,
+
     kCount, // sentinel
 };
 
