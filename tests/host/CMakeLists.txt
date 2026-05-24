@@ -17,9 +17,9 @@
 # shims around hardware accessors, the coverage here grows.
 #
 # Standalone project — NOT included from the root CMakeLists.txt.
-# Build via:
+# Build via (from the repo root):
 #
-#   cmake --preset host-tests
+#   cmake -S tests/host -B build/host-tests
 #   cmake --build build/host-tests
 #   ctest --test-dir build/host-tests --output-on-failure
 
