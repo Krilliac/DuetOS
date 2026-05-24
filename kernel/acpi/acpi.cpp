@@ -378,12 +378,31 @@ const Rsdp* FindRsdpInMultiboot(uptr info_phys)
     uptr cursor = base + sizeof(mm::MultibootInfoHeader);
     const uptr end = base + info->total_size;
 
+    // Boot-time diag: under VBox, e792bd2f's PhysToVirt fix unblocked
+    // the walk but the panic "no ACPI RSDP tag in Multiboot2 info"
+    // surfaced — the walker now WORKS but doesn't find tag-14 or
+    // tag-15. Distinguish "GRUB didn't pass ACPI tags" from "walk
+    // missed them" by emitting the structure header + every tag type
+    // seen. Cheap (~20 SerialWrite per boot) and leaves a permanent
+    // diagnostic trail per CLAUDE.md "Diagnostic Logging" rule.
+    arch::SerialWrite("[acpi/rsdp-walk] info_phys=");
+    SerialWriteHex(info_phys);
+    arch::SerialWrite(" total_size=");
+    SerialWriteHex(info->total_size);
+    arch::SerialWrite("\n");
+
     const Rsdp* old_rsdp = nullptr;
     const Rsdp* new_rsdp = nullptr;
 
+    u32 tag_count = 0;
     while (cursor < end)
     {
         const auto* tag = reinterpret_cast<const mm::MultibootTagHeader*>(cursor);
+        arch::SerialWrite("[acpi/rsdp-walk]   tag type=");
+        SerialWriteHex(tag->type);
+        arch::SerialWrite(" size=");
+        SerialWriteHex(tag->size);
+        arch::SerialWrite("\n");
         if (tag->type == mm::kMultibootTagEnd)
         {
             break;
@@ -403,7 +422,17 @@ const Rsdp* FindRsdpInMultiboot(uptr info_phys)
         // hang before the PhysToVirt fix landed.
         const uptr step = (tag->size + 7u) & ~uptr{7};
         cursor += step < 8 ? 8 : step;
+        if (++tag_count > 64)
+        {
+            arch::SerialWrite("[acpi/rsdp-walk] aborting: > 64 tags (probable corruption)\n");
+            break;
+        }
     }
+    arch::SerialWrite("[acpi/rsdp-walk] done; new_rsdp=");
+    SerialWriteHex(reinterpret_cast<uptr>(new_rsdp));
+    arch::SerialWrite(" old_rsdp=");
+    SerialWriteHex(reinterpret_cast<uptr>(old_rsdp));
+    arch::SerialWrite("\n");
     return new_rsdp != nullptr ? new_rsdp : old_rsdp;
 }
 
