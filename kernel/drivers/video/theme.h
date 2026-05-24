@@ -247,6 +247,14 @@ struct Theme
     // without it. Independent of tactility_enabled so a
     // tactility=off boot still gets a crisp cursor.
     bool cursor_microshadow_enabled;
+
+    // Motion intensity (0..255, where 255 means "full motion per the
+    // Pass B spec"). Scales arc rotation speed, pulse alpha amplitude,
+    // and topo drift speed. Gated by tactility_enabled — if tactility
+    // is off, motion is off regardless of this value.
+    //
+    // See docs/superpowers/specs/2026-05-24-duetos-pass-b-design.md §7.
+    u8 motion_intensity;
 };
 
 /// Read-only snapshot of the active theme. Valid for as long as
