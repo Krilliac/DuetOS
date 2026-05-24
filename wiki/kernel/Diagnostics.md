@@ -271,6 +271,9 @@ machine-check stack. See [Fault Injection](Fault-Injection.md).
 
 ## Related Pages
 
+- [Self-Thinking and Introspection](Self-Thinking.md) — the
+  cross-subsystem `SelfPortrait` + causal-chain ring that consumes
+  every primitive on this page
 - [Logging and Tracing](Logging-And-Tracing.md) — KLOG levels, sinks
 - [Debugger](../tooling/Debugger.md) — the kdbg shell command + GDB
   attach workflow

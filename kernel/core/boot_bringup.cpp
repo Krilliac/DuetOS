@@ -210,6 +210,7 @@
 #include "diag/fix_journal.h"
 #include "diag/fix_journal_persist.h"
 #include "diag/introspect.h"
+#include "diag/selfthink.h"
 #include "diag/gdb_server.h"
 #include "diag/minidump.h"
 #include "diag/perf_profile.h"
@@ -1984,6 +1985,14 @@ void BootBringupDevices(bool force_net_smoke)
     // KERNEL.F0 doesn't exist yet (first boot).
     duetos::diag::introspect::LoadPriorDigest();
     DUETOS_BOOT_SELFTEST(duetos::diag::introspect::IntrospectSelfTest());
+
+    // Cross-subsystem self-portrait + causal-chain self-test. Pure
+    // observation: snapshots the kernel state via every existing
+    // public stats accessor, exercises a CausalRecord round-trip,
+    // and asserts the resulting struct's arithmetic is coherent.
+    // Runs after the introspect selftest so the SelfPortrait's
+    // `introspect_*` fields have a populated source to copy.
+    DUETOS_BOOT_SELFTEST(duetos::diag::selfthink::SelfthinkSelfTest());
 
     // Session restore: read SESSION.CFG and apply the saved
     // theme + per-app window positions. No-op on first boot
