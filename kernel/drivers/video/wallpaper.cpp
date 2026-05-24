@@ -4,6 +4,7 @@
 #include "debug/probes.h"
 #include "log/klog.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/shadow.h"
 #include "drivers/video/svg.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -511,11 +512,16 @@ void WallpaperPaint(u32 desktop_rgb)
             }
         }
         PaintSlate10Grid(desktop_rgb, info.width, info.height);
-        // Subtle syscalls-grid accent over the Slate10 grid — the
-        // grid pattern fits the Win10/Unreal slate aesthetic.
+        // Pass B Task 20 — syscalls-grid polish: soft shadow halo + theme tint.
+        // Option B+C: one RenderSoftShadow under the full SVG bbox gives visual
+        // depth without requiring SVG cell introspection; a mild fixed-alpha tint
+        // (no pulse) lifts the stroke colour toward the Slate10 accent. The grid
+        // stays STATIC — motion on a dense regular pattern reads as noise.
         if (g_svg_inited)
         {
-            SvgRender(g_svg_syscalls_grid, 0, 0, info.width, info.height);
+            RenderSoftShadow(0, 0, info.width, info.height, 12U, 40U, 0x00000000U);
+            const u32 tint_argb = (60U << 24) | (ThemeCurrent().taskbar_accent & 0x00FFFFFFU);
+            SvgRender(g_svg_syscalls_grid, 0, 0, info.width, info.height, tint_argb);
         }
         break;
     case ThemeId::Amber:
