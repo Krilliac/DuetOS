@@ -156,4 +156,10 @@ bool IdleLockCheckOnce();
 /// lock the screen — the test runs before any session opens.
 void IdleLockSelfTest();
 
+/// Re-paint ONLY the clock + date region of the GUI login. Called by
+/// WallpaperTick when the wall-clock minute advances. No-op if the
+/// login gate is not active or not in GUI mode. Caller holds the
+/// compositor lock.
+void LoginRefreshClock();
+
 } // namespace duetos::core

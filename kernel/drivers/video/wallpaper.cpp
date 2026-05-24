@@ -11,6 +11,7 @@
 #include "generated_svg_syscalls-grid.h"
 #include "generated_svg_topo.h"
 #include "mm/frame_allocator.h"
+#include "security/login.h"
 #include "time/timekeeper.h"
 
 namespace duetos::drivers::video
@@ -577,6 +578,24 @@ void WallpaperTick()
         // smaller). Marking the full width ensures the wrap-around
         // copy pass in WallpaperPaint covers its strip too.
         FramebufferAddDamage(0U, 200U, info.width, 400U);
+    }
+
+    // Clock-minute roll check — runs at every tick (~15 FPS) but the
+    // comparison is a single integer divide + compare, cost ≈ 0.07 ms.
+    // Fires at most once per minute: calls LoginRefreshClock which is a
+    // no-op when the login gate is inactive or in TTY mode.
+    // NOTE: t_ms is elapsed since base_ms, not wall-clock minutes —
+    // this counter rolls over at ~49 days (u64 saturation). For the
+    // login screen use-case (minutes to hours of idle) it is fine.
+    // The cross-subsystem include (drivers/video → security) is
+    // pragmatic for v0; a cleaner abstraction would be a function
+    // pointer or observer registered from login.cpp, but the coupling
+    // is one-way and the dependency graph is shallow.
+    const u64 minute_index = t_ms / 60000ULL;
+    if (minute_index != g_motion.last_minute)
+    {
+        g_motion.last_minute = minute_index;
+        duetos::core::LoginRefreshClock();
     }
 }
 

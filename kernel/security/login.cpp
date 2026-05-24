@@ -945,6 +945,22 @@ void IdleExpect(bool cond, const char* what)
 
 } // namespace
 
+void LoginRefreshClock()
+{
+    // No-op when the gate is inactive or in TTY mode — only the
+    // framebuffer GUI path has a clock region to refresh.
+    if (!LoginIsActive() || LoginCurrentMode() != LoginMode::Gui)
+        return;
+
+    // Delegate to GuiRepaint: it repaints the full login UI from
+    // scratch (wallpaper backdrop → big clock → corner card).
+    // Once per minute the cost of a full repaint is negligible;
+    // the compositor's content-diff layer (Pass A) elides any
+    // region whose pixels are unchanged, so only the clock digits
+    // that actually differ hit the wire.
+    GuiRepaint();
+}
+
 void IdleLockSelfTest()
 {
     KLOG_TRACE_SCOPE("login", "IdleLockSelfTest");
