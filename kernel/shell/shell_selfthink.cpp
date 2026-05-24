@@ -20,6 +20,8 @@
 
 #include "diag/selfthink.h"
 #include "diag/selfthink_baselines.h"
+#include "diag/selfthink_narrative.h"
+#include "diag/selfthink_persist.h"
 #include "drivers/video/console.h"
 #include "env/autonomic.h"
 #include "env/autonomic_feedback.h"
@@ -66,6 +68,8 @@ void SelfthinkUsage()
     ConsoleWrite("  selfthink causality [N]         — last N causal entries (default 32)\n");
     ConsoleWrite("  selfthink baselines             — per-metric rolling mean/stddev/anomalies\n");
     ConsoleWrite("  selfthink feedback              — autonomic action outcomes\n");
+    ConsoleWrite("  selfthink why                   — operator narrative of recent kernel state\n");
+    ConsoleWrite("  selfthink prev                  — prior-boot causal chain (loaded from KERNEL.THK)\n");
 }
 
 void PrintPortrait()
@@ -309,6 +313,44 @@ void PrintFeedback()
         ConsoleWrite("(no feedback entries yet)\n");
 }
 
+void PrintPrev()
+{
+    using duetos::diag::selfthink::CausalEntry;
+    using duetos::diag::selfthink::persist::PriorAvailable;
+    using duetos::diag::selfthink::persist::PriorEntryCount;
+    using duetos::diag::selfthink::persist::PriorRingWalk;
+
+    if (!PriorAvailable())
+    {
+        ConsoleWrite("(no prior boot data — first boot, no FAT32 mount, or KERNEL.THK absent)\n");
+        return;
+    }
+    ConsoleWrite("selfthink prior-boot causal chain (");
+    WriteU64Dec(PriorEntryCount());
+    ConsoleWrite(" entries, newest first)\n");
+    auto cb = +[](const CausalEntry& e, void* /*ctx*/) -> bool
+    {
+        ConsoleWrite("  tick=");
+        WriteU64Dec(e.tick);
+        ConsoleWrite("  cpu=");
+        WriteU64Dec(e.cpu_id);
+        ConsoleWrite("  kind=");
+        WriteU64Dec(e.kind);
+        ConsoleWrite("  src=");
+        WriteU64Dec(e.source_id);
+        ConsoleWrite("  val=");
+        WriteU64Dec(e.value);
+        if (e.tag[0] != '\0')
+        {
+            ConsoleWrite("  tag=");
+            ConsoleWrite(e.tag);
+        }
+        ConsoleWrite("\n");
+        return true;
+    };
+    PriorRingWalk(cb, nullptr);
+}
+
 void PrintCausality(u32 argc, char** argv)
 {
     const u32 limit = ParseLimit(argc, argv);
@@ -342,6 +384,10 @@ void CmdSelfthink(u32 argc, char** argv)
         PrintBaselines();
     else if (StrEq(sub, "feedback"))
         PrintFeedback();
+    else if (StrEq(sub, "why"))
+        duetos::diag::selfthink::narrative::Write();
+    else if (StrEq(sub, "prev"))
+        PrintPrev();
     else
         SelfthinkUsage();
 }

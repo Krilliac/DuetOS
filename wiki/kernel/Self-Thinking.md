@@ -5,9 +5,9 @@
 > **Execution context:** Kernel — snapshot + ring reads are safe from any
 > context; the `kselfthink` thread runs in task context only
 >
-> **Maturity:** v0 (Slices A + B landed) — snapshot + causal ring + shell,
-> plus closed-loop autonomic feedback and rolling per-metric baselines.
-> The operator narrative + cross-boot persistence ship in Slice C.
+> **Maturity:** v0 (Slices A + B + C landed) — snapshot, causal-chain
+> ring, closed-loop autonomic feedback, rolling baselines, operator
+> narrative, and cross-boot FAT32 persistence of the chain.
 
 ## Overview
 
@@ -182,7 +182,66 @@ selfthink                  — print the current SelfPortrait
 selfthink causality [N]    — print the last N causal entries (default 32)
 selfthink baselines        — per-metric rolling mean / stddev / anomalies
 selfthink feedback         — autonomic action outcomes (recent + lifetime stats)
+selfthink why              — operator-facing narrative of recent kernel state
+selfthink prev             — prior-boot causal chain (loaded from KERNEL.THK)
 ```
+
+## Operator narrative (Slice C)
+
+`selfthink why` invokes the formatter in `kernel/diag/selfthink_narrative.{h,cpp}`.
+It walks the current `SelfPortrait` + causal chain + feedback stats and writes
+a human-readable explanation directly to the console:
+
+```text
+selfthink narrative @ tick 18432 (uptime 184s)
+state: cpu_busy=22%  mem=78%  heap=82%  tasks_live=14
+recent events (last 312): probes=4 autonomic_actions=2
+  (improved=1 worsened=1 nochange=0) anomalies=3 fault_react=0 heals=0
+health: scans_run=15 issues_total=2 cross_boot(new=14 persistent=0 resolved=0)
+autonomic: actions_fired=2 outcomes evaluated=2 overflows=0
+  highlight @ tick 18412: autonomic action mem-reclaim outcome Worsened
+  (the targeted metric moved AGAINST expected). Tag=autonomic
+verdict: WARN — autonomic action(s) failed to achieve their goal;
+  investigate the worsened outcome above.
+```
+
+The verdict line is the operator's grep target — `OK` when nothing
+actionable, `WARN` plus a sentence pointing at the cause otherwise.
+
+The writer is a switch-table over `CausalKind` with per-kind formatters.
+No template engine, no runtime parsing, no allocation. Safe from task
+context only (it uses `ConsoleWrite`).
+
+## Cross-boot persistence (Slice C)
+
+`kernel/diag/selfthink_persist.{h,cpp}` tier-1 mirrors the causal ring
+to `/KERNEL.THK` on the FAT32 root volume:
+
+- **On install** (called from boot_bringup after FAT32 mount): read
+  existing `KERNEL.THK` into the in-RAM "prior boot" buffer, then
+  delete + recreate with an empty header so the periodic flush
+  starts fresh.
+- **On every 6th kselfthink wake** (~6 s): rewrite `KERNEL.THK`
+  from the current causal ring.
+- **`selfthink prev`** displays the prior-boot ring restored at
+  install time.
+
+On-disk format:
+
+```text
+[u32 magic 'STHK']  [u32 version]  [u32 entry_count]  [u32 reserved]
+[CausalEntry × entry_count]
+```
+
+Single-backup scheme — only the immediately previous boot is retained.
+The N-deep rotation `fix_journal_persist` uses isn't justified here:
+the causal chain is for "what did the kernel just do?" triage, not the
+long-tail "is this gap chronic across many boots?" question that the
+fix journal answers.
+
+A tier-2 NVMe panic write is a follow-up — the FAT32 tier is
+sufficient for clean-reboot post-mortems, and adding the NVMe mirror
+requires its own panic-safety audit that this slice does not attempt.
 
 The portrait dump is one section per `SelfPortrait` surface, each line
 short enough for `grep` to extract a single field cleanly.
@@ -192,7 +251,7 @@ Read-only; no cap gate (symmetric with `resmon`, `ps`, `free`, `dintro`,
 
 ## Boot self-tests
 
-Three tests run inside the boot self-test battery
+Five tests run inside the boot self-test battery
 (`DUETOS_BOOT_SELFTEST`, see [build_config.h](../../kernel/util/build_config.h)):
 
 - **`SelfthinkSelfTest()`** — snapshot completes + arithmetic
@@ -203,6 +262,13 @@ Three tests run inside the boot self-test battery
 - **`baselines::SelfTest()`** — push 16 inliers + assert mean is
   not flagged + outlier flag holds on a clean ring + IntSqrt
   sanity.
+- **`persist::SelfTest()`** — pure in-RAM round-trip of header +
+  CausalEntry through serialise + parse + field-by-field
+  compare (FAT32 round-trip is exercised by the live `Install`
+  call that follows).
+- **`narrative::SelfTest()`** — inject one synthetic Worsened
+  AutoAction entry and assert the highlight picker selects it
+  (verifies the priority order).
 
 Each emits one explicit pass-line so CI greps have positive
 evidence; on FAIL fires
@@ -225,13 +291,22 @@ so an attached GDB can break at the exact frame.
 
 ## Roadmap
 
-Layered slices, each independently shippable:
+Layered slices, all landed in this branch:
 
 - **Slice A (landed)** — Snapshot + causal ring + shell + self-test.
 - **Slice B (landed)** — Closed-loop autonomic feedback (pre/post
   telemetry around each `AutoAction`, missed-outcome probe fire) +
   rolling per-metric baselines for learned anomaly detection.
-- **Slice C** — Operator-facing narrative (`selfthink why` walks the
-  recent chain + portrait and produces English) + cross-boot
-  persistence of the causal ring (FAT32 / NVMe) so post-mortems
-  survive reboots.
+- **Slice C (landed)** — Operator-facing narrative (`selfthink why`
+  walks the recent chain + portrait) + cross-boot FAT32 persistence
+  of the causal ring (`KERNEL.THK`) so post-mortems survive reboots.
+
+Open follow-ups (not in scope for this branch):
+
+- Tier-2 NVMe panic-time persistence of the causal ring (requires
+  its own panic-safety audit).
+- Operator-tunable kselfthink wake cadence + per-metric `k` factor
+  via `loglevel`-style shell knob.
+- Additional baseline metrics (`syscall_rate`, `irq_rate`) once
+  the kernel exposes their total counters publicly. Enum + a
+  single sampler callsite per metric.

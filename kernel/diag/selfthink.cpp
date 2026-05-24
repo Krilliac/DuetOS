@@ -8,6 +8,7 @@
 #include "diag/introspect.h"
 #include "diag/runtime_checker.h"
 #include "diag/selfthink_baselines.h"
+#include "diag/selfthink_persist.h"
 #include "env/autonomic.h"
 #include "env/autonomic_feedback.h"
 #include "log/klog.h"
@@ -28,6 +29,12 @@ namespace
 // we refresh the latest portrait. 100 Hz * 1 s default. A future
 // slice exposes this via env if a per-flavour cadence is wanted.
 constexpr u64 kSelfthinkTicks = 100;
+
+// FAT32 flush cadence in kselfthink wakes. 6 wakes ≈ 6 s of recent
+// causal-chain activity; matches the introspect persist's rough
+// ratio of "log every event, persist on a low-rate timer". Avoids
+// thrashing the FAT32 layer at the kthread's 1 s pulse.
+constexpr u64 kPersistFlushEveryWakes = 6;
 
 // Causal ring storage. Head is a single u64 we bump on every
 // append; index by `head % kCausalRingCap`. Total fires is a
@@ -195,10 +202,12 @@ namespace
     // Identical pattern to kheartbeat. SchedSleepUntil's wrap-safe
     // compare handles the "already past" case by yielding.
     u64 deadline = ::duetos::sched::SchedNowTicks() + kSelfthinkTicks;
+    u64 wake_count = 0;
     for (;;)
     {
         ::duetos::sched::SchedSleepUntil(deadline);
         deadline += kSelfthinkTicks;
+        ++wake_count;
 
         // Refresh the latest portrait so shell queries hit a
         // pre-built snapshot rather than reassembling on every
@@ -243,6 +252,13 @@ namespace
             }
             baselines::Sample(s.id, s.value);
         }
+
+        // Tier-1 cross-boot persistence on a slower cadence than
+        // the snapshot refresh so the FAT32 layer isn't beaten
+        // up by 1 Hz rewrites. No-op when no FAT32 volume is
+        // mounted.
+        if ((wake_count % kPersistFlushEveryWakes) == 0)
+            persist::Flush();
     }
 }
 
