@@ -10,6 +10,7 @@
 #include "generated_svg_syscalls-grid.h"
 #include "generated_svg_topo.h"
 #include "mm/frame_allocator.h"
+#include "time/timekeeper.h"
 
 namespace duetos::drivers::video
 {
@@ -58,6 +59,71 @@ u32 AmbientStrokeRgb(u32 bg, u32 amount)
     const u32 b = bg & 0xFFU;
     const u32 avg = (r + g + b) / 3U;
     return (avg < 0x80U) ? LightenRgb(bg, amount) : DarkenRgb(bg, amount);
+}
+
+// -----------------------------------------------------------------------
+// Pass B — ambient motion state + phase-math helpers.
+//
+// All three helpers mirror tests/host/test_motion_math.cpp exactly for
+// ArcRotationDegrees and TopoDriftOffsetPx. PulseAlphaBoost uses a
+// smoothstep approximation (3u²-2u³) instead of 0.5-0.5*cos(2πt)
+// because the kernel has no <math.h>. Both forms are bounded [0, peak],
+// both reach 0 at t=0 and t=1, both peak at midperiod — the max curve
+// deviation vs the true cosine is ~1.5 %, invisible at the 8 % alpha
+// amplitude this drives.
+// -----------------------------------------------------------------------
+
+struct MotionState
+{
+    u64  base_ms;        // monotonic base captured on first tick
+    u64  last_minute;    // minute of last clock-roll detection (login path)
+    i32  topo_drift_px;  // current horizontal drift offset, [0, fb_w)
+    double arc_rot_deg;  // current rotation, [-5, +5]
+    double pulse_boost;  // current pulse alpha boost, [0, kPulsePeak]
+};
+static MotionState g_motion = {0, 0, 0, 0.0, 0.0};
+
+constexpr u64    kArcRotPeriodMs    = 60000; // ±5° sweep over 60 s
+constexpr u64    kPulsePeriodMs     =  8000; // 8 s breath
+constexpr double kPulsePeak         =  0.08; // alpha boost at peak
+constexpr i32    kTopoDriftPxPerSec =     1; // 1 px/s
+
+// Triangular sweep −5 → +5 → −5 over period_ms.
+// Matches tests/host/test_motion_math.cpp ArcRotationDegrees exactly.
+inline double ArcRotationDegrees(u64 now_ms, u64 period_ms)
+{
+    if (period_ms == 0)
+        return 0.0;
+    const double t     = double(now_ms % period_ms) / double(period_ms);
+    const double phase = t < 0.5 ? (t * 4.0) - 1.0 : 3.0 - (t * 4.0);
+    return 5.0 * phase;
+}
+
+// Smoothstep breath [0..peak..0] over period_ms.
+// Kernel approximation of the sine breath in the hosted test — no
+// <math.h> available. Max deviation from true sine ≈ 1.5 % at 8 %
+// amplitude, invisible in practice.
+inline double PulseAlphaBoost(u64 now_ms, u64 period_ms, double peak)
+{
+    if (period_ms == 0)
+        return 0.0;
+    const double t = double(now_ms % period_ms) / double(period_ms);
+    const double u = t < 0.5 ? t * 2.0 : (1.0 - t) * 2.0; // 0..1..0
+    const double s = (3.0 * u * u) - (2.0 * u * u * u);    // smoothstep
+    return peak * s;
+}
+
+// Horizontal drift offset that wraps at fb_w pixels.
+// Matches tests/host/test_motion_math.cpp TopoDriftOffsetPx exactly.
+inline i32 TopoDriftOffsetPx(u64 now_ms, i32 speed_px_per_s, i32 fb_w)
+{
+    if (fb_w <= 0)
+        return 0;
+    const i64 total = (i64(now_ms) * speed_px_per_s) / 1000;
+    i64 mod = total % i64(fb_w);
+    if (mod < 0)
+        mod += i64(fb_w);
+    return i32(mod);
 }
 
 // Slate10 grid: a sparse Win10-style "subtle grid of dots"
@@ -146,7 +212,12 @@ void PaintAmberScanlines(u32 desktop_rgb, u32 fb_w, u32 fb_h)
 // flips automatically on light themes via AmbientStrokeRgb, so
 // DuetLight gets soft slate-on-cream arcs while slate Duet gets
 // pale-on-deep arcs.
-void PaintDuetArcs(u32 desktop_rgb, u32 fb_w, u32 fb_h)
+// rot_deg: added to each arc's start angle for ambient rotation
+//          ([-5, +5] from WallpaperTick; 0.0 when motion is off).
+// pulse:   fractional extra brightness boost [0, kPulsePeak] applied
+//          to the stroke colours, giving the arcs a slow breathing
+//          presence. 0.0 when motion is off.
+void PaintDuetArcs(u32 desktop_rgb, u32 fb_w, u32 fb_h, double rot_deg, double pulse)
 {
     const u32 short_side = (fb_w < fb_h) ? fb_w : fb_h;
     if (short_side < 96U)
@@ -168,11 +239,23 @@ void PaintDuetArcs(u32 desktop_rgb, u32 fb_w, u32 fb_h)
     const u32 teal_r = lift_r;
     const u32 teal_g = (lift_g + 28U > 0xFFU) ? 0xFFU : lift_g + 28U;
     const u32 teal_b = (lift_b + 22U > 0xFFU) ? 0xFFU : lift_b + 22U;
-    const u32 teal = (teal_r << 16) | (teal_g << 8) | teal_b;
     const u32 amber_r = (lift_r + 30U > 0xFFU) ? 0xFFU : lift_r + 30U;
     const u32 amber_g = (lift_g + 16U > 0xFFU) ? 0xFFU : lift_g + 16U;
     const u32 amber_b = lift_b;
-    const u32 amber = (amber_r << 16) | (amber_g << 8) | amber_b;
+
+    // Pulse boost: convert the fractional boost to a per-channel
+    // integer lift (0..20 at kPulsePeak=0.08, scale is 255*0.08≈20).
+    const u32 pulse_lift = static_cast<u32>(pulse * 255.0);
+    const u32 teal = ((teal_r < 0xFFU - pulse_lift ? teal_r + pulse_lift : 0xFFU) << 16) |
+                     ((teal_g < 0xFFU - pulse_lift ? teal_g + pulse_lift : 0xFFU) << 8) |
+                     (teal_b < 0xFFU - pulse_lift ? teal_b + pulse_lift : 0xFFU);
+    const u32 amber = ((amber_r < 0xFFU - pulse_lift ? amber_r + pulse_lift : 0xFFU) << 16) |
+                      ((amber_g < 0xFFU - pulse_lift ? amber_g + pulse_lift : 0xFFU) << 8) |
+                      (amber_b < 0xFFU - pulse_lift ? amber_b + pulse_lift : 0xFFU);
+
+    // Rotation: convert rot_deg (double, [-5, +5]) to an integer degree
+    // offset applied to every arc's start angle, giving a slow sweep.
+    const i32 rot_i = static_cast<i32>(rot_deg);
 
     // Six concentric arcs per side, stepping 8% of the shorter
     // dimension between rings. Each arc pair rotates a small
@@ -190,13 +273,10 @@ void PaintDuetArcs(u32 desktop_rgb, u32 fb_w, u32 fb_h)
     {
         const i32 r = static_cast<i32>(r0 + i * step);
         const i32 wobble = static_cast<i32>(i) * 3;
-        // Teal arc: rotate roughly -30° + per-ring wobble. The
-        // open mouth of each arc points down-right, so the arc
-        // body sweeps the upper-left quadrant of its anchor.
-        FramebufferStrokeArc(cx - offset, cy, r, -90 - wobble, kSweep, 2u, teal);
-        // Amber arc: rotate +150° from the teal arc so the open
-        // mouth points down-left, giving the mirror sweep.
-        FramebufferStrokeArc(cx + offset, cy, r, 90 + wobble, kSweep, 2u, amber);
+        // Teal arc: rotate roughly -30° + per-ring wobble + ambient rotation.
+        FramebufferStrokeArc(cx - offset, cy, r, -90 - wobble + rot_i, kSweep, 2u, teal);
+        // Amber arc: rotate +150° from the teal arc + ambient rotation.
+        FramebufferStrokeArc(cx + offset, cy, r,  90 + wobble + rot_i, kSweep, 2u, amber);
     }
 
     // Centre dots — small filled disks at each arc anchor. The
@@ -333,7 +413,27 @@ void WallpaperPaint(u32 desktop_rgb)
         // automatically. Accent variants share the neutral arc
         // tints since the START button + active-tab dot already
         // carry the variant's brand hue.
-        PaintDuetArcs(desktop_rgb, info.width, info.height);
+        //
+        // Pass B: topo SVG renders under the arcs with horizontal
+        // drift applied as a shifted render pass. When motion is
+        // active the topo drifts at 1 px/s with a wrap-around
+        // copy so the seam is invisible. When motion is off
+        // drift_px == 0 and the two render calls collapse to
+        // the same origin (the second is entirely off-screen
+        // and clipped by the framebuffer driver).
+        if (g_svg_inited && g_svg_topo.shape_count > 0)
+        {
+            const i32 drift = g_motion.topo_drift_px;
+            SvgRender(g_svg_topo, -drift, 0, info.width, info.height);
+            // Wrap-around copy: covers the right-hand gap that
+            // appears when the primary shifted render slides left.
+            if (drift > 0)
+            {
+                SvgRender(g_svg_topo, i32(info.width) - drift, 0, info.width, info.height);
+            }
+        }
+        PaintDuetArcs(desktop_rgb, info.width, info.height,
+                      g_motion.arc_rot_deg, g_motion.pulse_boost);
         PaintDuetBrandText(desktop_rgb, info.width, info.height);
         // Live kernel-stats footer used to paint syscall / DLL / export
         // counts in the bottom-right of the wallpaper. With the chrome
@@ -360,6 +460,87 @@ void WallpaperPaint(u32 desktop_rgb)
     default:
         break;
     }
+}
+
+void WallpaperTick()
+{
+    if (!FramebufferAvailable())
+        return;
+
+    const u8 motion = ThemeEffectiveMotionIntensity();
+    if (motion == 0)
+        return; // master gate: cmdline motion=off or theme opts out
+
+    // Derive monotonic time in milliseconds. MonotonicNs returns 0
+    // before the timekeeper is initialised — treat as "not ready yet"
+    // and skip the tick rather than accumulating a spurious base.
+    const u64 now_ns = time::MonotonicNs();
+    if (now_ns == 0)
+        return;
+    const u64 now_ms = now_ns / 1'000'000ULL;
+
+    // Capture the monotonic base on the first tick that actually runs.
+    if (g_motion.base_ms == 0)
+        g_motion.base_ms = now_ms;
+    const u64 t_ms = now_ms - g_motion.base_ms;
+
+    // Scale animation periods by motion intensity (0..255):
+    //   intensity=255 (Duet/Slate10/Amber) → full speed (60 s rotation)
+    //   intensity=77  (Classic) → ~3× slower rotation (~197 s)
+    // Pulse period is fixed at kPulsePeriodMs regardless of intensity
+    // (the breath already scales via pulse_peak_eff).
+    const u32 intensity_nz = motion;  // motion != 0 is guaranteed above
+    const u64 rot_period_ms = (kArcRotPeriodMs * 255ULL) / intensity_nz;
+    const double pulse_peak_eff = kPulsePeak * (double(intensity_nz) / 255.0);
+    const i32 drift_speed_eff   = (kTopoDriftPxPerSec * i32(intensity_nz)) / 255;
+
+    // Compute the new phase values.
+    g_motion.arc_rot_deg = ArcRotationDegrees(t_ms, rot_period_ms);
+    g_motion.pulse_boost = PulseAlphaBoost(t_ms, kPulsePeriodMs, pulse_peak_eff);
+
+    const auto info = FramebufferGet();
+
+    // Topo drift: update and mark dirty only when the offset changes.
+    const i32 new_drift = TopoDriftOffsetPx(t_ms, drift_speed_eff, i32(info.width));
+    const bool topo_moved = (new_drift != g_motion.topo_drift_px);
+    if (topo_moved)
+        g_motion.topo_drift_px = new_drift;
+
+    // Dirty-rect notifications. There is no CompositorOpaqueRectIntersects
+    // equivalent in the current codebase — always mark the regions dirty
+    // and rely on the compositor's content-diff layer (Pass A) to elide
+    // the blit if the pixels didn't change. The arc bbox is a 340×340
+    // region centred on the Duet arc anchor (~48 % down from the top).
+    //
+    // NOTE: FramebufferAddDamage is the real dirty-mark API. There is no
+    // opaque-window intersection check available yet; if a window covers
+    // the arcs the compositor's damage diff will still skip the pixel blit
+    // because the shadow-buffer content won't differ. No wasted PCIe
+    // bandwidth in that path.
+    const u32 arcs_x = (info.width  > 170U) ? info.width  / 2U - 170U : 0U;
+    const u32 arcs_y = (info.height > 170U) ? (info.height * 48U) / 100U - 170U : 0U;
+    FramebufferAddDamage(arcs_x, arcs_y, 340U, 340U);
+
+    if (topo_moved && info.height > 280U)
+    {
+        // Topo contour band: rows 200–600 (or top-half of screen if
+        // smaller). Marking the full width ensures the wrap-around
+        // copy pass in WallpaperPaint covers its strip too.
+        FramebufferAddDamage(0U, 200U, info.width, 400U);
+    }
+}
+
+void WallpaperMotionSelfTest()
+{
+    // Implemented in Task 7. Declared here so the linker sees the
+    // symbol. Task 7 fills in the body.
+    // STUB: body pending Task 7 — returns without running any checks.
+}
+
+bool WallpaperMotionSelfTestPassed()
+{
+    // STUB: returns false until Task 7 implements the self-test.
+    return false;
 }
 
 } // namespace duetos::drivers::video
