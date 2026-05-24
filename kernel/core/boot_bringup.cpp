@@ -2031,8 +2031,17 @@ void BootBringupDevices(bool force_net_smoke)
     // (file doesn't exist) or if FAT32 isn't mounted.
     // SessionRestoreSelfTest exercises the parse path in
     // memory without touching the on-disk config.
+    //
+    // Diagnostic sentinels between each post-selftest step localise
+    // intermittent boot-tail hangs uncovered by PR #336's CI un-skip
+    // (kboot ticks_in_run=101 soft-lockup before bringup-complete on
+    // ~50% of bringup smoke runs; the last `[bringup-tail] X done`
+    // line in the smoke log identifies which step wedged). Cheap
+    // (one SerialWrite per step) and leave them in — see CLAUDE.md
+    // "Diagnostic Logging — Keep It, Gate It, Probe It".
     DUETOS_BOOT_SELFTEST(duetos::core::SessionRestoreSelfTest());
     duetos::core::SessionRestoreApply();
+    SerialWrite("[bringup-tail] session-restore done\n");
 
     // Win32 registry hive: replay any sidecar values the previous
     // boot wrote (NtSetValueKey / NtDeleteValueKey targets land in
@@ -2040,6 +2049,7 @@ void BootBringupDevices(bool force_net_smoke)
     // a regression surfaces before the live load mutates the pool.
     DUETOS_BOOT_SELFTEST(duetos::subsystems::win32::registry::RegistryHiveSelfTest());
     duetos::subsystems::win32::registry::RegistryHiveLoad();
+    SerialWrite("[bringup-tail] registry-hive done\n");
 
     // /APPS shortcut enumeration. Creates the directory + a
     // SAMPLE.MNF seed on first boot so the user has a working
@@ -2047,17 +2057,22 @@ void BootBringupDevices(bool force_net_smoke)
     // in the Start menu, dispatched through ThemeRole.
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::StartMenuAppsSelfTest());
     duetos::drivers::video::StartMenuAppsScan();
+    SerialWrite("[bringup-tail] start-menu-apps done\n");
 
     SerialWrite("[boot] Probing read-only FS shells (ext4 / NTFS / exFAT).\n");
     duetos::fs::ext4::Ext4ScanAll();
+    SerialWrite("[bringup-tail] ext4-scan done\n");
     duetos::fs::ntfs::NtfsScanAll();
+    SerialWrite("[bringup-tail] ntfs-scan done\n");
     duetos::fs::exfat::ExfatScanAll();
+    SerialWrite("[bringup-tail] exfat-scan done\n");
 
     // Steady-state begins here. Arm the heartbeat-cadence fix-journal
     // persist now — deferring it past the boot self-test storm avoids
     // a measured ~1 s full-core CPU spike from repeated KERNEL.FIX
     // rewrites colliding with the storage self-tests.
     duetos::diag::FixJournalPersistEnablePeriodic();
+    SerialWrite("[bringup-tail] fix-journal-periodic armed\n");
 
     // Metrics checkpoint: everything above is bringup overhead; what
     // the system consumes from here on is steady-state.
