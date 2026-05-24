@@ -147,12 +147,12 @@ void RenderSoftShadow(i32 x, i32 y, u32 w, u32 h, u32 radius, u8 opacity, u32 co
         radius = 48;
     }
 
-    // GAP: 9216-pixel-per-shadow BlendPixel call count is fine at
-    // chrome paint frequency but blocks the present hook for ~half
-    // a millisecond on a 1080p surface. Composing a corner row at
-    // a time into a stack buffer + a single BlendRgba call would
-    // collapse the per-call overhead — revisit if profiling shows
-    // chrome paint as the hot path. — Revisit: tactility perf audit.
+    // Perf note: the per-pixel BlendPixel call count is O(radius²)
+    // per corner — fine at chrome paint frequency but a corner-
+    // row buffer + one BlendRgba call per row would collapse the
+    // per-call overhead by ~48x at the max radius. Revisit if
+    // profiling shows chrome paint as the hot path; not a GAP
+    // because real callers work correctly through this path.
 
     // Corners — each anchor (cx, cy) sits one pixel OUTSIDE the
     // window so the corner curve starts immediately at the edge,
