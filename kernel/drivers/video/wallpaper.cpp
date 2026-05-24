@@ -555,19 +555,61 @@ void WallpaperPaint(u32 desktop_rgb)
 
 void WallpaperTick()
 {
+    // Diagnostic ladder — emit one line per distinct entry/exit reason
+    // ONCE, so we can confirm whether WallpaperTick is called at all,
+    // and which gate (if any) is making it bail. The 'once' guard
+    // keeps serial quiet during steady-state; each branch only emits
+    // the first time it fires.
+    static bool s_logged_entered = false;
+    static bool s_logged_no_fb = false;
+    static bool s_logged_motion_zero = false;
+    static bool s_logged_now_ns_zero = false;
+    if (!s_logged_entered)
+    {
+        s_logged_entered = true;
+        duetos::arch::SerialWrite("[wpm-diag] WallpaperTick FIRST CALL\n");
+    }
+
     if (!FramebufferAvailable())
+    {
+        if (!s_logged_no_fb)
+        {
+            s_logged_no_fb = true;
+            duetos::arch::SerialWrite("[wpm-diag] EXIT: !FramebufferAvailable\n");
+        }
         return;
+    }
 
     const u8 motion = ThemeEffectiveMotionIntensity();
     if (motion == 0)
+    {
+        if (!s_logged_motion_zero)
+        {
+            s_logged_motion_zero = true;
+            duetos::arch::SerialWrite("[wpm-diag] EXIT: motion==0 (theme=");
+            duetos::arch::SerialWrite(duetos::drivers::video::ThemeIdName(duetos::drivers::video::ThemeCurrentId()));
+            duetos::arch::SerialWrite(" tactility=");
+            duetos::arch::SerialWriteHex(duetos::drivers::video::ThemeCurrent().tactility_enabled ? 1U : 0U);
+            duetos::arch::SerialWrite(" motion_intensity=");
+            duetos::arch::SerialWriteHex(duetos::drivers::video::ThemeCurrent().motion_intensity);
+            duetos::arch::SerialWrite(")\n");
+        }
         return; // master gate: cmdline motion=off or theme opts out
+    }
 
     // Derive monotonic time in milliseconds. MonotonicNs returns 0
     // before the timekeeper is initialised — treat as "not ready yet"
     // and skip the tick rather than accumulating a spurious base.
     const u64 now_ns = time::MonotonicNs();
     if (now_ns == 0)
+    {
+        if (!s_logged_now_ns_zero)
+        {
+            s_logged_now_ns_zero = true;
+            duetos::arch::SerialWrite("[wpm-diag] EXIT: now_ns==0 (clocksource not ready)\n");
+        }
         return;
+    }
     const u64 now_ms = now_ns / 1'000'000ULL;
 
     // Capture the monotonic base on the first tick that actually runs.
