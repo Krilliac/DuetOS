@@ -625,6 +625,28 @@ void WallpaperTick()
         FramebufferAddDamage(0U, 200U, info.width, 400U);
     }
 
+    // Diagnostic: log motion phase once per second so an operator can
+    // verify the motion driver is actually running. Cheap (8 KLOG_DEBUG
+    // per second worst case). Remove or demote once visible-motion is
+    // confirmed end-to-end.
+    static u64 s_last_diag_s = 0;
+    const u64 cur_s = t_ms / 1000ULL;
+    if (cur_s != s_last_diag_s)
+    {
+        s_last_diag_s = cur_s;
+        duetos::arch::SerialWrite("[wpm-diag] t_s=");
+        duetos::arch::SerialWriteHex(cur_s);
+        duetos::arch::SerialWrite(" rot_deg_x100=");
+        duetos::arch::SerialWriteHex(static_cast<u64>(static_cast<i64>(g_motion.arc_rot_deg * 100.0)));
+        duetos::arch::SerialWrite(" pulse_x1000=");
+        duetos::arch::SerialWriteHex(static_cast<u64>(g_motion.pulse_boost * 1000.0));
+        duetos::arch::SerialWrite(" drift_px=");
+        duetos::arch::SerialWriteHex(static_cast<u64>(g_motion.topo_drift_px));
+        duetos::arch::SerialWrite(" intensity=");
+        duetos::arch::SerialWriteHex(motion);
+        duetos::arch::SerialWrite("\n");
+    }
+
     // Clock-minute roll check — runs at every tick (~15 FPS) but the
     // comparison is a single integer divide + compare, cost ≈ 0.07 ms.
     // Fires at most once per minute: calls LoginRefreshClock which is a
