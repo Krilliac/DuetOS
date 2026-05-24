@@ -1,6 +1,7 @@
 #include "drivers/video/wallpaper.h"
 
 #include "arch/x86_64/serial.h"
+#include "debug/probes.h"
 #include "log/klog.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/svg.h"
@@ -389,6 +390,11 @@ void InitSvgImage(SvgImage& img, const u8* bytes, u32 size, SvgShape* shape_buf,
     }
 }
 
+// Set to true by WallpaperMotionSelfTest on PASS; read by
+// WallpaperMotionSelfTestPassed(). Initially false so an absent or
+// FAILed self-test never lights up the umbrella line.
+bool g_wallpaper_motion_selftest_passed = false;
+
 } // namespace
 
 void WallpaperSvgInit()
@@ -576,15 +582,85 @@ void WallpaperTick()
 
 void WallpaperMotionSelfTest()
 {
-    // Implemented in Task 7. Declared here so the linker sees the
-    // symbol. Task 7 fills in the body.
-    // STUB: body pending Task 7 — returns without running any checks.
+    using duetos::arch::SerialWrite;
+
+    g_wallpaper_motion_selftest_passed = false;
+    bool pass        = true;
+    u32  failed_step = 0;
+
+    auto mark_fail = [&](u32 step)
+    {
+        if (pass)
+        {
+            pass        = false;
+            failed_step = step;
+        }
+    };
+
+    // 1. ArcRotationDegrees stays within [-5, +5] degrees over a full
+    //    60-second rotation period.  Sample every ~67 ms (≈ 900 ticks).
+    for (u64 ms = 0; ms <= 60000; ms += 67)
+    {
+        const double d = ArcRotationDegrees(ms, 60000);
+        if (d < -5.001 || d > 5.001)
+        {
+            SerialWrite("[wallpaper-motion-selftest] FAIL arc rotation out of bounds\n");
+            KBP_PROBE_V(debug::ProbeId::kBootSelftestFail, 0xB3);
+            mark_fail(1);
+            break;
+        }
+    }
+
+    // 2. PulseAlphaBoost stays within [0, kPulsePeak] over a full
+    //    8-second pulse period.  Sample every 50 ms (161 ticks).
+    if (pass)
+    {
+        for (u64 ms = 0; ms <= 8000; ms += 50)
+        {
+            const double p = PulseAlphaBoost(ms, 8000, kPulsePeak);
+            if (p < 0.0 || p > kPulsePeak + 1e-6)
+            {
+                SerialWrite("[wallpaper-motion-selftest] FAIL pulse out of bounds\n");
+                KBP_PROBE_V(debug::ProbeId::kBootSelftestFail, 0xB4);
+                mark_fail(2);
+                break;
+            }
+        }
+    }
+
+    // 3. TopoDriftOffsetPx wraps correctly:
+    //      now_ms=1024000 speed=1 fb_w=1024 → (1024000/1000*1) % 1024 = 0
+    //      now_ms=1000    speed=1 fb_w=1024 → (1000/1000*1)    % 1024 = 1
+    if (pass)
+    {
+        if (TopoDriftOffsetPx(1024000, 1, 1024) != 0 ||
+            TopoDriftOffsetPx(1000, 1, 1024)    != 1)
+        {
+            SerialWrite("[wallpaper-motion-selftest] FAIL topo wrap broken\n");
+            KBP_PROBE_V(debug::ProbeId::kBootSelftestFail, 0xB5);
+            mark_fail(3);
+        }
+    }
+
+    if (pass)
+    {
+        SerialWrite("[wallpaper-motion-selftest] PASS (rotation/pulse/wrap)\n");
+        g_wallpaper_motion_selftest_passed = true;
+    }
+    else
+    {
+        char msg[64] = "[wallpaper-motion-selftest] FAIL at step ";
+        u32 o = 41;
+        msg[o++] = static_cast<char>('0' + (failed_step % 10));
+        msg[o++] = '\n';
+        msg[o]   = '\0';
+        SerialWrite(msg);
+    }
 }
 
 bool WallpaperMotionSelfTestPassed()
 {
-    // STUB: returns false until Task 7 implements the self-test.
-    return false;
+    return g_wallpaper_motion_selftest_passed;
 }
 
 } // namespace duetos::drivers::video
