@@ -54,6 +54,7 @@
 #include "drivers/video/ttf_raster.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/taskbar.h"
+#include "security/login.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/tray_flyout.h"
 #include "drivers/video/wallpaper.h"
@@ -2582,6 +2583,20 @@ void CompositorUnlock()
 
 void DesktopCompose(u32 desktop_rgb, const char* banner)
 {
+    // Pass B fix — login gate owns the framebuffer in Gui mode.
+    // Compose-paths reaching here while the gate is up would paint
+    // the desktop chrome (taskbar, windows, banner) over the login
+    // card, defeating both the visual continuity AND the security
+    // boundary (a visible window can be clicked through any path
+    // that doesn't go through the mouse-reader gate). Short-circuit
+    // to a LoginRepaint so the login surface is refreshed instead.
+    // Mirrors the TTY-mode short-circuit below.
+    if (duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui)
+    {
+        duetos::core::LoginRepaint();
+        return;
+    }
+
     if (g_display_mode == DisplayMode::Tty)
     {
         // TTY mode: fullscreen console, no windows / cursor /
