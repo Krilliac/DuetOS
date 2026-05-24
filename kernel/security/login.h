@@ -83,6 +83,26 @@ void LoginRepaint();
 /// to turn a click on the button into the same submit path as Enter.
 bool LoginHitTestSignInButton(u32 cx, u32 cy);
 
+/// Returns true if (cx, cy) is inside the username row of the login
+/// card (avatar circle + name + role hint text band). No-op (returns
+/// false) when LoginIsActive is false or LoginCurrentMode is not Gui.
+/// Used by the mouse reader to route a click on the username row to
+/// LoginFocusUsername.
+bool LoginHitTestUsernameField(u32 cx, u32 cy);
+
+/// Returns true if (cx, cy) is inside the password input rect.
+/// Same gating as LoginHitTestUsernameField.
+bool LoginHitTestPasswordField(u32 cx, u32 cy);
+
+/// Move keyboard focus to the username field and repaint the card
+/// so the focus indicator follows. No-op if the gate is not up in
+/// Gui mode.
+void LoginFocusUsername();
+
+/// Move keyboard focus to the password field and repaint the card.
+/// No-op if the gate is not up in Gui mode.
+void LoginFocusPassword();
+
 /// External trigger for `logout` to re-open the gate. Clears
 /// the session, drops back to the mode last shown (or Gui if
 /// called before the first activation), re-paints.

@@ -2192,9 +2192,23 @@ void MouseReaderTask(void*)
         // above is released and the loop continues.
         if (duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui)
         {
-            if (press_edge && duetos::core::LoginHitTestSignInButton(cx, cy))
+            if (press_edge)
             {
-                duetos::core::LoginFeedKey(duetos::drivers::input::kKeyEnter);
+                // Route by hit-test, sign-in button first (it overlaps no
+                // other field), then password input, then the username
+                // row (avatar/name/role). Anything else is inert.
+                if (duetos::core::LoginHitTestSignInButton(cx, cy))
+                {
+                    duetos::core::LoginFeedKey(duetos::drivers::input::kKeyEnter);
+                }
+                else if (duetos::core::LoginHitTestPasswordField(cx, cy))
+                {
+                    duetos::core::LoginFocusPassword();
+                }
+                else if (duetos::core::LoginHitTestUsernameField(cx, cy))
+                {
+                    duetos::core::LoginFocusUsername();
+                }
             }
             duetos::drivers::video::CompositorUnlock();
             continue;

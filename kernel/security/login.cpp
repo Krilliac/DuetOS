@@ -367,19 +367,39 @@ void LoginFormatDate(char* out, u32 cap)
     }
 }
 
-// Compute the sign-in button rect from the live framebuffer dimensions.
-// Mirrors the arithmetic chain in GuiRepaint (card → password field →
-// button), so any change to that layout MUST update this helper too.
-// Shared between GuiRepaint (paint) and LoginHitTestSignInButton (mouse).
-void ComputeSignInButtonRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h)
+// Layout-rect helpers — mirror the arithmetic chain in GuiRepaint
+// (card → username row / password field / sign-in button). Shared
+// between GuiRepaint (paint) and the LoginHitTest* mouse helpers.
+// Any change to GuiRepaint's coordinate math MUST update these too.
+
+void ComputeUsernameRowRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h)
+{
+    // Hit target is the avatar+name+role band — full card width from
+    // card_x to card right, from card top through end of the role line.
+    const u32 card_x = 694u * fb_w / 1024u;
+    const u32 card_y = 540u * fb_h / 768u;
+    const u32 card_w = 280u * fb_w / 1024u;
+    if (x) *x = card_x;
+    if (y) *y = card_y;
+    if (w) *w = card_w;
+    if (h) *h = 80u * fb_h / 768u; // covers avatar (~60px) + role text below
+}
+
+void ComputePasswordFieldRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h)
 {
     const u32 card_x = 694u * fb_w / 1024u;
     const u32 card_y = 540u * fb_h / 768u;
     const u32 card_w = 280u * fb_w / 1024u;
-    const u32 pwd_x = card_x + 20u * fb_w / 1024u;
-    const u32 pwd_y = card_y + 86u * fb_h / 768u;
-    const u32 pwd_w = card_w - 40u * fb_w / 1024u;
-    const u32 pwd_h = 28u * fb_h / 768u;
+    if (x) *x = card_x + 20u * fb_w / 1024u;
+    if (y) *y = card_y + 86u * fb_h / 768u;
+    if (w) *w = card_w - 40u * fb_w / 1024u;
+    if (h) *h = 28u * fb_h / 768u;
+}
+
+void ComputeSignInButtonRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h)
+{
+    u32 pwd_x = 0, pwd_y = 0, pwd_w = 0, pwd_h = 0;
+    ComputePasswordFieldRect(fb_w, fb_h, &pwd_x, &pwd_y, &pwd_w, &pwd_h);
     const u32 btn_w = 170u * fb_w / 1024u;
     const u32 btn_h = 28u * fb_h / 768u;
     if (x) *x = pwd_x + pwd_w - btn_w;
@@ -819,6 +839,42 @@ bool LoginHitTestSignInButton(u32 cx, u32 cy)
     u32 bx = 0, by = 0, bw = 0, bh = 0;
     ComputeSignInButtonRect(fb.width, fb.height, &bx, &by, &bw, &bh);
     return (cx >= bx) && (cx < bx + bw) && (cy >= by) && (cy < by + bh);
+}
+
+bool LoginHitTestUsernameField(u32 cx, u32 cy)
+{
+    if (!g_login.active || g_login.mode != LoginMode::Gui) return false;
+    if (!duetos::drivers::video::FramebufferAvailable()) return false;
+    const auto& fb = duetos::drivers::video::FramebufferGet();
+    u32 rx = 0, ry = 0, rw = 0, rh = 0;
+    ComputeUsernameRowRect(fb.width, fb.height, &rx, &ry, &rw, &rh);
+    return (cx >= rx) && (cx < rx + rw) && (cy >= ry) && (cy < ry + rh);
+}
+
+bool LoginHitTestPasswordField(u32 cx, u32 cy)
+{
+    if (!g_login.active || g_login.mode != LoginMode::Gui) return false;
+    if (!duetos::drivers::video::FramebufferAvailable()) return false;
+    const auto& fb = duetos::drivers::video::FramebufferGet();
+    u32 rx = 0, ry = 0, rw = 0, rh = 0;
+    ComputePasswordFieldRect(fb.width, fb.height, &rx, &ry, &rw, &rh);
+    return (cx >= rx) && (cx < rx + rw) && (cy >= ry) && (cy < ry + rh);
+}
+
+void LoginFocusUsername()
+{
+    if (!g_login.active || g_login.mode != LoginMode::Gui) return;
+    if (g_login.focus == Field::Username) return; // already focused, no repaint
+    g_login.focus = Field::Username;
+    GuiRepaint();
+}
+
+void LoginFocusPassword()
+{
+    if (!g_login.active || g_login.mode != LoginMode::Gui) return;
+    if (g_login.focus == Field::Password) return;
+    g_login.focus = Field::Password;
+    GuiRepaint();
 }
 
 void LoginReopen()
