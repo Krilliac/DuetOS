@@ -346,6 +346,22 @@ void FramebufferPunchCorners(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 punch_r
 /// No-op if `!Available()` or `thickness == 0`.
 void FramebufferStrokeArc(i32 cx, i32 cy, i32 radius, i32 start_deg, i32 sweep_deg, u32 thickness, u32 rgb);
 
+/// Double-precision variant of `FramebufferStrokeArc`. Accepts fractional
+/// degree values for both `start_deg` and `sweep_deg`, giving smooth
+/// sub-degree arc rotation without integer-step quantisation.
+///
+/// The step size is approximately 1 pixel of arc length at `radius`
+/// (≈ 57.3 / radius degrees, clamped to [0.1°, 1.0°]) so arcs stay
+/// dense and gapless across the full radius range the wallpaper uses.
+///
+/// Uses linear interpolation of the Q16.16 integer sin/cos table
+/// (no <math.h> dependency). Accuracy vs true sin/cos is < 0.0015
+/// relative error — invisible at any screen resolution.
+///
+/// All other semantics match `FramebufferStrokeArc`. No-op if
+/// `!Available()`, `radius <= 0`, or `thickness == 0`.
+void FramebufferStrokeArcFloat(i32 cx, i32 cy, i32 radius, double start_deg, double sweep_deg, u32 thickness, u32 rgb);
+
 /// Path-op tag for `FramebufferStrokePath`. The op carries 0–3
 /// `(x, y)` pairs depending on the tag.
 enum class PathOp : u8

@@ -253,10 +253,6 @@ void PaintDuetArcs(u32 desktop_rgb, u32 fb_w, u32 fb_h, double rot_deg, double p
                       ((amber_g < 0xFFU - pulse_lift ? amber_g + pulse_lift : 0xFFU) << 8) |
                       (amber_b < 0xFFU - pulse_lift ? amber_b + pulse_lift : 0xFFU);
 
-    // Rotation: convert rot_deg (double, [-5, +5]) to an integer degree
-    // offset applied to every arc's start angle, giving a slow sweep.
-    const i32 rot_i = static_cast<i32>(rot_deg);
-
     // Six concentric arcs per side, stepping 8% of the shorter
     // dimension between rings. Each arc pair rotates a small
     // amount so the rings don't visually merge into one fat
@@ -264,7 +260,7 @@ void PaintDuetArcs(u32 desktop_rgb, u32 fb_w, u32 fb_h, double rot_deg, double p
     constexpr u32 kRings = 6;
     const u32 step = (short_side * 8u) / 100u;
     const u32 r0 = (short_side * 14u) / 100u;
-    constexpr i32 kSweep = 150;
+    constexpr double kSweepD = 150.0;
     // Horizontal centre offset: shift the arc origin slightly
     // off-centre so the sweep wraps around the shared anchor.
     const i32 offset = static_cast<i32>(short_side / 32u);
@@ -272,11 +268,14 @@ void PaintDuetArcs(u32 desktop_rgb, u32 fb_w, u32 fb_h, double rot_deg, double p
     for (u32 i = 0; i < kRings; ++i)
     {
         const i32 r = static_cast<i32>(r0 + i * step);
-        const i32 wobble = static_cast<i32>(i) * 3;
-        // Teal arc: rotate roughly -30° + per-ring wobble + ambient rotation.
-        FramebufferStrokeArc(cx - offset, cy, r, -90 - wobble + rot_i, kSweep, 2u, teal);
-        // Amber arc: rotate +150° from the teal arc + ambient rotation.
-        FramebufferStrokeArc(cx + offset, cy, r,  90 + wobble + rot_i, kSweep, 2u, amber);
+        const double wobble = static_cast<double>(i) * 3.0;
+        // Teal arc: rotate roughly -90° + per-ring wobble + ambient rotation.
+        // Float variant gives continuous sub-degree rotation so the ±5°
+        // sweep doesn't step visibly at the 11 integer positions the int
+        // variant would produce.
+        FramebufferStrokeArcFloat(cx - offset, cy, r, -90.0 - wobble + rot_deg, kSweepD, 2u, teal);
+        // Amber arc: rotate +90° + wobble + ambient rotation.
+        FramebufferStrokeArcFloat(cx + offset, cy, r,  90.0 + wobble + rot_deg, kSweepD, 2u, amber);
     }
 
     // Centre dots — small filled disks at each arc anchor. The

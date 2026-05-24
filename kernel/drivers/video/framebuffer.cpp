@@ -1496,6 +1496,36 @@ i32 CosDegQ16(i32 deg)
 
 } // namespace
 
+// Fractional-degree sin/cos using linear interpolation of the existing
+// Q16.16 integer table. Input is any double in degrees; output is a
+// double in [-1, +1]. Error vs true sin/cos < 0.5 LSB of the table
+// (< 0.0015 rad), well below any visible arc-rotation artefact at the
+// ±5° sweep range PaintDuetArcs uses.
+//
+// File-scope static — not in the anonymous namespace so
+// FramebufferStrokeArcFloat (a public function) can call it without an
+// internal-linkage violation. Does not pull in any math library header.
+static double SinDegF(double deg)
+{
+    // Reduce to [0, 360).
+    while (deg < 0.0)
+        deg += 360.0;
+    while (deg >= 360.0)
+        deg -= 360.0;
+    // Lerp between the two nearest integer-degree entries.
+    const i32 d0 = static_cast<i32>(deg);
+    const i32 d1 = (d0 + 1) % 360;
+    const double frac = deg - static_cast<double>(d0);
+    const double s0 = static_cast<double>(SinDegQ16(d0)) / 65536.0;
+    const double s1 = static_cast<double>(SinDegQ16(d1)) / 65536.0;
+    return s0 + frac * (s1 - s0);
+}
+
+static double CosDegF(double deg)
+{
+    return SinDegF(deg + 90.0);
+}
+
 void FramebufferStrokeArc(i32 cx, i32 cy, i32 radius, i32 start_deg, i32 sweep_deg, u32 thickness, u32 rgb)
 {
     if (!g_available || radius <= 0 || thickness == 0)
@@ -1543,6 +1573,55 @@ void FramebufferStrokeArc(i32 cx, i32 cy, i32 radius, i32 start_deg, i32 sweep_d
                 FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py), rgb);
             }
         }
+    }
+}
+
+void FramebufferStrokeArcFloat(i32 cx, i32 cy, i32 radius, double start_deg, double sweep_deg, u32 thickness, u32 rgb)
+{
+    if (!g_available || radius <= 0 || thickness == 0)
+        return;
+    // Step size: ~1 pixel of arc length at this radius.
+    // `step = 180 / (π * r)` degrees ≈ `57.3 / r`. Clamped to [0.1°, 1.0°]
+    // so tiny radii don't explode the loop and huge radii stay gapless.
+    double step = 57.3 / static_cast<double>(radius);
+    if (step > 1.0)
+        step = 1.0;
+    if (step < 0.1)
+        step = 0.1;
+
+    // Walk the sweep in fractional-degree steps. A negative sweep
+    // walks backward; cap magnitude at 360° so a full revolution is
+    // the maximum.
+    double walk = sweep_deg;
+    double sign = 1.0;
+    if (walk < 0.0)
+    {
+        walk = -walk;
+        sign = -1.0;
+    }
+    if (walk > 360.0)
+        walk = 360.0;
+
+    const i32 half = static_cast<i32>(thickness / 2);
+    double d = 0.0;
+    while (d <= walk)
+    {
+        const double angle = start_deg + sign * d;
+        const double c = CosDegF(angle);
+        const double s = SinDegF(angle);
+        for (u32 t = 0; t < thickness; ++t)
+        {
+            const i32 r = radius - half + static_cast<i32>(t);
+            if (r <= 0)
+                continue;
+            const i32 px = cx + static_cast<i32>(c * static_cast<double>(r) + 0.5);
+            const i32 py = cy + static_cast<i32>(s * static_cast<double>(r) + 0.5);
+            if (px >= 0 && py >= 0 && static_cast<u32>(px) < g_info.width && static_cast<u32>(py) < g_info.height)
+            {
+                FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py), rgb);
+            }
+        }
+        d += step;
     }
 }
 
