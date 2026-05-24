@@ -86,10 +86,15 @@ struct MotionState
 };
 static MotionState g_motion = {0, 0, 0, 0.0, 0.0};
 
-constexpr u64    kArcRotPeriodMs    = 60000; // ±5° sweep over 60 s
-constexpr u64    kPulsePeriodMs     =  8000; // 8 s breath
-constexpr double kPulsePeak         =  0.08; // alpha boost at peak
-constexpr i32    kTopoDriftPxPerSec =     1; // 1 px/s
+// Motion cadences — bumped from the original Pass B values (60s arc,
+// 0.08 pulse, 1 px/s drift) which the design ratified as "subtle ambient"
+// but operators reported as visually static. Current rates are still
+// well within "ambient wallpaper" (not screensaver-busy) but cross the
+// "I can perceive it moving" threshold without staring.
+constexpr u64    kArcRotPeriodMs    = 20000; // ±5° sweep over 20 s (3× faster)
+constexpr u64    kPulsePeriodMs     =  8000; // 8 s breath (unchanged — feels right)
+constexpr double kPulsePeak         =  0.15; // alpha boost at peak (~2× the old amplitude)
+constexpr i32    kTopoDriftPxPerSec =     5; // 5 px/s — now visibly drifting
 
 // Triangular sweep −5 → +5 → −5 over period_ms.
 // Matches tests/host/test_motion_math.cpp ArcRotationDegrees exactly.
@@ -280,7 +285,7 @@ void PaintDuetArcs(u32 desktop_rgb, u32 fb_w, u32 fb_h, double rot_deg, double p
     const u32 amber_b = lift_b;
 
     // Pulse boost: convert the fractional boost to a per-channel
-    // integer lift (0..20 at kPulsePeak=0.08, scale is 255*0.08≈20).
+    // integer lift (0..38 at kPulsePeak=0.15, scale is 255*0.15≈38).
     const u32 pulse_lift = static_cast<u32>(pulse * 255.0);
     const u32 teal = ((teal_r < 0xFFU - pulse_lift ? teal_r + pulse_lift : 0xFFU) << 16) |
                      ((teal_g < 0xFFU - pulse_lift ? teal_g + pulse_lift : 0xFFU) << 8) |
@@ -467,7 +472,7 @@ void WallpaperPaint(u32 desktop_rgb)
             // Pulse tint: blend topo curves toward the theme accent colour
             // proportional to the current pulse_boost so the contour lines
             // breathe in sync with the arc brightness. Alpha byte encodes
-            // pulse_boost [0, kPulsePeak=0.08] scaled to [0, 255*0.08≈20].
+            // pulse_boost [0, kPulsePeak=0.15] scaled to [0, 255*0.15≈38].
             // When motion is off pulse_boost == 0.0 and tint_argb alpha == 0
             // → SvgRender uses raw SVG stroke colours (no overhead).
             const u32 pulse_alpha = static_cast<u32>(g_motion.pulse_boost * 255.0);
