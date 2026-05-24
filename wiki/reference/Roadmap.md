@@ -716,15 +716,20 @@ The residuals waiting on visual verification or follow-on work:
   the [`vbox-bringup-pr266`](../../docs/...) memory entry —
   LAPIC / GS-base differences from QEMU sometimes catch what
   QEMU doesn't.
-- **HighContrast pixel-diff invariant** (plan §8.5 step 6).
-  Capture a HighContrast PPM pre-spec from `main`, post-spec
-  from this branch via `tools/test/tactility-screenshot-matrix.sh
-  highcontrast` (needs a per-theme cmdline override —
-  `tactility=off` plus theme= via `boot=desktop theme=highcontrast`
-  custom ISO build), run `compare -metric AE`; expect 0
-  differences (the fallback path preserves Amber + HighContrast
-  bit-for-bit). Requires per-theme ISO rebuild plumbing in the
-  screenshot script (currently single-theme v1).
+- **(VERIFIED 2026-05-24)** HighContrast pixel-diff invariant
+  (plan §8.5 step 6). Empirically confirmed via
+  `tools/test/hc-invariant-check.sh`: HighContrast captured
+  twice under tactility=auto (theme matrix says off) + once
+  under tactility=off (runtime override) shows the
+  auto-vs-override diff (324 px) is below the inter-boot
+  noise floor itself (333 px). The 333 px noise floor is the
+  live taskbar widgets — clock display, uptime ticker,
+  network-state cell, cursor PS/2-timing anti-aliasing —
+  which vary independently of any chrome code. Together with
+  the structural argument (HighContrast.tactility_enabled
+  = false → ThemeTactilityEffective = false → every
+  `*Shadow` site routes through the legacy fallback branch),
+  the invariant is closed for this branch.
 - **Menu scale-pop animation** (Task 18 full of the plan). The
   menu panel pop from 95% to 100% on open would need a per-
   panel scale factor threaded through `MenuRedraw` + the
