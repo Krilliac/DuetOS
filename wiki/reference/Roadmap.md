@@ -691,6 +691,66 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ## End-user features
 
+### Chrome tactility (Pass A) — residual polish + Pass A verification
+
+The chrome-tactility plan
+(`docs/superpowers/plans/2026-05-24-duetos-chrome-tactility.md`)
+landed 23 of its 28 tasks: blend math + atlas-based 9-slice soft
+shadow + 7 new Theme fields + per-theme intensity matrix +
+runtime override (cmdline + shell) + chrome paint integration
+on windows, modals, snap previews, taskbar tabs + strip, menu
+panels + the WindowPaintFocusGlow helper. See
+[`Compositor`](../subsystems/Compositor.md#chrome-tactility-pass-a)
+for the subsystem summary.
+
+The residuals waiting on visual verification or follow-on work:
+
+- **Live QEMU/VBox verification** (Task 27 steps 2-6 of the
+  plan). Run `tools/test/tactility-soak.sh duet 30` and
+  `tools/test/tactility-screenshot-matrix.sh` against a host
+  with QEMU + OVMF installed; the 4 `*-selftest` PASS sentinels
+  should appear in the boot log and the screenshot matrix
+  should show visible soft shadows on the tactility-enabled
+  themes (Duet variants, Classic, Slate10, DuetClassic) and
+  unchanged flat chrome on HighContrast + Amber. VBox boot
+  also wanted per [`vbox-bringup-pr266`](../../docs/...) (LAPIC
+  / GS-base differences from QEMU sometimes catch what QEMU
+  doesn't).
+- **HighContrast pixel-diff invariant** (plan §8.5 step 6).
+  Capture a HighContrast PPM pre-spec from `main`, post-spec
+  from this branch, run `compare -metric AE`; expect 0
+  differences (the fallback path preserves Amber + HighContrast
+  bit-for-bit). Needs the QEMU env above.
+- **Menu scale-pop animation** (Task 18 full of the plan). The
+  menu panel pop from 95% to 100% on open would need a per-
+  panel scale factor threaded through `MenuRedraw` + the
+  `MenuItemAt` hit-test so the click target stays aligned with
+  the painted bounds while the animation runs. Discrete
+  refactor; visual verification mandatory.
+- **Cursor micro-shadow** (Task 21 of the plan, plan-marked
+  stretch). Per-frame cost is the heaviest in the spec —
+  cursor moves every PS/2 packet at up to 60 Hz. Also requires
+  enlarging the cursor backing-store to cover the shadow halo
+  so the shadow region restores when the cursor moves, instead
+  of leaving a trail. Defer until soak shows headroom.
+- **Per-tab pressed state** (out of plan scope). The taskbar
+  per-tab paint reads a CursorPosition-derived hover state but
+  the input layer transitions straight from press to dispatch
+  without a paint-time pressed bit. An input-state refactor
+  that surfaces per-widget pressed-bits would light up the
+  press overlay that the chrome-tactility plan describes.
+- **Menu row hover wash + force-dirty on flips** (Tasks 18 row-
+  wash + 23 of the plan). The existing solid-accent hover-row
+  fill in `MenuRedraw` is already a strong affordance; layering
+  a tactility wash on top would compound. Task 23's
+  force-dirty-on-flip pattern needs `WidgetFlag::*` bit-flip
+  call sites that don't exist in this codebase — the current
+  bool-state model doesn't have flip points to instrument.
+
+When a residual ships, delete its bullet here and update the
+[`Compositor`](../subsystems/Compositor.md) subsystem page's
+"Deferred from Pass A" call-out.
+
 ### RBAC + elevation broker — v1 follow-ups
 
 - **v1 — Argon2id with lazy migration.** Blake2b primitive
