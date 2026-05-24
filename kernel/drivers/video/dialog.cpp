@@ -2,6 +2,7 @@
 
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/shadow.h"
 #include "drivers/video/sound_cue.h"
 #include "drivers/video/theme.h"
 
@@ -371,6 +372,21 @@ void DialogCompose()
     const u32 ink = 0x00101020;
     const u32 dim_ink = 0x00606078;
     const u32 border = th.window_border;
+
+    // Tactility lift: paint a 50% larger soft shadow than the
+    // window's 24-active radius (40 here) at 75% of the active
+    // shadow intensity. Modals already command attention via the
+    // 40% scrim above, but the stronger shadow makes the panel
+    // physically read as floating on top of the dim, not painted
+    // onto it. No-op for tactility=off themes / runtime override.
+    if (ThemeTactilityEffective() && th.shadow_intensity_active > 0)
+    {
+        const u8 opacity = static_cast<u8>((static_cast<u32>(th.shadow_intensity_active) * 3U) / 4U);
+        if (opacity > 0)
+        {
+            RenderSoftShadow(static_cast<i32>(px), static_cast<i32>(py), kPanelW, kPanelH, 40U, opacity, 0x00000000U);
+        }
+    }
 
     // Body fill + 1-px border.
     FramebufferFillRect(px, py, kPanelW, kPanelH, panel_bg);

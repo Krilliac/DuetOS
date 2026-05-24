@@ -1837,6 +1837,17 @@ void SnapPreviewCompose()
     // 0x40 = 25 % alpha. ARGB packing matches FramebufferFillRectAlpha.
     const u32 argb = (0x40u << 24) | accent_rgb;
     FramebufferFillRectAlpha(x, y, w, h, argb);
+
+    // Tactility lift: the preview gains an accent-tinted soft halo
+    // so it reads as "the window will hover here" instead of a flat
+    // filled rect. The translucent body fill above already implies
+    // preview-ness; the halo adds the depth cue without changing
+    // the affordance. No-op when tactility is disabled at runtime
+    // or off for the theme.
+    if (ThemeTactilityEffective())
+    {
+        RenderSoftShadow(static_cast<i32>(x), static_cast<i32>(y), w, h, 16U, 100U, accent_rgb);
+    }
 }
 
 } // namespace
