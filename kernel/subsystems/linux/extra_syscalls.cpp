@@ -462,13 +462,26 @@ i64 DoCopyFileRange(u64 fd_in, u64 user_off_in, u64 fd_out, u64 user_off_out, u6
     if (user_off_in != 0)
     {
         i64 final_in = static_cast<i64>(p->linux_fds[fd_in].offset);
-        (void)mm::CopyToUser(reinterpret_cast<void*>(user_off_in), &final_in, sizeof(final_in));
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_off_in), &final_in, sizeof(final_in)))
+        {
+            // Linux copy_file_range contract: when off_in is non-NULL
+            // the kernel updates *off_in. A faulting writeback is
+            // -EFAULT — silently swallowing it would leave the caller
+            // reading their pre-call value while believing the syscall
+            // succeeded. Bytes already moved stay moved (no rollback).
+            p->linux_fds[fd_in].offset = static_cast<u64>(saved_in);
+            return kEFAULT;
+        }
         p->linux_fds[fd_in].offset = static_cast<u64>(saved_in);
     }
     if (user_off_out != 0)
     {
         i64 final_out = static_cast<i64>(p->linux_fds[fd_out].offset);
-        (void)mm::CopyToUser(reinterpret_cast<void*>(user_off_out), &final_out, sizeof(final_out));
+        if (!mm::CopyToUser(reinterpret_cast<void*>(user_off_out), &final_out, sizeof(final_out)))
+        {
+            p->linux_fds[fd_out].offset = static_cast<u64>(saved_out);
+            return kEFAULT;
+        }
         p->linux_fds[fd_out].offset = static_cast<u64>(saved_out);
     }
     // Ransomware-rate guard. copy_file_range bypasses DoWrite —

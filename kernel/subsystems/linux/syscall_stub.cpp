@@ -201,7 +201,12 @@ i64 DoWaitid(u64 idtype, u64 id, u64 user_info, u64 options, u64 user_rusage)
                     u8 zero[128];
                     for (u32 i = 0; i < sizeof(zero); ++i)
                         zero[i] = 0;
-                    (void)mm::CopyToUser(reinterpret_cast<void*>(user_info), zero, sizeof(zero));
+                    // waitid(WNOHANG) zeroes *infop to indicate "no
+                    // children waiting". A faulting writeback violates
+                    // the contract — the caller would read uninitialised
+                    // siginfo_t and interpret it as a real child status.
+                    if (!mm::CopyToUser(reinterpret_cast<void*>(user_info), zero, sizeof(zero)))
+                        return kEFAULT;
                 }
                 return 0;
             }

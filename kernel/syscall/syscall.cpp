@@ -1113,7 +1113,10 @@ void SyscallDispatch(arch::TrapFrame* frame)
             // task exits, so a multi-threaded PE that calls
             // NtTerminateProcess(NtCurrentProcess()) actually
             // brings the whole task group down rather than just
-            // the caller.
+            // the caller. The kill return value is intentionally
+            // dropped: we are about to SchedExit() ourselves, and
+            // any error path through "failed to kill a sibling"
+            // would have no caller left to receive it.
             (void)sched::SchedKillByProcess(caller);
             sched::SchedExit();
         }
@@ -1253,7 +1256,18 @@ void SyscallDispatch(arch::TrapFrame* frame)
             if (user_retlen != 0)
             {
                 u32 needed = sizeof(info);
-                (void)mm::CopyToUser(reinterpret_cast<void*>(user_retlen), &needed, sizeof(needed));
+                if (!mm::CopyToUser(reinterpret_cast<void*>(user_retlen), &needed, sizeof(needed)))
+                {
+                    // Caller passed a non-null ReturnLength pointer but
+                    // it became invalid mid-syscall. NT contract: the
+                    // length-mismatch status only sets *ReturnLength
+                    // when the write succeeds; on write failure we
+                    // surface the access violation instead so the
+                    // caller can distinguish "buffer too small" from
+                    // "your output pointer is broken".
+                    frame->rax = kStatusAccessViolation;
+                    return;
+                }
             }
             frame->rax = kStatusInfoLengthMismatch;
             return;
@@ -1266,7 +1280,16 @@ void SyscallDispatch(arch::TrapFrame* frame)
         if (user_retlen != 0)
         {
             u32 written = sizeof(info);
-            (void)mm::CopyToUser(reinterpret_cast<void*>(user_retlen), &written, sizeof(written));
+            if (!mm::CopyToUser(reinterpret_cast<void*>(user_retlen), &written, sizeof(written)))
+            {
+                // Main buffer wrote ok, but ReturnLength faulted. NT
+                // contract guarantees *ReturnLength is set on
+                // STATUS_SUCCESS — failing to honour that would make a
+                // caller that reads *ReturnLength see uninitialised
+                // memory. Surface as access violation.
+                frame->rax = kStatusAccessViolation;
+                return;
+            }
         }
         frame->rax = kStatusSuccess;
         return;
@@ -1370,7 +1393,19 @@ void SyscallDispatch(arch::TrapFrame* frame)
             target->linux_mmap_cursor = base_va + aligned_size;
         if (user_out != 0)
         {
-            (void)mm::CopyToUser(reinterpret_cast<void*>(user_out), &base_va, sizeof(base_va));
+            if (!mm::CopyToUser(reinterpret_cast<void*>(user_out), &base_va, sizeof(base_va)))
+            {
+                // NtAllocateVirtualMemory contract: *BaseAddress is
+                // set on STATUS_SUCCESS. If the user output pointer
+                // faulted, the caller has no way to find or free the
+                // region we just allocated — that's a leak masquerading
+                // as success. Surface the fault so the caller at least
+                // knows something went wrong; the leak itself is
+                // accepted (the region will be reclaimed when the
+                // process exits).
+                frame->rax = kStatusAccessViolation;
+                return;
+            }
         }
         frame->rax = kStatusSuccess;
         return;
@@ -1428,6 +1463,13 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         for (u64 va = aligned_base; va < aligned_base + aligned_size; va += page_size)
         {
+            // The UnmapUserPage return is intentionally dropped:
+            // VirtualFree/NtFreeVirtualMemory is idempotent over
+            // not-present pages (per Win32 docs and POSIX munmap
+            // semantics). Returning false here only means "this
+            // particular page wasn't mapped", which is allowed —
+            // surfacing it would break callers that legitimately
+            // call VirtualFree on a partially-decommitted range.
             (void)mm::AddressSpaceUnmapUserPage(target->as, va);
         }
         frame->rax = kStatusSuccess;
@@ -1498,13 +1540,36 @@ void SyscallDispatch(arch::TrapFrame* frame)
             return;
         }
         u32 first_old_protect = 0x04; // best-effort: PAGE_READWRITE
+        bool any_protect_failed = false;
         for (u64 va = aligned_base; va < aligned_base + aligned_size; va += page_size)
         {
-            (void)mm::AddressSpaceProtectUserPage(target->as, va, pte_flags | mm::kPagePresent);
+            // Unlike VirtualFree, NtProtectVirtualMemory is NOT
+            // idempotent over not-present pages — Win32 returns
+            // STATUS_INVALID_PARAMETER when asked to change protection
+            // on an unmapped page. Track partial-failure so the caller
+            // sees the contract-correct status; the pages that DID
+            // change remain changed (Win32 has no rollback semantics
+            // here either).
+            if (!mm::AddressSpaceProtectUserPage(target->as, va, pte_flags | mm::kPagePresent))
+            {
+                any_protect_failed = true;
+            }
+        }
+        if (any_protect_failed)
+        {
+            frame->rax = kStatusInvalidParameter;
+            return;
         }
         if (user_old != 0)
         {
-            (void)mm::CopyToUser(reinterpret_cast<void*>(user_old), &first_old_protect, sizeof(first_old_protect));
+            if (!mm::CopyToUser(reinterpret_cast<void*>(user_old), &first_old_protect, sizeof(first_old_protect)))
+            {
+                // Same contract as VM_ALLOCATE / QUERY_INFORMATION:
+                // *OldProtect must be set on STATUS_SUCCESS or the
+                // caller reads uninitialised memory.
+                frame->rax = kStatusAccessViolation;
+                return;
+            }
         }
         frame->rax = kStatusSuccess;
         return;
