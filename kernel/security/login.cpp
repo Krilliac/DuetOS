@@ -30,6 +30,7 @@
 #include "drivers/video/console.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
+#include "drivers/video/shadow.h"
 #include "drivers/video/wallpaper.h"
 #include "log/klog.h"
 #include "sched/sched.h"
@@ -46,7 +47,9 @@ using duetos::drivers::video::ConsoleWriteln;
 using duetos::drivers::video::FramebufferBeginCompose;
 using duetos::drivers::video::FramebufferDrawStringScaled;
 using duetos::drivers::video::FramebufferEndCompose;
+using duetos::drivers::video::FramebufferFillRect;
 using duetos::drivers::video::FramebufferGet;
+using duetos::drivers::video::RenderSoftShadowWithStroke;
 using duetos::drivers::video::ThemeCurrent;
 using duetos::drivers::video::WallpaperPaint;
 
@@ -399,6 +402,30 @@ void GuiRepaint()
 
     FramebufferDrawStringScaled(clock_x, clock_y, clock_buf, fg, bg, /*scale=*/8);
     FramebufferDrawStringScaled(clock_x, date_y, date_buf, fg, bg, /*scale=*/2);
+
+    // 3. Corner card bottom-right — 280×160 at (694, 540) on a 1024×768
+    //    reference; scaled to the actual framebuffer dimensions.
+    //    Pass B Task 13: atlas-shadow halo + body fill + border stroke.
+    //    Card contents (avatar, name, password, button) land in Tasks 14–16;
+    //    this commit lays the card silhouette only.
+    const u32 card_x = 694u * fb.width / 1024u;
+    const u32 card_y = 540u * fb.height / 768u;
+    const u32 card_w = 280u * fb.width / 1024u;
+    const u32 card_h = 160u * fb.height / 768u;
+
+    // Card body — taskbar_bg is the elevated-panel surface shared across
+    // all themes; window_border is the 1-px stroke used on every window
+    // chrome so the card matches the rest of the chrome language.
+    FramebufferFillRect(card_x, card_y, card_w, card_h, ThemeCurrent().taskbar_bg);
+
+    // Atlas-shadow halo + 1-px inner stroke in one call.
+    // Shadow colour is pure black (0x000000); stroke colour is the theme's
+    // window_border — matches window chrome language. radius=16 / opacity=120
+    // gives a soft, medium-lift halo consistent with the Pass A window chrome.
+    RenderSoftShadowWithStroke(
+        static_cast<i32>(card_x), static_cast<i32>(card_y), card_w, card_h,
+        /*radius=*/16, /*opacity=*/120, /*colour=*/0x000000u,
+        /*stroke_colour=*/ThemeCurrent().window_border);
 
     // Flush offscreen shadow → live framebuffer (no-op if BeginCompose
     // fell back to direct mode).
