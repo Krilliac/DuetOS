@@ -485,6 +485,13 @@ void FramebufferSelfTest();
 /// pass is active (live-FB read-back is the wrong target then).
 void BlendSelfTest();
 
+/// Returns true iff the last BlendSelfTest() call passed. Used by
+/// the boot bringup's tactility umbrella aggregator to emit a
+/// single [tactility-selftest] PASS line when every sub-test
+/// passed (spec §8.2). False until BlendSelfTest has run; false
+/// for SKIP or FAIL outcomes.
+bool BlendSelfTestPassed();
+
 /// Re-bind the framebuffer driver to a new physical base +
 /// dimensions. Called after a GPU-side mode-set (Bochs VBE,
 /// future Intel/AMD/NVIDIA modeset) so the compositor paints at

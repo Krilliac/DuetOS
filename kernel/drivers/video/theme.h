@@ -279,4 +279,10 @@ void ThemeApplyToAll();
 /// ThemeSet is wired up at boot.
 void ThemeSelfTest();
 
+/// Returns true iff the last ThemeSelfTest() call passed. Used by
+/// the boot bringup's tactility umbrella aggregator to emit a
+/// single [tactility-selftest] PASS line when every sub-test
+/// passed (spec §8.2). False until ThemeSelfTest has run.
+bool ThemeSelfTestPassed();
+
 } // namespace duetos::drivers::video

@@ -986,10 +986,20 @@ void ThemeApplyToAll()
     }
 }
 
+namespace
+{
+// File-scope PASS tracker for the boot umbrella aggregator. Set
+// by the success branch of ThemeSelfTest; read by
+// ThemeSelfTestPassed(). Initially false so an absent or
+// FAILed self-test never lights up the umbrella line.
+bool s_theme_passed = false;
+} // namespace
+
 void ThemeSelfTest()
 {
     using duetos::arch::SerialWrite;
 
+    s_theme_passed = false;
     const ThemeId saved = g_current;
     bool pass = true;
     u32 failed_step = 0;
@@ -1081,6 +1091,7 @@ void ThemeSelfTest()
     if (pass)
     {
         SerialWrite("[theme] self-test OK (palette table + name round-trip + cycle)\n");
+        s_theme_passed = true;
     }
     else
     {
@@ -1091,6 +1102,11 @@ void ThemeSelfTest()
         msg[o] = '\0';
         SerialWrite(msg);
     }
+}
+
+bool ThemeSelfTestPassed()
+{
+    return s_theme_passed;
 }
 
 } // namespace duetos::drivers::video

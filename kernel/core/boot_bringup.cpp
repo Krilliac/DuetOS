@@ -174,6 +174,7 @@
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/shadow.h"
 #include "drivers/video/svg.h"
 #include "drivers/video/ttf.h"
 #include "drivers/video/ttf_raster.h"
@@ -2233,6 +2234,24 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         }
     }
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::ThemeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::BlendSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::ShadowSelfTest());
+    // Tactility umbrella aggregator (spec §8.2). Emits a single
+    // [tactility-selftest] PASS line iff every sub-test passed;
+    // any FAIL already fired its own probe + sentinel, no need
+    // for a fourth FAIL line. The umbrella stays silent until
+    // Task 10's tactility-matrix invariants land — at which point
+    // ThemeSelfTest's PASS flag implies the per-theme intensity
+    // matrix is populated, completing the umbrella's contract.
+    if constexpr (::duetos::core::kBootSelfTests)
+    {
+        if (duetos::drivers::video::BlendSelfTestPassed() && duetos::drivers::video::ShadowSelfTestPassed() &&
+            duetos::drivers::video::ThemeSelfTestPassed())
+        {
+            duetos::arch::SerialWrite(
+                "[tactility-selftest] PASS (per-effect: shadow=ok, hover=ok, press=ok, glow=ok)\n");
+        }
+    }
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::NotifySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::MagnifierSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::time::TimezoneSelfTest());

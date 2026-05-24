@@ -1765,8 +1765,19 @@ void FramebufferSelfTest()
     SerialWrite("[video/fb] self-test OK\n");
 }
 
+// File-scope PASS tracker for the boot umbrella aggregator. Set
+// by the success branch of BlendSelfTest; read by
+// BlendSelfTestPassed(). Initially false so an absent or
+// FAILed self-test never lights up the umbrella line.
+namespace
+{
+bool s_blend_passed = false;
+} // namespace
+
 void BlendSelfTest()
 {
+    s_blend_passed = false;
+
     if (!g_available)
     {
         SerialWrite("[blend-selftest] SKIP (framebuffer not available)\n");
@@ -1811,6 +1822,12 @@ void BlendSelfTest()
 
     FramebufferPutPixel(0, 0, saved);
     SerialWrite("[blend-selftest] PASS (blendrgba, blendfill, alpha-zero-skip)\n");
+    s_blend_passed = true;
+}
+
+bool BlendSelfTestPassed()
+{
+    return s_blend_passed;
 }
 
 } // namespace duetos::drivers::video
