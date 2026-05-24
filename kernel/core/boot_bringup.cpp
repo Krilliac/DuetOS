@@ -2290,20 +2290,21 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // Pass B self-tests — first-impression moments. SplashSelfTest walks
     // the full state-machine without touching the real framebuffer.
     // WallpaperMotionSelfTest validates the three motion paths + phase
-    // math. LoginGuiSelfTest is wired in Task 18 (Phase 4 login GUI).
+    // math. LoginGuiSelfTest asserts corner-card coords + format helpers.
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::SplashSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::WallpaperMotionSelfTest());
-    // Pass B umbrella — emits a single sentinel iff both ready sub-tests
+    DUETOS_BOOT_SELFTEST(duetos::core::LoginGuiSelfTest());
+    // Pass B umbrella — emits a single sentinel iff all three sub-tests
     // passed. Any FAIL already fired its own probe + serial line; the
     // umbrella does not emit a fake PASS that masks a FAIL.
-    // LoginGuiSelfTest will extend this gate in Task 18.
     if constexpr (::duetos::core::kBootSelfTests)
     {
         if (duetos::drivers::video::SplashSelfTestPassed() &&
-            duetos::drivers::video::WallpaperMotionSelfTestPassed())
+            duetos::drivers::video::WallpaperMotionSelfTestPassed() &&
+            duetos::core::LoginGuiSelfTestPassed())
         {
             duetos::arch::SerialWrite(
-                "[pass-b-selftest] PASS (splash=ok, wallpaper-motion=ok; login-gui pending Task 18)\n");
+                "[pass-b-selftest] PASS (splash=ok, wallpaper-motion=ok, login-gui=ok)\n");
         }
     }
     duetos::drivers::video::SplashAdvancePhase("theme online");

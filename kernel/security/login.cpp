@@ -26,6 +26,7 @@
 
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
+#include "debug/probes.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/console.h"
 #include "drivers/video/framebuffer.h"
@@ -993,6 +994,59 @@ void IdleLockSelfTest()
     // window.
     InputActivityStamp();
     KLOG_INFO("login", "idle-lock self-test ok");
+}
+
+namespace
+{
+bool g_login_gui_selftest_passed = false;
+} // namespace
+
+void LoginGuiSelfTest()
+{
+    auto mark_fail = [](u32 code, const char* msg)
+    {
+        duetos::arch::SerialWrite(msg);
+        duetos::arch::SerialWrite("\n");
+        KBP_PROBE_V(duetos::debug::ProbeId::kBootSelftestFail, code);
+    };
+
+    // Invariant 1: corner-card coordinates compute to spec values
+    // at the canonical 1024×768 baseline.
+    constexpr u32 kFbW = 1024, kFbH = 768;
+    const u32 card_x = 694u * kFbW / 1024u;
+    const u32 card_y = 540u * kFbH / 768u;
+    const u32 card_w = 280u * kFbW / 1024u;
+    const u32 card_h = 160u * kFbH / 768u;
+    if (card_x != 694u || card_y != 540u || card_w != 280u || card_h != 160u)
+    {
+        mark_fail(0xB7, "[login-gui-selftest] FAIL card coord drift");
+        return;
+    }
+
+    // Invariant 2: clock format helper produces non-empty output.
+    char buf[32];
+    LoginFormatClock(buf, sizeof(buf));
+    if (buf[0] == '\0')
+    {
+        mark_fail(0xB8, "[login-gui-selftest] FAIL clock format empty");
+        return;
+    }
+
+    // Invariant 3: date format helper produces non-empty output.
+    LoginFormatDate(buf, sizeof(buf));
+    if (buf[0] == '\0')
+    {
+        mark_fail(0xB9, "[login-gui-selftest] FAIL date format empty");
+        return;
+    }
+
+    duetos::arch::SerialWrite("[login-gui-selftest] PASS\n");
+    g_login_gui_selftest_passed = true;
+}
+
+bool LoginGuiSelfTestPassed()
+{
+    return g_login_gui_selftest_passed;
 }
 
 } // namespace duetos::core

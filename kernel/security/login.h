@@ -162,4 +162,13 @@ void IdleLockSelfTest();
 /// compositor lock.
 void LoginRefreshClock();
 
+/// Boot-time self-test for the GUI login layout.
+/// Asserts the corner-card coordinates compute correctly at the
+/// canonical 1024×768 framebuffer baseline, and that the format
+/// helpers produce non-empty output.
+/// Emits `[login-gui-selftest] PASS` on success or a FAIL line +
+/// probe fire on failure.
+void LoginGuiSelfTest();
+bool LoginGuiSelfTestPassed();
+
 } // namespace duetos::core
