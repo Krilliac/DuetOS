@@ -758,12 +758,14 @@ void SessionRestoreSelfTest()
     namespace fat = fs::fat32;
     namespace v = drivers::video;
     using arch::SerialWrite;
+    SerialWrite("[session-selftest] enter\n");
     const fat::Volume* vol = fat::Fat32Volume(0);
     if (vol == nullptr)
     {
         SerialWrite("[session] self-test SKIP: no FAT32 volume\n");
         return;
     }
+    SerialWrite("[session-selftest] vol acquired\n");
     // Round-trip a synthetic payload through ApplyPayload +
     // FormatPayload without touching the on-disk SESSION.CFG.
     // We don't want this self-test to clobber the user's saved
@@ -787,6 +789,7 @@ void SessionRestoreSelfTest()
            "sound.cues=0\n"
            "tz.minutes=-330\n"
            "calc.mem=-12345\ncalc.memset=1\n");
+    SerialWrite("[session-selftest] payload assembled\n");
     const v::ThemeId orig_theme = v::ThemeCurrentId();
     u32 ox = 0;
     u32 oy = 0;
@@ -794,6 +797,7 @@ void SessionRestoreSelfTest()
     u32 oh = 0;
     const v::WindowHandle calc = v::ThemeRoleWindow(v::ThemeRole::Calculator);
     const bool have_calc = (calc != v::kWindowInvalid) && v::WindowGetBounds(calc, &ox, &oy, &ow, &oh);
+    SerialWrite("[session-selftest] orig snapshot done\n");
 
     // Snapshot the live system-knob state so we can restore it
     // after the round-trip — this self-test must not perturb
@@ -807,7 +811,9 @@ void SessionRestoreSelfTest()
     const i64 orig_mem = apps::calculator::CalculatorMemoryValue();
     const bool orig_memset = apps::calculator::CalculatorMemorySet();
 
+    SerialWrite("[session-selftest] calling ApplyPayload\n");
     ApplyPayload(synth, spos);
+    SerialWrite("[session-selftest] ApplyPayload returned\n");
 
     bool ok = true;
     v::ThemeId got;
