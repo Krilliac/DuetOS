@@ -355,9 +355,28 @@ bool ChecksumOk(const void* p, u32 length)
 // the XSDT gives us.
 const Rsdp* FindRsdpInMultiboot(uptr info_phys)
 {
-    const auto* info = reinterpret_cast<const mm::MultibootInfoHeader*>(info_phys);
-    uptr cursor = info_phys + sizeof(mm::MultibootInfoHeader);
-    const uptr end = info_phys + info->total_size;
+    // CRITICAL: `info_phys` is the LOW identity-mapped address the
+    // boot loader handed us. That mapping is torn down by
+    // MmFinalizePaging long before AcpiInit runs, so a raw
+    // reinterpret_cast<MultibootInfoHeader*>(info_phys) dereference
+    // here either silently hangs (VBox — first observed in PR #336's
+    // VBox boot of the 0e017192 ISO, captured at OneDrive Desktop\\
+    // DuetOS Logs\\serial.txt: boot wedged at [acpi] step=find-rsdp
+    // with no further output) or surfaces as a late-boot #PF (the
+    // shape boot_cmdline.cpp:38-45 documents at cr2=0x92000).
+    //
+    // FindBootCmdline (sibling walker over the SAME structure) avoids
+    // this by caching the cmdline string on the first early-boot
+    // call. AcpiInit only calls this ONCE per boot, so caching has
+    // no value; instead, route the dereference through the upper-
+    // half direct map via PhysToVirt. The direct map covers the low
+    // 1 GiB of physical RAM (per kernel/mm/paging — the
+    // k.directmap region 0xffffffff80000000..0xffffffffc0000000),
+    // which is where every multiboot loader places the info struct.
+    const auto* info = reinterpret_cast<const mm::MultibootInfoHeader*>(mm::PhysToVirt(info_phys));
+    const uptr base = reinterpret_cast<uptr>(info);
+    uptr cursor = base + sizeof(mm::MultibootInfoHeader);
+    const uptr end = base + info->total_size;
 
     const Rsdp* old_rsdp = nullptr;
     const Rsdp* new_rsdp = nullptr;
@@ -377,7 +396,13 @@ const Rsdp* FindRsdpInMultiboot(uptr info_phys)
         {
             old_rsdp = reinterpret_cast<const Rsdp*>(cursor + sizeof(MbAcpiTag));
         }
-        cursor += (tag->size + 7u) & ~uptr{7};
+        // Defensive: a corrupt or zero-sized tag would otherwise stall
+        // this loop forever. Bound the per-iteration advance at 8 bytes
+        // minimum (the smallest legal tag — type + size, both u32).
+        // Under VBox this is what previously presented as a silent
+        // hang before the PhysToVirt fix landed.
+        const uptr step = (tag->size + 7u) & ~uptr{7};
+        cursor += step < 8 ? 8 : step;
     }
     return new_rsdp != nullptr ? new_rsdp : old_rsdp;
 }
