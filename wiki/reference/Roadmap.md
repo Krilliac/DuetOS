@@ -755,6 +755,25 @@ The residuals waiting on visual verification or follow-on work:
   force-dirty-on-flip pattern needs `WidgetFlag::*` bit-flip
   call sites that don't exist in this codebase — the current
   bool-state model doesn't have flip points to instrument.
+- **WM z-order click bleed-through re-verification.** User reported
+  on 2026-05-25 (amber-theme VBox boot, screenshot at 00:59) that
+  "apps beneath the ones on top i clicked bleed through." Visible
+  bleed in that screenshot predates `7ecfa12c security/guard: pause
+  desktop compose while modal prompt is up` by 21 min and is most
+  likely the same desktop-compose-vs-guard-prompt race that commit
+  fixes. Code inspection of `WindowRaise` + `DesktopCompose` +
+  `FramebufferEndCompose` diff scan found the z-order repaint path
+  architecturally correct in isolation (gradient marks full-screen
+  damage → diff scan finds all changed pixels → blit). Commit
+  `e13159be video/wm: force full-screen snapshot invalidation on
+  WindowRaise` lands a belt-and-suspenders: when `WindowRaise`
+  actually reorders, post a full-screen `FramebufferInvalidateSnapshot`
+  so the next `EndCompose` unconditionally flushes shadow→live +
+  resyncs the snapshot. Re-verify on the next VBox session WITHOUT
+  triggering a guard prompt; if bleed still observable, the root
+  cause is elsewhere (cursor backing mismatch, a draw path bypassing
+  `MarkDamage`, or a paint primitive writing to `g_info.virt`
+  directly during compose) and a follow-up slice is needed.
 
 When a residual ships, delete its bullet here and update the
 [`Compositor`](../subsystems/Compositor.md) subsystem page's
