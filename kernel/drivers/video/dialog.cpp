@@ -1,6 +1,7 @@
 #include "drivers/video/dialog.h"
 
 #include "drivers/input/ps2kbd.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/shadow.h"
 #include "drivers/video/sound_cue.h"
@@ -296,35 +297,61 @@ bool DialogOnPress(u32 cx, u32 cy)
 namespace
 {
 
-// Wrap-aware multi-line draw. Splits `text` at '\n' and at the
-// caller's column cap so a long body string still reads inside
-// the panel. Stops painting when it runs out of vertical room.
+// Wrap-aware multi-line draw. Splits `text` at '\n' and at a
+// column cap so a long body string still reads inside the panel.
+// Each line is buffered then emitted as a single ChromeTextDraw
+// call so the TTF path advances cleanly per-glyph; the column
+// cap remains a coarse character heuristic (variable-width
+// glyphs may stop short of the pixel cap, never overrun it for
+// typical text). Stops painting when it runs out of vertical room.
 void DrawWrappedText(u32 x0, u32 y0, u32 max_w, u32 max_h, const char* text, u32 fg, u32 bg)
 {
     if (text == nullptr || max_w < kGlyphW || max_h < kGlyphH)
         return;
     const u32 max_col = max_w / kGlyphW;
     const u32 max_row = max_h / kGlyphH;
+    // One row of buffered characters (+ NUL). Sized to the bitmap
+    // column cap so the heuristic still holds for the widest line.
+    constexpr u32 kLineCap = (kPanelW / kGlyphW) + 1;
+    char line[kLineCap];
+    u32 line_len = 0;
     u32 row = 0, col = 0;
+
+    auto flush_line = [&]()
+    {
+        if (line_len == 0)
+            return;
+        line[line_len] = '\0';
+        ChromeTextDraw(ChromeTextRole::Body, x0, y0 + row * kGlyphH, line, fg, bg);
+        line_len = 0;
+    };
+
     for (u32 i = 0; text[i] != '\0' && row < max_row; ++i)
     {
         const char c = text[i];
         if (c == '\n')
         {
+            flush_line();
             ++row;
             col = 0;
             continue;
         }
         if (col >= max_col)
         {
+            flush_line();
             ++row;
             col = 0;
             if (row >= max_row)
-                break;
+                return;
         }
-        FramebufferDrawChar(x0 + col * kGlyphW, y0 + row * kGlyphH, c, fg, bg);
+        if (line_len + 1 < kLineCap)
+        {
+            line[line_len++] = c;
+        }
         ++col;
     }
+    if (row < max_row)
+        flush_line();
 }
 
 void PaintButton(bool ok, bool focused, u32 fg, u32 fill_normal, u32 fill_focus, u32 border)
@@ -335,12 +362,16 @@ void PaintButton(bool ok, bool focused, u32 fg, u32 fill_normal, u32 fill_focus,
     FramebufferFillRect(x, y, w, h, fill);
     FramebufferDrawRect(x, y, w, h, border, 1);
     const char* label = ok ? "OK" : "CANCEL";
-    u32 lw = 0;
-    while (label[lw] != '\0')
-        ++lw;
-    const u32 lx = (lw * kGlyphW < w) ? x + (w - lw * kGlyphW) / 2 : x + 4;
-    const u32 ly = y + (h > kGlyphH ? (h - kGlyphH) / 2 : 2);
-    FramebufferDrawString(lx, ly, label, fg, fill);
+    // The focused button doubles as the Enter-default in this
+    // dialog kit (OK is always focused; see DialogCompose call
+    // site) — bold its label to match the macOS / KDE / GNOME
+    // default-button convention.
+    const auto weight = focused ? ChromeTextWeight::Bold : ChromeTextWeight::Regular;
+    const u32 label_w = ChromeTextMeasure(ChromeTextRole::Body, label);
+    const u32 label_h = ChromeTextRoleHeight(ChromeTextRole::Body);
+    const u32 lx = (label_w < w) ? x + (w - label_w) / 2 : x + 4;
+    const u32 ly = y + (h > label_h ? (h - label_h) / 2 : 2);
+    ChromeTextDraw(ChromeTextRole::Body, lx, ly, label, fg, fill, weight);
 }
 
 } // namespace
@@ -398,7 +429,7 @@ void DialogCompose()
     FramebufferFillRect(px + 2, py + 2, kPanelW - 4, kTitleH, title_bg);
     if (g_state.title != nullptr)
     {
-        FramebufferDrawString(px + 6, py + 4, g_state.title, ink, title_bg);
+        ChromeTextDraw(ChromeTextRole::Title, px + 6, py + 4, g_state.title, ink, title_bg, ChromeTextWeight::Bold);
     }
 
     // Body text.
