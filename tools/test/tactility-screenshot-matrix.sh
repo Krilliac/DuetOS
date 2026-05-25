@@ -20,6 +20,15 @@
 #     --lock      post-idle lock screen (autologin=1 idlelock=2, capture at 10 s)
 #     --wallpaper desktop after login (autologin=1, capture at 12 s)
 #
+#   Meta-modes (iterate multiple surfaces in one invocation):
+#     --typography  Pass C reference set: iterates {login, lock, wallpaper}.
+#                   Output PNG/PPM names are prefixed with "typography-"
+#                   so reviewers can grep the Pass C chrome-text shots.
+#                   The three surfaces cover the four Pass C type roles:
+#                     login     -> Display (clock) + Title (panel header)
+#                     lock      -> Title + Body (lock overlay text)
+#                     wallpaper -> Body (menu rows) + Caption (taskbar date)
+#
 # USAGE
 #   tools/test/tactility-screenshot-matrix.sh
 #     -> single wallpaper PPM at build/shots/wallpaper-default.ppm
@@ -82,6 +91,12 @@ CAPTURE_AT_MS="${DUETOS_CAPTURE_AT_MS:-12000}"
 AUTOLOGIN=1
 SURFACE_EXTRA=""
 
+# Typography meta-mode: when set to 1, the script iterates a fixed
+# set of surfaces (declared in TYPOGRAPHY_SURFACES below) per theme
+# and prefixes output filenames with "typography-".
+TYPOGRAPHY_MODE=0
+readonly TYPOGRAPHY_SURFACES=(login lock wallpaper)
+
 # Theme filter — set via --theme <name> OR positional args.
 declare -a THEME_ARGS
 
@@ -95,6 +110,10 @@ Surface flags (mutually exclusive; default: --wallpaper):
   --lock        Capture post-idle lock screen    (autologin=1 idlelock=2, T+10 s)
   --wallpaper   Capture desktop after login      (autologin=1, T+12 s)
 
+Meta-modes (iterate multiple surfaces per theme):
+  --typography  Pass C reference set: iterates {login, lock, wallpaper}
+                with output PPMs named "typography-<surface>-<theme>.ppm"
+
 Theme selectors (at most one):
   --all         All 10 registered themes
   --theme NAME  Single named theme
@@ -105,6 +124,7 @@ Examples:
   tactility-screenshot-matrix.sh --login --all
   tactility-screenshot-matrix.sh --lock classic duet
   tactility-screenshot-matrix.sh --wallpaper --theme highcontrast
+  tactility-screenshot-matrix.sh --typography --theme duet
 EOF
     exit 0
 }
@@ -139,6 +159,9 @@ while [[ $# -gt 0 ]]; do
             CAPTURE_AT_MS="${DUETOS_CAPTURE_AT_MS:-12000}"
             AUTOLOGIN=1
             SURFACE_EXTRA=""
+            ;;
+        --typography)
+            TYPOGRAPHY_MODE=1
             ;;
         --all)
             DO_ALL=1
@@ -191,12 +214,20 @@ mkdir -p "${SHOTS_DIR}"
 # surfaces the selftest may never emit (splash fires before it, login/lock
 # stall it), so the poll is skipped and we rely solely on the timed delay.
 #
-# Output: ${SHOTS_DIR}/${SURFACE}-${THEME}.ppm
+# Output filename — without typography mode:
+#   ${SHOTS_DIR}/${SURFACE}-${THEME}.ppm
+# With --typography (TYPOGRAPHY_MODE=1) the basename is prefixed so the
+# Pass C reference set is grep-able:
+#   ${SHOTS_DIR}/typography-${SURFACE}-${THEME}.ppm
 # ---------------------------------------------------------------------------
 capture_theme() {
     local theme="$1"
-    local ppm="${SHOTS_DIR}/${SURFACE}-${theme}.ppm"
-    local boot_log="${SHOTS_DIR}/${SURFACE}-${theme}.log"
+    local name_prefix=""
+    if [[ ${TYPOGRAPHY_MODE} -eq 1 ]]; then
+        name_prefix="typography-"
+    fi
+    local ppm="${SHOTS_DIR}/${name_prefix}${SURFACE}-${theme}.ppm"
+    local boot_log="${SHOTS_DIR}/${name_prefix}${SURFACE}-${theme}.log"
 
     # Build extra kernel cmdline: theme + autologin + surface extras.
     local extra_cmdline=""
@@ -276,39 +307,104 @@ capture_theme() {
     return 0
 }
 
-failed=0
-for theme in "${THEMES[@]}"
-do
-    capture_theme "${theme}" || ((failed++)) || true
-done
+# ---------------------------------------------------------------------------
+# apply_surface_profile SURFACE_NAME
+#
+# Mutates the global surface config (SURFACE / CAPTURE_AT_MS / AUTOLOGIN /
+# SURFACE_EXTRA) to the canonical defaults for the named surface.  Used by
+# the --typography meta-mode to switch surfaces between captures of the
+# same theme without re-parsing argv.  Honours DUETOS_CAPTURE_AT_MS only
+# when the user pinned it explicitly (else uses each surface's default).
+# ---------------------------------------------------------------------------
+apply_surface_profile() {
+    case "$1" in
+        splash)
+            SURFACE=splash
+            CAPTURE_AT_MS="${DUETOS_CAPTURE_AT_MS:-1500}"
+            AUTOLOGIN=1
+            SURFACE_EXTRA=""
+            ;;
+        login)
+            SURFACE=login
+            CAPTURE_AT_MS="${DUETOS_CAPTURE_AT_MS:-8000}"
+            AUTOLOGIN=0
+            SURFACE_EXTRA=""
+            ;;
+        lock)
+            SURFACE=lock
+            CAPTURE_AT_MS="${DUETOS_CAPTURE_AT_MS:-10000}"
+            AUTOLOGIN=1
+            SURFACE_EXTRA="idlelock=2"
+            ;;
+        wallpaper)
+            SURFACE=wallpaper
+            CAPTURE_AT_MS="${DUETOS_CAPTURE_AT_MS:-12000}"
+            AUTOLOGIN=1
+            SURFACE_EXTRA=""
+            ;;
+        *)
+            echo "ERROR: apply_surface_profile: unknown surface '$1'" >&2
+            return 1
+            ;;
+    esac
+}
 
-# Optional contact-sheet via ImageMagick if more than one PPM
-# landed and `montage` is on PATH.
-if [[ ${#THEMES[@]} -gt 1 ]] && command -v montage >/dev/null 2>&1
-then
-    SHEET="${LOG_DIR}/tactility-matrix-${SURFACE}.png"
-    available_ppms=()
+# Build the list of surfaces to walk per theme.
+declare -a SURFACES_TO_CAPTURE
+if [[ ${TYPOGRAPHY_MODE} -eq 1 ]]; then
+    SURFACES_TO_CAPTURE=("${TYPOGRAPHY_SURFACES[@]}")
+    echo "[shots] mode=typography surfaces=${SURFACES_TO_CAPTURE[*]} themes=${#THEMES[@]} (total captures=$(( ${#SURFACES_TO_CAPTURE[@]} * ${#THEMES[@]} )))"
+else
+    SURFACES_TO_CAPTURE=("${SURFACE}")
+fi
+
+failed=0
+total=0
+for surface in "${SURFACES_TO_CAPTURE[@]}"
+do
+    apply_surface_profile "${surface}"
     for theme in "${THEMES[@]}"
     do
-        ppm="${SHOTS_DIR}/${SURFACE}-${theme}.ppm"
-        [[ -s "${ppm}" ]] && available_ppms+=("${ppm}")
+        total=$((total + 1))
+        capture_theme "${theme}" || ((failed++)) || true
     done
-    if [[ ${#available_ppms[@]} -gt 0 ]]
-    then
-        tile_x=5
-        if [[ ${#available_ppms[@]} -lt 5 ]]
-        then
-            tile_x=${#available_ppms[@]}
+done
+
+# Optional contact-sheet via ImageMagick.  Build one sheet per surface
+# captured (typography mode produces 3 sheets when --all is combined).
+# Skipped when there's only one PPM total.
+if [[ ${total} -gt 1 ]] && command -v montage >/dev/null 2>&1
+then
+    for surface in "${SURFACES_TO_CAPTURE[@]}"
+    do
+        sheet_prefix=""
+        if [[ ${TYPOGRAPHY_MODE} -eq 1 ]]; then
+            sheet_prefix="typography-"
         fi
-        montage "${available_ppms[@]}" -tile "${tile_x}x" -geometry +4+4 -label '%t' "${SHEET}" 2>/dev/null && \
-            echo "[shots] grid: ${SHEET}"
-    fi
+        SHEET="${LOG_DIR}/tactility-matrix-${sheet_prefix}${surface}.png"
+        available_ppms=()
+        for theme in "${THEMES[@]}"
+        do
+            ppm="${SHOTS_DIR}/${sheet_prefix}${surface}-${theme}.ppm"
+            [[ -s "${ppm}" ]] && available_ppms+=("${ppm}")
+        done
+        if [[ ${#available_ppms[@]} -gt 1 ]]
+        then
+            tile_x=5
+            if [[ ${#available_ppms[@]} -lt 5 ]]
+            then
+                tile_x=${#available_ppms[@]}
+            fi
+            montage "${available_ppms[@]}" -tile "${tile_x}x" -geometry +4+4 -label '%t' "${SHEET}" 2>/dev/null && \
+                echo "[shots] grid: ${SHEET}"
+        fi
+    done
 fi
 
 if [[ ${failed} -gt 0 ]]
 then
-    echo "[shots] FAIL: ${failed}/${#THEMES[@]} captures failed (surface=${SURFACE})" >&2
+    echo "[shots] FAIL: ${failed}/${total} captures failed (surfaces=${SURFACES_TO_CAPTURE[*]})" >&2
     exit 1
 fi
 
-echo "[shots] OK (${#THEMES[@]}/${#THEMES[@]} captures, surface=${SURFACE})"
+echo "[shots] OK (${total}/${total} captures, surfaces=${SURFACES_TO_CAPTURE[*]})"
