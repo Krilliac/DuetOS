@@ -41,6 +41,7 @@
 #include "sched/sched.h"
 #include "sync/lockdep.h"
 #include "drivers/video/calendar.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/dialog.h"
@@ -2172,19 +2173,15 @@ void WindowDrawAllOrdered()
         const u32 title_y = drawn.y + ((tbh_eff_for_title > cell_h) ? (tbh_eff_for_title - cell_h) / 2 : 0);
         if (g_windows[h].title != nullptr)
         {
-            // Theme-driven font dispatch: themes that opt in to the
-            // TTF path try the rasterizer first; if no chrome font is
-            // registered (TtfChromeFontGet returns nullptr) the
-            // bitmap font runs as the fallback. Pixel height matches
-            // the existing scaled cell size so the overall chrome
-            // layout is identical between the two paths.
-            const bool used_ttf = (ThemeCurrent().font_kind == Theme::FontKind::Ttf) &&
-                                  TtfDrawString(drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF, cell_h);
-            if (!used_ttf)
-            {
-                FramebufferDrawStringScaled(drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF, drawn.colour_title,
-                                            ttscale);
-            }
+            // Pass C: chrome text routes through the unified
+            // ChromeTextDraw(Title) dispatcher. Active windows
+            // render the title bold to reinforce the focus
+            // signal already carried by colour_title; inactive
+            // windows stay regular. The dispatcher handles
+            // TTF-vs-bitmap fallback internally based on the
+            // active theme's font_kind + chrome-font registration.
+            ChromeTextDraw(ChromeTextRole::Title, drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF,
+                           drawn.colour_title, is_active ? ChromeTextWeight::Bold : ChromeTextWeight::Regular);
             const char* t = g_windows[h].title;
             u32 n = 0;
             while (t[n] != '\0')
