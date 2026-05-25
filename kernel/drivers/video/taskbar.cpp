@@ -451,7 +451,10 @@ void TaskbarRedraw()
                                 tid_start == ThemeId::DuetGreen || tid_start == ThemeId::DuetClassic;
     if (is_duet_family)
     {
-        constexpr u32 mark_label_w = 4 * 8; // "DUET"
+        // "DUET" label width comes from the chrome-text dispatcher
+        // so the DuetMark centring stays correct under TTF themes
+        // where the advance differs from the bitmap's 4 * 8.
+        const u32 mark_label_w = ChromeTextMeasure(ChromeTextRole::Body, "DUET");
         constexpr u32 mark_diameter = 14;
         constexpr u32 mark_overlap = 6; // shared horizontal overlap between rings
         const u32 mark_total_w = 2 * mark_diameter - mark_overlap + 6 + mark_label_w;
@@ -482,7 +485,7 @@ void TaskbarRedraw()
         FramebufferStrokeArc(ring_b_cx, ring_cy, static_cast<i32>(ring_r), 150, kArcSweep, 2U, kAmber);
         // Label sits right of the rings.
         const u32 label_x = mark_origin_x + 2 * mark_diameter - mark_overlap + 6;
-        FramebufferDrawString(label_x, text_y, "DUET", g_fg, g_accent);
+        ChromeTextDraw(ChromeTextRole::Body, label_x, text_y, "DUET", g_fg, g_accent);
     }
     else
     {
@@ -490,8 +493,11 @@ void TaskbarRedraw()
         // label ink so it stays readable when g_fg and g_accent are
         // close in hue — amber's palette in particular puts both
         // values in the same amber band and the label was invisible
-        // against the button.
-        FramebufferDrawString(4 + (start_w - 5 * 8) / 2, text_y, "START", g_border, g_accent);
+        // against the button. Width comes from the chrome-text
+        // dispatcher so the label stays centred under TTF themes.
+        const u32 start_label_w = ChromeTextMeasure(ChromeTextRole::Body, "START");
+        const u32 start_label_x = 4 + ((start_w > start_label_w) ? (start_w - start_label_w) / 2 : 0);
+        ChromeTextDraw(ChromeTextRole::Body, start_label_x, text_y, "START", g_border, g_accent);
     }
 
     // Per-window tabs. Iterate every registered window, filter
@@ -1031,12 +1037,26 @@ void TaskbarRedraw()
             // Layout: "CPU NN%" + 1-px divider + "60.0 FPS" — the
             // two-half pattern + hairline separator are taken
             // verbatim from the prototype's `WidgetsPill` JSX.
-            constexpr u32 kLeftCells = 7;  // "CPU NN%" = 7 glyphs
-            constexpr u32 kRightCells = 8; // "60.0 FPS" = 8 glyphs
-            constexpr u32 kSepCells = 2;   // gap around the divider
-            const u32 pill_text_cells = kLeftCells + kSepCells + kRightCells;
+            // Pass C: the pill text routes through the unified
+            // ChromeTextDraw(Caption) dispatcher; width / offsets
+            // come from ChromeTextMeasure so the pill resizes to
+            // the actual rendered advances under both TTF and
+            // bitmap themes (a fixed cell * 8 would over-reserve
+            // on TTF and clip on wide-bitmap themes).
+            char left[8];
+            left[0] = 'C';
+            left[1] = 'P';
+            left[2] = 'U';
+            left[3] = ' ';
+            left[4] = static_cast<char>('0' + cpu_pct / 10);
+            left[5] = static_cast<char>('0' + cpu_pct % 10);
+            left[6] = '%';
+            left[7] = '\0';
+            const u32 left_w = ChromeTextMeasure(ChromeTextRole::Caption, left);
+            const u32 sep_w = ChromeTextMeasure(ChromeTextRole::Caption, "  "); // 2-glyph gap around divider
+            const u32 right_w = ChromeTextMeasure(ChromeTextRole::Caption, "60.0 FPS");
             constexpr u32 pill_pad_x = 12;
-            const u32 pill_w = pill_text_cells * 8 + 2 * pill_pad_x;
+            const u32 pill_w = left_w + sep_w + right_w + 2 * pill_pad_x;
             constexpr u32 pill_pad_y = 4;
             const u32 pill_h = (g_h > 2 * pill_pad_y) ? g_h - 2 * pill_pad_y - 2 : 22;
             if (tray_right > pill_w + 8)
@@ -1051,21 +1071,16 @@ void TaskbarRedraw()
                 // DuetBlue, etc.), the digits pick up the bright
                 // ink so the value reads at the same weight as
                 // the chrome's titles.
-                char left[8];
-                left[0] = 'C';
-                left[1] = 'P';
-                left[2] = 'U';
-                left[3] = ' ';
-                left[4] = static_cast<char>('0' + cpu_pct / 10);
-                left[5] = static_cast<char>('0' + cpu_pct % 10);
-                left[6] = '%';
-                left[7] = '\0';
-                FramebufferDrawString(pill_x + pill_pad_x, text_y, "CPU", g_accent, g_tab_inactive);
-                FramebufferDrawString(pill_x + pill_pad_x + 4 * 8, text_y, left + 4, g_fg, g_tab_inactive);
+                const u32 cpu_label_w = ChromeTextMeasure(ChromeTextRole::Caption, "CPU ");
+                ChromeTextDraw(ChromeTextRole::Caption, pill_x + pill_pad_x, text_y, "CPU", g_accent, g_tab_inactive);
+                ChromeTextDraw(ChromeTextRole::Caption, pill_x + pill_pad_x + cpu_label_w, text_y, left + 4, g_fg,
+                               g_tab_inactive);
                 // Hairline divider (1-px) between the two halves
                 // — matches the prototype's `<span style={{width:1
                 // height:12,background:'var(--line-2)'}}/>` strip.
-                const u32 div_x = pill_x + pill_pad_x + (kLeftCells + 1) * 8;
+                // Anchor the divider at the midpoint of the sep
+                // gap so the spacing reads symmetric on both sides.
+                const u32 div_x = pill_x + pill_pad_x + left_w + sep_w / 2;
                 if (pill_h > 8)
                 {
                     FramebufferFillRect(div_x, pill_y + 4, 1, pill_h - 8, g_border);
@@ -1075,9 +1090,10 @@ void TaskbarRedraw()
                 // pill carries the dual-accent duet narrative in
                 // the smallest cell of the chrome too.
                 constexpr u32 kAmberInk = 0x00F5B73A;
-                const u32 right_x = div_x + 1 * 8;
-                FramebufferDrawString(right_x, text_y, "60.0", kAmberInk, g_tab_inactive);
-                FramebufferDrawString(right_x + 5 * 8, text_y, "FPS", g_fg, g_tab_inactive);
+                const u32 right_x = pill_x + pill_pad_x + left_w + sep_w;
+                const u32 num_w = ChromeTextMeasure(ChromeTextRole::Caption, "60.0 ");
+                ChromeTextDraw(ChromeTextRole::Caption, right_x, text_y, "60.0", kAmberInk, g_tab_inactive);
+                ChromeTextDraw(ChromeTextRole::Caption, right_x + num_w, text_y, "FPS", g_fg, g_tab_inactive);
                 tray_right = (pill_x >= tray_gap) ? pill_x - tray_gap : 0;
             }
         }
