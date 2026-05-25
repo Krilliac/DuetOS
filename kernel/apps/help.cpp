@@ -1,6 +1,12 @@
 #include "apps/help.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/input/ps2mouse.h"
+#include "drivers/video/app_widgets/app_button.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_toolbar.h"
+#include "drivers/video/app_widgets/widget_group.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -11,13 +17,25 @@ namespace duetos::apps::help
 namespace
 {
 
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
 using duetos::drivers::video::FramebufferDrawString;
 using duetos::drivers::video::FramebufferFillRect;
 using duetos::drivers::video::kWindowInvalid;
 using duetos::drivers::video::ThemeCurrent;
 using duetos::drivers::video::ThemeRole;
+using duetos::drivers::video::WindowGetBounds;
 using duetos::drivers::video::WindowHandle;
 using duetos::drivers::video::WindowSetContentDraw;
+using duetos::drivers::video::app_widgets::AppButton;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::AppToolbar;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::Event;
+using duetos::drivers::video::app_widgets::EventKind;
+using duetos::drivers::video::app_widgets::EventResult;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
 
 constexpr u32 kRowH = 11;
 constexpr u32 kSectionGap = 6;
@@ -201,7 +219,211 @@ bool ShouldRenderRow(u32 i)
     return ContainsCi(kRows[i].text, g_filter);
 }
 
-void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
+// ---------------------------------------------------------------
+// Pass D chrome: AppToolbar (back) + 1 AppButton (CLEAR) + 3
+// AppLabels (header "DUETOS QUICK REFERENCE", live filter
+// readout, footer hint). The CLEAR toolbar action wipes the
+// live filter — the only mutable state Help carries, and the
+// keyboard-only filter affordance from v0 wasn't discoverable
+// without reading the in-window hint.
+//
+// Carve-out that stays raw paint:
+//   - The reference list itself (kRows): variable-length, with
+//     section headers (banner_fg, no indent) interleaved with
+//     binding rows (console_fg, indented). AppListRow has no
+//     section-header model and no per-row colour split, and the
+//     "(no match — Backspace to clear)" hint + "..." truncation
+//     tail have no AppLabel equivalent in a list context. The
+//     list paints inside the band DrawFn carves out between
+//     the (toolbar + header + filter row) at the top and the
+//     AppLabel footer at the bottom.
+
+constexpr u32 kHelpToolbarH = 22U;
+constexpr u32 kHelpToolbarBtnW = 56U;
+constexpr u32 kHelpToolbarBtnH = 18U;
+constexpr u32 kHelpToolbarBtnGap = 4U;
+constexpr u32 kHelpToolbarPadX = 4U;
+constexpr u32 kHelpToolbarPadY = 2U;
+constexpr u32 kHelpActionBtnCount = 1U;
+constexpr u32 kHelpHeaderH = kRowH + 4U;
+constexpr u32 kHelpFilterH = kRowH + 4U;
+constexpr u32 kHelpFooterH = kRowH + 2U;
+
+// AppLabel stores text by pointer so the buffers must outlive
+// every Paint. DrawFn re-renders them each frame.
+constinit char g_header_text[40] = {};
+constinit char g_filter_text[kFilterCap + 16] = {};
+constinit char g_footer_text[64] = {};
+
+// Forward decl for the toolbar click trampoline (defined below;
+// it has to live above the constinit g_help that captures it
+// by function-pointer value).
+void ClickClear();
+
+// Toolbar (back), then 1 action AppButton, then 3 AppLabels
+// (header, filter readout, footer). Reverse declaration order
+// is dispatch order — buttons get first refusal on clicks.
+constinit auto g_help = MakeWidgetGroup(AppToolbar{}, AppButton{}, AppLabel{}, AppLabel{}, AppLabel{});
+
+constinit bool g_help_bound = false;
+constinit bool g_help_prev_left_down = false;
+constinit bool g_help_self_test_passed = false;
+
+// Walk the recursive WidgetChain by hand to grab a stable
+// pointer to the action button. Chain order mirrors the
+// MakeWidgetGroup argument list (toolbar -> 1 button -> 3
+// labels).
+AppButton* HelpActionButton()
+{
+    return &g_help.chain.tail.head; // toolbar -> btn[0]
+}
+
+// AppLabel accessors — header / filter / footer sit at chain
+// positions 2, 3, 4 (zero-indexed) after the 1 toolbar + 1
+// button.
+AppLabel& HelpHeaderLabel()
+{
+    return g_help.chain.tail.tail.head;
+}
+AppLabel& HelpFilterLabel()
+{
+    return g_help.chain.tail.tail.tail.head;
+}
+AppLabel& HelpFooterLabel()
+{
+    return g_help.chain.tail.tail.tail.tail.head;
+}
+
+void BindHelpOnce()
+{
+    if (g_help_bound)
+        return;
+    g_help_bound = true;
+
+    auto& toolbar = g_help.chain.head;
+    toolbar.bg_rgb = 0; // theme.taskbar_bg
+
+    AppButton* btn = HelpActionButton();
+    btn->label = "CLEAR";
+    btn->on_click = ClickClear;
+    btn->weight = ChromeTextWeight::Regular;
+    btn->bg_rgb = 0; // theme role default
+    btn->fg_rgb = 0x00101828U;
+
+    const auto& th = ThemeCurrent();
+    const u32 fg = th.console_fg;
+    const u32 dim = th.banner_fg;
+    const u32 bg = th.role_client[static_cast<u32>(ThemeRole::Help)];
+
+    auto& header = HelpHeaderLabel();
+    header.text = g_header_text;
+    header.role = ChromeTextRole::Body;
+    header.weight = ChromeTextWeight::Bold;
+    header.fg_rgb = dim;
+    header.bg_rgb = bg;
+    header.align_left = true;
+
+    auto& filter = HelpFilterLabel();
+    filter.text = g_filter_text;
+    filter.role = ChromeTextRole::Body;
+    filter.weight = ChromeTextWeight::Regular;
+    filter.fg_rgb = fg;
+    filter.bg_rgb = bg;
+    filter.align_left = true;
+
+    auto& footer = HelpFooterLabel();
+    footer.text = g_footer_text;
+    footer.role = ChromeTextRole::Caption;
+    footer.weight = ChromeTextWeight::Regular;
+    footer.fg_rgb = dim;
+    footer.bg_rgb = bg;
+    footer.align_left = true;
+}
+
+// Re-anchor the toolbar + button + labels to the live client
+// rect. Called from DrawFn before PaintAll and from
+// HelpMouseInput before DispatchEvent so hit-tests + visuals
+// stay consistent across window moves / resizes.
+void RebindHelpBounds(u32 cx, u32 cy, u32 cw, u32 ch)
+{
+    auto& toolbar = g_help.chain.head;
+    toolbar.bounds = Rect{cx, cy, cw, kHelpToolbarH};
+
+    {
+        constexpr u32 i = 0U;
+        const u32 bx = cx + kHelpToolbarPadX + i * (kHelpToolbarBtnW + kHelpToolbarBtnGap);
+        HelpActionButton()->bounds = Rect{bx, cy + kHelpToolbarPadY, kHelpToolbarBtnW, kHelpToolbarBtnH};
+    }
+
+    // Header sits directly below the toolbar. Spans the client
+    // width with an 8-px x-pad to match the legacy raw-paint
+    // x-offset.
+    const u32 header_y = cy + kHelpToolbarH;
+    constexpr u32 kHeaderXPad = 8U;
+    HelpHeaderLabel().bounds =
+        Rect{cx + kHeaderXPad, header_y, (cw > kHeaderXPad) ? cw - kHeaderXPad : cw, kHelpHeaderH};
+
+    // Filter readout sits directly below the header row.
+    const u32 filter_y = header_y + kHelpHeaderH;
+    HelpFilterLabel().bounds =
+        Rect{cx + kHeaderXPad, filter_y, (cw > kHeaderXPad) ? cw - kHeaderXPad : cw, kHelpFilterH};
+
+    // Footer hint band along the bottom of the client area.
+    const u32 fy = (ch > kHelpFooterH) ? cy + ch - kHelpFooterH : cy;
+    const u32 fw = (cw > kHeaderXPad) ? cw - kHeaderXPad : cw;
+    HelpFooterLabel().bounds = Rect{cx + kHeaderXPad, fy, fw, kHelpFooterH};
+}
+
+void RefreshHelpHeader()
+{
+    static const char kHeader[] = "DUETOS QUICK REFERENCE";
+    u32 i = 0;
+    for (; kHeader[i] != '\0' && i + 1 < sizeof(g_header_text); ++i)
+        g_header_text[i] = kHeader[i];
+    g_header_text[i] = '\0';
+}
+
+void RefreshHelpFilter()
+{
+    // Live filter readout. "FIND: <chars>" when active, "TYPE
+    // TO FILTER" placeholder otherwise. Matches the legacy raw-
+    // paint right-aligned filter line, but rendered as an
+    // AppLabel so theme + tactility-aware paint applies.
+    const char* lead = (g_filter_len > 0) ? "FIND: " : "TYPE TO FILTER";
+    u32 o = 0;
+    for (u32 i = 0; lead[i] != '\0' && o + 1 < sizeof(g_filter_text); ++i)
+        g_filter_text[o++] = lead[i];
+    for (u32 i = 0; i < g_filter_len && o + 1 < sizeof(g_filter_text); ++i)
+        g_filter_text[o++] = g_filter[i];
+    g_filter_text[o] = '\0';
+}
+
+void RefreshHelpFooter()
+{
+    static const char kHint[] = "TYPE to filter  -  BACKSPACE to undo  -  CLEAR to wipe";
+    u32 i = 0;
+    for (; kHint[i] != '\0' && i + 1 < sizeof(g_footer_text); ++i)
+        g_footer_text[i] = kHint[i];
+    g_footer_text[i] = '\0';
+}
+
+// ----- Pass D click trampoline ---------------------------------
+// AppButton::on_click is a plain `void (*)()` so the constinit
+// g_help above captures it by function-pointer value. CLEAR
+// wipes the live filter — a discoverable affordance for users
+// who landed on the Help window without realising they could
+// type into it.
+
+void ClickClear()
+{
+    g_filter_len = 0;
+    g_filter[0] = '\0';
+}
+
+// Paint the raw reference list (carve-out) inside the band
+// DrawFn carves out between the (toolbar + header + filter row)
+// at the top and the AppLabel footer at the bottom.
+void PaintHelpContent(u32 cx, u32 cy, u32 cw, u32 ch)
 {
     const auto& th = ThemeCurrent();
     const u32 bg = th.role_client[static_cast<u32>(ThemeRole::Help)];
@@ -209,32 +431,13 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     const u32 dim = th.banner_fg;
     FramebufferFillRect(cx, cy, cw, ch, bg);
 
-    if (cw < 220 || ch < 60)
+    if (cw < 220 || ch < kRowH)
     {
         FramebufferDrawString(cx + 4, cy + 4, "(window too small)", dim, bg);
         return;
     }
 
-    // Title row + live filter readout. Filter sits on the right
-    // half of the title line; ESC / BACKSPACE manage it via the
-    // HelpFeedChar path.
-    FramebufferDrawString(cx + 8, cy + 6, "DUETOS QUICK REFERENCE", dim, bg);
-    {
-        char fline[kFilterCap + 16];
-        u32 o = 0;
-        const char* lead = (g_filter_len > 0) ? "FIND: " : "TYPE TO FILTER";
-        for (u32 i = 0; lead[i] != '\0' && o + 1 < sizeof(fline); ++i)
-            fline[o++] = lead[i];
-        for (u32 i = 0; i < g_filter_len && o + 1 < sizeof(fline); ++i)
-            fline[o++] = g_filter[i];
-        fline[o] = '\0';
-        const u32 fw = o * 8;
-        const u32 fx = (cw > fw + 16) ? cx + cw - fw - 8 : cx + 8;
-        const u32 ffg = (g_filter_len > 0) ? fg : dim;
-        FramebufferDrawString(fx, cy + 6, fline, ffg, bg);
-    }
-
-    u32 y = cy + 6 + kRowH + 4;
+    u32 y = cy + 2;
     bool any_drawn = false;
     for (u32 i = 0; i < kRowCount; ++i)
     {
@@ -266,7 +469,41 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     }
     if (!any_drawn)
     {
-        FramebufferDrawString(cx + 8, y, "(no match — Backspace to clear)", dim, bg);
+        FramebufferDrawString(cx + 8, y, "(no match - Backspace to clear)", dim, bg);
+    }
+}
+
+void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
+{
+    const auto& th = ThemeCurrent();
+    const u32 bg = th.role_client[static_cast<u32>(ThemeRole::Help)];
+    FramebufferFillRect(cx, cy, cw, ch, bg);
+
+    // Pass D chrome: refresh the header / filter / footer text
+    // from live state, re-anchor the toolbar + labels to the
+    // current client rect, and paint the WidgetGroup. The raw
+    // reference list (carve-out) sits in the band between the
+    // header + filter rows and the AppLabel footer.
+    BindHelpOnce();
+    RefreshHelpHeader();
+    RefreshHelpFilter();
+    RefreshHelpFooter();
+    RebindHelpBounds(cx, cy, cw, ch);
+
+    Compose compose_ctx{};
+    g_help.PaintAll(compose_ctx);
+
+    // Content band — between (toolbar + header + filter row) at
+    // the top and the AppLabel footer at the bottom.
+    const u32 top_band = kHelpToolbarH + kHelpHeaderH + kHelpFilterH;
+    const u32 bot_band = kHelpFooterH + 2U;
+    const u32 list_x = cx;
+    const u32 list_y = cy + top_band;
+    const u32 list_w = cw;
+    const u32 list_h = (ch > top_band + bot_band) ? (ch - top_band - bot_band) : 0;
+    if (list_h > 0)
+    {
+        PaintHelpContent(list_x, list_y, list_w, list_h);
     }
 }
 
@@ -276,6 +513,7 @@ void HelpInit(WindowHandle handle)
 {
     g_state.handle = handle;
     WindowSetContentDraw(handle, DrawFn, nullptr);
+    BindHelpOnce();
 }
 
 bool HelpFeedChar(char c)
@@ -313,21 +551,166 @@ WindowHandle HelpWindow()
 void HelpSelfTest()
 {
     using arch::SerialWrite;
-    bool pass = (kRowCount > 0);
+    bool ok = (kRowCount > 0);
+
     // Every section header must be followed by at least one
     // non-section row. Catches a regression where the list grew
     // a stray "TITLE\n" with no bindings underneath.
-    for (u32 i = 0; pass && i < kRowCount; ++i)
+    for (u32 i = 0; ok && i < kRowCount; ++i)
     {
         if (!kRows[i].is_section)
             continue;
         if (i + 1 >= kRowCount || kRows[i + 1].is_section)
         {
-            pass = false;
+            ok = false;
             break;
         }
     }
-    SerialWrite(pass ? "[help] self-test OK (sections non-empty)\n" : "[help] self-test FAILED\n");
+
+    // ContainsCi case-insensitive match: positive + negative.
+    if (!ContainsCi("CTRL+ALT+P", "ctrl"))
+        ok = false;
+    if (!ContainsCi("CTRL+ALT+P", "alt"))
+        ok = false;
+    if (!ContainsCi("CTRL+ALT+P", ""))
+        ok = false; // empty needle matches all
+    if (ContainsCi("CTRL+ALT+P", "zzzz"))
+        ok = false;
+    if (ContainsCi(nullptr, "ctrl"))
+        ok = false;
+
+    // HelpFeedChar: snapshot + restore around the mutations so
+    // the test leaves the live filter exactly as it found it.
+    char saved_filter[kFilterCap + 1];
+    for (u32 i = 0; i < sizeof(saved_filter); ++i)
+        saved_filter[i] = g_filter[i];
+    const u32 saved_filter_len = g_filter_len;
+    g_filter_len = 0;
+    g_filter[0] = '\0';
+
+    if (!HelpFeedChar('A'))
+        ok = false;
+    if (!HelpFeedChar('b'))
+        ok = false;
+    if (g_filter_len != 2 || g_filter[0] != 'A' || g_filter[1] != 'b')
+        ok = false;
+    // Backspace pops the most recent char.
+    if (!HelpFeedChar(static_cast<char>(0x08)))
+        ok = false;
+    if (g_filter_len != 1 || g_filter[0] != 'A')
+        ok = false;
+    // Non-printable control codes are rejected.
+    if (HelpFeedChar('\n'))
+        ok = false;
+    if (HelpFeedChar('\t'))
+        ok = false;
+
+    // Pass D: drive a synthetic click on the CLEAR toolbar
+    // button via the WidgetGroup dispatch chain. ClickClear
+    // wipes the live filter — pre-condition: filter is non-
+    // empty (we just pushed 'A' above); post-condition:
+    // g_filter_len == 0.
+    BindHelpOnce();
+    // Anchor the toolbar at (0, 22, 440, 280) — matches the
+    // shape boot_bringup.cpp registers the live Help window
+    // with (440x302 minus 22 px title bar). CLEAR is action
+    // index 0.
+    RebindHelpBounds(0U, 22U, 440U, 280U);
+    constexpr u32 kClearIdx = 0U;
+    const u32 nx = kHelpToolbarPadX + kClearIdx * (kHelpToolbarBtnW + kHelpToolbarBtnGap) + kHelpToolbarBtnW / 2U;
+    const u32 ny = 22U + kHelpToolbarPadY + kHelpToolbarBtnH / 2U;
+    const Event n_move{EventKind::MouseMove, nx, ny, 0U, 0U};
+    const Event n_down{EventKind::MouseDown, nx, ny, 0U, 0U};
+    const Event n_up{EventKind::MouseUp, nx, ny, 0U, 0U};
+
+    if (g_help.DispatchEvent(n_move) != EventResult::Consumed)
+        ok = false;
+    if (g_help.DispatchEvent(n_down) != EventResult::Consumed)
+        ok = false;
+    if (g_help.DispatchEvent(n_up) != EventResult::Consumed)
+        ok = false;
+    if (g_filter_len != 0 || g_filter[0] != '\0')
+        ok = false;
+
+    // Header / filter / footer composers must produce non-
+    // empty text after a refresh.
+    RefreshHelpHeader();
+    if (g_header_text[0] == '\0')
+        ok = false;
+    RefreshHelpFilter();
+    if (g_filter_text[0] == '\0')
+        ok = false;
+    RefreshHelpFooter();
+    if (g_footer_text[0] == '\0')
+        ok = false;
+
+    // Restore the pre-test filter so a user with a typed
+    // filter doesn't see it wiped at the next boot self-test
+    // window paint.
+    for (u32 i = 0; i < sizeof(saved_filter); ++i)
+        g_filter[i] = saved_filter[i];
+    g_filter_len = saved_filter_len;
+
+    g_help_self_test_passed = ok;
+    SerialWrite(ok ? "[help-selftest] PASS\n" : "[help-selftest] FAIL\n");
+}
+
+bool HelpSelfTestPassed()
+{
+    return g_help_self_test_passed;
+}
+
+void HelpMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
+{
+    using duetos::drivers::input::kMouseButtonLeft;
+    if (g_state.handle == kWindowInvalid)
+        return;
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+        return;
+    // Title bar is 22 px; client origin sits below it. The
+    // WidgetGroup dispatch path needs cursor coords in the
+    // same frame RebindHelpBounds anchors the chrome to.
+    constexpr duetos::u32 kTitleH = 22U;
+    if (wh <= kTitleH)
+        return;
+    const duetos::u32 client_y = wy + kTitleH;
+    const duetos::u32 client_h = wh - kTitleH;
+    BindHelpOnce();
+    RebindHelpBounds(wx, client_y, ww, client_h);
+
+    const bool left_down = (button_mask & kMouseButtonLeft) != 0;
+    const bool press_edge = left_down && !g_help_prev_left_down;
+    const bool release_edge = !left_down && g_help_prev_left_down;
+    g_help_prev_left_down = left_down;
+
+    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < wy + wh);
+    if (inside_window)
+    {
+        const Event m{EventKind::MouseMove, cx, cy, 0U, 0U};
+        g_help.DispatchEvent(m);
+    }
+    if (press_edge && inside_window)
+    {
+        // Carve-out: the raw reference list sits below the
+        // toolbar / header / filter rows the WidgetGroup
+        // owns. DispatchEvent's hit-test naturally short-
+        // circuits when the click misses the toolbar bounds
+        // — the list has no per-row click semantics in v0
+        // (filter management is keyboard-driven via
+        // HelpFeedChar or the CLEAR toolbar button).
+        // MouseDown still fires for the toolbar Pressed-
+        // state visual.
+        const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
+        g_help.DispatchEvent(d);
+    }
+    if (release_edge)
+    {
+        // Always dispatch MouseUp so a button pressed inside
+        // the toolbar and dragged off clears its Pressed flag.
+        const Event u{EventKind::MouseUp, cx, cy, 0U, 0U};
+        g_help.DispatchEvent(u);
+    }
 }
 
 } // namespace duetos::apps::help
