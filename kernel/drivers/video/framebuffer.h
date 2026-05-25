@@ -346,6 +346,22 @@ void FramebufferPunchCorners(u32 x, u32 y, u32 w, u32 h, u32 radius, u32 punch_r
 /// No-op if `!Available()` or `thickness == 0`.
 void FramebufferStrokeArc(i32 cx, i32 cy, i32 radius, i32 start_deg, i32 sweep_deg, u32 thickness, u32 rgb);
 
+/// Double-precision variant of `FramebufferStrokeArc`. Accepts fractional
+/// degree values for both `start_deg` and `sweep_deg`, giving smooth
+/// sub-degree arc rotation without integer-step quantisation.
+///
+/// The step size is approximately 1 pixel of arc length at `radius`
+/// (≈ 57.3 / radius degrees, clamped to [0.1°, 1.0°]) so arcs stay
+/// dense and gapless across the full radius range the wallpaper uses.
+///
+/// Uses linear interpolation of the Q16.16 integer sin/cos table
+/// (no <math.h> dependency). Accuracy vs true sin/cos is < 0.0015
+/// relative error — invisible at any screen resolution.
+///
+/// All other semantics match `FramebufferStrokeArc`. No-op if
+/// `!Available()`, `radius <= 0`, or `thickness == 0`.
+void FramebufferStrokeArcFloat(i32 cx, i32 cy, i32 radius, double start_deg, double sweep_deg, u32 thickness, u32 rgb);
+
 /// Path-op tag for `FramebufferStrokePath`. The op carries 0–3
 /// `(x, y)` pairs depending on the tag.
 enum class PathOp : u8
@@ -533,6 +549,31 @@ DamageRect FramebufferReadDamage();
 /// + `FramebufferPresent` invoke this themselves; explicit callers
 /// only need it if they bypass the standard compose-end flow.
 void FramebufferResetDamage();
+
+/// Tell the compositor that some external writer (typically the
+/// cursor sprite driven by `MouseReaderTask`) has mutated the LIVE
+/// framebuffer at the given rect, bypassing the offscreen compose
+/// shadow + snapshot tracking. The next `EndCompose` will
+/// FORCE-BLIT the offscreen contents at these rects to live,
+/// regardless of the diff-scan elision (which would otherwise miss
+/// the divergence because the snapshot still reflects the
+/// pre-mutation state).
+///
+/// Background: Pass A's frame elision compares the offscreen
+/// shadow against a "last-blitted-state" snapshot and only blits
+/// where they differ. That tracks compose-side changes perfectly
+/// but is blind to direct-to-live writes. Without this hook a
+/// cursor that wrote to live FB at position P would never be
+/// erased on the next compose — the offscreen at P matches the
+/// snapshot at P (both "wallpaper", because the previous compose
+/// blitted wallpaper there and the offscreen now also paints
+/// wallpaper there), so the diff scan elides the blit and the
+/// cursor pixels left on live FB stay.
+///
+/// Up to 8 rects accumulate between composes; overflow merges
+/// into the smallest enclosing union. No-op outside compose-aware
+/// callers.
+void FramebufferInvalidateSnapshot(u32 x, u32 y, u32 w, u32 h);
 
 /// Begin an offscreen compose pass. While compose is active every
 /// pixel-write primitive in this header (`FramebufferPutPixel`,

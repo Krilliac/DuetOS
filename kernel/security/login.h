@@ -77,6 +77,32 @@ bool LoginFeedKey(u16 code);
 /// when !LoginIsActive(). Caller holds the compositor lock.
 void LoginRepaint();
 
+/// Returns true if (cx, cy) is inside the sign-in button rect of the
+/// active GUI login layout. No-op (returns false) when LoginIsActive
+/// is false or LoginCurrentMode is not Gui. Used by the mouse reader
+/// to turn a click on the button into the same submit path as Enter.
+bool LoginHitTestSignInButton(u32 cx, u32 cy);
+
+/// Returns true if (cx, cy) is inside the username row of the login
+/// card (avatar circle + name + role hint text band). No-op (returns
+/// false) when LoginIsActive is false or LoginCurrentMode is not Gui.
+/// Used by the mouse reader to route a click on the username row to
+/// LoginFocusUsername.
+bool LoginHitTestUsernameField(u32 cx, u32 cy);
+
+/// Returns true if (cx, cy) is inside the password input rect.
+/// Same gating as LoginHitTestUsernameField.
+bool LoginHitTestPasswordField(u32 cx, u32 cy);
+
+/// Move keyboard focus to the username field and repaint the card
+/// so the focus indicator follows. No-op if the gate is not up in
+/// Gui mode.
+void LoginFocusUsername();
+
+/// Move keyboard focus to the password field and repaint the card.
+/// No-op if the gate is not up in Gui mode.
+void LoginFocusPassword();
+
 /// External trigger for `logout` to re-open the gate. Clears
 /// the session, drops back to the mode last shown (or Gui if
 /// called before the first activation), re-paints.
@@ -155,5 +181,20 @@ bool IdleLockCheckOnce();
 /// without firing for sub-threshold gaps. Does NOT actually
 /// lock the screen — the test runs before any session opens.
 void IdleLockSelfTest();
+
+/// Re-paint ONLY the clock + date region of the GUI login. Called by
+/// WallpaperTick when the wall-clock minute advances. No-op if the
+/// login gate is not active or not in GUI mode. Caller holds the
+/// compositor lock.
+void LoginRefreshClock();
+
+/// Boot-time self-test for the GUI login layout.
+/// Asserts the corner-card coordinates compute correctly at the
+/// canonical 1024×768 framebuffer baseline, and that the format
+/// helpers produce non-empty output.
+/// Emits `[login-gui-selftest] PASS` on success or a FAIL line +
+/// probe fire on failure.
+void LoginGuiSelfTest();
+bool LoginGuiSelfTestPassed();
 
 } // namespace duetos::core

@@ -67,6 +67,18 @@ void CursorHide();
 /// sprite on top. Pairs with CursorHide().
 void CursorShow();
 
+/// Re-overlay the cursor sprite onto whatever framebuffer write target
+/// is currently active. Intended to be called from INSIDE a DesktopCompose
+/// pass (between BeginCompose and EndCompose) — FramebufferPutPixel will
+/// route to the offscreen shadow, so SaveAt + DrawAt run against the
+/// composed-but-not-yet-blitted frame. The subsequent EndCompose blit
+/// then publishes the cursor atomically with the rest of the changed
+/// pixels, eliminating the CursorHide-then-CursorShow visual gap.
+///
+/// No-op when the cursor is currently hidden (g_ready == false) or the
+/// framebuffer is unavailable. Caller must hold the compositor lock.
+void CursorOverlayInCompose();
+
 /// Update the fallback desktop-background colour the cursor uses
 /// when its backing store misses (framebuffer read out of bounds).
 /// Called by the theme module after a theme switch so the cursor

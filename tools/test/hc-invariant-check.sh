@@ -131,10 +131,46 @@ if [[ "${TEST}" -le "${THRESHOLD}" ]]
 then
     echo "[hc-invariant] OK: auto-vs-override diff ${TEST} ≤ noise threshold ${THRESHOLD}"
     echo "[hc-invariant]     HighContrast opt-out invariant holds within boot-determinism noise."
+else
+    echo "[hc-invariant] FAIL: auto-vs-override diff ${TEST} exceeds threshold ${THRESHOLD}" >&2
+    echo "[hc-invariant]   — the tactility=off override changes HighContrast chrome" >&2
+    echo "[hc-invariant]     beyond what live-widget boot-time variation explains." >&2
+    exit 1
+fi
+
+# ============================================================
+# Pass B — motion-gate invariant
+# ============================================================
+# HighContrast (tactility_enabled=false) must produce identical pixels
+# with motion=on vs motion=off because tactility_enabled is the master
+# gate — motion=on cannot bypass it. This catches a regression where
+# a future motion code path accidentally bypasses the master gate.
+
+echo
+echo "=== Pass B motion-gate invariant (HighContrast) ==="
+
+capture hc_motion_on  "theme=highcontrast motion=on"
+capture hc_motion_off "theme=highcontrast motion=off"
+
+MOTION_DIFF="$(diff_px "${OUT_DIR}/hc_motion_on.ppm" "${OUT_DIR}/hc_motion_off.ppm")"
+HC_MOTION_NOISE_FLOOR=333
+
+echo "[hc-invariant] HC motion=on vs motion=off pixel-diff: ${MOTION_DIFF} px (noise floor: ${HC_MOTION_NOISE_FLOOR})"
+
+if ! [[ "${MOTION_DIFF}" =~ ^[0-9]+$ ]]
+then
+    echo "[hc-invariant] FAIL: compare did not return an integer count for motion diff" >&2
+    exit 1
+fi
+
+if [[ "${MOTION_DIFF}" -le "${HC_MOTION_NOISE_FLOOR}" ]]
+then
+    echo "[hc-invariant] PASS HC motion-gate invariant (diff ${MOTION_DIFF} px ≤ ${HC_MOTION_NOISE_FLOOR} noise floor)"
+    echo "[hc-invariant]     motion=on cannot bypass the tactility_enabled master gate."
     exit 0
 fi
 
-echo "[hc-invariant] FAIL: auto-vs-override diff ${TEST} exceeds threshold ${THRESHOLD}" >&2
-echo "[hc-invariant]   — the tactility=off override changes HighContrast chrome" >&2
-echo "[hc-invariant]     beyond what live-widget boot-time variation explains." >&2
+echo "[hc-invariant] FAIL: HC motion-gate broken — diff ${MOTION_DIFF} px > ${HC_MOTION_NOISE_FLOOR} noise floor" >&2
+echo "[hc-invariant]   — motion=on changed HighContrast chrome despite tactility_enabled=false." >&2
+echo "[hc-invariant]   Screenshots: ${OUT_DIR}/hc_motion_on.ppm  ${OUT_DIR}/hc_motion_off.ppm" >&2
 exit 1

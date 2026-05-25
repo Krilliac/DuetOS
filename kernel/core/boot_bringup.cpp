@@ -178,6 +178,7 @@
 #include "drivers/video/svg.h"
 #include "drivers/video/ttf.h"
 #include "drivers/video/ttf_raster.h"
+#include "drivers/video/splash.h"
 #include "drivers/video/wallpaper.h"
 #include "generated_chrome_font.h"
 #include "drivers/video/calendar.h"
@@ -2136,6 +2137,12 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // firmware-level shutdown, so any on-screen state matches the
     // power request.
     duetos::drivers::gpu::DpmsInit();
+    // Pass B — splash ticker. SplashInit paints the wallpaper backdrop
+    // + opens the bottom-left phase ticker. Every milestone below fires
+    // SplashAdvancePhase to keep the user's boot visible. SplashDismiss
+    // clears the ticker before the login gate paints its own surface.
+    duetos::drivers::video::SplashInit();
+    duetos::drivers::video::SplashAdvancePhase("framebuffer up");
     if constexpr (duetos::core::kBootSelfTests)
     {
         duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Drivers, "framebuffer-selftest",
@@ -2197,6 +2204,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
                                               return duetos::core::Result<void>{};
                                           });
     (void)duetos::core::RunPhase(duetos::core::Phase::Drivers);
+    duetos::drivers::video::SplashAdvancePhase("chrome fonts");
 
     // Phase::Drivers ran the DPMS-hook initcall — by this point the
     // canonical backend dispatcher is wired into the bookkeeper, so
@@ -2244,6 +2252,21 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         {
             duetos::drivers::video::ThemeSetTactilityOverride(1);
         }
+        // Pass B: motion=on|off|auto runtime override. kAuto (default)
+        // honours the active theme's motion_intensity. tactility_enabled
+        // remains the master gate — motion=on under HighContrast still
+        // produces zero motion.
+        if (CmdlineMatches(early_cmdline, "motion", "off"))
+        {
+            duetos::drivers::video::ThemeSetMotionOverride(
+                duetos::drivers::video::MotionOverride::kOff);
+        }
+        else if (CmdlineMatches(early_cmdline, "motion", "on"))
+        {
+            duetos::drivers::video::ThemeSetMotionOverride(
+                duetos::drivers::video::MotionOverride::kOn);
+        }
+        // "auto" (or absent) leaves the default kAuto — no call needed.
     }
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::ThemeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::BlendSelfTest());
@@ -2264,6 +2287,27 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
                 "[tactility-selftest] PASS (per-effect: shadow=ok, hover=ok, press=ok, glow=ok)\n");
         }
     }
+    // Pass B self-tests — first-impression moments. SplashSelfTest walks
+    // the full state-machine without touching the real framebuffer.
+    // WallpaperMotionSelfTest validates the three motion paths + phase
+    // math. LoginGuiSelfTest asserts corner-card coords + format helpers.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::SplashSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::WallpaperMotionSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::core::LoginGuiSelfTest());
+    // Pass B umbrella — emits a single sentinel iff all three sub-tests
+    // passed. Any FAIL already fired its own probe + serial line; the
+    // umbrella does not emit a fake PASS that masks a FAIL.
+    if constexpr (::duetos::core::kBootSelfTests)
+    {
+        if (duetos::drivers::video::SplashSelfTestPassed() &&
+            duetos::drivers::video::WallpaperMotionSelfTestPassed() &&
+            duetos::core::LoginGuiSelfTestPassed())
+        {
+            duetos::arch::SerialWrite(
+                "[pass-b-selftest] PASS (splash=ok, wallpaper-motion=ok, login-gui=ok)\n");
+        }
+    }
+    duetos::drivers::video::SplashAdvancePhase("theme online");
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::NotifySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::MagnifierSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::time::TimezoneSelfTest());
@@ -2767,6 +2811,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // back to the interactive shell buffer. Both consoles share
     // the same screen origin so the flip is in-place.
     duetos::core::SetLogTee([](const char* s) { duetos::drivers::video::ConsoleWriteKlog(s); });
+    duetos::drivers::video::SplashAdvancePhase("compositor up");
 
     // Early-boot file sink: tee every Info+ log line into
     // /tmp/boot.log on tmpfs. Receives one fully-formed line per
@@ -2829,6 +2874,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::security::RbacSnapshotSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::GraceCacheSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::BrokerSelfTest());
+    duetos::drivers::video::SplashAdvancePhase("auth ready");
 
     // Shell welcome + initial prompt. Landing here after every
     // subsystem init line keeps the boot log visible above the
@@ -3024,6 +3070,16 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     if (!autologin)
     {
         const auto mode = want_tty ? duetos::core::LoginMode::Tty : duetos::core::LoginMode::Gui;
+        if (mode == duetos::core::LoginMode::Gui)
+        {
+            // Splash ticker has done its job; clear it before the login
+            // gate paints its own surface. TTY path skips this — splash
+            // never started in TTY mode (SplashInit no-ops when FB is
+            // unavailable) so Dismiss is a no-op there too, but we
+            // avoid the call for clarity.
+            duetos::drivers::video::SplashAdvancePhase("login starting");
+            duetos::drivers::video::SplashDismiss();
+        }
         duetos::core::LoginStart(mode);
     }
     else

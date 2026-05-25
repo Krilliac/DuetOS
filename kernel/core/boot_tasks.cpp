@@ -2181,6 +2181,39 @@ void MouseReaderTask(void*)
         const bool right_release = !right_down && prev_right;
         prev_right = right_down;
 
+        // Login gate — Pass B fix. While LoginIsActive() in Gui mode the
+        // desktop chrome (windows, taskbar, widget table) must NOT receive
+        // mouse events: clicking through to apps would bypass auth entirely.
+        // We still let CursorMove (above) update the sprite position so the
+        // cursor tracks visually, and we route a press-edge click on the
+        // sign-in button to LoginFeedKey(kKeyEnter) — same submit path as
+        // pressing Enter. Everything else (drag, widget routing, window
+        // hit-test, DesktopCompose) is skipped. The compositor lock taken
+        // above is released and the loop continues.
+        if (duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui)
+        {
+            if (press_edge)
+            {
+                // Route by hit-test, sign-in button first (it overlaps no
+                // other field), then password input, then the username
+                // row (avatar/name/role). Anything else is inert.
+                if (duetos::core::LoginHitTestSignInButton(cx, cy))
+                {
+                    duetos::core::LoginFeedKey(duetos::drivers::input::kKeyEnter);
+                }
+                else if (duetos::core::LoginHitTestPasswordField(cx, cy))
+                {
+                    duetos::core::LoginFocusPassword();
+                }
+                else if (duetos::core::LoginHitTestUsernameField(cx, cy))
+                {
+                    duetos::core::LoginFocusUsername();
+                }
+            }
+            duetos::drivers::video::CompositorUnlock();
+            continue;
+        }
+
         // Right-click opens a context menu. Different item set
         // depending on what's under the cursor:
         //   - Taskbar: skip (no right-click menu there yet).
@@ -3248,27 +3281,54 @@ void MouseReaderTask(void*)
 void WinTimerTickerTask(void*)
 {
     auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
+    // Wallpaper motion runs at ~25 FPS nominal. This task fires every
+    // 10 ms (SchedSleepTicks(1) = 1 scheduler tick = 10 ms); every 4th
+    // call is 40 ms ≈ 25 FPS nominal. Effective FPS depends on how long
+    // each DesktopCompose takes (~25-30 ms on VBox, so effective ~8 Hz);
+    // on QEMU/real-HW DesktopCompose is faster and you get closer to the
+    // 25 Hz nominal. Previously kWallpaperSubDiv was 7 which targeted
+    // 14 Hz but VBox delivered 4 Hz — slideshow territory. Drop to 4.
+    static u32 s_wallpaper_sub = 0;
+    static constexpr u32 kWallpaperSubDiv = 4; // 10 ms × 4 = 40 ms ≈ 25 FPS nominal
     for (;;)
     {
         duetos::sched::SchedSleepTicks(1);
         duetos::drivers::video::CompositorLock();
         duetos::drivers::video::WindowTimerTick();
         const bool anim_stepped = duetos::drivers::video::WindowAnimateStepAll();
-        if (anim_stepped)
+
+        // Advance ambient wallpaper motion at ~15 FPS. WallpaperTick()
+        // updates arc rotation, pulse, and topo drift phases then marks
+        // dirty rects. Skip during the login gate (LoginRepaint owns the
+        // framebuffer) and in TTY mode (no wallpaper is painted there).
+        const bool gate_active =
+            duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui;
+        const bool is_tty = duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty;
+        bool wallpaper_ticked = false;
+        if (!gate_active && !is_tty)
         {
-            // Skip recompose while the login gate owns the
-            // framebuffer or in TTY mode — animations are a
-            // desktop-only affordance and the gate / TTY paths
-            // would clobber their own state if we composed
-            // here.
-            const bool gate_active =
-                duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui;
-            const bool is_tty = duetos::drivers::video::GetDisplayMode() == duetos::drivers::video::DisplayMode::Tty;
+            if (++s_wallpaper_sub >= kWallpaperSubDiv)
+            {
+                s_wallpaper_sub = 0;
+                duetos::drivers::video::WallpaperTick();
+                wallpaper_ticked = true;
+            }
+        }
+
+        if (anim_stepped || wallpaper_ticked)
+        {
+            // Skip recompose while the login gate owns the framebuffer or
+            // in TTY mode — desktop-only affordance.
+            //
+            // CursorHide/Show is no longer needed: DesktopCompose now
+            // paints the cursor sprite into the offscreen buffer via
+            // CursorOverlayInCompose, and cursor.cpp's DrawAt/RestoreAt
+            // call FramebufferInvalidateSnapshot to force-blit cursor's
+            // prior live-FB positions. Together these eliminate cursor
+            // flash entirely without ghosts, lag, or trails.
             if (!gate_active && !is_tty)
             {
-                duetos::drivers::video::CursorHide();
                 duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
-                duetos::drivers::video::CursorShow();
             }
         }
         duetos::drivers::video::CompositorUnlock();

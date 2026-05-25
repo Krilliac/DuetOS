@@ -90,7 +90,13 @@ bool SvgParse(const u8* bytes, u32 size, SvgImage* image);
 /// via the matching framebuffer primitive (StrokePath / DrawLine /
 /// DrawCircle). Pixel-aligned, no anti-aliasing — the AA path is
 /// the rasterizer's job (see ttf_raster.h).
-void SvgRender(const SvgImage& image, i32 target_x, i32 target_y, u32 target_w, u32 target_h);
+///
+/// Optional `tint_argb` (0xAARRGGBB): when the alpha byte is non-zero,
+/// every rendered pixel is blended toward the RGB portion of the tint
+/// proportional to the alpha (0 = no tint, 255 = fully tinted). Default
+/// value `0` (alpha == 0) means "use SVG colours as-is" — backwards-
+/// compatible with every existing caller.
+void SvgRender(const SvgImage& image, i32 target_x, i32 target_y, u32 target_w, u32 target_h, u32 tint_argb = 0);
 
 /// Boot-time self-test. Parses a small embedded SVG and verifies
 /// the shape count matches expectations. Logs the result line and

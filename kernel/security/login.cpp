@@ -24,17 +24,21 @@
 
 #include "security/login.h"
 
+#include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
+#include "debug/probes.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/video/console.h"
 #include "drivers/video/framebuffer.h"
-#include "drivers/video/shadow.h"
 #include "drivers/video/theme.h"
+#include "drivers/video/shadow.h"
+#include "drivers/video/wallpaper.h"
 #include "drivers/video/widget.h"
 #include "log/klog.h"
 #include "sched/sched.h"
 #include "security/auth.h"
 #include "time/tick.h"
+#include "util/datetime.h"
 
 namespace duetos::core
 {
@@ -43,17 +47,18 @@ using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
 using duetos::drivers::video::FramebufferBeginCompose;
+using duetos::drivers::video::FramebufferDrawCircle;
 using duetos::drivers::video::FramebufferDrawRect;
 using duetos::drivers::video::FramebufferDrawString;
-using duetos::drivers::video::FramebufferDropShadow;
+using duetos::drivers::video::FramebufferDrawStringScaled;
 using duetos::drivers::video::FramebufferEndCompose;
+using duetos::drivers::video::FramebufferFillCircle;
 using duetos::drivers::video::FramebufferFillRect;
-using duetos::drivers::video::FramebufferFillRectGradient;
 using duetos::drivers::video::FramebufferGet;
-using duetos::drivers::video::RenderSoftShadow;
+using duetos::drivers::video::RenderSoftShadowWithStroke;
 using duetos::drivers::video::ThemeCurrent;
-using duetos::drivers::video::ThemeIntensityEffective;
-using duetos::drivers::video::ThemeTactilityEffective;
+using duetos::drivers::video::WallpaperPaint;
+using duetos::drivers::video::WindowPaintFocusGlow;
 
 namespace
 {
@@ -90,22 +95,8 @@ struct State
 
 constinit State g_login = {};
 
-// Colours used by the GUI login screen. The top-to-bottom teal
-// gradient matches the desktop mode so the transition from
-// login → desktop is visually continuous.
-constexpr u32 kBgTop = 0x00204868;
-constexpr u32 kBgBottom = 0x00101828;
-constexpr u32 kPanel = 0x00E0E0D8;
-constexpr u32 kPanelBorder = 0x00101828;
-constexpr u32 kTitleBar = 0x00205080;
-constexpr u32 kTitleText = 0x00FFFFFF;
-constexpr u32 kFieldBg = 0x00FFFFFF;
-constexpr u32 kFieldFocusBg = 0x00FFF8C0;
-constexpr u32 kFieldBorder = 0x00404040;
-constexpr u32 kFieldText = 0x00101010;
-constexpr u32 kLabelText = 0x00101010;
-constexpr u32 kHint = 0x00606060;
-constexpr u32 kStatusError = 0x00801010;
+// Colours for the Pass B corner-card login screen.
+// T13+ will add corner-card palette constants here.
 
 void ClearField(char* buf, u32* len)
 {
@@ -284,233 +275,355 @@ bool TtySubmit()
 // the live framebuffer dimensions so it centres on any resolution.
 // ---------------------------------------------------------------
 
-struct GuiLayout
-{
-    u32 fb_w, fb_h;
-    u32 panel_x, panel_y, panel_w, panel_h;
-    u32 title_h;
-    u32 user_x, user_y, user_w, user_h;
-    u32 pass_x, pass_y, pass_w, pass_h;
-    u32 hint_y;
-    u32 status_y;
-};
 
-GuiLayout ComputeLayout()
+// ---------------------------------------------------------------
+// Pass B corner-card helpers — clock + date text for the big
+// clock left panel. Both read the RTC directly so they're
+// always wall-clock accurate (no separate tick-derived fallback
+// needed: RtcRead is cheap, ~1 ms max spin, fine for a 1 Hz
+// repaint).
+// ---------------------------------------------------------------
+
+// Write a two-digit decimal (with leading zero) at *pos in buf.
+// Helper for LoginFormatClock/Date — avoids a snprintf dependency.
+void AppendTwoDigit(char* buf, u32* pos, u32 cap, u32 val)
 {
-    const auto fb = FramebufferGet();
-    GuiLayout l = {};
-    l.fb_w = fb.width;
-    l.fb_h = fb.height;
-    l.panel_w = 440;
-    l.panel_h = 220;
-    if (l.panel_w > l.fb_w)
+    if (*pos + 1 < cap)
     {
-        l.panel_w = l.fb_w;
+        buf[(*pos)++] = static_cast<char>('0' + (val / 10) % 10);
     }
-    if (l.panel_h > l.fb_h)
+    if (*pos + 1 < cap)
     {
-        l.panel_h = l.fb_h;
+        buf[(*pos)++] = static_cast<char>('0' + val % 10);
     }
-    l.panel_x = (l.fb_w - l.panel_w) / 2;
-    l.panel_y = (l.fb_h - l.panel_h) / 2;
-    l.title_h = 28;
-    const u32 field_w = 260;
-    const u32 field_h = 22;
-    const u32 field_x = l.panel_x + 140;
-    l.user_x = field_x;
-    l.user_y = l.panel_y + l.title_h + 24;
-    l.user_w = field_w;
-    l.user_h = field_h;
-    l.pass_x = field_x;
-    l.pass_y = l.user_y + field_h + 14;
-    l.pass_w = field_w;
-    l.pass_h = field_h;
-    l.status_y = l.pass_y + field_h + 18;
-    l.hint_y = l.panel_y + l.panel_h - 14;
-    return l;
 }
 
-// Saturating per-channel lighten — file-local copy.
-u32 LightenRgb(u32 rgb, u32 amount)
+void LoginFormatClock(char* out, u32 cap)
 {
-    u32 r = ((rgb >> 16) & 0xFFU) + amount;
-    u32 g = ((rgb >> 8) & 0xFFU) + amount;
-    u32 b = (rgb & 0xFFU) + amount;
-    if (r > 0xFFU)
-        r = 0xFFU;
-    if (g > 0xFFU)
-        g = 0xFFU;
-    if (b > 0xFFU)
-        b = 0xFFU;
-    return (r << 16) | (g << 8) | b;
+    duetos::arch::RtcTime t = {};
+    duetos::arch::RtcRead(&t);
+    u32 pos = 0;
+    AppendTwoDigit(out, &pos, cap, t.hour);
+    if (pos + 1 < cap)
+    {
+        out[pos++] = ':';
+    }
+    AppendTwoDigit(out, &pos, cap, t.minute);
+    if (pos < cap)
+    {
+        out[pos] = '\0';
+    }
 }
 
-void DrawBackground(const GuiLayout& l)
+void LoginFormatDate(char* out, u32 cap)
 {
-    // Smooth full-height vertical gradient. Replaces the previous
-    // two-stripe approximation now that the framebuffer ships
-    // FillRectGradient — the same primitive the desktop compose
-    // uses, so the login → desktop transition reads as continuous
-    // colour rather than a band hand-off.
-    FramebufferFillRectGradient(0, 0, l.fb_w, l.fb_h, kBgTop, kBgBottom);
-    // Top banner text.
-    FramebufferDrawString(16, 12, "DUETOS", 0x00FFFFFF, kBgTop);
-    FramebufferDrawString(l.fb_w - 8 * 9, 12, "LOGIN v0", 0x00C0D0E0, kBgTop);
+    duetos::arch::RtcTime t = {};
+    duetos::arch::RtcRead(&t);
+
+    static const char* kDay[] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+    static const char* kMonth[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+    const u8 dow = duetos::util::DayOfWeekFromYmd(i32(t.year), t.month, t.day);
+    const char* day_name = kDay[dow % 7];
+    const u8 m0 = (t.month >= 1 && t.month <= 12) ? u8(t.month - 1) : u8(0);
+    const char* month_name = kMonth[m0];
+
+    u32 pos = 0;
+    // Write day name.
+    for (u32 i = 0; day_name[i] != '\0' && pos + 1 < cap; ++i)
+    {
+        out[pos++] = day_name[i];
+    }
+    if (pos + 1 < cap)
+    {
+        out[pos++] = ',';
+    }
+    if (pos + 1 < cap)
+    {
+        out[pos++] = ' ';
+    }
+    // Write abbreviated month name.
+    for (u32 i = 0; month_name[i] != '\0' && pos + 1 < cap; ++i)
+    {
+        out[pos++] = month_name[i];
+    }
+    if (pos + 1 < cap)
+    {
+        out[pos++] = ' ';
+    }
+    // Write day-of-month (1 or 2 digits, no leading zero).
+    const u32 d = t.day;
+    if (d >= 10 && pos + 1 < cap)
+    {
+        out[pos++] = static_cast<char>('0' + d / 10);
+    }
+    if (pos + 1 < cap)
+    {
+        out[pos++] = static_cast<char>('0' + d % 10);
+    }
+    if (pos < cap)
+    {
+        out[pos] = '\0';
+    }
 }
 
-void DrawPanel(const GuiLayout& l)
+// Layout-rect helpers — mirror the arithmetic chain in GuiRepaint
+// (card → username row / password field / sign-in button). Shared
+// between GuiRepaint (paint) and the LoginHitTest* mouse helpers.
+// Any change to GuiRepaint's coordinate math MUST update these too.
+
+void ComputeUsernameRowRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h)
 {
-    // Drop shadow first so the panel reads as raised relative to
-    // the gradient bg. Atlas-shadow under tactility; strip-shadow
-    // fallback preserves Amber/HighContrast bit-for-bit.
-    {
-        const u8 atlas_opacity =
-            ThemeTactilityEffective() ? ThemeIntensityEffective(ThemeCurrent().shadow_intensity_active) : u8{0};
-        if (atlas_opacity > 0)
-        {
-            RenderSoftShadow(static_cast<i32>(l.panel_x), static_cast<i32>(l.panel_y), l.panel_w, l.panel_h, 20U,
-                             atlas_opacity, 0x00000000U);
-        }
-        else
-        {
-            FramebufferDropShadow(l.panel_x, l.panel_y, l.panel_w, l.panel_h, 5, 0x70);
-        }
-    }
-
-    // Body fill + 1-px outer border (was 2-px slab).
-    FramebufferFillRect(l.panel_x, l.panel_y, l.panel_w, l.panel_h, kPanel);
-    FramebufferDrawRect(l.panel_x, l.panel_y, l.panel_w, l.panel_h, kPanelBorder, 1);
-
-    // Title bar with a vertical gradient + a 1-px ridge highlight
-    // along its top edge. Same chrome language as window titles.
-    FramebufferFillRectGradient(l.panel_x, l.panel_y, l.panel_w, l.title_h, LightenRgb(kTitleBar, 24), kTitleBar);
-    if (l.panel_w > 4)
-    {
-        FramebufferFillRect(l.panel_x + 2, l.panel_y + 1, l.panel_w - 4, 1, LightenRgb(kTitleBar, 56));
-    }
-    // 1-pixel divider where the title bar meets the panel body —
-    // matches the window-chrome divider.
-    if (l.panel_h > l.title_h + 2)
-    {
-        FramebufferFillRect(l.panel_x + 2, l.panel_y + l.title_h, l.panel_w - 4, 1, kPanelBorder);
-    }
-
-    FramebufferDrawString(l.panel_x + 10, l.panel_y + 10, "WELCOME TO DUETOS", kTitleText, kTitleBar);
+    // Hit target is the avatar+name+role band — full card width from
+    // card_x to card right, from card top through end of the role line.
+    const u32 card_x = 694u * fb_w / 1024u;
+    const u32 card_y = 540u * fb_h / 768u;
+    const u32 card_w = 280u * fb_w / 1024u;
+    if (x) *x = card_x;
+    if (y) *y = card_y;
+    if (w) *w = card_w;
+    if (h) *h = 80u * fb_h / 768u; // covers avatar (~60px) + role text below
 }
 
-void DrawField(u32 x, u32 y, u32 w, u32 h, const char* text, u32 len, bool mask, bool focus)
+void ComputePasswordFieldRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h)
 {
-    const u32 bg = focus ? kFieldFocusBg : kFieldBg;
-    FramebufferFillRect(x, y, w, h, bg);
-    FramebufferDrawRect(x, y, w, h, kFieldBorder, 1);
-    // Draw text inside with a small left inset. Mask shows stars
-    // for password. 8-pixel glyph cells.
-    const u32 inset_x = x + 4;
-    const u32 inset_y = y + (h - 8) / 2;
-    const u32 max_chars = (w - 8) / 8;
-    const u32 shown = (len > max_chars) ? max_chars : len;
-    if (mask)
-    {
-        char stars[kFieldMax];
-        for (u32 i = 0; i < shown; ++i)
-        {
-            stars[i] = '*';
-        }
-        stars[shown] = '\0';
-        FramebufferDrawString(inset_x, inset_y, stars, kFieldText, bg);
-    }
-    else
-    {
-        // Local NUL-terminated copy of the shown prefix.
-        char buf[kFieldMax];
-        for (u32 i = 0; i < shown; ++i)
-        {
-            buf[i] = text[i];
-        }
-        buf[shown] = '\0';
-        FramebufferDrawString(inset_x, inset_y, buf, kFieldText, bg);
-    }
-    if (focus)
-    {
-        const u32 caret_x = inset_x + shown * 8;
-        if (caret_x + 8 < x + w)
-        {
-            FramebufferFillRect(caret_x, inset_y, 8, 2, kFieldText);
-        }
-    }
+    const u32 card_x = 694u * fb_w / 1024u;
+    const u32 card_y = 540u * fb_h / 768u;
+    const u32 card_w = 280u * fb_w / 1024u;
+    if (x) *x = card_x + 20u * fb_w / 1024u;
+    if (y) *y = card_y + 86u * fb_h / 768u;
+    if (w) *w = card_w - 40u * fb_w / 1024u;
+    if (h) *h = 28u * fb_h / 768u;
+}
+
+void ComputeSignInButtonRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h)
+{
+    u32 pwd_x = 0, pwd_y = 0, pwd_w = 0, pwd_h = 0;
+    ComputePasswordFieldRect(fb_w, fb_h, &pwd_x, &pwd_y, &pwd_w, &pwd_h);
+    const u32 btn_w = 170u * fb_w / 1024u;
+    const u32 btn_h = 28u * fb_h / 768u;
+    if (x) *x = pwd_x + pwd_w - btn_w;
+    if (y) *y = pwd_y + pwd_h + 14u * fb_h / 768u;
+    if (w) *w = btn_w;
+    if (h) *h = btn_h;
 }
 
 void GuiRepaint()
 {
-    const GuiLayout l = ComputeLayout();
-    // Compose the whole panel offscreen so the 1 Hz ui-ticker
-    // repaint lands in a single blit. Without this the full-screen
-    // gradient clear is visible on its own for a frame on
-    // un-coalesced host framebuffers (VBox), reading as a 1 Hz
-    // flicker. Mirrors DesktopCompose's BeginCompose/EndCompose/
-    // Present flow; no-op fallback to direct mode if the shadow
-    // allocator is unavailable.
+    // Pass B corner-card layout. See spec §4.2 / §5.
+    //
+    // Step 1 (Task 12): wallpaper backdrop + big clock left.
+    // Step 2 (Tasks 13-16 — pending): corner card bottom-right with
+    //   atlas-shadow, avatar/name, password field, sign-in button.
+    //
+    // The login form (centered winlogon-flavour box) is intentionally
+    // absent in this commit. Keyboard input is still wired through
+    // GuiFeedKey → GuiTrySubmit, but nothing on-screen reflects it
+    // until the corner card lands in T13-T16.
+
     FramebufferBeginCompose();
-    DrawBackground(l);
-    DrawPanel(l);
 
-    FramebufferDrawString(l.panel_x + 24, l.user_y + 6, "USERNAME:", kLabelText, kPanel);
-    FramebufferDrawString(l.panel_x + 24, l.pass_y + 6, "PASSWORD:", kLabelText, kPanel);
+    // 1. Backdrop — wallpaper pattern continuous from splash, repainted
+    //    here to recover pixels on every LoginRepaint / mode flip.
+    WallpaperPaint(ThemeCurrent().desktop_bg);
 
-    DrawField(l.user_x, l.user_y, l.user_w, l.user_h, g_login.username, g_login.username_len, false,
-              g_login.focus == Field::Username);
-    DrawField(l.pass_x, l.pass_y, l.pass_w, l.pass_h, g_login.password, g_login.password_len, true,
-              g_login.focus == Field::Password);
+    // 2. Big clock left — 84-px digit clock (scale=8 on the 8×8 font)
+    //    at (80, 560) baseline and 20-px date (scale=2) at (80, 660)
+    //    on a 1024×768 reference; scaled to the actual framebuffer.
+    const auto& fb = FramebufferGet();
+    const u32 clock_x = 80u * fb.width / 1024u;
+    const u32 clock_y = 560u * fb.height / 768u;
+    const u32 date_y = 660u * fb.height / 768u;
 
-    const char* status = g_login.status;
-    if (status != nullptr && status[0] != '\0')
+    char clock_buf[8]; // "HH:MM\0"
+    char date_buf[32]; // "Wednesday, May 24\0"
+    LoginFormatClock(clock_buf, sizeof(clock_buf));
+    LoginFormatDate(date_buf, sizeof(date_buf));
+
+    // Text colour: banner_fg is the high-contrast overlay ink used for
+    // the desktop banner — correct tone for the large clock over the
+    // wallpaper backdrop regardless of active theme.
+    const u32 fg = ThemeCurrent().banner_fg;
+    // bg = transparent match: use desktop_bg so the scaled glyphs
+    // blend against the wallpaper tone rather than leaving a solid rect.
+    const u32 bg = ThemeCurrent().desktop_bg;
+
+    FramebufferDrawStringScaled(clock_x, clock_y, clock_buf, fg, bg, /*scale=*/8);
+    FramebufferDrawStringScaled(clock_x, date_y, date_buf, fg, bg, /*scale=*/2);
+
+    // 3. Corner card bottom-right — 280×160 at (694, 540) on a 1024×768
+    //    reference; scaled to the actual framebuffer dimensions.
+    //    Pass B Task 13: atlas-shadow halo + body fill + border stroke.
+    //    Pass B Task 14: avatar circle + monogram + username + role text.
+    //    Card contents (password field, sign-in button) land in Tasks 15–16.
+    const u32 card_x = 694u * fb.width / 1024u;
+    const u32 card_y = 540u * fb.height / 768u;
+    const u32 card_w = 280u * fb.width / 1024u;
+    const u32 card_h = 160u * fb.height / 768u;
+
+    // Card body — taskbar_bg is the elevated-panel surface shared across
+    // all themes; window_border is the 1-px stroke used on every window
+    // chrome so the card matches the rest of the chrome language.
+    FramebufferFillRect(card_x, card_y, card_w, card_h, ThemeCurrent().taskbar_bg);
+
+    // Atlas-shadow halo + 1-px inner stroke in one call.
+    // Shadow colour is pure black (0x000000); stroke colour is the theme's
+    // window_border — matches window chrome language. radius=16 / opacity=120
+    // gives a soft, medium-lift halo consistent with the Pass A window chrome.
+    RenderSoftShadowWithStroke(static_cast<i32>(card_x), static_cast<i32>(card_y), card_w, card_h,
+                               /*radius=*/16, /*opacity=*/120, /*colour=*/0x000000u,
+                               /*stroke_colour=*/ThemeCurrent().window_border);
+
+    // 4. Avatar circle + monogram + username + role text.
+    //    Pass B Task 14.
+    //
+    //    Avatar is a 40-px diameter circle (radius 20) positioned
+    //    36 px right and 40 px down from the card top-left corner
+    //    on a 1024×768 reference grid, scaled to actual fb dimensions.
+    //    accent_colour = taskbar_accent — the theme's primary accent,
+    //    used consistently for topo tint, start-button fill, and
+    //    highlighted tab borders across all themes.
+    const u32 accent = ThemeCurrent().taskbar_accent;
+    // Avatar background: use taskbar_bg (elevated panel surface) so the
+    // circle reads as an inset element inside the card rather than a
+    // flat sticker on top of it.
+    const u32 avatar_bg = ThemeCurrent().taskbar_bg;
+
+    // Scale the avatar centre to the actual framebuffer resolution.
+    const u32 avatar_cx = card_x + 36u * fb.width / 1024u;
+    const u32 avatar_cy = card_y + 40u * fb.height / 768u;
+    const u32 avatar_r = 20u * fb.width / 1024u;
+
+    // Filled circle (card-body colour) then 1-px accent stroke ring.
+    FramebufferFillCircle(static_cast<i32>(avatar_cx), static_cast<i32>(avatar_cy), avatar_r, avatar_bg);
+    FramebufferDrawCircle(static_cast<i32>(avatar_cx), static_cast<i32>(avatar_cy), avatar_r, accent);
+
+    // Monogram — first character of the current username, uppercased.
+    // Falls back to '?' if the username buffer is empty (shouldn't happen
+    // at repaint time, but defensive for the autologin path).
+    char mono = '?';
+    const char* user = g_login.username;
+    if (user != nullptr && user[0] != '\0')
     {
-        FramebufferDrawString(l.panel_x + 24, l.status_y, status, kStatusError, kPanel);
+        mono = user[0];
+        if (mono >= 'a' && mono <= 'z')
+        {
+            mono = static_cast<char>(mono - 'a' + 'A');
+        }
     }
+    char mono_str[2] = {mono, '\0'};
 
-    FramebufferDrawString(l.panel_x + 24, l.hint_y, "TAB TO SWITCH FIELD   ENTER TO LOG IN", kHint, kPanel);
+    // Centre the 2x-scaled 8×8 bitmap glyph (16×16 rendered pixels)
+    // inside the circle.  Offset by half the rendered glyph size so
+    // the character visual centre lands on avatar_cx / avatar_cy.
+    FramebufferDrawStringScaled(avatar_cx - 8u, avatar_cy - 8u, mono_str, accent, avatar_bg, /*scale=*/2);
 
-    const u32 y_hint = l.fb_h - 22;
-    if (g_login.locked)
+    // Username and role text rendered to the right of the avatar.
+    // name_x is avatar right-edge + 12 px of gap on the reference grid.
+    const u32 name_x = avatar_cx + avatar_r + 12u * fb.width / 1024u;
+    const u32 name_y = card_y + 32u * fb.height / 768u;
+    const u32 role_y = card_y + 48u * fb.height / 768u;
+
+    // Username row. Empty = placeholder hint in dim ink so the user knows
+    // a username is required; non-empty = the typed text in full ink.
+    const bool has_user = (user != nullptr && user[0] != '\0');
+    // Dim ink for placeholders: low-saturation grey that reads against any
+    // theme's taskbar_bg without depending on a per-theme dim field.
+    constexpr u32 kHintInk = 0x00808890u;
+    FramebufferDrawString(name_x, name_y,
+                          has_user ? user : "type username",
+                          has_user ? ThemeCurrent().banner_fg : kHintInk,
+                          ThemeCurrent().taskbar_bg);
+
+    // Default-account hint replaces the misleading hardcoded "Administrator"
+    // role label (which the v0 RBAC surface couldn't actually validate
+    // against — see the GAP marker history). Dim ink so it reads as a hint
+    // rather than a username candidate. Revisit when RBAC v1 persistence
+    // lands and we have a real role-per-user lookup.
+    FramebufferDrawString(name_x, role_y, "default: admin / admin", kHintInk, ThemeCurrent().taskbar_bg);
+
+    // 5. Password field — single-line accent-stroked rect with masked echo.
+    //    Pass B Task 15.
+    //
+    //    Positioned in the lower half of the card, below the avatar/name
+    //    block. On a 1024×768 reference: 20 px inset from the card left,
+    //    86 px down from the card top (below the 40-px avatar + 40-px gap),
+    //    spanning the card width minus 40 px of horizontal padding, 28 px tall.
+    const u32 pwd_x = card_x + 20u * fb.width / 1024u;
+    const u32 pwd_y = card_y + 86u * fb.height / 768u;
+    const u32 pwd_w = card_w - 40u * fb.width / 1024u;
+    const u32 pwd_h = 28u * fb.height / 768u;
+
+    // Field body: taskbar_bg gives the same elevated-panel surface used by the
+    // avatar fill — reads as a recessed input well inside the card.
+    FramebufferFillRect(pwd_x, pwd_y, pwd_w, pwd_h, ThemeCurrent().taskbar_bg);
+
+    // Focus indicator: Pass A WindowPaintFocusGlow when the password field has
+    // keyboard focus; thin window_border stroke otherwise (matches Task 13).
+    if (g_login.focus == Field::Password)
     {
-        char locked_msg[96];
-        u32 o = 0;
-        const char* prefix = "LOCKED FOR ";
-        for (u32 i = 0; prefix[i] != '\0' && o + 1 < sizeof(locked_msg); ++i)
-        {
-            locked_msg[o++] = prefix[i];
-        }
-        for (u32 i = 0; g_login.locked_user[i] != '\0' && o + 1 < sizeof(locked_msg); ++i)
-        {
-            char c = g_login.locked_user[i];
-            if (c >= 'a' && c <= 'z')
-            {
-                c = static_cast<char>(c - 'a' + 'A');
-            }
-            locked_msg[o++] = c;
-        }
-        const char* suffix = "  -  CTRL+ALT+S TO SWITCH USER (LOGS OUT)";
-        for (u32 i = 0; suffix[i] != '\0' && o + 1 < sizeof(locked_msg); ++i)
-        {
-            locked_msg[o++] = suffix[i];
-        }
-        locked_msg[o] = '\0';
-        FramebufferDrawString(16, y_hint, locked_msg, 0x00FFC080, kBgBottom);
+        WindowPaintFocusGlow(pwd_x, pwd_y, pwd_w, pwd_h, /*is_pe_window=*/false);
     }
     else
     {
-        FramebufferDrawString(16, y_hint, "DEFAULT ACCOUNTS: ADMIN/ADMIN  GUEST/(EMPTY)", 0x00C0D0E0, kBgBottom);
+        FramebufferDrawRect(pwd_x, pwd_y, pwd_w, pwd_h, ThemeCurrent().window_border, 1u);
     }
 
-    // Flush the offscreen shadow surface to the live framebuffer in
-    // one row-by-row copy (no-op if BeginCompose fell back to direct
-    // mode).
+    // Masked password echo: render one asterisk per typed character.
+    {
+        char masked[64];
+        const u32 cap = static_cast<u32>(sizeof(masked)) - 1u;
+        const u32 n = g_login.password_len < cap ? g_login.password_len : cap;
+        for (u32 i = 0; i < n; ++i)
+        {
+            masked[i] = '*';
+        }
+        masked[n] = '\0';
+        if (n > 0u)
+        {
+            FramebufferDrawString(pwd_x + 8u * fb.width / 1024u, pwd_y + 10u * fb.height / 768u, masked,
+                                  ThemeCurrent().banner_fg, ThemeCurrent().taskbar_bg);
+        }
+    }
+
+    // 6. Sign-in button — accent fill with dark "Sign in" label.
+    //    Pass B Task 16. Right-aligned under the password field.
+    //    Font8x8MeasureString does not exist; label width is approximated
+    //    from glyph count × 8 px (8×8 bitmap font, scale=1).
+    const u32 btn_w = 170u * fb.width / 1024u;
+    const u32 btn_h = 28u * fb.height / 768u;
+    const u32 btn_x = pwd_x + pwd_w - btn_w;
+    const u32 btn_y = pwd_y + pwd_h + 14u * fb.height / 768u;
+
+    FramebufferFillRect(btn_x, btn_y, btn_w, btn_h, ThemeCurrent().taskbar_accent);
+
+    // "Sign in" = 7 glyphs × 8 px wide = 56 px at scale 1.
+    constexpr u32 kLabelPxW = 7u * 8u;
+    const char* btn_label = "Sign in";
+    FramebufferDrawString(btn_x + (btn_w - kLabelPxW) / 2u,
+                          btn_y + 10u * fb.height / 768u,
+                          btn_label,
+                          ThemeCurrent().desktop_bg,    // dark ink on accent fill
+                          ThemeCurrent().taskbar_accent); // bg matches button so glyphs blend
+
+    // 7. Status line — render g_login.status below the card body if set.
+    //    Used for "LOGIN FAILED - CHECK USERNAME / PASSWORD",
+    //    "ENTER A USERNAME", "LOCKED — USE THE SAME USER..." etc.
+    //    Without this, auth failures were silent (set the field but never
+    //    drew it) and the user had no feedback on a wrong password.
+    if (g_login.status != nullptr)
+    {
+        constexpr u32 kWarnInk = 0x00E66060u; // soft warning red
+        const u32 status_y = btn_y + btn_h + 8u * fb.height / 768u;
+        FramebufferDrawString(card_x + 14u * fb.width / 1024u, status_y,
+                              g_login.status, kWarnInk, ThemeCurrent().desktop_bg);
+    }
+
+    // Flush offscreen shadow → live framebuffer (no-op if BeginCompose
+    // fell back to direct mode).
     FramebufferEndCompose();
-    // Push the freshly-painted login surface to the active backend
-    // (virtio-gpu TRANSFER_TO_HOST_2D + RESOURCE_FLUSH; no-op for
-    // direct firmware-handoff framebuffers). Without this the
-    // virtio-gpu host display stays at whatever the GPU init painted
-    // and the user never sees the login chrome.
+    // Push to the active backend (virtio-gpu TRANSFER_TO_HOST_2D +
+    // RESOURCE_FLUSH; no-op for direct firmware-handoff framebuffers).
     drivers::video::FramebufferPresent();
 }
 
@@ -712,6 +825,58 @@ void LoginRepaint()
     // DesktopCompose; no dedicated work needed here.
 }
 
+bool LoginHitTestSignInButton(u32 cx, u32 cy)
+{
+    if (!g_login.active || g_login.mode != LoginMode::Gui)
+    {
+        return false;
+    }
+    if (!duetos::drivers::video::FramebufferAvailable())
+    {
+        return false;
+    }
+    const auto& fb = duetos::drivers::video::FramebufferGet();
+    u32 bx = 0, by = 0, bw = 0, bh = 0;
+    ComputeSignInButtonRect(fb.width, fb.height, &bx, &by, &bw, &bh);
+    return (cx >= bx) && (cx < bx + bw) && (cy >= by) && (cy < by + bh);
+}
+
+bool LoginHitTestUsernameField(u32 cx, u32 cy)
+{
+    if (!g_login.active || g_login.mode != LoginMode::Gui) return false;
+    if (!duetos::drivers::video::FramebufferAvailable()) return false;
+    const auto& fb = duetos::drivers::video::FramebufferGet();
+    u32 rx = 0, ry = 0, rw = 0, rh = 0;
+    ComputeUsernameRowRect(fb.width, fb.height, &rx, &ry, &rw, &rh);
+    return (cx >= rx) && (cx < rx + rw) && (cy >= ry) && (cy < ry + rh);
+}
+
+bool LoginHitTestPasswordField(u32 cx, u32 cy)
+{
+    if (!g_login.active || g_login.mode != LoginMode::Gui) return false;
+    if (!duetos::drivers::video::FramebufferAvailable()) return false;
+    const auto& fb = duetos::drivers::video::FramebufferGet();
+    u32 rx = 0, ry = 0, rw = 0, rh = 0;
+    ComputePasswordFieldRect(fb.width, fb.height, &rx, &ry, &rw, &rh);
+    return (cx >= rx) && (cx < rx + rw) && (cy >= ry) && (cy < ry + rh);
+}
+
+void LoginFocusUsername()
+{
+    if (!g_login.active || g_login.mode != LoginMode::Gui) return;
+    if (g_login.focus == Field::Username) return; // already focused, no repaint
+    g_login.focus = Field::Username;
+    GuiRepaint();
+}
+
+void LoginFocusPassword()
+{
+    if (!g_login.active || g_login.mode != LoginMode::Gui) return;
+    if (g_login.focus == Field::Password) return;
+    g_login.focus = Field::Password;
+    GuiRepaint();
+}
+
 void LoginReopen()
 {
     AuthLogout();
@@ -898,6 +1063,22 @@ void IdleExpect(bool cond, const char* what)
 
 } // namespace
 
+void LoginRefreshClock()
+{
+    // No-op when the gate is inactive or in TTY mode — only the
+    // framebuffer GUI path has a clock region to refresh.
+    if (!LoginIsActive() || LoginCurrentMode() != LoginMode::Gui)
+        return;
+
+    // Delegate to GuiRepaint: it repaints the full login UI from
+    // scratch (wallpaper backdrop → big clock → corner card).
+    // Once per minute the cost of a full repaint is negligible;
+    // the compositor's content-diff layer (Pass A) elides any
+    // region whose pixels are unchanged, so only the clock digits
+    // that actually differ hit the wire.
+    GuiRepaint();
+}
+
 void IdleLockSelfTest()
 {
     KLOG_TRACE_SCOPE("login", "IdleLockSelfTest");
@@ -930,6 +1111,59 @@ void IdleLockSelfTest()
     // window.
     InputActivityStamp();
     KLOG_INFO("login", "idle-lock self-test ok");
+}
+
+namespace
+{
+bool g_login_gui_selftest_passed = false;
+} // namespace
+
+void LoginGuiSelfTest()
+{
+    auto mark_fail = [](u32 code, const char* msg)
+    {
+        duetos::arch::SerialWrite(msg);
+        duetos::arch::SerialWrite("\n");
+        KBP_PROBE_V(duetos::debug::ProbeId::kBootSelftestFail, code);
+    };
+
+    // Invariant 1: corner-card coordinates compute to spec values
+    // at the canonical 1024×768 baseline.
+    constexpr u32 kFbW = 1024, kFbH = 768;
+    const u32 card_x = 694u * kFbW / 1024u;
+    const u32 card_y = 540u * kFbH / 768u;
+    const u32 card_w = 280u * kFbW / 1024u;
+    const u32 card_h = 160u * kFbH / 768u;
+    if (card_x != 694u || card_y != 540u || card_w != 280u || card_h != 160u)
+    {
+        mark_fail(0xB7, "[login-gui-selftest] FAIL card coord drift");
+        return;
+    }
+
+    // Invariant 2: clock format helper produces non-empty output.
+    char buf[32];
+    LoginFormatClock(buf, sizeof(buf));
+    if (buf[0] == '\0')
+    {
+        mark_fail(0xB8, "[login-gui-selftest] FAIL clock format empty");
+        return;
+    }
+
+    // Invariant 3: date format helper produces non-empty output.
+    LoginFormatDate(buf, sizeof(buf));
+    if (buf[0] == '\0')
+    {
+        mark_fail(0xB9, "[login-gui-selftest] FAIL date format empty");
+        return;
+    }
+
+    duetos::arch::SerialWrite("[login-gui-selftest] PASS\n");
+    g_login_gui_selftest_passed = true;
+}
+
+bool LoginGuiSelfTestPassed()
+{
+    return g_login_gui_selftest_passed;
 }
 
 } // namespace duetos::core

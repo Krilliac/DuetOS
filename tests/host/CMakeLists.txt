@@ -17,9 +17,9 @@
 # shims around hardware accessors, the coverage here grows.
 #
 # Standalone project — NOT included from the root CMakeLists.txt.
-# Build via:
+# Build via (from the repo root):
 #
-#   cmake --preset host-tests
+#   cmake -S tests/host -B build/host-tests
 #   cmake --build build/host-tests
 #   ctest --test-dir build/host-tests --output-on-failure
 
@@ -110,3 +110,4 @@ add_host_test(forwarder)
 add_host_test(thunk_hash)
 add_host_test(blend)
 add_host_test(shadow_atlas)
+add_host_test(motion_math)

@@ -1145,6 +1145,101 @@ with a timeout+retry guard. Verified by `userland/apps/sync_smoke`
 `WakeByAddressSingle` handshake, and the two-call `InitOnce` all
 PASS, with zero SEH or browser regression.
 
+## Phase 6.19 — Chrome tactility (Pass A): blend math, soft shadows, per-theme intensity (2026-05-24)
+
+Pass A of the four-pass UX initiative. Until this slice, every window
+border, shadow, hover lift, and focus glow was a flat opaque rect or
+a fixed-width integer fill. Pass A made the compositor *physically
+aware*: a window casts a soft gaussian-falloff shadow, a focused
+window glows, a hovered chrome element lifts.
+
+What landed (23 of 28 plan tasks, merged via PR #338):
+
+- **`BlendRgba` / `BlendFill` math.** Porter-Duff `src-over` with
+  alpha, skip-if-zero-alpha fast path, 8 × vectorisable iterations per
+  fill call. Used by every chrome paint path below.
+- **Atlas-based 9-slice soft shadow.** A 32 × 32 grey-level atlas
+  baked at startup (one quadrant, 4 corner tiles + 4 edge tiles at
+  `ATLAS_CORNER = 8 px`). `ShadowPaint9Slice` expands it to any window
+  size in nine-slice fashion, compositing the shadow colour below the
+  window surface without copying the framebuffer.
+- **Seven new `Theme` fields:** `chrome_shadow_color`,
+  `chrome_shadow_opacity`, `chrome_hover_lift_alpha`,
+  `chrome_press_deepen_alpha`, `chrome_focus_glow_color`,
+  `chrome_focus_glow_opacity`, `tactility_enabled`. Per-theme intensity
+  matrix (HighContrast opts out entirely; Classic uses subdued values).
+- **Runtime override:** `tactility=on|off|auto` on the kernel cmdline
+  (mirrors the per-theme matrix for accessibility overrides).
+- **Chrome paint integration** on windows, modals, snap previews,
+  taskbar tabs + strip, menu panels, and the
+  `WindowPaintFocusGlow` helper.
+- **HighContrast invariant verified:** `tools/test/hc-invariant-check.sh`
+  confirms the auto-vs-override pixel diff (324 px) is below the
+  inter-boot noise floor (333 px) — tactility motion leaves
+  HighContrast bit-for-bit identical to pre-spec.
+- **Test infrastructure:** `tools/test/tactility-screenshot-matrix.sh`,
+  `tools/test/hc-invariant-check.sh`, `tools/test/boot-determinism-sweep.sh`.
+  Analyzer extended with a TACTILITY section (`blend=N shadow=N …`).
+
+See [`Compositor`](../subsystems/Compositor.md#chrome-tactility-pass-a)
+for the subsystem reference and
+[`Roadmap`](../reference/Roadmap.md#chrome-tactility-pass-a--residual-polish--pass-a-verification)
+for the deferred residuals.
+
+## Phase 6.20 — First-impression moments (Pass B): splash, wallpaper motion, login GUI (2026-05-24)
+
+Pass B of the four-pass UX initiative. Until this slice, the boot
+sequence was invisible: the framebuffer showed a flat fill before
+login, and the login screen was a bare credential form with no visual
+relationship to the desktop. Pass B makes the four moments before any
+app opens — boot, login, lock, desktop — feel like one continuous,
+characterful surface.
+
+What landed (all 25 plan tasks):
+
+- **Boot splash** (`kernel/drivers/video/splash.{h,cpp}`). Full-screen
+  wallpaper pattern paints immediately after `FramebufferInit()`. A
+  phase ticker line at bottom-left snaps on each `SplashAdvancePhase()`
+  call. Arcs rotate ±5° over 60 s; the pulse glow breathes on an 8 s
+  sine; topo curves drift 1 px/s. `SplashDismiss()` clears the ticker
+  rect and exits cleanly into the login path.
+- **Animated wallpaper** (`kernel/drivers/video/wallpaper.{h,cpp}` +
+  `WallpaperTick`). Three independent motion paths — arc rotation,
+  pulse glow (alpha), topo drift — each computed from a shared
+  `g_motion_ticks` counter advanced by the compositor tick scheduler at
+  ≤ 15 FPS. Surgical dirty-rect declarations so Pass A's frame-elision
+  continues to elide static chrome regions.
+- **Login GUI redesign** (`kernel/drivers/video/login.{h,cpp}`).
+  The same wallpaper backdrop (unchanged from splash) is the floor.
+  A 84 px display-weight clock top-centre uses HPET. An atlas-shadow
+  corner card bottom-right holds avatar (48 px arc placeholder),
+  username + role label, a Pass A focus-glow password field, and a
+  sign-in button. `LoginRefreshClock` + `WallpaperTick` fire on every
+  minute boundary.
+- **Lock screen** — the login screen is the lock screen with
+  session-aware state; no new code path required.
+- **Per-theme motion intensity** (`Theme::motion_intensity`). Five
+  values: `Full` (Duet, Amber, Slate10), `Subdued` (Classic),
+  `None` (HighContrast). The `motion=on|off|auto` cmdline override
+  pairs with the per-theme matrix (same pattern as `tactility=`).
+- **Self-tests:** `SplashSelfTest`, `WallpaperMotionSelfTest`,
+  `LoginGuiSelfTest`, and the umbrella `PassBSelfTest`. Boot-log
+  analyzer extended with a PASS B section (`splash=N wallpaper-motion=N
+  login-gui=N umbrella=N`).
+- **Test infrastructure:** `tools/test/pass-b-soak.sh`,
+  `tools/test/tactility-screenshot-matrix.sh --splash --login --lock
+  --wallpaper` (extended Task 22).
+
+Verified on QEMU (2026-05-24): all PASS B sentinels fire, analyzer
+reports clean, soak shows zero errors / zero real lockups / zero missed
+ticks, no Pass A regressions.
+
+See [`Compositor`](../subsystems/Compositor.md#first-impression-moments-pass-b)
+for the subsystem reference and
+[`Roadmap`](../reference/Roadmap.md#chrome-tactility-pass-b--residual-polish--pass-b-verification)
+for the deferred residuals (VBox visual verification + screenshot
+matrix, same pattern as the Pass A residuals).
+
 ## How to read the rest of the tree
 
 - `CLAUDE.md` — the authoritative project context, coding standards,

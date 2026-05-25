@@ -247,6 +247,14 @@ struct Theme
     // without it. Independent of tactility_enabled so a
     // tactility=off boot still gets a crisp cursor.
     bool cursor_microshadow_enabled;
+
+    // Motion intensity (0..255, where 255 means "full motion per the
+    // Pass B spec"). Scales arc rotation speed, pulse alpha amplitude,
+    // and topo drift speed. Gated by tactility_enabled — if tactility
+    // is off, motion is off regardless of this value.
+    //
+    // See docs/superpowers/specs/2026-05-24-duetos-pass-b-design.md §7.
+    u8 motion_intensity;
 };
 
 /// Read-only snapshot of the active theme. Valid for as long as
@@ -337,6 +345,21 @@ bool ThemeSelfTestPassed();
 // `tactility on|off|default` shell command at runtime.
 i8 ThemeTactilityOverride();
 void ThemeSetTactilityOverride(i8 v);
+
+// ----- Motion runtime override (Pass B) -----
+//
+// Three-state: kAuto = honour active theme's motion_intensity,
+// kOff = force 0 (no motion), kOn = force 255 (full motion).
+// tactility_enabled is the master gate — kOn under HighContrast
+// still produces zero motion (see spec §7). Set via the `motion=`
+// kernel cmdline at boot.
+enum class MotionOverride : u8 { kAuto, kOn, kOff };
+void ThemeSetMotionOverride(MotionOverride o);
+
+/// Effective motion intensity (0..255) after applying the
+/// runtime override and the tactility_enabled master gate.
+/// Use this from every motion-aware paint path.
+u8 ThemeEffectiveMotionIntensity();
 
 /// Resolved tactility setting for the active theme. Equivalent to
 /// `(override == -1) ? current_theme.tactility_enabled

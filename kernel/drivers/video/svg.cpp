@@ -450,7 +450,29 @@ bool SvgParse(const u8* bytes, u32 size, SvgImage* image)
     return true;
 }
 
-void SvgRender(const SvgImage& image, i32 target_x, i32 target_y, u32 target_w, u32 target_h)
+// Apply a tint to a shape's stroke colour. `tint_argb` is 0xAARRGGBB;
+// alpha byte drives how strongly the pixel moves toward the tint RGB.
+// Alpha == 0 → unchanged; alpha == 255 → fully replaced by tint RGB.
+// Uses 8-bit straight-alpha "src-over" per-channel arithmetic.
+static u32 ApplySvgTint(u32 stroke_rgb, u32 tint_argb)
+{
+    const u32 alpha = (tint_argb >> 24) & 0xFFU;
+    if (alpha == 0)
+        return stroke_rgb;
+    const u32 inv = 255U - alpha;
+    const u32 tr = (tint_argb >> 16) & 0xFFU;
+    const u32 tg = (tint_argb >> 8) & 0xFFU;
+    const u32 tb = tint_argb & 0xFFU;
+    const u32 sr = (stroke_rgb >> 16) & 0xFFU;
+    const u32 sg = (stroke_rgb >> 8) & 0xFFU;
+    const u32 sb = stroke_rgb & 0xFFU;
+    const u32 r = (sr * inv + tr * alpha) / 255U;
+    const u32 g = (sg * inv + tg * alpha) / 255U;
+    const u32 b = (sb * inv + tb * alpha) / 255U;
+    return (r << 16) | (g << 8) | b;
+}
+
+void SvgRender(const SvgImage& image, i32 target_x, i32 target_y, u32 target_w, u32 target_h, u32 tint_argb)
 {
     if (image.viewbox_w == 0 || image.viewbox_h == 0 || target_w == 0 || target_h == 0)
         return;
@@ -467,13 +489,14 @@ void SvgRender(const SvgImage& image, i32 target_x, i32 target_y, u32 target_w, 
     for (u32 i = 0; i < image.shape_count; ++i)
     {
         const SvgShape& sh = image.shapes[i];
+        const u32 stroke = ApplySvgTint(sh.stroke_rgb, tint_argb);
         switch (sh.kind)
         {
         case SvgShapeKind::Line:
-            FramebufferDrawLine(map_x(sh.ax), map_y(sh.ay), map_x(sh.bx), map_y(sh.by), sh.stroke_rgb);
+            FramebufferDrawLine(map_x(sh.ax), map_y(sh.ay), map_x(sh.bx), map_y(sh.by), stroke);
             break;
         case SvgShapeKind::Circle:
-            FramebufferDrawCircle(map_x(sh.ax), map_y(sh.ay), map_r(sh.bx), sh.stroke_rgb);
+            FramebufferDrawCircle(map_x(sh.ax), map_y(sh.ay), map_r(sh.bx), stroke);
             break;
         case SvgShapeKind::Path:
         {
@@ -495,7 +518,7 @@ void SvgRender(const SvgImage& image, i32 target_x, i32 target_y, u32 target_w, 
                 }
                 scratch[s] = src;
             }
-            FramebufferStrokePath(scratch, n, sh.stroke_width, sh.stroke_rgb);
+            FramebufferStrokePath(scratch, n, sh.stroke_width, stroke);
             break;
         }
         }

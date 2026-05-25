@@ -126,6 +126,7 @@ void CmdHelp()
     ConsoleWriteln("  HWMON        UNIFIED SENSORS VIEW (SMBIOS + THERMAL + POWER + FANS)");
     ConsoleWriteln("  GPU          LIST DISCOVERED GPUS");
     ConsoleWriteln("  VBE [W H [B]]  QUERY / SET BOCHS-VBE DISPLAY MODE");
+    ConsoleWriteln("  FBDUMP [SCALED]  FRAMEBUFFER -> BASE64 PPM ON SERIAL (^C ABORT)");
     ConsoleWriteln("  NIC          LIST NICS + MAC + LINK");
     ConsoleWriteln("  IFCONFIG     PER-IFACE: LINK / MAC / IP / GATEWAY / DNS / LEASE");
     ConsoleWriteln("  NETSCAN      LIST WIRELESS + WIRED NETWORKS WE COULD CONNECT TO");
@@ -722,7 +723,7 @@ constinit const char* const kCommandSet[] = {
     "script",      "exit",         "mkfs",       "mkfs.duetfs", "install",   "lastdump",   "loadtest",  "stress",
     "bench",       "dbg",          "dfix",       "dintro",      "selfthink", "drshd",      "pe-triage", "caplog",
     "live-update", "fault-inject", "suspend",    "resume",      "affinity",  "vtop",       "logclock",  "dpms",
-    "wrmsr",       "io",           "peek",       "poke",
+    "wrmsr",       "io",           "peek",       "poke",       "fbdump",
 };
 constinit const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1338,6 +1339,11 @@ void Dispatch(char* line)
     if (StrEq(cmd, "monitor"))
     {
         CmdMonitor(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "fbdump"))
+    {
+        CmdFbdump(argc, argv);
         return;
     }
     if (StrEq(cmd, "ping"))

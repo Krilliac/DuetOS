@@ -90,6 +90,30 @@ inline void MarkDamage(u32 x, u32 y, u32 w, u32 h)
     g_damage.Extend(x, y, w, h);
 }
 
+// --- Snapshot invalidation (direct-FB-writer hook) -----------------
+//
+// Pass A's compose elision diffs offscreen vs presented-snapshot and
+// only blits divergent pixels. That's blind to writes that bypass the
+// offscreen surface (the cursor sprite is the primary case — see
+// drivers/video/cursor.cpp). When such a writer touches live FB, it
+// must call `FramebufferInvalidateSnapshot` to tell the next EndCompose
+// "the snapshot at this rect is no longer trustworthy — force a blit
+// from the offscreen here regardless of pixel-level equality." The
+// blit then writes offscreen contents (which lack the cursor sprite)
+// to live FB, cleanly erasing the cursor pixels left behind by direct
+// writes. The cursor is then re-painted into the next offscreen via
+// `CursorOverlayInCompose` so the blit lands the cursor at the
+// CURRENT position atomically.
+//
+// Bounded to 8 rects per compose cycle; on overflow new entries are
+// merged into the nearest existing rect (degrading toward a single
+// bounding box). Cursor sprite movement at PS/2 rate (~60 Hz) over a
+// ~70 ms compose cycle produces at most ~4-8 invalidations — well
+// within the cap before merging kicks in.
+constexpr u32 kMaxInvalidations = 8;
+constinit DamageRect g_invalidations[kMaxInvalidations] = {};
+constinit u32 g_invalidation_count = 0;
+
 // --- Multi-rect (banded) damage for the present path ---------------
 //
 // D1 fix. The content diff (FramebufferEndCompose) used to collapse
@@ -475,6 +499,56 @@ void FramebufferResetDamage()
     g_damage_rect_count = 0;
 }
 
+void FramebufferInvalidateSnapshot(u32 x, u32 y, u32 w, u32 h)
+{
+    if (!g_available || w == 0 || h == 0)
+        return;
+    if (x >= g_info.width || y >= g_info.height)
+        return;
+    const u32 x_end = (x + w > g_info.width) ? g_info.width : x + w;
+    const u32 y_end = (y + h > g_info.height) ? g_info.height : y + h;
+    const u32 cw = x_end - x;
+    const u32 ch = y_end - y;
+
+    // Try to merge into an existing rect that overlaps or touches the
+    // new one — keeps the count small for cursor movements that pass
+    // over (or near) the same region multiple times.
+    for (u32 i = 0; i < g_invalidation_count; ++i)
+    {
+        const auto& r = g_invalidations[i];
+        // Touch / overlap test: one rect's right edge >= the other's
+        // left, AND vice versa, for both axes.
+        if (x <= r.x + r.w && r.x <= x + cw && y <= r.y + r.h && r.y <= y + ch)
+        {
+            g_invalidations[i].Extend(x, y, cw, ch);
+            return;
+        }
+    }
+
+    if (g_invalidation_count < kMaxInvalidations)
+    {
+        g_invalidations[g_invalidation_count].Reset();
+        g_invalidations[g_invalidation_count].Extend(x, y, cw, ch);
+        ++g_invalidation_count;
+        return;
+    }
+
+    // Overflow: merge into the smallest existing rect (degrades toward
+    // a single bounding box over time but keeps coverage complete).
+    u32 smallest = 0;
+    u64 smallest_area = static_cast<u64>(g_invalidations[0].w) * g_invalidations[0].h;
+    for (u32 i = 1; i < kMaxInvalidations; ++i)
+    {
+        const u64 a = static_cast<u64>(g_invalidations[i].w) * g_invalidations[i].h;
+        if (a < smallest_area)
+        {
+            smallest = i;
+            smallest_area = a;
+        }
+    }
+    g_invalidations[smallest].Extend(x, y, cw, ch);
+}
+
 void FramebufferBeginCompose()
 {
     if (!g_available || g_compose_active)
@@ -575,6 +649,37 @@ void FramebufferEndCompose()
 {
     if (!g_compose_active)
         return;
+
+    // Snapshot-invalidation pass: external direct-FB writers (cursor)
+    // accumulate rects via FramebufferInvalidateSnapshot. The diff
+    // scan below would elide these regions because offscreen and
+    // snapshot match (the writer's pixels live on LIVE FB and are
+    // invisible to both). Force a blit from offscreen → live and
+    // sync snapshot at each invalidated rect. This erases the
+    // writer's pixels (e.g. cursor at an old position) by writing
+    // the compose-rendered content over them. Cheap: ~16x16 per
+    // cursor invalidation, up to 8 rects per compose.
+    if (g_invalidation_count > 0 && g_presented_base != nullptr && g_presented_valid)
+    {
+        for (u32 i = 0; i < g_invalidation_count; ++i)
+        {
+            const auto& r = g_invalidations[i];
+            if (!r.valid || r.w == 0 || r.h == 0)
+                continue;
+            const u32 bx = r.x;
+            const u32 by = r.y;
+            const u32 bx_end = (r.x + r.w > g_info.width) ? g_info.width : r.x + r.w;
+            const u32 by_end = (r.y + r.h > g_info.height) ? g_info.height : r.y + r.h;
+            if (bx >= bx_end || by >= by_end)
+                continue;
+            BlitShadowRectToLive(bx, by, bx_end, by_end);
+            SyncShadowRectToSnapshot(bx, by, bx_end, by_end);
+            // Also extend g_damage so the present hook flushes these
+            // pixels to the backend (virtio-gpu TRANSFER_TO_HOST_2D).
+            g_damage.Extend(bx, by, bx_end - bx, by_end - by);
+        }
+        g_invalidation_count = 0;
+    }
 
     // Nothing was painted at all this pass — leave the screen as-is.
     // `g_damage.valid == false` also makes FramebufferPresent skip
@@ -1496,6 +1601,36 @@ i32 CosDegQ16(i32 deg)
 
 } // namespace
 
+// Fractional-degree sin/cos using linear interpolation of the existing
+// Q16.16 integer table. Input is any double in degrees; output is a
+// double in [-1, +1]. Error vs true sin/cos < 0.5 LSB of the table
+// (< 0.0015 rad), well below any visible arc-rotation artefact at the
+// ±5° sweep range PaintDuetArcs uses.
+//
+// File-scope static — not in the anonymous namespace so
+// FramebufferStrokeArcFloat (a public function) can call it without an
+// internal-linkage violation. Does not pull in any math library header.
+static double SinDegF(double deg)
+{
+    // Reduce to [0, 360).
+    while (deg < 0.0)
+        deg += 360.0;
+    while (deg >= 360.0)
+        deg -= 360.0;
+    // Lerp between the two nearest integer-degree entries.
+    const i32 d0 = static_cast<i32>(deg);
+    const i32 d1 = (d0 + 1) % 360;
+    const double frac = deg - static_cast<double>(d0);
+    const double s0 = static_cast<double>(SinDegQ16(d0)) / 65536.0;
+    const double s1 = static_cast<double>(SinDegQ16(d1)) / 65536.0;
+    return s0 + frac * (s1 - s0);
+}
+
+static double CosDegF(double deg)
+{
+    return SinDegF(deg + 90.0);
+}
+
 void FramebufferStrokeArc(i32 cx, i32 cy, i32 radius, i32 start_deg, i32 sweep_deg, u32 thickness, u32 rgb)
 {
     if (!g_available || radius <= 0 || thickness == 0)
@@ -1543,6 +1678,55 @@ void FramebufferStrokeArc(i32 cx, i32 cy, i32 radius, i32 start_deg, i32 sweep_d
                 FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py), rgb);
             }
         }
+    }
+}
+
+void FramebufferStrokeArcFloat(i32 cx, i32 cy, i32 radius, double start_deg, double sweep_deg, u32 thickness, u32 rgb)
+{
+    if (!g_available || radius <= 0 || thickness == 0)
+        return;
+    // Step size: ~1 pixel of arc length at this radius.
+    // `step = 180 / (π * r)` degrees ≈ `57.3 / r`. Clamped to [0.1°, 1.0°]
+    // so tiny radii don't explode the loop and huge radii stay gapless.
+    double step = 57.3 / static_cast<double>(radius);
+    if (step > 1.0)
+        step = 1.0;
+    if (step < 0.1)
+        step = 0.1;
+
+    // Walk the sweep in fractional-degree steps. A negative sweep
+    // walks backward; cap magnitude at 360° so a full revolution is
+    // the maximum.
+    double walk = sweep_deg;
+    double sign = 1.0;
+    if (walk < 0.0)
+    {
+        walk = -walk;
+        sign = -1.0;
+    }
+    if (walk > 360.0)
+        walk = 360.0;
+
+    const i32 half = static_cast<i32>(thickness / 2);
+    double d = 0.0;
+    while (d <= walk)
+    {
+        const double angle = start_deg + sign * d;
+        const double c = CosDegF(angle);
+        const double s = SinDegF(angle);
+        for (u32 t = 0; t < thickness; ++t)
+        {
+            const i32 r = radius - half + static_cast<i32>(t);
+            if (r <= 0)
+                continue;
+            const i32 px = cx + static_cast<i32>(c * static_cast<double>(r) + 0.5);
+            const i32 py = cy + static_cast<i32>(s * static_cast<double>(r) + 0.5);
+            if (px >= 0 && py >= 0 && static_cast<u32>(px) < g_info.width && static_cast<u32>(py) < g_info.height)
+            {
+                FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py), rgb);
+            }
+        }
+        d += step;
     }
 }
 

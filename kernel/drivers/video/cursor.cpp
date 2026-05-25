@@ -338,6 +338,12 @@ void RestoreAt(u32 x, u32 y)
             FramebufferPutPixel(x + xi, y + yi, g_backing[yi][xi]);
         }
     }
+    // Tell the compositor that direct-FB writes happened here so the
+    // next EndCompose force-blits offscreen contents over this rect,
+    // erasing any stale cursor pixels the snapshot still thinks are
+    // valid. Without this, the compose diff-elision masks the change
+    // and cursor trails appear (see framebuffer.h docstring).
+    FramebufferInvalidateSnapshot(x, y, kCursorWidth, kCursorHeight);
 }
 
 void DrawAt(u32 x, u32 y)
@@ -355,6 +361,13 @@ void DrawAt(u32 x, u32 y)
             FramebufferPutPixel(x + xi, y + yi, rgb);
         }
     }
+    // Tell the compositor we touched live-FB pixels here so the next
+    // EndCompose force-blits the offscreen content over this rect.
+    // Without it, cursor pixels persist on live FB whenever the
+    // offscreen at this position matches the snapshot (very common —
+    // wallpaper doesn't change everywhere). See framebuffer.h
+    // FramebufferInvalidateSnapshot docstring for the full rationale.
+    FramebufferInvalidateSnapshot(x, y, kCursorWidth, kCursorHeight);
 }
 
 } // namespace
@@ -451,6 +464,40 @@ void CursorShow()
     SaveAt(g_x, g_y);
     DrawAt(g_x, g_y);
     g_ready = true;
+}
+
+void CursorOverlayInCompose()
+{
+    // v6 (post snapshot-invalidation hook): paint the cursor sprite
+    // into the offscreen compose buffer at the CURRENT (g_x, g_y).
+    // FramebufferPutPixel auto-routes to the offscreen shadow during
+    // compose, so DrawAt writes the sprite there. The subsequent
+    // EndCompose blit publishes the cursor atomically with the rest
+    // of the composed frame — no visual gap, no flash.
+    //
+    // The trail problem that killed v2-v4 is now fixed by the
+    // snapshot-invalidation hook: MouseReader's RestoreAt/DrawAt
+    // calls FramebufferInvalidateSnapshot, which forces EndCompose
+    // to blit offscreen contents at the cursor's prior positions
+    // (erasing residual cursor pixels left on live FB). The
+    // CURRENT position is also blitted (cursor sprite from this
+    // overlay), so the cursor visibly relocates atomically.
+    //
+    // No SaveAt here — backing remains owned by MouseReader's
+    // CursorMove. The cursor sprite is composed; the backing
+    // tracks what's UNDER the cursor on live FB. Both are correct
+    // because the invalidation-driven force-blit puts wallpaper
+    // (not cursor) at the cursor rect into live FB before this
+    // overlay's blit lands the cursor sprite on top.
+    if (!g_ready)
+    {
+        return;
+    }
+    if (!FramebufferAvailable())
+    {
+        return;
+    }
+    DrawAt(g_x, g_y);
 }
 
 void CursorSetDesktopBackground(u32 rgb)

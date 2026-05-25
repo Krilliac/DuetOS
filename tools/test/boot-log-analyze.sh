@@ -169,6 +169,32 @@ if [ "$tact_umbrella" -gt 0 ] && { [ "$tact_blend" -eq 0 ] || [ "$tact_shadow" -
 fi
 
 hr
+echo "PASS B (first-impression moments)"
+# Pass B added three PASS sentinels (splash, wallpaper-motion,
+# login-gui) and one umbrella that the login bringup emits only
+# when all three sub-tests passed.  Probe fires in the 0xB3-0xB9
+# range are Pass B regression signals even if the sentinel counts
+# look clean.
+pb_splash=$(gc '\[splash-selftest\] PASS')
+pb_wpm=$(gc '\[wallpaper-motion-selftest\] PASS')
+pb_lg=$(gc '\[login-gui-selftest\] PASS')
+pb_umbrella=$(gc '\[pass-b-selftest\] PASS')
+pb_probes=$(gc 'ProbeFire.*kBootSelftestFail.*0xB[3-9]')
+echo "  splash=${pb_splash}  wallpaper-motion=${pb_wpm}  login-gui=${pb_lg}  umbrella=${pb_umbrella}"
+echo "  probe fires=${pb_probes}"
+if [ "$pb_probes" -gt 0 ]; then
+    g 'ProbeFire.*kBootSelftestFail.*0xB[3-9]' | head -3 | sed 's/^/  !! /'
+    rc=1
+fi
+# Umbrella requires all three sub-tests; if any sub PASS is zero but
+# umbrella > 0, that's a wiring bug in the bringup aggregator.
+if [ "$pb_umbrella" -gt 0 ] && { [ "$pb_splash" -eq 0 ] || [ "$pb_wpm" -eq 0 ] || [ "$pb_lg" -eq 0 ]; }; then
+    echo "  !! umbrella PASS without all sub-tests (bringup aggregator wiring bug)"
+    rc=1
+fi
+# Lock screen reuses the login-gui paint path — no separate selftest.
+
+hr
 echo "LOCKDEP"
 invn=$(gc 'inversion detected')
 if [ "$invn" -gt 0 ]; then

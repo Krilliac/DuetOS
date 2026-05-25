@@ -118,6 +118,9 @@ constexpr Theme kClassic = {
     .press_alpha = 100,
     .focus_glow_colour = 0x245EDC,
     .cursor_microshadow_enabled = false,
+
+    // Pass B - motion_intensity: Classic is subdued (≈ 0.3 × 255, see spec §7)
+    .motion_intensity = 77,
 };
 
 // Amber is a deliberate retro exercise — a single-hue amber palette
@@ -208,6 +211,9 @@ constexpr Theme kAmber = {
     .press_alpha = 0,
     .focus_glow_colour = 0xF5B73A,
     .cursor_microshadow_enabled = false,
+
+    // Pass B - motion_intensity: full (tactility_enabled=false gates motion at runtime)
+    .motion_intensity = 255,
 };
 
 constexpr Theme kSlate10 = {
@@ -301,6 +307,9 @@ constexpr Theme kSlate10 = {
     .press_alpha = 255,
     .focus_glow_colour = 0x0078D4,
     .cursor_microshadow_enabled = true,
+
+    // Pass B - motion_intensity: full
+    .motion_intensity = 255,
 };
 
 // Duet — the redesigned palette. Slate-charcoal canvas, dual-accent
@@ -402,6 +411,9 @@ constexpr Theme kDuet = {
     .press_alpha = 255,
     .focus_glow_colour = 0x2DD4BF,
     .cursor_microshadow_enabled = true,
+
+    // Pass B - motion_intensity: full
+    .motion_intensity = 255,
 };
 
 // DuetLight — light-mode sibling of Duet, sourced from the
@@ -495,6 +507,9 @@ constexpr Theme kDuetLight = {
     .press_alpha = 200,
     .focus_glow_colour = 0x0F9B8A,
     .cursor_microshadow_enabled = true,
+
+    // Pass B - motion_intensity: full
+    .motion_intensity = 255,
 };
 
 // Duet accent variants. Each one duplicates the slate Duet
@@ -573,6 +588,9 @@ constexpr Theme kDuetBlue = {
     .press_alpha = 255,
     .focus_glow_colour = 0x0078D4,
     .cursor_microshadow_enabled = true,
+
+    // Pass B - motion_intensity: full
+    .motion_intensity = 255,
 };
 
 constexpr Theme kDuetViolet = {
@@ -640,6 +658,9 @@ constexpr Theme kDuetViolet = {
     .press_alpha = 255,
     .focus_glow_colour = 0x9B59B6,
     .cursor_microshadow_enabled = true,
+
+    // Pass B - motion_intensity: full
+    .motion_intensity = 255,
 };
 
 constexpr Theme kDuetGreen = {
@@ -707,6 +728,9 @@ constexpr Theme kDuetGreen = {
     .press_alpha = 255,
     .focus_glow_colour = 0xF5B73A,
     .cursor_microshadow_enabled = true,
+
+    // Pass B - motion_intensity: full
+    .motion_intensity = 255,
 };
 
 // DuetClassic — the prototype's "classic mode" sibling.
@@ -806,6 +830,9 @@ constexpr Theme kDuetClassic = {
     .press_alpha = 200,
     .focus_glow_colour = 0,
     .cursor_microshadow_enabled = false,
+
+    // Pass B - motion_intensity: full (Duet variant)
+    .motion_intensity = 255,
 };
 
 // HighContrast — accessibility-first theme. Pure black bg,
@@ -892,6 +919,9 @@ constexpr Theme kHighContrast = {
     .press_alpha = 0,
     .focus_glow_colour = 0xFFFFFF,
     .cursor_microshadow_enabled = false,
+
+    // Pass B - motion_intensity: 0 (double-gated: tactility_enabled=false + motion=0)
+    .motion_intensity = 0,
 };
 
 const Theme* const kThemes[static_cast<u32>(ThemeId::kCount)] = {
@@ -1223,10 +1253,55 @@ void ThemeSelfTest()
         }
     }
 
+    // Pass B invariants — motion_intensity.
+    //
+    // (1) HighContrast must have motion_intensity == 0 AND tactility_enabled == false.
+    //     Double-gate is intentional: tactility_enabled is the master,
+    //     motion_intensity is the per-effect knob. Either alone disables motion.
+    if (pass)
+    {
+        const Theme& hc = *kThemes[static_cast<u32>(ThemeId::HighContrast)];
+        if (hc.tactility_enabled || hc.motion_intensity != 0)
+        {
+            SerialWrite("[theme-selftest] FAIL HighContrast motion gate broken\n");
+            KBP_PROBE_V(debug::ProbeId::kBootSelftestFail, 0xB0);
+            mark_fail(8);
+        }
+    }
+    // (2) Classic must have motion_intensity < 128 (subdued — see spec §7).
+    if (pass)
+    {
+        const Theme& cl = *kThemes[static_cast<u32>(ThemeId::Classic)];
+        if (cl.motion_intensity >= 128)
+        {
+            SerialWrite("[theme-selftest] FAIL Classic motion_intensity not subdued\n");
+            KBP_PROBE_V(debug::ProbeId::kBootSelftestFail, 0xB1);
+            mark_fail(9);
+        }
+    }
+    // (3) Every other theme with tactility_enabled must have motion_intensity == 255.
+    if (pass)
+    {
+        for (u32 i = 0; i < static_cast<u32>(ThemeId::kCount); ++i)
+        {
+            if (i == static_cast<u32>(ThemeId::HighContrast) || i == static_cast<u32>(ThemeId::Classic))
+                continue;
+            const Theme& t = *kThemes[i];
+            if (t.tactility_enabled && t.motion_intensity != 255)
+            {
+                SerialWrite("[theme-selftest] FAIL non-classic non-hc not full motion\n");
+                KBP_PROBE_V(debug::ProbeId::kBootSelftestFail, 0xB2);
+                mark_fail(10);
+                break;
+            }
+        }
+    }
+
     if (pass)
     {
         SerialWrite("[theme] self-test OK (palette table + name round-trip + cycle)\n");
         SerialWrite("[theme-selftest] tactility-matrix PASS (10/10, hc-amber-opt-out=verified)\n");
+        SerialWrite("[theme-selftest] motion-intensity PASS (hc-double-gate + classic-subdued + others-full)\n");
         s_theme_passed = true;
     }
     else
@@ -1249,6 +1324,14 @@ void ThemeSelfTest()
 //       for screenshot capture but cosmetically wrong; expected to
 //       be a debugging affordance only).
 constinit i8 g_tactility_override = -1;
+
+// ----- Motion runtime override (Pass B) -----
+//
+// kAuto = use the theme's configured motion_intensity.
+// kOn   = force 255 (full motion), still gated by tactility_enabled.
+// kOff  = force 0 (no motion). Parsed from the `motion=` cmdline
+//         argument in boot_bringup.cpp.
+static MotionOverride g_motion_override = MotionOverride::kAuto;
 
 i8 ThemeTactilityOverride()
 {
@@ -1296,6 +1379,28 @@ u8 ThemeIntensityEffective(u8 raw)
 bool ThemeSelfTestPassed()
 {
     return s_theme_passed;
+}
+
+void ThemeSetMotionOverride(MotionOverride o)
+{
+    g_motion_override = o;
+}
+
+u8 ThemeEffectiveMotionIntensity()
+{
+    const Theme& t = ThemeCurrent();
+    if (!t.tactility_enabled)
+        return 0; // master gate wins — motion is always disabled when tactility is off
+    switch (g_motion_override)
+    {
+        case MotionOverride::kOff:
+            return 0;
+        case MotionOverride::kOn:
+            return 255;
+        case MotionOverride::kAuto:
+            return t.motion_intensity;
+    }
+    return t.motion_intensity;
 }
 
 } // namespace duetos::drivers::video

@@ -760,6 +760,56 @@ When a residual ships, delete its bullet here and update the
 [`Compositor`](../subsystems/Compositor.md) subsystem page's
 "Deferred from Pass A" call-out.
 
+### Chrome tactility (Pass B) — residual polish + Pass B verification
+
+The first-impression moments plan
+(`docs/superpowers/plans/2026-05-24-duetos-pass-b.md`)
+landed all 25 tasks: boot splash with motion + phase ticker, animated
+wallpaper with arc rotation / pulse / topo drift, login GUI with
+backdrop clock + avatar card + atlas-shadow + focus-glow password
+field + sign-in button. See
+[`Compositor`](../subsystems/Compositor.md#first-impression-moments-pass-b)
+for the subsystem summary.
+
+QEMU verification complete (2026-05-24): all Pass B self-tests fire
+(`[splash-selftest] PASS`, `[wallpaper-motion-selftest] PASS`,
+`[login-gui-selftest] PASS`, `[pass-b-selftest] PASS`); the
+boot-log-analyzer PASS B section reports `splash=1 wallpaper-motion=1
+login-gui=1 umbrella=1 probe fires=0`; no Pass A regressions;
+soak reports zero wallpaper/splash/login errors, zero real soft-lockup
+warnings, zero compositor missed ticks.
+
+The residuals waiting on visual verification:
+
+- **VBox boot verification.** Pairs with the Pass A VBox residual
+  above. Same approach: boot the matrix under VirtualBox after QEMU
+  verification; LAPIC / GS-base differences from QEMU sometimes catch
+  what QEMU doesn't. Run after the Pass A VBox verification is cleared.
+- **Screenshot matrix for splash / login surfaces.** The
+  `tactility-screenshot-matrix.sh --splash --login --wallpaper`
+  invocation from the spec §10 criterion 1 requires QEMU PPM capture
+  (`-screendump`), which is infra-limited in the headless WSL dev
+  environment. Cleared automatically when VBox visual verification runs
+  (the GUI boot produces the visible frames the spec calls for).
+
+Follow-on items surfaced during live VBox testing of Pass B:
+
+- **Mouse-click positioning under headless QEMU rel-mode.**
+  `tools/test/qmp-click.sh` ships in two modes — `abs` for display
+  setups and `rel` for headless. The rel-mode "snap to origin via
+  Δ=-65535 then move by (X, Y)" pattern is reliable for the snap part
+  but the move-by-(X,Y) sometimes doesn't fully propagate through the
+  PS/2 driver under fast successive calls (observed: cursor stays at
+  origin after a click on (400, 400)). Needs a per-call settling
+  delay or per-axis ack from the kernel-side PS/2 ringbuffer; for now,
+  treat headless QEMU mouse-click as best-effort and re-issue if the
+  cursor doesn't land. Abs-mode users (real display, `usb-tablet`)
+  are unaffected.
+
+When a residual ships, delete its bullet here and update the
+[`Compositor`](../subsystems/Compositor.md) subsystem page's
+"Deferred from Pass B" call-out.
+
 ### RBAC + elevation broker — v1 follow-ups
 
 - **v1 — Argon2id with lazy migration.** Blake2b primitive

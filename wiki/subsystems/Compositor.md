@@ -494,6 +494,54 @@ needed first):
   itself dirty as it paints. The plan's `MarkDirty(window.bounds)`
   pattern doesn't exist in this codebase.
 
+## First-Impression Moments (Pass B)
+
+Pass B is the four scenes a user sees before any app opens: boot
+splash, login welcome, idle/lock, and the desktop wallpaper itself.
+
+**Continuous backdrop.** `WallpaperPaint(rgb)` paints the active
+theme's wallpaper at the same coordinates in every scene. Splash,
+login, lock, and the desktop all share that same backdrop layer.
+Overlays (phase ticker, login card, desktop chrome) paint on top
+without recomposing the backdrop — the arcs centroid at (512, 384)
+never moves between scenes.
+
+**Ambient motion** (~15 FPS via WinTimerTickerTask): arcs rotate ±5° / 60s
+(via `FramebufferStrokeArcFloat` for sub-degree smoothness), soft pulse
+glow (8s breath via smoothstep), topo curves drift 1 px/s horizontally
+(theme-tinted via the new `SvgRender(..., tint_argb)` parameter), login
+clock refreshes on minute roll. Gated by `Theme::motion_intensity` (new
+field) and the existing `tactility_enabled` master gate — HighContrast
+opts out entirely; Classic runs at 30% intensity; others run full.
+Runtime override via `motion=on|off|auto` cmdline (mirrors Pass A's
+`tactility=` pattern, with `tactility_enabled` as the unbypassable
+master gate).
+
+**Files:**
+
+- `kernel/drivers/video/splash.{h,cpp}` (new) — boot splash module
+- `kernel/drivers/video/wallpaper.cpp` — adds `WallpaperTick()`, three
+  motion math helpers, motion threading into arcs + topo paint
+- `kernel/drivers/video/framebuffer.{h,cpp}` — `FramebufferStrokeArcFloat`
+  variant for sub-degree rotation
+- `kernel/drivers/video/svg.{h,cpp}` — optional `tint_argb` parameter
+  on `SvgRender` for topo pulse-breath
+- `kernel/drivers/video/theme.{h,cpp}` — `motion_intensity` field +
+  per-theme matrix + `motion=` cmdline override
+- `kernel/security/login.cpp` — corner-card GUI layout (clock left,
+  atlas-shadow card bottom-right, avatar + monogram + name + focus-glow
+  password + sign-in button), per-minute clock refresh, GUI self-test
+
+**Self-tests:** `SplashSelfTest`, `WallpaperMotionSelfTest`,
+`LoginGuiSelfTest` — each emits `[*-selftest] PASS` on success.
+Umbrella line emitted by `boot_bringup.cpp`:
+`[pass-b-selftest] PASS (splash=ok, wallpaper-motion=ok, login-gui=ok)`.
+`boot-log-analyze.sh` recognises the new sentinels and a
+`[pass-b]` umbrella status line.
+
+See [`docs/superpowers/specs/2026-05-24-duetos-pass-b-design.md`](../../docs/superpowers/specs/2026-05-24-duetos-pass-b-design.md)
+for the full design + acceptance criteria.
+
 ## Network Flyout
 
 Bottom-right Wi-Fi-style popup with hover preview, exposing the

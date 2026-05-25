@@ -51,4 +51,22 @@ void WallpaperPaint(u32 desktop_rgb);
 /// safe to call from any boot phase after `FramebufferInit`.
 void WallpaperSvgInit();
 
+/// Per-frame ambient motion tick. Called from the compositor tick
+/// scheduler at ~15 FPS. Mutates internal motion state (arc rotation
+/// phase, pulse phase, topo drift offset) and marks the corresponding
+/// dirty rects on the framebuffer so the compositor recomposes only
+/// the moving regions. Cheap when `ThemeEffectiveMotionIntensity() == 0`
+/// (early return — no math, no dirty marks). Caller holds compositor
+/// lock.
+void WallpaperTick();
+
+/// Boot self-test: validates motion phase math over 240 simulated ticks
+/// (16 s @ 15 FPS). Emits `[wallpaper-motion-selftest] PASS` on success
+/// or a FAIL line + ProbeFire on failure. Does NOT actually paint —
+/// runs against the inline phase helpers only.
+void WallpaperMotionSelfTest();
+
+/// Accessor for the boot umbrella aggregator in main.cpp / boot_bringup.
+bool WallpaperMotionSelfTestPassed();
+
 } // namespace duetos::drivers::video
