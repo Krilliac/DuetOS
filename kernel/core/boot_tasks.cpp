@@ -3244,6 +3244,7 @@ void MouseReaderTask(void*)
             duetos::apps::browser::BrowserMouseInput(cx, cy, p.buttons);
             duetos::apps::calendar::CalendarMouseInput(cx, cy, p.buttons);
             duetos::apps::imageview::ImageViewMouseInput(cx, cy, p.buttons);
+            duetos::apps::clock::ClockMouseInput(cx, cy, p.buttons);
         }
 
         // Hover responsiveness: when a menu is open and the
