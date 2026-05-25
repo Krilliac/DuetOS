@@ -2375,7 +2375,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     {
         if (duetos::drivers::video::app_widgets::AppWidgetsSelfTestPassed())
         {
-            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=16/28)\n");
+            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=17/28)\n");
         }
     }
     duetos::drivers::video::SplashAdvancePhase("theme online");
