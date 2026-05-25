@@ -3281,11 +3281,15 @@ void MouseReaderTask(void*)
 void WinTimerTickerTask(void*)
 {
     auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
-    // Wallpaper motion runs at ~15 FPS. This task fires every 10 ms
-    // (SchedSleepTicks(1) = 1 scheduler tick = 10 ms); every 7th call
-    // is 70 ms ≈ 14.3 FPS — well within the acceptable 10–25 FPS band.
+    // Wallpaper motion runs at ~25 FPS nominal. This task fires every
+    // 10 ms (SchedSleepTicks(1) = 1 scheduler tick = 10 ms); every 4th
+    // call is 40 ms ≈ 25 FPS nominal. Effective FPS depends on how long
+    // each DesktopCompose takes (~25-30 ms on VBox, so effective ~8 Hz);
+    // on QEMU/real-HW DesktopCompose is faster and you get closer to the
+    // 25 Hz nominal. Previously kWallpaperSubDiv was 7 which targeted
+    // 14 Hz but VBox delivered 4 Hz — slideshow territory. Drop to 4.
     static u32 s_wallpaper_sub = 0;
-    static constexpr u32 kWallpaperSubDiv = 7; // 10 ms × 7 = 70 ms ≈ 14.3 FPS
+    static constexpr u32 kWallpaperSubDiv = 4; // 10 ms × 4 = 40 ms ≈ 25 FPS nominal
     for (;;)
     {
         duetos::sched::SchedSleepTicks(1);

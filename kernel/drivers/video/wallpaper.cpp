@@ -87,15 +87,17 @@ struct MotionState
 };
 static MotionState g_motion = {0, 0, 0, 0.0, 0.0};
 
-// Motion cadences — bumped from the original Pass B values (60s arc,
-// 0.08 pulse, 1 px/s drift) which the design ratified as "subtle ambient"
-// but operators reported as visually static. Current rates are still
-// well within "ambient wallpaper" (not screensaver-busy) but cross the
-// "I can perceive it moving" threshold without staring.
-constexpr u64    kArcRotPeriodMs    = 20000; // ±5° sweep over 20 s (3× faster)
-constexpr u64    kPulsePeriodMs     =  8000; // 8 s breath (unchanged — feels right)
-constexpr double kPulsePeak         =  0.15; // alpha boost at peak (~2× the old amplitude)
-constexpr i32    kTopoDriftPxPerSec =     5; // 5 px/s — now visibly drifting
+// Motion cadences — tuned for the observed VBox compose rate (~4 Hz
+// effective, since each DesktopCompose ~25-30 ms on VBox and the
+// WinTimerTickerTask sub-divider only fires WallpaperTick every Nth
+// 10 ms iteration). Per-frame deltas must be visible at the actual
+// frame rate, not the nominal one: previous rates were tuned for an
+// optimistic 14 Hz target and looked like a slideshow when the system
+// only delivered 4-5 Hz.
+constexpr u64    kArcRotPeriodMs    = 10000; // ±5° sweep over 10 s (1°/sec)
+constexpr u64    kPulsePeriodMs     =  6000; // 6 s breath (slightly snappier)
+constexpr double kPulsePeak         =  0.20; // alpha boost at peak (~2.5× the original)
+constexpr i32    kTopoDriftPxPerSec =    15; // 15 px/s — ~4 px per 4-Hz frame, clearly visible
 
 // Triangular sweep −5 → +5 → −5 over period_ms.
 // Matches tests/host/test_motion_math.cpp ArcRotationDegrees exactly.
@@ -556,47 +558,12 @@ void WallpaperPaint(u32 desktop_rgb)
 
 void WallpaperTick()
 {
-    // Diagnostic ladder — emit one line per distinct entry/exit reason
-    // ONCE, so we can confirm whether WallpaperTick is called at all,
-    // and which gate (if any) is making it bail. The 'once' guard
-    // keeps serial quiet during steady-state; each branch only emits
-    // the first time it fires.
-    static bool s_logged_entered = false;
-    static bool s_logged_no_fb = false;
-    static bool s_logged_motion_zero = false;
-    static bool s_logged_now_ns_zero = false;
-    if (!s_logged_entered)
-    {
-        s_logged_entered = true;
-        duetos::arch::SerialWrite("[wpm-diag] WallpaperTick FIRST CALL\n");
-    }
-
     if (!FramebufferAvailable())
-    {
-        if (!s_logged_no_fb)
-        {
-            s_logged_no_fb = true;
-            duetos::arch::SerialWrite("[wpm-diag] EXIT: !FramebufferAvailable\n");
-        }
         return;
-    }
 
     const u8 motion = ThemeEffectiveMotionIntensity();
     if (motion == 0)
-    {
-        if (!s_logged_motion_zero)
-        {
-            s_logged_motion_zero = true;
-            duetos::arch::SerialWrite("[wpm-diag] EXIT: motion==0 (theme=");
-            duetos::arch::SerialWrite(duetos::drivers::video::ThemeIdName(duetos::drivers::video::ThemeCurrentId()));
-            duetos::arch::SerialWrite(" tactility=");
-            duetos::arch::SerialWriteHex(duetos::drivers::video::ThemeCurrent().tactility_enabled ? 1U : 0U);
-            duetos::arch::SerialWrite(" motion_intensity=");
-            duetos::arch::SerialWriteHex(duetos::drivers::video::ThemeCurrent().motion_intensity);
-            duetos::arch::SerialWrite(")\n");
-        }
         return; // master gate: cmdline motion=off or theme opts out
-    }
 
     // Derive monotonic time in milliseconds. Prefer the clocksource
     // (high-resolution, e.g. TSC-deadline / HPET) when it's registered;
@@ -612,14 +579,7 @@ void WallpaperTick()
         ? (now_ns / 1'000'000ULL)
         : (duetos::arch::TimerTicks() * 10ULL);
     if (now_ms == 0)
-    {
-        if (!s_logged_now_ns_zero)
-        {
-            s_logged_now_ns_zero = true;
-            duetos::arch::SerialWrite("[wpm-diag] EXIT: now_ms==0 (both clocksource AND TimerTicks unavailable)\n");
-        }
-        return;
-    }
+        return; // both sources cold — extremely early boot
 
     // Capture the monotonic base on the first tick that actually runs.
     // The phase wraps at its period, so theme switches don't reset motion —
@@ -674,28 +634,6 @@ void WallpaperTick()
         // copy pass in WallpaperPaint covers its strip too.
         // Fires for all themes that render topo (Duet*, Slate10, Amber).
         FramebufferAddDamage(0U, 200U, info.width, 400U);
-    }
-
-    // Diagnostic: log motion phase once per second so an operator can
-    // verify the motion driver is actually running. Cheap (8 KLOG_DEBUG
-    // per second worst case). Remove or demote once visible-motion is
-    // confirmed end-to-end.
-    static u64 s_last_diag_s = 0;
-    const u64 cur_s = t_ms / 1000ULL;
-    if (cur_s != s_last_diag_s)
-    {
-        s_last_diag_s = cur_s;
-        duetos::arch::SerialWrite("[wpm-diag] t_s=");
-        duetos::arch::SerialWriteHex(cur_s);
-        duetos::arch::SerialWrite(" rot_deg_x100=");
-        duetos::arch::SerialWriteHex(static_cast<u64>(static_cast<i64>(g_motion.arc_rot_deg * 100.0)));
-        duetos::arch::SerialWrite(" pulse_x1000=");
-        duetos::arch::SerialWriteHex(static_cast<u64>(g_motion.pulse_boost * 1000.0));
-        duetos::arch::SerialWrite(" drift_px=");
-        duetos::arch::SerialWriteHex(static_cast<u64>(g_motion.topo_drift_px));
-        duetos::arch::SerialWrite(" intensity=");
-        duetos::arch::SerialWriteHex(motion);
-        duetos::arch::SerialWrite("\n");
     }
 
     // Clock-minute roll check — runs at every tick (~15 FPS) but the
