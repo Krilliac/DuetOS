@@ -162,4 +162,18 @@ void TtfChromeFontSet(const TtfFont* font);
 /// Used by the chrome paint path to gate the TTF dispatch.
 const TtfFont* TtfChromeFontGet();
 
+/// Bold companion to TtfChromeFontSet. The ChromeText module's
+/// `Bold` weight dispatches to this font when registered. No-op if
+/// `font` is nullptr (caller can deregister by passing nullptr).
+/// Caller retains ownership; the parser stores a borrowed pointer
+/// (same contract as TtfChromeFontSet).
+void TtfChromeBoldSet(const TtfFont* font);
+
+/// Returns the bold chrome font, or nullptr if unregistered.
+/// Used by chrome_text.cpp to decide whether the Bold weight has
+/// a real bold font or must degrade to a synthesized form
+/// (double-paint with 1px x-offset for bitmap, fall back to
+/// Regular for TTF when the bold font failed to load).
+const TtfFont* TtfChromeBoldGet();
+
 } // namespace duetos::drivers::video

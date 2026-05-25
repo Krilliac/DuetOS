@@ -571,4 +571,19 @@ const TtfFont* TtfChromeFontGet()
     return g_chrome_font;
 }
 
+namespace
+{
+constinit const TtfFont* g_chrome_bold_font = nullptr;
+}
+
+void TtfChromeBoldSet(const TtfFont* font)
+{
+    g_chrome_bold_font = font;
+}
+
+const TtfFont* TtfChromeBoldGet()
+{
+    return g_chrome_bold_font;
+}
+
 } // namespace duetos::drivers::video
