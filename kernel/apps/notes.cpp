@@ -4,6 +4,11 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/input/ps2mouse.h"
+#include "drivers/video/app_widgets/app_button.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_toolbar.h"
+#include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/dnd.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
@@ -172,6 +177,146 @@ constinit u32 g_view_top = 0;
 // divide by zero.
 constinit u32 g_last_max_col = 80;
 constinit u32 g_last_max_row = 24;
+
+// ----- Pass D chrome: AppToolbar + 3 buttons (NEW / OPEN /
+//                      SAVE) + AppLabel status footer.
+//
+// The editor area itself stays raw paint — multi-line text
+// editing with a caret + selection band + viewport scroll
+// doesn't fit the single-line AppInput contract, and the
+// status footer's right-aligned "*MOD" tag + find indicator
+// have variable positions that the centred AppLabel can't
+// reproduce. The plain status text (L:/CHARS:/WORDS:) lives
+// in the AppLabel; the floating tags overlay on top after
+// PaintAll.
+//
+// Layout: 28 px toolbar at top, then the editor takes the
+// middle band, then a 12 px status label at the bottom.
+
+constexpr u32 kToolbarH = 28U;
+constexpr u32 kToolbarBtnW = 64U;
+constexpr u32 kToolbarBtnH = 22U;
+constexpr u32 kToolbarBtnGap = 6U;
+constexpr u32 kToolbarPadX = 6U;
+constexpr u32 kToolbarPadY = 3U;
+constexpr u32 kFooterH = 12U;
+
+// Forward decls for the toolbar callbacks (defined below;
+// have to live above the constinit g_notes that captures
+// them by function-pointer value).
+void ClickNew();
+void ClickOpen();
+void ClickSave();
+
+// Status-footer text buffer. AppLabel stores text by pointer
+// so the buffer must outlive every Paint — file-static gives
+// it a stable address. DrawFn re-renders it each frame.
+constinit char g_status_text[80] = {};
+
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::app_widgets::AppButton;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::AppToolbar;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::Event;
+using duetos::drivers::video::app_widgets::EventKind;
+using duetos::drivers::video::app_widgets::EventResult;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// Toolbar first (back), then the 3 buttons (front-of-toolbar),
+// then the status label (overlays the status band). Reverse
+// declaration order is the dispatch order, so buttons get
+// first refusal on the click — exactly what we want.
+constinit auto g_notes = MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppLabel{});
+
+constinit bool g_notes_bound = false;
+constinit bool g_prev_left_down = false;
+constinit bool g_self_test_passed = false;
+
+void BindToolbarOnce()
+{
+    if (g_notes_bound)
+        return;
+    g_notes_bound = true;
+
+    auto& toolbar = g_notes.chain.head;
+    toolbar.bg_rgb = 0; // theme.taskbar_bg
+
+    AppButton* buttons[3] = {
+        &g_notes.chain.tail.head,
+        &g_notes.chain.tail.tail.head,
+        &g_notes.chain.tail.tail.tail.head,
+    };
+    static const char* const kLabels[3] = {"NEW", "OPEN", "SAVE"};
+    using ClickFn = void (*)();
+    static constexpr ClickFn kClicks[3] = {ClickNew, ClickOpen, ClickSave};
+    for (u32 i = 0; i < 3; ++i)
+    {
+        buttons[i]->label = kLabels[i];
+        buttons[i]->on_click = kClicks[i];
+        buttons[i]->weight = ChromeTextWeight::Regular;
+        buttons[i]->bg_rgb = 0; // theme role default
+        buttons[i]->fg_rgb = 0x00101828U;
+    }
+
+    auto& label = g_notes.chain.tail.tail.tail.tail.head;
+    label.text = g_status_text;
+    label.role = ChromeTextRole::Caption;
+    label.weight = ChromeTextWeight::Regular;
+    label.fg_rgb = 0x00181828U;
+    label.bg_rgb = 0x00C8C8B8U; // status band tone
+    label.align_left = true;
+}
+
+// Re-anchor the toolbar + buttons + status label to the live
+// window's client rect. Called from DrawFn before PaintAll and
+// from NotesMouseInput before DispatchEvent so hit-tests +
+// visuals stay consistent across window moves / resizes.
+void RebindToolbarBounds(u32 cx, u32 cy, u32 cw, u32 ch)
+{
+    auto& toolbar = g_notes.chain.head;
+    toolbar.bounds = Rect{cx, cy, cw, kToolbarH};
+
+    AppButton* buttons[3] = {
+        &g_notes.chain.tail.head,
+        &g_notes.chain.tail.tail.head,
+        &g_notes.chain.tail.tail.tail.head,
+    };
+    for (u32 i = 0; i < 3; ++i)
+    {
+        buttons[i]->bounds = Rect{cx + kToolbarPadX + i * (kToolbarBtnW + kToolbarBtnGap), cy + kToolbarPadY,
+                                  kToolbarBtnW, kToolbarBtnH};
+    }
+
+    auto& label = g_notes.chain.tail.tail.tail.tail.head;
+    // Status band sits at the bottom of the client area. Width
+    // shrunk on the right so the dynamic "*MOD" / find tag has
+    // room to overlay without colliding with the centred text.
+    constexpr u32 kModReserve = 4U * 8U + 8U; // "*MOD" worst-case
+    const u32 lw = (cw > kModReserve + 8U) ? cw - kModReserve - 8U : cw;
+    label.bounds = Rect{cx + 4U, cy + ch - kFooterH, lw, kFooterH};
+}
+
+// Toolbar click trampolines — AppButton's on_click is a plain
+// `void (*)()`, so we route through file-scope wrappers that
+// call the public NotesNew / NotesLoad / NotesSave functions
+// defined later in this TU (outside the anonymous namespace).
+void ClickNew()
+{
+    duetos::apps::notes::NotesNew();
+}
+
+void ClickOpen()
+{
+    duetos::apps::notes::NotesLoad();
+}
+
+void ClickSave()
+{
+    duetos::apps::notes::NotesSave();
+}
 
 // Delete the char to the right of the cursor (forward delete).
 // Returns true iff anything was deleted.
@@ -559,6 +704,30 @@ u32 WordCount()
     return n;
 }
 
+// Rebuild g_status_text from the live cursor / counts so the
+// AppLabel paints the same content the legacy raw-paint path
+// did. Called from DrawFn before PaintAll so the label sees
+// the current frame's numbers.
+void RefreshStatusText()
+{
+    u32 o = 0;
+    const LogicalPos lp = LogicalCursor();
+    AppendStr(g_status_text, sizeof(g_status_text), &o, "L:");
+    AppendU32(g_status_text, sizeof(g_status_text), &o, lp.line);
+    AppendStr(g_status_text, sizeof(g_status_text), &o, "/");
+    AppendU32(g_status_text, sizeof(g_status_text), &o, LogicalLineCount());
+    AppendStr(g_status_text, sizeof(g_status_text), &o, "  C:");
+    AppendU32(g_status_text, sizeof(g_status_text), &o, lp.col);
+    AppendStr(g_status_text, sizeof(g_status_text), &o, "  CHARS:");
+    AppendU32(g_status_text, sizeof(g_status_text), &o, g_len);
+    AppendStr(g_status_text, sizeof(g_status_text), &o, "  WORDS:");
+    AppendU32(g_status_text, sizeof(g_status_text), &o, WordCount());
+    if (o < sizeof(g_status_text))
+        g_status_text[o] = '\0';
+    else
+        g_status_text[sizeof(g_status_text) - 1] = '\0';
+}
+
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
     using duetos::drivers::video::FramebufferDrawChar;
@@ -567,16 +736,30 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // Reserve a small inset so text doesn't touch the window's
     // border — matches the padding the kernel-log viewer uses.
     constexpr u32 kPad = 4;
-    // Reserve one glyph row + two pixels of separator at the
-    // bottom for the status footer (line:col, counts, modified
-    // flag). Text wraps inside the upper region only.
-    constexpr u32 kStatusH = kGlyphH + 2;
-    if (cw <= 2 * kPad || ch <= 2 * kPad + kStatusH)
+    // Pass D layout: toolbar (kToolbarH) — editor — status
+    // footer (kFooterH). The AppLabel inside g_notes paints
+    // the running L:/C:/CHARS:/WORDS: text against a band
+    // backdrop; the editor uses the middle region.
+    BindToolbarOnce();
+    RebindToolbarBounds(cx, cy, cw, ch);
+    RefreshStatusText();
+    // Pre-paint the status-band backdrop so the AppLabel's
+    // text sits on a uniform tone (AppLabel only paints its
+    // glyphs, not a full-width band).
+    constexpr u32 kStatusBg = 0x00C8C8B8;
+    constexpr u32 kStatusFg = 0x00181828;
+    constexpr u32 kStatusFgDirty = 0x00B82020;
+    FramebufferFillRect(cx, cy + ch - kFooterH, cw, kFooterH, kStatusBg);
+    Compose compose_ctx{};
+    g_notes.PaintAll(compose_ctx);
+    const u32 ey0 = cy + kToolbarH;
+    const u32 eh0 = (ch > kToolbarH + kFooterH) ? ch - kToolbarH - kFooterH : 0U;
+    if (cw <= 2 * kPad || eh0 <= 2 * kPad)
         return;
     const u32 x0 = cx + kPad;
-    const u32 y0 = cy + kPad;
+    const u32 y0 = ey0 + kPad;
     const u32 max_col = (cw - 2 * kPad) / kGlyphW;
-    const u32 max_row = (ch - 2 * kPad - kStatusH) / kGlyphH;
+    const u32 max_row = (eh0 - 2 * kPad) / kGlyphH;
     if (max_col == 0 || max_row == 0)
         return;
     // Cache geometry so the wheel + nav handlers can compute
@@ -663,40 +846,17 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         FramebufferDrawChar(x0 + cp.col * kGlyphW, y0 + vis_row * kGlyphH, '_', kInkColour, kPaperColour);
     }
 
-    // Status footer: paint a thin band along the bottom of the
-    // client area showing the cursor's logical line:col, total
-    // line count, character count, word count, and a "*MOD"
-    // flag when the buffer is dirty since the last save / load.
-    const u32 status_y = cy + ch - kStatusH;
-    const u32 status_band_h = kStatusH - 1;
-    constexpr u32 kStatusBg = 0x00C8C8B8; // a tone darker than kPaperColour
-    constexpr u32 kStatusFg = 0x00181828;
-    constexpr u32 kStatusFgDirty = 0x00B82020; // red-ish for "*MOD"
-    FramebufferFillRect(cx, status_y, cw, status_band_h, kStatusBg);
-
-    char buf[80];
-    u32 o = 0;
-    const LogicalPos lp = LogicalCursor();
-    AppendStr(buf, sizeof(buf), &o, "L:");
-    AppendU32(buf, sizeof(buf), &o, lp.line);
-    AppendStr(buf, sizeof(buf), &o, "/");
-    AppendU32(buf, sizeof(buf), &o, LogicalLineCount());
-    AppendStr(buf, sizeof(buf), &o, "  C:");
-    AppendU32(buf, sizeof(buf), &o, lp.col);
-    AppendStr(buf, sizeof(buf), &o, "  CHARS:");
-    AppendU32(buf, sizeof(buf), &o, g_len);
-    AppendStr(buf, sizeof(buf), &o, "  WORDS:");
-    AppendU32(buf, sizeof(buf), &o, WordCount());
-    buf[o] = '\0';
-
-    const u32 sx = cx + kPad;
-    const u32 sy = status_y + 1;
-    FramebufferDrawString(sx, sy, buf, kStatusFg, kStatusBg);
+    // Status footer overlays: the AppLabel already painted the
+    // base "L:/C:/CHARS:/WORDS:" text against kStatusBg. We
+    // overlay the "*MOD" flag (right-aligned) + find indicator
+    // (after the counts) as raw paint — both have variable
+    // position that the centred AppLabel can't reproduce.
+    const u32 status_y = cy + ch - kFooterH;
+    const u32 sx = cx + 4U;
+    const u32 sy = status_y + 1U;
 
     if (g_dirty)
     {
-        // Right-align the "*MOD" tag inside the status band so it
-        // never collides with the running counts on the left.
         constexpr const char* kModTag = "*MOD";
         constexpr u32 kModW = 4 * kGlyphW;
         if (cw > kModW + 2 * kPad)
@@ -708,10 +868,6 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
     // Find indicator — visible whenever a query is set, even
     // when it has no matches (so the user knows the search ran).
-    // Layout: above the line/col status row, sharing the same
-    // band on a row reserved for Find. We render it in-band
-    // when there's room (full status band height) by drawing
-    // the find row immediately to the right of the counts.
     const char* fq = NotesFindQuery();
     if (fq != nullptr && fq[0] != '\0')
     {
@@ -735,14 +891,18 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
             AppendU32(fbuf, sizeof(fbuf), &fo, total);
         }
         fbuf[fo] = '\0';
-        // Anchor to the existing status row, after the counts:
-        // sx + 8 px per existing glyph * o is the cell after
-        // the line/col/chars/words string.
-        const u32 fx = sx + o * kGlyphW;
+        // Anchor past the rendered base status text (length in
+        // bytes ~= glyph cell count for the Caption role bitmap
+        // path, which is the v0 default).
+        u32 base_len = 0;
+        while (g_status_text[base_len] != '\0' && base_len < sizeof(g_status_text))
+            ++base_len;
+        const u32 fx = sx + base_len * kGlyphW;
         const u32 max_x = cx + cw - kPad;
         if (fx + fo * kGlyphW < max_x)
             FramebufferDrawString(fx, sy, fbuf, kStatusFgDirty, kStatusBg);
     }
+    (void)kStatusFg; // referenced inside the AppLabel path, suppress unused
 }
 
 } // namespace
@@ -794,7 +954,11 @@ u32 ClickToBufferIndex(u32 sx, u32 sy)
     if (!duetos::drivers::video::WindowGetBounds(g_handle, &wx, &wy, nullptr, nullptr))
         return g_len;
     const u32 content_x = wx + kBorder;
-    const u32 content_y = wy + kTitleH + kBorder;
+    // Pass D: editor area sits BELOW the toolbar; offset the
+    // content origin so screen clicks land on the right buffer
+    // row even after the toolbar has eaten the top kToolbarH
+    // pixels of the client area.
+    const u32 content_y = wy + kTitleH + kBorder + kToolbarH;
     if (sx < content_x + kPad || sy < content_y + kPad)
         return 0;
     const u32 cx_in_content = sx - content_x - kPad;
@@ -919,6 +1083,7 @@ bool NotesOnDrop(const duetos::drivers::video::DndPayload& payload, u32 /*cx*/, 
 void NotesInit(duetos::drivers::video::WindowHandle handle)
 {
     g_handle = handle;
+    BindToolbarOnce();
     duetos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
     duetos::drivers::video::WindowSetWheelHandler(handle, NotesOnWheel);
     duetos::drivers::video::DndRegisterDropTarget(handle, NotesOnDrop,
@@ -942,6 +1107,49 @@ void NotesInit(duetos::drivers::video::WindowHandle handle)
 duetos::drivers::video::WindowHandle NotesWindow()
 {
     return g_handle;
+}
+
+void NotesMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
+{
+    using duetos::drivers::input::kMouseButtonLeft;
+    if (g_handle == duetos::drivers::video::kWindowInvalid)
+        return;
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_handle, &wx, &wy, &ww, &wh))
+        return;
+    // Title bar is 22 px; client origin sits below it. Toolbar
+    // bounds are set in client-relative coords so the widget
+    // dispatch path needs cursor coords in the same frame.
+    constexpr duetos::u32 kTitleH = 22U;
+    if (wh <= kTitleH)
+        return;
+    const duetos::u32 client_y = wy + kTitleH;
+    const duetos::u32 client_h = wh - kTitleH;
+    RebindToolbarBounds(wx, client_y, ww, client_h);
+
+    const bool left_down = (button_mask & kMouseButtonLeft) != 0;
+    const bool press_edge = left_down && !g_prev_left_down;
+    const bool release_edge = !left_down && g_prev_left_down;
+    g_prev_left_down = left_down;
+
+    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < wy + wh);
+    if (inside_window)
+    {
+        const Event m{EventKind::MouseMove, cx, cy, 0u, 0u};
+        g_notes.DispatchEvent(m);
+    }
+    if (press_edge && inside_window)
+    {
+        const Event d{EventKind::MouseDown, cx, cy, 0u, 0u};
+        g_notes.DispatchEvent(d);
+    }
+    if (release_edge)
+    {
+        // Always dispatch MouseUp so a button pressed inside the
+        // toolbar and dragged off clears its Pressed flag.
+        const Event u{EventKind::MouseUp, cx, cy, 0u, 0u};
+        g_notes.DispatchEvent(u);
+    }
 }
 
 bool NotesFeedChar(char c)
@@ -1331,6 +1539,34 @@ void NotesSelfTest()
     check(g_sel_anchor == kNoSelection); // 33
     check(!g_dirty);                     // 34: fresh doc is clean
 
+    // Pass D: drive a synthetic click through the toolbar's
+    // WidgetGroup and confirm the NEW button's callback fires
+    // (verified by typing into the buffer first, then clicking
+    // — NotesNew clears the buffer to 0 bytes). Anchor the
+    // toolbar at (0, 22, 380, 200) — same shape the live
+    // boot-time window registration uses.
+    BindToolbarOnce();
+    RebindToolbarBounds(0U, 22U, 380U, 200U);
+    g_len = 0;
+    g_cursor = 0;
+    g_sel_anchor = kNoSelection;
+    g_dirty = false;
+    for (const char* s = "click-target"; *s != '\0'; ++s)
+        InsertAtCursor(*s);
+    check(g_len == 12 && g_dirty); // 35
+    // Centre of the NEW button (index 0). Bounds are
+    // {0+kToolbarPadX, 22+kToolbarPadY, kToolbarBtnW, kToolbarBtnH}.
+    const duetos::u32 nbx = kToolbarPadX + kToolbarBtnW / 2U;
+    const duetos::u32 nby = 22U + kToolbarPadY + kToolbarBtnH / 2U;
+    const Event move{EventKind::MouseMove, nbx, nby, 0U, 0U};
+    const Event down{EventKind::MouseDown, nbx, nby, 0U, 0U};
+    const Event up{EventKind::MouseUp, nbx, nby, 0U, 0U};
+    check(g_notes.DispatchEvent(move) == EventResult::Consumed); // 36
+    check(g_notes.DispatchEvent(down) == EventResult::Consumed); // 37
+    check(g_notes.DispatchEvent(up) == EventResult::Consumed);   // 38
+    // NEW callback ran -> buffer cleared, dirty bit reset.
+    check(g_len == 0 && !g_dirty); // 39
+
     // Restore pre-test state.
     g_len = saved_len;
     g_cursor = saved_cursor;
@@ -1340,9 +1576,11 @@ void NotesSelfTest()
         g_buf[i] = saved_buf[i];
     }
 
+    g_self_test_passed = pass;
     if (pass)
     {
-        SerialWrite("[notes] self-test OK (insert + nav + dirty flag + status counts + new-doc)\n");
+        SerialWrite("[notes] self-test OK (insert + nav + dirty flag + status counts + new-doc + widget-click)\n");
+        SerialWrite("[notes-selftest] PASS\n");
     }
     else
     {
@@ -1370,7 +1608,13 @@ void NotesSelfTest()
         msg[o++] = '\n';
         msg[o] = '\0';
         SerialWrite(msg);
+        SerialWrite("[notes-selftest] FAIL\n");
     }
+}
+
+bool NotesSelfTestPassed()
+{
+    return g_self_test_passed;
 }
 
 // ---------------------------------------------------------------

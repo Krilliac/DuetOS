@@ -162,6 +162,23 @@ bool NotesLoadFile(const char* path);
 /// PASS/FAIL line to COM1. Safe to call after NotesInit.
 void NotesSelfTest();
 
+/// Accessor for the Pass D umbrella aggregator. True iff the
+/// most recent `NotesSelfTest()` invocation ran every check
+/// (including the app_widgets click-dispatch path on the New
+/// toolbar button) without error.
+bool NotesSelfTestPassed();
+
+/// Mouse-event entry point for the migrated (Pass D) notes
+/// chrome. Called from the boot-time mouse-reader thread on
+/// every motion packet. Detects left-button press / release
+/// edges internally and dispatches MouseDown / MouseUp /
+/// MouseMove into the toolbar's WidgetGroup. Clicks that miss
+/// every widget land in the editor area and currently no-op
+/// (the existing double-click word-snap path is wired through
+/// the WM, not here). No-op before `NotesInit` has wired a
+/// window.
+void NotesMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
+
 /// Round-trip self-test for NotesSave / NotesLoad. Plants a
 /// known marker into a scratch buffer, saves, clears, loads,
 /// and verifies the bytes match. Cleans up the test file at
