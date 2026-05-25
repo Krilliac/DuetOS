@@ -810,6 +810,87 @@ When a residual ships, delete its bullet here and update the
 [`Compositor`](../subsystems/Compositor.md) subsystem page's
 "Deferred from Pass B" call-out.
 
+### Chrome typography (Pass C) — residual polish + Pass C verification
+
+The typography hierarchy plan
+(`docs/superpowers/plans/2026-05-24-duetos-pass-c.md`)
+landed all 21 planned tasks plus 5 settings sub-panel migrations + 1
+drive-by comment fix (27 commits total). New module
+`kernel/drivers/video/chrome_text.{h,cpp}` owns the four-tier
+dispatch (Display 72 px / Title 16 px / Body 13 px / Caption 11 px),
+with Regular + Bold weights backed by Liberation Sans Regular and a
+newly-baked Liberation Sans Bold companion. Boot sentinels
+`[chrome-text-selftest] PASS` and `[pass-c-selftest] PASS
+(chrome-text=ok)` fire under the `if constexpr (kBootSelfTests)`
+umbrella. See
+[`Compositor`](../subsystems/Compositor.md#typography-hierarchy-pass-c)
+for the subsystem summary.
+
+Per-task verification: every implementation subagent ran a debug
+boot smoke after its commit; all 21 tasks reported all three Pass C
+sentinels green plus the bold-font load line, with no PANIC / TRIPLE
+/ new non-deliberate FAIL. The `pass-c-soak.sh` 30 s rig (Task 19)
+PASSed against commit `ad680846`. Full end-to-end acceptance run
+(debug + release builds, hosted ctest, soak, screenshot matrix,
+clang-format on all touched TUs together) is **deferred — pending
+host disk space** at the time of branch wrap (WSL vhdx couldn't grow
+on a 29 MB-free C:). Re-run once disk is freed; expected to be clean
+based on per-task evidence.
+
+Residuals carried into Pass D / future polish:
+
+- **Dialog body wrap uses bitmap col-cap on TTF render path.**
+  `kernel/drivers/video/dialog.cpp::DrawWrappedText` computes
+  `max_col = max_w / kGlyphW` (8-px bitmap cap) then renders with
+  TTF advances. Wide ASCII (W / M / &) on a maximally-packed wrap
+  line can clip into the `kPad`-byte right margin (12 px) rather
+  than overrun the panel border — cosmetic, not a correctness bug.
+  Fix: route wrap through `ChromeTextMeasure(Body)` shared with
+  menu / taskbar. Surfaced by Task 10 review.
+- **Bitmap themes collapse Caption to Body at scale 1** (both =
+  8 px). Acceptable v0 — bitmap font is single-size; the role split
+  is recovered automatically on any TTF theme. Add a 6×8 micro-font
+  asset if a bitmap-theme reviewer reports the visual collapse is
+  confusing.
+- **Bold-TTF degrades to Regular when bold-font load fails.** The
+  boot-log line `chrome font bold load FAILED — Bold weight will
+  degrade to Regular` surfaces this; `boot-log-analyze.sh` emits a
+  non-fatal advisory (`chrome-font-bold: FAILED — Bold weight
+  degraded (non-fatal)`). The dispatcher's `// GAP:` marker in
+  `chrome_text.cpp::UseTtf` points at a future
+  `TtfDrawStringWeighted(font*, ...)` overload that would route
+  Bold to the bold registration when present.
+- **`ChromeTextMeasure` for TTF is a `chars × px × 0.55` estimate**,
+  not a real per-glyph advance sum. Accurate within ~10 % for
+  Liberation Sans across typical ASCII; mis-sizes hit-rects for
+  unusually wide strings ("Mwwwwww"-type cases). Wire a real
+  per-glyph advance sum through the rasterizer if a layout bug
+  surfaces.
+- **No italic, no Thin / Medium / Heavy weights.** Intentional v0
+  omission. Extend `ChromeTextWeight` + bake the asset when a design
+  need lands.
+- **Visual verification gap on the live login UI.** Default boot
+  uses autologin so the login chrome (Display clock, Title Bold
+  monogram + card name, Body Bold "Sign in" button, Caption Bold
+  status line) isn't pixel-tested in `pass-c-soak.sh`.
+  `LoginGuiSelfTest` validates rect-compute invariants but doesn't
+  rasterize. Closed by a non-autologin boot variant in the soak rig,
+  or by a VBox visual pass.
+- **VBox boot verification.** Pairs with the Pass A / Pass B VBox
+  residuals above — boot the typography matrix under VirtualBox to
+  pick up anything QEMU smokes don't. The
+  `tactility-screenshot-matrix.sh --typography` rig (Task 18) is
+  the canonical surface set (login + lock + wallpaper × 10 themes
+  = 30 PPMs) once the host can rebuild the kernel.elf.
+- **Avatar monogram is Title Bold** — fits the 40 px circle today.
+  If avatar grows above ~40 px or shrinks below ~24 px, the Bold
+  Title metric may need a dedicated "hero monogram" role between
+  Display and Title.
+
+When a residual ships, delete its bullet here and update the
+[`Compositor`](../subsystems/Compositor.md) subsystem page's
+"Pass C — Typography Hierarchy" call-out.
+
 ### RBAC + elevation broker — v1 follow-ups
 
 - **v1 — Argon2id with lazy migration.** Blake2b primitive
