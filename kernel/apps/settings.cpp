@@ -5,7 +5,7 @@
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
 #include "drivers/gpu/dpms.h"
-#include "drivers/video/framebuffer.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -19,7 +19,10 @@ namespace duetos::apps::settings
 {
 
 using duetos::drivers::video::ButtonWidget;
-using duetos::drivers::video::FramebufferDrawString;
+using duetos::drivers::video::ChromeTextDraw;
+using duetos::drivers::video::ChromeTextMeasure;
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
 using duetos::drivers::video::kWindowInvalid;
 using duetos::drivers::video::ThemeApplyToAll;
 using duetos::drivers::video::ThemeCurrent;
@@ -262,8 +265,10 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     const u32 ink_bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
     // Panel-switcher hint at the very top: lists the number-key
     // shortcuts so a fresh user can find sub-panels without
-    // reading the wiki.
-    FramebufferDrawString(cx + kReadoutX, cy + 2, "0:GEN 1:DSP 2:SND 3:KBD 4:MSE 5:DT", th.banner_fg, ink_bg);
+    // reading the wiki. Caption role — small navigation hint, not
+    // the panel's primary content.
+    ChromeTextDraw(ChromeTextRole::Caption, cx + kReadoutX, cy + 2,
+                   "0:GEN 1:DSP 2:SND 3:KBD 4:MSE 5:DT", th.banner_fg, ink_bg);
     // Sub-panel dispatch. When a non-General panel is active
     // and registered, render its content into the readout area
     // (everything to the right of the button column) and skip
@@ -285,24 +290,35 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         }
         // Fallthrough — placeholder text when a panel slot is
         // empty. The real panel populates via SettingsRegisterPanel
-        // from its own .cpp.
-        FramebufferDrawString(cx + kReadoutX, cy + 24, "(panel not registered yet)", th.banner_fg, ink_bg);
+        // from its own .cpp. Caption role — diagnostic placeholder,
+        // not a section header.
+        ChromeTextDraw(ChromeTextRole::Caption, cx + kReadoutX, cy + 24,
+                       "(panel not registered yet)", th.banner_fg, ink_bg);
         return;
     }
 
-    // Section header.
+    // Section header — Title + Bold so "SETTINGS" reads as the
+    // window's hero label rather than a row.
     const u32 hdr_y = cy + 6;
-    FramebufferDrawString(cx + kReadoutX, hdr_y, "SETTINGS", ink_fg, ink_bg);
+    ChromeTextDraw(ChromeTextRole::Title, cx + kReadoutX, hdr_y, "SETTINGS", ink_fg, ink_bg,
+                   ChromeTextWeight::Bold);
 
-    // Theme readout: "THEME: <name>"
+    // Theme readout: "THEME: <name>" — Body role for both label and
+    // value. Value column derived from ChromeTextMeasure so variable-
+    // width TTF doesn't collide with the label; collapses to the
+    // prior fixed-grid spacing (label + space) under the bitmap path.
     u32 y = hdr_y + 16;
-    FramebufferDrawString(cx + kReadoutX, y, "THEME:", ink_fg, ink_bg);
+    ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX, y, "THEME:", ink_fg, ink_bg);
     const char* name = ThemeIdName(ThemeCurrentId());
-    FramebufferDrawString(cx + kReadoutX + 8 * 7, y, (name != nullptr) ? name : "?", ink_fg, ink_bg);
+    const u32 theme_label_w = ChromeTextMeasure(ChromeTextRole::Body, "THEME: ");
+    ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX + theme_label_w, y,
+                   (name != nullptr) ? name : "?", ink_fg, ink_bg);
 
-    // Opacity readout: "OPACITY: <hex>"
+    // Opacity readout: "OPACITY: <hex>" — same Body role + measured
+    // value column as the THEME row.
     y += 12;
-    FramebufferDrawString(cx + kReadoutX, y, "OPACITY:", ink_fg, ink_bg);
+    ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX, y, "OPACITY:", ink_fg, ink_bg);
+    const u32 opacity_label_w = ChromeTextMeasure(ChromeTextRole::Body, "OPACITY: ");
     const auto active = WindowActive();
     if (active != kWindowInvalid && WindowIsAlive(active))
     {
@@ -311,23 +327,27 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         constexpr char kHex[] = "0123456789ABCDEF";
         hex[2] = kHex[(op >> 4) & 0xF];
         hex[3] = kHex[op & 0xF];
-        FramebufferDrawString(cx + kReadoutX + 8 * 9, y, hex, ink_fg, ink_bg);
+        ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX + opacity_label_w, y, hex, ink_fg, ink_bg);
     }
     else
     {
-        FramebufferDrawString(cx + kReadoutX + 8 * 9, y, "(no win)", ink_fg, ink_bg);
+        ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX + opacity_label_w, y, "(no win)", ink_fg, ink_bg);
     }
 
     // Wall clock — refreshed on every paint via RtcRead. UTC line
     // first, then a LOCAL line that applies the live timezone
-    // offset, then an offset readout. Each row is 12 px tall.
+    // offset, then an offset readout. Each row is 12 px tall. Both
+    // label and value use Body role; "UTC:  " (with trailing spaces)
+    // is measured to derive the value column so the digits don't
+    // collide under TTF.
     y += 16;
     arch::RtcTime t{};
     arch::RtcRead(&t);
     char utc_buf[20];
     FormatRtc(t, utc_buf);
-    FramebufferDrawString(cx + kReadoutX, y, "UTC:  ", ink_fg, ink_bg);
-    FramebufferDrawString(cx + kReadoutX + 8 * 6, y, utc_buf, ink_fg, ink_bg);
+    const u32 clock_label_w = ChromeTextMeasure(ChromeTextRole::Body, "UTC:  ");
+    ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX, y, "UTC:  ", ink_fg, ink_bg);
+    ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX + clock_label_w, y, utc_buf, ink_fg, ink_bg);
     y += 12;
 
     const i32 off_min = duetos::time::TimezoneOffsetMinutes();
@@ -347,8 +367,10 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     }
     char local_buf[20];
     FormatRtc(local, local_buf);
-    FramebufferDrawString(cx + kReadoutX, y, "LOCAL:", ink_fg, ink_bg);
-    FramebufferDrawString(cx + kReadoutX + 8 * 6, y, local_buf, ink_fg, ink_bg);
+    ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX, y, "LOCAL:", ink_fg, ink_bg);
+    // Reuses the same six-char prefix column as the UTC line so the
+    // two timestamps stack visually under any chrome font.
+    ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX + clock_label_w, y, local_buf, ink_fg, ink_bg);
     y += 12;
 
     char tz[12] = {'T', 'Z', ':', ' ', ' ', ' ', '+', '0', '0', ':', '0', 0};
@@ -372,13 +394,17 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         }
         buf[11] = Digit(mm % 10);
         buf[12] = '\0';
-        FramebufferDrawString(cx + kReadoutX, y, buf, ink_fg, ink_bg);
+        // Full "TZ:    +HH:MM" line as one Body-role paint — the
+        // label and value share the same buffer so we keep the
+        // original single-call shape.
+        ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX, y, buf, ink_fg, ink_bg);
     }
     y += 16;
 
     // Users readout — shows the live account table + the currently
-    // signed-in identity. Read-only.
-    FramebufferDrawString(cx + kReadoutX, y, "USERS:", ink_fg, ink_bg);
+    // signed-in identity. Read-only. Section label as Body (USERS:
+    // is a row header, not a window title).
+    ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX, y, "USERS:", ink_fg, ink_bg);
     const u32 count = duetos::core::AuthAccountCount();
     for (u32 i = 0; i < count && i < 4; ++i)
     {
@@ -416,11 +442,14 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
             line[li++] = role[ri];
         }
         line[li] = '\0';
-        FramebufferDrawString(cx + kReadoutX + 8, y + 12 * (i + 1), line, ink_fg, ink_bg);
+        // Per-user row — Body role. The 8 px left indent keeps the
+        // username column under the "USERS:" header above; that
+        // visual offset is independent of the chrome font width.
+        ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX + 8, y + 12 * (i + 1), line, ink_fg, ink_bg);
     }
     if (count == 0)
     {
-        FramebufferDrawString(cx + kReadoutX + 8, y + 12, "(none)", ink_fg, ink_bg);
+        ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX + 8, y + 12, "(none)", ink_fg, ink_bg);
     }
 }
 
