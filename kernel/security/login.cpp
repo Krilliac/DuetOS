@@ -28,6 +28,7 @@
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/console.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
@@ -43,14 +44,17 @@
 namespace duetos::core
 {
 
+using duetos::drivers::video::ChromeTextDraw;
+using duetos::drivers::video::ChromeTextMeasure;
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextRoleHeight;
+using duetos::drivers::video::ChromeTextWeight;
 using duetos::drivers::video::ConsoleWrite;
 using duetos::drivers::video::ConsoleWriteChar;
 using duetos::drivers::video::ConsoleWriteln;
 using duetos::drivers::video::FramebufferBeginCompose;
 using duetos::drivers::video::FramebufferDrawCircle;
 using duetos::drivers::video::FramebufferDrawRect;
-using duetos::drivers::video::FramebufferDrawString;
-using duetos::drivers::video::FramebufferDrawStringScaled;
 using duetos::drivers::video::FramebufferEndCompose;
 using duetos::drivers::video::FramebufferFillCircle;
 using duetos::drivers::video::FramebufferFillRect;
@@ -379,10 +383,14 @@ void ComputeUsernameRowRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h)
     const u32 card_x = 694u * fb_w / 1024u;
     const u32 card_y = 540u * fb_h / 768u;
     const u32 card_w = 280u * fb_w / 1024u;
-    if (x) *x = card_x;
-    if (y) *y = card_y;
-    if (w) *w = card_w;
-    if (h) *h = 80u * fb_h / 768u; // covers avatar (~60px) + role text below
+    if (x)
+        *x = card_x;
+    if (y)
+        *y = card_y;
+    if (w)
+        *w = card_w;
+    if (h)
+        *h = 80u * fb_h / 768u; // covers avatar (~60px) + role text below
 }
 
 void ComputePasswordFieldRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h)
@@ -390,10 +398,14 @@ void ComputePasswordFieldRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h
     const u32 card_x = 694u * fb_w / 1024u;
     const u32 card_y = 540u * fb_h / 768u;
     const u32 card_w = 280u * fb_w / 1024u;
-    if (x) *x = card_x + 20u * fb_w / 1024u;
-    if (y) *y = card_y + 86u * fb_h / 768u;
-    if (w) *w = card_w - 40u * fb_w / 1024u;
-    if (h) *h = 28u * fb_h / 768u;
+    if (x)
+        *x = card_x + 20u * fb_w / 1024u;
+    if (y)
+        *y = card_y + 86u * fb_h / 768u;
+    if (w)
+        *w = card_w - 40u * fb_w / 1024u;
+    if (h)
+        *h = 28u * fb_h / 768u;
 }
 
 void ComputeSignInButtonRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h)
@@ -402,10 +414,14 @@ void ComputeSignInButtonRect(u32 fb_w, u32 fb_h, u32* x, u32* y, u32* w, u32* h)
     ComputePasswordFieldRect(fb_w, fb_h, &pwd_x, &pwd_y, &pwd_w, &pwd_h);
     const u32 btn_w = 170u * fb_w / 1024u;
     const u32 btn_h = 28u * fb_h / 768u;
-    if (x) *x = pwd_x + pwd_w - btn_w;
-    if (y) *y = pwd_y + pwd_h + 14u * fb_h / 768u;
-    if (w) *w = btn_w;
-    if (h) *h = btn_h;
+    if (x)
+        *x = pwd_x + pwd_w - btn_w;
+    if (y)
+        *y = pwd_y + pwd_h + 14u * fb_h / 768u;
+    if (w)
+        *w = btn_w;
+    if (h)
+        *h = btn_h;
 }
 
 void GuiRepaint()
@@ -448,8 +464,10 @@ void GuiRepaint()
     // blend against the wallpaper tone rather than leaving a solid rect.
     const u32 bg = ThemeCurrent().desktop_bg;
 
-    FramebufferDrawStringScaled(clock_x, clock_y, clock_buf, fg, bg, /*scale=*/8);
-    FramebufferDrawStringScaled(clock_x, date_y, date_buf, fg, bg, /*scale=*/2);
+    // Pass C: clock numerals → Display role (~72 px TTF / scale 8 bitmap),
+    // date → Caption role (subdued informational line under the hero clock).
+    ChromeTextDraw(ChromeTextRole::Display, clock_x, clock_y, clock_buf, fg, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, clock_x, date_y, date_buf, fg, bg);
 
     // 3. Corner card bottom-right — 280×160 at (694, 540) on a 1024×768
     //    reference; scaled to the actual framebuffer dimensions.
@@ -513,10 +531,14 @@ void GuiRepaint()
     }
     char mono_str[2] = {mono, '\0'};
 
-    // Centre the 2x-scaled 8×8 bitmap glyph (16×16 rendered pixels)
-    // inside the circle.  Offset by half the rendered glyph size so
-    // the character visual centre lands on avatar_cx / avatar_cy.
-    FramebufferDrawStringScaled(avatar_cx - 8u, avatar_cy - 8u, mono_str, accent, avatar_bg, /*scale=*/2);
+    // Pass C: monogram glyph → Title role + Bold (~16 px, matches the
+    // prior scale=2 bitmap intent). Use Measure/RoleHeight to centre the
+    // variable-width TTF glyph properly inside the circle; under the
+    // bitmap themes this collapses to scale=2 at 16×16 pixels.
+    const u32 mono_w = ChromeTextMeasure(ChromeTextRole::Title, mono_str);
+    const u32 mono_h = ChromeTextRoleHeight(ChromeTextRole::Title);
+    ChromeTextDraw(ChromeTextRole::Title, avatar_cx - mono_w / 2u, avatar_cy - mono_h / 2u, mono_str, accent, avatar_bg,
+                   ChromeTextWeight::Bold);
 
     // Username and role text rendered to the right of the avatar.
     // name_x is avatar right-edge + 12 px of gap on the reference grid.
@@ -530,17 +552,21 @@ void GuiRepaint()
     // Dim ink for placeholders: low-saturation grey that reads against any
     // theme's taskbar_bg without depending on a per-theme dim field.
     constexpr u32 kHintInk = 0x00808890u;
-    FramebufferDrawString(name_x, name_y,
-                          has_user ? user : "type username",
-                          has_user ? ThemeCurrent().banner_fg : kHintInk,
-                          ThemeCurrent().taskbar_bg);
+    // Pass C: card account name → Title role + Bold (card-internal title).
+    // Bold weight earns the slot whether the field shows the real name or
+    // the "type username" placeholder so the form's primary anchor is
+    // visually consistent across both states.
+    ChromeTextDraw(ChromeTextRole::Title, name_x, name_y, has_user ? user : "type username",
+                   has_user ? ThemeCurrent().banner_fg : kHintInk, ThemeCurrent().taskbar_bg, ChromeTextWeight::Bold);
 
     // Default-account hint replaces the misleading hardcoded "Administrator"
     // role label (which the v0 RBAC surface couldn't actually validate
     // against — see the GAP marker history). Dim ink so it reads as a hint
     // rather than a username candidate. Revisit when RBAC v1 persistence
     // lands and we have a real role-per-user lookup.
-    FramebufferDrawString(name_x, role_y, "default: admin / admin", kHintInk, ThemeCurrent().taskbar_bg);
+    // Pass C: hint → Caption role (subdued informational).
+    ChromeTextDraw(ChromeTextRole::Caption, name_x, role_y, "default: admin / admin", kHintInk,
+                   ThemeCurrent().taskbar_bg);
 
     // 5. Password field — single-line accent-stroked rect with masked echo.
     //    Pass B Task 15.
@@ -581,15 +607,15 @@ void GuiRepaint()
         masked[n] = '\0';
         if (n > 0u)
         {
-            FramebufferDrawString(pwd_x + 8u * fb.width / 1024u, pwd_y + 10u * fb.height / 768u, masked,
-                                  ThemeCurrent().banner_fg, ThemeCurrent().taskbar_bg);
+            // Pass C: masked echo → Body role (text-input echo).
+            ChromeTextDraw(ChromeTextRole::Body, pwd_x + 8u * fb.width / 1024u, pwd_y + 10u * fb.height / 768u, masked,
+                           ThemeCurrent().banner_fg, ThemeCurrent().taskbar_bg);
         }
     }
 
     // 6. Sign-in button — accent fill with dark "Sign in" label.
     //    Pass B Task 16. Right-aligned under the password field.
-    //    Font8x8MeasureString does not exist; label width is approximated
-    //    from glyph count × 8 px (8×8 bitmap font, scale=1).
+    //    Fixed width matches ComputeSignInButtonRect (hit-test contract).
     const u32 btn_w = 170u * fb.width / 1024u;
     const u32 btn_h = 28u * fb.height / 768u;
     const u32 btn_x = pwd_x + pwd_w - btn_w;
@@ -597,14 +623,18 @@ void GuiRepaint()
 
     FramebufferFillRect(btn_x, btn_y, btn_w, btn_h, ThemeCurrent().taskbar_accent);
 
-    // "Sign in" = 7 glyphs × 8 px wide = 56 px at scale 1.
-    constexpr u32 kLabelPxW = 7u * 8u;
+    // Pass C: button label → Body role + Bold (default action of the form).
+    // Measure under the active font so bolder TTF advances stay centred
+    // inside the fixed-width button rect.
     const char* btn_label = "Sign in";
-    FramebufferDrawString(btn_x + (btn_w - kLabelPxW) / 2u,
-                          btn_y + 10u * fb.height / 768u,
-                          btn_label,
-                          ThemeCurrent().desktop_bg,    // dark ink on accent fill
-                          ThemeCurrent().taskbar_accent); // bg matches button so glyphs blend
+    const u32 label_w = ChromeTextMeasure(ChromeTextRole::Body, btn_label);
+    const u32 label_h = ChromeTextRoleHeight(ChromeTextRole::Body);
+    const u32 lbl_x = btn_x + (label_w < btn_w ? (btn_w - label_w) / 2u : 4u);
+    const u32 lbl_y = btn_y + (label_h < btn_h ? (btn_h - label_h) / 2u : 2u);
+    ChromeTextDraw(ChromeTextRole::Body, lbl_x, lbl_y, btn_label,
+                   ThemeCurrent().desktop_bg,     // dark ink on accent fill
+                   ThemeCurrent().taskbar_accent, // bg matches button so glyphs blend
+                   ChromeTextWeight::Bold);
 
     // 7. Status line — render g_login.status below the card body if set.
     //    Used for "LOGIN FAILED - CHECK USERNAME / PASSWORD",
@@ -615,8 +645,11 @@ void GuiRepaint()
     {
         constexpr u32 kWarnInk = 0x00E66060u; // soft warning red
         const u32 status_y = btn_y + btn_h + 8u * fb.height / 768u;
-        FramebufferDrawString(card_x + 14u * fb.width / 1024u, status_y,
-                              g_login.status, kWarnInk, ThemeCurrent().desktop_bg);
+        // Pass C: error/status → Caption role + Bold (small but emphasised).
+        // bg = desktop_bg because the status line sits BELOW the card body,
+        // painting over the wallpaper backdrop rather than the card surface.
+        ChromeTextDraw(ChromeTextRole::Caption, card_x + 14u * fb.width / 1024u, status_y, g_login.status, kWarnInk,
+                       ThemeCurrent().desktop_bg, ChromeTextWeight::Bold);
     }
 
     // Flush offscreen shadow → live framebuffer (no-op if BeginCompose
@@ -843,8 +876,10 @@ bool LoginHitTestSignInButton(u32 cx, u32 cy)
 
 bool LoginHitTestUsernameField(u32 cx, u32 cy)
 {
-    if (!g_login.active || g_login.mode != LoginMode::Gui) return false;
-    if (!duetos::drivers::video::FramebufferAvailable()) return false;
+    if (!g_login.active || g_login.mode != LoginMode::Gui)
+        return false;
+    if (!duetos::drivers::video::FramebufferAvailable())
+        return false;
     const auto& fb = duetos::drivers::video::FramebufferGet();
     u32 rx = 0, ry = 0, rw = 0, rh = 0;
     ComputeUsernameRowRect(fb.width, fb.height, &rx, &ry, &rw, &rh);
@@ -853,8 +888,10 @@ bool LoginHitTestUsernameField(u32 cx, u32 cy)
 
 bool LoginHitTestPasswordField(u32 cx, u32 cy)
 {
-    if (!g_login.active || g_login.mode != LoginMode::Gui) return false;
-    if (!duetos::drivers::video::FramebufferAvailable()) return false;
+    if (!g_login.active || g_login.mode != LoginMode::Gui)
+        return false;
+    if (!duetos::drivers::video::FramebufferAvailable())
+        return false;
     const auto& fb = duetos::drivers::video::FramebufferGet();
     u32 rx = 0, ry = 0, rw = 0, rh = 0;
     ComputePasswordFieldRect(fb.width, fb.height, &rx, &ry, &rw, &rh);
@@ -863,16 +900,20 @@ bool LoginHitTestPasswordField(u32 cx, u32 cy)
 
 void LoginFocusUsername()
 {
-    if (!g_login.active || g_login.mode != LoginMode::Gui) return;
-    if (g_login.focus == Field::Username) return; // already focused, no repaint
+    if (!g_login.active || g_login.mode != LoginMode::Gui)
+        return;
+    if (g_login.focus == Field::Username)
+        return; // already focused, no repaint
     g_login.focus = Field::Username;
     GuiRepaint();
 }
 
 void LoginFocusPassword()
 {
-    if (!g_login.active || g_login.mode != LoginMode::Gui) return;
-    if (g_login.focus == Field::Password) return;
+    if (!g_login.active || g_login.mode != LoginMode::Gui)
+        return;
+    if (g_login.focus == Field::Password)
+        return;
     g_login.focus = Field::Password;
     GuiRepaint();
 }
