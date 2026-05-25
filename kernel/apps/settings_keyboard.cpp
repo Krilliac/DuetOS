@@ -1,7 +1,7 @@
 #include "apps/settings.h"
 
 #include "drivers/input/ps2kbd.h"
-#include "drivers/video/framebuffer.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -51,16 +51,19 @@ void AppendStr(char* out, u32 cap, u32* o, const char* s)
 
 void Draw(u32 x, u32 y, u32 w, u32 h)
 {
-    using duetos::drivers::video::FramebufferDrawString;
+    using duetos::drivers::video::ChromeTextDraw;
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::ChromeTextWeight;
     const auto& th = duetos::drivers::video::ThemeCurrent();
     const u32 bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
     const u32 fg = th.console_fg;
     const u32 dim = th.banner_fg;
     if (w < 8 * 24 || h < 8 * 8)
         return;
-    FramebufferDrawString(x, y, "KEYBOARD", fg, bg);
-    FramebufferDrawString(x, y + 14, "LAYOUT: US (hardcoded)", dim, bg);
-    FramebufferDrawString(x, y + 26, "REPEAT: PS/2 hardware default", dim, bg);
+    // Section header — Title + Bold for the panel's hero label.
+    ChromeTextDraw(ChromeTextRole::Title, x, y, "KEYBOARD", fg, bg, ChromeTextWeight::Bold);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 14, "LAYOUT: US (hardcoded)", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 26, "REPEAT: PS/2 hardware default", dim, bg);
 
     // Live diagnostics — counters from the PS/2 driver.
     const auto stats = duetos::drivers::input::Ps2KeyboardStats();
@@ -69,17 +72,17 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     AppendStr(line, sizeof(line), &o, "IRQS: ");
     AppendDec(line, sizeof(line), &o, stats.irqs_seen);
     line[o] = '\0';
-    FramebufferDrawString(x, y + 46, line, fg, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 46, line, fg, bg);
     o = 0;
     AppendStr(line, sizeof(line), &o, "BYTES BUFFERED: ");
     AppendDec(line, sizeof(line), &o, stats.bytes_buffered);
     line[o] = '\0';
-    FramebufferDrawString(x, y + 58, line, dim, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 58, line, dim, bg);
     o = 0;
     AppendStr(line, sizeof(line), &o, "BYTES DROPPED: ");
     AppendDec(line, sizeof(line), &o, stats.bytes_dropped);
     line[o] = '\0';
-    FramebufferDrawString(x, y + 70, line, dim, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 70, line, dim, bg);
 
     // Async modifier readout.
     const u8 mods = duetos::drivers::video::WindowModifierState();
@@ -96,14 +99,14 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     if (mods == 0)
         AppendStr(line, sizeof(line), &o, " (none)");
     line[o] = '\0';
-    FramebufferDrawString(x, y + 90, line, fg, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 90, line, fg, bg);
 
     o = 0;
     AppendStr(line, sizeof(line), &o, "REPEAT RATE IDX: ");
     AppendDec(line, sizeof(line), &o, g_rate_idx);
     AppendStr(line, sizeof(line), &o, " (lower = faster, 0..31)");
     line[o] = '\0';
-    FramebufferDrawString(x, y + 106, line, fg, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 106, line, fg, bg);
 
     o = 0;
     AppendStr(line, sizeof(line), &o, "REPEAT DELAY IDX: ");
@@ -113,10 +116,11 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     AppendStr(line, sizeof(line), &o, kDelayMs[g_delay_idx & 0x3]);
     AppendStr(line, sizeof(line), &o, ")");
     line[o] = '\0';
-    FramebufferDrawString(x, y + 118, line, fg, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 118, line, fg, bg);
 
-    FramebufferDrawString(x, y + 134, "F : faster repeat   S : slower repeat", dim, bg);
-    FramebufferDrawString(x, y + 146, "D : longer delay    Q : shorter delay", dim, bg);
+    // Hint lines — Caption role for key-shortcut help.
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 134, "F : faster repeat   S : slower repeat", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 146, "D : longer delay    Q : shorter delay", dim, bg);
 
     o = 0;
     AppendStr(line, sizeof(line), &o, "ACTIVE LAYOUT: ");
@@ -142,9 +146,11 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
         break;
     }
     line[o] = '\0';
-    FramebufferDrawString(x, y + 162, line, fg, bg);
-    FramebufferDrawString(x, y + 174, "1:US  2:UK  3:DVORAK  4:DE  5:FR  6:COLEMAK", dim, bg);
-    FramebufferDrawString(x, y + 186, "(DE/FR diacritics: ASCII fallback for now)", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 162, line, fg, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 174,
+                   "1:US  2:UK  3:DVORAK  4:DE  5:FR  6:COLEMAK", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 186,
+                   "(DE/FR diacritics: ASCII fallback for now)", dim, bg);
 }
 
 bool Key(char c)
