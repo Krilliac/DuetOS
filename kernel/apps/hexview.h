@@ -74,6 +74,26 @@ bool HexViewSelectByName(const char* name);
 
 /// Boot self-test. Round-trips the offset-format helpers and
 /// the printable-byte filter; pure compute, runs unconditionally.
+/// Also drives a synthetic click through the Pass D toolbar's
+/// WidgetGroup to verify the dispatch chain is wired end-to-end.
 void HexViewSelfTest();
+
+/// Pass D umbrella accessor — true iff the most recent
+/// HexViewSelfTest() invocation ran every check (including
+/// the synthetic toolbar button click) without error.
+bool HexViewSelfTestPassed();
+
+/// Mouse-event entry point for the Pass D toolbar + labels.
+/// Called from the boot-time mouse-reader thread on every
+/// motion packet. Edge-detects left-button press / release
+/// internally and dispatches MouseMove / MouseDown / MouseUp
+/// into the WidgetGroup so AppButton hover state tracks the
+/// cursor on tactility themes. The raw byte grid (offset col +
+/// 16 hex bytes + ASCII gutter) stays raw paint (carve-out) —
+/// the grid's fixed-width cell alignment is its invariant and
+/// AppPanel/AppLabel have no per-column alignment model. Wheel
+/// / keyboard paths into the grid remain untouched. No-op
+/// before HexViewInit has wired a window.
+void HexViewMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
 
 } // namespace duetos::apps::hexview
