@@ -62,8 +62,25 @@ bool CalendarOnClick(duetos::u32 cx, duetos::u32 cy);
 
 /// Boot self-test: Zeller's-congruence weekday round-trip,
 /// month-length table including Feb leap years, prev/next
-/// navigation across year boundaries. Pure compute.
+/// navigation across year boundaries, plus (Pass D) the
+/// toolbar widget dispatch path. Pure compute.
 void CalendarSelfTest();
+
+/// Pass D umbrella accessor — true iff the most recent
+/// CalendarSelfTest() invocation ran every check (including
+/// the synthetic toolbar button click) without error.
+bool CalendarSelfTestPassed();
+
+/// Mouse-event entry point for the Pass D toolbar + labels.
+/// Called from the boot-time mouse-reader thread on every
+/// motion packet. Edge-detects left-button press / release
+/// internally and dispatches MouseMove / MouseDown / MouseUp
+/// into the WidgetGroup so AppButton hover state tracks the
+/// cursor on tactility themes. The day-grid hit test still
+/// runs through CalendarOnClick — the two paths are
+/// non-overlapping (toolbar sits above the grid). No-op
+/// before CalendarInit has wired a window.
+void CalendarMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
 
 /// Maximum events the in-RAM table holds. v0 has no on-disk
 /// persistence — events vanish at reboot. 64 is well above the

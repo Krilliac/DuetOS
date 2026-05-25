@@ -3,6 +3,12 @@
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/input/ps2mouse.h"
+#include "drivers/video/app_widgets/app_button.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_toolbar.h"
+#include "drivers/video/app_widgets/widget_group.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/dialog.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
@@ -190,6 +196,255 @@ bool ValidDate(u32 year, u8 month, u8 day)
     return true;
 }
 
+// ---------------------------------------------------------------
+// Pass D chrome: AppToolbar (back) + 3 AppButton entries
+// (PREV / TODAY / NEXT) + 2 AppLabel rows (month / year title
+// and footer hint). The 3 toolbar buttons duplicate the
+// keyboard shortcuts '[' / 'T' / ']' so the chrome stays
+// discoverable without forcing fresh users to memorise the
+// footer hint.
+//
+// Carve-outs that stay raw paint:
+//   - Day-cell grid (7 x 6 = 42 cells). Each cell carries
+//     per-instance state — today highlight, selection outline,
+//     weekend tone, dimmed-adjacent-month, event-dot indicator
+//     — which AppButton's uniform fg/bg model doesn't reproduce.
+//     Click selection still runs through CalendarOnClick from
+//     the boot-time hit-test path.
+//   - Weekday header row (SMTWTFS). 7 column captions painted
+//     directly into the grid origin; centring + per-column
+//     offset is simpler inline than as 7 AppLabels.
+//   - The month/year title's ISO-week-of-year suffix is
+//     composed into the AppLabel text buffer each frame, but
+//     the label paint itself stays a single line.
+//
+// Layout: toolbar (kToolbarH = 22) at the top of the client
+// area, then the existing centred panel sits below it. The
+// panel's own header bar (kHeaderH = 26) carries the static
+// title text via an AppLabel anchored over it.
+
+constexpr u32 kCalToolbarH = 22U;
+constexpr u32 kCalToolbarBtnW = 56U;
+constexpr u32 kCalToolbarBtnH = 18U;
+constexpr u32 kCalToolbarBtnGap = 4U;
+constexpr u32 kCalToolbarPadX = 4U;
+constexpr u32 kCalToolbarPadY = 2U;
+constexpr u32 kCalNavBtnCount = 3U;
+
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::app_widgets::AppButton;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::AppToolbar;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::Event;
+using duetos::drivers::video::app_widgets::EventKind;
+using duetos::drivers::video::app_widgets::EventResult;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// AppLabel stores text by pointer so the buffers must outlive
+// every Paint. DrawFn re-renders them each frame.
+constinit char g_title_text[40] = {};
+constinit char g_footer_text[96] = {};
+
+// Forward decls for the toolbar click trampolines (defined
+// below; they have to live above the constinit g_calendar that
+// captures them by function-pointer value).
+void ClickPrev();
+void ClickToday();
+void ClickNext();
+
+// Forward decl for ResetToToday — defined further down (after
+// RefreshFromRtcIfFresh) but referenced by ClickToday above it.
+void ResetToToday();
+
+// Toolbar (back), then 3 nav AppButtons (PREV / TODAY / NEXT),
+// then 2 AppLabels (title row, footer hint). Reverse declaration
+// order is dispatch order — buttons get first refusal on clicks.
+constinit auto g_calendar =
+    MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppLabel{}, AppLabel{});
+
+constinit bool g_calendar_bound = false;
+constinit bool g_prev_left_down = false;
+constinit bool g_self_test_passed = false;
+
+// Walk the recursive WidgetChain by hand to grab a stable
+// pointer to each nav button. Chain order mirrors the
+// MakeWidgetGroup argument list (toolbar -> 3 buttons -> 2
+// labels).
+AppButton* NavButton(u32 i)
+{
+    auto& a = g_calendar.chain.tail; // toolbar -> btn[0]
+    auto& b = a.tail;                // btn[0]   -> btn[1]
+    auto& c = b.tail;                // btn[1]   -> btn[2]
+    AppButton* btns[kCalNavBtnCount] = {&a.head, &b.head, &c.head};
+    return btns[i];
+}
+
+// AppLabel accessors — title / footer sit at chain positions 4
+// and 5 (zero-indexed) after the 1 toolbar + 3 buttons.
+AppLabel& TitleLabel()
+{
+    return g_calendar.chain.tail.tail.tail.tail.head;
+}
+AppLabel& FooterLabel()
+{
+    return g_calendar.chain.tail.tail.tail.tail.tail.head;
+}
+
+void BindCalendarOnce()
+{
+    if (g_calendar_bound)
+        return;
+    g_calendar_bound = true;
+
+    auto& toolbar = g_calendar.chain.head;
+    toolbar.bg_rgb = 0; // theme.taskbar_bg
+
+    static const char* const kNavLabels[kCalNavBtnCount] = {"<", "TODAY", ">"};
+    using ClickFn = void (*)();
+    static constexpr ClickFn kNavClicks[kCalNavBtnCount] = {ClickPrev, ClickToday, ClickNext};
+    for (u32 i = 0; i < kCalNavBtnCount; ++i)
+    {
+        AppButton* btn = NavButton(i);
+        btn->label = kNavLabels[i];
+        btn->on_click = kNavClicks[i];
+        btn->weight = ChromeTextWeight::Regular;
+        btn->bg_rgb = 0; // theme role default
+        btn->fg_rgb = 0x00101828U;
+    }
+
+    auto& title = TitleLabel();
+    title.text = g_title_text;
+    title.role = ChromeTextRole::Title;
+    title.weight = ChromeTextWeight::Bold;
+    title.fg_rgb = 0x00181828U;
+    title.bg_rgb = 0;
+    title.align_left = false;
+
+    auto& footer = FooterLabel();
+    footer.text = g_footer_text;
+    footer.role = ChromeTextRole::Caption;
+    footer.weight = ChromeTextWeight::Regular;
+    footer.fg_rgb = 0x00181828U;
+    footer.bg_rgb = 0;
+    footer.align_left = true;
+}
+
+// Re-anchor the toolbar + buttons + labels to the live client
+// rect. Called from DrawFn before PaintAll and from
+// CalendarMouseInput before DispatchEvent so hit-tests + visuals
+// stay consistent across window moves / resizes.
+//
+// title_x / title_y / title_w come from the panel-centre maths
+// inside DrawFn so the title label sits in the panel header
+// (not the toolbar — toolbar carries the nav buttons only).
+void RebindCalendarBounds(u32 cx, u32 cy, u32 cw, u32 ch, u32 title_x, u32 title_y, u32 title_w, u32 footer_x,
+                          u32 footer_y, u32 footer_w)
+{
+    auto& toolbar = g_calendar.chain.head;
+    toolbar.bounds = Rect{cx, cy, cw, kCalToolbarH};
+
+    for (u32 i = 0; i < kCalNavBtnCount; ++i)
+    {
+        const u32 bx = cx + kCalToolbarPadX + i * (kCalToolbarBtnW + kCalToolbarBtnGap);
+        NavButton(i)->bounds = Rect{bx, cy + kCalToolbarPadY, kCalToolbarBtnW, kCalToolbarBtnH};
+    }
+
+    TitleLabel().bounds = Rect{title_x, title_y, title_w, kHeaderH};
+
+    // Footer hint band sits at the bottom of the panel — caller
+    // hands us the rect so the geometry stays in lockstep with
+    // the centred-panel maths in DrawFn.
+    FooterLabel().bounds = Rect{footer_x, footer_y, footer_w, kFooterH};
+    (void)ch; // ch reserved for future bottom-anchored layout
+}
+
+// Re-compose g_title_text from live state. Mirrors the old
+// inline build in DrawFn's header block: month name + year +
+// optional ISO week suffix.
+void RefreshTitleText()
+{
+    u32 o = 0;
+    const char* mn =
+        (g_state.view_month >= 1 && g_state.view_month <= 12) ? kMonthNames[g_state.view_month] : "???";
+    for (u32 i = 0; mn[i] != '\0' && o + 1 < sizeof(g_title_text); ++i)
+        g_title_text[o++] = mn[i];
+    if (o + 1 < sizeof(g_title_text))
+        g_title_text[o++] = ' ';
+    char ybuf[5];
+    FormatU16Dec4(ybuf, g_state.view_year);
+    for (u32 i = 0; ybuf[i] != '\0' && o + 1 < sizeof(g_title_text); ++i)
+        g_title_text[o++] = ybuf[i];
+    if (g_state.view_month >= 1 && g_state.view_month <= 12)
+    {
+        const IsoWeekDate iso = IsoYearWeek(i32(g_state.view_year), u8(g_state.view_month), 1);
+        if (iso.week >= 1 && iso.week <= 53 && o + 8 < sizeof(g_title_text))
+        {
+            const char sep[6] = {' ', '-', ' ', 'W', 'k', ' '};
+            for (u32 i = 0; i < sizeof(sep) && o + 1 < sizeof(g_title_text); ++i)
+                g_title_text[o++] = sep[i];
+            if (iso.week >= 10)
+                g_title_text[o++] = char('0' + (iso.week / 10));
+            g_title_text[o++] = char('0' + (iso.week % 10));
+        }
+    }
+    g_title_text[o] = '\0';
+}
+
+// Re-compose g_footer_text. Mirrors the original footer logic:
+// when the selection has an event, show its first event text
+// prefixed with "* "; otherwise show the static binding hint.
+void RefreshFooterText()
+{
+    char ev_buf[kEventTextCap + 1] = {};
+    const bool has_ev = (g_state.sel_year != 0) &&
+                        CalendarFirstEventText(g_state.sel_year, static_cast<u8>(g_state.sel_month),
+                                               static_cast<u8>(g_state.sel_day), ev_buf, sizeof(ev_buf));
+    u32 o = 0;
+    if (has_ev)
+    {
+        const char* lead = "* ";
+        while (*lead != '\0' && o + 1 < sizeof(g_footer_text))
+            g_footer_text[o++] = *lead++;
+        for (u32 i = 0; ev_buf[i] != '\0' && o + 1 < sizeof(g_footer_text); ++i)
+            g_footer_text[o++] = ev_buf[i];
+    }
+    else
+    {
+        static const char kHint[] = "[ ] MONTH  { } YEAR  T TODAY  ENTER ADD  DEL REMOVE";
+        for (u32 i = 0; kHint[i] != '\0' && o + 1 < sizeof(g_footer_text); ++i)
+            g_footer_text[o++] = kHint[i];
+    }
+    g_footer_text[o] = '\0';
+}
+
+// ----- Pass D click trampolines --------------------------------
+// AppButton::on_click is a plain `void (*)()` so the constinit
+// g_calendar above captures each one by function-pointer value.
+// Each one mirrors the corresponding CalendarFeedChar branch
+// end-state so the chrome migration adds discoverability (a
+// fresh user can click PREV / TODAY / NEXT instead of memorising
+// the footer hint) without changing any side effects.
+
+void ClickPrev()
+{
+    Step(g_state.view_year, g_state.view_month, -1);
+    g_state.initialised = true;
+}
+
+void ClickToday()
+{
+    ResetToToday();
+}
+
+void ClickNext()
+{
+    Step(g_state.view_year, g_state.view_month, +1);
+    g_state.initialised = true;
+}
+
 // Pull current RTC date into view_year / view_month if the user
 // hasn't navigated yet. Called on every paint so the live month is
 // always shown until a key is pressed.
@@ -232,58 +487,45 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
     FramebufferFillRect(cx, cy, cw, ch, bg);
 
+    // Pass D chrome: reserve a toolbar band along the top of
+    // the client area; the existing centred panel sits below
+    // it. Toolbar height eats into the vertical budget so the
+    // (cw, ch) the panel maths reads is offset.
+    BindCalendarOnce();
+    const u32 panel_cy = (ch > kCalToolbarH) ? cy + kCalToolbarH : cy;
+    const u32 panel_ch = (ch > kCalToolbarH) ? ch - kCalToolbarH : 0;
+
     const u32 grid_w = kCols * kCellW;
     const u32 grid_h = kGridRows * kCellH;
     const u32 panel_w = grid_w + 2 * kMargin;
     const u32 panel_h = kHeaderH + kWeekdayH + grid_h + kFooterH + 2 * kMargin;
 
-    if (cw < panel_w + 4 || ch < panel_h + 4)
+    if (cw < panel_w + 4 || panel_ch < panel_h + 4)
     {
         FramebufferDrawString(cx + 4, cy + 4, "(WINDOW TOO SMALL)", dim, bg);
         return;
     }
 
     const u32 ox = cx + (cw - panel_w) / 2;
-    const u32 oy = cy + (ch - panel_h) / 2;
+    const u32 oy = panel_cy + (panel_ch - panel_h) / 2;
 
-    // Header: month + year, centred. Width = "SEPTEMBER 9999" =
-    // 14 glyphs × 8 px = 112 px.
+    // Header band paint stays — the AppLabel sits inside it
+    // and carries only the text. Pre-fill the band so the
+    // label's transparent (bg_rgb=0) draw lands on the theme
+    // header tone.
     FramebufferFillRect(ox, oy, panel_w, kHeaderH, header_bg);
-    {
-        char title[40];
-        u32 o = 0;
-        const char* mn =
-            (g_state.view_month >= 1 && g_state.view_month <= 12) ? kMonthNames[g_state.view_month] : "???";
-        for (u32 i = 0; mn[i] != '\0' && o + 1 < sizeof(title); ++i)
-            title[o++] = mn[i];
-        title[o++] = ' ';
-        char ybuf[5];
-        FormatU16Dec4(ybuf, g_state.view_year);
-        for (u32 i = 0; ybuf[i] != '\0' && o + 1 < sizeof(title); ++i)
-            title[o++] = ybuf[i];
-        // ISO week-of-year for the first day of the displayed month.
-        // ISO weeks straddle calendar-year boundaries, so the printed
-        // year is iso.year (which can be view_year-1 in early January
-        // or view_year+1 in late December — see ISO 8601:2019 §4.4.4).
-        if (g_state.view_month >= 1 && g_state.view_month <= 12)
-        {
-            const IsoWeekDate iso = IsoYearWeek(i32(g_state.view_year), u8(g_state.view_month), 1);
-            if (iso.week >= 1 && iso.week <= 53 && o + 8 < sizeof(title))
-            {
-                const char sep[6] = {' ', '-', ' ', 'W', 'k', ' '};
-                for (u32 i = 0; i < sizeof(sep) && o + 1 < sizeof(title); ++i)
-                    title[o++] = sep[i];
-                if (iso.week >= 10)
-                    title[o++] = char('0' + (iso.week / 10));
-                title[o++] = char('0' + (iso.week % 10));
-            }
-        }
-        title[o] = '\0';
-        const u32 title_w = o * 8;
-        const u32 tx = ox + (panel_w > title_w ? (panel_w - title_w) / 2 : 0);
-        const u32 ty = oy + (kHeaderH - 8) / 2;
-        FramebufferDrawString(tx, ty, title, dim, header_bg);
-    }
+
+    // Hand the chrome the live anchor points for the title
+    // (centred in the header band) and the footer (panel
+    // bottom row). Then paint the WidgetGroup — toolbar +
+    // 3 nav buttons + title label + footer label.
+    const u32 footer_y = oy + kHeaderH + kWeekdayH + grid_h + (kFooterH - 8) / 2 + 2;
+    RefreshTitleText();
+    RefreshFooterText();
+    RebindCalendarBounds(cx, cy, cw, ch, ox, oy, panel_w, ox + kMargin, footer_y, panel_w);
+
+    Compose compose_ctx{};
+    g_calendar.PaintAll(compose_ctx);
 
     // Weekday row: SMTWTFS. Each cell is centred under the column.
     {
@@ -398,33 +640,9 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // 1-px frame around the grid for visual lock-in.
     FramebufferDrawRect(grid_origin_x, grid_origin_y, grid_w, grid_h, dim, 1);
 
-    // Footer hint + selected-date event preview when applicable.
-    {
-        const u32 fy = oy + kHeaderH + kWeekdayH + grid_h + (kFooterH - 8) / 2 + 2;
-        char ev_buf[kEventTextCap + 1] = {};
-        const bool has_ev =
-            (g_state.sel_year != 0) && CalendarFirstEventText(g_state.sel_year, static_cast<u8>(g_state.sel_month),
-                                                              static_cast<u8>(g_state.sel_day), ev_buf, sizeof(ev_buf));
-        if (has_ev)
-        {
-            // Show the first event's text on the footer row,
-            // prefixed with a small "*" to make it visually
-            // distinct from the static binding hint.
-            char line[kEventTextCap + 8];
-            u32 o = 0;
-            const char* lead = "* ";
-            while (*lead != '\0' && o + 1 < sizeof(line))
-                line[o++] = *lead++;
-            for (u32 i = 0; ev_buf[i] != '\0' && o + 1 < sizeof(line); ++i)
-                line[o++] = ev_buf[i];
-            line[o] = '\0';
-            FramebufferDrawString(ox + kMargin, fy, line, fg, bg);
-        }
-        else
-        {
-            FramebufferDrawString(ox + kMargin, fy, "[ ] MONTH  { } YEAR  T TODAY  ENTER ADD  DEL REMOVE", dim, bg);
-        }
-    }
+    // Footer hint + selected-date event preview is now painted
+    // by the FooterLabel AppLabel above (RefreshFooterText
+    // re-composes the text from live event state each frame).
 }
 
 } // namespace
@@ -447,14 +665,17 @@ bool CalendarOnClick(duetos::u32 cx, duetos::u32 cy)
     const duetos::u32 client_y = wy + kTitle + kBorder;
     const duetos::u32 client_w = (ww > 2 * kBorder) ? ww - 2 * kBorder : 0;
     const duetos::u32 client_h = (wh > kTitle + 2 * kBorder) ? wh - kTitle - 2 * kBorder : 0;
+    // Pass D: panel sits below the toolbar band (kCalToolbarH).
+    const duetos::u32 panel_cy = (client_h > kCalToolbarH) ? client_y + kCalToolbarH : client_y;
+    const duetos::u32 panel_ch = (client_h > kCalToolbarH) ? client_h - kCalToolbarH : 0;
     const duetos::u32 grid_w = kCols * kCellW;
     const duetos::u32 grid_h = kGridRows * kCellH;
     const duetos::u32 panel_w = grid_w + 2 * kMargin;
     const duetos::u32 panel_h = kHeaderH + kWeekdayH + grid_h + kFooterH + 2 * kMargin;
-    if (client_w < panel_w + 4 || client_h < panel_h + 4)
+    if (client_w < panel_w + 4 || panel_ch < panel_h + 4)
         return false;
     const duetos::u32 ox = client_x + (client_w - panel_w) / 2;
-    const duetos::u32 oy = client_y + (client_h - panel_h) / 2;
+    const duetos::u32 oy = panel_cy + (panel_ch - panel_h) / 2;
     const duetos::u32 grid_origin_x = ox + kMargin;
     const duetos::u32 grid_origin_y = oy + kHeaderH + kWeekdayH;
     if (cx < grid_origin_x || cx >= grid_origin_x + grid_w)
@@ -511,7 +732,72 @@ void CalendarInit(WindowHandle handle)
     g_state.initialised = false;
     g_state.view_year = 2026;
     g_state.view_month = 1;
+    BindCalendarOnce();
     WindowSetContentDraw(handle, DrawFn, nullptr);
+}
+
+void CalendarMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
+{
+    using duetos::drivers::input::kMouseButtonLeft;
+    if (g_state.handle == kWindowInvalid)
+        return;
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+        return;
+    // Title bar is 22 px; client origin sits below it. The
+    // WidgetGroup dispatch path needs cursor coords in the
+    // same frame RebindCalendarBounds anchors the chrome to.
+    constexpr duetos::u32 kTitleH = 22U;
+    if (wh <= kTitleH)
+        return;
+    const duetos::u32 client_y = wy + kTitleH;
+    const duetos::u32 client_h = wh - kTitleH;
+
+    // We need to mirror DrawFn's anchor maths so the toolbar
+    // / title / footer hit-tests line up with what's on screen.
+    // The panel-relative anchor points come from the centred-
+    // panel maths; the toolbar itself anchors to client (cx, cy).
+    BindCalendarOnce();
+    const duetos::u32 panel_cy = (client_h > kCalToolbarH) ? client_y + kCalToolbarH : client_y;
+    const duetos::u32 panel_ch = (client_h > kCalToolbarH) ? client_h - kCalToolbarH : 0;
+    const duetos::u32 grid_w = kCols * kCellW;
+    const duetos::u32 grid_h = kGridRows * kCellH;
+    const duetos::u32 panel_w = grid_w + 2 * kMargin;
+    const duetos::u32 panel_h = kHeaderH + kWeekdayH + grid_h + kFooterH + 2 * kMargin;
+    duetos::u32 ox = wx;
+    duetos::u32 oy = panel_cy;
+    duetos::u32 footer_y = client_y;
+    if (ww >= panel_w + 4 && panel_ch >= panel_h + 4)
+    {
+        ox = wx + (ww - panel_w) / 2;
+        oy = panel_cy + (panel_ch - panel_h) / 2;
+        footer_y = oy + kHeaderH + kWeekdayH + grid_h + (kFooterH - 8) / 2 + 2;
+    }
+    RebindCalendarBounds(wx, client_y, ww, client_h, ox, oy, panel_w, ox + kMargin, footer_y, panel_w);
+
+    const bool left_down = (button_mask & kMouseButtonLeft) != 0;
+    const bool press_edge = left_down && !g_prev_left_down;
+    const bool release_edge = !left_down && g_prev_left_down;
+    g_prev_left_down = left_down;
+
+    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < wy + wh);
+    if (inside_window)
+    {
+        const Event m{EventKind::MouseMove, cx, cy, 0U, 0U};
+        g_calendar.DispatchEvent(m);
+    }
+    if (press_edge && inside_window)
+    {
+        const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
+        g_calendar.DispatchEvent(d);
+    }
+    if (release_edge)
+    {
+        // Always dispatch MouseUp so a button pressed inside
+        // the toolbar and dragged off clears its Pressed flag.
+        const Event u{EventKind::MouseUp, cx, cy, 0U, 0U};
+        g_calendar.DispatchEvent(u);
+    }
 }
 
 bool CalendarFeedChar(char c)
@@ -832,7 +1118,73 @@ void CalendarSelfTest()
     if (g_event_count != 0)
         pass = false;
     g_event_count = saved_event_count;
-    SerialWrite(pass ? "[calendar] self-test OK (zeller + days + step + events)\n" : "[calendar] self-test FAILED\n");
+
+    // Pass D: drive a synthetic click on the NEXT toolbar
+    // button via the WidgetGroup dispatch chain. ClickNext
+    // steps the view forward by one month; the test verifies
+    // the dispatch path is wired end-to-end AND that the
+    // click mutates the view state. Restore the view + flags
+    // so the live desktop is unchanged when the test returns.
+    const u32 saved_view_year = g_state.view_year;
+    const u32 saved_view_month = g_state.view_month;
+    const bool saved_initialised = g_state.initialised;
+    BindCalendarOnce();
+    // Anchor the toolbar at (0, 22, 360, 258) — same shape
+    // boot_bringup.cpp registers the live Calendar window
+    // with (360x280 minus 22 px title bar). The panel sits
+    // below the toolbar at panel_cy; the title/footer rects
+    // don't matter for a NEXT-button click.
+    RebindCalendarBounds(0U, 22U, 360U, 258U, 0U, 22U + kCalToolbarH, 360U, 0U,
+                         22U + kCalToolbarH + kHeaderH + kWeekdayH + kGridRows * kCellH, 360U);
+    g_state.view_year = 2026;
+    g_state.view_month = 6;
+    g_state.initialised = false;
+    constexpr u32 kNextIdx = 2U;
+    const u32 nx = kCalToolbarPadX + kNextIdx * (kCalToolbarBtnW + kCalToolbarBtnGap) + kCalToolbarBtnW / 2U;
+    const u32 ny = 22U + kCalToolbarPadY + kCalToolbarBtnH / 2U;
+    const Event n_move{EventKind::MouseMove, nx, ny, 0U, 0U};
+    const Event n_down{EventKind::MouseDown, nx, ny, 0U, 0U};
+    const Event n_up{EventKind::MouseUp, nx, ny, 0U, 0U};
+    if (g_calendar.DispatchEvent(n_move) != EventResult::Consumed)
+        pass = false;
+    if (g_calendar.DispatchEvent(n_down) != EventResult::Consumed)
+        pass = false;
+    if (g_calendar.DispatchEvent(n_up) != EventResult::Consumed)
+        pass = false;
+    if (g_state.view_year != 2026 || g_state.view_month != 7)
+        pass = false;
+
+    // Title + footer composers must produce non-empty text
+    // after a refresh.
+    RefreshTitleText();
+    if (g_title_text[0] == '\0')
+        pass = false;
+    RefreshFooterText();
+    if (g_footer_text[0] == '\0')
+        pass = false;
+
+    // Restore pre-test state so the live UI is unchanged when
+    // the umbrella selftest returns.
+    g_state.view_year = saved_view_year;
+    g_state.view_month = saved_view_month;
+    g_state.initialised = saved_initialised;
+
+    g_self_test_passed = pass;
+    if (pass)
+    {
+        SerialWrite("[calendar] self-test OK (zeller + days + step + events + widget-click)\n");
+        SerialWrite("[calendar-selftest] PASS\n");
+    }
+    else
+    {
+        SerialWrite("[calendar] self-test FAILED\n");
+        SerialWrite("[calendar-selftest] FAIL\n");
+    }
+}
+
+bool CalendarSelfTestPassed()
+{
+    return g_self_test_passed;
 }
 
 bool CalendarAddEvent(u32 year, u8 month, u8 day, const char* text)
