@@ -123,8 +123,16 @@ void TerminalReset();
 void TerminalCopyVisibleViewport();
 
 /// Boot self-test. Drives the parser through the FeedBytes
-/// path and verifies cursor placement + cell contents. Pure
-/// compute, no I/O side effects beyond serial on failure.
+/// path and verifies cursor placement + cell contents. Also
+/// binds + paints the Pass D chrome header / footer labels and
+/// confirms the buffers are non-empty (cell grid is the carve-
+/// out and stays raw paint). Pure compute, no I/O side effects
+/// beyond serial on failure.
 void TerminalSelfTest();
+
+/// Pass D umbrella accessor — true iff the most recent
+/// TerminalSelfTest() invocation ran every check (including the
+/// chrome header / footer bind + paint) without error.
+bool TerminalSelfTestPassed();
 
 } // namespace duetos::apps::terminal
