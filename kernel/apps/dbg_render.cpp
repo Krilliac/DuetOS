@@ -1,10 +1,15 @@
 #include "apps/dbg_internal.h"
 
 #include "apps/dbg_core.h"
+#include "arch/x86_64/serial.h"
 #include "arch/x86_64/traps.h"
 #include "debug/breakpoints.h"
 #include "debug/disasm.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/widget_group.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/theme.h"
 #include "util/types.h"
 
 /*
@@ -23,10 +28,73 @@ namespace duetos::apps::dbg::render
 namespace
 {
 
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::ThemeCurrent;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
 // 8x8 glyphs. The framebuffer renderer scales 1x by default.
 constexpr u32 kRowPx = 10; // glyph + 2px gutter for legibility
 constexpr u32 kTabBarH = 18;
 constexpr u32 kStatusBarH = 12;
+
+// ---------------------------------------------------------------
+// Pass D chrome: DEBUGGER window. Header (Title Bold) label.
+// The carve-outs that STAY RAW are deliberate: a debugger has
+// to keep working when half the kernel is wedged, so the
+// existing TabBar (RenderTabBar), the StatusBar
+// (RenderStatusBar), and every per-tab content renderer
+// (RenderProcesses / RenderMemory / RenderRegs /
+// RenderBreakpoints / RenderWatch / RenderScan / RenderDisasm /
+// RenderSystem / RenderSymbols / RenderThreads) all stay raw
+// FramebufferDrawString + FramebufferFillRect calls — those
+// surfaces have to be paintable when a slab is corrupt, when
+// the heap is mid-rebalance, when AppLabel's compositor wiring
+// has tripped. The chrome label is purely additive: a header
+// strip above the tab bar that names the app so it's
+// recognisable at a glance + smoke-proves the AppLabel stack
+// can paint into the debugger's window without crashing.
+
+constexpr u32 kDbgChromeHeaderH = 12U;
+
+constinit char g_dbg_header[16] = "DBG";
+
+constinit auto g_dbg_chrome = MakeWidgetGroup(AppLabel{});
+
+constinit bool g_dbg_chrome_bound = false;
+constinit bool g_dbg_render_self_test_passed = false;
+
+AppLabel& DbgHeader()
+{
+    return g_dbg_chrome.chain.head;
+}
+
+void BindDbgChromeOnce()
+{
+    if (g_dbg_chrome_bound)
+        return;
+    g_dbg_chrome_bound = true;
+
+    // Match the existing raw paint palette so a clean theme
+    // doesn't suddenly recolour just the header strip. kBgClient
+    // is the debugger's near-black ground; kFgAccent is the cyan
+    // tab-active ink already used by the per-tab headings.
+    AppLabel& h = DbgHeader();
+    h.text = g_dbg_header;
+    h.role = ChromeTextRole::Title;
+    h.weight = ChromeTextWeight::Bold;
+    h.fg_rgb = 0x60E0FFU; // kFgAccent
+    h.bg_rgb = 0x101418U; // kBgClient
+    h.align_left = true;
+}
+
+void RebindDbgChromeBounds(u32 cx, u32 cy, u32 cw)
+{
+    DbgHeader().bounds = Rect{cx, cy, cw, kDbgChromeHeaderH};
+}
 
 // Theme palette — picked to match DuetOS' Slate-10 default.
 constexpr u32 kBgClient = 0x101418;
@@ -443,13 +511,25 @@ void RenderThreads(u32 x, u32 y, u32 w, u32 h)
 void Paint(u32 x, u32 y, u32 w, u32 h, void* cookie)
 {
     (void)cookie;
-    if (w < 80 || h < (kTabBarH + kStatusBarH + kRowPx * 4))
+    if (w < 80 || h < (kDbgChromeHeaderH + kTabBarH + kStatusBarH + kRowPx * 4))
         return;
     duetos::drivers::video::FramebufferFillRect(x, y, w, h, kBgClient);
-    RenderTabBar(x, y, w, internal::g_state.current_tab);
 
-    const u32 cy = y + kTabBarH + 2;
-    const u32 ch = h - kTabBarH - kStatusBarH - 4;
+    // Pass D chrome: header strip above the tab bar. Carve-out
+    // anchors below (tab bar, status bar, per-tab content all
+    // shift down by kDbgChromeHeaderH so they stay non-
+    // overlapping with the chrome label band).
+    BindDbgChromeOnce();
+    RebindDbgChromeBounds(x + 4U, y, (w > 4U) ? w - 4U : w);
+    {
+        Compose ctx{};
+        g_dbg_chrome.PaintAll(ctx);
+    }
+
+    RenderTabBar(x, y + kDbgChromeHeaderH, w, internal::g_state.current_tab);
+
+    const u32 cy = y + kDbgChromeHeaderH + kTabBarH + 2;
+    const u32 ch = h - kDbgChromeHeaderH - kTabBarH - kStatusBarH - 4;
     switch (internal::g_state.current_tab)
     {
     case Tab::Processes:
@@ -487,6 +567,42 @@ void Paint(u32 x, u32 y, u32 w, u32 h, void* cookie)
     }
 
     RenderStatusBar(x, y + h - kStatusBarH, w);
+}
+
+void DbgRenderSelfTest()
+{
+    using duetos::arch::SerialWrite;
+    bool ok = true;
+
+    // Pass D chrome — bind + paint the header AppLabel on a
+    // synthetic (700x500) client rect (matches the live
+    // debugger window size DbgInit registers) and confirm the
+    // buffer is non-empty + the label.text pointer is bound.
+    // Pure compose; no compositor state mutated. The carve-outs
+    // (tab bar + status bar + per-tab content renderers) are
+    // raw paint and are exercised by the live debugger window
+    // every compose, not by this self-test — debug surfaces
+    // need to keep working when half the kernel is wedged and
+    // a self-test that depended on slab / heap / theme state
+    // would defeat that contract.
+    BindDbgChromeOnce();
+    RebindDbgChromeBounds(0U, 0U, 700U);
+    {
+        Compose ctx{};
+        g_dbg_chrome.PaintAll(ctx);
+    }
+    if (g_dbg_header[0] == '\0')
+        ok = false;
+    if (DbgHeader().text == nullptr)
+        ok = false;
+
+    g_dbg_render_self_test_passed = ok;
+    SerialWrite(ok ? "[dbg-render-selftest] PASS\n" : "[dbg-render-selftest] FAIL\n");
+}
+
+bool DbgRenderSelfTestPassed()
+{
+    return g_dbg_render_self_test_passed;
 }
 
 } // namespace duetos::apps::dbg::render

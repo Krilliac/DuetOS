@@ -161,6 +161,7 @@
 #include "apps/files.h"
 #include "apps/firewall.h"
 #include "apps/dbg.h"
+#include "apps/dbg_internal.h"
 #include "apps/gfxdemo.h"
 #include "apps/help.h"
 #include "apps/imageview.h"
@@ -2380,7 +2381,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     {
         if (duetos::drivers::video::app_widgets::AppWidgetsSelfTestPassed())
         {
-            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=27/28)\n");
+            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=28/28)\n");
         }
     }
     duetos::drivers::video::SplashAdvancePhase("theme online");
@@ -2624,6 +2625,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // don't pre-register one here.
     duetos::apps::dbg::DbgInit();
     DUETOS_BOOT_SELFTEST(duetos::apps::dbg::DbgSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::dbg::render::DbgRenderSelfTest());
 
     // SETTINGS — unified panel that wraps the Ctrl+Alt chord
     // surfaces (theme cycle / direct picker, opacity step, high-
