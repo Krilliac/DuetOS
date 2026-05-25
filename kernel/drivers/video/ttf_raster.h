@@ -108,4 +108,24 @@ bool TtfRasterSelfTest();
 /// length (≤ 32 chars).
 bool TtfDrawString(u32 x, u32 y, const char* text, u32 fg, u32 pixel_height);
 
+/// Measure `text` at `pixel_height` tall using the per-glyph advance
+/// widths from the supplied font's `hmtx` table. This is the exact
+/// pen-advance sum a subsequent `TtfDrawString` will produce for the
+/// same string + size on the same font — no estimate, no kerning
+/// (TrueType `hmtx` advance already includes both side bearings).
+///
+/// Used by chrome_text.cpp's `ChromeTextMeasure` for the TTF path
+/// instead of the previous `chars * px * 0.55` Liberation-Sans
+/// estimate, so hit-rects and centring math line up with the
+/// rasterizer's actual pen advance for any font (including the
+/// bold companion via `font = TtfChromeBoldGet()`).
+///
+/// Returns 0 for nullptr / empty inputs or `pixel_height == 0`. On a
+/// per-glyph lookup miss (e.g. `hmtx` parse error on a codepoint not
+/// covered by the font), falls back to advancing one `em-width` for
+/// that glyph — same behaviour as `TtfDrawString` on a render-miss,
+/// so the measure stays in lock-step with paint even in degenerate
+/// cases.
+u32 TtfMeasureString(const TtfFont& font, const char* text, u32 pixel_height);
+
 } // namespace duetos::drivers::video

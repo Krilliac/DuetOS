@@ -1,18 +1,26 @@
 // tests/host/test_chrome_text_measure.cpp
 //
 // Hosted unit test for Pass C ChromeTextMeasure math.
-// Verifies the proportional-glyph estimate used by the bitmap path
-// and the TTF path's expected behavior with known strings.
+// Verifies the bitmap-path exact math AND the TTF-path defensive
+// fallback estimate (`chars * px * 55 / 100`).
 //
-// This test does NOT link the kernel TU; it re-derives the math
-// inline to catch regressions in the formula independent of the
-// rasterizer state. The kernel version of ChromeTextMeasure
-// (kernel/drivers/video/chrome_text.cpp) must produce the SAME
-// values when called with the same inputs and the same theme +
-// font registration state. If the kernel formula drifts (e.g. the
-// 0.55 em-average estimate moves to 0.60, or the 8x8 ROM-font
-// stride changes), this test starts failing and the regression is
-// caught at host-CI time rather than in a QEMU smoke.
+// As of the 2026-05-25 Pass C residuals slice, the kernel's TTF
+// branch routes through `TtfMeasureString` (real per-glyph `hmtx`
+// advance sum at the requested pixel size) — that path requires a
+// loaded TtfFont so it isn't exercisable from a hosted test that
+// doesn't link the kernel rasterizer + font asset. The kernel only
+// falls back to the proportional estimate when no chrome font is
+// registered (a defensive branch — UseTtf already gates on a
+// non-null font), so the estimate math still has to stay correct
+// to catch silent regressions in the fallback formula.
+//
+// This test does NOT link the kernel TU; it re-derives the bitmap
+// + fallback math inline. If a future change moves the fallback
+// constant or the 8x8 ROM-font stride, this test starts failing
+// and the regression is caught at host-CI time rather than in a
+// QEMU smoke. The real-advance TTF path is gated by the kernel
+// `[chrome-text-selftest]` boot sentinel + a future targeted hosted
+// fixture once a synthetic font binding is in scope.
 
 #include "host_test_helper.h"
 
@@ -48,11 +56,14 @@ static uint32_t MeasureBitmap(uint32_t scale, const char* text)
     return n * scale * 8U;
 }
 
-// TTF estimate: (chars * px * 55) / 100. Mirrors the TTF branch
-// of ChromeTextMeasure exactly — coarse 0.55-em average across
-// mixed ASCII glyphs in Liberation Sans. Integer math (truncating
-// divide) matches the kernel implementation; do NOT switch to
-// floating-point here, the kernel value is the integer truncation.
+// TTF defensive-fallback estimate: (chars * px * 55) / 100.
+// Mirrors the kernel ChromeTextMeasure's no-chrome-font fallback —
+// coarse 0.55-em average across mixed ASCII glyphs in Liberation
+// Sans. The default TTF path now sums real per-glyph advances via
+// TtfMeasureString; this estimate is the safety net for when no
+// font is registered. Integer math (truncating divide) matches the
+// kernel implementation; do NOT switch to floating-point here, the
+// kernel value is the integer truncation.
 static uint32_t MeasureTtfEstimate(uint32_t px, const char* text)
 {
     uint32_t n = 0;
@@ -71,7 +82,10 @@ int main()
     EXPECT_TRUE(MeasureBitmap(1U, "OK") == 16U);               // 2 * 1 * 8
     EXPECT_TRUE(MeasureBitmap(1U, "") == 0U);
 
-    // ----- TTF estimate: 0.55 * px * chars (integer-truncated). -----
+    // ----- TTF defensive fallback (no chrome font): 0.55 * px * chars. -----
+    // Pinned at the integer-truncated values the kernel falls back to
+    // when TtfChromeFontGet() returns nullptr. Catches a regression in
+    // that branch's constant or order-of-operations.
     EXPECT_TRUE(MeasureTtfEstimate(72U, "X") == (1U * 72U * 55U) / 100U);                       // 39
     EXPECT_TRUE(MeasureTtfEstimate(16U, "Sign in") == (7U * 16U * 55U) / 100U);                 // 61
     EXPECT_TRUE(MeasureTtfEstimate(13U, "OK") == (2U * 13U * 55U) / 100U);                      // 14

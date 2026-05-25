@@ -453,6 +453,36 @@ void CompositeCoverage(i32 dx, i32 dy, const u8* cover, u32 w, u32 h, u32 fg)
 
 } // namespace
 
+u32 TtfMeasureString(const TtfFont& font, const char* text, u32 pixel_height)
+{
+    if (text == nullptr || text[0] == '\0' || pixel_height == 0 || font.units_per_em == 0)
+        return 0;
+    u64 total = 0;
+    while (*text != '\0')
+    {
+        const u32 cp = static_cast<u32>(static_cast<u8>(*text));
+        const u16 gid = TtfGlyphIndex(font, cp);
+        auto hm_r = TtfGetHMetric(font, gid);
+        if (hm_r.has_value())
+        {
+            // Same advance formula TtfRenderGlyph commits to `rg.advance`
+            // (see e.g. ttf_raster.cpp:310, :351). Keep this in lock-step
+            // so the measure matches the eventual pen position exactly.
+            total += (static_cast<u64>(hm_r.value().advance_width) * pixel_height) / font.units_per_em;
+        }
+        else
+        {
+            // Missing-metric fallback mirrors TtfDrawString's
+            // missing-glyph-render branch (advances one em-width so layout
+            // stays roughly stable). Keeps measure == paint in degenerate
+            // cases.
+            total += pixel_height;
+        }
+        ++text;
+    }
+    return (total > static_cast<u64>(0xFFFFFFFFU)) ? 0xFFFFFFFFU : static_cast<u32>(total);
+}
+
 bool TtfDrawString(u32 x, u32 y, const char* text, u32 fg, u32 pixel_height)
 {
     if (text == nullptr || pixel_height == 0)
