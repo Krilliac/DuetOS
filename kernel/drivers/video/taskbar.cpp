@@ -486,7 +486,12 @@ void TaskbarRedraw()
     }
     else
     {
-        FramebufferDrawString(4 + (start_w - 5 * 8) / 2, text_y, "START", g_fg, g_accent);
+        // Use g_border (the darkest theme amber/grey) as the START
+        // label ink so it stays readable when g_fg and g_accent are
+        // close in hue — amber's palette in particular puts both
+        // values in the same amber band and the label was invisible
+        // against the button.
+        FramebufferDrawString(4 + (start_w - 5 * 8) / 2, text_y, "START", g_border, g_accent);
     }
 
     // Per-window tabs. Iterate every registered window, filter
