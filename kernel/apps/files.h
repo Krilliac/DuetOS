@@ -70,7 +70,28 @@ bool FilesFeedListKey(duetos::u16 code);
 /// One-shot self-test: verifies the root has at least one
 /// child and that Enter on a directory updates the listing
 /// to that directory's children. Prints PASS/FAIL to COM1.
+/// Also drives a synthetic click through the migrated Pass D
+/// toolbar (g_files WidgetGroup) and cycles the footer text
+/// across all four modes.
 void FilesSelfTest();
+
+/// Accessor for the Pass D umbrella aggregator. True iff the
+/// most recent `FilesSelfTest()` invocation ran every check
+/// (including the app_widgets click-dispatch path on the RAM
+/// + REFRESH toolbar buttons) without error.
+bool FilesSelfTestPassed();
+
+/// Mouse-event entry point for the migrated (Pass D) files
+/// chrome. Called from the boot-time mouse-reader thread on
+/// every motion packet. Detects left-button press / release
+/// edges internally and dispatches MouseDown / MouseUp /
+/// MouseMove into the toolbar's WidgetGroup. Clicks that miss
+/// every widget land in the list area and are dispatched
+/// elsewhere (the existing FilesOnDoubleClick / FilesOnRightClick
+/// + WM-level click path stays the source of truth for row
+/// selection / context menus). No-op before `FilesInit` has
+/// wired a window.
+void FilesMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
 
 /// Map cursor (cx, cy) in screen coordinates to a row index in
 /// the current FAT32 listing. Returns -1 if the cursor is not

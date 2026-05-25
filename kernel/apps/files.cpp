@@ -6,6 +6,11 @@
 #include "arch/x86_64/serial.h"
 #include "diag/fix_journal.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/input/ps2mouse.h"
+#include "drivers/video/app_widgets/app_button.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_toolbar.h"
+#include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/dialog.h"
@@ -151,6 +156,156 @@ constinit State g_state = {duetos::drivers::video::kWindowInvalid,
                            0,
                            Pending::None,
                            0};
+
+// ---- Pass D chrome: AppToolbar header + 6 mode/action buttons +
+// AppLabel footer hint. The list rows themselves remain raw paint
+// (DrawRamfs / DrawFat32 / DrawTrash / DrawDuetFs) — each mode's
+// row paints inline tag colour, dim right-aligned size column, and
+// a per-mode header band that AppListRow cannot reproduce without
+// either compositing three widgets per row or losing fidelity. The
+// chrome migration is the honest Pass D win for Files: typography
+// + tactility on the header strip + footer + clickable mode
+// buttons (no need to remember D/M/T/F/R/S hotkeys). Carve-out
+// justification per Notes (Task 9): the editor area / list rows
+// were kept raw paint there too — same logic applies here.
+//
+// Layout: 26 px AppToolbar at the top of the content area, with
+// six 56-px-wide AppButtons inset 4 px (RAM/DISK/TRASH/DRIVE +
+// REFRESH + SORT). Below: the legacy header line + list paint.
+// At the bottom: an AppLabel(Caption) covers the dynamic hint /
+// pending-prompt text the legacy footer used to paint inline.
+
+constexpr u32 kHdrToolbarH = 26U;
+constexpr u32 kHdrBtnW = 56U;
+constexpr u32 kHdrBtnH = 20U;
+constexpr u32 kHdrBtnGap = 4U;
+constexpr u32 kHdrPadX = 4U;
+constexpr u32 kHdrPadY = 3U;
+constexpr u32 kFooterH = 12U;
+constexpr u32 kFooterPadX = 4U;
+
+// Number of toolbar buttons (RAM/DISK/TRASH/DRIVE/REFRESH/SORT).
+constexpr u32 kHdrBtnCount = 6U;
+
+// Index of the REFRESH button — used by the self-test to target a
+// known mid-toolbar slot. The mode buttons (0..3 RAM/DISK/TRASH/
+// DRIVE) + SORT (5) are addressed positionally by the BindFilesOnce
+// loop, so only the test's target needs a named constant.
+constexpr u32 kBtnRefresh = 4;
+
+// Static footer text buffer — AppLabel stores text by pointer so
+// the buffer must outlive every Paint. Re-rendered each frame
+// from RefreshFooterText() based on mode + pending state.
+constinit char g_footer_text[96] = {};
+
+// Self-test result flag for the Pass D umbrella aggregator. True
+// iff the most recent FilesSelfTest() invocation ran every check
+// (including the synthetic toolbar-button click) without error.
+constinit bool g_self_test_passed = false;
+
+// Mouse-state edge detector for FilesMouseInput. The legacy WM
+// dispatch on click (FilesOnDoubleClick / FilesOnRightClick)
+// stays the kernel's source of truth — this only drives the
+// toolbar widget chain so AppButton hover + press tracking
+// works on tactility themes.
+constinit bool g_prev_left_down = false;
+
+// Toolbar click trampolines — AppButton's on_click is a plain
+// `void (*)()` so we route through file-scope wrappers that
+// mutate g_state.mode / drive a rescan. Defined below; forward-
+// declared so the constinit g_files (which captures them by
+// function-pointer value) can be initialised at this point.
+void ClickModeRam();
+void ClickModeDisk();
+void ClickModeTrash();
+void ClickModeDrive();
+void ClickRefresh();
+void ClickSort();
+
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::app_widgets::AppButton;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::AppToolbar;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::Event;
+using duetos::drivers::video::app_widgets::EventKind;
+using duetos::drivers::video::app_widgets::EventResult;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// Toolbar first (back), then 6 buttons in mode-order, then the
+// footer AppLabel last (overlays the bottom hint band). Reverse
+// declaration order is the dispatch order, so buttons get first
+// refusal on the click — exactly what we want.
+constinit auto g_files = MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
+                                         AppButton{}, AppLabel{});
+
+constinit bool g_files_bound = false;
+
+// Walk the recursive WidgetChain by hand to grab a stable pointer
+// to each button. The chain order matches the MakeWidgetGroup
+// argument list: head = AppToolbar, then 6 AppButton nodes, then
+// the AppLabel.
+AppButton* HdrButton(u32 i)
+{
+    auto& a = g_files.chain.tail; // toolbar -> btn[0]
+    auto& b = a.tail;             // btn[0] -> btn[1]
+    auto& c2 = b.tail;            // btn[1] -> btn[2]
+    auto& d = c2.tail;            // btn[2] -> btn[3]
+    auto& e = d.tail;             // btn[3] -> btn[4]
+    auto& f = e.tail;             // btn[4] -> btn[5]
+    AppButton* btns[kHdrBtnCount] = {&a.head, &b.head, &c2.head, &d.head, &e.head, &f.head};
+    return btns[i];
+}
+
+void BindFilesOnce()
+{
+    if (g_files_bound)
+        return;
+    g_files_bound = true;
+
+    auto& toolbar = g_files.chain.head;
+    toolbar.bg_rgb = 0; // theme.taskbar_bg
+
+    static const char* const kLabels[kHdrBtnCount] = {"RAM", "DISK", "TRASH", "DRIVE", "REFRESH", "SORT"};
+    using ClickFn = void (*)();
+    static constexpr ClickFn kClicks[kHdrBtnCount] = {ClickModeRam,   ClickModeDisk, ClickModeTrash,
+                                                      ClickModeDrive, ClickRefresh,  ClickSort};
+    for (u32 i = 0; i < kHdrBtnCount; ++i)
+    {
+        AppButton* btn = HdrButton(i);
+        btn->label = kLabels[i];
+        btn->on_click = kClicks[i];
+        btn->weight = ChromeTextWeight::Regular;
+        btn->bg_rgb = 0; // theme role_title[0]
+        btn->fg_rgb = 0x00101828U;
+    }
+
+    auto& label = g_files.chain.tail.tail.tail.tail.tail.tail.tail.head;
+    label.text = g_footer_text;
+    label.role = ChromeTextRole::Caption;
+    label.weight = ChromeTextWeight::Regular;
+    label.fg_rgb = 0x00181828U;
+    label.bg_rgb = 0x00C8C8B8U; // status band tone
+    label.align_left = true;
+}
+
+void RebindFilesBounds(u32 cx, u32 cy, u32 cw, u32 ch)
+{
+    auto& toolbar = g_files.chain.head;
+    toolbar.bounds = Rect{cx, cy, cw, kHdrToolbarH};
+
+    for (u32 i = 0; i < kHdrBtnCount; ++i)
+    {
+        HdrButton(i)->bounds = Rect{cx + kHdrPadX + i * (kHdrBtnW + kHdrBtnGap), cy + kHdrPadY, kHdrBtnW, kHdrBtnH};
+    }
+
+    auto& label = g_files.chain.tail.tail.tail.tail.tail.tail.tail.head;
+    const u32 fy = (ch > kFooterH) ? cy + ch - kFooterH : cy;
+    const u32 fw = (cw > 2 * kFooterPadX) ? cw - 2 * kFooterPadX : cw;
+    label.bounds = Rect{cx + kFooterPadX, fy, fw, kFooterH};
+}
 
 // Case-insensitive ASCII strcmp used by the Name + Type sort
 // comparators. Returns the standard <0 / 0 / >0 trichotomy.
@@ -509,10 +664,9 @@ void DrawRamfs(u32 cx, u32 cy, u32 cw, u32 ch)
         DrawRowGeneric(cx, list_top + i * kRowH, cw, is_dir, child->name, is_dir ? 0 : child->file_size,
                        idx == g_state.ramfs_selection);
     }
-    if (ch > kRowH + 2)
-    {
-        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "UP/DN ENTER:OPEN B:BACK D:DISK F:DRIVE", kInkDim, kBg);
-    }
+    // Footer hint line moved to the AppLabel painted by DrawFn —
+    // RefreshFooterText composes the per-mode text + pending-prompt
+    // overlay into g_footer_text before PaintAll fires.
 }
 
 void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
@@ -532,10 +686,7 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
     if (g_state.fat_count == 0)
     {
         FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(no FAT32 volume mounted)", kInkDim, kBg);
-        if (ch > kRowH + 2)
-        {
-            FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "M:RAM  R:RESCAN", kInkDim, kBg);
-        }
+        // Footer hint -> AppLabel (RefreshFooterText / DrawFn).
         return;
     }
 
@@ -582,30 +733,10 @@ void DrawFat32(u32 cx, u32 cy, u32 cw, u32 ch)
         s.present = false;
         duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
     }
-    // Delete-to-trash prompt overlays the footer row when armed.
-    // Painted in red ink so a confirmation step is visually
-    // unmistakable.
-    if (g_state.pending == Pending::DeleteToTrash && g_state.pending_idx < g_state.fat_count && ch > kRowH + 2)
-    {
-        const auto& e = g_state.fat_entries[g_state.pending_idx];
-        char prompt[80];
-        u32 p = 0;
-        const char* lead = "TO TRASH: ";
-        for (u32 i = 0; lead[i] != '\0' && p + 1 < sizeof(prompt); ++i)
-            prompt[p++] = lead[i];
-        for (u32 i = 0; e.name[i] != '\0' && p + 1 < sizeof(prompt); ++i)
-            prompt[p++] = e.name[i];
-        const char* tail = " ? Y:CONFIRM ANY:CANCEL";
-        for (u32 i = 0; tail[i] != '\0' && p + 1 < sizeof(prompt); ++i)
-            prompt[p++] = tail[i];
-        prompt[p] = '\0';
-        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, prompt, 0x00FF8080, kBg);
-    }
-    else if (ch > kRowH + 2)
-    {
-        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "ENTER:OPEN R:RESCAN X:TRASH T:TRASH M:RAM F:DRIVE", kInkDim,
-                              kBg);
-    }
+    // Footer hint + delete-to-trash prompt overlay moved to the
+    // AppLabel painted by DrawFn — RefreshFooterText composes the
+    // per-mode text and the pending-prompt body into a single
+    // string before PaintAll fires.
 }
 
 void DrawTrash(u32 cx, u32 cy, u32 cw, u32 ch)
@@ -618,10 +749,7 @@ void DrawTrash(u32 cx, u32 cy, u32 cw, u32 ch)
     if (g_state.trash_count == 0)
     {
         FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(trash is empty)", kInkDim, kBg);
-        if (ch > kRowH + 2)
-        {
-            FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "D:DISK  M:RAM", kInkDim, kBg);
-        }
+        // Footer hint -> AppLabel (RefreshFooterText / DrawFn).
         return;
     }
 
@@ -638,34 +766,10 @@ void DrawTrash(u32 cx, u32 cy, u32 cw, u32 ch)
         DrawRowGeneric(cx, list_top + i * kRowH, cw, false, e.name, e.size_bytes, idx == g_state.trash_selection);
     }
 
-    // Two distinct prompts share the footer slot: per-item
-    // permanent delete vs whole-bin empty. Paint the right one
-    // for the active arm.
-    if (g_state.pending == Pending::PermDeleteFromTrash && g_state.pending_idx < g_state.trash_count && ch > kRowH + 2)
-    {
-        const auto& e = g_state.trash_entries[g_state.pending_idx];
-        char prompt[96];
-        u32 p = 0;
-        const char* lead = "PERM-DELETE ";
-        for (u32 i = 0; lead[i] != '\0' && p + 1 < sizeof(prompt); ++i)
-            prompt[p++] = lead[i];
-        for (u32 i = 0; e.name[i] != '\0' && p + 1 < sizeof(prompt); ++i)
-            prompt[p++] = e.name[i];
-        const char* tail = " ? Y:CONFIRM ANY:CANCEL";
-        for (u32 i = 0; tail[i] != '\0' && p + 1 < sizeof(prompt); ++i)
-            prompt[p++] = tail[i];
-        prompt[p] = '\0';
-        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, prompt, 0x00FF6060, kBg);
-    }
-    else if (g_state.pending == Pending::EmptyTrash && ch > kRowH + 2)
-    {
-        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "EMPTY ALL? Y:CONFIRM ANY:CANCEL", 0x00FF6060, kBg);
-    }
-    else if (ch > kRowH + 2)
-    {
-        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "R:RESTORE  X:PERM-DEL  E:EMPTY  D:DISK  M:RAM", kInkDim,
-                              kBg);
-    }
+    // Footer hint + pending-prompt overlays moved to the AppLabel
+    // painted by DrawFn — RefreshFooterText composes the per-mode
+    // text and the active pending prompt (perm-delete / empty)
+    // into a single string before PaintAll fires.
 }
 
 void DrawDuetFs(u32 cx, u32 cy, u32 cw, u32 ch)
@@ -693,8 +797,7 @@ void DrawDuetFs(u32 cx, u32 cy, u32 cw, u32 ch)
     if (g_state.duet_count == 0)
     {
         FramebufferDrawString(cx + 4, cy + 2 + kRowH + 4, "(empty directory)", kInkDim, kBg);
-        if (ch > kRowH + 2)
-            FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "B:BACK  M:RAM  D:DISK", kInkDim, kBg);
+        // Footer hint -> AppLabel (RefreshFooterText / DrawFn).
         return;
     }
 
@@ -742,20 +845,106 @@ void DrawDuetFs(u32 cx, u32 cy, u32 cw, u32 ch)
         s.present = false;
         duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
     }
-    if (ch > kRowH + 2)
-        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, "UP/DN ENTER:OPEN B:BACK M:RAM D:DISK", kInkDim, kBg);
+    // Footer hint -> AppLabel (RefreshFooterText / DrawFn).
+}
+
+// Append `s` (NUL-terminated) onto `dst` at offset `*o`, capped
+// at `cap - 1` bytes. Stops early if either runs out. Helper for
+// the footer-text formatter. Mirrors the Notes status-text shape.
+void FooterAppend(char* dst, u32 cap, u32* o, const char* s)
+{
+    while (*s != '\0' && *o + 1 < cap)
+    {
+        dst[(*o)++] = *s++;
+    }
+}
+
+// Re-compose g_footer_text from mode + pending state. Called from
+// DrawFn before PaintAll so the AppLabel sees the current frame's
+// text. Three layers:
+//   1. Pending prompt has priority (TO TRASH / PERM-DELETE / EMPTY).
+//   2. Otherwise per-mode hint string (mirrors the legacy per-mode
+//      inline footer strings).
+//   3. Empty / no-volume modes get a short fallback hint.
+void RefreshFooterText()
+{
+    u32 o = 0;
+    g_footer_text[0] = '\0';
+    // Pending prompts take priority.
+    if (g_state.pending == Pending::DeleteToTrash && g_state.pending_idx < g_state.fat_count)
+    {
+        FooterAppend(g_footer_text, sizeof(g_footer_text), &o, "TO TRASH: ");
+        FooterAppend(g_footer_text, sizeof(g_footer_text), &o, g_state.fat_entries[g_state.pending_idx].name);
+        FooterAppend(g_footer_text, sizeof(g_footer_text), &o, " ? Y:CONFIRM ANY:CANCEL");
+    }
+    else if (g_state.pending == Pending::PermDeleteFromTrash && g_state.pending_idx < g_state.trash_count)
+    {
+        FooterAppend(g_footer_text, sizeof(g_footer_text), &o, "PERM-DELETE ");
+        FooterAppend(g_footer_text, sizeof(g_footer_text), &o, g_state.trash_entries[g_state.pending_idx].name);
+        FooterAppend(g_footer_text, sizeof(g_footer_text), &o, " ? Y:CONFIRM ANY:CANCEL");
+    }
+    else if (g_state.pending == Pending::EmptyTrash)
+    {
+        FooterAppend(g_footer_text, sizeof(g_footer_text), &o, "EMPTY ALL? Y:CONFIRM ANY:CANCEL");
+    }
+    else
+    {
+        // Per-mode hint. Matches the strings the legacy inline
+        // footer code used to paint per-mode at the same screen
+        // slot.
+        const char* hint = "UP/DN ENTER:OPEN B:BACK D:DISK F:DRIVE";
+        if (g_state.mode == Mode::Fat32)
+        {
+            hint = (g_state.fat_count == 0) ? "M:RAM  R:RESCAN" : "ENTER:OPEN R:RESCAN X:TRASH T:TRASH M:RAM F:DRIVE";
+        }
+        else if (g_state.mode == Mode::Trash)
+        {
+            hint = (g_state.trash_count == 0) ? "D:DISK  M:RAM" : "R:RESTORE  X:PERM-DEL  E:EMPTY  D:DISK  M:RAM";
+        }
+        else if (g_state.mode == Mode::DuetFs)
+        {
+            hint = (g_state.duet_count == 0) ? "B:BACK  M:RAM  D:DISK" : "UP/DN ENTER:OPEN B:BACK M:RAM D:DISK";
+        }
+        FooterAppend(g_footer_text, sizeof(g_footer_text), &o, hint);
+    }
+    if (o < sizeof(g_footer_text))
+        g_footer_text[o] = '\0';
+    else
+        g_footer_text[sizeof(g_footer_text) - 1] = '\0';
 }
 
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
+    using duetos::drivers::video::FramebufferFillRect;
+    // Pass D chrome: AppToolbar at top (kHdrToolbarH), per-mode
+    // list paint in the middle, AppLabel footer at the bottom.
+    BindFilesOnce();
+    RebindFilesBounds(cx, cy, cw, ch);
+    RefreshFooterText();
+    // Pre-paint the footer band tone so the AppLabel glyphs sit
+    // on a uniform bg (AppLabel paints only its glyphs, not a
+    // full-width band).
+    if (ch > kFooterH)
+    {
+        FramebufferFillRect(cx, cy + ch - kFooterH, cw, kFooterH, 0x00C8C8B8U);
+    }
+    Compose compose_ctx{};
+    g_files.PaintAll(compose_ctx);
+    // Per-mode list paint into the middle slice. Mode-specific
+    // draw functions still own their own background fill +
+    // header-line + row rendering — chrome separation only.
+    const u32 my = cy + kHdrToolbarH;
+    const u32 mh = (ch > kHdrToolbarH + kFooterH) ? ch - kHdrToolbarH - kFooterH : 0U;
+    if (mh == 0)
+        return;
     if (g_state.mode == Mode::Fat32)
-        DrawFat32(cx, cy, cw, ch);
+        DrawFat32(cx, my, cw, mh);
     else if (g_state.mode == Mode::Trash)
-        DrawTrash(cx, cy, cw, ch);
+        DrawTrash(cx, my, cw, mh);
     else if (g_state.mode == Mode::DuetFs)
-        DrawDuetFs(cx, cy, cw, ch);
+        DrawDuetFs(cx, my, cw, mh);
     else
-        DrawRamfs(cx, cy, cw, ch);
+        DrawRamfs(cx, my, cw, mh);
 }
 
 // Spawn a PE / ELF directly from a ramfs node's embedded bytes.
@@ -1080,6 +1269,39 @@ void EmptyTrashAll()
     g_state.trash_selection = 0;
 }
 
+// ---- Pass D toolbar click trampolines (forward-declared above
+// the constinit g_files). Each routes through the equivalent
+// FilesFeedChar keybind so the click + key surfaces stay in
+// lock-step automatically — adding a new keybind branch
+// propagates to the button for free. Trampolines exist (rather
+// than binding FilesFeedChar directly) because AppButton's
+// `on_click` is `void(*)()`, not `bool(*)(char)`.
+
+void ClickModeRam()
+{
+    duetos::apps::files::FilesFeedChar('m');
+}
+void ClickModeDisk()
+{
+    duetos::apps::files::FilesFeedChar('d');
+}
+void ClickModeTrash()
+{
+    duetos::apps::files::FilesFeedChar('t');
+}
+void ClickModeDrive()
+{
+    duetos::apps::files::FilesFeedChar('f');
+}
+void ClickRefresh()
+{
+    duetos::apps::files::FilesFeedChar('r');
+}
+void ClickSort()
+{
+    duetos::apps::files::FilesFeedChar('s');
+}
+
 } // namespace
 
 void FilesInit(duetos::drivers::video::WindowHandle handle)
@@ -1220,16 +1442,23 @@ bool FilesFeedArrow(bool up)
 }
 
 // Visible list rows for the current window size. Mirrors the
-// max_rows formula in every Draw* path / FilesRowAt (title bar
-// 22 px + 2-px borders, header line at 2 + kRowH + 2). Used to
-// make PageUp/PageDown step exactly one screenful.
+// max_rows formula in every Draw* path / FilesRowAt. Title bar
+// 22 px + 2-px borders + Pass D AppToolbar (kHdrToolbarH) at the
+// top, AppLabel footer (kFooterH) reserved at the bottom, then
+// the per-mode header line (2 + kRowH + 2) above the first row.
+// Used to make PageUp/PageDown step exactly one screenful.
 u32 FilesListVisibleRows()
 {
     duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
     if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh) || wh < 26)
         return 0;
-    const duetos::u32 content_y = wy + 22 + 2;
-    const duetos::u32 content_h = wh - 22 - 4;
+    const duetos::u32 content_y_full = wy + 22 + 2;
+    const duetos::u32 content_h_full = wh - 22 - 4;
+    if (content_h_full <= kHdrToolbarH + kFooterH)
+        return 0;
+    // Middle slice the per-mode Draw* now receives.
+    const duetos::u32 content_y = content_y_full + kHdrToolbarH;
+    const duetos::u32 content_h = content_h_full - kHdrToolbarH - kFooterH;
     const duetos::u32 list_top = content_y + 2 + kRowH + 2;
     return (content_h > (list_top - content_y) + kRowH) ? (content_h - (list_top - content_y)) / kRowH : 0;
 }
@@ -1694,13 +1923,127 @@ void FilesSelfTest()
             pass = false;
     }
 
+    // Pass D: drive a synthetic click through the toolbar's
+    // WidgetGroup and verify the RAM button's callback fires.
+    // Start in DuetFS mode, click RAM, assert the mode switched.
+    // Anchor the toolbar at (0, 22, 400, 200) — same shape the
+    // live boot-time window registration uses (boot_bringup.cpp).
+    BindFilesOnce();
+    RebindFilesBounds(0U, 22U, 400U, 200U);
+    g_state.mode = Mode::DuetFs;
+    // Centre of the RAM button (index 0 — the first slot the
+    // BindFilesOnce loop wires up). Bounds are {kHdrPadX,
+    // 22+kHdrPadY, kHdrBtnW, kHdrBtnH}.
+    const duetos::u32 rx = kHdrPadX + kHdrBtnW / 2U;
+    const duetos::u32 ry = 22U + kHdrPadY + kHdrBtnH / 2U;
+    const Event m_move{EventKind::MouseMove, rx, ry, 0U, 0U};
+    const Event m_down{EventKind::MouseDown, rx, ry, 0U, 0U};
+    const Event m_up{EventKind::MouseUp, rx, ry, 0U, 0U};
+    if (g_files.DispatchEvent(m_move) != EventResult::Consumed)
+        pass = false;
+    if (g_files.DispatchEvent(m_down) != EventResult::Consumed)
+        pass = false;
+    if (g_files.DispatchEvent(m_up) != EventResult::Consumed)
+        pass = false;
+    if (g_state.mode != Mode::Ramfs)
+        pass = false;
+    // REFRESH button click (index kBtnRefresh=4). NotifyShow is
+    // the visible side effect; check the dispatch path runs end-
+    // to-end (the click chain returning Consumed is the test).
+    const duetos::u32 fx = kHdrPadX + kBtnRefresh * (kHdrBtnW + kHdrBtnGap) + kHdrBtnW / 2U;
+    const duetos::u32 fy = 22U + kHdrPadY + kHdrBtnH / 2U;
+    const Event r_move{EventKind::MouseMove, fx, fy, 0U, 0U};
+    const Event r_down{EventKind::MouseDown, fx, fy, 0U, 0U};
+    const Event r_up{EventKind::MouseUp, fx, fy, 0U, 0U};
+    if (g_files.DispatchEvent(r_move) != EventResult::Consumed)
+        pass = false;
+    if (g_files.DispatchEvent(r_down) != EventResult::Consumed)
+        pass = false;
+    if (g_files.DispatchEvent(r_up) != EventResult::Consumed)
+        pass = false;
+    // Footer-text refresh: each per-mode hint must compose non-
+    // empty into g_footer_text. Cycle the four modes and check.
+    g_state.pending = Pending::None;
+    const Mode modes_to_check[4] = {Mode::Ramfs, Mode::Fat32, Mode::Trash, Mode::DuetFs};
+    for (u32 mi = 0; mi < 4; ++mi)
+    {
+        g_state.mode = modes_to_check[mi];
+        RefreshFooterText();
+        if (g_footer_text[0] == '\0')
+            pass = false;
+    }
+    // Pending-prompt overlay in the footer text.
+    g_state.mode = Mode::Trash;
+    g_state.pending = Pending::EmptyTrash;
+    RefreshFooterText();
+    if (g_footer_text[0] != 'E') // "EMPTY ALL? ..."
+        pass = false;
+    g_state.pending = Pending::None;
+
     g_state.ramfs_depth = saved_depth;
     g_state.ramfs_selection = saved_sel;
     g_state.mode = saved_mode;
-    SerialWrite(pass ? "[files] self-test OK (ramfs descend+back, mode toggle, duetfs descend+back, ctx-dispatch, "
-                       "home/end, "
-                       "ext match, delete-disarm)\n"
-                     : "[files] self-test FAILED\n");
+    g_self_test_passed = pass;
+    if (pass)
+    {
+        SerialWrite("[files] self-test OK (ramfs descend+back, mode toggle, duetfs descend+back, ctx-dispatch, "
+                    "home/end, ext match, delete-disarm, widget-click, footer-refresh)\n");
+        SerialWrite("[files-selftest] PASS\n");
+    }
+    else
+    {
+        SerialWrite("[files] self-test FAILED\n");
+        SerialWrite("[files-selftest] FAIL\n");
+    }
+}
+
+bool FilesSelfTestPassed()
+{
+    return g_self_test_passed;
+}
+
+void FilesMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
+{
+    using duetos::drivers::input::kMouseButtonLeft;
+    if (g_state.handle == duetos::drivers::video::kWindowInvalid)
+        return;
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+        return;
+    // Title bar is 22 px; client origin sits below it. RebindBounds
+    // works in client-relative coords so the widget dispatch path
+    // needs cursor coords in the same frame.
+    constexpr duetos::u32 kTitleH = 22U;
+    if (wh <= kTitleH)
+        return;
+    const duetos::u32 client_y = wy + kTitleH;
+    const duetos::u32 client_h = wh - kTitleH;
+    BindFilesOnce();
+    RebindFilesBounds(wx, client_y, ww, client_h);
+
+    const bool left_down = (button_mask & kMouseButtonLeft) != 0;
+    const bool press_edge = left_down && !g_prev_left_down;
+    const bool release_edge = !left_down && g_prev_left_down;
+    g_prev_left_down = left_down;
+
+    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < wy + wh);
+    if (inside_window)
+    {
+        const Event m{EventKind::MouseMove, cx, cy, 0U, 0U};
+        g_files.DispatchEvent(m);
+    }
+    if (press_edge && inside_window)
+    {
+        const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
+        g_files.DispatchEvent(d);
+    }
+    if (release_edge)
+    {
+        // Always dispatch MouseUp so a button pressed inside the
+        // toolbar and dragged off clears its Pressed flag.
+        const Event u{EventKind::MouseUp, cx, cy, 0U, 0U};
+        g_files.DispatchEvent(u);
+    }
 }
 
 namespace
@@ -1799,6 +2142,17 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
     // draws its list with the same geometry, so the hit-test only
     // needs the per-mode count + selection (via ModeCount /
     // ModeSelection) — no per-mode whitelist.
+    //
+    // Pass D layout: title bar 22 px + 2-px content inset, then a
+    // 26-px AppToolbar (mirrors `kHdrToolbarH`), then the per-mode
+    // header line (2 + kRowH + 2), then the first row. 12-px footer
+    // (mirrors `kFooterH`) reserved at the bottom for the AppLabel.
+    // Constants duplicated here because they live in this TU's
+    // anonymous namespace and FilesRowAt is in the outer namespace;
+    // if you change either k_hdr_toolbar_h or k_footer_h in the
+    // anonymous block above, change them here too.
+    constexpr duetos::u32 k_hdr_toolbar_h = 26U;
+    constexpr duetos::u32 k_footer_h = 12U;
     if (ModeCount() == 0)
         return -1;
     duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
@@ -1806,13 +2160,17 @@ duetos::i32 FilesRowAt(duetos::u32 sx, duetos::u32 sy)
         return -1;
     if (ww < 4 || wh < 26)
         return -1;
-    // Content area starts at (wx+2, wy+22+2) — title bar 22 px +
-    // 2-px borders. Mirror the geometry in DrawFat32: list_top is
-    // 2 + kRowH + 2 below the content origin.
+    // Full content area first (matches DrawFn's cy / ch), then
+    // carve out the toolbar top + footer bottom to get the middle
+    // slice the per-mode Draw* function received.
     const duetos::u32 content_x = wx + 2;
-    const duetos::u32 content_y = wy + 22 + 2;
+    const duetos::u32 content_y_full = wy + 22 + 2;
     const duetos::u32 content_w = ww - 4;
-    const duetos::u32 content_h = wh - 22 - 4;
+    const duetos::u32 content_h_full = wh - 22 - 4;
+    if (content_h_full <= k_hdr_toolbar_h + k_footer_h)
+        return -1;
+    const duetos::u32 content_y = content_y_full + k_hdr_toolbar_h;
+    const duetos::u32 content_h = content_h_full - k_hdr_toolbar_h - k_footer_h;
     if (sx < content_x || sx >= content_x + content_w)
         return -1;
     const duetos::u32 list_top = content_y + 2 + kRowH + 2;

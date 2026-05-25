@@ -3238,6 +3238,7 @@ void MouseReaderTask(void*)
             // events still fire exactly once per click.
             duetos::apps::calculator::CalculatorMouseInput(cx, cy, p.buttons);
             duetos::apps::notes::NotesMouseInput(cx, cy, p.buttons);
+            duetos::apps::files::FilesMouseInput(cx, cy, p.buttons);
         }
 
         // Hover responsiveness: when a menu is open and the
