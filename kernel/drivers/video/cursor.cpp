@@ -455,24 +455,31 @@ void CursorShow()
 
 void CursorOverlayInCompose()
 {
-    // Called from inside DesktopCompose between Begin/EndCompose.
-    // FramebufferPutPixel auto-routes to the offscreen shadow during
-    // compose, so DrawAt lands the cursor sprite in the offscreen buffer
-    // and the subsequent blit publishes the cursor atomically with the
-    // rest of the composed frame — no visual gap, no flash.
+    // Called by DesktopCompose AFTER EndCompose has flushed the
+    // offscreen shadow to the live framebuffer. The blit may have
+    // overwritten the cursor pixels at (g_x, g_y) with composed
+    // wallpaper/chrome pixels (the offscreen has no cursor). This
+    // re-asserts the cursor on the live framebuffer at the CURRENT
+    // mouse position so the user always sees the cursor where the
+    // mouse actually is — not at a stale compose-time position.
     //
-    // We deliberately do NOT call SaveAt here: FramebufferReadPixel
-    // always reads from LIVE framebuffer (per its docstring), so SaveAt
-    // would capture the CURRENT cursor pixels (which are already on
-    // live FB from MouseReader's DrawAt) into g_backing. The next
-    // CursorMove → RestoreAt would then write cursor pixels back at
-    // the old position — a visible "ghost" cursor lagging behind the
-    // real one. Backing is owned by MouseReader's CursorMove
-    // (Restore-old → Save-new → Draw-new at each PS/2 packet); leaving
-    // it alone here keeps the static-region case bit-perfect. For
-    // motion regions the backing may be one frame stale (a 16×16 patch
-    // of slightly-old wallpaper momentarily on next move) but that's
-    // far less perceptible than a full cursor-shaped ghost.
+    // Why this order matters: previous designs (a) hid cursor before
+    // compose then re-showed after, producing a ~25 ms visible gap
+    // (the "flash"), or (b) painted cursor into the offscreen at
+    // compose-start position, which lagged behind the live position
+    // when MouseReader moved the cursor between compose and blit
+    // (the "ghost"). Painting on top of LIVE FB after blit avoids
+    // both: cursor stays continuously visible (live-FB pixels from
+    // MouseReader's last DrawAt remain through compose; if the blit
+    // erases them, the redraw immediately below restores them at the
+    // CURRENT position — microsecond gap, imperceptible).
+    //
+    // SaveAt + DrawAt on live FB: SaveAt reads the post-blit pixels
+    // (which reflect whatever the compose actually wrote to that
+    // region — typically wallpaper since the offscreen has no cursor
+    // pixels there) into g_backing. DrawAt then draws the cursor
+    // sprite. Backing is consistent with live FB → next CursorMove's
+    // RestoreAt cleanly recovers the underlying wallpaper.
     if (!g_ready)
     {
         return; // operator/widget code explicitly hid the cursor
@@ -481,6 +488,7 @@ void CursorOverlayInCompose()
     {
         return;
     }
+    SaveAt(g_x, g_y);
     DrawAt(g_x, g_y);
 }
 

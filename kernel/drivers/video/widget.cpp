@@ -2727,17 +2727,20 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
             FramebufferFillRect(g_caret.x, g_caret.y, g_caret.w, g_caret.h, 0x00000000);
         }
     }
-    // Paint the cursor sprite into the offscreen compose buffer as
-    // the LAST step before EndCompose flushes. The blit then publishes
-    // cursor pixels atomically with the rest of the composed frame,
-    // eliminating the CursorHide/CursorShow visual gap that previously
-    // caused a per-compose cursor flash (~25-30 ms blank on VBox).
-    // No-op when the cursor is hidden (g_ready=false in cursor.cpp).
-    CursorOverlayInCompose();
-
     // Flush the shadow surface to the live framebuffer (no-op if
     // BeginCompose fell back to direct mode).
     FramebufferEndCompose();
+
+    // Re-assert the cursor sprite on the LIVE framebuffer at the
+    // CURRENT mouse position. The blit above may have overwritten
+    // cursor pixels with composed wallpaper/chrome (offscreen has no
+    // cursor). This puts the cursor back at the live position, not
+    // the stale compose-start position — eliminates both the
+    // CursorHide/Show flash AND the lag-ghost from the previous
+    // offscreen-paint approach. See cursor.cpp::CursorOverlayInCompose
+    // for the full rationale. Microsecond gap between blit and redraw
+    // is imperceptible. No-op when cursor is explicitly hidden.
+    CursorOverlayInCompose();
 
     // Present the freshly-composed frame. For in-place framebuffers
     // (firmware handoff, Bochs VBE) this is a no-op. For
