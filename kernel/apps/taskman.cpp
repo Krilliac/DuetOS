@@ -3,6 +3,11 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/input/ps2mouse.h"
+#include "drivers/video/app_widgets/app_button.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_toolbar.h"
+#include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/dialog.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
@@ -184,6 +189,189 @@ constinit duetos::u64 g_last_sample_tick = 0;
 // ring covers a clean rolling minute. 100 ticks = 1 s at the
 // kernel's 100 Hz scheduler tick.
 constexpr duetos::u64 kSampleIntervalTicks = 100;
+
+// ---- Pass D chrome: AppToolbar header + 4 mode/action buttons +
+// AppLabel status footer. The process list rows (5-column —
+// PID / NAME / STATE / CPU% / TICKS, with selection highlight
+// and bright-green ink for the on-CPU task) stay as raw paint
+// (DrawRows + DrawHeader), and the Performance-tab sparkline
+// stack stays raw paint too (DrawPerformance) — neither fits
+// AppListRow's single-Body-label contract without losing visual
+// fidelity. Same judgment Files (Task 10) applied: chrome
+// migrates, content band stays raw.
+//
+// Layout: 26 px AppToolbar at the top of the content area with
+// four 64-px-wide AppButtons inset 4 px (TASKS/PERF/SORT/REFRESH).
+// Below: the legacy header line + per-tab content paint. At the
+// bottom: an AppLabel(Caption) covers the dynamic hotkey hint
+// the legacy footer used to paint inline.
+
+constexpr duetos::u32 kHdrToolbarH = 26U;
+constexpr duetos::u32 kHdrBtnW = 64U;
+constexpr duetos::u32 kHdrBtnH = 20U;
+constexpr duetos::u32 kHdrBtnGap = 4U;
+constexpr duetos::u32 kHdrPadX = 4U;
+constexpr duetos::u32 kHdrPadY = 3U;
+constexpr duetos::u32 kFooterBandH = 12U;
+constexpr duetos::u32 kFooterPadX = 4U;
+
+// Number of toolbar buttons (TASKS / PERF / SORT / REFRESH).
+// KILL deliberately omitted — that's a destructive action that
+// opens a confirm dialog, and the kill flow needs a row
+// selected first. The keyboard 'K' / Del shortcuts stay as the
+// only entry point so a stray click on a tactile toolbar
+// button can't accidentally arm a process kill.
+constexpr duetos::u32 kHdrBtnCount = 4U;
+
+// Index of the REFRESH button — used by the self-test to drive
+// a synthetic click on a known-safe slot (REFRESH is idempotent
+// and never escalates to a kill dialog or destructive op).
+constexpr duetos::u32 kBtnRefresh = 3U;
+
+// Static footer text buffer — AppLabel stores text by pointer
+// so the buffer must outlive every Paint. Re-rendered each
+// frame from RefreshTaskmanStatus() based on the active sort
+// mode (the cycling hotkey hint shows which sort key is live).
+constinit char g_footer_text[96] = {};
+
+// Self-test result flag for the Pass D umbrella aggregator. True
+// iff the most recent TaskmanSelfTest() invocation ran every
+// check (including the synthetic toolbar-button click) without
+// error.
+constinit bool g_self_test_passed = false;
+
+// Mouse-state edge detector for TaskmanMouseInput. The existing
+// keyboard surface (TaskmanFeedChar / TaskmanFeedKey) and the
+// wheel handler stay the kernel's source of truth for selection
+// + tab cycling — this only drives the toolbar widget chain so
+// AppButton hover + press tracking works on tactility themes.
+constinit bool g_prev_left_down = false;
+
+// Toolbar click trampolines — AppButton's on_click is a plain
+// `void (*)()` so we route through file-scope wrappers that
+// re-enter TaskmanFeedChar with the matching keybind. Defined
+// below; forward-declared so the constinit g_taskman (which
+// captures them by function-pointer value) can be initialised.
+void ClickTasksTab();
+void ClickPerfTab();
+void ClickSort();
+void ClickRefresh();
+
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::app_widgets::AppButton;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::AppToolbar;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::Event;
+using duetos::drivers::video::app_widgets::EventKind;
+using duetos::drivers::video::app_widgets::EventResult;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// Toolbar first (back), then the 4 buttons in tab/action order,
+// then the footer AppLabel last (overlays the bottom hint band).
+// Reverse declaration order is the dispatch order, so buttons
+// get first refusal on the click — exactly what we want.
+constinit auto g_taskman =
+    MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppLabel{});
+
+constinit bool g_taskman_bound = false;
+
+// Walk the recursive WidgetChain by hand to grab a stable
+// pointer to each button. The chain order matches the
+// MakeWidgetGroup argument list: head = AppToolbar, then 4
+// AppButton nodes, then the AppLabel.
+AppButton* HdrButton(duetos::u32 i)
+{
+    auto& a = g_taskman.chain.tail; // toolbar -> btn[0]
+    auto& b = a.tail;               // btn[0] -> btn[1]
+    auto& c2 = b.tail;              // btn[1] -> btn[2]
+    auto& d = c2.tail;              // btn[2] -> btn[3]
+    AppButton* btns[kHdrBtnCount] = {&a.head, &b.head, &c2.head, &d.head};
+    return btns[i];
+}
+
+void BindTaskmanOnce()
+{
+    if (g_taskman_bound)
+        return;
+    g_taskman_bound = true;
+
+    auto& toolbar = g_taskman.chain.head;
+    toolbar.bg_rgb = 0; // theme.taskbar_bg
+
+    static const char* const kLabels[kHdrBtnCount] = {"TASKS", "PERF", "SORT", "REFRESH"};
+    using ClickFn = void (*)();
+    static constexpr ClickFn kClicks[kHdrBtnCount] = {ClickTasksTab, ClickPerfTab, ClickSort, ClickRefresh};
+    for (duetos::u32 i = 0; i < kHdrBtnCount; ++i)
+    {
+        AppButton* btn = HdrButton(i);
+        btn->label = kLabels[i];
+        btn->on_click = kClicks[i];
+        btn->weight = ChromeTextWeight::Regular;
+        btn->bg_rgb = 0; // theme role default
+        btn->fg_rgb = 0x00101828U;
+    }
+
+    auto& label = g_taskman.chain.tail.tail.tail.tail.tail.head;
+    label.text = g_footer_text;
+    label.role = ChromeTextRole::Caption;
+    label.weight = ChromeTextWeight::Regular;
+    label.fg_rgb = 0x00181828U;
+    label.bg_rgb = 0x00C8C8B8U; // status band tone
+    label.align_left = true;
+}
+
+// Re-anchor the toolbar + buttons + footer label to the live
+// window's client rect. Called from DrawFn before PaintAll and
+// from TaskmanMouseInput before DispatchEvent so hit-tests +
+// visuals stay consistent across window moves / resizes.
+void RebindTaskmanBounds(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch)
+{
+    auto& toolbar = g_taskman.chain.head;
+    toolbar.bounds = Rect{cx, cy, cw, kHdrToolbarH};
+
+    for (duetos::u32 i = 0; i < kHdrBtnCount; ++i)
+    {
+        HdrButton(i)->bounds = Rect{cx + kHdrPadX + i * (kHdrBtnW + kHdrBtnGap), cy + kHdrPadY, kHdrBtnW, kHdrBtnH};
+    }
+
+    auto& label = g_taskman.chain.tail.tail.tail.tail.tail.head;
+    const duetos::u32 fy = (ch > kFooterBandH) ? cy + ch - kFooterBandH : cy;
+    const duetos::u32 fw = (cw > 2U * kFooterPadX) ? cw - 2U * kFooterPadX : cw;
+    label.bounds = Rect{cx + kFooterPadX, fy, fw, kFooterBandH};
+}
+
+// Append `s` (NUL-terminated) onto `dst` at offset `*o`, capped
+// at `cap - 1` bytes. Stops early if either runs out. Mirrors
+// the Files RefreshFooterText helper shape so future passes can
+// factor both into a shared util if a third app wants it.
+void StatusAppend(char* dst, duetos::u32 cap, duetos::u32* o, const char* s)
+{
+    while (*s != '\0' && *o + 1 < cap)
+    {
+        dst[(*o)++] = *s++;
+    }
+}
+
+// Re-compose g_footer_text from the active sort mode + tab.
+// Called from DrawFn before PaintAll so the AppLabel sees the
+// current frame's text. The legacy hotkey strip the inline
+// footer used to paint moves here verbatim, with the live
+// SORT- suffix updating per Tab cycle.
+void RefreshTaskmanStatus()
+{
+    duetos::u32 o = 0;
+    g_footer_text[0] = '\0';
+    StatusAppend(g_footer_text, sizeof(g_footer_text), &o, "TAB:VIEW  UP/DN PGUP/PGDN  S:SORT-");
+    StatusAppend(g_footer_text, sizeof(g_footer_text), &o, SortModeName(g_sort));
+    StatusAppend(g_footer_text, sizeof(g_footer_text), &o, "  K:KILL  R:REFRESH");
+    if (o < sizeof(g_footer_text))
+        g_footer_text[o] = '\0';
+    else
+        g_footer_text[sizeof(g_footer_text) - 1] = '\0';
+}
 
 // String helpers — the kernel has no printf, so column
 // formatting is done by hand. All formatters write at most
@@ -576,27 +764,11 @@ void DrawRows(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, du
     }
 }
 
-void DrawFooter(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, duetos::u32 fg, duetos::u32 bg)
-{
-    using duetos::drivers::video::FramebufferDrawString;
-    using duetos::drivers::video::FramebufferFillRect;
-    if (ch < kFooterH)
-        return;
-    const duetos::u32 y = cy + ch - kFooterH;
-    FramebufferFillRect(cx, y, cw, kFooterH, bg);
-    char hint[80];
-    duetos::u32 o = 0;
-    auto append = [&](const char* s)
-    {
-        while (*s != '\0' && o + 1 < sizeof(hint))
-            hint[o++] = *s++;
-    };
-    append("TAB:VIEW  UP/DN PGUP/PGDN  S:SORT-");
-    append(SortModeName(g_sort));
-    append("  K:KILL  R:REFRESH");
-    hint[o] = '\0';
-    FramebufferDrawString(cx + kColPad, y + 2, hint, fg, bg);
-}
+// DrawFooter was the legacy inline footer painter. The hotkey
+// hint moved to the Pass D AppLabel footer (RefreshTaskmanStatus
+// + g_taskman.PaintAll), so the inline painter is no longer
+// called. Deleted to avoid an -Wunused-function break under
+// -Werror; the live composer lives in RefreshTaskmanStatus().
 
 // Render a single line graph into a rectangle. `samples` is the
 // kHistorySamples-long ring at `g_history`; `field_offset` picks
@@ -812,12 +984,76 @@ void DrawFn(duetos::u32 cx, duetos::u32 cy, duetos::u32 cw, duetos::u32 ch, void
 
     MaybeSampleHistory();
     RebuildSnapshot();
-    DrawHeader(cx, cy, cw, kFg, kHl, bg);
+
+    // Pass D chrome: AppToolbar at top (kHdrToolbarH), legacy
+    // header + rows + perf-graph paint in the middle, AppLabel
+    // footer at the bottom (kFooterBandH). The middle slice is
+    // what DrawHeader / DrawRows / DrawPerformance receive.
+    BindTaskmanOnce();
+    RebindTaskmanBounds(cx, cy, cw, ch);
+    RefreshTaskmanStatus();
+    // Pre-paint the footer band tone so the AppLabel glyphs sit
+    // on a uniform bg (AppLabel paints only its glyphs, not a
+    // full-width band).
+    if (ch > kFooterBandH)
+    {
+        FramebufferFillRect(cx, cy + ch - kFooterBandH, cw, kFooterBandH, 0x00C8C8B8U);
+    }
+    Compose compose_ctx{};
+    g_taskman.PaintAll(compose_ctx);
+
+    // Middle slice for the legacy content paint. kHdrToolbarH
+    // off the top, kFooterBandH off the bottom. The legacy
+    // DrawHeader expects to paint its own header band at the
+    // top of the slice it receives; passing my/mh achieves
+    // that without changing DrawHeader / DrawRows.
+    const duetos::u32 my = cy + kHdrToolbarH;
+    const duetos::u32 mh = (ch > kHdrToolbarH + kFooterBandH) ? ch - kHdrToolbarH - kFooterBandH : 0U;
+    if (mh == 0)
+        return;
+    DrawHeader(cx, my, cw, kFg, kHl, bg);
     if (g_tab == Tab::Processes)
-        DrawRows(cx, cy, cw, ch, kFg, kFgRun, kSelBg, bg);
+        DrawRows(cx, my, cw, mh, kFg, kFgRun, kSelBg, bg);
     else
-        DrawPerformance(cx, cy, cw, ch, kFg, kFgCpu, kFgMem, kGrid, kFrame, kFill, bg);
-    DrawFooter(cx, cy, cw, ch, kFg, bg);
+        DrawPerformance(cx, my, cw, mh, kFg, kFgCpu, kFgMem, kGrid, kFrame, kFill, bg);
+    // The legacy DrawFooter painted the hotkey hint inside the
+    // middle slice. That hint moved to the AppLabel footer
+    // (RefreshTaskmanStatus + PaintAll), so DrawFooter is no
+    // longer called.
+}
+
+// ---- Pass D toolbar click trampolines (forward-declared above
+// the constinit g_taskman). Each routes through the equivalent
+// TaskmanFeedChar keybind so the click + key surfaces stay in
+// lock-step automatically — adding a new keybind branch
+// propagates to the button for free. KILL is deliberately NOT
+// wired to a toolbar slot: that action needs a row selected and
+// opens a confirm dialog, so it's safer left to the K / Del
+// keyboard path where the user has already committed to acting
+// on the selection.
+
+void ClickTasksTab()
+{
+    // Cycle to PROCESSES tab. TaskmanFeedChar('\t') cycles
+    // PROCESSES <-> PERFORMANCE; force-set instead so a click
+    // on TASKS always lands on the tab a user expects regardless
+    // of where the cycle was.
+    g_tab = Tab::Processes;
+}
+
+void ClickPerfTab()
+{
+    g_tab = Tab::Performance;
+}
+
+void ClickSort()
+{
+    duetos::apps::taskman::TaskmanFeedChar('s');
+}
+
+void ClickRefresh()
+{
+    duetos::apps::taskman::TaskmanFeedChar('r');
 }
 
 // ---------------------------------------------------------------
@@ -1038,13 +1274,129 @@ void TaskmanSelfTest()
         static_cast<TaskState>(g_rows[3].state) != TaskState::Blocked)
         pass = false;
 
-    // Restore.
+    // Restore the sort-comparator state before the Pass D click
+    // test runs (the click trampoline may mutate g_tab, which is
+    // independent of g_sort but cleaner to restore in one block).
     for (duetos::u32 i = 0; i < kMaxRows; ++i)
         g_rows[i] = saved[i];
     g_row_count = saved_count;
     g_sort = saved_mode;
 
-    SerialWrite(pass ? "[taskman] self-test OK (sort comparators)\n" : "[taskman] self-test FAILED\n");
+    // Pass D: drive a synthetic click on the REFRESH toolbar
+    // button (kBtnRefresh slot) via the WidgetGroup dispatch
+    // chain. KILL is deliberately NOT in the toolbar set (it
+    // would arm a destructive op on a row that may not exist
+    // during the boot-time self-test), so REFRESH — which is
+    // idempotent — is the safe target. Anchor the toolbar at
+    // (0, 22, 520, 260) — the same shape boot_bringup.cpp
+    // registers the live window with.
+    const Tab saved_tab = g_tab;
+    BindTaskmanOnce();
+    RebindTaskmanBounds(0U, 22U, 520U, 260U);
+
+    // REFRESH button click (index kBtnRefresh=3). The on_click
+    // trampoline routes through TaskmanFeedChar('r') which
+    // zeroes g_first_visible — verifying the dispatch path runs
+    // end-to-end without crashing is the test.
+    const duetos::u32 rx = kHdrPadX + kBtnRefresh * (kHdrBtnW + kHdrBtnGap) + kHdrBtnW / 2U;
+    const duetos::u32 ry = 22U + kHdrPadY + kHdrBtnH / 2U;
+    const Event m_move{EventKind::MouseMove, rx, ry, 0U, 0U};
+    const Event m_down{EventKind::MouseDown, rx, ry, 0U, 0U};
+    const Event m_up{EventKind::MouseUp, rx, ry, 0U, 0U};
+    if (g_taskman.DispatchEvent(m_move) != EventResult::Consumed)
+        pass = false;
+    if (g_taskman.DispatchEvent(m_down) != EventResult::Consumed)
+        pass = false;
+    if (g_taskman.DispatchEvent(m_up) != EventResult::Consumed)
+        pass = false;
+
+    // TASKS tab click — should force g_tab back to Processes
+    // regardless of the prior state. Start by setting it to
+    // Performance so the click flip is observable.
+    g_tab = Tab::Performance;
+    const duetos::u32 tx = kHdrPadX + 0U * (kHdrBtnW + kHdrBtnGap) + kHdrBtnW / 2U;
+    const duetos::u32 ty = 22U + kHdrPadY + kHdrBtnH / 2U;
+    const Event t_move{EventKind::MouseMove, tx, ty, 0U, 0U};
+    const Event t_down{EventKind::MouseDown, tx, ty, 0U, 0U};
+    const Event t_up{EventKind::MouseUp, tx, ty, 0U, 0U};
+    if (g_taskman.DispatchEvent(t_move) != EventResult::Consumed)
+        pass = false;
+    if (g_taskman.DispatchEvent(t_down) != EventResult::Consumed)
+        pass = false;
+    if (g_taskman.DispatchEvent(t_up) != EventResult::Consumed)
+        pass = false;
+    if (g_tab != Tab::Processes)
+        pass = false;
+
+    // Footer-text composer: must produce non-empty text for the
+    // current sort mode. Mutating g_sort here is fine — it's
+    // restored below as part of the saved-mode pair.
+    RefreshTaskmanStatus();
+    if (g_footer_text[0] == '\0')
+        pass = false;
+
+    g_tab = saved_tab;
+
+    g_self_test_passed = pass;
+    if (pass)
+    {
+        SerialWrite("[taskman] self-test OK (sort comparators, widget-click, footer-refresh)\n");
+        SerialWrite("[taskman-selftest] PASS\n");
+    }
+    else
+    {
+        SerialWrite("[taskman] self-test FAILED\n");
+        SerialWrite("[taskman-selftest] FAIL\n");
+    }
+}
+
+bool TaskmanSelfTestPassed()
+{
+    return g_self_test_passed;
+}
+
+void TaskmanMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
+{
+    using duetos::drivers::input::kMouseButtonLeft;
+    if (g_handle == duetos::drivers::video::kWindowInvalid)
+        return;
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_handle, &wx, &wy, &ww, &wh))
+        return;
+    // Title bar is 22 px; client origin sits below it.
+    // RebindTaskmanBounds works in client-relative coords so the
+    // widget dispatch path needs cursor coords in the same frame.
+    constexpr duetos::u32 kTitleH = 22U;
+    if (wh <= kTitleH)
+        return;
+    const duetos::u32 client_y = wy + kTitleH;
+    const duetos::u32 client_h = wh - kTitleH;
+    BindTaskmanOnce();
+    RebindTaskmanBounds(wx, client_y, ww, client_h);
+
+    const bool left_down = (button_mask & kMouseButtonLeft) != 0;
+    const bool press_edge = left_down && !g_prev_left_down;
+    const bool release_edge = !left_down && g_prev_left_down;
+    g_prev_left_down = left_down;
+
+    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < wy + wh);
+    if (inside_window)
+    {
+        const Event m{EventKind::MouseMove, cx, cy, 0U, 0U};
+        g_taskman.DispatchEvent(m);
+    }
+    if (press_edge && inside_window)
+    {
+        const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
+        g_taskman.DispatchEvent(d);
+    }
+    if (release_edge)
+    {
+        // Always dispatch MouseUp so a button pressed inside the
+        // toolbar and dragged off clears its Pressed flag.
+        const Event u{EventKind::MouseUp, cx, cy, 0U, 0U};
+        g_taskman.DispatchEvent(u);
+    }
 }
 
 } // namespace duetos::apps::taskman

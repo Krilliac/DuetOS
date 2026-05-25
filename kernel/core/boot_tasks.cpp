@@ -3239,6 +3239,7 @@ void MouseReaderTask(void*)
             duetos::apps::calculator::CalculatorMouseInput(cx, cy, p.buttons);
             duetos::apps::notes::NotesMouseInput(cx, cy, p.buttons);
             duetos::apps::files::FilesMouseInput(cx, cy, p.buttons);
+            duetos::apps::taskman::TaskmanMouseInput(cx, cy, p.buttons);
         }
 
         // Hover responsiveness: when a menu is open and the
