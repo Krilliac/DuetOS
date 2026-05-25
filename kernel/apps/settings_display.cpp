@@ -1,6 +1,9 @@
 #include "apps/settings.h"
 
+#include "arch/x86_64/serial.h"
 #include "drivers/gpu/dpms.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
@@ -11,6 +14,77 @@ namespace duetos::apps::settings
 
 namespace
 {
+
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::ThemeCurrent;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// ---------------------------------------------------------------
+// Pass D chrome: DISPLAY panel. Header (Title Bold) + footer
+// (Caption hint band) AppLabels stand the canonical hero / hint
+// chrome up; the four data-bearing rows (resolution, pitch,
+// DPMS state, transitions) and the four B/W/Y/U hint lines stay
+// raw paint because their content is live-data + key-driven and
+// composes better in-line than as separate AppLabels with their
+// own static composer buffers.
+
+constinit char g_disp_header[16] = "DISPLAY";
+constinit char g_disp_footer[64] = "B:BLANK  W:WAKE  Y:STANDBY  U:SUSPEND";
+
+constinit auto g_settings_display = MakeWidgetGroup(AppLabel{}, AppLabel{});
+
+constinit bool g_settings_display_bound = false;
+constinit bool g_settings_display_self_test_passed = false;
+
+AppLabel& DspHeader()
+{
+    return g_settings_display.chain.head;
+}
+AppLabel& DspFooter()
+{
+    return g_settings_display.chain.tail.head;
+}
+
+void BindSettingsDisplayOnce()
+{
+    if (g_settings_display_bound)
+        return;
+    g_settings_display_bound = true;
+
+    const auto& th = ThemeCurrent();
+    const u32 bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
+    const u32 fg = th.console_fg;
+    const u32 dim = th.banner_fg;
+
+    AppLabel& h = DspHeader();
+    h.text = g_disp_header;
+    h.role = ChromeTextRole::Title;
+    h.weight = ChromeTextWeight::Bold;
+    h.fg_rgb = fg;
+    h.bg_rgb = bg;
+    h.align_left = true;
+
+    AppLabel& f = DspFooter();
+    f.text = g_disp_footer;
+    f.role = ChromeTextRole::Caption;
+    f.weight = ChromeTextWeight::Regular;
+    f.fg_rgb = dim;
+    f.bg_rgb = bg;
+    f.align_left = true;
+}
+
+void RebindSettingsDisplayBounds(u32 x, u32 y, u32 w, u32 h)
+{
+    constexpr u32 kHeaderH = 14U;
+    constexpr u32 kFooterH = 12U;
+    DspHeader().bounds = Rect{x, y, w, kHeaderH};
+    const u32 fy = (h > kFooterH) ? y + h - kFooterH : y;
+    DspFooter().bounds = Rect{x, fy, w, kFooterH};
+}
 
 // Decimal-render `v` into `out` at offset `*o`, capped at
 // `cap - 1` chars.
@@ -47,16 +121,19 @@ void AppendStr(char* out, u32 cap, u32* o, const char* s)
 void Draw(u32 x, u32 y, u32 w, u32 h)
 {
     using duetos::drivers::video::ChromeTextDraw;
-    using duetos::drivers::video::ChromeTextRole;
-    using duetos::drivers::video::ChromeTextWeight;
     const auto& th = duetos::drivers::video::ThemeCurrent();
     const u32 bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
     const u32 fg = th.console_fg;
     const u32 dim = th.banner_fg;
     if (w < 8 * 24 || h < 8 * 8)
         return;
-    // Section header — Title + Bold for the panel's hero label.
-    ChromeTextDraw(ChromeTextRole::Title, x, y, "DISPLAY", fg, bg, ChromeTextWeight::Bold);
+
+    // Pass D chrome: anchor + paint header + footer labels.
+    BindSettingsDisplayOnce();
+    RebindSettingsDisplayBounds(x, y, w, h);
+    Compose ctx{};
+    g_settings_display.PaintAll(ctx);
+
     const auto fb = duetos::drivers::video::FramebufferGet();
     char line[80];
     u32 o = 0;
@@ -90,6 +167,9 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     ChromeTextDraw(ChromeTextRole::Body, x, y + 56, line, dim, bg);
 
     // Hint lines — Caption role for key-shortcut help under the readouts.
+    // The bottom-pinned AppLabel footer carries the canonical one-liner;
+    // the four expanded rows here document the long-form effect of each
+    // key for a user who hasn't memorised the abbreviations.
     ChromeTextDraw(ChromeTextRole::Caption, x, y + 80, "B: BLANK MONITOR (DPMS Off)", dim, bg);
     ChromeTextDraw(ChromeTextRole::Caption, x, y + 92, "W: WAKE MONITOR (DPMS On)", dim, bg);
     ChromeTextDraw(ChromeTextRole::Caption, x, y + 104, "Y: STANDBY (H-sync off)", dim, bg);
@@ -132,6 +212,30 @@ bool Key(char c)
 void SettingsDisplayInit()
 {
     SettingsRegisterPanel(Panel::Display, Draw, Key);
+}
+
+void SettingsDisplaySelfTest()
+{
+    using duetos::arch::SerialWrite;
+    bool ok = true;
+
+    BindSettingsDisplayOnce();
+    RebindSettingsDisplayBounds(0U, 0U, 256U, 160U);
+    Compose ctx{};
+    g_settings_display.PaintAll(ctx);
+
+    if (g_disp_header[0] == '\0' || g_disp_footer[0] == '\0')
+        ok = false;
+    if (DspHeader().text == nullptr || DspFooter().text == nullptr)
+        ok = false;
+
+    g_settings_display_self_test_passed = ok;
+    SerialWrite(ok ? "[settings-display-selftest] PASS\n" : "[settings-display-selftest] FAIL\n");
+}
+
+bool SettingsDisplaySelfTestPassed()
+{
+    return g_settings_display_self_test_passed;
 }
 
 } // namespace duetos::apps::settings
