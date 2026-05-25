@@ -55,6 +55,7 @@
 #include "drivers/video/ttf_raster.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/taskbar.h"
+#include "security/guard.h"
 #include "security/login.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/tray_flyout.h"
@@ -2591,6 +2592,25 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     if (duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui)
     {
         duetos::core::LoginRepaint();
+        return;
+    }
+
+    // Security-guard modal owns the framebuffer while up. The
+    // prompt (kernel/security/guard.cpp::PromptUser) paints its
+    // panel directly to the live FB and busy-waits on user input
+    // — it does NOT participate in the shadow / EndCompose diff
+    // pipeline because it runs synchronously on the kboot/loader
+    // thread, not on the ui-ticker thread that owns BeginCompose.
+    // Without this short-circuit, an in-flight ui-ticker compose
+    // races the prompt's paint and the EndCompose shadow->live
+    // diff blits whatever the desktop drew over the prompt's
+    // pixels — observable as terminal / desktop content bleeding
+    // through the guard modal (reported 2026-05-25, amber theme,
+    // ring3-hello-pe PE_NO_IMPORTS prompt). Same pattern as the
+    // LoginIsActive short-circuit above. The cursor and animation
+    // paths drive themselves and survive this no-op.
+    if (duetos::security::GuardPromptActive())
+    {
         return;
     }
 
