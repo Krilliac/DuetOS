@@ -297,35 +297,65 @@ bool DialogOnPress(u32 cx, u32 cy)
 namespace
 {
 
-// Wrap-aware multi-line draw. Splits `text` at '\n' and at a
-// column cap so a long body string still reads inside the panel.
-// Each line is buffered then emitted as a single ChromeTextDraw
-// call so the TTF path advances cleanly per-glyph; the column
-// cap remains a coarse character heuristic (variable-width
-// glyphs may stop short of the pixel cap, never overrun it for
-// typical text). Stops painting when it runs out of vertical room.
+// Wrap-aware multi-line draw. Splits `text` at '\n' and Measure-
+// drives the soft wrap so the TTF render path doesn't clip into
+// the panel padding. The old bitmap col-cap (`max_w / kGlyphW`)
+// over-estimated the legal char count by ~45% under TTF themes
+// (Liberation Sans averages ~0.55 em per glyph, not the bitmap
+// font's full 8 px), so wide ASCII could spill into the right
+// kPad margin even though the bitmap-equivalent col-cap held.
+//
+// Wrap policy: try to break at the previous whitespace if a
+// pending word would push the line over `max_w`; if the word
+// itself is wider than `max_w` (worst-case "Mwwwwww..." style),
+// flush whatever fits and keep going from the next char. Falls
+// back to char-at-a-time when no whitespace is in sight.
+//
+// Each completed line is emitted as a single ChromeTextDraw call
+// so per-glyph TTF advances align with the layout this code
+// computed. Stops painting when it runs out of vertical room.
 void DrawWrappedText(u32 x0, u32 y0, u32 max_w, u32 max_h, const char* text, u32 fg, u32 bg)
 {
-    if (text == nullptr || max_w < kGlyphW || max_h < kGlyphH)
+    if (text == nullptr || max_w == 0)
         return;
-    const u32 max_col = max_w / kGlyphW;
-    const u32 max_row = max_h / kGlyphH;
+    const u32 line_h = ChromeTextRoleHeight(ChromeTextRole::Body);
+    if (line_h == 0 || max_h < line_h)
+        return;
+    const u32 max_row = max_h / line_h;
     // One row of buffered characters (+ NUL). Sized to the bitmap
-    // column cap so the heuristic still holds for the widest line.
+    // column cap so a worst-case bitmap-font row (the densest of
+    // the two paths) still fits the buffer.
     constexpr u32 kLineCap = (kPanelW / kGlyphW) + 1;
     char line[kLineCap];
     u32 line_len = 0;
-    u32 row = 0, col = 0;
+    u32 row = 0;
 
     auto flush_line = [&]()
     {
         if (line_len == 0)
             return;
         line[line_len] = '\0';
-        ChromeTextDraw(ChromeTextRole::Body, x0, y0 + row * kGlyphH, line, fg, bg);
+        ChromeTextDraw(ChromeTextRole::Body, x0, y0 + row * line_h, line, fg, bg);
         line_len = 0;
     };
 
+    // Measure the candidate line: append `c` to `line` and ask
+    // ChromeTextMeasure for the resulting pixel width. Uses the
+    // same NUL-terminated buffer the eventual ChromeTextDraw call
+    // sees, so the measure stays in lock-step with the paint.
+    auto candidate_width = [&](char c) -> u32
+    {
+        if (line_len + 1 >= kLineCap)
+            return max_w + 1; // force a flush — buffer is full
+        line[line_len] = c;
+        line[line_len + 1] = '\0';
+        return ChromeTextMeasure(ChromeTextRole::Body, line);
+    };
+
+    // Track the last whitespace position so we can rewind on a
+    // mid-word overflow. -1 sentinel means "no break point in
+    // this line yet" → must hard-break the longest run.
+    i32 last_ws = -1;
     for (u32 i = 0; text[i] != '\0' && row < max_row; ++i)
     {
         const char c = text[i];
@@ -333,22 +363,60 @@ void DrawWrappedText(u32 x0, u32 y0, u32 max_w, u32 max_h, const char* text, u32
         {
             flush_line();
             ++row;
-            col = 0;
+            last_ws = -1;
             continue;
         }
-        if (col >= max_col)
+        // Would adding this char overflow the pixel budget?
+        const u32 w_after = candidate_width(c);
+        if (w_after > max_w && line_len > 0)
         {
-            flush_line();
-            ++row;
-            col = 0;
-            if (row >= max_row)
-                return;
+            if (last_ws > 0 && static_cast<u32>(last_ws) < line_len)
+            {
+                // Rewind to the last whitespace: emit the prefix,
+                // and replay the suffix on the next line. This is
+                // the soft-wrap-at-word-boundary case.
+                const u32 suffix_start = static_cast<u32>(last_ws) + 1;
+                const u32 suffix_len = line_len - suffix_start;
+                char carry[kLineCap];
+                for (u32 k = 0; k < suffix_len; ++k)
+                {
+                    carry[k] = line[suffix_start + k];
+                }
+                line_len = static_cast<u32>(last_ws); // drop the whitespace itself
+                flush_line();
+                ++row;
+                last_ws = -1;
+                if (row >= max_row)
+                    return;
+                // Re-seed the new line with the carried suffix.
+                for (u32 k = 0; k < suffix_len; ++k)
+                {
+                    line[line_len++] = carry[k];
+                }
+            }
+            else
+            {
+                // No legal break in this line — the current word
+                // is itself wider than max_w (or starts the line).
+                // Flush what we have, keep going from this char.
+                flush_line();
+                ++row;
+                last_ws = -1;
+                if (row >= max_row)
+                    return;
+            }
         }
+        // Buffer the char. candidate_width already wrote it +
+        // NUL, but only on the path where we didn't flush; on a
+        // flush path the line was reset and we re-write here.
         if (line_len + 1 < kLineCap)
         {
             line[line_len++] = c;
+            if (c == ' ' || c == '\t')
+            {
+                last_ws = static_cast<i32>(line_len) - 1;
+            }
         }
-        ++col;
     }
     if (row < max_row)
         flush_line();

@@ -775,16 +775,9 @@ Action-id allocation:
   `LiberationSans-Bold.ttf` fails to load**: surfaced at boot via
   `chrome font bold load FAILED — Bold weight will degrade to
   Regular` (non-fatal advisory).
-- **Pass C typography — `ChromeTextMeasure` is a TTF estimate**:
-  computed as `chars × px × 0.55`, not a real per-glyph advance sum.
-  Accurate within ~10% for Liberation Sans; long/wide strings may
-  mis-size hit-rects.
 - **Pass C typography — no italic, no Thin/Medium/Heavy weights**.
   Extend via the `ChromeTextWeight` enum when a real caller needs
   it.
-- **Pass C typography — dialog body wrap uses bitmap col-cap on the
-  TTF render path**: wide ASCII can clip into the `kPad` margin.
-  Filed for Pass C residual polish.
 
 ## Related Pages
 

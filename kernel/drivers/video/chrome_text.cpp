@@ -7,15 +7,13 @@
  * deterministic + monotone in role.
  *
  * Measurement notes:
- *   - TTF measure is a coarse estimate: `chars * px * 55 / 100`.
- *     Liberation Sans averages ~0.55 em per glyph across mixed
- *     ASCII; per-glyph advance from `TtfGetHMetric` is exact but
- *     adds a parser round-trip per character. The chrome paint
- *     path measures for layout / clipping only, not for
- *     glyph-perfect text fitting — coarse is fine, but the
- *     fitness-for-purpose is documented here so a future caller
- *     who needs sub-pixel accuracy upgrades the math rather than
- *     stacking a fudge factor on top.
+ *   - TTF measure routes through `TtfMeasureString` (real per-glyph
+ *     `hmtx` advance sum at the requested pixel height). Pen advance
+ *     matches `TtfDrawString` exactly. Defensive fallback to the
+ *     historical `chars * px * 0.55` Liberation-Sans estimate only
+ *     when no chrome font is registered (in which case Draw wouldn't
+ *     take the TTF path either, so measure stays in lock-step with
+ *     paint).
  *   - Bitmap measure is exact: `chars * scale * 8`. The 8x8 ROM
  *     font is fixed-width, integer-scaled.
  *
@@ -149,20 +147,38 @@ u32 ChromeTextMeasure(ChromeTextRole role, const char* text)
 
     const RoleSpec& spec = Spec(role);
 
+    if (UseTtf(ChromeTextWeight::Regular))
+    {
+        // Route through TtfMeasureString for the real per-glyph
+        // advance sum. Pen advance matches what TtfDrawString will
+        // commit for the same string + size on the same font, so
+        // hit-rects and centring math line up with the rasterizer
+        // even on wide ASCII ("Mwwwwww..." runs) that the previous
+        // chars * px * 0.55 estimate mis-sized by ~+15%.
+        const TtfFont* font = TtfChromeFontGet();
+        if (font != nullptr)
+        {
+            return TtfMeasureString(*font, text, spec.ttf_px);
+        }
+        // Defensive: UseTtf already gates on TtfChromeFontGet() != nullptr,
+        // so this branch is unreachable in normal operation. Fall back to
+        // the historical estimate so a future refactor of UseTtf doesn't
+        // silently divide by zero or assert. Match the bitmap path's
+        // char-counting loop shape.
+        u32 count = 0;
+        for (const char* p = text; *p != '\0'; ++p)
+        {
+            ++count;
+        }
+        return (count * spec.ttf_px * 55U) / 100U;
+    }
+
+    // Bitmap path is exact: 8x8 ROM font scaled to integer multiple.
     u32 count = 0;
     for (const char* p = text; *p != '\0'; ++p)
     {
         ++count;
     }
-
-    if (UseTtf(ChromeTextWeight::Regular))
-    {
-        // Coarse estimate — see header comment. Liberation Sans
-        // averages ~0.55 em across mixed ASCII glyphs.
-        return (count * spec.ttf_px * 55U) / 100U;
-    }
-
-    // Bitmap path is exact: 8x8 ROM font scaled to integer multiple.
     return count * spec.bitmap_scale * 8U;
 }
 
