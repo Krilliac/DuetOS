@@ -24,6 +24,28 @@ to TTF via their `Theme::FontKind` field; the bitmap fallback in
 `FramebufferDrawStringScaled` stays available for the non-TTF
 themes (Classic / Slate10 / Amber / DuetClassic / HighContrast).
 
+## `duet-chrome-bold.ttf`
+
+**Liberation Sans Bold**, the paired bold weight from the same
+`fonts-liberation` package. Added in Pass C for the four-tier
+typography hierarchy (Display / Title / Body / Caption); used
+whenever `ChromeTextWeight::Bold` is requested — Display + Title
+roles always, Body + Caption opt-in for emphasis.
+
+- **Source**: `/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf`
+- **Size**: 405 KiB
+- **License**: SIL Open Font License 1.1 (see `LICENSE-Liberation.txt`)
+- **Coverage**: identical to Regular — full ASCII + Latin-1 + Latin
+  extended via cmap format 4
+
+Embedded the same way as the Regular variant — `embed-blob.py`
+produces `generated_chrome_font_bold.h` at build time with
+`kBinChromeFontBoldBytes` in `duetos::drivers::video::generated`;
+boot hands the bytes to `TtfLoad` and registers the resulting
+`TtfFont` via `TtfChromeBoldSet`. Non-TTF themes still fall back to
+the bitmap path (which double-paints at `(x+1, y)` for a
+synthesized bold).
+
 ## License compliance
 
 The OFL's redistribution clauses are satisfied by:

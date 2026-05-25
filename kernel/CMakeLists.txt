@@ -753,6 +753,24 @@ add_custom_command(
     VERBATIM)
 list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_CHROME_FONT_HEADER}")
 
+# Chrome font Bold — Liberation Sans Bold (SIL OFL 1.1). Pass C
+# typography hierarchy needs a bold weight for Display / Title roles
+# and for Bold-flagged Body / Caption draws. Embedded as bytes via
+# the same embed-blob.py path as the Regular variant; boot wires it
+# through TtfLoad + TtfChromeBoldSet so ChromeTextDraw can pick the
+# matching face when ChromeTextWeight::Bold is requested.
+set(DUETOS_CHROME_FONT_BOLD_SRC    "${CMAKE_SOURCE_DIR}/userland/assets/fonts/duet-chrome-bold.ttf")
+set(DUETOS_CHROME_FONT_BOLD_HEADER "${CMAKE_CURRENT_BINARY_DIR}/generated_chrome_font_bold.h")
+add_custom_command(
+    OUTPUT "${DUETOS_CHROME_FONT_BOLD_HEADER}"
+    COMMAND python3 "${DUETOS_EMBED_BLOB_SCRIPT}"
+            "${DUETOS_CHROME_FONT_BOLD_SRC}" "${DUETOS_CHROME_FONT_BOLD_HEADER}"
+            kBinChromeFontBoldBytes --namespace "duetos::drivers::video::generated"
+    DEPENDS "${DUETOS_CHROME_FONT_BOLD_SRC}" "${DUETOS_EMBED_BLOB_SCRIPT}"
+    COMMENT "Embedding chrome font Liberation Sans Bold (SIL OFL 1.1)"
+    VERBATIM)
+list(APPEND DUETOS_KERNEL_SHARED_SOURCES "${DUETOS_CHROME_FONT_BOLD_HEADER}")
+
 # Wallpaper SVG assets — DuetMark, topo backdrop, syscalls grid.
 # Hand-authored under userland/assets/wallpapers/. Each gets its
 # own embed entry so the wallpaper paint dispatch can walk them
