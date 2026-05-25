@@ -858,14 +858,6 @@ based on per-task evidence.
 
 Residuals carried into Pass D / future polish:
 
-- **Dialog body wrap uses bitmap col-cap on TTF render path.**
-  `kernel/drivers/video/dialog.cpp::DrawWrappedText` computes
-  `max_col = max_w / kGlyphW` (8-px bitmap cap) then renders with
-  TTF advances. Wide ASCII (W / M / &) on a maximally-packed wrap
-  line can clip into the `kPad`-byte right margin (12 px) rather
-  than overrun the panel border — cosmetic, not a correctness bug.
-  Fix: route wrap through `ChromeTextMeasure(Body)` shared with
-  menu / taskbar. Surfaced by Task 10 review.
 - **Bitmap themes collapse Caption to Body at scale 1** (both =
   8 px). Acceptable v0 — bitmap font is single-size; the role split
   is recovered automatically on any TTF theme. Add a 6×8 micro-font
@@ -879,22 +871,9 @@ Residuals carried into Pass D / future polish:
   `chrome_text.cpp::UseTtf` points at a future
   `TtfDrawStringWeighted(font*, ...)` overload that would route
   Bold to the bold registration when present.
-- **`ChromeTextMeasure` for TTF is a `chars × px × 0.55` estimate**,
-  not a real per-glyph advance sum. Accurate within ~10 % for
-  Liberation Sans across typical ASCII; mis-sizes hit-rects for
-  unusually wide strings ("Mwwwwww"-type cases). Wire a real
-  per-glyph advance sum through the rasterizer if a layout bug
-  surfaces.
 - **No italic, no Thin / Medium / Heavy weights.** Intentional v0
   omission. Extend `ChromeTextWeight` + bake the asset when a design
   need lands.
-- **Visual verification gap on the live login UI.** Default boot
-  uses autologin so the login chrome (Display clock, Title Bold
-  monogram + card name, Body Bold "Sign in" button, Caption Bold
-  status line) isn't pixel-tested in `pass-c-soak.sh`.
-  `LoginGuiSelfTest` validates rect-compute invariants but doesn't
-  rasterize. Closed by a non-autologin boot variant in the soak rig,
-  or by a VBox visual pass.
 - **VBox boot verification.** Pairs with the Pass A / Pass B VBox
   residuals above — boot the typography matrix under VirtualBox to
   pick up anything QEMU smokes don't. The
