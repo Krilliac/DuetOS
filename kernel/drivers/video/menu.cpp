@@ -277,7 +277,7 @@ void MenuRedraw()
             const u32 bg = is_hovered ? hover_rgb : g_body_rgb;
 
             // Checkmark glyph for radio-style checked items —
-            // rendered as a leading '>' so we don't have to ship a
+            // rendered as a leading '*' so we don't have to ship a
             // new glyph; visible cue beats dictionary purity.
             u32 text_x = p.anchor_x + kPaddingX;
             if (is_checked)
