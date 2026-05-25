@@ -23,10 +23,7 @@ struct Rect
     uint32_t w = 0;
     uint32_t h = 0;
 
-    bool Contains(uint32_t px, uint32_t py) const
-    {
-        return px >= x && py >= y && px < x + w && py < y + h;
-    }
+    bool Contains(uint32_t px, uint32_t py) const { return px >= x && py >= y && px < x + w && py < y + h; }
 };
 
 int main()

@@ -40,10 +40,7 @@ struct FakeWidget
     int id;
     bool consumes;
 
-    void Paint(PaintTrace& t) const
-    {
-        t.paint_order.push_back(id);
-    }
+    void Paint(PaintTrace& t) const { t.paint_order.push_back(id); }
 
     EventResult OnEvent(PaintTrace& t)
     {
