@@ -22,6 +22,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/wallpaper.h"
@@ -98,7 +99,7 @@ void DrawTickerLine()
     FramebufferFillRect(kTickerX, ticker_y, fb_w - kTickerX, kTickerH, bg_rgb);
 
     // Build the label: "duetos . <phase>".  We concatenate into a small stack
-    // buffer so FramebufferDrawString gets one contiguous string.
+    // buffer so ChromeTextDraw gets one contiguous string.
     char label[kPhaseMax + 16]; // prefix (≤15) + phase (≤63) + NUL
     u32  lp = 0;
     for (const char* s = kTickerPrefix; *s != '\0' && lp < sizeof(label) - 1; ++s)
@@ -111,7 +112,12 @@ void DrawTickerLine()
     }
     label[lp] = '\0';
 
-    FramebufferDrawString(kTickerX, ticker_y + kTickerTextDY, label, kTickerFg, bg_rgb);
+    ChromeTextDraw(ChromeTextRole::Caption,
+                   kTickerX,
+                   ticker_y + kTickerTextDY,
+                   label,
+                   kTickerFg,
+                   bg_rgb);
 }
 
 } // anonymous namespace
