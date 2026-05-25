@@ -19,6 +19,12 @@
  *       2. Heap-fragmentation proxy (free_chunk_count / 32 clamped)
  *   - Footer hint: F5 force-refresh, C clear ring
  *
+ * Pass D chrome: AppToolbar with two AppButtons (SAMPLE, CLEAR)
+ * plus three AppLabels (header summary, heap-usage detail, footer
+ * hint). The two sparkline panels stay raw paint (carve-out) —
+ * AppPanel has no time-series / per-sample bar model and the
+ * trace colour varies (green for heap-used, amber for frag).
+ *
  * Why two panels — heap-used + fragmentation are the two failure
  * modes a long-running kernel cares about; tying them to the same
  * x-axis lets an operator correlate "alloc storm" against "heap
@@ -63,7 +69,25 @@ bool SysmonFeedChar(char c);
 
 /// Boot-time self-test. Round-trips ring-push / ring-read /
 /// ring-clear with a synthetic sample sequence and asserts
-/// monotone newest-first order. Pure compute; runs unconditionally.
+/// monotone newest-first order, then drives a synthetic click
+/// through the Pass D toolbar (SAMPLE / CLEAR are both safe ring
+/// mutations — saved + restored around the click). Pure compute;
+/// runs unconditionally. Emits `[sysmon-selftest] PASS` / `FAIL`.
 void SysmonSelfTest();
+
+/// Pass D umbrella accessor — true iff the most recent
+/// SysmonSelfTest() invocation ran every check (including the
+/// synthetic toolbar button click) without error.
+bool SysmonSelfTestPassed();
+
+/// Mouse-event entry point for the Pass D toolbar + labels.
+/// Called from the boot-time mouse-reader thread on every
+/// motion packet. Edge-detects left-button press / release
+/// internally and dispatches MouseMove / MouseDown / MouseUp
+/// into the WidgetGroup so AppButton hover state tracks the
+/// cursor on tactility themes. The two sparkline panels stay
+/// raw paint (carve-out) and have no per-bar click semantics.
+/// No-op before SysmonInit has wired a window.
+void SysmonMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
 
 } // namespace duetos::apps::sysmon
