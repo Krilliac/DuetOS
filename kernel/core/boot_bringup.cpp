@@ -2375,11 +2375,12 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsDisplaySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsKeyboardSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsMouseSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsSoundSelfTest());
     if constexpr (::duetos::core::kBootSelfTests)
     {
         if (duetos::drivers::video::app_widgets::AppWidgetsSelfTestPassed())
         {
-            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=24/28)\n");
+            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=25/28)\n");
         }
     }
     duetos::drivers::video::SplashAdvancePhase("theme online");
