@@ -114,10 +114,27 @@ bool ImageViewSelectByName(const char* name);
 /// Boot self-test. Synthesises a 4×4 32-bpp BMP in memory through
 /// the same byte layout the Screenshot app writes, parses it via
 /// the in-process header decoder, and asserts width/height/bpp
-/// round-trip. Prints PASS/FAIL to COM1. SKIPped silently if
-/// FAT32 isn't mounted, since the on-disk path is what production
-/// uses.
+/// round-trip, plus (Pass D) the toolbar widget dispatch path.
+/// Prints PASS/FAIL to COM1. SKIPped silently if FAT32 isn't
+/// mounted, since the on-disk path is what production uses.
 void ImageViewSelfTest();
+
+/// Pass D umbrella accessor — true iff the most recent
+/// ImageViewSelfTest() invocation ran every check (including
+/// the synthetic toolbar button click) without error.
+bool ImageViewSelfTestPassed();
+
+/// Mouse-event entry point for the Pass D toolbar + labels.
+/// Called from the boot-time mouse-reader thread on every
+/// motion packet. Edge-detects left-button press / release
+/// internally and dispatches MouseMove / MouseDown / MouseUp
+/// into the WidgetGroup so AppButton hover state tracks the
+/// cursor on tactility themes. The image canvas band stays
+/// raw paint (carve-out) — toolbar clicks are the only
+/// widget-dispatched events; the canvas's wheel / keyboard
+/// paths remain untouched. No-op before ImageViewInit has
+/// wired a window.
+void ImageViewMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
 
 /// Currently-selected image filename, or `""` when no image is
 /// loaded. The pointer references in-app storage and stays valid
