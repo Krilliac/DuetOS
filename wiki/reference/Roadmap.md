@@ -792,6 +792,45 @@ The residuals waiting on visual verification:
   environment. Cleared automatically when VBox visual verification runs
   (the GUI boot produces the visible frames the spec calls for).
 
+Follow-on items surfaced during live VBox testing of Pass B:
+
+- **Compositor snapshot-invalidation hook for direct-FB writers.**
+  `kernel/drivers/video/framebuffer.cpp`'s frame-elision diff
+  (Pass A's compose → snapshot → diff → blit-only-dirty optimisation)
+  only sees pixel changes that route through `BeginCompose / EndCompose`.
+  Direct-to-live-FB writers — `kernel/drivers/video/cursor.cpp`'s
+  `DrawAt` / `RestoreAt` driven by `MouseReaderTask` at PS/2 packet
+  rate (~60 Hz) — bypass the snapshot. Consequence: when WallpaperTick
+  paints offscreen wallpaper at a cursor-touched position, the diff
+  scan reports "no change vs snapshot" (snapshot still reflects what
+  the last blit wrote, which matched the offscreen wallpaper) and no
+  blit fires — so residual cursor pixels left by MouseReader at OLD
+  positions stay on live FB indefinitely. Four cursor flash/ghost/trail
+  fix attempts ran aground on this (commits 82f9a0f2 → cd82bca4 →
+  b0234357 → 2b692ab5 → d887c41f reverted to the original intersection
+  pattern). The clean fix is a public `FramebufferInvalidateSnapshot(x, y, w, h)`
+  that cursor (and any other direct-live-FB writer) calls from
+  `RestoreAt`/`DrawAt`; the next `EndCompose` diff scan then forces a
+  blit at those rects regardless of offscreen-vs-snapshot equality.
+  With that, the cursor can be left ENTIRELY in MouseReader's hands
+  (no compose-side bookkeeping), the offscreen always paints without
+  a cursor sprite, and any cursor pixels left on live FB get blitted
+  over with wallpaper on the next compose. The current v1 intersection-
+  check is a stopgap: cursor flashes briefly when over the arc/topo
+  motion regions; solid in chrome / outside-motion areas. Re-revisit
+  cursor compose strategy after this hook lands.
+- **Mouse-click positioning under headless QEMU rel-mode.**
+  `tools/test/qmp-click.sh` ships in two modes — `abs` for display
+  setups and `rel` for headless. The rel-mode "snap to origin via
+  Δ=-65535 then move by (X, Y)" pattern is reliable for the snap part
+  but the move-by-(X,Y) sometimes doesn't fully propagate through the
+  PS/2 driver under fast successive calls (observed: cursor stays at
+  origin after a click on (400, 400)). Needs a per-call settling
+  delay or per-axis ack from the kernel-side PS/2 ringbuffer; for now,
+  treat headless QEMU mouse-click as best-effort and re-issue if the
+  cursor doesn't land. Abs-mode users (real display, `usb-tablet`)
+  are unaffected.
+
 When a residual ships, delete its bullet here and update the
 [`Compositor`](../subsystems/Compositor.md) subsystem page's
 "Deferred from Pass B" call-out.
