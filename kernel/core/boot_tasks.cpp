@@ -3250,6 +3250,7 @@ void MouseReaderTask(void*)
             duetos::apps::devicemgr::DeviceMgrMouseInput(cx, cy, p.buttons);
             duetos::apps::firewall::FirewallMouseInput(cx, cy, p.buttons);
             duetos::apps::help::HelpMouseInput(cx, cy, p.buttons);
+            duetos::apps::netstatus::NetStatusMouseInput(cx, cy, p.buttons);
         }
 
         // Hover responsiveness: when a menu is open and the
