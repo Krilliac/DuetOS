@@ -4,6 +4,7 @@
 #include "arch/x86_64/timer.h"
 #include "debug/probes.h"
 #include "log/klog.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/shadow.h"
 #include "drivers/video/svg.h"
@@ -342,21 +343,19 @@ void PaintDuetBrandText(u32 desktop_rgb, u32 fb_w, u32 fb_h)
     const u32 ink = AmbientStrokeRgb(desktop_rgb, 56);
     constexpr const char* kHeader = "DUETOS  BUILD 0.9.4  X86_64";
     constexpr const char* kFooter = "SYSCALLS 57  DLLS 29  EXPORTS 760";
-    // Header: 28-px from the top-left corner, monospace style.
+    // Header: 28-px from the top-left corner, Caption role.
     // bg = desktop_rgb (closest match to the gradient at the
     // anchor's row) so the glyph cell doesn't paint a hard rect.
-    FramebufferDrawString(28, 28, kHeader, ink, desktop_rgb);
+    ChromeTextDraw(ChromeTextRole::Caption, 28, 28, kHeader, ink, desktop_rgb);
     // Footer: bottom-right, 28-px inset above the taskbar
-    // reserve. Compute width from the string length × 8 (8x8
-    // bitmap font) so the right edge sits 28-px in.
-    u32 fn = 0;
-    while (kFooter[fn] != '\0')
-        ++fn;
-    const u32 fw = fn * 8u;
+    // reserve. Width comes from the chrome-text dispatcher so the
+    // measurement matches the actual rendered advance regardless
+    // of whether TTF or bitmap is active under the theme.
+    const u32 fw = ChromeTextMeasure(ChromeTextRole::Caption, kFooter);
     const u32 reserve = 80u; // matches Duet taskbar + spacing
     if (fb_h > reserve + 28u && fb_w > fw + 28u)
     {
-        FramebufferDrawString(fb_w - fw - 28u, fb_h - reserve - 8u, kFooter, ink, desktop_rgb);
+        ChromeTextDraw(ChromeTextRole::Caption, fb_w - fw - 28u, fb_h - reserve - 8u, kFooter, ink, desktop_rgb);
     }
 }
 
