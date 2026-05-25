@@ -195,6 +195,47 @@ fi
 # Lock screen reuses the login-gui paint path — no separate selftest.
 
 hr
+echo "PASS C (typography hierarchy)"
+# Pass C wires the chrome-text dispatch on top of the TTF font cache:
+# `[boot] chrome font (Liberation Sans) loaded + registered` plus a
+# Bold-weight load (which may legitimately fail and degrade to
+# Regular — non-fatal), the chrome-text-selftest PASS, and the
+# umbrella `[pass-c-selftest] PASS` line emitted only when the
+# chrome-text sub-test passed.
+pc_chrome_text=$(gc '\[chrome-text-selftest\] PASS')
+pc_chrome_text_fail=$(gc '\[chrome-text-selftest\] FAIL')
+pc_umbrella=$(gc '\[pass-c-selftest\] PASS')
+pc_bold_loaded=$(gc 'chrome font bold .* loaded \+ registered')
+pc_bold_failed=$(gc 'chrome font bold load FAILED')
+echo "  chrome-text=${pc_chrome_text}  umbrella=${pc_umbrella}"
+if [ "$pc_umbrella" -eq 0 ]; then
+    echo "  !! [pass-c-selftest] PASS missing (boot may have failed before umbrella, OR Pass C not wired)"
+    rc=1
+fi
+if [ "$pc_chrome_text_fail" -gt 0 ]; then
+    g '\[chrome-text-selftest\] FAIL' | head -1 | sed 's/^/  !! chrome-text-selftest FAIL: /'
+    rc=1
+elif [ "$pc_chrome_text" -eq 0 ]; then
+    echo "  (chrome-text-selftest neither PASS nor FAIL detected — advisory only)"
+fi
+# Bold-font load is advisory: the ChromeText dispatch degrades cleanly
+# to Regular weight when Bold is unavailable. Surface the state but do
+# NOT fail the gate on it.
+if [ "$pc_bold_loaded" -gt 0 ]; then
+    echo "  chrome-font-bold: loaded"
+elif [ "$pc_bold_failed" -gt 0 ]; then
+    echo "  chrome-font-bold: FAILED — Bold weight degraded to Regular (non-fatal advisory)"
+else
+    echo "  chrome-font-bold: not detected"
+fi
+# Umbrella requires the chrome-text sub-test; if sub PASS is zero but
+# umbrella > 0, that's a wiring bug in the bringup aggregator.
+if [ "$pc_umbrella" -gt 0 ] && [ "$pc_chrome_text" -eq 0 ]; then
+    echo "  !! umbrella PASS without chrome-text sub-test (bringup aggregator wiring bug)"
+    rc=1
+fi
+
+hr
 echo "LOCKDEP"
 invn=$(gc 'inversion detected')
 if [ "$invn" -gt 0 ]; then
