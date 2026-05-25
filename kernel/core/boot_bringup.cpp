@@ -176,11 +176,13 @@
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/shadow.h"
 #include "drivers/video/svg.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/ttf.h"
 #include "drivers/video/ttf_raster.h"
 #include "drivers/video/splash.h"
 #include "drivers/video/wallpaper.h"
 #include "generated_chrome_font.h"
+#include "generated_chrome_font_bold.h"
 #include "drivers/video/calendar.h"
 #include "drivers/video/magnifier.h"
 #include "drivers/video/dialog.h"
@@ -326,6 +328,13 @@ namespace
 // outlives the registration because TtfChromeFontSet stores a
 // borrowed pointer, so it must have static storage duration.
 constinit duetos::drivers::video::TtfFont g_chrome_font_storage{};
+
+// Storage for the chrome bold font handle. Same lifetime contract as
+// g_chrome_font_storage — populated by the chrome-font-bold-load
+// initcall, borrowed by TtfChromeBoldSet, must live for the kernel's
+// lifetime. When ChromeTextDraw is called with ChromeTextWeight::Bold,
+// the TTF dispatch path picks this face up.
+constinit duetos::drivers::video::TtfFont g_chrome_bold_font_storage{};
 
 } // namespace
 
@@ -2193,6 +2202,32 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
             }
             return duetos::core::Result<void>{};
         });
+    // Pass C — load Liberation Sans Bold for the chrome bold weight.
+    // When ChromeTextDraw(role, ..., ChromeTextWeight::Bold) fires on a
+    // TTF theme, the dispatcher picks this face up via TtfChromeBoldGet().
+    // Failure is non-fatal — the dispatcher degrades to the Regular face
+    // (or to double-paint bitmap if even Regular failed).
+    duetos::core::InitcallRegisterOrPanic(
+        duetos::core::Phase::Drivers, "chrome-font-bold-load",
+        []()
+        {
+            const auto* bytes = duetos::drivers::video::generated::kBinChromeFontBoldBytes;
+            const auto size =
+                static_cast<duetos::u32>(sizeof(duetos::drivers::video::generated::kBinChromeFontBoldBytes));
+            auto r = duetos::drivers::video::TtfLoad(bytes, size);
+            if (r.has_value())
+            {
+                g_chrome_bold_font_storage = r.value();
+                duetos::drivers::video::TtfChromeBoldSet(&g_chrome_bold_font_storage);
+                duetos::arch::SerialWrite("[boot] chrome font bold (Liberation Sans Bold) loaded + registered\n");
+            }
+            else
+            {
+                duetos::arch::SerialWrite(
+                    "[boot] chrome font bold load FAILED — Bold weight will degrade to Regular\n");
+            }
+            return duetos::core::Result<void>{};
+        });
     // Parse the embedded wallpaper SVGs once into static SvgImage
     // instances. WallpaperPaint then layers them on the matching
     // theme paints (DuetMark + topo for Duet family; syscalls grid
@@ -2305,6 +2340,19 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         {
             duetos::arch::SerialWrite(
                 "[pass-b-selftest] PASS (splash=ok, wallpaper-motion=ok, login-gui=ok)\n");
+        }
+    }
+    // Pass C — typography hierarchy. ChromeTextSelfTest validates the
+    // role->pixel-size table, dispatch path per font_kind, and that
+    // Measure is deterministic. The umbrella fires iff the self-test
+    // passed; the boot-log analyzer keys its Pass C section off the
+    // `[pass-c-selftest] PASS` sentinel.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::ChromeTextSelfTest());
+    if constexpr (::duetos::core::kBootSelfTests)
+    {
+        if (duetos::drivers::video::ChromeTextSelfTestPassed())
+        {
+            duetos::arch::SerialWrite("[pass-c-selftest] PASS (chrome-text=ok)\n");
         }
     }
     duetos::drivers::video::SplashAdvancePhase("theme online");
