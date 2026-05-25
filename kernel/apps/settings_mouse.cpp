@@ -1,6 +1,9 @@
 #include "apps/settings.h"
 
+#include "arch/x86_64/serial.h"
 #include "drivers/input/ps2mouse.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/notify.h"
@@ -12,6 +15,76 @@ namespace duetos::apps::settings
 
 namespace
 {
+
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::ThemeCurrent;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// ---------------------------------------------------------------
+// Pass D chrome: MOUSE panel. Header (Title Bold) + footer
+// (Caption hint band) AppLabels. All live readouts (cursor
+// position, active shape name, dbl-click threshold, sensitivity)
+// + the multi-key shape menu + the bottom hint trio stay raw
+// paint because they recompose every paint via CursorPosition /
+// CursorGetShape / WindowDoubleClickTicks / WindowMouseSensitivity.
+
+constinit char g_mse_header[16] = "MOUSE";
+constinit char g_mse_footer[64] = "1-9:shape  [/]:dbl-click  -/=:sens  0:reset";
+
+constinit auto g_settings_mouse = MakeWidgetGroup(AppLabel{}, AppLabel{});
+
+constinit bool g_settings_mouse_bound = false;
+constinit bool g_settings_mouse_self_test_passed = false;
+
+AppLabel& MseHeader()
+{
+    return g_settings_mouse.chain.head;
+}
+AppLabel& MseFooter()
+{
+    return g_settings_mouse.chain.tail.head;
+}
+
+void BindSettingsMouseOnce()
+{
+    if (g_settings_mouse_bound)
+        return;
+    g_settings_mouse_bound = true;
+
+    const auto& th = ThemeCurrent();
+    const u32 bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
+    const u32 fg = th.console_fg;
+    const u32 dim = th.banner_fg;
+
+    AppLabel& h = MseHeader();
+    h.text = g_mse_header;
+    h.role = ChromeTextRole::Title;
+    h.weight = ChromeTextWeight::Bold;
+    h.fg_rgb = fg;
+    h.bg_rgb = bg;
+    h.align_left = true;
+
+    AppLabel& f = MseFooter();
+    f.text = g_mse_footer;
+    f.role = ChromeTextRole::Caption;
+    f.weight = ChromeTextWeight::Regular;
+    f.fg_rgb = dim;
+    f.bg_rgb = bg;
+    f.align_left = true;
+}
+
+void RebindSettingsMouseBounds(u32 x, u32 y, u32 w, u32 h)
+{
+    constexpr u32 kHeaderH = 14U;
+    constexpr u32 kFooterH = 12U;
+    MseHeader().bounds = Rect{x, y, w, kHeaderH};
+    const u32 fy = (h > kFooterH) ? y + h - kFooterH : y;
+    MseFooter().bounds = Rect{x, fy, w, kFooterH};
+}
 
 void AppendDec(char* out, u32 cap, u32* o, u64 v)
 {
@@ -67,16 +140,19 @@ const char* CursorShapeName(duetos::drivers::video::CursorShape s)
 void Draw(u32 x, u32 y, u32 w, u32 h)
 {
     using duetos::drivers::video::ChromeTextDraw;
-    using duetos::drivers::video::ChromeTextRole;
-    using duetos::drivers::video::ChromeTextWeight;
     const auto& th = duetos::drivers::video::ThemeCurrent();
     const u32 bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
     const u32 fg = th.console_fg;
     const u32 dim = th.banner_fg;
     if (w < 8 * 24 || h < 8 * 8)
         return;
-    // Section header — Title + Bold for the panel's hero label.
-    ChromeTextDraw(ChromeTextRole::Title, x, y, "MOUSE", fg, bg, ChromeTextWeight::Bold);
+
+    // Pass D chrome: anchor + paint header + footer labels.
+    BindSettingsMouseOnce();
+    RebindSettingsMouseBounds(x, y, w, h);
+    Compose ctx{};
+    g_settings_mouse.PaintAll(ctx);
+
     ChromeTextDraw(ChromeTextRole::Body, x, y + 14, "DRIVER: PS/2 + xHCI HID (auto)", dim, bg);
 
     duetos::u32 cx = 0, cy = 0;
@@ -207,6 +283,30 @@ bool Key(char c)
 void SettingsMouseInit()
 {
     SettingsRegisterPanel(Panel::Mouse, Draw, Key);
+}
+
+void SettingsMouseSelfTest()
+{
+    using duetos::arch::SerialWrite;
+    bool ok = true;
+
+    BindSettingsMouseOnce();
+    RebindSettingsMouseBounds(0U, 0U, 256U, 200U);
+    Compose ctx{};
+    g_settings_mouse.PaintAll(ctx);
+
+    if (g_mse_header[0] == '\0' || g_mse_footer[0] == '\0')
+        ok = false;
+    if (MseHeader().text == nullptr || MseFooter().text == nullptr)
+        ok = false;
+
+    g_settings_mouse_self_test_passed = ok;
+    SerialWrite(ok ? "[settings-mouse-selftest] PASS\n" : "[settings-mouse-selftest] FAIL\n");
+}
+
+bool SettingsMouseSelfTestPassed()
+{
+    return g_settings_mouse_self_test_passed;
 }
 
 } // namespace duetos::apps::settings
