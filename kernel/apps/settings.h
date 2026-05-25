@@ -82,6 +82,19 @@ bool SettingsFeedChar(char c);
 /// path. Prints one PASS/FAIL line to COM1.
 void SettingsSelfTest();
 
+/// Pass D umbrella accessor — true iff the most recent
+/// SettingsSelfTest() invocation ran every check (including the
+/// synthetic tab-strip widget click) without error.
+bool SettingsSelfTestPassed();
+
+/// Mouse-event entry point for the Pass D tab strip + footer label.
+/// Called from the boot-time mouse-reader thread on every motion
+/// packet. Detects left-button press / release edges internally and
+/// dispatches MouseMove / MouseDown / MouseUp into the WidgetGroup
+/// so AppButton hover state tracks the cursor on tactility themes.
+/// No-op before SettingsInit has wired a window.
+void SettingsMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
+
 /// Sub-panel identifier. The Settings window's main DrawFn
 /// dispatches to a sub-panel renderer; each sub-panel owns
 /// its own draw + key handler. Number-key shortcuts (0..5)
