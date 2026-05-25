@@ -72,23 +72,23 @@ void AppWidgetsSelfTest()
     btn.on_click = +[] { s_click_flag = true; };
 
     // MouseMove into bounds -> Hover ON.
-    if (btn.OnEvent(Event{EventKind::MouseMove, 50, 15, 0, 0}) != EventResult::Consumed
-        || !HasFlag(btn.state.flags, WidgetStateFlags::Hover))
+    if (btn.OnEvent(Event{EventKind::MouseMove, 50, 15, 0, 0}) != EventResult::Consumed ||
+        !HasFlag(btn.state.flags, WidgetStateFlags::Hover))
     {
         mark_fail(0xD1, "[app-widgets-selftest] FAIL AppButton hover not set");
         return;
     }
     // MouseMove outside -> Hover OFF.
-    if (btn.OnEvent(Event{EventKind::MouseMove, 200, 50, 0, 0}) != EventResult::NotInterested
-        || HasFlag(btn.state.flags, WidgetStateFlags::Hover))
+    if (btn.OnEvent(Event{EventKind::MouseMove, 200, 50, 0, 0}) != EventResult::NotInterested ||
+        HasFlag(btn.state.flags, WidgetStateFlags::Hover))
     {
         mark_fail(0xD2, "[app-widgets-selftest] FAIL AppButton hover not cleared");
         return;
     }
     // MouseDown inside -> Pressed.
     (void)btn.OnEvent(Event{EventKind::MouseMove, 50, 15, 0, 0}); // hover ON again
-    if (btn.OnEvent(Event{EventKind::MouseDown, 50, 15, 0, 0}) != EventResult::Consumed
-        || !HasFlag(btn.state.flags, WidgetStateFlags::Pressed))
+    if (btn.OnEvent(Event{EventKind::MouseDown, 50, 15, 0, 0}) != EventResult::Consumed ||
+        !HasFlag(btn.state.flags, WidgetStateFlags::Pressed))
     {
         mark_fail(0xD3, "[app-widgets-selftest] FAIL AppButton press not set");
         return;
@@ -122,8 +122,7 @@ void AppWidgetsSelfTest()
     //     a flag.
     AppLabel lab{};
     AppPanel pan{};
-    if (HasFlag(lab.state.flags, WidgetStateFlags::Hover)
-        || HasFlag(pan.state.flags, WidgetStateFlags::Hover))
+    if (HasFlag(lab.state.flags, WidgetStateFlags::Hover) || HasFlag(pan.state.flags, WidgetStateFlags::Hover))
     {
         mark_fail(0xD0, "[app-widgets-selftest] FAIL default state not None");
         return;
