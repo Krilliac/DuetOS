@@ -3319,36 +3319,16 @@ void WinTimerTickerTask(void*)
         {
             // Skip recompose while the login gate owns the framebuffer or
             // in TTY mode — desktop-only affordance.
+            //
+            // CursorHide/Show is no longer needed: DesktopCompose now
+            // paints the cursor sprite into the offscreen buffer via
+            // CursorOverlayInCompose, and cursor.cpp's DrawAt/RestoreAt
+            // call FramebufferInvalidateSnapshot to force-blit cursor's
+            // prior live-FB positions. Together these eliminate cursor
+            // flash entirely without ghosts, lag, or trails.
             if (!gate_active && !is_tty)
             {
-                // Cursor visibility around compose: CursorHide/Show always
-                // works correctly but causes a visible flash for the
-                // duration of compose (~25ms on VBox). Skip Hide/Show
-                // when motion-driven compose's dirty rect doesn't intersect
-                // the cursor position — covers taskbar + anywhere outside
-                // the arcs/topo regions.
-                bool need_cursor_save = anim_stepped;
-                if (!need_cursor_save && wallpaper_ticked)
-                {
-                    duetos::u32 cx = 0, cy = 0;
-                    duetos::drivers::video::CursorPosition(&cx, &cy);
-                    const auto fb = duetos::drivers::video::FramebufferGet();
-                    const duetos::i32 arcs_cx = duetos::i32(fb.width)  / 2;
-                    const duetos::i32 arcs_cy = duetos::i32((fb.height * 48U) / 100U);
-                    const bool in_arcs = (duetos::i32(cx) >= arcs_cx - 170) && (duetos::i32(cx) < arcs_cx + 170)
-                                      && (duetos::i32(cy) >= arcs_cy - 170) && (duetos::i32(cy) < arcs_cy + 170);
-                    const bool in_topo = (cy >= 200u && cy < 600u);
-                    need_cursor_save = in_arcs || in_topo;
-                }
-                if (need_cursor_save)
-                {
-                    duetos::drivers::video::CursorHide();
-                }
                 duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
-                if (need_cursor_save)
-                {
-                    duetos::drivers::video::CursorShow();
-                }
             }
         }
         duetos::drivers::video::CompositorUnlock();

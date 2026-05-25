@@ -2727,6 +2727,15 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
             FramebufferFillRect(g_caret.x, g_caret.y, g_caret.w, g_caret.h, 0x00000000);
         }
     }
+    // Overlay the cursor sprite into the offscreen compose buffer
+    // BEFORE EndCompose blits. The blit then publishes cursor pixels
+    // atomically with the rest of the composed frame. Combined with
+    // FramebufferInvalidateSnapshot calls in cursor.cpp's DrawAt /
+    // RestoreAt (which force-blit cursor's prior positions to wipe
+    // residual pixels from live FB), this eliminates the cursor
+    // flash entirely without ghosts or trails.
+    CursorOverlayInCompose();
+
     // Flush the shadow surface to the live framebuffer (no-op if
     // BeginCompose fell back to direct mode).
     FramebufferEndCompose();
