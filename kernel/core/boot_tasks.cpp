@@ -3247,6 +3247,7 @@ void MouseReaderTask(void*)
             duetos::apps::clock::ClockMouseInput(cx, cy, p.buttons);
             duetos::apps::hexview::HexViewMouseInput(cx, cy, p.buttons);
             duetos::apps::charmap::CharMapMouseInput(cx, cy, p.buttons);
+            duetos::apps::devicemgr::DeviceMgrMouseInput(cx, cy, p.buttons);
         }
 
         // Hover responsiveness: when a menu is open and the
