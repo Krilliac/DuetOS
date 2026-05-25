@@ -453,6 +453,27 @@ void CursorShow()
     g_ready = true;
 }
 
+void CursorOverlayInCompose()
+{
+    // Called from inside DesktopCompose between Begin/EndCompose.
+    // FramebufferPutPixel auto-routes to the offscreen shadow during
+    // compose, so SaveAt + DrawAt land in the offscreen buffer and the
+    // subsequent blit publishes the cursor atomically with the rest of
+    // the compose — no visual gap, no flash. Bypasses the g_ready early
+    // return that CursorShow uses (we want to redraw on every compose
+    // even when the cursor was already visible on live FB).
+    if (!g_ready)
+    {
+        return; // operator/widget code explicitly hid the cursor
+    }
+    if (!FramebufferAvailable())
+    {
+        return;
+    }
+    SaveAt(g_x, g_y);
+    DrawAt(g_x, g_y);
+}
+
 void CursorSetDesktopBackground(u32 rgb)
 {
     g_desktop_rgb = rgb;

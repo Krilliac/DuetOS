@@ -2727,6 +2727,14 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
             FramebufferFillRect(g_caret.x, g_caret.y, g_caret.w, g_caret.h, 0x00000000);
         }
     }
+    // Paint the cursor sprite into the offscreen compose buffer as
+    // the LAST step before EndCompose flushes. The blit then publishes
+    // cursor pixels atomically with the rest of the composed frame,
+    // eliminating the CursorHide/CursorShow visual gap that previously
+    // caused a per-compose cursor flash (~25-30 ms blank on VBox).
+    // No-op when the cursor is hidden (g_ready=false in cursor.cpp).
+    CursorOverlayInCompose();
+
     // Flush the shadow surface to the live framebuffer (no-op if
     // BeginCompose fell back to direct mode).
     FramebufferEndCompose();

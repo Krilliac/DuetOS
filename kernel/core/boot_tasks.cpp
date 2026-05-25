@@ -3320,44 +3320,16 @@ void WinTimerTickerTask(void*)
             // Skip recompose while the login gate owns the framebuffer or
             // in TTY mode — desktop-only affordance; the gate / TTY paths
             // would clobber their own state if we composed here.
+            //
+            // CursorHide/Show wrapping is no longer needed here:
+            // DesktopCompose now paints the cursor sprite directly into the
+            // offscreen compose buffer via CursorOverlayInCompose, and the
+            // EndCompose blit publishes the cursor atomically with the rest
+            // of the composed frame. No visual gap, no flash, regardless of
+            // where the cursor is or which region of the wallpaper changed.
             if (!gate_active && !is_tty)
             {
-                // Cursor flash mitigation: CursorHide+CursorShow erases the
-                // cursor sprite for the duration of compose (~25-30 ms on
-                // VBox). When ONLY wallpaper motion drove this compose AND
-                // the cursor is outside the wallpaper's motion regions, the
-                // compose's diff blit won't touch the cursor's backing — so
-                // Hide/Show is unnecessary, and skipping it removes the
-                // visible flash. Window animations can dirty anywhere, so
-                // we keep Hide/Show defensively when anim_stepped.
-                bool need_cursor_save = anim_stepped;
-                if (!need_cursor_save && wallpaper_ticked)
-                {
-                    duetos::u32 cx = 0, cy = 0;
-                    duetos::drivers::video::CursorPosition(&cx, &cy);
-                    const auto fb = duetos::drivers::video::FramebufferGet();
-                    // Same coords WallpaperTick uses for its dirty marks:
-                    // arcs bbox (340×340 centred on fb_w/2 at 48% fb_h) and
-                    // topo strip (full width, y ∈ [200, 600] in 1024×768
-                    // baseline). Cursor sprite is ~16-22 px so a point
-                    // check is close enough; the worst case is a Hide/Show
-                    // when the sprite is one pixel inside the region.
-                    const duetos::i32 arcs_cx = duetos::i32(fb.width)  / 2;
-                    const duetos::i32 arcs_cy = duetos::i32((fb.height * 48U) / 100U);
-                    const bool in_arcs = (duetos::i32(cx) >= arcs_cx - 170) && (duetos::i32(cx) < arcs_cx + 170)
-                                      && (duetos::i32(cy) >= arcs_cy - 170) && (duetos::i32(cy) < arcs_cy + 170);
-                    const bool in_topo = (cy >= 200u && cy < 600u);
-                    need_cursor_save = in_arcs || in_topo;
-                }
-                if (need_cursor_save)
-                {
-                    duetos::drivers::video::CursorHide();
-                }
                 duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
-                if (need_cursor_save)
-                {
-                    duetos::drivers::video::CursorShow();
-                }
             }
         }
         duetos::drivers::video::CompositorUnlock();
