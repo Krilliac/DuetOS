@@ -1241,4 +1241,223 @@ void CmdAutonomic()
 }
 
 
+// ============================================================
+// `fbdump [scaled]` — framebuffer serial dump.
+//
+// Encodes the current framebuffer as a base64-wrapped PPM (P6 binary)
+// and emits it via COM1 so a host-side capture can reconstruct the
+// image without QMP or a display. Designed for VBox / bare-metal targets
+// where QMP is not available.
+//
+// Sentinels:
+//   [fbdump-begin]           — start of the encoded stream
+//   [fbdump] <base64-line>   — one 60-char base64 line of payload
+//   [fbdump-end]             — end of the encoded stream
+//
+// Host-side extraction: `tools/test/serial-fbdump.sh <serial.log> <out.ppm>`
+//
+// At 115200 baud and 1024x768x3 raw pixels (~2.36 MiB raw, ~3.15 MiB
+// base64) this takes roughly 4 minutes. The `scaled` subcommand
+// downsamples to 512x384 first (~1 minute).
+// ============================================================
+
+namespace
+{
+
+// Base64 encoding table.
+static constexpr char kB64Table[65] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+// Encode `n` bytes (n must be 1, 2, or 3) into 4 base64 ASCII characters
+// in `out[0..3]`. Pads with '=' as needed.
+void B64EncodeTriple(const u8* src, u32 n, char out[4])
+{
+    u32 v = static_cast<u32>(src[0]) << 16;
+    if (n > 1)
+        v |= static_cast<u32>(src[1]) << 8;
+    if (n > 2)
+        v |= static_cast<u32>(src[2]);
+    out[0] = kB64Table[(v >> 18) & 0x3F];
+    out[1] = kB64Table[(v >> 12) & 0x3F];
+    out[2] = (n > 1) ? kB64Table[(v >> 6) & 0x3F] : '=';
+    out[3] = (n > 2) ? kB64Table[(v >> 0) & 0x3F] : '=';
+}
+
+// Emit `raw_bytes` bytes of pixel data as "[fbdump] <base64>\n" lines.
+// Each line carries 60 base64 chars (= 45 raw bytes). Checks for ^C
+// after each line so an operator can abort a 4-minute dump.
+// Returns false if interrupted, true on completion.
+bool EmitBase64Serial(const u8* data, u32 len)
+{
+    // Line buffer: "[fbdump] " (9) + 60 base64 chars + "\n" + NUL = 71.
+    char line[72];
+    line[0] = '['; line[1] = 'f'; line[2] = 'b'; line[3] = 'd';
+    line[4] = 'u'; line[5] = 'm'; line[6] = 'p'; line[7] = ']';
+    line[8] = ' ';
+
+    u32 pos = 0;
+    while (pos < len)
+    {
+        if (duetos::core::ShellInterruptRequested())
+        {
+            duetos::arch::SerialWrite("[fbdump-interrupted]\n");
+            return false;
+        }
+
+        // Fill up to 45 raw bytes per line → 60 base64 chars.
+        u32 line_payload = 0;
+        char* out = line + 9;
+        while (line_payload < 45 && pos < len)
+        {
+            u32 n = (len - pos);
+            if (n > 3)
+                n = 3;
+            u8 triple[3] = {0, 0, 0};
+            for (u32 i = 0; i < n; ++i)
+                triple[i] = data[pos + i];
+            B64EncodeTriple(triple, n, out);
+            out += 4;
+            pos += n;
+            line_payload += n;
+        }
+        *out++ = '\n';
+        *out   = '\0';
+        duetos::arch::SerialWrite(line);
+    }
+    return true;
+}
+
+// Build a P6 PPM header for a w×h image with maxval=255.
+// Writes into `buf` (must be at least 32 bytes). Returns the header length.
+u32 BuildPpmHeader(u32 w, u32 h, char buf[32])
+{
+    // Format: "P6\n<w> <h>\n255\n"
+    // Write width + height as decimal inline (no sprintf in kernel).
+    auto write_dec = [&](u32 v, char* p) -> u32
+    {
+        if (v == 0)
+        {
+            *p = '0';
+            return 1;
+        }
+        char tmp[12];
+        u32 n = 0;
+        while (v > 0)
+        {
+            tmp[n++] = static_cast<char>('0' + (v % 10));
+            v /= 10;
+        }
+        for (u32 i = 0; i < n; ++i)
+            p[i] = tmp[n - 1 - i];
+        return n;
+    };
+
+    u32 i = 0;
+    buf[i++] = 'P'; buf[i++] = '6'; buf[i++] = '\n';
+    i += write_dec(w, buf + i);
+    buf[i++] = ' ';
+    i += write_dec(h, buf + i);
+    buf[i++] = '\n';
+    buf[i++] = '2'; buf[i++] = '5'; buf[i++] = '5'; buf[i++] = '\n';
+    return i;
+}
+
+} // namespace
+
+void CmdFbdump(u32 argc, char** argv)
+{
+    if (!duetos::drivers::video::FramebufferAvailable())
+    {
+        ConsoleWriteln("FBDUMP: framebuffer not available — serial dump skipped");
+        return;
+    }
+
+    const auto info = duetos::drivers::video::FramebufferGet();
+    if (info.virt == nullptr || info.width == 0 || info.height == 0)
+    {
+        ConsoleWriteln("FBDUMP: framebuffer geometry invalid");
+        return;
+    }
+
+    const bool scaled = (argc >= 2 && argv != nullptr && argv[1] != nullptr &&
+                         (argv[1][0] == 's' || argv[1][0] == 'S'));
+
+    const u32 out_w = scaled ? info.width / 2 : info.width;
+    const u32 out_h = scaled ? info.height / 2 : info.height;
+    const u32 pixel_bytes = out_w * out_h * 3;
+    const u32 b64_bytes   = ((pixel_bytes + 2) / 3) * 4;
+    const u32 baud_bytes_per_sec = 115200 / 10; // ~11520 bytes/s at 8N1
+    const u32 est_secs = (b64_bytes + baud_bytes_per_sec - 1) / baud_bytes_per_sec;
+
+    // Warn on entry so the operator can abort before committing to a long wait.
+    ConsoleWrite("[fbdump] starting framebuffer dump ");
+    WriteU64Dec(out_w);
+    ConsoleWrite("x");
+    WriteU64Dec(out_h);
+    ConsoleWrite(" — ~");
+    WriteU64Dec(est_secs);
+    ConsoleWriteln(" seconds at 115200 baud (^C to abort)");
+
+    duetos::arch::SerialWrite("[fbdump-begin]\n");
+
+    // Build and emit the PPM header (≤32 bytes, always completes quickly).
+    char hdr[32];
+    const u32 hdr_len = BuildPpmHeader(out_w, out_h, hdr);
+    if (!EmitBase64Serial(reinterpret_cast<const u8*>(hdr), hdr_len))
+    {
+        ConsoleWriteln("[fbdump] aborted during header");
+        return;
+    }
+
+    // Emit pixel data row by row.
+    // The framebuffer is 32 bpp BGRX (or RGBX) in MMIO; PPM P6 wants 24-bit RGB.
+    // We emit R, G, B from the 0x00RRGGBB pixel word. QEMU stdvga stores
+    // channels as B=byte0, G=byte1, R=byte2, X=byte3 (little-endian BGRA).
+    // Downsampling (scaled) takes the top-left pixel of each 2×2 block.
+    const auto* fb = static_cast<const u32*>(info.virt);
+    const u32 pitch_px = info.pitch / 4; // pitch in 32-bit pixels
+
+    // We emit one row at a time. Each row is out_w*3 bytes of RGB.
+    // Batch into a small stack buffer to reduce SerialWrite call count.
+    static constexpr u32 kRowBufMax = 1024 * 3; // enough for 1024-wide row
+    u8 row_buf[kRowBufMax];
+
+    const u32 step = scaled ? 2u : 1u;
+    bool ok = true;
+    for (u32 row = 0; row < out_h && ok; ++row)
+    {
+        if (duetos::core::ShellInterruptRequested())
+        {
+            duetos::arch::SerialWrite("[fbdump-interrupted]\n");
+            ok = false;
+            break;
+        }
+
+        const u32 src_row = row * step;
+        const u32* src    = fb + src_row * pitch_px;
+        u32 bp = 0;
+        for (u32 col = 0; col < out_w; ++col)
+        {
+            const u32 px = src[col * step];
+            row_buf[bp++] = static_cast<u8>((px >> 16) & 0xFF); // R
+            row_buf[bp++] = static_cast<u8>((px >>  8) & 0xFF); // G
+            row_buf[bp++] = static_cast<u8>((px >>  0) & 0xFF); // B
+        }
+        ok = EmitBase64Serial(row_buf, bp);
+    }
+
+    if (ok)
+    {
+        duetos::arch::SerialWrite("[fbdump-end]\n");
+        ConsoleWrite("[fbdump] done — ");
+        WriteU64Dec(out_w);
+        ConsoleWrite("x");
+        WriteU64Dec(out_h);
+        ConsoleWriteln(" PPM sent via serial");
+    }
+    else
+    {
+        ConsoleWriteln("[fbdump] aborted");
+    }
+}
+
 } // namespace duetos::core::shell::internal
