@@ -457,11 +457,22 @@ void CursorOverlayInCompose()
 {
     // Called from inside DesktopCompose between Begin/EndCompose.
     // FramebufferPutPixel auto-routes to the offscreen shadow during
-    // compose, so SaveAt + DrawAt land in the offscreen buffer and the
-    // subsequent blit publishes the cursor atomically with the rest of
-    // the compose — no visual gap, no flash. Bypasses the g_ready early
-    // return that CursorShow uses (we want to redraw on every compose
-    // even when the cursor was already visible on live FB).
+    // compose, so DrawAt lands the cursor sprite in the offscreen buffer
+    // and the subsequent blit publishes the cursor atomically with the
+    // rest of the composed frame — no visual gap, no flash.
+    //
+    // We deliberately do NOT call SaveAt here: FramebufferReadPixel
+    // always reads from LIVE framebuffer (per its docstring), so SaveAt
+    // would capture the CURRENT cursor pixels (which are already on
+    // live FB from MouseReader's DrawAt) into g_backing. The next
+    // CursorMove → RestoreAt would then write cursor pixels back at
+    // the old position — a visible "ghost" cursor lagging behind the
+    // real one. Backing is owned by MouseReader's CursorMove
+    // (Restore-old → Save-new → Draw-new at each PS/2 packet); leaving
+    // it alone here keeps the static-region case bit-perfect. For
+    // motion regions the backing may be one frame stale (a 16×16 patch
+    // of slightly-old wallpaper momentarily on next move) but that's
+    // far less perceptible than a full cursor-shaped ghost.
     if (!g_ready)
     {
         return; // operator/widget code explicitly hid the cursor
@@ -470,7 +481,6 @@ void CursorOverlayInCompose()
     {
         return;
     }
-    SaveAt(g_x, g_y);
     DrawAt(g_x, g_y);
 }
 
