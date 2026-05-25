@@ -2731,17 +2731,6 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     // BeginCompose fell back to direct mode).
     FramebufferEndCompose();
 
-    // Re-assert the cursor sprite on the LIVE framebuffer at the
-    // CURRENT mouse position. The blit above may have overwritten
-    // cursor pixels with composed wallpaper/chrome (offscreen has no
-    // cursor). This puts the cursor back at the live position, not
-    // the stale compose-start position — eliminates both the
-    // CursorHide/Show flash AND the lag-ghost from the previous
-    // offscreen-paint approach. See cursor.cpp::CursorOverlayInCompose
-    // for the full rationale. Microsecond gap between blit and redraw
-    // is imperceptible. No-op when cursor is explicitly hidden.
-    CursorOverlayInCompose();
-
     // Present the freshly-composed frame. For in-place framebuffers
     // (firmware handoff, Bochs VBE) this is a no-op. For
     // virtio-gpu-backed framebuffers the hook runs

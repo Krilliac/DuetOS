@@ -455,41 +455,18 @@ void CursorShow()
 
 void CursorOverlayInCompose()
 {
-    // Called by DesktopCompose AFTER EndCompose has flushed the
-    // offscreen shadow to the live framebuffer. The blit may have
-    // overwritten the cursor pixels at (g_x, g_y) with composed
-    // wallpaper/chrome pixels (the offscreen has no cursor). This
-    // re-asserts the cursor on the live framebuffer at the CURRENT
-    // mouse position so the user always sees the cursor where the
-    // mouse actually is — not at a stale compose-time position.
-    //
-    // Why this order matters: previous designs (a) hid cursor before
-    // compose then re-showed after, producing a ~25 ms visible gap
-    // (the "flash"), or (b) painted cursor into the offscreen at
-    // compose-start position, which lagged behind the live position
-    // when MouseReader moved the cursor between compose and blit
-    // (the "ghost"). Painting on top of LIVE FB after blit avoids
-    // both: cursor stays continuously visible (live-FB pixels from
-    // MouseReader's last DrawAt remain through compose; if the blit
-    // erases them, the redraw immediately below restores them at the
-    // CURRENT position — microsecond gap, imperceptible).
-    //
-    // SaveAt + DrawAt on live FB: SaveAt reads the post-blit pixels
-    // (which reflect whatever the compose actually wrote to that
-    // region — typically wallpaper since the offscreen has no cursor
-    // pixels there) into g_backing. DrawAt then draws the cursor
-    // sprite. Backing is consistent with live FB → next CursorMove's
-    // RestoreAt cleanly recovers the underlying wallpaper.
-    if (!g_ready)
-    {
-        return; // operator/widget code explicitly hid the cursor
-    }
-    if (!FramebufferAvailable())
-    {
-        return;
-    }
-    SaveAt(g_x, g_y);
-    DrawAt(g_x, g_y);
+    // v5: do nothing inside compose. The compose paints offscreen
+    // without a cursor; the blit may or may not cover the cursor
+    // depending on its dirty rect. MouseReader's CursorMove path is
+    // what owns cursor visibility on live FB. We leave compose alone
+    // and rely on a separate "hide before, show after" pattern in
+    // WinTimerTickerTask for any flash mitigation — the v2-v4 attempts
+    // to be cleverer inside compose all produced worse artifacts
+    // (ghosts, lag-cursors, trails) because the compositor's frame-
+    // elision diff scan ignores live-FB changes from MouseReader, so
+    // any cursor-related backing manipulation we do here desynchronises
+    // from the compose's view of the world.
+    (void)g_ready;
 }
 
 void CursorSetDesktopBackground(u32 rgb)
