@@ -128,18 +128,6 @@ bool PointInButton(const ButtonWidget& b, u32 x, u32 y)
     return true;
 }
 
-u32 StringPixelWidth(const char* s)
-{
-    if (s == nullptr)
-        return 0;
-    u32 n = 0;
-    while (s[n] != '\0')
-    {
-        ++n;
-    }
-    return n * 8;
-}
-
 // Saturating per-channel lighten — forward declaration of the
 // helper defined further down this TU (just before WindowDraw).
 // Buttons want the same "lifted top, settled bottom" gradient
@@ -200,13 +188,15 @@ void PaintButton(const ButtonWidget& b)
     }
     if (b.label != nullptr)
     {
-        // Centre the label inside the button. 8x8 cell metrics,
-        // rounded down so odd-pixel buttons don't wiggle by a
-        // pixel between normal and pressed states.
-        const u32 text_w = StringPixelWidth(b.label);
+        // Centre the label inside the button. Width / height come
+        // from the chrome-text dispatcher so the centring math is
+        // correct under both TTF and bitmap themes; the per-role
+        // height keeps the vertical anchor stable across themes.
+        const u32 text_w = ChromeTextMeasure(ChromeTextRole::Body, b.label);
+        const u32 text_h = ChromeTextRoleHeight(ChromeTextRole::Body);
         const u32 cx = (text_w < b.w) ? bx + (b.w - text_w) / 2 : bx + 4;
-        const u32 cy = (b.h > 8) ? by + (b.h - 8) / 2 : by + 2;
-        FramebufferDrawString(cx, cy, b.label, b.colour_label, fill);
+        const u32 cy = (b.h > text_h) ? by + (b.h - text_h) / 2 : by + 2;
+        ChromeTextDraw(ChromeTextRole::Body, cx, cy, b.label, b.colour_label, fill);
     }
 }
 
@@ -312,12 +302,13 @@ void WidgetTooltipRender()
     const u64 now = duetos::arch::TimerTicks();
     if (now - g_tooltip_arm_tick < kTooltipArmTicks)
         return;
-    const u32 lw = StringPixelWidth(b.label);
+    const u32 lw = ChromeTextMeasure(ChromeTextRole::Caption, b.label);
     if (lw == 0)
         return;
     const u32 pad = 4;
+    const u32 lh = ChromeTextRoleHeight(ChromeTextRole::Caption);
     const u32 panel_w = lw + 2 * pad;
-    const u32 panel_h = 8 + 2 * pad;
+    const u32 panel_h = lh + 2 * pad;
     // Anchor below the cursor by 16 px so the panel doesn't
     // sit under the pointer sprite. Clamp to the framebuffer.
     const auto fb = FramebufferGet();
@@ -332,7 +323,7 @@ void WidgetTooltipRender()
     constexpr u32 kTipBorder = 0x00606078;
     FramebufferFillRect(px, py, panel_w, panel_h, kTipBg);
     FramebufferDrawRect(px, py, panel_w, panel_h, kTipBorder, 1);
-    FramebufferDrawString(px + pad, py + pad, b.label, kTipFg, kTipBg);
+    ChromeTextDraw(ChromeTextRole::Caption, px + pad, py + pad, b.label, kTipFg, kTipBg);
 }
 
 namespace
@@ -2204,7 +2195,11 @@ void WindowDrawAllOrdered()
         u32 title_pixel_w = 0;
         const u32 ttscale_raw = ThemeCurrent().title_text_scale;
         const u32 ttscale = (ttscale_raw == 0) ? 1u : ttscale_raw;
-        const u32 cell_w = 8u * ttscale;
+        // cell_h still drives the vertical title centring math —
+        // matches the bitmap-glyph height the title row was sized
+        // for. cell_w is no longer needed: title width is measured
+        // via ChromeTextMeasure, and the subtitle slot does its
+        // own greedy fit through the chrome-text dispatcher.
         const u32 cell_h = 8u * ttscale;
         const u32 tbh_eff_for_title = EffectiveTitleHeight(drawn);
         const u32 title_y = drawn.y + ((tbh_eff_for_title > cell_h) ? (tbh_eff_for_title - cell_h) / 2 : 0);
@@ -2219,13 +2214,11 @@ void WindowDrawAllOrdered()
             // active theme's font_kind + chrome-font registration.
             ChromeTextDraw(ChromeTextRole::Title, drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF,
                            drawn.colour_title, is_active ? ChromeTextWeight::Bold : ChromeTextWeight::Regular);
-            const char* t = g_windows[h].title;
-            u32 n = 0;
-            while (t[n] != '\0')
-            {
-                ++n;
-            }
-            title_pixel_w = n * cell_w;
+            // Measure the title via the chrome-text dispatcher so
+            // the subtitle anchor below is correct under both TTF
+            // and bitmap themes (n * cell_w would only be right
+            // for the bitmap path).
+            title_pixel_w = ChromeTextMeasure(ChromeTextRole::Title, g_windows[h].title);
         }
         // Subtitle slot (Duet-era "context tag"). Painted in a
         // dimmer ink immediately right of the title with a 12-px
@@ -2243,31 +2236,49 @@ void WindowDrawAllOrdered()
             const u32 close_left =
                 (drawn.w > btn_w_for_sub + btn_pad) ? drawn.x + drawn.w - btn_w_for_sub - btn_pad : drawn.x + drawn.w;
             const u32 sub_x = drawn.x + 8 + title_pixel_w + 12;
+            // Pass C: subtitle separator + text route through the
+            // unified ChromeTextDraw(Caption) dispatcher so the
+            // subtitle stays cohesive with the rest of the chrome
+            // under both TTF and bitmap themes. Caption is the
+            // "secondary chrome label" role — lighter weight than
+            // the Title above, matching the dim-ink treatment we
+            // already use for this slot.
+            const u32 sep_w = ChromeTextMeasure(ChromeTextRole::Caption, "| ");
             // Only paint if there's room for at least the
-            // separator + 4 glyphs before the close button.
-            if (sub_x + 5 * cell_w < close_left)
+            // separator + a few glyphs before the close button.
+            if (sub_x + sep_w + 32u < close_left)
             {
                 // Dim ink derived from the title — a brighter
                 // shade reads against dark titles, a dimmer one
-                // against bright titles. We use a fixed 60%-of-
-                // white blend with the title bg as the bg colour
-                // so the bitmap font's anti-aliased-by-bg trick
-                // still works. Brighten just enough that the
-                // subtitle reads as secondary, not background.
+                // against bright titles. Brighten just enough
+                // that the subtitle reads as secondary, not
+                // background.
                 const u32 ink = LightenRgb(drawn.colour_title, 96);
-                const u32 max_chars = (close_left - sub_x) / cell_w;
-                FramebufferDrawStringScaled(sub_x, title_y, "|", ink, drawn.colour_title, ttscale);
-                if (max_chars > 2)
+                ChromeTextDraw(ChromeTextRole::Caption, sub_x, title_y, "|", ink, drawn.colour_title);
+                // Greedy fit: extend the clipped buffer one
+                // character at a time and stop the moment the
+                // measured advance would overrun the close-button
+                // edge. Works under both TTF (variable advance)
+                // and bitmap (fixed advance).
+                const u32 budget = close_left - (sub_x + sep_w);
+                char clipped[kWindowSubtitleStorage];
+                u32 n = 0;
+                while (subtitle[n] != '\0' && n < kWindowSubtitleStorage - 1)
                 {
-                    char clipped[kWindowSubtitleStorage];
-                    u32 n = 0;
-                    while (subtitle[n] != '\0' && n < kWindowSubtitleStorage - 1 && n + 2 < max_chars)
+                    clipped[n] = subtitle[n];
+                    clipped[n + 1] = '\0';
+                    if (ChromeTextMeasure(ChromeTextRole::Caption, clipped) > budget)
                     {
-                        clipped[n] = subtitle[n];
-                        ++n;
+                        // Roll back the last character that
+                        // pushed us over the limit.
+                        clipped[n] = '\0';
+                        break;
                     }
-                    clipped[n] = '\0';
-                    FramebufferDrawStringScaled(sub_x + 2 * cell_w, title_y, clipped, ink, drawn.colour_title, ttscale);
+                    ++n;
+                }
+                if (n > 0)
+                {
+                    ChromeTextDraw(ChromeTextRole::Caption, sub_x + sep_w, title_y, clipped, ink, drawn.colour_title);
                 }
             }
         }
@@ -2735,14 +2746,14 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
         // each glyph's bg = desktop_rgb (matches the gradient
         // closely enough that the shadow doesn't show up as a
         // smear) while the foreground is pure white.
-        // On themes with a 30+ px title bar (Duet family) the
-        // banner renders at 2x scale so the larger chrome has a
-        // proportionate banner — first concrete consumer of
-        // FramebufferDrawStringScaled. Compact themes stay 1x
-        // so existing layouts don't shift.
-        const u32 scale = (ThemeCurrent().title_bar_height >= 30) ? 2u : 1u;
-        FramebufferDrawStringScaled(17, 9, banner, 0x00000000, desktop_rgb, scale);
-        FramebufferDrawStringScaled(16, 8, banner, 0x00FFFFFF, desktop_rgb, scale);
+        // Pass C: route through ChromeTextDraw(Title) so the
+        // banner picks up the active theme's typography (TTF on
+        // Duet, scaled bitmap on classic / 90s themes). The
+        // Title role already absorbs the previous "2x on big-
+        // title themes vs 1x on compact" split — its pixel
+        // height is set per role, not per call site.
+        ChromeTextDraw(ChromeTextRole::Title, 17, 9, banner, 0x00000000, desktop_rgb, ChromeTextWeight::Bold);
+        ChromeTextDraw(ChromeTextRole::Title, 16, 8, banner, 0x00FFFFFF, desktop_rgb, ChromeTextWeight::Bold);
     }
     // Snap-zone hover preview — translucent target rect painted
     // after every window so the preview lays on top of normal
