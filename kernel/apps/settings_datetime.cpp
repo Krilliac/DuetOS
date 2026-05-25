@@ -110,8 +110,7 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     ChromeTextDraw(ChromeTextRole::Caption, x, y + 62, ", : -15 min    . : +15 min", dim, bg);
     ChromeTextDraw(ChromeTextRole::Caption, x, y + 74, "Z : reset to UTC", dim, bg);
 
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 96,
-                   "S : SET RTC (UTC) — opens YYYY-MM-DD HH:MM:SS prompt", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 96, "S : SET RTC (UTC) — opens YYYY-MM-DD HH:MM:SS prompt", dim, bg);
 }
 
 // Trim leading whitespace + parse "YYYY-MM-DD HH:MM:SS" or

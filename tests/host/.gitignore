@@ -1,0 +1,4 @@
+# Visual Studio out-of-tree CMake build dir (used by VS's "Open folder"
+# integration that probes tests/host/ as a self-contained CMake project).
+# These artifacts are local-only and should never be committed.
+build-check/

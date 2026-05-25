@@ -2293,13 +2293,11 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         // produces zero motion.
         if (CmdlineMatches(early_cmdline, "motion", "off"))
         {
-            duetos::drivers::video::ThemeSetMotionOverride(
-                duetos::drivers::video::MotionOverride::kOff);
+            duetos::drivers::video::ThemeSetMotionOverride(duetos::drivers::video::MotionOverride::kOff);
         }
         else if (CmdlineMatches(early_cmdline, "motion", "on"))
         {
-            duetos::drivers::video::ThemeSetMotionOverride(
-                duetos::drivers::video::MotionOverride::kOn);
+            duetos::drivers::video::ThemeSetMotionOverride(duetos::drivers::video::MotionOverride::kOn);
         }
         // "auto" (or absent) leaves the default kAuto — no call needed.
     }
@@ -2334,12 +2332,10 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // umbrella does not emit a fake PASS that masks a FAIL.
     if constexpr (::duetos::core::kBootSelfTests)
     {
-        if (duetos::drivers::video::SplashSelfTestPassed() &&
-            duetos::drivers::video::WallpaperMotionSelfTestPassed() &&
+        if (duetos::drivers::video::SplashSelfTestPassed() && duetos::drivers::video::WallpaperMotionSelfTestPassed() &&
             duetos::core::LoginGuiSelfTestPassed())
         {
-            duetos::arch::SerialWrite(
-                "[pass-b-selftest] PASS (splash=ok, wallpaper-motion=ok, login-gui=ok)\n");
+            duetos::arch::SerialWrite("[pass-b-selftest] PASS (splash=ok, wallpaper-motion=ok, login-gui=ok)\n");
         }
     }
     // Pass C — typography hierarchy. ChromeTextSelfTest validates the

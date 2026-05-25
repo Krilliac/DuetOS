@@ -147,10 +147,8 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     }
     line[o] = '\0';
     ChromeTextDraw(ChromeTextRole::Body, x, y + 162, line, fg, bg);
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 174,
-                   "1:US  2:UK  3:DVORAK  4:DE  5:FR  6:COLEMAK", dim, bg);
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 186,
-                   "(DE/FR diacritics: ASCII fallback for now)", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 174, "1:US  2:UK  3:DVORAK  4:DE  5:FR  6:COLEMAK", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 186, "(DE/FR diacritics: ASCII fallback for now)", dim, bg);
 }
 
 bool Key(char c)

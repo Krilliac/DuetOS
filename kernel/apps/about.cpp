@@ -128,8 +128,7 @@ void AppendUptime(char* dst, u32* pos, u32 cap, u64 ticks, u64 hz)
 // role. Defaults to Body — the row labels + values that dominate
 // the panel. Callers pick Title (Bold) for the hero header and
 // Caption for the footer hint.
-void DrawLine(u32 cx, u32 y, const char* line, u32 fg, u32 bg,
-              ChromeTextRole role = ChromeTextRole::Body,
+void DrawLine(u32 cx, u32 y, const char* line, u32 fg, u32 bg, ChromeTextRole role = ChromeTextRole::Body,
               ChromeTextWeight weight = ChromeTextWeight::Regular)
 {
     ChromeTextDraw(role, cx + 12, y, line, fg, bg, weight);

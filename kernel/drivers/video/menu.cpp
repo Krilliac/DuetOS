@@ -294,8 +294,8 @@ void MenuRedraw()
             // Submenu chevron in the row's right gutter.
             if (has_submenu && kMenuWidth > kChevronInset)
             {
-                ChromeTextDraw(ChromeTextRole::Body, p.anchor_x + kMenuWidth - kChevronInset,
-                               row_y + kTextOffsetY, ">", ink, bg);
+                ChromeTextDraw(ChromeTextRole::Body, p.anchor_x + kMenuWidth - kChevronInset, row_y + kTextOffsetY, ">",
+                               ink, bg);
             }
 
             // Separator line between rows — half-strength border.

@@ -32,26 +32,23 @@ namespace duetos::drivers::video
 
 enum class ChromeTextRole : u8
 {
-    Display = 0,   // ~72 px TTF / scale 8 bitmap — hero numerals (clock, hero metrics)
-    Title   = 1,   // ~16 px TTF / scale 2 bitmap — window titlebars, modal titles, card name
-    Body    = 2,   // ~13 px TTF / scale 1 bitmap — menu rows, button labels, dialog text
-    Caption = 3,   // ~11 px TTF / scale 1 bitmap — hints, status, tooltips, timestamps
+    Display = 0, // ~72 px TTF / scale 8 bitmap — hero numerals (clock, hero metrics)
+    Title = 1,   // ~16 px TTF / scale 2 bitmap — window titlebars, modal titles, card name
+    Body = 2,    // ~13 px TTF / scale 1 bitmap — menu rows, button labels, dialog text
+    Caption = 3, // ~11 px TTF / scale 1 bitmap — hints, status, tooltips, timestamps
 };
 
 enum class ChromeTextWeight : u8
 {
     Regular = 0,
-    Bold    = 1,   // TTF: Liberation Sans Bold (if loaded). Bitmap: double-paint with 1px x-offset.
+    Bold = 1, // TTF: Liberation Sans Bold (if loaded). Bitmap: double-paint with 1px x-offset.
 };
 
 /// Draw chrome text at (x, y). Dispatches internally based on the
 /// active theme's font_kind and the registered chrome fonts.
 /// Caller holds compositor lock. No-op if text is null/empty or the
 /// framebuffer is unavailable.
-void ChromeTextDraw(ChromeTextRole role,
-                    u32 x, u32 y,
-                    const char* text,
-                    u32 fg, u32 bg,
+void ChromeTextDraw(ChromeTextRole role, u32 x, u32 y, const char* text, u32 fg, u32 bg,
                     ChromeTextWeight weight = ChromeTextWeight::Regular);
 
 /// Pixel width the string occupies at the role under the active theme.

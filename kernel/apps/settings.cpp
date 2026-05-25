@@ -267,8 +267,8 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // shortcuts so a fresh user can find sub-panels without
     // reading the wiki. Caption role — small navigation hint, not
     // the panel's primary content.
-    ChromeTextDraw(ChromeTextRole::Caption, cx + kReadoutX, cy + 2,
-                   "0:GEN 1:DSP 2:SND 3:KBD 4:MSE 5:DT", th.banner_fg, ink_bg);
+    ChromeTextDraw(ChromeTextRole::Caption, cx + kReadoutX, cy + 2, "0:GEN 1:DSP 2:SND 3:KBD 4:MSE 5:DT", th.banner_fg,
+                   ink_bg);
     // Sub-panel dispatch. When a non-General panel is active
     // and registered, render its content into the readout area
     // (everything to the right of the button column) and skip
@@ -292,16 +292,15 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         // empty. The real panel populates via SettingsRegisterPanel
         // from its own .cpp. Caption role — diagnostic placeholder,
         // not a section header.
-        ChromeTextDraw(ChromeTextRole::Caption, cx + kReadoutX, cy + 24,
-                       "(panel not registered yet)", th.banner_fg, ink_bg);
+        ChromeTextDraw(ChromeTextRole::Caption, cx + kReadoutX, cy + 24, "(panel not registered yet)", th.banner_fg,
+                       ink_bg);
         return;
     }
 
     // Section header — Title + Bold so "SETTINGS" reads as the
     // window's hero label rather than a row.
     const u32 hdr_y = cy + 6;
-    ChromeTextDraw(ChromeTextRole::Title, cx + kReadoutX, hdr_y, "SETTINGS", ink_fg, ink_bg,
-                   ChromeTextWeight::Bold);
+    ChromeTextDraw(ChromeTextRole::Title, cx + kReadoutX, hdr_y, "SETTINGS", ink_fg, ink_bg, ChromeTextWeight::Bold);
 
     // Theme readout: "THEME: <name>" — Body role for both label and
     // value. Value column derived from ChromeTextMeasure so variable-
@@ -311,8 +310,8 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX, y, "THEME:", ink_fg, ink_bg);
     const char* name = ThemeIdName(ThemeCurrentId());
     const u32 theme_label_w = ChromeTextMeasure(ChromeTextRole::Body, "THEME: ");
-    ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX + theme_label_w, y,
-                   (name != nullptr) ? name : "?", ink_fg, ink_bg);
+    ChromeTextDraw(ChromeTextRole::Body, cx + kReadoutX + theme_label_w, y, (name != nullptr) ? name : "?", ink_fg,
+                   ink_bg);
 
     // Opacity readout: "OPACITY: <hex>" — same Body role + measured
     // value column as the THEME row.
