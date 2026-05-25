@@ -41,6 +41,7 @@
 #include "sched/sched.h"
 #include "sync/lockdep.h"
 #include "drivers/video/calendar.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/dialog.h"
@@ -54,6 +55,7 @@
 #include "drivers/video/ttf_raster.h"
 #include "drivers/video/netpanel.h"
 #include "drivers/video/taskbar.h"
+#include "security/guard.h"
 #include "security/login.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/tray_flyout.h"
@@ -954,6 +956,42 @@ void WindowRaise(WindowHandle h)
         g_z_order[j] = g_z_order[j + 1];
     }
     g_z_order[g_window_count - 1] = h;
+
+    // Z-order changed — force the next EndCompose to do an unconditional
+    // shadow->live blit + snapshot resync over the FULL surface. The
+    // diff-scan path normally handles this correctly (DesktopCompose
+    // paints the gradient first, which marks damage full-screen, so the
+    // EndCompose diff catches every changed pixel between the new
+    // composition and the snapshot of what's on screen). But the diff
+    // scan is conditional on three invariants holding simultaneously:
+    //
+    //   1. g_damage covers every pixel that could have changed
+    //   2. the snapshot accurately mirrors the LIVE framebuffer
+    //   3. no concurrent direct-FB writer raced the compose pass
+    //
+    // Direct-FB writers (cursor restore/draw, guard prompt, login
+    // repaint, any non-compose paint path) routinely break (2)+(3). When
+    // a z-order change lands a window's chrome in a region that the
+    // snapshot still believes matches LIVE (because the snapshot was
+    // synced from a stale shadow during a racy partial paint), the diff
+    // scan elides the blit and the formerly-on-top window's pixels
+    // persist where the now-on-top window should have painted.
+    //
+    // Posting the full-screen invalidation rect makes the next
+    // EndCompose flush every pixel unconditionally. Cost: ~3 MB
+    // shadow->live copy on a 1024x768 surface, which is the same cost
+    // we already pay on the FIRST compose after FramebufferInit (the
+    // "snapshot not yet valid" full path at framebuffer.cpp:712). On a
+    // click-rate workload this fires at most once per click, which is
+    // imperceptible. Architectural cost: zero — the invalidation list
+    // is the canonical mechanism for "the snapshot may be wrong, please
+    // resync this rect" and the cursor / guard-prompt paths already
+    // depend on it.
+    if (FramebufferAvailable())
+    {
+        const auto info = FramebufferGet();
+        FramebufferInvalidateSnapshot(0, 0, info.width, info.height);
+    }
 }
 
 WindowHandle WindowActive()
@@ -2172,19 +2210,15 @@ void WindowDrawAllOrdered()
         const u32 title_y = drawn.y + ((tbh_eff_for_title > cell_h) ? (tbh_eff_for_title - cell_h) / 2 : 0);
         if (g_windows[h].title != nullptr)
         {
-            // Theme-driven font dispatch: themes that opt in to the
-            // TTF path try the rasterizer first; if no chrome font is
-            // registered (TtfChromeFontGet returns nullptr) the
-            // bitmap font runs as the fallback. Pixel height matches
-            // the existing scaled cell size so the overall chrome
-            // layout is identical between the two paths.
-            const bool used_ttf = (ThemeCurrent().font_kind == Theme::FontKind::Ttf) &&
-                                  TtfDrawString(drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF, cell_h);
-            if (!used_ttf)
-            {
-                FramebufferDrawStringScaled(drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF, drawn.colour_title,
-                                            ttscale);
-            }
+            // Pass C: chrome text routes through the unified
+            // ChromeTextDraw(Title) dispatcher. Active windows
+            // render the title bold to reinforce the focus
+            // signal already carried by colour_title; inactive
+            // windows stay regular. The dispatcher handles
+            // TTF-vs-bitmap fallback internally based on the
+            // active theme's font_kind + chrome-font registration.
+            ChromeTextDraw(ChromeTextRole::Title, drawn.x + 8, title_y, g_windows[h].title, 0x00FFFFFF,
+                           drawn.colour_title, is_active ? ChromeTextWeight::Bold : ChromeTextWeight::Regular);
             const char* t = g_windows[h].title;
             u32 n = 0;
             while (t[n] != '\0')
@@ -2594,6 +2628,25 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     if (duetos::core::LoginIsActive() && duetos::core::LoginCurrentMode() == duetos::core::LoginMode::Gui)
     {
         duetos::core::LoginRepaint();
+        return;
+    }
+
+    // Security-guard modal owns the framebuffer while up. The
+    // prompt (kernel/security/guard.cpp::PromptUser) paints its
+    // panel directly to the live FB and busy-waits on user input
+    // — it does NOT participate in the shadow / EndCompose diff
+    // pipeline because it runs synchronously on the kboot/loader
+    // thread, not on the ui-ticker thread that owns BeginCompose.
+    // Without this short-circuit, an in-flight ui-ticker compose
+    // races the prompt's paint and the EndCompose shadow->live
+    // diff blits whatever the desktop drew over the prompt's
+    // pixels — observable as terminal / desktop content bleeding
+    // through the guard modal (reported 2026-05-25, amber theme,
+    // ring3-hello-pe PE_NO_IMPORTS prompt). Same pattern as the
+    // LoginIsActive short-circuit above. The cursor and animation
+    // paths drive themselves and survive this no-op.
+    if (duetos::security::GuardPromptActive())
+    {
         return;
     }
 

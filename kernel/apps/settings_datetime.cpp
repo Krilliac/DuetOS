@@ -2,8 +2,8 @@
 
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/dialog.h"
-#include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/sound_cue.h"
 #include "drivers/video/theme.h"
@@ -58,7 +58,9 @@ void AppendSignedDec(char* out, u32 cap, u32* o, i32 v)
 
 void Draw(u32 x, u32 y, u32 w, u32 h)
 {
-    using duetos::drivers::video::FramebufferDrawString;
+    using duetos::drivers::video::ChromeTextDraw;
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::ChromeTextWeight;
     const auto& th = duetos::drivers::video::ThemeCurrent();
     const u32 bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
     const u32 fg = th.console_fg;
@@ -71,7 +73,9 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     char line[80];
     u32 o = 0;
 
-    FramebufferDrawString(x, y, "DATE & TIME", fg, bg);
+    // Section header — Title + Bold so "DATE & TIME" reads as the
+    // panel's hero label rather than a row.
+    ChromeTextDraw(ChromeTextRole::Title, x, y, "DATE & TIME", fg, bg, ChromeTextWeight::Bold);
 
     o = 0;
     AppendStr(line, sizeof(line), &o, "RTC (UTC): ");
@@ -87,7 +91,7 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     line[o++] = ':';
     Append2(line, &o, rtc.second);
     line[o] = '\0';
-    FramebufferDrawString(x, y + 14, line, fg, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 14, line, fg, bg);
 
     const i32 off = duetos::time::TimezoneOffsetMinutes();
     o = 0;
@@ -99,13 +103,14 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     AppendSignedDec(line, sizeof(line), &o, (off >= 0 ? off : -off) % 60);
     AppendStr(line, sizeof(line), &o, "m)");
     line[o] = '\0';
-    FramebufferDrawString(x, y + 30, line, fg, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 30, line, fg, bg);
 
-    FramebufferDrawString(x, y + 50, "[ : -1 hour    ] : +1 hour", dim, bg);
-    FramebufferDrawString(x, y + 62, ", : -15 min    . : +15 min", dim, bg);
-    FramebufferDrawString(x, y + 74, "Z : reset to UTC", dim, bg);
+    // Hint lines — Caption role for the key-shortcut help below the readouts.
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 50, "[ : -1 hour    ] : +1 hour", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 62, ", : -15 min    . : +15 min", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 74, "Z : reset to UTC", dim, bg);
 
-    FramebufferDrawString(x, y + 96, "S : SET RTC (UTC) — opens YYYY-MM-DD HH:MM:SS prompt", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 96, "S : SET RTC (UTC) — opens YYYY-MM-DD HH:MM:SS prompt", dim, bg);
 }
 
 // Trim leading whitespace + parse "YYYY-MM-DD HH:MM:SS" or

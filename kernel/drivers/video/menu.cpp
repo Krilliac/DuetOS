@@ -1,6 +1,7 @@
 #include "drivers/video/menu.h"
 
 #include "drivers/input/ps2kbd.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/shadow.h"
 #include "drivers/video/theme.h"
@@ -276,24 +277,25 @@ void MenuRedraw()
             const u32 bg = is_hovered ? hover_rgb : g_body_rgb;
 
             // Checkmark glyph for radio-style checked items —
-            // rendered as a leading '>' so we don't have to ship a
+            // rendered as a leading '*' so we don't have to ship a
             // new glyph; visible cue beats dictionary purity.
             u32 text_x = p.anchor_x + kPaddingX;
             if (is_checked)
             {
-                FramebufferDrawString(text_x, row_y + kTextOffsetY, "*", ink, bg);
-                text_x += 8;
+                ChromeTextDraw(ChromeTextRole::Body, text_x, row_y + kTextOffsetY, "*", ink, bg);
+                text_x += ChromeTextMeasure(ChromeTextRole::Body, "*");
             }
 
             if (it.label != nullptr)
             {
-                FramebufferDrawString(text_x, row_y + kTextOffsetY, it.label, ink, bg);
+                ChromeTextDraw(ChromeTextRole::Body, text_x, row_y + kTextOffsetY, it.label, ink, bg);
             }
 
             // Submenu chevron in the row's right gutter.
             if (has_submenu && kMenuWidth > kChevronInset)
             {
-                FramebufferDrawString(p.anchor_x + kMenuWidth - kChevronInset, row_y + kTextOffsetY, ">", ink, bg);
+                ChromeTextDraw(ChromeTextRole::Body, p.anchor_x + kMenuWidth - kChevronInset, row_y + kTextOffsetY, ">",
+                               ink, bg);
             }
 
             // Separator line between rows — half-strength border.

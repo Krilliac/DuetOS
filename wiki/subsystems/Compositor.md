@@ -542,6 +542,70 @@ Umbrella line emitted by `boot_bringup.cpp`:
 See [`docs/superpowers/specs/2026-05-24-duetos-pass-b-design.md`](../../docs/superpowers/specs/2026-05-24-duetos-pass-b-design.md)
 for the full design + acceptance criteria.
 
+## Typography Hierarchy (Pass C)
+
+Pass C wires a four-tier type role (Display / Title / Body / Caption)
+through a single dispatcher (`kernel/drivers/video/chrome_text.{h,cpp}`).
+Every chrome paint site uses
+`ChromeTextDraw(role, x, y, text, fg, bg, weight)` instead of calling
+`TtfDrawString` or `FramebufferDrawStringScaled` directly. The mono
+path (terminal, kernel shell, hex viewer) intentionally does NOT route
+through `ChromeTextDraw` — those surfaces call `FramebufferDrawString`
+directly to keep cell width predictable.
+
+### Type Roles
+
+| Role | TTF px | Bitmap scale | Surfaces |
+|---|---|---|---|
+| Display | 72 | 8 (64 px) | Login clock, hero numerals |
+| Title | 16 | 2 (16 px) | Window titlebars, dialog titles, login card name, taskbar clock |
+| Body | 13 | 1 (8 px) | Menu rows, button labels, dialog body, tile labels, password echo |
+| Caption | 11 | 1 (8 px) | Hints, status, date, splash phase ticker, settings hints, taskbar date |
+
+Weights: **Regular** (default) and **Bold**. Bitmap themes synthesize
+bold via double-paint with 1 px x-offset; TTF themes load Liberation
+Sans Bold and dispatch to it when present (falling back to Regular if
+the bold font failed to load).
+
+### Per-Theme Dispatch
+
+`Theme::font_kind` determines path:
+
+- **TTF themes** (`Duet`, `DuetLight`, `DuetSoft`, `DuetDeep`,
+  `DuetMono`): all roles use Liberation Sans Regular + Bold companion.
+- **Bitmap themes** (`Classic`, `Slate10`, `Amber`, `HighContrast`,
+  `DuetClassic`): roles map to integer-scaled 8×8.
+
+### Self-Test + Sentinels
+
+`ChromeTextSelfTest()` runs at the boot umbrella stage and emits:
+
+```
+[chrome-text-selftest] PASS
+[pass-c-selftest] PASS (chrome-text=ok)
+```
+
+The bold-font load is announced at boot via
+`[boot] chrome font bold (Liberation Sans Bold) loaded + registered`.
+
+Verify via:
+
+- `tools/test/boot-log-analyze.sh <log>` — Pass C section reports
+  `chrome-text=N umbrella=N` + bold-font status.
+- `tools/test/tactility-screenshot-matrix.sh --typography` — 10 themes
+  × 3 surfaces reference set.
+- `tools/test/pass-c-soak.sh` — 30 s sustained-load regression guard.
+
+### API Summary
+
+```cpp
+ChromeTextDraw(role, x, y, text, fg, bg, weight);   // paint
+u32 w = ChromeTextMeasure(role, text);              // pixel width
+u32 h = ChromeTextRoleHeight(role);                 // pixel height
+```
+
+See `kernel/drivers/video/chrome_text.h` for the full declaration set.
+
 ## Network Flyout
 
 Bottom-right Wi-Fi-style popup with hover preview, exposing the
@@ -704,6 +768,23 @@ Action-id allocation:
   `MessageBox` / `InputBox`; native scrollbars ship via
   `scrollbar.{h,cpp}` with full hit-test + drag-the-thumb
   wiring in the kernel mouse loop.)
+- **Pass C typography — bitmap Caption collapses to Body scale**:
+  both render at 8 px on bitmap themes because the bitmap font is
+  single-size. Acceptable v0.
+- **Pass C typography — Bold-TTF degrades to Regular when
+  `LiberationSans-Bold.ttf` fails to load**: surfaced at boot via
+  `chrome font bold load FAILED — Bold weight will degrade to
+  Regular` (non-fatal advisory).
+- **Pass C typography — `ChromeTextMeasure` is a TTF estimate**:
+  computed as `chars × px × 0.55`, not a real per-glyph advance sum.
+  Accurate within ~10% for Liberation Sans; long/wide strings may
+  mis-size hit-rects.
+- **Pass C typography — no italic, no Thin/Medium/Heavy weights**.
+  Extend via the `ChromeTextWeight` enum when a real caller needs
+  it.
+- **Pass C typography — dialog body wrap uses bitmap col-cap on the
+  TTF render path**: wide ASCII can clip into the `kPad` margin.
+  Filed for Pass C residual polish.
 
 ## Related Pages
 

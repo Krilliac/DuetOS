@@ -1,7 +1,7 @@
 #include "apps/settings.h"
 
 #include "drivers/audio/pcspk.h"
-#include "drivers/video/framebuffer.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/sound_cue.h"
 #include "drivers/video/theme.h"
@@ -14,20 +14,24 @@ namespace
 
 void Draw(u32 x, u32 y, u32 w, u32 h)
 {
-    using duetos::drivers::video::FramebufferDrawString;
+    using duetos::drivers::video::ChromeTextDraw;
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::ChromeTextWeight;
     const auto& th = duetos::drivers::video::ThemeCurrent();
     const u32 bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
     const u32 fg = th.console_fg;
     const u32 dim = th.banner_fg;
     if (w < 8 * 24 || h < 8 * 8)
         return;
-    FramebufferDrawString(x, y, "SOUND", fg, bg);
-    FramebufferDrawString(x, y + 14, "PC SPEAKER ENGINE: PIT channel 2", dim, bg);
+    // Section header — Title + Bold for the panel's hero label.
+    ChromeTextDraw(ChromeTextRole::Title, x, y, "SOUND", fg, bg, ChromeTextWeight::Bold);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 14, "PC SPEAKER ENGINE: PIT channel 2", dim, bg);
     const bool enabled = duetos::drivers::video::SoundCueIsEnabled();
-    FramebufferDrawString(x, y + 30, enabled ? "UI CUES: ENABLED" : "UI CUES: MUTED", fg, bg);
-    FramebufferDrawString(x, y + 50, "M: TOGGLE MUTE", dim, bg);
-    FramebufferDrawString(x, y + 62, "C: PLAY CLICK CUE  E: ERROR  A: ALARM  H: CHIME", dim, bg);
-    FramebufferDrawString(x, y + 74, "B: BEEP TEST (440 Hz, 200ms)", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 30, enabled ? "UI CUES: ENABLED" : "UI CUES: MUTED", fg, bg);
+    // Hint lines — Caption role for key-shortcut help.
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 50, "M: TOGGLE MUTE", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 62, "C: PLAY CLICK CUE  E: ERROR  A: ALARM  H: CHIME", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 74, "B: BEEP TEST (440 Hz, 200ms)", dim, bg);
 }
 
 bool Key(char c)

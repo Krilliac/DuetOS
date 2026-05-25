@@ -1,6 +1,7 @@
 #include "apps/about.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/widget.h"
@@ -16,7 +17,9 @@ namespace duetos::apps::about
 namespace
 {
 
-using duetos::drivers::video::FramebufferDrawString;
+using duetos::drivers::video::ChromeTextDraw;
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
 using duetos::drivers::video::FramebufferFillRect;
 using duetos::drivers::video::kWindowInvalid;
 using duetos::drivers::video::ThemeCurrent;
@@ -121,9 +124,14 @@ void AppendUptime(char* dst, u32* pos, u32 cap, u64 ticks, u64 hz)
     }
 }
 
-void DrawLine(u32 cx, u32 y, const char* line, u32 fg, u32 bg)
+// All body rows render through ChromeTextDraw with the requested
+// role. Defaults to Body — the row labels + values that dominate
+// the panel. Callers pick Title (Bold) for the hero header and
+// Caption for the footer hint.
+void DrawLine(u32 cx, u32 y, const char* line, u32 fg, u32 bg, ChromeTextRole role = ChromeTextRole::Body,
+              ChromeTextWeight weight = ChromeTextWeight::Regular)
 {
-    FramebufferDrawString(cx + 12, y, line, fg, bg);
+    ChromeTextDraw(role, cx + 12, y, line, fg, bg, weight);
 }
 
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
@@ -143,11 +151,12 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     char line[96];
     u32 p = 0;
 
-    // Header.
+    // Header — Title + Bold so the panel name reads as the
+    // window's hero label rather than another row.
     p = 0;
     AppendStr(line, &p, sizeof(line), "DUETOS v0 — system info");
     line[p] = '\0';
-    DrawLine(cx, cy + 8, line, dim, bg);
+    DrawLine(cx, cy + 8, line, dim, bg, ChromeTextRole::Title, ChromeTextWeight::Bold);
 
     u32 y = cy + 8 + kRowH + 6;
 
@@ -274,10 +283,11 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     DrawLine(cx, y, line, fg, bg);
     y += kRowH + 6;
 
-    // Footer hint.
+    // Footer hint — Caption role for the secondary "how this
+    // panel behaves" annotation, distinct from the row content.
     if (y + kRowH < cy + ch)
     {
-        DrawLine(cx, y, "Refreshes on every compositor tick.", dim, bg);
+        DrawLine(cx, y, "Refreshes on every compositor tick.", dim, bg, ChromeTextRole::Caption);
     }
 }
 

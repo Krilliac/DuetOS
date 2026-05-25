@@ -1,6 +1,7 @@
 #include "drivers/video/calendar.h"
 
 #include "arch/x86_64/rtc.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/shadow.h"
 #include "drivers/video/theme.h"
@@ -204,11 +205,13 @@ void CalendarRedraw()
     }
     FramebufferDrawRect(g_ax, g_ay, kPanelW, kPanelH, g_border_rgb, 1);
 
-    // Header: coloured bar + "MMM YYYY" centred.
+    // Header: coloured bar + "MMM YYYY" centred. Title role + Bold
+    // weight so the month/year reads as the popup's hero label;
+    // ChromeTextMeasure handles TTF variable-width centering and
+    // collapses to scale*8 under bitmap themes.
     FramebufferFillRect(g_ax + kMargin, g_ay + kMargin, kPanelW - kMargin * 2, kHeaderH, g_header_rgb);
     char ybuf[5];
     FormatU16Dec(ybuf, u16(year));
-    // "APR 2026" = 8 glyphs × 8 px = 64 px.
     char title[9];
     title[0] = kMonthNames[month][0];
     title[1] = kMonthNames[month][1];
@@ -219,28 +222,36 @@ void CalendarRedraw()
     title[6] = ybuf[2];
     title[7] = ybuf[3];
     title[8] = '\0';
-    const u32 title_w = 8 * 8;
+    const u32 title_w = ChromeTextMeasure(ChromeTextRole::Title, title);
+    const u32 title_h = ChromeTextRoleHeight(ChromeTextRole::Title);
     const u32 title_x = g_ax + (kPanelW - title_w) / 2;
-    const u32 title_y = g_ay + kMargin + (kHeaderH - 8) / 2;
-    FramebufferDrawString(title_x, title_y, title, g_ink_rgb, g_header_rgb);
+    const u32 title_y = g_ay + kMargin + (kHeaderH > title_h ? (kHeaderH - title_h) / 2 : 0);
+    ChromeTextDraw(ChromeTextRole::Title, title_x, title_y, title, g_ink_rgb, g_header_rgb, ChromeTextWeight::Bold);
 
-    // Weekday initials row.
+    // Weekday initials row — Caption role, single-glyph centred per
+    // column. Measured per-glyph so a variable-width TTF font lines
+    // up under all weekday letters.
     const char* kWeek = "SMTWTFS";
     const u32 week_y = g_ay + kMargin + kHeaderH;
+    const u32 wk_h = ChromeTextRoleHeight(ChromeTextRole::Caption);
     for (u32 c = 0; c < kCols; ++c)
     {
         char one[2];
         one[0] = kWeek[c];
         one[1] = '\0';
-        const u32 cx = g_ax + kMargin + c * kCellW + (kCellW - 8) / 2;
-        const u32 cy = week_y + (kWeekdayH - 8) / 2;
-        FramebufferDrawString(cx, cy, one, kDimRgb, g_body_rgb);
+        const u32 wk_w = ChromeTextMeasure(ChromeTextRole::Caption, one);
+        const u32 cx = g_ax + kMargin + c * kCellW + (kCellW > wk_w ? (kCellW - wk_w) / 2 : 0);
+        const u32 cy = week_y + (kWeekdayH > wk_h ? (kWeekdayH - wk_h) / 2 : 0);
+        ChromeTextDraw(ChromeTextRole::Caption, cx, cy, one, kDimRgb, g_body_rgb);
     }
 
-    // Grid.
+    // Grid — day numbers as Body role, measured per cell so the
+    // two-char buffer centres correctly under both TTF (variable
+    // advance) and bitmap (deterministic 16 px) paths.
     const u32 first_dow = DayOfWeek(year, month, 1);
     const u32 days = DaysInMonth(year, month);
     const u32 grid_top = week_y + kWeekdayH;
+    const u32 day_h = ChromeTextRoleHeight(ChromeTextRole::Body);
     for (u32 r = 0; r < kGridRows; ++r)
     {
         for (u32 c = 0; c < kCols; ++c)
@@ -268,9 +279,10 @@ void CalendarRedraw()
                 buf[1] = char('0' + day % 10);
             }
             buf[2] = '\0';
-            const u32 text_x = cx + (kCellW - 16) / 2;
-            const u32 text_y = cy + (kCellH - 8) / 2;
-            FramebufferDrawString(text_x, text_y, buf, g_ink_rgb, is_today ? kTodayRgb : g_body_rgb);
+            const u32 day_w = ChromeTextMeasure(ChromeTextRole::Body, buf);
+            const u32 text_x = cx + (kCellW > day_w ? (kCellW - day_w) / 2 : 0);
+            const u32 text_y = cy + (kCellH > day_h ? (kCellH - day_h) / 2 : 0);
+            ChromeTextDraw(ChromeTextRole::Body, text_x, text_y, buf, g_ink_rgb, is_today ? kTodayRgb : g_body_rgb);
         }
     }
 }

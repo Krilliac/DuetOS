@@ -63,6 +63,25 @@ constinit u64 g_deny_count = 0;
 constinit Report g_last_report = {};
 constinit bool g_init_done = false;
 
+// True while `PromptUser` is blocked on a user decision. Read by
+// `GuardPromptActive()` (public). The desktop compositor short-
+// circuits while this is set so the prompt's directly-painted
+// pixels (the guard modal does NOT use the compose shadow surface
+// — it runs synchronously on the kboot/loader thread, not on the
+// ui-ticker that owns BeginCompose/EndCompose) are not clobbered
+// by an in-flight `DesktopCompose` shadow->live diff blit. Without
+// this, ui-ticker-driven redraws race the prompt and the user sees
+// terminal / desktop content bleeding through the modal panel.
+//
+// Single-writer (PromptUser entry/exit RAII guard), many-reader
+// (DesktopCompose check). Plain bool is safe: x86 byte stores are
+// atomic, the readers tolerate a one-frame stale read either way
+// (a frame painted just before the flag is set is fine — the
+// prompt's next iteration repaints over it; a frame skipped just
+// after the flag is cleared is fine — the next compose paints
+// normally).
+constinit bool g_prompt_active = false;
+
 // Persistent allow-list, keyed by SHA-256 image digest. A hash
 // that landed here during a previous boot (because the user
 // answered "yes" at a prompt) short-circuits Inspect -> Allow.
@@ -667,6 +686,19 @@ bool PromptUser(const ImageDescriptor& desc, const Report& r)
     // live) AND emits the serial text. Answer accepted from
     // whichever channel responds first. 10s default-deny.
     using arch::SerialWrite;
+
+    // Hold the compositor short-circuit flag for the entire prompt
+    // lifetime — `DesktopCompose` returns immediately while this is
+    // set so the modal's directly-painted pixels aren't clobbered
+    // by an in-flight ui-ticker redraw. RAII so an early return on
+    // any decision path (serial / keyboard / timeout) clears the
+    // flag and the desktop resumes composing. See `g_prompt_active`
+    // declaration for the full rationale.
+    struct PromptActiveGuard
+    {
+        PromptActiveGuard() { g_prompt_active = true; }
+        ~PromptActiveGuard() { g_prompt_active = false; }
+    } prompt_active_guard;
     SerialWrite("\n[guard] ========================================\n");
     SerialWrite("[guard]  SECURITY GUARD PROMPT\n");
     SerialWrite("[guard]    image  : ");
@@ -948,6 +980,11 @@ u64 GuardDenyCount()
 const Report* GuardLastReport()
 {
     return &g_last_report;
+}
+
+bool GuardPromptActive()
+{
+    return g_prompt_active;
 }
 
 void GuardInit()

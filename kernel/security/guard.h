@@ -153,4 +153,15 @@ void GuardInit();
 /// Prints PASS/FAIL to COM1.
 void GuardSelfTest();
 
+/// True iff a `PromptUser` modal is currently up. The desktop
+/// compositor (`drivers::video::DesktopCompose`) short-circuits
+/// when this returns true so the prompt's directly-painted pixels
+/// (the guard modal bypasses BeginCompose / EndCompose because it
+/// runs synchronously on the kboot/loader thread, not on the ui-
+/// ticker) are not overwritten by an in-flight desktop redraw.
+/// Mirrors the `LoginIsActive()` short-circuit pattern.
+///
+/// Safe to call from any context — single-byte read, no locks.
+bool GuardPromptActive();
+
 } // namespace duetos::security

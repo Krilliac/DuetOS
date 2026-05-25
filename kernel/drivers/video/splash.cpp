@@ -22,6 +22,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/wallpaper.h"
@@ -47,7 +48,7 @@ static State g_state = State::kUninitialised;
 // Current phase name displayed in the ticker. Bounded by kPhaseMax including
 // the NUL terminator so DrawTickerLine never reads past the buffer end.
 static constexpr u32 kPhaseMax = 64;
-static char          g_phase[kPhaseMax] = {};
+static char g_phase[kPhaseMax] = {};
 
 // Set to true by SplashSelfTest on PASS; read by SplashSelfTestPassed().
 static bool g_selftest_passed = false;
@@ -66,8 +67,8 @@ static constexpr u32 kTickerTextDY = 4;
 // Ticker Y position: 730/768 of the framebuffer height, scaled to the actual
 // framebuffer. On a 1024×768 baseline this places the ticker at y = 730.
 // On taller resolutions it scales proportionally into the lower-left corner.
-static constexpr u32 kTickerYFrac   = 730;
-static constexpr u32 kTickerYBase   = 768;
+static constexpr u32 kTickerYFrac = 730;
+static constexpr u32 kTickerYBase = 768;
 
 // Foreground and background for the ticker line.
 // Soft-grey on desktop background — visible on any theme, unobtrusive.
@@ -88,19 +89,19 @@ void DrawTickerLine()
         return;
     }
 
-    const auto info      = FramebufferGet();
-    const u32  fb_w      = info.width;
-    const u32  fb_h      = info.height;
-    const u32  ticker_y  = (kTickerYFrac * fb_h) / kTickerYBase;
-    const u32  bg_rgb    = ThemeCurrent().desktop_bg;
+    const auto info = FramebufferGet();
+    const u32 fb_w = info.width;
+    const u32 fb_h = info.height;
+    const u32 ticker_y = (kTickerYFrac * fb_h) / kTickerYBase;
+    const u32 bg_rgb = ThemeCurrent().desktop_bg;
 
     // Clear the ticker rect.
     FramebufferFillRect(kTickerX, ticker_y, fb_w - kTickerX, kTickerH, bg_rgb);
 
     // Build the label: "duetos . <phase>".  We concatenate into a small stack
-    // buffer so FramebufferDrawString gets one contiguous string.
+    // buffer so ChromeTextDraw gets one contiguous string.
     char label[kPhaseMax + 16]; // prefix (≤15) + phase (≤63) + NUL
-    u32  lp = 0;
+    u32 lp = 0;
     for (const char* s = kTickerPrefix; *s != '\0' && lp < sizeof(label) - 1; ++s)
     {
         label[lp++] = *s;
@@ -111,7 +112,7 @@ void DrawTickerLine()
     }
     label[lp] = '\0';
 
-    FramebufferDrawString(kTickerX, ticker_y + kTickerTextDY, label, kTickerFg, bg_rgb);
+    ChromeTextDraw(ChromeTextRole::Caption, kTickerX, ticker_y + kTickerTextDY, label, kTickerFg, bg_rgb);
 }
 
 } // anonymous namespace
@@ -193,11 +194,11 @@ void SplashDismiss()
     // login screen can paint on top without a visible flash.
     if (FramebufferAvailable())
     {
-        const auto info     = FramebufferGet();
-        const u32  fb_w     = info.width;
-        const u32  fb_h     = info.height;
-        const u32  ticker_y = (kTickerYFrac * fb_h) / kTickerYBase;
-        const u32  bg_rgb   = ThemeCurrent().desktop_bg;
+        const auto info = FramebufferGet();
+        const u32 fb_w = info.width;
+        const u32 fb_h = info.height;
+        const u32 ticker_y = (kTickerYFrac * fb_h) / kTickerYBase;
+        const u32 bg_rgb = ThemeCurrent().desktop_bg;
 
         FramebufferFillRect(kTickerX, ticker_y, fb_w - kTickerX, kTickerH, bg_rgb);
     }
@@ -212,28 +213,28 @@ void SplashSelfTest()
     using duetos::arch::SerialWrite;
 
     g_selftest_passed = false;
-    bool pass        = true;
-    u32  failed_step = 0;
+    bool pass = true;
+    u32 failed_step = 0;
 
     auto mark_fail = [&](u32 step)
     {
         if (pass)
         {
-            pass        = false;
+            pass = false;
             failed_step = step;
         }
     };
 
     // Capture existing state so we can restore it after the test.
     const State saved_state = g_state;
-    char        saved_phase[kPhaseMax];
+    char saved_phase[kPhaseMax];
     for (u32 i = 0; i < kPhaseMax; ++i)
     {
         saved_phase[i] = g_phase[i];
     }
 
     // ── Step 1: SplashInit from kUninitialised ────────────────────────────
-    g_state    = State::kUninitialised;
+    g_state = State::kUninitialised;
     g_phase[0] = '\0';
 
     SplashInit();
@@ -325,10 +326,10 @@ void SplashSelfTest()
     else
     {
         char msg[64] = "[splash-selftest] FAIL at step ";
-        u32  o       = 31;
-        msg[o++]     = static_cast<char>('0' + (failed_step % 10));
-        msg[o++]     = '\n';
-        msg[o]       = '\0';
+        u32 o = 31;
+        msg[o++] = static_cast<char>('0' + (failed_step % 10));
+        msg[o++] = '\n';
+        msg[o] = '\0';
         SerialWrite(msg);
     }
 }

@@ -1,6 +1,7 @@
 #include "apps/settings.h"
 
 #include "drivers/gpu/dpms.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
@@ -45,14 +46,17 @@ void AppendStr(char* out, u32 cap, u32* o, const char* s)
 
 void Draw(u32 x, u32 y, u32 w, u32 h)
 {
-    using duetos::drivers::video::FramebufferDrawString;
+    using duetos::drivers::video::ChromeTextDraw;
+    using duetos::drivers::video::ChromeTextRole;
+    using duetos::drivers::video::ChromeTextWeight;
     const auto& th = duetos::drivers::video::ThemeCurrent();
     const u32 bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
     const u32 fg = th.console_fg;
     const u32 dim = th.banner_fg;
     if (w < 8 * 24 || h < 8 * 8)
         return;
-    FramebufferDrawString(x, y, "DISPLAY", fg, bg);
+    // Section header — Title + Bold for the panel's hero label.
+    ChromeTextDraw(ChromeTextRole::Title, x, y, "DISPLAY", fg, bg, ChromeTextWeight::Bold);
     const auto fb = duetos::drivers::video::FramebufferGet();
     char line[80];
     u32 o = 0;
@@ -64,31 +68,32 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     AppendDec(line, sizeof(line), &o, fb.bpp);
     AppendStr(line, sizeof(line), &o, " bpp");
     line[o] = '\0';
-    FramebufferDrawString(x, y + 14, line, fg, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 14, line, fg, bg);
 
     o = 0;
     AppendStr(line, sizeof(line), &o, "PITCH: ");
     AppendDec(line, sizeof(line), &o, fb.pitch);
     AppendStr(line, sizeof(line), &o, " bytes");
     line[o] = '\0';
-    FramebufferDrawString(x, y + 26, line, dim, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 26, line, dim, bg);
 
     o = 0;
     AppendStr(line, sizeof(line), &o, "DPMS STATE: ");
     AppendStr(line, sizeof(line), &o, duetos::drivers::gpu::DpmsStateName(duetos::drivers::gpu::DpmsGet()));
     line[o] = '\0';
-    FramebufferDrawString(x, y + 44, line, fg, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 44, line, fg, bg);
 
     o = 0;
     AppendStr(line, sizeof(line), &o, "TRANSITIONS: ");
     AppendDec(line, sizeof(line), &o, duetos::drivers::gpu::DpmsTransitionCount());
     line[o] = '\0';
-    FramebufferDrawString(x, y + 56, line, dim, bg);
+    ChromeTextDraw(ChromeTextRole::Body, x, y + 56, line, dim, bg);
 
-    FramebufferDrawString(x, y + 80, "B: BLANK MONITOR (DPMS Off)", dim, bg);
-    FramebufferDrawString(x, y + 92, "W: WAKE MONITOR (DPMS On)", dim, bg);
-    FramebufferDrawString(x, y + 104, "Y: STANDBY (H-sync off)", dim, bg);
-    FramebufferDrawString(x, y + 116, "U: SUSPEND (V-sync off)", dim, bg);
+    // Hint lines — Caption role for key-shortcut help under the readouts.
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 80, "B: BLANK MONITOR (DPMS Off)", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 92, "W: WAKE MONITOR (DPMS On)", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 104, "Y: STANDBY (H-sync off)", dim, bg);
+    ChromeTextDraw(ChromeTextRole::Caption, x, y + 116, "U: SUSPEND (V-sync off)", dim, bg);
 }
 
 bool Key(char c)
