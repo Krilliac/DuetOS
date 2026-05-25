@@ -120,7 +120,22 @@ void BrowserNavForward();
 
 /// Boot self-test — pure compute. Validates URL parsing
 /// (scheme/host/port/path extraction), HTML tag stripper +
-/// entity decoder. No network I/O so it runs unconditionally.
+/// entity decoder, AND (Pass D) the toolbar widget dispatch
+/// path. No network I/O so it runs unconditionally.
 void BrowserSelfTest();
+
+/// Pass D umbrella accessor — true iff the most recent
+/// BrowserSelfTest() invocation ran every check (including
+/// the synthetic toolbar button click) without error.
+bool BrowserSelfTestPassed();
+
+/// Mouse-event entry point for the Pass D toolbar + labels.
+/// Called from the boot-time mouse-reader thread on every
+/// motion packet. Edge-detects left-button press / release
+/// internally and dispatches MouseMove / MouseDown / MouseUp
+/// into the WidgetGroup so AppButton hover state tracks the
+/// cursor on tactility themes. No-op before BrowserInit has
+/// wired a window.
+void BrowserMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
 
 } // namespace duetos::apps::browser
