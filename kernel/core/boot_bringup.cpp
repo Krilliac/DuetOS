@@ -177,6 +177,7 @@
 #include "drivers/video/shadow.h"
 #include "drivers/video/svg.h"
 #include "drivers/video/chrome_text.h"
+#include "drivers/video/app_widgets/self_test.h"
 #include "drivers/video/ttf.h"
 #include "drivers/video/ttf_raster.h"
 #include "drivers/video/splash.h"
@@ -2349,6 +2350,23 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         if (duetos::drivers::video::ChromeTextSelfTestPassed())
         {
             duetos::arch::SerialWrite("[pass-c-selftest] PASS (chrome-text=ok)\n");
+        }
+    }
+    // Pass D — app-widget framework. AppWidgetsSelfTest constructs
+    // each concrete widget (button/listrow/label/panel), drives
+    // synthetic mouse events, and verifies state-flag transitions
+    // + on_click dispatch. The umbrella fires iff the self-test
+    // passed; the boot-log analyzer keys its Pass D section off
+    // the `[pass-d-selftest] PASS` sentinel. The `apps=0/0` field
+    // is a placeholder for the Phase-1 native-app rollup (will
+    // become e.g. `apps=3/3` once the redesigned calculator /
+    // clock / gfxdemo land their own self-tests).
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::app_widgets::AppWidgetsSelfTest());
+    if constexpr (::duetos::core::kBootSelfTests)
+    {
+        if (duetos::drivers::video::app_widgets::AppWidgetsSelfTestPassed())
+        {
+            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=0/0)\n");
         }
     }
     duetos::drivers::video::SplashAdvancePhase("theme online");
