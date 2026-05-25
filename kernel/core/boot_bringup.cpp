@@ -2375,7 +2375,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     {
         if (duetos::drivers::video::app_widgets::AppWidgetsSelfTestPassed())
         {
-            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=18/28)\n");
+            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=19/28)\n");
         }
     }
     duetos::drivers::video::SplashAdvancePhase("theme online");
@@ -2726,6 +2726,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(notify_chrome, "NOTIFICATIONS");
     duetos::drivers::video::ThemeRegisterWindow(Role::NotifyCenter, notify_handle);
     duetos::apps::notify_center::NotifyCenterInit(notify_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::notify_center::NotifyCenterSelfTest());
 
     // SYSMON — rolling system monitor: heap-used % + free-list
     // fragmentation, sampled once per ui-ticker tick. About

@@ -3246,6 +3246,7 @@ void MouseReaderTask(void*)
             duetos::apps::imageview::ImageViewMouseInput(cx, cy, p.buttons);
             duetos::apps::clock::ClockMouseInput(cx, cy, p.buttons);
             duetos::apps::hexview::HexViewMouseInput(cx, cy, p.buttons);
+            duetos::apps::notify_center::NotifyCenterMouseInput(cx, cy, p.buttons);
             duetos::apps::charmap::CharMapMouseInput(cx, cy, p.buttons);
             duetos::apps::devicemgr::DeviceMgrMouseInput(cx, cy, p.buttons);
             duetos::apps::firewall::FirewallMouseInput(cx, cy, p.buttons);
