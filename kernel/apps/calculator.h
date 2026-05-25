@@ -71,22 +71,37 @@ void CalculatorInit(duetos::drivers::video::WindowHandle handle);
 /// to the calculator vs. the shell.
 duetos::drivers::video::WindowHandle CalculatorWindow();
 
-/// Mouse-click handler. `id` is a widget ID returned by
-/// `WidgetRouteMouse`; if it's outside the calculator's range
-/// this is a no-op. Returns true iff the ID was claimed.
+/// Legacy widget-table dispatch entry point. Always returns false
+/// in the migrated (Pass D) calculator — hit-testing now happens
+/// inside the app via `CalculatorMouseInput` + g_calc.DispatchEvent.
+/// The shim is kept so the boot-time mouse loop doesn't need a
+/// site-by-site removal during the Pass D rollout.
 bool CalculatorOnWidgetEvent(u32 id);
+
+/// Mouse-event entry point for the migrated (Pass D) calculator.
+/// Called from the boot-time mouse-reader thread on every motion
+/// packet. Detects left-button press / release edges internally,
+/// dispatches MouseDown / MouseUp / MouseMove events into the
+/// app's WidgetGroup. The button hover state (visible on
+/// tactility-on themes) tracks the cursor through this path. No-op
+/// before `CalculatorInit` has wired a window.
+void CalculatorMouseInput(u32 cursor_x, u32 cursor_y, u8 button_mask);
 
 /// Keyboard handler. Accepts the characters documented above.
 /// Returns true iff the char was consumed (caller should then
 /// skip other input paths).
 bool CalculatorFeedChar(char c);
 
-/// Run three boot-time arithmetic checks ("2+3=5", "9-4=5",
-/// "6*7=42") through DispatchKey + ReadDisplayAsI64 and print
-/// one PASS / FAIL line to COM1. Called by main.cpp right
-/// after CalculatorInit. Also clears the display afterwards
-/// so the window renders with a blank "0" on first paint.
+/// Run boot-time arithmetic + memory + scientific + bitwise checks
+/// through DispatchKey and the new app_widgets dispatch path, then
+/// print `[calculator-selftest] PASS` or `FAIL` on COM1. Called by
+/// boot_bringup.cpp after CalculatorInit. Clears state afterwards.
 void CalculatorSelfTest();
+
+/// Accessor for the Pass D umbrella aggregator. True iff the most
+/// recent `CalculatorSelfTest()` invocation ran every check
+/// (including the app_widgets click-dispatch path) without error.
+bool CalculatorSelfTestPassed();
 
 /// Memory register read-back. Exposed so SessionRestoreSave can
 /// snapshot the user's stash through SESSION.CFG. The display

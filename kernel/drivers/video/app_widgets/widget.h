@@ -24,10 +24,7 @@ struct Rect
     u32 w = 0;
     u32 h = 0;
 
-    constexpr bool Contains(u32 px, u32 py) const
-    {
-        return px >= x && py >= y && px < x + w && py < y + h;
-    }
+    constexpr bool Contains(u32 px, u32 py) const { return px >= x && py >= y && px < x + w && py < y + h; }
 };
 
 enum class EventKind : u8
@@ -85,23 +82,24 @@ struct WidgetState
     WidgetStateFlags flags = WidgetStateFlags::None;
 };
 
-struct Compose; // forward — concrete type lives in compositor
+/// Compositor-side context handle threaded through every widget Paint
+/// call. Today this is an empty tag type — no widget uses any compose
+/// state — but a future slice will hand widgets a clip rect, dirty
+/// region, or back-buffer pointer through here without changing every
+/// PaintSelf signature. Apps construct one on the stack and pass it to
+/// `WidgetGroup::PaintAll`.
+struct Compose
+{
+};
 
-template <typename Self>
-struct Widget
+template <typename Self> struct Widget
 {
     Rect bounds{};
     WidgetState state{};
 
-    constexpr void Paint(Compose& c) const
-    {
-        static_cast<const Self*>(this)->PaintSelf(c);
-    }
+    constexpr void Paint(Compose& c) const { static_cast<const Self*>(this)->PaintSelf(c); }
 
-    constexpr EventResult OnEvent(const Event& e)
-    {
-        return static_cast<Self*>(this)->OnEventSelf(e);
-    }
+    constexpr EventResult OnEvent(const Event& e) { return static_cast<Self*>(this)->OnEventSelf(e); }
 
     constexpr void PaintSelf(Compose&) const { /* derived overrides */ }
     constexpr EventResult OnEventSelf(const Event&) { return EventResult::NotInterested; }

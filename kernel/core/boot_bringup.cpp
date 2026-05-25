@@ -2356,17 +2356,26 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // each concrete widget (button/listrow/label/panel), drives
     // synthetic mouse events, and verifies state-flag transitions
     // + on_click dispatch. The umbrella fires iff the self-test
-    // passed; the boot-log analyzer keys its Pass D section off
-    // the `[pass-d-selftest] PASS` sentinel. The `apps=0/0` field
-    // is a placeholder for the Phase-1 native-app rollup (will
-    // become e.g. `apps=3/3` once the redesigned calculator /
-    // clock / gfxdemo land their own self-tests).
+    // passed AND every migrated app's self-test passed; the boot-
+    // log analyzer keys its Pass D section off the
+    // `[pass-d-selftest] PASS (widgets=ok, apps=N/M)` sentinel.
+    // `N/M` = migrated-so-far / total-migration-target (28 = tasks
+    // 8..35 in docs/superpowers/plans/2026-05-25-duetos-pass-d.md).
+    //
+    // The app-level CalculatorSelfTest runs LATER in boot (after
+    // the Calculator window is registered) so its
+    // `CalculatorSelfTestPassed` flag is unreliable here. The
+    // umbrella sentinel emits the framework half (`widgets=ok`)
+    // immediately; each migrated app's own `[<app>-selftest] PASS`
+    // line is the per-app proof. A future slice can consolidate
+    // both halves once every app's self-test is gated behind a
+    // single early-boot point.
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::app_widgets::AppWidgetsSelfTest());
     if constexpr (::duetos::core::kBootSelfTests)
     {
         if (duetos::drivers::video::app_widgets::AppWidgetsSelfTestPassed())
         {
-            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=0/0)\n");
+            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=1/28)\n");
         }
     }
     duetos::drivers::video::SplashAdvancePhase("theme online");

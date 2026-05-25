@@ -1,7 +1,13 @@
 #include "apps/calculator.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/input/ps2mouse.h"
+#include "drivers/video/app_widgets/app_button.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_panel.h"
+#include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/theme.h"
 
 namespace duetos::apps::calculator
 {
@@ -9,19 +15,26 @@ namespace duetos::apps::calculator
 namespace
 {
 
-// Logical key value of each button. Index i in this array is
-// the value sent as {kIdBase + i}. Ordering matches the on-
-// screen grid row-major top-to-bottom.
+// Logical key value of each button. Index i in this array is the key
+// fed into DispatchKey when button i fires. Ordering matches the on-
+// screen 4×4 grid row-major, top-to-bottom — same as the legacy
+// pre-app_widgets layout so visual fidelity is preserved.
 constexpr char kButtonKeys[kIdCount] = {
     '7', '8', '9', '+', '4', '5', '6', '-', '1', '2', '3', '*', 'C', '0', '=', '/',
 };
 
-// Grid layout inside the calculator window. Numbers are
-// offsets from the window origin; the chrome's title bar takes
-// the first 22 pixels, the display + multi-radix preview
-// occupies ~64 pixels of client area below it, so the button
-// grid sits at window-y kGridTopOffset = 100 (= 22 + 4 + 28 +
-// 4 + 28 + 14 px gap).
+// Per-button labels. The widget stores the label by pointer, so the
+// strings live in .rodata and outlive every paint.
+constexpr const char* kButtonLabels[kIdCount] = {
+    "7", "8", "9", "+", "4", "5", "6", "-", "1", "2", "3", "*", "C", "0", "=", "/",
+};
+
+// Grid layout inside the calculator window. All values are offsets
+// from the window's client-area origin (cx, cy as delivered by the
+// content-draw callback). The display strip takes the first ~60 px
+// of vertical space; the multi-radix preview band takes the next 28
+// px; the 4×4 button grid starts at kGridTopOffset and uses
+// 68×36 buttons separated by 4 px gaps.
 constexpr u32 kGridTopOffset = 100;
 constexpr u32 kGridLeftOffset = 8;
 constexpr u32 kBtnW = 68;
@@ -30,22 +43,22 @@ constexpr u32 kBtnGap = 4;
 
 constexpr u32 kDisplayCap = 16;
 
-// Colour scheme. Light-grey digit keys, orange operators,
-// green equals, red clear. Contrast chosen to read cleanly
-// on the window's dark client colour (0x00101828 picked in
-// main.cpp).
+// Colour scheme. Light-grey digit keys, orange operators, green
+// equals, red clear. Kept identical to the pre-app_widgets palette
+// so users notice the typography + tactility upgrade rather than a
+// chrome re-tone. The label colour rides on the AppButton fg field;
+// the background overrides AppButton::bg_rgb directly.
 struct KeyColours
 {
     u32 normal;
-    u32 pressed;
     u32 label;
 };
-constexpr KeyColours kColDigit = {0x00D0D0D0, 0x00FFFFFF, 0x00101828};
-constexpr KeyColours kColOp = {0x00E08040, 0x00FFB070, 0x00101828};
-constexpr KeyColours kColEq = {0x0060A060, 0x0080D080, 0x00101828};
-constexpr KeyColours kColClear = {0x00C04040, 0x00E06060, 0x00FFFFFF};
+constexpr KeyColours kColDigit = {0x00D0D0D0, 0x00101828};
+constexpr KeyColours kColOp = {0x00E08040, 0x00101828};
+constexpr KeyColours kColEq = {0x0060A060, 0x00101828};
+constexpr KeyColours kColClear = {0x00C04040, 0x00FFFFFF};
 
-KeyColours ColoursFor(char k)
+constexpr KeyColours ColoursFor(char k)
 {
     if (k >= '0' && k <= '9')
         return kColDigit;
@@ -64,8 +77,8 @@ struct State
     u32 display_len;
     // Running evaluation state. When `has_pending` is true,
     // `accumulator` holds the LHS and `pending_op` the operator;
-    // the digits currently being typed will be combined with
-    // these on the next operator / '='.
+    // the digits currently being typed will be combined with these
+    // on the next operator / '='.
     i64 accumulator;
     char pending_op; // 0 when no pending op
     bool has_pending;
@@ -94,8 +107,8 @@ void SetDisplayLiteral(const char* s)
 }
 
 // Format an i64 into the display. Signed decimal, no thousands
-// separator. If the number doesn't fit in kDisplayCap, sets
-// error state and shows "ERR".
+// separator. If the number doesn't fit in kDisplayCap, sets error
+// state and shows "ERR".
 void SetDisplayI64(i64 v)
 {
     char tmp[24];
@@ -139,9 +152,9 @@ void SetDisplayI64(i64 v)
     g_state.display_len = o;
 }
 
-// Parse the current display string as an i64. Returns 0 on an
-// empty/invalid display (the state machine treats a blank
-// display as zero, which matches most physical calculators).
+// Parse the current display string as an i64. Returns 0 on an empty/
+// invalid display (the state machine treats a blank display as zero,
+// which matches most physical calculators).
 i64 ReadDisplayAsI64()
 {
     if (g_state.display_len == 0)
@@ -164,8 +177,8 @@ i64 ReadDisplayAsI64()
     return neg ? -v : v;
 }
 
-// Commit a pending operation against the given RHS, store the
-// result in `accumulator`, and write it to the display.
+// Commit a pending operation against the given RHS, store the result
+// in `accumulator`, and write it to the display.
 void ApplyPending(i64 rhs)
 {
     if (!g_state.has_pending)
@@ -209,9 +222,6 @@ void ApplyPending(i64 rhs)
         result = lhs ^ rhs;
         break;
     case '<': // shift left
-        // Out-of-range shifts (negative or >= 64) are
-        // undefined behavior in C++; clamp to a sane range
-        // and let the user see 0 or saturated bits.
         if (rhs < 0 || rhs >= 64)
             result = 0;
         else
@@ -283,37 +293,22 @@ void HandleClear()
     SetDisplayLiteral("0");
 }
 
-// Negate the current display value. Acts on whatever's typed (or
-// the accumulator if `fresh_entry` is set, since the display is
-// then showing the last result). Toggles sign in place by rewriting
-// the display via SetDisplayI64 — keeps formatting consistent with
-// every other path.
 void HandleSignToggle()
 {
     if (g_state.error)
         return;
     const i64 cur = ReadDisplayAsI64();
     if (cur == 0)
-        return; // -0 == 0; no point flipping
+        return;
     SetDisplayI64(-cur);
-    // Once sign-toggled, the digit-typing path should not append
-    // to the existing string — that would produce e.g. "-50" + "1"
-    // = "-501" which is fine, but more usefully a fresh op
-    // commits the new sign. Leaving fresh_entry alone preserves
-    // the ability to type more digits if the user is mid-entry.
 }
 
-// Pop the last digit (or sign) off the display. Mirrors the
-// Backspace key on a real calculator. No-op when the display is
-// already showing a single character or after an error.
 void HandleBackspace()
 {
     if (g_state.error)
         return;
     if (g_state.fresh_entry)
     {
-        // Backspace after `=` / op should clear the accumulator
-        // view rather than chip away at the previous result.
         g_state.display_len = 0;
         g_state.display[0] = '\0';
         return;
@@ -329,14 +324,9 @@ void HandleBackspace()
     }
 }
 
-// Percent: two semantics depending on whether an op is pending.
-// With a pending op (the common bank-calc convention): treat the
-// display value as a percentage OF the accumulator and combine
-// per the pending op. Examples:
-//     200 + 15 % =       -> 230  (i.e. 200 + 200*15/100)
-//     400 - 10 % =       -> 360
-//     100 * 50 % =       -> 50   (rare, but matches Win10 calc)
-// Without a pending op: divide the display by 100, integer-trunc.
+// Percent: with a pending op, treat display as a percentage OF the
+// accumulator and combine via the pending op (Win10-calc convention).
+// Without a pending op, divide display by 100 with integer trunc.
 void HandlePercent()
 {
     if (g_state.error)
@@ -344,10 +334,6 @@ void HandlePercent()
     const i64 cur = ReadDisplayAsI64();
     if (g_state.has_pending)
     {
-        // Compute (lhs * cur) / 100 with overflow-resistant order:
-        // do the multiply first so the % of small numbers stays
-        // accurate; integer i64 holds up to 9.2e18 so even with
-        // a 10-digit operand we don't overflow.
         const i64 lhs = g_state.accumulator;
         const i64 scaled = (lhs * cur) / 100;
         SetDisplayI64(scaled);
@@ -356,15 +342,9 @@ void HandlePercent()
     {
         SetDisplayI64(cur / 100);
     }
-    // Following calc convention, percent leaves the result on the
-    // display but doesn't auto-commit — the user still hits `=` to
-    // close the expression.
     g_state.fresh_entry = false;
 }
 
-// Memory recall (MR): pull the stored memory register into the
-// display, marking fresh_entry so the next digit starts a new
-// number. No-op if memory has never been written.
 void HandleMemRecall()
 {
     if (g_state.error)
@@ -375,9 +355,6 @@ void HandleMemRecall()
     g_state.fresh_entry = true;
 }
 
-// Memory store (MS): copy the current display value into the
-// memory register. Does NOT clear the display or alter pending
-// op state — same convention as physical bank calculators.
 void HandleMemStore()
 {
     if (g_state.error)
@@ -386,15 +363,12 @@ void HandleMemStore()
     g_state.memory_set = true;
 }
 
-// Memory clear (MC): reset the register and drop the indicator.
 void HandleMemClear()
 {
     g_state.memory = 0;
     g_state.memory_set = false;
 }
 
-// Memory add (M+): memory += display. Same display behaviour as
-// MS — leaves the visible value alone, lifts memory.
 void HandleMemAdd()
 {
     if (g_state.error)
@@ -403,7 +377,6 @@ void HandleMemAdd()
     g_state.memory_set = true;
 }
 
-// Memory subtract (M-): memory -= display. Mirror of M+.
 void HandleMemSub()
 {
     if (g_state.error)
@@ -412,29 +385,18 @@ void HandleMemSub()
     g_state.memory_set = true;
 }
 
-// ---------------------------------------------------------------
-// Scientific (unary) operations — apply directly to the display
-// value, write the result back via SetDisplayI64. All set
-// fresh_entry so the next digit starts a new number, mirroring
-// the convention used by '=' / op chains.
-// ---------------------------------------------------------------
-
-// Integer square root via Newton's method. Returns floor(sqrt(v)).
-// Negative input flips the error flag — sqrt of a negative number
-// has no integer answer in this calculator's domain.
+// Integer square root via Newton's method. Returns floor(sqrt(v)) for
+// non-negative input; returns -1 for negative input (caller flips
+// ERR).
 i64 IntSqrt(i64 v)
 {
     if (v < 0)
         return -1;
     if (v < 2)
         return v;
-    // Initial guess: a power of two at least as large as the
-    // answer. (1 << (bits/2 + 1)) is a safe over-estimate that
-    // converges in <=6 iterations for any 63-bit positive input.
     i64 x = 1;
     while (x * x <= v && x < (1ll << 31))
         x <<= 1;
-    // Newton: x = (x + v/x) / 2 until fixed-point or oscillation.
     for (u32 i = 0; i < 64; ++i)
     {
         const i64 nx = (x + v / x) / 2;
@@ -447,6 +409,12 @@ i64 IntSqrt(i64 v)
     return x;
 }
 
+void TripErr()
+{
+    g_state.error = true;
+    SetDisplayLiteral("ERR");
+}
+
 void HandleSqrt()
 {
     if (g_state.error)
@@ -455,11 +423,7 @@ void HandleSqrt()
     const i64 r = IntSqrt(cur);
     if (r < 0)
     {
-        g_state.error = true;
-        const char* err = "ERR";
-        for (u32 i = 0; i < 4; ++i)
-            g_state.display[i] = err[i];
-        g_state.display_len = 3;
+        TripErr();
         return;
     }
     SetDisplayI64(r);
@@ -471,15 +435,9 @@ void HandleSquare()
     if (g_state.error)
         return;
     const i64 cur = ReadDisplayAsI64();
-    // Overflow guard: i64 square overflows past sqrt(I64_MAX) ~= 3e9.
-    // Anything past that flips the sticky error flag.
     if (cur > 3037000499ll || cur < -3037000499ll)
     {
-        g_state.error = true;
-        const char* err = "ERR";
-        for (u32 i = 0; i < 4; ++i)
-            g_state.display[i] = err[i];
-        g_state.display_len = 3;
+        TripErr();
         return;
     }
     SetDisplayI64(cur * cur);
@@ -497,9 +455,6 @@ void HandleAbs()
     g_state.fresh_entry = true;
 }
 
-// Factorial. Caps at 20! = 2432902008176640000 (largest 20-digit
-// factorial that fits in i64); anything past 20 flips ERR.
-// Negative inputs also flip ERR (factorial undefined on negatives).
 void HandleFactorial()
 {
     if (g_state.error)
@@ -507,11 +462,7 @@ void HandleFactorial()
     const i64 cur = ReadDisplayAsI64();
     if (cur < 0 || cur > 20)
     {
-        g_state.error = true;
-        const char* err = "ERR";
-        for (u32 i = 0; i < 4; ++i)
-            g_state.display[i] = err[i];
-        g_state.display_len = 3;
+        TripErr();
         return;
     }
     i64 r = 1;
@@ -521,8 +472,6 @@ void HandleFactorial()
     g_state.fresh_entry = true;
 }
 
-// Bitwise NOT (one's complement). Unary; flips fresh_entry so a
-// subsequent digit starts a new number.
 void HandleBitwiseNot()
 {
     if (g_state.error)
@@ -532,8 +481,6 @@ void HandleBitwiseNot()
     g_state.fresh_entry = true;
 }
 
-// Reciprocal: 1 / cur, integer-truncated. Division by zero flips
-// ERR — same policy as the binary `/` operator.
 void HandleReciprocal()
 {
     if (g_state.error)
@@ -541,11 +488,7 @@ void HandleReciprocal()
     const i64 cur = ReadDisplayAsI64();
     if (cur == 0)
     {
-        g_state.error = true;
-        const char* err = "ERR";
-        for (u32 i = 0; i < 4; ++i)
-            g_state.display[i] = err[i];
-        g_state.display_len = 3;
+        TripErr();
         return;
     }
     SetDisplayI64(1 / cur);
@@ -592,15 +535,210 @@ void DispatchKey(char k)
         HandleReciprocal();
 }
 
-// Content-draw callback: paints the display strip across the
-// top of the client area. The buttons below are regular widgets
-// painted by WidgetDrawAll — the compositor calls that after
-// each window's content-draw, so they appear on top of the
-// client fill naturally.
-// Format `v` as unsigned hex into `out`. `width` must be >= 18
-// (covers "0x" + 16 hex digits + NUL). Negative values are
-// rendered via two's-complement bit pattern, mirroring how every
-// programmer calculator surfaces signed -1 as 0xFFFF...FFFF.
+// One free-function per on-screen button. AppButton::on_click is a
+// plain `void (*)()`, so we can't pack the key value into the
+// callback — each button needs its own trampoline. Trivial wrappers
+// keep the dispatch site honest (one call site per visible key) and
+// they compile to a single tail-call.
+void Click0()
+{
+    DispatchKey('0');
+}
+void Click1()
+{
+    DispatchKey('1');
+}
+void Click2()
+{
+    DispatchKey('2');
+}
+void Click3()
+{
+    DispatchKey('3');
+}
+void Click4()
+{
+    DispatchKey('4');
+}
+void Click5()
+{
+    DispatchKey('5');
+}
+void Click6()
+{
+    DispatchKey('6');
+}
+void Click7()
+{
+    DispatchKey('7');
+}
+void Click8()
+{
+    DispatchKey('8');
+}
+void Click9()
+{
+    DispatchKey('9');
+}
+void ClickPlus()
+{
+    DispatchKey('+');
+}
+void ClickMinus()
+{
+    DispatchKey('-');
+}
+void ClickMul()
+{
+    DispatchKey('*');
+}
+void ClickDiv()
+{
+    DispatchKey('/');
+}
+void ClickEq()
+{
+    DispatchKey('=');
+}
+void ClickClear()
+{
+    DispatchKey('C');
+}
+
+using ClickFn = void (*)();
+constexpr ClickFn kClickFns[kIdCount] = {
+    Click7, Click8, Click9, ClickPlus, Click4,     Click5, Click6,  ClickMinus,
+    Click1, Click2, Click3, ClickMul,  ClickClear, Click0, ClickEq, ClickDiv,
+};
+
+// ----- App-widget composition --------------------------------------
+//
+// The calculator is a panel + a label (display readout) + 16 buttons,
+// laid out in declaration order back-to-front so the panel paints
+// first and the buttons land on top.
+//
+// Bounds are recomputed every paint from the live window client
+// rect — the window can move or resize, so caching screen-absolute
+// bounds in the constinit instance would put buttons in the wrong
+// place after a drag. The display label's text pointer is bound
+// directly to `g_state.display` for the same reason: the display
+// updates every keypress, and a static initialiser would lock us to
+// whatever was visible at boot.
+
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::app_widgets::AppButton;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::AppPanel;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::Event;
+using duetos::drivers::video::app_widgets::EventKind;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+constinit auto g_calc = MakeWidgetGroup(AppPanel{}, AppLabel{},
+                                        // 4×4 button grid, row-major top-to-bottom — order matches
+                                        // kButtonKeys / kClickFns / kButtonLabels so RebindBounds and
+                                        // self-test stay table-driven.
+                                        AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
+                                        AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
+                                        AppButton{}, AppButton{}, AppButton{}, AppButton{});
+
+// Walk the widget chain by hand to set per-button label / colour /
+// callback once at init. The chain layout matches g_calc's argument
+// list above: head = AppPanel, tail.head = AppLabel, then 16
+// AppButton nodes in row-major order.
+void BindButtonsOnce()
+{
+    auto& panel = g_calc.chain.head;
+    panel.bg_rgb = 0x00101828U;
+    panel.border_rgb = 0x00081018U;
+    panel.shadow_radius = 0; // panel is INSIDE the window, no own shadow
+
+    auto& label = g_calc.chain.tail.head;
+    label.text = g_state.display;
+    label.role = ChromeTextRole::Display;
+    label.weight = ChromeTextWeight::Regular;
+    label.fg_rgb = 0x0080F088U;
+    label.bg_rgb = 0x00202830U;
+    label.align_left = false;
+
+    auto& b0 = g_calc.chain.tail.tail.head;
+    auto& b1 = g_calc.chain.tail.tail.tail.head;
+    auto& b2 = g_calc.chain.tail.tail.tail.tail.head;
+    auto& b3 = g_calc.chain.tail.tail.tail.tail.tail.head;
+    auto& b4 = g_calc.chain.tail.tail.tail.tail.tail.tail.head;
+    auto& b5 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& b6 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& b7 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& b8 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& b9 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& b10 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& b11 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& b12 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& b13 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& b14 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    auto& b15 = g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    AppButton* buttons[kIdCount] = {&b0, &b1, &b2,  &b3,  &b4,  &b5,  &b6,  &b7,
+                                    &b8, &b9, &b10, &b11, &b12, &b13, &b14, &b15};
+    for (u32 i = 0; i < kIdCount; ++i)
+    {
+        const KeyColours c = ColoursFor(kButtonKeys[i]);
+        buttons[i]->label = kButtonLabels[i];
+        buttons[i]->on_click = kClickFns[i];
+        buttons[i]->bg_rgb = c.normal;
+        buttons[i]->fg_rgb = c.label;
+        buttons[i]->weight =
+            (kButtonKeys[i] == '=' || kButtonKeys[i] == 'C') ? ChromeTextWeight::Bold : ChromeTextWeight::Regular;
+    }
+}
+
+// Re-anchor widget bounds to the live client rect. Called from
+// DrawFn before PaintAll and from CalculatorMouseInput before
+// DispatchEvent so hit-tests + visuals stay consistent across
+// window moves / resizes.
+void RebindBoundsToClient(u32 cx, u32 cy, u32 cw)
+{
+    auto& panel = g_calc.chain.head;
+    panel.bounds = Rect{cx, cy, cw, /*h=*/256u};
+
+    auto& label = g_calc.chain.tail.head;
+    label.bounds = Rect{cx + 8u, cy + 4u, (cw >= 16u) ? cw - 16u : cw, 28u};
+
+    AppButton* buttons[kIdCount];
+    buttons[0] = &g_calc.chain.tail.tail.head;
+    buttons[1] = &g_calc.chain.tail.tail.tail.head;
+    buttons[2] = &g_calc.chain.tail.tail.tail.tail.head;
+    buttons[3] = &g_calc.chain.tail.tail.tail.tail.tail.head;
+    buttons[4] = &g_calc.chain.tail.tail.tail.tail.tail.tail.head;
+    buttons[5] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.head;
+    buttons[6] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    buttons[7] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    buttons[8] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    buttons[9] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    buttons[10] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    buttons[11] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    buttons[12] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    buttons[13] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    buttons[14] = &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    buttons[15] =
+        &g_calc.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+    for (u32 i = 0; i < kIdCount; ++i)
+    {
+        const u32 row = i / 4;
+        const u32 col = i % 4;
+        buttons[i]->bounds = Rect{cx + kGridLeftOffset + col * (kBtnW + kBtnGap),
+                                  cy + kGridTopOffset + row * (kBtnH + kBtnGap), kBtnW, kBtnH};
+    }
+}
+
+// Multi-radix preview formatters — preserved as a carve-out below
+// the widget-group paint so the hex / bin / oct strip keeps reading
+// alongside the main decimal display. Carve-out justification per
+// CLAUDE.md: the multi-radix strip is part of the calculator's
+// character; AppLabel(Display) can render the decimal value but
+// can't compose three separate per-radix strings into one band.
+
 void FmtHex(i64 v, char* out, u32 width)
 {
     if (width < 19)
@@ -626,10 +764,6 @@ void FmtHex(i64 v, char* out, u32 width)
     out[o] = '\0';
 }
 
-// Format `v` as unsigned binary into `out`. Drops leading zeros
-// down to the minimum, then caps the prefix at 16 bits — values
-// past 0xFFFF render as e.g. "0b1...1010101" so the strip
-// doesn't overflow.
 void FmtBin(i64 v, char* out, u32 width)
 {
     if (width < 4)
@@ -642,7 +776,6 @@ void FmtBin(i64 v, char* out, u32 width)
     out[0] = '0';
     out[1] = 'b';
     u32 o = 2;
-    // Determine the highest set bit (also handles v == 0 -> "0").
     i32 hi = -1;
     for (i32 i = 63; i >= 0; --i)
     {
@@ -658,9 +791,6 @@ void FmtBin(i64 v, char* out, u32 width)
         out[o] = '\0';
         return;
     }
-    // If the value fits in 16 bits, render it in full. Otherwise
-    // emit a "1...XXXXXXXXXXXXXXXX" elision so the high portion
-    // is implied without exceeding ~22 chars.
     if (hi < 16)
     {
         for (i32 i = hi; i >= 0; --i)
@@ -672,7 +802,6 @@ void FmtBin(i64 v, char* out, u32 width)
     }
     else
     {
-        // High bit + ellipsis + low 16 bits.
         if (o + 5 < width)
         {
             out[o++] = '1';
@@ -690,9 +819,6 @@ void FmtBin(i64 v, char* out, u32 width)
     out[o] = '\0';
 }
 
-// Format `v` as unsigned octal into `out`. Width >= 24 covers
-// "0o" + 22 octal digits + NUL (i64 fits in 22 octal digits
-// when interpreted unsigned).
 void FmtOct(i64 v, char* out, u32 width)
 {
     if (width < 25)
@@ -723,87 +849,86 @@ void FmtOct(i64 v, char* out, u32 width)
     out[o] = '\0';
 }
 
+// Content-draw callback. Paints the app_widgets group (panel +
+// display readout + 16 buttons) first, then overlays the
+// multi-radix preview band carve-out and the "M" memory indicator
+// directly via the framebuffer primitives — neither of those has a
+// clean widget shape yet, and they're load-bearing for the
+// calculator's character (the original v0 design).
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 /*ch*/, void* /*cookie*/)
 {
-    using duetos::drivers::video::FramebufferDrawRect;
     using duetos::drivers::video::FramebufferDrawString;
     using duetos::drivers::video::FramebufferFillRect;
-    constexpr u32 kDisplayPadY = 4;
-    constexpr u32 kDisplayH = 28;
-    if (cw <= 16 || kDisplayH + 2 * kDisplayPadY > 80)
+    if (cw <= 16)
         return;
-    const u32 x = cx + 8;
-    const u32 y = cy + kDisplayPadY;
-    const u32 w = (cw >= 16) ? cw - 16 : cw;
-    constexpr u32 kDisplayBg = 0x00202830;
-    constexpr u32 kDisplayFg = 0x0080F088;
-    constexpr u32 kDisplayBorder = 0x00081018;
-    constexpr u32 kAuxFg = 0x0060B0E0; // muted blue for the multi-radix line
-    // Two-row display strip: top is the main right-aligned number,
-    // bottom row holds the multi-radix preview (hex / bin / oct).
-    // Filling both bands with kDisplayBg keeps the aux line's per-
-    // character background tone-matched to the strip.
-    constexpr u32 kAuxBandH = 28; // 2 lines of 12 px + a 4 px top gap
-    FramebufferFillRect(x, y, w, kDisplayH + kAuxBandH, kDisplayBg);
-    FramebufferDrawRect(x, y, w, kDisplayH + kAuxBandH, kDisplayBorder, 1);
-    // Memory indicator: small "M" in the top-left of the display
-    // strip when the register has a non-zero value. Painted before
-    // the right-aligned number so it doesn't get pushed off-screen
-    // on long results.
+
+    // 1) Re-anchor widgets to the live client rect, then paint the
+    //    widget group. PaintAll runs panel -> label -> 16 buttons in
+    //    declaration order; buttons land on top of the panel.
+    RebindBoundsToClient(cx, cy, cw);
+    // Make sure the label sees the live display string (a fresh
+    // calculator boot leaves it pointing at g_state.display, but a
+    // future SessionRestore could swap pointers).
+    g_calc.chain.tail.head.text = (g_state.display_len == 0) ? "0" : g_state.display;
+    Compose c{};
+    g_calc.PaintAll(c);
+
+    // 2) Memory indicator — small "M" in the top-left of the display
+    //    strip when the register has a non-zero value. Painted after
+    //    the widget label so it sits on top.
+    constexpr u32 kDisplayBg = 0x00202830U;
     if (g_state.memory_set && g_state.memory != 0)
     {
-        constexpr u32 kMemFg = 0x00FFC848; // amber, distinguishes from main fg
-        FramebufferDrawString(x + 4, y + 2, "M", kMemFg, kDisplayBg);
+        constexpr u32 kMemFg = 0x00FFC848U;
+        FramebufferDrawString(cx + 8u + 4u, cy + 4u + 2u, "M", kMemFg, kDisplayBg);
     }
-    // Right-align the text: calculators always push digits to
-    // the right margin so the next digit appears on the left.
-    const char* s = (g_state.display_len == 0) ? "0" : g_state.display;
-    u32 len = 0;
-    while (s[len] != '\0')
-        ++len;
-    const u32 text_w = len * 8;
-    const u32 text_x = (text_w + 12 < w) ? x + w - text_w - 6 : x + 4;
-    const u32 text_y = y + (kDisplayH > 8 ? (kDisplayH - 8) / 2 : 0);
-    FramebufferDrawString(text_x, text_y, s, kDisplayFg, kDisplayBg);
 
-    // Multi-radix preview line — sits in the gap between the
-    // display strip and the button grid (kGridTopOffset = 60,
-    // display strip extends to y = kDisplayPadY + kDisplayH = 32,
-    // leaving ~28 vertical px of gap). Skips paint when the
-    // value would be pure noise (error state).
-    if (!g_state.error)
-    {
-        const i64 v = ReadDisplayAsI64();
-        char hex_buf[24];
-        char bin_buf[28];
-        char oct_buf[28];
-        FmtHex(v, hex_buf, sizeof(hex_buf));
-        FmtBin(v, bin_buf, sizeof(bin_buf));
-        FmtOct(v, oct_buf, sizeof(oct_buf));
-        const u32 aux_y = y + kDisplayH + 4;
-        // Two rows: hex on top right-aligned with the main
-        // display, bin + oct on the lower row. Keeps total
-        // height within the 28 px gap.
-        u32 hlen = 0;
-        while (hex_buf[hlen] != '\0')
-            ++hlen;
-        const u32 hx = (hlen * 8 + 12 < w) ? x + w - hlen * 8 - 6 : x + 4;
-        FramebufferDrawString(hx, aux_y, hex_buf, kAuxFg, kDisplayBg);
-        // Bin + oct sit below hex on the same row, separated
-        // by spaces. Both pushed to the right edge.
-        char low[60];
-        u32 lo = 0;
-        for (u32 i = 0; bin_buf[i] != '\0' && lo + 1 < sizeof(low); ++i)
-            low[lo++] = bin_buf[i];
-        low[lo++] = ' ';
-        low[lo++] = ' ';
-        for (u32 i = 0; oct_buf[i] != '\0' && lo + 1 < sizeof(low); ++i)
-            low[lo++] = oct_buf[i];
-        low[lo] = '\0';
-        const u32 lx = (lo * 8 + 12 < w) ? x + w - lo * 8 - 6 : x + 4;
-        FramebufferDrawString(lx, aux_y + 12, low, kAuxFg, kDisplayBg);
-    }
+    // 3) Multi-radix preview band — sits between the display strip
+    //    (cy+4..cy+32) and the button grid (cy+100..). Skipped in
+    //    error state to avoid hex-formatting noise.
+    if (g_state.error)
+        return;
+    constexpr u32 kAuxFg = 0x0060B0E0U;
+    const u32 x = cx + 8u;
+    const u32 y = cy + 4u;
+    const u32 w = (cw >= 16u) ? cw - 16u : cw;
+    constexpr u32 kDisplayH = 28u;
+    constexpr u32 kAuxBandH = 28u;
+    FramebufferFillRect(x, y + kDisplayH, w, kAuxBandH, kDisplayBg);
+    const i64 v = ReadDisplayAsI64();
+    char hex_buf[24];
+    char bin_buf[28];
+    char oct_buf[28];
+    FmtHex(v, hex_buf, sizeof(hex_buf));
+    FmtBin(v, bin_buf, sizeof(bin_buf));
+    FmtOct(v, oct_buf, sizeof(oct_buf));
+    const u32 aux_y = y + kDisplayH + 4u;
+    u32 hlen = 0;
+    while (hex_buf[hlen] != '\0')
+        ++hlen;
+    const u32 hx = (hlen * 8u + 12u < w) ? x + w - hlen * 8u - 6u : x + 4u;
+    FramebufferDrawString(hx, aux_y, hex_buf, kAuxFg, kDisplayBg);
+    char low[60];
+    u32 lo = 0;
+    for (u32 i = 0; bin_buf[i] != '\0' && lo + 1 < sizeof(low); ++i)
+        low[lo++] = bin_buf[i];
+    low[lo++] = ' ';
+    low[lo++] = ' ';
+    for (u32 i = 0; oct_buf[i] != '\0' && lo + 1 < sizeof(low); ++i)
+        low[lo++] = oct_buf[i];
+    low[lo] = '\0';
+    const u32 lx = (lo * 8u + 12u < w) ? x + w - lo * 8u - 6u : x + 4u;
+    FramebufferDrawString(lx, aux_y + 12u, low, kAuxFg, kDisplayBg);
 }
+
+// Edge-detection state for mouse input. The legacy widget table
+// kept its own g_prev_left_down; the migrated app needs the same
+// shape so MouseDown / MouseUp event pairs fire per click rather
+// than per packet.
+constinit bool g_prev_left_down = false;
+
+// Self-test result flag for the Pass D umbrella aggregator.
+constinit bool g_self_test_passed = false;
 
 } // namespace
 
@@ -811,105 +936,8 @@ void CalculatorInit(duetos::drivers::video::WindowHandle handle)
 {
     g_state.handle = handle;
     HandleClear();
+    BindButtonsOnce();
     duetos::drivers::video::WindowSetContentDraw(handle, DrawFn, nullptr);
-
-    // Register 16 buttons as a 4x4 grid inside the window. Each
-    // button's `owner` field is `handle` so the widget layer
-    // translates the stored (x, y) offsets into absolute
-    // framebuffer coordinates relative to the live window
-    // position — drag the window, buttons move too.
-    for (u32 i = 0; i < kIdCount; ++i)
-    {
-        const u32 row = i / 4;
-        const u32 col = i % 4;
-        const char key = kButtonKeys[i];
-        const KeyColours cols = ColoursFor(key);
-        duetos::drivers::video::ButtonWidget b{};
-        b.id = kIdBase + i;
-        b.owner = handle;
-        b.x = kGridLeftOffset + col * (kBtnW + kBtnGap);
-        b.y = kGridTopOffset + row * (kBtnH + kBtnGap);
-        b.w = kBtnW;
-        b.h = kBtnH;
-        b.colour_normal = cols.normal;
-        b.colour_pressed = cols.pressed;
-        b.colour_border = 0x00081018;
-        b.colour_label = cols.label;
-        // Store the label via a pointer to a one-char static
-        // string. FramebufferDrawString walks until NUL so we
-        // need a real NUL after each char.
-        static constexpr char kLabel0[] = "0";
-        static constexpr char kLabel1[] = "1";
-        static constexpr char kLabel2[] = "2";
-        static constexpr char kLabel3[] = "3";
-        static constexpr char kLabel4[] = "4";
-        static constexpr char kLabel5[] = "5";
-        static constexpr char kLabel6[] = "6";
-        static constexpr char kLabel7[] = "7";
-        static constexpr char kLabel8[] = "8";
-        static constexpr char kLabel9[] = "9";
-        static constexpr char kLabelPlus[] = "+";
-        static constexpr char kLabelMinus[] = "-";
-        static constexpr char kLabelMul[] = "*";
-        static constexpr char kLabelDiv[] = "/";
-        static constexpr char kLabelEq[] = "=";
-        static constexpr char kLabelClear[] = "C";
-        switch (key)
-        {
-        case '0':
-            b.label = kLabel0;
-            break;
-        case '1':
-            b.label = kLabel1;
-            break;
-        case '2':
-            b.label = kLabel2;
-            break;
-        case '3':
-            b.label = kLabel3;
-            break;
-        case '4':
-            b.label = kLabel4;
-            break;
-        case '5':
-            b.label = kLabel5;
-            break;
-        case '6':
-            b.label = kLabel6;
-            break;
-        case '7':
-            b.label = kLabel7;
-            break;
-        case '8':
-            b.label = kLabel8;
-            break;
-        case '9':
-            b.label = kLabel9;
-            break;
-        case '+':
-            b.label = kLabelPlus;
-            break;
-        case '-':
-            b.label = kLabelMinus;
-            break;
-        case '*':
-            b.label = kLabelMul;
-            break;
-        case '/':
-            b.label = kLabelDiv;
-            break;
-        case '=':
-            b.label = kLabelEq;
-            break;
-        case 'C':
-            b.label = kLabelClear;
-            break;
-        default:
-            b.label = nullptr;
-            break;
-        }
-        duetos::drivers::video::WidgetRegisterButton(b);
-    }
 }
 
 duetos::drivers::video::WindowHandle CalculatorWindow()
@@ -917,13 +945,58 @@ duetos::drivers::video::WindowHandle CalculatorWindow()
     return g_state.handle;
 }
 
-bool CalculatorOnWidgetEvent(u32 id)
+bool CalculatorOnWidgetEvent(u32 /*id*/)
 {
-    if (id < kIdBase || id >= kIdBase + kIdCount)
-        return false;
-    const u32 idx = id - kIdBase;
-    DispatchKey(kButtonKeys[idx]);
-    return true;
+    // Legacy widget-table dispatch path. The migrated calculator
+    // owns its own hit-testing via g_calc.DispatchEvent (see
+    // CalculatorMouseInput) so no IDs in the legacy `kIdBase`
+    // range are ever produced. Kept as a no-op so the boot-time
+    // mouse loop's call site doesn't need a conditional removal.
+    return false;
+}
+
+void CalculatorMouseInput(u32 cx, u32 cy, u8 button_mask)
+{
+    using duetos::drivers::input::kMouseButtonLeft;
+    if (g_state.handle == duetos::drivers::video::kWindowInvalid)
+        return;
+    u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+        return;
+    // Translate framebuffer-absolute cursor into client coords
+    // relative to the window's title-bar-below client origin. The
+    // widget bounds set by RebindBoundsToClient use the same origin.
+    u32 client_x = cx;
+    u32 client_y = cy;
+    RebindBoundsToClient(wx, wy + 22u, ww);
+
+    const bool left_down = (button_mask & kMouseButtonLeft) != 0;
+    const bool press_edge = left_down && !g_prev_left_down;
+    const bool release_edge = !left_down && g_prev_left_down;
+    g_prev_left_down = left_down;
+
+    // Always send MouseMove so hover state tracks the cursor on
+    // tactility themes. Hover only matters when the cursor is
+    // actually over the window; ignoring out-of-window motion keeps
+    // hover stickiness from leaking into other windows.
+    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= wy + 22u && cy < wy + wh);
+    if (inside_window)
+    {
+        const Event m{EventKind::MouseMove, client_x, client_y, 0u, 0u};
+        g_calc.DispatchEvent(m);
+    }
+    if (press_edge && inside_window)
+    {
+        const Event d{EventKind::MouseDown, client_x, client_y, 0u, 0u};
+        g_calc.DispatchEvent(d);
+    }
+    if (release_edge)
+    {
+        // Always send MouseUp (even outside the window) so a button
+        // pressed inside and dragged off clears its Pressed flag.
+        const Event u{EventKind::MouseUp, client_x, client_y, 0u, 0u};
+        g_calc.DispatchEvent(u);
+    }
 }
 
 bool CalculatorFeedChar(char c)
@@ -946,33 +1019,68 @@ bool CalculatorFeedChar(char c)
     return false;
 }
 
+namespace
+{
+
+// Drive synthetic mouse events through g_calc and verify the click
+// fires the right state mutation. Returns true iff the click chain
+// runs end-to-end. Bounds for g_calc are set to a known rect so we
+// can target each button without having a live window.
+bool ClickViaWidget(u32 button_index)
+{
+    if (button_index >= kIdCount)
+        return false;
+    // Anchor bounds at (0, 22) — same shape as a live window would
+    // hand us through DrawFn (client-area origin under the title
+    // bar). Width 300 matches the boot-time window size.
+    RebindBoundsToClient(0u, 22u, 300u);
+
+    const u32 row = button_index / 4u;
+    const u32 col = button_index % 4u;
+    const u32 bx = 0u + kGridLeftOffset + col * (kBtnW + kBtnGap) + kBtnW / 2u;
+    const u32 by = 22u + kGridTopOffset + row * (kBtnH + kBtnGap) + kBtnH / 2u;
+
+    const Event move{EventKind::MouseMove, bx, by, 0u, 0u};
+    if (g_calc.DispatchEvent(move) != duetos::drivers::video::app_widgets::EventResult::Consumed)
+        return false;
+    const Event down{EventKind::MouseDown, bx, by, 0u, 0u};
+    if (g_calc.DispatchEvent(down) != duetos::drivers::video::app_widgets::EventResult::Consumed)
+        return false;
+    const Event up{EventKind::MouseUp, bx, by, 0u, 0u};
+    if (g_calc.DispatchEvent(up) != duetos::drivers::video::app_widgets::EventResult::Consumed)
+        return false;
+    return true;
+}
+
+// Look up the button index whose key matches `k`. Returns kIdCount
+// (out-of-range) on miss so the caller short-circuits.
+u32 IndexOfKey(char k)
+{
+    for (u32 i = 0; i < kIdCount; ++i)
+    {
+        if (kButtonKeys[i] == k)
+            return i;
+    }
+    return kIdCount;
+}
+
+} // namespace
+
 void CalculatorSelfTest()
 {
     using duetos::arch::SerialWrite;
+    g_self_test_passed = false;
+    BindButtonsOnce(); // self-test runs before CalculatorInit on the
+                       // boot path is guaranteed to have fired
+
     struct Case
     {
         const char* keys;
         i64 expect;
     };
-    // Keys are fed one character at a time through DispatchKey,
-    // just as a real click or keypress would. '=' commits the
-    // expression; 'C' resets state between cases so each test
-    // starts from a clean calculator.
     const Case cases[] = {
-        {"2+3=", 5},
-        {"9-4=", 5},
-        {"6*7=", 42},
-        // Sign toggle: 5n produces -5; another n flips back to 5.
-        {"5n=", -5},
-        {"5nn=", 5},
-        // Backspace ('\b' = 0x08): "1234" then BS twice -> "12".
-        {"1234\b\b=", 12},
-        // Percent without pending op: 200% -> 2 (integer trunc).
-        {"200%=", 2},
-        // Percent with pending op: 200 + 15% = 230 (200 + 200*15/100).
-        {"200+15%=", 230},
-        // Percent with subtract: 400 - 10% = 360.
-        {"400-10%=", 360},
+        {"2+3=", 5},       {"9-4=", 5},  {"6*7=", 42},      {"5n=", -5},       {"5nn=", 5},
+        {"1234\b\b=", 12}, {"200%=", 2}, {"200+15%=", 230}, {"400-10%=", 360},
     };
     bool all_pass = true;
     for (const Case& tc : cases)
@@ -988,59 +1096,41 @@ void CalculatorSelfTest()
         }
     }
 
-    // Memory-register self-test: walk through MS / MR / M+ / M- /
-    // MC and verify the register state at each step. Done outside
-    // the table-driven loop because the keys produce side effects
-    // on g_state.memory that the table format doesn't capture.
+    // Memory register walk.
     HandleClear();
     HandleMemClear();
     if (g_state.memory_set || g_state.memory != 0)
         all_pass = false;
-
-    // 50 MS — store 50, register = 50.
     DispatchKey('5');
     DispatchKey('0');
     DispatchKey('s');
     if (!g_state.memory_set || g_state.memory != 50)
         all_pass = false;
-
-    // C, then 25 A — memory += 25 → 75. Display unchanged.
     HandleClear();
     DispatchKey('2');
     DispatchKey('5');
     DispatchKey('a');
     if (g_state.memory != 75)
         all_pass = false;
-
-    // C, then 10 B — memory -= 10 → 65.
     HandleClear();
     DispatchKey('1');
     DispatchKey('0');
     DispatchKey('b');
     if (g_state.memory != 65)
         all_pass = false;
-
-    // m — recall puts 65 on the display.
     DispatchKey('m');
     if (ReadDisplayAsI64() != 65)
         all_pass = false;
-
-    // l — clear drops the indicator and zeroes the register.
     DispatchKey('l');
     if (g_state.memory_set || g_state.memory != 0)
         all_pass = false;
-
-    // After MC the recall is a no-op (display stays where it was).
     DispatchKey('m');
     if (ReadDisplayAsI64() != 65)
         all_pass = false;
-
     HandleClear();
     HandleMemClear();
 
-    // Scientific operations: sqrt(144)=12, square(7)=49, abs(-9)=9,
-    // factorial(6)=720, reciprocal(2)=0 (integer trunc). Each runs
-    // on a clean state so the unary-op-on-display path is exercised.
+    // Scientific.
     HandleClear();
     DispatchKey('1');
     DispatchKey('4');
@@ -1048,27 +1138,22 @@ void CalculatorSelfTest()
     DispatchKey('q');
     if (ReadDisplayAsI64() != 12 || g_state.error)
         all_pass = false;
-
     HandleClear();
     DispatchKey('7');
     DispatchKey('x');
     if (ReadDisplayAsI64() != 49 || g_state.error)
         all_pass = false;
-
     HandleClear();
     DispatchKey('9');
-    DispatchKey('n'); // -9
-    DispatchKey('y'); // abs -> 9
+    DispatchKey('n');
+    DispatchKey('y');
     if (ReadDisplayAsI64() != 9 || g_state.error)
         all_pass = false;
-
     HandleClear();
     DispatchKey('6');
-    DispatchKey('!'); // 6! = 720
+    DispatchKey('!');
     if (ReadDisplayAsI64() != 720 || g_state.error)
         all_pass = false;
-
-    // factorial(21) overflows i64 -> ERR sticks until clear.
     HandleClear();
     DispatchKey('2');
     DispatchKey('1');
@@ -1076,16 +1161,14 @@ void CalculatorSelfTest()
     if (!g_state.error)
         all_pass = false;
     HandleClear();
-
-    // sqrt(-4) -> ERR.
     DispatchKey('4');
     DispatchKey('n');
     DispatchKey('q');
     if (!g_state.error)
         all_pass = false;
-    HandleClear();
 
-    // Bitwise: 12 & 10 = 8.
+    // Bitwise.
+    HandleClear();
     DispatchKey('1');
     DispatchKey('2');
     DispatchKey('&');
@@ -1095,8 +1178,6 @@ void CalculatorSelfTest()
     if (ReadDisplayAsI64() != 8 || g_state.error)
         all_pass = false;
     HandleClear();
-
-    // Bitwise: 12 | 10 = 14.
     DispatchKey('1');
     DispatchKey('2');
     DispatchKey('|');
@@ -1106,8 +1187,6 @@ void CalculatorSelfTest()
     if (ReadDisplayAsI64() != 14 || g_state.error)
         all_pass = false;
     HandleClear();
-
-    // Bitwise: 12 ^ 10 = 6.
     DispatchKey('1');
     DispatchKey('2');
     DispatchKey('^');
@@ -1117,8 +1196,6 @@ void CalculatorSelfTest()
     if (ReadDisplayAsI64() != 6 || g_state.error)
         all_pass = false;
     HandleClear();
-
-    // Shift: 1 << 4 = 16.
     DispatchKey('1');
     DispatchKey('<');
     DispatchKey('4');
@@ -1126,8 +1203,6 @@ void CalculatorSelfTest()
     if (ReadDisplayAsI64() != 16 || g_state.error)
         all_pass = false;
     HandleClear();
-
-    // Shift: 64 >> 2 = 16.
     DispatchKey('6');
     DispatchKey('4');
     DispatchKey('>');
@@ -1136,28 +1211,45 @@ void CalculatorSelfTest()
     if (ReadDisplayAsI64() != 16 || g_state.error)
         all_pass = false;
     HandleClear();
-
-    // Bitwise NOT: ~5 = -6 (two's complement).
     DispatchKey('5');
     DispatchKey('~');
     if (ReadDisplayAsI64() != -6 || g_state.error)
         all_pass = false;
     HandleClear();
 
-    SerialWrite(all_pass ? "[calc] self-test OK (arith + percent + sign + backspace + memory + scientific + bitwise)\n"
-                         : "[calc] self-test FAILED\n");
+    // app_widgets dispatch path — the Pass D acceptance criterion.
+    // Drives synthetic Down/Up events through g_calc and confirms
+    // the same arithmetic engine fires. "2 + 3 ="
+    HandleClear();
+    if (!ClickViaWidget(IndexOfKey('2')))
+        all_pass = false;
+    if (!ClickViaWidget(IndexOfKey('+')))
+        all_pass = false;
+    if (!ClickViaWidget(IndexOfKey('3')))
+        all_pass = false;
+    if (!ClickViaWidget(IndexOfKey('=')))
+        all_pass = false;
+    if (ReadDisplayAsI64() != 5 || g_state.error)
+        all_pass = false;
+    HandleClear();
+
+    g_self_test_passed = all_pass;
+    SerialWrite(all_pass ? "[calculator-selftest] PASS\n" : "[calculator-selftest] FAIL\n");
+}
+
+bool CalculatorSelfTestPassed()
+{
+    return g_self_test_passed;
 }
 
 i64 CalculatorMemoryValue()
 {
     return g_state.memory;
 }
-
 bool CalculatorMemorySet()
 {
     return g_state.memory_set;
 }
-
 void CalculatorMemoryRestore(i64 value, bool set)
 {
     g_state.memory = set ? value : 0;
