@@ -2,6 +2,8 @@
 
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/dialog.h"
 #include "drivers/video/notify.h"
@@ -14,6 +16,91 @@ namespace duetos::apps::settings
 
 namespace
 {
+
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::ThemeCurrent;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// ---------------------------------------------------------------
+// Pass D chrome: DATE & TIME panel. Three AppLabels stand the
+// canonical hero / readout-line / hint-line chrome up behind the
+// existing key-driven panel. The two data-bearing rows (RTC line +
+// timezone-offset line) stay as raw ChromeTextDraw because their
+// text mutates every paint via RtcRead / TimezoneOffsetMinutes —
+// AppLabel.text is a `const char*` and we want the buffer to be
+// re-composed inside Draw without leaning on a separate static
+// composer per row.
+//
+// Composition (back-to-front declaration order):
+//   - AppLabel  Title   — "DATE & TIME" hero header
+//   - AppLabel  Caption — "S : SET RTC (UTC) ..." footer hint
+//
+// The intermediate Body rows and the [/]/,/./Z hint lines stay
+// carve-out raw paint because they're heterogeneous (live values
+// + multi-key cheat-sheet rows) and would each need their own
+// composer buffer for ~zero readability gain.
+
+constinit char g_dt_header[16] = "DATE & TIME";
+constinit char g_dt_footer[64] = "S : SET RTC (UTC) - opens YYYY-MM-DD HH:MM:SS prompt";
+
+constinit auto g_settings_datetime = MakeWidgetGroup(AppLabel{}, AppLabel{});
+
+constinit bool g_settings_datetime_bound = false;
+constinit bool g_settings_datetime_self_test_passed = false;
+
+AppLabel& DtHeader()
+{
+    return g_settings_datetime.chain.head;
+}
+AppLabel& DtFooter()
+{
+    return g_settings_datetime.chain.tail.head;
+}
+
+void BindSettingsDateTimeOnce()
+{
+    if (g_settings_datetime_bound)
+        return;
+    g_settings_datetime_bound = true;
+
+    const auto& th = ThemeCurrent();
+    const u32 bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
+    const u32 fg = th.console_fg;
+    const u32 dim = th.banner_fg;
+
+    AppLabel& h = DtHeader();
+    h.text = g_dt_header;
+    h.role = ChromeTextRole::Title;
+    h.weight = ChromeTextWeight::Bold;
+    h.fg_rgb = fg;
+    h.bg_rgb = bg;
+    h.align_left = true;
+
+    AppLabel& f = DtFooter();
+    f.text = g_dt_footer;
+    f.role = ChromeTextRole::Caption;
+    f.weight = ChromeTextWeight::Regular;
+    f.fg_rgb = dim;
+    f.bg_rgb = bg;
+    f.align_left = true;
+}
+
+// Re-anchor the header / footer to the supplied sub-panel content
+// rect. Called from Draw before PaintAll so the labels track the
+// live layout. The header sits at the top; the footer pins to the
+// bottom of the rect.
+void RebindSettingsDateTimeBounds(u32 x, u32 y, u32 w, u32 h)
+{
+    constexpr u32 kHeaderH = 14U;
+    constexpr u32 kFooterH = 12U;
+    DtHeader().bounds = Rect{x, y, w, kHeaderH};
+    const u32 fy = (h > kFooterH) ? y + h - kFooterH : y;
+    DtFooter().bounds = Rect{x, fy, w, kFooterH};
+}
 
 void Append2(char* out, u32* o, u32 v)
 {
@@ -59,8 +146,6 @@ void AppendSignedDec(char* out, u32 cap, u32* o, i32 v)
 void Draw(u32 x, u32 y, u32 w, u32 h)
 {
     using duetos::drivers::video::ChromeTextDraw;
-    using duetos::drivers::video::ChromeTextRole;
-    using duetos::drivers::video::ChromeTextWeight;
     const auto& th = duetos::drivers::video::ThemeCurrent();
     const u32 bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
     const u32 fg = th.console_fg;
@@ -68,15 +153,20 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     if (w < 8 * 24 || h < 8 * 8)
         return;
 
+    // Pass D chrome: anchor + paint the header + footer labels.
+    BindSettingsDateTimeOnce();
+    RebindSettingsDateTimeBounds(x, y, w, h);
+    Compose ctx{};
+    g_settings_datetime.PaintAll(ctx);
+
     duetos::arch::RtcTime rtc{};
     duetos::arch::RtcRead(&rtc);
     char line[80];
     u32 o = 0;
 
-    // Section header — Title + Bold so "DATE & TIME" reads as the
-    // panel's hero label rather than a row.
-    ChromeTextDraw(ChromeTextRole::Title, x, y, "DATE & TIME", fg, bg, ChromeTextWeight::Bold);
-
+    // Raw paint — live-data rows + multi-key hint lines. AppLabel
+    // stores text by pointer; these buffers refresh every Draw so
+    // carve-out raw paint is the simpler shape.
     o = 0;
     AppendStr(line, sizeof(line), &o, "RTC (UTC): ");
     Append4(line, &o, rtc.year);
@@ -109,8 +199,6 @@ void Draw(u32 x, u32 y, u32 w, u32 h)
     ChromeTextDraw(ChromeTextRole::Caption, x, y + 50, "[ : -1 hour    ] : +1 hour", dim, bg);
     ChromeTextDraw(ChromeTextRole::Caption, x, y + 62, ", : -15 min    . : +15 min", dim, bg);
     ChromeTextDraw(ChromeTextRole::Caption, x, y + 74, "Z : reset to UTC", dim, bg);
-
-    ChromeTextDraw(ChromeTextRole::Caption, x, y + 96, "S : SET RTC (UTC) — opens YYYY-MM-DD HH:MM:SS prompt", dim, bg);
 }
 
 // Trim leading whitespace + parse "YYYY-MM-DD HH:MM:SS" or
@@ -271,6 +359,35 @@ bool Key(char c)
 void SettingsDateTimeInit()
 {
     SettingsRegisterPanel(Panel::DateTime, Draw, Key);
+}
+
+void SettingsDateTimeSelfTest()
+{
+    using duetos::arch::SerialWrite;
+    bool ok = true;
+
+    // Pass D chrome: anchor + paint into a notional (0,0,256,160)
+    // sub-panel content rect. Paint is side-effect-free at this
+    // boot phase (no framebuffer attached to the synthetic Compose
+    // ctx); we only verify the bind path + bounds clamp don't
+    // crash and that the labels carry their populated buffers.
+    BindSettingsDateTimeOnce();
+    RebindSettingsDateTimeBounds(0U, 0U, 256U, 160U);
+    Compose ctx{};
+    g_settings_datetime.PaintAll(ctx);
+
+    if (g_dt_header[0] == '\0' || g_dt_footer[0] == '\0')
+        ok = false;
+    if (DtHeader().text == nullptr || DtFooter().text == nullptr)
+        ok = false;
+
+    g_settings_datetime_self_test_passed = ok;
+    SerialWrite(ok ? "[settings-datetime-selftest] PASS\n" : "[settings-datetime-selftest] FAIL\n");
+}
+
+bool SettingsDateTimeSelfTestPassed()
+{
+    return g_settings_datetime_self_test_passed;
 }
 
 } // namespace duetos::apps::settings

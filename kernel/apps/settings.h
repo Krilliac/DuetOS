@@ -141,6 +141,22 @@ void SettingsKeyboardInit();
 void SettingsMouseInit();
 void SettingsDateTimeInit();
 
+/// Pass D per-sub-panel self-tests. Each verifies the panel's
+/// AppLabel / AppButton chrome binds + paints without crash and
+/// emits a `[settings-<panel>-selftest] PASS/FAIL` sentinel that
+/// the boot-log analyzer can grep for. Aggregated by the Pass D
+/// umbrella sentinel in boot_bringup.cpp.
+void SettingsDateTimeSelfTest();
+bool SettingsDateTimeSelfTestPassed();
+void SettingsDisplaySelfTest();
+bool SettingsDisplaySelfTestPassed();
+void SettingsKeyboardSelfTest();
+bool SettingsKeyboardSelfTestPassed();
+void SettingsMouseSelfTest();
+bool SettingsMouseSelfTestPassed();
+void SettingsSoundSelfTest();
+bool SettingsSoundSelfTestPassed();
+
 /// Keyboard typematic — rate / delay indices currently shown by
 /// the Keyboard sub-panel and pushed to the PS/2 controller. The
 /// indices are the raw values accepted by Ps2KeyboardSetTypematic

@@ -2371,11 +2371,12 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // both halves once every app's self-test is gated behind a
     // single early-boot point.
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::app_widgets::AppWidgetsSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsDateTimeSelfTest());
     if constexpr (::duetos::core::kBootSelfTests)
     {
         if (duetos::drivers::video::app_widgets::AppWidgetsSelfTestPassed())
         {
-            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=20/28)\n");
+            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=21/28)\n");
         }
     }
     duetos::drivers::video::SplashAdvancePhase("theme online");
