@@ -7,6 +7,7 @@
 #include "net/stack.h"
 #include "sched/sched.h"
 #include "drivers/video/blend_math.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/shadow.h"
@@ -618,7 +619,17 @@ void TaskbarRedraw()
         const char* title = WindowTitle(h);
         if (title != nullptr)
         {
-            FramebufferDrawString(text_x, text_y, title, g_fg, tab_bg);
+            // Pass C: tab labels through the unified chrome-text
+            // dispatcher. The active tab renders bold to reinforce
+            // the focus signal already carried by the accent
+            // gradient + focus dot; inactive tabs stay regular.
+            // Tab slot width is a fixed 170 px (kGlyphSize + label
+            // run + padding) so labels are truncated to fit rather
+            // than sizing-to-fit — the slot rect doubles as the
+            // hit rect, so click-targeting is decoupled from the
+            // rendered label width.
+            ChromeTextDraw(ChromeTextRole::Body, text_x, text_y, title, g_fg, tab_bg,
+                           is_active ? ChromeTextWeight::Bold : ChromeTextWeight::Regular);
         }
         // Record the slot so subsequent hit-tests can map a
         // click back to a window without re-running the layout.
@@ -665,7 +676,12 @@ void TaskbarRedraw()
     clk[3] = char('0' + rtc.minute / 10);
     clk[4] = char('0' + rtc.minute % 10);
     clk[5] = '\0';
-    const u32 clk_text_w = 5 * 8;
+    // Pass C: width comes from the chrome-text dispatcher so the
+    // calendar hit-rect tracks whichever font path the active theme
+    // selected (TTF Title vs scaled bitmap). Falling back to the
+    // raw 5*8 bitmap math would leave the hit-rect undersized on
+    // TTF themes the moment the clock rendered wider than 40 px.
+    const u32 clk_text_w = ChromeTextMeasure(ChromeTextRole::Title, clk);
 
     // Date row underneath: "WWW M/D" (e.g. "MON 5/4"). Compact —
     // 7 chars × 8 px = 56 px, less than the clock above so the
@@ -703,7 +719,11 @@ void TaskbarRedraw()
     }
     date[d_off++] = char('0' + rtc.day % 10);
     date[d_off] = '\0';
-    const u32 date_text_w = d_off * 8;
+    // Pass C: same rationale as clk_text_w — measure under the
+    // active theme's Caption font so the block hit-rect stays
+    // accurate when the date rendered width diverges from bitmap
+    // `d_off * 8`.
+    const u32 date_text_w = ChromeTextMeasure(ChromeTextRole::Caption, date);
 
     // Block geometry: take the wider of the two rows + 12 px right
     // inset, anchored to the framebuffer's right edge.
@@ -717,8 +737,12 @@ void TaskbarRedraw()
     // Right-align each row inside the block.
     const u32 clk_x = block_x + (block_text_w - clk_text_w);
     const u32 date_x = block_x + (block_text_w - date_text_w);
-    FramebufferDrawString(clk_x, row_top_y, clk, g_fg, g_bg);
-    FramebufferDrawString(date_x, row_bot_y, date, g_fg, g_bg);
+    // Pass C: clock numerals run at Title weight (matches window
+    // titlebars + modal titles — the most prominent chrome text
+    // role), date underneath uses Caption (the chrome's smallest
+    // role, reserved for hints/status/timestamps).
+    ChromeTextDraw(ChromeTextRole::Title, clk_x, row_top_y, clk, g_fg, g_bg);
+    ChromeTextDraw(ChromeTextRole::Caption, date_x, row_bot_y, date, g_fg, g_bg);
 
     // Publish a whole-cell hit-test rect around the stacked block
     // so a click anywhere in the time card opens the calendar.
@@ -1073,7 +1097,7 @@ void TaskbarRedraw()
         const u32 rail_h = (g_h > 8) ? g_h - 8 : g_h;
         const u8 rail_alpha = WindowShowDesktopActive() ? 0xC0 : 0x60;
         FramebufferBlendFill(rail_x, rail_y, rail_w, rail_h,
-                                 (static_cast<u32>(rail_alpha) << 24) | (g_accent & 0x00FFFFFFU));
+                             (static_cast<u32>(rail_alpha) << 24) | (g_accent & 0x00FFFFFFU));
         // 1-px brighter highlight on the inside edge so the
         // rail has visible structure when hovered.
         FramebufferFillRect(rail_x, rail_y, 1, rail_h, LightenRgb(g_accent, 56));
