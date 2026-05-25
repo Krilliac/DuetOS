@@ -1,6 +1,9 @@
 #include "apps/settings.h"
 
+#include "arch/x86_64/serial.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
@@ -22,6 +25,75 @@ constinit u8 g_delay_idx = 1;  // 500 ms
 
 namespace
 {
+
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::ThemeCurrent;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// ---------------------------------------------------------------
+// Pass D chrome: KEYBOARD panel. Header (Title Bold) + footer
+// (Caption hint band) AppLabels. All the live-data rows (IRQ
+// counts, typematic indices, modifier flags, layout name) stay
+// raw paint because they recompose every paint via Ps2KeyboardStats
+// / WindowModifierState / Ps2KeyboardLayout.
+
+constinit char g_kbd_header[16] = "KEYBOARD";
+constinit char g_kbd_footer[64] = "F/S:rate Q/D:delay  1-6:layout";
+
+constinit auto g_settings_keyboard = MakeWidgetGroup(AppLabel{}, AppLabel{});
+
+constinit bool g_settings_keyboard_bound = false;
+constinit bool g_settings_keyboard_self_test_passed = false;
+
+AppLabel& KbdHeader()
+{
+    return g_settings_keyboard.chain.head;
+}
+AppLabel& KbdFooter()
+{
+    return g_settings_keyboard.chain.tail.head;
+}
+
+void BindSettingsKeyboardOnce()
+{
+    if (g_settings_keyboard_bound)
+        return;
+    g_settings_keyboard_bound = true;
+
+    const auto& th = ThemeCurrent();
+    const u32 bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
+    const u32 fg = th.console_fg;
+    const u32 dim = th.banner_fg;
+
+    AppLabel& h = KbdHeader();
+    h.text = g_kbd_header;
+    h.role = ChromeTextRole::Title;
+    h.weight = ChromeTextWeight::Bold;
+    h.fg_rgb = fg;
+    h.bg_rgb = bg;
+    h.align_left = true;
+
+    AppLabel& f = KbdFooter();
+    f.text = g_kbd_footer;
+    f.role = ChromeTextRole::Caption;
+    f.weight = ChromeTextWeight::Regular;
+    f.fg_rgb = dim;
+    f.bg_rgb = bg;
+    f.align_left = true;
+}
+
+void RebindSettingsKeyboardBounds(u32 x, u32 y, u32 w, u32 h)
+{
+    constexpr u32 kHeaderH = 14U;
+    constexpr u32 kFooterH = 12U;
+    KbdHeader().bounds = Rect{x, y, w, kHeaderH};
+    const u32 fy = (h > kFooterH) ? y + h - kFooterH : y;
+    KbdFooter().bounds = Rect{x, fy, w, kFooterH};
+}
 
 void AppendDec(char* out, u32 cap, u32* o, u64 v)
 {
@@ -52,16 +124,19 @@ void AppendStr(char* out, u32 cap, u32* o, const char* s)
 void Draw(u32 x, u32 y, u32 w, u32 h)
 {
     using duetos::drivers::video::ChromeTextDraw;
-    using duetos::drivers::video::ChromeTextRole;
-    using duetos::drivers::video::ChromeTextWeight;
     const auto& th = duetos::drivers::video::ThemeCurrent();
     const u32 bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
     const u32 fg = th.console_fg;
     const u32 dim = th.banner_fg;
     if (w < 8 * 24 || h < 8 * 8)
         return;
-    // Section header — Title + Bold for the panel's hero label.
-    ChromeTextDraw(ChromeTextRole::Title, x, y, "KEYBOARD", fg, bg, ChromeTextWeight::Bold);
+
+    // Pass D chrome: anchor + paint header + footer labels.
+    BindSettingsKeyboardOnce();
+    RebindSettingsKeyboardBounds(x, y, w, h);
+    Compose ctx{};
+    g_settings_keyboard.PaintAll(ctx);
+
     ChromeTextDraw(ChromeTextRole::Body, x, y + 14, "LAYOUT: US (hardcoded)", dim, bg);
     ChromeTextDraw(ChromeTextRole::Body, x, y + 26, "REPEAT: PS/2 hardware default", dim, bg);
 
@@ -238,6 +313,30 @@ bool Key(char c)
 void SettingsKeyboardInit()
 {
     SettingsRegisterPanel(Panel::Keyboard, Draw, Key);
+}
+
+void SettingsKeyboardSelfTest()
+{
+    using duetos::arch::SerialWrite;
+    bool ok = true;
+
+    BindSettingsKeyboardOnce();
+    RebindSettingsKeyboardBounds(0U, 0U, 256U, 200U);
+    Compose ctx{};
+    g_settings_keyboard.PaintAll(ctx);
+
+    if (g_kbd_header[0] == '\0' || g_kbd_footer[0] == '\0')
+        ok = false;
+    if (KbdHeader().text == nullptr || KbdFooter().text == nullptr)
+        ok = false;
+
+    g_settings_keyboard_self_test_passed = ok;
+    SerialWrite(ok ? "[settings-keyboard-selftest] PASS\n" : "[settings-keyboard-selftest] FAIL\n");
+}
+
+bool SettingsKeyboardSelfTestPassed()
+{
+    return g_settings_keyboard_self_test_passed;
 }
 
 u8 KeyboardTypematicRateIdx()
