@@ -2375,7 +2375,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     {
         if (duetos::drivers::video::app_widgets::AppWidgetsSelfTestPassed())
         {
-            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=12/28)\n");
+            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=13/28)\n");
         }
     }
     duetos::drivers::video::SplashAdvancePhase("theme online");
@@ -2832,6 +2832,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "FIREWALL");
         duetos::drivers::video::WindowSetVisible(h, false);
         duetos::apps::firewall::FirewallInit(h);
+        DUETOS_BOOT_SELFTEST(duetos::apps::firewall::FirewallSelfTest());
     }
 
     // Framebuffer text console. 80x40 chars of boot log at the
