@@ -956,6 +956,42 @@ void WindowRaise(WindowHandle h)
         g_z_order[j] = g_z_order[j + 1];
     }
     g_z_order[g_window_count - 1] = h;
+
+    // Z-order changed — force the next EndCompose to do an unconditional
+    // shadow->live blit + snapshot resync over the FULL surface. The
+    // diff-scan path normally handles this correctly (DesktopCompose
+    // paints the gradient first, which marks damage full-screen, so the
+    // EndCompose diff catches every changed pixel between the new
+    // composition and the snapshot of what's on screen). But the diff
+    // scan is conditional on three invariants holding simultaneously:
+    //
+    //   1. g_damage covers every pixel that could have changed
+    //   2. the snapshot accurately mirrors the LIVE framebuffer
+    //   3. no concurrent direct-FB writer raced the compose pass
+    //
+    // Direct-FB writers (cursor restore/draw, guard prompt, login
+    // repaint, any non-compose paint path) routinely break (2)+(3). When
+    // a z-order change lands a window's chrome in a region that the
+    // snapshot still believes matches LIVE (because the snapshot was
+    // synced from a stale shadow during a racy partial paint), the diff
+    // scan elides the blit and the formerly-on-top window's pixels
+    // persist where the now-on-top window should have painted.
+    //
+    // Posting the full-screen invalidation rect makes the next
+    // EndCompose flush every pixel unconditionally. Cost: ~3 MB
+    // shadow->live copy on a 1024x768 surface, which is the same cost
+    // we already pay on the FIRST compose after FramebufferInit (the
+    // "snapshot not yet valid" full path at framebuffer.cpp:712). On a
+    // click-rate workload this fires at most once per click, which is
+    // imperceptible. Architectural cost: zero — the invalidation list
+    // is the canonical mechanism for "the snapshot may be wrong, please
+    // resync this rect" and the cursor / guard-prompt paths already
+    // depend on it.
+    if (FramebufferAvailable())
+    {
+        const auto info = FramebufferGet();
+        FramebufferInvalidateSnapshot(0, 0, info.width, info.height);
+    }
 }
 
 WindowHandle WindowActive()
