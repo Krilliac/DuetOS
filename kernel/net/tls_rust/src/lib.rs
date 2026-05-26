@@ -302,3 +302,250 @@ pub unsafe extern "C" fn duetos_tls_parse_certificate_leaf(
 pub unsafe extern "C" fn duetos_tls_parse_server_hello_done(_body: *const u8, len: u32) -> bool {
     len == 0
 }
+
+// ---------------------------------------------------------------------------
+// Host-only unit tests. Run via tools/dev/cargo-host-test.sh, which
+// compiles this lib.rs with `rustc --test` against the host's libcore
+// + libstd (the kernel build uses x86_64-unknown-none which can't host
+// test binaries). Each test exercises one parser entry point on a
+// hand-built byte stream that matches the wire format, then checks
+// both the happy path and a handful of malformed inputs.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    extern crate alloc;
+    use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use core::ptr;
+
+    fn make_record_view() -> DuetosTlsRecordView {
+        DuetosTlsRecordView::default()
+    }
+
+    fn make_handshake_view() -> DuetosTlsHandshakeView {
+        DuetosTlsHandshakeView::default()
+    }
+
+    #[test]
+    fn peek_record_ok() {
+        // type=0x17 (Application Data), version=0x0303 (TLS 1.2),
+        // length=0x0003, then 3 bytes payload.
+        let buf = [0x17u8, 0x03, 0x03, 0x00, 0x03, b'h', b'i', b'!'];
+        let mut v = make_record_view();
+        let ok = unsafe { duetos_tls_peek_record(buf.as_ptr(), buf.len() as u32, &mut v) };
+        assert!(ok);
+        assert_eq!(v.content_type, 0x17);
+        assert_eq!(v.version, 0x0303);
+        assert_eq!(v.length, 3);
+        // payload should point at byte 5 of the input.
+        assert_eq!(v.payload, unsafe { buf.as_ptr().add(5) });
+    }
+
+    #[test]
+    fn peek_record_short_buffer_rejects() {
+        let buf = [0x17u8, 0x03, 0x03, 0x00]; // 4 bytes — header is 5.
+        let mut v = make_record_view();
+        assert!(!unsafe { duetos_tls_peek_record(buf.as_ptr(), buf.len() as u32, &mut v) });
+    }
+
+    #[test]
+    fn peek_record_null_out_rejects() {
+        let buf = [0x17u8, 0x03, 0x03, 0x00, 0x00];
+        assert!(!unsafe { duetos_tls_peek_record(buf.as_ptr(), buf.len() as u32, ptr::null_mut()) });
+    }
+
+    #[test]
+    fn peek_record_null_buf_rejects() {
+        let mut v = make_record_view();
+        assert!(!unsafe { duetos_tls_peek_record(ptr::null(), 5, &mut v) });
+    }
+
+    #[test]
+    fn peek_handshake_ok() {
+        // type=0x02 (ServerHello), length=0x000004, then 4 bytes body.
+        let buf = [0x02u8, 0x00, 0x00, 0x04, 0xaa, 0xbb, 0xcc, 0xdd];
+        let mut v = make_handshake_view();
+        let ok = unsafe { duetos_tls_peek_handshake(buf.as_ptr(), buf.len() as u32, &mut v) };
+        assert!(ok);
+        assert_eq!(v.kind, 0x02);
+        assert_eq!(v.length, 4);
+        assert_eq!(v.body, unsafe { buf.as_ptr().add(4) });
+    }
+
+    #[test]
+    fn peek_handshake_body_overflow_rejects() {
+        // Declares 8-byte body but only 4 bytes follow header.
+        let buf = [0x02u8, 0x00, 0x00, 0x08, 0xaa, 0xbb, 0xcc, 0xdd];
+        let mut v = make_handshake_view();
+        assert!(!unsafe { duetos_tls_peek_handshake(buf.as_ptr(), buf.len() as u32, &mut v) });
+    }
+
+    fn build_server_hello() -> Vec<u8> {
+        let mut b = vec![0u8; 0];
+        b.extend_from_slice(&[0x03, 0x03]); // version TLS 1.2
+        b.extend((0..32u8).collect::<Vec<_>>()); // server_random
+        b.push(0x00); // session_id length = 0
+        b.extend_from_slice(&[0x00, 0x9C]); // cipher = TLS_RSA_WITH_AES_128_GCM_SHA256
+        b.push(0x00); // compression = null
+        b
+    }
+
+    #[test]
+    fn parse_server_hello_ok_no_extensions() {
+        let body = build_server_hello();
+        let mut server_random = [0u8; 32];
+        let mut cipher = 0u16;
+        let ok = unsafe {
+            duetos_tls_parse_server_hello(
+                body.as_ptr(),
+                body.len() as u32,
+                server_random.as_mut_ptr(),
+                &mut cipher,
+            )
+        };
+        assert!(ok);
+        assert_eq!(cipher, 0x009C);
+        // server_random should be 0..31 (what we put in the body).
+        for (i, v) in server_random.iter().enumerate() {
+            assert_eq!(*v as usize, i);
+        }
+    }
+
+    #[test]
+    fn parse_server_hello_with_extensions_ok() {
+        let mut body = build_server_hello();
+        // Add a 0-length extensions block.
+        body.extend_from_slice(&[0x00, 0x00]);
+        let mut server_random = [0u8; 32];
+        let mut cipher = 0u16;
+        let ok = unsafe {
+            duetos_tls_parse_server_hello(
+                body.as_ptr(),
+                body.len() as u32,
+                server_random.as_mut_ptr(),
+                &mut cipher,
+            )
+        };
+        assert!(ok);
+    }
+
+    #[test]
+    fn parse_server_hello_bad_cipher_rejects() {
+        let mut body = build_server_hello();
+        // Cipher lives at offset 35, 36 — flip to TLS_NULL_WITH_NULL_NULL.
+        body[35] = 0x00;
+        body[36] = 0x00;
+        let mut server_random = [0u8; 32];
+        let mut cipher = 0u16;
+        let ok = unsafe {
+            duetos_tls_parse_server_hello(
+                body.as_ptr(),
+                body.len() as u32,
+                server_random.as_mut_ptr(),
+                &mut cipher,
+            )
+        };
+        assert!(!ok);
+    }
+
+    #[test]
+    fn parse_server_hello_bad_compression_rejects() {
+        let mut body = build_server_hello();
+        body[37] = 0x01; // non-null compression
+        let mut server_random = [0u8; 32];
+        let mut cipher = 0u16;
+        let ok = unsafe {
+            duetos_tls_parse_server_hello(
+                body.as_ptr(),
+                body.len() as u32,
+                server_random.as_mut_ptr(),
+                &mut cipher,
+            )
+        };
+        assert!(!ok);
+    }
+
+    #[test]
+    fn parse_server_hello_bad_version_rejects() {
+        let mut body = build_server_hello();
+        body[0] = 0x03;
+        body[1] = 0x02; // TLS 1.1
+        let mut server_random = [0u8; 32];
+        let mut cipher = 0u16;
+        let ok = unsafe {
+            duetos_tls_parse_server_hello(
+                body.as_ptr(),
+                body.len() as u32,
+                server_random.as_mut_ptr(),
+                &mut cipher,
+            )
+        };
+        assert!(!ok);
+    }
+
+    #[test]
+    fn parse_certificate_leaf_ok() {
+        // Build: 3-byte total list length + 3-byte cert length + cert.
+        let cert = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x42];
+        let mut body = vec![0u8; 0];
+        // list_len = 3 + cert.len()
+        let list_len = 3 + cert.len() as u32;
+        body.push((list_len >> 16) as u8);
+        body.push((list_len >> 8) as u8);
+        body.push(list_len as u8);
+        // per-cert length
+        let cl = cert.len() as u32;
+        body.push((cl >> 16) as u8);
+        body.push((cl >> 8) as u8);
+        body.push(cl as u8);
+        body.extend_from_slice(&cert);
+
+        let mut leaf_ptr: *const u8 = ptr::null();
+        let mut leaf_len: u32 = 0;
+        let ok = unsafe {
+            duetos_tls_parse_certificate_leaf(body.as_ptr(), body.len() as u32, &mut leaf_ptr, &mut leaf_len)
+        };
+        assert!(ok);
+        assert_eq!(leaf_len, cert.len() as u32);
+        assert_eq!(leaf_ptr, unsafe { body.as_ptr().add(6) });
+    }
+
+    #[test]
+    fn parse_certificate_leaf_overflow_rejects() {
+        // list_len claims a value larger than the actual body.
+        let body = [0xFFu8, 0xFF, 0xFF, 0x00, 0x00, 0x05];
+        let mut leaf_ptr: *const u8 = ptr::null();
+        let mut leaf_len: u32 = 0;
+        let ok = unsafe {
+            duetos_tls_parse_certificate_leaf(body.as_ptr(), body.len() as u32, &mut leaf_ptr, &mut leaf_len)
+        };
+        assert!(!ok);
+    }
+
+    #[test]
+    fn parse_certificate_leaf_zero_leaf_len_rejects() {
+        // list_len = 3 (just the per-cert length, no cert bytes);
+        // per-cert length = 0.
+        let body = [0x00u8, 0x00, 0x03, 0x00, 0x00, 0x00];
+        let mut leaf_ptr: *const u8 = ptr::null();
+        let mut leaf_len: u32 = 0;
+        let ok = unsafe {
+            duetos_tls_parse_certificate_leaf(body.as_ptr(), body.len() as u32, &mut leaf_ptr, &mut leaf_len)
+        };
+        assert!(!ok);
+    }
+
+    #[test]
+    fn parse_server_hello_done_zero_ok() {
+        let ok = unsafe { duetos_tls_parse_server_hello_done(ptr::null(), 0) };
+        assert!(ok);
+    }
+
+    #[test]
+    fn parse_server_hello_done_nonzero_rejects() {
+        let buf = [0x00u8];
+        let ok = unsafe { duetos_tls_parse_server_hello_done(buf.as_ptr(), 1) };
+        assert!(!ok);
+    }
+}

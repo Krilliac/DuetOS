@@ -30,6 +30,7 @@ HOST_TEST_CRATES=(
     "kernel/mm/multiboot2_rust"
     "kernel/net/wifi80211_rust"
     "kernel/net/hci_rust"
+    "kernel/net/tls_rust"
 )
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
