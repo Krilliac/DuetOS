@@ -144,6 +144,12 @@ bool NamedKObjectRegister(KObjectType type, const char* name, KObject* obj)
     // without recursive-lock issues).
     KObject* evicted = nullptr;
     const u32 slot = PickVictimSlot();
+    // PickVictimSlot returns 0..kNamedKObjectSlots-1 by construction
+    // (it starts at 0 and walks every slot). A regression that
+    // returned an OOB index would silently scribble outside
+    // g_table[]. Pin the postcondition so a future refactor of the
+    // LRU walk can't break it without a loud panic.
+    KASSERT_WITH_VALUE(slot < kNamedKObjectSlots, "ipc/named_kobjects", "victim slot oob", static_cast<u64>(slot));
     // If the victim slot already holds the very object we're
     // registering (same kobj re-homed under a different name/type
     // that the dedup loop above didn't match), this is a re-home,
