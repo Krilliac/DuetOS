@@ -2041,6 +2041,32 @@ bool PeResolveImportsForLoadedImage(const u8* file, u64 file_len, duetos::mm::Ad
         return false;
     if (s == PeStatus::Ok)
         return true; // no imports to resolve
+    // CRITICAL: `h.image_base` from ParseHeaders is the file's
+    // PREFERRED base. ResolveImports computes the IAT-slot VA as
+    // `h.image_base + iat_slot_off` and writes through that VA
+    // into `as`. If we don't adjust `h.image_base` to the actual
+    // per-process loaded base, the write lands on a VA that
+    // isn't mapped in `as` and ImageDirectWriteLe fails with
+    // `IAT slot VA not mapped`. Find the file's DllImage in
+    // `preloaded_dlls[]` and rebase to its `base_va`.
+    //
+    // Without this rebase, cross-preload reconcile (spawn.cpp's
+    // post-preload re-resolve pass that closes T6-05 fault #1)
+    // silently no-ops on every preloaded DLL — vcruntime140's
+    // ntdll imports (NtRaiseException, RtlLookupFunctionEntry,
+    // RtlUnwindEx, RtlCaptureContext) end up still bound to the
+    // file's RVA-as-VA stub, and the first C++ throw faults at a
+    // bare RVA (the documented T6-05 fault #2 shape — the
+    // `[cxxeh-dbg]` diagnostic in vcruntime140 never fires
+    // because the fault precedes `__CxxFrameHandler3`).
+    for (u64 i = 0; i < preloaded_dll_count; ++i)
+    {
+        if (preloaded_dlls[i].file == file)
+        {
+            h.image_base = preloaded_dlls[i].base_va;
+            break;
+        }
+    }
     return ResolveImports(file, file_len, h, as, preloaded_dlls, preloaded_dll_count);
 }
 
