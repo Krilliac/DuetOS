@@ -830,6 +830,18 @@ void MapPage(uptr virt, PhysAddr phys, u64 flags)
     {
         PanicPaging("MapPage: unaligned physical address", phys);
     }
+    // Physical-address-bit invariant. x86_64 spec caps a frame's
+    // physical address at bit 51 — bits 52..63 are reserved and the
+    // PTE write below silently DROPS them via `phys & kAddrMask`
+    // (mask covers bits 12..51 only). A caller that hands us a
+    // `PhysAddr` with garbage in the high bits gets a successful map
+    // to the WRONG frame. Catch the wild-PA at the source instead
+    // of letting it land as a stale page-fault five frames up the
+    // stack.
+    if (phys >= (1ULL << 52))
+    {
+        PanicPaging("MapPage: physical address > 52 bits", phys);
+    }
     // W^X enforcement — same rule as AddressSpaceMapUserPage. A
     // kernel mapping that is both writable and executable is a
     // loaded gun; enforce the invariant at the single choke point

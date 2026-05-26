@@ -13,6 +13,7 @@
 #include "ipc/named_pipes.h"
 
 #include "arch/x86_64/serial.h"
+#include "core/panic.h"
 #include "log/klog.h"
 #include "subsystems/linux/syscall_pipe.h"
 #include "sync/spinlock.h"
@@ -163,6 +164,13 @@ void NamedPipeOnServerClose(i32 slot)
         return;
 
     auto flags = ::duetos::sync::SpinLockAcquire(g_table_lock);
+    // Belt-and-braces post-guard: the bound was just verified in the
+    // early return above. Wild-store to a local `slot` between the
+    // check and this index would silently scribble outside g_table,
+    // overwriting the SpinLock storage or adjacent state. KASSERT
+    // catches it before the index hits the array.
+    KASSERT_WITH_VALUE(static_cast<u32>(slot) < kNamedPipeSlots, "ipc/named_pipes", "slot index oob after guard",
+                       static_cast<u64>(slot));
     NamedPipeEntry& e = g_table[slot];
     if (!e.in_use)
     {

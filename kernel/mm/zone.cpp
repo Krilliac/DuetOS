@@ -83,6 +83,13 @@ PhysAddr AllocateZoneFrame(Zone zone)
     }
     else
     {
+        // Ceiling postcondition. `AllocateFrameInRange` promises a
+        // frame below `max_phys` (when max_phys > 0); a regression
+        // in its bitmap search would land DMA traffic at memory the
+        // device cannot address. The self-test verifies this on
+        // every boot but a runtime KASSERT catches an in-production
+        // drift. zero `max_phys` means "no ceiling" (Normal zone).
+        KASSERT_WITH_VALUE(max_phys == 0 || f < max_phys, "mm/zone", "alloc: frame above zone ceiling", f);
         ++g_stats[static_cast<u32>(zone)].allocs;
         KLOG_TRACE_V("mm/zone", "AllocateZoneFrame: granted frame", f);
     }
