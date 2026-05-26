@@ -214,17 +214,24 @@ typedef struct
     i32_ state;
 } ip2state_entry;
 
+/* MSVC x64 FH3 FuncInfo. Total size = 0x28 (40 bytes). Order MUST
+ * match `ehdata.h::_s_FuncInfo` — the compiler emits this layout
+ * verbatim into `.xdata`. Missing the `unwind_help` field between
+ * `ipmap` and `expect_list` would silently shift `expect_list` and
+ * `flags` by 4 bytes; today neither is consumed, but a future read
+ * would land on the wrong source bytes. */
 typedef struct
 {
-    u32_ magic;
-    i32_ unwind_count;
-    i32_ unwind_map; /* RVA unwind_map_entry[] */
-    i32_ tryblock_count;
-    i32_ tryblock; /* RVA tryblock_info[] */
-    i32_ ipmap_count;
-    i32_ ipmap; /* RVA ip2state_entry[] */
-    i32_ expect_list;
-    i32_ flags;
+    u32_ magic;          /* 0x00 — CXX_FRAME_MAGIC_VC{6,7,8} */
+    i32_ unwind_count;   /* 0x04 — maxState */
+    i32_ unwind_map;     /* 0x08 — RVA unwind_map_entry[] */
+    i32_ tryblock_count; /* 0x0C — nTryBlocks */
+    i32_ tryblock;       /* 0x10 — RVA tryblock_info[] */
+    i32_ ipmap_count;    /* 0x14 — nIPMapEntries */
+    i32_ ipmap;          /* 0x18 — RVA ip2state_entry[] */
+    i32_ unwind_help;    /* 0x1C — FP offset of unwind helper (x64) */
+    i32_ expect_list;    /* 0x20 — RVA ESTypeList (exception spec) */
+    i32_ flags;          /* 0x24 — EHFlags */
 } cxx_function_descr;
 
 typedef struct
@@ -310,20 +317,67 @@ static int cxx_streq(const char* a, const char* b)
     return *a == 0 && *b == 0;
 }
 
-/* Invoke a catch / destructor funclet. x64 MSVC funclets take the
- * establisher frame pointer in rdx and (catch) return the
- * continuation address in rax. Naked so our prologue can't shift
- * the frame the funclet addresses through rdx. */
+/* Diagnostic — direct SYS_DEBUG_PRINT (46) so vcruntime140 can dump
+ * state without depending on kernel32!OutputDebugString. The first
+ * throw fires four lines tagged `[cxxeh-dbg]` so a future runtime
+ * diagnosis of T6-05 fault #2 (image_base wrong/0, funclet a bare
+ * RVA) can grep one boot transcript instead of rebuilding +
+ * re-instrumenting. The fault would surface as `funclet=0x000023d8`
+ * (or similar low value) with `image_base=...` and the funclet RVA
+ * separately printable from `cb->handler`. Gated on a static "first
+ * throw" guard so a steady-state PE that throws repeatedly doesn't
+ * flood the log. */
+static int s_cxxeh_dbg_armed = 1;
+
+static void cxxeh_dbg_emit(const char* s)
+{
+    long long discard;
+    __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)46), "D"((long long)s) : "memory");
+}
+
+static void cxxeh_dbg_hex64(char* out, unsigned long long v)
+{
+    /* 16 hex digits + NUL. Caller's buffer must be >= 17 bytes. */
+    static const char hex[] = "0123456789abcdef";
+    for (int i = 15; i >= 0; --i)
+    {
+        out[i] = hex[v & 0xFu];
+        v >>= 4;
+    }
+    out[16] = '\0';
+}
+
+/* Invoke a catch / destructor funclet. x64 MSVC funclets receive
+ * the establisher frame in rdx (param 2) per the Windows x64 ABI,
+ * BUT also expect it spilled to the r8-home shadow slot
+ * (`[rsp+0x10]` from the funclet's view) because MSVC-generated
+ * catch funclets typically reload it from there rather than
+ * trusting rdx across nested calls inside the funclet body.
+ * cxxeh_pe's catch funclet for `test_int_throw` literally does
+ * `mov rdx, [rsp+0x10]` as its first instruction — without the
+ * spill the funclet reads stale shadow-space bytes (a previous
+ * caller's r8) and `lea rbp, [rdx+0x40]` lands rbp at a garbage
+ * address. Stack-discipline-wise this is the MSVC funclet ABI we
+ * have to honour even though our cxx_call_funclet itself doesn't
+ * need the spill. Naked so our prologue can't shift the frame
+ * the funclet addresses through rdx. */
 __attribute__((naked)) static void* cxx_call_funclet(void* handler, u64_ frame)
 {
     __asm__ volatile("push %rbp\n\t"
                      "mov %rsp,%rbp\n\t"
                      "sub $0x20,%rsp\n\t"
                      "and $-16,%rsp\n\t"
-                     "mov %rdx,%r8\n\t"  /* frame */
-                     "mov %rcx,%rax\n\t" /* handler */
+                     "mov %rdx,%r8\n\t"  /* r8 = frame (establisher) */
+                     "mov %rcx,%rax\n\t" /* rax = handler */
                      "xor %ecx,%ecx\n\t"
-                     "mov %r8,%rdx\n\t" /* arg: establisher frame */
+                     "mov %r8,%rdx\n\t" /* rdx = frame (ABI arg 2) */
+                     /* The CALL below pushes 8 bytes (return addr),
+                      * so the funclet's `[rsp+0x10]` from its view is
+                      * `[rsp+0x08]` from ours (pre-call). Store the
+                      * establisher there so the funclet's first
+                      * `mov rdx, [rsp+0x10]` (re-reading the
+                      * r8/rdx-home slot) sees the right frame. */
+                     "mov %r8,0x08(%rsp)\n\t"
                      "call *%rax\n\t"
                      "leave\n\t"
                      "ret\n\t");
@@ -453,7 +507,73 @@ static long __attribute__((ms_abi)) cxx_frame_handler(CXX_EXCEPTION_RECORD* rec,
             cxx_local_unwind(image_base, d, frame, cur_state, tb[t].start_level - 1);
 
             void* funclet = (void*)(image_base + (u32_)cb->handler);
+
+            /* Gated diagnostic — fires once on the first throw so a
+             * future T6-05-fault-#2 investigation can read the four
+             * load-bearing values straight off the boot log without
+             * re-instrumenting. The expected shapes:
+             *   image_base   = the catch-site module's load address
+             *                  (non-zero); a 0 here IS the bug.
+             *   cb->handler  = the catch funclet's RVA (small u32).
+             *   funclet      = image_base + cb->handler — absolute
+             *                  VA in the catch-site module's .text.
+             *                  If this equals cb->handler, image_base
+             *                  was 0 and the call would fault at a
+             *                  bare RVA in .rdata (the reported 0x23d8). */
+            if (s_cxxeh_dbg_armed)
+            {
+                s_cxxeh_dbg_armed = 0;
+                char buf[80];
+                cxxeh_dbg_emit("[cxxeh-dbg] catch dispatch (first throw)\n");
+                /* "ib=<hex16>\n" — 21 bytes incl. NUL. */
+                buf[0] = 'i';
+                buf[1] = 'b';
+                buf[2] = '=';
+                cxxeh_dbg_hex64(buf + 3, (unsigned long long)image_base);
+                buf[19] = '\n';
+                buf[20] = '\0';
+                cxxeh_dbg_emit(buf);
+                buf[0] = 'h';
+                buf[1] = 'r';
+                buf[2] = '=';
+                cxxeh_dbg_hex64(buf + 3, (unsigned long long)(unsigned int)cb->handler);
+                buf[19] = '\n';
+                buf[20] = '\0';
+                cxxeh_dbg_emit(buf);
+                buf[0] = 'f';
+                buf[1] = 'u';
+                buf[2] = '=';
+                cxxeh_dbg_hex64(buf + 3, (unsigned long long)funclet);
+                buf[19] = '\n';
+                buf[20] = '\0';
+                cxxeh_dbg_emit(buf);
+                buf[0] = 'd';
+                buf[1] = 'i';
+                buf[2] = '=';
+                cxxeh_dbg_hex64(buf + 3, (unsigned long long)disp);
+                buf[19] = '\n';
+                buf[20] = '\0';
+                cxxeh_dbg_emit(buf);
+            }
+
             void* cont = cxx_call_funclet(funclet, frame);
+
+            if (!s_cxxeh_dbg_armed)
+            {
+                /* Re-armed-to-zero state. Print the post-funclet
+                 * continuation. If the funclet faulted (jumped to
+                 * bare RVA), we never reach this line — the absence
+                 * of `[cxxeh-dbg] co=` in the log AFTER the `fu=`
+                 * line confirms `call *funclet` was the fault site. */
+                char buf[80];
+                buf[0] = 'c';
+                buf[1] = 'o';
+                buf[2] = '=';
+                cxxeh_dbg_hex64(buf + 3, (unsigned long long)cont);
+                buf[19] = '\n';
+                buf[20] = '\0';
+                cxxeh_dbg_emit(buf);
+            }
 
             /* Resume after the try/catch: unwind everything down to
              * (and including) the inner frames and continue at the

@@ -916,6 +916,7 @@ duetos_embed_blob(generated_ntdll_dll.h
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_internal.h"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_rtl.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_seh.c"
+        "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_dispatch.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_reg.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_info.c"
         "${CMAKE_SOURCE_DIR}/userland/libs/ntdll/ntdll_facades.c"

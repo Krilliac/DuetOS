@@ -108,6 +108,15 @@ bool TtfRasterSelfTest();
 /// length (≤ 32 chars).
 bool TtfDrawString(u32 x, u32 y, const char* text, u32 fg, u32 pixel_height);
 
+/// Like `TtfDrawString`, but routes through the caller-supplied
+/// `font` instead of `TtfChromeFontGet()`. Lets the chrome text
+/// dispatcher pick a weighted face (e.g. `TtfChromeBoldGet()` for
+/// Bold) without hand-rolling the glyph loop. Returns false on
+/// `text == nullptr` or `pixel_height == 0`. All other semantics
+/// (per-glyph render-miss fallback, alpha composite, pen advance)
+/// match `TtfDrawString` exactly.
+bool TtfDrawStringFont(const TtfFont& font, u32 x, u32 y, const char* text, u32 fg, u32 pixel_height);
+
 /// Measure `text` at `pixel_height` tall using the per-glyph advance
 /// widths from the supplied font's `hmtx` table. This is the exact
 /// pen-advance sum a subsequent `TtfDrawString` will produce for the

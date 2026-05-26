@@ -178,4 +178,54 @@ inline void PoisonFreedPage(void* ptr, u64 bytes)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Hardware-poison frame blacklist (v1 minimal — record-only).
+//
+// Background: an x86_64 SRAR (Software Recoverable Action Required)
+// machine-check fires when the CPU consumes an uncorrectable memory
+// error on a load. Per Intel SDM Vol 3 Ch 16, `MCG_STATUS.RIPV=1`
+// promises the iret frame is restartable IF software repairs the
+// underlying condition first. Linux's `hwpoison` (mm/memory-failure.c)
+// does that repair by walking every PTE that references the failing
+// frame, unmapping it, and signalling consumers. v1 here does the
+// minimal infrastructure half: it records the failing PFN so the
+// allocator never recycles it back into the free pool. Full SRAR
+// recovery (PTE walk + signal) lands on top of this once the rmap +
+// signal-delivery stories are ready.
+//
+// The list is small (32 frames) — a real machine emitting more than
+// 32 SRARs without a reboot is in a hardware-failure state where
+// the OS is no longer the load-bearing layer.
+// ---------------------------------------------------------------------------
+
+inline constexpr u32 kFramePoisonCapacity = 32;
+
+/// Mark the page-aligned physical frame `frame_phys` as bad. After
+/// this call, the next `FreeFrame(f)` for that PFN will drop the
+/// frame instead of returning it to the free pool, and any future
+/// caller can query `IsFramePoisoned` before consuming a frame.
+///
+/// Idempotent: poisoning a frame already on the list is a no-op.
+/// Returns true on insert (new or already-present), false only when
+/// the list is saturated and `frame_phys` was not already on it.
+///
+/// `frame_phys` is rounded down to page granularity by the implementation;
+/// callers may pass either a frame-aligned PFN-style value or a
+/// byte-precise fault address.
+bool PoisonFrame(u64 frame_phys);
+
+/// Returns true iff the page-aligned frame `frame_phys` has been
+/// recorded via `PoisonFrame`. Cheap linear scan (≤ 32 entries).
+bool IsFramePoisoned(u64 frame_phys);
+
+/// Number of distinct frames recorded via `PoisonFrame` since boot.
+/// 0 on a healthy box. Diagnostic for `mem` / `crprobe` shell paths.
+u32 PoisonedFrameCount();
+
+/// Boot self-test — exercises the round-trip (poison fake PFN,
+/// query, count, idempotent re-poison). Restores list to empty
+/// before returning so the live SRAR record path stays unaffected.
+/// Emits `[mm/poison-selftest] PASS` on success; panics on failure.
+void PoisonFrameSelfTest();
+
 } // namespace duetos::mm

@@ -100,10 +100,32 @@ constexpr u8 kMadtEntryLapic = 0;
 constexpr u8 kMadtEntryIoApic = 1;
 constexpr u8 kMadtEntryIntSourceOverride = 2;
 constexpr u8 kMadtEntryLapicAddrOverride = 5;
+// ACPI 4.0+: Local x2APIC entry. Carries a 32-bit APIC ID, so it
+// is the only way to enumerate logical CPUs whose ID exceeds 254
+// (the legacy 8-bit-ID space). On boxes that have at least one
+// CPU with id > 254, firmware lists ALL CPUs as type 9 — the
+// type-0 (Local APIC) entries are absent or only cover the
+// ID-< 255 subset. Source: ACPI 6.5 §5.2.12.12.
+constexpr u8 kMadtEntryLocalX2Apic = 9;
+// ACPI 4.0+: x2APIC NMI source. 12-byte body; we capture it
+// alongside the legacy LAPIC NMI (type 4) once a workload wires
+// NMI routing through it. Today the parser accepts the entry
+// (so it doesn't trip the malformed-table guard) but performs
+// no caching — wired routes are still GSI-IOAPIC only.
+constexpr u8 kMadtEntryLocalX2ApicNmi = 10;
 
-// MADT LAPIC entry flags (Intel-defined, since ACPI 5.0).
+// MADT LAPIC entry flags (Intel-defined, since ACPI 5.0). Same
+// flag layout for both type-0 (Local APIC) and type-9 (Local
+// x2APIC).
 constexpr u32 kLapicFlagEnabled = 1U << 0;
 constexpr u32 kLapicFlagOnlineCapable = 1U << 1;
+
+// Sentinel APIC ID reserved by Intel to mean "no logical CPU".
+// Firmware that pre-allocates a fixed-size table and leaves
+// holes encodes 0xFFFFFFFF for unused slots — drop the entry
+// rather than register a phantom CPU the scheduler would try
+// to steer wakes at.
+constexpr u32 kX2ApicIdInvalid = 0xFFFFFFFFu;
 
 struct [[gnu::packed]] MadtIoApic
 {
@@ -128,6 +150,17 @@ struct [[gnu::packed]] MadtLapicAddrOverride
     MadtEntryHeader header;
     u16 reserved;
     u64 address;
+};
+
+// ACPI 6.5 §5.2.12.12: Processor Local x2APIC. 16-byte body
+// including the 2-byte entry header.
+struct [[gnu::packed]] MadtLocalX2Apic
+{
+    MadtEntryHeader header;
+    u16 reserved;      // must be zero
+    u32 apic_id;       // full 32-bit x2APIC ID
+    u32 flags;         // same Enabled/OnlineCapable layout as type-0
+    u32 processor_uid; // ACPI Processor UID (matches DSDT Device(_UID))
 };
 
 // Multiboot2 ACPI tag headers are identical in layout — an 8-byte tag
@@ -695,7 +728,65 @@ void ParseMadt(const Madt& madt)
                 .apic_id = e->apic_id,
                 .enabled = (e->flags & kLapicFlagEnabled) != 0,
                 .online_capable = (e->flags & kLapicFlagOnlineCapable) != 0,
+                .is_x2apic = false,
             };
+            break;
+        }
+        case kMadtEntryLocalX2Apic:
+        {
+            // Processor Local x2APIC (ACPI 4.0+). 16-byte body with
+            // the 2-byte header; defined in ACPI 6.5 §5.2.12.12. Used
+            // by firmware to enumerate logical CPUs whose APIC ID
+            // exceeds 254 (the limit of the 8-bit field in type-0).
+            // De-duplication against type-0: on most firmware that
+            // emits type-9, the CPUs with ID < 255 still get a
+            // type-0 entry, and the type-9 entry repeats them at
+            // their wider ID. Rather than scanning the already-
+            // populated table on every entry (quadratic), we accept
+            // the duplication — the SMP bring-up code already
+            // skips its own LAPIC ID via `bsp_apic_id` and dedupes
+            // remaining entries by ID before bringing each AP up.
+            const auto* e = reinterpret_cast<const MadtLocalX2Apic*>(h);
+            // Intel sentinel for "unused slot" — refuse to register
+            // a phantom CPU the scheduler would steer wakes at.
+            if (e->apic_id == kX2ApicIdInvalid)
+            {
+                break;
+            }
+            if (g_lapic_count >= kMaxCpus)
+            {
+                // Don't panic — we may have already absorbed the
+                // first kMaxCpus entries via type-0, and the type-9
+                // duplicates of those would push us past the cap.
+                // Log once and stop accepting x2APIC entries.
+                KLOG_ONCE_WARN_V("acpi", "MADT x2APIC entries exceed kMaxCpus; dropping extras",
+                                 static_cast<u64>(e->apic_id));
+                break;
+            }
+            // Note: processor_uid is 32-bit in the type-9 entry,
+            // but `LapicRecord::processor_uid` is u8 (UIDs in
+            // current consumer firmware fit, and the field is
+            // diagnostic-only). Narrow with a saturating cast so a
+            // huge UID renders 0xFF instead of UB-via-truncation.
+            const u8 narrow_uid = (e->processor_uid > 0xFFu) ? 0xFFu : static_cast<u8>(e->processor_uid);
+            g_lapics[g_lapic_count++] = LapicRecord{
+                .processor_uid = narrow_uid,
+                .apic_id = e->apic_id,
+                .enabled = (e->flags & kLapicFlagEnabled) != 0,
+                .online_capable = (e->flags & kLapicFlagOnlineCapable) != 0,
+                .is_x2apic = true,
+            };
+            break;
+        }
+        case kMadtEntryLocalX2ApicNmi:
+        {
+            // Local x2APIC NMI source (ACPI 4.0+). 12-byte body:
+            // flags (u16), processor_uid (u32), LINT# (u8),
+            // reserved[3]. We don't currently route NMI through a
+            // LAPIC LINT — IOAPIC GSI is the only NMI source we
+            // service — so accept the entry to keep the parser
+            // happy on real firmware that lists one, but cache
+            // nothing. Wire when a workload demands LAPIC-NMI.
             break;
         }
         case kMadtEntryIoApic:
@@ -1581,6 +1672,114 @@ void AcpiSleepPrepSelfTest()
     arch::SerialWrite(has_gts ? "present" : "absent");
     arch::SerialWrite(")\n");
     KLOG_INFO_2V("acpi/s5", "selftest PASS", "_PTS", has_pts ? 1 : 0, "_GTS", has_gts ? 1 : 0);
+}
+
+// Boot-time self-test: synthesise a minimal MADT containing one
+// Local x2APIC (type 9) entry with a wide APIC ID, one with the
+// 0xFFFFFFFF sentinel (must be skipped), and one Local x2APIC
+// NMI (type 10) entry (must parse without panicking). Save and
+// restore the live `g_lapics` table around the call so the test
+// is idempotent. The point is to prove the parser accepts the
+// entry shapes — boots on dual-socket / >254-thread hardware will
+// silently lose CPUs without these cases.
+void AcpiMadtX2ApicSelfTest()
+{
+    // Snapshot live state.
+    const u32 saved_count = g_lapic_count;
+    LapicRecord saved_table[kMaxCpus];
+    for (u32 i = 0; i < kMaxCpus && i < saved_count; ++i)
+        saved_table[i] = g_lapics[i];
+
+    // Reset to a known empty table so the synthetic entries land at
+    // index 0..N-1 and we can validate by index.
+    g_lapic_count = 0;
+
+    // Build the synthetic MADT in a stack buffer. SdtHeader (36) +
+    // local_apic_addr (4) + flags (4) + three sub-entries (16+16+12 = 44).
+    constexpr u32 kBufBytes = sizeof(SdtHeader) + 8 + 16 + 16 + 12;
+    alignas(8) u8 buf[kBufBytes] = {};
+    auto* madt = reinterpret_cast<Madt*>(buf);
+    madt->header.signature[0] = 'A';
+    madt->header.signature[1] = 'P';
+    madt->header.signature[2] = 'I';
+    madt->header.signature[3] = 'C';
+    madt->header.length = kBufBytes;
+    madt->header.revision = 5;
+    madt->local_apic_addr = 0xFEE00000u; // standard
+    madt->flags = 0;
+
+    uptr cursor = reinterpret_cast<uptr>(buf) + sizeof(Madt);
+    // Entry 1: Local x2APIC, wide ID 0x12345678, enabled.
+    {
+        auto* e = reinterpret_cast<MadtLocalX2Apic*>(cursor);
+        e->header.type = kMadtEntryLocalX2Apic;
+        e->header.length = 16;
+        e->reserved = 0;
+        e->apic_id = 0x12345678u;
+        e->flags = kLapicFlagEnabled;
+        e->processor_uid = 0x40;
+        cursor += e->header.length;
+    }
+    // Entry 2: Local x2APIC, sentinel ID — must be dropped.
+    {
+        auto* e = reinterpret_cast<MadtLocalX2Apic*>(cursor);
+        e->header.type = kMadtEntryLocalX2Apic;
+        e->header.length = 16;
+        e->reserved = 0;
+        e->apic_id = kX2ApicIdInvalid;
+        e->flags = kLapicFlagEnabled;
+        e->processor_uid = 0x41;
+        cursor += e->header.length;
+    }
+    // Entry 3: Local x2APIC NMI — must not panic; we cache nothing.
+    {
+        struct [[gnu::packed]] X2ApicNmi
+        {
+            MadtEntryHeader header;
+            u16 flags;
+            u32 processor_uid;
+            u8 lint;
+            u8 reserved[3];
+        };
+        auto* e = reinterpret_cast<X2ApicNmi*>(cursor);
+        e->header.type = kMadtEntryLocalX2ApicNmi;
+        e->header.length = 12;
+        e->flags = 0;
+        e->processor_uid = 0xFFFFFFFFu; // applies to all CPUs
+        e->lint = 1;
+        cursor += e->header.length;
+    }
+
+    ParseMadt(*madt);
+
+    // Validate: exactly one entry should have been registered (the
+    // sentinel-id entry must be dropped; the NMI entry must register
+    // nothing).
+    if (g_lapic_count != 1u)
+    {
+        core::PanicWithValue("acpi/madt", "x2APIC selftest: unexpected lapic_count after parse",
+                             static_cast<u64>(g_lapic_count));
+    }
+    if (g_lapics[0].apic_id != 0x12345678u)
+    {
+        core::PanicWithValue("acpi/madt", "x2APIC selftest: apic_id round-trip wrong",
+                             static_cast<u64>(g_lapics[0].apic_id));
+    }
+    if (!g_lapics[0].is_x2apic)
+    {
+        core::Panic("acpi/madt", "x2APIC selftest: is_x2apic flag not set");
+    }
+    if (!g_lapics[0].enabled)
+    {
+        core::Panic("acpi/madt", "x2APIC selftest: enabled flag round-trip wrong");
+    }
+
+    // Restore live state.
+    g_lapic_count = saved_count;
+    for (u32 i = 0; i < kMaxCpus && i < saved_count; ++i)
+        g_lapics[i] = saved_table[i];
+
+    arch::SerialWrite("[acpi/madt-x2apic-selftest] PASS\n");
 }
 
 } // namespace duetos::acpi

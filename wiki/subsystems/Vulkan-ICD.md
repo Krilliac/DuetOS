@@ -540,10 +540,15 @@ the v0 syscall surface doesn't provide.
   per-pixel src-over alpha; software Z-test when v1 vertex format
   is selected), AND the SPIR-V shader rasterizer when a pipeline
   binds parseable VS + FS modules (TriangleList only).
-- **SPIR-V texture sampling.** The interpreter recognises
-  `OpExtInst` and `OpFunctionCall` shapes but does not implement
-  `OpImageSample*` / `OpImageRead`. Descriptor-set fetch path is
-  not wired into the shader hook yet.
+- **SPIR-V texture sampling.** `OpImageSampleImplicitLod` /
+  `OpImageSampleExplicitLod` are implemented and fetch through the
+  bound (set 0, binding 0) sampled-image descriptor via
+  `SampleImageRgba8`. v0 uses REPEAT addressing for any sampler
+  binding and ignores explicit LOD (no mipmap chain). Unbound
+  samples return the UV coordinate as `(u, v, 0, 1)` — the
+  "missing texture" diagnostic. `OpImageRead` / `OpImageWrite`
+  and non-REPEAT sampler modes (CLAMP, MIRROR, BORDER) are still
+  unimplemented.
 - **SPIR-V perspective correction.** The shader rasterizer is
   affine (linear pixel-space interpolation in pixel space).
   Perspective-correct attribute interpolation needs a per-fragment

@@ -53,11 +53,12 @@ When a slice ADDS a new DLL or new method:
 2. Surface it in the corresponding subsystem wiki page (`wiki/
    subsystems/Win32-DLLs.md` for shipping DLLs).
 
-## Summary counts (2026-05-11)
+## Summary counts (2026-05-26)
 
-- **Shipping DLLs:** 46 dirs in `userland/libs/` (Win32 user-mode +
-  DirectX peripheral). Two `dx_*.h` files in the same tree are
-  shared headers, not DLLs.
+- **Shipping DLLs:** 60 dirs in `userland/libs/` — 45 production
+  DLLs (PE64), 13 PE32 i386 variants (`*_32`) for cross-bitness
+  imports, and 2 `customdll*` test fixtures. Two `dx_*.h` files in
+  the same tree are shared headers, not DLLs.
 - **Approximate exports:** ~1100 across all shipping DLLs
 - **Source LOC across `userland/libs/`:** ~40 000
 - **Live STUB / GAP markers** in user-mode + win32 subsystem
@@ -65,7 +66,7 @@ When a slice ADDS a new DLL or new method:
   — STUB/GAP discipline now lives entirely in kernel TUs (gpu,
   iwlwifi, etc.). Userland DLL stubs are documented in this page
   rather than via inline markers; see the per-DLL drilldown below.
-- **Win32 PE smoke coverage:** 143 fixtures in `userland/apps/`
+- **Win32 PE smoke coverage:** 154 fixtures in `userland/apps/`
   boot-tested per run
 
 The marker count is a lower bound on known-stub paths — most stubs
@@ -314,10 +315,15 @@ syscall routing shows up immediately.
   spurious wakeups, never lost ones). The condition-variable
   sleep samples the sequence under the lock before releasing,
   so a wake in the gap returns immediately — no lost wakeup.
-  These bind via the new api-set host resolver: an
-  `api-ms-win-*` / `ext-ms-win-*` import (mingw's
-  `-lsynchronization`, and Chrome) is a name contract resolved
-  against whichever preloaded base DLL hosts it. Verified by
+  These bind via the api-set host resolver. The resolver is a
+  two-tier lookup: a static curated contract→host table
+  (`kernel/loader/apiset_static.cpp`, ~70 entries spanning the
+  core / crt / security / service surfaces) is consulted first;
+  contracts the table doesn't yet cover fall through to the
+  original "first preloaded export by name" heuristic. The boot
+  log emits `via-apiset-table` vs `via-apiset-heuristic` so new
+  contracts are grep-able and can be promoted into the table.
+  Verified by
   `userland/apps/sync_smoke` (`smoke=pe-hello`): a
   cross-thread CV producer/consumer, a WaitOnAddress handshake
   and the two-call InitOnce all PASS. SRW shared still aliases

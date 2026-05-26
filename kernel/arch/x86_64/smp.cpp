@@ -914,12 +914,15 @@ u64 SmpStartAps()
             const char* p = "[arch/smp] starting AP apic_id=0x";
             while (*p)
                 buf[n++] = *p++;
-            // Render rec.apic_id as zero-padded 2-digit hex (8-bit
-            // MADT field).
+            // Render rec.apic_id zero-padded. 2 digits for the legacy
+            // xAPIC table entry (8-bit MADT type-0 field), 8 digits
+            // for x2APIC (32-bit MADT type-9 field) so IDs above the
+            // 8-bit range render unambiguously.
             const u32 aid = rec.apic_id;
             const char hex[] = "0123456789abcdef";
-            buf[n++] = hex[(aid >> 4) & 0xF];
-            buf[n++] = hex[aid & 0xF];
+            const u32 digits = rec.is_x2apic ? 8u : 2u;
+            for (u32 i = digits; i-- > 0;)
+                buf[n++] = hex[(aid >> (i * 4u)) & 0xFu];
             buf[n++] = '\n';
             buf[n] = '\0';
             SerialWrite(buf);

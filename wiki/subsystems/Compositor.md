@@ -13,7 +13,8 @@ The compositor and window manager live in `kernel/drivers/video/`
 **in-kernel** for hot-path latency. Userland reaches them via
 `SYS_WIN_*` (window lifecycle) and `SYS_GDI_*` (pixel primitives).
 
-`kMaxWindows = 16`.
+`kMaxWindows = 40` (21 system + debugger + headroom for ring-3 PE
+windows; see `kernel/drivers/video/widget.h` for the breakdown).
 
 ## What Paints Today
 

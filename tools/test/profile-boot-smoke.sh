@@ -161,7 +161,7 @@ case "${PROFILE}" in
             "[advapi] advapi32 + event/wait/time/proc OK"
             "[perf-counter] perf counter + tick count OK"
             "[heap-resize] HeapSize + HeapReAlloc + realloc OK"
-            "[calc] self-test OK"
+            "[calculator-selftest] PASS"
             "[files] self-test OK"
             "[clock] self-test OK"
             "[block] self-test OK"

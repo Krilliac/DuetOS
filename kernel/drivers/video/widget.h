@@ -108,24 +108,20 @@ void WidgetTooltipRender();
 // ---------------------------------------------------------------
 
 constexpr u32 kWindowInvalid = 0xFFFFFFFFu;
-// Headroom split: 6 slots for boot-time built-in apps (Calculator,
-// Notepad, Task Manager, Kernel Log, Files, Clock), 10 slots for
-// ring-3 windows registered via SYS_WIN_CREATE from user32.dll's
-// CreateWindowExA/W bridge. 16 is a round number well under any
-// real-world Win32 program's window budget and small enough that
-// the kMaxWindows-sized static arrays still fit comfortably in
-// .bss. A future slice replaces this with a dynamic table when
-// some program legitimately needs more than this cap.
+// Window-registry cap: 21 boot-time system windows (CALCULATOR,
+// NOTEPAD, …, TERMINAL, CHARACTER MAP, NETWORK STATUS, DEVICE
+// MANAGER, FIREWALL — registered by boot_bringup.cpp), 1 debugger
+// window (apps/dbg.cpp), and headroom for ring-3 PE windows
+// registered via SYS_WIN_CREATE from user32.dll's CreateWindowExA/W
+// bridge. The kMaxWindows-sized static arrays still fit comfortably
+// in .bss at this size; a future slice replaces them with a dynamic
+// table when a real workload exceeds the headroom.
 //
-// Bumped from 16 → 40 on 2026-05-23: boot_bringup.cpp registers
-// 21 system windows (CALCULATOR, NOTEPAD, …, TERMINAL, NETWORK
-// STATUS, DEVICE MANAGER, FIREWALL, …) and apps/dbg.cpp adds the
-// debugger window. With kMaxWindows=16 the 17th and later registers
-// silently returned kWindowInvalid — TERMINAL itself, CHARACTER MAP,
-// NETWORK STATUS, DEVICE MANAGER and FIREWALL all failed to register,
-// and any PE that called CreateWindow afterward got "registry full"
-// from window_syscall.cpp. 40 = 21 system + debugger + sane headroom
-// for ring-3 PE windows without inflating the .bss footprint.
+// History: bumped from 16 → 40 on 2026-05-23. The original 16 was
+// half the system-window count alone — TERMINAL, CHARACTER MAP,
+// NETWORK STATUS, DEVICE MANAGER and FIREWALL silently failed to
+// register at the old cap, and any PE that called CreateWindow
+// afterward got "registry full" from window_syscall.cpp.
 constexpr u32 kMaxWindows = 40;
 
 using WindowHandle = u32;

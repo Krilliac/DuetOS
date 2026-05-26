@@ -4,8 +4,9 @@
 >
 > **Execution context:** Userland — DLLs run in the target process's user-mode context
 >
-> **Maturity:** 44 production DLLs in tree (38 preloaded into every
-> Win32 PE process; remainder load on demand)
+> **Maturity:** 45 production DLLs in tree, all preloaded on real
+> hardware; 7 non-essential entries are skipped under
+> `arch::IsEmulator()` to keep CI runs short
 
 ## Overview
 
@@ -15,7 +16,7 @@ They are *not* parallel subsystems — there is one TCP stack in the
 kernel, one VFS, one registry, one window manager. The DLLs marshal
 Win32 calls into syscalls and trust the kernel's return.
 
-## DLL Inventory (44 production DLLs)
+## DLL Inventory (45 production DLLs)
 
 | Group | DLLs |
 |-------|------|
@@ -26,8 +27,9 @@ Win32 calls into syscalls and trust the kernel's return.
 | Crypto / RNG | `bcrypt` |
 | Multimedia | `winmm`, `dsound`, `xaudio2_8`, `xinput1_4` |
 | DirectX surface | `d3d9`, `d3d11`, `d3d12`, `dxgi`, `d2d1`, `dwrite`, `dinput8`, `ddraw`, `d3dcompiler` |
+| Vulkan | `vulkan-1` |
 
-Total: ~1100 exports across the 44 production DLLs (plus 2
+Total: ~1100 exports across the 45 production DLLs (plus 2
 `customdll*` test fixtures used by the dev-time export-resolver
 smoke). For per-DLL drilldown, LOC, and per-method REAL / GAP /
 STUB / MISSING status, see
@@ -35,14 +37,22 @@ STUB / MISSING status, see
 
 ## Load Time
 
-Every Win32-imports PE process preloads the full set at spawn. The PE
-loader maps each DLL into the new process's `AddressSpace`, applies
-relocations, and registers the DLL with the per-process DLL table.
-Per-process cost: ~96 frames.
+Every Win32-imports PE process preloads the production DLL set at
+spawn on real hardware. The PE loader maps each DLL into the new
+process's `AddressSpace`, applies relocations, and registers the DLL
+with the per-process DLL table. Per-process cost: ~96 frames for the
+default essential subset.
 
-This is a deliberate v0 simplification. Lazy loading
-(`LoadLibrary`-on-demand) would save frames for small PEs but
-complicates the spawn path. Today every PE pays the same flat cost.
+Under `arch::IsEmulator()` the 9 entries in `preload_set[]` flagged
+`essential=false` (7 production DLLs + 2 customdll test fixtures)
+are skipped. Each skipped slot saves a page alloc + PE parse + EAT
+walk, which compounds to seconds of guest time per PE under
+TCG / oversubscribed-KVM. On real hardware everything preloads.
+
+This is a deliberate v0 simplification. Lazy
+(`LoadLibrary`-on-demand) loading would save frames for small PEs
+but complicates the spawn path; the emulator skip-list is the only
+trim today.
 
 ## Real Implementations Behind the Surface
 

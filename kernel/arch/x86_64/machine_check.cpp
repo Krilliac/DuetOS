@@ -3,8 +3,9 @@
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
-#include "log/klog.h"
 #include "diag/fix_journal.h"
+#include "log/klog.h"
+#include "mm/poison.h"
 
 namespace duetos::arch
 {
@@ -129,6 +130,14 @@ MachineCheckVerdict MachineCheckReport(const TrapFrame* frame)
     bool any_pcc = false;
     bool any_uc = false;
     u32 worst_bank = 0;
+    // Track the *first* bank that reports a SRAR-class error
+    // (Software Recoverable, Action Required: AR=1 + S=1 + UC=1 +
+    // PCC=0, with ADDRV=1 giving a usable physical address). The
+    // recorded address feeds `mm::PoisonFrame` in the
+    // RestartableInfo verdict arm so the failing frame never
+    // re-enters the free pool. Intel SDM Vol 3 §16.4.2.1.
+    bool srar_present = false;
+    u64 srar_addr = 0;
 
     for (u32 i = 0; i < banks; ++i)
     {
@@ -187,6 +196,15 @@ MachineCheckVerdict MachineCheckReport(const TrapFrame* frame)
             if (!any_pcc)
                 worst_bank = i;
         }
+        // SRAR detection (Software Recoverable, Action Required).
+        // The exact gate (S=1, AR=1, UC=1, PCC=0, ADDRV=1) is per
+        // Intel SDM Vol 3 §16.4.2.1 — "Action Required" class.
+        if ((status & kMcStatusS) != 0 && (status & kMcStatusAr) != 0 && (status & kMcStatusUc) != 0 &&
+            (status & kMcStatusPcc) == 0 && (status & kMcStatusAddrv) != 0 && !srar_present)
+        {
+            srar_present = true;
+            srar_addr = ReadMsr(kMsrMcAddr(i));
+        }
     }
 
     MachineCheckVerdict verdict;
@@ -211,17 +229,31 @@ MachineCheckVerdict MachineCheckReport(const TrapFrame* frame)
     else
     {
         verdict = MachineCheckVerdict::RestartableInfo;
-        // GAP: restartable in principle (RIPV=1, no PCC) but DuetOS
-        // v0 has no page-poison / SRAR recovery path (no per-frame
-        // poison tracking, no kill-just-the-poisoned-page handler) —
-        // revisit when the mm layer grows a poison list. Until then
-        // the conservative contract (data integrity over liveness)
-        // halts rather than resume into possibly-bad data.
-        FIX_NOTE_GAP("kernel/arch/x86_64/machine_check.cpp:213",
-                     "restartable in principle (RIPV=1, no PCC) but DuetOS");
-        SerialWrite("RESTARTABLE in principle (RIPV=1, no PCC) — but v0 has "
-                    "no page-poison recovery path; halting for data "
-                    "integrity\n");
+        // v1 (record-only) page poison: if any bank carries an SRAR
+        // class entry with a usable ADDRV, record the failing frame
+        // on the poison list. Subsequent `FreeFrame` on that PFN
+        // will drop the frame instead of returning it to the pool;
+        // existing references in user/kernel mappings stay in place
+        // (full v1 — PTE walk + signal — depends on rmap which the
+        // v0 mm layer doesn't have yet). The verdict still resolves
+        // to "halt" for the current fault because resuming the
+        // interrupted load requires the rmap walk we don't have;
+        // recording the PFN ensures a future reboot persistence
+        // path (the /system/badmem-list follow-on) sees the frame.
+        if (srar_present)
+        {
+            duetos::mm::PoisonFrame(srar_addr);
+            SerialWrite("SRAR ADDRESS recorded on poison list — frame "
+                        "excluded from future allocation, but v1 has no "
+                        "rmap walk, so this boot still halts for data "
+                        "integrity\n");
+        }
+        else
+        {
+            SerialWrite("RESTARTABLE in principle (RIPV=1, no PCC) — no "
+                        "SRAR-class bank with ADDRV; halting for data "
+                        "integrity\n");
+        }
     }
     (void)any_uc;
 

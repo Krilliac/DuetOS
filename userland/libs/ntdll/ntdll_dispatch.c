@@ -385,12 +385,42 @@ __declspec(dllexport) void RtlUnwindEx(void* TargetFrame, void* TargetIp, void* 
     /* Resume in the target frame at TargetIp. Rebuild the resume
      * context from the original fault context (registers the
      * handler block expects) but with Rip = TargetIp and the
-     * unwound Rsp/Rbp of the target frame. */
+     * unwound Rsp/Rbp of the target frame.
+     *
+     * Critical RSP adjustment: at the throw site, the fault
+     * ContextRecord has rsp pointing AT the return address that
+     * the (call _CxxThrowException) instruction pushed. The
+     * TargetIp lives in the same function as the throw site (a
+     * try/catch within one function), and resumes in the body —
+     * AFTER the throw call's stack effect should be undone.
+     *
+     * The body expects rsp = rsp_at_throw + 8 (the throw call's
+     * return-address slot consumed). Without this `+8`, the
+     * function's epilogue (`add rsp,N; pop rbp; ret`) lands the
+     * `pop rbp` over the saved-rbp's slot, and `ret` jumps to a
+     * value from the wrong stack location — manifesting as
+     * RIP=4 (or any low garbage) at the catch resume.
+     *
+     * For T6-05 fault #2's last leg, this is what restores
+     * cxxeh_pe's `test_int_throw` to a sensible body rsp after
+     * the catch funclet returns. Same pattern Wine + ReactOS use:
+     * after the unwind walk, the resume rsp is the body-rsp of
+     * the catching function, not the throw-site rsp. */
     {
         unsigned char r[1232];
         for (unsigned i = 0; i < 1232; ++i)
             r[i] = ((unsigned char*)ContextRecord)[i];
-        *(unsigned long long*)((unsigned char*)r + CTX_RSP) = *(unsigned long long*)((unsigned char*)c + CTX_RSP);
+        unsigned long long resume_rsp = *(unsigned long long*)((unsigned char*)c + CTX_RSP);
+        /* Undo the throwing call's return-address push. Strictly
+         * applies when the catch target is in the SAME function
+         * as the throw (the common case our FH3 personality
+         * generates today). Cross-function catches would need a
+         * full RtlVirtualUnwind to bring c->rsp from the throw
+         * site up past the throwing frame's prologue — not yet
+         * implemented; revisit when a cross-function catch
+         * workload demands it. */
+        resume_rsp += 8;
+        *(unsigned long long*)((unsigned char*)r + CTX_RSP) = resume_rsp;
         *(unsigned long long*)((unsigned char*)r + CTX_RBP) = *(unsigned long long*)((unsigned char*)c + CTX_RBP);
         *(unsigned long long*)((unsigned char*)r + CTX_RIP) = (unsigned long long)TargetIp;
         *(unsigned long long*)((unsigned char*)r + CTX_RAX) = (unsigned long long)ReturnValue;

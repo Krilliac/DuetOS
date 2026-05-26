@@ -457,11 +457,14 @@ void LapicTimerStartOnCurrent()
     // (g_pit_fallback_active), arming this AP's LAPIC timer LVT is
     // pointless: on this platform the LVT counts but never delivers,
     // and the PIT IRQ0 is routed only to the BSP's LAPIC id. APs
-    // would get no tick from either source. DuetOS boots 1 CPU
-    // today, so this is currently unreachable; a real SMP bring-up
-    // needs either (a) an IPI-broadcast of the BSP's PIT-derived
-    // tick to APs, or (b) a per-AP TSC-deadline timer. Until then,
-    // don't arm a known-dead LVT — warn once and return.
+    // would get no tick from either source. DuetOS now boots SMP=8
+    // routinely with LAPIC-timer delivery working — this fallback
+    // path is unreachable on any system the test matrix covers, but
+    // a future board whose LAPIC timer is buggy enough to need the
+    // PIT recovery while running multiple cores needs either (a) an
+    // IPI-broadcast of the BSP's PIT-derived tick to APs, or (b) a
+    // per-AP TSC-deadline timer. Until then, don't arm a known-dead
+    // LVT — warn once and return.
     if (g_pit_fallback_active)
     {
         KLOG_ONCE_WARN("arch/timer", "AP LAPIC timer skipped — BSP is on PIT-tick fallback (SMP tick GAP)");

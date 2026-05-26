@@ -24,14 +24,16 @@
  *     wakes a caller-supplied WaitQueue so a process-context
  *     worker (the `env-monitor` task) can react.
  *
- * GAP: GPE status is acked (so a firmware-raised GPE can't keep
- * the level-triggered SCI asserted) but the per-GPE `_Qxx` AML
- * query method is NOT evaluated yet — that needs the AML
- * interpreter in process context and an EC `_Qxx` path that does
- * not exist (see `ec.h`). Power-button (the one event QEMU can
- * exercise) is fully handled; lid/AC via EC `_Qxx` remain a
- * documented limit, tracked by the "Battery + ACPI suspend"
- * roadmap entry.
+ * Status: GPE status is acked (so a firmware-raised GPE can't
+ * keep the level-triggered SCI asserted). EC `_Qxx` events are
+ * dispatched by the `env-monitor` task, which on any pending
+ * GPE drains `AcpiEcDispatchPendingQuery` (acpi/ec.h) in a
+ * bounded loop. That picks up lid / AC / battery events routed
+ * through the EC. The remaining gap is per-GPE `_Lxx`/`_Exx`
+ * dispatch for events whose firmware skips the EC (rare on
+ * laptops); a full GPE dispatch worker that consults the
+ * namespace is the documented follow-on. Power-button (the one
+ * event QEMU can exercise) is fully handled via PM1 status.
  *
  * Context: kernel. `AcpiSciInit` runs once at boot after AcpiInit
  * + IOAPIC are up and the scheduler is online (it needs the

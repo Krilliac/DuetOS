@@ -11,9 +11,8 @@
 ## Overview
 
 The translation layer is a thin module that **bridges** the Win32 and
-Linux subsystems through the native DuetOS syscall surface. It is
-deliberately small — under 500 lines — and lives at
-[`kernel/subsystems/translation/`](../../kernel/subsystems/translation/).
+Linux subsystems through the native DuetOS syscall surface. It lives
+at [`kernel/subsystems/translation/`](../../kernel/subsystems/translation/).
 
 Its job:
 
@@ -173,9 +172,13 @@ Use cases:
 
 ## Known Limits / GAPs
 
-- **`NtTranslateToLinux` is available but not yet wired** in the NT
-  dispatch hot path. The first NT shape that benefits from it lands
-  with the next-slice work on `NtCreateThreadEx` argument shuffling.
+- **`NtTranslateToLinux` is wired** via `SYS_NT_INVOKE` in
+  `kernel/syscall/syscall.cpp`; six NT calls in the auto-generated
+  `nt_syscall_table_generated.h` currently route through it. The
+  bridge is opt-in per NT-syscall row, not a wholesale rerouting
+  of the NT dispatch — additional NT shapes flip onto the path
+  when the per-call argument shuffle is worth less code than a
+  dedicated native handler.
 - **Locale and thread-info classes** are not exposed through
   translation — they are NT-only concepts with no Linux analogue
   worth bridging. `// GAP:` markers in `translate.cpp` pin the

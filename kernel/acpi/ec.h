@@ -54,4 +54,43 @@ bool AcpiEcWrite(u8 addr, u8 value);
 /// hanging or faulting. Emits one `[acpi/ec] selftest PASS` line.
 void AcpiEcSelfTest();
 
+/// Read the next pending EC query byte (CMD_QUERY / 0x84). Used by
+/// the SCI handler when the EC asserts SCI_EVT — issue CMD_QUERY,
+/// poll OBF with the standard deadline, and read EC_DATA.
+///
+/// Returns true on success with `*query` set to the byte (0 if
+/// nothing was pending). Returns false on:
+///   - EC absent (no `EmbeddedControl` region declared)
+///   - IBF stuck (host write side blocked beyond timeout)
+///   - OBF didn't go high within timeout (firmware not responding
+///     to CMD_QUERY)
+/// The boolean false return is the same shape `AcpiEcRead`/`Write`
+/// use; caller should KLOG and move on, not panic.
+///
+/// Caller context: process / kernel-task only. The polled wait
+/// can take tens of microseconds, so don't call from an IRQ
+/// handler — queue from the SCI ISR to a worker that calls
+/// `AcpiEcDispatchPendingQuery` (below) instead.
+bool AcpiEcReadQueryByte(u8* query);
+
+/// Drain one pending EC query: read the query byte via
+/// `AcpiEcReadQueryByte`, build the `\_GPE._Qxx` AML method name
+/// (or whatever scope the EC's `_GPE` lives in — v0 uses the
+/// global `\_GPE` namespace), and evaluate the matching `_Qxx`
+/// method via the AML interpreter.
+///
+/// Returns true if a query was drained AND a matching `_Qxx`
+/// method was evaluated. Returns false if no query was pending,
+/// the read failed, or no matching method exists in the
+/// namespace (the latter is a firmware-bug condition — a real
+/// firmware that asserts SCI_EVT always provides a matching
+/// query method, but the call is non-fatal because some
+/// firmwares emit spurious events).
+///
+/// Idempotent — safe to call repeatedly while the EC has more
+/// queries queued (CMD_QUERY itself acks the event in the EC).
+/// Caller should loop until this returns false to drain a
+/// full burst from the GPE worker.
+bool AcpiEcDispatchPendingQuery();
+
 } // namespace duetos::acpi

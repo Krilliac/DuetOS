@@ -280,8 +280,14 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
             // RecordErr are the real notification channels; an [E]
             // sentinel here floods the error log on every wrong
             // password and trips the boot-log [E] CI grep.
-            KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
-                        "M3 MIC verify FAILED — handshake aborted");
+            // DEBUG (not WARN): MIC verify failing is a legitimate
+            // per-handshake outcome — wrong PSK, AP-side bug, or the
+            // tamper-detect self-test deliberately corrupting M3. The
+            // RecordErr below + the caller's `Err` return propagate the
+            // failure; a WARN sentinel here floods the boot log on
+            // every tamper-test run with no actionable signal.
+            KLOG_DEBUG_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                         "M3 MIC verify FAILED — handshake aborted");
             diag::RecordErr(diag::Layer::Eapol, "4way-m3-mic", static_cast<u32>(vr.error()), 0, 0, 0);
             return vr;
         }
@@ -326,8 +332,13 @@ void FourWayInit(FourWayContext& ctx, const u8 pmk[32], const u8 sta_mac[6], con
             {
                 ++ctx.mic_failures;
                 ctx.state = FourWayState::Failed;
-                KLOG_WARN_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
-                            "M3 AES-KW unwrap integrity check FAILED — handshake aborted");
+                // DEBUG (not WARN): AES-KW unwrap failure is a legitimate
+                // per-handshake outcome — wrong KEK, corrupted M3 payload,
+                // or the tamper-detect self-test exercising the failure
+                // leg. RecordErr + the caller's `Err` return are the
+                // real notification channels.
+                KLOG_DEBUG_A(::duetos::core::LogArea::Wireless, "net/wireless/fourway",
+                             "M3 AES-KW unwrap integrity check FAILED — handshake aborted");
                 diag::RecordErr(diag::Layer::Eapol, "4way-m3-kw-fail",
                                 static_cast<u32>(::duetos::core::ErrorCode::Corrupt), f.key_data_len, 0, 0);
                 return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};

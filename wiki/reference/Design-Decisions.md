@@ -10009,3 +10009,199 @@ a fresh AP idle task — intermittent" — closes the underlying
 shape that the 6 indirect-control-flow validators kept silent
 on. Validator suite stays in place as regression armour for
 unrelated wild-target dispatch shapes.
+
+## 2026-05-26 — MADT Local x2APIC (type 9) entries are parsed and registered
+
+**Decision:** `kernel/acpi/acpi.cpp::ParseMadt` accepts MADT
+sub-entries of type 9 (Local x2APIC) and type 10 (Local x2APIC
+NMI). The type-9 body — `{ u16 reserved, u32 apic_id, u32 flags,
+u32 processor_uid }` per ACPI 6.5 §5.2.12.12 — is registered into
+the same `g_lapics[]` table the legacy type-0 entries land in.
+`LapicRecord::apic_id` is widened from `u8` to `u32` to hold the
+wider ID. A new `LapicRecord::is_x2apic` boolean records the
+source for diagnostic rendering (the AP-bringup boot-log line in
+`kernel/arch/x86_64/smp.cpp` renders 8 hex digits for x2APIC IDs,
+2 for legacy xAPIC). The Intel-reserved sentinel `0xFFFFFFFF` is
+dropped without registering a phantom CPU. Type 10 (Local x2APIC
+NMI) is accepted by the parser so the malformed-table guard
+doesn't trip, but the entry is not yet cached — IOAPIC GSI is the
+only NMI source DuetOS currently routes.
+
+**Why:** firmware on any logical-CPU box that exceeds 254 cores
+enumerates **all** CPUs as MADT type 9 — the type-0 entries are
+absent above the 8-bit ID boundary. Without the type-9 case, a
+real dual-socket Xeon SP / EPYC box would boot with only the
+first 254 cores visible and the rest silently invisible to AP
+bring-up. Modern Linux (`arch/x86/kernel/acpi/boot.c::
+acpi_parse_x2apic`) and FreeBSD (`sys/x86/acpica/madt.c::
+madt_setup_cpus_handler`) both gate on the same shape; we
+mirror their accept-shape.
+
+**Verified:** new boot self-test `AcpiMadtX2ApicSelfTest`
+(`[acpi/madt-x2apic-selftest] PASS` sentinel) builds a synthetic
+MADT containing one valid x2APIC entry (id=0x12345678), one
+sentinel entry (id=0xFFFFFFFF, must drop), and one type-10 NMI
+entry (must parse). Snapshots and restores `g_lapics` around the
+call so the test is idempotent. Wired under `DUETOS_BOOT_SELFTEST`
+in `kernel/core/boot_bringup.cpp` alongside the existing ACPI
+selftests.
+
+**Alternatives considered and rejected:**
+- *Leave type 9 in the `default:` arm and ignore.* Today's
+  behaviour. Silently loses cores on big servers; the firmware
+  ID is present in the table but the kernel pretends it isn't.
+  Anti-pattern: "system that exists but is never called."
+- *Bump `kMaxCpus` past 32 to accept all CPUs an enterprise
+  server might list.* Would cascade through `mm/slab.cpp`,
+  `mm/frame_allocator.cpp` (per-CPU magazines / frame pools
+  sized by `kMaxCpus`), and the 32-bit `affinity_mask` in
+  `sched::Task`. Deferred as its own slice — landing MADT-9
+  parsing first means a future cap-bump only has to widen the
+  mask, not also teach the parser to find the entries.
+- *De-duplicate type-9 entries against existing type-0 entries
+  by APIC ID before inserting.* Linux does this. For DuetOS v0
+  the SMP bring-up code (`SmpStartAps`) already skips its own
+  LAPIC ID via `bsp_apic_id` and would naturally dedupe its
+  iteration. Accept the duplication in the table; the cap
+  (`kMaxCpus`) is the practical limiter and we log + drop
+  rather than panic when it's hit.
+
+**Revisit when:** an actual >32-thread target appears in the
+hardware matrix (requires the `kMaxCpus` cascade above), or a
+workload needs LAPIC-routed NMI delivery (would consume the
+type-10 entries we currently accept-and-drop).
+
+**Sources:** ACPI 6.5 §5.2.12.12 / §5.2.12.13; Linux
+`arch/x86/kernel/acpi/boot.c`; FreeBSD `sys/x86/acpica/madt.c`.
+
+**Related roadmap track(s):** Topology — cluster-scoped IPI
+fan-out (Roadmap line 323) references x2APIC; the cluster fan-out
+work itself remains gated on workload-justified profile evidence,
+but the *enumeration* of x2APIC-only CPUs is now correct.
+
+## 2026-05-26 — API-set v1 is a static curated table, not a parsed schema
+
+**Decision:** the api-set contract → host DLL mapping lives in
+`kernel/loader/apiset_static.cpp` as a sorted in-kernel table of
+~70 entries (the contracts DuetOS PEs actually import). Lookup
+is binary search by case-folded contract head (the trailing
+`-<major>-<minor>.dll` is stripped before compare). The PE
+loader's api-set fallback (`pe_loader.cpp::ResolveImports`)
+consults the static table first; on miss it falls through to the
+existing "first preloaded export by name" heuristic so behaviour
+is monotonically better than the heuristic-only path. The boot
+log distinguishes `via-apiset-table` from `via-apiset-heuristic`,
+making any contract that needs to be promoted into the table
+grep-able from a boot transcript.
+
+**Why not load Microsoft's `apisetschema.dll`:** we do not load
+Microsoft binaries at runtime. A v2 path that builds a v6
+schema blob from a vendored JSON manifest is documented as a
+follow-on (see the research report), but v1 doesn't need it —
+the surface DuetOS PEs touch is small enough that a static table
+is both adequate and reviewable.
+
+**Why not parse a vendored v6 schema blob now:** YAGNI. The
+in-tree PE corpus has not shown a case where one base DLL
+exports the same name as another with different semantics — the
+only "API-set in practice" risk the heuristic GAP names. A
+parsed schema gains us (a) per-parent-module aliasing and (b)
+per-SKU host swaps — neither are workloads DuetOS has today. The
+v2 path is documented + the file layout is sketched in the
+research notes so a future slice can pick it up cheaply.
+
+**Verified:** new boot self-test `ApiSetSelfTest`
+(`[apiset-selftest] PASS` sentinel) validates: table sort order;
+known contract lookup returns the expected host; uppercase input
+resolves case-insensitively; head-only contract (no version
+suffix) matches; trailing `.dll` without version digits matches;
+unknown contract returns `false` without scribbling `out_host`;
+NULL inputs return false. Wired under `DUETOS_BOOT_SELFTEST` in
+`boot_bringup.cpp:509`.
+
+**Alternatives considered and rejected:**
+- *Keep the heuristic only.* Today's behaviour. The
+  `pe_loader.cpp:1609 // GAP` was the marker; the heuristic
+  works in practice but bakes in a silent collision risk and
+  makes the boot log carry no record of which base DLL ended
+  up hosting each import.
+- *Parse the v6 schema from a vendored blob.* The right v2
+  answer, deferred per YAGNI above.
+
+**Sources:** Microsoft Learn — "API set loader operation";
+Geoff Chappell — Windows API Sets reference; Wine
+`dlls/ntdll/loader.c::get_apiset_target`; ReactOS
+`sdk/lib/apisets/apisets.c`.
+
+**Related roadmap track(s):** Closes the `kernel/loader/pe_loader.cpp:1609 // GAP` marker. Future v2 (real schema blob)
+would replace the static table with a parser; the loader-side
+call site stays unchanged.
+
+## 2026-05-26 — Page-poison v1 records SRAR PFNs but does not (yet) rmap-walk
+
+**Decision:** the machine-check architecture (`MachineCheckReport`)
+detects the SRAR class (Software Recoverable Action Required —
+Intel SDM Vol 3 §16.4.2.1: S=1, AR=1, UC=1, PCC=0, ADDRV=1) on
+the first matching bank and calls `mm::PoisonFrame(addr)` with
+the failing physical address. `mm::PoisonFrame` records the
+page-aligned PFN in a 32-entry spinlock-guarded blacklist
+(`kernel/mm/poison_list.cpp`). `FreeFrame` then consults
+`mm::IsFramePoisoned` before recycling — a poisoned PFN is
+dropped (bitmap stays USED, frame leaked for this boot)
+instead of being returned to the free pool. The 0xDE poison
+stamp is skipped on known-bad frames so the 4 KiB write doesn't
+fault on the failing DRAM cell.
+
+**Why not full v1 (rmap walk + signal):** v0 has no rmap. Linux's
+`memory_failure()` walks every PTE that references the poisoned
+folio, converts each to a hwpoison swap entry, and SIGBUSes
+every task that mapped it. DuetOS would need (a) a reverse-map
+per frame and (b) a Win32+Linux signal-delivery primitive for
+SRAR-class events. Both are real follow-ons. v1 minimal is "do
+the structural minimum so a future reboot-persistence layer has
+the failing PFN to permanently exclude" — Linux's
+`take_page_off_buddy` analogue, without the in-flight kill
+half.
+
+**Why not hook AllocateFrame:** the FreeFrame drop is sufficient
+to keep a poisoned PFN out of new allocations once it's been
+freed once. A poisoned PFN currently free in the pool might
+still be handed out until that pool slot recycles through
+FreeFrame; the windows are bounded and not all boots see SRAR
+at all. The allocator-side skip-loop is a follow-on, small but
+not currently load-bearing.
+
+**Critical lock-discipline note:** the IsFramePoisoned check in
+FreeFrame MUST run BEFORE `PoisonFreedPage`'s 4 KiB 0xDE stamp.
+Writing 4 KiB into a frame whose ECC cell already failed could
+fault on the next access or — worse — corrupt adjacent memory
+sharing the same ECC line. Order is documented in the FreeFrame
+code; class-of-bug pattern for any future refactor moving the
+check.
+
+**Verified:** new boot self-test `PoisonFrameSelfTest`
+(`[mm/poison-selftest] PASS`) round-trips insert, query,
+idempotent re-insert, page-mask normalisation (byte offset
+within frame matches), second distinct PFN, negative lookup,
+restore-original-state. Wired under `DUETOS_BOOT_SELFTEST` in
+`boot_bringup.cpp:962`.
+
+**Alternatives considered and rejected:**
+- *Halt on every SRAR (today's behaviour, no recording).* The
+  GAP at machine_check.cpp:213. Failing frame is forgotten on
+  reboot — the operator can't even tell which DIMM cell is
+  failing. v1 minimal records, halt remains.
+- *Implement the full PTE-walk recovery first.* Needs rmap +
+  signal delivery + per-Win32/Linux signal routing. Multiple
+  slices; gated on infrastructure DuetOS doesn't have. v1
+  minimal lands the structural cap so the rest can layer on.
+
+**Sources:** Intel SDM Vol 3 §16.4 (MCA architecture); Linux
+`mm/memory-failure.c`; WHEA `PFA Performed by a PSHED Plug-In`
+(Microsoft Learn); FreeBSD `sys/x86/x86/mca.c` (comparison).
+
+**Related roadmap track(s):** Closes
+`kernel/arch/x86_64/machine_check.cpp:213 // GAP` in part
+(restartable-info arm now does useful work). Persistence
+(`/system/badmem-list`) is the next slice once writable
+system FS for secrets/config lands.

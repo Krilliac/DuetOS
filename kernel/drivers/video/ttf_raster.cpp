@@ -483,12 +483,9 @@ u32 TtfMeasureString(const TtfFont& font, const char* text, u32 pixel_height)
     return (total > static_cast<u64>(0xFFFFFFFFU)) ? 0xFFFFFFFFU : static_cast<u32>(total);
 }
 
-bool TtfDrawString(u32 x, u32 y, const char* text, u32 fg, u32 pixel_height)
+bool TtfDrawStringFont(const TtfFont& font, u32 x, u32 y, const char* text, u32 fg, u32 pixel_height)
 {
     if (text == nullptr || pixel_height == 0)
-        return false;
-    const TtfFont* font = TtfChromeFontGet();
-    if (font == nullptr)
         return false;
 
     i32 pen_x = static_cast<i32>(x);
@@ -497,7 +494,7 @@ bool TtfDrawString(u32 x, u32 y, const char* text, u32 fg, u32 pixel_height)
     {
         TtfRenderedGlyph rg{};
         const u32 cp = static_cast<u32>(static_cast<u8>(*text));
-        const bool ok = TtfRenderGlyph(*font, cp, pixel_height, g_glyph_cover, sizeof(g_glyph_cover), g_glyph_pts,
+        const bool ok = TtfRenderGlyph(font, cp, pixel_height, g_glyph_cover, sizeof(g_glyph_cover), g_glyph_pts,
                                        sizeof(g_glyph_pts) / sizeof(g_glyph_pts[0]), g_glyph_endpoints,
                                        sizeof(g_glyph_endpoints) / sizeof(g_glyph_endpoints[0]), &rg);
         if (!ok)
@@ -516,6 +513,14 @@ bool TtfDrawString(u32 x, u32 y, const char* text, u32 fg, u32 pixel_height)
         ++text;
     }
     return true;
+}
+
+bool TtfDrawString(u32 x, u32 y, const char* text, u32 fg, u32 pixel_height)
+{
+    const TtfFont* font = TtfChromeFontGet();
+    if (font == nullptr)
+        return false;
+    return TtfDrawStringFont(*font, x, y, text, fg, pixel_height);
 }
 
 } // namespace duetos::drivers::video

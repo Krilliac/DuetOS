@@ -1288,6 +1288,25 @@ void FreeFrame(PhysAddr frame)
         core::PanicWithValue("mm/frame_allocator", "FreeFrame on already-free frame (double-free?)", frame);
     }
 
+    // Hardware-poison guard (mm/poison.h::IsFramePoisoned). A frame
+    // that was tagged by the SRAR machine-check path (or a future
+    // PFA / CMCI predictive-failure escalation) must NOT re-enter
+    // the free pool — leaving the bitmap bit set as USED is
+    // equivalent to never-allocating-from-it. The frame is leaked
+    // for the remainder of the boot; persistence across reboots is
+    // the rmap+/system/badmem-list follow-on documented in the
+    // hwpoison research notes. Log per poisoned-free so the
+    // operator can correlate boot-log entries with a known bad
+    // DIMM cell. Critical: take this branch BEFORE the
+    // PoisonFreedPage(0xDE) stamp below — writing 4 KiB into a
+    // known-bad frame could fault (or worse, scribble adjacent
+    // memory via a shared ECC line).
+    if (IsFramePoisoned(frame))
+    {
+        KLOG_WARN_V("mm/frame_allocator", "FreeFrame dropping poisoned frame (kept out of pool) phys", frame);
+        return;
+    }
+
     // Freed-page poison (plan C2). Stamp 0xDE across the whole 4 KiB
     // page just before returning it to the bitmap. A use-after-free
     // reader sees an obviously stale pattern instead of plausible

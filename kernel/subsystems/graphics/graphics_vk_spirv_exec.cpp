@@ -53,11 +53,19 @@ bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
  *   - ExtInst GLSL.std.450: Sqrt, FMin, FMax, FClamp, FMix, Step,
  *                           Length, Normalize, Cross, Sin, Cos, Pow
  *
+ * In scope but partial:
+ *   - OpImageSample{Implicit,Explicit}Lod: descriptor fetch via
+ *     `LookupDescriptor(0, 0)` + `SampleImageRgba8` with REPEAT
+ *     addressing. Explicit LOD operand is parsed but ignored (no
+ *     mipmap chain). Unbound samples return the UV coordinate as
+ *     the "missing texture" diagnostic.
+ *
  * Out of scope for v1 — opcodes that survive parsing but cause
  * execution to abort:
  *   - OpAtomic*, OpControlBarrier, OpMemoryBarrier
- *   - OpImageSample* / OpImageRead / OpImageWrite (no descriptor
- *     fetch in the rasterizer hook yet)
+ *   - OpImageRead / OpImageWrite (storage images)
+ *   - Non-REPEAT sampler modes (CLAMP, MIRROR, BORDER) — the
+ *     Sampler descriptor's addressing mode is not yet consumed
  *   - OpKill (deferred — frag shaders that discard are rare in
  *     hello-world cases)
  *   - OpSwitch (sane shaders rarely emit; deferred)

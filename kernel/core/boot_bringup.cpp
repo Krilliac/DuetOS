@@ -206,6 +206,7 @@
 #include "mm/address_space.h"
 #include "mm/dma.h"
 #include "mm/frame_allocator.h"
+#include "mm/poison.h"
 #include "mm/zone.h"
 #include "ipc/handle_table.h"
 #include "ipc/iocp.h"
@@ -298,6 +299,7 @@
 #include "subsystems/win32/nt_coverage.h"
 #include "subsystems/win32/registry.h"
 #include "subsystems/win32/window_syscall.h"
+#include "loader/apiset_static.h"
 #include "loader/compat_shim.h"
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
@@ -506,6 +508,9 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
 
     SerialWrite("[boot] Exercising PE app-compat sidecar parser.\n");
     DUETOS_BOOT_SELFTEST(duetos::core::compat::SelfTest());
+
+    SerialWrite("[boot] Exercising API-set contract table.\n");
+    DUETOS_BOOT_SELFTEST(duetos::loader::ApiSetSelfTest());
 
     SerialWrite("[boot] Exercising A/B boot-slot state machine.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::boot_slot::SelfTest());
@@ -955,6 +960,10 @@ void BootBringupMemPaging()
     // the managed paging API (PagingInit) for MapPage / UnmapPage
     // but must be online before any SchedCreate call uses it.
     DUETOS_BOOT_SELFTEST(duetos::mm::KernelStackSelfTest());
+    // Hardware-poison frame blacklist round-trip. No machine-check
+    // is fired during the test — it exercises the list mutation
+    // and lookup paths with synthetic PFNs and restores live state.
+    DUETOS_BOOT_SELFTEST(duetos::mm::PoisonFrameSelfTest());
     // Kernel-image W^X / DEP — split the 2 MiB PS direct map covering
     // the kernel image into 4 KiB pages, then apply per-section flags:
     //   .text  → R + X   (writes to .text now #PF)
@@ -1121,6 +1130,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiEcSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiPowerSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiSleepPrepSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiMadtX2ApicSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiSciSelfTest());
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
@@ -1262,6 +1272,20 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
 
     SerialWrite("[boot] Programming Linux-ABI syscall MSRs.\n");
     duetos::subsystems::linux::SyscallInit();
+
+    // Re-capture the runtime-checker baseline now that all of the
+    // syscall MSRs (LSTAR/STAR/CSTAR/SYSENTER) are programmed.
+    // The first RuntimeCheckerInit (early in driver-domain bring-up)
+    // ran BEFORE the Linux SyscallInit above, so its baseline saw
+    // LSTAR=0. Every later RuntimeCheckerScan would then compare a
+    // live non-zero LSTAR against the stale-zero baseline and
+    // report `HealthIssue::SyscallMsrHijacked` — a false rootkit
+    // signal that escalated `blockguard -> Deny` and failed the
+    // boot-smoke FORBIDDEN guard. Teardown clears the captured
+    // gate; Init re-reads every g_baseline_* MSR/register against
+    // the now-final values.
+    duetos::core::RuntimeCheckerTeardown();
+    duetos::core::RuntimeCheckerInit();
 
     DUETOS_BOOT_SELFTEST(duetos::sync::SpinLockSelfTest());
 

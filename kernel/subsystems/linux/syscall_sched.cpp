@@ -17,6 +17,7 @@
 
 #include "diag/fix_journal.h"
 #include "mm/address_space.h"
+#include "proc/process.h"
 #include "sched/sched.h"
 
 namespace duetos::subsystems::linux::internal
@@ -35,25 +36,70 @@ constexpr i64 kSchedIdle = 5;
 
 } // namespace
 
-// sched_setaffinity(pid, cpusetsize, mask): hard-pin the calling
+// Resolve `pid` (Linux thread id; 0 means "the calling thread") to
+// a target Task, applying the cross-thread-group permission check.
+// On success, returns the target Task and, when a Process retain was
+// taken, sets `*retained` to the owner Process so the caller can
+// `core::ProcessRelease` it once the affinity write has committed.
+// On any failure, returns nullptr with `*errno_out` set to the Linux
+// errno to surface (kESRCH / kEPERM).
+//
+// Same lookup shape as SYS_THREAD_OPEN (kernel/syscall/syscall.cpp).
+// The window between `SchedFindTaskByTid` returning and
+// `ProcessRetain` taking the reference is small and matches the
+// existing accepted risk for foreign-thread handle acquisition.
+namespace
+{
+sched::Task* ResolveAffinityTarget(u64 pid, core::Process** retained, i64* errno_out)
+{
+    *retained = nullptr;
+    if (pid == 0)
+    {
+        sched::Task* self = sched::CurrentTask();
+        if (self == nullptr)
+        {
+            *errno_out = kEINVAL;
+            return nullptr;
+        }
+        return self;
+    }
+    sched::Task* found = sched::SchedFindTaskByTid(pid);
+    if (found == nullptr)
+    {
+        *errno_out = kESRCH;
+        return nullptr;
+    }
+    core::Process* owner = sched::TaskProcess(found);
+    if (owner == nullptr)
+    {
+        // Kernel-only Task — no Linux thread identity.
+        *errno_out = kESRCH;
+        return nullptr;
+    }
+    if (owner != core::CurrentProcess())
+    {
+        // Cross-thread-group affinity requires CAP_SYS_NICE on
+        // Linux; kCapDebug is our closest analog.
+        core::Process* caller = core::CurrentProcess();
+        if (caller == nullptr || !core::CapSetHas(caller->caps, core::kCapDebug))
+        {
+            *errno_out = kEPERM;
+            return nullptr;
+        }
+    }
+    core::ProcessRetain(owner);
+    *retained = owner;
+    return found;
+}
+} // namespace
+
+// sched_setaffinity(pid, cpusetsize, mask): hard-pin the target
 // thread to a CPU set. The kernel cpumask is 32 bits wide
 // (acpi::kMaxCpus); we consume the low 4 bytes of the user
 // cpu_set_t and hand them to the scheduler, which intersects with
 // the online set and rejects an empty result.
-// GAP: pid != 0 (another thread) is not resolved in v0 — affinity
-// always applies to the calling thread. Revisit when the Linux
-// pid→Task map lands.
 i64 DoSchedSetaffinity(u64 pid, u64 cpusetsize, u64 user_mask)
 {
-    // Record only when the call asks for a non-self pid — the v0
-    // fallback (apply to caller) silently loses that semantic, and a
-    // future Linux pid→Task map should localise the fix here.
-    if (pid != 0)
-    {
-        FIX_NOTE_GAP("subsystems/linux/syscall_sched.cpp:DoSchedSetaffinity",
-                     "pid != 0 (another thread) is not resolved in v0");
-    }
-    (void)pid;
     if (user_mask == 0)
         return kEFAULT;
     if (cpusetsize == 0)
@@ -67,31 +113,39 @@ i64 DoSchedSetaffinity(u64 pid, u64 cpusetsize, u64 user_mask)
         mask |= static_cast<u32>(raw[i]) << (i * 8u);
     if (mask == 0)
         return kEINVAL;
-    sched::Task* self = sched::CurrentTask();
-    if (self == nullptr)
-        return kEINVAL;
+    core::Process* retained = nullptr;
+    i64 errno_out = 0;
+    sched::Task* target = ResolveAffinityTarget(pid, &retained, &errno_out);
+    if (target == nullptr)
+        return errno_out;
     // SchedSetAffinityMask intersects with the online set and
     // fails when nothing is left — surface that as -EINVAL, the
     // errno Linux returns for a mask with no usable CPU.
-    if (!sched::SchedSetAffinityMask(self, mask))
+    const bool ok = sched::SchedSetAffinityMask(target, mask);
+    if (retained != nullptr)
+        core::ProcessRelease(retained);
+    if (!ok)
         return kEINVAL;
     return 0;
 }
 
-// sched_getaffinity: report the calling thread's effective mask.
+// sched_getaffinity: report the target thread's effective mask.
 // Linux returns the number of bytes written into the user buffer.
 i64 DoSchedGetaffinity(u64 pid, u64 cpusetsize, u64 user_mask)
 {
-    (void)pid;
     if (user_mask == 0)
         return kEFAULT;
     const u64 bytes = (cpusetsize < 8) ? cpusetsize : 8;
     if (bytes == 0)
         return kEINVAL;
-    sched::Task* self = sched::CurrentTask();
-    if (self == nullptr)
-        return kEINVAL;
-    const u32 m = sched::SchedGetAffinityMask(self);
+    core::Process* retained = nullptr;
+    i64 errno_out = 0;
+    sched::Task* target = ResolveAffinityTarget(pid, &retained, &errno_out);
+    if (target == nullptr)
+        return errno_out;
+    const u32 m = sched::SchedGetAffinityMask(target);
+    if (retained != nullptr)
+        core::ProcessRelease(retained);
     u8 out[8] = {0};
     for (u32 i = 0; i < 4u; ++i)
         out[i] = static_cast<u8>((m >> (i * 8u)) & 0xFFu);
