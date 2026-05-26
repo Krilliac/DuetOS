@@ -644,31 +644,46 @@ __declspec(dllexport) NTSTATUS NtGetMUIRegistryInfo(ULONG Flags, ULONG* OutputRe
     return (NTSTATUS)0xC0000002;
 }
 
+/* Process-local default LCID + UI LangID. Real Windows persists
+ * these to HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language and
+ * shares them across the system; v0 keeps them per-process in
+ * userland (no cross-process registry yet). Initialised to en-US
+ * (0x0409). A subsequent NtSetDefault* call updates the value so a
+ * follow-up NtQueryDefault* reads back what was written. Plain
+ * statics are safe in v0 — DuetOS PEs are single-process callers of
+ * these and the locale knobs are not on a hot path. */
+static unsigned long g_default_lcid = 0x0409UL;
+static unsigned short g_default_langid = 0x0409;
+
 __declspec(dllexport) NTSTATUS NtQueryDefaultLocale(BOOL UserProfile, ULONG* DefaultLocaleId)
 {
     (void)UserProfile;
     if (DefaultLocaleId != (ULONG*)0)
-        *DefaultLocaleId = 0x0409; /* en-US */
+        *DefaultLocaleId = g_default_lcid;
     return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS NtSetDefaultLocale(BOOL UserProfile, ULONG DefaultLocaleId)
 {
     (void)UserProfile;
-    (void)DefaultLocaleId;
+    if (DefaultLocaleId == 0)
+        return NTSTATUS_INVALID_PARAMETER;
+    g_default_lcid = DefaultLocaleId;
     return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS NtQueryDefaultUILanguage(unsigned short* DefaultUILanguageId)
 {
     if (DefaultUILanguageId != (unsigned short*)0)
-        *DefaultUILanguageId = 0x0409;
+        *DefaultUILanguageId = g_default_langid;
     return NTSTATUS_SUCCESS;
 }
 
 __declspec(dllexport) NTSTATUS NtSetDefaultUILanguage(unsigned short DefaultUILanguageId)
 {
-    (void)DefaultUILanguageId;
+    if (DefaultUILanguageId == 0)
+        return NTSTATUS_INVALID_PARAMETER;
+    g_default_langid = DefaultUILanguageId;
     return NTSTATUS_SUCCESS;
 }
 

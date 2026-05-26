@@ -107,6 +107,17 @@ struct MissSampleTable
 };
 constinit MissSampleTable g_native_miss_sampling = {};
 
+// System-default locale + UI language. Real Windows persists these
+// to HKLM\SYSTEM\CurrentControlSet\Control\Nls\Language and reads
+// them at boot. v0 keeps them in-memory only — `NtSetDefaultLocale`
+// / `NtSetDefaultUILanguage` writes here, `NtQueryDefault*` reads
+// from here. Initialised to en-US (0x0409) so a fresh boot matches
+// the historical hard-coded behaviour. Plain `u32` / `u16` atomics
+// are enough — the values are unrelated and writes are rare, so
+// torn-read across the pair is not a concern.
+constinit u32 g_default_lcid = 0x0409u;
+constinit u16 g_default_langid = 0x0409u;
+
 inline u64 ReadTsc()
 {
     return ::duetos::arch::TscRead();
@@ -391,6 +402,8 @@ enum : u64
     kNtSetInformationThread = 0x000D,
     kNtQueryDefaultLocale = 0x0015,
     kNtQueryDefaultUILanguage = 0x0044,
+    kNtSetDefaultLocale = 0x019D,
+    kNtSetDefaultUILanguage = 0x019E,
     kNtFlushInstructionCache = 0x00F1,
     kNtTestAlert = 0x01D3,
 };
@@ -594,33 +607,70 @@ i64 NtDoSetInformationThread(arch::TrapFrame* /*f*/)
 }
 
 // NtQueryDefaultLocale(BOOLEAN UserProfile, PLCID DefaultLocaleId).
-// We report LOCALE_NEUTRAL_LCID en-US (0x0409); the ntdll shim that
-// asks at startup just wants a stable value to thread through to
-// the user-mode locale tables.
-// GAP: locale is not settable — NtSetDefaultLocale not wired.
+// Reads the system-default LCID from `g_default_lcid`, seeded to
+// en-US (0x0409) and writable via `NtSetDefaultLocale`. The ntdll
+// shim that asks at startup just wants a stable value to thread
+// through to the user-mode locale tables.
 i64 NtDoQueryDefaultLocale(arch::TrapFrame* f)
 {
     const u64 user_lcid = f->rdx;
     if (user_lcid == 0)
         return kStatusInvalidParam;
-    const u32 lcid = 0x0409u; // en-US
+    const u32 lcid = __atomic_load_n(&g_default_lcid, __ATOMIC_ACQUIRE);
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_lcid), &lcid, sizeof(lcid)))
         return kStatusInvalidParam;
     return kStatusSuccess;
 }
 
-// NtQueryDefaultUILanguage(PLANGID DefaultUILanguageId). Same
-// shape as the LCID variant; report 0x0409 (LANGIDFROMLCID of
-// en-US).
-// GAP: UI language is not settable — NtSetDefaultUILanguage not wired.
+// NtSetDefaultLocale(BOOLEAN UserProfile, LCID DefaultLocaleId).
+// Sets the system-default LCID consulted by `NtQueryDefaultLocale`.
+// Real Windows persists the value to the registry (HKLM\SYSTEM\...);
+// DuetOS v0 keeps it in-memory only — a fresh boot resets to en-US.
+// LCID == 0 is rejected (`STATUS_INVALID_PARAMETER`) the same way
+// real Windows does; any other value is accepted without an
+// is-this-a-known-LCID check (the same shape `NtQueryDefaultLocale`
+// returns is whatever was stored).
+//
+// `UserProfile` is intentionally ignored — DuetOS v0 has no per-user
+// locale split; the system default is the only knob. Real Windows
+// would route a TRUE value through `HKEY_CURRENT_USER` instead, but
+// the user-mode side just stores both copies through the same
+// kernel value.
+i64 NtDoSetDefaultLocale(arch::TrapFrame* f)
+{
+    const u64 user_profile = f->rsi;
+    const u64 new_lcid = f->rdx;
+    (void)user_profile;
+    if (new_lcid == 0)
+        return kStatusInvalidParam;
+    __atomic_store_n(&g_default_lcid, static_cast<u32>(new_lcid & 0xFFFFFFFFu), __ATOMIC_RELEASE);
+    return kStatusSuccess;
+}
+
+// NtQueryDefaultUILanguage(PLANGID DefaultUILanguageId). Reads the
+// system-default UI LangID from `g_default_langid`, seeded to en-US
+// (0x0409) and writable via `NtSetDefaultUILanguage`.
 i64 NtDoQueryDefaultUILanguage(arch::TrapFrame* f)
 {
     const u64 user_langid = f->rsi;
     if (user_langid == 0)
         return kStatusInvalidParam;
-    const u16 langid = 0x0409u; // en-US
+    const u16 langid = __atomic_load_n(&g_default_langid, __ATOMIC_ACQUIRE);
     if (!mm::CopyToUser(reinterpret_cast<void*>(user_langid), &langid, sizeof(langid)))
         return kStatusInvalidParam;
+    return kStatusSuccess;
+}
+
+// NtSetDefaultUILanguage(LANGID DefaultUILanguageId). Sets the
+// system-default UI LangID consulted by `NtQueryDefaultUILanguage`.
+// Same persistence note as `NtSetDefaultLocale` — v0 is in-memory
+// only. LANGID == 0 is rejected; any other value is accepted.
+i64 NtDoSetDefaultUILanguage(arch::TrapFrame* f)
+{
+    const u64 new_langid = f->rsi;
+    if (new_langid == 0)
+        return kStatusInvalidParam;
+    __atomic_store_n(&g_default_langid, static_cast<u16>(new_langid & 0xFFFFu), __ATOMIC_RELEASE);
     return kStatusSuccess;
 }
 
@@ -764,12 +814,20 @@ Result NtTranslateToLinux(arch::TrapFrame* frame)
         r = {true, NtDoSetInformationThread(frame)};
         break;
     case kNtQueryDefaultLocale:
-        LogNtTranslation(nt_nr, "synthetic:en-US-lcid");
+        LogNtTranslation(nt_nr, "native:default-lcid");
         r = {true, NtDoQueryDefaultLocale(frame)};
         break;
+    case kNtSetDefaultLocale:
+        LogNtTranslation(nt_nr, "native:set-default-lcid");
+        r = {true, NtDoSetDefaultLocale(frame)};
+        break;
     case kNtQueryDefaultUILanguage:
-        LogNtTranslation(nt_nr, "synthetic:en-US-langid");
+        LogNtTranslation(nt_nr, "native:default-langid");
         r = {true, NtDoQueryDefaultUILanguage(frame)};
+        break;
+    case kNtSetDefaultUILanguage:
+        LogNtTranslation(nt_nr, "native:set-default-langid");
+        r = {true, NtDoSetDefaultUILanguage(frame)};
         break;
     case kNtFlushInstructionCache:
         LogNtTranslation(nt_nr, "synthetic:icache-coherent-x86");
