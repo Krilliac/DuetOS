@@ -31,6 +31,7 @@ HOST_TEST_CRATES=(
     "kernel/net/wifi80211_rust"
     "kernel/net/hci_rust"
     "kernel/net/tls_rust"
+    "kernel/util/vt_parser_rust"
 )
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

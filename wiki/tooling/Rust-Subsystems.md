@@ -4,11 +4,11 @@
 >
 > **Execution context:** Kernel build tooling and kernel-linked Rust crates.
 >
-> **Maturity:** Stable foundation; seventeen production Rust subsystems live in the kernel tree.
+> **Maturity:** Stable foundation; eighteen production Rust subsystems live in the kernel tree.
 >
-> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA / JPEG header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, Multiboot2 info-structure walker, and TLS 1.2 record + handshake walker.
+> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options / IPv4-header byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA / JPEG header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, Multiboot2 info-structure walker, TLS 1.2 record + handshake walker, and VT/ANSI escape parser.
 >
-> All seventeen crates have a current C++ caller; there are no skeleton crates left in this slice.
+> All eighteen crates have a current C++ caller; there are no skeleton crates left in this slice.
 
 ## Overview
 
@@ -140,6 +140,20 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   Read_BD_ADDR bodies. `kernel/net/bluetooth/hci.cpp` delegates
   the Read_Local_Version + Read_BD_ADDR rparam decoders to the
   crate.
+- `/kernel/util/vt_parser_rust/` (`duetos_vt`) implements the DEC
+  ANSI / xterm escape parser. State machine + UTF-8 decoder + CSI
+  parameter accumulator + OSC string buffer over a `&mut
+  DuetosVtParser` (the C++ side allocates the struct; Rust
+  operates on it). Four callbacks (print/execute/csi/osc) cross
+  the FFI wall via repr(C) function pointers; the `extern "C"`
+  invocations are otherwise plain Rust calls so the parser core
+  stays `unsafe`-free outside the three init/reset/feed entry
+  points. Untrusted PTY bytes from user processes feed
+  `kernel/util/vt_parser.cpp`, which delegates every operation
+  to this crate. The compile-time static_assert on
+  `sizeof(Parser) == sizeof(DuetosVtParser)` + `sizeof(Callbacks)
+  == sizeof(DuetosVtCallbacks)` pins the binary equivalence so a
+  future drift on either side can't silently desync.
 - `/kernel/net/tls_rust/` (`duetos_tls`) parses TLS 1.2 record
   + handshake byte streams: the 5-byte record header, the
   4-byte handshake header, the ServerHello body (version +

@@ -25,6 +25,7 @@ members = [
     "kernel/net/wifi80211_rust",
     "kernel/rust",
     "kernel/util/img_meta_rust",
+    "kernel/util/vt_parser_rust",
 ]
 
 [workspace.package]

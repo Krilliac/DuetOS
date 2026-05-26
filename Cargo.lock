@@ -153,6 +153,7 @@ dependencies = [
  "duetos_smbios",
  "duetos_tls",
  "duetos_usb_msc_scsi",
+ "duetos_vt",
  "duetos_wifi80211",
  "usbclass",
  "usbhid",
@@ -184,6 +185,10 @@ version = "0.0.1"
 
 [[package]]
 name = "duetos_usb_msc_scsi"
+version = "0.0.1"
+
+[[package]]
+name = "duetos_vt"
 version = "0.0.1"
 
 [[package]]

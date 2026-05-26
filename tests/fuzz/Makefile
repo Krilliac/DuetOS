@@ -273,8 +273,24 @@ $(BIN)/fuzz_pe_exports: fuzz_pe_exports.cpp $(LOADER)/pe_exports.cpp \
 #
 # ParserFeed runs the DEC ANSI state machine over a PTY byte
 # stream; util/unicode does the UTF-8 join.
-$(BIN)/fuzz_vt: fuzz_vt.cpp $(UTIL)/vt_parser.cpp $(UTIL)/unicode.cpp | $(BIN)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+# vt_parser.cpp delegates the DEC ANSI state machine to the
+# `duetos_vt` Rust crate (kernel/util/vt_parser_rust/). Link the
+# rlib + panic=abort staticlib pattern; a Rust-side panic in the
+# state machine aborts as a libFuzzer crash.
+VT_RUST := $(KERNEL)/util/vt_parser_rust
+
+$(BIN)/libduetos_vt.rlib: $(VT_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_vt -O $< -o $@
+
+$(BIN)/libduetos_vt_fuzz.a: host_shim/vt_fuzz_shim.rs \
+		$(BIN)/libduetos_vt.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_vt=$(BIN)/libduetos_vt.rlib $< -o $@
+
+$(BIN)/fuzz_vt: fuzz_vt.cpp $(UTIL)/vt_parser.cpp $(UTIL)/unicode.cpp \
+		host_shim/vt_stubs.cpp $(BIN)/libduetos_vt_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(VT_RUST)/include $^ -o $@
 
 # --- TLS 1.2 record + handshake parsers (Rust-backed) ------------
 #
