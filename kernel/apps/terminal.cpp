@@ -1233,17 +1233,18 @@ void TerminalSelfTest()
         ok = false;
     }
 
-    // 12. Pass D chrome — header + footer AppLabel bind + paint.
-    //     Pure compose, no compositor side effects. The cell-grid
-    //     carve-out above is the load-bearing invariant; this just
-    //     verifies the chrome strap-on doesn't crash and emits non-
-    //     empty text buffers.
+    // 12. Pass D chrome — header + footer AppLabel bind + bounds
+    //     rebind. We deliberately do NOT call PaintAll here: under
+    //     TTF themes (duet*) AppLabel::PaintSelf would route into
+    //     TtfDrawString -> CompositeCoverage -> FramebufferBlendFill
+    //     at the synthetic (0,0) origin, racing the compositor lock
+    //     before the WM is online and silently halting boot. The
+    //     live DrawFn path exercises the paint once the WM composes
+    //     a real terminal window. The bind + rebind + buffer-non-
+    //     empty + label-bound checks below validate the chrome
+    //     contract without painting.
     BindTerminalChromeOnce();
     RebindTerminalChromeBounds(0U, 0U, 320U, 200U);
-    {
-        Compose ctx{};
-        g_term_chrome.PaintAll(ctx);
-    }
     if (g_term_header[0] == '\0' || g_term_footer[0] == '\0')
     {
         arch::SerialWrite("[terminal-selftest] FAIL chrome-text-empty\n");

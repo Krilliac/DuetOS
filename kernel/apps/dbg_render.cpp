@@ -578,19 +578,18 @@ void DbgRenderSelfTest()
     // synthetic (700x500) client rect (matches the live
     // debugger window size DbgInit registers) and confirm the
     // buffer is non-empty + the label.text pointer is bound.
-    // Pure compose; no compositor state mutated. The carve-outs
-    // (tab bar + status bar + per-tab content renderers) are
-    // raw paint and are exercised by the live debugger window
-    // every compose, not by this self-test — debug surfaces
-    // need to keep working when half the kernel is wedged and
-    // a self-test that depended on slab / heap / theme state
-    // would defeat that contract.
+    // Bind + rebind only — NOT PaintAll. Under TTF themes (duet*)
+    // AppLabel::PaintSelf routes into TtfDrawString ->
+    // CompositeCoverage -> FramebufferBlendFill at the synthetic
+    // (0,0) origin and races the compositor lock before the WM is
+    // online (silent boot halt). The carve-outs (tab bar + status
+    // bar + per-tab content renderers) are raw paint and are
+    // exercised by the live debugger window every compose, not by
+    // this self-test — debug surfaces need to keep working when
+    // half the kernel is wedged and a self-test that depended on
+    // slab / heap / theme state would defeat that contract.
     BindDbgChromeOnce();
     RebindDbgChromeBounds(0U, 0U, 700U);
-    {
-        Compose ctx{};
-        g_dbg_chrome.PaintAll(ctx);
-    }
     if (g_dbg_header[0] == '\0')
         ok = false;
     if (DbgHeader().text == nullptr)
