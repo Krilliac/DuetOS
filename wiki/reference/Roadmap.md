@@ -123,16 +123,21 @@ cleanup debt: move the residual up and delete the rest.
   `tools/test/smp-stress-sweep.sh 8 8 5` (release SMP=8) and
   no inversions in the lockdep self-test under the new
   storage layout.
-- **Residual (architectural cleanup, no live failure):** the
-  spinlock-vs-mutex class split. Today every `LockClass` lives
-  in one per-CPU stack; with the per-task `Task::lockdep_held`
-  snapshot/restore wired underneath, sleeping-mutex classes
-  technically ride the task across a switch via that buffer,
-  while spinlock classes are protected by Cli (single CPU at a
-  time). The two are not separately tagged at the API. A
-  `LockClassSpin` / `LockClassMutex` tag would make the
-  separation explicit so an audit can verify a sleeping-mutex
-  class never appears on a per-CPU spinlock stack.
+- **LockKind class-tag split — LANDED (2026-05-26).** Upstream
+  `90867be5 sync/lockdep: WITNESS-style lock-kind taxonomy +
+  LOCKDEP_ASSERT_HELD` shipped the WITNESS-style three-variant
+  enum `LockKind { Spin, Sleep, Irq }` with acquire-time
+  enforcement: a `Sleep` acquire while holding a `Spin` / `Irq`
+  class is a BUG (the Sleep acquire may yield but the CPU has
+  IRQs off and another task can't run on it). Counter:
+  `g_kind_violations`. Catches the violation at the OFFENDING
+  ACQUIRE SITE — better diagnostic than an after-the-fact
+  snapshot-time audit. Companion primitive
+  `LOCKDEP_ASSERT_HELD(class_id)` lets a callee assert a
+  caller's invariant directly. Spinlock-vs-mutex separation is
+  now explicit at the API for every kind: sched/kobject/kstack/
+  pci-config/breakpoints/cleanroom-trace are `Spin`, wifi/
+  fat32/compositor are `Sleep`.
 - **Blocks on:** a workload that produces a false inversion the
   per-CPU + per-task pair doesn't already absorb. None
   observed since 2026-05-22.
