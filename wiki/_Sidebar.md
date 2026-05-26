@@ -65,10 +65,14 @@
 
 ### Filesystem
 - [VFS](filesystem/VFS.md)
+- [Mount Registry](filesystem/Mount-Registry.md)
 - [DuetFS (Rust, native)](filesystem/DuetFS.md)
 - [FAT32](filesystem/FAT32.md)
+- [exFAT](filesystem/exFAT.md)
 - [ext4](filesystem/ext4.md)
 - [NTFS](filesystem/NTFS.md)
+- [RAM Filesystems (ramfs + tmpfs)](filesystem/RAM-Filesystems.md)
+- [Boot Slots (A/B kernel)](filesystem/Boot-Slots.md)
 - [GPT](filesystem/GPT.md)
 
 ### Networking
