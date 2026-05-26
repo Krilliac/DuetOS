@@ -92,6 +92,93 @@ inline bool SerialInProgressOnThisCpu()
 // loads is fine on x86_64 single-CPU.
 constinit u64 g_serial_bytes_written = 0;
 
+// Panic-emit serializer (2026-05-26). The `g_serial_panic_mode`
+// bypass above keeps a panic dump alive when the lock holder is
+// wedged, but its cost is byte-level interleaving between any two
+// concurrent panic-mode emitters. The canonical case is SMP=8
+// debug AP-bringup: the BSP enters core::Panic, sets panic_mode,
+// broadcasts NMI, then begins its dump. A peer that took its own
+// trap before its NMI handler ran lands in HaltOnRecursiveFault
+// and ALSO writes to the wire in panic-mode bypass. Both
+// write byte-by-byte through WriteByteRaw; UART bytes interleave;
+// the recursive-fault line emerges as `vec=0x   __  rip=0x   __`
+// with the BSP's hex digits scrambled in.
+//
+// This single-u32 owner CAS provides a lightweight critical
+// section for panic-mode writers. It is intentionally NOT the
+// regular spinlock primitive — that would drag lockdep, the
+// per-CPU held-locks stack, and owner tracking into the
+// recursive-fault path, all of which run on a possibly-corrupt
+// per-CPU area and would themselves re-fault. Just a single
+// atomic CAS with a bounded spin.
+//
+// The bounded spin preserves the original wedged-holder escape:
+// if the CAS doesn't clear within ~kPanicEmitSpinBudget pause
+// iterations, the writer falls through to raw bytes (current
+// behavior). One CPU might still corrupt another's output, but
+// only when a panic-emit owner is genuinely stuck — the only
+// scenario where the bypass was always going to fire anyway.
+//
+// `0xFFFFFFFFu` means "free." Any other value is a CPU id.
+// Re-entry on the same CPU returns claim-success without
+// touching the atomic (so SerialLineGuard nesting under panic
+// mode still works).
+constexpr u32 kPanicEmitOwnerFree = 0xFFFFFFFFu;
+constinit volatile u32 g_panic_emit_owner_cpuid = kPanicEmitOwnerFree;
+// ~2k pause iterations ≈ a few µs on TCG, < 1µs on real silicon.
+// Long enough for a peer's short emit burst (one SerialWrite call
+// per byte stream) to retire; short enough that a wedged holder
+// doesn't trap the recursive-fault dumper forever.
+constexpr u32 kPanicEmitSpinBudget = 2048;
+
+// Try to claim the panic-emit owner for `cpuid`. Returns
+// `kClaimAcquired` on first claim, `kClaimReentrant` if this CPU
+// already owns it (nested panic-mode emit on same CPU — e.g. the
+// recursive-fault line built from multiple SerialWrite calls),
+// or `kClaimFailed` if the bounded spin elapsed without the
+// owner clearing. Callers should treat reentrant the same as
+// acquired for the in-band emit, but must NOT release on
+// reentrant claims (the outer owner will release).
+enum PanicClaimResult : u8
+{
+    kClaimAcquired = 0,
+    kClaimReentrant = 1,
+    kClaimFailed = 2,
+};
+
+PanicClaimResult PanicEmitTryClaim(u32 cpuid)
+{
+    for (u32 spin = 0; spin < kPanicEmitSpinBudget; ++spin)
+    {
+        const u32 cur = __atomic_load_n(&g_panic_emit_owner_cpuid, __ATOMIC_ACQUIRE);
+        if (cur == cpuid)
+        {
+            return kClaimReentrant;
+        }
+        if (cur == kPanicEmitOwnerFree)
+        {
+            u32 expected = kPanicEmitOwnerFree;
+            if (__atomic_compare_exchange_n(&g_panic_emit_owner_cpuid, &expected, cpuid, false, __ATOMIC_ACQ_REL,
+                                            __ATOMIC_ACQUIRE))
+            {
+                return kClaimAcquired;
+            }
+        }
+        asm volatile("pause" ::: "memory");
+    }
+    return kClaimFailed;
+}
+
+void PanicEmitRelease(u32 cpuid)
+{
+    // Release only if we own it. A reentrant claim (no acquire)
+    // never reaches this — callers use the claim-result to gate
+    // the release.
+    u32 expected = cpuid;
+    __atomic_compare_exchange_n(&g_panic_emit_owner_cpuid, &expected, kPanicEmitOwnerFree, false, __ATOMIC_ACQ_REL,
+                                __ATOMIC_ACQUIRE);
+}
+
 // Drive the UART directly. No locking, no panic-mode check — the
 // callers above have already decided whether they hold the lock or
 // have bypassed it. Each byte spins on the LSR transmit-empty bit
@@ -253,7 +340,13 @@ void SerialWriteByte(u8 byte)
 {
     if (g_serial_panic_mode || SerialInProgressOnThisCpu())
     {
+        const u32 cpuid = ::duetos::cpu::CurrentCpuIdOrBsp();
+        const PanicClaimResult c = PanicEmitTryClaim(cpuid);
         WriteByteRaw(byte);
+        if (c == kClaimAcquired)
+        {
+            PanicEmitRelease(cpuid);
+        }
         return;
     }
     volatile u32* slot = SerialInProgressSlot();
@@ -274,9 +367,15 @@ void SerialWrite(const char* str)
 
     if (g_serial_panic_mode || SerialInProgressOnThisCpu())
     {
+        const u32 cpuid = ::duetos::cpu::CurrentCpuIdOrBsp();
+        const PanicClaimResult c = PanicEmitTryClaim(cpuid);
         for (const char* p = str; *p != '\0'; ++p)
         {
             WriteCharRaw(*p);
+        }
+        if (c == kClaimAcquired)
+        {
+            PanicEmitRelease(cpuid);
         }
         return;
     }
@@ -302,9 +401,15 @@ void SerialWriteN(const char* data, u64 len)
 
     if (g_serial_panic_mode || SerialInProgressOnThisCpu())
     {
+        const u32 cpuid = ::duetos::cpu::CurrentCpuIdOrBsp();
+        const PanicClaimResult c = PanicEmitTryClaim(cpuid);
         for (u64 i = 0; i < len; ++i)
         {
             WriteCharRaw(data[i]);
+        }
+        if (c == kClaimAcquired)
+        {
+            PanicEmitRelease(cpuid);
         }
         return;
     }
@@ -327,11 +432,17 @@ void SerialWriteHex(u64 value)
 
     if (g_serial_panic_mode || SerialInProgressOnThisCpu())
     {
+        const u32 cpuid = ::duetos::cpu::CurrentCpuIdOrBsp();
+        const PanicClaimResult c = PanicEmitTryClaim(cpuid);
         WriteByteRaw('0');
         WriteByteRaw('x');
         for (int shift = 60; shift >= 0; shift -= 4)
         {
             WriteByteRaw(static_cast<u8>(kDigits[(value >> shift) & 0xF]));
+        }
+        if (c == kClaimAcquired)
+        {
+            PanicEmitRelease(cpuid);
         }
         return;
     }

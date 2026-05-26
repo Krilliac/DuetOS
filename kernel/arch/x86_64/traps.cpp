@@ -604,27 +604,64 @@ void HaltOnRecursiveFault(u64 vector, u64 rip)
     // spinlock — and skip every heavy primitive (symbol resolve,
     // VA region tag, page walk). One line, then halt.
     //
-    // SMP-correctness: under multi-CPU saturation (observed
-    // 2026-05-22 on x86_64-debug SMP=8), N peer CPUs can hit
-    // their own kernel-mode fault concurrently and all land here
-    // while the FIRST panicking CPU is still mid-dump. If each
-    // peer writes the recursive-fault line, the hex digits
-    // interleave at the UART and the operator sees corruption
-    // (`vec=0x   __  rip=0x   __` — mostly spaces with the
-    // occasional surviving digit). An atomic test-and-set lets
-    // the FIRST peer here actually emit the line; subsequent
-    // peers halt silently. Lossy by design — one line of
-    // diagnostic per cluster of recursive faults is what's
-    // useful; further lines just corrupt the first.
+    // SMP-correctness (CAS dedup): under multi-CPU saturation
+    // (observed 2026-05-22 on x86_64-debug SMP=8), N peer CPUs
+    // can hit their own kernel-mode fault concurrently and all
+    // land here while the FIRST panicking CPU is still mid-dump.
+    // The CAS below lets the FIRST peer here actually emit the
+    // line; subsequent peers halt silently. Lossy by design —
+    // one line of diagnostic per cluster of recursive faults is
+    // what's useful; further lines just corrupt the first.
+    //
+    // SMP-correctness (byte interleave): even with one
+    // recursive-fault writer, the BSP panic dumper is still
+    // emitting concurrently in panic-mode bypass. Without
+    // serialization the BSP's hex digits and our digits land
+    // byte-by-byte on the same UART, producing the historical
+    // `vec=0x   __  rip=0x   __` symptom. Two defenses now:
+    //   1. The panic-mode SerialWrite path (serial.cpp) serializes
+    //      panic-mode emitters through `g_panic_emit_owner_cpuid`
+    //      with a bounded-spin fall-back to raw — so individual
+    //      SerialWrite* calls don't byte-interleave with the BSP
+    //      dump.
+    //   2. This routine pre-formats the entire line into a stack
+    //      buffer and emits it via ONE SerialWriteN call, so the
+    //      line is contiguous at the call boundary AND atomic
+    //      under the panic-emit owner claim.
     static volatile u32 s_recursive_dump_owner = 0;
     u32 expected = 0;
     if (__atomic_compare_exchange_n(&s_recursive_dump_owner, &expected, 1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
     {
-        SerialWrite("\n[recursive-fault] vec=");
-        SerialWriteHex(vector);
-        SerialWrite(" rip=");
-        SerialWriteHex(rip);
-        SerialWrite(" — short-circuiting panic dump\n");
+        // Build "\n[recursive-fault] vec=0xVVVVVVVVVVVVVVVV
+        //   rip=0xRRRRRRRRRRRRRRRR — short-circuiting panic dump\n"
+        // into a stack buffer. No heap, no symbol resolve, no
+        // klog. Fixed-width hex for both vec and rip.
+        constexpr char kHex[] = "0123456789abcdef";
+        static constexpr const char kPrefix[] = "\n[recursive-fault] vec=0x";
+        static constexpr const char kMid[] = " rip=0x";
+        // "em dash" matches the original SerialWrite literal; the
+        // UTF-8 bytes are e2 80 94. Tracked as raw bytes here so
+        // the buffer math is explicit.
+        static constexpr const char kSuffix[] = " \xe2\x80\x94 short-circuiting panic dump\n";
+        constexpr u64 kPrefixLen = sizeof(kPrefix) - 1;
+        constexpr u64 kMidLen = sizeof(kMid) - 1;
+        constexpr u64 kSuffixLen = sizeof(kSuffix) - 1;
+        // 16 hex digits per quad.
+        constexpr u64 kHexQuad = 16;
+        constexpr u64 kBufLen = kPrefixLen + kHexQuad + kMidLen + kHexQuad + kSuffixLen;
+        char buf[kBufLen];
+        u64 p = 0;
+        for (u64 i = 0; i < kPrefixLen; ++i)
+            buf[p++] = kPrefix[i];
+        for (int shift = 60; shift >= 0; shift -= 4)
+            buf[p++] = kHex[(vector >> shift) & 0xF];
+        for (u64 i = 0; i < kMidLen; ++i)
+            buf[p++] = kMid[i];
+        for (int shift = 60; shift >= 0; shift -= 4)
+            buf[p++] = kHex[(rip >> shift) & 0xF];
+        for (u64 i = 0; i < kSuffixLen; ++i)
+            buf[p++] = kSuffix[i];
+        SerialWriteN(buf, p);
     }
     Halt();
 }

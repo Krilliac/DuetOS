@@ -23,6 +23,20 @@
  * fired from within SerialWrite — still gets its banner out instead of
  * self-deadlocking.
  *
+ * Panic SMP serialization: while the bypass above keeps a panic dump
+ * alive past a wedged lock holder, byte-level interleaving between two
+ * concurrent panic-mode emitters (canonical case: BSP panic dump + an
+ * AP-side `HaltOnRecursiveFault` after the AP took its own trap before
+ * the panic-broadcast NMI drained) corrupts the second writer's output.
+ * Inside the bypass path each panic-mode SerialWrite* try-claims a
+ * single-u32 panic-emit owner with a bounded spin; on success it holds
+ * the claim across its own byte writes and releases on the way out, so
+ * two panic-mode emitters serialize their bursts at the call boundary.
+ * On claim timeout (genuinely wedged peer) the writer falls through to
+ * raw bytes — original wedged-holder escape preserved. Independent of
+ * `g_serial_lock` so the recursive-fault path doesn't drag the heavy
+ * spinlock + lockdep machinery into a possibly-corrupt-stack context.
+ *
  * Context: kernel. Safe to call from task context, IRQ context, and
  * panic / trap context.
  */
