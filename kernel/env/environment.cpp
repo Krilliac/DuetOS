@@ -2,6 +2,7 @@
 
 #include "acpi/acpi.h"
 #include "acpi/acpi_sci.h"
+#include "acpi/ec.h"
 #include "acpi/srat.h"
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/cpu_info.h"
@@ -255,6 +256,35 @@ void EmitBanner(const SystemEnvironment& e)
             // this; a redundant KLOG line would just double it.
             arch::SerialWrite("[env/sci] power button -> ACPI shutdown\n");
             (void)acpi::AcpiShutdown();
+        }
+
+        // Any GPE that fired could be the EC's GPE (the firmware
+        // maps it; the bit position varies per board). Drain the
+        // EC's pending-query queue unconditionally on any GPE
+        // status — the EC silently returns "no event pending" if
+        // CMD_QUERY had nothing for it, so a spurious drain has
+        // no visible effect. Bounded loop (16 iterations) caps
+        // worst-case time spent here under a wedged EC that keeps
+        // re-arming SCI_EVT. Most boards burst a small handful
+        // (lid close + AC unplug at the same instant might emit
+        // two or three queries in sequence).
+        //
+        // Architecturally: this is the v0 stand-in for the full
+        // GPE dispatch worker. A proper implementation would
+        // (a) consult the per-GPE namespace lookup to identify
+        // the EC's GPE bit specifically, and (b) walk every
+        // OTHER set bit through `\_GPE._Lxx`/`\_GPE._Exx`
+        // evaluation. v0 only handles the EC-routed events
+        // because they're the ones a laptop actually depends on
+        // (lid, AC, battery); other GPEs are firmware-bug-rare
+        // and harmless when not dispatched.
+        if (sp.gpe0_status != 0 || sp.gpe1_status != 0)
+        {
+            for (u32 drain = 0; drain < 16; ++drain)
+            {
+                if (!acpi::AcpiEcDispatchPendingQuery())
+                    break;
+            }
         }
 
         // AC / lid / thermal may have moved (the SCI woke us, or
