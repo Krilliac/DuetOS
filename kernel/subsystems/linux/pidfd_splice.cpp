@@ -153,10 +153,15 @@ i64 DoPidfdSendSignal(u64 pidfd, u64 sig, u64 user_info, u64 flags)
     (void)user_info; // siginfo_t payload not honoured (v0 carries only signum)
     (void)flags;
     core::Process* caller = core::CurrentProcess();
-    if (caller == nullptr || pidfd >= 16 || caller->linux_fds[pidfd].state != 12)
+    if (caller == nullptr || pidfd >= 16)
         return kEBADF;
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    // Mask BEFORE the linux_fds[] dereference: a misprediction of the
+    // `pidfd >= 16` bounds check would otherwise speculate the load at
+    // an OOB index and leak via cache side-channel.
     pidfd = util::MaskedIndex(pidfd, 16);
+    if (caller->linux_fds[pidfd].state != 12)
+        return kEBADF;
     const u64 target_pid = caller->linux_fds[pidfd].first_cluster;
     core::Process* target = sched::SchedFindProcessByPid(target_pid);
     if (target == nullptr)
@@ -179,7 +184,7 @@ i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
     using ::duetos::core::CapSetHas;
     using ::duetos::core::kCapDebug;
     core::Process* caller = core::CurrentProcess();
-    if (caller == nullptr || pidfd >= 16 || caller->linux_fds[pidfd].state != 12)
+    if (caller == nullptr || pidfd >= 16)
         return kEBADF;
     if (!CapSetHas(caller->caps, kCapDebug))
     {
@@ -187,14 +192,20 @@ i64 DoPidfdGetfd(u64 pidfd, u64 target_fd, u64 flags)
         return kEPERM;
     }
     // Spectre v1 nospec — see syscall_io.cpp DoWrite for rationale.
+    // Mask BEFORE the linux_fds[] dereference (the bounds-check branch
+    // can mispredict and leak an OOB load via cache side-channel).
     pidfd = util::MaskedIndex(pidfd, 16);
+    if (caller->linux_fds[pidfd].state != 12)
+        return kEBADF;
     const u64 target_pid = caller->linux_fds[pidfd].first_cluster;
     core::Process* target = sched::SchedFindProcessByPid(target_pid);
     if (target == nullptr)
         return kESRCH;
-    if (target_fd >= 16 || target->linux_fds[target_fd].state == 0)
+    if (target_fd >= 16)
         return kEBADF;
     target_fd = util::MaskedIndex(target_fd, 16);
+    if (target->linux_fds[target_fd].state == 0)
+        return kEBADF;
 
     // Find a free slot in caller's table.
     i32 caller_slot = -1;

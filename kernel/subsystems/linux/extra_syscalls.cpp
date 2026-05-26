@@ -577,7 +577,12 @@ i64 DoStatfs(u64 user_path, u64 user_buf)
 i64 DoFstatfs(u64 fd, u64 user_buf)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || fd >= 16 || p->linux_fds[fd].state == 0)
+    if (p == nullptr || fd >= 16)
+        return kEBADF;
+    // Spectre v1 nospec — mask before the linux_fds[] dereference
+    // (see syscall_io.cpp DoWrite).
+    fd = util::MaskedIndex(fd, 16);
+    if (p->linux_fds[fd].state == 0)
         return kEBADF;
     Statfs out;
     FillStatfs(out);
