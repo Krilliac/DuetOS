@@ -38,8 +38,8 @@ EventResult AppListRow::OnEventSelf(const Event& e)
         if (inside)
             state.flags = state.flags | WidgetStateFlags::Hover;
         else
-            state.flags = static_cast<WidgetStateFlags>(static_cast<u8>(state.flags)
-                                                        & ~static_cast<u8>(WidgetStateFlags::Hover));
+            state.flags =
+                static_cast<WidgetStateFlags>(static_cast<u8>(state.flags) & ~static_cast<u8>(WidgetStateFlags::Hover));
         return inside ? EventResult::Consumed : EventResult::NotInterested;
     }
     if (e.kind == EventKind::MouseDown && bounds.Contains(e.x, e.y))

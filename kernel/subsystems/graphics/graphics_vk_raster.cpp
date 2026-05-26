@@ -471,7 +471,7 @@ void RasterizeOne(const VertexV0& v0, const VertexV0& v1, const VertexV0& v2, co
                                                     (r << 16) | (g << 8) | b);
             else if (a > 0)
                 drivers::video::FramebufferBlendPixel(static_cast<u32>(px), static_cast<u32>(py),
-                                                         (a << 24) | (r << 16) | (g << 8) | b);
+                                                      (a << 24) | (r << 16) | (g << 8) | b);
         }
     }
     drivers::video::FramebufferAddDamage(static_cast<u32>(bb.min_x), static_cast<u32>(bb.min_y),

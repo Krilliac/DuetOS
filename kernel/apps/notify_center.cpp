@@ -89,8 +89,7 @@ void ClickClear();
 // Toolbar (back), then 1 action AppButton, then 2 AppLabels
 // (header, footer). Declaration order is dispatch order — the
 // button gets first refusal on clicks.
-constinit auto g_notify_center =
-    MakeWidgetGroup(AppToolbar{}, AppButton{}, AppLabel{}, AppLabel{});
+constinit auto g_notify_center = MakeWidgetGroup(AppToolbar{}, AppButton{}, AppLabel{}, AppLabel{});
 
 constinit bool g_notify_center_bound = false;
 constinit bool g_notify_center_prev_left_down = false;

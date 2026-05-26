@@ -312,7 +312,7 @@ constinit bool g_sysmon_self_test_passed = false;
 AppButton* SmActionButton(u32 idx)
 {
     if (idx == 0)
-        return &g_sysmon.chain.tail.head; // toolbar -> btn[0]
+        return &g_sysmon.chain.tail.head;  // toolbar -> btn[0]
     return &g_sysmon.chain.tail.tail.head; // toolbar -> btn[0] -> btn[1]
 }
 

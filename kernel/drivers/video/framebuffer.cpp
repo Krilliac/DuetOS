@@ -851,8 +851,8 @@ u32 FramebufferReadPixel(u32 x, u32 y)
     {
         return 0;
     }
-    const auto* row =
-        reinterpret_cast<const volatile u32*>(reinterpret_cast<const u8*>(g_info.virt) + static_cast<u64>(y) * g_info.pitch);
+    const auto* row = reinterpret_cast<const volatile u32*>(reinterpret_cast<const u8*>(g_info.virt) +
+                                                            static_cast<u64>(y) * g_info.pitch);
     return row[x];
 }
 

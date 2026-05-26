@@ -163,8 +163,7 @@ void ClickTimerMode();
 // Toolbar (back), then 4 mode-toggle AppButtons (CLOCK / STOP /
 // ALRM / TIMR), then 1 AppLabel footer. Reverse declaration
 // order is dispatch order — buttons get first refusal on clicks.
-constinit auto g_clock =
-    MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppLabel{});
+constinit auto g_clock = MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppLabel{});
 
 constinit bool g_clock_bound = false;
 constinit bool g_clock_prev_left_down = false;
@@ -202,8 +201,8 @@ void BindClockOnce()
 
     static const char* const kClockModeLabels[kClockModeBtnCount] = {"CLOCK", "STOP", "ALRM", "TIMR"};
     using ClickFn = void (*)();
-    static constexpr ClickFn kClockModeClicks[kClockModeBtnCount] = {ClickClockMode, ClickStopwatchMode,
-                                                                     ClickAlarmMode, ClickTimerMode};
+    static constexpr ClickFn kClockModeClicks[kClockModeBtnCount] = {ClickClockMode, ClickStopwatchMode, ClickAlarmMode,
+                                                                     ClickTimerMode};
     for (u32 i = 0; i < kClockModeBtnCount; ++i)
     {
         AppButton* btn = ClockModeButton(i);
@@ -250,7 +249,8 @@ void RebindClockBounds(u32 cx, u32 cy, u32 cw, u32 ch)
 void RefreshClockFooter()
 {
     u32 o = 0;
-    auto append = [&](const char* s) {
+    auto append = [&](const char* s)
+    {
         for (u32 i = 0; s[i] != '\0' && o + 1 < sizeof(g_clock_footer_text); ++i)
             g_clock_footer_text[o++] = s[i];
     };
@@ -268,9 +268,9 @@ void RefreshClockFooter()
     }
     else // Timer
     {
-        append(g_timer_running ? "TIMR .RUN | S:SET SPC:RUN R:RESET"
-                               : (g_timer_fired ? "TIMR .ZERO | S:SET SPC:RUN R:RESET"
-                                                : "TIMR .IDLE | S:SET SPC:RUN R:RESET"));
+        append(g_timer_running
+                   ? "TIMR .RUN | S:SET SPC:RUN R:RESET"
+                   : (g_timer_fired ? "TIMR .ZERO | S:SET SPC:RUN R:RESET" : "TIMR .IDLE | S:SET SPC:RUN R:RESET"));
     }
     g_clock_footer_text[o] = '\0';
 }
