@@ -77,7 +77,23 @@ void ProbeFire(ProbeId, u64, u64) {}
 namespace duetos::diag
 {
 ::duetos::core::Result<void> FixJournalRecord(FixDetector, const char*, const char*, u64, u64) { return {}; }
+
+// Code-path ledger flag — kernel-side defaults to 0 (disabled) and
+// the kpath KPATH_* macros in pe_loader.cpp early-out on the load.
+// Host fuzz harness keeps it 0 so no kpath tracking fires.
+volatile ::duetos::u8 g_kpath_enabled = 0;
 } // namespace duetos::diag
+
+namespace duetos::loader
+{
+// ApiSet contract resolver — the static curated table is populated
+// at kernel boot from a generator script. Host fuzz harness has no
+// API-set table; returning false makes pe_loader.cpp treat every
+// `api-ms-*` import as "no static contract", which routes through
+// the regular DLL miss-logger and is the correct behaviour under
+// fuzz (we're parsing PE bytes, not resolving real api-set names).
+bool ApiSetResolveStatic(const char*, const char**) { return false; }
+} // namespace duetos::loader
 
 namespace duetos::security
 {
