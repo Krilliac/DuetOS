@@ -48,6 +48,8 @@ The contract every module follows:
 | `fault_react` | [`fault_react.h`](../../kernel/diag/fault_react.h) | Self-defensive fault dispatcher (`FaultKind` × `FaultSeverity` → `FaultReaction`). Trap-safe deferred drain. | `FaultReactSelfTest()` |
 | `fix_journal` | [`fix_journal.h`](../../kernel/diag/fix_journal.h) | Record-and-defer for STUB/GAP hits at runtime — 1024×128B ring. Macros `FIX_NOTE_STUB()` / `FIX_NOTE_GAP()`. | `FixJournalSelfTest()` |
 | `fix_journal_persist` | [`fix_journal_persist.h`](../../kernel/diag/fix_journal_persist.h) | Tier-2/3 persistence to FAT32 `/KERNEL.FIX` and NVMe reserved LBAs. | `FixJournalPersistSelfTest()` |
+| `kpath` | [`kpath.h`](../../kernel/diag/kpath.h) | Code path execution ledger. Linker-section sites + auto-enrolled syscall / vector / initcall / probe / fix-journal views. `KPATH(category, name)` macro. Emits `[kpath] visited=N/M ...` sentinel at smoke completion and on panic. See [Code Path Ledger](Code-Path-Ledger.md). | `KPathSelfTest()` |
+| `kpath_persist` | [`kpath_persist.h`](../../kernel/diag/kpath_persist.h) | Tier-2 persistence to FAT32 `KERNEL.KPATH.TSV`. Consumed by `tools/test/kpath-coverage.sh` for cross-boot coverage diff. | none (verified via `KPathSelfTest`) |
 | `perf_profile` | [`perf_profile.h`](../../kernel/diag/perf_profile.h) | PMU sample ring (4096 × 16 B). Sampling wiring pending. | `PerfProfileSelfTest()` |
 | `event_trace` | [`event_trace.h`](../../kernel/diag/event_trace.h) | Lock-free per-CPU event ring (4096 × 32 B). 8 canonical event kinds. | `EventTraceSelfTest()` |
 | `heartbeat` | [`heartbeat.h`](../../kernel/diag/heartbeat.h) | Stats thread (`kheartbeat`). Calls `RcuTick`, `RuntimeCheckerTick`, fix-journal flush. | none |

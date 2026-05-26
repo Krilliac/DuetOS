@@ -6,6 +6,8 @@
 #include "core/init.h"
 #include "diag/boot_observe.h"
 #include "diag/fix_journal.h"
+#include "diag/kpath.h"
+#include "diag/kpath_persist.h"
 #include "sched/sched.h"
 #include "subsystems/translation/translate.h"
 
@@ -464,6 +466,14 @@ void SmokeProfileSleepAndExit()
     // tools/qemu/run-fix-cycle.sh can pick them up alongside the
     // standard sentinel.
     ::duetos::diag::FixJournalEmitBootSummary();
+
+    // KPath: one `[kpath] visited=N/M ...` sentinel that CI greps,
+    // plus a TSV flush so KERNEL.KPATH.TSV reflects final coverage.
+    ::duetos::diag::KPathEmitBootSummary();
+    if (::duetos::diag::KPathPersistInstalled())
+    {
+        ::duetos::diag::KPathPersistFlush();
+    }
 
     // Translator boot summary — one-line key=hexvalue snapshot of
     // native + NT translator activity for the same CI-grep pattern.

@@ -208,9 +208,33 @@ under `tests/`. These do not require QEMU.
 DuetOS, wait `DUETOS_SETTLE` seconds, snapshot the framebuffer to
 PNG. Used to capture `docs/screenshots/`.
 
+## Code Path Coverage
+
+At smoke-profile completion the kernel emits one structured
+sentinel that `tools/test/boot-log-analyze.sh` parses:
+
+```
+[kpath] visited=412/1023 (40%) cats=site:5/5 syscall:23/256 vector:14/256 initcall:48/48 probe=12 fix=3
+```
+
+Plus `KERNEL.KPATH.TSV` on the FAT32 root volume. The offline
+diff tool `tools/test/kpath-coverage.sh` compares a baseline TSV
+against a current TSV and reports newly-visited and newly-cold
+sites:
+
+```
+tools/test/kpath-coverage.sh known-good.tsv build/x86_64-release/KERNEL.KPATH.TSV
+```
+
+Returns nonzero on regression (any newly-cold site, or visited%
+drop past the configured threshold — default 5pp). Slot into CI
+alongside `boot-log-analyze.sh`. Full details:
+[Code Path Ledger](../kernel/Code-Path-Ledger.md).
+
 ## Related Pages
 
 - [Build System](Build-System.md)
 - [Debugging](Debugging.md)
 - [Logging and Tracing](../kernel/Logging-And-Tracing.md)
+- [Code Path Ledger](../kernel/Code-Path-Ledger.md)
 - [Boot Path](../kernel/Boot.md)

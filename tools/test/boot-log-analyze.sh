@@ -279,6 +279,30 @@ else
 fi
 
 hr
+echo "KPATH (code path execution ledger)"
+# KPath emits one structured sentinel at smoke completion:
+#   [kpath] visited=N/M (P%) cats=site:a/b syscall:c/d vector:e/f initcall:g/h probe=i fix=j
+# Parse the line and surface visited% + per-category visited counts.
+# When the line is absent the ledger never reached EmitBootSummary —
+# either smoke completion didn't fire (boot hung earlier) or KPath
+# init was skipped. Either case is an advisory; the hard-fault and
+# completion gates above already cover the underlying problem.
+kpath_line=$(grep -aoE '\[kpath\] visited=[0-9]+/[0-9]+[^[:cntrl:]]*' "$LOG" | tail -1)
+if [ -n "$kpath_line" ]; then
+    echo "  ${kpath_line}"
+    # Extract visited/total + percentage for a quick coverage gate.
+    vis=$(echo "$kpath_line" | grep -aoE 'visited=[0-9]+/[0-9]+' | head -1)
+    pct=$(echo "$kpath_line" | grep -aoE '\([0-9]+%\)' | head -1 | tr -d '()%')
+    if [ -n "$pct" ] && [ "$pct" -lt 20 ]; then
+        echo "  !! kpath visited% suspiciously low (${pct}%) — coverage regression?"
+        # Advisory only — not a gate failure. CI baselines should
+        # decide the floor explicitly via tools/test/kpath-coverage.sh.
+    fi
+else
+    echo "  (no [kpath] sentinel — ledger did not emit summary)"
+fi
+
+hr
 echo "STRESS / LOADTEST (if present)"
 if g -q '\[stress\] (start|arming)|LOADTEST:'; then
     g '\[stress\] (arming|start|pre|done)|LOADTEST:|workers spawned:|elapsed ticks:|iterations:|ctx switches:|idle ticks:|window complete' \

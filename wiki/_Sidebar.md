@@ -24,6 +24,7 @@
 - [Image Loaders](kernel/Loader.md)
 - [Subsystem Isolation](kernel/Subsystem-Isolation.md)
 - [Logging and Tracing](kernel/Logging-And-Tracing.md)
+- [Code Path Ledger (KPath)](kernel/Code-Path-Ledger.md)
 - [Diagnostics](kernel/Diagnostics.md)
 - [Self-Thinking and Introspection](kernel/Self-Thinking.md)
 - [Fault Injection](kernel/Fault-Injection.md)

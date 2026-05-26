@@ -462,6 +462,7 @@ void CmdLogarea(u32 argc, char** argv);
 void CmdLogclock(u32 argc, char** argv);
 void CmdKdbg(u32 argc, char** argv);
 void CmdDfix(u32 argc, char** argv);
+void CmdKpath(u32 argc, char** argv);
 void CmdDintro(u32 argc, char** argv);
 void CmdSelfthink(u32 argc, char** argv);
 void CmdMetrics();

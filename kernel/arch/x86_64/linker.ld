@@ -117,6 +117,21 @@ SECTIONS
         __duetos_hotpatch_pairs_end = .;
     }
 
+    /* KPath site registry. Each `KPATH(...)` macro emits one
+     * `KPathSite` record into this section. The unified iterator
+     * in `kernel/diag/kpath.cpp` walks
+     * [__kpath_sites_start, __kpath_sites_end) to enumerate every
+     * static call site marked at compile time. KEEP() so entries
+     * survive `--gc-sections`. See kernel/diag/kpath.h for the
+     * record layout.
+     */
+    .kpath_sites : AT(ADDR(.kpath_sites) - KERNEL_VIRTUAL_BASE) ALIGN(8)
+    {
+        __kpath_sites_start = .;
+        KEEP(*(.kpath_sites .kpath_sites.*))
+        __kpath_sites_end = .;
+    }
+
     . = ALIGN(4K);
     _rodata_end = .;
 
@@ -124,6 +139,18 @@ SECTIONS
     .data : AT(ADDR(.data) - KERNEL_VIRTUAL_BASE) ALIGN(4K)
     {
         *(.data .data.*)
+    }
+
+    /* KPath mutable hit counters. Parallel-indexed to .kpath_sites;
+     * each `KPATH(...)` macro stamps one u64 into this section from
+     * the same TU as its corresponding site record. The KPathSite
+     * struct carries an explicit `hits_ptr` so we never rely on the
+     * link order matching across sections. */
+    .kpath_hits : AT(ADDR(.kpath_hits) - KERNEL_VIRTUAL_BASE) ALIGN(8)
+    {
+        __kpath_hits_start = .;
+        KEEP(*(.kpath_hits .kpath_hits.*))
+        __kpath_hits_end = .;
     }
     . = ALIGN(4K);
     _data_end = .;
