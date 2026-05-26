@@ -21,6 +21,7 @@ members = [
     "kernel/mm/multiboot2_rust",
     "kernel/net/hci_rust",
     "kernel/net/parsers_rust",
+    "kernel/net/tls_rust",
     "kernel/net/wifi80211_rust",
     "kernel/rust",
     "kernel/util/img_meta_rust",

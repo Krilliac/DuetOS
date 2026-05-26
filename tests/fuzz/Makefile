@@ -276,23 +276,35 @@ $(BIN)/fuzz_pe_exports: fuzz_pe_exports.cpp $(LOADER)/pe_exports.cpp \
 $(BIN)/fuzz_vt: fuzz_vt.cpp $(UTIL)/vt_parser.cpp $(UTIL)/unicode.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
-# --- TLS 1.2 record + handshake parsers --------------------------
+# --- TLS 1.2 record + handshake parsers (Rust-backed) ------------
 #
-# net/tls.cpp's parser entry points (TlsPeekRecord,
-# TlsPeekHandshake, TlsParseServerHello, TlsParseCertificateLeaf,
-# TlsParseServerHelloDone) are pure byte-functional walkers. The
-# state-machine half of tls.cpp pulls in RSA + AES + x509, but
-# those are reached through the Tls{Step}Bytes API the harness
-# does NOT drive — only HMAC + SHA-256 are pulled in transitively
-# via crypto/hmac.h + crypto/sha256.h includes. Link the leaf
-# parsers' deps and rely on the linker to discard the unused
-# state-machine body.
-NET := $(KERNEL)/net
+# net/tls.cpp delegates the five parser entry points
+# (TlsPeekRecord, TlsPeekHandshake, TlsParseServerHello,
+# TlsParseCertificateLeaf, TlsParseServerHelloDone) to the
+# `duetos_tls` Rust crate. The fuzz harness must link the
+# Rust staticlib via the same rlib + panic=abort staticlib
+# recipe as the USB harnesses so the Rust crate's parser
+# bodies are exercised on the fuzzed bytes. The state-machine
+# half of tls.cpp still pulls in RSA + AES + x509 (TlsSelfTest
+# body), so those object files stay on the link line.
+NET           := $(KERNEL)/net
+TLS_RUST      := $(KERNEL)/net/tls_rust
+
+$(BIN)/libduetos_tls.rlib: $(TLS_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_tls -O $< -o $@
+
+$(BIN)/libduetos_tls_fuzz.a: host_shim/tls_fuzz_shim.rs \
+		$(BIN)/libduetos_tls.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_tls=$(BIN)/libduetos_tls.rlib $< -o $@
+
 $(BIN)/fuzz_tls: fuzz_tls.cpp $(NET)/tls.cpp \
 		$(CRYPTO)/hmac.cpp $(CRYPTO)/sha256.cpp $(CRYPTO)/sha1.cpp \
 		$(CRYPTO)/bigint.cpp $(CRYPTO)/rsa.cpp $(CRYPTO)/aes.cpp \
-		$(CRYPTO)/aes_gcm.cpp $(CRYPTO)/x509.cpp $(CRYPTO)/asn1.cpp | $(BIN)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+		$(CRYPTO)/aes_gcm.cpp $(CRYPTO)/x509.cpp $(CRYPTO)/asn1.cpp \
+		$(BIN)/libduetos_tls_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(TLS_RUST)/include $^ -o $@
 
 # --- USB descriptors (Rust-backed) -------------------------------
 #

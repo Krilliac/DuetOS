@@ -80,6 +80,7 @@ list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/pci/caps_rust/(
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^mm/multiboot2_rust/(target|cargo-target|multiboot2-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/wifi80211_rust/(target|cargo-target|wifi80211-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/hci_rust/(target|cargo-target|hci-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/tls_rust/(target|cargo-target|tls-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^rust/(target|cargo-target|duetos-kernel-rust-cargo-target)/")
 # AArch64 starter files (boot.S, exceptions.S, context_switch.S,
 # usermode.S, syscall_entry.S) — second-tier-pillar surface that
@@ -1210,6 +1211,7 @@ set(PCICAPS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/pci/caps_rust/inclu
 set(MULTIBOOT2RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mm/multiboot2_rust/include")
 set(WIFI80211_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/net/wifi80211_rust/include")
 set(HCIRUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/net/hci_rust/include")
+set(TLSRUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/net/tls_rust/include")
 
 # Stage 1 needs a stub `kernel_elf_blob` so ramfs.cpp's references
 # to kBinKernelElfBytes / kBinKernelElfBytes_len link cleanly.
@@ -1250,6 +1252,7 @@ target_include_directories(duetos-kernel-stage1 PRIVATE
     "${MULTIBOOT2RUST_INCLUDE_DIR}"
     "${WIFI80211_INCLUDE_DIR}"
     "${HCIRUST_INCLUDE_DIR}"
+    "${TLSRUST_INCLUDE_DIR}"
 )
 add_dependencies(duetos-kernel-stage1 ${DUETOS_KERNEL_RUST_TARGET})
 set_target_properties(duetos-kernel-stage1 PROPERTIES
@@ -1356,6 +1359,7 @@ target_include_directories(duetos-kernel PRIVATE
     "${MULTIBOOT2RUST_INCLUDE_DIR}"
     "${WIFI80211_INCLUDE_DIR}"
     "${HCIRUST_INCLUDE_DIR}"
+    "${TLSRUST_INCLUDE_DIR}"
 )
 add_dependencies(duetos-kernel ${DUETOS_KERNEL_RUST_TARGET})
 

@@ -151,6 +151,7 @@ dependencies = [
  "duetos_ntfs",
  "duetos_pci_caps",
  "duetos_smbios",
+ "duetos_tls",
  "duetos_usb_msc_scsi",
  "duetos_wifi80211",
  "usbclass",
@@ -175,6 +176,10 @@ version = "0.0.1"
 
 [[package]]
 name = "duetos_smbios"
+version = "0.0.1"
+
+[[package]]
+name = "duetos_tls"
 version = "0.0.1"
 
 [[package]]

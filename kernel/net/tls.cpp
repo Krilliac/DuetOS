@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "crypto/hmac.h"
 #include "crypto/sha256.h"
+#include "duetos_tls.h"
 
 namespace duetos::net::tls
 {
@@ -257,106 +258,58 @@ inline u32 LoadU24Be(const u8* p)
 
 } // namespace
 
+// All five TLS parser entry points below delegate byte parsing
+// to the `duetos_tls` Rust crate (kernel/net/tls_rust/). Remote
+// peers control packet lengths, header offsets, session-id
+// lengths, certificate-list / per-cert length prefixes, and
+// extension-list lengths — Rust-Subsystems P0 surface. The
+// Rust crate keeps `unsafe` confined to the FFI wall and runs
+// the rest of each parser on bounds-checked slices with
+// checked-arithmetic length comparisons. The C++ wrappers
+// remain the public API; they translate between the Rust FFI
+// structs (DuetosTlsRecordView, DuetosTlsHandshakeView) and
+// the existing `tls.h` shapes so the rest of the kernel
+// doesn't pick up Rust-side field names.
 bool TlsPeekRecord(const u8* buf, u32 len, RecordView* out)
 {
-    if (buf == nullptr || out == nullptr || len < 5)
+    if (out == nullptr)
         return false;
-    out->type = buf[0];
-    out->version = LoadU16Be(buf + 1);
-    out->length = LoadU16Be(buf + 3);
-    out->payload = buf + 5;
+    DuetosTlsRecordView rv{};
+    if (!duetos_tls_peek_record(buf, len, &rv))
+        return false;
+    out->type = rv.content_type;
+    out->version = rv.version;
+    out->length = rv.length;
+    out->payload = rv.payload;
     return true;
 }
 
 bool TlsPeekHandshake(const u8* buf, u32 len, HandshakeView* out)
 {
-    if (buf == nullptr || out == nullptr || len < 4)
+    if (out == nullptr)
         return false;
-    out->type = buf[0];
-    out->length = LoadU24Be(buf + 1);
-    out->body = buf + 4;
-    if (out->length > len - 4)
+    DuetosTlsHandshakeView hv{};
+    if (!duetos_tls_peek_handshake(buf, len, &hv))
         return false;
+    out->type = hv.kind;
+    out->length = hv.length;
+    out->body = hv.body;
     return true;
 }
 
 bool TlsParseServerHello(const u8* body, u32 len, u8 server_random[kServerRandomBytes], u16* out_cipher)
 {
-    // ServerHello layout (RFC 5246 §7.4.1.3):
-    //   ProtocolVersion server_version;            // 2 bytes
-    //   Random          random;                    // 32 bytes
-    //   SessionID       session_id<0..32>;         // 1-byte length + body
-    //   CipherSuite     cipher_suite;              // 2 bytes
-    //   CompressionMethod compression_method;      // 1 byte
-    //   Extension       extensions<0..2^16-1>;     // optional, 2-byte length + body
-    if (body == nullptr || server_random == nullptr || out_cipher == nullptr)
-        return false;
-    if (len < 2 + 32 + 1 + 2 + 1)
-        return false;
-    const u16 version = LoadU16Be(body);
-    if (version != kVersionTls12)
-        return false;
-    for (u32 i = 0; i < kServerRandomBytes; ++i)
-        server_random[i] = body[2 + i];
-    u32 off = 2 + 32;
-    const u8 sid_len = body[off++];
-    if (sid_len > 32 || off + sid_len + 2 + 1 > len)
-        return false;
-    off += sid_len;
-    const u16 cipher = LoadU16Be(body + off);
-    off += 2;
-    if (cipher != kCipherTlsRsaAes128GcmSha256)
-        return false;
-    const u8 compression = body[off++];
-    if (compression != 0)
-        return false;
-    // Extensions are optional. If `off` reaches `len`, server
-    // chose to omit them entirely. Otherwise, there must be a
-    // 2-byte length followed by exactly that many bytes — we
-    // skip the contents in v0 (no extensions we negotiate).
-    if (off < len)
-    {
-        if (off + 2 > len)
-            return false;
-        const u16 ext_len = LoadU16Be(body + off);
-        off += 2;
-        if (off + ext_len > len)
-            return false;
-        // off += ext_len; // (don't need to read; just validate length)
-    }
-    *out_cipher = cipher;
-    return true;
+    return duetos_tls_parse_server_hello(body, len, server_random, out_cipher);
 }
 
 bool TlsParseCertificateLeaf(const u8* body, u32 len, const u8** out_leaf_der, u32* out_leaf_len)
 {
-    // Certificate message body layout (RFC 5246 §7.4.2):
-    //   opaque ASN.1Cert<1..2^24-1>;
-    //   struct {
-    //       ASN.1Cert certificate_list<0..2^24-1>;
-    //   } Certificate;
-    //
-    // i.e. 3-byte total list length, then a stream of
-    // [3-byte cert length | cert bytes] entries. The leaf
-    // is the FIRST entry.
-    if (body == nullptr || out_leaf_der == nullptr || out_leaf_len == nullptr || len < 6)
-        return false;
-    const u32 list_len = LoadU24Be(body);
-    if (list_len + 3 > len)
-        return false;
-    if (list_len < 3)
-        return false; // need at least one cert-length prefix
-    const u32 leaf_len = LoadU24Be(body + 3);
-    if (leaf_len == 0 || leaf_len + 3 > list_len)
-        return false;
-    *out_leaf_der = body + 6;
-    *out_leaf_len = leaf_len;
-    return true;
+    return duetos_tls_parse_certificate_leaf(body, len, out_leaf_der, out_leaf_len);
 }
 
-bool TlsParseServerHelloDone(const u8* /*body*/, u32 len)
+bool TlsParseServerHelloDone(const u8* body, u32 len)
 {
-    return len == 0;
+    return duetos_tls_parse_server_hello_done(body, len);
 }
 
 // ---------------------------------------------------------------------------

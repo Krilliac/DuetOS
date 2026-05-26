@@ -4,11 +4,11 @@
 >
 > **Execution context:** Kernel build tooling and kernel-linked Rust crates.
 >
-> **Maturity:** Stable foundation; sixteen production Rust subsystems live in the kernel tree.
+> **Maturity:** Stable foundation; seventeen production Rust subsystems live in the kernel tree.
 >
-> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA / JPEG header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, and Multiboot2 info-structure walker.
+> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA / JPEG header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, Multiboot2 info-structure walker, and TLS 1.2 record + handshake walker.
 >
-> All sixteen crates have a current C++ caller; there are no skeleton crates left in this slice.
+> All seventeen crates have a current C++ caller; there are no skeleton crates left in this slice.
 
 ## Overview
 
@@ -140,6 +140,20 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   Read_BD_ADDR bodies. `kernel/net/bluetooth/hci.cpp` delegates
   the Read_Local_Version + Read_BD_ADDR rparam decoders to the
   crate.
+- `/kernel/net/tls_rust/` (`duetos_tls`) parses TLS 1.2 record
+  + handshake byte streams: the 5-byte record header, the
+  4-byte handshake header, the ServerHello body (version +
+  random + session-id + cipher + compression + optional
+  extensions), the Certificate-message body (3-byte total
+  list + per-cert length prefix + leaf DER slice), and the
+  zero-byte ServerHelloDone. Remote peer controls every
+  length prefix; the Rust core uses checked arithmetic to
+  reject `u32` length overflows that would otherwise wrap
+  under attacker control. `kernel/net/tls.cpp` delegates the
+  five `TlsPeek*` / `TlsParse*` entry points to this crate;
+  the C++ side keeps AES-GCM record crypto, RSA pre-master
+  encryption, the PRF, the transcript hash, and the
+  connection lifecycle.
 - `/kernel/arch/x86_64/smbios_rust/` (`duetos_smbios`) decodes
   the 2.x (`_SM_` + `_DMI_`) and 3.x (`_SM3_`) entry-point
   anchors (signature + length + 8-bit checksum), then walks the
