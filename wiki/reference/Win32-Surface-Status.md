@@ -315,10 +315,15 @@ syscall routing shows up immediately.
   spurious wakeups, never lost ones). The condition-variable
   sleep samples the sequence under the lock before releasing,
   so a wake in the gap returns immediately — no lost wakeup.
-  These bind via the new api-set host resolver: an
-  `api-ms-win-*` / `ext-ms-win-*` import (mingw's
-  `-lsynchronization`, and Chrome) is a name contract resolved
-  against whichever preloaded base DLL hosts it. Verified by
+  These bind via the api-set host resolver. The resolver is a
+  two-tier lookup: a static curated contract→host table
+  (`kernel/loader/apiset_static.cpp`, ~70 entries spanning the
+  core / crt / security / service surfaces) is consulted first;
+  contracts the table doesn't yet cover fall through to the
+  original "first preloaded export by name" heuristic. The boot
+  log emits `via-apiset-table` vs `via-apiset-heuristic` so new
+  contracts are grep-able and can be promoted into the table.
+  Verified by
   `userland/apps/sync_smoke` (`smoke=pe-hello`): a
   cross-thread CV producer/consumer, a WaitOnAddress handshake
   and the two-call InitOnce all PASS. SRW shared still aliases

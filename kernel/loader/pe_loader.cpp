@@ -58,6 +58,7 @@
 #include "diag/kdbg.h"
 #include "diag/kpath.h"
 #include "log/klog.h"
+#include "loader/apiset_static.h"
 #include "loader/image_patch.h"
 #include "loader/pe_exports.h"
 #include "proc/process.h"
@@ -1808,18 +1809,44 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
                     : TryResolveViaPreloadedDlls(dll_name, fn_name, preloaded_dlls, preloaded_dll_count, &stub_va);
             // API-set fallback: an "api-ms-win-*" / "ext-ms-win-*"
             // import names a contract, not a real DLL, so the exact
-            // (dll,fn) match above misses. Resolve the function by
-            // name against whichever preloaded base DLL hosts it
-            // (kernel32 / kernelbase / ntdll / …). This is how
-            // modern APIs (WaitOnAddress, condition variables, …)
-            // — and Chrome — bind.
+            // (dll,fn) match above misses. Two-tier resolution:
+            //
+            //   1. Static contract→host table (`apiset_static.cpp`).
+            //      The deterministic path — for every contract the
+            //      table knows, route directly to the named host
+            //      and let the normal (dll, fn) resolution chase
+            //      forwarders. Boot log says `via-apiset-table`.
+            //
+            //   2. "First preloaded export by name" heuristic
+            //      (`TryResolveViaPreloadedDllsAnyName`). Fallback
+            //      for contracts the table doesn't yet cover. Boot
+            //      log says `via-apiset-heuristic` so a new
+            //      contract is grep-able and can be added to the
+            //      table in a follow-on slice.
             if (!resolved_via_dll && !is_ordinal_import && IsApiSetContract(dll_name))
             {
-                if (TryResolveViaPreloadedDllsAnyName(fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
+                const char* host = nullptr;
+                if (::duetos::loader::ApiSetResolveStatic(dll_name, &host) && host != nullptr)
+                {
+                    if (TryResolveViaPreloadedDlls(host, fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
+                    {
+                        resolved_via_dll = true;
+                        SerialLineGuard guard;
+                        SerialWrite("[pe-resolve] via-apiset-table ");
+                        SerialWrite(dll_name);
+                        SerialWrite("!");
+                        SerialWrite(fn_name);
+                        SerialWrite(" -> ");
+                        SerialWrite(host);
+                        SerialWrite("\n");
+                    }
+                }
+                if (!resolved_via_dll &&
+                    TryResolveViaPreloadedDllsAnyName(fn_name, preloaded_dlls, preloaded_dll_count, &stub_va))
                 {
                     resolved_via_dll = true;
                     SerialLineGuard guard;
-                    SerialWrite("[pe-resolve] via-apiset ");
+                    SerialWrite("[pe-resolve] via-apiset-heuristic ");
                     SerialWrite(dll_name);
                     SerialWrite("!");
                     SerialWrite(fn_name);

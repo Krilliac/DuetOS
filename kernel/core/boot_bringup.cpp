@@ -298,6 +298,7 @@
 #include "subsystems/win32/nt_coverage.h"
 #include "subsystems/win32/registry.h"
 #include "subsystems/win32/window_syscall.h"
+#include "loader/apiset_static.h"
 #include "loader/compat_shim.h"
 #include "loader/dll_loader.h"
 #include "loader/elf_loader.h"
@@ -506,6 +507,9 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
 
     SerialWrite("[boot] Exercising PE app-compat sidecar parser.\n");
     DUETOS_BOOT_SELFTEST(duetos::core::compat::SelfTest());
+
+    SerialWrite("[boot] Exercising API-set contract table.\n");
+    DUETOS_BOOT_SELFTEST(duetos::loader::ApiSetSelfTest());
 
     SerialWrite("[boot] Exercising A/B boot-slot state machine.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::boot_slot::SelfTest());

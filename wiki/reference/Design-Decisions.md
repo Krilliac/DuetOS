@@ -10078,3 +10078,61 @@ type-10 entries we currently accept-and-drop).
 fan-out (Roadmap line 323) references x2APIC; the cluster fan-out
 work itself remains gated on workload-justified profile evidence,
 but the *enumeration* of x2APIC-only CPUs is now correct.
+
+## 2026-05-26 — API-set v1 is a static curated table, not a parsed schema
+
+**Decision:** the api-set contract → host DLL mapping lives in
+`kernel/loader/apiset_static.cpp` as a sorted in-kernel table of
+~70 entries (the contracts DuetOS PEs actually import). Lookup
+is binary search by case-folded contract head (the trailing
+`-<major>-<minor>.dll` is stripped before compare). The PE
+loader's api-set fallback (`pe_loader.cpp::ResolveImports`)
+consults the static table first; on miss it falls through to the
+existing "first preloaded export by name" heuristic so behaviour
+is monotonically better than the heuristic-only path. The boot
+log distinguishes `via-apiset-table` from `via-apiset-heuristic`,
+making any contract that needs to be promoted into the table
+grep-able from a boot transcript.
+
+**Why not load Microsoft's `apisetschema.dll`:** we do not load
+Microsoft binaries at runtime. A v2 path that builds a v6
+schema blob from a vendored JSON manifest is documented as a
+follow-on (see the research report), but v1 doesn't need it —
+the surface DuetOS PEs touch is small enough that a static table
+is both adequate and reviewable.
+
+**Why not parse a vendored v6 schema blob now:** YAGNI. The
+in-tree PE corpus has not shown a case where one base DLL
+exports the same name as another with different semantics — the
+only "API-set in practice" risk the heuristic GAP names. A
+parsed schema gains us (a) per-parent-module aliasing and (b)
+per-SKU host swaps — neither are workloads DuetOS has today. The
+v2 path is documented + the file layout is sketched in the
+research notes so a future slice can pick it up cheaply.
+
+**Verified:** new boot self-test `ApiSetSelfTest`
+(`[apiset-selftest] PASS` sentinel) validates: table sort order;
+known contract lookup returns the expected host; uppercase input
+resolves case-insensitively; head-only contract (no version
+suffix) matches; trailing `.dll` without version digits matches;
+unknown contract returns `false` without scribbling `out_host`;
+NULL inputs return false. Wired under `DUETOS_BOOT_SELFTEST` in
+`boot_bringup.cpp:509`.
+
+**Alternatives considered and rejected:**
+- *Keep the heuristic only.* Today's behaviour. The
+  `pe_loader.cpp:1609 // GAP` was the marker; the heuristic
+  works in practice but bakes in a silent collision risk and
+  makes the boot log carry no record of which base DLL ended
+  up hosting each import.
+- *Parse the v6 schema from a vendored blob.* The right v2
+  answer, deferred per YAGNI above.
+
+**Sources:** Microsoft Learn — "API set loader operation";
+Geoff Chappell — Windows API Sets reference; Wine
+`dlls/ntdll/loader.c::get_apiset_target`; ReactOS
+`sdk/lib/apisets/apisets.c`.
+
+**Related roadmap track(s):** Closes the `kernel/loader/pe_loader.cpp:1609 // GAP` marker. Future v2 (real schema blob)
+would replace the static table with a parser; the loader-side
+call site stays unchanged.
