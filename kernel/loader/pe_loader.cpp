@@ -1601,16 +1601,19 @@ bool IsApiSetContract(const char* dll_name)
 
 // Resolve `fn_name` by NAME across every preloaded DLL, ignoring
 // the (contract) DLL name. This is the api-set host-resolution
-// model: the contract names a function, the host is whichever
-// preloaded base DLL exports it. First match wins — for the
-// api-set surface that is unambiguous in practice (a given
-// contract function is exported by exactly one base DLL we
-// preload). Forwarders are chased through the normal path.
+// FALLBACK: `ResolveImports` consults `ApiSetResolveStatic`
+// (kernel/loader/apiset_static.cpp) first, which holds a curated
+// contract→host table covering the surface DuetOS PEs touch
+// today. This function only runs when the static table missed,
+// so the boot log emits `via-apiset-heuristic` (vs the
+// deterministic `via-apiset-table`) to make new contracts
+// grep-able and promote-able into the table.
 //
-// GAP: "first preloaded export by name" is a heuristic, not a
-// real api-set schema. If two preloaded base DLLs ever export the
-// same name with different semantics this could mis-host;
-// revisit with a real api-set map if that collision shows up.
+// First match wins. Collision risk in this fallback is bounded
+// because the static table absorbs the common surface; any
+// contract reaching here is by definition not yet curated, and
+// the heuristic is a safe stopgap until a real PE pushes a
+// contract into the boot log that we then promote.
 bool TryResolveViaPreloadedDllsAnyName(const char* fn_name, const DllImage* dlls, u64 count, u64* out_va)
 {
     if (fn_name == nullptr || dlls == nullptr || count == 0 || out_va == nullptr)
