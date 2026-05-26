@@ -68,6 +68,13 @@ const Clocksource* ClocksourceGet(u32 index)
     {
         return nullptr;
     }
+    // Registry-count invariant. `g_registry_count` is monotonic-up,
+    // capped at `kMaxClocksources` in Register, so the in-range
+    // `index` should always be a valid array slot — but a wild
+    // store to either value would let the load below escape the
+    // array.
+    KASSERT_WITH_VALUE(g_registry_count <= kMaxClocksources, "time/clocksource", "registry_count > kMaxClocksources",
+                       static_cast<u64>(g_registry_count));
     return g_registry[index];
 }
 

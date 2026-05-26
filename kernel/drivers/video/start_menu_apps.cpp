@@ -1,6 +1,7 @@
 #include "drivers/video/start_menu_apps.h"
 
 #include "arch/x86_64/serial.h"
+#include "core/panic.h"
 #include "fs/fat32.h"
 #include "log/klog.h"
 #include "util/string.h"
@@ -418,6 +419,14 @@ void StartMenuAppsAppendTo(MenuItem* items, u32* count, u32 max)
     {
         return;
     }
+    // Pool-bound invariant on the loop limit. `g_slot_count` is
+    // incremented during scan-time only and bounded by the
+    // `g_slot_count < kStartMenuAppsMax` guard at line 370, but a
+    // wild store would let the loop below read past `g_slots[]` and
+    // hand the menu code a wild label pointer — which the start
+    // menu would then dereference inside the GUI render path.
+    KASSERT_WITH_VALUE(g_slot_count <= kStartMenuAppsMax, "video/startmenu", "slot_count exceeds pool cap",
+                       static_cast<u64>(g_slot_count));
     bool dropped = false;
     for (u32 i = 0; i < g_slot_count; ++i)
     {

@@ -27,6 +27,19 @@
 namespace duetos::sync
 {
 
+// Mutual-exclusion invariant. The file header documents that
+// `writer_active && active_readers > 0` is NEVER valid; this is
+// the runtime enforcement. Called under `lock.inner` so the read
+// is a coherent snapshot. KASSERT, not DEBUG_ASSERT — the cost
+// is one cmp+branch and a violation means a reader is about to
+// observe a writer's mid-update payload, the exact bug rwlock
+// exists to prevent.
+[[gnu::always_inline]] inline void RwLockAssertExclusivity(const RwLock& lock)
+{
+    KASSERT(!(lock.writer_active && lock.active_readers > 0), "sync/rwlock",
+            "exclusivity invariant: writer_active && active_readers > 0");
+}
+
 void RwLockAcquireShared(RwLock& lock)
 {
     LockdepBeforeAcquire(lock.class_id);
@@ -36,6 +49,7 @@ void RwLockAcquireShared(RwLock& lock)
         sched::CondvarWait(&lock.readers_cv, &lock.inner);
     }
     ++lock.active_readers;
+    RwLockAssertExclusivity(lock);
     sched::MutexUnlock(&lock.inner);
     LockdepAfterAcquire(lock.class_id);
 }
@@ -75,6 +89,7 @@ void RwLockAcquireExclusive(RwLock& lock)
     }
     --lock.waiting_writers;
     lock.writer_active = true;
+    RwLockAssertExclusivity(lock);
     sched::MutexUnlock(&lock.inner);
     LockdepAfterAcquire(lock.class_id);
 }
@@ -117,6 +132,7 @@ bool RwLockTryAcquireShared(RwLock& lock)
         ++lock.active_readers;
         ok = true;
     }
+    RwLockAssertExclusivity(lock);
     sched::MutexUnlock(&lock.inner);
     if (ok)
     {
@@ -138,6 +154,7 @@ bool RwLockTryAcquireExclusive(RwLock& lock)
         lock.writer_active = true;
         ok = true;
     }
+    RwLockAssertExclusivity(lock);
     sched::MutexUnlock(&lock.inner);
     if (ok)
     {

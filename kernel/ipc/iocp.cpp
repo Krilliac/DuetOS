@@ -61,6 +61,13 @@ bool IocpTryPost(IocpPort* port, const IocpCompletion& c)
         sched::MutexUnlock(&port->inner);
         return false;
     }
+    // Ring-buffer index invariant. `head < kCapacity` should hold by
+    // the modulo-update below, but a wild store between cycles would
+    // let `slots[head]` write past the slot array. KASSERT catches
+    // the corruption at the source rather than letting a torn IOCP
+    // completion poison every GetQueuedCompletionStatus caller after.
+    KASSERT_WITH_VALUE(port->head < IocpPort::kCapacity, "ipc/iocp", "try-post: head oob",
+                       static_cast<u64>(port->head));
     port->slots[port->head] = c;
     port->head = (port->head + 1) % IocpPort::kCapacity;
     ++port->count;
@@ -79,6 +86,9 @@ bool IocpTryPop(IocpPort* port, IocpCompletion* out)
         sched::MutexUnlock(&port->inner);
         return false;
     }
+    KASSERT_WITH_VALUE(port->tail < IocpPort::kCapacity, "ipc/iocp", "try-pop: tail oob", static_cast<u64>(port->tail));
+    KASSERT_WITH_VALUE(port->count <= IocpPort::kCapacity, "ipc/iocp", "try-pop: count > capacity",
+                       static_cast<u64>(port->count));
     *out = port->slots[port->tail];
     Zero(&port->slots[port->tail]);
     port->tail = (port->tail + 1) % IocpPort::kCapacity;
@@ -124,6 +134,7 @@ bool IocpWait(IocpPort* port, IocpCompletion* out, u64 timeout_ticks)
         sched::MutexUnlock(&port->inner);
         return false;
     }
+    KASSERT_WITH_VALUE(port->tail < IocpPort::kCapacity, "ipc/iocp", "wait: tail oob", static_cast<u64>(port->tail));
     *out = port->slots[port->tail];
     Zero(&port->slots[port->tail]);
     port->tail = (port->tail + 1) % IocpPort::kCapacity;

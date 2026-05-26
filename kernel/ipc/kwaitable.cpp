@@ -78,6 +78,13 @@ u32 KWaitableWaitForAny(KWaitable* w)
     sched::MutexLock(&w->inner);
     while (true)
     {
+        // Loop-bound invariant. `pred_count` is monotonic-add-only
+        // and bounded by `kWaitableMaxPredicates` at the Add path —
+        // but a wild store could push it past the array bound and
+        // the loop below would read past `preds[]`. KASSERT catches
+        // the corrupted bound before the OOB read.
+        KASSERT_WITH_VALUE(w->pred_count <= kWaitableMaxPredicates, "ipc/kwaitable", "pred_count > capacity at wait",
+                           static_cast<u64>(w->pred_count));
         // Lowest-index-wins iteration so a deterministic order is
         // observable to callers (matches Win32 WaitForMultiple's
         // documented "wait_object_0 + first ready" semantics).

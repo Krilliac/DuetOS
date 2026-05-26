@@ -70,6 +70,10 @@ void KSemaphoreAcquire(KSemaphore* s)
     {
         sched::CondvarWait(&s->cv, &s->inner);
     }
+    // Loop-exit precondition: `count > 0` here. If a concurrent
+    // path corrupted `count` we'd underflow into UINT32_MAX and
+    // every subsequent caller would race past the wait forever.
+    KASSERT(s->count > 0, "ipc/ksemaphore", "acquire: count underflow precondition");
     --s->count;
     sched::MutexUnlock(&s->inner);
     KObjectRelease(&s->base);
@@ -132,6 +136,16 @@ void KSemaphoreRelease(KSemaphore* s, u32 n)
         return;
     }
     s->count += n;
+    // Cap-invariant postcondition. The `count + n > max_count`
+    // guard above already proved `count <= max_count` here; the
+    // KASSERT pins the postcondition so a future refactor that
+    // drops the guard (e.g. an "atomic add then check" rewrite)
+    // can't silently let the count drift past the contract every
+    // consumer relies on. KASSERT, not DEBUG_ASSERT — a leaked
+    // permit is the silent-corruption shape this whole TU defends
+    // against, and we don't want it stripped in release.
+    KASSERT_WITH_VALUE(s->count <= s->max_count, "ipc/ksemaphore", "release: count > max_count postcondition",
+                       static_cast<u64>(s->count));
     // Wake up to n waiters. Each will re-check `count > 0` under
     // the mutex and consume one permit. Broadcasting all and
     // letting them filter is correct but wasteful when n < waiter
@@ -164,6 +178,8 @@ bool KSemaphoreTryRelease(KSemaphore* s, u32 n, u32* prev_out)
     }
     const u32 prev = s->count;
     s->count = static_cast<u32>(new_count);
+    KASSERT_WITH_VALUE(s->count <= s->max_count, "ipc/ksemaphore", "try-release: count > max_count postcondition",
+                       static_cast<u64>(s->count));
     for (u32 i = 0; i < n; ++i)
     {
         sched::CondvarSignal(&s->cv);

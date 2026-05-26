@@ -7,6 +7,7 @@
 
 #include "security/kaslr.h"
 
+#include "core/panic.h"
 #include "log/klog.h"
 #include "util/build_config.h"
 #include "util/random.h"
@@ -54,6 +55,16 @@ void KaslrInit()
     const u64 raw = core::RandomU64();
     const u64 slot = raw % kSlideMaxSlots;
     g_candidate_slide = slot * kSlideAlignment;
+    // Init-time postcondition. The KASLR self-test below verifies
+    // the same invariants but runs LATER; pinning them at the
+    // produce-site catches a regression (slot math, alignment
+    // mismatch) before the slide is published — the self-test only
+    // logs warnings, but this is the value that will eventually be
+    // applied to real kernel relocations.
+    KASSERT_WITH_VALUE((g_candidate_slide & (kSlideAlignment - 1)) == 0, "security/kaslr",
+                       "candidate slide not 2-MiB aligned at init", g_candidate_slide);
+    KASSERT_WITH_VALUE(g_candidate_slide < kSlideAlignment * kSlideMaxSlots, "security/kaslr",
+                       "candidate slide exceeds slot range at init", g_candidate_slide);
     g_initialized = true;
 
     KLOG_INFO_V("security/kaslr", "KASLR candidate slide computed", g_candidate_slide);

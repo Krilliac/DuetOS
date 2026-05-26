@@ -95,6 +95,15 @@ void KMailboxPost(KMailbox* mb, const KMailboxMessage& msg)
     {
         sched::CondvarWait(&mb->not_full, &mb->inner);
     }
+    // Circular-buffer integrity invariants. `head` must already be
+    // a valid index before we dereference `slots[head]`; if a wild
+    // store corrupted it the write below would scribble outside the
+    // slot buffer. `count < capacity` is the loop's exit
+    // postcondition but a corrupted `count` would loop-exit early
+    // and silently overwrite a queued message.
+    KASSERT_WITH_VALUE(mb->head < mb->capacity, "ipc/kmailbox", "post: head oob", static_cast<u64>(mb->head));
+    KASSERT_WITH_VALUE(mb->count < mb->capacity, "ipc/kmailbox", "post: count >= capacity",
+                       static_cast<u64>(mb->count));
     mb->slots[mb->head] = msg;
     mb->head = (mb->head + 1) % mb->capacity;
     ++mb->count;
@@ -112,6 +121,7 @@ bool KMailboxTryPost(KMailbox* mb, const KMailboxMessage& msg)
         sched::MutexUnlock(&mb->inner);
         return false;
     }
+    KASSERT_WITH_VALUE(mb->head < mb->capacity, "ipc/kmailbox", "try-post: head oob", static_cast<u64>(mb->head));
     mb->slots[mb->head] = msg;
     mb->head = (mb->head + 1) % mb->capacity;
     ++mb->count;
@@ -129,6 +139,8 @@ void KMailboxReceive(KMailbox* mb, KMailboxMessage* out)
     {
         sched::CondvarWait(&mb->not_empty, &mb->inner);
     }
+    KASSERT_WITH_VALUE(mb->tail < mb->capacity, "ipc/kmailbox", "receive: tail oob", static_cast<u64>(mb->tail));
+    KASSERT(mb->count > 0, "ipc/kmailbox", "receive: count underflow guard");
     *out = mb->slots[mb->tail];
     mb->tail = (mb->tail + 1) % mb->capacity;
     --mb->count;
@@ -146,6 +158,7 @@ bool KMailboxTryReceive(KMailbox* mb, KMailboxMessage* out)
         sched::MutexUnlock(&mb->inner);
         return false;
     }
+    KASSERT_WITH_VALUE(mb->tail < mb->capacity, "ipc/kmailbox", "try-receive: tail oob", static_cast<u64>(mb->tail));
     *out = mb->slots[mb->tail];
     mb->tail = (mb->tail + 1) % mb->capacity;
     --mb->count;

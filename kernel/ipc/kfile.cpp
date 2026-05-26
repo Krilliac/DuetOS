@@ -31,6 +31,15 @@ namespace
 void KFileDestroy(KObject* obj)
 {
     auto* f = reinterpret_cast<KFile*>(obj);
+    // Release-callback exclusivity invariant. KFileCreate sets
+    // `release_pool` and clears `release_pool_with_owner`;
+    // KFileCreateWithOwner does the opposite. Both pointers
+    // simultaneously non-null would mean either a wild store
+    // scribbled one of them or a future `Create…` factory dropped
+    // the mutual-exclusion contract — either way the pool ref
+    // would be released TWICE (or against the wrong owner).
+    KASSERT(!(f->release_pool != nullptr && f->release_pool_with_owner != nullptr), "ipc/kfile",
+            "destroy: both release callbacks set");
     // Per-kind pool release callback fires before the storage
     // is freed. For kinds with no pool ref to drop (None / Tty /
     // Fat32File) the callback is nullptr and we just free.

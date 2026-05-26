@@ -175,6 +175,14 @@ bool FreelistPop(u32* out_slot)
     }
     --g_free_count;
     *out_slot = g_free_stack[g_free_count];
+    // Freelist storage corruption (wild store) would let `*out_slot`
+    // come back larger than the arena. Two callers later hand the
+    // same slot to two tasks, or InstallStackPages maps frames
+    // outside the arena. KASSERT, not DEBUG_ASSERT: a sliced kernel
+    // stack is the canonical "wild RIP at 2 a.m." footprint and we
+    // want every flavour to catch the corruption at the source.
+    KASSERT_WITH_VALUE(*out_slot < kKernelStackMaxSlots, "mm/kstack", "freelist popped oob slot",
+                       static_cast<u64>(*out_slot));
     return true;
 }
 
@@ -184,6 +192,13 @@ void FreelistPush(u32 slot_index)
     // Same g_kstack_lock precondition as FreelistPop — an unlocked
     // push races a concurrent pop and corrupts g_free_count.
     sync::SpinLockAssertHeld(g_kstack_lock);
+    // Architectural precondition: a caller-supplied oob slot would
+    // poison the freelist for every later pop. `SlotIndexFromBase`
+    // panics on misalignment but the kstack-self-test sites bypass
+    // it; pin the invariant at the storage site so EVERY push is
+    // bounded.
+    KASSERT_WITH_VALUE(slot_index < kKernelStackMaxSlots, "mm/kstack", "freelist push oob slot",
+                       static_cast<u64>(slot_index));
     if (g_free_count >= kKernelStackMaxSlots)
     {
         PanicKstack("freelist overflow (double-free?)", g_free_count);
@@ -263,6 +278,14 @@ void* AllocateKernelStack(u64 stack_bytes)
         sync::SpinLockGuard guard(g_kstack_lock);
         ++g_slots_in_use;
         ++g_slots_ever_allocated;
+        // Accounting invariant: slots_in_use can never exceed the
+        // arena. If it does, a free path missed its decrement; left
+        // unchecked the next allocator pass would think the arena
+        // is full forever (FreelistPop empty AND g_next_unseen_slot
+        // saturated) — silent denial-of-service on every later
+        // SchedCreate.
+        KASSERT_WITH_VALUE(g_slots_in_use <= kKernelStackMaxSlots, "mm/kstack", "slots_in_use exceeds arena cap",
+                           g_slots_in_use);
         if (g_slots_in_use > g_high_water_slots)
         {
             g_high_water_slots = g_slots_in_use;

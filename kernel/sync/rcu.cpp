@@ -87,6 +87,20 @@ u32 DrainQueue(RcuPerCpuQueue& q)
             SpinLockGuard guard(q.lock);
             if (q.count > 0)
             {
+                // Ring-buffer integrity invariants. `tail` indexes
+                // `q.slots[]` below; `count` bounds the loop's
+                // termination condition. Either corruption shape
+                // (wild store, slab class collision, etc.) would
+                // surface here as either an OOB read of q.slots or
+                // an underflow on `--q.count`. The wild-callback
+                // check below catches the eventual dispatched-bytes
+                // shape; catching the index corruption here pins
+                // the offender to RCU's own state instead of the
+                // generic "callback fn outside text" path.
+                KASSERT_WITH_VALUE(q.tail < kRcuPerCpuQueueDepth, "sync/rcu", "drain: tail oob",
+                                   static_cast<u64>(q.tail));
+                KASSERT_WITH_VALUE(q.count <= kRcuPerCpuQueueDepth, "sync/rcu", "drain: count > depth",
+                                   static_cast<u64>(q.count));
                 const u64 now = __atomic_load_n(&g_ticks, __ATOMIC_RELAXED);
                 const PendingCb& head = q.slots[q.tail];
                 if (now > head.enqueue_tick)
@@ -187,6 +201,9 @@ bool RcuCall(RcuCallback cb, void* arg)
         KLOG_ONCE_WARN("sync/rcu", "RcuCall: per-CPU queue full — callback DROPPED, will leak");
         return false;
     }
+    // `head` indexes `q.slots[]`; a wild-store regression would let
+    // the slot write below corrupt adjacent per-CPU structures.
+    KASSERT_WITH_VALUE(q.head < kRcuPerCpuQueueDepth, "sync/rcu", "RcuCall: head oob", static_cast<u64>(q.head));
     q.slots[q.head] = {cb, arg, __atomic_load_n(&g_ticks, __ATOMIC_RELAXED)};
     q.head = (q.head + 1) % kRcuPerCpuQueueDepth;
     ++q.count;
