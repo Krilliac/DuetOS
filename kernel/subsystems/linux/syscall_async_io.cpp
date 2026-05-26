@@ -874,7 +874,13 @@ i64 DoEpollCtl(u64 epfd, u64 op, u64 fd, u64 user_event)
 i64 DoEpollWait(u64 epfd, u64 user_events, u64 maxevents, u64 timeout_ms)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || epfd >= 16 || p->linux_fds[epfd].state != 9)
+    if (p == nullptr || epfd >= 16)
+        return kEBADF;
+    // Spectre v1 nospec — mask BEFORE the linux_fds[] dereference
+    // (see syscall_io.cpp DoWrite). A mispredicted bounds branch can
+    // otherwise speculate an OOB load and leak via cache side-channel.
+    epfd = util::MaskedIndex(epfd, 16);
+    if (p->linux_fds[epfd].state != 9)
         return kEBADF;
     if (maxevents == 0)
         return kEINVAL;

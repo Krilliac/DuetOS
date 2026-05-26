@@ -108,6 +108,12 @@ i32 AllocFd(::duetos::core::Process* p)
 // the explicit `SocketFdRelease` arm).
 bool FdAssignSocket(::duetos::core::Process* p, u32 fd, u32 sock_idx)
 {
+    // Defensive null + bounds check. Every current caller validates
+    // both before getting here (LinuxFdAllocLowest can only return a
+    // valid fd in [3, 16) or -1), but the cost of being wrong is an
+    // OOB write into the Process struct, so re-check at the boundary.
+    if (p == nullptr || fd >= 16)
+        return false;
     p->linux_fds[fd].state = 6;
     p->linux_fds[fd].flags = 0;
     p->linux_fds[fd].first_cluster = sock_idx;

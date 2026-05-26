@@ -28,6 +28,7 @@
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "time/tick.h"
+#include "util/nospec.h"
 
 namespace duetos::subsystems::linux::internal
 {
@@ -636,8 +637,14 @@ i64 DoMqUnlink(u64 user_name)
 i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeout)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || mqdes >= 16 || p->linux_fds[mqdes].state != 13)
+    if (p == nullptr || mqdes >= 16)
         return -9; // -EBADF
+    // Spectre v1 nospec — mask the index BEFORE the linux_fds[]
+    // dereference so a mispredicted bounds branch can't speculate
+    // an OOB load. See syscall_io.cpp DoWrite for class N rationale.
+    mqdes = ::duetos::util::MaskedIndex(mqdes, 16);
+    if (p->linux_fds[mqdes].state != 13)
+        return -9;
     const u32 idx = p->linux_fds[mqdes].first_cluster;
     if (idx >= kPosixMqPoolCap)
         return -22;
@@ -678,7 +685,11 @@ i64 DoMqTimedsend(u64 mqdes, u64 user_msg, u64 msg_len, u64 prio, u64 user_timeo
 i64 DoMqTimedreceive(u64 mqdes, u64 user_msg, u64 msg_cap, u64 user_prio, u64 user_timeout)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || mqdes >= 16 || p->linux_fds[mqdes].state != 13)
+    if (p == nullptr || mqdes >= 16)
+        return -9;
+    // Spectre v1 nospec — mask before dereference (see DoMqTimedsend).
+    mqdes = ::duetos::util::MaskedIndex(mqdes, 16);
+    if (p->linux_fds[mqdes].state != 13)
         return -9;
     const u32 idx = p->linux_fds[mqdes].first_cluster;
     if (idx >= kPosixMqPoolCap)
@@ -743,6 +754,8 @@ i64 DoMqNotify(u64 mqdes, u64 user_notification)
     core::Process* p = core::CurrentProcess();
     if (p == nullptr || mqdes >= 16)
         return kEBADF;
+    // Spectre v1 nospec — mask before dereference (see DoMqTimedsend).
+    mqdes = ::duetos::util::MaskedIndex(mqdes, 16);
     // mqd_t is just an fd in the linux_fds table; mq state ==
     // 13 (see DoMqOpen). Reject if the fd doesn't reference
     // a message queue.
@@ -754,7 +767,11 @@ i64 DoMqNotify(u64 mqdes, u64 user_notification)
 i64 DoMqGetsetattr(u64 mqdes, u64 user_new, u64 user_old)
 {
     core::Process* p = core::CurrentProcess();
-    if (p == nullptr || mqdes >= 16 || p->linux_fds[mqdes].state != 13)
+    if (p == nullptr || mqdes >= 16)
+        return -9;
+    // Spectre v1 nospec — mask before dereference (see DoMqTimedsend).
+    mqdes = ::duetos::util::MaskedIndex(mqdes, 16);
+    if (p->linux_fds[mqdes].state != 13)
         return -9;
     const u32 idx = p->linux_fds[mqdes].first_cluster;
     if (idx >= kPosixMqPoolCap)
