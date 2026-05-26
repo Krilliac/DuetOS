@@ -280,6 +280,7 @@
 #include "diag/diag_decode.h"
 #include "diag/hexdump.h"
 #include "util/result.h"
+#include "util/result_check.h"
 #include "util/string.h"
 #include "proc/ring3_smoke.h"
 #include "proc/spawn.h"
@@ -490,7 +491,7 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
                 return duetos::core::Result<void>{};
             });
     }
-    (void)duetos::core::RunPhase(duetos::core::Phase::Earlycon);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Earlycon), "boot", "RunPhase Earlycon");
 
     // One-shot mm-map anchor for every later panic dump. The region
     // tags on cr2/rsp/rbp/rip in a crash record map back to the
@@ -573,7 +574,7 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
                                                   return duetos::core::Result<void>{};
                                               });
     }
-    (void)duetos::core::RunPhase(duetos::core::Phase::Idt);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Idt), "boot", "RunPhase Idt");
 
 #ifdef DUETOS_GDB_SERVER
     // Wire COM2 to the in-kernel GDB stub as early as possible —
@@ -903,7 +904,7 @@ void BootBringupMemPaging()
                                                   return duetos::core::Result<void>{};
                                               });
     }
-    (void)duetos::core::RunPhase(duetos::core::Phase::PhysMem);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::PhysMem), "boot", "RunPhase PhysMem");
 
     SerialWrite("[boot] Bringing up kernel heap.\n");
     KernelHeapInit();
@@ -931,7 +932,7 @@ void BootBringupMemPaging()
         // (heap is up at Phase::Sched too), so the test runs end
         // to end at the later phase.
     }
-    (void)duetos::core::RunPhase(duetos::core::Phase::Heap);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Heap), "boot", "RunPhase Heap");
 
     KLOG_METRICS("boot", "after-kernel-heap");
 
@@ -946,7 +947,7 @@ void BootBringupMemPaging()
                                                   return duetos::core::Result<void>{};
                                               });
     }
-    (void)duetos::core::RunPhase(duetos::core::Phase::Paging);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Paging), "boot", "RunPhase Paging");
 
     // Kernel-stack guard-paged arena — runs here because it needs
     // the managed paging API (PagingInit) for MapPage / UnmapPage
@@ -1081,7 +1082,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                                   return duetos::core::Result<void>{};
                                               });
     }
-    (void)duetos::core::RunPhase(duetos::core::Phase::Vfs);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Vfs), "boot", "RunPhase Vfs");
 
     SerialWrite("[boot] Parsing ACPI tables.\n");
     duetos::acpi::AcpiInit(multiboot_info);
@@ -1135,7 +1136,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                                   return duetos::core::Result<void>{};
                                               });
     }
-    (void)duetos::core::RunPhase(duetos::core::Phase::Apic);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Apic), "boot", "RunPhase Apic");
 
     // Phase::Time — clocksource registry, timekeeper init + self-tests.
     // The init body still runs imperatively (it samples HPET at
@@ -1169,7 +1170,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                                   return duetos::core::Result<void>{};
                                               });
     }
-    (void)duetos::core::RunPhase(duetos::core::Phase::Time);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Time), "boot", "RunPhase Time");
 
     // Sample the CMOS RTC once at boot so the wall-clock time
     // is visible in the boot log. A future slice wires this
@@ -1213,7 +1214,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // Drive any future Phase::PerCpuBsp registrants. No callers
     // yet, but the phase slot exists so the registry stays the
     // single contract for "per-CPU BSP init."
-    (void)duetos::core::RunPhase(duetos::core::Phase::PerCpuBsp);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::PerCpuBsp), "boot", "RunPhase PerCpuBsp");
 
     // Decode BSP CPUID 0x1F/0x0B + SRAT row into the per-CPU
     // topology table. AP rows are filled later by each AP from
@@ -1530,7 +1531,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                                   return duetos::core::Result<void>{};
                                               });
     }
-    (void)duetos::core::RunPhase(duetos::core::Phase::Sched);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Sched), "boot", "RunPhase Sched");
 
     // KObject + HandleTable infrastructure self-tests (plan A3).
     // Verifies refcount + destroy-on-zero, plus the table's
@@ -2240,7 +2241,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
                                               duetos::drivers::video::WallpaperSvgInit();
                                               return duetos::core::Result<void>{};
                                           });
-    (void)duetos::core::RunPhase(duetos::core::Phase::Drivers);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Drivers), "boot", "RunPhase Drivers");
     duetos::drivers::video::SplashAdvancePhase("chrome fonts");
 
     // Phase::Drivers ran the DPMS-hook initcall — by this point the

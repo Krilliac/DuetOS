@@ -194,9 +194,10 @@ void BootPhaseFailed(core::Phase phase, u32 errcode)
     }
 
     // Bare-metal / interactive boots keep their current behaviour: the
-    // imperative path already `(void)`-discards the RunPhase Result, so
-    // we only escalate under a smoke profile, where a structured exit
-    // code beats the harness waiting out the full wall timeout.
+    // imperative path uses `RESULT_LOG_AND_DROP` on the RunPhase Result
+    // (documented "log and continue" policy in `util/result_check.h`),
+    // so we only escalate under a smoke profile, where a structured
+    // exit code beats the harness waiting out the full wall timeout.
     if (UnderSmoke())
     {
         arch::TestExit(ec);

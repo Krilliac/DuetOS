@@ -311,6 +311,18 @@ enum class ProbeId : u8
     // GDB break-point on ProbeFire.
     kTactilityThemeMismatch,
 
+    // RESULT_EXPECT was about to panic on a Result error path. The
+    // value carries the ErrorCode (low byte) so an attached GDB can
+    // break at `duetos::debug::ProbeFire` and inspect the panicking
+    // frame BEFORE core::Panic obliterates the stack — without this
+    // hook the panic dump shows the panic frame, not the throw frame
+    // the Result came from. The throw site itself is captured at
+    // construction time via SourceLocation (see DUETOS_RESULT_LOC in
+    // util/result.h) and appears in the panic message. ArmedLog: a
+    // clean boot never trips RESULT_EXPECT (its contract is "never
+    // fails at runtime"), so any fire is a kernel programmer bug.
+    kResultExpectFail,
+
     kCount, // sentinel
 };
 

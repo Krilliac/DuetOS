@@ -158,7 +158,52 @@ void ResultSelfTest()
         Expect(n[0] != '?', "ErrorCodeName not the unnamed sentinel");
     }
 
-    arch::SerialWrite("[result-selftest] PASS (Result<T> + Result<void> + TRY + ErrorCodeName)\n");
+#if DUETOS_RESULT_LOC
+    // Source-location capture: an Err{} construction site stamps its
+    // own file/func/line into the Result. Verify the captured loc
+    // round-trips through Err -> Result -> Err -> Result (the TRY
+    // propagation path) without being recaptured at the propagation
+    // site.
+    {
+        // line_of_err is the line of the `Err{...}` expression below;
+        // capture it via __LINE__ adjacent to the construction so the
+        // expected/actual values stay locked to the same source row.
+        const u32 line_of_err = __LINE__ + 1;
+        Result<u64> bad = []() -> Result<u64> { return Err{ErrorCode::NotFound}; }();
+        const SourceLocation loc = bad.location();
+        Expect(loc.file != nullptr, "location.file captured (file)");
+        Expect(loc.line == line_of_err, "location.line captured (matches expected line)");
+        Expect(loc.func != nullptr, "location.func captured");
+    }
+    {
+        // Propagation: the inner Err{} site's loc must survive a
+        // RESULT_TRY through an outer frame. The outer Result's loc
+        // is the INNER throw line, not the line of RESULT_TRY.
+        const u32 inner_line = __LINE__ + 3;
+        auto outer = []() -> Result<u64>
+        {
+            auto inner = []() -> Result<u64> { return Err{ErrorCode::Busy}; };
+            RESULT_TRY_ASSIGN(u64 n, inner());
+            return n;
+        }();
+        Expect(!outer.has_value(), "RESULT_TRY propagation: outer is error");
+        Expect(outer.location().line == inner_line, "RESULT_TRY: outer.loc == inner throw line");
+    }
+    {
+        // Result<void> path: location survives through Result<void>(Err{})
+        // construction and the Result<void> error accessor.
+        const u32 line_of_err = __LINE__ + 1;
+        Result<void> bad = []() -> Result<void> { return Err{ErrorCode::Timeout}; }();
+        Expect(bad.location().line == line_of_err, "Result<void> location.line captured");
+        Expect(bad.error() == ErrorCode::Timeout, "Result<void> error preserved alongside loc");
+    }
+#endif
+
+    arch::SerialWrite("[result-selftest] PASS (Result<T> + Result<void> + TRY + ErrorCodeName"
+#if DUETOS_RESULT_LOC
+                      " + SourceLocation"
+#endif
+                      ")\n");
 }
 
 } // namespace duetos::core
