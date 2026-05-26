@@ -1407,13 +1407,19 @@ established `tests/fuzz/` pattern (host harness + `host_shim/`
 stubs + a `seeds/gen_*_seeds.py`); the codec/cert ones are pure
 `bytes → struct` and need *less* shimming than the FS probes.
 
-- **DEFLATE / gzip / zip** — `kernel/util/deflate.{h,cpp}`,
-  `gzip.h`, `zip.h`. Decompressors are the single richest fuzz
-  surface (bit-level Huffman over attacker data, window
-  arithmetic, decompression-bomb ratios). Highest priority.
-- **ASN.1 / X.509** — `kernel/crypto/asn1.{h,cpp}`,
-  `x509.{h,cpp}`. TLV length/recursion parsing of untrusted TLS
-  certificates — classic OOB / stack-recursion territory.
+- **X.509** — `kernel/crypto/x509.{h,cpp}`. ASN.1 host harness
+  + DEFLATE/gzip/ZIP host harnesses now all seeded
+  (`seeds/gen_{asn1,deflate,gzip,zip}_seeds.py`, 2026-05-26 —
+  fuzz_asn1 ≈ 400k runs/s, fuzz_deflate ≈ 36k/s, fuzz_gzip ≈
+  26k/s, all clean past the format gates with the new
+  corpora). X.509 still needs a real cert seed (TBSCertificate
+  + SPKI + signature DER) — the parser delegates to
+  `asn1::Read` so it already gets partial coverage from the
+  asn1 corpus, but the TBS / RSA-SPKI / signature-bitstring
+  paths are unreached. Real-cert seed approach: build a
+  minimal self-signed RSA-2048 cert with openssl (build-time
+  dep) or port the in-tree `X509SelfTest` cert-builder
+  (kernel/crypto/x509.cpp::X509SelfTest) to Python.
 - **TLS records/handshake** — `kernel/net/tls.cpp`
   (`TlsPeekRecord`, `TlsParseServerHello`,
   `TlsParseCertificateLeaf`, `TlsPeekHandshake`). Untrusted
