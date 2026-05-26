@@ -606,6 +606,35 @@ u32 h = ChromeTextRoleHeight(role);                 // pixel height
 
 See `kernel/drivers/video/chrome_text.h` for the full declaration set.
 
+## App Widgets (Pass D)
+
+Pass D collapses the imperative paint + click ladder every kernel
+app used to hand-roll into a small set of value-typed widget
+structs composed into a per-app `WidgetGroup<…>`. The library
+lives under `kernel/drivers/video/app_widgets/` and ships eight
+widgets (`AppPanel`, `AppLabel`, `AppDivider`, `AppButton`,
+`AppListRow`, `AppToolbar`, `AppInput`, `AppScrollbar`) layered
+on a CRTP `Widget<Self>` base — zero virtual dispatch, zero RTTI,
+zero heap, every widget a plain value struct.
+
+28 of 33 in-tree apps migrated; the 5 carve-outs (debug overlays,
+gfx-demo content modes, notes persistence backend, trash facade)
+stay on raw paint by design. Apps marked "chrome only" (Terminal,
+Hexview, Gfxdemo, Dbg_render) migrated their toolbar / status bar
+to widgets and kept the content region raw. Files and Calendar
+carve out raw paint regions inside otherwise-migrated apps for
+their grid surfaces.
+
+The umbrella sentinel
+`[pass-d-selftest] PASS (widgets=ok, apps=28/28)` fires at boot
+when both `AppWidgetsSelfTest()` and every per-app self-test pass.
+`boot-log-analyze.sh` keys its Pass D section off this line and
+`tools/test/pass-d-soak.sh` is the 60 s regression rig.
+
+See [AppWidgets](AppWidgets.md) for the full library reference
+(CRTP design, widget table, event model, carve-out rationale,
+acceptance criteria).
+
 ## Network Flyout
 
 Bottom-right Wi-Fi-style popup with hover preview, exposing the

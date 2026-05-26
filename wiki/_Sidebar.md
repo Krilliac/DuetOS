@@ -57,6 +57,7 @@
 - [Linux ABI](subsystems/Linux-ABI.md)
 - [ABI Translation Layer](subsystems/Translation-Layer.md)
 - [Compositor and Window Manager](subsystems/Compositor.md)
+- [App Widgets (Pass D)](subsystems/AppWidgets.md)
 - [UI Toolkit](subsystems/UI-Toolkit.md)
 - [DirectX v0 Path](subsystems/DirectX.md)
 - [Vulkan ICD](subsystems/Vulkan-ICD.md)

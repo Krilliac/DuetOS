@@ -236,6 +236,36 @@ if [ "$pc_umbrella" -gt 0 ] && [ "$pc_chrome_text" -eq 0 ]; then
 fi
 
 hr
+echo "PASS D (app widgets)"
+# Pass D ships the app_widgets library + 28 per-app migrations. The
+# library self-test (`[app-widgets-selftest] PASS`) is the gate; the
+# per-app self-tests are counted via the standard `[<app>-selftest]
+# PASS` convention but are already aggregated into the SELF-TESTS
+# section above (OK / SKIP / FAIL columns). The umbrella line
+# `[pass-d-selftest] PASS (widgets=ok, apps=N/M)` fires only when
+# the library AND every per-app self-test passed.
+pd_widgets=$(gc '\[app-widgets-selftest\] PASS')
+pd_widgets_fail=$(gc '\[app-widgets-selftest\] FAIL')
+pd_umbrella=$(gc '\[pass-d-selftest\] PASS')
+echo "  app-widgets=${pd_widgets}  umbrella=${pd_umbrella}"
+if [ "$pd_umbrella" -eq 0 ]; then
+    echo "  !! [pass-d-selftest] PASS missing (boot may have failed before umbrella, OR Pass D not wired)"
+    rc=1
+fi
+if [ "$pd_widgets_fail" -gt 0 ]; then
+    g '\[app-widgets-selftest\] FAIL' | head -1 | sed 's/^/  !! app-widgets-selftest FAIL: /'
+    rc=1
+elif [ "$pd_widgets" -eq 0 ]; then
+    echo "  (app-widgets-selftest neither PASS nor FAIL detected — advisory only)"
+fi
+# Umbrella requires the widget library sub-test; if sub PASS is zero
+# but umbrella > 0, that's a wiring bug in the bringup aggregator.
+if [ "$pd_umbrella" -gt 0 ] && [ "$pd_widgets" -eq 0 ]; then
+    echo "  !! umbrella PASS without app-widgets sub-test (bringup aggregator wiring bug)"
+    rc=1
+fi
+
+hr
 echo "LOCKDEP"
 invn=$(gc 'inversion detected')
 if [ "$invn" -gt 0 ]; then
