@@ -362,6 +362,15 @@ BrokerOutcome BrokerRequestElevation(const BrokerRequest& req)
     const u64 pid = req.proc->pid;
     if (GraceCacheLookup(pid, req.cap))
     {
+        // Capability bit-shift bound invariant on a security-critical
+        // privilege-grant. `req.cap` was bound-checked at line 354 but
+        // is read again here; a wild store between the check and the
+        // shift would grant the WRONG cap if `cap >= 64` wraps the
+        // u64 shift, or grant NO cap at all silently. Both outcomes
+        // are silent privilege bugs — pin the invariant at the shift
+        // site itself.
+        KASSERT_WITH_VALUE(static_cast<u32>(req.cap) < 64, "security/broker",
+                           "cap shift width overflow (cache-hit grant)", static_cast<u64>(req.cap));
         req.proc->caps.bits |= (1ULL << static_cast<u32>(req.cap));
         return BrokerOutcome::Granted;
     }
@@ -395,6 +404,10 @@ BrokerOutcome BrokerRequestElevation(const BrokerRequest& req)
             // Cache the grant unless the role policy says no_cache.
             if (grace > 0)
                 GraceCacheInsert(pid, req.cap, grace);
+            // Same bound as the cache-hit path above — the password-
+            // verified grant is just as security-critical.
+            KASSERT_WITH_VALUE(static_cast<u32>(req.cap) < 64, "security/broker",
+                               "cap shift width overflow (verified grant)", static_cast<u64>(req.cap));
             req.proc->caps.bits |= (1ULL << static_cast<u32>(req.cap));
             KLOG_WARN("broker", "elevation granted");
             return BrokerOutcome::Granted;

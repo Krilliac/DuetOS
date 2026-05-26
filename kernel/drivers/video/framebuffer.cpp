@@ -1,6 +1,7 @@
 #include "drivers/video/framebuffer.h"
 
 #include "arch/x86_64/serial.h"
+#include "core/panic.h"
 #include "debug/probes.h"
 #include "drivers/video/blend_math.h"
 #include "drivers/video/font8x8.h"
@@ -249,6 +250,18 @@ void FramebufferInit(uptr multiboot_info_phys)
     // programming we don't have yet; uncached works universally and
     // 1024x768x32 @ 60 Hz is well under the bandwidth budget.
     const u64 bytes = static_cast<u64>(tag->pitch) * tag->height;
+    // Multiplication-overflow invariant. `pitch` and `height` are
+    // firmware-supplied u32 fields; a malicious/buggy bootloader
+    // that reports pitch=0xFFFFFFFF + height=0xFFFFFFFF wraps `bytes`
+    // to a tiny value, MapMmio succeeds for the truncated range, and
+    // FramebufferPresent below scribbles past the mapped region into
+    // adjacent MMIO arena (or kernel memory if the arena is exhausted).
+    // The sanity checks above bound `pitch >= width*4` but don't cap
+    // either dimension — the multiplication itself is the only place
+    // the wraparound is observable. KASSERT, not silent: a corrupt
+    // bytes here means EVERY later pixel write is a wild store.
+    KASSERT_WITH_VALUE(tag->height == 0 || bytes / tag->height == tag->pitch, "video/fb", "pitch * height overflow",
+                       bytes);
     void* virt = mm::MapMmio(tag->addr, bytes);
     if (virt == nullptr)
     {

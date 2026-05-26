@@ -98,6 +98,15 @@ bool GraceCacheInsert(u64 pid, Cap cap, u32 lifetime_seconds)
     u32 slot = FindRow(pid, cap, now);
     if (slot == kGraceCacheCapacity)
         slot = AllocSlot();
+    // Slot postcondition. AllocSlot always returns a row in
+    // [0, kGraceCacheCapacity) by construction — either an empty
+    // slot or the eviction victim. A regression that broke that
+    // invariant would let the write below silently scribble outside
+    // g_rows[], poisoning the SECURITY-CRITICAL grace cache (a stale
+    // PID/cap row past the array bound could falsely match a future
+    // Lookup and grant a cached privilege the user never validated).
+    KASSERT_WITH_VALUE(slot < kGraceCacheCapacity, "security/grace", "slot exceeds cache capacity",
+                       static_cast<u64>(slot));
     GraceEntry& e = g_rows[slot];
     e.pid = pid;
     e.cap = cap;

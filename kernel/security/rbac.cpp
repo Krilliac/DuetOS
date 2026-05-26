@@ -189,6 +189,15 @@ bool RbacAddMembership(const char* username, RoleId role)
         m.role_mask = 0;
         m.in_use = true;
     }
+    // Shift-bound invariant. `role` is bounded by `kRbacMaxRoles` at
+    // line 179 above; pinning the shift width here defends against a
+    // wild store between check and use (security-sensitive: a
+    // corrupted role > 31 would `1u << role` to UB and either alias
+    // a different role bit or wrap to 0, granting either the wrong
+    // role or no role at all). Mirrors the kRbacMaxRoles constraint
+    // by limit, not by name: `1u << 31` is the last well-defined
+    // shift for a `u32`.
+    KASSERT_WITH_VALUE(role < 32, "security/rbac", "role shift width overflow", static_cast<u64>(role));
     g_memberships[idx].role_mask |= (1u << role);
     return true;
 }
@@ -200,6 +209,7 @@ bool RbacRemoveMembership(const char* username, RoleId role)
         return false;
     if (role >= kRbacMaxRoles)
         return false;
+    KASSERT_WITH_VALUE(role < 32, "security/rbac", "role shift width overflow", static_cast<u64>(role));
     const u32 before = g_memberships[idx].role_mask;
     g_memberships[idx].role_mask &= ~(1u << role);
     if (g_memberships[idx].role_mask == 0)

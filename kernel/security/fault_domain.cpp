@@ -109,6 +109,13 @@ const FaultDomain* FaultDomainGet(FaultDomainId id)
 {
     if (id >= g_domain_count)
         return nullptr;
+    // `g_domain_count` is monotonic-up via FaultDomainRegister, which
+    // refuses past kMaxFaultDomains. A wild store to either counter
+    // would make this load index past g_domains[]. Pin the table-
+    // bound invariant once at every getter (instead of every site
+    // that walks `g_domains` afterwards) — Get is the gate.
+    KASSERT_WITH_VALUE(g_domain_count <= kMaxFaultDomains, "security/fault_domain", "domain_count exceeds table cap",
+                       static_cast<u64>(g_domain_count));
     return &g_domains[id];
 }
 
@@ -116,6 +123,8 @@ FaultDomain* FaultDomainGetMutable(FaultDomainId id)
 {
     if (id >= g_domain_count)
         return nullptr;
+    KASSERT_WITH_VALUE(g_domain_count <= kMaxFaultDomains, "security/fault_domain", "domain_count exceeds table cap",
+                       static_cast<u64>(g_domain_count));
     return &g_domains[id];
 }
 
