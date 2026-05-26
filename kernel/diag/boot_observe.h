@@ -117,4 +117,13 @@ void BootObserveSetStallPhase(core::Phase phase);
 /// the self-test with `(true)` / `(false)`.
 void BootObserveSuppress(bool on);
 
+/// True while the suppress window is active. Lets the init-registry
+/// `RunPhase` demote its "callback failed" ERROR log to INFO when
+/// the failing row is part of the deliberate self-test plumbing —
+/// the test verifies that a failing Result propagates, NOT that an
+/// `[E]` line appears in the boot log. Without this, the deliberate
+/// failure pollutes the regression-scan output of
+/// `tools/test/boot-log-analyze.sh` on every clean boot.
+bool BootObserveIsSuppressed();
+
 } // namespace duetos::diag

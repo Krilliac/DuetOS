@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 #include "core/init.h"
 #include "test/smoke_profile.h"
 #include "time/timekeeper.h"
@@ -20,8 +21,12 @@ constexpr u32 kPhaseCount = static_cast<u32>(core::Phase::kPhaseCount);
 struct PhaseSlot
 {
     bool entered;
-    u64 enter_ms; ///< NowMs() at enter; 0 == clock not online yet.
-    u64 dur_ms;   ///< Finalised span (next-enter or report); valid iff dur_known.
+    u64 enter_ms;  ///< NowMs() at enter; 0 == clock not online yet.
+    u64 enter_tsc; ///< TscRead() at enter; ALWAYS captured (TSC is on
+                   ///< from reset on every supported part), so phases
+                   ///< that start before HPET is calibrated still have
+                   ///< a finalize-time duration.
+    u64 dur_ms;    ///< Finalised span (next-enter or report); valid iff dur_known.
     bool dur_known;
 };
 
@@ -78,15 +83,47 @@ void EmitDurField(u64 dur_ms, bool known)
 
 void FinalisePhase(u32 ord, u64 now_ms)
 {
-    bool known = false;
+    // Three possible duration sources, picked in order of fidelity:
+    //   1. ms-clock at both endpoints (HPET online) — most accurate.
+    //   2. TSC calibrated NOW — convert enter_tsc -> now_tsc to ms.
+    //   3. TSC not yet calibrated (Earlycon..Vfs run before
+    //      TimekeeperInit) — emit raw cycles so an operator can at
+    //      least see RELATIVE phase cost; convert in post-processing
+    //      once g_tsc_freq_hz is known to a follow-up audit.
+    enum class DurSource : u8
+    {
+        Unknown,
+        Ms,
+        TscMs,
+        TscCycles,
+    };
+    DurSource src = DurSource::Unknown;
     u64 dur = 0;
+    u64 cycles = 0;
+    if (g_slots[ord].enter_tsc != 0)
+    {
+        cycles = arch::TscRead() - g_slots[ord].enter_tsc;
+    }
     if (now_ms != 0 && g_slots[ord].enter_ms != 0)
     {
         dur = now_ms - g_slots[ord].enter_ms;
-        known = true;
+        src = DurSource::Ms;
     }
-    g_slots[ord].dur_ms = dur;
-    g_slots[ord].dur_known = known;
+    else if (cycles != 0 && time::TscCalibrated())
+    {
+        dur = time::TscToNanos(cycles) / 1'000'000;
+        src = DurSource::TscMs;
+    }
+    else if (cycles != 0)
+    {
+        dur = cycles;
+        src = DurSource::TscCycles;
+    }
+    // dur_ms in the slot table is always in milliseconds — store 0 for
+    // the cycles-only path so a later BootReportEmit pass that has
+    // since calibrated TSC can re-derive ms from enter_tsc on its own.
+    g_slots[ord].dur_ms = (src == DurSource::TscCycles) ? 0 : dur;
+    g_slots[ord].dur_known = (src == DurSource::Ms || src == DurSource::TscMs);
 
     // Hold g_serial_lock for the whole sentinel so a concurrent AP-
     // bringup / klog / stress line can't slice it. Pre-fix: an AP's
@@ -101,7 +138,24 @@ void FinalisePhase(u32 ord, u64 now_ms)
     arch::SerialWrite(" complete t=");
     SerialWriteDec(now_ms);
     arch::SerialWrite(" dur=");
-    EmitDurField(dur, known);
+    switch (src)
+    {
+    case DurSource::Ms:
+        SerialWriteDec(dur);
+        arch::SerialWrite("ms");
+        break;
+    case DurSource::TscMs:
+        SerialWriteDec(dur);
+        arch::SerialWrite("ms(tsc)");
+        break;
+    case DurSource::TscCycles:
+        SerialWriteDec(dur);
+        arch::SerialWrite("cyc(pre-clock)");
+        break;
+    case DurSource::Unknown:
+        arch::SerialWrite("unknown");
+        break;
+    }
     arch::SerialWrite("\n");
 }
 
@@ -115,6 +169,11 @@ void BootObserveSetStallPhase(core::Phase phase)
 void BootObserveSuppress(bool on)
 {
     g_suppressed = on;
+}
+
+bool BootObserveIsSuppressed()
+{
+    return g_suppressed;
 }
 
 core::Phase BootPhaseCurrent()
@@ -142,6 +201,11 @@ void BootPhaseEnter(core::Phase phase)
 
     g_slots[ord].entered = true;
     g_slots[ord].enter_ms = now;
+    // TSC is the only monotonic source running before HPET is
+    // calibrated; capturing it unconditionally lets FinalisePhase
+    // emit a meaningful duration for the early phases (Earlycon ..
+    // Vfs) once the calibration completes mid-boot.
+    g_slots[ord].enter_tsc = arch::TscRead();
     if (g_boot_first_ms == 0 && now != 0)
     {
         g_boot_first_ms = now;

@@ -271,7 +271,10 @@ bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
 
     Fat32Guard guard;
     KDBG_S(Fat32Lookup, "fs/fat32", "lookup", "path", path);
-    KLOG_DEBUG_AS(::duetos::core::LogArea::FS, "fs/fat32", "lookup", "path", path);
+    // Trace — hundreds of these fire per boot from klog-persist
+    // rotation, registry probes, and shell ls. DEBUG was too loud;
+    // an operator chasing a lookup race can flip to Trace explicitly.
+    KLOG_TRACE_AS(::duetos::core::LogArea::FS, "fs/fat32", "lookup", "path", path);
 
     // Memoized result? (Stable key = the caller's original path
     // bytes, before slash-stripping / component descent.) Re-probed
@@ -361,7 +364,11 @@ bool Fat32LookupPath(const Volume* v, const char* path, DirEntry* out)
         }
         if (!ctx.found)
         {
-            KLOG_DEBUG_AS(::duetos::core::LogArea::FS, "fs/fat32", "lookup: component not found", "comp", comp);
+            // Trace — probe-style misses are the expected path for
+            // klog-persist rotation slot lookups, the path cache's
+            // negative-cache priming, and shell completion. DEBUG
+            // flooded the serial console on every boot.
+            KLOG_TRACE_AS(::duetos::core::LogArea::FS, "fs/fat32", "lookup: component not found", "comp", comp);
             PathCachePut(v, orig_path, /*found=*/false, nullptr); // negative cache
             return false;
         }
