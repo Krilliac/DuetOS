@@ -228,8 +228,14 @@ constexpr u32 kMicOffsetInBody = 1u + 2u + 2u + 8u + 32u + 16u + 8u + 8u;
     {
         if (body[kMicOffsetInBody + i] != expected[i])
         {
-            KLOG_WARN_AV(::duetos::core::LogArea::Wireless, "net/wireless/eapol", "mic-verify: byte mismatch at offset",
-                         static_cast<u64>(i));
+            // Demoted to DEBUG: MIC mismatch is a legitimate per-frame
+            // outcome (wrong password, corrupted frame, tamper-detect
+            // self-test exercising the failure leg). The `RecordErr`
+            // below + the caller's `Err` return are the real notification
+            // channels; an unconditional WARN here flooded the boot log
+            // on every tamper-test run.
+            KLOG_DEBUG_AV(::duetos::core::LogArea::Wireless, "net/wireless/eapol",
+                          "mic-verify: byte mismatch at offset", static_cast<u64>(i));
             diag::RecordErr(diag::Layer::Eapol, "mic-verify-fail", static_cast<u32>(::duetos::core::ErrorCode::Corrupt),
                             i, body_len, 0);
             return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};

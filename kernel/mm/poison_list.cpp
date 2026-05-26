@@ -41,6 +41,14 @@ constinit u64 g_poisoned[kFramePoisonCapacity] = {};
 constinit u32 g_count = 0;
 constinit sync::SpinLock g_poison_lock = {};
 
+// Set during `PoisonFrameSelfTest` to suppress the per-PFN WARN
+// log line — the selftest exercises the round-trip with synthetic
+// PFNs that aren't real DRAM frames, so emitting "frame poisoned
+// (excluded from future allocation)" would mislead operators
+// reading the boot log. The selftest restores the table to its
+// original state afterwards; the suppression flag is restored too.
+constinit bool g_selftest_in_progress = false;
+
 // Linear scan helper called under the lock.
 bool ContainsLocked(u64 frame_phys)
 {
@@ -69,10 +77,15 @@ bool PoisonFrame(u64 frame_phys)
         return false;
     }
     g_poisoned[g_count++] = pfn;
-    // Log even at the high level: a frame transitioning into
-    // poisoned-state is a non-recoverable event whose log line
-    // should survive any reasonable kernel log level filtering.
-    KLOG_WARN_V("mm/poison", "frame poisoned (excluded from future allocation) phys", pfn);
+    if (!g_selftest_in_progress)
+    {
+        // Log even at the high level: a frame transitioning into
+        // poisoned-state is a non-recoverable event whose log line
+        // should survive any reasonable kernel log level filtering.
+        // Suppressed during the boot selftest (synthetic PFNs would
+        // mis-attribute a hardware-failure event).
+        KLOG_WARN_V("mm/poison", "frame poisoned (excluded from future allocation) phys", pfn);
+    }
     return true;
 }
 
@@ -106,6 +119,13 @@ void PoisonFrameSelfTest()
     }
 
     const u32 saved_count = PoisonedFrameCount();
+
+    // Suppress the per-PFN WARN log during the synthetic-PFN
+    // round-trip; restored before any real-SRAR path can run.
+    {
+        sync::SpinLockGuard guard(g_poison_lock);
+        g_selftest_in_progress = true;
+    }
 
     // (1) Insert.
     if (!PoisonFrame(kFakePfn1))
@@ -177,6 +197,13 @@ void PoisonFrameSelfTest()
     if (PoisonedFrameCount() != saved_count)
     {
         core::Panic("mm/poison", "selftest: restore-original-state failed");
+    }
+
+    // Clear the suppress flag so a real SRAR after the selftest
+    // emits its WARN sentinel.
+    {
+        sync::SpinLockGuard guard(g_poison_lock);
+        g_selftest_in_progress = false;
     }
 
     SerialWrite("[mm/poison-selftest] PASS\n");
