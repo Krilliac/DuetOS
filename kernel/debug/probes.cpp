@@ -66,6 +66,7 @@ constexpr ProbeRow kProbeTable[] = {
     {ProbeId::kBlendRangeOob, "video.blend_range_oob", ProbeArm::ArmedLog},
     {ProbeId::kShadowAtlasInvalid, "video.shadow_atlas_invalid", ProbeArm::ArmedLog},
     {ProbeId::kTactilityThemeMismatch, "video.tactility_theme_mismatch", ProbeArm::ArmedLog},
+    {ProbeId::kResultExpectFail, "result.expect_fail", ProbeArm::ArmedLog},
 };
 static_assert(sizeof(kProbeTable) / sizeof(kProbeTable[0]) == static_cast<u64>(ProbeId::kCount),
               "kProbeTable size must match ProbeId::kCount — add a row for every enum entry");
