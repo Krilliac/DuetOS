@@ -76,6 +76,19 @@ extern "C"
     /// the parser ready avoids re-deriving the option-walk every
     /// time a new option needs to be honoured.
     u32 duetos_parsers_tcp_walk_options(const u8* opts, usize opts_len, DuetosTcpOptionCallback cb, void* cookie);
+
+    /// One's-complement Internet checksum (RFC 1071) over `buf`.
+    /// 16-bit big-endian words summed with end-around carry, then
+    /// the 1's-complement of the low 16 bits is returned. If the
+    /// input already contains the on-the-wire checksum field, a
+    /// computed value of `0` means the stored checksum matches.
+    u16 duetos_parsers_ipv4_header_checksum(const u8* buf, usize len);
+
+    /// Validate an IPv4 header at the start of `buf`. Returns true
+    /// iff the version field == 4, IHL is in [5, 15], the header-
+    /// byte count and total_length both fit within `len`, and the
+    /// stored checksum matches the bytes. Pure compute, no I/O.
+    bool duetos_parsers_ipv4_header_valid(const u8* buf, usize len);
 }
 
 } // namespace duetos::net::parsers

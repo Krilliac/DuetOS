@@ -322,6 +322,94 @@ pub extern "C" fn duetos_parsers_tcp_walk_options(
     walk_tcp_options(slice, cb, cookie)
 }
 
+// ---------- IPv4 header ----------
+
+/// One's-complement Internet checksum over a byte slice (RFC 1071).
+/// 16-bit big-endian words summed with end-around carry, then the
+/// 1's-complement of the low 16 bits is returned. A computed
+/// checksum of `0` (i.e. the input ALREADY contains the on-the-wire
+/// checksum field) means the stored value matches.
+fn ipv4_header_checksum(buf: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut i: usize = 0;
+    while i + 2 <= buf.len() {
+        let word = (u16::from(buf[i]) << 8) | u16::from(buf[i + 1]);
+        sum = sum.wrapping_add(u32::from(word));
+        i += 2;
+    }
+    if i < buf.len() {
+        // Odd trailing byte — pad with 0 in the low half.
+        sum = sum.wrapping_add(u32::from(buf[i]) << 8);
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xFFFF) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
+/// Validate an IPv4 header at the start of `buf`. Checks:
+///   - buffer holds at least 20 bytes (minimum IHL = 5)
+///   - version field == 4
+///   - IHL field in [5, 15]
+///   - declared header byte count (IHL × 4) doesn't overrun the buffer
+///   - total_length field doesn't overrun the buffer
+///   - one's-complement checksum over the header bytes is zero
+///     (i.e. the stored checksum matches the data)
+///
+/// All length arithmetic is `checked_mul`/`checked_add`-style — a
+/// hostile peer can't drive IHL or total_length into an overflow
+/// that wraps to a smaller "fits the buffer" value. Pure compute,
+/// no mutation, no allocation.
+fn ipv4_header_valid(buf: &[u8]) -> bool {
+    if buf.len() < 20 {
+        return false;
+    }
+    let version = buf[0] >> 4;
+    let ihl = (buf[0] & 0x0F) as usize;
+    if version != 4 {
+        return false;
+    }
+    if ihl < 5 {
+        return false;
+    }
+    let header_bytes = match ihl.checked_mul(4) {
+        Some(v) => v,
+        None => return false,
+    };
+    if header_bytes > buf.len() {
+        return false;
+    }
+    let total_len = ((u16::from(buf[2]) << 8) | u16::from(buf[3])) as usize;
+    if total_len > buf.len() {
+        return false;
+    }
+    ipv4_header_checksum(&buf[..header_bytes]) == 0
+}
+
+/// FFI: compute the IPv4 one's-complement Internet checksum (RFC
+/// 1071) over `buf[0..len)`. Returns 0 on a null buffer (caller
+/// distinguishes via a sentinel since 0 is also a legitimate
+/// "matches stored" result — the typical caller pattern is
+/// "if buf is unknown to be non-null, validate it first").
+#[no_mangle]
+pub extern "C" fn duetos_parsers_ipv4_header_checksum(buf: *const u8, len: usize) -> u16 {
+    let Some(slice) = slice_from_raw(buf, len) else {
+        return 0;
+    };
+    ipv4_header_checksum(slice)
+}
+
+/// FFI: validate an IPv4 header at the start of `buf`. Returns
+/// `true` iff the header is structurally well-formed AND the
+/// stored checksum matches.
+#[no_mangle]
+pub extern "C" fn duetos_parsers_ipv4_header_valid(buf: *const u8, len: usize) -> bool {
+    let Some(slice) = slice_from_raw(buf, len) else {
+        return false;
+    };
+    ipv4_header_valid(slice)
+}
+
 // ---------- hosted tests ----------
 //
 // These run under `cargo test --target <host>`; the kernel build
@@ -557,5 +645,96 @@ mod tests {
         let visited = walk_tcp_options(&opts, cb, cookie);
         assert_eq!(visited, 1);
         assert_eq!(*count.borrow(), 1);
+    }
+
+    // --- IPv4 header ---
+
+    fn build_minimal_ipv4_header() -> [u8; 20] {
+        // Minimum header: version=4, IHL=5, total_len=20. Checksum
+        // computed below.
+        let mut h = [0u8; 20];
+        h[0] = 0x45; // version=4 IHL=5
+        // total length = 20
+        h[2] = 0;
+        h[3] = 20;
+        // TTL + protocol just to keep the checksum non-zero.
+        h[8] = 64;
+        h[9] = 17; // UDP
+        // src/dst zeros — fine.
+        // Compute checksum over the header.
+        let cs = ipv4_header_checksum(&h);
+        h[10] = (cs >> 8) as u8;
+        h[11] = cs as u8;
+        h
+    }
+
+    #[test]
+    fn ipv4_minimum_header_ok() {
+        let h = build_minimal_ipv4_header();
+        assert!(ipv4_header_valid(&h));
+    }
+
+    #[test]
+    fn ipv4_wrong_version_rejects() {
+        let mut h = build_minimal_ipv4_header();
+        h[0] = 0x65; // version=6, IHL=5
+        assert!(!ipv4_header_valid(&h));
+    }
+
+    #[test]
+    fn ipv4_ihl_too_small_rejects() {
+        let mut h = build_minimal_ipv4_header();
+        h[0] = 0x44; // version=4, IHL=4 (invalid — minimum is 5)
+        assert!(!ipv4_header_valid(&h));
+    }
+
+    #[test]
+    fn ipv4_short_buffer_rejects() {
+        let h = build_minimal_ipv4_header();
+        assert!(!ipv4_header_valid(&h[..19]));
+    }
+
+    #[test]
+    fn ipv4_bad_checksum_rejects() {
+        let mut h = build_minimal_ipv4_header();
+        h[10] ^= 0xFF; // corrupt the checksum field
+        assert!(!ipv4_header_valid(&h));
+    }
+
+    #[test]
+    fn ipv4_ihl_overruns_buffer_rejects() {
+        // IHL = 15 (max), header would need 60 bytes but the buffer
+        // is only 20.
+        let mut h = build_minimal_ipv4_header();
+        h[0] = 0x4F; // version=4, IHL=15
+        assert!(!ipv4_header_valid(&h));
+    }
+
+    #[test]
+    fn ipv4_total_len_overruns_buffer_rejects() {
+        let mut h = build_minimal_ipv4_header();
+        h[2] = 0xFF;
+        h[3] = 0xFF; // total_len = 65535, buffer is 20
+        // Recompute checksum so we're only testing the total_len check.
+        h[10] = 0;
+        h[11] = 0;
+        let cs = ipv4_header_checksum(&h);
+        h[10] = (cs >> 8) as u8;
+        h[11] = cs as u8;
+        assert!(!ipv4_header_valid(&h));
+    }
+
+    #[test]
+    fn ipv4_checksum_known_value() {
+        // RFC 1071 example: header bytes 0x45 0x00 0x00 0x73
+        // 0x00 0x00 0x40 0x00 0x40 0x11 0xb8 0x61 0xc0 0xa8 0x00 0x01
+        // 0xc0 0xa8 0x00 0xc7 with stored checksum 0xb861. Computing
+        // over the header with the checksum field already filled in
+        // gives 0 (the standard "matches" sentinel).
+        let h = [
+            0x45, 0x00, 0x00, 0x73, 0x00, 0x00, 0x40, 0x00, 0x40, 0x11, 0xb8, 0x61, 0xc0, 0xa8, 0x00, 0x01, 0xc0, 0xa8,
+            0x00, 0xc7,
+        ];
+        assert_eq!(ipv4_header_checksum(&h), 0);
     }
 }

@@ -951,48 +951,22 @@ ArpStats ArpStatsRead()
 
 u16 Ipv4HeaderChecksum(const void* buf, u64 len)
 {
-    const auto* p = static_cast<const u8*>(buf);
-    u32 sum = 0;
-    u64 i = 0;
-    // 16-bit big-endian words.
-    while (i + 2 <= len)
-    {
-        const u16 word = (u16(p[i]) << 8) | u16(p[i + 1]);
-        sum += word;
-        i += 2;
-    }
-    if (i < len)
-    {
-        // Odd trailing byte — pad with 0 in the low half.
-        sum += u32(p[i]) << 8;
-    }
-    // Fold carry.
-    while (sum >> 16)
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    return u16(~sum & 0xFFFF);
+    // Pure byte function — delegates to the duetos_net_parsers
+    // Rust crate. Same RFC 1071 algorithm, but every arithmetic
+    // step uses safe-Rust slice traversal so a malformed input
+    // can't drive an index out of bounds.
+    return ::duetos::net::parsers::duetos_parsers_ipv4_header_checksum(static_cast<const u8*>(buf),
+                                                                       static_cast<usize>(len));
 }
 
 bool Ipv4HeaderValid(const void* buf, u64 len)
 {
-    if (buf == nullptr)
-        return false;
-    const auto* p = static_cast<const u8*>(buf);
-    if (len < sizeof(Ipv4Header))
-        return false;
-    const u8 version = p[0] >> 4;
-    const u8 ihl = p[0] & 0x0F;
-    if (version != 4)
-        return false;
-    if (ihl < 5)
-        return false;
-    const u64 header_bytes = u64(ihl) * 4;
-    if (header_bytes > len)
-        return false;
-    const u16 total_len = (u16(p[2]) << 8) | u16(p[3]);
-    if (total_len > len)
-        return false;
-    // A computed checksum of 0 means the stored checksum matches.
-    return Ipv4HeaderChecksum(p, header_bytes) == 0;
+    // Delegate to the Rust crate: version + IHL + header-byte-count
+    // + total_length + stored-checksum validation in checked-
+    // arithmetic Rust. A hostile peer can't drive IHL or
+    // total_length into an overflow that wraps to "fits the buffer".
+    return ::duetos::net::parsers::duetos_parsers_ipv4_header_valid(static_cast<const u8*>(buf),
+                                                                    static_cast<usize>(len));
 }
 
 bool Ipv4HandleIncoming(u32 iface_index, const void* frame, u64 len)
