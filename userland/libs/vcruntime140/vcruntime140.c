@@ -347,20 +347,37 @@ static void cxxeh_dbg_hex64(char* out, unsigned long long v)
     out[16] = '\0';
 }
 
-/* Invoke a catch / destructor funclet. x64 MSVC funclets take the
- * establisher frame pointer in rdx and (catch) return the
- * continuation address in rax. Naked so our prologue can't shift
- * the frame the funclet addresses through rdx. */
+/* Invoke a catch / destructor funclet. x64 MSVC funclets receive
+ * the establisher frame in rdx (param 2) per the Windows x64 ABI,
+ * BUT also expect it spilled to the r8-home shadow slot
+ * (`[rsp+0x10]` from the funclet's view) because MSVC-generated
+ * catch funclets typically reload it from there rather than
+ * trusting rdx across nested calls inside the funclet body.
+ * cxxeh_pe's catch funclet for `test_int_throw` literally does
+ * `mov rdx, [rsp+0x10]` as its first instruction — without the
+ * spill the funclet reads stale shadow-space bytes (a previous
+ * caller's r8) and `lea rbp, [rdx+0x40]` lands rbp at a garbage
+ * address. Stack-discipline-wise this is the MSVC funclet ABI we
+ * have to honour even though our cxx_call_funclet itself doesn't
+ * need the spill. Naked so our prologue can't shift the frame
+ * the funclet addresses through rdx. */
 __attribute__((naked)) static void* cxx_call_funclet(void* handler, u64_ frame)
 {
     __asm__ volatile("push %rbp\n\t"
                      "mov %rsp,%rbp\n\t"
                      "sub $0x20,%rsp\n\t"
                      "and $-16,%rsp\n\t"
-                     "mov %rdx,%r8\n\t"  /* frame */
-                     "mov %rcx,%rax\n\t" /* handler */
+                     "mov %rdx,%r8\n\t"  /* r8 = frame (establisher) */
+                     "mov %rcx,%rax\n\t" /* rax = handler */
                      "xor %ecx,%ecx\n\t"
-                     "mov %r8,%rdx\n\t" /* arg: establisher frame */
+                     "mov %r8,%rdx\n\t" /* rdx = frame (ABI arg 2) */
+                     /* The CALL below pushes 8 bytes (return addr),
+                      * so the funclet's `[rsp+0x10]` from its view is
+                      * `[rsp+0x08]` from ours (pre-call). Store the
+                      * establisher there so the funclet's first
+                      * `mov rdx, [rsp+0x10]` (re-reading the
+                      * r8/rdx-home slot) sees the right frame. */
+                     "mov %r8,0x08(%rsp)\n\t"
                      "call *%rax\n\t"
                      "leave\n\t"
                      "ret\n\t");
