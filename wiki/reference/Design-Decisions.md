@@ -10009,3 +10009,72 @@ a fresh AP idle task — intermittent" — closes the underlying
 shape that the 6 indirect-control-flow validators kept silent
 on. Validator suite stays in place as regression armour for
 unrelated wild-target dispatch shapes.
+
+## 2026-05-26 — MADT Local x2APIC (type 9) entries are parsed and registered
+
+**Decision:** `kernel/acpi/acpi.cpp::ParseMadt` accepts MADT
+sub-entries of type 9 (Local x2APIC) and type 10 (Local x2APIC
+NMI). The type-9 body — `{ u16 reserved, u32 apic_id, u32 flags,
+u32 processor_uid }` per ACPI 6.5 §5.2.12.12 — is registered into
+the same `g_lapics[]` table the legacy type-0 entries land in.
+`LapicRecord::apic_id` is widened from `u8` to `u32` to hold the
+wider ID. A new `LapicRecord::is_x2apic` boolean records the
+source for diagnostic rendering (the AP-bringup boot-log line in
+`kernel/arch/x86_64/smp.cpp` renders 8 hex digits for x2APIC IDs,
+2 for legacy xAPIC). The Intel-reserved sentinel `0xFFFFFFFF` is
+dropped without registering a phantom CPU. Type 10 (Local x2APIC
+NMI) is accepted by the parser so the malformed-table guard
+doesn't trip, but the entry is not yet cached — IOAPIC GSI is the
+only NMI source DuetOS currently routes.
+
+**Why:** firmware on any logical-CPU box that exceeds 254 cores
+enumerates **all** CPUs as MADT type 9 — the type-0 entries are
+absent above the 8-bit ID boundary. Without the type-9 case, a
+real dual-socket Xeon SP / EPYC box would boot with only the
+first 254 cores visible and the rest silently invisible to AP
+bring-up. Modern Linux (`arch/x86/kernel/acpi/boot.c::
+acpi_parse_x2apic`) and FreeBSD (`sys/x86/acpica/madt.c::
+madt_setup_cpus_handler`) both gate on the same shape; we
+mirror their accept-shape.
+
+**Verified:** new boot self-test `AcpiMadtX2ApicSelfTest`
+(`[acpi/madt-x2apic-selftest] PASS` sentinel) builds a synthetic
+MADT containing one valid x2APIC entry (id=0x12345678), one
+sentinel entry (id=0xFFFFFFFF, must drop), and one type-10 NMI
+entry (must parse). Snapshots and restores `g_lapics` around the
+call so the test is idempotent. Wired under `DUETOS_BOOT_SELFTEST`
+in `kernel/core/boot_bringup.cpp` alongside the existing ACPI
+selftests.
+
+**Alternatives considered and rejected:**
+- *Leave type 9 in the `default:` arm and ignore.* Today's
+  behaviour. Silently loses cores on big servers; the firmware
+  ID is present in the table but the kernel pretends it isn't.
+  Anti-pattern: "system that exists but is never called."
+- *Bump `kMaxCpus` past 32 to accept all CPUs an enterprise
+  server might list.* Would cascade through `mm/slab.cpp`,
+  `mm/frame_allocator.cpp` (per-CPU magazines / frame pools
+  sized by `kMaxCpus`), and the 32-bit `affinity_mask` in
+  `sched::Task`. Deferred as its own slice — landing MADT-9
+  parsing first means a future cap-bump only has to widen the
+  mask, not also teach the parser to find the entries.
+- *De-duplicate type-9 entries against existing type-0 entries
+  by APIC ID before inserting.* Linux does this. For DuetOS v0
+  the SMP bring-up code (`SmpStartAps`) already skips its own
+  LAPIC ID via `bsp_apic_id` and would naturally dedupe its
+  iteration. Accept the duplication in the table; the cap
+  (`kMaxCpus`) is the practical limiter and we log + drop
+  rather than panic when it's hit.
+
+**Revisit when:** an actual >32-thread target appears in the
+hardware matrix (requires the `kMaxCpus` cascade above), or a
+workload needs LAPIC-routed NMI delivery (would consume the
+type-10 entries we currently accept-and-drop).
+
+**Sources:** ACPI 6.5 §5.2.12.12 / §5.2.12.13; Linux
+`arch/x86/kernel/acpi/boot.c`; FreeBSD `sys/x86/acpica/madt.c`.
+
+**Related roadmap track(s):** Topology — cluster-scoped IPI
+fan-out (Roadmap line 323) references x2APIC; the cluster fan-out
+work itself remains gated on workload-justified profile evidence,
+but the *enumeration* of x2APIC-only CPUs is now correct.

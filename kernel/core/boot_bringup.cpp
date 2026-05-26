@@ -1121,6 +1121,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiEcSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiPowerSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiSleepPrepSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiMadtX2ApicSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiSciSelfTest());
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");

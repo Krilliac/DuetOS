@@ -52,9 +52,15 @@ struct IoApicRecord
 struct LapicRecord
 {
     u8 processor_uid;    // ACPI processor UID (opaque to us beyond logging)
-    u8 apic_id;          // LAPIC ID — the target for IPIs / IOAPIC routes
+    u32 apic_id;         // LAPIC ID — the target for IPIs / IOAPIC routes
+                         // (32-bit so x2APIC IDs from MADT type 9 fit; legacy
+                         // xAPIC IDs occupy only the low 8 bits)
     bool enabled;        // MADT flag bit 0: 1 = present + usable
     bool online_capable; // MADT flag bit 1: 1 = can be onlined by OS
+    bool is_x2apic;      // true if sourced from a MADT type-9 (Local x2APIC)
+                         // entry; false for legacy type-0 (Local APIC). Affects
+                         // how the AP-bringup code renders the id in boot logs
+                         // and lets future code key on the wider ID space.
 };
 
 struct InterruptOverride
@@ -249,5 +255,15 @@ void AcpiUnderflowSelfTest();
 /// firmware declares `\_PTS` / `\_GTS`. Emits one
 /// `[acpi/s5] selftest PASS` line. Panics on a wrong result.
 void AcpiSleepPrepSelfTest();
+
+/// Boot-time self-test for the MADT Local x2APIC (type 9) parser.
+/// Builds a synthetic MADT containing one valid x2APIC entry (wide
+/// ID 0x12345678), one with the 0xFFFFFFFF sentinel (must be
+/// dropped), and one Local x2APIC NMI entry (type 10; must parse
+/// without panicking). Saves and restores the live g_lapics table
+/// around the call so re-running it is idempotent. Emits
+/// `[acpi/madt-x2apic-selftest] PASS` on success; panics on a
+/// wrong field round-trip.
+void AcpiMadtX2ApicSelfTest();
 
 } // namespace duetos::acpi
