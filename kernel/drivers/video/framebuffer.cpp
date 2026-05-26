@@ -365,6 +365,14 @@ bool FramebufferRebind(u64 phys, u32 width, u32 height, u32 pitch, u8 bpp)
     g_info.pitch = pitch;
     g_info.bpp = bpp;
     g_available = true;
+    // Match FramebufferRebindExternal: a fresh live FB target moves
+    // the snapshot out of sync with reality, so force the next
+    // EndCompose to do a full first-frame blit instead of relying
+    // on its content-diff (which would compare against a snapshot
+    // that no longer reflects what's on the new screen).
+    g_presented_valid = false;
+    g_damage.Reset();
+    g_damage_rect_count = 0;
     SerialWrite("[video/fb] rebound phys=");
     SerialWriteHex(phys);
     SerialWrite(" virt=");
@@ -393,6 +401,24 @@ bool FramebufferRebindExternal(void* virt, u64 phys, u32 width, u32 height, u32 
     g_info.pitch = pitch;
     g_info.bpp = bpp;
     g_available = true;
+    // The new live buffer (e.g. virtio-gpu's host-side scanout backing
+    // populated by the driver's boot-proof test pattern) is OUT OF SYNC
+    // with both the prior live FB and the EndCompose snapshot. If we
+    // don't invalidate, the next compose's content-diff scan compares
+    // shadow against the stale snapshot, finds them identical (the
+    // compose paints the same scene), elides the blit, and the new
+    // live FB keeps whatever the driver left there — typically the
+    // host-side RGB diagonal+corner test pattern, with only the SVG-
+    // bearing parts of the wallpaper overwritten on subsequent
+    // partial-diff blits. Symptom: Classic + Amber themes (no SVG
+    // wallpaper backdrop) showed the GPU test pattern at boot
+    // instead of the themed desktop. Slate10 + Duet looked "ok"
+    // only because their full-screen SVG wallpaper masked it.
+    // Force a full first-frame blit on the next EndCompose by
+    // dropping the snapshot's valid bit + the damage union.
+    g_presented_valid = false;
+    g_damage.Reset();
+    g_damage_rect_count = 0;
     SerialWrite("[video/fb] rebound-ext virt=");
     SerialWriteHex(reinterpret_cast<u64>(virt));
     SerialWrite(" phys=");
@@ -851,8 +877,8 @@ u32 FramebufferReadPixel(u32 x, u32 y)
     {
         return 0;
     }
-    const auto* row =
-        reinterpret_cast<const volatile u32*>(reinterpret_cast<const u8*>(g_info.virt) + static_cast<u64>(y) * g_info.pitch);
+    const auto* row = reinterpret_cast<const volatile u32*>(reinterpret_cast<const u8*>(g_info.virt) +
+                                                            static_cast<u64>(y) * g_info.pitch);
     return row[x];
 }
 

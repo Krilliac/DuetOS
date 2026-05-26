@@ -581,12 +581,12 @@ void DeviceMgrSelfTest()
 
     // Class-label lookup table sanity — verify the most common
     // PCI base classes resolve to non-empty stable labels.
-    ok = ok && ClassLabel(0x01, 0x06)[0] == 'A';      // AHCI
-    ok = ok && ClassLabel(0x01, 0x08)[0] == 'N';      // NVME
-    ok = ok && ClassLabel(0x02, 0x00)[0] == 'N';      // NET
-    ok = ok && ClassLabel(0x0C, 0x03)[0] == 'U';      // USB
-    ok = ok && UsbSpeedLabel(3)[0] == 'H';            // HS
-    ok = ok && UsbClassLabel(0x03)[0] == 'H';         // HID
+    ok = ok && ClassLabel(0x01, 0x06)[0] == 'A'; // AHCI
+    ok = ok && ClassLabel(0x01, 0x08)[0] == 'N'; // NVME
+    ok = ok && ClassLabel(0x02, 0x00)[0] == 'N'; // NET
+    ok = ok && ClassLabel(0x0C, 0x03)[0] == 'U'; // USB
+    ok = ok && UsbSpeedLabel(3)[0] == 'H';       // HS
+    ok = ok && UsbClassLabel(0x03)[0] == 'H';    // HID
 
     // PCI device-count walk: every cached PciDevice(idx) is
     // dereferenceable up to PciDeviceCount(). This mirrors the

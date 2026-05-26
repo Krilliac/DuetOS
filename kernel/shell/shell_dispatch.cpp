@@ -723,7 +723,7 @@ constinit const char* const kCommandSet[] = {
     "script",      "exit",         "mkfs",       "mkfs.duetfs", "install",   "lastdump",   "loadtest",  "stress",
     "bench",       "dbg",          "dfix",       "dintro",      "selfthink", "drshd",      "pe-triage", "caplog",
     "live-update", "fault-inject", "suspend",    "resume",      "affinity",  "vtop",       "logclock",  "dpms",
-    "wrmsr",       "io",           "peek",       "poke",       "fbdump",
+    "wrmsr",       "io",           "peek",       "poke",        "fbdump",
 };
 constinit const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 

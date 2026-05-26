@@ -36,6 +36,21 @@ namespace
 // to zero and fool the "report freshness" health probe.
 constinit util::SatU64 g_reports = 0;
 
+// Pointer-sanity guard for handler arguments. The compiler emits
+// UBSan handler calls with a static metadata pointer that's always
+// inside the kernel image. If we observe a value that's not in the
+// canonical high-half kernel range (≥ 0xFFFFFFFF80000000) — null,
+// a small integer cast through, the all-ones sentinel, or any
+// userland VA — the call is corrupt and dereferencing it would
+// page-fault. The check costs one compare and lets us replace the
+// crash with a logged sentinel so the rest of the boot survives.
+constexpr u64 kKernelLowBound = 0xFFFFFFFF80000000ULL;
+inline bool LooksLikeKernelPtr(const void* p)
+{
+    const auto v = reinterpret_cast<u64>(p);
+    return v >= kKernelLowBound && v != ~u64{0};
+}
+
 // Source location pointed to by every handler. Filename is a string
 // literal embedded in the calling TU's rodata; we don't own it.
 struct SourceLocation
@@ -180,6 +195,24 @@ void Report(const char* kind, const SourceLocation* loc)
 {
     ++g_reports;
 
+    // Defensive: every compiler-emitted call passes a static
+    // SourceLocation pointer inside the kernel image. If we see
+    // something else (null, small int, all-ones sentinel, userland
+    // VA) the call is corrupt — dereferencing loc->filename would
+    // page-fault and turn one bad caller into a triple-fault.
+    // Log the wild pointer to serial + counter and bail. Real
+    // recursive call sites (Report from ReportTypeMismatch with a
+    // valid d->loc) pass the LooksLikeKernelPtr gate trivially.
+    if (!LooksLikeKernelPtr(loc))
+    {
+        arch::SerialWrite("[ubsan] wild loc= ");
+        arch::SerialWriteHex(reinterpret_cast<u64>(loc));
+        arch::SerialWrite(" kind=");
+        arch::SerialWrite(kind != nullptr ? kind : "<null>");
+        arch::SerialWrite(" (handler arg corrupt; skipping deref)\n");
+        return;
+    }
+
     const char* file = (loc != nullptr && loc->filename != nullptr) ? loc->filename : "<no-loc>";
 
     // Detailed serial line, preserved verbatim — host-side
@@ -282,6 +315,24 @@ bool DetailAlreadyEmitted(const SourceLocation* loc)
 // object-too-small) instead of just pointing at a line.
 void ReportTypeMismatch(const TypeMismatchData* d, u64 ptr)
 {
+    // Mirror Report's defensive guard: a compiler-emitted call
+    // always supplies a static TypeMismatchData* inside the kernel
+    // image. A wild d (null, small int, all-ones) means the call
+    // was corrupted — derefing &d->loc would still hand Report a
+    // wild pointer, and Report's own guard would catch it but only
+    // after we'd already taken one extra wild branch. Catch it at
+    // the entry so the recursion stops here.
+    if (!LooksLikeKernelPtr(d))
+    {
+        arch::SerialWrite("[ubsan] wild type-mismatch data=");
+        arch::SerialWrite(" ");
+        arch::SerialWriteHex(reinterpret_cast<u64>(d));
+        arch::SerialWrite(" ptr=");
+        arch::SerialWriteHex(ptr);
+        arch::SerialWrite(" (handler data corrupt; skipping report)\n");
+        return;
+    }
+
     Report("type-mismatch", &d->loc);
 
     if (d->loc.filename == nullptr || DetailAlreadyEmitted(&d->loc))

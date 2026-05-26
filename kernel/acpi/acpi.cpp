@@ -388,9 +388,8 @@ const Rsdp* FindRsdpInMultiboot(uptr info_phys)
     // called pre-FrameAllocatorInit — neither legitimate today).
     const void* snap = ::duetos::mm::MultibootInfoSnapshot();
     const u64 snap_size = ::duetos::mm::MultibootInfoSnapshotSize();
-    const auto* info = snap != nullptr
-                           ? reinterpret_cast<const mm::MultibootInfoHeader*>(snap)
-                           : reinterpret_cast<const mm::MultibootInfoHeader*>(mm::PhysToVirt(info_phys));
+    const auto* info = snap != nullptr ? reinterpret_cast<const mm::MultibootInfoHeader*>(snap)
+                                       : reinterpret_cast<const mm::MultibootInfoHeader*>(mm::PhysToVirt(info_phys));
     const uptr base = reinterpret_cast<uptr>(info);
     uptr cursor = base + sizeof(mm::MultibootInfoHeader);
     const uptr end = base + (snap != nullptr ? snap_size : info->total_size);

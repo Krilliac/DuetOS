@@ -1290,8 +1290,14 @@ bool EmitBase64Serial(const u8* data, u32 len)
 {
     // Line buffer: "[fbdump] " (9) + 60 base64 chars + "\n" + NUL = 71.
     char line[72];
-    line[0] = '['; line[1] = 'f'; line[2] = 'b'; line[3] = 'd';
-    line[4] = 'u'; line[5] = 'm'; line[6] = 'p'; line[7] = ']';
+    line[0] = '[';
+    line[1] = 'f';
+    line[2] = 'b';
+    line[3] = 'd';
+    line[4] = 'u';
+    line[5] = 'm';
+    line[6] = 'p';
+    line[7] = ']';
     line[8] = ' ';
 
     u32 pos = 0;
@@ -1320,7 +1326,7 @@ bool EmitBase64Serial(const u8* data, u32 len)
             line_payload += n;
         }
         *out++ = '\n';
-        *out   = '\0';
+        *out = '\0';
         duetos::arch::SerialWrite(line);
     }
     return true;
@@ -1352,12 +1358,17 @@ u32 BuildPpmHeader(u32 w, u32 h, char buf[32])
     };
 
     u32 i = 0;
-    buf[i++] = 'P'; buf[i++] = '6'; buf[i++] = '\n';
+    buf[i++] = 'P';
+    buf[i++] = '6';
+    buf[i++] = '\n';
     i += write_dec(w, buf + i);
     buf[i++] = ' ';
     i += write_dec(h, buf + i);
     buf[i++] = '\n';
-    buf[i++] = '2'; buf[i++] = '5'; buf[i++] = '5'; buf[i++] = '\n';
+    buf[i++] = '2';
+    buf[i++] = '5';
+    buf[i++] = '5';
+    buf[i++] = '\n';
     return i;
 }
 
@@ -1378,13 +1389,13 @@ void CmdFbdump(u32 argc, char** argv)
         return;
     }
 
-    const bool scaled = (argc >= 2 && argv != nullptr && argv[1] != nullptr &&
-                         (argv[1][0] == 's' || argv[1][0] == 'S'));
+    const bool scaled =
+        (argc >= 2 && argv != nullptr && argv[1] != nullptr && (argv[1][0] == 's' || argv[1][0] == 'S'));
 
     const u32 out_w = scaled ? info.width / 2 : info.width;
     const u32 out_h = scaled ? info.height / 2 : info.height;
     const u32 pixel_bytes = out_w * out_h * 3;
-    const u32 b64_bytes   = ((pixel_bytes + 2) / 3) * 4;
+    const u32 b64_bytes = ((pixel_bytes + 2) / 3) * 4;
     const u32 baud_bytes_per_sec = 115200 / 10; // ~11520 bytes/s at 8N1
     const u32 est_secs = (b64_bytes + baud_bytes_per_sec - 1) / baud_bytes_per_sec;
 
@@ -1433,14 +1444,14 @@ void CmdFbdump(u32 argc, char** argv)
         }
 
         const u32 src_row = row * step;
-        const u32* src    = fb + src_row * pitch_px;
+        const u32* src = fb + src_row * pitch_px;
         u32 bp = 0;
         for (u32 col = 0; col < out_w; ++col)
         {
             const u32 px = src[col * step];
             row_buf[bp++] = static_cast<u8>((px >> 16) & 0xFF); // R
-            row_buf[bp++] = static_cast<u8>((px >>  8) & 0xFF); // G
-            row_buf[bp++] = static_cast<u8>((px >>  0) & 0xFF); // B
+            row_buf[bp++] = static_cast<u8>((px >> 8) & 0xFF);  // G
+            row_buf[bp++] = static_cast<u8>((px >> 0) & 0xFF);  // B
         }
         ok = EmitBase64Serial(row_buf, bp);
     }

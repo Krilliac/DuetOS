@@ -367,8 +367,7 @@ void RebindCalendarBounds(u32 cx, u32 cy, u32 cw, u32 ch, u32 title_x, u32 title
 void RefreshTitleText()
 {
     u32 o = 0;
-    const char* mn =
-        (g_state.view_month >= 1 && g_state.view_month <= 12) ? kMonthNames[g_state.view_month] : "???";
+    const char* mn = (g_state.view_month >= 1 && g_state.view_month <= 12) ? kMonthNames[g_state.view_month] : "???";
     for (u32 i = 0; mn[i] != '\0' && o + 1 < sizeof(g_title_text); ++i)
         g_title_text[o++] = mn[i];
     if (o + 1 < sizeof(g_title_text))
@@ -399,9 +398,9 @@ void RefreshTitleText()
 void RefreshFooterText()
 {
     char ev_buf[kEventTextCap + 1] = {};
-    const bool has_ev = (g_state.sel_year != 0) &&
-                        CalendarFirstEventText(g_state.sel_year, static_cast<u8>(g_state.sel_month),
-                                               static_cast<u8>(g_state.sel_day), ev_buf, sizeof(ev_buf));
+    const bool has_ev =
+        (g_state.sel_year != 0) && CalendarFirstEventText(g_state.sel_year, static_cast<u8>(g_state.sel_month),
+                                                          static_cast<u8>(g_state.sel_day), ev_buf, sizeof(ev_buf));
     u32 o = 0;
     if (has_ev)
     {

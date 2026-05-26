@@ -290,9 +290,8 @@ using duetos::drivers::video::app_widgets::Rect;
 // footer AppLabel (overlays the bottom hint band). Reverse
 // declaration order is dispatch order — tab buttons get first
 // refusal on clicks.
-constinit auto g_settings =
-    MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
-                    AppLabel{});
+constinit auto g_settings = MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
+                                            AppButton{}, AppButton{}, AppLabel{});
 
 constinit bool g_settings_bound = false;
 
@@ -322,8 +321,8 @@ void BindSettingsOnce()
 
     static const char* const kTabLabels[kTabBtnCount] = {"GEN", "DSP", "SND", "KBD", "MSE", "DT"};
     using ClickFn = void (*)();
-    static constexpr ClickFn kTabClicks[kTabBtnCount] = {ClickTabGeneral, ClickTabDisplay, ClickTabSound,
-                                                         ClickTabKeyboard, ClickTabMouse,  ClickTabDateTime};
+    static constexpr ClickFn kTabClicks[kTabBtnCount] = {ClickTabGeneral,  ClickTabDisplay, ClickTabSound,
+                                                         ClickTabKeyboard, ClickTabMouse,   ClickTabDateTime};
     for (u32 i = 0; i < kTabBtnCount; ++i)
     {
         AppButton* btn = TabButton(i);
@@ -507,8 +506,8 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         // empty. The real panel populates via SettingsRegisterPanel
         // from its own .cpp. Caption role — diagnostic placeholder,
         // not a section header.
-        ChromeTextDraw(ChromeTextRole::Caption, cx + kReadoutX, cy + kTabStripH + 12,
-                       "(panel not registered yet)", th.banner_fg, ink_bg);
+        ChromeTextDraw(ChromeTextRole::Caption, cx + kReadoutX, cy + kTabStripH + 12, "(panel not registered yet)",
+                       th.banner_fg, ink_bg);
         return;
     }
 

@@ -49,8 +49,8 @@ EventResult AppButton::OnEventSelf(const Event& e)
         if (inside && !was_hover)
             state.flags = state.flags | WidgetStateFlags::Hover;
         else if (!inside && was_hover)
-            state.flags = static_cast<WidgetStateFlags>(static_cast<u8>(state.flags)
-                                                        & ~static_cast<u8>(WidgetStateFlags::Hover));
+            state.flags =
+                static_cast<WidgetStateFlags>(static_cast<u8>(state.flags) & ~static_cast<u8>(WidgetStateFlags::Hover));
         return inside ? EventResult::Consumed : EventResult::NotInterested;
     }
     if (e.kind == EventKind::MouseDown && bounds.Contains(e.x, e.y))
@@ -60,8 +60,8 @@ EventResult AppButton::OnEventSelf(const Event& e)
     }
     if (e.kind == EventKind::MouseUp && HasFlag(state.flags, WidgetStateFlags::Pressed))
     {
-        state.flags = static_cast<WidgetStateFlags>(static_cast<u8>(state.flags)
-                                                    & ~static_cast<u8>(WidgetStateFlags::Pressed));
+        state.flags =
+            static_cast<WidgetStateFlags>(static_cast<u8>(state.flags) & ~static_cast<u8>(WidgetStateFlags::Pressed));
         if (bounds.Contains(e.x, e.y) && on_click != nullptr)
             on_click();
         return EventResult::Consumed;

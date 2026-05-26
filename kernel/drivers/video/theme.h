@@ -353,7 +353,12 @@ void ThemeSetTactilityOverride(i8 v);
 // tactility_enabled is the master gate — kOn under HighContrast
 // still produces zero motion (see spec §7). Set via the `motion=`
 // kernel cmdline at boot.
-enum class MotionOverride : u8 { kAuto, kOn, kOff };
+enum class MotionOverride : u8
+{
+    kAuto,
+    kOn,
+    kOff
+};
 void ThemeSetMotionOverride(MotionOverride o);
 
 /// Effective motion intensity (0..255) after applying the

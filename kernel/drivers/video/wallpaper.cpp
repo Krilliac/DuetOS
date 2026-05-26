@@ -80,11 +80,11 @@ u32 AmbientStrokeRgb(u32 bg, u32 amount)
 
 struct MotionState
 {
-    u64  base_ms;        // monotonic base captured on first tick
-    u64  last_minute;    // minute of last clock-roll detection (login path)
-    i32  topo_drift_px;  // current horizontal drift offset, [0, fb_w)
-    double arc_rot_deg;  // current rotation, [-5, +5]
-    double pulse_boost;  // current pulse alpha boost, [0, kPulsePeak]
+    u64 base_ms;        // monotonic base captured on first tick
+    u64 last_minute;    // minute of last clock-roll detection (login path)
+    i32 topo_drift_px;  // current horizontal drift offset, [0, fb_w)
+    double arc_rot_deg; // current rotation, [-5, +5]
+    double pulse_boost; // current pulse alpha boost, [0, kPulsePeak]
 };
 static MotionState g_motion = {0, 0, 0, 0.0, 0.0};
 
@@ -95,10 +95,10 @@ static MotionState g_motion = {0, 0, 0, 0.0, 0.0};
 // frame rate, not the nominal one: previous rates were tuned for an
 // optimistic 14 Hz target and looked like a slideshow when the system
 // only delivered 4-5 Hz.
-constexpr u64    kArcRotPeriodMs    = 10000; // ±5° sweep over 10 s (1°/sec)
-constexpr u64    kPulsePeriodMs     =  6000; // 6 s breath (slightly snappier)
-constexpr double kPulsePeak         =  0.20; // alpha boost at peak (~2.5× the original)
-constexpr i32    kTopoDriftPxPerSec =    15; // 15 px/s — ~4 px per 4-Hz frame, clearly visible
+constexpr u64 kArcRotPeriodMs = 10000; // ±5° sweep over 10 s (1°/sec)
+constexpr u64 kPulsePeriodMs = 6000;   // 6 s breath (slightly snappier)
+constexpr double kPulsePeak = 0.20;    // alpha boost at peak (~2.5× the original)
+constexpr i32 kTopoDriftPxPerSec = 15; // 15 px/s — ~4 px per 4-Hz frame, clearly visible
 
 // Triangular sweep −5 → +5 → −5 over period_ms.
 // Matches tests/host/test_motion_math.cpp ArcRotationDegrees exactly.
@@ -106,7 +106,7 @@ inline double ArcRotationDegrees(u64 now_ms, u64 period_ms)
 {
     if (period_ms == 0)
         return 0.0;
-    const double t     = double(now_ms % period_ms) / double(period_ms);
+    const double t = double(now_ms % period_ms) / double(period_ms);
     const double phase = t < 0.5 ? (t * 4.0) - 1.0 : 3.0 - (t * 4.0);
     return 5.0 * phase;
 }
@@ -121,7 +121,7 @@ inline double PulseAlphaBoost(u64 now_ms, u64 period_ms, double peak)
         return 0.0;
     const double t = double(now_ms % period_ms) / double(period_ms);
     const double u = t < 0.5 ? t * 2.0 : (1.0 - t) * 2.0; // 0..1..0
-    const double s = (3.0 * u * u) - (2.0 * u * u * u);    // smoothstep
+    const double s = (3.0 * u * u) - (2.0 * u * u * u);   // smoothstep
     return peak * s;
 }
 
@@ -320,7 +320,7 @@ void PaintDuetArcs(u32 desktop_rgb, u32 fb_w, u32 fb_h, double rot_deg, double p
         // variant would produce.
         FramebufferStrokeArcFloat(cx - offset, cy, r, -90.0 - wobble + rot_deg, kSweepD, 2u, teal);
         // Amber arc: rotate +90° + wobble + ambient rotation.
-        FramebufferStrokeArcFloat(cx + offset, cy, r,  90.0 + wobble + rot_deg, kSweepD, 2u, amber);
+        FramebufferStrokeArcFloat(cx + offset, cy, r, 90.0 + wobble + rot_deg, kSweepD, 2u, amber);
     }
 
     // Centre dots — small filled disks at each arc anchor. The
@@ -487,8 +487,7 @@ void WallpaperPaint(u32 desktop_rgb)
                 SvgRender(g_svg_topo, i32(info.width) - drift, 0, info.width, info.height, tint_argb);
             }
         }
-        PaintDuetArcs(desktop_rgb, info.width, info.height,
-                      g_motion.arc_rot_deg, g_motion.pulse_boost);
+        PaintDuetArcs(desktop_rgb, info.width, info.height, g_motion.arc_rot_deg, g_motion.pulse_boost);
         PaintDuetBrandText(desktop_rgb, info.width, info.height);
         // Live kernel-stats footer used to paint syscall / DLL / export
         // counts in the bottom-right of the wallpaper. With the chrome
@@ -574,9 +573,7 @@ void WallpaperTick()
     // always available post-boot and 10ms is well below our 70ms tick
     // period — sufficient resolution for visible motion.
     const u64 now_ns = time::MonotonicNs();
-    const u64 now_ms = (now_ns != 0)
-        ? (now_ns / 1'000'000ULL)
-        : (duetos::arch::TimerTicks() * 10ULL);
+    const u64 now_ms = (now_ns != 0) ? (now_ns / 1'000'000ULL) : (duetos::arch::TimerTicks() * 10ULL);
     if (now_ms == 0)
         return; // both sources cold — extremely early boot
 
@@ -592,10 +589,10 @@ void WallpaperTick()
     //   intensity=77  (Classic) → ~3× slower rotation (~197 s)
     // Pulse period is fixed at kPulsePeriodMs regardless of intensity
     // (the breath already scales via pulse_peak_eff).
-    const u32 intensity_nz = motion;  // motion != 0 is guaranteed above
+    const u32 intensity_nz = motion; // motion != 0 is guaranteed above
     const u64 rot_period_ms = (kArcRotPeriodMs * 255ULL) / intensity_nz;
     const double pulse_peak_eff = kPulsePeak * (double(intensity_nz) / 255.0);
-    const i32 drift_speed_eff   = (kTopoDriftPxPerSec * i32(intensity_nz)) / 255;
+    const i32 drift_speed_eff = (kTopoDriftPxPerSec * i32(intensity_nz)) / 255;
 
     // Compute the new phase values.
     g_motion.arc_rot_deg = ArcRotationDegrees(t_ms, rot_period_ms);
@@ -619,7 +616,7 @@ void WallpaperTick()
     // into this module. When the region IS visible the dirty-mark fires
     // and the compositor's content-diff layer (Pass A) still elides the
     // actual blit if the pixels didn't change.
-    const u32 arcs_x = (info.width  > 170U) ? info.width  / 2U - 170U : 0U;
+    const u32 arcs_x = (info.width > 170U) ? info.width / 2U - 170U : 0U;
     const u32 arcs_y = (info.height > 170U) ? (info.height * 48U) / 100U - 170U : 0U;
     if (!AnyOpaqueWindowCoversRect(arcs_x, arcs_y, 340U, 340U))
     {
@@ -659,14 +656,14 @@ void WallpaperMotionSelfTest()
     using duetos::arch::SerialWrite;
 
     g_wallpaper_motion_selftest_passed = false;
-    bool pass        = true;
-    u32  failed_step = 0;
+    bool pass = true;
+    u32 failed_step = 0;
 
     auto mark_fail = [&](u32 step)
     {
         if (pass)
         {
-            pass        = false;
+            pass = false;
             failed_step = step;
         }
     };
@@ -707,8 +704,7 @@ void WallpaperMotionSelfTest()
     //      now_ms=1000    speed=1 fb_w=1024 → (1000/1000*1)    % 1024 = 1
     if (pass)
     {
-        if (TopoDriftOffsetPx(1024000, 1, 1024) != 0 ||
-            TopoDriftOffsetPx(1000, 1, 1024)    != 1)
+        if (TopoDriftOffsetPx(1024000, 1, 1024) != 0 || TopoDriftOffsetPx(1000, 1, 1024) != 1)
         {
             SerialWrite("[wallpaper-motion-selftest] FAIL topo wrap broken\n");
             KBP_PROBE_V(debug::ProbeId::kBootSelftestFail, 0xB5);
@@ -727,7 +723,7 @@ void WallpaperMotionSelfTest()
         u32 o = 41;
         msg[o++] = static_cast<char>('0' + (failed_step % 10));
         msg[o++] = '\n';
-        msg[o]   = '\0';
+        msg[o] = '\0';
         SerialWrite(msg);
     }
 }

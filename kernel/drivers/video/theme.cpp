@@ -1393,12 +1393,12 @@ u8 ThemeEffectiveMotionIntensity()
         return 0; // master gate wins — motion is always disabled when tactility is off
     switch (g_motion_override)
     {
-        case MotionOverride::kOff:
-            return 0;
-        case MotionOverride::kOn:
-            return 255;
-        case MotionOverride::kAuto:
-            return t.motion_intensity;
+    case MotionOverride::kOff:
+        return 0;
+    case MotionOverride::kOn:
+        return 255;
+    case MotionOverride::kAuto:
+        return t.motion_intensity;
     }
     return t.motion_intensity;
 }

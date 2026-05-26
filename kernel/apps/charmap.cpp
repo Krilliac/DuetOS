@@ -166,9 +166,9 @@ constexpr u32 kCmToolbarBtnGap = 4U;
 constexpr u32 kCmToolbarPadX = 4U;
 constexpr u32 kCmToolbarPadY = 2U;
 constexpr u32 kCmActionBtnCount = 2U;
-constexpr u32 kCmHeaderH = kRowH;   // selection summary label
-constexpr u32 kCmModeH = kRowH;     // range-mode label
-constexpr u32 kCmFooterH = kRowH;   // controls hint label
+constexpr u32 kCmHeaderH = kRowH; // selection summary label
+constexpr u32 kCmModeH = kRowH;   // range-mode label
+constexpr u32 kCmFooterH = kRowH; // controls hint label
 
 using duetos::drivers::video::ChromeTextRole;
 using duetos::drivers::video::ChromeTextWeight;
@@ -197,8 +197,7 @@ void ClickCopy();
 // Toolbar (back), then 2 action AppButtons, then 3 AppLabels
 // (header, mode, footer). Reverse declaration order is
 // dispatch order — buttons get first refusal on clicks.
-constinit auto g_charmap =
-    MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppLabel{}, AppLabel{}, AppLabel{});
+constinit auto g_charmap = MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppLabel{}, AppLabel{}, AppLabel{});
 
 constinit bool g_charmap_bound = false;
 constinit bool g_charmap_prev_left_down = false;
