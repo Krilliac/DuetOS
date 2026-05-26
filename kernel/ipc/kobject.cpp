@@ -144,6 +144,21 @@ void KObjectRelease(KObject* obj)
 
     if (reached_zero && obj->destroy != nullptr)
     {
+        // Type-tag sanity right before the destroy callback fires.
+        // The callback typically reinterpret_casts `obj` back to a
+        // concrete IPC type (KMutex, KMailbox, ...); if `obj->type`
+        // got scribbled to a wrong enumerator the cast is silent
+        // but every member access reads / writes the wrong layout.
+        // Catching the corrupted tag here turns a UAF amplifier
+        // into a clean panic with the corrupted value in hex. The
+        // valid range is {Mutex..Iocp} ∪ {Test=0xFFFE}; Invalid=0
+        // means "never initialised" which is also a corruption
+        // signal at destroy time.
+        const u32 type_tag = static_cast<u32>(obj->type);
+        const bool valid_tag =
+            (type_tag >= static_cast<u32>(KObjectType::Mutex) && type_tag <= static_cast<u32>(KObjectType::Iocp)) ||
+            type_tag == static_cast<u32>(KObjectType::Test);
+        KASSERT_WITH_VALUE(valid_tag, "ipc/kobject", "destroy: type tag corrupted", static_cast<u64>(type_tag));
         // Run destroy outside the lock — destroy may itself touch
         // other objects (Release them) and re-entering the global
         // lock from inside a destroy callback would deadlock.

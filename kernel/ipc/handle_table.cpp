@@ -50,6 +50,8 @@ bool HandleInRange(Handle h)
     // typically-busy prefix on a sparse table; degrades to a
     // full scan when the table is dense. Slot 0 stays reserved
     // for kHandleInvalid.
+    KASSERT_WITH_VALUE(table.next_free_hint < kHandleTableCapacity, "ipc/handle_table",
+                       "next_free_hint corrupted (oob)", static_cast<u64>(table.next_free_hint));
     const u32 start = (table.next_free_hint + 1u) % kHandleTableCapacity;
     for (u32 step = 0; step < kHandleTableCapacity; ++step)
     {
@@ -60,6 +62,13 @@ bool HandleInRange(Handle h)
             continue; // reserved sentinel slot
         if (table.slots[i].obj == nullptr)
         {
+            // Belt-and-braces: the scan above just observed the
+            // slot empty under `table.lock` and no other writer
+            // could have raced. If `slots[i].obj` is non-null
+            // now, the slot array itself was corrupted by a wild
+            // store. Catching it here prevents silently leaking
+            // the previously-installed KObject's reference.
+            KASSERT(table.slots[i].obj == nullptr, "ipc/handle_table", "slot raced between check and install");
             table.slots[i].obj = obj;
             table.next_free_hint = i;
             KLOG_TRACE_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "insert ok handle", static_cast<u64>(i));
@@ -81,6 +90,12 @@ KObject* HandleTableLookup(HandleTable& table, Handle h, KObjectType expected_ty
     // speculate `table.slots[h]` for an h past the cap. Mask the
     // index so the speculative load is bounded to [0, capacity).
     const Handle masked_h = static_cast<Handle>(util::MaskedIndex32(static_cast<u32>(h), kHandleTableCapacity));
+    // Architectural-bounds invariant on the masked index. Catches
+    // a MaskedIndex32 regression where the mask formula stops
+    // clamping (a one-character bug would turn a Spectre-defence
+    // into a real OOB on every IPC syscall).
+    KASSERT_WITH_VALUE(masked_h < kHandleTableCapacity, "ipc/handle_table", "masked handle oob",
+                       static_cast<u64>(masked_h));
     sync::SpinLockGuard guard(table.lock);
     KObject* obj = table.slots[masked_h].obj;
     if (obj == nullptr)
@@ -102,6 +117,8 @@ KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected
     }
     // Spectre v1 nospec — see HandleTableLookup for the rationale.
     const Handle masked_h = static_cast<Handle>(util::MaskedIndex32(static_cast<u32>(h), kHandleTableCapacity));
+    KASSERT_WITH_VALUE(masked_h < kHandleTableCapacity, "ipc/handle_table", "masked handle oob",
+                       static_cast<u64>(masked_h));
     KObject* obj = nullptr;
     {
         sync::SpinLockGuard guard(table.lock);
@@ -135,6 +152,8 @@ KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected
 
     // Spectre v1 nospec — see HandleTableLookup for the rationale.
     const Handle masked_h = static_cast<Handle>(util::MaskedIndex32(static_cast<u32>(h), kHandleTableCapacity));
+    KASSERT_WITH_VALUE(masked_h < kHandleTableCapacity, "ipc/handle_table", "masked handle oob",
+                       static_cast<u64>(masked_h));
     KObject* dropped = nullptr;
     {
         sync::SpinLockGuard guard(table.lock);
@@ -215,6 +234,14 @@ void HandleTableDrain(HandleTable& table)
         {
             if (table.slots[i].obj != nullptr)
             {
+                // Defensive: victim_count cannot exceed
+                // kHandleTableCapacity by the loop bound, but a
+                // KASSERT here turns a future refactor that breaks
+                // the bound (e.g. nested loop over a virtual cap)
+                // into a loud failure rather than a stack-buffer
+                // overflow of the on-stack `victims` array.
+                KASSERT_WITH_VALUE(victim_count < kHandleTableCapacity, "ipc/handle_table",
+                                   "drain victim buffer overflow", static_cast<u64>(victim_count));
                 victims[victim_count++] = table.slots[i].obj;
                 table.slots[i].obj = nullptr;
             }
