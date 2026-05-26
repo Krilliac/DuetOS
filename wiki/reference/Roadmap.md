@@ -600,15 +600,17 @@ In rough priority:
 
 ### Battery + ACPI suspend (residual — shared with ACPI S5)
 
-- **Residual:** (1) S3 / S0ix suspend-to-RAM wake-vector +
-  context save/restore; (2) GPE `_Qxx` AML query-method
-  evaluation — the SCI detects + acks a GPE but dispatching the
-  firmware's per-GPE `_Qxx` handler (lid-close / AC *event*
-  delivery) needs the AML interpreter in process context off the
-  woken worker plus an EC `_Qxx` read path (`ec.h` has none).
-  Lid/AC *state* is already readable via `_LID`/`_PSR`. (Battery
-  / AC / lid via EC + ACPI, SCI power-button path, and ACPI S5
-  soft-off incl. `_PTS`/`_GTS` all landed.)
+- **Residual:** S3 / S0ix suspend-to-RAM wake-vector +
+  context save/restore. EC `_Qxx` read path
+  (`AcpiEcReadQueryByte` / `AcpiEcDispatchPendingQuery`) and
+  per-bit `_Lxx`/`_Exx` GPE walking in the `env-monitor` task
+  both landed 2026-05-26 — lid-close / AC plug/unplug events
+  routed through either EC `_Qxx` or per-GPE method now fire
+  the firmware's handler. Battery / AC / lid *state* readable
+  via `_LID`/`_PSR`, SCI power-button path, ACPI S5 soft-off
+  incl. `_PTS`/`_GTS`, and the GPE `_Qxx` event surface all
+  landed. Open work: S3 trampoline + per-driver Suspend/Resume
+  callback contract (the harder half, per the research notes).
 
 ### Bluetooth, Printer, Webcam
 
@@ -1000,12 +1002,18 @@ When a residual ships, delete its bullet here and update the
   CLI/GUI prompt + `NtAdjustPrivilegesToken` facade routing
   landed.)
 
-### Suspend-to-RAM (S3 / S0ix) + GPE `_Qxx` dispatch
+### Suspend-to-RAM (S3 / S0ix)
 
-Consolidated single residual shared by the ACPI S5, Battery, and
-power-management surfaces: (1) S3 / S0ix wake-vector + context
-save/restore; (2) GPE `_Qxx` AML query-method evaluation off the
-woken worker + an EC `_Qxx` read path. (ACPI S5 soft-off incl.
+Consolidated S3 / S0ix wake-vector + context save/restore
+residual. The GPE `_Qxx` / `_Lxx` / `_Exx` dispatch half of this
+entry landed 2026-05-26 (EC query-byte read +
+`env-monitor`-task GPE walker — see "Battery + ACPI suspend"
+above). What remains: the trampoline blob below 1 MiB, CPU /
+device context save/restore via `kernel/arch/x86_64/acpi_wakeup.{S,cpp}`,
+and the per-driver Suspend/Resume callback contract in a new
+`kernel/power/` subsystem. Research notes document the FACS
+wake-vector handshake, the trampoline mode-transition sequence,
+and the device-state save surface. (ACPI S5 soft-off incl.
 `_PTS`/`_GTS` in §7 order, reboot chain, and lid/AC/battery
 *state* reads all landed — see the Battery row above.)
 
