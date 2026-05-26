@@ -20,7 +20,7 @@ emulator, no host OS underneath.
 ```
 Windows PE applications
         |  imports
-Win32 translator DLLs       userland/libs/   (44 production DLLs, ~1100 exports)
+Win32 translator DLLs       userland/libs/   (45 production DLLs, ~1100 exports)
         |  int 0x80
 Native DuetOS kernel
         |
@@ -70,7 +70,7 @@ sockets.
 | EAT parser | `kernel/loader/pe_exports.cpp` | `IMAGE_EXPORT_DIRECTORY`, binary-search lookup |
 | DLL loader | `kernel/loader/dll_loader.cpp` | Maps a DLL into a process, applies relocs, parses EAT |
 | Win32 syscall handlers | `kernel/subsystems/win32/` | `SYS_WIN_*`, `SYS_GDI_*`, `SYS_FILE_*`, `SYS_HEAP_*` etc. |
-| Translator DLLs | `userland/libs/{kernel32,ntdll,user32,gdi32,...}` | 44 production DLLs, ~1100 exports |
+| Translator DLLs | `userland/libs/{kernel32,ntdll,user32,gdi32,...}` | 45 production DLLs, ~1100 exports |
 | Flat-stubs page (legacy) | `kernel/subsystems/win32/` | Fallback for anything not yet ported to a real DLL |
 
 ## Per-process Bringup
@@ -79,9 +79,12 @@ When a PE spawns:
 
 1. PE bytes validated; `PeReport` summarises every directory.
 2. New `mm::AddressSpace` allocated.
-3. **Preload set of 38 userland DLLs** (out of 44 production DLLs in
-   `userland/libs/`) mapped into the new AS. The remaining DLLs load
-   on demand via `LoadLibraryA/W` -> `DllLoad`.
+3. **Preload set:** all 45 production DLLs in `userland/libs/` (plus
+   2 customdll test fixtures) mapped into the new AS on real
+   hardware. Under `arch::IsEmulator()` the 9 entries flagged
+   `essential=false` (7 production + 2 fixtures) are skipped to keep
+   CI runs short; the 38 essential entries always map. No on-demand
+   `LoadLibraryA/W` path is wired today.
 4. PE sections mapped with characteristic-driven flags (W^X enforced).
 5. DIR64 base relocations applied.
 6. Imports walked: each `(dll, name)` resolved against the preloaded
