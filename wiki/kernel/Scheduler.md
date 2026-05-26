@@ -44,7 +44,7 @@ struct Task {
     TaskState   state;       // Ready | Running | Dead
     u64         rsp;         // saved SP (valid only when NOT running)
     u8*         stack_base;
-    u64         stack_size;  // 16 KiB today
+    u64         stack_size;  // 64 KiB today
     const char* name;
     Task*       next;        // intrusive runqueue link
 };

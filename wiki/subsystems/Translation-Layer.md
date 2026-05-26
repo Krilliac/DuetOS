@@ -11,9 +11,8 @@
 ## Overview
 
 The translation layer is a thin module that **bridges** the Win32 and
-Linux subsystems through the native DuetOS syscall surface. It is
-deliberately small — under 500 lines — and lives at
-[`kernel/subsystems/translation/`](../../kernel/subsystems/translation/).
+Linux subsystems through the native DuetOS syscall surface. It lives
+at [`kernel/subsystems/translation/`](../../kernel/subsystems/translation/).
 
 Its job:
 
