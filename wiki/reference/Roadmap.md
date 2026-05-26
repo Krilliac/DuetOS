@@ -863,14 +863,6 @@ Residuals carried into Pass D / future polish:
   is recovered automatically on any TTF theme. Add a 6×8 micro-font
   asset if a bitmap-theme reviewer reports the visual collapse is
   confusing.
-- **Bold-TTF degrades to Regular when bold-font load fails.** The
-  boot-log line `chrome font bold load FAILED — Bold weight will
-  degrade to Regular` surfaces this; `boot-log-analyze.sh` emits a
-  non-fatal advisory (`chrome-font-bold: FAILED — Bold weight
-  degraded (non-fatal)`). The dispatcher's `// GAP:` marker in
-  `chrome_text.cpp::UseTtf` points at a future
-  `TtfDrawStringWeighted(font*, ...)` overload that would route
-  Bold to the bold registration when present.
 - **No italic, no Thin / Medium / Heavy weights.** Intentional v0
   omission. Extend `ChromeTextWeight` + bake the asset when a design
   need lands.

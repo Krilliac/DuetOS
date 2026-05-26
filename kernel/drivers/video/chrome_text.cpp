@@ -21,13 +21,13 @@
  *   - Bitmap path synthesises bold by double-painting with a 1-px
  *     x-offset (visually thicker stroke without a second font
  *     asset). Cheap and correct for the 8x8 font.
- *   - TTF path dispatches to the registered Regular font even
- *     when `weight == Bold` and `TtfChromeBoldGet() != nullptr`.
- *     `TtfDrawString` reads `TtfChromeFontGet()` internally and
- *     doesn't accept a font argument, so the bold registration
- *     is currently ignored in the TTF path. This is a v0
- *     limitation marked `// GAP:` below; a future slice should
- *     introduce a `TtfDrawStringWeighted(font*, ...)` overload.
+ *   - TTF path dispatches to the registered bold face when
+ *     `weight == Bold` and `TtfChromeBoldGet() != nullptr`, via
+ *     `TtfDrawStringFont`. When the bold font failed to load
+ *     (no asset, parse failure) the dispatcher falls back to the
+ *     Regular face — surfaced at boot via the
+ *     `chrome font bold load FAILED — Bold weight will degrade
+ *     to Regular` advisory.
  *
  * Self-test: validates the role table + dispatch math without
  * touching the framebuffer (so it runs cleanly headless and at
@@ -83,6 +83,11 @@ inline const RoleSpec& Spec(ChromeTextRole role)
 // Regular font registered also falls back to bitmap (TtfDrawString
 // would refuse internally, but routing through bitmap here keeps
 // the measure math consistent with the actual paint path).
+//
+// Weight is not consulted here: Bold rides the TTF path whenever
+// the theme + Regular registration permit it. `ChromeTextDraw`
+// picks the bold face when present and falls back to Regular when
+// the bold load failed (advertised at boot).
 inline bool UseTtf(ChromeTextWeight /*weight*/)
 {
     if (ThemeCurrent().font_kind != Theme::FontKind::Ttf)
@@ -93,15 +98,6 @@ inline bool UseTtf(ChromeTextWeight /*weight*/)
     {
         return false;
     }
-    // GAP: when Bold is requested but TtfChromeBoldGet() is nullptr
-    // (OR even when it's registered), we still take the TTF path
-    // and dispatch to Regular — TtfDrawString reads the Regular
-    // font registration internally and doesn't accept a font
-    // parameter. A future slice should introduce
-    // TtfDrawStringWeighted(font*, ...) so the Bold weight can
-    // route to the bold registration when present. — revisit when
-    // bold-weight visual fidelity matters (currently degrades
-    // silently to Regular pixel weight under TTF themes).
     return true;
 }
 
@@ -120,10 +116,25 @@ void ChromeTextDraw(ChromeTextRole role, u32 x, u32 y, const char* text, u32 fg,
 
     if (UseTtf(weight))
     {
-        // See the // GAP: note in UseTtf — TtfDrawString reads
-        // TtfChromeFontGet() internally so the Bold weight degrades
-        // to Regular pixel weight under TTF themes today.
-        TtfDrawString(x, y, text, fg, spec.ttf_px);
+        // Bold dispatches through the bold face when one is
+        // registered; otherwise falls back to Regular (surfaced
+        // at boot via the bold-load FAILED advisory). Regular
+        // always uses the Regular face. `TtfDrawStringFont` lets
+        // us pick the face explicitly instead of going through
+        // `TtfDrawString`'s implicit `TtfChromeFontGet()` lookup.
+        const TtfFont* face = nullptr;
+        if (weight == ChromeTextWeight::Bold)
+        {
+            face = TtfChromeBoldGet();
+        }
+        if (face == nullptr)
+        {
+            face = TtfChromeFontGet();
+        }
+        if (face != nullptr)
+        {
+            TtfDrawStringFont(*face, x, y, text, fg, spec.ttf_px);
+        }
         (void)bg; // TTF blends src-over; no opaque background fill.
         return;
     }
