@@ -1,9 +1,11 @@
 #include "log/klog_persist.h"
 
 #include "arch/x86_64/serial.h"
+#include "arch/x86_64/timer.h"
 #include "cpu/percpu.h"
 #include "fs/fat32.h"
 #include "log/klog.h"
+#include "time/timekeeper.h"
 
 /*
  * klog persistence layer — per-area FAT32-backed log files.
@@ -519,13 +521,28 @@ bool KlogPersistInstall()
     // ages to <BASE>.0 across the board, even for areas that don't
     // log this boot. Live <BASE>.LOG files are seeded lazily on
     // first line — avoids creating empty files for cold areas.
+    //
+    // Each rotation walks kRotationDepth slots * kFat32LookupPaths and
+    // produces a burst of Trace-level fs/fat32 "lookup" lines (negative
+    // probes when the slot doesn't exist). Bracket the loop with TSC
+    // reads so the install summary reports the visible cost — a 60-area
+    // rotation pass on a slow TCG host can take tens of ms and an
+    // operator chasing boot-time should see that in dmesg, not
+    // re-derive it by counting fat32 trace lines.
+    const u64 rotate_start_tsc = arch::TscRead();
+    u32 rotated_areas = 0;
     for (const auto& a : g_area_files)
     {
         if (a.base != nullptr)
         {
             RotateAreaChain(v, a.base);
+            ++rotated_areas;
         }
     }
+    const u64 rotate_end_tsc = arch::TscRead();
+    const u64 rotate_ms = time::TscCalibrated() ? time::TscToNanos(rotate_end_tsc - rotate_start_tsc) / 1'000'000 : 0;
+    KLOG_INFO_2V("log/klog-persist", "rotation pass", "areas", static_cast<u64>(rotated_areas), "elapsed_ms",
+                 rotate_ms);
 
     g_installed = true;
     SetLogLineSink(LineSink);

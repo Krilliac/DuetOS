@@ -96,7 +96,7 @@ of grepping a fragile multi-line signature list.
 
 ```
 [boot] phase=<name> begin
-[boot] phase=<name> complete t=<ms> dur=<ms|unknown>
+[boot] phase=<name> complete t=<ms> dur=<Nms|Nms(tsc)|Ncyc(pre-clock)|unknown>
 [boot] phase=<name> FAIL ec=<hexbyte> err=<hex>
 [boot] phase=<name> STUCK ec=<hexbyte> (init-wedge: no serial progress)
 [boot-report] begin
@@ -107,9 +107,24 @@ of grepping a fragile multi-line signature list.
 [boot-report] end
 ```
 
-`t=0` / `dur=unknown` is the explicit "monotonic clock not online
-yet" sentinel for phases that ran before `Phase::Time`
-(`time::MonotonicNs()` returns 0 until `TimekeeperInit`). A phase is
+`dur` carries one of four shapes:
+
+  - `dur=<N>ms` — ms-clock was online at both endpoints (HPET / TSC
+    clocksource registered). Highest fidelity.
+  - `dur=<N>ms(tsc)` — ms-clock was online at finalize but NOT at
+    enter; converted via the calibrated TSC cycle delta. Same
+    accuracy on real hardware; less reliable under hypervisor TSC
+    virtualisation.
+  - `dur=<N>cyc(pre-clock)` — neither endpoint had a registered
+    monotonic clocksource; phases run before `Phase::Time`
+    (`TimekeeperInit`) finalise into this shape, with `<N>` the raw
+    TSC cycle delta. Convert to ms post-hoc by dividing by the
+    boot's calibrated `g_tsc_freq_hz`.
+  - `dur=unknown` — neither HPET nor TSC was sampleable; rare,
+    indicates a serious bring-up regression.
+
+`t=0` lines are pre-`Phase::Time` finalisations (`time::MonotonicNs()`
+returns 0 until `TimekeeperInit` registers HPET / TSC). A phase is
 "active" from its `begin` until the next phase's `begin`; the last
 phase is finalised by the report. The fix-journal / translator
 structured summaries are emitted immediately above the report and

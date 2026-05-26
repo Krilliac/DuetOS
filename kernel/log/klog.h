@@ -755,6 +755,16 @@ void DumpLogRingFilteredAreaTo(LogTee writer, u32 area_mask, u32 max_entries);
         }                                                                                                              \
     } while (0)
 
+#define KLOG_TRACE_AS(area_, subsys, msg, label, s)                                                                    \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if constexpr (static_cast<::duetos::u8>(::duetos::core::LogLevel::Trace) >=                                    \
+                      static_cast<::duetos::u8>(::duetos::core::kKlogMinLevel))                                        \
+        {                                                                                                              \
+            ::duetos::core::LogAWithString(::duetos::core::LogLevel::Trace, (area_), (subsys), (msg), (label), (s));   \
+        }                                                                                                              \
+    } while (0)
+
 #define KLOG_DEBUG_A(area_, subsys, msg)                                                                               \
     do                                                                                                                 \
     {                                                                                                                  \
