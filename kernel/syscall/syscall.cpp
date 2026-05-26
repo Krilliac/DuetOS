@@ -110,6 +110,7 @@
 #include "diag/event_trace.h"
 #include "diag/fault_inject.h"
 #include "diag/fix_journal.h"
+#include "diag/kpath.h"
 #include "diag/log_names.h"
 #include "loader/compat_shim.h"
 #include "proc/process.h"
@@ -467,6 +468,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
         return;
     }
     const u64 num = frame->rax;
+    // KPath: bump the per-syscall hit counter before any handler-
+    // specific logic runs. Cheap (single bounds check + relaxed
+    // atomic add) and safe from any context the syscall path can
+    // be in. Surfaces "which syscalls actually fire on real
+    // workloads" in the kpath ledger + KERNEL.KPATH.TSV.
+    ::duetos::diag::KPathHitSyscall(num);
     // Capture the syscall args at entry so an RAII guard (below)
     // can push the (nr, args, ret, ts) entry into the calling
     // task's trail ring on every return path. Reading from `frame`

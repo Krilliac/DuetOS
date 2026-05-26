@@ -108,7 +108,7 @@ userland. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 | `psp` | 1 | `kernel/drivers/psp/` |
 | `storage` | 3 | `kernel/drivers/storage/` |
 | `usb` | 21 | `kernel/drivers/usb/` |
-| `video` | 25 | `kernel/drivers/video/` |
+| `video` | 37 | `kernel/drivers/video/` |
 | `virtio` | 9 | `kernel/drivers/virtio/` |
 <!-- /AUTO:driver_list -->
 

@@ -56,6 +56,7 @@
 #include "diag/cleanroom_trace.h"
 #include "diag/fix_journal.h"
 #include "diag/kdbg.h"
+#include "diag/kpath.h"
 #include "log/klog.h"
 #include "loader/image_patch.h"
 #include "loader/pe_exports.h"
@@ -1630,6 +1631,7 @@ bool TryResolveViaPreloadedDllsAnyName(const char* fn_name, const DllImage* dlls
 bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm::AddressSpace* as,
                     const DllImage* preloaded_dlls, u64 preloaded_dll_count)
 {
+    KPATH(Manual, "loader.pe.resolve_imports");
     KLOG_TRACE_SCOPE("pe-resolve", "ResolveImports");
     using arch::SerialLineGuard;
     using arch::SerialWrite;
@@ -1638,6 +1640,7 @@ bool ResolveImports(const u8* file, u64 file_len, const PeHeaders& h, duetos::mm
     const PeDataDir imp = ReadDataDir(file, file_len, h, kDirEntryImport);
     if (imp.rva == 0 || imp.size == 0)
     {
+        KPATH(Branch, "loader.pe.resolve_imports.no_import_dir");
         KDBG(PeImport, "pe-resolve", "no import directory — skipping");
         return true; // no imports, nothing to do
     }

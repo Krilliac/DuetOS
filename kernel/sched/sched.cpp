@@ -47,6 +47,7 @@
 #include "diag/event_trace.h"
 #include "diag/fix_journal.h"
 #include "diag/kdbg.h"
+#include "diag/kpath.h"
 #include "diag/soft_lockup.h"
 #include "sched/loadavg.h"
 #include "sync/rcu.h"
@@ -2116,11 +2117,13 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags);
 
 void Schedule()
 {
+    KPATH_HOT(Manual, "sched.schedule.entry");
     if (Current() == nullptr)
     {
         // pre-SchedInit timer tick (shouldn't happen, but be safe).
         // Log once so a recurring null-current pattern is visible
         // without burying the boot log in tick-rate spam.
+        KPATH(Branch, "sched.schedule.no_current");
         KLOG_ONCE_WARN("sched", "Schedule called with no current task (pre-SchedInit?)");
         return;
     }

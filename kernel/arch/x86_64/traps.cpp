@@ -42,6 +42,7 @@
 #include "diag/fault_react.h"
 #include "diag/fix_journal.h"
 #include "diag/gdb_server.h"
+#include "diag/kpath.h"
 #include "security/fault_domain.h"
 #include "diag/hexdump.h"
 #include "diag/minidump.h"
@@ -695,6 +696,10 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         }
     };
     RipIntegrityGuard guard(frame);
+    // KPath: record that this vector fired before any handler-
+    // specific dispatch. Single bounds check + relaxed atomic add;
+    // safe in trap / IRQ context (no allocation, no klog, no locks).
+    ::duetos::diag::KPathHitVector(static_cast<::duetos::u32>(frame->vector));
     // Hardware IRQ path. Routes to the registered handler (if any), then
     // EOIs the LAPIC and returns to isr_common's iretq, which resumes the
     // interrupted code. No diagnostic spew per IRQ — the timer alone fires

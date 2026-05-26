@@ -26,6 +26,7 @@
 
 extern "C" void duetos_arch_PanicCaptureShim();
 #include "diag/fix_journal.h"
+#include "diag/kpath.h"
 #include "loader/dll_loader.h"
 #include "loader/pe_exports.h"
 #include "log/klog.h"
@@ -1009,6 +1010,13 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     sched::DumpCurrentTaskSyscallTrail();
     DumpProcessVmInfo();
     DumpProbeFires();
+    // KPath summary at panic — single-line `[kpath] visited=...`
+    // sentinel that surfaces "which code paths fired before the
+    // crash" alongside the standard panic banner. Safe in panic
+    // context: reads counters via lock-free atomic loads; the
+    // FixJournalGetStats call inside takes no lock (returns a
+    // shared-stats copy by design).
+    ::duetos::diag::KPathEmitBootSummary();
     DumpHeldLocksLocal();
     DumpLogRing();
     DumpInflightScopes();

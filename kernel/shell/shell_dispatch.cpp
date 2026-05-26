@@ -723,7 +723,7 @@ constinit const char* const kCommandSet[] = {
     "script",      "exit",         "mkfs",       "mkfs.duetfs", "install",   "lastdump",   "loadtest",  "stress",
     "bench",       "dbg",          "dfix",       "dintro",      "selfthink", "drshd",      "pe-triage", "caplog",
     "live-update", "fault-inject", "suspend",    "resume",      "affinity",  "vtop",       "logclock",  "dpms",
-    "wrmsr",       "io",           "peek",       "poke",        "fbdump",
+    "wrmsr",       "io",           "peek",       "poke",        "fbdump",    "kpath",
 };
 constinit const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -1562,6 +1562,15 @@ void Dispatch(char* line)
         // it consistent with `probe list` (no admin required) for
         // the read paths and mark the write path symmetric.
         CmdDfix(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "kpath"))
+    {
+        // Same exposure model as `dfix` — the ledger reflects what
+        // the kernel has already exposed via the boot log. Flush
+        // just rewrites a TSV the smoke completion path already
+        // emits, so no admin gate on it either.
+        CmdKpath(argc, argv);
         return;
     }
     if (StrEq(cmd, "dintro"))

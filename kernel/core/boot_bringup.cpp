@@ -214,6 +214,8 @@
 #include "diag/fault_react.h"
 #include "diag/panic_wait.h"
 #include "diag/fix_journal.h"
+#include "diag/kpath.h"
+#include "diag/kpath_persist.h"
 #include "diag/fix_journal_persist.h"
 #include "diag/introspect.h"
 #include "diag/selfthink.h"
@@ -1035,6 +1037,14 @@ void BootBringupMemPaging()
     // state.
     duetos::diag::FixJournalInit();
     DUETOS_BOOT_SELFTEST(duetos::diag::FixJournalSelfTest());
+
+    // KPath — code path execution ledger. Sits next to the fix
+    // journal because both observe-record runtime behaviour and
+    // share the FAT32 sink pattern. Init runs after FixJournalInit
+    // so KPath's selftest (which fires probes through ProbeFire)
+    // doesn't trip a fix-journal call before its ring is live.
+    duetos::diag::KPathInit();
+    DUETOS_BOOT_SELFTEST(duetos::diag::KPathSelfTest());
 }
 
 
@@ -1995,6 +2005,12 @@ void BootBringupDevices(bool force_net_smoke)
     // boots too.
     duetos::diag::FixJournalPersistInstall();
     DUETOS_BOOT_SELFTEST(duetos::diag::FixJournalPersistSelfTest());
+
+    // KPath FAT32 sink — KERNEL.KPATH.TSV. Pairs with the fix-
+    // journal sink (same FAT32 volume, same install-after-mount
+    // ordering). Lets the offline diff tool
+    // `tools/test/kpath-coverage.sh` compare coverage across runs.
+    duetos::diag::KPathPersistInstall();
 
     // Cross-boot introspection: load the prior boot's journal
     // (KERNEL.F0, which the persist install just rotated into

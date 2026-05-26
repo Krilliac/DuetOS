@@ -97,8 +97,19 @@ host). Loadable in Visual Studio / WinDbg / VSCode-cppvsdbg / Python
 persistence (raw-block write to a reserved LBA) is on the
 [Roadmap](../reference/Roadmap.md#crash-dump-persistence-to-disk).
 
+## Code Path Coverage
+
+For "did this code path execute?" rather than "what did it log?",
+see the [Code Path Ledger](Code-Path-Ledger.md). The `KPATH(...)`
+macro is a peer of `KBP_PROBE(...)` — both record execution at a
+named site, but KPath also auto-enrolls every syscall / IDT
+vector / initcall / probe / fix-journal record and emits a single
+structured sentinel that CI greps (`[kpath] visited=N/M ...`).
+
 ## Related Pages
 
+- [Code Path Ledger](Code-Path-Ledger.md) — KPath ledger, the
+  global "what fired this boot?" surface.
 - [Debugging](../tooling/Debugging.md) — `addr2sym`, `disasm-at.sh`,
   `decode-panic.sh`
 - [QEMU Smoke Tests](../tooling/QEMU-Smoke.md)
