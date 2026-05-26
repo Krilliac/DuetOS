@@ -1273,6 +1273,20 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     SerialWrite("[boot] Programming Linux-ABI syscall MSRs.\n");
     duetos::subsystems::linux::SyscallInit();
 
+    // Re-capture the runtime-checker baseline now that all of the
+    // syscall MSRs (LSTAR/STAR/CSTAR/SYSENTER) are programmed.
+    // The first RuntimeCheckerInit (early in driver-domain bring-up)
+    // ran BEFORE the Linux SyscallInit above, so its baseline saw
+    // LSTAR=0. Every later RuntimeCheckerScan would then compare a
+    // live non-zero LSTAR against the stale-zero baseline and
+    // report `HealthIssue::SyscallMsrHijacked` — a false rootkit
+    // signal that escalated `blockguard -> Deny` and failed the
+    // boot-smoke FORBIDDEN guard. Teardown clears the captured
+    // gate; Init re-reads every g_baseline_* MSR/register against
+    // the now-final values.
+    duetos::core::RuntimeCheckerTeardown();
+    duetos::core::RuntimeCheckerInit();
+
     DUETOS_BOOT_SELFTEST(duetos::sync::SpinLockSelfTest());
 
     // Seqlock (plan B1.3). Sequence-counter primitive for
