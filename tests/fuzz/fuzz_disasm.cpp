@@ -37,8 +37,7 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
     // skip via simple-case fast paths.
     constexpr duetos::u64 kVa = 0xffffffff80100000ULL;
 
-    (void)duetos::debug::disasm::DecodeStream(reinterpret_cast<const duetos::u8*>(data),
-                                              static_cast<duetos::u64>(size), kVa, rows,
-                                              sizeof(rows) / sizeof(rows[0]));
+    (void)duetos::debug::disasm::DecodeStream(reinterpret_cast<const duetos::u8*>(data), static_cast<duetos::u64>(size),
+                                              kVa, rows, sizeof(rows) / sizeof(rows[0]));
     return 0;
 }
