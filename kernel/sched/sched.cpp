@@ -1137,30 +1137,70 @@ Task* StealNormalFromPeer()
             {
                 continue;
             }
-            if (!TaskAllowedOn(head, self_id))
+            // Walk the peer's Normal queue looking for the first
+            // task whose affinity mask allows execution on `self_id`.
+            // The peer's head might be affinity-pinned away from us
+            // (e.g. a worker pinned to a specific NUMA node); a
+            // deeper task that IS allowed here should still be
+            // stealable. Bounded walk caps worst-case time spent
+            // here under a peer queue that's entirely pinned away —
+            // kStealScanCap (32) covers the vast majority of real
+            // queues; beyond that we accept "no steal this round"
+            // and the next periodic balance picks up the slack.
+            //
+            // Single-pass: track `prev` so the chosen task can be
+            // unlinked without re-walking. `prev == nullptr`
+            // identifies the head case so the head pointer gets
+            // updated.
+            constexpr u32 kStealScanCap = 32;
+            Task* prev = nullptr;
+            Task* victim = nullptr;
+            u32 scanned = 0;
+            for (Task* t = head; t != nullptr && scanned < kStealScanCap; t = t->next, ++scanned)
             {
-                // The peer's head task is pinned away from this
-                // CPU — we may not run it, so don't steal it.
-                // GAP: a runnable task deeper in the peer's queue
-                // that IS allowed here is not pulled (we only
-                // inspect the head). Acceptable for v0 — revisit
-                // if pinned-task starvation shows up in a profile.
-                FIX_NOTE_GAP("sched/sched.cpp:StealNormalFromPeer", "scan past pinned head to next-allowed task");
+                if (TaskAllowedOn(t, self_id))
+                {
+                    victim = t;
+                    break;
+                }
+                prev = t;
+            }
+            if (victim == nullptr)
+            {
+                // Every reachable task in this peer's queue is
+                // affinity-pinned away from us (or the queue is
+                // deeper than the scan cap). Try the next peer.
                 continue;
             }
-            // Pop the head off the peer's Normal queue.
-            RunqHeadNormal(peer) = head->next;
+            // Unlink `victim` from the peer's queue.
+            if (prev == nullptr)
+            {
+                // Head case — same fast-path as the original
+                // implementation when the head is the chosen task.
+                RunqHeadNormal(peer) = victim->next;
+            }
+            else
+            {
+                prev->next = victim->next;
+            }
             if (RunqHeadNormal(peer) == nullptr)
             {
                 RunqTailNormal(peer) = nullptr;
             }
-            head->next = nullptr;
+            else if (victim == RunqTailNormal(peer))
+            {
+                // Stole the tail (a deeper-than-head allowed task
+                // happened to be last in the queue). The new tail
+                // is the predecessor we tracked.
+                RunqTailNormal(peer) = prev;
+            }
+            victim->next = nullptr;
             KASSERT(peer->runq_normal_len > 0, "sched", "Steal: peer normal_len underflow");
             --peer->runq_normal_len;
             // Update affinity so the next wake routes to us — keeps
             // hot tasks on whichever CPU is actually running them.
-            head->last_cpu = self_id;
-            return head;
+            victim->last_cpu = self_id;
+            return victim;
         }
     }
     return nullptr;
