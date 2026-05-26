@@ -366,15 +366,16 @@ void SettingsDateTimeSelfTest()
     using duetos::arch::SerialWrite;
     bool ok = true;
 
-    // Pass D chrome: anchor + paint into a notional (0,0,256,160)
-    // sub-panel content rect. Paint is side-effect-free at this
-    // boot phase (no framebuffer attached to the synthetic Compose
-    // ctx); we only verify the bind path + bounds clamp don't
-    // crash and that the labels carry their populated buffers.
+    // Pass D chrome: bind + rebind only. Skipping PaintAll because
+    // under TTF themes (duet*) AppLabel::PaintSelf routes into
+    // TtfDrawString -> CompositeCoverage -> FramebufferBlendFill at
+    // the synthetic (0,0) origin and races the compositor lock
+    // before the WM is online (silent boot halt). The bind + rebind
+    // + buffer-non-empty + label-bound checks below validate the
+    // chrome contract without painting. The live Draw() path
+    // exercises paint when the settings shell composes us.
     BindSettingsDateTimeOnce();
     RebindSettingsDateTimeBounds(0U, 0U, 256U, 160U);
-    Compose ctx{};
-    g_settings_datetime.PaintAll(ctx);
 
     if (g_dt_header[0] == '\0' || g_dt_footer[0] == '\0')
         ok = false;

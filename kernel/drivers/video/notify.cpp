@@ -436,22 +436,20 @@ void NotifySelfTest()
 
     NotifyShow(nullptr);
 
-    // Pass D: drive a synthetic Paint through the WidgetGroup
-    // chain. Pinned at a 240x32 box with text_w=200 — well
-    // inside any real framebuffer — and a known-good
-    // (panel/border/fg) triple. No FramebufferGet check: the
-    // CRTP Paint inlines into AppPanel + AppLabel, both of
-    // which early-out on bounds.w/h == 0; we just confirm the
-    // chain composes without faulting and the bind +
-    // re-anchor helpers don't crash on a fresh boot.
+    // Pass D: bind + re-anchor the WidgetGroup chain and verify
+    // the rebind landed. We deliberately do NOT call PaintAll
+    // here: under TTF themes (duet*) AppLabel::PaintSelf routes
+    // into TtfDrawString -> CompositeCoverage ->
+    // FramebufferBlendFill and races the compositor lock when
+    // the self-test runs before the WM is online (silent boot
+    // halt). The live NotifyRedraw() path exercises Paint each
+    // time a real toast fires.
     BindNotifyOnce();
     RebindNotifyBounds(/*box*/ 16U, 16U, 240U, 32U,
                        /*text*/ 28U, 22U, 200U, 20U,
                        /*panel*/ 0x00305030U,
                        /*border*/ 0x00000000U,
                        /*fg*/ 0x00FFFFFFU);
-    Compose compose_ctx{};
-    g_notify.PaintAll(compose_ctx);
     ok = ok && (NotifyPanel().bounds.w == 240U);
     ok = ok && (NotifyLabel().bounds.w == 200U);
     ok = ok && (NotifyLabel().text == g_toast.text);

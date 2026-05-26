@@ -469,19 +469,19 @@ void GfxDemoSelfTest()
     if (MandelbrotEscape(-(1 << 18), 0, 32) != 32)
         pass = false;
 
-    // Pass D chrome — bind + paint the header / footer AppLabels
-    // on a synthetic client rect and confirm both buffers are
-    // non-empty + the label.text pointers are bound. Pure
-    // compose; no compositor state mutated. The carve-out
-    // (DispatchRender + DrawHud + ResetParticles/Starfield/Fire
-    // state machines) is verified by the static spot checks
-    // above — this just verifies the chrome strap-on landed.
+    // Pass D chrome — bind + rebind the header / footer AppLabels
+    // and confirm both buffers are non-empty + the label.text
+    // pointers are bound. We do NOT call PaintAll here: under TTF
+    // themes (duet*) AppLabel::PaintSelf routes into TtfDrawString
+    // -> CompositeCoverage -> FramebufferBlendFill at the synthetic
+    // (0,0) origin and races the compositor lock before the WM is
+    // online (silent boot halt). The carve-out (DispatchRender +
+    // DrawHud + ResetParticles/Starfield/Fire state machines) is
+    // verified by the static spot checks above; the live DrawFn
+    // path exercises chrome paint once a real gfxdemo window
+    // composes.
     BindGfxChromeOnce();
     RebindGfxChromeBounds(0U, 0U, 340U, 280U);
-    {
-        Compose ctx{};
-        g_gfx_chrome.PaintAll(ctx);
-    }
     if (g_gfx_header[0] == '\0' || g_gfx_footer[0] == '\0')
         pass = false;
     if (GfxHeader().text == nullptr || GfxFooter().text == nullptr)

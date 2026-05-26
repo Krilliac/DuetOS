@@ -168,10 +168,14 @@ void SettingsSoundSelfTest()
     using duetos::arch::SerialWrite;
     bool ok = true;
 
+    // Pass D chrome: bind + rebind only. Skipping PaintAll because
+    // under TTF themes (duet*) AppLabel::PaintSelf routes into
+    // TtfDrawString -> CompositeCoverage -> FramebufferBlendFill at
+    // the synthetic (0,0) origin and races the compositor lock
+    // before the WM is online (silent boot halt). The live Draw()
+    // path exercises paint when the settings shell composes us.
     BindSettingsSoundOnce();
     RebindSettingsSoundBounds(0U, 0U, 256U, 120U);
-    Compose ctx{};
-    g_settings_sound.PaintAll(ctx);
 
     if (g_snd_header[0] == '\0' || g_snd_footer[0] == '\0')
         ok = false;
