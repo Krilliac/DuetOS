@@ -1412,13 +1412,6 @@ established `tests/fuzz/` pattern (host harness + `host_shim/`
 stubs + a `seeds/gen_*_seeds.py`); the codec/cert ones are pure
 `bytes → struct` and need *less* shimming than the FS probes.
 
-- **TLS records/handshake** — `kernel/net/tls.cpp`
-  (`TlsPeekRecord`, `TlsParseServerHello`,
-  `TlsParseCertificateLeaf`, `TlsPeekHandshake`). Untrusted
-  network bytes; feeds the ASN.1/X.509 path.
-- **Image decoders** — `kernel/util/jpeg.cpp`, `png` (+
-  `deflate`), `tga.h`. Untrusted file bytes; wallpaper / asset
-  load path.
 - **AML interpreter** — `kernel/acpi/aml.cpp`, `aml_eval.cpp`.
   Firmware-provided bytecode the kernel *executes*; large
   attack surface, heavier harness (needs an ACPI namespace
@@ -1438,7 +1431,15 @@ stubs + a `seeds/gen_*_seeds.py`); the codec/cert ones are pure
   fuzz_cea861 ≈ 511k/s); USB class-descriptor + HID report-
   descriptor (fuzz_usbclass + fuzz_usbhid via the
   usbclass/usbhid Rust rlib + panic=abort staticlib pattern;
-  fuzz_usbclass ≈ 1.05M/s, fuzz_usbhid ≈ 639k/s — both clean).
+  fuzz_usbclass ≈ 1.05M/s, fuzz_usbhid ≈ 639k/s — both clean);
+  TLS records/handshake (fuzz_tls + seeds/gen_tls_seeds.py —
+  five parsers (TlsPeekRecord / TlsPeekHandshake /
+  TlsParseServerHello / TlsParseCertificateLeaf /
+  TlsParseServerHelloDone) dispatched by a 1-byte selector;
+  6 seeds covering each entry point at ≈ 982k runs/s clean);
+  Image decoders (fuzz_bmp / fuzz_tga / fuzz_jpeg / fuzz_png
+  harnesses + seeds + duetos_img_meta Rust shim were already
+  in tree from prior slices — bullet was stale).
 -->
 - **Bluetooth HCI/HID** — `kernel/net/bluetooth/hci.h`,
   `hid.h`. Untrusted radio peer.

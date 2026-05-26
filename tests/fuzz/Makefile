@@ -56,7 +56,8 @@ HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuz
              $(BIN)/fuzz_asn1 $(BIN)/fuzz_x509 $(BIN)/fuzz_fw_pkg \
              $(BIN)/fuzz_pe_exports $(BIN)/fuzz_vt $(BIN)/fuzz_disasm \
              $(BIN)/fuzz_edid $(BIN)/fuzz_cea861 \
-             $(BIN)/fuzz_usbclass $(BIN)/fuzz_usbhid
+             $(BIN)/fuzz_usbclass $(BIN)/fuzz_usbhid \
+             $(BIN)/fuzz_tls
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -273,6 +274,24 @@ $(BIN)/fuzz_pe_exports: fuzz_pe_exports.cpp $(LOADER)/pe_exports.cpp \
 # ParserFeed runs the DEC ANSI state machine over a PTY byte
 # stream; util/unicode does the UTF-8 join.
 $(BIN)/fuzz_vt: fuzz_vt.cpp $(UTIL)/vt_parser.cpp $(UTIL)/unicode.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# --- TLS 1.2 record + handshake parsers --------------------------
+#
+# net/tls.cpp's parser entry points (TlsPeekRecord,
+# TlsPeekHandshake, TlsParseServerHello, TlsParseCertificateLeaf,
+# TlsParseServerHelloDone) are pure byte-functional walkers. The
+# state-machine half of tls.cpp pulls in RSA + AES + x509, but
+# those are reached through the Tls{Step}Bytes API the harness
+# does NOT drive — only HMAC + SHA-256 are pulled in transitively
+# via crypto/hmac.h + crypto/sha256.h includes. Link the leaf
+# parsers' deps and rely on the linker to discard the unused
+# state-machine body.
+NET := $(KERNEL)/net
+$(BIN)/fuzz_tls: fuzz_tls.cpp $(NET)/tls.cpp \
+		$(CRYPTO)/hmac.cpp $(CRYPTO)/sha256.cpp $(CRYPTO)/sha1.cpp \
+		$(CRYPTO)/bigint.cpp $(CRYPTO)/rsa.cpp $(CRYPTO)/aes.cpp \
+		$(CRYPTO)/aes_gcm.cpp $(CRYPTO)/x509.cpp $(CRYPTO)/asn1.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 # --- USB descriptors (Rust-backed) -------------------------------
