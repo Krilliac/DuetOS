@@ -1412,19 +1412,6 @@ established `tests/fuzz/` pattern (host harness + `host_shim/`
 stubs + a `seeds/gen_*_seeds.py`); the codec/cert ones are pure
 `bytes → struct` and need *less* shimming than the FS probes.
 
-- **X.509** — `kernel/crypto/x509.{h,cpp}`. ASN.1 host harness
-  + DEFLATE/gzip/ZIP host harnesses now all seeded
-  (`seeds/gen_{asn1,deflate,gzip,zip}_seeds.py`, 2026-05-26 —
-  fuzz_asn1 ≈ 400k runs/s, fuzz_deflate ≈ 36k/s, fuzz_gzip ≈
-  26k/s, all clean past the format gates with the new
-  corpora). X.509 still needs a real cert seed (TBSCertificate
-  + SPKI + signature DER) — the parser delegates to
-  `asn1::Read` so it already gets partial coverage from the
-  asn1 corpus, but the TBS / RSA-SPKI / signature-bitstring
-  paths are unreached. Real-cert seed approach: build a
-  minimal self-signed RSA-2048 cert with openssl (build-time
-  dep) or port the in-tree `X509SelfTest` cert-builder
-  (kernel/crypto/x509.cpp::X509SelfTest) to Python.
 - **TLS records/handshake** — `kernel/net/tls.cpp`
   (`TlsPeekRecord`, `TlsParseServerHello`,
   `TlsParseCertificateLeaf`, `TlsPeekHandshake`). Untrusted
@@ -1432,18 +1419,27 @@ stubs + a `seeds/gen_*_seeds.py`); the codec/cert ones are pure
 - **Image decoders** — `kernel/util/jpeg.cpp`, `png` (+
   `deflate`), `tga.h`. Untrusted file bytes; wallpaper / asset
   load path.
-- **EDID / CEA-861** — `kernel/drivers/gpu/edid.cpp`,
-  `cea861.cpp`. Untrusted monitor-supplied descriptor bytes;
-  both already have `*_selftest.cpp` so a harness entrypoint is
-  trivial.
 - **AML interpreter** — `kernel/acpi/aml.cpp`, `aml_eval.cpp`.
   Firmware-provided bytecode the kernel *executes*; large
   attack surface, heavier harness (needs an ACPI namespace
   stub).
-- **USB descriptors** — `kernel/drivers/usb/usb_class_desc.cpp`,
-  `hid_descriptor.h`, `cdc_ecm.cpp`, `rndis.cpp`. Device-
-  supplied (untrusted peripheral) configuration/HID-report
-  descriptors.
+- **CDC-ECM + RNDIS** — `kernel/drivers/usb/cdc_ecm.cpp`,
+  `rndis.cpp`. Device-supplied configuration/data-frame bytes;
+  parser surface beyond the standard class-descriptor walker.
+  (The class-descriptor + HID-report-descriptor walkers under
+  `usb_class_desc.cpp` + `hid_descriptor.cpp` are now both
+  fuzzed via the Rust-backed harnesses landed 2026-05-26.)<!--
+  Retired bullets — seeded + fuzzed 2026-05-26:
+  X.509 (seeds/gen_x509_seeds.py — openssl-subprocess + embedded
+  RSA-2048 reference cert + 128-byte truncation seed; fuzz_x509
+  ≈ 244k runs/s + 551 new units added past the format gate);
+  EDID + CEA-861 (seeds/gen_{edid,cea861}_seeds.py + host_shim/
+  edid_stubs.cpp ConsoleWrite no-op stub; fuzz_edid ≈ 407k/s,
+  fuzz_cea861 ≈ 511k/s); USB class-descriptor + HID report-
+  descriptor (fuzz_usbclass + fuzz_usbhid via the
+  usbclass/usbhid Rust rlib + panic=abort staticlib pattern;
+  fuzz_usbclass ≈ 1.05M/s, fuzz_usbhid ≈ 639k/s — both clean).
+-->
 - **Bluetooth HCI/HID** — `kernel/net/bluetooth/hci.h`,
   `hid.h`. Untrusted radio peer.
 <!-- Disassembler bullet retired 2026-05-26: fuzz_disasm harness

@@ -54,7 +54,9 @@ HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuz
              $(BIN)/fuzz_deflate $(BIN)/fuzz_gzip $(BIN)/fuzz_zip \
              $(BIN)/fuzz_bmp $(BIN)/fuzz_tga $(BIN)/fuzz_jpeg $(BIN)/fuzz_png \
              $(BIN)/fuzz_asn1 $(BIN)/fuzz_x509 $(BIN)/fuzz_fw_pkg \
-             $(BIN)/fuzz_pe_exports $(BIN)/fuzz_vt $(BIN)/fuzz_disasm
+             $(BIN)/fuzz_pe_exports $(BIN)/fuzz_vt $(BIN)/fuzz_disasm \
+             $(BIN)/fuzz_edid $(BIN)/fuzz_cea861 \
+             $(BIN)/fuzz_usbclass $(BIN)/fuzz_usbhid
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -271,6 +273,66 @@ $(BIN)/fuzz_pe_exports: fuzz_pe_exports.cpp $(LOADER)/pe_exports.cpp \
 # ParserFeed runs the DEC ANSI state machine over a PTY byte
 # stream; util/unicode does the UTF-8 join.
 $(BIN)/fuzz_vt: fuzz_vt.cpp $(UTIL)/vt_parser.cpp $(UTIL)/unicode.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# --- USB descriptors (Rust-backed) -------------------------------
+#
+# usb_class_desc.cpp + hid_descriptor.cpp delegate byte parsing
+# to the `usbclass` + `usbhid` Rust crates. Same rlib +
+# panic=abort staticlib recipe as duetos_exfat / duetos_ntfs:
+# a Rust-side bounds/overflow bug in either walker aborts as a
+# libFuzzer crash. host_shim/edid_stubs.cpp's ConsoleWrite
+# no-ops are NOT pulled in here — the USB TUs use SerialWrite,
+# which the host_shim/arch/x86_64/serial.h already inlines as
+# a no-op.
+USBCLASS_RUST := $(KERNEL)/drivers/usb/class_rust
+USBHID_RUST   := $(KERNEL)/drivers/usb/hid_rust
+USB           := $(KERNEL)/drivers/usb
+
+$(BIN)/libusbclass.rlib: $(USBCLASS_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name usbclass -O $< -o $@
+
+$(BIN)/libusbclass_fuzz.a: host_shim/usbclass_fuzz_shim.rs \
+		$(BIN)/libusbclass.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern usbclass=$(BIN)/libusbclass.rlib $< -o $@
+
+$(BIN)/fuzz_usbclass: fuzz_usbclass.cpp $(USB)/usb_class_desc.cpp \
+		$(BIN)/libusbclass_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(USBCLASS_RUST)/include $^ -o $@
+
+$(BIN)/libusbhid.rlib: $(USBHID_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name usbhid -O $< -o $@
+
+$(BIN)/libusbhid_fuzz.a: host_shim/usbhid_fuzz_shim.rs \
+		$(BIN)/libusbhid.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern usbhid=$(BIN)/libusbhid.rlib $< -o $@
+
+$(BIN)/fuzz_usbhid: fuzz_usbhid.cpp $(USB)/hid_descriptor.cpp \
+		host_shim/usbhid_stubs.cpp $(BIN)/libusbhid_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(USBHID_RUST)/include $^ -o $@
+
+# --- EDID + CEA-861 EDID extension block -------------------------
+#
+# Both walkers are "pure compute, allocation-free, no IRQ" per
+# their headers, so no shim TU is needed beyond host_shim/log/klog.
+# CEA-861 includes edid.h transitively (shares the DTD struct),
+# but only the structs — no kernel-side functions cross the
+# boundary. The util/result.cpp dependency is shared with several
+# other harnesses; the Makefile linker pulls it in via the kernel
+# include path.
+GPU := $(KERNEL)/drivers/gpu
+# host_shim/edid_stubs.cpp resolves the kernel ConsoleWrite /
+# ConsoleWriteln functions referenced by EdidDumpToConsole and
+# Cea861DumpToConsole (shell-command path; never reached from
+# the fuzz parser drive but pulled in by linking the full TU).
+$(BIN)/fuzz_edid: fuzz_edid.cpp $(GPU)/edid.cpp host_shim/edid_stubs.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+$(BIN)/fuzz_cea861: fuzz_cea861.cpp $(GPU)/cea861.cpp $(GPU)/edid.cpp host_shim/edid_stubs.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 # --- x86_64 disassembler (crash-dump path) -----------------------
