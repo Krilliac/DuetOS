@@ -41,4 +41,17 @@ namespace duetos::apps::dbg::render
 /// the per-tab paint functions based on `g_state.current_tab`.
 void Paint(u32 x, u32 y, u32 w, u32 h, void* cookie);
 
+/// Pass D self-test for the debugger render layer's chrome
+/// header label. Binds + paints on a synthetic 700x500 rect and
+/// confirms the header buffer is non-empty + the AppLabel.text
+/// pointer is bound. The tab bar / status bar / per-tab content
+/// renderers stay raw paint (carve-out: debug surfaces must
+/// keep working when half the kernel is wedged) and are not
+/// exercised here. Emits `[dbg-render-selftest] PASS` / `FAIL`.
+void DbgRenderSelfTest();
+
+/// Pass D umbrella accessor — true iff the most recent
+/// DbgRenderSelfTest() invocation ran every check without error.
+bool DbgRenderSelfTestPassed();
+
 } // namespace duetos::apps::dbg::render

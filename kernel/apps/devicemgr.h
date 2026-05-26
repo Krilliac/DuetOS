@@ -32,7 +32,27 @@ void DeviceMgrInit(duetos::drivers::video::WindowHandle handle);
 duetos::drivers::video::WindowHandle DeviceMgrWindow();
 
 /// Boot self-test: walks `PciDeviceCount()` and confirms every
-/// `PciDevice(idx)` is non-empty. Prints PASS/FAIL on COM1.
+/// `PciDevice(idx)` is non-empty. Also drives a synthetic click
+/// through the Pass D toolbar's WidgetGroup to verify the
+/// dispatch chain is wired end-to-end. Prints PASS/FAIL on COM1.
 void DeviceMgrSelfTest();
+
+/// Pass D umbrella accessor — true iff the most recent
+/// DeviceMgrSelfTest() invocation ran every check (including the
+/// synthetic toolbar button click) without error.
+bool DeviceMgrSelfTestPassed();
+
+/// Mouse-event entry point for the Pass D toolbar + labels.
+/// Called from the boot-time mouse-reader thread on every motion
+/// packet. Edge-detects left-button press / release internally
+/// and dispatches MouseMove / MouseDown / MouseUp into the
+/// WidgetGroup so AppButton hover state tracks the cursor on
+/// tactility themes. The raw PCI + USB list (variable-length
+/// tabular blocks with section headings + column-header sublines)
+/// stays raw paint (carve-out) — AppListRow has no multi-column /
+/// section-header model. The list has no per-row click semantics
+/// in v0 (no selection, no detail). No-op before DeviceMgrInit
+/// has wired a window.
+void DeviceMgrMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
 
 } // namespace duetos::apps::devicemgr

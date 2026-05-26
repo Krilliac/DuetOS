@@ -5,6 +5,11 @@
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
 #include "drivers/gpu/dpms.h"
+#include "drivers/input/ps2mouse.h"
+#include "drivers/video/app_widgets/app_button.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_toolbar.h"
+#include "drivers/video/app_widgets/widget_group.h"
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
@@ -222,6 +227,208 @@ constexpr u32 kBtnH = 22;
 constexpr u32 kBtnGap = 4;
 constexpr u32 kReadoutX = 112; // right of the button column
 
+// ---- Pass D chrome: AppToolbar tab strip + 6 sub-panel buttons
+// (GEN/DSP/SND/KBD/MSE/DT) + AppLabel status footer at the top of
+// the readout column (cx + kReadoutX onward). The 11 left-column
+// action buttons (THEME PREV/NEXT, OPACITY -/+, etc.) stay on the
+// legacy WidgetRegisterButton path — their kIdBase..kIdBase+11 ID
+// range is load-bearing for the boot-time DispatchById hit-test.
+// The readout content (theme/opacity/wall clock/users) stays raw
+// paint — heterogeneous Body-role rows with measured value
+// columns AppLabel can't compose without losing alignment. The
+// Pass D win here is making the panel-switcher discoverable
+// (click instead of memorising 1..5 number-key shortcuts).
+
+constexpr u32 kTabStripH = 22U;
+constexpr u32 kTabBtnW = 38U;
+constexpr u32 kTabBtnH = 18U;
+constexpr u32 kTabBtnGap = 4U;
+constexpr u32 kTabPadX = 4U;
+constexpr u32 kTabPadY = 2U;
+constexpr u32 kFooterBandH = 12U;
+constexpr u32 kFooterPadX = 4U;
+
+// Six tab buttons — one per Panel enum value. Order matches the
+// '0'..'5' panel-switcher number keys so on-screen order aligns
+// with the keyboard shortcuts.
+constexpr u32 kTabBtnCount = static_cast<u32>(Panel::kCount);
+static_assert(kTabBtnCount == 6, "Update kTabLabels / kTabClicks if Panel::kCount changes");
+
+// AppLabel stores text by pointer so the buffer must outlive
+// every Paint. Composed by RefreshSettingsFooter() before
+// PaintAll fires.
+constinit char g_footer_text[96] = {};
+
+// Pass D umbrella result + mouse-state edge detector for
+// SettingsMouseInput. The legacy DispatchById path stays the
+// source of truth for the 11 left-column action buttons; this
+// edge detector only drives the new tab-strip widget chain.
+constinit bool g_self_test_passed = false;
+constinit bool g_prev_left_down = false;
+
+// Forward-declared click trampolines — AppButton::on_click is a
+// plain `void (*)()` so the constinit g_settings below captures
+// them by function-pointer value.
+void ClickTabGeneral();
+void ClickTabDisplay();
+void ClickTabSound();
+void ClickTabKeyboard();
+void ClickTabMouse();
+void ClickTabDateTime();
+
+using duetos::drivers::video::app_widgets::AppButton;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::AppToolbar;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::Event;
+using duetos::drivers::video::app_widgets::EventKind;
+using duetos::drivers::video::app_widgets::EventResult;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// Toolbar (back), then 6 tab AppButtons in panel order, then
+// footer AppLabel (overlays the bottom hint band). Reverse
+// declaration order is dispatch order — tab buttons get first
+// refusal on clicks.
+constinit auto g_settings =
+    MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
+                    AppLabel{});
+
+constinit bool g_settings_bound = false;
+
+// Walk the recursive WidgetChain by hand to grab a stable pointer
+// to each tab button. Chain order matches the MakeWidgetGroup
+// argument list (toolbar -> 6 buttons -> label).
+AppButton* TabButton(u32 i)
+{
+    auto& a = g_settings.chain.tail; // toolbar -> btn[0]
+    auto& b = a.tail;                // btn[0] -> btn[1]
+    auto& c2 = b.tail;               // btn[1] -> btn[2]
+    auto& d = c2.tail;               // btn[2] -> btn[3]
+    auto& e = d.tail;                // btn[3] -> btn[4]
+    auto& f = e.tail;                // btn[4] -> btn[5]
+    AppButton* btns[kTabBtnCount] = {&a.head, &b.head, &c2.head, &d.head, &e.head, &f.head};
+    return btns[i];
+}
+
+void BindSettingsOnce()
+{
+    if (g_settings_bound)
+        return;
+    g_settings_bound = true;
+
+    auto& toolbar = g_settings.chain.head;
+    toolbar.bg_rgb = 0; // theme.taskbar_bg
+
+    static const char* const kTabLabels[kTabBtnCount] = {"GEN", "DSP", "SND", "KBD", "MSE", "DT"};
+    using ClickFn = void (*)();
+    static constexpr ClickFn kTabClicks[kTabBtnCount] = {ClickTabGeneral, ClickTabDisplay, ClickTabSound,
+                                                         ClickTabKeyboard, ClickTabMouse,  ClickTabDateTime};
+    for (u32 i = 0; i < kTabBtnCount; ++i)
+    {
+        AppButton* btn = TabButton(i);
+        btn->label = kTabLabels[i];
+        btn->on_click = kTabClicks[i];
+        btn->weight = ChromeTextWeight::Regular;
+        btn->bg_rgb = 0; // theme role default
+        btn->fg_rgb = 0x00101828U;
+    }
+
+    auto& label = g_settings.chain.tail.tail.tail.tail.tail.tail.tail.head;
+    label.text = g_footer_text;
+    label.role = ChromeTextRole::Caption;
+    label.weight = ChromeTextWeight::Regular;
+    label.fg_rgb = 0x00181828U;
+    label.bg_rgb = 0x00C8C8B8U; // status band tone
+    label.align_left = true;
+}
+
+// Re-anchor the toolbar + tab buttons + footer label to the live
+// window's client rect. Called from DrawFn before PaintAll and
+// from SettingsMouseInput before DispatchEvent so hit-tests +
+// visuals stay consistent across window moves / resizes. The tab
+// strip lives at the top of the readout area (cx + kReadoutX) so
+// the 11 left-column action buttons are unaffected; the footer
+// spans the full client width as a status hint.
+void RebindSettingsBounds(u32 cx, u32 cy, u32 cw, u32 ch)
+{
+    const u32 strip_x = (cw > kReadoutX) ? cx + kReadoutX : cx;
+    const u32 strip_w = (cw > kReadoutX) ? cw - kReadoutX : 0;
+    auto& toolbar = g_settings.chain.head;
+    toolbar.bounds = Rect{strip_x, cy, strip_w, kTabStripH};
+
+    for (u32 i = 0; i < kTabBtnCount; ++i)
+    {
+        const u32 bx = strip_x + kTabPadX + i * (kTabBtnW + kTabBtnGap);
+        TabButton(i)->bounds = Rect{bx, cy + kTabPadY, kTabBtnW, kTabBtnH};
+        // Bold the active tab so the visual selection state is
+        // unambiguous (legacy UX had no distinction at all).
+        TabButton(i)->weight =
+            (static_cast<u32>(g_active_panel) == i) ? ChromeTextWeight::Bold : ChromeTextWeight::Regular;
+    }
+
+    auto& label = g_settings.chain.tail.tail.tail.tail.tail.tail.tail.head;
+    const u32 fy = (ch > kFooterBandH) ? cy + ch - kFooterBandH : cy;
+    const u32 fw = (cw > 2U * kFooterPadX) ? cw - 2U * kFooterPadX : cw;
+    label.bounds = Rect{cx + kFooterPadX, fy, fw, kFooterBandH};
+}
+
+// Append `s` (NUL-terminated) onto `dst` at offset `*o`, capped at
+// `cap - 1` bytes. Mirrors the Files / Taskman footer helpers.
+void FooterAppend(char* dst, u32 cap, u32* o, const char* s)
+{
+    while (*s != '\0' && *o + 1 < cap)
+    {
+        dst[(*o)++] = *s++;
+    }
+}
+
+// Re-compose g_footer_text from the active panel. Called from
+// DrawFn before PaintAll so the AppLabel sees the current frame's
+// text. Replaces the legacy raw-paint hint at the top of the
+// readout area.
+void RefreshSettingsFooter()
+{
+    u32 o = 0;
+    g_footer_text[0] = '\0';
+    FooterAppend(g_footer_text, sizeof(g_footer_text), &o, "0:GEN 1:DSP 2:SND 3:KBD 4:MSE 5:DT  (active=");
+    static const char* const kShortName[kTabBtnCount] = {"GEN", "DSP", "SND", "KBD", "MSE", "DT"};
+    const u32 idx = static_cast<u32>(g_active_panel);
+    FooterAppend(g_footer_text, sizeof(g_footer_text), &o, (idx < kTabBtnCount) ? kShortName[idx] : "?");
+    FooterAppend(g_footer_text, sizeof(g_footer_text), &o, ")");
+    if (o < sizeof(g_footer_text))
+        g_footer_text[o] = '\0';
+    else
+        g_footer_text[sizeof(g_footer_text) - 1] = '\0';
+}
+
+// Click trampolines — each one sets the active panel directly,
+// matching the SettingsFeedChar '0'..'5' branch.
+void ClickTabGeneral()
+{
+    g_active_panel = Panel::General;
+}
+void ClickTabDisplay()
+{
+    g_active_panel = Panel::Display;
+}
+void ClickTabSound()
+{
+    g_active_panel = Panel::Sound;
+}
+void ClickTabKeyboard()
+{
+    g_active_panel = Panel::Keyboard;
+}
+void ClickTabMouse()
+{
+    g_active_panel = Panel::Mouse;
+}
+void ClickTabDateTime()
+{
+    g_active_panel = Panel::DateTime;
+}
+
 // 0..9 -> '0'..'9'; >=10 wraps to '?'. Used by the wall-clock readout.
 constexpr char Digit(u32 v)
 {
@@ -263,28 +470,36 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     const auto& th = ThemeCurrent();
     const u32 ink_fg = th.console_fg;
     const u32 ink_bg = th.role_client[static_cast<u32>(duetos::drivers::video::ThemeRole::Settings)];
-    // Panel-switcher hint at the very top: lists the number-key
-    // shortcuts so a fresh user can find sub-panels without
-    // reading the wiki. Caption role — small navigation hint, not
-    // the panel's primary content.
-    ChromeTextDraw(ChromeTextRole::Caption, cx + kReadoutX, cy + 2, "0:GEN 1:DSP 2:SND 3:KBD 4:MSE 5:DT", th.banner_fg,
-                   ink_bg);
+
+    // Pass D chrome: refresh the footer text from the live panel,
+    // re-anchor the tab strip + footer label to the current client
+    // rect, and paint the WidgetGroup. The active tab gets a Bold
+    // weight via RebindSettingsBounds so the visual selection
+    // state is unambiguous.
+    BindSettingsOnce();
+    RefreshSettingsFooter();
+    RebindSettingsBounds(cx, cy, cw, ch);
+    Compose ctx{};
+    g_settings.PaintAll(ctx);
+
     // Sub-panel dispatch. When a non-General panel is active
     // and registered, render its content into the readout area
-    // (everything to the right of the button column) and skip
-    // the General-panel body below.
+    // — below the tab strip carved out by RebindSettingsBounds
+    // and above the AppLabel footer band — and skip the
+    // General-panel body below.
     if (g_active_panel != Panel::General)
     {
         const PanelSlot& s = g_panels[static_cast<u32>(g_active_panel)];
         if (s.draw != nullptr)
         {
-            // Readout area = right of buttons, below the
-            // panel-switcher hint, above the bottom edge.
-            constexpr u32 kSubTop = 14;
+            // Readout area = right of buttons, below the tab strip,
+            // above the footer band. Matches the same vertical
+            // budget the General-panel rows below claim.
             const u32 sx = cx + kReadoutX;
-            const u32 sy = cy + kSubTop;
+            const u32 sy = cy + kTabStripH + 2;
             const u32 sw = (cw > kReadoutX) ? cw - kReadoutX - 4 : 0;
-            const u32 sh = (ch > kSubTop + 4) ? ch - kSubTop - 4 : 0;
+            const u32 reserve = kTabStripH + 2 + kFooterBandH + 4;
+            const u32 sh = (ch > reserve) ? ch - reserve : 0;
             s.draw(sx, sy, sw, sh);
             return;
         }
@@ -292,14 +507,16 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
         // empty. The real panel populates via SettingsRegisterPanel
         // from its own .cpp. Caption role — diagnostic placeholder,
         // not a section header.
-        ChromeTextDraw(ChromeTextRole::Caption, cx + kReadoutX, cy + 24, "(panel not registered yet)", th.banner_fg,
-                       ink_bg);
+        ChromeTextDraw(ChromeTextRole::Caption, cx + kReadoutX, cy + kTabStripH + 12,
+                       "(panel not registered yet)", th.banner_fg, ink_bg);
         return;
     }
 
     // Section header — Title + Bold so "SETTINGS" reads as the
-    // window's hero label rather than a row.
-    const u32 hdr_y = cy + 6;
+    // window's hero label rather than a row. Offset below the
+    // Pass D tab strip the AppToolbar carved out at the top of
+    // the readout area.
+    const u32 hdr_y = cy + kTabStripH + 4;
     ChromeTextDraw(ChromeTextRole::Title, cx + kReadoutX, hdr_y, "SETTINGS", ink_fg, ink_bg, ChromeTextWeight::Bold);
 
     // Theme readout: "THEME: <name>" — Body role for both label and
@@ -649,7 +866,98 @@ void SettingsSelfTest()
     ThemeSet(start);
     ThemeApplyToAll();
 
-    SerialWrite(ok ? "[settings] self-test OK\n" : "[settings] self-test FAILED\n");
+    // Pass D: drive a synthetic click on the DSP tab button via
+    // the WidgetGroup dispatch chain. Each tab trampoline just
+    // flips g_active_panel directly, so the test verifies the
+    // dispatch path is wired end-to-end AND that the click
+    // actually mutates the active-panel state. Save / restore the
+    // panel so the live desktop is unchanged when the test
+    // returns.
+    const Panel saved_panel = g_active_panel;
+    BindSettingsOnce();
+    // Anchor the tab strip at (0, 22, 380, 318) — same shape
+    // boot_bringup.cpp registers the live Settings window with
+    // (380x340 minus 22 px title bar). The DSP tab is index 1.
+    RebindSettingsBounds(0U, 22U, 380U, 318U);
+    g_active_panel = Panel::General;
+    const u32 dx = kReadoutX + kTabPadX + 1U * (kTabBtnW + kTabBtnGap) + kTabBtnW / 2U;
+    const u32 dy = 22U + kTabPadY + kTabBtnH / 2U;
+    const Event d_move{EventKind::MouseMove, dx, dy, 0U, 0U};
+    const Event d_down{EventKind::MouseDown, dx, dy, 0U, 0U};
+    const Event d_up{EventKind::MouseUp, dx, dy, 0U, 0U};
+    ok = ok && (g_settings.DispatchEvent(d_move) == EventResult::Consumed);
+    ok = ok && (g_settings.DispatchEvent(d_down) == EventResult::Consumed);
+    ok = ok && (g_settings.DispatchEvent(d_up) == EventResult::Consumed);
+    ok = ok && (g_active_panel == Panel::Display);
+
+    // Footer-text composer must produce non-empty text for any
+    // panel. Mutating g_active_panel here is fine — restored
+    // below as part of saved_panel.
+    RefreshSettingsFooter();
+    ok = ok && (g_footer_text[0] != '\0');
+
+    g_active_panel = saved_panel;
+
+    g_self_test_passed = ok;
+    if (ok)
+    {
+        SerialWrite("[settings] self-test OK (dispatch, theme-cycle, tab-click, footer-refresh)\n");
+        SerialWrite("[settings-selftest] PASS\n");
+    }
+    else
+    {
+        SerialWrite("[settings] self-test FAILED\n");
+        SerialWrite("[settings-selftest] FAIL\n");
+    }
+}
+
+bool SettingsSelfTestPassed()
+{
+    return g_self_test_passed;
+}
+
+void SettingsMouseInput(u32 cx, u32 cy, u8 button_mask)
+{
+    using duetos::drivers::input::kMouseButtonLeft;
+    if (g_state.handle == kWindowInvalid)
+        return;
+    u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+        return;
+    // Title bar is 22 px; client origin sits below it.
+    // RebindSettingsBounds works in client-relative coords so the
+    // widget dispatch path needs cursor coords in the same frame.
+    constexpr u32 kTitleH = 22U;
+    if (wh <= kTitleH)
+        return;
+    const u32 client_y = wy + kTitleH;
+    const u32 client_h = wh - kTitleH;
+    BindSettingsOnce();
+    RebindSettingsBounds(wx, client_y, ww, client_h);
+
+    const bool left_down = (button_mask & kMouseButtonLeft) != 0;
+    const bool press_edge = left_down && !g_prev_left_down;
+    const bool release_edge = !left_down && g_prev_left_down;
+    g_prev_left_down = left_down;
+
+    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < wy + wh);
+    if (inside_window)
+    {
+        const Event m{EventKind::MouseMove, cx, cy, 0U, 0U};
+        g_settings.DispatchEvent(m);
+    }
+    if (press_edge && inside_window)
+    {
+        const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
+        g_settings.DispatchEvent(d);
+    }
+    if (release_edge)
+    {
+        // Always dispatch MouseUp so a button pressed inside the
+        // tab strip and dragged off clears its Pressed flag.
+        const Event u{EventKind::MouseUp, cx, cy, 0U, 0U};
+        g_settings.DispatchEvent(u);
+    }
 }
 
 } // namespace duetos::apps::settings

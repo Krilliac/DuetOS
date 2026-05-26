@@ -3231,6 +3231,29 @@ void MouseReaderTask(void*)
                 duetos::apps::calculator::CalculatorOnWidgetEvent(hit);
                 duetos::apps::settings::SettingsOnWidgetEvent(hit);
             }
+            // Pass D: migrated apps own their own hit-testing and
+            // need to see every motion packet so AppButton hover
+            // state can track the cursor across tactility themes.
+            // Each call is internal-edge-detecting so press / release
+            // events still fire exactly once per click.
+            duetos::apps::calculator::CalculatorMouseInput(cx, cy, p.buttons);
+            duetos::apps::notes::NotesMouseInput(cx, cy, p.buttons);
+            duetos::apps::files::FilesMouseInput(cx, cy, p.buttons);
+            duetos::apps::taskman::TaskmanMouseInput(cx, cy, p.buttons);
+            duetos::apps::settings::SettingsMouseInput(cx, cy, p.buttons);
+            duetos::apps::browser::BrowserMouseInput(cx, cy, p.buttons);
+            duetos::apps::calendar::CalendarMouseInput(cx, cy, p.buttons);
+            duetos::apps::imageview::ImageViewMouseInput(cx, cy, p.buttons);
+            duetos::apps::clock::ClockMouseInput(cx, cy, p.buttons);
+            duetos::apps::hexview::HexViewMouseInput(cx, cy, p.buttons);
+            duetos::apps::notify_center::NotifyCenterMouseInput(cx, cy, p.buttons);
+            duetos::apps::charmap::CharMapMouseInput(cx, cy, p.buttons);
+            duetos::apps::devicemgr::DeviceMgrMouseInput(cx, cy, p.buttons);
+            duetos::apps::firewall::FirewallMouseInput(cx, cy, p.buttons);
+            duetos::apps::help::HelpMouseInput(cx, cy, p.buttons);
+            duetos::apps::netstatus::NetStatusMouseInput(cx, cy, p.buttons);
+            duetos::apps::sysmon::SysmonMouseInput(cx, cy, p.buttons);
+            duetos::apps::about::AboutMouseInput(cx, cy, p.buttons);
         }
 
         // Hover responsiveness: when a menu is open and the

@@ -74,10 +74,17 @@ bool NotifyIsActive();
 void NotifyRedraw();
 
 /// One-shot self-test: shows + dismisses a toast through the
-/// public API and asserts state transitions match. Restores
-/// idle state before returning. Prints one PASS/FAIL line to
-/// COM1.
+/// public API and asserts state transitions match, then drives
+/// a synthetic Paint through the Pass D WidgetGroup chain
+/// (AppPanel + AppLabel) to confirm the chrome composition
+/// inlines without faulting. Restores idle state before
+/// returning. Emits `[notify-selftest] PASS` / `FAIL`.
 void NotifySelfTest();
+
+/// Pass D umbrella accessor — true iff the most recent
+/// NotifySelfTest() invocation ran every check (including the
+/// synthetic WidgetGroup Paint) without error.
+bool NotifySelfTestPassed();
 
 /// History ring — last `kNotifyHistoryCap` displayed toasts,
 /// newest first. The Notification Center / "what was that

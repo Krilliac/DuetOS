@@ -2,6 +2,9 @@
 
 #include "arch/x86_64/serial.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/widget_group.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/console.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/theme.h"
@@ -15,6 +18,8 @@ namespace duetos::apps::terminal
 namespace
 {
 
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
 using duetos::drivers::video::FramebufferDrawChar;
 using duetos::drivers::video::FramebufferDrawString;
 using duetos::drivers::video::FramebufferFillRect;
@@ -22,6 +27,10 @@ using duetos::drivers::video::kWindowInvalid;
 using duetos::drivers::video::ThemeCurrent;
 using duetos::drivers::video::WindowHandle;
 using duetos::drivers::video::WindowSetContentDraw;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
 
 // Bitmap-font cell metrics — match the rest of the kernel UI.
 // FramebufferDrawChar emits 8x8 glyphs; the terminal's cell box
@@ -116,6 +125,77 @@ struct State
 };
 
 constinit State g_state = {kWindowInvalid, {}, 0, 0, {}, {}, 0, 0, 0, 0, 0, 0, kColorDefault, kColorDefault, true};
+
+// ---------------------------------------------------------------
+// Pass D chrome: TERMINAL window. Header (Title Bold) label + a
+// footer (Caption) hint band. The cell grid STAYS RAW — the mono
+// cell-alignment invariant requires fixed-width 8x8 glyphs at
+// exact (col * kCellW, row * kCellH) pixel positions, and the
+// per-cell attribute / SGR colour / cursor-inversion paint code
+// composes nothing AppLabel can model. The chrome labels eat a
+// 14 px header band + a 12 px footer band off the client rect;
+// RecomputeGridSize sees the SHRUNKEN inner band so cells fill
+// exactly the gap between the two chrome rows.
+
+constexpr u32 kTermHeaderH = 14U;
+constexpr u32 kTermFooterH = 12U;
+
+constinit char g_term_header[16] = "TERMINAL";
+constinit char g_term_footer[64] = "Ctrl+Shift+C: copy  PgUp/PgDn: scroll";
+
+constinit auto g_term_chrome = MakeWidgetGroup(AppLabel{}, AppLabel{});
+
+constinit bool g_term_chrome_bound = false;
+constinit bool g_terminal_self_test_passed = false;
+
+AppLabel& TermHeader()
+{
+    return g_term_chrome.chain.head;
+}
+AppLabel& TermFooter()
+{
+    return g_term_chrome.chain.tail.head;
+}
+
+void BindTerminalChromeOnce()
+{
+    if (g_term_chrome_bound)
+        return;
+    g_term_chrome_bound = true;
+
+    // Terminal client paints over its own near-black ground
+    // (`bg_default = 0x00101020u`) regardless of the active
+    // theme — the goal is xterm-grade contrast, not theme tint.
+    // Pull the chrome ink from the theme so a high-contrast
+    // theme stays readable on top of that ground.
+    const auto& th = ThemeCurrent();
+    const u32 bg = 0x00101020u; // matches DrawFn's bg_default
+    const u32 fg = th.console_fg;
+    const u32 dim = th.banner_fg;
+
+    AppLabel& h = TermHeader();
+    h.text = g_term_header;
+    h.role = ChromeTextRole::Title;
+    h.weight = ChromeTextWeight::Bold;
+    h.fg_rgb = fg;
+    h.bg_rgb = bg;
+    h.align_left = true;
+
+    AppLabel& f = TermFooter();
+    f.text = g_term_footer;
+    f.role = ChromeTextRole::Caption;
+    f.weight = ChromeTextWeight::Regular;
+    f.fg_rgb = dim;
+    f.bg_rgb = bg;
+    f.align_left = true;
+}
+
+void RebindTerminalChromeBounds(u32 cx, u32 cy, u32 cw, u32 ch)
+{
+    TermHeader().bounds = Rect{cx, cy, cw, kTermHeaderH};
+    const u32 fy = (ch > kTermFooterH) ? cy + ch - kTermFooterH : cy;
+    TermFooter().bounds = Rect{cx, fy, cw, kTermFooterH};
+}
 
 // ---- Grid primitives -------------------------------------------
 
@@ -559,8 +639,6 @@ char CpToAscii(u32 cp)
 
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
-    RecomputeGridSize(cw, ch);
-
     const auto& t = ThemeCurrent();
     const u32 ink_default = t.banner_fg;
     const u32 ink_default_bold = 0x00FFFFFFu; // brightened theme ink for SGR bold
@@ -569,8 +647,26 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // earlier paint underneath us doesn't bleed through.
     FramebufferFillRect(cx, cy, cw, ch, bg_default);
 
+    // Pass D chrome: paint the header + footer AppLabels FIRST,
+    // then carve the cell grid into the inner band between them.
+    // RecomputeGridSize sees the shrunken inner height so cells
+    // don't overlap the chrome rows.
+    const u32 chrome_band = kTermHeaderH + kTermFooterH;
+    const bool have_chrome = (ch > chrome_band + kCellH);
+    if (have_chrome)
+    {
+        BindTerminalChromeOnce();
+        RebindTerminalChromeBounds(cx, cy, cw, ch);
+        Compose ctx{};
+        g_term_chrome.PaintAll(ctx);
+    }
+
+    const u32 inner_y = have_chrome ? (cy + kTermHeaderH) : cy;
+    const u32 inner_h = have_chrome ? (ch - chrome_band) : ch;
+    RecomputeGridSize(cw, inner_h);
+
     const u32 grid_x0 = cx + kPad;
-    const u32 grid_y0 = cy + kPad;
+    const u32 grid_y0 = inner_y + kPad;
 
     const u32 k = g_state.scroll_offset;
     // Cursor only displays when the viewport is live (k == 0); a
@@ -1137,9 +1233,37 @@ void TerminalSelfTest()
         ok = false;
     }
 
+    // 12. Pass D chrome — header + footer AppLabel bind + paint.
+    //     Pure compose, no compositor side effects. The cell-grid
+    //     carve-out above is the load-bearing invariant; this just
+    //     verifies the chrome strap-on doesn't crash and emits non-
+    //     empty text buffers.
+    BindTerminalChromeOnce();
+    RebindTerminalChromeBounds(0U, 0U, 320U, 200U);
+    {
+        Compose ctx{};
+        g_term_chrome.PaintAll(ctx);
+    }
+    if (g_term_header[0] == '\0' || g_term_footer[0] == '\0')
+    {
+        arch::SerialWrite("[terminal-selftest] FAIL chrome-text-empty\n");
+        ok = false;
+    }
+    if (TermHeader().text == nullptr || TermFooter().text == nullptr)
+    {
+        arch::SerialWrite("[terminal-selftest] FAIL chrome-label-unbound\n");
+        ok = false;
+    }
+
     g_state = saved;
+    g_terminal_self_test_passed = ok;
     if (ok)
         arch::SerialWrite("[terminal-selftest] PASS\n");
+}
+
+bool TerminalSelfTestPassed()
+{
+    return g_terminal_self_test_passed;
 }
 
 } // namespace duetos::apps::terminal

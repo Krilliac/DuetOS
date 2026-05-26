@@ -3,6 +3,12 @@
 #include "arch/x86_64/serial.h"
 #include "log/klog.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/input/ps2mouse.h"
+#include "drivers/video/app_widgets/app_button.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_toolbar.h"
+#include "drivers/video/app_widgets/widget_group.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
 #include "drivers/video/scrollbar.h"
@@ -97,6 +103,222 @@ struct State
 };
 
 constinit State g_state = {};
+
+// ---------------------------------------------------------------
+// Pass D chrome: AppToolbar (back) + 7 AppButton entries
+// (BACK / FWD / RLD / HIST / BMRK / MARK / SAVE) + 3 AppLabel
+// rows (URL bar, status line, footer hint). The 7 nav buttons
+// duplicate the keyboard shortcuts B / F / R / H / L / M / S so
+// the chrome stays discoverable without forcing fresh users to
+// memorise the footer hint.
+//
+// Carve-outs that stay raw paint:
+//   - URL bar with the crude '_' cursor sits in the AppLabel
+//     text buffer (re-composed each frame from g_state.url +
+//     mode), but the live caret rendering would clash with
+//     AppInput's own focus-driven caret and keystroke handling
+//     — Browser's URL editing is mode-gated by Mode::UrlEdit,
+//     not by mouse focus, so AppInput's contract doesn't fit.
+//   - Modal History / Bookmarks lists keep their custom hit-
+//     highlight + selection band (heterogeneous rows + key-
+//     driven cursor — AppListRow's per-row click handler
+//     doesn't reproduce the j/k navigation semantics).
+//   - Body view (HTML-stripped text + scrollbar) stays raw
+//     paint — wrapping is computed inline against the live
+//     glyph cell, not by a widget primitive.
+//
+// Layout: toolbar (kToolbarH=28) + URL bar (kRowH+4) +
+// status row (kRowH+2) + body band + footer hint (kFooterH=12).
+
+constexpr u32 kToolbarH = 28U;
+constexpr u32 kToolbarBtnW = 56U;
+constexpr u32 kToolbarBtnH = 22U;
+constexpr u32 kToolbarBtnGap = 4U;
+constexpr u32 kToolbarPadX = 4U;
+constexpr u32 kToolbarPadY = 3U;
+constexpr u32 kUrlBarH = kRowH + 4U;
+constexpr u32 kUrlBarPadX = 4U;
+constexpr u32 kStatusRowH = kRowH + 2U;
+constexpr u32 kFooterH = 12U;
+constexpr u32 kNavBtnCount = 7U;
+
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::app_widgets::AppButton;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::AppToolbar;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::Event;
+using duetos::drivers::video::app_widgets::EventKind;
+using duetos::drivers::video::app_widgets::EventResult;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// AppLabel stores text by pointer so the buffers must outlive
+// every Paint. DrawFn re-renders them each frame.
+constinit char g_urlbar_text[kUrlCap + 8] = {};
+constinit char g_footer_text[96] = {};
+
+// Forward decls for the toolbar click trampolines (defined
+// below; they have to live above the constinit g_browser that
+// captures them by function-pointer value).
+void ClickBack();
+void ClickForward();
+void ClickReload();
+void ClickHistory();
+void ClickBookmarks();
+void ClickMark();
+void ClickSave();
+
+// Toolbar (back), then 7 nav AppButtons, then URL-bar label,
+// status label, footer label. Reverse declaration order is
+// dispatch order — buttons get first refusal on clicks.
+constinit auto g_browser = MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppButton{},
+                                           AppButton{}, AppButton{}, AppButton{}, AppLabel{}, AppLabel{}, AppLabel{});
+
+constinit bool g_browser_bound = false;
+constinit bool g_prev_left_down = false;
+constinit bool g_self_test_passed = false;
+
+// Walk the recursive WidgetChain by hand to grab a stable
+// pointer to each nav button. Chain order mirrors the
+// MakeWidgetGroup argument list (toolbar -> 7 buttons -> 3
+// labels).
+AppButton* NavButton(u32 i)
+{
+    auto& a = g_browser.chain.tail; // toolbar -> btn[0]
+    auto& b = a.tail;               // btn[0]   -> btn[1]
+    auto& c = b.tail;               // btn[1]   -> btn[2]
+    auto& d = c.tail;               // btn[2]   -> btn[3]
+    auto& e = d.tail;               // btn[3]   -> btn[4]
+    auto& f = e.tail;               // btn[4]   -> btn[5]
+    auto& g = f.tail;               // btn[5]   -> btn[6]
+    AppButton* btns[kNavBtnCount] = {&a.head, &b.head, &c.head, &d.head, &e.head, &f.head, &g.head};
+    return btns[i];
+}
+
+// AppLabel accessors — URL bar / status / footer sit at chain
+// positions 8, 9, 10 (zero-indexed) after the 1 toolbar + 7
+// buttons.
+AppLabel& UrlBarLabel()
+{
+    return g_browser.chain.tail.tail.tail.tail.tail.tail.tail.tail.head;
+}
+AppLabel& StatusLabel()
+{
+    return g_browser.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+}
+AppLabel& FooterLabel()
+{
+    return g_browser.chain.tail.tail.tail.tail.tail.tail.tail.tail.tail.tail.head;
+}
+
+void BindBrowserOnce()
+{
+    if (g_browser_bound)
+        return;
+    g_browser_bound = true;
+
+    auto& toolbar = g_browser.chain.head;
+    toolbar.bg_rgb = 0; // theme.taskbar_bg
+
+    static const char* const kNavLabels[kNavBtnCount] = {"BACK", "FWD", "RLD", "HIST", "BMRK", "MARK", "SAVE"};
+    using ClickFn = void (*)();
+    static constexpr ClickFn kNavClicks[kNavBtnCount] = {ClickBack,      ClickForward, ClickReload, ClickHistory,
+                                                         ClickBookmarks, ClickMark,    ClickSave};
+    for (u32 i = 0; i < kNavBtnCount; ++i)
+    {
+        AppButton* btn = NavButton(i);
+        btn->label = kNavLabels[i];
+        btn->on_click = kNavClicks[i];
+        btn->weight = ChromeTextWeight::Regular;
+        btn->bg_rgb = 0; // theme role default
+        btn->fg_rgb = 0x00101828U;
+    }
+
+    auto& url = UrlBarLabel();
+    url.text = g_urlbar_text;
+    url.role = ChromeTextRole::Body;
+    url.weight = ChromeTextWeight::Regular;
+    url.fg_rgb = 0x00181828U;
+    url.bg_rgb = 0;
+    url.align_left = true;
+
+    auto& status = StatusLabel();
+    status.text = g_state.status;
+    status.role = ChromeTextRole::Caption;
+    status.weight = ChromeTextWeight::Regular;
+    status.fg_rgb = 0x00404858U;
+    status.bg_rgb = 0;
+    status.align_left = true;
+
+    auto& footer = FooterLabel();
+    footer.text = g_footer_text;
+    footer.role = ChromeTextRole::Caption;
+    footer.weight = ChromeTextWeight::Regular;
+    footer.fg_rgb = 0x00181828U;
+    footer.bg_rgb = 0x00C8C8B8U;
+    footer.align_left = true;
+}
+
+// Re-anchor the toolbar + buttons + labels to the live client
+// rect. Called from DrawFn before PaintAll and from
+// BrowserMouseInput before DispatchEvent so hit-tests + visuals
+// stay consistent across window moves / resizes.
+void RebindBrowserBounds(u32 cx, u32 cy, u32 cw, u32 ch)
+{
+    auto& toolbar = g_browser.chain.head;
+    toolbar.bounds = Rect{cx, cy, cw, kToolbarH};
+
+    for (u32 i = 0; i < kNavBtnCount; ++i)
+    {
+        const u32 bx = cx + kToolbarPadX + i * (kToolbarBtnW + kToolbarBtnGap);
+        NavButton(i)->bounds = Rect{bx, cy + kToolbarPadY, kToolbarBtnW, kToolbarBtnH};
+    }
+
+    // URL bar sits directly below the toolbar; status line
+    // sits below that. Both span the full client width
+    // (carve-out: the '_' caret in UrlEdit mode is appended
+    // into g_urlbar_text by RefreshUrlBarText below).
+    const u32 urlbar_y = cy + kToolbarH;
+    const u32 status_y = urlbar_y + kUrlBarH;
+    UrlBarLabel().bounds =
+        Rect{cx + kUrlBarPadX, urlbar_y, (cw > 2U * kUrlBarPadX) ? cw - 2U * kUrlBarPadX : cw, kUrlBarH};
+    StatusLabel().bounds =
+        Rect{cx + kUrlBarPadX, status_y, (cw > 2U * kUrlBarPadX) ? cw - 2U * kUrlBarPadX : cw, kStatusRowH};
+
+    // Footer hint band along the bottom of the client area.
+    const u32 fy = (ch > kFooterH) ? cy + ch - kFooterH : cy;
+    const u32 fw = (cw > 2U * kUrlBarPadX) ? cw - 2U * kUrlBarPadX : cw;
+    FooterLabel().bounds = Rect{cx + kUrlBarPadX, fy, fw, kFooterH};
+}
+
+// Re-compose g_urlbar_text from live state. Mirrors the old
+// inline build in DrawHeader: '>' prefix when in UrlEdit mode,
+// then the URL itself, then a '_' caret when in UrlEdit mode.
+void RefreshUrlBarText()
+{
+    u32 bp = 0;
+    g_urlbar_text[bp++] = (g_state.mode == Mode::UrlEdit) ? '>' : ' ';
+    g_urlbar_text[bp++] = ' ';
+    for (u32 i = 0; i < g_state.url_len && bp + 1 < sizeof(g_urlbar_text); ++i)
+        g_urlbar_text[bp++] = g_state.url[i];
+    if (g_state.mode == Mode::UrlEdit && bp + 1 < sizeof(g_urlbar_text))
+        g_urlbar_text[bp++] = '_';
+    g_urlbar_text[bp] = '\0';
+}
+
+// Re-compose g_footer_text. The legacy DrawFn paints a static
+// hint; we keep the same shape so the migration is a wash from
+// the user's perspective.
+void RefreshFooterText()
+{
+    static const char kHint[] = "U:URL  B:BACK  F:FWD  R:RELOAD  H:HIST  L:BMARK  M:MARK  S:SAVE  J/K:SCROLL";
+    u32 i = 0;
+    for (; kHint[i] != '\0' && i + 1 < sizeof(g_footer_text); ++i)
+        g_footer_text[i] = kHint[i];
+    g_footer_text[i] = '\0';
+}
 
 // Forward declarations.
 void DoFetch(const char* url);
@@ -919,29 +1141,19 @@ void DoFetch(const char* url)
 // UI / paint.
 // ---------------------------------------------------------------
 
-void DrawHeader(u32 cx, u32 cy, u32 /*cw*/, u32 fg, u32 dim, u32 bg)
-{
-    // URL bar — always visible, single line.
-    char bar[kUrlCap + 8];
-    u32 bp = 0;
-    bar[bp++] = (g_state.mode == Mode::UrlEdit) ? '>' : ' ';
-    bar[bp++] = ' ';
-    for (u32 i = 0; i < g_state.url_len && bp + 1 < sizeof(bar); ++i)
-        bar[bp++] = g_state.url[i];
-    if (g_state.mode == Mode::UrlEdit && bp + 1 < sizeof(bar))
-        bar[bp++] = '_'; // crude cursor
-    bar[bp] = '\0';
-    FramebufferDrawString(cx + 4, cy + 4, bar, fg, bg);
-
-    // Status line.
-    FramebufferDrawString(cx + 4, cy + 4 + kRowH, g_state.status, dim, bg);
-}
+// DrawHeader is gone — the URL bar + status row now live in
+// the AppLabel chain inside g_browser (URL = UrlBarLabel(),
+// status = StatusLabel(), both painted via PaintAll from
+// DrawFn). RefreshUrlBarText composes the URL bar text from
+// g_state.url + the mode-driven '_' caret each frame.
 
 void DrawBody(u32 cx, u32 cy, u32 cw, u32 ch, u32 fg, u32 bg)
 {
-    // Reserve URL bar + status row at the top + footer at bottom.
-    const u32 top_reserved = 4 + kRowH + kRowH + 2;
-    const u32 bot_reserved = kRowH + 2;
+    // Reserve Pass D toolbar + URL bar + status row at the top
+    // and the AppLabel footer at the bottom. Body view sits in
+    // the middle band.
+    const u32 top_reserved = kToolbarH + kUrlBarH + kStatusRowH + 2;
+    const u32 bot_reserved = kFooterH + 2;
     if (ch < top_reserved + bot_reserved)
         return;
     const u32 view_h = ch - top_reserved - bot_reserved;
@@ -1059,33 +1271,50 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     const u32 dim = th.banner_fg;
     FramebufferFillRect(cx, cy, cw, ch, bg);
 
-    DrawHeader(cx, cy, cw, fg, dim, bg);
+    // Pass D chrome: refresh the URL bar + footer text from
+    // live state, re-anchor the toolbar / labels to the current
+    // client rect, and paint the WidgetGroup. The pre-existing
+    // raw-paint body / modal-list paths run below, OFFSET to
+    // sit under the new top band the toolbar / URL bar / status
+    // label carve out.
+    BindBrowserOnce();
+    RefreshUrlBarText();
+    RefreshFooterText();
+    RebindBrowserBounds(cx, cy, cw, ch);
+
+    // Pre-paint a status-band tone behind the footer label so
+    // the Caption-role glyphs sit on a uniform backdrop —
+    // mirrors the Notes status band.
+    if (ch > kFooterH)
+        FramebufferFillRect(cx, cy + ch - kFooterH, cw, kFooterH, 0x00C8C8B8U);
+
+    Compose compose_ctx{};
+    g_browser.PaintAll(compose_ctx);
+
+    // Body / modal-list paint area starts BELOW the toolbar +
+    // URL bar + status row the AppToolbar / labels just painted.
+    const u32 top_band = kToolbarH + kUrlBarH + kStatusRowH;
 
     if (g_state.fetch_in_flight)
     {
-        FramebufferDrawString(cx + 4, cy + 4 + kRowH * 3, "Fetching... please wait.", dim, bg);
+        FramebufferDrawString(cx + 4, cy + top_band + 4, "Fetching... please wait.", dim, bg);
     }
     else if (g_state.mode == Mode::History)
     {
-        DrawList(cx, cy + kRowH * 2 + 4, cw, ch - kRowH * 2 - 4, "HISTORY (Enter:load Esc:back):", g_state.history,
-                 g_state.history_count, fg, dim, bg);
+        DrawList(cx, cy + top_band, cw, (ch > top_band + kFooterH) ? ch - top_band - kFooterH : 0,
+                 "HISTORY (Enter:load Esc:back):", g_state.history, g_state.history_count, fg, dim, bg);
     }
     else if (g_state.mode == Mode::Bookmarks)
     {
-        DrawList(cx, cy + kRowH * 2 + 4, cw, ch - kRowH * 2 - 4,
+        DrawList(cx, cy + top_band, cw, (ch > top_band + kFooterH) ? ch - top_band - kFooterH : 0,
                  "BOOKMARKS (Enter:load X:remove Esc:back):", g_state.bookmarks, g_state.bookmark_count, fg, dim, bg);
     }
     else
     {
         DrawBody(cx, cy, cw, ch, fg, bg);
     }
-
-    // Footer hint.
-    if (ch > kRowH + 2)
-    {
-        const char* hint = "U:URL  B:BACK  F:FWD  R:RELOAD  H:HIST  L:BMARK  M:MARK  S:SAVE  J/K:SCROLL";
-        FramebufferDrawString(cx + 4, cy + ch - kRowH - 1, hint, dim, bg);
-    }
+    // Footer hint is now painted by the AppLabel inside
+    // g_browser — see RefreshFooterText.
 }
 
 void StartFetch(const char* url)
@@ -1182,6 +1411,60 @@ void EnterUrlEdit()
     g_state.mode = Mode::UrlEdit;
 }
 
+// ----- Pass D click trampolines --------------------------------
+// AppButton::on_click is a plain `void (*)()` so the constinit
+// g_browser above captures each one by function-pointer value.
+// Each one mirrors the corresponding BrowserFeedChar branch
+// end-state so the chrome migration adds discoverability (a
+// fresh user can click BACK / FWD / etc. instead of memorising
+// the footer hint) without changing any side effects.
+
+void ClickBack()
+{
+    NavigateBackForward(false);
+}
+
+void ClickForward()
+{
+    NavigateBackForward(true);
+}
+
+void ClickReload()
+{
+    Reload();
+}
+
+void ClickHistory()
+{
+    if (g_state.fetch_in_flight)
+        return;
+    g_state.mode = Mode::History;
+    g_state.list_selection = (g_state.history_count > 0) ? g_state.history_count - 1 : 0;
+}
+
+void ClickBookmarks()
+{
+    if (g_state.fetch_in_flight)
+        return;
+    g_state.mode = Mode::Bookmarks;
+    RescanBookmarks();
+    g_state.list_selection = 0;
+}
+
+void ClickMark()
+{
+    if (g_state.fetch_in_flight)
+        return;
+    BookmarkCurrent();
+}
+
+void ClickSave()
+{
+    if (g_state.fetch_in_flight)
+        return;
+    SaveDownload();
+}
+
 void HandleUrlEditChar(char c)
 {
     const u8 uc = static_cast<u8>(c);
@@ -1232,6 +1515,7 @@ void BrowserInit(WindowHandle handle)
     g_state.list_selection = 0;
     g_state.fetch_in_flight = false;
     StatusSet("Press U for URL bar.  HTTP only (no HTTPS).");
+    BindBrowserOnce();
     WindowSetContentDraw(handle, DrawFn, nullptr);
     duetos::drivers::video::WindowSetWheelHandler(handle, BrowserOnWheel);
     duetos::drivers::video::WindowSetScrollHandler(handle,
@@ -1286,12 +1570,15 @@ bool BrowserOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
         return false;
     // Mirror the geometry from DrawFn → DrawList. Client area
     // starts 22 px below the window origin (title bar) + 2 px
-    // border. DrawList is invoked at (cy + kRowH * 2 + 4); inside
-    // it the list rows start at top = cy_inner + 4 + kRowH * 2.
+    // border. Pass D chrome: DrawList is invoked at
+    // (cy + top_band) where top_band = kToolbarH + kUrlBarH +
+    // kStatusRowH. Inside DrawList the list rows start at
+    // top = cy_inner + 4 + kRowH * 2.
     constexpr u32 kTitle = 22;
     constexpr u32 kBorder = 2;
     const u32 client_y = wy + kTitle + kBorder;
-    const u32 list_y0 = client_y + kRowH * 2 + 4 + 4 + kRowH * 2;
+    const u32 top_band = kToolbarH + kUrlBarH + kStatusRowH;
+    const u32 list_y0 = client_y + top_band + 4 + kRowH * 2;
     if (sy < list_y0)
         return false;
     const u32 row = (sy - list_y0) / kRowH;
@@ -1539,8 +1826,119 @@ void BrowserSelfTest()
             pass = false;
     }
 
-    SerialWrite(pass ? "[browser] self-test OK (URL parse + dotted-quad + HTML strip)\n"
-                     : "[browser] self-test FAILED\n");
+    // Pass D: drive a synthetic click on the HIST nav button
+    // via the WidgetGroup dispatch chain. ClickHistory flips
+    // g_state.mode to Mode::History (when not fetch-in-flight),
+    // so the test verifies the dispatch path is wired end-to-end
+    // AND that the click mutates the browser state. Restore the
+    // mode + selection so the live desktop is unchanged when
+    // the test returns.
+    const Mode saved_mode = g_state.mode;
+    const u32 saved_selection = g_state.list_selection;
+    const bool saved_in_flight = g_state.fetch_in_flight;
+    BindBrowserOnce();
+    // Anchor the toolbar at (0, 22, 640, 438) — same shape
+    // boot_bringup.cpp registers the live Browser window with
+    // (640x460 minus 22 px title bar). HIST is nav index 3.
+    RebindBrowserBounds(0U, 22U, 640U, 438U);
+    g_state.mode = Mode::View;
+    g_state.fetch_in_flight = false;
+    constexpr u32 kHistIdx = 3U;
+    const u32 hx = kToolbarPadX + kHistIdx * (kToolbarBtnW + kToolbarBtnGap) + kToolbarBtnW / 2U;
+    const u32 hy = 22U + kToolbarPadY + kToolbarBtnH / 2U;
+    const Event h_move{EventKind::MouseMove, hx, hy, 0U, 0U};
+    const Event h_down{EventKind::MouseDown, hx, hy, 0U, 0U};
+    const Event h_up{EventKind::MouseUp, hx, hy, 0U, 0U};
+    if (g_browser.DispatchEvent(h_move) != EventResult::Consumed)
+        pass = false;
+    if (g_browser.DispatchEvent(h_down) != EventResult::Consumed)
+        pass = false;
+    if (g_browser.DispatchEvent(h_up) != EventResult::Consumed)
+        pass = false;
+    if (g_state.mode != Mode::History)
+        pass = false;
+
+    // URL-bar composer + footer composer must produce non-empty
+    // text after a refresh.
+    g_state.mode = Mode::UrlEdit;
+    StrCopyCap(g_state.url, kUrlCap, "example.com");
+    g_state.url_len = StrLen(g_state.url);
+    RefreshUrlBarText();
+    // Expect '>' prefix + ' ' + URL + '_' caret.
+    if (g_urlbar_text[0] != '>' || g_urlbar_text[1] != ' ' || g_urlbar_text[2] != 'e')
+        pass = false;
+    RefreshFooterText();
+    if (g_footer_text[0] == '\0')
+        pass = false;
+
+    // Restore pre-test state so the live UI is unchanged when
+    // the umbrella selftest returns.
+    g_state.mode = saved_mode;
+    g_state.list_selection = saved_selection;
+    g_state.fetch_in_flight = saved_in_flight;
+    g_state.url[0] = '\0';
+    g_state.url_len = 0;
+
+    g_self_test_passed = pass;
+    if (pass)
+    {
+        SerialWrite("[browser] self-test OK (URL parse + dotted-quad + HTML strip + widget-click)\n");
+        SerialWrite("[browser-selftest] PASS\n");
+    }
+    else
+    {
+        SerialWrite("[browser] self-test FAILED\n");
+        SerialWrite("[browser-selftest] FAIL\n");
+    }
+}
+
+bool BrowserSelfTestPassed()
+{
+    return g_self_test_passed;
+}
+
+void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
+{
+    using duetos::drivers::input::kMouseButtonLeft;
+    if (g_state.handle == kWindowInvalid)
+        return;
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+        return;
+    // Title bar is 22 px; client origin sits below it. The
+    // WidgetGroup dispatch path needs cursor coords in the
+    // same frame RebindBrowserBounds anchors the chrome to.
+    constexpr duetos::u32 kTitleH = 22U;
+    if (wh <= kTitleH)
+        return;
+    const duetos::u32 client_y = wy + kTitleH;
+    const duetos::u32 client_h = wh - kTitleH;
+    BindBrowserOnce();
+    RebindBrowserBounds(wx, client_y, ww, client_h);
+
+    const bool left_down = (button_mask & kMouseButtonLeft) != 0;
+    const bool press_edge = left_down && !g_prev_left_down;
+    const bool release_edge = !left_down && g_prev_left_down;
+    g_prev_left_down = left_down;
+
+    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < wy + wh);
+    if (inside_window)
+    {
+        const Event m{EventKind::MouseMove, cx, cy, 0U, 0U};
+        g_browser.DispatchEvent(m);
+    }
+    if (press_edge && inside_window)
+    {
+        const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
+        g_browser.DispatchEvent(d);
+    }
+    if (release_edge)
+    {
+        // Always dispatch MouseUp so a button pressed inside
+        // the toolbar and dragged off clears its Pressed flag.
+        const Event u{EventKind::MouseUp, cx, cy, 0U, 0U};
+        g_browser.DispatchEvent(u);
+    }
 }
 
 } // namespace duetos::apps::browser

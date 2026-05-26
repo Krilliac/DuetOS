@@ -44,4 +44,21 @@ bool ClockFeedChar(char c);
 /// PASS/FAIL line to COM1.
 void ClockSelfTest();
 
+/// Pass D umbrella accessor — true iff the most recent
+/// ClockSelfTest() invocation ran every check (including
+/// the synthetic toolbar button click) without error.
+bool ClockSelfTestPassed();
+
+/// Mouse-event entry point for the Pass D toolbar + footer
+/// label. Called from the boot-time mouse-reader thread on
+/// every motion packet. Edge-detects left-button press /
+/// release internally and dispatches MouseMove / MouseDown /
+/// MouseUp into the WidgetGroup so AppButton hover state tracks
+/// the cursor on tactility themes. The LED-style digit face
+/// stays raw paint (carve-out) — toolbar mode buttons are the
+/// only widget-dispatched events; the digit face has no per-
+/// pixel click semantics. No-op before ClockInit has wired a
+/// window.
+void ClockMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
+
 } // namespace duetos::apps::clock

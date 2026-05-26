@@ -63,8 +63,15 @@ bool GfxDemoFeedChar(char c);
 
 /// Boot-time self-test — exercises the trig LUT spot values, the
 /// 16.16 fixed-point multiply helper, particle bounce wall logic,
-/// and a known Mandelbrot escape count. Prints one PASS / FAIL
-/// line to COM1.
+/// and a known Mandelbrot escape count. Also binds + paints the
+/// Pass D chrome header / footer AppLabels (the framebuffer demo
+/// content is the carve-out and stays raw paint). Prints one
+/// PASS / FAIL line to COM1.
 void GfxDemoSelfTest();
+
+/// Pass D umbrella accessor — true iff the most recent
+/// GfxDemoSelfTest() invocation ran every check (including the
+/// chrome header / footer bind + paint) without error.
+bool GfxDemoSelfTestPassed();
 
 } // namespace duetos::apps::gfxdemo

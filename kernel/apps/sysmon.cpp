@@ -1,7 +1,14 @@
 #include "apps/sysmon.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/input/ps2mouse.h"
+#include "drivers/video/app_widgets/app_button.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_toolbar.h"
+#include "drivers/video/app_widgets/widget_group.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
+#include "drivers/video/notify.h"
 #include "drivers/video/theme.h"
 #include "mm/kheap.h"
 #include "time/tick.h"
@@ -193,7 +200,7 @@ void AppendUptime(char* dst, u32* pos, u32 cap, u64 ticks, u64 hz)
 }
 
 // -------------------------------------------------------------------
-// Sparkline panel painter.
+// Sparkline panel painter (carve-out).
 // -------------------------------------------------------------------
 //
 // Paints `count` samples right-aligned inside (x, y, w, h). Each
@@ -236,66 +243,209 @@ void PaintSparkline(u32 x, u32 y, u32 w, u32 h, u32 trace_rgb, u32 axis_rgb, u8 
     }
 }
 
-void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
+// ---------------------------------------------------------------
+// Pass D chrome: AppToolbar (back) + 2 AppButtons (SAMPLE, CLEAR)
+// + 3 AppLabels (header summary, heap-usage detail, footer hint).
+// The toolbar exposes both ring-mutating actions ('C' / clear and
+// the F5 / force-sample shortcut from SysmonFeedChar) as
+// discoverable buttons, so an operator who never reads the footer
+// hint can still drive the app.
+//
+// Carve-outs that stay raw paint:
+//   - Two stacked sparkline panels (HEAP USED %, FRAGMENTATION).
+//     AppPanel has no time-series / per-sample bar model, the
+//     trace colour varies per panel (green for heap-used, amber
+//     for frag), and the right-aligned bar layout has no AppList
+//     equivalent.
+// AppLabel paints the header / heap-detail / footer lines; the
+// carve-out band sits between the heap-detail label and the
+// footer label.
+
+constexpr u32 kSmToolbarH = 22U;
+constexpr u32 kSmToolbarBtnW = 60U;
+constexpr u32 kSmToolbarBtnH = 18U;
+constexpr u32 kSmToolbarBtnGap = 4U;
+constexpr u32 kSmToolbarPadX = 4U;
+constexpr u32 kSmToolbarPadY = 2U;
+constexpr u32 kSmActionBtnCount = 2U;
+constexpr u32 kSmHeaderH = kRowH + 2U;
+constexpr u32 kSmDetailH = kRowH + 2U;
+constexpr u32 kSmFooterH = kRowH;
+
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::app_widgets::AppButton;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::AppToolbar;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::Event;
+using duetos::drivers::video::app_widgets::EventKind;
+using duetos::drivers::video::app_widgets::EventResult;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// AppLabel stores text by pointer so the buffers must outlive
+// every Paint. DrawFn re-renders them each frame.
+constinit char g_header_text[96] = {};
+constinit char g_detail_text[96] = {};
+constinit char g_footer_text[64] = {};
+
+// Forward decls for the toolbar click trampolines (defined below;
+// they have to live above the constinit g_sysmon that captures
+// them by function-pointer value).
+void ClickSample();
+void ClickClear();
+
+// Toolbar (back), then 2 action AppButtons, then 3 AppLabels
+// (header, detail, footer). Declaration order is dispatch order
+// — buttons get first refusal on clicks.
+constinit auto g_sysmon = MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppLabel{}, AppLabel{}, AppLabel{});
+
+constinit bool g_sysmon_bound = false;
+constinit bool g_sysmon_prev_left_down = false;
+constinit bool g_sysmon_self_test_passed = false;
+
+// Walk the recursive WidgetChain by hand to grab stable pointers
+// to each action button + label. Chain order mirrors the
+// MakeWidgetGroup argument list (toolbar -> btn[0] -> btn[1] ->
+// label[0] -> label[1] -> label[2]).
+AppButton* SmActionButton(u32 idx)
 {
+    if (idx == 0)
+        return &g_sysmon.chain.tail.head; // toolbar -> btn[0]
+    return &g_sysmon.chain.tail.tail.head; // toolbar -> btn[0] -> btn[1]
+}
+
+AppLabel& SmHeaderLabel()
+{
+    return g_sysmon.chain.tail.tail.tail.head;
+}
+AppLabel& SmDetailLabel()
+{
+    return g_sysmon.chain.tail.tail.tail.tail.head;
+}
+AppLabel& SmFooterLabel()
+{
+    return g_sysmon.chain.tail.tail.tail.tail.tail.head;
+}
+
+void BindSysmonOnce()
+{
+    if (g_sysmon_bound)
+        return;
+    g_sysmon_bound = true;
+
+    auto& toolbar = g_sysmon.chain.head;
+    toolbar.bg_rgb = 0; // theme.taskbar_bg
+
+    static const char* const kBtnLabels[kSmActionBtnCount] = {"SAMPLE", "CLEAR"};
+    static void (*const kBtnHandlers[kSmActionBtnCount])() = {ClickSample, ClickClear};
+    for (u32 i = 0; i < kSmActionBtnCount; ++i)
+    {
+        AppButton* btn = SmActionButton(i);
+        btn->label = kBtnLabels[i];
+        btn->on_click = kBtnHandlers[i];
+        btn->weight = ChromeTextWeight::Regular;
+        btn->bg_rgb = 0; // theme role default
+        btn->fg_rgb = 0x00101828U;
+    }
+
     const auto& th = ThemeCurrent();
-    const u32 bg = 0x00101828;
     const u32 fg = th.console_fg;
     const u32 dim = th.banner_fg;
-    const u32 axis_rgb = 0x00404858;
-    const u32 trace_used = 0x0050C050; // green — heap-used trace
-    const u32 trace_frag = 0x00E0A040; // amber — fragmentation trace
-    FramebufferFillRect(cx, cy, cw, ch, bg);
+    constexpr u32 kBg = 0x00101828U;
 
-    // Header: 2 text rows = uptime + heap line.
-    const auto h = mm::KernelHeapStatsRead();
+    auto& header = SmHeaderLabel();
+    header.text = g_header_text;
+    header.role = ChromeTextRole::Body;
+    header.weight = ChromeTextWeight::Bold;
+    header.fg_rgb = fg;
+    header.bg_rgb = kBg;
+    header.align_left = true;
+
+    auto& detail = SmDetailLabel();
+    detail.text = g_detail_text;
+    detail.role = ChromeTextRole::Body;
+    detail.weight = ChromeTextWeight::Regular;
+    detail.fg_rgb = dim;
+    detail.bg_rgb = kBg;
+    detail.align_left = true;
+
+    auto& footer = SmFooterLabel();
+    footer.text = g_footer_text;
+    footer.role = ChromeTextRole::Caption;
+    footer.weight = ChromeTextWeight::Regular;
+    footer.fg_rgb = dim;
+    footer.bg_rgb = kBg;
+    footer.align_left = true;
+}
+
+// Re-anchor the toolbar + buttons + labels to the live client
+// rect. Called from DrawFn before PaintAll and from
+// SysmonMouseInput before DispatchEvent so hit-tests + visuals
+// stay consistent across window moves / resizes.
+void RebindSysmonBounds(u32 cx, u32 cy, u32 cw, u32 ch)
+{
+    auto& toolbar = g_sysmon.chain.head;
+    toolbar.bounds = Rect{cx, cy, cw, kSmToolbarH};
+
+    for (u32 i = 0; i < kSmActionBtnCount; ++i)
+    {
+        const u32 bx = cx + kSmToolbarPadX + i * (kSmToolbarBtnW + kSmToolbarBtnGap);
+        SmActionButton(i)->bounds = Rect{bx, cy + kSmToolbarPadY, kSmToolbarBtnW, kSmToolbarBtnH};
+    }
+
+    // Header sits directly below the toolbar.
+    const u32 header_y = cy + kSmToolbarH;
+    SmHeaderLabel().bounds = Rect{cx + kPad, header_y, (cw > kPad) ? cw - kPad : cw, kSmHeaderH};
+
+    // Detail row directly below header.
+    const u32 detail_y = header_y + kSmHeaderH;
+    SmDetailLabel().bounds = Rect{cx + kPad, detail_y, (cw > kPad) ? cw - kPad : cw, kSmDetailH};
+
+    // Footer hint band along the bottom of the client area.
+    const u32 fy = (ch > kSmFooterH) ? cy + ch - kSmFooterH : cy;
+    const u32 fw = (cw > kPad) ? cw - kPad : cw;
+    SmFooterLabel().bounds = Rect{cx + kPad, fy, fw, kSmFooterH};
+}
+
+void RefreshSysmonHeader()
+{
     const Sample latest = (g_state.count > 0) ? RingAt(0) : Sample{};
-    char line[96];
+    const auto h = mm::KernelHeapStatsRead();
     u32 lp = 0;
-    AppendStr(line, &lp, sizeof(line), "UPTIME ");
-    AppendUptime(line, &lp, sizeof(line), time::TickCount(), time::TickHz());
-    AppendStr(line, &lp, sizeof(line), "  WIN ");
-    AppendU64(line, &lp, sizeof(line), latest.alive_windows);
-    AppendStr(line, &lp, sizeof(line), "  POOL ");
-    AppendBytes(line, &lp, sizeof(line), h.pool_bytes);
-    line[(lp < sizeof(line)) ? lp : sizeof(line) - 1] = '\0';
-    FramebufferDrawString(cx + kPad, cy + kPad, line, fg, bg);
+    AppendStr(g_header_text, &lp, sizeof(g_header_text), "UPTIME ");
+    AppendUptime(g_header_text, &lp, sizeof(g_header_text), time::TickCount(), time::TickHz());
+    AppendStr(g_header_text, &lp, sizeof(g_header_text), "  WIN ");
+    AppendU64(g_header_text, &lp, sizeof(g_header_text), latest.alive_windows);
+    AppendStr(g_header_text, &lp, sizeof(g_header_text), "  POOL ");
+    AppendBytes(g_header_text, &lp, sizeof(g_header_text), h.pool_bytes);
+    g_header_text[(lp < sizeof(g_header_text)) ? lp : sizeof(g_header_text) - 1] = '\0';
+}
 
-    lp = 0;
-    AppendStr(line, &lp, sizeof(line), "USED ");
-    AppendBytes(line, &lp, sizeof(line), h.used_bytes);
-    AppendStr(line, &lp, sizeof(line), " (");
-    AppendU64(line, &lp, sizeof(line), latest.heap_used_pct);
-    AppendStr(line, &lp, sizeof(line), "%)  FREE ");
-    AppendBytes(line, &lp, sizeof(line), h.free_bytes);
-    AppendStr(line, &lp, sizeof(line), "  FRAG ");
-    AppendU64(line, &lp, sizeof(line), h.free_chunk_count);
-    line[(lp < sizeof(line)) ? lp : sizeof(line) - 1] = '\0';
-    FramebufferDrawString(cx + kPad, cy + kPad + kRowH, line, dim, bg);
+void RefreshSysmonDetail()
+{
+    const Sample latest = (g_state.count > 0) ? RingAt(0) : Sample{};
+    const auto h = mm::KernelHeapStatsRead();
+    u32 lp = 0;
+    AppendStr(g_detail_text, &lp, sizeof(g_detail_text), "USED ");
+    AppendBytes(g_detail_text, &lp, sizeof(g_detail_text), h.used_bytes);
+    AppendStr(g_detail_text, &lp, sizeof(g_detail_text), " (");
+    AppendU64(g_detail_text, &lp, sizeof(g_detail_text), latest.heap_used_pct);
+    AppendStr(g_detail_text, &lp, sizeof(g_detail_text), "%)  FREE ");
+    AppendBytes(g_detail_text, &lp, sizeof(g_detail_text), h.free_bytes);
+    AppendStr(g_detail_text, &lp, sizeof(g_detail_text), "  FRAG ");
+    AppendU64(g_detail_text, &lp, sizeof(g_detail_text), h.free_chunk_count);
+    g_detail_text[(lp < sizeof(g_detail_text)) ? lp : sizeof(g_detail_text) - 1] = '\0';
+}
 
-    // Two stacked sparkline panels.
-    const u32 panel_top = cy + kPad + kRowH * 2 + kPad;
-    const u32 footer_h = kRowH + kPad;
-    const u32 panels_w = (cw > 2 * kPad) ? cw - 2 * kPad : cw;
-    const u32 panels_h_total = (ch > (panel_top - cy) + footer_h) ? ch - (panel_top - cy) - footer_h : 0;
-    const u32 panel_h = (panels_h_total > kPanelGap) ? (panels_h_total - kPanelGap) / 2 : 0;
-    if (panel_h > 8)
-    {
-        // Caption row above each panel.
-        FramebufferDrawString(cx + kPad, panel_top, "HEAP USED %", dim, bg);
-        PaintSparkline(cx + kPad, panel_top + kRowH, panels_w, panel_h - kRowH, trace_used, axis_rgb,
-                       [](const Sample& s) -> u8 { return s.heap_used_pct; });
-        const u32 panel2_top = panel_top + panel_h + kPanelGap;
-        FramebufferDrawString(cx + kPad, panel2_top, "FRAGMENTATION", dim, bg);
-        PaintSparkline(cx + kPad, panel2_top + kRowH, panels_w, panel_h - kRowH, trace_frag, axis_rgb,
-                       [](const Sample& s) -> u8 { return s.frag_score; });
-    }
-
-    // Footer hint.
-    if (ch > kRowH + 2)
-    {
-        FramebufferDrawString(cx + kPad, cy + ch - kRowH - 1, "F5=SAMPLE NOW   C=CLEAR RING", dim, bg);
-    }
+void RefreshSysmonFooter()
+{
+    static const char kHint[] = "SAMPLE=push now   CLEAR=reset ring   (kbd: R/C)";
+    u32 i = 0;
+    for (; kHint[i] != '\0' && i + 1 < sizeof(g_footer_text); ++i)
+        g_footer_text[i] = kHint[i];
+    g_footer_text[i] = '\0';
 }
 
 // Forwarding helper to keep SysmonTick / SysmonFeedChar from
@@ -304,6 +454,89 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 void PushNewSample()
 {
     RingPush(CollectSample());
+}
+
+// ----- Pass D click trampolines --------------------------------
+// AppButton::on_click is a plain `void (*)()` so the constinit
+// g_sysmon above captures them by function-pointer value. SAMPLE
+// pushes one new sample (mirrors the F5 / 'r' kbd shortcut),
+// CLEAR resets the ring (mirrors the 'c' kbd shortcut). Both
+// mutate only the sysmon-local ring — no cross-subsystem state
+// touched.
+
+void ClickSample()
+{
+    PushNewSample();
+    duetos::drivers::video::NotifyShow("sysmon: sampled");
+}
+
+void ClickClear()
+{
+    RingClear();
+    duetos::drivers::video::NotifyShow("sysmon: ring cleared");
+}
+
+// Paint the raw sparkline content (carve-out) inside the band
+// DrawFn carves out between the detail label at the top and the
+// AppLabel footer at the bottom.
+void PaintSysmonContent(u32 cx, u32 cy, u32 cw, u32 ch)
+{
+    constexpr u32 kBg = 0x00101828U;
+    const auto& th = ThemeCurrent();
+    const u32 dim = th.banner_fg;
+    const u32 axis_rgb = 0x00404858;
+    const u32 trace_used = 0x0050C050; // green — heap-used trace
+    const u32 trace_frag = 0x00E0A040; // amber — fragmentation trace
+    FramebufferFillRect(cx, cy, cw, ch, kBg);
+
+    // Two stacked sparkline panels with a caption row above each.
+    const u32 panels_w = (cw > 2 * kPad) ? cw - 2 * kPad : cw;
+    const u32 panels_h_total = (ch > kPanelGap) ? ch : 0;
+    const u32 panel_h = (panels_h_total > kPanelGap) ? (panels_h_total - kPanelGap) / 2 : 0;
+    if (panel_h > 8)
+    {
+        const u32 panel_top = cy;
+        FramebufferDrawString(cx + kPad, panel_top, "HEAP USED %", dim, kBg);
+        PaintSparkline(cx + kPad, panel_top + kRowH, panels_w, panel_h - kRowH, trace_used, axis_rgb,
+                       [](const Sample& s) -> u8 { return s.heap_used_pct; });
+        const u32 panel2_top = panel_top + panel_h + kPanelGap;
+        FramebufferDrawString(cx + kPad, panel2_top, "FRAGMENTATION", dim, kBg);
+        PaintSparkline(cx + kPad, panel2_top + kRowH, panels_w, panel_h - kRowH, trace_frag, axis_rgb,
+                       [](const Sample& s) -> u8 { return s.frag_score; });
+    }
+}
+
+void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
+{
+    constexpr u32 kBg = 0x00101828U;
+    FramebufferFillRect(cx, cy, cw, ch, kBg);
+
+    // Pass D chrome: refresh the header / detail / footer text
+    // from live state, re-anchor the toolbar / labels to the
+    // current client rect, and paint the WidgetGroup. The raw
+    // sparkline panels (carve-out) sit in the band between the
+    // detail label and the AppLabel footer.
+    BindSysmonOnce();
+    RefreshSysmonHeader();
+    RefreshSysmonDetail();
+    RefreshSysmonFooter();
+    RebindSysmonBounds(cx, cy, cw, ch);
+
+    Compose compose_ctx{};
+    g_sysmon.PaintAll(compose_ctx);
+
+    // Content band — between (toolbar + header + detail) at the
+    // top and the AppLabel footer at the bottom.
+    const u32 top_band = kSmToolbarH + kSmHeaderH + kSmDetailH + kPad;
+    const u32 bot_band = kSmFooterH + kPad;
+    const u32 list_x = cx;
+    const u32 list_y = cy + top_band;
+    const u32 list_w = cw;
+    const u32 list_h = (ch > top_band + bot_band) ? (ch - top_band - bot_band) : 0;
+    if (list_h > 0)
+    {
+        PaintSysmonContent(list_x, list_y, list_w, list_h);
+    }
 }
 
 } // namespace
@@ -315,6 +548,7 @@ void SysmonInit(WindowHandle handle)
     g_state.count = 0;
     g_state.initted = true;
     WindowSetContentDraw(handle, DrawFn, nullptr);
+    BindSysmonOnce();
 }
 
 WindowHandle SysmonWindow()
@@ -399,9 +633,119 @@ void SysmonSelfTest()
     RingClear();
     ok = ok && (g_state.count == 0);
 
+    // Pass D: drive a synthetic click on each toolbar button via
+    // the WidgetGroup dispatch chain. SAMPLE pushes one new
+    // sample (collected from live heap state); CLEAR resets the
+    // ring. Both are sysmon-local mutations of g_state.ring —
+    // the surrounding `save` / `g_state = State{}` / restore
+    // dance prevents leakage into the operator's view.
+    BindSysmonOnce();
+    // Anchor the toolbar at (0, 22, 380, 258) — same shape
+    // boot_bringup.cpp registers the live sysmon window with
+    // (380x280 minus 22 px title bar). Buttons sit at indices
+    // 0 (SAMPLE) and 1 (CLEAR).
+    RebindSysmonBounds(0U, 22U, 380U, 258U);
+
+    auto click_button = [&ok](u32 btn_idx)
+    {
+        const u32 nx = kSmToolbarPadX + btn_idx * (kSmToolbarBtnW + kSmToolbarBtnGap) + kSmToolbarBtnW / 2U;
+        const u32 ny = 22U + kSmToolbarPadY + kSmToolbarBtnH / 2U;
+        const Event move{EventKind::MouseMove, nx, ny, 0U, 0U};
+        const Event down{EventKind::MouseDown, nx, ny, 0U, 0U};
+        const Event up{EventKind::MouseUp, nx, ny, 0U, 0U};
+        if (g_sysmon.DispatchEvent(move) != EventResult::Consumed)
+            ok = false;
+        if (g_sysmon.DispatchEvent(down) != EventResult::Consumed)
+            ok = false;
+        if (g_sysmon.DispatchEvent(up) != EventResult::Consumed)
+            ok = false;
+    };
+
+    // SAMPLE: starts from empty ring, must produce count == 1.
+    RingClear();
+    click_button(0);
+    ok = ok && (g_state.count == 1);
+
+    // CLEAR: starts from non-empty ring (1 from SAMPLE above +
+    // 2 manual pushes = 3), must produce count == 0.
+    PushNewSample();
+    PushNewSample();
+    ok = ok && (g_state.count == 3);
+    click_button(1);
+    ok = ok && (g_state.count == 0);
+
+    // Header / detail / footer composers must produce non-empty
+    // text after a refresh.
+    RefreshSysmonHeader();
+    if (g_header_text[0] == '\0')
+        ok = false;
+    RefreshSysmonDetail();
+    if (g_detail_text[0] == '\0')
+        ok = false;
+    RefreshSysmonFooter();
+    if (g_footer_text[0] == '\0')
+        ok = false;
+
     // Restore.
     g_state = save;
-    SerialWrite(ok ? "[sysmon] self-test OK\n" : "[sysmon] self-test FAILED\n");
+    g_sysmon_self_test_passed = ok;
+    SerialWrite(ok ? "[sysmon-selftest] PASS\n" : "[sysmon-selftest] FAIL\n");
+}
+
+bool SysmonSelfTestPassed()
+{
+    return g_sysmon_self_test_passed;
+}
+
+void SysmonMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
+{
+    using duetos::drivers::input::kMouseButtonLeft;
+    if (g_state.handle == duetos::drivers::video::kWindowInvalid)
+        return;
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+        return;
+    // Title bar is 22 px; client origin sits below it. The
+    // WidgetGroup dispatch path needs cursor coords in the same
+    // frame RebindSysmonBounds anchors the chrome to.
+    constexpr duetos::u32 kTitleH = 22U;
+    if (wh <= kTitleH)
+        return;
+    const duetos::u32 client_y = wy + kTitleH;
+    const duetos::u32 client_h = wh - kTitleH;
+    BindSysmonOnce();
+    RebindSysmonBounds(wx, client_y, ww, client_h);
+
+    const bool left_down = (button_mask & kMouseButtonLeft) != 0;
+    const bool press_edge = left_down && !g_sysmon_prev_left_down;
+    const bool release_edge = !left_down && g_sysmon_prev_left_down;
+    g_sysmon_prev_left_down = left_down;
+
+    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < wy + wh);
+    if (inside_window)
+    {
+        const Event m{EventKind::MouseMove, cx, cy, 0U, 0U};
+        g_sysmon.DispatchEvent(m);
+    }
+    if (press_edge && inside_window)
+    {
+        // Carve-out: the raw sparkline panels sit below the
+        // toolbar / header / detail rows the WidgetGroup owns.
+        // DispatchEvent's hit-test naturally short-circuits when
+        // the click misses the toolbar bounds — the sparkline
+        // panels have no per-bar click semantics (the panels are
+        // an at-a-glance visualisation; mutating actions are on
+        // the toolbar SAMPLE / CLEAR buttons).
+        const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
+        g_sysmon.DispatchEvent(d);
+    }
+    if (release_edge)
+    {
+        // Always dispatch MouseUp so a button pressed inside the
+        // toolbar and dragged off clears its Pressed flag.
+        const Event u{EventKind::MouseUp, cx, cy, 0U, 0U};
+        g_sysmon.DispatchEvent(u);
+    }
 }
 
 } // namespace duetos::apps::sysmon

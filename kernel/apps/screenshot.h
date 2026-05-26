@@ -57,13 +57,35 @@ bool ScreenshotCapture();
 /// only the 18-byte header differs. Bound to Ctrl+Alt+T.
 bool ScreenshotCaptureTga();
 
-/// Boot self-test: skipped silently if FAT32 isn't mounted.
-/// Synthesises a 4×4 BMP via the same write path
-/// ScreenshotCapture uses (against `SHOTTEST.BMP` to avoid
-/// colliding with real captures), verifies the file size on
-/// disk matches the BMP header (54 + 4×4×4 = 118 bytes),
-/// then deletes the test file. Prints PASS / FAIL / SKIP to
-/// COM1.
+/// Boot self-test. Drives a synthetic CAPTURE-button hover via
+/// the Pass D WidgetGroup chain to confirm the chrome dispatch
+/// path is wired, then (when FAT32 is mounted) synthesises a 4×4
+/// BMP via the same write path ScreenshotCapture uses (against
+/// `SHOTTEST.BMP` to avoid colliding with real captures),
+/// verifies the file size on disk matches the BMP header (54 +
+/// 4×4×4 = 118 bytes), then deletes the test file. Emits
+/// `[screenshot-selftest] PASS` / `FAIL` on COM1; also emits the
+/// legacy `[shot] self-test SKIP: no FAT32 volume` line when the
+/// fs-leg is skipped so existing log triage still sees the
+/// historical sentinel.
 void ScreenshotSelfTest();
+
+/// Pass D umbrella accessor — true iff the most recent
+/// ScreenshotSelfTest() invocation ran every check (chrome
+/// dispatch + label refresh; the BMP round-trip is gated on FAT32
+/// being mounted but does not fail the umbrella when skipped).
+bool ScreenshotSelfTestPassed();
+
+/// Pass D mouse-input entry. Screenshot has no live windowed
+/// surface today; the chrome WidgetGroup is anchored at a
+/// notional (0,0,240,200) client rect so a hover / press over
+/// those coordinates routes through the CAPTURE button. The
+/// kernel mouse loop does not feed these coordinates without a
+/// window registration — the entry point exists so a future
+/// "Capture & Save" surface can be wired without adding a new
+/// boot_tasks dispatch case. Edge-detects left-button state
+/// internally so the caller can invoke unconditionally per
+/// packet.
+void ScreenshotMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
 
 } // namespace duetos::apps::screenshot

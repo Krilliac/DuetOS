@@ -1,6 +1,10 @@
 #include "drivers/video/notify.h"
 
 #include "arch/x86_64/serial.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_panel.h"
+#include "drivers/video/app_widgets/widget_group.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/sound_cue.h"
 #include "drivers/video/taskbar.h"
@@ -116,6 +120,84 @@ u32 StrLenCapped(const char* s, u32 cap)
         ++n;
     }
     return n;
+}
+
+// ---------------------------------------------------------------
+// Pass D chrome: AppPanel (severity-coloured bg + 1 px border +
+// soft shadow on tactility-on themes) + AppLabel (toast body
+// text, ChromeTextRole::Body). Toast has NO interactive surface
+// — implicit-dismiss-on-timeout is the only dismissal path, so
+// there is no NotifyMouseInput and no AppButton.
+//
+// Carve-outs: none. The full toast chrome composes through the
+// WidgetGroup — the per-frame ttl decrement + headless-fb early
+// exit stay in NotifyRedraw since they are state mechanics, not
+// paint.
+
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::AppPanel;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// AppLabel stores text by pointer, so g_toast.text (a constinit
+// fixed-cap buffer that lives in this TU) is the stable storage
+// — re-binding it once at bind-time is enough.
+constinit auto g_notify = MakeWidgetGroup(AppPanel{}, AppLabel{});
+
+constinit bool g_notify_bound = false;
+constinit bool g_notify_self_test_passed = false;
+
+// Walk the chain by hand to grab a stable pointer to the panel +
+// label. Chain order mirrors the MakeWidgetGroup argument list
+// (panel -> label).
+AppPanel& NotifyPanel()
+{
+    return g_notify.chain.head;
+}
+AppLabel& NotifyLabel()
+{
+    return g_notify.chain.tail.head;
+}
+
+void BindNotifyOnce()
+{
+    if (g_notify_bound)
+        return;
+    g_notify_bound = true;
+
+    AppPanel& p = NotifyPanel();
+    // shadow_radius is intentionally smaller than the app-panel
+    // default (12) — toasts are ~120-700 px wide and a 12 px
+    // shadow blooms past the right edge of the screen at the
+    // tightest framebuffers.
+    p.shadow_radius = 8U;
+
+    AppLabel& l = NotifyLabel();
+    l.text = g_toast.text;
+    l.role = ChromeTextRole::Body;
+    l.weight = ChromeTextWeight::Regular;
+    l.align_left = true;
+}
+
+// Re-anchor the panel + label to the live toast bounds. Called
+// from NotifyRedraw before PaintAll so the chrome tracks the
+// current framebuffer dimensions + text width.
+void RebindNotifyBounds(u32 box_x, u32 box_y, u32 box_w, u32 box_h, u32 text_x, u32 text_y, u32 text_w, u32 text_h,
+                        u32 panel_rgb, u32 border_rgb, u32 fg_rgb)
+{
+    AppPanel& p = NotifyPanel();
+    p.bounds = Rect{box_x, box_y, box_w, box_h};
+    p.bg_rgb = panel_rgb;
+    p.border_rgb = border_rgb;
+
+    AppLabel& l = NotifyLabel();
+    l.bounds = Rect{text_x, text_y, text_w, text_h};
+    l.fg_rgb = fg_rgb;
+    l.bg_rgb = panel_rgb;
+    // Re-point at the live text buffer in case a self-test (or
+    // future caller) ever swaps the underlying storage.
+    l.text = g_toast.text;
 }
 
 } // namespace
@@ -261,12 +343,20 @@ void NotifyRedraw()
     // Border matches window_border for visual consistency with
     // the rest of the chrome.
     const u32 panel_rgb = KindPanelRgb(g_toast.kind, th.taskbar_accent);
-    FramebufferFillRect(box_x, box_y, box_w, box_h, panel_rgb);
-    FramebufferDrawRect(box_x, box_y, box_w, box_h, th.window_border, 1);
 
+    // Pass D chrome: bind the panel + label widgets once, anchor
+    // them to the just-computed box, then paint via the
+    // WidgetGroup. AppPanel handles tactility-on shadow internally,
+    // so a `tactility=on` theme now drops a soft drop-shadow under
+    // the toast — used to be a hard 1 px border only.
+    BindNotifyOnce();
     const u32 text_x = box_x + padding_x;
     const u32 text_y = box_y + padding_y;
-    FramebufferDrawString(text_x, text_y, g_toast.text, th.banner_fg, panel_rgb);
+    RebindNotifyBounds(box_x, box_y, box_w, box_h, text_x, text_y, text_w, box_h - 2 * padding_y, panel_rgb,
+                       th.window_border, th.banner_fg);
+
+    Compose compose_ctx{};
+    g_notify.PaintAll(compose_ctx);
 
     --g_toast.ttl;
     if (g_toast.ttl == 0)
@@ -346,6 +436,26 @@ void NotifySelfTest()
 
     NotifyShow(nullptr);
 
+    // Pass D: drive a synthetic Paint through the WidgetGroup
+    // chain. Pinned at a 240x32 box with text_w=200 — well
+    // inside any real framebuffer — and a known-good
+    // (panel/border/fg) triple. No FramebufferGet check: the
+    // CRTP Paint inlines into AppPanel + AppLabel, both of
+    // which early-out on bounds.w/h == 0; we just confirm the
+    // chain composes without faulting and the bind +
+    // re-anchor helpers don't crash on a fresh boot.
+    BindNotifyOnce();
+    RebindNotifyBounds(/*box*/ 16U, 16U, 240U, 32U,
+                       /*text*/ 28U, 22U, 200U, 20U,
+                       /*panel*/ 0x00305030U,
+                       /*border*/ 0x00000000U,
+                       /*fg*/ 0x00FFFFFFU);
+    Compose compose_ctx{};
+    g_notify.PaintAll(compose_ctx);
+    ok = ok && (NotifyPanel().bounds.w == 240U);
+    ok = ok && (NotifyLabel().bounds.w == 200U);
+    ok = ok && (NotifyLabel().text == g_toast.text);
+
     // Restore the operator's history ring + the live toast.
     for (u32 i = 0; i < kNotifyHistoryCap; ++i)
         g_history[i] = saved_history[i];
@@ -355,7 +465,13 @@ void NotifySelfTest()
     // Restore the sound-cue master toggle.
     SoundCueSetEnabled(prev_sound_enabled);
 
-    SerialWrite(ok ? "[notify] self-test OK\n" : "[notify] self-test FAILED\n");
+    g_notify_self_test_passed = ok;
+    SerialWrite(ok ? "[notify-selftest] PASS\n" : "[notify-selftest] FAIL\n");
+}
+
+bool NotifySelfTestPassed()
+{
+    return g_notify_self_test_passed;
 }
 
 } // namespace duetos::drivers::video

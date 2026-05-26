@@ -82,6 +82,19 @@ bool SettingsFeedChar(char c);
 /// path. Prints one PASS/FAIL line to COM1.
 void SettingsSelfTest();
 
+/// Pass D umbrella accessor — true iff the most recent
+/// SettingsSelfTest() invocation ran every check (including the
+/// synthetic tab-strip widget click) without error.
+bool SettingsSelfTestPassed();
+
+/// Mouse-event entry point for the Pass D tab strip + footer label.
+/// Called from the boot-time mouse-reader thread on every motion
+/// packet. Detects left-button press / release edges internally and
+/// dispatches MouseMove / MouseDown / MouseUp into the WidgetGroup
+/// so AppButton hover state tracks the cursor on tactility themes.
+/// No-op before SettingsInit has wired a window.
+void SettingsMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
+
 /// Sub-panel identifier. The Settings window's main DrawFn
 /// dispatches to a sub-panel renderer; each sub-panel owns
 /// its own draw + key handler. Number-key shortcuts (0..5)
@@ -127,6 +140,22 @@ void SettingsSoundInit();
 void SettingsKeyboardInit();
 void SettingsMouseInit();
 void SettingsDateTimeInit();
+
+/// Pass D per-sub-panel self-tests. Each verifies the panel's
+/// AppLabel / AppButton chrome binds + paints without crash and
+/// emits a `[settings-<panel>-selftest] PASS/FAIL` sentinel that
+/// the boot-log analyzer can grep for. Aggregated by the Pass D
+/// umbrella sentinel in boot_bringup.cpp.
+void SettingsDateTimeSelfTest();
+bool SettingsDateTimeSelfTestPassed();
+void SettingsDisplaySelfTest();
+bool SettingsDisplaySelfTestPassed();
+void SettingsKeyboardSelfTest();
+bool SettingsKeyboardSelfTestPassed();
+void SettingsMouseSelfTest();
+bool SettingsMouseSelfTestPassed();
+void SettingsSoundSelfTest();
+bool SettingsSoundSelfTestPassed();
 
 /// Keyboard typematic — rate / delay indices currently shown by
 /// the Keyboard sub-panel and pushed to the PS/2 controller. The

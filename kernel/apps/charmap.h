@@ -55,7 +55,28 @@ bool CharMapFeedArrow(duetos::u16 keycode);
 
 /// Boot self-test. Validates the codepoint <-> grid-cell
 /// mapping (round-trip) and the clipboard copy helper. Pure
-/// compute; runs unconditionally.
+/// compute; runs unconditionally. Also drives a synthetic click
+/// through the Pass D toolbar's WidgetGroup to verify the
+/// dispatch chain is wired end-to-end.
 void CharMapSelfTest();
+
+/// Pass D umbrella accessor — true iff the most recent
+/// CharMapSelfTest() invocation ran every check (including the
+/// synthetic toolbar button click) without error.
+bool CharMapSelfTestPassed();
+
+/// Mouse-event entry point for the Pass D toolbar + labels.
+/// Called from the boot-time mouse-reader thread on every
+/// motion packet. Edge-detects left-button press / release
+/// internally and dispatches MouseMove / MouseDown / MouseUp
+/// into the WidgetGroup so AppButton hover state tracks the
+/// cursor on tactility themes. The raw codepoint grid (16-col
+/// 24×24 cells with selection border + scale-2 glyphs) stays
+/// raw paint (carve-out) — per-cell AppButton would register
+/// 224 widget bounds in full-range mode and AppPanel/AppLabel
+/// have no per-cell centred-glyph model. Selection is reached
+/// via the keyboard arrow / Tab paths. No-op before
+/// CharMapInit has wired a window.
+void CharMapMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
 
 } // namespace duetos::apps::charmap

@@ -3,6 +3,12 @@
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
+#include "drivers/input/ps2mouse.h"
+#include "drivers/video/app_widgets/app_button.h"
+#include "drivers/video/app_widgets/app_label.h"
+#include "drivers/video/app_widgets/app_toolbar.h"
+#include "drivers/video/app_widgets/widget_group.h"
+#include "drivers/video/chrome_text.h"
 #include "drivers/video/dialog.h"
 #include "drivers/video/framebuffer.h"
 #include "drivers/video/notify.h"
@@ -95,6 +101,179 @@ constinit u64 g_timer_remaining_ticks = 60 * 100;
 constinit u64 g_timer_run_start_tick = 0;
 constinit bool g_timer_running = false;
 constinit bool g_timer_fired = false;
+
+// ---------------------------------------------------------------
+// Pass D chrome: AppToolbar (back) + 4 AppButton entries (CLOCK
+// / STOP / ALRM / TIMR — one per Mode) + 1 AppLabel footer that
+// carries the per-mode status / hint line. The 4 toolbar buttons
+// duplicate the Tab-cycle keyboard shortcut so the chrome stays
+// discoverable without forcing fresh users to memorise that
+// Tab cycles modes.
+//
+// Carve-outs that stay raw paint:
+//   - LED-style 7-segment digit face (HH:MM:SS row). This is the
+//     app's intentional personality — each digit is composed of
+//     up to 7 filled rectangles in retro-LED green against a
+//     dark background. AppButton's uniform fg/bg/label model
+//     can't reproduce the per-segment on/off ghosting or the
+//     two-square colon glyph. The face paints inside the band
+//     DrawFn carves out below the toolbar and above the footer
+//     label.
+//
+// Layout: toolbar (kClockToolbarH = 22) at the top of the
+// client area, then the LED digit face centred in the middle
+// band, then a footer AppLabel along the bottom. Status text
+// content is per-mode (see RefreshFooterText) and re-composed
+// each frame from the live mode + run/armed/fired flags.
+
+constexpr u32 kClockToolbarH = 22U;
+constexpr u32 kClockToolbarBtnW = 48U;
+constexpr u32 kClockToolbarBtnH = 18U;
+constexpr u32 kClockToolbarBtnGap = 4U;
+constexpr u32 kClockToolbarPadX = 4U;
+constexpr u32 kClockToolbarPadY = 2U;
+constexpr u32 kClockModeBtnCount = 4U;
+constexpr u32 kClockFooterH = 12U;
+
+using duetos::drivers::video::ChromeTextRole;
+using duetos::drivers::video::ChromeTextWeight;
+using duetos::drivers::video::app_widgets::AppButton;
+using duetos::drivers::video::app_widgets::AppLabel;
+using duetos::drivers::video::app_widgets::AppToolbar;
+using duetos::drivers::video::app_widgets::Compose;
+using duetos::drivers::video::app_widgets::Event;
+using duetos::drivers::video::app_widgets::EventKind;
+using duetos::drivers::video::app_widgets::EventResult;
+using duetos::drivers::video::app_widgets::MakeWidgetGroup;
+using duetos::drivers::video::app_widgets::Rect;
+
+// AppLabel stores text by pointer so the buffer must outlive
+// every Paint. DrawFn re-renders it each frame via
+// RefreshClockFooter.
+constinit char g_clock_footer_text[64] = {};
+
+// Forward decls for the toolbar click trampolines (defined
+// below; they have to live above the constinit g_clock that
+// captures them by function-pointer value).
+void ClickClockMode();
+void ClickStopwatchMode();
+void ClickAlarmMode();
+void ClickTimerMode();
+
+// Toolbar (back), then 4 mode-toggle AppButtons (CLOCK / STOP /
+// ALRM / TIMR), then 1 AppLabel footer. Reverse declaration
+// order is dispatch order — buttons get first refusal on clicks.
+constinit auto g_clock =
+    MakeWidgetGroup(AppToolbar{}, AppButton{}, AppButton{}, AppButton{}, AppButton{}, AppLabel{});
+
+constinit bool g_clock_bound = false;
+constinit bool g_clock_prev_left_down = false;
+constinit bool g_clock_self_test_passed = false;
+
+// Walk the recursive WidgetChain by hand to grab a stable
+// pointer to each mode button. Chain order mirrors the
+// MakeWidgetGroup argument list (toolbar -> 4 buttons -> 1
+// label).
+AppButton* ClockModeButton(u32 i)
+{
+    auto& a = g_clock.chain.tail; // toolbar -> btn[0]
+    auto& b = a.tail;             // btn[0]   -> btn[1]
+    auto& c = b.tail;             // btn[1]   -> btn[2]
+    auto& d = c.tail;             // btn[2]   -> btn[3]
+    AppButton* btns[kClockModeBtnCount] = {&a.head, &b.head, &c.head, &d.head};
+    return btns[i];
+}
+
+// AppLabel accessor — footer sits at chain position 5 (zero-
+// indexed) after the 1 toolbar + 4 buttons.
+AppLabel& ClockFooterLabel()
+{
+    return g_clock.chain.tail.tail.tail.tail.tail.head;
+}
+
+void BindClockOnce()
+{
+    if (g_clock_bound)
+        return;
+    g_clock_bound = true;
+
+    auto& toolbar = g_clock.chain.head;
+    toolbar.bg_rgb = 0; // theme.taskbar_bg
+
+    static const char* const kClockModeLabels[kClockModeBtnCount] = {"CLOCK", "STOP", "ALRM", "TIMR"};
+    using ClickFn = void (*)();
+    static constexpr ClickFn kClockModeClicks[kClockModeBtnCount] = {ClickClockMode, ClickStopwatchMode,
+                                                                     ClickAlarmMode, ClickTimerMode};
+    for (u32 i = 0; i < kClockModeBtnCount; ++i)
+    {
+        AppButton* btn = ClockModeButton(i);
+        btn->label = kClockModeLabels[i];
+        btn->on_click = kClockModeClicks[i];
+        btn->weight = ChromeTextWeight::Regular;
+        btn->bg_rgb = 0; // theme role default
+        btn->fg_rgb = 0x00101828U;
+    }
+
+    auto& footer = ClockFooterLabel();
+    footer.text = g_clock_footer_text;
+    footer.role = ChromeTextRole::Caption;
+    footer.weight = ChromeTextWeight::Regular;
+    footer.fg_rgb = kSegOn;
+    footer.bg_rgb = kBg;
+    footer.align_left = false;
+}
+
+// Re-anchor the toolbar + buttons + footer to the live client
+// rect. Called from DrawFn before PaintAll and from
+// ClockMouseInput before DispatchEvent so hit-tests + visuals
+// stay consistent across window moves / resizes.
+void RebindClockBounds(u32 cx, u32 cy, u32 cw, u32 ch)
+{
+    auto& toolbar = g_clock.chain.head;
+    toolbar.bounds = Rect{cx, cy, cw, kClockToolbarH};
+
+    for (u32 i = 0; i < kClockModeBtnCount; ++i)
+    {
+        const u32 bx = cx + kClockToolbarPadX + i * (kClockToolbarBtnW + kClockToolbarBtnGap);
+        ClockModeButton(i)->bounds = Rect{bx, cy + kClockToolbarPadY, kClockToolbarBtnW, kClockToolbarBtnH};
+    }
+
+    // Footer hint band along the bottom of the client area.
+    const u32 fy = (ch > kClockFooterH) ? cy + ch - kClockFooterH : cy;
+    const u32 fw = (cw > 4U) ? cw - 4U : cw;
+    ClockFooterLabel().bounds = Rect{cx + 2U, fy, fw, kClockFooterH};
+}
+
+// Re-compose g_clock_footer_text from live state. Per-mode
+// status (RUN/IDLE/ARMED/etc.) + hint, mirroring the legacy
+// inline footer build in DrawFn.
+void RefreshClockFooter()
+{
+    u32 o = 0;
+    auto append = [&](const char* s) {
+        for (u32 i = 0; s[i] != '\0' && o + 1 < sizeof(g_clock_footer_text); ++i)
+            g_clock_footer_text[o++] = s[i];
+    };
+    if (g_mode == Mode::Clock)
+    {
+        append("CLOCK | TAB:NEXT MODE");
+    }
+    else if (g_mode == Mode::Stopwatch)
+    {
+        append(g_sw_running ? "STOP .RUN | SPC:RUN R:RESET" : "STOP .IDLE | SPC:RUN R:RESET");
+    }
+    else if (g_mode == Mode::Alarm)
+    {
+        append(g_alarm_armed ? "ALRM .ARMED | S:SET A:ARM" : "ALRM .IDLE | S:SET A:ARM");
+    }
+    else // Timer
+    {
+        append(g_timer_running ? "TIMR .RUN | S:SET SPC:RUN R:RESET"
+                               : (g_timer_fired ? "TIMR .ZERO | S:SET SPC:RUN R:RESET"
+                                                : "TIMR .IDLE | S:SET SPC:RUN R:RESET"));
+    }
+    g_clock_footer_text[o] = '\0';
+}
 
 // Paint one segment of a digit. `x` / `y` is the digit's
 // top-left. `on` chooses colour.
@@ -231,17 +410,13 @@ void CheckTimerTrigger()
     }
 }
 
-void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
+// Paint the LED 7-segment digit face (HH:MM:SS) inside the band
+// DrawFn reserves between the toolbar and the footer label. This
+// is the carve-out: the digits aren't a uniform-fill / uniform-
+// label widget, so they stay raw FramebufferFillRect paint via
+// PaintDigit / PaintColon.
+void PaintLedFace(u32 cx, u32 cy, u32 cw, u32 ch)
 {
-    using duetos::drivers::video::FramebufferDrawString;
-    using duetos::drivers::video::FramebufferFillRect;
-    // Per-frame trigger checks. 1 Hz cadence is the worst case —
-    // alarm matches a whole minute window, timer countdown
-    // resolution is 10 ms and we test against zero.
-    CheckAlarmTrigger();
-    CheckTimerTrigger();
-    FramebufferFillRect(cx, cy, cw, ch, kBg);
-
     u8 digits[6] = {0, 0, 0, 0, 0, 0};
     if (g_mode == Mode::Clock)
     {
@@ -295,11 +470,12 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     }
 
     const u32 row_w = 6 * kDigitW + 2 * kColonW + 7 * kGap;
-    // Centre the row horizontally if the window is wider, else
-    // clip at kMarginX. `ch` is used only to centre vertically
-    // when there's spare height above/below the digit row.
-    u32 x = (cw > row_w + 2 * kMarginX) ? cx + (cw - row_w) / 2 : cx + kMarginX;
-    const u32 y = (ch > kDigitH + 2 * kMarginY) ? cy + (ch - kDigitH - 16) / 2 : cy + kMarginY;
+    // Centre the row horizontally if the band is wider, else
+    // clip at the left margin. Vertical centring inside the
+    // band when there's spare height; otherwise top-anchor with
+    // a small inset.
+    u32 x = (cw > row_w) ? cx + (cw - row_w) / 2 : cx + 2U;
+    const u32 y = (ch > kDigitH) ? cy + (ch - kDigitH) / 2 : cy;
 
     // HH : MM : SS
     for (u32 g = 0; g < 6; ++g)
@@ -312,90 +488,106 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
             x += kColonW + kGap;
         }
     }
+}
 
-    // Footer: in Clock mode, paint date + year. In Stopwatch
-    // mode, paint mode label + run/stop hint + centisecond
-    // counter.
-    if (ch >= kDigitH + 2 * kMarginY + 12)
+void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
+{
+    using duetos::drivers::video::FramebufferFillRect;
+    // Per-frame trigger checks. 1 Hz cadence is the worst case —
+    // alarm matches a whole minute window, timer countdown
+    // resolution is 10 ms and we test against zero.
+    CheckAlarmTrigger();
+    CheckTimerTrigger();
+    FramebufferFillRect(cx, cy, cw, ch, kBg);
+
+    // Pass D chrome: re-anchor + refresh + paint the toolbar +
+    // mode buttons + footer label. The LED face (carve-out)
+    // paints inside the band between the toolbar and the footer.
+    BindClockOnce();
+    RefreshClockFooter();
+    RebindClockBounds(cx, cy, cw, ch);
+
+    Compose compose_ctx{};
+    g_clock.PaintAll(compose_ctx);
+
+    // LED face band — between the toolbar at the top and the
+    // footer AppLabel at the bottom.
+    const u32 top_band = kClockToolbarH;
+    const u32 bot_band = kClockFooterH;
+    const u32 face_x = cx;
+    const u32 face_y = cy + top_band;
+    const u32 face_w = cw;
+    const u32 face_h = (ch > top_band + bot_band) ? (ch - top_band - bot_band) : 0;
+    if (face_h > 0)
     {
-        char line[40];
-        u32 o = 0;
-        if (g_mode == Mode::Clock)
-        {
-            duetos::arch::RtcTime rtc{};
-            duetos::arch::RtcRead(&rtc);
-            line[o++] = static_cast<char>('0' + (rtc.day / 10));
-            line[o++] = static_cast<char>('0' + (rtc.day % 10));
-            line[o++] = '/';
-            line[o++] = static_cast<char>('0' + (rtc.month / 10));
-            line[o++] = static_cast<char>('0' + (rtc.month % 10));
-            line[o++] = '/';
-            const u32 y_div_1000 = rtc.year / 1000;
-            const u32 y_div_100 = (rtc.year / 100) % 10;
-            const u32 y_div_10 = (rtc.year / 10) % 10;
-            const u32 y_mod_10 = rtc.year % 10;
-            line[o++] = static_cast<char>('0' + y_div_1000);
-            line[o++] = static_cast<char>('0' + y_div_100);
-            line[o++] = static_cast<char>('0' + y_div_10);
-            line[o++] = static_cast<char>('0' + y_mod_10);
-            line[o++] = ' ';
-            line[o++] = '|';
-            line[o++] = ' ';
-            line[o++] = 'T';
-            line[o++] = 'A';
-            line[o++] = 'B';
-            line[o++] = ':';
-            line[o++] = 'S';
-            line[o++] = 'W';
-        }
-        else if (g_mode == Mode::Stopwatch)
-        {
-            const u64 ticks = StopwatchElapsedTicks();
-            const u64 cs = (ticks % 100); // centiseconds
-            const char* lead = g_sw_running ? "STOPWATCH .RUN " : "STOPWATCH .STOP";
-            for (u32 i = 0; lead[i] != '\0' && o + 1 < sizeof(line); ++i)
-                line[o++] = lead[i];
-            line[o++] = ' ';
-            line[o++] = '.';
-            line[o++] = static_cast<char>('0' + (cs / 10));
-            line[o++] = static_cast<char>('0' + (cs % 10));
-            line[o++] = ' ';
-            line[o++] = '|';
-            line[o++] = ' ';
-            const char* hint = "SPACE:RUN R:RESET TAB:NEXT";
-            for (u32 i = 0; hint[i] != '\0' && o + 1 < sizeof(line); ++i)
-                line[o++] = hint[i];
-        }
-        else if (g_mode == Mode::Alarm)
-        {
-            const char* lead = g_alarm_armed ? "ALARM .ARMED " : "ALARM .IDLE  ";
-            for (u32 i = 0; lead[i] != '\0' && o + 1 < sizeof(line); ++i)
-                line[o++] = lead[i];
-            line[o++] = ' ';
-            line[o++] = '|';
-            line[o++] = ' ';
-            const char* hint = "S:SET A:ARM TAB:NEXT";
-            for (u32 i = 0; hint[i] != '\0' && o + 1 < sizeof(line); ++i)
-                line[o++] = hint[i];
-        }
-        else // Timer
-        {
-            const char* lead = g_timer_running ? "TIMER .RUN  " : (g_timer_fired ? "TIMER .ZERO " : "TIMER .IDLE ");
-            for (u32 i = 0; lead[i] != '\0' && o + 1 < sizeof(line); ++i)
-                line[o++] = lead[i];
-            line[o++] = ' ';
-            line[o++] = '|';
-            line[o++] = ' ';
-            const char* hint = "S:SET SPC:RUN R:RESET TAB:NEXT";
-            for (u32 i = 0; hint[i] != '\0' && o + 1 < sizeof(line); ++i)
-                line[o++] = hint[i];
-        }
-        line[o] = '\0';
-        const u32 text_w = o * 8;
-        const u32 text_x = (cw > text_w) ? cx + (cw - text_w) / 2 : cx;
-        const u32 text_y = y + kDigitH + 6;
-        FramebufferDrawString(text_x, text_y, line, kSegOn, kBg);
+        PaintLedFace(face_x, face_y, face_w, face_h);
     }
+}
+
+// Local copies of the Pause* helpers. The non-anonymous-namespace
+// PauseStopwatchIfRunning / PauseTimerIfRunning are the public
+// entry points (still called from ClockFeedChar's Tab branch);
+// the click trampolines need the same behaviour but live inside
+// the anonymous namespace where the forward-decl ordering vs.
+// constinit g_clock would otherwise force a layering shuffle.
+void PauseSwInternal()
+{
+    if (g_sw_running)
+    {
+        const u64 now = duetos::arch::TimerTicks();
+        if (now >= g_sw_run_start_tick)
+            g_sw_accumulated_ticks += now - g_sw_run_start_tick;
+        g_sw_running = false;
+    }
+}
+
+void PauseTimerInternal()
+{
+    if (!g_timer_running)
+        return;
+    const u64 now = duetos::arch::TimerTicks();
+    const u64 elapsed = (now >= g_timer_run_start_tick) ? (now - g_timer_run_start_tick) : 0;
+    if (elapsed >= g_timer_remaining_ticks)
+        g_timer_remaining_ticks = 0;
+    else
+        g_timer_remaining_ticks -= elapsed;
+    g_timer_running = false;
+}
+
+// ----- Pass D click trampolines --------------------------------
+// AppButton::on_click is a plain `void (*)()` so the constinit
+// g_clock above captures each one by function-pointer value. Each
+// click sets the corresponding Mode and pauses anything that was
+// counting — mirrors the Tab-cycle's "pause running state on
+// mode change" discipline so a fresh user can click straight to
+// CLOCK / STOP / ALRM / TIMR without remembering the Tab key.
+
+void ClickClockMode()
+{
+    PauseSwInternal();
+    PauseTimerInternal();
+    g_mode = Mode::Clock;
+}
+
+void ClickStopwatchMode()
+{
+    PauseSwInternal();
+    PauseTimerInternal();
+    g_mode = Mode::Stopwatch;
+}
+
+void ClickAlarmMode()
+{
+    PauseSwInternal();
+    PauseTimerInternal();
+    g_mode = Mode::Alarm;
+}
+
+void ClickTimerMode()
+{
+    PauseSwInternal();
+    PauseTimerInternal();
+    g_mode = Mode::Timer;
 }
 
 } // namespace
@@ -413,29 +605,17 @@ duetos::drivers::video::WindowHandle ClockWindow()
 
 // Pause running state on mode change so the Stopwatch / Timer
 // don't keep counting invisibly while the user is on Clock /
-// Alarm. Restart requires an explicit Space.
+// Alarm. Restart requires an explicit Space. Delegated to the
+// anonymous-namespace internal helpers so the click trampolines
+// (Pass D) and the keyboard Tab path share one implementation.
 void PauseStopwatchIfRunning()
 {
-    if (g_sw_running)
-    {
-        const u64 now = duetos::arch::TimerTicks();
-        if (now >= g_sw_run_start_tick)
-            g_sw_accumulated_ticks += now - g_sw_run_start_tick;
-        g_sw_running = false;
-    }
+    PauseSwInternal();
 }
 
 void PauseTimerIfRunning()
 {
-    if (!g_timer_running)
-        return;
-    const u64 now = duetos::arch::TimerTicks();
-    const u64 elapsed = (now >= g_timer_run_start_tick) ? (now - g_timer_run_start_tick) : 0;
-    if (elapsed >= g_timer_remaining_ticks)
-        g_timer_remaining_ticks = 0;
-    else
-        g_timer_remaining_ticks -= elapsed;
-    g_timer_running = false;
+    PauseTimerInternal();
 }
 
 // InputBox callback for "set alarm time": accepts "HH:MM" and
@@ -662,7 +842,110 @@ void ClockSelfTest()
     const u32 row_w = 6 * kDigitW + 2 * kColonW + 7 * kGap;
     if (row_w >= 400)
         pass = false;
-    SerialWrite(pass ? "[clock] self-test OK (digit mask + row fit)\n" : "[clock] self-test FAILED\n");
+
+    // Pass D: drive a synthetic click on the TIMR toolbar
+    // button via the WidgetGroup dispatch chain. ClickTimerMode
+    // sets g_mode = Mode::Timer (and pauses any running
+    // counters); the test verifies the dispatch path is wired
+    // end-to-end AND that the click mutates the view state.
+    // Restore g_mode after.
+    const Mode saved_mode = g_mode;
+    BindClockOnce();
+    // Anchor the toolbar at (0, 22, 240, 88) — same shape
+    // boot_bringup.cpp registers the live Clock window with
+    // (240x110 minus 22 px title bar). TIMR is mode index 3.
+    RebindClockBounds(0U, 22U, 240U, 88U);
+    g_mode = Mode::Clock;
+    constexpr u32 kTimerIdx = 3U;
+    const u32 nx = kClockToolbarPadX + kTimerIdx * (kClockToolbarBtnW + kClockToolbarBtnGap) + kClockToolbarBtnW / 2U;
+    const u32 ny = 22U + kClockToolbarPadY + kClockToolbarBtnH / 2U;
+    const Event n_move{EventKind::MouseMove, nx, ny, 0U, 0U};
+    const Event n_down{EventKind::MouseDown, nx, ny, 0U, 0U};
+    const Event n_up{EventKind::MouseUp, nx, ny, 0U, 0U};
+    if (g_clock.DispatchEvent(n_move) != EventResult::Consumed)
+        pass = false;
+    if (g_clock.DispatchEvent(n_down) != EventResult::Consumed)
+        pass = false;
+    if (g_clock.DispatchEvent(n_up) != EventResult::Consumed)
+        pass = false;
+    if (g_mode != Mode::Timer)
+        pass = false;
+
+    // Footer composer must produce non-empty text after a
+    // refresh.
+    RefreshClockFooter();
+    if (g_clock_footer_text[0] == '\0')
+        pass = false;
+
+    // Restore pre-test state so the live UI is unchanged when
+    // the umbrella selftest returns.
+    g_mode = saved_mode;
+
+    g_clock_self_test_passed = pass;
+    if (pass)
+    {
+        SerialWrite("[clock] self-test OK (digit mask + row fit + widget-click)\n");
+        SerialWrite("[clock-selftest] PASS\n");
+    }
+    else
+    {
+        SerialWrite("[clock] self-test FAILED\n");
+        SerialWrite("[clock-selftest] FAIL\n");
+    }
+}
+
+bool ClockSelfTestPassed()
+{
+    return g_clock_self_test_passed;
+}
+
+void ClockMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
+{
+    using duetos::drivers::input::kMouseButtonLeft;
+    if (g_handle == duetos::drivers::video::kWindowInvalid)
+        return;
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_handle, &wx, &wy, &ww, &wh))
+        return;
+    // Title bar is 22 px; client origin sits below it. The
+    // WidgetGroup dispatch path needs cursor coords in the
+    // same frame RebindClockBounds anchors the chrome to.
+    constexpr duetos::u32 kTitleH = 22U;
+    if (wh <= kTitleH)
+        return;
+    const duetos::u32 client_y = wy + kTitleH;
+    const duetos::u32 client_h = wh - kTitleH;
+    BindClockOnce();
+    RebindClockBounds(wx, client_y, ww, client_h);
+
+    const bool left_down = (button_mask & kMouseButtonLeft) != 0;
+    const bool press_edge = left_down && !g_clock_prev_left_down;
+    const bool release_edge = !left_down && g_clock_prev_left_down;
+    g_clock_prev_left_down = left_down;
+
+    const bool inside_window = (cx >= wx && cx < wx + ww && cy >= client_y && cy < wy + wh);
+    if (inside_window)
+    {
+        const Event m{EventKind::MouseMove, cx, cy, 0U, 0U};
+        g_clock.DispatchEvent(m);
+    }
+    if (press_edge && inside_window)
+    {
+        // Carve-out: the LED digit face below the toolbar has
+        // no per-pixel click semantics in v0 — the dispatch
+        // path's hit-test naturally short-circuits when the
+        // click misses the toolbar bounds. MouseDown still
+        // fires for the toolbar's Pressed-state visual.
+        const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
+        g_clock.DispatchEvent(d);
+    }
+    if (release_edge)
+    {
+        // Always dispatch MouseUp so a button pressed inside
+        // the toolbar and dragged off clears its Pressed flag.
+        const Event u{EventKind::MouseUp, cx, cy, 0U, 0U};
+        g_clock.DispatchEvent(u);
+    }
 }
 
 } // namespace duetos::apps::clock

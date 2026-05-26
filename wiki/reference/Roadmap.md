@@ -889,6 +889,99 @@ When a residual ships, delete its bullet here and update the
 [`Compositor`](../subsystems/Compositor.md) subsystem page's
 "Pass C — Typography Hierarchy" call-out.
 
+### App widgets (Pass D) — residual polish
+
+The app-widgets plan
+(`docs/superpowers/plans/2026-05-25-duetos-pass-d.md`)
+landed the library at
+`kernel/drivers/video/app_widgets/{widget.h,widget_group.h,
+app_button.{h,cpp}, app_label.{h,cpp}, app_panel.{h,cpp},
+app_divider.{h,cpp}, app_list_row.{h,cpp}, app_toolbar.{h,cpp},
+app_input.{h,cpp}, app_scrollbar.{h,cpp}, self_test.{h,cpp}}`
+plus 28 per-app migrations and the acceptance scaffolding
+(`tools/test/pass-d-soak.sh` 60 s regression guard,
+`tactility-screenshot-matrix.sh --apps` mode). Boot sentinels
+`[app-widgets-selftest] PASS` and
+`[pass-d-selftest] PASS (widgets=ok, apps=28/28)` fire under the
+`if constexpr (kBootSelfTests)` umbrella. See
+[`AppWidgets`](../subsystems/AppWidgets.md) for the subsystem
+reference and
+[`Compositor`](../subsystems/Compositor.md#app-widgets-pass-d)
+for the integration summary.
+
+Per-task verification: every implementation subagent ran a debug
+boot smoke after its commit; all 28 app migrations report their
+per-app sentinel green plus both umbrella sentinels, with no
+PANIC / TRIPLE / oom-slab-fault. The `pass-d-soak.sh` 60 s rig
+PASSes against commit `5dd79097` (28/28 apps green + Pass A/B/C
+umbrellas all green + no soft-lockups).
+
+Residuals carried out of Pass D:
+
+- **Apps not migrated** — six `.cpp` files under `kernel/apps/`
+  intentionally stay on raw paint (or have no paint surface):
+    - `dbg.cpp`, `dbg_core.cpp` — debug overlays must work when
+      half the kernel is wedged; raw paint by design.
+    - `gfxdemo_modes.cpp`, `gfxdemo_modes_vk.cpp` — the demos
+      exercise primitive APIs directly; widget chrome would
+      defeat the demonstration.
+    - `notes_persist.cpp` — pure data layer; no paint surface.
+    - `trash.cpp` — facade module providing Files' trash mode;
+      no chrome of its own.
+  Don't migrate these without a compelling reason; the carve-out
+  rationale is documented in
+  [`AppWidgets`](../subsystems/AppWidgets.md#carve-outs).
+- **Carve-outs preserved (raw paint regions inside migrated
+  apps)** — Files' folder/list grid, Calendar's month/week/day
+  cells, Terminal's cell grid, Hexview's byte grid,
+  Gfxdemo's content region, Dbg_render's overlay layer all
+  paint raw. Each app's `RenderContent()` runs after
+  `group.PaintAll(compose)` into the carved-out rect; the
+  widget group owns the chrome only. This pattern is the
+  recommended shape for future apps with fixed-grid surfaces.
+- **VBox visual verification** — pairs with the Pass A / Pass B /
+  Pass C VBox residuals above. Boot the
+  `tactility-screenshot-matrix.sh --apps` 3 surfaces × 10 themes
+  = 30 PPM reference set under VirtualBox to pick up anything
+  QEMU smokes don't.
+- **Per-app window screenshots deferred to VBox.** The
+  `--apps` matrix mode captures three chrome surfaces (login,
+  wallpaper, lock) per theme because qmp.sh can't open
+  Calculator / Notes / etc. headlessly — QMP key+click driving
+  the Start menu isn't implemented (qmp.sh supports
+  `screendump` / `powerdown` / `quit` / `status` only). When
+  full per-app shots become valuable, either extend qmp.sh
+  with a `keys` / `click` subcommand routed through QMP
+  `input-send-event`, or capture them manually under VBox.
+- **gfxdemo legacy sentinel.** Predates the
+  `[<app>-selftest] PASS` convention and emits
+  `[gfxdemo] self-test OK (sin LUT, FxMul, PRNG, Mandelbrot,
+  chrome)` instead. `pass-d-soak.sh` accepts either form;
+  next time gfxdemo gets touched, normalise its emission to
+  the standard sentinel and drop the soak's special case.
+
+Potential Pass E items (deferred — none of these are committed):
+
+- **Layout managers** — today every widget gets explicit
+  `Rect bounds` set at construction. A `VBox` / `HBox` /
+  `Grid` layout manager would compute bounds from constraints
+  + content size, eliminating manual coordinate maths.
+- **Extended widget set** — `Checkbox`, `Slider`, `Progress`,
+  `Tabs`, `Tooltip`, `Spinner`, `RadioGroup`. Each is one
+  widget pair following the existing shape.
+- **Event-routing hub** — today every app calls
+  `group.DispatchEvent(event)` directly from its mouse /
+  keyboard reader. A hub that knows about window focus +
+  z-order would route automatically (the window manager
+  already does this for chrome; widgets could plug in).
+- **Animation system** — Pass A's tactility uses
+  static shadow textures; an animation hook (interpolate
+  state.flags transitions over N ms) would let press / hover
+  feel kinetic without each widget hand-rolling it.
+
+When a residual ships, delete its bullet here and update the
+[`AppWidgets`](../subsystems/AppWidgets.md) subsystem page.
+
 ### RBAC + elevation broker — v1 follow-ups
 
 - **v1 — Argon2id with lazy migration.** Blake2b primitive

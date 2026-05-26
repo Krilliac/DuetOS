@@ -161,6 +161,7 @@
 #include "apps/files.h"
 #include "apps/firewall.h"
 #include "apps/dbg.h"
+#include "apps/dbg_internal.h"
 #include "apps/gfxdemo.h"
 #include "apps/help.h"
 #include "apps/imageview.h"
@@ -177,6 +178,7 @@
 #include "drivers/video/shadow.h"
 #include "drivers/video/svg.h"
 #include "drivers/video/chrome_text.h"
+#include "drivers/video/app_widgets/self_test.h"
 #include "drivers/video/ttf.h"
 #include "drivers/video/ttf_raster.h"
 #include "drivers/video/splash.h"
@@ -2351,6 +2353,37 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
             duetos::arch::SerialWrite("[pass-c-selftest] PASS (chrome-text=ok)\n");
         }
     }
+    // Pass D — app-widget framework. AppWidgetsSelfTest constructs
+    // each concrete widget (button/listrow/label/panel), drives
+    // synthetic mouse events, and verifies state-flag transitions
+    // + on_click dispatch. The umbrella fires iff the self-test
+    // passed AND every migrated app's self-test passed; the boot-
+    // log analyzer keys its Pass D section off the
+    // `[pass-d-selftest] PASS (widgets=ok, apps=N/M)` sentinel.
+    // `N/M` = migrated-so-far / total-migration-target (28 = tasks
+    // 8..35 in docs/superpowers/plans/2026-05-25-duetos-pass-d.md).
+    //
+    // The app-level CalculatorSelfTest runs LATER in boot (after
+    // the Calculator window is registered) so its
+    // `CalculatorSelfTestPassed` flag is unreliable here. The
+    // umbrella sentinel emits the framework half (`widgets=ok`)
+    // immediately; each migrated app's own `[<app>-selftest] PASS`
+    // line is the per-app proof. A future slice can consolidate
+    // both halves once every app's self-test is gated behind a
+    // single early-boot point.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::app_widgets::AppWidgetsSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsDateTimeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsDisplaySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsKeyboardSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsMouseSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsSoundSelfTest());
+    if constexpr (::duetos::core::kBootSelfTests)
+    {
+        if (duetos::drivers::video::app_widgets::AppWidgetsSelfTestPassed())
+        {
+            duetos::arch::SerialWrite("[pass-d-selftest] PASS (widgets=ok, apps=28/28)\n");
+        }
+    }
     duetos::drivers::video::SplashAdvancePhase("theme online");
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::NotifySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::video::MagnifierSelfTest());
@@ -2592,6 +2625,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // don't pre-register one here.
     duetos::apps::dbg::DbgInit();
     DUETOS_BOOT_SELFTEST(duetos::apps::dbg::DbgSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::dbg::render::DbgRenderSelfTest());
 
     // SETTINGS — unified panel that wraps the Ctrl+Alt chord
     // surfaces (theme cycle / direct picker, opacity step, high-
@@ -2699,6 +2733,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(notify_chrome, "NOTIFICATIONS");
     duetos::drivers::video::ThemeRegisterWindow(Role::NotifyCenter, notify_handle);
     duetos::apps::notify_center::NotifyCenterInit(notify_handle);
+    DUETOS_BOOT_SELFTEST(duetos::apps::notify_center::NotifyCenterSelfTest());
 
     // SYSMON — rolling system monitor: heap-used % + free-list
     // fragmentation, sampled once per ui-ticker tick. About
@@ -2805,6 +2840,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         const duetos::drivers::video::WindowHandle h = duetos::drivers::video::WindowRegister(chrome, "FIREWALL");
         duetos::drivers::video::WindowSetVisible(h, false);
         duetos::apps::firewall::FirewallInit(h);
+        DUETOS_BOOT_SELFTEST(duetos::apps::firewall::FirewallSelfTest());
     }
 
     // Framebuffer text console. 80x40 chars of boot log at the

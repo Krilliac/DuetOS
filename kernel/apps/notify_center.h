@@ -33,4 +33,23 @@ bool NotifyCenterFeedChar(char c);
 bool NotifyCenterFeedArrow(duetos::u16 keycode);
 void NotifyCenterOnWheel(duetos::i32 dz, duetos::u8 modifiers);
 
+/// Pass D mouse-input entry. Routes cursor packets through the
+/// WidgetGroup dispatch chain so the toolbar CLR button hover /
+/// press / release state tracks the cursor without waiting for
+/// the ui-ticker. Edge-detects left-button state internally so
+/// the kernel mouse loop can call unconditionally per packet.
+void NotifyCenterMouseInput(duetos::u32 cursor_x, duetos::u32 cursor_y, duetos::u8 button_mask);
+
+/// Pass D self-test. Exercises the toolbar hit-test + dispatch
+/// chain via a synthetic hover (stops at the edge — the click
+/// would pop a MessageBox, which would mutate dialog state) and
+/// verifies the header / footer composers produce non-empty
+/// text. Emits `[notify_center-selftest] PASS` or `FAIL` to the
+/// serial console.
+void NotifyCenterSelfTest();
+
+/// Returns true iff the most recent NotifyCenterSelfTest()
+/// invocation ran every check and set the internal pass flag.
+bool NotifyCenterSelfTestPassed();
+
 } // namespace duetos::apps::notify_center
