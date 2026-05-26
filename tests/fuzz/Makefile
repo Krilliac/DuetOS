@@ -54,7 +54,7 @@ HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuz
              $(BIN)/fuzz_deflate $(BIN)/fuzz_gzip $(BIN)/fuzz_zip \
              $(BIN)/fuzz_bmp $(BIN)/fuzz_tga $(BIN)/fuzz_jpeg $(BIN)/fuzz_png \
              $(BIN)/fuzz_asn1 $(BIN)/fuzz_x509 $(BIN)/fuzz_fw_pkg \
-             $(BIN)/fuzz_pe_exports $(BIN)/fuzz_vt
+             $(BIN)/fuzz_pe_exports $(BIN)/fuzz_vt $(BIN)/fuzz_disasm
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -271,6 +271,19 @@ $(BIN)/fuzz_pe_exports: fuzz_pe_exports.cpp $(LOADER)/pe_exports.cpp \
 # ParserFeed runs the DEC ANSI state machine over a PTY byte
 # stream; util/unicode does the UTF-8 join.
 $(BIN)/fuzz_vt: fuzz_vt.cpp $(UTIL)/vt_parser.cpp $(UTIL)/unicode.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# --- x86_64 disassembler (crash-dump path) -----------------------
+#
+# DecodeStream runs on the crash-dump path so a decode bug there
+# faults the post-mortem itself. The decoder is "allocation-free,
+# IRQ-safe, panic-safe" per the header; host_shim/disasm_stubs.cpp
+# resolves the two non-decode symbols disasm.cpp pulls in
+# (FixJournalRecord — defensive self-healing observer; and the
+# symbol-table resolver used by the operands formatter — always
+# misses on host).
+DEBUG := $(KERNEL)/debug
+$(BIN)/fuzz_disasm: fuzz_disasm.cpp $(DEBUG)/disasm.cpp host_shim/disasm_stubs.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 # Each run-* keeps a persistent corpus and stops after 60 s.

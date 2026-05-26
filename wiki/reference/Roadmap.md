@@ -1446,9 +1446,13 @@ stubs + a `seeds/gen_*_seeds.py`); the codec/cert ones are pure
   descriptors.
 - **Bluetooth HCI/HID** — `kernel/net/bluetooth/hci.h`,
   `hid.h`. Untrusted radio peer.
-- **Disassembler** — `kernel/debug/disasm.cpp`. Decodes
-  arbitrary code bytes on the crash-dump path; a decode bug
-  there faults the post-mortem.
+<!-- Disassembler bullet retired 2026-05-26: fuzz_disasm harness
+     + host_shim/disasm_stubs.cpp + seeds/gen_disasm_seeds.py
+     landed; fuzz_disasm runs ≈ 50k execs/s clean on the canonical
+     five-family seed corpus (prologue / ALU / control / SIMD /
+     unknown-as-db). Auto-picked up by tools/test/fuzz-all.sh via
+     the established seeds/gen_<name>_seeds.py convention. -->
+
 
 **Blocks on:** nothing — independent slices, one parser each,
 same recipe. Pick the top unstruck bullet, land harness +
