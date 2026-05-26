@@ -28,6 +28,31 @@
 #                     login     -> Display (clock) + Title (panel header)
 #                     lock      -> Title + Body (lock overlay text)
 #                     wallpaper -> Body (menu rows) + Caption (taskbar date)
+#     --apps        Pass D reference set: iterates {login, wallpaper, lock}.
+#                   Output PNG/PPM names are prefixed with "apps-".
+#                   These three surfaces are the chrome moments that
+#                   exercise app_widgets visibly without per-app
+#                   windows being opened (which would require deeper
+#                   QMP key/click integration the matrix script does
+#                   not have today):
+#                     login     -> Login card uses AppButton +
+#                                  AppPanel; taskbar (visible behind
+#                                  the card on themes that don't
+#                                  fully veil) uses AppToolbar.
+#                     wallpaper -> Taskbar + tray icons + clock cell
+#                                  all paint through Pass D widgets;
+#                                  desktop tiles use AppLabel.
+#                     lock      -> Lock card uses AppPanel + AppLabel
+#                                  + AppInput placeholder.
+#                   PER-APP WINDOW SHOTS ARE DEFERRED TO VBOX. The
+#                   matrix script cannot open Calculator / Notes /
+#                   etc. headlessly — that needs full QMP key+click
+#                   driving the Start menu, which the
+#                   tools/qemu/qmp.sh client does not implement
+#                   (only screendump / powerdown / quit / status).
+#                   See wiki/reference/Roadmap.md "App widgets
+#                   (Pass D) — residual polish" for the visual
+#                   verification path under VirtualBox.
 #
 # USAGE
 #   tools/test/tactility-screenshot-matrix.sh
@@ -57,8 +82,10 @@
 
 set -euo pipefail
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+readonly REPO_ROOT
 
 readonly ALL_THEMES=(
     classic
@@ -97,6 +124,15 @@ SURFACE_EXTRA=""
 TYPOGRAPHY_MODE=0
 readonly TYPOGRAPHY_SURFACES=(login lock wallpaper)
 
+# Apps meta-mode (Pass D Task 37): same shape as TYPOGRAPHY_MODE but
+# with the "apps-" filename prefix and an explicit "per-app windows
+# deferred to VBox" advisory printed at start. The surface set is
+# {login, wallpaper, lock} — the three chrome moments that exercise
+# the Pass D app_widgets without needing the start menu / taskbar
+# clicks the matrix can't do headlessly.
+APPS_MODE=0
+readonly APPS_SURFACES=(login wallpaper lock)
+
 # Theme filter — set via --theme <name> OR positional args.
 declare -a THEME_ARGS
 
@@ -113,6 +149,13 @@ Surface flags (mutually exclusive; default: --wallpaper):
 Meta-modes (iterate multiple surfaces per theme):
   --typography  Pass C reference set: iterates {login, lock, wallpaper}
                 with output PPMs named "typography-<surface>-<theme>.ppm"
+  --apps        Pass D reference set: iterates {login, wallpaper, lock}
+                with output PPMs named "apps-<surface>-<theme>.ppm".
+                Per-app window shots (Calculator / Notes / etc.) are
+                DEFERRED TO VBOX — opening apps headlessly requires
+                QMP key+click integration that qmp.sh doesn't
+                implement. The three chrome surfaces still exercise
+                Pass D widgets (login card, taskbar, lock card).
 
 Theme selectors (at most one):
   --all         All 10 registered themes
@@ -125,6 +168,7 @@ Examples:
   tactility-screenshot-matrix.sh --lock classic duet
   tactility-screenshot-matrix.sh --wallpaper --theme highcontrast
   tactility-screenshot-matrix.sh --typography --theme duet
+  tactility-screenshot-matrix.sh --apps --all
 EOF
     exit 0
 }
@@ -162,6 +206,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --typography)
             TYPOGRAPHY_MODE=1
+            ;;
+        --apps)
+            APPS_MODE=1
             ;;
         --all)
             DO_ALL=1
@@ -225,6 +272,8 @@ capture_theme() {
     local name_prefix=""
     if [[ ${TYPOGRAPHY_MODE} -eq 1 ]]; then
         name_prefix="typography-"
+    elif [[ ${APPS_MODE} -eq 1 ]]; then
+        name_prefix="apps-"
     fi
     local ppm="${SHOTS_DIR}/${name_prefix}${SURFACE}-${theme}.ppm"
     local boot_log="${SHOTS_DIR}/${name_prefix}${SURFACE}-${theme}.log"
@@ -351,9 +400,19 @@ apply_surface_profile() {
 
 # Build the list of surfaces to walk per theme.
 declare -a SURFACES_TO_CAPTURE
+if [[ ${TYPOGRAPHY_MODE} -eq 1 && ${APPS_MODE} -eq 1 ]]; then
+    echo "ERROR: --typography and --apps are mutually exclusive" >&2
+    exit 2
+fi
 if [[ ${TYPOGRAPHY_MODE} -eq 1 ]]; then
     SURFACES_TO_CAPTURE=("${TYPOGRAPHY_SURFACES[@]}")
     echo "[shots] mode=typography surfaces=${SURFACES_TO_CAPTURE[*]} themes=${#THEMES[@]} (total captures=$(( ${#SURFACES_TO_CAPTURE[@]} * ${#THEMES[@]} )))"
+elif [[ ${APPS_MODE} -eq 1 ]]; then
+    SURFACES_TO_CAPTURE=("${APPS_SURFACES[@]}")
+    echo "[shots] mode=apps surfaces=${SURFACES_TO_CAPTURE[*]} themes=${#THEMES[@]} (total captures=$(( ${#SURFACES_TO_CAPTURE[@]} * ${#THEMES[@]} )))"
+    echo "[shots] NOTE: per-app window shots (Calculator, Notes, etc.) are deferred to VBox —"
+    echo "[shots]       headless QMP cannot open the Start menu / launch apps via key+click."
+    echo "[shots]       The three chrome surfaces still exercise Pass D widgets."
 else
     SURFACES_TO_CAPTURE=("${SURFACE}")
 fi
@@ -380,6 +439,8 @@ then
         sheet_prefix=""
         if [[ ${TYPOGRAPHY_MODE} -eq 1 ]]; then
             sheet_prefix="typography-"
+        elif [[ ${APPS_MODE} -eq 1 ]]; then
+            sheet_prefix="apps-"
         fi
         SHEET="${LOG_DIR}/tactility-matrix-${sheet_prefix}${surface}.png"
         available_ppms=()
