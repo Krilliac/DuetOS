@@ -292,6 +292,7 @@
 #include "diag/diag_decode.h"
 #include "diag/hexdump.h"
 #include "util/result.h"
+#include "util/result_check.h"
 #include "util/string.h"
 #include "proc/ring3_smoke.h"
 #include "proc/spawn.h"
@@ -718,7 +719,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
 
     // Drive any future Phase::Smp registrants now that APs are
     // online and the per-CPU runqueues exist.
-    (void)duetos::core::RunPhase(duetos::core::Phase::Smp);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Smp), "boot", "RunPhase Smp");
 
     // Every AP populated its own k_topo[i] before flipping the
     // trampoline's online_flag, so by the time SmpStartAps returns
@@ -842,7 +843,7 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
                                                   return duetos::core::Result<void>{};
                                               });
     }
-    (void)duetos::core::RunPhase(duetos::core::Phase::Userland);
+    RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Userland), "boot", "RunPhase Userland");
 
     duetos::core::StartHeartbeatThread();
 
