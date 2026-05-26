@@ -33,9 +33,9 @@ resolution, binary-search EAT lookup.
    loader's evolution.
 3. **Address space**: allocate `mm::AddressSpace`, mirror kernel half.
 4. **Preload set**: register every userland DLL into the per-process
-   DLL table (`Process::dll_images[]`). 38 DLLs preloaded out of the
-   44 production DLLs in `userland/libs/` (the rest load on demand);
-   ~1100 exports total. Per-DLL status lives in
+   DLL table (`Process::dll_images[]`). 46 DLLs preloaded out of the
+   47 production DLLs in `userland/libs/` (only `vulkan_1.dll`
+   loads on demand); ~1100 exports total. Per-DLL status lives in
    [`Win32-Surface-Status`](../reference/Win32-Surface-Status.md).
 5. **Map sections**: each PE section mapped at `ImageBase + VA` with
    flags from `Characteristics` (`MEM_EXECUTE`, `MEM_WRITE`,
