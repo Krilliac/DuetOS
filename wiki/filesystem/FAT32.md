@@ -44,9 +44,10 @@ the standard manner. The driver reads the FAT in 4 KiB chunks
   file beyond its existing cluster count rejects with `-1`.
   Append-then-write is the workaround for grow-heavy workloads.
 - **No FAT16 / FAT12 fallback.** FAT32 only.
-- **No exFAT** despite the project pillar mentioning it for
-  interoperability — exFAT is a separate code path and a separate
-  slice.
+- **exFAT lives in [`kernel/fs/exfat.{h,cpp}`](../../kernel/fs/exfat.h)**
+  as a sibling backend — probe + root-directory walk are wired
+  today. See the [exFAT page](exFAT.md) for that backend's scope
+  and limits.
 - **Cross-volume rename rejected** by `Fat32RenameAtPath` and the
   file-route layer — the operation has no atomic primitive within
   one volume's FAT, so cross-volume rename would require copy +
@@ -58,5 +59,7 @@ growth work.
 ## Related Pages
 
 - [VFS](VFS.md)
+- [exFAT](exFAT.md) — sibling backend for ≥ 32 GiB volumes.
+- [Mount Registry](Mount-Registry.md) — FAT32 is wired into the per-FsType vtable.
 - [Storage (NVMe + AHCI)](../drivers/Storage.md)
 - [GPT](GPT.md) — partition discovery

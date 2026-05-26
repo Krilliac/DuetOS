@@ -18,9 +18,11 @@ whose root is embedded inside a larger tree).
 
 - `kernel/fs/vfs.{h,cpp}` — VFS API + path walker
 - `kernel/fs/ramfs.{h,cpp}` — in-memory tree used as boot root + jails
-- `kernel/fs/routing.{h,cpp}` — kernel-side helper API used by
+- `kernel/fs/tmpfs.{h,cpp}` — writable in-RAM tier mounted at `/tmp`
+- `kernel/fs/mount.{h,cpp}` — mount registry + per-FsType lookup vtable
+- `kernel/fs/file_route.{h,cpp}` — kernel-side helper API used by
   `kernel/subsystems/win32/` and `kernel/subsystems/linux/`
-- `kernel/fs/<backend>/` — FAT32, ext4, NTFS, GPT
+- `kernel/fs/<backend>.{h,cpp}` — FAT32, ext4, exFAT, NTFS, DuetFS, GPT
 
 ## Path Resolution
 
@@ -55,10 +57,13 @@ invariant.
 
 | Backend | Path | Status |
 |---------|------|--------|
-| ramfs | `kernel/fs/ramfs.{h,cpp}` | Read + write |
-| FAT32 | `kernel/fs/fat32/` | Read-only; LFN walker validates SFN checksum |
-| ext4 | `kernel/fs/ext4/` | Read-only; root-dir extents walked, depth>0 deferred |
-| NTFS | `kernel/fs/ntfs/` | Read-only (work in progress) |
+| ramfs | `kernel/fs/ramfs.{h,cpp}` | Read-only constinit tree + mutable `/proc` snapshots |
+| tmpfs | `kernel/fs/tmpfs.{h,cpp}` | Writable flat `/tmp` (16 slots × 512 B) |
+| FAT32 | `kernel/fs/fat32.{h,cpp}` + `fat32_*.cpp` | Read + write (in-place / append / create / delete / rename); LFN-validated |
+| exFAT | `kernel/fs/exfat.{h,cpp}` | Probe + root-directory walk (first cluster only) |
+| ext4 | `kernel/fs/ext4.{h,cpp}` + `ext4_rust/` | Read-only; root-dir extents walked, depth>0 deferred |
+| NTFS | `kernel/fs/ntfs.{h,cpp}` + `ntfs_rust/` | Read-only (work in progress) |
+| DuetFS | `kernel/fs/duetfs.{h,cpp}` + `duetfs/` | Native Rust FS; v3 with per-block CRCs, symlinks, hard links |
 | GPT | `kernel/fs/gpt.{h,cpp}` | Partition discovery |
 
 ## File Handles
@@ -78,18 +83,25 @@ See [Capabilities](../security/Capabilities.md).
 
 ## Known Limits / GAPs
 
-- **No write paths past ramfs.** FAT32 / ext4 / NTFS are read-only;
-  the FS write slice is the next FS milestone.
-- **No symlinks.** Hard links not supported either.
-- **No mount table.** Boot mounts the root ramfs; later FS mounts will
-  need a real mount table.
-- **No file caching layer** between VFS and FS backends.
+- **FAT32 mid-file growth is unwritten.** In-place writes,
+  append-only growth, file create/delete/rename are live; a write
+  that would extend the cluster chain is rejected with `-1`. See
+  [FAT32](FAT32.md).
+- **ext4 and NTFS are read-only.** Write paths for either are
+  separate multi-slice efforts.
+- **DuetFS symlinks/hard links live; on FAT32 / ext4 / NTFS they
+  are not surfaced.** DuetFS resolves symlinks with cycle detection
+  capped at 8 hops.
+- **No file caching layer** between VFS and FS backends. Each
+  backend serialises against the block device directly.
 
 ## Related Pages
 
-- [FAT32](FAT32.md)
-- [ext4](ext4.md)
-- [NTFS](NTFS.md)
+- [FAT32](FAT32.md), [exFAT](exFAT.md), [ext4](ext4.md),
+  [NTFS](NTFS.md), [DuetFS](DuetFS.md)
+- [RAM Filesystems (ramfs + tmpfs)](RAM-Filesystems.md)
+- [Mount Registry](Mount-Registry.md)
+- [Boot Slots](Boot-Slots.md)
 - [GPT](GPT.md)
 - [Storage (NVMe + AHCI)](../drivers/Storage.md)
 - [Capabilities](../security/Capabilities.md)
