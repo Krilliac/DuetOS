@@ -42,6 +42,18 @@ struct CetStatus
     bool ibt_supported; ///< CPUID(7,0).EDX[20] = CET-IBT in silicon.
     bool ss_enabled;    ///< IA32_S_CET.SH_STK_EN observed (v0 always false).
     bool ibt_enabled;   ///< IA32_S_CET.ENDBR_EN observed (v0 always false).
+    /// CR4.CET (bit 23) live state. True if the bit is set on
+    /// the boot CPU — surfaces the case where firmware or a
+    /// hypervisor enabled CR4.CET before kernel entry (rare but
+    /// possible on configured-secure platforms). Independent of
+    /// `ss_enabled` / `ibt_enabled` — CR4.CET gates whether the
+    /// IA32_S_CET / IA32_U_CET writes are honoured at all.
+    bool cr4_cet_set;
+    /// Live IA32_S_CET MSR value at probe time. Zero in v0 since
+    /// no boot path writes it. Captured so a future fault-domain
+    /// drift check can KASSERT it matches the value `CetEnable`
+    /// thinks it wrote.
+    duetos::u64 s_cet_value;
 };
 
 /// Probe CET support once. Idempotent. Logs a boot-console

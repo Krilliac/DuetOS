@@ -10,6 +10,7 @@
 
 #include "arch/x86_64/cet.h"
 
+#include "arch/x86_64/cpu.h"
 #include "arch/x86_64/serial.h"
 
 namespace duetos::arch
@@ -64,10 +65,29 @@ void CetProbe()
     // IA32_S_CET. A future E1-followup gates the writes on
     // ss_supported / ibt_supported.
 
+    // CR4.CET live state (bit 23). Firmware / hypervisor MAY
+    // enable CR4.CET before the kernel starts; we surface that
+    // here so the boot log reflects the actual hardware
+    // posture instead of "false in v0" lies.
+    constexpr u64 kCr4CetBit = 1ull << 23;
+    g_cet.cr4_cet_set = (ReadCr4() & kCr4CetBit) != 0;
+
+    // IA32_S_CET MSR value. Only readable when CR4.CET is set;
+    // otherwise the MSR read can #GP on some implementations.
+    // Read only when we know it's safe (either ss or ibt is in
+    // silicon AND CR4.CET is set).
+    constexpr u32 kIa32SCet = 0x6A2;
+    if (g_cet.cr4_cet_set && (g_cet.ss_supported || g_cet.ibt_supported))
+    {
+        g_cet.s_cet_value = ReadMsr(kIa32SCet);
+    }
+
     SerialWrite("[cpu] cet: ss=");
     SerialWrite(g_cet.ss_supported ? "supported" : "absent");
     SerialWrite(" ibt=");
     SerialWrite(g_cet.ibt_supported ? "supported" : "absent");
+    SerialWrite(" cr4=");
+    SerialWrite(g_cet.cr4_cet_set ? "on" : "off");
     SerialWrite("\n");
 }
 
@@ -86,12 +106,11 @@ constexpr u64 kSCetWrShStk = 1ull << 1; // WR_SHSTK_EN
 constexpr u64 kSCetEndbrEn = 1ull << 2; // ENDBR_EN
 constexpr u64 kSCetNoTrack = 1ull << 4; // NO_TRACK_EN
 
-u64 ReadCr4()
-{
-    u64 v;
-    asm volatile("mov %%cr4, %0" : "=r"(v));
-    return v;
-}
+// Use the kernel-wide ReadCr4 from arch/cpu.h — a local copy
+// here would shadow the namespace version and cause an
+// ambiguous call when the probe reads CR4. WriteCr4 isn't in
+// cpu.h yet so we keep that one local for now.
+using ::duetos::arch::ReadCr4;
 
 void WriteCr4(u64 v)
 {
@@ -129,8 +148,23 @@ void CetEnable(u64 kernel_ssp_top)
     }
     if (g_cet.ibt_supported)
     {
+#if defined(DUETOS_KERNEL_HAS_ENDBR)
+        // Build was compiled with -fcf-protection=branch, so every
+        // indirect-branch target has an ENDBR64 prologue. Safe to
+        // set ENDBR_EN — the CPU will accept all our indirect
+        // branches and #CP only on attacker-controlled redirects.
         s_cet |= kSCetEndbrEn | kSCetNoTrack;
         u_cet |= kSCetEndbrEn | kSCetNoTrack;
+#else
+        // Kernel was built with -fcf-protection=none (the current
+        // default — see cmake/toolchains/x86_64-kernel.cmake's GAP
+        // note about the KVM emulator bug). Setting ENDBR_EN here
+        // would #CP on the very next indirect call. Skip the IBT
+        // half of CET; SS (shadow stack) is still safe because it
+        // doesn't fault on missing prologues.
+        SerialWrite("[cpu] cet: skipping IBT enable — kernel not built with "
+                    "-fcf-protection=branch (DUETOS_KERNEL_HAS_ENDBR undef)\n");
+#endif
     }
 
     CetEnableMsrs(s_cet, u_cet);
@@ -141,7 +175,11 @@ void CetEnable(u64 kernel_ssp_top)
     }
 
     g_cet.ss_enabled = g_cet.ss_supported;
+#if defined(DUETOS_KERNEL_HAS_ENDBR)
     g_cet.ibt_enabled = g_cet.ibt_supported;
+#else
+    g_cet.ibt_enabled = false;
+#endif
 
     SerialWrite("[cpu] cet: enabled (ss=");
     SerialWrite(g_cet.ss_enabled ? "y" : "n");
