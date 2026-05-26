@@ -10136,3 +10136,72 @@ Geoff Chappell — Windows API Sets reference; Wine
 **Related roadmap track(s):** Closes the `kernel/loader/pe_loader.cpp:1609 // GAP` marker. Future v2 (real schema blob)
 would replace the static table with a parser; the loader-side
 call site stays unchanged.
+
+## 2026-05-26 — Page-poison v1 records SRAR PFNs but does not (yet) rmap-walk
+
+**Decision:** the machine-check architecture (`MachineCheckReport`)
+detects the SRAR class (Software Recoverable Action Required —
+Intel SDM Vol 3 §16.4.2.1: S=1, AR=1, UC=1, PCC=0, ADDRV=1) on
+the first matching bank and calls `mm::PoisonFrame(addr)` with
+the failing physical address. `mm::PoisonFrame` records the
+page-aligned PFN in a 32-entry spinlock-guarded blacklist
+(`kernel/mm/poison_list.cpp`). `FreeFrame` then consults
+`mm::IsFramePoisoned` before recycling — a poisoned PFN is
+dropped (bitmap stays USED, frame leaked for this boot)
+instead of being returned to the free pool. The 0xDE poison
+stamp is skipped on known-bad frames so the 4 KiB write doesn't
+fault on the failing DRAM cell.
+
+**Why not full v1 (rmap walk + signal):** v0 has no rmap. Linux's
+`memory_failure()` walks every PTE that references the poisoned
+folio, converts each to a hwpoison swap entry, and SIGBUSes
+every task that mapped it. DuetOS would need (a) a reverse-map
+per frame and (b) a Win32+Linux signal-delivery primitive for
+SRAR-class events. Both are real follow-ons. v1 minimal is "do
+the structural minimum so a future reboot-persistence layer has
+the failing PFN to permanently exclude" — Linux's
+`take_page_off_buddy` analogue, without the in-flight kill
+half.
+
+**Why not hook AllocateFrame:** the FreeFrame drop is sufficient
+to keep a poisoned PFN out of new allocations once it's been
+freed once. A poisoned PFN currently free in the pool might
+still be handed out until that pool slot recycles through
+FreeFrame; the windows are bounded and not all boots see SRAR
+at all. The allocator-side skip-loop is a follow-on, small but
+not currently load-bearing.
+
+**Critical lock-discipline note:** the IsFramePoisoned check in
+FreeFrame MUST run BEFORE `PoisonFreedPage`'s 4 KiB 0xDE stamp.
+Writing 4 KiB into a frame whose ECC cell already failed could
+fault on the next access or — worse — corrupt adjacent memory
+sharing the same ECC line. Order is documented in the FreeFrame
+code; class-of-bug pattern for any future refactor moving the
+check.
+
+**Verified:** new boot self-test `PoisonFrameSelfTest`
+(`[mm/poison-selftest] PASS`) round-trips insert, query,
+idempotent re-insert, page-mask normalisation (byte offset
+within frame matches), second distinct PFN, negative lookup,
+restore-original-state. Wired under `DUETOS_BOOT_SELFTEST` in
+`boot_bringup.cpp:962`.
+
+**Alternatives considered and rejected:**
+- *Halt on every SRAR (today's behaviour, no recording).* The
+  GAP at machine_check.cpp:213. Failing frame is forgotten on
+  reboot — the operator can't even tell which DIMM cell is
+  failing. v1 minimal records, halt remains.
+- *Implement the full PTE-walk recovery first.* Needs rmap +
+  signal delivery + per-Win32/Linux signal routing. Multiple
+  slices; gated on infrastructure DuetOS doesn't have. v1
+  minimal lands the structural cap so the rest can layer on.
+
+**Sources:** Intel SDM Vol 3 §16.4 (MCA architecture); Linux
+`mm/memory-failure.c`; WHEA `PFA Performed by a PSHED Plug-In`
+(Microsoft Learn); FreeBSD `sys/x86/x86/mca.c` (comparison).
+
+**Related roadmap track(s):** Closes
+`kernel/arch/x86_64/machine_check.cpp:213 // GAP` in part
+(restartable-info arm now does useful work). Persistence
+(`/system/badmem-list`) is the next slice once writable
+system FS for secrets/config lands.
