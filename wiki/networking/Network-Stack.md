@@ -134,13 +134,10 @@ throughput display.
   so the option stays available without renegotiation when SACK
   generation lands. See [TCP State Machine](TCP-State-Machine.md#known-limits--gaps-v1)
   for the full v1 GAP list.
-- **No connection tracking** in the firewall — flipping the
-  default-deny inbound policy on without it would break TCP
-  connects we initiated, since the peer's reply would arrive
-  unsolicited. v0 defaults Allow inbound for that reason.
-- **No firewall logging ring** for recent denials; the
-  per-rule hit counters are the only signal an operator can
-  read today.
+- Conntrack and the recent-denial log ring (`kFwLogCap = 32`) have
+  landed; see [Firewall Roadmap](Firewall-Roadmap.md) for the live
+  state machine and capacity. Default-deny inbound is still off by
+  policy choice (Allow by default), not by missing infrastructure.
 
 ## Related Pages
 

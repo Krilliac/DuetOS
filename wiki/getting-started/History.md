@@ -144,7 +144,7 @@ The current phase rebuilt the Win32 subsystem around real DLLs:
    `psapi`, `crypt32`, `comctl32`, `comdlg32`, `version`, `setupapi`,
    `iphlpapi`, `userenv`, `wtsapi32`, `dwmapi`, `uxtheme`, `secur32`,
    `ws2_32`, `wininet`, `winhttp`, `d3d9`/`11`/`12`, `dxgi`)
-   totalling ~760 exports. Phase 5 and beyond grew the surface to 44
+   totalling ~760 exports. Phase 5 and beyond grew the surface to 45
    production DLLs / ~1100 exports — see
    [`Win32-Surface-Status`](../reference/Win32-Surface-Status.md) for
    the live inventory.
