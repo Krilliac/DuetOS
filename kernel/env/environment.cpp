@@ -2,6 +2,8 @@
 
 #include "acpi/acpi.h"
 #include "acpi/acpi_sci.h"
+#include "acpi/aml.h"
+#include "acpi/aml_eval.h"
 #include "acpi/ec.h"
 #include "acpi/srat.h"
 #include "arch/x86_64/cpu.h"
@@ -285,6 +287,68 @@ void EmitBanner(const SystemEnvironment& e)
                 if (!acpi::AcpiEcDispatchPendingQuery())
                     break;
             }
+            // Per-GPE _Lxx (level-triggered) / _Exx (edge-triggered)
+            // dispatch for events not routed through the EC. The
+            // status word covers up to 32 GPEs (in each of GPE0
+            // and GPE1 blocks); we walk every set bit and try
+            // both naming forms. ACPI 6.5 §5.6.4.1 fixes the
+            // names: `\_GPE._Lxx` for level-triggered events,
+            // `\_GPE._Exx` for edge-triggered. Most boards only
+            // emit one or the other per bit; trying both is
+            // harmless when one doesn't exist (AmlNamespaceFind
+            // returns nullptr and we skip).
+            auto dispatch_gpe_bits = [](u32 status, u32 base)
+            {
+                for (u32 bit = 0; bit < 32u; ++bit)
+                {
+                    if ((status & (1u << bit)) == 0)
+                        continue;
+                    const u32 gpe = base + bit;
+                    // Build `\_GPE._Lxx` / `\_GPE._Exx`. 2 hex
+                    // digits (uppercase) per ACPI naming.
+                    char name[12];
+                    name[0] = '\\';
+                    name[1] = '_';
+                    name[2] = 'G';
+                    name[3] = 'P';
+                    name[4] = 'E';
+                    name[5] = '.';
+                    name[6] = '_';
+                    static const char kHex[] = "0123456789ABCDEF";
+                    name[8] = kHex[(gpe >> 4) & 0xFu];
+                    name[9] = kHex[gpe & 0xFu];
+                    name[10] = '\0';
+
+                    static const char kTriggerForms[2] = {'L', 'E'};
+                    for (u32 form = 0; form < 2; ++form)
+                    {
+                        name[7] = kTriggerForms[form];
+                        if (acpi::AmlNamespaceFind(name) == nullptr)
+                            continue;
+                        acpi::AmlValue r;
+                        if (!acpi::AmlEvaluate(name, nullptr, 0, &r).has_value())
+                        {
+                            KLOG_WARN_V("env/sci", "GPE method evaluation failed; bit", gpe);
+                        }
+                        // First match wins — a single GPE never
+                        // has both _Lxx and _Exx (the firmware
+                        // chooses based on the hardware trigger
+                        // mode).
+                        break;
+                    }
+                }
+            };
+            dispatch_gpe_bits(sp.gpe0_status, 0);
+            // GPE1 starts at `FADT.Gpe1Base` per ACPI 6.5
+            // §5.2.9. The PM1 block does not expose this to us
+            // through the existing `acpi.h` accessors; default
+            // to 32 (the common "GPE0 holds 0..31, GPE1 holds
+            // 32..63" layout). A future slice that wires
+            // `FADT.gpe1_base` correctly would replace the
+            // constant; for now the worst case is mis-named
+            // method lookups that miss in the namespace and
+            // are skipped silently.
+            dispatch_gpe_bits(sp.gpe1_status, 32);
         }
 
         // AC / lid / thermal may have moved (the SCI woke us, or
