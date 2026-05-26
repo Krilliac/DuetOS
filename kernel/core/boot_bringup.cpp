@@ -206,6 +206,7 @@
 #include "mm/address_space.h"
 #include "mm/dma.h"
 #include "mm/frame_allocator.h"
+#include "mm/poison.h"
 #include "mm/zone.h"
 #include "ipc/handle_table.h"
 #include "ipc/iocp.h"
@@ -959,6 +960,10 @@ void BootBringupMemPaging()
     // the managed paging API (PagingInit) for MapPage / UnmapPage
     // but must be online before any SchedCreate call uses it.
     DUETOS_BOOT_SELFTEST(duetos::mm::KernelStackSelfTest());
+    // Hardware-poison frame blacklist round-trip. No machine-check
+    // is fired during the test — it exercises the list mutation
+    // and lookup paths with synthetic PFNs and restores live state.
+    DUETOS_BOOT_SELFTEST(duetos::mm::PoisonFrameSelfTest());
     // Kernel-image W^X / DEP — split the 2 MiB PS direct map covering
     // the kernel image into 4 KiB pages, then apply per-section flags:
     //   .text  → R + X   (writes to .text now #PF)
