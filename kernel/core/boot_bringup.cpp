@@ -231,6 +231,7 @@
 #include "diag/gdb_server.h"
 #include "diag/minidump.h"
 #include "diag/perf_profile.h"
+#include "diag/fma/diagnose.h"
 #include "diag/hung_task.h"
 #include "diag/kstat.h"
 #include "diag/soft_lockup.h"
@@ -1769,6 +1770,17 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // quietly mis-report every other subsystem's stats once
     // consumers attach.
     duetos::diag::KstatSelfTest();
+
+    // FMA (Fault Management Architecture) skeleton. Sits beside
+    // FaultReactDispatch as the cross-correlation surface: every
+    // detector that already posts to FaultReactDispatch also posts
+    // an ereport, and the diagnosis engine walks the ereport ring
+    // every heartbeat looking for patterns (ECC retention, repeated
+    // driver faults, kernel-integrity drift). Unconditional —
+    // skeleton, three rules, suspect ring of 64; the cost is one
+    // bounded walk per heartbeat.
+    duetos::diag::fma::FmaInstall();
+    duetos::diag::fma::FmaSelfTest();
 }
 
 // Device + late-bring-up: PS/2 kbd/mouse, PCI enumeration,

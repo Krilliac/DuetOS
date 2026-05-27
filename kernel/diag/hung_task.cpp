@@ -19,6 +19,7 @@
 #include "core/panic.h"
 #include "debug/probes.h"
 #include "diag/fault_react.h"
+#include "diag/fma/ereport.h"
 #include "log/klog.h"
 #include "sched/sched.h"
 #include "security/fault_domain.h"
@@ -191,6 +192,15 @@ u64 TickInternal(u64 now_ticks, u64 threshold)
         ev.faulting_rip = 0;
         ev.aux = info.id;
         (void)FaultReactDispatch(::duetos::core::kFaultDomainInvalid, ev);
+
+        // FMA bridge: emit an ereport so the diagnosis engine can
+        // correlate repeated hung-task warnings across time. The
+        // correlation key is the TID (which the engine can roll up
+        // by; a repeated hang on the same TID is more diagnostic
+        // than a sequence of distinct TIDs). aux carries stuck_for.
+        ::duetos::diag::fma::EreportPost(::duetos::diag::fma::EreportClass::HungTask,
+                                         ::duetos::diag::fma::EreportSeverity::Degraded, info.id, stuck_for, 0,
+                                         "diag.hungtask");
     }
     return emitted;
 }

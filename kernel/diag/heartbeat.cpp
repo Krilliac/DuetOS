@@ -13,6 +13,8 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "diag/fault_react.h"
+#include "diag/fma/diagnose.h"
+#include "diag/fma/ereport.h"
 #include "diag/hung_task.h"
 #include "diag/kstat.h"
 #include "diag/runtime_checker.h"
@@ -163,6 +165,26 @@ u64 ReadHealthIssuesTotal(void*)
     return ::duetos::core::RuntimeCheckerStatusRead().issues_found_total;
 }
 
+u64 ReadFmaSuspectCount(void*)
+{
+    return static_cast<u64>(::duetos::diag::fma::SuspectCount());
+}
+
+u64 ReadFmaEventsTotal(void*)
+{
+    return ::duetos::diag::fma::EreportStatsRead().events_total;
+}
+
+u64 ReadFmaEventsDropped(void*)
+{
+    return ::duetos::diag::fma::EreportStatsRead().events_dropped;
+}
+
+u64 ReadFmaDiagnosesTotal(void*)
+{
+    return ::duetos::diag::fma::EreportStatsRead().diagnoses_total;
+}
+
 // One-shot registration of every heartbeat-observed counter into
 // the kstat registry. Called from the first heartbeat beat — the
 // scheduler / heap / frame-allocator surfaces all exist by then
@@ -200,6 +222,14 @@ void RegisterHeartbeatKstats()
     D::KstatRegister("cpu", "busy_pct", K::Gauge, &ReadCpuBusyPct, nullptr);
 
     D::KstatRegister("health", "issues_total", K::Counter, &ReadHealthIssuesTotal, nullptr);
+
+    // FMA: per-spec the "health:suspects" gauge is the live count of
+    // diagnosis-engine suspects. Sibling counters expose ereport
+    // throughput for tooling that wants to plot the engine's load.
+    D::KstatRegister("health", "suspects", K::Gauge, &ReadFmaSuspectCount, nullptr);
+    D::KstatRegister("fma", "events_total", K::Counter, &ReadFmaEventsTotal, nullptr);
+    D::KstatRegister("fma", "events_dropped", K::Counter, &ReadFmaEventsDropped, nullptr);
+    D::KstatRegister("fma", "diagnoses_total", K::Counter, &ReadFmaDiagnosesTotal, nullptr);
 
     const auto stats = D::KstatRegistryStatsRead();
     LogWithValue(LogLevel::Info, "kheartbeat", "kstat entries live", stats.entries_live);
@@ -349,6 +379,19 @@ void RegisterHeartbeatKstats()
         // registry.
         FaultDomainTick();
         LogWithValue(LogLevel::Info, "kheartbeat", "fault_domains_count", FaultDomainCount());
+
+        // FMA diagnosis pass. Runs AFTER FaultReactDrainPending +
+        // FaultDomainTick so the engine sees the full picture of
+        // this beat's events. v0: 3 rules (ECC / driver / kernel-
+        // integrity correlation). Cheap when the ereport ring is
+        // empty (one walk over 256 slots + filter); sub-ms even at
+        // a full ring. The returned new-suspect count is logged
+        // only when non-zero so a clean boot stays quiet.
+        const u32 new_suspects = ::duetos::diag::fma::DiagnoseTick();
+        if (new_suspects > 0)
+        {
+            LogWithValue(LogLevel::Warn, "kheartbeat", "fma_new_suspects", new_suspects);
+        }
 
         // Refresh /proc/dumps with the current recent-dumps ring
         // so userland tools see the latest crash records without
