@@ -207,6 +207,7 @@
 #include "mm/dma.h"
 #include "mm/frame_allocator.h"
 #include "mm/poison.h"
+#include "mm/poison_alloc.h"
 #include "mm/zone.h"
 #include "ipc/handle_table.h"
 #include "ipc/iocp.h"
@@ -964,6 +965,24 @@ void BootBringupMemPaging()
     // is fired during the test — it exercises the list mutation
     // and lookup paths with synthetic PFNs and restores live state.
     DUETOS_BOOT_SELFTEST(duetos::mm::PoisonFrameSelfTest());
+    // Guard-page poison allocator — sibling of KMalloc that
+    // dedicates 3 pages of VA per allocation ([guard][data][guard])
+    // so overruns and use-after-free trap at the write site
+    // instead of corrupting random neighbours. MUST run before
+    // any AddressSpaceCreate — the PML4[384] entry the region
+    // lives under is propagated into every per-process AS at
+    // AS-create time, so a late init would leave existing
+    // address spaces blind to the region.
+    //
+    // The self-test is "init-with-validation" rather than a pure
+    // test: it exercises the alloc/free round-trip AND it's the
+    // first call that walks the new PML4 entry into existence,
+    // so it doubles as the trigger that pulls in the PDPT/PD/PT
+    // for the region's first slot. Runs unconditionally (same
+    // policy as RegistrySelfTest, the canonical
+    // init-with-validation example).
+    duetos::mm::PoisonAllocInit();
+    duetos::mm::PoisonAllocSelfTest();
     // Kernel-image W^X / DEP — split the 2 MiB PS direct map covering
     // the kernel image into 4 KiB pages, then apply per-section flags:
     //   .text  → R + X   (writes to .text now #PF)

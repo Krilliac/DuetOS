@@ -58,6 +58,7 @@
 #include "debug/extable.h"
 #include "debug/probes.h"
 #include "mm/kstack.h"
+#include "mm/poison_alloc.h"
 #include "sched/sched.h"
 #include "subsystems/win32/vmap_syscall.h"
 #include "subsystems/win32/seh_dispatch.h"
@@ -1036,6 +1037,39 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             SerialWriteHex(frame->rip);
             SerialWrite("\n");
             core::PanicWithValue("sched/kstack", "guard-page hit — kernel stack overflow", cr2);
+        }
+        // mm/poison-alloc guard-page hit. A CR2 inside the poison
+        // VA region is, by construction, a buffer overrun OR a use-
+        // after-free on a poison-allocated buffer — the data page
+        // is the only mapped page in the slot, the two flanking
+        // pages are reserved-unmapped guards, and freed slots have
+        // their data page unmapped (VA leak by design). Either way,
+        // catching this fault at the write site IS the whole point
+        // of the allocator, so the reaction is Halt — continuing
+        // would only mask the bug. Routed through FaultReactDispatch
+        // so the kernel-owned floor + policy machinery get to log
+        // and tally the event uniformly with every other fault kind.
+        if (mm::IsPoisonRegionAddress(cr2))
+        {
+            SerialWrite("[poison] guard-page hit at CR2=");
+            SerialWriteHex(cr2);
+            SerialWrite(" RIP=");
+            SerialWriteHex(frame->rip);
+            SerialWrite(" — buffer overrun or use-after-free detected\n");
+            ::duetos::diag::FaultEvidence ev{};
+            ev.source = "kernel/mm/poison-alloc";
+            ev.kind = ::duetos::diag::FaultKind::PoisonGuardHit;
+            ev.severity = ::duetos::diag::FaultSeverity::Critical;
+            ev.attempt_count = 0;
+            ev.faulting_rip = frame->rip;
+            ev.aux = cr2;
+            (void)::duetos::diag::FaultReactDispatch(::duetos::core::kFaultDomainInvalid, ev);
+            // Dispatch should Halt (default policy is Halt for this
+            // kind, floor pins it to Halt anyway). Belt-and-braces
+            // panic on the off chance dispatch returned — the panic
+            // value lets the operator recover CR2 even if the
+            // dispatch logged the wrong field.
+            core::PanicWithValue("kernel/mm/poison-alloc", "guard-page hit (overrun / UAF)", cr2);
         }
     }
 

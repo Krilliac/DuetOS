@@ -84,6 +84,7 @@ enum class FaultKind : u8
     MemoryCorruption,  // Heap / page-table / freelist sanity check failed.
     StackCanaryFailed, // Stack-protector tripped.
     SoftLockup,        // CPU pinned in a non-progressing loop.
+    PoisonGuardHit,    // mm/poison-alloc guard page touched (overrun / UAF).
     Unknown,           // Catch-all when the reporter has no better label.
 };
 
