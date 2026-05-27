@@ -1668,6 +1668,18 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // of any current handle surface is tracked as a follow-up.
     DUETOS_BOOT_SELFTEST(duetos::ipc::KObjectSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::HandleTableSelfTest());
+    // Per-handle rights extension — ceiling-vs-floor model on top
+    // of Process::caps. Exercises type-allowed masking,
+    // caps-derived narrowing, dup-with-narrow, escalation refusal,
+    // HandleReplace atomicity, and HandleCheckRight gating.
+    //
+    // Run UNCONDITIONALLY (not gated by DUETOS_BOOT_SELFTEST) — the
+    // rights model is the security floor for every handle-mediated
+    // syscall, and a regression here is a hard stop. The test is
+    // cheap (no scheduler dependency, ~µs of work) and emits a
+    // single `[handle-rights] self-test OK` sentinel on success so
+    // CI can grep for it. Same convention as adaptive-mutex below.
+    duetos::ipc::HandleRightsSelfTest();
     // Concrete KMutex subclass self-test (plan A3-followup) —
     // demonstrates the full HandleTable round-trip on a real
     // type with refcounted storage. Existing per-type Win32
