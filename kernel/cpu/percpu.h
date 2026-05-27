@@ -297,6 +297,37 @@ struct PerCpu
     // `DUETOS_THIS_CPU_OFFSET(PerCpu, this_cpu_selftest_counter)`.
     u64 this_cpu_selftest_counter;
 
+    // Preempt-off-but-IRQs-on critical section state (FreeBSD
+    // critical_enter style). See kernel/cpu/critical.h.
+    //
+    // Invariants:
+    //   - critnest == 0 AND deferred_preempt == 0 is the steady state.
+    //   - critnest > 0 means we are inside one (or more nested)
+    //     critical sections; the scheduler must NOT preempt this CPU
+    //     until critnest returns to zero.
+    //   - deferred_preempt == 1 is set by a scheduler reschedule
+    //     decision that fired while critnest > 0; CriticalExit picks
+    //     it up when critnest returns to zero, clears the flag, and
+    //     invokes Schedule() synchronously.
+    //
+    // Written only by the owning CPU (CriticalEnter/Exit and the
+    // tick-time DeferPreemptIfCritical path), so the
+    // `arch::ThisCpu*` single-instruction `gs:` operators are correct
+    // for the read-modify-writes. Cross-CPU reads (for the stats
+    // sum-walk) are READ_ONCE-style: a stale value is fine — these
+    // are diagnostic counters, not synchronisation primitives.
+    u32 critnest;
+    u32 deferred_preempt;
+
+    // Per-CPU stats for the critical-section subsystem. Bumped by
+    // the owning CPU on each Enter/Exit; cross-CPU summed by
+    // CriticalStatsRead.
+    u64 critical_enter_count;
+    u64 critical_exit_count;
+    u64 critical_deferred_count;
+    u32 critical_max_nesting;
+    u32 _pad_critical[1];
+
     // Everything below this line will grow as SMP matures:
     //   - per-CPU runqueue spinlock (today: shared g_sched_lock)
     //   - per-CPU heap magazine (when the heap grows per-CPU caching)

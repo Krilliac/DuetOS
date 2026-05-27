@@ -53,6 +53,7 @@
 #include "util/symbols.h"
 #include "syscall/syscall.h"
 #include "acpi/acpi.h"
+#include "cpu/critical.h"
 #include "cpu/percpu.h"
 #include "debug/breakpoints.h"
 #include "debug/extable.h"
@@ -783,9 +784,21 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             // schedule anyway. Before this branch ran on
             // the unhandled path too; that regressed the pre-SchedInit
             // boot probe into a #GP inside Schedule().
+            //
+            // critnest gate (FreeBSD critical_enter semantics): if
+            // we're inside a preempt-off critical section, defer the
+            // reschedule until CriticalExit drains it. DeferPreemptIfCritical
+            // returns true and atomically records the deferral when
+            // critnest > 0; otherwise it returns false and we
+            // proceed to call Schedule() normally. We still consume
+            // need_resched via TakeNeedResched so a future tick
+            // doesn't see a stale flag.
             if (sched::TakeNeedResched())
             {
-                sched::Schedule();
+                if (!cpu::DeferPreemptIfCritical())
+                {
+                    sched::Schedule();
+                }
             }
         }
         else
