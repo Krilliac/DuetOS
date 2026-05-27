@@ -119,21 +119,29 @@ work; CLAMP_TO_BORDER's border colour is transparent black in v0.
 
 Open gates for the next slice:
 
-- **Per-axis address modes.** `SamplerRecord` carries U / V / W
-  but the bilerp only reads U. Decouple by threading the mode
-  through `fold` per axis.
-- **`OpImageRead` / `OpImageWrite`.** Storage-image compute access.
-  Coordinates are signed integer vectors; out-of-bounds reads
-  return 0, writes are dropped. Format-aware unpack/pack
-  (R8_UNORM, BGRA8_UNORM, R32G32B32A32_SFLOAT, etc.).
+- **Format-aware texel access.** `OpImageRead` / `OpImageWrite`
+  execute today against the implicit BGRA8 backing. To honour
+  the other five formats DuetOS recognises (R8_UNORM, R8G8_UNORM,
+  R8G8B8A8_UNORM, R16_UNORM, R32G32B32A32_SFLOAT), `VkCreateImage`
+  needs to grow a format parameter and `ImageRecord` needs to
+  carry it.
 - **Bilinear math correction.** Current path scales by `W-1`;
   spec convention is `u*W - 0.5` for centre-of-texel sampling.
   Behavior change — coordinate with any self-tests that assume
   the W-1 convention.
-- **Other opcodes:** `OpControlBarrier` (workgroup), `OpAtomic*`
-  (no-op on serial interpreter, dispatch entry needed),
-  `OpFRem` / `OpUMod` / `OpSMod`, `OpDPdx` / `OpDPdy` / `OpFwidth`
-  (stub to zero with GAP marker).
+- **Explicit LOD / mipmap chains.** `OpImageSampleExplicitLod`
+  ignores the Lod operand because there's no mip chain. Image
+  views need a per-level array; `VkCreateImageView` needs to take
+  a level count.
+- **Real atomicity for parallel compute.** Atomic opcodes
+  currently collapse to non-atomic ops — correct only because
+  the interpreter runs invocations serially. When the dispatcher
+  parallelises (real GPU back-end or work-stealing across CPUs),
+  these need actual atomic intrinsics.
+- **Real derivatives for fragment shaders.** `OpDPdx` / `OpDPdy` /
+  `OpFwidth` return zero. Real values need 2×2-quad fragment
+  execution — invocations sharing per-quad context so finite
+  differences become meaningful.
 - **GLSL.std.450 has no texture functions** — `textureGrad`,
   `textureLod`, `textureGather`, `texelFetch` all lower to core
   SPIR-V `OpImageSample*Grad/Lod` and `OpImageGather/Fetch`.

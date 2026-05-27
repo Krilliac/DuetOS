@@ -533,6 +533,20 @@ bool RunCanonicalLifecycle()
         // writes that don't pin a sampler keep working.
         if (internal::SamplerAddressModeFor(0) != internal::SamplerAddressMode::ClampToEdge)
             return SelftestFail("[selftest:graphics] sampler handle=0 fallback wrong", 0);
+        // Per-axis decoupling: an asymmetric sampler (Repeat-U /
+        // ClampToEdge-V) must report distinct modes on each axis.
+        // The pre-decouple path only honoured the U axis; this
+        // pins the regression bound.
+        const VkSamplerCreateInfo sci_mixed{VkFilter::Linear, VkFilter::Linear, VkSamplerAddressMode::Repeat,
+                                            VkSamplerAddressMode::ClampToEdge, VkSamplerAddressMode::Repeat};
+        VkSampler smp_mixed = 0;
+        if (VkCreateSampler(dev, &sci_mixed, &smp_mixed) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateSampler(mixed) failed", 0);
+        if (internal::SamplerAddressModeFor(smp_mixed) != internal::SamplerAddressMode::Repeat)
+            return SelftestFail("[selftest:graphics] mixed sampler U axis wrong", 0);
+        if (internal::SamplerAddressModeVFor(smp_mixed) != internal::SamplerAddressMode::ClampToEdge)
+            return SelftestFail("[selftest:graphics] mixed sampler V axis wrong", 0);
+        VkDestroySampler(dev, smp_mixed);
 
         VkEvent evt = 0;
         if (VkCreateEvent(dev, &evt) != VkResult::Success)
@@ -697,6 +711,42 @@ bool RunCanonicalLifecycle()
             return SelftestFail("[selftest:graphics] BufferDeviceAddress reported 0 on bound host-visible buffer", 0);
         VkDestroyBuffer(dev, arr_buf);
         VkFreeMemory(dev, arr_mem);
+    }
+
+    // Storage-image texel write/read round-trip: covers the
+    // OpImageWrite -> OpImageRead path the SPIR-V executor now
+    // routes compute shaders through. Allocate a host-visible
+    // image, write a cookie at (3, 4), read it back, assert the
+    // exact bit pattern survives. Out-of-bounds writes must be
+    // silently dropped without corrupting neighbours.
+    {
+        VkImage stor_img = 0;
+        VkDeviceMemory stor_mem = 0;
+        if (VkCreateImage(dev, VkExtent3D{8, 8, 1}, 0, &stor_img) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] storage-image create failed", 0);
+        if (VkAllocateMemory(dev, 8 * 8 * 4u, /*memory_type_index=*/1, &stor_mem) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] storage-image AllocateMemory failed", 0);
+        if (VkBindImageMemory(dev, stor_img, stor_mem, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] storage-image BindImageMemory failed", 0);
+        // Sentinel write at (1, 0) so we can verify the OOB-drop
+        // assertion below didn't clobber a neighbour.
+        internal::WriteTexelBgra8(stor_img, 1, 0, 0xFF112233u);
+        // Cookie at (3, 4); read back must match.
+        internal::WriteTexelBgra8(stor_img, 3, 4, 0xAABBCCDDu);
+        const u32 read_back = internal::FetchTexelBgra8(stor_img, 3, 4);
+        if (read_back != 0xAABBCCDDu)
+            return SelftestFail("[selftest:graphics] storage-image texel round-trip mismatch", read_back);
+        // Out-of-bounds write: silently dropped; sentinel at (1, 0)
+        // must still read back unchanged.
+        internal::WriteTexelBgra8(stor_img, 999, 999, 0xDEADBEEFu);
+        if (internal::FetchTexelBgra8(stor_img, 1, 0) != 0xFF112233u)
+            return SelftestFail("[selftest:graphics] storage-image OOB write clobbered neighbour", 0);
+        // Out-of-bounds read: spec returns 0 (no border colour for
+        // sampler-less image reads).
+        if (internal::FetchTexelBgra8(stor_img, 999, 999) != 0x00000000u)
+            return SelftestFail("[selftest:graphics] storage-image OOB read returned non-zero", 0);
+        VkDestroyImage(dev, stor_img);
+        VkFreeMemory(dev, stor_mem);
     }
 
     // Cmd-debug-label + push-descriptor leg: record a few ops on

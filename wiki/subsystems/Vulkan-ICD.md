@@ -541,26 +541,50 @@ the v0 syscall surface doesn't provide.
   is selected), AND the SPIR-V shader rasterizer when a pipeline
   binds parseable VS + FS modules (TriangleList only).
 - **SPIR-V texture sampling.** `OpImageSampleImplicitLod` /
-  `OpImageSampleExplicitLod` are implemented and fetch through the
-  bound (set 0, binding 0) sampled-image descriptor via
-  `SampleImageRgba8`. The addressing mode is now driven by the
-  VkSampler the caller pinned at descriptor-update time —
-  `VkCreateSampler` records `addressModeU` into a per-handle
-  `SamplerRecord`, `VkUpdateDescriptorSetSampled` propagates the
-  VkSampler handle alongside the VkImageView, and the executor
-  reads `SamplerAddressModeFor(handle)` on every sample to pick
-  REPEAT / CLAMP_TO_EDGE / MIRRORED_REPEAT / CLAMP_TO_BORDER
-  before walking the bilerp. v0's CLAMP_TO_BORDER border colour
-  is always transparent black (0,0,0,0); per-sampler border tints
-  land when `VkSamplerCreateInfo` grows a `borderColor` field.
-  Unbound samples still return the UV coordinate as
-  `(u, v, 0, 1)` — the "missing texture" diagnostic. Per-axis
-  decoupling (different modes for U / V / W) is recorded by
-  `SamplerRecord` but the executor only honours U today — same-
-  axis-everywhere works correctly; an axis split would need the
-  bilerp to thread the mode per fold. `OpImageRead` /
-  `OpImageWrite` (storage-image compute access) and explicit LOD
-  (no mipmap chain) are still unimplemented.
+  `OpImageSampleExplicitLod` fetch through the bound (set 0,
+  binding 0) sampled-image descriptor via `SampleImageRgba8`. The
+  per-axis addressing mode is driven by the VkSampler the caller
+  pinned at descriptor-update time — `VkCreateSampler` records
+  `addressModeU` / `_V` / `_W` into a per-handle `SamplerRecord`,
+  `VkUpdateDescriptorSetSampled` propagates the VkSampler handle
+  alongside the VkImageView, and the executor reads both
+  `SamplerAddressModeFor(handle)` (U) and `SamplerAddressModeVFor`
+  (V) on every sample so an asymmetric sampler like
+  `(REPEAT_U, CLAMP_TO_EDGE_V)` produces tileable-X clamped-Y
+  output. ClampToBorder is per-axis too — a UV component outside
+  [0, 1] on a border-mode axis returns the border colour, while
+  the other axis follows its own fold. v0's CLAMP_TO_BORDER
+  border colour is always transparent black (0,0,0,0); per-sampler
+  border tints land when `VkSamplerCreateInfo` grows a
+  `borderColor` field. Unbound samples still return the UV
+  coordinate as `(u, v, 0, 1)` — the "missing texture"
+  diagnostic. Explicit LOD (no mipmap chain) is still
+  unimplemented; the W axis is recorded but only meaningful for
+  3D / cube images that v0 doesn't yet ship.
+- **SPIR-V storage-image access.** `OpImageRead` / `OpImageFetch`
+  (integer-coord unfiltered read) and `OpImageWrite` (integer-coord
+  unfiltered store) execute against the bound (set 0, binding 0)
+  image. Backing format is BGRA8 only (matching what
+  `VkCreateImage` advertises); out-of-bounds reads return
+  `(0, 0, 0, 1)` and out-of-bounds writes are silently dropped per
+  spec. Coordinate input is signed integer scalar or vector; the
+  first two components are consumed (2D). Used by compute shaders
+  that walk a storage image — boot self-test pins the
+  write/read round-trip and the OOB-no-clobber invariant.
+- **SPIR-V derivative / barrier / atomic opcodes.** `OpDPdx`,
+  `OpDPdy`, `OpFwidth` (plus `Fine` / `Coarse` variants) return
+  zero — GAP: real derivatives need 2×2-quad fragment execution
+  that the serial interpreter doesn't model. `OpControlBarrier`
+  and `OpMemoryBarrier` are no-ops because invocations run
+  serially (the barrier is satisfied trivially). `OpAtomicLoad`,
+  `OpAtomicStore`, and the RMW family (`Exchange` / `IIncrement` /
+  `IDecrement` / `IAdd` / `ISub` / `SMin` / `UMin` / `SMax` /
+  `UMax` / `And` / `Or` / `Xor`) collapse to non-atomic
+  equivalents — correct on serial execution, will need real
+  atomicity once compute dispatch runs invocations in parallel.
+  `OpFRem` / `OpFMod` dispatch through the soft-float scalar path
+  (FRem = trunc-quotient remainder, FMod = floor-quotient with
+  sign of divisor).
 - **SPIR-V perspective correction.** The shader rasterizer is
   affine (linear pixel-space interpolation in pixel space).
   Perspective-correct attribute interpolation needs a per-fragment

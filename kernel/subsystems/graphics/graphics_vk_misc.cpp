@@ -54,17 +54,30 @@ VkResult VkCreateSampler(VkDevice dev, const VkSamplerCreateInfo* info, VkSample
     return VkResult::Success;
 }
 
-SamplerAddressMode SamplerAddressModeFor(u64 sampler_handle)
+namespace
+{
+SamplerAddressMode SamplerAxisMode(u64 sampler_handle, u8 SamplerRecord::*axis_field)
 {
     if (sampler_handle == 0 || !HandleInRange(sampler_handle, kSamplerBase))
         return SamplerAddressMode::ClampToEdge;
     const u32 slot = SlotOf(sampler_handle, kSamplerBase);
     if (!PoolIsLive(g_sampler_pool, slot))
         return SamplerAddressMode::ClampToEdge;
-    const u8 raw = g_sampler_data[slot].address_mode_u;
+    const u8 raw = g_sampler_data[slot].*axis_field;
     if (raw > static_cast<u8>(SamplerAddressMode::ClampToBorder))
         return SamplerAddressMode::ClampToEdge;
     return static_cast<SamplerAddressMode>(raw);
+}
+} // namespace
+
+SamplerAddressMode SamplerAddressModeFor(u64 sampler_handle)
+{
+    return SamplerAxisMode(sampler_handle, &SamplerRecord::address_mode_u);
+}
+
+SamplerAddressMode SamplerAddressModeVFor(u64 sampler_handle)
+{
+    return SamplerAxisMode(sampler_handle, &SamplerRecord::address_mode_v);
 }
 
 void VkDestroySampler(VkDevice dev, VkSampler sampler)

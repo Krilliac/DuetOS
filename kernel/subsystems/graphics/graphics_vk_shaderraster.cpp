@@ -635,7 +635,84 @@ bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d)
     return true;
 }
 
-u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddressMode mode)
+// Resolve a descriptor handle (VkImage or VkImageView) to the
+// underlying ImageRecord, returning nullptr on any lookup failure.
+// Both SampleImageRgba8 (filtered sampling) and FetchTexelBgra8 /
+// WriteTexelBgra8 (unfiltered storage-image access) share this.
+namespace
+{
+const ImageRecord* ResolveImageRecord(u64 resource_handle)
+{
+    if (resource_handle == 0)
+        return nullptr;
+    VkImage img = 0;
+    if (HandleInRange(resource_handle, kImageViewBase))
+    {
+        const u32 slot = SlotOf(resource_handle, kImageViewBase);
+        if (!PoolIsLive(g_imageview_pool, slot))
+            return nullptr;
+        img = g_imageview_data[slot].image;
+    }
+    else if (HandleInRange(resource_handle, kImageBase))
+    {
+        img = resource_handle;
+    }
+    else
+    {
+        return nullptr;
+    }
+    if (!HandleInRange(img, kImageBase))
+        return nullptr;
+    const u32 islot = SlotOf(img, kImageBase);
+    if (!PoolIsLive(g_image_pool, islot))
+        return nullptr;
+    return &g_image_data[islot];
+}
+ImageRecord* ResolveImageRecordMut(u64 resource_handle)
+{
+    // const_cast is fine: ResolveImageRecord only inspects pool
+    // bookkeeping. The caller takes responsibility for not racing
+    // against another mutator under the storage-image write lock.
+    return const_cast<ImageRecord*>(ResolveImageRecord(resource_handle));
+}
+} // namespace
+
+u32 FetchTexelBgra8(u64 resource_handle, u32 x, u32 y)
+{
+    const ImageRecord* rec = ResolveImageRecord(resource_handle);
+    if (rec == nullptr || rec->backing == nullptr || rec->extent.width == 0 || rec->extent.height == 0)
+        return 0x00000000u;
+    if (x >= rec->extent.width || y >= rec->extent.height)
+        return 0x00000000u;
+    const u64 off = (static_cast<u64>(y) * rec->extent.width + x) * 4u;
+    const u8* p = static_cast<const u8*>(rec->backing) + off;
+    // Match `SampleImageRgba8`'s convention: backing byte order is
+    // [R, G, B, A]; returned packed word is 0xAARRGGBB. The
+    // function is named "Bgra8" because the Vulkan format enum it
+    // serves is `VK_FORMAT_B8G8R8A8_UNORM`; the on-disk byte order
+    // is DuetOS's internal-RGBA8 layout regardless.
+    return (static_cast<u32>(p[3]) << 24) | (static_cast<u32>(p[0]) << 16) | (static_cast<u32>(p[1]) << 8) |
+           static_cast<u32>(p[2]);
+}
+
+void WriteTexelBgra8(u64 resource_handle, u32 x, u32 y, u32 argb)
+{
+    ImageRecord* rec = ResolveImageRecordMut(resource_handle);
+    if (rec == nullptr || rec->backing == nullptr || rec->extent.width == 0 || rec->extent.height == 0)
+        return;
+    if (x >= rec->extent.width || y >= rec->extent.height)
+        return;
+    const u64 off = (static_cast<u64>(y) * rec->extent.width + x) * 4u;
+    u8* p = static_cast<u8*>(rec->backing) + off;
+    // Inverse of FetchTexelBgra8: argb=0xAARRGGBB packs into
+    // backing bytes [R, G, B, A].
+    p[0] = static_cast<u8>((argb >> 16) & 0xFFu); // R
+    p[1] = static_cast<u8>((argb >> 8) & 0xFFu);  // G
+    p[2] = static_cast<u8>(argb & 0xFFu);         // B
+    p[3] = static_cast<u8>((argb >> 24) & 0xFFu); // A
+}
+
+u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddressMode mode_u, SamplerAddressMode mode_v)
 {
     if (resource_handle == 0)
         return 0xFF000000u;
@@ -674,13 +751,15 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
     using ::duetos::core::Sf32ToI32;
     using ::duetos::core::Sf32Zero;
 
-    // ClampToBorder: when the caller's UV is outside [0, 1] on
-    // EITHER axis we short-circuit the bilerp and return the
-    // border colour. v0's border is always transparent black
-    // (0x00000000); the spec's per-sampler borderColor variants
-    // (opaque black, opaque white, ints, custom) land when the
-    // VkSamplerCreateInfo surface grows the field.
-    if (mode == SamplerAddressMode::ClampToBorder)
+    // ClampToBorder is checked per-axis: only the axes whose
+    // mode is ClampToBorder return the border colour when their
+    // UV component falls outside [0, 1]. A mixed sampler such as
+    // (REPEAT_U, BORDER_V) correctly produces tiled-X /
+    // border-stamped-Y output instead of border-everywhere. v0's
+    // border colour is always transparent black (0x00000000); the
+    // spec's per-sampler borderColor variants (opaque black,
+    // opaque white, ints, custom) land when VkSamplerCreateInfo
+    // grows the field.
     {
         const Sf32 zero = Sf32Zero();
         const Sf32 one = Sf32One();
@@ -688,12 +767,16 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
         const Sf32 vval{v_bits};
         const bool u_out = ::duetos::core::Sf32LessThan(uval, zero) || ::duetos::core::Sf32GreaterThan(uval, one);
         const bool v_out = ::duetos::core::Sf32LessThan(vval, zero) || ::duetos::core::Sf32GreaterThan(vval, one);
-        if (u_out || v_out)
+        if ((mode_u == SamplerAddressMode::ClampToBorder && u_out) ||
+            (mode_v == SamplerAddressMode::ClampToBorder && v_out))
             return 0x00000000u;
     }
 
-    // Apply the addressing mode to fold raw UV into [0, 1].
-    auto fold = [mode](u32 bits) -> Sf32
+    // Apply each axis's addressing mode independently to fold raw
+    // UV into [0, 1]. The two folds operate on different scalars
+    // and don't share state — the lambda just routes through the
+    // per-axis mode.
+    auto fold = [](u32 bits, SamplerAddressMode mode) -> Sf32
     {
         Sf32 v{bits};
         switch (mode)
@@ -717,8 +800,8 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
     };
     // Bilinear filtering: sample the 4 texels around (u*w, v*h),
     // blend by the sub-texel weights.
-    const Sf32 u = fold(u_bits);
-    const Sf32 v = fold(v_bits);
+    const Sf32 u = fold(u_bits, mode_u);
+    const Sf32 v = fold(v_bits, mode_v);
     const Sf32 fx = Sf32Mul(u, Sf32FromU32(rec.extent.width - 1));
     const Sf32 fy = Sf32Mul(v, Sf32FromU32(rec.extent.height - 1));
     const i32 ix = Sf32ToI32(fx);

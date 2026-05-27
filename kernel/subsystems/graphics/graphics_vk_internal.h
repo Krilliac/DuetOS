@@ -642,16 +642,50 @@ enum class SamplerAddressMode : u8
 /// Vk_SAMPLER_FILTER_NEAREST option yet). Returns the packed
 /// BGRA8 word (0xAARRGGBB). Returns 0xFF000000 (opaque black)
 /// on any lookup failure — caller treats it as a fallback.
+/// Sample a 2D RGBA8 texel from an image bound via descriptor.
+/// `resource_handle` is a VkImage or VkImageView handle as
+/// returned by `spirv::LookupDescriptor`; both kinds resolve
+/// to the underlying image. u_bits / v_bits are Sf32 bit
+/// patterns (raw float values; the addressing mode determines
+/// how out-of-range UV gets folded). `mode_u` selects the U-axis
+/// addressing mode; `mode_v` selects the V-axis mode (defaults
+/// to the same as U for legacy callers that don't care about the
+/// asymmetric case). Filtering is bilinear (the v0 sampler
+/// doesn't expose a separate Vk_SAMPLER_FILTER_NEAREST option
+/// yet). Returns the packed BGRA8 word (0xAARRGGBB). Returns
+/// 0xFF000000 (opaque black) on any lookup failure — caller
+/// treats it as a fallback.
 u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits,
-                     SamplerAddressMode mode = SamplerAddressMode::ClampToEdge);
+                     SamplerAddressMode mode_u = SamplerAddressMode::ClampToEdge,
+                     SamplerAddressMode mode_v = SamplerAddressMode::ClampToEdge);
 
 /// Look up the address-mode-U recorded by VkCreateSampler against
 /// a VkSampler handle. Returns `ClampToEdge` for handle == 0 or
 /// an unrecognised handle so a binding without a sampler still
-/// produces a defined result. (V0 honours the U-axis mode for
-/// both axes — per-axis decoupling lands when the sampler info
-/// struct grows the V/W fields beyond bookkeeping.)
+/// produces a defined result.
 SamplerAddressMode SamplerAddressModeFor(u64 sampler_handle);
+
+/// V-axis counterpart of `SamplerAddressModeFor`. v0's
+/// `SamplerRecord` captures all three axes at VkCreateSampler
+/// time; the executor reads U + V independently so a sampler with
+/// `(REPEAT, CLAMP_TO_EDGE)` produces tileable-X clamped-Y output
+/// (the right shape for a scrolling-strip background pattern).
+SamplerAddressMode SamplerAddressModeVFor(u64 sampler_handle);
+
+/// Unfiltered, integer-coordinate BGRA8 texel fetch from an
+/// image bound via descriptor. Used by the SPIR-V executor's
+/// OpImageFetch / OpImageRead path. Returns 0x00000000
+/// (transparent black) on any lookup failure; caller is
+/// responsible for the bounds check (so a deliberate
+/// out-of-bounds is distinguishable from a failed lookup at the
+/// call site). Bit layout: 0xAARRGGBB.
+u32 FetchTexelBgra8(u64 resource_handle, u32 x, u32 y);
+
+/// Unfiltered, integer-coordinate BGRA8 texel store to an image
+/// bound via descriptor. Used by the SPIR-V executor's
+/// OpImageWrite path. Silently no-ops on lookup failure or
+/// out-of-bounds coordinate. Bit layout of `argb`: 0xAARRGGBB.
+void WriteTexelBgra8(u64 resource_handle, u32 x, u32 y, u32 argb);
 
 /// Run the SPIR-V shader-based rasterizer for the current draw.
 /// Returns true if the shader path actually painted (in which
