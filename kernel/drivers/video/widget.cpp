@@ -1009,12 +1009,13 @@ WindowHandle WindowActive()
 
 void WindowCycleActive()
 {
-    // Find the handle of the currently-active window in z-order,
-    // then walk forward (wrapping) until we hit a different alive
-    // window. Raise it. Handles the 0- and 1-window corner cases
-    // inside the loop: the first pass that finds the active
-    // window tries to bump to the next, and the wrap detects
-    // "no other alive windows."
+    // Cycle Alt+Tab through VISIBLE alive windows only. With the
+    // "hidden launchers stay registered" model the start menu
+    // uses today, including hidden windows here would surface a
+    // surprise (Task Manager, Settings, Browser, etc.) on every
+    // Alt+Tab even though the user can't see them on the desktop.
+    // The taskbar already filters to visible windows; Alt+Tab
+    // must agree.
     if (g_window_count == 0)
     {
         return;
@@ -1031,13 +1032,14 @@ void WindowCycleActive()
         }
     }
     // Start the search one past the active slot (wrap). Walk up
-    // to kMaxWindows steps; bail out if nothing else is alive.
+    // to kMaxWindows steps; bail out if no other visible window
+    // is alive.
     const u32 start = (active_idx + 1) % g_window_count;
     for (u32 step = 0; step < g_window_count; ++step)
     {
         const u32 idx = (start + step) % g_window_count;
         const WindowHandle candidate = g_z_order[idx];
-        if (candidate != g_active_window && WindowValid(candidate))
+        if (candidate != g_active_window && WindowValid(candidate) && g_windows[candidate].visible)
         {
             WindowRaise(candidate);
             return;

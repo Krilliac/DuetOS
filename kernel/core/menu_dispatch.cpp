@@ -37,6 +37,7 @@
 
 #include "core/menu_dispatch.h"
 
+#include "apps/dbg.h"
 #include "apps/devicemgr.h"
 #include "apps/files.h"
 #include "apps/firewall.h"
@@ -488,6 +489,17 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
     case 62: // FIREWALL
     {
         const auto h = duetos::apps::firewall::FirewallWindow();
+        if (h != duetos::drivers::video::kWindowInvalid)
+        {
+            duetos::drivers::video::WindowSetVisible(h, true);
+            duetos::drivers::video::WindowRaise(h);
+        }
+        break;
+    }
+    case 63: // DEBUGGER — no ThemeRole; raise the kernel debugger
+             // app's own-registered window via its handle accessor.
+    {
+        const auto h = duetos::apps::dbg::DbgWindow();
         if (h != duetos::drivers::video::kWindowInvalid)
         {
             duetos::drivers::video::WindowSetVisible(h, true);

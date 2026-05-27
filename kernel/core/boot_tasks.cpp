@@ -1441,8 +1441,42 @@ void KbdReaderTask(void*)
                     duetos::drivers::video::CompositorUnlock();
                     continue;
                 }
-                duetos::drivers::video::WindowClose(active);
-                SerialWrite("[ui] alt-f4 close window=");
+                // For built-in role-registered apps (Calculator,
+                // Notepad, Help, etc.), Alt+F4 hides instead of
+                // destroying. Destroying would mark the slot
+                // alive=false permanently and the Start menu's
+                // "open <role>" handler — which looks up the role
+                // -> window mapping — would never raise it again.
+                // PE / user-spawned windows have no ThemeRole;
+                // they get the destroy semantics that match the
+                // Win32 expectation (a closed PE window stays
+                // closed until the process re-creates it).
+                duetos::drivers::video::ThemeRole role{};
+                const bool is_role_app = duetos::drivers::video::ThemeRoleForWindow(active, &role);
+                // Also treat the bespoke non-role panels (Network
+                // Status, Device Manager, Firewall, Debugger,
+                // Notification Center via its own role) as hide-
+                // on-close. The check is the conservative one:
+                // does the window belong to the kernel-owned app
+                // catalogue rather than a runtime spawn? `parent
+                // == kWindowInvalid` distinguishes the two —
+                // user-spawned PE windows record their owner_pid
+                // and never get added to the role registry, so
+                // the role check above is sufficient for them;
+                // the non-role internal panels likewise have
+                // owner_pid == 0.
+                const bool is_kernel_app =
+                    is_role_app || duetos::drivers::video::WindowOwnerPid(active) == 0;
+                if (is_kernel_app)
+                {
+                    duetos::drivers::video::WindowSetVisible(active, false);
+                    SerialWrite("[ui] alt-f4 hide window=");
+                }
+                else
+                {
+                    duetos::drivers::video::WindowClose(active);
+                    SerialWrite("[ui] alt-f4 close window=");
+                }
                 SerialWriteHex(active);
                 SerialWrite("\n");
             }
@@ -1866,9 +1900,11 @@ const duetos::drivers::video::MenuItem kStartMenuSystemItems[] = {
     {"TASK MANAGER", 100 + static_cast<duetos::u32>(StartMenuRole::TaskManager), 0, nullptr, 0},
     {"SYSTEM MONITOR", 100 + static_cast<duetos::u32>(StartMenuRole::Sysmon), 0, nullptr, 0},
     {"KERNEL LOG", 100 + static_cast<duetos::u32>(StartMenuRole::LogView), 0, nullptr, 0},
+    {"NOTIFICATIONS", 100 + static_cast<duetos::u32>(StartMenuRole::NotifyCenter), 0, nullptr, 0},
     {"NETWORK STATUS", 60, 0, nullptr, 0},
     {"DEVICE MANAGER", 61, 0, nullptr, 0},
     {"FIREWALL", 62, 0, nullptr, 0},
+    {"DEBUGGER", 63, 0, nullptr, 0},
     {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0},
     {"CYCLE WINDOWS", 2, 0, nullptr, 0},
     {"SWITCH TO TTY", 5, 0, nullptr, 0},
@@ -2819,9 +2855,14 @@ void MouseReaderTask(void*)
                 {
                     // PE-owned windows receive WM_CLOSE and
                     // decide whether to DestroyWindow (or
-                    // ignore). Kernel-owned boot windows
-                    // still close immediately — no PE to
-                    // delegate to.
+                    // ignore). Kernel-owned boot windows hide
+                    // instead of destroying so the Start menu's
+                    // role-raise handler can bring them back —
+                    // same reason as the Alt+F4 close path: a
+                    // destroyed role slot is permanent in v0,
+                    // and "closed Calculator" should mean "the
+                    // window is gone for now," not "Calculator
+                    // is unrecoverable for this session."
                     if (duetos::drivers::video::WindowOwnerPid(hit) > 0)
                     {
                         constexpr duetos::u32 kWmClose = 0x0010;
@@ -2833,8 +2874,8 @@ void MouseReaderTask(void*)
                     }
                     else
                     {
-                        duetos::drivers::video::WindowClose(hit);
-                        SerialWrite("[ui] close window=");
+                        duetos::drivers::video::WindowSetVisible(hit, false);
+                        SerialWrite("[ui] hide window=");
                         SerialWriteHex(hit);
                         SerialWrite("\n");
                     }

@@ -2835,7 +2835,11 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // uses internally. Visible proof that the kernel's pixel
     // pipeline produces real graphical output, not just glyphs.
     duetos::drivers::video::WindowChrome gfx_chrome = theme_chrome(Role::GfxDemo);
-    gfx_chrome.x = 900;
+    // 340-px-wide window anchored so the full chrome (title +
+    // subtitle "MODE N/5 …") fits inside a 1024-wide framebuffer.
+    // Previous x=900 clipped the right ~216 px off-screen, leaving
+    // the title bar reading "GFX DEM" and the subtitle "PLASM".
+    gfx_chrome.x = 660;
     gfx_chrome.y = 40;
     gfx_chrome.w = 340;
     gfx_chrome.h = 280;
