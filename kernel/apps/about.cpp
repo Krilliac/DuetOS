@@ -181,7 +181,7 @@ using duetos::drivers::video::app_widgets::Rect;
 // AppLabel stores text by pointer so the buffers must outlive
 // every Paint. DrawFn re-renders them each frame.
 constinit char g_header_text[48] = {};
-constinit char g_footer_text[48] = {};
+constinit char g_footer_text[80] = {};
 
 // Forward decl for the toolbar click trampoline (defined below;
 // it has to live above the constinit g_about that captures it by
@@ -293,7 +293,10 @@ void RefreshAboutHeader()
 
 void RefreshAboutFooter()
 {
-    static const char kHint[] = "Refreshes on every compositor tick.";
+    // User-facing tagline. The previous "Refreshes on every
+    // compositor tick." was a maintainer note about the data
+    // pipeline that didn't belong in the About panel.
+    static const char kHint[] = "DuetOS - a from-scratch desktop OS.";
     u32 i = 0;
     for (; kHint[i] != '\0' && i + 1 < sizeof(g_footer_text); ++i)
         g_footer_text[i] = kHint[i];
@@ -446,22 +449,20 @@ void PaintAboutContent(u32 cx, u32 cy, u32 cw, u32 ch)
     DrawLine(cx, y, line, fg, bg);
     y += kRowH;
 
-    // Window count — walks the registry counting alive entries so
-    // a number that drifts when an app is closed shows the real
-    // live state, not the lifetime registration count.
-    u32 alive = 0;
+    // Open-window count — only visible windows; users care about
+    // what's actually on screen, not the hidden launchers the
+    // Start menu raises on demand.
+    u32 visible = 0;
     const u32 reg_n = WindowRegistryCount();
     for (u32 i = 0; i < reg_n; ++i)
     {
-        if (duetos::drivers::video::WindowIsAlive(i))
-            ++alive;
+        if (duetos::drivers::video::WindowIsAlive(i) && duetos::drivers::video::WindowIsVisible(i))
+            ++visible;
     }
     p = 0;
     AppendStr(line, &p, sizeof(line), "WINDOWS:  ");
-    AppendU64(line, &p, sizeof(line), alive);
-    AppendStr(line, &p, sizeof(line), " alive / ");
-    AppendU64(line, &p, sizeof(line), reg_n);
-    AppendStr(line, &p, sizeof(line), " slots");
+    AppendU64(line, &p, sizeof(line), visible);
+    AppendStr(line, &p, sizeof(line), " OPEN");
     line[p] = '\0';
     DrawLine(cx, y, line, fg, bg);
 }
