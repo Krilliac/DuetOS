@@ -232,6 +232,7 @@
 #include "diag/minidump.h"
 #include "diag/perf_profile.h"
 #include "diag/hung_task.h"
+#include "diag/kstat.h"
 #include "diag/soft_lockup.h"
 #include "ipc/kevent.h"
 #include "ipc/kfile.h"
@@ -1725,6 +1726,19 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // reaper to clean its victim up); the boot-bringup order
     // satisfies that by construction.
     DUETOS_BOOT_SELFTEST(duetos::diag::HungTaskSelfTest());
+
+    // kstat registry (unified machine-readable statistics
+    // surface). The self-test runs synthetic register /
+    // read / walk / dup-reject probes against a clean
+    // registry before any heartbeat-driven production
+    // entries are added; running it here keeps the bug
+    // floor for "registration races with first read"
+    // visible at boot rather than at first heartbeat.
+    // Unconditional (not gated by `kBootSelfTests`) — kstat
+    // is small and the test is cheap; a broken kstat would
+    // quietly mis-report every other subsystem's stats once
+    // consumers attach.
+    duetos::diag::KstatSelfTest();
 }
 
 // Device + late-bring-up: PS/2 kbd/mouse, PCI enumeration,

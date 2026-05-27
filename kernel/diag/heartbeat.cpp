@@ -14,6 +14,7 @@
 #include "core/panic.h"
 #include "diag/fault_react.h"
 #include "diag/hung_task.h"
+#include "diag/kstat.h"
 #include "diag/runtime_checker.h"
 
 namespace duetos::core
@@ -77,6 +78,139 @@ u64 DeltaClampMonotonic(const char* counter_name, u64 now, u64 prev)
     return 0;
 }
 
+// ------- kstat readers for the heartbeat-observed counters. -------
+//
+// Each reader is a static function that pulls the live value from
+// the existing source-of-truth accessor (`sched::SchedStatsRead`,
+// `mm::KernelHeapStatsRead`, etc.). All accessors are documented as
+// cheap snapshots — they're already called every heartbeat for the
+// klog emissions below. The kstat registry exposes the same numbers
+// to machine consumers (kshell, /proc/kstat, future FMA reader)
+// without parsing the klog text stream.
+//
+// The klog emissions stay — kstat is a parallel structured surface,
+// not a replacement. Human operators reading the serial log keep the
+// one-line-per-counter view; tooling gets the typed value.
+
+u64 ReadSchedContextSwitches(void*)
+{
+    return ::duetos::sched::SchedStatsRead().context_switches;
+}
+u64 ReadSchedTasksLive(void*)
+{
+    return ::duetos::sched::SchedStatsRead().tasks_live;
+}
+u64 ReadSchedTasksSleeping(void*)
+{
+    return ::duetos::sched::SchedStatsRead().tasks_sleeping;
+}
+u64 ReadSchedTasksBlocked(void*)
+{
+    return ::duetos::sched::SchedStatsRead().tasks_blocked;
+}
+u64 ReadSchedTasksCreated(void*)
+{
+    return ::duetos::sched::SchedStatsRead().tasks_created;
+}
+u64 ReadSchedTasksExited(void*)
+{
+    return ::duetos::sched::SchedStatsRead().tasks_exited;
+}
+
+u64 ReadHeapUsedBytes(void*)
+{
+    return ::duetos::mm::KernelHeapStatsRead().used_bytes;
+}
+u64 ReadHeapFreeBytes(void*)
+{
+    return ::duetos::mm::KernelHeapStatsRead().free_bytes;
+}
+u64 ReadHeapLargestFreeRun(void*)
+{
+    return ::duetos::mm::KernelHeapStatsRead().largest_free_run;
+}
+u64 ReadHeapAllocCount(void*)
+{
+    return ::duetos::mm::KernelHeapStatsRead().alloc_count;
+}
+u64 ReadHeapFreeCount(void*)
+{
+    return ::duetos::mm::KernelHeapStatsRead().free_count;
+}
+
+u64 ReadFramesFree(void*)
+{
+    return ::duetos::mm::FreeFramesCount();
+}
+
+u64 ReadCpusOnline(void*)
+{
+    return ::duetos::arch::SmpCpusOnline();
+}
+u64 ReadCpuBusyPct(void*)
+{
+    const auto s = ::duetos::sched::SchedStatsRead();
+    const u64 total = s.total_ticks;
+    if (total == 0)
+    {
+        return 0;
+    }
+    return ((total - s.idle_ticks) * 100u) / total;
+}
+
+u64 ReadHealthIssuesTotal(void*)
+{
+    return ::duetos::core::RuntimeCheckerStatusRead().issues_found_total;
+}
+
+// One-shot registration of every heartbeat-observed counter into
+// the kstat registry. Called from the first heartbeat beat — the
+// scheduler / heap / frame-allocator surfaces all exist by then
+// (the heartbeat itself can't have started without them). Latched
+// so subsequent beats skip the work; if a registration fails
+// (`g_register_failures` ticks), we log it once and proceed — the
+// kstat registry is best-effort, never gating.
+void RegisterHeartbeatKstats()
+{
+    using K = ::duetos::diag::KstatKind;
+    namespace D = ::duetos::diag;
+
+    // Snapshot the failure baseline BEFORE our batch so we only
+    // attribute new failures to our calls. The boot-time
+    // `KstatSelfTest` deliberately exercises the dup-key reject,
+    // leaving `register_failures = 1`; without the baseline a
+    // clean run would emit a misleading WARN here.
+    const u32 pre_failures = D::KstatRegistryStatsRead().register_failures;
+
+    D::KstatRegister("sched", "context_switches", K::Counter, &ReadSchedContextSwitches, nullptr);
+    D::KstatRegister("sched", "tasks_live", K::Gauge, &ReadSchedTasksLive, nullptr);
+    D::KstatRegister("sched", "tasks_sleeping", K::Gauge, &ReadSchedTasksSleeping, nullptr);
+    D::KstatRegister("sched", "tasks_blocked", K::Gauge, &ReadSchedTasksBlocked, nullptr);
+    D::KstatRegister("sched", "tasks_created", K::Counter, &ReadSchedTasksCreated, nullptr);
+    D::KstatRegister("sched", "tasks_exited", K::Counter, &ReadSchedTasksExited, nullptr);
+
+    D::KstatRegister("mm", "heap_used_bytes", K::Gauge, &ReadHeapUsedBytes, nullptr);
+    D::KstatRegister("mm", "heap_free_bytes", K::Gauge, &ReadHeapFreeBytes, nullptr);
+    D::KstatRegister("mm", "heap_largest_free_run", K::Gauge, &ReadHeapLargestFreeRun, nullptr);
+    D::KstatRegister("mm", "heap_alloc_count", K::Counter, &ReadHeapAllocCount, nullptr);
+    D::KstatRegister("mm", "heap_free_count", K::Counter, &ReadHeapFreeCount, nullptr);
+    D::KstatRegister("mm", "frames_free", K::Gauge, &ReadFramesFree, nullptr);
+
+    D::KstatRegister("cpu", "online", K::Gauge, &ReadCpusOnline, nullptr);
+    D::KstatRegister("cpu", "busy_pct", K::Gauge, &ReadCpuBusyPct, nullptr);
+
+    D::KstatRegister("health", "issues_total", K::Counter, &ReadHealthIssuesTotal, nullptr);
+
+    const auto stats = D::KstatRegistryStatsRead();
+    LogWithValue(LogLevel::Info, "kheartbeat", "kstat entries live", stats.entries_live);
+    if (stats.register_failures > pre_failures)
+    {
+        // Strictly OUR failures — the self-test's intentional
+        // dup-key reject is excluded by the pre-batch baseline.
+        LogWithValue(LogLevel::Warn, "kheartbeat", "kstat register failures", stats.register_failures - pre_failures);
+    }
+}
+
 [[noreturn]] void HeartbeatMain(void* /*arg*/)
 {
     // Previous-beat snapshots so we can emit deltas/rates in addition
@@ -103,10 +237,22 @@ u64 DeltaClampMonotonic(const char* counter_name, u64 now, u64 prev)
     // can't run away with the active flag. Idempotent: subsequent
     // beats are no-ops via the static guard.
     static constinit bool s_marked_healthy = false;
+    // Register all heartbeat-observed counters into the kstat
+    // registry on the very first beat. One-shot via a static guard;
+    // subsequent beats just walk the registry via `/proc/kstat`.
+    // Deferring to the first beat (rather than registering at boot
+    // self-test time) keeps the kstat registry empty during the
+    // self-test, so the test can assert exact entry counts.
+    static constinit bool s_kstat_registered = false;
     for (;;)
     {
         sched::SchedSleepUntil(deadline);
         deadline += kHeartbeatTicks;
+        if (!s_kstat_registered)
+        {
+            RegisterHeartbeatKstats();
+            s_kstat_registered = true;
+        }
         if (!s_marked_healthy)
         {
             const auto st = ::duetos::fs::boot_slot::MarkHealthyNow();
@@ -217,6 +363,13 @@ u64 DeltaClampMonotonic(const char* counter_name, u64 now, u64 prev)
         // without needing a shell prompt; the userland flusher
         // (slice 5) also pulls from here.
         ::duetos::fs::RamfsFixJournalSnapshot();
+
+        // Refresh /proc/kstat from the live kstat registry. Same
+        // bounded-format pattern: one walk over <=128 entries, each
+        // entry's reader is documented as cheap, no allocations.
+        // Userland tooling reads /proc/kstat for typed metrics in
+        // parallel with the human-readable klog emissions below.
+        ::duetos::fs::RamfsKstatSnapshot();
 
         prev_tick_sample = sched_stats.total_ticks;
         prev_sched_stats = sched_stats;

@@ -113,6 +113,13 @@ void RamfsDumpsSnapshot();
 /// to triage observed gaps without a shell prompt.
 void RamfsFixJournalSnapshot();
 
+/// Refresh `/proc/kstat` from the live `diag::KstatRegister`-d
+/// registry. One line per entry: `<module>:<name> <kind> <value>`,
+/// with a `#`-prefixed header. Called from the heartbeat so the
+/// file's content is at most one tick stale; cheap (no allocations,
+/// bounded format, one walk over <=128 entries).
+void RamfsKstatSnapshot();
+
 /// Format the native syscall number → name table into the static
 /// `/sys/syscalls` buffer. Each line is "<dec_nr>  SYS_FOO\n",
 /// in `kSyscallNames[]` order. Idempotent. Buffer is 8 KiB,
