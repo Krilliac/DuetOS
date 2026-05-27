@@ -73,6 +73,8 @@ PhysicalDeviceRecord g_phys_data[kPoolCapacity];
 QueueRecord g_queue_data[kPoolCapacity];
 PipelineRecord g_pipeline_data[kPoolCapacity];
 SamplerRecord g_sampler_data[kPoolCapacity];
+FenceRecord g_fence_data[kPoolCapacity];
+SemaphoreRecord g_semaphore_data[kPoolCapacity];
 
 Pool g_instance_pool;
 Pool g_phys_pool;
@@ -2097,10 +2099,17 @@ VkResult VkQueueSubmit(VkQueue q, u32 cb_count, const VkCommandBuffer* cbs, VkFe
     ++g_queue_submits;
     for (u32 i = 0; i < cb_count; ++i)
         ReplayCommandBuffer(cbs[i]);
-    // signal_fence — fences in this v0 ICD are pre-signalled
-    // sentinels, so the submit doesn't need to do anything to
-    // drive vkWaitForFences to Success.
-    (void)signal_fence;
+    // The submit completed (synchronously, in v0). Drive the
+    // caller-supplied fence to signalled so VkWaitForFences /
+    // VkGetFenceStatus see the completion. A real-GPU back-end
+    // would defer this signal to the ring's completion IRQ; the
+    // FenceRecord shape is symmetric across the two paths.
+    if (signal_fence != 0 && HandleInRange(signal_fence, kFenceBase))
+    {
+        const u32 fslot = SlotOf(signal_fence, kFenceBase);
+        if (PoolIsLive(g_fence_pool, fslot))
+            g_fence_data[fslot].signalled = true;
+    }
     return VkResult::Success;
 }
 
@@ -2110,12 +2119,16 @@ VkResult VkQueueSubmit(VkQueue q, u32 cb_count, const VkCommandBuffer* cbs, VkFe
 
 VkResult VkCreateFence(VkDevice dev, bool signalled, VkFence* out)
 {
-    (void)signalled;
     if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
         return VkResult::ErrorInitializationFailed;
     u32 slot = 0;
     if (!PoolAlloc(g_fence_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
+    // VK_FENCE_CREATE_SIGNALED_BIT — a caller that wants its
+    // first vkWaitForFences to not block configures the fence
+    // pre-signalled. The pre-fix path silently swallowed this
+    // flag.
+    g_fence_data[slot].signalled = signalled;
     if (out != nullptr)
         *out = HandleFor(kFenceBase, slot);
     return VkResult::Success;
@@ -2132,9 +2145,29 @@ void VkDestroyFence(VkDevice dev, VkFence fence)
 VkResult VkResetFences(VkDevice dev, u32 count, const VkFence* fences)
 {
     (void)dev;
-    (void)count;
-    (void)fences;
+    if (fences == nullptr && count != 0)
+        return VkResult::ErrorInitializationFailed;
+    for (u32 i = 0; i < count; ++i)
+    {
+        const VkFence f = fences[i];
+        if (f == 0 || !HandleInRange(f, kFenceBase))
+            continue;
+        const u32 slot = SlotOf(f, kFenceBase);
+        if (PoolIsLive(g_fence_pool, slot))
+            g_fence_data[slot].signalled = false;
+    }
     return VkResult::Success;
+}
+
+VkResult VkGetFenceStatus(VkDevice dev, VkFence fence)
+{
+    (void)dev;
+    if (fence == 0 || !HandleInRange(fence, kFenceBase))
+        return VkResult::ErrorInitializationFailed;
+    const u32 slot = SlotOf(fence, kFenceBase);
+    if (!PoolIsLive(g_fence_pool, slot))
+        return VkResult::ErrorInitializationFailed;
+    return g_fence_data[slot].signalled ? VkResult::Success : VkResult::NotReady;
 }
 
 VkResult VkWaitForFences(VkDevice dev, u32 count, const VkFence* fences, u64 timeout_ns)
@@ -2143,8 +2176,24 @@ VkResult VkWaitForFences(VkDevice dev, u32 count, const VkFence* fences, u64 tim
     (void)timeout_ns;
     if (fences == nullptr && count != 0)
         return VkResult::ErrorInitializationFailed;
-    // All submits are synchronous in this ICD, so any fence the
-    // caller is waiting on is already "signalled".
+    // v0 submits complete synchronously, so by the time the
+    // caller reaches VkWaitForFences the matching VkQueueSubmit
+    // has already flipped each fence's bit. We honour the
+    // caller's array — every fence must already be signalled to
+    // succeed (waitAll semantics; v0 doesn't expose a
+    // waitAll=false form on the entry point). Returns Timeout if
+    // any fence is still unsignalled.
+    for (u32 i = 0; i < count; ++i)
+    {
+        const VkFence f = fences[i];
+        if (f == 0 || !HandleInRange(f, kFenceBase))
+            return VkResult::ErrorInitializationFailed;
+        const u32 slot = SlotOf(f, kFenceBase);
+        if (!PoolIsLive(g_fence_pool, slot))
+            return VkResult::ErrorInitializationFailed;
+        if (!g_fence_data[slot].signalled)
+            return VkResult::Timeout;
+    }
     return VkResult::Success;
 }
 
@@ -2155,10 +2204,50 @@ VkResult VkCreateSemaphore(VkDevice dev, VkSemaphore* out)
     u32 slot = 0;
     if (!PoolAlloc(g_semaphore_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
+    g_semaphore_data[slot].signalled = false;
     if (out != nullptr)
         *out = HandleFor(kSemaphoreBase, slot);
     return VkResult::Success;
 }
+
+// Internal helpers used by WSI + QueueSubmit to flip the
+// signalled bit on a binary-semaphore handle. Returns false when
+// the handle is 0 or doesn't resolve.
+namespace internal
+{
+bool SignalSemaphoreInternal(VkSemaphore sem)
+{
+    if (sem == 0 || !HandleInRange(sem, kSemaphoreBase))
+        return false;
+    const u32 slot = SlotOf(sem, kSemaphoreBase);
+    if (!PoolIsLive(g_semaphore_pool, slot))
+        return false;
+    g_semaphore_data[slot].signalled = true;
+    return true;
+}
+
+bool ConsumeSemaphoreInternal(VkSemaphore sem)
+{
+    if (sem == 0 || !HandleInRange(sem, kSemaphoreBase))
+        return false;
+    const u32 slot = SlotOf(sem, kSemaphoreBase);
+    if (!PoolIsLive(g_semaphore_pool, slot))
+        return false;
+    const bool was_signalled = g_semaphore_data[slot].signalled;
+    g_semaphore_data[slot].signalled = false;
+    return was_signalled;
+}
+
+bool SemaphoreIsSignalled(VkSemaphore sem)
+{
+    if (sem == 0 || !HandleInRange(sem, kSemaphoreBase))
+        return false;
+    const u32 slot = SlotOf(sem, kSemaphoreBase);
+    if (!PoolIsLive(g_semaphore_pool, slot))
+        return false;
+    return g_semaphore_data[slot].signalled;
+}
+} // namespace internal
 
 void VkDestroySemaphore(VkDevice dev, VkSemaphore sem)
 {

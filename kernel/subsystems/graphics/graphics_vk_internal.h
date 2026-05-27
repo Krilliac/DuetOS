@@ -432,6 +432,29 @@ struct SamplerRecord
     u8 min_filter;
 };
 
+/// Per-fence state. `signalled` flips true when the submit that
+/// the fence rides on completes; flips false on VkResetFences.
+/// `VkWaitForFences` consults the bit. v0 submits are synchronous
+/// so the bit is set at VkQueueSubmit return time — no blocking
+/// path is needed today, but the structural backing is in place
+/// for a real-GPU back-end to set it asynchronously.
+struct FenceRecord
+{
+    bool signalled;
+};
+
+/// Per-semaphore state. Binary semaphores: `signalled` flips true
+/// on a queue-side signal (e.g. VkQueueSubmit's signal-semaphore
+/// list), flips false on a queue-side wait that consumes it. The
+/// signal/wait surface for VkQueueSubmit grows in a follow-on
+/// slice; v0 captures the bit so VkAcquireNextImageKHR /
+/// VkQueuePresentKHR can interact with it once the WSI side
+/// passes real semaphores through.
+struct SemaphoreRecord
+{
+    bool signalled;
+};
+
 inline constexpr u32 kMaxQueriesPerPool = 16;
 struct QueryPoolRecord
 {
@@ -501,6 +524,8 @@ extern PhysicalDeviceRecord g_phys_data[kPoolCapacity];
 extern QueueRecord g_queue_data[kPoolCapacity];
 extern PipelineRecord g_pipeline_data[kPoolCapacity];
 extern SamplerRecord g_sampler_data[kPoolCapacity];
+extern FenceRecord g_fence_data[kPoolCapacity];
+extern SemaphoreRecord g_semaphore_data[kPoolCapacity];
 
 // -------------------------------------------------------------------
 // Aggregate counters.
@@ -686,6 +711,16 @@ u32 FetchTexelBgra8(u64 resource_handle, u32 x, u32 y);
 /// OpImageWrite path. Silently no-ops on lookup failure or
 /// out-of-bounds coordinate. Bit layout of `argb`: 0xAARRGGBB.
 void WriteTexelBgra8(u64 resource_handle, u32 x, u32 y, u32 argb);
+
+/// Binary-semaphore signal / consume / poll. Used by VkQueueSubmit
+/// (signal after CB replay) and VkAcquireNextImageKHR /
+/// VkQueuePresentKHR (signal-then-consume across the swapchain
+/// boundary). Returns false on a 0 or unrecognised handle. The
+/// consume path returns the pre-consume bit so the caller can tell
+/// "had to wait" from "was already signalled".
+bool SignalSemaphoreInternal(VkSemaphore sem);
+bool ConsumeSemaphoreInternal(VkSemaphore sem);
+bool SemaphoreIsSignalled(VkSemaphore sem);
 
 /// Run the SPIR-V shader-based rasterizer for the current draw.
 /// Returns true if the shader path actually painted (in which

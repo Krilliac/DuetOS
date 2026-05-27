@@ -922,6 +922,11 @@ void VkDestroyFence(VkDevice dev, VkFence fence);
 VkResult VkResetFences(VkDevice dev, u32 count, const VkFence* fences);
 VkResult VkWaitForFences(VkDevice dev, u32 count, const VkFence* fences, u64 timeout_ns);
 
+/// Poll a fence without blocking. Returns Success when signalled,
+/// NotReady when unsignalled, or ErrorInitializationFailed when
+/// the handle doesn't resolve. Mirrors `vkGetFenceStatus`.
+VkResult VkGetFenceStatus(VkDevice dev, VkFence fence);
+
 VkResult VkCreateSemaphore(VkDevice dev, VkSemaphore* out);
 void VkDestroySemaphore(VkDevice dev, VkSemaphore sem);
 

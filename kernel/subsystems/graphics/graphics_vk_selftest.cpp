@@ -312,6 +312,11 @@ bool RunCanonicalLifecycle()
     VkFence fence = 0;
     if (VkCreateFence(dev, false, &fence) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkCreateFence failed", 0);
+    // A freshly-created unsignalled fence must report NotReady;
+    // the pre-fix path returned Success unconditionally because
+    // FenceRecord didn't exist.
+    if (VkGetFenceStatus(dev, fence) != VkResult::NotReady)
+        return SelftestFail("[selftest:graphics] new unsignalled fence reported ready", 0);
 
     // The cb above recorded `VkCmdDraw(cb, 3, ...)` against a
     // non-scanout image — the rasterizer must STILL bump the
@@ -322,8 +327,31 @@ bool RunCanonicalLifecycle()
     const u32 tri_before = internal::TrianglesDrawnCount();
     if (VkQueueSubmit(queue, 1, &cb, fence) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkQueueSubmit failed", 0);
+    // VkQueueSubmit must flip the fence to signalled — the
+    // synchronous v0 submit completes before this line.
+    if (VkGetFenceStatus(dev, fence) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkQueueSubmit did not signal fence", 0);
     if (VkWaitForFences(dev, 1, &fence, 0) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkWaitForFences failed", 0);
+    // VkResetFences must clear the signalled bit, returning the
+    // fence to NotReady status.
+    if (VkResetFences(dev, 1, &fence) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkResetFences failed", 0);
+    if (VkGetFenceStatus(dev, fence) != VkResult::NotReady)
+        return SelftestFail("[selftest:graphics] reset fence did not clear signalled bit", 0);
+    // A wait against an unsignalled fence must return Timeout
+    // (rather than the legacy Success-no-matter-what).
+    if (VkWaitForFences(dev, 1, &fence, 0) != VkResult::Timeout)
+        return SelftestFail("[selftest:graphics] wait on unsignalled fence did not Timeout", 0);
+    // VkCreateFence(signalled=true) — the create-info bit must
+    // reach the FenceRecord so callers that want to immediately
+    // wait without blocking get Success on the first call.
+    VkFence pre_signalled = 0;
+    if (VkCreateFence(dev, true, &pre_signalled) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCreateFence(signalled=true) failed", 0);
+    if (VkGetFenceStatus(dev, pre_signalled) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] pre-signalled fence reported NotReady", 0);
+    VkDestroyFence(dev, pre_signalled);
     if (VkQueueWaitIdle(queue) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkQueueWaitIdle failed", 0);
     if (internal::TrianglesDrawnCount() <= tri_before)
@@ -889,6 +917,26 @@ bool RunCanonicalLifecycle()
             return SelftestFail("[selftest:graphics] AcquireNextImage(2) failed", 0);
         if (VkQueuePresentKHR(queue, sc, idx) != VkResult::Success)
             return SelftestFail("[selftest:graphics] QueuePresent(2) failed", 0);
+
+        // Acquire/Fence signal-through leg: the caller-supplied
+        // VkSemaphore + VkFence must flip to signalled when the
+        // image becomes "available". v0 returns the image
+        // immediately, so signal happens during the Acquire call.
+        VkSemaphore acquire_sem = 0;
+        VkFence acquire_fence = 0;
+        if (VkCreateSemaphore(dev, &acquire_sem) != VkResult::Success ||
+            VkCreateFence(dev, false, &acquire_fence) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] sync handle alloc for Acquire failed", 0);
+        if (VkAcquireNextImageKHR(dev, sc, 0, acquire_sem, acquire_fence, &idx) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] AcquireNextImage(with sync) failed", 0);
+        if (!internal::SemaphoreIsSignalled(acquire_sem))
+            return SelftestFail("[selftest:graphics] Acquire did not signal semaphore", 0);
+        if (VkGetFenceStatus(dev, acquire_fence) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] Acquire did not signal fence", 0);
+        if (VkQueuePresentKHR(queue, sc, idx) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] QueuePresent(with sync) failed", 0);
+        VkDestroyFence(dev, acquire_fence);
+        VkDestroySemaphore(dev, acquire_sem);
 
         VkDestroySwapchainKHR(dev, sc);
         VkDestroySurfaceKHR(inst, surface);
