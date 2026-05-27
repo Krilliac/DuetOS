@@ -11,6 +11,7 @@ members = [
     "kernel/arch/x86_64/smbios_rust",
     "kernel/drivers/gpu/amd_gfx_fw_rust",
     "kernel/drivers/gpu/nvidia_gsp_fw_rust",
+    "kernel/drivers/iommu/dmar_rust",
     "kernel/drivers/net/bcm43xx_fw_rust",
     "kernel/drivers/net/iwlwifi_fw_rust",
     "kernel/drivers/net/rtl88xx_fw_rust",

@@ -77,6 +77,7 @@
 #include "drivers/gpu/nvidia_gsp_fw.h"
 #include "drivers/input/hid_keyboard.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/iommu/dmar.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/net/ath9k_htc.h"
 #include "drivers/net/ath9k_htc_fw.h"
@@ -1181,6 +1182,16 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiSleepPrepSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiMadtX2ApicSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiSciSelfTest());
+
+    // VT-d DMAR discovery + parse. Reads the ACPI DMAR table (when
+    // firmware advertises one) and surfaces the IOMMU register
+    // bases + reserved-memory regions for the next IOMMU slice to
+    // consume. No behavioural effect today — just data surfacing.
+    // Absent on QEMU-default + VirtualBox; firmware-present on
+    // most real Intel laptops/desktops + QEMU with
+    // `-device intel-iommu`.
+    duetos::drivers::iommu::DmarInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::DmarSelfTest());
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();

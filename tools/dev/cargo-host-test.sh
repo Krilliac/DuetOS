@@ -37,6 +37,7 @@ HOST_TEST_CRATES=(
     "kernel/drivers/net/bcm43xx_fw_rust"
     "kernel/drivers/net/rtl88xx_fw_rust"
     "kernel/drivers/net/iwlwifi_fw_rust"
+    "kernel/drivers/iommu/dmar_rust"
 )
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

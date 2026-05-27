@@ -124,6 +124,10 @@ name = "duetos_bcm43xx_fw"
 version = "0.0.1"
 
 [[package]]
+name = "duetos_dmar"
+version = "0.0.1"
+
+[[package]]
 name = "duetos_exec_meta"
 version = "0.0.1"
 
@@ -155,6 +159,7 @@ dependencies = [
  "duetos_acpi",
  "duetos_amd_gfx_fw",
  "duetos_bcm43xx_fw",
+ "duetos_dmar",
  "duetos_exec_meta",
  "duetos_exfat",
  "duetos_ext4",

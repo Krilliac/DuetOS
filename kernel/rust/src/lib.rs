@@ -12,6 +12,7 @@ pub use duetfs::ffi::*;
 pub use duetos_acpi::*;
 pub use duetos_amd_gfx_fw::*;
 pub use duetos_bcm43xx_fw::*;
+pub use duetos_dmar::*;
 pub use duetos_exec_meta::*;
 pub use duetos_exfat::*;
 pub use duetos_ext4::*;

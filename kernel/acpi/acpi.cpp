@@ -289,6 +289,15 @@ struct [[gnu::packed]] McfgTable
 // ---------------------------------------------------------------------------
 // Cache. Populated once by AcpiInit; read-only after.
 // ---------------------------------------------------------------------------
+
+// Cached RSDP virt pointer — captured during AcpiInit so post-init
+// callers (notably the IOMMU subsystem's DMAR/IVRS walkers via
+// AcpiFindTablePhys) can re-walk the XSDT/RSDT without re-running
+// the multiboot probe. FindRsdpInMultiboot writes the RSDP into a
+// static snapshot buffer with kernel-lifetime durability, so the
+// pointer survives.
+constinit const Rsdp* g_rsdp = nullptr;
+
 constinit u64 g_lapic_address = 0;
 constinit IoApicRecord g_ioapics[kMaxIoapics]{};
 constinit u64 g_ioapic_count = 0;
@@ -1052,6 +1061,8 @@ void AcpiInit(uptr multiboot_info_phys)
     }
     arch::SerialWrite("[acpi] step=rsdp-validated\n");
 
+    g_rsdp = rsdp;
+
     AcpiDiagDumpTables(*rsdp);
     arch::SerialWrite("[acpi] step=diag-dumped\n");
 
@@ -1780,6 +1791,60 @@ void AcpiMadtX2ApicSelfTest()
         g_lapics[i] = saved_table[i];
 
     arch::SerialWrite("[acpi/madt-x2apic-selftest] PASS\n");
+}
+
+bool AcpiFindTablePhys(const char* sig4, u64* out_phys, u32* out_len)
+{
+    if (sig4 == nullptr || out_phys == nullptr || out_len == nullptr || g_rsdp == nullptr)
+        return false;
+    *out_phys = 0;
+    *out_len = 0;
+
+    // XSDT entry array carries 64-bit physical pointers — that's
+    // what we surface to the caller, who then maps the region
+    // itself via AcpiMapTable. Mirror FindTable's XSDT-then-RSDT
+    // walk so a firmware that hides DMAR in the legacy RSDT (rare
+    // but observed on hybrid pre-2.0 boards) is still discoverable.
+    if (g_rsdp->revision >= 2 && g_rsdp->xsdt_address != 0)
+    {
+        const auto* xsdt = PhysToHeader(g_rsdp->xsdt_address);
+        if (BytesEqual(xsdt->signature, "XSDT", 4) && ChecksumOk(xsdt, xsdt->length))
+        {
+            const u64 count =
+                (xsdt->length >= sizeof(SdtHeader)) ? (xsdt->length - sizeof(SdtHeader)) / sizeof(u64) : 0;
+            for (u64 i = 0; i < count; ++i)
+            {
+                const u64 phys = XsdtEntryAt(xsdt, i);
+                const auto* h = PhysToHeader(phys);
+                if (BytesEqual(h->signature, sig4, 4))
+                {
+                    *out_phys = phys;
+                    *out_len = h->length;
+                    return true;
+                }
+            }
+        }
+    }
+
+    if (g_rsdp->rsdt_address == 0)
+        return false;
+    const auto* rsdt = PhysToHeader(g_rsdp->rsdt_address);
+    if (!BytesEqual(rsdt->signature, "RSDT", 4) || !ChecksumOk(rsdt, rsdt->length))
+        return false;
+    const u64 count = (rsdt->length >= sizeof(SdtHeader)) ? (rsdt->length - sizeof(SdtHeader)) / sizeof(u32) : 0;
+    const auto* entries = reinterpret_cast<const u32*>(reinterpret_cast<uptr>(rsdt) + sizeof(SdtHeader));
+    for (u64 i = 0; i < count; ++i)
+    {
+        const u32 phys = entries[i];
+        const auto* h = PhysToHeader(phys);
+        if (BytesEqual(h->signature, sig4, 4))
+        {
+            *out_phys = phys;
+            *out_len = h->length;
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace duetos::acpi

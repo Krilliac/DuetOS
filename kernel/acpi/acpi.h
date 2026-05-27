@@ -239,6 +239,21 @@ u32 SsdtLength(u64 index);
 /// the battery's current state this way, just its declaration.
 bool AmlContainsName(const char* name4);
 
+/// Locate an arbitrary ACPI table by its 4-byte signature and
+/// return its physical base address + length. `sig4` is the 4-byte
+/// signature (no NUL needed, e.g. "DMAR", "IVRS"). Returns true on
+/// hit; `*out_phys` is the physical base, `*out_len` is the table's
+/// `length` field (the whole table including the 36-byte SDT
+/// header). Returns false if AcpiInit didn't run, or if the
+/// signature was not present in either the XSDT or the RSDT.
+///
+/// Used by the IOMMU subsystem (DMAR for Intel VT-d, IVRS for
+/// AMD-Vi) to fetch the firmware's IOMMU description without
+/// having to expose the static table cache directly. Mirrors the
+/// MADT / FADT / HPET / MCFG getters but for tables that may be
+/// added by future slices.
+bool AcpiFindTablePhys(const char* sig4, u64* out_phys, u32* out_len);
+
 /// Boot-time self-test for the parser-underflow guards added when a
 /// hostile / malformed firmware ships an ACPI table whose
 /// `header.length` is smaller than its struct size. Invoked from

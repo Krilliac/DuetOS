@@ -87,6 +87,7 @@ list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/gpu/amd_gfx_fw_
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/net/bcm43xx_fw_rust/(target|cargo-target|bcm-fw-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/net/rtl88xx_fw_rust/(target|cargo-target|rtl-fw-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/net/iwlwifi_fw_rust/(target|cargo-target|iwl-fw-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/iommu/dmar_rust/(target|cargo-target|dmar-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^rust/(target|cargo-target|duetos-kernel-rust-cargo-target)/")
 # AArch64 starter files (boot.S, exceptions.S, context_switch.S,
 # usermode.S, syscall_entry.S) — second-tier-pillar surface that
@@ -1224,6 +1225,7 @@ set(AMD_GFX_FW_RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/gpu/amd_gfx
 set(BCM43XX_FW_RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/net/bcm43xx_fw_rust/include")
 set(RTL88XX_FW_RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/net/rtl88xx_fw_rust/include")
 set(IWLWIFI_FW_RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/net/iwlwifi_fw_rust/include")
+set(DMAR_RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/iommu/dmar_rust/include")
 
 # Stage 1 needs a stub `kernel_elf_blob` so ramfs.cpp's references
 # to kBinKernelElfBytes / kBinKernelElfBytes_len link cleanly.
@@ -1271,6 +1273,7 @@ target_include_directories(duetos-kernel-stage1 PRIVATE
     "${BCM43XX_FW_RUST_INCLUDE_DIR}"
     "${RTL88XX_FW_RUST_INCLUDE_DIR}"
     "${IWLWIFI_FW_RUST_INCLUDE_DIR}"
+    "${DMAR_RUST_INCLUDE_DIR}"
 )
 add_dependencies(duetos-kernel-stage1 ${DUETOS_KERNEL_RUST_TARGET})
 set_target_properties(duetos-kernel-stage1 PROPERTIES
@@ -1384,6 +1387,7 @@ target_include_directories(duetos-kernel PRIVATE
     "${BCM43XX_FW_RUST_INCLUDE_DIR}"
     "${RTL88XX_FW_RUST_INCLUDE_DIR}"
     "${IWLWIFI_FW_RUST_INCLUDE_DIR}"
+    "${DMAR_RUST_INCLUDE_DIR}"
 )
 add_dependencies(duetos-kernel ${DUETOS_KERNEL_RUST_TARGET})
 
