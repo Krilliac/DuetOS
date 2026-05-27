@@ -34,6 +34,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
 
 
 TRAILER_MAGIC = b"FWSG"
@@ -68,7 +69,12 @@ def sign(package: bytes, priv_key, pubkey_id: int) -> bytes:
     h.update(package[payload_off : payload_off + payload_size])
     digest = h.digest()
 
-    sig = priv_key.sign(digest, padding.PKCS1v15(), hashes.SHA256())
+    # Use Prehashed: `digest` is already SHA-256(header || payload), so we
+    # need PKCS#1 v1.5 to wrap it directly without re-hashing. Passing
+    # `hashes.SHA256()` (instead of Prehashed) would make Python sign
+    # SHA-256(SHA-256(message)), which the kernel verify (single-hash)
+    # would correctly reject.
+    sig = priv_key.sign(digest, padding.PKCS1v15(), Prehashed(hashes.SHA256()))
     sig_len = len(sig)
     if sig_len != priv_key.key_size // 8:
         raise RuntimeError(f"sig_len {sig_len} unexpected for key_size {priv_key.key_size}")
