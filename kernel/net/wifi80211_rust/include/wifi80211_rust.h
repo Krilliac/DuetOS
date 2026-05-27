@@ -64,6 +64,26 @@ struct DuetosWifiEapolKey
     u8 _pad3[7];
 };
 
+inline constexpr u32 kDuetosWifiCountryIeMaxTriplets = 16;
+
+struct DuetosWifiCountryIeTriplet
+{
+    u8 first_channel;
+    u8 num_channels;
+    i8 max_tx_dbm;
+    u8 _pad;
+};
+
+struct DuetosWifiCountryIe
+{
+    u8 alpha2[2];
+    u8 environment;
+    u8 n_triplets;
+    DuetosWifiCountryIeTriplet triplets[kDuetosWifiCountryIeMaxTriplets];
+    u8 ok;
+    u8 _pad[3];
+};
+
 extern "C"
 {
     /// Decode the 24-byte 802.11 frame header (3-address case).
@@ -83,6 +103,15 @@ extern "C"
     /// Validates the EAPOL header, descriptor-fixed-prefix length,
     /// and the KeyData length field.
     bool duetos_wifi80211_parse_eapol_key(const u8* buf, usize len, DuetosWifiEapolKey* out);
+
+    /// Decode an 802.11d Country Information Element payload (the
+    /// bytes AFTER the 2-byte element-id/length header). Sub-band
+    /// triplets are captured into `out->triplets`; operating-
+    /// triplet entries (first_channel >= 201) are parsed but
+    /// discarded — the intersector only consumes sub-band form,
+    /// and skipping operating-class keeps the "beacon can only
+    /// narrow" safety property.
+    bool duetos_wifi80211_parse_country_ie(const u8* buf, usize len, DuetosWifiCountryIe* out);
 }
 
 } // namespace duetos::net::wifi80211
