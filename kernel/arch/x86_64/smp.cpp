@@ -10,6 +10,7 @@
 #include "arch/x86_64/traps.h"
 
 #include "acpi/acpi.h"
+#include "cpu/cpuhp.h"
 #include "cpu/percpu.h"
 #include "debug/probes.h"
 #include "diag/tlb_history.h"
@@ -656,27 +657,32 @@ void SmpSendReschedIpi(u32 cpu_id)
 //   4) hlt forever (scheduler entry is a separate follow-up commit,
 //      gated on the runqueue/sleepqueue spinlock work landing fully)
 // ---------------------------------------------------------------------------
-extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
+namespace
 {
-    cpu::PerCpu* pcpu = g_ap_percpus[cpu_id];
 
-    // Install this AP's own GDT + TSS so NMI / #DF / #MC trap entries
-    // resolve to the AP's IST stacks (not the BSP's, which would race
-    // any concurrent BSP fault and corrupt either CPU's frame). Must
-    // happen BEFORE LAPIC enable — once LAPIC is on, an NMI could
-    // arrive at any moment, and without an installed TSS the CPU
-    // would triple-fault picking up RSP0 / IST stack from a stale or
-    // missing slot. The bundle was prepared by SmpStartAps.
+// CPUHP startup callbacks for the AP bring-up sequence. The bodies
+// are the original inline steps from `ApEntryFromTrampoline`, now
+// each gated by the state-machine framework so a future failure has
+// a named bring-up state to attribute it to. Ordering is preserved
+// exactly — the state-machine walks forward in numeric order and the
+// state-number assignments below match what the inline sequence
+// did. Behaviour unchanged.
+
+::duetos::core::Result<void> CpuhpStartGdt(u32 cpu_id)
+{
     ApGdtBundle* bundle = g_ap_gdt_bundles[cpu_id];
     // SmpStartAps only fires SIPI for an AP whose bundle was
-    // allocated, so by construction we should never enter here
-    // with a null bundle. If a future refactor violates the
-    // invariant, continuing without a loaded GDT would crash
-    // the AP at the first NMI/#DF on a stale or missing IST
-    // stack — far worse than halting cleanly.
-    KASSERT(bundle != nullptr, "arch/smp", "AP entered ApEntryFromTrampoline without an allocated GDT bundle");
+    // allocated, so by construction we should never reach here with
+    // a null bundle. Continuing without a loaded GDT would crash the
+    // AP at the first NMI/#DF on a stale or missing IST stack — far
+    // worse than failing the bring-up cleanly here.
+    KASSERT(bundle != nullptr, "arch/smp", "AP entered CpuhpStartGdt without an allocated GDT bundle");
     LoadGdtForCurrent(bundle);
+    return {};
+}
 
+::duetos::core::Result<void> CpuhpStartGsBase(u32 cpu_id)
+{
     // Establish this CPU's GSBASE *after* LoadGdtForCurrent — not
     // before. LoadGdtForCurrent reloads the segment registers, and
     // its `mov %ax, %gs` reloads GS's hidden base from the kernel-
@@ -693,6 +699,7 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // tools/qemu/gui-fuzz.sh). The BSP is correct for the mirror-
     // image reason: PerCpuInitBsp programs GSBASE *after* GdtInit.
     // Orders match now.
+    cpu::PerCpu* pcpu = g_ap_percpus[cpu_id];
     WriteMsrGsBase(reinterpret_cast<u64>(pcpu));
     // IA32_KERNEL_GS_BASE is the swapgs shadow — `mov %gs` does NOT
     // touch it — but program it here too (co-located with the GSBASE
@@ -700,16 +707,11 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // the per-CPU pointer, not 0, into GS_BASE. Mirrors the BSP path
     // in linux::SyscallInit which programs this same MSR.
     WriteMsrKernelGsBase(reinterpret_cast<u64>(pcpu));
+    return {};
+}
 
-    // SYSCALL/SYSRET MSRs (STAR, LSTAR, SFMASK) + EFER.SCE. The BSP
-    // programs these in linux::SyscallInit; the AP needs the same
-    // setup before any ring-3 code on this CPU issues SYSCALL — and
-    // before the runtime checker's heartbeat scan can land on this
-    // AP and (correctly!) report LSTAR=0 vs the BSP-side baseline.
-    // See `ProgramSyscallMsrsForCurrentCpu` for the per-MSR
-    // rationale and the cross-reference back to subsystems/linux.
-    ProgramSyscallMsrsForCurrentCpu();
-
+::duetos::core::Result<void> CpuhpStartIdt(u32 /*cpu_id*/)
+{
     // Point THIS CPU's IDTR at the shared IDT. IDTR is per-CPU; the
     // SMP trampoline only loads a transition GDT (no lidt), and the
     // BSP's IdtInit lidt'd only the BSP. Without this an AP has no
@@ -722,7 +724,11 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // LoadGdtForCurrent (gate CS = kKernelCodeSelector must resolve
     // in the now-active GDT) and precede the LAPIC enable below.
     IdtLoadForCurrent();
+    return {};
+}
 
+::duetos::core::Result<void> CpuhpStartCr4(u32 /*cpu_id*/)
+{
     // Per-AP kernel-protection bit setup. CR0.WP, CR4.SMEP, CR4.SMAP,
     // and CET/IBT are PER-CPU state — programming them on the BSP
     // inside PagingInit does NOT propagate to APs, which would
@@ -740,7 +746,24 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // suppresses the per-AP `[mm] CR4 protection bits:` summary;
     // BSP's PagingInit already emitted it once.
     mm::EnableKernelProtectionBitsForThisCpu(/*emit_log=*/false);
+    return {};
+}
 
+::duetos::core::Result<void> CpuhpStartSyscallMsrs(u32 /*cpu_id*/)
+{
+    // SYSCALL/SYSRET MSRs (STAR, LSTAR, SFMASK) + EFER.SCE. The BSP
+    // programs these in linux::SyscallInit; the AP needs the same
+    // setup before any ring-3 code on this CPU issues SYSCALL — and
+    // before the runtime checker's heartbeat scan can land on this
+    // AP and (correctly!) report LSTAR=0 vs the BSP-side baseline.
+    // See `ProgramSyscallMsrsForCurrentCpu` for the per-MSR
+    // rationale and the cross-reference back to subsystems/linux.
+    ProgramSyscallMsrsForCurrentCpu();
+    return {};
+}
+
+::duetos::core::Result<void> CpuhpStartLapic(u32 /*cpu_id*/)
+{
     // Enable the AP's LAPIC. IA32_APIC_BASE MSR bit 11 (EN) is the
     // global enable; bit 10 (EXTD) selects x2APIC mode. The BSP
     // already programmed EN|EXTD when it ran LapicInit and set
@@ -770,13 +793,59 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     }
     LapicWrite(kLapicRegTpr, 0);
     LapicWrite(kLapicRegSvr, (1U << 8) | 0xFF);
+    return {};
+}
 
+::duetos::core::Result<void> CpuhpStartTopology(u32 cpu_id)
+{
     // Decode this AP's CPUID/SRAT topology BEFORE flipping the
     // online_flag, so the BSP's WaitForApOnline poll inside
     // SmpStartAps doubles as the rendezvous on AP topology init.
     // After SmpStartAps returns, the BSP runs TopologyAssignClusters
     // and every AP's row is already populated — no separate done flag.
     cpu::TopologyInitAp(cpu_id);
+    return {};
+}
+
+} // namespace
+
+void SmpCpuhpRegister()
+{
+    // Register the AP bring-up steps in their existing ordering.
+    // The state-machine framework walks these in ascending numeric
+    // order from the AP's current state (Offline) up to Online. The
+    // step bodies are byte-identical to what `ApEntryFromTrampoline`
+    // ran inline before — see each CpuhpStart* for the rationale and
+    // history of the underlying step.
+    using cpu::CpuhpInstall;
+    using cpu::CpuhpState;
+    CpuhpInstall(CpuhpState::StartingGdt, "gdt-load", &CpuhpStartGdt, nullptr);
+    CpuhpInstall(CpuhpState::StartingGsBase, "gs-base", &CpuhpStartGsBase, nullptr);
+    CpuhpInstall(CpuhpState::StartingIdt, "idt-load", &CpuhpStartIdt, nullptr);
+    CpuhpInstall(CpuhpState::StartingCr4, "cr4-protect", &CpuhpStartCr4, nullptr);
+    CpuhpInstall(CpuhpState::StartingSyscallMsrs, "syscall-msrs", &CpuhpStartSyscallMsrs, nullptr);
+    CpuhpInstall(CpuhpState::StartingLapic, "lapic-enable", &CpuhpStartLapic, nullptr);
+    CpuhpInstall(CpuhpState::StartingTopology, "topology", &CpuhpStartTopology, nullptr);
+}
+
+extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
+{
+    // Walk the bring-up chain through every registered startup. The
+    // chain runs the historic AP init steps (GDT/GS-base/IDT/CR4/
+    // syscall-MSRs/LAPIC/topology) in their original numeric order;
+    // each step is now a named state so a future failure has an
+    // attributable bring-up point. Behaviour-identical to the
+    // pre-migration inline sequence — see CpuhpStart* in this TU for
+    // each step's body and rationale.
+    //
+    // The CpuhpBringUp return value is intentionally dropped: any
+    // failure here is fatal to the AP, but at this stage we have
+    // no logging surface beyond raw serial — the underlying step
+    // KASSERTs/panics for the conditions that historically triggered
+    // them, and a rollback through the AP's partial state is not
+    // recoverable (we are mid-bring-up on this very CPU). The
+    // framework still records the per-CPU state for the panic dump.
+    (void)::duetos::cpu::CpuhpBringUp(cpu_id);
 
     // Signal BSP BEFORE logging — log path races with BSP's serial
     // writes and can delay arbitrarily on contention.

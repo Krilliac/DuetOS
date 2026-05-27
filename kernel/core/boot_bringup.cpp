@@ -46,6 +46,7 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/timer.h"
+#include "cpu/cpuhp.h"
 #include "cpu/critical.h"
 #include "cpu/percpu.h"
 #include "cpu/percpu_counter.h"
@@ -1275,6 +1276,18 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
 
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     duetos::cpu::PerCpuInitBsp();
+
+    // CPU hotplug state machine — Linux-style ordered bring-up
+    // chain. The BSP is already initialised by this point (we are
+    // currently EXECUTING on it), so the framework's
+    // `CpuhpMarkOnline(0)` short-circuits BSP to Online without
+    // walking the chain. AP bring-up in SmpStartAps below routes
+    // through `CpuhpBringUp(cpu_id)` via the registered STARTING
+    // band states. The self-test exercises the rollback path
+    // against toy states in the unreserved 700+ band.
+    duetos::cpu::CpuhpMarkOnline(0);
+    duetos::cpu::CpuhpSelfTest();
+    SerialWrite("[cpuhp] state-machine ready\n");
 
     // Drive any future Phase::PerCpuBsp registrants. No callers
     // yet, but the phase slot exists so the registry stays the

@@ -9,6 +9,7 @@
 #include "arch/x86_64/timer.h"
 #include "arch/x86_64/traps.h"
 #include "time/tick.h"
+#include "cpu/cpuhp.h"
 #include "cpu/percpu.h"
 #include "debug/probes.h"
 #include "net/wireless/wifi_diag.h"
@@ -1143,6 +1144,10 @@ void Panic(const char* subsystem, const char* message)
     // walker then climbs up through the caller.
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
     DumpPeerCpuSnapshots();
+    // Per-CPU cpuhp state dump. Useful when a panic surfaces during
+    // AP bring-up — the per-CPU state slot pinpoints which Starting*
+    // step the AP was inside, narrowing the trail beyond just RIP.
+    ::duetos::cpu::CpuhpDumpStates();
     duetos::diag::TlbHistoryDump();
     DumpEventTraceTail();
 
@@ -1242,6 +1247,10 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
 
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
     DumpPeerCpuSnapshots();
+    // Per-CPU cpuhp state dump. Useful when a panic surfaces during
+    // AP bring-up — the per-CPU state slot pinpoints which Starting*
+    // step the AP was inside, narrowing the trail beyond just RIP.
+    ::duetos::cpu::CpuhpDumpStates();
     duetos::diag::TlbHistoryDump();
     DumpEventTraceTail();
 

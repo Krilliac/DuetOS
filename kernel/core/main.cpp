@@ -715,6 +715,14 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // IpiCallEach to a fresh AP would fault on an empty IDT slot.
     duetos::cpu::IpiCallInstall();
 
+    // Register the per-AP bring-up steps with the cpuhp state
+    // machine BEFORE SmpStartAps, since the moment an AP enters
+    // ApEntryFromTrampoline it walks the chain. The lambdas live
+    // in arch/smp.cpp's anon namespace so they reach the file-local
+    // g_ap_percpus / g_ap_gdt_bundles tables without exposing those
+    // tables in a public header.
+    duetos::arch::SmpCpuhpRegister();
+
     // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
     // INIT and SIPI; the dedicated idle task installed at the top
     // of SchedInit guarantees the runqueue is non-empty, so the
