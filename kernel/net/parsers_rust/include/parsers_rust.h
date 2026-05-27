@@ -76,6 +76,33 @@ extern "C"
     /// the parser ready avoids re-deriving the option-walk every
     /// time a new option needs to be honoured.
     u32 duetos_parsers_tcp_walk_options(const u8* opts, usize opts_len, DuetosTcpOptionCallback cb, void* cookie);
+}
+
+/// Aggregated TCP options the v1 receiver recognises. Mirrors the
+/// internal `ParsedOptions` struct in
+/// kernel/net/tcp_segment.cpp. Use `duetos_parsers_tcp_parse_options`
+/// to populate from a raw options byte stream.
+struct DuetosTcpParsedOptions
+{
+    u16 mss;
+    u8 wscale;
+    bool has_wscale;
+    bool sack_permitted;
+    bool has_timestamp;
+    u8 _pad0[2];
+    u32 tsval;
+    u32 tsecr;
+};
+
+extern "C"
+{
+    /// Parse the recognised RFC-track options (MSS, WindowScale,
+    /// SackPermitted, Timestamps) from a TCP options byte stream.
+    /// Returns true iff `out` is non-null. Malformed or empty
+    /// streams leave `*out` at its default-zeroed state. Hostile
+    /// inputs (length-0 TLV spin, truncated tail) are absorbed;
+    /// the walker caps iterations at TCP_OPT_GUARD = 64.
+    bool duetos_parsers_tcp_parse_options(const u8* opts, usize opts_len, DuetosTcpParsedOptions* out);
 
     /// One's-complement Internet checksum (RFC 1071) over `buf`.
     /// 16-bit big-endian words summed with end-around carry, then

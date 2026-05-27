@@ -20,6 +20,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "log/klog.h"
+#include "parsers_rust.h"
 #include "mm/kheap.h"
 #include "net/firewall.h"
 #include "sched/sched.h"
@@ -192,57 +193,22 @@ struct ParsedOptions
 
 ParsedOptions ParseOptions(const u8* opts, u32 opts_len)
 {
+    // Byte parsing delegated to `duetos_net_parsers::tcp_parse_options`
+    // — TCP option bytes come from peer-controlled segments and
+    // every TLV length is attacker-shaped. The Rust walker uses
+    // checked arithmetic on every (i + opt_len) boundary, caps
+    // iterations at 64 (so a length-0 TLV-spin can't pin the
+    // kernel), and clamps wscale to 14 per RFC 7323.
+    ::duetos::net::parsers::DuetosTcpParsedOptions rs{};
+    (void)::duetos::net::parsers::duetos_parsers_tcp_parse_options(opts, opts_len, &rs);
     ParsedOptions po = {};
-    u32 i = 0;
-    while (i < opts_len)
-    {
-        const u8 kind = opts[i];
-        if (kind == kOptEnd)
-            break;
-        if (kind == kOptNop)
-        {
-            ++i;
-            continue;
-        }
-        if (i + 1 >= opts_len)
-            break;
-        const u8 len = opts[i + 1];
-        if (len < 2 || i + len > opts_len)
-            break;
-        switch (kind)
-        {
-        case kOptMss:
-            if (len == 4)
-                po.mss = (u16(opts[i + 2]) << 8) | u16(opts[i + 3]);
-            break;
-        case kOptWindowScale:
-            if (len == 3)
-            {
-                po.has_wscale = true;
-                po.wscale = opts[i + 2];
-                if (po.wscale > 14)
-                    po.wscale = 14;
-            }
-            break;
-        case kOptSackPermitted:
-            if (len == 2)
-                po.sack_permitted = true;
-            break;
-        case kOptTimestamp:
-            if (len == 10)
-            {
-                po.has_timestamp = true;
-                po.tsval =
-                    (u32(opts[i + 2]) << 24) | (u32(opts[i + 3]) << 16) | (u32(opts[i + 4]) << 8) | u32(opts[i + 5]);
-                po.tsecr =
-                    (u32(opts[i + 6]) << 24) | (u32(opts[i + 7]) << 16) | (u32(opts[i + 8]) << 8) | u32(opts[i + 9]);
-            }
-            break;
-        default:
-            break;
-        }
-        i += len;
-    }
+    po.mss = rs.mss;
+    po.wscale = rs.wscale;
+    po.has_wscale = rs.has_wscale;
+    po.sack_permitted = rs.sack_permitted;
+    po.has_timestamp = rs.has_timestamp;
+    po.tsval = rs.tsval;
+    po.tsecr = rs.tsecr;
     return po;
 }
 

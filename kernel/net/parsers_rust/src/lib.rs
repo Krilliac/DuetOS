@@ -322,6 +322,130 @@ pub extern "C" fn duetos_parsers_tcp_walk_options(
     walk_tcp_options(slice, cb, cookie)
 }
 
+/// Aggregated parsed-options view used by the v1 TCP receiver.
+/// Mirrors the C++ `ParsedOptions` struct in
+/// kernel/net/tcp_segment.cpp. Fields are zero-initialised; only
+/// the option kinds the receiver recognises are populated. SACK
+/// blocks themselves are not captured here — the receiver-side
+/// SACK consumer only needs the `sack_permitted` negotiation
+/// flag; the sender-side scoreboard (RFC 6675 NextSeg/IsLost)
+/// that consumes inbound SACK blocks is its own future slice.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DuetosTcpParsedOptions {
+    pub mss: u16,
+    pub wscale: u8,
+    pub has_wscale: bool,
+    pub sack_permitted: bool,
+    pub has_timestamp: bool,
+    pub _pad0: [u8; 2],
+    pub tsval: u32,
+    pub tsecr: u32,
+}
+
+const TCP_OPT_KIND_MSS: u8 = 2;
+const TCP_OPT_KIND_WINDOW_SCALE: u8 = 3;
+const TCP_OPT_KIND_SACK_PERMITTED: u8 = 4;
+const TCP_OPT_KIND_TIMESTAMP: u8 = 8;
+
+fn parse_tcp_options(opts: &[u8], out: &mut DuetosTcpParsedOptions) {
+    let mut i: usize = 0;
+    // Cap loop iterations the same way `walk_tcp_options` does so a
+    // hostile peer sending length-0 TLVs can't pin the kernel in a
+    // loop even if our length-check has a latent off-by-one bug.
+    let mut visited: u32 = 0;
+    while i < opts.len() && visited < TCP_OPT_GUARD {
+        let kind = opts[i];
+        if kind == TCP_OPT_END_OF_LIST {
+            return;
+        }
+        if kind == TCP_OPT_NOP {
+            i = i.saturating_add(1);
+            visited = visited.saturating_add(1);
+            continue;
+        }
+        // TLV: need kind + len + (len-2) value bytes.
+        let Some(len_off) = i.checked_add(1) else { return; };
+        if len_off >= opts.len() {
+            return;
+        }
+        let opt_len = opts[len_off] as usize;
+        if opt_len < 2 {
+            return;
+        }
+        let Some(end) = i.checked_add(opt_len) else { return; };
+        if end > opts.len() {
+            return;
+        }
+        match kind {
+            TCP_OPT_KIND_MSS if opt_len == 4 => {
+                out.mss = (u16::from(opts[i + 2]) << 8) | u16::from(opts[i + 3]);
+            }
+            TCP_OPT_KIND_WINDOW_SCALE if opt_len == 3 => {
+                out.has_wscale = true;
+                // RFC 7323 §2.3: shift count must be capped at 14.
+                // Saturate here so the caller never sees a wscale
+                // that would shift past the u32 boundary on apply.
+                let shift = opts[i + 2];
+                out.wscale = if shift > 14 { 14 } else { shift };
+            }
+            TCP_OPT_KIND_SACK_PERMITTED if opt_len == 2 => {
+                out.sack_permitted = true;
+            }
+            TCP_OPT_KIND_TIMESTAMP if opt_len == 10 => {
+                out.has_timestamp = true;
+                out.tsval = (u32::from(opts[i + 2]) << 24)
+                    | (u32::from(opts[i + 3]) << 16)
+                    | (u32::from(opts[i + 4]) << 8)
+                    | u32::from(opts[i + 5]);
+                out.tsecr = (u32::from(opts[i + 6]) << 24)
+                    | (u32::from(opts[i + 7]) << 16)
+                    | (u32::from(opts[i + 8]) << 8)
+                    | u32::from(opts[i + 9]);
+            }
+            _ => {
+                // Ignore unknown / unsupported kinds + malformed
+                // lengths; the negotiated set above is what the
+                // v1 receiver needs.
+            }
+        }
+        i = end;
+        visited = visited.saturating_add(1);
+    }
+}
+
+/// FFI: parse the recognised RFC-track options from a TCP-options
+/// byte stream into the populated `*out`. Returns true iff the
+/// inputs were non-null; the actual options stream's
+/// well-formed-ness is reflected in the populated struct (a
+/// malformed stream simply leaves later fields at default).
+#[no_mangle]
+pub extern "C" fn duetos_parsers_tcp_parse_options(
+    opts: *const u8,
+    opts_len: usize,
+    out: *mut DuetosTcpParsedOptions,
+) -> bool {
+    if out.is_null() {
+        return false;
+    }
+    // SAFETY: caller's contract is that out is writable; zero-
+    // initialise via the Default impl so partial parses don't
+    // leak stale fields.
+    unsafe {
+        core::ptr::write(out, DuetosTcpParsedOptions::default());
+    }
+    let Some(slice) = slice_from_raw(opts, opts_len) else {
+        // Null opts buffer is a no-op success — caller already
+        // sees a zero-initialised struct, which mirrors what the
+        // C++ ParseOptions returned on an empty options field.
+        return true;
+    };
+    // SAFETY: out is non-null + writable (just initialised).
+    let out_ref = unsafe { &mut *out };
+    parse_tcp_options(slice, out_ref);
+    true
+}
+
 // ---------- IPv4 header ----------
 
 /// One's-complement Internet checksum over a byte slice (RFC 1071).
@@ -736,5 +860,132 @@ mod tests {
             0x00, 0xc7,
         ];
         assert_eq!(ipv4_header_checksum(&h), 0);
+    }
+
+    // --- TCP ParsedOptions ---
+
+    fn parse_opts(buf: &[u8]) -> DuetosTcpParsedOptions {
+        let mut p = DuetosTcpParsedOptions::default();
+        let ok = duetos_parsers_tcp_parse_options(buf.as_ptr(), buf.len(), &mut p);
+        assert!(ok);
+        p
+    }
+
+    #[test]
+    fn tcp_parse_mss() {
+        // MSS = 1460 (0x05B4)
+        let opts = [TCP_OPT_KIND_MSS, 4, 0x05, 0xB4];
+        let p = parse_opts(&opts);
+        assert_eq!(p.mss, 1460);
+    }
+
+    #[test]
+    fn tcp_parse_window_scale_clamped() {
+        // Shift count 99 (> 14) must clamp to 14.
+        let opts = [TCP_OPT_NOP, TCP_OPT_KIND_WINDOW_SCALE, 3, 99];
+        let p = parse_opts(&opts);
+        assert!(p.has_wscale);
+        assert_eq!(p.wscale, 14);
+    }
+
+    #[test]
+    fn tcp_parse_sack_permitted() {
+        let opts = [TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_KIND_SACK_PERMITTED, 2];
+        let p = parse_opts(&opts);
+        assert!(p.sack_permitted);
+    }
+
+    #[test]
+    fn tcp_parse_timestamps() {
+        // Kind=8, len=10, tsval=0x01020304, tsecr=0x0A0B0C0D.
+        let opts = [TCP_OPT_KIND_TIMESTAMP, 10, 0x01, 0x02, 0x03, 0x04, 0x0A, 0x0B, 0x0C, 0x0D];
+        let p = parse_opts(&opts);
+        assert!(p.has_timestamp);
+        assert_eq!(p.tsval, 0x01020304);
+        assert_eq!(p.tsecr, 0x0A0B0C0D);
+    }
+
+    #[test]
+    fn tcp_parse_chained_syn_options() {
+        // Common SYN: MSS 1460, NOP NOP SACK-Permitted, NOP WindowScale 7, NOP NOP TSval+TSecr.
+        let opts = [
+            TCP_OPT_KIND_MSS, 4, 0x05, 0xB4,
+            TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_KIND_SACK_PERMITTED, 2,
+            TCP_OPT_NOP, TCP_OPT_KIND_WINDOW_SCALE, 3, 7,
+            TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_KIND_TIMESTAMP, 10,
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        ];
+        let p = parse_opts(&opts);
+        assert_eq!(p.mss, 1460);
+        assert!(p.sack_permitted);
+        assert!(p.has_wscale);
+        assert_eq!(p.wscale, 7);
+        assert!(p.has_timestamp);
+        assert_eq!(p.tsval, 0x11223344);
+        assert_eq!(p.tsecr, 0x55667788);
+    }
+
+    #[test]
+    fn tcp_parse_end_of_list_stops_walk() {
+        // EOL kind=0 ends the walk; later bytes are ignored.
+        let opts = [
+            TCP_OPT_KIND_MSS, 4, 0x05, 0xB4,
+            TCP_OPT_END_OF_LIST,
+            // These shouldn't be parsed — after EOL.
+            TCP_OPT_KIND_TIMESTAMP, 10, 1, 2, 3, 4, 5, 6, 7, 8,
+        ];
+        let p = parse_opts(&opts);
+        assert_eq!(p.mss, 1460);
+        assert!(!p.has_timestamp);
+    }
+
+    #[test]
+    fn tcp_parse_length_zero_terminates() {
+        // Malformed TLV with len=0 must not pin the parser. The
+        // walker bails immediately.
+        let opts = [TCP_OPT_KIND_MSS, 0, 0x05, 0xB4];
+        let p = parse_opts(&opts);
+        assert_eq!(p.mss, 0); // never populated; we bailed before the read.
+    }
+
+    #[test]
+    fn tcp_parse_length_overruns_stream() {
+        // Declared len=10 but only 4 bytes follow the kind/len pair.
+        let opts = [TCP_OPT_KIND_TIMESTAMP, 10, 1, 2];
+        let p = parse_opts(&opts);
+        assert!(!p.has_timestamp);
+    }
+
+    #[test]
+    fn tcp_parse_unknown_kind_skipped() {
+        // Kind=99 with len=4 — parser must skip past, not fail.
+        let opts = [99u8, 4, 0xDE, 0xAD, TCP_OPT_KIND_MSS, 4, 0x05, 0xB4];
+        let p = parse_opts(&opts);
+        assert_eq!(p.mss, 1460); // walker advanced past the unknown.
+    }
+
+    #[test]
+    fn tcp_parse_wrong_size_mss_ignored() {
+        // MSS kind with wrong len (5 instead of 4) — ignore the value.
+        let opts = [TCP_OPT_KIND_MSS, 5, 0x05, 0xB4, 0x00];
+        let p = parse_opts(&opts);
+        assert_eq!(p.mss, 0);
+    }
+
+    #[test]
+    fn tcp_parse_null_out_rejects() {
+        let opts = [TCP_OPT_NOP];
+        let ok = duetos_parsers_tcp_parse_options(opts.as_ptr(), opts.len(), core::ptr::null_mut());
+        assert!(!ok);
+    }
+
+    #[test]
+    fn tcp_parse_empty_stream_ok() {
+        let opts: [u8; 0] = [];
+        let mut p = DuetosTcpParsedOptions::default();
+        // Empty options is valid (e.g., established segment with no opts).
+        let ok = duetos_parsers_tcp_parse_options(opts.as_ptr(), 0, &mut p);
+        assert!(ok);
+        assert_eq!(p.mss, 0);
     }
 }
