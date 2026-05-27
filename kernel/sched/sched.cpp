@@ -55,6 +55,7 @@
 #include "core/panic.h"
 #include "proc/process.h"
 #include "diag/recovery.h"
+#include "cpu/critical.h"
 #include "cpu/percpu.h"
 #include "cpu/topology.h"
 #include "debug/probes.h"
@@ -2713,6 +2714,14 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
 void SchedYield()
 {
     KLOG_TRACE("sched", "SchedYield: voluntary preempt");
+    // Yielding from inside a preempt-off critical section is a
+    // contract violation — the whole point of `cpu::CriticalEnter`
+    // is that the caller chose not to be migrated. The deferred-
+    // preempt drain on `CriticalExit` is the legitimate path; an
+    // explicit yield must be balanced against the critnest counter
+    // first.
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "SchedYield from inside critical section",
+                       cpu::CriticalNesting());
     arch::Cli();
     Schedule();
     arch::Sti();
@@ -2721,6 +2730,12 @@ void SchedYield()
 void SchedSleepTicks(u64 ticks)
 {
     KLOG_TRACE_V("sched", "SchedSleepTicks: parking task for ticks", ticks);
+    // Sleeping inside a preempt-off critical section is a contract
+    // violation — the task would never be reachable for wake without
+    // first dropping critnest, which the sleeper can't do because
+    // it's no longer on-CPU.
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "SchedSleepTicks from inside critical section",
+                       cpu::CriticalNesting());
     if (ticks == 0)
     {
         SchedYield();
@@ -2754,6 +2769,8 @@ void SchedSleepUntil(u64 deadline_tick)
     // monotonically-increasing counter that OnTimerTick publishes,
     // so "passed" means (i64)(g_tick_now - deadline) >= 0.
     KLOG_TRACE_V("sched", "SchedSleepUntil: deadline_tick", deadline_tick);
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "SchedSleepUntil from inside critical section",
+                       cpu::CriticalNesting());
     arch::Cli();
     if (TickReached(g_tick_now, deadline_tick))
     {
@@ -2784,6 +2801,11 @@ u64 SchedNowTicks()
 void SchedExit()
 {
     KLOG_INFO("sched", "SchedExit: task entering termination path");
+    // A task can't exit while owning a critical section — there's
+    // no Exit pair on the dying side to drain the per-CPU counter.
+    // Leaving critnest > 0 across the post-switch onto a different
+    // task would silently disable preemption forever on this CPU.
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "SchedExit with critnest != 0", cpu::CriticalNesting());
     arch::Cli();
     Task* self = Current();
     // SchedExit must fire exactly once per task. A second call would
@@ -5093,6 +5115,8 @@ void WaitQueueBlockCurrentLocked(WaitQueue* wq)
 void WaitQueueBlock(WaitQueue* wq)
 {
     KASSERT(wq != nullptr, "sched", "WaitQueueBlock null queue");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "WaitQueueBlock from inside critical section",
+                       cpu::CriticalNesting());
 
     // Acquire manually + hold the lock straight through the
     // deschedule. The old guard-scope-then-Schedule() shape left an
@@ -5110,6 +5134,8 @@ void WaitQueueBlock(WaitQueue* wq)
 bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
 {
     KASSERT(wq != nullptr, "sched", "WaitQueueBlockTimeout null queue");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "WaitQueueBlockTimeout from inside critical section",
+                       cpu::CriticalNesting());
 
     // Zero ticks: no wait at all — yield and declare it a timeout.
     // Callers should not rely on this as a "cheap test" — use
@@ -5281,6 +5307,13 @@ u64 WaitQueueWakeAll(WaitQueue* wq)
 void MutexLock(Mutex* m)
 {
     KASSERT(m != nullptr, "sched", "MutexLock null mutex");
+    // Sleeping-mutex acquire inside a preempt-off critical section
+    // is a contract violation — the park path goes through
+    // ScheduleLockedHandoff which would deschedule us while
+    // critnest > 0, silently disabling preemption forever on the
+    // CPU that picks us back up.
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "MutexLock from inside critical section",
+                       cpu::CriticalNesting());
 
     // Lockdep edge-walk before the wait/acquire — the "held → this"
     // edge is recorded against any tagged SpinLock / Mutex this task
@@ -5539,6 +5572,8 @@ void CondvarWait(Condvar* cv, Mutex* m)
 {
     KASSERT(cv != nullptr, "sched", "CondvarWait null condvar");
     KASSERT(m != nullptr, "sched", "CondvarWait null mutex");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "CondvarWait from inside critical section",
+                       cpu::CriticalNesting());
 
     arch::Cli();
     if (m->owner != Current())
@@ -5610,6 +5645,8 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
 {
     KASSERT(cv != nullptr, "sched", "CondvarWaitTimeout null condvar");
     KASSERT(m != nullptr, "sched", "CondvarWaitTimeout null mutex");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "CondvarWaitTimeout from inside critical section",
+                       cpu::CriticalNesting());
 
     // Zero ticks: drop the lock, yield, re-acquire — report as
     // timeout so the caller doesn't treat a missed signal as a

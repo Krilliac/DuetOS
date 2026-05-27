@@ -46,6 +46,7 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/timer.h"
+#include "cpu/critical.h"
 #include "cpu/percpu.h"
 #include "cpu/percpu_counter.h"
 #include "cpu/topology.h"
@@ -1271,6 +1272,18 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // (~thousand single-instruction increments) and IRQ-off, so
     // safe to run inline here right after the BSP slot is live.
     duetos::arch::ThisCpuOpsSelfTest();
+
+    // Preempt-off (IRQs-on) critical-section self-test. Validates
+    // the `cpu::CriticalEnter` / `CriticalExit` round-trip,
+    // nesting, RAII guard, and the deferred-preempt drain — all
+    // before any in-kernel client of the primitive has a chance to
+    // exercise it. Runs unconditionally (same policy as
+    // PoisonAllocSelfTest / ThisCpuOpsSelfTest above): the
+    // primitive will be used in release builds, so it must be
+    // validated in release boot too. Cheap (~10 atomic ops + 1
+    // Schedule()), and runs after PerCpuInitBsp so critnest /
+    // deferred_preempt slots are live.
+    duetos::cpu::CriticalSelfTest();
 
     // Architectural LBR — start the per-CPU branch trace ring as
     // early as practical so a panic during late init still has
