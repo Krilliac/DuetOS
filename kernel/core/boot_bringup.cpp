@@ -78,6 +78,7 @@
 #include "drivers/input/hid_keyboard.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/iommu/dmar.h"
+#include "drivers/iommu/vtd.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/net/ath9k_htc.h"
 #include "drivers/net/ath9k_htc_fw.h"
@@ -1192,6 +1193,14 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // `-device intel-iommu`.
     duetos::drivers::iommu::DmarInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::DmarSelfTest());
+
+    // VT-d register MMIO map + capability decode (read-only). No
+    // control bits written; no translation enabled. Surfaces what
+    // each IOMMU supports so slice 27c can program page tables +
+    // enable translation without re-decoding. No-op when
+    // DmarPresent()=false (QEMU-default / VirtualBox).
+    duetos::drivers::iommu::VtdInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::VtdSelfTest());
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();
