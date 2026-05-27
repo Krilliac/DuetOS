@@ -123,16 +123,21 @@ cleanup debt: move the residual up and delete the rest.
   `tools/test/smp-stress-sweep.sh 8 8 5` (release SMP=8) and
   no inversions in the lockdep self-test under the new
   storage layout.
-- **Residual (architectural cleanup, no live failure):** the
-  spinlock-vs-mutex class split. Today every `LockClass` lives
-  in one per-CPU stack; with the per-task `Task::lockdep_held`
-  snapshot/restore wired underneath, sleeping-mutex classes
-  technically ride the task across a switch via that buffer,
-  while spinlock classes are protected by Cli (single CPU at a
-  time). The two are not separately tagged at the API. A
-  `LockClassSpin` / `LockClassMutex` tag would make the
-  separation explicit so an audit can verify a sleeping-mutex
-  class never appears on a per-CPU spinlock stack.
+- **LockKind class-tag split — LANDED (2026-05-26).** Upstream
+  `90867be5 sync/lockdep: WITNESS-style lock-kind taxonomy +
+  LOCKDEP_ASSERT_HELD` shipped the WITNESS-style three-variant
+  enum `LockKind { Spin, Sleep, Irq }` with acquire-time
+  enforcement: a `Sleep` acquire while holding a `Spin` / `Irq`
+  class is a BUG (the Sleep acquire may yield but the CPU has
+  IRQs off and another task can't run on it). Counter:
+  `g_kind_violations`. Catches the violation at the OFFENDING
+  ACQUIRE SITE — better diagnostic than an after-the-fact
+  snapshot-time audit. Companion primitive
+  `LOCKDEP_ASSERT_HELD(class_id)` lets a callee assert a
+  caller's invariant directly. Spinlock-vs-mutex separation is
+  now explicit at the API for every kind: sched/kobject/kstack/
+  pci-config/breakpoints/cleanroom-trace are `Spin`, wifi/
+  fat32/compositor are `Sleep`.
 - **Blocks on:** a workload that produces a false inversion the
   per-CPU + per-task pair doesn't already absorb. None
   observed since 2026-05-22.
@@ -1407,37 +1412,44 @@ established `tests/fuzz/` pattern (host harness + `host_shim/`
 stubs + a `seeds/gen_*_seeds.py`); the codec/cert ones are pure
 `bytes → struct` and need *less* shimming than the FS probes.
 
-- **DEFLATE / gzip / zip** — `kernel/util/deflate.{h,cpp}`,
-  `gzip.h`, `zip.h`. Decompressors are the single richest fuzz
-  surface (bit-level Huffman over attacker data, window
-  arithmetic, decompression-bomb ratios). Highest priority.
-- **ASN.1 / X.509** — `kernel/crypto/asn1.{h,cpp}`,
-  `x509.{h,cpp}`. TLV length/recursion parsing of untrusted TLS
-  certificates — classic OOB / stack-recursion territory.
-- **TLS records/handshake** — `kernel/net/tls.cpp`
-  (`TlsPeekRecord`, `TlsParseServerHello`,
-  `TlsParseCertificateLeaf`, `TlsPeekHandshake`). Untrusted
-  network bytes; feeds the ASN.1/X.509 path.
-- **Image decoders** — `kernel/util/jpeg.cpp`, `png` (+
-  `deflate`), `tga.h`. Untrusted file bytes; wallpaper / asset
-  load path.
-- **EDID / CEA-861** — `kernel/drivers/gpu/edid.cpp`,
-  `cea861.cpp`. Untrusted monitor-supplied descriptor bytes;
-  both already have `*_selftest.cpp` so a harness entrypoint is
-  trivial.
 - **AML interpreter** — `kernel/acpi/aml.cpp`, `aml_eval.cpp`.
   Firmware-provided bytecode the kernel *executes*; large
   attack surface, heavier harness (needs an ACPI namespace
   stub).
-- **USB descriptors** — `kernel/drivers/usb/usb_class_desc.cpp`,
-  `hid_descriptor.h`, `cdc_ecm.cpp`, `rndis.cpp`. Device-
-  supplied (untrusted peripheral) configuration/HID-report
-  descriptors.
+- **CDC-ECM + RNDIS** — `kernel/drivers/usb/cdc_ecm.cpp`,
+  `rndis.cpp`. Device-supplied configuration/data-frame bytes;
+  parser surface beyond the standard class-descriptor walker.
+  (The class-descriptor + HID-report-descriptor walkers under
+  `usb_class_desc.cpp` + `hid_descriptor.cpp` are now both
+  fuzzed via the Rust-backed harnesses landed 2026-05-26.)<!--
+  Retired bullets — seeded + fuzzed 2026-05-26:
+  X.509 (seeds/gen_x509_seeds.py — openssl-subprocess + embedded
+  RSA-2048 reference cert + 128-byte truncation seed; fuzz_x509
+  ≈ 244k runs/s + 551 new units added past the format gate);
+  EDID + CEA-861 (seeds/gen_{edid,cea861}_seeds.py + host_shim/
+  edid_stubs.cpp ConsoleWrite no-op stub; fuzz_edid ≈ 407k/s,
+  fuzz_cea861 ≈ 511k/s); USB class-descriptor + HID report-
+  descriptor (fuzz_usbclass + fuzz_usbhid via the
+  usbclass/usbhid Rust rlib + panic=abort staticlib pattern;
+  fuzz_usbclass ≈ 1.05M/s, fuzz_usbhid ≈ 639k/s — both clean);
+  TLS records/handshake (fuzz_tls + seeds/gen_tls_seeds.py —
+  five parsers (TlsPeekRecord / TlsPeekHandshake /
+  TlsParseServerHello / TlsParseCertificateLeaf /
+  TlsParseServerHelloDone) dispatched by a 1-byte selector;
+  6 seeds covering each entry point at ≈ 982k runs/s clean);
+  Image decoders (fuzz_bmp / fuzz_tga / fuzz_jpeg / fuzz_png
+  harnesses + seeds + duetos_img_meta Rust shim were already
+  in tree from prior slices — bullet was stale).
+-->
 - **Bluetooth HCI/HID** — `kernel/net/bluetooth/hci.h`,
   `hid.h`. Untrusted radio peer.
-- **Disassembler** — `kernel/debug/disasm.cpp`. Decodes
-  arbitrary code bytes on the crash-dump path; a decode bug
-  there faults the post-mortem.
+<!-- Disassembler bullet retired 2026-05-26: fuzz_disasm harness
+     + host_shim/disasm_stubs.cpp + seeds/gen_disasm_seeds.py
+     landed; fuzz_disasm runs ≈ 50k execs/s clean on the canonical
+     five-family seed corpus (prologue / ALU / control / SIMD /
+     unknown-as-db). Auto-picked up by tools/test/fuzz-all.sh via
+     the established seeds/gen_<name>_seeds.py convention. -->
+
 
 **Blocks on:** nothing — independent slices, one parser each,
 same recipe. Pick the top unstruck bullet, land harness +

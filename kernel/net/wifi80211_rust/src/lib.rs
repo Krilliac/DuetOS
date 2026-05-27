@@ -74,6 +74,47 @@ pub struct DuetosWifiEapolKey {
     pub _pad3: [u8; 7],
 }
 
+/// 802.11d Country Information Element §9.4.2.10. Triplets are
+/// stored inline (capped at 16) so the parser is allocation-free.
+/// Operating-triplet form (first_channel >= 201) is parsed but
+/// not stored — `IntersectWithCountryIe` only consumes sub-band
+/// triplets, and ignoring the operating-class form keeps the
+/// safety property "a beacon can only narrow the allowed set."
+pub const COUNTRY_IE_MAX_TRIPLETS: usize = 16;
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct DuetosWifiCountryIeTriplet {
+    pub first_channel: u8,
+    pub num_channels: u8,
+    pub max_tx_dbm: i8,
+    pub _pad: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DuetosWifiCountryIe {
+    pub alpha2: [u8; 2],
+    pub environment: u8,
+    pub n_triplets: u8,
+    pub triplets: [DuetosWifiCountryIeTriplet; COUNTRY_IE_MAX_TRIPLETS],
+    pub ok: u8,
+    pub _pad: [u8; 3],
+}
+
+impl Default for DuetosWifiCountryIe {
+    fn default() -> Self {
+        Self {
+            alpha2: [0; 2],
+            environment: 0,
+            n_triplets: 0,
+            triplets: [DuetosWifiCountryIeTriplet::default(); COUNTRY_IE_MAX_TRIPLETS],
+            ok: 0,
+            _pad: [0; 3],
+        }
+    }
+}
+
 const WIFI_FRAME_MIN: usize = 24;
 const BEACON_FIXED_BODY_BYTES: usize = 12;
 /// EAPOL-Key body lives below a 4-byte EAPOL header (IEEE 802.1X-2010 §11.4).
@@ -195,6 +236,56 @@ fn parse_ie(buf: &[u8], off: usize, out: &mut DuetosWifiIe) -> bool {
     true
 }
 
+/// Parse a Country Information Element payload (the bytes AFTER
+/// the 2-byte element-id/length header). Returns true on a
+/// well-formed IE; operating-triplet entries (first_channel >=
+/// 201) are skipped per the safety property documented above.
+fn parse_country_ie(buf: &[u8], out: &mut DuetosWifiCountryIe) -> bool {
+    // Minimum payload: 2-byte alpha2 + 1-byte environment.
+    if buf.len() < 3 {
+        return false;
+    }
+    out.alpha2[0] = buf[0];
+    out.alpha2[1] = buf[1];
+    out.environment = buf[2];
+    out.n_triplets = 0;
+    let mut i: usize = 3;
+    // Cap at COUNTRY_IE_MAX_TRIPLETS to bound the stored output
+    // AND at TCP_OPT_GUARD-equivalent 64 iterations so a hostile
+    // 255-byte IE with 80+ triplets can't tie up the parser.
+    let mut visited: u32 = 0;
+    while i + 3 <= buf.len()
+        && (out.n_triplets as usize) < COUNTRY_IE_MAX_TRIPLETS
+        && visited < 64
+    {
+        let first = buf[i];
+        if first >= 201 {
+            // Operating-triplet form: skip 3 bytes without
+            // recording. The intersector only consumes sub-band
+            // triplets; ignoring operating-class form keeps the
+            // safety property intact.
+            i = match i.checked_add(3) {
+                Some(v) => v,
+                None => return true, // saturated; treat as end
+            };
+            visited = visited.saturating_add(1);
+            continue;
+        }
+        let slot = out.n_triplets as usize;
+        out.triplets[slot].first_channel = first;
+        out.triplets[slot].num_channels = buf[i + 1];
+        out.triplets[slot].max_tx_dbm = buf[i + 2] as i8;
+        out.n_triplets += 1;
+        i = match i.checked_add(3) {
+            Some(v) => v,
+            None => return true,
+        };
+        visited = visited.saturating_add(1);
+    }
+    out.ok = 1;
+    true
+}
+
 fn parse_eapol_key(buf: &[u8], out: &mut DuetosWifiEapolKey) -> bool {
     // IEEE 802.1X EAPOL packet header:
     //   [0]   Protocol Version (1 or 2)
@@ -279,6 +370,29 @@ pub extern "C" fn duetos_wifi80211_parse_ie(buf: *const u8, len: usize, off: usi
 }
 
 #[no_mangle]
+pub extern "C" fn duetos_wifi80211_parse_country_ie(
+    buf: *const u8,
+    len: usize,
+    out: *mut DuetosWifiCountryIe,
+) -> bool {
+    if out.is_null() {
+        return false;
+    }
+    // SAFETY: caller's contract that `out` is writable; zero-init
+    // via Default::default so a partial parse never leaks stale
+    // triplets.
+    unsafe {
+        ptr::write(out, DuetosWifiCountryIe::default());
+    }
+    let Some(slice) = slice_from_raw(buf, len) else {
+        return false;
+    };
+    // SAFETY: out is non-null + writable (just initialised).
+    let dst = unsafe { &mut *out };
+    parse_country_ie(slice, dst)
+}
+
+#[no_mangle]
 pub extern "C" fn duetos_wifi80211_parse_eapol_key(buf: *const u8, len: usize, out: *mut DuetosWifiEapolKey) -> bool {
     let Some(dst) = out_init(out) else {
         return false;
@@ -295,6 +409,8 @@ extern crate alloc;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     fn make_management_beacon() -> [u8; 24] {
         let mut buf = [0u8; 24];
@@ -467,5 +583,89 @@ mod tests {
         buf[4 + 93..4 + 95].copy_from_slice(&0xFFFFu16.to_be_bytes());
         let mut out = DuetosWifiEapolKey::default();
         assert!(!parse_eapol_key(&buf, &mut out));
+    }
+
+    // --- Country IE ---
+
+    #[test]
+    fn country_ie_minimal_no_triplets() {
+        // 2 alpha2 bytes + 1 environment.
+        let buf = [b'U', b'S', b'I'];
+        let mut out = DuetosWifiCountryIe::default();
+        assert!(parse_country_ie(&buf, &mut out));
+        assert_eq!(out.alpha2, [b'U', b'S']);
+        assert_eq!(out.environment, b'I');
+        assert_eq!(out.n_triplets, 0);
+    }
+
+    #[test]
+    fn country_ie_subband_triplet() {
+        // US indoor + one sub-band triplet (ch 1, 11 channels, 30 dBm).
+        let buf = [b'U', b'S', b'I', 1, 11, 30];
+        let mut out = DuetosWifiCountryIe::default();
+        assert!(parse_country_ie(&buf, &mut out));
+        assert_eq!(out.n_triplets, 1);
+        assert_eq!(out.triplets[0].first_channel, 1);
+        assert_eq!(out.triplets[0].num_channels, 11);
+        assert_eq!(out.triplets[0].max_tx_dbm, 30);
+    }
+
+    #[test]
+    fn country_ie_signed_dbm_negative() {
+        // -1 dBm encoded as 0xFF.
+        let buf = [b'J', b'P', b'I', 1, 14, 0xFF];
+        let mut out = DuetosWifiCountryIe::default();
+        assert!(parse_country_ie(&buf, &mut out));
+        assert_eq!(out.triplets[0].max_tx_dbm, -1);
+    }
+
+    #[test]
+    fn country_ie_operating_triplet_skipped() {
+        // Sub-band ch1, then operating triplet (>=201), then sub-band ch36.
+        let buf = [b'U', b'S', b'I', 1, 11, 30, 201, 0, 0, 36, 8, 17];
+        let mut out = DuetosWifiCountryIe::default();
+        assert!(parse_country_ie(&buf, &mut out));
+        // 2 sub-band triplets recorded, operating one skipped.
+        assert_eq!(out.n_triplets, 2);
+        assert_eq!(out.triplets[0].first_channel, 1);
+        assert_eq!(out.triplets[1].first_channel, 36);
+    }
+
+    #[test]
+    fn country_ie_short_buffer_rejects() {
+        let buf = [b'U', b'S']; // 2 bytes, need at least 3.
+        let mut out = DuetosWifiCountryIe::default();
+        assert!(!parse_country_ie(&buf, &mut out));
+    }
+
+    #[test]
+    fn country_ie_caps_at_16_triplets() {
+        // Build 20 sub-band triplets; only first 16 should be stored.
+        let mut buf = vec![b'U', b'S', b'I'];
+        for i in 0..20 {
+            buf.extend_from_slice(&[1 + i as u8, 1, 20]);
+        }
+        let mut out = DuetosWifiCountryIe::default();
+        assert!(parse_country_ie(&buf, &mut out));
+        assert_eq!(out.n_triplets, 16);
+    }
+
+    #[test]
+    fn country_ie_trailing_partial_triplet_ignored() {
+        // 2 sub-band triplets + 2 trailing bytes (not enough for triplet).
+        let buf = [b'U', b'S', b'I', 1, 11, 30, 36, 8, 17, 0xAA, 0xBB];
+        let mut out = DuetosWifiCountryIe::default();
+        assert!(parse_country_ie(&buf, &mut out));
+        assert_eq!(out.n_triplets, 2);
+    }
+
+    #[test]
+    fn country_ie_null_out_rejects() {
+        let buf = [b'U', b'S', b'I'];
+        assert!(!duetos_wifi80211_parse_country_ie(
+            buf.as_ptr(),
+            buf.len(),
+            core::ptr::null_mut(),
+        ));
     }
 }

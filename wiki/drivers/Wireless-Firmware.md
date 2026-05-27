@@ -74,8 +74,14 @@ Add a firmware-loader pipeline with four layers:
    `.ucode` file shape used by Intel iwlwifi blobs, with clean-room payload
    sections supplied by the caller.
 3. **DuetOS package envelope** — `FwPackageParse()` validates `DUETFWPK`
-   packages, verifies SHA-256 over the payload, and denies custom/lab images
-   unless the caller explicitly opts in.
+   packages, verifies SHA-256 over the payload, denies custom/lab images
+   unless the caller explicitly opts in, and (when a trailing `FWSG`
+   trust-root signature is present) verifies RSA-PKCS1-v1.5 over
+   `SHA-256(header || payload)` against a baked-in public key (see
+   `kernel/loader/firmware_package_trust.h`). The matching signing tool
+   is `tools/build/fw-sign.py`; production builds set
+   `DUETOS_FW_REQUIRE_SIGNATURE=1` so packages without a valid signature
+   are refused at parse time.
 4. **Package lookup** — the VFS firmware loader searches DuetOS/open firmware
    paths before vendor paths, and now unwraps verified DuetOS packages so
    drivers receive the payload bytes rather than the envelope.

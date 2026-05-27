@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
+#include "duetos_nvidia_gsp_fw.h"
 #include "log/klog.h"
 
 /*
@@ -20,17 +21,6 @@
 namespace duetos::drivers::gpu::nvidia
 {
 
-namespace
-{
-
-u32 LeU32(const u8* p)
-{
-    return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) |
-           (static_cast<u32>(p[3]) << 24);
-}
-
-} // namespace
-
 NvidiaGspArchClass NvidiaGspClassifyDescriptor(u32 descriptor_size)
 {
     if (descriptor_size == kNvidiaDescBytesTuringGa100)
@@ -42,74 +32,40 @@ NvidiaGspArchClass NvidiaGspClassifyDescriptor(u32 descriptor_size)
 
 ::duetos::core::Result<void> NvidiaGspFwParse(const u8* blob, u32 blob_size, NvidiaGspFwParsed* parsed)
 {
+    // Byte parsing delegated to the `duetos_nvidia_gsp_fw` Rust
+    // crate (kernel/drivers/gpu/nvidia_gsp_fw_rust/). Firmware
+    // blobs are attacker-controllable when the install media or
+    // staging path is hostile — Rust-Subsystems P1. The crate's
+    // unsafe surface is the FFI wall only; every length check
+    // and offset arithmetic is checked-arithmetic safe Rust.
     if (parsed == nullptr)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+
+    DuetosNvidiaGspFwParsed rs{};
+    const i32 rc = duetos_nvidia_gsp_fw_parse(blob, blob_size, &rs);
+
+    // Copy fields from the Rust shape to the public struct.
     *parsed = NvidiaGspFwParsed{};
+    parsed->valid = rs.valid;
+    parsed->bin_magic = rs.bin_magic;
+    parsed->bin_ver = rs.bin_ver;
+    parsed->bin_size = rs.bin_size;
+    parsed->header_offset = rs.header_offset;
+    parsed->data_offset = rs.data_offset;
+    parsed->data_size = rs.data_size;
+    parsed->descriptor_offset = rs.descriptor_offset;
+    parsed->descriptor_size = rs.descriptor_size;
+    parsed->arch_class = static_cast<NvidiaGspArchClass>(rs.arch_class);
+    parsed->payload = rs.payload;
+    parsed->payload_size = rs.payload_size;
+    parsed->payload_looks_elf = rs.payload_looks_elf;
+    parsed->reject_reason = rs.reject_reason;
 
-    if (blob == nullptr || blob_size < kNvidiaBinHdrBytes)
-    {
-        parsed->reject_reason |= kNvFwRejectBlobTooShort;
+    if (rc == 0)
+        return {};
+    if (rc == 1)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
-    }
-
-    parsed->bin_magic = LeU32(blob + 0x00);
-    parsed->bin_ver = LeU32(blob + 0x04);
-    parsed->bin_size = LeU32(blob + 0x08);
-    parsed->header_offset = LeU32(blob + 0x0C);
-    parsed->data_offset = LeU32(blob + 0x10);
-    parsed->data_size = LeU32(blob + 0x14);
-
-    if (parsed->bin_magic != kNvidiaBinHdrMagic)
-    {
-        parsed->reject_reason |= kNvFwRejectBadMagic;
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-    }
-    if (parsed->bin_ver != kNvidiaBinHdrVerExpected)
-    {
-        // Newer container revisions might rearrange fields; refuse
-        // them rather than silently mis-parsing.
-        parsed->reject_reason |= kNvFwRejectBadVersion;
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-    }
-    if (parsed->data_size > kNvidiaMaxGspImageBytes)
-    {
-        parsed->reject_reason |= kNvFwRejectOversize;
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-    }
-    if (parsed->header_offset != kNvidiaBinHdrBytes)
-    {
-        // The publicly-documented layout puts the inner descriptor
-        // immediately after the outer header. Anything else means a
-        // pre/post amendment we don't understand.
-        parsed->reject_reason |= kNvFwRejectHeaderOffset;
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-    }
-    if (parsed->data_offset < parsed->header_offset + kNvidiaDescBytesTuringGa100)
-    {
-        parsed->reject_reason |= kNvFwRejectDescTooSmall;
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-    }
-    const u64 data_end = static_cast<u64>(parsed->data_offset) + parsed->data_size;
-    if (parsed->data_offset >= blob_size || data_end > blob_size)
-    {
-        parsed->reject_reason |= kNvFwRejectDataBounds;
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-    }
-
-    parsed->descriptor_offset = parsed->header_offset;
-    parsed->descriptor_size = parsed->data_offset - parsed->header_offset;
-    parsed->arch_class = NvidiaGspClassifyDescriptor(parsed->descriptor_size);
-
-    parsed->payload = blob + parsed->data_offset;
-    parsed->payload_size = parsed->data_size;
-    // ELF magic check is advisory — a payload that doesn't start
-    // with `\x7fELF` is still structurally valid at the container
-    // level. The ELF walker (next slice) is the place to enforce.
-    parsed->payload_looks_elf = (parsed->data_size >= 4 && parsed->payload[0] == 0x7Fu && parsed->payload[1] == 'E' &&
-                                 parsed->payload[2] == 'L' && parsed->payload[3] == 'F');
-
-    parsed->valid = true;
-    return {};
+    return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
 }
 
 void NvidiaGspFwLog(const char* basename, const NvidiaGspFwParsed& parsed)

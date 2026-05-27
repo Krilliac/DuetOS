@@ -2,155 +2,64 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "duetos_iwlwifi_fw.h"
 #include "log/klog.h"
 
 namespace duetos::drivers::net
 {
 
-namespace
-{
-
-// Little-endian dword read at byte offset `off` of `buf`. The blob
-// is treated as raw bytes — vendor microcode is shipped in LE form
-// regardless of host endianness, and the parser MUST not assume
-// alignment beyond byte. (iwlwifi blobs are 4-byte-aligned in
-// practice, but we don't take that on faith.)
-u32 ReadLe32(const u8* buf, u32 off)
-{
-    return static_cast<u32>(buf[off]) | (static_cast<u32>(buf[off + 1]) << 8) | (static_cast<u32>(buf[off + 2]) << 16) |
-           (static_cast<u32>(buf[off + 3]) << 24);
-}
-
-// Round `n` up to the next 4-byte boundary. iwlwifi pads every TLV
-// payload to dword alignment, regardless of the declared length.
-u32 RoundUp4(u32 n)
-{
-    return (n + 3u) & ~3u;
-}
-
-void CopyHumanReadable(char* dst, const u8* src, u32 max_in)
-{
-    u32 i = 0;
-    for (; i < max_in && i < kIwlTlvHumanReadableLen && src[i] != 0; ++i)
-    {
-        const u8 c = src[i];
-        // Sanitize — the field is printed to serial. Reject every
-        // byte outside the 7-bit printable ASCII range so a
-        // mangled blob can't slip control characters into the log.
-        dst[i] = (c >= 0x20 && c < 0x7F) ? static_cast<char>(c) : '?';
-    }
-    dst[i] = '\0';
-}
-
-} // namespace
-
 ::duetos::core::Result<void> IwlFirmwareParse(const u8* blob, u32 blob_size, IwlFirmwareParsed* parsed)
 {
-    if (blob == nullptr || parsed == nullptr)
+    // Byte parsing delegated to `duetos_iwlwifi_fw` Rust crate.
+    // Untrusted firmware bytes — Rust-Subsystems P1. The Rust
+    // walker uses checked_add for every (off + 8 + length)
+    // arithmetic so a hostile TLV length can't wrap to a
+    // smaller value that "fits the blob."
+    if (parsed == nullptr)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
-    *parsed = {};
-    if (blob_size < kIwlFwHeaderBytes)
-        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
 
-    // Header preamble.
-    //   bytes [0..4)  : zero (distinguishes TLV format from v1/v2).
-    //   bytes [4..8)  : magic 0x0A4C5749 ("IWL\n" LE).
-    //   bytes [8..72) : 64-byte human-readable name.
-    //   bytes [72..76): version dword.
-    //   bytes [76..80): build dword.
-    //   bytes [80..88): 8 bytes ignore.
-    // TLV stream begins immediately at +88 (no further alignment).
-    const u32 zero_word = ReadLe32(blob, 0);
-    const u32 magic = ReadLe32(blob, 4);
-    if (zero_word != 0 || magic != kIwlFwTlvMagic)
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
+    DuetosIwlFirmwareParsed rs{};
+    const i32 rc = duetos_iwlwifi_fw_parse(blob, blob_size, &rs);
 
-    CopyHumanReadable(parsed->human_readable, blob + 8, kIwlTlvHumanReadableLen);
-    parsed->ver_packed = ReadLe32(blob, 8 + kIwlTlvHumanReadableLen);
-    parsed->build = ReadLe32(blob, 8 + kIwlTlvHumanReadableLen + 4);
-
-    // The 8-byte "ignore" field is officially at +80; the TLV stream
-    // begins at +88. We don't add the 4 alignment bytes — the spec
-    // (and Linux's iwl-drv) walks TLVs starting at offset 88.
-    constexpr u32 kTlvStreamStart = 88;
-    u32 off = kTlvStreamStart;
-
-    // TLV walk. Each record:
-    //   u32 type, u32 length, u8 payload[length], pad to dword.
-    while (off + 8 <= blob_size)
+    *parsed = IwlFirmwareParsed{};
+    parsed->valid = rs.valid;
+    // Copy the 64-byte name (NUL-terminated) and sanitize for
+    // serial-print: replace any non-printable byte with '?' so a
+    // mangled blob can't slip control chars into the log.
+    for (u32 i = 0; i < kIwlTlvHumanReadableLen; ++i)
     {
-        const u32 type = ReadLe32(blob, off);
-        const u32 length = ReadLe32(blob, off + 4);
-        const u32 payload_off = off + 8;
-
-        // Bounds check. A length that would push the payload past
-        // the blob end is fatal — we can't trust further records.
-        if (length > blob_size || payload_off + length > blob_size)
+        const u8 c = rs.human_readable[i];
+        if (c == 0)
         {
-            ++parsed->invalid_records;
-            return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-        }
-
-        ++parsed->total_records;
-        const u8* payload = blob + payload_off;
-
-        switch (static_cast<IwlTlvType>(type))
-        {
-        case IwlTlvType::Inst:
-            parsed->inst = {payload, length};
-            break;
-        case IwlTlvType::Data:
-            parsed->data = {payload, length};
-            break;
-        case IwlTlvType::Init:
-            parsed->init = {payload, length};
-            break;
-        case IwlTlvType::InitData:
-            parsed->init_data = {payload, length};
-            break;
-        case IwlTlvType::SecRt:
-        case IwlTlvType::SecureSecRt:
-            if (parsed->sec_rt_count == 0)
-                parsed->sec_rt_first = {payload, length};
-            ++parsed->sec_rt_count;
-            break;
-        case IwlTlvType::Flags:
-            if (length >= 4)
-                parsed->flags = ReadLe32(blob, payload_off);
-            break;
-        case IwlTlvType::NumOfCpu:
-            if (length >= 4)
-                parsed->num_of_cpu = ReadLe32(blob, payload_off);
-            break;
-        case IwlTlvType::FwVersion:
-            if (length >= 4)
-                parsed->fw_version = ReadLe32(blob, payload_off);
-            break;
-        case IwlTlvType::PhySku:
-            if (length >= 4)
-                parsed->phy_sku = ReadLe32(blob, payload_off);
-            break;
-        case IwlTlvType::HwType:
-            if (length >= 4)
-                parsed->hw_type = ReadLe32(blob, payload_off);
-            break;
-        default:
-            ++parsed->unknown_records;
+            parsed->human_readable[i] = '\0';
             break;
         }
-
-        // Advance past payload, then up to dword boundary.
-        const u32 advance = 8 + RoundUp4(length);
-        // Defensive: a 0-length record advances by 8 and we keep
-        // going. A length so large it caused payload_off+length to
-        // wrap can't get here — the bounds check above already
-        // ruled it out.
-        off += advance;
+        parsed->human_readable[i] = (c >= 0x20 && c < 0x7F) ? static_cast<char>(c) : '?';
     }
+    parsed->human_readable[kIwlTlvHumanReadableLen] = '\0';
+    parsed->ver_packed = rs.ver_packed;
+    parsed->build = rs.build;
+    parsed->inst = {rs.inst.data, rs.inst.size};
+    parsed->data = {rs.data.data, rs.data.size};
+    parsed->init = {rs.init.data, rs.init.size};
+    parsed->init_data = {rs.init_data.data, rs.init_data.size};
+    parsed->sec_rt_first = {rs.sec_rt_first.data, rs.sec_rt_first.size};
+    parsed->sec_rt_count = rs.sec_rt_count;
+    parsed->flags = rs.flags;
+    parsed->num_of_cpu = rs.num_of_cpu;
+    parsed->fw_version = rs.fw_version;
+    parsed->phy_sku = rs.phy_sku;
+    parsed->hw_type = rs.hw_type;
+    parsed->total_records = rs.total_records;
+    parsed->unknown_records = rs.unknown_records;
+    parsed->walked_bytes = rs.walked_bytes;
+    parsed->invalid_records = rs.invalid_records;
 
-    parsed->walked_bytes = off;
-    parsed->valid = (parsed->total_records > 0);
-    return ::duetos::core::Result<void>{};
+    if (rc == 0)
+        return {};
+    if (rc == 1)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
 }
 
 void IwlFirmwareLog(const IwlFirmwareParsed& parsed)

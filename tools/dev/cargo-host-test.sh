@@ -30,6 +30,15 @@ HOST_TEST_CRATES=(
     "kernel/mm/multiboot2_rust"
     "kernel/net/wifi80211_rust"
     "kernel/net/hci_rust"
+    "kernel/net/tls_rust"
+    "kernel/util/vt_parser_rust"
+    "kernel/drivers/gpu/nvidia_gsp_fw_rust"
+    "kernel/drivers/gpu/amd_gfx_fw_rust"
+    "kernel/drivers/net/bcm43xx_fw_rust"
+    "kernel/drivers/net/rtl88xx_fw_rust"
+    "kernel/drivers/net/iwlwifi_fw_rust"
+    "kernel/drivers/iommu/dmar_rust"
+    "kernel/drivers/iommu/ivrs_rust"
 )
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

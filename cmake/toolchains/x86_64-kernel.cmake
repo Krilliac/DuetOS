@@ -63,14 +63,26 @@ set(DUETOS_KERNEL_C_FLAGS
     # interrupt-window or MMIO emulation fallback lands at the
     # entry of an indirectly-called function (observed at
     # MemRead, the C++ block-device callback Rust calls through
-    # the Device struct). CET wiring (CetInit, CR4.CET set,
-    # #CP handling) hasn't landed yet either, so this flag was
-    # only contributing dead NOPs anyway. Re-enable in lockstep
-    # with the CetInit slice + a runtime probe that checks
-    # whether the host KVM decoder handles endbr64 (`-cpu max`
-    # exposes the feature flag but the emulator support is
-    # kernel-version-gated).
+    # the Device struct). CR4.CET, IA32_S_CET writes, and
+    # CetEnable now exist in tree (kernel/arch/x86_64/cet.cpp);
+    # what's missing is the kernel-image compile flag below + a
+    # boot-time call to CetEnable + per-task shadow-stack
+    # allocation for SS. Re-enable in lockstep with a runtime
+    # probe that checks whether the host KVM decoder handles
+    # endbr64 (`-cpu max` exposes the feature flag but the
+    # emulator support is kernel-version-gated). Flip this line
+    # to `-fcf-protection=branch` AND uncomment the
+    # DUETOS_KERNEL_HAS_ENDBR define just below to opt the build
+    # in; CetEnable's `#if defined(DUETOS_KERNEL_HAS_ENDBR)` gate
+    # will then set ENDBR_EN safely.
     -fcf-protection=none
+    # When the build flag above flips to `-fcf-protection=branch`,
+    # also flip this define so CetEnable knows it can set
+    # ENDBR_EN without #CP'ing the next indirect call. Default off
+    # to stay safe under -fcf-protection=none. (Defined-but-zero
+    # is treated as "present"; an absent macro is treated as
+    # "absent" by the #if defined check.)
+    # add_compile_definitions(DUETOS_KERNEL_HAS_ENDBR=1)
     # Spectre-v2 / branch-target-injection mitigation. Replaces
     # every `jmp/call *%reg` with a `call __x86_indirect_thunk_<reg>`
     # that traps speculation at a lfence before the indirect

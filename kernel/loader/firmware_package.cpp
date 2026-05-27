@@ -2,6 +2,10 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "crypto/rsa.h"
+#include "crypto/sha256.h"
+#include "loader/firmware_package_test_vectors.h"
+#include "loader/firmware_package_trust.h"
 
 namespace duetos::core
 {
@@ -10,6 +14,7 @@ namespace
 {
 
 constexpr u8 kMagic[8] = {'D', 'U', 'E', 'T', 'F', 'W', 'P', 'K'};
+constexpr u8 kTrailerMagic[4] = {'F', 'W', 'S', 'G'};
 
 u16 ReadLe16(const u8* p, u32 off)
 {
@@ -145,6 +150,111 @@ const char* FwPackageSourceKindName(FwPackageSourceKind source_kind)
     return "unknown";
 }
 
+bool FwPackageSignatureRequired()
+{
+#if defined(DUETOS_FW_REQUIRE_SIGNATURE) && DUETOS_FW_REQUIRE_SIGNATURE
+    return true;
+#else
+    return false;
+#endif
+}
+
+namespace
+{
+
+const FwTrustRoot* LookupTrustRoot(u16 pubkey_id)
+{
+    for (u32 i = 0; i < kFwTrustRootCount; ++i)
+    {
+        if (kFwTrustRoots[i].pubkey_id == pubkey_id)
+            return &kFwTrustRoots[i];
+    }
+    return nullptr;
+}
+
+// Try to locate + verify the FWSG trailer that lives immediately
+// after the payload. Updates `parsed->has_signature` and
+// `parsed->signature_verified` based on what was found.
+//
+// Returns true iff:
+//   - no trailer is present (caller decides whether that's OK per
+//     FwPackageSignatureRequired()), OR
+//   - a trailer is present AND well-formed AND verifies against a
+//     known trust root.
+//
+// Returns false ONLY when a trailer is present but malformed or
+// fails verification — that is an authentication failure, distinct
+// from "no trailer at all."
+bool VerifyTrailer(const u8* blob, u32 blob_size, u32 payload_off, u32 payload_size, FwPackageParsed* parsed)
+{
+    const u32 sig_off = payload_off + payload_size;
+    if (sig_off + 4 > blob_size)
+    {
+        // No room for even the trailer magic — package is unsigned.
+        return true;
+    }
+    for (u32 i = 0; i < sizeof(kTrailerMagic); ++i)
+    {
+        if (blob[sig_off + i] != kTrailerMagic[i])
+            return true; // Bytes after payload aren't a trailer.
+    }
+
+    parsed->has_signature = true;
+
+    // Trailer header is 16 bytes (4 magic + 12 LE16 fields).
+    if (sig_off + kFwTrailerHeaderBytes > blob_size)
+        return false;
+
+    auto read_le16 = [](const u8* p) -> u16
+    { return static_cast<u16>(static_cast<u16>(p[0]) | (static_cast<u16>(p[1]) << 8)); };
+    const u16 trailer_version = read_le16(blob + sig_off + 4);
+    const u16 hash_alg = read_le16(blob + sig_off + 6);
+    const u16 sig_alg = read_le16(blob + sig_off + 8);
+    const u16 sig_len = read_le16(blob + sig_off + 10);
+    const u16 pubkey_id = read_le16(blob + sig_off + 12);
+
+    parsed->signature_pubkey_id = pubkey_id;
+
+    if (trailer_version != kFwTrailerVersion || hash_alg != kFwHashAlgSha256 || sig_alg != kFwSigAlgRsaPkcs1V15)
+        return false;
+
+    if (sig_len == 0 || sig_off + kFwTrailerHeaderBytes + sig_len > blob_size)
+        return false;
+
+    const FwTrustRoot* root = LookupTrustRoot(pubkey_id);
+    if (root == nullptr)
+        return false;
+
+    // Sig must be exactly RSA-modulus-width — refuses oversized
+    // packages where a forged trailer claims a different sig length.
+    if (sig_len != root->modulus_len)
+        return false;
+
+    crypto::RsaPublicKey key{};
+    if (!crypto::RsaPublicKeyFromBE(&key, root->modulus_be, root->modulus_len, root->exponent_be, root->exponent_len))
+        return false;
+
+    // Compute SHA-256(header[0..160] || payload[0..payload_size]).
+    // Match exactly what tools/build/fw-sign.py signs.
+    crypto::Sha256Ctx ctx{};
+    crypto::Sha256Init(ctx);
+    crypto::Sha256Update(ctx, blob, kDuetFwPackageHeaderBytes);
+    crypto::Sha256Update(ctx, blob + payload_off, payload_size);
+    u8 digest[crypto::kSha256DigestBytes] = {};
+    crypto::Sha256Final(ctx, digest);
+
+    const u8* sig = blob + sig_off + kFwTrailerHeaderBytes;
+    const bool ok = crypto::RsaPkcs1V15Verify(key, sig, sig_len, crypto::kPkcs1Sha256DigestPrefix,
+                                              crypto::kPkcs1Sha256DigestPrefixLen, digest, crypto::kSha256DigestBytes);
+    if (!ok)
+        return false;
+
+    parsed->signature_verified = true;
+    return true;
+}
+
+} // namespace
+
 bool FwPackageHasFlag(const FwPackageParsed& parsed, FwPackageFlags flag)
 {
     return (parsed.flags & static_cast<u32>(flag)) != 0;
@@ -153,6 +263,8 @@ bool FwPackageHasFlag(const FwPackageParsed& parsed, FwPackageFlags flag)
 bool FwPackageLoadAllowed(const FwPackageParsed& parsed, bool allow_custom_lab_image)
 {
     if (!parsed.valid || parsed.payload == nullptr || parsed.payload_size == 0)
+        return false;
+    if (FwPackageSignatureRequired() && !parsed.signature_verified)
         return false;
     const bool lab_only = FwPackageHasFlag(parsed, kFwPackageFlagCustomLabImage) ||
                           FwPackageHasFlag(parsed, kFwPackageFlagRequiresExplicitOptIn);
@@ -210,6 +322,21 @@ bool FwPackageLooksLike(const u8* blob, u32 blob_size)
     CopyFixedString(parsed->upstream, sizeof(parsed->upstream), blob + 96, kDuetFwPackageUpstreamBytes);
     parsed->payload = blob + payload_offset;
     parsed->payload_size = payload_size;
+
+    // Optional trust-root signature trailer. VerifyTrailer returns
+    // true for the "no trailer" case (unsigned package) AND for a
+    // valid-trailer + verified-signature case. It returns false only
+    // when a trailer is present but fails authentication — that is
+    // ErrorCode::PermissionDenied. The package's payload digest
+    // already matched above, so we know any signature failure here
+    // is an authenticity problem (wrong key, forged sig, malformed
+    // trailer fields), not a transport corruption.
+    if (!VerifyTrailer(blob, blob_size, payload_offset, payload_size, parsed))
+        return ::duetos::core::Err{ErrorCode::PermissionDenied};
+
+    if (FwPackageSignatureRequired() && !parsed->signature_verified)
+        return ::duetos::core::Err{ErrorCode::PermissionDenied};
+
     return ::duetos::core::Result<void>{};
 }
 
@@ -253,6 +380,35 @@ void FwPackageSelfTest()
             "family name mismatch");
     KASSERT(FwPackageSourceKindName(FwPackageSourceKind::OpenSource)[0] == 'o', "loader/firmware_package",
             "source kind name mismatch");
+
+    // Trust-root signature verify against the pre-signed test fixture
+    // baked into firmware_package_test_vectors.h. Re-derives the full
+    // signed-package path (FWSG trailer detect + RSA-PKCS1-v1.5
+    // verify against the dev pubkey) end-to-end. The matching
+    // private key lives in tools/build/fw-signing-keys/; the test
+    // vector was produced by `tools/build/fw-sign.py
+    // --emit-test-fixture`.
+    FwPackageParsed signed_parsed{};
+    auto signed_r = FwPackageParse(testvec::kFwTestPackage, testvec::kFwTestPackageBytes, &signed_parsed);
+    KASSERT(signed_r.has_value(), "loader/firmware_package", "signed test package parse failed");
+    KASSERT(signed_parsed.has_signature, "loader/firmware_package", "signed test package: trailer not detected");
+    KASSERT(signed_parsed.signature_verified, "loader/firmware_package",
+            "signed test package: signature did not verify against dev trust root");
+    KASSERT(signed_parsed.signature_pubkey_id == kFwPubkeyIdDev, "loader/firmware_package",
+            "signed test package: unexpected pubkey id");
+
+    // Tamper the signature byte and expect a verify failure. Copy
+    // into a mutable buffer first.
+    static u8 sig_buf[testvec::kFwTestPackageBytes];
+    for (u32 i = 0; i < testvec::kFwTestPackageBytes; ++i)
+        sig_buf[i] = testvec::kFwTestPackage[i];
+    // Flip a byte inside the signature region (after the 16-byte trailer header).
+    const u32 sig_tamper_off = testvec::kFwTestPackageBytes - 32;
+    sig_buf[sig_tamper_off] ^= 0x01;
+    FwPackageParsed tampered{};
+    auto tampered_r = FwPackageParse(sig_buf, testvec::kFwTestPackageBytes, &tampered);
+    KASSERT(!tampered_r.has_value() && tampered_r.error() == ErrorCode::PermissionDenied, "loader/firmware_package",
+            "tampered signature should fail with PermissionDenied");
 
     arch::SerialWrite("[fw-package] selftest pass\n");
 }

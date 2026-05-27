@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "duetos_bcm43xx_fw.h"
 
 namespace duetos::drivers::net
 {
@@ -9,26 +10,15 @@ namespace duetos::drivers::net
 namespace
 {
 
-// Big-endian dword read at byte offset `off` of `buf`. b43 headers
-// are documented as big-endian (Broadcom's ARM-side firmware tools
-// emit them that way regardless of host endianness).
-u32 ReadBe32(const u8* buf, u32 off)
-{
-    return (static_cast<u32>(buf[off]) << 24) | (static_cast<u32>(buf[off + 1]) << 16) |
-           (static_cast<u32>(buf[off + 2]) << 8) | static_cast<u32>(buf[off + 3]);
-}
-
+// Big-endian dword writer — only used by the self-test below to
+// synthesize records. Reader + record-type recognizer moved to
+// the Rust crate.
 void WriteBe32(u8* buf, u32 off, u32 v)
 {
     buf[off] = static_cast<u8>((v >> 24) & 0xFF);
     buf[off + 1] = static_cast<u8>((v >> 16) & 0xFF);
     buf[off + 2] = static_cast<u8>((v >> 8) & 0xFF);
     buf[off + 3] = static_cast<u8>(v & 0xFF);
-}
-
-bool RecognisedRecordType(u8 t)
-{
-    return t == kB43FwTypeUcode || t == kB43FwTypePcm || t == kB43FwTypeIv;
 }
 
 } // namespace
@@ -50,80 +40,46 @@ const char* BcmFwTypeName(u8 type)
 
 ::duetos::core::Result<void> BcmFirmwareParse(const u8* blob, u32 blob_size, BcmFirmwareParsed* parsed)
 {
-    if (blob == nullptr || parsed == nullptr)
+    // Byte parsing delegated to `duetos_bcm43xx_fw` Rust crate
+    // (kernel/drivers/net/bcm43xx_fw_rust/). Untrusted firmware
+    // bytes — Rust-Subsystems P1. Checked arithmetic in Rust
+    // catches the next length-overflow before it becomes a
+    // wild pointer.
+    if (parsed == nullptr)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
-    *parsed = {};
-    if (blob_size < kB43FwRecordHeaderBytes)
+
+    DuetosBcmFirmwareParsed rs{};
+    const i32 rc = duetos_bcm43xx_fw_parse(blob, blob_size, &rs);
+
+    *parsed = BcmFirmwareParsed{};
+    parsed->valid = rs.valid;
+    parsed->truncated = rs.truncated;
+    parsed->record_count = rs.record_count;
+    parsed->walked_bytes = rs.walked_bytes;
+    parsed->dropped_records = rs.dropped_records;
+    for (u32 i = 0; i < rs.record_count && i < kBcmMaxRecords; ++i)
+    {
+        parsed->records[i].type = rs.records[i].type;
+        parsed->records[i].version = rs.records[i].version;
+        parsed->records[i].size = rs.records[i].size;
+        parsed->records[i].payload = rs.records[i].payload;
+    }
+    // Set the convenience pointers to point into THIS struct's
+    // records array (not the Rust caller's, which would be a
+    // dangling reference after this function returns).
+    constexpr u32 kIndexNone = ~0u;
+    if (rs.ucode_index != kIndexNone && rs.ucode_index < parsed->record_count)
+        parsed->ucode = &parsed->records[rs.ucode_index];
+    if (rs.pcm_index != kIndexNone && rs.pcm_index < parsed->record_count)
+        parsed->pcm = &parsed->records[rs.pcm_index];
+    if (rs.iv_index != kIndexNone && rs.iv_index < parsed->record_count)
+        parsed->iv = &parsed->records[rs.iv_index];
+
+    if (rc == 0)
+        return {};
+    if (rc == 1)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
-
-    // First byte must be a recognised record type. b43 blobs
-    // never start with anything else; an out-of-range byte here is
-    // the cleanest "this isn't a b43 blob" signal we can give.
-    if (!RecognisedRecordType(blob[0]))
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-
-    u32 off = 0;
-    while (off + kB43FwRecordHeaderBytes <= blob_size)
-    {
-        const u8 type = blob[off];
-        const u8 version = blob[off + 1];
-        // bytes [off+2 .. off+4) are reserved (be16); ignored.
-        const u32 size = ReadBe32(blob, off + 4);
-        const u32 payload_off = off + kB43FwRecordHeaderBytes;
-
-        // Bounds + type check. A record whose size pushes past the
-        // blob is fatal — we truncate the parse but still report
-        // any earlier records that walked cleanly.
-        if (size > blob_size || payload_off + size > blob_size)
-        {
-            parsed->truncated = true;
-            break;
-        }
-        if (!RecognisedRecordType(type))
-        {
-            // An unrecognised record TYPE in the middle of an
-            // otherwise valid stream is a stop signal — Broadcom
-            // docs do not define new types and we don't want to
-            // walk garbage. Mark truncated and stop.
-            parsed->truncated = true;
-            break;
-        }
-
-        if (parsed->record_count < kBcmMaxRecords)
-        {
-            BcmFwRecord& r = parsed->records[parsed->record_count];
-            r.type = type;
-            r.version = version;
-            r.size = size;
-            r.payload = blob + payload_off;
-            ++parsed->record_count;
-        }
-        else
-        {
-            ++parsed->dropped_records;
-        }
-
-        off = payload_off + size;
-    }
-
-    parsed->walked_bytes = off;
-
-    // Convenience pointers.
-    for (u32 i = 0; i < parsed->record_count; ++i)
-    {
-        const BcmFwRecord* r = &parsed->records[i];
-        if (r->type == kB43FwTypeUcode && parsed->ucode == nullptr)
-            parsed->ucode = r;
-        else if (r->type == kB43FwTypePcm && parsed->pcm == nullptr)
-            parsed->pcm = r;
-        else if (r->type == kB43FwTypeIv && parsed->iv == nullptr)
-            parsed->iv = r;
-    }
-
-    parsed->valid = (parsed->record_count > 0);
-    if (!parsed->valid)
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-    return ::duetos::core::Result<void>{};
+    return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
 }
 
 void BcmFirmwareLog(const BcmFirmwareParsed& parsed)

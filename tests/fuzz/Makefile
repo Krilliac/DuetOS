@@ -54,7 +54,11 @@ HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuz
              $(BIN)/fuzz_deflate $(BIN)/fuzz_gzip $(BIN)/fuzz_zip \
              $(BIN)/fuzz_bmp $(BIN)/fuzz_tga $(BIN)/fuzz_jpeg $(BIN)/fuzz_png \
              $(BIN)/fuzz_asn1 $(BIN)/fuzz_x509 $(BIN)/fuzz_fw_pkg \
-             $(BIN)/fuzz_pe_exports $(BIN)/fuzz_vt
+             $(BIN)/fuzz_pe_exports $(BIN)/fuzz_vt $(BIN)/fuzz_disasm \
+             $(BIN)/fuzz_edid $(BIN)/fuzz_cea861 \
+             $(BIN)/fuzz_usbclass $(BIN)/fuzz_usbhid \
+             $(BIN)/fuzz_tls \
+             $(BIN)/fuzz_nvidia_gsp_fw $(BIN)/fuzz_amd_gfx_fw
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -62,14 +66,53 @@ all: $(HARNESSES)
 $(BIN):
 	mkdir -p $(BIN)
 
-$(BIN)/fuzz_iwl_fw: fuzz_iwl_fw.cpp $(NETDRV)/iwlwifi_fw.cpp | $(BIN)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+# Wireless firmware harnesses — now delegate the byte parse to
+# the per-vendor Rust crates (kernel/drivers/net/*_fw_rust/).
+# Same rlib + panic=abort staticlib recipe as fuzz_tls / fuzz_vt.
+# host_shim/wireless_fw_stubs.cpp carries the rust_eh_personality
+# stub for the panic-aborting Rust runtime.
+IWLWIFI_FW_RUST := $(KERNEL)/drivers/net/iwlwifi_fw_rust
+RTL88XX_FW_RUST := $(KERNEL)/drivers/net/rtl88xx_fw_rust
+BCM43XX_FW_RUST := $(KERNEL)/drivers/net/bcm43xx_fw_rust
 
-$(BIN)/fuzz_rtl_fw: fuzz_rtl_fw.cpp $(NETDRV)/rtl88xx_fw.cpp | $(BIN)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+$(BIN)/libduetos_iwlwifi_fw.rlib: $(IWLWIFI_FW_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_iwlwifi_fw -O $< -o $@
 
-$(BIN)/fuzz_bcm_fw: fuzz_bcm_fw.cpp $(NETDRV)/bcm43xx_fw.cpp | $(BIN)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+$(BIN)/libduetos_iwlwifi_fw_fuzz.a: host_shim/iwlwifi_fw_fuzz_shim.rs \
+		$(BIN)/libduetos_iwlwifi_fw.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_iwlwifi_fw=$(BIN)/libduetos_iwlwifi_fw.rlib $< -o $@
+
+$(BIN)/fuzz_iwl_fw: fuzz_iwl_fw.cpp $(NETDRV)/iwlwifi_fw.cpp \
+		host_shim/wireless_fw_stubs.cpp $(BIN)/libduetos_iwlwifi_fw_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(IWLWIFI_FW_RUST)/include $^ -o $@
+
+$(BIN)/libduetos_rtl88xx_fw.rlib: $(RTL88XX_FW_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_rtl88xx_fw -O $< -o $@
+
+$(BIN)/libduetos_rtl88xx_fw_fuzz.a: host_shim/rtl88xx_fw_fuzz_shim.rs \
+		$(BIN)/libduetos_rtl88xx_fw.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_rtl88xx_fw=$(BIN)/libduetos_rtl88xx_fw.rlib $< -o $@
+
+$(BIN)/fuzz_rtl_fw: fuzz_rtl_fw.cpp $(NETDRV)/rtl88xx_fw.cpp \
+		host_shim/wireless_fw_stubs.cpp $(BIN)/libduetos_rtl88xx_fw_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(RTL88XX_FW_RUST)/include $^ -o $@
+
+$(BIN)/libduetos_bcm43xx_fw.rlib: $(BCM43XX_FW_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_bcm43xx_fw -O $< -o $@
+
+$(BIN)/libduetos_bcm43xx_fw_fuzz.a: host_shim/bcm43xx_fw_fuzz_shim.rs \
+		$(BIN)/libduetos_bcm43xx_fw.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_bcm43xx_fw=$(BIN)/libduetos_bcm43xx_fw.rlib $< -o $@
+
+$(BIN)/fuzz_bcm_fw: fuzz_bcm_fw.cpp $(NETDRV)/bcm43xx_fw.cpp \
+		host_shim/wireless_fw_stubs.cpp $(BIN)/libduetos_bcm43xx_fw_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(BCM43XX_FW_RUST)/include $^ -o $@
 
 # EapolKeyParse pulls HMAC-SHA1/SHA256 (MIC verify) transitively.
 $(BIN)/fuzz_eapol: fuzz_eapol.cpp $(WIRELESS)/eapol.cpp \
@@ -252,10 +295,14 @@ $(BIN)/fuzz_x509: fuzz_x509.cpp $(CRYPTO)/x509.cpp $(CRYPTO)/asn1.cpp \
 # --- firmware-package envelope -----------------------------------
 #
 # FwPackageParse validates a 160-byte header + SHA-256 payload
-# digest; the real crypto/sha256 is linked so the digest gate is
-# exercised (host_shim/util/result.h supplies Result).
+# digest AND (when a trailing FWSG signature is present) verifies
+# an RSA-PKCS1-v1.5 signature against the kernel's baked-in trust
+# root. The real crypto/sha256 + crypto/rsa + crypto/bigint +
+# crypto/asn1 are linked so both gates run on the harness.
+# host_shim/util/result.h supplies Result.
 $(BIN)/fuzz_fw_pkg: fuzz_fw_pkg.cpp $(LOADER)/firmware_package.cpp \
-		$(CRYPTO)/sha256.cpp | $(BIN)
+		$(CRYPTO)/sha256.cpp $(CRYPTO)/rsa.cpp \
+		$(CRYPTO)/bigint.cpp $(CRYPTO)/asn1.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 # --- PE export-directory walker ----------------------------------
@@ -270,8 +317,169 @@ $(BIN)/fuzz_pe_exports: fuzz_pe_exports.cpp $(LOADER)/pe_exports.cpp \
 #
 # ParserFeed runs the DEC ANSI state machine over a PTY byte
 # stream; util/unicode does the UTF-8 join.
-$(BIN)/fuzz_vt: fuzz_vt.cpp $(UTIL)/vt_parser.cpp $(UTIL)/unicode.cpp | $(BIN)
+# vt_parser.cpp delegates the DEC ANSI state machine to the
+# `duetos_vt` Rust crate (kernel/util/vt_parser_rust/). Link the
+# rlib + panic=abort staticlib pattern; a Rust-side panic in the
+# state machine aborts as a libFuzzer crash.
+VT_RUST := $(KERNEL)/util/vt_parser_rust
+
+$(BIN)/libduetos_vt.rlib: $(VT_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_vt -O $< -o $@
+
+$(BIN)/libduetos_vt_fuzz.a: host_shim/vt_fuzz_shim.rs \
+		$(BIN)/libduetos_vt.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_vt=$(BIN)/libduetos_vt.rlib $< -o $@
+
+$(BIN)/fuzz_vt: fuzz_vt.cpp $(UTIL)/vt_parser.cpp $(UTIL)/unicode.cpp \
+		host_shim/vt_stubs.cpp $(BIN)/libduetos_vt_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(VT_RUST)/include $^ -o $@
+
+# --- TLS 1.2 record + handshake parsers (Rust-backed) ------------
+#
+# net/tls.cpp delegates the five parser entry points
+# (TlsPeekRecord, TlsPeekHandshake, TlsParseServerHello,
+# TlsParseCertificateLeaf, TlsParseServerHelloDone) to the
+# `duetos_tls` Rust crate. The fuzz harness must link the
+# Rust staticlib via the same rlib + panic=abort staticlib
+# recipe as the USB harnesses so the Rust crate's parser
+# bodies are exercised on the fuzzed bytes. The state-machine
+# half of tls.cpp still pulls in RSA + AES + x509 (TlsSelfTest
+# body), so those object files stay on the link line.
+NET           := $(KERNEL)/net
+TLS_RUST      := $(KERNEL)/net/tls_rust
+
+$(BIN)/libduetos_tls.rlib: $(TLS_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_tls -O $< -o $@
+
+$(BIN)/libduetos_tls_fuzz.a: host_shim/tls_fuzz_shim.rs \
+		$(BIN)/libduetos_tls.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_tls=$(BIN)/libduetos_tls.rlib $< -o $@
+
+$(BIN)/fuzz_tls: fuzz_tls.cpp $(NET)/tls.cpp \
+		$(CRYPTO)/hmac.cpp $(CRYPTO)/sha256.cpp $(CRYPTO)/sha1.cpp \
+		$(CRYPTO)/bigint.cpp $(CRYPTO)/rsa.cpp $(CRYPTO)/aes.cpp \
+		$(CRYPTO)/aes_gcm.cpp $(CRYPTO)/x509.cpp $(CRYPTO)/asn1.cpp \
+		$(BIN)/libduetos_tls_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(TLS_RUST)/include $^ -o $@
+
+# --- USB descriptors (Rust-backed) -------------------------------
+#
+# usb_class_desc.cpp + hid_descriptor.cpp delegate byte parsing
+# to the `usbclass` + `usbhid` Rust crates. Same rlib +
+# panic=abort staticlib recipe as duetos_exfat / duetos_ntfs:
+# a Rust-side bounds/overflow bug in either walker aborts as a
+# libFuzzer crash. host_shim/edid_stubs.cpp's ConsoleWrite
+# no-ops are NOT pulled in here — the USB TUs use SerialWrite,
+# which the host_shim/arch/x86_64/serial.h already inlines as
+# a no-op.
+USBCLASS_RUST := $(KERNEL)/drivers/usb/class_rust
+USBHID_RUST   := $(KERNEL)/drivers/usb/hid_rust
+USB           := $(KERNEL)/drivers/usb
+
+$(BIN)/libusbclass.rlib: $(USBCLASS_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name usbclass -O $< -o $@
+
+$(BIN)/libusbclass_fuzz.a: host_shim/usbclass_fuzz_shim.rs \
+		$(BIN)/libusbclass.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern usbclass=$(BIN)/libusbclass.rlib $< -o $@
+
+$(BIN)/fuzz_usbclass: fuzz_usbclass.cpp $(USB)/usb_class_desc.cpp \
+		$(BIN)/libusbclass_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(USBCLASS_RUST)/include $^ -o $@
+
+$(BIN)/libusbhid.rlib: $(USBHID_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name usbhid -O $< -o $@
+
+$(BIN)/libusbhid_fuzz.a: host_shim/usbhid_fuzz_shim.rs \
+		$(BIN)/libusbhid.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern usbhid=$(BIN)/libusbhid.rlib $< -o $@
+
+$(BIN)/fuzz_usbhid: fuzz_usbhid.cpp $(USB)/hid_descriptor.cpp \
+		host_shim/usbhid_stubs.cpp $(BIN)/libusbhid_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(USBHID_RUST)/include $^ -o $@
+
+# --- EDID + CEA-861 EDID extension block -------------------------
+#
+# Both walkers are "pure compute, allocation-free, no IRQ" per
+# their headers, so no shim TU is needed beyond host_shim/log/klog.
+# CEA-861 includes edid.h transitively (shares the DTD struct),
+# but only the structs — no kernel-side functions cross the
+# boundary. The util/result.cpp dependency is shared with several
+# other harnesses; the Makefile linker pulls it in via the kernel
+# include path.
+GPU := $(KERNEL)/drivers/gpu
+# host_shim/edid_stubs.cpp resolves the kernel ConsoleWrite /
+# ConsoleWriteln functions referenced by EdidDumpToConsole and
+# Cea861DumpToConsole (shell-command path; never reached from
+# the fuzz parser drive but pulled in by linking the full TU).
+$(BIN)/fuzz_edid: fuzz_edid.cpp $(GPU)/edid.cpp host_shim/edid_stubs.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
+
+$(BIN)/fuzz_cea861: fuzz_cea861.cpp $(GPU)/cea861.cpp $(GPU)/edid.cpp host_shim/edid_stubs.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# --- x86_64 disassembler (crash-dump path) -----------------------
+#
+# DecodeStream runs on the crash-dump path so a decode bug there
+# faults the post-mortem itself. The decoder is "allocation-free,
+# IRQ-safe, panic-safe" per the header; host_shim/disasm_stubs.cpp
+# resolves the two non-decode symbols disasm.cpp pulls in
+# (FixJournalRecord — defensive self-healing observer; and the
+# symbol-table resolver used by the operands formatter — always
+# misses on host).
+DEBUG := $(KERNEL)/debug
+$(BIN)/fuzz_disasm: fuzz_disasm.cpp $(DEBUG)/disasm.cpp host_shim/disasm_stubs.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# --- Nvidia GSP + AMD GFX firmware parsers -----------------------
+#
+# Both parsers are "pure compute, no allocation, no IRQ" per their
+# headers (kernel/drivers/gpu/{nvidia_gsp_fw,amd_gfx_fw}.h). Same
+# shape as the existing iwl_fw / rtl_fw / bcm_fw harnesses — no
+# shim TU needed beyond the existing host_shim/log/klog no-ops.
+GPUDRV := $(KERNEL)/drivers/gpu
+NVIDIA_GSP_FW_RUST := $(KERNEL)/drivers/gpu/nvidia_gsp_fw_rust
+AMD_GFX_FW_RUST   := $(KERNEL)/drivers/gpu/amd_gfx_fw_rust
+
+# Both parsers now delegate to a no_std Rust crate. Same rlib +
+# panic=abort staticlib recipe as fuzz_tls / fuzz_vt. Rust-side
+# panic (bounds/overflow that the parser failed to guard) aborts
+# as a libFuzzer crash. host_shim/gpu_fw_stubs.cpp keeps the
+# ProbeFire stub for the self-test path that links into the C++
+# TU but is never reached from the harness.
+$(BIN)/libduetos_nvidia_gsp_fw.rlib: $(NVIDIA_GSP_FW_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_nvidia_gsp_fw -O $< -o $@
+
+$(BIN)/libduetos_nvidia_gsp_fw_fuzz.a: host_shim/nvidia_gsp_fw_fuzz_shim.rs \
+		$(BIN)/libduetos_nvidia_gsp_fw.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_nvidia_gsp_fw=$(BIN)/libduetos_nvidia_gsp_fw.rlib $< -o $@
+
+$(BIN)/fuzz_nvidia_gsp_fw: fuzz_nvidia_gsp_fw.cpp $(GPUDRV)/nvidia_gsp_fw.cpp \
+		host_shim/gpu_fw_stubs.cpp $(BIN)/libduetos_nvidia_gsp_fw_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(NVIDIA_GSP_FW_RUST)/include $^ -o $@
+
+$(BIN)/libduetos_amd_gfx_fw.rlib: $(AMD_GFX_FW_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_amd_gfx_fw -O $< -o $@
+
+$(BIN)/libduetos_amd_gfx_fw_fuzz.a: host_shim/amd_gfx_fw_fuzz_shim.rs \
+		$(BIN)/libduetos_amd_gfx_fw.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_amd_gfx_fw=$(BIN)/libduetos_amd_gfx_fw.rlib $< -o $@
+
+$(BIN)/fuzz_amd_gfx_fw: fuzz_amd_gfx_fw.cpp $(GPUDRV)/amd_gfx_fw.cpp \
+		host_shim/gpu_fw_stubs.cpp $(BIN)/libduetos_amd_gfx_fw_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(AMD_GFX_FW_RUST)/include $^ -o $@
 
 # Each run-* keeps a persistent corpus and stops after 60 s.
 # run-pe seeds the corpus first (see seeds/gen_pe_seeds.py) so the

@@ -917,11 +917,13 @@ u64 SmpStartAps()
     TrampU64At(kOffPml4) = ReadCr3() & ~0xFFFULL;
     TrampU64At(kOffEntry) = reinterpret_cast<u64>(&ApEntryFromTrampoline);
 
-    // GAP: legacy MADT LAPIC records carry only an 8-bit APIC ID,
-    // so AP matching below is on the low 8 bits. Fine for every
-    // current target (QEMU + <=255-thread boxes); x2APIC MADT
-    // (type 9) parsing for >255 IDs is a separate follow-on.
-    FIX_NOTE_GAP("kernel/arch/x86_64/smp.cpp:761", "legacy MADT LAPIC records carry only an 8-bit APIC ID,");
+    // AP matching is full-width u32: `LapicRecord::apic_id` widened
+    // to u32 when the ACPI MADT parser learned to read type-9
+    // (Local x2APIC) records alongside type-0 (Local APIC) — see
+    // acpi/acpi.h:60. `LapicCurrentId()` returns the matching
+    // full-width value (`(raw >> 24)` for xAPIC, the unshifted
+    // x2APIC MSR for x2APIC). xAPIC and x2APIC processors compare
+    // cleanly in the same MADT enumeration loop.
     const u32 bsp_apic_id = LapicCurrentId();
     u64 aps_started = 0;
 

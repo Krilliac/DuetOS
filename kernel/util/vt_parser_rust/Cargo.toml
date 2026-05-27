@@ -1,0 +1,28 @@
+# DuetOS VT/ANSI parser for DuetOS.
+#
+# Parses untrusted PTY byte streams from user processes through the
+# DEC ANSI / xterm escape grammar. Per the Rust-Subsystems P1
+# entries (UI / asset / protocol parsers — attacker-shaped TLV /
+# state-machine input), the state machine + UTF-8 decoder + OSC
+# buffer manage attacker-supplied bytes and must reject overlong
+# / unterminated / oversized sequences without out-of-bounds
+# reads or writes.
+#
+# Standalone no_std rlib; exposes a narrow C ABI consumed by
+# kernel/util/vt_parser.cpp. The C++ side keeps the boot self-
+# test (which exercises this crate via the same FFI).
+
+[package]
+name = "duetos_vt"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS VT/ANSI escape parser (DEC ANSI state machine)"
+
+[lib]
+name = "duetos_vt"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

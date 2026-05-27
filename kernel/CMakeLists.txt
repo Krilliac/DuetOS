@@ -80,6 +80,15 @@ list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/pci/caps_rust/(
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^mm/multiboot2_rust/(target|cargo-target|multiboot2-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/wifi80211_rust/(target|cargo-target|wifi80211-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/hci_rust/(target|cargo-target|hci-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^net/tls_rust/(target|cargo-target|tls-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^util/vt_parser_rust/(target|cargo-target|vt-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/gpu/nvidia_gsp_fw_rust/(target|cargo-target|nvidia-gsp-fw-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/gpu/amd_gfx_fw_rust/(target|cargo-target|amd-gfx-fw-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/net/bcm43xx_fw_rust/(target|cargo-target|bcm-fw-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/net/rtl88xx_fw_rust/(target|cargo-target|rtl-fw-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/net/iwlwifi_fw_rust/(target|cargo-target|iwl-fw-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/iommu/dmar_rust/(target|cargo-target|dmar-cargo-target)/")
+list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^drivers/iommu/ivrs_rust/(target|cargo-target|ivrs-cargo-target)/")
 list(FILTER DUETOS_KERNEL_SHARED_SOURCES EXCLUDE REGEX "^rust/(target|cargo-target|duetos-kernel-rust-cargo-target)/")
 # AArch64 starter files (boot.S, exceptions.S, context_switch.S,
 # usermode.S, syscall_entry.S) — second-tier-pillar surface that
@@ -1210,6 +1219,15 @@ set(PCICAPS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/pci/caps_rust/inclu
 set(MULTIBOOT2RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/mm/multiboot2_rust/include")
 set(WIFI80211_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/net/wifi80211_rust/include")
 set(HCIRUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/net/hci_rust/include")
+set(TLSRUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/net/tls_rust/include")
+set(VTRUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/util/vt_parser_rust/include")
+set(NVIDIA_GSP_FW_RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/gpu/nvidia_gsp_fw_rust/include")
+set(AMD_GFX_FW_RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/gpu/amd_gfx_fw_rust/include")
+set(BCM43XX_FW_RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/net/bcm43xx_fw_rust/include")
+set(RTL88XX_FW_RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/net/rtl88xx_fw_rust/include")
+set(IWLWIFI_FW_RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/net/iwlwifi_fw_rust/include")
+set(DMAR_RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/iommu/dmar_rust/include")
+set(IVRS_RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/drivers/iommu/ivrs_rust/include")
 
 # Stage 1 needs a stub `kernel_elf_blob` so ramfs.cpp's references
 # to kBinKernelElfBytes / kBinKernelElfBytes_len link cleanly.
@@ -1250,6 +1268,15 @@ target_include_directories(duetos-kernel-stage1 PRIVATE
     "${MULTIBOOT2RUST_INCLUDE_DIR}"
     "${WIFI80211_INCLUDE_DIR}"
     "${HCIRUST_INCLUDE_DIR}"
+    "${TLSRUST_INCLUDE_DIR}"
+    "${VTRUST_INCLUDE_DIR}"
+    "${NVIDIA_GSP_FW_RUST_INCLUDE_DIR}"
+    "${AMD_GFX_FW_RUST_INCLUDE_DIR}"
+    "${BCM43XX_FW_RUST_INCLUDE_DIR}"
+    "${RTL88XX_FW_RUST_INCLUDE_DIR}"
+    "${IWLWIFI_FW_RUST_INCLUDE_DIR}"
+    "${DMAR_RUST_INCLUDE_DIR}"
+    "${IVRS_RUST_INCLUDE_DIR}"
 )
 add_dependencies(duetos-kernel-stage1 ${DUETOS_KERNEL_RUST_TARGET})
 set_target_properties(duetos-kernel-stage1 PROPERTIES
@@ -1356,6 +1383,15 @@ target_include_directories(duetos-kernel PRIVATE
     "${MULTIBOOT2RUST_INCLUDE_DIR}"
     "${WIFI80211_INCLUDE_DIR}"
     "${HCIRUST_INCLUDE_DIR}"
+    "${TLSRUST_INCLUDE_DIR}"
+    "${VTRUST_INCLUDE_DIR}"
+    "${NVIDIA_GSP_FW_RUST_INCLUDE_DIR}"
+    "${AMD_GFX_FW_RUST_INCLUDE_DIR}"
+    "${BCM43XX_FW_RUST_INCLUDE_DIR}"
+    "${RTL88XX_FW_RUST_INCLUDE_DIR}"
+    "${IWLWIFI_FW_RUST_INCLUDE_DIR}"
+    "${DMAR_RUST_INCLUDE_DIR}"
+    "${IVRS_RUST_INCLUDE_DIR}"
 )
 add_dependencies(duetos-kernel ${DUETOS_KERNEL_RUST_TARGET})
 
@@ -1366,6 +1402,48 @@ option(DUETOS_PANIC_DEMO "Insert a deliberate Panic() at end of kernel_main (tes
 if(DUETOS_PANIC_DEMO)
     target_compile_definitions(duetos-kernel          PRIVATE DUETOS_PANIC_DEMO=1)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_PANIC_DEMO=1)
+endif()
+
+# Turn on Intel VT-d translation at boot (RTADDR + GCMD.TE +
+# context-cache + IOTLB invalidate) for every DMA Remapping
+# Hardware Unit reported by the ACPI DMAR table. With identity-
+# passthrough page tables (slice 27c) the IOMMU translates every
+# IOVA back to itself, so existing DMA continues to work — the
+# kernel just gains the ability to refuse a future DMA from
+# unknown source-id (slice 28+ wires that part).
+#
+# OFF by default because a bug in the enable path can brick all
+# device DMA (disk, NIC, USB, GPU) and leave the box unbootable.
+# Operators turn it on per-build with
+#   cmake -DDUETOS_IOMMU_ENABLE=ON
+# tools/test/iommu-smoke.sh is the canonical repro under QEMU's
+# `-device intel-iommu`.
+option(DUETOS_IOMMU_ENABLE "Enable Intel VT-d translation at boot (RTADDR + GCMD.TE)" OFF)
+if(DUETOS_IOMMU_ENABLE)
+    target_compile_definitions(duetos-kernel          PRIVATE DUETOS_IOMMU_ENABLE=1)
+    target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_IOMMU_ENABLE=1)
+endif()
+
+# Strict-mode companion to DUETOS_IOMMU_ENABLE: when ON, a failed
+# IOMMU enable at boot PANICS the kernel instead of silently
+# leaving translation off.
+#
+# Without this flag, an enable failure today logs a warning and
+# continues — useful for development (you don't lose the boot just
+# because intel-iommu wasn't plugged into the QEMU command). For
+# production, the gentler behaviour is a foot-gun: a deployment
+# that THINKS it has IOMMU defense but actually doesn't is
+# worse than one that knows it has none. Set this flag in any
+# release build that depends on the IOMMU for its threat model.
+#
+# Matrix:
+#   ENABLE=OFF, REQUIRE=*    : translation off, no enable attempted (dev)
+#   ENABLE=ON,  REQUIRE=OFF  : try to enable, log + continue on failure
+#   ENABLE=ON,  REQUIRE=ON   : try to enable, PANIC on failure (release)
+option(DUETOS_IOMMU_REQUIRE "Panic at boot if IOMMU enable was requested but failed" OFF)
+if(DUETOS_IOMMU_REQUIRE)
+    target_compile_definitions(duetos-kernel          PRIVATE DUETOS_IOMMU_REQUIRE=1)
+    target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_IOMMU_REQUIRE=1)
 endif()
 
 # Deliberate stack-smash build flag. Enables a small in-kernel_main

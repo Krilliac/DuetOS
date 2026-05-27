@@ -77,6 +77,11 @@
 #include "drivers/gpu/nvidia_gsp_fw.h"
 #include "drivers/input/hid_keyboard.h"
 #include "drivers/input/ps2kbd.h"
+#include "drivers/iommu/dmar.h"
+#include "drivers/iommu/iommu.h"
+#include "drivers/iommu/ivrs.h"
+#include "drivers/iommu/vtd.h"
+#include "drivers/iommu/vtd_paging.h"
 #include "drivers/input/ps2mouse.h"
 #include "drivers/net/ath9k_htc.h"
 #include "drivers/net/ath9k_htc_fw.h"
@@ -1181,6 +1186,57 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiSleepPrepSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiMadtX2ApicSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::acpi::AcpiSciSelfTest());
+
+    // VT-d DMAR discovery + parse. Reads the ACPI DMAR table (when
+    // firmware advertises one) and surfaces the IOMMU register
+    // bases + reserved-memory regions for the next IOMMU slice to
+    // consume. No behavioural effect today — just data surfacing.
+    // Absent on QEMU-default + VirtualBox; firmware-present on
+    // most real Intel laptops/desktops + QEMU with
+    // `-device intel-iommu`.
+    duetos::drivers::iommu::DmarInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::DmarSelfTest());
+
+    // VT-d register MMIO map + capability decode (read-only). No
+    // control bits written; no translation enabled. Surfaces what
+    // each IOMMU supports so slice 27c can program page tables +
+    // enable translation without re-decoding. No-op when
+    // DmarPresent()=false (QEMU-default / VirtualBox).
+    duetos::drivers::iommu::VtdInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::VtdSelfTest());
+
+    // AMD-Vi IVRS discovery + parse. Mirror of DmarInit for AMD
+    // platforms. No-op (table absent) on Intel boxes; surfaces
+    // IVHD/IVMD blocks on AMD boxes for the (future) AMD-Vi
+    // register / page-table slices to consume. No write of any
+    // IOMMU register here either.
+    duetos::drivers::iommu::IvrsInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::IvrsSelfTest());
+
+    // VT-d identity-passthrough page tables. Builds root + shared
+    // context + identity-mapping PDPT (3 frames = 12 KiB). The
+    // self-test exercises the in-memory walk independently of
+    // whether any real IOMMU is present.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::vtd_paging::VtdPagingSelfTest());
+
+    // Vendor-neutral IOMMU enable. Routes through
+    // drivers/iommu/iommu.cpp which picks Intel vs AMD based on
+    // what IommuInit discovered. Gated by DUETOS_IOMMU_ENABLE
+    // (build flag). When DUETOS_IOMMU_REQUIRE is also set, a
+    // failed enable panics — the deployment-safety gate that lets
+    // release builds refuse to run without IOMMU protection.
+    if (duetos::drivers::iommu::IommuEnableEffective())
+    {
+        auto r = duetos::drivers::iommu::IommuEnableAtBoot();
+        if (!r.has_value())
+        {
+            if (duetos::drivers::iommu::IommuRequireEffective())
+            {
+                duetos::core::Panic("boot/iommu", "DUETOS_IOMMU_REQUIRE set but IommuEnableAtBoot failed");
+            }
+            SerialWrite("[boot] IOMMU enable returned error — translation remains off\n");
+        }
+    }
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();

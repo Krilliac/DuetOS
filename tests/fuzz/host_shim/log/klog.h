@@ -16,6 +16,8 @@
 #define KLOG_TRACE_A(...) ((void)0)
 #define KLOG_TRACE_V(...) ((void)0)
 #define KLOG_TRACE_AV(...) ((void)0)
+#define KLOG_TRACE_S(...) ((void)0)
+#define KLOG_TRACE_AS(...) ((void)0)
 #define KLOG_DEBUG(...) ((void)0)
 #define KLOG_DEBUG_A(...) ((void)0)
 #define KLOG_DEBUG_V(...) ((void)0)
@@ -69,9 +71,40 @@ enum class LogLevel : u8
     Critical
 };
 
-enum class LogArea : u8
+enum class LogArea : u32
 {
-    General = 0
+    None = 0,
+    General = 1u << 0,
+    Boot = 1u << 1,
+    Memory = 1u << 2,
+    Sched = 1u << 3,
+    Process = 1u << 4,
+    Syscall = 1u << 5,
+    Loader = 1u << 6,
+    FS = 1u << 7,
+    Net = 1u << 8,
+    Storage = 1u << 9,
+    USB = 1u << 10,
+    GPU = 1u << 11,
+    Input = 1u << 12,
+    Audio = 1u << 13,
+    IPC = 1u << 14,
+    Win32 = 1u << 15,
+    Linux = 1u << 16,
+    Time = 1u << 17,
+    Power = 1u << 18,
+    Security = 1u << 19,
+    Diag = 1u << 20,
+    Ring3 = 1u << 21,
+    App = 1u << 22,
+    Driver = 1u << 23,
+    ACPI = 1u << 24,
+    PCI = 1u << 25,
+    Wireless = 1u << 26,
+    Graphics = 1u << 27,
+    Test = 1u << 28,
+    Arith = 1u << 29,
+    All = 0xFFFFFFFFu,
 };
 
 // Escape-hatch loggers called directly (not via KLOG_* macros) by

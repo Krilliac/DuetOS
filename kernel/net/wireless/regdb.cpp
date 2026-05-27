@@ -16,6 +16,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "util/string.h"
+#include "wifi80211_rust.h"
 
 namespace duetos::net::wireless::regdb
 {
@@ -245,30 +246,28 @@ bool FreqToChannel(u32 freq_khz, u8* out_band, u8* out_channel)
 
 bool ParseCountryIe(const u8* ie_payload, u32 len, CountryIeView* out)
 {
-    if (out == nullptr || ie_payload == nullptr || len < 3)
+    // Byte parsing delegated to the `duetos_wifi80211` Rust crate.
+    // Country IE bytes come from peer-broadcast beacons —
+    // attacker-adjacent (any radio in range can send arbitrary
+    // bytes here). The Rust parser caps the walker at 64
+    // iterations + 16 stored triplets and uses checked arithmetic
+    // on every advance.
+    if (out == nullptr)
         return false;
-    out->alpha2[0] = char(ie_payload[0]);
-    out->alpha2[1] = char(ie_payload[1]);
-    out->environment = ie_payload[2];
-    out->n_triplets = 0;
-    u32 i = 3;
-    while (i + 3 <= len && out->n_triplets < 16)
+    ::duetos::net::wifi80211::DuetosWifiCountryIe rs{};
+    const bool ok = ::duetos::net::wifi80211::duetos_wifi80211_parse_country_ie(ie_payload, len, &rs);
+    if (!ok)
+        return false;
+    out->alpha2[0] = char(rs.alpha2[0]);
+    out->alpha2[1] = char(rs.alpha2[1]);
+    out->environment = rs.environment;
+    out->n_triplets = rs.n_triplets;
+    const u8 n = (rs.n_triplets > 16) ? 16 : rs.n_triplets;
+    for (u8 i = 0; i < n; ++i)
     {
-        const u8 first = ie_payload[i];
-        if (first >= 201)
-        {
-            // Operating-triplet form. Skip silently — the existing
-            // sub-band triplets we've already parsed are the
-            // intersect input; ignoring operating triplets only
-            // narrows the safety surface.
-            i += 3;
-            continue;
-        }
-        CountryIeTriplet& t = out->triplets[out->n_triplets++];
-        t.first_channel = first;
-        t.num_channels = ie_payload[i + 1];
-        t.max_tx_dbm = i8(ie_payload[i + 2]);
-        i += 3;
+        out->triplets[i].first_channel = rs.triplets[i].first_channel;
+        out->triplets[i].num_channels = rs.triplets[i].num_channels;
+        out->triplets[i].max_tx_dbm = rs.triplets[i].max_tx_dbm;
     }
     return true;
 }

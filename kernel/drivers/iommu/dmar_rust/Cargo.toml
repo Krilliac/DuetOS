@@ -1,0 +1,33 @@
+# DuetOS Intel VT-d DMAR (DMA Remapping Reporting) ACPI-table parser.
+#
+# Production crate. Validates the 48-byte DMAR header, walks the
+# variable-length array of remapping structures (DRHD / RMRR /
+# ATSR / RHSA / ANDD / SATC), and surfaces:
+#   - Host Address Width (HAW)
+#   - DMA Remapping Hardware Unit Definitions (DRHDs — the IOMMUs)
+#   - Reserved Memory Region Reporting (RMRRs — must be identity
+#     mapped, typically for legacy USB / VGA legacy IO buffers)
+# Other structure types are recognised and skipped without parse-
+# failing the table (forward-compat with newer Intel VT-d spec
+# revisions).
+#
+# Spec: Intel VT-d Architecture Specification §8 (DMAR ACPI Table).
+#
+# This is a *parser*, not an enabler — surfacing the data is its
+# only job. The IOMMU register-set + page-table work lives in a
+# separate slice that consumes this crate's output.
+
+[package]
+name = "duetos_dmar"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS Intel VT-d DMAR ACPI-table parser"
+
+[lib]
+name = "duetos_dmar"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

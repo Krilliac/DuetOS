@@ -78,4 +78,44 @@ extern "C"
     u32 duetos_parsers_tcp_walk_options(const u8* opts, usize opts_len, DuetosTcpOptionCallback cb, void* cookie);
 }
 
+/// Aggregated TCP options the v1 receiver recognises. Mirrors the
+/// internal `ParsedOptions` struct in
+/// kernel/net/tcp_segment.cpp. Use `duetos_parsers_tcp_parse_options`
+/// to populate from a raw options byte stream.
+struct DuetosTcpParsedOptions
+{
+    u16 mss;
+    u8 wscale;
+    bool has_wscale;
+    bool sack_permitted;
+    bool has_timestamp;
+    u8 _pad0[2];
+    u32 tsval;
+    u32 tsecr;
+};
+
+extern "C"
+{
+    /// Parse the recognised RFC-track options (MSS, WindowScale,
+    /// SackPermitted, Timestamps) from a TCP options byte stream.
+    /// Returns true iff `out` is non-null. Malformed or empty
+    /// streams leave `*out` at its default-zeroed state. Hostile
+    /// inputs (length-0 TLV spin, truncated tail) are absorbed;
+    /// the walker caps iterations at TCP_OPT_GUARD = 64.
+    bool duetos_parsers_tcp_parse_options(const u8* opts, usize opts_len, DuetosTcpParsedOptions* out);
+
+    /// One's-complement Internet checksum (RFC 1071) over `buf`.
+    /// 16-bit big-endian words summed with end-around carry, then
+    /// the 1's-complement of the low 16 bits is returned. If the
+    /// input already contains the on-the-wire checksum field, a
+    /// computed value of `0` means the stored checksum matches.
+    u16 duetos_parsers_ipv4_header_checksum(const u8* buf, usize len);
+
+    /// Validate an IPv4 header at the start of `buf`. Returns true
+    /// iff the version field == 4, IHL is in [5, 15], the header-
+    /// byte count and total_length both fit within `len`, and the
+    /// stored checksum matches the bytes. Pure compute, no I/O.
+    bool duetos_parsers_ipv4_header_valid(const u8* buf, usize len);
+}
+
 } // namespace duetos::net::parsers

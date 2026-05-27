@@ -125,6 +125,15 @@ credentials.json
 *.pfx
 settings.local.ini
 
+# Explicitly checked in: the DEV firmware-signing keypair used by
+# tools/build/fw-sign.py to exercise the kernel's trust-root verify
+# path in tree. The private key here is for development only — see
+# tools/build/fw-signing-keys/README.md for the production rotation
+# story. The blanket *.pem rule above protects accidental secret
+# leakage; this exception is a deliberate, documented inclusion.
+!tools/build/fw-signing-keys/dev-fw-signing-private.pem
+!tools/build/fw-signing-keys/dev-fw-signing-public.pem
+
 ##########################
 # Coverage / reports      #
 ##########################
