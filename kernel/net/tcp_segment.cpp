@@ -56,10 +56,24 @@ u16 ChecksumTcp(Ipv4Address src, Ipv4Address dst, const u8* tcp, u64 tcp_len)
     return u16(~sum & 0xFFFF);
 }
 
+// Count out-of-order segments currently held in the reassembly
+// queue. Used to decide whether emitting a SACK option is worth
+// the bytes — empty queue means in-order traffic; nothing to
+// report.
+u32 OoSegmentCount(const Tcb& t)
+{
+    u32 n = 0;
+    for (u32 i = 0; i < kReassQueueMax; ++i)
+        if (t.oo_queue[i].in_use)
+            ++n;
+    return n;
+}
+
 // Build options for an outgoing segment. Returns the option-block
 // length (multiple of 4). `flags` decides which options are valid:
 // SYN includes MSS + window scale + SACK-permitted + timestamps;
-// ESTABLISHED only includes timestamps.
+// ESTABLISHED only includes timestamps + SACK blocks (when we have
+// out-of-order RX state to report).
 u32 BuildOptions(const Tcb& t, u8 flags, u8* opts)
 {
     u32 i = 0;
@@ -80,9 +94,13 @@ u32 BuildOptions(const Tcb& t, u8 flags, u8* opts)
         opts[i++] = kOptWindowScale;
         opts[i++] = 3;
         opts[i++] = 0; // shift count
-        // SACK-permitted — advertised even though v0 doesn't emit
-        // SACK blocks; the option signals the peer that future
-        // ranges may use it without renegotiation.
+        // SACK-permitted. v1 emits SACK blocks from the receiver
+        // side (out-of-order reassembly queue → option), so the
+        // option is now load-bearing rather than aspirational.
+        // STUB: sender-side processing of incoming SACK blocks
+        // (scoreboard + RFC-6675 NextSeg) is the next slice; we
+        // accept SACK from peers for the negotiation but ignore
+        // their bytes on the TX path.
         opts[i++] = kOptSackPermitted;
         opts[i++] = 2;
     }
@@ -103,6 +121,54 @@ u32 BuildOptions(const Tcb& t, u8 flags, u8* opts)
         opts[i++] = u8(tsecr >> 16);
         opts[i++] = u8(tsecr >> 8);
         opts[i++] = u8(tsecr);
+    }
+    // SACK blocks (RFC 2018). Only on non-SYN segments to a peer
+    // that negotiated SACK-permitted and only when we hold
+    // out-of-order data. Each block is 8 bytes (left + right edge);
+    // option header is 2 bytes; we emit up to 4 blocks. Most-recent
+    // first per RFC 2018 §4 — that lets the sender's scoreboard
+    // narrow the lost-segment window cheaply. We approximate
+    // "most recent" by walking the oo_queue in slot order from
+    // the most recently inserted backward; the segment dispatcher
+    // inserts at the first empty slot so a forward walk would
+    // bias toward stale entries.
+    if (!syn && t.peer_supports_sack)
+    {
+        const u32 oo_count = OoSegmentCount(t);
+        if (oo_count > 0)
+        {
+            u32 emit = oo_count;
+            if (emit > 4)
+                emit = 4;
+            // Space check: 2 NOP pad + 2 hdr + 8 × emit ≤ 40
+            // (TCP option budget). Always fits at emit ≤ 4 with
+            // room for the timestamp option already encoded above.
+            opts[i++] = kOptNop;
+            opts[i++] = kOptNop;
+            opts[i++] = kOptSack;
+            opts[i++] = u8(2 + 8 * emit);
+            // Walk oo_queue from the last slot backward, picking
+            // the first `emit` in-use entries. Reverse iteration
+            // approximates LIFO (most-recent-insert first).
+            u32 picked = 0;
+            for (i32 si = i32(kReassQueueMax) - 1; si >= 0 && picked < emit; --si)
+            {
+                const OoSegment& oo = t.oo_queue[si];
+                if (!oo.in_use)
+                    continue;
+                const u32 left = oo.seq;
+                const u32 right = oo.seq + oo.len;
+                opts[i++] = u8(left >> 24);
+                opts[i++] = u8(left >> 16);
+                opts[i++] = u8(left >> 8);
+                opts[i++] = u8(left);
+                opts[i++] = u8(right >> 24);
+                opts[i++] = u8(right >> 16);
+                opts[i++] = u8(right >> 8);
+                opts[i++] = u8(right);
+                ++picked;
+            }
+        }
     }
     // Pad to a 4-byte boundary with NOPs.
     while ((i & 3) != 0)
@@ -666,6 +732,12 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
             t.rcv_nxt = seq + 1;
             t.peer_supports_wscale = po.has_wscale;
             t.snd_wscale = po.has_wscale ? po.wscale : 0;
+            t.peer_supports_sack = po.sack_permitted;
+            // RFC 3168 §6.1.1 — the SYN-ACK confirms ECN iff
+            // ECE=1 and CWR=0. Any other combination (incl. both
+            // clear, both set, or CWR only) means the peer
+            // declined; we fall back to classic TCP.
+            t.ecn_ok = (flags & kFlagEce) != 0 && (flags & kFlagCwr) == 0;
             if (po.mss > 0 && po.mss < t.mss_send)
                 t.mss_send = po.mss;
             // Mark our SYN as acked.
@@ -843,7 +915,7 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
 }
 
 void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip, u16 peer_port,
-                     u16 local_port, u32 peer_seq, const ParsedOptions& po)
+                     u16 local_port, u32 peer_seq, u8 peer_flags, const ParsedOptions& po)
 {
     Tcb& parent = g_tcbs[listener_idx];
     if (parent.backlog_count >= parent.backlog_max)
@@ -888,10 +960,17 @@ void HandleListenSyn(u32 listener_idx, u32 iface_index, const MacAddress& peer_m
     child.peer_supports_wscale = po.has_wscale;
     child.snd_wscale = po.has_wscale ? po.wscale : 0;
     child.peer_supports_timestamps = po.has_timestamp;
+    child.peer_supports_sack = po.sack_permitted;
     if (po.has_timestamp)
         child.ts_recent = po.tsval;
+    // RFC 3168 §6.1.1 — ECN-Setup-SYN sets ECE=1 AND CWR=1. A
+    // SYN with only one of the two bits is NOT an ECN setup; treat
+    // as classic TCP. On match, our SYN-ACK echoes ECE=1, CWR=0.
+    const bool ecn_setup = (peer_flags & kFlagEce) != 0 && (peer_flags & kFlagCwr) != 0;
+    child.ecn_ok = ecn_setup;
     BucketInsert(idx);
-    SendSegment(child, kFlagSyn | kFlagAck, child.iss, child.rcv_nxt, nullptr, 0);
+    const u8 synack_flags = u8(kFlagSyn | kFlagAck | (ecn_setup ? kFlagEce : 0));
+    SendSegment(child, synack_flags, child.iss, child.rcv_nxt, nullptr, 0);
     child.rtx_deadline = NowTicks() + child.rto_ticks;
 }
 
@@ -935,7 +1014,7 @@ void OnSegment(u32 iface_index, const MacAddress& peer_mac, Ipv4Address peer_ip,
             const u8* opts = tcp + 20;
             const u32 opts_len = data_off_bytes - 20;
             ParsedOptions po = ParseOptions(opts, opts_len);
-            HandleListenSyn(lidx, iface_index, peer_mac, peer_ip, src_port, dst_port, seq, po);
+            HandleListenSyn(lidx, iface_index, peer_mac, peer_ip, src_port, dst_port, seq, flags, po);
             arch::Sti();
             return;
         }

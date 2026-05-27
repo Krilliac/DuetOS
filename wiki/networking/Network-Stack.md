@@ -48,6 +48,20 @@ See [Networking Drivers](../drivers/Networking-Drivers.md).
   congestion control. Up to 256 concurrent TCBs per host. See
   [TCP State Machine](TCP-State-Machine.md) for the design + RFC
   mapping.
+- **TCP SACK (receiver side)** — when a peer negotiates
+  SACK-Permitted on the SYN, every ACK from us that carries
+  out-of-order RX state emits up to 4 SACK blocks (RFC 2018),
+  most-recent-first, sourced directly from the reassembly queue.
+  Sender-side SACK processing (RFC 6675 scoreboard / NextSeg) is
+  the next slice.
+- **TCP ECN negotiation (RFC 3168 §6.1.1)** — the initial SYN
+  carries ECE+CWR; an ECN-capable peer replies SYN+ACK with
+  ECE=1, CWR=0, and the connection records `ecn_ok = true`. A
+  listener that receives an ECN-Setup-SYN echoes ECE=1, CWR=0 in
+  its SYN+ACK. The IP-layer ECT/CE bit threading (data segments
+  carry ECT(0); received CE → ECE feedback → CWR confirmation)
+  is the next slice and lives in `stack.cpp`'s IPv4 emit/recv
+  path — see GAP below.
 - **DHCP client** — gets an IP from the local network
 - **DNS resolver** — `getaddrinfo`-equivalent
 
@@ -130,10 +144,30 @@ throughput display.
   message delivery) and IOCP overlapped socket reads are still
   out of scope.**
 - **TCP NewReno fast retransmit + Reno congestion control;
-  no SACK blocks, no CUBIC** yet. SACK-permitted is negotiated
-  so the option stays available without renegotiation when SACK
-  generation lands. See [TCP State Machine](TCP-State-Machine.md#known-limits--gaps-v1)
+  receiver-side SACK lands but no CUBIC / BBR** yet. CUBIC is
+  ~400 LoC + 56 bytes/TCB and is the next congestion-control
+  slice; BBR needs a pacer + delivery-rate estimator and is
+  deferred. See [TCP State Machine](TCP-State-Machine.md#known-limits--gaps-v1)
   for the full v1 GAP list.
+- **TCP SACK sender-side processing** — receiver-side SACK
+  emission lands; sender-side scoreboard + RFC 6675 NextSeg
+  (~600 LoC + ~16 B per outstanding hole) is the next slice.
+  Until then the sender ignores incoming SACK blocks and falls
+  back to NewReno's fast-retransmit on triple-dup-ACK. Reference:
+  FreeBSD `sys/netinet/tcp_sack.c` (hole-list scoreboard, ~1100
+  LoC).
+- **TCP ECN IP-layer ECT/CE threading** — RFC 3168 negotiation
+  is live; the data-plane half (set ECT(0) on outbound IP TOS for
+  `ecn_ok` connections, detect inbound CE, schedule the ECE
+  feedback, halve cwnd + emit CWR on the ECE arrival) wires
+  through `stack.cpp`'s IPv4 path next. Pairs naturally with
+  AccECN (RFC 9768 — the 2024 successor) for L4S / DOCSIS
+  prioritisation.
+- **No TCP Fast Open (RFC 7413).** Middlebox interference (~6%
+  of paths drop SYN-data) plus disabled-by-default at major
+  CDNs (Cloudflare, Fastly, Google Frontends) means the
+  cost/benefit doesn't pencil. Deferred indefinitely; QUIC 0-RTT
+  is the modern replacement.
 - Conntrack and the recent-denial log ring (`kFwLogCap = 32`) have
   landed; see [Firewall Roadmap](Firewall-Roadmap.md) for the live
   state machine and capacity. Default-deny inbound is still off by

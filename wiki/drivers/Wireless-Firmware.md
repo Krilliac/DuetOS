@@ -214,6 +214,8 @@ move back to Intel iwlwifi for the tier-1 laptop path.
 - Fedora `b43-openfwwf` package metadata: <https://packages.fedoraproject.org/pkgs/b43-openfwwf/b43-openfwwf>
 - openSUSE `b43-openfwwf` feature/limit notes: <https://build.opensuse.org/package/show/hardware/b43-openfwwf>
 - Nexmon firmware patching framework paper: <https://www.sciencedirect.com/science/article/pii/S014036641731294X>
+- See also [Open Firmware Landscape 2026](Open-Firmware-Landscape-2026.md) — current
+  state of every project we evaluated, refresh quarterly.
 
 ## Hardware-test playbook
 
