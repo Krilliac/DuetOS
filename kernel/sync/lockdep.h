@@ -20,19 +20,22 @@
  *   per-instance disambiguation lands when there's a workload
  *   that needs it.
  *
- * SCOPE FOR THIS COMMIT
+ * SCOPE
  *   - Graph storage + edge recording + cycle detection.
- *   - Held-class stack (single global, fine until SMP ships;
- *     per-CPU upgrade is one ifdef once kPerCpu lands real).
+ *   - Per-CPU held-class stack (`acpi::kMaxCpus` slots, indexed
+ *     by `cpu::CurrentCpuIdOrBsp()` inside `Cli`) for spinlock
+ *     classes; per-task held-class stack threaded through
+ *     `Task` + the context-switch boundary for sleeping mutex
+ *     classes (so a mutex held across a yield-and-resume on a
+ *     different CPU stays attributed to the holding task).
  *   - Self-test that synthesises `A then B` followed by `B then A`
  *     and asserts an inversion is reported.
  *
  *   NOT IN SCOPE (tracked as D1 follow-ups in the plan):
- *   - Hooking SpinLock / Mutex / RwLock acquire/release paths.
- *     Those changes need a `class_id` field added to each lock
- *     type and would touch every initialiser; deferred.
+ *   - Hooking every SpinLock / Mutex / RwLock instance — class
+ *     IDs are wired at the primary acquire/release sites; per-
+ *     instance disambiguation arrives when a workload needs it.
  *   - Promoting warnings to panics after a stabilisation window.
- *   - Per-CPU held stack via the SMP scaffolding.
  *
  * USAGE PATTERN (once primitives are hooked up)
  *

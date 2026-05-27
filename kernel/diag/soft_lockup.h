@@ -29,9 +29,14 @@
  *   the panic / shutdown paths — once we're crashing, the noisy
  *   warning channel only obscures the real signal.
  *
- * SCOPE FOR v0
- *   - Single global state (the kernel runs on one CPU during
- *     bring-up; per-CPU state lands with B2 SMP).
+ * SCOPE
+ *   - Per-CPU state (one slot per `acpi::kMaxCpus`, indexed by
+ *     `cpu::CurrentCpuIdOrBsp()` at the call site). Each online
+ *     CPU's timer-IRQ tail tracks the task hogging THAT CPU; a
+ *     long streak on one CPU does not reset another CPU's
+ *     counter. The warnings counter and the fault-react dispatch
+ *     are global so a multi-CPU lockup storm bubbles up to one
+ *     dispatch stream rather than N independent ones.
  *   - Warning, not panic — soft-lockups are bugs to investigate,
  *     not always reasons to halt.
  *   - No "stuck task killer" — a future slice can pair the

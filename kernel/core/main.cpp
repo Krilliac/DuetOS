@@ -728,12 +728,26 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::cpu::TopologyAssignClusters();
     duetos::cpu::TopologyDump();
 
-    // Runtime invariant checker baseline. Capture NOW, after
-    // every init that touches IDT / GDT / TSS / CR4 / EFER has
-    // run — so the hashes reflect the final steady-state view
-    // of those structures. Earlier capture would flag every
-    // subsequent IdtSetUserGate / TssSetRsp0 as "drift".
-    duetos::core::RuntimeCheckerInit();
+    // Runtime invariant checker baseline is owned by
+    // `BootBringupKernelServices`: it runs `RuntimeCheckerTeardown`
+    // + `RuntimeCheckerInit` immediately after `linux::SyscallInit`
+    // programs LSTAR/STAR/CSTAR/SYSENTER (see boot_bringup.cpp's
+    // post-SyscallInit re-baseline). Nothing between that point and
+    // the idle loop mutates the baselined GLOBAL state:
+    //   - GDT contents are stable (per-CPU TSS rsp0 lives in the
+    //     per-CPU TSS body, not g_gdt; LTR's BUSY bit is masked
+    //     by GdtHash; AP GDT bundles are separate from g_gdt).
+    //   - IDT contents are stable (IdtSetUserGate fires only from
+    //     core::SyscallInit, which is much earlier).
+    //   - CR0/CR4/EFER are stable on the BSP (NmiWatchdogInit
+    //     below programs PMU MSRs, which the baseline doesn't
+    //     touch; CET enable would mutate CR4 but is not wired in).
+    // A redundant re-init here also runs in scheduler context AFTER
+    // `SmpStartAps`, so it can land on an AP whose LSTAR/STAR/CR0
+    // differ from the BSP — capturing those AP-local values as the
+    // baseline then trips a false `SyscallMsrHijacked` alarm on
+    // every subsequent BSP-side scan. Leave the canonical
+    // post-SyscallInit baseline as the source of truth.
 
     // NMI watchdog. Arms a PMU counter to fire NMI every few
     // seconds of real execution; if the timer IRQ stops

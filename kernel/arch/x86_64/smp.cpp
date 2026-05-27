@@ -92,6 +92,86 @@ inline void WriteMsrKernelGsBase(u64 value)
     asm volatile("wrmsr" : : "c"(0xC0000102u), "a"(lo), "d"(hi));
 }
 
+// Forward decl from subsystems/linux/syscall_entry.S. The SYSCALL
+// instruction's MSR_LSTAR (0xC0000082) must point at this stub on
+// every CPU that can issue a SYSCALL. The native-ABI retarget
+// (`arch::SyscallRetargetForAbi`) flips LSTAR between this and
+// `native_syscall_entry` on a per-task ABI-crossing context switch;
+// the initial value is the Linux entry to match the BSP-side
+// `linux::SyscallInit` ordering.
+extern "C" void linux_syscall_entry();
+
+// Mirror of `linux::SyscallInit`'s per-CPU SYSCALL/SYSRET MSR setup
+// for an AP that's just come online. Must be byte-for-byte identical
+// to the BSP-side constants in subsystems/linux/syscall.cpp — if
+// either side drifts, `diag::CheckSyscallMsrs` will fire
+// `SyscallMsrHijacked` on the heartbeat scan that lands on this AP.
+//
+// MSRs programmed:
+//   IA32_STAR    (0xC0000081) — SYSCALL/SYSRET selector base.
+//                                kernel CS=0x08 (slot 1), user base=0x10
+//                                so SYSRET derives user CS = 0x10+16 = 0x1B
+//                                with RPL=3 and SS = 0x10+8  = 0x18 with RPL=3.
+//   IA32_LSTAR   (0xC0000082) — 64-bit SYSCALL entry RIP. Linux
+//                                stub by default; retargeted per task.
+//   IA32_SFMASK  (0xC0000084) — RFLAGS bits cleared on SYSCALL entry:
+//                                IF (bit 9) so the entry runs with
+//                                interrupts off, DF (bit 10) for SysV
+//                                ABI, TF (bit 8) so a stray ring-3
+//                                single-step doesn't trace the kernel.
+//   IA32_EFER    (0xC0000080) — set SCE (bit 0). Without this the
+//                                SYSCALL instruction #UDs on the AP.
+//                                Earlier AP setup (long-mode bringup
+//                                via the trampoline) sets LME+NXE but
+//                                NOT SCE, so the AP can't issue SYSCALL
+//                                until this runs. RMW so we don't
+//                                clobber LME/NXE.
+//
+// History: the AP entry path historically only programmed GS_BASE +
+// KERNEL_GS_BASE, leaving STAR/LSTAR/SFMASK at trampoline-cleared
+// zero and EFER without SCE. Any heartbeat scan that landed on an
+// AP fired `[health] syscall MSR hijacked: IA32_LSTAR baseline=...
+// now=0` and escalated `blockguard -> Deny (rootkit indicator)`; the
+// runtime checker's HEAL path then back-filled LSTAR/STAR per
+// heartbeat. Programming the MSRs at bring-up retires the false-
+// positive alarm AND closes the actual "SYSCALL on an AP #UDs"
+// hole. See `wiki/security/Runtime-Recovery.md` Class B vs the
+// "fix the source, not the symptom" principle.
+inline void ProgramSyscallMsrsForCurrentCpu()
+{
+    constexpr u32 kMsrStar = 0xC0000081;
+    constexpr u32 kMsrLstar = 0xC0000082;
+    constexpr u32 kMsrSfmask = 0xC0000084;
+    constexpr u32 kMsrEfer = 0xC0000080;
+    constexpr u64 kEferSce = 1ULL << 0;
+
+    // STAR layout exactly matches linux::SyscallInit.
+    const u64 star = (u64(0x10) << 48) | (u64(0x08) << 32);
+    const u32 star_lo = static_cast<u32>(star & 0xFFFFFFFF);
+    const u32 star_hi = static_cast<u32>(star >> 32);
+    asm volatile("wrmsr" : : "c"(kMsrStar), "a"(star_lo), "d"(star_hi));
+
+    const u64 lstar = reinterpret_cast<u64>(&linux_syscall_entry);
+    const u32 lstar_lo = static_cast<u32>(lstar & 0xFFFFFFFF);
+    const u32 lstar_hi = static_cast<u32>(lstar >> 32);
+    asm volatile("wrmsr" : : "c"(kMsrLstar), "a"(lstar_lo), "d"(lstar_hi));
+
+    constexpr u64 sfmask = (1u << 9) | (1u << 10) | (1u << 8);
+    const u32 sfmask_lo = static_cast<u32>(sfmask & 0xFFFFFFFF);
+    const u32 sfmask_hi = static_cast<u32>(sfmask >> 32);
+    asm volatile("wrmsr" : : "c"(kMsrSfmask), "a"(sfmask_lo), "d"(sfmask_hi));
+
+    // EFER read-modify-write — preserve LME/NXE the long-mode
+    // bringup set, OR in SCE so SYSCALL is enabled.
+    u32 efer_lo, efer_hi;
+    asm volatile("rdmsr" : "=a"(efer_lo), "=d"(efer_hi) : "c"(kMsrEfer));
+    u64 efer = (static_cast<u64>(efer_hi) << 32) | efer_lo;
+    efer |= kEferSce;
+    asm volatile("wrmsr"
+                 :
+                 : "c"(kMsrEfer), "a"(static_cast<u32>(efer & 0xFFFFFFFF)), "d"(static_cast<u32>(efer >> 32)));
+}
+
 inline void* TrampVirt()
 {
     return mm::PhysToVirt(kTrampolinePhys);
@@ -620,6 +700,15 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // the per-CPU pointer, not 0, into GS_BASE. Mirrors the BSP path
     // in linux::SyscallInit which programs this same MSR.
     WriteMsrKernelGsBase(reinterpret_cast<u64>(pcpu));
+
+    // SYSCALL/SYSRET MSRs (STAR, LSTAR, SFMASK) + EFER.SCE. The BSP
+    // programs these in linux::SyscallInit; the AP needs the same
+    // setup before any ring-3 code on this CPU issues SYSCALL — and
+    // before the runtime checker's heartbeat scan can land on this
+    // AP and (correctly!) report LSTAR=0 vs the BSP-side baseline.
+    // See `ProgramSyscallMsrsForCurrentCpu` for the per-MSR
+    // rationale and the cross-reference back to subsystems/linux.
+    ProgramSyscallMsrsForCurrentCpu();
 
     // Point THIS CPU's IDTR at the shared IDT. IDTR is per-CPU; the
     // SMP trampoline only loads a transition GDT (no lidt), and the
