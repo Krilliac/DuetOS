@@ -173,6 +173,20 @@ struct Task
     // when kill_requested is true.
     KillReason kill_reason;
 
+    // Hung-task detector opt-out. Some kernel tasks legitimately
+    // sit in `TaskState::Blocked` forever waiting for a wake-up
+    // that may never come on this boot (input pollers waiting for
+    // a keypress, the reaper waiting for a task to die, future
+    // device-event listeners). Without this flag the hung-task
+    // detector correctly identifies them as "blocked > threshold"
+    // and warns once per minute — true but noisy and not
+    // actionable. The task sets this flag once at entry via
+    // `sched::SchedExemptCurrentFromHungTask()` and the
+    // detector's snapshot pass skips it. Set-once / clear-never
+    // for this slice; if a future workload wants to opt OUT of
+    // the exemption mid-life, this becomes a clear path too.
+    bool hung_task_exempt;
+
     // One-shot boot context: this Task exists ONLY to give a CPU's
     // first Schedule() a non-null `prev`; its rsp / stack_base are
     // placeholders and it must NEVER go on a runqueue. The AP boot
@@ -1822,6 +1836,7 @@ void SchedInit()
     boot_task->process = nullptr;                    // kernel-only — no owning process
     boot_task->kill_requested = false;               // kernel tasks never hit a budget
     boot_task->kill_reason = KillReason::TickBudget; // unused when kill_requested=false
+    boot_task->hung_task_exempt = false;             // default: detector watches every task
     boot_task->suspend_count = 0;                    // boot/kernel tasks never get suspended
     boot_task->win32_last_error = 0;                 // ERROR_SUCCESS, per-thread Win32 slot
     boot_task->last_cpu = cpu::CurrentCpu()->cpu_id; // BSP pin — boot task only ever runs here
@@ -1923,6 +1938,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->process = process; // user tasks: caller's Process; kernel tasks: nullptr
     t->kill_requested = false;
     t->kill_reason = KillReason::TickBudget;
+    t->hung_task_exempt = false; // default: detector watches every task
     t->ticks_run = 0;
     t->schedin_tick = 0;
     t->win32_last_error = 0; // ERROR_SUCCESS, per-thread Win32 slot
@@ -4600,6 +4616,16 @@ u64 SchedSnapshotBlockedTasks(SchedBlockedTaskInfo* out, u64 cap)
             // here: legitimately-suspended threads aren't hung.
             continue;
         }
+        if (t->hung_task_exempt)
+        {
+            // Task opted out via SchedExemptCurrentFromHungTask().
+            // The legitimate use cases (input pollers waiting for
+            // a keypress that may never come, the reaper waiting
+            // for a death notification) are correctly Blocked for
+            // arbitrarily long, so flagging them as hung is true
+            // but unactionable noise.
+            continue;
+        }
         out[written].id = t->id;
         out[written].name = t->name;
         out[written].block_start_tick = t->block_start_tick;
@@ -4607,6 +4633,20 @@ u64 SchedSnapshotBlockedTasks(SchedBlockedTaskInfo* out, u64 cap)
     }
     sync::SpinLockRelease(g_sched_lock, f);
     return written;
+}
+
+void SchedExemptCurrentFromHungTask()
+{
+    Task* t = Current();
+    if (t == nullptr)
+    {
+        return;
+    }
+    // Single bool write; the hung-task detector reads it under
+    // sched lock, and we set it from the task's own context where
+    // a concurrent reader sees either the old or new value
+    // deterministically (no torn read for a single byte).
+    t->hung_task_exempt = true;
 }
 
 u64 SchedSelftestRewindBlockStart(const char* match_name, u64 delta_ticks)
@@ -4846,6 +4886,12 @@ namespace
 
 [[noreturn]] void ReaperMain(void*)
 {
+    // Opt out of the hung-task detector — the reaper sits in
+    // `TaskState::Blocked` on `g_reaper_wq` between task deaths,
+    // which is unbounded on a system with no exiting tasks (QEMU
+    // smoke past boot). The detector would otherwise correctly
+    // flag this legitimate idle as a hang.
+    SchedExemptCurrentFromHungTask();
     for (;;)
     {
         arch::Cli();

@@ -574,6 +574,26 @@ u64 SchedSnapshotBlockedTasks(SchedBlockedTaskInfo* out, u64 cap);
 /// `diag::HungTaskSelfTest` — production code MUST NOT call this.
 u64 SchedSelftestRewindBlockStart(const char* match_name, u64 delta_ticks);
 
+/// Opt the currently-running task out of the hung-task detector.
+/// Some kernel tasks legitimately sit in `TaskState::Blocked` forever
+/// waiting for a wake-up that may never come on this boot:
+///
+///   - Input pollers (kbd-reader, mouse-reader, xhci-hid-poll) parked
+///     on a `KEvent` that only fires on a real keypress / mouse move.
+///   - The reaper, parked on a `WaitQueue` that only wakes when a
+///     task transitions to `Dead`.
+///   - Future device-event listeners (link-up, hotplug, audio jack).
+///
+/// Without this opt-out, the hung-task detector correctly identifies
+/// each as "blocked beyond the 30s threshold" and emits one WARN per
+/// minute per task — true but unactionable noise. Tasks set this flag
+/// once at entry; the detector's snapshot pass skips them.
+///
+/// Set-once / clear-never in v0. Safe to call from the task's own
+/// entry function under any context (just sets a bool on the Task).
+/// No-op if `Current()` is null (pre-Schedule path).
+void SchedExemptCurrentFromHungTask();
+
 struct StackHealth
 {
     u64 canary_broken;    // # tasks whose stack-bottom sentinel scribbled

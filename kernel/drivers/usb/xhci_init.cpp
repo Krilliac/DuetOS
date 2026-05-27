@@ -98,6 +98,12 @@ void HidPollEntry(void* raw)
     auto* arg = static_cast<PollTaskArg*>(raw);
     Runtime& rt = *arg->rt;
     const bool have_msix = (arg->irq_vector != 0);
+    // Opt out of the hung-task detector — a HID poller in MSI-X
+    // mode parks on the event-ring KEvent until the next USB
+    // event, which is unbounded on a QEMU smoke with no input
+    // devices generating traffic. The detector would otherwise
+    // correctly flag this as "blocked > 30s" every minute.
+    ::duetos::sched::SchedExemptCurrentFromHungTask();
     for (;;)
     {
         // Drain every event currently available, then sleep.
