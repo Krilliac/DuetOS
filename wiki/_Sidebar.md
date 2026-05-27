@@ -42,6 +42,7 @@
 - [Wireless/GPU Firmware](drivers/Wireless-Firmware.md)
 - [Wi-Fi Onboarding](drivers/WiFi-Onboarding.md)
 - [802.11 Wireless Stack](drivers/Wireless-80211.md)
+- [Wireless Regulatory Database](drivers/Wireless-Regulatory.md)
 - [Bluetooth](drivers/Bluetooth.md)
 - [Graphics Drivers](drivers/Graphics-Drivers.md)
 - [Neural Engine (NPU)](drivers/Neural-Engine.md)

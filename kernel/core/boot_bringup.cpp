@@ -114,6 +114,7 @@
 #include "net/wireless/gcmp.h"
 #include "net/wireless/mock_isp.h"
 #include "net/wireless/mlme.h"
+#include "net/wireless/regdb.h"
 #include "net/wireless/test/wireless_dataplane_test.h"
 #include "net/wireless/test/wireless_e2e_test.h"
 #include "net/wireless/wdev.h"
@@ -1903,6 +1904,7 @@ void BootBringupDevices(bool force_net_smoke)
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::EapolSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::FourWaySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::GcmpSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::regdb::SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::WdevSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::MlmeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::net::IwlUploadSelfTest());
