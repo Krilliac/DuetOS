@@ -1424,6 +1424,28 @@ if(DUETOS_IOMMU_ENABLE)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_IOMMU_ENABLE=1)
 endif()
 
+# Strict-mode companion to DUETOS_IOMMU_ENABLE: when ON, a failed
+# IOMMU enable at boot PANICS the kernel instead of silently
+# leaving translation off.
+#
+# Without this flag, an enable failure today logs a warning and
+# continues — useful for development (you don't lose the boot just
+# because intel-iommu wasn't plugged into the QEMU command). For
+# production, the gentler behaviour is a foot-gun: a deployment
+# that THINKS it has IOMMU defense but actually doesn't is
+# worse than one that knows it has none. Set this flag in any
+# release build that depends on the IOMMU for its threat model.
+#
+# Matrix:
+#   ENABLE=OFF, REQUIRE=*    : translation off, no enable attempted (dev)
+#   ENABLE=ON,  REQUIRE=OFF  : try to enable, log + continue on failure
+#   ENABLE=ON,  REQUIRE=ON   : try to enable, PANIC on failure (release)
+option(DUETOS_IOMMU_REQUIRE "Panic at boot if IOMMU enable was requested but failed" OFF)
+if(DUETOS_IOMMU_REQUIRE)
+    target_compile_definitions(duetos-kernel          PRIVATE DUETOS_IOMMU_REQUIRE=1)
+    target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_IOMMU_REQUIRE=1)
+endif()
+
 # Deliberate stack-smash build flag. Enables a small in-kernel_main
 # block that overruns a local array past its stack canary, forcing
 # __stack_chk_fail to fire on return. Intended for verifying the

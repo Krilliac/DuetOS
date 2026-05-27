@@ -78,6 +78,7 @@
 #include "drivers/input/hid_keyboard.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/iommu/dmar.h"
+#include "drivers/iommu/iommu.h"
 #include "drivers/iommu/ivrs.h"
 #include "drivers/iommu/vtd.h"
 #include "drivers/iommu/vtd_paging.h"
@@ -1218,30 +1219,22 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // whether any real IOMMU is present.
     DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::vtd_paging::VtdPagingSelfTest());
 
-    // Translation enable. Gated TWICE: by the build flag
-    // (DUETOS_IOMMU_ENABLE off by default — a regression here
-    // bricks all device DMA) AND by VtdAvailable (no IOMMU
-    // discovered ⇒ nothing to enable). Both checks happen even
-    // in selftest-enabled builds.
-    if (duetos::drivers::iommu::VtdEnableRequested() && duetos::drivers::iommu::VtdAvailable())
+    // Vendor-neutral IOMMU enable. Routes through
+    // drivers/iommu/iommu.cpp which picks Intel vs AMD based on
+    // what IommuInit discovered. Gated by DUETOS_IOMMU_ENABLE
+    // (build flag). When DUETOS_IOMMU_REQUIRE is also set, a
+    // failed enable panics — the deployment-safety gate that lets
+    // release builds refuse to run without IOMMU protection.
+    if (duetos::drivers::iommu::IommuEnableEffective())
     {
-        // VtdPagingInit guarantees the page tables exist before
-        // VtdProgramAndEnable writes RTADDR. The self-test above
-        // already proved the walk; here we just commit the result
-        // to the IOMMU hardware. Build-flag-gated, so the failure
-        // mode in a default build is "didn't run at all."
-        auto paging_init = duetos::drivers::iommu::vtd_paging::VtdPagingInit();
-        if (paging_init.has_value())
+        auto r = duetos::drivers::iommu::IommuEnableAtBoot();
+        if (!r.has_value())
         {
-            auto enable_result = duetos::drivers::iommu::VtdProgramAndEnable();
-            if (!enable_result.has_value())
+            if (duetos::drivers::iommu::IommuRequireEffective())
             {
-                SerialWrite("[boot] VT-d enable returned error — translation remains off\n");
+                duetos::core::Panic("boot/iommu", "DUETOS_IOMMU_REQUIRE set but IommuEnableAtBoot failed");
             }
-        }
-        else
-        {
-            SerialWrite("[boot] VtdPagingInit failed — translation NOT enabled\n");
+            SerialWrite("[boot] IOMMU enable returned error — translation remains off\n");
         }
     }
 
