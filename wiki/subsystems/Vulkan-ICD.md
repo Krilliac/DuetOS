@@ -223,9 +223,17 @@ Out of scope — deferred:
   `CombinedImageSampler` binds but the rasterizer has no
   per-pixel sampler fetch path; the bound image-view is recorded
   for stats only.
-- Perspective-correct attribute interpolation. The rasterizer
-  is affine; pre-divided W-space attributes are the caller's
-  responsibility.
+- Perspective-correct attribute interpolation. The shader-path
+  rasterizer enables it automatically when every triangle vertex
+  reports a positive `gl_Position.w` from the VS — each vertex's
+  `1/w` is computed once, varyings are pre-divided by `w`, both
+  `value/w` and `1/w` are interpolated linearly across the
+  triangle, and a per-pixel divide recovers the correct attribute.
+  Orthographic projections (`w == 0` or NaN) fall back to the
+  affine path without producing artefacts. The fixed-function
+  v0/v1 vertex format rasterizer remains affine — its inputs are
+  pixel-space pre-projected, so perspective correction would be a
+  no-op there anyway.
 - Multi-binding vertex buffers — the fixed-function (DuetOS v0/v1
   vertex format) rasterizer reads only binding 0. The SPIR-V
   shader rasterizer honours per-attribute binding indices via
