@@ -46,6 +46,7 @@
 #include "sched/sched.h"
 #include "security/guard.h"
 #include "diag/fault_react.h"
+#include "diag/fma/ereport.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "security/fault_domain.h"
@@ -429,6 +430,35 @@ bool AttemptHeal(HealthIssue issue)
     return ok;
 }
 
+// Narrow predicate for the FMA bridge: only the structural-drift
+// integrity issues (text / IDT / GDT / MSR / PTE / fn-table) — the
+// kind of finding a future remediation slice can act on as a
+// kernel-integrity correlation. Excludes per-task findings
+// (TaskStackOverflow, TaskRspOutOfRange) and threshold-driven
+// findings (mass FS writes, IRQ storms) that are noisier signals;
+// those go through the existing FaultReactDispatch path on their
+// own. KernelIntegrity in FMA is the "is the kernel itself
+// trustworthy" axis.
+bool IsKernelIntegrityForFma(HealthIssue issue)
+{
+    switch (issue)
+    {
+    case HealthIssue::IdtModified:
+    case HealthIssue::GdtModified:
+    case HealthIssue::KernelTextModified:
+    case HealthIssue::SyscallMsrHijacked:
+    case HealthIssue::KernelFnTableModified:
+    case HealthIssue::KernelPteWxFlipped:
+    case HealthIssue::Cr0WpCleared:
+    case HealthIssue::Cr4SmepCleared:
+    case HealthIssue::Cr4SmapCleared:
+    case HealthIssue::EferNxeCleared:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void Report(HealthIssue issue)
 {
     const u32 idx = u32(issue);
@@ -439,6 +469,18 @@ void Report(HealthIssue issue)
     ++g_report.issues_found_total;
     g_report.last_issue = issue;
     Log(LogLevel::Warn, "health", HealthIssueName(issue));
+
+    // FMA bridge: post an ereport for kernel-integrity drift so the
+    // diagnosis engine's rule 3 (KernelIntegrity = always Critical)
+    // can correlate across the integrity surface. Non-invasive — the
+    // existing escalation paths below remain unchanged.
+    if (IsKernelIntegrityForFma(issue))
+    {
+        ::duetos::diag::fma::EreportPost(::duetos::diag::fma::EreportClass::KernelIntegrity,
+                                         ::duetos::diag::fma::EreportSeverity::Critical,
+                                         /*target_id=*/static_cast<u64>(issue),
+                                         /*aux0=*/g_report.issues_found_total, /*aux1=*/0, "kernel/health");
+    }
 
     // Guard escalation. Any security-critical finding forces
     // the guard into Enforce mode so the next image load is

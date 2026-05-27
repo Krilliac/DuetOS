@@ -22,6 +22,7 @@
 #include "core/panic.h"
 #include "cpu/percpu.h"
 #include "diag/fault_react.h"
+#include "diag/fma/ereport.h"
 #include "log/klog.h"
 #include "security/fault_domain.h"
 #include "util/types.h"
@@ -221,6 +222,14 @@ void TickInternal(u32 slot, u64 now_ticks, u64 current_tid, const char* current_
         ev.faulting_rip = 0;
         ev.aux = current_tid;
         (void)::duetos::diag::FaultReactDispatch(::duetos::core::kFaultDomainInvalid, ev);
+
+        // FMA bridge: also post an ereport so the diagnosis engine
+        // can correlate soft-lockup events across time (a single
+        // task spiking once vs. a runaway pattern). target_id is
+        // the stuck task's TID; aux carries the streak length.
+        ::duetos::diag::fma::EreportPost(::duetos::diag::fma::EreportClass::SoftLockup,
+                                         ::duetos::diag::fma::EreportSeverity::Degraded, current_tid,
+                                         state.same_tid_count, slot, "diag.softlockup");
     }
 }
 
