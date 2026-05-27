@@ -164,10 +164,15 @@ silently.
 |---|---|---|
 | MSS (RFC 879) | SYN | Yes — caps `mss_send`. |
 | Window scale (RFC 7323) | SYN | Yes — we advertise wscale=0, accept peer's. |
-| SACK-permitted (RFC 2018) | SYN | Advertised; SACK blocks are NOT generated yet. |
+| SACK-permitted (RFC 2018) | SYN | Yes — `peer_supports_sack` captured both sides; SACK blocks emitted from the OoO reassembly queue on every ACK that carries OoO state. |
+| SACK (RFC 2018) | Any non-SYN ACK | Yes (RX side) — up to 4 blocks per ACK, most-recent-first. Sender-side scoreboard / RFC-6675 NextSeg is the next slice. |
 | Timestamps (RFC 7323) | SYN, every seg | Yes — drives RTT estimation + PAWS. |
+| ECN (RFC 3168 §6.1.1) | SYN flag bits | Yes (negotiation) — connector sends SYN with ECE+CWR; listener that sees ECN-Setup-SYN replies SYN+ACK with ECE. Result lands in `ecn_ok` on both ends. IP-layer ECT/CE/feedback threading is GAP. |
 
-The selftest covers the option-encoder/decoder round-trip.
+The selftest covers the option-encoder/decoder round-trip and
+explicitly asserts SACK block emission from the OoO queue,
+SACK-suppression when the peer didn't negotiate, and the ECN
+flag-bit encoding round-trip.
 
 ## Capabilities
 
@@ -197,9 +202,18 @@ probe fire.
 These get explicit roadmap rows; future slices retire them one at
 a time.
 
-- **No SACK blocks emitted.** SACK-permitted is advertised so the
-  option stays negotiable, but the receiver doesn't yet generate
-  SACK blocks. RFC-6675 SACK-driven recovery is a follow-up.
+- **No sender-side SACK processing.** Receiver-side SACK
+  emission lands (up to 4 blocks per ACK, sourced from
+  `oo_queue`). Sender-side scoreboard + RFC-6675 `IsLost()` /
+  `NextSeg()` (~600 LoC + ~16 B per outstanding hole) is the
+  follow-up. Reference: FreeBSD `sys/netinet/tcp_sack.c`
+  (~1100 LoC, hole-list approach matches our data shape).
+- **ECN data plane.** SYN-time negotiation (RFC 3168 §6.1.1)
+  lands; the data-plane half — set ECT(0) on outbound IP TOS
+  for `ecn_ok` connections, detect inbound CE, schedule the
+  ECE feedback, halve cwnd + emit CWR on the ECE arrival —
+  wires through `stack.cpp`'s IPv4 path in the next slice.
+  AccECN (RFC 9768) is a natural pairing once classic ECN is live.
 - **No CUBIC.** Plain Reno today; CUBIC requires microsecond-RTT
   precision we don't have on a 100 Hz scheduler tick.
 - **No SYN cookies.** SYN flood defense is a backlog-overflow drop

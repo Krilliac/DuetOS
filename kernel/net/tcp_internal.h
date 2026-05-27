@@ -24,6 +24,9 @@ inline constexpr u8 kFlagSyn = 0x02;
 inline constexpr u8 kFlagRst = 0x04;
 inline constexpr u8 kFlagPsh = 0x08;
 inline constexpr u8 kFlagAck = 0x10;
+inline constexpr u8 kFlagUrg = 0x20;
+inline constexpr u8 kFlagEce = 0x40; ///< ECN-Echo (RFC 3168).
+inline constexpr u8 kFlagCwr = 0x80; ///< Congestion Window Reduced (RFC 3168).
 
 inline constexpr u8 kOptEnd = 0;
 inline constexpr u8 kOptNop = 1;
@@ -101,9 +104,26 @@ struct Tcb
     u8 rcv_wscale;
     bool peer_supports_wscale;
     bool peer_supports_timestamps;
+    bool peer_supports_sack;
     u32 ts_recent;
     u64 ts_recent_age_ticks;
     u16 mss_send;
+
+    // ECN (RFC 3168). v0 implements the SYN-time negotiation only;
+    // marking IP-layer ECT/CE bits is the next slice and lives in
+    // stack.cpp's IPv4 emit/recv path.
+    //
+    // ecn_ok       — peer's SYN-ACK echoed (ECE=1, CWR=0) so we may
+    //                use ECN-marked IP packets on this connection.
+    // peer_ce_pending — RX side: we received an IP-layer CE-marked
+    //                   segment and owe the peer an ECE on the next
+    //                   outgoing ACK. (Not threaded yet — see GAP.)
+    // sent_cwr     — TX side: we already lowered cwnd in response
+    //                to the most recent ECE; next data segment
+    //                emits CWR=1 to inform the peer.
+    bool ecn_ok;
+    bool peer_ce_pending;
+    bool sent_cwr;
 
     // Congestion control (simplified Reno, RFC-5681).
     u32 cwnd;
@@ -227,6 +247,17 @@ void SendStandaloneRst(u32 iface_index, const MacAddress& peer_mac, Ipv4Address 
 // Send / Recv on the public surface.
 bool AckInWindow(u32 ack, u32 snd_una, u32 snd_nxt);
 bool DeliverPayload(Tcb& t, u32 seq, const u8* data, u32 len);
+
+/// Build the TCP option block for an outgoing segment. Same
+/// semantics as the internal call site in tcp_segment.cpp. Exposed
+/// so the boot self-test can assert SACK / timestamp / ECN-related
+/// option encoding without going through the wire path.
+u32 BuildOptions(const Tcb& t, u8 flags, u8* opts);
+
+/// Number of in-use slots in the OoO reassembly queue. O(N) walk
+/// over kReassQueueMax — at the v0 cap (8) it's cheaper than a
+/// running counter we'd have to keep in sync.
+u32 OoSegmentCount(const Tcb& t);
 
 // Move a TCB into TIME_WAIT (arms the 2*MSL timer).
 void EnterTimeWait(Tcb& t);

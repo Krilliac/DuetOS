@@ -235,6 +235,10 @@ void ResetTcbStorage(Tcb& t)
     t.rcv_wscale = 0;
     t.peer_supports_wscale = false;
     t.peer_supports_timestamps = false;
+    t.peer_supports_sack = false;
+    t.ecn_ok = false;
+    t.peer_ce_pending = false;
+    t.sent_cwr = false;
     t.ts_recent = 0;
     t.ts_recent_age_ticks = 0;
     t.mss_send = kDefaultMss;
@@ -507,8 +511,13 @@ TcbId Connect(u32 iface_index, Ipv4Address dst_ip, u16 dst_port, u16 local_port)
     t.mss_send = kDefaultMss;
     BucketInsert(idx);
     ++g_stats.connects;
-    // Send the SYN with options (MSS, WS=7, TS).
-    SendSegment(t, kFlagSyn, t.iss, 0, nullptr, 0);
+    // Send the SYN with options (MSS, WS, TS, SACK-Permitted) +
+    // RFC-3168 ECN-Setup-SYN flags (ECE=1, CWR=1). The peer's
+    // SYN-ACK confirms ECN by echoing ECE=1, CWR=0; a peer that
+    // doesn't know ECN clears both bits and the connection runs
+    // as classic TCP. Either way the protocol negotiation is
+    // backward-compatible.
+    SendSegment(t, kFlagSyn | kFlagEce | kFlagCwr, t.iss, 0, nullptr, 0);
     // Arm retransmit.
     t.rtx_deadline = NowTicks() + t.rto_ticks;
     arch::Sti();
