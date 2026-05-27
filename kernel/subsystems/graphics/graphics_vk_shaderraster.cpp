@@ -255,6 +255,17 @@ bool RunFragmentShader(spirv::Program* fs, const u32 pixel_xy[2], const VaryingS
     }
     if (!spirv::ExecuteEntryPoint(fs, "main"))
         return false;
+    // OpKill terminates the FS without producing a colour — the
+    // caller's per-pixel loop must skip the pixel paint. Return
+    // success-with-discard so RunFragmentShader's contract (true
+    // iff the shader executed) stays clean; the discard bit
+    // travels back through ExecuteEntryPointWasKilled() instead
+    // of an extra out-param.
+    if (spirv::ExecuteEntryPointWasKilled())
+    {
+        *argb_out = 0u;
+        return true;
+    }
     u32 color_bits[4] = {0, 0, 0, Sf32ToBits(::duetos::core::Sf32One())};
     if (!spirv::ReadOutputLocation(fs, 0, color_bits, sizeof(color_bits)))
         return false;
@@ -546,6 +557,12 @@ void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Progra
                 }
             }
             if (!RunFragmentShader(fs, pixel_xy, interp, varying_n, &argb))
+                continue;
+            // OpKill in the FS leaves ExecuteEntryPointWasKilled()
+            // set — skip the pixel paint entirely. `painted`
+            // tracks only the pixels that actually reached the
+            // framebuffer.
+            if (spirv::ExecuteEntryPointWasKilled())
                 continue;
             drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py), argb);
             ++painted;

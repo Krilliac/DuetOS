@@ -374,6 +374,13 @@ u32 EnumerateLocationVars(const Program* prog, StorageClass storage, LocationVar
 // malformed instruction / unsupported opcode.
 bool ExecuteEntryPoint(Program* prog, const char* name);
 
+/// Did the most recent ExecuteEntryPoint invocation hit OpKill?
+/// The shader rasterizer's per-pixel fragment loop reads this
+/// immediately after the FS runs to decide whether to skip the
+/// pixel write. Sticky across the entire ExecuteEntryPoint call;
+/// reset to false at the top of each new call.
+bool ExecuteEntryPointWasKilled();
+
 // Public SPIR-V BuiltIn enum values that the interpreter
 // recognises and the rasterizer hook needs to reference.
 namespace builtins

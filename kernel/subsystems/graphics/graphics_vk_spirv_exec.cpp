@@ -246,6 +246,13 @@ struct ExecContext
     u32 cur_block_label;
     u32 jump_target; // 0 = no jump
     bool returned;
+    // True iff the shader hit OpKill. Distinct from `returned`
+    // because the rasterizer needs to know whether the per-pixel
+    // colour write should be SKIPPED (kill) versus written normally
+    // (clean return). Sticky across function calls within a single
+    // ExecuteEntryPoint — once a fragment kills itself it stays
+    // killed for the rest of this invocation.
+    bool killed;
     u32 step_count;
 };
 
@@ -1515,8 +1522,13 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
             break;
         }
         case kOpKill:
-            // Fragment discard. Treat as early-return; the shader
-            // hook drops the pixel.
+            // Fragment discard. Sets both `killed` and `returned`;
+            // the shader rasterizer's per-pixel loop reads
+            // ExecuteEntryPointWasKilled() after the call and skips
+            // the pixel write when set. Without the killed bit the
+            // hook can't distinguish "shader chose discard" from
+            // "shader returned normally with output_color=0".
+            ec.killed = true;
             ec.returned = true;
             ec.jump_target = 0;
             return;
@@ -1683,10 +1695,17 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
 
 } // namespace
 
+// Sticky bit captured from the last completed `ExecuteEntryPoint`
+// call. The shader rasterizer reads it via
+// `ExecuteEntryPointWasKilled()` immediately after running an FS
+// to decide whether to write or drop the pixel.
+static bool g_last_killed = false;
+
 bool ExecuteEntryPoint(Program* prog, const char* name)
 {
     if (prog == nullptr || !prog->parse_ok || name == nullptr)
         return false;
+    g_last_killed = false;
     // Find the entry point.
     u32 ep_idx = 0xFFFFFFFFu;
     for (u32 i = 0; i < prog->entry_point_count; ++i)
@@ -1752,7 +1771,13 @@ bool ExecuteEntryPoint(Program* prog, const char* name)
         ec.jump_target = 0;
     }
     ++::duetos::subsystems::graphics::internal::g_spirv_entry_point_executions;
+    g_last_killed = ec.killed;
     return true;
+}
+
+bool ExecuteEntryPointWasKilled()
+{
+    return g_last_killed;
 }
 
 } // namespace duetos::subsystems::graphics::spirv
