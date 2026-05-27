@@ -358,6 +358,17 @@ constexpr u64 kLowParkTicks = 10 * 100; // 10 s @ 100 Hz
 
 [[noreturn]] void LowDispatcherMain(void* /*arg*/)
 {
+    // Opt out of the hung-task detector. The cyclic Low dispatcher
+    // is by design a long-blocked task between deadlines: when no
+    // Low cyclics are registered, it parks on the 10 s empty-heap
+    // deadline (which stays under the 30 s hung-task threshold by
+    // construction), but a workload that registers a single Low
+    // cyclic with cadence > 30 s would otherwise produce a true
+    // but unactionable "kcyclic-low is hung" warning every minute.
+    // The dispatcher's own progress is observable via CyclicStats
+    // (`fires_low` increments), so a genuine deadlock here is
+    // visible without the hung-task channel.
+    sched::SchedExemptCurrentFromHungTask();
     for (;;)
     {
         // Dispatch + decide next deadline under the lock.
