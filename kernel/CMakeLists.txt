@@ -1400,6 +1400,26 @@ if(DUETOS_PANIC_DEMO)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_PANIC_DEMO=1)
 endif()
 
+# Turn on Intel VT-d translation at boot (RTADDR + GCMD.TE +
+# context-cache + IOTLB invalidate) for every DMA Remapping
+# Hardware Unit reported by the ACPI DMAR table. With identity-
+# passthrough page tables (slice 27c) the IOMMU translates every
+# IOVA back to itself, so existing DMA continues to work — the
+# kernel just gains the ability to refuse a future DMA from
+# unknown source-id (slice 28+ wires that part).
+#
+# OFF by default because a bug in the enable path can brick all
+# device DMA (disk, NIC, USB, GPU) and leave the box unbootable.
+# Operators turn it on per-build with
+#   cmake -DDUETOS_IOMMU_ENABLE=ON
+# tools/test/iommu-smoke.sh is the canonical repro under QEMU's
+# `-device intel-iommu`.
+option(DUETOS_IOMMU_ENABLE "Enable Intel VT-d translation at boot (RTADDR + GCMD.TE)" OFF)
+if(DUETOS_IOMMU_ENABLE)
+    target_compile_definitions(duetos-kernel          PRIVATE DUETOS_IOMMU_ENABLE=1)
+    target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_IOMMU_ENABLE=1)
+endif()
+
 # Deliberate stack-smash build flag. Enables a small in-kernel_main
 # block that overruns a local array past its stack canary, forcing
 # __stack_chk_fail to fire on return. Intended for verifying the

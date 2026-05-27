@@ -82,6 +82,52 @@ inline constexpr u64 kEcapSc = 1ULL << 7;          // Snoop Control
 inline constexpr u64 kEcapIroMask = 0x3FFULL << 8; // bits 8..17: IOTLB Register Offset (16-byte units)
 inline constexpr u64 kEcapIroShift = 8;
 
+// Global Command Register (GCMD) — Intel VT-d §10.4.4.
+// 32-bit WRITE-ONLY. Each write executes a one-shot command + sets
+// or clears persistent feature bits. Pattern is RMW against GSTS:
+//   gcmd = (gsts & sticky_mask) | command_bits; write GCMD.
+// Then poll GSTS until the matching status bit changes.
+inline constexpr u32 kGcmdTe = 1U << 31;    // Translation Enable (sticky)
+inline constexpr u32 kGcmdSrtp = 1U << 30;  // Set Root Table Pointer (one-shot)
+inline constexpr u32 kGcmdSfl = 1U << 29;   // Set Fault Log (one-shot)
+inline constexpr u32 kGcmdEafl = 1U << 28;  // Enable Advanced Fault Log (sticky)
+inline constexpr u32 kGcmdWbf = 1U << 27;   // Write Buffer Flush (one-shot)
+inline constexpr u32 kGcmdQie = 1U << 26;   // Queued Invalidation Enable (sticky)
+inline constexpr u32 kGcmdIre = 1U << 25;   // Interrupt Remap Enable (sticky)
+inline constexpr u32 kGcmdSirtp = 1U << 24; // Set Interrupt Remap Table Pointer (one-shot)
+inline constexpr u32 kGcmdCfi = 1U << 23;   // Compatibility Format Interrupt (sticky)
+
+// Sticky-feature mask: bits that persist across GCMD writes (as
+// reflected in GSTS). One-shot bits (SRTP/SFL/WBF/SIRTP) are NOT
+// in this mask — they only fire on the cycle that writes them.
+inline constexpr u32 kGcmdStickyMask = kGcmdTe | kGcmdEafl | kGcmdQie | kGcmdIre | kGcmdCfi;
+
+// Context Command Register (CCMD) — Intel VT-d §10.4.6.
+// 64-bit. Write to issue a context-cache invalidation; poll the
+// ICC bit until it clears.
+inline constexpr u64 kCcmdIcc = 1ULL << 63;        // Invalidate Context Cache (one-shot)
+inline constexpr u64 kCcmdCirgGlobal = 1ULL << 61; // CIRG: Global invalidation request
+inline constexpr u64 kCcmdCirgMask = 3ULL << 61;
+inline constexpr u64 kCcmdCaigGlobal = 1ULL << 59; // CAIG: actual granularity = global
+
+// IOTLB Invalidation Register (IOTLB_REG) — Intel VT-d §10.4.8.
+// Lives at register-base + IRO*16 (read IRO from ECAP). Layout:
+//   offset 0x00: IVA_REG   — IOVA + address mask (write)
+//   offset 0x08: IOTLB_REG — actual invalidation request
+// 64-bit. Write IOTLB_REG to issue an invalidation; poll IVT bit.
+inline constexpr u32 kRegIvaOffset = 0x00;          // IVA from IRO base
+inline constexpr u32 kRegIotlbOffset = 0x08;        // IOTLB_REG from IRO base
+inline constexpr u64 kIotlbIvt = 1ULL << 63;        // Invalidate Translation TLB (one-shot)
+inline constexpr u64 kIotlbIirgGlobal = 1ULL << 60; // IIRG: Global request
+inline constexpr u64 kIotlbIirgMask = 3ULL << 60;
+inline constexpr u64 kIotlbIaigGlobal = 1ULL << 57; // IAIG: actual granularity = global
+
+// Root-Table Address Register (RTADDR) — Intel VT-d §10.4.6.
+// 64-bit. Bits 12..63 = root table physical-page address. Bit 11
+// (RTT) selects 0 = legacy root table, 1 = extended root table.
+// v0 uses legacy.
+inline constexpr u64 kRtaddrRttExtended = 1ULL << 11;
+
 // Global Status Register (GSTS) — Intel VT-d §10.4.5.
 // 32-bit; bit set => corresponding feature is enabled.
 inline constexpr u32 kGstsTes = 1U << 31;   // Translation Enable Status

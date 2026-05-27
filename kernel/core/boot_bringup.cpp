@@ -1204,12 +1204,37 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::VtdSelfTest());
 
     // VT-d identity-passthrough page tables. Builds root + shared
-    // context + identity-mapping PDPT (3 frames = 12 KiB). Does
-    // NOT write RTADDR or flip GCMD.TE — that's slice 27d, gated
-    // by DUETOS_IOMMU_ENABLE. The build runs even on QEMU-default
-    // (no DMAR) because the self-test exercises the in-memory
-    // walk independently of whether any real IOMMU is present.
+    // context + identity-mapping PDPT (3 frames = 12 KiB). The
+    // self-test exercises the in-memory walk independently of
+    // whether any real IOMMU is present.
     DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::vtd_paging::VtdPagingSelfTest());
+
+    // Translation enable. Gated TWICE: by the build flag
+    // (DUETOS_IOMMU_ENABLE off by default — a regression here
+    // bricks all device DMA) AND by VtdAvailable (no IOMMU
+    // discovered ⇒ nothing to enable). Both checks happen even
+    // in selftest-enabled builds.
+    if (duetos::drivers::iommu::VtdEnableRequested() && duetos::drivers::iommu::VtdAvailable())
+    {
+        // VtdPagingInit guarantees the page tables exist before
+        // VtdProgramAndEnable writes RTADDR. The self-test above
+        // already proved the walk; here we just commit the result
+        // to the IOMMU hardware. Build-flag-gated, so the failure
+        // mode in a default build is "didn't run at all."
+        auto paging_init = duetos::drivers::iommu::vtd_paging::VtdPagingInit();
+        if (paging_init.has_value())
+        {
+            auto enable_result = duetos::drivers::iommu::VtdProgramAndEnable();
+            if (!enable_result.has_value())
+            {
+                SerialWrite("[boot] VT-d enable returned error — translation remains off\n");
+            }
+        }
+        else
+        {
+            SerialWrite("[boot] VtdPagingInit failed — translation NOT enabled\n");
+        }
+    }
 
     SerialWrite("[boot] Disabling 8259 PIC.\n");
     PicDisable();

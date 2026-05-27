@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/result.h"
 #include "util/types.h"
 
 /*
@@ -83,5 +84,27 @@ const VtdIommuInfo* VtdGetIommu(u32 index);
 /// + asserts every field round-trips. Saves/restores live cached
 /// state so re-runs are idempotent. Emits `[vtd-selftest] PASS`.
 void VtdSelfTest();
+
+/// True iff the kernel was built with DUETOS_IOMMU_ENABLE=1. The
+/// flag is OFF by default — a regression in the enable path would
+/// otherwise brick all device DMA at boot. Operators turn it on
+/// per-build via `cmake -DDUETOS_IOMMU_ENABLE=ON`.
+bool VtdEnableRequested();
+
+/// Program every discovered IOMMU with the identity-passthrough
+/// page tables built by VtdPagingInit, invalidate context cache +
+/// IOTLB, then flip GCMD.TE to turn translation on. Idempotent:
+/// IOMMUs already showing GSTS.TES are skipped.
+///
+/// Returns:
+///   - InvalidArgument if VtdAvailable() is false (no IOMMU found)
+///   - BadState if VtdPagingInit hasn't run
+///   - Timeout if GSTS.RTPS or GSTS.TES doesn't flip within the
+///     hardware-recommended bound (1ms / ~10000 reads)
+///   - Ok otherwise. Every IOMMU's TES bit is now set.
+///
+/// Caller is responsible for gating on VtdEnableRequested() —
+/// VtdProgramAndEnable does NOT consult the build flag itself.
+::duetos::core::Result<void> VtdProgramAndEnable();
 
 } // namespace duetos::drivers::iommu

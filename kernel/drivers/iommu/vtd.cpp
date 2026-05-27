@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "drivers/iommu/dmar.h"
+#include "drivers/iommu/vtd_paging.h"
 #include "drivers/iommu/vtd_regs.h"
 #include "mm/paging.h"
 
@@ -30,6 +31,40 @@ inline u32 ReadReg32(void* base, u32 offset)
 inline u64 ReadReg64(void* base, u32 offset)
 {
     return *reinterpret_cast<volatile u64*>(reinterpret_cast<u8*>(base) + offset);
+}
+
+inline void WriteReg32(void* base, u32 offset, u32 value)
+{
+    *reinterpret_cast<volatile u32*>(reinterpret_cast<u8*>(base) + offset) = value;
+}
+
+inline void WriteReg64(void* base, u32 offset, u64 value)
+{
+    *reinterpret_cast<volatile u64*>(reinterpret_cast<u8*>(base) + offset) = value;
+}
+
+// Spin until ReadReg32(mmio, offset) & mask == expected, bounded
+// by `iter_cap`. The spec recommends ~1 ms for SRTP/TES status
+// changes — 100k iterations of plain register reads is generous
+// even on emulation. Returns true on success, false on timeout.
+bool SpinUntilReg32(void* mmio, u32 offset, u32 mask, u32 expected, u32 iter_cap = 100000)
+{
+    for (u32 i = 0; i < iter_cap; ++i)
+    {
+        if ((ReadReg32(mmio, offset) & mask) == expected)
+            return true;
+    }
+    return false;
+}
+
+bool SpinUntilReg64Clear(void* mmio, u32 offset, u64 mask, u32 iter_cap = 100000)
+{
+    for (u32 i = 0; i < iter_cap; ++i)
+    {
+        if ((ReadReg64(mmio, offset) & mask) == 0)
+            return true;
+    }
+    return false;
 }
 
 void SerialWriteHex64(u64 v)
@@ -275,6 +310,103 @@ void VtdSelfTest()
     KASSERT(vtd::SagawBitToAgawBits(5) == 0, "drivers/iommu/vtd", "SAGAW bit 5 should be invalid");
 
     arch::SerialWrite("[vtd-selftest] PASS\n");
+}
+
+bool VtdEnableRequested()
+{
+#if defined(DUETOS_IOMMU_ENABLE) && DUETOS_IOMMU_ENABLE
+    return true;
+#else
+    return false;
+#endif
+}
+
+namespace
+{
+
+::duetos::core::Result<void> ProgramOneIommu(const VtdIommuInfo& info, u64 root_table_phys)
+{
+    using namespace vtd;
+    void* mmio = info.register_mmio;
+
+    // If translation is already on we're idempotent: leave it
+    // alone. (Firmware may have programmed an IOMMU before kernel
+    // entry — rare but observed on some boards.)
+    if ((ReadReg32(mmio, kRegGsts) & kGstsTes) != 0)
+    {
+        arch::SerialWrite("[vtd] iommu[base=");
+        SerialWriteHex64(info.register_base_phys);
+        arch::SerialWrite("] already enabled — skipping program\n");
+        return {};
+    }
+
+    // 1. RTADDR write. Bit 11 = 0 selects legacy root format.
+    WriteReg64(mmio, kRegRtaddr, root_table_phys);
+
+    // 2. GCMD = (current sticky bits) | SRTP. RMW pattern: read
+    //    GSTS, mask to sticky bits, OR in the one-shot command,
+    //    write to GCMD. Poll GSTS.RTPS until it flips to 1.
+    const u32 sticky_before = ReadReg32(mmio, kRegGsts) & kGcmdStickyMask;
+    WriteReg32(mmio, kRegGcmd, sticky_before | kGcmdSrtp);
+    if (!SpinUntilReg32(mmio, kRegGsts, kGstsRtps, kGstsRtps))
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Timeout};
+
+    // 3. Context-cache global invalidate. Required by spec between
+    //    SRTP and TE because the IOMMU may have stale entries from
+    //    a prior root table.
+    const u64 ccmd_request = kCcmdIcc | kCcmdCirgGlobal;
+    WriteReg64(mmio, kRegCcmd, ccmd_request);
+    if (!SpinUntilReg64Clear(mmio, kRegCcmd, kCcmdIcc))
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Timeout};
+
+    // 4. IOTLB global invalidate. The IOTLB register pair lives at
+    //    register-base + IRO (offset cached during decode). Write
+    //    IOTLB_REG with IVT + global granularity; poll IVT to clear.
+    const u32 iotlb_off = info.iotlb_register_offset + kRegIotlbOffset;
+    const u64 iotlb_request = kIotlbIvt | kIotlbIirgGlobal;
+    WriteReg64(mmio, iotlb_off, iotlb_request);
+    if (!SpinUntilReg64Clear(mmio, iotlb_off, kIotlbIvt))
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Timeout};
+
+    // 5. Translation Enable. Preserves any other sticky bits the
+    //    firmware may have already set (rare but possible).
+    const u32 sticky_now = ReadReg32(mmio, kRegGsts) & kGcmdStickyMask;
+    WriteReg32(mmio, kRegGcmd, sticky_now | kGcmdTe);
+    if (!SpinUntilReg32(mmio, kRegGsts, kGstsTes, kGstsTes))
+        return ::duetos::core::Err{::duetos::core::ErrorCode::Timeout};
+
+    arch::SerialWrite("[vtd] iommu[base=");
+    SerialWriteHex64(info.register_base_phys);
+    arch::SerialWrite("] translation ENABLED (root=");
+    SerialWriteHex64(root_table_phys);
+    arch::SerialWrite(")\n");
+    return {};
+}
+
+} // namespace
+
+::duetos::core::Result<void> VtdProgramAndEnable()
+{
+    if (!VtdAvailable())
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+
+    auto paging = vtd_paging::VtdPagingGet();
+    if (!paging.has_value())
+        return ::duetos::core::Err{paging.error()};
+    const u64 root_phys = paging.value().root_table_phys;
+
+    for (u32 i = 0; i < g_iommu_count; ++i)
+    {
+        auto r = ProgramOneIommu(g_iommus[i], root_phys);
+        if (!r.has_value())
+        {
+            arch::SerialWrite("[vtd] iommu[");
+            SerialWriteDec(i);
+            arch::SerialWrite("] program FAILED — leaving translation off\n");
+            return r;
+        }
+    }
+    return {};
 }
 
 } // namespace duetos::drivers::iommu
