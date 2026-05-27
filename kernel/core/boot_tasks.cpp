@@ -77,6 +77,11 @@ namespace
 duetos::sched::Mutex s_demo_mutex{};
 duetos::u64 s_shared_counter = 0;
 
+// Forward decl — defined further down in a sibling anonymous
+// namespace. KbdReaderTask above MouseReaderTask uses it to
+// implement the Ctrl+Esc shortcut.
+void StartMenuToggle();
+
 } // namespace
 
 void UiTickerTask(void*)
@@ -123,7 +128,7 @@ void UiTickerTask(void*)
         else
         {
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
         }
         duetos::drivers::video::CompositorUnlock();
@@ -261,7 +266,7 @@ void KbdReaderTask(void*)
                 else
                 {
                     duetos::drivers::video::CursorHide();
-                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                     duetos::drivers::video::CursorShow();
                 }
                 // First-run welcome toast. One-shot per boot
@@ -292,7 +297,7 @@ void KbdReaderTask(void*)
                 duetos::drivers::video::DndCancel();
             }
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             continue;
@@ -310,7 +315,7 @@ void KbdReaderTask(void*)
                 duetos::drivers::video::ModalInputOnCancel();
             }
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             continue;
@@ -331,7 +336,7 @@ void KbdReaderTask(void*)
             duetos::drivers::video::CompositorLock();
             duetos::drivers::video::SnapPreviewArm(duetos::drivers::video::SnapZone::None);
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             continue;
@@ -362,7 +367,7 @@ void KbdReaderTask(void*)
                 duetos::drivers::video::DialogFeedChar(static_cast<char>(ev.code));
             }
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             // Fire any resolved dialog callback OUTSIDE the
@@ -410,7 +415,7 @@ void KbdReaderTask(void*)
                 duetos::subsystems::win32::TrackPopupCompleteFromKernel(0);
             }
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             continue;
@@ -753,7 +758,7 @@ void KbdReaderTask(void*)
                     SerialWrite("[ui] alt+right browser forward\n");
                 }
                 duetos::drivers::video::CursorHide();
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
                 duetos::drivers::video::CompositorUnlock();
                 continue;
@@ -798,7 +803,7 @@ void KbdReaderTask(void*)
             }
             duetos::drivers::video::ConsoleWriteln("--- end of history ---");
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             SerialWrite("[ui] ^+N notify history dump\n");
@@ -817,7 +822,7 @@ void KbdReaderTask(void*)
             {
                 duetos::apps::files::FilesBeginDragSelection();
                 duetos::drivers::video::CursorHide();
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
                 duetos::drivers::video::CompositorUnlock();
                 SerialWrite("[ui] ^D begin files drag\n");
@@ -933,7 +938,7 @@ void KbdReaderTask(void*)
             }
             duetos::core::PrintShortcutHelp();
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             SerialWrite("[ui] F1 help\n");
@@ -965,7 +970,7 @@ void KbdReaderTask(void*)
             else
             {
                 duetos::drivers::video::CursorHide();
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
             }
             duetos::drivers::video::CompositorUnlock();
@@ -987,7 +992,7 @@ void KbdReaderTask(void*)
             duetos::drivers::video::ConsoleSetPaintEnabled(now_visible);
             SerialWrite(now_visible ? "[ui] console -> visible\n" : "[ui] console -> hidden\n");
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             continue;
@@ -1019,7 +1024,7 @@ void KbdReaderTask(void*)
                 duetos::drivers::video::ConsoleSetOrigin(16, 400);
                 duetos::drivers::video::ConsoleSetColours(duetos::drivers::video::ThemeCurrent().console_fg,
                                                           duetos::drivers::video::ThemeCurrent().console_bg);
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
             }
             duetos::drivers::video::CompositorUnlock();
@@ -1064,7 +1069,7 @@ void KbdReaderTask(void*)
                     break;
                 }
                 duetos::drivers::video::CursorHide();
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
                 duetos::drivers::video::CompositorUnlock();
             }
@@ -1084,7 +1089,7 @@ void KbdReaderTask(void*)
                                                        ? duetos::drivers::video::TaskbarDock::Top
                                                        : duetos::drivers::video::TaskbarDock::Bottom);
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             SerialWrite("[ui] taskbar dock -> ");
@@ -1171,6 +1176,18 @@ void KbdReaderTask(void*)
             SerialWrite(ok_tga ? "[ui] ^Alt+T screenshot (TGA) saved\n" : "[ui] ^Alt+T screenshot (TGA) FAILED\n");
             continue;
         }
+        // Ctrl+Esc opens (toggles) the Start menu. Universal
+        // keyboard discoverability of the Start menu —
+        // matches what every desktop user reaches for after
+        // failing to find a Super-key handler. Wraps the same
+        // mouse-click path so behaviour, animations, item set,
+        // and dispatch are identical.
+        if (ctrl && !alt && ev.code == duetos::drivers::input::kKeyEsc)
+        {
+            StartMenuToggle();
+            SerialWrite("[ui] ^Esc Start menu toggle\n");
+            continue;
+        }
         // Ctrl+Alt+Y cycles the desktop theme. Classic (teal)
         // -> Slate10 (Win10 x Unreal Slate hybrid) -> Amber
         // (mono CRT tribute) -> Duet (redesigned palette,
@@ -1193,7 +1210,7 @@ void KbdReaderTask(void*)
             else
             {
                 duetos::drivers::video::CursorHide();
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
             }
             duetos::drivers::video::CompositorUnlock();
@@ -1230,7 +1247,7 @@ void KbdReaderTask(void*)
                 SerialWrite("\n");
             }
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             continue;
@@ -1260,7 +1277,7 @@ void KbdReaderTask(void*)
                 else
                 {
                     duetos::drivers::video::CursorHide();
-                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                     duetos::drivers::video::CursorShow();
                 }
                 duetos::drivers::video::CompositorUnlock();
@@ -1279,7 +1296,7 @@ void KbdReaderTask(void*)
             duetos::drivers::video::CompositorLock();
             duetos::drivers::video::WindowCycleActive();
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             SerialWrite("[ui] alt-tab\n");
@@ -1329,7 +1346,7 @@ void KbdReaderTask(void*)
                 }
             }
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             continue;
@@ -1377,7 +1394,7 @@ void KbdReaderTask(void*)
                 }
             }
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             continue;
@@ -1419,18 +1436,52 @@ void KbdReaderTask(void*)
                         },
                         nullptr);
                     duetos::drivers::video::CursorHide();
-                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                     duetos::drivers::video::CursorShow();
                     duetos::drivers::video::CompositorUnlock();
                     continue;
                 }
-                duetos::drivers::video::WindowClose(active);
-                SerialWrite("[ui] alt-f4 close window=");
+                // For built-in role-registered apps (Calculator,
+                // Notepad, Help, etc.), Alt+F4 hides instead of
+                // destroying. Destroying would mark the slot
+                // alive=false permanently and the Start menu's
+                // "open <role>" handler — which looks up the role
+                // -> window mapping — would never raise it again.
+                // PE / user-spawned windows have no ThemeRole;
+                // they get the destroy semantics that match the
+                // Win32 expectation (a closed PE window stays
+                // closed until the process re-creates it).
+                duetos::drivers::video::ThemeRole role{};
+                const bool is_role_app = duetos::drivers::video::ThemeRoleForWindow(active, &role);
+                // Also treat the bespoke non-role panels (Network
+                // Status, Device Manager, Firewall, Debugger,
+                // Notification Center via its own role) as hide-
+                // on-close. The check is the conservative one:
+                // does the window belong to the kernel-owned app
+                // catalogue rather than a runtime spawn? `parent
+                // == kWindowInvalid` distinguishes the two —
+                // user-spawned PE windows record their owner_pid
+                // and never get added to the role registry, so
+                // the role check above is sufficient for them;
+                // the non-role internal panels likewise have
+                // owner_pid == 0.
+                const bool is_kernel_app =
+                    is_role_app || duetos::drivers::video::WindowOwnerPid(active) == 0;
+                if (is_kernel_app)
+                {
+                    duetos::drivers::video::WindowSetVisible(active, false);
+                    SerialWrite("[ui] alt-f4 hide window=");
+                }
+                else
+                {
+                    duetos::drivers::video::WindowClose(active);
+                    SerialWrite("[ui] alt-f4 close window=");
+                }
                 SerialWriteHex(active);
                 SerialWrite("\n");
             }
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             duetos::drivers::video::CompositorUnlock();
             continue;
@@ -1743,7 +1794,7 @@ void KbdReaderTask(void*)
             else
             {
                 duetos::drivers::video::CursorHide();
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
             }
             duetos::drivers::video::CompositorUnlock();
@@ -1819,6 +1870,117 @@ duetos::drivers::input::MousePacket AcquireCoalescedPacket(PendingMousePacket& p
     return acc;
 }
 
+// ============================================================
+// Start menu — shared between the mouse-reader (click on START
+// button) and the kbd-reader (Ctrl+Esc / Super). Item arrays
+// live at file scope so both tasks can rebuild + open the same
+// menu without a copy-paste of the layout.
+// ============================================================
+namespace
+{
+using StartMenuRole = duetos::drivers::video::ThemeRole;
+using duetos::drivers::video::kMenuItemFlagDisabled;
+using duetos::drivers::video::kMenuItemFlagSeparator;
+using duetos::drivers::video::kMenuItemFlagSubmenu;
+
+const duetos::drivers::video::MenuItem kStartMenuAppsItems[] = {
+    {"CALCULATOR", 100 + static_cast<duetos::u32>(StartMenuRole::Calculator), 0, nullptr, 0},
+    {"NOTEPAD", 100 + static_cast<duetos::u32>(StartMenuRole::Notes), 0, nullptr, 0},
+    {"FILES", 100 + static_cast<duetos::u32>(StartMenuRole::Files), 0, nullptr, 0},
+    {"CLOCK", 100 + static_cast<duetos::u32>(StartMenuRole::Clock), 0, nullptr, 0},
+    {"CALENDAR", 100 + static_cast<duetos::u32>(StartMenuRole::Calendar), 0, nullptr, 0},
+    {"BROWSER", 100 + static_cast<duetos::u32>(StartMenuRole::Browser), 0, nullptr, 0},
+    {"IMAGE VIEWER", 100 + static_cast<duetos::u32>(StartMenuRole::ImageView), 0, nullptr, 0},
+    {"GFX DEMO", 100 + static_cast<duetos::u32>(StartMenuRole::GfxDemo), 0, nullptr, 0},
+    {"ABOUT", 100 + static_cast<duetos::u32>(StartMenuRole::About), 0, nullptr, 0},
+    {"HELP", 100 + static_cast<duetos::u32>(StartMenuRole::Help), 0, nullptr, 0},
+};
+const duetos::drivers::video::MenuItem kStartMenuSystemItems[] = {
+    {"SETTINGS", 100 + static_cast<duetos::u32>(StartMenuRole::Settings), 0, nullptr, 0},
+    {"TASK MANAGER", 100 + static_cast<duetos::u32>(StartMenuRole::TaskManager), 0, nullptr, 0},
+    {"SYSTEM MONITOR", 100 + static_cast<duetos::u32>(StartMenuRole::Sysmon), 0, nullptr, 0},
+    {"KERNEL LOG", 100 + static_cast<duetos::u32>(StartMenuRole::LogView), 0, nullptr, 0},
+    {"NOTIFICATIONS", 100 + static_cast<duetos::u32>(StartMenuRole::NotifyCenter), 0, nullptr, 0},
+    {"NETWORK STATUS", 60, 0, nullptr, 0},
+    {"DEVICE MANAGER", 61, 0, nullptr, 0},
+    {"FIREWALL", 62, 0, nullptr, 0},
+    {"DEBUGGER", 63, 0, nullptr, 0},
+    {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0},
+    {"CYCLE WINDOWS", 2, 0, nullptr, 0},
+    {"SWITCH TO TTY", 5, 0, nullptr, 0},
+};
+const duetos::drivers::video::MenuItem kStartMenuUtilitiesItems[] = {
+    {"HEX VIEWER", 100 + static_cast<duetos::u32>(StartMenuRole::HexView), 0, nullptr, 0},
+    {"CHARACTER MAP", 100 + static_cast<duetos::u32>(StartMenuRole::CharMap), 0, nullptr, 0},
+    {"TERMINAL", 100 + static_cast<duetos::u32>(StartMenuRole::Terminal), 0, nullptr, 0},
+};
+const duetos::drivers::video::MenuItem kStartMenuPowerItems[] = {
+    {"LOCK", 42, 0, nullptr, 0},
+    {"LOG OUT", 43, 0, nullptr, 0},
+    {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0},
+    {"REBOOT", 40, 0, nullptr, 0},
+    {"SHUT DOWN", 41, 0, nullptr, 0},
+};
+
+constexpr duetos::u32 kStartMenuUserAppsCap = 12;
+duetos::drivers::video::MenuItem g_start_menu_user_apps[kStartMenuUserAppsCap] = {};
+duetos::drivers::video::MenuItem g_start_menu_root[7] = {};
+
+// Rebuild the root from the current /APPS scan + open the menu
+// anchored above the START button. Closing-on-toggle is the
+// caller's responsibility (the mouse path wraps with MenuIsOpen,
+// the kbd path does too).
+void StartMenuRebuildAndOpen()
+{
+    duetos::u32 user_apps_count = 0;
+    duetos::drivers::video::StartMenuAppsAppendTo(g_start_menu_user_apps, &user_apps_count, kStartMenuUserAppsCap);
+
+    g_start_menu_root[0] = {"APPS", 0, kMenuItemFlagSubmenu, kStartMenuAppsItems,
+                            sizeof(kStartMenuAppsItems) / sizeof(kStartMenuAppsItems[0])};
+    g_start_menu_root[1] = {"UTILITIES", 0, kMenuItemFlagSubmenu, kStartMenuUtilitiesItems,
+                            sizeof(kStartMenuUtilitiesItems) / sizeof(kStartMenuUtilitiesItems[0])};
+    g_start_menu_root[2] = {"SYSTEM", 0, kMenuItemFlagSubmenu, kStartMenuSystemItems,
+                            sizeof(kStartMenuSystemItems) / sizeof(kStartMenuSystemItems[0])};
+    g_start_menu_root[3] = {(user_apps_count == 0) ? "USER APPS (EMPTY)" : "USER APPS", 0,
+                            kMenuItemFlagSubmenu | (user_apps_count == 0 ? kMenuItemFlagDisabled : 0u),
+                            g_start_menu_user_apps, user_apps_count};
+    g_start_menu_root[4] = {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0};
+    g_start_menu_root[5] = {"SCREENSHOT", 50, 0, nullptr, 0};
+    g_start_menu_root[6] = {"POWER", 0, kMenuItemFlagSubmenu, kStartMenuPowerItems,
+                            sizeof(kStartMenuPowerItems) / sizeof(kStartMenuPowerItems[0])};
+
+    duetos::u32 sx = 0, sy = 0, sw = 0, sh = 0;
+    duetos::drivers::video::TaskbarStartBounds(&sx, &sy, &sw, &sh);
+    constexpr duetos::u32 kStartMenuItemsCount = sizeof(g_start_menu_root) / sizeof(g_start_menu_root[0]);
+    duetos::drivers::video::MenuOpen(g_start_menu_root, kStartMenuItemsCount, sx, sy, 0);
+    const duetos::u32 mh = duetos::drivers::video::MenuPanelHeight();
+    const duetos::u32 my = (sy > mh) ? sy - mh : 0;
+    duetos::drivers::video::MenuOpen(g_start_menu_root, kStartMenuItemsCount, sx, my, 0);
+}
+
+void StartMenuToggle()
+{
+    duetos::drivers::video::CompositorLock();
+    if (duetos::drivers::video::MenuIsOpen())
+    {
+        duetos::drivers::video::MenuClose();
+    }
+    else
+    {
+        StartMenuRebuildAndOpen();
+    }
+    // Force a full desktop recompose so the menu open/close is
+    // visible immediately. Without this the mouse-click path
+    // schedules a recompose on the next ui-ticker beat (~33 ms);
+    // the keyboard toggle should feel equally instant.
+    duetos::drivers::video::CursorHide();
+    duetos::drivers::video::DesktopCompose(duetos::drivers::video::ThemeCurrent().desktop_bg, nullptr);
+    duetos::drivers::video::CursorShow();
+    duetos::drivers::video::CompositorUnlock();
+}
+
+} // namespace
+
 // Mouse reader task: Ps2 packet consumer driving window
 // focus/drag/resize/snap, menu + taskbar + tray interaction,
 // scrollbar drag and the desktop context menu.
@@ -1893,69 +2055,6 @@ void MouseReaderTask(void*)
     using duetos::drivers::video::kMenuItemFlagDisabled;
     using duetos::drivers::video::kMenuItemFlagSeparator;
     using duetos::drivers::video::kMenuItemFlagSubmenu;
-    using StartMenuRole = duetos::drivers::video::ThemeRole;
-
-    static const duetos::drivers::video::MenuItem kAppsItems[] = {
-        {"CALCULATOR", 100 + static_cast<duetos::u32>(StartMenuRole::Calculator), 0, nullptr, 0},
-        {"NOTEPAD", 100 + static_cast<duetos::u32>(StartMenuRole::Notes), 0, nullptr, 0},
-        {"FILES", 100 + static_cast<duetos::u32>(StartMenuRole::Files), 0, nullptr, 0},
-        {"CLOCK", 100 + static_cast<duetos::u32>(StartMenuRole::Clock), 0, nullptr, 0},
-        {"CALENDAR", 100 + static_cast<duetos::u32>(StartMenuRole::Calendar), 0, nullptr, 0},
-        {"BROWSER", 100 + static_cast<duetos::u32>(StartMenuRole::Browser), 0, nullptr, 0},
-        {"IMAGE VIEWER", 100 + static_cast<duetos::u32>(StartMenuRole::ImageView), 0, nullptr, 0},
-        {"GFX DEMO", 100 + static_cast<duetos::u32>(StartMenuRole::GfxDemo), 0, nullptr, 0},
-        {"ABOUT", 100 + static_cast<duetos::u32>(StartMenuRole::About), 0, nullptr, 0},
-        {"HELP", 100 + static_cast<duetos::u32>(StartMenuRole::Help), 0, nullptr, 0},
-    };
-    static const duetos::drivers::video::MenuItem kSystemItems[] = {
-        {"SETTINGS", 100 + static_cast<duetos::u32>(StartMenuRole::Settings), 0, nullptr, 0},
-        {"TASK MANAGER", 100 + static_cast<duetos::u32>(StartMenuRole::TaskManager), 0, nullptr, 0},
-        {"SYSTEM MONITOR", 100 + static_cast<duetos::u32>(StartMenuRole::Sysmon), 0, nullptr, 0},
-        {"KERNEL LOG", 100 + static_cast<duetos::u32>(StartMenuRole::LogView), 0, nullptr, 0},
-        {"NETWORK STATUS", 60, 0, nullptr, 0},
-        {"DEVICE MANAGER", 61, 0, nullptr, 0},
-        {"FIREWALL", 62, 0, nullptr, 0},
-        {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0},
-        {"CYCLE WINDOWS", 2, 0, nullptr, 0},
-        {"SWITCH TO TTY", 5, 0, nullptr, 0},
-    };
-    static const duetos::drivers::video::MenuItem kUtilitiesItems[] = {
-        {"HEX VIEWER", 100 + static_cast<duetos::u32>(StartMenuRole::HexView), 0, nullptr, 0},
-        {"CHARACTER MAP", 100 + static_cast<duetos::u32>(StartMenuRole::CharMap), 0, nullptr, 0},
-    };
-    static const duetos::drivers::video::MenuItem kPowerItems[] = {
-        {"LOCK", 42, 0, nullptr, 0},
-        {"LOG OUT", 43, 0, nullptr, 0},
-        {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0},
-        {"REBOOT", 40, 0, nullptr, 0},
-        {"SHUT DOWN", 41, 0, nullptr, 0},
-    };
-
-    // /APPS shortcuts — populated each open from the FAT32
-    // scan so a freshly-dropped /APPS/*.MNF picks up without
-    // a reboot. Capped at 12 to fit the menu renderer's per-
-    // panel limit (StartMenuAppsAppendTo logs an overflow line
-    // if more were discovered).
-    constexpr duetos::u32 kUserAppsCap = 12;
-    static duetos::drivers::video::MenuItem kUserAppsItems[kUserAppsCap] = {};
-    duetos::u32 user_apps_count = 0;
-    duetos::drivers::video::StartMenuAppsAppendTo(kUserAppsItems, &user_apps_count, kUserAppsCap);
-
-    // Six-row root. USER APPS is disabled when empty so the
-    // user sees the bucket (and learns about the /APPS slot)
-    // without firing a launcher path that resolves to nothing.
-    static duetos::drivers::video::MenuItem kStartItems[7] = {};
-    kStartItems[0] = {"APPS", 0, kMenuItemFlagSubmenu, kAppsItems, sizeof(kAppsItems) / sizeof(kAppsItems[0])};
-    kStartItems[1] = {"UTILITIES", 0, kMenuItemFlagSubmenu, kUtilitiesItems,
-                      sizeof(kUtilitiesItems) / sizeof(kUtilitiesItems[0])};
-    kStartItems[2] = {"SYSTEM", 0, kMenuItemFlagSubmenu, kSystemItems, sizeof(kSystemItems) / sizeof(kSystemItems[0])};
-    kStartItems[3] = {(user_apps_count == 0) ? "USER APPS (EMPTY)" : "USER APPS", 0,
-                      kMenuItemFlagSubmenu | (user_apps_count == 0 ? kMenuItemFlagDisabled : 0u), kUserAppsItems,
-                      user_apps_count};
-    kStartItems[4] = {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0};
-    kStartItems[5] = {"SCREENSHOT", 50, 0, nullptr, 0};
-    kStartItems[6] = {"POWER", 0, kMenuItemFlagSubmenu, kPowerItems, sizeof(kPowerItems) / sizeof(kPowerItems[0])};
-    constexpr duetos::u32 start_items_count = sizeof(kStartItems) / sizeof(kStartItems[0]);
     static const duetos::drivers::video::MenuItem kDesktopMenuItems[] = {
         {"FILE MANAGER", 104, 0, nullptr, 0}, // 100 + ThemeRole::Files(4)
         {"TERMINAL", 117, 0, nullptr, 0},     // 100 + ThemeRole::Terminal(17)
@@ -2315,7 +2414,7 @@ void MouseReaderTask(void*)
                 }
             }
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             if (!pe_right_skip)
             {
@@ -2346,7 +2445,7 @@ void MouseReaderTask(void*)
         {
             duetos::drivers::video::DndResolveAt(cx, cy);
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             menu_handled = true;
         }
@@ -2357,7 +2456,7 @@ void MouseReaderTask(void*)
         {
             duetos::drivers::video::ModalInputOnPress(cx, cy);
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             menu_handled = true;
         }
@@ -2369,7 +2468,7 @@ void MouseReaderTask(void*)
         {
             duetos::drivers::video::DialogOnPress(cx, cy);
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             // Same contract as the keyboard path: fire the
             // resolved callback with no compositor lock held.
@@ -2421,7 +2520,7 @@ void MouseReaderTask(void*)
             // second for the ui-ticker. Also clears (or refreshes)
             // the menu panel from the framebuffer.
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             menu_handled = true;
         }
@@ -2603,16 +2702,7 @@ void MouseReaderTask(void*)
                 }
                 else
                 {
-                    // Open with the start item set; measure
-                    // panel height AFTER MenuOpen populates
-                    // its item count so the anchor sits
-                    // flush against the top of the START
-                    // button regardless of how many items
-                    // are in the set.
-                    duetos::drivers::video::MenuOpen(kStartItems, start_items_count, sx, sy, 0);
-                    const duetos::u32 mh = duetos::drivers::video::MenuPanelHeight();
-                    const duetos::u32 my = (sy > mh) ? sy - mh : 0;
-                    duetos::drivers::video::MenuOpen(kStartItems, start_items_count, sx, my, 0);
+                    StartMenuRebuildAndOpen();
                     SerialWrite("[ui] menu open\n");
                 }
                 menu_handled = true;
@@ -2634,7 +2724,7 @@ void MouseReaderTask(void*)
                 const bool now_active = duetos::drivers::video::WindowShowDesktopToggle();
                 SerialWrite(now_active ? "[ui] show-desktop ON\n" : "[ui] show-desktop OFF\n");
                 duetos::drivers::video::CursorHide();
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
                 menu_handled = true; // sliver ate the click
             }
@@ -2719,7 +2809,7 @@ void MouseReaderTask(void*)
                 SerialWriteHex(tab_hit);
                 SerialWrite("\n");
                 duetos::drivers::video::CursorHide();
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
                 menu_handled = true; // taskbar ate the click
             }
@@ -2736,7 +2826,7 @@ void MouseReaderTask(void*)
                     duetos::core::DispatchMenuAction(112, 0);
                     SerialWrite("[ui] taskbar clock click -> calendar\n");
                     duetos::drivers::video::CursorHide();
-                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                     duetos::drivers::video::CursorShow();
                     menu_handled = true;
                 }
@@ -2753,7 +2843,7 @@ void MouseReaderTask(void*)
         if (press_edge && menu_handled)
         {
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
         }
         else if (press_edge && !drag.active)
@@ -2765,9 +2855,14 @@ void MouseReaderTask(void*)
                 {
                     // PE-owned windows receive WM_CLOSE and
                     // decide whether to DestroyWindow (or
-                    // ignore). Kernel-owned boot windows
-                    // still close immediately — no PE to
-                    // delegate to.
+                    // ignore). Kernel-owned boot windows hide
+                    // instead of destroying so the Start menu's
+                    // role-raise handler can bring them back —
+                    // same reason as the Alt+F4 close path: a
+                    // destroyed role slot is permanent in v0,
+                    // and "closed Calculator" should mean "the
+                    // window is gone for now," not "Calculator
+                    // is unrecoverable for this session."
                     if (duetos::drivers::video::WindowOwnerPid(hit) > 0)
                     {
                         constexpr duetos::u32 kWmClose = 0x0010;
@@ -2779,8 +2874,8 @@ void MouseReaderTask(void*)
                     }
                     else
                     {
-                        duetos::drivers::video::WindowClose(hit);
-                        SerialWrite("[ui] close window=");
+                        duetos::drivers::video::WindowSetVisible(hit, false);
+                        SerialWrite("[ui] hide window=");
                         SerialWriteHex(hit);
                         SerialWrite("\n");
                     }
@@ -2883,7 +2978,7 @@ void MouseReaderTask(void*)
                     }
                 }
                 duetos::drivers::video::CursorHide();
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
             }
         }
@@ -2937,7 +3032,7 @@ void MouseReaderTask(void*)
             if (snapped)
             {
                 duetos::drivers::video::CursorHide();
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
             }
         }
@@ -2961,7 +3056,7 @@ void MouseReaderTask(void*)
             // released over.
             duetos::drivers::video::TaskbarEndDrag(cy);
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
             SerialWrite("[ui] taskbar dock -> ");
             SerialWrite(duetos::drivers::video::TaskbarGetDock() == duetos::drivers::video::TaskbarDock::Top
@@ -3114,7 +3209,7 @@ void MouseReaderTask(void*)
                     // gestures aren't part of their UX.
                     s_native_dc_hwnd = duetos::drivers::video::kWindowInvalid;
                     duetos::drivers::video::CursorHide();
-                    duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                     duetos::drivers::video::CursorShow();
                 }
                 else
@@ -3152,7 +3247,7 @@ void MouseReaderTask(void*)
                 const duetos::u8 mods = duetos::drivers::video::WindowModifierState();
                 duetos::drivers::video::WindowDispatchWheel(pe_hit, client_x, client_y, dz, cx, cy, mk, mods);
                 duetos::drivers::video::CursorHide();
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
                 duetos::drivers::video::CursorShow();
             }
         }
@@ -3189,7 +3284,7 @@ void MouseReaderTask(void*)
             }
             duetos::drivers::video::SnapPreviewArm(zone);
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
         }
         else if (sb_drag.active)
@@ -3205,7 +3300,7 @@ void MouseReaderTask(void*)
                 duetos::drivers::video::WindowDispatchScroll(sb_drag.hwnd, nf);
             }
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
         }
         else if (resize.active)
@@ -3218,7 +3313,7 @@ void MouseReaderTask(void*)
             duetos::drivers::video::WindowResizeFromEdge(resize.window, resize.edge, resize.anchor_x, resize.anchor_y,
                                                          resize.anchor_w, resize.anchor_h, dx, dy);
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
         }
         else
@@ -3280,7 +3375,7 @@ void MouseReaderTask(void*)
         if (!drag.active && !menu_handled && duetos::drivers::video::MenuIsOpen() && menu_hover_changed)
         {
             duetos::drivers::video::CursorHide();
-            duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             duetos::drivers::video::CursorShow();
         }
 
@@ -3361,7 +3456,7 @@ void WinTimerTickerTask(void*)
             // flash entirely without ghosts, lag, or trails.
             if (!gate_active && !is_tty)
             {
-                duetos::drivers::video::DesktopCompose(desktop_bg(), "WELCOME TO DUETOS   BOOT OK");
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
             }
         }
         duetos::drivers::video::CompositorUnlock();

@@ -54,6 +54,8 @@ VkResult VkCreateSampler(VkDevice dev, const VkSamplerCreateInfo* info, VkSample
     return VkResult::Success;
 }
 
+namespace internal
+{
 namespace
 {
 SamplerAddressMode SamplerAxisMode(u64 sampler_handle, u8 SamplerRecord::*axis_field)
@@ -89,6 +91,7 @@ u8 SamplerMagFilterFor(u64 sampler_handle)
         return 1u;
     return g_sampler_data[slot].mag_filter;
 }
+} // namespace internal
 
 void VkDestroySampler(VkDevice dev, VkSampler sampler)
 {

@@ -37,6 +37,7 @@
 
 #include "core/menu_dispatch.h"
 
+#include "apps/dbg.h"
 #include "apps/devicemgr.h"
 #include "apps/files.h"
 #include "apps/firewall.h"
@@ -72,7 +73,7 @@ void PrintShortcutHelp()
     ConsoleWriteln("");
     ConsoleWriteln("==== DUETOS QUICK REFERENCE ===================");
     ConsoleWriteln("  GETTING STARTED");
-    ConsoleWriteln("    CLICK [START] (BOTTOM-LEFT) TO LAUNCH APPS");
+    ConsoleWriteln("    CLICK [START] OR PRESS CTRL+ESC TO LAUNCH APPS");
     ConsoleWriteln("    CLICK A TASKBAR TAB TO RAISE THAT WINDOW");
     ConsoleWriteln("    DRAG A TITLE BAR TO MOVE A WINDOW");
     ConsoleWriteln("    CLICK [X] OR PRESS ALT+F4 TO CLOSE");
@@ -254,7 +255,7 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
     }
     case 8: // REFRESH DESKTOP — recompose the wallpaper + windows.
         duetos::drivers::video::DesktopCompose(duetos::drivers::video::ThemeCurrent().desktop_bg,
-                                               "WELCOME TO DUETOS   BOOT OK");
+                                               nullptr);
         duetos::drivers::video::ConsoleWriteln("-> DESKTOP REFRESHED");
         break;
     case 9: // SHOW DESKTOP — toggle minimize-all / restore.
@@ -488,6 +489,17 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
     case 62: // FIREWALL
     {
         const auto h = duetos::apps::firewall::FirewallWindow();
+        if (h != duetos::drivers::video::kWindowInvalid)
+        {
+            duetos::drivers::video::WindowSetVisible(h, true);
+            duetos::drivers::video::WindowRaise(h);
+        }
+        break;
+    }
+    case 63: // DEBUGGER — no ThemeRole; raise the kernel debugger
+             // app's own-registered window via its handle accessor.
+    {
+        const auto h = duetos::apps::dbg::DbgWindow();
         if (h != duetos::drivers::video::kWindowInvalid)
         {
             duetos::drivers::video::WindowSetVisible(h, true);

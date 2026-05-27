@@ -366,7 +366,7 @@ void ProcessRelease(Process* p)
         if (reaped > 0)
         {
             const duetos::drivers::video::Theme& theme = duetos::drivers::video::ThemeCurrent();
-            duetos::drivers::video::DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(theme.desktop_bg, nullptr);
             arch::SerialLineGuard guard;
             arch::SerialWrite("[proc] reap-windows pid=");
             arch::SerialWriteHex(p->pid);

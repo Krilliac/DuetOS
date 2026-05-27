@@ -904,7 +904,7 @@ void DoGdiBitBltDC(arch::TrapFrame* frame)
         {
             WindowClientBitBlt(h_comp, dst_x, dst_y, staging, static_cast<u32>(cx), static_cast<u32>(cy));
             const Theme& theme = ThemeCurrent();
-            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            DesktopCompose(theme.desktop_bg, nullptr);
             ok = true;
         }
         CompositorUnlock();
@@ -1047,7 +1047,7 @@ void DoGdiStretchBltDC(arch::TrapFrame* frame)
         {
             WindowClientBitBlt(h_comp, dst_x, dst_y, staging, static_cast<u32>(dst_w), static_cast<u32>(dst_h));
             const Theme& theme = ThemeCurrent();
-            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            DesktopCompose(theme.desktop_bg, nullptr);
             ok = true;
         }
         CompositorUnlock();
@@ -1316,7 +1316,7 @@ void DoGdiLineTo(arch::TrapFrame* frame)
             {
                 WindowClientLine(h_comp, x0, y0, x1, y1, rgb);
                 const Theme& theme = ThemeCurrent();
-                DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+                DesktopCompose(theme.desktop_bg, nullptr);
                 ok = true;
             }
             CompositorUnlock();
@@ -1385,7 +1385,7 @@ void DoGdiPatBlt(arch::TrapFrame* frame)
         {
             WindowClientFillRect(h_comp, x, y, w, h, brush_rgb);
             const Theme& theme = ThemeCurrent();
-            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            DesktopCompose(theme.desktop_bg, nullptr);
             ok = true;
         }
         CompositorUnlock();
@@ -1447,7 +1447,7 @@ void DoGdiRectangleFilled(arch::TrapFrame* frame)
             WindowClientFillRect(h_comp, x, y, w, h, brush_rgb);
             WindowClientRectangle(h_comp, x, y, w, h, pen_rgb);
             const Theme& theme = ThemeCurrent();
-            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            DesktopCompose(theme.desktop_bg, nullptr);
             ok = true;
         }
         CompositorUnlock();
@@ -1507,7 +1507,7 @@ void DoGdiEllipseFilled(arch::TrapFrame* frame)
             WindowClientFilledEllipse(h_comp, x, y, w, h, brush_rgb);
             WindowClientEllipse(h_comp, x, y, w, h, pen_rgb);
             const Theme& theme = ThemeCurrent();
-            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            DesktopCompose(theme.desktop_bg, nullptr);
             ok = true;
         }
         CompositorUnlock();

@@ -538,6 +538,11 @@ void FramebufferResetDamage()
     g_damage_rect_count = 0;
 }
 
+void FramebufferDropSnapshot()
+{
+    g_presented_valid = false;
+}
+
 void FramebufferInvalidateSnapshot(u32 x, u32 y, u32 w, u32 h)
 {
     if (!g_available || w == 0 || h == 0)

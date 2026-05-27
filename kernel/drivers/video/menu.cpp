@@ -136,7 +136,21 @@ void MenuOpen(const MenuItem* items, u32 count, u32 ax, u32 ay, u32 context)
     root.count = count;
     root.anchor_x = ax;
     root.anchor_y = ay;
+    // Hover the first activatable row so a keyboard-opened menu
+    // (Ctrl+Esc, context-menu key, etc.) responds to Enter / Right
+    // immediately instead of demanding a Down press first. Mouse-
+    // opened menus get an immediate cursor-hover update from the
+    // next compose, so the initial selection is invisible to mouse
+    // users either way.
     root.hovered_row = -1;
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (ItemIsActivatable(root.items[i]))
+        {
+            root.hovered_row = static_cast<i32>(i);
+            break;
+        }
+    }
     g_panel_depth = 1;
     g_context = context;
 }
@@ -172,7 +186,18 @@ void MenuOpenSubmenu(u32 row)
         cy = fb.height - child_h;
     child.anchor_x = cx;
     child.anchor_y = cy;
+    // Match MenuOpen: default-select the first activatable row so
+    // a keyboard-only flow (Right to enter submenu, Enter to fire)
+    // doesn't require a Down between them.
     child.hovered_row = -1;
+    for (u32 i = 0; i < count; ++i)
+    {
+        if (ItemIsActivatable(child.items[i]))
+        {
+            child.hovered_row = static_cast<i32>(i);
+            break;
+        }
+    }
     ++g_panel_depth;
 }
 
@@ -198,6 +223,18 @@ void MenuClose()
 {
     g_panel_depth = 0;
     g_context = 0;
+    // Drop the snapshot so the next EndCompose takes the
+    // conservative full-blit path. The menu's tactility
+    // drop-shadow (RenderSoftShadow with a non-zero atlas
+    // opacity on Duet/Slate10/Classic themes) lays alpha-
+    // blended pixels into live FB that the per-frame damage
+    // rect doesn't tightly cover; without dropping the
+    // snapshot, the diff-elision keeps the menu's silhouette
+    // visible after every key-driven close (Ctrl+Esc toggle,
+    // menu-nav Esc, click-outside). Equivalent to a window
+    // move over the affected area, but free of the user
+    // having to discover that workaround.
+    FramebufferDropSnapshot();
 }
 
 bool MenuIsOpen()

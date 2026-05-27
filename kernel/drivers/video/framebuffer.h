@@ -575,6 +575,16 @@ void FramebufferResetDamage();
 /// callers.
 void FramebufferInvalidateSnapshot(u32 x, u32 y, u32 w, u32 h);
 
+/// Force the next `FramebufferEndCompose` to take the conservative
+/// "full shadow→live blit + full snapshot resync" path instead of
+/// the diff-elided fast path. Equivalent to the state after a
+/// fresh `FramebufferRebindExternal`. Used by paths where a
+/// caller knows the snapshot has drifted but can't enumerate the
+/// affected rects (e.g. menu close, where the menu's tactility
+/// drop-shadow has scribbled live pixels that aren't tracked in
+/// the per-frame damage rect).
+void FramebufferDropSnapshot();
+
 /// Begin an offscreen compose pass. While compose is active every
 /// pixel-write primitive in this header (`FramebufferPutPixel`,
 /// `FillRect`, `Blit`, `FramebufferBlendFill`, `FillRectGradient`
