@@ -551,7 +551,11 @@ the v0 syscall surface doesn't provide.
   `SamplerAddressModeFor(handle)` (U) and `SamplerAddressModeVFor`
   (V) on every sample so an asymmetric sampler like
   `(REPEAT_U, CLAMP_TO_EDGE_V)` produces tileable-X clamped-Y
-  output. ClampToBorder is per-axis too — a UV component outside
+  output. The `magFilter` propagates too — `SamplerMagFilterFor`
+  picks 0=Nearest / 1=Linear; the Nearest path short-circuits the
+  bilerp to a single-texel fetch (the previous always-bilinear
+  behaviour silently degraded VK_FILTER_NEAREST samples into
+  blurred ones). ClampToBorder is per-axis too — a UV component outside
   [0, 1] on a border-mode axis returns the border colour, while
   the other axis follows its own fold. v0's CLAMP_TO_BORDER
   border colour is always transparent black (0,0,0,0); per-sampler

@@ -696,9 +696,14 @@ enum class SamplerAddressMode : u8
 /// yet). Returns the packed BGRA8 word (0xAARRGGBB). Returns
 /// 0xFF000000 (opaque black) on any lookup failure — caller
 /// treats it as a fallback.
+/// `filter`: 0 = Nearest (single-texel fetch, no blend),
+/// 1 = Linear (bilinear blend). Default is Linear because the
+/// pre-decouple executor always blended; callers that want
+/// nearest-neighbour sample a VkSampler whose `magFilter` is
+/// `VkFilter::Nearest` and the executor passes 0 here.
 u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits,
                      SamplerAddressMode mode_u = SamplerAddressMode::ClampToEdge,
-                     SamplerAddressMode mode_v = SamplerAddressMode::ClampToEdge);
+                     SamplerAddressMode mode_v = SamplerAddressMode::ClampToEdge, u8 filter = 1u);
 
 /// Look up the address-mode-U recorded by VkCreateSampler against
 /// a VkSampler handle. Returns `ClampToEdge` for handle == 0 or
@@ -712,6 +717,14 @@ SamplerAddressMode SamplerAddressModeFor(u64 sampler_handle);
 /// `(REPEAT, CLAMP_TO_EDGE)` produces tileable-X clamped-Y output
 /// (the right shape for a scrolling-strip background pattern).
 SamplerAddressMode SamplerAddressModeVFor(u64 sampler_handle);
+
+/// Return the magnification filter recorded by VkCreateSampler.
+/// 0 = Nearest (single-texel fetch, no blend), 1 = Linear
+/// (bilinear, the existing path). Used by `SampleImageRgba8` to
+/// pick the per-pixel sample shape. Falls back to Linear (1) for
+/// handle == 0 / unknown so a binding without a sampler keeps
+/// the previous filtered behaviour.
+u8 SamplerMagFilterFor(u64 sampler_handle);
 
 /// Unfiltered, integer-coordinate BGRA8 texel fetch from an
 /// image bound via descriptor. Used by the SPIR-V executor's

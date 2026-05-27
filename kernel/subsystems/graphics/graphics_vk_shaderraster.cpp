@@ -917,7 +917,8 @@ void WriteTexelBgra8(u64 resource_handle, u32 x, u32 y, u32 argb)
     p[3] = static_cast<u8>((argb >> 24) & 0xFFu); // A
 }
 
-u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddressMode mode_u, SamplerAddressMode mode_v)
+u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddressMode mode_u, SamplerAddressMode mode_v,
+                     u8 filter)
 {
     if (resource_handle == 0)
         return 0xFF000000u;
@@ -1004,16 +1005,15 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
         }
     };
     // Bilinear filtering: sample the 4 texels around (u*w, v*h),
-    // blend by the sub-texel weights.
+    // blend by the sub-texel weights. Nearest filter (filter == 0)
+    // short-circuits the bilerp and returns the single texel at
+    // the rounded coordinate — VK_FILTER_NEAREST semantics.
     const Sf32 u = fold(u_bits, mode_u);
     const Sf32 v = fold(v_bits, mode_v);
     const Sf32 fx = Sf32Mul(u, Sf32FromU32(rec.extent.width - 1));
     const Sf32 fy = Sf32Mul(v, Sf32FromU32(rec.extent.height - 1));
     const i32 ix = Sf32ToI32(fx);
     const i32 iy = Sf32ToI32(fy);
-    // Sub-pixel offsets (the fractional parts) become the blend weights.
-    const Sf32 fxf = Sf32Sub(fx, Sf32FromU32(static_cast<u32>(ix)));
-    const Sf32 fyf = Sf32Sub(fy, Sf32FromU32(static_cast<u32>(iy)));
 
     auto clamp_to_extent = [&](i32 x, u32 max_w) -> u32
     {
@@ -1023,6 +1023,23 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
             return max_w - 1u;
         return static_cast<u32>(x);
     };
+
+    if (filter == 0u)
+    {
+        // VK_FILTER_NEAREST: single texel, no blend. Read the
+        // already-clamped (ix, iy) coordinate.
+        const u32 nx = clamp_to_extent(ix, rec.extent.width);
+        const u32 ny = clamp_to_extent(iy, rec.extent.height);
+        const u64 noff = (static_cast<u64>(ny) * rec.extent.width + nx) * 4u;
+        const u8* np = static_cast<const u8*>(rec.backing) + noff;
+        return (static_cast<u32>(np[3]) << 24) | (static_cast<u32>(np[0]) << 16) | (static_cast<u32>(np[1]) << 8) |
+               static_cast<u32>(np[2]);
+    }
+
+    // Sub-pixel offsets (the fractional parts) become the blend weights.
+    const Sf32 fxf = Sf32Sub(fx, Sf32FromU32(static_cast<u32>(ix)));
+    const Sf32 fyf = Sf32Sub(fy, Sf32FromU32(static_cast<u32>(iy)));
+
     const u32 x0 = clamp_to_extent(ix, rec.extent.width);
     const u32 y0 = clamp_to_extent(iy, rec.extent.height);
     const u32 x1 = clamp_to_extent(ix + 1, rec.extent.width);

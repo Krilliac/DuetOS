@@ -80,6 +80,16 @@ SamplerAddressMode SamplerAddressModeVFor(u64 sampler_handle)
     return SamplerAxisMode(sampler_handle, &SamplerRecord::address_mode_v);
 }
 
+u8 SamplerMagFilterFor(u64 sampler_handle)
+{
+    if (sampler_handle == 0 || !HandleInRange(sampler_handle, kSamplerBase))
+        return 1u; // default Linear preserves the pre-decouple path
+    const u32 slot = SlotOf(sampler_handle, kSamplerBase);
+    if (!PoolIsLive(g_sampler_pool, slot))
+        return 1u;
+    return g_sampler_data[slot].mag_filter;
+}
+
 void VkDestroySampler(VkDevice dev, VkSampler sampler)
 {
     (void)dev;

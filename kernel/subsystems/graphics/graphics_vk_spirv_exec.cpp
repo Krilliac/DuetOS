@@ -1309,8 +1309,9 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
                         ::duetos::subsystems::graphics::internal::SamplerAddressModeFor(sampler);
                     const ::duetos::subsystems::graphics::internal::SamplerAddressMode mode_v =
                         ::duetos::subsystems::graphics::internal::SamplerAddressModeVFor(sampler);
+                    const u8 filter = ::duetos::subsystems::graphics::internal::SamplerMagFilterFor(sampler);
                     const u32 argb = ::duetos::subsystems::graphics::internal::SampleImageRgba8(
-                        bound, coord_buf[0], coord_buf[1], mode_u, mode_v);
+                        bound, coord_buf[0], coord_buf[1], mode_u, mode_v, filter);
                     // Decompose back to RGBA Sf32 components for
                     // the shader: bits 16..23 = R, 8..15 = G, 0..7 = B,
                     // 24..31 = A.

@@ -562,6 +562,8 @@ bool RunCanonicalLifecycle()
         // writes that don't pin a sampler keep working.
         if (internal::SamplerAddressModeFor(0) != internal::SamplerAddressMode::ClampToEdge)
             return SelftestFail("[selftest:graphics] sampler handle=0 fallback wrong", 0);
+        if (internal::SamplerMagFilterFor(0) != 1u)
+            return SelftestFail("[selftest:graphics] sampler handle=0 filter fallback wrong", 0);
         // Per-axis decoupling: an asymmetric sampler (Repeat-U /
         // ClampToEdge-V) must report distinct modes on each axis.
         // The pre-decouple path only honoured the U axis; this
@@ -575,7 +577,21 @@ bool RunCanonicalLifecycle()
             return SelftestFail("[selftest:graphics] mixed sampler U axis wrong", 0);
         if (internal::SamplerAddressModeVFor(smp_mixed) != internal::SamplerAddressMode::ClampToEdge)
             return SelftestFail("[selftest:graphics] mixed sampler V axis wrong", 0);
+        // The mixed sampler was created with VkFilter::Linear above,
+        // so the SamplerMagFilterFor lookup must return 1.
+        if (internal::SamplerMagFilterFor(smp_mixed) != 1u)
+            return SelftestFail("[selftest:graphics] mixed sampler magFilter not Linear", 0);
         VkDestroySampler(dev, smp_mixed);
+        // Nearest-filter sampler: VkCreateSampler(magFilter=Nearest)
+        // must round-trip to SamplerMagFilterFor(handle) == 0.
+        const VkSamplerCreateInfo sci_nearest{VkFilter::Nearest, VkFilter::Nearest, VkSamplerAddressMode::ClampToEdge,
+                                              VkSamplerAddressMode::ClampToEdge, VkSamplerAddressMode::ClampToEdge};
+        VkSampler smp_nearest = 0;
+        if (VkCreateSampler(dev, &sci_nearest, &smp_nearest) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateSampler(nearest) failed", 0);
+        if (internal::SamplerMagFilterFor(smp_nearest) != 0u)
+            return SelftestFail("[selftest:graphics] nearest sampler magFilter not propagated", 0);
+        VkDestroySampler(dev, smp_nearest);
 
         VkEvent evt = 0;
         if (VkCreateEvent(dev, &evt) != VkResult::Success)
