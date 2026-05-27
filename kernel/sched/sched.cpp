@@ -51,6 +51,7 @@
 #include "diag/soft_lockup.h"
 #include "sched/loadavg.h"
 #include "sync/rcu.h"
+#include "time/cyclic.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "proc/process.h"
@@ -3030,6 +3031,12 @@ void OnTimerTick(u64 now_ticks)
     const char* cur_name = (cur != nullptr) ? cur->name : nullptr;
     diag::SoftLockupTick(now_ticks, (cur != nullptr && !cur_is_idle) ? TaskId(cur) : 0, cur_name);
     sync::RcuTick();
+    // Cyclic subsystem IRQ-tail dispatch (High + Lock levels).
+    // Cheap on the common "nothing due" path (one heap-top
+    // compare per level); when due, releases the cyclic lock
+    // around each callback so a slow callback doesn't block
+    // the rest on this tick.
+    ::duetos::time::CyclicTimerTick();
     // D2 instrumentation. arg0 = vector (32 = LAPIC timer),
     // arg1 = current_tid. Tagging IRQs lets a tracer dump
     // correlate "which task got preempted" with the syscall +

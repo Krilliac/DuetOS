@@ -249,6 +249,7 @@
 #include "sync/seqlock.h"
 #include "sync/spinlock.h"
 #include "time/clocksource.h"
+#include "time/cyclic.h"
 #include "time/tick.h"
 #include "time/timekeeper.h"
 #include "time/timezone.h"
@@ -1451,6 +1452,16 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // workaround that used to depend on worker creation order.
     duetos::sched::SchedStartIdle("idle-bsp");
     duetos::sched::SchedStartReaper();
+
+    // Cyclic subsystem (Solaris/illumos-style level-rule timer
+    // callbacks). Install AFTER SchedInit + idle + reaper are
+    // running — Install spawns the Low-level dispatcher kthread.
+    // The self-test runs unconditionally (PoisonAllocSelfTest /
+    // RegistrySelfTest convention) so a release boot still gets
+    // the "init-with-validation" coverage; the cyclic ABI is too
+    // load-bearing on the first slice to gate behind kBootSelfTests.
+    duetos::time::CyclicInstall();
+    duetos::time::CyclicSelfTest();
 
     // Pre-stage the boot-time stress driver mode (no task spawn yet
     // — that happens later from kernel_main once the shell + ring3
