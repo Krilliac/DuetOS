@@ -57,7 +57,8 @@ HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuz
              $(BIN)/fuzz_pe_exports $(BIN)/fuzz_vt $(BIN)/fuzz_disasm \
              $(BIN)/fuzz_edid $(BIN)/fuzz_cea861 \
              $(BIN)/fuzz_usbclass $(BIN)/fuzz_usbhid \
-             $(BIN)/fuzz_tls
+             $(BIN)/fuzz_tls \
+             $(BIN)/fuzz_nvidia_gsp_fw $(BIN)/fuzz_amd_gfx_fw
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -393,6 +394,23 @@ $(BIN)/fuzz_cea861: fuzz_cea861.cpp $(GPU)/cea861.cpp $(GPU)/edid.cpp host_shim/
 # misses on host).
 DEBUG := $(KERNEL)/debug
 $(BIN)/fuzz_disasm: fuzz_disasm.cpp $(DEBUG)/disasm.cpp host_shim/disasm_stubs.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# --- Nvidia GSP + AMD GFX firmware parsers -----------------------
+#
+# Both parsers are "pure compute, no allocation, no IRQ" per their
+# headers (kernel/drivers/gpu/{nvidia_gsp_fw,amd_gfx_fw}.h). Same
+# shape as the existing iwl_fw / rtl_fw / bcm_fw harnesses — no
+# shim TU needed beyond the existing host_shim/log/klog no-ops.
+GPUDRV := $(KERNEL)/drivers/gpu
+# host_shim/gpu_fw_stubs.cpp resolves the kernel ProbeFire that
+# the self-test path in each parser TU pulls in. Self-test is
+# never reached from the harness, but linking the full TU pulls
+# in every cross-file reference.
+$(BIN)/fuzz_nvidia_gsp_fw: fuzz_nvidia_gsp_fw.cpp $(GPUDRV)/nvidia_gsp_fw.cpp host_shim/gpu_fw_stubs.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+$(BIN)/fuzz_amd_gfx_fw: fuzz_amd_gfx_fw.cpp $(GPUDRV)/amd_gfx_fw.cpp host_shim/gpu_fw_stubs.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 # Each run-* keeps a persistent corpus and stops after 60 s.
