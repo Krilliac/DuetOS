@@ -10,3 +10,8 @@ namespace duetos::debug
 {
 void ProbeFire(ProbeId, ::duetos::u64, ::duetos::u64) {}
 } // namespace duetos::debug
+
+// Each Rust staticlib pulls in `core` objects that reference the
+// unwind personality even though we're panic=abort. Empty stub
+// satisfies the linker for both fuzz_nvidia_gsp_fw + fuzz_amd_gfx_fw.
+extern "C" void rust_eh_personality() {}

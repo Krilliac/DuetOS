@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
+#include "duetos_amd_gfx_fw.h"
 #include "log/klog.h"
 
 /*
@@ -20,117 +21,47 @@
 namespace duetos::drivers::gpu::amd
 {
 
-namespace
-{
-
-u16 LeU16(const u8* p)
-{
-    return static_cast<u16>(p[0]) | (static_cast<u16>(p[1]) << 8);
-}
-u32 LeU32(const u8* p)
-{
-    return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) |
-           (static_cast<u32>(p[3]) << 24);
-}
-
-} // namespace
-
 ::duetos::core::Result<void> AmdGfxFwParse(const u8* blob, u32 blob_size, AmdGfxFwParsed* parsed)
 {
+    // Byte parsing delegated to the `duetos_amd_gfx_fw` Rust
+    // crate (kernel/drivers/gpu/amd_gfx_fw_rust/). Firmware
+    // blobs are attacker-controllable when the install media or
+    // staging path is hostile — Rust-Subsystems P1. Checked
+    // arithmetic Rust catches the next ucode_size_bytes /
+    // jt_offset_dwords overflow before it becomes a wild
+    // pointer.
     if (parsed == nullptr)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+
+    DuetosAmdGfxFwParsed rs{};
+    const i32 rc = duetos_amd_gfx_fw_parse(blob, blob_size, &rs);
+
+    // Copy fields from the Rust shape to the public struct.
     *parsed = AmdGfxFwParsed{};
+    parsed->valid = rs.valid;
+    parsed->is_v1_gfx_header = rs.is_v1_gfx_header;
+    parsed->size_bytes = rs.size_bytes;
+    parsed->header_size_bytes = rs.header_size_bytes;
+    parsed->header_version_major = rs.header_version_major;
+    parsed->header_version_minor = rs.header_version_minor;
+    parsed->ip_version_major = rs.ip_version_major;
+    parsed->ip_version_minor = rs.ip_version_minor;
+    parsed->ucode_version = rs.ucode_version;
+    parsed->ucode_size_bytes = rs.ucode_size_bytes;
+    parsed->ucode_array_offset = rs.ucode_array_offset;
+    parsed->crc32 = rs.crc32;
+    parsed->ucode_feature_version = rs.ucode_feature_version;
+    parsed->jt_offset_dwords = rs.jt_offset_dwords;
+    parsed->jt_size_dwords = rs.jt_size_dwords;
+    parsed->ucode = rs.ucode;
+    parsed->ucode_dword_count = rs.ucode_dword_count;
+    parsed->reject_reason = rs.reject_reason;
 
-    if (blob == nullptr || blob_size < kAmdCommonFwHeaderBytes)
-    {
-        parsed->reject_reason |= kAmdFwRejectBlobTooShort;
+    if (rc == 0)
+        return {};
+    if (rc == 1)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
-    }
-
-    // common_firmware_header pulls.
-    parsed->size_bytes = LeU32(blob + 0x00);
-    parsed->header_size_bytes = LeU32(blob + 0x04);
-    parsed->header_version_major = LeU16(blob + 0x08);
-    parsed->header_version_minor = LeU16(blob + 0x0A);
-    parsed->ip_version_major = LeU16(blob + 0x0C);
-    parsed->ip_version_minor = LeU16(blob + 0x0E);
-    parsed->ucode_version = LeU32(blob + 0x10);
-    parsed->ucode_size_bytes = LeU32(blob + 0x14);
-    parsed->ucode_array_offset = LeU32(blob + 0x18);
-    parsed->crc32 = LeU32(blob + 0x1C);
-
-    if (parsed->size_bytes > kAmdMaxFwSizeBytes || parsed->ucode_size_bytes > kAmdMaxFwSizeBytes)
-    {
-        parsed->reject_reason |= kAmdFwRejectOversize;
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-    }
-
-    // Header self-consistency: the header itself must fit in the
-    // declared total size, and the declared total size must fit in
-    // the blob. We're permissive about `size_bytes > blob_size` only
-    // when `ucode_array_offset + ucode_size_bytes <= blob_size` — the
-    // amdgpu driver tolerates trailing padding past the declared
-    // total. The strict check is on the payload bound, not the
-    // declared total.
-    if (parsed->header_size_bytes < kAmdCommonFwHeaderBytes || parsed->header_size_bytes > blob_size)
-    {
-        parsed->reject_reason |= kAmdFwRejectHeaderShort;
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-    }
-    if (parsed->size_bytes < parsed->header_size_bytes)
-    {
-        parsed->reject_reason |= kAmdFwRejectHeaderInconsistent;
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-    }
-
-    // Bound the payload.
-    // - ucode_array_offset must be within the blob.
-    // - ucode_array_offset + ucode_size_bytes must not overflow u32
-    //   and must fit in the blob.
-    // - ucode_size_bytes must be a positive multiple of 4 (microcode
-    //   is streamed as dwords).
-    if (parsed->ucode_array_offset >= blob_size || parsed->ucode_size_bytes == 0 ||
-        (parsed->ucode_size_bytes & 0x3u) != 0)
-    {
-        parsed->reject_reason |= kAmdFwRejectUcodeOverflow;
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-    }
-    const u64 payload_end = static_cast<u64>(parsed->ucode_array_offset) + parsed->ucode_size_bytes;
-    if (payload_end > blob_size)
-    {
-        parsed->reject_reason |= kAmdFwRejectUcodeOverflow;
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-    }
-
-    parsed->ucode = reinterpret_cast<const u32*>(blob + parsed->ucode_array_offset);
-    parsed->ucode_dword_count = parsed->ucode_size_bytes / 4u;
-
-    // v1 gfx-header fields are present iff the header is 44 bytes
-    // or more. Side-band images that use only the common header
-    // (some RLC variants) stop here.
-    if (parsed->header_size_bytes >= kAmdGfxFwHeaderV1Bytes)
-    {
-        parsed->is_v1_gfx_header = true;
-        parsed->ucode_feature_version = LeU32(blob + 0x20);
-        parsed->jt_offset_dwords = LeU32(blob + 0x24);
-        parsed->jt_size_dwords = LeU32(blob + 0x28);
-
-        // Validate the jump-table fits inside the payload.
-        const u64 jt_end = static_cast<u64>(parsed->jt_offset_dwords) + parsed->jt_size_dwords;
-        if (jt_end > parsed->ucode_dword_count)
-        {
-            parsed->reject_reason |= kAmdFwRejectJtOverflow;
-            // Clear the ucode view so a caller that ignores the
-            // Result can't accidentally use a structurally bogus
-            // image. The reject_reason is preserved for diagnostics.
-            parsed->ucode = nullptr;
-            parsed->ucode_dword_count = 0;
-            return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-        }
-    }
-
-    parsed->valid = true;
-    return {};
+    return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
 }
 
 void AmdGfxFwLog(const char* basename, const AmdGfxFwParsed& parsed)

@@ -116,6 +116,10 @@ name = "duetos_acpi"
 version = "0.0.1"
 
 [[package]]
+name = "duetos_amd_gfx_fw"
+version = "0.0.1"
+
+[[package]]
 name = "duetos_exec_meta"
 version = "0.0.1"
 
@@ -141,6 +145,7 @@ version = "0.0.1"
 dependencies = [
  "duetfs",
  "duetos_acpi",
+ "duetos_amd_gfx_fw",
  "duetos_exec_meta",
  "duetos_exfat",
  "duetos_ext4",
@@ -149,6 +154,7 @@ dependencies = [
  "duetos_multiboot2",
  "duetos_net_parsers",
  "duetos_ntfs",
+ "duetos_nvidia_gsp_fw",
  "duetos_pci_caps",
  "duetos_smbios",
  "duetos_tls",
@@ -169,6 +175,10 @@ version = "0.0.1"
 
 [[package]]
 name = "duetos_ntfs"
+version = "0.0.1"
+
+[[package]]
+name = "duetos_nvidia_gsp_fw"
 version = "0.0.1"
 
 [[package]]

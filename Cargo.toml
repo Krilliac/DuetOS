@@ -9,6 +9,8 @@ resolver = "2"
 members = [
     "kernel/acpi/acpi_rust",
     "kernel/arch/x86_64/smbios_rust",
+    "kernel/drivers/gpu/amd_gfx_fw_rust",
+    "kernel/drivers/gpu/nvidia_gsp_fw_rust",
     "kernel/drivers/pci/caps_rust",
     "kernel/drivers/usb/class_rust",
     "kernel/drivers/usb/hid_rust",

@@ -4,11 +4,11 @@
 >
 > **Execution context:** Kernel build tooling and kernel-linked Rust crates.
 >
-> **Maturity:** Stable foundation; eighteen production Rust subsystems live in the kernel tree.
+> **Maturity:** Stable foundation; twenty production Rust subsystems live in the kernel tree.
 >
-> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options / IPv4-header byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA / JPEG header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, Multiboot2 info-structure walker, TLS 1.2 record + handshake walker, and VT/ANSI escape parser.
+> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options / IPv4-header byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA / JPEG header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, Multiboot2 info-structure walker, TLS 1.2 record + handshake walker, VT/ANSI escape parser, NVIDIA GSP firmware-image (nvfw_bin_hdr) parser, and AMD GFX9+ microcode-image (gfx_firmware_header_v1_0) parser.
 >
-> All eighteen crates have a current C++ caller; there are no skeleton crates left in this slice.
+> All twenty crates have a current C++ caller; there are no skeleton crates left in this slice.
 
 ## Overview
 
@@ -140,6 +140,27 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   Read_BD_ADDR bodies. `kernel/net/bluetooth/hci.cpp` delegates
   the Read_Local_Version + Read_BD_ADDR rparam decoders to the
   crate.
+- `/kernel/drivers/gpu/nvidia_gsp_fw_rust/` (`duetos_nvidia_gsp_fw`)
+  parses NVIDIA Turing+ GSP firmware containers
+  (`gsp_tu10x.bin` / `ga10x.bin` / `ad10x.bin`). The 24-byte
+  outer `nvfw_bin_hdr` + per-arch inner descriptor (76 bytes
+  Turing/GA100, 84 bytes GA102+) + ELF64 RISC-V payload are all
+  attacker-controllable when the install media is hostile.
+  Checked arithmetic on `data_offset + data_size`; rejects bad
+  magic, bad version, descriptor-too-small, data-bounds, and
+  oversize images. `kernel/drivers/gpu/nvidia_gsp_fw.cpp`
+  delegates the byte parse to this crate; the C++ side keeps
+  the public NvidiaGspFwParse API + boot self-test.
+- `/kernel/drivers/gpu/amd_gfx_fw_rust/` (`duetos_amd_gfx_fw`)
+  parses AMD GFX9+ microcode images (`linux-firmware` blobs).
+  32-byte `common_firmware_header` + optional 12-byte
+  `gfx_firmware_header_v1_0` tail (feature version + jump-table
+  offset/size) + ucode payload. Validates header_size_bytes vs
+  blob, ucode_array_offset+size bound, ucode multiple-of-4,
+  and jump-table fits inside the payload — every check via
+  checked arithmetic so a hostile peer can't drive a length
+  field into wrap-around. `kernel/drivers/gpu/amd_gfx_fw.cpp`
+  delegates to this crate.
 - `/kernel/util/vt_parser_rust/` (`duetos_vt`) implements the DEC
   ANSI / xterm escape parser. State machine + UTF-8 decoder + CSI
   parameter accumulator + OSC string buffer over a `&mut

@@ -1,0 +1,24 @@
+# DuetOS AMD GFX9+ microcode-image parser.
+#
+# Parses AMD GFX microcode blobs distributed via `linux-firmware`
+# (`gfx_*.bin`). The 32-byte common header + 12-byte gfx-v1 tail
+# + jump-table + ucode payload come from install media. Rust-
+# Subsystems P1 (GPU / asset parsers).
+#
+# Standalone no_std rlib; C ABI consumed by
+# kernel/drivers/gpu/amd_gfx_fw.cpp.
+
+[package]
+name = "duetos_amd_gfx_fw"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS AMD GFX9+ microcode-image (gfx_firmware_header_v1_0) parser"
+
+[lib]
+name = "duetos_amd_gfx_fw"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

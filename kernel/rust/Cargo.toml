@@ -18,6 +18,7 @@ crate-type = ["staticlib"]
 [dependencies]
 duetfs = { path = "../fs/duetfs" }
 duetos_acpi = { path = "../acpi/acpi_rust" }
+duetos_amd_gfx_fw = { path = "../drivers/gpu/amd_gfx_fw_rust" }
 duetos_exec_meta = { path = "../loader/exec_meta_rust" }
 duetos_exfat = { path = "../fs/exfat_rust" }
 duetos_ext4 = { path = "../fs/ext4_rust" }
@@ -26,6 +27,7 @@ duetos_img_meta = { path = "../util/img_meta_rust" }
 duetos_multiboot2 = { path = "../mm/multiboot2_rust" }
 duetos_net_parsers = { path = "../net/parsers_rust" }
 duetos_ntfs = { path = "../fs/ntfs_rust" }
+duetos_nvidia_gsp_fw = { path = "../drivers/gpu/nvidia_gsp_fw_rust" }
 duetos_pci_caps = { path = "../drivers/pci/caps_rust" }
 duetos_smbios = { path = "../arch/x86_64/smbios_rust" }
 duetos_tls = { path = "../net/tls_rust" }

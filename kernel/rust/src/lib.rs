@@ -10,6 +10,7 @@ mod panic;
 
 pub use duetfs::ffi::*;
 pub use duetos_acpi::*;
+pub use duetos_amd_gfx_fw::*;
 pub use duetos_exec_meta::*;
 pub use duetos_exfat::*;
 pub use duetos_ext4::*;
@@ -18,6 +19,7 @@ pub use duetos_img_meta::*;
 pub use duetos_multiboot2::*;
 pub use duetos_net_parsers::*;
 pub use duetos_ntfs::*;
+pub use duetos_nvidia_gsp_fw::*;
 pub use duetos_pci_caps::*;
 pub use duetos_smbios::*;
 pub use duetos_tls::*;

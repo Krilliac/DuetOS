@@ -403,15 +403,40 @@ $(BIN)/fuzz_disasm: fuzz_disasm.cpp $(DEBUG)/disasm.cpp host_shim/disasm_stubs.c
 # shape as the existing iwl_fw / rtl_fw / bcm_fw harnesses — no
 # shim TU needed beyond the existing host_shim/log/klog no-ops.
 GPUDRV := $(KERNEL)/drivers/gpu
-# host_shim/gpu_fw_stubs.cpp resolves the kernel ProbeFire that
-# the self-test path in each parser TU pulls in. Self-test is
-# never reached from the harness, but linking the full TU pulls
-# in every cross-file reference.
-$(BIN)/fuzz_nvidia_gsp_fw: fuzz_nvidia_gsp_fw.cpp $(GPUDRV)/nvidia_gsp_fw.cpp host_shim/gpu_fw_stubs.cpp | $(BIN)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+NVIDIA_GSP_FW_RUST := $(KERNEL)/drivers/gpu/nvidia_gsp_fw_rust
+AMD_GFX_FW_RUST   := $(KERNEL)/drivers/gpu/amd_gfx_fw_rust
 
-$(BIN)/fuzz_amd_gfx_fw: fuzz_amd_gfx_fw.cpp $(GPUDRV)/amd_gfx_fw.cpp host_shim/gpu_fw_stubs.cpp | $(BIN)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+# Both parsers now delegate to a no_std Rust crate. Same rlib +
+# panic=abort staticlib recipe as fuzz_tls / fuzz_vt. Rust-side
+# panic (bounds/overflow that the parser failed to guard) aborts
+# as a libFuzzer crash. host_shim/gpu_fw_stubs.cpp keeps the
+# ProbeFire stub for the self-test path that links into the C++
+# TU but is never reached from the harness.
+$(BIN)/libduetos_nvidia_gsp_fw.rlib: $(NVIDIA_GSP_FW_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_nvidia_gsp_fw -O $< -o $@
+
+$(BIN)/libduetos_nvidia_gsp_fw_fuzz.a: host_shim/nvidia_gsp_fw_fuzz_shim.rs \
+		$(BIN)/libduetos_nvidia_gsp_fw.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_nvidia_gsp_fw=$(BIN)/libduetos_nvidia_gsp_fw.rlib $< -o $@
+
+$(BIN)/fuzz_nvidia_gsp_fw: fuzz_nvidia_gsp_fw.cpp $(GPUDRV)/nvidia_gsp_fw.cpp \
+		host_shim/gpu_fw_stubs.cpp $(BIN)/libduetos_nvidia_gsp_fw_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(NVIDIA_GSP_FW_RUST)/include $^ -o $@
+
+$(BIN)/libduetos_amd_gfx_fw.rlib: $(AMD_GFX_FW_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_amd_gfx_fw -O $< -o $@
+
+$(BIN)/libduetos_amd_gfx_fw_fuzz.a: host_shim/amd_gfx_fw_fuzz_shim.rs \
+		$(BIN)/libduetos_amd_gfx_fw.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_amd_gfx_fw=$(BIN)/libduetos_amd_gfx_fw.rlib $< -o $@
+
+$(BIN)/fuzz_amd_gfx_fw: fuzz_amd_gfx_fw.cpp $(GPUDRV)/amd_gfx_fw.cpp \
+		host_shim/gpu_fw_stubs.cpp $(BIN)/libduetos_amd_gfx_fw_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(AMD_GFX_FW_RUST)/include $^ -o $@
 
 # Each run-* keeps a persistent corpus and stops after 60 s.
 # run-pe seeds the corpus first (see seeds/gen_pe_seeds.py) so the

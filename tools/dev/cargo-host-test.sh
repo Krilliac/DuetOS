@@ -32,6 +32,8 @@ HOST_TEST_CRATES=(
     "kernel/net/hci_rust"
     "kernel/net/tls_rust"
     "kernel/util/vt_parser_rust"
+    "kernel/drivers/gpu/nvidia_gsp_fw_rust"
+    "kernel/drivers/gpu/amd_gfx_fw_rust"
 )
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
