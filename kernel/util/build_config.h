@@ -192,6 +192,29 @@ inline constexpr bool kKaslrEnabled = false;
 #endif
 
 // -----------------------------------------------------------------
+// KARL — Kernel Address Randomized Link.
+//
+// Build-time complement to KASLR. The kernel CMake (kernel/CMakeLists.txt)
+// shuffles the per-TU object link order before passing the source list to
+// the linker, so two builds with different seeds produce kernels whose
+// non-special symbols sit at different in-image offsets. The seed itself
+// is baked in as DUETOS_KARL_BUILD_SEED so the boot banner can report
+// which seed produced the image — critical for triaging a crash dump
+// against the matching kernel.symbols map.
+// -----------------------------------------------------------------
+#ifdef DUETOS_KARL
+inline constexpr bool kKarlEnabled = (DUETOS_KARL != 0);
+#else
+inline constexpr bool kKarlEnabled = false;
+#endif
+
+#ifdef DUETOS_KARL_BUILD_SEED
+inline constexpr unsigned long long kKarlBuildSeed = (DUETOS_KARL_BUILD_SEED);
+#else
+inline constexpr unsigned long long kKarlBuildSeed = 0;
+#endif
+
+// -----------------------------------------------------------------
 // KASAN-equivalent diagnostics.
 //
 // Mirrors the top-level DUETOS_KASAN option. The kernel's current

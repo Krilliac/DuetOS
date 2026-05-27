@@ -418,6 +418,24 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     }
     SerialWrite("\n");
 
+    // KARL — Kernel Address Randomized Link. When ON, the kernel's
+    // per-TU link order was randomized with the printed seed; a
+    // panic dump needs the matching `kernel.symbols` map (emitted
+    // next to the kernel ELF / under /boot on the ISO) to decode
+    // RIPs back to function names. When OFF, every build of this
+    // commit lays symbols at the same offsets and a stock nm of
+    // the kernel ELF suffices.
+    if constexpr (duetos::core::kKarlEnabled)
+    {
+        SerialWrite("[boot] karl=seed=");
+        SerialWriteHex(duetos::core::kKarlBuildSeed);
+        SerialWrite("\n");
+    }
+    else
+    {
+        SerialWrite("[boot] karl=disabled\n");
+    }
+
     constexpr duetos::u32 kMultiboot2BootMagic = 0x36D76289;
     if (multiboot_magic == kMultiboot2BootMagic)
     {
