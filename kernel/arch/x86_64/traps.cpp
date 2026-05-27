@@ -381,7 +381,9 @@ inline bool IsDispatchedVector(u64 vector)
     // installed by SMP bring-up (kernel/arch/x86_64/smp.cpp).
     // Without the 0xF9 leg the IrqInstall registration path would
     // halt the kernel mid-boot the moment SMP wires up shootdowns.
-    if (vector == 0xF8 || vector == 0xF9)
+    // IPI-call (0xFA): cross-CPU function-call primitive — same
+    // shape, installed by kernel/cpu/ipi_call.cpp's IpiCallInstall.
+    if (vector == 0xF8 || vector == 0xF9 || vector == 0xFA)
         return true;
     return false;
 }
