@@ -1,0 +1,19 @@
+# DuetOS Broadcom b43 / brcm firmware parser.
+#
+# Walks the 8-byte-record b43 wire format. Attacker-controllable
+# firmware blob — Rust-Subsystems P1.
+
+[package]
+name = "duetos_bcm43xx_fw"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS Broadcom b43 firmware-record-stream parser"
+
+[lib]
+name = "duetos_bcm43xx_fw"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

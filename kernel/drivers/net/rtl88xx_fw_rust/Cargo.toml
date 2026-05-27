@@ -1,0 +1,19 @@
+# DuetOS Realtek rtlwifi firmware-header parser.
+#
+# Walks the 32-byte rtlwifi / rtw88 / rtw89 fixed header.
+# Attacker-controllable firmware blob — Rust-Subsystems P1.
+
+[package]
+name = "duetos_rtl88xx_fw"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS Realtek rtlwifi firmware-header parser"
+
+[lib]
+name = "duetos_rtl88xx_fw"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

@@ -34,6 +34,9 @@ HOST_TEST_CRATES=(
     "kernel/util/vt_parser_rust"
     "kernel/drivers/gpu/nvidia_gsp_fw_rust"
     "kernel/drivers/gpu/amd_gfx_fw_rust"
+    "kernel/drivers/net/bcm43xx_fw_rust"
+    "kernel/drivers/net/rtl88xx_fw_rust"
+    "kernel/drivers/net/iwlwifi_fw_rust"
 )
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

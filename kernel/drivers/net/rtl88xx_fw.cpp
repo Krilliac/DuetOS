@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "duetos_rtl88xx_fw.h"
 #include "log/klog.h"
 
 namespace duetos::drivers::net
@@ -10,17 +11,8 @@ namespace duetos::drivers::net
 namespace
 {
 
-u16 ReadLe16(const u8* buf, u32 off)
-{
-    return static_cast<u16>(buf[off]) | static_cast<u16>(static_cast<u16>(buf[off + 1]) << 8);
-}
-
-u32 ReadLe32(const u8* buf, u32 off)
-{
-    return static_cast<u32>(buf[off]) | (static_cast<u32>(buf[off + 1]) << 8) | (static_cast<u32>(buf[off + 2]) << 16) |
-           (static_cast<u32>(buf[off + 3]) << 24);
-}
-
+// LE writers — only used by the self-test below to synthesize
+// blobs. Readers + classifier moved to the Rust crate.
 void WriteLe16(u8* buf, u32 off, u16 v)
 {
     buf[off] = static_cast<u8>(v & 0xFF);
@@ -33,23 +25,6 @@ void WriteLe32(u8* buf, u32 off, u32 v)
     buf[off + 1] = static_cast<u8>((v >> 8) & 0xFF);
     buf[off + 2] = static_cast<u8>((v >> 16) & 0xFF);
     buf[off + 3] = static_cast<u8>((v >> 24) & 0xFF);
-}
-
-RtlFwGeneration ClassifySignature(u16 sig)
-{
-    // Wi-Fi 6E silicon (rtw89). Note: this match is overly inclusive
-    // — the rtw89 family also covers some 0x88xx values via
-    // the rtw89-specific naming, but those collide with rtw88's
-    // signatures. For v0 we report rtw88 vs rtw89 by the
-    // signature's high nibble (0x88 → rtw88, 0x88B*/8852 → rtw89).
-    if (sig == kRtlSig8852a)
-        return RtlFwGeneration::Rtw89;
-    if (sig == kRtlSig8822b)
-        return RtlFwGeneration::Rtw88;
-    if (sig == kRtlSig8192c || sig == kRtlSig8192d || sig == kRtlSig8723b || sig == kRtlSig8723d ||
-        sig == kRtlSig8821 || sig == kRtlSig8812 || sig == kRtlSig8814)
-        return RtlFwGeneration::Rtlwifi;
-    return RtlFwGeneration::Unknown;
 }
 
 } // namespace
@@ -71,49 +46,38 @@ const char* RtlFwGenerationName(RtlFwGeneration g)
 
 ::duetos::core::Result<void> RtlFirmwareParse(const u8* blob, u32 blob_size, RtlFirmwareParsed* parsed)
 {
-    if (blob == nullptr || parsed == nullptr)
+    // Byte parsing delegated to `duetos_rtl88xx_fw` Rust crate.
+    // Untrusted firmware bytes — Rust-Subsystems P1.
+    if (parsed == nullptr)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
-    *parsed = {};
-    if (blob_size < kRtlFwHeaderBytes)
+
+    DuetosRtlFirmwareParsed rs{};
+    const i32 rc = duetos_rtl88xx_fw_parse(blob, blob_size, &rs);
+
+    *parsed = RtlFirmwareParsed{};
+    parsed->valid = rs.valid;
+    parsed->generation = static_cast<RtlFwGeneration>(rs.generation);
+    parsed->signature = rs.signature;
+    parsed->category = rs.category;
+    parsed->function = rs.function;
+    parsed->version = rs.version;
+    parsed->subversion = rs.subversion;
+    parsed->subsubversion = rs.subsubversion;
+    parsed->date_month = rs.date_month;
+    parsed->date_day = rs.date_day;
+    parsed->date_hour = rs.date_hour;
+    parsed->date_minute = rs.date_minute;
+    parsed->ramcode_size = rs.ramcode_size;
+    parsed->svn_index = rs.svn_index;
+    parsed->payload = rs.payload;
+    parsed->payload_size = rs.payload_size;
+    parsed->size_mismatch = rs.size_mismatch;
+
+    if (rc == 0)
+        return {};
+    if (rc == 1)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
-
-    parsed->signature = ReadLe16(blob, 0x00);
-    parsed->generation = ClassifySignature(parsed->signature);
-    if (parsed->generation == RtlFwGeneration::Unknown)
-        return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
-
-    parsed->category = blob[0x02];
-    parsed->function = blob[0x03];
-    parsed->version = ReadLe16(blob, 0x04);
-    parsed->subversion = blob[0x06];
-    parsed->subsubversion = blob[0x07];
-    parsed->date_month = blob[0x08];
-    parsed->date_day = blob[0x09];
-    parsed->date_hour = blob[0x0A];
-    parsed->date_minute = blob[0x0B];
-    parsed->ramcode_size = ReadLe16(blob, 0x0C);
-    parsed->svn_index = ReadLe32(blob, 0x10);
-
-    parsed->payload = blob + kRtlFwHeaderBytes;
-    parsed->payload_size = blob_size - kRtlFwHeaderBytes;
-
-    // Realtek's `ramcodesize` field can be either bytes or kbytes
-    // depending on family — rtlwifi v1 uses raw bytes, rtw88
-    // sometimes encodes it scaled. We accept either if it agrees
-    // within a 4 KiB tolerance, otherwise flag the mismatch.
-    const u32 declared = static_cast<u32>(parsed->ramcode_size);
-    const u32 declared_scaled = declared * 1024u;
-    const u32 tol = 4096u;
-    bool agrees = false;
-    if (declared == 0)
-        agrees = true;
-    if (parsed->payload_size >= declared && parsed->payload_size - declared <= tol)
-        agrees = true;
-    if (parsed->payload_size >= declared_scaled && parsed->payload_size - declared_scaled <= tol)
-        agrees = true;
-    parsed->size_mismatch = !agrees;
-    parsed->valid = true;
-    return ::duetos::core::Result<void>{};
+    return ::duetos::core::Err{::duetos::core::ErrorCode::Corrupt};
 }
 
 void RtlFirmwareLog(const RtlFirmwareParsed& parsed)

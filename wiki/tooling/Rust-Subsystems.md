@@ -4,11 +4,11 @@
 >
 > **Execution context:** Kernel build tooling and kernel-linked Rust crates.
 >
-> **Maturity:** Stable foundation; twenty production Rust subsystems live in the kernel tree.
+> **Maturity:** Stable foundation; twenty-three production Rust subsystems live in the kernel tree.
 >
-> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options / IPv4-header byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA / JPEG header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, Multiboot2 info-structure walker, TLS 1.2 record + handshake walker, VT/ANSI escape parser, NVIDIA GSP firmware-image (nvfw_bin_hdr) parser, and AMD GFX9+ microcode-image (gfx_firmware_header_v1_0) parser.
+> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options / IPv4-header byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA / JPEG header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, Multiboot2 info-structure walker, TLS 1.2 record + handshake walker, VT/ANSI escape parser, NVIDIA GSP firmware-image (nvfw_bin_hdr) parser, AMD GFX9+ microcode-image (gfx_firmware_header_v1_0) parser, Intel iwlwifi TLV firmware parser, Realtek rtlwifi/rtw88/rtw89 firmware-header parser, and Broadcom b43 firmware-record-stream parser.
 >
-> All twenty crates have a current C++ caller; there are no skeleton crates left in this slice.
+> All twenty-three crates have a current C++ caller; there are no skeleton crates left in this slice.
 
 ## Overview
 
@@ -140,6 +140,33 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   Read_BD_ADDR bodies. `kernel/net/bluetooth/hci.cpp` delegates
   the Read_Local_Version + Read_BD_ADDR rparam decoders to the
   crate.
+- `/kernel/drivers/net/iwlwifi_fw_rust/` (`duetos_iwlwifi_fw`)
+  walks the Intel iwlwifi TLV firmware blob: 88-byte preamble
+  (zero + magic + 64-byte name + ver + build + 8 ignored) +
+  stream of `(u32 type, u32 length, payload[length], pad-to-4)`
+  TLV records. Recognises INST / DATA / INIT / INIT_DATA /
+  SEC_RT / FLAGS / NUM_OF_CPU / FW_VERSION / PHY_SKU / HW_TYPE;
+  unknown TLVs bump a counter without failing the parse. Every
+  `off + 8 + length` arithmetic uses checked_add so a hostile
+  TLV length can't wrap into a smaller "fits the blob" value.
+  `kernel/drivers/net/iwlwifi_fw.cpp` delegates byte parsing
+  to this crate; C++ side keeps the sanitize-for-serial-print
+  pass on the human-readable name.
+- `/kernel/drivers/net/rtl88xx_fw_rust/` (`duetos_rtl88xx_fw`)
+  walks the Realtek rtlwifi/rtw88/rtw89 32-byte fixed firmware
+  header. Classifies the generation by signature
+  (rtl8192/8723/8821/8812/8814 → rtlwifi, 0x88B0 → rtw88,
+  0x8852 → rtw89). Rejects unknown signatures + short blobs.
+  `kernel/drivers/net/rtl88xx_fw.cpp` delegates.
+- `/kernel/drivers/net/bcm43xx_fw_rust/` (`duetos_bcm43xx_fw`)
+  walks the Broadcom b43 8-byte-big-endian record stream
+  (`type / version / reserved / be32 size / payload`). Up to 8
+  records per blob (configurable cap); convenience indices for
+  the first ucode / pcm / iv record. Truncated-on-overflow
+  semantics — earlier-records still report cleanly when a
+  later record's declared size overflows the blob. The C++
+  wrapper converts the Rust-side indices back to in-place
+  convenience pointers in the caller-owned struct.
 - `/kernel/drivers/gpu/nvidia_gsp_fw_rust/` (`duetos_nvidia_gsp_fw`)
   parses NVIDIA Turing+ GSP firmware containers
   (`gsp_tu10x.bin` / `ga10x.bin` / `ad10x.bin`). The 24-byte

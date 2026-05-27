@@ -66,14 +66,53 @@ all: $(HARNESSES)
 $(BIN):
 	mkdir -p $(BIN)
 
-$(BIN)/fuzz_iwl_fw: fuzz_iwl_fw.cpp $(NETDRV)/iwlwifi_fw.cpp | $(BIN)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+# Wireless firmware harnesses — now delegate the byte parse to
+# the per-vendor Rust crates (kernel/drivers/net/*_fw_rust/).
+# Same rlib + panic=abort staticlib recipe as fuzz_tls / fuzz_vt.
+# host_shim/wireless_fw_stubs.cpp carries the rust_eh_personality
+# stub for the panic-aborting Rust runtime.
+IWLWIFI_FW_RUST := $(KERNEL)/drivers/net/iwlwifi_fw_rust
+RTL88XX_FW_RUST := $(KERNEL)/drivers/net/rtl88xx_fw_rust
+BCM43XX_FW_RUST := $(KERNEL)/drivers/net/bcm43xx_fw_rust
 
-$(BIN)/fuzz_rtl_fw: fuzz_rtl_fw.cpp $(NETDRV)/rtl88xx_fw.cpp | $(BIN)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+$(BIN)/libduetos_iwlwifi_fw.rlib: $(IWLWIFI_FW_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_iwlwifi_fw -O $< -o $@
 
-$(BIN)/fuzz_bcm_fw: fuzz_bcm_fw.cpp $(NETDRV)/bcm43xx_fw.cpp | $(BIN)
-	$(CXX) $(CXXFLAGS) $^ -o $@
+$(BIN)/libduetos_iwlwifi_fw_fuzz.a: host_shim/iwlwifi_fw_fuzz_shim.rs \
+		$(BIN)/libduetos_iwlwifi_fw.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_iwlwifi_fw=$(BIN)/libduetos_iwlwifi_fw.rlib $< -o $@
+
+$(BIN)/fuzz_iwl_fw: fuzz_iwl_fw.cpp $(NETDRV)/iwlwifi_fw.cpp \
+		host_shim/wireless_fw_stubs.cpp $(BIN)/libduetos_iwlwifi_fw_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(IWLWIFI_FW_RUST)/include $^ -o $@
+
+$(BIN)/libduetos_rtl88xx_fw.rlib: $(RTL88XX_FW_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_rtl88xx_fw -O $< -o $@
+
+$(BIN)/libduetos_rtl88xx_fw_fuzz.a: host_shim/rtl88xx_fw_fuzz_shim.rs \
+		$(BIN)/libduetos_rtl88xx_fw.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_rtl88xx_fw=$(BIN)/libduetos_rtl88xx_fw.rlib $< -o $@
+
+$(BIN)/fuzz_rtl_fw: fuzz_rtl_fw.cpp $(NETDRV)/rtl88xx_fw.cpp \
+		host_shim/wireless_fw_stubs.cpp $(BIN)/libduetos_rtl88xx_fw_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(RTL88XX_FW_RUST)/include $^ -o $@
+
+$(BIN)/libduetos_bcm43xx_fw.rlib: $(BCM43XX_FW_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_bcm43xx_fw -O $< -o $@
+
+$(BIN)/libduetos_bcm43xx_fw_fuzz.a: host_shim/bcm43xx_fw_fuzz_shim.rs \
+		$(BIN)/libduetos_bcm43xx_fw.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_bcm43xx_fw=$(BIN)/libduetos_bcm43xx_fw.rlib $< -o $@
+
+$(BIN)/fuzz_bcm_fw: fuzz_bcm_fw.cpp $(NETDRV)/bcm43xx_fw.cpp \
+		host_shim/wireless_fw_stubs.cpp $(BIN)/libduetos_bcm43xx_fw_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) -I $(BCM43XX_FW_RUST)/include $^ -o $@
 
 # EapolKeyParse pulls HMAC-SHA1/SHA256 (MIC verify) transitively.
 $(BIN)/fuzz_eapol: fuzz_eapol.cpp $(WIRELESS)/eapol.cpp \

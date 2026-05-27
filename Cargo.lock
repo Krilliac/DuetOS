@@ -120,6 +120,10 @@ name = "duetos_amd_gfx_fw"
 version = "0.0.1"
 
 [[package]]
+name = "duetos_bcm43xx_fw"
+version = "0.0.1"
+
+[[package]]
 name = "duetos_exec_meta"
 version = "0.0.1"
 
@@ -140,22 +144,29 @@ name = "duetos_img_meta"
 version = "0.0.1"
 
 [[package]]
+name = "duetos_iwlwifi_fw"
+version = "0.0.1"
+
+[[package]]
 name = "duetos_kernel_rust"
 version = "0.0.1"
 dependencies = [
  "duetfs",
  "duetos_acpi",
  "duetos_amd_gfx_fw",
+ "duetos_bcm43xx_fw",
  "duetos_exec_meta",
  "duetos_exfat",
  "duetos_ext4",
  "duetos_hci",
  "duetos_img_meta",
+ "duetos_iwlwifi_fw",
  "duetos_multiboot2",
  "duetos_net_parsers",
  "duetos_ntfs",
  "duetos_nvidia_gsp_fw",
  "duetos_pci_caps",
+ "duetos_rtl88xx_fw",
  "duetos_smbios",
  "duetos_tls",
  "duetos_usb_msc_scsi",
@@ -183,6 +194,10 @@ version = "0.0.1"
 
 [[package]]
 name = "duetos_pci_caps"
+version = "0.0.1"
+
+[[package]]
+name = "duetos_rtl88xx_fw"
 version = "0.0.1"
 
 [[package]]
