@@ -114,16 +114,20 @@ inline void WriteMsr(u32 msr, u64 value)
 // Bit positions per Intel SDM Vol. 2A "CPUID — CPU Identification".
 constexpr u32 kCpuidLeaf7Ebx_Smep = 1U << 7;
 constexpr u32 kCpuidLeaf7Ebx_Smap = 1U << 20;
+#if defined(DUETOS_KERNEL_HAS_ENDBR)
 constexpr u32 kCpuidLeaf7Edx_CetIbt = 1U << 20; // Indirect Branch Tracking
+#endif
 
 // CR4 enable bits for the kernel-protection features.
 constexpr u64 kCr4_Smep = 1ULL << 20;
 constexpr u64 kCr4_Smap = 1ULL << 21;
+#if defined(DUETOS_KERNEL_HAS_ENDBR)
 constexpr u64 kCr4_Cet = 1ULL << 23;
 
 // CET MSRs.
 constexpr u32 kIa32_S_Cet = 0x6A2;         // supervisor-mode CET config
 constexpr u64 kCetMsr_EndbrEn = 1ULL << 2; // enable IBT (endbr64 enforcement)
+#endif
 
 inline void ReadCpuidLeaf7_0(u32& ebx_out, u32& edx_out)
 {
@@ -209,17 +213,24 @@ void EnableKernelProtectionBitsImpl(bool emit_log)
     }
 
     // CET / IBT — the hardware side of Control-Flow Integrity.
-    // Compiler already emitted endbr64 at indirect-branch targets
-    // (via -fcf-protection=branch in the toolchain + hand-written
-    // endbr64 at asm entry points); turning on IA32_S_CET.ENDBR_EN
-    // + CR4.CET makes the CPU raise #CP (vector 21) on any
-    // indirect branch whose target isn't an endbr64. The write
-    // order MUST be: set the MSR first (so the CPU has a valid
-    // CET config), then flip CR4 (which activates the feature) —
-    // reversed order triggers #GP.
+    // CET-IBT couples a hardware *enforcement* to a compile-time
+    // *invariant*: every indirect-branch target must begin with
+    // `endbr64`. The compiler emits those prologues only when built
+    // with `-fcf-protection=branch` (gated by DUETOS_KERNEL_HAS_ENDBR
+    // — see cmake/toolchains/x86_64-kernel.cmake). If we set
+    // IA32_S_CET.ENDBR_EN + CR4.CET while the kernel was built
+    // WITHOUT that flag (current default — KVM emulator bug), the
+    // next indirect call inside the kernel raises #CP (vector 21)
+    // and triple-faults the box on real CET-IBT silicon (Tiger
+    // Lake+, Zen 3+). So the enable must be gated on BOTH the
+    // hardware advertising CET-IBT AND the build emitting endbr
+    // prologues. Today QEMU+KVM hides CET-IBT in CPUID so the
+    // unguarded form happened to work in test; this fix prevents
+    // the latent crash when the kernel is booted on real silicon.
     //
     // IBT only, for now. Shadow stacks (CET_SS) need per-task
     // SHSTK allocation + context-switch plumbing; separate slice.
+#if defined(DUETOS_KERNEL_HAS_ENDBR)
     if ((leaf7_edx & kCpuidLeaf7Edx_CetIbt) != 0)
     {
         const u64 s_cet = ReadMsr(kIa32_S_Cet);
@@ -227,6 +238,14 @@ void EnableKernelProtectionBitsImpl(bool emit_log)
         cr4 |= kCr4_Cet;
         cet_ibt_on = true;
     }
+#else
+    (void)leaf7_edx;
+    // Kernel built with -fcf-protection=none — leave CET-IBT off.
+    // Re-derives the same `IBT supported but compile-time prologues
+    // absent` posture as the original probe in arch/x86_64/cet.cpp,
+    // and keeps the cet_ibt_on=false branch in the log message
+    // accurate.
+#endif
 
     if (cr4 != before)
     {
