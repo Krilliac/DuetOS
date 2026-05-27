@@ -108,6 +108,14 @@ void DoEventSet(arch::TrapFrame* frame)
         frame->rax = static_cast<u64>(-1);
         return;
     }
+    // Per-handle rights gate — SetEvent is signalling.
+    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightSignal))
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtSetEvent: handle lacks Signal right; handle",
+                     handle);
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
     ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Event);
     if (obj == nullptr)
     {
@@ -136,6 +144,15 @@ void DoEventReset(arch::TrapFrame* frame)
     if (ipc_h == ipc::kHandleInvalid)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtResetEvent: bad handle; handle", handle);
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    // Per-handle rights gate — ResetEvent is signalling (mutates
+    // observable event state).
+    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightSignal))
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtResetEvent: handle lacks Signal right; handle",
+                     handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
@@ -170,6 +187,14 @@ void DoEventWait(arch::TrapFrame* frame)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event", "NtWaitForSingleObject: bad event handle; handle",
                      handle);
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    // Per-handle rights gate — WaitForSingleObject is waiting.
+    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightWait))
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/event",
+                     "NtWaitForSingleObject(event): handle lacks Wait right; handle", handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }
