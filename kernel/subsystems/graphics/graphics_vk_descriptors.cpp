@@ -131,9 +131,16 @@ VkResult VkAllocateDescriptorSets(VkDevice dev, VkDescriptorPool pool, u32 count
                 (void)PoolFree(g_desc_set_pool, SlotOf(out[j], kDescSetBase));
             return VkResult::ErrorOutOfHostMemory;
         }
-        g_desc_set_data[slot].pool = pool;
-        g_desc_set_data[slot].layout = layouts[i];
-        g_desc_set_data[slot].writes = 0;
+        DescriptorSetRecord& dsr = g_desc_set_data[slot];
+        dsr.pool = pool;
+        dsr.layout = layouts[i];
+        dsr.writes = 0;
+        for (u32 b = 0; b < kMaxDescriptorBindings; ++b)
+        {
+            dsr.bindings[b].type = 0;
+            dsr.bindings[b].handle = 0;
+            dsr.bindings[b].sampler_handle = 0;
+        }
         out[i] = HandleFor(kDescSetBase, slot);
         ++pool_rec.sets_allocated;
     }
@@ -164,23 +171,30 @@ VkResult VkFreeDescriptorSets(VkDevice dev, VkDescriptorPool pool, u32 count, co
     return VkResult::Success;
 }
 
-VkResult VkUpdateDescriptorSet(VkDescriptorSet set, u32 binding, VkDescriptorType type, u64 resource_handle)
+VkResult VkUpdateDescriptorSetSampled(VkDescriptorSet set, u32 binding, VkDescriptorType type, u64 resource_handle,
+                                      u64 sampler_handle)
 {
     if (!HandleInRange(set, kDescSetBase) || !PoolIsLive(g_desc_set_pool, SlotOf(set, kDescSetBase)))
         return VkResult::ErrorInitializationFailed;
     const u32 slot = SlotOf(set, kDescSetBase);
     ++g_desc_set_data[slot].writes;
     ++g_descriptor_writes;
-    // Record the (binding, type, handle) tuple so the shader-
-    // rasterizer hook can hand it to spirv::BindDescriptor at
-    // draw time. Out-of-range binding silently no-ops the write
+    // Record the (binding, type, image, sampler) tuple so the
+    // shader-rasterizer hook can hand it to spirv::BindDescriptor
+    // at draw time. Out-of-range binding silently no-ops the write
     // (keeps the existing counter behaviour).
     if (binding < kMaxDescriptorBindings)
     {
         g_desc_set_data[slot].bindings[binding].type = static_cast<u32>(type);
         g_desc_set_data[slot].bindings[binding].handle = resource_handle;
+        g_desc_set_data[slot].bindings[binding].sampler_handle = sampler_handle;
     }
     return VkResult::Success;
+}
+
+VkResult VkUpdateDescriptorSet(VkDescriptorSet set, u32 binding, VkDescriptorType type, u64 resource_handle)
+{
+    return VkUpdateDescriptorSetSampled(set, binding, type, resource_handle, 0);
 }
 
 VkResult VkUpdateDescriptorSets(VkDevice dev, u32 write_count, const VkWriteDescriptorSet* writes, u32 copy_count,
@@ -198,8 +212,8 @@ VkResult VkUpdateDescriptorSets(VkDevice dev, u32 write_count, const VkWriteDesc
     // copy that the implementation chooses to no-op.
     for (u32 i = 0; i < write_count; ++i)
     {
-        const VkResult r =
-            VkUpdateDescriptorSet(writes[i].dstSet, writes[i].dstBinding, writes[i].type, writes[i].resourceHandle);
+        const VkResult r = VkUpdateDescriptorSetSampled(writes[i].dstSet, writes[i].dstBinding, writes[i].type,
+                                                        writes[i].resourceHandle, writes[i].samplerHandle);
         if (r != VkResult::Success)
             return r;
     }

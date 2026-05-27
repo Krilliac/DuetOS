@@ -481,6 +481,14 @@ u64 VkGetBufferDeviceAddress(VkDevice dev, VkBuffer buffer);
 /// active framebuffer via `FramebufferFillRect` — our v0 swapchain
 /// shortcut.  `extent.depth` is recorded but unused.
 VkResult VkCreateImage(VkDevice dev, VkExtent3D extent, u32 flags, VkImage* out);
+
+/// Format-aware image create. `format` is the DuetOS-internal id
+/// (0 = BGRA8_UNORM, 1 = RGBA8_UNORM, 2 = R8_UNORM, 3 = R8G8_UNORM,
+/// 4 = R16_UNORM, 5 = R32G32B32A32_SFLOAT). The format drives
+/// bytes-per-texel arithmetic + per-channel unpack/pack in the
+/// SPIR-V executor's storage-image read/write path. Legacy callers
+/// can keep using `VkCreateImage` (defers with format=0).
+VkResult VkCreateImageWithFormat(VkDevice dev, VkExtent3D extent, u32 format, u32 flags, VkImage* out);
 void VkDestroyImage(VkDevice dev, VkImage img);
 VkResult VkBindImageMemory(VkDevice dev, VkImage img, VkDeviceMemory mem, u64 offset);
 
@@ -922,6 +930,11 @@ void VkDestroyFence(VkDevice dev, VkFence fence);
 VkResult VkResetFences(VkDevice dev, u32 count, const VkFence* fences);
 VkResult VkWaitForFences(VkDevice dev, u32 count, const VkFence* fences, u64 timeout_ns);
 
+/// Poll a fence without blocking. Returns Success when signalled,
+/// NotReady when unsignalled, or ErrorInitializationFailed when
+/// the handle doesn't resolve. Mirrors `vkGetFenceStatus`.
+VkResult VkGetFenceStatus(VkDevice dev, VkFence fence);
+
 VkResult VkCreateSemaphore(VkDevice dev, VkSemaphore* out);
 void VkDestroySemaphore(VkDevice dev, VkSemaphore sem);
 
@@ -986,17 +999,28 @@ VkResult VkFreeDescriptorSets(VkDevice dev, VkDescriptorPool pool, u32 count, co
 /// in v0.
 VkResult VkUpdateDescriptorSet(VkDescriptorSet set, u32 binding, VkDescriptorType type, u64 resource_handle);
 
+/// Combined-image-sampler form. For CombinedImageSampler bindings,
+/// the caller supplies both the image-view (drives texel fetch) and
+/// the sampler (drives addressing-mode + filter). For other types
+/// `sampler_handle` should be 0 and this collapses to the single-
+/// handle path.
+VkResult VkUpdateDescriptorSetSampled(VkDescriptorSet set, u32 binding, VkDescriptorType type, u64 resource_handle,
+                                      u64 sampler_handle);
+
 /// Spec-form descriptor write — same shape Vulkan callers
 /// expect: an array of writes, each describing a (set, binding,
-/// type, resource handle) tuple.  Internally this dispatches to
-/// `VkUpdateDescriptorSet` per-element so the per-set write
-/// counter increments correctly.
+/// type, resource handle, sampler handle) tuple.  Internally this
+/// dispatches to `VkUpdateDescriptorSetSampled` per-element so the
+/// per-set write counter increments correctly.
 struct VkWriteDescriptorSet
 {
     VkDescriptorSet dstSet;
     u32 dstBinding;
     VkDescriptorType type;
-    u64 resourceHandle; // VkBuffer / VkImageView / VkSampler
+    u64 resourceHandle; // VkBuffer / VkImageView (CombinedImageSampler / SampledImage)
+    u64 samplerHandle;  // VkSampler for CombinedImageSampler; 0 otherwise.
+                        // Aggregate-init that doesn't specify this defaults to 0,
+                        // which matches the prior single-handle behaviour.
 };
 
 VkResult VkUpdateDescriptorSets(VkDevice dev, u32 write_count, const VkWriteDescriptorSet* writes, u32 copy_count,

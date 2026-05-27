@@ -946,6 +946,24 @@ u64 LookupDescriptor(const Program* prog, u32 set, u32 binding)
     return prog->descriptor_bindings[set][binding];
 }
 
+void BindSampler(Program* prog, u32 set, u32 binding, u64 sampler_handle)
+{
+    if (prog == nullptr)
+        return;
+    if (set >= Program::kMaxDescriptorSets || binding >= Program::kMaxBindingsPerSet)
+        return;
+    prog->sampler_bindings[set][binding] = sampler_handle;
+}
+
+u64 LookupSampler(const Program* prog, u32 set, u32 binding)
+{
+    if (prog == nullptr)
+        return 0;
+    if (set >= Program::kMaxDescriptorSets || binding >= Program::kMaxBindingsPerSet)
+        return 0;
+    return prog->sampler_bindings[set][binding];
+}
+
 u32 EnumerateLocationVars(const Program* prog, StorageClass storage, LocationVar* out, u32 cap)
 {
     if (prog == nullptr || out == nullptr || cap == 0)

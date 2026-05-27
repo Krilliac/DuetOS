@@ -68,11 +68,13 @@
 #include "drivers/gpu/dpms.h"
 #include "drivers/gpu/edid.h"
 #include "drivers/gpu/gpu.h"
+#include "drivers/gpu/amd_gfx_fw.h"
 #include "drivers/gpu/amd_gpu.h"
 #include "drivers/gpu/gpu_resources.h"
 #include "drivers/gpu/intel_gpu.h"
 #include "drivers/gpu/intel_gsc_fw.h"
 #include "drivers/gpu/nvidia_gpu.h"
+#include "drivers/gpu/nvidia_gsp_fw.h"
 #include "drivers/input/hid_keyboard.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
@@ -1851,7 +1853,9 @@ void BootBringupDevices(bool force_net_smoke)
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::Cea861SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::intel::IntelGscFwSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::intel::IntelRcsRingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::amd::AmdGfxFwSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::amd::AmdCpRingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::nvidia::NvidiaGspFwSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::nvidia::NvidiaGspSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::GpuResourcesSelfTest());
 

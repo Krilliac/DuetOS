@@ -3,11 +3,10 @@
 #include "subsystems/graphics/graphics_vk_internal.h"
 #include "util/soft_float.h"
 
-namespace duetos::subsystems::graphics::internal
-{
-u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits);
-bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
-} // namespace duetos::subsystems::graphics::internal
+// SampleImageRgba8 / QueryImageSize / SamplerAddressModeFor live
+// in `duetos::subsystems::graphics::internal` and are declared in
+// graphics_vk_internal.h, which is already included above. The
+// callers below use fully-qualified names.
 
 /*
  * DuetOS — SPIR-V interpreter, execution engine.
@@ -55,8 +54,10 @@ bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
  *
  * In scope but partial:
  *   - OpImageSample{Implicit,Explicit}Lod: descriptor fetch via
- *     `LookupDescriptor(0, 0)` + `SampleImageRgba8` with REPEAT
- *     addressing. Explicit LOD operand is parsed but ignored (no
+ *     `LookupDescriptor(0, 0)` + `SampleImageRgba8`. The addressing
+ *     mode comes from the bound VkSampler's `SamplerRecord` —
+ *     REPEAT / MIRRORED_REPEAT / CLAMP_TO_EDGE / CLAMP_TO_BORDER
+ *     all execute. Explicit LOD operand is parsed but ignored (no
  *     mipmap chain). Unbound samples return the UV coordinate as
  *     the "missing texture" diagnostic.
  *
@@ -64,8 +65,6 @@ bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
  * execution to abort:
  *   - OpAtomic*, OpControlBarrier, OpMemoryBarrier
  *   - OpImageRead / OpImageWrite (storage images)
- *   - Non-REPEAT sampler modes (CLAMP, MIRROR, BORDER) — the
- *     Sampler descriptor's addressing mode is not yet consumed
  *   - OpKill (deferred — frag shaders that discard are rare in
  *     hello-world cases)
  *   - OpSwitch (sane shaders rarely emit; deferred)
@@ -91,6 +90,9 @@ constexpr u16 kOpFunctionCall = 57;
 constexpr u16 kOpSampledImage = 86;
 constexpr u16 kOpImageSampleImplicitLod = 87;
 constexpr u16 kOpImageSampleExplicitLod = 88;
+constexpr u16 kOpImageFetch = 95;
+constexpr u16 kOpImageRead = 98;
+constexpr u16 kOpImageWrite = 99;
 constexpr u16 kOpImageQuerySize = 104;
 constexpr u16 kOpImageQuerySizeLod = 103;
 // Boolean + selection opcodes.
@@ -108,9 +110,13 @@ constexpr u16 kOpVectorShuffle = 79;
 constexpr u16 kOpCompositeConstruct = 80;
 constexpr u16 kOpCompositeExtract = 81;
 constexpr u16 kOpCompositeInsert = 82;
+constexpr u16 kOpConvertFToU = 109;
 constexpr u16 kOpConvertFToS = 110;
 constexpr u16 kOpConvertSToF = 111;
 constexpr u16 kOpConvertUToF = 112;
+constexpr u16 kOpUConvert = 113;
+constexpr u16 kOpSConvert = 114;
+constexpr u16 kOpFConvert = 115;
 constexpr u16 kOpBitcast = 124;
 constexpr u16 kOpSNegate = 126;
 constexpr u16 kOpFNegate = 127;
@@ -158,6 +164,45 @@ constexpr u16 kOpLogicalNot = 168;
 constexpr u16 kOpUMod = 137;
 constexpr u16 kOpSMod = 139;
 constexpr u16 kOpSRem = 138;
+constexpr u16 kOpFRem = 140;
+constexpr u16 kOpFMod = 141;
+// Derivative opcodes — meaningful only when a fragment shader runs
+// in 2x2-quad scope so finite differences can be measured between
+// neighbouring invocations. The serial interpreter executes one
+// invocation at a time, so the spec-correct "0" return is what we
+// have to give. GAP: real derivatives need 2x2-quad execution.
+constexpr u16 kOpDPdx = 207;
+constexpr u16 kOpDPdy = 208;
+constexpr u16 kOpFwidth = 209;
+constexpr u16 kOpDPdxFine = 210;
+constexpr u16 kOpDPdyFine = 211;
+constexpr u16 kOpFwidthFine = 212;
+constexpr u16 kOpDPdxCoarse = 213;
+constexpr u16 kOpDPdyCoarse = 214;
+constexpr u16 kOpFwidthCoarse = 215;
+// Workgroup / memory barriers — serial interpreter has no parallel
+// execution so the spec-correct collapse is a no-op. GAP: real
+// barriers matter once the executor runs multiple invocations
+// concurrently per workgroup.
+constexpr u16 kOpControlBarrier = 224;
+constexpr u16 kOpMemoryBarrier = 225;
+// Atomic ops — serial interpreter has no contention so these
+// collapse to plain Load / Store / IAdd on the pointed-to scalar.
+// GAP: real atomicity matters once compute dispatch is parallel.
+constexpr u16 kOpAtomicLoad = 227;
+constexpr u16 kOpAtomicStore = 228;
+constexpr u16 kOpAtomicExchange = 229;
+constexpr u16 kOpAtomicIIncrement = 232;
+constexpr u16 kOpAtomicIDecrement = 233;
+constexpr u16 kOpAtomicIAdd = 234;
+constexpr u16 kOpAtomicISub = 235;
+constexpr u16 kOpAtomicSMin = 236;
+constexpr u16 kOpAtomicUMin = 237;
+constexpr u16 kOpAtomicSMax = 238;
+constexpr u16 kOpAtomicUMax = 239;
+constexpr u16 kOpAtomicAnd = 240;
+constexpr u16 kOpAtomicOr = 241;
+constexpr u16 kOpAtomicXor = 242;
 constexpr u16 kOpPhi = 245;
 constexpr u16 kOpLoopMerge = 246;
 constexpr u16 kOpSelectionMerge = 247;
@@ -205,6 +250,13 @@ struct ExecContext
     u32 cur_block_label;
     u32 jump_target; // 0 = no jump
     bool returned;
+    // True iff the shader hit OpKill. Distinct from `returned`
+    // because the rasterizer needs to know whether the per-pixel
+    // colour write should be SKIPPED (kill) versus written normally
+    // (clean return). Sticky across function calls within a single
+    // ExecuteEntryPoint — once a fragment kills itself it stays
+    // killed for the rest of this invocation.
+    bool killed;
     u32 step_count;
 };
 
@@ -510,6 +562,29 @@ void DoBinaryFloatOp(ExecContext& ec, u16 op, u32 type_id, u32 result_id, u32 a_
         case kOpFDiv:
             rf = ::duetos::core::Sf32Div(af, bf);
             break;
+        case kOpFRem:
+        case kOpFMod:
+        {
+            // FRem: result has same sign as dividend (a - trunc(a/b)*b).
+            // FMod: result has same sign as divisor (a - floor(a/b)*b).
+            // v0 collapses both to a - trunc(a/b)*b for FRem and
+            // adjusts for FMod when signs differ; no GLSL.std.450
+            // dependency.
+            if (::duetos::core::Sf32IsZero(bf))
+            {
+                rf = ::duetos::core::Sf32Zero();
+                break;
+            }
+            const Sf32 quot = ::duetos::core::Sf32Div(af, bf);
+            const i32 tq = ::duetos::core::Sf32ToI32(quot);
+            const Sf32 trunc_q = ::duetos::core::Sf32FromI32(tq);
+            Sf32 rem = ::duetos::core::Sf32Sub(af, ::duetos::core::Sf32Mul(trunc_q, bf));
+            if (op == kOpFMod && !::duetos::core::Sf32IsZero(rem) &&
+                ::duetos::core::Sf32IsNegative(rem) != ::duetos::core::Sf32IsNegative(bf))
+                rem = ::duetos::core::Sf32Add(rem, bf);
+            rf = rem;
+            break;
+        }
         case kOpFNegate:
             rf = ::duetos::core::Sf32Neg(af);
             break;
@@ -1069,6 +1144,8 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
         case kOpFSub:
         case kOpFMul:
         case kOpFDiv:
+        case kOpFRem:
+        case kOpFMod:
         case kOpFOrdLessThan:
         case kOpFOrdGreaterThan:
         case kOpFOrdLessThanEqual:
@@ -1167,6 +1244,39 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
                 SetScalar(ec, rid, tid,
                           static_cast<u32>(::duetos::core::Sf32ToI32(Sf32FromBits(GetScalarBits(ec, w[3])))));
             break;
+        case kOpConvertFToU:
+            if (wc >= 4)
+            {
+                // Truncate toward zero; spec says behaviour on
+                // negative values is implementation-defined. The
+                // Sf32 path clamps NaN to 0 and lets ordinary
+                // negatives wrap through the i32-to-u32 cast.
+                const Sf32 s = Sf32FromBits(GetScalarBits(ec, w[3]));
+                if (::duetos::core::Sf32IsNaN(s) || ::duetos::core::Sf32IsNegative(s))
+                {
+                    SetScalar(ec, rid, tid, 0u);
+                }
+                else
+                {
+                    const i32 i = ::duetos::core::Sf32ToI32(s);
+                    SetScalar(ec, rid, tid, (i < 0) ? 0u : static_cast<u32>(i));
+                }
+            }
+            break;
+        case kOpUConvert:
+        case kOpSConvert:
+        case kOpFConvert:
+            // Width-only conversions. v0 only has 32-bit scalars
+            // in the SSA value array — every "wider" or "narrower"
+            // width collapses to a passthrough bit-copy. Future
+            // 16-bit / 64-bit support lands when the value array
+            // grows a per-id width field; until then preserving
+            // bit-pattern keeps the compute paths that emit
+            // implicit OpUConvert (storage-image coordinate widens,
+            // etc.) functioning.
+            if (wc >= 4)
+                SetScalar(ec, rid, tid, GetScalarBits(ec, w[3]));
+            break;
         case kOpBitcast:
             if (wc >= 4)
                 SetScalar(ec, rid, tid, GetScalarBits(ec, w[3]));
@@ -1224,16 +1334,21 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
                 {
                     // Real texture fetch via the descriptor handle.
                     // Resolves through ImageView->Image->backing
-                    // (set up by VkBindImageMemory). v0 defaults
-                    // to REPEAT addressing — matches what most
-                    // shader code expects for texture coords that
-                    // may go outside [0, 1] (procedural patterns,
-                    // tiled UV scrolling). When the Sampler
-                    // descriptor exposes an explicit mode the
-                    // OpImageSample handler will read it.
+                    // (set up by VkBindImageMemory). The addressing
+                    // mode comes from the VkSampler the caller
+                    // attached at descriptor-update time (REPEAT /
+                    // MIRROR / CLAMP_TO_EDGE / CLAMP_TO_BORDER);
+                    // when no sampler is bound, falls back to
+                    // ClampToEdge — a defined, undisruptive default
+                    // for shaders that don't pin a sampler explicitly.
+                    const u64 sampler = LookupSampler(ec.prog, 0, 0);
+                    const ::duetos::subsystems::graphics::internal::SamplerAddressMode mode_u =
+                        ::duetos::subsystems::graphics::internal::SamplerAddressModeFor(sampler);
+                    const ::duetos::subsystems::graphics::internal::SamplerAddressMode mode_v =
+                        ::duetos::subsystems::graphics::internal::SamplerAddressModeVFor(sampler);
+                    const u8 filter = ::duetos::subsystems::graphics::internal::SamplerMagFilterFor(sampler);
                     const u32 argb = ::duetos::subsystems::graphics::internal::SampleImageRgba8(
-                        bound, coord_buf[0], coord_buf[1],
-                        ::duetos::subsystems::graphics::internal::SamplerAddressMode::Repeat);
+                        bound, coord_buf[0], coord_buf[1], mode_u, mode_v, filter);
                     // Decompose back to RGBA Sf32 components for
                     // the shader: bits 16..23 = R, 8..15 = G, 0..7 = B,
                     // 24..31 = A.
@@ -1258,6 +1373,75 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
                         r4[2] = coord_buf[2];
                 }
                 StoreResultComponents(ec, rid, tid, r4, 4);
+            }
+            break;
+        }
+        case kOpImageFetch:
+        case kOpImageRead:
+        {
+            // Unfiltered, integer-coordinate fetch from the bound
+            // (set 0, binding 0) image. Coordinates are signed
+            // integer scalars / vectors per spec; v0 supports 2D
+            // images so the first two components matter. The result
+            // is a 4-component vector; we unpack the BGRA8 backing
+            // into [0,1] floats — symmetric with the OpImageSample
+            // path. Out-of-bounds reads return (0,0,0,1) per spec
+            // (sampler-less reads have no border colour).
+            //
+            // Operands: (T, R, image, coord, [ImageOperands ...]).
+            // ImageOperands are accepted but ignored — v0 has no
+            // mip chain (LOD), no MS sample-select, no offsets.
+            if (wc >= 5)
+            {
+                u32 coord_buf[4]{};
+                const u32 cn = LoadOperandComponents(ec, w[4], coord_buf, 4);
+                u32 r4[4] = {0, 0, 0, Sf32ToBits(::duetos::core::Sf32One())};
+                const u64 bound = LookupDescriptor(ec.prog, 0, 0);
+                if (bound != 0 && cn >= 1)
+                {
+                    const i32 px = static_cast<i32>(coord_buf[0]);
+                    const i32 py = (cn >= 2) ? static_cast<i32>(coord_buf[1]) : 0;
+                    if (px >= 0 && py >= 0)
+                    {
+                        // Format-aware fetch: returns four Sf32 bit
+                        // patterns directly, so HDR formats
+                        // (R32G32B32A32_SFLOAT) round-trip without
+                        // losing precision through a BGRA8 packing.
+                        // FetchTexel does the bounds check and falls
+                        // back to (0, 0, 0, 1) on OOB / no-backing.
+                        ::duetos::subsystems::graphics::internal::FetchTexel(bound, static_cast<u32>(px),
+                                                                             static_cast<u32>(py), r4);
+                    }
+                }
+                StoreResultComponents(ec, rid, tid, r4, 4);
+            }
+            break;
+        }
+        case kOpImageWrite:
+        {
+            // Storage-image write — no result id. Operands:
+            // (image, coord, texel, [ImageOperands ...]). v0
+            // dispatches the pack to the bound image's `format`
+            // field via WriteTexel; HDR formats round-trip raw
+            // f32, UNORM formats clamp + scale per channel. OOB
+            // writes are silently dropped per spec.
+            if (wc >= 4)
+            {
+                u32 coord_buf[4]{};
+                u32 texel_buf[4] = {0, 0, 0, Sf32ToBits(::duetos::core::Sf32One())};
+                const u32 cn = LoadOperandComponents(ec, w[2], coord_buf, 4);
+                (void)LoadOperandComponents(ec, w[3], texel_buf, 4);
+                const u64 bound = LookupDescriptor(ec.prog, 0, 0);
+                if (bound != 0 && cn >= 1)
+                {
+                    const i32 px = static_cast<i32>(coord_buf[0]);
+                    const i32 py = (cn >= 2) ? static_cast<i32>(coord_buf[1]) : 0;
+                    if (px >= 0 && py >= 0)
+                    {
+                        ::duetos::subsystems::graphics::internal::WriteTexel(bound, static_cast<u32>(px),
+                                                                             static_cast<u32>(py), texel_buf);
+                    }
+                }
             }
             break;
         }
@@ -1347,8 +1531,13 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
             break;
         }
         case kOpKill:
-            // Fragment discard. Treat as early-return; the shader
-            // hook drops the pixel.
+            // Fragment discard. Sets both `killed` and `returned`;
+            // the shader rasterizer's per-pixel loop reads
+            // ExecuteEntryPointWasKilled() after the call and skips
+            // the pixel write when set. Without the killed bit the
+            // hook can't distinguish "shader chose discard" from
+            // "shader returned normally with output_color=0".
+            ec.killed = true;
             ec.returned = true;
             ec.jump_target = 0;
             return;
@@ -1360,6 +1549,134 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
             ec.returned = true;
             ec.jump_target = 0;
             return;
+        case kOpDPdx:
+        case kOpDPdy:
+        case kOpFwidth:
+        case kOpDPdxFine:
+        case kOpDPdyFine:
+        case kOpFwidthFine:
+        case kOpDPdxCoarse:
+        case kOpDPdyCoarse:
+        case kOpFwidthCoarse:
+            // GAP: real partial derivatives need 2x2-quad fragment
+            // execution; the serial interpreter has one invocation
+            // active at a time. Return zero, matching the spec's
+            // permitted "implementation-defined" floor for shaders
+            // that read derivatives outside a derivative group.
+            if (rid != 0 && wc >= 4)
+            {
+                const u32 src_id = w[3];
+                u32 comp[16]{};
+                const u32 n = LoadOperandComponents(ec, src_id, comp, 16);
+                for (u32 i = 0; i < n; ++i)
+                    comp[i] = 0u;
+                StoreResultComponents(ec, rid, tid, comp, (n > 0) ? n : 1u);
+            }
+            break;
+        case kOpControlBarrier:
+        case kOpMemoryBarrier:
+            // GAP: real barriers matter only when multiple
+            // invocations from the same workgroup run concurrently.
+            // The serial dispatcher runs them one at a time, so the
+            // barrier is already satisfied trivially. No-op.
+            break;
+        case kOpAtomicLoad:
+        {
+            // Atomic load reduces to a plain pointer dereference
+            // when there's no contention. Operands:
+            // (T, R, pointer, scope, semantics).
+            if (rid != 0 && wc >= 4)
+                SetScalar(ec, rid, tid, GetScalarBits(ec, w[3]));
+            break;
+        }
+        case kOpAtomicStore:
+        {
+            // Operands: (pointer, scope, semantics, value). v0
+            // collapses to a plain store via SetScalar on the
+            // pointer's slot — same semantics as OpStore for a
+            // scalar target.
+            if (wc >= 5)
+            {
+                const u32 ptr_id = w[1];
+                const u32 ptr_type = ec.type_of[ptr_id];
+                SetScalar(ec, ptr_id, ptr_type, GetScalarBits(ec, w[4]));
+            }
+            break;
+        }
+        case kOpAtomicExchange:
+        case kOpAtomicIIncrement:
+        case kOpAtomicIDecrement:
+        case kOpAtomicIAdd:
+        case kOpAtomicISub:
+        case kOpAtomicSMin:
+        case kOpAtomicUMin:
+        case kOpAtomicSMax:
+        case kOpAtomicUMax:
+        case kOpAtomicAnd:
+        case kOpAtomicOr:
+        case kOpAtomicXor:
+        {
+            // RMW atomics return the OLD value and update the
+            // pointer. Operands typically: (T, R, pointer, scope,
+            // semantics, [value]).
+            // v0 collapses to non-atomic since the serial
+            // interpreter has no contention. Update-side semantics
+            // mirror the matching non-atomic op family.
+            if (rid != 0 && wc >= 4)
+            {
+                const u32 ptr_id = w[3];
+                const u32 old_bits = GetScalarBits(ec, ptr_id);
+                SetScalar(ec, rid, tid, old_bits);
+                const u32 ptr_type = ec.type_of[ptr_id];
+                u32 new_bits = old_bits;
+                const i32 ai = static_cast<i32>(old_bits);
+                const u32 val_bits = (wc >= 7) ? GetScalarBits(ec, w[6]) : 0u;
+                const i32 bi = static_cast<i32>(val_bits);
+                switch (op)
+                {
+                case kOpAtomicExchange:
+                    new_bits = val_bits;
+                    break;
+                case kOpAtomicIIncrement:
+                    new_bits = old_bits + 1u;
+                    break;
+                case kOpAtomicIDecrement:
+                    new_bits = old_bits - 1u;
+                    break;
+                case kOpAtomicIAdd:
+                    new_bits = old_bits + val_bits;
+                    break;
+                case kOpAtomicISub:
+                    new_bits = old_bits - val_bits;
+                    break;
+                case kOpAtomicSMin:
+                    new_bits = static_cast<u32>((ai < bi) ? ai : bi);
+                    break;
+                case kOpAtomicSMax:
+                    new_bits = static_cast<u32>((ai > bi) ? ai : bi);
+                    break;
+                case kOpAtomicUMin:
+                    new_bits = (old_bits < val_bits) ? old_bits : val_bits;
+                    break;
+                case kOpAtomicUMax:
+                    new_bits = (old_bits > val_bits) ? old_bits : val_bits;
+                    break;
+                case kOpAtomicAnd:
+                    new_bits = old_bits & val_bits;
+                    break;
+                case kOpAtomicOr:
+                    new_bits = old_bits | val_bits;
+                    break;
+                case kOpAtomicXor:
+                    new_bits = old_bits ^ val_bits;
+                    break;
+                default:
+                    break;
+                }
+                SetScalar(ec, ptr_id, ptr_type, new_bits);
+            }
+            break;
+        }
         case kOpFunctionCall:
         {
             // Inline call: jump to callee's first basic block.
@@ -1387,10 +1704,17 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
 
 } // namespace
 
+// Sticky bit captured from the last completed `ExecuteEntryPoint`
+// call. The shader rasterizer reads it via
+// `ExecuteEntryPointWasKilled()` immediately after running an FS
+// to decide whether to write or drop the pixel.
+static bool g_last_killed = false;
+
 bool ExecuteEntryPoint(Program* prog, const char* name)
 {
     if (prog == nullptr || !prog->parse_ok || name == nullptr)
         return false;
+    g_last_killed = false;
     // Find the entry point.
     u32 ep_idx = 0xFFFFFFFFu;
     for (u32 i = 0; i < prog->entry_point_count; ++i)
@@ -1456,7 +1780,13 @@ bool ExecuteEntryPoint(Program* prog, const char* name)
         ec.jump_target = 0;
     }
     ++::duetos::subsystems::graphics::internal::g_spirv_entry_point_executions;
+    g_last_killed = ec.killed;
     return true;
+}
+
+bool ExecuteEntryPointWasKilled()
+{
+    return g_last_killed;
 }
 
 } // namespace duetos::subsystems::graphics::spirv

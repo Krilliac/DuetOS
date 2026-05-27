@@ -22,15 +22,72 @@ using namespace internal;
 
 VkResult VkCreateSampler(VkDevice dev, const VkSamplerCreateInfo* info, VkSampler* out)
 {
-    (void)info;
     if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
         return VkResult::ErrorInitializationFailed;
     u32 slot = 0;
     if (!PoolAlloc(g_sampler_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
+    // Capture address modes + filters so the SPIR-V executor's
+    // OpImageSample path can honour the caller's choice instead
+    // of defaulting to Repeat. nullptr info -> Vulkan-default
+    // (Repeat / Nearest) for symmetry with what most CTS tests
+    // expect when they forget to fill the struct.
+    SamplerRecord& rec = g_sampler_data[slot];
+    if (info != nullptr)
+    {
+        rec.address_mode_u = static_cast<u8>(info->addressModeU);
+        rec.address_mode_v = static_cast<u8>(info->addressModeV);
+        rec.address_mode_w = static_cast<u8>(info->addressModeW);
+        rec.mag_filter = static_cast<u8>(info->magFilter);
+        rec.min_filter = static_cast<u8>(info->minFilter);
+    }
+    else
+    {
+        rec.address_mode_u = static_cast<u8>(VkSamplerAddressMode::Repeat);
+        rec.address_mode_v = static_cast<u8>(VkSamplerAddressMode::Repeat);
+        rec.address_mode_w = static_cast<u8>(VkSamplerAddressMode::Repeat);
+        rec.mag_filter = static_cast<u8>(VkFilter::Nearest);
+        rec.min_filter = static_cast<u8>(VkFilter::Nearest);
+    }
     if (out != nullptr)
         *out = HandleFor(kSamplerBase, slot);
     return VkResult::Success;
+}
+
+namespace
+{
+SamplerAddressMode SamplerAxisMode(u64 sampler_handle, u8 SamplerRecord::*axis_field)
+{
+    if (sampler_handle == 0 || !HandleInRange(sampler_handle, kSamplerBase))
+        return SamplerAddressMode::ClampToEdge;
+    const u32 slot = SlotOf(sampler_handle, kSamplerBase);
+    if (!PoolIsLive(g_sampler_pool, slot))
+        return SamplerAddressMode::ClampToEdge;
+    const u8 raw = g_sampler_data[slot].*axis_field;
+    if (raw > static_cast<u8>(SamplerAddressMode::ClampToBorder))
+        return SamplerAddressMode::ClampToEdge;
+    return static_cast<SamplerAddressMode>(raw);
+}
+} // namespace
+
+SamplerAddressMode SamplerAddressModeFor(u64 sampler_handle)
+{
+    return SamplerAxisMode(sampler_handle, &SamplerRecord::address_mode_u);
+}
+
+SamplerAddressMode SamplerAddressModeVFor(u64 sampler_handle)
+{
+    return SamplerAxisMode(sampler_handle, &SamplerRecord::address_mode_v);
+}
+
+u8 SamplerMagFilterFor(u64 sampler_handle)
+{
+    if (sampler_handle == 0 || !HandleInRange(sampler_handle, kSamplerBase))
+        return 1u; // default Linear preserves the pre-decouple path
+    const u32 slot = SlotOf(sampler_handle, kSamplerBase);
+    if (!PoolIsLive(g_sampler_pool, slot))
+        return 1u;
+    return g_sampler_data[slot].mag_filter;
 }
 
 void VkDestroySampler(VkDevice dev, VkSampler sampler)

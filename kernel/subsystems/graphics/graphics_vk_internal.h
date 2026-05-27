@@ -138,6 +138,16 @@ struct ImageRecord
 {
     VkExtent3D extent;
     u32 flags;
+    // DuetOS-internal format id. Maps to the same numbering as
+    // VkGetPhysicalDeviceFormatProperties:
+    //   0 = B8G8R8A8_UNORM (default), 1 = R8G8B8A8_UNORM,
+    //   2 = R8_UNORM,       3 = R8G8_UNORM,
+    //   4 = R16_UNORM,      5 = R32G32B32A32_SFLOAT.
+    // Drives texel-byte-stride + per-channel unpack/pack at sample
+    // and storage-image read/write time. Defaults to 0 for any
+    // legacy caller that goes through `VkCreateImage` without a
+    // format param.
+    u32 format;
     bool memory_bound;
     // Direct pointer into the bound DeviceMemory's host_ptr (when
     // the memory is HOST_VISIBLE). Set by `VkBindImageMemory`; the
@@ -146,6 +156,12 @@ struct ImageRecord
     // isn't host-visible.
     void* backing;
 };
+
+/// Bytes consumed per texel for each recognised DuetOS-internal
+/// format id. Drives offset arithmetic in the storage-image path.
+/// Returns 4 (BGRA8 stride) for any unknown format so a bogus id
+/// can't divide-by-zero or wander past the backing.
+u32 BytesPerTexelForFormat(u32 format);
 
 struct ShaderRecord
 {
@@ -376,8 +392,12 @@ struct DescriptorPoolRecord
 /// buffer types).
 struct DescriptorBinding
 {
-    u32 type;   // VkDescriptorType (Sampler / SampledImage / UniformBuffer / ...)
-    u64 handle; // VkImage / VkImageView / VkBuffer handle, or 0
+    u32 type;           // VkDescriptorType (Sampler / SampledImage / UniformBuffer / ...)
+    u64 handle;         // VkImage / VkImageView / VkBuffer handle, or 0
+    u64 sampler_handle; // For CombinedImageSampler: the VkSampler whose addressing
+                        // mode + filter the executor honours at OpImageSample time.
+                        // For Sampler bindings: the sampler handle itself (handle==0).
+                        // 0 means "no sampler specified — fall back to default".
 };
 
 struct DescriptorSetRecord
@@ -410,6 +430,45 @@ struct EventRecord
 struct PipelineCacheRecord
 {
     u64 stored_size;
+};
+
+/// Per-sampler record. v0 captures the VkSamplerCreateInfo fields
+/// the SPIR-V executor's OpImageSample path actually consults —
+/// the three per-axis address modes and the mag/min filters.
+/// `border_color` is fixed to 0 (transparent black) because the v0
+/// VkSamplerCreateInfo doesn't expose a borderColor field yet; a
+/// follow-on slice can plumb it through when callers need
+/// per-sampler border tints.
+struct SamplerRecord
+{
+    u8 address_mode_u; // VkSamplerAddressMode cast to u8
+    u8 address_mode_v;
+    u8 address_mode_w;
+    u8 mag_filter; // VkFilter::Nearest = 0, Linear = 1
+    u8 min_filter;
+};
+
+/// Per-fence state. `signalled` flips true when the submit that
+/// the fence rides on completes; flips false on VkResetFences.
+/// `VkWaitForFences` consults the bit. v0 submits are synchronous
+/// so the bit is set at VkQueueSubmit return time — no blocking
+/// path is needed today, but the structural backing is in place
+/// for a real-GPU back-end to set it asynchronously.
+struct FenceRecord
+{
+    bool signalled;
+};
+
+/// Per-semaphore state. Binary semaphores: `signalled` flips true
+/// on a queue-side signal (e.g. VkQueueSubmit's signal-semaphore
+/// list), flips false on a queue-side wait that consumes it. The
+/// signal/wait surface for VkQueueSubmit grows in a follow-on
+/// slice; v0 captures the bit so VkAcquireNextImageKHR /
+/// VkQueuePresentKHR can interact with it once the WSI side
+/// passes real semaphores through.
+struct SemaphoreRecord
+{
+    bool signalled;
 };
 
 inline constexpr u32 kMaxQueriesPerPool = 16;
@@ -480,6 +539,9 @@ extern QueryPoolRecord g_query_pool_data[kPoolCapacity];
 extern PhysicalDeviceRecord g_phys_data[kPoolCapacity];
 extern QueueRecord g_queue_data[kPoolCapacity];
 extern PipelineRecord g_pipeline_data[kPoolCapacity];
+extern SamplerRecord g_sampler_data[kPoolCapacity];
+extern FenceRecord g_fence_data[kPoolCapacity];
+extern SemaphoreRecord g_semaphore_data[kPoolCapacity];
 
 // -------------------------------------------------------------------
 // Aggregate counters.
@@ -598,12 +660,16 @@ PipelineShaders PipelineShaderHandles(VkPipeline pipe);
 bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
 
 /// Sampler addressing modes — passed to SampleImageRgba8 to
-/// control what happens at the [0, 1] UV boundary.
+/// control what happens at the [0, 1] UV boundary. Values match
+/// `VkSamplerAddressMode` (graphics.h) so we can cast without a
+/// remap table.
 enum class SamplerAddressMode : u8
 {
-    ClampToEdge = 0,    // default — texel at the edge is replicated for out-of-range UV
-    Repeat = 1,         // UV wraps modulo 1.0 (Sf32 fract)
-    MirroredRepeat = 2, // UV wraps modulo 2.0 with reflection
+    Repeat = 0,         // UV wraps modulo 1.0 (Sf32 fract)
+    MirroredRepeat = 1, // UV wraps modulo 2.0 with reflection
+    ClampToEdge = 2,    // texel at the edge is replicated for out-of-range UV
+    ClampToBorder = 3,  // out-of-range UV returns the sampler's border colour;
+                        // v0 always uses transparent black (0,0,0,0).
 };
 
 /// Sample a 2D RGBA8 texel from an image bound via descriptor.
@@ -617,8 +683,89 @@ enum class SamplerAddressMode : u8
 /// Vk_SAMPLER_FILTER_NEAREST option yet). Returns the packed
 /// BGRA8 word (0xAARRGGBB). Returns 0xFF000000 (opaque black)
 /// on any lookup failure — caller treats it as a fallback.
+/// Sample a 2D RGBA8 texel from an image bound via descriptor.
+/// `resource_handle` is a VkImage or VkImageView handle as
+/// returned by `spirv::LookupDescriptor`; both kinds resolve
+/// to the underlying image. u_bits / v_bits are Sf32 bit
+/// patterns (raw float values; the addressing mode determines
+/// how out-of-range UV gets folded). `mode_u` selects the U-axis
+/// addressing mode; `mode_v` selects the V-axis mode (defaults
+/// to the same as U for legacy callers that don't care about the
+/// asymmetric case). Filtering is bilinear (the v0 sampler
+/// doesn't expose a separate Vk_SAMPLER_FILTER_NEAREST option
+/// yet). Returns the packed BGRA8 word (0xAARRGGBB). Returns
+/// 0xFF000000 (opaque black) on any lookup failure — caller
+/// treats it as a fallback.
+/// `filter`: 0 = Nearest (single-texel fetch, no blend),
+/// 1 = Linear (bilinear blend). Default is Linear because the
+/// pre-decouple executor always blended; callers that want
+/// nearest-neighbour sample a VkSampler whose `magFilter` is
+/// `VkFilter::Nearest` and the executor passes 0 here.
 u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits,
-                     SamplerAddressMode mode = SamplerAddressMode::ClampToEdge);
+                     SamplerAddressMode mode_u = SamplerAddressMode::ClampToEdge,
+                     SamplerAddressMode mode_v = SamplerAddressMode::ClampToEdge, u8 filter = 1u);
+
+/// Look up the address-mode-U recorded by VkCreateSampler against
+/// a VkSampler handle. Returns `ClampToEdge` for handle == 0 or
+/// an unrecognised handle so a binding without a sampler still
+/// produces a defined result.
+SamplerAddressMode SamplerAddressModeFor(u64 sampler_handle);
+
+/// V-axis counterpart of `SamplerAddressModeFor`. v0's
+/// `SamplerRecord` captures all three axes at VkCreateSampler
+/// time; the executor reads U + V independently so a sampler with
+/// `(REPEAT, CLAMP_TO_EDGE)` produces tileable-X clamped-Y output
+/// (the right shape for a scrolling-strip background pattern).
+SamplerAddressMode SamplerAddressModeVFor(u64 sampler_handle);
+
+/// Return the magnification filter recorded by VkCreateSampler.
+/// 0 = Nearest (single-texel fetch, no blend), 1 = Linear
+/// (bilinear, the existing path). Used by `SampleImageRgba8` to
+/// pick the per-pixel sample shape. Falls back to Linear (1) for
+/// handle == 0 / unknown so a binding without a sampler keeps
+/// the previous filtered behaviour.
+u8 SamplerMagFilterFor(u64 sampler_handle);
+
+/// Unfiltered, integer-coordinate BGRA8 texel fetch from an
+/// image bound via descriptor. Used by the SPIR-V executor's
+/// OpImageFetch / OpImageRead path. Returns 0x00000000
+/// (transparent black) on any lookup failure; caller is
+/// responsible for the bounds check (so a deliberate
+/// out-of-bounds is distinguishable from a failed lookup at the
+/// call site). Bit layout: 0xAARRGGBB.
+u32 FetchTexelBgra8(u64 resource_handle, u32 x, u32 y);
+
+/// Unfiltered, integer-coordinate BGRA8 texel store to an image
+/// bound via descriptor. Used by the SPIR-V executor's
+/// OpImageWrite path. Silently no-ops on lookup failure or
+/// out-of-bounds coordinate. Bit layout of `argb`: 0xAARRGGBB.
+void WriteTexelBgra8(u64 resource_handle, u32 x, u32 y, u32 argb);
+
+/// Format-aware unfiltered texel fetch. Writes four Sf32 bit
+/// patterns to `out[4]` — (R, G, B, A) in linear [0, 1] for UNORM
+/// formats; raw f32 for SFLOAT. Out-of-bounds coordinates produce
+/// (0, 0, 0, 1) per the Vulkan spec for sampler-less reads.
+/// Backing-format-dispatched: reads bytes_per_texel from the bound
+/// image's `format` field and unpacks accordingly.
+void FetchTexel(u64 resource_handle, u32 x, u32 y, u32 out_components[4]);
+
+/// Format-aware unfiltered texel store. Reads four Sf32 bit
+/// patterns from `in[4]` — (R, G, B, A) clamped to [0, 1] for
+/// UNORM formats; raw f32 for SFLOAT. Out-of-bounds coordinates
+/// drop the write silently per the Vulkan spec. Backing-format-
+/// dispatched: packs into the bytes_per_texel layout the image's
+/// `format` declares.
+void WriteTexel(u64 resource_handle, u32 x, u32 y, const u32 in_components[4]);
+
+/// Binary-semaphore signal / consume / poll. Used by VkQueueSubmit
+/// (signal after CB replay) and VkAcquireNextImageKHR /
+/// VkQueuePresentKHR (signal-then-consume across the swapchain
+/// boundary). Returns false on a 0 or unrecognised handle. The
+/// consume path returns the pre-consume bit so the caller can tell
+/// "had to wait" from "was already signalled".
+bool SignalSemaphoreInternal(VkSemaphore sem);
+bool ConsumeSemaphoreInternal(VkSemaphore sem);
+bool SemaphoreIsSignalled(VkSemaphore sem);
 
 /// Run the SPIR-V shader-based rasterizer for the current draw.
 /// Returns true if the shader path actually painted (in which

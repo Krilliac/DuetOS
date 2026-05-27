@@ -127,6 +127,7 @@
 - [Daily-Driver Readiness](reference/Daily-Driver-Readiness.md)
 - [Design Decisions Log](reference/Design-Decisions.md)
 - [Directory Layout](reference/Directory-Layout.md)
+- [GPU Implementation Notes](reference/GPU-Implementation-Notes.md)
 - [Knowledge Base Index](reference/Knowledge-Base-Index.md)
 - [Shell Commands](reference/Shell-Commands.md)
 - [Shell Scripting](reference/Shell-Scripting.md)

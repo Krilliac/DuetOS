@@ -273,9 +273,16 @@ struct Program
     // a single descriptor set with up to 8 bindings. Slot value
     // 0 means "no binding"; non-zero values are resource handles
     // the executor's OpImageSample path dereferences.
+    //
+    // `sampler_bindings` carries the matching VkSampler handle
+    // for CombinedImageSampler bindings — the executor reads its
+    // addressing mode out of the sampler record so a caller's
+    // VkCreateSampler choice (REPEAT / CLAMP / MIRROR / BORDER)
+    // actually reaches the texel-fetch path.
     static constexpr u32 kMaxDescriptorSets = 2;
     static constexpr u32 kMaxBindingsPerSet = 8;
     u64 descriptor_bindings[kMaxDescriptorSets][kMaxBindingsPerSet];
+    u64 sampler_bindings[kMaxDescriptorSets][kMaxBindingsPerSet];
 };
 
 // Parse a SPIR-V module into Program form. Returns true if the
@@ -331,6 +338,17 @@ void BindDescriptor(Program* prog, u32 set, u32 binding, u64 resource_handle);
 /// OpImageSample path to find the texture data source.
 u64 LookupDescriptor(const Program* prog, u32 set, u32 binding);
 
+/// Bind the VkSampler handle that accompanies a CombinedImageSampler
+/// binding. The executor reads the sampler's record at OpImageSample
+/// time to pick up the caller's addressing mode (REPEAT / CLAMP /
+/// MIRROR / BORDER). Setting `sampler_handle == 0` means "no
+/// sampler chosen — fall back to the executor's default mode".
+void BindSampler(Program* prog, u32 set, u32 binding, u64 sampler_handle);
+
+/// Look up the sampler handle bound to (set, binding); returns 0
+/// when no sampler was recorded.
+u64 LookupSampler(const Program* prog, u32 set, u32 binding);
+
 /// Per-variable descriptor returned by `EnumerateLocationVars`:
 /// the Location number, the byte size of the variable's pointee,
 /// and the number of 32-bit components (size / 4 for the common
@@ -355,6 +373,13 @@ u32 EnumerateLocationVars(const Program* prog, StorageClass storage, LocationVar
 // completion (OpReturn reached), false on out-of-budget /
 // malformed instruction / unsupported opcode.
 bool ExecuteEntryPoint(Program* prog, const char* name);
+
+/// Did the most recent ExecuteEntryPoint invocation hit OpKill?
+/// The shader rasterizer's per-pixel fragment loop reads this
+/// immediately after the FS runs to decide whether to skip the
+/// pixel write. Sticky across the entire ExecuteEntryPoint call;
+/// reset to false at the top of each new call.
+bool ExecuteEntryPointWasKilled();
 
 // Public SPIR-V BuiltIn enum values that the interpreter
 // recognises and the rasterizer hook needs to reference.

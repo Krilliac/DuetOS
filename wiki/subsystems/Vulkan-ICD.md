@@ -223,10 +223,24 @@ Out of scope — deferred:
   `CombinedImageSampler` binds but the rasterizer has no
   per-pixel sampler fetch path; the bound image-view is recorded
   for stats only.
-- Perspective-correct attribute interpolation. The rasterizer
-  is affine; pre-divided W-space attributes are the caller's
-  responsibility.
-- Multi-binding vertex buffers — only binding 0 is consumed.
+- Perspective-correct attribute interpolation. The shader-path
+  rasterizer enables it automatically when every triangle vertex
+  reports a positive `gl_Position.w` from the VS — each vertex's
+  `1/w` is computed once, varyings are pre-divided by `w`, both
+  `value/w` and `1/w` are interpolated linearly across the
+  triangle, and a per-pixel divide recovers the correct attribute.
+  Orthographic projections (`w == 0` or NaN) fall back to the
+  affine path without producing artefacts. The fixed-function
+  v0/v1 vertex format rasterizer remains affine — its inputs are
+  pixel-space pre-projected, so perspective correction would be a
+  no-op there anyway.
+- Multi-binding vertex buffers — the fixed-function (DuetOS v0/v1
+  vertex format) rasterizer reads only binding 0. The SPIR-V
+  shader rasterizer honours per-attribute binding indices via
+  `VkVertexInputAttributeDescription` when an explicit input
+  description is attached (`VkSetVertexInputDuet`), looking each
+  attribute up against the matching `RasterState::vb_per_binding`
+  slot.
 - Multi-rect scissor — only the first scissor rect is recorded.
 
 The reason `Copy*` works while `Draw*` doesn't: copy operations don't
@@ -541,14 +555,63 @@ the v0 syscall surface doesn't provide.
   is selected), AND the SPIR-V shader rasterizer when a pipeline
   binds parseable VS + FS modules (TriangleList only).
 - **SPIR-V texture sampling.** `OpImageSampleImplicitLod` /
-  `OpImageSampleExplicitLod` are implemented and fetch through the
-  bound (set 0, binding 0) sampled-image descriptor via
-  `SampleImageRgba8`. v0 uses REPEAT addressing for any sampler
-  binding and ignores explicit LOD (no mipmap chain). Unbound
-  samples return the UV coordinate as `(u, v, 0, 1)` — the
-  "missing texture" diagnostic. `OpImageRead` / `OpImageWrite`
-  and non-REPEAT sampler modes (CLAMP, MIRROR, BORDER) are still
-  unimplemented.
+  `OpImageSampleExplicitLod` fetch through the bound (set 0,
+  binding 0) sampled-image descriptor via `SampleImageRgba8`. The
+  per-axis addressing mode is driven by the VkSampler the caller
+  pinned at descriptor-update time — `VkCreateSampler` records
+  `addressModeU` / `_V` / `_W` into a per-handle `SamplerRecord`,
+  `VkUpdateDescriptorSetSampled` propagates the VkSampler handle
+  alongside the VkImageView, and the executor reads both
+  `SamplerAddressModeFor(handle)` (U) and `SamplerAddressModeVFor`
+  (V) on every sample so an asymmetric sampler like
+  `(REPEAT_U, CLAMP_TO_EDGE_V)` produces tileable-X clamped-Y
+  output. The `magFilter` propagates too — `SamplerMagFilterFor`
+  picks 0=Nearest / 1=Linear; the Nearest path short-circuits the
+  bilerp to a single-texel fetch (the previous always-bilinear
+  behaviour silently degraded VK_FILTER_NEAREST samples into
+  blurred ones). ClampToBorder is per-axis too — a UV component outside
+  [0, 1] on a border-mode axis returns the border colour, while
+  the other axis follows its own fold. v0's CLAMP_TO_BORDER
+  border colour is always transparent black (0,0,0,0); per-sampler
+  border tints land when `VkSamplerCreateInfo` grows a
+  `borderColor` field. Unbound samples still return the UV
+  coordinate as `(u, v, 0, 1)` — the "missing texture"
+  diagnostic. Explicit LOD (no mipmap chain) is still
+  unimplemented; the W axis is recorded but only meaningful for
+  3D / cube images that v0 doesn't yet ship.
+- **SPIR-V storage-image access.** `OpImageRead` / `OpImageFetch`
+  (integer-coord unfiltered read) and `OpImageWrite` (integer-coord
+  unfiltered store) execute against the bound (set 0, binding 0)
+  image, dispatched by the image's recorded format. All six
+  DuetOS-internal formats round-trip correctly: BGRA8_UNORM,
+  R8G8B8A8_UNORM (1 byte/channel × 4); R8_UNORM (1 B/texel);
+  R8G8_UNORM (2 B/texel); R16_UNORM (2 B/texel, 16-bit precision);
+  and R32G32B32A32_SFLOAT (16 B/texel, raw f32 — HDR-precision
+  preserved across the round-trip). `VkCreateImageWithFormat`
+  takes a DuetOS format id (0–5) and records it in `ImageRecord`;
+  legacy `VkCreateImage` defers with format=0 so existing callers
+  see no change. Out-of-bounds reads return `(0, 0, 0, 1)` and
+  out-of-bounds writes are silently dropped per spec. Coordinate
+  input is signed integer scalar or vector; the first two
+  components are consumed (2D). Used by compute shaders that walk
+  a storage image — boot self-test pins both the BGRA8 and the
+  R8_UNORM + R32G32B32A32_SFLOAT round-trips along with the
+  OOB-no-clobber invariant. Explicit LOD (no mipmap chain) and
+  multisample images remain unimplemented.
+- **SPIR-V derivative / barrier / atomic opcodes.** `OpDPdx`,
+  `OpDPdy`, `OpFwidth` (plus `Fine` / `Coarse` variants) return
+  zero — GAP: real derivatives need 2×2-quad fragment execution
+  that the serial interpreter doesn't model. `OpControlBarrier`
+  and `OpMemoryBarrier` are no-ops because invocations run
+  serially (the barrier is satisfied trivially). `OpAtomicLoad`,
+  `OpAtomicStore`, and the RMW family (`Exchange` / `IIncrement` /
+  `IDecrement` / `IAdd` / `ISub` / `SMin` / `UMin` / `SMax` /
+  `UMax` / `And` / `Or` / `Xor`) collapse to non-atomic
+  equivalents — correct on serial execution, will need real
+  atomicity once compute dispatch runs invocations in parallel.
+  `OpFRem` / `OpFMod` dispatch through the soft-float scalar path
+  (FRem = trunc-quotient remainder, FMod = floor-quotient with
+  sign of divisor).
 - **SPIR-V perspective correction.** The shader rasterizer is
   affine (linear pixel-space interpolation in pixel space).
   Perspective-correct attribute interpolation needs a per-fragment
@@ -584,3 +647,6 @@ the v0 syscall surface doesn't provide.
 - [Win32 DLLs](Win32-DLLs.md) — `vulkan-1.dll`, `dxgi.dll`
 - [Win32 Surface Status](../reference/Win32-Surface-Status.md) — per-export
   REAL / STUB / MISSING inventory
+- [GPU Implementation Notes](../reference/GPU-Implementation-Notes.md) —
+  cross-vendor prior-art for the per-vendor submission path,
+  SPIR-V sampler / texel-fetch math, and the DXBC→SPIR-V plan

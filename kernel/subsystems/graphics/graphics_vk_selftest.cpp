@@ -3,6 +3,7 @@
 
 #include "drivers/video/display_info.h"
 #include "log/klog.h"
+#include "util/soft_float.h"
 
 /*
  * DuetOS — Vulkan ICD boot self-test.
@@ -312,6 +313,11 @@ bool RunCanonicalLifecycle()
     VkFence fence = 0;
     if (VkCreateFence(dev, false, &fence) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkCreateFence failed", 0);
+    // A freshly-created unsignalled fence must report NotReady;
+    // the pre-fix path returned Success unconditionally because
+    // FenceRecord didn't exist.
+    if (VkGetFenceStatus(dev, fence) != VkResult::NotReady)
+        return SelftestFail("[selftest:graphics] new unsignalled fence reported ready", 0);
 
     // The cb above recorded `VkCmdDraw(cb, 3, ...)` against a
     // non-scanout image — the rasterizer must STILL bump the
@@ -322,8 +328,31 @@ bool RunCanonicalLifecycle()
     const u32 tri_before = internal::TrianglesDrawnCount();
     if (VkQueueSubmit(queue, 1, &cb, fence) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkQueueSubmit failed", 0);
+    // VkQueueSubmit must flip the fence to signalled — the
+    // synchronous v0 submit completes before this line.
+    if (VkGetFenceStatus(dev, fence) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkQueueSubmit did not signal fence", 0);
     if (VkWaitForFences(dev, 1, &fence, 0) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkWaitForFences failed", 0);
+    // VkResetFences must clear the signalled bit, returning the
+    // fence to NotReady status.
+    if (VkResetFences(dev, 1, &fence) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkResetFences failed", 0);
+    if (VkGetFenceStatus(dev, fence) != VkResult::NotReady)
+        return SelftestFail("[selftest:graphics] reset fence did not clear signalled bit", 0);
+    // A wait against an unsignalled fence must return Timeout
+    // (rather than the legacy Success-no-matter-what).
+    if (VkWaitForFences(dev, 1, &fence, 0) != VkResult::Timeout)
+        return SelftestFail("[selftest:graphics] wait on unsignalled fence did not Timeout", 0);
+    // VkCreateFence(signalled=true) — the create-info bit must
+    // reach the FenceRecord so callers that want to immediately
+    // wait without blocking get Success on the first call.
+    VkFence pre_signalled = 0;
+    if (VkCreateFence(dev, true, &pre_signalled) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] vkCreateFence(signalled=true) failed", 0);
+    if (VkGetFenceStatus(dev, pre_signalled) != VkResult::Success)
+        return SelftestFail("[selftest:graphics] pre-signalled fence reported NotReady", 0);
+    VkDestroyFence(dev, pre_signalled);
     if (VkQueueWaitIdle(queue) != VkResult::Success)
         return SelftestFail("[selftest:graphics] vkQueueWaitIdle failed", 0);
     if (internal::TrianglesDrawnCount() <= tri_before)
@@ -511,7 +540,58 @@ bool RunCanonicalLifecycle()
         VkSampler smp = 0;
         if (VkCreateSampler(dev, &sci, &smp) != VkResult::Success)
             return SelftestFail("[selftest:graphics] VkCreateSampler failed", 0);
+        // The create-info's addressModeU must reach the executor's
+        // OpImageSample path via `SamplerAddressModeFor(smp)`. The
+        // pre-fix path threw the field on the floor — every sampler
+        // collapsed to Repeat — so this assertion pins the
+        // regression bound.
+        if (internal::SamplerAddressModeFor(smp) != internal::SamplerAddressMode::ClampToEdge)
+            return SelftestFail("[selftest:graphics] sampler addressModeU did not propagate (ClampToEdge)", 0);
         VkDestroySampler(dev, smp);
+        // A second sampler with a different mode confirms the
+        // record isn't a single-shared-slot bug.
+        const VkSamplerCreateInfo sci_border{VkFilter::Nearest, VkFilter::Nearest, VkSamplerAddressMode::ClampToBorder,
+                                             VkSamplerAddressMode::ClampToBorder, VkSamplerAddressMode::ClampToBorder};
+        VkSampler smp_border = 0;
+        if (VkCreateSampler(dev, &sci_border, &smp_border) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateSampler(border) failed", 0);
+        if (internal::SamplerAddressModeFor(smp_border) != internal::SamplerAddressMode::ClampToBorder)
+            return SelftestFail("[selftest:graphics] sampler addressModeU did not propagate (ClampToBorder)", 0);
+        VkDestroySampler(dev, smp_border);
+        // Handle == 0 must produce a defined fallback so descriptor
+        // writes that don't pin a sampler keep working.
+        if (internal::SamplerAddressModeFor(0) != internal::SamplerAddressMode::ClampToEdge)
+            return SelftestFail("[selftest:graphics] sampler handle=0 fallback wrong", 0);
+        if (internal::SamplerMagFilterFor(0) != 1u)
+            return SelftestFail("[selftest:graphics] sampler handle=0 filter fallback wrong", 0);
+        // Per-axis decoupling: an asymmetric sampler (Repeat-U /
+        // ClampToEdge-V) must report distinct modes on each axis.
+        // The pre-decouple path only honoured the U axis; this
+        // pins the regression bound.
+        const VkSamplerCreateInfo sci_mixed{VkFilter::Linear, VkFilter::Linear, VkSamplerAddressMode::Repeat,
+                                            VkSamplerAddressMode::ClampToEdge, VkSamplerAddressMode::Repeat};
+        VkSampler smp_mixed = 0;
+        if (VkCreateSampler(dev, &sci_mixed, &smp_mixed) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateSampler(mixed) failed", 0);
+        if (internal::SamplerAddressModeFor(smp_mixed) != internal::SamplerAddressMode::Repeat)
+            return SelftestFail("[selftest:graphics] mixed sampler U axis wrong", 0);
+        if (internal::SamplerAddressModeVFor(smp_mixed) != internal::SamplerAddressMode::ClampToEdge)
+            return SelftestFail("[selftest:graphics] mixed sampler V axis wrong", 0);
+        // The mixed sampler was created with VkFilter::Linear above,
+        // so the SamplerMagFilterFor lookup must return 1.
+        if (internal::SamplerMagFilterFor(smp_mixed) != 1u)
+            return SelftestFail("[selftest:graphics] mixed sampler magFilter not Linear", 0);
+        VkDestroySampler(dev, smp_mixed);
+        // Nearest-filter sampler: VkCreateSampler(magFilter=Nearest)
+        // must round-trip to SamplerMagFilterFor(handle) == 0.
+        const VkSamplerCreateInfo sci_nearest{VkFilter::Nearest, VkFilter::Nearest, VkSamplerAddressMode::ClampToEdge,
+                                              VkSamplerAddressMode::ClampToEdge, VkSamplerAddressMode::ClampToEdge};
+        VkSampler smp_nearest = 0;
+        if (VkCreateSampler(dev, &sci_nearest, &smp_nearest) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateSampler(nearest) failed", 0);
+        if (internal::SamplerMagFilterFor(smp_nearest) != 0u)
+            return SelftestFail("[selftest:graphics] nearest sampler magFilter not propagated", 0);
+        VkDestroySampler(dev, smp_nearest);
 
         VkEvent evt = 0;
         if (VkCreateEvent(dev, &evt) != VkResult::Success)
@@ -678,6 +758,115 @@ bool RunCanonicalLifecycle()
         VkFreeMemory(dev, arr_mem);
     }
 
+    // Storage-image texel write/read round-trip: covers the
+    // OpImageWrite -> OpImageRead path the SPIR-V executor now
+    // routes compute shaders through. Allocate a host-visible
+    // image, write a cookie at (3, 4), read it back, assert the
+    // exact bit pattern survives. Out-of-bounds writes must be
+    // silently dropped without corrupting neighbours.
+    {
+        VkImage stor_img = 0;
+        VkDeviceMemory stor_mem = 0;
+        if (VkCreateImage(dev, VkExtent3D{8, 8, 1}, 0, &stor_img) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] storage-image create failed", 0);
+        if (VkAllocateMemory(dev, 8 * 8 * 4u, /*memory_type_index=*/1, &stor_mem) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] storage-image AllocateMemory failed", 0);
+        if (VkBindImageMemory(dev, stor_img, stor_mem, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] storage-image BindImageMemory failed", 0);
+        // Sentinel write at (1, 0) so we can verify the OOB-drop
+        // assertion below didn't clobber a neighbour.
+        internal::WriteTexelBgra8(stor_img, 1, 0, 0xFF112233u);
+        // Cookie at (3, 4); read back must match.
+        internal::WriteTexelBgra8(stor_img, 3, 4, 0xAABBCCDDu);
+        const u32 read_back = internal::FetchTexelBgra8(stor_img, 3, 4);
+        if (read_back != 0xAABBCCDDu)
+            return SelftestFail("[selftest:graphics] storage-image texel round-trip mismatch", read_back);
+        // Out-of-bounds write: silently dropped; sentinel at (1, 0)
+        // must still read back unchanged.
+        internal::WriteTexelBgra8(stor_img, 999, 999, 0xDEADBEEFu);
+        if (internal::FetchTexelBgra8(stor_img, 1, 0) != 0xFF112233u)
+            return SelftestFail("[selftest:graphics] storage-image OOB write clobbered neighbour", 0);
+        // Out-of-bounds read: spec returns 0 (no border colour for
+        // sampler-less image reads).
+        if (internal::FetchTexelBgra8(stor_img, 999, 999) != 0x00000000u)
+            return SelftestFail("[selftest:graphics] storage-image OOB read returned non-zero", 0);
+        VkDestroyImage(dev, stor_img);
+        VkFreeMemory(dev, stor_mem);
+    }
+
+    // Format-aware texel write/read round-trip: covers the path
+    // SPIR-V's OpImageRead / OpImageWrite take through FetchTexel
+    // / WriteTexel when a non-default format is in play. Two legs
+    // exercise R8_UNORM (1 byte/texel UNORM) and R32G32B32A32_SFLOAT
+    // (16 bytes/texel raw f32) — the smallest and largest format
+    // strides DuetOS recognises.
+    {
+        VkImage r8_img = 0;
+        VkDeviceMemory r8_mem = 0;
+        // 8x8 R8_UNORM = 64 bytes; round up to a page for the host-
+        // visible memory backing.
+        if (VkCreateImageWithFormat(dev, VkExtent3D{8, 8, 1}, /*format=*/2u, 0, &r8_img) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] R8 image create failed", 0);
+        if (VkAllocateMemory(dev, 256, /*memory_type_index=*/1, &r8_mem) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] R8 AllocateMemory failed", 0);
+        if (VkBindImageMemory(dev, r8_img, r8_mem, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] R8 BindImageMemory failed", 0);
+        // Write Sf32(1.0) -> u8 255 -> Sf32(1.0) on the round-trip.
+        // The other three components are ignored by R8 (output is
+        // single-channel) but we keep `(0, 0, 0, 1)` so the spec
+        // contract for unwritten channels is satisfied.
+        const u32 one_bits = 0x3F800000u;  // Sf32(1.0)
+        const u32 half_bits = 0x3F000000u; // Sf32(0.5)
+        u32 wrote[4] = {one_bits, 0, 0, 0x3F800000u};
+        internal::WriteTexel(r8_img, 2, 3, wrote);
+        wrote[0] = half_bits;
+        internal::WriteTexel(r8_img, 4, 5, wrote);
+        u32 read_back[4]{};
+        internal::FetchTexel(r8_img, 2, 3, read_back);
+        // R8 round-trip: 1.0 packs to 255 then unpacks to 1.0
+        // exactly (255/255 == 1.0).
+        if (read_back[0] != one_bits)
+            return SelftestFail("[selftest:graphics] R8 round-trip(1.0) mismatch", read_back[0]);
+        if (read_back[3] != one_bits) // alpha default
+            return SelftestFail("[selftest:graphics] R8 alpha default wrong", read_back[3]);
+        internal::FetchTexel(r8_img, 4, 5, read_back);
+        // 0.5 packs to u8 127 (Sf32ToI32 truncates: 0.5*255 = 127.5 -> 127);
+        // 127/255 = 0.498... ≈ 0x3EFEFEFE
+        // Just assert it's bounded — exact value would over-pin to
+        // the truncation choice.
+        const ::duetos::core::Sf32 unpacked{read_back[0]};
+        if (::duetos::core::Sf32LessThan(unpacked, ::duetos::core::Sf32FromBits(0x3E800000u)) || // < 0.25
+            ::duetos::core::Sf32GreaterThan(unpacked, ::duetos::core::Sf32FromBits(0x3F800000u)))
+            return SelftestFail("[selftest:graphics] R8 round-trip(0.5) out of range", read_back[0]);
+        VkDestroyImage(dev, r8_img);
+        VkFreeMemory(dev, r8_mem);
+    }
+    {
+        VkImage f32_img = 0;
+        VkDeviceMemory f32_mem = 0;
+        // 4x4 R32G32B32A32_SFLOAT = 4*4*16 = 256 bytes.
+        if (VkCreateImageWithFormat(dev, VkExtent3D{4, 4, 1}, /*format=*/5u, 0, &f32_img) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] f32x4 image create failed", 0);
+        if (VkAllocateMemory(dev, 512, /*memory_type_index=*/1, &f32_mem) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] f32x4 AllocateMemory failed", 0);
+        if (VkBindImageMemory(dev, f32_img, f32_mem, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] f32x4 BindImageMemory failed", 0);
+        // HDR-range values: 2.5, -1.0, 100.0, 0.0 must survive
+        // exact round-trip on R32G32B32A32_SFLOAT (raw f32 bits in
+        // memory; no clamp/quantise).
+        const u32 wrote[4] = {0x40200000u, 0xBF800000u, 0x42C80000u, 0x00000000u};
+        internal::WriteTexel(f32_img, 1, 2, wrote);
+        u32 read_back[4]{};
+        internal::FetchTexel(f32_img, 1, 2, read_back);
+        for (u32 c = 0; c < 4; ++c)
+        {
+            if (read_back[c] != wrote[c])
+                return SelftestFail("[selftest:graphics] f32x4 component round-trip mismatch", c);
+        }
+        VkDestroyImage(dev, f32_img);
+        VkFreeMemory(dev, f32_mem);
+    }
+
     // Cmd-debug-label + push-descriptor leg: record a few ops on
     // a transient cb, submit, assert the push-descriptor
     // counter advanced.
@@ -818,6 +1007,26 @@ bool RunCanonicalLifecycle()
             return SelftestFail("[selftest:graphics] AcquireNextImage(2) failed", 0);
         if (VkQueuePresentKHR(queue, sc, idx) != VkResult::Success)
             return SelftestFail("[selftest:graphics] QueuePresent(2) failed", 0);
+
+        // Acquire/Fence signal-through leg: the caller-supplied
+        // VkSemaphore + VkFence must flip to signalled when the
+        // image becomes "available". v0 returns the image
+        // immediately, so signal happens during the Acquire call.
+        VkSemaphore acquire_sem = 0;
+        VkFence acquire_fence = 0;
+        if (VkCreateSemaphore(dev, &acquire_sem) != VkResult::Success ||
+            VkCreateFence(dev, false, &acquire_fence) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] sync handle alloc for Acquire failed", 0);
+        if (VkAcquireNextImageKHR(dev, sc, 0, acquire_sem, acquire_fence, &idx) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] AcquireNextImage(with sync) failed", 0);
+        if (!internal::SemaphoreIsSignalled(acquire_sem))
+            return SelftestFail("[selftest:graphics] Acquire did not signal semaphore", 0);
+        if (VkGetFenceStatus(dev, acquire_fence) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] Acquire did not signal fence", 0);
+        if (VkQueuePresentKHR(queue, sc, idx) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] QueuePresent(with sync) failed", 0);
+        VkDestroyFence(dev, acquire_fence);
+        VkDestroySemaphore(dev, acquire_sem);
 
         VkDestroySwapchainKHR(dev, sc);
         VkDestroySurfaceKHR(inst, surface);

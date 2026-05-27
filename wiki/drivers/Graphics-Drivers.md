@@ -463,9 +463,15 @@ Implemented:
     pixel counts — no rasterizer to sample).
   Other opcodes are recorded for stats but produce no
   visible output (no SPIR-V execution yet).
-- `vkCreateFence` / `vkWaitForFences` (always immediately
-  signalled — submits are synchronous in this ICD),
-  `vkCreateSemaphore`.
+- `vkCreateFence` / `vkResetFences` / `vkGetFenceStatus` /
+  `vkWaitForFences` — real `FenceRecord` backing. The create-info
+  signalled bit is honoured; `VkQueueSubmit` flips the fence to
+  signalled (synchronous v0 submits complete inline); `VkResetFences`
+  clears it; `VkWaitForFences` returns `Timeout` when any fence in
+  the array is still unsignalled. `vkCreateSemaphore` carries real
+  `SemaphoreRecord` state too — `VkAcquireNextImageKHR` flips the
+  bit when the image becomes available (immediate in v0; a real-GPU
+  backend would defer the signal to the page-flip completion event).
 - Descriptor sets: `vkCreateDescriptorSetLayout`,
   `vkCreateDescriptorPool` (with `max_sets` budget enforcement),
   `vkAllocateDescriptorSets`, `vkUpdateDescriptorSet` (DuetOS
@@ -681,3 +687,5 @@ recompose. Four themes ship:
 - [Compositor and Window Manager](../subsystems/Compositor.md)
 - [DirectX v0 Path](../subsystems/DirectX.md)
 - [Duet Theme Spec](../specifications/Duet-Theme-Spec.md)
+- [GPU Implementation Notes](../reference/GPU-Implementation-Notes.md) —
+  cross-vendor prior-art and the concrete next gates per driver

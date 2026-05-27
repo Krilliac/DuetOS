@@ -33,16 +33,16 @@
  *     [0, 1] and packed BGRA8 for the framebuffer.
  *
  * Shape NOT supported (falls back to fixed-function):
- *   - Vertex buffers other than binding 0 (mirrors the
- *     fixed-function GAP).
  *   - Vertex strides other than the canonical layout
- *     `{vec2/vec3 pos; padding}` aligned to 8 bytes.
- *   - Output Locations on the vertex shader (varyings to FS) —
- *     the FS sees them as zero. A v2 slice will plumb the
- *     interpolation, which needs per-pixel evaluation of the
- *     vertex outputs.
- *   - Anything that needs perspective-correct interpolation,
- *     texture sampling, or descriptor-set-driven uniform reads.
+ *     `{vec2/vec3 pos; padding}` aligned to 8 bytes — UNLESS the
+ *     caller attaches an explicit VkSetVertexInputDuet
+ *     description, in which case multi-binding lookups + the
+ *     declared (binding, offset, format) tuple drive each fetch.
+ *   - Topologies other than TriangleList (the fixed-function
+ *     path handles Strip / Fan / Lines / Points).
+ *   - Anything that needs OpKill-as-write — discards are honoured
+ *     by skipping the pixel; the pixel-painted counter advances
+ *     only on actual writes.
  *
  * The hook is a true opt-in: the existing fixed-function path is
  * unchanged and remains the default for any pipeline that
@@ -255,6 +255,17 @@ bool RunFragmentShader(spirv::Program* fs, const u32 pixel_xy[2], const VaryingS
     }
     if (!spirv::ExecuteEntryPoint(fs, "main"))
         return false;
+    // OpKill terminates the FS without producing a colour — the
+    // caller's per-pixel loop must skip the pixel paint. Return
+    // success-with-discard so RunFragmentShader's contract (true
+    // iff the shader executed) stays clean; the discard bit
+    // travels back through ExecuteEntryPointWasKilled() instead
+    // of an extra out-param.
+    if (spirv::ExecuteEntryPointWasKilled())
+    {
+        *argb_out = 0u;
+        return true;
+    }
     u32 color_bits[4] = {0, 0, 0, Sf32ToBits(::duetos::core::Sf32One())};
     if (!spirv::ReadOutputLocation(fs, 0, color_bits, sizeof(color_bits)))
         return false;
@@ -547,6 +558,12 @@ void PaintTriangle(i32 ax, i32 ay, i32 bx, i32 by, i32 cx, i32 cy, spirv::Progra
             }
             if (!RunFragmentShader(fs, pixel_xy, interp, varying_n, &argb))
                 continue;
+            // OpKill in the FS leaves ExecuteEntryPointWasKilled()
+            // set — skip the pixel paint entirely. `painted`
+            // tracks only the pixels that actually reached the
+            // framebuffer.
+            if (spirv::ExecuteEntryPointWasKilled())
+                continue;
             drivers::video::FramebufferPutPixel(static_cast<u32>(px), static_cast<u32>(py), argb);
             ++painted;
             if (painted >= kMaxPaintedPixels)
@@ -635,7 +652,273 @@ bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d)
     return true;
 }
 
-u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddressMode mode)
+// Resolve a descriptor handle (VkImage or VkImageView) to the
+// underlying ImageRecord, returning nullptr on any lookup failure.
+// Both SampleImageRgba8 (filtered sampling) and FetchTexelBgra8 /
+// WriteTexelBgra8 (unfiltered storage-image access) share this.
+namespace
+{
+const ImageRecord* ResolveImageRecord(u64 resource_handle)
+{
+    if (resource_handle == 0)
+        return nullptr;
+    VkImage img = 0;
+    if (HandleInRange(resource_handle, kImageViewBase))
+    {
+        const u32 slot = SlotOf(resource_handle, kImageViewBase);
+        if (!PoolIsLive(g_imageview_pool, slot))
+            return nullptr;
+        img = g_imageview_data[slot].image;
+    }
+    else if (HandleInRange(resource_handle, kImageBase))
+    {
+        img = resource_handle;
+    }
+    else
+    {
+        return nullptr;
+    }
+    if (!HandleInRange(img, kImageBase))
+        return nullptr;
+    const u32 islot = SlotOf(img, kImageBase);
+    if (!PoolIsLive(g_image_pool, islot))
+        return nullptr;
+    return &g_image_data[islot];
+}
+ImageRecord* ResolveImageRecordMut(u64 resource_handle)
+{
+    // const_cast is fine: ResolveImageRecord only inspects pool
+    // bookkeeping. The caller takes responsibility for not racing
+    // against another mutator under the storage-image write lock.
+    return const_cast<ImageRecord*>(ResolveImageRecord(resource_handle));
+}
+} // namespace
+
+u32 BytesPerTexelForFormat(u32 format)
+{
+    switch (format)
+    {
+    case 0:
+    case 1:
+        return 4u; // BGRA8 / RGBA8
+    case 2:
+        return 1u; // R8
+    case 3:
+        return 2u; // R8G8
+    case 4:
+        return 2u; // R16
+    case 5:
+        return 16u; // R32G32B32A32_SFLOAT
+    default:
+        return 4u; // unknown — caller's bounds check still applies
+    }
+}
+
+namespace
+{
+// Sf32 helpers shared with the format unpack/pack table.
+::duetos::core::Sf32 U8ToSf32Unorm(u8 v)
+{
+    // v / 255.0
+    return ::duetos::core::Sf32Div(::duetos::core::Sf32FromU32(v), ::duetos::core::Sf32FromU32(255u));
+}
+::duetos::core::Sf32 U16ToSf32Unorm(u16 v)
+{
+    // v / 65535.0
+    return ::duetos::core::Sf32Div(::duetos::core::Sf32FromU32(v), ::duetos::core::Sf32FromU32(65535u));
+}
+u8 Sf32ToU8Unorm(u32 sf_bits)
+{
+    using ::duetos::core::Sf32;
+    using ::duetos::core::Sf32Clamp;
+    using ::duetos::core::Sf32FromU32;
+    using ::duetos::core::Sf32IsNaN;
+    using ::duetos::core::Sf32Mul;
+    using ::duetos::core::Sf32One;
+    using ::duetos::core::Sf32ToI32;
+    using ::duetos::core::Sf32Zero;
+    Sf32 s{sf_bits};
+    if (Sf32IsNaN(s))
+        return 0;
+    const i32 v = Sf32ToI32(Sf32Mul(Sf32Clamp(s, Sf32Zero(), Sf32One()), Sf32FromU32(255u)));
+    if (v < 0)
+        return 0;
+    if (v > 255)
+        return 255;
+    return static_cast<u8>(v);
+}
+u16 Sf32ToU16Unorm(u32 sf_bits)
+{
+    using ::duetos::core::Sf32;
+    using ::duetos::core::Sf32Clamp;
+    using ::duetos::core::Sf32FromU32;
+    using ::duetos::core::Sf32IsNaN;
+    using ::duetos::core::Sf32Mul;
+    using ::duetos::core::Sf32One;
+    using ::duetos::core::Sf32ToI32;
+    using ::duetos::core::Sf32Zero;
+    Sf32 s{sf_bits};
+    if (Sf32IsNaN(s))
+        return 0;
+    const i32 v = Sf32ToI32(Sf32Mul(Sf32Clamp(s, Sf32Zero(), Sf32One()), Sf32FromU32(65535u)));
+    if (v < 0)
+        return 0;
+    if (v > 65535)
+        return 65535;
+    return static_cast<u16>(v);
+}
+u32 LeU32FromBytes(const u8* p)
+{
+    return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) |
+           (static_cast<u32>(p[3]) << 24);
+}
+void PutU32Le(u8* p, u32 v)
+{
+    p[0] = static_cast<u8>(v & 0xFFu);
+    p[1] = static_cast<u8>((v >> 8) & 0xFFu);
+    p[2] = static_cast<u8>((v >> 16) & 0xFFu);
+    p[3] = static_cast<u8>((v >> 24) & 0xFFu);
+}
+} // namespace
+
+void FetchTexel(u64 resource_handle, u32 x, u32 y, u32 out[4])
+{
+    using ::duetos::core::Sf32One;
+    using ::duetos::core::Sf32ToBits;
+    using ::duetos::core::Sf32Zero;
+    // Default to (0, 0, 0, 1) per spec for sampler-less OOB reads.
+    out[0] = Sf32ToBits(Sf32Zero());
+    out[1] = Sf32ToBits(Sf32Zero());
+    out[2] = Sf32ToBits(Sf32Zero());
+    out[3] = Sf32ToBits(Sf32One());
+    const ImageRecord* rec = ResolveImageRecord(resource_handle);
+    if (rec == nullptr || rec->backing == nullptr || rec->extent.width == 0 || rec->extent.height == 0)
+        return;
+    if (x >= rec->extent.width || y >= rec->extent.height)
+        return;
+    const u32 bpt = BytesPerTexelForFormat(rec->format);
+    const u64 off = (static_cast<u64>(y) * rec->extent.width + x) * bpt;
+    const u8* p = static_cast<const u8*>(rec->backing) + off;
+    switch (rec->format)
+    {
+    case 0:
+    case 1:
+        // Backing byte order is [R, G, B, A] regardless of the
+        // Vulkan enum name (the on-disk layout matches what
+        // SampleImageRgba8 expects).
+        out[0] = Sf32ToBits(U8ToSf32Unorm(p[0]));
+        out[1] = Sf32ToBits(U8ToSf32Unorm(p[1]));
+        out[2] = Sf32ToBits(U8ToSf32Unorm(p[2]));
+        out[3] = Sf32ToBits(U8ToSf32Unorm(p[3]));
+        break;
+    case 2:
+        out[0] = Sf32ToBits(U8ToSf32Unorm(p[0]));
+        break;
+    case 3:
+        out[0] = Sf32ToBits(U8ToSf32Unorm(p[0]));
+        out[1] = Sf32ToBits(U8ToSf32Unorm(p[1]));
+        break;
+    case 4:
+    {
+        const u16 r = static_cast<u16>(p[0]) | (static_cast<u16>(p[1]) << 8);
+        out[0] = Sf32ToBits(U16ToSf32Unorm(r));
+        break;
+    }
+    case 5:
+        // Raw f32 round-trip — backing carries the Sf32 bit
+        // pattern in little-endian order; the executor's Sf32
+        // helpers operate on the same u32 bit pattern.
+        out[0] = LeU32FromBytes(p + 0);
+        out[1] = LeU32FromBytes(p + 4);
+        out[2] = LeU32FromBytes(p + 8);
+        out[3] = LeU32FromBytes(p + 12);
+        break;
+    default:
+        break;
+    }
+}
+
+void WriteTexel(u64 resource_handle, u32 x, u32 y, const u32 in[4])
+{
+    ImageRecord* rec = ResolveImageRecordMut(resource_handle);
+    if (rec == nullptr || rec->backing == nullptr || rec->extent.width == 0 || rec->extent.height == 0)
+        return;
+    if (x >= rec->extent.width || y >= rec->extent.height)
+        return;
+    const u32 bpt = BytesPerTexelForFormat(rec->format);
+    const u64 off = (static_cast<u64>(y) * rec->extent.width + x) * bpt;
+    u8* p = static_cast<u8*>(rec->backing) + off;
+    switch (rec->format)
+    {
+    case 0:
+    case 1:
+        p[0] = Sf32ToU8Unorm(in[0]);
+        p[1] = Sf32ToU8Unorm(in[1]);
+        p[2] = Sf32ToU8Unorm(in[2]);
+        p[3] = Sf32ToU8Unorm(in[3]);
+        break;
+    case 2:
+        p[0] = Sf32ToU8Unorm(in[0]);
+        break;
+    case 3:
+        p[0] = Sf32ToU8Unorm(in[0]);
+        p[1] = Sf32ToU8Unorm(in[1]);
+        break;
+    case 4:
+    {
+        const u16 r = Sf32ToU16Unorm(in[0]);
+        p[0] = static_cast<u8>(r & 0xFFu);
+        p[1] = static_cast<u8>((r >> 8) & 0xFFu);
+        break;
+    }
+    case 5:
+        PutU32Le(p + 0, in[0]);
+        PutU32Le(p + 4, in[1]);
+        PutU32Le(p + 8, in[2]);
+        PutU32Le(p + 12, in[3]);
+        break;
+    default:
+        break;
+    }
+}
+
+u32 FetchTexelBgra8(u64 resource_handle, u32 x, u32 y)
+{
+    const ImageRecord* rec = ResolveImageRecord(resource_handle);
+    if (rec == nullptr || rec->backing == nullptr || rec->extent.width == 0 || rec->extent.height == 0)
+        return 0x00000000u;
+    if (x >= rec->extent.width || y >= rec->extent.height)
+        return 0x00000000u;
+    const u64 off = (static_cast<u64>(y) * rec->extent.width + x) * 4u;
+    const u8* p = static_cast<const u8*>(rec->backing) + off;
+    // Match `SampleImageRgba8`'s convention: backing byte order is
+    // [R, G, B, A]; returned packed word is 0xAARRGGBB. The
+    // function is named "Bgra8" because the Vulkan format enum it
+    // serves is `VK_FORMAT_B8G8R8A8_UNORM`; the on-disk byte order
+    // is DuetOS's internal-RGBA8 layout regardless.
+    return (static_cast<u32>(p[3]) << 24) | (static_cast<u32>(p[0]) << 16) | (static_cast<u32>(p[1]) << 8) |
+           static_cast<u32>(p[2]);
+}
+
+void WriteTexelBgra8(u64 resource_handle, u32 x, u32 y, u32 argb)
+{
+    ImageRecord* rec = ResolveImageRecordMut(resource_handle);
+    if (rec == nullptr || rec->backing == nullptr || rec->extent.width == 0 || rec->extent.height == 0)
+        return;
+    if (x >= rec->extent.width || y >= rec->extent.height)
+        return;
+    const u64 off = (static_cast<u64>(y) * rec->extent.width + x) * 4u;
+    u8* p = static_cast<u8*>(rec->backing) + off;
+    // Inverse of FetchTexelBgra8: argb=0xAARRGGBB packs into
+    // backing bytes [R, G, B, A].
+    p[0] = static_cast<u8>((argb >> 16) & 0xFFu); // R
+    p[1] = static_cast<u8>((argb >> 8) & 0xFFu);  // G
+    p[2] = static_cast<u8>(argb & 0xFFu);         // B
+    p[3] = static_cast<u8>((argb >> 24) & 0xFFu); // A
+}
+
+u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddressMode mode_u, SamplerAddressMode mode_v,
+                     u8 filter)
 {
     if (resource_handle == 0)
         return 0xFF000000u;
@@ -674,8 +957,32 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
     using ::duetos::core::Sf32ToI32;
     using ::duetos::core::Sf32Zero;
 
-    // Apply the addressing mode to fold raw UV into [0, 1].
-    auto fold = [mode](u32 bits) -> Sf32
+    // ClampToBorder is checked per-axis: only the axes whose
+    // mode is ClampToBorder return the border colour when their
+    // UV component falls outside [0, 1]. A mixed sampler such as
+    // (REPEAT_U, BORDER_V) correctly produces tiled-X /
+    // border-stamped-Y output instead of border-everywhere. v0's
+    // border colour is always transparent black (0x00000000); the
+    // spec's per-sampler borderColor variants (opaque black,
+    // opaque white, ints, custom) land when VkSamplerCreateInfo
+    // grows the field.
+    {
+        const Sf32 zero = Sf32Zero();
+        const Sf32 one = Sf32One();
+        const Sf32 uval{u_bits};
+        const Sf32 vval{v_bits};
+        const bool u_out = ::duetos::core::Sf32LessThan(uval, zero) || ::duetos::core::Sf32GreaterThan(uval, one);
+        const bool v_out = ::duetos::core::Sf32LessThan(vval, zero) || ::duetos::core::Sf32GreaterThan(vval, one);
+        if ((mode_u == SamplerAddressMode::ClampToBorder && u_out) ||
+            (mode_v == SamplerAddressMode::ClampToBorder && v_out))
+            return 0x00000000u;
+    }
+
+    // Apply each axis's addressing mode independently to fold raw
+    // UV into [0, 1]. The two folds operate on different scalars
+    // and don't share state — the lambda just routes through the
+    // per-axis mode.
+    auto fold = [](u32 bits, SamplerAddressMode mode) -> Sf32
     {
         Sf32 v{bits};
         switch (mode)
@@ -691,22 +998,22 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
             const Sf32 f = ::duetos::core::Sf32Fract(::duetos::core::Sf32Mul(v, half));
             return ::duetos::core::Sf32Mul(::duetos::core::Sf32Abs(::duetos::core::Sf32Sub(f, half)), two);
         }
+        case SamplerAddressMode::ClampToBorder:
         case SamplerAddressMode::ClampToEdge:
         default:
             return Sf32Clamp(v, Sf32Zero(), Sf32One());
         }
     };
     // Bilinear filtering: sample the 4 texels around (u*w, v*h),
-    // blend by the sub-texel weights.
-    const Sf32 u = fold(u_bits);
-    const Sf32 v = fold(v_bits);
+    // blend by the sub-texel weights. Nearest filter (filter == 0)
+    // short-circuits the bilerp and returns the single texel at
+    // the rounded coordinate — VK_FILTER_NEAREST semantics.
+    const Sf32 u = fold(u_bits, mode_u);
+    const Sf32 v = fold(v_bits, mode_v);
     const Sf32 fx = Sf32Mul(u, Sf32FromU32(rec.extent.width - 1));
     const Sf32 fy = Sf32Mul(v, Sf32FromU32(rec.extent.height - 1));
     const i32 ix = Sf32ToI32(fx);
     const i32 iy = Sf32ToI32(fy);
-    // Sub-pixel offsets (the fractional parts) become the blend weights.
-    const Sf32 fxf = Sf32Sub(fx, Sf32FromU32(static_cast<u32>(ix)));
-    const Sf32 fyf = Sf32Sub(fy, Sf32FromU32(static_cast<u32>(iy)));
 
     auto clamp_to_extent = [&](i32 x, u32 max_w) -> u32
     {
@@ -716,6 +1023,23 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
             return max_w - 1u;
         return static_cast<u32>(x);
     };
+
+    if (filter == 0u)
+    {
+        // VK_FILTER_NEAREST: single texel, no blend. Read the
+        // already-clamped (ix, iy) coordinate.
+        const u32 nx = clamp_to_extent(ix, rec.extent.width);
+        const u32 ny = clamp_to_extent(iy, rec.extent.height);
+        const u64 noff = (static_cast<u64>(ny) * rec.extent.width + nx) * 4u;
+        const u8* np = static_cast<const u8*>(rec.backing) + noff;
+        return (static_cast<u32>(np[3]) << 24) | (static_cast<u32>(np[0]) << 16) | (static_cast<u32>(np[1]) << 8) |
+               static_cast<u32>(np[2]);
+    }
+
+    // Sub-pixel offsets (the fractional parts) become the blend weights.
+    const Sf32 fxf = Sf32Sub(fx, Sf32FromU32(static_cast<u32>(ix)));
+    const Sf32 fyf = Sf32Sub(fy, Sf32FromU32(static_cast<u32>(iy)));
+
     const u32 x0 = clamp_to_extent(ix, rec.extent.width);
     const u32 y0 = clamp_to_extent(iy, rec.extent.height);
     const u32 x1 = clamp_to_extent(ix + 1, rec.extent.width);
@@ -821,6 +1145,8 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
             {
                 spirv::BindDescriptor(vs, 0, b, dsr.bindings[b].handle);
                 spirv::BindDescriptor(fs, 0, b, dsr.bindings[b].handle);
+                spirv::BindSampler(vs, 0, b, dsr.bindings[b].sampler_handle);
+                spirv::BindSampler(fs, 0, b, dsr.bindings[b].sampler_handle);
             }
         }
     }

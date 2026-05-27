@@ -8,6 +8,8 @@
 
 #include "arch/x86_64/serial.h"
 #include "diag/fix_journal.h"
+#include "drivers/gpu/nvidia_gsp_fw.h"
+#include "loader/firmware_loader.h"
 #include "log/klog.h"
 #include "mm/dma.h"
 #include "mm/zone.h"
@@ -56,11 +58,45 @@ const char* PfifoIntrTag(u32 intr)
 //                      parts need before gsp_rm.bin can be
 //                      pushed. On Ampere+ this is folded into
 //                      gsp_rm.bin.
+// Probe + parse the nvfw_bin_hdr container on each blob the loader
+// returns. Symmetric with the AMD GFX-firmware parser path —
+// FwLoad → NvidiaGspFwParse → NvidiaGspFwLog → FwRelease, so an
+// operator who dropped a gsp_tu10x.bin (etc.) sees the descriptor
+// arch class + payload size in the boot log.
+void ProbeAndParseNvidiaBlob(const char* basename)
+{
+    ProbeFirmwareBlob("nvidia-gpu", "[gpu/nvidia]", basename);
+
+    ::duetos::core::FwLoadRequest req{};
+    req.vendor = "nvidia-gpu";
+    req.basename = basename;
+    req.min_bytes = kNvidiaBinHdrBytes;
+    req.max_bytes = kNvidiaMaxGspImageBytes;
+    auto fw = ::duetos::core::FwLoad(req);
+    if (!fw.has_value())
+        return;
+    NvidiaGspFwParsed parsed{};
+    auto r = NvidiaGspFwParse(fw.value().data, fw.value().size, &parsed);
+    if (r.has_value())
+    {
+        NvidiaGspFwLog(basename, parsed);
+    }
+    else
+    {
+        arch::SerialWrite("[gpu/nvidia-fw] ");
+        arch::SerialWrite(basename);
+        arch::SerialWrite(" rejected (reason=");
+        arch::SerialWriteHex(parsed.reject_reason);
+        arch::SerialWrite(")\n");
+    }
+    ::duetos::core::FwRelease(fw.value());
+}
+
 void ProbeFirmwareBlobs()
 {
-    ProbeFirmwareBlob("nvidia-gpu", "[gpu/nvidia]", "gsp_rm.bin");
-    ProbeFirmwareBlob("nvidia-gpu", "[gpu/nvidia]", "gsp_log.bin");
-    ProbeFirmwareBlob("nvidia-gpu", "[gpu/nvidia]", "bootloader.bin");
+    ProbeAndParseNvidiaBlob("gsp_rm.bin");
+    ProbeAndParseNvidiaBlob("gsp_log.bin");
+    ProbeAndParseNvidiaBlob("bootloader.bin");
 }
 
 } // namespace

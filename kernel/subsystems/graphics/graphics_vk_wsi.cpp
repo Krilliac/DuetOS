@@ -204,8 +204,6 @@ VkResult VkAcquireNextImageKHR(VkDevice dev, VkSwapchainKHR sc, u64 timeout_ns, 
 {
     (void)dev;
     (void)timeout_ns;
-    (void)signal_semaphore;
-    (void)signal_fence;
     if (image_index_out == nullptr)
         return VkResult::ErrorInitializationFailed;
     if (!HandleInRange(sc, kSwapchainBase) || !PoolIsLive(g_swapchain_pool, SlotOf(sc, kSwapchainBase)))
@@ -218,6 +216,20 @@ VkResult VkAcquireNextImageKHR(VkDevice dev, VkSwapchainKHR sc, u64 timeout_ns, 
     rec.image_acquired = true;
     *image_index_out = rec.acquired_index;
     ++g_swapchain_acquires;
+    // The spec's contract: when the image becomes "available for
+    // rendering", the caller-supplied semaphore + fence are
+    // signalled. v0 swapchain images are always immediately
+    // available (one frame in flight; no real present-engine wait),
+    // so we signal both here. A real-GPU backend would defer these
+    // signals to the page-flip-completion event.
+    if (signal_semaphore != 0)
+        (void)internal::SignalSemaphoreInternal(signal_semaphore);
+    if (signal_fence != 0 && HandleInRange(signal_fence, kFenceBase))
+    {
+        const u32 fslot = SlotOf(signal_fence, kFenceBase);
+        if (PoolIsLive(g_fence_pool, fslot))
+            g_fence_data[fslot].signalled = true;
+    }
     return VkResult::Success;
 }
 
