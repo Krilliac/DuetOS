@@ -91,6 +91,19 @@ struct FwPackageParsed
     u8 payload_sha256[kDuetFwPackageDigestBytes];
     const u8* payload;
     u32 payload_size;
+
+    // Optional trailing trust-root signature. `has_signature` is set
+    // by FwPackageParse when a well-formed FWSG trailer is present
+    // immediately after the payload. `signature_verified` is set only
+    // after a successful RSA-PKCS1-v1.5 verify against a built-in
+    // trust root (see firmware_package_trust.h). A package can have
+    // `has_signature=true && signature_verified=false` if the trailer
+    // exists but the signature was forged / corrupted / signed with
+    // a key the kernel does not recognise; that is an authentication
+    // failure, not a parse failure.
+    bool has_signature;
+    bool signature_verified;
+    u16 signature_pubkey_id;
 };
 
 const char* FwPackageFamilyName(FwPackageFamily family);
@@ -98,6 +111,15 @@ const char* FwPackageSourceKindName(FwPackageSourceKind source_kind);
 
 bool FwPackageHasFlag(const FwPackageParsed& parsed, FwPackageFlags flag);
 bool FwPackageLoadAllowed(const FwPackageParsed& parsed, bool allow_custom_lab_image);
+
+/// True when the kernel build requires every loaded firmware package
+/// to carry a valid trust-root signature. Defaults to false in dev
+/// builds (so unsigned in-tree fixtures still work) and true in
+/// release builds; controlled by the DUETOS_FW_REQUIRE_SIGNATURE
+/// CMake option. When true, FwPackageParse returns
+/// ErrorCode::PermissionDenied for any package that lacks a valid
+/// signature.
+bool FwPackageSignatureRequired();
 
 /// Parse and verify a DuetOS firmware package. Returns Corrupt for
 /// bad magic/version/bounds or a SHA-256 payload mismatch.

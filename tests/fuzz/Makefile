@@ -295,10 +295,14 @@ $(BIN)/fuzz_x509: fuzz_x509.cpp $(CRYPTO)/x509.cpp $(CRYPTO)/asn1.cpp \
 # --- firmware-package envelope -----------------------------------
 #
 # FwPackageParse validates a 160-byte header + SHA-256 payload
-# digest; the real crypto/sha256 is linked so the digest gate is
-# exercised (host_shim/util/result.h supplies Result).
+# digest AND (when a trailing FWSG signature is present) verifies
+# an RSA-PKCS1-v1.5 signature against the kernel's baked-in trust
+# root. The real crypto/sha256 + crypto/rsa + crypto/bigint +
+# crypto/asn1 are linked so both gates run on the harness.
+# host_shim/util/result.h supplies Result.
 $(BIN)/fuzz_fw_pkg: fuzz_fw_pkg.cpp $(LOADER)/firmware_package.cpp \
-		$(CRYPTO)/sha256.cpp | $(BIN)
+		$(CRYPTO)/sha256.cpp $(CRYPTO)/rsa.cpp \
+		$(CRYPTO)/bigint.cpp $(CRYPTO)/asn1.cpp | $(BIN)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
 # --- PE export-directory walker ----------------------------------
