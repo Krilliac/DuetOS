@@ -1334,12 +1334,19 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // is still deferred. Runs early because it has no
     // dependencies past arch::Cli/Sti.
     DUETOS_BOOT_SELFTEST(duetos::sync::LockdepSelfTest());
+    // Kind taxonomy + LOCKDEP_ASSERT_HELD coverage. Runs in the
+    // same window as the base self-test because the cross-kind
+    // rule lives in the same `LockdepBeforeAcquire` path and has
+    // the same dependencies (arch::Cli/Sti only).
+    DUETOS_BOOT_SELFTEST(duetos::sync::LockdepKindClassSelfTest());
     // Name the canonical hot global locks (sched / kobject /
     // kstack / pci-config / breakpoints) so any inversion
     // detected post-self-test prints readable names instead of
     // raw class IDs. Idempotent; called after the self-test so
     // self-test scratch names don't get clobbered by names that
-    // need to be live for the rest of boot.
+    // need to be live for the rest of boot. This pass also lays
+    // down each class's kind tag (Spin / Sleep) so the cross-kind
+    // rule has live data going into the rest of the kernel boot.
     duetos::sync::LockdepRegisterCanonicalClasses();
 
     SerialWrite("[boot] Bringing up periodic timer.\n");
