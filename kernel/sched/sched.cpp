@@ -301,6 +301,19 @@ struct Task
     // override the routing decision when a peer CPU is idle.
     u32 last_cpu;
 
+    // Adaptive-mutex on-CPU flag. 1 while the task is the
+    // currently-running task on SOME CPU; 0 otherwise (Ready in the
+    // runqueue, Blocked / Sleeping on a wait or sleep queue, Dead).
+    // Set with __ATOMIC_RELEASE on the resuming task right before
+    // ContextSwitch, cleared with __ATOMIC_RELEASE on the outgoing
+    // task right before ContextSwitch. The adaptive mutex slow path
+    // reads this with __ATOMIC_ACQUIRE on a foreign CPU to decide
+    // "spin (owner still running, release imminent)" vs "park (owner
+    // is off-CPU; spinning would burn cycles waiting for a
+    // reschedule)". u8 not bool so the layout is explicit; one byte
+    // packs cheaply alongside the existing u32 last_cpu.
+    u8 on_cpu;
+
     // Hard CPU affinity: bit (1u << cpu_id) set => the task is
     // permitted to run on that CPU. kAffinityAll (~0u) means "no
     // restriction" and is the default for every task, so every
@@ -1741,6 +1754,13 @@ void SchedInit()
     boot_task->win32_last_error = 0;                 // ERROR_SUCCESS, per-thread Win32 slot
     boot_task->last_cpu = cpu::CurrentCpu()->cpu_id; // BSP pin — boot task only ever runs here
     boot_task->affinity_mask = kAffinityAll;         // unrestricted by default
+    // Boot task is the currently-running task on this CPU from the
+    // moment SchedInit returns. Mark on_cpu=1 so the adaptive-mutex
+    // slow path on a peer CPU sees the correct state if it observes
+    // the boot task as a mutex holder before the first real context
+    // switch flips the flag. RELEASE pairs with the ACQUIRE the
+    // slow path uses to read.
+    __atomic_store_n(&boot_task->on_cpu, 1u, __ATOMIC_RELEASE);
 
     Current() = boot_task;
     SchedCpuIncCreated();
@@ -2060,6 +2080,20 @@ bool TaskIsDead(const Task* t)
     return t != nullptr && t->state == TaskState::Dead;
 }
 
+bool TaskIsOnCpu(const Task* t)
+{
+    if (t == nullptr)
+    {
+        return false;
+    }
+    // Read with ACQUIRE so a peer CPU spinning on this flag pairs
+    // cleanly with the RELEASE-store the context-switch path
+    // performs around the same `next->state = Running` /
+    // `prev->state = Ready` transitions. AdaptiveMutex's slow path
+    // is the dominant caller.
+    return __atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE) != 0;
+}
+
 arch::TrapFrame* SchedFindUserTrapFrame(Task* t)
 {
     // Locate the outermost user→kernel TrapFrame on a target's
@@ -2357,6 +2391,26 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
     next->last_cpu = cpu::CurrentCpu()->cpu_id; // pin affinity to this CPU for next wake
     Current() = next;
     ++g_context_switches;
+
+    // Adaptive-mutex on-CPU flag handoff. Cleared on the outgoing
+    // task BEFORE ContextSwitch (it is about to stop running on this
+    // CPU); set on the resuming task right before its rsp is loaded.
+    // Both stores carry RELEASE ordering so a peer CPU reading the
+    // flag with ACQUIRE sees a value consistent with the rest of the
+    // task state at that moment — in particular, a clear is paired
+    // with the state flip out of Running above, and a set is paired
+    // with the assignment of Running + Current() = next on this CPU.
+    //
+    // Order matters: clear `prev` first (it is no longer the owner
+    // of this CPU), then set `next` (it is). On single-CPU early boot
+    // these atomics are still cheap; on SMP they close the race a
+    // spinning adaptive-mutex waiter on a peer CPU would otherwise
+    // see ("flag says on-cpu, but the task is parked on a wait queue").
+    if (prev != next)
+    {
+        __atomic_store_n(&prev->on_cpu, 0u, __ATOMIC_RELEASE);
+    }
+    __atomic_store_n(&next->on_cpu, 1u, __ATOMIC_RELEASE);
 
     // Lock-passing handoff. The lock STAYS HELD across ContextSwitch;
     // SchedFinishTaskSwitch (called below on the resumed task's stack,

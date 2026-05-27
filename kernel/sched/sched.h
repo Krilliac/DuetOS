@@ -172,6 +172,15 @@ Task* SchedFindTaskByTid(u64 target_tid);
 /// "this thread has exited." Safe against a null pointer.
 bool TaskIsDead(const Task* t);
 
+/// True iff `t` is currently the running task on SOME CPU. Reads
+/// the per-task `on_cpu` flag with __ATOMIC_ACQUIRE so a caller
+/// reading from a foreign CPU pairs cleanly with the RELEASE-store
+/// the context-switch path performs when the flag flips. Used by
+/// `sync::AdaptiveMutex`'s slow path to decide "spin (holder is
+/// running; release imminent)" vs "park (holder is off-CPU)". A
+/// null `t` reads false — there is no task to be on-CPU.
+bool TaskIsOnCpu(const Task* t);
+
 /// Canonical reasons a kernel subsystem can request task
 /// termination via `FlagCurrentForKill(reason)`. Used by
 /// Schedule() for the single-line reason log when it converts

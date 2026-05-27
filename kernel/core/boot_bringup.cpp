@@ -240,6 +240,7 @@
 #include "ipc/kwaitable.h"
 #include "ipc/named_kobjects.h"
 #include "ipc/named_pipes.h"
+#include "sync/adaptive_mutex.h"
 #include "sync/lockdep.h"
 #include "sync/rcu.h"
 #include "sync/rwlock.h"
@@ -1611,6 +1612,27 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                                   return duetos::core::Result<void>{};
                                               });
     }
+
+    // Adaptive mutex (illumos-style spin-if-owner-running, park
+    // otherwise). Exercises the fast path, the TryLock surface, the
+    // lockdep round-trip, and the two-task contention park/wake path.
+    // Routed through Phase::Sched because the contention case spawns
+    // workers via SchedCreate and drives them with SchedSleepTicks —
+    // both require the scheduler online. Registered OUTSIDE the
+    // `if constexpr (kBootSelfTests)` gate above: the primitive is a
+    // new kernel sync surface whose correctness has SMP-dependent
+    // edge cases (on_cpu flag handoff at ContextSwitch, park-vs-spin
+    // decision) that a compile-time check cannot prove, so even
+    // release boots run it as a live regression gate. The test is
+    // cheap (~100 ms for the contention worker's sleep) and prints a
+    // single sentinel line on success.
+    duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "adaptive-mutex-selftest",
+                                          []()
+                                          {
+                                              duetos::sync::AdaptiveMutexSelfTest();
+                                              return duetos::core::Result<void>{};
+                                          });
+
     RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Sched), "boot", "RunPhase Sched");
 
     // KObject + HandleTable infrastructure self-tests (plan A3).
