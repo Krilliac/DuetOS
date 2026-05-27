@@ -10,7 +10,9 @@
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
+#include "drivers/gpu/amd_gfx_fw.h"
 #include "drivers/pci/pci.h"
+#include "loader/firmware_loader.h"
 #include "log/klog.h"
 #include "mm/dma.h"
 #include "mm/paging.h"
@@ -75,14 +77,50 @@ const char* GrbmStatusTag(u32 grbm)
 // exist so an operator dropping a blob into
 // /lib/firmware/duetos/open/amd-gpu/ sees their image in the
 // boot log.
+// Run the shared "is it there?" probe AND the gfx-header parser
+// on each blob the loader returns. The parser is freestanding and
+// the FwLoad / FwRelease bracketing keeps the blob alive only for
+// the parse + log window — the actual upload-time consumer (in the
+// follow-on slice) will re-acquire via its own FwLoad.
+void ProbeAndParseAmdBlob(const char* basename)
+{
+    // The shared helper logs presence and size — keep it for parity
+    // with the other vendor probes.
+    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", basename);
+
+    ::duetos::core::FwLoadRequest req{};
+    req.vendor = "amd-gpu";
+    req.basename = basename;
+    req.min_bytes = kAmdCommonFwHeaderBytes;
+    req.max_bytes = kAmdMaxFwSizeBytes;
+    auto fw = ::duetos::core::FwLoad(req);
+    if (!fw.has_value())
+        return;
+    AmdGfxFwParsed parsed{};
+    auto r = AmdGfxFwParse(fw.value().data, fw.value().size, &parsed);
+    if (r.has_value())
+    {
+        AmdGfxFwLog(basename, parsed);
+    }
+    else
+    {
+        arch::SerialWrite("[gpu/amd-fw] ");
+        arch::SerialWrite(basename);
+        arch::SerialWrite(" rejected (reason=");
+        arch::SerialWriteHex(parsed.reject_reason);
+        arch::SerialWrite(")\n");
+    }
+    ::duetos::core::FwRelease(fw.value());
+}
+
 void ProbeFirmwareBlobs()
 {
-    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", "gfx_pfp.bin");
-    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", "gfx_me.bin");
-    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", "gfx_ce.bin");
-    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", "gfx_mec.bin");
-    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", "gfx_rlc.bin");
-    ProbeFirmwareBlob("amd-gpu", "[gpu/amd]", "sdma.bin");
+    ProbeAndParseAmdBlob("gfx_pfp.bin");
+    ProbeAndParseAmdBlob("gfx_me.bin");
+    ProbeAndParseAmdBlob("gfx_ce.bin");
+    ProbeAndParseAmdBlob("gfx_mec.bin");
+    ProbeAndParseAmdBlob("gfx_rlc.bin");
+    ProbeAndParseAmdBlob("sdma.bin");
 }
 
 } // namespace
