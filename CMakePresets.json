@@ -130,6 +130,15 @@
             "cacheVariables": {
                 "DUETOS_LTO": "ON"
             }
+        },
+        {
+            "name": "x86_64-release-karl",
+            "displayName": "x86_64 release with KARL (object-order link randomization, OpenBSD-style)",
+            "description": "Randomizes the per-TU object link order at configure time so every build produces a kernel ELF with different in-image symbol offsets. Strict complement to KASLR (which randomizes the BASE at boot). Seed is drawn from the DUETOS_KARL_SEED env var if set, else a string(RANDOM) value at configure time. The seed is baked into the boot banner and a sidecar kernel.symbols map is emitted next to the ELF so a panic dump can be decoded against the build that produced it.",
+            "inherits": "x86_64-release",
+            "cacheVariables": {
+                "DUETOS_KARL": "ON"
+            }
         }
     ],
     "buildPresets": [
@@ -180,6 +189,10 @@
         {
             "name": "x86_64-release-lto",
             "configurePreset": "x86_64-release-lto"
+        },
+        {
+            "name": "x86_64-release-karl",
+            "configurePreset": "x86_64-release-karl"
         }
     ]
 }
