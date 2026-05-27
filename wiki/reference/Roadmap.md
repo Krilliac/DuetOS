@@ -567,11 +567,40 @@ In rough priority:
   (`kernel/drivers/net/ath9k_htc{,_fw,_upload}.{h,cpp}`) but
   needs a physical dongle — open firmware exists for no on-board
   commodity Wi-Fi chip. (Data-decode + control tier + crypto +
-  4-way handshake + per-vendor upload + ring scaffolds all
-  landed; 16 self-tests pass.)
+  4-way handshake + per-vendor upload + ring scaffolds + regdb
+  US/EU/JP + 802.11d Country-IE intersector all landed; 17
+  self-tests pass.)
 - **Unlocks:** Network flyout SSID picker, Settings → Network →
   Wi-Fi tab, captive-portal handler.
 - **Owner:** `kernel/drivers/net/wireless/`, `kernel/net/wireless/`.
+
+### iwlwifi — live-silicon TX / RX
+
+- **Residual:** PCIe MSI-X negotiation (IVAR LUT writes at
+  `CSR_MSIX_IVAR_AD_REG = 0x2890`, route every cause to vec 0 for
+  single-vector start); per-TFD `iwl_pcie_txq_build_tfd` (legacy
+  format: 20 TBs, `__le16 hi_n_len` packed, `HBUS_TARG_WRPTR =
+  0x460` doorbell); RX queue init via `FH_RSCSR_*` (`0xBC0`,
+  `0xBC4`, `0xBC8` — note write-ptr must be multiple of 8);
+  `iwl_rx_packet` cmd dispatch on `REPLY_RX_MPDU_CMD` →
+  wdev::OnDataRx. ALIVE handler in MSI-X "other" vector.
+- **Reference:** `drivers/net/wireless/intel/iwlwifi/pcie/{tx,rx,trans}.c`
+  in Linux. Start with legacy gen1 (7000/8000/9000) — gen2's BC
+  table + dynamic scheduler is a separate slice.
+- **Owner:** `kernel/drivers/net/iwlwifi_rings.cpp` (598 lines),
+  `kernel/drivers/net/iwlwifi.cpp`.
+
+### ath9k_htc — HTC service negotiation
+
+- **Residual:** post-firmware-upload HTC state machine. Wait for
+  `HTC_MSG_READY_ID` on `USB_REG_IN_PIPE`, send
+  `HTC_MSG_CONFIG_PIPE_ID`, then `HTC_MSG_CONNECT_SERVICE_ID` for
+  `WMI_CONTROL_SVC` / `WMI_BEACON_SVC` / `WMI_MGMT_SVC`. Surface
+  `WmiSend(cmd_id, buf)` to wdev. `WMI_INIT_CMDID` →
+  `WMI_SET_CHANNEL_CMDID` → `WMI_START_RECV_CMDID` lights up the
+  scan path.
+- **Reference:** `drivers/net/wireless/ath/ath9k/{htc_hst,hif_usb}.c`.
+- **Owner:** `kernel/drivers/net/ath9k_htc.cpp` (301 lines).
 
 ### USB mouse — high-DPI real-hardware verification
 
@@ -688,6 +717,165 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
   ready event). (Synchronous BSD subset + the `WSAEvent*` /
   `WSAEventSelect` / `WSAEnumNetworkEvents` async surface +
   kernel `SocketPollEvents` producer landed.)
+
+### `WSAAsyncSelect` (Win32 socket → window-message delivery)
+
+- **Cost:** ~200 LoC in `userland/libs/ws2_32/ws2_32.c` plus a
+  helper thread per process. Zero kernel change — the existing
+  `kSockOpPollEvents` producer is enough.
+- **Design:** process-global socket→{hwnd, msg, events, armed,
+  fired} registry. One helper thread polls every 10 ms (same
+  cadence as the existing `WSAWaitForMultipleEvents` loop), AND
+  `events & armed`, calls `PostMessageA(hwnd, msg, s,
+  MAKELONG(bit, 0))` for each set bit, then clears that bit from
+  `armed`. Re-arm when `recv`/`send`/`accept` returns
+  `WSAEWOULDBLOCK`.
+- **Reference:** ReactOS `dll/win32/msafd/misc/dllmain.c`
+  (`WSPAsyncSelect`, `SockAsyncThread`). Wine's `server/sock.c`
+  has the kernel-push variant.
+- **Unlocks:** Legacy GUI networked PE apps (FTP/IRC/telnet
+  clients, classic Outlook Express). Implement before IOCP
+  because (a) lower kernel change, (b) broader app coverage.
+- **Owner:** `userland/libs/ws2_32/`, `userland/libs/user32/`.
+
+### IOCP for sockets (Win32)
+
+- **Cost:** ~300 LoC for a new `KCompletionPort` kernel object
+  (`kernel/ipc/kcompletion.{h,cpp}`) + new sub-ops on
+  `SYS_HANDLE_OP`: `kCompPortCreate(concurrency)`,
+  `kCompPortAssociate(port, handle, key)`,
+  `kCompPortPost(port, key, bytes, ovl)`,
+  `kCompPortGet(port, &key, &bytes, &ovl, timeoutMs)`. New socket
+  sub-op `kSockOpOverlapped(kind, sock, buf, len, ovl_uptr)`
+  returns `WSA_IO_PENDING` and posts completion to the associated
+  port.
+- **Reference:** Wine `dlls/ws2_32/socket.c` overlapped path +
+  `WS_AddCompletion` → `NtRemoveIoCompletion`.
+- **Ordering:** ship `WSAAsyncSelect` first (no kernel change);
+  IOCP follows when a real overlapped-using PE binary is in test.
+- **Owner:** `kernel/ipc/`, `userland/libs/ws2_32/`.
+
+### TCP sender-side SACK (RFC 6675)
+
+- **Cost:** ~600 LoC sender + ~24 B scoreboard head per TCB +
+  amortised ~16 B per outstanding hole.
+- **Design:** FreeBSD-style tail-queue of `sackhole {start, end,
+  rxmit}` per TCB. On every ACK, walk inbound SACK blocks ↔
+  scoreboard; implement `IsLost()` and `NextSeg()` per RFC 6675
+  §3. On loss → enter fast recovery, set `Pipe`, retransmit
+  `NextSeg()` candidates until `Pipe` hits cwnd.
+- **Reference:** `sys/netinet/tcp_sack.c` (FreeBSD, ~1100 LoC).
+  Linux's equivalent lives inline in `net/ipv4/tcp_input.c`
+  (`tcp_sacktag_write_queue` and friends) — readable but tightly
+  coupled to skb-chain state we don't have.
+- **State:** receiver-side SACK emission already landed; this is
+  the half that turns SACK into a real recovery win on lossy
+  paths.
+- **Owner:** `kernel/net/tcp_segment.cpp`, new
+  `kernel/net/tcp_sack.{h,cpp}` if the scoreboard grows large.
+
+### TCP ECN data plane (IP-layer ECT/CE threading)
+
+- **Cost:** ~200 LoC across `stack.cpp` IPv4 emit/recv +
+  `tcp_segment.cpp` ACK path.
+- **Design:** on outbound IP data segments for `ecn_ok` TCBs, set
+  TOS bits 0..1 to `10` (ECT(0)); on inbound IP CE-marked
+  segments (TOS bits = `11`), flag the receiving TCB
+  `peer_ce_pending = true`; on the next outbound ACK, set
+  ECE=1; on inbound ECE, halve `cwnd`, set `sent_cwr=true`; next
+  outbound data segment carries CWR=1, clears `sent_cwr`.
+- **Reference:** RFC 3168 §6.1.2-§6.1.5; Linux
+  `net/ipv4/tcp_input.c::tcp_ecn_*` family.
+- **State:** SYN-time negotiation landed (per-TCB `ecn_ok` bit
+  set on both sides). Data plane is the missing half.
+- **Pairs with:** AccECN (RFC 9768) — 4 counters per direction
+  for L4S / DOCSIS prioritisation. Land in same slice.
+- **Owner:** `kernel/net/stack.cpp`, `kernel/net/tcp_segment.cpp`.
+
+### TCP CUBIC congestion control (RFC 9438)
+
+- **Cost:** ~400 LoC + 56 B/TCB (14 fields including HyStart,
+  drop HyStart for v0 → ~350 LoC + ~40 B).
+- **Design:** drop-in replacement for Reno's window math. New
+  per-TCB fields (`last_max_cwnd`, `bic_K`, `bic_origin_point`,
+  `epoch_start`, etc); on ACK, compute `W_cubic(t) = C·(t-K)³ +
+  W_max`; on loss, `W_max = cwnd; cwnd *= 0.7`.
+- **Reference:** Linux `net/ipv4/tcp_cubic.c` (552 LoC, the
+  floor for a correct implementation; integer cube-root via
+  lookup-table + Newton iteration is the only non-obvious bit).
+- **BBR deferred indefinitely:** needs a pacer (no qdisc),
+  delivery-rate estimator (no `tx_done` skb timestamps), four-
+  state machine (~2000 LoC). Land CUBIC first.
+- **Owner:** `kernel/net/tcp_segment.cpp` (window math) +
+  new `kernel/net/tcp_cubic.{h,cpp}` if state grows.
+
+### IPv6 dual-stack
+
+- **Cost:** ~3000 LoC + ~15 KB state.
+- **Design:** mirror lwIP's `src/core/ipv6/` (smallest correct
+  IPv6 reference at ~3000 LoC). Cross-reference OpenBSD
+  `sys/netinet6/` for the cleaner protocol layering. Address
+  widening: 4-byte → 16-byte union on every `addr_t`; per-socket
+  +10 B for AF+V6ONLY+scope+flowinfo; per-TCB +24 B for
+  dual-family endpoints; prefix list + default-router list +
+  neighbor cache ~6 KB total.
+- **Approach:** AF_INET6 as the native type with v4-mapped
+  addresses (`::ffff:0:0/96`) bridging. NOT separate AF_INET +
+  AF_INET6 codepaths.
+- **Required pieces:** NDP (NS/NA), Router Discovery (RS/RA),
+  prefix-info → SLAAC, MLD (mandatory for solicited-node
+  reception), fragment reassembly (sender-side fragmentation can
+  defer to PMTUD-discovered minimum MTU + don't-fragment).
+- **Owner:** new `kernel/net/ipv6/` subdirectory; subsystem page
+  follows the same shape as `Network-Stack.md`.
+
+### TLS certificate verification (vendor BearSSL `x509_minimal`)
+
+- **Cost:** ~6000 LoC X.509 + ASN.1 surface (vendored from
+  BearSSL; MIT-licensed; single author).
+- **Design:** streaming SAX-style chain validator (constant-RAM,
+  no malloc). Trust anchors stored as `{DN-hash, SPKI}` pairs
+  (~300 B each; 140-root Mozilla bundle = ~50 KB resident).
+- **Pipeline:**
+  1. Build-time: `tools/ca-bundle/extract_certs.py` reads NSS
+     `certdata.txt`, honours `CKA_TRUST_SERVER_AUTH` /
+     `NOT_TRUSTED` bits (most parsers miss this), emits both PEM
+     and the BearSSL-style compact `{DN, SPKI}` C array as
+     `kernel/net/x509/trust_anchors.gen.cpp`.
+  2. Runtime: `br_x509_minimal` validator pulled into
+     `kernel/net/x509/`, integrated with `tls.cpp`'s certificate
+     message handler.
+  3. RFC 6125 DNS-ID matching on `subjectAltName:dNSName`
+     (~100 LoC).
+- **TLS 1.2 first, TLS 1.3 after.** Same reasoning as BearSSL's:
+  TLS 1.3 deprecates chain ordering, which breaks constant-RAM
+  validation; workaround is a small N=8 intermediate buffer
+  (~32 KB scratch) for DFS path-building.
+- **Minimum cipher suites for 2026 CDNs:**
+  - TLS 1.2: `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` (0xC02F),
+    `TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256` (0xCCA8),
+    `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` (0xC02B).
+  - TLS 1.3: all three RFC-mandatory (0x1301/0x1302/0x1303).
+  - Extensions: SNI mandatory, ALPN with `["http/1.1"]`.
+- **Verification target:** HTTPS to `www.google.com` with chain
+  validated against bundled Mozilla CAs.
+- **Owner:** new `kernel/net/x509/`, updates to `kernel/net/tls.cpp`,
+  new `tools/ca-bundle/` for the refresh pipeline.
+
+### Open-firmware adoption (per Wireless / GPU)
+
+- See [Open Firmware Landscape 2026](../drivers/Open-Firmware-Landscape-2026.md)
+  for the full decision matrix. Concrete next slices:
+  - **Wire ath9k_htc HTC service negotiation against
+    `qca/open-ath9k-htc-firmware` builds** — first physical-
+    hardware Wi-Fi target with zero closed firmware.
+  - **`.duetfw` package signing root** — Ed25519 offline HSM
+    project root + yearly intermediate; signer-key-ID format as
+    SHA-256 truncated to 16 B (Sigstore convention).
+  - **Quarterly firmware-landscape refresh** — rotate
+    `Open-Firmware-Landscape-2026.md` every quarter; key items
+    to recheck: Nexmon supported chips, openwifi releases, any
+    Realtek open-firmware emergence (currently zero).
 
 ---
 
