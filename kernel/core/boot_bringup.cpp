@@ -78,6 +78,7 @@
 #include "drivers/input/hid_keyboard.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/iommu/dmar.h"
+#include "drivers/iommu/ivrs.h"
 #include "drivers/iommu/vtd.h"
 #include "drivers/iommu/vtd_paging.h"
 #include "drivers/input/ps2mouse.h"
@@ -1202,6 +1203,14 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // DmarPresent()=false (QEMU-default / VirtualBox).
     duetos::drivers::iommu::VtdInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::VtdSelfTest());
+
+    // AMD-Vi IVRS discovery + parse. Mirror of DmarInit for AMD
+    // platforms. No-op (table absent) on Intel boxes; surfaces
+    // IVHD/IVMD blocks on AMD boxes for the (future) AMD-Vi
+    // register / page-table slices to consume. No write of any
+    // IOMMU register here either.
+    duetos::drivers::iommu::IvrsInit();
+    DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::IvrsSelfTest());
 
     // VT-d identity-passthrough page tables. Builds root + shared
     // context + identity-mapping PDPT (3 frames = 12 KiB). The

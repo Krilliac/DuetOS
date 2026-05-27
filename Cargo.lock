@@ -148,6 +148,10 @@ name = "duetos_img_meta"
 version = "0.0.1"
 
 [[package]]
+name = "duetos_ivrs"
+version = "0.0.1"
+
+[[package]]
 name = "duetos_iwlwifi_fw"
 version = "0.0.1"
 
@@ -165,6 +169,7 @@ dependencies = [
  "duetos_ext4",
  "duetos_hci",
  "duetos_img_meta",
+ "duetos_ivrs",
  "duetos_iwlwifi_fw",
  "duetos_multiboot2",
  "duetos_net_parsers",

@@ -21,6 +21,7 @@ duetos_acpi = { path = "../acpi/acpi_rust" }
 duetos_amd_gfx_fw = { path = "../drivers/gpu/amd_gfx_fw_rust" }
 duetos_bcm43xx_fw = { path = "../drivers/net/bcm43xx_fw_rust" }
 duetos_dmar = { path = "../drivers/iommu/dmar_rust" }
+duetos_ivrs = { path = "../drivers/iommu/ivrs_rust" }
 duetos_exec_meta = { path = "../loader/exec_meta_rust" }
 duetos_exfat = { path = "../fs/exfat_rust" }
 duetos_ext4 = { path = "../fs/ext4_rust" }

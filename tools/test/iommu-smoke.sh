@@ -14,6 +14,11 @@
 # Env vars:
 #   DUETOS_PRESET   — kernel preset (default x86_64-debug)
 #   DUETOS_TIMEOUT  — wall-clock cap in seconds (default 60)
+#   IOMMU_VENDOR    — "intel" (default) or "amd" — picks which
+#                     QEMU IOMMU device to plug in. Both paths
+#                     exist in the kernel; default to intel
+#                     because it matches the slice that introduced
+#                     this script.
 #
 # What this script proves:
 #   - DmarInit() actually decodes a real DMAR ACPI table (not just
@@ -35,6 +40,13 @@ set -euo pipefail
 
 PRESET="${DUETOS_PRESET:-x86_64-debug}"
 TIMEOUT_SECS="${DUETOS_TIMEOUT:-60}"
+VENDOR="${IOMMU_VENDOR:-intel}"
+
+case "${VENDOR}" in
+    intel) IOMMU_DEVICE="intel-iommu,intremap=off"; EXPECT_LINE="^\[vtd\] iommu\[0\] base=" ;;
+    amd)   IOMMU_DEVICE="amd-iommu"; EXPECT_LINE="^\[ivrs\] ivhd\[0\] type=" ;;
+    *)     echo "iommu-smoke: unknown IOMMU_VENDOR='${VENDOR}' (use intel|amd)" >&2; exit 2 ;;
+esac
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/../.." && pwd)"
@@ -69,19 +81,19 @@ timeout "${TIMEOUT_SECS}" qemu-system-x86_64 \
     -display none \
     -serial stdio \
     -no-reboot -no-shutdown \
-    -device intel-iommu,intremap=off \
+    -device "${IOMMU_DEVICE}" \
     -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
     -drive "if=pflash,format=raw,file=${OVMF_VARS}" \
     -drive "file=${BUILD_DIR}/duetos.iso,index=2,media=cdrom,readonly=on,format=raw" \
     -boot d \
     > "${LOG}" 2>&1 || true
 
-if grep -qE "^\[vtd\] iommu\[0\] base=" "${LOG}"; then
-    echo "iommu-smoke: OK — live VT-d decode succeeded"
-    grep -E "^\[dmar\]|^\[vtd" "${LOG}"
+if grep -qE "${EXPECT_LINE}" "${LOG}"; then
+    echo "iommu-smoke: OK — live ${VENDOR^^} IOMMU decode succeeded"
+    grep -E "^\[dmar|^\[vtd|^\[ivrs" "${LOG}"
     exit 0
 else
-    echo "iommu-smoke: FAIL — no [vtd] iommu[0] line in boot log" >&2
+    echo "iommu-smoke: FAIL — no '${EXPECT_LINE}' in boot log" >&2
     echo "Last 30 lines of ${LOG}:"
     tail -30 "${LOG}" >&2
     exit 1
