@@ -77,6 +77,7 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/timer.h"
+#include "cpu/ipi_call.h"
 #include "cpu/percpu.h"
 #include "cpu/topology.h"
 #include "debug/breakpoints.h"
@@ -708,6 +709,11 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // peer's TLB from carrying a stale entry into a recycled frame.
     // wiki/security/Linux-CVE-Audit.md class FF.
     duetos::arch::SmpInstallTlbShootdownIpiHandler();
+    // Cross-CPU function-call IPI (kernel/cpu/ipi_call.h). Must
+    // install BEFORE SmpStartAps so the AP IDT clone (built during
+    // bring-up) inherits the wired vector — otherwise the first
+    // IpiCallEach to a fresh AP would fault on an empty IDT slot.
+    duetos::cpu::IpiCallInstall();
 
     // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
     // INIT and SIPI; the dedicated idle task installed at the top
@@ -727,6 +733,17 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // rule (NUMA-node, package, or single) and propagate to PerCpu.
     duetos::cpu::TopologyAssignClusters();
     duetos::cpu::TopologyDump();
+
+    // Cross-CPU function-call primitive self-test. Drives:
+    //   - IpiCallOne to self (wait=true / wait=false).
+    //   - IpiCallOne to a peer CPU when SMP > 1.
+    //   - IpiCallEach across every online CPU.
+    // Unconditional (not gated by `kBootSelfTests`) so the
+    // structural `[ipi-call] self-test OK` sentinel appears in
+    // release smoke logs too — the primitive is foundational
+    // enough that a silent regression would mask real breakage in
+    // future TLB-shootdown / runtime-checker callers.
+    duetos::cpu::IpiCallSelfTest();
 
     // Runtime invariant checker baseline is owned by
     // `BootBringupKernelServices`: it runs `RuntimeCheckerTeardown`
