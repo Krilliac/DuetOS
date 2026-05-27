@@ -129,6 +129,19 @@ void DoMutexWait(arch::TrapFrame* frame)
         return;
     }
 
+    // Per-handle rights gate — the process-level cap check
+    // (SyscallGate) already ran upstream as the ceiling; this is
+    // the narrower per-handle floor. A handle minted with reduced
+    // rights cannot waive its way back up by re-entering the
+    // syscall. Mutex acquire == Wait.
+    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightWait))
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/mutex",
+                     "NtWaitForSingleObject: handle lacks Wait right; handle", handle);
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+
     // Pin the kernel object across the wait — closing every
     // handle in parallel cannot free the storage while we hold
     // this reference. KMutexAcquire/AcquireTimed also take
@@ -205,6 +218,15 @@ void DoMutexRelease(arch::TrapFrame* frame)
     if (ipc_h == ipc::kHandleInvalid)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/mutex", "NtReleaseMutant: bad handle; handle", handle);
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    // Per-handle rights gate — release is the signalling side of
+    // a mutex (hands off ownership), so kHandleRightSignal gates it.
+    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightSignal))
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/mutex",
+                     "NtReleaseMutant: handle lacks Signal right; handle", handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }

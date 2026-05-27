@@ -9,6 +9,7 @@
 #include "arch/x86_64/timer.h"
 #include "arch/x86_64/traps.h"
 #include "time/tick.h"
+#include "cpu/cpuhp.h"
 #include "cpu/percpu.h"
 #include "debug/probes.h"
 #include "net/wireless/wifi_diag.h"
@@ -34,6 +35,7 @@ extern "C" void duetos_arch_PanicCaptureShim();
 #include "mm/kstack.h"
 #include "proc/process.h"
 #include "sched/sched.h"
+#include "sync/lockdep.h"
 #include "test/smoke_profile.h"
 #include "util/build_config.h"
 #include "util/symbols.h"
@@ -1018,6 +1020,12 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     // shared-stats copy by design).
     ::duetos::diag::KPathEmitBootSummary();
     DumpHeldLocksLocal();
+    // Lockdep view of the held set — pairs with the raw per-CPU
+    // held_locks dump above. The raw dump shows SpinLock pointers;
+    // lockdep prints class names + kinds (so you can tell at a
+    // glance whether the panicking task held a Sleep or Spin lock).
+    // Safe in panic context (raw serial, lockdep re-entry guard).
+    ::duetos::sync::LockdepDumpHeldSets();
     DumpLogRing();
     DumpInflightScopes();
     // Wireless diag ring — only meaningful on hosts with active
@@ -1136,6 +1144,10 @@ void Panic(const char* subsystem, const char* message)
     // walker then climbs up through the caller.
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
     DumpPeerCpuSnapshots();
+    // Per-CPU cpuhp state dump. Useful when a panic surfaces during
+    // AP bring-up — the per-CPU state slot pinpoints which Starting*
+    // step the AP was inside, narrowing the trail beyond just RIP.
+    ::duetos::cpu::CpuhpDumpStates();
     duetos::diag::TlbHistoryDump();
     DumpEventTraceTail();
 
@@ -1235,6 +1247,10 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
 
     DumpDiagnostics(reinterpret_cast<u64>(__builtin_return_address(0)), arch::ReadRsp(), arch::ReadRbp());
     DumpPeerCpuSnapshots();
+    // Per-CPU cpuhp state dump. Useful when a panic surfaces during
+    // AP bring-up — the per-CPU state slot pinpoints which Starting*
+    // step the AP was inside, narrowing the trail beyond just RIP.
+    ::duetos::cpu::CpuhpDumpStates();
     duetos::diag::TlbHistoryDump();
     DumpEventTraceTail();
 

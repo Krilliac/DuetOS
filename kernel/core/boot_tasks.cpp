@@ -138,6 +138,12 @@ void KbdReaderTask(void*)
 {
     using namespace duetos::arch;
     using namespace duetos::drivers::input;
+    // Opt out of the hung-task detector — this task legitimately
+    // sits in `TaskState::Blocked` inside `Ps2KeyboardReadEvent` for
+    // arbitrarily long when no keys are pressed (the QEMU smoke runs
+    // through a 60s boot with no input at all). The detector would
+    // otherwise correctly report it as "blocked > 30s" every minute.
+    duetos::sched::SchedExemptCurrentFromHungTask();
     // Sample at each compose call so Ctrl+Alt+Y (theme cycle)
     // takes effect on the very next repaint — don't cache.
     auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
@@ -1819,6 +1825,10 @@ duetos::drivers::input::MousePacket AcquireCoalescedPacket(PendingMousePacket& p
 void MouseReaderTask(void*)
 {
     using namespace duetos::arch;
+    // Opt out of the hung-task detector — same rationale as
+    // KbdReaderTask: a quiescent QEMU smoke leaves this task
+    // Blocked inside `Ps2MouseReadEvent` for the entire run.
+    duetos::sched::SchedExemptCurrentFromHungTask();
     // Drag state is local to this thread. No other task
     // observes windows moving, so keeping the state on the
     // stack (via static-lambda-local) avoids a fragile global.

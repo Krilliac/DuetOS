@@ -323,6 +323,30 @@ enum class ProbeId : u8
     // fails at runtime"), so any fire is a kernel programmer bug.
     kResultExpectFail,
 
+    // LOCKDEP_ASSERT_HELD ran and the asserted class was NOT on the
+    // current CPU's spin held-stack and NOT on the current task's
+    // sleep held-stack — i.e. the caller violated the precondition
+    // "you must hold this lock to call me." Caller passes the
+    // failing LockClass id as `value`. ArmedLog by default: a clean
+    // boot never trips an assert (its contract is "the caller
+    // already holds the lock"), so any fire is a real lock-discipline
+    // bug worth a sentinel line + a GDB break on `ProbeFire` to land
+    // exactly one frame above the offending caller.
+    kLockdepAssertHeldFailed,
+
+    // Hung-task detector first-crossed-threshold for a TID. Fired
+    // from `diag::HungTaskTick` when a task has sat in
+    // TaskState::Blocked for longer than `kHungTaskThresholdTicks`
+    // (30 s on the 100 Hz clock). Caller passes the offending TID
+    // as `value`. ArmedLog by default — a clean boot never has a
+    // hung task, so any fire is a real lost-wakeup / deadlock /
+    // dropped-signal signal worth a sentinel line + an attached
+    // GDB break-point on `ProbeFire`. Complementary to
+    // `kSchedContextSwitch`-class signals: soft-lockup catches
+    // "task running but not yielding"; hung-task catches "task
+    // blocked but never woken".
+    kHungTaskDetected,
+
     kCount, // sentinel
 };
 

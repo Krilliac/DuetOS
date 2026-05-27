@@ -3,6 +3,7 @@
 #include "arch/x86_64/serial.h"
 #include "core/init.h"
 #include "diag/fix_journal.h"
+#include "diag/kstat.h"
 #include "loader/pe_loader.h"
 #include "log/klog.h"
 #include "sched/sched.h"
@@ -805,8 +806,29 @@ constinit RamfsNode k_proc_fixjournal = {
     .file_size = 0,
 };
 
+// ------- /proc/kstat -------
+//
+// Unified machine-readable kernel-statistics surface. One line per
+// registered entry; refreshed by the heartbeat so the file's content
+// is at most one tick stale. Format: `<module>:<name> <kind> <value>`,
+// preceded by a two-line `#`-prefixed header.
+//
+// 16 KiB is plenty for a 128-entry registry — each line is well
+// under 128 bytes (longest expected key ~60 chars, value max 20
+// decimal digits, kind 7 chars, separators 4 bytes).
+constexpr u32 kKstatBufferBytes = 16 * 1024;
+u8 g_kstat_buffer[kKstatBufferBytes] = {};
+
+constinit RamfsNode k_proc_kstat = {
+    .name = "kstat",
+    .type = RamfsNodeType::kFile,
+    .children = nullptr,
+    .file_bytes = g_kstat_buffer,
+    .file_size = 0,
+};
+
 constinit const RamfsNode* const k_proc_children[] = {
-    &k_proc_boottrace, &k_proc_dumps, &k_proc_fixjournal, &k_proc_abi_dir, &k_proc_cpuhist, nullptr,
+    &k_proc_boottrace, &k_proc_dumps, &k_proc_fixjournal, &k_proc_kstat, &k_proc_abi_dir, &k_proc_cpuhist, nullptr,
 };
 
 constinit RamfsNode k_proc_dir = {
@@ -1149,6 +1171,17 @@ void RamfsFixJournalSnapshot()
     }
     g_fixjournal_cursor = c;
     k_proc_fixjournal.file_size = c;
+}
+
+void RamfsKstatSnapshot()
+{
+    // KstatFormatProcText is bounded and lock-free on the read path,
+    // so this is safe to call from the heartbeat thread. The buffer
+    // is .bss, no allocations. Overflow truncates silently — the
+    // registry is capped at 128 entries, so under any realistic
+    // configuration we never come close to filling 16 KiB.
+    const u64 wrote = duetos::diag::KstatFormatProcText(reinterpret_cast<char*>(g_kstat_buffer), kKstatBufferBytes);
+    k_proc_kstat.file_size = wrote;
 }
 
 namespace

@@ -99,6 +99,10 @@ const char* FaultKindName(FaultKind k)
         return "stack-canary-failed";
     case FaultKind::SoftLockup:
         return "soft-lockup";
+    case FaultKind::PoisonGuardHit:
+        return "poison-guard-hit";
+    case FaultKind::HungTask:
+        return "hung-task";
     case FaultKind::Unknown:
         return "unknown";
     }
@@ -142,12 +146,21 @@ FaultReaction DefaultReactionPolicy(const FaultEvidence& ev)
     case FaultKind::InternalInvariant:
     case FaultKind::SoftLockup:
         return FaultReaction::RestartDomain; // Subsystem-local; floor may upgrade to Halt.
+    case FaultKind::HungTask:
+        // Hung-task is observational in v0 — log + continue. A
+        // future fault-domain owner that knows a particular hung
+        // task is recoverable (e.g. a driver worker thread tied
+        // to a restartable domain) can override the policy via
+        // FaultReactSetPolicy to escalate to RestartDomain.
+        return FaultReaction::Continue;
     case FaultKind::UserPageFault:
         return FaultReaction::KillProcess; // Class C.
     case FaultKind::KernelPageFault:
     case FaultKind::MemoryCorruption:
     case FaultKind::StackCanaryFailed:
         return FaultReaction::Halt; // Class A floor anyway.
+    case FaultKind::PoisonGuardHit:
+        return FaultReaction::Halt; // Catching the bug at the write site IS the point.
     case FaultKind::Unknown:
         return FaultReaction::Continue; // Floor still applies.
     }
@@ -171,6 +184,7 @@ FaultReaction FaultReactPolicyFloor(const FaultEvidence& ev)
     case FaultKind::MemoryCorruption:
     case FaultKind::StackCanaryFailed:
     case FaultKind::KernelPageFault:
+    case FaultKind::PoisonGuardHit:
         return FaultReaction::Halt;
     default:
         break;

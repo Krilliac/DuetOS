@@ -20,19 +20,22 @@
  *   per-instance disambiguation lands when there's a workload
  *   that needs it.
  *
- * SCOPE FOR THIS COMMIT
+ * SCOPE
  *   - Graph storage + edge recording + cycle detection.
- *   - Held-class stack (single global, fine until SMP ships;
- *     per-CPU upgrade is one ifdef once kPerCpu lands real).
+ *   - Per-CPU held-class stack (`acpi::kMaxCpus` slots, indexed
+ *     by `cpu::CurrentCpuIdOrBsp()` inside `Cli`) for spinlock
+ *     classes; per-task held-class stack threaded through
+ *     `Task` + the context-switch boundary for sleeping mutex
+ *     classes (so a mutex held across a yield-and-resume on a
+ *     different CPU stays attributed to the holding task).
  *   - Self-test that synthesises `A then B` followed by `B then A`
  *     and asserts an inversion is reported.
  *
  *   NOT IN SCOPE (tracked as D1 follow-ups in the plan):
- *   - Hooking SpinLock / Mutex / RwLock acquire/release paths.
- *     Those changes need a `class_id` field added to each lock
- *     type and would touch every initialiser; deferred.
+ *   - Hooking every SpinLock / Mutex / RwLock instance — class
+ *     IDs are wired at the primary acquire/release sites; per-
+ *     instance disambiguation arrives when a workload needs it.
  *   - Promoting warnings to panics after a stabilisation window.
- *   - Per-CPU held stack via the SMP scaffolding.
  *
  * USAGE PATTERN (once primitives are hooked up)
  *
@@ -61,6 +64,47 @@ namespace duetos::sync
 {
 
 using LockClass = u16;
+
+/// WITNESS-style lock-kind taxonomy. A class registration tags each
+/// lock with the execution context it lives in so the cross-kind
+/// rule below can flag "you are about to do something that would
+/// be unsafe to do while holding what you already hold."
+///
+/// The RULE (enforced in `LockdepBeforeAcquire`):
+///
+///   While holding a Spin lock, acquiring a Sleep lock is a BUG
+///   — the Sleep acquire may yield, but the CPU has interrupts
+///   off and another task cannot run on it, so the yield path
+///   is unsafe / will deadlock.
+///
+///   While holding a Sleep lock, acquiring a Spin lock is FINE
+///   — a spin acquire never yields, so a Sleep-then-Spin nesting
+///   is legal.
+///
+///   An Irq-kind class is the strictest: held only inside an
+///   IRQs-off section. Holding an Irq lock and acquiring a Sleep
+///   lock has the same problem as holding a Spin lock and
+///   acquiring a Sleep lock, AND the IRQs-off invariant means
+///   acquiring another Spin lock under it is fine only if that
+///   Spin lock is similarly IRQs-off-safe.
+///
+/// Concretely, the violation `LockdepBeforeAcquire` reports is:
+///
+///   - new kind = Sleep AND any held class is Spin or Irq, OR
+///   - new kind = Sleep AND held context implies we cannot yield.
+///
+/// All other combinations are legal. The violation is non-fatal in
+/// v0 (just like the existing inversion detector) — bumps the
+/// `g_kind_violations` saturating counter and emits one WARN line
+/// per occurrence. Non-fatal because the cross-kind discipline is
+/// new and the steady-state code may surface latent violations we
+/// want to triage before promoting to panic.
+enum class LockKind : u8
+{
+    Spin = 0, // SpinLock — held with IRQs off, must not yield.
+    Sleep,    // sched::Mutex / RwLock — may yield.
+    Irq,      // strictly hardirq-safe spinlock (subset of Spin).
+};
 
 /// Sentinel: locks with this class ID are skipped entirely. Default
 /// for any uninitialised lock — the cost of unclassified locks is
@@ -171,14 +215,27 @@ inline constexpr u32 kLockdepHeldMax = 128;
 
 /// Optional metadata: associate a stable name with a class ID so
 /// inversion reports can print something readable. Multiple
-/// registrations with the same ID are allowed (the last name
-/// wins; useful for late-binding tags during driver load).
-/// IDs at or beyond `kLockClassMax` are silently ignored.
-void LockdepRegisterClass(LockClass id, const char* name);
+/// registrations with the same ID are allowed (the last
+/// (name, kind) wins; useful for late-binding tags during driver
+/// load). IDs at or beyond `kLockClassMax` are silently ignored.
+///
+/// `kind` declares which execution context the lock lives in;
+/// see `LockKind` for the cross-kind rule lockdep enforces.
+/// Defaults to `LockKind::Sleep` because that's the strictest
+/// "no special context required" choice — a Sleep lock can be
+/// taken from anywhere a real lock can be taken — so leaving the
+/// kind argument off NEVER turns a clean call site into a kind-
+/// cross violation. Spin / Irq sites pass their kind explicitly.
+void LockdepRegisterClass(LockClass id, const char* name, LockKind kind = LockKind::Sleep);
 
 /// Returns the registered name for `id`, or "?" if unregistered /
 /// out of range.
 const char* LockdepClassName(LockClass id);
+
+/// Returns the registered kind for `id`. Defaults to
+/// `LockKind::Sleep` if `id` was never explicitly registered with
+/// a kind (matches the `LockdepRegisterClass` default).
+LockKind LockdepClassKind(LockClass id);
 
 /// Call BEFORE acquiring a lock with class `id`. Walks the held
 /// stack:
@@ -234,6 +291,20 @@ void LockdepHeldRestore(const LockClass* in, u32 depth);
 /// this; non-zero is a kernel bug to triage.
 u64 LockdepInversionsDetected();
 
+/// Total cross-kind violations detected since boot (e.g. trying
+/// to acquire a Sleep lock while a Spin lock is held). Cheap to
+/// read; saturating counter. Non-zero indicates either a real
+/// bug or a misclassified kind tag — investigate the first
+/// occurrence's WARN line for the offending pair.
+u64 LockdepKindViolations();
+
+/// Total `LOCKDEP_ASSERT_HELD` failures since boot — i.e. how
+/// many times an assertion ran and the class was NOT on the
+/// current CPU's spin stack or the current task's sleep stack.
+/// Cheap to read; saturating counter. Non-zero indicates a real
+/// "we expected the caller to hold this lock" assertion fired.
+u64 LockdepAssertHeldFailures();
+
 /// Set the promote-to-panic policy (plan D1-followup). When
 /// true, any subsequent inversion is a hard panic instead of a
 /// klog warning. Default false — a boot under instrumentation
@@ -273,6 +344,32 @@ void LockdepRegisterCanonicalClasses();
 /// graph after triaging a noisy inversion run.
 void LockdepReset();
 
+/// Assert that the calling context holds the lock identified by
+/// `class_id`. Walks the current CPU's spin held-stack and the
+/// current task's sleep held-stack (which is the same per-CPU
+/// stack — sched::Schedule snapshots into Task on switch-out and
+/// restores on switch-in, so at any given moment the per-CPU
+/// stack covers BOTH kinds for the running task). If `class_id`
+/// is absent from both, emits one WARN line, fires the
+/// `kLockdepAssertHeldFailed` probe, and bumps
+/// `g_assert_held_failures`. Non-fatal — caller carries on with
+/// the wrong assumption, which is no worse than they would have
+/// without the assert.
+///
+/// Use `LOCKDEP_ASSERT_HELD(class_id)` at function entry to
+/// document "my callers must already hold this lock"; lockdep
+/// then verifies the contract on every entry.
+void LockdepAssertHeld(LockClass class_id, const char* file, int line);
+
+/// Dump the current CPU's spinlock held stack + the current
+/// task's sleeping-lock held stack to the serial console. The
+/// two halves merge in the per-CPU stack (see `LockdepAssertHeld`
+/// above), so this is one walk under the lockdep re-entry guard.
+/// Safe in panic context — uses `arch::SerialWrite` directly so
+/// it doesn't take klog locks. Safe to call before lockdep is
+/// initialised (empty stacks → empty output).
+void LockdepDumpHeldSets();
+
 /// Boot-time self-test. Registers two scratch classes, simulates
 /// `acquire(A); acquire(B); release(B); release(A)` (the good
 /// order), then `acquire(B); acquire(A); release(A); release(B)`
@@ -281,4 +378,27 @@ void LockdepReset();
 /// the held-stack overflow guard. Panics on mismatch.
 void LockdepSelfTest();
 
+/// Boot-time self-test for the kind taxonomy and the
+/// `LOCKDEP_ASSERT_HELD` macro. Exercises (a) a legal
+/// Sleep-then-Spin acquire (no violation), (b) an illegal
+/// Spin-then-Sleep acquire (one violation), (c) the assert macro
+/// against a held vs not-held class. Panics on mismatch. Called
+/// from boot_bringup after `LockdepSelfTest`.
+void LockdepKindClassSelfTest();
+
 } // namespace duetos::sync
+
+// `DUETOS_LOCKDEP` is the compile-time presence gate for the
+// lockdep macros. Lockdep itself is always compiled in (the
+// `lockdep.cpp` TU is unconditionally part of the kernel), so
+// this is currently always defined. Kept as a macro so the
+// `LOCKDEP_ASSERT_HELD` callsite compiles to `((void)0)` if a
+// future build flavour strips lockdep (e.g. an extremely-tight
+// space-constrained variant).
+#define DUETOS_LOCKDEP 1
+
+#if DUETOS_LOCKDEP
+#define LOCKDEP_ASSERT_HELD(class_id) ::duetos::sync::LockdepAssertHeld((class_id), __FILE__, __LINE__)
+#else
+#define LOCKDEP_ASSERT_HELD(class_id) ((void)0)
+#endif

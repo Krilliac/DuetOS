@@ -54,6 +54,15 @@ namespace duetos::arch
 /// `online_flag` within the bounded polling window.
 u64 SmpStartAps();
 
+/// Register the AP bring-up sequence as states in the cpu::Cpuhp
+/// state machine. The lambdas registered here wrap each historic
+/// AP-init step (GDT load, GS base, IDT load, CR4 protection bits,
+/// syscall MSRs, LAPIC enable, topology) at its corresponding
+/// `cpu::CpuhpState::Starting*` slot. Must run on the BSP BEFORE
+/// `SmpStartAps` so the moment an AP enters `ApEntryFromTrampoline`
+/// the chain is ready to execute. Idempotent.
+void SmpCpuhpRegister();
+
 /// Number of online CPUs (BSP + any APs that successfully entered
 /// `ApEntryFromTrampoline`). BSP is always counted; each AP
 /// increments this on bring-up.

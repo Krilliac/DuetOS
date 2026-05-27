@@ -10,6 +10,7 @@
 #include "arch/x86_64/traps.h"
 
 #include "acpi/acpi.h"
+#include "cpu/cpuhp.h"
 #include "cpu/percpu.h"
 #include "debug/probes.h"
 #include "diag/tlb_history.h"
@@ -90,6 +91,86 @@ inline void WriteMsrKernelGsBase(u64 value)
     const u32 lo = static_cast<u32>(value & 0xFFFFFFFF);
     const u32 hi = static_cast<u32>(value >> 32);
     asm volatile("wrmsr" : : "c"(0xC0000102u), "a"(lo), "d"(hi));
+}
+
+// Forward decl from subsystems/linux/syscall_entry.S. The SYSCALL
+// instruction's MSR_LSTAR (0xC0000082) must point at this stub on
+// every CPU that can issue a SYSCALL. The native-ABI retarget
+// (`arch::SyscallRetargetForAbi`) flips LSTAR between this and
+// `native_syscall_entry` on a per-task ABI-crossing context switch;
+// the initial value is the Linux entry to match the BSP-side
+// `linux::SyscallInit` ordering.
+extern "C" void linux_syscall_entry();
+
+// Mirror of `linux::SyscallInit`'s per-CPU SYSCALL/SYSRET MSR setup
+// for an AP that's just come online. Must be byte-for-byte identical
+// to the BSP-side constants in subsystems/linux/syscall.cpp — if
+// either side drifts, `diag::CheckSyscallMsrs` will fire
+// `SyscallMsrHijacked` on the heartbeat scan that lands on this AP.
+//
+// MSRs programmed:
+//   IA32_STAR    (0xC0000081) — SYSCALL/SYSRET selector base.
+//                                kernel CS=0x08 (slot 1), user base=0x10
+//                                so SYSRET derives user CS = 0x10+16 = 0x1B
+//                                with RPL=3 and SS = 0x10+8  = 0x18 with RPL=3.
+//   IA32_LSTAR   (0xC0000082) — 64-bit SYSCALL entry RIP. Linux
+//                                stub by default; retargeted per task.
+//   IA32_SFMASK  (0xC0000084) — RFLAGS bits cleared on SYSCALL entry:
+//                                IF (bit 9) so the entry runs with
+//                                interrupts off, DF (bit 10) for SysV
+//                                ABI, TF (bit 8) so a stray ring-3
+//                                single-step doesn't trace the kernel.
+//   IA32_EFER    (0xC0000080) — set SCE (bit 0). Without this the
+//                                SYSCALL instruction #UDs on the AP.
+//                                Earlier AP setup (long-mode bringup
+//                                via the trampoline) sets LME+NXE but
+//                                NOT SCE, so the AP can't issue SYSCALL
+//                                until this runs. RMW so we don't
+//                                clobber LME/NXE.
+//
+// History: the AP entry path historically only programmed GS_BASE +
+// KERNEL_GS_BASE, leaving STAR/LSTAR/SFMASK at trampoline-cleared
+// zero and EFER without SCE. Any heartbeat scan that landed on an
+// AP fired `[health] syscall MSR hijacked: IA32_LSTAR baseline=...
+// now=0` and escalated `blockguard -> Deny (rootkit indicator)`; the
+// runtime checker's HEAL path then back-filled LSTAR/STAR per
+// heartbeat. Programming the MSRs at bring-up retires the false-
+// positive alarm AND closes the actual "SYSCALL on an AP #UDs"
+// hole. See `wiki/security/Runtime-Recovery.md` Class B vs the
+// "fix the source, not the symptom" principle.
+inline void ProgramSyscallMsrsForCurrentCpu()
+{
+    constexpr u32 kMsrStar = 0xC0000081;
+    constexpr u32 kMsrLstar = 0xC0000082;
+    constexpr u32 kMsrSfmask = 0xC0000084;
+    constexpr u32 kMsrEfer = 0xC0000080;
+    constexpr u64 kEferSce = 1ULL << 0;
+
+    // STAR layout exactly matches linux::SyscallInit.
+    const u64 star = (u64(0x10) << 48) | (u64(0x08) << 32);
+    const u32 star_lo = static_cast<u32>(star & 0xFFFFFFFF);
+    const u32 star_hi = static_cast<u32>(star >> 32);
+    asm volatile("wrmsr" : : "c"(kMsrStar), "a"(star_lo), "d"(star_hi));
+
+    const u64 lstar = reinterpret_cast<u64>(&linux_syscall_entry);
+    const u32 lstar_lo = static_cast<u32>(lstar & 0xFFFFFFFF);
+    const u32 lstar_hi = static_cast<u32>(lstar >> 32);
+    asm volatile("wrmsr" : : "c"(kMsrLstar), "a"(lstar_lo), "d"(lstar_hi));
+
+    constexpr u64 sfmask = (1u << 9) | (1u << 10) | (1u << 8);
+    const u32 sfmask_lo = static_cast<u32>(sfmask & 0xFFFFFFFF);
+    const u32 sfmask_hi = static_cast<u32>(sfmask >> 32);
+    asm volatile("wrmsr" : : "c"(kMsrSfmask), "a"(sfmask_lo), "d"(sfmask_hi));
+
+    // EFER read-modify-write — preserve LME/NXE the long-mode
+    // bringup set, OR in SCE so SYSCALL is enabled.
+    u32 efer_lo, efer_hi;
+    asm volatile("rdmsr" : "=a"(efer_lo), "=d"(efer_hi) : "c"(kMsrEfer));
+    u64 efer = (static_cast<u64>(efer_hi) << 32) | efer_lo;
+    efer |= kEferSce;
+    asm volatile("wrmsr"
+                 :
+                 : "c"(kMsrEfer), "a"(static_cast<u32>(efer & 0xFFFFFFFF)), "d"(static_cast<u32>(efer >> 32)));
 }
 
 inline void* TrampVirt()
@@ -576,27 +657,32 @@ void SmpSendReschedIpi(u32 cpu_id)
 //   4) hlt forever (scheduler entry is a separate follow-up commit,
 //      gated on the runqueue/sleepqueue spinlock work landing fully)
 // ---------------------------------------------------------------------------
-extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
+namespace
 {
-    cpu::PerCpu* pcpu = g_ap_percpus[cpu_id];
 
-    // Install this AP's own GDT + TSS so NMI / #DF / #MC trap entries
-    // resolve to the AP's IST stacks (not the BSP's, which would race
-    // any concurrent BSP fault and corrupt either CPU's frame). Must
-    // happen BEFORE LAPIC enable — once LAPIC is on, an NMI could
-    // arrive at any moment, and without an installed TSS the CPU
-    // would triple-fault picking up RSP0 / IST stack from a stale or
-    // missing slot. The bundle was prepared by SmpStartAps.
+// CPUHP startup callbacks for the AP bring-up sequence. The bodies
+// are the original inline steps from `ApEntryFromTrampoline`, now
+// each gated by the state-machine framework so a future failure has
+// a named bring-up state to attribute it to. Ordering is preserved
+// exactly — the state-machine walks forward in numeric order and the
+// state-number assignments below match what the inline sequence
+// did. Behaviour unchanged.
+
+::duetos::core::Result<void> CpuhpStartGdt(u32 cpu_id)
+{
     ApGdtBundle* bundle = g_ap_gdt_bundles[cpu_id];
     // SmpStartAps only fires SIPI for an AP whose bundle was
-    // allocated, so by construction we should never enter here
-    // with a null bundle. If a future refactor violates the
-    // invariant, continuing without a loaded GDT would crash
-    // the AP at the first NMI/#DF on a stale or missing IST
-    // stack — far worse than halting cleanly.
-    KASSERT(bundle != nullptr, "arch/smp", "AP entered ApEntryFromTrampoline without an allocated GDT bundle");
+    // allocated, so by construction we should never reach here with
+    // a null bundle. Continuing without a loaded GDT would crash the
+    // AP at the first NMI/#DF on a stale or missing IST stack — far
+    // worse than failing the bring-up cleanly here.
+    KASSERT(bundle != nullptr, "arch/smp", "AP entered CpuhpStartGdt without an allocated GDT bundle");
     LoadGdtForCurrent(bundle);
+    return {};
+}
 
+::duetos::core::Result<void> CpuhpStartGsBase(u32 cpu_id)
+{
     // Establish this CPU's GSBASE *after* LoadGdtForCurrent — not
     // before. LoadGdtForCurrent reloads the segment registers, and
     // its `mov %ax, %gs` reloads GS's hidden base from the kernel-
@@ -613,6 +699,7 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // tools/qemu/gui-fuzz.sh). The BSP is correct for the mirror-
     // image reason: PerCpuInitBsp programs GSBASE *after* GdtInit.
     // Orders match now.
+    cpu::PerCpu* pcpu = g_ap_percpus[cpu_id];
     WriteMsrGsBase(reinterpret_cast<u64>(pcpu));
     // IA32_KERNEL_GS_BASE is the swapgs shadow — `mov %gs` does NOT
     // touch it — but program it here too (co-located with the GSBASE
@@ -620,7 +707,11 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // the per-CPU pointer, not 0, into GS_BASE. Mirrors the BSP path
     // in linux::SyscallInit which programs this same MSR.
     WriteMsrKernelGsBase(reinterpret_cast<u64>(pcpu));
+    return {};
+}
 
+::duetos::core::Result<void> CpuhpStartIdt(u32 /*cpu_id*/)
+{
     // Point THIS CPU's IDTR at the shared IDT. IDTR is per-CPU; the
     // SMP trampoline only loads a transition GDT (no lidt), and the
     // BSP's IdtInit lidt'd only the BSP. Without this an AP has no
@@ -633,7 +724,11 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // LoadGdtForCurrent (gate CS = kKernelCodeSelector must resolve
     // in the now-active GDT) and precede the LAPIC enable below.
     IdtLoadForCurrent();
+    return {};
+}
 
+::duetos::core::Result<void> CpuhpStartCr4(u32 /*cpu_id*/)
+{
     // Per-AP kernel-protection bit setup. CR0.WP, CR4.SMEP, CR4.SMAP,
     // and CET/IBT are PER-CPU state — programming them on the BSP
     // inside PagingInit does NOT propagate to APs, which would
@@ -651,7 +746,24 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     // suppresses the per-AP `[mm] CR4 protection bits:` summary;
     // BSP's PagingInit already emitted it once.
     mm::EnableKernelProtectionBitsForThisCpu(/*emit_log=*/false);
+    return {};
+}
 
+::duetos::core::Result<void> CpuhpStartSyscallMsrs(u32 /*cpu_id*/)
+{
+    // SYSCALL/SYSRET MSRs (STAR, LSTAR, SFMASK) + EFER.SCE. The BSP
+    // programs these in linux::SyscallInit; the AP needs the same
+    // setup before any ring-3 code on this CPU issues SYSCALL — and
+    // before the runtime checker's heartbeat scan can land on this
+    // AP and (correctly!) report LSTAR=0 vs the BSP-side baseline.
+    // See `ProgramSyscallMsrsForCurrentCpu` for the per-MSR
+    // rationale and the cross-reference back to subsystems/linux.
+    ProgramSyscallMsrsForCurrentCpu();
+    return {};
+}
+
+::duetos::core::Result<void> CpuhpStartLapic(u32 /*cpu_id*/)
+{
     // Enable the AP's LAPIC. IA32_APIC_BASE MSR bit 11 (EN) is the
     // global enable; bit 10 (EXTD) selects x2APIC mode. The BSP
     // already programmed EN|EXTD when it ran LapicInit and set
@@ -681,13 +793,59 @@ extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
     }
     LapicWrite(kLapicRegTpr, 0);
     LapicWrite(kLapicRegSvr, (1U << 8) | 0xFF);
+    return {};
+}
 
+::duetos::core::Result<void> CpuhpStartTopology(u32 cpu_id)
+{
     // Decode this AP's CPUID/SRAT topology BEFORE flipping the
     // online_flag, so the BSP's WaitForApOnline poll inside
     // SmpStartAps doubles as the rendezvous on AP topology init.
     // After SmpStartAps returns, the BSP runs TopologyAssignClusters
     // and every AP's row is already populated — no separate done flag.
     cpu::TopologyInitAp(cpu_id);
+    return {};
+}
+
+} // namespace
+
+void SmpCpuhpRegister()
+{
+    // Register the AP bring-up steps in their existing ordering.
+    // The state-machine framework walks these in ascending numeric
+    // order from the AP's current state (Offline) up to Online. The
+    // step bodies are byte-identical to what `ApEntryFromTrampoline`
+    // ran inline before — see each CpuhpStart* for the rationale and
+    // history of the underlying step.
+    using cpu::CpuhpInstall;
+    using cpu::CpuhpState;
+    CpuhpInstall(CpuhpState::StartingGdt, "gdt-load", &CpuhpStartGdt, nullptr);
+    CpuhpInstall(CpuhpState::StartingGsBase, "gs-base", &CpuhpStartGsBase, nullptr);
+    CpuhpInstall(CpuhpState::StartingIdt, "idt-load", &CpuhpStartIdt, nullptr);
+    CpuhpInstall(CpuhpState::StartingCr4, "cr4-protect", &CpuhpStartCr4, nullptr);
+    CpuhpInstall(CpuhpState::StartingSyscallMsrs, "syscall-msrs", &CpuhpStartSyscallMsrs, nullptr);
+    CpuhpInstall(CpuhpState::StartingLapic, "lapic-enable", &CpuhpStartLapic, nullptr);
+    CpuhpInstall(CpuhpState::StartingTopology, "topology", &CpuhpStartTopology, nullptr);
+}
+
+extern "C" [[noreturn]] void ApEntryFromTrampoline(u32 cpu_id)
+{
+    // Walk the bring-up chain through every registered startup. The
+    // chain runs the historic AP init steps (GDT/GS-base/IDT/CR4/
+    // syscall-MSRs/LAPIC/topology) in their original numeric order;
+    // each step is now a named state so a future failure has an
+    // attributable bring-up point. Behaviour-identical to the
+    // pre-migration inline sequence — see CpuhpStart* in this TU for
+    // each step's body and rationale.
+    //
+    // The CpuhpBringUp return value is intentionally dropped: any
+    // failure here is fatal to the AP, but at this stage we have
+    // no logging surface beyond raw serial — the underlying step
+    // KASSERTs/panics for the conditions that historically triggered
+    // them, and a rollback through the AP's partial state is not
+    // recoverable (we are mid-bring-up on this very CPU). The
+    // framework still records the per-CPU state for the panic dump.
+    (void)::duetos::cpu::CpuhpBringUp(cpu_id);
 
     // Signal BSP BEFORE logging — log path races with BSP's serial
     // writes and can delay arbitrarily on contention.

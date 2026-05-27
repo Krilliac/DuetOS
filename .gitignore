@@ -197,3 +197,12 @@ localdev.ps1
 ##########################
 
 .superpowers/
+
+##############################################
+# Claude Code harness — agent worktrees etc. #
+##############################################
+
+# Worktree-isolated subagents live under .claude/worktrees/agent-*/
+# (each is a full repo checkout). Never commit them into the parent
+# repo — the agent commits live on their own pushed branches.
+.claude/

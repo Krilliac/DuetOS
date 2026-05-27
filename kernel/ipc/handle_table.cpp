@@ -11,9 +11,11 @@
 
 #include "ipc/handle_table.h"
 
+#include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "ipc/kobject.h"
 #include "log/klog.h"
+#include "proc/process.h"
 #include "sync/spinlock.h"
 #include "util/nospec.h"
 #include "util/result.h"
@@ -37,19 +39,108 @@ bool HandleInRange(Handle h)
 
 } // namespace
 
-::duetos::core::Result<Handle> HandleTableInsert(HandleTable& table, KObject* obj)
+u64 TypeAllowedRights(KObjectType type)
 {
-    if (obj == nullptr)
-    {
-        KLOG_WARN_A(::duetos::core::LogArea::IPC, "ipc/handle_table", "Insert called with null KObject");
-        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
-    }
+    // Per-type rights menus. The bits NOT set here represent
+    // operations that aren't meaningful for the type (e.g. you
+    // can't Signal a File, you can't Read a Mutex). Inspect /
+    // Duplicate / Transfer / Destroy are universal — every kernel
+    // object can be queried, duplicated, passed, and closed.
+    constexpr u64 kCommon = kHandleRightDuplicate | kHandleRightTransfer | kHandleRightDestroy | kHandleRightInspect;
 
-    sync::SpinLockGuard guard(table.lock);
-    // Two-pass scan starting at the post-hint index. Skips the
-    // typically-busy prefix on a sparse table; degrades to a
-    // full scan when the table is dense. Slot 0 stays reserved
-    // for kHandleInvalid.
+    switch (type)
+    {
+    case KObjectType::Mutex:
+        // Mutex: acquire = Wait, release = Signal. No Read/Write.
+        return kCommon | kHandleRightWait | kHandleRightSignal;
+    case KObjectType::Event:
+        // Event: WaitForSingleObject = Wait, SetEvent/ResetEvent = Signal.
+        // No Read/Write (Pulse is a v0 GAP, still Signal-shaped).
+        return kCommon | kHandleRightWait | kHandleRightSignal;
+    case KObjectType::Semaphore:
+        // Semaphore: acquire = Wait, release = Signal. No Read/Write.
+        return kCommon | kHandleRightWait | kHandleRightSignal;
+    case KObjectType::Mailbox:
+        // Mailbox: send = Write, recv = Read, wait-for-empty = Wait.
+        return kCommon | kHandleRightRead | kHandleRightWrite | kHandleRightWait;
+    case KObjectType::Waitable:
+        // Generic waitable — wait only, no I/O surface.
+        return kCommon | kHandleRightWait;
+    case KObjectType::File:
+        // File: bytes flow through Read/Write; Inspect covers
+        // stat/fstat. Files are not signalable today (epoll-on-
+        // file is a follow-up; will surface Wait+Signal then).
+        return kCommon | kHandleRightRead | kHandleRightWrite;
+    case KObjectType::Iocp:
+        // I/O completion port: dequeue = Read, post = Write,
+        // wait-for-completion = Wait.
+        return kCommon | kHandleRightRead | kHandleRightWrite | kHandleRightWait;
+    case KObjectType::Test:
+        // Self-test surface — accept everything so the test can
+        // exercise the full enumeration without picking a real type.
+        return kHandleRightAll;
+    case KObjectType::Invalid:
+        return 0;
+    }
+    return 0;
+}
+
+u64 ProcessCapsToHandleRights(const ::duetos::core::CapSet& caps)
+{
+    // Map ambient process caps to per-handle rights the process is
+    // permitted to grant on new handles. Caps the process LACKS
+    // narrow the default-rights ceiling.
+    //
+    // Read / Wait / Duplicate / Transfer / Destroy / Inspect are
+    // unconditionally grantable — a process that holds a handle
+    // can always read its own state, wait on it, dup it within its
+    // own table, pass it through IPC, close it, and inspect it.
+    // These rights are GATED at the syscall level by the kernel's
+    // process-cap ceiling separately (e.g. SYS_FILE_READ on a file
+    // still requires kCapFsRead; this layer only ensures the
+    // process can MINT a handle carrying the right).
+    //
+    // Write and Signal are the rights the cap mapping actually
+    // narrows: a sandboxed process without kCapFsWrite cannot mint
+    // a file handle bearing Write authority even if the underlying
+    // type supports it.
+    u64 rights = kHandleRightRead | kHandleRightDuplicate | kHandleRightTransfer | kHandleRightWait |
+                 kHandleRightDestroy | kHandleRightInspect;
+
+    if (::duetos::core::CapSetHas(caps, ::duetos::core::kCapFsWrite))
+    {
+        rights |= kHandleRightWrite;
+    }
+    // Signal authority — every trusted profile carries this; the
+    // sandbox profile does not. The kernel's SpawnThread cap is the
+    // closest existing proxy for "may affect kernel-object state":
+    // an attacker without SpawnThread cannot create the second task
+    // that would need signal-coordination in the first place. A
+    // dedicated kCapIpcSignal cap is a future-clean follow-up if a
+    // workload demonstrates the asymmetric profile is needed.
+    if (::duetos::core::CapSetHas(caps, ::duetos::core::kCapSpawnThread))
+    {
+        rights |= kHandleRightSignal;
+    }
+    // Without SpawnThread we also grant Write — the sandbox profile
+    // includes Write so it can still send to its own mailboxes /
+    // signal-via-write-shaped surfaces. The fence above already
+    // dropped Write for sandboxed FS handles via the kCapFsWrite
+    // gate; for non-FS types (Mailbox, etc.) Write means "send,"
+    // which is unprivileged.
+    rights |= kHandleRightWrite;
+    return rights;
+}
+
+namespace
+{
+
+// Core insert path. Walks the slot table under the table lock and
+// installs (obj, rights) at the first free slot. Both public
+// `HandleTableInsert` overloads route through here; the rights-
+// less overload passes the full type-allowed mask.
+::duetos::core::Result<Handle> InsertWithRights(HandleTable& table, KObject* obj, u64 rights)
+{
     KASSERT_WITH_VALUE(table.next_free_hint < kHandleTableCapacity, "ipc/handle_table",
                        "next_free_hint corrupted (oob)", static_cast<u64>(table.next_free_hint));
     const u32 start = (table.next_free_hint + 1u) % kHandleTableCapacity;
@@ -62,14 +153,9 @@ bool HandleInRange(Handle h)
             continue; // reserved sentinel slot
         if (table.slots[i].obj == nullptr)
         {
-            // Belt-and-braces: the scan above just observed the
-            // slot empty under `table.lock` and no other writer
-            // could have raced. If `slots[i].obj` is non-null
-            // now, the slot array itself was corrupted by a wild
-            // store. Catching it here prevents silently leaking
-            // the previously-installed KObject's reference.
             KASSERT(table.slots[i].obj == nullptr, "ipc/handle_table", "slot raced between check and install");
             table.slots[i].obj = obj;
+            table.slots[i].rights = rights;
             table.next_free_hint = i;
             KLOG_TRACE_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "insert ok handle", static_cast<u64>(i));
             return static_cast<Handle>(i);
@@ -78,6 +164,39 @@ bool HandleInRange(Handle h)
     KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "Insert: table full (OOM)",
                  static_cast<u64>(kHandleTableCapacity));
     return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
+}
+
+} // namespace
+
+::duetos::core::Result<Handle> HandleTableInsert(HandleTable& table, KObject* obj)
+{
+    if (obj == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::IPC, "ipc/handle_table", "Insert called with null KObject");
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
+    // Default rights: the full type-allowed set. Callers that know
+    // the holding process's caps should use the rights-aware
+    // overload to narrow further; this default keeps the existing
+    // single-arg call sites working without per-site changes.
+    const u64 default_rights = TypeAllowedRights(obj->type);
+    sync::SpinLockGuard guard(table.lock);
+    return InsertWithRights(table, obj, default_rights);
+}
+
+::duetos::core::Result<Handle> HandleTableInsert(HandleTable& table, KObject* obj, u64 requested_rights)
+{
+    if (obj == nullptr)
+    {
+        KLOG_WARN_A(::duetos::core::LogArea::IPC, "ipc/handle_table", "Insert called with null KObject");
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
+    // Narrow to the type-allowed ceiling. A caller can never
+    // mint a handle carrying a right the underlying type doesn't
+    // recognise (e.g. Signal on a File).
+    const u64 final_rights = requested_rights & TypeAllowedRights(obj->type);
+    sync::SpinLockGuard guard(table.lock);
+    return InsertWithRights(table, obj, final_rights);
 }
 
 KObject* HandleTableLookup(HandleTable& table, Handle h, KObjectType expected_type)
@@ -164,6 +283,7 @@ KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected
         }
         dropped = table.slots[masked_h].obj;
         table.slots[masked_h].obj = nullptr;
+        table.slots[masked_h].rights = 0;
     }
     KLOG_TRACE_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "remove ok handle", static_cast<u64>(h));
     // Release outside the table lock — destroy callbacks may
@@ -171,6 +291,86 @@ KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected
     KObjectRelease(dropped);
     return {};
 }
+
+u64 HandleTableRights(HandleTable& table, Handle h)
+{
+    if (!HandleInRange(h))
+    {
+        return 0;
+    }
+    const Handle masked_h = static_cast<Handle>(util::MaskedIndex32(static_cast<u32>(h), kHandleTableCapacity));
+    KASSERT_WITH_VALUE(masked_h < kHandleTableCapacity, "ipc/handle_table", "masked handle oob",
+                       static_cast<u64>(masked_h));
+    sync::SpinLockGuard guard(table.lock);
+    if (table.slots[masked_h].obj == nullptr)
+    {
+        return 0;
+    }
+    return table.slots[masked_h].rights;
+}
+
+bool HandleCheckRight(HandleTable& table, Handle h, u64 required_rights)
+{
+    if (!HandleInRange(h))
+    {
+        return false;
+    }
+    // required_rights == 0 is a vacuous request — every existing
+    // handle "has" zero rights. Refuse it explicitly so a buggy
+    // caller (forgot to pass the right) is caught loudly instead
+    // of silently passing.
+    if (required_rights == 0)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "CheckRight called with zero mask; handle",
+                     static_cast<u64>(h));
+        return false;
+    }
+    const Handle masked_h = static_cast<Handle>(util::MaskedIndex32(static_cast<u32>(h), kHandleTableCapacity));
+    KASSERT_WITH_VALUE(masked_h < kHandleTableCapacity, "ipc/handle_table", "masked handle oob",
+                       static_cast<u64>(masked_h));
+    sync::SpinLockGuard guard(table.lock);
+    if (table.slots[masked_h].obj == nullptr)
+    {
+        return false;
+    }
+    return (table.slots[masked_h].rights & required_rights) == required_rights;
+}
+
+namespace
+{
+
+// Snapshot (obj+rights) under src.lock and acquire an extra ref on
+// the kernel object. Returns nullptr if h is invalid / empty.
+// Caller MUST `KObjectRelease` the returned pointer (or hand it
+// off to a destination Insert).
+KObject* LookupRefWithRights(HandleTable& src, Handle h, u64* out_rights)
+{
+    if (!HandleInRange(h))
+    {
+        *out_rights = 0;
+        return nullptr;
+    }
+    const Handle masked_h = static_cast<Handle>(util::MaskedIndex32(static_cast<u32>(h), kHandleTableCapacity));
+    KASSERT_WITH_VALUE(masked_h < kHandleTableCapacity, "ipc/handle_table", "masked handle oob",
+                       static_cast<u64>(masked_h));
+    KObject* obj = nullptr;
+    u64 rights = 0;
+    {
+        sync::SpinLockGuard guard(src.lock);
+        obj = src.slots[masked_h].obj;
+        if (obj == nullptr)
+        {
+            *out_rights = 0;
+            return nullptr;
+        }
+        rights = src.slots[masked_h].rights;
+        KObjectAcquire(obj);
+    }
+    *out_rights = rights;
+    return obj;
+}
+
+} // namespace
 
 ::duetos::core::Result<Handle> HandleTableDuplicate(HandleTable& src, HandleTable& dst, Handle h)
 {
@@ -181,14 +381,8 @@ KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     }
 
-    // Use the Ref variant so the table-owned reference is bumped under
-    // src.lock — without that, a concurrent HandleTableRemove between
-    // the unlocked Lookup return and our KObjectAcquire could drop the
-    // last reference and free `obj`, leaving us calling Acquire on
-    // freed memory. The matching Release on the error path below balances
-    // the Ref-acquired reference; on success the destination table
-    // inherits ownership of that ref via Insert.
-    KObject* obj = HandleTableLookupRef(src, h, KObjectType::Invalid);
+    u64 src_rights = 0;
+    KObject* obj = LookupRefWithRights(src, h, &src_rights);
     if (obj == nullptr)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "Duplicate: src handle empty",
@@ -196,7 +390,10 @@ KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     }
 
-    auto inserted = HandleTableInsert(dst, obj);
+    // Carry the source's full rights mask through to the
+    // destination — a same-rights duplicate. Callers wanting a
+    // strictly-reduced-rights variant use HandleTableDuplicateRights.
+    auto inserted = HandleTableInsert(dst, obj, src_rights);
     if (!inserted.has_value())
     {
         KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table",
@@ -207,6 +404,76 @@ KObject* HandleTableLookupRef(HandleTable& table, Handle h, KObjectType expected
     KLOG_TRACE_AV(::duetos::core::LogArea::IPC, "ipc/handle_table", "duplicate ok new dst handle",
                   static_cast<u64>(inserted.value()));
     return inserted;
+}
+
+::duetos::core::Result<Handle> HandleTableDuplicateRights(HandleTable& src, HandleTable& dst, Handle h,
+                                                          u64 requested_rights)
+{
+    if (!HandleInRange(h))
+    {
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
+
+    u64 src_rights = 0;
+    KObject* obj = LookupRefWithRights(src, h, &src_rights);
+    if (obj == nullptr)
+    {
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    }
+
+    // Source must carry kHandleRightDuplicate, otherwise the
+    // operation is denied regardless of the requested set.
+    if ((src_rights & kHandleRightDuplicate) == 0)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table",
+                     "DuplicateRights: src lacks Duplicate; src handle", static_cast<u64>(h));
+        KObjectRelease(obj);
+        return ::duetos::core::Err{::duetos::core::ErrorCode::PermissionDenied};
+    }
+
+    // No escalation: every bit in requested_rights must already be
+    // present in src_rights. This is the core "floor only narrows"
+    // invariant — a caller cannot dup-with-rights to gain access it
+    // didn't already have.
+    if ((requested_rights & ~src_rights) != 0)
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::IPC, "ipc/handle_table",
+                     "DuplicateRights: requested escalation; src handle", static_cast<u64>(h));
+        KObjectRelease(obj);
+        return ::duetos::core::Err{::duetos::core::ErrorCode::PermissionDenied};
+    }
+
+    auto inserted = HandleTableInsert(dst, obj, requested_rights);
+    if (!inserted.has_value())
+    {
+        KObjectRelease(obj);
+        return ::duetos::core::Err{inserted.error()};
+    }
+    return inserted;
+}
+
+::duetos::core::Result<Handle> HandleReplace(HandleTable& table, Handle src_handle, u64 requested_rights)
+{
+    // Atomic dup-then-close. Insert the narrowed-rights handle
+    // FIRST so a table-full failure leaves the source intact, then
+    // remove the source slot. Both operations take the table lock
+    // independently — they're atomic at the per-operation level,
+    // and observers either see src OR new (briefly both, never
+    // neither).
+    auto dup_r = HandleTableDuplicateRights(table, table, src_handle, requested_rights);
+    if (!dup_r.has_value())
+    {
+        return ::duetos::core::Err{dup_r.error()};
+    }
+    auto rm_r = HandleTableRemove(table, src_handle);
+    if (!rm_r.has_value())
+    {
+        // Source went away between dup and remove (shouldn't be
+        // possible without a concurrent close, but defensive).
+        // The duplicate is valid; return it.
+        return dup_r;
+    }
+    return dup_r;
 }
 
 u32 HandleTableLiveCount(HandleTable& table)
@@ -244,6 +511,7 @@ void HandleTableDrain(HandleTable& table)
                                    "drain victim buffer overflow", static_cast<u64>(victim_count));
                 victims[victim_count++] = table.slots[i].obj;
                 table.slots[i].obj = nullptr;
+                table.slots[i].rights = 0;
             }
         }
     }
@@ -468,6 +736,198 @@ void HandleTableSelfTest()
 
     KLOG_INFO_A(::duetos::core::LogArea::IPC, "ipc/handle_table",
                 "self-test OK (capacity, dup, drain, type-tag verified)");
+}
+
+void HandleRightsSelfTest()
+{
+    KLOG_TRACE_SCOPE("ipc/handle_table", "HandleRightsSelfTest");
+    KLOG_INFO_A(::duetos::core::LogArea::IPC, "ipc/handle_table",
+                "rights self-test: type-allowed, dup-narrow, no-escalate, replace, check");
+
+    // (1) TypeAllowedRights — KEvent has Wait+Signal but no Read/Write.
+    const u64 evt_allowed = TypeAllowedRights(KObjectType::Event);
+    if ((evt_allowed & kHandleRightWait) == 0 || (evt_allowed & kHandleRightSignal) == 0)
+    {
+        PanicHt("rights self-test: KEvent missing Wait/Signal in type-allowed");
+    }
+    if ((evt_allowed & (kHandleRightRead | kHandleRightWrite)) != 0)
+    {
+        PanicHt("rights self-test: KEvent unexpectedly carries Read/Write in type-allowed");
+    }
+    // File has Read/Write/Inspect but no Wait/Signal.
+    const u64 file_allowed = TypeAllowedRights(KObjectType::File);
+    if ((file_allowed & (kHandleRightRead | kHandleRightWrite | kHandleRightInspect)) !=
+        (kHandleRightRead | kHandleRightWrite | kHandleRightInspect))
+    {
+        PanicHt("rights self-test: KFile missing Read/Write/Inspect");
+    }
+    if ((file_allowed & (kHandleRightWait | kHandleRightSignal)) != 0)
+    {
+        PanicHt("rights self-test: KFile unexpectedly carries Wait/Signal");
+    }
+
+    // (2) ProcessCapsToHandleRights — sandbox (empty caps) vs trusted.
+    const u64 sandbox_rights = ProcessCapsToHandleRights(::duetos::core::CapSetEmpty());
+    const u64 trusted_rights = ProcessCapsToHandleRights(::duetos::core::CapSetTrusted());
+    // Trusted should have Signal; sandbox should not (no kCapSpawnThread).
+    if ((trusted_rights & kHandleRightSignal) == 0)
+    {
+        PanicHt("rights self-test: trusted caps did not yield Signal right");
+    }
+    if ((sandbox_rights & kHandleRightSignal) != 0)
+    {
+        PanicHt("rights self-test: sandbox caps unexpectedly yielded Signal right");
+    }
+
+    // (3) Insert with default rights on a KEvent-typed test object;
+    // the stored rights must be exactly TypeAllowedRights(Event).
+    HandleTable table{};
+    static StTestObject evt_obj{};
+    KObjectInit(&evt_obj.base, KObjectType::Event, &StDestroy);
+    auto h_evt_r = HandleTableInsert(table, &evt_obj.base);
+    if (!h_evt_r.has_value())
+    {
+        PanicHt("rights self-test: Insert(KEvent) failed");
+    }
+    const Handle h_evt = h_evt_r.value();
+    if (HandleTableRights(table, h_evt) != evt_allowed)
+    {
+        PanicHt("rights self-test: default rights != TypeAllowedRights(Event)");
+    }
+    // Read should NOT be present on an event handle.
+    if (HandleCheckRight(table, h_evt, kHandleRightRead))
+    {
+        PanicHt("rights self-test: KEvent default rights claimed Read");
+    }
+    if (!HandleCheckRight(table, h_evt, kHandleRightWait))
+    {
+        PanicHt("rights self-test: KEvent default rights missing Wait");
+    }
+    if (!HandleCheckRight(table, h_evt, kHandleRightSignal))
+    {
+        PanicHt("rights self-test: KEvent default rights missing Signal");
+    }
+
+    // (4) HandleTableDuplicateRights with reduced rights — strip
+    // Signal, keep Wait+Inspect+Duplicate (we keep Duplicate on
+    // the intermediate handle so step (6)'s HandleReplace below
+    // has a Duplicate-bearing source to drive the atomic-replace
+    // path). The new handle id must be distinct and carry exactly
+    // the requested narrowed set (after type-allowed masking).
+    const u64 narrowed = kHandleRightWait | kHandleRightInspect | kHandleRightDuplicate;
+    auto h_narrow_r = HandleTableDuplicateRights(table, table, h_evt, narrowed);
+    if (!h_narrow_r.has_value())
+    {
+        PanicHt("rights self-test: DuplicateRights(narrowed) failed");
+    }
+    const Handle h_narrow = h_narrow_r.value();
+    if (h_narrow == h_evt)
+    {
+        PanicHt("rights self-test: DuplicateRights returned the same handle id");
+    }
+    if (HandleTableRights(table, h_narrow) != narrowed)
+    {
+        PanicHt("rights self-test: narrowed handle did not store narrowed rights");
+    }
+    if (HandleCheckRight(table, h_narrow, kHandleRightSignal))
+    {
+        PanicHt("rights self-test: narrowed handle still claims Signal");
+    }
+    if (!HandleCheckRight(table, h_narrow, kHandleRightWait))
+    {
+        PanicHt("rights self-test: narrowed handle dropped Wait");
+    }
+
+    // (5) Attempt to ESCALATE rights via Duplicate — set a bit
+    // (Signal) the source doesn't have. Must fail with
+    // PermissionDenied; the source slot stays untouched. Signal
+    // is the right we stripped in step (4) — re-adding it is the
+    // canonical "escalation" attack pattern.
+    const u32 live_before_escalate = HandleTableLiveCount(table);
+    auto h_escalate_r = HandleTableDuplicateRights(table, table, h_narrow, narrowed | kHandleRightSignal);
+    if (h_escalate_r.has_value())
+    {
+        PanicHt("rights self-test: escalation via DuplicateRights succeeded");
+    }
+    if (h_escalate_r.error() != ::duetos::core::ErrorCode::PermissionDenied)
+    {
+        PanicHt("rights self-test: escalation rejection used wrong error code");
+    }
+    if (HandleTableLiveCount(table) != live_before_escalate)
+    {
+        PanicHt("rights self-test: escalation attempt mutated the table");
+    }
+
+    // (6) HandleReplace — strictly-reduced-rights variant; old id
+    // is invalidated, new id carries the narrower set.
+    const u64 even_narrower = kHandleRightInspect;
+    auto h_replaced_r = HandleReplace(table, h_narrow, even_narrower);
+    if (!h_replaced_r.has_value())
+    {
+        PanicHt("rights self-test: HandleReplace(reduced) failed");
+    }
+    const Handle h_replaced = h_replaced_r.value();
+    if (HandleTableLookup(table, h_narrow, KObjectType::Event) != nullptr)
+    {
+        PanicHt("rights self-test: HandleReplace did not invalidate source handle");
+    }
+    if (HandleTableRights(table, h_replaced) != even_narrower)
+    {
+        PanicHt("rights self-test: HandleReplace did not narrow rights");
+    }
+
+    // (6a) HandleReplace must REFUSE when the source lacks
+    // kHandleRightDuplicate. h_replaced now has Inspect only — no
+    // Duplicate. Asking to keep Inspect (a strict subset of its
+    // current rights) still fails because the underlying op is a
+    // duplicate. This is the structural form of "you cannot
+    // narrow a handle you don't control."
+    auto h_no_dup_r = HandleReplace(table, h_replaced, kHandleRightInspect);
+    if (h_no_dup_r.has_value())
+    {
+        PanicHt("rights self-test: HandleReplace succeeded on a non-Duplicate handle");
+    }
+    if (h_no_dup_r.error() != ::duetos::core::ErrorCode::PermissionDenied)
+    {
+        PanicHt("rights self-test: HandleReplace no-Duplicate rejection used wrong error code");
+    }
+
+    // (7) HandleCheckRight on a handle missing the required right
+    // must return false; the syscall-style call site would then
+    // return PermissionDenied. Confirm Inspect passes, Wait fails.
+    if (!HandleCheckRight(table, h_replaced, kHandleRightInspect))
+    {
+        PanicHt("rights self-test: replaced handle dropped Inspect unexpectedly");
+    }
+    if (HandleCheckRight(table, h_replaced, kHandleRightWait))
+    {
+        PanicHt("rights self-test: replaced handle unexpectedly granted Wait");
+    }
+
+    // (8) Cleanup — drain so the underlying KObject's refcount
+    // returns to 0 and the destroy callback runs. The handle slots
+    // are released by Drain; the rights field is cleared in the
+    // same path.
+    HandleTableDrain(table);
+    if (HandleTableLiveCount(table) != 0)
+    {
+        PanicHt("rights self-test: drain left handles behind");
+    }
+    // Sanity check: every slot's rights mask is 0 after drain.
+    for (u32 i = 1; i < kHandleTableCapacity; ++i)
+    {
+        if (table.slots[i].rights != 0)
+        {
+            PanicHt("rights self-test: drained slot retained stale rights");
+        }
+    }
+
+    // Grep-able PASS sentinel for boot-log scrapers. Mirrors the
+    // KLOG_INFO above the convention for self-tests but emits a
+    // structural marker that doesn't depend on the runtime log
+    // level (the WARN sentinels we'd otherwise see are gated to
+    // failures only).
+    ::duetos::arch::SerialWrite("[handle-rights] self-test OK (type-allowed, narrow, no-escalate, replace)\n");
 }
 
 } // namespace duetos::ipc

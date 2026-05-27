@@ -172,6 +172,15 @@ Task* SchedFindTaskByTid(u64 target_tid);
 /// "this thread has exited." Safe against a null pointer.
 bool TaskIsDead(const Task* t);
 
+/// True iff `t` is currently the running task on SOME CPU. Reads
+/// the per-task `on_cpu` flag with __ATOMIC_ACQUIRE so a caller
+/// reading from a foreign CPU pairs cleanly with the RELEASE-store
+/// the context-switch path performs when the flag flips. Used by
+/// `sync::AdaptiveMutex`'s slow path to decide "spin (holder is
+/// running; release imminent)" vs "park (holder is off-CPU)". A
+/// null `t` reads false — there is no task to be on-CPU.
+bool TaskIsOnCpu(const Task* t);
+
 /// Canonical reasons a kernel subsystem can request task
 /// termination via `FlagCurrentForKill(reason)`. Used by
 /// Schedule() for the single-line reason log when it converts
@@ -520,6 +529,70 @@ struct SchedTaskInfo
 /// the timer tick mutating the lists mid-visit.
 using SchedEnumCb = void (*)(const SchedTaskInfo& info, void* cookie);
 void SchedEnumerate(SchedEnumCb cb, void* cookie);
+
+/// One row out of `SchedSnapshotBlockedTasks`. Fields are
+/// snapshotted under the sched lock at the moment of the walk;
+/// no pointers survive into the post-walk window (the name
+/// pointer is borrowed and points into the task's `name` field,
+/// which lives for the task's lifetime — same contract as
+/// `TaskName`).
+struct SchedBlockedTaskInfo
+{
+    u64 id;
+    const char* name;
+    // Tick at which the task entered TaskState::Blocked. The
+    // hung-task detector subtracts this from the current tick
+    // to compute "stuck for this long".
+    u64 block_start_tick;
+};
+
+/// Snapshot every currently-Blocked task into the caller-owned
+/// buffer. Returns the count actually written, capped at `cap`.
+/// Walks every CPU's runqueue plus the sleep queue under the
+/// sched lock (so the wait-queue / timer paths can't splice a
+/// list mid-walk) and selects entries with `state == Blocked`
+/// and `block_start_tick != 0`. The non-zero `block_start_tick`
+/// gate skips tasks that the suspend path forces into
+/// `TaskState::Blocked` without putting them on a wait queue
+/// — those aren't hung, they're explicitly suspended.
+///
+/// Designed for the hung-task detector: the caller (the
+/// heartbeat thread) walks Blocked tasks under the sched lock,
+/// then releases the lock before emitting warnings — warning
+/// emission can take klog locks and must not nest under sched.
+///
+/// `out` must be non-null and `cap` must be > 0 (otherwise
+/// returns 0 with no work done).
+u64 SchedSnapshotBlockedTasks(SchedBlockedTaskInfo* out, u64 cap);
+
+/// SELFTEST ONLY: rewind the most recently observed `block_start_tick`
+/// of every task whose `name` matches `match_name` (exact match, not
+/// prefix) so the hung-task detector sees the task as "stuck since
+/// `delta_ticks` ago". Returns the number of tasks tweaked. Returns 0
+/// (with no side effect) for null `match_name`. Walks every CPU's
+/// runqueue plus the sleep queue under the sched lock. Used ONLY by
+/// `diag::HungTaskSelfTest` — production code MUST NOT call this.
+u64 SchedSelftestRewindBlockStart(const char* match_name, u64 delta_ticks);
+
+/// Opt the currently-running task out of the hung-task detector.
+/// Some kernel tasks legitimately sit in `TaskState::Blocked` forever
+/// waiting for a wake-up that may never come on this boot:
+///
+///   - Input pollers (kbd-reader, mouse-reader, xhci-hid-poll) parked
+///     on a `KEvent` that only fires on a real keypress / mouse move.
+///   - The reaper, parked on a `WaitQueue` that only wakes when a
+///     task transitions to `Dead`.
+///   - Future device-event listeners (link-up, hotplug, audio jack).
+///
+/// Without this opt-out, the hung-task detector correctly identifies
+/// each as "blocked beyond the 30s threshold" and emits one WARN per
+/// minute per task — true but unactionable noise. Tasks set this flag
+/// once at entry; the detector's snapshot pass skips them.
+///
+/// Set-once / clear-never in v0. Safe to call from the task's own
+/// entry function under any context (just sets a bool on the Task).
+/// No-op if `Current()` is null (pre-Schedule path).
+void SchedExemptCurrentFromHungTask();
 
 struct StackHealth
 {

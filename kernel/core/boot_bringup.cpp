@@ -39,13 +39,17 @@
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/lbr.h"
 #include "arch/x86_64/nmi_watchdog.h"
+#include "arch/x86_64/percpu_ops.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/msr_safe.h"
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/timer.h"
+#include "cpu/cpuhp.h"
+#include "cpu/critical.h"
 #include "cpu/percpu.h"
+#include "cpu/percpu_counter.h"
 #include "cpu/topology.h"
 #include "debug/breakpoints.h"
 #include "debug/hot_patch.h"
@@ -207,6 +211,7 @@
 #include "mm/dma.h"
 #include "mm/frame_allocator.h"
 #include "mm/poison.h"
+#include "mm/poison_alloc.h"
 #include "mm/zone.h"
 #include "ipc/handle_table.h"
 #include "ipc/iocp.h"
@@ -227,6 +232,9 @@
 #include "diag/gdb_server.h"
 #include "diag/minidump.h"
 #include "diag/perf_profile.h"
+#include "diag/fma/diagnose.h"
+#include "diag/hung_task.h"
+#include "diag/kstat.h"
 #include "diag/soft_lockup.h"
 #include "ipc/kevent.h"
 #include "ipc/kfile.h"
@@ -237,12 +245,14 @@
 #include "ipc/kwaitable.h"
 #include "ipc/named_kobjects.h"
 #include "ipc/named_pipes.h"
+#include "sync/adaptive_mutex.h"
 #include "sync/lockdep.h"
 #include "sync/rcu.h"
 #include "sync/rwlock.h"
 #include "sync/seqlock.h"
 #include "sync/spinlock.h"
 #include "time/clocksource.h"
+#include "time/cyclic.h"
 #include "time/tick.h"
 #include "time/timekeeper.h"
 #include "time/timezone.h"
@@ -409,6 +419,24 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
         SerialWrite(" +trace");
     }
     SerialWrite("\n");
+
+    // KARL — Kernel Address Randomized Link. When ON, the kernel's
+    // per-TU link order was randomized with the printed seed; a
+    // panic dump needs the matching `kernel.symbols` map (emitted
+    // next to the kernel ELF / under /boot on the ISO) to decode
+    // RIPs back to function names. When OFF, every build of this
+    // commit lays symbols at the same offsets and a stock nm of
+    // the kernel ELF suffices.
+    if constexpr (duetos::core::kKarlEnabled)
+    {
+        SerialWrite("[boot] karl=seed=");
+        SerialWriteHex(duetos::core::kKarlBuildSeed);
+        SerialWrite("\n");
+    }
+    else
+    {
+        SerialWrite("[boot] karl=disabled\n");
+    }
 
     constexpr duetos::u32 kMultiboot2BootMagic = 0x36D76289;
     if (multiboot_magic == kMultiboot2BootMagic)
@@ -964,6 +992,24 @@ void BootBringupMemPaging()
     // is fired during the test — it exercises the list mutation
     // and lookup paths with synthetic PFNs and restores live state.
     DUETOS_BOOT_SELFTEST(duetos::mm::PoisonFrameSelfTest());
+    // Guard-page poison allocator — sibling of KMalloc that
+    // dedicates 3 pages of VA per allocation ([guard][data][guard])
+    // so overruns and use-after-free trap at the write site
+    // instead of corrupting random neighbours. MUST run before
+    // any AddressSpaceCreate — the PML4[384] entry the region
+    // lives under is propagated into every per-process AS at
+    // AS-create time, so a late init would leave existing
+    // address spaces blind to the region.
+    //
+    // The self-test is "init-with-validation" rather than a pure
+    // test: it exercises the alloc/free round-trip AND it's the
+    // first call that walks the new PML4 entry into existence,
+    // so it doubles as the trigger that pulls in the PDPT/PD/PT
+    // for the region's first slot. Runs unconditionally (same
+    // policy as RegistrySelfTest, the canonical
+    // init-with-validation example).
+    duetos::mm::PoisonAllocInit();
+    duetos::mm::PoisonAllocSelfTest();
     // Kernel-image W^X / DEP — split the 2 MiB PS direct map covering
     // the kernel image into 4 KiB pages, then apply per-section flags:
     //   .text  → R + X   (writes to .text now #PF)
@@ -1231,6 +1277,18 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     SerialWrite("[boot] Installing BSP per-CPU struct.\n");
     duetos::cpu::PerCpuInitBsp();
 
+    // CPU hotplug state machine — Linux-style ordered bring-up
+    // chain. The BSP is already initialised by this point (we are
+    // currently EXECUTING on it), so the framework's
+    // `CpuhpMarkOnline(0)` short-circuits BSP to Online without
+    // walking the chain. AP bring-up in SmpStartAps below routes
+    // through `CpuhpBringUp(cpu_id)` via the registered STARTING
+    // band states. The self-test exercises the rollback path
+    // against toy states in the unreserved 700+ band.
+    duetos::cpu::CpuhpMarkOnline(0);
+    duetos::cpu::CpuhpSelfTest();
+    SerialWrite("[cpuhp] state-machine ready\n");
+
     // Drive any future Phase::PerCpuBsp registrants. No callers
     // yet, but the phase slot exists so the registry stays the
     // single contract for "per-CPU BSP init."
@@ -1242,6 +1300,25 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // so the BSP's WaitForApOnline poll inside SmpStartAps is the
     // rendezvous; cluster assignment runs after SmpStartAps returns.
     duetos::cpu::TopologyInitBsp();
+
+    // Single-instruction per-CPU access self-test. Validates the
+    // `arch::ThisCpu*` macro suite (movq / incq / addq via the GS
+    // segment override) against `cpu::CurrentCpu()->field`. Cheap
+    // (~thousand single-instruction increments) and IRQ-off, so
+    // safe to run inline here right after the BSP slot is live.
+    duetos::arch::ThisCpuOpsSelfTest();
+
+    // Preempt-off (IRQs-on) critical-section self-test. Validates
+    // the `cpu::CriticalEnter` / `CriticalExit` round-trip,
+    // nesting, RAII guard, and the deferred-preempt drain — all
+    // before any in-kernel client of the primitive has a chance to
+    // exercise it. Runs unconditionally (same policy as
+    // PoisonAllocSelfTest / ThisCpuOpsSelfTest above): the
+    // primitive will be used in release builds, so it must be
+    // validated in release boot too. Cheap (~10 atomic ops + 1
+    // Schedule()), and runs after PerCpuInitBsp so critnest /
+    // deferred_preempt slots are live.
+    duetos::cpu::CriticalSelfTest();
 
     // Architectural LBR — start the per-CPU branch trace ring as
     // early as practical so a panic during late init still has
@@ -1306,12 +1383,19 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // is still deferred. Runs early because it has no
     // dependencies past arch::Cli/Sti.
     DUETOS_BOOT_SELFTEST(duetos::sync::LockdepSelfTest());
+    // Kind taxonomy + LOCKDEP_ASSERT_HELD coverage. Runs in the
+    // same window as the base self-test because the cross-kind
+    // rule lives in the same `LockdepBeforeAcquire` path and has
+    // the same dependencies (arch::Cli/Sti only).
+    DUETOS_BOOT_SELFTEST(duetos::sync::LockdepKindClassSelfTest());
     // Name the canonical hot global locks (sched / kobject /
     // kstack / pci-config / breakpoints) so any inversion
     // detected post-self-test prints readable names instead of
     // raw class IDs. Idempotent; called after the self-test so
     // self-test scratch names don't get clobbered by names that
-    // need to be live for the rest of boot.
+    // need to be live for the rest of boot. This pass also lays
+    // down each class's kind tag (Spin / Sleep) so the cross-kind
+    // rule has live data going into the rest of the kernel boot.
     duetos::sync::LockdepRegisterCanonicalClasses();
 
     SerialWrite("[boot] Bringing up periodic timer.\n");
@@ -1402,6 +1486,16 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     duetos::sched::SchedStartIdle("idle-bsp");
     duetos::sched::SchedStartReaper();
 
+    // Cyclic subsystem (Solaris/illumos-style level-rule timer
+    // callbacks). Install AFTER SchedInit + idle + reaper are
+    // running — Install spawns the Low-level dispatcher kthread.
+    // The self-test runs unconditionally (PoisonAllocSelfTest /
+    // RegistrySelfTest convention) so a release boot still gets
+    // the "init-with-validation" coverage; the cyclic ABI is too
+    // load-bearing on the first slice to gate behind kBootSelfTests.
+    duetos::time::CyclicInstall();
+    duetos::time::CyclicSelfTest();
+
     // Pre-stage the boot-time stress driver mode (no task spawn yet
     // — that happens later from kernel_main once the shell + ring3
     // smokes are queued). Sets the `StressDriverArmed()` flag so the
@@ -1476,6 +1570,17 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                               []()
                                               {
                                                   duetos::sched::WorkPoolSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+        // Split per-CPU counter (cpu::PercpuCounter). Drives Add /
+        // Fold / ReadExact / ReadApproximate from the BSP first,
+        // then from a 4-worker workpool to exercise per-CPU stash
+        // isolation under concurrent writers. Lives in Phase::Sched
+        // because the multi-CPU half spawns workpool tasks.
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "percpu-counter-selftest",
+                                              []()
+                                              {
+                                                  duetos::cpu::PercpuCounterSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
         // Slab allocator — fixed-size object cache layered over
@@ -1565,6 +1670,27 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                                   return duetos::core::Result<void>{};
                                               });
     }
+
+    // Adaptive mutex (illumos-style spin-if-owner-running, park
+    // otherwise). Exercises the fast path, the TryLock surface, the
+    // lockdep round-trip, and the two-task contention park/wake path.
+    // Routed through Phase::Sched because the contention case spawns
+    // workers via SchedCreate and drives them with SchedSleepTicks —
+    // both require the scheduler online. Registered OUTSIDE the
+    // `if constexpr (kBootSelfTests)` gate above: the primitive is a
+    // new kernel sync surface whose correctness has SMP-dependent
+    // edge cases (on_cpu flag handoff at ContextSwitch, park-vs-spin
+    // decision) that a compile-time check cannot prove, so even
+    // release boots run it as a live regression gate. The test is
+    // cheap (~100 ms for the contention worker's sleep) and prints a
+    // single sentinel line on success.
+    duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "adaptive-mutex-selftest",
+                                          []()
+                                          {
+                                              duetos::sync::AdaptiveMutexSelfTest();
+                                              return duetos::core::Result<void>{};
+                                          });
+
     RESULT_LOG_AND_DROP(duetos::core::RunPhase(duetos::core::Phase::Sched), "boot", "RunPhase Sched");
 
     // KObject + HandleTable infrastructure self-tests (plan A3).
@@ -1575,6 +1701,18 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // of any current handle surface is tracked as a follow-up.
     DUETOS_BOOT_SELFTEST(duetos::ipc::KObjectSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::ipc::HandleTableSelfTest());
+    // Per-handle rights extension — ceiling-vs-floor model on top
+    // of Process::caps. Exercises type-allowed masking,
+    // caps-derived narrowing, dup-with-narrow, escalation refusal,
+    // HandleReplace atomicity, and HandleCheckRight gating.
+    //
+    // Run UNCONDITIONALLY (not gated by DUETOS_BOOT_SELFTEST) — the
+    // rights model is the security floor for every handle-mediated
+    // syscall, and a regression here is a hard stop. The test is
+    // cheap (no scheduler dependency, ~µs of work) and emits a
+    // single `[handle-rights] self-test OK` sentinel on success so
+    // CI can grep for it. Same convention as adaptive-mutex below.
+    duetos::ipc::HandleRightsSelfTest();
     // Concrete KMutex subclass self-test (plan A3-followup) —
     // demonstrates the full HandleTable round-trip on a real
     // type with refcounted storage. Existing per-type Win32
@@ -1620,6 +1758,42 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // confirm the gating logic is correct before any real
     // workload exercises it.
     DUETOS_BOOT_SELFTEST(duetos::diag::SoftLockupSelfTest());
+
+    // Hung-task detector (the deadlock / lost-wakeup
+    // complement to soft-lockup). The detector is wired into
+    // the heartbeat task and will run on every beat once
+    // we're past this point; the self-test spawns a real
+    // Blocked task, rewinds its block-start anchor, and
+    // confirms the walker fires + the per-TID rate limit
+    // suppresses re-warns. Must run AFTER SchedInit + the
+    // reaper start (the self-test fixture relies on the
+    // reaper to clean its victim up); the boot-bringup order
+    // satisfies that by construction.
+    DUETOS_BOOT_SELFTEST(duetos::diag::HungTaskSelfTest());
+
+    // kstat registry (unified machine-readable statistics
+    // surface). The self-test runs synthetic register /
+    // read / walk / dup-reject probes against a clean
+    // registry before any heartbeat-driven production
+    // entries are added; running it here keeps the bug
+    // floor for "registration races with first read"
+    // visible at boot rather than at first heartbeat.
+    // Unconditional (not gated by `kBootSelfTests`) — kstat
+    // is small and the test is cheap; a broken kstat would
+    // quietly mis-report every other subsystem's stats once
+    // consumers attach.
+    duetos::diag::KstatSelfTest();
+
+    // FMA (Fault Management Architecture) skeleton. Sits beside
+    // FaultReactDispatch as the cross-correlation surface: every
+    // detector that already posts to FaultReactDispatch also posts
+    // an ereport, and the diagnosis engine walks the ereport ring
+    // every heartbeat looking for patterns (ECC retention, repeated
+    // driver faults, kernel-integrity drift). Unconditional —
+    // skeleton, three rules, suspect ring of 64; the cost is one
+    // bounded walk per heartbeat.
+    duetos::diag::fma::FmaInstall();
+    duetos::diag::fma::FmaSelfTest();
 }
 
 // Device + late-bring-up: PS/2 kbd/mouse, PCI enumeration,

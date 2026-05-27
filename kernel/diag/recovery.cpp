@@ -1,6 +1,7 @@
 #include "diag/recovery.h"
 
 #include "diag/fault_react.h"
+#include "diag/fma/ereport.h"
 #include "log/klog.h"
 
 namespace duetos::core
@@ -45,6 +46,26 @@ void DriverFault(const char* driver_name, DriverFaultReason reason)
     // driver model; until then call sites are just reporting to
     // the audit stream.
     LogWithValue(LogLevel::Error, driver_name, ReasonString(reason), g_driver_fault_count);
+
+    // FMA bridge: post an ereport so the diagnosis engine's
+    // driver-fault correlation rule (rule 2) can roll repeated
+    // faults from the same driver into a suspect. Without a domain
+    // id, target_id is the hash of the driver name (a stable
+    // identifier for correlation; we don't need a perfect hash —
+    // collisions only mean two distinct drivers get rolled up
+    // together, which is still an actionable signal).
+    u64 name_hash = 0xcbf29ce484222325ull; // FNV-1a 64-bit basis
+    if (driver_name != nullptr)
+    {
+        for (const char* p = driver_name; *p != '\0'; ++p)
+        {
+            name_hash ^= static_cast<u64>(static_cast<unsigned char>(*p));
+            name_hash *= 0x100000001b3ull;
+        }
+    }
+    ::duetos::diag::fma::EreportPost(::duetos::diag::fma::EreportClass::DriverFault,
+                                     ::duetos::diag::fma::EreportSeverity::Recoverable, name_hash,
+                                     static_cast<u64>(reason), g_driver_fault_count, driver_name);
 }
 
 namespace
@@ -104,6 +125,15 @@ void DriverFault(const char* driver_name, DriverFaultReason reason, FaultDomainI
     ev.attempt_count = 0;
     ev.faulting_rip = 0;
     ev.aux = g_driver_fault_count;
+
+    // FMA bridge: post an ereport with target_id = domain_id so the
+    // diagnosis engine can correlate per-domain. Posted BEFORE
+    // FaultReactDispatch because the dispatch may panic (Halt path);
+    // posting first means the ereport is in the ring when the next
+    // boot's recovery shell wants to inspect what happened.
+    ::duetos::diag::fma::EreportPost(::duetos::diag::fma::EreportClass::DriverFault,
+                                     ::duetos::diag::fma::EreportSeverity::Recoverable, static_cast<u64>(domain_id),
+                                     static_cast<u64>(reason), g_driver_fault_count, driver_name);
 
     // Dispatch chooses + executes the reaction. May not return
     // (Halt path); when it does, the chosen reaction is the

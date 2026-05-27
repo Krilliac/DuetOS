@@ -1073,6 +1073,84 @@ duetos_stub_dll(d3dcompiler 0x102E0000 "D3DCompile,D3DCompile2,D3DCreateBlob,D3D
 duetos_stub_dll(vulkan_1 0x102F0000 "vkCreateInstance,vkDestroyInstance,vkEnumeratePhysicalDevices,vkCreateDevice,vkDestroyDevice,vkGetDeviceQueue,vkDeviceWaitIdle,vkQueueWaitIdle,vkEnumerateInstanceVersion,vkGetInstanceProcAddr,vkGetDeviceProcAddr,DuetOS_Vk_GetStatsCounter,DuetOS_Vk_ClearFramebufferRgba,DuetOS_Vk_CreateSurface,DuetOS_Vk_DestroySurface,DuetOS_Vk_Present,vkCreateShaderModule,vkDestroyShaderModule,vkAllocateMemory,vkFreeMemory,vkCreateBuffer,vkDestroyBuffer,vkBindBufferMemory,vkMapMemory,vkUnmapMemory,vkCreateImage,vkDestroyImage,vkBindImageMemory,vkCreateCommandPool,vkDestroyCommandPool,vkAllocateCommandBuffers,vkBeginCommandBuffer,vkEndCommandBuffer,vkCmdClearColorImage,vkQueueSubmit,vkCreatePipelineLayout,vkDestroyPipelineLayout,vkCreateRenderPass,vkDestroyRenderPass,vkCreateGraphicsPipelines,vkCreateComputePipelines,vkDestroyPipeline,vkCmdBindPipeline,vkCmdDraw,vkCmdDispatch,vkCmdBindVertexBuffers,vkCmdBindIndexBuffer,vkUpdateDescriptorSets,vkCreateDescriptorSetLayout,vkDestroyDescriptorSetLayout,vkCreateDescriptorPool,vkDestroyDescriptorPool,vkAllocateDescriptorSets,vkCmdBindDescriptorSets" "vulkan-1")
 
 
+# ----------------------------------------------------------------------------
+# KARL — Kernel Address Randomized Link (OpenBSD-style).
+#
+# When ON, the per-TU object order passed to the linker is randomized using
+# tools/build/karl-shuffle.py. The shuffle is seeded so a given build is
+# reproducible (DUETOS_KARL_SEED env var pins it; otherwise we draw a value
+# at configure time), but two cleanly-configured builds with different seeds
+# produce kernels whose function VAs do NOT match. KARL complements KASLR:
+# KASLR randomizes the BASE on every boot, KARL randomizes the OFFSETS
+# inside the binary on every build. A single function-pointer leak no
+# longer derandomizes the rest of the image.
+#
+# Constraints the shuffle respects:
+#   - .text.boot / .rodata.boot / .bss.boot all come from one TU (boot.S)
+#     and are filtered into their own sections by the linker script, so a
+#     shuffle of the input list cannot move them across .text.
+#   - The linker script's ENTRY(_start) resolves the entry point by symbol
+#     after link, so the boot.S object's link-position is irrelevant.
+#   - C++ static-constructor ordering is governed by `.init_array.NNN`
+#     priority slots in the linker script (KEEP'd in priority order); the
+#     KERNEL_INITCALL macro registers each callback into an explicit phase
+#     enum + RunPhase() dispatcher — no source-order coupling there either.
+#   - The symbols TU pin (`symbols_stub.cpp` / `symbols_generated.cpp`) and
+#     the kernel-blob TU stay at the tail of the source list because the
+#     `add_executable` calls below append them AFTER the shuffled list.
+#     That preserves the two-stage symbol-table contract documented at
+#     the top of this file.
+# ----------------------------------------------------------------------------
+option(DUETOS_KARL "Enable KARL: randomize kernel-object link order per build" OFF)
+
+if(DUETOS_KARL)
+    set(_karl_seed "$ENV{DUETOS_KARL_SEED}")
+    if(_karl_seed STREQUAL "")
+        # No explicit seed — draw one at configure time. string(RANDOM) is
+        # deterministic only within a single configure run, so a `--fresh`
+        # reconfigure picks a new value (intentional: we want the kernel to
+        # actually re-randomize across builds).
+        string(RANDOM LENGTH 9 ALPHABET "0123456789" _karl_seed)
+        # Strip a leading zero if present so the seed parses as a clean
+        # base-10 integer in the Python helper.
+        string(REGEX REPLACE "^0+" "" _karl_seed "${_karl_seed}")
+        if(_karl_seed STREQUAL "")
+            set(_karl_seed "1")
+        endif()
+    endif()
+    set(DUETOS_KARL_BUILD_SEED "${_karl_seed}")
+    set(DUETOS_KARL_SEED_RECORD "${CMAKE_CURRENT_BINARY_DIR}/karl-seed.txt")
+    set(DUETOS_KARL_SHUFFLE_SCRIPT "${CMAKE_SOURCE_DIR}/tools/build/karl-shuffle.py")
+
+    # Pipe the source list into karl-shuffle.py via a temp file, collect
+    # the shuffled list back, and replace DUETOS_KERNEL_SHARED_SOURCES
+    # with it. Configure-time work so the generator (Ninja) sees a stable
+    # order on every incremental build until configure runs again.
+    string(REPLACE ";" "\n" _karl_stdin "${DUETOS_KERNEL_SHARED_SOURCES}")
+    set(_karl_tmp "${CMAKE_CURRENT_BINARY_DIR}/karl-input.txt")
+    file(WRITE "${_karl_tmp}" "${_karl_stdin}\n")
+    execute_process(
+        COMMAND python3 "${DUETOS_KARL_SHUFFLE_SCRIPT}"
+                --seed "${DUETOS_KARL_BUILD_SEED}"
+                --record "${DUETOS_KARL_SEED_RECORD}"
+        INPUT_FILE "${_karl_tmp}"
+        OUTPUT_VARIABLE _karl_stdout
+        RESULT_VARIABLE _karl_rc
+        OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT _karl_rc EQUAL 0)
+        message(FATAL_ERROR
+            "KARL shuffle failed (rc=${_karl_rc}). seed=${DUETOS_KARL_BUILD_SEED}\n"
+            "Output: ${_karl_stdout}")
+    endif()
+    string(REPLACE "\n" ";" DUETOS_KERNEL_SHARED_SOURCES "${_karl_stdout}")
+    # Remove any empty trailing element from the split.
+    list(REMOVE_ITEM DUETOS_KERNEL_SHARED_SOURCES "")
+    list(LENGTH DUETOS_KERNEL_SHARED_SOURCES _karl_count)
+    message(STATUS "KARL enabled — link order randomized (seed=${DUETOS_KARL_BUILD_SEED}, ${_karl_count} sources). Record: ${DUETOS_KARL_SEED_RECORD}")
+else()
+    set(DUETOS_KARL_BUILD_SEED "0")
+endif()
+
 set(DUETOS_KERNEL_LINKER_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/arch/x86_64/linker.ld")
 
 # Shared link flags — applied identically to both stages so the symbol
@@ -1370,6 +1448,16 @@ if(DUETOS_BOOT_TTY)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_BOOT_TTY=1)
 endif()
 
+# KARL — bake the build seed into both stage targets so the boot-info
+# banner can print which seed produced this image. The seed flows into
+# `build_config.h` as `kKarlBuildSeed`; the banner prints it at boot.
+# The shuffle decision itself was made at configure time (above);
+# these defines are pure metadata for triage.
+if(DUETOS_KARL)
+    target_compile_definitions(duetos-kernel          PRIVATE DUETOS_KARL=1 DUETOS_KARL_BUILD_SEED=${DUETOS_KARL_BUILD_SEED})
+    target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_KARL=1 DUETOS_KARL_BUILD_SEED=${DUETOS_KARL_BUILD_SEED})
+endif()
+
 # Link-time optimization (build-flavor follow-up). When ON, every
 # kernel TU is built with `-flto=thin` and the link consumes the
 # bitcode-flavored .o files via lld's ThinLTO. The two-stage
@@ -1498,6 +1586,27 @@ target_include_directories(duetos-kernel PRIVATE
 duetos_apply_kernel_link_flags(duetos-kernel)
 
 # ----------------------------------------------------------------------------
+# KARL symbol-map artefact for triage.
+#
+# A KARL build produces a unique address map per-seed; a panic RIP can only
+# be decoded against the map that built it. Emit `kernel.symbols` next to
+# the linked ELF (sorted by address) on every build — cheap, useful with or
+# without KARL. Include in the ISO so a recovery shell can read it.
+#
+# We don't fail the build if `nm` is missing — the kernel is still linked
+# and bootable; only the symbols artefact is skipped, with a status note.
+# ----------------------------------------------------------------------------
+find_program(NM_BIN nm)
+if(NM_BIN)
+    add_custom_command(TARGET duetos-kernel POST_BUILD
+        COMMAND sh -c "${NM_BIN} -n \"$<TARGET_FILE:duetos-kernel>\" > \"$<TARGET_FILE_DIR:duetos-kernel>/kernel.symbols\""
+        COMMENT "Generating KARL kernel.symbols map (nm -n) for triage"
+        VERBATIM)
+else()
+    message(STATUS "kernel.symbols artefact skipped (nm not found on PATH).")
+endif()
+
+# ----------------------------------------------------------------------------
 # Bootable ISO — uses GRUB as a third-party loader until our own UEFI boot
 # loader exists. If grub-mkrescue / xorriso aren't installed, the kernel
 # still builds; only the `duetos-iso` target is skipped, with a status
@@ -1522,6 +1631,12 @@ if(GRUB_MKRESCUE AND XORRISO)
                                          "${DUETOS_ISO_STAGE}/boot/duetos-kernel.elf"
         COMMAND ${CMAKE_COMMAND} -E copy "${DUETOS_GRUB_CFG}"
                                          "${DUETOS_ISO_STAGE}/boot/grub/grub.cfg"
+        # Best-effort copy of the KARL symbol-map artefact for triage.
+        # If nm was missing at configure time (no NM_BIN) the file
+        # wasn't generated; `cmake -E copy` over a missing source is
+        # a hard error, so we test+copy via sh and swallow failure.
+        # The ISO build itself is not gated on its presence.
+        COMMAND sh -c "test -f \"$<TARGET_FILE_DIR:duetos-kernel>/kernel.symbols\" && cp \"$<TARGET_FILE_DIR:duetos-kernel>/kernel.symbols\" \"${DUETOS_ISO_STAGE}/boot/kernel.symbols\" || true"
 
         # Produce the ISO. grub-mkrescue embeds the i386-pc boot image so the
         # result is bootable on both legacy BIOS (via QEMU's default SeaBIOS)

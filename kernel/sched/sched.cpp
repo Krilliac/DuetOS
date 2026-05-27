@@ -51,10 +51,12 @@
 #include "diag/soft_lockup.h"
 #include "sched/loadavg.h"
 #include "sync/rcu.h"
+#include "time/cyclic.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "proc/process.h"
 #include "diag/recovery.h"
+#include "cpu/critical.h"
 #include "cpu/percpu.h"
 #include "cpu/topology.h"
 #include "debug/probes.h"
@@ -88,6 +90,17 @@ struct Task
     // other state, and reset to 0 by the wake path so a task that
     // comes back Ready has a clean slate.
     u64 wake_tick;
+    // Tick value captured at the moment this task most recently
+    // transitioned INTO TaskState::Blocked. Zero while the task is
+    // not Blocked. Used by `diag::HungTaskTick` to compute how
+    // long a task has been stuck on a wait queue — large values
+    // (relative to the current tick) are the signal of a deadlock
+    // or lost wakeup. Cleared by the wake paths when the task is
+    // pulled off its wait queue. Untimed-Blocked tasks (the
+    // `WaitQueueBlock` path) get this set just like timed-Blocked;
+    // `wake_tick` alone is insufficient because it stays 0 for
+    // an untimed wait.
+    u64 block_start_tick;
     const char* name;
     // `next` threads the runqueue, a WaitQueue, or the zombie list —
     // mutually exclusive; at most one of those is the task's home
@@ -160,6 +173,20 @@ struct Task
     // reason when it converts the task into a zombie. Only valid
     // when kill_requested is true.
     KillReason kill_reason;
+
+    // Hung-task detector opt-out. Some kernel tasks legitimately
+    // sit in `TaskState::Blocked` forever waiting for a wake-up
+    // that may never come on this boot (input pollers waiting for
+    // a keypress, the reaper waiting for a task to die, future
+    // device-event listeners). Without this flag the hung-task
+    // detector correctly identifies them as "blocked > threshold"
+    // and warns once per minute — true but noisy and not
+    // actionable. The task sets this flag once at entry via
+    // `sched::SchedExemptCurrentFromHungTask()` and the
+    // detector's snapshot pass skips it. Set-once / clear-never
+    // for this slice; if a future workload wants to opt OUT of
+    // the exemption mid-life, this becomes a clear path too.
+    bool hung_task_exempt;
 
     // One-shot boot context: this Task exists ONLY to give a CPU's
     // first Schedule() a non-null `prev`; its rsp / stack_base are
@@ -301,6 +328,19 @@ struct Task
     // override the routing decision when a peer CPU is idle.
     u32 last_cpu;
 
+    // Adaptive-mutex on-CPU flag. 1 while the task is the
+    // currently-running task on SOME CPU; 0 otherwise (Ready in the
+    // runqueue, Blocked / Sleeping on a wait or sleep queue, Dead).
+    // Set with __ATOMIC_RELEASE on the resuming task right before
+    // ContextSwitch, cleared with __ATOMIC_RELEASE on the outgoing
+    // task right before ContextSwitch. The adaptive mutex slow path
+    // reads this with __ATOMIC_ACQUIRE on a foreign CPU to decide
+    // "spin (owner still running, release imminent)" vs "park (owner
+    // is off-CPU; spinning would burn cycles waiting for a
+    // reschedule)". u8 not bool so the layout is explicit; one byte
+    // packs cheaply alongside the existing u32 last_cpu.
+    u8 on_cpu;
+
     // Hard CPU affinity: bit (1u << cpu_id) set => the task is
     // permitted to run on that CPU. kAffinityAll (~0u) means "no
     // restriction" and is the default for every task, so every
@@ -346,6 +386,21 @@ struct Task
     u64 seh_last_rip;
     u32 seh_repeat;
     u32 _pad_seh;
+
+    // Doubly-linked "all live tasks" list. Threaded by these
+    // dedicated pointers (NOT by `next`, which is already claimed
+    // by the runqueue / wait-queue / zombie list this task is
+    // currently homed on). Lets the hung-task detector enumerate
+    // every Blocked task in the system without a wait-queue
+    // registry — Blocked tasks live on a WaitQueue threaded by
+    // `next`, with no central "all wait queues" pointer, so a
+    // per-task list anchor is the only way to find them.
+    //
+    // Mutated under `g_sched_lock` by `SchedCreateInternal`
+    // (push) and `SchedReap*` paths (remove). The walker uses
+    // the same lock.
+    Task* all_prev;
+    Task* all_next;
 
     // Lockdep held-class stack, parked here across ContextSwitch.
     // A sleeping mutex is held across switches; a single global
@@ -537,6 +592,51 @@ constinit u64 g_idle_ticks = 0;
 // for the reaper to free their struct + stack. Linked through Task::next
 // (reused from runqueue/waitqueue — a task is only ever on one list).
 constinit Task* g_zombies = nullptr;
+
+// Head of the doubly-linked "all live tasks" list (threaded by
+// `all_prev` / `all_next`). Mutated under `g_sched_lock`. The
+// hung-task detector walks this list under the same lock to find
+// every Blocked task — Blocked tasks live on per-WaitQueue lists
+// with no central registry, so without this anchor there is no
+// general way to enumerate them. The list contains every live
+// task (Running, Ready, Sleeping, Blocked) including the boot
+// task and idle tasks; Dead tasks are removed at reap time.
+constinit Task* g_all_tasks_head = nullptr;
+
+inline void AllTasksLink(Task* t)
+{
+    // Caller holds g_sched_lock OR is in early-init before any
+    // concurrent mutator can race (SchedInit pushes the boot
+    // task before APs come online). Push at the head — O(1).
+    t->all_prev = nullptr;
+    t->all_next = g_all_tasks_head;
+    if (g_all_tasks_head != nullptr)
+    {
+        g_all_tasks_head->all_prev = t;
+    }
+    g_all_tasks_head = t;
+}
+
+inline void AllTasksUnlink(Task* t)
+{
+    // Caller holds g_sched_lock. O(1) via the prev pointer.
+    Task* prev = t->all_prev;
+    Task* next = t->all_next;
+    if (prev != nullptr)
+    {
+        prev->all_next = next;
+    }
+    else
+    {
+        g_all_tasks_head = next;
+    }
+    if (next != nullptr)
+    {
+        next->all_prev = prev;
+    }
+    t->all_prev = nullptr;
+    t->all_next = nullptr;
+}
 constinit WaitQueue g_reaper_wq{};
 constinit u64 g_tasks_exited = 0;
 
@@ -1737,14 +1837,28 @@ void SchedInit()
     boot_task->process = nullptr;                    // kernel-only — no owning process
     boot_task->kill_requested = false;               // kernel tasks never hit a budget
     boot_task->kill_reason = KillReason::TickBudget; // unused when kill_requested=false
+    boot_task->hung_task_exempt = false;             // default: detector watches every task
     boot_task->suspend_count = 0;                    // boot/kernel tasks never get suspended
     boot_task->win32_last_error = 0;                 // ERROR_SUCCESS, per-thread Win32 slot
     boot_task->last_cpu = cpu::CurrentCpu()->cpu_id; // BSP pin — boot task only ever runs here
     boot_task->affinity_mask = kAffinityAll;         // unrestricted by default
+    // Boot task is the currently-running task on this CPU from the
+    // moment SchedInit returns. Mark on_cpu=1 so the adaptive-mutex
+    // slow path on a peer CPU sees the correct state if it observes
+    // the boot task as a mutex holder before the first real context
+    // switch flips the flag. RELEASE pairs with the ACQUIRE the
+    // slow path uses to read.
+    __atomic_store_n(&boot_task->on_cpu, 1u, __ATOMIC_RELEASE);
 
     Current() = boot_task;
     SchedCpuIncCreated();
     SchedCpuIncLive();
+    // Push the boot task onto the global "all live tasks" list.
+    // Pre-AP-bringup, no concurrent mutator exists; the global
+    // sched lock isn't taken (it isn't even constructed yet
+    // beyond constinit zero-init), but the ordering is safe by
+    // construction: the BSP is the only CPU running.
+    AllTasksLink(boot_task);
 
     SerialWrite("[sched] online; task 0 is \"kboot\"\n");
     KLOG_INFO("sched", "online; task 0 is kboot");
@@ -1825,6 +1939,7 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     t->process = process; // user tasks: caller's Process; kernel tasks: nullptr
     t->kill_requested = false;
     t->kill_reason = KillReason::TickBudget;
+    t->hung_task_exempt = false; // default: detector watches every task
     t->ticks_run = 0;
     t->schedin_tick = 0;
     t->win32_last_error = 0; // ERROR_SUCCESS, per-thread Win32 slot
@@ -1918,6 +2033,12 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     {
         sync::SpinLockGuard guard(g_sched_lock);
         RunqueuePush(t);
+        // Add the new task to the global "all live tasks" list
+        // under the same lock as the runqueue push. The hung-task
+        // detector walks this list under g_sched_lock; pushing
+        // here makes the new task observable to the very next
+        // detector pass.
+        AllTasksLink(t);
         SchedCpuIncCreated();
         SchedCpuIncLive();
     }
@@ -2058,6 +2179,20 @@ void SchedSetUserGsOverride(Task* t, u64 gs_base)
 bool TaskIsDead(const Task* t)
 {
     return t != nullptr && t->state == TaskState::Dead;
+}
+
+bool TaskIsOnCpu(const Task* t)
+{
+    if (t == nullptr)
+    {
+        return false;
+    }
+    // Read with ACQUIRE so a peer CPU spinning on this flag pairs
+    // cleanly with the RELEASE-store the context-switch path
+    // performs around the same `next->state = Running` /
+    // `prev->state = Ready` transitions. AdaptiveMutex's slow path
+    // is the dominant caller.
+    return __atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE) != 0;
 }
 
 arch::TrapFrame* SchedFindUserTrapFrame(Task* t)
@@ -2357,6 +2492,26 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
     next->last_cpu = cpu::CurrentCpu()->cpu_id; // pin affinity to this CPU for next wake
     Current() = next;
     ++g_context_switches;
+
+    // Adaptive-mutex on-CPU flag handoff. Cleared on the outgoing
+    // task BEFORE ContextSwitch (it is about to stop running on this
+    // CPU); set on the resuming task right before its rsp is loaded.
+    // Both stores carry RELEASE ordering so a peer CPU reading the
+    // flag with ACQUIRE sees a value consistent with the rest of the
+    // task state at that moment — in particular, a clear is paired
+    // with the state flip out of Running above, and a set is paired
+    // with the assignment of Running + Current() = next on this CPU.
+    //
+    // Order matters: clear `prev` first (it is no longer the owner
+    // of this CPU), then set `next` (it is). On single-CPU early boot
+    // these atomics are still cheap; on SMP they close the race a
+    // spinning adaptive-mutex waiter on a peer CPU would otherwise
+    // see ("flag says on-cpu, but the task is parked on a wait queue").
+    if (prev != next)
+    {
+        __atomic_store_n(&prev->on_cpu, 0u, __ATOMIC_RELEASE);
+    }
+    __atomic_store_n(&next->on_cpu, 1u, __ATOMIC_RELEASE);
 
     // Lock-passing handoff. The lock STAYS HELD across ContextSwitch;
     // SchedFinishTaskSwitch (called below on the resumed task's stack,
@@ -2659,6 +2814,14 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
 void SchedYield()
 {
     KLOG_TRACE("sched", "SchedYield: voluntary preempt");
+    // Yielding from inside a preempt-off critical section is a
+    // contract violation — the whole point of `cpu::CriticalEnter`
+    // is that the caller chose not to be migrated. The deferred-
+    // preempt drain on `CriticalExit` is the legitimate path; an
+    // explicit yield must be balanced against the critnest counter
+    // first.
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "SchedYield from inside critical section",
+                       cpu::CriticalNesting());
     arch::Cli();
     Schedule();
     arch::Sti();
@@ -2667,6 +2830,12 @@ void SchedYield()
 void SchedSleepTicks(u64 ticks)
 {
     KLOG_TRACE_V("sched", "SchedSleepTicks: parking task for ticks", ticks);
+    // Sleeping inside a preempt-off critical section is a contract
+    // violation — the task would never be reachable for wake without
+    // first dropping critnest, which the sleeper can't do because
+    // it's no longer on-CPU.
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "SchedSleepTicks from inside critical section",
+                       cpu::CriticalNesting());
     if (ticks == 0)
     {
         SchedYield();
@@ -2700,6 +2869,8 @@ void SchedSleepUntil(u64 deadline_tick)
     // monotonically-increasing counter that OnTimerTick publishes,
     // so "passed" means (i64)(g_tick_now - deadline) >= 0.
     KLOG_TRACE_V("sched", "SchedSleepUntil: deadline_tick", deadline_tick);
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "SchedSleepUntil from inside critical section",
+                       cpu::CriticalNesting());
     arch::Cli();
     if (TickReached(g_tick_now, deadline_tick))
     {
@@ -2730,6 +2901,11 @@ u64 SchedNowTicks()
 void SchedExit()
 {
     KLOG_INFO("sched", "SchedExit: task entering termination path");
+    // A task can't exit while owning a critical section — there's
+    // no Exit pair on the dying side to drain the per-CPU counter.
+    // Leaving critnest > 0 across the post-switch onto a different
+    // task would silently disable preemption forever on this CPU.
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "SchedExit with critnest != 0", cpu::CriticalNesting());
     arch::Cli();
     Task* self = Current();
     // SchedExit must fire exactly once per task. A second call would
@@ -2855,6 +3031,12 @@ void OnTimerTick(u64 now_ticks)
     const char* cur_name = (cur != nullptr) ? cur->name : nullptr;
     diag::SoftLockupTick(now_ticks, (cur != nullptr && !cur_is_idle) ? TaskId(cur) : 0, cur_name);
     sync::RcuTick();
+    // Cyclic subsystem IRQ-tail dispatch (High + Lock levels).
+    // Cheap on the common "nothing due" path (one heap-top
+    // compare per level); when due, releases the cyclic lock
+    // around each callback so a slow callback doesn't block
+    // the rest on this tick.
+    ::duetos::time::CyclicTimerTick();
     // D2 instrumentation. arg0 = vector (32 = LAPIC timer),
     // arg1 = current_tid. Tagging IRQs lets a tracer dump
     // correlate "which task got preempted" with the syscall +
@@ -2904,6 +3086,10 @@ void OnTimerTick(u64 now_ticks)
             }
 
             woken->wake_tick = 0;
+            // Clear the hung-task anchor on timer-driven wakeups
+            // too — the task is leaving Blocked, so the previous
+            // "stuck since" anchor is no longer meaningful.
+            woken->block_start_tick = 0;
             woken->next = nullptr;
             // Suspended tasks stay parked even when the timer
             // would otherwise wake them — RunqueueOrSuspendPush
@@ -4405,6 +4591,132 @@ void SchedEnumerate(SchedEnumCb cb, void* cookie)
     arch::Sti();
 }
 
+u64 SchedSnapshotBlockedTasks(SchedBlockedTaskInfo* out, u64 cap)
+{
+    if (out == nullptr || cap == 0)
+    {
+        return 0;
+    }
+    if (!cpu::BspInstalled())
+    {
+        // Pre-SchedInit / pre-BSP install: the all-tasks list is
+        // empty (or in a partial state); nothing to report.
+        return 0;
+    }
+    u64 written = 0;
+    // Walk the global all-tasks list under the sched lock. The
+    // snapshot is intentionally minimal — TID, name pointer,
+    // block_start_tick — because the caller may walk the buffer
+    // outside the lock (the hung-task detector emits warnings on
+    // the post-lock path, where klog is safe to call).
+    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
+    for (Task* t = g_all_tasks_head; t != nullptr && written < cap; t = t->all_next)
+    {
+        if (t->state != TaskState::Blocked)
+        {
+            continue;
+        }
+        if (t->block_start_tick == 0)
+        {
+            // Tasks the suspend path forced into TaskState::Blocked
+            // (without putting them on a wait queue) get filtered
+            // here: legitimately-suspended threads aren't hung.
+            continue;
+        }
+        if (t->hung_task_exempt)
+        {
+            // Task opted out via SchedExemptCurrentFromHungTask().
+            // The legitimate use cases (input pollers waiting for
+            // a keypress that may never come, the reaper waiting
+            // for a death notification) are correctly Blocked for
+            // arbitrarily long, so flagging them as hung is true
+            // but unactionable noise.
+            continue;
+        }
+        out[written].id = t->id;
+        out[written].name = t->name;
+        out[written].block_start_tick = t->block_start_tick;
+        ++written;
+    }
+    sync::SpinLockRelease(g_sched_lock, f);
+    return written;
+}
+
+void SchedExemptCurrentFromHungTask()
+{
+    Task* t = Current();
+    if (t == nullptr)
+    {
+        return;
+    }
+    // Single bool write; the hung-task detector reads it under
+    // sched lock, and we set it from the task's own context where
+    // a concurrent reader sees either the old or new value
+    // deterministically (no torn read for a single byte).
+    t->hung_task_exempt = true;
+}
+
+u64 SchedSelftestRewindBlockStart(const char* match_name, u64 delta_ticks)
+{
+    if (match_name == nullptr)
+    {
+        return 0;
+    }
+    if (!cpu::BspInstalled())
+    {
+        return 0;
+    }
+    u64 tweaked = 0;
+    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
+    const u64 now = g_tick_now;
+    // Compute the synthetic "started blocking this long ago" tick.
+    // Saturate at 1 (the smallest non-zero anchor) if delta_ticks
+    // would underflow (i.e. now < delta). Zero is the
+    // "not-tracked" sentinel in the walker's filter, so saturating
+    // to 0 would silently exclude the rewound task from the hung-
+    // task snapshot — exactly the regression the self-test exists
+    // to catch.
+    const u64 synthesized = (now > delta_ticks) ? (now - delta_ticks) : 1;
+    for (Task* t = g_all_tasks_head; t != nullptr; t = t->all_next)
+    {
+        if (t->state != TaskState::Blocked)
+        {
+            continue;
+        }
+        if (t->name == nullptr)
+        {
+            continue;
+        }
+        // Exact match — match_name strings are short literals
+        // (the hung-task self-test passes a fixed sentinel).
+        // Walk both strings under a small bound; sched_lock is
+        // held so the loop has to stay fast.
+        bool eq = true;
+        for (u32 i = 0; i < 64; ++i)
+        {
+            const char a = t->name[i];
+            const char b = match_name[i];
+            if (a != b)
+            {
+                eq = false;
+                break;
+            }
+            if (a == '\0')
+            {
+                break;
+            }
+        }
+        if (!eq)
+        {
+            continue;
+        }
+        t->block_start_tick = synthesized;
+        ++tweaked;
+    }
+    sync::SpinLockRelease(g_sched_lock, f);
+    return tweaked;
+}
+
 bool SchedIsPidZombie(u64 target_pid)
 {
     arch::Cli();
@@ -4581,6 +4893,12 @@ namespace
 
 [[noreturn]] void ReaperMain(void*)
 {
+    // Opt out of the hung-task detector — the reaper sits in
+    // `TaskState::Blocked` on `g_reaper_wq` between task deaths,
+    // which is unbounded on a system with no exiting tasks (QEMU
+    // smoke past boot). The detector would otherwise correctly
+    // flag this legitimate idle as a hang.
+    SchedExemptCurrentFromHungTask();
     for (;;)
     {
         arch::Cli();
@@ -4669,6 +4987,16 @@ namespace
                     core::PanicWithValue("sched/reaper", "stack canary corrupted (task overflow?)", canary);
                 }
                 mm::FreeKernelStack(dead->stack_base, dead->stack_size);
+            }
+            // Remove from the global all-tasks list before freeing
+            // the Task struct — otherwise the next walker would
+            // dereference a freed pointer. Under the sched lock so
+            // a concurrent SchedCreate or hung-task walker can't
+            // see the half-unlinked state.
+            {
+                sync::IrqFlags lf = sync::SpinLockAcquire(g_sched_lock);
+                AllTasksUnlink(dead);
+                sync::SpinLockRelease(g_sched_lock, lf);
             }
             mm::KFree(dead);
             SchedCpuIncReaped();
@@ -5022,6 +5350,13 @@ void WaitQueueBlockCurrentLocked(WaitQueue* wq)
     t->next = nullptr;
     t->waiting_on = wq;
     t->wake_by_timeout = false;
+    // Record the moment this task entered Blocked so the hung-task
+    // detector can measure "stuck on a wait queue for too long".
+    // g_tick_now is the scheduler's internal tick counter — same
+    // clock SchedNowTicks() returns. Untimed Blocked tasks would
+    // otherwise have no observable "when did I start waiting"
+    // anchor (`wake_tick` stays 0).
+    t->block_start_tick = g_tick_now;
     if (wq->tail == nullptr)
     {
         wq->head = wq->tail = t;
@@ -5039,6 +5374,8 @@ void WaitQueueBlockCurrentLocked(WaitQueue* wq)
 void WaitQueueBlock(WaitQueue* wq)
 {
     KASSERT(wq != nullptr, "sched", "WaitQueueBlock null queue");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "WaitQueueBlock from inside critical section",
+                       cpu::CriticalNesting());
 
     // Acquire manually + hold the lock straight through the
     // deschedule. The old guard-scope-then-Schedule() shape left an
@@ -5056,6 +5393,8 @@ void WaitQueueBlock(WaitQueue* wq)
 bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
 {
     KASSERT(wq != nullptr, "sched", "WaitQueueBlockTimeout null queue");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "WaitQueueBlockTimeout from inside critical section",
+                       cpu::CriticalNesting());
 
     // Zero ticks: no wait at all — yield and declare it a timeout.
     // Callers should not rely on this as a "cheap test" — use
@@ -5081,6 +5420,11 @@ bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
         // corrupt whichever holds it.
         KASSERT(t->state == TaskState::Running, "sched", "WaitQueueBlockTimeout on non-Running task");
         t->state = TaskState::Blocked;
+        // Same rationale as WaitQueueBlockCurrentLocked: anchor the
+        // hung-task detector's "stuck duration" measurement at the
+        // moment the task entered Blocked, regardless of whether
+        // the wait was timed.
+        t->block_start_tick = g_tick_now;
         t->next = nullptr;
         // Saturate the deadline rather than wrap. Without the clamp,
         // `g_tick_now + ticks` could overflow u64 (e.g., a Linux ABI
@@ -5156,6 +5500,10 @@ Task* WaitQueueWakeOneLocked(WaitQueue* wq)
     t->waiting_on = nullptr;
     t->wake_tick = 0;
     t->wake_by_timeout = false;
+    // Clear the hung-task anchor — once we've handed the task
+    // back to the runqueue (or the suspended list), the previous
+    // "stuck on a wait queue since…" measurement is meaningless.
+    t->block_start_tick = 0;
     // Suspended waiters get reparked instead of unblocked.
     RunqueueOrSuspendPush(t);
     SchedCpuDecBlocked();
@@ -5227,6 +5575,13 @@ u64 WaitQueueWakeAll(WaitQueue* wq)
 void MutexLock(Mutex* m)
 {
     KASSERT(m != nullptr, "sched", "MutexLock null mutex");
+    // Sleeping-mutex acquire inside a preempt-off critical section
+    // is a contract violation — the park path goes through
+    // ScheduleLockedHandoff which would deschedule us while
+    // critnest > 0, silently disabling preemption forever on the
+    // CPU that picks us back up.
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "MutexLock from inside critical section",
+                       cpu::CriticalNesting());
 
     // Lockdep edge-walk before the wait/acquire — the "held → this"
     // edge is recorded against any tagged SpinLock / Mutex this task
@@ -5485,6 +5840,8 @@ void CondvarWait(Condvar* cv, Mutex* m)
 {
     KASSERT(cv != nullptr, "sched", "CondvarWait null condvar");
     KASSERT(m != nullptr, "sched", "CondvarWait null mutex");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "CondvarWait from inside critical section",
+                       cpu::CriticalNesting());
 
     arch::Cli();
     if (m->owner != Current())
@@ -5527,6 +5884,9 @@ void CondvarWait(Condvar* cv, Mutex* m)
         // Enqueue self on the condvar's waiters.
         Task* t = Current();
         t->state = TaskState::Blocked;
+        // Anchor for the hung-task detector — see
+        // WaitQueueBlockCurrentLocked above for the rationale.
+        t->block_start_tick = g_tick_now;
         t->next = nullptr;
         t->wake_tick = 0;
         t->waiting_on = &cv->waiters;
@@ -5556,6 +5916,8 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
 {
     KASSERT(cv != nullptr, "sched", "CondvarWaitTimeout null condvar");
     KASSERT(m != nullptr, "sched", "CondvarWaitTimeout null mutex");
+    KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "CondvarWaitTimeout from inside critical section",
+                       cpu::CriticalNesting());
 
     // Zero ticks: drop the lock, yield, re-acquire — report as
     // timeout so the caller doesn't treat a missed signal as a
@@ -5599,6 +5961,9 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
         // wake arm, exactly like WaitQueueBlockTimeout.
         Task* t = Current();
         t->state = TaskState::Blocked;
+        // Anchor for the hung-task detector — see
+        // WaitQueueBlockCurrentLocked above for the rationale.
+        t->block_start_tick = g_tick_now;
         t->next = nullptr;
         // Saturate exactly like WaitQueueBlockTimeout (line ~3417):
         // an unclamped g_tick_now + ticks can wrap to 0 for a huge

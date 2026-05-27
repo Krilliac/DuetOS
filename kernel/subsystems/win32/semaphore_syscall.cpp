@@ -113,6 +113,15 @@ void DoSemWait(arch::TrapFrame* frame)
         frame->rax = static_cast<u64>(-1);
         return;
     }
+    // Per-handle rights gate — WaitForSingleObject on a semaphore
+    // is a decrementing acquire == Wait.
+    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightWait))
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/sem",
+                     "NtWaitForSingleObject(sem): handle lacks Wait right; handle", handle);
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
     ipc::KObject* obj = ipc::HandleTableLookupRef(proc->kobj_handles, ipc_h, ipc::KObjectType::Semaphore);
     if (obj == nullptr)
     {
@@ -160,6 +169,14 @@ void DoSemRelease(arch::TrapFrame* frame)
     if (ipc_h == ipc::kHandleInvalid)
     {
         KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/sem", "release: bad handle; handle", handle);
+        frame->rax = static_cast<u64>(-1);
+        return;
+    }
+    // Per-handle rights gate — ReleaseSemaphore posts to the
+    // count, signalling waiters == Signal.
+    if (!ipc::HandleCheckRight(proc->kobj_handles, ipc_h, ipc::kHandleRightSignal))
+    {
+        KLOG_WARN_AV(::duetos::core::LogArea::Win32, "win32/sem", "release: handle lacks Signal right; handle", handle);
         frame->rax = static_cast<u64>(-1);
         return;
     }

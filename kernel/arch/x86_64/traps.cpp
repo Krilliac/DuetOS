@@ -53,11 +53,13 @@
 #include "util/symbols.h"
 #include "syscall/syscall.h"
 #include "acpi/acpi.h"
+#include "cpu/critical.h"
 #include "cpu/percpu.h"
 #include "debug/breakpoints.h"
 #include "debug/extable.h"
 #include "debug/probes.h"
 #include "mm/kstack.h"
+#include "mm/poison_alloc.h"
 #include "sched/sched.h"
 #include "subsystems/win32/vmap_syscall.h"
 #include "subsystems/win32/seh_dispatch.h"
@@ -380,7 +382,9 @@ inline bool IsDispatchedVector(u64 vector)
     // installed by SMP bring-up (kernel/arch/x86_64/smp.cpp).
     // Without the 0xF9 leg the IrqInstall registration path would
     // halt the kernel mid-boot the moment SMP wires up shootdowns.
-    if (vector == 0xF8 || vector == 0xF9)
+    // IPI-call (0xFA): cross-CPU function-call primitive — same
+    // shape, installed by kernel/cpu/ipi_call.cpp's IpiCallInstall.
+    if (vector == 0xF8 || vector == 0xF9 || vector == 0xFA)
         return true;
     return false;
 }
@@ -780,9 +784,21 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             // schedule anyway. Before this branch ran on
             // the unhandled path too; that regressed the pre-SchedInit
             // boot probe into a #GP inside Schedule().
+            //
+            // critnest gate (FreeBSD critical_enter semantics): if
+            // we're inside a preempt-off critical section, defer the
+            // reschedule until CriticalExit drains it. DeferPreemptIfCritical
+            // returns true and atomically records the deferral when
+            // critnest > 0; otherwise it returns false and we
+            // proceed to call Schedule() normally. We still consume
+            // need_resched via TakeNeedResched so a future tick
+            // doesn't see a stale flag.
             if (sched::TakeNeedResched())
             {
-                sched::Schedule();
+                if (!cpu::DeferPreemptIfCritical())
+                {
+                    sched::Schedule();
+                }
             }
         }
         else
@@ -1036,6 +1052,39 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             SerialWriteHex(frame->rip);
             SerialWrite("\n");
             core::PanicWithValue("sched/kstack", "guard-page hit — kernel stack overflow", cr2);
+        }
+        // mm/poison-alloc guard-page hit. A CR2 inside the poison
+        // VA region is, by construction, a buffer overrun OR a use-
+        // after-free on a poison-allocated buffer — the data page
+        // is the only mapped page in the slot, the two flanking
+        // pages are reserved-unmapped guards, and freed slots have
+        // their data page unmapped (VA leak by design). Either way,
+        // catching this fault at the write site IS the whole point
+        // of the allocator, so the reaction is Halt — continuing
+        // would only mask the bug. Routed through FaultReactDispatch
+        // so the kernel-owned floor + policy machinery get to log
+        // and tally the event uniformly with every other fault kind.
+        if (mm::IsPoisonRegionAddress(cr2))
+        {
+            SerialWrite("[poison] guard-page hit at CR2=");
+            SerialWriteHex(cr2);
+            SerialWrite(" RIP=");
+            SerialWriteHex(frame->rip);
+            SerialWrite(" — buffer overrun or use-after-free detected\n");
+            ::duetos::diag::FaultEvidence ev{};
+            ev.source = "kernel/mm/poison-alloc";
+            ev.kind = ::duetos::diag::FaultKind::PoisonGuardHit;
+            ev.severity = ::duetos::diag::FaultSeverity::Critical;
+            ev.attempt_count = 0;
+            ev.faulting_rip = frame->rip;
+            ev.aux = cr2;
+            (void)::duetos::diag::FaultReactDispatch(::duetos::core::kFaultDomainInvalid, ev);
+            // Dispatch should Halt (default policy is Halt for this
+            // kind, floor pins it to Halt anyway). Belt-and-braces
+            // panic on the off chance dispatch returned — the panic
+            // value lets the operator recover CR2 even if the
+            // dispatch logged the wrong field.
+            core::PanicWithValue("kernel/mm/poison-alloc", "guard-page hit (overrun / UAF)", cr2);
         }
     }
 

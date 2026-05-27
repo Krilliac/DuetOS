@@ -3,9 +3,20 @@
  *
  * See `event_trace.h` for the public contract. This TU owns the
  * ring storage, the lockless append path, and the snapshot
- * walker. v0 is single-ring (one global buffer); per-CPU rings
- * land with B2 SMP — until then a single ring is correct on
- * BSP-only boot.
+ * walker.
+ *
+ * Concurrency: the ring is single-global with an atomic
+ * fetch-add head. Every online CPU's append path safely lands
+ * in a distinct slot under contention — the SMP-correctness
+ * primitive is the `__atomic_fetch_add` on `g_total`, not the
+ * `PerCpuRing` wrapper. The per-CPU struct shape is retained
+ * as a future optimisation hook (one ring per CPU would cut
+ * cross-CPU cache traffic on the head counter under bursty
+ * tracing workloads); promoting to that requires plumbing
+ * `cpu::CurrentCpuIdOrBsp()` into `EventTrace` and unifying
+ * the snapshot walker across slots. Until a profile shows the
+ * shared head as a hot line, the single ring is correct and
+ * cheaper.
  *
  * Append ordering note: the writer publishes (tick, kind,
  * arg0, arg1) into a slot, THEN bumps `g_total` so a reader who
@@ -30,12 +41,11 @@ namespace duetos::diag
 namespace
 {
 
-// Restructured to per-CPU shape (D2-followup). v0 has one CPU
-// slot since only the BSP runs at boot. Per-CPU upgrade lands
-// once SMP exposes the current-CPU ID; until then the macro
-// alias keeps the existing single-CPU code paths readable. The
-// ring + total counter sit in a struct so each future CPU's
-// state stays cache-line independent.
+// Per-CPU-shaped storage retained as a hook for the future
+// per-CPU ring optimisation (see header comment). With one slot
+// and an atomic head, every online CPU's appends safely fan into
+// distinct ring positions; the macro alias keeps the single-ring
+// fast path readable.
 struct PerCpuRing
 {
     EventRecord ring[kEventRingCapacity];

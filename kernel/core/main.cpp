@@ -77,6 +77,7 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/timer.h"
+#include "cpu/ipi_call.h"
 #include "cpu/percpu.h"
 #include "cpu/topology.h"
 #include "debug/breakpoints.h"
@@ -708,6 +709,19 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     // peer's TLB from carrying a stale entry into a recycled frame.
     // wiki/security/Linux-CVE-Audit.md class FF.
     duetos::arch::SmpInstallTlbShootdownIpiHandler();
+    // Cross-CPU function-call IPI (kernel/cpu/ipi_call.h). Must
+    // install BEFORE SmpStartAps so the AP IDT clone (built during
+    // bring-up) inherits the wired vector — otherwise the first
+    // IpiCallEach to a fresh AP would fault on an empty IDT slot.
+    duetos::cpu::IpiCallInstall();
+
+    // Register the per-AP bring-up steps with the cpuhp state
+    // machine BEFORE SmpStartAps, since the moment an AP enters
+    // ApEntryFromTrampoline it walks the chain. The lambdas live
+    // in arch/smp.cpp's anon namespace so they reach the file-local
+    // g_ap_percpus / g_ap_gdt_bundles tables without exposing those
+    // tables in a public header.
+    duetos::arch::SmpCpuhpRegister();
 
     // Bring up APs. SmpStartAps calls SchedSleepTicks(1) between
     // INIT and SIPI; the dedicated idle task installed at the top
@@ -728,12 +742,37 @@ extern "C" void kernel_main(duetos::u32 multiboot_magic, duetos::uptr multiboot_
     duetos::cpu::TopologyAssignClusters();
     duetos::cpu::TopologyDump();
 
-    // Runtime invariant checker baseline. Capture NOW, after
-    // every init that touches IDT / GDT / TSS / CR4 / EFER has
-    // run — so the hashes reflect the final steady-state view
-    // of those structures. Earlier capture would flag every
-    // subsequent IdtSetUserGate / TssSetRsp0 as "drift".
-    duetos::core::RuntimeCheckerInit();
+    // Cross-CPU function-call primitive self-test. Drives:
+    //   - IpiCallOne to self (wait=true / wait=false).
+    //   - IpiCallOne to a peer CPU when SMP > 1.
+    //   - IpiCallEach across every online CPU.
+    // Unconditional (not gated by `kBootSelfTests`) so the
+    // structural `[ipi-call] self-test OK` sentinel appears in
+    // release smoke logs too — the primitive is foundational
+    // enough that a silent regression would mask real breakage in
+    // future TLB-shootdown / runtime-checker callers.
+    duetos::cpu::IpiCallSelfTest();
+
+    // Runtime invariant checker baseline is owned by
+    // `BootBringupKernelServices`: it runs `RuntimeCheckerTeardown`
+    // + `RuntimeCheckerInit` immediately after `linux::SyscallInit`
+    // programs LSTAR/STAR/CSTAR/SYSENTER (see boot_bringup.cpp's
+    // post-SyscallInit re-baseline). Nothing between that point and
+    // the idle loop mutates the baselined GLOBAL state:
+    //   - GDT contents are stable (per-CPU TSS rsp0 lives in the
+    //     per-CPU TSS body, not g_gdt; LTR's BUSY bit is masked
+    //     by GdtHash; AP GDT bundles are separate from g_gdt).
+    //   - IDT contents are stable (IdtSetUserGate fires only from
+    //     core::SyscallInit, which is much earlier).
+    //   - CR0/CR4/EFER are stable on the BSP (NmiWatchdogInit
+    //     below programs PMU MSRs, which the baseline doesn't
+    //     touch; CET enable would mutate CR4 but is not wired in).
+    // A redundant re-init here also runs in scheduler context AFTER
+    // `SmpStartAps`, so it can land on an AP whose LSTAR/STAR/CR0
+    // differ from the BSP — capturing those AP-local values as the
+    // baseline then trips a false `SyscallMsrHijacked` alarm on
+    // every subsequent BSP-side scan. Leave the canonical
+    // post-SyscallInit baseline as the source of truth.
 
     // NMI watchdog. Arms a PMU counter to fire NMI every few
     // seconds of real execution; if the timer IRQ stops
