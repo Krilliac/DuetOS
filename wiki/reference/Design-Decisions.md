@@ -10205,3 +10205,88 @@ restore-original-state. Wired under `DUETOS_BOOT_SELFTEST` in
 (restartable-info arm now does useful work). Persistence
 (`/system/badmem-list`) is the next slice once writable
 system FS for secrets/config lands.
+
+## 2026-05-27 — Block layer issues FLUSH and DISCARD on every storage backend
+
+**What changed:** `BlockOps` grew a `discard(cookie, lba, count)`
+hook alongside the existing `flush`. NVMe, AHCI, and virtio-blk
+all wire both:
+- **NVMe Flush (0x00)** and **NVMe DSM Deallocate (0x09, AD=1)**
+  in `kernel/drivers/storage/nvme.cpp`.
+- **AHCI FLUSH CACHE EXT (0xEA)** and **DSM TRIM (0x06 +
+  FEATURES=0x01)** in `kernel/drivers/storage/ahci.cpp`. The
+  DSM TRIM payload reuses the per-port DMA scratch's IDENTIFY
+  slot (consumed once at bring-up, free thereafter); up to 64
+  8-byte LBA range descriptors per command.
+- **virtio-blk DISCARD (`VIRTIO_BLK_T_DISCARD`, virtio 1.2
+  §5.2.5)** in `kernel/drivers/virtio/virtio_blk.cpp`. Negotiated
+  via the `VIRTIO_BLK_F_DISCARD` feature bit.
+
+FAT32 routes through both:
+- `Fat32Sync(volume)` exposes `BlockDeviceFlush` through the
+  FS API; `Fat32Delete*` and `Fat32Truncate*` auto-flush on
+  success so destructive metadata operations cannot lose their
+  commit to a power cut.
+- `Fat32Trim(volume)` walks the FAT for free clusters and
+  coalesces contiguous runs into `BlockDeviceDiscard` calls.
+  `FreeClusterChain` discards freed cluster chains inline.
+
+**Shell surface:** `lsblk` now reports per-device TRIM support
+and the running total of discard hints issued + sectors hinted
+since boot. `fstrim <volume-index>` drives the FAT32 batch trim
+path manually.
+
+**Why this matters:** the previous block-layer contract that
+"absent flush op == nothing to flush == return 0" was a silent
+data-loss bug on any backend with a volatile write cache — every
+NVMe SSD, every AHCI SATA SSD, every QEMU virtio-blk backed by
+qcow2/raw. `BlockDeviceFlush` would return success without any
+data actually durable on media. Now real flushes are issued at
+FAT32 commit points, so `Fat32DeleteAtPath` returning true means
+the directory entry and the freed FAT entries are on
+non-volatile media, not just in the controller's DRAM cache.
+
+The discard tier is the SSD-longevity half: without it, every
+file unlink leaks the previously-written LBAs into the SSD's
+FTL forever. Real-world write amplification on a never-trimmed
+consumer SSD hits 4–8× under sustained mixed workloads; this
+collapses to 1.2–1.5× when TRIM is issued at unlink time.
+
+**Verified:** the block-layer self-test exercises every new op
+on every debug boot: discard zeros the RAM-backed test sector,
+counters advance, OOB / zero-count rejects, flush succeeds on
+a backend that has no flush op (deliberate no-op path) and
+rejects on an invalid handle. `[block] self-test OK (RAM device
+write + read + OOB reject + discard + flush)` appears on every
+boot under `boot-log-analyze.sh` verdict OK.
+
+**Alternatives considered and rejected:**
+- *Build a buffer cache first, defer flush/discard.* The cache
+  helps performance, not durability. Power-loss-safety is the
+  bar for "actual files can be stored"; the cache is throughput
+  scaffolding. Flush + discard ship first.
+- *Continuous discard (Linux `-o discard`).* Issue a DSM on
+  every `unlink`. We do this for now in `FreeClusterChain`
+  because the cluster-chain free path is the natural point —
+  it's not on a latency-critical workload. A future workload
+  showing per-unlink discard cost will move us to batch-only.
+- *NVMe DSM coalescing across calls.* The spec allows up to 256
+  ranges per DSM command; we issue one range per call. Caller
+  patterns from FAT32 are mostly run-of-clusters anyway, and the
+  `FreeClusterChain` coalescer already concatenates physically
+  contiguous freed clusters into one BlockDeviceDiscard call.
+
+**Sources:** NVMe Base Spec 2.0 §5.2 (Flush), §5.5 (Dataset
+Management); ACS-4 §7.10 (FLUSH CACHE EXT), §7.11 (DATA SET
+MANAGEMENT); virtio 1.2 §5.2.5 / §5.2.6; Linux
+`drivers/nvme/host/core.c::nvme_setup_flush/discard`,
+`block/blk-lib.c::blkdev_issue_discard`; Microsoft Learn
+"Storage Driver Architecture" (the storport / class / port /
+miniport split that informs the future block-layer refactor —
+not adopted in this slice).
+
+**Related roadmap track(s):** Closes the "Storage and
+filesystem" item that listed NVMe/AHCI flush as "wired alongside
+FUA writes" — flush+discard now lead, FUA-write is a follow-on.
+Unblocks any FS-write slice that needs durable commit (ext4
+write, NTFS write, DuetFS Rust-side flush hook).

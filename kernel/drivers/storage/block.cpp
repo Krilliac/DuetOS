@@ -66,10 +66,29 @@ i32 RamBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
     return 0;
 }
 
+i32 RamBlockDiscard(void* cookie, u64 lba, u32 count)
+{
+    // RAM disk has no media-aware deallocate concept, but treating
+    // discard as "zero the range" makes the hint observable: a
+    // hosted unit test can write a pattern, discard, and read
+    // zeros back, exercising the FS-layer plumbing without needing
+    // a real SSD. This matches NVMe's "may return zeroes" allowance
+    // — callers don't depend on it, but a backend that DOES zero
+    // makes the hint testable.
+    auto* dev = static_cast<RamBlock*>(cookie);
+    const u64 off = lba * dev->sector_size;
+    const u64 n = u64(count) * dev->sector_size;
+    u8* dst = dev->bytes + off;
+    for (u64 i = 0; i < n; ++i)
+        dst[i] = 0;
+    return 0;
+}
+
 constinit const BlockOps kRamBlockOps = {
     /*.read = */ &RamBlockRead,
     /*.write = */ &RamBlockWrite,
     /*.flush = */ nullptr, // RAM disk is immediately durable; nothing to flush.
+    /*.discard = */ &RamBlockDiscard,
 };
 
 // --- Partition-view block device -----------------------------------------
@@ -102,10 +121,32 @@ i32 PartitionBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
     return BlockDeviceWrite(dev->parent_handle, dev->first_lba + lba, count, buf);
 }
 
+i32 PartitionBlockFlush(void* cookie)
+{
+    auto* dev = static_cast<PartitionBlock*>(cookie);
+    // Forward to the parent — the parent owns the on-device cache.
+    // A partition's flush is a hint that "any of MY writes" reached
+    // media, which only the parent can honour. The block layer
+    // already collapses absent-flush-on-parent to no-op-success, so
+    // this wrapper inherits that behaviour for free.
+    return BlockDeviceFlush(dev->parent_handle);
+}
+
+i32 PartitionBlockDiscard(void* cookie, u64 lba, u32 count)
+{
+    auto* dev = static_cast<PartitionBlock*>(cookie);
+    // Translate (lba, count) onto the parent's LBA space — same
+    // shape as PartitionBlockRead/Write. The parent's discard hook
+    // (or its absence) is what determines whether the hint
+    // actually reaches the device.
+    return BlockDeviceDiscard(dev->parent_handle, dev->first_lba + lba, count);
+}
+
 constinit const BlockOps kPartitionBlockOps = {
     /*.read = */ &PartitionBlockRead,
     /*.write = */ &PartitionBlockWrite,
-    /*.flush = */ nullptr, // partition view forwards to parent; flush is owned at the parent level.
+    /*.flush = */ &PartitionBlockFlush,
+    /*.discard = */ &PartitionBlockDiscard,
 };
 
 // Read-only variant used when the parent device exposes no write
@@ -116,6 +157,7 @@ constinit const BlockOps kPartitionBlockOpsRO = {
     /*.read = */ &PartitionBlockRead,
     /*.write = */ nullptr,
     /*.flush = */ nullptr,
+    /*.discard = */ nullptr,
 };
 
 } // namespace
@@ -347,9 +389,97 @@ i32 BlockDeviceFlush(u32 handle)
     // Absent flush = nothing-to-flush success. Filesystem code
     // that commits at every fsync doesn't need to special-case
     // backends without a flush op (RAM disk, read-only mounts).
+    //
+    // CAUTION (per NVMe + SATA reliability audit, 2026-05-27):
+    // a backend that secretly has a volatile write cache but
+    // omits the flush hook silently turns this no-op-success
+    // path into data loss on power cut. Every backend with
+    // possible host-side caching MUST wire its flush hook; the
+    // partition wrapper, RAM disk, and read-only mounts are the
+    // only legitimate nullptr-flush backends today.
     if (d.ops->flush == nullptr)
         return 0;
     return d.ops->flush(d.cookie);
+}
+
+namespace
+{
+
+// Counters surfacing the block layer's discard activity since
+// boot — saturating so a misbehaving caller cannot wrap them and
+// obscure the actual hint volume in post-incident audit. Read
+// without atomics: 64-bit aligned scalars on x86_64 are torn-free
+// for reads against a single writer at this layer (the write-guard
+// counter follows the same pattern at line 249).
+constinit util::SatU64 g_discard_issued_count = 0;
+constinit util::SatU64 g_discard_sectors_hinted = 0;
+
+} // namespace
+
+i32 BlockDeviceDiscard(u32 handle, u64 lba, u32 count)
+{
+    if (!ValidHandle(handle) || count == 0)
+        return -1;
+    const BlockDesc& d = g_devices[handle].desc;
+    // Subtractive bound: mirror BlockDeviceRead's overflow guard.
+    if (lba >= d.sector_count || count > d.sector_count - lba)
+        return -1;
+
+    // Discard is a HINT, not a write — but it modifies on-disk
+    // state from the caller's perspective (deallocated bytes
+    // become controller-defined zeros or stale data). A bootkit
+    // that writes via discard would be just as effective at
+    // corrupting LBA 0/1 as one that writes; route the hint
+    // through the same write-guard predicate.
+    if (g_write_guard_mode != WriteGuardMode::Off)
+    {
+        const WriteRule* r = FindMatchingRule(handle, lba, count);
+        if (r != nullptr)
+        {
+            arch::SerialWrite("[blockguard] discard of guarded LBA: dev=");
+            arch::SerialWriteHex(handle);
+            arch::SerialWrite(" lba=");
+            arch::SerialWriteHex(lba);
+            arch::SerialWrite(" count=");
+            arch::SerialWriteHex(count);
+            arch::SerialWrite(" rule=\"");
+            arch::SerialWrite(r->tag);
+            arch::SerialWrite(g_write_guard_mode == WriteGuardMode::Deny ? "\" DENIED\n" : "\" (advisory)\n");
+            if (g_write_guard_mode == WriteGuardMode::Deny)
+            {
+                ++g_write_guard_deny_count;
+                return -1;
+            }
+        }
+    }
+
+    // Track every hint we accept, even when the backend will
+    // drop it on the floor — the FS layer's batch-trim path
+    // wants visibility into "did my fstrim actually try?"
+    ++g_discard_issued_count;
+    g_discard_sectors_hinted += static_cast<u64>(count);
+
+    if (d.ops->discard == nullptr)
+        return 0;
+    return d.ops->discard(d.cookie, lba, count);
+}
+
+bool BlockDeviceSupportsDiscard(u32 handle)
+{
+    if (!ValidHandle(handle))
+        return false;
+    const BlockOps* ops = g_devices[handle].desc.ops;
+    return ops != nullptr && ops->discard != nullptr;
+}
+
+u64 BlockDiscardIssuedCount()
+{
+    return g_discard_issued_count;
+}
+
+u64 BlockDiscardSectorsHinted()
+{
+    return g_discard_sectors_hinted;
 }
 
 u32 RamBlockDeviceCreate(const char* name, u32 sector_size, u64 sector_count)
@@ -491,7 +621,78 @@ void BlockLayerSelfTest()
         SerialWrite("[block] self-test FAILED: oob read accepted\n");
         return;
     }
-    SerialWrite("[block] self-test OK (RAM device write + read + OOB reject)\n");
+
+    // Discard end-to-end: the RAM backend implements discard as
+    // "zero the range," so we can prove the hint reaches the
+    // backend by checking a previously-written sector reads back
+    // as all zeros after the call. Also exercises the counter
+    // bookkeeping in BlockDeviceDiscard.
+    const u64 before_issued = BlockDiscardIssuedCount();
+    const u64 before_hinted = BlockDiscardSectorsHinted();
+    if (!BlockDeviceSupportsDiscard(h))
+    {
+        SerialWrite("[block] self-test FAILED: RAM backend missing discard hook\n");
+        return;
+    }
+    if (BlockDeviceDiscard(h, 0, 1) != 0)
+    {
+        SerialWrite("[block] self-test FAILED: discard LBA 0\n");
+        return;
+    }
+    for (u32 i = 0; i < 512; ++i)
+        read_buf[i] = 0xFF;
+    if (BlockDeviceRead(h, 0, 1, read_buf) != 0)
+    {
+        SerialWrite("[block] self-test FAILED: read after discard\n");
+        return;
+    }
+    for (u32 i = 0; i < 512; ++i)
+    {
+        if (read_buf[i] != 0)
+        {
+            SerialWrite("[block] self-test FAILED: discard did not zero LBA 0\n");
+            return;
+        }
+    }
+    // Out-of-range discard must fail.
+    if (BlockDeviceDiscard(h, 64, 1) != -1)
+    {
+        SerialWrite("[block] self-test FAILED: oob discard accepted\n");
+        return;
+    }
+    // Zero-count discard must fail (caller bug).
+    if (BlockDeviceDiscard(h, 0, 0) != -1)
+    {
+        SerialWrite("[block] self-test FAILED: zero-count discard accepted\n");
+        return;
+    }
+    if (BlockDiscardIssuedCount() != before_issued + 1)
+    {
+        SerialWrite("[block] self-test FAILED: issued counter did not advance by 1\n");
+        return;
+    }
+    if (BlockDiscardSectorsHinted() != before_hinted + 1)
+    {
+        SerialWrite("[block] self-test FAILED: sectors-hinted counter did not advance by 1\n");
+        return;
+    }
+
+    // Flush must succeed on any registered handle — RAM backend
+    // has no flush op so this exercises the absent-flush-success
+    // path documented in BlockDeviceFlush().
+    if (BlockDeviceFlush(h) != 0)
+    {
+        SerialWrite("[block] self-test FAILED: flush rejected on RAM device\n");
+        return;
+    }
+    // Flush on an invalid handle is a caller bug.
+    if (BlockDeviceFlush(kBlockHandleInvalid) != -1)
+    {
+        SerialWrite("[block] self-test FAILED: flush on invalid handle accepted\n");
+        return;
+    }
+
+    SerialWrite("[block] self-test OK (RAM device write + read + OOB reject + discard + flush)\n");
 }
 
 } // namespace duetos::drivers::storage

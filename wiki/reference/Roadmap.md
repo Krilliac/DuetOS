@@ -1145,8 +1145,9 @@ the per-call wiring.
   already-serviced I/O; (2) multiple in-flight descriptor chains
   so a second caller isn't fully serialised behind the first
   (depends on IRQ-driven completion first — the poll model
-  tracks one chain). (Read/write/flush + per-device serialising
-  mutex landed.)
+  tracks one chain). (Read/write/flush/discard + per-device
+  serialising mutex landed; `VIRTIO_BLK_F_DISCARD` negotiated and
+  consumed by FS-layer batch trim, 2026-05-27.)
 
 ### VirtIO — per-class polish
 

@@ -100,7 +100,7 @@ void CmdLsblk()
 {
     namespace storage = duetos::drivers::storage;
     const duetos::u32 count = storage::BlockDeviceCount();
-    ConsoleWrite("NAME       HANDLE  SECT_SZ  SECT_COUNT       MODE");
+    ConsoleWrite("NAME       HANDLE  SECT_SZ  SECT_COUNT       MODE  TRIM");
     ConsoleWriteln("");
     for (duetos::u32 i = 0; i < count; ++i)
     {
@@ -122,12 +122,83 @@ void CmdLsblk()
         ConsoleWrite("  ");
         WriteHexCol(storage::BlockDeviceSectorCount(i), 16);
         ConsoleWrite("  ");
-        ConsoleWriteln(storage::BlockDeviceIsWritable(i) ? "rw" : "ro");
+        ConsoleWrite(storage::BlockDeviceIsWritable(i) ? "rw" : "ro");
+        ConsoleWrite("    ");
+        ConsoleWriteln(storage::BlockDeviceSupportsDiscard(i) ? "yes" : "no");
     }
     if (count == 0)
     {
         ConsoleWriteln("  (no block devices registered)");
     }
+    else
+    {
+        ConsoleWrite("DISCARD HINTS SINCE BOOT: issued=");
+        WriteHexCol(storage::BlockDiscardIssuedCount(), 0);
+        ConsoleWrite("  sectors=");
+        WriteHexCol(storage::BlockDiscardSectorsHinted(), 0);
+        ConsoleWriteln("");
+    }
+}
+
+// `fstrim <handle>` — issue a batch TRIM across the named FAT32
+// volume's free space. Mirrors Linux `fstrim` semantics:
+//   - Walks the FAT looking for free clusters.
+//   - Coalesces contiguous runs of free clusters into one
+//     BlockDeviceDiscard call per run.
+//   - Returns the number of clusters hinted.
+// On backends without a discard hook (RAM disk, partition over an
+// HDD without TRIM support) this is a fast no-op — the FS still
+// walks but no I/O happens. Useful to reclaim SSD write-amp budget
+// after deleting a lot of files.
+void CmdFstrim(duetos::u32 argc, char** argv)
+{
+    namespace storage = duetos::drivers::storage;
+    namespace fat32 = duetos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("usage: fstrim <volume-index>");
+        ConsoleWriteln("       (volume index, not block handle — see `lsblk` for handles");
+        ConsoleWriteln("        and probed FAT32 mounts)");
+        return;
+    }
+    // Parse decimal volume index.
+    duetos::u32 vol = 0;
+    for (const char* p = argv[1]; *p != 0; ++p)
+    {
+        if (*p < '0' || *p > '9')
+        {
+            ConsoleWriteln("fstrim: bad volume index");
+            return;
+        }
+        vol = vol * 10 + static_cast<duetos::u32>(*p - '0');
+    }
+    if (vol >= fat32::Fat32VolumeCount())
+    {
+        ConsoleWriteln("fstrim: volume index out of range");
+        return;
+    }
+    const fat32::Volume* v = fat32::Fat32Volume(vol);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("fstrim: volume slot is empty");
+        return;
+    }
+    const bool supported = storage::BlockDeviceSupportsDiscard(v->block_handle);
+    ConsoleWrite("fstrim: vol=");
+    WriteHexCol(vol, 0);
+    ConsoleWrite(" handle=");
+    WriteHexCol(v->block_handle, 0);
+    ConsoleWrite(" discard=");
+    ConsoleWriteln(supported ? "supported" : "no-op (backend has no discard hook)");
+    const duetos::i64 hinted = fat32::Fat32Trim(v);
+    if (hinted < 0)
+    {
+        ConsoleWriteln("fstrim: I/O error walking the FAT");
+        return;
+    }
+    ConsoleWrite("fstrim: clusters hinted=");
+    WriteHexCol(static_cast<duetos::u64>(hinted), 0);
+    ConsoleWriteln("");
 }
 
 void CmdLsgpt()

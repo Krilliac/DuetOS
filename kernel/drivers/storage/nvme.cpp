@@ -84,8 +84,26 @@ constexpr u8 kAdminOpCreateCq = 0x05;
 constexpr u8 kAdminOpIdentify = 0x06;
 
 // NVM I/O opcodes.
+constexpr u8 kIoOpFlush = 0x00; // NVM Flush — commits the volatile write cache.
 constexpr u8 kIoOpWrite = 0x01;
 constexpr u8 kIoOpRead = 0x02;
+constexpr u8 kIoOpDatasetManagement = 0x09; // DSM — used with AD=1 for Deallocate (TRIM).
+
+// DSM range descriptor: 16 bytes per range, little-endian. NVMe
+// Base Spec §5.5.1. Up to 256 ranges per command (full 4 KiB
+// payload). v0 issues one range per BlockDeviceDiscard — coalescing
+// is a roadmap item but uncommon for a v0 workload anyway because
+// the FAT cluster allocator frees in small clumps.
+struct DsmRange
+{
+    u32 context_attrs; // Access freq / latency hints — leave 0.
+    u32 length_in_lbs; // Range length in logical blocks.
+    u64 starting_lba;  // 64-bit LBA.
+};
+static_assert(sizeof(DsmRange) == 16, "NVMe DSM range descriptor must be 16 bytes");
+
+// DSM Attribute bits in CDW11. AD = Attribute - Deallocate (the TRIM hint).
+constexpr u32 kDsmAttrDeallocate = 1U << 2;
 
 // Queue sizing. One 4 KiB page per SQ (64-byte entries -> 64 entries
 // fit) and one page per CQ (16-byte entries -> 256 entries fit). Cap
@@ -910,6 +928,83 @@ i32 NvmeBlockWrite(void* /*cookie*/, u64 lba, u32 count, const void* buf)
     return NvmeDoIo(/*write=*/true, lba, count, const_cast<void*>(buf));
 }
 
+// NVMe Flush — commits the controller's volatile write cache to
+// non-volatile media for the given namespace. NVMe Base Spec §5.2.
+// VWC=0 controllers are required to complete this successfully as
+// a no-op, so the host is always free to issue it unconditionally.
+// Without this, every BlockDeviceFlush() the FS layer issues
+// returns success without any data actually durable on the drive —
+// power-loss between an FS-level commit and the next dependent
+// write loses the commit (FAT32 dirent + cluster chain split, etc.).
+i32 NvmeBlockFlush(void* /*cookie*/)
+{
+    KDBG(Storage, "drivers/nvme", "NvmeBlockFlush");
+    if (!g_ctrl.online)
+        return -1;
+
+    SqEntry e{};
+    e.cdw0 = kIoOpFlush;
+    e.nsid = 1;
+    // Flush takes no data transfer — PRP1/PRP2 unused. CDW10..15
+    // ignored by Flush per §5.2.
+    if (!SubmitAndWait(g_ctrl.io, e))
+    {
+        return -1;
+    }
+    return 0;
+}
+
+// NVMe Dataset Management Deallocate (TRIM). Submits one DSM
+// command (opcode 0x09) with the AD bit set and a single
+// 16-byte range descriptor describing [lba, lba+count). NVMe
+// Base Spec §5.5. The range list lives in a DMA-coherent page;
+// v0 issues one range per call (no coalescing) because the
+// FAT cluster allocator already frees small contiguous runs
+// and the per-command setup cost is dominated by the
+// SubmitAndWait round trip rather than the range count.
+i32 NvmeBlockDiscard(void* /*cookie*/, u64 lba, u32 count)
+{
+    KDBG_2V(Storage, "drivers/nvme", "NvmeBlockDiscard", "lba", lba, "count", count);
+    if (!g_ctrl.online)
+        return -1;
+    if (count == 0)
+        return -1;
+    // NVMe DSM length-in-LBs field is 32-bit; the block layer's
+    // u32 count already fits. Guard u64 wrap for paranoia.
+    const u64 last = lba + (count - 1);
+    if (last < lba || last >= g_ctrl.ns_sector_count)
+        return -1;
+
+    // Borrow one frame from the page allocator for the range
+    // descriptor list. v0 issues one descriptor; the rest of the
+    // page stays zero (which the spec allows — only NR+1
+    // descriptors are consulted).
+    const mm::PhysAddr range_phys = AllocZeroedPage();
+    if (range_phys == 0)
+    {
+        KLOG_ERROR("drivers/nvme", "DSM range page allocation failed");
+        return -1;
+    }
+    auto* ranges = static_cast<DsmRange*>(mm::PhysToVirt(range_phys));
+    ranges[0].context_attrs = 0;
+    ranges[0].length_in_lbs = count;
+    ranges[0].starting_lba = lba;
+
+    SqEntry e{};
+    e.cdw0 = kIoOpDatasetManagement;
+    e.nsid = 1;
+    e.prp1 = range_phys;
+    e.prp2 = 0;
+    // CDW10: NR = Number of Ranges − 1.
+    e.cdw10 = 0; // one range
+    // CDW11: AD bit set = Deallocate hint.
+    e.cdw11 = kDsmAttrDeallocate;
+
+    const bool ok = SubmitAndWait(g_ctrl.io, e);
+    mm::FreeFrame(range_phys);
+    return ok ? 0 : -1;
+}
+
 // Panic-time write surface — see header for the full rationale.
 // All state lives in `g_ctrl` (already-allocated DMA queues +
 // staging buffer); no allocations along the way; busy-waits on
@@ -921,7 +1016,8 @@ constinit u64 g_panic_last_bytes = 0;
 constinit const BlockOps kNvmeBlockOps = {
     /*.read = */ &NvmeBlockRead,
     /*.write = */ &NvmeBlockWrite,
-    /*.flush = */ nullptr, // NVMe Flush (opcode 0x00 on Admin / 0x00 on IO) — wired alongside FUA writes.
+    /*.flush = */ &NvmeBlockFlush,
+    /*.discard = */ &NvmeBlockDiscard,
 };
 
 bool RegisterAsBlockDevice()
