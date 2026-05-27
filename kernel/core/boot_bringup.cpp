@@ -39,6 +39,7 @@
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/lbr.h"
 #include "arch/x86_64/nmi_watchdog.h"
+#include "arch/x86_64/percpu_ops.h"
 #include "arch/x86_64/pic.h"
 #include "arch/x86_64/rtc.h"
 #include "arch/x86_64/msr_safe.h"
@@ -46,6 +47,7 @@
 #include "arch/x86_64/smp.h"
 #include "arch/x86_64/timer.h"
 #include "cpu/percpu.h"
+#include "cpu/percpu_counter.h"
 #include "cpu/topology.h"
 #include "debug/breakpoints.h"
 #include "debug/hot_patch.h"
@@ -1262,6 +1264,13 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // rendezvous; cluster assignment runs after SmpStartAps returns.
     duetos::cpu::TopologyInitBsp();
 
+    // Single-instruction per-CPU access self-test. Validates the
+    // `arch::ThisCpu*` macro suite (movq / incq / addq via the GS
+    // segment override) against `cpu::CurrentCpu()->field`. Cheap
+    // (~thousand single-instruction increments) and IRQ-off, so
+    // safe to run inline here right after the BSP slot is live.
+    duetos::arch::ThisCpuOpsSelfTest();
+
     // Architectural LBR — start the per-CPU branch trace ring as
     // early as practical so a panic during late init still has
     // useful records to dump. No-op + serial line on CPUs that
@@ -1495,6 +1504,17 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
                                               []()
                                               {
                                                   duetos::sched::WorkPoolSelfTest();
+                                                  return duetos::core::Result<void>{};
+                                              });
+        // Split per-CPU counter (cpu::PercpuCounter). Drives Add /
+        // Fold / ReadExact / ReadApproximate from the BSP first,
+        // then from a 4-worker workpool to exercise per-CPU stash
+        // isolation under concurrent writers. Lives in Phase::Sched
+        // because the multi-CPU half spawns workpool tasks.
+        duetos::core::InitcallRegisterOrPanic(duetos::core::Phase::Sched, "percpu-counter-selftest",
+                                              []()
+                                              {
+                                                  duetos::cpu::PercpuCounterSelfTest();
                                                   return duetos::core::Result<void>{};
                                               });
         // Slab allocator — fixed-size object cache layered over
