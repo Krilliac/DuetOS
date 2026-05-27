@@ -61,9 +61,43 @@ u64 KaslrGetCandidateSlide();
 /// slide" — not an error.) False before init runs.
 bool KaslrInitialized();
 
+/// Per-boot 64-bit pointer-obfuscation mask. Derived from the
+/// same RandomU64() source as the candidate slide; non-zero on
+/// any boot where KaslrInit ran. Stable across the lifetime of
+/// one boot (deterministic during a single session) but
+/// unpredictable across cold boots.
+///
+/// Used by `KaslrMaskPointer` / `KaslrUnmaskPointer` to scrub
+/// kernel addresses before exposing them across a trust
+/// boundary (panic banner shown over a multiplexed serial line,
+/// any future /proc-like surface, syscall return values that
+/// might encode a kernel pointer).
+u64 KaslrPointerMask();
+
+/// Obfuscate a kernel pointer for cross-boundary printing.
+/// Returns `p ^ KaslrPointerMask()`. The result is NOT a valid
+/// pointer — the caller must NEVER dereference it. The mask is
+/// per-boot, so the same pointer obfuscates to the same masked
+/// value within one boot, and an attacker who collects two
+/// masked pointers can derive their XOR (relative offsets are
+/// preserved). The defense is "leak of one obfuscated kernel
+/// pointer does not disclose the kernel base address" — same
+/// posture as Linux's `%pK` formatting under
+/// `kptr_restrict=1`.
+u64 KaslrMaskPointer(u64 p);
+
+/// Recover the real pointer from a previously masked value.
+/// Inverse of `KaslrMaskPointer`. Available to in-kernel admin
+/// tools that need to display the true address (e.g. a
+/// crash-dump analyser running in a trusted context) — never
+/// surface this to user space.
+u64 KaslrUnmaskPointer(u64 masked);
+
 /// Boot-time self-test: confirms init ran, the candidate is page-
-/// aligned, and falls in the documented slide range. Logs a single
-/// klog line.
+/// aligned, and falls in the documented slide range; also confirms
+/// `KaslrPointerMask` is non-zero post-init and that
+/// `KaslrUnmaskPointer(KaslrMaskPointer(p)) == p` for a few sample
+/// pointers. Logs a single klog line.
 void KaslrSelfTest();
 
 } // namespace duetos::security
