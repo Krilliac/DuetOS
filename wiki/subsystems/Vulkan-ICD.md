@@ -564,13 +564,22 @@ the v0 syscall surface doesn't provide.
 - **SPIR-V storage-image access.** `OpImageRead` / `OpImageFetch`
   (integer-coord unfiltered read) and `OpImageWrite` (integer-coord
   unfiltered store) execute against the bound (set 0, binding 0)
-  image. Backing format is BGRA8 only (matching what
-  `VkCreateImage` advertises); out-of-bounds reads return
-  `(0, 0, 0, 1)` and out-of-bounds writes are silently dropped per
-  spec. Coordinate input is signed integer scalar or vector; the
-  first two components are consumed (2D). Used by compute shaders
-  that walk a storage image — boot self-test pins the
-  write/read round-trip and the OOB-no-clobber invariant.
+  image, dispatched by the image's recorded format. All six
+  DuetOS-internal formats round-trip correctly: BGRA8_UNORM,
+  R8G8B8A8_UNORM (1 byte/channel × 4); R8_UNORM (1 B/texel);
+  R8G8_UNORM (2 B/texel); R16_UNORM (2 B/texel, 16-bit precision);
+  and R32G32B32A32_SFLOAT (16 B/texel, raw f32 — HDR-precision
+  preserved across the round-trip). `VkCreateImageWithFormat`
+  takes a DuetOS format id (0–5) and records it in `ImageRecord`;
+  legacy `VkCreateImage` defers with format=0 so existing callers
+  see no change. Out-of-bounds reads return `(0, 0, 0, 1)` and
+  out-of-bounds writes are silently dropped per spec. Coordinate
+  input is signed integer scalar or vector; the first two
+  components are consumed (2D). Used by compute shaders that walk
+  a storage image — boot self-test pins both the BGRA8 and the
+  R8_UNORM + R32G32B32A32_SFLOAT round-trips along with the
+  OOB-no-clobber invariant. Explicit LOD (no mipmap chain) and
+  multisample images remain unimplemented.
 - **SPIR-V derivative / barrier / atomic opcodes.** `OpDPdx`,
   `OpDPdy`, `OpFwidth` (plus `Fine` / `Coarse` variants) return
   zero — GAP: real derivatives need 2×2-quad fragment execution

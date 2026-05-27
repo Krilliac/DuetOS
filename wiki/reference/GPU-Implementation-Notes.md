@@ -139,12 +139,6 @@ work; CLAMP_TO_BORDER's border colour is transparent black in v0.
 
 Open gates for the next slice:
 
-- **Format-aware texel access.** `OpImageRead` / `OpImageWrite`
-  execute today against the implicit BGRA8 backing. To honour
-  the other five formats DuetOS recognises (R8_UNORM, R8G8_UNORM,
-  R8G8B8A8_UNORM, R16_UNORM, R32G32B32A32_SFLOAT), `VkCreateImage`
-  needs to grow a format parameter and `ImageRecord` needs to
-  carry it.
 - **Bilinear math correction.** Current path scales by `W-1`;
   spec convention is `u*W - 0.5` for centre-of-texel sampling.
   Behavior change — coordinate with any self-tests that assume

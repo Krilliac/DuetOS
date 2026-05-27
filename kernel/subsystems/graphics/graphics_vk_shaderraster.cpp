@@ -694,6 +694,194 @@ ImageRecord* ResolveImageRecordMut(u64 resource_handle)
 }
 } // namespace
 
+u32 BytesPerTexelForFormat(u32 format)
+{
+    switch (format)
+    {
+    case 0:
+    case 1:
+        return 4u; // BGRA8 / RGBA8
+    case 2:
+        return 1u; // R8
+    case 3:
+        return 2u; // R8G8
+    case 4:
+        return 2u; // R16
+    case 5:
+        return 16u; // R32G32B32A32_SFLOAT
+    default:
+        return 4u; // unknown — caller's bounds check still applies
+    }
+}
+
+namespace
+{
+// Sf32 helpers shared with the format unpack/pack table.
+::duetos::core::Sf32 U8ToSf32Unorm(u8 v)
+{
+    // v / 255.0
+    return ::duetos::core::Sf32Div(::duetos::core::Sf32FromU32(v), ::duetos::core::Sf32FromU32(255u));
+}
+::duetos::core::Sf32 U16ToSf32Unorm(u16 v)
+{
+    // v / 65535.0
+    return ::duetos::core::Sf32Div(::duetos::core::Sf32FromU32(v), ::duetos::core::Sf32FromU32(65535u));
+}
+u8 Sf32ToU8Unorm(u32 sf_bits)
+{
+    using ::duetos::core::Sf32;
+    using ::duetos::core::Sf32Clamp;
+    using ::duetos::core::Sf32FromU32;
+    using ::duetos::core::Sf32IsNaN;
+    using ::duetos::core::Sf32Mul;
+    using ::duetos::core::Sf32One;
+    using ::duetos::core::Sf32ToI32;
+    using ::duetos::core::Sf32Zero;
+    Sf32 s{sf_bits};
+    if (Sf32IsNaN(s))
+        return 0;
+    const i32 v = Sf32ToI32(Sf32Mul(Sf32Clamp(s, Sf32Zero(), Sf32One()), Sf32FromU32(255u)));
+    if (v < 0)
+        return 0;
+    if (v > 255)
+        return 255;
+    return static_cast<u8>(v);
+}
+u16 Sf32ToU16Unorm(u32 sf_bits)
+{
+    using ::duetos::core::Sf32;
+    using ::duetos::core::Sf32Clamp;
+    using ::duetos::core::Sf32FromU32;
+    using ::duetos::core::Sf32IsNaN;
+    using ::duetos::core::Sf32Mul;
+    using ::duetos::core::Sf32One;
+    using ::duetos::core::Sf32ToI32;
+    using ::duetos::core::Sf32Zero;
+    Sf32 s{sf_bits};
+    if (Sf32IsNaN(s))
+        return 0;
+    const i32 v = Sf32ToI32(Sf32Mul(Sf32Clamp(s, Sf32Zero(), Sf32One()), Sf32FromU32(65535u)));
+    if (v < 0)
+        return 0;
+    if (v > 65535)
+        return 65535;
+    return static_cast<u16>(v);
+}
+u32 LeU32FromBytes(const u8* p)
+{
+    return static_cast<u32>(p[0]) | (static_cast<u32>(p[1]) << 8) | (static_cast<u32>(p[2]) << 16) |
+           (static_cast<u32>(p[3]) << 24);
+}
+void PutU32Le(u8* p, u32 v)
+{
+    p[0] = static_cast<u8>(v & 0xFFu);
+    p[1] = static_cast<u8>((v >> 8) & 0xFFu);
+    p[2] = static_cast<u8>((v >> 16) & 0xFFu);
+    p[3] = static_cast<u8>((v >> 24) & 0xFFu);
+}
+} // namespace
+
+void FetchTexel(u64 resource_handle, u32 x, u32 y, u32 out[4])
+{
+    using ::duetos::core::Sf32One;
+    using ::duetos::core::Sf32ToBits;
+    using ::duetos::core::Sf32Zero;
+    // Default to (0, 0, 0, 1) per spec for sampler-less OOB reads.
+    out[0] = Sf32ToBits(Sf32Zero());
+    out[1] = Sf32ToBits(Sf32Zero());
+    out[2] = Sf32ToBits(Sf32Zero());
+    out[3] = Sf32ToBits(Sf32One());
+    const ImageRecord* rec = ResolveImageRecord(resource_handle);
+    if (rec == nullptr || rec->backing == nullptr || rec->extent.width == 0 || rec->extent.height == 0)
+        return;
+    if (x >= rec->extent.width || y >= rec->extent.height)
+        return;
+    const u32 bpt = BytesPerTexelForFormat(rec->format);
+    const u64 off = (static_cast<u64>(y) * rec->extent.width + x) * bpt;
+    const u8* p = static_cast<const u8*>(rec->backing) + off;
+    switch (rec->format)
+    {
+    case 0:
+    case 1:
+        // Backing byte order is [R, G, B, A] regardless of the
+        // Vulkan enum name (the on-disk layout matches what
+        // SampleImageRgba8 expects).
+        out[0] = Sf32ToBits(U8ToSf32Unorm(p[0]));
+        out[1] = Sf32ToBits(U8ToSf32Unorm(p[1]));
+        out[2] = Sf32ToBits(U8ToSf32Unorm(p[2]));
+        out[3] = Sf32ToBits(U8ToSf32Unorm(p[3]));
+        break;
+    case 2:
+        out[0] = Sf32ToBits(U8ToSf32Unorm(p[0]));
+        break;
+    case 3:
+        out[0] = Sf32ToBits(U8ToSf32Unorm(p[0]));
+        out[1] = Sf32ToBits(U8ToSf32Unorm(p[1]));
+        break;
+    case 4:
+    {
+        const u16 r = static_cast<u16>(p[0]) | (static_cast<u16>(p[1]) << 8);
+        out[0] = Sf32ToBits(U16ToSf32Unorm(r));
+        break;
+    }
+    case 5:
+        // Raw f32 round-trip — backing carries the Sf32 bit
+        // pattern in little-endian order; the executor's Sf32
+        // helpers operate on the same u32 bit pattern.
+        out[0] = LeU32FromBytes(p + 0);
+        out[1] = LeU32FromBytes(p + 4);
+        out[2] = LeU32FromBytes(p + 8);
+        out[3] = LeU32FromBytes(p + 12);
+        break;
+    default:
+        break;
+    }
+}
+
+void WriteTexel(u64 resource_handle, u32 x, u32 y, const u32 in[4])
+{
+    ImageRecord* rec = ResolveImageRecordMut(resource_handle);
+    if (rec == nullptr || rec->backing == nullptr || rec->extent.width == 0 || rec->extent.height == 0)
+        return;
+    if (x >= rec->extent.width || y >= rec->extent.height)
+        return;
+    const u32 bpt = BytesPerTexelForFormat(rec->format);
+    const u64 off = (static_cast<u64>(y) * rec->extent.width + x) * bpt;
+    u8* p = static_cast<u8*>(rec->backing) + off;
+    switch (rec->format)
+    {
+    case 0:
+    case 1:
+        p[0] = Sf32ToU8Unorm(in[0]);
+        p[1] = Sf32ToU8Unorm(in[1]);
+        p[2] = Sf32ToU8Unorm(in[2]);
+        p[3] = Sf32ToU8Unorm(in[3]);
+        break;
+    case 2:
+        p[0] = Sf32ToU8Unorm(in[0]);
+        break;
+    case 3:
+        p[0] = Sf32ToU8Unorm(in[0]);
+        p[1] = Sf32ToU8Unorm(in[1]);
+        break;
+    case 4:
+    {
+        const u16 r = Sf32ToU16Unorm(in[0]);
+        p[0] = static_cast<u8>(r & 0xFFu);
+        p[1] = static_cast<u8>((r >> 8) & 0xFFu);
+        break;
+    }
+    case 5:
+        PutU32Le(p + 0, in[0]);
+        PutU32Le(p + 4, in[1]);
+        PutU32Le(p + 8, in[2]);
+        PutU32Le(p + 12, in[3]);
+        break;
+    default:
+        break;
+    }
+}
+
 u32 FetchTexelBgra8(u64 resource_handle, u32 x, u32 y)
 {
     const ImageRecord* rec = ResolveImageRecord(resource_handle);

@@ -1363,24 +1363,17 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
                 {
                     const i32 px = static_cast<i32>(coord_buf[0]);
                     const i32 py = (cn >= 2) ? static_cast<i32>(coord_buf[1]) : 0;
-                    u32 w_dim = 0, h_dim = 0, d_dim = 0;
-                    if (::duetos::subsystems::graphics::internal::QueryImageSize(bound, &w_dim, &h_dim, &d_dim) &&
-                        px >= 0 && py >= 0 && static_cast<u32>(px) < w_dim && static_cast<u32>(py) < h_dim)
+                    if (px >= 0 && py >= 0)
                     {
-                        const u32 argb = ::duetos::subsystems::graphics::internal::FetchTexelBgra8(
-                            bound, static_cast<u32>(px), static_cast<u32>(py));
-                        const u8 R = static_cast<u8>((argb >> 16) & 0xFFu);
-                        const u8 G = static_cast<u8>((argb >> 8) & 0xFFu);
-                        const u8 B = static_cast<u8>(argb & 0xFFu);
-                        const u8 A = static_cast<u8>((argb >> 24) & 0xFFu);
-                        const Sf32 inv255 =
-                            ::duetos::core::Sf32Div(::duetos::core::Sf32One(), ::duetos::core::Sf32FromU32(255u));
-                        r4[0] = Sf32ToBits(::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(R), inv255));
-                        r4[1] = Sf32ToBits(::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(G), inv255));
-                        r4[2] = Sf32ToBits(::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(B), inv255));
-                        r4[3] = Sf32ToBits(::duetos::core::Sf32Mul(::duetos::core::Sf32FromU32(A), inv255));
+                        // Format-aware fetch: returns four Sf32 bit
+                        // patterns directly, so HDR formats
+                        // (R32G32B32A32_SFLOAT) round-trip without
+                        // losing precision through a BGRA8 packing.
+                        // FetchTexel does the bounds check and falls
+                        // back to (0, 0, 0, 1) on OOB / no-backing.
+                        ::duetos::subsystems::graphics::internal::FetchTexel(bound, static_cast<u32>(px),
+                                                                             static_cast<u32>(py), r4);
                     }
-                    // out-of-bounds OR no backing -> (0,0,0,1) default above.
                 }
                 StoreResultComponents(ec, rid, tid, r4, 4);
             }
@@ -1389,48 +1382,26 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
         case kOpImageWrite:
         {
             // Storage-image write — no result id. Operands:
-            // (image, coord, texel, [ImageOperands ...]). v0 packs
-            // a 4-component float texel as BGRA8 with [0,1] clamp;
-            // out-of-bounds writes are silently dropped per spec.
+            // (image, coord, texel, [ImageOperands ...]). v0
+            // dispatches the pack to the bound image's `format`
+            // field via WriteTexel; HDR formats round-trip raw
+            // f32, UNORM formats clamp + scale per channel. OOB
+            // writes are silently dropped per spec.
             if (wc >= 4)
             {
                 u32 coord_buf[4]{};
-                u32 texel_buf[4]{};
+                u32 texel_buf[4] = {0, 0, 0, Sf32ToBits(::duetos::core::Sf32One())};
                 const u32 cn = LoadOperandComponents(ec, w[2], coord_buf, 4);
-                const u32 tn = LoadOperandComponents(ec, w[3], texel_buf, 4);
+                (void)LoadOperandComponents(ec, w[3], texel_buf, 4);
                 const u64 bound = LookupDescriptor(ec.prog, 0, 0);
-                if (bound != 0 && cn >= 1 && tn >= 1)
+                if (bound != 0 && cn >= 1)
                 {
                     const i32 px = static_cast<i32>(coord_buf[0]);
                     const i32 py = (cn >= 2) ? static_cast<i32>(coord_buf[1]) : 0;
-                    u32 w_dim = 0, h_dim = 0, d_dim = 0;
-                    if (::duetos::subsystems::graphics::internal::QueryImageSize(bound, &w_dim, &h_dim, &d_dim) &&
-                        px >= 0 && py >= 0 && static_cast<u32>(px) < w_dim && static_cast<u32>(py) < h_dim)
+                    if (px >= 0 && py >= 0)
                     {
-                        // Convert each Sf32 component in [0,1] to u8.
-                        auto clamp_to_u8 = [](u32 sf_bits) -> u8
-                        {
-                            const Sf32 s = Sf32FromBits(sf_bits);
-                            if (::duetos::core::Sf32IsNaN(s))
-                                return 0;
-                            const Sf32 clamped =
-                                ::duetos::core::Sf32Clamp(s, ::duetos::core::Sf32Zero(), ::duetos::core::Sf32One());
-                            const Sf32 scaled = ::duetos::core::Sf32Mul(clamped, ::duetos::core::Sf32FromU32(255u));
-                            const i32 v = ::duetos::core::Sf32ToI32(scaled);
-                            if (v < 0)
-                                return 0;
-                            if (v > 255)
-                                return 255;
-                            return static_cast<u8>(v);
-                        };
-                        const u8 R = clamp_to_u8(texel_buf[0]);
-                        const u8 G = (tn >= 2) ? clamp_to_u8(texel_buf[1]) : 0;
-                        const u8 B = (tn >= 3) ? clamp_to_u8(texel_buf[2]) : 0;
-                        const u8 A = (tn >= 4) ? clamp_to_u8(texel_buf[3]) : 255;
-                        const u32 argb = (static_cast<u32>(A) << 24) | (static_cast<u32>(R) << 16) |
-                                         (static_cast<u32>(G) << 8) | static_cast<u32>(B);
-                        ::duetos::subsystems::graphics::internal::WriteTexelBgra8(bound, static_cast<u32>(px),
-                                                                                  static_cast<u32>(py), argb);
+                        ::duetos::subsystems::graphics::internal::WriteTexel(bound, static_cast<u32>(px),
+                                                                             static_cast<u32>(py), texel_buf);
                     }
                 }
             }

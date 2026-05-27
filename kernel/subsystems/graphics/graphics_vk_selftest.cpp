@@ -3,6 +3,7 @@
 
 #include "drivers/video/display_info.h"
 #include "log/klog.h"
+#include "util/soft_float.h"
 
 /*
  * DuetOS — Vulkan ICD boot self-test.
@@ -775,6 +776,79 @@ bool RunCanonicalLifecycle()
             return SelftestFail("[selftest:graphics] storage-image OOB read returned non-zero", 0);
         VkDestroyImage(dev, stor_img);
         VkFreeMemory(dev, stor_mem);
+    }
+
+    // Format-aware texel write/read round-trip: covers the path
+    // SPIR-V's OpImageRead / OpImageWrite take through FetchTexel
+    // / WriteTexel when a non-default format is in play. Two legs
+    // exercise R8_UNORM (1 byte/texel UNORM) and R32G32B32A32_SFLOAT
+    // (16 bytes/texel raw f32) — the smallest and largest format
+    // strides DuetOS recognises.
+    {
+        VkImage r8_img = 0;
+        VkDeviceMemory r8_mem = 0;
+        // 8x8 R8_UNORM = 64 bytes; round up to a page for the host-
+        // visible memory backing.
+        if (VkCreateImageWithFormat(dev, VkExtent3D{8, 8, 1}, /*format=*/2u, 0, &r8_img) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] R8 image create failed", 0);
+        if (VkAllocateMemory(dev, 256, /*memory_type_index=*/1, &r8_mem) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] R8 AllocateMemory failed", 0);
+        if (VkBindImageMemory(dev, r8_img, r8_mem, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] R8 BindImageMemory failed", 0);
+        // Write Sf32(1.0) -> u8 255 -> Sf32(1.0) on the round-trip.
+        // The other three components are ignored by R8 (output is
+        // single-channel) but we keep `(0, 0, 0, 1)` so the spec
+        // contract for unwritten channels is satisfied.
+        const u32 one_bits = 0x3F800000u;  // Sf32(1.0)
+        const u32 half_bits = 0x3F000000u; // Sf32(0.5)
+        u32 wrote[4] = {one_bits, 0, 0, 0x3F800000u};
+        internal::WriteTexel(r8_img, 2, 3, wrote);
+        wrote[0] = half_bits;
+        internal::WriteTexel(r8_img, 4, 5, wrote);
+        u32 read_back[4]{};
+        internal::FetchTexel(r8_img, 2, 3, read_back);
+        // R8 round-trip: 1.0 packs to 255 then unpacks to 1.0
+        // exactly (255/255 == 1.0).
+        if (read_back[0] != one_bits)
+            return SelftestFail("[selftest:graphics] R8 round-trip(1.0) mismatch", read_back[0]);
+        if (read_back[3] != one_bits) // alpha default
+            return SelftestFail("[selftest:graphics] R8 alpha default wrong", read_back[3]);
+        internal::FetchTexel(r8_img, 4, 5, read_back);
+        // 0.5 packs to u8 127 (Sf32ToI32 truncates: 0.5*255 = 127.5 -> 127);
+        // 127/255 = 0.498... ≈ 0x3EFEFEFE
+        // Just assert it's bounded — exact value would over-pin to
+        // the truncation choice.
+        const ::duetos::core::Sf32 unpacked{read_back[0]};
+        if (::duetos::core::Sf32LessThan(unpacked, ::duetos::core::Sf32FromBits(0x3E800000u)) || // < 0.25
+            ::duetos::core::Sf32GreaterThan(unpacked, ::duetos::core::Sf32FromBits(0x3F800000u)))
+            return SelftestFail("[selftest:graphics] R8 round-trip(0.5) out of range", read_back[0]);
+        VkDestroyImage(dev, r8_img);
+        VkFreeMemory(dev, r8_mem);
+    }
+    {
+        VkImage f32_img = 0;
+        VkDeviceMemory f32_mem = 0;
+        // 4x4 R32G32B32A32_SFLOAT = 4*4*16 = 256 bytes.
+        if (VkCreateImageWithFormat(dev, VkExtent3D{4, 4, 1}, /*format=*/5u, 0, &f32_img) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] f32x4 image create failed", 0);
+        if (VkAllocateMemory(dev, 512, /*memory_type_index=*/1, &f32_mem) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] f32x4 AllocateMemory failed", 0);
+        if (VkBindImageMemory(dev, f32_img, f32_mem, 0) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] f32x4 BindImageMemory failed", 0);
+        // HDR-range values: 2.5, -1.0, 100.0, 0.0 must survive
+        // exact round-trip on R32G32B32A32_SFLOAT (raw f32 bits in
+        // memory; no clamp/quantise).
+        const u32 wrote[4] = {0x40200000u, 0xBF800000u, 0x42C80000u, 0x00000000u};
+        internal::WriteTexel(f32_img, 1, 2, wrote);
+        u32 read_back[4]{};
+        internal::FetchTexel(f32_img, 1, 2, read_back);
+        for (u32 c = 0; c < 4; ++c)
+        {
+            if (read_back[c] != wrote[c])
+                return SelftestFail("[selftest:graphics] f32x4 component round-trip mismatch", c);
+        }
+        VkDestroyImage(dev, f32_img);
+        VkFreeMemory(dev, f32_mem);
     }
 
     // Cmd-debug-label + push-descriptor leg: record a few ops on

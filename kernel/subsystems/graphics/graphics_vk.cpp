@@ -792,7 +792,7 @@ VkResult VkBindBufferMemory(VkDevice dev, VkBuffer buf, VkDeviceMemory mem, u64 
     return VkResult::Success;
 }
 
-VkResult VkCreateImage(VkDevice dev, VkExtent3D extent, u32 flags, VkImage* out)
+VkResult VkCreateImageWithFormat(VkDevice dev, VkExtent3D extent, u32 format, u32 flags, VkImage* out)
 {
     LogOnce(EpCreateImage, "vkCreateImage");
     if (!HandleInRange(dev, kDeviceBase) || !PoolIsLive(g_device_pool, SlotOf(dev, kDeviceBase)))
@@ -809,16 +809,27 @@ VkResult VkCreateImage(VkDevice dev, VkExtent3D extent, u32 flags, VkImage* out)
     {
         return VkResult::ErrorInitializationFailed;
     }
+    // Refuse formats outside the recognised id set so a caller
+    // passing a stale Vulkan enum number can't quietly land an
+    // image the unpack/pack table can't decode.
+    if (format > 5u)
+        return VkResult::ErrorInitializationFailed;
     u32 slot = 0;
     if (!PoolAlloc(g_image_pool, &slot))
         return VkResult::ErrorOutOfHostMemory;
     g_image_data[slot].extent = extent;
+    g_image_data[slot].format = format;
     g_image_data[slot].flags = flags;
     g_image_data[slot].memory_bound = false;
     g_image_data[slot].backing = nullptr;
     if (out != nullptr)
         *out = HandleFor(kImageBase, slot);
     return VkResult::Success;
+}
+
+VkResult VkCreateImage(VkDevice dev, VkExtent3D extent, u32 flags, VkImage* out)
+{
+    return VkCreateImageWithFormat(dev, extent, /*format=*/0u, flags, out);
 }
 
 void VkDestroyImage(VkDevice dev, VkImage img)

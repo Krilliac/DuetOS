@@ -138,6 +138,16 @@ struct ImageRecord
 {
     VkExtent3D extent;
     u32 flags;
+    // DuetOS-internal format id. Maps to the same numbering as
+    // VkGetPhysicalDeviceFormatProperties:
+    //   0 = B8G8R8A8_UNORM (default), 1 = R8G8B8A8_UNORM,
+    //   2 = R8_UNORM,       3 = R8G8_UNORM,
+    //   4 = R16_UNORM,      5 = R32G32B32A32_SFLOAT.
+    // Drives texel-byte-stride + per-channel unpack/pack at sample
+    // and storage-image read/write time. Defaults to 0 for any
+    // legacy caller that goes through `VkCreateImage` without a
+    // format param.
+    u32 format;
     bool memory_bound;
     // Direct pointer into the bound DeviceMemory's host_ptr (when
     // the memory is HOST_VISIBLE). Set by `VkBindImageMemory`; the
@@ -146,6 +156,12 @@ struct ImageRecord
     // isn't host-visible.
     void* backing;
 };
+
+/// Bytes consumed per texel for each recognised DuetOS-internal
+/// format id. Drives offset arithmetic in the storage-image path.
+/// Returns 4 (BGRA8 stride) for any unknown format so a bogus id
+/// can't divide-by-zero or wander past the backing.
+u32 BytesPerTexelForFormat(u32 format);
 
 struct ShaderRecord
 {
@@ -711,6 +727,22 @@ u32 FetchTexelBgra8(u64 resource_handle, u32 x, u32 y);
 /// OpImageWrite path. Silently no-ops on lookup failure or
 /// out-of-bounds coordinate. Bit layout of `argb`: 0xAARRGGBB.
 void WriteTexelBgra8(u64 resource_handle, u32 x, u32 y, u32 argb);
+
+/// Format-aware unfiltered texel fetch. Writes four Sf32 bit
+/// patterns to `out[4]` — (R, G, B, A) in linear [0, 1] for UNORM
+/// formats; raw f32 for SFLOAT. Out-of-bounds coordinates produce
+/// (0, 0, 0, 1) per the Vulkan spec for sampler-less reads.
+/// Backing-format-dispatched: reads bytes_per_texel from the bound
+/// image's `format` field and unpacks accordingly.
+void FetchTexel(u64 resource_handle, u32 x, u32 y, u32 out_components[4]);
+
+/// Format-aware unfiltered texel store. Reads four Sf32 bit
+/// patterns from `in[4]` — (R, G, B, A) clamped to [0, 1] for
+/// UNORM formats; raw f32 for SFLOAT. Out-of-bounds coordinates
+/// drop the write silently per the Vulkan spec. Backing-format-
+/// dispatched: packs into the bytes_per_texel layout the image's
+/// `format` declares.
+void WriteTexel(u64 resource_handle, u32 x, u32 y, const u32 in_components[4]);
 
 /// Binary-semaphore signal / consume / poll. Used by VkQueueSubmit
 /// (signal after CB replay) and VkAcquireNextImageKHR /

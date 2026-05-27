@@ -481,6 +481,14 @@ u64 VkGetBufferDeviceAddress(VkDevice dev, VkBuffer buffer);
 /// active framebuffer via `FramebufferFillRect` — our v0 swapchain
 /// shortcut.  `extent.depth` is recorded but unused.
 VkResult VkCreateImage(VkDevice dev, VkExtent3D extent, u32 flags, VkImage* out);
+
+/// Format-aware image create. `format` is the DuetOS-internal id
+/// (0 = BGRA8_UNORM, 1 = RGBA8_UNORM, 2 = R8_UNORM, 3 = R8G8_UNORM,
+/// 4 = R16_UNORM, 5 = R32G32B32A32_SFLOAT). The format drives
+/// bytes-per-texel arithmetic + per-channel unpack/pack in the
+/// SPIR-V executor's storage-image read/write path. Legacy callers
+/// can keep using `VkCreateImage` (defers with format=0).
+VkResult VkCreateImageWithFormat(VkDevice dev, VkExtent3D extent, u32 format, u32 flags, VkImage* out);
 void VkDestroyImage(VkDevice dev, VkImage img);
 VkResult VkBindImageMemory(VkDevice dev, VkImage img, VkDeviceMemory mem, u64 offset);
 
