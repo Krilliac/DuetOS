@@ -511,7 +511,28 @@ bool RunCanonicalLifecycle()
         VkSampler smp = 0;
         if (VkCreateSampler(dev, &sci, &smp) != VkResult::Success)
             return SelftestFail("[selftest:graphics] VkCreateSampler failed", 0);
+        // The create-info's addressModeU must reach the executor's
+        // OpImageSample path via `SamplerAddressModeFor(smp)`. The
+        // pre-fix path threw the field on the floor — every sampler
+        // collapsed to Repeat — so this assertion pins the
+        // regression bound.
+        if (internal::SamplerAddressModeFor(smp) != internal::SamplerAddressMode::ClampToEdge)
+            return SelftestFail("[selftest:graphics] sampler addressModeU did not propagate (ClampToEdge)", 0);
         VkDestroySampler(dev, smp);
+        // A second sampler with a different mode confirms the
+        // record isn't a single-shared-slot bug.
+        const VkSamplerCreateInfo sci_border{VkFilter::Nearest, VkFilter::Nearest, VkSamplerAddressMode::ClampToBorder,
+                                             VkSamplerAddressMode::ClampToBorder, VkSamplerAddressMode::ClampToBorder};
+        VkSampler smp_border = 0;
+        if (VkCreateSampler(dev, &sci_border, &smp_border) != VkResult::Success)
+            return SelftestFail("[selftest:graphics] VkCreateSampler(border) failed", 0);
+        if (internal::SamplerAddressModeFor(smp_border) != internal::SamplerAddressMode::ClampToBorder)
+            return SelftestFail("[selftest:graphics] sampler addressModeU did not propagate (ClampToBorder)", 0);
+        VkDestroySampler(dev, smp_border);
+        // Handle == 0 must produce a defined fallback so descriptor
+        // writes that don't pin a sampler keep working.
+        if (internal::SamplerAddressModeFor(0) != internal::SamplerAddressMode::ClampToEdge)
+            return SelftestFail("[selftest:graphics] sampler handle=0 fallback wrong", 0);
 
         VkEvent evt = 0;
         if (VkCreateEvent(dev, &evt) != VkResult::Success)

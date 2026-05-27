@@ -681,3 +681,5 @@ recompose. Four themes ship:
 - [Compositor and Window Manager](../subsystems/Compositor.md)
 - [DirectX v0 Path](../subsystems/DirectX.md)
 - [Duet Theme Spec](../specifications/Duet-Theme-Spec.md)
+- [GPU Implementation Notes](../reference/GPU-Implementation-Notes.md) —
+  cross-vendor prior-art and the concrete next gates per driver

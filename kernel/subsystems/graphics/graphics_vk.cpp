@@ -72,6 +72,7 @@ QueryPoolRecord g_query_pool_data[kPoolCapacity];
 PhysicalDeviceRecord g_phys_data[kPoolCapacity];
 QueueRecord g_queue_data[kPoolCapacity];
 PipelineRecord g_pipeline_data[kPoolCapacity];
+SamplerRecord g_sampler_data[kPoolCapacity];
 
 Pool g_instance_pool;
 Pool g_phys_pool;

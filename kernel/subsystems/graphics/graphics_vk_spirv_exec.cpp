@@ -3,11 +3,10 @@
 #include "subsystems/graphics/graphics_vk_internal.h"
 #include "util/soft_float.h"
 
-namespace duetos::subsystems::graphics::internal
-{
-u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits);
-bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
-} // namespace duetos::subsystems::graphics::internal
+// SampleImageRgba8 / QueryImageSize / SamplerAddressModeFor live
+// in `duetos::subsystems::graphics::internal` and are declared in
+// graphics_vk_internal.h, which is already included above. The
+// callers below use fully-qualified names.
 
 /*
  * DuetOS — SPIR-V interpreter, execution engine.
@@ -55,8 +54,10 @@ bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
  *
  * In scope but partial:
  *   - OpImageSample{Implicit,Explicit}Lod: descriptor fetch via
- *     `LookupDescriptor(0, 0)` + `SampleImageRgba8` with REPEAT
- *     addressing. Explicit LOD operand is parsed but ignored (no
+ *     `LookupDescriptor(0, 0)` + `SampleImageRgba8`. The addressing
+ *     mode comes from the bound VkSampler's `SamplerRecord` —
+ *     REPEAT / MIRRORED_REPEAT / CLAMP_TO_EDGE / CLAMP_TO_BORDER
+ *     all execute. Explicit LOD operand is parsed but ignored (no
  *     mipmap chain). Unbound samples return the UV coordinate as
  *     the "missing texture" diagnostic.
  *
@@ -64,8 +65,6 @@ bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
  * execution to abort:
  *   - OpAtomic*, OpControlBarrier, OpMemoryBarrier
  *   - OpImageRead / OpImageWrite (storage images)
- *   - Non-REPEAT sampler modes (CLAMP, MIRROR, BORDER) — the
- *     Sampler descriptor's addressing mode is not yet consumed
  *   - OpKill (deferred — frag shaders that discard are rare in
  *     hello-world cases)
  *   - OpSwitch (sane shaders rarely emit; deferred)
@@ -1224,16 +1223,18 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
                 {
                     // Real texture fetch via the descriptor handle.
                     // Resolves through ImageView->Image->backing
-                    // (set up by VkBindImageMemory). v0 defaults
-                    // to REPEAT addressing — matches what most
-                    // shader code expects for texture coords that
-                    // may go outside [0, 1] (procedural patterns,
-                    // tiled UV scrolling). When the Sampler
-                    // descriptor exposes an explicit mode the
-                    // OpImageSample handler will read it.
-                    const u32 argb = ::duetos::subsystems::graphics::internal::SampleImageRgba8(
-                        bound, coord_buf[0], coord_buf[1],
-                        ::duetos::subsystems::graphics::internal::SamplerAddressMode::Repeat);
+                    // (set up by VkBindImageMemory). The addressing
+                    // mode comes from the VkSampler the caller
+                    // attached at descriptor-update time (REPEAT /
+                    // MIRROR / CLAMP_TO_EDGE / CLAMP_TO_BORDER);
+                    // when no sampler is bound, falls back to
+                    // ClampToEdge — a defined, undisruptive default
+                    // for shaders that don't pin a sampler explicitly.
+                    const u64 sampler = LookupSampler(ec.prog, 0, 0);
+                    const ::duetos::subsystems::graphics::internal::SamplerAddressMode mode =
+                        ::duetos::subsystems::graphics::internal::SamplerAddressModeFor(sampler);
+                    const u32 argb = ::duetos::subsystems::graphics::internal::SampleImageRgba8(bound, coord_buf[0],
+                                                                                                coord_buf[1], mode);
                     // Decompose back to RGBA Sf32 components for
                     // the shader: bits 16..23 = R, 8..15 = G, 0..7 = B,
                     // 24..31 = A.

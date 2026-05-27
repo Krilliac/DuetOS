@@ -376,8 +376,12 @@ struct DescriptorPoolRecord
 /// buffer types).
 struct DescriptorBinding
 {
-    u32 type;   // VkDescriptorType (Sampler / SampledImage / UniformBuffer / ...)
-    u64 handle; // VkImage / VkImageView / VkBuffer handle, or 0
+    u32 type;           // VkDescriptorType (Sampler / SampledImage / UniformBuffer / ...)
+    u64 handle;         // VkImage / VkImageView / VkBuffer handle, or 0
+    u64 sampler_handle; // For CombinedImageSampler: the VkSampler whose addressing
+                        // mode + filter the executor honours at OpImageSample time.
+                        // For Sampler bindings: the sampler handle itself (handle==0).
+                        // 0 means "no sampler specified — fall back to default".
 };
 
 struct DescriptorSetRecord
@@ -410,6 +414,22 @@ struct EventRecord
 struct PipelineCacheRecord
 {
     u64 stored_size;
+};
+
+/// Per-sampler record. v0 captures the VkSamplerCreateInfo fields
+/// the SPIR-V executor's OpImageSample path actually consults —
+/// the three per-axis address modes and the mag/min filters.
+/// `border_color` is fixed to 0 (transparent black) because the v0
+/// VkSamplerCreateInfo doesn't expose a borderColor field yet; a
+/// follow-on slice can plumb it through when callers need
+/// per-sampler border tints.
+struct SamplerRecord
+{
+    u8 address_mode_u; // VkSamplerAddressMode cast to u8
+    u8 address_mode_v;
+    u8 address_mode_w;
+    u8 mag_filter; // VkFilter::Nearest = 0, Linear = 1
+    u8 min_filter;
 };
 
 inline constexpr u32 kMaxQueriesPerPool = 16;
@@ -480,6 +500,7 @@ extern QueryPoolRecord g_query_pool_data[kPoolCapacity];
 extern PhysicalDeviceRecord g_phys_data[kPoolCapacity];
 extern QueueRecord g_queue_data[kPoolCapacity];
 extern PipelineRecord g_pipeline_data[kPoolCapacity];
+extern SamplerRecord g_sampler_data[kPoolCapacity];
 
 // -------------------------------------------------------------------
 // Aggregate counters.
@@ -598,12 +619,16 @@ PipelineShaders PipelineShaderHandles(VkPipeline pipe);
 bool QueryImageSize(u64 resource_handle, u32* out_w, u32* out_h, u32* out_d);
 
 /// Sampler addressing modes — passed to SampleImageRgba8 to
-/// control what happens at the [0, 1] UV boundary.
+/// control what happens at the [0, 1] UV boundary. Values match
+/// `VkSamplerAddressMode` (graphics.h) so we can cast without a
+/// remap table.
 enum class SamplerAddressMode : u8
 {
-    ClampToEdge = 0,    // default — texel at the edge is replicated for out-of-range UV
-    Repeat = 1,         // UV wraps modulo 1.0 (Sf32 fract)
-    MirroredRepeat = 2, // UV wraps modulo 2.0 with reflection
+    Repeat = 0,         // UV wraps modulo 1.0 (Sf32 fract)
+    MirroredRepeat = 1, // UV wraps modulo 2.0 with reflection
+    ClampToEdge = 2,    // texel at the edge is replicated for out-of-range UV
+    ClampToBorder = 3,  // out-of-range UV returns the sampler's border colour;
+                        // v0 always uses transparent black (0,0,0,0).
 };
 
 /// Sample a 2D RGBA8 texel from an image bound via descriptor.
@@ -619,6 +644,14 @@ enum class SamplerAddressMode : u8
 /// on any lookup failure — caller treats it as a fallback.
 u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits,
                      SamplerAddressMode mode = SamplerAddressMode::ClampToEdge);
+
+/// Look up the address-mode-U recorded by VkCreateSampler against
+/// a VkSampler handle. Returns `ClampToEdge` for handle == 0 or
+/// an unrecognised handle so a binding without a sampler still
+/// produces a defined result. (V0 honours the U-axis mode for
+/// both axes — per-axis decoupling lands when the sampler info
+/// struct grows the V/W fields beyond bookkeeping.)
+SamplerAddressMode SamplerAddressModeFor(u64 sampler_handle);
 
 /// Run the SPIR-V shader-based rasterizer for the current draw.
 /// Returns true if the shader path actually painted (in which

@@ -500,6 +500,20 @@ void TestDescriptorBinding()
     // Different set untouched by binding to set 0.
     if (LookupDescriptor(&prog, 1, 0) != 0)
         Fail("descriptors: cross-set leak", 0);
+    // Sampler binding rides on a parallel array — same round-trip
+    // shape, independent of the image-handle bindings above. The
+    // executor's OpImageSample path reads this to pick the
+    // configured sampler addressing mode.
+    if (LookupSampler(&prog, 0, 0) != 0)
+        Fail("samplers: initial slot non-zero", 0);
+    BindSampler(&prog, 0, 0, 0x12345678ABCDEFull);
+    if (LookupSampler(&prog, 0, 0) != 0x12345678ABCDEFull)
+        Fail("samplers: round-trip mismatch", 0);
+    if (LookupDescriptor(&prog, 0, 0) != 0xDEADBEEFCAFEBABEull)
+        Fail("samplers: image-handle clobbered by sampler write", 0);
+    BindSampler(&prog, 99, 0, 0x9999);
+    if (LookupSampler(&prog, 99, 0) != 0)
+        Fail("samplers: OOB set should return 0", 0);
 }
 
 } // namespace

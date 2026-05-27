@@ -543,12 +543,24 @@ the v0 syscall surface doesn't provide.
 - **SPIR-V texture sampling.** `OpImageSampleImplicitLod` /
   `OpImageSampleExplicitLod` are implemented and fetch through the
   bound (set 0, binding 0) sampled-image descriptor via
-  `SampleImageRgba8`. v0 uses REPEAT addressing for any sampler
-  binding and ignores explicit LOD (no mipmap chain). Unbound
-  samples return the UV coordinate as `(u, v, 0, 1)` — the
-  "missing texture" diagnostic. `OpImageRead` / `OpImageWrite`
-  and non-REPEAT sampler modes (CLAMP, MIRROR, BORDER) are still
-  unimplemented.
+  `SampleImageRgba8`. The addressing mode is now driven by the
+  VkSampler the caller pinned at descriptor-update time —
+  `VkCreateSampler` records `addressModeU` into a per-handle
+  `SamplerRecord`, `VkUpdateDescriptorSetSampled` propagates the
+  VkSampler handle alongside the VkImageView, and the executor
+  reads `SamplerAddressModeFor(handle)` on every sample to pick
+  REPEAT / CLAMP_TO_EDGE / MIRRORED_REPEAT / CLAMP_TO_BORDER
+  before walking the bilerp. v0's CLAMP_TO_BORDER border colour
+  is always transparent black (0,0,0,0); per-sampler border tints
+  land when `VkSamplerCreateInfo` grows a `borderColor` field.
+  Unbound samples still return the UV coordinate as
+  `(u, v, 0, 1)` — the "missing texture" diagnostic. Per-axis
+  decoupling (different modes for U / V / W) is recorded by
+  `SamplerRecord` but the executor only honours U today — same-
+  axis-everywhere works correctly; an axis split would need the
+  bilerp to thread the mode per fold. `OpImageRead` /
+  `OpImageWrite` (storage-image compute access) and explicit LOD
+  (no mipmap chain) are still unimplemented.
 - **SPIR-V perspective correction.** The shader rasterizer is
   affine (linear pixel-space interpolation in pixel space).
   Perspective-correct attribute interpolation needs a per-fragment
@@ -584,3 +596,6 @@ the v0 syscall surface doesn't provide.
 - [Win32 DLLs](Win32-DLLs.md) — `vulkan-1.dll`, `dxgi.dll`
 - [Win32 Surface Status](../reference/Win32-Surface-Status.md) — per-export
   REAL / STUB / MISSING inventory
+- [GPU Implementation Notes](../reference/GPU-Implementation-Notes.md) —
+  cross-vendor prior-art for the per-vendor submission path,
+  SPIR-V sampler / texel-fetch math, and the DXBC→SPIR-V plan

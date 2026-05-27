@@ -674,6 +674,24 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
     using ::duetos::core::Sf32ToI32;
     using ::duetos::core::Sf32Zero;
 
+    // ClampToBorder: when the caller's UV is outside [0, 1] on
+    // EITHER axis we short-circuit the bilerp and return the
+    // border colour. v0's border is always transparent black
+    // (0x00000000); the spec's per-sampler borderColor variants
+    // (opaque black, opaque white, ints, custom) land when the
+    // VkSamplerCreateInfo surface grows the field.
+    if (mode == SamplerAddressMode::ClampToBorder)
+    {
+        const Sf32 zero = Sf32Zero();
+        const Sf32 one = Sf32One();
+        const Sf32 uval{u_bits};
+        const Sf32 vval{v_bits};
+        const bool u_out = ::duetos::core::Sf32LessThan(uval, zero) || ::duetos::core::Sf32GreaterThan(uval, one);
+        const bool v_out = ::duetos::core::Sf32LessThan(vval, zero) || ::duetos::core::Sf32GreaterThan(vval, one);
+        if (u_out || v_out)
+            return 0x00000000u;
+    }
+
     // Apply the addressing mode to fold raw UV into [0, 1].
     auto fold = [mode](u32 bits) -> Sf32
     {
@@ -691,6 +709,7 @@ u32 SampleImageRgba8(u64 resource_handle, u32 u_bits, u32 v_bits, SamplerAddress
             const Sf32 f = ::duetos::core::Sf32Fract(::duetos::core::Sf32Mul(v, half));
             return ::duetos::core::Sf32Mul(::duetos::core::Sf32Abs(::duetos::core::Sf32Sub(f, half)), two);
         }
+        case SamplerAddressMode::ClampToBorder:
         case SamplerAddressMode::ClampToEdge:
         default:
             return Sf32Clamp(v, Sf32Zero(), Sf32One());
@@ -821,6 +840,8 @@ bool ShaderRasterizeDraw(const RasterState& st, u32 first_vertex, u32 vertex_cou
             {
                 spirv::BindDescriptor(vs, 0, b, dsr.bindings[b].handle);
                 spirv::BindDescriptor(fs, 0, b, dsr.bindings[b].handle);
+                spirv::BindSampler(vs, 0, b, dsr.bindings[b].sampler_handle);
+                spirv::BindSampler(fs, 0, b, dsr.bindings[b].sampler_handle);
             }
         }
     }
