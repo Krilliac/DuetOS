@@ -70,6 +70,16 @@ Firmware-header layout: `common_firmware_header` (32 B) +
 `gfx_firmware_header_v1_0` (44 B) → payload at
 `ucode_array_offset_bytes`.
 
+**Status (this branch):** the microcode-image parser landed.
+`drivers/gpu/amd_gfx_fw.{h,cpp}` validates the
+`common_firmware_header` + `gfx_firmware_header_v1_0` layout and
+exposes the ucode payload as a (dword*, count) view to a follow-on
+upload slice. Pinned by `AmdGfxFwSelfTest` (1 happy path + 6 reject
+paths) and wired into `amd::Probe`. The MMIO upload sequence
+(halt CP, stream dwords to `mmCP_PFP_UCODE_DATA` / `mmCP_CE_UCODE_DATA`
+/ `mmCP_ME_RAM_DATA`, RLC bring-up, un-halt) is the next slice — it
+only validates on real Vega 10 / Navi hardware.
+
 Primary sources: [amdgpu gfx_v9_0.c](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/amdgpu/gfx_v9_0.c),
 [amdgpu_ucode.h](https://raw.githubusercontent.com/torvalds/linux/master/drivers/gpu/drm/amd/amdgpu/amdgpu_ucode.h),
 [KFD PM4 opcodes](https://github.com/Xilinx/linux-xlnx/blob/master/drivers/gpu/drm/amd/amdkfd/kfd_pm4_opcodes.h),
@@ -98,6 +108,16 @@ Steps:
 Once GSP is ready the host writes PM4-equivalent methods directly
 to USERD channel ring buffers — GSP only mediates the control
 plane.
+
+**Status (this branch):** Step 1 (firmware container parser) landed.
+`drivers/gpu/nvidia_gsp_fw.{h,cpp}` parses the outer `nvfw_bin_hdr`
+container, classifies the inner descriptor as TU10x/GA100 (76 bytes)
+or GA102+ (84 bytes), surfaces the GSP payload as a (data, size)
+view, and pins the parse + 7 reject paths via `NvidiaGspFwSelfTest`
+at boot. `nvidia::Probe` runs the parser on each blob the firmware
+loader returns. Steps 2–7 (WPR layout / FWSEC / Booter / mailbox-kick
+/ queues / sequencer / INIT_DONE) remain — those need real Turing+
+hardware to validate, and most are real-HW-only.
 
 Primary sources: [NVIDIA open-gpu-kernel-modules](https://github.com/NVIDIA/open-gpu-kernel-modules),
 [nouveau nvkm GSP](https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/nouveau/nvkm/subdev/gsp/rm/r535/rpc.c),
