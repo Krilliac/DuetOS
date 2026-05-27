@@ -66,6 +66,7 @@ constinit PerCpu g_bsp_percpu = {
     .idle_task = nullptr,     // published by SchedStartIdle on each CPU
     .scheduler_ready = false, // flipped to true at the end of SchedStartIdle / SchedEnterOnAp
     ._pad_sched_ready = {},
+    .this_cpu_selftest_counter = 0,
 };
 
 // One-shot flag so CurrentCpuIdOrBsp can return a sane value before

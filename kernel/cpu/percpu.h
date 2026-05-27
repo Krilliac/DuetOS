@@ -288,6 +288,15 @@ struct PerCpu
     bool scheduler_ready;
     u8 _pad_sched_ready[7];
 
+    // Single-instruction per-CPU access self-test slot. Bumped by
+    // `arch::ThisCpuOpsSelfTest` (kernel/arch/x86_64/percpu_ops.h)
+    // 1000 times via the `incq %gs:offset` macro, then read back
+    // and KASSERT'd against the expected value. Placed at the
+    // tail so its offset isn't ABI-frozen against any hand-written
+    // assembly stub — the offset is computed at compile time via
+    // `DUETOS_THIS_CPU_OFFSET(PerCpu, this_cpu_selftest_counter)`.
+    u64 this_cpu_selftest_counter;
+
     // Everything below this line will grow as SMP matures:
     //   - per-CPU runqueue spinlock (today: shared g_sched_lock)
     //   - per-CPU heap magazine (when the heap grows per-CPU caching)
