@@ -20,9 +20,10 @@
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
 #include "cpu/percpu.h"
+#include "debug/probes.h"
 #include "log/klog.h"
-#include "util/symbols.h" // TEMP: inversion-site diagnostic
 #include "util/saturating.h"
+#include "util/symbols.h" // TEMP: inversion-site diagnostic
 #include "util/types.h"
 
 namespace duetos::sync
@@ -38,6 +39,17 @@ constinit u8 g_edges[kLockClassMax][kLockClassMax / 8] = {};
 // Optional human-readable names per class. Stable string-literal
 // pointers; nullptr means "not registered".
 constinit const char* g_class_names[kLockClassMax] = {};
+
+// Per-class kind tag — parallel array to `g_class_names`. The
+// default is `LockKind::Sleep` because that's the most permissive
+// classification (a Sleep lock is acquirable in any context), so a
+// class that was registered before the kind argument landed (or
+// passes the default-Sleep argument) never gets a false-positive
+// kind-cross violation. Spin / Irq classes opt in by passing their
+// kind explicitly. Stored as the underlying u8 of the enum class
+// so loads are intrinsically atomic on x86_64 — the read path on
+// every acquire is unsynchronised.
+constinit u8 g_class_kinds[kLockClassMax] = {};
 
 // Held-class stack — per-CPU storage indexed by current-CPU id.
 // 2026-05-22 follow-on to the SMP=8 audit: the prior shape kept
@@ -95,6 +107,18 @@ inline u32 CurrentLockdepSlot()
 // clamp-at-max semantics.
 constinit u64 g_inversions = 0;
 constinit u64 g_edges_recorded = 0;
+
+// WITNESS-style kind-cross counter — increments once per
+// LockdepBeforeAcquire that observed the new class's kind
+// requirement is unsafe given the current held set. Saturating;
+// updated via `SatAtomicAdd` for the same SMP reason as the other
+// counters in this TU.
+constinit u64 g_kind_violations = 0;
+
+// LOCKDEP_ASSERT_HELD counter — increments once per call whose
+// asserted class wasn't on the current CPU's held-stack and
+// wasn't on the per-task sleep snapshot. Saturating.
+constinit u64 g_assert_held_failures = 0;
 
 // Inversion-warnings-promote-to-panic knob (plan D1-followup).
 // Default false: a kernel boot under instrumentation can complete
@@ -240,7 +264,7 @@ class LockdepCriticalSection
 
 } // namespace
 
-void LockdepRegisterClass(LockClass id, const char* name)
+void LockdepRegisterClass(LockClass id, const char* name, LockKind kind)
 {
     if (!ValidClass(id))
     {
@@ -248,6 +272,7 @@ void LockdepRegisterClass(LockClass id, const char* name)
     }
     LockdepCriticalSection cs;
     g_class_names[id] = name;
+    g_class_kinds[id] = static_cast<u8>(kind);
 }
 
 const char* LockdepClassName(LockClass id)
@@ -257,6 +282,15 @@ const char* LockdepClassName(LockClass id)
         return "?";
     }
     return g_class_names[id];
+}
+
+LockKind LockdepClassKind(LockClass id)
+{
+    if (!ValidClass(id))
+    {
+        return LockKind::Sleep;
+    }
+    return static_cast<LockKind>(g_class_kinds[id]);
 }
 
 void LockdepBeforeAcquire(LockClass id)
@@ -271,6 +305,41 @@ void LockdepBeforeAcquire(LockClass id)
         return; // Recursive entry — ignore.
     }
     PerCpuHeld& slot = g_per_cpu[cs.slot()];
+
+    // Cross-kind walk: a Sleep acquire is unsafe if any held lock
+    // is Spin / Irq (the Spin acquire path keeps interrupts off and
+    // the Sleep acquire may yield). Same fix-stays-quiet contract
+    // as the inversion warning above: raw serial to avoid routing
+    // through klog → Fat32 → sched while a held spinlock is still
+    // on the per-CPU stack on this CPU. One WARN per occurrence,
+    // counter is saturating.
+    const LockKind new_kind = static_cast<LockKind>(g_class_kinds[id]);
+    if (new_kind == LockKind::Sleep)
+    {
+        for (u32 i = 0; i < slot.depth; ++i)
+        {
+            const LockClass held = slot.stack[i];
+            if (held == kLockClassUnclassified || held == id)
+            {
+                continue;
+            }
+            const LockKind held_kind = static_cast<LockKind>(g_class_kinds[held]);
+            if (held_kind == LockKind::Spin || held_kind == LockKind::Irq)
+            {
+                (void)util::SatAtomicAdd<u64>(&g_kind_violations, 1);
+                const char* id_name = LockdepClassName(id);
+                const char* held_name = LockdepClassName(held);
+                arch::SerialWrite("[W] lockdep : kind-cross violation acquiring sleep-class=");
+                arch::SerialWrite(id_name != nullptr ? id_name : "<unnamed>");
+                arch::SerialWrite(" while holding spin-class=");
+                arch::SerialWrite(held_name != nullptr ? held_name : "<unnamed>");
+                arch::SerialWrite("\n");
+                break; // one report per acquire; the held set may
+                       // hold several spin locks but the offence
+                       // and the fix are the same.
+            }
+        }
+    }
 
     for (u32 i = 0; i < slot.depth; ++i)
     {
@@ -442,6 +511,111 @@ u64 LockdepInversionsDetected()
     return g_inversions;
 }
 
+u64 LockdepKindViolations()
+{
+    return g_kind_violations;
+}
+
+u64 LockdepAssertHeldFailures()
+{
+    return g_assert_held_failures;
+}
+
+void LockdepAssertHeld(LockClass class_id, const char* file, int line)
+{
+    if (!ValidClass(class_id))
+    {
+        return;
+    }
+    bool present = false;
+    {
+        LockdepCriticalSection cs;
+        if (cs.already_inside())
+        {
+            // Re-entry through a hook (the calling acquire's own
+            // path) — the held stack is in flux. The contract of
+            // LOCKDEP_ASSERT_HELD is "at function entry, the
+            // caller's static held set covers class_id"; the
+            // recursive-entry case is not the entry, so skip
+            // silently rather than emit a false negative.
+            return;
+        }
+        const PerCpuHeld& slot = g_per_cpu[cs.slot()];
+        for (u32 i = 0; i < slot.depth; ++i)
+        {
+            if (slot.stack[i] == class_id)
+            {
+                present = true;
+                break;
+            }
+        }
+    }
+    if (present)
+    {
+        return;
+    }
+    (void)util::SatAtomicAdd<u64>(&g_assert_held_failures, 1);
+    // Raw serial — same routing-deadlock rationale as the other
+    // lockdep hooks. The assert may fire deep inside a critical
+    // section; KLOG_WARN would re-enter sched / Fat32 and
+    // self-deadlock against a still-held spinlock.
+    arch::SerialWrite("[W] lockdep : LOCKDEP_ASSERT_HELD failed class=");
+    const char* name = LockdepClassName(class_id);
+    arch::SerialWrite(name != nullptr ? name : "<unnamed>");
+    arch::SerialWrite(" at ");
+    arch::SerialWrite(file != nullptr ? file : "<no-file>");
+    arch::SerialWrite(":");
+    arch::SerialWriteHex(static_cast<u64>(line));
+    arch::SerialWrite("\n");
+    KBP_PROBE_V(::duetos::debug::ProbeId::kLockdepAssertHeldFailed, static_cast<u64>(class_id));
+}
+
+void LockdepDumpHeldSets()
+{
+    // Panic-safe: take the lockdep critical section so we observe a
+    // consistent snapshot, but degrade gracefully if a peer CPU is
+    // already inside the hook (we still emit the header so the
+    // banner is grep-able). Use raw serial throughout — klog locks
+    // are off-limits in panic context.
+    LockdepCriticalSection cs;
+    arch::SerialWrite("[panic] --- lockdep held sets ---\n");
+    if (cs.already_inside())
+    {
+        arch::SerialWrite("  (lockdep critical section busy — skipping snapshot)\n");
+        return;
+    }
+    const PerCpuHeld& slot = g_per_cpu[cs.slot()];
+    if (slot.depth == 0)
+    {
+        arch::SerialWrite("  (none held on this CPU / task)\n");
+        return;
+    }
+    arch::SerialWrite("  depth=");
+    arch::SerialWriteHex(static_cast<u64>(slot.depth));
+    arch::SerialWrite(" (deepest first):\n");
+    // Walk top-down (most recently acquired first) — that's the
+    // lock whose critical section the panicking code was inside,
+    // usually the one that points at the bug.
+    for (i32 i = static_cast<i32>(slot.depth) - 1; i >= 0; --i)
+    {
+        const LockClass cid = slot.stack[i];
+        const LockKind kind = static_cast<LockKind>(g_class_kinds[cid]);
+        const char* kind_str = (kind == LockKind::Sleep)  ? "sleep"
+                               : (kind == LockKind::Irq)  ? "irq"
+                               : (kind == LockKind::Spin) ? "spin"
+                                                          : "?";
+        arch::SerialWrite("    [");
+        arch::SerialWriteHex(static_cast<u64>(i));
+        arch::SerialWrite("] class=");
+        arch::SerialWrite(LockdepClassName(cid));
+        arch::SerialWrite(" kind=");
+        arch::SerialWrite(kind_str);
+        arch::SerialWrite(" id=");
+        arch::SerialWriteHex(static_cast<u64>(cid));
+        arch::SerialWrite("\n");
+    }
+}
+
 void LockdepSetPromoteToPanic(bool enabled)
 {
     g_promote_to_panic = enabled;
@@ -459,15 +633,24 @@ u64 LockdepEdgesRecorded()
 
 void LockdepRegisterCanonicalClasses()
 {
-    LockdepRegisterClass(kLockClassSched, "sched");
-    LockdepRegisterClass(kLockClassKObject, "kobject");
-    LockdepRegisterClass(kLockClassKStack, "kstack");
-    LockdepRegisterClass(kLockClassPciConfig, "pci-config");
-    LockdepRegisterClass(kLockClassBreakpoints, "breakpoints");
-    LockdepRegisterClass(kLockClassCleanroomTrace, "cleanroom-trace");
-    LockdepRegisterClass(kLockClassWifi, "wifi");
-    LockdepRegisterClass(kLockClassFat32, "fat32");
-    LockdepRegisterClass(kLockClassCompositor, "compositor");
+    // SpinLock-backed classes (`sync::SpinLock`). These are held
+    // with IRQs off and must not yield. The wifi mutex docstring
+    // in the header is stale (says "WiFi driver mutex") — its
+    // implementation in `kernel/net/wifi.cpp` uses `sync::SpinLock`,
+    // hence `LockKind::Spin` here.
+    LockdepRegisterClass(kLockClassSched, "sched", LockKind::Spin);
+    LockdepRegisterClass(kLockClassKObject, "kobject", LockKind::Spin);
+    LockdepRegisterClass(kLockClassKStack, "kstack", LockKind::Spin);
+    LockdepRegisterClass(kLockClassPciConfig, "pci-config", LockKind::Spin);
+    LockdepRegisterClass(kLockClassBreakpoints, "breakpoints", LockKind::Spin);
+    LockdepRegisterClass(kLockClassCleanroomTrace, "cleanroom-trace", LockKind::Spin);
+    LockdepRegisterClass(kLockClassWifi, "wifi", LockKind::Spin);
+    // sched::Mutex-backed classes — may yield, may be held across
+    // context switches; tagged as Sleep so the cross-kind rule
+    // permits acquiring a Spin lock while one is held but not the
+    // reverse.
+    LockdepRegisterClass(kLockClassFat32, "fat32", LockKind::Sleep);
+    LockdepRegisterClass(kLockClassCompositor, "compositor", LockKind::Sleep);
 }
 
 void LockdepReset()
@@ -494,8 +677,16 @@ void LockdepReset()
             g_edges[i][j] = 0;
         }
     }
+    // Wipe per-class kind tags so a fresh registration cycle picks
+    // up its kind explicitly rather than inheriting a stale one.
+    for (u32 i = 0; i < kLockClassMax; ++i)
+    {
+        g_class_kinds[i] = static_cast<u8>(LockKind::Sleep);
+    }
     g_inversions = 0;
     g_edges_recorded = 0;
+    g_kind_violations = 0;
+    g_assert_held_failures = 0;
     g_promote_to_panic = false;
 }
 
@@ -609,6 +800,106 @@ void LockdepSelfTest()
     }
 
     arch::SerialWrite("[sync] lockdep self-test OK (inversion detected, overflow safe).\n");
+}
+
+namespace
+{
+
+// Scratch class IDs for the kind-class self-test. Chosen well
+// above the canonical 0x01..0x0F range and the regular self-test's
+// 0xFE / 0xFD scratch pair so a partially-run self-test can't have
+// left stale state behind on these slots.
+constexpr LockClass kStKindSpinA = 0xF0;
+constexpr LockClass kStKindSleepB = 0xF1;
+constexpr LockClass kStKindSpinC = 0xF2;
+constexpr LockClass kStKindSleepD = 0xF3;
+constexpr LockClass kStKindAssertE = 0xF4;
+
+} // namespace
+
+void LockdepKindClassSelfTest()
+{
+    arch::SerialWrite("[sync] lockdep kind-class self-test: cross-kind + assert-held\n");
+
+    LockdepRegisterClass(kStKindSpinA, "selftest-spin-A", LockKind::Spin);
+    LockdepRegisterClass(kStKindSleepB, "selftest-sleep-B", LockKind::Sleep);
+    LockdepRegisterClass(kStKindSpinC, "selftest-spin-C", LockKind::Spin);
+    LockdepRegisterClass(kStKindSleepD, "selftest-sleep-D", LockKind::Sleep);
+    LockdepRegisterClass(kStKindAssertE, "selftest-assert-E", LockKind::Sleep);
+
+    if (LockdepClassKind(kStKindSpinA) != LockKind::Spin)
+    {
+        PanicLd("Spin kind not recorded for A");
+    }
+    if (LockdepClassKind(kStKindSleepB) != LockKind::Sleep)
+    {
+        PanicLd("Sleep kind not recorded for B");
+    }
+
+    const u64 baseline_kind = LockdepKindViolations();
+    const u64 baseline_assert = LockdepAssertHeldFailures();
+
+    // (1) Legal: acquire Sleep B then Spin A. Spin-while-holding-
+    // Sleep is fine (the Spin acquire does not yield); no
+    // violation expected.
+    LockdepBeforeAcquire(kStKindSleepB);
+    LockdepAfterAcquire(kStKindSleepB);
+    LockdepBeforeAcquire(kStKindSpinA);
+    LockdepAfterAcquire(kStKindSpinA);
+    if (LockdepKindViolations() != baseline_kind)
+    {
+        PanicLd("Sleep-then-Spin acquire reported a kind-cross violation");
+    }
+    LockdepBeforeRelease(kStKindSpinA);
+    LockdepBeforeRelease(kStKindSleepB);
+
+    // (2) Illegal: acquire Spin C then Sleep D. Sleep-while-holding-
+    // Spin can yield with IRQs off — violation must fire exactly
+    // once. Note this also records a forward inversion-test edge
+    // (Spin C -> Sleep D); we don't care about inversions here,
+    // only the kind counter.
+    LockdepBeforeAcquire(kStKindSpinC);
+    LockdepAfterAcquire(kStKindSpinC);
+    LockdepBeforeAcquire(kStKindSleepD); // <-- violation expected
+    LockdepAfterAcquire(kStKindSleepD);
+    if (LockdepKindViolations() != baseline_kind + 1)
+    {
+        PanicLd("Spin-then-Sleep acquire did not report a kind-cross violation");
+    }
+    LockdepBeforeRelease(kStKindSleepD);
+    LockdepBeforeRelease(kStKindSpinC);
+
+    // (3a) LOCKDEP_ASSERT_HELD against a held class: no warn,
+    // counter unchanged.
+    LockdepBeforeAcquire(kStKindAssertE);
+    LockdepAfterAcquire(kStKindAssertE);
+    LOCKDEP_ASSERT_HELD(kStKindAssertE);
+    if (LockdepAssertHeldFailures() != baseline_assert)
+    {
+        PanicLd("LOCKDEP_ASSERT_HELD fired for a held class");
+    }
+    LockdepBeforeRelease(kStKindAssertE);
+
+    // (3b) LOCKDEP_ASSERT_HELD against a NOT-held class: warn
+    // fires, counter advances by 1.
+    LOCKDEP_ASSERT_HELD(kStKindAssertE);
+    if (LockdepAssertHeldFailures() != baseline_assert + 1)
+    {
+        PanicLd("LOCKDEP_ASSERT_HELD did not fire for a not-held class");
+    }
+
+    if (g_per_cpu[CurrentLockdepSlot()].depth != 0)
+    {
+        PanicLd("Held depth not zero after kind-class self-test cleanup");
+    }
+
+    // Structural sentinel — emit a single grep-able PASS line.
+    // The two new counters are at their baseline values from the
+    // operator's perspective (the +1 each above is from the test
+    // exercising the failure path), so a steady boot's lockdep
+    // inspect remains clean for actual code; CI greps this exact
+    // string to confirm the test ran.
+    arch::SerialWrite("[lockdep] kind-class self-test OK\n");
 }
 
 } // namespace duetos::sync
