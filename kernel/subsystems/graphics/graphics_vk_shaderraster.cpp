@@ -33,16 +33,16 @@
  *     [0, 1] and packed BGRA8 for the framebuffer.
  *
  * Shape NOT supported (falls back to fixed-function):
- *   - Vertex buffers other than binding 0 (mirrors the
- *     fixed-function GAP).
  *   - Vertex strides other than the canonical layout
- *     `{vec2/vec3 pos; padding}` aligned to 8 bytes.
- *   - Output Locations on the vertex shader (varyings to FS) —
- *     the FS sees them as zero. A v2 slice will plumb the
- *     interpolation, which needs per-pixel evaluation of the
- *     vertex outputs.
- *   - Anything that needs perspective-correct interpolation,
- *     texture sampling, or descriptor-set-driven uniform reads.
+ *     `{vec2/vec3 pos; padding}` aligned to 8 bytes — UNLESS the
+ *     caller attaches an explicit VkSetVertexInputDuet
+ *     description, in which case multi-binding lookups + the
+ *     declared (binding, offset, format) tuple drive each fetch.
+ *   - Topologies other than TriangleList (the fixed-function
+ *     path handles Strip / Fan / Lines / Points).
+ *   - Anything that needs OpKill-as-write — discards are honoured
+ *     by skipping the pixel; the pixel-painted counter advances
+ *     only on actual writes.
  *
  * The hook is a true opt-in: the existing fixed-function path is
  * unchanged and remains the default for any pipeline that

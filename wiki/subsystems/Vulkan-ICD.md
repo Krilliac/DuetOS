@@ -226,7 +226,13 @@ Out of scope — deferred:
 - Perspective-correct attribute interpolation. The rasterizer
   is affine; pre-divided W-space attributes are the caller's
   responsibility.
-- Multi-binding vertex buffers — only binding 0 is consumed.
+- Multi-binding vertex buffers — the fixed-function (DuetOS v0/v1
+  vertex format) rasterizer reads only binding 0. The SPIR-V
+  shader rasterizer honours per-attribute binding indices via
+  `VkVertexInputAttributeDescription` when an explicit input
+  description is attached (`VkSetVertexInputDuet`), looking each
+  attribute up against the matching `RasterState::vb_per_binding`
+  slot.
 - Multi-rect scissor — only the first scissor rect is recorded.
 
 The reason `Copy*` works while `Draw*` doesn't: copy operations don't

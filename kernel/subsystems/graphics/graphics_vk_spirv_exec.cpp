@@ -110,9 +110,13 @@ constexpr u16 kOpVectorShuffle = 79;
 constexpr u16 kOpCompositeConstruct = 80;
 constexpr u16 kOpCompositeExtract = 81;
 constexpr u16 kOpCompositeInsert = 82;
+constexpr u16 kOpConvertFToU = 109;
 constexpr u16 kOpConvertFToS = 110;
 constexpr u16 kOpConvertSToF = 111;
 constexpr u16 kOpConvertUToF = 112;
+constexpr u16 kOpUConvert = 113;
+constexpr u16 kOpSConvert = 114;
+constexpr u16 kOpFConvert = 115;
 constexpr u16 kOpBitcast = 124;
 constexpr u16 kOpSNegate = 126;
 constexpr u16 kOpFNegate = 127;
@@ -1239,6 +1243,39 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
             if (wc >= 4)
                 SetScalar(ec, rid, tid,
                           static_cast<u32>(::duetos::core::Sf32ToI32(Sf32FromBits(GetScalarBits(ec, w[3])))));
+            break;
+        case kOpConvertFToU:
+            if (wc >= 4)
+            {
+                // Truncate toward zero; spec says behaviour on
+                // negative values is implementation-defined. The
+                // Sf32 path clamps NaN to 0 and lets ordinary
+                // negatives wrap through the i32-to-u32 cast.
+                const Sf32 s = Sf32FromBits(GetScalarBits(ec, w[3]));
+                if (::duetos::core::Sf32IsNaN(s) || ::duetos::core::Sf32IsNegative(s))
+                {
+                    SetScalar(ec, rid, tid, 0u);
+                }
+                else
+                {
+                    const i32 i = ::duetos::core::Sf32ToI32(s);
+                    SetScalar(ec, rid, tid, (i < 0) ? 0u : static_cast<u32>(i));
+                }
+            }
+            break;
+        case kOpUConvert:
+        case kOpSConvert:
+        case kOpFConvert:
+            // Width-only conversions. v0 only has 32-bit scalars
+            // in the SSA value array — every "wider" or "narrower"
+            // width collapses to a passthrough bit-copy. Future
+            // 16-bit / 64-bit support lands when the value array
+            // grows a per-id width field; until then preserving
+            // bit-pattern keeps the compute paths that emit
+            // implicit OpUConvert (storage-image coordinate widens,
+            // etc.) functioning.
+            if (wc >= 4)
+                SetScalar(ec, rid, tid, GetScalarBits(ec, w[3]));
             break;
         case kOpBitcast:
             if (wc >= 4)
