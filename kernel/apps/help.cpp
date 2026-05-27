@@ -54,7 +54,7 @@ struct Row
 // same bindings; if one drifts the other is wrong.
 constexpr Row kRows[] = {
     {"GETTING STARTED", true},
-    {"  CLICK [START] (BOTTOM-LEFT) TO LAUNCH APPS", false},
+    {"  CLICK [START] OR PRESS CTRL+ESC TO LAUNCH APPS", false},
     {"  CLICK A TASKBAR TAB TO RAISE THAT WINDOW", false},
     {"  DRAG A TITLE BAR TO MOVE A WINDOW", false},
     {"  [X] OR ALT+F4 TO CLOSE", false},

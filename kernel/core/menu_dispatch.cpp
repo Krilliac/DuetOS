@@ -72,7 +72,7 @@ void PrintShortcutHelp()
     ConsoleWriteln("");
     ConsoleWriteln("==== DUETOS QUICK REFERENCE ===================");
     ConsoleWriteln("  GETTING STARTED");
-    ConsoleWriteln("    CLICK [START] (BOTTOM-LEFT) TO LAUNCH APPS");
+    ConsoleWriteln("    CLICK [START] OR PRESS CTRL+ESC TO LAUNCH APPS");
     ConsoleWriteln("    CLICK A TASKBAR TAB TO RAISE THAT WINDOW");
     ConsoleWriteln("    DRAG A TITLE BAR TO MOVE A WINDOW");
     ConsoleWriteln("    CLICK [X] OR PRESS ALT+F4 TO CLOSE");
@@ -254,7 +254,7 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
     }
     case 8: // REFRESH DESKTOP — recompose the wallpaper + windows.
         duetos::drivers::video::DesktopCompose(duetos::drivers::video::ThemeCurrent().desktop_bg,
-                                               "WELCOME TO DUETOS   BOOT OK");
+                                               nullptr);
         duetos::drivers::video::ConsoleWriteln("-> DESKTOP REFRESHED");
         break;
     case 9: // SHOW DESKTOP — toggle minimize-all / restore.

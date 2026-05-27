@@ -190,9 +190,29 @@ SerialLineGuard::SerialLineGuard() : m_flags(0), m_owned(false)
     {
         return;
     }
+    // Set the in-progress slot BEFORE acquiring g_serial_lock —
+    // mirrors the SerialWriteX family (which already does
+    // set-before / clear-after) and closes the re-entry window
+    // that was the gui-fuzz SELF-DEADLOCK trigger:
+    //   1. ctor enters SpinLockAcquire(g_serial_lock)
+    //   2. SpinLockAcquire claims a ticket, may spin
+    //   3. INSIDE that acquire (or in the slim
+    //      cli-and-set-owner-cpu window AFTER ticket comes up),
+    //      something on this CPU that ignores IF — NMI / MCE /
+    //      a lockdep-violation logger reached from
+    //      LockdepBeforeAcquire — calls SerialWrite or opens
+    //      another SerialLineGuard, sees slot=0 (we haven't
+    //      reached line 195 yet), and tries to acquire the same
+    //      lock. The HeldBySelf guard correctly fires and
+    //      panics — but it should never have been called: the
+    //      legitimate "ignore the lock on re-entry" path was
+    //      gated only by the slot, which we set too late.
+    // Setting slot=1 first means any re-entry on this CPU during
+    // the acquire takes the slot-bypass (raw serial) path.
+    // Per-CPU slot, so other CPUs are unaffected.
+    *SerialInProgressSlot() = 1;
     auto irq = duetos::sync::SpinLockAcquire(g_serial_lock);
     m_flags = irq.rflags;
-    *SerialInProgressSlot() = 1;
     m_owned = true;
 }
 

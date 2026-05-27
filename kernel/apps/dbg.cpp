@@ -53,6 +53,10 @@ void DbgInit()
         return;
     }
     duetos::drivers::video::WindowSetContentDraw(g_state.window, &render::Paint, nullptr);
+    // Hidden by default. The debugger is a power-user surface; it
+    // doesn't belong on a fresh boot's desktop. Raised on demand
+    // via the Start menu's SYSTEM ▸ DEBUGGER entry / the F11 chord.
+    duetos::drivers::video::WindowSetVisible(g_state.window, false);
     KLOG_INFO_V("dbg", "DbgInit: window=", g_state.window);
 }
 

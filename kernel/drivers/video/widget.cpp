@@ -919,6 +919,14 @@ void WindowRaise(WindowHandle h)
     {
         return;
     }
+    // A hidden window that the user just asked to raise (typically
+    // via the Start menu's "open app" path) must come back to the
+    // surface, not silently stay hidden. Bringup-time apps land
+    // registered + hidden so the boot desktop isn't a stack of
+    // overlapping panels; the Start menu's role-raise handler
+    // expects WindowRaise to be the single "make it visible and
+    // active" entry point.
+    g_windows[h].visible = true;
     // Activation tracks the raise even when the window is
     // already topmost — a click on the single-window desktop
     // still confirms focus.
@@ -940,7 +948,16 @@ void WindowRaise(WindowHandle h)
     }
     if (idx + 1 == g_window_count)
     {
-        return; // already topmost
+        // Already topmost in z-order, but if the window was hidden
+        // moments ago (set visible above) the compositor still has
+        // the wallpaper composited in its rect. Force a re-blit so
+        // the freshly-shown window actually paints.
+        if (FramebufferAvailable())
+        {
+            const auto info = FramebufferGet();
+            FramebufferInvalidateSnapshot(0, 0, info.width, info.height);
+        }
+        return;
     }
     for (u32 j = idx; j + 1 < g_window_count; ++j)
     {

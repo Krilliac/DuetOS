@@ -532,6 +532,15 @@ void TaskbarRedraw()
         {
             continue;
         }
+        // Hidden windows are pre-registered launchers, not running
+        // tasks — skip them so the taskbar reflects "what's actually
+        // on screen", which is what the user expects. Raising a
+        // hidden window via the Start menu unhides it (see
+        // WindowRaise), at which point it appears as a tab here.
+        if (!WindowIsVisible(h))
+        {
+            continue;
+        }
         if (tab_x + tab_w > tabs_right_limit)
         {
             break; // ran out of middle — overflow unshown in v0

@@ -287,7 +287,7 @@ void ApplyThemeAndRepaint()
     else
     {
         CursorHide();
-        DesktopCompose(ThemeCurrent().desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        DesktopCompose(ThemeCurrent().desktop_bg, nullptr);
         CursorShow();
     }
     CompositorUnlock();

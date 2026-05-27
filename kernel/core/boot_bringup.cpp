@@ -2641,6 +2641,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(win_a_chrome, "CALCULATOR");
     duetos::drivers::video::ThemeRegisterWindow(Role::Calculator, calc_handle);
     duetos::apps::calculator::CalculatorInit(calc_handle);
+    duetos::drivers::video::WindowSetVisible(calc_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::calculator::CalculatorSelfTest());
 
     duetos::drivers::video::WindowChrome win_b_chrome = theme_chrome(Role::Notes);
@@ -2656,6 +2657,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(win_b_chrome, "NOTEPAD");
     duetos::drivers::video::ThemeRegisterWindow(Role::Notes, notes_handle);
     duetos::apps::notes::NotesInit(notes_handle);
+    duetos::drivers::video::WindowSetVisible(notes_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::notes::NotesSelfTest());
 
     // Task Manager window — a window whose content drawer
@@ -2672,6 +2674,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     const duetos::drivers::video::WindowHandle taskman_handle =
         duetos::drivers::video::WindowRegister(taskman_chrome, "TASK MANAGER");
     duetos::drivers::video::ThemeRegisterWindow(Role::TaskManager, taskman_handle);
+    duetos::drivers::video::WindowSetVisible(taskman_handle, false);
 
     // Live log viewer window — renders a compact view of the
     // klog ring (the same ring `dmesg` prints). Refreshes every
@@ -2685,6 +2688,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     const duetos::drivers::video::WindowHandle logview_handle =
         duetos::drivers::video::WindowRegister(logview_chrome, "KERNEL LOG");
     duetos::drivers::video::ThemeRegisterWindow(Role::LogView, logview_handle);
+    duetos::drivers::video::WindowSetVisible(logview_handle, false);
     // Subtitle for Duet-era chrome to render next to the title.
     // Themes that don't read it (Classic / Slate10 / Amber)
     // ignore the field; the storage is unconditional.
@@ -2805,6 +2809,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(files_chrome, "FILES");
     duetos::drivers::video::ThemeRegisterWindow(Role::Files, files_handle);
     duetos::apps::files::FilesInit(files_handle);
+    duetos::drivers::video::WindowSetVisible(files_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::files::FilesSelfTest());
 
     // CLOCK — 7-segment-style wall clock. No input, refreshes
@@ -2819,6 +2824,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(clock_chrome, "CLOCK");
     duetos::drivers::video::ThemeRegisterWindow(Role::Clock, clock_handle);
     duetos::apps::clock::ClockInit(clock_handle);
+    duetos::drivers::video::WindowSetVisible(clock_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::clock::ClockSelfTest());
 
     // GFX DEMO — native graphics demonstration. Renders a per-
@@ -2837,6 +2843,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(gfx_chrome, "GFX DEMO");
     duetos::drivers::video::ThemeRegisterWindow(Role::GfxDemo, gfx_handle);
     duetos::apps::gfxdemo::GfxDemoInit(gfx_handle);
+    duetos::drivers::video::WindowSetVisible(gfx_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::gfxdemo::GfxDemoSelfTest());
 
     // DEBUGGER — native interactive debugger app (memory view +
@@ -2862,6 +2869,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(settings_chrome, "SETTINGS");
     duetos::drivers::video::ThemeRegisterWindow(Role::Settings, settings_handle);
     duetos::apps::settings::SettingsInit(settings_handle);
+    duetos::drivers::video::WindowSetVisible(settings_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::settings::SettingsSelfTest());
 
     // IMAGE VIEWER — opens BMP files from the FAT32 root volume.
@@ -2878,6 +2886,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(image_chrome, "IMAGE VIEWER");
     duetos::drivers::video::ThemeRegisterWindow(Role::ImageView, image_handle);
     duetos::apps::imageview::ImageViewInit(image_handle);
+    duetos::drivers::video::WindowSetVisible(image_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::imageview::ImageViewSelfTest());
 
     // ABOUT — windowed system-info readout. Replaces the legacy
@@ -2893,6 +2902,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(about_chrome, "ABOUT DUETOS");
     duetos::drivers::video::ThemeRegisterWindow(Role::About, about_handle);
     duetos::apps::about::AboutInit(about_handle);
+    duetos::drivers::video::WindowSetVisible(about_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::about::AboutSelfTest());
 
     // HELP — windowed shortcut reference. F1 + Start-menu HELP /
@@ -2924,6 +2934,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(browser_chrome, "BROWSER");
     duetos::drivers::video::ThemeRegisterWindow(Role::Browser, browser_handle);
     duetos::apps::browser::BrowserInit(browser_handle);
+    duetos::drivers::video::WindowSetVisible(browser_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserSelfTest());
 
     // CALENDAR — windowed month-view sibling of the read-only
@@ -2939,6 +2950,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(calendar_chrome, "CALENDAR");
     duetos::drivers::video::ThemeRegisterWindow(Role::Calendar, calendar_handle);
     duetos::apps::calendar::CalendarInit(calendar_handle);
+    duetos::drivers::video::WindowSetVisible(calendar_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::calendar::CalendarSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::apps::calendar::CalendarPersistSelfTest());
 
@@ -2954,6 +2966,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(notify_chrome, "NOTIFICATIONS");
     duetos::drivers::video::ThemeRegisterWindow(Role::NotifyCenter, notify_handle);
     duetos::apps::notify_center::NotifyCenterInit(notify_handle);
+    duetos::drivers::video::WindowSetVisible(notify_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::notify_center::NotifyCenterSelfTest());
 
     // SYSMON — rolling system monitor: heap-used % + free-list
@@ -2968,6 +2981,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(sysmon_chrome, "SYSTEM MONITOR");
     duetos::drivers::video::ThemeRegisterWindow(Role::Sysmon, sysmon_handle);
     duetos::apps::sysmon::SysmonInit(sysmon_handle);
+    duetos::drivers::video::WindowSetVisible(sysmon_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::sysmon::SysmonSelfTest());
 
     // HEXVIEW — read-only hex / ASCII inspector for FAT32 root
@@ -2984,6 +2998,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(hex_chrome, "HEX VIEWER");
     duetos::drivers::video::ThemeRegisterWindow(Role::HexView, hex_handle);
     duetos::apps::hexview::HexViewInit(hex_handle);
+    duetos::drivers::video::WindowSetVisible(hex_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::hexview::HexViewSelfTest());
 
     // CHARMAP — codepoint grid; Enter copies selected glyph as
@@ -2998,6 +3013,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(charmap_chrome, "CHARACTER MAP");
     duetos::drivers::video::ThemeRegisterWindow(Role::CharMap, charmap_handle);
     duetos::apps::charmap::CharMapInit(charmap_handle);
+    duetos::drivers::video::WindowSetVisible(charmap_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::charmap::CharMapSelfTest());
 
     // TERMINAL — windowed VT/ANSI host (slice 1 of the ToaruOS
@@ -3013,6 +3029,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(term_chrome, "TERMINAL");
     duetos::drivers::video::ThemeRegisterWindow(Role::Terminal, term_handle);
     duetos::apps::terminal::TerminalInit(term_handle);
+    duetos::drivers::video::WindowSetVisible(term_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::terminal::TerminalSelfTest());
 
     // Slice 3a: hide the framebuffer console region now that the
@@ -3263,7 +3280,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     }
     else
     {
-        duetos::drivers::video::DesktopCompose(theme0.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        duetos::drivers::video::DesktopCompose(theme0.desktop_bg, nullptr);
         duetos::drivers::video::CursorInit(theme0.desktop_bg);
         if (demo_calendar)
         {
@@ -3274,7 +3291,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
             const duetos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
             const duetos::u32 ay = (ky > ph) ? ky - ph : 0;
             duetos::drivers::video::CalendarOpen(ax, ay);
-            duetos::drivers::video::DesktopCompose(theme0.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            duetos::drivers::video::DesktopCompose(theme0.desktop_bg, nullptr);
         }
     }
 

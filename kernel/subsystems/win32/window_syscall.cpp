@@ -275,7 +275,7 @@ void DoWinCreate(arch::TrapFrame* frame)
     // call — without this the user sees a window "exist" (their
     // HWND is valid) but nothing on screen until the next
     // unrelated compose pass.
-    DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+    DesktopCompose(theme.desktop_bg, nullptr);
 
     CompositorUnlock();
 
@@ -330,7 +330,7 @@ void DoWinDestroy(arch::TrapFrame* frame)
     WindowTimerReap(proc->pid, h_comp);
     WindowClose(h_comp);
     const Theme& theme = ThemeCurrent();
-    DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+    DesktopCompose(theme.desktop_bg, nullptr);
     CompositorUnlock();
     WindowMsgWakeAll();
 
@@ -393,7 +393,7 @@ void DoWinShow(arch::TrapFrame* frame)
         }
     }
     const Theme& theme = ThemeCurrent();
-    DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+    DesktopCompose(theme.desktop_bg, nullptr);
     CompositorUnlock();
     WindowMsgWakeAll();
 
@@ -677,7 +677,7 @@ void DoGdiFillRect(arch::TrapFrame* frame)
         const i32 h = static_cast<i32>(frame->r8);
         WindowClientFillRect(h_comp, x, y, w, h, ColorRefToRgb(frame->r9));
         const Theme& theme = ThemeCurrent();
-        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        DesktopCompose(theme.desktop_bg, nullptr);
         ok = true;
     }
     CompositorUnlock();
@@ -705,7 +705,7 @@ void DoGdiRectangle(arch::TrapFrame* frame)
         const i32 h = static_cast<i32>(frame->r8);
         WindowClientRectangle(h_comp, x, y, w, h, ColorRefToRgb(frame->r9));
         const Theme& theme = ThemeCurrent();
-        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        DesktopCompose(theme.desktop_bg, nullptr);
         ok = true;
     }
     CompositorUnlock();
@@ -783,7 +783,7 @@ void DoGdiTextOut(arch::TrapFrame* frame)
         {
             WindowClientTextOut(h_comp, x, y, text, paint_rgb);
             const Theme& theme = ThemeCurrent();
-            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            DesktopCompose(theme.desktop_bg, nullptr);
             ok = true;
         }
         CompositorUnlock();
@@ -861,7 +861,7 @@ void DoGdiTextOutW(arch::TrapFrame* frame)
         {
             WindowClientTextOut(h_comp, x, y, text, paint_rgb);
             const Theme& theme = ThemeCurrent();
-            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            DesktopCompose(theme.desktop_bg, nullptr);
             ok = true;
         }
         CompositorUnlock();
@@ -886,7 +886,7 @@ void DoGdiClear(arch::TrapFrame* frame)
     {
         WindowClearDisplayList(h_comp);
         const Theme& theme = ThemeCurrent();
-        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        DesktopCompose(theme.desktop_bg, nullptr);
         ok = true;
     }
     CompositorUnlock();
@@ -945,7 +945,7 @@ void DoWinMove(arch::TrapFrame* frame)
             WindowPostMessage(h_comp, kWmSize, 0 /* SIZE_RESTORED */, lp);
         }
         const Theme& theme = ThemeCurrent();
-        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        DesktopCompose(theme.desktop_bg, nullptr);
         ok = true;
     }
     CompositorUnlock();
@@ -1095,7 +1095,7 @@ void DoGdiLine(arch::TrapFrame* frame)
         const i32 y1 = static_cast<i32>(frame->r8);
         WindowClientLine(h_comp, x0, y0, x1, y1, ColorRefToRgb(frame->r9));
         const Theme& theme = ThemeCurrent();
-        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        DesktopCompose(theme.desktop_bg, nullptr);
         ok = true;
     }
     CompositorUnlock();
@@ -1123,7 +1123,7 @@ void DoGdiEllipse(arch::TrapFrame* frame)
         const i32 h = static_cast<i32>(frame->r8);
         WindowClientEllipse(h_comp, x, y, w, h, ColorRefToRgb(frame->r9));
         const Theme& theme = ThemeCurrent();
-        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        DesktopCompose(theme.desktop_bg, nullptr);
         ok = true;
     }
     CompositorUnlock();
@@ -1149,7 +1149,7 @@ void DoGdiSetPixel(arch::TrapFrame* frame)
         const i32 y = static_cast<i32>(frame->rdx);
         WindowClientPixel(h_comp, x, y, ColorRefToRgb(frame->r10));
         const Theme& theme = ThemeCurrent();
-        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        DesktopCompose(theme.desktop_bg, nullptr);
         ok = true;
     }
     CompositorUnlock();
@@ -1211,7 +1211,7 @@ void DoGdiBitBlt(arch::TrapFrame* frame)
     {
         WindowClientBitBlt(h_comp, dst_x, dst_y, staging, src_w, src_h);
         const Theme& theme = ThemeCurrent();
-        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        DesktopCompose(theme.desktop_bg, nullptr);
         ok = true;
     }
     CompositorUnlock();
@@ -1672,7 +1672,7 @@ void DoGdiFillRectUser(arch::TrapFrame* frame)
         {
             WindowClientFillRect(h_comp, x, y, w, h, rgb);
             const Theme& theme = ThemeCurrent();
-            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            DesktopCompose(theme.desktop_bg, nullptr);
             ok = true;
         }
         CompositorUnlock();
@@ -1758,7 +1758,7 @@ static u64 DrawTextAsciiOnDc(u64 hdc, const char* text, u64 copy_len, u64 user_r
         {
             WindowClientTextOut(h_comp, px, py, text, fg);
             const Theme& theme = ThemeCurrent();
-            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            DesktopCompose(theme.desktop_bg, nullptr);
             ok = true;
         }
         CompositorUnlock();
@@ -1905,7 +1905,7 @@ void DoWinSetActive(arch::TrapFrame* frame)
     {
         WindowRaise(h_comp); // raise also marks active
         const Theme& theme = ThemeCurrent();
-        DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+        DesktopCompose(theme.desktop_bg, nullptr);
     }
     CompositorUnlock();
     frame->rax = (prev == kWindowInvalid) ? 0 : (static_cast<u64>(prev) + 1);
@@ -2195,7 +2195,7 @@ void DoWinSetText(arch::TrapFrame* frame)
         if (ok)
         {
             const Theme& theme = ThemeCurrent();
-            DesktopCompose(theme.desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+            DesktopCompose(theme.desktop_bg, nullptr);
         }
     }
     CompositorUnlock();
@@ -2551,7 +2551,7 @@ void DoWinTrackPopup(arch::TrapFrame* frame)
     if (ay < 0)
         ay = 0;
     MenuOpen(g_tp_items, req.root_count, static_cast<u32>(ax), static_cast<u32>(ay), kTrackPopupSentinelCtx);
-    DesktopCompose(ThemeCurrent().desktop_bg, "WELCOME TO DUETOS   BOOT OK");
+    DesktopCompose(ThemeCurrent().desktop_bg, nullptr);
     CompositorUnlock();
 
     SerialWrite("[win32/menu] track_popup hwnd=");
