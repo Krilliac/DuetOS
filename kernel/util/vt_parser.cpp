@@ -181,7 +181,8 @@ void VtParserSelfTest()
 
     // DEL is dropped silently.
     cap = {};
-    FeedString(p, "a\x7F" "b");
+    FeedString(p, "a\x7F"
+                  "b");
     ok &= Expect(cap.print_count == 2, "del/dropped");
 
     if (ok)
