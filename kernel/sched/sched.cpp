@@ -88,6 +88,17 @@ struct Task
     // other state, and reset to 0 by the wake path so a task that
     // comes back Ready has a clean slate.
     u64 wake_tick;
+    // Tick value captured at the moment this task most recently
+    // transitioned INTO TaskState::Blocked. Zero while the task is
+    // not Blocked. Used by `diag::HungTaskTick` to compute how
+    // long a task has been stuck on a wait queue — large values
+    // (relative to the current tick) are the signal of a deadlock
+    // or lost wakeup. Cleared by the wake paths when the task is
+    // pulled off its wait queue. Untimed-Blocked tasks (the
+    // `WaitQueueBlock` path) get this set just like timed-Blocked;
+    // `wake_tick` alone is insufficient because it stays 0 for
+    // an untimed wait.
+    u64 block_start_tick;
     const char* name;
     // `next` threads the runqueue, a WaitQueue, or the zombie list —
     // mutually exclusive; at most one of those is the task's home
@@ -360,6 +371,21 @@ struct Task
     u32 seh_repeat;
     u32 _pad_seh;
 
+    // Doubly-linked "all live tasks" list. Threaded by these
+    // dedicated pointers (NOT by `next`, which is already claimed
+    // by the runqueue / wait-queue / zombie list this task is
+    // currently homed on). Lets the hung-task detector enumerate
+    // every Blocked task in the system without a wait-queue
+    // registry — Blocked tasks live on a WaitQueue threaded by
+    // `next`, with no central "all wait queues" pointer, so a
+    // per-task list anchor is the only way to find them.
+    //
+    // Mutated under `g_sched_lock` by `SchedCreateInternal`
+    // (push) and `SchedReap*` paths (remove). The walker uses
+    // the same lock.
+    Task* all_prev;
+    Task* all_next;
+
     // Lockdep held-class stack, parked here across ContextSwitch.
     // A sleeping mutex is held across switches; a single global
     // held stack conflated two tasks' independent mutexes into a
@@ -550,6 +576,51 @@ constinit u64 g_idle_ticks = 0;
 // for the reaper to free their struct + stack. Linked through Task::next
 // (reused from runqueue/waitqueue — a task is only ever on one list).
 constinit Task* g_zombies = nullptr;
+
+// Head of the doubly-linked "all live tasks" list (threaded by
+// `all_prev` / `all_next`). Mutated under `g_sched_lock`. The
+// hung-task detector walks this list under the same lock to find
+// every Blocked task — Blocked tasks live on per-WaitQueue lists
+// with no central registry, so without this anchor there is no
+// general way to enumerate them. The list contains every live
+// task (Running, Ready, Sleeping, Blocked) including the boot
+// task and idle tasks; Dead tasks are removed at reap time.
+constinit Task* g_all_tasks_head = nullptr;
+
+inline void AllTasksLink(Task* t)
+{
+    // Caller holds g_sched_lock OR is in early-init before any
+    // concurrent mutator can race (SchedInit pushes the boot
+    // task before APs come online). Push at the head — O(1).
+    t->all_prev = nullptr;
+    t->all_next = g_all_tasks_head;
+    if (g_all_tasks_head != nullptr)
+    {
+        g_all_tasks_head->all_prev = t;
+    }
+    g_all_tasks_head = t;
+}
+
+inline void AllTasksUnlink(Task* t)
+{
+    // Caller holds g_sched_lock. O(1) via the prev pointer.
+    Task* prev = t->all_prev;
+    Task* next = t->all_next;
+    if (prev != nullptr)
+    {
+        prev->all_next = next;
+    }
+    else
+    {
+        g_all_tasks_head = next;
+    }
+    if (next != nullptr)
+    {
+        next->all_prev = prev;
+    }
+    t->all_prev = nullptr;
+    t->all_next = nullptr;
+}
 constinit WaitQueue g_reaper_wq{};
 constinit u64 g_tasks_exited = 0;
 
@@ -1765,6 +1836,12 @@ void SchedInit()
     Current() = boot_task;
     SchedCpuIncCreated();
     SchedCpuIncLive();
+    // Push the boot task onto the global "all live tasks" list.
+    // Pre-AP-bringup, no concurrent mutator exists; the global
+    // sched lock isn't taken (it isn't even constructed yet
+    // beyond constinit zero-init), but the ordering is safe by
+    // construction: the BSP is the only CPU running.
+    AllTasksLink(boot_task);
 
     SerialWrite("[sched] online; task 0 is \"kboot\"\n");
     KLOG_INFO("sched", "online; task 0 is kboot");
@@ -1938,6 +2015,12 @@ Task* SchedCreateInternal(TaskEntry entry, void* arg, const char* name, TaskPrio
     {
         sync::SpinLockGuard guard(g_sched_lock);
         RunqueuePush(t);
+        // Add the new task to the global "all live tasks" list
+        // under the same lock as the runqueue push. The hung-task
+        // detector walks this list under g_sched_lock; pushing
+        // here makes the new task observable to the very next
+        // detector pass.
+        AllTasksLink(t);
         SchedCpuIncCreated();
         SchedCpuIncLive();
     }
@@ -2958,6 +3041,10 @@ void OnTimerTick(u64 now_ticks)
             }
 
             woken->wake_tick = 0;
+            // Clear the hung-task anchor on timer-driven wakeups
+            // too — the task is leaving Blocked, so the previous
+            // "stuck since" anchor is no longer meaningful.
+            woken->block_start_tick = 0;
             woken->next = nullptr;
             // Suspended tasks stay parked even when the timer
             // would otherwise wake them — RunqueueOrSuspendPush
@@ -4459,6 +4546,108 @@ void SchedEnumerate(SchedEnumCb cb, void* cookie)
     arch::Sti();
 }
 
+u64 SchedSnapshotBlockedTasks(SchedBlockedTaskInfo* out, u64 cap)
+{
+    if (out == nullptr || cap == 0)
+    {
+        return 0;
+    }
+    if (!cpu::BspInstalled())
+    {
+        // Pre-SchedInit / pre-BSP install: the all-tasks list is
+        // empty (or in a partial state); nothing to report.
+        return 0;
+    }
+    u64 written = 0;
+    // Walk the global all-tasks list under the sched lock. The
+    // snapshot is intentionally minimal — TID, name pointer,
+    // block_start_tick — because the caller may walk the buffer
+    // outside the lock (the hung-task detector emits warnings on
+    // the post-lock path, where klog is safe to call).
+    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
+    for (Task* t = g_all_tasks_head; t != nullptr && written < cap; t = t->all_next)
+    {
+        if (t->state != TaskState::Blocked)
+        {
+            continue;
+        }
+        if (t->block_start_tick == 0)
+        {
+            // Tasks the suspend path forced into TaskState::Blocked
+            // (without putting them on a wait queue) get filtered
+            // here: legitimately-suspended threads aren't hung.
+            continue;
+        }
+        out[written].id = t->id;
+        out[written].name = t->name;
+        out[written].block_start_tick = t->block_start_tick;
+        ++written;
+    }
+    sync::SpinLockRelease(g_sched_lock, f);
+    return written;
+}
+
+u64 SchedSelftestRewindBlockStart(const char* match_name, u64 delta_ticks)
+{
+    if (match_name == nullptr)
+    {
+        return 0;
+    }
+    if (!cpu::BspInstalled())
+    {
+        return 0;
+    }
+    u64 tweaked = 0;
+    sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
+    const u64 now = g_tick_now;
+    // Compute the synthetic "started blocking this long ago" tick.
+    // Saturate at 1 (the smallest non-zero anchor) if delta_ticks
+    // would underflow (i.e. now < delta). Zero is the
+    // "not-tracked" sentinel in the walker's filter, so saturating
+    // to 0 would silently exclude the rewound task from the hung-
+    // task snapshot — exactly the regression the self-test exists
+    // to catch.
+    const u64 synthesized = (now > delta_ticks) ? (now - delta_ticks) : 1;
+    for (Task* t = g_all_tasks_head; t != nullptr; t = t->all_next)
+    {
+        if (t->state != TaskState::Blocked)
+        {
+            continue;
+        }
+        if (t->name == nullptr)
+        {
+            continue;
+        }
+        // Exact match — match_name strings are short literals
+        // (the hung-task self-test passes a fixed sentinel).
+        // Walk both strings under a small bound; sched_lock is
+        // held so the loop has to stay fast.
+        bool eq = true;
+        for (u32 i = 0; i < 64; ++i)
+        {
+            const char a = t->name[i];
+            const char b = match_name[i];
+            if (a != b)
+            {
+                eq = false;
+                break;
+            }
+            if (a == '\0')
+            {
+                break;
+            }
+        }
+        if (!eq)
+        {
+            continue;
+        }
+        t->block_start_tick = synthesized;
+        ++tweaked;
+    }
+    sync::SpinLockRelease(g_sched_lock, f);
+    return tweaked;
+}
+
 bool SchedIsPidZombie(u64 target_pid)
 {
     arch::Cli();
@@ -4723,6 +4912,16 @@ namespace
                     core::PanicWithValue("sched/reaper", "stack canary corrupted (task overflow?)", canary);
                 }
                 mm::FreeKernelStack(dead->stack_base, dead->stack_size);
+            }
+            // Remove from the global all-tasks list before freeing
+            // the Task struct — otherwise the next walker would
+            // dereference a freed pointer. Under the sched lock so
+            // a concurrent SchedCreate or hung-task walker can't
+            // see the half-unlinked state.
+            {
+                sync::IrqFlags lf = sync::SpinLockAcquire(g_sched_lock);
+                AllTasksUnlink(dead);
+                sync::SpinLockRelease(g_sched_lock, lf);
             }
             mm::KFree(dead);
             SchedCpuIncReaped();
@@ -5076,6 +5275,13 @@ void WaitQueueBlockCurrentLocked(WaitQueue* wq)
     t->next = nullptr;
     t->waiting_on = wq;
     t->wake_by_timeout = false;
+    // Record the moment this task entered Blocked so the hung-task
+    // detector can measure "stuck on a wait queue for too long".
+    // g_tick_now is the scheduler's internal tick counter — same
+    // clock SchedNowTicks() returns. Untimed Blocked tasks would
+    // otherwise have no observable "when did I start waiting"
+    // anchor (`wake_tick` stays 0).
+    t->block_start_tick = g_tick_now;
     if (wq->tail == nullptr)
     {
         wq->head = wq->tail = t;
@@ -5135,6 +5341,11 @@ bool WaitQueueBlockTimeout(WaitQueue* wq, u64 ticks)
         // corrupt whichever holds it.
         KASSERT(t->state == TaskState::Running, "sched", "WaitQueueBlockTimeout on non-Running task");
         t->state = TaskState::Blocked;
+        // Same rationale as WaitQueueBlockCurrentLocked: anchor the
+        // hung-task detector's "stuck duration" measurement at the
+        // moment the task entered Blocked, regardless of whether
+        // the wait was timed.
+        t->block_start_tick = g_tick_now;
         t->next = nullptr;
         // Saturate the deadline rather than wrap. Without the clamp,
         // `g_tick_now + ticks` could overflow u64 (e.g., a Linux ABI
@@ -5210,6 +5421,10 @@ Task* WaitQueueWakeOneLocked(WaitQueue* wq)
     t->waiting_on = nullptr;
     t->wake_tick = 0;
     t->wake_by_timeout = false;
+    // Clear the hung-task anchor — once we've handed the task
+    // back to the runqueue (or the suspended list), the previous
+    // "stuck on a wait queue since…" measurement is meaningless.
+    t->block_start_tick = 0;
     // Suspended waiters get reparked instead of unblocked.
     RunqueueOrSuspendPush(t);
     SchedCpuDecBlocked();
@@ -5581,6 +5796,9 @@ void CondvarWait(Condvar* cv, Mutex* m)
         // Enqueue self on the condvar's waiters.
         Task* t = Current();
         t->state = TaskState::Blocked;
+        // Anchor for the hung-task detector — see
+        // WaitQueueBlockCurrentLocked above for the rationale.
+        t->block_start_tick = g_tick_now;
         t->next = nullptr;
         t->wake_tick = 0;
         t->waiting_on = &cv->waiters;
@@ -5653,6 +5871,9 @@ bool CondvarWaitTimeout(Condvar* cv, Mutex* m, u64 ticks)
         // wake arm, exactly like WaitQueueBlockTimeout.
         Task* t = Current();
         t->state = TaskState::Blocked;
+        // Anchor for the hung-task detector — see
+        // WaitQueueBlockCurrentLocked above for the rationale.
+        t->block_start_tick = g_tick_now;
         t->next = nullptr;
         // Saturate exactly like WaitQueueBlockTimeout (line ~3417):
         // an unclamped g_tick_now + ticks can wrap to 0 for a huge

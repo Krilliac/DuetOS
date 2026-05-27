@@ -13,6 +13,7 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "diag/fault_react.h"
+#include "diag/hung_task.h"
 #include "diag/runtime_checker.h"
 
 namespace duetos::core
@@ -178,6 +179,14 @@ u64 DeltaClampMonotonic(const char* counter_name, u64 now, u64 prev)
         const auto& h = RuntimeCheckerStatusRead();
         LogWithValue(LogLevel::Info, "kheartbeat", "health_last_scan_issues", h.last_scan_issues);
         LogWithValue(LogLevel::Info, "kheartbeat", "health_issues_total", h.issues_found_total);
+
+        // Hung-task detector. Walks the all-tasks list looking
+        // for tasks stuck in Blocked state for longer than the
+        // 30 s threshold; complements the per-CPU soft-lockup
+        // detector by catching the deadlock / lost-wakeup /
+        // dropped-signal class. Cheap when nothing is hung — one
+        // bounded list walk + zero allocations.
+        ::duetos::diag::HungTaskTick();
 
         // Drain any deferred fault-react reports recorded from
         // the trap handler since the previous beat. Each pending

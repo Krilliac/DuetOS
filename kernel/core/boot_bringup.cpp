@@ -230,6 +230,7 @@
 #include "diag/gdb_server.h"
 #include "diag/minidump.h"
 #include "diag/perf_profile.h"
+#include "diag/hung_task.h"
 #include "diag/soft_lockup.h"
 #include "ipc/kevent.h"
 #include "ipc/kfile.h"
@@ -1688,6 +1689,18 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // confirm the gating logic is correct before any real
     // workload exercises it.
     DUETOS_BOOT_SELFTEST(duetos::diag::SoftLockupSelfTest());
+
+    // Hung-task detector (the deadlock / lost-wakeup
+    // complement to soft-lockup). The detector is wired into
+    // the heartbeat task and will run on every beat once
+    // we're past this point; the self-test spawns a real
+    // Blocked task, rewinds its block-start anchor, and
+    // confirms the walker fires + the per-TID rate limit
+    // suppresses re-warns. Must run AFTER SchedInit + the
+    // reaper start (the self-test fixture relies on the
+    // reaper to clean its victim up); the boot-bringup order
+    // satisfies that by construction.
+    DUETOS_BOOT_SELFTEST(duetos::diag::HungTaskSelfTest());
 }
 
 // Device + late-bring-up: PS/2 kbd/mouse, PCI enumeration,

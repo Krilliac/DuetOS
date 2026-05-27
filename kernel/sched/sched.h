@@ -530,6 +530,50 @@ struct SchedTaskInfo
 using SchedEnumCb = void (*)(const SchedTaskInfo& info, void* cookie);
 void SchedEnumerate(SchedEnumCb cb, void* cookie);
 
+/// One row out of `SchedSnapshotBlockedTasks`. Fields are
+/// snapshotted under the sched lock at the moment of the walk;
+/// no pointers survive into the post-walk window (the name
+/// pointer is borrowed and points into the task's `name` field,
+/// which lives for the task's lifetime — same contract as
+/// `TaskName`).
+struct SchedBlockedTaskInfo
+{
+    u64 id;
+    const char* name;
+    // Tick at which the task entered TaskState::Blocked. The
+    // hung-task detector subtracts this from the current tick
+    // to compute "stuck for this long".
+    u64 block_start_tick;
+};
+
+/// Snapshot every currently-Blocked task into the caller-owned
+/// buffer. Returns the count actually written, capped at `cap`.
+/// Walks every CPU's runqueue plus the sleep queue under the
+/// sched lock (so the wait-queue / timer paths can't splice a
+/// list mid-walk) and selects entries with `state == Blocked`
+/// and `block_start_tick != 0`. The non-zero `block_start_tick`
+/// gate skips tasks that the suspend path forces into
+/// `TaskState::Blocked` without putting them on a wait queue
+/// — those aren't hung, they're explicitly suspended.
+///
+/// Designed for the hung-task detector: the caller (the
+/// heartbeat thread) walks Blocked tasks under the sched lock,
+/// then releases the lock before emitting warnings — warning
+/// emission can take klog locks and must not nest under sched.
+///
+/// `out` must be non-null and `cap` must be > 0 (otherwise
+/// returns 0 with no work done).
+u64 SchedSnapshotBlockedTasks(SchedBlockedTaskInfo* out, u64 cap);
+
+/// SELFTEST ONLY: rewind the most recently observed `block_start_tick`
+/// of every task whose `name` matches `match_name` (exact match, not
+/// prefix) so the hung-task detector sees the task as "stuck since
+/// `delta_ticks` ago". Returns the number of tasks tweaked. Returns 0
+/// (with no side effect) for null `match_name`. Walks every CPU's
+/// runqueue plus the sleep queue under the sched lock. Used ONLY by
+/// `diag::HungTaskSelfTest` — production code MUST NOT call this.
+u64 SchedSelftestRewindBlockStart(const char* match_name, u64 delta_ticks);
+
 struct StackHealth
 {
     u64 canary_broken;    // # tasks whose stack-bottom sentinel scribbled
