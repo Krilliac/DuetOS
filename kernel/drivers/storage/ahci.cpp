@@ -90,6 +90,15 @@ constexpr u8 kFisH2dRegister = 0x27;
 constexpr u8 kAtaCmdIdentify = 0xEC;
 constexpr u8 kAtaCmdReadDmaExt = 0x25;
 constexpr u8 kAtaCmdWriteDmaExt = 0x35;
+constexpr u8 kAtaCmdFlushCacheExt = 0xEA;     // ACS-4 §7.10 — commit cache to media.
+constexpr u8 kAtaCmdDataSetManagement = 0x06; // ACS-4 §7.11 — TRIM and friends.
+constexpr u8 kAtaDsmFeatureTrim = 0x01;       // FEATURES = 0x01 selects TRIM.
+constexpr u16 kAtaDsmRangeBytes = 8;          // 6-byte LBA + 2-byte count, little-endian.
+// FLUSH CACHE EXT can legitimately take seconds when the drive
+// commits a deep write cache. ACS-4 doesn't bound this — vendors
+// document worst-case under 30 s. Use the same window as IDENTIFY
+// (already 30 s in IssueSlot0) so a flush during a real-disk
+// background relocation doesn't false-fail.
 
 constexpr u32 kSectorSize = 512;      // v1: hard-assume 512 B sectors.
 constexpr u32 kMaxSectorsPerXfer = 8; // 4 KiB — fits one frame.
@@ -498,10 +507,167 @@ i32 AhciBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
     return 0;
 }
 
+// Build a "no PRDT" command — used for FLUSH CACHE EXT which
+// transfers no data. The command header carries PRDTL=0 and the
+// command table only fills the CFIS. Spec-faithful equivalent of
+// BuildCmd with sectors=0 and PRDT omitted.
+void BuildNonDataCmd(Port& p, u8 ata_cmd)
+{
+    auto* hdr = reinterpret_cast<CmdHeader*>(p.scratch_virt + kCmdListOffset);
+    auto* tbl = reinterpret_cast<CmdTable*>(p.scratch_virt + kCmdTableOffset);
+    const mm::PhysAddr tbl_phys = p.scratch_phys + kCmdTableOffset;
+
+    VolatileZero(hdr, sizeof(CmdHeader) * 32);
+    hdr[0].flags = static_cast<u16>(sizeof(FisH2dReg) / 4); // CFL in DWORDs, no W bit
+    hdr[0].prdtl = 0;
+    hdr[0].prdbc = 0;
+    hdr[0].ctba = static_cast<u32>(tbl_phys & 0xFFFFFFFFu);
+    hdr[0].ctbau = static_cast<u32>(tbl_phys >> 32);
+
+    VolatileZero(tbl, sizeof(CmdTable));
+    tbl->cfis.fis_type = kFisH2dRegister;
+    tbl->cfis.pmport_c = 1u << 7; // C = 1 (Command)
+    tbl->cfis.command = ata_cmd;
+    tbl->cfis.device = 1u << 6; // LBA mode (FLUSH CACHE EXT is LBA-addressed by spec)
+}
+
+// FLUSH CACHE EXT (ATA 0xEA) — instructs the drive to commit its
+// write cache to non-volatile media. ACS-4 §7.10. Required for
+// power-loss durability: without this, every write that hit the
+// drive's DRAM cache can be lost on a power cut even though
+// AhciBlockWrite returned 0. FAT32 / DuetFS / ext4 journal
+// commit points call BlockDeviceFlush(); that routes through here.
+//
+// IssueSlot0 already uses a 30 s budget which is consistent with
+// the ACS-4 worst-case for FLUSH CACHE on a busy drive.
+i32 AhciBlockFlush(void* cookie)
+{
+    KDBG(Storage, "drivers/ahci", "AhciBlockFlush");
+    auto* p = static_cast<Port*>(cookie);
+    if (!p->online)
+        return -1;
+    BuildNonDataCmd(*p, kAtaCmdFlushCacheExt);
+    if (!IssueSlot0(p->regs))
+    {
+        core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "flush: slot0 failed port_idx=", p->port_idx);
+        return -1;
+    }
+    return 0;
+}
+
+// DATA SET MANAGEMENT TRIM (ATA 0x06, FEATURES=0x01). ACS-4 §7.11.
+// Builds a single 512-byte LBA-range buffer with one 8-byte
+// {lba48, count16} descriptor and issues the command on slot 0.
+// The buffer is reused — it lives in our per-port DMA scratch
+// region at the IDENTIFY-reply offset (the bring-up read of
+// IDENTIFY has already finished by the time any FS layer would
+// trim, and the scratch is unused between commands).
+//
+// v0 issues one range per call. A 16-bit COUNT field per range
+// caps each at 65,535 sectors; the block layer's u32 count is
+// already bounded against the device's sector_count so a 32-bit
+// argument that fits the device fits one range here too. Ranges
+// longer than 0xFFFF sectors are split into multiple 8-byte
+// descriptors within the one 512-byte buffer (up to 64
+// descriptors per command).
+i32 AhciBlockDiscard(void* cookie, u64 lba, u32 count)
+{
+    KDBG_2V(Storage, "drivers/ahci", "AhciBlockDiscard", "lba", lba, "count", count);
+    auto* p = static_cast<Port*>(cookie);
+    if (!p->online)
+        return -1;
+    if (count == 0)
+        return -1;
+    if (lba > p->sector_count || count > p->sector_count - lba)
+        return -1;
+
+    // Reuse the IDENTIFY-reply slot in the per-port DMA scratch
+    // (512 bytes — exactly one TRIM payload sector). The IDENTIFY
+    // data is consumed once at bring-up and never read again, so
+    // overwriting it here is safe.
+    u8* payload = p->scratch_virt + kIdentOffset;
+    for (u32 i = 0; i < kSectorSize; ++i)
+        payload[i] = 0;
+
+    // Pack [lba, count) into 8-byte descriptors. Each descriptor:
+    //   bytes 0..5 = starting LBA (48-bit, little-endian)
+    //   bytes 6..7 = range length in sectors (16-bit, little-endian)
+    // A length of 0 terminates the list — we explicitly zero the
+    // tail (already done above) so the drive stops at our last
+    // populated entry.
+    constexpr u32 kMaxRangesPerSector = kSectorSize / kAtaDsmRangeBytes; // 64
+    u32 desc_count = 0;
+    u64 cur_lba = lba;
+    u32 remaining = count;
+    while (remaining > 0 && desc_count < kMaxRangesPerSector)
+    {
+        const u16 chunk = (remaining > 0xFFFF) ? 0xFFFF : static_cast<u16>(remaining);
+        u8* d = payload + desc_count * kAtaDsmRangeBytes;
+        d[0] = static_cast<u8>(cur_lba & 0xFF);
+        d[1] = static_cast<u8>((cur_lba >> 8) & 0xFF);
+        d[2] = static_cast<u8>((cur_lba >> 16) & 0xFF);
+        d[3] = static_cast<u8>((cur_lba >> 24) & 0xFF);
+        d[4] = static_cast<u8>((cur_lba >> 32) & 0xFF);
+        d[5] = static_cast<u8>((cur_lba >> 40) & 0xFF);
+        d[6] = static_cast<u8>(chunk & 0xFF);
+        d[7] = static_cast<u8>((chunk >> 8) & 0xFF);
+        cur_lba += chunk;
+        remaining -= chunk;
+        ++desc_count;
+    }
+    if (remaining > 0)
+    {
+        // 64 ranges * 65535 sectors = 32 MiB-1; any caller asking
+        // for more than that in one BlockDeviceDiscard should split
+        // already. Refuse rather than silently dropping the tail.
+        core::LogWithValue(core::LogLevel::Warn, "drivers/ahci", "discard: oversized request, tail dropped, remaining",
+                           remaining);
+        return -1;
+    }
+
+    // Build the command — DSM TRIM with COUNT=1 (one 512-byte
+    // sector of LBA descriptors), W bit set (we transfer the
+    // descriptor list to the drive), single PRD pointing at our
+    // payload buffer.
+    auto* hdr = reinterpret_cast<CmdHeader*>(p->scratch_virt + kCmdListOffset);
+    auto* tbl = reinterpret_cast<CmdTable*>(p->scratch_virt + kCmdTableOffset);
+    const mm::PhysAddr tbl_phys = p->scratch_phys + kCmdTableOffset;
+    const mm::PhysAddr payload_phys = p->scratch_phys + kIdentOffset;
+
+    VolatileZero(hdr, sizeof(CmdHeader) * 32);
+    hdr[0].flags = static_cast<u16>(sizeof(FisH2dReg) / 4); // CFL DWORDs
+    hdr[0].flags |= 1u << 6;                                // W bit — host writes to drive
+    hdr[0].prdtl = 1;
+    hdr[0].prdbc = 0;
+    hdr[0].ctba = static_cast<u32>(tbl_phys & 0xFFFFFFFFu);
+    hdr[0].ctbau = static_cast<u32>(tbl_phys >> 32);
+
+    VolatileZero(tbl, sizeof(CmdTable));
+    tbl->cfis.fis_type = kFisH2dRegister;
+    tbl->cfis.pmport_c = 1u << 7;
+    tbl->cfis.command = kAtaCmdDataSetManagement;
+    tbl->cfis.featurel = kAtaDsmFeatureTrim; // FEATURES = TRIM
+    tbl->cfis.device = 1u << 6;              // LBA mode
+    tbl->cfis.countl = 1;                    // 1 × 512 B payload sector
+    tbl->cfis.counth = 0;
+
+    tbl->prdt[0].dba = static_cast<u32>(payload_phys & 0xFFFFFFFFu);
+    tbl->prdt[0].dbau = static_cast<u32>(payload_phys >> 32);
+    tbl->prdt[0].dbc = kSectorSize - 1; // byte count - 1
+
+    if (!IssueSlot0(p->regs))
+    {
+        core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "discard: slot0 failed lba=", lba);
+        return -1;
+    }
+    return 0;
+}
+
 constexpr BlockOps kAhciOps{
     .read = AhciBlockRead,
     .write = AhciBlockWrite,
-    .flush = nullptr, // AHCI device flush command not wired yet — landing alongside the FUA-write extension.
+    .flush = AhciBlockFlush,
+    .discard = AhciBlockDiscard,
 };
 
 void NamePort(Port& p, u32 idx)

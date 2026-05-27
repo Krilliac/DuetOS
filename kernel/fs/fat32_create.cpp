@@ -720,7 +720,18 @@ bool Fat32DeleteInRoot(const Volume* v, const char* name)
     internal::Fat32InvalidatePathCache();
     if (v == nullptr)
         return false;
-    return DeleteInDir(v, v->root_cluster, name);
+    if (!DeleteInDir(v, v->root_cluster, name))
+        return false;
+    // Flush the underlying device. Unlink is metadata-only but
+    // also frees a cluster chain — if the device's volatile write
+    // cache loses the FAT update but keeps the dir-entry deletion,
+    // we orphan the clusters; the reverse direction leaks the
+    // entry. A flush at the commit boundary closes the window.
+    // BlockDeviceFlush on a backend without a flush op is a no-op
+    // (RAM disk, partition over read-only parent), so this is
+    // cost-free for those paths.
+    (void)drivers::storage::BlockDeviceFlush(v->block_handle);
+    return true;
 }
 
 bool Fat32DeleteAtPath(const Volume* v, const char* path)
@@ -733,7 +744,10 @@ bool Fat32DeleteAtPath(const Volume* v, const char* path)
     char basename[64];
     if (!ResolveParentDir(*v, path, &parent_cluster, basename, sizeof(basename)))
         return false;
-    return DeleteInDir(v, parent_cluster, basename);
+    if (!DeleteInDir(v, parent_cluster, basename))
+        return false;
+    (void)drivers::storage::BlockDeviceFlush(v->block_handle);
+    return true;
 }
 
 bool Fat32MkdirAtPath(const Volume* v, const char* path)
@@ -792,7 +806,10 @@ bool Fat32RmdirAtPath(const Volume* v, const char* path)
         return false; // not empty
     // Reuse DeleteInDir — it frees the cluster chain AND clears
     // preceding LFN fragments, which is exactly what we need.
-    return DeleteInDir(v, parent_cluster, basename);
+    if (!DeleteInDir(v, parent_cluster, basename))
+        return false;
+    (void)drivers::storage::BlockDeviceFlush(v->block_handle);
+    return true;
 }
 
 namespace

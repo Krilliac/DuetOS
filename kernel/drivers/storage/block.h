@@ -88,6 +88,18 @@ struct BlockOps
     /// (fsync, journal close) so the device persists any
     /// in-flight writes before the call returns.
     i32 (*flush)(void* cookie);
+    /// Optional discard hook — tells the device that the given
+    /// LBA range no longer holds caller-meaningful data (file
+    /// unlink, freed cluster, freed inode block). On NVMe the
+    /// backend issues a Dataset Management Deallocate command
+    /// (opcode 0x09 with the AD bit); on AHCI it's DATA SET
+    /// MANAGEMENT with feature TRIM (0x06 / feature 0x01); on
+    /// virtio-blk it's VIRTIO_BLK_T_DISCARD. Optional because
+    /// non-SSD backends (RAM disk, spinning HDD without TRIM
+    /// support) have nothing useful to do. Absent discard = the
+    /// block layer returns 0 without calling through, mirroring
+    /// the flush contract. Returns 0 on success, -1 on failure.
+    i32 (*discard)(void* cookie, u64 lba, u32 count);
 };
 
 /// Register a backend. Returns a stable handle for the life of
@@ -155,6 +167,37 @@ inline ::duetos::core::Result<void> TryBlockDeviceWrite(u32 handle, u64 lba, u32
 /// drivers call this at commit points so the device persists
 /// before the call returns.
 i32 BlockDeviceFlush(u32 handle);
+
+/// Hint to the device that sectors [lba, lba+count) no longer
+/// hold caller-meaningful data. Called when a filesystem frees
+/// blocks (unlink, truncate-shrink, mkfs). The block layer
+/// bounds-checks and consults the write-guard before dispatch —
+/// a discard touching a guarded LBA is denied just like a write.
+/// Returns 0 on success (including no-op success when the
+/// backend doesn't implement discard), -1 on failure.
+///
+/// The discard is a HINT: every backend is free to drop it on
+/// the floor. Callers must NOT assume the bytes read back as
+/// zero (NVMe DSM Deallocate may return either the old bytes
+/// or all-zeros, controller's choice; AHCI TRIM is similar).
+i32 BlockDeviceDiscard(u32 handle, u64 lba, u32 count);
+
+/// True iff the backend behind `handle` exposes a non-null
+/// discard hook. Filesystem drivers query this to decide whether
+/// to attempt batch trim at all — saves the loop overhead on
+/// backends that wouldn't do anything with the hint.
+bool BlockDeviceSupportsDiscard(u32 handle);
+
+/// Saturating counters surfacing the block layer's discard
+/// activity since boot. `Issued` counts every accepted
+/// BlockDeviceDiscard call (including no-op-success on backends
+/// without a discard hook); `Sectors` counts the total sectors
+/// the FS layer asked us to deallocate. Useful for triage when
+/// a "did my fstrim actually run?" question comes up — and for
+/// the storage selftest to verify a hint round-trips at least
+/// once on every boot.
+u64 BlockDiscardIssuedCount();
+u64 BlockDiscardSectorsHinted();
 
 // -------------------------------------------------------------------
 // Write-guard for sensitive LBAs.

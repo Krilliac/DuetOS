@@ -58,15 +58,32 @@ inline constexpr u64 kBlkFeatureSegMax = 1ULL << 2;
 inline constexpr u64 kBlkFeatureGeometry = 1ULL << 4;
 inline constexpr u64 kBlkFeatureRo = 1ULL << 5;
 inline constexpr u64 kBlkFeatureBlkSize = 1ULL << 6;
+// VIRTIO_BLK_F_DISCARD (bit 13) — host accepts deallocate hints.
+// virtio 1.2 §5.2.5. Required for the SSD-style "unlink == TRIM"
+// path; QEMU's qcow2/raw backends both honour it on host SSDs.
+inline constexpr u64 kBlkFeatureDiscard = 1ULL << 13;
 
 namespace
 {
 
 // virtio_blk_outhdr layout (virtio 1.0 §5.2.6). 16 bytes.
-constexpr u32 kBlkTypeIn = 0;    // read from device
-constexpr u32 kBlkTypeOut = 1;   // write to device
-constexpr u32 kBlkTypeFlush = 4; // commit any in-flight writes
+constexpr u32 kBlkTypeIn = 0;       // read from device
+constexpr u32 kBlkTypeOut = 1;      // write to device
+constexpr u32 kBlkTypeFlush = 4;    // commit any in-flight writes
+constexpr u32 kBlkTypeDiscard = 11; // virtio 1.2 §5.2.6 — deallocate ranges
 constexpr u8 kBlkStatusOk = 0;
+
+// One virtio_blk_discard_write_zeroes range, 16 bytes per spec.
+// We issue one range per call, matching the NVMe/AHCI drivers'
+// v0 patterns — coalescing waits for a workload showing the
+// per-command overhead matters.
+struct BlkDiscardRange
+{
+    u64 sector; // starting LBA in 512-byte units
+    u32 num_sectors;
+    u32 flags; // bit 0 = unmap, bit 1 = write-zeroes (we leave both clear)
+};
+static_assert(sizeof(BlkDiscardRange) == 16, "virtio-blk discard range descriptor must be 16 bytes");
 
 struct BlkReqHdr
 {
@@ -79,7 +96,8 @@ struct DeviceState
 {
     bool up;
     bool read_only;
-    u8 _pad[6];
+    bool discard;
+    u8 _pad[5];
 
     VirtioPciLayout layout;
     VirtioQueue q;
@@ -247,10 +265,77 @@ i32 VirtioBlkBlockFlush(void* cookie)
     return -1;
 }
 
+// VIRTIO_BLK_T_DISCARD with a single 16-byte range descriptor.
+// Chain shape: header (driver-write 16 B) -> range payload
+// (driver-write 16 B) -> status (device-write 1 B). The range
+// payload reuses the shared scratch page at offset 32 — past
+// both the header (0..15) and the status byte (16) — so the
+// existing single-in-flight serialisation still covers it.
+i32 VirtioBlkBlockDiscard(void* cookie, u64 lba, u32 count)
+{
+    auto* dev = static_cast<DeviceState*>(cookie);
+    if (dev == nullptr || !dev->up)
+        return -1;
+    if (count == 0)
+        return -1;
+    if (!dev->discard)
+        return 0; // Hint dropped — caller treats this as success.
+    if (dev->read_only)
+        return -1;
+
+    duetos::sched::MutexLock(&dev->req_lock);
+
+    auto* hdr = reinterpret_cast<BlkReqHdr*>(dev->hdr_virt);
+    hdr->type = kBlkTypeDiscard;
+    hdr->reserved = 0;
+    hdr->sector = 0; // ignored for discard — range is in the payload
+    u8* status = dev->hdr_virt + 16;
+    *status = 0xFF;
+
+    auto* range = reinterpret_cast<BlkDiscardRange*>(dev->hdr_virt + 32);
+    range->sector = lba;
+    range->num_sectors = count;
+    range->flags = 0;
+
+    VirtqDesc* d = const_cast<VirtqDesc*>(dev->q.desc);
+    d[0].addr = dev->hdr_phys;
+    d[0].len = 16;
+    d[0].flags = kVirtqDescNext;
+    d[0].next = 1;
+    d[1].addr = dev->hdr_phys + 32;
+    d[1].len = sizeof(BlkDiscardRange);
+    d[1].flags = kVirtqDescNext;
+    d[1].next = 2;
+    d[2].addr = dev->hdr_phys + 16;
+    d[2].len = 1;
+    d[2].flags = kVirtqDescWrite;
+    d[2].next = 0;
+
+    VirtioQueuePublish(&dev->layout, &dev->q, /*desc_head=*/0);
+    for (u32 spin = 0; spin < 5000000; ++spin)
+    {
+        u32 head = 0;
+        u32 used_len = 0;
+        if (VirtioQueueTryPop(&dev->q, &head, &used_len))
+        {
+            const i32 rc = (*status == kBlkStatusOk) ? 0 : -1;
+            if (rc != 0)
+                KLOG_WARN_V("drivers/virtio/blk", "discard completed non-OK", static_cast<u64>(*status));
+            duetos::sched::MutexUnlock(&dev->req_lock);
+            return rc;
+        }
+        asm volatile("pause" ::: "memory");
+    }
+    KLOG_WARN("drivers/virtio/blk", "discard poll timed out");
+    duetos::sched::MutexUnlock(&dev->req_lock);
+    return -1;
+}
+
 constinit const duetos::drivers::storage::BlockOps kBlkOps = {
     /*.read = */ &VirtioBlkBlockRead,
     /*.write = */ &VirtioBlkBlockWrite,
     /*.flush = */ &VirtioBlkBlockFlush,
+    /*.discard = */ &VirtioBlkBlockDiscard,
 };
 
 } // namespace
@@ -270,7 +355,8 @@ bool VirtioBlkProbe(const VirtioPciLayout& L)
     const u64 dev_features =
         (static_cast<u64>(layout.device_features_hi) << 32) | static_cast<u64>(layout.device_features_lo);
     u64 want = kFeatureVersion1;
-    want |= dev_features & (kBlkFeatureSegMax | kBlkFeatureGeometry | kBlkFeatureRo | kBlkFeatureBlkSize);
+    want |= dev_features &
+            (kBlkFeatureSegMax | kBlkFeatureGeometry | kBlkFeatureRo | kBlkFeatureBlkSize | kBlkFeatureDiscard);
 
     if (!VirtioNegotiate(&layout, want))
     {
@@ -331,6 +417,7 @@ bool VirtioBlkProbe(const VirtioPciLayout& L)
     g_blk.sector_size = sector_size;
     g_blk.sector_count = capacity;
     g_blk.read_only = ((want & kBlkFeatureRo) != 0);
+    g_blk.discard = ((want & kBlkFeatureDiscard) != 0);
     g_blk.up = true;
 
     duetos::drivers::storage::BlockDesc desc{};

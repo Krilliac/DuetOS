@@ -214,6 +214,28 @@ i64 Fat32CreateInRoot(const Volume* v, const char* name, const void* buf, u64 le
 /// be inconsistent — v0 has no journaling.
 bool Fat32DeleteInRoot(const Volume* v, const char* name);
 
+/// Flush the volume's underlying block device. Routes through
+/// BlockDeviceFlush, which translates to an NVMe Flush or
+/// AHCI FLUSH CACHE EXT on real hardware so writes since the
+/// last flush are guaranteed to be on non-volatile media. v0
+/// destructive operations (Delete / Truncate-shrink) call this
+/// internally on success so a power-cut after the call cannot
+/// leave the on-disk image in a "FAT updated but cache lost"
+/// state. Userland fsync() will route here too once it lands.
+/// Returns true on success, false if the device refuses the
+/// flush (real-disk error, controller wedge).
+bool Fat32Sync(const Volume* v);
+
+/// Issue a batch TRIM/discard across the volume's free clusters.
+/// Walks the FAT looking for entry == 0 (free) and hands every
+/// contiguous run of free clusters to BlockDeviceDiscard.
+/// Useful as the "fstrim" command's backend on backends that
+/// support discard (NVMe / AHCI / virtio-blk SSDs). v0 caps the
+/// walk at 1 M FAT entries — well above any image we'd run on
+/// commodity hardware — to bound the work. Returns the number
+/// of clusters hinted, or -1 on I/O error walking the FAT.
+i64 Fat32Trim(const Volume* v);
+
 /// Truncate a root-dir file to `new_size` bytes. Three cases:
 ///   - new_size == current: no-op, returns 0.
 ///   - new_size >  current: equivalent to Fat32AppendInRoot of

@@ -56,6 +56,28 @@ the standard manner. The driver reads the FAT in 4 KiB chunks
 See [Roadmap](../reference/Roadmap.md) for the cluster-chain
 growth work.
 
+## Durability and TRIM
+
+`Fat32Sync(volume)` routes `BlockDeviceFlush` through to the
+underlying NVMe/AHCI/virtio-blk backend so a successful return
+means metadata is on non-volatile media, not just in the
+controller's volatile write cache. `Fat32DeleteAtPath` and
+`Fat32TruncateAtPath` call this internally on success, so a
+power-cut after a successful unlink can no longer leave the
+volume in a "FAT updated but dir-entry deletion lost" half-state.
+
+`Fat32Trim(volume)` walks the FAT, coalesces contiguous runs of
+free clusters, and hands each run to `BlockDeviceDiscard`. The
+underlying backend turns this into an NVMe DSM Deallocate / AHCI
+DATA SET MANAGEMENT TRIM / virtio-blk DISCARD command, depending
+on which device is mounted. Drives the `fstrim <volume-index>`
+shell command.
+
+`FreeClusterChain` coalesces just-freed clusters into the
+longest contiguous run and discards each before returning, so
+even an automatic `unlink` issues the trim hint on SSDs without
+the caller having to know.
+
 ## Related Pages
 
 - [VFS](VFS.md)

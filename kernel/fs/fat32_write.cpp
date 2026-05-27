@@ -285,18 +285,75 @@ bool FindFreeSlotInDir(const Volume& v, u32 first_cluster, u64* out_lba, u32* ou
 // Free an entire cluster chain starting at `first_cluster`. Each
 // FAT entry is zeroed (in both mirrors). Bounded at 65536
 // clusters so a corrupted self-loop can't spin forever.
+//
+// On backends that expose a discard hook (NVMe / AHCI / virtio-blk
+// SSDs), each freed cluster's LBA range is coalesced into the
+// longest run of physically-contiguous freed clusters and the
+// run is handed to BlockDeviceDiscard so the controller can
+// deallocate it. Spinning HDDs (no discard hook) get the no-op
+// success path documented in block.h — they pay no overhead.
+//
+// Coalescing runs by "next == current + 1" (cluster numbers,
+// which translate to contiguous LBA spans through
+// data_start_sector) avoids paying per-cluster command overhead
+// on the common file-with-contiguous-allocation case while
+// still being correct for fragmented files (a discontinuity
+// just emits the previous run and starts a new one).
 bool FreeClusterChain(const Volume& v, u32 first_cluster)
 {
+    const bool supports_discard = drivers::storage::BlockDeviceSupportsDiscard(v.block_handle);
     u32 cluster = first_cluster;
+    u32 run_start = 0;
+    u32 run_len = 0;
+    auto flush_run = [&]()
+    {
+        if (run_len == 0 || !supports_discard)
+        {
+            run_len = 0;
+            return;
+        }
+        const u64 first_lba =
+            static_cast<u64>(v.data_start_sector) + static_cast<u64>(run_start - 2) * v.sectors_per_cluster;
+        const u32 sectors = run_len * v.sectors_per_cluster;
+        // Discard is a HINT — a failure here is logged but does
+        // not abort the free path; the FAT entries are still
+        // zeroed, the clusters are still reclaimable, and the
+        // device just loses the trim hint.
+        (void)drivers::storage::BlockDeviceDiscard(v.block_handle, first_lba, sectors);
+        run_len = 0;
+    };
+
     for (u32 step = 0; step < 65536; ++step)
     {
         if (cluster < 2 || cluster >= 0x0FFFFFF8u)
+        {
+            flush_run();
             return true;
+        }
         const u32 next = ReadFatEntry(v, cluster);
         if (!WriteFatEntry(v, cluster, 0))
+        {
+            flush_run();
             return false;
+        }
+        if (run_len == 0)
+        {
+            run_start = cluster;
+            run_len = 1;
+        }
+        else if (cluster == run_start + run_len)
+        {
+            ++run_len;
+        }
+        else
+        {
+            flush_run();
+            run_start = cluster;
+            run_len = 1;
+        }
         cluster = next;
     }
+    flush_run();
     return true;
 }
 
@@ -1118,7 +1175,10 @@ i64 Fat32TruncateInRoot(const Volume* v, const char* name, u64 new_size)
     internal::Fat32InvalidatePathCache();
     if (v == nullptr)
         return -1;
-    return TruncateInDir(v, v->root_cluster, name, new_size);
+    const i64 rc = TruncateInDir(v, v->root_cluster, name, new_size);
+    if (rc >= 0)
+        (void)drivers::storage::BlockDeviceFlush(v->block_handle);
+    return rc;
 }
 
 i64 Fat32TruncateAtPath(const Volume* v, const char* path, u64 new_size)
@@ -1131,7 +1191,85 @@ i64 Fat32TruncateAtPath(const Volume* v, const char* path, u64 new_size)
     char basename[64];
     if (!ResolveParentDir(*v, path, &parent_cluster, basename, sizeof(basename)))
         return -1;
-    return TruncateInDir(v, parent_cluster, basename, new_size);
+    const i64 rc = TruncateInDir(v, parent_cluster, basename, new_size);
+    if (rc >= 0)
+        (void)drivers::storage::BlockDeviceFlush(v->block_handle);
+    return rc;
+}
+
+bool Fat32Sync(const Volume* v)
+{
+    if (v == nullptr)
+        return false;
+    return drivers::storage::BlockDeviceFlush(v->block_handle) == 0;
+}
+
+i64 Fat32Trim(const Volume* v)
+{
+    if (v == nullptr)
+        return -1;
+    // Backend can't honour the hint — return 0 hinted, not an
+    // error. fstrim on a spinning HDD or an AHCI HDD that doesn't
+    // implement TRIM is legitimately a no-op.
+    if (!drivers::storage::BlockDeviceSupportsDiscard(v->block_handle))
+        return 0;
+
+    Fat32Guard guard;
+    // Walk the FAT. Coalesce contiguous runs of free clusters
+    // (entry == 0) into one BlockDeviceDiscard per run. The
+    // FAT is read via ReadFatEntry (which reuses g_scratch under
+    // the mutex), so this is safe under the same serialisation
+    // as the rest of the write paths.
+    const u32 cluster_count = ((v->total_sectors - v->data_start_sector) / v->sectors_per_cluster) + 2;
+    // Sanity cap so a wildly oversized BPB doesn't park us here
+    // forever — 1 M clusters is roughly a 4 GiB volume at 4 KiB
+    // clusters, well past anything we'd run today.
+    const u32 effective_max = (cluster_count > 1'048'576u) ? 1'048'576u : cluster_count;
+
+    u64 hinted = 0;
+    u32 run_start = 0;
+    u32 run_len = 0;
+
+    auto flush_run = [&]()
+    {
+        if (run_len == 0)
+            return;
+        const u64 first_lba =
+            static_cast<u64>(v->data_start_sector) + static_cast<u64>(run_start - 2) * v->sectors_per_cluster;
+        const u32 sectors = run_len * v->sectors_per_cluster;
+        (void)drivers::storage::BlockDeviceDiscard(v->block_handle, first_lba, sectors);
+        hinted += run_len;
+        run_len = 0;
+    };
+
+    for (u32 c = 2; c < effective_max; ++c)
+    {
+        const u32 entry = ReadFatEntry(*v, c);
+        if (entry == 0)
+        {
+            if (run_len == 0)
+            {
+                run_start = c;
+                run_len = 1;
+            }
+            else if (c == run_start + run_len)
+            {
+                ++run_len;
+            }
+            else
+            {
+                flush_run();
+                run_start = c;
+                run_len = 1;
+            }
+        }
+        else
+        {
+            flush_run();
+        }
+    }
+    flush_run();
+    return static_cast<i64>(hinted);
 }
 
 } // namespace duetos::fs::fat32

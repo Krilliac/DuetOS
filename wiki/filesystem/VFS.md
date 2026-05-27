@@ -93,7 +93,36 @@ See [Capabilities](../security/Capabilities.md).
   are not surfaced.** DuetFS resolves symlinks with cycle detection
   capped at 8 hops.
 - **No file caching layer** between VFS and FS backends. Each
-  backend serialises against the block device directly.
+  backend serialises against the block device directly. Tracked
+  in [Roadmap.md](../reference/Roadmap.md) — Haiku-style
+  transactional `block_cache` is the next slice.
+
+## Durability path (2026-05-27)
+
+For "data survives a power cut" semantics the chain is:
+
+```
+FAT32 / DuetFS / ext4 commit point
+        |
+[ BlockDeviceFlush(handle) ]               kernel/fs/.../*.cpp
+        |
+[ Block layer dispatch ]                   kernel/drivers/storage/block.cpp
+        |
+[ NVMe Flush 0x00 / AHCI FLUSH CACHE EXT 0xEA / virtio-blk T_FLUSH ]
+```
+
+Every backend with a possible volatile write cache (every real
+SSD, every QEMU virtio-blk over qcow2/raw) now wires the flush
+op. `BlockDeviceFlush` on a backend with `flush == nullptr` is a
+deliberate no-op success — only legitimate for the RAM-backed
+test device, partition views (which forward to the parent), and
+read-only mounts.
+
+`BlockDeviceDiscard` rounds out the SSD-friendly tier:
+`Fat32Delete*`/`Fat32Truncate*`/`FreeClusterChain` all hand the
+freed-cluster LBAs to the block layer, which dispatches via
+NVMe DSM Deallocate / AHCI DSM TRIM / virtio-blk DISCARD. The
+`fstrim <volume>` shell command exposes the batch path.
 
 ## Related Pages
 
