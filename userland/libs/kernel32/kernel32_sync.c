@@ -698,29 +698,41 @@ __declspec(dllexport) BOOL ReleaseSemaphore(HANDLE h, long releaseCount, long* l
 /* ------------------------------------------------------------------
  * WaitForSingleObject — dispatch by handle range
  *
- * Mutex (0x200..0x207)    -> SYS_MUTEX_WAIT (26)
- * Event (0x300..0x307)    -> SYS_EVENT_WAIT (33)
- * Semaphore (0x500..0x507) -> SYS_SEM_WAIT (53)
- * Thread (0x400..0x407)   -> SYS_THREAD_WAIT (54)
+ * Mutex (0x200..0x23F)    -> SYS_MUTEX_WAIT (26)
+ * Event (0x300..0x33F)    -> SYS_EVENT_WAIT (33)
+ * Semaphore (0x500..0x53F) -> SYS_SEM_WAIT (53)
+ * Thread (0x400..0x43F)   -> SYS_THREAD_WAIT (54)
  * Anything else            -> WAIT_OBJECT_0 (0) — pseudo-signal
  *                             (matches the flat-stub fallback)
+ *
+ * The per-type span is WIN32_HANDLE_CAP_PER_TYPE = the kernel's
+ * kHandleTableCapacity (64). It was 8, which silently routed any
+ * handle past the 8th of its type to the pseudo-signal else-branch:
+ * WaitForSingleObject returned WAIT_OBJECT_0 without acquiring, so a
+ * later ReleaseMutex hit the kernel's non-owner reject. The
+ * hello-winapi stress loop creates 4 mutexes that land at
+ * 0x205/0x207/0x209/0x20b, and 0x209/0x20b tripped this. The span
+ * stays below the 0x100 base spacing so the four ranges are disjoint.
+ * Freestanding DLL — can't include the kernel header, so the value is
+ * mirrored here; keep it in sync with ipc::kHandleTableCapacity.
  * ------------------------------------------------------------------ */
 
 #define WAIT_OBJECT_0 0u
 #define WAIT_TIMEOUT 0x102u
+#define WIN32_HANDLE_CAP_PER_TYPE 0x40u /* = kernel kHandleTableCapacity (64) */
 
 __declspec(dllexport) DWORD WaitForSingleObject(HANDLE h, DWORD timeout_ms)
 {
     unsigned long long handle = (unsigned long long)h;
     long long rv;
     long long syscall_num;
-    if (handle >= 0x200 && handle < 0x208)
+    if (handle >= 0x200 && handle < 0x200 + WIN32_HANDLE_CAP_PER_TYPE)
         syscall_num = 26; /* SYS_MUTEX_WAIT */
-    else if (handle >= 0x300 && handle < 0x308)
+    else if (handle >= 0x300 && handle < 0x300 + WIN32_HANDLE_CAP_PER_TYPE)
         syscall_num = 33; /* SYS_EVENT_WAIT */
-    else if (handle >= 0x500 && handle < 0x508)
+    else if (handle >= 0x500 && handle < 0x500 + WIN32_HANDLE_CAP_PER_TYPE)
         syscall_num = 53; /* SYS_SEM_WAIT */
-    else if (handle >= 0x400 && handle < 0x408)
+    else if (handle >= 0x400 && handle < 0x400 + WIN32_HANDLE_CAP_PER_TYPE)
         syscall_num = 54; /* SYS_THREAD_WAIT */
     else
         return WAIT_OBJECT_0; /* Unknown handle — pseudo-signal. */

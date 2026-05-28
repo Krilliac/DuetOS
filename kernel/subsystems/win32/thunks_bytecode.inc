@@ -2466,20 +2466,31 @@
     // Dispatch order is still "cheapest first": mutex, event,
     // thread, semaphore. Unknown handles fall through to the
     // pseudo-signaled path for backward compatibility.
+    //
+    // Each type's range width is `cmp rax, 64` = kHandleTableCapacity
+    // (handle_table.h). It was 8 originally, which silently mis-routed
+    // any handle past the 8th of its type (e.g. mutex 0x208..0x23F) to
+    // the .pseudo fast-success path: WaitForSingleObject returned
+    // WAIT_OBJECT_0 WITHOUT acquiring, so every following ReleaseMutex
+    // hit the kernel's non-owner reject — a debug-log flood that
+    // soft-locked the hello-winapi stress loop (which creates 4 mutexes
+    // landing at 0x205/0x207/0x209/0x20b). The static_assert in
+    // thunks.cpp pins this width to the cap. Width (64) stays well below
+    // the 0x100 base spacing, so the four ranges remain disjoint.
     0x57,                               // 0xA47 push rdi
     0x56,                               // 0xA48 push rsi
     0x48, 0x89, 0xC8,                   // 0xA49 mov rax, rcx
     0x48, 0x2D, 0x00, 0x02, 0x00, 0x00, // 0xA4C sub rax, 0x200
-    0x48, 0x83, 0xF8, 0x08,             // 0xA52 cmp rax, 8
+    0x48, 0x83, 0xF8, 0x40,             // 0xA52 cmp rax, 64 (= kHandleTableCapacity)
     0x72, 0x29,                         // 0xA56 jb .mutex (+41 -> 0xA81)
     0x48, 0x2D, 0x00, 0x01, 0x00, 0x00, // 0xA58 sub rax, 0x100 (H - 0x300)
-    0x48, 0x83, 0xF8, 0x08,             // 0xA5E cmp rax, 8
+    0x48, 0x83, 0xF8, 0x40,             // 0xA5E cmp rax, 64 (= kHandleTableCapacity)
     0x72, 0x2D,                         // 0xA62 jb .event (+45 -> 0xA91)
     0x48, 0x2D, 0x00, 0x01, 0x00, 0x00, // 0xA64 sub rax, 0x100 (H - 0x400)
-    0x48, 0x83, 0xF8, 0x08,             // 0xA6A cmp rax, 8
+    0x48, 0x83, 0xF8, 0x40,             // 0xA6A cmp rax, 64 (= kHandleTableCapacity)
     0x72, 0x31,                         // 0xA6E jb .thread (+49 -> 0xAA1)
     0x48, 0x2D, 0x00, 0x01, 0x00, 0x00, // 0xA70 sub rax, 0x100 (H - 0x500)
-    0x48, 0x83, 0xF8, 0x08,             // 0xA76 cmp rax, 8
+    0x48, 0x83, 0xF8, 0x40,             // 0xA76 cmp rax, 64 (= kHandleTableCapacity)
     0x72, 0x35,                         // 0xA7A jb .sem (+53 -> 0xAB1)
     // .pseudo: unknown handle -> WAIT_OBJECT_0
     0x31, 0xC0, // 0xA7C xor eax, eax
