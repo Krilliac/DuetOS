@@ -37,8 +37,7 @@ using duetos::drivers::video::WindowSetContentDraw;
 constexpr u32 kMaxFiles = 64; // ~64 BMPs in the root tracked at once
 constexpr u32 kNameCap = 16;  // 8.3 = 12 chars + NUL, with slack
 constexpr u32 kStatusCap = 96;
-constexpr u32 kRowH = 10;      // 8x8 glyph + 2 px padding
-constexpr u32 kHeaderRows = 2; // status line + filename / pos line
+constexpr u32 kRowH = 10; // 8x8 glyph + 2 px padding
 
 // BMP-format constants (BITMAPFILEHEADER + BITMAPINFOHEADER) +
 // header parser now live in `kernel/util/bmp.h`. The aliases
@@ -1217,7 +1216,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
     // Image canvas band — between (status + header) at the top
     // and the AppLabel footer at the bottom. Mirrors the legacy
-    // `reserved = kRowH * kHeaderRows + 2` carve-out the raw
+    // `reserved = kRowH * 2 + 2` carve-out the raw
     // FramebufferDrawString header used; the AppLabel header /
     // status combine to the same vertical reach
     // (kIvHeaderH + kIvStatusH = kRowH + kRowH + 2), and we

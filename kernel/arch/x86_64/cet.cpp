@@ -103,8 +103,11 @@ constexpr u64 kCr4Cet = 1ull << 23;
 
 constexpr u64 kSCetShStkEn = 1ull << 0; // SH_STK_EN
 constexpr u64 kSCetWrShStk = 1ull << 1; // WR_SHSTK_EN
-constexpr u64 kSCetEndbrEn = 1ull << 2; // ENDBR_EN
-constexpr u64 kSCetNoTrack = 1ull << 4; // NO_TRACK_EN
+// IBT bits are unused under -fcf-protection=none builds (the current
+// default; see the DUETOS_KERNEL_HAS_ENDBR-gated branch below). Keep
+// them in source as canonical MSR bit-position references.
+[[maybe_unused]] constexpr u64 kSCetEndbrEn = 1ull << 2; // ENDBR_EN
+[[maybe_unused]] constexpr u64 kSCetNoTrack = 1ull << 4; // NO_TRACK_EN
 
 // Use the kernel-wide ReadCr4 from arch/cpu.h — a local copy
 // here would shadow the namespace version and cause an

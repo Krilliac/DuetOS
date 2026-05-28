@@ -72,7 +72,6 @@ constexpr u32 kNcToolbarBtnH = 18U;
 constexpr u32 kNcToolbarBtnGap = 4U;
 constexpr u32 kNcToolbarPadX = 4U;
 constexpr u32 kNcToolbarPadY = 2U;
-constexpr u32 kNcActionBtnCount = 1U;
 constexpr u32 kNcHeaderH = kRowH + 4U;
 constexpr u32 kNcFooterH = kRowH;
 

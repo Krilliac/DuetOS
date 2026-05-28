@@ -251,11 +251,6 @@ inline u16 LoadU16Be(const u8* p)
     return (u16(p[0]) << 8) | u16(p[1]);
 }
 
-inline u32 LoadU24Be(const u8* p)
-{
-    return (u32(p[0]) << 16) | (u32(p[1]) << 8) | u32(p[2]);
-}
-
 } // namespace
 
 // All five TLS parser entry points below delegate byte parsing
