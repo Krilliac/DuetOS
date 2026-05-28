@@ -67,12 +67,12 @@ constinit PerCpu g_bsp_percpu = {
     .scheduler_ready = false, // flipped to true at the end of SchedStartIdle / SchedEnterOnAp
     ._pad_sched_ready = {},
     .this_cpu_selftest_counter = 0,
-    .critnest = 0,                  // steady-state: no critical section active
-    .deferred_preempt = 0,          // no pending preempt at boot
-    .critical_enter_count = 0,      // stats — bumped by CriticalEnter
-    .critical_exit_count = 0,       // stats — bumped by CriticalExit
-    .critical_deferred_count = 0,   // stats — bumped on deferred preempt
-    .critical_max_nesting = 0,      // high-water mark across the boot
+    .critnest = 0,                // steady-state: no critical section active
+    .deferred_preempt = 0,        // no pending preempt at boot
+    .critical_enter_count = 0,    // stats — bumped by CriticalEnter
+    .critical_exit_count = 0,     // stats — bumped by CriticalExit
+    .critical_deferred_count = 0, // stats — bumped on deferred preempt
+    .critical_max_nesting = 0,    // high-water mark across the boot
     ._pad_critical = {},
 };
 

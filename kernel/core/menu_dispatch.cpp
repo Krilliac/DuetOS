@@ -254,8 +254,7 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
         break;
     }
     case 8: // REFRESH DESKTOP — recompose the wallpaper + windows.
-        duetos::drivers::video::DesktopCompose(duetos::drivers::video::ThemeCurrent().desktop_bg,
-                                               nullptr);
+        duetos::drivers::video::DesktopCompose(duetos::drivers::video::ThemeCurrent().desktop_bg, nullptr);
         duetos::drivers::video::ConsoleWriteln("-> DESKTOP REFRESHED");
         break;
     case 9: // SHOW DESKTOP — toggle minimize-all / restore.
