@@ -280,16 +280,18 @@ u64 AddressSpaceProbePteRaw(const AddressSpace* as, u64 virt);
 /// page in the child, copies contents through the kernel
 /// direct-map alias, and maps the new frame in the child with
 /// the SAME PTE flags the parent's leaf PTE carried (preserves
-/// W^X — code stays RX, data stays RW + NX). Returns nullptr on
-/// allocation failure (and rolls back any partially-installed
-/// child mappings via AddressSpaceRelease). Does NOT cover
+/// W^X — code stays RX, data stays RW + NX). Returns
+/// `Err{ErrorCode::InvalidArgument}` if `parent` is null, or
+/// `Err{ErrorCode::OutOfMemory}` on allocation failure (and rolls
+/// back any partially-installed child mappings via
+/// AddressSpaceRelease before returning the error). Does NOT cover
 /// borrowed-page mappings (Win32 sections) — they aren't in
 /// the regions ledger; callers that need them must dup them
 /// explicitly.
 ///
 /// The caller owns the returned AS — must AddressSpaceRelease
 /// it when done.
-AddressSpace* AddressSpaceFork(const AddressSpace* parent);
+core::Result<AddressSpace*> AddressSpaceFork(const AddressSpace* parent);
 
 /// Clear every user-region mapping in `as` without releasing
 /// the AS itself. Walks `regions[0..region_count)`, unmaps each

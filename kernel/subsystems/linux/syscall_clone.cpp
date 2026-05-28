@@ -159,7 +159,8 @@ i64 DoFork()
     // Allocate child AS as a deep copy of the parent. Pages are
     // duplicated frame-by-frame with parent PTE flags preserved
     // (W^X stays intact). No COW yet — sub-GAP.
-    mm::AddressSpace* child_as = mm::AddressSpaceFork(parent->as);
+    auto child_as_r = mm::AddressSpaceFork(parent->as);
+    mm::AddressSpace* child_as = child_as_r.has_value() ? child_as_r.value() : nullptr;
     if (child_as == nullptr)
         return kENOMEM;
 

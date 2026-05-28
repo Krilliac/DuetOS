@@ -586,13 +586,16 @@ u64 AddressSpaceProbePteRaw(const AddressSpace* as, u64 virt)
     return *pte;
 }
 
-AddressSpace* AddressSpaceFork(const AddressSpace* parent)
+core::Result<AddressSpace*> AddressSpaceFork(const AddressSpace* parent)
 {
     if (parent == nullptr)
-        return nullptr;
+        return core::Err{core::ErrorCode::InvalidArgument};
+    // Not RESULT_TRY_ASSIGN: clang-format misparses a pointer-typed
+    // macro arg as multiplication (`AddressSpace * child`). The
+    // explicit unwrap keeps the file's `Type* var` pointer style.
     auto child_r = AddressSpaceCreate(parent->frame_budget);
     if (!child_r)
-        return nullptr;
+        return core::Err{child_r.error()};
     AddressSpace* child = child_r.value();
     for (u16 i = 0; i < parent->region_count; ++i)
     {
@@ -619,7 +622,7 @@ AddressSpace* AddressSpaceFork(const AddressSpace* parent)
         if (child_frame == kNullFrame)
         {
             AddressSpaceRelease(child);
-            return nullptr;
+            return core::Err{core::ErrorCode::OutOfMemory};
         }
         // Copy page contents through the direct-map alias.
         const void* src = PhysToVirt(parent_frame);
