@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/result.h"
 #include "util/types.h"
 
 /*
@@ -50,13 +51,16 @@ constexpr u32 Base64DecodedMaxLen(u32 encoded_len)
 /// equal to `Base64EncodedLen(len)` on success).
 u32 Base64Encode(const u8* in, u32 len, char* out);
 
-/// Decode a base64-encoded string into raw bytes. Returns:
-///   - `out_bytes` set to the decoded length on success and `true`.
-///   - `false` if the input contains an invalid character, has a
-///     bad padding configuration, or the output capacity is too
-///     small. `*out_bytes` is unspecified on failure.
+/// Decode a base64-encoded string into raw bytes. On success the
+/// returned `Result<u32>` carries the decoded length (the number
+/// of bytes actually written into `out`). Errors:
+///   - `ErrorCode::InvalidArgument` — null `in` or `out`.
+///   - `ErrorCode::Corrupt` — invalid character, bad padding
+///     configuration, or truncated (non-4-aligned) input.
+///   - `ErrorCode::BufferTooSmall` — `out_capacity` is too small
+///     for the decoded data.
 /// Whitespace inside `in` is silently skipped (MIME tolerance).
-bool Base64Decode(const char* in, u32 in_len, u8* out, u32 out_capacity, u32* out_bytes);
+::duetos::core::Result<u32> Base64Decode(const char* in, u32 in_len, u8* out, u32 out_capacity);
 
 void Base64SelfTest();
 
