@@ -1,6 +1,7 @@
 #include "subsystems/win32/thunks.h"
 
 #include "arch/x86_64/serial.h"
+#include "ipc/handle_table.h"
 #include "subsystems/win32/proc_env.h"
 #include "util/compiler.h"
 
@@ -206,6 +207,18 @@ constexpr u32 kOffReleaseSemaphore = 0x9CC;             // 29 bytes (saves rdi+r
 // === real thread-handle wait + 4-range WaitForSingleObject v4.
 constexpr u32 kOffWaitForObj4 = 0xA47; // 122 bytes
                                        // (v3 + thread range 0x400..0x407 → SYS_THREAD_WAIT)
+
+// The WaitForSingleObject v4 thunk routes each handle type by a fixed
+// `cmp rax, 64` range check (thunks_bytecode.inc, offsets 0xA52/0xA5E/
+// 0xA6A/0xA76). That width MUST cover the full per-type handle space —
+// kHandleTableCapacity slots — or handles past it silently mis-route to
+// the pseudo-signaled fast-success path (the hello-winapi mutex
+// soft-lockup). The width also has to fit an imm8 unsigned compare
+// (< 0x80) and stay below the 0x100 type-base spacing for disjointness.
+static_assert(::duetos::ipc::kHandleTableCapacity <= 64,
+              "WaitForSingleObject v4 thunk routes only the first 64 handles per type; raising "
+              "kHandleTableCapacity past 64 requires widening the four `cmp rax, 64` immediates in "
+              "thunks_bytecode.inc (and re-checking imm8 fit + range disjointness).");
 
 // === real GetStartupInfo stub.
 constexpr u32 kOffGetStartupInfo = 0xAC1; // 24 bytes (zero-fill + cb=104)
