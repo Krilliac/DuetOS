@@ -855,7 +855,7 @@ bool DecodeTga(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const c
         return false;
     }
     u32* inter = static_cast<u32*>(inter_alloc);
-    const bool ok = duetos::util::TgaDecodeUncompressed(file_buf, static_cast<u32>(read), info, inter);
+    const bool ok = duetos::util::TgaDecodeUncompressed(file_buf, static_cast<u32>(read), info, inter).has_value();
     mm::KFree(file_alloc);
     if (!ok)
     {
