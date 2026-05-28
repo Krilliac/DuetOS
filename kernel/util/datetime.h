@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/result.h"
 #include "util/types.h"
 
 /*
@@ -113,9 +114,11 @@ u32 FormatIso8601(const DateTime& dt, char* out, u32 out_cap);
 ///
 /// `len` is the number of bytes available at `s` (the parser
 /// does not require NUL termination but stops at the first
-/// invalid byte). Returns true on success and writes through
-/// `out`. Returns false on any malformed input.
-bool ParseIso8601(const char* s, u32 len, DateTime& out);
+/// invalid byte). On success writes through `out` and returns
+/// `{}`. Returns `ErrorCode::InvalidArgument` on any malformed
+/// input (bad length, non-digit where a digit is required, bad
+/// separator, out-of-range field, malformed timezone offset).
+::duetos::core::Result<void> ParseIso8601(const char* s, u32 len, DateTime& out);
 
 void DateTimeSelfTest();
 
