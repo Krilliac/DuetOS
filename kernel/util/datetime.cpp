@@ -441,7 +441,8 @@ void DateTimeSelfTest()
         // No-Z suffix.
         KASSERT(ParseIso8601("2026-05-03T14:07:30", 19, out).has_value(), "util/datetime", "no-Z parse failed");
         // Fractional seconds.
-        KASSERT(ParseIso8601("2026-05-03T14:07:30.123Z", 24, out).has_value(), "util/datetime", "frac-sec parse failed");
+        KASSERT(ParseIso8601("2026-05-03T14:07:30.123Z", 24, out).has_value(), "util/datetime",
+                "frac-sec parse failed");
         KASSERT(out.second == 30, "util/datetime", "frac-sec second field wrong");
         // Numeric UTC offsets are normalised into the UTC DateTime shape.
         KASSERT(ParseIso8601("2026-05-03T14:07:30+02:30", 25, out).has_value(), "util/datetime",

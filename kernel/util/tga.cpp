@@ -313,8 +313,7 @@ void TgaSelfTest()
                 "encode header parse wrong");
         KASSERT(info.top_down, "util/tga", "encode must be top-down");
         u32 round[4] = {};
-        KASSERT(TgaDecodeUncompressed(enc, n, info, round).has_value(), "util/tga",
-                "encode round-trip decode failed");
+        KASSERT(TgaDecodeUncompressed(enc, n, info, round).has_value(), "util/tga", "encode round-trip decode failed");
         for (u32 i = 0; i < 4; ++i)
             KASSERT(round[i] == mosaic[i], "util/tga", "encode round-trip pixel mismatch");
     }
