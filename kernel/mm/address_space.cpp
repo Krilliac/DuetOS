@@ -101,11 +101,12 @@ inline void Invlpg(u64 v)
 // frame ceiling must kill that process, never halt the kernel.
 u64* AllocateTable()
 {
-    const PhysAddr frame = AllocateFrame();
-    if (frame == kNullFrame)
+    auto frame_r = TryAllocateFrame();
+    if (!frame_r)
     {
         return nullptr;
     }
+    const PhysAddr frame = frame_r.value();
     auto* table = static_cast<u64*>(PhysToVirt(frame));
     for (u64 i = 0; i < kEntriesPerTable; ++i)
     {
@@ -258,18 +259,19 @@ core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget)
     // and #GPs.
     memset(as, 0, sizeof(AddressSpace));
 
-    const PhysAddr pml4_frame = AllocateFrame();
-    if (pml4_frame == kNullFrame)
+    auto pml4_frame_r = TryAllocateFrame();
+    if (!pml4_frame_r)
     {
         // Frame allocator exhausted while reserving the PML4 root —
         // every user process needs one, so a fresh-process spawn
         // under high memory pressure dies here silently. Cleanup
-        // releases the struct alloc; we still return nullptr but
+        // releases the struct alloc; we still return the error but
         // now the OOM is in the log.
         KLOG_ERROR("mm/as", "AddressSpaceCreate: AllocateFrame for PML4 root failed");
         KFree(as);
-        return core::Err{core::ErrorCode::OutOfMemory};
+        return core::Err{pml4_frame_r.error()};
     }
+    const PhysAddr pml4_frame = pml4_frame_r.value();
 
     auto* pml4 = static_cast<u64*>(PhysToVirt(pml4_frame));
 
@@ -618,12 +620,13 @@ core::Result<AddressSpace*> AddressSpaceFork(const AddressSpace* parent)
         // Extract flags: mask out the address bits, keep the
         // protection / present / user / NX flags.
         const u64 flags = parent_pte & ~kAddrMask;
-        const PhysAddr child_frame = AllocateFrame();
-        if (child_frame == kNullFrame)
+        auto child_frame_r = TryAllocateFrame();
+        if (!child_frame_r)
         {
             AddressSpaceRelease(child);
-            return core::Err{core::ErrorCode::OutOfMemory};
+            return core::Err{child_frame_r.error()};
         }
+        const PhysAddr child_frame = child_frame_r.value();
         // Copy page contents through the direct-map alias.
         const void* src = PhysToVirt(parent_frame);
         void* dst = PhysToVirt(child_frame);
@@ -890,11 +893,12 @@ void AddressSpaceSelfTest()
     }
     AddressSpace* b = b_r.value();
 
-    const PhysAddr frame = AllocateFrame();
-    if (frame == kNullFrame)
+    auto frame_r = TryAllocateFrame();
+    if (!frame_r)
     {
         PanicAs("self-test: AllocateFrame failed", 0);
     }
+    const PhysAddr frame = frame_r.value();
     AddressSpaceMapUserPage(a, kTestVa, frame, kPagePresent | kPageWritable | kPageUser | kPageNoExecute);
 
     // Walk a's tables directly — must find the PTE we just

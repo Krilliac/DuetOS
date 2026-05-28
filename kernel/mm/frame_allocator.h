@@ -96,6 +96,18 @@ inline ::duetos::core::Result<PhysAddr> TryAllocateFrame()
     return f;
 }
 
+/// Result-shaped sibling of `AllocateFrameInRange`. Maps the
+/// null-frame sentinel (no free frame below `max_phys`) to
+/// `ErrorCode::OutOfMemory`. `max_phys == 0` means "no upper bound".
+/// Prefer this in new code.
+inline ::duetos::core::Result<PhysAddr> TryAllocateFrameInRange(PhysAddr max_phys)
+{
+    const PhysAddr f = AllocateFrameInRange(max_phys);
+    if (f == kNullFrame)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
+    return f;
+}
+
 /// Allocate `count` physically-contiguous 4 KiB frames. Returns the base
 /// physical address of the run, or kNullFrame if no run of that length is
 /// available. `count == 0` is treated as an error and returns kNullFrame.
@@ -122,6 +134,20 @@ inline ::duetos::core::Result<PhysAddr> TryAllocateContiguousFrames(u64 count)
     if (count == 0)
         return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
     const PhysAddr f = AllocateContiguousFrames(count);
+    if (f == kNullFrame)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
+    return f;
+}
+
+/// Result-shaped sibling of `AllocateContiguousFramesInRange`. Maps
+/// `count==0` to `ErrorCode::InvalidArgument` and a null-frame result
+/// (no in-range run of that length) to `ErrorCode::OutOfMemory`.
+/// `max_phys == 0` means "no upper bound". Prefer this in new code.
+inline ::duetos::core::Result<PhysAddr> TryAllocateContiguousFramesInRange(u64 count, PhysAddr max_phys)
+{
+    if (count == 0)
+        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
+    const PhysAddr f = AllocateContiguousFramesInRange(count, max_phys);
     if (f == kNullFrame)
         return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
     return f;

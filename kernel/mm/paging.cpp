@@ -282,11 +282,12 @@ void EnableKernelProtectionBits()
 // from the entry stored by callers.
 u64* AllocateTable()
 {
-    const PhysAddr frame = AllocateFrame();
-    if (frame == kNullFrame)
+    auto frame_r = TryAllocateFrame();
+    if (!frame_r)
     {
         PanicPaging("AllocateFrame returned null while building page tables", 0);
     }
+    const PhysAddr frame = frame_r.value();
     auto* table = static_cast<u64*>(PhysToVirt(frame));
     for (u64 i = 0; i < kEntriesPerTable; ++i)
     {
@@ -723,11 +724,12 @@ void UserStringCopySelfTest()
     // deliberately unmapped so the page-tail cases prove the string
     // helpers stop at NUL instead of bulk-copying the full cap.
     constexpr u64 kUserTestVa = 0x0000004000000000ULL;
-    const PhysAddr frame = AllocateFrame();
-    if (frame == kNullFrame)
+    auto frame_r = TryAllocateFrame();
+    if (!frame_r)
     {
         PanicPaging("user-string self-test: AllocateFrame returned null", 0);
     }
+    const PhysAddr frame = frame_r.value();
 
     auto* alias = static_cast<volatile u8*>(MapMmio(frame, kPageSize));
     if (alias == nullptr)
@@ -1305,11 +1307,12 @@ void PagingSelfTest()
     // Allocate one frame, map it twice into the MMIO arena, and use the
     // second mapping to read what the first wrote. Proves: walker descent,
     // intermediate-table allocation, PTE install, TLB consistency.
-    const PhysAddr frame = AllocateFrame();
-    if (frame == kNullFrame)
+    auto frame_r = TryAllocateFrame();
+    if (!frame_r)
     {
         PanicPaging("self-test: AllocateFrame returned null", 0);
     }
+    const PhysAddr frame = frame_r.value();
 
     auto* alias_a = static_cast<volatile u64*>(MapMmio(frame, kPageSize));
     auto* alias_b = static_cast<volatile u64*>(MapMmio(frame, kPageSize));

@@ -188,8 +188,8 @@ void* PoisonAlloc(u64 size, PoisonMode mode)
     const u64 data_page = slot_base + kPageSizeLocal;
 
     // Back the data page with one fresh physical frame.
-    const PhysAddr phys = AllocateFrame();
-    if (phys == kNullFrame)
+    auto phys_r = TryAllocateFrame();
+    if (!phys_r)
     {
         const auto irq = sync::SpinLockAcquire(g_poison_alloc_lock);
         ++g_frame_oom_count;
@@ -198,6 +198,7 @@ void* PoisonAlloc(u64 size, PoisonMode mode)
         // poison allocator leaks VA on every free anyway.
         return nullptr;
     }
+    const PhysAddr phys = phys_r.value();
 
     // Map the DATA page only. The two flanking guard pages
     // stay unmapped, so a one-byte overrun or underrun takes
