@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/result.h"
 #include "util/types.h"
 
 /*
@@ -100,16 +101,19 @@ u64 JpegEstimateScratch(const JpegInfo& info);
 ///                     u32 array, written in row-major order
 ///                     (pixel (x, y) at `out_pixels[y * width + x]`).
 ///
-/// Returns true on success. Returns false on:
-///   - Wrong SOF marker (not 0xC0 → not Baseline)
-///   - Precision != 8
-///   - Unsupported component count (must be 1 or 3)
-///   - Component subsampling ratios outside {1, 2}
-///   - Malformed Huffman or quantisation tables
-///   - Bit-stream truncation
-///   - Coefficient run/length out of range
-///   - Restart-marker misalignment
-u64 JpegDecode(const u8* src, u32 src_len, const JpegInfo& info, u8* scratch, u64 scratch_len, u32* out_pixels);
+/// On success returns the decoded pixel count (`width * height`).
+/// Errors:
+///   - `ErrorCode::InvalidArgument` — null pointer, or `info`
+///     describing an unsupported file (wrong SOF marker / not
+///     Baseline, precision != 8, component count not 1 or 3,
+///     zero or oversize dimensions).
+///   - `ErrorCode::BufferTooSmall` — `scratch_len` is below the
+///     `JpegEstimateScratch(info)` requirement.
+///   - `ErrorCode::Corrupt` — malformed markers / Huffman /
+///     quantisation tables, bit-stream truncation, out-of-range
+///     run-length, restart-marker misalignment.
+::duetos::core::Result<u64> JpegDecode(const u8* src, u32 src_len, const JpegInfo& info, u8* scratch, u64 scratch_len,
+                                       u32* out_pixels);
 
 /// Boot self-test. Decodes an embedded 8x8 Y'CbCr Baseline JPEG
 /// and asserts the output matches a known reference. Pure

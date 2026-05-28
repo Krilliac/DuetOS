@@ -33,6 +33,22 @@ fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
+/// Null-check + zero-initialise an FFI out-pointer, returning a safe
+/// `&mut T`. Keeps the raw-pointer deref in this private helper so the
+/// public extern "C" wrappers don't trip clippy::not_unsafe_ptr_arg_deref
+/// (the lint only fires on public functions). Zero-init via Default so a
+/// partial parse never leaks stale fields.
+fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+    if out.is_null() {
+        return None;
+    }
+    // SAFETY: FFI contract pins `out` as a writable T-sized region.
+    unsafe {
+        core::ptr::write(out, T::default());
+        Some(&mut *out)
+    }
+}
+
 /// Write the DHCP miss outputs (`out_data = null`, `out_len = 0`)
 /// then return `false`. Encapsulates the only raw-pointer write the
 /// DHCP entry point performs on the miss path.
@@ -365,7 +381,9 @@ fn parse_tcp_options(opts: &[u8], out: &mut DuetosTcpParsedOptions) {
             continue;
         }
         // TLV: need kind + len + (len-2) value bytes.
-        let Some(len_off) = i.checked_add(1) else { return; };
+        let Some(len_off) = i.checked_add(1) else {
+            return;
+        };
         if len_off >= opts.len() {
             return;
         }
@@ -373,7 +391,9 @@ fn parse_tcp_options(opts: &[u8], out: &mut DuetosTcpParsedOptions) {
         if opt_len < 2 {
             return;
         }
-        let Some(end) = i.checked_add(opt_len) else { return; };
+        let Some(end) = i.checked_add(opt_len) else {
+            return;
+        };
         if end > opts.len() {
             return;
         }
@@ -425,23 +445,15 @@ pub extern "C" fn duetos_parsers_tcp_parse_options(
     opts_len: usize,
     out: *mut DuetosTcpParsedOptions,
 ) -> bool {
-    if out.is_null() {
+    let Some(out_ref) = out_init(out) else {
         return false;
-    }
-    // SAFETY: caller's contract is that out is writable; zero-
-    // initialise via the Default impl so partial parses don't
-    // leak stale fields.
-    unsafe {
-        core::ptr::write(out, DuetosTcpParsedOptions::default());
-    }
+    };
     let Some(slice) = slice_from_raw(opts, opts_len) else {
         // Null opts buffer is a no-op success — caller already
         // sees a zero-initialised struct, which mirrors what the
         // C++ ParseOptions returned on an empty options field.
         return true;
     };
-    // SAFETY: out is non-null + writable (just initialised).
-    let out_ref = unsafe { &mut *out };
     parse_tcp_options(slice, out_ref);
     true
 }
@@ -778,14 +790,14 @@ mod tests {
         // computed below.
         let mut h = [0u8; 20];
         h[0] = 0x45; // version=4 IHL=5
-        // total length = 20
+                     // total length = 20
         h[2] = 0;
         h[3] = 20;
         // TTL + protocol just to keep the checksum non-zero.
         h[8] = 64;
         h[9] = 17; // UDP
-        // src/dst zeros — fine.
-        // Compute checksum over the header.
+                   // src/dst zeros — fine.
+                   // Compute checksum over the header.
         let cs = ipv4_header_checksum(&h);
         h[10] = (cs >> 8) as u8;
         h[11] = cs as u8;
@@ -839,7 +851,7 @@ mod tests {
         let mut h = build_minimal_ipv4_header();
         h[2] = 0xFF;
         h[3] = 0xFF; // total_len = 65535, buffer is 20
-        // Recompute checksum so we're only testing the total_len check.
+                     // Recompute checksum so we're only testing the total_len check.
         h[10] = 0;
         h[11] = 0;
         let cs = ipv4_header_checksum(&h);
@@ -898,7 +910,18 @@ mod tests {
     #[test]
     fn tcp_parse_timestamps() {
         // Kind=8, len=10, tsval=0x01020304, tsecr=0x0A0B0C0D.
-        let opts = [TCP_OPT_KIND_TIMESTAMP, 10, 0x01, 0x02, 0x03, 0x04, 0x0A, 0x0B, 0x0C, 0x0D];
+        let opts = [
+            TCP_OPT_KIND_TIMESTAMP,
+            10,
+            0x01,
+            0x02,
+            0x03,
+            0x04,
+            0x0A,
+            0x0B,
+            0x0C,
+            0x0D,
+        ];
         let p = parse_opts(&opts);
         assert!(p.has_timestamp);
         assert_eq!(p.tsval, 0x01020304);
@@ -909,11 +932,30 @@ mod tests {
     fn tcp_parse_chained_syn_options() {
         // Common SYN: MSS 1460, NOP NOP SACK-Permitted, NOP WindowScale 7, NOP NOP TSval+TSecr.
         let opts = [
-            TCP_OPT_KIND_MSS, 4, 0x05, 0xB4,
-            TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_KIND_SACK_PERMITTED, 2,
-            TCP_OPT_NOP, TCP_OPT_KIND_WINDOW_SCALE, 3, 7,
-            TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_KIND_TIMESTAMP, 10,
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+            TCP_OPT_KIND_MSS,
+            4,
+            0x05,
+            0xB4,
+            TCP_OPT_NOP,
+            TCP_OPT_NOP,
+            TCP_OPT_KIND_SACK_PERMITTED,
+            2,
+            TCP_OPT_NOP,
+            TCP_OPT_KIND_WINDOW_SCALE,
+            3,
+            7,
+            TCP_OPT_NOP,
+            TCP_OPT_NOP,
+            TCP_OPT_KIND_TIMESTAMP,
+            10,
+            0x11,
+            0x22,
+            0x33,
+            0x44,
+            0x55,
+            0x66,
+            0x77,
+            0x88,
         ];
         let p = parse_opts(&opts);
         assert_eq!(p.mss, 1460);
@@ -929,10 +971,22 @@ mod tests {
     fn tcp_parse_end_of_list_stops_walk() {
         // EOL kind=0 ends the walk; later bytes are ignored.
         let opts = [
-            TCP_OPT_KIND_MSS, 4, 0x05, 0xB4,
+            TCP_OPT_KIND_MSS,
+            4,
+            0x05,
+            0xB4,
             TCP_OPT_END_OF_LIST,
             // These shouldn't be parsed — after EOL.
-            TCP_OPT_KIND_TIMESTAMP, 10, 1, 2, 3, 4, 5, 6, 7, 8,
+            TCP_OPT_KIND_TIMESTAMP,
+            10,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
         ];
         let p = parse_opts(&opts);
         assert_eq!(p.mss, 1460);

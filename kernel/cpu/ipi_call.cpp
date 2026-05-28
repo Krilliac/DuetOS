@@ -557,6 +557,10 @@ void IpiCallSelfTest()
     // CPUs may have additional hits from earlier legs — that's
     // fine; we only check coverage). The exact count of CPUs
     // that received the broadcast must match `dispatched`.
+    if (hit_cpus < dispatched)
+    {
+        KLOG_WARN("cpu/ipi-call", "IpiCallEach coverage shortfall: hit_cpus < dispatched");
+    }
     u32 each_hit_cpus = 0;
     for (u32 id = 0; id < limit; ++id)
     {

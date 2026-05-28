@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/result.h"
 #include "util/types.h"
 
 /*
@@ -44,8 +45,18 @@ namespace duetos::util
 /// Decompress a raw DEFLATE bit stream. `src` is `src_len` bytes
 /// of compressed input. `dst` has `dst_cap` bytes available for
 /// the decompressed output. On success returns the decompressed
-/// byte count. On any malformed input or `dst` overflow returns 0.
-u32 DeflateInflate(const u8* src, u32 src_len, u8* dst, u32 dst_cap);
+/// byte count in `Result<u32>` — which can legitimately be 0 (a
+/// final empty stored block decodes to zero bytes). Errors:
+///   - `ErrorCode::Corrupt` — malformed bit stream (bad NLEN,
+///     reserved BTYPE, invalid Huffman code, out-of-range
+///     length/distance symbol, truncated input).
+///   - `ErrorCode::BufferTooSmall` — the decompressed data would
+///     overrun `dst_cap`.
+/// NOTE: the previous bool/u32 sentinel return collapsed "produced
+/// 0 bytes" and "decode failed" into the same value — Result<u32>
+/// disambiguates them, which the empty-stored-block self-test
+/// relied on getting wrong.
+::duetos::core::Result<u32> DeflateInflate(const u8* src, u32 src_len, u8* dst, u32 dst_cap);
 
 void DeflateSelfTest();
 

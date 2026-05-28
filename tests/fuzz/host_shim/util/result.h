@@ -73,3 +73,23 @@ inline const char* ErrorCodeName(ErrorCode)
 }
 
 } // namespace duetos::core
+
+// Shim-adapted RESULT_TRY / RESULT_TRY_ASSIGN. The real kernel macros
+// (kernel/util/result.h) propagate a source location through a 2-arg
+// Err; this shim's Result carries no location, so the macros drop it.
+// Fuzzers only care that the error/success branch is taken correctly,
+// not where the error originated. Kept here so the migrated codec TUs
+// (deflate/jpeg/... use RESULT_TRY) compile against the shim.
+#define RESULT_TRY(expr)                                                                                               \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        auto _res_try = (expr);                                                                                        \
+        if (!_res_try)                                                                                                 \
+            return ::duetos::core::Err{_res_try.error()};                                                              \
+    } while (0)
+
+#define RESULT_TRY_ASSIGN(decl, expr)                                                                                  \
+    auto _resta_##__LINE__ = (expr);                                                                                   \
+    if (!_resta_##__LINE__)                                                                                            \
+        return ::duetos::core::Err{_resta_##__LINE__.error()};                                                         \
+    decl = _resta_##__LINE__.value() // NOLINT(bugprone-macro-parentheses)

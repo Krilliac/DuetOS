@@ -77,9 +77,10 @@ u32 GzipInflate(const u8* src, u32 src_len, u8* dst, u32 dst_cap)
         return 0;
 
     const u32 deflate_len = src_len - off - 8;
-    const u32 produced = DeflateInflate(src + off, deflate_len, dst, dst_cap);
-    if (produced == 0 && deflate_len > 0)
+    const auto inflated = DeflateInflate(src + off, deflate_len, dst, dst_cap);
+    if (!inflated.has_value())
         return 0;
+    const u32 produced = inflated.value();
     // Trailer: CRC-32 (LE) + ISIZE (LE).
     const u8* trailer = src + src_len - 8;
     const u32 want_crc = LoadU32Le(trailer + 0);
@@ -108,9 +109,10 @@ u32 ZlibInflate(const u8* src, u32 src_len, u8* dst, u32 dst_cap)
         return 0;
 
     const u32 deflate_len = src_len - 2 - 4;
-    const u32 produced = DeflateInflate(src + 2, deflate_len, dst, dst_cap);
-    if (produced == 0 && deflate_len > 0)
+    const auto inflated = DeflateInflate(src + 2, deflate_len, dst, dst_cap);
+    if (!inflated.has_value())
         return 0;
+    const u32 produced = inflated.value();
 
     const u8* tail = src + src_len - 4;
     // Adler-32 stored big-endian.

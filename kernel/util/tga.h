@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/result.h"
 #include "util/types.h"
 
 /*
@@ -81,17 +82,22 @@ TgaInfo TgaParseHeader(const u8* hdr);
 /// Bottom-up source is automatically row-flipped during decode
 /// so the output is always top-down.
 ///
-/// Returns true on success. Returns false on truncated `src`,
-/// malformed dimensions, or any unsupported subformat the parser
-/// would have flagged via `info.ok = false` already.
-bool TgaDecodeUncompressed(const u8* src, u32 src_len, const TgaInfo& info, u32* out_pixels);
+/// Errors:
+///   - `ErrorCode::InvalidArgument` — `info.ok == false` or the
+///     parser rejected the header.
+///   - `ErrorCode::Unsupported` — image_type is not the v0
+///     uncompressed True-color variant (type 2).
+///   - `ErrorCode::Truncated` — `src_len` doesn't cover the
+///     pixel region implied by the header's dimensions.
+::duetos::core::Result<void> TgaDecodeUncompressed(const u8* src, u32 src_len, const TgaInfo& info, u32* out_pixels);
 
 /// Write the canonical 18-byte uncompressed 32-bpp top-down TGA
 /// header into `out`. `out` must hold at least `kTgaHeaderBytes`.
-/// Returns true on success; false if dimensions are out of range.
-/// Streaming consumers (e.g. the Screenshot writer) emit this
-/// header first, then append BGRA-row bytes verbatim.
-bool TgaWriteHeader32(u8 out[kTgaHeaderBytes], u32 width, u32 height);
+/// Returns `ErrorCode::InvalidArgument` if dimensions are out of
+/// range (zero or above `kTgaMaxDim`). Streaming consumers
+/// (e.g. the Screenshot writer) emit this header first, then
+/// append BGRA-row bytes verbatim.
+::duetos::core::Result<void> TgaWriteHeader32(u8 out[kTgaHeaderBytes], u32 width, u32 height);
 
 /// Encode a 32-bpp uncompressed top-down TGA image. `pixels` is
 /// `width × height` BGRA8888 u32 elements (same format

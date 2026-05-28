@@ -132,7 +132,6 @@ constexpr u32 kFwToolbarBtnH = 18U;
 constexpr u32 kFwToolbarBtnGap = 4U;
 constexpr u32 kFwToolbarPadX = 4U;
 constexpr u32 kFwToolbarPadY = 2U;
-constexpr u32 kFwActionBtnCount = 1U;
 constexpr u32 kFwHeaderH = kRowH + 6U; // matches legacy header drop
 constexpr u32 kFwFooterH = kRowH;
 

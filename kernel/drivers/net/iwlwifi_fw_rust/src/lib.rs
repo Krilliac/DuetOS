@@ -132,20 +132,40 @@ fn parse_inner(blob: &[u8], blob_ptr: *const u8, parsed: &mut DuetosIwlFirmwareP
 
         match r_type {
             TLV_INST => {
-                parsed.inst = DuetosIwlFwSection { data: payload_ptr, size: length, _pad: 0 };
+                parsed.inst = DuetosIwlFwSection {
+                    data: payload_ptr,
+                    size: length,
+                    _pad: 0,
+                };
             }
             TLV_DATA => {
-                parsed.data = DuetosIwlFwSection { data: payload_ptr, size: length, _pad: 0 };
+                parsed.data = DuetosIwlFwSection {
+                    data: payload_ptr,
+                    size: length,
+                    _pad: 0,
+                };
             }
             TLV_INIT => {
-                parsed.init = DuetosIwlFwSection { data: payload_ptr, size: length, _pad: 0 };
+                parsed.init = DuetosIwlFwSection {
+                    data: payload_ptr,
+                    size: length,
+                    _pad: 0,
+                };
             }
             TLV_INIT_DATA => {
-                parsed.init_data = DuetosIwlFwSection { data: payload_ptr, size: length, _pad: 0 };
+                parsed.init_data = DuetosIwlFwSection {
+                    data: payload_ptr,
+                    size: length,
+                    _pad: 0,
+                };
             }
             TLV_SEC_RT | TLV_SECURE_SEC_RT => {
                 if parsed.sec_rt_count == 0 {
-                    parsed.sec_rt_first = DuetosIwlFwSection { data: payload_ptr, size: length, _pad: 0 };
+                    parsed.sec_rt_first = DuetosIwlFwSection {
+                        data: payload_ptr,
+                        size: length,
+                        _pad: 0,
+                    };
                 }
                 parsed.sec_rt_count += 1;
             }
@@ -231,10 +251,11 @@ pub unsafe extern "C" fn duetos_iwlwifi_fw_parse(
 #[cfg(test)]
 mod tests {
     extern crate alloc;
-    use super::*;
     use alloc::boxed::Box;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    use super::*;
 
     fn build_blob(records: &[(u32, &[u8])]) -> Vec<u8> {
         let mut buf = Vec::new();
@@ -262,8 +283,7 @@ mod tests {
     }
 
     fn parse(buf: &[u8]) -> (i32, Box<DuetosIwlFirmwareParsed>) {
-        let mut p: Box<DuetosIwlFirmwareParsed> =
-            unsafe { Box::new(core::mem::zeroed::<DuetosIwlFirmwareParsed>()) };
+        let mut p: Box<DuetosIwlFirmwareParsed> = unsafe { Box::new(core::mem::zeroed::<DuetosIwlFirmwareParsed>()) };
         let r = unsafe { duetos_iwlwifi_fw_parse(buf.as_ptr(), buf.len() as u32, p.as_mut() as *mut _) };
         (r, p)
     }

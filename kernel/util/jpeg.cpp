@@ -2,9 +2,14 @@
 
 #include "arch/x86_64/serial.h"
 #include "img_meta_rust.h"
+#include "util/result.h"
 
 namespace duetos::util
 {
+
+using ::duetos::core::Err;
+using ::duetos::core::ErrorCode;
+using ::duetos::core::Result;
 
 JpegInfo JpegParseHeader(const u8* src, u32 src_len)
 {
@@ -142,7 +147,7 @@ u16 Read16Be(const u8* p)
 // — the precision here is the QUANT table precision, not the
 // image precision).
 // ---------------------------------------------------------------
-bool ParseDqt(Decoder& d, u32 segment_end)
+Result<void> ParseDqt(Decoder& d, u32 segment_end)
 {
     while (d.cursor < segment_end)
     {
@@ -150,13 +155,13 @@ bool ParseDqt(Decoder& d, u32 segment_end)
         const u8 precision = pt >> 4;
         const u8 table_id = pt & 0xF;
         if (table_id >= kMaxQuantTables)
-            return false;
+            return Err{ErrorCode::Corrupt};
         if (precision != 0 && precision != 1)
-            return false;
+            return Err{ErrorCode::Corrupt};
         const u32 entry_size = (precision == 0) ? 1u : 2u;
         const u32 bytes_needed = entry_size * kBlockSize;
         if (d.cursor + bytes_needed > segment_end)
-            return false;
+            return Err{ErrorCode::Corrupt};
         QuantTable& q = d.quant[table_id];
         for (u32 i = 0; i < kBlockSize; ++i)
         {
@@ -170,7 +175,7 @@ bool ParseDqt(Decoder& d, u32 segment_end)
         }
         q.present = true;
     }
-    return true;
+    return {};
 }
 
 // ---------------------------------------------------------------
@@ -179,7 +184,7 @@ bool ParseDqt(Decoder& d, u32 segment_end)
 // symbols (sum of those 16 counts, max 256).
 // We build both the 9-bit fast lookup and the slow walk arrays.
 // ---------------------------------------------------------------
-bool ParseDht(Decoder& d, u32 segment_end)
+Result<void> ParseDht(Decoder& d, u32 segment_end)
 {
     while (d.cursor < segment_end)
     {
@@ -187,9 +192,9 @@ bool ParseDht(Decoder& d, u32 segment_end)
         const u8 table_class = tc_th >> 4; // 0=DC, 1=AC
         const u8 table_id = tc_th & 0xF;
         if (table_class > 1 || table_id >= kMaxHuffTables)
-            return false;
+            return Err{ErrorCode::Corrupt};
         if (d.cursor + 16 > segment_end)
-            return false;
+            return Err{ErrorCode::Corrupt};
         u8 counts[17] = {};
         u32 total = 0;
         for (u32 i = 1; i <= 16; ++i)
@@ -198,7 +203,7 @@ bool ParseDht(Decoder& d, u32 segment_end)
             total += counts[i];
         }
         if (total > 256 || d.cursor + total > segment_end)
-            return false;
+            return Err{ErrorCode::Corrupt};
         HuffTable& t = (table_class == 0) ? d.hdc[table_id] : d.hac[table_id];
         for (u32 i = 0; i < 512; ++i)
             t.fast[i] = 0xFFFF;
@@ -245,7 +250,7 @@ bool ParseDht(Decoder& d, u32 segment_end)
         }
         t.present = true;
     }
-    return true;
+    return {};
 }
 
 // ---------------------------------------------------------------
@@ -254,15 +259,15 @@ bool ParseDht(Decoder& d, u32 segment_end)
 // We only validate baseline (Ss=0, Se=63, Ah=Al=0); Cs values
 // must match a component declared in SOF0.
 // ---------------------------------------------------------------
-bool ParseSos(Decoder& d, u32 segment_end)
+Result<void> ParseSos(Decoder& d, u32 segment_end)
 {
     if (d.cursor + 1 > segment_end)
-        return false;
+        return Err{ErrorCode::Corrupt};
     const u8 ns = d.src[d.cursor++];
     if (ns != d.components_count)
-        return false;
+        return Err{ErrorCode::Corrupt};
     if (d.cursor + 2u * ns + 3u > segment_end)
-        return false;
+        return Err{ErrorCode::Corrupt};
     for (u32 i = 0; i < ns; ++i)
     {
         const u8 cs = d.src[d.cursor++];
@@ -276,18 +281,18 @@ bool ParseSos(Decoder& d, u32 segment_end)
                 break;
             }
         if (c == nullptr)
-            return false;
+            return Err{ErrorCode::Corrupt};
         c->dc_table_id = td_ta >> 4;
         c->ac_table_id = td_ta & 0xF;
         if (c->dc_table_id >= kMaxHuffTables || c->ac_table_id >= kMaxHuffTables)
-            return false;
+            return Err{ErrorCode::Corrupt};
     }
     const u8 ss = d.src[d.cursor++];
     const u8 se = d.src[d.cursor++];
     const u8 ah_al = d.src[d.cursor++];
     if (ss != 0 || se != 63 || ah_al != 0)
-        return false;
-    return true;
+        return Err{ErrorCode::Corrupt};
+    return {};
 }
 
 // ---------------------------------------------------------------
@@ -296,24 +301,24 @@ bool ParseSos(Decoder& d, u32 segment_end)
 // The header validator already parsed dimensions; we use this
 // pass to capture sampling factors + quant table assignments.
 // ---------------------------------------------------------------
-bool ParseSof0(Decoder& d, u32 segment_end)
+Result<void> ParseSof0(Decoder& d, u32 segment_end)
 {
     if (d.cursor + 6 > segment_end)
-        return false;
+        return Err{ErrorCode::Corrupt};
     const u8 precision = d.src[d.cursor++];
     if (precision != 8)
-        return false;
+        return Err{ErrorCode::Corrupt};
     const u16 h = Read16Be(&d.src[d.cursor]);
     d.cursor += 2;
     const u16 w = Read16Be(&d.src[d.cursor]);
     d.cursor += 2;
     if (w != d.width || h != d.height)
-        return false;
+        return Err{ErrorCode::Corrupt};
     const u8 nf = d.src[d.cursor++];
     if (nf != 1 && nf != 3)
-        return false;
+        return Err{ErrorCode::Corrupt};
     if (d.cursor + 3u * nf > segment_end)
-        return false;
+        return Err{ErrorCode::Corrupt};
     d.components_count = nf;
     u8 max_h = 0;
     u8 max_v = 0;
@@ -326,11 +331,11 @@ bool ParseSof0(Decoder& d, u32 segment_end)
         c.sampling_v = hv & 0xF;
         c.quant_id = d.src[d.cursor++];
         if (c.sampling_h == 0 || c.sampling_h > 2)
-            return false;
+            return Err{ErrorCode::Corrupt};
         if (c.sampling_v == 0 || c.sampling_v > 2)
-            return false;
+            return Err{ErrorCode::Corrupt};
         if (c.quant_id >= kMaxQuantTables)
-            return false;
+            return Err{ErrorCode::Corrupt};
         c.dc_pred = 0;
         if (c.sampling_h > max_h)
             max_h = c.sampling_h;
@@ -349,13 +354,20 @@ bool ParseSof0(Decoder& d, u32 segment_end)
         c.width_in_blocks = d.mcu_w * c.sampling_h;
         c.height_in_blocks = d.mcu_h * c.sampling_v;
     }
-    return true;
+    return {};
 }
 
 // ---------------------------------------------------------------
 // Bit reader over the entropy-coded scan data. Handles byte
 // stuffing (FF 00 → FF) and bails on truncation. The scan ends
 // when a non-zero byte follows FF (marker boundary).
+//
+// Hot path: FillBits / HuffDecode / DecodeBlock run once per bit /
+// per Huffman symbol / per 8x8 block — millions of times for a
+// full-frame JPEG. They keep their bool / i32-sentinel return per
+// spec section 6.2 ("measured hot paths where Result construction
+// cost is observable"). The once-per-image / once-per-segment
+// callers above and below them propagate via Result.
 // ---------------------------------------------------------------
 bool FillBits(Decoder& d, u32 want)
 {
@@ -646,7 +658,7 @@ void EmitBlock(const u8 block[kBlockSize], u8* plane, u32 plane_stride, u32 bloc
     }
 }
 
-bool DecodeScan(Decoder& d, u8* planes[kMaxComponents], const u32 strides[kMaxComponents])
+Result<void> DecodeScan(Decoder& d, u8* planes[kMaxComponents], const u32 strides[kMaxComponents])
 {
     d.bit_buf = 0;
     d.bit_count = 0;
@@ -668,7 +680,7 @@ bool DecodeScan(Decoder& d, u8* planes[kMaxComponents], const u32 strides[kMaxCo
                     i32 raw[kBlockSize];
                     u8 spatial[kBlockSize];
                     if (!DecodeBlock(d, c, raw))
-                        return false;
+                        return Err{ErrorCode::Corrupt};
                     Idct(raw, spatial);
                     const u32 block_x = mcu_x * c.sampling_h + bx;
                     const u32 block_y = mcu_y * c.sampling_v + by;
@@ -687,16 +699,16 @@ bool DecodeScan(Decoder& d, u8* planes[kMaxComponents], const u32 strides[kMaxCo
             while (d.cursor < d.src_len && d.src[d.cursor] != 0xFF)
                 ++d.cursor;
             if (d.cursor + 2 > d.src_len)
-                return false;
+                return Err{ErrorCode::Corrupt};
             const u8 m = d.src[d.cursor + 1];
             if (m < kMarkerRst0 || m > kMarkerRst0 + 7)
-                return false;
+                return Err{ErrorCode::Corrupt};
             d.cursor += 2;
             for (u32 i = 0; i < d.components_count; ++i)
                 d.comp[i].dc_pred = 0;
         }
     }
-    return true;
+    return {};
 }
 
 // ---------------------------------------------------------------
@@ -776,25 +788,25 @@ u64 JpegEstimateScratch(const JpegInfo& info)
     return plane * info.components + 16 * 1024;
 }
 
-u64 JpegDecode(const u8* src, u32 src_len, const JpegInfo& info, u8* scratch, u64 scratch_len, u32* out_pixels)
+Result<u64> JpegDecode(const u8* src, u32 src_len, const JpegInfo& info, u8* scratch, u64 scratch_len, u32* out_pixels)
 {
     if (src == nullptr || scratch == nullptr || out_pixels == nullptr)
-        return 0;
+        return Err{ErrorCode::InvalidArgument};
     if (!info.ok || info.precision != 8 || info.sof_marker != kMarkerSof0)
-        return 0;
+        return Err{ErrorCode::InvalidArgument};
     if (info.components != 1 && info.components != 3)
-        return 0;
+        return Err{ErrorCode::InvalidArgument};
     if (info.width == 0 || info.height == 0)
-        return 0;
+        return Err{ErrorCode::InvalidArgument};
     if (info.width > kJpegMaxDimension || info.height > kJpegMaxDimension)
-        return 0;
+        return Err{ErrorCode::InvalidArgument};
     const u64 need = JpegEstimateScratch(info);
     if (scratch_len < need)
-        return 0;
+        return Err{ErrorCode::BufferTooSmall};
     if (src_len < 4)
-        return 0;
+        return Err{ErrorCode::Corrupt};
     if (src[0] != kMarkerLead || src[1] != kMarkerSoi)
-        return 0;
+        return Err{ErrorCode::Corrupt};
 
     // Place the Decoder struct at the start of scratch; the
     // remaining tail is reserved for per-component planes.
@@ -817,51 +829,47 @@ u64 JpegDecode(const u8* src, u32 src_len, const JpegInfo& info, u8* scratch, u6
     while (d.cursor < d.src_len && !sos_seen)
     {
         if (d.src[d.cursor] != kMarkerLead)
-            return 0;
+            return Err{ErrorCode::Corrupt};
         while (d.cursor < d.src_len && d.src[d.cursor] == kMarkerLead)
             ++d.cursor;
         if (d.cursor >= d.src_len)
-            return 0;
+            return Err{ErrorCode::Corrupt};
         const u8 marker = d.src[d.cursor++];
         if (marker == kMarkerEoi)
-            return 0;
+            return Err{ErrorCode::Corrupt};
         // All segment markers carry a 2-byte length prefix.
         if (d.cursor + 2 > d.src_len)
-            return 0;
+            return Err{ErrorCode::Corrupt};
         const u32 seg_len = Read16Be(&d.src[d.cursor]);
         if (seg_len < 2)
-            return 0;
+            return Err{ErrorCode::Corrupt};
         const u32 seg_end = d.cursor + seg_len;
         if (seg_end > d.src_len)
-            return 0;
+            return Err{ErrorCode::Corrupt};
         d.cursor += 2;
         switch (marker)
         {
         case kMarkerSof0:
             if (sof_seen)
-                return 0;
-            if (!ParseSof0(d, seg_end))
-                return 0;
+                return Err{ErrorCode::Corrupt};
+            RESULT_TRY(ParseSof0(d, seg_end));
             sof_seen = true;
             break;
         case kMarkerDqt:
-            if (!ParseDqt(d, seg_end))
-                return 0;
+            RESULT_TRY(ParseDqt(d, seg_end));
             break;
         case kMarkerDht:
-            if (!ParseDht(d, seg_end))
-                return 0;
+            RESULT_TRY(ParseDht(d, seg_end));
             break;
         case kMarkerDri:
             if (seg_end - d.cursor != 2)
-                return 0;
+                return Err{ErrorCode::Corrupt};
             d.restart_interval = Read16Be(&d.src[d.cursor]);
             break;
         case kMarkerSos:
             if (!sof_seen)
-                return 0;
-            if (!ParseSos(d, seg_end))
-                return 0;
+                return Err{ErrorCode::Corrupt};
+            RESULT_TRY(ParseSos(d, seg_end));
             sos_seen = true;
             // Don't skip seg_end — entropy data starts immediately.
             d.cursor = seg_end;
@@ -872,7 +880,7 @@ u64 JpegDecode(const u8* src, u32 src_len, const JpegInfo& info, u8* scratch, u6
         }
     }
     if (!sos_seen)
-        return 0;
+        return Err{ErrorCode::Corrupt};
 
     // Carve component planes out of the scratch buffer.
     u8* plane_ptr[kMaxComponents] = {nullptr, nullptr, nullptr};
@@ -886,10 +894,9 @@ u64 JpegDecode(const u8* src, u32 src_len, const JpegInfo& info, u8* scratch, u6
         plane_ptr[ci] = base;
         base += plane_bytes;
         if (static_cast<u64>(base - scratch) > scratch_len)
-            return 0;
+            return Err{ErrorCode::BufferTooSmall};
     }
-    if (!DecodeScan(d, plane_ptr, plane_stride))
-        return 0;
+    RESULT_TRY(DecodeScan(d, plane_ptr, plane_stride));
     if (d.components_count == 1)
         EmitGrayscale(plane_ptr[0], plane_stride[0], d.width, d.height, out_pixels);
     else
@@ -963,9 +970,9 @@ void JpegDecoderSelfTest()
     // .bss/.data without a heap allocation.
     static u8 g_jpeg_selftest_scratch[32 * 1024];
     static u32 g_jpeg_selftest_pixels[16 * 16];
-    const u64 n = JpegDecode(kSelfTestJpeg, kSelfTestJpegLen, info, g_jpeg_selftest_scratch,
-                             sizeof(g_jpeg_selftest_scratch), g_jpeg_selftest_pixels);
-    ok &= ExpectSelfTest(n == 16u * 16u, "decode-pixel-count");
+    const auto decoded = JpegDecode(kSelfTestJpeg, kSelfTestJpegLen, info, g_jpeg_selftest_scratch,
+                                    sizeof(g_jpeg_selftest_scratch), g_jpeg_selftest_pixels);
+    ok &= ExpectSelfTest(decoded.has_value() && decoded.value() == 16u * 16u, "decode-pixel-count");
 
     // Sanity check pixel values — the input is mid-grey-ish so
     // every output pixel should be in the [0x10, 0xF0] range

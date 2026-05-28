@@ -48,10 +48,8 @@ constexpr u8 kDigitMask[10] = {
     /* 9 */ 0x6F, // abcdfg
 };
 
-constexpr u32 kColonW = 8;   // width reserved for a ":" glyph
-constexpr u32 kGap = 4;      // gap between digits / separators
-constexpr u32 kMarginX = 16; // left inset from window client edge
-constexpr u32 kMarginY = 16; // top inset
+constexpr u32 kColonW = 8; // width reserved for a ":" glyph
+constexpr u32 kGap = 4;    // gap between digits / separators
 
 // Colours chosen for a retro-LED look against the client's
 // dark background. kSegOn = glowing green; kSegOff = dim

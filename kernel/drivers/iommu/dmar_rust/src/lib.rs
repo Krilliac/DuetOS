@@ -252,9 +252,10 @@ pub unsafe extern "C" fn duetos_dmar_zero(out: *mut DuetosDmar) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use alloc::vec::Vec;
     use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::*;
 
     fn make_header(table_len: u32) -> Vec<u8> {
         let mut h = vec![0u8; DMAR_SDT_HEADER_BYTES + DMAR_HEADER_AFTER_SDT_BYTES];
@@ -373,7 +374,7 @@ mod tests {
         buf.resize(start + 8, 0);
         buf[start..start + 2].copy_from_slice(&99u16.to_le_bytes()); // unknown type
         buf[start + 2..start + 4].copy_from_slice(&8u16.to_le_bytes()); // 8 bytes total
-        // Now follow with a real DRHD.
+                                                                        // Now follow with a real DRHD.
         push_drhd(&mut buf, 0, 0, 0xFED90000);
         let total = buf.len() as u32;
         buf[4..8].copy_from_slice(&total.to_le_bytes());

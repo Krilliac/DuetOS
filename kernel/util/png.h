@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/result.h"
 #include "util/types.h"
 
 /*
@@ -67,9 +68,16 @@ PngInfo PngParseHeader(const u8* src, u32 src_len);
 /// where `bytes_per_pixel` is 3 (RGB) or 4 (RGBA). A simple
 /// upper bound: `scratch_cap >= src_len + (width * 4 + 1) * height`.
 ///
-/// Returns true on success. Returns false on chunk-CRC mismatch,
-/// zlib failure, scratch overflow, or any malformed input.
-bool PngDecode(const u8* src, u32 src_len, const PngInfo& info, u8* scratch, u32 scratch_cap, u32* out_pixels);
+/// On success returns `{}`. Errors:
+///   - `ErrorCode::InvalidArgument` — `info.ok == false`.
+///   - `ErrorCode::BufferTooSmall` — `scratch_cap` cannot hold
+///     the filtered scanlines or the concatenated IDAT bytes.
+///   - `ErrorCode::Truncated` — `src_len` doesn't cover the
+///     chunks the IHDR implied.
+///   - `ErrorCode::Corrupt` — chunk-CRC mismatch, zlib failure,
+///     malformed IEND, unknown filter byte, missing IDAT.
+::duetos::core::Result<void> PngDecode(const u8* src, u32 src_len, const PngInfo& info, u8* scratch, u32 scratch_cap,
+                                       u32* out_pixels);
 
 void PngSelfTest();
 

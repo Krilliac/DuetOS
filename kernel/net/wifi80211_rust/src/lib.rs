@@ -254,10 +254,7 @@ fn parse_country_ie(buf: &[u8], out: &mut DuetosWifiCountryIe) -> bool {
     // AND at TCP_OPT_GUARD-equivalent 64 iterations so a hostile
     // 255-byte IE with 80+ triplets can't tie up the parser.
     let mut visited: u32 = 0;
-    while i + 3 <= buf.len()
-        && (out.n_triplets as usize) < COUNTRY_IE_MAX_TRIPLETS
-        && visited < 64
-    {
+    while i + 3 <= buf.len() && (out.n_triplets as usize) < COUNTRY_IE_MAX_TRIPLETS && visited < 64 {
         let first = buf[i];
         if first >= 201 {
             // Operating-triplet form: skip 3 bytes without
@@ -370,25 +367,17 @@ pub extern "C" fn duetos_wifi80211_parse_ie(buf: *const u8, len: usize, off: usi
 }
 
 #[no_mangle]
-pub extern "C" fn duetos_wifi80211_parse_country_ie(
-    buf: *const u8,
-    len: usize,
-    out: *mut DuetosWifiCountryIe,
-) -> bool {
-    if out.is_null() {
+pub extern "C" fn duetos_wifi80211_parse_country_ie(buf: *const u8, len: usize, out: *mut DuetosWifiCountryIe) -> bool {
+    // Route the raw-pointer null-check + zero-init through out_init (as the
+    // sibling FFI wrappers do) so the deref lives in the private helper, not
+    // this public fn — clippy::not_unsafe_ptr_arg_deref fires otherwise.
+    // Zero-init via Default so a partial parse never leaks stale triplets.
+    let Some(dst) = out_init(out) else {
         return false;
-    }
-    // SAFETY: caller's contract that `out` is writable; zero-init
-    // via Default::default so a partial parse never leaks stale
-    // triplets.
-    unsafe {
-        ptr::write(out, DuetosWifiCountryIe::default());
-    }
+    };
     let Some(slice) = slice_from_raw(buf, len) else {
         return false;
     };
-    // SAFETY: out is non-null + writable (just initialised).
-    let dst = unsafe { &mut *out };
     parse_country_ie(slice, dst)
 }
 
@@ -408,9 +397,10 @@ extern crate alloc;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    use super::*;
 
     fn make_management_beacon() -> [u8; 24] {
         let mut buf = [0u8; 24];

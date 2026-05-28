@@ -137,10 +137,7 @@ fn read_u16_le(buf: &[u8], off: usize) -> u16 {
 
 #[inline]
 fn read_u32_le(buf: &[u8], off: usize) -> u32 {
-    (buf[off] as u32)
-        | ((buf[off + 1] as u32) << 8)
-        | ((buf[off + 2] as u32) << 16)
-        | ((buf[off + 3] as u32) << 24)
+    (buf[off] as u32) | ((buf[off + 1] as u32) << 8) | ((buf[off + 2] as u32) << 16) | ((buf[off + 3] as u32) << 24)
 }
 
 #[inline]
@@ -263,9 +260,10 @@ pub unsafe extern "C" fn duetos_ivrs_zero(out: *mut DuetosIvrs) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
+
+    use super::*;
 
     fn make_header() -> Vec<u8> {
         let mut h = vec![0u8; IVRS_SDT_HEADER_BYTES + IVRS_HEADER_AFTER_SDT_BYTES];

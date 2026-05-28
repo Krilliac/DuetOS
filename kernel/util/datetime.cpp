@@ -1,9 +1,14 @@
 #include "util/datetime.h"
 
 #include "core/panic.h"
+#include "util/result.h"
 
 namespace duetos::util
 {
+
+using ::duetos::core::Err;
+using ::duetos::core::ErrorCode;
+using ::duetos::core::Result;
 
 namespace
 {
@@ -188,32 +193,31 @@ u32 FormatIso8601(const DateTime& dt, char* out, u32 out_cap)
 namespace
 {
 
-bool DigitVal(char c, u32& v)
+Result<u32> DigitVal(char c)
 {
     if (c < '0' || c > '9')
-        return false;
-    v = u32(c - '0');
-    return true;
+        return Err{ErrorCode::InvalidArgument};
+    return u32(c - '0');
 }
 
-bool ReadFixedDigits(const char* s, u32 n, u32& v)
+Result<u32> ReadFixedDigits(const char* s, u32 n)
 {
-    v = 0;
+    u32 v = 0;
     for (u32 i = 0; i < n; ++i)
     {
-        u32 d;
-        if (!DigitVal(s[i], d))
-            return false;
-        v = v * 10 + d;
+        const auto d = DigitVal(s[i]);
+        if (!d.has_value())
+            return Err{d.error(), d.location()};
+        v = v * 10 + d.value();
     }
-    return true;
+    return v;
 }
 
-bool AddSecondsToDateTime(DateTime& dt, i64 delta_secs)
+Result<void> AddSecondsToDateTime(DateTime& dt, i64 delta_secs)
 {
     const u64 jdn_u = JulianDayFromYmd(dt.year, dt.month, dt.day);
     if (jdn_u == kJulianDayInvalid)
-        return false;
+        return Err{ErrorCode::InvalidArgument};
 
     i64 total = i64(dt.hour) * 3600 + i64(dt.minute) * 60 + i64(dt.second) + delta_secs;
     i64 day_delta = total / 86400;
@@ -226,99 +230,113 @@ bool AddSecondsToDateTime(DateTime& dt, i64 delta_secs)
 
     const i64 jdn = i64(jdn_u) + day_delta;
     if (jdn < 0)
-        return false;
+        return Err{ErrorCode::InvalidArgument};
 
     YmdFromJulianDay(u64(jdn), dt.year, dt.month, dt.day);
     dt.hour = u8(sec_in_day / 3600);
     dt.minute = u8((sec_in_day / 60) % 60);
     dt.second = u8(sec_in_day % 60);
-    return true;
+    return {};
 }
 
-bool ParseTimezoneOffsetSeconds(const char* s, u32 len, u32 i, i64& offset_secs)
+Result<void> ParseTimezoneOffsetSeconds(const char* s, u32 len, u32 i, i64& offset_secs)
 {
     offset_secs = 0;
     if (i >= len)
-        return false;
+        return Err{ErrorCode::InvalidArgument};
 
     if (s[i] == 'Z')
-        return i + 1 == len;
+        return (i + 1 == len) ? Result<void>{} : Result<void>{Err{ErrorCode::InvalidArgument}};
 
     if (s[i] != '+' && s[i] != '-')
-        return false;
+        return Err{ErrorCode::InvalidArgument};
     const i64 sign = (s[i] == '+') ? 1 : -1;
     if (i + 6 != len)
-        return false;
+        return Err{ErrorCode::InvalidArgument};
 
-    u32 off_hh = 0;
-    u32 off_mm = 0;
-    if (!ReadFixedDigits(s + i + 1, 2, off_hh))
-        return false;
+    const auto off_hh_r = ReadFixedDigits(s + i + 1, 2);
+    if (!off_hh_r.has_value())
+        return Err{off_hh_r.error(), off_hh_r.location()};
     if (s[i + 3] != ':')
-        return false;
-    if (!ReadFixedDigits(s + i + 4, 2, off_mm))
-        return false;
+        return Err{ErrorCode::InvalidArgument};
+    const auto off_mm_r = ReadFixedDigits(s + i + 4, 2);
+    if (!off_mm_r.has_value())
+        return Err{off_mm_r.error(), off_mm_r.location()};
+    const u32 off_hh = off_hh_r.value();
+    const u32 off_mm = off_mm_r.value();
     if (off_hh > 23 || off_mm > 59)
-        return false;
+        return Err{ErrorCode::InvalidArgument};
 
     offset_secs = sign * (i64(off_hh) * 3600 + i64(off_mm) * 60);
-    return true;
+    return {};
 }
 
 } // namespace
 
-bool ParseIso8601(const char* s, u32 len, DateTime& out)
+Result<void> ParseIso8601(const char* s, u32 len, DateTime& out)
 {
     out = {};
     if (len < 10)
-        return false;
-    u32 yyyy = 0;
-    if (!ReadFixedDigits(s, 4, yyyy))
-        return false;
+        return Err{ErrorCode::InvalidArgument};
+    // Local digit-field reader: parses `n` fixed digits at `s+at`
+    // into `dst`, returning false on a non-digit. Hoists the
+    // repeated has_value()/error() dance into one place so each
+    // call site stays a single `if`. (RESULT_TRY_ASSIGN can't be
+    // stacked in one scope — its `_resta_##__LINE__` temporary
+    // doesn't expand __LINE__, so two uses collide; see result.h.)
+    auto read_field = [&](u32 at, u32 n, u32& dst) -> bool
+    {
+        const auto r = ReadFixedDigits(s + at, n);
+        if (!r.has_value())
+            return false;
+        dst = r.value();
+        return true;
+    };
+    u32 yyyy = 0, mo = 0, dd = 0;
+    if (!read_field(0, 4, yyyy))
+        return Err{ErrorCode::InvalidArgument};
     if (s[4] != '-')
-        return false;
-    u32 mo = 0;
-    if (!ReadFixedDigits(s + 5, 2, mo))
-        return false;
+        return Err{ErrorCode::InvalidArgument};
+    if (!read_field(5, 2, mo))
+        return Err{ErrorCode::InvalidArgument};
     if (s[7] != '-')
-        return false;
-    u32 dd = 0;
-    if (!ReadFixedDigits(s + 8, 2, dd))
-        return false;
+        return Err{ErrorCode::InvalidArgument};
+    if (!read_field(8, 2, dd))
+        return Err{ErrorCode::InvalidArgument};
     out.year = i32(yyyy);
     out.month = u8(mo);
     out.day = u8(dd);
     if (!DateValid(out.year, out.month, out.day))
-        return false;
+        return Err{ErrorCode::InvalidArgument};
 
     if (len == 10)
     {
         // Date-only form; time fields stay zero.
-        return true;
+        return {};
     }
     if (len < 19)
-        return false;
+        return Err{ErrorCode::InvalidArgument};
     if (s[10] != 'T' && s[10] != ' ')
-        return false;
+        return Err{ErrorCode::InvalidArgument};
     u32 hh = 0, mm = 0, ss = 0;
-    if (!ReadFixedDigits(s + 11, 2, hh))
-        return false;
+    if (!read_field(11, 2, hh))
+        return Err{ErrorCode::InvalidArgument};
     if (s[13] != ':')
-        return false;
-    if (!ReadFixedDigits(s + 14, 2, mm))
-        return false;
+        return Err{ErrorCode::InvalidArgument};
+    if (!read_field(14, 2, mm))
+        return Err{ErrorCode::InvalidArgument};
     if (s[16] != ':')
-        return false;
-    if (!ReadFixedDigits(s + 17, 2, ss))
-        return false;
+        return Err{ErrorCode::InvalidArgument};
+    if (!read_field(17, 2, ss))
+        return Err{ErrorCode::InvalidArgument};
     if (!TimeValid(u8(hh), u8(mm), u8(ss)))
-        return false;
+        return Err{ErrorCode::InvalidArgument};
     out.hour = u8(hh);
     out.minute = u8(mm);
     out.second = u8(ss);
 
     if (len == 19)
-        return true; // unsuffixed; assume Z
+        return {}; // unsuffixed; assume Z
 
     u32 i = 19;
     if (s[i] == '.')
@@ -332,17 +350,16 @@ bool ParseIso8601(const char* s, u32 len, DateTime& out)
             ++frac_digits;
         }
         if (frac_digits == 0)
-            return false;
+            return Err{ErrorCode::InvalidArgument};
     }
     if (i == len)
-        return true;
+        return {};
 
     i64 offset_secs = 0;
-    if (!ParseTimezoneOffsetSeconds(s, len, i, offset_secs))
-        return false;
+    RESULT_TRY(ParseTimezoneOffsetSeconds(s, len, i, offset_secs));
 
     if (offset_secs == 0)
-        return true;
+        return {};
 
     // ISO 8601 offsets describe local time relative to UTC. Convert
     // to the UTC instant represented by the existing DateTime shape:
@@ -409,7 +426,7 @@ void DateTimeSelfTest()
             KASSERT(buf[i] == want[i], "util/datetime", "format content wrong");
 
         DateTime out;
-        KASSERT(ParseIso8601(buf, n, out), "util/datetime", "parse round-trip failed");
+        KASSERT(ParseIso8601(buf, n, out).has_value(), "util/datetime", "parse round-trip failed");
         KASSERT(out.year == 2026 && out.month == 5 && out.day == 3 && out.hour == 14 && out.minute == 7 &&
                     out.second == 30,
                 "util/datetime", "parse round-trip mismatch");
@@ -418,24 +435,27 @@ void DateTimeSelfTest()
     {
         DateTime out;
         // Date-only.
-        KASSERT(ParseIso8601("2026-01-15", 10, out), "util/datetime", "date-only parse failed");
+        KASSERT(ParseIso8601("2026-01-15", 10, out).has_value(), "util/datetime", "date-only parse failed");
         KASSERT(out.year == 2026 && out.month == 1 && out.day == 15 && out.hour == 0, "util/datetime",
                 "date-only fields wrong");
         // No-Z suffix.
-        KASSERT(ParseIso8601("2026-05-03T14:07:30", 19, out), "util/datetime", "no-Z parse failed");
+        KASSERT(ParseIso8601("2026-05-03T14:07:30", 19, out).has_value(), "util/datetime", "no-Z parse failed");
         // Fractional seconds.
-        KASSERT(ParseIso8601("2026-05-03T14:07:30.123Z", 24, out), "util/datetime", "frac-sec parse failed");
+        KASSERT(ParseIso8601("2026-05-03T14:07:30.123Z", 24, out).has_value(), "util/datetime",
+                "frac-sec parse failed");
         KASSERT(out.second == 30, "util/datetime", "frac-sec second field wrong");
         // Numeric UTC offsets are normalised into the UTC DateTime shape.
-        KASSERT(ParseIso8601("2026-05-03T14:07:30+02:30", 25, out), "util/datetime", "positive tz-offset parse failed");
+        KASSERT(ParseIso8601("2026-05-03T14:07:30+02:30", 25, out).has_value(), "util/datetime",
+                "positive tz-offset parse failed");
         KASSERT(out.year == 2026 && out.month == 5 && out.day == 3 && out.hour == 11 && out.minute == 37 &&
                     out.second == 30,
                 "util/datetime", "positive tz-offset normalisation wrong");
-        KASSERT(ParseIso8601("2026-05-03T23:30:00-02:00", 25, out), "util/datetime", "negative tz-offset parse failed");
+        KASSERT(ParseIso8601("2026-05-03T23:30:00-02:00", 25, out).has_value(), "util/datetime",
+                "negative tz-offset parse failed");
         KASSERT(out.year == 2026 && out.month == 5 && out.day == 4 && out.hour == 1 && out.minute == 30 &&
                     out.second == 0,
                 "util/datetime", "negative tz-offset day rollover wrong");
-        KASSERT(ParseIso8601("2026-01-01T00:15:00+01:00", 25, out), "util/datetime",
+        KASSERT(ParseIso8601("2026-01-01T00:15:00+01:00", 25, out).has_value(), "util/datetime",
                 "year-boundary tz-offset parse failed");
         KASSERT(out.year == 2025 && out.month == 12 && out.day == 31 && out.hour == 23 && out.minute == 15,
                 "util/datetime", "year-boundary tz-offset rollover wrong");
@@ -476,16 +496,19 @@ void DateTimeSelfTest()
     {
         DateTime out;
         // Invalid month.
-        KASSERT(!ParseIso8601("2026-13-01", 10, out), "util/datetime", "month=13 not rejected");
+        KASSERT(!ParseIso8601("2026-13-01", 10, out).has_value(), "util/datetime", "month=13 not rejected");
         // Invalid day for Feb non-leap year.
-        KASSERT(!ParseIso8601("2025-02-29", 10, out), "util/datetime", "non-leap Feb 29 not rejected");
+        KASSERT(!ParseIso8601("2025-02-29", 10, out).has_value(), "util/datetime", "non-leap Feb 29 not rejected");
         // Bad separator.
-        KASSERT(!ParseIso8601("2026/05/03", 10, out), "util/datetime", "slash separator not rejected");
+        KASSERT(!ParseIso8601("2026/05/03", 10, out).has_value(), "util/datetime", "slash separator not rejected");
         // Malformed timezone offset.
-        KASSERT(!ParseIso8601("2026-05-03T14:07:30+24:00", 25, out), "util/datetime", "tz offset hour=24 not rejected");
-        KASSERT(!ParseIso8601("2026-05-03T14:07:30+02", 22, out), "util/datetime", "short tz offset not rejected");
+        KASSERT(!ParseIso8601("2026-05-03T14:07:30+24:00", 25, out).has_value(), "util/datetime",
+                "tz offset hour=24 not rejected");
+        KASSERT(!ParseIso8601("2026-05-03T14:07:30+02", 22, out).has_value(), "util/datetime",
+                "short tz offset not rejected");
         // Empty fractional digits.
-        KASSERT(!ParseIso8601("2026-05-03T14:07:30.Z", 21, out), "util/datetime", "empty frac not rejected");
+        KASSERT(!ParseIso8601("2026-05-03T14:07:30.Z", 21, out).has_value(), "util/datetime",
+                "empty frac not rejected");
     }
 }
 

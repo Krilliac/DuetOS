@@ -263,8 +263,8 @@ bool RunCanonicalLifecycle()
     // Spec-form descriptor writes — exercises the array entry
     // alongside the per-binding form so both code paths cover.
     const VkWriteDescriptorSet writes[] = {
-        VkWriteDescriptorSet{dset, 0, VkDescriptorType::UniformBuffer, buf},
-        VkWriteDescriptorSet{dset, 1, VkDescriptorType::CombinedImageSampler, view},
+        VkWriteDescriptorSet{dset, 0, VkDescriptorType::UniformBuffer, buf, 0},
+        VkWriteDescriptorSet{dset, 1, VkDescriptorType::CombinedImageSampler, view, 0},
     };
     if (VkUpdateDescriptorSets(dev, 2, writes, 0, nullptr) != VkResult::Success)
         return SelftestFail("[selftest:graphics] VkUpdateDescriptorSets(array) failed", 0);
@@ -778,9 +778,9 @@ bool RunCanonicalLifecycle()
         internal::WriteTexelBgra8(stor_img, 1, 0, 0xFF112233u);
         // Cookie at (3, 4); read back must match.
         internal::WriteTexelBgra8(stor_img, 3, 4, 0xAABBCCDDu);
-        const u32 read_back = internal::FetchTexelBgra8(stor_img, 3, 4);
-        if (read_back != 0xAABBCCDDu)
-            return SelftestFail("[selftest:graphics] storage-image texel round-trip mismatch", read_back);
+        const u32 texel_back = internal::FetchTexelBgra8(stor_img, 3, 4);
+        if (texel_back != 0xAABBCCDDu)
+            return SelftestFail("[selftest:graphics] storage-image texel round-trip mismatch", texel_back);
         // Out-of-bounds write: silently dropped; sentinel at (1, 0)
         // must still read back unchanged.
         internal::WriteTexelBgra8(stor_img, 999, 999, 0xDEADBEEFu);
@@ -821,23 +821,23 @@ bool RunCanonicalLifecycle()
         internal::WriteTexel(r8_img, 2, 3, wrote);
         wrote[0] = half_bits;
         internal::WriteTexel(r8_img, 4, 5, wrote);
-        u32 read_back[4]{};
-        internal::FetchTexel(r8_img, 2, 3, read_back);
+        u32 r8_back[4]{};
+        internal::FetchTexel(r8_img, 2, 3, r8_back);
         // R8 round-trip: 1.0 packs to 255 then unpacks to 1.0
         // exactly (255/255 == 1.0).
-        if (read_back[0] != one_bits)
-            return SelftestFail("[selftest:graphics] R8 round-trip(1.0) mismatch", read_back[0]);
-        if (read_back[3] != one_bits) // alpha default
-            return SelftestFail("[selftest:graphics] R8 alpha default wrong", read_back[3]);
-        internal::FetchTexel(r8_img, 4, 5, read_back);
+        if (r8_back[0] != one_bits)
+            return SelftestFail("[selftest:graphics] R8 round-trip(1.0) mismatch", r8_back[0]);
+        if (r8_back[3] != one_bits) // alpha default
+            return SelftestFail("[selftest:graphics] R8 alpha default wrong", r8_back[3]);
+        internal::FetchTexel(r8_img, 4, 5, r8_back);
         // 0.5 packs to u8 127 (Sf32ToI32 truncates: 0.5*255 = 127.5 -> 127);
         // 127/255 = 0.498... ≈ 0x3EFEFEFE
         // Just assert it's bounded — exact value would over-pin to
         // the truncation choice.
-        const ::duetos::core::Sf32 unpacked{read_back[0]};
+        const ::duetos::core::Sf32 unpacked{r8_back[0]};
         if (::duetos::core::Sf32LessThan(unpacked, ::duetos::core::Sf32FromBits(0x3E800000u)) || // < 0.25
             ::duetos::core::Sf32GreaterThan(unpacked, ::duetos::core::Sf32FromBits(0x3F800000u)))
-            return SelftestFail("[selftest:graphics] R8 round-trip(0.5) out of range", read_back[0]);
+            return SelftestFail("[selftest:graphics] R8 round-trip(0.5) out of range", r8_back[0]);
         VkDestroyImage(dev, r8_img);
         VkFreeMemory(dev, r8_mem);
     }
@@ -856,11 +856,11 @@ bool RunCanonicalLifecycle()
         // memory; no clamp/quantise).
         const u32 wrote[4] = {0x40200000u, 0xBF800000u, 0x42C80000u, 0x00000000u};
         internal::WriteTexel(f32_img, 1, 2, wrote);
-        u32 read_back[4]{};
-        internal::FetchTexel(f32_img, 1, 2, read_back);
+        u32 f32_back[4]{};
+        internal::FetchTexel(f32_img, 1, 2, f32_back);
         for (u32 c = 0; c < 4; ++c)
         {
-            if (read_back[c] != wrote[c])
+            if (f32_back[c] != wrote[c])
                 return SelftestFail("[selftest:graphics] f32x4 component round-trip mismatch", c);
         }
         VkDestroyImage(dev, f32_img);
@@ -880,7 +880,7 @@ bool RunCanonicalLifecycle()
             return SelftestFail("[selftest:graphics] BeginDebugUtilsLabel failed", 0);
         if (VkCmdInsertDebugUtilsLabelEXT(dbg_cb, "midpoint") != VkResult::Success)
             return SelftestFail("[selftest:graphics] InsertDebugUtilsLabel failed", 0);
-        const VkWriteDescriptorSet pd_write{dset, 0, VkDescriptorType::UniformBuffer, buf};
+        const VkWriteDescriptorSet pd_write{dset, 0, VkDescriptorType::UniformBuffer, buf, 0};
         const u32 pd_before = internal::PushDescriptorWritesCount();
         if (VkCmdPushDescriptorSetKHR(dbg_cb, VkPipelineBindPoint::Graphics, pl_layout, 0, 1, &pd_write) !=
             VkResult::Success)

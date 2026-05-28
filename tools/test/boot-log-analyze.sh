@@ -266,6 +266,19 @@ if [ "$pd_umbrella" -gt 0 ] && [ "$pd_widgets" -eq 0 ]; then
 fi
 
 hr
+echo "IDIOM AUDIT (kernel/util wave-1)"
+# The idiom-audit phase-1 wave-1 PR (kernel/util Result migration) emits
+# one gate sentinel from ResultSelfTest()'s PASS path. Its presence proves
+# the migrated kernel/util code is still on the live boot path; its absence
+# means either ResultSelfTest() regressed or the boot died before it ran.
+ia_wave1=$(gc '\[idiom-audit-selftest\] PASS \(wave-1\)')
+echo "  wave-1=${ia_wave1}"
+if [ "$ia_wave1" -eq 0 ]; then
+    echo "  !! [idiom-audit-selftest] PASS (wave-1) sentinel missing (ResultSelfTest regressed OR boot died before it)"
+    rc=1
+fi
+
+hr
 echo "LOCKDEP"
 invn=$(gc 'inversion detected')
 if [ "$invn" -gt 0 ]; then

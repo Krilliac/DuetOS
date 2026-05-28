@@ -1,6 +1,11 @@
 #include "util/base64.h"
 
 #include "core/panic.h"
+#include "util/result.h"
+
+using ::duetos::core::Err;
+using ::duetos::core::ErrorCode;
+using ::duetos::core::Result;
 
 /*
  * Reference: RFC 4648 §4 (standard base64 alphabet with '='
@@ -88,10 +93,10 @@ u32 Base64Encode(const u8* in, u32 len, char* out)
     return j;
 }
 
-bool Base64Decode(const char* in, u32 in_len, u8* out, u32 out_capacity, u32* out_bytes)
+Result<u32> Base64Decode(const char* in, u32 in_len, u8* out, u32 out_capacity)
 {
-    if (in == nullptr || out == nullptr || out_bytes == nullptr)
-        return false;
+    if (in == nullptr || out == nullptr)
+        return Err{ErrorCode::InvalidArgument};
     InitDecodeTable();
 
     u32 quad[4];
@@ -106,20 +111,20 @@ bool Base64Decode(const char* in, u32 in_len, u8* out, u32 out_capacity, u32* ou
         if (v == kWs)
             continue;
         if (v == kBad)
-            return false;
+            return Err{ErrorCode::Corrupt};
         if (past_pad && v != kWs)
-            return false; // bytes after a '=' that aren't whitespace
+            return Err{ErrorCode::Corrupt}; // bytes after a '=' that aren't whitespace
         if (v == kPad)
         {
             ++pad_seen;
             if (pad_seen > 2)
-                return false;
+                return Err{ErrorCode::Corrupt};
             quad[quad_fill++] = kPad;
         }
         else
         {
             if (pad_seen != 0)
-                return false; // alphabet byte after '='
+                return Err{ErrorCode::Corrupt}; // alphabet byte after '='
             quad[quad_fill++] = v;
         }
         if (quad_fill == 4)
@@ -130,23 +135,23 @@ bool Base64Decode(const char* in, u32 in_len, u8* out, u32 out_capacity, u32* ou
             const u32 c = quad[2];
             const u32 d = quad[3];
             if (a == kPad || b == kPad)
-                return false; // first two MUST be alphabet
+                return Err{ErrorCode::Corrupt}; // first two MUST be alphabet
             if (c == kPad && d != kPad)
-                return false; // can't have "X=Y"
+                return Err{ErrorCode::Corrupt}; // can't have "X=Y"
             const u32 val = (a << 18) | (b << 12) | ((c == kPad ? 0u : c) << 6) | (d == kPad ? 0u : d);
             if (written >= out_capacity)
-                return false;
+                return Err{ErrorCode::BufferTooSmall};
             out[written++] = static_cast<u8>((val >> 16) & 0xFFu);
             if (c != kPad)
             {
                 if (written >= out_capacity)
-                    return false;
+                    return Err{ErrorCode::BufferTooSmall};
                 out[written++] = static_cast<u8>((val >> 8) & 0xFFu);
             }
             if (d != kPad)
             {
                 if (written >= out_capacity)
-                    return false;
+                    return Err{ErrorCode::BufferTooSmall};
                 out[written++] = static_cast<u8>(val & 0xFFu);
             }
             if (c == kPad || d == kPad)
@@ -155,9 +160,8 @@ bool Base64Decode(const char* in, u32 in_len, u8* out, u32 out_capacity, u32* ou
         }
     }
     if (quad_fill != 0)
-        return false; // truncated input — encoded data is always 4-aligned
-    *out_bytes = written;
-    return true;
+        return Err{ErrorCode::Corrupt}; // truncated input — encoded data is always 4-aligned
+    return written;
 }
 
 void Base64SelfTest()
@@ -192,9 +196,9 @@ void Base64SelfTest()
             KASSERT(enc[k] == vectors[v].encoded[k], "util/base64", "RFC 4648 encode byte mismatch");
 
         u8 dec[16];
-        u32 dec_bytes = 0;
-        const bool ok = Base64Decode(vectors[v].encoded, expected_len, dec, sizeof(dec), &dec_bytes);
-        KASSERT(ok, "util/base64", "RFC 4648 decode rejected valid encoding");
+        const auto r = Base64Decode(vectors[v].encoded, expected_len, dec, sizeof(dec));
+        KASSERT(r.has_value(), "util/base64", "RFC 4648 decode rejected valid encoding");
+        const u32 dec_bytes = r.has_value() ? r.value() : 0;
         KASSERT(dec_bytes == vectors[v].raw_len, "util/base64", "RFC 4648 decode length mismatch");
         for (u32 k = 0; k < dec_bytes; ++k)
             KASSERT(dec[k] == static_cast<u8>(vectors[v].raw[k]), "util/base64", "RFC 4648 decode byte mismatch");
@@ -204,9 +208,9 @@ void Base64SelfTest()
     {
         const char* enc = "Zm9v\r\nYmFy";
         u8 dec[8];
-        u32 dec_bytes = 0;
-        const bool ok = Base64Decode(enc, 10, dec, sizeof(dec), &dec_bytes);
-        KASSERT(ok, "util/base64", "decode rejected whitespace-tolerant input");
+        const auto r = Base64Decode(enc, 10, dec, sizeof(dec));
+        KASSERT(r.has_value(), "util/base64", "decode rejected whitespace-tolerant input");
+        const u32 dec_bytes = r.has_value() ? r.value() : 0;
         KASSERT(dec_bytes == 6, "util/base64", "decode-with-whitespace len mismatch");
         const u8 want[6] = {'f', 'o', 'o', 'b', 'a', 'r'};
         for (u32 k = 0; k < 6; ++k)
@@ -216,18 +220,17 @@ void Base64SelfTest()
     // Bad-input rejection.
     {
         u8 dec[8];
-        u32 dec_bytes = 0;
         // Non-alphabet character.
-        KASSERT(!Base64Decode("Zm$v", 4, dec, sizeof(dec), &dec_bytes), "util/base64", "decode accepted '$'");
+        KASSERT(!Base64Decode("Zm$v", 4, dec, sizeof(dec)).has_value(), "util/base64", "decode accepted '$'");
         // Truncated (not multiple of 4 after whitespace strip).
-        KASSERT(!Base64Decode("Zm9", 3, dec, sizeof(dec), &dec_bytes), "util/base64",
+        KASSERT(!Base64Decode("Zm9", 3, dec, sizeof(dec)).has_value(), "util/base64",
                 "decode accepted truncated input");
         // Padding in the wrong place.
-        KASSERT(!Base64Decode("Z=9v", 4, dec, sizeof(dec), &dec_bytes), "util/base64",
+        KASSERT(!Base64Decode("Z=9v", 4, dec, sizeof(dec)).has_value(), "util/base64",
                 "decode accepted '=' before alphabet");
         // Output buffer too small.
         u8 small[1];
-        KASSERT(!Base64Decode("Zm9vYmFy", 8, small, sizeof(small), &dec_bytes), "util/base64",
+        KASSERT(!Base64Decode("Zm9vYmFy", 8, small, sizeof(small)).has_value(), "util/base64",
                 "decode accepted into undersized output");
     }
 }

@@ -52,18 +52,18 @@ namespace duetos::util
 template <typename F> class ScopeGuard
 {
   public:
-    explicit ScopeGuard(F fn) : fn_(fn), active_(true) {}
+    explicit ScopeGuard(F fn) : m_fn(fn), m_active(true) {}
 
     ~ScopeGuard()
     {
-        if (active_)
-            fn_();
+        if (m_active)
+            m_fn();
     }
 
     // Disarm the guard — the deferred action will NOT fire when the
     // guard goes out of scope. Call this on the success path after
     // every fallible step has succeeded.
-    void dismiss() { active_ = false; }
+    void dismiss() { m_active = false; }
 
     // Non-copyable, non-movable: the guard owns one cleanup
     // commitment and that commitment lives at exactly one stack
@@ -76,8 +76,8 @@ template <typename F> class ScopeGuard
     ScopeGuard& operator=(ScopeGuard&&) = delete;
 
   private:
-    F fn_;
-    bool active_;
+    F m_fn;
+    bool m_active;
 };
 
 // Factory used by the macro — lets CTAD deduce F without the caller

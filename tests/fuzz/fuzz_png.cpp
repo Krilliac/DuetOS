@@ -36,6 +36,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
         return 0;
 
     static duetos::u32 out[4u * 1024u * 1024u];
-    (void)duetos::util::PngDecode(src, static_cast<duetos::u32>(size), info, scratch, sizeof(scratch), out);
+    // Fuzzer cares about crashes / out-of-bounds reads, not return
+    // value — drop the Result intentionally. `.has_value()` keeps
+    // the [[nodiscard]] contract honoured without further branching.
+    (void)duetos::util::PngDecode(src, static_cast<duetos::u32>(size), info, scratch, sizeof(scratch), out).has_value();
     return 0;
 }

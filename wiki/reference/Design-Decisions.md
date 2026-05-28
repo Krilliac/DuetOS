@@ -10290,3 +10290,56 @@ filesystem" item that listed NVMe/AHCI flush as "wired alongside
 FUA writes" — flush+discard now lead, FUA-write is a follow-on.
 Unblocks any FS-write slice that needs durable commit (ext4
 write, NTFS write, DuetFS Rust-side flush hook).
+
+## 2026-05-28 — `[[nodiscard]]` Pattern-5 sweep annotates only ref/ptr-returning `Result` functions, not by-value ones
+
+**Decision:** the idiom-audit Phase-1 Pattern-5 sweep adds
+`[[nodiscard]]` only to functions whose return type is a
+*glvalue* `Result` — `Result<T>&`, `const Result<T>&`,
+`Result<T>*`. Functions returning `Result<T>` **by value** are
+NOT annotated, because `Result` is already declared
+`class [[nodiscard]]` (`kernel/util/result.h:180`) and the
+type-level attribute already diagnoses every discarded prvalue.
+Wave 1 (`kernel/util`) found **zero** ref/ptr-returning `Result`
+functions, so the Pattern-5 sweep is a no-op for this PR.
+
+This narrows the spec's §2 goal ("Add `[[nodiscard]]` to every
+function declaration returning `Result<T, E>`") and its §6.5
+mechanical rule ("Every function declaration ... gets
+`[[nodiscard]]`"). The spec's §6.5 skip-rule already noted the
+type is `[[nodiscard]]` but asserted function-level "matters for
+many call patterns" — that is true *only* for glvalue returns,
+which is the set this decision keeps.
+
+**Verified:** GCC 16.1 / `-std=c++23 -Wall -Wextra` on a minimal
+`class [[nodiscard]] Result<T>` reproduction: discarding a
+by-value `Result<int> f()` call already emits
+`-Wunused-result` ("ignoring returned value of type 'Result<int>',
+declared with attribute 'nodiscard'", citing both the type and the
+function). Adding `[[nodiscard]]` to the function changed only the
+diagnostic wording, not whether it fired. Tree grep
+(`Result<...>[&*]` returns under `kernel/util`) returned 0 matches.
+
+**Alternatives considered and rejected:**
+- *Annotate all 122 by-value returners anyway (spec literal).*
+  Adds zero diagnostic coverage on GCC/Clang for prvalue returns
+  and violates the CLAUDE.md anti-bloat rule ("write only what is
+  needed today"). Rejected as redundant noise.
+- *Annotate none, ever (drop Pattern 5 entirely).* Wrong for
+  later waves: a function returning `const Result<T>&` (e.g. an
+  accessor that hands back a cached result) is NOT caught by the
+  type-level attribute, so the function-level annotation is the
+  only signal there. Keeping the precise rule preserves that.
+
+**Sources:** [dcl.attr.nodiscard] (the attribute applies to a
+*type* for discarded prvalues of that type; to a *function* for
+that function's discarded result regardless of value category);
+GCC 16.1 `-Wunused-result` behaviour as reproduced above;
+`kernel/util/result.h:180` (`class [[nodiscard]] Result`).
+
+**Related roadmap track(s):** Refines idiom-audit Phase-1 spec
+§2/§6.5 for Waves 2+ (`log`, `sync`, `mm`, `core`, then
+`userland`): the Pattern-5 worklist for each wave is
+"ref/ptr-returning `Result` functions", not "all `Result`
+returners". No separate roadmap item; tracked in the phase-1
+spec under `docs/superpowers/specs/`.

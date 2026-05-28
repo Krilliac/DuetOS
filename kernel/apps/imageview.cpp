@@ -37,8 +37,7 @@ using duetos::drivers::video::WindowSetContentDraw;
 constexpr u32 kMaxFiles = 64; // ~64 BMPs in the root tracked at once
 constexpr u32 kNameCap = 16;  // 8.3 = 12 chars + NUL, with slack
 constexpr u32 kStatusCap = 96;
-constexpr u32 kRowH = 10;      // 8x8 glyph + 2 px padding
-constexpr u32 kHeaderRows = 2; // status line + filename / pos line
+constexpr u32 kRowH = 10; // 8x8 glyph + 2 px padding
 
 // BMP-format constants (BITMAPFILEHEADER + BITMAPINFOHEADER) +
 // header parser now live in `kernel/util/bmp.h`. The aliases
@@ -856,7 +855,7 @@ bool DecodeTga(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const c
         return false;
     }
     u32* inter = static_cast<u32*>(inter_alloc);
-    const bool ok = duetos::util::TgaDecodeUncompressed(file_buf, static_cast<u32>(read), info, inter);
+    const bool ok = duetos::util::TgaDecodeUncompressed(file_buf, static_cast<u32>(read), info, inter).has_value();
     mm::KFree(file_alloc);
     if (!ok)
     {
@@ -989,7 +988,8 @@ bool DecodePng(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const c
     }
     u32* inter = static_cast<u32*>(inter_alloc);
     const bool ok = duetos::util::PngDecode(file_buf, static_cast<u32>(read), info, static_cast<u8*>(scratch_alloc),
-                                            static_cast<u32>(scratch_bytes), inter);
+                                            static_cast<u32>(scratch_bytes), inter)
+                        .has_value();
     mm::KFree(scratch_alloc);
     mm::KFree(file_alloc);
     if (!ok)
@@ -1106,8 +1106,10 @@ bool DecodeJpeg(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const 
         StatusAppendStr(name);
         return false;
     }
-    const u64 n = duetos::util::JpegDecode(file_buf, static_cast<u32>(read), info, static_cast<u8*>(scratch_alloc),
-                                           scratch_bytes, static_cast<u32*>(inter_alloc));
+    const auto decoded =
+        duetos::util::JpegDecode(file_buf, static_cast<u32>(read), info, static_cast<u8*>(scratch_alloc), scratch_bytes,
+                                 static_cast<u32*>(inter_alloc));
+    const u64 n = decoded.has_value() ? decoded.value() : 0;
     mm::KFree(scratch_alloc);
     mm::KFree(file_alloc);
     if (n == 0)
@@ -1217,7 +1219,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
     // Image canvas band — between (status + header) at the top
     // and the AppLabel footer at the bottom. Mirrors the legacy
-    // `reserved = kRowH * kHeaderRows + 2` carve-out the raw
+    // `reserved = kRowH * 2 + 2` carve-out the raw
     // FramebufferDrawString header used; the AppLabel header /
     // status combine to the same vertical reach
     // (kIvHeaderH + kIvStatusH = kRowH + kRowH + 2), and we

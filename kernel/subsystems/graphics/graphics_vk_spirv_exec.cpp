@@ -1258,8 +1258,8 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
                 }
                 else
                 {
-                    const i32 i = ::duetos::core::Sf32ToI32(s);
-                    SetScalar(ec, rid, tid, (i < 0) ? 0u : static_cast<u32>(i));
+                    const i32 truncated = ::duetos::core::Sf32ToI32(s);
+                    SetScalar(ec, rid, tid, (truncated < 0) ? 0u : static_cast<u32>(truncated));
                 }
             }
             break;
@@ -1568,8 +1568,8 @@ void ExecuteBlock(ExecContext& ec, u32 block_index)
                 const u32 src_id = w[3];
                 u32 comp[16]{};
                 const u32 n = LoadOperandComponents(ec, src_id, comp, 16);
-                for (u32 i = 0; i < n; ++i)
-                    comp[i] = 0u;
+                for (u32 c = 0; c < n; ++c)
+                    comp[c] = 0u;
                 StoreResultComponents(ec, rid, tid, comp, (n > 0) ? n : 1u);
             }
             break;

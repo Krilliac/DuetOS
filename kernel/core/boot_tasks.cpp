@@ -1465,8 +1465,7 @@ void KbdReaderTask(void*)
                 // the role check above is sufficient for them;
                 // the non-role internal panels likewise have
                 // owner_pid == 0.
-                const bool is_kernel_app =
-                    is_role_app || duetos::drivers::video::WindowOwnerPid(active) == 0;
+                const bool is_kernel_app = is_role_app || duetos::drivers::video::WindowOwnerPid(active) == 0;
                 if (is_kernel_app)
                 {
                     duetos::drivers::video::WindowSetVisible(active, false);
@@ -1915,11 +1914,8 @@ const duetos::drivers::video::MenuItem kStartMenuUtilitiesItems[] = {
     {"TERMINAL", 100 + static_cast<duetos::u32>(StartMenuRole::Terminal), 0, nullptr, 0},
 };
 const duetos::drivers::video::MenuItem kStartMenuPowerItems[] = {
-    {"LOCK", 42, 0, nullptr, 0},
-    {"LOG OUT", 43, 0, nullptr, 0},
-    {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0},
-    {"REBOOT", 40, 0, nullptr, 0},
-    {"SHUT DOWN", 41, 0, nullptr, 0},
+    {"LOCK", 42, 0, nullptr, 0},   {"LOG OUT", 43, 0, nullptr, 0},   {nullptr, 0, kMenuItemFlagSeparator, nullptr, 0},
+    {"REBOOT", 40, 0, nullptr, 0}, {"SHUT DOWN", 41, 0, nullptr, 0},
 };
 
 constexpr duetos::u32 kStartMenuUserAppsCap = 12;

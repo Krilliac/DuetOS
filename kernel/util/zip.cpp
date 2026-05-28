@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "util/deflate.h"
+#include "util/result.h"
 
 namespace duetos::util
 {
@@ -242,9 +243,10 @@ ZipStatus ZipExtractEntry(const ZipReader& reader, u32 index, u8* dst, u32 dst_c
         return ZipStatus::Ok;
     }
     // method == kMethodDeflate
-    const u32 produced = DeflateInflate(compressed, info.compressed_size, dst, dst_cap);
-    if (produced == 0 && info.uncompressed_size != 0)
+    const auto inflated = DeflateInflate(compressed, info.compressed_size, dst, dst_cap);
+    if (!inflated.has_value())
         return ZipStatus::InflateFailed;
+    const u32 produced = inflated.value();
     if (produced != info.uncompressed_size)
         return ZipStatus::InflateFailed;
     *out_bytes = produced;
@@ -303,12 +305,16 @@ inline void Pu32(u8* p, u32 v)
 //   EOCD
 u32 BuildTestZip(u8* buf, u32 buf_cap)
 {
-    auto write_local = [&](u32& cursor, const char* name, u16 method, u32 csize, u32 usize, const u8* data) -> bool
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
+    using ::duetos::core::Result;
+    auto write_local = [&](u32& cursor, const char* name, u16 method, u32 csize, u32 usize,
+                           const u8* data) -> Result<void>
     {
         const u16 name_len = u16(__builtin_strlen(name));
         const u32 need = 30 + name_len + csize;
         if (cursor + need > buf_cap)
-            return false;
+            return Err{ErrorCode::BufferTooSmall};
         u8* p = buf + cursor;
         Pu32(p + 0, 0x04034b50);
         Pu16(p + 4, 20); // version needed
@@ -326,14 +332,15 @@ u32 BuildTestZip(u8* buf, u32 buf_cap)
         for (u32 i = 0; i < csize; ++i)
             p[30 + name_len + i] = data[i];
         cursor += need;
-        return true;
+        return {};
     };
-    auto write_central = [&](u32& cursor, const char* name, u16 method, u32 csize, u32 usize, u32 local_off) -> bool
+    auto write_central = [&](u32& cursor, const char* name, u16 method, u32 csize, u32 usize,
+                             u32 local_off) -> Result<void>
     {
         const u16 name_len = u16(__builtin_strlen(name));
         const u32 need = 46 + name_len;
         if (cursor + need > buf_cap)
-            return false;
+            return Err{ErrorCode::BufferTooSmall};
         u8* p = buf + cursor;
         Pu32(p + 0, 0x02014b50);
         Pu16(p + 4, 20); // version made by
@@ -355,20 +362,20 @@ u32 BuildTestZip(u8* buf, u32 buf_cap)
         for (u16 i = 0; i < name_len; ++i)
             p[46 + i] = u8(name[i]);
         cursor += need;
-        return true;
+        return {};
     };
 
     u32 cur = 0;
     const u32 lh1_off = cur;
-    if (!write_local(cur, "hi.txt", kMethodStored, kStoredLen, kStoredLen, kStoredPayload))
+    if (!write_local(cur, "hi.txt", kMethodStored, kStoredLen, kStoredLen, kStoredPayload).has_value())
         return 0;
     const u32 lh2_off = cur;
-    if (!write_local(cur, "data.bin", kMethodDeflate, kDeflateStreamLen, kDeflateOrigLen, kDeflateStream))
+    if (!write_local(cur, "data.bin", kMethodDeflate, kDeflateStreamLen, kDeflateOrigLen, kDeflateStream).has_value())
         return 0;
     const u32 cd_off = cur;
-    if (!write_central(cur, "hi.txt", kMethodStored, kStoredLen, kStoredLen, lh1_off))
+    if (!write_central(cur, "hi.txt", kMethodStored, kStoredLen, kStoredLen, lh1_off).has_value())
         return 0;
-    if (!write_central(cur, "data.bin", kMethodDeflate, kDeflateStreamLen, kDeflateOrigLen, lh2_off))
+    if (!write_central(cur, "data.bin", kMethodDeflate, kDeflateStreamLen, kDeflateOrigLen, lh2_off).has_value())
         return 0;
     const u32 cd_size = cur - cd_off;
     // EOCD

@@ -2,6 +2,11 @@
 
 #include "core/panic.h"
 #include "img_meta_rust.h"
+#include "util/result.h"
+
+using ::duetos::core::Err;
+using ::duetos::core::ErrorCode;
+using ::duetos::core::Result;
 
 namespace duetos::util
 {
@@ -48,17 +53,17 @@ TgaInfo TgaParseHeader(const u8* hdr)
     return info;
 }
 
-bool TgaDecodeUncompressed(const u8* src, u32 src_len, const TgaInfo& info, u32* out_pixels)
+Result<void> TgaDecodeUncompressed(const u8* src, u32 src_len, const TgaInfo& info, u32* out_pixels)
 {
     if (!info.ok)
-        return false;
+        return Err{ErrorCode::InvalidArgument};
     if (info.image_type != kImageTypeUncompressedTrueColor)
-        return false;
+        return Err{ErrorCode::Unsupported};
 
     const u32 bytes_per_pixel = info.bpp / 8;
     const u64 pixel_bytes = u64(info.width) * info.height * bytes_per_pixel;
     if (u64(info.pixel_offset) + pixel_bytes > u64(src_len))
-        return false;
+        return Err{ErrorCode::Truncated};
 
     const u8* pix = src + info.pixel_offset;
     const u32 w = info.width;
@@ -84,13 +89,13 @@ bool TgaDecodeUncompressed(const u8* src, u32 src_len, const TgaInfo& info, u32*
             dst_row[x] = b | (g << 8) | (r << 16) | (a << 24);
         }
     }
-    return true;
+    return {};
 }
 
-bool TgaWriteHeader32(u8 out[kTgaHeaderBytes], u32 width, u32 height)
+Result<void> TgaWriteHeader32(u8 out[kTgaHeaderBytes], u32 width, u32 height)
 {
     if (width == 0 || height == 0 || width > kTgaMaxDim || height > kTgaMaxDim)
-        return false;
+        return Err{ErrorCode::InvalidArgument};
     for (u32 i = 0; i < kTgaHeaderBytes; ++i)
         out[i] = 0;
     out[kHdrImageType] = u8(kImageTypeUncompressedTrueColor);
@@ -100,7 +105,7 @@ bool TgaWriteHeader32(u8 out[kTgaHeaderBytes], u32 width, u32 height)
     out[kHdrImageHeight + 1] = u8(height >> 8);
     out[kHdrPixelDepth] = 32;
     out[kHdrImageDescriptor] = u8(kDescriptorOriginTop | 0x08); // top-down + 8-bit alpha
-    return true;
+    return {};
 }
 
 u32 TgaEncode32(const u32* pixels, u32 width, u32 height, u8* out, u32 out_cap)
@@ -111,7 +116,7 @@ u32 TgaEncode32(const u32* pixels, u32 width, u32 height, u8* out, u32 out_cap)
     const u64 total = u64(kTgaHeaderBytes) + pixel_bytes;
     if (total > u64(out_cap))
         return 0;
-    if (!TgaWriteHeader32(out, width, height))
+    if (!TgaWriteHeader32(out, width, height).has_value())
         return 0;
     // Pixels: BGRA8888 LE u32 → spec-required B G R A byte order.
     u8* dst = out + kTgaHeaderBytes;
@@ -208,7 +213,7 @@ void TgaSelfTest()
         KASSERT(!info.top_down, "util/tga", "32-bpp fixture must be bottom-up");
 
         u32 px[4] = {0, 0, 0, 0};
-        const bool ok = TgaDecodeUncompressed(buf, len, info, px);
+        const bool ok = TgaDecodeUncompressed(buf, len, info, px).has_value();
         KASSERT(ok, "util/tga", "32-bpp decode failed");
         // Expected output (top-down):
         //   px[0] = (0,0) red    = 0xFF FF 00 00 → B=00 G=00 R=FF A=FF → 0xFFFF0000
@@ -231,7 +236,7 @@ void TgaSelfTest()
         KASSERT(info.top_down, "util/tga", "24-bpp fixture must be top-down");
 
         u32 px = 0;
-        const bool ok = TgaDecodeUncompressed(buf, len, info, &px);
+        const bool ok = TgaDecodeUncompressed(buf, len, info, &px).has_value();
         KASSERT(ok, "util/tga", "24-bpp decode failed");
         // Cyan with implicit alpha=FF: B=FF G=FF R=00 A=FF → 0xFF00FFFF
         KASSERT(px == 0xFF00FFFFu, "util/tga", "24-bpp cyan pixel wrong");
@@ -293,7 +298,8 @@ void TgaSelfTest()
         const TgaInfo info = TgaParseHeader(buf);
         KASSERT(info.ok, "util/tga", "valid header should parse");
         u32 px[16] = {};
-        KASSERT(!TgaDecodeUncompressed(buf, sizeof(buf), info, px), "util/tga", "truncated decode not rejected");
+        KASSERT(!TgaDecodeUncompressed(buf, sizeof(buf), info, px).has_value(), "util/tga",
+                "truncated decode not rejected");
     }
 
     // ----- Encode → Decode round-trip for a 2×2 mosaic.
@@ -307,7 +313,7 @@ void TgaSelfTest()
                 "encode header parse wrong");
         KASSERT(info.top_down, "util/tga", "encode must be top-down");
         u32 round[4] = {};
-        KASSERT(TgaDecodeUncompressed(enc, n, info, round), "util/tga", "encode round-trip decode failed");
+        KASSERT(TgaDecodeUncompressed(enc, n, info, round).has_value(), "util/tga", "encode round-trip decode failed");
         for (u32 i = 0; i < 4; ++i)
             KASSERT(round[i] == mosaic[i], "util/tga", "encode round-trip pixel mismatch");
     }

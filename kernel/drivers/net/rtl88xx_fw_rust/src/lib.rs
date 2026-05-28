@@ -68,7 +68,10 @@ fn classify_signature(sig: u16) -> u8 {
         GEN_RTW89
     } else if sig == SIG_8822B {
         GEN_RTW88
-    } else if matches!(sig, SIG_8192C | SIG_8192D | SIG_8723B | SIG_8723D | SIG_8821 | SIG_8812 | SIG_8814) {
+    } else if matches!(
+        sig,
+        SIG_8192C | SIG_8192D | SIG_8723B | SIG_8723D | SIG_8821 | SIG_8812 | SIG_8814
+    ) {
         GEN_RTLWIFI
     } else {
         GEN_UNKNOWN
@@ -151,8 +154,9 @@ pub unsafe extern "C" fn duetos_rtl88xx_fw_parse(
 #[cfg(test)]
 mod tests {
     extern crate alloc;
-    use super::*;
     use alloc::vec::Vec;
+
+    use super::*;
 
     fn build_image(sig: u16, payload_size: usize) -> Vec<u8> {
         let mut buf = Vec::with_capacity(HEADER_BYTES as usize + payload_size);

@@ -1081,8 +1081,8 @@ u64 SmpStartAps()
             const u32 aid = rec.apic_id;
             const char hex[] = "0123456789abcdef";
             const u32 digits = rec.is_x2apic ? 8u : 2u;
-            for (u32 i = digits; i-- > 0;)
-                buf[n++] = hex[(aid >> (i * 4u)) & 0xFu];
+            for (u32 nib = digits; nib-- > 0;)
+                buf[n++] = hex[(aid >> (nib * 4u)) & 0xFu];
             buf[n++] = '\n';
             buf[n] = '\0';
             SerialWrite(buf);

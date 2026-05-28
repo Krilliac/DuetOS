@@ -164,7 +164,6 @@ constexpr u32 kAboutToolbarBtnH = 18U;
 constexpr u32 kAboutToolbarBtnGap = 4U;
 constexpr u32 kAboutToolbarPadX = 4U;
 constexpr u32 kAboutToolbarPadY = 2U;
-constexpr u32 kAboutActionBtnCount = 1U;
 constexpr u32 kAboutHeaderH = kRowH + 4U;
 constexpr u32 kAboutFooterH = kRowH;
 
@@ -234,7 +233,6 @@ void BindAboutOnce()
     btn->fg_rgb = 0x00101828U;
 
     const auto& th = ThemeCurrent();
-    const u32 fg = th.console_fg;
     const u32 dim = th.banner_fg;
     const u32 bg = th.role_client[static_cast<u32>(ThemeRole::About)];
 

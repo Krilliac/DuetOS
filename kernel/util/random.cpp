@@ -8,6 +8,7 @@
 #include "log/klog.h"
 #include "core/panic.h"
 #include "util/compiler.h"
+#include "util/result.h"
 
 // Image-base symbols from the linker script — used as a last-ditch
 // non-constant input to the splitmix seed when every clock reads
@@ -47,9 +48,9 @@ u64 ReadTsc()
 }
 
 // RDRAND wrapper — retries up to 10x per the Intel recommendation.
-// CF set on success. Returns true iff a valid 64-bit value was
-// obtained.
-bool TryRdrand(u64& out)
+// CF set on success. Returns the 64-bit value on success;
+// `ErrorCode::NotReady` if every retry attempt saw CF clear.
+::duetos::core::Result<u64> TryRdrand()
 {
     ++g_stats.rdrand_calls;
     for (u32 i = 0; i < 10; ++i)
@@ -59,18 +60,17 @@ bool TryRdrand(u64& out)
         asm volatile("rdrand %0; setc %1" : "=r"(val), "=r"(cf));
         if (cf)
         {
-            out = val;
             ++g_stats.rdrand_successes;
-            return true;
+            return val;
         }
     }
-    return false;
+    return ::duetos::core::Err{::duetos::core::ErrorCode::NotReady};
 }
 
 // RDSEED wrapper — same shape, different MSR. RDSEED can fail more
 // often under load; Intel recommends up to 100 retries for seed
 // stretching. We compromise at 32 to bound latency.
-bool TryRdseed(u64& out)
+::duetos::core::Result<u64> TryRdseed()
 {
     ++g_stats.rdseed_calls;
     for (u32 i = 0; i < 32; ++i)
@@ -80,23 +80,27 @@ bool TryRdseed(u64& out)
         asm volatile("rdseed %0; setc %1" : "=r"(val), "=r"(cf));
         if (cf)
         {
-            out = val;
             ++g_stats.rdseed_successes;
-            return true;
+            return val;
         }
     }
-    return false;
+    return ::duetos::core::Err{::duetos::core::ErrorCode::NotReady};
 }
 
 // Pick the best source available. Updates stats. Falls back to
 // splitmix on repeated hardware-source failure.
 u64 GenU64()
 {
-    u64 v;
-    if (g_tier == EntropyTier::Rdseed && TryRdseed(v))
-        return v;
-    if (g_tier >= EntropyTier::Rdrand && TryRdrand(v))
-        return v;
+    if (g_tier == EntropyTier::Rdseed)
+    {
+        if (auto r = TryRdseed(); r.has_value())
+            return r.value();
+    }
+    if (g_tier >= EntropyTier::Rdrand)
+    {
+        if (auto r = TryRdrand(); r.has_value())
+            return r.value();
+    }
     ++g_stats.splitmix_calls;
     return Splitmix64(g_splitmix_state);
 }
@@ -132,16 +136,14 @@ void RandomInit()
     // successful read.
     if (arch::CpuHas(arch::kCpuFeatRdseed))
     {
-        u64 probe;
-        if (TryRdseed(probe))
+        if (TryRdseed().has_value())
         {
             g_tier = EntropyTier::Rdseed;
         }
     }
     if (g_tier < EntropyTier::Rdseed && arch::CpuHas(arch::kCpuFeatRdrand))
     {
-        u64 probe;
-        if (TryRdrand(probe))
+        if (TryRdrand().has_value())
         {
             g_tier = EntropyTier::Rdrand;
         }

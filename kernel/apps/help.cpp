@@ -244,7 +244,6 @@ constexpr u32 kHelpToolbarBtnH = 18U;
 constexpr u32 kHelpToolbarBtnGap = 4U;
 constexpr u32 kHelpToolbarPadX = 4U;
 constexpr u32 kHelpToolbarPadY = 2U;
-constexpr u32 kHelpActionBtnCount = 1U;
 constexpr u32 kHelpHeaderH = kRowH + 4U;
 constexpr u32 kHelpFilterH = kRowH + 4U;
 constexpr u32 kHelpFooterH = kRowH + 2U;
