@@ -553,10 +553,11 @@ pub unsafe extern "C" fn duetos_vt_parser_feed(p: *mut DuetosVtParser, bytes: *c
 #[cfg(test)]
 mod tests {
     extern crate alloc;
-    use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
     use core::cell::RefCell;
+
+    use super::*;
 
     struct Capture {
         prints: RefCell<Vec<u32>>,

@@ -314,10 +314,11 @@ pub unsafe extern "C" fn duetos_tls_parse_server_hello_done(_body: *const u8, le
 #[cfg(test)]
 mod tests {
     extern crate alloc;
-    use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
     use core::ptr;
+
+    use super::*;
 
     fn make_record_view() -> DuetosTlsRecordView {
         DuetosTlsRecordView::default()

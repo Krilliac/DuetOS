@@ -209,8 +209,9 @@ pub unsafe extern "C" fn duetos_nvidia_gsp_fw_parse(
 #[cfg(test)]
 mod tests {
     extern crate alloc;
-    use super::*;
     use alloc::vec::Vec;
+
+    use super::*;
 
     fn build_image(desc_bytes: u32, payload_size: u32, elf_magic: bool) -> Vec<u8> {
         let header_offset = NVIDIA_BIN_HDR_BYTES;
@@ -365,8 +366,8 @@ mod tests {
         // checked_add on u64 catches both.
         let mut img = build_image(NVIDIA_DESC_BYTES_TURING_GA100, 256, false);
         img[0x10..0x14].copy_from_slice(&0xFFFFFF00u32.to_le_bytes()); // data_offset huge
-        img[0x14..0x18].copy_from_slice(&0xFFu32.to_le_bytes());       // data_size small
-        // data_offset >= blob.len() triggers REJECT_DATA_BOUNDS.
+        img[0x14..0x18].copy_from_slice(&0xFFu32.to_le_bytes()); // data_size small
+                                                                 // data_offset >= blob.len() triggers REJECT_DATA_BOUNDS.
         let (r, p) = parse(&img);
         assert_eq!(r, RESULT_CORRUPT);
         assert_ne!(p.reject_reason & REJECT_DATA_BOUNDS, 0);

@@ -365,7 +365,9 @@ fn parse_tcp_options(opts: &[u8], out: &mut DuetosTcpParsedOptions) {
             continue;
         }
         // TLV: need kind + len + (len-2) value bytes.
-        let Some(len_off) = i.checked_add(1) else { return; };
+        let Some(len_off) = i.checked_add(1) else {
+            return;
+        };
         if len_off >= opts.len() {
             return;
         }
@@ -373,7 +375,9 @@ fn parse_tcp_options(opts: &[u8], out: &mut DuetosTcpParsedOptions) {
         if opt_len < 2 {
             return;
         }
-        let Some(end) = i.checked_add(opt_len) else { return; };
+        let Some(end) = i.checked_add(opt_len) else {
+            return;
+        };
         if end > opts.len() {
             return;
         }
@@ -778,14 +782,14 @@ mod tests {
         // computed below.
         let mut h = [0u8; 20];
         h[0] = 0x45; // version=4 IHL=5
-        // total length = 20
+                     // total length = 20
         h[2] = 0;
         h[3] = 20;
         // TTL + protocol just to keep the checksum non-zero.
         h[8] = 64;
         h[9] = 17; // UDP
-        // src/dst zeros — fine.
-        // Compute checksum over the header.
+                   // src/dst zeros — fine.
+                   // Compute checksum over the header.
         let cs = ipv4_header_checksum(&h);
         h[10] = (cs >> 8) as u8;
         h[11] = cs as u8;
@@ -839,7 +843,7 @@ mod tests {
         let mut h = build_minimal_ipv4_header();
         h[2] = 0xFF;
         h[3] = 0xFF; // total_len = 65535, buffer is 20
-        // Recompute checksum so we're only testing the total_len check.
+                     // Recompute checksum so we're only testing the total_len check.
         h[10] = 0;
         h[11] = 0;
         let cs = ipv4_header_checksum(&h);
@@ -898,7 +902,18 @@ mod tests {
     #[test]
     fn tcp_parse_timestamps() {
         // Kind=8, len=10, tsval=0x01020304, tsecr=0x0A0B0C0D.
-        let opts = [TCP_OPT_KIND_TIMESTAMP, 10, 0x01, 0x02, 0x03, 0x04, 0x0A, 0x0B, 0x0C, 0x0D];
+        let opts = [
+            TCP_OPT_KIND_TIMESTAMP,
+            10,
+            0x01,
+            0x02,
+            0x03,
+            0x04,
+            0x0A,
+            0x0B,
+            0x0C,
+            0x0D,
+        ];
         let p = parse_opts(&opts);
         assert!(p.has_timestamp);
         assert_eq!(p.tsval, 0x01020304);
@@ -909,11 +924,30 @@ mod tests {
     fn tcp_parse_chained_syn_options() {
         // Common SYN: MSS 1460, NOP NOP SACK-Permitted, NOP WindowScale 7, NOP NOP TSval+TSecr.
         let opts = [
-            TCP_OPT_KIND_MSS, 4, 0x05, 0xB4,
-            TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_KIND_SACK_PERMITTED, 2,
-            TCP_OPT_NOP, TCP_OPT_KIND_WINDOW_SCALE, 3, 7,
-            TCP_OPT_NOP, TCP_OPT_NOP, TCP_OPT_KIND_TIMESTAMP, 10,
-            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+            TCP_OPT_KIND_MSS,
+            4,
+            0x05,
+            0xB4,
+            TCP_OPT_NOP,
+            TCP_OPT_NOP,
+            TCP_OPT_KIND_SACK_PERMITTED,
+            2,
+            TCP_OPT_NOP,
+            TCP_OPT_KIND_WINDOW_SCALE,
+            3,
+            7,
+            TCP_OPT_NOP,
+            TCP_OPT_NOP,
+            TCP_OPT_KIND_TIMESTAMP,
+            10,
+            0x11,
+            0x22,
+            0x33,
+            0x44,
+            0x55,
+            0x66,
+            0x77,
+            0x88,
         ];
         let p = parse_opts(&opts);
         assert_eq!(p.mss, 1460);
@@ -929,10 +963,22 @@ mod tests {
     fn tcp_parse_end_of_list_stops_walk() {
         // EOL kind=0 ends the walk; later bytes are ignored.
         let opts = [
-            TCP_OPT_KIND_MSS, 4, 0x05, 0xB4,
+            TCP_OPT_KIND_MSS,
+            4,
+            0x05,
+            0xB4,
             TCP_OPT_END_OF_LIST,
             // These shouldn't be parsed — after EOL.
-            TCP_OPT_KIND_TIMESTAMP, 10, 1, 2, 3, 4, 5, 6, 7, 8,
+            TCP_OPT_KIND_TIMESTAMP,
+            10,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
         ];
         let p = parse_opts(&opts);
         assert_eq!(p.mss, 1460);

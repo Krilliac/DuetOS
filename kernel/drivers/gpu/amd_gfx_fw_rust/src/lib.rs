@@ -187,8 +187,9 @@ pub unsafe extern "C" fn duetos_amd_gfx_fw_parse(
 #[cfg(test)]
 mod tests {
     extern crate alloc;
-    use super::*;
     use alloc::vec::Vec;
+
+    use super::*;
 
     fn build_image(header_size: u32, ucode_size: u32, jt_offset_dwords: u32, jt_size_dwords: u32) -> Vec<u8> {
         assert!(ucode_size % 4 == 0);

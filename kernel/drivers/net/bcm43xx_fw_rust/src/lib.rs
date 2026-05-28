@@ -178,8 +178,9 @@ pub unsafe extern "C" fn duetos_bcm43xx_fw_parse(
 #[cfg(test)]
 mod tests {
     extern crate alloc;
-    use super::*;
     use alloc::vec::Vec;
+
+    use super::*;
 
     fn write_record(buf: &mut Vec<u8>, type_b: u8, version: u8, payload: &[u8]) {
         buf.push(type_b);
