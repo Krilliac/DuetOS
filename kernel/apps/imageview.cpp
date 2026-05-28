@@ -1106,8 +1106,10 @@ bool DecodeJpeg(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const 
         StatusAppendStr(name);
         return false;
     }
-    const u64 n = duetos::util::JpegDecode(file_buf, static_cast<u32>(read), info, static_cast<u8*>(scratch_alloc),
-                                           scratch_bytes, static_cast<u32*>(inter_alloc));
+    const auto decoded = duetos::util::JpegDecode(file_buf, static_cast<u32>(read), info,
+                                                  static_cast<u8*>(scratch_alloc), scratch_bytes,
+                                                  static_cast<u32*>(inter_alloc));
+    const u64 n = decoded.has_value() ? decoded.value() : 0;
     mm::KFree(scratch_alloc);
     mm::KFree(file_alloc);
     if (n == 0)
