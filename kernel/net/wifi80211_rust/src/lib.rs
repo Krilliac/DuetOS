@@ -368,20 +368,16 @@ pub extern "C" fn duetos_wifi80211_parse_ie(buf: *const u8, len: usize, off: usi
 
 #[no_mangle]
 pub extern "C" fn duetos_wifi80211_parse_country_ie(buf: *const u8, len: usize, out: *mut DuetosWifiCountryIe) -> bool {
-    if out.is_null() {
+    // Route the raw-pointer null-check + zero-init through out_init (as the
+    // sibling FFI wrappers do) so the deref lives in the private helper, not
+    // this public fn — clippy::not_unsafe_ptr_arg_deref fires otherwise.
+    // Zero-init via Default so a partial parse never leaks stale triplets.
+    let Some(dst) = out_init(out) else {
         return false;
-    }
-    // SAFETY: caller's contract that `out` is writable; zero-init
-    // via Default::default so a partial parse never leaks stale
-    // triplets.
-    unsafe {
-        ptr::write(out, DuetosWifiCountryIe::default());
-    }
+    };
     let Some(slice) = slice_from_raw(buf, len) else {
         return false;
     };
-    // SAFETY: out is non-null + writable (just initialised).
-    let dst = unsafe { &mut *out };
     parse_country_ie(slice, dst)
 }
 

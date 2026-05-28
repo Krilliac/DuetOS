@@ -23,7 +23,7 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 
-use core::{ptr, slice};
+use core::slice;
 
 // ---------------------------------------------------------------------------
 // Protocol constants (mirror kernel/util/vt_parser.h).
@@ -62,25 +62,13 @@ const STATE_OSC_ESCAPE: u8 = 5;
 // ---------------------------------------------------------------------------
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct DuetosVtCallbacks {
     pub cookie: *mut core::ffi::c_void,
     pub print: Option<extern "C" fn(*mut core::ffi::c_void, u32)>,
     pub execute: Option<extern "C" fn(*mut core::ffi::c_void, u8)>,
     pub csi: Option<extern "C" fn(*mut core::ffi::c_void, i8, i8, *const u16, u32)>,
     pub osc: Option<extern "C" fn(*mut core::ffi::c_void, u32, *const i8, u32)>,
-}
-
-impl Default for DuetosVtCallbacks {
-    fn default() -> Self {
-        Self {
-            cookie: ptr::null_mut(),
-            print: None,
-            execute: None,
-            csi: None,
-            osc: None,
-        }
-    }
 }
 
 #[repr(C)]
@@ -307,7 +295,7 @@ fn param_commit(p: &mut DuetosVtParser) {
 }
 
 fn dispatch_csi(p: &mut DuetosVtParser, final_byte: i8) {
-    if p.current_param_set || (p.nparams > 0 && !p.current_param_set) {
+    if p.current_param_set || p.nparams > 0 {
         param_commit(p);
     }
     if let Some(f) = p.cb.csi {

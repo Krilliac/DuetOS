@@ -33,6 +33,22 @@ fn slice_from_raw<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
+/// Null-check + zero-initialise an FFI out-pointer, returning a safe
+/// `&mut T`. Keeps the raw-pointer deref in this private helper so the
+/// public extern "C" wrappers don't trip clippy::not_unsafe_ptr_arg_deref
+/// (the lint only fires on public functions). Zero-init via Default so a
+/// partial parse never leaks stale fields.
+fn out_init<'a, T: Default + Copy>(out: *mut T) -> Option<&'a mut T> {
+    if out.is_null() {
+        return None;
+    }
+    // SAFETY: FFI contract pins `out` as a writable T-sized region.
+    unsafe {
+        core::ptr::write(out, T::default());
+        Some(&mut *out)
+    }
+}
+
 /// Write the DHCP miss outputs (`out_data = null`, `out_len = 0`)
 /// then return `false`. Encapsulates the only raw-pointer write the
 /// DHCP entry point performs on the miss path.
@@ -429,23 +445,15 @@ pub extern "C" fn duetos_parsers_tcp_parse_options(
     opts_len: usize,
     out: *mut DuetosTcpParsedOptions,
 ) -> bool {
-    if out.is_null() {
+    let Some(out_ref) = out_init(out) else {
         return false;
-    }
-    // SAFETY: caller's contract is that out is writable; zero-
-    // initialise via the Default impl so partial parses don't
-    // leak stale fields.
-    unsafe {
-        core::ptr::write(out, DuetosTcpParsedOptions::default());
-    }
+    };
     let Some(slice) = slice_from_raw(opts, opts_len) else {
         // Null opts buffer is a no-op success — caller already
         // sees a zero-initialised struct, which mirrors what the
         // C++ ParseOptions returned on an empty options field.
         return true;
     };
-    // SAFETY: out is non-null + writable (just initialised).
-    let out_ref = unsafe { &mut *out };
     parse_tcp_options(slice, out_ref);
     true
 }
