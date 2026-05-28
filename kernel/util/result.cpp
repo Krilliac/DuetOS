@@ -204,6 +204,11 @@ void ResultSelfTest()
                       " + SourceLocation"
 #endif
                       ")\n");
+
+    // Wave-1 idiom-audit gate sentinel (spec §10): the first PR of each
+    // audit wave emits one sentinel here so boot-log-analyze.sh can prove
+    // the migrated kernel/util code is still on the live boot path.
+    arch::SerialWrite("[idiom-audit-selftest] PASS (wave-1)\n");
 }
 
 } // namespace duetos::core
