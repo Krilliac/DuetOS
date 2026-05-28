@@ -106,7 +106,7 @@ Expected: "100% tests passed". If any test fails, that's a preexisting baseline 
 Run:
 ```bash
 for i in 1 2 3; do
-  DUETOS_TIMEOUT=20 tools/qemu/run.sh --headless build/x86_64-release/duetos.img \
+  DUETOS_TIMEOUT=20 tools/qemu/run.sh build/x86_64-release/duetos.iso \
     > /tmp/util-baseline.$i.log 2>&1
   tools/test/boot-log-analyze.sh /tmp/util-baseline.$i.log \
     && echo "RUN $i: PASS" \
@@ -127,6 +127,106 @@ wc -l kernel/util/*.cpp kernel/util/*.h 2>/dev/null \
   | sort -rn > /tmp/util-audit/baseline-linecounts.txt
 ```
 Expected: three files in `/tmp/util-audit/` capturing the baseline SHA, any build warnings (should be empty), and per-file line counts.
+
+---
+
+## Task 1.5: Preamble — clean preexisting baseline warnings
+
+> **Added 2026-05-27 after Phase-3 baseline gate finding.** Task 1's baseline build surfaced **48 preexisting warnings** in non-`util` code. CLAUDE.md states "Zero warnings: `-Wall -Wextra -Wpedantic -Werror`" but the toolchain at HEAD `670c6090` has only `-Wall -Wextra -Wpedantic` (no `-Werror`), so the warnings don't gate the build. Per the user's call (and consistent with spec §6.7's no-deferring rule + CLAUDE.md's "fix anything you surface" rule), these are fixed as **preamble commits on the same `claude/idiom-audit-phase1-util` branch** — the util PR includes them.
+
+**Files (from Phase-3 finding):**
+- `kernel/apps/{clock,about,devicemgr,help,notify_center,firewall,netstatus}.cpp`
+- `kernel/arch/x86_64/{cet,smp}.cpp`
+- `kernel/cpu/{ipi_call,percpu}.cpp`
+- `kernel/net/tls.cpp`
+- `kernel/subsystems/graphics/graphics_vk_selftest.cpp`
+
+**Warning categories:**
+- 22× `-Wunused-const-variable` — remove unused or `[[maybe_unused]]`.
+- 12× `-Wshadow` — rename the inner variable.
+- 8× `-Wmissing-field-initializers` — add explicit `{}` initializers.
+- 2× `-Wunused-variable` — delete or `[[maybe_unused]]`.
+- 2× `-Wunused-function` — delete or `[[maybe_unused]]`.
+- 2× `-Wunused-but-set-variable` — delete assignment or use the value.
+
+- [ ] **Step 1: Capture the exact baseline warning list** so we can verify completeness:
+
+```bash
+wsl bash -c 'cd ~/source/DuetOS && grep -E "warning:" /tmp/util-baseline-build.log | sort -u > /tmp/util-audit/baseline-warnings.txt && wc -l /tmp/util-audit/baseline-warnings.txt && head -10 /tmp/util-audit/baseline-warnings.txt'
+```
+Expected: file count ~48 (some warnings may be duplicates from re-included headers; the sort -u dedupes).
+
+- [ ] **Step 2: Apply fixes per category**
+
+For each warning in the list, apply the appropriate mechanical fix:
+
+- **`unused-const-variable`** — if the constant is genuinely never referenced, delete it; if it's a deliberate-for-future or self-documenting placeholder, add `[[maybe_unused]]` before the declaration.
+- **`shadow`** — rename the inner variable. Pick a name that disambiguates from the shadowed outer (e.g., outer `auto x = ...; for (auto x : ...)` → rename inner to `xi` or domain-specific).
+- **`missing-field-initializers`** — add explicit `{}` for each missing field, or use `{.field = ...}` designated initializers if the struct supports them.
+- **`unused-variable` / `unused-function`** — delete (preferred per anti-bloat) or `[[maybe_unused]]` if a callable that's documented for external use.
+- **`unused-but-set-variable`** — delete the dead assignment; if the value IS being computed deliberately for a side-effect, either restructure to avoid the unused result or assign to `[[maybe_unused]]`.
+
+**Skip rules:**
+- Do NOT touch warnings in `third_party/` or generated code.
+- Do NOT touch `kernel/util/*` warnings in this Task — those (if any) get caught by Task 6 (m_ prefix) and Task 8 (const). Task 1.5 is non-util-only.
+- Do NOT introduce new TODO/FIXME markers for "fix this properly later" — the fix lands here.
+
+- [ ] **Step 3: Rebuild and verify warning count drops to 0**
+
+```bash
+wsl bash -c 'cd ~/source/DuetOS && cmake --build build/x86_64-release --parallel $(nproc) 2>&1 | tee /tmp/util-after-warnings-build.log | tail -30 && echo "---" && grep -cE "warning:|error:" /tmp/util-after-warnings-build.log'
+```
+Expected: final grep count is `0`. If non-zero, identify the residual warning(s) and re-apply Step 2.
+
+- [ ] **Step 4: Run ctest and 1× boot smoke to confirm fixes don't regress runtime**
+
+```bash
+wsl bash -c 'cd ~/source/DuetOS/build/x86_64-release && ctest --output-on-failure 2>&1 | tail -10'
+wsl bash -c 'cd ~/source/DuetOS && DUETOS_TIMEOUT=20 tools/qemu/run.sh build/x86_64-release/duetos.iso > /tmp/util-after-warnings-smoke.log 2>&1 && tools/test/boot-log-analyze.sh /tmp/util-after-warnings-smoke.log && echo PASS || echo FAIL'
+```
+Expected: ctest 100%, boot smoke PASS.
+
+- [ ] **Step 5: Commit as a single preamble commit**
+
+```bash
+git add kernel/apps/ kernel/arch/x86_64/ kernel/cpu/ kernel/net/ kernel/subsystems/graphics/
+git commit -m "$(cat <<'EOF'
+fix(toolchain): clear 48 preexisting baseline warnings
+
+Cleans warnings present at HEAD 670c6090 ahead of the kernel/util
+Phase-1 idiom sweep. Categories:
+- 22x -Wunused-const-variable
+- 12x -Wshadow
+-  8x -Wmissing-field-initializers
+-  2x -Wunused-variable
+-  2x -Wunused-function
+-  2x -Wunused-but-set-variable
+
+Files touched: kernel/apps/{clock,about,devicemgr,help,notify_center,
+firewall,netstatus}.cpp, kernel/arch/x86_64/{cet,smp}.cpp, kernel/cpu/
+{ipi_call,percpu}.cpp, kernel/net/tls.cpp, kernel/subsystems/graphics/
+graphics_vk_selftest.cpp.
+
+Per spec §6.7's no-deferring rule and CLAUDE.md's "fix anything you
+surface" doctrine. Lands as preamble on the util branch before any
+util pattern-sweep commits so the util PR ships a tree with the
+"Zero warnings" doctrine actually upheld.
+
+Note: -Werror is still not on. Whether to flip it on is a separate
+decision out-of-scope here (would convert any future warning into a
+build failure — a defensive measure but disruptive to add now).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+EOF
+)"
+```
+
+- [ ] **Step 6: Re-capture baseline state with new SHA**
+
+```bash
+wsl bash -c 'cd ~/source/DuetOS && git rev-parse HEAD > /tmp/util-audit/baseline-sha.txt && cat /tmp/util-audit/baseline-sha.txt'
+```
+The SHA recorded for the rest of the plan is now this new HEAD (the post-warning-cleanup commit), not the original `670c6090`.
 
 ---
 
@@ -443,7 +543,7 @@ For each ignored-sentinel caller surfaced by the build/test, run the regression-
 
 Run:
 ```bash
-DUETOS_TIMEOUT=20 tools/qemu/run.sh --headless build/x86_64-release/duetos.img \
+DUETOS_TIMEOUT=20 tools/qemu/run.sh build/x86_64-release/duetos.iso \
   > /tmp/util-p2-smoke.log 2>&1
 tools/test/boot-log-analyze.sh /tmp/util-p2-smoke.log && echo PASS || echo FAIL
 ```
@@ -778,7 +878,7 @@ Expected: zero warnings, all tests pass.
 
 Run:
 ```bash
-DUETOS_TIMEOUT=20 tools/qemu/run.sh --headless build/x86_64-release/duetos.img \
+DUETOS_TIMEOUT=20 tools/qemu/run.sh build/x86_64-release/duetos.iso \
   > /tmp/util-sentinel-smoke.log 2>&1
 grep -F '[idiom-audit-selftest] PASS (wave-1)' /tmp/util-sentinel-smoke.log
 ```
@@ -861,7 +961,7 @@ Expected: "100% tests passed". Every regression test added during the sweep is a
 Run:
 ```bash
 for i in 1 2 3; do
-  DUETOS_TIMEOUT=20 tools/qemu/run.sh --headless build/x86_64-release/duetos.img \
+  DUETOS_TIMEOUT=20 tools/qemu/run.sh build/x86_64-release/duetos.iso \
     > /tmp/util-final-smoke.$i.log 2>&1
   tools/test/boot-log-analyze.sh /tmp/util-final-smoke.$i.log \
     && echo "RUN $i: PASS" \
