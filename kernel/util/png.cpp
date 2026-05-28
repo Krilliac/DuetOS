@@ -5,6 +5,11 @@
 #include "util/adler32.h"
 #include "util/crc32.h"
 #include "util/gzip.h"
+#include "util/result.h"
+
+using ::duetos::core::Err;
+using ::duetos::core::ErrorCode;
+using ::duetos::core::Result;
 
 namespace duetos::util
 {
@@ -65,15 +70,15 @@ PngInfo PngParseHeader(const u8* src, u32 src_len)
     return info;
 }
 
-bool PngDecode(const u8* src, u32 src_len, const PngInfo& info, u8* scratch, u32 scratch_cap, u32* out_pixels)
+Result<void> PngDecode(const u8* src, u32 src_len, const PngInfo& info, u8* scratch, u32 scratch_cap, u32* out_pixels)
 {
     if (!info.ok)
-        return false;
+        return Err{ErrorCode::InvalidArgument};
     const u32 bpp = (info.color_type == kColorTypeRgba) ? 4u : 3u;
     const u64 row_bytes = u64(info.width) * bpp;
     const u64 filtered_bytes = (row_bytes + 1) * info.height; // +1 filter byte per row
     if (filtered_bytes > scratch_cap)
-        return false;
+        return Err{ErrorCode::BufferTooSmall};
 
     // Walk chunks. Concatenate IDAT bytes into the tail of `scratch`
     // (above the filtered-scanlines region we'll fill on inflate).
@@ -86,20 +91,20 @@ bool PngDecode(const u8* src, u32 src_len, const PngInfo& info, u8* scratch, u32
     while (!seen_iend)
     {
         if (off + 8 > src_len)
-            return false;
+            return Err{ErrorCode::Truncated};
         const u32 chunk_len = LoadU32Be(src + off);
         const u8* type_ptr = src + off + 4;
         const u8* data_ptr = src + off + 8;
         if (u64(off) + 8 + chunk_len + 4 > u64(src_len))
-            return false;
+            return Err{ErrorCode::Truncated};
         const u32 stored_crc = LoadU32Be(src + off + 8 + chunk_len);
         if (!VerifyChunkCrc(type_ptr, 4 + chunk_len, stored_crc))
-            return false;
+            return Err{ErrorCode::Corrupt};
 
         if (TagEq(type_ptr, "IDAT"))
         {
             if (idat_len + chunk_len > idat_cap)
-                return false;
+                return Err{ErrorCode::BufferTooSmall};
             for (u32 i = 0; i < chunk_len; ++i)
                 idat_buf[idat_len + i] = data_ptr[i];
             idat_len += chunk_len;
@@ -107,7 +112,7 @@ bool PngDecode(const u8* src, u32 src_len, const PngInfo& info, u8* scratch, u32
         else if (TagEq(type_ptr, "IEND"))
         {
             if (chunk_len != 0)
-                return false;
+                return Err{ErrorCode::Corrupt};
             seen_iend = true;
         }
         // Every other chunk is walked past tolerantly.
@@ -115,13 +120,13 @@ bool PngDecode(const u8* src, u32 src_len, const PngInfo& info, u8* scratch, u32
     }
 
     if (idat_len == 0)
-        return false;
+        return Err{ErrorCode::Corrupt};
 
     // Inflate the concatenated IDAT through the zlib wrapper. Output
     // lands in the low end of scratch, ahead of the IDAT bytes.
     const u32 produced = ZlibInflate(idat_buf, idat_len, scratch, u32(filtered_bytes));
     if (u64(produced) != filtered_bytes)
-        return false;
+        return Err{ErrorCode::Corrupt};
 
     // Unfilter scanlines in place, then convert to BGRA8888.
     for (u32 y = 0; y < info.height; ++y)
@@ -164,7 +169,7 @@ bool PngDecode(const u8* src, u32 src_len, const PngInfo& info, u8* scratch, u32
             }
             break;
         default:
-            return false;
+            return Err{ErrorCode::Corrupt};
         }
 
         // Pack into BGRA8888 (low byte = B). PNG stores RGB or RGBA
@@ -180,7 +185,7 @@ bool PngDecode(const u8* src, u32 src_len, const PngInfo& info, u8* scratch, u32
             drow[x] = b | (g << 8) | (r << 16) | (a << 24);
         }
     }
-    return true;
+    return {};
 }
 
 namespace
@@ -317,7 +322,7 @@ void PngSelfTest()
 
         u8 scratch[64];
         u32 pixels[4];
-        const bool ok = PngDecode(src, src_len, info, scratch, sizeof(scratch), pixels);
+        const bool ok = PngDecode(src, src_len, info, scratch, sizeof(scratch), pixels).has_value();
         KASSERT(ok, "util/png", "decode failed");
         // Expected BGRA-packed (low byte = B, high byte = A):
         //   red   = 0xFFFF0000
@@ -369,7 +374,7 @@ void PngSelfTest()
         KASSERT(info.ok, "util/png", "header should parse");
         u8 scratch[8];
         u32 pixels[4];
-        KASSERT(!PngDecode(src, src_len, info, scratch, sizeof(scratch), pixels), "util/png",
+        KASSERT(!PngDecode(src, src_len, info, scratch, sizeof(scratch), pixels).has_value(), "util/png",
                 "scratch overflow not rejected");
     }
 }

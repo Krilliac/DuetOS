@@ -988,7 +988,8 @@ bool DecodePng(const fs::fat32::Volume* v, const fs::fat32::DirEntry* e, const c
     }
     u32* inter = static_cast<u32*>(inter_alloc);
     const bool ok = duetos::util::PngDecode(file_buf, static_cast<u32>(read), info, static_cast<u8*>(scratch_alloc),
-                                            static_cast<u32>(scratch_bytes), inter);
+                                            static_cast<u32>(scratch_bytes), inter)
+                        .has_value();
     mm::KFree(scratch_alloc);
     mm::KFree(file_alloc);
     if (!ok)
