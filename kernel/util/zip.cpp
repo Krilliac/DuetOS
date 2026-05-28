@@ -243,9 +243,10 @@ ZipStatus ZipExtractEntry(const ZipReader& reader, u32 index, u8* dst, u32 dst_c
         return ZipStatus::Ok;
     }
     // method == kMethodDeflate
-    const u32 produced = DeflateInflate(compressed, info.compressed_size, dst, dst_cap);
-    if (produced == 0 && info.uncompressed_size != 0)
+    const auto inflated = DeflateInflate(compressed, info.compressed_size, dst, dst_cap);
+    if (!inflated.has_value())
         return ZipStatus::InflateFailed;
+    const u32 produced = inflated.value();
     if (produced != info.uncompressed_size)
         return ZipStatus::InflateFailed;
     *out_bytes = produced;

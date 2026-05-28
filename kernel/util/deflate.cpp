@@ -1,9 +1,14 @@
 #include "util/deflate.h"
 
 #include "core/panic.h"
+#include "util/result.h"
 
 namespace duetos::util
 {
+
+using ::duetos::core::Err;
+using ::duetos::core::ErrorCode;
+using ::duetos::core::Result;
 
 namespace
 {
@@ -28,6 +33,11 @@ struct BitReader
     bool error;
 };
 
+// Hot path: ReadBits and DecodeSymbol run once per bit / per
+// Huffman symbol — tens of millions of times for a real PNG IDAT.
+// They keep their bool / i32-sentinel return (Result construction
+// per call would be observable here). The block-level helpers that
+// call them propagate via Result. (spec section 6.2 hot-path skip)
 bool ReadBits(BitReader& r, u32 n, u32& out)
 {
     while (r.bit_count < n)
@@ -60,18 +70,18 @@ struct Huffman
     u16 symbol[kFixedLitLenSymbols]; // symbols sorted by (length, original-index); sized for fixed-Huffman 288
 };
 
-bool BuildHuffman(Huffman& h, const u16* lengths, u32 n)
+Result<void> BuildHuffman(Huffman& h, const u16* lengths, u32 n)
 {
     for (u32 i = 0; i <= kMaxBits; ++i)
         h.count[i] = 0;
     for (u32 i = 0; i < n; ++i)
     {
         if (lengths[i] > kMaxBits)
-            return false;
+            return Err{ErrorCode::Corrupt};
         ++h.count[lengths[i]];
     }
     if (h.count[0] == n)
-        return true; // empty code is fine (no symbols used)
+        return {}; // empty code is fine (no symbols used)
 
     // Check the Kraft inequality: sum count[len] * 2^(15-len) == 2^15
     // for a complete code; less is allowed (incomplete) but more is bad.
@@ -81,7 +91,7 @@ bool BuildHuffman(Huffman& h, const u16* lengths, u32 n)
         left <<= 1;
         left -= h.count[len];
         if (left < 0)
-            return false;
+            return Err{ErrorCode::Corrupt};
     }
     // (We accept incomplete codes — RFC 1951 doesn't require completeness
     // for the dynamic-table degenerate case where only one symbol is used.)
@@ -95,7 +105,7 @@ bool BuildHuffman(Huffman& h, const u16* lengths, u32 n)
         if (lengths[i] != 0)
             h.symbol[offs[lengths[i]]++] = u16(i);
     }
-    return true;
+    return {};
 }
 
 // Decode one symbol from the Huffman table.
@@ -132,7 +142,7 @@ constexpr u8 kDistExtra[30] = {0, 0, 0, 0, 1, 1, 2, 2,  3,  3,  4,  4,  5,  5,  
 // Code-length code-length permutation per RFC 1951 §3.2.7.
 constexpr u8 kClenOrder[19] = {16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15};
 
-bool BuildFixed(Huffman& litlen, Huffman& dist)
+Result<void> BuildFixed(Huffman& litlen, Huffman& dist)
 {
     u16 lengths[288];
     for (u32 i = 0; i <= 143; ++i)
@@ -143,36 +153,34 @@ bool BuildFixed(Huffman& litlen, Huffman& dist)
         lengths[i] = 7;
     for (u32 i = 280; i <= 287; ++i)
         lengths[i] = 8;
-    if (!BuildHuffman(litlen, lengths, 288))
-        return false;
+    RESULT_TRY(BuildHuffman(litlen, lengths, 288));
     u16 dist_len[30];
     for (u32 i = 0; i < 30; ++i)
         dist_len[i] = 5;
     return BuildHuffman(dist, dist_len, 30);
 }
 
-bool ReadDynamicTables(BitReader& r, Huffman& litlen, Huffman& dist)
+Result<void> ReadDynamicTables(BitReader& r, Huffman& litlen, Huffman& dist)
 {
     u32 hlit, hdist, hclen;
     if (!ReadBits(r, 5, hlit) || !ReadBits(r, 5, hdist) || !ReadBits(r, 4, hclen))
-        return false;
+        return Err{ErrorCode::Corrupt};
     hlit += 257;
     hdist += 1;
     hclen += 4;
     if (hlit > kMaxLitLenSymbols || hdist > kMaxDistSymbols)
-        return false;
+        return Err{ErrorCode::Corrupt};
 
     u16 clen_lengths[19] = {};
     for (u32 i = 0; i < hclen; ++i)
     {
         u32 v;
         if (!ReadBits(r, 3, v))
-            return false;
+            return Err{ErrorCode::Corrupt};
         clen_lengths[kClenOrder[i]] = u16(v);
     }
     Huffman clen;
-    if (!BuildHuffman(clen, clen_lengths, kMaxCodeLengthSymbols))
-        return false;
+    RESULT_TRY(BuildHuffman(clen, clen_lengths, kMaxCodeLengthSymbols));
 
     // Decode hlit + hdist code lengths.
     u16 lengths[kMaxLitLenSymbols + kMaxDistSymbols] = {};
@@ -181,7 +189,7 @@ bool ReadDynamicTables(BitReader& r, Huffman& litlen, Huffman& dist)
     {
         const i32 sym = DecodeSymbol(r, clen);
         if (sym < 0)
-            return false;
+            return Err{ErrorCode::Corrupt};
         if (sym < 16)
         {
             lengths[idx++] = u16(sym);
@@ -189,10 +197,10 @@ bool ReadDynamicTables(BitReader& r, Huffman& litlen, Huffman& dist)
         else if (sym == 16)
         {
             if (idx == 0)
-                return false;
+                return Err{ErrorCode::Corrupt};
             u32 rep;
             if (!ReadBits(r, 2, rep))
-                return false;
+                return Err{ErrorCode::Corrupt};
             rep += 3;
             const u16 last = lengths[idx - 1];
             while (rep-- > 0 && idx < hlit + hdist)
@@ -202,7 +210,7 @@ bool ReadDynamicTables(BitReader& r, Huffman& litlen, Huffman& dist)
         {
             u32 rep;
             if (!ReadBits(r, 3, rep))
-                return false;
+                return Err{ErrorCode::Corrupt};
             rep += 3;
             while (rep-- > 0 && idx < hlit + hdist)
                 lengths[idx++] = 0;
@@ -211,31 +219,30 @@ bool ReadDynamicTables(BitReader& r, Huffman& litlen, Huffman& dist)
         {
             u32 rep;
             if (!ReadBits(r, 7, rep))
-                return false;
+                return Err{ErrorCode::Corrupt};
             rep += 11;
             while (rep-- > 0 && idx < hlit + hdist)
                 lengths[idx++] = 0;
         }
     }
-    if (!BuildHuffman(litlen, lengths, hlit))
-        return false;
+    RESULT_TRY(BuildHuffman(litlen, lengths, hlit));
     return BuildHuffman(dist, lengths + hlit, hdist);
 }
 
-bool InflateBlockUncompressed(BitReader& r, u8* dst, u32 dst_cap, u32& dst_off)
+Result<void> InflateBlockUncompressed(BitReader& r, u8* dst, u32 dst_cap, u32& dst_off)
 {
     AlignToByte(r);
     if (r.byte_pos + 4 > r.src_len)
-        return false;
+        return Err{ErrorCode::Corrupt};
     const u16 len = u16(r.src[r.byte_pos] | (u16(r.src[r.byte_pos + 1]) << 8));
     const u16 nlen = u16(r.src[r.byte_pos + 2] | (u16(r.src[r.byte_pos + 3]) << 8));
     if (u16(~len) != nlen)
-        return false;
+        return Err{ErrorCode::Corrupt};
     r.byte_pos += 4;
     if (r.byte_pos + len > r.src_len)
-        return false;
+        return Err{ErrorCode::Corrupt};
     if (dst_off + len > dst_cap)
-        return false;
+        return Err{ErrorCode::BufferTooSmall};
     for (u32 i = 0; i < len; ++i)
         dst[dst_off + i] = r.src[r.byte_pos + i];
     r.byte_pos += len;
@@ -243,46 +250,47 @@ bool InflateBlockUncompressed(BitReader& r, u8* dst, u32 dst_cap, u32& dst_off)
     // Reset the bit buffer; it should already be empty after AlignToByte.
     r.bit_buf = 0;
     r.bit_count = 0;
-    return true;
+    return {};
 }
 
-bool InflateBlockHuffman(BitReader& r, const Huffman& litlen, const Huffman& dist, u8* dst, u32 dst_cap, u32& dst_off)
+Result<void> InflateBlockHuffman(BitReader& r, const Huffman& litlen, const Huffman& dist, u8* dst, u32 dst_cap,
+                                 u32& dst_off)
 {
     while (true)
     {
         const i32 sym = DecodeSymbol(r, litlen);
         if (sym < 0)
-            return false;
+            return Err{ErrorCode::Corrupt};
         if (sym < 256)
         {
             if (dst_off >= dst_cap)
-                return false;
+                return Err{ErrorCode::BufferTooSmall};
             dst[dst_off++] = u8(sym);
         }
         else if (sym == 256)
         {
-            return true;
+            return {};
         }
         else
         {
             const u32 lcode = u32(sym) - 257;
             if (lcode >= 29)
-                return false;
+                return Err{ErrorCode::Corrupt};
             u32 extra = 0;
             if (kLengthExtra[lcode] > 0 && !ReadBits(r, kLengthExtra[lcode], extra))
-                return false;
+                return Err{ErrorCode::Corrupt};
             const u32 length = kLengthBase[lcode] + extra;
             const i32 dsym = DecodeSymbol(r, dist);
             if (dsym < 0 || u32(dsym) >= 30)
-                return false;
+                return Err{ErrorCode::Corrupt};
             u32 dextra = 0;
             if (kDistExtra[dsym] > 0 && !ReadBits(r, kDistExtra[dsym], dextra))
-                return false;
+                return Err{ErrorCode::Corrupt};
             const u32 distance = u32(kDistBase[dsym]) + dextra;
             if (distance == 0 || distance > dst_off)
-                return false;
+                return Err{ErrorCode::Corrupt};
             if (dst_off + length > dst_cap)
-                return false;
+                return Err{ErrorCode::BufferTooSmall};
             for (u32 i = 0; i < length; ++i)
             {
                 dst[dst_off + i] = dst[dst_off + i - distance];
@@ -294,7 +302,7 @@ bool InflateBlockHuffman(BitReader& r, const Huffman& litlen, const Huffman& dis
 
 } // namespace
 
-u32 DeflateInflate(const u8* src, u32 src_len, u8* dst, u32 dst_cap)
+Result<u32> DeflateInflate(const u8* src, u32 src_len, u8* dst, u32 dst_cap)
 {
     BitReader r = {src, src_len, 0, 0, 0, false};
     u32 dst_off = 0;
@@ -302,31 +310,26 @@ u32 DeflateInflate(const u8* src, u32 src_len, u8* dst, u32 dst_cap)
     {
         u32 bfinal, btype;
         if (!ReadBits(r, 1, bfinal) || !ReadBits(r, 2, btype))
-            return 0;
+            return Err{ErrorCode::Corrupt};
         if (btype == 0)
         {
-            if (!InflateBlockUncompressed(r, dst, dst_cap, dst_off))
-                return 0;
+            RESULT_TRY(InflateBlockUncompressed(r, dst, dst_cap, dst_off));
         }
         else if (btype == 1)
         {
             Huffman litlen, dist;
-            if (!BuildFixed(litlen, dist))
-                return 0;
-            if (!InflateBlockHuffman(r, litlen, dist, dst, dst_cap, dst_off))
-                return 0;
+            RESULT_TRY(BuildFixed(litlen, dist));
+            RESULT_TRY(InflateBlockHuffman(r, litlen, dist, dst, dst_cap, dst_off));
         }
         else if (btype == 2)
         {
             Huffman litlen, dist;
-            if (!ReadDynamicTables(r, litlen, dist))
-                return 0;
-            if (!InflateBlockHuffman(r, litlen, dist, dst, dst_cap, dst_off))
-                return 0;
+            RESULT_TRY(ReadDynamicTables(r, litlen, dist));
+            RESULT_TRY(InflateBlockHuffman(r, litlen, dist, dst, dst_cap, dst_off));
         }
         else
         {
-            return 0; // reserved
+            return Err{ErrorCode::Corrupt}; // reserved
         }
         if (bfinal != 0)
             return dst_off;
@@ -351,8 +354,8 @@ void DeflateSelfTest()
         src[8] = 'l';
         src[9] = 'o';
         u8 out[16];
-        const u32 n = DeflateInflate(src, sizeof(src), out, sizeof(out));
-        KASSERT(n == 5, "util/deflate", "stored block length wrong");
+        const auto r = DeflateInflate(src, sizeof(src), out, sizeof(out));
+        KASSERT(r.has_value() && r.value() == 5, "util/deflate", "stored block length wrong");
         KASSERT(out[0] == 'H' && out[1] == 'e' && out[2] == 'l' && out[3] == 'l' && out[4] == 'o', "util/deflate",
                 "stored content wrong");
     }
@@ -362,8 +365,11 @@ void DeflateSelfTest()
     {
         const u8 src[5] = {0x01, 0x00, 0x00, 0xFF, 0xFF};
         u8 out[1];
-        const u32 n = DeflateInflate(src, sizeof(src), out, sizeof(out));
-        KASSERT(n == 0, "util/deflate", "empty stored block should yield 0 bytes");
+        const auto r = DeflateInflate(src, sizeof(src), out, sizeof(out));
+        // Result<u32> now distinguishes "decoded 0 bytes" (success)
+        // from "decode failed" — the old u32-sentinel API conflated
+        // them. This block legitimately produces zero output.
+        KASSERT(r.has_value() && r.value() == 0, "util/deflate", "empty stored block should yield 0 bytes");
     }
 
     // ----- Type-1 (fixed Huffman) round-trip via a known reference
@@ -384,8 +390,8 @@ void DeflateSelfTest()
     {
         const u8 src[2] = {0x03, 0x00};
         u8 out[1];
-        const u32 n = DeflateInflate(src, sizeof(src), out, sizeof(out));
-        KASSERT(n == 0, "util/deflate", "fixed-Huffman empty block should yield 0 bytes");
+        const auto r = DeflateInflate(src, sizeof(src), out, sizeof(out));
+        KASSERT(r.has_value() && r.value() == 0, "util/deflate", "fixed-Huffman empty block should yield 0 bytes");
     }
 
     // ----- Type-1 with one literal: BFINAL=1, BTYPE=01, then literal
@@ -405,16 +411,16 @@ void DeflateSelfTest()
     {
         const u8 src[5] = {0x01, 0x05, 0x00, 0xFF, 0xFF}; // NLEN = ~LEN should be 0xFFFA, not 0xFFFF
         u8 out[8];
-        const u32 n = DeflateInflate(src, sizeof(src), out, sizeof(out));
-        KASSERT(n == 0, "util/deflate", "bad NLEN not rejected");
+        const auto r = DeflateInflate(src, sizeof(src), out, sizeof(out));
+        KASSERT(!r.has_value(), "util/deflate", "bad NLEN not rejected");
     }
 
     // ----- Negative: reserved BTYPE = 11.
     {
         const u8 src[1] = {0x07}; // BFINAL=1, BTYPE=11
         u8 out[1];
-        const u32 n = DeflateInflate(src, sizeof(src), out, sizeof(out));
-        KASSERT(n == 0, "util/deflate", "BTYPE=11 not rejected");
+        const auto r = DeflateInflate(src, sizeof(src), out, sizeof(out));
+        KASSERT(!r.has_value(), "util/deflate", "BTYPE=11 not rejected");
     }
 }
 

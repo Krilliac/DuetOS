@@ -22,7 +22,11 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
     // stream decompresses, bounded so a decompression-bomb input
     // can't wedge the fuzzer on allocation.
     static duetos::u8 out[256u * 1024u];
+    // Fuzzer cares about crashes / OOB reads, not the return value
+    // — drop the Result intentionally. `.has_value()` keeps the
+    // [[nodiscard]] contract honoured without further branching.
     (void)duetos::util::DeflateInflate(reinterpret_cast<const duetos::u8*>(data), static_cast<duetos::u32>(size), out,
-                                       sizeof(out));
+                                       sizeof(out))
+        .has_value();
     return 0;
 }
