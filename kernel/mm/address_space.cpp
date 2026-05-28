@@ -230,7 +230,7 @@ void FreeUserHalfTables(u64* pml4)
 
 } // namespace
 
-AddressSpace* AddressSpaceCreate(u64 frame_budget)
+core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget)
 {
     KLOG_TRACE_SCOPE("mm/as", "AddressSpaceCreate");
     if (frame_budget == 0 || frame_budget > kMaxUserVmRegionsPerAs)
@@ -246,7 +246,7 @@ AddressSpace* AddressSpaceCreate(u64 frame_budget)
         // without a separate signal. Surface so a post-mortem can
         // tie the process-create failure to memory pressure.
         KLOG_ERROR("mm/as", "AddressSpaceCreate: KMalloc for AddressSpace struct failed");
-        return nullptr;
+        return core::Err{core::ErrorCode::OutOfMemory};
     }
     // Zero the chunk before populating. KMalloc returns memory still
     // carrying whatever was last in it — including the freed-payload
@@ -268,7 +268,7 @@ AddressSpace* AddressSpaceCreate(u64 frame_budget)
         // now the OOM is in the log.
         KLOG_ERROR("mm/as", "AddressSpaceCreate: AllocateFrame for PML4 root failed");
         KFree(as);
-        return nullptr;
+        return core::Err{core::ErrorCode::OutOfMemory};
     }
 
     auto* pml4 = static_cast<u64*>(PhysToVirt(pml4_frame));
@@ -590,9 +590,10 @@ AddressSpace* AddressSpaceFork(const AddressSpace* parent)
 {
     if (parent == nullptr)
         return nullptr;
-    AddressSpace* child = AddressSpaceCreate(parent->frame_budget);
-    if (child == nullptr)
+    auto child_r = AddressSpaceCreate(parent->frame_budget);
+    if (!child_r)
         return nullptr;
+    AddressSpace* child = child_r.value();
     for (u16 i = 0; i < parent->region_count; ++i)
     {
         const u64 va = parent->regions[i].vaddr;
@@ -873,16 +874,18 @@ void AddressSpaceSelfTest()
 
     arch::SerialWrite("[mm/as] isolation self-test\n");
 
-    AddressSpace* a = AddressSpaceCreate(kFrameBudgetTrusted);
-    if (a == nullptr)
+    auto a_r = AddressSpaceCreate(kFrameBudgetTrusted);
+    if (!a_r)
     {
         PanicAs("self-test: AddressSpaceCreate failed for A", 0);
     }
-    AddressSpace* b = AddressSpaceCreate(kFrameBudgetTrusted);
-    if (b == nullptr)
+    AddressSpace* a = a_r.value();
+    auto b_r = AddressSpaceCreate(kFrameBudgetTrusted);
+    if (!b_r)
     {
         PanicAs("self-test: AddressSpaceCreate failed for B", 0);
     }
+    AddressSpace* b = b_r.value();
 
     const PhysAddr frame = AllocateFrame();
     if (frame == kNullFrame)

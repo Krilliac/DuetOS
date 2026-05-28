@@ -2,6 +2,7 @@
 
 #include "util/types.h"
 #include "util/saturating.h"
+#include "util/result.h"
 #include "mm/frame_allocator.h"
 #include "mm/paging.h"
 #include "sync/rwlock.h"
@@ -181,9 +182,9 @@ struct AddressSpace
 /// frames this AS can map (via AddressSpaceMapUserPage); pick
 /// `kFrameBudgetSandbox` for untrusted callers or
 /// `kFrameBudgetTrusted` for kernel-shipped userland. Returns
-/// nullptr on frame-allocator or kheap failure (no panic — callers
-/// may want to refuse the process spawn cleanly).
-AddressSpace* AddressSpaceCreate(u64 frame_budget);
+/// `Err{ErrorCode::OutOfMemory}` on frame-allocator or kheap failure
+/// (no panic — callers may want to refuse the process spawn cleanly).
+core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget);
 
 /// Install a user-accessible 4 KiB mapping at `virt` in `as`. `virt`
 /// must be in the canonical low half and 4 KiB-aligned; `flags` must
