@@ -37,6 +37,7 @@
 #include "drivers/video/calendar.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
+#include "drivers/video/desktop_icons.h"
 #include "drivers/video/dialog.h"
 #include "drivers/video/dnd.h"
 #include "drivers/video/framebuffer.h"
@@ -2556,6 +2557,42 @@ void MouseReaderTask(void*)
             !duetos::drivers::video::CalendarContains(cx, cy))
         {
             duetos::drivers::video::CalendarClose();
+        }
+
+        // Desktop icons — double-click on a bare-desktop icon raises its
+        // app. Gated on "no window under the cursor" so an icon covered
+        // by a window is never clickable (icons paint beneath windows).
+        // Double-click uses the same tick window as title-bar dbl-click.
+        if (press_edge && !menu_handled && !drag.active &&
+            cached_topmost_under_cursor == duetos::drivers::video::kWindowInvalid &&
+            !duetos::drivers::video::TaskbarContains(cx, cy))
+        {
+            const int icon = duetos::drivers::video::DesktopIconHitTest(cx, cy);
+            if (icon >= 0)
+            {
+                static duetos::u64 s_icon_dc_tick = 0;
+                static int s_icon_dc_idx = -1;
+                const duetos::u64 dc_ticks = duetos::drivers::video::WindowDoubleClickTicks();
+                const duetos::u64 now_tick = duetos::arch::TimerTicks();
+                const bool is_dbl = (s_icon_dc_idx == icon) && (now_tick - s_icon_dc_tick <= dc_ticks);
+                if (is_dbl)
+                {
+                    duetos::drivers::video::DesktopIconActivate(icon);
+                    duetos::drivers::video::CursorHide();
+                    duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
+                    duetos::drivers::video::CursorShow();
+                    s_icon_dc_idx = -1; // consume so a triple-click doesn't re-fire
+                    SerialWrite("[ui] desktop icon launch idx=");
+                    SerialWriteHex(static_cast<duetos::u64>(icon));
+                    SerialWrite("\n");
+                }
+                else
+                {
+                    s_icon_dc_tick = now_tick;
+                    s_icon_dc_idx = icon;
+                }
+                menu_handled = true; // claim the click; don't fall through to window/start chain
+            }
         }
 
         // --- Network flyout handlers ---------------------------

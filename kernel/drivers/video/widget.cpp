@@ -44,6 +44,7 @@
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
+#include "drivers/video/desktop_icons.h"
 #include "drivers/video/dialog.h"
 #include "drivers/video/dnd.h"
 #include "drivers/video/framebuffer.h"
@@ -2749,6 +2750,9 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
         WallpaperPaint(desktop_rgb);
     }
     ConsoleRedraw();
+    // Desktop icons sit on the wallpaper, beneath the window list, so an
+    // open window correctly occludes them.
+    DesktopIconsPaint();
     WindowDrawAllOrdered();
     for (u32 i = 0; i < g_widget_count; ++i)
     {

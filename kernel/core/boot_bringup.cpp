@@ -204,6 +204,7 @@
 #include "generated_chrome_font.h"
 #include "generated_chrome_font_bold.h"
 #include "drivers/video/calendar.h"
+#include "drivers/video/desktop_icons.h"
 #include "drivers/video/magnifier.h"
 #include "drivers/video/dialog.h"
 #include "drivers/video/dnd.h"
@@ -2991,6 +2992,11 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowRegister(help_chrome, "HELP");
     duetos::drivers::video::ThemeRegisterWindow(Role::Help, help_handle);
     duetos::apps::help::HelpInit(help_handle);
+    // Start hidden like every other app window (ABOUT / Terminal / Device
+    // Manager all do this) so the boot desktop isn't dominated by a
+    // full-screen help panel. Reachable from the desktop "Help" icon, the
+    // F1 key, and the Start menu.
+    duetos::drivers::video::WindowSetVisible(help_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::help::HelpSelfTest());
 
     // BROWSER — minimal HTTP-only browser. Hidden by default;
@@ -3126,7 +3132,10 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         DUETOS_BOOT_SELFTEST(duetos::apps::netstatus::NetStatusSelfTest());
     }
 
-    // DEVICE MANAGER — read-only PCI device list.
+    // DEVICE MANAGER — read-only PCI device list. Handle captured for the
+    // desktop-icon registration below (Device Manager has no ThemeRole, so
+    // its icon binds to the window handle directly).
+    duetos::drivers::video::WindowHandle devicemgr_win = duetos::drivers::video::kWindowInvalid;
     {
         duetos::drivers::video::WindowChrome chrome = theme_chrome(Role::TaskManager);
         chrome.x = 260;
@@ -3137,6 +3146,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowSetVisible(h, false);
         duetos::apps::devicemgr::DeviceMgrInit(h);
         DUETOS_BOOT_SELFTEST(duetos::apps::devicemgr::DeviceMgrSelfTest());
+        devicemgr_win = h;
     }
 
     // FIREWALL — empty-state placeholder; honest about the absent
@@ -3151,6 +3161,28 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         duetos::drivers::video::WindowSetVisible(h, false);
         duetos::apps::firewall::FirewallInit(h);
         DUETOS_BOOT_SELFTEST(duetos::apps::firewall::FirewallSelfTest());
+    }
+
+    // DESKTOP ICONS — surface the canonical destinations on the bare
+    // desktop (double-click to launch), the way every other OS does.
+    // Targets are window handles: themed apps resolve via ThemeRoleWindow,
+    // Device Manager uses the handle captured above. "Computer" and "Trash"
+    // both open the Files manager — it shows drives in its disk view, which
+    // is also where deleted items live (/TRASH); a standalone trash window
+    // is a follow-up.
+    {
+        using duetos::drivers::video::DesktopIconRegister;
+        using duetos::drivers::video::ThemeRoleWindow;
+        DesktopIconRegister("Computer", "PC", ThemeRoleWindow(Role::Files));
+        DesktopIconRegister("Browser", "Web", ThemeRoleWindow(Role::Browser));
+        DesktopIconRegister("Terminal", ">_", ThemeRoleWindow(Role::Terminal));
+        DesktopIconRegister("Calculator", "12", ThemeRoleWindow(Role::Calculator));
+        DesktopIconRegister("Notepad", "Aa", ThemeRoleWindow(Role::Notes));
+        DesktopIconRegister("Settings", "Set", ThemeRoleWindow(Role::Settings));
+        DesktopIconRegister("Device Mgr", "Dev", devicemgr_win);
+        DesktopIconRegister("Trash", "Bin", ThemeRoleWindow(Role::Files));
+        DesktopIconRegister("Help", "?", ThemeRoleWindow(Role::Help));
+        DUETOS_BOOT_SELFTEST(duetos::drivers::video::DesktopIconsSelfTest());
     }
 
     // Framebuffer text console. 80x40 chars of boot log at the
