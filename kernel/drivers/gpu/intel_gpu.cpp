@@ -10,6 +10,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
+#include "drivers/gpu/intel_forcewake.h"
 #include "drivers/gpu/intel_gsc_fw.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
@@ -204,6 +205,17 @@ void Probe(GpuInfo& g)
     //   4) Re-enable with the length encoded in the high bits:
     //      `length` is (#pages - 1) << 12 — for a 1-page ring
     //      that's 0, AND the enable bit.
+    //
+    // Slice 1 precondition: real silicon power-gates the GT register
+    // block, so hold forcewake on RENDER+GT (the two domains the RCS
+    // 0x2000 block straddles) and un-stop the ring before programming
+    // it — otherwise the writes below are dropped on metal. Held for
+    // the boot. Reached only on a live Intel BAR0 (QEMU never gets
+    // here), and on a forcewake-ack miss the HEAD poll below still
+    // reports the failure uniformly, so we don't early-return.
+    ForcewakeGetForRing(g);
+    IntelRingUnstop(g);
+
     Mmio32Write(g, kIntelRcsCtl, 0);
     Mmio32Write(g, kIntelRcsTail, 0);
     Mmio32Write(g, kIntelRcsHead, 0);

@@ -50,6 +50,25 @@
 namespace duetos::drivers::gpu::intel
 {
 
+// Shared BAR0 MMIO accessors used by every Intel GPU TU (intel_gpu,
+// intel_forcewake, …). Bounds-checked against the mapped BAR; a read
+// past the map returns all-ones (the dead-decode sentinel), a write
+// past it is dropped. `volatile` so the compiler never reorders or
+// elides register touches.
+inline u32 IntelReg32(const GpuInfo& g, u64 offset)
+{
+    if (g.mmio_virt == nullptr || offset + 4 > g.mmio_size)
+        return 0xFFFFFFFFu;
+    return *reinterpret_cast<volatile u32*>(static_cast<u8*>(g.mmio_virt) + offset);
+}
+
+inline void IntelReg32Write(const GpuInfo& g, u64 offset, u32 value)
+{
+    if (g.mmio_virt == nullptr || offset + 4 > g.mmio_size)
+        return;
+    *reinterpret_cast<volatile u32*>(static_cast<u8*>(g.mmio_virt) + offset) = value;
+}
+
 // Register offsets we read in v0. All are stable across Gen9..Gen13.
 //
 //   GEN_INFO        BAR0 + 0x0   — first liveness dword
@@ -68,6 +87,14 @@ inline constexpr u64 kIntelRcsStart = 0x2038; // RCS_START (ring buffer GPA)
 inline constexpr u64 kIntelRcsCtl = 0x203C;   // RCS_CTL
 inline constexpr u32 kIntelRingEnable = 1u << 0;
 inline constexpr u32 kIntelRingLengthMask = 0x1FF000u;
+
+// RCS RING_MI_MODE (ring base 0x2000 + 0x9C). STOP_RING (bit 8) parks
+// the command streamer; it must be cleared (un-stopped) before the
+// ring will execute. MODE_IDLE (bit 9) reads back the parked state.
+// Written through the masked-bit form (upper 16 bits = write-mask).
+inline constexpr u64 kIntelRcsMiMode = 0x209C;
+inline constexpr u32 kIntelStopRing = 1u << 8;
+inline constexpr u32 kIntelModeIdle = 1u << 9;
 
 inline constexpr u64 kIntelRingBytes = 4096; // single-page ring
 
