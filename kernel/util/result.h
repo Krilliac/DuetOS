@@ -218,6 +218,14 @@ template <typename T, typename E = ErrorCode> class [[nodiscard]] Result
         return storage_.value;
     }
 
+    // std::expected/optional-style accessor: the contained value, or
+    // `fallback` on the error path. For boundaries whose own contract
+    // is genuinely sentinel-shaped (a self-test that panics on a known
+    // sentinel, or a function whose public API returns one) and so
+    // have nothing to propagate — NOT a substitute for handling a real
+    // error in production code, which uses `if (!r) ...` / RESULT_TRY.
+    T value_or(T fallback) const { return has_value_ ? storage_.value : fallback; }
+
     E error() const { return has_value_ ? E{} : storage_.error; }
 
     // Origin of the error, when DUETOS_RESULT_LOC is on. Returns a

@@ -109,12 +109,14 @@ void ResultSelfTest()
         Expect(ok.has_value(), "Result<u64>(7).has_value()");
         Expect(bool(ok), "Result<u64>(7) truthy");
         Expect(ok.value() == 7, "Result<u64>(7).value()==7");
+        Expect(ok.value_or(99) == 7, "Result<u64>(7).value_or(99)==7");
     }
     {
         Result<u64> bad(Err{ErrorCode::NotFound});
         Expect(!bad.has_value(), "Result<u64>(Err).has_value()==false");
         Expect(!bool(bad), "Result<u64>(Err) falsy");
         Expect(bad.error() == ErrorCode::NotFound, "Result<u64>(Err).error()==NotFound");
+        Expect(bad.value_or(99) == 99, "Result<u64>(Err).value_or(99)==99");
     }
 
     // Result<void> Ok + error.
