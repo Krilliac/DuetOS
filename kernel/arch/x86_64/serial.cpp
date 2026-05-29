@@ -349,13 +349,19 @@ void SerialWriteByte(u8 byte)
         }
         return;
     }
+    // Clear the in-progress slot BEFORE releasing the lock — same
+    // ordering SerialLineGuard's dtor uses (see its comment). A
+    // SpinLockGuard would release + restore IF at the close brace and
+    // only THEN clear the slot, leaving the cross-CPU window where this
+    // CPU's slot still reads 1 with the lock free + IF on: an IRQ here
+    // whose handler logs takes the slot-bypass (raw, unlocked) path and
+    // interleaves with a peer CPU that grabbed the freed lock.
     volatile u32* slot = SerialInProgressSlot();
     *slot = 1;
-    {
-        duetos::sync::SpinLockGuard guard(g_serial_lock);
-        WriteByteRaw(byte);
-    }
+    auto irq = duetos::sync::SpinLockAcquire(g_serial_lock);
+    WriteByteRaw(byte);
     *slot = 0;
+    duetos::sync::SpinLockRelease(g_serial_lock, irq);
 }
 
 void SerialWrite(const char* str)
@@ -380,16 +386,16 @@ void SerialWrite(const char* str)
         return;
     }
 
+    // Clear the slot before release (not after) — see SerialWriteByte.
     volatile u32* slot = SerialInProgressSlot();
     *slot = 1;
+    auto irq = duetos::sync::SpinLockAcquire(g_serial_lock);
+    for (const char* p = str; *p != '\0'; ++p)
     {
-        duetos::sync::SpinLockGuard guard(g_serial_lock);
-        for (const char* p = str; *p != '\0'; ++p)
-        {
-            WriteCharRaw(*p);
-        }
+        WriteCharRaw(*p);
     }
     *slot = 0;
+    duetos::sync::SpinLockRelease(g_serial_lock, irq);
 }
 
 void SerialWriteN(const char* data, u64 len)
@@ -414,16 +420,16 @@ void SerialWriteN(const char* data, u64 len)
         return;
     }
 
+    // Clear the slot before release (not after) — see SerialWriteByte.
     volatile u32* slot = SerialInProgressSlot();
     *slot = 1;
+    auto irq = duetos::sync::SpinLockAcquire(g_serial_lock);
+    for (u64 i = 0; i < len; ++i)
     {
-        duetos::sync::SpinLockGuard guard(g_serial_lock);
-        for (u64 i = 0; i < len; ++i)
-        {
-            WriteCharRaw(data[i]);
-        }
+        WriteCharRaw(data[i]);
     }
     *slot = 0;
+    duetos::sync::SpinLockRelease(g_serial_lock, irq);
 }
 
 void SerialWriteHex(u64 value)
@@ -447,18 +453,18 @@ void SerialWriteHex(u64 value)
         return;
     }
 
+    // Clear the slot before release (not after) — see SerialWriteByte.
     volatile u32* slot = SerialInProgressSlot();
     *slot = 1;
+    auto irq = duetos::sync::SpinLockAcquire(g_serial_lock);
+    WriteByteRaw('0');
+    WriteByteRaw('x');
+    for (int shift = 60; shift >= 0; shift -= 4)
     {
-        duetos::sync::SpinLockGuard guard(g_serial_lock);
-        WriteByteRaw('0');
-        WriteByteRaw('x');
-        for (int shift = 60; shift >= 0; shift -= 4)
-        {
-            WriteByteRaw(static_cast<u8>(kDigits[(value >> shift) & 0xF]));
-        }
+        WriteByteRaw(static_cast<u8>(kDigits[(value >> shift) & 0xF]));
     }
     *slot = 0;
+    duetos::sync::SpinLockRelease(g_serial_lock, irq);
 }
 
 // ---------------------------------------------------------------------------
