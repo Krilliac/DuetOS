@@ -294,6 +294,26 @@ inline duetos::i16 SatAddS16(duetos::i16 a, duetos::i16 b)
     return static_cast<duetos::i16>(s);
 }
 
+// Master output volume (0..100 percent) + mute. Applied as a gain to each
+// producer sample at write time — the HDA DMA reads the ring directly with
+// no kernel hook, so a level change affects samples written after it (fine
+// for streaming producers like waveOutWrite). Muting forces the applied
+// gain to 0 while retaining the stored level for un-mute. Not applied to
+// WriteSine (a raw tone/self-test generator with its own amplitude arg).
+// Default 100 (full) so the gain is identity out of the box — existing
+// producers and the mixer self-test see unscaled samples until the user
+// lowers the slider. Dropping below 100 engages the per-sample scale.
+duetos::u8 g_master_volume = 100;
+bool g_muted = false;
+
+inline duetos::i16 ApplyMasterGain(duetos::i16 sample)
+{
+    const duetos::u32 vol = g_muted ? 0u : static_cast<duetos::u32>(g_master_volume);
+    if (vol >= 100u)
+        return sample;
+    return static_cast<duetos::i16>((static_cast<duetos::i32>(sample) * static_cast<duetos::i32>(vol)) / 100);
+}
+
 } // namespace
 
 duetos::u32 WritePcmS16Stereo(const duetos::i16* samples, duetos::u32 frame_count, duetos::u32 frame_offset)
@@ -307,7 +327,7 @@ duetos::u32 WritePcmS16Stereo(const duetos::i16* samples, duetos::u32 frame_coun
     {
         for (duetos::u32 c = 0; c < kChannels; ++c)
         {
-            dst[cursor] = SatAddS16(dst[cursor], samples[f * kChannels + c]);
+            dst[cursor] = SatAddS16(dst[cursor], ApplyMasterGain(samples[f * kChannels + c]));
             cursor = (cursor + 1) % total_samples;
         }
     }
@@ -325,11 +345,31 @@ duetos::u32 WritePcmS16StereoOverwrite(const duetos::i16* samples, duetos::u32 f
     {
         for (duetos::u32 c = 0; c < kChannels; ++c)
         {
-            dst[cursor] = samples[f * kChannels + c];
+            dst[cursor] = ApplyMasterGain(samples[f * kChannels + c]);
             cursor = (cursor + 1) % total_samples;
         }
     }
     return frame_count;
+}
+
+void AudioSetMasterVolume(duetos::u8 pct)
+{
+    g_master_volume = (pct > 100u) ? 100u : pct;
+}
+
+duetos::u8 AudioGetMasterVolume()
+{
+    return g_master_volume;
+}
+
+void AudioSetMuted(bool muted)
+{
+    g_muted = muted;
+}
+
+bool AudioIsMuted()
+{
+    return g_muted;
 }
 
 namespace

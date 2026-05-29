@@ -53,6 +53,7 @@
 #include "drivers/video/theme.h"
 #include "drivers/video/tray_flyout.h"
 #include "drivers/video/ttf.h"
+#include "drivers/video/volume_flyout.h"
 #include "drivers/video/ttf_raster.h"
 #include "drivers/video/wallpaper.h"
 #include "drivers/video/widget.h"
@@ -64,6 +65,7 @@
 #include "security/broker.h"
 #include "security/login.h"
 #include "shell/shell.h"
+#include "subsystems/audio/audio_backend.h"
 #include "subsystems/win32/window_syscall.h"
 
 namespace duetos::core
@@ -2683,6 +2685,75 @@ void MouseReaderTask(void*)
                      !duetos::drivers::video::NetPanelContains(cx, cy))
             {
                 duetos::drivers::video::NetPanelClose();
+            }
+        }
+
+        // --- Volume flyout (taskbar speaker cell) ---------------
+        //
+        // Click the speaker cell to toggle a mute + master-volume
+        // slider popup; scroll the wheel over the cell to nudge the
+        // level +/-5%. Mirrors the network flyout's click-toggle and
+        // click-outside-to-close pattern.
+        {
+            namespace audio = duetos::subsystems::audio;
+            duetos::u32 vx = 0, vy = 0, vw = 0, vh = 0;
+            duetos::drivers::video::TaskbarVolumeBounds(&vx, &vy, &vw, &vh);
+            const bool over_vol = (vw > 0) && cx >= vx && cx < vx + vw && cy >= vy && cy < vy + vh;
+
+            if (over_vol && p.dz != 0 && !menu_handled)
+            {
+                duetos::i32 next = static_cast<duetos::i32>(audio::AudioGetMasterVolume()) + (p.dz > 0 ? 5 : -5);
+                next = (next < 0) ? 0 : (next > 100 ? 100 : next);
+                audio::AudioSetMasterVolume(static_cast<duetos::u8>(next));
+                audio::AudioSetMuted(false);
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
+                duetos::drivers::video::CursorShow();
+                menu_handled = true;
+            }
+
+            if (press_edge && !menu_handled && over_vol)
+            {
+                if (duetos::drivers::video::VolumeFlyoutIsOpen())
+                {
+                    duetos::drivers::video::VolumeFlyoutClose();
+                }
+                else
+                {
+                    const duetos::u32 fw = duetos::drivers::video::VolumeFlyoutWidth();
+                    const duetos::u32 fh = duetos::drivers::video::VolumeFlyoutHeight();
+                    const duetos::u32 ax = (vx + vw > fw) ? (vx + vw - fw) : 0;
+                    const duetos::u32 ay = (vy > fh) ? vy - fh : 0;
+                    duetos::drivers::video::VolumeFlyoutOpen(ax, ay);
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
+                duetos::drivers::video::CursorShow();
+                menu_handled = true;
+            }
+            else if (press_edge && !menu_handled && duetos::drivers::video::VolumeFlyoutIsOpen() &&
+                     duetos::drivers::video::VolumeFlyoutContains(cx, cy))
+            {
+                if (duetos::drivers::video::VolumeFlyoutMuteContains(cx, cy))
+                {
+                    audio::AudioSetMuted(!audio::AudioIsMuted());
+                }
+                else if (duetos::drivers::video::VolumeFlyoutSliderContains(cx, cy))
+                {
+                    duetos::drivers::video::VolumeFlyoutSetFromX(cx);
+                }
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
+                duetos::drivers::video::CursorShow();
+                menu_handled = true;
+            }
+            else if (press_edge && !menu_handled && duetos::drivers::video::VolumeFlyoutIsOpen() &&
+                     !duetos::drivers::video::VolumeFlyoutContains(cx, cy))
+            {
+                duetos::drivers::video::VolumeFlyoutClose();
+                duetos::drivers::video::CursorHide();
+                duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
+                duetos::drivers::video::CursorShow();
             }
         }
 

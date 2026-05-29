@@ -86,6 +86,11 @@ void TaskbarClockBounds(u32* x, u32* y, u32* w, u32* h);
 /// framebuffer-absolute.
 void TaskbarNetCellBounds(u32* x, u32* y, u32* w, u32* h);
 
+/// Bounds of the volume (speaker) tray cell, for the mouse reader to
+/// click-toggle the volume flyout. Returns w == 0 until the tray has
+/// been laid out. Framebuffer-absolute coordinates.
+void TaskbarVolumeBounds(u32* x, u32* y, u32* w, u32* h);
+
 /// Bounds of the chevron-up "show hidden tray icons" button —
 /// the leftmost cell of the tray on themes that paint it (Duet
 /// family today). Used by the mouse reader to hover-expand and

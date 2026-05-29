@@ -158,6 +158,20 @@ duetos::u32 WritePcmS16StereoOverwrite(const duetos::i16* samples, duetos::u32 f
 /// the loop boundary.
 void WriteSine(duetos::u32 freq_hz, duetos::u16 amplitude_q15);
 
+/// Master output volume, 0..100 percent (clamped). Applied as a gain to
+/// every producer sample written via the WritePcm* paths; the stored
+/// level survives mute/un-mute. Default 80. GAP: applied at write time
+/// (no kernel hook on the HDA DMA read), and the audible result is
+/// unverified on this host (DuetOS audio is QEMU-smoke-only, never heard)
+/// — revisit on real HDA hardware.
+void AudioSetMasterVolume(duetos::u8 pct);
+duetos::u8 AudioGetMasterVolume();
+
+/// Mute / un-mute. While muted the applied gain is 0 regardless of the
+/// stored master volume.
+void AudioSetMuted(bool muted);
+bool AudioIsMuted();
+
 /// Tear down: stop the stream, free DMA, clear state. Idempotent.
 ::duetos::core::Result<void> Shutdown();
 

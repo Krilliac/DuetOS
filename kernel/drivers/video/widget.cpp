@@ -60,6 +60,7 @@
 #include "security/login.h"
 #include "drivers/video/theme.h"
 #include "drivers/video/tray_flyout.h"
+#include "drivers/video/volume_flyout.h"
 #include "drivers/video/wallpaper.h"
 
 namespace duetos::drivers::video
@@ -2788,6 +2789,7 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     MenuRedraw();
     CalendarRedraw();
     NetPanelRedraw();
+    VolumeFlyoutRedraw();
     TrayFlyoutRedraw();
     NotifyRedraw();
     MagnifierRedraw();

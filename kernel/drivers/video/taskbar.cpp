@@ -6,6 +6,7 @@
 #include "mm/frame_allocator.h"
 #include "net/stack.h"
 #include "sched/sched.h"
+#include "subsystems/audio/audio_backend.h"
 #include "drivers/video/blend_math.h"
 #include "drivers/video/chrome_text.h"
 #include "drivers/video/cursor.h"
@@ -53,6 +54,14 @@ constinit u32 g_net_cell_x = 0;
 constinit u32 g_net_cell_y = 0;
 constinit u32 g_net_cell_w = 0;
 constinit u32 g_net_cell_h = 0;
+
+// Cached volume (speaker) tray cell bounds — exposed via
+// TaskbarVolumeBounds so the mouse reader can click-toggle the volume
+// flyout. Same right-to-left recompute caveat as the NET cell.
+constinit u32 g_vol_cell_x = 0;
+constinit u32 g_vol_cell_y = 0;
+constinit u32 g_vol_cell_w = 0;
+constinit u32 g_vol_cell_h = 0;
 
 // "Show Desktop" sliver bounds — exposed via
 // `TaskbarShowDesktopBounds`. Updated every redraw; remains 0
@@ -792,6 +801,7 @@ void TaskbarRedraw()
     // actually got placed on this redraw (e.g. NET cell skipped
     // entirely if the strip ran out of horizontal room).
     g_net_cell_x = g_net_cell_y = g_net_cell_w = g_net_cell_h = 0;
+    g_vol_cell_x = g_vol_cell_y = g_vol_cell_w = g_vol_cell_h = 0;
     g_chevron_x = g_chevron_y = g_chevron_w = g_chevron_h = 0;
 
     // --- Icon-drawing helpers. Each takes the (x, y) origin of
@@ -816,7 +826,7 @@ void TaskbarRedraw()
     // Volume: a small speaker (filled trapezoid) on the left + 1-2
     // sound waves on the right. Drawn with stacked horizontal
     // rects for the cone + arcs for the waves.
-    auto draw_volume = [&](u32 ox, u32 oy, u32 ink)
+    auto draw_volume = [&](u32 ox, u32 oy, u32 ink, bool muted)
     {
         // Speaker box (square): 4×4 at left. Cone: triangle of
         // stacked horizontal lines reaching toward the centre.
@@ -825,11 +835,20 @@ void TaskbarRedraw()
         FramebufferFillRect(ox + 4, oy + 4, 1, 6, ink);
         FramebufferFillRect(ox + 5, oy + 3, 1, 8, ink);
         FramebufferFillRect(ox + 6, oy + 2, 1, 10, ink);
-        // Two outward sound-wave arcs.
-        const i32 cx = static_cast<i32>(ox + 6);
-        const i32 cy = static_cast<i32>(oy + kGlyph / 2);
-        FramebufferStrokeArc(cx, cy, 3, -50, 100, 1u, ink);
-        FramebufferStrokeArc(cx, cy, 5, -50, 100, 1u, ink);
+        if (muted)
+        {
+            // Diagonal slash across the speaker — no sound waves.
+            FramebufferDrawLine(static_cast<i32>(ox + 3), static_cast<i32>(oy + 1), static_cast<i32>(ox + kGlyph - 1),
+                                static_cast<i32>(oy + kGlyph - 3), ink);
+        }
+        else
+        {
+            // Two outward sound-wave arcs.
+            const i32 cx = static_cast<i32>(ox + 6);
+            const i32 cy = static_cast<i32>(oy + kGlyph / 2);
+            FramebufferStrokeArc(cx, cy, 3, -50, 100, 1u, ink);
+            FramebufferStrokeArc(cx, cy, 5, -50, 100, 1u, ink);
+        }
     };
 
     // Battery: outline rect + inner fill showing charge level.
@@ -925,15 +944,16 @@ void TaskbarRedraw()
             }
         }
     }
-    // Volume — placeholder dot in the accent (no audio mixer
-    // yet). Drawn second-from-right.
+    // Volume — speaker icon (slashed when muted). Drawn second-from-
+    // right. Bounds published so the mouse reader can open the volume
+    // flyout on click.
     {
-        u32 cx = 0;
-        if (place_cell(0, &cx, nullptr, nullptr, nullptr))
+        const bool muted = duetos::subsystems::audio::AudioIsMuted();
+        if (place_cell(0, &g_vol_cell_x, &g_vol_cell_y, &g_vol_cell_w, &g_vol_cell_h))
         {
-            const u32 ox = cx + (tray_cell - kGlyph) / 2;
+            const u32 ox = g_vol_cell_x + (tray_cell - kGlyph) / 2;
             const u32 oy = tray_y + (tray_cell - kGlyph) / 2;
-            draw_volume(ox, oy, g_fg);
+            draw_volume(ox, oy, g_fg, muted);
         }
     }
     // Network cell — Wi-Fi waves icon + status dot. Status dot
@@ -1187,6 +1207,18 @@ void TaskbarNetCellBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
         *w_out = g_net_cell_w;
     if (h_out)
         *h_out = g_net_cell_h;
+}
+
+void TaskbarVolumeBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
+{
+    if (x_out)
+        *x_out = g_vol_cell_x;
+    if (y_out)
+        *y_out = g_vol_cell_y;
+    if (w_out)
+        *w_out = g_vol_cell_w;
+    if (h_out)
+        *h_out = g_vol_cell_h;
 }
 
 void TaskbarChevronBounds(u32* x_out, u32* y_out, u32* w_out, u32* h_out)
