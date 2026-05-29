@@ -10,6 +10,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
+#include "drivers/gpu/intel_display.h"
 #include "drivers/gpu/intel_forcewake.h"
 #include "drivers/gpu/intel_ggtt.h"
 #include "drivers/gpu/intel_gpu_cmds.h"
@@ -167,6 +168,11 @@ void Probe(GpuInfo& g)
     // own trace ring records every attempt).
     ProbeFirmwareBlob("intel-gpu", "[gpu/intel]", "guc.bin");
     ProbeFirmwareBlob("intel-gpu", "[gpu/intel]", "huc.bin");
+
+    // Slice 5: detect connected panels by reading their EDID over GMBUS.
+    // Real-HW only — QEMU has no Intel device, so this is never reached
+    // there (Probe runs only for vendor=Intel 0x8086).
+    IntelDisplayProbe(g);
 }
 
 ::duetos::core::Result<void> Bringup(GpuInfo& g)
