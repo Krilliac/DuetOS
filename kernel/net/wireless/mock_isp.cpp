@@ -108,7 +108,7 @@ bool MockConnect(void* /*ctx*/, const char* ssid, WifiSecurity security, const c
     // Acquire a lease before returning so `wifi status` is online
     // immediately; the pump thread then keeps the link serviced.
     duetos::net::DhcpStart(kNetIface);
-    for (u32 round = 0; round < 16 && !duetos::net::DhcpLeaseRead().valid; ++round)
+    for (u32 round = 0; round < 16 && !duetos::net::DhcpLeaseRead(kNetIface).valid; ++round)
     {
         test::LoopbackDriverPump(&g_drv);
         duetos::sched::SchedYield();

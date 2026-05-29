@@ -494,9 +494,19 @@ struct DhcpLease
 /// false on already-in-progress or missing binding.
 bool DhcpStart(u32 iface_index);
 
-/// Current lease snapshot. `valid` is true only after a DHCP ACK
-/// successfully bound a new IP.
+/// Active lease across all interfaces: the first valid lease scanning
+/// from iface 0 upward (so the wired NIC wins when it has one). For
+/// UI / shell / syscall consumers that just want "the IP this box is
+/// using." Returns an invalid lease if no interface is bound.
 DhcpLease DhcpLeaseRead();
+
+/// Lease snapshot for a SPECIFIC `iface_index`. `valid` is true only
+/// after a DHCP ACK bound a new IP on that interface. DHCP state is
+/// per-interface, so each NIC's lease is independent — callers that
+/// transmit on a particular NIC (net-smoke, ARP gateway resolution)
+/// must read the iface they send on, not the active-lease scan.
+/// Out-of-range indices return an invalid lease.
+DhcpLease DhcpLeaseRead(u32 iface_index);
 
 // -------------------------------------------------------------------
 // TCP. The full multi-connection TCB state machine + retransmit +
