@@ -616,6 +616,40 @@ In rough priority:
   injector + synthetic self-tests landed.)
 - **Owner:** `kernel/drivers/usb/`.
 
+### Intel iGPU command submission (GGTT batch + 2D BLT)
+
+- **Today:** the RCS ring at MMIO 0x2000 is programmed and the boot
+  self-test verifies `MI_STORE_DWORD_IMM` read-back. Everything
+  graphics-accelerated still falls back to a software rasterizer.
+- **Plan (research landed 2026-05-29 — see
+  [`GPU-Implementation-Notes` §Intel](GPU-Implementation-Notes.md)):**
+  five slices, in order —
+  1. **Forcewake + GT-init** — hold RENDER+GT domains (Gen9 set/ack
+     `0xA278`/`0x0D84` + `0xA188`/`0x130044`) with the Gen9–11
+     fallback-ack erratum, RC6 off, un-stop the ring via
+     `RING_MI_MODE`.
+  2. **GGTT manager** — encode 64-bit PTEs (`phys | present`, LM=0),
+     write through the BAR0 GTTMMADR upper-half alias, scratch-fill
+     all slots, allocate GPU-VA above the GMADR aperture.
+  3. **Batch submission + breadcrumb** — `MI_BATCH_BUFFER_START`
+     (full 48-bit lo/hi addr) from a GGTT batch, `wmb` before the
+     `RING_TAIL` doorbell, PIPE_CONTROL post-sync seqno + poll.
+  4. **2D BLT → GDI accel (the T4-03 win)** — `XY_COLOR_BLT`
+     (ROP `0xF0` fill) + `XY_SRC_COPY_BLT` (ROP `0xCC` copy) on the
+     BCS ring; wire GDI `FillRect`/`BitBlt` to it.
+  5. **Display detect/modeset** (independent) — GMBUS EDID read +
+     `SDEISR`/`GEN11_DE_HPD_ISR` connector detect + primary-plane
+     reprogram (keep firmware timings; defer PLL math).
+- **Verification ceiling:** QEMU has no Intel-iGPU model, so the
+  encoders (PTE / MI_* / BLT command builders) are pinned by boot
+  self-tests asserting exact DWORDs (run + PASS under QEMU), but the
+  MMIO submission paths are gated and **unverified on silicon** — they
+  need a Gen9 NUC (Skylake/Kaby-Lake, no Optimus) + serial UART. The
+  non-destructive proof ladder is in the notes page.
+- **Blocks:** GPU-accelerated GDI paint (Track 4 → T4-03), DirectX
+  real-device backends, multi-monitor mode-set.
+- **Owner:** `kernel/drivers/gpu/intel_gpu.{h,cpp}` + a new GGTT/BLT unit.
+
 ### Multi-monitor / runtime resolution change
 
 - **Today:** single linear framebuffer, mode set at boot via
