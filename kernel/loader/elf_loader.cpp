@@ -271,7 +271,7 @@ void LoadSegment(LoadCtx& ctx, const ElfSegment& seg)
 
     for (u64 page_va = start; page_va < end; page_va += kPageSize)
     {
-        auto frame_r = TryAllocateFrame();
+        auto frame_r = AllocateFrame();
         if (!frame_r)
         {
             KBP_PROBE_V(::duetos::debug::ProbeId::kElfLoaderOom, page_va);
@@ -356,7 +356,7 @@ ElfLoadResult ElfLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
     // Stack page. Writable + NX + User. Caller has already populated
     // the code segment(s); the stack goes at the fixed v0 VA.
     using namespace duetos::mm;
-    auto stack_frame_r = TryAllocateFrame();
+    auto stack_frame_r = AllocateFrame();
     if (!stack_frame_r)
     {
         KLOG_ERROR("elf-loader", "stack frame allocation failed (OOM)");

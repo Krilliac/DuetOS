@@ -354,7 +354,7 @@ void ZeroFrame(mm::PhysAddr phys)
 // Allocate + zero one DMA-safe page. Returns 0 on OOM.
 mm::PhysAddr AllocZeroedPage()
 {
-    auto p_r = mm::TryAllocateFrame();
+    auto p_r = mm::AllocateFrame();
     if (!p_r)
     {
         return 0;
@@ -1025,7 +1025,7 @@ bool RegisterAsBlockDevice()
 {
     // Contiguous 16-page staging buffer so PRP list entries point
     // at consecutive physical pages without per-page allocation.
-    auto stage_phys_r = mm::TryAllocateContiguousFrames(kIoBufPages);
+    auto stage_phys_r = mm::AllocateContiguousFrames(kIoBufPages);
     if (!stage_phys_r)
     {
         core::Log(core::LogLevel::Error, "drivers/nvme", "contiguous staging buffer allocation failed");

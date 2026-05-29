@@ -251,7 +251,7 @@ bool VirtioNetProbe(const VirtioPciLayout& L)
     VirtioMarkDriverOk(&layout);
 
     // TX header page (12 bytes, all-zero, reused across transmits).
-    auto hdr_phys_r = mm::TryAllocateFrame();
+    auto hdr_phys_r = mm::AllocateFrame();
     if (!hdr_phys_r)
     {
         KLOG_WARN("drivers/virtio/net", "header page alloc failed");
@@ -267,7 +267,7 @@ bool VirtioNetProbe(const VirtioPciLayout& L)
     // Ethernet frame (max 1518 B) with room to spare. The TX
     // path copies the caller's frame here, then DMAs from this
     // direct-map address — never from the caller's pointer.
-    auto tx_phys_r = mm::TryAllocateFrame();
+    auto tx_phys_r = mm::AllocateFrame();
     if (!tx_phys_r)
     {
         KLOG_WARN("drivers/virtio/net", "TX staging page alloc failed");
@@ -282,7 +282,7 @@ bool VirtioNetProbe(const VirtioPciLayout& L)
     // a buffer inside frame `f` at offset `b * kRxBufBytes`.
     for (u32 f = 0; f < kRxFrames; ++f)
     {
-        auto phys_r = mm::TryAllocateFrame();
+        auto phys_r = mm::AllocateFrame();
         if (!phys_r)
         {
             KLOG_WARN_V("drivers/virtio/net", "RX buffer frame alloc failed at frame", static_cast<u64>(f));

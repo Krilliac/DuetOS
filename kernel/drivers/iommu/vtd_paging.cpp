@@ -41,12 +41,12 @@ void* PhysToWritable(u64 phys)
     // call leaks the first frame forever. Tracking by local
     // variables (vs g_state) means a failure leaves g_initialized
     // false and a retry starts fresh.
-    auto root_phys_r = mm::TryAllocateFrame();
+    auto root_phys_r = mm::AllocateFrame();
     if (!root_phys_r)
         return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
     const mm::PhysAddr root_phys = root_phys_r.value();
 
-    auto ctx_phys_r = mm::TryAllocateFrame();
+    auto ctx_phys_r = mm::AllocateFrame();
     if (!ctx_phys_r)
     {
         mm::FreeFrame(root_phys);
@@ -54,7 +54,7 @@ void* PhysToWritable(u64 phys)
     }
     const mm::PhysAddr ctx_phys = ctx_phys_r.value();
 
-    auto pdpt_phys_r = mm::TryAllocateFrame();
+    auto pdpt_phys_r = mm::AllocateFrame();
     if (!pdpt_phys_r)
     {
         mm::FreeFrame(root_phys);

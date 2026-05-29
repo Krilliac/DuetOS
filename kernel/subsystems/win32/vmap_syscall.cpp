@@ -48,7 +48,7 @@ void DoVmap(arch::TrapFrame* frame)
     const u64 base = proc->vmap_base + proc->vmap_pages_used * mm::kPageSize;
     for (u64 i = 0; i < pages; ++i)
     {
-        const mm::PhysAddr f = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+        const mm::PhysAddr f = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (f == mm::kNullFrame)
         {
             // OOM partway through — frames already mapped stay
@@ -220,7 +220,7 @@ bool CommitPages(::duetos::core::Process* proc, ::duetos::core::Process::Win32Vm
             continue;
         if ((r.committed_bits & (1u << i)) != 0)
             continue; // already committed — caller's race
-        auto f_r = TryAllocateFrame();
+        auto f_r = AllocateFrame();
         if (!f_r)
         {
             // Roll back.

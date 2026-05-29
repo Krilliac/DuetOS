@@ -101,7 +101,7 @@ inline void Invlpg(u64 v)
 // frame ceiling must kill that process, never halt the kernel.
 u64* AllocateTable()
 {
-    auto frame_r = TryAllocateFrame();
+    auto frame_r = AllocateFrame();
     if (!frame_r)
     {
         return nullptr;
@@ -259,7 +259,7 @@ core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget)
     // and #GPs.
     memset(as, 0, sizeof(AddressSpace));
 
-    auto pml4_frame_r = TryAllocateFrame();
+    auto pml4_frame_r = AllocateFrame();
     if (!pml4_frame_r)
     {
         // Frame allocator exhausted while reserving the PML4 root —
@@ -620,7 +620,7 @@ core::Result<AddressSpace*> AddressSpaceFork(const AddressSpace* parent)
         // Extract flags: mask out the address bits, keep the
         // protection / present / user / NX flags.
         const u64 flags = parent_pte & ~kAddrMask;
-        auto child_frame_r = TryAllocateFrame();
+        auto child_frame_r = AllocateFrame();
         if (!child_frame_r)
         {
             AddressSpaceRelease(child);
@@ -893,7 +893,7 @@ void AddressSpaceSelfTest()
     }
     AddressSpace* b = b_r.value();
 
-    auto frame_r = TryAllocateFrame();
+    auto frame_r = AllocateFrame();
     if (!frame_r)
     {
         PanicAs("self-test: AllocateFrame failed", 0);

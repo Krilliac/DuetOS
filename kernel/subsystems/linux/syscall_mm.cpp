@@ -227,7 +227,7 @@ i64 DoBrk(u64 new_brk)
     {
         for (u64 va = cur_aligned; va < new_aligned; va += mm::kPageSize)
         {
-            const mm::PhysAddr frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+            const mm::PhysAddr frame = mm::AllocateFrame().value_or(mm::kNullFrame);
             if (frame == mm::kNullFrame)
             {
                 // Partial-brk contract: report the page-aligned
@@ -311,7 +311,7 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     {
         for (u64 va = base; va < base + aligned; va += mm::kPageSize)
         {
-            const mm::PhysAddr frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+            const mm::PhysAddr frame = mm::AllocateFrame().value_or(mm::kNullFrame);
             if (frame == mm::kNullFrame)
             {
                 KLOG_ERROR_AV(::duetos::core::LogArea::Linux, "linux/mm", "mmap anon: AllocateFrame OOM at va", va);
@@ -371,7 +371,7 @@ i64 DoMmap(u64 addr, u64 len, u64 prot, u64 flags, u64 fd, u64 off)
     for (u64 page_idx = 0; page_idx * mm::kPageSize < aligned; ++page_idx)
     {
         const u64 va = base + page_idx * mm::kPageSize;
-        const mm::PhysAddr frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+        const mm::PhysAddr frame = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (frame == mm::kNullFrame)
         {
             // Unwind [base, va) — same partial-OOM hazard as the
@@ -506,7 +506,7 @@ i64 DoMremap(u64 old_addr, u64 old_len, u64 new_len, u64 flags, u64 new_addr)
     // Allocate new frames for the entire new range.
     for (u64 i = 0; i < new_pages; ++i)
     {
-        const mm::PhysAddr fr = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+        const mm::PhysAddr fr = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (fr == mm::kNullFrame)
         {
             // Unwind freshly mapped frames so we don't leak.

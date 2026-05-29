@@ -118,7 +118,7 @@ bool VirtioConsoleProbe(const VirtioPciLayout& L)
     // buffer and re-posts when empty.
     if (VirtioQueueSetup(&layout, &g_console.rxq, /*queue_index=*/0, kVirtqDefaultSize))
     {
-        auto rx_phys_r = mm::TryAllocateFrame();
+        auto rx_phys_r = mm::AllocateFrame();
         if (rx_phys_r)
         {
             const mm::PhysAddr rx_phys = rx_phys_r.value();
@@ -150,7 +150,7 @@ bool VirtioConsoleProbe(const VirtioPciLayout& L)
     // Static TX scratch — one page is plenty for the line-at-a-
     // time write pattern. A consumer that wants to ship more
     // than 256 bytes per call splits the buffer at the caller.
-    auto phys_r = mm::TryAllocateFrame();
+    auto phys_r = mm::AllocateFrame();
     if (!phys_r)
     {
         KLOG_WARN("drivers/virtio/console", "tx buffer alloc failed");

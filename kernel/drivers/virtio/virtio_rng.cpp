@@ -36,7 +36,7 @@ bool PullEntropy(VirtioPciLayout* L, VirtioQueue* q)
     // Allocate one page as the device-write buffer. virtio-rng has
     // no per-request header — the device just writes random bytes
     // into the supplied buffer.
-    auto buf_phys_r = mm::TryAllocateFrame();
+    auto buf_phys_r = mm::AllocateFrame();
     if (!buf_phys_r)
     {
         KLOG_WARN("drivers/virtio/rng", "entropy buffer alloc failed");

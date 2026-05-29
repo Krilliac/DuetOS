@@ -86,7 +86,7 @@ bool InstallStackPages(u32 slot_index)
     u64 installed = 0;
     for (u64 i = 0; i < kKernelStackPages; ++i)
     {
-        auto phys_r = TryAllocateFrame();
+        auto phys_r = AllocateFrame();
         if (!phys_r)
         {
             // Unwind: free every frame we installed so far so we

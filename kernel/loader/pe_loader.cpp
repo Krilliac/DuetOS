@@ -460,7 +460,7 @@ bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::Addre
         // and skip a duplicate AddressSpaceMapUserPage call.
         const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
         const bool reusing = existing != kNullFrame;
-        const PhysAddr frame = reusing ? existing : TryAllocateFrame().value_or(kNullFrame);
+        const PhysAddr frame = reusing ? existing : AllocateFrame().value_or(kNullFrame);
         if (frame == kNullFrame)
             return false;
         auto* frame_direct = static_cast<u8*>(PhysToVirt(frame));
@@ -516,7 +516,7 @@ bool MapHeaders(const u8* file, u64 sizeof_headers, u64 image_base, duetos::mm::
         // bytes than SectionAlignment. Reuse the existing mapping.
         const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
         const bool reusing = existing != kNullFrame;
-        const PhysAddr frame = reusing ? existing : TryAllocateFrame().value_or(kNullFrame);
+        const PhysAddr frame = reusing ? existing : AllocateFrame().value_or(kNullFrame);
         if (frame == kNullFrame)
             return false;
         auto* direct = static_cast<u8*>(PhysToVirt(frame));
@@ -856,7 +856,7 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
     const u64 npages = total == 0 ? 1 : ((total + duetos::mm::kPageSize - 1) / duetos::mm::kPageSize);
     for (u64 p = 0; p < npages; ++p)
     {
-        const mm::PhysAddr f = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+        const mm::PhysAddr f = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (f == mm::kNullFrame)
         {
             arch::SerialWrite("[pe-tls] FAIL block frame alloc\n");
@@ -895,7 +895,7 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
 
     // 2. Slot array page; slot[0] -> block.
     {
-        const mm::PhysAddr f = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+        const mm::PhysAddr f = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (f == mm::kNullFrame)
         {
             arch::SerialWrite("[pe-tls] FAIL array frame alloc\n");
@@ -948,7 +948,7 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
     }
     if (ncb != 0)
     {
-        const mm::PhysAddr f = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+        const mm::PhysAddr f = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (f == mm::kNullFrame)
         {
             arch::SerialWrite("[pe-tls] FAIL trampoline frame alloc\n");
@@ -2297,7 +2297,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     //    blew out at rsp+0x1000 inside the CRT).
     for (u64 p = 0; p < kV0StackPages; ++p)
     {
-        auto stack_frame_r = TryAllocateFrame();
+        auto stack_frame_r = AllocateFrame();
         if (!stack_frame_r)
         {
             SerialWrite("[pe-load] FAIL stack frame alloc idx=");
@@ -2325,7 +2325,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     u64 teb_va = 0;
     if (ps == PeStatus::ImportsPresent)
     {
-        auto teb_frame_r = TryAllocateFrame();
+        auto teb_frame_r = AllocateFrame();
         if (!teb_frame_r)
         {
             SerialWrite("[pe-load] FAIL teb frame alloc\n");
@@ -2477,7 +2477,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     //     Layer 4.
     if (!h.is_pe32 && ps == PeStatus::ImportsPresent)
     {
-        auto env_frame_r = TryAllocateFrame();
+        auto env_frame_r = AllocateFrame();
         if (!env_frame_r)
         {
             SerialWrite("[pe-load] FAIL proc-env frame alloc\n");
@@ -2513,7 +2513,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // page beyond the stub table stay zeroed from the pre-clear.
     if (!h.is_pe32 && ps == PeStatus::ImportsPresent)
     {
-        auto stubs_frame_r = TryAllocateContiguousFrames(2);
+        auto stubs_frame_r = AllocateContiguousFrames(2);
         if (!stubs_frame_r)
         {
             SerialWrite("[pe-load] FAIL stubs frames alloc (need 2)\n");
@@ -2549,7 +2549,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         // stub at kWin32Thunks32Va, so calling an unresolved
         // import cleanly terminates the process instead of #PFing
         // at the 64-bit catch-all VA (which isn't mapped for PE32).
-        auto thunks32_frame_r = TryAllocateFrame();
+        auto thunks32_frame_r = AllocateFrame();
         if (!thunks32_frame_r)
         {
             SerialWrite("[pe-load] FAIL pe32 thunks page alloc\n");

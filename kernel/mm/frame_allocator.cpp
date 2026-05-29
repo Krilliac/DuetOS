@@ -818,7 +818,7 @@ void FrameAllocatorNumaSelfTest()
     // linear-scan path. Always covered: even on a NUMA boot, a node
     // index past the recorded count is treated as "no range" and
     // falls through.
-    const PhysAddr fallback = AllocateFrameNode(acpi::srat::kNoNode);
+    const PhysAddr fallback = AllocateFrameNode(acpi::srat::kNoNode).value_or(kNullFrame);
     if (fallback == kNullFrame)
     {
         core::Panic("mm/frame", "numa self-test: UMA fallback alloc failed");
@@ -850,7 +850,7 @@ void FrameAllocatorNumaSelfTest()
         arch::SerialWrite("[mm/frame] numa self-test SKIP (every node range collapsed to empty)\n");
         return;
     }
-    const PhysAddr local = AllocateFrameNode(test_node);
+    const PhysAddr local = AllocateFrameNode(test_node).value_or(kNullFrame);
     if (local == kNullFrame)
     {
         core::Panic("mm/frame", "numa self-test: AllocateFrameNode(local) failed");
@@ -966,7 +966,7 @@ void FrameAllocatorBuildNumaRanges()
     }
 }
 
-PhysAddr AllocateFrameInRange(PhysAddr max_phys)
+core::Result<PhysAddr> AllocateFrameInRange(PhysAddr max_phys)
 {
     sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
     u64 max_frames = g_bitmap_frames;
@@ -980,7 +980,7 @@ PhysAddr AllocateFrameInRange(PhysAddr max_phys)
     if (frame >= g_bitmap_frames)
     {
         KLOG_ONCE_WARN("mm/frame", "AllocateFrameInRange: no free frame in range");
-        return kNullFrame;
+        return core::Err{core::ErrorCode::OutOfMemory};
     }
     return AllocateFrameAtIndex(frame);
 }
@@ -1024,14 +1024,14 @@ PhysAddr ProcessAndReturnFrame(u64 frame, u8 node)
 
 } // namespace
 
-PhysAddr AllocateFrameNode(u8 node)
+core::Result<PhysAddr> AllocateFrameNode(u8 node)
 {
     if (g_fail_after != 0)
     {
         if (g_fail_after == 1)
         {
             g_fail_after = 0;
-            return kNullFrame;
+            return core::Err{core::ErrorCode::OutOfMemory};
         }
         --g_fail_after;
     }
@@ -1082,10 +1082,10 @@ PhysAddr AllocateFrameNode(u8 node)
         ::duetos::diag::FixDetector::SoftFaultRecov, "mm/frame-alloc",
         "physical OOM: AllocateFrameNode returned kNullFrame; investigate caller's null-handling and frame budget",
         FreeFramesCount(), /*ctx_b=*/0, /*severity=*/2, upstream);
-    return kNullFrame;
+    return core::Err{core::ErrorCode::OutOfMemory};
 }
 
-PhysAddr AllocateFrame()
+core::Result<PhysAddr> AllocateFrame()
 {
     sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
     // ---- Per-CPU warm pool fast path ------------------------------
@@ -1146,7 +1146,7 @@ PhysAddr AllocateFrame()
         if (g_fail_after == 1)
         {
             g_fail_after = 0;
-            return kNullFrame;
+            return core::Err{core::ErrorCode::OutOfMemory};
         }
         --g_fail_after;
     }
@@ -1227,7 +1227,7 @@ PhysAddr AllocateFrame()
     KLOG_CRITICAL_A(::duetos::core::LogArea::Memory, "mm/frame", "AllocateFrame: physical OOM");
     KDBG(Mm, "mm/frame", "AllocateFrame OOM");
     KBP_PROBE(::duetos::debug::ProbeId::kPhysAllocFail);
-    return kNullFrame;
+    return core::Err{core::ErrorCode::OutOfMemory};
 }
 
 void FreeFrame(PhysAddr frame)
@@ -1382,12 +1382,16 @@ void FrameAllocatorDrainPools()
     }
 }
 
-PhysAddr AllocateContiguousFrames(u64 count)
+core::Result<PhysAddr> AllocateContiguousFrames(u64 count)
 {
     sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
-    if (count == 0 || count > g_alloc_ceiling_frames)
+    if (count == 0)
     {
-        return kNullFrame;
+        return core::Err{core::ErrorCode::InvalidArgument};
+    }
+    if (count > g_alloc_ceiling_frames)
+    {
+        return core::Err{core::ErrorCode::OutOfMemory};
     }
     if (count == 1)
     {
@@ -1406,7 +1410,7 @@ PhysAddr AllocateContiguousFrames(u64 count)
         if (g_fail_after == 1)
         {
             g_fail_after = 0;
-            return kNullFrame;
+            return core::Err{core::ErrorCode::OutOfMemory};
         }
         --g_fail_after;
     }
@@ -1440,15 +1444,19 @@ PhysAddr AllocateContiguousFrames(u64 count)
         }
     }
     KLOG_WARN_V("mm/frame", "no contiguous run available; requested frames", count);
-    return kNullFrame;
+    return core::Err{core::ErrorCode::OutOfMemory};
 }
 
-PhysAddr AllocateContiguousFramesInRange(u64 count, PhysAddr max_phys)
+core::Result<PhysAddr> AllocateContiguousFramesInRange(u64 count, PhysAddr max_phys)
 {
     sync::SpinLockRecursiveGuard g_lock(g_frame_lock);
-    if (count == 0 || count > g_alloc_ceiling_frames)
+    if (count == 0)
     {
-        return kNullFrame;
+        return core::Err{core::ErrorCode::InvalidArgument};
+    }
+    if (count > g_alloc_ceiling_frames)
+    {
+        return core::Err{core::ErrorCode::OutOfMemory};
     }
     // max_phys == 0 == no upper bound, matching AllocateFrameInRange.
     // Either way the run must stay inside the direct map (the caller
@@ -1462,7 +1470,7 @@ PhysAddr AllocateContiguousFramesInRange(u64 count, PhysAddr max_phys)
             max_frames = g_alloc_ceiling_frames;
     }
     if (count > max_frames)
-        return kNullFrame;
+        return core::Err{core::ErrorCode::OutOfMemory};
 
     // Same linear scan as AllocateContiguousFrames, clamped at
     // max_frames so the WHOLE run sits strictly below max_phys (the
@@ -1489,7 +1497,7 @@ PhysAddr AllocateContiguousFramesInRange(u64 count, PhysAddr max_phys)
         }
     }
     KLOG_WARN_V("mm/frame", "no in-range contiguous run available; requested frames", count);
-    return kNullFrame;
+    return core::Err{core::ErrorCode::OutOfMemory};
 }
 
 void FreeContiguousFrames(PhysAddr base, u64 count)
@@ -1569,20 +1577,20 @@ void FrameAllocatorOomInjectionSelfTest()
     // two AllocateFrame calls below succeed; the third returns
     // kNullFrame and the counter resets to 0.
     FrameAllocatorSetFailAfter(3);
-    const PhysAddr a = AllocateFrame();
+    const PhysAddr a = AllocateFrame().value_or(kNullFrame);
     if (a == kNullFrame)
         PanicFrame("FrameAllocatorOomInjectionSelfTest: first AllocateFrame returned null");
-    const PhysAddr b = AllocateFrame();
+    const PhysAddr b = AllocateFrame().value_or(kNullFrame);
     if (b == kNullFrame)
         PanicFrame("FrameAllocatorOomInjectionSelfTest: second AllocateFrame returned null");
-    const PhysAddr c = AllocateFrame();
+    const PhysAddr c = AllocateFrame().value_or(kNullFrame);
     if (c != kNullFrame)
         PanicFrame("FrameAllocatorOomInjectionSelfTest: third AllocateFrame should have failed");
     if (g_fail_after != 0)
         PanicFrame("FrameAllocatorOomInjectionSelfTest: counter not consumed");
 
     // Subsequent allocations succeed (injection is disabled again).
-    const PhysAddr d = AllocateFrame();
+    const PhysAddr d = AllocateFrame().value_or(kNullFrame);
     if (d == kNullFrame)
         PanicFrame("FrameAllocatorOomInjectionSelfTest: post-injection alloc failed");
 
@@ -1600,9 +1608,9 @@ void FrameAllocatorSelfTest()
 
     const u64 free_before = g_free_count;
 
-    const PhysAddr a = AllocateFrame();
-    const PhysAddr b = AllocateFrame();
-    const PhysAddr c = AllocateFrame();
+    const PhysAddr a = AllocateFrame().value_or(kNullFrame);
+    const PhysAddr b = AllocateFrame().value_or(kNullFrame);
+    const PhysAddr c = AllocateFrame().value_or(kNullFrame);
 
     if (a == kNullFrame || b == kNullFrame || c == kNullFrame)
     {
@@ -1640,7 +1648,7 @@ void FrameAllocatorSelfTest()
 
     // The hint was rewound to min(a,b,c) by the first Free, so the next
     // allocation should reuse the lowest freed frame.
-    const PhysAddr reuse = AllocateFrame();
+    const PhysAddr reuse = AllocateFrame().value_or(kNullFrame);
     if (reuse != a && reuse != b && reuse != c)
     {
         PanicFrame("self-test: realloc did not reuse freed frame");
@@ -1654,7 +1662,7 @@ void FrameAllocatorSelfTest()
     // a base whose successor frames are also reserved — verify by probing
     // each frame index inside the run.
     constexpr u64 kRun = 8;
-    const PhysAddr run_base = AllocateContiguousFrames(kRun);
+    const PhysAddr run_base = AllocateContiguousFrames(kRun).value_or(kNullFrame);
     if (run_base == kNullFrame)
     {
         PanicFrame("self-test: contiguous allocation returned null");
@@ -1688,7 +1696,7 @@ void FrameAllocatorSelfTest()
     // higher-half direct map is safe in this self-test scope — the
     // bitmap slot is free but the physical page hasn't been handed
     // out, and the direct map keeps the VA mapped.
-    const PhysAddr poison_probe = AllocateFrame();
+    const PhysAddr poison_probe = AllocateFrame().value_or(kNullFrame);
     if (poison_probe == kNullFrame)
     {
         PanicFrame("self-test: poison-probe alloc failed");

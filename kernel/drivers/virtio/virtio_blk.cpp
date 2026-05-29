@@ -402,7 +402,7 @@ bool VirtioBlkProbe(const VirtioPciLayout& L)
     // One shared header + status page. Single in-flight request
     // (see file-level GAP comment) means we don't need per-call
     // allocation here.
-    auto hdr_phys_r = mm::TryAllocateFrame();
+    auto hdr_phys_r = mm::AllocateFrame();
     if (!hdr_phys_r)
     {
         KLOG_WARN("drivers/virtio/blk", "header page alloc failed");

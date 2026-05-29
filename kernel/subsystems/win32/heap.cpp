@@ -99,7 +99,7 @@ bool Win32HeapInit(duetos::core::Process* proc)
     // will clean them up when the load itself is aborted).
     for (u64 i = 0; i < kWin32HeapPages; ++i)
     {
-        auto frame_r = TryAllocateFrame();
+        auto frame_r = AllocateFrame();
         if (!frame_r)
             return false;
         const PhysAddr frame = frame_r.value();
@@ -395,7 +395,7 @@ u64 Win32HeapExCreate(duetos::core::Process* proc, u64 pages)
     u64 mapped = 0;
     for (; mapped < pages; ++mapped)
     {
-        auto frame_r = TryAllocateFrame();
+        auto frame_r = AllocateFrame();
         if (!frame_r)
             break;
         const PhysAddr frame = frame_r.value();

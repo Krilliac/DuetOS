@@ -285,7 +285,7 @@ void KernelHeapInit()
     constexpr u64 kFrames = kKernelHeapBytes / kPageSize;
     static_assert(kFrames * kPageSize == kKernelHeapBytes, "Heap size must be a multiple of the page size");
 
-    auto base_phys_r = TryAllocateContiguousFrames(kFrames);
+    auto base_phys_r = AllocateContiguousFrames(kFrames);
     if (!base_phys_r)
     {
         PanicHeap("could not allocate contiguous frames for the heap pool");

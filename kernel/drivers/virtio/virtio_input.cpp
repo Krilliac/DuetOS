@@ -552,7 +552,7 @@ bool VirtioInputProbe(const VirtioPciLayout& L)
         return false;
     }
 
-    auto phys_r = mm::TryAllocateFrame();
+    auto phys_r = mm::AllocateFrame();
     if (!phys_r)
     {
         KLOG_WARN("drivers/virtio/input", "event buffer alloc failed");

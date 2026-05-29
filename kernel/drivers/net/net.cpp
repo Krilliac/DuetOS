@@ -334,7 +334,7 @@ void E1000ClearMulticastTable()
 bool E1000SetupRxRing()
 {
     // One 4 KiB frame for the RX descriptor ring (256 × 16 B).
-    auto ring_phys_r = mm::TryAllocateFrame();
+    auto ring_phys_r = mm::AllocateFrame();
     if (!ring_phys_r)
         return false;
     const mm::PhysAddr ring_phys = ring_phys_r.value();
@@ -347,7 +347,7 @@ bool E1000SetupRxRing()
     // 256 × 2 KiB = 128 pages contiguous for RX buffers. Each
     // descriptor points at buf_base + slot × 2048.
     constexpr u32 kRxBufPages = (kE1000RxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
-    auto buf_phys_r = mm::TryAllocateContiguousFrames(kRxBufPages);
+    auto buf_phys_r = mm::AllocateContiguousFrames(kRxBufPages);
     if (!buf_phys_r)
     {
         mm::FreeFrame(ring_phys);
@@ -377,7 +377,7 @@ bool E1000SetupRxRing()
 
 bool E1000SetupTxRing()
 {
-    auto ring_phys_r = mm::TryAllocateFrame();
+    auto ring_phys_r = mm::AllocateFrame();
     if (!ring_phys_r)
         return false;
     const mm::PhysAddr ring_phys = ring_phys_r.value();
@@ -388,7 +388,7 @@ bool E1000SetupTxRing()
     g_e1000.tx_ring = reinterpret_cast<E1000TxDesc*>(ring_virt);
 
     constexpr u32 kTxBufPages = (kE1000TxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
-    auto buf_phys_r = mm::TryAllocateContiguousFrames(kTxBufPages);
+    auto buf_phys_r = mm::AllocateContiguousFrames(kTxBufPages);
     if (!buf_phys_r)
     {
         mm::FreeFrame(ring_phys);

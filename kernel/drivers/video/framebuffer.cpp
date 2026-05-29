@@ -603,7 +603,7 @@ void FramebufferBeginCompose()
         // Tightly packed: width * 4 bytes per row, no padding.
         const u64 bytes = static_cast<u64>(g_info.width) * 4ULL * g_info.height;
         const u64 frames = (bytes + (mm::kPageSize - 1ULL)) >> mm::kPageSizeLog2;
-        auto phys_r = mm::TryAllocateContiguousFrames(frames);
+        auto phys_r = mm::AllocateContiguousFrames(frames);
         if (!phys_r)
         {
             // Allocator exhausted — fall back to direct-to-MMIO mode.
@@ -629,7 +629,7 @@ void FramebufferBeginCompose()
         // present goes full (g_presented_valid stays false and the
         // EndCompose full-sync path runs each frame). Don't fail
         // the whole compose for it.
-        const auto snap_phys = mm::TryAllocateContiguousFrames(frames).value_or(mm::kNullFrame);
+        const auto snap_phys = mm::AllocateContiguousFrames(frames).value_or(mm::kNullFrame);
         if (snap_phys == mm::kNullFrame)
         {
             SerialWrite("[video/fb] presented-snapshot alloc failed (frames=");

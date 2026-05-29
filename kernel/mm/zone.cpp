@@ -75,7 +75,7 @@ PhysAddr AllocateZoneFrame(Zone zone)
         max_phys = 16ULL * 1024 * 1024; // < 16 MiB (legacy ISA DMA)
     else if (zone == Zone::Dma32)
         max_phys = 4ULL * 1024 * 1024 * 1024; // < 4 GiB (PCIe DMA)
-    auto f_r = TryAllocateFrameInRange(max_phys);
+    auto f_r = AllocateFrameInRange(max_phys);
     if (!f_r)
     {
         ++g_stats[static_cast<u32>(zone)].oom;

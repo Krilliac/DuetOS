@@ -217,7 +217,7 @@ bool MapLinuxVdso(::duetos::mm::AddressSpace* as, Process* proc, u64 base_va)
 
     static_assert(sizeof(kBinLinuxVdsoBytes) <= kPageSize, "Linux vDSO blob must fit in one 4 KiB page");
 
-    auto frame_r = TryAllocateFrame();
+    auto frame_r = AllocateFrame();
     if (!frame_r)
         return false;
     const PhysAddr frame = frame_r.value();

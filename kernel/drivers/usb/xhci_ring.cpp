@@ -29,7 +29,7 @@ namespace duetos::drivers::usb::xhci::internal
 // pointer. Returns false on out-of-memory.
 bool AllocZeroPage(mm::PhysAddr* out_phys, void** out_virt)
 {
-    auto phys_r = mm::TryAllocateFrame();
+    auto phys_r = mm::AllocateFrame();
     if (!phys_r)
         return false;
     const mm::PhysAddr phys = phys_r.value();

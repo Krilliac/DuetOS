@@ -378,7 +378,7 @@ void Write64(u64 off, u64 v)
 
 bool AllocOnePage(::duetos::mm::PhysAddr* phys_out, void** virt_out)
 {
-    auto f_r = ::duetos::mm::TryAllocateFrame();
+    auto f_r = ::duetos::mm::AllocateFrame();
     if (!f_r)
         return false;
     const ::duetos::mm::PhysAddr f = f_r.value();
@@ -857,7 +857,7 @@ bool VirtioGpuSetupScanout(u32 width, u32 height)
     const u64 pitch = static_cast<u64>(width) * 4;
     const u64 bytes = pitch * height;
     const u64 pages = (bytes + kPageSize - 1) / kPageSize;
-    auto base_r = ::duetos::mm::TryAllocateContiguousFrames(pages);
+    auto base_r = ::duetos::mm::AllocateContiguousFrames(pages);
     if (!base_r)
     {
         arch::SerialWrite("[virtio-gpu] setup-scanout: could not allocate ");

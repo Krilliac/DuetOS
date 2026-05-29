@@ -303,7 +303,7 @@ bool BringUp(u8 slot_id)
     }
     // Pull the full config descriptor into an allocated page so we
     // don't need large stack arrays (no memset in freestanding).
-    auto cfg_phys_r = mm::TryAllocateFrame();
+    auto cfg_phys_r = mm::AllocateFrame();
     if (!cfg_phys_r)
         return false;
     const mm::PhysAddr cfg_phys = cfg_phys_r.value();
@@ -379,8 +379,8 @@ bool BringUp(u8 slot_id)
     }
 
     // DMA buffers.
-    g_state.rx_buf_phys = mm::TryAllocateFrame().value_or(mm::kNullFrame);
-    g_state.tx_buf_phys = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+    g_state.rx_buf_phys = mm::AllocateFrame().value_or(mm::kNullFrame);
+    g_state.tx_buf_phys = mm::AllocateFrame().value_or(mm::kNullFrame);
     if (g_state.rx_buf_phys == mm::kNullFrame || g_state.tx_buf_phys == mm::kNullFrame)
     {
         KLOG_ERROR("drivers/usb/cdc-ecm", "DMA buffer allocation failed (rx or tx frame)");

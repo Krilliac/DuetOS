@@ -304,7 +304,7 @@ bool BringUp(u8 slot_id)
 
     // GET_DESCRIPTOR(Config) header first to learn wTotalLength,
     // then the full descriptor.
-    auto cfg_phys_r = mm::TryAllocateFrame();
+    auto cfg_phys_r = mm::AllocateFrame();
     if (!cfg_phys_r)
         return false;
     mm::PhysAddr cfg_phys = cfg_phys_r.value();
@@ -346,12 +346,12 @@ bool BringUp(u8 slot_id)
     if (!xhci::XhciConfigureBulkEndpoint(slot_id, acl_out, acl_out_mps))
         return false;
 
-    g_state.rx_buf_phys = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+    g_state.rx_buf_phys = mm::AllocateFrame().value_or(mm::kNullFrame);
     if (g_state.rx_buf_phys == mm::kNullFrame)
         return false;
     g_state.rx_buf_virt = static_cast<u8*>(mm::PhysToVirt(g_state.rx_buf_phys));
 
-    g_state.tx_buf_phys = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+    g_state.tx_buf_phys = mm::AllocateFrame().value_or(mm::kNullFrame);
     if (g_state.tx_buf_phys == mm::kNullFrame)
     {
         mm::FreeFrame(g_state.rx_buf_phys);
@@ -390,7 +390,7 @@ bool BringUp(u8 slot_id)
     if (evt_in != 0 && evt_in_mps != 0 &&
         xhci::XhciConfigureInterruptInEndpoint(slot_id, evt_in, evt_in_mps, kEvtInterval))
     {
-        g_state.evt_buf_phys = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+        g_state.evt_buf_phys = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (g_state.evt_buf_phys != mm::kNullFrame)
         {
             g_state.evt_buf_virt = static_cast<u8*>(mm::PhysToVirt(g_state.evt_buf_phys));

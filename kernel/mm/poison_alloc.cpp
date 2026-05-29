@@ -188,7 +188,7 @@ void* PoisonAlloc(u64 size, PoisonMode mode)
     const u64 data_page = slot_base + kPageSizeLocal;
 
     // Back the data page with one fresh physical frame.
-    auto phys_r = TryAllocateFrame();
+    auto phys_r = AllocateFrame();
     if (!phys_r)
     {
         const auto irq = sync::SpinLockAcquire(g_poison_alloc_lock);

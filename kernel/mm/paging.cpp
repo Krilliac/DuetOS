@@ -282,7 +282,7 @@ void EnableKernelProtectionBits()
 // from the entry stored by callers.
 u64* AllocateTable()
 {
-    auto frame_r = TryAllocateFrame();
+    auto frame_r = AllocateFrame();
     if (!frame_r)
     {
         PanicPaging("AllocateFrame returned null while building page tables", 0);
@@ -724,7 +724,7 @@ void UserStringCopySelfTest()
     // deliberately unmapped so the page-tail cases prove the string
     // helpers stop at NUL instead of bulk-copying the full cap.
     constexpr u64 kUserTestVa = 0x0000004000000000ULL;
-    auto frame_r = TryAllocateFrame();
+    auto frame_r = AllocateFrame();
     if (!frame_r)
     {
         PanicPaging("user-string self-test: AllocateFrame returned null", 0);
@@ -1307,7 +1307,7 @@ void PagingSelfTest()
     // Allocate one frame, map it twice into the MMIO arena, and use the
     // second mapping to read what the first wrote. Proves: walker descent,
     // intermediate-table allocation, PTE install, TLB consistency.
-    auto frame_r = TryAllocateFrame();
+    auto frame_r = AllocateFrame();
     if (!frame_r)
     {
         PanicPaging("self-test: AllocateFrame returned null", 0);

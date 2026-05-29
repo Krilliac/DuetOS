@@ -107,7 +107,7 @@ i32 MemfdAlloc(const char* name, u64 page_count)
         }
         for (u32 p = 0; p < page_count; ++p)
         {
-            const mm::PhysAddr f = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+            const mm::PhysAddr f = mm::AllocateFrame().value_or(mm::kNullFrame);
             if (f == mm::kNullFrame)
             {
                 for (u32 q = 0; q < p; ++q)

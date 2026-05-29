@@ -693,7 +693,7 @@ bool RamEnsureFrames(RamNode* f, u32 need_frames)
     }
     for (u32 k = f->frame_count; k < need_frames; ++k)
     {
-        mm::PhysAddr p = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+        mm::PhysAddr p = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (p == mm::kNullFrame)
         {
             return false; // OOM; previously-added frames stay (still owned/usable)

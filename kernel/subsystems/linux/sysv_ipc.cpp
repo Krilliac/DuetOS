@@ -147,7 +147,7 @@ i32 ShmAlloc(i32 key, u64 size)
         bool ok = true;
         for (u32 p = 0; p < page_count; ++p)
         {
-            const mm::PhysAddr f = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+            const mm::PhysAddr f = mm::AllocateFrame().value_or(mm::kNullFrame);
             if (f == mm::kNullFrame)
             {
                 // Roll back already-allocated frames.

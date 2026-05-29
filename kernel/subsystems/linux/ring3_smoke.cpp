@@ -524,8 +524,8 @@ void SpawnRing3LinuxFileSmoke()
         core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
         return;
     }
-    const PhysAddr code_frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
-    const PhysAddr stack_frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+    const PhysAddr code_frame = mm::AllocateFrame().value_or(mm::kNullFrame);
+    const PhysAddr stack_frame = mm::AllocateFrame().value_or(mm::kNullFrame);
     if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
     {
         core::DebugPanicOrWarn("linux/smoke", "frame alloc failed");
@@ -720,8 +720,8 @@ void SpawnRing3LinuxMmapSmoke()
         core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
         return;
     }
-    const PhysAddr code_frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
-    const PhysAddr stack_frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+    const PhysAddr code_frame = mm::AllocateFrame().value_or(mm::kNullFrame);
+    const PhysAddr stack_frame = mm::AllocateFrame().value_or(mm::kNullFrame);
     if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
     {
         core::DebugPanicOrWarn("linux/smoke", "frame alloc failed");
@@ -934,8 +934,8 @@ void SpawnRing3LinuxTranslateSmoke()
         core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
         return;
     }
-    const PhysAddr code_frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
-    const PhysAddr stack_frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+    const PhysAddr code_frame = mm::AllocateFrame().value_or(mm::kNullFrame);
+    const PhysAddr stack_frame = mm::AllocateFrame().value_or(mm::kNullFrame);
     if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
     {
         core::DebugPanicOrWarn("linux/smoke", "frame alloc failed");
@@ -1165,8 +1165,8 @@ void SpawnRing3LinuxExtendSmoke()
         core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
         return;
     }
-    const PhysAddr code_frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
-    const PhysAddr stack_frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+    const PhysAddr code_frame = mm::AllocateFrame().value_or(mm::kNullFrame);
+    const PhysAddr stack_frame = mm::AllocateFrame().value_or(mm::kNullFrame);
     if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
     {
         core::DebugPanicOrWarn("linux/smoke", "frame alloc failed");
@@ -1210,8 +1210,8 @@ void SpawnRing3LinuxSmoke()
         core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
         return;
     }
-    const PhysAddr code_frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
-    const PhysAddr stack_frame = mm::TryAllocateFrame().value_or(mm::kNullFrame);
+    const PhysAddr code_frame = mm::AllocateFrame().value_or(mm::kNullFrame);
+    const PhysAddr stack_frame = mm::AllocateFrame().value_or(mm::kNullFrame);
     if (code_frame == mm::kNullFrame || stack_frame == mm::kNullFrame)
     {
         core::DebugPanicOrWarn("linux/smoke", "frame allocation failed");
