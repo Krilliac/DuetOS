@@ -419,13 +419,15 @@ void _start(void)
     memset(membuf, '=', sizeof(membuf)); // fill with '=' -- proves memset
     const char mmsg[] = "[vcruntime140] memset+memcpy+memmove OK\n";
     memcpy(membuf, mmsg, sizeof(mmsg) - 1); // overwrite prefix -- proves memcpy
-    // Overlap test for memmove: shift the tail right by 1,
-    // forcing the backward-copy branch (dst > src, regions
-    // overlap). If the forward-copy branch ran by mistake,
-    // the trailing bytes would get corrupted to '\n\n\n...'.
-    memmove(membuf + 1, membuf, sizeof(mmsg) - 2);
-    // Restore the leading char so the message reads clean.
-    membuf[0] = '[';
+    // Overlap test for memmove, both directions. First shift the
+    // whole message (INCLUDING its trailing '\n') right by 1: this
+    // forces the backward-copy branch (dst > src, regions overlap).
+    // Then shift it back left by 1, forcing the forward-copy branch
+    // (dst < src, overlap). If either branch is wrong the restored
+    // buffer won't equal mmsg. membuf is 64B; the message is well
+    // under that, so the right-shift to [1..N] stays in bounds.
+    memmove(membuf + 1, membuf, sizeof(mmsg) - 1); // right by 1 -- backward copy
+    memmove(membuf, membuf + 1, sizeof(mmsg) - 1); // left by 1  -- forward copy, restores msg
     DWORD mwritten = 0;
     WriteFile(out, membuf, sizeof(mmsg) - 1, &mwritten, 0);
 
