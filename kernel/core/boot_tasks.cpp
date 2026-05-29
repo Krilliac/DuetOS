@@ -2158,6 +2158,17 @@ void MouseReaderTask(void*)
         // ring-3 smoke battery puts 13+ windows on the list.
         const auto cached_topmost_under_cursor = duetos::drivers::video::WindowTopmostAt(cx, cy);
 
+        // Desktop-icon hover highlight. Only when the cursor is on the bare
+        // desktop (no window or taskbar under it). DesktopIconSetHover
+        // returns true only when the hovered icon actually changes, so the
+        // recompose below fires at most once per icon crossing, never per
+        // packet (the discipline that keeps the PS/2 ring from overflowing).
+        const int desk_icon_hover = (cached_topmost_under_cursor == duetos::drivers::video::kWindowInvalid &&
+                                     !duetos::drivers::video::TaskbarContains(cx, cy))
+                                        ? duetos::drivers::video::DesktopIconHitTest(cx, cy)
+                                        : -1;
+        const bool icon_hover_changed = duetos::drivers::video::DesktopIconSetHover(desk_icon_hover);
+
         // Track menu hover. Cheap when no menu is open. When
         // open, this updates the highlighted row so the next
         // compose paints it. `menu_hover_changed` drives the
@@ -3406,6 +3417,15 @@ void MouseReaderTask(void*)
         // drag (drag has its own compose) and when the menu was
         // already handled (the dispatch path composes too).
         if (!drag.active && !menu_handled && duetos::drivers::video::MenuIsOpen() && menu_hover_changed)
+        {
+            duetos::drivers::video::CursorHide();
+            duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);
+            duetos::drivers::video::CursorShow();
+        }
+
+        // Same change-gated recompose for the desktop-icon hover highlight:
+        // repaint only when the hovered icon changed, never per packet.
+        if (!drag.active && !menu_handled && icon_hover_changed)
         {
             duetos::drivers::video::CursorHide();
             duetos::drivers::video::DesktopCompose(desktop_bg(), nullptr);

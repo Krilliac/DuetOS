@@ -33,11 +33,34 @@
 namespace duetos::drivers::video
 {
 
-/// Register a desktop icon bound to `target`. `label` is shown beneath
-/// the tile; `glyph` (1–3 chars) is drawn large inside it. Auto-laid-out
-/// top-to-bottom in the left column in registration order. Silently
+/// Which iconographic glyph a desktop icon paints in its tile. Each is
+/// drawn from framebuffer primitives (rounded rects / circles / lines) —
+/// see DrawGlyph in desktop_icons.cpp.
+enum class IconGlyph : u8
+{
+    Computer,   // monitor + stand
+    Browser,    // globe with meridians
+    Terminal,   // dark screen + prompt
+    Calculator, // body + display + keypad
+    Notepad,    // ruled page
+    Settings,   // cog/gear
+    DeviceMgr,  // chip with pins
+    Trash,      // bin with lid
+    Help,       // disc with "?"
+};
+
+/// Register a desktop icon bound to `target`. `label` is shown beneath the
+/// tile; `glyph` selects the iconographic drawing inside it. Auto-laid-out
+/// top-to-bottom (wrapping into columns) in registration order. Silently
 /// ignored past the fixed capacity or when `target` is kWindowInvalid.
-void DesktopIconRegister(const char* label, const char* glyph, WindowHandle target);
+void DesktopIconRegister(const char* label, IconGlyph glyph, WindowHandle target);
+
+/// Set which icon (if any) is highlighted as hovered; pass -1 for none.
+/// Returns true if the hovered icon actually changed — the caller uses
+/// that to recompose only on a change (never per mouse packet), so the
+/// hover highlight stays responsive without the per-packet repaint that
+/// previously caused mouse lag.
+bool DesktopIconSetHover(int index);
 
 /// Paint every registered icon onto the current framebuffer. Call from
 /// DesktopCompose between the wallpaper and the window list.

@@ -3172,16 +3172,17 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // is a follow-up.
     {
         using duetos::drivers::video::DesktopIconRegister;
+        using duetos::drivers::video::IconGlyph;
         using duetos::drivers::video::ThemeRoleWindow;
-        DesktopIconRegister("Computer", "PC", ThemeRoleWindow(Role::Files));
-        DesktopIconRegister("Browser", "Web", ThemeRoleWindow(Role::Browser));
-        DesktopIconRegister("Terminal", ">_", ThemeRoleWindow(Role::Terminal));
-        DesktopIconRegister("Calculator", "12", ThemeRoleWindow(Role::Calculator));
-        DesktopIconRegister("Notepad", "Aa", ThemeRoleWindow(Role::Notes));
-        DesktopIconRegister("Settings", "Set", ThemeRoleWindow(Role::Settings));
-        DesktopIconRegister("Device Mgr", "Dev", devicemgr_win);
-        DesktopIconRegister("Trash", "Bin", ThemeRoleWindow(Role::Files));
-        DesktopIconRegister("Help", "?", ThemeRoleWindow(Role::Help));
+        DesktopIconRegister("Computer", IconGlyph::Computer, ThemeRoleWindow(Role::Files));
+        DesktopIconRegister("Browser", IconGlyph::Browser, ThemeRoleWindow(Role::Browser));
+        DesktopIconRegister("Terminal", IconGlyph::Terminal, ThemeRoleWindow(Role::Terminal));
+        DesktopIconRegister("Calculator", IconGlyph::Calculator, ThemeRoleWindow(Role::Calculator));
+        DesktopIconRegister("Notepad", IconGlyph::Notepad, ThemeRoleWindow(Role::Notes));
+        DesktopIconRegister("Settings", IconGlyph::Settings, ThemeRoleWindow(Role::Settings));
+        DesktopIconRegister("Device Mgr", IconGlyph::DeviceMgr, devicemgr_win);
+        DesktopIconRegister("Trash", IconGlyph::Trash, ThemeRoleWindow(Role::Files));
+        DesktopIconRegister("Help", IconGlyph::Help, ThemeRoleWindow(Role::Help));
         DUETOS_BOOT_SELFTEST(duetos::drivers::video::DesktopIconsSelfTest());
     }
 
