@@ -856,6 +856,25 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
             // — typically manifesting as a ring-3 #GP/#UD/#PF at a
             // valid-looking RIP inside a previously-loaded DLL.
             const bool dll_dynamic_base = duetos::core::PeIsDynamicBase(active_set[i].bytes, active_set[i].len);
+            // Per-DLL preload breadcrumb (smoke-profile-gated). The
+            // intermittent CI boot-wedge localized to "between as-ok and
+            // dll-preloaded" (the spawn-trace breadcrumbs) — i.e. inside
+            // this preload loop — but the existing `pre-loaded <label>`
+            // line below fires only AFTER a successful DllLoad, so a
+            // hang shows up as the ABSENCE of the next `pre-loaded`
+            // without naming the culprit. This "dll-attempt label=X"
+            // line, emitted BEFORE the roll loop + DllLoad, pins the
+            // exact DLL: the last `dll-attempt` with no matching
+            // `pre-loaded` is the one whose DllLoad/ResolveImports hung.
+            if (::duetos::test::SmokeProfileGet() != ::duetos::test::SmokeProfile::None)
+            {
+                arch::SerialLineGuard line;
+                SerialWrite("[ring3] spawn-trace name=\"");
+                SerialWrite(name);
+                SerialWrite("\" step=dll-attempt label=");
+                SerialWrite(active_set[i].label);
+                SerialWrite("\n");
+            }
             u64 dll_aslr_delta = 0;
             DllLoadResult dll{};
             dll.status = DllLoadStatus::HeaderParseFailed;
