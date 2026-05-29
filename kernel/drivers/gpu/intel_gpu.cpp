@@ -12,6 +12,7 @@
 #include "debug/probes.h"
 #include "drivers/gpu/intel_forcewake.h"
 #include "drivers/gpu/intel_ggtt.h"
+#include "drivers/gpu/intel_gpu_cmds.h"
 #include "drivers/gpu/intel_gsc_fw.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
@@ -403,6 +404,104 @@ u32 IntelRcsStoreImmProbe(u32 value)
     return *scratch;
 }
 
+u32 IntelBatchExecProbe(u32 cookie)
+{
+    // Escalation rung 3: prove GGTT translation + batch dispatch +
+    // execution together. We map a batch page into the GGTT, fill it
+    // with [MI_STORE_DWORD_IMM(scratch, cookie) ; MI_BATCH_BUFFER_END],
+    // and dispatch it from the ring via MI_BATCH_BUFFER_START(GGTT).
+    // If the engine fetched the batch through the GGTT and ran it, the
+    // (physical, gtt-bypass) scratch dword reads back `cookie`.
+    if (!g_brought_up || g_intel_info == nullptr || g_rcs_ring.virt == nullptr || !GgttReady())
+        return 0xFFFFFFFFu;
+    const GpuInfo& g = *g_intel_info;
+
+    if (g_rcs_scratch.virt == nullptr)
+    {
+        auto sr = mm::AllocDmaCoherent(0x1000u, mm::Zone::Dma32);
+        if (!sr.has_value())
+            return 0xFFFFFFFFu;
+        g_rcs_scratch = sr.value();
+    }
+    auto* scratch = static_cast<volatile u32*>(g_rcs_scratch.virt);
+    *scratch = 0xDEADBEEFu;
+
+    auto br = mm::AllocDmaCoherent(0x1000u, mm::Zone::Normal);
+    if (!br.has_value())
+        return 0xFFFFFFFFu;
+    mm::DmaBuffer batch = br.value();
+    const u64 batch_va = GgttMapPage(g, batch.phys);
+    if (batch_va == 0)
+    {
+        mm::FreeDmaCoherent(batch);
+        return 0xFFFFFFFFu;
+    }
+
+    // Build the batch: store the cookie to the physical scratch, then
+    // end. The store targets a guest-physical address (GGTT-bypass),
+    // matching IntelRcsStoreImmProbe's convention.
+    u32* b = static_cast<u32*>(batch.virt);
+    b[0] = kIntelMiStoreDwordImm;
+    b[1] = static_cast<u32>(g_rcs_scratch.phys & 0xFFFFFFFFu);
+    b[2] = static_cast<u32>((g_rcs_scratch.phys >> 32) & 0xFFFFFFFFu);
+    b[3] = cookie;
+    b[4] = kMiBatchBufferEnd;
+    mm::DmaSyncForDevice(batch, 0, 0x1000u);
+
+    // Append MI_BATCH_BUFFER_START to the ring (pad to a qword-even
+    // 4-dword slot with one MI_NOOP), then ring the TAIL doorbell.
+    const BatchStartPacket pkt = EncodeBatchBufferStart(batch_va, /*ggtt=*/true);
+    u32* ring = static_cast<u32*>(g_rcs_ring.virt);
+    const u64 ring_dwords = kIntelRingBytes / 4u;
+    const u32 cur_tail = Mmio32(g, kIntelRcsTail);
+    u64 ofs = (cur_tail / 4u) % ring_dwords;
+    if (ofs + 4 > ring_dwords)
+    {
+        while (ofs < ring_dwords)
+            ring[ofs++] = kIntelMiNoop;
+        ofs = 0;
+    }
+    ring[ofs + 0] = pkt.dw[0];
+    ring[ofs + 1] = pkt.dw[1];
+    ring[ofs + 2] = pkt.dw[2];
+    ring[ofs + 3] = kIntelMiNoop;
+    const u32 new_tail = static_cast<u32>(((ofs + 4u) * 4u) % kIntelRingBytes);
+    mm::DmaSyncForDevice(g_rcs_ring, 0, kIntelRingBytes);
+    Mmio32Write(g, kIntelRcsTail, new_tail);
+
+    constexpr u64 kTimeoutNs = 100ull * 1000ull * 1000ull;
+    constexpr u32 kIterCap = 1u << 20;
+    const u64 start_ns = ::duetos::time::MonotonicNs();
+    bool advanced = false;
+    for (u32 iter = 0; iter < kIterCap; ++iter)
+    {
+        if (Mmio32(g, kIntelRcsHead) == new_tail)
+        {
+            advanced = true;
+            break;
+        }
+        asm volatile("pause" ::: "memory");
+        if (start_ns != 0)
+        {
+            const u64 now = ::duetos::time::MonotonicNs();
+            if (now > start_ns && (now - start_ns) > kTimeoutNs)
+                break;
+        }
+    }
+    if (!advanced)
+    {
+        KLOG_WARN("drivers/gpu/intel", "RCS batch-exec: HEAD did not catch TAIL");
+        mm::FreeDmaCoherent(batch);
+        return 0xFFFFFFFFu;
+    }
+    mm::DmaSyncForCpu(g_rcs_scratch, 0, 4u);
+    const u32 readback = *scratch;
+    // The batch's GGTT slot leaks (one high-window entry) — acceptable
+    // for a one-shot boot probe; the page itself is freed.
+    mm::FreeDmaCoherent(batch);
+    return readback;
+}
+
 bool IsBroughtUp()
 {
     return g_brought_up;
@@ -448,6 +547,23 @@ void IntelRcsRingSelfTest()
         {
             arch::SerialWrite("[gpu/intel/rcs] selftest PASS (ring online, MI_STORE_DWORD_IMM verified, "
                               "scratch=0xC0DEFACE)\n");
+            // Escalation rung 3 (real-HW only): dispatch a GGTT-mapped
+            // batch via MI_BATCH_BUFFER_START. Informational — batch
+            // execution has never been proven on silicon, so a miss is
+            // "not yet working", not a regression; we don't fail the
+            // boot on it (unlike the store-imm rung, which a wedged
+            // engine genuinely regressing would trip).
+            constexpr u32 kBatchCookie = 0xBA7C0DE5u;
+            const u32 batch_rb = IntelBatchExecProbe(kBatchCookie);
+            if (batch_rb == kBatchCookie)
+                arch::SerialWrite("[gpu/intel/cmds] batch-exec PASS (GGTT MI_BATCH_BUFFER_START + store, "
+                                  "scratch=0xBA7C0DE5)\n");
+            else
+            {
+                arch::SerialWrite("[gpu/intel/cmds] batch-exec readback=");
+                arch::SerialWriteHex(batch_rb);
+                arch::SerialWrite(" (GGTT batch dispatch unverified on this part)\n");
+            }
             return;
         }
         // The bring-up succeeded but the store-imm didn't land.
