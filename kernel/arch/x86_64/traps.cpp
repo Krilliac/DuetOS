@@ -1769,15 +1769,18 @@ void IrqInstall(u8 vector, IrqHandler handler)
         // the per-CPU state.
         ::duetos::core::PanicWithValue("arch/traps", "IrqInstall: vector out of range", vector);
     }
-    if (handler == nullptr)
-    {
-        // A null handler would compile, then null-deref the first
-        // time the IRQ fires — far from the registration site. Catch
-        // it at registration so the panic frame points at the buggy
-        // driver rather than at TrapDispatch.
-        ::duetos::core::PanicWithValue("arch/traps", "IrqInstall: null handler", vector);
-    }
-    g_irq_handlers[vector] = handler;
+    // A null handler CLEARS the slot — the documented contract (see
+    // traps.h) and what the dispatcher already expects: g_irq_handlers
+    // defaults to nullptr meaning "no handler", and TrapDispatch
+    // sanity-checks the slot is in kernel .text before the indirect
+    // call (so a null slot logs+EOIs, never derefs). Callers rely on
+    // this to UNDO an install — e.g. PciMsixBindSimple's cleanup when
+    // MSI-X routing fails on a device that has no MSI-X (an e1000 /
+    // 82540EM under QEMU/VirtualBox). The previous PanicWithValue here
+    // violated that contract and crashed the boot the instant a NIC's
+    // MSI-X bind tried to fall back to polling — i.e. on every wired
+    // NIC the VM exposes.
+    g_irq_handlers[vector] = handler; // handler may be nullptr (clear)
 }
 
 u8 IrqAllocVector()
