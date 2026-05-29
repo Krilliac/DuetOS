@@ -42,6 +42,7 @@ template <typename T = void, typename E = ErrorCode> class Result
     bool has_value() const { return has_value_; }
     explicit operator bool() const { return has_value_; }
     const T& value() const { return value_; }
+    T value_or(T fallback) const { return has_value_ ? value_ : fallback; }
     E error() const { return error_; }
 
   private:
