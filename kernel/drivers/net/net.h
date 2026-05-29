@@ -43,6 +43,7 @@ inline constexpr u16 kVendorBroadcom = 0x14E4;
 inline constexpr u16 kVendorMarvell = 0x11AB;
 inline constexpr u16 kVendorMellanox = 0x15B3;
 inline constexpr u16 kVendorRedHatVirt = 0x1AF4; // virtio-net
+inline constexpr u16 kVendorAmd = 0x1022;        // AMD PCnet (VirtualBox default NIC)
 
 // PCI class codes.
 inline constexpr u8 kPciClassNetwork = 0x02;
@@ -147,5 +148,11 @@ const char* RealtekNicTag(u16 device_id);
 const char* BroadcomNicTag(u16 device_id);
 const char* VirtioNetTag(u16 device_id);
 const char* MediatekNicTag(u16 device_id);
+
+/// Bring up an AMD PCnet-PCI II/III (1022:2000) — VirtualBox's default
+/// adapter / QEMU `-device pcnet`. Full polled RX/TX over an I/O-port
+/// register file (RAP/RDP, SWSTYLE 2), binds iface 0 and starts DHCP.
+/// Returns true if the chip came up and was bound. Defined in pcnet.cpp.
+bool PcnetBringUp(NicInfo& n);
 
 } // namespace duetos::drivers::net

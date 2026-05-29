@@ -740,6 +740,12 @@ bool RunVendorProbe(NicInfo& n)
     case kVendorMediaTek:
         family = MediatekNicTag(n.device_id);
         break;
+    case kVendorAmd:
+        // AMD PCnet (Am79C970A/Am79C973) — VirtualBox's default adapter.
+        if (n.device_id != 0x2000)
+            return false;
+        family = "pcnet-am79c970";
+        break;
     default:
         return false;
     }
@@ -788,6 +794,13 @@ bool RunVendorProbe(NicInfo& n)
     {
         wireless_shell = Mt76BringUp(n);
         brought_up = wireless_shell;
+    }
+    else if (n.vendor_id == kVendorAmd && n.device_id == 0x2000)
+    {
+        // AMD PCnet — full wired driver (polled RX/TX + DHCP). This is the
+        // default NIC a stock VirtualBox VM exposes, so it brings real
+        // networking up with no adapter reconfiguration.
+        brought_up = PcnetBringUp(n);
     }
     {
         // Hold the serial line lock across the full vid/did/family
