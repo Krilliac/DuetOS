@@ -39,9 +39,16 @@ inline constexpr u64 kHeapAlignment = 16;
 /// the boot-time self-test battery (ring3-smoke, pe-compat, linux-smoke)
 /// outgrew once the kernel actually runs the full battery on a healthy
 /// boot — `AddressSpaceCreate` alone is 128 KiB per ring-3 task and the
-/// linux-smoke batch queues ~13 tasks (panic site: kernel/mm/kheap.cpp:445
-/// "KMalloc OOM - pool exhausted, request size 0x20080"). 64 MiB leaves
-/// plenty of headroom and is still trivial against any modern minimum.
+/// linux-smoke batch queues ~13 tasks (panic site: kernel/mm/kheap.cpp:446
+/// "KMalloc OOM - pool exhausted, request size 0x20080").
+///
+/// NOTE: 64 MiB is NOT comfortable headroom — the full non-emulator boot
+/// battery (the ~12 security probes + ring3 trio + PE smokes + Linux
+/// batch, all spawning 128 KiB address spaces concurrently before the
+/// reaper catches up) has been observed to reach this ceiling and OOM
+/// `AddressSpaceCreate`. The durable fix is to shrink the per-AS cost
+/// (lazy/grown region table — see mm/address_space.h), NOT to keep
+/// growing this number; raising the heap just moves the wall.
 inline constexpr u64 kKernelHeapBytes = 64ULL * 1024 * 1024;
 
 struct KernelHeapStats

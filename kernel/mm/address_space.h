@@ -76,20 +76,27 @@
 namespace duetos::mm
 {
 
-// Max user-page mappings per address space. Bumped from 32 → 128
-// → 1024 as the stage-2 preload set grew to 29 userland DLLs
-// (each contributing ~3 page regions + PE sections + heap +
-// stack + TEB + stubs). 1024 × 16 bytes/region = 16 KiB per AS
-// (four pages) — still cheap. A region-arena-backed impl can
-// replace this flat table when a workload exceeds 1024.
-// 8192 entries = 32 MiB per process. Bumped from 1024 to accommodate
-// real third-party PE32 images (NetSurf 3.11 is ~20 MiB of sections
-// + 13 preloaded DLLs + stack + TEB + proc-env + Win32 thunks page).
-// Cost is sizeof(AddressSpaceUserRegion) (~24 bytes) × 8192 ≈ 192 KiB
-// per AddressSpace struct — within budget for a kernel that already
-// allocates ~50 KiB AS structs and is targeted at machines with
-// >= 256 MiB of RAM.
+// Hard cap on user-page mappings per address space. Grew 32 → 128 →
+// 1024 → 8192 as the userland DLL preload set and real third-party
+// PE32 images grew (NetSurf 3.11 is ~20 MiB of sections + 13 preloaded
+// DLLs + stack + TEB + proc-env + Win32 thunks page).
+//
+// The region table is HEAP-ALLOCATED and grown on demand (see the
+// `regions` field below): it starts at kInitialRegionCapacity and
+// doubles up to the AS's frame_budget, never past this cap. So this
+// number bounds the MAXIMUM a single process may reach — NOT a fixed
+// per-process cost. A process that maps a handful of pages occupies a
+// handful of 16-byte entries, not all 8192. (The prior design stored a
+// flat inline 8192-entry array = 128 KiB on EVERY AddressSpace, which
+// exhausted the 64 MiB kheap when the boot battery spawned dozens of
+// ASes concurrently — see kernel/mm/kheap.h.)
 inline constexpr u64 kMaxUserVmRegionsPerAs = 8192;
+
+// Initial heap-allocated capacity of a fresh AS's region table, in
+// entries (16 × sizeof(AddressSpaceUserRegion) = 256 bytes). Clamped
+// down to frame_budget for tiny-budget sandbox ASes. Grown by doubling
+// in AddressSpaceMapUserPage when full.
+inline constexpr u16 kInitialRegionCapacity = 16;
 
 // Default frame budgets for the two canonical profiles. A new AS is
 // created with one of these (or a caller-supplied value) and
@@ -136,12 +143,15 @@ struct AddressSpace
     // starts running.
     u64 frame_budget;
 
-    // User-VM region table. Bounded by kMaxUserVmRegionsPerAs (the
-    // fixed-size array capacity); the AS's frame_budget caps usage
-    // within that array to an even smaller number for untrusted
-    // processes. Destroy walks the first `region_count` entries.
+    // User-VM region table. The backing storage is HEAP-ALLOCATED and
+    // grows on demand (kInitialRegionCapacity, doubling up to
+    // frame_budget / kMaxUserVmRegionsPerAs) — so a process that maps
+    // few pages costs few entries, not a flat 128 KiB. The AS's
+    // frame_budget caps usage to an even smaller number for untrusted
+    // processes. Destroy walks the first `region_count` entries; Release
+    // frees the `regions` allocation.
     //
-    // u16 (not u8): kMaxUserVmRegionsPerAs is 1024 — well past
+    // u16 (not u8): kMaxUserVmRegionsPerAs is 8192 — well past
     // 255. A 1.29 MiB PE like 7za.exe needs ~325 page mappings
     // for sections alone, plus per-process stack/TEB/heap/preloaded
     // DLLs. With a u8 counter the increment wrapped past 255 and
@@ -150,7 +160,12 @@ struct AddressSpace
     // `regions[0..region_count)` lost the early entries (.rdata,
     // IAT) and ResolveImports failed with "IAT slot VA not mapped".
     u16 region_count;
-    AddressSpaceUserRegion regions[kMaxUserVmRegionsPerAs];
+    // Allocated capacity of `regions` in entries (region_count <=
+    // region_capacity <= frame_budget <= kMaxUserVmRegionsPerAs).
+    u16 region_capacity;
+    // Heap-allocated region table (region_capacity entries). Non-null
+    // for any live AS; freed by AddressSpaceRelease.
+    AddressSpaceUserRegion* regions;
 
     // Bitmask of CPU ids that currently have THIS AS loaded in CR3.
     // Bit (1u << cpu_id) is set by AddressSpaceActivate when a CPU

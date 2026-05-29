@@ -259,15 +259,30 @@ core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget)
     // and #GPs.
     memset(as, 0, sizeof(AddressSpace));
 
+    // Heap-allocate the user-VM region table (grown on demand later in
+    // AddressSpaceMapUserPage). Clamp the initial capacity down for
+    // tiny-budget sandbox ASes. This replaces the old 128 KiB inline
+    // array — a fresh AS now costs the struct + 256 bytes, not 128 KiB.
+    const u16 init_cap =
+        (frame_budget < kInitialRegionCapacity) ? static_cast<u16>(frame_budget) : kInitialRegionCapacity;
+    auto* regions = static_cast<AddressSpaceUserRegion*>(KMalloc(sizeof(AddressSpaceUserRegion) * init_cap));
+    if (regions == nullptr)
+    {
+        KLOG_ERROR("mm/as", "AddressSpaceCreate: KMalloc for region table failed");
+        KFree(as);
+        return core::Err{core::ErrorCode::OutOfMemory};
+    }
+
     auto pml4_frame_r = AllocateFrame();
     if (!pml4_frame_r)
     {
         // Frame allocator exhausted while reserving the PML4 root —
         // every user process needs one, so a fresh-process spawn
         // under high memory pressure dies here silently. Cleanup
-        // releases the struct alloc; we still return the error but
-        // now the OOM is in the log.
+        // releases the region table + struct alloc; we still return the
+        // error but now the OOM is in the log.
         KLOG_ERROR("mm/as", "AddressSpaceCreate: AllocateFrame for PML4 root failed");
+        KFree(regions);
         KFree(as);
         return core::Err{pml4_frame_r.error()};
     }
@@ -305,10 +320,8 @@ core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget)
     as->refcount = 1;
     as->frame_budget = frame_budget;
     as->region_count = 0;
-    for (u64 i = 0; i < kMaxUserVmRegionsPerAs; ++i)
-    {
-        as->regions[i] = AddressSpaceUserRegion{0, 0};
-    }
+    as->region_capacity = init_cap;
+    as->regions = regions;
 
     ++g_created;
 
@@ -394,6 +407,34 @@ void AddressSpaceMapUserPage(AddressSpace* as, u64 virt, PhysAddr frame, u64 fla
         // anticipated this needing a non-fatal variant.)
         KLOG_WARN_V("mm/as", "MapUserPage: frame budget exhausted — refusing mapping", as->region_count);
         return;
+    }
+
+    // Grow the heap-allocated region table if this append would overflow
+    // it. The budget check above guarantees region_count < frame_budget,
+    // so region_count == region_capacity implies region_capacity <
+    // frame_budget — doubling (clamped to frame_budget) always yields
+    // room. Done BEFORE the PTE write so a grow-OOM refuses the mapping
+    // without leaving an installed-but-unrecorded leaf PTE behind.
+    if (as->region_count == as->region_capacity)
+    {
+        u32 new_cap = static_cast<u32>(as->region_capacity) * 2u;
+        if (new_cap > as->frame_budget)
+        {
+            new_cap = static_cast<u32>(as->frame_budget);
+        }
+        auto* grown = static_cast<AddressSpaceUserRegion*>(KMalloc(sizeof(AddressSpaceUserRegion) * new_cap));
+        if (grown == nullptr)
+        {
+            // NON-FATAL, same contract as the budget / frame-pool-dry
+            // paths below: refuse this one mapping (caller's user page
+            // #PFs and the process is reaped), never halt the kernel.
+            KLOG_WARN_V("mm/as", "MapUserPage: region-table grow OOM — refusing mapping", as->region_count);
+            return;
+        }
+        memcpy(grown, as->regions, sizeof(AddressSpaceUserRegion) * as->region_count);
+        KFree(as->regions);
+        as->regions = grown;
+        as->region_capacity = static_cast<u16>(new_cap);
     }
 
     u64* pte = WalkToPteIn(as->pml4_virt, virt, /*create=*/true);
@@ -853,6 +894,10 @@ void AddressSpaceRelease(AddressSpace* as)
     arch::SerialWrite("[as] tables freed\n");
     FreeFrame(as->pml4_phys);
     arch::SerialWrite("[as] pml4 frame freed\n");
+
+    // Free the heap-allocated region table before the struct itself.
+    KFree(as->regions);
+    as->regions = nullptr;
 
     KFree(as);
     arch::SerialWrite("[as] AddressSpace struct freed\n");

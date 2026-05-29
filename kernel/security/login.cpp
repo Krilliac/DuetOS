@@ -747,6 +747,10 @@ bool GuiFeedKey(u16 code)
     }
     if (code == kKeyBackspace)
     {
+        // Editing the field means the user is correcting a prior attempt —
+        // drop any stale "LOGIN FAILED …" status so it doesn't linger as a
+        // permanent red banner that the minute-tick repaint keeps redrawing.
+        g_login.status = nullptr;
         if (g_login.focus == Field::Username)
         {
             FieldBackspace(g_login.username, &g_login.username_len);
@@ -760,6 +764,9 @@ bool GuiFeedKey(u16 code)
     }
     if (code >= 0x20 && code <= 0x7E)
     {
+        // See the backspace branch: any keystroke that mutates the field
+        // clears the stale status banner.
+        g_login.status = nullptr;
         const char c = static_cast<char>(code);
         if (g_login.focus == Field::Username)
         {
