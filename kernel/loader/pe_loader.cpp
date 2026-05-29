@@ -2297,8 +2297,8 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     //    blew out at rsp+0x1000 inside the CRT).
     for (u64 p = 0; p < kV0StackPages; ++p)
     {
-        const PhysAddr stack_frame = AllocateFrame();
-        if (stack_frame == kNullFrame)
+        auto stack_frame_r = TryAllocateFrame();
+        if (!stack_frame_r)
         {
             SerialWrite("[pe-load] FAIL stack frame alloc idx=");
             SerialWriteHex(p);
@@ -2306,6 +2306,7 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
             KBP_PROBE_V(::duetos::debug::ProbeId::kPeLoaderOom, p);
             return r;
         }
+        const PhysAddr stack_frame = stack_frame_r.value();
         const u64 page_va = kV0StackVa + p * kPageSize;
         AddressSpaceMapUserPage(as, page_va, stack_frame, kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
         guard.Track(page_va);
@@ -2324,13 +2325,14 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     u64 teb_va = 0;
     if (ps == PeStatus::ImportsPresent)
     {
-        const PhysAddr teb_frame = AllocateFrame();
-        if (teb_frame == kNullFrame)
+        auto teb_frame_r = TryAllocateFrame();
+        if (!teb_frame_r)
         {
             SerialWrite("[pe-load] FAIL teb frame alloc\n");
             KBP_PROBE(::duetos::debug::ProbeId::kPeLoaderOom);
             return r;
         }
+        const PhysAddr teb_frame = teb_frame_r.value();
         auto* teb_direct = static_cast<u8*>(PhysToVirt(teb_frame));
         for (u64 i = 0; i < kPageSize; ++i)
             teb_direct[i] = 0;
@@ -2475,13 +2477,14 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     //     Layer 4.
     if (!h.is_pe32 && ps == PeStatus::ImportsPresent)
     {
-        const PhysAddr env_frame = AllocateFrame();
-        if (env_frame == kNullFrame)
+        auto env_frame_r = TryAllocateFrame();
+        if (!env_frame_r)
         {
             SerialWrite("[pe-load] FAIL proc-env frame alloc\n");
             KBP_PROBE(::duetos::debug::ProbeId::kPeLoaderOom);
             return r;
         }
+        const PhysAddr env_frame = env_frame_r.value();
         auto* env_direct = static_cast<u8*>(PhysToVirt(env_frame));
         for (u64 i = 0; i < kPageSize; ++i)
             env_direct[i] = 0;
@@ -2510,13 +2513,14 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
     // page beyond the stub table stay zeroed from the pre-clear.
     if (!h.is_pe32 && ps == PeStatus::ImportsPresent)
     {
-        const PhysAddr stubs_frame = AllocateContiguousFrames(2);
-        if (stubs_frame == kNullFrame)
+        auto stubs_frame_r = TryAllocateContiguousFrames(2);
+        if (!stubs_frame_r)
         {
             SerialWrite("[pe-load] FAIL stubs frames alloc (need 2)\n");
             KBP_PROBE(::duetos::debug::ProbeId::kPeLoaderOom);
             return r;
         }
+        const PhysAddr stubs_frame = stubs_frame_r.value();
         auto* stubs_direct = static_cast<u8*>(PhysToVirt(stubs_frame));
         for (u64 i = 0; i < 2 * kPageSize; ++i)
             stubs_direct[i] = 0;
@@ -2545,13 +2549,14 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         // stub at kWin32Thunks32Va, so calling an unresolved
         // import cleanly terminates the process instead of #PFing
         // at the 64-bit catch-all VA (which isn't mapped for PE32).
-        const PhysAddr thunks32_frame = AllocateFrame();
-        if (thunks32_frame == kNullFrame)
+        auto thunks32_frame_r = TryAllocateFrame();
+        if (!thunks32_frame_r)
         {
             SerialWrite("[pe-load] FAIL pe32 thunks page alloc\n");
             KBP_PROBE(::duetos::debug::ProbeId::kPeLoaderOom);
             return r;
         }
+        const PhysAddr thunks32_frame = thunks32_frame_r.value();
         auto* thunks32_direct = static_cast<u8*>(PhysToVirt(thunks32_frame));
         for (u64 i = 0; i < kPageSize; ++i)
             thunks32_direct[i] = 0;
