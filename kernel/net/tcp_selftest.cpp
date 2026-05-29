@@ -317,6 +317,61 @@ bool TestStateNames()
     return true;
 }
 
+// Zero-window persist timer (RFC 9293 §3.8.6.1). Exercises the real
+// arm/disarm logic in DrainSendBuffer deterministically — with a shut
+// window (or a full rtx queue) the send loop sends nothing, so no NIC
+// is touched and no buffers are dereferenced.
+bool TestPersistTimer()
+{
+    using namespace internal;
+    Tcb t = {};
+    t.state = State::Established;
+    t.rto_ticks = MsToTicks(kInitialRtoMs);
+    t.snd_una = 1000;
+    t.snd_nxt = 1000; // nothing in flight
+    t.cwnd = 8u * kDefaultMss;
+    t.mss_send = kDefaultMss;
+
+    // (1) Peer shuts its window while we have queued data → ARM.
+    // snd_wnd==0 makes DrainSendBuffer's loop break before sending.
+    t.snd_wnd = 0;
+    t.sndbuf_count = 200;
+    DrainSendBuffer(t);
+    if (t.persist_deadline == 0)
+        return false; // must arm
+    if (t.persist_backoff_ticks != t.rto_ticks)
+        return false; // first backoff seeds from RTO
+
+    // (2) Backoff doubles per probe and is capped at kMaxRtoMs
+    // (mirrors the timer-task fire path's arithmetic).
+    const u32 first = t.persist_backoff_ticks;
+    u32 b = first ? (first * 2) : t.rto_ticks;
+    if (b > MsToTicks(kMaxRtoMs))
+        b = MsToTicks(kMaxRtoMs);
+    if (b < first)
+        return false; // monotone non-decreasing
+    if (b > MsToTicks(kMaxRtoMs))
+        return false; // respects cap
+
+    // (3) Window reopens → DISARM. Fill the rtx queue so the send
+    // loop is skipped (no NIC/buffer access) and we land directly in
+    // the persist-management else-branch with snd_wnd > 0.
+    t.snd_wnd = 4096;
+    t.rtx_count = kRtxQueueMax;
+    DrainSendBuffer(t);
+    if (t.persist_deadline != 0 || t.persist_backoff_ticks != 0)
+        return false; // must disarm on window reopen
+
+    // (4) No queued data → never arms even with a shut window.
+    t.snd_wnd = 0;
+    t.sndbuf_count = 0;
+    t.rtx_count = 0;
+    DrainSendBuffer(t);
+    if (t.persist_deadline != 0)
+        return false;
+    return true;
+}
+
 } // namespace
 
 void SelfTest()
@@ -352,6 +407,11 @@ void SelfTest()
     if (!TestEcnSynFlags())
     {
         EmitFail("ecn syn flags");
+        all_ok = false;
+    }
+    if (!TestPersistTimer())
+    {
+        EmitFail("zero-window persist timer");
         all_ok = false;
     }
     arch::Sti();

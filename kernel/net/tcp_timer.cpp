@@ -156,6 +156,27 @@ void TimerTick()
             ++g_stats.keepalive_probes;
             t.keepalive_deadline = now + MsToTicks(60'000);
         }
+
+        // Zero-window persist probe (RFC 9293 §3.8.6.1 / RFC 1122
+        // §4.2.2.17). Armed by DrainSendBuffer when the peer shut its
+        // window while we still have queued data. The probe is an ACK at
+        // the stale sequence snd_una-1 (same shape as keepalive): it is
+        // unacceptable to the peer, so per RFC 9293 §3.10 the peer MUST
+        // reply with an ACK — which carries its CURRENT window. If that
+        // window is non-zero, the inbound-ACK path's DrainSendBuffer
+        // disarms this timer and resumes sending, breaking the deadlock
+        // a lost window-reopening ACK would otherwise cause. Re-arm with
+        // exponential backoff capped at kMaxRtoMs.
+        if ((t.state == State::Established || t.state == State::CloseWait) && t.snd_wnd == 0 && t.sndbuf_count > 0 &&
+            t.persist_deadline != 0 && now >= t.persist_deadline)
+        {
+            SendSegment(t, kFlagAck, t.snd_una - 1, t.rcv_nxt, nullptr, 0);
+            ++g_stats.persist_probes;
+            t.persist_backoff_ticks = t.persist_backoff_ticks ? (t.persist_backoff_ticks * 2) : t.rto_ticks;
+            if (t.persist_backoff_ticks > MsToTicks(kMaxRtoMs))
+                t.persist_backoff_ticks = MsToTicks(kMaxRtoMs);
+            t.persist_deadline = now + t.persist_backoff_ticks;
+        }
     }
     arch::Sti();
 }

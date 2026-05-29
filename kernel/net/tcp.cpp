@@ -254,6 +254,8 @@ void ResetTcbStorage(Tcb& t)
     t.timewait_deadline = 0;
     t.delack_deadline = 0;
     t.keepalive_deadline = 0;
+    t.persist_deadline = 0;
+    t.persist_backoff_ticks = 0;
     t.delack_pending = false;
     t.keepalive_on = false;
     t.nodelay = false;
