@@ -137,9 +137,10 @@ void DllLoaderSelfTest()
     // page + one header page + one reloc patch page is the
     // ceiling. 16 frames is a safety margin.
     constexpr u64 kScratchBudget = 16;
-    duetos::mm::AddressSpace* as = duetos::mm::AddressSpaceCreate(kScratchBudget);
-    if (!Expect(as != nullptr, "AddressSpaceCreate"))
+    auto as_r = duetos::mm::AddressSpaceCreate(kScratchBudget);
+    if (!Expect(as_r.has_value(), "AddressSpaceCreate"))
         return;
+    duetos::mm::AddressSpace* as = as_r.value();
 
     DllLoadResult r = DllLoad(bytes, len, as, /*aslr_delta=*/0);
     const bool loaded = (r.status == DllLoadStatus::Ok);

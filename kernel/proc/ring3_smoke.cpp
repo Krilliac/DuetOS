@@ -563,7 +563,8 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
 
-    AddressSpace* as = AddressSpaceCreate(frame_budget);
+    auto as_r = AddressSpaceCreate(frame_budget);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AddressSpaceCreate failed");
@@ -700,7 +701,8 @@ void SpawnDropcapsProbe()
     const u64 stack_va = code_va + kStackOffsetFromCode;
     KASSERT(code_va <= 0xFFFFFFFFULL, "core/ring3", "dropcaps code_va overflow");
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetTrusted);
+    auto as_r = AddressSpaceCreate(kFrameBudgetTrusted);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for dropcaps probe");
@@ -808,7 +810,8 @@ void SpawnHostileProbe()
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    auto as_r = AddressSpaceCreate(kFrameBudgetSandbox);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for hostile probe");
@@ -898,7 +901,8 @@ void SpawnCrossPidProbe()
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    auto as_r = AddressSpaceCreate(kFrameBudgetSandbox);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for cross-pid probe");
@@ -971,7 +975,8 @@ void SpawnCpuHogProbe()
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    auto as_r = AddressSpaceCreate(kFrameBudgetSandbox);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for cpu-hog probe");
@@ -1055,7 +1060,8 @@ void SpawnSyscallStormProbeTask()
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    auto as_r = AddressSpaceCreate(kFrameBudgetSandbox);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for syscall-storm probe");
@@ -1132,7 +1138,8 @@ void SpawnNxProbeTask()
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    auto as_r = AddressSpaceCreate(kFrameBudgetSandbox);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for nx probe");
@@ -1229,7 +1236,8 @@ void SpawnJailProbeTask()
     const u64 stack_va = code_va + kStackOffsetFromCode;
     KASSERT(code_va <= 0xFFFFFFFFULL, "core/ring3", "jail-probe code_va overflows imm32");
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    auto as_r = AddressSpaceCreate(kFrameBudgetSandbox);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for jail probe");
@@ -1326,7 +1334,8 @@ void SpawnPrivProbeTask()
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    auto as_r = AddressSpaceCreate(kFrameBudgetSandbox);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for priv probe");
@@ -1404,7 +1413,8 @@ void SpawnBadIntProbeTask()
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    auto as_r = AddressSpaceCreate(kFrameBudgetSandbox);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for bad-int probe");
@@ -1487,7 +1497,8 @@ void SpawnKernelReadProbeTask()
     const u64 code_va = AslrPickBase();
     const u64 stack_va = code_va + kStackOffsetFromCode;
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetSandbox);
+    auto as_r = AddressSpaceCreate(kFrameBudgetSandbox);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for kernel-read probe");
@@ -1658,7 +1669,8 @@ void SpawnPtrFuzzProbeTask()
     const u64 stack_va = code_va + kStackOffsetFromCode;
     KASSERT(code_va <= 0xFFFFFFFFULL, "core/ring3", "ptrfuzz code_va overflows imm32");
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetTrusted);
+    auto as_r = AddressSpaceCreate(kFrameBudgetTrusted);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for ptrfuzz probe");
@@ -1818,7 +1830,8 @@ void SpawnWriteFuzzProbeTask()
     const u64 stack_va = code_va + kStackOffsetFromCode;
     KASSERT(code_va <= 0xFFFFFFFFULL, "core/ring3", "writefuzz code_va overflows imm32");
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetTrusted);
+    auto as_r = AddressSpaceCreate(kFrameBudgetTrusted);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for writefuzz probe");
@@ -1966,7 +1979,8 @@ void SpawnBpProbeTask()
     const u64 stack_va = code_va + kStackOffsetFromCode;
     KASSERT(code_va <= 0xFFFFFFFFULL, "core/ring3", "bp-probe code_va overflows imm32");
 
-    AddressSpace* as = AddressSpaceCreate(kFrameBudgetTrusted);
+    auto as_r = AddressSpaceCreate(kFrameBudgetTrusted);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         Panic("core/ring3", "AS create failed for bp-probe");

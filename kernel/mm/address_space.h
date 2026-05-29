@@ -2,6 +2,7 @@
 
 #include "util/types.h"
 #include "util/saturating.h"
+#include "util/result.h"
 #include "mm/frame_allocator.h"
 #include "mm/paging.h"
 #include "sync/rwlock.h"
@@ -181,9 +182,9 @@ struct AddressSpace
 /// frames this AS can map (via AddressSpaceMapUserPage); pick
 /// `kFrameBudgetSandbox` for untrusted callers or
 /// `kFrameBudgetTrusted` for kernel-shipped userland. Returns
-/// nullptr on frame-allocator or kheap failure (no panic — callers
-/// may want to refuse the process spawn cleanly).
-AddressSpace* AddressSpaceCreate(u64 frame_budget);
+/// `Err{ErrorCode::OutOfMemory}` on frame-allocator or kheap failure
+/// (no panic — callers may want to refuse the process spawn cleanly).
+core::Result<AddressSpace*> AddressSpaceCreate(u64 frame_budget);
 
 /// Install a user-accessible 4 KiB mapping at `virt` in `as`. `virt`
 /// must be in the canonical low half and 4 KiB-aligned; `flags` must
@@ -279,16 +280,18 @@ u64 AddressSpaceProbePteRaw(const AddressSpace* as, u64 virt);
 /// page in the child, copies contents through the kernel
 /// direct-map alias, and maps the new frame in the child with
 /// the SAME PTE flags the parent's leaf PTE carried (preserves
-/// W^X — code stays RX, data stays RW + NX). Returns nullptr on
-/// allocation failure (and rolls back any partially-installed
-/// child mappings via AddressSpaceRelease). Does NOT cover
+/// W^X — code stays RX, data stays RW + NX). Returns
+/// `Err{ErrorCode::InvalidArgument}` if `parent` is null, or
+/// `Err{ErrorCode::OutOfMemory}` on allocation failure (and rolls
+/// back any partially-installed child mappings via
+/// AddressSpaceRelease before returning the error). Does NOT cover
 /// borrowed-page mappings (Win32 sections) — they aren't in
 /// the regions ledger; callers that need them must dup them
 /// explicitly.
 ///
 /// The caller owns the returned AS — must AddressSpaceRelease
 /// it when done.
-AddressSpace* AddressSpaceFork(const AddressSpace* parent);
+core::Result<AddressSpace*> AddressSpaceFork(const AddressSpace* parent);
 
 /// Clear every user-region mapping in `as` without releasing
 /// the AS itself. Walks `regions[0..region_count)`, unmaps each

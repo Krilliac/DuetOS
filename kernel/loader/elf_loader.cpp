@@ -469,12 +469,13 @@ void ElfLoaderUnwindSelfTest()
     FrameAllocatorDrainPools();
     const u64 free_before = FreeFramesCount();
 
-    AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/64);
-    if (as == nullptr)
+    auto as_r = AddressSpaceCreate(/*frame_budget=*/64);
+    if (!as_r)
     {
         SerialWrite("[elf-test] FAIL AddressSpaceCreate\n");
         core::Panic("elf-loader", "ElfLoaderUnwindSelfTest: AddressSpaceCreate returned null");
     }
+    AddressSpace* as = as_r.value();
 
     // Inject OOM mid-load so the unwind guard has work to do.
     //

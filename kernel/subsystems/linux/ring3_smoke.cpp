@@ -517,7 +517,8 @@ void SpawnRing3LinuxFileSmoke()
 {
     KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxFileSmoke");
 
-    AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
+    auto as_r = AddressSpaceCreate(/*frame_budget=*/16);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
@@ -712,7 +713,8 @@ void SpawnRing3LinuxMmapSmoke()
 {
     KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxMmapSmoke");
 
-    AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
+    auto as_r = AddressSpaceCreate(/*frame_budget=*/16);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
@@ -925,7 +927,8 @@ void SpawnRing3LinuxTranslateSmoke()
 {
     KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxTranslateSmoke");
 
-    AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
+    auto as_r = AddressSpaceCreate(/*frame_budget=*/16);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
@@ -1155,7 +1158,8 @@ void SpawnRing3LinuxExtendSmoke()
 {
     KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxExtendSmoke");
 
-    AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
+    auto as_r = AddressSpaceCreate(/*frame_budget=*/16);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");
@@ -1199,7 +1203,8 @@ void SpawnRing3LinuxSmoke()
     KLOG_TRACE_SCOPE("linux/smoke", "SpawnRing3LinuxSmoke");
     using arch::SerialWrite;
 
-    AddressSpace* as = AddressSpaceCreate(/*frame_budget=*/16);
+    auto as_r = AddressSpaceCreate(/*frame_budget=*/16);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         core::DebugPanicOrWarn("linux/smoke", "AddressSpaceCreate failed");

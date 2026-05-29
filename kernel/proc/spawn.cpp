@@ -268,7 +268,8 @@ u64 SpawnElfFile(const char* name, const u8* elf_bytes, u64 elf_len, CapSet caps
     // Fire the `inspect arm` latch if the operator armed it
     // before spawning. No-op when unarmed; one-shot when armed.
     duetos::debug::InspectOnSpawn(name, elf_bytes, elf_len);
-    AddressSpace* as = AddressSpaceCreate(frame_budget);
+    auto as_r = AddressSpaceCreate(frame_budget);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         return 0;
@@ -316,7 +317,8 @@ u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, CapSet cap
         return 0;
     }
     duetos::debug::InspectOnSpawn(name, elf_bytes, elf_len);
-    AddressSpace* as = AddressSpaceCreate(frame_budget);
+    auto as_r = AddressSpaceCreate(frame_budget);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         return 0;
@@ -501,7 +503,8 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // images get the i386 DLL set (currently just kernel32_32.dll);
     // PE32+ images get the existing 44-DLL preload list.
     const bool pe_is_pe32 = duetos::core::PeIsPe32(pe_bytes, pe_len);
-    AddressSpace* as = AddressSpaceCreate(frame_budget);
+    auto as_r = AddressSpaceCreate(frame_budget);
+    AddressSpace* as = as_r.has_value() ? as_r.value() : nullptr;
     if (as == nullptr)
     {
         return 0;
