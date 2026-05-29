@@ -132,7 +132,7 @@ u8* MapOrReuse(core::Process* proc, u64 va, u64 flags)
     mm::PhysAddr fr = mm::AddressSpaceLookupUserFrame(proc->as, va & ~0xFFFULL);
     if (fr == mm::kNullFrame)
     {
-        fr = mm::AllocateFrame();
+        fr = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (fr == mm::kNullFrame)
             return nullptr;
         mm::AddressSpaceMapUserPage(proc->as, va, fr, flags);
@@ -394,7 +394,7 @@ void DoThreadCreate(arch::TrapFrame* frame)
     mm::PhysAddr top_frame_phys = mm::kNullFrame;
     for (u64 p = 0; p < stack_pages; ++p)
     {
-        const mm::PhysAddr frame_phys = mm::AllocateFrame();
+        const mm::PhysAddr frame_phys = mm::AllocateFrame().value_or(mm::kNullFrame);
         if (frame_phys == mm::kNullFrame)
         {
             SerialWrite("[thread] create FAIL stack frame alloc pid=");

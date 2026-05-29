@@ -466,9 +466,10 @@ bool BringUp(u8 slot_id)
     const u16 total = u16(hdr[2]) | (u16(hdr[3]) << 8);
     if (total > 1024)
         return false;
-    const mm::PhysAddr cfg_phys = mm::AllocateFrame();
-    if (cfg_phys == mm::kNullFrame)
+    auto cfg_phys_r = mm::AllocateFrame();
+    if (!cfg_phys_r)
         return false;
+    const mm::PhysAddr cfg_phys = cfg_phys_r.value();
     auto* cfg = static_cast<u8*>(mm::PhysToVirt(cfg_phys));
     if (!xhci::XhciControlIn(slot_id, kReqTypeStandardIn, kUsbReqGetDescriptor, u16(u16(kDescTypeConfig) << 8) | 0,
                              /*wIndex=*/0, cfg, total))
@@ -522,8 +523,8 @@ bool BringUp(u8 slot_id)
     }
 
     // DMA buffers.
-    g_state.rx_buf_phys = mm::AllocateFrame();
-    g_state.tx_buf_phys = mm::AllocateFrame();
+    g_state.rx_buf_phys = mm::AllocateFrame().value_or(mm::kNullFrame);
+    g_state.tx_buf_phys = mm::AllocateFrame().value_or(mm::kNullFrame);
     if (g_state.rx_buf_phys == mm::kNullFrame || g_state.tx_buf_phys == mm::kNullFrame)
         return false;
     g_state.rx_buf_virt = static_cast<u8*>(mm::PhysToVirt(g_state.rx_buf_phys));

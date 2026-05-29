@@ -75,24 +75,26 @@ PhysAddr AllocateZoneFrame(Zone zone)
         max_phys = 16ULL * 1024 * 1024; // < 16 MiB (legacy ISA DMA)
     else if (zone == Zone::Dma32)
         max_phys = 4ULL * 1024 * 1024 * 1024; // < 4 GiB (PCIe DMA)
-    const PhysAddr f = AllocateFrameInRange(max_phys);
-    if (f == kNullFrame)
+    auto f_r = AllocateFrameInRange(max_phys);
+    if (!f_r)
     {
         ++g_stats[static_cast<u32>(zone)].oom;
         KLOG_WARN_S("mm/zone", "AllocateZoneFrame: out of frames", "zone", ZoneName(zone));
+        // AllocateZoneFrame keeps its sentinel contract: kNullFrame
+        // signals "no frame in this zone" (the Mmio path above relies
+        // on it too). Translate the Result error at this boundary.
+        return kNullFrame;
     }
-    else
-    {
-        // Ceiling postcondition. `AllocateFrameInRange` promises a
-        // frame below `max_phys` (when max_phys > 0); a regression
-        // in its bitmap search would land DMA traffic at memory the
-        // device cannot address. The self-test verifies this on
-        // every boot but a runtime KASSERT catches an in-production
-        // drift. zero `max_phys` means "no ceiling" (Normal zone).
-        KASSERT_WITH_VALUE(max_phys == 0 || f < max_phys, "mm/zone", "alloc: frame above zone ceiling", f);
-        ++g_stats[static_cast<u32>(zone)].allocs;
-        KLOG_TRACE_V("mm/zone", "AllocateZoneFrame: granted frame", f);
-    }
+    const PhysAddr f = f_r.value();
+    // Ceiling postcondition. `AllocateFrameInRange` promises a
+    // frame below `max_phys` (when max_phys > 0); a regression
+    // in its bitmap search would land DMA traffic at memory the
+    // device cannot address. The self-test verifies this on
+    // every boot but a runtime KASSERT catches an in-production
+    // drift. zero `max_phys` means "no ceiling" (Normal zone).
+    KASSERT_WITH_VALUE(max_phys == 0 || f < max_phys, "mm/zone", "alloc: frame above zone ceiling", f);
+    ++g_stats[static_cast<u32>(zone)].allocs;
+    KLOG_TRACE_V("mm/zone", "AllocateZoneFrame: granted frame", f);
     return f;
 }
 

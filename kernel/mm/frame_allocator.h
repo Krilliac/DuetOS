@@ -62,12 +62,12 @@ u64 MultibootInfoSnapshotSize();
 /// linear-scan path. Logs one summary line per node to klog.
 void FrameAllocatorBuildNumaRanges();
 
-/// Allocate one 4 KiB frame. Returns kNullFrame on out-of-memory.
-/// On a NUMA-aware boot (SRAT memory-affinity records present),
-/// biases the search toward the calling CPU's local node before
-/// falling back to the global pool. UMA boots get the historical
+/// Allocate one 4 KiB frame. Returns `Err{ErrorCode::OutOfMemory}` on
+/// out-of-memory. On a NUMA-aware boot (SRAT memory-affinity records
+/// present), biases the search toward the calling CPU's local node
+/// before falling back to the global pool. UMA boots get the historical
 /// global linear-scan path verbatim.
-PhysAddr AllocateFrame();
+core::Result<PhysAddr> AllocateFrame();
 
 /// Allocate a 4 KiB frame from a specific NUMA node, falling back
 /// to the global pool when the node is exhausted or unknown.
@@ -75,57 +75,35 @@ PhysAddr AllocateFrame();
 /// `acpi::srat::SratNodeForApic`. Mostly an internal seam exposed
 /// for the boot self-test; production callers go through
 /// `AllocateFrame()` and let the per-CPU NUMA hint drive locality.
-PhysAddr AllocateFrameNode(u8 node);
+core::Result<PhysAddr> AllocateFrameNode(u8 node);
 
 /// Allocate a 4 KiB frame whose physical address is strictly less
 /// than `max_phys`. Used by per-zone allocation paths to honour
 /// DMA-window constraints (e.g. a legacy ISA device wants <16 MiB,
 /// most PCIe DMA engines accept <4 GiB). `max_phys == 0` is treated
 /// as "no upper bound" and is identical to `AllocateFrame()`.
-/// Returns kNullFrame if no in-range frame is free.
-PhysAddr AllocateFrameInRange(PhysAddr max_phys);
+/// Returns `Err{ErrorCode::OutOfMemory}` if no in-range frame is free.
+core::Result<PhysAddr> AllocateFrameInRange(PhysAddr max_phys);
 
-/// Result-shaped sibling of `AllocateFrame`. Returns
-/// `ErrorCode::OutOfMemory` on allocator exhaustion; success wraps
-/// the same PhysAddr. Prefer this in new code.
-inline ::duetos::core::Result<PhysAddr> TryAllocateFrame()
-{
-    const PhysAddr f = AllocateFrame();
-    if (f == kNullFrame)
-        return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
-    return f;
-}
-
-/// Allocate `count` physically-contiguous 4 KiB frames. Returns the base
-/// physical address of the run, or kNullFrame if no run of that length is
-/// available. `count == 0` is treated as an error and returns kNullFrame.
+/// Allocate `count` physically-contiguous 4 KiB frames. Returns the
+/// base physical address of the run, `Err{ErrorCode::InvalidArgument}`
+/// if `count == 0`, or `Err{ErrorCode::OutOfMemory}` if no run of that
+/// length is available.
 ///
 /// Used by the kernel heap (which needs a contiguous virtual range backed by
 /// the static higher-half direct map) and any future driver that needs a
 /// contiguous DMA buffer.
-PhysAddr AllocateContiguousFrames(u64 count);
+core::Result<PhysAddr> AllocateContiguousFrames(u64 count);
 
 /// Allocate `count` physically-contiguous 4 KiB frames whose entire run
 /// sits strictly below `max_phys`. The contiguous-run sibling of
 /// `AllocateFrameInRange`, used by `mm::AllocDmaCoherent` to honour the
 /// per-zone DMA window (16 MiB for legacy ISA, 4 GiB for 32-bit-PCIe).
 /// `max_phys == 0` is treated as "no upper bound" and is identical to
-/// `AllocateContiguousFrames(count)`. Returns kNullFrame if no in-range
-/// run of that length is free.
-PhysAddr AllocateContiguousFramesInRange(u64 count, PhysAddr max_phys);
-
-/// Result-shaped sibling of `AllocateContiguousFrames`. Maps the
-/// null-frame sentinel to `ErrorCode::OutOfMemory` (run not
-/// available) and `count==0` to `ErrorCode::InvalidArgument`.
-inline ::duetos::core::Result<PhysAddr> TryAllocateContiguousFrames(u64 count)
-{
-    if (count == 0)
-        return ::duetos::core::Err{::duetos::core::ErrorCode::InvalidArgument};
-    const PhysAddr f = AllocateContiguousFrames(count);
-    if (f == kNullFrame)
-        return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
-    return f;
-}
+/// `AllocateContiguousFrames(count)`. Returns `Err{ErrorCode::OutOfMemory}`
+/// if no in-range run of that length is free, or
+/// `Err{ErrorCode::InvalidArgument}` if `count == 0`.
+core::Result<PhysAddr> AllocateContiguousFramesInRange(u64 count, PhysAddr max_phys);
 
 /// Return a previously-allocated frame to the pool.
 void FreeFrame(PhysAddr frame);

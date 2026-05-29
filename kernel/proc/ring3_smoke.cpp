@@ -570,14 +570,14 @@ void SpawnRing3Task(const char* name, CapSet caps, const fs::RamfsNode* root, u6
         Panic("core/ring3", "AddressSpaceCreate failed");
     }
 
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "failed to allocate user code frame");
     }
     WriteUserCodeFrame(code_frame, code_va, stack_va);
 
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "failed to allocate user stack frame");
@@ -707,7 +707,7 @@ void SpawnDropcapsProbe()
     {
         Panic("core/ring3", "AS create failed for dropcaps probe");
     }
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for dropcaps probe");
@@ -736,7 +736,7 @@ void SpawnDropcapsProbe()
         WriteImm32LE(code_direct, p.bytecode_offset, static_cast<u32>(target));
     }
 
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for dropcaps probe");
@@ -816,7 +816,7 @@ void SpawnHostileProbe()
     {
         Panic("core/ring3", "AS create failed for hostile probe");
     }
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for hostile probe");
@@ -830,7 +830,7 @@ void SpawnHostileProbe()
     {
         code_direct[i] = kHostileProbeBytes[i];
     }
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for hostile probe");
@@ -907,7 +907,7 @@ void SpawnCrossPidProbe()
     {
         Panic("core/ring3", "AS create failed for cross-pid probe");
     }
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for cross-pid probe");
@@ -921,7 +921,7 @@ void SpawnCrossPidProbe()
     {
         code_direct[i] = kCrossPidProbeBytes[i];
     }
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for cross-pid probe");
@@ -981,7 +981,7 @@ void SpawnCpuHogProbe()
     {
         Panic("core/ring3", "AS create failed for cpu-hog probe");
     }
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for cpu-hog");
@@ -995,7 +995,7 @@ void SpawnCpuHogProbe()
     {
         code_direct[i] = kCpuHogBytes[i];
     }
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for cpu-hog");
@@ -1066,7 +1066,7 @@ void SpawnSyscallStormProbeTask()
     {
         Panic("core/ring3", "AS create failed for syscall-storm probe");
     }
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for syscall-storm");
@@ -1080,7 +1080,7 @@ void SpawnSyscallStormProbeTask()
     {
         code_direct[i] = kSyscallStormBytes[i];
     }
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for syscall-storm");
@@ -1145,7 +1145,7 @@ void SpawnNxProbeTask()
         Panic("core/ring3", "AS create failed for nx probe");
     }
 
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for nx probe");
@@ -1167,7 +1167,7 @@ void SpawnNxProbeTask()
     // bytes into the payload (after `pause` + `48 B8` opcode).
     WriteImm64LE(code_direct, 4, stack_va);
 
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for nx probe");
@@ -1243,7 +1243,7 @@ void SpawnJailProbeTask()
         Panic("core/ring3", "AS create failed for jail probe");
     }
 
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for jail probe");
@@ -1264,7 +1264,7 @@ void SpawnJailProbeTask()
     // imm64 begins at offset 4.
     WriteImm64LE(code_direct, 4, code_va);
 
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for jail probe");
@@ -1341,7 +1341,7 @@ void SpawnPrivProbeTask()
         Panic("core/ring3", "AS create failed for priv probe");
     }
 
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for priv probe");
@@ -1355,7 +1355,7 @@ void SpawnPrivProbeTask()
     {
         code_direct[i] = kPrivProbeBytes[i];
     }
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for priv probe");
@@ -1420,7 +1420,7 @@ void SpawnBadIntProbeTask()
         Panic("core/ring3", "AS create failed for bad-int probe");
     }
 
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for bad-int probe");
@@ -1434,7 +1434,7 @@ void SpawnBadIntProbeTask()
     {
         code_direct[i] = kBadIntProbeBytes[i];
     }
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for bad-int probe");
@@ -1504,7 +1504,7 @@ void SpawnKernelReadProbeTask()
         Panic("core/ring3", "AS create failed for kernel-read probe");
     }
 
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for kernel-read probe");
@@ -1521,7 +1521,7 @@ void SpawnKernelReadProbeTask()
     // Patch imm64 at byte offset 4 (after `pause` + `48 B8`).
     WriteImm64LE(code_direct, 4, kKernelHigherHalfBase);
 
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for kernel-read probe");
@@ -1676,7 +1676,7 @@ void SpawnPtrFuzzProbeTask()
         Panic("core/ring3", "AS create failed for ptrfuzz probe");
     }
 
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for ptrfuzz probe");
@@ -1699,7 +1699,7 @@ void SpawnPtrFuzzProbeTask()
             "ptrfuzz patch: byte before ctrl-src offset is not the mov-esi-imm32 opcode");
     WriteImm32LE(code_direct, kPtrFuzzCtrlSrcOffset, static_cast<u32>(code_va + kPtrFuzzMsgOffset));
 
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for ptrfuzz probe");
@@ -1837,7 +1837,7 @@ void SpawnWriteFuzzProbeTask()
         Panic("core/ring3", "AS create failed for writefuzz probe");
     }
 
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for writefuzz probe");
@@ -1870,7 +1870,7 @@ void SpawnWriteFuzzProbeTask()
             "writefuzz patch: byte before ctrl-src slot is not mov-esi opcode");
     WriteImm32LE(code_direct, kWriteFuzzMsgPatchOffset, static_cast<u32>(code_va + kWriteFuzzMsgOffset));
 
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for writefuzz probe");
@@ -1986,7 +1986,7 @@ void SpawnBpProbeTask()
         Panic("core/ring3", "AS create failed for bp-probe");
     }
 
-    const PhysAddr code_frame = AllocateFrame();
+    const PhysAddr code_frame = AllocateFrame().value_or(kNullFrame);
     if (code_frame == kNullFrame)
     {
         Panic("core/ring3", "code frame alloc failed for bp-probe");
@@ -2010,7 +2010,7 @@ void SpawnBpProbeTask()
     WriteImm32LE(code_direct, kBpProbeInstallTargetOffset, static_cast<u32>(code_va + kBpProbeTargetOffset));
     WriteImm32LE(code_direct, kBpProbeWriteSrcOffset, static_cast<u32>(code_va + kBpProbeMsgOffset));
 
-    const PhysAddr stack_frame = AllocateFrame();
+    const PhysAddr stack_frame = AllocateFrame().value_or(kNullFrame);
     if (stack_frame == kNullFrame)
     {
         Panic("core/ring3", "stack frame alloc failed for bp-probe");

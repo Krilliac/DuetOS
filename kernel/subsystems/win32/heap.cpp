@@ -99,9 +99,10 @@ bool Win32HeapInit(duetos::core::Process* proc)
     // will clean them up when the load itself is aborted).
     for (u64 i = 0; i < kWin32HeapPages; ++i)
     {
-        const PhysAddr frame = AllocateFrame();
-        if (frame == kNullFrame)
+        auto frame_r = AllocateFrame();
+        if (!frame_r)
             return false;
+        const PhysAddr frame = frame_r.value();
         AddressSpaceMapUserPage(proc->as, kWin32HeapVa + i * kPageSize, frame,
                                 kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
     }
@@ -394,9 +395,10 @@ u64 Win32HeapExCreate(duetos::core::Process* proc, u64 pages)
     u64 mapped = 0;
     for (; mapped < pages; ++mapped)
     {
-        const PhysAddr frame = AllocateFrame();
-        if (frame == kNullFrame)
+        auto frame_r = AllocateFrame();
+        if (!frame_r)
             break;
+        const PhysAddr frame = frame_r.value();
         AddressSpaceMapUserPage(proc->as, base_va + mapped * kPageSize, frame,
                                 kPagePresent | kPageUser | kPageWritable | kPageNoExecute);
     }

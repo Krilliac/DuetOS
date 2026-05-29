@@ -1384,7 +1384,7 @@ void SyscallDispatch(arch::TrapFrame* frame)
         }
         for (u64 va = base_va; va < base_va + aligned_size; va += page_size)
         {
-            const mm::PhysAddr fp = mm::AllocateFrame();
+            const mm::PhysAddr fp = mm::AllocateFrame().value_or(mm::kNullFrame);
             if (fp == mm::kNullFrame)
             {
                 frame->rax = kStatusNoMemory;

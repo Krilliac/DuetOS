@@ -354,11 +354,12 @@ void ZeroFrame(mm::PhysAddr phys)
 // Allocate + zero one DMA-safe page. Returns 0 on OOM.
 mm::PhysAddr AllocZeroedPage()
 {
-    const mm::PhysAddr p = mm::AllocateFrame();
-    if (p == mm::kNullFrame)
+    auto p_r = mm::AllocateFrame();
+    if (!p_r)
     {
         return 0;
     }
+    const mm::PhysAddr p = p_r.value();
     ZeroFrame(p);
     return p;
 }
@@ -1024,12 +1025,13 @@ bool RegisterAsBlockDevice()
 {
     // Contiguous 16-page staging buffer so PRP list entries point
     // at consecutive physical pages without per-page allocation.
-    const mm::PhysAddr stage_phys = mm::AllocateContiguousFrames(kIoBufPages);
-    if (stage_phys == mm::kNullFrame)
+    auto stage_phys_r = mm::AllocateContiguousFrames(kIoBufPages);
+    if (!stage_phys_r)
     {
         core::Log(core::LogLevel::Error, "drivers/nvme", "contiguous staging buffer allocation failed");
         return false;
     }
+    const mm::PhysAddr stage_phys = stage_phys_r.value();
     g_ctrl.io_buf_phys = stage_phys;
     g_ctrl.io_buf_virt = static_cast<u8*>(mm::PhysToVirt(stage_phys));
     for (u64 i = 0; i < kIoBufBytes; ++i)

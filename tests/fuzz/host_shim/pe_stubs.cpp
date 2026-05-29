@@ -45,12 +45,12 @@ namespace duetos::mm
 void AddressSpaceMapUserPage(AddressSpace*, u64, PhysAddr, u64) { Trap("AddressSpaceMapUserPage"); }
 bool AddressSpaceUnmapUserPage(AddressSpace*, u64) { Trap("AddressSpaceUnmapUserPage"); }
 PhysAddr AddressSpaceLookupUserFrame(const AddressSpace*, u64) { Trap("AddressSpaceLookupUserFrame"); }
-PhysAddr AllocateFrame() { Trap("AllocateFrame"); }
-PhysAddr AllocateContiguousFrames(u64) { Trap("AllocateContiguousFrames"); }
+core::Result<PhysAddr> AllocateFrame() { Trap("AllocateFrame"); }
+core::Result<PhysAddr> AllocateContiguousFrames(u64) { Trap("AllocateContiguousFrames"); }
 void* PhysToVirt(PhysAddr) { Trap("PhysToVirt"); }
 // ElfLoad path (fuzz_elf reuses this TU). Never reached by the
 // pure ElfValidate/ElfForEachPtLoad surface the harness drives.
-AddressSpace* AddressSpaceCreate(u64) { Trap("AddressSpaceCreate"); }
+core::Result<AddressSpace*> AddressSpaceCreate(u64) { Trap("AddressSpaceCreate"); }
 void AddressSpaceRelease(AddressSpace*) { Trap("AddressSpaceRelease"); }
 u64 FreeFramesCount() { return 0; }
 void FrameAllocatorDrainPools() {}

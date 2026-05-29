@@ -285,11 +285,12 @@ void KernelHeapInit()
     constexpr u64 kFrames = kKernelHeapBytes / kPageSize;
     static_assert(kFrames * kPageSize == kKernelHeapBytes, "Heap size must be a multiple of the page size");
 
-    const PhysAddr base_phys = AllocateContiguousFrames(kFrames);
-    if (base_phys == kNullFrame)
+    auto base_phys_r = AllocateContiguousFrames(kFrames);
+    if (!base_phys_r)
     {
         PanicHeap("could not allocate contiguous frames for the heap pool");
     }
+    const PhysAddr base_phys = base_phys_r.value();
 
     g_pool_base = static_cast<u8*>(PhysToVirt(base_phys));
     g_pool_bytes = kKernelHeapBytes;

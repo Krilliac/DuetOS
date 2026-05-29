@@ -47,9 +47,10 @@ u16 Read16(volatile u8* base, u64 off)
 // on OOM.
 bool AllocZeroPage(u64* phys_out, void** virt_out)
 {
-    const mm::PhysAddr f = mm::AllocateFrame();
-    if (f == mm::kNullFrame)
+    auto f_r = mm::AllocateFrame();
+    if (!f_r)
         return false;
+    const mm::PhysAddr f = f_r.value();
     void* v = mm::PhysToVirt(f);
     u8* bytes = static_cast<u8*>(v);
     for (u64 i = 0; i < 4096; ++i)

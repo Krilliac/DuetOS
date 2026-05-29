@@ -79,12 +79,13 @@ void ZeroBuffer(void* virt, u64 bytes)
     const u64 rounded = pages << kPageSizeLog2;
     const PhysAddr max_phys = ZoneMaxPhys(zone);
 
-    const PhysAddr phys = AllocateContiguousFramesInRange(pages, max_phys);
-    if (phys == kNullFrame)
+    auto phys_r = AllocateContiguousFramesInRange(pages, max_phys);
+    if (!phys_r)
     {
         KLOG_WARN_S("mm/dma", "AllocDmaCoherent: no in-range contiguous run", "zone", ZoneName(zone));
-        return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
+        return ::duetos::core::Err{phys_r.error()};
     }
+    const PhysAddr phys = phys_r.value();
 
     // Sanity-pin the zone ceiling. The frame allocator already
     // promised this when max_phys was non-zero, but the assertion

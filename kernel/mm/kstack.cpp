@@ -86,8 +86,8 @@ bool InstallStackPages(u32 slot_index)
     u64 installed = 0;
     for (u64 i = 0; i < kKernelStackPages; ++i)
     {
-        const PhysAddr phys = AllocateFrame();
-        if (phys == kNullFrame)
+        auto phys_r = AllocateFrame();
+        if (!phys_r)
         {
             // Unwind: free every frame we installed so far so we
             // don't leak on an OOM that may yet be recoverable.
@@ -100,6 +100,7 @@ bool InstallStackPages(u32 slot_index)
             }
             return false;
         }
+        const PhysAddr phys = phys_r.value();
         MapPage(base + i * kPageSize, phys, kKernelData);
         g_slot_frames[slot_index][i] = phys;
         ++installed;
