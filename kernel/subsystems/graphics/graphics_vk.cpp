@@ -164,6 +164,13 @@ void LogOnce(EpId id, const char* name)
     if (g_logged[id])
         return;
     g_logged[id] = true;
+    // Hold the line guard across the 3-call chain so a concurrent
+    // writer (net-smoke, a klog WARN) can't splice between the prefix,
+    // the name, and the suffix — observed as
+    // `[vk] vkCreateInstance[net-smoke] step 1: PASS`. The per-CPU
+    // serial lock makes each SerialWrite atomic on its own; the guard
+    // extends that atomicity over the whole logical line.
+    arch::SerialLineGuard line;
     arch::SerialWrite("[vk] ");
     arch::SerialWrite(name);
     arch::SerialWrite(" reached (v0 ICD)\n");
