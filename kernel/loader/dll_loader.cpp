@@ -232,7 +232,7 @@ bool MapHeadersPage(const u8* file, u64 sizeof_headers, u64 base_va, duetos::mm:
         // new one.
         const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
         const bool reusing = existing != kNullFrame;
-        const PhysAddr frame = reusing ? existing : AllocateFrame();
+        const PhysAddr frame = reusing ? existing : TryAllocateFrame().value_or(kNullFrame);
         if (frame == kNullFrame)
             return false;
         auto* direct = static_cast<u8*>(PhysToVirt(frame));
@@ -288,7 +288,7 @@ bool MapSection(const u8* file, const u8* sec, u64 base_va, duetos::mm::AddressS
         // FileAlignment normalisation makes structurally true.
         const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
         const bool reusing = existing != kNullFrame;
-        const PhysAddr frame = reusing ? existing : AllocateFrame();
+        const PhysAddr frame = reusing ? existing : TryAllocateFrame().value_or(kNullFrame);
         if (frame == kNullFrame)
             return false;
         auto* frame_direct = static_cast<u8*>(PhysToVirt(frame));

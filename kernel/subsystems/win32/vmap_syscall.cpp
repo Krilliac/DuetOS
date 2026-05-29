@@ -48,7 +48,7 @@ void DoVmap(arch::TrapFrame* frame)
     const u64 base = proc->vmap_base + proc->vmap_pages_used * mm::kPageSize;
     for (u64 i = 0; i < pages; ++i)
     {
-        const mm::PhysAddr f = mm::AllocateFrame();
+        const mm::PhysAddr f = mm::TryAllocateFrame().value_or(mm::kNullFrame);
         if (f == mm::kNullFrame)
         {
             // OOM partway through — frames already mapped stay

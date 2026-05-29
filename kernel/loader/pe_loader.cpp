@@ -460,7 +460,7 @@ bool MapSection(const u8* file, const u8* sec, u64 image_base, duetos::mm::Addre
         // and skip a duplicate AddressSpaceMapUserPage call.
         const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
         const bool reusing = existing != kNullFrame;
-        const PhysAddr frame = reusing ? existing : AllocateFrame();
+        const PhysAddr frame = reusing ? existing : TryAllocateFrame().value_or(kNullFrame);
         if (frame == kNullFrame)
             return false;
         auto* frame_direct = static_cast<u8*>(PhysToVirt(frame));
@@ -516,7 +516,7 @@ bool MapHeaders(const u8* file, u64 sizeof_headers, u64 image_base, duetos::mm::
         // bytes than SectionAlignment. Reuse the existing mapping.
         const PhysAddr existing = AddressSpaceLookupUserFrame(as, page_va);
         const bool reusing = existing != kNullFrame;
-        const PhysAddr frame = reusing ? existing : AllocateFrame();
+        const PhysAddr frame = reusing ? existing : TryAllocateFrame().value_or(kNullFrame);
         if (frame == kNullFrame)
             return false;
         auto* direct = static_cast<u8*>(PhysToVirt(frame));
@@ -856,7 +856,7 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
     const u64 npages = total == 0 ? 1 : ((total + duetos::mm::kPageSize - 1) / duetos::mm::kPageSize);
     for (u64 p = 0; p < npages; ++p)
     {
-        const mm::PhysAddr f = mm::AllocateFrame();
+        const mm::PhysAddr f = mm::TryAllocateFrame().value_or(mm::kNullFrame);
         if (f == mm::kNullFrame)
         {
             arch::SerialWrite("[pe-tls] FAIL block frame alloc\n");
@@ -895,7 +895,7 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
 
     // 2. Slot array page; slot[0] -> block.
     {
-        const mm::PhysAddr f = mm::AllocateFrame();
+        const mm::PhysAddr f = mm::TryAllocateFrame().value_or(mm::kNullFrame);
         if (f == mm::kNullFrame)
         {
             arch::SerialWrite("[pe-tls] FAIL array frame alloc\n");
@@ -948,7 +948,7 @@ TlsSetupResult SetupStaticTls(const u8* file, u64 file_len, const PeHeaders& h, 
     }
     if (ncb != 0)
     {
-        const mm::PhysAddr f = mm::AllocateFrame();
+        const mm::PhysAddr f = mm::TryAllocateFrame().value_or(mm::kNullFrame);
         if (f == mm::kNullFrame)
         {
             arch::SerialWrite("[pe-tls] FAIL trampoline frame alloc\n");

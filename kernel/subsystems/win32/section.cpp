@@ -125,7 +125,7 @@ i32 SectionCreate(u64 size_bytes, u32 page_protect)
         s.frames[i] = mm::kNullFrame;
     for (u32 i = 0; i < num_pages; ++i)
     {
-        const mm::PhysAddr f = mm::AllocateFrame();
+        const mm::PhysAddr f = mm::TryAllocateFrame().value_or(mm::kNullFrame);
         if (f == mm::kNullFrame)
         {
             // OOM mid-creation — roll back.
