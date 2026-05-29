@@ -69,6 +69,22 @@ inline void IntelReg32Write(const GpuInfo& g, u64 offset, u32 value)
     *reinterpret_cast<volatile u32*>(static_cast<u8*>(g.mmio_virt) + offset) = value;
 }
 
+// 64-bit variants — the GGTT page-table (upper half of BAR0) holds
+// 64-bit PTEs, written through this same BAR alias.
+inline u64 IntelReg64(const GpuInfo& g, u64 offset)
+{
+    if (g.mmio_virt == nullptr || offset + 8 > g.mmio_size)
+        return ~0ull;
+    return *reinterpret_cast<volatile u64*>(static_cast<u8*>(g.mmio_virt) + offset);
+}
+
+inline void IntelReg64Write(const GpuInfo& g, u64 offset, u64 value)
+{
+    if (g.mmio_virt == nullptr || offset + 8 > g.mmio_size)
+        return;
+    *reinterpret_cast<volatile u64*>(static_cast<u8*>(g.mmio_virt) + offset) = value;
+}
+
 // Register offsets we read in v0. All are stable across Gen9..Gen13.
 //
 //   GEN_INFO        BAR0 + 0x0   — first liveness dword

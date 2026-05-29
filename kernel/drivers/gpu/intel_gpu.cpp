@@ -11,6 +11,7 @@
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 #include "drivers/gpu/intel_forcewake.h"
+#include "drivers/gpu/intel_ggtt.h"
 #include "drivers/gpu/intel_gsc_fw.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
@@ -215,6 +216,10 @@ void Probe(GpuInfo& g)
     // reports the failure uniformly, so we don't early-return.
     ForcewakeGetForRing(g);
     IntelRingUnstop(g);
+    // Slice 2: stand up the GGTT high window (the foundation batch-
+    // buffer execution in slice 3 maps its batch + surfaces through).
+    // Consumed there; standing it up here is harmless.
+    (void)GgttInit(g);
 
     Mmio32Write(g, kIntelRcsCtl, 0);
     Mmio32Write(g, kIntelRcsTail, 0);
