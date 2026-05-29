@@ -46,7 +46,7 @@ constexpr u16 kRdp = 0x10;   // register data port (CSR via RAP)
 constexpr u16 kRap = 0x14;   // register address port (index)
 constexpr u16 kReset = 0x18; // reading resets the chip (32-bit)
 constexpr u16 kReset16 = 0x14;
-constexpr u16 kBdp = 0x1C; // bus-config data port (BCR via RAP)
+[[maybe_unused]] constexpr u16 kBdp = 0x1C; // bus-config data port (BCR via RAP) — completes the I/O map
 
 // CSR0 control/status bits.
 constexpr u32 kCsr0Init = 0x0001;
@@ -222,7 +222,10 @@ bool PcnetBringUp(NicInfo& n)
     // Reset, then latch 32-bit DWIO mode (a 32-bit write to RDP).
     (void)arch::Inl(g_pcnet.io + kReset);
     (void)arch::Inw(g_pcnet.io + kReset16);
-    for (volatile u32 i = 0; i < 20000; ++i)
+    // Non-compound `i = i + 1`: pre/post-inc on a volatile-qualified
+    // counter is deprecated in C++20. The volatile keeps this post-reset
+    // settle spin from being optimised away.
+    for (volatile u32 i = 0; i < 20000; i = i + 1)
     {
     }
     arch::Outl(g_pcnet.io + kRdp, 0);

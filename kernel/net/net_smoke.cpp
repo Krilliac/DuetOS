@@ -18,6 +18,14 @@ namespace
 
 constinit bool g_started = false;
 
+// The smoke targets the wired NIC (stack iface 0). DHCP state is
+// per-interface, so we read iface 0's own lease and transmit ICMP/DNS
+// on iface 0 — keeping the lease and the send path on the same NIC.
+// (Reading a shared global lease used to pick up the wireless mock-
+// ISP's loopback lease on iface 3, then ping its gateway out iface 0,
+// which can never route.)
+constexpr u32 kSmokeIface = 0;
+
 void WriteIp(Ipv4Address ip)
 {
     for (u32 i = 0; i < 4; ++i)
@@ -53,7 +61,7 @@ bool WaitForDhcp(DhcpLease& out_lease)
     // 50 × 100 ms = 5 s.
     for (u32 i = 0; i < 50; ++i)
     {
-        out_lease = DhcpLeaseRead();
+        out_lease = DhcpLeaseRead(kSmokeIface);
         if (out_lease.valid)
             return true;
         duetos::sched::SchedSleepTicks(10);
@@ -64,7 +72,7 @@ bool WaitForDhcp(DhcpLease& out_lease)
 bool DoIcmpEcho(Ipv4Address dst, u16 id, u32 timeout_ticks)
 {
     NetPingArm(id, /*seq=*/1);
-    if (!NetIcmpSendEcho(/*iface_index=*/0, dst, id, /*seq=*/1))
+    if (!NetIcmpSendEcho(kSmokeIface, dst, id, /*seq=*/1))
         return false;
     for (u32 i = 0; i < timeout_ticks; ++i)
     {
@@ -85,7 +93,7 @@ enum class DnsLookupResult : u8
 
 DnsLookupResult DoDnsLookup(Ipv4Address resolver, const char* name, Ipv4Address& out_ip, u32 timeout_ticks)
 {
-    if (!NetDnsQueryA(/*iface_index=*/0, resolver, name))
+    if (!NetDnsQueryA(kSmokeIface, resolver, name))
     {
         // Distinguishes "query never made it onto the wire" (ARP fail
         // or UDP send rejected — kernel-side issue worth investigating)

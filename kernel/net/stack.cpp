@@ -220,7 +220,13 @@ struct DhcpState
     MacAddress server_mac;
     DhcpLease lease;
 };
-DhcpState g_dhcp = {};
+// Per-interface DHCP state. A single global slot used to be shared
+// by every NIC, so the wired NIC (iface 0) and the wireless mock-ISP
+// loopback (iface 3) raced for one lease — whichever completed first
+// won, and net-smoke then read a lease that didn't belong to the
+// interface it transmitted on. One DhcpState per interface lets each
+// NIC hold and resolve its own lease independently.
+DhcpState g_dhcp[kMaxInterfaces] = {};
 
 bool IpEq(Ipv4Address a, Ipv4Address b)
 {
@@ -303,7 +309,7 @@ const ArpEntry* ArpResolveWithWait(u32 iface_index, Ipv4Address ip, u64 per_try_
 
 const ArpEntry* ResolveL2Destination(u32 iface_index, Ipv4Address target_ip)
 {
-    const DhcpLease lease = DhcpLeaseRead();
+    const DhcpLease lease = DhcpLeaseRead(iface_index);
     const Ipv4Address fallback_gw =
         lease.valid ? lease.router : Ipv4Address{{target_ip.octets[0], target_ip.octets[1], target_ip.octets[2], 2}};
 
@@ -1524,30 +1530,29 @@ void DhcpBuildPayload(u8* buf, u64 cap, u8 msg_type, u32 xid, const MacAddress& 
     buf[o++] = kDhcpOptEnd;
 }
 
-void DhcpSendDiscover()
+void DhcpSendDiscover(u32 iface_index)
 {
-    const Interface& ifc = g_interfaces[g_dhcp.iface_index];
+    const DhcpState& st = g_dhcp[iface_index];
+    const Interface& ifc = g_interfaces[iface_index];
     u8 payload[kDhcpFrameBytes];
-    DhcpBuildPayload(payload, sizeof(payload), kDhcpMsgDiscover, g_dhcp.xid, ifc.mac, false, {}, {});
+    DhcpBuildPayload(payload, sizeof(payload), kDhcpMsgDiscover, st.xid, ifc.mac, false, {}, {});
     const MacAddress bcast_mac{{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
     const Ipv4Address bcast_ip{{0xFF, 0xFF, 0xFF, 0xFF}};
     const Ipv4Address any_ip{{0, 0, 0, 0}};
-    NetUdpSend(g_dhcp.iface_index, bcast_mac, bcast_ip, /*dst_port=*/67, any_ip, /*src_port=*/68, payload,
-               sizeof(payload));
+    NetUdpSend(iface_index, bcast_mac, bcast_ip, /*dst_port=*/67, any_ip, /*src_port=*/68, payload, sizeof(payload));
     arch::SerialWrite("[dhcp] DISCOVER sent\n");
 }
 
-void DhcpSendRequest()
+void DhcpSendRequest(u32 iface_index)
 {
-    const Interface& ifc = g_interfaces[g_dhcp.iface_index];
+    const DhcpState& st = g_dhcp[iface_index];
+    const Interface& ifc = g_interfaces[iface_index];
     u8 payload[kDhcpFrameBytes];
-    DhcpBuildPayload(payload, sizeof(payload), kDhcpMsgRequest, g_dhcp.xid, ifc.mac, true, g_dhcp.offered_ip,
-                     g_dhcp.server_ip);
+    DhcpBuildPayload(payload, sizeof(payload), kDhcpMsgRequest, st.xid, ifc.mac, true, st.offered_ip, st.server_ip);
     const MacAddress bcast_mac{{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
     const Ipv4Address bcast_ip{{0xFF, 0xFF, 0xFF, 0xFF}};
     const Ipv4Address any_ip{{0, 0, 0, 0}};
-    NetUdpSend(g_dhcp.iface_index, bcast_mac, bcast_ip, /*dst_port=*/67, any_ip, /*src_port=*/68, payload,
-               sizeof(payload));
+    NetUdpSend(iface_index, bcast_mac, bcast_ip, /*dst_port=*/67, any_ip, /*src_port=*/68, payload, sizeof(payload));
     {
         arch::SerialLineGuard line;
         arch::SerialWrite("[dhcp] REQUEST sent for ");
@@ -1555,7 +1560,7 @@ void DhcpSendRequest()
         {
             if (i != 0)
                 arch::SerialWrite(".");
-            arch::SerialWriteHex(g_dhcp.offered_ip.octets[i]);
+            arch::SerialWriteHex(st.offered_ip.octets[i]);
         }
         arch::SerialWrite("\n");
     }
@@ -1567,16 +1572,17 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
 {
     (void)src_port;
     (void)dst_port;
-    if (iface_index >= kMaxInterfaces || iface_index != g_dhcp.iface_index)
+    if (iface_index >= kMaxInterfaces)
         return;
+    DhcpState& st = g_dhcp[iface_index];
     if (payload == nullptr || len < kDhcpFrameBytes)
         return;
     const auto* buf = static_cast<const u8*>(payload);
     if (buf[0] != kDhcpOpReply)
         return;
-    // Check xid matches our in-flight transaction.
+    // Check xid matches this interface's in-flight transaction.
     const u32 xid = (u32(buf[4]) << 24) | (u32(buf[5]) << 16) | (u32(buf[6]) << 8) | u32(buf[7]);
-    if (xid != g_dhcp.xid)
+    if (xid != st.xid)
         return;
     // Magic cookie at offset 236.
     if (buf[236] != 0x63 || buf[237] != 0x82 || buf[238] != 0x53 || buf[239] != 0x63)
@@ -1600,27 +1606,27 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
             server_id.octets[i] = v[i];
     }
 
-    if (msg == kDhcpMsgOffer && g_dhcp.stage == DhcpState::Stage::Discovered)
+    if (msg == kDhcpMsgOffer && st.stage == DhcpState::Stage::Discovered)
     {
-        g_dhcp.offered_ip = yiaddr;
-        g_dhcp.server_ip = server_id;
-        DhcpSendRequest();
+        st.offered_ip = yiaddr;
+        st.server_ip = server_id;
+        DhcpSendRequest(iface_index);
         return;
     }
-    if (msg == kDhcpMsgAck && (g_dhcp.stage == DhcpState::Stage::Discovered || g_dhcp.stage == DhcpState::Stage::Acked))
+    if (msg == kDhcpMsgAck && (st.stage == DhcpState::Stage::Discovered || st.stage == DhcpState::Stage::Acked))
     {
-        g_dhcp.stage = DhcpState::Stage::Acked;
-        g_dhcp.lease.valid = true;
-        g_dhcp.lease.ip = yiaddr;
-        g_dhcp.lease.server = server_id;
+        st.stage = DhcpState::Stage::Acked;
+        st.lease.valid = true;
+        st.lease.ip = yiaddr;
+        st.lease.server = server_id;
         if (DhcpFindOption(opts, opts_len, kDhcpOptRouter, &v, &vl) && vl >= 4)
             for (u64 i = 0; i < 4; ++i)
-                g_dhcp.lease.router.octets[i] = v[i];
+                st.lease.router.octets[i] = v[i];
         if (DhcpFindOption(opts, opts_len, kDhcpOptDns, &v, &vl) && vl >= 4)
             for (u64 i = 0; i < 4; ++i)
-                g_dhcp.lease.dns.octets[i] = v[i];
+                st.lease.dns.octets[i] = v[i];
         if (DhcpFindOption(opts, opts_len, kDhcpOptLeaseTime, &v, &vl) && vl == 4)
-            g_dhcp.lease.lease_secs = (u32(v[0]) << 24) | (u32(v[1]) << 16) | (u32(v[2]) << 8) | u32(v[3]);
+            st.lease.lease_secs = (u32(v[0]) << 24) | (u32(v[1]) << 16) | (u32(v[2]) << 8) | u32(v[3]);
 
         // Rebind the interface's IP so subsequent outbound traffic
         // uses the leased address.
@@ -1640,10 +1646,10 @@ void DhcpOnUdp(u32 iface_index, Ipv4Address src_ip, u16 src_port, u16 dst_port, 
             {
                 if (i != 0)
                     arch::SerialWrite(".");
-                arch::SerialWriteHex(g_dhcp.lease.router.octets[i]);
+                arch::SerialWriteHex(st.lease.router.octets[i]);
             }
             arch::SerialWrite(" lease_secs=");
-            arch::SerialWriteHex(g_dhcp.lease.lease_secs);
+            arch::SerialWriteHex(st.lease.lease_secs);
             arch::SerialWrite("\n");
         }
     }
@@ -1653,25 +1659,39 @@ bool DhcpStart(u32 iface_index)
 {
     if (iface_index >= kMaxInterfaces || !g_interfaces[iface_index].bound)
         return false;
-    if (g_dhcp.stage == DhcpState::Stage::Discovered)
-        return false; // already in flight
+    DhcpState& st = g_dhcp[iface_index];
+    if (st.stage == DhcpState::Stage::Discovered)
+        return false; // already in flight on THIS interface
 
-    g_dhcp = {};
-    g_dhcp.iface_index = iface_index;
+    st = {};
+    st.iface_index = iface_index;
     // Deterministic xid derived from MAC + a constant so repeated
     // starts don't reuse xid=0 (DHCP servers filter that).
     const MacAddress& mac = g_interfaces[iface_index].mac;
-    g_dhcp.xid = 0xC05A0000u ^ ((u32(mac.octets[2]) << 24) | (u32(mac.octets[3]) << 16) | (u32(mac.octets[4]) << 8) |
-                                u32(mac.octets[5]));
-    g_dhcp.stage = DhcpState::Stage::Discovered;
+    st.xid = 0xC05A0000u ^
+             ((u32(mac.octets[2]) << 24) | (u32(mac.octets[3]) << 16) | (u32(mac.octets[4]) << 8) | u32(mac.octets[5]));
+    st.stage = DhcpState::Stage::Discovered;
     NetUdpBindRx(/*local_port=*/68, DhcpOnUdp);
-    DhcpSendDiscover();
+    DhcpSendDiscover(iface_index);
     return true;
+}
+
+DhcpLease DhcpLeaseRead(u32 iface_index)
+{
+    if (iface_index >= kMaxInterfaces)
+        return DhcpLease{};
+    return g_dhcp[iface_index].lease;
 }
 
 DhcpLease DhcpLeaseRead()
 {
-    return g_dhcp.lease;
+    // Active-lease scan: lowest iface index with a valid lease wins,
+    // so the wired NIC (iface 0) is preferred over loopback/wireless
+    // test interfaces when both are up.
+    for (u32 i = 0; i < kMaxInterfaces; ++i)
+        if (g_dhcp[i].lease.valid)
+            return g_dhcp[i].lease;
+    return DhcpLease{};
 }
 
 // ---------------------------------------------------------------

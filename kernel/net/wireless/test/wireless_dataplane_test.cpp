@@ -49,14 +49,14 @@ void WirelessDataPlaneSelfTest()
 
     // DHCP over the encrypted link.
     const bool started = duetos::net::DhcpStart(kIface);
-    KASSERT(started, "net/wireless/data", "DhcpStart refused (single g_dhcp still in flight on iface 0?)");
-    for (u32 round = 0; round < 16 && !duetos::net::DhcpLeaseRead().valid; ++round)
+    KASSERT(started, "net/wireless/data", "DhcpStart refused (already in flight on this iface?)");
+    for (u32 round = 0; round < 16 && !duetos::net::DhcpLeaseRead(kIface).valid; ++round)
     {
         LoopbackDriverPump(&drv);
         duetos::sched::SchedYield();
     }
 
-    const auto lease = duetos::net::DhcpLeaseRead();
+    const auto lease = duetos::net::DhcpLeaseRead(kIface);
     KASSERT(lease.valid, "net/wireless/data", "no DHCP lease after pumping the encrypted link");
     KASSERT(IpEq(lease.ip, lease_ip), "net/wireless/data", "leased IP is not the gateway's pool address");
     KASSERT(IpEq(duetos::net::InterfaceIp(kIface), lease_ip), "net/wireless/data", "iface IP not rebound to lease");
