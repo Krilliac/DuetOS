@@ -8,6 +8,8 @@
 
 #include "drivers/gpu/amd_gpu.h"
 
+#include "drivers/gpu/amd_cp_ucode.h"
+
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 #include "drivers/gpu/amd_gfx_fw.h"
@@ -273,7 +275,12 @@ void Probe(GpuInfo& g)
     arch::SerialWriteHex(rb_cntl);
     arch::SerialWrite(" rptr=");
     arch::SerialWriteHex(rb_rptr);
-    arch::SerialWrite(" (firmware-pending — MEC/PFP/ME push gates the next slice)\n");
+    arch::SerialWrite(" — attempting CP microcode upload\n");
+    // CP microcode upload (amd_cp_ucode): stream PFP/CE/ME (+RLC) so the
+    // CP can execute PM4 from the ring. Real-HW + needs gfx_*.bin under
+    // the open-firmware path; returns Err (logged) when absent, leaving
+    // the ring programmed but inert. Reached only on a live AMD BAR5.
+    (void)AmdCpLoadMicrocode(MmioRegs());
     return {};
 }
 

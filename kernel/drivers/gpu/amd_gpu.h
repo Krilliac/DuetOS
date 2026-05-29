@@ -79,13 +79,23 @@ namespace duetos::drivers::gpu::amd
 //                              writable when RPTR_WR_ENA is set)
 //   mmCP_RB0_WPTR     0xC114 — ring write pointer (host bumps this
 //                              past each submitted packet)
+// BAR5 byte offset = (GC_segment_base_dword + reg_dword_offset) * 4
+// (SOC15 addressing; Vega10 GC seg0=0x2000, seg1=0xA000). Verified
+// against gc_9_0_offset.h on 2026-05-29.
+//
+// CORRECTION (2026-05-29): the original CNTL/BASE pair below was
+// SWAPPED and WPTR was wrong. gc_9_0_offset.h: CP_RB0_BASE=dword 0x1040
+// → 0xC100, CP_RB0_CNTL=dword 0x1041 → 0xC104, CP_RB0_WPTR=dword 0x1054
+// → 0xC150 (the old 0xC114 = dword 0x1045 is the RPTR_ADDR region, not
+// WPTR). GRBM_STATUS=0x8010 and BASE_HI=0xC108 already matched.
+// All unverified on silicon (no AMD model in QEMU) but now spec-correct.
 inline constexpr u64 kAmdRegGrbmStatus = 0x8010;
 inline constexpr u64 kAmdRegRlcGpmStat = 0xC400;
-inline constexpr u64 kAmdRegCpRb0Cntl = 0xC100;
-inline constexpr u64 kAmdRegCpRb0Base = 0xC104;
-inline constexpr u64 kAmdRegCpRb0BaseHi = 0xC108;
-inline constexpr u64 kAmdRegCpRb0Rptr = 0xC10C;
-inline constexpr u64 kAmdRegCpRb0Wptr = 0xC114;
+inline constexpr u64 kAmdRegCpRb0Base = 0xC100;   // dword 0x1040
+inline constexpr u64 kAmdRegCpRb0Cntl = 0xC104;   // dword 0x1041
+inline constexpr u64 kAmdRegCpRb0BaseHi = 0xC108; // dword 0x1042
+inline constexpr u64 kAmdRegCpRb0Rptr = 0xC10C;   // dword 0x1043
+inline constexpr u64 kAmdRegCpRb0Wptr = 0xC150;   // dword 0x1054
 
 // CP_RB0_CNTL bitfields (GFX9..GFX11 stable layout).
 //   RB_SIZE         [5:0]   log2(ring_size_in_dwords) - 1
@@ -107,6 +117,23 @@ inline constexpr u64 kAmdMmioCap = 1ULL * 1024 * 1024;
 
 inline constexpr u64 kAmdCpRingBytes = 4096;
 inline constexpr u64 kAmdCpRingDwords = kAmdCpRingBytes / 4;
+
+// Shared BAR5 register accessors (the AMD driver maps BAR5 itself;
+// pass the pointer from MmioRegs()). Bounds-checked against the 1 MiB
+// map cap. Used by amd_gpu and amd_cp_ucode.
+inline u32 AmdReg32(void* bar5, u64 off)
+{
+    if (bar5 == nullptr || off + 4 > kAmdMmioCap)
+        return 0xFFFFFFFFu;
+    return *reinterpret_cast<volatile u32*>(static_cast<u8*>(bar5) + off);
+}
+
+inline void AmdReg32Write(void* bar5, u64 off, u32 value)
+{
+    if (bar5 == nullptr || off + 4 > kAmdMmioCap)
+        return;
+    *reinterpret_cast<volatile u32*>(static_cast<u8*>(bar5) + off) = value;
+}
 
 /// Run the v0 probe: map BAR5, read GRBM_STATUS + RLC_GPM_STAT,
 /// log a one-line summary, and probe the firmware-loader for the
