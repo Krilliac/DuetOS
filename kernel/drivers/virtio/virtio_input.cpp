@@ -552,12 +552,13 @@ bool VirtioInputProbe(const VirtioPciLayout& L)
         return false;
     }
 
-    const mm::PhysAddr phys = mm::AllocateFrame();
-    if (phys == mm::kNullFrame)
+    auto phys_r = mm::TryAllocateFrame();
+    if (!phys_r)
     {
         KLOG_WARN("drivers/virtio/input", "event buffer alloc failed");
         return false;
     }
+    const mm::PhysAddr phys = phys_r.value();
     g_input.evt_buf_phys = phys;
     g_input.evt_buf_virt = static_cast<u8*>(mm::PhysToVirt(phys));
     for (u32 i = 0; i < mm::kPageSize; ++i)

@@ -41,24 +41,27 @@ void* PhysToWritable(u64 phys)
     // call leaks the first frame forever. Tracking by local
     // variables (vs g_state) means a failure leaves g_initialized
     // false and a retry starts fresh.
-    const mm::PhysAddr root_phys = mm::AllocateFrame();
-    if (root_phys == mm::kNullFrame)
+    auto root_phys_r = mm::TryAllocateFrame();
+    if (!root_phys_r)
         return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
+    const mm::PhysAddr root_phys = root_phys_r.value();
 
-    const mm::PhysAddr ctx_phys = mm::AllocateFrame();
-    if (ctx_phys == mm::kNullFrame)
+    auto ctx_phys_r = mm::TryAllocateFrame();
+    if (!ctx_phys_r)
     {
         mm::FreeFrame(root_phys);
         return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
     }
+    const mm::PhysAddr ctx_phys = ctx_phys_r.value();
 
-    const mm::PhysAddr pdpt_phys = mm::AllocateFrame();
-    if (pdpt_phys == mm::kNullFrame)
+    auto pdpt_phys_r = mm::TryAllocateFrame();
+    if (!pdpt_phys_r)
     {
         mm::FreeFrame(root_phys);
         mm::FreeFrame(ctx_phys);
         return ::duetos::core::Err{::duetos::core::ErrorCode::OutOfMemory};
     }
+    const mm::PhysAddr pdpt_phys = pdpt_phys_r.value();
 
     ZeroFrame(root_phys);
     ZeroFrame(ctx_phys);

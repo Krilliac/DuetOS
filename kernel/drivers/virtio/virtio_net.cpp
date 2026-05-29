@@ -251,12 +251,13 @@ bool VirtioNetProbe(const VirtioPciLayout& L)
     VirtioMarkDriverOk(&layout);
 
     // TX header page (12 bytes, all-zero, reused across transmits).
-    const mm::PhysAddr hdr_phys = mm::AllocateFrame();
-    if (hdr_phys == mm::kNullFrame)
+    auto hdr_phys_r = mm::TryAllocateFrame();
+    if (!hdr_phys_r)
     {
         KLOG_WARN("drivers/virtio/net", "header page alloc failed");
         return false;
     }
+    const mm::PhysAddr hdr_phys = hdr_phys_r.value();
     g_net.hdr_phys = hdr_phys;
     g_net.hdr_virt = static_cast<u8*>(mm::PhysToVirt(hdr_phys));
     auto* h = reinterpret_cast<NetHdr*>(g_net.hdr_virt);
@@ -266,12 +267,13 @@ bool VirtioNetProbe(const VirtioPciLayout& L)
     // Ethernet frame (max 1518 B) with room to spare. The TX
     // path copies the caller's frame here, then DMAs from this
     // direct-map address — never from the caller's pointer.
-    const mm::PhysAddr tx_phys = mm::AllocateFrame();
-    if (tx_phys == mm::kNullFrame)
+    auto tx_phys_r = mm::TryAllocateFrame();
+    if (!tx_phys_r)
     {
         KLOG_WARN("drivers/virtio/net", "TX staging page alloc failed");
         return false;
     }
+    const mm::PhysAddr tx_phys = tx_phys_r.value();
     g_net.tx_buf_phys = tx_phys;
     g_net.tx_buf_virt = static_cast<u8*>(mm::PhysToVirt(tx_phys));
 
@@ -280,12 +282,13 @@ bool VirtioNetProbe(const VirtioPciLayout& L)
     // a buffer inside frame `f` at offset `b * kRxBufBytes`.
     for (u32 f = 0; f < kRxFrames; ++f)
     {
-        const mm::PhysAddr phys = mm::AllocateFrame();
-        if (phys == mm::kNullFrame)
+        auto phys_r = mm::TryAllocateFrame();
+        if (!phys_r)
         {
             KLOG_WARN_V("drivers/virtio/net", "RX buffer frame alloc failed at frame", static_cast<u64>(f));
             return false;
         }
+        const mm::PhysAddr phys = phys_r.value();
         u8* virt = static_cast<u8*>(mm::PhysToVirt(phys));
         for (u32 b = 0; b < kRxBuffersPerFrame; ++b)
         {

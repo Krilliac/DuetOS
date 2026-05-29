@@ -334,9 +334,10 @@ void E1000ClearMulticastTable()
 bool E1000SetupRxRing()
 {
     // One 4 KiB frame for the RX descriptor ring (256 × 16 B).
-    const mm::PhysAddr ring_phys = mm::AllocateFrame();
-    if (ring_phys == mm::kNullFrame)
+    auto ring_phys_r = mm::TryAllocateFrame();
+    if (!ring_phys_r)
         return false;
+    const mm::PhysAddr ring_phys = ring_phys_r.value();
     auto* ring_virt = static_cast<u8*>(mm::PhysToVirt(ring_phys));
     for (u64 i = 0; i < mm::kPageSize; ++i)
         ring_virt[i] = 0;
@@ -346,12 +347,13 @@ bool E1000SetupRxRing()
     // 256 × 2 KiB = 128 pages contiguous for RX buffers. Each
     // descriptor points at buf_base + slot × 2048.
     constexpr u32 kRxBufPages = (kE1000RxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
-    const mm::PhysAddr buf_phys = mm::AllocateContiguousFrames(kRxBufPages);
-    if (buf_phys == mm::kNullFrame)
+    auto buf_phys_r = mm::TryAllocateContiguousFrames(kRxBufPages);
+    if (!buf_phys_r)
     {
         mm::FreeFrame(ring_phys);
         return false;
     }
+    const mm::PhysAddr buf_phys = buf_phys_r.value();
     g_e1000.rx_buf_base_phys = buf_phys;
     g_e1000.rx_buf_base_virt = static_cast<u8*>(mm::PhysToVirt(buf_phys));
     for (u32 i = 0; i < kE1000RxRingSlots; ++i)
@@ -375,9 +377,10 @@ bool E1000SetupRxRing()
 
 bool E1000SetupTxRing()
 {
-    const mm::PhysAddr ring_phys = mm::AllocateFrame();
-    if (ring_phys == mm::kNullFrame)
+    auto ring_phys_r = mm::TryAllocateFrame();
+    if (!ring_phys_r)
         return false;
+    const mm::PhysAddr ring_phys = ring_phys_r.value();
     auto* ring_virt = static_cast<u8*>(mm::PhysToVirt(ring_phys));
     for (u64 i = 0; i < mm::kPageSize; ++i)
         ring_virt[i] = 0;
@@ -385,12 +388,13 @@ bool E1000SetupTxRing()
     g_e1000.tx_ring = reinterpret_cast<E1000TxDesc*>(ring_virt);
 
     constexpr u32 kTxBufPages = (kE1000TxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
-    const mm::PhysAddr buf_phys = mm::AllocateContiguousFrames(kTxBufPages);
-    if (buf_phys == mm::kNullFrame)
+    auto buf_phys_r = mm::TryAllocateContiguousFrames(kTxBufPages);
+    if (!buf_phys_r)
     {
         mm::FreeFrame(ring_phys);
         return false;
     }
+    const mm::PhysAddr buf_phys = buf_phys_r.value();
     g_e1000.tx_buf_base_phys = buf_phys;
     g_e1000.tx_buf_base_virt = static_cast<u8*>(mm::PhysToVirt(buf_phys));
 

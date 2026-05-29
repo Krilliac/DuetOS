@@ -118,9 +118,10 @@ bool VirtioConsoleProbe(const VirtioPciLayout& L)
     // buffer and re-posts when empty.
     if (VirtioQueueSetup(&layout, &g_console.rxq, /*queue_index=*/0, kVirtqDefaultSize))
     {
-        const mm::PhysAddr rx_phys = mm::AllocateFrame();
-        if (rx_phys != mm::kNullFrame)
+        auto rx_phys_r = mm::TryAllocateFrame();
+        if (rx_phys_r)
         {
+            const mm::PhysAddr rx_phys = rx_phys_r.value();
             g_console.rx_buf_phys = rx_phys;
             g_console.rx_buf_virt = static_cast<u8*>(mm::PhysToVirt(rx_phys));
             VirtqDesc* d = const_cast<VirtqDesc*>(g_console.rxq.desc);
@@ -149,12 +150,13 @@ bool VirtioConsoleProbe(const VirtioPciLayout& L)
     // Static TX scratch — one page is plenty for the line-at-a-
     // time write pattern. A consumer that wants to ship more
     // than 256 bytes per call splits the buffer at the caller.
-    const mm::PhysAddr phys = mm::AllocateFrame();
-    if (phys == mm::kNullFrame)
+    auto phys_r = mm::TryAllocateFrame();
+    if (!phys_r)
     {
         KLOG_WARN("drivers/virtio/console", "tx buffer alloc failed");
         return false;
     }
+    const mm::PhysAddr phys = phys_r.value();
     g_console.tx_buf_phys = phys;
     g_console.tx_buf_virt = static_cast<u8*>(mm::PhysToVirt(phys));
     for (u32 i = 0; i < 4096; ++i)

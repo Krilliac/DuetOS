@@ -378,9 +378,10 @@ void Write64(u64 off, u64 v)
 
 bool AllocOnePage(::duetos::mm::PhysAddr* phys_out, void** virt_out)
 {
-    const ::duetos::mm::PhysAddr f = ::duetos::mm::AllocateFrame();
-    if (f == ::duetos::mm::kNullFrame)
+    auto f_r = ::duetos::mm::TryAllocateFrame();
+    if (!f_r)
         return false;
+    const ::duetos::mm::PhysAddr f = f_r.value();
     void* v = ::duetos::mm::PhysToVirt(f);
     // Zero the page — descriptor tables and buffers must start at a
     // known state so stale bits don't look like valid entries.
@@ -856,14 +857,15 @@ bool VirtioGpuSetupScanout(u32 width, u32 height)
     const u64 pitch = static_cast<u64>(width) * 4;
     const u64 bytes = pitch * height;
     const u64 pages = (bytes + kPageSize - 1) / kPageSize;
-    const ::duetos::mm::PhysAddr base = ::duetos::mm::AllocateContiguousFrames(pages);
-    if (base == ::duetos::mm::kNullFrame)
+    auto base_r = ::duetos::mm::TryAllocateContiguousFrames(pages);
+    if (!base_r)
     {
         arch::SerialWrite("[virtio-gpu] setup-scanout: could not allocate ");
         arch::SerialWriteHex(pages);
         arch::SerialWrite(" contiguous frames for backing\n");
         return false;
     }
+    const ::duetos::mm::PhysAddr base = base_r.value();
     void* backing_va = ::duetos::mm::PhysToVirt(base);
     // Zero the backing so the first flush shows a predictable colour
     // rather than stale kernel memory.
