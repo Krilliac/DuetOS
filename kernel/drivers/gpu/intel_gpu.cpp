@@ -502,6 +502,86 @@ u32 IntelBatchExecProbe(u32 cookie)
     return readback;
 }
 
+u32 IntelBltColorFillProbe(u32 argb)
+{
+    // Escalation rung 4: the first ACCELERATED workload. GGTT-map an
+    // OFFSCREEN 32-bpp page, XY_COLOR_BLT a solid colour into it, flush,
+    // and read pixel[0] back over the CPU mapping. Never touches the
+    // live framebuffer (the safe pre-scanout proof). 0xFFFFFFFF on
+    // not-ready / failure. Gated; real-HW only.
+    if (!g_brought_up || g_intel_info == nullptr || g_rcs_ring.virt == nullptr || !GgttReady())
+        return 0xFFFFFFFFu;
+    const GpuInfo& g = *g_intel_info;
+
+    auto sr = mm::AllocDmaCoherent(0x1000u, mm::Zone::Normal);
+    if (!sr.has_value())
+        return 0xFFFFFFFFu;
+    mm::DmaBuffer surf = sr.value();
+    const u64 surf_va = GgttMapPage(g, surf.phys);
+    if (surf_va == 0)
+    {
+        mm::FreeDmaCoherent(surf);
+        return 0xFFFFFFFFu;
+    }
+    // Pre-clear to a known non-fill value so a stale read can't pass.
+    auto* px = static_cast<volatile u32*>(surf.virt);
+    for (u32 i = 0; i < 0x1000u / 4u; ++i)
+        px[i] = 0xDEADBEEFu;
+    mm::DmaSyncForDevice(surf, 0, 0x1000u);
+
+    // Fill an 8x1 rect at (0,0) of a one-page (4096-byte-pitch) surface.
+    const ColorBltPacket blt = EncodeColorBlt(surf_va, /*pitch=*/0x1000u, 0, 0, 8, 1, argb);
+    u32* ring = static_cast<u32*>(g_rcs_ring.virt);
+    const u64 ring_dwords = kIntelRingBytes / 4u;
+    const u32 cur_tail = Mmio32(g, kIntelRcsTail);
+    u64 ofs = (cur_tail / 4u) % ring_dwords;
+    constexpr u64 kNeed = 7u + 3u; // 7-dword BLT + 3-dword MI_FLUSH_DW (even)
+    if (ofs + kNeed > ring_dwords)
+    {
+        while (ofs < ring_dwords)
+            ring[ofs++] = kIntelMiNoop;
+        ofs = 0;
+    }
+    for (u32 i = 0; i < 7; ++i)
+        ring[ofs + i] = blt.dw[i];
+    ring[ofs + 7] = kMiFlushDw; // MI_FLUSH_DW (len 1 -> 3 dwords)
+    ring[ofs + 8] = 0;          // post-sync address = none
+    ring[ofs + 9] = 0;          // post-sync data = none
+    const u32 new_tail = static_cast<u32>(((ofs + kNeed) * 4u) % kIntelRingBytes);
+    mm::DmaSyncForDevice(g_rcs_ring, 0, kIntelRingBytes);
+    Mmio32Write(g, kIntelRcsTail, new_tail);
+
+    constexpr u64 kTimeoutNs = 100ull * 1000ull * 1000ull;
+    constexpr u32 kIterCap = 1u << 20;
+    const u64 start_ns = ::duetos::time::MonotonicNs();
+    bool advanced = false;
+    for (u32 iter = 0; iter < kIterCap; ++iter)
+    {
+        if (Mmio32(g, kIntelRcsHead) == new_tail)
+        {
+            advanced = true;
+            break;
+        }
+        asm volatile("pause" ::: "memory");
+        if (start_ns != 0)
+        {
+            const u64 now = ::duetos::time::MonotonicNs();
+            if (now > start_ns && (now - start_ns) > kTimeoutNs)
+                break;
+        }
+    }
+    if (!advanced)
+    {
+        KLOG_WARN("drivers/gpu/intel", "RCS blt-fill: HEAD did not catch TAIL");
+        mm::FreeDmaCoherent(surf);
+        return 0xFFFFFFFFu;
+    }
+    mm::DmaSyncForCpu(surf, 0, 4u);
+    const u32 readback = px[0];
+    mm::FreeDmaCoherent(surf); // GGTT slot leaks (one high-window entry) — fine for a one-shot probe
+    return readback;
+}
+
 bool IsBroughtUp()
 {
     return g_brought_up;
@@ -563,6 +643,19 @@ void IntelRcsRingSelfTest()
                 arch::SerialWrite("[gpu/intel/cmds] batch-exec readback=");
                 arch::SerialWriteHex(batch_rb);
                 arch::SerialWrite(" (GGTT batch dispatch unverified on this part)\n");
+            }
+            // Escalation rung 4 (real-HW only): the first ACCELERATED
+            // workload — XY_COLOR_BLT into an offscreen surface, read
+            // the pixel back. Informational (never proven on silicon).
+            constexpr u32 kBltColor = 0xFF00FF00u;
+            const u32 blt_rb = IntelBltColorFillProbe(kBltColor);
+            if (blt_rb == kBltColor)
+                arch::SerialWrite("[gpu/intel/cmds] blt-fill PASS (XY_COLOR_BLT offscreen, pixel=0xFF00FF00)\n");
+            else
+            {
+                arch::SerialWrite("[gpu/intel/cmds] blt-fill readback=");
+                arch::SerialWriteHex(blt_rb);
+                arch::SerialWrite(" (2D BLT unverified on this part)\n");
             }
             return;
         }

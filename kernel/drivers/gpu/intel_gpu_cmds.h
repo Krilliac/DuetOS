@@ -66,6 +66,64 @@ constexpr PipeControlPacket EncodePipeControlQwWrite(u64 gpu_gtt_addr, u64 value
              static_cast<u32>(value & 0xFFFFFFFFu), static_cast<u32>((value >> 32) & 0xFFFFFFFFu)}};
 }
 
+// ---- 2D BLT engine (legacy blitter, present Gen9–Gen12) -----------
+// The cheapest accelerated workload: solid fills + surface copies for
+// GDI paint. 2D client = bits 31:29 = 0x2; opcode in bits 28:22. The
+// XY_* macros do NOT bake in the DWORD-length field — the caller ORs
+// (total_dwords - 2). On Gen8+ the surface base addresses are 48-bit,
+// emitted as two DWORDs (lo, hi), so XY_COLOR_BLT is 7 DWORDs and
+// XY_SRC_COPY_BLT is 10. (Computed constants below are derived from
+// the i915 macro expressions, NOT a third party's hand-arithmetic.)
+inline constexpr u32 kXyColorBltCmd = (2u << 29) | (0x50u << 22);   // 0x54000000
+inline constexpr u32 kXySrcCopyBltCmd = (2u << 29) | (0x53u << 22); // 0x54C00000
+inline constexpr u32 kBltDepth32 = 3u << 24;                        // 0x03000000 (32 bpp)
+inline constexpr u32 kBltWriteRgba = 3u << 20;                      // 0x00300000 (write A+RGB)
+inline constexpr u32 kBltRopFill = 0xF0u << 16;                     // 0x00F00000 (PATCOPY/solid)
+inline constexpr u32 kBltRopSrcCopy = 0xCCu << 16;                  // 0x00CC0000 (SRCCOPY)
+
+struct ColorBltPacket
+{
+    u32 dw[7];
+};
+
+// Solid-fill `argb` into the rect [x1,y1)..[x2,y2) of a 32-bpp linear
+// surface at GPU VA `dst_va`, `pitch_bytes` stride. (x2,y2) exclusive.
+constexpr ColorBltPacket EncodeColorBlt(u64 dst_va, u32 pitch_bytes, u32 x1, u32 y1, u32 x2, u32 y2, u32 argb)
+{
+    return {{kXyColorBltCmd | kBltWriteRgba | (7u - 2u), kBltDepth32 | kBltRopFill | (pitch_bytes & 0xFFFFu),
+             (y1 << 16) | (x1 & 0xFFFFu), (y2 << 16) | (x2 & 0xFFFFu), static_cast<u32>(dst_va & 0xFFFFFFFFu),
+             static_cast<u32>((dst_va >> 32) & 0xFFFFFFFFu), argb}};
+}
+
+struct SrcCopyBltPacket
+{
+    u32 dw[10];
+};
+
+// Copy the rect at dst (dx1,dy1)..(dx2,dy2) from src (sx1,sy1), both
+// 32-bpp linear surfaces (GPU VAs + byte pitches). Write-channel +
+// ROP=SRCCOPY; confirm the exact write-mask on first-HW bring-up.
+constexpr SrcCopyBltPacket EncodeSrcCopyBlt(u64 dst_va, u32 dst_pitch, u32 dx1, u32 dy1, u32 dx2, u32 dy2, u64 src_va,
+                                            u32 src_pitch, u32 sx1, u32 sy1)
+{
+    return {{kXySrcCopyBltCmd | kBltWriteRgba | (10u - 2u), kBltDepth32 | kBltRopSrcCopy | (dst_pitch & 0xFFFFu),
+             (dy1 << 16) | (dx1 & 0xFFFFu), (dy2 << 16) | (dx2 & 0xFFFFu), static_cast<u32>(dst_va & 0xFFFFFFFFu),
+             static_cast<u32>((dst_va >> 32) & 0xFFFFFFFFu), (sy1 << 16) | (sx1 & 0xFFFFu), (src_pitch & 0xFFFFu),
+             static_cast<u32>(src_va & 0xFFFFFFFFu), static_cast<u32>((src_va >> 32) & 0xFFFFFFFFu)}};
+}
+
+// MI_FLUSH_DW (MI_INSTR 0x26, len 1) — the legacy blitter is cached, so
+// a flush is required after a blit before the CPU / scanout reads the
+// destination.
+inline constexpr u32 kMiFlushDw = (0x26u << 23) | 1u;
+
+// Real-hardware escalation rung 4: GGTT-map an OFFSCREEN 32-bpp
+// surface, XY_COLOR_BLT a solid colour into it, MI_FLUSH_DW, then read
+// a pixel back over the CPU mapping. Returns the read-back pixel (or
+// 0xFFFFFFFF on not-ready / failure). Offscreen — never touches the
+// live framebuffer. Gated; real-HW only.
+u32 IntelBltColorFillProbe(u32 argb);
+
 // Real-hardware escalation rung 3: allocate a batch page, GGTT-map it,
 // fill it with [MI_STORE_DWORD_IMM(cookie) ; MI_BATCH_BUFFER_END],
 // dispatch it from the ring via MI_BATCH_BUFFER_START (GGTT), poll, and
