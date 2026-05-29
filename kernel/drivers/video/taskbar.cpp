@@ -931,7 +931,16 @@ void TaskbarRedraw()
     // clock — matches the Win10/macOS bottom-right convention.
     {
         const auto snap = duetos::drivers::power::PowerSnapshotRead();
-        if (snap.battery.state != duetos::drivers::power::kBatNotPresent)
+        // Only surface the battery cell when there is a REAL reading.
+        // kBatNotPresent (desktop) AND kBatUnknown (no live ACPI battery
+        // backend — the common virtual-machine case, e.g. VirtualBox)
+        // both mean "nothing real to show", so the tray hides the cell
+        // entirely rather than painting a stub/placeholder.
+        const auto bstate = snap.battery.state;
+        const bool battery_real = (bstate == duetos::drivers::power::kBatCharging) ||
+                                  (bstate == duetos::drivers::power::kBatDischarging) ||
+                                  (bstate == duetos::drivers::power::kBatFull);
+        if (battery_real)
         {
             const u32 dot = (snap.ac == duetos::drivers::power::kAcOnline) ? 0x003C9060 : 0x00C09040;
             u32 cx = 0;

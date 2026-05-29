@@ -468,9 +468,20 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     // CI doesn't check any [pe-report] output, so paying the cost
     // there directly squeezes the wall-clock budget for no signal.
     // Bare metal still gets the full diagnostic dump.
+    // The full PeReport dump (sections + every import name + relocs + TLS)
+    // is a bring-up diagnostic, not a per-spawn need. It's raw SerialWrite,
+    // so on every PE spawn it floods the log with hundreds of import-name
+    // lines (the "<bad name rva>" blocks an operator sees). The old gate
+    // was "!IsEmulator() => bare metal => dump", but a VM that doesn't set
+    // the CPUID hypervisor bit (some VirtualBox configs) reads as
+    // non-emulator and floods just like real hardware would. Cap the dump
+    // to the first few PE spawns: enough to diagnose initial bring-up,
+    // without burying the rest of the boot/session in import dumps.
+    static constinit u32 s_pe_reports = 0;
     const bool emulator_pe_report = ::duetos::arch::IsEmulator();
-    if (!emulator_pe_report)
+    if (!emulator_pe_report && s_pe_reports < 3)
     {
+        ++s_pe_reports;
         {
             arch::SerialLineGuard guard;
             SerialWrite("[ring3] pe report name=\"");

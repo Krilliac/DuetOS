@@ -268,7 +268,14 @@ void TrayFlyoutRedraw()
     {
         rows[2].label = "battery";
         const auto snap = duetos::drivers::power::PowerSnapshotRead();
-        if (snap.battery.state == duetos::drivers::power::kBatNotPresent)
+        // Treat both kBatNotPresent (desktop) and kBatUnknown (no live
+        // ACPI battery backend — the virtual-machine case) as "no real
+        // battery", so the row reads "ac"/"no battery" instead of a bogus
+        // percent. Only a genuine charging/discharging/full state shows %.
+        const bool battery_real = (snap.battery.state == duetos::drivers::power::kBatCharging) ||
+                                  (snap.battery.state == duetos::drivers::power::kBatDischarging) ||
+                                  (snap.battery.state == duetos::drivers::power::kBatFull);
+        if (!battery_real)
         {
             const char* s = (snap.ac == duetos::drivers::power::kAcOnline) ? "ac" : "no battery";
             u32 i = 0;

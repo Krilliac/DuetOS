@@ -192,6 +192,11 @@ void ShellInit()
     Prompt();
 }
 
+// Caps ShellRedrawAfterLogLine to ONE input-line refresh per keystroke
+// (see that function). Re-armed on every user edit below; set once a
+// post-keystroke log line has refreshed the prompt.
+constinit bool g_redraw_suppressed = false;
+
 void ShellFeedChar(char c)
 {
     if (c < 0x20 || c > 0x7E)
@@ -204,6 +209,7 @@ void ShellFeedChar(char c)
     }
     g_input[g_len++] = c;
     ConsoleWriteChar(c);
+    g_redraw_suppressed = false; // a fresh keystroke re-arms the input-line refresh
 }
 
 void ShellBackspace()
@@ -215,6 +221,7 @@ void ShellBackspace()
     --g_len;
     g_input[g_len] = '\0';
     ConsoleWriteChar('\b');
+    g_redraw_suppressed = false;
 }
 
 // Returns true if the typed line starts with a verb whose
@@ -281,6 +288,17 @@ void ShellRedrawAfterLogLine()
     // to console + serial, not through klog).
     if (g_len == 0)
         return;
+    // Cap the refresh to ONCE per keystroke. The input-line preservation
+    // is for the occasional async log line; during a burst (e.g. a PE
+    // preloading dozens of DLLs at debug log level) klog calls this
+    // per-line and it would re-print "duetos>…" hundreds of times, burying
+    // the terminal in repeated echoes of what the user typed. The first
+    // post-keystroke log line refreshes the prompt; the rest are
+    // suppressed until the next edit re-arms the flag. The buffer is intact
+    // and fully shown on the next keystroke / submit.
+    if (g_redraw_suppressed)
+        return;
+    g_redraw_suppressed = true;
     Prompt();
     for (u32 i = 0; i < g_len; ++i)
     {
