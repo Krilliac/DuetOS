@@ -389,6 +389,29 @@ void DrainSendBuffer(Tcb& t)
     // Wake any waiter blocked on space.
     if (kSndBufBytes - t.sndbuf_count >= t.mss_send)
         sched::WaitQueueWakeAll(&t.write_wq);
+
+    // Zero-window persist management (RFC 9293 §3.8.6.1). DrainSendBuffer
+    // runs on every send opportunity AND after each inbound ACK updates
+    // snd_wnd, so it's the natural owner of arm/disarm. If the peer's
+    // window is shut while we still have queued data that the loop above
+    // couldn't send, arm the persist timer so the timer task probes for
+    // a window update — otherwise a lost window-reopening ACK deadlocks
+    // the sender. Any other condition (window open again, or nothing
+    // left to send) disarms it; the next opened-window ACK lands here
+    // and clears the probe so normal transmission resumes.
+    if (t.snd_wnd == 0 && t.sndbuf_count > 0)
+    {
+        if (t.persist_deadline == 0)
+        {
+            t.persist_backoff_ticks = t.rto_ticks;
+            t.persist_deadline = NowTicks() + t.persist_backoff_ticks;
+        }
+    }
+    else
+    {
+        t.persist_deadline = 0;
+        t.persist_backoff_ticks = 0;
+    }
 }
 
 void ArmRtxTimer(Tcb& t)

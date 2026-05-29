@@ -144,6 +144,14 @@ struct Tcb
     u64 timewait_deadline;
     u64 delack_deadline;
     u64 keepalive_deadline;
+    // Zero-window persist timer (RFC 9293 §3.8.6.1 / RFC 1122
+    // §4.2.2.17). Armed by DrainSendBuffer when the peer advertises a
+    // zero send window while we still have data queued; fired by the
+    // timer task to probe the peer for a window update. Without it, a
+    // lost window-reopening ACK strands the sender forever. backoff
+    // doubles per probe, capped at kMaxRtoMs.
+    u64 persist_deadline;
+    u32 persist_backoff_ticks;
     bool delack_pending;
     bool keepalive_on;
 

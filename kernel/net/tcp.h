@@ -118,6 +118,7 @@ struct Stats
     u64 backlog_drops;    // SYN dropped — listener backlog full
     u64 timeouts;         // retransmit gave up
     u64 keepalive_probes; // keepalive probes sent
+    u64 persist_probes;   // zero-window persist probes sent
     u64 tcbs_alive;
 };
 
