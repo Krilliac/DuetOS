@@ -37,6 +37,7 @@
 #include "proc/process.h"
 #include "sched/sched.h"
 #include "subsystems/win32/heap.h"
+#include "test/smoke_profile.h"
 #include "util/random.h"
 
 // Embedded Linux vDSO blob — kernel/subsystems/linux/vdso/vdso.S
@@ -460,6 +461,34 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     {
         return 0;
     }
+
+    // Phase breadcrumbs for the intermittent CI boot-wedge (seen on
+    // bad runner instances: a smoke boot hangs inside SpawnPeFile
+    // before the `[ring3] pe spawn name=...` line below, serial goes
+    // silent, the job hits the 480s wall). SpawnPeFile has three heavy
+    // phases — AddressSpaceCreate, the ~44-DLL preload, and PeLoad —
+    // and until now nothing marked which one we were in, so a wedge
+    // log just stopped with no locus. These emit one line per phase so
+    // the LAST breadcrumb before silence pins the hung phase. Gated to
+    // an active smoke profile: the wedge only reproduces under
+    // `smoke=<profile>` (CI), and gating keeps the bare-metal full boot
+    // (profile=None, ~12 PE spawns) quiet. SerialLineGuard keeps each
+    // multi-call line atomic against concurrent writers.
+    const auto spawn_trace = [&](const char* step)
+    {
+        if (::duetos::test::SmokeProfileGet() == ::duetos::test::SmokeProfile::None)
+        {
+            return;
+        }
+        arch::SerialLineGuard line;
+        SerialWrite("[ring3] spawn-trace name=\"");
+        SerialWrite(name);
+        SerialWrite("\" step=");
+        SerialWrite(step);
+        SerialWrite("\n");
+    };
+    spawn_trace("begin");
+
     duetos::debug::InspectOnSpawn(name, pe_bytes, pe_len);
     // Diagnostic pre-pass — sections, imports, relocs, TLS. Skip
     // under a hypervisor: every line is N port-IO writes that
@@ -521,6 +550,7 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     {
         return 0;
     }
+    spawn_trace("as-ok");
     // Per-process ASLR: pick a 64 KiB-aligned delta in [0, 64 MiB).
     // 10 bits of entropy × 64 KiB = 1024 possible positions. Kept
     // modest so the shifted ImageBase can't collide with the
@@ -1280,7 +1310,9 @@ u64 SpawnPeFile(const char* name, const u8* pe_bytes, u64 pe_len, CapSet caps, c
     }
 
     const DllImage* dll_array = preloaded_count > 0 ? preloaded_dlls : nullptr;
+    spawn_trace("dll-preloaded");
     const PeLoadResult r = PeLoad(pe_bytes, pe_len, as, name, aslr_delta, dll_array, preloaded_count);
+    spawn_trace("pe-loaded");
     if (!r.ok)
     {
         // PeLoad rejected the image. Without surfacing this, a
