@@ -68,10 +68,16 @@
 #include "drivers/gpu/dpms.h"
 #include "drivers/gpu/edid.h"
 #include "drivers/gpu/gpu.h"
+#include "drivers/gpu/amd_cp_ucode.h"
 #include "drivers/gpu/amd_gfx_fw.h"
 #include "drivers/gpu/amd_gpu.h"
+#include "drivers/gpu/amd_gpu_cmds.h"
 #include "drivers/gpu/gpu_resources.h"
+#include "drivers/gpu/intel_display.h"
+#include "drivers/gpu/intel_forcewake.h"
+#include "drivers/gpu/intel_ggtt.h"
 #include "drivers/gpu/intel_gpu.h"
+#include "drivers/gpu/intel_gpu_cmds.h"
 #include "drivers/gpu/intel_gsc_fw.h"
 #include "drivers/gpu/nvidia_gpu.h"
 #include "drivers/gpu/nvidia_gsp_fw.h"
@@ -1909,9 +1915,15 @@ void BootBringupDevices(bool force_net_smoke)
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::DpmsSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::Cea861SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::intel::IntelGscFwSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::intel::IntelForcewakeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::intel::IntelGgttSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::intel::IntelGpuCmdsSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::intel::IntelDisplaySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::intel::IntelRcsRingSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::amd::AmdGfxFwSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::amd::AmdCpRingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::amd::AmdGpuCmdsSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::amd::AmdCpUcodeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::nvidia::NvidiaGspFwSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::nvidia::NvidiaGspSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::GpuResourcesSelfTest());

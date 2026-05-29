@@ -10,6 +10,10 @@
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
+#include "drivers/gpu/intel_display.h"
+#include "drivers/gpu/intel_forcewake.h"
+#include "drivers/gpu/intel_ggtt.h"
+#include "drivers/gpu/intel_gpu_cmds.h"
 #include "drivers/gpu/intel_gsc_fw.h"
 #include "loader/firmware_loader.h"
 #include "log/klog.h"
@@ -164,6 +168,11 @@ void Probe(GpuInfo& g)
     // own trace ring records every attempt).
     ProbeFirmwareBlob("intel-gpu", "[gpu/intel]", "guc.bin");
     ProbeFirmwareBlob("intel-gpu", "[gpu/intel]", "huc.bin");
+
+    // Slice 5: detect connected panels by reading their EDID over GMBUS.
+    // Real-HW only — QEMU has no Intel device, so this is never reached
+    // there (Probe runs only for vendor=Intel 0x8086).
+    IntelDisplayProbe(g);
 }
 
 ::duetos::core::Result<void> Bringup(GpuInfo& g)
@@ -204,6 +213,21 @@ void Probe(GpuInfo& g)
     //   4) Re-enable with the length encoded in the high bits:
     //      `length` is (#pages - 1) << 12 — for a 1-page ring
     //      that's 0, AND the enable bit.
+    //
+    // Slice 1 precondition: real silicon power-gates the GT register
+    // block, so hold forcewake on RENDER+GT (the two domains the RCS
+    // 0x2000 block straddles) and un-stop the ring before programming
+    // it — otherwise the writes below are dropped on metal. Held for
+    // the boot. Reached only on a live Intel BAR0 (QEMU never gets
+    // here), and on a forcewake-ack miss the HEAD poll below still
+    // reports the failure uniformly, so we don't early-return.
+    ForcewakeGetForRing(g);
+    IntelRingUnstop(g);
+    // Slice 2: stand up the GGTT high window (the foundation batch-
+    // buffer execution in slice 3 maps its batch + surfaces through).
+    // Consumed there; standing it up here is harmless.
+    (void)GgttInit(g);
+
     Mmio32Write(g, kIntelRcsCtl, 0);
     Mmio32Write(g, kIntelRcsTail, 0);
     Mmio32Write(g, kIntelRcsHead, 0);
@@ -386,6 +410,184 @@ u32 IntelRcsStoreImmProbe(u32 value)
     return *scratch;
 }
 
+u32 IntelBatchExecProbe(u32 cookie)
+{
+    // Escalation rung 3: prove GGTT translation + batch dispatch +
+    // execution together. We map a batch page into the GGTT, fill it
+    // with [MI_STORE_DWORD_IMM(scratch, cookie) ; MI_BATCH_BUFFER_END],
+    // and dispatch it from the ring via MI_BATCH_BUFFER_START(GGTT).
+    // If the engine fetched the batch through the GGTT and ran it, the
+    // (physical, gtt-bypass) scratch dword reads back `cookie`.
+    if (!g_brought_up || g_intel_info == nullptr || g_rcs_ring.virt == nullptr || !GgttReady())
+        return 0xFFFFFFFFu;
+    const GpuInfo& g = *g_intel_info;
+
+    if (g_rcs_scratch.virt == nullptr)
+    {
+        auto sr = mm::AllocDmaCoherent(0x1000u, mm::Zone::Dma32);
+        if (!sr.has_value())
+            return 0xFFFFFFFFu;
+        g_rcs_scratch = sr.value();
+    }
+    auto* scratch = static_cast<volatile u32*>(g_rcs_scratch.virt);
+    *scratch = 0xDEADBEEFu;
+
+    auto br = mm::AllocDmaCoherent(0x1000u, mm::Zone::Normal);
+    if (!br.has_value())
+        return 0xFFFFFFFFu;
+    mm::DmaBuffer batch = br.value();
+    const u64 batch_va = GgttMapPage(g, batch.phys);
+    if (batch_va == 0)
+    {
+        mm::FreeDmaCoherent(batch);
+        return 0xFFFFFFFFu;
+    }
+
+    // Build the batch: store the cookie to the physical scratch, then
+    // end. The store targets a guest-physical address (GGTT-bypass),
+    // matching IntelRcsStoreImmProbe's convention.
+    u32* b = static_cast<u32*>(batch.virt);
+    b[0] = kIntelMiStoreDwordImm;
+    b[1] = static_cast<u32>(g_rcs_scratch.phys & 0xFFFFFFFFu);
+    b[2] = static_cast<u32>((g_rcs_scratch.phys >> 32) & 0xFFFFFFFFu);
+    b[3] = cookie;
+    b[4] = kMiBatchBufferEnd;
+    mm::DmaSyncForDevice(batch, 0, 0x1000u);
+
+    // Append MI_BATCH_BUFFER_START to the ring (pad to a qword-even
+    // 4-dword slot with one MI_NOOP), then ring the TAIL doorbell.
+    const BatchStartPacket pkt = EncodeBatchBufferStart(batch_va, /*ggtt=*/true);
+    u32* ring = static_cast<u32*>(g_rcs_ring.virt);
+    const u64 ring_dwords = kIntelRingBytes / 4u;
+    const u32 cur_tail = Mmio32(g, kIntelRcsTail);
+    u64 ofs = (cur_tail / 4u) % ring_dwords;
+    if (ofs + 4 > ring_dwords)
+    {
+        while (ofs < ring_dwords)
+            ring[ofs++] = kIntelMiNoop;
+        ofs = 0;
+    }
+    ring[ofs + 0] = pkt.dw[0];
+    ring[ofs + 1] = pkt.dw[1];
+    ring[ofs + 2] = pkt.dw[2];
+    ring[ofs + 3] = kIntelMiNoop;
+    const u32 new_tail = static_cast<u32>(((ofs + 4u) * 4u) % kIntelRingBytes);
+    mm::DmaSyncForDevice(g_rcs_ring, 0, kIntelRingBytes);
+    Mmio32Write(g, kIntelRcsTail, new_tail);
+
+    constexpr u64 kTimeoutNs = 100ull * 1000ull * 1000ull;
+    constexpr u32 kIterCap = 1u << 20;
+    const u64 start_ns = ::duetos::time::MonotonicNs();
+    bool advanced = false;
+    for (u32 iter = 0; iter < kIterCap; ++iter)
+    {
+        if (Mmio32(g, kIntelRcsHead) == new_tail)
+        {
+            advanced = true;
+            break;
+        }
+        asm volatile("pause" ::: "memory");
+        if (start_ns != 0)
+        {
+            const u64 now = ::duetos::time::MonotonicNs();
+            if (now > start_ns && (now - start_ns) > kTimeoutNs)
+                break;
+        }
+    }
+    if (!advanced)
+    {
+        KLOG_WARN("drivers/gpu/intel", "RCS batch-exec: HEAD did not catch TAIL");
+        mm::FreeDmaCoherent(batch);
+        return 0xFFFFFFFFu;
+    }
+    mm::DmaSyncForCpu(g_rcs_scratch, 0, 4u);
+    const u32 readback = *scratch;
+    // The batch's GGTT slot leaks (one high-window entry) — acceptable
+    // for a one-shot boot probe; the page itself is freed.
+    mm::FreeDmaCoherent(batch);
+    return readback;
+}
+
+u32 IntelBltColorFillProbe(u32 argb)
+{
+    // Escalation rung 4: the first ACCELERATED workload. GGTT-map an
+    // OFFSCREEN 32-bpp page, XY_COLOR_BLT a solid colour into it, flush,
+    // and read pixel[0] back over the CPU mapping. Never touches the
+    // live framebuffer (the safe pre-scanout proof). 0xFFFFFFFF on
+    // not-ready / failure. Gated; real-HW only.
+    if (!g_brought_up || g_intel_info == nullptr || g_rcs_ring.virt == nullptr || !GgttReady())
+        return 0xFFFFFFFFu;
+    const GpuInfo& g = *g_intel_info;
+
+    auto sr = mm::AllocDmaCoherent(0x1000u, mm::Zone::Normal);
+    if (!sr.has_value())
+        return 0xFFFFFFFFu;
+    mm::DmaBuffer surf = sr.value();
+    const u64 surf_va = GgttMapPage(g, surf.phys);
+    if (surf_va == 0)
+    {
+        mm::FreeDmaCoherent(surf);
+        return 0xFFFFFFFFu;
+    }
+    // Pre-clear to a known non-fill value so a stale read can't pass.
+    auto* px = static_cast<volatile u32*>(surf.virt);
+    for (u32 i = 0; i < 0x1000u / 4u; ++i)
+        px[i] = 0xDEADBEEFu;
+    mm::DmaSyncForDevice(surf, 0, 0x1000u);
+
+    // Fill an 8x1 rect at (0,0) of a one-page (4096-byte-pitch) surface.
+    const ColorBltPacket blt = EncodeColorBlt(surf_va, /*pitch=*/0x1000u, 0, 0, 8, 1, argb);
+    u32* ring = static_cast<u32*>(g_rcs_ring.virt);
+    const u64 ring_dwords = kIntelRingBytes / 4u;
+    const u32 cur_tail = Mmio32(g, kIntelRcsTail);
+    u64 ofs = (cur_tail / 4u) % ring_dwords;
+    constexpr u64 kNeed = 7u + 3u; // 7-dword BLT + 3-dword MI_FLUSH_DW (even)
+    if (ofs + kNeed > ring_dwords)
+    {
+        while (ofs < ring_dwords)
+            ring[ofs++] = kIntelMiNoop;
+        ofs = 0;
+    }
+    for (u32 i = 0; i < 7; ++i)
+        ring[ofs + i] = blt.dw[i];
+    ring[ofs + 7] = kMiFlushDw; // MI_FLUSH_DW (len 1 -> 3 dwords)
+    ring[ofs + 8] = 0;          // post-sync address = none
+    ring[ofs + 9] = 0;          // post-sync data = none
+    const u32 new_tail = static_cast<u32>(((ofs + kNeed) * 4u) % kIntelRingBytes);
+    mm::DmaSyncForDevice(g_rcs_ring, 0, kIntelRingBytes);
+    Mmio32Write(g, kIntelRcsTail, new_tail);
+
+    constexpr u64 kTimeoutNs = 100ull * 1000ull * 1000ull;
+    constexpr u32 kIterCap = 1u << 20;
+    const u64 start_ns = ::duetos::time::MonotonicNs();
+    bool advanced = false;
+    for (u32 iter = 0; iter < kIterCap; ++iter)
+    {
+        if (Mmio32(g, kIntelRcsHead) == new_tail)
+        {
+            advanced = true;
+            break;
+        }
+        asm volatile("pause" ::: "memory");
+        if (start_ns != 0)
+        {
+            const u64 now = ::duetos::time::MonotonicNs();
+            if (now > start_ns && (now - start_ns) > kTimeoutNs)
+                break;
+        }
+    }
+    if (!advanced)
+    {
+        KLOG_WARN("drivers/gpu/intel", "RCS blt-fill: HEAD did not catch TAIL");
+        mm::FreeDmaCoherent(surf);
+        return 0xFFFFFFFFu;
+    }
+    mm::DmaSyncForCpu(surf, 0, 4u);
+    const u32 readback = px[0];
+    mm::FreeDmaCoherent(surf); // GGTT slot leaks (one high-window entry) — fine for a one-shot probe
+    return readback;
+}
+
 bool IsBroughtUp()
 {
     return g_brought_up;
@@ -431,6 +633,36 @@ void IntelRcsRingSelfTest()
         {
             arch::SerialWrite("[gpu/intel/rcs] selftest PASS (ring online, MI_STORE_DWORD_IMM verified, "
                               "scratch=0xC0DEFACE)\n");
+            // Escalation rung 3 (real-HW only): dispatch a GGTT-mapped
+            // batch via MI_BATCH_BUFFER_START. Informational — batch
+            // execution has never been proven on silicon, so a miss is
+            // "not yet working", not a regression; we don't fail the
+            // boot on it (unlike the store-imm rung, which a wedged
+            // engine genuinely regressing would trip).
+            constexpr u32 kBatchCookie = 0xBA7C0DE5u;
+            const u32 batch_rb = IntelBatchExecProbe(kBatchCookie);
+            if (batch_rb == kBatchCookie)
+                arch::SerialWrite("[gpu/intel/cmds] batch-exec PASS (GGTT MI_BATCH_BUFFER_START + store, "
+                                  "scratch=0xBA7C0DE5)\n");
+            else
+            {
+                arch::SerialWrite("[gpu/intel/cmds] batch-exec readback=");
+                arch::SerialWriteHex(batch_rb);
+                arch::SerialWrite(" (GGTT batch dispatch unverified on this part)\n");
+            }
+            // Escalation rung 4 (real-HW only): the first ACCELERATED
+            // workload — XY_COLOR_BLT into an offscreen surface, read
+            // the pixel back. Informational (never proven on silicon).
+            constexpr u32 kBltColor = 0xFF00FF00u;
+            const u32 blt_rb = IntelBltColorFillProbe(kBltColor);
+            if (blt_rb == kBltColor)
+                arch::SerialWrite("[gpu/intel/cmds] blt-fill PASS (XY_COLOR_BLT offscreen, pixel=0xFF00FF00)\n");
+            else
+            {
+                arch::SerialWrite("[gpu/intel/cmds] blt-fill readback=");
+                arch::SerialWriteHex(blt_rb);
+                arch::SerialWrite(" (2D BLT unverified on this part)\n");
+            }
             return;
         }
         // The bring-up succeeded but the store-imm didn't land.
