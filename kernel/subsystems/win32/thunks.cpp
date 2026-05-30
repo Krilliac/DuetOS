@@ -456,12 +456,24 @@ constexpr u32 kOffPinLcidEnUs = 0x11F0;   // 6 bytes — pinned en-US LCID/LANGI
 // so callers passing nullptr don't fault inside the thunk itself.
 constexpr u32 kOffPcToFileHeaderNull = 0x1322;
 
+// === wide-CRT (wmainCRTStartup) startup accessors ===========
+// Wide-entry exes read __wargv / _wenviron / the initial wide +
+// narrow environment through these and immediately deref the
+// result. Each returns a pointer into the proc-env page that's
+// pre-populated with a valid chain (see Win32ProcEnvPopulate),
+// so the CRT does not deref NULL / errno-scratch. Replaces the
+// old kOffPErrno / kOffPinReturn0 bindings that #GP'd the CRT.
+constexpr u32 kOffPWargv = 0x1331;            // 6 bytes — &__wargv  (-> wargv[])
+constexpr u32 kOffPWenviron = 0x1337;         // 6 bytes — &_wenviron (-> wenviron[])
+constexpr u32 kOffGetInitialWideEnv = 0x133D; // 6 bytes — wide env block (valid \0\0)
+constexpr u32 kOffGetInitialEnv = 0x1343;     // 6 bytes — narrow env block (valid \0\0)
+
 constexpr u8 kThunksBytes[] = {
 #include "subsystems/win32/thunks_bytecode.inc"
 };
 
 static_assert(sizeof(kThunksBytes) <= 8192, "Win32 thunks page fits in two 4 KiB pages");
-static_assert(sizeof(kThunksBytes) == 0x1331, "thunk layout drifted; update kOff* constants");
+static_assert(sizeof(kThunksBytes) == 0x1349, "thunk layout drifted; update kOff* constants");
 // Keep the hand-assembled __p___argc / __p___argv addresses in
 // sync with the public proc-env layout constants. The thunk
 // bytes encode 0x65000000 and 0x65000008 directly; if proc_env.h
@@ -470,6 +482,10 @@ static_assert(sizeof(kThunksBytes) == 0x1331, "thunk layout drifted; update kOff
 static_assert(kProcEnvVa == 0x65000000ULL, "proc-env page VA no longer matches __p___argc thunk bytes");
 static_assert(kProcEnvArgcOff == 0x00, "argc offset no longer matches __p___argc thunk bytes");
 static_assert(kProcEnvArgvPtrOff == 0x08, "argv-ptr offset no longer matches __p___argv thunk bytes");
+static_assert(kProcEnvWargvPtrOff == 0x700, "wargv-ptr offset no longer matches __p___wargv thunk bytes");
+static_assert(kProcEnvWenvironPtrOff == 0x710, "wenviron-ptr offset no longer matches __p___wenviron thunk bytes");
+static_assert(kProcEnvEnvBlockWOff == 0x400, "wide-env offset no longer matches _get_initial_wide_environment bytes");
+static_assert(kProcEnvNarrowEnvBlockOff == 0x760, "narrow-env offset no longer matches _get_initial_environment bytes");
 static_assert(kProcEnvCommodeOff == 0x200, "commode offset no longer matches __p__commode thunk bytes");
 static_assert(kProcEnvUnhandledFilterOff == 0x600,
               "unhandled-filter offset no longer matches SetUnhandledExceptionFilter stub bytes");
@@ -794,6 +810,20 @@ bool Win32ThunksLookupDataNamed(const char* func, u64* out_va)
         *out_va = kProcEnvVa + kProcEnvArgcOff;
         return true;
     }
+    // Wide globals — older PEs that import __wargv / _wenviron
+    // directly (rather than through __p___wargv / __p__wenviron)
+    // read `wargv = *(wchar_t***)&__wargv`. The slot value is the
+    // user-VA of the populated wargv[] / wenviron[] array.
+    if (strEq(func, "__wargv") || strEq(func, "_wargv"))
+    {
+        *out_va = kProcEnvVa + kProcEnvWargvPtrOff;
+        return true;
+    }
+    if (strEq(func, "_wenviron"))
+    {
+        *out_va = kProcEnvVa + kProcEnvWenvironPtrOff;
+        return true;
+    }
     // _acmdln / _wcmdln: pointer slots holding the command-line
     // string in narrow / wide form. proc-env populates both at
     // offset 0x380 / 0x300.
@@ -903,11 +933,29 @@ bool Win32ThunksLookupKind(const char* dll, const char* func, u64* out_va, bool*
 {
     if (dll == nullptr || func == nullptr || out_va == nullptr)
         return false;
-    const bool found_hashed = Win32ThunksLookupHashed(dll, func, out_va, out_is_noop);
+    bool found_hashed = Win32ThunksLookupHashed(dll, func, out_va, out_is_noop);
+    // `_o_`-prefix downlevel-forwarder alias. Modern statically-
+    // linked UCRT exes import the CRT family as `_o_<name>` (the
+    // forwarder alias ucrtbase publishes for back-compat — e.g.
+    // `_o__get_initial_wide_environment` tail-calls
+    // `_get_initial_wide_environment`). The preloaded-DLL export
+    // path already strips this prefix (pe_loader.cpp), but a
+    // wide-CRT import like `_o__get_initial_wide_environment` that
+    // our freestanding ucrtbase.dll doesn't export falls through
+    // to THIS flat thunk table — which only carries the base
+    // names. Strip the `_o_` and retry so the IAT slot binds to
+    // the same stub the base name would, exactly what the
+    // forwarder alias reaches anyway.
+    if (!found_hashed && func[0] == '_' && func[1] == 'o' && func[2] == '_' && func[3] != '\0')
+        found_hashed = Win32ThunksLookupHashed(dll, func + 3, out_va, out_is_noop);
 #if defined(DUETOS_WIN32_THUNKS_VALIDATE_LINEAR)
     u64 linear_va = 0;
     bool linear_noop = false;
-    const bool found_linear = Win32ThunksLookupLinear(dll, func, &linear_va, &linear_noop);
+    bool found_linear = Win32ThunksLookupLinear(dll, func, &linear_va, &linear_noop);
+    // Mirror the hashed `_o_`-strip retry so the validation path
+    // doesn't flag a false mismatch on forwarder-alias imports.
+    if (!found_linear && func[0] == '_' && func[1] == 'o' && func[2] == '_' && func[3] != '\0')
+        found_linear = Win32ThunksLookupLinear(dll, func + 3, &linear_va, &linear_noop);
     if (found_hashed != found_linear ||
         (found_hashed && ((*out_va != linear_va) || ((out_is_noop != nullptr) && (*out_is_noop != linear_noop)))))
     {

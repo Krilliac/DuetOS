@@ -97,6 +97,28 @@ void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name, u64 modul
     // — touch nothing.
     (void)kProcEnvEnvBlockWOff; // documented; no init needed for empty form
 
+    // Wide-CRT (wmainCRTStartup) startup data. Wide-entry exes
+    // read __wargv / _wenviron via accessors that the UCRT then
+    // dereferences; each must hand back a valid, non-NULL pointer
+    // chain. Mirror the narrow argv block above:
+    //   __wargv (0x700)   -> wargv[] (0x720) = { &cmdlineW, NULL }
+    //   _wenviron (0x710) -> wenviron[] (0x740) = { NULL }
+    // The wide cmdline at 0x300 already holds the program name as
+    // UTF-16LE, so wargv[0] points at it.
+    const u64 wargv_array_va = kProcEnvVa + kProcEnvWargvArrayOff;
+    const u64 wenviron_array_va = kProcEnvVa + kProcEnvWenvironArrayOff;
+    StoreLeU64(page + kProcEnvWargvPtrOff, wargv_array_va);
+    StoreLeU64(page + kProcEnvWenvironPtrOff, wenviron_array_va);
+    // wargv[0] = &cmdlineW (program name), wargv[1] = NULL.
+    StoreLeU64(page + kProcEnvWargvArrayOff, kProcEnvVa + kProcEnvCmdlineWOff);
+    StoreLeU64(page + kProcEnvWargvArrayOff + 8, 0);
+    // wenviron[0] = NULL — empty environment. Already zeroed, but
+    // write explicitly so the contract is visible in a page dump.
+    StoreLeU64(page + kProcEnvWenvironArrayOff, 0);
+    // Empty narrow env block ("\0\0") for _get_initial_environment.
+    // Already zeroed by the caller — documented; no init needed.
+    (void)kProcEnvNarrowEnvBlockOff;
+
     // Data-miss "fake object". PE data imports whose names the
     // stub table doesn't know (e.g. std::cout) get an IAT slot
     // of `kProcEnvVa + kProcEnvDataMissOff`. Dereferenced as

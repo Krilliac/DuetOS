@@ -4130,3 +4130,49 @@
     // .ret @ 0x132E
     0x31, 0xC0,                               // 0x132E xor eax, eax
     0xC3,                                     // 0x1330 ret
+
+    // === wide-CRT (wmainCRTStartup) startup accessors ==========
+    //
+    // Wide-entry exes (ftp.exe, comp.exe, sort.exe, …) run the
+    // UCRT wide startup path, which reads:
+    //   __wargv   = *__p___wargv()      (wchar_t***)
+    //   _wenviron = *__p___wenviron()   (wchar_t***)
+    //   wenv      = _get_initial_wide_environment()  (wchar_t*)
+    //   env       = _get_initial_environment()       (char*)
+    // and immediately dereferences each. The old bindings
+    // (__p___wargv -> kOffPErrno errno scratch; wide-env ->
+    // kOffPinReturn0 NULL) made the CRT deref a bad/NULL pointer
+    // -> 0xc0000005 #GP inside wmainCRTStartup before main ran.
+    //
+    // These mirror the narrow accessors (__p___argv @ 0x279):
+    // return a pointer into the proc-env page; the CRT loads the
+    // value there and walks the (valid, populated) chain.
+
+    // --- __p___wargv (offset 0x1331, 6 bytes) ------------------
+    // Returns &__wargv (wchar_t***). __wargv (a wchar_t**) lives
+    // at kProcEnvVa + kProcEnvWargvPtrOff (0x65000700), populated
+    // to point at the wargv[] array { &cmdlineW, NULL }.
+    0xB8, 0x00, 0x07, 0x00, 0x65, // 0x1331 mov eax, 0x65000700
+    0xC3,                         // 0x1336 ret
+
+    // --- __p___wenviron (offset 0x1337, 6 bytes) ---------------
+    // Returns &_wenviron (wchar_t***). _wenviron lives at
+    // kProcEnvVa + kProcEnvWenvironPtrOff (0x65000710), pointing
+    // at the empty wenviron[] array { NULL }.
+    0xB8, 0x10, 0x07, 0x00, 0x65, // 0x1337 mov eax, 0x65000710
+    0xC3,                         // 0x133C ret
+
+    // --- _get_initial_wide_environment (offset 0x133D, 6 bytes) -
+    // Returns wchar_t* to the wide env block at
+    // kProcEnvVa + kProcEnvEnvBlockWOff (0x65000400) — a valid
+    // empty UTF-16LE block (the two NUL bytes that terminate an
+    // empty environment). The CRT walks it and stops immediately.
+    0xB8, 0x00, 0x04, 0x00, 0x65, // 0x133D mov eax, 0x65000400
+    0xC3,                         // 0x1342 ret
+
+    // --- _get_initial_environment (offset 0x1343, 6 bytes) -----
+    // Narrow counterpart. Returns char* to the empty narrow env
+    // block at kProcEnvVa + kProcEnvNarrowEnvBlockOff
+    // (0x65000760) — a "\0\0" block.
+    0xB8, 0x60, 0x07, 0x00, 0x65, // 0x1343 mov eax, 0x65000760
+    0xC3,                         // 0x1348 ret
