@@ -493,6 +493,9 @@ bool RequireCap(::duetos::core::Cap cap, const char* cmd);
 // translation table dump.
 // ---------------------------------------------------------------
 void CmdLinuxexec(u32 argc, char** argv);
+// Load a Windows PE/.exe from FAT32 and spawn it as a ring-3 Win32
+// process (twin of CmdLinuxexec for the PE path).
+void CmdPeexec(u32 argc, char** argv);
 void CmdTranslate();
 void CmdRead(u32 argc, char** argv);
 void CmdExec(u32 argc, char** argv);

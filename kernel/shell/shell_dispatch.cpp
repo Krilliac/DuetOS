@@ -194,6 +194,7 @@ void CmdHelp()
     ConsoleWriteln("  FATMKDIR PATH            CREATE A NEW DIRECTORY");
     ConsoleWriteln("  FATRMDIR PATH            REMOVE AN EMPTY DIRECTORY");
     ConsoleWriteln("  LINUXEXEC PATH           LOAD ELF FROM FAT32 AS A LINUX-ABI PROCESS");
+    ConsoleWriteln("  PEEXEC PATH              LOAD WINDOWS PE/.EXE FROM FAT32 AS A WIN32 PROCESS");
     ConsoleWriteln("  TRANSLATE                ABI TRANSLATION-UNIT HIT TABLE");
     ConsoleWriteln("  FREE         MEMORY USAGE (PHYS + HEAP)");
     ConsoleWriteln("  PS           LIST EVERY SCHEDULER TASK");
@@ -693,37 +694,37 @@ u32 Tokenize(char* buf, char** argv)
 // New commands added here + dispatched in Dispatch — keeping
 // the two in sync is the price of not having reflection.
 constinit const char* const kCommandSet[] = {
-    "help",     "about",       "version",      "clear",      "console",     "panic-test", "uptime",     "date",
-    "windows",  "mode",        "ls",           "cat",        "touch",       "rm",         "echo",       "cp",
-    "mv",       "wc",          "head",         "tail",       "dmesg",       "stats",      "mem",        "history",
-    "set",      "unset",       "env",          "alias",      "unalias",     "sysinfo",    "source",     "man",
-    "grep",     "find",        "time",         "which",      "seq",         "sort",       "uniq",       "cpuid",
-    "cr",       "rflags",      "tsc",          "hpet",       "ticks",       "msr",        "lapic",      "smp",
-    "lspci",    "heap",        "paging",       "fb",         "kbdstats",    "mousestats", "loglevel",   "logcolor",
-    "logarea",  "kdbg",        "getenv",       "yield",      "reboot",      "halt",       "uname",      "whoami",
-    "hostname", "pwd",         "true",         "false",      "mount",       "lsmod",      "lsblk",      "lsgpt",
-    "free",     "ps",          "spawn",        "readelf",    "hexdump",     "stat",       "basename",   "dirname",
-    "cal",      "sleep",       "reset",        "tac",        "nl",          "rev",        "expr",       "color",
-    "rand",     "flushtlb",    "checksum",     "repeat",     "kill",        "exec",       "unzip",      "wget",
-    "curl",     "sha256sum",   "shasum",       "base64",     "xxd",         "wc",         "tr",         "dd",
-    "crc32",    "cmp",         "tee",          "metrics",    "trace",       "read",       "guard",      "top",
-    "resmon",   "fatcat",      "fatls",        "fatwrite",   "fatappend",   "fatnew",     "fatrm",      "fattrunc",
-    "fatmkdir", "fatrmdir",    "fstrim",       "slotinfo",   "bootslot",    "linuxexec",  "translate",  "smbios",
-    "power",    "battery",     "thermal",      "temp",       "hw",          "hardware",   "gpu",        "lsgpu",
-    "gfx",      "nic",         "lsnic",        "ip",         "arp",         "ipv4",       "uuid",       "uuidgen",
-    "health",   "checkup",     "attacksim",    "redteam",    "memdump",     "leakcheck",  "ifconfig",   "netinfo",
-    "dhcp",     "route",       "netscan",      "wifi",       "firewall",    "fwpolicy",   "fwtrace",    "crtrace",
-    "crprobe",  "net",         "usbnet",       "instr",      "dumpstate",   "bp",         "breakpoint", "login",
-    "logout",   "passwd",      "useradd",      "userdel",    "users",       "who",        "su",         "idlelock",
-    "hwmon",    "vbe",         "ping",         "nslookup",   "ntp",         "http",       "shutdown",   "poweroff",
-    "beep",     "inspect",     "theme",        "tactility",  "addr2sym",    "cap-audit",  "monitor",    "secevents",
-    "events",   "policy",      "purple",       "purpleteam", "mkdir",       "rmdir",      "truncate",   "realpath",
-    "id",       "groups",      "nproc",        "arch",       "tty",         "type",       "printenv",   "df",
-    "du",       "loadavg",     "clearhist",    "pause",      "yes",         "sync",       "port",       "assert",
-    "watch",    "script",      "exit",         "mkfs",       "mkfs.duetfs", "install",    "lastdump",   "loadtest",
-    "stress",   "bench",       "dbg",          "dfix",       "dintro",      "selfthink",  "drshd",      "pe-triage",
-    "caplog",   "live-update", "fault-inject", "suspend",    "resume",      "affinity",   "vtop",       "logclock",
-    "dpms",     "wrmsr",       "io",           "peek",       "poke",        "fbdump",     "kpath",
+    "help",      "about",     "version",     "clear",        "console",    "panic-test",  "uptime",    "date",
+    "windows",   "mode",      "ls",          "cat",          "touch",      "rm",          "echo",      "cp",
+    "mv",        "wc",        "head",        "tail",         "dmesg",      "stats",       "mem",       "history",
+    "set",       "unset",     "env",         "alias",        "unalias",    "sysinfo",     "source",    "man",
+    "grep",      "find",      "time",        "which",        "seq",        "sort",        "uniq",      "cpuid",
+    "cr",        "rflags",    "tsc",         "hpet",         "ticks",      "msr",         "lapic",     "smp",
+    "lspci",     "heap",      "paging",      "fb",           "kbdstats",   "mousestats",  "loglevel",  "logcolor",
+    "logarea",   "kdbg",      "getenv",      "yield",        "reboot",     "halt",        "uname",     "whoami",
+    "hostname",  "pwd",       "true",        "false",        "mount",      "lsmod",       "lsblk",     "lsgpt",
+    "free",      "ps",        "spawn",       "readelf",      "hexdump",    "stat",        "basename",  "dirname",
+    "cal",       "sleep",     "reset",       "tac",          "nl",         "rev",         "expr",      "color",
+    "rand",      "flushtlb",  "checksum",    "repeat",       "kill",       "exec",        "unzip",     "wget",
+    "curl",      "sha256sum", "shasum",      "base64",       "xxd",        "wc",          "tr",        "dd",
+    "crc32",     "cmp",       "tee",         "metrics",      "trace",      "read",        "guard",     "top",
+    "resmon",    "fatcat",    "fatls",       "fatwrite",     "fatappend",  "fatnew",      "fatrm",     "fattrunc",
+    "fatmkdir",  "fatrmdir",  "fstrim",      "slotinfo",     "bootslot",   "linuxexec",   "peexec",    "translate",
+    "smbios",    "power",     "battery",     "thermal",      "temp",       "hw",          "hardware",  "gpu",
+    "lsgpu",     "gfx",       "nic",         "lsnic",        "ip",         "arp",         "ipv4",      "uuid",
+    "uuidgen",   "health",    "checkup",     "attacksim",    "redteam",    "memdump",     "leakcheck", "ifconfig",
+    "netinfo",   "dhcp",      "route",       "netscan",      "wifi",       "firewall",    "fwpolicy",  "fwtrace",
+    "crtrace",   "crprobe",   "net",         "usbnet",       "instr",      "dumpstate",   "bp",        "breakpoint",
+    "login",     "logout",    "passwd",      "useradd",      "userdel",    "users",       "who",       "su",
+    "idlelock",  "hwmon",     "vbe",         "ping",         "nslookup",   "ntp",         "http",      "shutdown",
+    "poweroff",  "beep",      "inspect",     "theme",        "tactility",  "addr2sym",    "cap-audit", "monitor",
+    "secevents", "events",    "policy",      "purple",       "purpleteam", "mkdir",       "rmdir",     "truncate",
+    "realpath",  "id",        "groups",      "nproc",        "arch",       "tty",         "type",      "printenv",
+    "df",        "du",        "loadavg",     "clearhist",    "pause",      "yes",         "sync",      "port",
+    "assert",    "watch",     "script",      "exit",         "mkfs",       "mkfs.duetfs", "install",   "lastdump",
+    "loadtest",  "stress",    "bench",       "dbg",          "dfix",       "dintro",      "selfthink", "drshd",
+    "pe-triage", "caplog",    "live-update", "fault-inject", "suspend",    "resume",      "affinity",  "vtop",
+    "logclock",  "dpms",      "wrmsr",       "io",           "peek",       "poke",        "fbdump",    "kpath",
 };
 constinit const u32 kCommandCount = sizeof(kCommandSet) / sizeof(kCommandSet[0]);
 
@@ -2043,6 +2044,15 @@ void Dispatch(char* line)
         if (!RequireAdmin("LINUXEXEC"))
             return;
         CmdLinuxexec(argc, argv);
+        return;
+    }
+    if (StrEq(cmd, "peexec"))
+    {
+        // Spawns a Windows PE/.exe from FAT32 as a ring-3 Win32
+        // process. Same arbitrary-code concern as LINUXEXEC.
+        if (!RequireAdmin("PEEXEC"))
+            return;
+        CmdPeexec(argc, argv);
         return;
     }
     if (StrEq(cmd, "free"))
