@@ -2407,6 +2407,69 @@ void BootBringupDevices(bool force_net_smoke)
     }
 }
 
+// Deferred runner for the `peexec=<FATPATH>` test cmdline. Storage
+// (nvme/ahci) enumerates asynchronously AFTER BootBringupDesktop
+// returns, so the path is captured here and this task — spawned via
+// SchedCreate so it runs concurrently without blocking boot — polls
+// for the FAT volume (force-probing each poll), then loads + spawns
+// the staged .exe via SpawnPeFile. Output lands on [peexec] /
+// [pe-load] / [dll-load]. Test-only; g_peexec_path is written once at
+// boot before the task is created.
+namespace
+{
+using duetos::arch::SerialWrite;
+using duetos::arch::SerialWriteHex;
+char g_peexec_path[64] = {0};
+
+void PeexecDeferredTask(void*)
+{
+    namespace fat = duetos::fs::fat32;
+    const fat::Volume* v = nullptr;
+    for (duetos::u32 tries = 0; tries < 400; ++tries) // ~40 s @ 100 ms
+    {
+        const duetos::u32 bdc = duetos::drivers::storage::BlockDeviceCount();
+        for (duetos::u32 h = 0; h < bdc; ++h)
+        {
+            (void)fat::Fat32Probe(h, nullptr);
+        }
+        v = fat::Fat32Volume(0);
+        if (v != nullptr)
+        {
+            break;
+        }
+        duetos::sched::SchedSleepTicks(10); // ~100 ms; yields so storage can come online
+    }
+    if (v == nullptr)
+    {
+        SerialWrite("[peexec] FAIL: timed out waiting for a FAT volume\n");
+        return;
+    }
+    fat::DirEntry entry;
+    if (!fat::Fat32LookupPath(v, g_peexec_path, &entry))
+    {
+        SerialWrite("[peexec] FAIL: no such file on FAT vol 0\n");
+        return;
+    }
+    static duetos::u8 s_peexec_buf[1u << 20];
+    const duetos::i64 rn = fat::Fat32ReadFile(v, &entry, s_peexec_buf, sizeof(s_peexec_buf));
+    if (rn <= 0)
+    {
+        SerialWrite("[peexec] FAIL: read error or empty\n");
+        return;
+    }
+    SerialWrite("[peexec] read bytes=");
+    SerialWriteHex(static_cast<duetos::u64>(rn));
+    SerialWrite("\n");
+    const auto pid = duetos::core::SpawnPeFile(g_peexec_path, s_peexec_buf, static_cast<duetos::u64>(rn),
+                                               duetos::core::CapSetTrusted(), duetos::fs::RamfsTrustedRoot(),
+                                               duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
+    SerialWrite("[peexec] spawn pid=");
+    SerialWriteHex(pid);
+    SerialWrite(pid != 0 ? "  spawned (see [pe-load]/[dll-load] for import resolution)\n"
+                         : "  FAIL: SpawnPeFile returned 0 (load/import error)\n");
+}
+} // namespace
+
 // Desktop / Phase::Drivers bring-up: framebuffer + chrome
 // font, theme selection from cmdline, the theme_chrome
 // helper + ~20 app windows (calculator, notes, taskman,
@@ -3462,6 +3525,53 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
         SerialWriteHex(pid);
         SerialWrite("\n");
     }
+    // peexec=<FATPATH> kernel cmdline: load a Windows PE/.exe off
+    // FAT32 vol 0 and spawn it as a Win32 process at boot. This is the
+    // automated entry point for running EXTERNAL .exe files staged onto
+    // the disk image (tools/test/run-exe.sh stages the exe + sets this
+    // cmdline) — it avoids having to drive the interactive shell, so a
+    // test harness can boot-run an arbitrary exe and grep the serial.
+    // Twin of the PEEXEC shell command. SpawnPeFile validates the image
+    // and resolves imports against the preloaded Win32 DLL set; failures
+    // surface on the [pe-load] / [dll-load] lines.
+    if (cmdline != nullptr)
+    {
+        namespace fat = duetos::fs::fat32;
+        const char* kkey = "peexec=";
+        const char* hit = nullptr;
+        for (const char* p = cmdline; *p != '\0'; ++p)
+        {
+            duetos::u32 i = 0;
+            while (kkey[i] != '\0' && p[i] == kkey[i])
+            {
+                ++i;
+            }
+            if (kkey[i] == '\0')
+            {
+                hit = p + i;
+                break;
+            }
+        }
+        if (hit != nullptr)
+        {
+            duetos::u32 n = 0;
+            while (hit[n] != '\0' && hit[n] != ' ' && n < sizeof(g_peexec_path) - 1)
+            {
+                g_peexec_path[n] = hit[n];
+                ++n;
+            }
+            g_peexec_path[n] = '\0';
+            SerialWrite("[peexec] boot-run path=");
+            SerialWrite(g_peexec_path);
+            SerialWrite(" (deferred — waiting for async storage)\n");
+            // MUST NOT block here: storage (nvme/ahci) only enumerates
+            // AFTER this bringup returns, so polling for FAT on this
+            // thread would stall the boot (and never see a disk). Hand
+            // off to a dedicated thread that polls + spawns concurrently.
+            (void)duetos::sched::SchedCreate(PeexecDeferredTask, nullptr, "peexec-deferred");
+        }
+    }
+
     // /bin/duet-pkg — on-target package manager scaffold. Spawning
     // it at boot with no argv runs its built-in selftest, so the
     // boot log carries the `[duet-pkg-selftest] PASS` sentinel on

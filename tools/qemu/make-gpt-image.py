@@ -17,6 +17,7 @@
 # Invocation:
 #   tools/qemu/make-gpt-image.py <output-path>
 
+import os
 import struct
 import sys
 import uuid
@@ -228,6 +229,149 @@ def lfn_entry(ordinal: int, name_chunk: str, is_last: bool, chksum: int) -> byte
             e[off] = 0xFF
             e[off + 1] = 0xFF
     return bytes(e)
+
+
+# ----- Arbitrary host-file staging (DUETOS_STAGE_FILES) --------------------
+# First cluster + root-dir slot available AFTER the fixed seeds.
+# Seeds occupy clusters 2..9 and root offsets 0,32,64,96,128,160.
+FAT_FIRST_FREE_CLUSTER = 10
+FAT_FIRST_FREE_ROOT_OFFSET = 192  # 6 * 32
+# A single root-directory cluster (cluster 2, 4 KiB) holds 128 slots.
+# The seeds use 6, leaving 122 for staged files (each staged file is
+# one SFN slot — no LFN). The kernel's FAT32 self-test only depends on
+# the seeded entries; staged entries are appended after them.
+FAT_ROOT_DIR_SLOTS = (FAT_SPC * SECTOR) // 32
+
+
+def encode_sfn(name: str) -> bytes:
+    """Convert a DOS 8.3 name like "HELLO.EXE" to the 11-byte
+    space-padded FAT directory form (b"HELLO   EXE"). The base is
+    left-justified in 8 bytes, the extension (if any) in 3.
+    Names are upper-cased; base truncates to 8, ext to 3."""
+    name = name.strip().upper()
+    if "." in name:
+        base, _, ext = name.partition(".")
+    else:
+        base, ext = name, ""
+    base = base[:8].ljust(8)
+    ext = ext[:3].ljust(3)
+    encoded = (base + ext).encode("ascii")
+    if len(encoded) != 11:
+        raise ValueError(f"bad SFN encoding for {name!r}: {encoded!r}")
+    return encoded
+
+
+def parse_stage_spec(spec: str):
+    """Parse DUETOS_STAGE_FILES = ';'-separated 'SFN=/host/path' entries.
+
+    Returns a list of (sfn_string, host_path) tuples in order. Blank
+    segments (trailing ';' etc.) are skipped."""
+    staged = []
+    for segment in spec.split(";"):
+        segment = segment.strip()
+        if not segment:
+            continue
+        if "=" not in segment:
+            raise ValueError(
+                f"DUETOS_STAGE_FILES entry missing '=': {segment!r}"
+            )
+        sfn, _, path = segment.partition("=")
+        sfn = sfn.strip()
+        path = path.strip()
+        if not sfn or not path:
+            raise ValueError(
+                f"DUETOS_STAGE_FILES entry has empty SFN or path: {segment!r}"
+            )
+        staged.append((sfn, path))
+    return staged
+
+
+def stage_files(buf: bytearray, part_sector_count: int, staged) -> None:
+    """Inject each (sfn, host_path) into the FAT32 ROOT directory.
+
+    Allocates contiguous 4 KiB clusters starting at the first free
+    cluster (10+), chains them in BOTH FAT copies, writes the file
+    bytes across the cluster data sectors, and adds a 32-byte SFN
+    root-dir entry. Refuses (raises) if a file needs more clusters
+    than fit in the partition / FAT entry count, or if the root dir
+    runs out of slots."""
+    if not staged:
+        return
+
+    data_start_sector = FAT_RESERVED + FAT_NUM_FATS * FAT_FATSZ
+    root_off = data_start_sector * SECTOR
+
+    # FAT entry count = (FAT size in bytes) / 4. Cluster numbers must
+    # stay below this; cluster N's data must also fit in the partition.
+    fat_entry_count = (FAT_FATSZ * SECTOR) // 4
+    total_clusters = (part_sector_count - data_start_sector) // FAT_SPC
+    cluster_size = FAT_SPC * SECTOR
+
+    fat1_off = FAT_RESERVED * SECTOR
+    fat2_off = fat1_off + FAT_FATSZ * SECTOR
+
+    def set_fat(cluster: int, value: int) -> None:
+        struct.pack_into("<I", buf, fat1_off + cluster * 4, value & 0x0FFFFFFF)
+        struct.pack_into("<I", buf, fat2_off + cluster * 4, value & 0x0FFFFFFF)
+
+    # Absolute byte offset (into buf) of the next free root-dir slot.
+    # The root directory lives at root_off; the first free slot is
+    # FAT_FIRST_FREE_ROOT_OFFSET bytes into it (after the 6 seed slots).
+    next_cluster = FAT_FIRST_FREE_CLUSTER
+    root_slot_off = root_off + FAT_FIRST_FREE_ROOT_OFFSET
+    root_end_off = root_off + cluster_size  # one root cluster
+
+    for sfn, host_path in staged:
+        sfn11 = encode_sfn(sfn)
+        with open(host_path, "rb") as f:
+            body = f.read()
+        size = len(body)
+
+        # Clusters needed (a 0-byte file still gets one cluster so the
+        # entry has a valid first-cluster; matches how the seeds work).
+        clusters_needed = max(1, (size + cluster_size - 1) // cluster_size)
+        first_cluster = next_cluster
+        last_cluster = first_cluster + clusters_needed - 1
+
+        # Bounds: must not exceed the FAT entry count, the on-disk
+        # cluster count, or the partition itself.
+        if last_cluster >= fat_entry_count:
+            raise SystemExit(
+                f"error: staged file {sfn} needs clusters up to {last_cluster}, "
+                f"exceeds FAT entry count {fat_entry_count}"
+            )
+        if (last_cluster - 2) >= total_clusters:
+            raise SystemExit(
+                f"error: staged file {sfn} ({size} bytes, {clusters_needed} "
+                f"clusters) overflows the {total_clusters}-cluster partition"
+            )
+        if root_slot_off + 32 > root_end_off:
+            raise SystemExit(
+                f"error: root directory full — cannot stage {sfn} "
+                f"(only {FAT_ROOT_DIR_SLOTS} slots in one root cluster)"
+            )
+
+        # Chain the clusters in both FAT copies.
+        for c in range(first_cluster, last_cluster):
+            set_fat(c, c + 1)
+        set_fat(last_cluster, 0x0FFFFFFF)  # EOC
+
+        # Write the file bytes across the contiguous cluster run.
+        run_sector = data_start_sector + (first_cluster - 2) * FAT_SPC
+        run_off = run_sector * SECTOR
+        buf[run_off:run_off + size] = body
+
+        # SFN root-dir entry.
+        entry = bytearray(32)
+        entry[0:11] = sfn11
+        entry[11] = 0x20  # ATTR_ARCHIVE
+        struct.pack_into("<H", entry, 20, (first_cluster >> 16) & 0xFFFF)
+        struct.pack_into("<H", entry, 26, first_cluster & 0xFFFF)
+        struct.pack_into("<I", entry, 28, size)
+        buf[root_slot_off:root_slot_off + 32] = entry
+
+        next_cluster = last_cluster + 1
+        root_slot_off += 32
 
 
 def build_pmbr() -> bytearray:
@@ -489,6 +633,14 @@ def main(out_path: str) -> None:
     # the kernel no longer needs the raw marker since it can parse the FS.
     part_sectors = LAST_LBA - FIRST_LBA + 1
     fat_region = build_fat32(part_sectors)
+
+    # Inject any host files named by DUETOS_STAGE_FILES (';'-separated
+    # 'SFN=/host/path'). Unset => no staging => byte-identical image to
+    # the no-stage baseline (determinism for the FAT32 self-test).
+    stage_spec = os.environ.get("DUETOS_STAGE_FILES", "")
+    if stage_spec.strip():
+        stage_files(fat_region, part_sectors, parse_stage_spec(stage_spec))
+
     img[FIRST_LBA * SECTOR:FIRST_LBA * SECTOR + len(fat_region)] = fat_region
 
     with open(out_path, "wb") as f:
