@@ -1532,21 +1532,39 @@ __declspec(dllexport) HANDLE LoadMenuW(HANDLE h, const wchar_t16* name)
     (void)name;
     return (HANDLE)0;
 }
+/* LoadStringA/W — no PE resource (.rsrc) loader yet, so we can't return
+ * the app's real string-table entry. Returning an EMPTY string (len 0)
+ * is a STUB that breaks GUI apps which gate behaviour on a non-empty
+ * result — e.g. winver's wWinMain loads its caption / "Version" text via
+ * LoadStringW and only proceeds to ShellAboutW when the load returns >0.
+ * Synthesize a short non-empty placeholder so resource-string-gated code
+ * advances. GAP: not the app's real string — a .rsrc string-table loader
+ * is the proper fix (Roadmap). */
+static const char kLoadStringPlaceholder[] = "DuetOS";
+
 __declspec(dllexport) int LoadStringA(HANDLE h, UINT id, char* buf, int len)
 {
     (void)h;
     (void)id;
-    if (buf && len > 0)
-        buf[0] = 0;
-    return 0;
+    if (!buf || len <= 0)
+        return 0;
+    int i = 0;
+    for (; kLoadStringPlaceholder[i] && i < len - 1; ++i)
+        buf[i] = kLoadStringPlaceholder[i];
+    buf[i] = 0;
+    return i;
 }
 __declspec(dllexport) int LoadStringW(HANDLE h, UINT id, wchar_t16* buf, int len)
 {
     (void)h;
     (void)id;
-    if (buf && len > 0)
-        buf[0] = 0;
-    return 0;
+    if (!buf || len <= 0)
+        return 0;
+    int i = 0;
+    for (; kLoadStringPlaceholder[i] && i < len - 1; ++i)
+        buf[i] = (wchar_t16)(unsigned char)kLoadStringPlaceholder[i];
+    buf[i] = 0;
+    return i;
 }
 
 /* --- Cursor / clipboard --- */
