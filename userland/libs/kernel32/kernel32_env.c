@@ -353,3 +353,178 @@ __declspec(dllexport) DWORD ExpandEnvironmentStringsW(const wchar_t16* src, wcha
     }
     return out + 1; /* total chars required including NUL */
 }
+
+/* ------------------------------------------------------------------
+ * GetEnvironmentStringsW / FreeEnvironmentStringsW
+ *
+ * Win32 contract: GetEnvironmentStringsW returns a pointer to a
+ * contiguous, double-NUL-terminated block of UTF-16LE
+ * "NAME=VALUE\0NAME=VALUE\0...\0" entries. Callers (notably
+ * cmd.exe's startup) walk the block AND uppercase it in place via
+ * _wcsupr — so the storage MUST be writable. The kernel proc-env
+ * env block (0x65000400) is writable but empty; and the
+ * apiset/heuristic resolve for this name fell through to the
+ * catch-all NO-OP (returning NULL) before this export existed,
+ * which made cmd's in-place uppercase deref a NULL pointer and
+ * #PF.
+ *
+ * We back the block with a non-const static in the DLL's writable
+ * .data section (IMAGE_SCN_MEM_WRITE -> kPageWritable at load,
+ * see kernel/loader/dll_loader.cpp). It is materialised on first
+ * call from the seeded per-process env table (the same table
+ * Get/SetEnvironmentVariableW maintain), so the strings stay
+ * consistent with what GetEnvironmentVariableW reports.
+ *
+ * FreeEnvironmentStringsW is a no-op (returns TRUE): the block is
+ * static storage, not a heap allocation. ------------------------ */
+
+/* Worst case: DUETOS_ENV_MAX entries, each "NAME=VALUE\0" =
+ * NAME(31) + '=' + VALUE(95) + NUL = 128 wide chars, plus the
+ * final list-terminating NUL. Size generously. */
+#define DUETOS_ENV_BLOCK_W (DUETOS_ENV_MAX * (DUETOS_ENV_NAME + 1 + DUETOS_ENV_VAL) + 2)
+
+static wchar_t16 g_env_block_w[DUETOS_ENV_BLOCK_W];
+
+static void env_block_build(void)
+{
+    env_seed_defaults();
+    int o = 0;
+    for (int i = 0; i < DUETOS_ENV_MAX; ++i)
+    {
+        if (!g_env_table[i].in_use)
+            continue;
+        /* NAME */
+        for (int k = 0; g_env_table[i].name[k] != 0 && o < DUETOS_ENV_BLOCK_W - 2; ++k)
+            g_env_block_w[o++] = g_env_table[i].name[k];
+        if (o < DUETOS_ENV_BLOCK_W - 2)
+            g_env_block_w[o++] = (wchar_t16)'=';
+        /* VALUE */
+        for (int k = 0; g_env_table[i].val[k] != 0 && o < DUETOS_ENV_BLOCK_W - 2; ++k)
+            g_env_block_w[o++] = g_env_table[i].val[k];
+        /* entry terminator */
+        g_env_block_w[o++] = 0;
+    }
+    /* list terminator (second NUL) */
+    g_env_block_w[o++] = 0;
+    /* Guarantee a valid empty block even if nothing was seeded. */
+    if (o < 2)
+    {
+        g_env_block_w[0] = 0;
+        g_env_block_w[1] = 0;
+    }
+}
+
+__declspec(dllexport) wchar_t16* GetEnvironmentStringsW(void)
+{
+    env_block_build();
+    return g_env_block_w;
+}
+
+/* GetEnvironmentStrings (no W/A suffix) is an alias that, on
+ * Windows, returns the ANSI block. cmd and the CRT both reach for
+ * the W form; provide a narrow companion for callers that want it. */
+static char g_env_block_a[DUETOS_ENV_BLOCK_W];
+
+__declspec(dllexport) char* GetEnvironmentStringsA(void)
+{
+    env_block_build();
+    int i = 0;
+    for (; i < DUETOS_ENV_BLOCK_W - 1; ++i)
+        g_env_block_a[i] = (char)(unsigned char)g_env_block_w[i];
+    g_env_block_a[i] = 0;
+    return g_env_block_a;
+}
+
+__declspec(dllexport) BOOL FreeEnvironmentStringsW(wchar_t16* block)
+{
+    (void)block; /* static storage — nothing to free */
+    return 1;
+}
+
+__declspec(dllexport) BOOL FreeEnvironmentStringsA(char* block)
+{
+    (void)block;
+    return 1;
+}
+
+/* ------------------------------------------------------------------
+ * GetModuleFileNameW / GetModuleFileNameA
+ *
+ * Win32: DWORD GetModuleFileNameW(HMODULE hModule, LPWSTR buf,
+ * DWORD nSize). hModule==NULL means "the running executable".
+ * Writes the module's full path into the caller's (writable)
+ * buffer and returns the length in characters (excluding NUL), or
+ * nSize (with truncation + ERROR_INSUFFICIENT_BUFFER) if too
+ * small.
+ *
+ * The kernel proc-env page carries the program name as argv[0] at
+ * kProcEnvStringOff (0x65000040, ASCII). We synthesise a Windows-
+ * shaped absolute path from it: bare names get an "X:\" prefix
+ * (matching GetCurrentDirectory's v0 sentinel); names that already
+ * look absolute are passed through. cmd uppercases this path in
+ * place too — the caller's buffer is its own writable storage, so
+ * that is fine. ----------------------------------------------- */
+#define DUETOS_PROC_ENV_ARGV0_A_VA 0x0000000065000040ULL
+
+static int modpath_build_a(char* out, int cap)
+{
+    /* argv[0] (ASCII) lives in the writable proc-env page. */
+    const char* argv0 = (const char*)(UINT_PTR)DUETOS_PROC_ENV_ARGV0_A_VA;
+    int n = 0;
+    /* Does it already carry a drive letter ("X:" / "C:\")? */
+    int has_drive = (argv0[0] != 0 && argv0[1] == ':');
+    if (!has_drive)
+    {
+        if (n < cap - 1)
+            out[n++] = 'X';
+        if (n < cap - 1)
+            out[n++] = ':';
+        if (n < cap - 1)
+            out[n++] = '\\';
+    }
+    for (int i = 0; argv0[i] != 0 && n < cap - 1; ++i)
+        out[n++] = argv0[i];
+    /* Fall back to a stable sentinel if argv[0] was empty. */
+    if (n == 0 || (!has_drive && n == 3))
+    {
+        n = 0;
+        const char* fallback = "X:\\CMD.EXE";
+        for (int i = 0; fallback[i] != 0 && n < cap - 1; ++i)
+            out[n++] = fallback[i];
+    }
+    out[n] = 0;
+    return n;
+}
+
+__declspec(dllexport) DWORD GetModuleFileNameW(HANDLE hModule, wchar_t16* buf, DWORD nSize)
+{
+    (void)hModule; /* only the running EXE is modelled in v0 */
+    if (buf == (wchar_t16*)0 || nSize == 0)
+        return 0;
+    char path[260];
+    int len = modpath_build_a(path, (int)(sizeof(path)));
+    DWORD i = 0;
+    for (; i < nSize - 1 && i < (DWORD)len; ++i)
+        buf[i] = (wchar_t16)(unsigned char)path[i];
+    buf[i] = 0;
+    /* On truncation Win32 returns nSize; otherwise the length. */
+    if ((DWORD)len >= nSize)
+        return nSize;
+    return i;
+}
+
+__declspec(dllexport) DWORD GetModuleFileNameA(HANDLE hModule, char* buf, DWORD nSize)
+{
+    (void)hModule;
+    if (buf == (char*)0 || nSize == 0)
+        return 0;
+    char path[260];
+    int len = modpath_build_a(path, (int)(sizeof(path)));
+    DWORD i = 0;
+    for (; i < nSize - 1 && i < (DWORD)len; ++i)
+        buf[i] = path[i];
+    buf[i] = 0;
+    if ((DWORD)len >= nSize)
+        return nSize;
+    return i;
+}
