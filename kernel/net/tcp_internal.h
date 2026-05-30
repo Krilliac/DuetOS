@@ -233,8 +233,20 @@ bool SendSegment(Tcb& t, u8 flags, u32 seq, u32 ack, const u8* payload, u32 payl
 
 // Drain bytes from sndbuf onto the wire, honouring snd_wnd, cwnd,
 // and the rtx_queue depth. Called from Send(), from ACK processing,
-// and from the timer (after retransmit completes).
-void DrainSendBuffer(Tcb& t);
+// and from the timer (after retransmit completes). `extra_cwnd`
+// temporarily widens the effective congestion window for RFC 3042
+// Limited Transmit (one new segment per early dup-ACK); 0 = normal.
+void DrainSendBuffer(Tcb& t, u32 extra_cwnd = 0);
+
+// Effective send window = min(snd_wnd, cwnd + extra_cwnd), overflow-safe.
+// Exposed for the self-test; used by DrainSendBuffer's clamp.
+u32 EffectiveSendWindow(const Tcb& t, u32 extra_cwnd);
+
+// PAWS (RFC 7323 §5.3): true if a segment carrying `seg_tsval` should be
+// dropped as a stale duplicate — i.e. the connection is synchronized,
+// the peer uses timestamps, the segment is not a RST, and seg_tsval is
+// older (mod-2^32) than ts_recent. Exposed for the self-test.
+bool PawsReject(const Tcb& t, u32 seg_tsval, u8 flags, bool has_timestamp);
 
 // Schedule a retransmit timer. Sets t.rtx_deadline = now + rto_ticks.
 // No-op if the rtx_queue is empty.
