@@ -1786,6 +1786,21 @@ void SyscallDispatch(arch::TrapFrame* frame)
             LinuxSockaddrIn sa;
             if (!mm::CopyFromUser(&sa, reinterpret_cast<const void*>(user_addr), sizeof(sa)))
                 return false;
+            // sin_family / sin6_family share the leading u16, and the
+            // port sits at the same offset (bytes 2-3) in both
+            // sockaddr_in and sockaddr_in6. v0 has no IPv6 address
+            // space, so an AF_INET6 (23) sockaddr is accepted but
+            // mapped to the IPv4 wildcard (0.0.0.0): enough for a
+            // dual-stack client (ftp.exe) to bind its placeholder v6
+            // socket and reach its prompt. GAP: the v6 address is
+            // discarded — revisit with a real IPv6 stack.
+            if (sa.sin_family == 23 /* AF_INET6 */)
+            {
+                port = (u16(sa.sin_port_be & 0xFF) << 8) | u16(sa.sin_port_be >> 8);
+                for (u32 i = 0; i < 4; ++i)
+                    ip.octets[i] = 0;
+                return true;
+            }
             if (sa.sin_family != 2)
                 return false;
             port = (u16(sa.sin_port_be & 0xFF) << 8) | u16(sa.sin_port_be >> 8);
@@ -1824,7 +1839,27 @@ void SyscallDispatch(arch::TrapFrame* frame)
         {
         case kSockOpCreate:
         {
-            const i32 idx = ::duetos::net::SocketAlloc(static_cast<u16>(frame->rsi), static_cast<u16>(frame->rdx));
+            const u16 dom = static_cast<u16>(frame->rsi);
+            // v0 has only an AF_INET (2) socket layer — no AF_INET6 (23)
+            // and no AF_UNIX (1). Win32 clients open dual-stack at
+            // startup: ftp.exe creates an AF_INET socket AND an AF_INET6
+            // socket and treats a failure of EITHER as fatal — it exits
+            // (rc=3) before reaching its interactive `ftp>` prompt.
+            // Since the prompt never needs a live connection, back an
+            // AF_INET6 request with a real AF_INET socket so the client
+            // gets a usable handle and proceeds; any later v6-specific
+            // I/O on it would fail gracefully at send/recv, not abort
+            // startup. AF_UNIX / other domains have no analogue and
+            // still report -EAFNOSUPPORT (97 -> WSAEAFNOSUPPORT).
+            // GAP: no real IPv6 stack — revisit when a v6 socket layer
+            // lands; the v6 handle here is an IPv4 socket in disguise.
+            const u16 alloc_dom = (dom == 23 /* AF_INET6 */) ? ::duetos::net::kSocketDomainInet : dom;
+            if (alloc_dom != ::duetos::net::kSocketDomainInet)
+            {
+                rv = -97; // -EAFNOSUPPORT
+                break;
+            }
+            const i32 idx = ::duetos::net::SocketAlloc(alloc_dom, static_cast<u16>(frame->rdx));
             rv = (idx < 0) ? -23 /* -ENFILE */ : static_cast<i64>(idx);
             break;
         }
@@ -2065,6 +2100,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
             break;
         }
         }
+        // Per-op trace of the winsock surface — DEBUG-gated so it is
+        // silent under release defaults but lets a winsock-client
+        // bring-up (ftp.exe, telnet.exe, …) be replayed op-by-op when a
+        // client exits on an unexpected socket-op return.
+        KLOG_DEBUG_V("net/socket", "sockop op", op);
+        KLOG_DEBUG_V("net/socket", "  arg1", frame->rsi);
+        KLOG_DEBUG_V("net/socket", "  arg2", frame->rdx);
+        KLOG_DEBUG_V("net/socket", "  rv", static_cast<u64>(rv));
         frame->rax = static_cast<u64>(rv);
         return;
     }

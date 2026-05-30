@@ -1129,3 +1129,98 @@ __declspec(dllexport) DWORD WSAWaitForMultipleEvents(DWORD cEvents, const WSAEVE
         ws2_sleep_ms(10);
     }
 }
+
+/* ---------------------------------------------------------------------------
+ * Wide (UTF-16) winsock surface — the variants ftp.exe / telnet.exe / modern
+ * clients import BY NAME (GetAddrInfoW, GetNameInfoW, FreeAddrInfoW,
+ * GetHostNameW) plus WSARecv. ftp resolves these at load and calls
+ * GetHostNameW early; the addrinfo variants only fire on `open <host>`,
+ * which the interactive prompt doesn't need — but the IAT must still bind,
+ * so they exist with happy-path-correct narrow-backed implementations.
+ * ------------------------------------------------------------------------- */
+typedef unsigned short WCHAR;
+
+/* GetHostNameW — UTF-16 host name. Mirrors gethostname's "duetos"
+ * sentinel. `namelen` is a character count (Win32 contract). */
+__declspec(dllexport) INT GetHostNameW(WCHAR* name, INT namelen)
+{
+    static const char kHost[] = "duetos";
+    if (!name || namelen <= 0)
+    {
+        g_wsa_last_error = WSAEFAULT;
+        return SOCKET_ERROR;
+    }
+    int i = 0;
+    for (; kHost[i] && i + 1 < namelen; ++i)
+        name[i] = (WCHAR)kHost[i];
+    name[i] = 0;
+    return 0;
+}
+
+/* Narrow a UTF-16 string into a caller-provided ASCII buffer. Used by
+ * GetAddrInfoW to reuse the narrow getaddrinfo path. Non-ASCII code
+ * units are truncated to their low byte (the hostnames a winsock client
+ * resolves are ASCII in practice). */
+static void ws2_w2a(const WCHAR* w, char* a, int cap)
+{
+    int i = 0;
+    if (w)
+        for (; i < cap - 1 && w[i] != 0; ++i)
+            a[i] = (char)(w[i] & 0xFF);
+    a[i] = 0;
+}
+
+/* GetAddrInfoW — wide getaddrinfo. The ADDRINFOW struct has the same
+ * field layout/sizes as the narrow addrinfo on x64 (ai_canonname is a
+ * PWSTR vs PSTR but both are 8-byte pointers), so the narrow
+ * getaddrinfo result block is ABI-compatible for the fields a caller
+ * reads (ai_family / ai_socktype / ai_protocol / ai_addr / ai_addrlen /
+ * ai_next). Canonname is left NULL, matching getaddrinfo. */
+__declspec(dllexport) INT GetAddrInfoW(const WCHAR* node, const WCHAR* service, const void* hints, void** result)
+{
+    char nbuf[256];
+    char sbuf[64];
+    ws2_w2a(node, nbuf, (int)sizeof(nbuf));
+    ws2_w2a(service, sbuf, (int)sizeof(sbuf));
+    const char* np = (node != (const WCHAR*)0) ? nbuf : (const char*)0;
+    const char* sp = (service != (const WCHAR*)0) ? sbuf : (const char*)0;
+    return getaddrinfo(np, sp, hints, result);
+}
+
+__declspec(dllexport) void FreeAddrInfoW(void* r)
+{
+    freeaddrinfo(r);
+}
+
+__declspec(dllexport) INT GetNameInfoW(const void* addr, INT addrlen, WCHAR* host, DWORD hostlen, WCHAR* serv,
+                                       DWORD servlen, INT flags)
+{
+    (void)addr;
+    (void)addrlen;
+    (void)flags;
+    if (host && hostlen > 0)
+        host[0] = 0;
+    if (serv && servlen > 0)
+        serv[0] = 0;
+    return WSAENETDOWN;
+}
+
+/* WSARecv — overlapped/scatter recv. v0 has no overlapped tier and the
+ * interactive prompt never reaches a data transfer, so this fails
+ * cleanly rather than faulting: a real `get`/`ls` would surface
+ * WSAEINVAL through the caller's error handling. Must still export by
+ * name so the IAT binds. */
+__declspec(dllexport) INT WSARecv(SOCKET s, void* buffers, DWORD buffer_count, DWORD* bytes_recvd, DWORD* flags,
+                                  void* overlapped, void* completion)
+{
+    (void)s;
+    (void)buffers;
+    (void)buffer_count;
+    (void)overlapped;
+    (void)completion;
+    if (bytes_recvd)
+        *bytes_recvd = 0;
+    (void)flags;
+    g_wsa_last_error = WSAEINVAL;
+    return SOCKET_ERROR;
+}

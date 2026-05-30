@@ -2279,6 +2279,31 @@ static int wfmt_to_narrow(char* out, size_t out_cap, const _ucrt_wchar_t* wfmt)
     return (int)i;
 }
 
+/* __stdio_common_vfwprintf — wide formatted output to a stream. This
+ * is the backend modern UCRT routes fwprintf / vfwprintf / fputws
+ * through. ftp.exe prints its interactive "ftp> " prompt via this
+ * path; without it the prompt vanished into the catch-all NO-OP and
+ * ftp read EOF on an empty stdin and exited. Down-convert the wide
+ * format to ASCII (matching the other wide variants here) and emit
+ * through the same narrow stream-write path as __stdio_common_vfprintf
+ * so the prompt reaches the console. */
+__declspec(dllexport) int __stdio_common_vfwprintf(unsigned long long options, FILE* stream,
+                                                   const _ucrt_wchar_t* format, void* locale, va_list arglist)
+{
+    (void)options;
+    (void)locale;
+    char nfmt[512];
+    wfmt_to_narrow(nfmt, sizeof(nfmt), format);
+    char buf[1024];
+    int n = vfmt(buf, sizeof(buf), nfmt, arglist);
+    if (n < 0)
+        return -1;
+    if (n > (int)sizeof(buf) - 1)
+        n = (int)sizeof(buf) - 1;
+    fwrite(buf, 1, (size_t)n, stream);
+    return n;
+}
+
 __declspec(dllexport) int __stdio_common_vswprintf(unsigned long long options, _ucrt_wchar_t* buffer, size_t count,
                                                    const _ucrt_wchar_t* format, void* locale, va_list arglist)
 {
