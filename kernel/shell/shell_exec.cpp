@@ -26,6 +26,7 @@
 #include "sched/sched.h"
 #include "subsystems/translation/translate.h"
 #include "loader/elf_loader.h"
+#include "loader/pe_loader.h"
 #include "proc/process.h"
 #include "proc/spawn.h"
 #include "util/zip.h"
@@ -181,6 +182,85 @@ void CmdLinuxexec(u32 argc, char** argv)
         return;
     }
     ConsoleWrite("LINUXEXEC: SPAWNED PID=");
+    WriteU64Dec(pid);
+    ConsoleWrite(" PATH=");
+    ConsoleWriteln(path);
+}
+
+// PEEXEC <path> — the PE/.exe twin of LINUXEXEC. Reads a Windows
+// executable off FAT32 vol 0, validates it, and spawns it as a ring-3
+// Win32 process via SpawnPeFile (imports resolve against the preloaded
+// Win32 DLL set). This is the path for running EXTERNAL .exe files
+// staged onto the disk image — everything else runs build-time-embedded
+// blobs. Trusted caps (like the live-update PE path) so the program can
+// actually do console / file I/O.
+void CmdPeexec(u32 argc, char** argv)
+{
+    namespace fat = duetos::fs::fat32;
+    if (argc < 2)
+    {
+        ConsoleWriteln("PEEXEC: USAGE: PEEXEC PATH");
+        return;
+    }
+    const char* path = argv[1];
+    if (const char* leaf = FatLeaf(path); leaf != nullptr && *leaf != '\0')
+    {
+        path = leaf;
+    }
+    else if (path[0] == '/')
+    {
+        ++path;
+    }
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        ConsoleWriteln("PEEXEC: FAT32 NOT MOUNTED");
+        return;
+    }
+    fat::DirEntry entry;
+    if (!fat::Fat32LookupPath(v, path, &entry))
+    {
+        ConsoleWrite("PEEXEC: NO SUCH FILE: ");
+        ConsoleWriteln(path);
+        return;
+    }
+    if (entry.attributes & 0x10)
+    {
+        ConsoleWriteln("PEEXEC: PATH IS A DIRECTORY");
+        return;
+    }
+    // Real console exes run ~32 KB–360 KB; cap the static read buffer
+    // at 1 MiB and refuse anything larger rather than silently
+    // truncate into an invalid image.
+    constexpr u64 kPeExecMaxBytes = 1u << 20;
+    static u8 pe_buf[kPeExecMaxBytes];
+    if (entry.size_bytes > kPeExecMaxBytes)
+    {
+        ConsoleWriteln("PEEXEC: FILE TOO LARGE (>1 MiB)");
+        return;
+    }
+    const i64 n = fat::Fat32ReadFile(v, &entry, pe_buf, sizeof(pe_buf));
+    if (n <= 0)
+    {
+        ConsoleWriteln("PEEXEC: READ ERROR OR EMPTY");
+        return;
+    }
+    const auto st = duetos::core::PeValidate(pe_buf, static_cast<u64>(n));
+    if (st != duetos::core::PeStatus::Ok)
+    {
+        ConsoleWrite("PEEXEC: NOT A VALID PE: ");
+        ConsoleWriteln(duetos::core::PeStatusName(st));
+        return;
+    }
+    const u64 pid = duetos::core::SpawnPeFile(path, pe_buf, static_cast<u64>(n), duetos::core::CapSetTrusted(),
+                                              duetos::fs::RamfsTrustedRoot(), duetos::mm::kFrameBudgetTrusted,
+                                              duetos::core::kTickBudgetTrusted);
+    if (pid == 0)
+    {
+        ConsoleWriteln("PEEXEC: SPAWNPEFILE FAILED (load/import-resolution error — see serial log)");
+        return;
+    }
+    ConsoleWrite("PEEXEC: SPAWNED PID=");
     WriteU64Dec(pid);
     ConsoleWrite(" PATH=");
     ConsoleWriteln(path);
