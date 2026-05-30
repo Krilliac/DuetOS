@@ -15,8 +15,9 @@
  * The Win32DirEntryReport struct is the kernel-side stable ABI:
  *   char name[64]; u32 attributes; u32 _pad; u64 size_bytes; u8 _r[16];
  * = 96 bytes total. The kernel32 thunks marshal this into the
- * caller's WIN32_FIND_DATA[A|W] (Win32 layout: 320-byte block
- * starting with FILETIME * 3 + DWORD * 4 + name fields).
+ * caller's WIN32_FIND_DATA[A|W] (Win32 layout: WIN32_FIND_DATAW is
+ * 592 bytes / WIN32_FIND_DATAA 320 bytes, starting with FILETIME * 3
+ * + DWORD * 4 + name fields — see the struct + _Static_asserts below).
  *
  * FindFirstFile* + FindNextFile* both hand a 320-byte WIN32_FIND_DATA
  * to user code — we zero-fill the leading FILETIME / size DWORDs we
@@ -41,31 +42,54 @@ struct Win32DirEntryReport_t
     unsigned char _reserved[16];
 };
 
-/* WIN32_FIND_DATA shape — 320 bytes total. We only ever populate
- * the few fields that matter (attributes + size + name). */
+/* WIN32_FIND_DATA shape — must match Microsoft's layout EXACTLY, or
+ * a real PE (which reads <windows.h> field offsets) lands on the
+ * wrong bytes. The FILETIME fields are TWO 4-byte DWORDs each
+ * (`{DWORD dwLowDateTime; DWORD dwHighDateTime;}`), 4-byte aligned —
+ * NOT an 8-byte-aligned `long long`. Using `long long` here inserted
+ * 4 bytes of pad after `dwFileAttributes` to 8-align it, shifting
+ * cFileName to offset 48 (Windows: 44) and the size DWORDs by 4. cmd
+ * read cFileName at offset 44 → a malformed UTF-16 name → faulted in
+ * its post-enumeration string handling. Keeping the FILETIMEs as
+ * 4-byte-aligned DWORD pairs pins cFileName at offset 44 and
+ * nFileSizeHigh/Low at 28/32, matching WIN32_FIND_DATAW byte-for-byte
+ * (sizeof == 592). */
+struct Win32FileTime_t
+{
+    DWORD dwLowDateTime;
+    DWORD dwHighDateTime;
+};
+
 struct Win32FindDataW_t
 {
     DWORD dwFileAttributes;
-    long long ftCreationTime;
-    long long ftLastAccessTime;
-    long long ftLastWriteTime;
+    struct Win32FileTime_t ftCreationTime;
+    struct Win32FileTime_t ftLastAccessTime;
+    struct Win32FileTime_t ftLastWriteTime;
     DWORD nFileSizeHigh;
     DWORD nFileSizeLow;
     DWORD dwReserved0;
     DWORD dwReserved1;
     wchar_t16 cFileName[260];
     wchar_t16 cAlternateFileName[14];
-    DWORD dwFileType;
-    DWORD dwCreatorType;
-    unsigned short wFinderFlags;
 };
+
+/* Lock the Win32 layout at compile time — a future field edit that
+ * reintroduces alignment pad (the bug this replaced) fails the build
+ * instead of silently breaking every PE that enumerates a directory.
+ * Windows: sizeof(WIN32_FIND_DATAW)==592, cFileName@44. */
+_Static_assert(sizeof(struct Win32FindDataW_t) == 592, "WIN32_FIND_DATAW must match Microsoft layout (592 bytes)");
+_Static_assert(__builtin_offsetof(struct Win32FindDataW_t, cFileName) == 44,
+               "WIN32_FIND_DATAW.cFileName must be at offset 44");
+_Static_assert(__builtin_offsetof(struct Win32FindDataW_t, nFileSizeHigh) == 28,
+               "WIN32_FIND_DATAW.nFileSizeHigh must be at offset 28");
 
 struct Win32FindDataA_t
 {
     DWORD dwFileAttributes;
-    long long ftCreationTime;
-    long long ftLastAccessTime;
-    long long ftLastWriteTime;
+    struct Win32FileTime_t ftCreationTime;
+    struct Win32FileTime_t ftLastAccessTime;
+    struct Win32FileTime_t ftLastWriteTime;
     DWORD nFileSizeHigh;
     DWORD nFileSizeLow;
     DWORD dwReserved0;
@@ -73,6 +97,10 @@ struct Win32FindDataA_t
     char cFileName[260];
     char cAlternateFileName[14];
 };
+
+_Static_assert(sizeof(struct Win32FindDataA_t) == 320, "WIN32_FIND_DATAA must match Microsoft layout (320 bytes)");
+_Static_assert(__builtin_offsetof(struct Win32FindDataA_t, cFileName) == 44,
+               "WIN32_FIND_DATAA.cFileName must be at offset 44");
 
 static long long DirOpenSyscall(const char* path)
 {
@@ -353,12 +381,18 @@ static void FindSlotRelease(long long h)
     }
 }
 
+static void ZeroFileTime(struct Win32FileTime_t* ft)
+{
+    ft->dwLowDateTime = 0;
+    ft->dwHighDateTime = 0;
+}
+
 static void FillFindDataA(const struct Win32DirEntryReport_t* r, struct Win32FindDataA_t* fd)
 {
     fd->dwFileAttributes = r->attributes;
-    fd->ftCreationTime = 0;
-    fd->ftLastAccessTime = 0;
-    fd->ftLastWriteTime = 0;
+    ZeroFileTime(&fd->ftCreationTime);
+    ZeroFileTime(&fd->ftLastAccessTime);
+    ZeroFileTime(&fd->ftLastWriteTime);
     fd->nFileSizeLow = (DWORD)(r->size_bytes & 0xFFFFFFFFULL);
     fd->nFileSizeHigh = (DWORD)((r->size_bytes >> 32) & 0xFFFFFFFFULL);
     fd->dwReserved0 = 0;
@@ -372,9 +406,9 @@ static void FillFindDataA(const struct Win32DirEntryReport_t* r, struct Win32Fin
 static void FillFindDataW(const struct Win32DirEntryReport_t* r, struct Win32FindDataW_t* fd)
 {
     fd->dwFileAttributes = r->attributes;
-    fd->ftCreationTime = 0;
-    fd->ftLastAccessTime = 0;
-    fd->ftLastWriteTime = 0;
+    ZeroFileTime(&fd->ftCreationTime);
+    ZeroFileTime(&fd->ftLastAccessTime);
+    ZeroFileTime(&fd->ftLastWriteTime);
     fd->nFileSizeLow = (DWORD)(r->size_bytes & 0xFFFFFFFFULL);
     fd->nFileSizeHigh = (DWORD)((r->size_bytes >> 32) & 0xFFFFFFFFULL);
     fd->dwReserved0 = 0;
@@ -383,9 +417,6 @@ static void FillFindDataW(const struct Win32DirEntryReport_t* r, struct Win32Fin
         fd->cFileName[i] = (i < 64) ? (wchar_t16)(unsigned char)r->name[i] : 0;
     for (unsigned long i = 0; i < 14; ++i)
         fd->cAlternateFileName[i] = 0;
-    fd->dwFileType = 0;
-    fd->dwCreatorType = 0;
-    fd->wFinderFlags = 0;
 }
 
 /* Walk past kernel-returned entries until one matches `pattern` or
