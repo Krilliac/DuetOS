@@ -74,6 +74,15 @@ __declspec(dllimport) void __stdcall SetLastError(DWORD dwErrCode);
 __declspec(dllimport) int __stdcall MulDiv(int, int, int);
 __declspec(dllimport) int wsprintfA(char*, const char*, ...);
 
+// kernel32 GetDateFormatA — now honors the format-picture string
+// (previously ignored). SYSTEMTIME layout: 8 u16 fields.
+typedef struct
+{
+    unsigned short wYear, wMonth, wDayOfWeek, wDay, wHour, wMinute, wSecond, wMilliseconds;
+} DUETOS_SYSTEMTIME;
+__declspec(dllimport) int __stdcall GetDateFormatA(unsigned long, DWORD, const DUETOS_SYSTEMTIME*, const char*, char*,
+                                                   int);
+
 // critical sections (v0 no-ops)
 // CRITICAL_SECTION is 40 bytes on x64: {PDEBUG_INFO, LONG,
 // LONG, HANDLE, HANDLE, ULONG_PTR}. We only need the size
@@ -489,6 +498,42 @@ void _start(void)
         if (md == 150 && fmt_ok)
         {
             const char ok[] = "[winfmt] MulDiv+wsprintfA OK\n";
+            DWORD wn = 0;
+            WriteFile(out, ok, sizeof(ok) - 1, &wn, 0);
+        }
+    }
+
+    // Exercise — kernel32!GetDateFormatA now honors the picture string
+    // (it used to ignore it and always emit MM/DD/YYYY). Format a fixed
+    // date (Fri 2026-05-29) two ways and require both: "yyyy-MM-dd" ->
+    // "2026-05-29" and "dddd" -> "Friday" (full day name from the new
+    // en-US table). Proves picture parsing + day-name lookup.
+    {
+        DUETOS_SYSTEMTIME sdt;
+        sdt.wYear = 2026;
+        sdt.wMonth = 5;
+        sdt.wDayOfWeek = 5; /* Friday (Sun=0) */
+        sdt.wDay = 29;
+        sdt.wHour = 0;
+        sdt.wMinute = 0;
+        sdt.wSecond = 0;
+        sdt.wMilliseconds = 0;
+        char dbuf[32];
+        char nbuf[32];
+        GetDateFormatA(0, 0, &sdt, "yyyy-MM-dd", dbuf, (int)sizeof(dbuf));
+        GetDateFormatA(0, 0, &sdt, "dddd", nbuf, (int)sizeof(nbuf));
+        const char e1[] = "2026-05-29";
+        const char e2[] = "Friday";
+        int ok1 = 1, ok2 = 1;
+        for (int i = 0; i < (int)sizeof(e1); ++i)
+            if (dbuf[i] != e1[i])
+                ok1 = 0;
+        for (int i = 0; i < (int)sizeof(e2); ++i)
+            if (nbuf[i] != e2[i])
+                ok2 = 0;
+        if (ok1 && ok2)
+        {
+            const char ok[] = "[winfmt2] GetDateFormat picture OK\n";
             DWORD wn = 0;
             WriteFile(out, ok, sizeof(ok) - 1, &wn, 0);
         }
