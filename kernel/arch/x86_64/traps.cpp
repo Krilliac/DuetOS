@@ -685,6 +685,12 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         const ::duetos::u64 entry_r15;
         const ::duetos::u64 entry_cs;
         const bool kernel_mode_return;
+        // Set by the dispatcher when it legitimately redirects RIP via a
+        // registered extable fixup (kernel-mode #PF/#GP recovery, e.g.
+        // mm/SafeReadKernel reading a faulting user RIP during task-kill).
+        // That is a sanctioned rewrite, not a scribble — without this the
+        // guard false-positives on every extable-recovered kernel fault.
+        bool sanctioned_rewrite = false;
         RipIntegrityGuard(TrapFrame* f)
             : frame(f), entry_rip(f->rip), entry_r15(f->r15), entry_cs(f->cs), kernel_mode_return((f->cs & 0x3) == 0)
         {
@@ -698,7 +704,7 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             // tree is allowed to mutate frame->rip.
             const ::duetos::u64 v = frame->vector;
             const bool exempt = (v == 0x80) || (v == 3) || (v == 1);
-            if (exempt)
+            if (exempt || sanctioned_rewrite)
                 return;
             // Only kernel-mode returns are checked — user-mode RIPs
             // can be anywhere in the process VA range.
@@ -1198,6 +1204,10 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             // recovered in trap" (see fix_journal.cpp:357-363).
             ::duetos::diag::FixJournalRecordFromTrap(::duetos::diag::FixDetector::SoftFaultRecov, frame->rip,
                                                      hit->fixup_rip);
+            // Sanctioned RIP redirect — tell the integrity guard so it
+            // doesn't mistake this extable recovery for a mid-handler
+            // scribble (false-positive found by mem/smp stress fuzzing).
+            guard.sanctioned_rewrite = true;
             frame->rip = hit->fixup_rip;
             return;
         }
