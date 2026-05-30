@@ -189,16 +189,22 @@ void ApplyPending(i64 rhs)
     }
     i64 lhs = g_state.accumulator;
     i64 result = 0;
+    // Arithmetic overflow routes to the same sticky ERR state as
+    // divide-by-zero. The bare lhs+rhs / lhs-rhs / lhs*rhs are signed-
+    // overflow UB on large operands (a GUI keystroke fuzz hit the `*`
+    // case); the __builtin_*_overflow forms compute the result and
+    // report overflow without UB.
+    bool ovf = false;
     switch (g_state.pending_op)
     {
     case '+':
-        result = lhs + rhs;
+        ovf = __builtin_add_overflow(lhs, rhs, &result);
         break;
     case '-':
-        result = lhs - rhs;
+        ovf = __builtin_sub_overflow(lhs, rhs, &result);
         break;
     case '*':
-        result = lhs * rhs;
+        ovf = __builtin_mul_overflow(lhs, rhs, &result);
         break;
     case '/':
         if (rhs == 0)
@@ -221,11 +227,12 @@ void ApplyPending(i64 rhs)
     case '^':
         result = lhs ^ rhs;
         break;
-    case '<': // shift left
+    case '<': // shift left (unsigned semantics — a signed << that
+              // shifts into/through the sign bit is UB; compute via u64)
         if (rhs < 0 || rhs >= 64)
             result = 0;
         else
-            result = lhs << rhs;
+            result = static_cast<i64>(static_cast<u64>(lhs) << rhs);
         break;
     case '>': // shift right (arithmetic — keeps sign bit)
         if (rhs < 0 || rhs >= 64)
@@ -236,6 +243,15 @@ void ApplyPending(i64 rhs)
     default:
         result = rhs;
         break;
+    }
+    if (ovf)
+    {
+        SetDisplayLiteral("ERR");
+        g_state.error = true;
+        g_state.accumulator = 0;
+        g_state.has_pending = false;
+        g_state.fresh_entry = true;
+        return;
     }
     g_state.accumulator = result;
     g_state.has_pending = false;
@@ -335,7 +351,17 @@ void HandlePercent()
     if (g_state.has_pending)
     {
         const i64 lhs = g_state.accumulator;
-        const i64 scaled = (lhs * cur) / 100;
+        // lhs and cur are each up to a 16-digit display value, so the
+        // product can reach ~1e32 — guard the multiply (UB otherwise).
+        i64 prod = 0;
+        if (__builtin_mul_overflow(lhs, cur, &prod))
+        {
+            // TripErr() is defined below this function; inline its body.
+            g_state.error = true;
+            SetDisplayLiteral("ERR");
+            return;
+        }
+        const i64 scaled = prod / 100;
         SetDisplayI64(scaled);
     }
     else
