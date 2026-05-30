@@ -66,6 +66,7 @@
 #include "security/login.h"
 #include "shell/shell.h"
 #include "subsystems/audio/audio_backend.h"
+#include "time/tick.h"
 #include "subsystems/win32/window_syscall.h"
 
 namespace duetos::core
@@ -155,9 +156,30 @@ void KbdReaderTask(void*)
     // Sample at each compose call so Ctrl+Alt+Y (theme cycle)
     // takes effect on the very next repaint — don't cache.
     auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
+
+    // Software typematic control. PS/2 keyboards (and especially the
+    // emulated ones in VBox/QEMU) auto-repeat a held key by re-sending
+    // its MAKE code with no intervening BREAK; the keyboard layer
+    // surfaces each as another press, so a single tap can register
+    // several times. We suppress same-key repeats that arrive within
+    // kKbdRepeatDelayTicks of the last accepted press of that key —
+    // giving "tap = one character" while still allowing a deliberate
+    // hold to repeat slowly (after the delay). A genuine fast re-type
+    // of the same key (e.g. "ll") is unaffected because it carries a
+    // release between the makes, which clears held_code below.
+    constexpr duetos::u64 kKbdRepeatDelayTicks = 50; // ~500 ms at 100 Hz
+    duetos::u16 held_code = kKeyNone;
+    duetos::u64 held_last_tick = 0;
     for (;;)
     {
         const KeyEvent ev = Ps2KeyboardReadEvent();
+        // Per-event diagnostic (DEBUG-gated): each line is one event
+        // returned by the keyboard layer. A single physical keypress
+        // that emits several "key press" lines points at hardware/
+        // firmware typematic auto-repeat (see the keyboard init's
+        // typematic-rate set). Greppable as `kbd-ev`.
+        KLOG_DEBUG_V("input/kbd", ev.is_release ? "kbd-ev release code" : "kbd-ev press code",
+                     static_cast<u64>(ev.code));
         // Elevation broker — if an off-thread broker request has
         // posted a deferred prompt, the kbd reader takes over the
         // prompt UI here (safe because we ARE the legal
@@ -172,6 +194,10 @@ void KbdReaderTask(void*)
         // the VK cache so ext keys collide gracefully with
         // unmapped slots.
         duetos::drivers::video::WindowInputTrackKey(static_cast<duetos::u16>(ev.code), !ev.is_release);
+        // A real release of the held key clears the typematic guard so
+        // the NEXT press of that key (a re-type) is always accepted.
+        if (ev.is_release && ev.code == held_code)
+            held_code = kKeyNone;
         if (ev.is_release || ev.code == kKeyNone)
         {
             // PE-routed key release. The press / char branch
@@ -214,6 +240,27 @@ void KbdReaderTask(void*)
             }
             continue;
         }
+
+        // Software typematic suppression (see the held_code declaration
+        // above). A press of the key already held is an auto-repeat;
+        // drop it unless the repeat delay has elapsed (then allow a
+        // slow, deliberate hold-repeat). This is what makes "tap = one
+        // character" regardless of how aggressively the firmware
+        // auto-repeats.
+        {
+            const duetos::u64 now_ticks = duetos::time::TickCount();
+            if (ev.code == held_code)
+            {
+                if (now_ticks - held_last_tick < kKbdRepeatDelayTicks)
+                    continue; // suppress fast auto-repeat of the held key
+            }
+            else
+            {
+                held_code = ev.code;
+            }
+            held_last_tick = now_ticks;
+        }
+
         const bool alt = (ev.modifiers & kKeyModAlt) != 0;
         const bool ctrl = (ev.modifiers & kKeyModCtrl) != 0;
         const bool shift = (ev.modifiers & kKeyModShift) != 0;
