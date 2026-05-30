@@ -2129,6 +2129,16 @@ void MouseReaderTask(void*)
         {"RAISE", 10, 0, nullptr, 0},   {"MINIMIZE", 23, 0, nullptr, 0}, {"MAXIMIZE", 24, 0, nullptr, 0},
         {"RESTORE", 20, 0, nullptr, 0}, {"CLOSE", 11, 0, nullptr, 0},
     };
+    // Terminal client-area right-click — text actions (COPY /
+    // PASTE / CLEAR via the 70..72 dispatch band) on top of the
+    // standard window controls, so a right-click in the terminal
+    // body is the everyday "copy what I see" gesture. This is the
+    // popup that stands in for true drag-selection until the
+    // widget layer grows an in-content mouse-press hook.
+    static const duetos::drivers::video::MenuItem kTerminalMenuItems[] = {
+        {"COPY", 70, 0, nullptr, 0},  {"PASTE", 71, 0, nullptr, 0}, {"CLEAR", 72, 0, nullptr, 0},
+        {"RAISE", 10, 0, nullptr, 0}, {"CLOSE", 11, 0, nullptr, 0},
+    };
     // Title-bar (NC) right-click — the classic Win32 system
     // menu. RESTORE/MINIMIZE/MAXIMIZE/CLOSE are wired; MOVE
     // does a one-shot recenter (GAP) and SIZE is shown
@@ -2450,6 +2460,16 @@ void MouseReaderTask(void*)
                             // context menu opened). No-op
                             // here; the menu is up.
                             SerialWrite("[ui] right-click target=client (files) window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
+                        else if (hit == duetos::apps::terminal::TerminalWindow())
+                        {
+                            // Terminal body: COPY/PASTE/CLEAR popup.
+                            duetos::drivers::video::MenuOpen(kTerminalMenuItems,
+                                                             sizeof(kTerminalMenuItems) / sizeof(kTerminalMenuItems[0]),
+                                                             cx, cy, hit);
+                            SerialWrite("[ui] right-click target=client (terminal) window=");
                             SerialWriteHex(hit);
                             SerialWrite("\n");
                         }

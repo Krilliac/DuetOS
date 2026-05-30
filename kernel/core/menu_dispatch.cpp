@@ -43,6 +43,7 @@
 #include "apps/firewall.h"
 #include "apps/netstatus.h"
 #include "apps/screenshot.h"
+#include "apps/terminal.h"
 #include "arch/x86_64/serial.h"
 #include "core/init.h"
 #include "core/session_restore.h"
@@ -506,6 +507,28 @@ void DispatchMenuAction(duetos::u32 action, duetos::u32 ctx)
         }
         break;
     }
+    // Terminal context menu (70..72) — text actions on the
+    // in-kernel terminal. COPY snapshots the visible viewport to
+    // the clipboard; PASTE feeds clipboard text back through the
+    // shell input line (ShellFeedChar drops control bytes, so a
+    // multi-line clipboard collapses to one command — the safe
+    // default); CLEAR resets the grid. ctx unused.
+    case 70: // COPY
+        duetos::apps::terminal::TerminalCopyVisibleViewport();
+        break;
+    case 71: // PASTE
+    {
+        char clip[256];
+        const duetos::u32 n = duetos::drivers::video::WindowClipboardGetText(clip, sizeof(clip));
+        for (duetos::u32 i = 0; i < n; ++i)
+        {
+            duetos::apps::terminal::TerminalFeedChar(clip[i]);
+        }
+        break;
+    }
+    case 72: // CLEAR
+        duetos::apps::terminal::TerminalReset();
+        break;
     default:
         // App launcher bands: 100..199 == "raise the window
         // registered for ThemeRole(action - 100)". /APPS shortcut
