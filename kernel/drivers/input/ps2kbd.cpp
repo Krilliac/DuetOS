@@ -602,6 +602,28 @@ void ControllerInit()
         core::Log(core::LogLevel::Warn, "drivers/ps2kbd", "scan code set 1 select not ACKed");
     }
 
+    // Step 8b: set the slowest, longest typematic profile so a
+    // normal keystroke never auto-repeats. Byte 0x7F = bits6-5
+    // delay 11 (1000 ms before the first repeat) + bits4-0 rate
+    // 11111 (2 cps, the slowest). The firmware default is a short
+    // ~250-500 ms delay; under VirtualBox that turned even brief
+    // key holds into runs of duplicate characters ("v" -> "vvv",
+    // held backspace deleting whole words). With a 1-second delay
+    // a tap held well under a second produces exactly one event;
+    // a deliberate >1 s hold still repeats, slowly. This is the
+    // primary fix for the typematic make/break repeat shape that
+    // no host-side software de-bounce window can separate from a
+    // fast intentional double-letter. Sequence: 0xF3 -> 0xFA, then
+    // rate byte 0x7F -> 0xFA.
+    if (!KbdSendAndAck(0xF3))
+    {
+        core::Log(core::LogLevel::Warn, "drivers/ps2kbd", "set-typematic (0xF3) not ACKed");
+    }
+    else if (!KbdSendAndAck(0x7F))
+    {
+        core::Log(core::LogLevel::Warn, "drivers/ps2kbd", "typematic rate/delay byte (0x7F) not ACKed");
+    }
+
     // Step 9: enable scanning — reset above disables it on most
     // devices. 0xF4 on port 1 data tells the keyboard to start
     // producing scan codes again. Without this, keypresses land
