@@ -531,36 +531,180 @@ typedef struct
     unsigned short y, m, dow, d, h, min, s, ms;
 } DUETOS_SYSTEMTIME;
 
-__declspec(dllexport) int GetDateFormatA(unsigned long lcid, DWORD flags, const DUETOS_SYSTEMTIME* st, const char* fmt,
-                                         char* buf, int cchData)
+/* en-US locale name tables (DuetOS is en-US-only) shared by the
+ * date/time picture formatter. */
+static const char* const k_day_full[7] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+static const char* const k_day_abbr[7] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+static const char* const k_mon_full[12] = {"January", "February", "March",     "April",   "May",      "June",
+                                           "July",    "August",   "September", "October", "November", "December"};
+static const char* const k_mon_abbr[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+
+static int dt_emit_str(char* s, int pos, int cap, const char* str)
 {
-    (void)lcid;
-    (void)flags;
-    (void)fmt;
-    if (st == (const DUETOS_SYSTEMTIME*)0)
-        return 0;
-    char tmp[32];
-    int len = 0;
-    if (st->m < 10)
-        tmp[len++] = '0';
-    len += duetos_u32_to_dec(st->m, tmp + len);
-    tmp[len++] = '/';
-    if (st->d < 10)
-        tmp[len++] = '0';
-    len += duetos_u32_to_dec(st->d, tmp + len);
-    tmp[len++] = '/';
-    len += duetos_u32_to_dec(st->y, tmp + len);
-    tmp[len] = 0;
+    while (*str && pos < cap - 1)
+        s[pos++] = *str++;
+    return pos;
+}
+
+static int dt_emit_num(char* s, int pos, int cap, unsigned v, int min_width)
+{
+    char t[16];
+    int n = duetos_u32_to_dec(v, t);
+    for (int i = n; i < min_width && pos < cap - 1; ++i)
+        s[pos++] = '0';
+    for (int i = 0; i < n && pos < cap - 1; ++i)
+        s[pos++] = t[i];
+    return pos;
+}
+
+/* Format a SYSTEMTIME through a Win32 date/time picture string into
+ * `scratch` (NUL-terminated), returning the length. Honors the
+ * documented run-length tokens — d/dd/ddd/dddd, M/MM/MMM/MMMM,
+ * y/yy/yyyy, H/HH (24h), h/hh (12h), m/mm, s/ss, t/tt (AM/PM) — plus
+ * single-quoted literals ('' = a literal quote). Any other character
+ * is copied verbatim. One unified walker serves both Get*Format APIs;
+ * each just supplies its default picture. */
+static int duetos_fmt_datetime(const DUETOS_SYSTEMTIME* st, const char* fmt, char* scratch, int scap)
+{
+    int pos = 0;
+    const char* p = fmt;
+    while (*p && pos < scap - 1)
+    {
+        char c = *p;
+        if (c == '\'')
+        {
+            ++p;
+            while (*p && pos < scap - 1)
+            {
+                if (*p == '\'')
+                {
+                    if (p[1] == '\'') /* '' -> literal quote */
+                    {
+                        scratch[pos++] = '\'';
+                        p += 2;
+                        continue;
+                    }
+                    ++p;
+                    break;
+                }
+                scratch[pos++] = *p++;
+            }
+            continue;
+        }
+        int run = 0;
+        while (p[run] == c)
+            ++run;
+        unsigned dow = st->dow % 7u;
+        unsigned mon = (st->m >= 1 && st->m <= 12) ? (unsigned)(st->m - 1) : 0u;
+        if (c == 'd')
+        {
+            if (run >= 4)
+                pos = dt_emit_str(scratch, pos, scap, k_day_full[dow]);
+            else if (run == 3)
+                pos = dt_emit_str(scratch, pos, scap, k_day_abbr[dow]);
+            else
+                pos = dt_emit_num(scratch, pos, scap, st->d, run == 2 ? 2 : 1);
+        }
+        else if (c == 'M')
+        {
+            if (run >= 4)
+                pos = dt_emit_str(scratch, pos, scap, k_mon_full[mon]);
+            else if (run == 3)
+                pos = dt_emit_str(scratch, pos, scap, k_mon_abbr[mon]);
+            else
+                pos = dt_emit_num(scratch, pos, scap, st->m, run == 2 ? 2 : 1);
+        }
+        else if (c == 'y')
+        {
+            if (run >= 3)
+                pos = dt_emit_num(scratch, pos, scap, st->y, 4);
+            else
+                pos = dt_emit_num(scratch, pos, scap, st->y % 100u, 2);
+        }
+        else if (c == 'H')
+            pos = dt_emit_num(scratch, pos, scap, st->h, run >= 2 ? 2 : 1);
+        else if (c == 'h')
+        {
+            unsigned h12 = st->h % 12u;
+            if (h12 == 0)
+                h12 = 12;
+            pos = dt_emit_num(scratch, pos, scap, h12, run >= 2 ? 2 : 1);
+        }
+        else if (c == 'm')
+            pos = dt_emit_num(scratch, pos, scap, st->min, run >= 2 ? 2 : 1);
+        else if (c == 's')
+            pos = dt_emit_num(scratch, pos, scap, st->s, run >= 2 ? 2 : 1);
+        else if (c == 't')
+        {
+            const char* ap = (st->h < 12) ? "AM" : "PM";
+            if (run >= 2)
+                pos = dt_emit_str(scratch, pos, scap, ap);
+            else if (pos < scap - 1)
+                scratch[pos++] = ap[0];
+        }
+        else
+        {
+            for (int i = 0; i < run && pos < scap - 1; ++i)
+                scratch[pos++] = c;
+        }
+        p += run;
+    }
+    scratch[pos] = 0;
+    return pos;
+}
+
+/* Shared tail: copy `scratch` into the caller buffer honoring the
+ * cchData==0 (query size) / too-small (return 0) contract. */
+static int dt_finish(const char* scratch, int len, char* buf, int cchData)
+{
     int needed = len + 1;
     if (cchData == 0)
         return needed;
     if (buf == (char*)0 || cchData < needed)
         return 0;
-    /* len is bounded by sizeof(tmp) (=32); the byte loop unrolls
-     * cleanly under -O2 and avoids a memcpy call into a libc the
-     * userland DLL doesn't link. */
     for (int i = 0; i < len; ++i)
-        buf[i] = tmp[i];
+        buf[i] = scratch[i];
+    buf[len] = 0;
+    return needed;
+}
+
+__declspec(dllexport) int GetDateFormatA(unsigned long lcid, DWORD flags, const DUETOS_SYSTEMTIME* st, const char* fmt,
+                                         char* buf, int cchData)
+{
+    (void)lcid;
+    (void)flags;
+    if (st == (const DUETOS_SYSTEMTIME*)0)
+        return 0;
+    char scratch[128];
+    int len = duetos_fmt_datetime(st, (fmt && fmt[0]) ? fmt : "M/d/yyyy", scratch, (int)sizeof(scratch));
+    return dt_finish(scratch, len, buf, cchData);
+}
+
+__declspec(dllexport) int GetDateFormatW(unsigned long lcid, DWORD flags, const DUETOS_SYSTEMTIME* st,
+                                         const WCHAR_t* fmt, WCHAR_t* buf, int cchData)
+{
+    (void)lcid;
+    (void)flags;
+    if (st == (const DUETOS_SYSTEMTIME*)0)
+        return 0;
+    /* Narrow the wide picture (en-US tokens are all ASCII), format,
+     * then widen the result back out. */
+    char nfmt[128];
+    int fi = 0;
+    if (fmt)
+        for (; fmt[fi] && fi < (int)sizeof(nfmt) - 1; ++fi)
+            nfmt[fi] = (char)(fmt[fi] & 0xFF);
+    nfmt[fi] = 0;
+    char scratch[128];
+    int len = duetos_fmt_datetime(st, (fi > 0) ? nfmt : "M/d/yyyy", scratch, (int)sizeof(scratch));
+    int needed = len + 1;
+    if (cchData == 0)
+        return needed;
+    if (buf == (WCHAR_t*)0 || cchData < needed)
+        return 0;
+    for (int i = 0; i < len; ++i)
+        buf[i] = (WCHAR_t)(unsigned char)scratch[i];
     buf[len] = 0;
     return needed;
 }
@@ -570,30 +714,35 @@ __declspec(dllexport) int GetTimeFormatA(unsigned long lcid, DWORD flags, const 
 {
     (void)lcid;
     (void)flags;
-    (void)fmt;
     if (st == (const DUETOS_SYSTEMTIME*)0)
         return 0;
-    char tmp[32];
-    int len = 0;
-    if (st->h < 10)
-        tmp[len++] = '0';
-    len += duetos_u32_to_dec(st->h, tmp + len);
-    tmp[len++] = ':';
-    if (st->min < 10)
-        tmp[len++] = '0';
-    len += duetos_u32_to_dec(st->min, tmp + len);
-    tmp[len++] = ':';
-    if (st->s < 10)
-        tmp[len++] = '0';
-    len += duetos_u32_to_dec(st->s, tmp + len);
-    tmp[len] = 0;
+    char scratch[128];
+    int len = duetos_fmt_datetime(st, (fmt && fmt[0]) ? fmt : "HH:mm:ss", scratch, (int)sizeof(scratch));
+    return dt_finish(scratch, len, buf, cchData);
+}
+
+__declspec(dllexport) int GetTimeFormatW(unsigned long lcid, DWORD flags, const DUETOS_SYSTEMTIME* st,
+                                         const WCHAR_t* fmt, WCHAR_t* buf, int cchData)
+{
+    (void)lcid;
+    (void)flags;
+    if (st == (const DUETOS_SYSTEMTIME*)0)
+        return 0;
+    char nfmt[128];
+    int fi = 0;
+    if (fmt)
+        for (; fmt[fi] && fi < (int)sizeof(nfmt) - 1; ++fi)
+            nfmt[fi] = (char)(fmt[fi] & 0xFF);
+    nfmt[fi] = 0;
+    char scratch[128];
+    int len = duetos_fmt_datetime(st, (fi > 0) ? nfmt : "HH:mm:ss", scratch, (int)sizeof(scratch));
     int needed = len + 1;
     if (cchData == 0)
         return needed;
-    if (buf == (char*)0 || cchData < needed)
+    if (buf == (WCHAR_t*)0 || cchData < needed)
         return 0;
     for (int i = 0; i < len; ++i)
-        buf[i] = tmp[i];
+        buf[i] = (WCHAR_t)(unsigned char)scratch[i];
     buf[len] = 0;
     return needed;
 }
