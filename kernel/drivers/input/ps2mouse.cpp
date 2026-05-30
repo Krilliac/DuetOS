@@ -54,6 +54,8 @@ constexpr u8 kResponseTestPort2Pass = 0x00;
 // Mouse device commands (sent through 0xD4 + 0x60).
 constexpr u8 kMouseCmdSetDefaults = 0xF6;
 constexpr u8 kMouseCmdEnableReporting = 0xF4;
+constexpr u8 kMouseCmdSetSampleRate = 0xF3; // followed by a rate byte
+constexpr u8 kMouseCmdGetDeviceId = 0xF2;   // ACK then one ID byte
 
 constexpr u8 kMouseAck = 0xFA;
 
@@ -89,7 +91,11 @@ constinit u64 g_ring_tail = 0;
 // Per-packet IRQ-side state. Three bytes come in; we assemble them
 // and only push a complete packet onto the ring.
 constinit u8 g_packet_cursor = 0;
-constinit u8 g_packet_bytes[3] = {0, 0, 0};
+constinit u8 g_packet_bytes[4] = {0, 0, 0, 0};
+// Packet length: 3 for the standard protocol, 4 once the IntelliMouse
+// wheel extension is negotiated (byte[3] carries the signed Z/wheel
+// delta). Set by EnableWheel() at bring-up.
+constinit u8 g_packet_len = 3;
 
 constinit duetos::sched::WaitQueue g_readers{};
 
@@ -215,6 +221,47 @@ bool MouseSendAndAck(u8 byte)
     return false;
 }
 
+// Send a mouse command that returns one data byte after its ACK
+// (e.g. Get-Device-ID, 0xF2). Returns the byte, or 0xFF on timeout.
+u8 MouseSendAndReadByte(u8 cmd)
+{
+    if (!MouseSendAndAck(cmd))
+        return 0xFF;
+    for (u64 i = 0; i < kPollSpinLimit; ++i)
+    {
+        if ((Inb(kStatusPort) & kStatusOutputFull) != 0)
+            return Inb(kDataPort);
+    }
+    return 0xFF;
+}
+
+// Set the mouse sample rate (0xF3 + rate byte). Both bytes ACK.
+bool MouseSetSampleRate(u8 rate)
+{
+    return MouseSendAndAck(kMouseCmdSetSampleRate) && MouseSendAndAck(rate);
+}
+
+// Negotiate the Microsoft IntelliMouse wheel extension via the
+// documented 200/100/80 sample-rate "magic knock", then read the device
+// ID: ID==3 means the mouse switched to the 4-byte wheel protocol
+// (byte[3] = signed Z). Non-IntelliMouse mice ignore the knock and report
+// ID 0, so we stay in safe 3-byte mode — this is purely additive. Must
+// run BEFORE enable-reporting so the rate writes don't interleave with
+// motion packets.
+void EnableWheel()
+{
+    if (!MouseSetSampleRate(200) || !MouseSetSampleRate(100) || !MouseSetSampleRate(80))
+        return;
+    const u8 id = MouseSendAndReadByte(kMouseCmdGetDeviceId);
+    if (id == 3)
+    {
+        g_packet_len = 4;
+        core::Log(core::LogLevel::Info, "drivers/ps2mouse", "IntelliMouse wheel enabled (4-byte protocol)");
+    }
+    // Restore a sane reporting rate (the knock left it at 80 Hz).
+    (void)MouseSetSampleRate(100);
+}
+
 // ---------------------------------------------------------------------------
 // Packet decode.
 // ---------------------------------------------------------------------------
@@ -276,6 +323,16 @@ MousePacket DecodePacket(const u8* b)
     p.dx = dx;
     p.dy = dy;
     p.buttons = buttons;
+
+    // IntelliMouse wheel (4-byte mode only): byte[3] is the signed Z
+    // delta. Linux psmouse maps wheel-up to +REL_WHEEL via -(s8)byte[3];
+    // the dz field's convention is likewise "positive = scroll up", so
+    // negate the two's-complement Z. In 3-byte mode dz stays 0.
+    if (g_packet_len == 4)
+    {
+        const i32 z = (b[3] & 0x80U) ? (static_cast<i32>(b[3]) - 256) : static_cast<i32>(b[3]);
+        p.dz = -z;
+    }
     return p;
 }
 
@@ -335,7 +392,7 @@ void IrqHandler()
         g_packet_bytes[g_packet_cursor] = byte;
         ++g_packet_cursor;
 
-        if (g_packet_cursor == 3)
+        if (g_packet_cursor >= g_packet_len)
         {
             PushPacket(DecodePacket(g_packet_bytes));
             g_packet_cursor = 0;
@@ -395,6 +452,12 @@ bool Ps2MouseControllerBringup()
         core::Log(core::LogLevel::Warn, "drivers/ps2mouse", "set-defaults (0xF6) not ACKed — mouse disabled");
         return false;
     }
+
+    // Step 3b: try to negotiate the IntelliMouse wheel (4-byte) protocol.
+    // Safe no-op on mice that don't support it (they stay 3-byte). Done
+    // before enable-reporting so the rate-set dialogue isn't interleaved
+    // with motion packets.
+    EnableWheel();
 
     // Step 4: enable data reporting. Without this, the mouse stays
     // mute regardless of movement.

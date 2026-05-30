@@ -141,7 +141,7 @@ constexpr u32 kTermHeaderH = 14U;
 constexpr u32 kTermFooterH = 12U;
 
 constinit char g_term_header[16] = "TERMINAL";
-constinit char g_term_footer[64] = "Ctrl+Shift+C: copy  PgUp/PgDn: scroll";
+constinit char g_term_footer[64] = "Ctrl+Shift+C: copy  Wheel/PgUp/PgDn/Arrows: scroll";
 
 constinit auto g_term_chrome = MakeWidgetGroup(AppLabel{}, AppLabel{});
 
@@ -950,13 +950,25 @@ bool TerminalFeedArrow(u16 keycode)
     // has no in-line cursor.
     if (keycode == duetos::drivers::input::kKeyArrowUp)
     {
-        ScrollSnapLive();
+        // Scrolled back into the output → arrows navigate scrollback
+        // line-by-line. At the live prompt → shell history (the
+        // conventional terminal behaviour). Enter scrollback first via
+        // the wheel or PgUp.
+        if (g_state.scroll_offset > 0)
+        {
+            ScrollAdjust(1);
+            return true;
+        }
         duetos::core::ShellHistoryPrev();
         return true;
     }
     if (keycode == duetos::drivers::input::kKeyArrowDown)
     {
-        ScrollSnapLive();
+        if (g_state.scroll_offset > 0)
+        {
+            ScrollAdjust(-1);
+            return true;
+        }
         duetos::core::ShellHistoryNext();
         return true;
     }
