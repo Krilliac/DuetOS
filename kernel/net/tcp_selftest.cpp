@@ -431,6 +431,75 @@ bool TestLimitedTransmitWindow()
     return true;
 }
 
+// CUBIC (RFC 9438) integer math — all deterministic, no network.
+bool TestCubic()
+{
+    using namespace internal;
+
+    // (1) Exact integer cube root (the oracle): exact equalities.
+    if (IcbrtExact(0) != 0 || IcbrtExact(1) != 1 || IcbrtExact(8) != 2 || IcbrtExact(26) != 2 || IcbrtExact(27) != 3 ||
+        IcbrtExact(1000000) != 100 || IcbrtExact(999999) != 99 || IcbrtExact(1000000000ull) != 1000)
+        return false;
+
+    // (2) Linux CubicRoot within ~0.5%+1 of exact across a wide range.
+    const u64 samples[] = {27ull, 1000ull, 1000000ull, (1ull << 30), (1ull << 40)};
+    for (unsigned i = 0; i < sizeof(samples) / sizeof(samples[0]); ++i)
+    {
+        const u64 a = samples[i];
+        const u64 e = IcbrtExact(a);
+        const u64 g = CubicRoot(a);
+        const u64 tol = e / 200u + 1u; // 0.5% + 1
+        if (g + tol < e || g > e + tol)
+            return false;
+    }
+
+    // (3) Compile-time constants didn't drift.
+    if (kCubeRttScale != 410u || kBetaScale != 15u || kCubicBeta != 717u)
+        return false;
+    if (kCubeFactor != (1ull << 40) / 410ull)
+        return false;
+
+    // (4) CubicTarget shape (values scaled so delta is non-trivial under
+    // the >>40 fixed point): == origin at K, concave (below) before K,
+    // convex (above) after K, monotonic non-decreasing overall.
+    {
+        const u32 origin = 2000u, K = 20000u;
+        if (CubicTarget(origin, K, K) != origin)
+            return false;
+        if (CubicTarget(origin, K, K - 10000u) >= origin)
+            return false;
+        if (CubicTarget(origin, K, K + 10000u) <= origin)
+            return false;
+        u32 prev = 0u;
+        for (u64 tt = 0; tt <= 40000u; tt += 5000u)
+        {
+            const u32 cur = CubicTarget(origin, K, tt);
+            if (cur < prev)
+                return false;
+            prev = cur;
+        }
+    }
+
+    // (5) Loss reaction: beta=717/1024 + fast-convergence + floor.
+    {
+        Tcb t = {};
+        t.cubic.last_max_cwnd = 0;
+        if (CubicRecalcSsthresh(t, 100) != 70u) // 100*717/1024 = 70
+            return false;
+        if (t.cubic.last_max_cwnd != 100u) // lastmax was 0 → no fast-conv
+            return false;
+        if (t.cubic.epoch_start != 0) // epoch ended
+            return false;
+        t.cubic.last_max_cwnd = 120; // cwnd(100) < lastmax(120) → fast-conv
+        (void)CubicRecalcSsthresh(t, 100);
+        if (t.cubic.last_max_cwnd != 85u) // 100*1741/2048 = 85
+            return false;
+        if (CubicRecalcSsthresh(t, 1) < 2u) // ssthresh floors at 2
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
 void SelfTest()
@@ -481,6 +550,11 @@ void SelfTest()
     if (!TestLimitedTransmitWindow())
     {
         EmitFail("RFC 3042 limited-transmit window");
+        all_ok = false;
+    }
+    if (!TestCubic())
+    {
+        EmitFail("CUBIC congestion control (RFC 9438)");
         all_ok = false;
     }
     arch::Sti();

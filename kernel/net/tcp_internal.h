@@ -131,6 +131,26 @@ struct Tcb
     u32 dup_acks;
     bool in_fast_recovery;
 
+    // CUBIC congestion control (RFC 9438 / Linux tcp_cubic.c port).
+    // Window members are in MSS-PACKETS to match the reference
+    // fixed-point scaling; converted to/from cwnd (BYTES) at the CA
+    // boundary. epoch_start uses the 100Hz tick clock. Growth is
+    // floored to NewReno at the call site (max(cubic,reno)) so it can
+    // never underperform; `enabled` is the kill switch back to Reno.
+    struct CubicState
+    {
+        u32 last_max_cwnd;    // W_max in packets
+        u32 bic_origin_point; // origin (W_max or cwnd), packets
+        u32 bic_K;            // time-to-origin (BICTCP_HZ-scaled)
+        u32 tcp_cwnd;         // Reno-friendly estimate, packets
+        u32 cnt;              // ACKs needed per +1 packet
+        u32 cwnd_cnt;         // ACK accumulator toward next +1
+        u32 ack_cnt;          // ACKed packets this epoch
+        u32 delay_min_ticks;  // min RTT seen (ticks); 0 = unknown
+        u64 epoch_start;      // tick at epoch start; 0 = not in epoch
+        bool enabled;         // false → fall back to NewReno
+    } cubic;
+
     // RTT estimator (RFC-6298). All in ticks (100 Hz).
     bool rtt_have_sample;
     u32 srtt_ticks;
@@ -289,6 +309,37 @@ void DropTcb(u32 idx);
 // Wake any blocked accept() on the parent listener after a child
 // hits ESTABLISHED. Idempotent.
 void NotifyParentAccept(Tcb& child);
+
+// ---------------------------------------------------------------
+// CUBIC congestion control (RFC 9438 / Linux tcp_cubic.c port).
+// Implemented in tcp_cubic.cpp; declared here for the call sites
+// (tcp_segment.cpp, tcp_timer.cpp) and the self-test. Integer-only.
+// ---------------------------------------------------------------
+// Compile-time integer constants (no float). BICTCP_HZ=10,
+// beta=717/1024≈0.7, bic_scale=41 — all from Linux defaults.
+inline constexpr u32 kBictcpHz = 10;
+inline constexpr u32 kBictcpBetaScale = 1024;
+inline constexpr u32 kCubicBeta = 717; // ≈0.7
+inline constexpr u32 kCubicBicScale = 41;
+inline constexpr u32 kCubeRttScale = kCubicBicScale * 10;                                  // 410
+inline constexpr u64 kCubeFactor = (1ull << (10 + 3 * kBictcpHz)) / (kCubicBicScale * 10); // 2^40/410
+inline constexpr u32 kBetaScale = (8 * (kBictcpBetaScale + kCubicBeta) / 3) / (kBictcpBetaScale - kCubicBeta); // 15
+
+// 1-based index of the highest set bit (0 for 0). Linux fls64.
+u32 Fls64(u64 a);
+// Exact floor(cbrt(a)) — the self-test oracle.
+u64 IcbrtExact(u64 a);
+// Linux table+Newton cube root (~0.2% err) — used on the live path.
+u32 CubicRoot(u64 a);
+// Pure CUBIC window target for a scaled time `tt` relative to origin
+// `origin_pkts` and time-to-origin `bic_K`. Exposed so the self-test
+// can pin the concave/convex shape without a clock.
+u32 CubicTarget(u32 origin_pkts, u32 bic_K, u64 tt);
+// Per-ACK CA update: recomputes cubic.cnt for the current cwnd (pkts).
+void CubicUpdate(Tcb& t, u32 cwnd_pkts, u32 acked_pkts);
+// Loss reaction: returns new ssthresh (pkts), updates last_max_cwnd,
+// ends the epoch. beta=717/1024 with fast-convergence.
+u32 CubicRecalcSsthresh(Tcb& t, u32 cwnd_pkts);
 
 } // namespace internal
 
