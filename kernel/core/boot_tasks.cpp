@@ -67,6 +67,7 @@
 #include "shell/shell.h"
 #include "subsystems/audio/audio_backend.h"
 #include "time/tick.h"
+#include "time/timekeeper.h"
 #include "subsystems/win32/window_syscall.h"
 
 namespace duetos::core
@@ -169,18 +170,25 @@ void KbdReaderTask(void*)
     // same key only ~50-80 ms after its own release, which a human
     // physically cannot do (a deliberate same-key re-type — "ll",
     // "ee" — is >120 ms apart). So: when a key is re-pressed within
-    // kRepeatGapTicks of its OWN release, treat it as the start of an
+    // kRepeatGapNs of its OWN release, treat it as the start of an
     // auto-repeat RUN and suppress every further press of that key
     // until a different key arrives or the key goes idle for
-    // kRunBreakTicks. Result: tap = one char, held key = one char,
+    // kRunBreakNs. Result: tap = one char, held key = one char,
     // genuine double-letters preserved.
-    constexpr duetos::u64 kRepeatGapTicks = 10; // ~100 ms at 100 Hz (release->re-press)
-    constexpr duetos::u64 kRunBreakTicks = 45;  // ~450 ms idle ends a run
-    duetos::u16 last_press_code = kKeyNone;     // last accepted (delivered) press
-    duetos::u16 last_release_code = kKeyNone;   // most recent release's key
-    duetos::u64 last_release_tick = 0;          // tick of that release
-    duetos::u16 repeat_run_code = kKeyNone;     // key whose auto-repeat run we're eating
-    duetos::u64 repeat_run_tick = 0;            // tick of the last suppressed repeat
+    //
+    // The clock is time::MonotonicNs() (HPET / clocksource-backed real
+    // time), NOT time::TickCount() (scheduler ticks): the scheduler
+    // tick lags real time under load / TCG, so a 158 ms human gap can
+    // register as <10 ticks and be wrongly eaten. MonotonicNs tracks
+    // wall time on QEMU and VBox alike (falls back to TSC/PIT when HPET
+    // is absent, as it is under VirtualBox).
+    constexpr duetos::u64 kRepeatGapNs = 100'000'000ull; // 100 ms release->re-press
+    constexpr duetos::u64 kRunBreakNs = 450'000'000ull;  // 450 ms idle ends a run
+    duetos::u16 last_press_code = kKeyNone;              // last accepted (delivered) press
+    duetos::u16 last_release_code = kKeyNone;            // most recent release's key
+    duetos::u64 last_release_ns = 0;                     // MonotonicNs of that release
+    duetos::u16 repeat_run_code = kKeyNone;              // key whose auto-repeat run we're eating
+    duetos::u64 repeat_run_ns = 0;                       // MonotonicNs of the last suppressed repeat
     for (;;)
     {
         const KeyEvent ev = Ps2KeyboardReadEvent();
@@ -211,7 +219,7 @@ void KbdReaderTask(void*)
         if (ev.is_release && ev.code != kKeyNone)
         {
             last_release_code = ev.code;
-            last_release_tick = duetos::time::TickCount();
+            last_release_ns = duetos::time::MonotonicNs();
         }
         if (ev.is_release || ev.code == kKeyNone)
         {
@@ -260,25 +268,23 @@ void KbdReaderTask(void*)
         // above for the full rationale / why hardware + time-window
         // approaches don't work under VirtualBox).
         {
-            const duetos::u64 now_ticks = duetos::time::TickCount();
+            const duetos::u64 now_ns = duetos::time::MonotonicNs();
             // Already eating an auto-repeat run for this key: keep
             // eating until it changes key or goes idle.
-            if (repeat_run_code != kKeyNone && ev.code == repeat_run_code &&
-                (now_ticks - repeat_run_tick) < kRunBreakTicks)
+            if (repeat_run_code != kKeyNone && ev.code == repeat_run_code && (now_ns - repeat_run_ns) < kRunBreakNs)
             {
-                repeat_run_tick = now_ticks;
+                repeat_run_ns = now_ns;
                 continue;
             }
             repeat_run_code = kKeyNone;
             // Detect the start of a run: this key was just released
-            // (kRepeatGapTicks ago or less) and re-pressed — a gap no
+            // (kRepeatGapNs ago or less) and re-pressed — a gap no
             // human achieves, so it is the emulator's host-driven
             // auto-repeat. Eat this press and enter run mode.
-            if (ev.code == last_press_code && ev.code == last_release_code &&
-                (now_ticks - last_release_tick) < kRepeatGapTicks)
+            if (ev.code == last_press_code && ev.code == last_release_code && (now_ns - last_release_ns) < kRepeatGapNs)
             {
                 repeat_run_code = ev.code;
-                repeat_run_tick = now_ticks;
+                repeat_run_ns = now_ns;
                 // One line per run start (not per suppressed repeat) so a
                 // VBox log shows the fix engaging without flooding.
                 KLOG_DEBUG_V("input/kbd", "auto-repeat run suppressed; code", static_cast<duetos::u64>(ev.code));
