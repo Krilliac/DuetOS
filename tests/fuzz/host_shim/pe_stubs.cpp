@@ -110,4 +110,5 @@ bool Win32ThunksLookupCatchAll(u64*) { Trap("Win32ThunksLookupCatchAll"); }
 bool Win32ThunksLookupDataCatchAll(u64*) { Trap("Win32ThunksLookupDataCatchAll"); }
 bool Win32ThunksLookupDataNamed(const char*, u64*) { Trap("Win32ThunksLookupDataNamed"); }
 bool Win32ThunksLookupKind(const char*, const char*, u64*, bool*) { Trap("Win32ThunksLookupKind"); }
+void Win32KuserSharedDataPopulate(u8*) { Trap("Win32KuserSharedDataPopulate"); }
 } // namespace duetos::win32
