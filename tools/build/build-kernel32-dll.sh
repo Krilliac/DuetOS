@@ -170,6 +170,12 @@ set +e
     /export:SetEnvironmentVariableA \
     /export:ExpandEnvironmentStringsW \
     /export:ExpandEnvironmentStringsA \
+    /export:GetEnvironmentStringsW \
+    /export:GetEnvironmentStringsA \
+    /export:FreeEnvironmentStringsW \
+    /export:FreeEnvironmentStringsA \
+    /export:GetModuleFileNameW \
+    /export:GetModuleFileNameA \
     /export:GetCPInfo \
     /export:LCMapStringW \
     /export:CompareStringW \
