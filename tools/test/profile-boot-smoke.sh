@@ -155,6 +155,7 @@ case "${PROFILE}" in
             "[hello-winapi] printed via kernel32.WriteFile!"
             "[vcruntime140] memset+memcpy+memmove OK"
             "[strings] strcmp+strlen+strchr OK"
+            "[winfmt] MulDiv+wsprintfA OK"
             "[heap] HeapAlloc + GetProcessHeap OK"
             "[heap] malloc+free+malloc round-trip OK"
             "[heap] calloc zero-fill OK"

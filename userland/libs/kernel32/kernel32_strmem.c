@@ -230,3 +230,34 @@ __declspec(dllexport) wchar_t16* lstrcpyW(wchar_t16* dst, const wchar_t16* src)
     }
     return dst;
 }
+
+/* ------------------------------------------------------------------
+ * MulDiv — kernel32 integer scale helper.
+ *
+ * Computes (nNumber * nNumerator) / nDenominator, rounding the result
+ * to the nearest integer (ties away from zero), using a 64-bit
+ * intermediate so the product can't overflow before the divide. This
+ * is the canonical DPI / GDI scaling primitive (e.g.
+ * MulDiv(value, dpi, 96)) that real Win32 PEs import directly from
+ * kernel32 — it was MISSING, so any PE importing it failed to load.
+ * Returns -1 on a zero denominator or when the rounded result doesn't
+ * fit in a signed 32-bit int (matches Windows). Mirrors the
+ * ReactOS/Wine implementation.
+ * ------------------------------------------------------------------ */
+__declspec(dllexport) int MulDiv(int nNumber, int nNumerator, int nDenominator)
+{
+    long long product;
+    if (nDenominator == 0)
+        return -1;
+    product = (long long)nNumber * (long long)nNumerator;
+    /* Round to nearest, ties away from zero — add/sub half the
+     * denominator with the sign of the product before truncating. */
+    if (product >= 0)
+        product += nDenominator / 2;
+    else
+        product -= nDenominator / 2;
+    product /= nDenominator;
+    if (product > 2147483647LL || product < (-2147483647LL - 1))
+        return -1;
+    return (int)product;
+}
