@@ -1842,6 +1842,70 @@ __declspec(dllexport) int _configure_narrow_argv(int mode)
 }
 
 /* ------------------------------------------------------------------
+ * Wide (UTF-16) command-line + argv surface for wWinMain / wmain PEs.
+ *
+ * The narrow block above serves main()/WinMain() apps; wide-entry
+ * GUI apps (charmap.exe and friends) go through a parallel set the
+ * wWinMainCRTStartup glue calls before wWinMain:
+ *
+ *   _configure_wide_argv(mode)                 // wide argv parse
+ *   _initialize_wide_environment()             // (covered elsewhere)
+ *   lpCmdLine = _get_wide_winmain_command_line()  // -> wWinMain arg
+ *
+ * `_get_wide_winmain_command_line()` returning NULL is fatal: the
+ * startup glue walks the returned pointer to strip the program
+ * name, dereferencing it immediately. Observed as a charmap
+ * 0xc0000005 the instant `_o__get_wide_winmain_command_line` hit the
+ * catch-all NO-OP (which returns 0). Return a valid, NUL-terminated
+ * wide string. For a bare launch the WinMain command line is the
+ * text *after* the program name — empty — so an empty wide string is
+ * both non-faulting and semantically correct.
+ *
+ * Built as an explicit `_ucrt_wchar_t` array, not an `L""` literal:
+ * the cross-toolchain's `wchar_t` is 32-bit, but this file's wide
+ * type is 16-bit (unsigned short), matching Win32 UTF-16.
+ * ------------------------------------------------------------------ */
+static _ucrt_wchar_t g_wcmdline[1] = {0};
+static _ucrt_wchar_t* g_wargv[1] = {(_ucrt_wchar_t*)0};
+static _ucrt_wchar_t** g_wargv_ptr = g_wargv;
+
+__declspec(dllexport) _ucrt_wchar_t* _get_wide_winmain_command_line(void)
+{
+    return g_wcmdline;
+}
+
+__declspec(dllexport) char* _get_narrow_winmain_command_line(void)
+{
+    /* Narrow analog: empty command line (text after the program
+     * name). g_arg0 is the program name itself, not the cmdline. */
+    static char narrow_cmdline[1] = {0};
+    return narrow_cmdline;
+}
+
+/* _configure_wide_argv(mode) — wide argv parse. Same single
+ * synthetic-arg0 model as the narrow path; nothing to tokenise. */
+__declspec(dllexport) int _configure_wide_argv(int mode)
+{
+    (void)mode;
+    return 0;
+}
+
+/* __p___wargv() -> &__wargv (wide argv). The CRT reads *__p___wargv()
+ * to hand wmain its argv. Backed by real storage so the deref is
+ * safe; the vector is empty (NULL-terminated). */
+__declspec(dllexport) _ucrt_wchar_t*** __p___wargv(void)
+{
+    return &g_wargv_ptr;
+}
+
+/* _initialize_wide_environment() — wide env block setup. Mirrors
+ * the narrow no-op; the env is statically empty. Return 0. */
+__declspec(dllexport) int _initialize_wide_environment(void)
+{
+    return 0;
+}
+
+/* ------------------------------------------------------------------
  * onexit / atexit ledger
  *
  * The CRT registers cleanup callbacks through an "onexit table"

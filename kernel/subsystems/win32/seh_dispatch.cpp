@@ -194,6 +194,13 @@ bool Win32DeliverException(arch::TrapFrame* frame, u32 ntstatus, bool is_pf, boo
 
     KLOG_DEBUG_V("win32/seh", "deliver exception code", ntstatus);
     KLOG_DEBUG_V("win32/seh", "  faulting rip", frame->rip);
+    if (is_pf)
+    {
+        // Faulting VA + access kind localise the bad pointer that a
+        // ring-3 PE dereferenced. (access: 0=read 1=write 8=exec)
+        KLOG_DEBUG_V("win32/seh", "  faulting va", fault_va);
+        KLOG_DEBUG_V("win32/seh", "  access (0=r 1=w 8=x)", pf_write ? 1u : 0u);
+    }
     KLOG_DEBUG_V("win32/seh", "  resume at KiUserExceptionDispatcher", kidisp);
 
     // Rewrite the trap frame: resume in user mode at the dispatcher
