@@ -711,6 +711,28 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ## Win32 / NT subsystem
 
+### Locale / format-picture surface (residual)
+
+Landed 2026-05-29: `kernel32!MulDiv`, `user32!wsprintf{A,W}`/`wvsprintf{A,W}`
+(were MISSING), and `kernel32!GetDateFormat{A,W}`/`GetTimeFormat{A,W}` now
+honor their format-picture string (were `(void)fmt`-ignored). Remaining,
+same clean en-US-table pattern (verifiable via the `hello_winapi` pe-winapi
+smoke):
+
+- **`GetNumberFormatA/W`** still ignores its `NUMBERFMT` picture
+  (`userland/libs/kernel32/kernel32_io.c` ~`GetNumberFormatA`,
+  `(void)fmt;`): grouping commas, decimal places, separators. The
+  easiest next item — mirrors the `GetDateFormat` picture work.
+- **`GetLocaleInfoW`** — widen the LCType table
+  (`kernel32_locale.c`): `LOCALE_SSHORTDATE`/`SLONGDATE`/`STIMEFORMAT`/
+  `SCURRENCY`/`SDAYNAME1..7`/`SMONTHNAME1..12` (reuse the day/month
+  tables added for GetDateFormat).
+- **`LCMapStringW`** — add `LCMAP_SORTKEY` (an upcased ordinal key is
+  valid en-US/invariant) and standalone `NORM_IGNORECASE`
+  (`kernel32_io.c` ~`LCMapStringW`, currently case-map only).
+- **`shlwapi!wnsprintf{A,W}`, `StrToIntEx`** — bounded printf + parse;
+  can share the `user32` restricted-printf core.
+
 ### DirectX real device backends
 
 - **Still gated:** HLSL bytecode execution (the `d3dcompiler.dll`
@@ -831,22 +853,17 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
   for L4S / DOCSIS prioritisation. Land in same slice.
 - **Owner:** `kernel/net/stack.cpp`, `kernel/net/tcp_segment.cpp`.
 
-### TCP CUBIC congestion control (RFC 9438)
+### TCP CUBIC congestion control (RFC 9438) — LANDED (2026-05-29, PR #366)
 
-- **Cost:** ~400 LoC + 56 B/TCB (14 fields including HyStart,
-  drop HyStart for v0 → ~350 LoC + ~40 B).
-- **Design:** drop-in replacement for Reno's window math. New
-  per-TCB fields (`last_max_cwnd`, `bic_K`, `bic_origin_point`,
-  `epoch_start`, etc); on ACK, compute `W_cubic(t) = C·(t-K)³ +
-  W_max`; on loss, `W_max = cwnd; cwnd *= 0.7`.
-- **Reference:** Linux `net/ipv4/tcp_cubic.c` (552 LoC, the
-  floor for a correct implementation; integer cube-root via
-  lookup-table + Newton iteration is the only non-obvious bit).
-- **BBR deferred indefinitely:** needs a pacer (no qdisc),
-  delivery-rate estimator (no `tx_done` skb timestamps), four-
-  state machine (~2000 LoC). Land CUBIC first.
-- **Owner:** `kernel/net/tcp_segment.cpp` (window math) +
-  new `kernel/net/tcp_cubic.{h,cpp}` if state grows.
+Implemented as integer-only `kernel/net/tcp_cubic.cpp` (port of Linux
+tcp_cubic.c), wired into the CA branch with a `max(cubic, reno)` floor
+(can never underperform NewReno) and a `Tcb.cubic.enabled` kill switch.
+Loss reaction beta=717/1024 at both 3-dup and RTO sites; verified by
+deterministic `tcp_selftest::TestCubic`. NOTE: throughput benefit is
+unobservable on QEMU's zero-RTT loopback — needs real-HW / high-RTT
+validation; flip `cubic.enabled=false` if it ever misbehaves on silicon.
+**BBR** remains deferred indefinitely (needs a pacer + delivery-rate
+estimator + 4-state machine, ~2000 LoC).
 
 ### IPv6 dual-stack
 
