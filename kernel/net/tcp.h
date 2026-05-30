@@ -113,12 +113,14 @@ struct Stats
     u64 connects;
     u64 accepts;
     u64 closes;
-    u64 oo_segs;          // out-of-order segments received
-    u64 reass_drops;      // OOO segment dropped (queue full)
-    u64 backlog_drops;    // SYN dropped — listener backlog full
-    u64 timeouts;         // retransmit gave up
-    u64 keepalive_probes; // keepalive probes sent
-    u64 persist_probes;   // zero-window persist probes sent
+    u64 oo_segs;           // out-of-order segments received
+    u64 reass_drops;       // OOO segment dropped (queue full)
+    u64 backlog_drops;     // SYN dropped — listener backlog full
+    u64 timeouts;          // retransmit gave up
+    u64 keepalive_probes;  // keepalive probes sent
+    u64 persist_probes;    // zero-window persist probes sent
+    u64 paws_drops;        // segments dropped by PAWS (RFC 7323)
+    u64 limited_transmits; // RFC 3042 limited-transmit sends
     u64 tcbs_alive;
 };
 

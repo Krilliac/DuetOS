@@ -333,10 +333,35 @@ void SendStandaloneRst(u32 iface_index, const MacAddress& peer_mac, Ipv4Address 
     SendSegment(t, flags, seq, ack, nullptr, 0);
 }
 
+// Effective send window = min(snd_wnd, cwnd + extra_cwnd). extra_cwnd
+// is normally 0; RFC 3042 Limited Transmit passes a small positive
+// value to permit one new segment past cwnd on an early dup-ACK. The
+// cwnd + extra add is saturated so it can't wrap u32.
+u32 EffectiveSendWindow(const Tcb& t, u32 extra_cwnd)
+{
+    const u32 eff_cwnd = (t.cwnd > 0xFFFFFFFFu - extra_cwnd) ? 0xFFFFFFFFu : (t.cwnd + extra_cwnd);
+    return (t.snd_wnd < eff_cwnd) ? t.snd_wnd : eff_cwnd;
+}
+
+// PAWS stale-segment test (RFC 7323 §5.3). See the header declaration.
+bool PawsReject(const Tcb& t, u32 seg_tsval, u8 flags, bool has_timestamp)
+{
+    if (!has_timestamp || !t.peer_supports_timestamps)
+        return false;
+    if ((flags & kFlagRst) != 0)
+        return false; // never PAWS-drop a RST
+    // Synchronized states only (Established and later); during the
+    // handshake ts_recent isn't yet a meaningful clock reference.
+    if (static_cast<u8>(t.state) < static_cast<u8>(State::Established))
+        return false;
+    // Mod-2^32 compare: seg_tsval older than ts_recent ⇒ stale duplicate.
+    return static_cast<i32>(seg_tsval - t.ts_recent) < 0;
+}
+
 // Push contiguous bytes from sndbuf onto the wire, honoring snd_wnd,
 // cwnd, and rtx queue depth. Each chunk gets a SegmentBuf entry +
 // rtx_deadline arm.
-void DrainSendBuffer(Tcb& t)
+void DrainSendBuffer(Tcb& t, u32 extra_cwnd)
 {
     if (t.state != State::Established && t.state != State::CloseWait)
         return;
@@ -345,7 +370,7 @@ void DrainSendBuffer(Tcb& t)
         // How many bytes are still allowed by the receiver window
         // and the congestion window combined?
         const u32 in_flight = t.snd_nxt - t.snd_una;
-        const u32 wnd = (t.snd_wnd < t.cwnd) ? t.snd_wnd : t.cwnd;
+        const u32 wnd = EffectiveSendWindow(t, extra_cwnd);
         if (in_flight >= wnd)
             break;
         const u32 send_room = wnd - in_flight;
@@ -694,6 +719,17 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
     if (po.has_timestamp)
     {
         t.peer_supports_timestamps = true;
+        // PAWS (RFC 7323 §5.3): a synchronized-state segment whose TSval
+        // is older than ts_recent is a stale duplicate (reordered old
+        // segment or a ghost from a prior incarnation). Drop it, but
+        // send a current ACK so the peer resynchronizes. Checked before
+        // ts_recent is advanced so the stale value can't poison it.
+        if (PawsReject(t, po.tsval, flags, po.has_timestamp))
+        {
+            ++g_stats.paws_drops;
+            SendSegment(t, kFlagAck, t.snd_nxt, t.rcv_nxt, nullptr, 0);
+            return;
+        }
         t.ts_recent = po.tsval;
         t.ts_recent_age_ticks = NowTicks();
     }
@@ -804,6 +840,20 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
                 else if (t.in_fast_recovery)
                 {
                     t.cwnd += t.mss_send;
+                }
+                else if (t.dup_acks < 3)
+                {
+                    // RFC 3042 Limited Transmit: on the 1st and 2nd dup
+                    // ACK (before fast retransmit), send one new segment
+                    // if the receiver window allows, WITHOUT changing
+                    // cwnd. Widening the effective window by
+                    // dup_acks*MSS caps the extra in-flight data at
+                    // 2*SMSS per the RFC. Lets small-cwnd flows clock
+                    // out losses that would never reach 3 dup ACKs.
+                    const u32 before = t.snd_nxt;
+                    DrainSendBuffer(t, t.dup_acks * t.mss_send);
+                    if (t.snd_nxt != before)
+                        ++g_stats.limited_transmits;
                 }
             }
             else

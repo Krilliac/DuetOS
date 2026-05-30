@@ -372,6 +372,65 @@ bool TestPersistTimer()
     return true;
 }
 
+// PAWS stale-segment detection (RFC 7323 §5.3), including mod-2^32
+// wraparound — the subtle part. Drives the real PawsReject predicate.
+bool TestPaws()
+{
+    using namespace internal;
+    Tcb t = {};
+    t.state = State::Established;
+    t.peer_supports_timestamps = true;
+    t.ts_recent = 1000;
+
+    if (!PawsReject(t, 999, 0, true))
+        return false; // older TSval ⇒ stale ⇒ reject
+    if (PawsReject(t, 1001, 0, true))
+        return false; // newer ⇒ accept
+    if (PawsReject(t, 1000, 0, true))
+        return false; // equal ⇒ accept (strictly-older only)
+    if (PawsReject(t, 999, kFlagRst, true))
+        return false; // never PAWS-drop a RST
+    if (PawsReject(t, 999, 0, false))
+        return false; // no timestamp option ⇒ no PAWS
+    // Not synchronized (handshake) ⇒ never reject.
+    t.state = State::SynSent;
+    if (PawsReject(t, 999, 0, true))
+        return false;
+    t.state = State::Established;
+    // Wraparound: ts_recent near the top, a small new value that
+    // wrapped past 0 must read as NEWER (accept), and the reverse
+    // must read as OLDER (reject).
+    t.ts_recent = 0xFFFFFFF0u;
+    if (PawsReject(t, 0x00000005u, 0, true))
+        return false; // wrapped-forward ⇒ newer ⇒ accept
+    t.ts_recent = 0x00000005u;
+    if (!PawsReject(t, 0xFFFFFFF0u, 0, true))
+        return false; // wrapped-back ⇒ older ⇒ reject
+    return true;
+}
+
+// RFC 3042 Limited Transmit effective-window math (and overflow guard).
+bool TestLimitedTransmitWindow()
+{
+    using namespace internal;
+    Tcb t = {};
+    t.snd_wnd = 10000;
+    t.cwnd = 5000;
+    if (EffectiveSendWindow(t, 0) != 5000)
+        return false; // cwnd-limited, no extra
+    if (EffectiveSendWindow(t, 1460) != 6460)
+        return false; // limited-transmit widens by one MSS
+    t.snd_wnd = 100;
+    if (EffectiveSendWindow(t, 1460) != 100)
+        return false; // receiver window still caps
+    // Saturating add: cwnd + extra must not wrap u32.
+    t.snd_wnd = 0xFFFFFFFFu;
+    t.cwnd = 0xFFFFFFF0u;
+    if (EffectiveSendWindow(t, 0x100) != 0xFFFFFFFFu)
+        return false;
+    return true;
+}
+
 } // namespace
 
 void SelfTest()
@@ -412,6 +471,16 @@ void SelfTest()
     if (!TestPersistTimer())
     {
         EmitFail("zero-window persist timer");
+        all_ok = false;
+    }
+    if (!TestPaws())
+    {
+        EmitFail("PAWS stale-segment rejection");
+        all_ok = false;
+    }
+    if (!TestLimitedTransmitWindow())
+    {
+        EmitFail("RFC 3042 limited-transmit window");
         all_ok = false;
     }
     arch::Sti();
