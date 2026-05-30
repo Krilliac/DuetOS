@@ -66,6 +66,8 @@
 #include "security/login.h"
 #include "shell/shell.h"
 #include "subsystems/audio/audio_backend.h"
+#include "time/tick.h"
+#include "time/timekeeper.h"
 #include "subsystems/win32/window_syscall.h"
 
 namespace duetos::core
@@ -155,9 +157,48 @@ void KbdReaderTask(void*)
     // Sample at each compose call so Ctrl+Alt+Y (theme cycle)
     // takes effect on the very next repaint — don't cache.
     auto desktop_bg = []() { return duetos::drivers::video::ThemeCurrent().desktop_bg; };
+
+    // Software auto-repeat suppression. A held key auto-repeats; the
+    // ps2kbd typematic-rate set (0xF3) disables this on real hardware
+    // and QEMU, but VirtualBox ACKs that command and ignores it,
+    // driving repeat from the HOST as make/BREAK PAIRS — so a guard
+    // that keys off "a press with no intervening release" can't catch
+    // it, and the press-to-press interval (~180-330 ms observed)
+    // overlaps deliberate double-letter typing, so a fixed time
+    // window can't either. The reliable discriminator is the
+    // release->re-press GAP: the emulator's auto-repeat re-presses the
+    // same key only ~50-80 ms after its own release, which a human
+    // physically cannot do (a deliberate same-key re-type — "ll",
+    // "ee" — is >120 ms apart). So: when a key is re-pressed within
+    // kRepeatGapNs of its OWN release, treat it as the start of an
+    // auto-repeat RUN and suppress every further press of that key
+    // until a different key arrives or the key goes idle for
+    // kRunBreakNs. Result: tap = one char, held key = one char,
+    // genuine double-letters preserved.
+    //
+    // The clock is time::MonotonicNs() (HPET / clocksource-backed real
+    // time), NOT time::TickCount() (scheduler ticks): the scheduler
+    // tick lags real time under load / TCG, so a 158 ms human gap can
+    // register as <10 ticks and be wrongly eaten. MonotonicNs tracks
+    // wall time on QEMU and VBox alike (falls back to TSC/PIT when HPET
+    // is absent, as it is under VirtualBox).
+    constexpr duetos::u64 kRepeatGapNs = 100'000'000ull; // 100 ms release->re-press
+    constexpr duetos::u64 kRunBreakNs = 450'000'000ull;  // 450 ms idle ends a run
+    duetos::u16 last_press_code = kKeyNone;              // last accepted (delivered) press
+    duetos::u16 last_release_code = kKeyNone;            // most recent release's key
+    duetos::u64 last_release_ns = 0;                     // MonotonicNs of that release
+    duetos::u16 repeat_run_code = kKeyNone;              // key whose auto-repeat run we're eating
+    duetos::u64 repeat_run_ns = 0;                       // MonotonicNs of the last suppressed repeat
     for (;;)
     {
         const KeyEvent ev = Ps2KeyboardReadEvent();
+        // Per-event diagnostic (DEBUG-gated): each line is one event
+        // returned by the keyboard layer. A single physical keypress
+        // that emits several "key press" lines points at hardware/
+        // firmware typematic auto-repeat (see the keyboard init's
+        // typematic-rate set). Greppable as `kbd-ev`.
+        KLOG_DEBUG_V("input/kbd", ev.is_release ? "kbd-ev release code" : "kbd-ev press code",
+                     static_cast<u64>(ev.code));
         // Elevation broker — if an off-thread broker request has
         // posted a deferred prompt, the kbd reader takes over the
         // prompt UI here (safe because we ARE the legal
@@ -172,6 +213,14 @@ void KbdReaderTask(void*)
         // the VK cache so ext keys collide gracefully with
         // unmapped slots.
         duetos::drivers::video::WindowInputTrackKey(static_cast<duetos::u16>(ev.code), !ev.is_release);
+        // Record a real key's release for the auto-repeat run detector
+        // below (it keys off the release->re-press gap). Modifier-only
+        // transitions (kKeyNone) carry no VK and are skipped.
+        if (ev.is_release && ev.code != kKeyNone)
+        {
+            last_release_code = ev.code;
+            last_release_ns = duetos::time::MonotonicNs();
+        }
         if (ev.is_release || ev.code == kKeyNone)
         {
             // PE-routed key release. The press / char branch
@@ -214,6 +263,36 @@ void KbdReaderTask(void*)
             }
             continue;
         }
+
+        // Software auto-repeat suppression (see the declaration block
+        // above for the full rationale / why hardware + time-window
+        // approaches don't work under VirtualBox).
+        {
+            const duetos::u64 now_ns = duetos::time::MonotonicNs();
+            // Already eating an auto-repeat run for this key: keep
+            // eating until it changes key or goes idle.
+            if (repeat_run_code != kKeyNone && ev.code == repeat_run_code && (now_ns - repeat_run_ns) < kRunBreakNs)
+            {
+                repeat_run_ns = now_ns;
+                continue;
+            }
+            repeat_run_code = kKeyNone;
+            // Detect the start of a run: this key was just released
+            // (kRepeatGapNs ago or less) and re-pressed — a gap no
+            // human achieves, so it is the emulator's host-driven
+            // auto-repeat. Eat this press and enter run mode.
+            if (ev.code == last_press_code && ev.code == last_release_code && (now_ns - last_release_ns) < kRepeatGapNs)
+            {
+                repeat_run_code = ev.code;
+                repeat_run_ns = now_ns;
+                // One line per run start (not per suppressed repeat) so a
+                // VBox log shows the fix engaging without flooding.
+                KLOG_DEBUG_V("input/kbd", "auto-repeat run suppressed; code", static_cast<duetos::u64>(ev.code));
+                continue;
+            }
+            last_press_code = ev.code;
+        }
+
         const bool alt = (ev.modifiers & kKeyModAlt) != 0;
         const bool ctrl = (ev.modifiers & kKeyModCtrl) != 0;
         const bool shift = (ev.modifiers & kKeyModShift) != 0;
@@ -2082,6 +2161,16 @@ void MouseReaderTask(void*)
         {"RAISE", 10, 0, nullptr, 0},   {"MINIMIZE", 23, 0, nullptr, 0}, {"MAXIMIZE", 24, 0, nullptr, 0},
         {"RESTORE", 20, 0, nullptr, 0}, {"CLOSE", 11, 0, nullptr, 0},
     };
+    // Terminal client-area right-click — text actions (COPY /
+    // PASTE / CLEAR via the 70..72 dispatch band) on top of the
+    // standard window controls, so a right-click in the terminal
+    // body is the everyday "copy what I see" gesture. This is the
+    // popup that stands in for true drag-selection until the
+    // widget layer grows an in-content mouse-press hook.
+    static const duetos::drivers::video::MenuItem kTerminalMenuItems[] = {
+        {"COPY", 70, 0, nullptr, 0},  {"PASTE", 71, 0, nullptr, 0}, {"CLEAR", 72, 0, nullptr, 0},
+        {"RAISE", 10, 0, nullptr, 0}, {"CLOSE", 11, 0, nullptr, 0},
+    };
     // Title-bar (NC) right-click — the classic Win32 system
     // menu. RESTORE/MINIMIZE/MAXIMIZE/CLOSE are wired; MOVE
     // does a one-shot recenter (GAP) and SIZE is shown
@@ -2403,6 +2492,16 @@ void MouseReaderTask(void*)
                             // context menu opened). No-op
                             // here; the menu is up.
                             SerialWrite("[ui] right-click target=client (files) window=");
+                            SerialWriteHex(hit);
+                            SerialWrite("\n");
+                        }
+                        else if (hit == duetos::apps::terminal::TerminalWindow())
+                        {
+                            // Terminal body: COPY/PASTE/CLEAR popup.
+                            duetos::drivers::video::MenuOpen(kTerminalMenuItems,
+                                                             sizeof(kTerminalMenuItems) / sizeof(kTerminalMenuItems[0]),
+                                                             cx, cy, hit);
+                            SerialWrite("[ui] right-click target=client (terminal) window=");
                             SerialWriteHex(hit);
                             SerialWrite("\n");
                         }

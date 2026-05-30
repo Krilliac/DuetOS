@@ -346,7 +346,6 @@ bool ApplyRelocations(const u8* file, u64 file_len, const DllHeaders& h, duetos:
     }
     const u64 end = tbl_off + br_sz;
     u64 cursor = tbl_off;
-    u32 blocks = 0;
     u32 applied = 0;
     while (cursor + 8 <= end)
     {
@@ -410,16 +409,9 @@ bool ApplyRelocations(const u8* file, u64 file_len, const DllHeaders& h, duetos:
             }
             ++applied;
         }
-        ++blocks;
         cursor += block_sz;
     }
-    SerialWrite("[dll-load] relocs blocks=");
-    SerialWriteHex(blocks);
-    SerialWrite(" applied=");
-    SerialWriteHex(applied);
-    SerialWrite(" delta=");
-    SerialWriteHex(delta);
-    SerialWrite("\n");
+    KLOG_DEBUG_V("loader/dll", "relocs applied", applied);
     return true;
 }
 
@@ -499,17 +491,13 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
         }
     }
 
-    KLOG_INFO_2V("loader/dll", "DLL load BEGIN", "base_va", base_va, "size", h.image_size);
+    // Per-DLL happy-path trace lives at DEBUG: a single PE spawn
+    // preloads ~40 DLLs, so logging each at INFO floods the serial
+    // console (thousands of lines per boot). The wedge investigator
+    // turns on debug-level logging to see these; a clean boot stays
+    // quiet. Failure legs below stay loud (WARN/ERROR).
+    KLOG_DEBUG_V("loader/dll", "DLL load BEGIN base_va", base_va);
     KLOG_DEBUG_V("loader/dll", "DLL sections+chars; sections", static_cast<u64>(h.section_count));
-    SerialWrite("[dll-load] begin base_va=");
-    SerialWriteHex(base_va);
-    SerialWrite(" size=");
-    SerialWriteHex(h.image_size);
-    SerialWrite(" sections=");
-    SerialWriteHex(h.section_count);
-    SerialWrite(" chars=");
-    SerialWriteHex(h.characteristics);
-    SerialWrite("\n");
 
     if (!MapHeadersPage(file, h.sizeof_headers, base_va, as))
     {
@@ -561,13 +549,7 @@ DllLoadResult DllLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as
         r.image.exports = exp;
     r.status = DllLoadStatus::Ok;
 
-    KLOG_INFO_2V("loader/dll", "DLL load OK", "entry_rva", static_cast<u64>(h.entry_rva), "has_exports",
-                 static_cast<u64>(r.image.has_exports ? 1 : 0));
-    SerialWrite("[dll-load] OK entry_rva=");
-    SerialWriteHex(h.entry_rva);
-    SerialWrite(" has_exports=");
-    SerialWriteHex(r.image.has_exports ? 1 : 0);
-    SerialWrite("\n");
+    KLOG_DEBUG_V("loader/dll", "DLL load OK entry_rva", static_cast<u64>(h.entry_rva));
     return r;
 }
 

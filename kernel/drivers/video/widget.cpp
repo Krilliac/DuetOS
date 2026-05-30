@@ -2808,13 +2808,31 @@ void DesktopCompose(u32 desktop_rgb, const char* banner)
     // Caret — painted last so it overlays everything, including
     // the taskbar. Blink phase toggles per compose; the ui-
     // ticker's 1 Hz compose produces the blink cadence.
-    if (g_caret.visible && g_caret.shown && g_caret.w > 0 && g_caret.h > 0)
+    //
+    // The caret is a single Win32-owned global (only the Win32
+    // CreateCaret syscall creates one; native apps draw their own
+    // carets inline). Gate the paint on the owner still being a
+    // live, visible, *active* window. Without this, a Win32 PE that
+    // called CreateCaret/ShowCaret and then exited (or was killed)
+    // without DestroyCaret leaves the global blinking forever at its
+    // last position — a stuck '|' on the bare desktop. Tying it to
+    // the active window also matches Win32 focus semantics: the
+    // caret belongs to whoever currently has focus.
+    const bool caret_owner_live =
+        WindowValid(g_caret.owner) && g_windows[g_caret.owner].visible && g_caret.owner == g_active_window;
+    if (g_caret.visible && g_caret.shown && g_caret.w > 0 && g_caret.h > 0 && caret_owner_live)
     {
         g_caret_on = !g_caret_on;
         if (g_caret_on)
         {
             FramebufferFillRect(g_caret.x, g_caret.y, g_caret.w, g_caret.h, 0x00000000);
         }
+    }
+    else
+    {
+        // Owner gone / not focused: stop the blink phase so the next
+        // full compose's background redraw clears any residual bar.
+        g_caret_on = false;
     }
     // Overlay the cursor sprite into the offscreen compose buffer
     // BEFORE EndCompose blits. The blit then publishes cursor pixels
