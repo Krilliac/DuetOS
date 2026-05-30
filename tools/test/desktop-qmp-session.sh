@@ -57,6 +57,25 @@ SATA="${PFX}-sata.img"
 rm -rf "${STAGE}"; mkdir -p "${STAGE}/boot/grub"
 cp "${KERNEL_ELF}" "${STAGE}/boot/duetos-kernel.elf"
 cat > "${STAGE}/boot/grub/grub.cfg" <<'EOF'
+# Mirror the canonical boot/grub/grub.cfg + run.sh video setup so GRUB
+# sets a gfx mode and the multiboot2 framebuffer-request tag reaches
+# the kernel. Without it the kernel logs "no framebuffer tag" and falls
+# back to the EFI-GOP rebind path (which works, but the framebuffer
+# self-test SKIPs and the boot looks displayless to a triage reader).
+if loadfont unicode ; then
+    insmod gfxterm
+    if [ "${feature_all_video_module}" = "y" ] ; then
+        insmod all_video
+    else
+        insmod vbe
+        insmod vga
+        insmod efi_gop
+        insmod efi_uga
+    fi
+    set gfxmode=1024x768x32
+    set gfxpayload=keep
+    terminal_output gfxterm
+fi
 set timeout=0
 set default=0
 menuentry "DuetOS qmp-session desktop" {
