@@ -556,6 +556,9 @@ u32 ProcessAck(Tcb& t, u32 ack, bool has_timestamp, u32 tsecr)
                 if (now >= sent)
                 {
                     const u32 rtt = u32(now - sent);
+                    // CUBIC needs the minimum observed RTT (delay_min).
+                    if (t.cubic.delay_min_ticks == 0 || rtt < t.cubic.delay_min_ticks)
+                        t.cubic.delay_min_ticks = rtt;
                     if (!t.rtt_have_sample)
                     {
                         t.srtt_ticks = rtt;
@@ -585,12 +588,37 @@ u32 ProcessAck(Tcb& t, u32 ack, bool has_timestamp, u32 tsecr)
     {
         t.snd_una = ack;
         // Congestion-control: slow-start while cwnd < ssthresh; then
-        // CA. Increment by MSS per RTT in CA (1 MSS * MSS / cwnd
-        // per ACK).
+        // congestion avoidance. In CA, CUBIC (RFC 9438) computes the
+        // window when enabled, FLOORED to NewReno via max(cubic,reno)
+        // so it can never grow slower than the proven Reno path; the
+        // kill switch (cubic.enabled) reverts to pure NewReno.
         if (t.cwnd < t.ssthresh)
             t.cwnd += t.mss_send;
         else
-            t.cwnd += (u32(t.mss_send) * t.mss_send) / (t.cwnd == 0 ? 1 : t.cwnd);
+        {
+            const u32 mss = t.mss_send ? t.mss_send : 1u;
+            // NewReno floor candidate (the previous behaviour).
+            const u32 reno_cwnd = t.cwnd + (u32(mss) * mss) / (t.cwnd == 0 ? 1 : t.cwnd);
+            if (t.cubic.enabled)
+            {
+                u32 cwnd_pkts = t.cwnd / mss;
+                if (cwnd_pkts == 0)
+                    cwnd_pkts = 1;
+                const u32 acked_pkts = (acked + mss - 1) / mss;
+                CubicUpdate(t, cwnd_pkts, acked_pkts ? acked_pkts : 1);
+                if (++t.cubic.cwnd_cnt >= t.cubic.cnt)
+                {
+                    cwnd_pkts += 1;
+                    t.cubic.cwnd_cnt = 0;
+                }
+                const u32 cubic_cwnd = cwnd_pkts * mss;
+                t.cwnd = (cubic_cwnd > reno_cwnd) ? cubic_cwnd : reno_cwnd;
+            }
+            else
+            {
+                t.cwnd = reno_cwnd;
+            }
+        }
         if (t.cwnd > 0x7FFFFFFFu)
             t.cwnd = 0x7FFFFFFFu;
         t.retries = 0;
@@ -823,7 +851,20 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
                 if (t.dup_acks == 3 && !t.in_fast_recovery)
                 {
                     t.in_fast_recovery = true;
-                    t.ssthresh = (t.cwnd / 2 < 2u * t.mss_send) ? 2u * t.mss_send : t.cwnd / 2;
+                    if (t.cubic.enabled)
+                    {
+                        // CUBIC loss reaction: ssthresh = cwnd*beta (0.7),
+                        // record W_max with fast-convergence, end the epoch.
+                        const u32 mss = t.mss_send ? t.mss_send : 1u;
+                        const u32 ssh_pkts = CubicRecalcSsthresh(t, t.cwnd / mss ? t.cwnd / mss : 1u);
+                        t.ssthresh = ssh_pkts * mss;
+                        if (t.ssthresh < 2u * t.mss_send)
+                            t.ssthresh = 2u * t.mss_send;
+                    }
+                    else
+                    {
+                        t.ssthresh = (t.cwnd / 2 < 2u * t.mss_send) ? 2u * t.mss_send : t.cwnd / 2;
+                    }
                     t.cwnd = t.ssthresh + 3u * t.mss_send;
                     // Resend first unacked.
                     for (u32 i = 0; i < kRtxQueueMax; ++i)

@@ -223,6 +223,7 @@ $(BIN)/libduetos_net_parsers_fuzz.a: host_shim/net_parsers_fuzz_shim.rs \
 
 $(BIN)/fuzz_net: fuzz_net.cpp $(NET)/stack.cpp $(NET)/firewall.cpp \
 		$(NET)/socket.cpp $(NET)/tcp.cpp $(NET)/tcp_segment.cpp $(NET)/tcp_timer.cpp \
+		$(NET)/tcp_cubic.cpp \
 		host_shim/net_stubs.cpp host_shim/fs_stubs.cpp \
 		$(BIN)/libduetos_net_parsers_fuzz.a | $(BIN)
 	$(CXX) $(CXXFLAGS) -I $(NET_PARSERS_RUST)/include $^ -o $@

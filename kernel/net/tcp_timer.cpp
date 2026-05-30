@@ -46,10 +46,23 @@ void RetransmitFirstUnacked(Tcb& t)
     // RFC-6298 §5: collapse cwnd to one MSS, multiply RTO by two,
     // re-arm the timer. Karn's algorithm: don't sample RTT off this
     // retransmit.
+    if (t.cubic.enabled)
+    {
+        // CUBIC RTO reaction: record W_max (fast-convergence) and end
+        // the epoch via CubicRecalcSsthresh; cwnd still collapses to 1.
+        const u32 mss = t.mss_send ? t.mss_send : 1u;
+        const u32 ssh_pkts = CubicRecalcSsthresh(t, t.cwnd / mss ? t.cwnd / mss : 1u);
+        t.ssthresh = ssh_pkts * mss;
+        if (t.ssthresh < 2u * t.mss_send)
+            t.ssthresh = 2u * t.mss_send;
+    }
+    else
+    {
+        t.ssthresh = (t.snd_nxt - t.snd_una) / 2;
+        if (t.ssthresh < 2u * t.mss_send)
+            t.ssthresh = 2u * t.mss_send;
+    }
     t.cwnd = t.mss_send;
-    t.ssthresh = (t.snd_nxt - t.snd_una) / 2;
-    if (t.ssthresh < 2u * t.mss_send)
-        t.ssthresh = 2u * t.mss_send;
     t.in_fast_recovery = false;
     t.rto_ticks = t.rto_ticks * 2;
     if (t.rto_ticks > MsToTicks(kMaxRtoMs))

@@ -246,6 +246,16 @@ void ResetTcbStorage(Tcb& t)
     t.ssthresh = 0x7FFFFFFFu;
     t.dup_acks = 0;
     t.in_fast_recovery = false;
+    t.cubic.last_max_cwnd = 0;
+    t.cubic.bic_origin_point = 0;
+    t.cubic.bic_K = 0;
+    t.cubic.tcp_cwnd = 0;
+    t.cubic.cnt = 0;
+    t.cubic.cwnd_cnt = 0;
+    t.cubic.ack_cnt = 0;
+    t.cubic.delay_min_ticks = 0;
+    t.cubic.epoch_start = 0;
+    t.cubic.enabled = true; // CUBIC on by default, NewReno-floored
     t.rtt_have_sample = false;
     t.srtt_ticks = 0;
     t.rttvar_ticks = 0;
