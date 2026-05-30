@@ -1750,3 +1750,579 @@ __declspec(dllexport) int* _errno(void)
 {
     return &g_errno;
 }
+
+/* ==================================================================
+ * Modern UCRT startup surface
+ *
+ * Statically-linked UCRT exes (cmd.exe, anything built with a
+ * recent MSVC /MT) drive `mainCRTStartup` through this sequence
+ * during init:
+ *
+ *   _initterm_e(__xi_a, __xi_z)            // C init
+ *   _initialize_narrow_environment()       // env block
+ *   _configure_narrow_argv(mode)           // argv parse
+ *   _get_initial_narrow_environment()      // -> char**
+ *   __p___argc() / __p___argv()            // -> &__argc / &__argv
+ *   _initialize_onexit_table(table)        // atexit ledger
+ *   ...
+ *   main(__argc, __argv, _environ)
+ *
+ * The fatal bit for us: the CRT *dereferences* the pointers
+ * `__p___argv()` and `__p___argc()` hand back. A NO-OP stub that
+ * returns 0 makes the CRT read through a null pointer -> #PF
+ * (0xc0000005), which is exactly where cmd.exe died before this
+ * surface existed. So these must return the address of real
+ * storage, even if the storage holds a minimal { argc=1,
+ * argv={"X:\\cmd.exe", NULL} } program model.
+ * ================================================================== */
+
+/* The narrow program model. One synthetic arg (the program name)
+ * so `__argc >= 1` and `__argv[0]` is a valid C string — the shape
+ * every argv-walking CRT expects. `_environ` is an empty,
+ * NULL-terminated vector (getenv() still works via the k_env_vars
+ * table above; this block is only what the CRT hands to main()). */
+static char g_arg0[] = "X:\\cmd.exe";
+static char* g_argv[2] = {g_arg0, (char*)0};
+/* `__argv` is a `char**` global; __p___argv() returns its
+ * address (char***). g_argv_ptr IS that global; it points at the
+ * vector above. Likewise g_environ_ptr for `_environ`. */
+static char** g_argv_ptr = g_argv;
+static int g_argc = 1;
+static char* g_environ[1] = {(char*)0};
+static char** g_environ_ptr = g_environ;
+static int g_commode = 0;
+static int g_fmode = 0;
+
+/* __p___argv() -> &__argv (char***); __p___argc() -> &__argc.
+ * The CRT reads *__p___argv() to get argv and *__p___argc() for
+ * argc, then passes both to main(). Returning the address of real
+ * storage is what keeps that dereference from faulting. */
+__declspec(dllexport) char*** __p___argv(void)
+{
+    return &g_argv_ptr;
+}
+
+__declspec(dllexport) int* __p___argc(void)
+{
+    return &g_argc;
+}
+
+/* __p__commode -> &_commode (file-commit mode flag). The CRT
+ * reads/writes this during stdio init; a real backing int is all
+ * it needs. */
+__declspec(dllexport) int* __p__commode(void)
+{
+    return &g_commode;
+}
+
+/* _get_initial_narrow_environment() -> char** environ. Returns
+ * the NULL-terminated (empty) environment vector. The CRT stores
+ * this as the `_environ` global and hands it to main(). */
+__declspec(dllexport) char** _get_initial_narrow_environment(void)
+{
+    return g_environ_ptr;
+}
+
+/* _initialize_narrow_environment() — set up the narrow env block.
+ * Ours is statically constructed (empty + NULL terminator), so
+ * there's nothing to build at runtime. Return 0 = success. */
+__declspec(dllexport) int _initialize_narrow_environment(void)
+{
+    return 0;
+}
+
+/* _configure_narrow_argv(mode) — parse the command line into
+ * __argv/__argc. Our program model is the single synthetic arg0
+ * built above; there's no real command line to tokenise in v0, so
+ * this is a success no-op. Return 0 = success. */
+__declspec(dllexport) int _configure_narrow_argv(int mode)
+{
+    (void)mode;
+    return 0;
+}
+
+/* ------------------------------------------------------------------
+ * onexit / atexit ledger
+ *
+ * The CRT registers cleanup callbacks through an "onexit table"
+ * (an opaque struct the CRT allocates/embeds; we treat it as a
+ * 3-pointer { first, last, end } the docs describe). v0 keeps a
+ * single process-wide fixed-size table and runs nothing at exit
+ * (the kernel reclaims everything on SYS_EXIT), so register simply
+ * records the function pointer and returns success. This is enough
+ * for the startup sequence to complete; full atexit dispatch can
+ * land when a PE actually relies on a registered finaliser running
+ * before teardown.
+ * ------------------------------------------------------------------ */
+
+typedef int (*ucrt_onexit_fn)(void);
+
+typedef struct ucrt_onexit_table
+{
+    ucrt_onexit_fn* first;
+    ucrt_onexit_fn* last;
+    ucrt_onexit_fn* end;
+} ucrt_onexit_table_t;
+
+/* _initialize_onexit_table(table) — zero the table so the CRT
+ * sees an empty, valid ledger. Return 0 = success. */
+__declspec(dllexport) int _initialize_onexit_table(ucrt_onexit_table_t* table)
+{
+    if (table == (ucrt_onexit_table_t*)0)
+        return -1;
+    table->first = (ucrt_onexit_fn*)0;
+    table->last = (ucrt_onexit_fn*)0;
+    table->end = (ucrt_onexit_fn*)0;
+    return 0;
+}
+
+/* _register_onexit_function(table, fn) — record a finaliser. v0
+ * doesn't run them (kernel teardown handles cleanup), so this is a
+ * success no-op that keeps the CRT's atexit() path happy. */
+__declspec(dllexport) int _register_onexit_function(ucrt_onexit_table_t* table, ucrt_onexit_fn fn)
+{
+    (void)table;
+    (void)fn;
+    return 0;
+}
+
+/* _crt_atexit(fn) — the global-table variant of the above. Same
+ * no-op contract. */
+__declspec(dllexport) int _crt_atexit(ucrt_onexit_fn fn)
+{
+    (void)fn;
+    return 0;
+}
+
+/* _callnewh(size) — the new-handler hook the CRT calls when an
+ * allocation fails. With no installed handler the C++ contract is
+ * "return 0" (caller then throws bad_alloc / returns null). */
+__declspec(dllexport) int _callnewh(size_t size)
+{
+    (void)size;
+    return 0;
+}
+
+/* ------------------------------------------------------------------
+ * Startup mode setters — all success no-ops returning 0.
+ *
+ * _set_fmode / _set_new_mode select text-vs-binary stdio default
+ * and the malloc-failure-calls-new-handler flag. _setmode changes
+ * a specific fd's translation mode. _seh_filter_exe is the
+ * top-level SEH filter the CRT installs (0 = EXCEPTION_CONTINUE_
+ * SEARCH, i.e. don't swallow). _invalid_parameter_noinfo is the
+ * non-noreturn sibling of _invalid_parameter_noinfo_noreturn — the
+ * CRT calls it on a bad arg and EXPECTS to continue, so it must
+ * return (not exit).
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) int _set_fmode(int mode)
+{
+    g_fmode = mode;
+    return 0;
+}
+
+__declspec(dllexport) int _set_new_mode(int newhandlermode)
+{
+    (void)newhandlermode;
+    return 0;
+}
+
+__declspec(dllexport) int _setmode(int fd, int mode)
+{
+    (void)fd;
+    /* Return the "previous mode"; text (0x4000 = _O_TEXT) is the
+     * conventional default. Callers that ignore the return are the
+     * common case. */
+    (void)mode;
+    return 0x4000;
+}
+
+__declspec(dllexport) int _seh_filter_exe(unsigned int code, void* ptrs)
+{
+    (void)code;
+    (void)ptrs;
+    return 0; /* EXCEPTION_CONTINUE_SEARCH */
+}
+
+__declspec(dllexport) void _invalid_parameter_noinfo(void) {}
+
+__declspec(dllexport) void _purecall(void) {}
+
+/* ------------------------------------------------------------------
+ * Low-level fd / pipe / popen stubs
+ *
+ * cmd.exe imports these but the banner path doesn't exercise them
+ * (they back _popen / pipe redirection / the raw-fd console).
+ * v0 returns the C "failure" sentinel so any caller that DOES hit
+ * them fails cleanly rather than faulting:
+ *   _open_osfhandle / _tell -> -1
+ *   _pipe / _pclose / _dup / _dup2 / _close -> -1
+ *   _wpopen -> NULL
+ *   _getch -> -1 (EOF)
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) long long _open_osfhandle(long long osfhandle, int flags)
+{
+    (void)osfhandle;
+    (void)flags;
+    return -1;
+}
+
+__declspec(dllexport) long _tell(int fd)
+{
+    (void)fd;
+    return -1L;
+}
+
+__declspec(dllexport) int _pipe(int* fds, unsigned int psize, int textmode)
+{
+    (void)fds;
+    (void)psize;
+    (void)textmode;
+    return -1;
+}
+
+__declspec(dllexport) int _pclose(FILE* stream)
+{
+    (void)stream;
+    return -1;
+}
+
+__declspec(dllexport) FILE* _wpopen(const _ucrt_wchar_t* command, const _ucrt_wchar_t* mode)
+{
+    (void)command;
+    (void)mode;
+    return (FILE*)0;
+}
+
+__declspec(dllexport) int _close(int fd)
+{
+    (void)fd;
+    return -1;
+}
+
+__declspec(dllexport) int _dup(int fd)
+{
+    (void)fd;
+    return -1;
+}
+
+__declspec(dllexport) int _dup2(int fd1, int fd2)
+{
+    (void)fd1;
+    (void)fd2;
+    return -1;
+}
+
+__declspec(dllexport) int _getch(void)
+{
+    return -1; /* EOF — no console input wired in v0 */
+}
+
+/* ------------------------------------------------------------------
+ * _ultoa / _ultoa_s — unsigned-long to ASCII in an arbitrary radix
+ * (2..36). MSVC long = 32-bit. _ultoa assumes the caller's buffer
+ * is large enough (33 bytes covers base-2 of a 32-bit value);
+ * _ultoa_s bounds-checks against the supplied size.
+ * ------------------------------------------------------------------ */
+
+static int ultoa_core(unsigned long value, char* buf, int radix, size_t cap)
+{
+    if (radix < 2 || radix > 36)
+    {
+        if (cap > 0)
+            buf[0] = 0;
+        return 22; /* EINVAL */
+    }
+    char tmp[33];
+    int n = 0;
+    const char* digits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    if (value == 0)
+        tmp[n++] = '0';
+    while (value)
+    {
+        tmp[n++] = digits[value % (unsigned long)radix];
+        value /= (unsigned long)radix;
+    }
+    /* Need n digits + NUL. */
+    if (cap != 0 && (size_t)(n + 1) > cap)
+    {
+        buf[0] = 0;
+        return 34; /* ERANGE */
+    }
+    int o = 0;
+    for (int i = n - 1; i >= 0; --i)
+        buf[o++] = tmp[i];
+    buf[o] = 0;
+    return 0;
+}
+
+__declspec(dllexport) char* _ultoa(unsigned long value, char* buf, int radix)
+{
+    ultoa_core(value, buf, radix, 0);
+    return buf;
+}
+
+__declspec(dllexport) int _ultoa_s(unsigned long value, char* buf, size_t size, int radix)
+{
+    if (buf == (char*)0 || size == 0)
+        return 22; /* EINVAL */
+    return ultoa_core(value, buf, radix, size);
+}
+
+/* ------------------------------------------------------------------
+ * Wide-character string + ctype family
+ *
+ * UTF-16 wchar_t (16-bit). ASCII-range case folding is all v0
+ * needs — the CRT calls these during locale/console setup. Non-
+ * ASCII wide chars pass through unchanged (no Unicode tables).
+ * ------------------------------------------------------------------ */
+
+static _ucrt_wchar_t w_lower(_ucrt_wchar_t c)
+{
+    return (c >= 'A' && c <= 'Z') ? (_ucrt_wchar_t)(c + ('a' - 'A')) : c;
+}
+
+static _ucrt_wchar_t w_upper(_ucrt_wchar_t c)
+{
+    return (c >= 'a' && c <= 'z') ? (_ucrt_wchar_t)(c - ('a' - 'A')) : c;
+}
+
+__declspec(dllexport) int _wcsicmp(const _ucrt_wchar_t* a, const _ucrt_wchar_t* b)
+{
+    while (*a && *b)
+    {
+        _ucrt_wchar_t ca = w_lower(*a), cb = w_lower(*b);
+        if (ca != cb)
+            return (int)ca - (int)cb;
+        ++a;
+        ++b;
+    }
+    return (int)w_lower(*a) - (int)w_lower(*b);
+}
+
+__declspec(dllexport) int _wcsnicmp(const _ucrt_wchar_t* a, const _ucrt_wchar_t* b, size_t n)
+{
+    for (size_t i = 0; i < n; ++i)
+    {
+        _ucrt_wchar_t ca = w_lower(a[i]), cb = w_lower(b[i]);
+        if (ca != cb)
+            return (int)ca - (int)cb;
+        if (!a[i])
+            return 0;
+    }
+    return 0;
+}
+
+__declspec(dllexport) _ucrt_wchar_t* _wcslwr(_ucrt_wchar_t* s)
+{
+    if (s == (_ucrt_wchar_t*)0)
+        return s;
+    for (_ucrt_wchar_t* p = s; *p; ++p)
+        *p = w_lower(*p);
+    return s;
+}
+
+__declspec(dllexport) _ucrt_wchar_t* _wcsupr(_ucrt_wchar_t* s)
+{
+    // NOTE: in-place uppercase — the caller must hand us a WRITABLE
+    // buffer (MSVC's contract). A read-only/literal string here is a
+    // caller bug, not ours; the NULL guard only catches the cheap
+    // case. cmd.exe trips this against a non-writable wide string
+    // during locale init (see commit body / Win32-Surface-Status).
+    if (s == (_ucrt_wchar_t*)0)
+        return s;
+    for (_ucrt_wchar_t* p = s; *p; ++p)
+        *p = w_upper(*p);
+    return s;
+}
+
+/* _wtol — wide string to long (MSVC long = 32-bit). */
+__declspec(dllexport) long _wtol(const _ucrt_wchar_t* s)
+{
+    while (*s == ' ' || *s == '\t')
+        ++s;
+    int neg = 0;
+    if (*s == '-')
+    {
+        neg = 1;
+        ++s;
+    }
+    else if (*s == '+')
+        ++s;
+    long v = 0;
+    while (*s >= '0' && *s <= '9')
+    {
+        v = v * 10 + (long)(*s - '0');
+        ++s;
+    }
+    return neg ? -v : v;
+}
+
+/* wcsspn — length of the initial wide-string segment of `s`
+ * consisting only of chars from `accept`. Narrow strspn's twin. */
+__declspec(dllexport) size_t wcsspn(const _ucrt_wchar_t* s, const _ucrt_wchar_t* accept)
+{
+    size_t n = 0;
+    for (; s[n]; ++n)
+    {
+        const _ucrt_wchar_t* a = accept;
+        int found = 0;
+        for (; *a; ++a)
+            if (*a == s[n])
+            {
+                found = 1;
+                break;
+            }
+        if (!found)
+            break;
+    }
+    return n;
+}
+
+/* iswXXX — wide ctype, ASCII range only. */
+__declspec(dllexport) int iswalpha(int c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+__declspec(dllexport) int iswdigit(int c)
+{
+    return c >= '0' && c <= '9';
+}
+
+__declspec(dllexport) int iswspace(int c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+__declspec(dllexport) int iswxdigit(int c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+__declspec(dllexport) int towlower(int c)
+{
+    return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
+}
+
+__declspec(dllexport) int towupper(int c)
+{
+    return (c >= 'a' && c <= 'z') ? c - ('a' - 'A') : c;
+}
+
+/* setlocale(category, locale) — v0 has only the "C" locale. Return
+ * the literal "C" so callers that inspect the result see a valid,
+ * non-NULL locale name; NULL would signal failure. */
+__declspec(dllexport) char* setlocale(int category, const char* locale)
+{
+    (void)category;
+    (void)locale;
+    static char c_locale[] = "C";
+    return c_locale;
+}
+
+/* _time32 — seconds since the Unix epoch, 32-bit. v0 has no
+ * wall-clock wired to a syscall here, so return a fixed plausible
+ * timestamp (2024-01-01 00:00:00 UTC = 1704067200). Callers that
+ * seed an RNG or stamp output get a stable value; callers that
+ * need real time will surface as a GAP when they appear. */
+__declspec(dllexport) long _time32(long* out)
+{
+    const long fixed = 1704067200L; /* GAP: fixed clock — no time syscall wired here yet */
+    if (out != (long*)0)
+        *out = fixed;
+    return fixed;
+}
+
+/* ------------------------------------------------------------------
+ * __stdio_common_* — the modern UCRT stdio backend.
+ *
+ * Recent CRTs route printf/sprintf/scanf through these shared
+ * entry points instead of the legacy `_vsnprintf`. The signature
+ * carries a 64-bit `options` flag word ahead of the buffer.
+ * We forward to the existing narrow vfmt() backend; the wide
+ * variants down-convert UTF-16 format/output by truncating to the
+ * low byte (ASCII-range correct, which is all the startup banner
+ * path needs).
+ *
+ * Signatures (UCRT):
+ *   __stdio_common_vfprintf(opts, FILE*, fmt, locale, va)
+ *   __stdio_common_vswprintf(opts, wbuf, cap, wfmt, locale, va)
+ *   __stdio_common_vswprintf_s(opts, wbuf, cap, wfmt, locale, va)
+ *   __stdio_common_vswscanf(opts, wbuf, cap, wfmt, locale, va)
+ * ------------------------------------------------------------------ */
+
+__declspec(dllexport) int __stdio_common_vfprintf(unsigned long long options, FILE* stream, const char* format,
+                                                  void* locale, va_list arglist)
+{
+    (void)options;
+    (void)locale;
+    char buf[1024];
+    int n = vfmt(buf, sizeof(buf), format, arglist);
+    if (n > (int)sizeof(buf) - 1)
+        n = (int)sizeof(buf) - 1;
+    fwrite(buf, 1, (size_t)n, stream);
+    return n;
+}
+
+/* Down-convert a UTF-16 format string to ASCII on the stack so the
+ * narrow vfmt() can consume it. Truncates non-ASCII; fine for the
+ * %s/%d/%x startup banner formats. */
+static int wfmt_to_narrow(char* out, size_t out_cap, const _ucrt_wchar_t* wfmt)
+{
+    size_t i = 0;
+    for (; wfmt[i] && i + 1 < out_cap; ++i)
+        out[i] = (char)(wfmt[i] & 0xFF);
+    out[i] = 0;
+    return (int)i;
+}
+
+__declspec(dllexport) int __stdio_common_vswprintf(unsigned long long options, _ucrt_wchar_t* buffer, size_t count,
+                                                   const _ucrt_wchar_t* format, void* locale, va_list arglist)
+{
+    (void)options;
+    (void)locale;
+    if (buffer == (_ucrt_wchar_t*)0 || count == 0)
+        return -1;
+    char nfmt[512];
+    wfmt_to_narrow(nfmt, sizeof(nfmt), format);
+    char nbuf[1024];
+    int n = vfmt(nbuf, sizeof(nbuf), nfmt, arglist);
+    if (n < 0)
+        return -1;
+    /* Widen the narrow result back into the caller's UTF-16 buffer. */
+    size_t o = 0;
+    for (; o + 1 < count && nbuf[o] != 0; ++o)
+        buffer[o] = (_ucrt_wchar_t)(unsigned char)nbuf[o];
+    buffer[o] = 0;
+    return (int)o;
+}
+
+__declspec(dllexport) int __stdio_common_vswprintf_s(unsigned long long options, _ucrt_wchar_t* buffer, size_t count,
+                                                     const _ucrt_wchar_t* format, void* locale, va_list arglist)
+{
+    return __stdio_common_vswprintf(options, buffer, count, format, locale, arglist);
+}
+
+/* __stdio_common_vswscanf — wide sscanf backend. Down-convert both
+ * the input and the format to ASCII, run the narrow vsscanf. The
+ * `%s`/`%c` outputs land in narrow buffers; wide-output specs would
+ * need widening but the startup path doesn't use them.
+ * GAP: wide-output scan specs (%ls into wchar buffer) unimplemented. */
+__declspec(dllexport) int __stdio_common_vswscanf(unsigned long long options, const _ucrt_wchar_t* buffer, size_t count,
+                                                  const _ucrt_wchar_t* format, void* locale, va_list arglist)
+{
+    (void)options;
+    (void)count;
+    (void)locale;
+    char nbuf[512];
+    char nfmt[256];
+    size_t i = 0;
+    for (; buffer[i] && i + 1 < sizeof(nbuf); ++i)
+        nbuf[i] = (char)(buffer[i] & 0xFF);
+    nbuf[i] = 0;
+    wfmt_to_narrow(nfmt, sizeof(nfmt), format);
+    return vsscanf_impl(nbuf, nfmt, arglist);
+}

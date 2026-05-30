@@ -107,6 +107,22 @@ set +e
     /export:_errno \
     /export:_beginthread /export:_beginthreadex \
     /export:_endthread /export:_endthreadex \
+    /export:__p___argv /export:__p___argc /export:__p__commode \
+    /export:_get_initial_narrow_environment /export:_initialize_narrow_environment \
+    /export:_configure_narrow_argv \
+    /export:_initialize_onexit_table /export:_register_onexit_function \
+    /export:_crt_atexit /export:_callnewh \
+    /export:_set_fmode /export:_set_new_mode /export:_setmode \
+    /export:_seh_filter_exe /export:_invalid_parameter_noinfo /export:_purecall \
+    /export:_open_osfhandle /export:_tell /export:_pipe /export:_pclose \
+    /export:_wpopen /export:_close /export:_dup /export:_dup2 /export:_getch \
+    /export:_ultoa /export:_ultoa_s \
+    /export:_wcsicmp /export:_wcsnicmp /export:_wcslwr /export:_wcsupr \
+    /export:_wtol /export:wcsspn /export:setlocale \
+    /export:iswalpha /export:iswdigit /export:iswspace /export:iswxdigit \
+    /export:towlower /export:towupper /export:_time32 \
+    /export:__stdio_common_vfprintf /export:__stdio_common_vswprintf \
+    /export:__stdio_common_vswprintf_s /export:__stdio_common_vswscanf \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"
 LINK_RC=${PIPESTATUS[0]}
