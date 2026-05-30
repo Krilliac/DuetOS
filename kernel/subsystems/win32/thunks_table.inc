@@ -1613,14 +1613,20 @@
     {"api-ms-win-crt-runtime-l1-1-0.dll", "__p__fmode", kOffPErrno},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "__p__commode", kOffPCommode}, // real slot
     {"api-ms-win-crt-runtime-l1-1-0.dll", "__p__environ", kOffPErrno},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p__wenviron", kOffPErrno},
+    // __p__wenviron / __p___wargv return wchar_t*** — the wide CRT
+    // does `_wenviron = *__p__wenviron()` / `__wargv =
+    // *__p___wargv()` and walks the result. The old kOffPErrno
+    // (errno scratch, value 0 = NULL) made that walk start from
+    // NULL; point at the proc-env slots that hold valid
+    // (empty wenviron[] / single-entry wargv[]) arrays.
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p__wenviron", kOffPWenviron},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "__p___argc", kOffPArgc},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "__p___argv", kOffPArgv},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p___wargv", kOffPErrno}, {"ucrtbase.dll", "__p__fmode", kOffPErrno},
-    {"ucrtbase.dll", "__p__environ", kOffPErrno}, {"ucrtbase.dll", "__p__wenviron", kOffPErrno},
-    {"ucrtbase.dll", "__p___wargv", kOffPErrno}, {"msvcrt.dll", "__p__fmode", kOffPErrno},
-    {"msvcrt.dll", "__p__environ", kOffPErrno}, {"msvcrt.dll", "__p__wenviron", kOffPErrno},
-    {"msvcrt.dll", "__p___wargv", kOffPErrno},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "__p___wargv", kOffPWargv}, {"ucrtbase.dll", "__p__fmode", kOffPErrno},
+    {"ucrtbase.dll", "__p__environ", kOffPErrno}, {"ucrtbase.dll", "__p__wenviron", kOffPWenviron},
+    {"ucrtbase.dll", "__p___wargv", kOffPWargv}, {"msvcrt.dll", "__p__fmode", kOffPErrno},
+    {"msvcrt.dll", "__p__environ", kOffPErrno}, {"msvcrt.dll", "__p__wenviron", kOffPWenviron},
+    {"msvcrt.dll", "__p___wargv", kOffPWargv},
     // __acrt_iob_func(idx) -> FILE*. We hand back the writable pad;
     // callers' fwrite(stream, ...) ends up storing transient buf-ptr
     // state in scratch, then our fwrite/fputs thunks ignore the FILE*
@@ -1668,7 +1674,17 @@
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_crt_at_quick_exit", kOffPinReturn0},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_configure_wide_argv", kOffPinReturn0},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "_initialize_wide_environment", kOffPinReturn0},
-    {"api-ms-win-crt-runtime-l1-1-0.dll", "_get_initial_wide_environment", kOffPinReturn0},
+    // Wide-CRT (wmainCRTStartup) initial-environment accessors.
+    // Return a pointer to a valid env block (empty \0\0) instead
+    // of NULL — the wide CRT immediately walks the result, so a
+    // NULL (old kOffPinReturn0) #GP'd inside wmainCRTStartup
+    // before main ran. Narrow counterpart added alongside.
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_get_initial_wide_environment", kOffGetInitialWideEnv},
+    {"ucrtbase.dll", "_get_initial_wide_environment", kOffGetInitialWideEnv},
+    {"msvcrt.dll", "_get_initial_wide_environment", kOffGetInitialWideEnv},
+    {"api-ms-win-crt-runtime-l1-1-0.dll", "_get_initial_environment", kOffGetInitialEnv},
+    {"ucrtbase.dll", "_get_initial_environment", kOffGetInitialEnv},
+    {"msvcrt.dll", "_get_initial_environment", kOffGetInitialEnv},
     {"api-ms-win-crt-runtime-l1-1-0.dll", "__C_specific_handler", kOffPinReturn0}, // ExceptionContinueSearch
     {"ucrtbase.dll", "abort", kOffTerminate}, {"ucrtbase.dll", "_set_invalid_parameter_handler", kOffPinReturn0},
     {"ucrtbase.dll", "_clearfp", kOffPinReturn0}, {"ucrtbase.dll", "_statusfp", kOffPinReturn0},
@@ -1730,6 +1746,23 @@
     {"api-ms-win-crt-private-l1-1-0.dll", "_initialize_onexit_table", kOffPinReturn0},
     {"api-ms-win-crt-private-l1-1-0.dll", "_register_onexit_function", kOffPinReturn0},
     {"api-ms-win-crt-private-l1-1-0.dll", "_execute_onexit_table", kOffPinReturn0},
+    // Wide-CRT startup accessors under the private apiset contract.
+    // ftp.exe / comp.exe import these as
+    // `_o__get_initial_wide_environment` etc. from
+    // api-ms-win-crt-private-l1-1-0.dll. The apiset-static table
+    // routes the contract to ucrtbase, but our freestanding
+    // ucrtbase doesn't export the wide-env accessors, so they fall
+    // through to this flat thunk table. Register them here (the
+    // `_o_`-strip in Win32ThunksLookupKind handles the prefix) so
+    // the wide CRT gets a valid env/wargv chain instead of the
+    // catch-all NO-OP (NULL) that #GP'd wmainCRTStartup.
+    {"api-ms-win-crt-private-l1-1-0.dll", "_get_initial_wide_environment", kOffGetInitialWideEnv},
+    {"api-ms-win-crt-private-l1-1-0.dll", "_get_initial_environment", kOffGetInitialEnv},
+    {"api-ms-win-crt-private-l1-1-0.dll", "_initialize_wide_environment", kOffPinReturn0},
+    {"api-ms-win-crt-private-l1-1-0.dll", "_initialize_narrow_environment", kOffNoNarrowEnv},
+    {"api-ms-win-crt-private-l1-1-0.dll", "_get_initial_narrow_environment", kOffNoNarrowEnv},
+    {"api-ms-win-crt-private-l1-1-0.dll", "__p___wargv", kOffPWargv},
+    {"api-ms-win-crt-private-l1-1-0.dll", "__p__wenviron", kOffPWenviron},
     {"api-ms-win-crt-locale-l1-1-0.dll", "localeconv", kOffPinReturn0},
     {"api-ms-win-crt-locale-l1-1-0.dll", "setlocale", kOffPinReturn0},
     {"api-ms-win-crt-locale-l1-1-0.dll", "_create_locale", kOffPinReturn0},

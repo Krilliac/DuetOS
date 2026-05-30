@@ -25,6 +25,11 @@
  *   0x400 wchar_t envBlockW[...]         ; empty env block (\0\0)
  *   0x500 u64   moduleBase               ; HMODULE for the running PE
  *   0x600 u64   unhandledFilter          ; SetUnhandledExceptionFilter slot
+ *   0x700 wchar_t** __wargv              ; -> wargv[] @ 0x720
+ *   0x710 wchar_t** _wenviron            ; -> wenviron[] @ 0x740
+ *   0x720 wchar_t*  wargv[2]             ; { &cmdlineW, NULL }
+ *   0x740 wchar_t*  wenviron[1]          ; { NULL }
+ *   0x760 char      narrowEnv[2]         ; "\0\0" empty narrow env
  *   0x800 u64   data-miss landing pad    ; see below
  *
  * Lives at a fixed user VA (kProcEnvVa = 0x65000000) in every
@@ -87,6 +92,31 @@ inline constexpr u64 kProcEnvModuleBaseOff = 0x500;
 // stub then returns EXCEPTION_EXECUTE_HANDLER (1) as Windows's
 // documented default.
 inline constexpr u64 kProcEnvUnhandledFilterOff = 0x600;
+
+// === wide-CRT (wmainCRTStartup) startup data =================
+//
+// Wide-entry exes (wmain) run the UCRT's wide startup path, which
+// reads `__wargv = *__p___wargv()`, `_wenviron = *__p___wenviron()`
+// and `_get_initial_wide_environment()`. Each must hand back a
+// VALID, non-NULL pointer chain or the CRT faults dereferencing
+// the (previously NULL / errno-scratch) return.
+//
+//   0x700 wchar_t** __wargv      ; = kProcEnvVa + kProcEnvWargvArrayOff
+//   0x710 wchar_t** _wenviron    ; = kProcEnvVa + kProcEnvWenvironArrayOff
+//   0x720 wchar_t* wargv[2]      ; { &cmdlineW (program name), NULL }
+//   0x740 wchar_t* wenviron[1]   ; { NULL } — empty environment array
+//   0x760 char     narrowEnv[2]  ; "\0\0" — empty narrow env block
+//
+// `__p___wargv` returns &__wargv (a wchar_t***); the CRT does
+// `__wargv = *__p___wargv()`, loading the value at 0x700, which is
+// the user-VA of the wargv[] array at 0x720. Mirrors how
+// `__p___argv` returns &argv (0x08) whose value points at the
+// narrow argv[] array at 0x20.
+inline constexpr u64 kProcEnvWargvPtrOff = 0x700;
+inline constexpr u64 kProcEnvWenvironPtrOff = 0x710;
+inline constexpr u64 kProcEnvWargvArrayOff = 0x720;
+inline constexpr u64 kProcEnvWenvironArrayOff = 0x740;
+inline constexpr u64 kProcEnvNarrowEnvBlockOff = 0x760;
 
 /*
  * Data-import catch-all landing pad.
