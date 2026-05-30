@@ -67,6 +67,13 @@ __declspec(dllimport) BOOL __stdcall TerminateProcess(HANDLE hProcess, unsigned 
 __declspec(dllimport) DWORD __stdcall GetLastError(void);
 __declspec(dllimport) void __stdcall SetLastError(DWORD dwErrCode);
 
+// kernel32 MulDiv + user32 wsprintfA — newly-added Win32 surface.
+// MulDiv is the GDI/DPI integer-scale primitive; wsprintfA is the
+// CRT-free restricted printf. Exercising them here proves both the
+// new exports and that the loader resolves a fresh user32 import.
+__declspec(dllimport) int __stdcall MulDiv(int, int, int);
+__declspec(dllimport) int wsprintfA(char*, const char*, ...);
+
 // critical sections (v0 no-ops)
 // CRITICAL_SECTION is 40 bytes on x64: {PDEBUG_INFO, LONG,
 // LONG, HANDLE, HANDLE, ULONG_PTR}. We only need the size
@@ -463,6 +470,29 @@ void _start(void)
     (void)v_strchr;
     DWORD swritten = 0;
     WriteFile(out, str_msg, (DWORD)v_strlen, &swritten, 0);
+
+    // Exercise — kernel32!MulDiv + user32!wsprintfA. MulDiv(100,3,2)
+    // rounds (300/2) to 150; wsprintfA builds "42-00ff-hi" from the
+    // restricted conversion set (%d, zero-padded %04x, %s). Only print
+    // the OK line when BOTH match, so the pe-winapi smoke signature
+    // proves the new exports actually work end-to-end (loaded via the
+    // preloaded kernel32/user32 EATs, not a stub).
+    {
+        int md = MulDiv(100, 3, 2);
+        char fbuf[64];
+        int fn = wsprintfA(fbuf, "%d-%04x-%s", 42, 255, "hi");
+        const char expect[] = "42-00ff-hi";
+        int fmt_ok = (fn == 10);
+        for (int i = 0; i < 10 && fmt_ok; ++i)
+            if (fbuf[i] != expect[i])
+                fmt_ok = 0;
+        if (md == 150 && fmt_ok)
+        {
+            const char ok[] = "[winfmt] MulDiv+wsprintfA OK\n";
+            DWORD wn = 0;
+            WriteFile(out, ok, sizeof(ok) - 1, &wn, 0);
+        }
+    }
 
     // Exercise — per-process Win32 heap.
     //

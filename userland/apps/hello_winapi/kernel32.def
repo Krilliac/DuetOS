@@ -149,3 +149,4 @@ EXPORTS
     TlsFree
     TlsGetValue
     TlsSetValue
+    MulDiv
