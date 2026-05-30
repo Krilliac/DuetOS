@@ -204,6 +204,25 @@ Result<void> ParseDht(Decoder& d, u32 segment_end)
         }
         if (total > 256 || d.cursor + total > segment_end)
             return Err{ErrorCode::Corrupt};
+        // Reject an over-subscribed Huffman table: more codes packed at
+        // some length than a prefix-free code space permits. Without
+        // this, a crafted DHT (e.g. 207 symbols at length 1, which has
+        // room for only 2 codes) drives the canonical `code` below past
+        // 2^length, and the length<=9 fast-table fill writes past the
+        // u16 fast[512] member — an attacker-controlled OOB write
+        // (found by fuzz_jpeg). Kraft-inequality walk: one code slot at
+        // length 0, double per length, subtract the codes used; a
+        // negative remainder means over-subscription.
+        {
+            i32 avail = 1;
+            for (u32 length = 1; length <= 16; ++length)
+            {
+                avail <<= 1;
+                avail -= static_cast<i32>(counts[length]);
+                if (avail < 0)
+                    return Err{ErrorCode::Corrupt};
+            }
+        }
         HuffTable& t = (table_class == 0) ? d.hdc[table_id] : d.hac[table_id];
         for (u32 i = 0; i < 512; ++i)
             t.fast[i] = 0xFFFF;
@@ -582,30 +601,40 @@ void IdctRow(i32* row)
 
     // Even part — terms involving cos(0), cos(2π/16), cos(4π/16),
     // cos(6π/16). 1D IDCT formula from JPEG Annex A.
-    const i32 e0 = (s0 + s4) << kFrac;
-    const i32 e1 = (s0 - s4) << kFrac;
-    const i32 e2 = s2 * kC6 - s6 * kC2;
-    const i32 e3 = s2 * kC2 + s6 * kC6;
-    const i32 even0 = e0 + e3;
-    const i32 even1 = e1 + e2;
-    const i32 even2 = e1 - e2;
-    const i32 even3 = e0 - e3;
+    // i64 accumulators: a crafted JPEG can dequantize coefficients
+    // large enough that s*kC and the butterfly sums overflow i32
+    // (signed-overflow UB, found by fuzz_jpeg). The products and sums
+    // are computed in 64-bit; the final >>kFrac result is narrowed
+    // back to the i32 row[] (a defined conversion, not UB) and the
+    // pixel is clamped to a byte downstream by ClampToByte.
+    const i64 e0 = (static_cast<i64>(s0) + s4) << kFrac;
+    const i64 e1 = (static_cast<i64>(s0) - s4) << kFrac;
+    const i64 e2 = static_cast<i64>(s2) * kC6 - static_cast<i64>(s6) * kC2;
+    const i64 e3 = static_cast<i64>(s2) * kC2 + static_cast<i64>(s6) * kC6;
+    const i64 even0 = e0 + e3;
+    const i64 even1 = e1 + e2;
+    const i64 even2 = e1 - e2;
+    const i64 even3 = e0 - e3;
 
     // Odd part.
-    const i32 o0 = s1 * kC1 + s3 * kC3 + s5 * kC5 + s7 * kC7;
-    const i32 o1 = s1 * kC3 - s3 * kC7 - s5 * kC1 - s7 * kC5;
-    const i32 o2 = s1 * kC5 - s3 * kC1 + s5 * kC7 + s7 * kC3;
-    const i32 o3 = s1 * kC7 - s3 * kC5 + s5 * kC3 - s7 * kC1;
+    const i64 o0 = static_cast<i64>(s1) * kC1 + static_cast<i64>(s3) * kC3 + static_cast<i64>(s5) * kC5 +
+                   static_cast<i64>(s7) * kC7;
+    const i64 o1 = static_cast<i64>(s1) * kC3 - static_cast<i64>(s3) * kC7 - static_cast<i64>(s5) * kC1 -
+                   static_cast<i64>(s7) * kC5;
+    const i64 o2 = static_cast<i64>(s1) * kC5 - static_cast<i64>(s3) * kC1 + static_cast<i64>(s5) * kC7 +
+                   static_cast<i64>(s7) * kC3;
+    const i64 o3 = static_cast<i64>(s1) * kC7 - static_cast<i64>(s3) * kC5 + static_cast<i64>(s5) * kC3 -
+                   static_cast<i64>(s7) * kC1;
 
-    const i32 add = 1 << (kFrac - 1);
-    row[0] = (even0 + o0 + add) >> kFrac;
-    row[1] = (even1 + o1 + add) >> kFrac;
-    row[2] = (even2 + o2 + add) >> kFrac;
-    row[3] = (even3 + o3 + add) >> kFrac;
-    row[4] = (even3 - o3 + add) >> kFrac;
-    row[5] = (even2 - o2 + add) >> kFrac;
-    row[6] = (even1 - o1 + add) >> kFrac;
-    row[7] = (even0 - o0 + add) >> kFrac;
+    const i64 add = static_cast<i64>(1) << (kFrac - 1);
+    row[0] = static_cast<i32>((even0 + o0 + add) >> kFrac);
+    row[1] = static_cast<i32>((even1 + o1 + add) >> kFrac);
+    row[2] = static_cast<i32>((even2 + o2 + add) >> kFrac);
+    row[3] = static_cast<i32>((even3 + o3 + add) >> kFrac);
+    row[4] = static_cast<i32>((even3 - o3 + add) >> kFrac);
+    row[5] = static_cast<i32>((even2 - o2 + add) >> kFrac);
+    row[6] = static_cast<i32>((even1 - o1 + add) >> kFrac);
+    row[7] = static_cast<i32>((even0 - o0 + add) >> kFrac);
 }
 
 u8 ClampToByte(i32 v)
