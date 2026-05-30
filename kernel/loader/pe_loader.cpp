@@ -2510,6 +2510,34 @@ PeLoadResult PeLoad(const u8* file, u64 file_len, duetos::mm::AddressSpace* as, 
         SerialWrite("[pe-load] step4c proc-env mapped va=");
         SerialWriteHex(win32::kProcEnvVa);
         SerialWrite("\n");
+
+        // 4d. KUSER_SHARED_DATA. Windows maps a read-only system-data
+        //     page at the fixed VA 0x7FFE0000 in every process. The
+        //     MSVC CRT reads it inline (e.g. __security_init_cookie /
+        //     the GetTickCount / time fast-path read TickCountQuad /
+        //     SystemTime at fixed offsets) WITHOUT a syscall, so an
+        //     unmapped 0x7FFE0000 #PFs deep in CRT init before main
+        //     runs (observed as winver.exe's repeated cr2=0x7ffe02c8
+        //     access-violation re-fault loop). Map a zero-filled R/O,
+        //     NX page and seed the few fields a CRT timing fast-path
+        //     reads so the values are sane rather than just non-faulting.
+        auto kusd_frame_r = AllocateFrame();
+        if (!kusd_frame_r)
+        {
+            SerialWrite("[pe-load] FAIL KUSER_SHARED_DATA frame alloc\n");
+            KBP_PROBE(::duetos::debug::ProbeId::kPeLoaderOom);
+            return r;
+        }
+        const PhysAddr kusd_frame = kusd_frame_r.value();
+        auto* kusd_direct = static_cast<u8*>(PhysToVirt(kusd_frame));
+        for (u64 i = 0; i < kPageSize; ++i)
+            kusd_direct[i] = 0;
+        win32::Win32KuserSharedDataPopulate(kusd_direct);
+        AddressSpaceMapUserPage(as, win32::kKuserSharedDataVa, kusd_frame, kPagePresent | kPageUser | kPageNoExecute);
+        guard.Track(win32::kKuserSharedDataVa);
+        SerialWrite("[pe-load] step4d KUSER_SHARED_DATA mapped va=");
+        SerialWriteHex(win32::kKuserSharedDataVa);
+        SerialWrite("\n");
     }
 
     // 5. If imports are present, stand up the per-process

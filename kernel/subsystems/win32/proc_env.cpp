@@ -1,5 +1,7 @@
 #include "subsystems/win32/proc_env.h"
 
+#include "time/tick.h"
+
 namespace duetos::win32
 {
 
@@ -10,6 +12,12 @@ inline void StoreLeU64(u8* dst, u64 value)
 {
     for (u64 b = 0; b < 8; ++b)
         dst[b] = static_cast<u8>((value >> (b * 8)) & 0xFFULL);
+}
+// Write a little-endian u32 at `dst`.
+inline void StoreLeU32(u8* dst, u32 value)
+{
+    for (u64 b = 0; b < 4; ++b)
+        dst[b] = static_cast<u8>((value >> (b * 8)) & 0xFFU);
 }
 } // namespace
 
@@ -90,6 +98,15 @@ void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name, u64 modul
         a[copied] = 0;
     }
 
+    // _acmdln / _wcmdln pointer-variable slots: store the VA of the
+    // command-line STRING (at 0x380 / 0x300). A PE importing _wcmdln
+    // by name reads the pointer from here, then walks the string the
+    // pointer addresses. (See the header note: pointing the IAT slot
+    // straight at the string buffer makes the CRT deref the string's
+    // first chars as an address and #PF.)
+    StoreLeU64(page + kProcEnvAcmdlnPtrOff, kProcEnvVa + kProcEnvCmdlineAOff);
+    StoreLeU64(page + kProcEnvWcmdlnPtrOff, kProcEnvVa + kProcEnvCmdlineWOff);
+
     // Empty wide environment block. An env block is a
     // contiguous run of UTF-16LE `KEY=VALUE\0` entries, plus a
     // final extra NUL terminating the list. The minimum legal
@@ -142,6 +159,49 @@ void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name, u64 modul
     // stops crashing.
     const u64 fake_obj_va = kProcEnvVa + kProcEnvDataMissOff + 8;
     StoreLeU64(page + kProcEnvDataMissOff, fake_obj_va);
+}
+
+void Win32KuserSharedDataPopulate(u8* kusd_page)
+{
+    if (kusd_page == nullptr)
+        return;
+    u8* const page = kusd_page;
+
+    // Uptime in ms from the scheduler tick (100 Hz -> *10 ms/tick).
+    const u64 uptime_ms = duetos::time::TicksToNs(duetos::time::TickCount()) / 1'000'000ULL;
+
+    // TickCountMultiplier: the fixed Windows constant used by the
+    // GetTickCount fast path (TickCountQuad * Multiplier >> 24 == ms).
+    // We store TickCountQuad directly in ms, so a multiplier of
+    // (1 << 24) makes the fast-path arithmetic an identity.
+    StoreLeU32(page + kKusdTickCountMultiplierOff, 1u << 24);
+
+    // TickCountQuad — milliseconds since boot. KSYSTEM_TIME-style
+    // GetTickCount64 readers take this directly.
+    StoreLeU64(page + kKusdTickCountQuadOff, uptime_ms);
+
+    // InterruptTime — 100ns units since boot (KSYSTEM_TIME: LowPart,
+    // High1Time, High2Time). Both High copies equal so a torn-read
+    // retry loop converges immediately.
+    const u64 interrupt_100ns = uptime_ms * 10'000ULL;
+    StoreLeU32(page + kKusdInterruptTimeOff + 0, static_cast<u32>(interrupt_100ns & 0xFFFFFFFFULL));
+    StoreLeU32(page + kKusdInterruptTimeOff + 4, static_cast<u32>(interrupt_100ns >> 32));
+    StoreLeU32(page + kKusdInterruptTimeOff + 8, static_cast<u32>(interrupt_100ns >> 32));
+
+    // SystemTime — 100ns units since 1601-01-01 (FILETIME epoch).
+    // We don't have a wall clock, so anchor at a fixed plausible date
+    // (2024-01-01 00:00:00 UTC) plus uptime. 2024-01-01 in FILETIME =
+    // 0x01DA43B5DC9E0000. Both High copies equal (torn-read contract).
+    const u64 base_2024 = 0x01DA43B5DC9E0000ULL;
+    const u64 system_100ns = base_2024 + interrupt_100ns;
+    StoreLeU32(page + kKusdSystemTimeOff + 0, static_cast<u32>(system_100ns & 0xFFFFFFFFULL));
+    StoreLeU32(page + kKusdSystemTimeOff + 4, static_cast<u32>(system_100ns >> 32));
+    StoreLeU32(page + kKusdSystemTimeOff + 8, static_cast<u32>(system_100ns >> 32));
+
+    // OS version winver / GetVersionEx fast-paths may read: report
+    // Windows 10 (10.0) so version-gated code takes its modern path.
+    StoreLeU32(page + kKusdNtMajorVersionOff, 10);
+    StoreLeU32(page + kKusdNtMinorVersionOff, 0);
 }
 
 } // namespace duetos::win32

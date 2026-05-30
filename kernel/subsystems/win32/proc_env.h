@@ -84,6 +84,19 @@ inline constexpr u64 kProcEnvEnvBlockWOff = 0x400;
 // `mov rax, [kProcEnvVa + kProcEnvModuleBaseOff]` read.
 inline constexpr u64 kProcEnvModuleBaseOff = 0x500;
 
+// _acmdln / _wcmdln POINTER slots. The MSVC CRT globals `char*
+// _acmdln` and `wchar_t* _wcmdln` are pointer VARIABLES whose value
+// is the address of the command-line string. A PE that imports them
+// by name does `mov rax, [_wcmdln]` to load the pointer, then walks
+// the string it points at. The resolver must therefore point the IAT
+// slot at one of THESE slots (which hold the VA of the string buffer),
+// NOT at the string buffer at 0x300 / 0x380 directly — otherwise the
+// first load yields the first 8 bytes of the string interpreted as a
+// pointer and the next deref #PFs on a wild address (observed as
+// cr2 == UTF-16 "WINV..." when winver's __wgetmainargs ran).
+inline constexpr u64 kProcEnvAcmdlnPtrOff = 0x520;
+inline constexpr u64 kProcEnvWcmdlnPtrOff = 0x528;
+
 // Unhandled-exception-filter pointer. Per-process top-level
 // filter set by SetUnhandledExceptionFilter and invoked (via
 // tail-call) by UnhandledExceptionFilter. Stored as a u64 so
@@ -175,5 +188,28 @@ static_assert(kProcEnvAtexitSlotsOff + kProcEnvAtexitMax * 8 <= 0x1000, "atexit 
 /// v0 (argc always = 1). Truncates `program_name` to
 /// `kProcEnvStringBudget - 1` bytes if too long.
 void Win32ProcEnvPopulate(u8* proc_env_page, const char* program_name, u64 module_base);
+
+// KUSER_SHARED_DATA — the read-only system-data page Windows maps at
+// the fixed VA 0x7FFE0000 in every process. The MSVC CRT and many
+// PEs read fields here inline (no syscall): TickCountQuad, SystemTime,
+// InterruptTime, the QPC/perf-counter fast path, NtMajor/MinorVersion.
+// An unmapped 0x7FFE0000 #PFs deep in CRT startup. We map a zero page
+// and seed the handful of fields a CRT timing/version fast-path reads.
+inline constexpr u64 kKuserSharedDataVa = 0x7FFE0000ULL;
+
+// Offsets into KUSER_SHARED_DATA that we populate. Layout per the
+// public ntddk KUSER_SHARED_DATA struct (stable Windows ABI).
+inline constexpr u64 kKusdTickCountMultiplierOff = 0x004; // ULONG, fixed 0x0FA00000
+inline constexpr u64 kKusdInterruptTimeOff = 0x008;       // KSYSTEM_TIME { LowPart, High1Time, High2Time }
+inline constexpr u64 kKusdSystemTimeOff = 0x014;          // KSYSTEM_TIME (100ns since 1601)
+inline constexpr u64 kKusdTickCountQuadOff = 0x320;       // ULONGLONG TickCountQuad (ms)
+inline constexpr u64 kKusdNtMajorVersionOff = 0x26C;      // ULONG
+inline constexpr u64 kKusdNtMinorVersionOff = 0x270;      // ULONG
+
+/// Populate a freshly-zeroed KUSER_SHARED_DATA page. `kusd_page` is
+/// the kernel-visible direct-map pointer to the 4 KiB frame mapped at
+/// kKuserSharedDataVa. Seeds tick count / system time / OS version
+/// from the kernel clock so CRT timing fast-paths read sane values.
+void Win32KuserSharedDataPopulate(u8* kusd_page);
 
 } // namespace duetos::win32

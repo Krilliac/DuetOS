@@ -649,3 +649,277 @@ __declspec(dllexport) void DragFinish(HANDLE hDrop)
 {
     (void)hDrop;
 }
+
+/* --- ShellAboutW / ShellAboutA — the classic "About Windows" box ---
+ *
+ * winver.exe is the canonical caller: its WinMain does nothing but
+ * ShellAboutW(NULL, L"Windows", extraText, hIcon). Real Windows pops a
+ * modal dialog showing the OS version + the szApp / szOtherStuff text.
+ *
+ * shell32 is freestanding (it does NOT link user32/gdi32), so we drive
+ * the window manager directly through the same SYS_WIN_* / SYS_GDI_*
+ * syscalls user32/gdi32 issue. The sequence mirrors the dx_demo_window
+ * fixture that the screenshot harness already verifies:
+ *   1. SYS_WIN_CREATE  — real compositor-backed window (gets a frame +
+ *                        title bar from the WM).
+ *   2. SYS_WIN_SHOW    — make it visible.
+ *   3. SYS_GDI_FILL_RECT + SYS_GDI_TEXT_OUT — paint the client.
+ *   4. A bounded message pump (SYS_WIN_GET_MSG) so the window stays up
+ *      and the process doesn't exit (which would destroy the window)
+ *      before a screendump can capture it. The pump exits on WM_QUIT /
+ *      WM_CLOSE / WM_DESTROY, or after a fixed number of ticks so a
+ *      headless smoke can never wedge forever.
+ *
+ * GAP: not a true modal dialog (no DLGPROC, no OK button hit-testing) —
+ * the window is informational and self-dismisses on a timeout. Good
+ * enough for winver's "show the about box" contract; a real modal pump
+ * is a windowing upgrade tracked in the Roadmap. */
+
+#define SYS_SLEEP_MS 19
+#define SYS_WIN_CREATE 58
+#define SYS_WIN_SHOW 60
+#define SYS_WIN_MSGBOX 61
+#define SYS_WIN_PEEK_MSG 62
+#define SYS_GDI_FILL_RECT 65
+#define SYS_GDI_TEXT_OUT 66
+
+#define WM_DESTROY 0x0002
+#define WM_CLOSE 0x0010
+#define WM_QUIT 0x0012
+#define SW_SHOW 5
+
+/* PM_REMOVE — dequeue the peeked message. */
+#define PM_REMOVE 0x0001
+
+#define ABOUT_W 360
+#define ABOUT_H 200
+
+/* Build a Win32 COLORREF (0x00BBGGRR) from R/G/B. The GDI syscalls
+ * convert this back to framebuffer RGB kernel-side via ColorRefToRgb. */
+#define SA_RGB(r, g, b) (((unsigned)(b) << 16) | ((unsigned)(g) << 8) | (unsigned)(r))
+
+/* SYS_WIN_CREATE(x, y, w, h, title) — title is an ASCII pointer.
+ * 5 args: rdi=x rsi=y rdx=w r10=h r8=title. Returns a biased HWND. */
+static HANDLE sa_win_create(int x, int y, int w, int h, const char* title)
+{
+    register long long r10_h __asm__("r10") = (long long)(unsigned)h;
+    register long long r8_t __asm__("r8") = (long long)(unsigned long long)title;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_CREATE), "D"((long long)(unsigned)x), "S"((long long)(unsigned)y),
+                       "d"((long long)(unsigned)w), "r"(r10_h), "r"(r8_t)
+                     : "memory");
+    return (HANDLE)(unsigned long long)rv;
+}
+
+static void sa_win_show(HANDLE h, int cmd)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_SHOW), "D"((long long)(unsigned long long)h), "S"((long long)cmd)
+                     : "memory");
+    (void)rv;
+}
+
+/* SYS_GDI_FILL_RECT(hwnd, x, y, w, h, colour). The kernel handler runs
+ * colour through ColorRefToRgb, so `colour` is a Win32 COLORREF
+ * (0x00BBGGRR) — not framebuffer RGB. Use the SA_RGB() helper below to
+ * build one from R/G/B components. */
+static void sa_fill_rect(HANDLE hwnd, int x, int y, int w, int h, unsigned colour)
+{
+    register long long r10_w __asm__("r10") = (long long)w;
+    register long long r8_h __asm__("r8") = (long long)h;
+    register long long r9_c __asm__("r9") = (long long)(unsigned long long)colour;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_GDI_FILL_RECT), "D"((long long)(unsigned long long)hwnd), "S"((long long)x),
+                       "d"((long long)y), "r"(r10_w), "r"(r8_h), "r"(r9_c)
+                     : "memory");
+    (void)rv;
+}
+
+/* SYS_GDI_TEXT_OUT(hwnd, x, y, text, len, colour). text is ASCII. */
+static void sa_text_out(HANDLE hwnd, int x, int y, const char* text, unsigned len, unsigned colour)
+{
+    register long long r10_t __asm__("r10") = (long long)(unsigned long long)text;
+    register long long r8_l __asm__("r8") = (long long)len;
+    register long long r9_c __asm__("r9") = (long long)(unsigned long long)colour;
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_GDI_TEXT_OUT), "D"((long long)(unsigned long long)hwnd), "S"((long long)x),
+                       "d"((long long)y), "r"(r10_t), "r"(r8_l), "r"(r9_c)
+                     : "memory");
+    (void)rv;
+}
+
+/* Message layout matches the kernel's CopyMsgToUser: { u64 hwnd; u32
+ * message; u32 pad; u64 wparam; u64 lparam; }. */
+struct SaMsg
+{
+    unsigned long long hwnd;
+    unsigned int message;
+    unsigned int _pad;
+    unsigned long long wparam;
+    unsigned long long lparam;
+};
+
+/* Non-blocking peek+remove. Returns nonzero if a message was dequeued
+ * into *m. SYS_WIN_PEEK_MSG: rdi=msg, rsi=hwnd-filter(0=any),
+ * rdx=remove. */
+static int sa_peek_msg(struct SaMsg* m)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_PEEK_MSG), "D"((long long)(unsigned long long)m), "S"((long long)0),
+                       "d"((long long)PM_REMOVE)
+                     : "memory");
+    return rv > 0;
+}
+
+/* Block the calling thread for `ms` milliseconds. */
+static void sa_sleep_ms(unsigned ms)
+{
+    long long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long long)SYS_SLEEP_MS), "D"((long long)ms) : "memory");
+    (void)rv;
+}
+
+/* Render the about box client area. Title bar + frame come from the WM;
+ * we paint a light client + the version/app text lines. */
+static void sa_paint(HANDLE hwnd, const char* app, const char* extra)
+{
+    /* Light grey client, matching the classic dialog face colour. */
+    sa_fill_rect(hwnd, 0, 0, ABOUT_W, ABOUT_H, SA_RGB(0xEC, 0xEC, 0xEC));
+    /* A thin blue accent bar across the top of the client area. */
+    sa_fill_rect(hwnd, 0, 0, ABOUT_W, 28, SA_RGB(0x24, 0x5E, 0xDC));
+
+    int y = 44;
+    sa_text_out(hwnd, 16, 8, "About", 5, SA_RGB(0xFF, 0xFF, 0xFF));
+
+    /* Line 1: the OS identity. */
+    const char* osline = "DuetOS - Win32 subsystem";
+    unsigned n = 0;
+    while (osline[n])
+        ++n;
+    sa_text_out(hwnd, 16, y, osline, n, SA_RGB(0x20, 0x20, 0x20));
+    y += 22;
+
+    /* Line 2: caller's app name (winver passes L"Windows"). */
+    if (app && app[0])
+    {
+        n = 0;
+        while (app[n])
+            ++n;
+        sa_text_out(hwnd, 16, y, app, n, SA_RGB(0x20, 0x20, 0x20));
+        y += 22;
+    }
+
+    /* Line 3+: caller's extra text (version string). One line is enough
+     * for winver's payload. */
+    if (extra && extra[0])
+    {
+        n = 0;
+        while (extra[n])
+            ++n;
+        sa_text_out(hwnd, 16, y, extra, n, SA_RGB(0x40, 0x40, 0x40));
+        y += 22;
+    }
+
+    sa_text_out(hwnd, 16, ABOUT_H - 28, "OK", 2, SA_RGB(0x24, 0x5E, 0xDC));
+}
+
+/* Down-convert a UTF-16 string into a fixed ASCII buffer (non-ASCII
+ * units -> '?'). Always NUL-terminated. */
+static void sa_w_to_ascii(const wchar_t16* src, char* dst, int cap)
+{
+    int i = 0;
+    if (!dst || cap <= 0)
+        return;
+    if (src)
+    {
+        for (; src[i] && i < cap - 1; ++i)
+            dst[i] = (src[i] < 0x80) ? (char)src[i] : '?';
+    }
+    dst[i] = 0;
+}
+
+/* Diagnostic breadcrumb: SYS_WIN_MSGBOX serial-logs caption+text, so
+ * an operator can confirm ShellAboutW was entered + see the HWND
+ * outcome in the boot log without a debugger. Greppable as [msgbox]. */
+static void sa_trace(const char* caption, const char* text)
+{
+    long long rv;
+    __asm__ volatile("int $0x80"
+                     : "=a"(rv)
+                     : "a"((long long)SYS_WIN_MSGBOX), "D"((long long)(unsigned long long)text),
+                       "S"((long long)(unsigned long long)caption)
+                     : "memory");
+    (void)rv;
+}
+
+static void shell_about_core(const char* app, const char* extra)
+{
+    sa_trace("ShellAboutW", "entered — creating about window");
+    /* Centre-ish on a 1024x768 framebuffer. */
+    HANDLE hwnd = sa_win_create((1024 - ABOUT_W) / 2, (768 - ABOUT_H) / 2, ABOUT_W, ABOUT_H, "About DuetOS");
+    if (!hwnd)
+    {
+        sa_trace("ShellAboutW", "sa_win_create returned NULL");
+        return;
+    }
+    sa_win_show(hwnd, SW_SHOW);
+    sa_paint(hwnd, app, extra);
+
+    /* Bounded modal-ish lifetime: keep the window (and the process)
+     * alive for ~30s so a headless screendump (captured ~20-25s after
+     * bringup) can see the about box, then return cleanly. This mirrors
+     * the dx_demo_window screenshot-fixture pattern (Sleep + settle)
+     * rather than blocking forever in GetMessage. We non-blockingly
+     * drain the queue each tick so an explicit WM_CLOSE / WM_DESTROY /
+     * WM_QUIT dismisses early, and repaint on any delivered message so
+     * a compositor expose keeps the content fresh.
+     *
+     * GAP: no OK-button hit-test — the box self-dismisses on the
+     * timeout. A true modal dialog (DLGPROC + button) is a windowing
+     * upgrade tracked in the Roadmap. */
+    struct SaMsg m;
+    const int kTicks = 300; /* 300 * 100ms = ~30s */
+    for (int t = 0; t < kTicks; ++t)
+    {
+        int repaint = 0;
+        while (sa_peek_msg(&m))
+        {
+            if (m.message == WM_QUIT || m.message == WM_CLOSE || m.message == WM_DESTROY)
+                return;
+            repaint = 1;
+        }
+        if (repaint)
+            sa_paint(hwnd, app, extra);
+        sa_sleep_ms(100);
+    }
+}
+
+__declspec(dllexport) int ShellAboutW(HANDLE hWnd, const wchar_t16* szApp, const wchar_t16* szOtherStuff, HANDLE hIcon)
+{
+    (void)hWnd;
+    (void)hIcon;
+    char app[128];
+    char extra[256];
+    sa_w_to_ascii(szApp, app, (int)sizeof(app));
+    sa_w_to_ascii(szOtherStuff, extra, (int)sizeof(extra));
+    shell_about_core(app, extra);
+    return 1; /* TRUE — Windows returns nonzero on success */
+}
+
+__declspec(dllexport) int ShellAboutA(HANDLE hWnd, const char* szApp, const char* szOtherStuff, HANDLE hIcon)
+{
+    (void)hWnd;
+    (void)hIcon;
+    shell_about_core(szApp ? szApp : "", szOtherStuff ? szOtherStuff : "");
+    return 1;
+}

@@ -824,17 +824,22 @@ bool Win32ThunksLookupDataNamed(const char* func, u64* out_va)
         *out_va = kProcEnvVa + kProcEnvWenvironPtrOff;
         return true;
     }
-    // _acmdln / _wcmdln: pointer slots holding the command-line
-    // string in narrow / wide form. proc-env populates both at
-    // offset 0x380 / 0x300.
+    // _acmdln / _wcmdln are pointer VARIABLES (`char* _acmdln`,
+    // `wchar_t* _wcmdln`): the IAT slot must address a location whose
+    // VALUE is the cmdline-string VA, so the CRT's `mov rax,[_wcmdln]`
+    // loads the pointer and then walks the string. Point at the
+    // dedicated pointer slots (0x520 / 0x528) proc-env fills with the
+    // string addresses — NOT at the string buffers (0x380 / 0x300),
+    // which would feed the string's first bytes back as a wild pointer
+    // (the winver __wgetmainargs #PF, cr2 == UTF-16 "WINV...").
     if (strEq(func, "_acmdln"))
     {
-        *out_va = kProcEnvVa + kProcEnvCmdlineAOff;
+        *out_va = kProcEnvVa + kProcEnvAcmdlnPtrOff;
         return true;
     }
     if (strEq(func, "_wcmdln"))
     {
-        *out_va = kProcEnvVa + kProcEnvCmdlineWOff;
+        *out_va = kProcEnvVa + kProcEnvWcmdlnPtrOff;
         return true;
     }
     // MSVCP140 well-known C++ stream globals. These are CLASS

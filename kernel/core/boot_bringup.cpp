@@ -2444,17 +2444,60 @@ void PeexecDeferredTask(void*)
         SerialWrite("[peexec] FAIL: timed out waiting for a FAT volume\n");
         return;
     }
-    fat::DirEntry entry;
-    if (!fat::Fat32LookupPath(v, g_peexec_path, &entry))
-    {
-        SerialWrite("[peexec] FAIL: no such file on FAT vol 0\n");
-        return;
-    }
+    // The file may live on any mounted FAT volume — Fat32Volume(0) is
+    // whichever probed first, not necessarily the one carrying the
+    // staged .exe. Worse, the emulated block path occasionally drops a
+    // FAT-sector read mid-chain (kernel/fs/fat32.cpp ReadFatEntry warns
+    // "sector read failed; treating chain as EOC"), which silently
+    // truncates a multi-cluster file to its first cluster and trips a
+    // BadDosMagic reject. Both failure modes are transient/volume-
+    // dependent, so: scan EVERY volume for the file, and retry the
+    // lookup+read a few times, accepting the read only when it returns
+    // the full size_bytes the dir entry advertises. This rides out the
+    // selection race and the truncating-read flake without changing the
+    // FS itself.
     static duetos::u8 s_peexec_buf[1u << 20];
-    const duetos::i64 rn = fat::Fat32ReadFile(v, &entry, s_peexec_buf, sizeof(s_peexec_buf));
+    duetos::i64 rn = 0;
+    for (duetos::u32 attempt = 0; attempt < 12 && rn <= 0; ++attempt)
+    {
+        const duetos::u32 vc = fat::Fat32VolumeCount();
+        for (duetos::u32 vi = 0; vi < vc; ++vi)
+        {
+            const fat::Volume* vol = fat::Fat32Volume(vi);
+            if (vol == nullptr)
+            {
+                continue;
+            }
+            fat::DirEntry entry;
+            if (!fat::Fat32LookupPath(vol, g_peexec_path, &entry))
+            {
+                continue;
+            }
+            const duetos::i64 got = fat::Fat32ReadFile(vol, &entry, s_peexec_buf, sizeof(s_peexec_buf));
+            // Accept only a complete read. A short read means a FAT
+            // chain-walk hiccup truncated the file — retry rather than
+            // hand a torn image to the PE loader.
+            if (got > 0 && static_cast<duetos::u64>(got) >= entry.size_bytes)
+            {
+                rn = got;
+                break;
+            }
+        }
+        if (rn <= 0)
+        {
+            // Re-probe (a late-mounting volume / a transient read may
+            // succeed on the next pass) and back off one tick.
+            const duetos::u32 bdc2 = duetos::drivers::storage::BlockDeviceCount();
+            for (duetos::u32 h = 0; h < bdc2; ++h)
+            {
+                (void)fat::Fat32Probe(h, nullptr);
+            }
+            duetos::sched::SchedSleepTicks(10);
+        }
+    }
     if (rn <= 0)
     {
-        SerialWrite("[peexec] FAIL: read error or empty\n");
+        SerialWrite("[peexec] FAIL: file not found / unreadable on any FAT volume\n");
         return;
     }
     SerialWrite("[peexec] read bytes=");

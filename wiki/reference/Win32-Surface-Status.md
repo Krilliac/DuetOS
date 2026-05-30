@@ -1683,6 +1683,16 @@ zero attributes, empty GetDisplayNameOf STRRET). Enough that
 callers see `S_OK` instead of `class-not-registered`; not
 enough to actually navigate the shell namespace.
 `ShellExecuteW`, `ShellExecuteExW`, `SHFileOperationW` — STUB.
+`ShellAboutW` / `ShellAboutA` — REAL (GUI): creates a real
+compositor-backed "About DuetOS" window via `SYS_WIN_CREATE` +
+`SYS_WIN_SHOW`, paints a titled client (blue accent bar + the
+OS-identity / app / version-text lines) via `SYS_GDI_FILL_RECT`
++ `SYS_GDI_TEXT_OUT`, then runs a bounded ~30 s message-pump
+loop so the window stays visible (and the process alive) for a
+screendump before returning. This is what makes `winver.exe`'s
+dialog appear on the desktop. GAP: not a true modal dialog (no
+DLGPROC, no OK-button hit-test) — it self-dismisses on the
+timeout or an explicit WM_CLOSE/WM_QUIT.
 
 **Thunked imports (auto-generated from `kernel/subsystems/win32/thunks_table.inc`):**
 
