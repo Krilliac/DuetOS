@@ -121,7 +121,8 @@ set +e
     /export:_wtol /export:wcsspn /export:setlocale \
     /export:iswalpha /export:iswdigit /export:iswspace /export:iswxdigit \
     /export:towlower /export:towupper /export:_time32 \
-    /export:__stdio_common_vfprintf /export:__stdio_common_vswprintf \
+    /export:__stdio_common_vfprintf /export:__stdio_common_vfwprintf \
+    /export:__stdio_common_vswprintf \
     /export:__stdio_common_vswprintf_s /export:__stdio_common_vswscanf \
     /out:"${DLL}" \
     "${OBJ}" 2>&1 | grep -v "align specified without /driver"

@@ -99,11 +99,25 @@ LLD_LINK="${LLD_LINK:-lld-link}"
     -O2 -Wall -Wextra \
     "${SRC_C}" -o "${OBJ}"
 
-# Build /export: args from comma-separated list.
+# Build /export: args from comma-separated list. An entry may carry
+# an explicit ordinal as "name@ordinal" (e.g. "socket@23"); we
+# translate that into lld-link's "/export:name,@ordinal" form so the
+# generated PE export-directory pins that function at the canonical
+# Windows ordinal. This matters for callers that import by ordinal
+# (e.g. ftp.exe imports ws2_32 socket/connect/... purely by their
+# stable Windows ordinals — name-only exports would bind those
+# ordinal slots to the wrong functions). Entries without "@" keep
+# lld's default sequential ordinal assignment.
 EXPORT_ARGS=()
 IFS=',' read -ra NAMES <<< "${EXPORTS}"
 for n in "${NAMES[@]}"; do
-    EXPORT_ARGS+=("/export:${n}")
+    if [[ "${n}" == *"@"* ]]; then
+        sym="${n%@*}"
+        ord="${n##*@}"
+        EXPORT_ARGS+=("/export:${sym},@${ord}")
+    else
+        EXPORT_ARGS+=("/export:${n}")
+    fi
 done
 
 rm -f "${DLL}"
