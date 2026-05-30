@@ -118,11 +118,27 @@ set +e
     /export:fopen \
     /export:fclose \
     /export:fread \
+    /export:fwrite \
+    /export:fputs \
+    /export:fputc \
+    /export:puts \
+    /export:fflush \
     /export:fseek \
     /export:ftell \
     /export:rewind \
     /export:feof \
     /export:ferror \
+    /export:__iob_func \
+    /export:_fileno \
+    /export:_get_osfhandle \
+    /export:fprintf \
+    /export:vfprintf \
+    /export:printf \
+    /export:vprintf \
+    /export:vsnprintf \
+    /export:snprintf \
+    /export:_vsnprintf \
+    /export:_vsnwprintf \
     /export:_aligned_malloc \
     /export:_aligned_free \
     /export:memcpy \

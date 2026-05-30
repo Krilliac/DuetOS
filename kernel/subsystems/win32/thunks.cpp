@@ -851,12 +851,12 @@ bool IsLikelyDataImport(const char* func)
     // PEs actually import. Add new names as live-test boots surface
     // them.
     static const char* const kCrtDataNames[] = {
-        "_commode",   "_fmode",      "_environ",   "_wenviron",      "__argc",          "__argv",        "__wargv",
-        "_acmdln",    "_wcmdln",     "_pgmptr",    "_wpgmptr",       "__mb_cur_max",    "___mb_cur_max", "_iob",
-        "__iob_func", "_osplatform", "_osver",     "_winver",        "_winmajor",       "_winminor",     "_aexit_rtn",
-        "__progname", "_HUGE",       "__threadid", "__threadhandle", "__sys_errlist",   "__sys_nerr",    "_timezone",
-        "_daylight",  "_tzname",     "__timezone", "__daylight",     "__tzname",        "__initenv",     "_winitenv",
-        "_amblksiz",  "__badioinfo", "__pioinfo",  "__lc_codepage",  "__lc_collate_cp",
+        "_commode",    "_fmode",     "_environ",       "_wenviron",       "__argc",       "__argv",        "__wargv",
+        "_acmdln",     "_wcmdln",    "_pgmptr",        "_wpgmptr",        "__mb_cur_max", "___mb_cur_max", "_iob",
+        "_osplatform", "_osver",     "_winver",        "_winmajor",       "_winminor",    "_aexit_rtn",    "__progname",
+        "_HUGE",       "__threadid", "__threadhandle", "__sys_errlist",   "__sys_nerr",   "_timezone",     "_daylight",
+        "_tzname",     "__timezone", "__daylight",     "__tzname",        "__initenv",    "_winitenv",     "_amblksiz",
+        "__badioinfo", "__pioinfo",  "__lc_codepage",  "__lc_collate_cp",
     };
     for (const char* name : kCrtDataNames)
     {

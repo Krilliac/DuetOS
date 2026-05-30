@@ -824,6 +824,460 @@ __declspec(dllexport) void _aligned_free(void* p)
     __asm__ volatile("int $0x80" : "=a"(discard) : "a"((long long)12), "D"((long long)orig) : "memory");
 }
 
+/* ==================================================================
+ * C-runtime stdio (real, routed to SYS_WRITE / SYS_FILE_WRITE)
+ *
+ * Real Windows console exes (sort.exe, where.exe, hostname.exe)
+ * import their stdio from msvcrt.dll — objdump confirms
+ * `msvcrt.dll!__iob_func`, `msvcrt.dll!fprintf`,
+ * `msvcrt.dll!_fileno`. They do `stdout = &__iob_func()[1]`,
+ * `stderr = &__iob_func()[2]` and print via fprintf — which had
+ * no flat thunk row, so output was swallowed by the catch-all
+ * NO-OP. Implementing real exports here (preloaded-DLL EAT wins
+ * over the flat thunk table) restores their console output.
+ *
+ * CRITICAL: classic msvcrt x64 sizeof(FILE) == 48. The exe adds
+ * 0x30 (=48) per index after calling __iob_func, so the static
+ * table's stride MUST be 48 bytes or stdout/stderr land on the
+ * wrong entry. We store the route (0/1/2) in the first 8 bytes
+ * and pad to 48.
+ * ================================================================== */
+
+typedef struct DUETOS_IOB_msvcrt
+{
+    long long route; /* 0 = stdin, 1 = stdout, 2 = stderr */
+    long long pad[5];
+} DUETOS_IOB;
+
+_Static_assert(sizeof(DUETOS_IOB) == 48, "msvcrt FILE stride must be classic-msvcrt 48 bytes");
+
+static DUETOS_IOB g_iob[3] = {{0, {0, 0, 0, 0, 0}}, {1, {0, 0, 0, 0, 0}}, {2, {0, 0, 0, 0, 0}}};
+
+__declspec(dllexport) DUETOS_IOB* __iob_func(void)
+{
+    return &g_iob[0];
+}
+
+/* Map a FILE* the exe handed us back to a route index (0/1/2).
+ * The exe computes &__iob_func()[N] so the pointer should land
+ * exactly on a 48-byte boundary; we CLAMP to 0..2 so a slightly
+ * off pointer still prints rather than faulting. A pointer
+ * outside the table band (a fopen FILE*, below) is reported as
+ * -1 by the caller, which checks the band first. */
+static int iob_route(const void* f)
+{
+    long long delta = (const char*)f - (const char*)&g_iob[0];
+    long long idx = delta / 48;
+    if (idx < 0)
+        idx = 0;
+    if (idx > 2)
+        idx = 2;
+    return (int)idx;
+}
+
+/* True if f points inside the static __iob table (a std stream)
+ * rather than at a heap FILE returned by fopen(). */
+static int iob_is_std(const void* f)
+{
+    const char* base = (const char*)&g_iob[0];
+    const char* p = (const char*)f;
+    return p >= base && p < base + sizeof(g_iob);
+}
+
+/* Low-level: write n bytes to fd via SYS_WRITE (syscall 2). */
+static void msvcrt_sys_write(int fd, const char* p, long long n)
+{
+    long long discard;
+    __asm__ volatile("int $0x80"
+                     : "=a"(discard)
+                     : "a"((long long)2), "D"((long long)fd), "S"((long long)p), "d"(n)
+                     : "memory");
+}
+
+/* fwrite: std streams (1/2) route to SYS_WRITE(fd=1); a heap
+ * FILE* (fopen band 0x100..0x10F stored as the first 8 bytes)
+ * routes to SYS_FILE_WRITE (43). */
+__declspec(dllexport) size_t fwrite(const void* ptr, size_t sz, size_t nmemb, void* f)
+{
+    if (!ptr || !f || sz == 0 || nmemb == 0)
+        return 0;
+    size_t total = sz * nmemb;
+    if (iob_is_std(f))
+    {
+        /* stdin(0) silently drops on write; stdout/stderr -> fd 1. */
+        if (iob_route(f) != 0)
+            msvcrt_sys_write(1, (const char*)ptr, (long long)total);
+        return nmemb;
+    }
+    /* Heap FILE* from this file's fopen(): handle is first 8 bytes. */
+    DUETOS_FILE* fp = (DUETOS_FILE*)f;
+    if (fp->handle >= 0x100 && fp->handle < 0x110)
+    {
+        long long rv;
+        __asm__ volatile("int $0x80"
+                         : "=a"(rv)
+                         : "a"((long long)43), "D"(fp->handle), "S"((long long)ptr), "d"((long long)total)
+                         : "memory");
+        if (rv <= 0)
+        {
+            fp->err = 1;
+            return 0;
+        }
+        return (size_t)rv / sz;
+    }
+    return 0;
+}
+
+__declspec(dllexport) int fputs(const char* s, void* f)
+{
+    if (!s || !f)
+        return -1;
+    size_t n = 0;
+    while (s[n])
+        ++n;
+    if (fwrite(s, 1, n, f) != n)
+        return -1;
+    return 0;
+}
+
+__declspec(dllexport) int fputc(int c, void* f)
+{
+    char b = (char)c;
+    if (fwrite(&b, 1, 1, f) != 1)
+        return -1;
+    return c;
+}
+
+__declspec(dllexport) int puts(const char* s)
+{
+    if (!s)
+        s = "(null)";
+    size_t n = 0;
+    while (s[n])
+        ++n;
+    msvcrt_sys_write(1, s, (long long)n);
+    msvcrt_sys_write(1, "\n", 1);
+    return (int)n + 1;
+}
+
+/* Streams are unbuffered (every write hits the syscall directly),
+ * so fflush is a no-op success. */
+__declspec(dllexport) int fflush(void* f)
+{
+    (void)f;
+    return 0;
+}
+
+/* _fileno: return the std-stream index (0/1/2) for a std FILE*,
+ * or the kernel handle for a heap FILE*. */
+__declspec(dllexport) int _fileno(void* f)
+{
+    if (!f)
+        return -1;
+    if (iob_is_std(f))
+        return iob_route(f);
+    return (int)((DUETOS_FILE*)f)->handle;
+}
+
+/* _get_osfhandle: map a CRT fd (0/1/2) to the Win32 std
+ * pseudo-handle DWORDs (-10/-11/-12). Other fds: pass through. */
+__declspec(dllexport) long long _get_osfhandle(int fd)
+{
+    switch (fd)
+    {
+    case 0:
+        return -10;
+    case 1:
+        return -11;
+    case 2:
+        return -12;
+    default:
+        return (long long)fd;
+    }
+}
+
+/* ------------------------------------------------------------------
+ * Minimal printf family (ported from ucrtbase.c vfmt — the DLLs
+ * are independent freestanding TUs that duplicate helpers; do NOT
+ * cross-call). Supports %d/i/u/x/X/p/s/c/%, width (space or 0
+ * pad) and l/ll/z length modifiers. No float, no %n, no locale.
+ * ------------------------------------------------------------------ */
+
+static int msvcrt_emit_char(char* buf, size_t cap, size_t* pos, char c)
+{
+    if (buf && *pos + 1 < cap)
+        buf[*pos] = c;
+    (*pos)++;
+    return 1;
+}
+
+static void msvcrt_emit_str(char* buf, size_t cap, size_t* pos, const char* s, size_t n)
+{
+    for (size_t i = 0; i < n; ++i)
+        msvcrt_emit_char(buf, cap, pos, s[i]);
+}
+
+static void msvcrt_emit_pad(char* buf, size_t cap, size_t* pos, int width, int printed, char fill)
+{
+    while (printed < width)
+    {
+        msvcrt_emit_char(buf, cap, pos, fill);
+        ++printed;
+    }
+}
+
+static int msvcrt_fmt_int(char* tmp, unsigned long long v, int base, int upper)
+{
+    int n = 0;
+    const char* digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+    if (v == 0)
+    {
+        tmp[n++] = '0';
+        return n;
+    }
+    while (v)
+    {
+        tmp[n++] = digits[v % (unsigned)base];
+        v /= (unsigned)base;
+    }
+    return n;
+}
+
+#define va_list __builtin_va_list
+#define va_start __builtin_va_start
+#define va_end __builtin_va_end
+#define va_arg_ptr(ap, type) (__builtin_va_arg(ap, type))
+
+static int msvcrt_vfmt(char* buf, size_t cap, const char* fmt, va_list ap)
+{
+    size_t pos = 0;
+    while (*fmt)
+    {
+        if (*fmt != '%')
+        {
+            msvcrt_emit_char(buf, cap, &pos, *fmt++);
+            continue;
+        }
+        ++fmt;
+        char pad = ' ';
+        if (*fmt == '0')
+        {
+            pad = '0';
+            ++fmt;
+        }
+        int width = 0;
+        while (*fmt >= '0' && *fmt <= '9')
+            width = width * 10 + (*fmt++ - '0');
+        int mod = 0; /* 0=int, 1=long, 2=long long, 3=size_t */
+        if (*fmt == 'l')
+        {
+            mod = 1;
+            ++fmt;
+            if (*fmt == 'l')
+            {
+                mod = 2;
+                ++fmt;
+            }
+        }
+        else if (*fmt == 'z')
+        {
+            mod = 3;
+            ++fmt;
+        }
+        char spec = *fmt++;
+        if (spec == 0)
+            break;
+        char tmp[32];
+        switch (spec)
+        {
+        case 'c':
+        {
+            char c = (char)va_arg_ptr(ap, int);
+            msvcrt_emit_pad(buf, cap, &pos, width, 1, pad);
+            msvcrt_emit_char(buf, cap, &pos, c);
+            break;
+        }
+        case 's':
+        {
+            const char* s = va_arg_ptr(ap, const char*);
+            if (!s)
+                s = "(null)";
+            size_t n = 0;
+            while (s[n])
+                ++n;
+            msvcrt_emit_pad(buf, cap, &pos, width, (int)n, pad);
+            msvcrt_emit_str(buf, cap, &pos, s, n);
+            break;
+        }
+        case 'd':
+        case 'i':
+        {
+            long long v;
+            if (mod == 2)
+                v = va_arg_ptr(ap, long long);
+            else if (mod == 3)
+                v = (long long)va_arg_ptr(ap, size_t);
+            else if (mod == 1)
+                v = va_arg_ptr(ap, long);
+            else
+                v = va_arg_ptr(ap, int);
+            int neg = 0;
+            unsigned long long u;
+            if (v < 0)
+            {
+                neg = 1;
+                u = (unsigned long long)(-v);
+            }
+            else
+                u = (unsigned long long)v;
+            int n = msvcrt_fmt_int(tmp, u, 10, 0);
+            int total = n + (neg ? 1 : 0);
+            msvcrt_emit_pad(buf, cap, &pos, width, total, pad);
+            if (neg)
+                msvcrt_emit_char(buf, cap, &pos, '-');
+            for (int i = n - 1; i >= 0; --i)
+                msvcrt_emit_char(buf, cap, &pos, tmp[i]);
+            break;
+        }
+        case 'u':
+        case 'x':
+        case 'X':
+        {
+            unsigned long long v;
+            if (mod == 2)
+                v = va_arg_ptr(ap, unsigned long long);
+            else if (mod == 3)
+                v = va_arg_ptr(ap, size_t);
+            else if (mod == 1)
+                v = va_arg_ptr(ap, unsigned long);
+            else
+                v = va_arg_ptr(ap, unsigned int);
+            int base = (spec == 'u') ? 10 : 16;
+            int upper = (spec == 'X');
+            int n = msvcrt_fmt_int(tmp, v, base, upper);
+            msvcrt_emit_pad(buf, cap, &pos, width, n, pad);
+            for (int i = n - 1; i >= 0; --i)
+                msvcrt_emit_char(buf, cap, &pos, tmp[i]);
+            break;
+        }
+        case 'p':
+        {
+            unsigned long long v = (unsigned long long)va_arg_ptr(ap, void*);
+            msvcrt_emit_str(buf, cap, &pos, "0x", 2);
+            int n = msvcrt_fmt_int(tmp, v, 16, 0);
+            for (int i = n - 1; i >= 0; --i)
+                msvcrt_emit_char(buf, cap, &pos, tmp[i]);
+            break;
+        }
+        case '%':
+            msvcrt_emit_char(buf, cap, &pos, '%');
+            break;
+        default:
+            msvcrt_emit_char(buf, cap, &pos, '%');
+            msvcrt_emit_char(buf, cap, &pos, spec);
+            break;
+        }
+    }
+    if (buf && cap > 0)
+        buf[pos < cap ? pos : cap - 1] = 0;
+    return (int)pos;
+}
+
+__declspec(dllexport) int vsnprintf(char* buf, size_t cap, const char* fmt, va_list ap)
+{
+    return msvcrt_vfmt(buf, cap, fmt, ap);
+}
+
+__declspec(dllexport) int _vsnprintf(char* buf, size_t cap, const char* fmt, va_list ap)
+{
+    return msvcrt_vfmt(buf, cap, fmt, ap);
+}
+
+__declspec(dllexport) int snprintf(char* buf, size_t cap, const char* fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    int n = msvcrt_vfmt(buf, cap, fmt, ap);
+    va_end(ap);
+    return n;
+}
+
+__declspec(dllexport) int vfprintf(void* f, const char* fmt, va_list ap)
+{
+    char buf[1024];
+    int n = msvcrt_vfmt(buf, sizeof(buf), fmt, ap);
+    if (n > (int)sizeof(buf) - 1)
+        n = (int)sizeof(buf) - 1;
+    fwrite(buf, 1, (size_t)n, f);
+    return n;
+}
+
+__declspec(dllexport) int fprintf(void* f, const char* fmt, ...)
+{
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = msvcrt_vfmt(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > (int)sizeof(buf) - 1)
+        n = (int)sizeof(buf) - 1;
+    fwrite(buf, 1, (size_t)n, f);
+    return n;
+}
+
+__declspec(dllexport) int vprintf(const char* fmt, va_list ap)
+{
+    char buf[1024];
+    int n = msvcrt_vfmt(buf, sizeof(buf), fmt, ap);
+    if (n > (int)sizeof(buf) - 1)
+        n = (int)sizeof(buf) - 1;
+    msvcrt_sys_write(1, buf, (long long)n);
+    return n;
+}
+
+__declspec(dllexport) int printf(const char* fmt, ...)
+{
+    char buf[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = msvcrt_vfmt(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > (int)sizeof(buf) - 1)
+        n = (int)sizeof(buf) - 1;
+    msvcrt_sys_write(1, buf, (long long)n);
+    return n;
+}
+
+/* _vsnwprintf — where.exe wide variant. Format the ASCII result
+ * via the narrow vfmt, then widen byte->u16.
+ * GAP: non-ASCII format output (multibyte / wide %ls) is not
+ * handled — each narrow byte is zero-extended. where.exe's usage
+ * text is pure ASCII so this suffices; revisit if a wide caller
+ * needs real UTF-16 formatting. */
+__declspec(dllexport) int _vsnwprintf(wchar_t16* buf, size_t cap, const wchar_t16* wfmt, va_list ap)
+{
+    if (!buf || cap == 0)
+        return 0;
+    /* Narrow the format string (ASCII band only). */
+    char nfmt[512];
+    size_t fi = 0;
+    while (wfmt[fi] && fi < sizeof(nfmt) - 1)
+    {
+        nfmt[fi] = (char)(wfmt[fi] & 0xFF);
+        ++fi;
+    }
+    nfmt[fi] = 0;
+    char nbuf[1024];
+    int n = msvcrt_vfmt(nbuf, sizeof(nbuf), nfmt, ap);
+    if (n > (int)sizeof(nbuf) - 1)
+        n = (int)sizeof(nbuf) - 1;
+    size_t i = 0;
+    for (; i < (size_t)n && i < cap - 1; ++i)
+        buf[i] = (wchar_t16)(unsigned char)nbuf[i];
+    buf[i] = 0;
+    return (int)i;
+}
+
 /* Re-export memcpy/memmove/memset from msvcrt — vcruntime140 already
  * has them, but mingw-w64 imports memcpy/memmove via msvcrt by
  * default. Without these msvcrt-exported names, link-time mingw
