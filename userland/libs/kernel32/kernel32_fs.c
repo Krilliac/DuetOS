@@ -566,6 +566,38 @@ struct ProcessInformation_t
 #define STARTUPINFO_STDIN_OFFSET 80
 #define STARTUPINFO_STDOUT_OFFSET 88
 #define STARTUPINFO_STDERR_OFFSET 96
+#define STARTUPINFO_SIZE 104
+
+/* GetStartupInfoW / GetStartupInfoA — fill the caller's STARTUPINFO.
+ *
+ * Load-bearing for wWinMain PEs: the MSVC CRT startup reads
+ * cbReserved2 (+66) / lpReserved2 (+72) to rebuild inherited file
+ * handles, walking lpReserved2 as a packed handle array of length
+ * cbReserved2. If this were a NO-OP the struct is uninitialised
+ * stack garbage, so the CRT iterates a garbage-length loop over a
+ * garbage pointer — corrupting state into an intermittent, ASLR-
+ * dependent crash at varying RIPs (observed: charmap.exe writing to
+ * NULL at a function prologue, ~1 boot in 6). Zero-filling forces
+ * cbReserved2 = 0 (CRT skips the inherited-handle walk — the correct
+ * "launched normally" state) and dwFlags = 0 (no STARTF_USESTDHANDLES,
+ * so the CRT uses default std handles). cb is set to the struct size.
+ * A and W share the binary layout (only lpDesktop/lpTitle point at
+ * different string types, left NULL here), so A defers to W.
+ */
+__declspec(dllexport) void GetStartupInfoW(void* lpStartupInfo)
+{
+    if (lpStartupInfo == (void*)0)
+        return;
+    unsigned char* p = (unsigned char*)lpStartupInfo;
+    for (int i = 0; i < STARTUPINFO_SIZE; ++i)
+        p[i] = 0;
+    *(unsigned int*)p = (unsigned int)STARTUPINFO_SIZE; /* cb */
+}
+
+__declspec(dllexport) void GetStartupInfoA(void* lpStartupInfo)
+{
+    GetStartupInfoW(lpStartupInfo);
+}
 
 struct ProcessSpawnStdio_t
 {

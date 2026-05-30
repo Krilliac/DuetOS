@@ -1316,33 +1316,51 @@ __declspec(dllexport) void WakeAllConditionVariable(void* cv)
 /* ------------------------------------------------------------------
  * InitOnceBeginInitialize / InitOnceComplete — the explicit
  * two-call form of one-time init (InitOnceExecuteOnce above is the
- * callback form). Synchronous subset only: the INIT_ONCE word is
- * 0 = untouched, 1 = initialiser running, 2 = done. Losers block
- * on WaitOnAddress(slot) until the winner completes.
+ * callback form). Synchronous subset only.
  *
- * GAP: the per-INIT_ONCE context pointer is not preserved (the
- * single word holds the state) and INIT_ONCE_ASYNC is treated as
- * the synchronous path — revisit if a real caller needs pending
- * async init or the context slot.
+ * Block encoding matches NT's RtlRunOnce: the pointer-sized INIT_ONCE
+ * word packs a 2-bit state into the low bits and the caller's context
+ * pointer into the high bits (a Win32 INIT_ONCE context is required
+ * to be 4-byte aligned, so the low 2 bits are free):
+ *     state 0 = uninitialized
+ *     state 1 = synchronous init in progress
+ *     state 2 = done   (high bits = context pointer)
+ *     state 3 = async init in progress (treated as synchronous here)
+ * Losers on state 1/3 block on WaitOnAddress(slot) until the winner
+ * bumps the word.
+ *
+ * Preserving the context is load-bearing, not cosmetic: a caller that
+ * stores a context via InitOnceComplete and re-enters
+ * InitOnceBeginInitialize on the already-done path expects its context
+ * back. The prior version discarded it (returned NULL), and the
+ * caller's caller dereferenced that NULL — observed as a charmap.exe
+ * 0xc0000005 the second time its run-once-initialised singleton was
+ * fetched (caller does `mov 0x8(%rax),%rax` on the returned context).
+ *
+ * GAP: INIT_ONCE_ASYNC is folded onto the synchronous path — revisit
+ * if a real caller needs genuine pending async init.
  * ------------------------------------------------------------------ */
 
 #define INIT_ONCE_CHECK_ONLY 0x1u
 #define INIT_ONCE_INIT_FAILED 0x4u
+#define INIT_ONCE_STATE_MASK 0x3ull
 
 __declspec(dllexport) BOOL InitOnceBeginInitialize(void* InitOnce, unsigned long dwFlags, BOOL* fPending,
                                                    void** lpContext)
 {
     if (InitOnce == (void*)0 || fPending == (BOOL*)0)
         return 0;
-    volatile unsigned* slot = (volatile unsigned*)InitOnce;
+    volatile unsigned long long* slot = (volatile unsigned long long*)InitOnce;
     for (;;)
     {
-        unsigned cur = __atomic_load_n(slot, __ATOMIC_SEQ_CST);
-        if (cur == 2)
+        unsigned long long cur = __atomic_load_n(slot, __ATOMIC_SEQ_CST);
+        unsigned state = (unsigned)(cur & INIT_ONCE_STATE_MASK);
+        if (state == 2)
         {
+            /* Done — hand back the preserved context. */
             *fPending = 0;
             if (lpContext != (void**)0)
-                *lpContext = (void*)0;
+                *lpContext = (void*)(cur & ~INIT_ONCE_STATE_MASK);
             return 1;
         }
         if (dwFlags & INIT_ONCE_CHECK_ONLY)
@@ -1350,10 +1368,10 @@ __declspec(dllexport) BOOL InitOnceBeginInitialize(void* InitOnce, unsigned long
             /* Not finished and caller only wants a peek. */
             return 0;
         }
-        if (cur == 0)
+        if (state == 0)
         {
-            unsigned expected = 0;
-            if (__atomic_compare_exchange_n(slot, &expected, 1u, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
+            unsigned long long expected = cur; /* == 0 */
+            if (__atomic_compare_exchange_n(slot, &expected, 1ull, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST))
             {
                 *fPending = 1; /* caller is the initialiser */
                 if (lpContext != (void**)0)
@@ -1362,23 +1380,31 @@ __declspec(dllexport) BOOL InitOnceBeginInitialize(void* InitOnce, unsigned long
             }
             continue; /* lost the race — re-evaluate */
         }
-        /* cur == 1: another thread is initialising. Park until it
-         * bumps the slot, then loop to observe the new state. */
+        /* state 1/3: another thread is initialising. Park until it
+         * bumps the slot, then loop to observe the new state. The
+         * in-progress word is exactly 1, so a 4-byte compare on the
+         * low word detects the transition. */
         unsigned running = 1u;
-        WaitOnAddress(slot, &running, 4, 0xFFFFFFFFu);
+        WaitOnAddress((void*)slot, &running, 4, 0xFFFFFFFFu);
     }
 }
 
 __declspec(dllexport) BOOL InitOnceComplete(void* InitOnce, unsigned long dwFlags, void* lpContext)
 {
-    (void)lpContext;
     if (InitOnce == (void*)0)
         return 0;
-    volatile unsigned* slot = (volatile unsigned*)InitOnce;
+    volatile unsigned long long* slot = (volatile unsigned long long*)InitOnce;
     if (dwFlags & INIT_ONCE_INIT_FAILED)
-        __atomic_store_n(slot, 0u, __ATOMIC_SEQ_CST); /* let another thread retry */
+    {
+        __atomic_store_n(slot, 0ull, __ATOMIC_SEQ_CST); /* let another thread retry */
+    }
     else
-        __atomic_store_n(slot, 2u, __ATOMIC_SEQ_CST); /* done */
+    {
+        /* Pack context | done. Context is 4-byte aligned per the
+         * INIT_ONCE contract, so masking the low 2 bits is lossless. */
+        unsigned long long packed = ((unsigned long long)lpContext & ~INIT_ONCE_STATE_MASK) | 2ull;
+        __atomic_store_n(slot, packed, __ATOMIC_SEQ_CST);
+    }
     WakeByAddressAll(InitOnce);
     return 1;
 }
