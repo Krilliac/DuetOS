@@ -1148,6 +1148,39 @@ the printf/scanf family (vsnprintf with %d %s %x %f basics),
 str* / wcs* mirrors of msvcrt, fopen/fread/fwrite/fclose,
 math (sqrt, pow, exp, log, sin, cos, tan via Taylor series).
 
+**Modern UCRT startup surface (added for statically-linked /MT exes):**
+- argv/env model: `__p___argv`, `__p___argc`, `__p__commode`,
+  `_get_initial_narrow_environment`, `_initialize_narrow_environment`,
+  `_configure_narrow_argv` — REAL, back a minimal one-arg program
+  model (`__argc=1`, `__argv[0]="X:\\cmd.exe"`, empty `_environ`).
+  The pointers point at real storage so the CRT's
+  `*__p___argv()` dereference doesn't fault (this was the
+  pre-fix 0xc0000005 in cmd.exe's CRT startup).
+- onexit ledger: `_initialize_onexit_table`, `_register_onexit_function`,
+  `_crt_atexit` — REAL register-only (kernel reclaims on SYS_EXIT;
+  finalisers are not run — GAP: atexit dispatch).
+- startup no-ops: `_set_fmode`, `_set_new_mode`, `_setmode`,
+  `_seh_filter_exe` (returns 0 = EXCEPTION_CONTINUE_SEARCH),
+  `_invalid_parameter_noinfo`, `_purecall`, `_callnewh` — REAL.
+- wide string/ctype: `_wcsicmp`, `_wcsnicmp`, `_wcslwr`, `_wcsupr`,
+  `_wtol`, `wcsspn`, `iswalpha/iswdigit/iswspace/iswxdigit`,
+  `towlower/towupper`, `setlocale` (returns "C") — REAL, ASCII-range.
+- modern stdio backend: `__stdio_common_vfprintf`,
+  `__stdio_common_vswprintf(_s)`, `__stdio_common_vswscanf` — REAL,
+  forward to the narrow vfmt/vsscanf backends (UTF-16 down-converted).
+- `_ultoa`/`_ultoa_s` — REAL. `_time32` — GAP: fixed clock (no time
+  syscall wired here). fd/pipe stubs (`_open_osfhandle`, `_tell`,
+  `_pipe`, `_pclose`, `_wpopen`, `_close`, `_dup`, `_dup2`, `_getch`)
+  — STUB return -1/NULL (banner path doesn't exercise them).
+
+**`_o_<name>` downlevel-forwarder aliases:** modern UCRT exes import
+the CRT family as `_o_<name>` (ucrtbase's back-compat alias that
+tail-calls `<name>`). The PE loader's preloaded-DLL resolver
+(`TryResolveViaPreloadedDllsImpl`, `kernel/loader/pe_loader.cpp`)
+strips a leading `_o_` and retries the same DLL's export table on a
+miss, so every base export above also satisfies its `_o_`-prefixed
+import — no duplicate `_o_*` exports needed.
+
 **STUB / GAP:**
 - Multi-byte conversion: `mbtowc`, `wctomb` — STUB ASCII passthrough
 - Locale-aware printf (`_l` family) — STUB returns same as non-_l

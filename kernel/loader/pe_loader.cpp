@@ -1454,7 +1454,22 @@ bool TryResolveViaPreloadedDllsImpl(const char* dll_name, const char* fn_name, c
             continue;
         PeExport e{};
         if (!PeExportLookupName(img.exports, fn_name, e))
-            continue;
+        {
+            // `_o_`-prefix downlevel-forwarder alias. Modern
+            // statically-linked UCRT exes import the CRT family
+            // as `_o_<name>` (the "old" / downlevel-forwarder
+            // alias ucrtbase publishes for back-compat — e.g.
+            // ucrtbase's `_o_calloc` literally tail-calls
+            // `calloc`). Our freestanding ucrtbase.dll exports the
+            // BASE names only, so an `_o_`-prefixed import misses
+            // the exact lookup. Strip the `_o_` and retry the same
+            // DLL's export table; on hit the IAT slot binds to the
+            // base implementation, which is exactly what the
+            // forwarder alias would have reached anyway.
+            const bool has_o_prefix = fn_name[0] == '_' && fn_name[1] == 'o' && fn_name[2] == '_' && fn_name[3] != '\0';
+            if (!has_o_prefix || !PeExportLookupName(img.exports, fn_name + 3, e))
+                continue;
+        }
         if (e.is_forwarder)
         {
             char fwd_dll[kMaxForwarderDllLen];
