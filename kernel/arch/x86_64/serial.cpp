@@ -249,6 +249,72 @@ void SerialEnterPanicMode()
     g_serial_panic_mode = 1;
 }
 
+void SerialWriteNRecursiveFault(const char* data, u64 len)
+{
+    if (data == nullptr || len == 0)
+    {
+        return;
+    }
+
+    // Snapshot the arguments into locals before any locking attempt so
+    // a concurrent fault on the same CPU can't mutate them mid-print.
+    // (In practice the caller already passes stack-local values, but
+    // an explicit local copy makes the guarantee visible at this level.)
+    const char* const buf = data;
+    const u64 n = len;
+
+    // Level 1: try to acquire g_serial_lock with a single non-blocking
+    // attempt. If the BSP's panic dump already finished and released the
+    // lock this will succeed and we emit a fully serialized, contiguous
+    // burst — indistinguishable from a normal SerialWriteN call.
+    //
+    // SpinLockTryAcquire returns Err{Deadlock} when this CPU already
+    // holds the lock (self-held) and Err{Busy} when another CPU holds
+    // it. Either failure falls through to level 2.
+    auto try_result = duetos::sync::SpinLockTryAcquire(g_serial_lock);
+    if (try_result.has_value())
+    {
+        // Acquired. Emit under the lock exactly as SerialWriteN would,
+        // then release. Set the in-progress slot so any re-entrant trap
+        // during the write bypasses the lock instead of self-deadlocking.
+        volatile u32* slot = SerialInProgressSlot();
+        *slot = 1;
+        for (u64 i = 0; i < n; ++i)
+        {
+            WriteCharRaw(buf[i]);
+        }
+        *slot = 0;
+        duetos::sync::SpinLockRelease(g_serial_lock, try_result.value());
+        return;
+    }
+
+    // Level 2: lock is held (BSP mid-dump in panic mode, or this CPU
+    // already owns it via a nested fault). Use the PanicEmitTryClaim
+    // bounded-spin serializer so concurrent panic-mode writers don't
+    // byte-interleave. This mirrors the panic-mode bypass in SerialWriteN
+    // but is called here explicitly to avoid the panic-mode flag check
+    // that would otherwise gate entry.
+    //
+    // GAP: recursive-fault root cause — the true first-fault site (the
+    // kernel state corruption that triggered the cascade) has not been
+    // identified; see Roadmap §"SMP recursive-fault serial corruption".
+    // This fix serializes the diagnostic output so the real fault vector
+    // and RIP are readable; the root cause chase requires re-running
+    // tools/test/smp-stress-sweep.sh with this fix in tree and grepping
+    // the first-fault line. Revisit once the harness produces a clean
+    // log with this serialization in place.
+    const u32 cpuid = ::duetos::cpu::CurrentCpuIdOrBsp();
+    const PanicClaimResult c = PanicEmitTryClaim(cpuid);
+    for (u64 i = 0; i < n; ++i)
+    {
+        WriteCharRaw(buf[i]);
+    }
+    if (c == kClaimAcquired)
+    {
+        PanicEmitRelease(cpuid);
+    }
+}
+
 SerialLineGuard::SerialLineGuard() : m_flags(0), m_owned(false)
 {
     // Acquire the lock and mark in-progress so nested SerialWrite*
