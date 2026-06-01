@@ -46,13 +46,26 @@ echo "→ Syncing with origin/main..."
 git fetch origin main
 git rebase origin/main 2>/dev/null || echo "  (rebase skipped — resolve manually if behind)"
 
-# Warn if the target files look already-claimed. Match the files string as a
-# fixed literal ('*' etc. must not be treated as regex).
-if [[ -f "$WORK_FILE" ]] && grep -qF -- "Files: \`${FILES}\`" "$WORK_FILE"; then
-    echo "⚠️  WARNING: '$FILES' may already be claimed by another session:"
-    grep -B2 -A2 -F -- "Files: \`${FILES}\`" "$WORK_FILE" || true
-    read -rp "Continue anyway? [y/N] " confirm
-    [[ "$confirm" =~ ^[Yy]$ ]] || exit 1
+# Warn if the target files are already claimed by an ACTIVE (🟢) session.
+# Completed (✅) claims have released their files, so they don't count. The
+# Files value is compared exactly (the '*' in a glob is not a regex here).
+if [[ -f "$WORK_FILE" ]]; then
+    CONFLICT_BLOCK="$(awk -v f="$FILES" '
+        function flush() { if (show && blk != "") print blk; show = 0 }
+        /^### / { flush(); active = ($0 ~ /🟢/); blk = $0; next }
+        blk != "" { blk = blk "\n" $0 }
+        active && /\*\*Files\*\*:/ {
+            v = $0; sub(/^[^`]*`/, "", v); sub(/`.*/, "", v)
+            if (v == f) show = 1
+        }
+        END { flush() }
+    ' "$WORK_FILE")"
+    if [[ -n "$CONFLICT_BLOCK" ]]; then
+        echo "⚠️  WARNING: '$FILES' is already claimed by an active session:"
+        echo "$CONFLICT_BLOCK"
+        read -rp "Continue anyway? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || exit 1
+    fi
 fi
 
 # Bootstrap the coordinator file on first use.
