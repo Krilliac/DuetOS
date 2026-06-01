@@ -412,7 +412,18 @@ struct Process
         // (FAT32's append path can't grow a 0-byte file in v0; see
         // fat32_write.cpp first_cluster<2 guards.)
         u8 flags;
-        u8 _pad[2];
+        // Open-file-description (OFD) handle: 1-based index into the
+        // kernel-wide refcounted OFD pool (see process.cpp), or 0 for
+        // "no OFD attached". POSIX requires dup()/dup2()/dup3() (and
+        // fork) to make the new fd share ONE open-file description —
+        // a single file offset + a single set of O_* status flags —
+        // with the source fd. The OFD object is that shared,
+        // refcounted description: dup bumps its refcount, close drops
+        // it, the last close releases it. `offset` below stays as a
+        // live write-through mirror of the OFD's offset so the
+        // existing syscall TUs that read `linux_fds[fd].offset`
+        // inline keep working unchanged.
+        u16 ofd;
         u32 first_cluster;
         u32 size;
         // Sidecar handle into `kobj_handles`. 0 (kHandleInvalid) =
@@ -446,9 +457,11 @@ struct Process
     // FAN_CLOEXEC, EFD_CLOEXEC, SOCK_CLOEXEC, EPOLL_CLOEXEC),
     // and via fcntl(F_SETFD, FD_CLOEXEC). Cleared by fcntl
     // F_SETFD with arg=0 and by dup() (which always produces a
-    // non-cloexec fd). Independent of O_CLOEXEC at the open-file-
-    // description layer (that's a sub-GAP — v0 has no shared open
-    // file descriptions yet). Per-fd, not per-file.
+    // non-cloexec fd). FD_CLOEXEC is correctly a per-fd (per-
+    // descriptor) flag — distinct from O_CLOEXEC, which lives in the
+    // shared open-file description (`LinuxFd::ofd`). dup() shares the
+    // description but resets FD_CLOEXEC on the new fd, which is why
+    // this flag lives inline here, not in the OFD.
     static constexpr u8 kLinuxFdFlagCloexec = 0x04;
     LinuxFd linux_fds[16];
 
@@ -1603,19 +1616,40 @@ bool LinuxFdAttachKFileOwned(Process* p, u32 fd, u8 kind, u32 pool_index, void (
 void LinuxFdClose(Process* p, u32 fd);
 
 /// Duplicate slot `oldfd` into slot `newfd`. Copies state +
-/// first_cluster + size + offset + path; if a KFile sidecar
-/// exists, calls `HandleTableDuplicate` so both fds share the
-/// underlying KFile + its pool ref (each fd holds one ref —
-/// closing one drops one ref, closing both fires the per-pool
-/// release callback). Closes any existing slot at `newfd`
-/// first. Caller is responsible for setting cloexec on the
-/// new slot if dup3 honoured O_CLOEXEC. Returns false on
-/// HandleTable exhaustion.
+/// first_cluster + size + path and SHARES the open-file
+/// description (OFD) — both fds point at one refcounted OFD, so
+/// a seek/offset change through one fd is visible through the
+/// other (POSIX dup semantics). If a KFile sidecar exists, calls
+/// `HandleTableDuplicate` so both fds share the underlying KFile
+/// + its pool ref (each fd holds one ref — closing one drops one
+/// ref, closing both fires the per-pool release callback).
+/// Closes any existing slot at `newfd` first. Caller is
+/// responsible for setting cloexec on the new slot if dup3
+/// honoured O_CLOEXEC. Returns false on HandleTable / OFD-pool
+/// exhaustion.
 bool LinuxFdDup(Process* p, u32 oldfd, u32 newfd);
 
 /// Set / clear FD_CLOEXEC on a slot. No-op for unused slots.
 void LinuxFdSetCloexec(Process* p, u32 fd, bool on);
 bool LinuxFdGetCloexec(const Process* p, u32 fd);
+
+/// Open-file-description (OFD) accessors. The OFD is the
+/// refcounted object that dup()/dup2()/dup3()/fork make the new
+/// fd SHARE with the source fd — one file offset + one set of
+/// O_* status flags per open, exactly as POSIX requires. These
+/// are the authoritative read/write path for a slot's offset and
+/// status flags; they keep `linux_fds[fd].offset` mirrored so the
+/// existing inline readers still see the live value.
+///
+/// `LinuxFdOpenDescription` allocates a fresh OFD for a slot
+/// (called at open/pipe/socket/etc. creation time when a brand-new
+/// description is wanted). No-op-returns-true if the slot already
+/// owns an OFD. Returns false only on OFD-pool exhaustion.
+bool LinuxFdOpenDescription(Process* p, u32 fd, u64 initial_offset, u32 status_flags);
+u64 LinuxFdGetOffset(const Process* p, u32 fd);
+void LinuxFdSetOffset(Process* p, u32 fd, u64 offset);
+u32 LinuxFdGetStatusFlags(const Process* p, u32 fd);
+void LinuxFdSetStatusFlags(Process* p, u32 fd, u32 status_flags);
 
 /// Copy parent's fd table into `child` at fork time. Each
 /// occupied slot in `parent` is mirrored into `child`; KFile

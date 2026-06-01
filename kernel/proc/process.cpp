@@ -18,6 +18,7 @@
 #include "subsystems/win32/custom.h"
 #include "subsystems/win32/window_syscall.h"
 #include "sched/sched.h"
+#include "sync/spinlock.h"
 #include "log/klog.h"
 #include "core/panic.h"
 #include "loader/pe_loader.h"
@@ -110,8 +111,7 @@ Process* ProcessCreate(const char* name, mm::AddressSpace* as, CapSet caps, cons
         p->linux_fds[i].size = 0;
         p->linux_fds[i].kf_handle = ::duetos::ipc::kHandleInvalid;
         p->linux_fds[i].offset = 0;
-        for (u32 j = 0; j < sizeof(p->linux_fds[i]._pad); ++j)
-            p->linux_fds[i]._pad[j] = 0;
+        p->linux_fds[i].ofd = 0; // no shared open-file description yet
         for (u32 j = 0; j < sizeof(p->linux_fds[i].path); ++j)
             p->linux_fds[i].path[j] = 0;
     }
@@ -1218,6 +1218,93 @@ inline ::duetos::ipc::KFileKind KindOf(u8 state)
     return static_cast<::duetos::ipc::KFileKind>(state);
 }
 
+// ----------------------------------------------------------------
+// Open-file-description (OFD) pool.
+//
+// POSIX models an open() as creating a kernel "open file
+// description" that carries the file offset and the O_* status
+// flags. A file descriptor is a per-process handle that points
+// AT a description. dup()/dup2()/dup3() and fork() create new
+// descriptors that point at the SAME description — so a seek or
+// an F_SETFL through one fd is observed through its dup. close()
+// drops the descriptor's reference; the description is freed when
+// the last referencing fd closes.
+//
+// `Process::LinuxFd::ofd` is a 1-based index into this pool
+// (0 = "no description"). The pool is kernel-wide because
+// fork-inherited descriptions are shared ACROSS processes — the
+// description is not owned by any single fd table. A ticket
+// spinlock serialises alloc / retain / release; the per-field
+// offset/flags reads and writes also take it so a concurrent
+// seek from a sibling fd (another thread sharing the table, or a
+// forked peer) can't tear a 64-bit offset.
+//
+// Sizing: 64 live descriptions kernel-wide is comfortable for the
+// smoke / static-musl workloads (≤16 fds per process, a handful
+// of processes). The pool is fixed so the path stays allocation-
+// free and lock-bounded; exhaustion surfaces as a false return
+// from `LinuxFdOpenDescription` which the caller maps to -ENFILE.
+constexpr u32 kOfdPoolCap = 64;
+
+struct OpenFileDescription
+{
+    u32 refcount;     // number of fds (across all processes) pointing here
+    u32 status_flags; // O_* status flags shared by all referencing fds
+    u64 offset;       // shared file offset (read/write cursor)
+};
+
+constinit OpenFileDescription g_ofd_pool[kOfdPoolCap] = {};
+SpinLock g_ofd_lock{};
+
+// Allocate a fresh description with refcount 1. Returns the
+// 1-based pool index, or 0 if the pool is exhausted. Caller holds
+// g_ofd_lock.
+u16 OfdAllocLocked(u64 offset, u32 status_flags)
+{
+    for (u32 i = 0; i < kOfdPoolCap; ++i)
+    {
+        if (g_ofd_pool[i].refcount == 0)
+        {
+            g_ofd_pool[i].refcount = 1;
+            g_ofd_pool[i].offset = offset;
+            g_ofd_pool[i].status_flags = status_flags;
+            return static_cast<u16>(i + 1);
+        }
+    }
+    return 0;
+}
+
+// Bump the refcount of an existing description (dup / fork).
+// `ofd` is 1-based; 0 is a no-op. Caller holds g_ofd_lock.
+void OfdRetainLocked(u16 ofd)
+{
+    if (ofd == 0 || ofd > kOfdPoolCap)
+        return;
+    ++g_ofd_pool[ofd - 1].refcount;
+}
+
+// Drop one reference; frees (refcount→0) the description on the
+// last close. `ofd` is 1-based; 0 is a no-op. Caller holds
+// g_ofd_lock.
+void OfdReleaseLocked(u16 ofd)
+{
+    if (ofd == 0 || ofd > kOfdPoolCap)
+        return;
+    OpenFileDescription& d = g_ofd_pool[ofd - 1];
+    if (d.refcount == 0)
+    {
+        // Double-release / stale index — refcount asymmetry bug.
+        // Surface once; do not underflow the counter.
+        KLOG_ONCE_WARN_V("proc/linux-fd", "OFD release on zero-refcount slot (1-based idx)", ofd);
+        return;
+    }
+    if (--d.refcount == 0)
+    {
+        d.offset = 0;
+        d.status_flags = 0;
+    }
+}
+
 } // namespace
 
 i32 LinuxFdAllocLowest(Process* p, u32 lo)
@@ -1308,6 +1395,16 @@ void LinuxFdClose(Process* p, u32 fd)
         (void)::duetos::ipc::HandleTableRemove(p->kobj_handles, lf.kf_handle);
         lf.kf_handle = ::duetos::ipc::kHandleInvalid;
     }
+    // Drop this fd's reference on the shared open-file description.
+    // Last close frees it; a dup sibling still holding a ref keeps
+    // the offset/flags alive. No-op when the slot never got an OFD
+    // (lf.ofd == 0).
+    if (lf.ofd != 0)
+    {
+        SpinLockGuard g(g_ofd_lock);
+        OfdReleaseLocked(lf.ofd);
+        lf.ofd = 0;
+    }
     lf.state = 0;
     lf.flags = 0;
     lf.first_cluster = 0;
@@ -1330,20 +1427,50 @@ bool LinuxFdDup(Process* p, u32 oldfd, u32 newfd)
     // KFile ref via the unified path.
     LinuxFdClose(p, newfd);
 
-    Process::LinuxFd& dst = p->linux_fds[newfd];
-    // Mirror the v0 sub-GAP: per-fd offsets/path/etc. are an
-    // independent copy. Real Linux dup() shares the open-file
-    // description (single offset, single flag set); v0 doesn't
-    // model that yet — the per-fd state is per-slot.
+    // Open-file-description sharing (POSIX dup semantics). The new
+    // fd must reference the SAME description as the source so a
+    // seek / F_SETFL through one is visible through the other. If
+    // the source slot doesn't yet own a description (older open
+    // paths that haven't migrated to LinuxFdOpenDescription), lazily
+    // materialise one from its current inline offset/flags so both
+    // fds end up sharing it. Do this BEFORE touching dst so a pool-
+    // exhaustion failure leaves the whole table untouched.
+    u16 shared_ofd = 0;
+    {
+        SpinLockGuard g(g_ofd_lock);
+        if (src.ofd == 0)
+        {
+            // Inline offset is the live cursor; status flags aren't
+            // tracked inline yet, so seed the description's flags to 0.
+            // GAP: status flags for pre-OFD opens are seeded empty —
+            // revisit when sys_open/pipe2/socket call
+            // LinuxFdOpenDescription with the real O_* flags so a
+            // dup'd fd inherits the source's status flags too.
+            src.ofd = OfdAllocLocked(src.offset, /*status_flags=*/0);
+            if (src.ofd == 0)
+            {
+                KLOG_ONCE_WARN("proc/linux-fd", "OFD pool exhausted on dup (src materialise)");
+                return false;
+            }
+        }
+        OfdRetainLocked(src.ofd);
+        shared_ofd = src.ofd;
+    }
+
     dst.state = src.state;
     dst.flags = src.flags;
     // Drop FD_CLOEXEC on the new fd by default. Linux semantics:
     // dup() always produces a non-cloexec fd; dup3() with
     // O_CLOEXEC re-sets it via LinuxFdSetCloexec at the call site.
+    // FD_CLOEXEC is a per-fd (per-descriptor) flag, NOT part of the
+    // shared open-file description — correct to differ per dup.
     dst.flags = static_cast<u8>(dst.flags & ~Process::kLinuxFdFlagCloexec);
     dst.first_cluster = src.first_cluster;
     dst.size = src.size;
-    dst.offset = src.offset;
+    dst.ofd = shared_ofd;
+    // Seed dst's inline mirror from the shared description so the
+    // existing inline readers see the right cursor immediately.
+    dst.offset = LinuxFdGetOffset(p, newfd);
     for (u32 j = 0; j < sizeof(dst.path); ++j)
         dst.path[j] = src.path[j];
 
@@ -1355,13 +1482,20 @@ bool LinuxFdDup(Process* p, u32 oldfd, u32 newfd)
         auto h_r = ::duetos::ipc::HandleTableDuplicate(p->kobj_handles, p->kobj_handles, src.kf_handle);
         if (!h_r.has_value())
         {
-            // Roll back the slot copy — we promised "either both
-            // fds reference the same KFile, or neither does".
+            // Roll back EVERYTHING — we promised "either both fds
+            // reference the same KFile + OFD, or neither does".
+            // Drop the OFD ref we just took (refcount asymmetry
+            // guard: the retain above must be matched on this leg).
+            {
+                SpinLockGuard g(g_ofd_lock);
+                OfdReleaseLocked(shared_ofd);
+            }
             dst.state = 0;
             dst.flags = 0;
             dst.first_cluster = 0;
             dst.size = 0;
             dst.offset = 0;
+            dst.ofd = 0;
             for (u32 j = 0; j < sizeof(dst.path); ++j)
                 dst.path[j] = 0;
             return false;
@@ -1398,6 +1532,91 @@ bool LinuxFdGetCloexec(const Process* p, u32 fd)
     return (lf.flags & Process::kLinuxFdFlagCloexec) != 0;
 }
 
+bool LinuxFdOpenDescription(Process* p, u32 fd, u64 initial_offset, u32 status_flags)
+{
+    if (p == nullptr || fd >= 16)
+        return false;
+    Process::LinuxFd& lf = p->linux_fds[fd];
+    if (lf.state == 0)
+        return false;
+    if (lf.ofd != 0)
+    {
+        // Already has a description — refresh the inline offset
+        // mirror and leave the shared object alone. (Re-opening a
+        // description over a live one would silently orphan dup
+        // siblings.)
+        lf.offset = LinuxFdGetOffset(p, fd);
+        return true;
+    }
+    SpinLockGuard g(g_ofd_lock);
+    const u16 ofd = OfdAllocLocked(initial_offset, status_flags);
+    if (ofd == 0)
+    {
+        KLOG_ONCE_WARN("proc/linux-fd", "OFD pool exhausted on open");
+        return false;
+    }
+    lf.ofd = ofd;
+    lf.offset = initial_offset; // keep the inline mirror in step
+    return true;
+}
+
+u64 LinuxFdGetOffset(const Process* p, u32 fd)
+{
+    if (p == nullptr || fd >= 16)
+        return 0;
+    const Process::LinuxFd& lf = p->linux_fds[fd];
+    if (lf.ofd == 0)
+        return lf.offset; // no shared description — inline is authoritative
+    SpinLockGuard g(g_ofd_lock);
+    return g_ofd_pool[lf.ofd - 1].offset;
+}
+
+void LinuxFdSetOffset(Process* p, u32 fd, u64 offset)
+{
+    if (p == nullptr || fd >= 16)
+        return;
+    Process::LinuxFd& lf = p->linux_fds[fd];
+    if (lf.ofd == 0)
+    {
+        lf.offset = offset; // no shared description — inline only
+        return;
+    }
+    {
+        SpinLockGuard g(g_ofd_lock);
+        g_ofd_pool[lf.ofd - 1].offset = offset;
+    }
+    // Keep the inline mirror in step for the TUs that still read
+    // `linux_fds[fd].offset` directly.
+    // GAP: syscall TUs that WRITE `linux_fds[fd].offset` inline (read,
+    // write, lseek, sendfile, splice) won't propagate to dup siblings
+    // until they migrate to LinuxFdSetOffset — revisit by porting
+    // those write sites to this accessor; the OFD is the source of
+    // truth, the inline field a per-fd cache.
+    lf.offset = offset;
+}
+
+u32 LinuxFdGetStatusFlags(const Process* p, u32 fd)
+{
+    if (p == nullptr || fd >= 16)
+        return 0;
+    const Process::LinuxFd& lf = p->linux_fds[fd];
+    if (lf.ofd == 0)
+        return 0;
+    SpinLockGuard g(g_ofd_lock);
+    return g_ofd_pool[lf.ofd - 1].status_flags;
+}
+
+void LinuxFdSetStatusFlags(Process* p, u32 fd, u32 status_flags)
+{
+    if (p == nullptr || fd >= 16)
+        return;
+    Process::LinuxFd& lf = p->linux_fds[fd];
+    if (lf.ofd == 0)
+        return;
+    SpinLockGuard g(g_ofd_lock);
+    g_ofd_pool[lf.ofd - 1].status_flags = status_flags;
+}
+
 void LinuxFdInheritFromParent(Process* parent, Process* child)
 {
     if (parent == nullptr || child == nullptr)
@@ -1419,6 +1638,39 @@ void LinuxFdInheritFromParent(Process* parent, Process* child)
         dst.offset = src.offset;
         for (u32 j = 0; j < sizeof(dst.path); ++j)
             dst.path[j] = src.path[j];
+
+        // Open-file-description inheritance. POSIX fork(): the child
+        // SHARES the parent's open file descriptions, so a seek in
+        // the child moves the parent's cursor too (both fds point at
+        // one description). Reserved-tty slots (state 1) carry no
+        // offset semantics — leave them OFD-less to avoid burning a
+        // pool slot per fork on the three standard streams. Already-
+        // described slots share their existing OFD; a slot that has a
+        // real backing (state >= 2) but no OFD yet gets one lazily so
+        // both sides share it. The child's `ofd` references the same
+        // pool slot; its refcount counts both the parent fd and the
+        // child fd, so either side's close drops exactly one ref.
+        if (src.state != 1)
+        {
+            SpinLockGuard g(g_ofd_lock);
+            // NB: `src` is const above; re-fetch the parent slot
+            // mutably here to allow the lazy materialise to stick.
+            Process::LinuxFd& psrc = parent->linux_fds[fd];
+            if (psrc.ofd == 0)
+            {
+                psrc.ofd = OfdAllocLocked(psrc.offset, /*status_flags=*/0);
+                // On pool exhaustion the parent stays OFD-less and
+                // the child inherits no OFD either (dst.ofd left 0);
+                // both keep their independent inline offset mirror —
+                // degraded but safe.
+                // GAP: fork under OFD-pool pressure loses offset
+                // sharing for that fd — revisit by growing kOfdPoolCap
+                // or making the pool KMalloc-backed if real workloads
+                // exhaust 64 live descriptions.
+            }
+            OfdRetainLocked(psrc.ofd);
+            dst.ofd = psrc.ofd;
+        }
 
         // KFile sidecar inheritance — duplicate the parent's
         // handle into the child's table. Each side now holds one
@@ -1528,12 +1780,35 @@ void LinuxFdSelfTest()
     if (p->linux_fds[4].kf_handle == p->linux_fds[3].kf_handle)
         core::Panic("proc/linux-fd", "self-test: Dup gave dst the SAME handle");
 
+    // 3b) Shared open-file description: dup MUST make fd 3 and fd 4
+    // point at ONE description (same OFD index), so a seek through
+    // one fd is observed through the other. This is the POSIX
+    // semantic the OFD pool exists to provide.
+    if (p->linux_fds[3].ofd == 0)
+        core::Panic("proc/linux-fd", "self-test: Dup did not materialise an OFD on src");
+    if (p->linux_fds[4].ofd != p->linux_fds[3].ofd)
+        core::Panic("proc/linux-fd", "self-test: dup did not SHARE the open-file description");
+    LinuxFdSetOffset(p, 3, 0x1234);
+    if (LinuxFdGetOffset(p, 4) != 0x1234)
+        core::Panic("proc/linux-fd", "self-test: seek on fd 3 not visible through dup fd 4");
+    LinuxFdSetOffset(p, 4, 0x5678);
+    if (LinuxFdGetOffset(p, 3) != 0x5678)
+        core::Panic("proc/linux-fd", "self-test: seek on fd 4 not visible through fd 3");
+    // Status flags share too.
+    LinuxFdSetStatusFlags(p, 3, 0x0800 /*synthetic O_NONBLOCK-ish*/);
+    if (LinuxFdGetStatusFlags(p, 4) != 0x0800)
+        core::Panic("proc/linux-fd", "self-test: status flags not shared across dup");
+
     // 4) CLOEXEC: stamp on fd 3, leave fd 4 clear.
     LinuxFdSetCloexec(p, 3, true);
     if (!LinuxFdGetCloexec(p, 3))
         core::Panic("proc/linux-fd", "self-test: SetCloexec(3,true) didn't take");
     if (LinuxFdGetCloexec(p, 4))
         core::Panic("proc/linux-fd", "self-test: cloexec leaked across dup");
+
+    // Remember the shared OFD index so we can prove it's freed only
+    // on the LAST close (refcount-balance check).
+    const u16 shared_ofd = p->linux_fds[3].ofd;
 
     // 5) CloseOnExec: fd 3 (cloexec) should close, fd 4 should survive.
     LinuxFdCloseOnExec(p);
@@ -1543,13 +1818,23 @@ void LinuxFdSelfTest()
         core::Panic("proc/linux-fd", "self-test: CloseOnExec dropped non-cloexec slot");
     if (g_lfd_selftest_release_calls != 0)
         core::Panic("proc/linux-fd", "self-test: pool release fired prematurely");
+    // The shared description must SURVIVE fd 3's close — fd 4 still
+    // references it (refcount 2 → 1, not 0).
+    if (shared_ofd == 0 || g_ofd_pool[shared_ofd - 1].refcount != 1)
+        core::Panic("proc/linux-fd", "self-test: OFD freed too early (closed one dup, both should keep it)");
+    // fd 4 still reads the last offset written through the now-closed fd 3.
+    if (LinuxFdGetOffset(p, 4) != 0x5678)
+        core::Panic("proc/linux-fd", "self-test: surviving dup lost the shared offset");
 
-    // 6) Final close on fd 4 — fires the per-pool release callback.
+    // 6) Final close on fd 4 — fires the per-pool release callback
+    // AND drops the last OFD reference, freeing the description.
     LinuxFdClose(p, 4);
     if (g_lfd_selftest_release_calls != 1)
         core::Panic("proc/linux-fd", "self-test: pool release didn't fire on last close");
     if (g_lfd_selftest_release_idx != 0xAAAA)
         core::Panic("proc/linux-fd", "self-test: pool release got wrong index");
+    if (g_ofd_pool[shared_ofd - 1].refcount != 0)
+        core::Panic("proc/linux-fd", "self-test: OFD not freed on last close (refcount asymmetry)");
 
     mm::KFree(p);
     arch::SerialWrite("[proc] linux-fd-table self-test OK\n");
