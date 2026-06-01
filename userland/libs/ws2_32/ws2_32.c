@@ -1224,3 +1224,179 @@ __declspec(dllexport) INT WSARecv(SOCKET s, void* buffers, DWORD buffer_count, D
     g_wsa_last_error = WSAEINVAL;
     return SOCKET_ERROR;
 }
+
+/* ---------------------------------------------------------------------------
+ * WSAAsyncSelect — message-based async socket notification.
+ *
+ * Win32 contract: WSAAsyncSelect(s, hWnd, wMsg, lEvent) registers `s` so
+ * that whenever one of the FD_* events in `lEvent` fires, the window
+ * manager posts message `wMsg` to `hWnd` with:
+ *   wParam = the socket handle
+ *   lParam = WSAMAKESELECTREPLY(event, error)
+ *            (low 16 bits = the single FD_* event, high 16 bits = error)
+ *
+ * Rules implemented:
+ *   - Only ONE async registration per socket. A second call for the same
+ *     socket replaces the first (and re-arms its edge state).
+ *   - lEvent == 0 cancels the registration for `s`.
+ *   - Calling WSAAsyncSelect implicitly puts the socket in non-blocking
+ *     mode in real Win32; our kernel socket layer is always-blocking in
+ *     v0, so that side effect is a no-op (see ioctlsocket FIONBIO).
+ *
+ * Mechanism: a single per-process helper thread (spawned lazily on the
+ * first live registration) polls every registered socket via
+ * `kSockOpPollEvents` (SYS_SOCKET_OP op=14) on a short cadence. For each
+ * socket it compares the freshly-observed FD_* bitmask against the bits
+ * it last delivered (edge detection) and, for every newly-set subscribed
+ * event, posts `wMsg` to the registered HWND through the SAME kernel entry
+ * user32's PostMessage uses (SYS_WIN_POST_MSG = 64). One post per distinct
+ * event so the caller's WindowProc sees one FD_* per message, matching
+ * Winsock's WSAMAKESELECTREPLY contract.
+ *
+ * GAP: edge re-arm follows the kernel poll bitmask, not Winsock's exact
+ *   level/edge re-enable rules (e.g. FD_READ should re-fire only after a
+ *   recv that drains-then-refills). With a level-triggered poll source we
+ *   suppress repeats by tracking the last-delivered mask and only posting
+ *   on a 0->1 transition; a socket that stays readable without an
+ *   intervening recv won't re-post until the kernel mask drops the bit.
+ *   — revisit when the kernel grows a true edge-triggered readiness queue.
+ * GAP: FD_CONNECT completion error is always reported as 0 (success) — the
+ *   kernel poll has no per-event error channel yet, so the high 16 bits of
+ *   lParam are 0. — revisit when SocketPollEvents surfaces a pending
+ *   SO_ERROR.
+ * ------------------------------------------------------------------------- */
+
+#define WS2_FD_READ 0x01L
+#define WS2_FD_WRITE 0x02L
+#define WS2_FD_ACCEPT 0x08L
+#define WS2_FD_CONNECT 0x10L
+#define WS2_FD_CLOSE 0x20L
+
+#define WSAMAKESELECTREPLY(event, error) ((long)(((unsigned)(event)) | (((unsigned)(error)) << 16)))
+
+#define WS2_ASYNC_SLOTS 32
+
+typedef struct WsaAsyncReg
+{
+    int in_use;
+    SOCKET socket;
+    void* hwnd;
+    unsigned wMsg;
+    long eventMask; /* subscribed FD_* bits */
+    long delivered; /* FD_* bits already posted since last clear (edge state) */
+} WsaAsyncReg;
+
+static WsaAsyncReg g_wsa_async[WS2_ASYNC_SLOTS];
+static int g_wsa_async_thread_started = 0;
+
+/* SYS_WIN_POST_MSG (64): the exact kernel entry user32's PostMessage
+ * routes through. rdi = hwnd, rsi = message, rdx = wParam, r10 = lParam.
+ * Cross-pid posts are rejected kernel-side; we only ever post to HWNDs the
+ * caller registered, which it owns. */
+static void ws2_post_message(void* hwnd, unsigned msg, unsigned long long wparam, long lparam)
+{
+    register long long r10_l __asm__("r10") = (long long)lparam;
+    long long discard;
+    __asm__ volatile("int $0x80"
+                     : "=a"(discard)
+                     : "a"((long long)64), "D"((long long)(unsigned long long)hwnd), "S"((long long)msg),
+                       "d"((long long)wparam), "r"(r10_l)
+                     : "memory");
+}
+
+/* Helper-thread body. Polls every live async registration, posts a message
+ * for each newly-set subscribed FD_* event, sleeps, repeats. Never returns
+ * — the kernel reclaims the thread on process exit. */
+static void ws2_async_select_thread(void* arg)
+{
+    (void)arg;
+    /* Single FD_* event per iteration, posted individually so each
+     * delivered message carries exactly one event in the reply. */
+    static const long kEventBits[5] = {WS2_FD_READ, WS2_FD_WRITE, WS2_FD_ACCEPT, WS2_FD_CONNECT, WS2_FD_CLOSE};
+    for (;;)
+    {
+        for (int i = 0; i < WS2_ASYNC_SLOTS; ++i)
+        {
+            if (!g_wsa_async[i].in_use)
+                continue;
+            const long subscribed = g_wsa_async[i].eventMask;
+            const long ready = ws2_poll_events(g_wsa_async[i].socket) & subscribed;
+            /* Newly-set bits = ready bits we haven't delivered yet. */
+            const long fresh = ready & ~g_wsa_async[i].delivered;
+            for (int b = 0; b < 5; ++b)
+            {
+                if (fresh & kEventBits[b])
+                {
+                    ws2_post_message(g_wsa_async[i].hwnd, g_wsa_async[i].wMsg,
+                                     (unsigned long long)g_wsa_async[i].socket, WSAMAKESELECTREPLY(kEventBits[b], 0));
+                }
+            }
+            /* Re-arm: a bit that dropped out of `ready` becomes eligible to
+             * re-fire on its next 0->1 transition. */
+            g_wsa_async[i].delivered = ready;
+        }
+        ws2_sleep_ms(10);
+    }
+}
+
+__declspec(dllexport) INT WSAAsyncSelect(SOCKET s, void* hWnd, unsigned wMsg, long lEvent)
+{
+    /* Find an existing registration for this socket — one per socket. */
+    int free_idx = -1;
+    for (int i = 0; i < WS2_ASYNC_SLOTS; ++i)
+    {
+        if (g_wsa_async[i].in_use && g_wsa_async[i].socket == s)
+        {
+            if (lEvent == 0)
+            {
+                /* Cancel: drop the registration entirely. */
+                g_wsa_async[i].in_use = 0;
+                return 0;
+            }
+            g_wsa_async[i].hwnd = hWnd;
+            g_wsa_async[i].wMsg = wMsg;
+            g_wsa_async[i].eventMask = lEvent;
+            g_wsa_async[i].delivered = 0; /* re-arm edge state */
+            return 0;
+        }
+        if (!g_wsa_async[i].in_use && free_idx < 0)
+            free_idx = i;
+    }
+
+    if (lEvent == 0)
+        return 0; /* Cancel of a nonexistent registration — succeeds. */
+
+    if (free_idx < 0)
+    {
+        g_wsa_last_error = 10055; /* WSAENOBUFS */
+        return SOCKET_ERROR;
+    }
+
+    g_wsa_async[free_idx].socket = s;
+    g_wsa_async[free_idx].hwnd = hWnd;
+    g_wsa_async[free_idx].wMsg = wMsg;
+    g_wsa_async[free_idx].eventMask = lEvent;
+    g_wsa_async[free_idx].delivered = 0;
+    g_wsa_async[free_idx].in_use = 1;
+
+    /* Spawn the poller lazily on the first live registration — same
+     * SYS_THREAD_CREATE (45) path the CRT's _beginthread uses (rdi = start
+     * VA, rsi = arg). The kernel returns a pseudo-handle on success or a
+     * negative errno on cap-deny / slot exhaustion. */
+    if (!g_wsa_async_thread_started)
+    {
+        long long h;
+        __asm__ volatile("int $0x80"
+                         : "=a"(h)
+                         : "a"((long long)45), "D"((long long)(unsigned long long)&ws2_async_select_thread),
+                           "S"((long long)0)
+                         : "memory");
+        /* GAP: a failed spawn leaves the registration recorded but
+         *   unserviced; the next WSAAsyncSelect call retries the spawn. A
+         *   well-formed Win32 client with kCapSpawnThread never hits this.
+         *   — revisit if a no-thread cap tier appears. */
+        if (h >= 0)
+            g_wsa_async_thread_started = 1;
+    }
+    return 0;
+}
