@@ -28,11 +28,17 @@
  *   - Body cap is `kHttpResponseCap` (64 KiB). Pages larger than
  *     this show a `(truncated)` banner — streamed downloads to disk
  *     are a follow-up.
- *   - No JavaScript, no CSS, no images, no layout. The renderer is
- *     a tag stripper: HTML tags collapse to whitespace, common
- *     entities (`&amp;` `&lt;` `&gt;` `&quot;` `&nbsp;` `&apos;`)
- *     decode, block-level closers (`</p>` `</div>` `</br>` etc.)
- *     emit a newline so the structure stays readable.
+ *   - Real rendering: pages flow through the kernel/web engine —
+ *     ParseHtml -> author CSS (from <style> + inline style="") ->
+ *     ComputeStyles -> <script> execution against the live DOM (so
+ *     scripts mutate the page before layout, bounded by the JS step
+ *     budget) -> LayoutDocument -> a paint-order DisplayList ->
+ *     PaintToCanvas/PaintToWindow (kernel/web/paint). Text uses the
+ *     8x8 console font; <img> resolves + fetches + decodes (PNG/JPEG)
+ *     against the page URL and blits, with a placeholder box on
+ *     failure. The body scrolls in pixel units over the laid-out
+ *     display list. GAP: floats/flex/grid/tables/positioning are the
+ *     layout engine's documented v0 limits; no link navigation yet.
  *
  * UI shape (one window, four modes):
  *
@@ -138,6 +144,18 @@ void BrowserSelfTest();
 /// BrowserSelfTest() invocation ran every check (including
 /// the synthetic toolbar button click) without error.
 bool BrowserSelfTestPassed();
+
+/// Boot self-test for the END-TO-END render pipeline. Calls
+/// RenderPage on a canned HTML page (style + heading + box + a
+/// script that mutates the DOM), paints the resulting display list
+/// into an in-memory canvas, and asserts: the styled box background
+/// colour appears at the expected pixels; the heading renders red
+/// glyph pixels; AND the script ran (the laid-out text reflects the
+/// mutation), proving parse->style->script->layout->paint end-to-end.
+/// Emits `[browser-render-selftest] PASS (...)`; on the first failed
+/// sub-check fires KBP_PROBE_V(kBootSelftestFail, <#>). No outbound
+/// network — real-internet rendering is correct-by-inspection only.
+void BrowserRenderSelfTest();
 
 /// Mouse-event entry point for the Pass D toolbar + labels.
 /// Called from the boot-time mouse-reader thread on every

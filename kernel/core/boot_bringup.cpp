@@ -178,6 +178,7 @@
 #include "web/jpeg.h"
 #include "web/js_dom.h"
 #include "web/layout.h"
+#include "web/paint.h"
 #include "web/png.h"
 #include "apps/calendar.h"
 #include "apps/charmap.h"
@@ -3216,6 +3217,19 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // text-align:center shifting a run. Produces the draw commands a
     // future framebuffer painter executes.
     DUETOS_BOOT_SELFTEST(duetos::web::LayoutSelfTest());
+
+    // Display-list painter self-test (kernel/web/paint). Rasterises a
+    // handcrafted display list (FillRect, TextRun, Border, ImageBox over
+    // a decoded PNG fixture) into an RGBA8888 canvas and asserts pixels:
+    // exact fill colour, glyph pixels from the 8x8 console font, border
+    // edges, nearest-neighbour image blit, off-canvas clipping, scroll.
+    DUETOS_BOOT_SELFTEST(duetos::web::PaintSelfTest());
+
+    // Browser end-to-end render self-test. Drives RenderPage on a canned
+    // page (author CSS + heading + box + a DOM-mutating script) through
+    // parse->style->script->layout->paint and asserts the painted
+    // pixels + that the script mutation reached the display list.
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserRenderSelfTest());
 
     // CALENDAR — windowed month-view sibling of the read-only
     // taskbar-clock popup. Lets the user page through past / future

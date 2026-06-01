@@ -1,6 +1,7 @@
 #include "apps/browser.h"
 
 #include "arch/x86_64/serial.h"
+#include "debug/probes.h"
 #include "log/klog.h"
 #include "drivers/input/ps2kbd.h"
 #include "drivers/input/ps2mouse.h"
@@ -23,6 +24,14 @@
 #include "net/x509_verify.h"
 #include "sched/sched.h"
 #include "time/timekeeper.h"
+#include "web/css.h"
+#include "web/dom.h"
+#include "web/html.h"
+#include "web/jpeg.h"
+#include "web/js_dom.h"
+#include "web/layout.h"
+#include "web/paint.h"
+#include "web/png.h"
 
 namespace duetos::apps::browser
 {
@@ -80,9 +89,27 @@ struct State
     char status[kStatusCap];
     u32 status_code; // last HTTP status if known
 
-    // Vertical scroll offset (in wrapped rows). Reset to 0 on a
-    // successful fetch.
+    // Vertical scroll offset (in wrapped rows). Used by the History /
+    // Bookmarks modal lists. Reset to 0 on a successful fetch.
     u32 scroll_row;
+
+    // Rendered-page scroll offset in DEVICE PIXELS. The render
+    // pipeline (ParseHtml -> ComputeStyles -> scripts -> LayoutDocument
+    // -> DisplayList) produces a pixel-addressed display list; the View
+    // body scrolls it by this offset, clamped to [0, total_height -
+    // view_h]. Reset to 0 on a successful fetch.
+    i32 scroll_y;
+
+    // Render output, produced by RenderPage in the fetch worker and
+    // consumed by DrawBody under the compositor lock. `render_dl` points
+    // into `render_arena_buf` (persistent so it outlives DoFetch);
+    // `render_total_h` is the laid-out page height in device px;
+    // `render_ready` gates DrawBody between the painter path and the
+    // legacy "Fetching..." / empty state.
+    duetos::web::DisplayList* render_dl;
+    i32 render_total_h;
+    u32 render_viewport_w;
+    volatile bool render_ready;
 
     // History — circular buffer of visited URLs. `idx` points
     // past the most-recent entry; back/forward decrement/increment
@@ -108,6 +135,50 @@ struct State
 };
 
 constinit State g_state = {};
+
+// ---------------------------------------------------------------
+// Render pipeline backing storage. All of this is single-page —
+// each RenderPage rebuilds the DOM / styles / display list from the
+// raw HTML, so we keep ONE persistent arena (the display list it
+// produces must outlive DoFetch because DrawBody paints it later).
+//
+//   - kRenderArenaBytes: DOM + stylesheets + style map + display
+//     list for one page. 1 MiB comfortably holds a real-world page
+//     (capped by kHttpResponseCap = 64 KiB of source anyway).
+//   - kCanvasW/kCanvasH: the off-screen RGBA8888 compose surface the
+//     painter draws into before blitting to the framebuffer. Sized to
+//     a generous window content area; oversize windows clip to this.
+//   - Image cache: up to kImageCacheCap decoded images keyed by URL,
+//     each decoded into its own slice of kImageArenaBytes.
+// ---------------------------------------------------------------
+constexpr u32 kRenderArenaBytes = 1024u * 1024u;
+constexpr u32 kCanvasW = 1024u;
+constexpr u32 kCanvasH = 1024u;
+constexpr u32 kImageArenaBytes = 4u * 1024u * 1024u;
+constexpr u32 kImageCacheCap = 16u;
+
+alignas(16) u8 g_render_arena_buf[kRenderArenaBytes];
+alignas(16) u8 g_canvas[kCanvasW * kCanvasH * 4u];
+alignas(16) u8 g_image_arena_buf[kImageArenaBytes];
+
+struct ImageCacheEntry
+{
+    char url[kUrlCap];
+    duetos::web::PaintImage img; // rgba==nullptr => decode failed (placeholder)
+    bool used;
+};
+
+struct ImageCache
+{
+    ImageCacheEntry entries[kImageCacheCap];
+    u32 count;
+    duetos::web::PngArena arena; // bump over g_image_arena_buf
+    // Page URL the current cache was resolved against (for relative
+    // <img src> resolution). Reset per RenderPage.
+    char page_url[kUrlCap];
+};
+
+constinit ImageCache g_images = {};
 
 // ---------------------------------------------------------------
 // Pass D chrome: AppToolbar (back) + 7 AppButton entries
@@ -526,16 +597,15 @@ bool TryParseDottedQuad(const char* host, net::Ipv4Address* out)
 }
 
 // ---------------------------------------------------------------
-// HTML stripping.
+// HTML stripping (plain-text utility — NOT the live renderer).
 //
 // Walk the input, drop tag content (<...>), decode known entities,
-// and emit a newline at every block-level close. The output is a
-// plaintext stream the painter line-wraps on the fly.
-//
-// GAP: CSS / JavaScript / images / layout — the renderer is a tag
-//      stripper, not a layout engine. Styling, scripting, and inline
-//      media are deferred to future swarms; <script> bodies are
-//      dropped, <style>/CSS is treated as text, <img> is ignored.
+// and emit a newline at every block-level close. The LIVE page is now
+// rendered through the full web engine (ParseHtml -> ComputeStyles ->
+// scripts -> LayoutDocument -> DisplayList -> paint); see RenderPage /
+// DrawBody below. This stripper survives only as a tested text-
+// extraction helper (BrowserSelfTest) and could back a future
+// "view source as text" mode.
 // ---------------------------------------------------------------
 
 // Block-level open/close tags whose presence implies a paragraph
@@ -1320,12 +1390,278 @@ void FormatHttpStatus(char* buf, u32 cap, u16 code, bool truncated)
         append(" (truncated to 64 KiB)");
 }
 
+// ---------------------------------------------------------------
+// Render pipeline: ParseHtml -> gather author CSS -> ComputeStyles ->
+// run <script>s against the live DOM -> LayoutDocument -> DisplayList.
+// All allocation comes from g_render_arena_buf so the resulting display
+// list outlives DoFetch (DrawBody paints it later, off the same state).
+// ---------------------------------------------------------------
+
+// Resolve a (possibly relative) reference `ref` against `base` into
+// `out`. Handles: absolute http(s):// (copied as-is), scheme-relative
+// (//host/...), root-relative (/path), and same-directory relative
+// (path). GAP: no `..` collapsing, no query/fragment normalisation —
+// enough for the common <img src> shapes a v0 page ships.
+void ResolveUrl(const char* base, const char* ref, char* out, u32 cap)
+{
+    if (ref == nullptr || ref[0] == '\0')
+    {
+        out[0] = '\0';
+        return;
+    }
+    // Absolute.
+    if ((StrLen(ref) >= 7 && ref[0] == 'h' && ref[1] == 't' && ref[2] == 't' && ref[3] == 'p' &&
+         (ref[4] == ':' || (ref[4] == 's' && ref[5] == ':'))))
+    {
+        StrCopyCap(out, cap, ref);
+        return;
+    }
+    const auto bp = ParseUrl(base);
+    if (!bp.ok)
+    {
+        StrCopyCap(out, cap, ref);
+        return;
+    }
+    // Scheme-relative: //host/path.
+    if (ref[0] == '/' && ref[1] == '/')
+    {
+        StrCopyCap(out, cap, bp.scheme_https ? "https:" : "http:");
+        StrAppend(out, cap, ref);
+        return;
+    }
+    // Build "scheme://host" prefix.
+    StrCopyCap(out, cap, bp.scheme_https ? "https://" : "http://");
+    StrAppend(out, cap, bp.host);
+    if (ref[0] == '/')
+    {
+        // Root-relative.
+        StrAppend(out, cap, ref);
+        return;
+    }
+    // Same-directory relative: take base path up to the last '/'.
+    char dir[160];
+    StrCopyCap(dir, sizeof(dir), bp.path);
+    u32 cut = 0;
+    for (u32 i = 0; dir[i] != '\0'; ++i)
+    {
+        if (dir[i] == '/')
+            cut = i + 1;
+    }
+    dir[cut] = '\0';
+    StrAppend(out, cap, dir);
+    StrAppend(out, cap, ref);
+}
+
+// Fetch + decode the image at `url` into the image arena, returning its
+// PaintImage (rgba==nullptr on failure). Sniffs PNG vs JPEG by magic.
+duetos::web::PaintImage DecodeImage(const char* url)
+{
+    duetos::web::PaintImage out{};
+    u8* raw = static_cast<u8*>(mm::KMalloc(kHttpResponseCap));
+    if (raw == nullptr)
+        return out;
+
+    u32 got = 0;
+    u16 code = 0;
+    bool trunc = false;
+    const FetchStatus st = FetchUrl(url, raw, kHttpResponseCap, &got, &code, &trunc, /*injected=*/nullptr);
+    if (st != FetchStatus::Ok || got < 4)
+    {
+        mm::KFree(raw);
+        return out;
+    }
+
+    if (raw[0] == 0x89 && raw[1] == 0x50 && raw[2] == 0x4E && raw[3] == 0x47)
+    {
+        duetos::web::PngImage png{};
+        if (duetos::web::PngDecode(raw, got, g_images.arena, &png))
+        {
+            out.rgba = png.pixels;
+            out.w = png.width;
+            out.h = png.height;
+        }
+    }
+    else if (raw[0] == 0xFF && raw[1] == 0xD8)
+    {
+        duetos::web::JpegImage jpg{};
+        if (duetos::web::JpegDecode(raw, got, g_images.arena, &jpg))
+        {
+            out.rgba = jpg.pixels;
+            out.w = jpg.width;
+            out.h = jpg.height;
+        }
+    }
+    mm::KFree(raw);
+    return out;
+}
+
+// Painter ImageProvider callback: resolve <img src> against the page
+// URL, return a cached decode, or fetch+decode (and cache) on first
+// sight. A cache slot with rgba==nullptr is a remembered failure so we
+// don't refetch a broken image every paint.
+duetos::web::PaintImage ImageProviderFn(const char* src, u32 /*srcLen*/, void* /*ctx*/)
+{
+    duetos::web::PaintImage none{};
+    if (src == nullptr || src[0] == '\0')
+        return none;
+
+    char abs[kUrlCap];
+    ResolveUrl(g_images.page_url, src, abs, sizeof(abs));
+    if (abs[0] == '\0')
+        return none;
+
+    for (u32 i = 0; i < g_images.count; ++i)
+    {
+        if (g_images.entries[i].used && StrEqI(g_images.entries[i].url, abs))
+            return g_images.entries[i].img;
+    }
+    if (g_images.count >= kImageCacheCap)
+        return none; // cache full — placeholder
+
+    ImageCacheEntry& e = g_images.entries[g_images.count++];
+    StrCopyCap(e.url, sizeof(e.url), abs);
+    e.img = DecodeImage(abs);
+    e.used = true;
+    return e.img;
+}
+
+// Concatenate every <style> element's text into `out` (recursive walk),
+// NUL-terminated, truncated to cap-1.
+u32 GatherStyles(const duetos::web::Node* node, char* out, u32 cap, u32 len)
+{
+    using duetos::web::NodeKind;
+    for (const duetos::web::Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
+    {
+        if (c->kind == NodeKind::Element && c->tag != nullptr && StrEqI(c->tag, "style"))
+        {
+            for (const duetos::web::Node* t = c->firstChild; t != nullptr; t = t->nextSibling)
+            {
+                if (t->kind == NodeKind::Text && t->text != nullptr)
+                {
+                    for (u32 i = 0; t->text[i] != '\0' && len + 1 < cap; ++i)
+                        out[len++] = t->text[i];
+                }
+            }
+        }
+        len = GatherStyles(c, out, cap, len);
+    }
+    out[(len < cap) ? len : cap - 1] = '\0';
+    return len;
+}
+
+// Run every <script> element's text against the live DOM (so scripts
+// mutate the tree before layout). Each call is bounded by the JS
+// engine's step budget, so a runaway page script returns Timeout rather
+// than hanging the browser.
+void RunScripts(duetos::web::Node* docRoot, duetos::web::Node* node, duetos::web::Arena& arena, char* console_buf,
+                u32 console_cap)
+{
+    using duetos::web::NodeKind;
+    for (duetos::web::Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
+    {
+        if (c->kind == NodeKind::Element && c->tag != nullptr && StrEqI(c->tag, "script"))
+        {
+            for (duetos::web::Node* t = c->firstChild; t != nullptr; t = t->nextSibling)
+            {
+                if (t->kind == NodeKind::Text && t->text != nullptr && t->text[0] != '\0')
+                {
+                    // Always run against the TRUE document root so
+                    // getElementById / querySelector see the whole tree.
+                    duetos::web::JsRunOnDocument(docRoot, t->text, StrLen(t->text), arena, console_buf, console_cap);
+                }
+            }
+        }
+        RunScripts(docRoot, c, arena, console_buf, console_cap);
+    }
+}
+
+// Compute the laid-out page's total height in device px (max bottom of
+// any display item) so the scrollbar / scroll clamp have a real extent.
+i32 DisplayListHeight(const duetos::web::DisplayList& dl)
+{
+    i32 maxY = 0;
+    for (u32 i = 0; i < dl.count; ++i)
+    {
+        const i32 bottom = dl.items[i].rect.y + dl.items[i].rect.h;
+        if (bottom > maxY)
+            maxY = bottom;
+    }
+    return maxY;
+}
+
+// RenderPage — UI-decoupled: parse, style, script, lay out one page
+// into the persistent render arena and stash the display list + height
+// for DrawBody. `page_url` drives relative <img src> resolution.
+void RenderPage(const char* html, u32 len, const char* page_url, u32 viewport_w)
+{
+    g_state.render_ready = false;
+    g_state.render_dl = nullptr;
+    g_state.render_total_h = 0;
+    g_state.scroll_y = 0;
+    g_state.render_viewport_w = viewport_w;
+
+    // Reset the image cache for the new page (the decoded pixels in the
+    // image arena are reclaimed wholesale).
+    g_images.count = 0;
+    g_images.arena = duetos::web::PngArena(g_image_arena_buf, kImageArenaBytes);
+    StrCopyCap(g_images.page_url, sizeof(g_images.page_url), page_url);
+
+    duetos::web::Arena arena(g_render_arena_buf, kRenderArenaBytes);
+
+    duetos::web::Node* doc = duetos::web::ParseHtml(html, len, arena);
+    if (doc == nullptr)
+        return;
+
+    // Author CSS from <style> elements (inline style="" is folded in by
+    // ComputeStyles directly off each element's attribute).
+    static char css_buf[16 * 1024];
+    GatherStyles(doc, css_buf, sizeof(css_buf), 0);
+
+    duetos::web::StyleSheet sheet;
+    duetos::web::AppendUserAgentStyles(sheet, arena);
+    duetos::web::ParseStyleSheet(sheet, css_buf, StrLen(css_buf), /*userAgent=*/false, arena);
+
+    // Run scripts BEFORE styling+layout so DOM mutations are reflected.
+    static char console_buf[4096];
+    RunScripts(doc, doc, arena, console_buf, sizeof(console_buf));
+
+    duetos::web::StyleMap styles = duetos::web::ComputeStyles(doc, sheet, arena);
+
+    // Monospace metrics matching the 8x8 console font (cell height 16px
+    // gives readable line spacing; the painter scales the 8x8 bitmap).
+    duetos::web::TextMetrics tm;
+    tm.glyphW = 8;
+    tm.glyphH = 16;
+    tm.baseFontPx = 16;
+
+    duetos::web::DisplayList* dl = duetos::web::LayoutDocument(doc, styles, viewport_w, tm, arena);
+    if (dl == nullptr)
+        return;
+
+    // Pre-warm the image cache HERE (in the fetch-worker context) by
+    // resolving + decoding every ImageBox up front. This keeps the
+    // ImageProvider a pure cache lookup at PAINT time, so DrawBody never
+    // does network I/O under the compositor lock.
+    for (u32 i = 0; i < dl->count; ++i)
+    {
+        if (dl->items[i].cmd == duetos::web::DisplayCmd::ImageBox)
+            ImageProviderFn(dl->items[i].src, dl->items[i].srcLen, nullptr);
+    }
+
+    g_state.render_dl = dl;
+    g_state.render_total_h = DisplayListHeight(*dl);
+    g_state.render_ready = true;
+}
+
 void DoFetch(const char* url)
 {
     g_state.body_len = 0;
     g_state.body[0] = '\0';
     g_state.truncated = false;
     g_state.scroll_row = 0;
+    g_state.scroll_y = 0;
+    g_state.render_ready = false;
+    g_state.render_dl = nullptr;
     g_state.status_code = 0;
 
     const auto p = ParseUrl(url);
@@ -1387,7 +1723,24 @@ void DoFetch(const char* url)
 
     g_state.status_code = code;
     g_state.truncated = truncated;
-    StripHtml(raw, got, g_state.body, kBodyCap, &g_state.body_len);
+
+    // Keep the RAW HTML in g_state.body so Save writes the actual page
+    // source, and render the page through the full pipeline (parse ->
+    // style -> script -> layout -> display list) for DrawBody to paint.
+    u32 keep = got;
+    if (keep >= kBodyCap)
+        keep = kBodyCap - 1;
+    for (u32 i = 0; i < keep; ++i)
+        g_state.body[i] = static_cast<char>(raw[i]);
+    g_state.body[keep] = '\0';
+    g_state.body_len = keep;
+
+    // Viewport width for layout: the window content width minus the
+    // scrollbar gutter; clamped to the canvas width. DrawBody re-lays
+    // nothing — it paints this display list at the live scroll offset.
+    const u32 vw = (g_state.render_viewport_w != 0) ? g_state.render_viewport_w : 640;
+    RenderPage(g_state.body, g_state.body_len, url, vw);
+
     mm::KFree(raw);
 
     char status_buf[kStatusCap];
@@ -1422,80 +1775,76 @@ void DoFetch(const char* url)
 
 void DrawBody(u32 cx, u32 cy, u32 cw, u32 ch, u32 fg, u32 bg)
 {
-    // Reserve Pass D toolbar + URL bar + status row at the top
-    // and the AppLabel footer at the bottom. Body view sits in
-    // the middle band.
+    // Reserve Pass D toolbar + URL bar + status row at the top and the
+    // AppLabel footer at the bottom. The rendered page sits in the
+    // middle band, painted from the display list at the live pixel
+    // scroll offset.
     const u32 top_reserved = kToolbarH + kUrlBarH + kStatusRowH + 2;
     const u32 bot_reserved = kFooterH + 2;
     if (ch < top_reserved + bot_reserved)
         return;
     const u32 view_h = ch - top_reserved - bot_reserved;
-    const u32 chars_per_row = (cw > 12) ? (cw - 8) / 8 : 1;
-    const u32 rows_visible = view_h / kRowH;
+    const u32 sbw = duetos::drivers::video::kScrollbarWidth;
+    const u32 view_w = (cw > sbw + 4) ? cw - sbw : cw;
 
-    // Wrap body on the fly. Maintain a row counter so we can skip
-    // ahead by `scroll_row` and stop after `rows_visible` rows.
-    u32 row = 0;
-    u32 col = 0;
-    char line[200];
-    u32 line_n = 0;
+    // Record the live viewport width so the NEXT fetch / reload lays the
+    // page out to the current window size. We do NOT re-run RenderPage
+    // here: the pipeline runs scripts and (pre-)fetches images, which is
+    // network I/O that must not happen under the compositor lock. A
+    // resize therefore reflows on the next reload, not live.
+    g_state.render_viewport_w = view_w;
 
-    auto flush_line = [&]()
+    if (!g_state.render_ready || g_state.render_dl == nullptr)
     {
-        line[line_n] = '\0';
-        if (row >= g_state.scroll_row && row < g_state.scroll_row + rows_visible)
-        {
-            const u32 y = cy + top_reserved + (row - g_state.scroll_row) * kRowH;
-            FramebufferDrawString(cx + 4, y, line, fg, bg);
-        }
-        ++row;
-        line_n = 0;
-        col = 0;
-    };
-
-    for (u32 i = 0; i < g_state.body_len; ++i)
-    {
-        const char c = g_state.body[i];
-        if (c == '\n')
-        {
-            flush_line();
-            continue;
-        }
-        if (col >= chars_per_row)
-        {
-            flush_line();
-        }
-        if (line_n + 1 < sizeof(line))
-        {
-            line[line_n++] = c;
-        }
-        ++col;
-        // Don't break early — keep counting rows past the
-        // visible range so the scrollbar's "total" reflects the
-        // full body. The flush_line bounds-check above already
-        // prevents writes outside the visible window.
+        FramebufferDrawString(cx + 4, cy + top_reserved + 4, "(no content)", fg, bg);
+        duetos::drivers::video::WindowScrollbarSurface s{};
+        s.present = false;
+        duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
+        return;
     }
-    if (line_n > 0)
-        flush_line();
-    // Scrollbar at the right edge of the body view. `total` is
-    // the final row count; `visible` is rows_visible; `first`
-    // is scroll_row.
-    if (rows_visible > 0 && cw > duetos::drivers::video::kScrollbarWidth)
+
+    // Clamp the scroll offset to the page extent.
+    i32 max_scroll = g_state.render_total_h - static_cast<i32>(view_h);
+    if (max_scroll < 0)
+        max_scroll = 0;
+    if (g_state.scroll_y > max_scroll)
+        g_state.scroll_y = max_scroll;
+    if (g_state.scroll_y < 0)
+        g_state.scroll_y = 0;
+
+    // Compose the page off-screen into the persistent canvas, then blit
+    // it into the body band. The canvas is clamped to its fixed size.
+    const u32 canvas_w = (view_w < kCanvasW) ? view_w : kCanvasW;
+    const u32 canvas_h = (view_h < kCanvasH) ? view_h : kCanvasH;
+
+    duetos::web::PaintMetrics pm;
+    pm.glyphW = 8;
+    pm.glyphH = 16;
+    pm.baseFontPx = 16;
+
+    // Background = the browser client tone (0xRRGGBBAA, opaque).
+    const u32 bg_rgba = (bg << 8) | 0xFFu;
+    duetos::web::PaintToWindow(*g_state.render_dl, g_canvas, canvas_w, canvas_h, g_state.scroll_y, pm, ImageProviderFn,
+                               nullptr, cx, cy + top_reserved, bg_rgba);
+
+    // Scrollbar at the right edge, in pixel units (total/visible/first).
+    if (cw > sbw)
     {
-        const u32 sb_x = cx + cw - duetos::drivers::video::kScrollbarWidth;
+        const u32 sb_x = cx + cw - sbw;
         const u32 sb_y = cy + top_reserved;
-        const u32 sb_w = duetos::drivers::video::kScrollbarWidth;
-        const u32 sb_h = rows_visible * kRowH;
-        duetos::drivers::video::ScrollbarPaint(sb_x, sb_y, sb_w, sb_h, {row, rows_visible, g_state.scroll_row});
+        const u32 sb_h = view_h;
+        const u32 total = static_cast<u32>(g_state.render_total_h);
+        const u32 first = static_cast<u32>(g_state.scroll_y);
+        duetos::drivers::video::ScrollbarPaint(sb_x, sb_y, sbw, sb_h, {total, view_h, first});
         duetos::drivers::video::WindowScrollbarSurface s{};
         s.present = true;
         s.x = sb_x;
         s.y = sb_y;
-        s.w = sb_w;
+        s.w = sbw;
         s.h = sb_h;
-        s.total = row;
-        s.visible = rows_visible;
-        s.first = g_state.scroll_row;
+        s.total = total;
+        s.visible = view_h;
+        s.first = first;
         duetos::drivers::video::WindowSetScrollbar(g_state.handle, s);
     }
     else
@@ -1857,6 +2206,11 @@ void BrowserInit(WindowHandle handle)
     g_state.status[0] = '\0';
     g_state.status_code = 0;
     g_state.scroll_row = 0;
+    g_state.scroll_y = 0;
+    g_state.render_ready = false;
+    g_state.render_dl = nullptr;
+    g_state.render_total_h = 0;
+    g_state.render_viewport_w = 0;
     g_state.history_count = 0;
     g_state.history_idx = 0;
     g_state.bookmark_count = 0;
@@ -1873,9 +2227,10 @@ void BrowserInit(WindowHandle handle)
     duetos::drivers::video::WindowSetScrollHandler(handle,
                                                    [](duetos::u32 first)
                                                    {
-                                                       // Body view binds directly; modal lists clamp.
+                                                       // Body view scroll is in pixel units (display-list
+                                                       // total/first), clamped on the next DrawBody.
                                                        if (g_state.mode == Mode::View)
-                                                           g_state.scroll_row = first;
+                                                           g_state.scroll_y = static_cast<duetos::i32>(first);
                                                    });
 }
 
@@ -1962,15 +2317,28 @@ bool BrowserFeedArrow(u16 keycode)
 {
     if (g_state.mode == Mode::View)
     {
+        // Scroll the rendered page (pixel units): arrows step one line,
+        // page keys step most of a viewport.
+        constexpr i32 kLineStep = 16;
+        constexpr i32 kPageStep = 16 * 20;
         if (keycode == kKeyArrowUp)
         {
-            if (g_state.scroll_row > 0)
-                --g_state.scroll_row;
+            g_state.scroll_y -= kLineStep;
         }
         else if (keycode == kKeyArrowDown)
         {
-            ++g_state.scroll_row;
+            g_state.scroll_y += kLineStep;
         }
+        else if (keycode == duetos::drivers::input::kKeyPageUp)
+        {
+            g_state.scroll_y -= kPageStep;
+        }
+        else if (keycode == duetos::drivers::input::kKeyPageDown)
+        {
+            g_state.scroll_y += kPageStep;
+        }
+        if (g_state.scroll_y < 0)
+            g_state.scroll_y = 0;
         return true;
     }
     if (g_state.mode == Mode::History || g_state.mode == Mode::Bookmarks)
@@ -2393,6 +2761,177 @@ void BrowserSelfTest()
 bool BrowserSelfTestPassed()
 {
     return g_self_test_passed;
+}
+
+void BrowserRenderSelfTest()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+
+    auto fail = [](u32 check)
+    {
+        SerialWrite("[browser-render-selftest] FAIL check=");
+        SerialWriteHex(check);
+        SerialWrite("\n");
+        KBP_PROBE_V(duetos::debug::ProbeId::kBootSelftestFail, check);
+    };
+
+    // A canned page exercising the full pipeline: an author stylesheet
+    // (a styled box + a red h1), a heading, the box, and a script that
+    // mutates the h1's text. If the script runs before layout, the
+    // display list will carry a "Changed" TextRun, not "Hi".
+    const char* html =
+        "<html><head><style>.box{background:#3366cc;width:200px;height:40px} h1{color:#ff0000}</style></head>"
+        "<body><h1 id=t>Hi</h1><div class=box></div>"
+        "<script>document.getElementById('t').textContent='Changed'</script></body></html>";
+
+    const u32 vw = 320;
+    RenderPage(html, StrLen(html), "http://example.com/", vw);
+
+    if (!g_state.render_ready || g_state.render_dl == nullptr)
+    {
+        fail(1);
+        return;
+    }
+    const duetos::web::DisplayList& dl = *g_state.render_dl;
+
+    // --- Check 1: a FillRect of #3366CC (the .box background) exists,
+    // sized to the styled 200x40 box. ---
+    const duetos::web::DisplayItem* box = nullptr;
+    for (u32 i = 0; i < dl.count; ++i)
+    {
+        const auto& it = dl.items[i];
+        if (it.cmd == duetos::web::DisplayCmd::FillRect && it.color.r == 0x33 && it.color.g == 0x66 &&
+            it.color.b == 0xCC)
+        {
+            box = &it;
+            break;
+        }
+    }
+    if (box == nullptr)
+    {
+        fail(2);
+        return;
+    }
+    if (box->rect.w != 200 || box->rect.h != 40)
+    {
+        fail(3);
+        return;
+    }
+
+    // --- Check 2: the heading run is RED and reflects the script
+    // mutation ('Changed', not 'Hi') — proving parse->style->script->
+    // layout end-to-end. ---
+    const duetos::web::DisplayItem* heading = nullptr;
+    for (u32 i = 0; i < dl.count; ++i)
+    {
+        const auto& it = dl.items[i];
+        if (it.cmd == duetos::web::DisplayCmd::TextRun && it.color.r == 0xFF && it.color.g == 0x00 &&
+            it.color.b == 0x00)
+        {
+            heading = &it;
+            break;
+        }
+    }
+    if (heading == nullptr)
+    {
+        fail(4);
+        return;
+    }
+    if (heading->textLen != 7 || heading->text[0] != 'C' || heading->text[1] != 'h')
+    {
+        SerialWrite("[browser-render-selftest] DIAG heading='");
+        for (u32 i = 0; i < heading->textLen && i < 32; ++i)
+        {
+            char ch[2] = {heading->text[i], '\0'};
+            SerialWrite(ch);
+        }
+        SerialWrite("' len=");
+        SerialWriteHex(heading->textLen);
+        SerialWrite("\n");
+        // Script did not run (still "Hi") or text wrong.
+        fail(5);
+        return;
+    }
+
+    // --- Check 3: PAINT the display list into a canvas and assert the
+    // pixels: the .box background colour lands at the box rect, and the
+    // heading draws red glyph pixels. ---
+    duetos::web::PaintMetrics pm;
+    pm.glyphW = 8;
+    pm.glyphH = 16;
+    pm.baseFontPx = 16;
+
+    const u32 cw = vw;
+    const u32 chh = 256;
+    // Clear the canvas to opaque white background.
+    for (u32 i = 0; i < cw * chh; ++i)
+    {
+        g_canvas[i * 4 + 0] = 0xFF;
+        g_canvas[i * 4 + 1] = 0xFF;
+        g_canvas[i * 4 + 2] = 0xFF;
+        g_canvas[i * 4 + 3] = 0xFF;
+    }
+    duetos::web::PaintToCanvas(dl, g_canvas, cw, chh, /*scrollY=*/0, pm, ImageProviderFn, nullptr);
+
+    // The box FillRect's interior must be #3366CC.
+    {
+        const i32 px = box->rect.x + box->rect.w / 2;
+        const i32 py = box->rect.y + box->rect.h / 2;
+        if (px >= 0 && py >= 0 && static_cast<u32>(px) < cw && static_cast<u32>(py) < chh)
+        {
+            const u8* p = g_canvas + (static_cast<u32>(py) * cw + static_cast<u32>(px)) * 4u;
+            if (p[0] != 0x33 || p[1] != 0x66 || p[2] != 0xCC)
+            {
+                fail(6);
+                return;
+            }
+        }
+        else
+        {
+            fail(6);
+            return;
+        }
+    }
+
+    // The heading region must contain red glyph pixels.
+    {
+        bool foundRed = false;
+        const i32 y0 = heading->rect.y;
+        const i32 y1 = y0 + 16;
+        const i32 x0 = heading->rect.x;
+        const i32 x1 = x0 + static_cast<i32>(heading->textLen) * 8;
+        for (i32 yy = y0; yy < y1 && yy >= 0 && static_cast<u32>(yy) < chh && !foundRed; ++yy)
+        {
+            for (i32 xx = x0; xx < x1 && xx >= 0 && static_cast<u32>(xx) < cw; ++xx)
+            {
+                const u8* p = g_canvas + (static_cast<u32>(yy) * cw + static_cast<u32>(xx)) * 4u;
+                if (p[0] == 0xFF && p[1] == 0x00 && p[2] == 0x00)
+                {
+                    foundRed = true;
+                    break;
+                }
+            }
+        }
+        if (!foundRed)
+        {
+            fail(7);
+            return;
+        }
+    }
+
+    // Leave g_state clean — this ran against canned HTML, not a real
+    // navigation, so wipe the render handle so the live browser starts
+    // empty rather than showing the test page.
+    g_state.render_ready = false;
+    g_state.render_dl = nullptr;
+    g_state.render_total_h = 0;
+    g_state.body_len = 0;
+    g_state.body[0] = '\0';
+    g_images.count = 0;
+
+    SerialWrite("[browser-render-selftest] PASS (parse->style->script->layout->paint: box bg pixels, "
+                "red heading glyphs, script mutation 'Changed')\n");
 }
 
 void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
