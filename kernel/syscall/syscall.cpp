@@ -2026,12 +2026,21 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 return false;
             // sin_family / sin6_family share the leading u16, and the
             // port sits at the same offset (bytes 2-3) in both
-            // sockaddr_in and sockaddr_in6. v0 has no IPv6 address
-            // space, so an AF_INET6 (23) sockaddr is accepted but
-            // mapped to the IPv4 wildcard (0.0.0.0): enough for a
-            // dual-stack client (ftp.exe) to bind its placeholder v6
-            // socket and reach its prompt. GAP: the v6 address is
-            // discarded — revisit with a real IPv6 stack.
+            // sockaddr_in and sockaddr_in6. A real IPv6 wire path now
+            // exists (net/ipv6.cpp handles 0x86DD frames, ICMPv6, and
+            // the v6 pseudo-header checksum), but the SOCKET layer
+            // (net/socket.{h,cpp}) is still keyed on Ipv4Address — it
+            // has no v6 address slot to bind/connect through. So an
+            // AF_INET6 sockaddr is parsed for its port (same offset)
+            // and mapped to the IPv4 wildcard (0.0.0.0) rather than
+            // misreading bytes 2..5 as a v4 address. This is an
+            // explicit, marked mapping — not a silent reinterpret —
+            // and is enough for a dual-stack client (ftp.exe) to bind
+            // its v6 socket and reach its prompt.
+            // GAP: AF_INET6 socket bind/connect/send is v4-backed — the
+            //      128-bit address is discarded at the socket boundary.
+            //      Revisit when net/socket.cpp grows a v6 address key
+            //      that can drive the (already real) v6 wire path.
             if (sa.sin_family == 23 /* AF_INET6 */)
             {
                 port = (u16(sa.sin_port_be & 0xFF) << 8) | u16(sa.sin_port_be >> 8);
@@ -2086,11 +2095,14 @@ void SyscallDispatch(arch::TrapFrame* frame)
             // Since the prompt never needs a live connection, back an
             // AF_INET6 request with a real AF_INET socket so the client
             // gets a usable handle and proceeds; any later v6-specific
-            // I/O on it would fail gracefully at send/recv, not abort
-            // startup. AF_UNIX / other domains have no analogue and
-            // still report -EAFNOSUPPORT (97 -> WSAEAFNOSUPPORT).
-            // GAP: no real IPv6 stack — revisit when a v6 socket layer
-            // lands; the v6 handle here is an IPv4 socket in disguise.
+            // I/O on it routes through the v4-keyed socket layer (the
+            // v6 wire path in net/ipv6.cpp is real, but the socket
+            // table has no v6 address key yet). AF_UNIX / other domains
+            // have no analogue and still report -EAFNOSUPPORT
+            // (97 -> WSAEAFNOSUPPORT).
+            // GAP: AF_INET6 sockets are v4-backed at the socket layer —
+            //      revisit when net/socket.cpp grows a v6 address key to
+            //      bind/connect through the existing v6 wire stack.
             const u16 alloc_dom = (dom == 23 /* AF_INET6 */) ? ::duetos::net::kSocketDomainInet : dom;
             if (alloc_dom != ::duetos::net::kSocketDomainInet)
             {

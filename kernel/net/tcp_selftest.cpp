@@ -13,6 +13,7 @@
  * and fires kBootSelftestFail through the probe table.
  */
 
+#include "net/stack.h"
 #include "net/tcp.h"
 #include "net/tcp_internal.h"
 
@@ -658,6 +659,13 @@ void SelfTest()
 
     if (all_ok)
         EmitPass("frame round-trip + reassembly + window wrap");
+
+    // Run the IPv6 protocol-layer self-test from the same net
+    // self-test entry. It emits its own [net/ipv6-selftest] line and
+    // fires its own probe on failure (boot_bringup.cpp owns only the
+    // tcp::SelfTest() hook, so chaining here is how the v6 path gets
+    // exercised on a selftest build).
+    duetos::net::Ipv6SelfTest();
 }
 
 } // namespace duetos::net::tcp
