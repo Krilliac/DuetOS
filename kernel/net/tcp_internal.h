@@ -40,12 +40,19 @@ inline constexpr u8 kBucketNone = 0xFF;
 
 // One in-flight segment. Allocated as an array on the TCB heap;
 // `len == 0` marks an unused slot.
+//
+// `sacked` is the RFC-6675 per-segment scoreboard bit: set when an
+// inbound SACK block reports the receiver already holds this
+// segment's bytes out-of-order. A SACKed segment is never
+// retransmitted (the receiver has it) and is treated as "out of the
+// network" when NextSeg picks the next hole to fill.
 struct SegmentBuf
 {
     u32 seq;
     u32 len;
     u8 flags;
-    u8 _pad[3];
+    bool sacked;
+    u8 _pad[2];
     u64 ticks_sent;
     u8 data[kSegmentBytes];
 };
@@ -108,6 +115,13 @@ struct Tcb
     u32 ts_recent;
     u64 ts_recent_age_ticks;
     u16 mss_send;
+
+    // RFC 6675 sender-side SACK scoreboard. `sack_high` is the
+    // highest sequence number the receiver has SACKed (the "HighData"
+    // edge below which NextSeg looks for holes). The per-segment
+    // `sacked` bits live on rtx_queue[]. Reset on a cumulative-ACK
+    // advance that retires the whole window. 0 = no SACK state.
+    u32 sack_high;
 
     // ECN (RFC 3168). v0 implements the SYN-time negotiation only;
     // marking IP-layer ECT/CE bits is the next slice and lives in
@@ -287,6 +301,36 @@ void SendStandaloneRst(u32 iface_index, const MacAddress& peer_mac, Ipv4Address 
 // Send / Recv on the public surface.
 bool AckInWindow(u32 ack, u32 snd_una, u32 snd_nxt);
 bool DeliverPayload(Tcb& t, u32 seq, const u8* data, u32 len);
+
+// One inbound SACK block (RFC 2018), host byte order, half-open
+// [left, right). Used by the sender-side scoreboard.
+struct SackBlock
+{
+    u32 left;
+    u32 right;
+};
+
+inline constexpr u32 kMaxSackBlocks = 4; ///< RFC 2018: at most 4 blocks per option.
+
+/// Parse the SACK option (kind 5) out of a raw TCP option byte
+/// stream into `out` (up to kMaxSackBlocks). Returns the block
+/// count. Hostile-input safe: bounds every TLV walk, ignores a
+/// malformed / truncated SACK length, and stops at the first EOL.
+/// Exposed for the boot self-test.
+u32 ParseSackBlocks(const u8* opts, u32 opts_len, SackBlock* out);
+
+/// Apply parsed SACK blocks to the retransmit scoreboard: mark each
+/// rtx_queue segment whose byte range is fully covered by a block as
+/// `sacked`. Returns true if any segment newly flipped to SACKed.
+/// Exposed for the boot self-test.
+bool ApplySackScoreboard(Tcb& t, const SackBlock* blocks, u32 count);
+
+/// RFC 6675 NextSeg(): pick the lowest-sequence rtx_queue segment
+/// that is NOT SACKed and lies below the SACK scoreboard's highest
+/// acknowledged edge (i.e. a genuine hole the receiver is missing).
+/// Returns the slot index, or kRtxQueueMax when there is no hole to
+/// retransmit. Exposed for the boot self-test.
+u32 SackNextSeg(const Tcb& t);
 
 /// Build the TCP option block for an outgoing segment. Same
 /// semantics as the internal call site in tcp_segment.cpp. Exposed

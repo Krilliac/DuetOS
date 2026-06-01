@@ -248,6 +248,81 @@ bool TestSackEmission()
     return true;
 }
 
+// Sender-side SACK (RFC 2018 receipt / RFC 6675 NextSeg). Exercises
+// the three exposed helpers deterministically — no wire path, no NIC.
+bool TestSackSender()
+{
+    using namespace internal;
+
+    // (1) ParseSackBlocks: one SACK option carrying two blocks,
+    // NOP-padded, embedded in a realistic option stream. Bytes are
+    // big-endian on the wire (left/right edges).
+    // Layout: NOP NOP SACK len=18 | [0x100,0x200) | [0x300,0x400)
+    const u8 opts[] = {kOptNop, kOptNop, kOptSack, 18,   0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+                       0x02,    0x00,    0x00,     0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00};
+    SackBlock blocks[kMaxSackBlocks];
+    const u32 n = ParseSackBlocks(opts, sizeof(opts), blocks);
+    if (n != 2)
+        return false;
+    if (blocks[0].left != 0x100 || blocks[0].right != 0x200)
+        return false;
+    if (blocks[1].left != 0x300 || blocks[1].right != 0x400)
+        return false;
+
+    // Malformed: truncated SACK length must not over-read; expect 0.
+    const u8 bad[] = {kOptSack, 10, 0x00, 0x00};
+    if (ParseSackBlocks(bad, sizeof(bad), blocks) != 0)
+        return false;
+
+    // (2) Scoreboard + NextSeg on a synthetic rtx_queue. Four 0x100-byte
+    // segments at 0x100,0x200,0x300,0x400. SACK [0x200,0x400) covers the
+    // middle two; the hole at 0x100 is below sack_high → NextSeg picks it,
+    // the segment at 0x400 sits at the SACK edge (not yet SACKed, nothing
+    // past it) → not a hole.
+    Tcb t = {};
+    SegmentBuf rtx[kRtxQueueMax];
+    for (u32 i = 0; i < kRtxQueueMax; ++i)
+        rtx[i].len = 0;
+    t.rtx_queue = rtx;
+    t.snd_una = 0x100;
+    t.sack_high = 0x100;
+    const u32 seqs[] = {0x100, 0x200, 0x300, 0x400};
+    for (u32 i = 0; i < 4; ++i)
+    {
+        rtx[i].seq = seqs[i];
+        rtx[i].len = 0x100;
+        rtx[i].flags = kFlagAck;
+        rtx[i].sacked = false;
+    }
+
+    SackBlock cover = {0x200, 0x400};
+    if (!ApplySackScoreboard(t, &cover, 1))
+        return false;
+    if (!rtx[1].sacked || !rtx[2].sacked) // middle two SACKed
+        return false;
+    if (rtx[0].sacked || rtx[3].sacked) // edges untouched
+        return false;
+    if (t.sack_high != 0x400)
+        return false;
+
+    // NextSeg names the lowest un-SACKed hole below sack_high: 0x100.
+    const u32 hole = SackNextSeg(t);
+    if (hole == kRtxQueueMax || rtx[hole].seq != 0x100)
+        return false;
+
+    // Mark the hole SACKed too; now nothing below sack_high is unSACKed
+    // except 0x400 which sits AT the edge (not a hole) → no NextSeg.
+    rtx[0].sacked = true;
+    if (SackNextSeg(t) != kRtxQueueMax)
+        return false;
+
+    // Re-applying the same block reports no new progress (idempotent).
+    if (ApplySackScoreboard(t, &cover, 1))
+        return false;
+
+    return true;
+}
+
 bool TestEcnSynFlags()
 {
     using namespace internal;
@@ -530,6 +605,11 @@ void SelfTest()
     if (!TestSackEmission())
     {
         EmitFail("sack option emission");
+        all_ok = false;
+    }
+    if (!TestSackSender())
+    {
+        EmitFail("sack sender scoreboard + NextSeg");
         all_ok = false;
     }
     if (!TestEcnSynFlags())
