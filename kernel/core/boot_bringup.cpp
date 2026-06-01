@@ -154,6 +154,7 @@
 #include "net/stack.h"
 #include "net/tcp.h"
 #include "net/tls.h"
+#include "net/tls_socket.h"
 #include "subsystems/graphics/graphics.h"
 #include "subsystems/graphics/graphics_vk_spirv.h"
 #include "drivers/storage/ahci.h"
@@ -2243,6 +2244,7 @@ void BootBringupDevices(bool force_net_smoke)
     // and asserts Content-Length + chunked decode, redirect chains,
     // the Set-Cookie hook, and hostile-input rejection.
     DUETOS_BOOT_SELFTEST(duetos::net::http::HttpSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::tls::TlsSocketSelfTest());
 
     // Disk-installer layout-math self-test. Pure math (no block I/O,
     // no GPT writes), so cheap to run on every boot. A regression
