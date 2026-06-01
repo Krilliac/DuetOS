@@ -176,6 +176,7 @@
 #include "web/css.h"
 #include "web/html.h"
 #include "web/js_dom.h"
+#include "web/layout.h"
 #include "web/png.h"
 #include "apps/calendar.h"
 #include "apps/charmap.h"
@@ -3198,6 +3199,15 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // createElement+appendChild/getElementsByTagName), asserting effects
     // via the console buffer and an independent DOM re-walk.
     DUETOS_BOOT_SELFTEST(duetos::web::JsDomSelfTest());
+
+    // Block + inline layout-engine self-test (kernel/web). Lays the
+    // styled DOM out at a fixed width + deterministic glyph metrics and
+    // asserts the flat paint-order DISPLAY LIST: a styled box's FillRect
+    // rect/color, a bold heading run's y, paragraph word-wrapping,
+    // stacked-block y offsets, display:none emitting nothing, and
+    // text-align:center shifting a run. Produces the draw commands a
+    // future framebuffer painter executes.
+    DUETOS_BOOT_SELFTEST(duetos::web::LayoutSelfTest());
 
     // CALENDAR — windowed month-view sibling of the read-only
     // taskbar-clock popup. Lets the user page through past / future

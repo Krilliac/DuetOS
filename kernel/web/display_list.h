@@ -1,0 +1,112 @@
+#pragma once
+
+/*
+ * DuetOS — flat paint-order display list for the web layout engine.
+ *
+ * Layout (kernel/web/layout.{h,cpp}) turns a styled DOM into an array
+ * of drawing COMMANDS in back-to-front paint order. This header is the
+ * contract between the layout engine (producer) and the browser /
+ * framebuffer painter swarm (consumer). NOTHING here touches a
+ * framebuffer — a DisplayItem is a description of a draw, not a draw.
+ *
+ * Coordinates are device pixels with the origin at the top-left of the
+ * viewport; +x is right, +y is down. Rects carry w/h as extents.
+ *
+ * Memory discipline (kernel rules: no naked new/delete, no libc): the
+ * command array and the DisplayList itself are carved from the caller's
+ * `duetos::web::Arena` (the SAME arena the DOM/CSS use — this header
+ * reuses Arena from dom.h, it does NOT define a second one). String
+ * payloads (TextRun bytes, ImageBox src) point back into the arena-owned
+ * DOM/style storage, so a DisplayList lives only as long as that arena.
+ * Exhaustion is signalled by a truncated item array (count stops
+ * growing); nothing here faults.
+ */
+
+#include "util/types.h"
+#include "web/css.h" // Color
+
+namespace duetos::web
+{
+
+using duetos::i32;
+using duetos::u32;
+using duetos::u8;
+
+/// An axis-aligned rectangle in device pixels. {x,y} is the top-left
+/// corner; {w,h} are non-negative extents.
+struct Rect
+{
+    i32 x = 0;
+    i32 y = 0;
+    i32 w = 0;
+    i32 h = 0;
+};
+
+/// Which kind of draw a DisplayItem describes. The painter switches on
+/// this to pick the right blit.
+enum class DisplayCmd : u8
+{
+    FillRect, // solid-color rectangle (backgrounds)
+    Border,   // 1..N-px outline stroked around a rect
+    TextRun,  // a run of monospace glyphs at a top-left origin
+    ImageBox, // an <img> box; painter decodes `src` and blits into rect
+};
+
+/// One paint command. A flat tagged record (no virtuals, no RTTI): the
+/// `cmd` field selects which members are meaningful. Unused members for
+/// a given command are left at their defaults.
+struct DisplayItem
+{
+    DisplayCmd cmd = DisplayCmd::FillRect;
+
+    // Geometry — meaningful for every command. For TextRun the rect's
+    // {x,y} is the run's top-left; {w,h} are the run's pixel extents.
+    Rect rect{};
+
+    // FillRect / TextRun / Border color (sRGB + alpha).
+    Color color{0, 0, 0, 255};
+
+    // Border only: stroke width in device px. This subset draws a
+    // uniform border on all four edges (GAP: per-edge width/color).
+    i32 borderWidth = 0;
+
+    // TextRun only: the bytes to render (length-delimited, do NOT rely
+    // on a NUL) and their length. `text` points into arena-owned DOM
+    // text storage. Font attributes drive the painter's glyph pick.
+    const char* text = nullptr;
+    u32 textLen = 0;
+    bool bold = false;
+    bool italic = false;
+    i32 fontPx = 16; // font-size in px (painter may scale the cell)
+
+    // ImageBox only: the raw <img src="..."> attribute value (arena-
+    // owned, NUL-terminated). The painter resolves + decodes it.
+    const char* src = nullptr;
+    u32 srcLen = 0;
+};
+
+/// A display list: a bump-grown array of DisplayItems in paint order
+/// (index 0 painted first / bottom-most). `cap` is the arena-backed
+/// capacity; once `count == cap` further pushes are dropped (the list
+/// truncates rather than faulting).
+struct DisplayList
+{
+    DisplayItem* items = nullptr;
+    u32 count = 0;
+    u32 cap = 0;
+
+    /// Append `it` if room remains; returns false (and drops it) when the
+    /// backing array is full.
+    bool Push(const DisplayItem& it)
+    {
+        if (items == nullptr || count >= cap)
+        {
+            return false;
+        }
+        items[count] = it;
+        ++count;
+        return true;
+    }
+};
+
+} // namespace duetos::web
