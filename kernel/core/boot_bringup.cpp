@@ -173,6 +173,7 @@
 #include "apps/calculator.h"
 #include "apps/about.h"
 #include "apps/browser.h"
+#include "web/html.h"
 #include "apps/calendar.h"
 #include "apps/charmap.h"
 #include "apps/clock.h"
@@ -3171,6 +3172,11 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     duetos::apps::browser::BrowserInit(browser_handle);
     duetos::drivers::video::WindowSetVisible(browser_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserSelfTest());
+
+    // HTML tokenizer + DOM tree builder self-test (kernel/web). Parses
+    // representative fragments and asserts the resulting tree; the
+    // parse substrate for a future CSS/layout/JS swarm.
+    DUETOS_BOOT_SELFTEST(duetos::web::HtmlDomSelfTest());
 
     // CALENDAR — windowed month-view sibling of the read-only
     // taskbar-clock popup. Lets the user page through past / future
