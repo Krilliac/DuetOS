@@ -194,6 +194,7 @@
 #include "apps/taskman.h"
 #include "apps/terminal.h"
 #include "apps/trash.h"
+#include "web/js/engine.h"
 #include "drivers/video/console.h"
 #include "drivers/video/cursor.h"
 #include "drivers/video/framebuffer.h"
@@ -3171,6 +3172,11 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     duetos::apps::browser::BrowserInit(browser_handle);
     duetos::drivers::video::WindowSetVisible(browser_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserSelfTest());
+
+    // JS "scripts" engine self-test — tree-walking interpreter core.
+    // Runs after the browser/net self-tests; proves the step budget
+    // kills a runaway script instead of hanging the boot.
+    DUETOS_BOOT_SELFTEST(duetos::web::js::JsSelfTest());
 
     // CALENDAR — windowed month-view sibling of the read-only
     // taskbar-clock popup. Lets the user page through past / future
