@@ -44,8 +44,17 @@
  *     pathLen beyond the hard depth-2 cap.
  *   - CRL / OCSP revocation. A revoked-but-unexpired cert still
  *     verifies. Revisit when the network stack can fetch OCSP.
- *   - The full Mozilla root program. The embedded store carries a
- *     test root (and is the seam where real roots get added).
+ *   - The full Mozilla / CCADB root program. The embedded store carries
+ *     a synthetic test root PLUS a small hand-picked set of real,
+ *     widely-trusted RSA-2048 roots whose self-signature is sha256WithRSA
+ *     (DigiCert Global Root G2, Amazon Root CA 1, GlobalSign Root CA - R3,
+ *     Go Daddy Root CA - G2, AffirmTrust Commercial). Sites whose chains
+ *     terminate at any OTHER root — every ECDSA root, and every RSA-4096
+ *     root (e.g. ISRG Root X1 / Let's Encrypt; see below) — fail closed
+ *     until that root (or the missing primitive) lands.
+ *   - RSA-4096 moduli. The kernel bigint is 4096 bits wide, which holds a
+ *     2048-bit modulus's squared intermediate but overflows on a 4096-bit
+ *     one. RSA-4096 roots/leaves fail closed until the bigint widens.
  *   - Cross-signed / multi-path chains, chains deeper than one
  *     intermediate.
  */
@@ -102,7 +111,13 @@ using CertVerifyFn = bool (*)(const u8* leaf_der, u32 leaf_len, const u8* const*
 ///   - a tampered signature byte verifies FALSE,
 ///   - a wrong hostname verifies FALSE,
 ///   - an out-of-window `now_unix` verifies FALSE,
-///   - a leaf with no trusted issuer verifies FALSE.
+///   - a leaf with no trusted issuer verifies FALSE,
+///   - every embedded REAL root parses and its own self-signature
+///     verifies through the RSA+SHA-256 path (proving the chain-verify
+///     code works on real-world DER, not just the synthetic fixture).
+/// Real leaves are deliberately NOT embedded: they expire, so a
+/// hardcoded live leaf is not a durable self-test — only the roots'
+/// long-lived self-signatures are asserted.
 /// Emits `[x509-verify-selftest] PASS (...)`; on any failure fires
 /// KBP_PROBE_V(kBootSelftestFail, ...) and emits a FAIL line.
 void X509VerifySelfTest();
