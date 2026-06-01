@@ -2221,6 +2221,15 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] ext4 read-path self-test (synthetic RAM volume).\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::ext4::Ext4SelfTest());
 
+    // NTFS read-path self-test. Builds a synthetic NTFS volume in a
+    // fresh RAM disk (512-byte sectors, 1024-byte MFT records with the
+    // USA fixup, a $Root record carrying a resident $I30 INDEX_ROOT
+    // and one file record with resident $DATA) and drives the read
+    // path end to end: probe → MFT-record read + USA fixup → root-dir
+    // enumerate → find file → resolve $DATA → file read.
+    SerialWrite("[boot] ntfs read-path self-test (synthetic RAM volume).\n");
+    DUETOS_BOOT_SELFTEST(duetos::fs::ntfs::NtfsSelfTest());
+
     // Disk-installer layout-math self-test. Pure math (no block I/O,
     // no GPT writes), so cheap to run on every boot. A regression
     // here means the partition layout planner drifted — surfaces
