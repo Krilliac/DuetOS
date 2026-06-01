@@ -283,6 +283,12 @@ __declspec(dllexport) HGDIOBJ SelectObject(HDC dc, HGDIOBJ obj)
         return (HGDIOBJ)(unsigned long long)0xD0FFEDULL;
     return (HGDIOBJ)(unsigned long long)prev;
 }
+/* Defined with the Region API near the end of the file: frees a
+ * user-mode region's pool slot. Returns 1 if `obj` was one of our
+ * region handles (so DeleteObject doesn't fall through to the
+ * kernel-bitmap branch), 0 otherwise. */
+static int gdi32_region_delete(HGDIOBJ obj);
+
 __declspec(dllexport) BOOL DeleteObject(HGDIOBJ obj)
 {
     if (obj == (HGDIOBJ)0)
@@ -300,6 +306,8 @@ __declspec(dllexport) BOOL DeleteObject(HGDIOBJ obj)
         return 1; /* stock-object sentinel range */
     if (v == 0xD0FFEDULL)
         return 1; /* SelectObject "prev" sentinel */
+    if (gdi32_region_delete(obj))
+        return 1; /* user-mode region — freed its pool slot */
     return gdi32_syscall1(SYS_GDI_DELETE_OBJECT, (long long)v) ? 1 : 0;
 }
 __declspec(dllexport) INT GetObjectA(HGDIOBJ obj, INT cb, void* buf)
@@ -631,9 +639,102 @@ static BOOL gdi32_line_core(HANDLE hwnd, INT x0, INT y0, INT x1, INT y1, COLORRE
     return rv ? 1 : 0;
 }
 
+/* --- Path bookkeeping (BeginPath / EndPath / Stroke / Fill / CloseFigure) ---
+ *
+ * Real GDI keeps a "path bracket" per DC: between BeginPath and
+ * EndPath every drawing primitive that would have painted instead
+ * appends to the DC's current path. After EndPath the path is
+ * "closed for recording" and StrokePath / FillPath replay it.
+ *
+ * The DLL is freestanding (no malloc), so the path lives in a
+ * small fixed pool of slots keyed by HDC — mirroring the
+ * module-global current-point pattern above. Each slot stores a
+ * flat point list plus per-subpath start indices (a MoveToEx
+ * starts a new subpath). Polyline / Polygon are already line
+ * lists, so flattening on record needs no curve handling.
+ *
+ * GAP: fixed GDI_PATH_SLOTS open paths / GDI_PATH_MAX_PTS points /
+ * GDI_PATH_MAX_SUBPATHS subpaths — overflow drops the excess
+ * (Stroke/Fill still replay what fit). Revisit if a real PE drives
+ * a path larger than this.
+ * GAP: no Bezier/arc curve flattening — only the straight-line
+ * primitives wired to the recorder (MoveTo/LineTo/Polyline/Polygon)
+ * are path-aware; PolyBezier is not.
+ */
+#define GDI_PATH_SLOTS 4
+#define GDI_PATH_MAX_PTS 256
+#define GDI_PATH_MAX_SUBPATHS 16
+
+typedef struct
+{
+    HDC dc;         /* owning DC; 0 == free slot */
+    BOOL recording; /* inside BeginPath..EndPath */
+    BOOL closed;    /* EndPath seen — ready for Stroke/Fill */
+    INT pt_count;   /* points recorded */
+    INT sub_count;  /* subpaths recorded */
+    INT pts_x[GDI_PATH_MAX_PTS];
+    INT pts_y[GDI_PATH_MAX_PTS];
+    INT sub_start[GDI_PATH_MAX_SUBPATHS]; /* index into pts_* of each subpath start */
+    BOOL sub_closed[GDI_PATH_MAX_SUBPATHS];
+} GdiPath;
+
+static GdiPath g_paths[GDI_PATH_SLOTS];
+
+static GdiPath* gdi32_path_find(HDC dc)
+{
+    for (int i = 0; i < GDI_PATH_SLOTS; ++i)
+    {
+        if (g_paths[i].dc == dc)
+            return &g_paths[i];
+    }
+    return (GdiPath*)0;
+}
+
+/* Return the path slot actively recording for `dc`, or NULL if the
+ * DC has no open path bracket. */
+static GdiPath* gdi32_path_recording(HDC dc)
+{
+    GdiPath* p = gdi32_path_find(dc);
+    if (p && p->recording)
+        return p;
+    return (GdiPath*)0;
+}
+
+static void gdi32_path_open_subpath(GdiPath* p, INT x, INT y)
+{
+    if (p->sub_count < GDI_PATH_MAX_SUBPATHS && p->pt_count < GDI_PATH_MAX_PTS)
+    {
+        p->sub_start[p->sub_count] = p->pt_count;
+        p->sub_closed[p->sub_count] = 0;
+        ++p->sub_count;
+    }
+    if (p->pt_count < GDI_PATH_MAX_PTS)
+    {
+        p->pts_x[p->pt_count] = x;
+        p->pts_y[p->pt_count] = y;
+        ++p->pt_count;
+    }
+}
+
+static void gdi32_path_add_point(GdiPath* p, INT x, INT y)
+{
+    /* A LineTo before any MoveTo opens an implicit subpath at the
+     * DC's current point; otherwise extend the current subpath. */
+    if (p->sub_count == 0)
+    {
+        gdi32_path_open_subpath(p, x, y);
+        return;
+    }
+    if (p->pt_count < GDI_PATH_MAX_PTS)
+    {
+        p->pts_x[p->pt_count] = x;
+        p->pts_y[p->pt_count] = y;
+        ++p->pt_count;
+    }
+}
+
 __declspec(dllexport) BOOL MoveToEx(HDC dc, INT x, INT y, void* prev)
 {
-    (void)dc;
     if (prev)
     {
         POINT* p = (POINT*)prev;
@@ -642,10 +743,25 @@ __declspec(dllexport) BOOL MoveToEx(HDC dc, INT x, INT y, void* prev)
     }
     g_cur_x = x;
     g_cur_y = y;
+    /* Inside a path bracket a MoveTo opens a new subpath. */
+    GdiPath* path = gdi32_path_recording(dc);
+    if (path)
+        gdi32_path_open_subpath(path, x, y);
     return 1;
 }
 __declspec(dllexport) BOOL LineTo(HDC dc, INT x, INT y)
 {
+    /* Inside a path bracket the segment is recorded, not drawn. */
+    GdiPath* path = gdi32_path_recording(dc);
+    if (path)
+    {
+        if (path->sub_count == 0)
+            gdi32_path_open_subpath(path, g_cur_x, g_cur_y);
+        gdi32_path_add_point(path, x, y);
+        g_cur_x = x;
+        g_cur_y = y;
+        return 1;
+    }
     HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
     if (!hwnd)
         return 0;
@@ -658,10 +774,21 @@ __declspec(dllexport) BOOL Polyline(HDC dc, const void* pts, INT n)
 {
     if (!pts || n < 2)
         return 0;
+    const POINT* p = (const POINT*)pts;
+    /* Inside a path bracket the run becomes one open subpath. */
+    GdiPath* path = gdi32_path_recording(dc);
+    if (path)
+    {
+        gdi32_path_open_subpath(path, p[0].x, p[0].y);
+        for (INT i = 1; i < n; ++i)
+            gdi32_path_add_point(path, p[i].x, p[i].y);
+        g_cur_x = p[n - 1].x;
+        g_cur_y = p[n - 1].y;
+        return 1;
+    }
     HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
     if (!hwnd)
         return 0;
-    const POINT* p = (const POINT*)pts;
     for (INT i = 0; i + 1 < n; ++i)
     {
         (void)gdi32_line_core(hwnd, p[i].x, p[i].y, p[i + 1].x, p[i + 1].y, 0);
@@ -672,10 +799,21 @@ __declspec(dllexport) BOOL Polygon(HDC dc, const void* pts, INT n)
 {
     if (!pts || n < 2)
         return 0;
+    const POINT* p = (const POINT*)pts;
+    /* Inside a path bracket the polygon becomes one closed subpath. */
+    GdiPath* path = gdi32_path_recording(dc);
+    if (path)
+    {
+        gdi32_path_open_subpath(path, p[0].x, p[0].y);
+        for (INT i = 1; i < n; ++i)
+            gdi32_path_add_point(path, p[i].x, p[i].y);
+        if (path->sub_count > 0)
+            path->sub_closed[path->sub_count - 1] = 1;
+        return 1;
+    }
     HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
     if (!hwnd)
         return 0;
-    const POINT* p = (const POINT*)pts;
     Polyline(dc, pts, n);
     (void)gdi32_line_core(hwnd, p[n - 1].x, p[n - 1].y, p[0].x, p[0].y, 0);
     return 1;
@@ -973,5 +1111,376 @@ __declspec(dllexport) INT SetStretchBltMode(HDC dc, INT mode)
 __declspec(dllexport) INT GetStretchBltMode(HDC dc)
 {
     (void)dc;
+    return 1;
+}
+
+/* --- Path API ---
+ *
+ * BeginPath opens a path bracket on the DC: subsequent MoveTo /
+ * LineTo / Polyline / Polygon append to the path instead of
+ * painting (see the recorder hooks above). EndPath closes the
+ * bracket. StrokePath replays each recorded segment as a line;
+ * FillPath replays each subpath's outline and closes it (no scan-
+ * line interior fill — the kernel has no polygon-fill primitive).
+ */
+
+/* Replay one path slot via the per-segment line core; if `close`,
+ * also draw the closing edge of every subpath. Resets the slot to
+ * free afterwards (Stroke/Fill discard the path, matching GDI). */
+static BOOL gdi32_path_replay(HANDLE hwnd, GdiPath* p, BOOL close)
+{
+    for (INT s = 0; s < p->sub_count; ++s)
+    {
+        INT start = p->sub_start[s];
+        INT end = (s + 1 < p->sub_count) ? p->sub_start[s + 1] : p->pt_count;
+        for (INT i = start; i + 1 < end; ++i)
+            (void)gdi32_line_core(hwnd, p->pts_x[i], p->pts_y[i], p->pts_x[i + 1], p->pts_y[i + 1], 0);
+        /* Close the figure if requested (FillPath) or if CloseFigure
+         * marked this subpath closed. */
+        if ((close || p->sub_closed[s]) && end - start >= 2)
+            (void)gdi32_line_core(hwnd, p->pts_x[end - 1], p->pts_y[end - 1], p->pts_x[start], p->pts_y[start], 0);
+    }
+    p->dc = (HDC)0;
+    p->recording = 0;
+    p->closed = 0;
+    p->pt_count = 0;
+    p->sub_count = 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL BeginPath(HDC dc)
+{
+    if (!dc)
+        return 0;
+    /* Reuse an existing slot for this DC, else grab a free one. */
+    GdiPath* p = gdi32_path_find(dc);
+    if (!p)
+        p = gdi32_path_find((HDC)0);
+    if (!p)
+        return 0; /* GAP: all GDI_PATH_SLOTS in use — see pool note above */
+    p->dc = dc;
+    p->recording = 1;
+    p->closed = 0;
+    p->pt_count = 0;
+    p->sub_count = 0;
+    return 1;
+}
+
+__declspec(dllexport) BOOL EndPath(HDC dc)
+{
+    GdiPath* p = gdi32_path_recording(dc);
+    if (!p)
+        return 0;
+    p->recording = 0;
+    p->closed = 1;
+    return 1;
+}
+
+__declspec(dllexport) BOOL CloseFigure(HDC dc)
+{
+    GdiPath* p = gdi32_path_recording(dc);
+    if (!p || p->sub_count == 0)
+        return 0;
+    /* Mark the current (last) subpath closed; the next MoveTo opens
+     * a fresh one, matching GDI's CloseFigure semantics. */
+    p->sub_closed[p->sub_count - 1] = 1;
+    return 1;
+}
+
+__declspec(dllexport) BOOL StrokePath(HDC dc)
+{
+    GdiPath* p = gdi32_path_find(dc);
+    if (!p || !p->closed)
+        return 0;
+    HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
+    if (!hwnd)
+    {
+        /* Non-window DC has no line primitive — discard and report
+         * success (the path was consumed). */
+        p->dc = (HDC)0;
+        p->closed = 0;
+        p->pt_count = 0;
+        p->sub_count = 0;
+        return 1;
+    }
+    return gdi32_path_replay(hwnd, p, 0);
+}
+
+__declspec(dllexport) BOOL FillPath(HDC dc)
+{
+    GdiPath* p = gdi32_path_find(dc);
+    if (!p || !p->closed)
+        return 0;
+    HANDLE hwnd = gdi32_hwnd_from_hdc(dc);
+    if (!hwnd)
+    {
+        p->dc = (HDC)0;
+        p->closed = 0;
+        p->pt_count = 0;
+        p->sub_count = 0;
+        return 1;
+    }
+    /* GAP: no scanline interior fill — FillPath strokes each
+     * subpath's closed outline (the kernel exposes no polygon-fill
+     * primitive). Revisit when SYS_GDI gains a fill-region call. */
+    return gdi32_path_replay(hwnd, p, 1);
+}
+
+/* --- Region API ---
+ *
+ * Regions are user-mode rectangle lists. CreateRectRgn makes a
+ * single-rect region; CombineRgn merges two source regions into a
+ * destination per the RGN_* mode. The handle is an index into a
+ * fixed pool, tagged GDI_RGN_TAG so DeleteObject can free the slot
+ * and the kernel-bitmap branch never mistakes it for a bitmap.
+ *
+ * GAP: GDI_RGN_SLOTS regions / GDI_RGN_MAX_RECTS rects each —
+ * CreateRectRgn over capacity returns NULL.
+ * GAP: RGN_AND / RGN_OR / RGN_XOR / RGN_DIFF on multi-rect inputs
+ * collapse to the bounding-box of the exact-rectangle result (no
+ * rectangle-decomposition coalescing). RGN_COPY and the single-
+ * rect cases are exact; complex multi-rect set algebra is the
+ * deferred bit — revisit when a caller needs pixel-exact regions
+ * (e.g. non-rectangular window clipping).
+ */
+#define GDI_RGN_SLOTS 16
+#define GDI_RGN_MAX_RECTS 8
+#define GDI_RGN_TAG 0x52470000ULL /* 'RG' — region handle tag */
+#define GDI_RGN_TAG_MASK 0xFFFF0000ULL
+
+#define RGN_AND 1
+#define RGN_OR 2
+#define RGN_XOR 3
+#define RGN_DIFF 4
+#define RGN_COPY 5
+
+#define RGN_NULLREGION 1
+#define RGN_SIMPLEREGION 2
+#define RGN_COMPLEXREGION 3
+#define RGN_ERROR 0
+
+typedef void* HRGN;
+
+typedef struct
+{
+    BOOL used;
+    INT count; /* number of rects; 0 == empty (NULLREGION) */
+    RECT rects[GDI_RGN_MAX_RECTS];
+} GdiRegion;
+
+static GdiRegion g_regions[GDI_RGN_SLOTS];
+
+/* Map an HRGN back to its pool slot, or NULL if the handle isn't
+ * one of ours / is stale. */
+static GdiRegion* gdi32_rgn_resolve(HRGN h)
+{
+    unsigned long long v = (unsigned long long)h;
+    if ((v & GDI_RGN_TAG_MASK) != GDI_RGN_TAG)
+        return (GdiRegion*)0;
+    unsigned idx = (unsigned)(v & 0xFFFFULL);
+    if (idx >= GDI_RGN_SLOTS || !g_regions[idx].used)
+        return (GdiRegion*)0;
+    return &g_regions[idx];
+}
+
+static HRGN gdi32_rgn_handle(unsigned idx)
+{
+    return (HRGN)(GDI_RGN_TAG | (unsigned long long)idx);
+}
+
+static GdiRegion* gdi32_rgn_alloc(unsigned* out_idx)
+{
+    for (unsigned i = 0; i < GDI_RGN_SLOTS; ++i)
+    {
+        if (!g_regions[i].used)
+        {
+            g_regions[i].used = 1;
+            g_regions[i].count = 0;
+            *out_idx = i;
+            return &g_regions[i];
+        }
+    }
+    return (GdiRegion*)0;
+}
+
+__declspec(dllexport) HRGN CreateRectRgn(INT l, INT t, INT r, INT b)
+{
+    unsigned idx;
+    GdiRegion* rg = gdi32_rgn_alloc(&idx);
+    if (!rg)
+        return (HRGN)0; /* GAP: pool exhausted */
+    /* Normalise so left<=right, top<=bottom (GDI does the same). */
+    if (r < l)
+    {
+        INT tmp = l;
+        l = r;
+        r = tmp;
+    }
+    if (b < t)
+    {
+        INT tmp = t;
+        t = b;
+        b = tmp;
+    }
+    if (r > l && b > t)
+    {
+        rg->rects[0].left = l;
+        rg->rects[0].top = t;
+        rg->rects[0].right = r;
+        rg->rects[0].bottom = b;
+        rg->count = 1;
+    }
+    else
+    {
+        rg->count = 0; /* empty region */
+    }
+    return gdi32_rgn_handle(idx);
+}
+
+__declspec(dllexport) HRGN CreateRectRgnIndirect(const void* prc)
+{
+    if (!prc)
+        return (HRGN)0;
+    const RECT* rc = (const RECT*)prc;
+    return CreateRectRgn(rc->left, rc->top, rc->right, rc->bottom);
+}
+
+/* Union bounding box of every rect in a region into *out; returns
+ * 1 if the region is non-empty. */
+static int gdi32_rgn_bbox(const GdiRegion* rg, RECT* out)
+{
+    if (!rg || rg->count == 0)
+        return 0;
+    *out = rg->rects[0];
+    for (INT i = 1; i < rg->count; ++i)
+    {
+        if (rg->rects[i].left < out->left)
+            out->left = rg->rects[i].left;
+        if (rg->rects[i].top < out->top)
+            out->top = rg->rects[i].top;
+        if (rg->rects[i].right > out->right)
+            out->right = rg->rects[i].right;
+        if (rg->rects[i].bottom > out->bottom)
+            out->bottom = rg->rects[i].bottom;
+    }
+    return 1;
+}
+
+static void gdi32_rgn_set_single(GdiRegion* dst, const RECT* rc)
+{
+    if (rc->right > rc->left && rc->bottom > rc->top)
+    {
+        dst->rects[0] = *rc;
+        dst->count = 1;
+    }
+    else
+    {
+        dst->count = 0;
+    }
+}
+
+__declspec(dllexport) INT CombineRgn(HRGN hDst, HRGN hSrc1, HRGN hSrc2, INT mode)
+{
+    GdiRegion* dst = gdi32_rgn_resolve(hDst);
+    GdiRegion* s1 = gdi32_rgn_resolve(hSrc1);
+    if (!dst || !s1)
+        return RGN_ERROR;
+
+    if (mode == RGN_COPY)
+    {
+        *dst = *s1;
+        dst->used = 1;
+        return dst->count == 0 ? RGN_NULLREGION : (dst->count == 1 ? RGN_SIMPLEREGION : RGN_COMPLEXREGION);
+    }
+
+    GdiRegion* s2 = gdi32_rgn_resolve(hSrc2);
+    if (!s2)
+        return RGN_ERROR;
+
+    RECT b1, b2;
+    int have1 = gdi32_rgn_bbox(s1, &b1);
+    int have2 = gdi32_rgn_bbox(s2, &b2);
+    RECT result = {0, 0, 0, 0};
+    int empty = 1;
+
+    switch (mode)
+    {
+    case RGN_OR:
+    case RGN_XOR:
+        /* GAP: OR/XOR collapse to the union bounding box of both
+         * sources rather than an exact rect decomposition. */
+        if (have1 && have2)
+        {
+            result.left = b1.left < b2.left ? b1.left : b2.left;
+            result.top = b1.top < b2.top ? b1.top : b2.top;
+            result.right = b1.right > b2.right ? b1.right : b2.right;
+            result.bottom = b1.bottom > b2.bottom ? b1.bottom : b2.bottom;
+            empty = 0;
+        }
+        else if (have1)
+        {
+            result = b1;
+            empty = 0;
+        }
+        else if (have2)
+        {
+            result = b2;
+            empty = 0;
+        }
+        break;
+    case RGN_AND:
+        /* Intersection of the two bounding boxes — exact when both
+         * sources are single rects. */
+        if (have1 && have2)
+        {
+            result.left = b1.left > b2.left ? b1.left : b2.left;
+            result.top = b1.top > b2.top ? b1.top : b2.top;
+            result.right = b1.right < b2.right ? b1.right : b2.right;
+            result.bottom = b1.bottom < b2.bottom ? b1.bottom : b2.bottom;
+            empty = (result.right <= result.left || result.bottom <= result.top);
+        }
+        break;
+    case RGN_DIFF:
+        /* GAP: DIFF returns src1's bounding box when the regions
+         * don't overlap, else empty — no partial-rect subtraction. */
+        if (have1 && !have2)
+        {
+            result = b1;
+            empty = 0;
+        }
+        else if (have1 && have2)
+        {
+            int overlap = !(b2.right <= b1.left || b2.left >= b1.right || b2.bottom <= b1.top || b2.top >= b1.bottom);
+            if (!overlap)
+            {
+                result = b1;
+                empty = 0;
+            }
+        }
+        break;
+    default:
+        return RGN_ERROR;
+    }
+
+    dst->used = 1;
+    if (empty)
+    {
+        dst->count = 0;
+        return RGN_NULLREGION;
+    }
+    gdi32_rgn_set_single(dst, &result);
+    return dst->count == 0 ? RGN_NULLREGION : RGN_SIMPLEREGION;
+}
+
+/* DeleteObject hook: if `obj` is one of our region handles, free
+ * its slot and return 1. Returns 0 for any non-region handle so
+ * DeleteObject continues to its kernel-bitmap path. */
+static int gdi32_region_delete(HGDIOBJ obj)
+{
+    GdiRegion* rg = gdi32_rgn_resolve((HRGN)obj);
+    if (!rg)
+        return 0;
+    rg->used = 0;
+    rg->count = 0;
     return 1;
 }
