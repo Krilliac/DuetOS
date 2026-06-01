@@ -1,5 +1,6 @@
 #include "cpu/percpu.h"
 
+#include "acpi/acpi.h"
 #include "arch/x86_64/gdt.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/serial.h"
@@ -189,9 +190,35 @@ PerCpu* CurrentCpu()
         // &g_bsp_percpu, so this never recurses back into
         // CurrentCpu(); likewise LapicCurrentId() reads LAPIC MMIO,
         // not GSBASE.
+        //
+        // Scan the FULL allocated-slot space (acpi::kMaxCpus), NOT
+        // arch::SmpCpuIdLimit(). SmpCpuIdLimit() is the SCHEDULER's
+        // wake-routing iteration bound and is deliberately NOT bumped
+        // until an AP signals online (SmpStartAps defers the
+        // g_cpu_id_limit bump until after WaitForApOnline, gated
+        // additionally by the PerCpu::online routing predicate). But
+        // an AP runs its ENTIRE CpuhpBringUp chain — including the
+        // StartingGdt / StartingGsBase states — BEFORE CpuhpStartGsBase
+        // programs a kernel GSBASE, so every cpu::CurrentCpu() in that
+        // window has GSBASE=0 and lands HERE. Bounding the scan by
+        // SmpCpuIdLimit() (which does NOT yet cover the booting AP)
+        // made the lapic match FAIL and silently returned
+        // &g_bsp_percpu — so the AP pushed g_state_lock / g_frame_lock
+        // onto the BSP's per-CPU held-locks stack and stamped
+        // owner_cpu=BSP. Once CpuhpStartGsBase ran, GSBASE became valid
+        // and the AP's later releases hit its OWN slot, leaving the
+        // BSP's held-stack with a phantom entry — surfacing as the
+        // intermittent `sync/spinlock : release out-of-order` under the
+        // lockdep audit build, escalating to a serial self-deadlock
+        // when the raw-serial diagnostic re-entered g_serial_lock. The
+        // 2026-05-19 LAPIC fallback was correct in principle but its
+        // SmpCpuIdLimit() bound was defeated by the (separately
+        // correct) 2026-05-22 deferred-limit-bump fix. The AP's
+        // g_ap_percpus[cpu_id] + lapic_id are stamped before SIPI, so
+        // scanning to kMaxCpus finds the booting AP's real slot;
+        // unallocated (nullptr) slots are skipped by the guard below.
         const u32 lapic = arch::LapicCurrentId();
-        const u32 limit = arch::SmpCpuIdLimit();
-        for (u32 id = 0; id < limit; ++id)
+        for (u32 id = 0; id < acpi::kMaxCpus; ++id)
         {
             PerCpu* cand = arch::SmpGetPercpu(id);
             if (cand != nullptr && cand->lapic_id == lapic)
