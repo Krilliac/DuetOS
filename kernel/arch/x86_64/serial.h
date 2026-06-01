@@ -119,6 +119,26 @@ duetos::i32 SerialReadByteNonblocking();
 /// cleared — the kernel halts anyway.
 void SerialEnterPanicMode();
 
+/// Write exactly `len` bytes from a pre-built buffer in recursive-fault
+/// context. Safe to call while g_serial_lock may be held by another CPU,
+/// with broken page-tables, and with a possibly-corrupt stack.
+///
+/// Strategy (two-level serialization):
+///   1. Try-acquire g_serial_lock with a single non-blocking attempt. If
+///      acquired, emit under the lock and release — same atomicity as a
+///      normal SerialWriteN call. This is the common case: the BSP's
+///      first panic line has finished before any AP reaches here.
+///   2. If the lock is busy or self-held — the BSP is mid-dump and has
+///      already set panic mode — fall through to the PanicEmitTryClaim
+///      bounded-spin serializer so concurrent panic-mode writers don't
+///      byte-interleave.
+///
+/// Never blocks. Never panics. Never allocates. The caller must
+/// pre-format the entire line into a stack buffer and pass it here as a
+/// single contiguous region; that makes the emit atomic at the call
+/// boundary under either serialization path.
+void SerialWriteNRecursiveFault(const char* data, u64 len);
+
 /// RAII guard that holds the per-port serial spinlock for an entire
 /// scope. Use it to make a sequence of SerialWrite/SerialWriteHex
 /// calls atomic at the *line* level (or any granularity larger than

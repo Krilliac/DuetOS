@@ -599,11 +599,17 @@ void HaltOnRecursiveFault(u64 vector, u64 rip)
 {
     // Anything we touch here can re-fault (we're already on a
     // potentially-corrupt stack, possibly with broken page tables
-    // or a wild GS base). Stick to raw SerialWrite — the panic-
-    // mode flag set by the first dump path makes it bypass its
-    // spinlock — and skip every heavy primitive (symbol resolve,
-    // VA region tag, page walk). One line, then halt.
+    // or a wild GS base). Skip every heavy primitive (symbol
+    // resolve, VA region tag, page walk). One line, then halt.
     //
+    // Snapshot vec and rip into locals ONCE before any locking so a
+    // concurrent fault on another CPU can't mutate the frame under us
+    // while we're formatting or emitting. (The parameters are already
+    // copies — this makes the intent explicit and guards against
+    // future callers that pass frame fields by reference.)
+    const u64 vec_snap = vector;
+    const u64 rip_snap = rip;
+
     // SMP-correctness (CAS dedup): under multi-CPU saturation
     // (observed 2026-05-22 on x86_64-debug SMP=8), N peer CPUs
     // can hit their own kernel-mode fault concurrently and all
@@ -614,28 +620,24 @@ void HaltOnRecursiveFault(u64 vector, u64 rip)
     // what's useful; further lines just corrupt the first.
     //
     // SMP-correctness (byte interleave): even with one
-    // recursive-fault writer, the BSP panic dumper is still
-    // emitting concurrently in panic-mode bypass. Without
-    // serialization the BSP's hex digits and our digits land
-    // byte-by-byte on the same UART, producing the historical
-    // `vec=0x   __  rip=0x   __` symptom. Two defenses now:
-    //   1. The panic-mode SerialWrite path (serial.cpp) serializes
-    //      panic-mode emitters through `g_panic_emit_owner_cpuid`
-    //      with a bounded-spin fall-back to raw — so individual
-    //      SerialWrite* calls don't byte-interleave with the BSP
-    //      dump.
-    //   2. This routine pre-formats the entire line into a stack
-    //      buffer and emits it via ONE SerialWriteN call, so the
-    //      line is contiguous at the call boundary AND atomic
-    //      under the panic-emit owner claim.
+    // recursive-fault writer, the BSP panic dumper may still be
+    // emitting concurrently. Without serialization the BSP's hex
+    // digits and our digits land byte-by-byte on the same UART,
+    // producing the historical `vec=0x   __  rip=0x   __` symptom.
+    // SerialWriteNRecursiveFault provides two-level serialization:
+    //   1. try-acquire g_serial_lock (non-blocking) — succeeds when
+    //      the BSP dump has finished; gives fully locked atomicity.
+    //   2. PanicEmitTryClaim bounded-spin — used when the lock is
+    //      still held (BSP mid-dump); serializes among concurrent
+    //      panic-mode writers without blocking.
     static volatile u32 s_recursive_dump_owner = 0;
     u32 expected = 0;
     if (__atomic_compare_exchange_n(&s_recursive_dump_owner, &expected, 1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
     {
         // Build "\n[recursive-fault] vec=0xVVVVVVVVVVVVVVVV
         //   rip=0xRRRRRRRRRRRRRRRR — short-circuiting panic dump\n"
-        // into a stack buffer. No heap, no symbol resolve, no
-        // klog. Fixed-width hex for both vec and rip.
+        // into a stack buffer using the snapshotted values. No heap,
+        // no symbol resolve, no klog. Fixed-width hex for both fields.
         constexpr char kHex[] = "0123456789abcdef";
         static constexpr const char kPrefix[] = "\n[recursive-fault] vec=0x";
         static constexpr const char kMid[] = " rip=0x";
@@ -654,14 +656,17 @@ void HaltOnRecursiveFault(u64 vector, u64 rip)
         for (u64 i = 0; i < kPrefixLen; ++i)
             buf[p++] = kPrefix[i];
         for (int shift = 60; shift >= 0; shift -= 4)
-            buf[p++] = kHex[(vector >> shift) & 0xF];
+            buf[p++] = kHex[(vec_snap >> shift) & 0xF];
         for (u64 i = 0; i < kMidLen; ++i)
             buf[p++] = kMid[i];
         for (int shift = 60; shift >= 0; shift -= 4)
-            buf[p++] = kHex[(rip >> shift) & 0xF];
+            buf[p++] = kHex[(rip_snap >> shift) & 0xF];
         for (u64 i = 0; i < kSuffixLen; ++i)
             buf[p++] = kSuffix[i];
-        SerialWriteN(buf, p);
+        // Emit via the recursive-fault serializer: try-lock first,
+        // fall back to bounded-spin panic-emit claim. One call = one
+        // contiguous burst on the UART under either path.
+        SerialWriteNRecursiveFault(buf, p);
     }
     Halt();
 }

@@ -313,14 +313,21 @@ area is readable immediately instead of corrupted.
   re-triggers the scenario with per-repeat log capture so a
   future investigation can grep `build/x86_64-debug/smp-stress-N.log`
   for the first fault line.
-- **Bounded fix to land first (before chasing the race):** make
-  the recursive-fault dump grab `g_serial_lock` with `try_lock`
-  semantics (or take an `IrqFlags` snapshot once per AP) so the
-  vec/rip survive the second fault. Without that the loop is
-  diagnose-by-corruption. Then re-run the harness with that fix
-  in tree to read the real first-fault site.
-- **Blocks on:** the serial-bypass cleanup OR a per-CPU panic
-  ringbuffer the AP fault path can write to (no serial contention).
+- **Bounded fix landed** (`arch/traps,serial: serialize recursive-fault
+  dump through g_serial_lock try-lock`): `HaltOnRecursiveFault` now
+  snapshots vec/rip into locals before formatting, pre-formats the
+  entire line into a stack buffer, and emits it through
+  `SerialWriteNRecursiveFault` — which try-acquires `g_serial_lock`
+  (non-blocking) first, falling back to the `PanicEmitTryClaim`
+  bounded-spin serializer only if the lock is held (BSP mid-dump).
+  The `vec=0x   __  rip=0x   __` interleaving symptom is suppressed.
+  Re-run `tools/test/smp-stress-sweep.sh 20 8 5` with this fix in
+  tree to read the real first-fault site in the now-clean log.
+- **Root cause still open:** the underlying AP-bringup fault (likely
+  KASAN/UBSAN shadow-map race on first timer IRQ with a sentinel
+  `Current()`) has not been identified. See GAP marker in
+  `SerialWriteNRecursiveFault` (serial.cpp). Blocks on: clean log
+  from the harness pointing at the actual first-fault RIP.
 
 ### Topology — cluster-scoped IPI fan-out
 
