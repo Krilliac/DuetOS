@@ -320,6 +320,39 @@ struct Connection
     crypto::RsaPublicKey server_rsa;
     bool server_cert_seen;
 
+    // True once ServerHelloDone has been absorbed. This — NOT
+    // server_cert_seen — is what ends the server's first flight.
+    // TLS record boundaries are independent of handshake-message
+    // boundaries (RFC 5246 §6.2.1): the server may send
+    // ServerHello, Certificate, and ServerHelloDone as separate
+    // records (or coalesce / fragment them arbitrarily). The
+    // client must mix EVERY handshake message — including
+    // ServerHelloDone — into the transcript before computing its
+    // Finished verify_data, or the verify mismatches a real
+    // server. See kHsReasmMax below.
+    bool server_flight_done;
+
+    // Handshake-message reassembly across record boundaries. A
+    // single handshake message (a large Certificate chain, say)
+    // can be split across multiple TLS records, and several
+    // messages can be coalesced inside one record. We accumulate
+    // the raw handshake-stream bytes here and drain complete
+    // messages (4-byte header + body) as they become available.
+    // Bounded so a hostile peer can't make us buffer unboundedly:
+    // one TLS record's plaintext maxes at 2^14, and a v0 RSA cert
+    // chain comfortably fits 16 KiB.
+    static constexpr u32 kHsReasmMax = 16384;
+    u8 hs_reasm[kHsReasmMax];
+    u32 hs_reasm_len;
+
+    // Count of the fed server_bytes already absorbed into
+    // hs_reasm during the first flight. ConnectionFeed re-feeds
+    // the full accumulated buffer each call (see
+    // TlsSocketHandshake), so this cursor lets a re-feed skip the
+    // records it already consumed instead of double-mixing them
+    // into the transcript.
+    u32 server_flight_consumed;
+
     // Hostname the caller asked us to connect to. Captured in
     // ConnectionStart; the cert parser uses this to enforce
     // hostname matching against the leaf cert's subject CN.
