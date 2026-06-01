@@ -120,8 +120,61 @@ struct Volume
 u32 Ext4VolumeCount();
 const Volume* Ext4VolumeByIndex(u32 index);
 
+/// Find the probed volume backed by `block_handle`, or nullptr if
+/// no ext4 volume on that handle has been registered. Mirrors
+/// `fat32::Fat32Volume` — the VFS backend lookup keys by handle.
+const Volume* Ext4VolumeByHandle(u32 block_handle);
+
+/// Read inode number `ino_num` (1-based, as on disk) from volume
+/// `v` into `*out`. Walks the block-group descriptor table to find
+/// the group, then the inode table within it, then parses the
+/// record. Returns NotFound on a zero / out-of-range inode number,
+/// IoError on a block-layer failure, InvalidArgument on geometry
+/// skew (inode straddles two blocks — not yet handled).
+///   GAP: assumes the inode record fits inside a single FS block
+///   (inode_size <= block_size and the record doesn't straddle a
+///   block boundary). True for every sane mkfs.ext4 layout; revisit
+///   if a 1KiB-block + 256B-inode image ever lands an inode across
+///   a block edge.
+::duetos::core::Result<void> Ext4ReadInode(const Volume& v, u32 ino_num, InodeInfo* out);
+
+/// Find a child named `name` directly under the root directory of
+/// `v`, filling `*out` with its directory entry (inode number +
+/// type + name). Returns NotFound if absent. Uses the cached
+/// `root_dir_entries[]` snapshot populated at probe time, so this
+/// is a linear scan over already-parsed entries.
+///   GAP: htree (hashed) directories are not walked — a large dir
+///   with the INDEX_FL flag set falls back to whatever linear
+///   entries the leaf walk captured. Revisit when htree lands.
+::duetos::core::Result<void> Ext4FindInRoot(const Volume& v, const char* name, Ext4DirEntry* out);
+
+/// Read up to `len` bytes of regular-file data starting at byte
+/// `offset` from the extent-mapped inode `inode` on volume `v`.
+/// Writes into `buf` and reports the byte count actually read via
+/// `*out_read` (clamped to the file size). Returns InvalidArgument
+/// for a non-extent inode or bad geometry, IoError on a block read
+/// failure.
+///   GAP: extents only — classic direct/indirect block maps
+///   (ext2/3 layout, EXT4_EXTENTS_FL clear) are not read here. The
+///   modern mkfs.ext4 default is extents, so the happy path is
+///   covered; revisit for legacy images.
+///   GAP: depth-0 (inline) extent tree only — a file large enough
+///   to need an extent index node (depth>0) is not followed. The
+///   root-dir walker already has the depth>0 DFS; lifting it into a
+///   shared file-read helper is the follow-up.
+::duetos::core::Result<void> Ext4ReadFile(const Volume& v, const InodeInfo& inode, u64 offset, void* buf, u64 len,
+                                          u64* out_read);
+
 /// Boot-time sweep: probe every discovered block device. Logs
 /// the outcome for each.
 void Ext4ScanAll();
+
+/// Boot self-test: builds a minimal synthetic ext4 volume in a RAM
+/// block device and drives probe → group-desc → root-inode →
+/// root-dir enumerate → find file → extent file read with
+/// assertions. Emits `[ext4-selftest] PASS (...)` on success;
+/// `[ext4-selftest] FAIL (<phase>)` + a kBootSelftestFail probe on
+/// failure. Lives in kernel/fs/ext4_selftest.cpp.
+void Ext4SelfTest();
 
 } // namespace duetos::fs::ext4

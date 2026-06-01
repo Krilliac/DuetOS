@@ -544,6 +544,232 @@ const Volume* Ext4VolumeByIndex(u32 index)
     return &g_volumes[index];
 }
 
+const Volume* Ext4VolumeByHandle(u32 block_handle)
+{
+    for (u32 i = 0; i < g_volume_count; ++i)
+    {
+        if (g_volumes[i].block_handle == block_handle)
+            return &g_volumes[i];
+    }
+    return nullptr;
+}
+
+namespace
+{
+
+// Compare a NUL-terminated `a` against `b` (also NUL-terminated).
+bool StrEq(const char* a, const char* b)
+{
+    u32 i = 0;
+    while (a[i] != '\0' && b[i] != '\0')
+    {
+        if (a[i] != b[i])
+            return false;
+        ++i;
+    }
+    return a[i] == b[i];
+}
+
+// Copy a parsed Rust inode record into our InodeInfo POD.
+void CopyInode(const DuetosExt4Inode& ino, InodeInfo& out)
+{
+    out.mode = ino.mode;
+    out.uid = ino.uid;
+    out.size_bytes = ino.size_bytes;
+    out.atime = ino.atime;
+    out.ctime = ino.ctime;
+    out.mtime = ino.mtime;
+    out.gid = ino.gid;
+    out.links_count = ino.links_count;
+    out.blocks_lo = ino.blocks_lo;
+    out.flags = ino.flags;
+    out.uses_extents = ino.uses_extents != 0;
+    out.block0_magic = ino.block0_magic;
+    for (u32 i = 0; i < 60; ++i)
+        out.i_block[i] = ino.i_block[i];
+}
+
+// Translate a file-logical block index to its physical FS block via
+// the inode's depth-0 extent tree (the i_block[60] inline header).
+// Returns true and sets `*phys` when `logical` falls inside a leaf
+// extent; returns false for a hole / out-of-range / depth>0 tree.
+bool MapLogicalBlockInline(const InodeInfo& inode, u32 logical, u64& phys)
+{
+    using namespace duetos::fs::ext4_rust;
+    DuetosExt4ExtentHeader hdr{};
+    if (!duetos_ext4_parse_extent_header(inode.i_block, 60, &hdr))
+        return false;
+    if (hdr.depth != 0)
+        return false; // GAP: depth>0 file extent tree — see Ext4ReadFile doc.
+    constexpr u16 kInlineMaxRecords = 4;
+    const u16 count = hdr.entries < kInlineMaxRecords ? hdr.entries : kInlineMaxRecords;
+    for (u16 ei = 0; ei < count; ++ei)
+    {
+        DuetosExt4Extent ext{};
+        if (!duetos_ext4_parse_extent_leaf(inode.i_block, 60, ei, &ext))
+            return false;
+        if (ext.length_blocks == 0)
+            continue;
+        if (logical >= ext.logical_block && logical < u32(ext.logical_block + ext.length_blocks))
+        {
+            phys = ext.physical_block + (logical - ext.logical_block);
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+::duetos::core::Result<void> Ext4ReadInode(const Volume& v, u32 ino_num, InodeInfo* out)
+{
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
+    if (out == nullptr || ino_num == 0 || ino_num > v.inode_count)
+        return Err{ErrorCode::NotFound};
+    if (v.inode_size == 0 || v.inodes_per_group == 0 || v.block_size == 0)
+        return Err{ErrorCode::InvalidArgument};
+
+    const u32 sector_size = drivers::storage::BlockDeviceSectorSize(v.block_handle);
+    if (sector_size == 0 || (v.block_size % sector_size) != 0)
+        return Err{ErrorCode::InvalidArgument};
+
+    const u32 group = (ino_num - 1) / v.inodes_per_group;
+    const u32 index_in_group = (ino_num - 1) % v.inodes_per_group;
+
+    // Locate the group's inode-table block. Group 0's descriptor is
+    // already cached; for other groups, read its 32-byte classic
+    // descriptor from the GDT (block first_data_block + 1).
+    u32 inode_table_block = 0;
+    if (group == 0)
+    {
+        if (!v.group0_valid)
+            return Err{ErrorCode::BadState};
+        inode_table_block = v.group0.inode_table_block;
+    }
+    else
+    {
+        const u64 gdt_block = u64(v.first_data_block) + 1;
+        const u64 gdt_lba = gdt_block * v.block_size / sector_size;
+        if (!ReadIntoBlockScratch(v.block_handle, gdt_lba, sector_size, v.block_size))
+            return Err{ErrorCode::IoError};
+        // Each classic group descriptor is 32 bytes; descriptor N
+        // sits at byte 32*N within the GDT block.
+        // GAP: 64bit feature (64-byte descriptors / multi-block GDT)
+        //   is not handled — single-block, 32-byte descriptors only.
+        const u32 desc_off = group * 32;
+        if (desc_off + 32 > v.block_size)
+            return Err{ErrorCode::InvalidArgument};
+        DuetosExt4GroupDesc gd{};
+        if (!duetos::fs::ext4_rust::duetos_ext4_parse_group_desc0(g_block_scratch + desc_off, v.block_size - desc_off,
+                                                                  &gd))
+            return Err{ErrorCode::BadState};
+        inode_table_block = gd.inode_table_block;
+    }
+
+    const u64 byte_offset_in_table = u64(index_in_group) * v.inode_size;
+    const u64 block_within_table = byte_offset_in_table / v.block_size;
+    const u32 offset_in_block = u32(byte_offset_in_table % v.block_size);
+    // GAP: inode record straddling a block boundary — see header doc.
+    if (offset_in_block + v.inode_size > v.block_size)
+        return Err{ErrorCode::InvalidArgument};
+
+    const u64 table_block_phys = u64(inode_table_block) + block_within_table;
+    const u64 lba = table_block_phys * v.block_size / sector_size;
+    if (!ReadIntoBlockScratch(v.block_handle, lba, sector_size, v.block_size))
+        return Err{ErrorCode::IoError};
+
+    DuetosExt4Inode ino{};
+    if (!duetos::fs::ext4_rust::duetos_ext4_parse_inode(
+            g_block_scratch + offset_in_block, v.block_size - offset_in_block, v.inode_size, v.feature_ro_compat, &ino))
+        return Err{ErrorCode::BadState};
+    CopyInode(ino, *out);
+    return {};
+}
+
+::duetos::core::Result<void> Ext4FindInRoot(const Volume& v, const char* name, Ext4DirEntry* out)
+{
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
+    if (name == nullptr || out == nullptr)
+        return Err{ErrorCode::InvalidArgument};
+    for (u32 i = 0; i < v.root_dir_entry_count; ++i)
+    {
+        const Ext4DirEntry& e = v.root_dir_entries[i];
+        if (StrEq(e.name, name))
+        {
+            *out = e;
+            return {};
+        }
+    }
+    return Err{ErrorCode::NotFound};
+}
+
+::duetos::core::Result<void> Ext4ReadFile(const Volume& v, const InodeInfo& inode, u64 offset, void* buf, u64 len,
+                                          u64* out_read)
+{
+    using ::duetos::core::Err;
+    using ::duetos::core::ErrorCode;
+    if (buf == nullptr || out_read == nullptr)
+        return Err{ErrorCode::InvalidArgument};
+    *out_read = 0;
+    if (!inode.uses_extents)
+        return Err{ErrorCode::InvalidArgument}; // GAP: classic block maps — see header doc.
+    if (v.block_size == 0)
+        return Err{ErrorCode::InvalidArgument};
+
+    const u32 sector_size = drivers::storage::BlockDeviceSectorSize(v.block_handle);
+    if (sector_size == 0 || (v.block_size % sector_size) != 0)
+        return Err{ErrorCode::InvalidArgument};
+    const u32 count_per_block = v.block_size / sector_size;
+
+    if (offset >= inode.size_bytes)
+        return {}; // EOF — zero bytes read.
+    u64 remaining = inode.size_bytes - offset;
+    if (len < remaining)
+        remaining = len;
+
+    auto* dst = static_cast<u8*>(buf);
+    u64 produced = 0;
+    while (produced < remaining)
+    {
+        const u64 file_pos = offset + produced;
+        const u32 logical = u32(file_pos / v.block_size);
+        const u32 in_block = u32(file_pos % v.block_size);
+
+        u64 phys = 0;
+        if (!MapLogicalBlockInline(inode, logical, phys))
+        {
+            // Hole or unmapped logical block: ext4 reads holes as
+            // zeroes. Fill the rest of this block with zero.
+            const u32 chunk_max = v.block_size - in_block;
+            u64 chunk = remaining - produced;
+            if (chunk > chunk_max)
+                chunk = chunk_max;
+            for (u64 i = 0; i < chunk; ++i)
+                dst[produced + i] = 0;
+            produced += chunk;
+            continue;
+        }
+        // Overflow guard: phys came from on-disk extent data.
+        if (phys > u64(-1) / v.block_size)
+            return Err{ErrorCode::IoError};
+        const u64 lba = phys * v.block_size / sector_size;
+        if (drivers::storage::BlockDeviceRead(v.block_handle, lba, count_per_block, g_block_scratch) < 0)
+            return Err{ErrorCode::IoError};
+
+        const u32 chunk_max = v.block_size - in_block;
+        u64 chunk = remaining - produced;
+        if (chunk > chunk_max)
+            chunk = chunk_max;
+        for (u64 i = 0; i < chunk; ++i)
+            dst[produced + i] = g_block_scratch[in_block + i];
+        produced += chunk;
+    }
+    *out_read = produced;
+    return {};
+}
+
 void Ext4ScanAll()
 {
     KLOG_TRACE_SCOPE("fs/ext4", "Ext4ScanAll");
