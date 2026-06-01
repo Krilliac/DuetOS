@@ -1254,7 +1254,7 @@ struct OpenFileDescription
 };
 
 constinit OpenFileDescription g_ofd_pool[kOfdPoolCap] = {};
-SpinLock g_ofd_lock{};
+sync::SpinLock g_ofd_lock{};
 
 // Allocate a fresh description with refcount 1. Returns the
 // 1-based pool index, or 0 if the pool is exhausted. Caller holds
@@ -1401,7 +1401,7 @@ void LinuxFdClose(Process* p, u32 fd)
     // (lf.ofd == 0).
     if (lf.ofd != 0)
     {
-        SpinLockGuard g(g_ofd_lock);
+        sync::SpinLockGuard g(g_ofd_lock);
         OfdReleaseLocked(lf.ofd);
         lf.ofd = 0;
     }
@@ -1437,7 +1437,7 @@ bool LinuxFdDup(Process* p, u32 oldfd, u32 newfd)
     // exhaustion failure leaves the whole table untouched.
     u16 shared_ofd = 0;
     {
-        SpinLockGuard g(g_ofd_lock);
+        sync::SpinLockGuard g(g_ofd_lock);
         if (src.ofd == 0)
         {
             // Inline offset is the live cursor; status flags aren't
@@ -1457,6 +1457,7 @@ bool LinuxFdDup(Process* p, u32 oldfd, u32 newfd)
         shared_ofd = src.ofd;
     }
 
+    Process::LinuxFd& dst = p->linux_fds[newfd];
     dst.state = src.state;
     dst.flags = src.flags;
     // Drop FD_CLOEXEC on the new fd by default. Linux semantics:
@@ -1487,7 +1488,7 @@ bool LinuxFdDup(Process* p, u32 oldfd, u32 newfd)
             // Drop the OFD ref we just took (refcount asymmetry
             // guard: the retain above must be matched on this leg).
             {
-                SpinLockGuard g(g_ofd_lock);
+                sync::SpinLockGuard g(g_ofd_lock);
                 OfdReleaseLocked(shared_ofd);
             }
             dst.state = 0;
@@ -1548,7 +1549,7 @@ bool LinuxFdOpenDescription(Process* p, u32 fd, u64 initial_offset, u32 status_f
         lf.offset = LinuxFdGetOffset(p, fd);
         return true;
     }
-    SpinLockGuard g(g_ofd_lock);
+    sync::SpinLockGuard g(g_ofd_lock);
     const u16 ofd = OfdAllocLocked(initial_offset, status_flags);
     if (ofd == 0)
     {
@@ -1567,7 +1568,7 @@ u64 LinuxFdGetOffset(const Process* p, u32 fd)
     const Process::LinuxFd& lf = p->linux_fds[fd];
     if (lf.ofd == 0)
         return lf.offset; // no shared description — inline is authoritative
-    SpinLockGuard g(g_ofd_lock);
+    sync::SpinLockGuard g(g_ofd_lock);
     return g_ofd_pool[lf.ofd - 1].offset;
 }
 
@@ -1582,7 +1583,7 @@ void LinuxFdSetOffset(Process* p, u32 fd, u64 offset)
         return;
     }
     {
-        SpinLockGuard g(g_ofd_lock);
+        sync::SpinLockGuard g(g_ofd_lock);
         g_ofd_pool[lf.ofd - 1].offset = offset;
     }
     // Keep the inline mirror in step for the TUs that still read
@@ -1602,7 +1603,7 @@ u32 LinuxFdGetStatusFlags(const Process* p, u32 fd)
     const Process::LinuxFd& lf = p->linux_fds[fd];
     if (lf.ofd == 0)
         return 0;
-    SpinLockGuard g(g_ofd_lock);
+    sync::SpinLockGuard g(g_ofd_lock);
     return g_ofd_pool[lf.ofd - 1].status_flags;
 }
 
@@ -1613,7 +1614,7 @@ void LinuxFdSetStatusFlags(Process* p, u32 fd, u32 status_flags)
     Process::LinuxFd& lf = p->linux_fds[fd];
     if (lf.ofd == 0)
         return;
-    SpinLockGuard g(g_ofd_lock);
+    sync::SpinLockGuard g(g_ofd_lock);
     g_ofd_pool[lf.ofd - 1].status_flags = status_flags;
 }
 
@@ -1652,7 +1653,7 @@ void LinuxFdInheritFromParent(Process* parent, Process* child)
         // child fd, so either side's close drops exactly one ref.
         if (src.state != 1)
         {
-            SpinLockGuard g(g_ofd_lock);
+            sync::SpinLockGuard g(g_ofd_lock);
             // NB: `src` is const above; re-fetch the parent slot
             // mutably here to allow the lazy materialise to stick.
             Process::LinuxFd& psrc = parent->linux_fds[fd];

@@ -1388,7 +1388,12 @@ __declspec(dllexport) INT CombineRgn(HRGN hDst, HRGN hSrc1, HRGN hSrc2, INT mode
 
     if (mode == RGN_COPY)
     {
-        *dst = *s1;
+        /* Element-wise copy of the live rects only. A whole-struct
+         * assignment (*dst = *s1) gets lowered to a memcpy libcall,
+         * which freestanding DLLs don't link; per-RECT copies inline. */
+        dst->count = s1->count;
+        for (INT i = 0; i < s1->count && i < (INT)GDI_RGN_MAX_RECTS; i++)
+            dst->rects[i] = s1->rects[i];
         dst->used = 1;
         return dst->count == 0 ? RGN_NULLREGION : (dst->count == 1 ? RGN_SIMPLEREGION : RGN_COMPLEXREGION);
     }
