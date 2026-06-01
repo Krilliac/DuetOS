@@ -2211,6 +2211,16 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] exFAT write-path self-test (synthetic RAM volume).\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::exfat::ExfatSelfTest());
 
+    // ext4 read-path self-test. Like the exFAT one, builds a synthetic
+    // ext4 volume in a fresh RAM disk (1 KiB blocks, one block group,
+    // extent-mapped root dir + one small regular file) and drives the
+    // read path end to end: probe → group-desc → root inode → root-dir
+    // enumerate → find file → extent file read. Self-contained, so it
+    // runs here next to FAT32/exFAT rather than waiting for the late
+    // ext4 disk scan in the bringup tail.
+    SerialWrite("[boot] ext4 read-path self-test (synthetic RAM volume).\n");
+    DUETOS_BOOT_SELFTEST(duetos::fs::ext4::Ext4SelfTest());
+
     // Disk-installer layout-math self-test. Pure math (no block I/O,
     // no GPT writes), so cheap to run on every boot. A regression
     // here means the partition layout planner drifted — surfaces

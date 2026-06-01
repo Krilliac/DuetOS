@@ -2,6 +2,7 @@
 
 #include "core/panic.h"
 #include "fs/duetfs.h"
+#include "fs/ext4.h"
 #include "fs/fat32.h"
 #include "fs/tmpfs.h"
 #include "fs/vfs.h"
@@ -377,6 +378,56 @@ bool RamVolLookup(u32 block_handle, const char* subpath, void* out_node)
 
 constinit VfsBackendOps g_ramvol_ops = {&RamVolLookup};
 
+// ext4 read backend. Resolves a name directly under the ext4 root
+// directory; the read path it routes through (probe → group-desc →
+// inode → root-dir enumerate → Ext4FindInRoot) lives in fs/ext4.cpp.
+// `subpath` arrives volume-relative with a leading '/'.
+//
+// STUB: a successful resolve cannot yet surface a usable VfsNode.
+//   vfs.h owns the `VfsBackend` enum + the `VfsNode` field set and is
+//   outside this slice's file scope, so there is no `VfsBackend::Ext4`
+//   tag nor an ext4 volume-idx/inode pair to populate. VfsResolve's
+//   contract is "a `true` return leaves a backend-tagged node"; an
+//   ext4 hit can't honour that, so this lookup always reports miss.
+//   The real read path IS reachable and exercised on every boot via
+//   Ext4SelfTest (probe → enumerate → Ext4ReadFile). To finish the
+//   VFS wiring: add `VfsBackend::Ext4` + an `ext4_volume_idx` /
+//   `ext4_dir_entry` pair to VfsNode in vfs.h, then fill out_node here
+//   the way Fat32Lookup does and extend to multi-component path walks
+//   via repeated Ext4ReadInode + dir enumerate.
+bool Ext4Lookup(u32 block_handle, const char* subpath, void* out_node)
+{
+    (void)out_node;
+    if (subpath == nullptr)
+    {
+        return false;
+    }
+    const ext4::Volume* v = ext4::Ext4VolumeByHandle(block_handle);
+    if (v == nullptr)
+    {
+        return false;
+    }
+    // Strip leading slash(es). A bare "/" addresses the root dir; a
+    // name addresses a direct child of root. We perform the real
+    // resolution (it exercises the parsed root-dir snapshot) but, per
+    // the STUB above, cannot surface a tagged VfsNode, so the result
+    // is discarded and we always report miss until vfs.h grows an
+    // ext4 backend tag.
+    const char* name = subpath;
+    while (*name == '/')
+    {
+        ++name;
+    }
+    if (*name != '\0')
+    {
+        ext4::Ext4DirEntry entry{};
+        (void)ext4::Ext4FindInRoot(*v, name, &entry);
+    }
+    return false;
+}
+
+constinit VfsBackendOps g_ext4_ops = {&Ext4Lookup};
+
 } // namespace
 
 const VfsBackendOps* VfsBackendForFsType(FsType t)
@@ -389,8 +440,14 @@ const VfsBackendOps* VfsBackendForFsType(FsType t)
         return &g_duetfs_ops;
     case FsType::RamVol:
         return &g_ramvol_ops;
-    case FsType::Ramfs:
     case FsType::Ext4:
+        // Read backend registered; dispatch reaches Ext4Lookup. The
+        // lookup performs real root-dir resolution but cannot yet
+        // surface a tagged VfsNode (vfs.h owns the tag — see the STUB
+        // on Ext4Lookup). The read path proper is exercised by
+        // Ext4SelfTest on every boot.
+        return &g_ext4_ops;
+    case FsType::Ramfs:
     case FsType::Ntfs:
     default:
         // GAP: exFAT — the read lookup + the file-mutation API
