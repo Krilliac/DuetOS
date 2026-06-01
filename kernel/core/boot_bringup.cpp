@@ -105,6 +105,7 @@
 #include "drivers/net/rtl88xx_upload.h"
 #include "net/bluetooth/diag.h"
 #include "net/drsh/drsh.h"
+#include "net/http.h"
 #include "net/bluetooth/hci.h"
 #include "net/bluetooth/hid.h"
 #include "net/wireless/beacon.h"
@@ -2229,6 +2230,12 @@ void BootBringupDevices(bool force_net_smoke)
     // enumerate → find file → resolve $DATA → file read.
     SerialWrite("[boot] ntfs read-path self-test (synthetic RAM volume).\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::ntfs::NtfsSelfTest());
+
+    // HTTP/1.1 client self-test (transport-abstracted): drives an
+    // in-memory canned-response transport through the request engine
+    // and asserts Content-Length + chunked decode, redirect chains,
+    // the Set-Cookie hook, and hostile-input rejection.
+    DUETOS_BOOT_SELFTEST(duetos::net::http::HttpSelfTest());
 
     // Disk-installer layout-math self-test. Pure math (no block I/O,
     // no GPT writes), so cheap to run on every boot. A regression
