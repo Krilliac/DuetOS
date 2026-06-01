@@ -117,6 +117,7 @@
 #include "crypto/hkdf.h"
 #include "crypto/rsa.h"
 #include "crypto/x509.h"
+#include "net/x509_verify.h"
 #include "crypto/hmac.h"
 #include "crypto/pbkdf2.h"
 #include "crypto/prf.h"
@@ -2229,6 +2230,13 @@ void BootBringupDevices(bool force_net_smoke)
     // enumerate → find file → resolve $DATA → file read.
     SerialWrite("[boot] ntfs read-path self-test (synthetic RAM volume).\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::ntfs::NtfsSelfTest());
+
+    // X.509 certificate-chain verification self-test (HTTPS trust path):
+    // embeds real OpenSSL-signed DER fixtures and proves the leaf->root
+    // and leaf->intermediate->root paths verify TRUE while a tampered
+    // signature, wrong hostname, expired window, and untrusted issuer
+    // all verify FALSE. Pure compute over embedded data (no I/O).
+    DUETOS_BOOT_SELFTEST(duetos::net::x509::X509VerifySelfTest());
 
     // Disk-installer layout-math self-test. Pure math (no block I/O,
     // no GPT writes), so cheap to run on every boot. A regression
