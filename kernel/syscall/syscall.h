@@ -1262,13 +1262,15 @@ enum SyscallNumber : u64
     //
     // Symmetric to the read path but with caller and target
     // roles swapped. Same partial-copy behaviour at the first
-    // unmapped target page. There is NO COW — a write to a
-    // page the target has read-only mapped will succeed
-    // (because the kernel's direct map is always writable);
-    // the v0 region table only tracks (vaddr, frame), not
-    // protection bits, so we cannot refuse the write on
-    // protection grounds. GAP: protection-respecting writes
-    // need a per-page flags column on AddressSpaceUserRegion.
+    // unmapped target page. There is NO COW: a write to a page
+    // the target has READ-ONLY mapped is REFUSED, not silently
+    // satisfied via the always-writable kernel direct map. The
+    // handler probes the target's leaf PTE
+    // (AddressSpaceProbePteRaw) and writes a page only if it is
+    // present + user + writable from the target's own view — so
+    // this path can't write memory a native process couldn't
+    // (closes the W^X / RO-page isolation hole). A refused page
+    // surfaces as a partial copy, exactly like an unmapped page.
     SYS_PROCESS_VM_WRITE = 133,
 
     // SYS_PROCESS_VM_QUERY — query the mapping state of one

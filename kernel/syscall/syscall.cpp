@@ -201,6 +201,34 @@ bool CrossAsTransfer(Process* target, u64 target_va, void* caller_buf, u64 len, 
         {
             return false; // partial copy; caller surfaces what we did move
         }
+
+        // Protection check for the write path. The kernel direct map
+        // is ALWAYS writable, so writing through PhysToVirt(frame)
+        // silently bypasses the target page's protection — an
+        // isolation / W^X hole letting a debug-capped caller write a
+        // page the target itself couldn't (an RX code page, a
+        // PAGE_READONLY data page, a guard page). Consult the
+        // target's actual leaf PTE — the existing per-page protection
+        // state, no separate flags column needed — and refuse the
+        // write unless the page is present, user-accessible, AND
+        // writable. Reads are intentionally unaffected: a debug-capped
+        // reader may observe any mapped target page (matches
+        // ReadProcessMemory), and AddressSpaceLookupUserFrame already
+        // gates the read on the page being present.
+        if (dir == CrossAsDir::Write)
+        {
+            const u64 pte = mm::AddressSpaceProbePteRaw(target->as, page_va);
+            constexpr u64 kWritableUserPage = mm::kPagePresent | mm::kPageUser | mm::kPageWritable;
+            if ((pte & kWritableUserPage) != kWritableUserPage)
+            {
+                // Not writable from the target's own view — refuse.
+                // Bytes already moved (earlier writable pages) stand;
+                // this page and everything past it are left untouched,
+                // surfaced to the caller as a partial copy.
+                return false;
+            }
+        }
+
         auto* direct = static_cast<u8*>(mm::PhysToVirt(frame)) + page_off;
 
         if (dir == CrossAsDir::Read)
