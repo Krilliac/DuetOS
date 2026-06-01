@@ -6,15 +6,25 @@
 /*
  * DuetOS Browser — v0.
  *
- * Minimal HTTP browser. Primary purpose: get the user onto the
- * web so they can download a fuller browser. Hard limits keep the
- * implementation tractable:
+ * Minimal HTTP/HTTPS browser. Primary purpose: get the user onto
+ * the web so they can download a fuller browser. The fetch path is
+ * built on the reusable net modules (net::http, net::tls,
+ * net::cookies, net::x509) — the browser is the UI + renderer over
+ * an `HttpTransport`. Hard limits keep the implementation tractable:
  *
- *   - HTTP only — no TLS, so HTTPS URLs are rejected with a clear
- *     status message rather than silently failing.
- *   - HTTP/1.0 GET only — POST / PUT / cookies / redirects are not
- *     followed (a 30x response is reported to the user but the
- *     Location header is not auto-fetched).
+ *   - HTTP/1.1 GET over a plain socket (http://) OR a TLS 1.2
+ *     session (https://) via TlsSocketConnect. Redirects (3xx),
+ *     chunked Transfer-Encoding, and Content-Length bodies all work
+ *     (net::http::HttpRequest drives them).
+ *   - Cookies: the request Cookie header is built from the jar
+ *     (net::CookieBuildHeader) and every Set-Cookie response header
+ *     is fed back into the jar (net::CookieSetFromHeader), persisted
+ *     to FAT32 via CookieJarSave.
+ *   - HTTPS trust: the x509 chain verifier (net::x509::Verify) is
+ *     installed into the TLS socket layer. NOTE its embedded trust
+ *     store is TEST-ONLY today, so a real-internet leaf fails the
+ *     chain check and the browser surfaces "certificate not trusted"
+ *     rather than proceeding. Production roots are the GAP.
  *   - Body cap is `kHttpResponseCap` (64 KiB). Pages larger than
  *     this show a `(truncated)` banner — streamed downloads to disk
  *     are a follow-up.

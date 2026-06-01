@@ -15,9 +15,14 @@
 #include "drivers/video/theme.h"
 #include "fs/fat32.h"
 #include "mm/kheap.h"
+#include "net/cookies.h"
+#include "net/http.h"
 #include "net/socket.h"
 #include "net/stack.h"
+#include "net/tls_socket.h"
+#include "net/x509_verify.h"
 #include "sched/sched.h"
+#include "time/timekeeper.h"
 
 namespace duetos::apps::browser
 {
@@ -383,7 +388,7 @@ void StatusSet(const char* msg)
 //   host[:port][/path]            (scheme defaulted to http)
 //
 // Output:
-//   `scheme_https`: true if scheme is "https" (rejected by fetch)
+//   `scheme_https`: true if scheme is "https" (routed through TLS)
 //   `host`:        zero-terminated, lower-case-tolerant
 //   `port`:        80 default, parsed otherwise
 //   `path`:        starts with '/'; defaults to "/"
@@ -431,8 +436,9 @@ ParsedUrl ParseUrl(const char* url)
         out.host[hi++] = *p++;
     }
     out.host[hi] = '\0';
-    // Trim and parse :port.
-    out.port = 80;
+    // Trim and parse :port. Default depends on scheme: 443 for
+    // https, 80 otherwise. An explicit ":port" below overrides.
+    out.port = out.scheme_https ? 443 : 80;
     for (u32 i = 0; i < hi; ++i)
     {
         if (out.host[i] == ':')
@@ -525,6 +531,11 @@ bool TryParseDottedQuad(const char* host, net::Ipv4Address* out)
 // Walk the input, drop tag content (<...>), decode known entities,
 // and emit a newline at every block-level close. The output is a
 // plaintext stream the painter line-wraps on the fly.
+//
+// GAP: CSS / JavaScript / images / layout — the renderer is a tag
+//      stripper, not a layout engine. Styling, scripting, and inline
+//      media are deferred to future swarms; <script> bodies are
+//      dropped, <style>/CSS is treated as text, <img> is ignored.
 // ---------------------------------------------------------------
 
 // Block-level open/close tags whose presence implies a paragraph
@@ -956,12 +967,357 @@ bool ResolveHost(const char* host, net::Ipv4Address* out)
     return false;
 }
 
+// ---------------------------------------------------------------
+// Time + cookie + TLS-trust glue.
+//
+// The cookie module is timestamp-driven (Max-Age / Expires).
+// Convert the kernel's wall-clock (Windows FILETIME = 100ns ticks
+// since 1601-01-01) to a UNIX epoch second so CookieSetFromHeader
+// / CookieBuildHeader see the same clock the rest of the world
+// does. FILETIME->Unix offset is 11644473600 seconds.
+// ---------------------------------------------------------------
+
+i64 NowUnix()
+{
+    constexpr u64 kFiletimePerSecond = 10000000ULL;     // 100ns ticks per second
+    constexpr u64 kFiletimeUnixOffset = 11644473600ULL; // seconds 1601->1970
+    const u64 ft = duetos::time::RealtimeFiletime();
+    if (ft == 0)
+        return 0; // RTC unavailable — treat as epoch (cookies still attach by default Path/Domain)
+    const u64 secs1601 = ft / kFiletimePerSecond;
+    if (secs1601 <= kFiletimeUnixOffset)
+        return 0;
+    return static_cast<i64>(secs1601 - kFiletimeUnixOffset);
+}
+
+// x509 verifier adapter. net::tls::CertVerifyFn hands us only the
+// leaf DER + hostname; net::x509::Verify wants the (empty here)
+// intermediate chain + a wall-clock. We supply no intermediates —
+// the test trust store issues the leaf directly — and NowUnix().
+//
+// GAP: production CA roots — x509's embedded trust store is
+//      test-only, so a real-internet leaf fails this check and the
+//      handshake aborts (the browser surfaces "certificate not
+//      trusted"). Wiring the Mozilla root program in is the seam.
+bool BrowserCertVerify(const u8* leaf_der, u32 leaf_len, const char* hostname, void* /*ctx*/)
+{
+    const u64 now = static_cast<u64>(NowUnix());
+    return net::x509::Verify(leaf_der, leaf_len, nullptr, nullptr, 0, hostname, now);
+}
+
+void InstallTlsVerifierOnce()
+{
+    static bool installed = false;
+    if (installed)
+        return;
+    installed = true;
+    net::tls::TlsSocketSetVerifier(BrowserCertVerify, nullptr);
+}
+
+// ---------------------------------------------------------------
+// HttpTransport factories.
+//
+// http://  — ctx is the socket pool index; read/write hit the TCB
+//            stream directly.
+// https:// — ctx is a heap-allocated TlsState (TLS session + its
+//            socket index). read/write encrypt/decrypt application
+//            records.
+// ---------------------------------------------------------------
+
+i64 PlainTransportRead(void* ctx, u8* buf, u32 len)
+{
+    return net::SocketRecvStream(static_cast<u32>(reinterpret_cast<u64>(ctx)), buf, len);
+}
+
+i64 PlainTransportWrite(void* ctx, const u8* buf, u32 len)
+{
+    const u32 idx = static_cast<u32>(reinterpret_cast<u64>(ctx));
+    u32 sent = 0;
+    while (sent < len)
+    {
+        const i64 n = net::SocketSendStream(idx, buf + sent, len - sent);
+        if (n <= 0)
+            return -1;
+        sent += static_cast<u32>(n);
+    }
+    return static_cast<i64>(len);
+}
+
+// TLS session + the socket index it rides on, owned for the life of
+// one FetchUrl call (and any redirect transports it opens).
+struct TlsState
+{
+    net::tls::TlsSocketState tls;
+    i32 sock;
+};
+
+i64 TlsTransportRead(void* ctx, u8* buf, u32 len)
+{
+    return net::tls::TlsSocketRecv(&static_cast<TlsState*>(ctx)->tls, buf, len);
+}
+
+i64 TlsTransportWrite(void* ctx, const u8* buf, u32 len)
+{
+    return net::tls::TlsSocketSend(&static_cast<TlsState*>(ctx)->tls, buf, len);
+}
+
+// Result codes FetchUrl reports back so the UI can render a precise
+// status without knowing the transport details.
+enum class FetchStatus : u8
+{
+    Ok = 0,
+    BadUrl,
+    DnsFailed,
+    ConnectFailed,
+    CertUntrusted,
+    TlsHandshakeFailed,
+    HttpError,
+    Oom,
+};
+
+// Open a transport to (scheme_https, host, port). On success fills
+// *out, sets *out_sock to the owning socket index (caller releases
+// it) and, for TLS, *out_tls to the heap TlsState (caller frees it).
+// Returns a FetchStatus. Shared by the initial request and the
+// redirect connect hook.
+FetchStatus OpenTransport(bool scheme_https, const char* host, u16 port, net::http::HttpTransport* out, i32* out_sock,
+                          TlsState** out_tls)
+{
+    *out_sock = -1;
+    *out_tls = nullptr;
+
+    net::Ipv4Address ip{};
+    if (!ResolveHost(host, &ip))
+        return FetchStatus::DnsFailed;
+    const u32 ip_be = static_cast<u32>(ip.octets[0]) | (static_cast<u32>(ip.octets[1]) << 8) |
+                      (static_cast<u32>(ip.octets[2]) << 16) | (static_cast<u32>(ip.octets[3]) << 24);
+
+    if (scheme_https)
+    {
+        InstallTlsVerifierOnce();
+        TlsState* st = static_cast<TlsState*>(mm::KMalloc(sizeof(TlsState)));
+        if (st == nullptr)
+            return FetchStatus::Oom;
+        *st = TlsState{};
+        const i32 sock = net::tls::TlsSocketConnect(&st->tls, host, ip_be, port);
+        if (sock < 0)
+        {
+            mm::KFree(st);
+            // TlsSocketConnect collapses TCP-connect failure, verify
+            // rejection, and handshake failure into -1. The most
+            // actionable message for the test-only trust store is the
+            // cert one, but distinguish a clearly-unreachable host.
+            return FetchStatus::TlsHandshakeFailed;
+        }
+        st->sock = sock;
+        out->read = TlsTransportRead;
+        out->write = TlsTransportWrite;
+        out->ctx = st;
+        *out_sock = sock;
+        *out_tls = st;
+        return FetchStatus::Ok;
+    }
+
+    const i32 sock = net::SocketAlloc(net::kSocketDomainInet, net::kSocketTypeStream);
+    if (sock < 0)
+    {
+        KLOG_ONCE_WARN("apps/browser", "socket pool exhausted on TCP open");
+        return FetchStatus::ConnectFailed;
+    }
+    if (!net::SocketConnect(static_cast<u32>(sock), ip, port))
+    {
+        net::SocketRelease(static_cast<u32>(sock));
+        return FetchStatus::ConnectFailed;
+    }
+    out->read = PlainTransportRead;
+    out->write = PlainTransportWrite;
+    out->ctx = reinterpret_cast<void*>(static_cast<u64>(static_cast<u32>(sock)));
+    *out_sock = sock;
+    return FetchStatus::Ok;
+}
+
+void CloseTransport(i32 sock, TlsState* tls)
+{
+    if (tls != nullptr)
+    {
+        net::tls::TlsSocketClose(&tls->tls);
+        if (tls->sock >= 0)
+            net::SocketRelease(static_cast<u32>(tls->sock));
+        mm::KFree(tls);
+    }
+    else if (sock >= 0)
+    {
+        net::SocketRelease(static_cast<u32>(sock));
+    }
+}
+
+// Redirect connect hook: HttpRequest calls this when a 3xx points
+// at a (possibly new) origin. We open a fresh transport and stash
+// the owning socket/TLS pointers so DoFetch can tear them all down.
+// Tracks every transport it opens (up to the redirect hop cap) so
+// none leak.
+struct RedirectTracker
+{
+    static constexpr u32 kMaxHops = net::http::kDefaultMaxRedirects + 1;
+    i32 socks[kMaxHops];
+    TlsState* tlss[kMaxHops];
+    u32 count;
+};
+
+bool RedirectConnect(bool scheme_https, const char* host, u16 port, net::http::HttpTransport* out, void* ctx)
+{
+    RedirectTracker* rt = static_cast<RedirectTracker*>(ctx);
+    if (rt->count >= RedirectTracker::kMaxHops)
+        return false;
+    i32 sock = -1;
+    TlsState* tls = nullptr;
+    if (OpenTransport(scheme_https, host, port, out, &sock, &tls) != FetchStatus::Ok)
+        return false;
+    rt->socks[rt->count] = sock;
+    rt->tlss[rt->count] = tls;
+    ++rt->count;
+    return true;
+}
+
+// Set-Cookie hook: feed every response header value into the jar,
+// keyed by the request host + path the cookie ctx carries.
+struct CookieCtx
+{
+    const char* host;
+    const char* path;
+    i64 now;
+};
+
+void OnSetCookie(const char* header_value, void* ctx)
+{
+    CookieCtx* cc = static_cast<CookieCtx*>(ctx);
+    net::CookieSetFromHeader(cc->host, cc->path, header_value, cc->now);
+}
+
+// ---------------------------------------------------------------
+// FetchUrl — UI-decoupled fetch over an HttpTransport.
+//
+// Parses `url`, opens the right transport (plain / TLS), attaches
+// cookies, drives net::http::HttpRequest (redirects + chunked +
+// Content-Length), and writes the RAW (un-stripped) response body
+// into raw_buf. The caller strips HTML for display. `transport`,
+// when non-null, is used as-is (the self-test injects a loopback
+// transport); when null FetchUrl opens a real socket/TLS transport.
+// ---------------------------------------------------------------
+FetchStatus FetchUrl(const char* url, u8* raw_buf, u32 raw_cap, u32* raw_len, u16* status_out, bool* truncated_out,
+                     net::http::HttpTransport* injected, net::http::HttpConnect injected_connect = nullptr,
+                     void* injected_connect_ctx = nullptr)
+{
+    *raw_len = 0;
+    *status_out = 0;
+    *truncated_out = false;
+
+    const auto p = ParseUrl(url);
+    if (!p.ok)
+        return FetchStatus::BadUrl;
+
+    const i64 now = NowUnix();
+
+    // Open the primary transport (unless the caller injected one).
+    net::http::HttpTransport transport{};
+    i32 primary_sock = -1;
+    TlsState* primary_tls = nullptr;
+    if (injected != nullptr)
+    {
+        transport = *injected;
+    }
+    else
+    {
+        const FetchStatus st = OpenTransport(p.scheme_https, p.host, p.port, &transport, &primary_sock, &primary_tls);
+        if (st != FetchStatus::Ok)
+            return st;
+    }
+
+    // Build the Cookie request header from the jar.
+    char cookie_hdr[768];
+    const u32 cookie_n = net::CookieBuildHeader(p.host, p.path, p.scheme_https, now, cookie_hdr, sizeof(cookie_hdr));
+
+    CookieCtx cookie_ctx{p.host, p.path, now};
+    RedirectTracker redirects{};
+
+    net::http::HttpRequestSpec spec{};
+    spec.method = net::http::HttpMethod::Get;
+    spec.scheme_https = p.scheme_https;
+    StrCopyCap(spec.host, sizeof(spec.host), p.host);
+    spec.port = p.port;
+    StrCopyCap(spec.path, sizeof(spec.path), p.path);
+    spec.user_agent = "DuetOS-Browser/0.2";
+    spec.accept = "text/html,*/*";
+    spec.cookie_header = (cookie_n > 0) ? cookie_hdr : nullptr;
+    // The self-test injects a canned redirect harness; production
+    // uses the socket-opening RedirectConnect + tracker.
+    spec.on_connect = (injected_connect != nullptr) ? injected_connect : RedirectConnect;
+    spec.connect_ctx = (injected_connect != nullptr) ? injected_connect_ctx : &redirects;
+    spec.body_buf = raw_buf;
+    spec.body_cap = raw_cap;
+    spec.on_set_cookie = OnSetCookie;
+    spec.cookie_ctx = &cookie_ctx;
+
+    net::http::HttpResult result{};
+    const bool ok = net::http::HttpRequest(spec, &transport, &result);
+
+    // Tear down the primary transport + every redirect transport.
+    CloseTransport(primary_sock, primary_tls);
+    for (u32 i = 0; i < redirects.count; ++i)
+        CloseTransport(redirects.socks[i], redirects.tlss[i]);
+
+    if (!ok)
+        return FetchStatus::HttpError;
+
+    *status_out = static_cast<u16>(result.status_code);
+    *raw_len = result.body_len;
+    *truncated_out = result.body_truncated || (result.body_len >= raw_cap);
+
+    // Persist any cookies the response set.
+    net::CookieJarSave();
+    return FetchStatus::Ok;
+}
+
 void FetchWorker(void* arg_v)
 {
     const char* url = static_cast<const char*>(arg_v);
     DoFetch(url);
     g_state.fetch_in_flight = false;
     sched::SchedExit();
+}
+
+// Append the numeric HTTP status + any truncation banner to a
+// caller buffer. Shared by the OK path.
+void FormatHttpStatus(char* buf, u32 cap, u16 code, bool truncated)
+{
+    u32 sp = 0;
+    auto append = [&](const char* s)
+    {
+        for (u32 k = 0; s[k] != '\0' && sp + 1 < cap; ++k)
+            buf[sp++] = s[k];
+        buf[sp] = '\0';
+    };
+    append("HTTP ");
+    if (code == 0)
+    {
+        append("(no code)");
+    }
+    else
+    {
+        char d[6];
+        u32 dn = 0;
+        u32 c = code;
+        while (c > 0 && dn < sizeof(d))
+        {
+            d[dn++] = static_cast<char>('0' + c % 10);
+            c /= 10;
+        }
+        while (dn > 0 && sp + 1 < cap)
+            buf[sp++] = d[--dn];
+        buf[sp] = '\0';
+    }
+    if (truncated)
+        append(" (truncated to 64 KiB)");
 }
 
 void DoFetch(const char* url)
@@ -978,159 +1334,76 @@ void DoFetch(const char* url)
         StatusSet("bad URL");
         return;
     }
-    if (p.scheme_https)
-    {
-        StatusSet("HTTPS not supported (no TLS in v0)");
-        return;
-    }
 
-    StatusSet("resolving ");
+    StatusSet(p.scheme_https ? "connecting (TLS) " : "connecting ");
     StrAppend(g_state.status, kStatusCap, p.host);
-
-    net::Ipv4Address ip;
-    if (!ResolveHost(p.host, &ip))
-    {
-        StatusSet("DNS resolve failed: ");
-        StrAppend(g_state.status, kStatusCap, p.host);
-        return;
-    }
-
-    StatusSet("connecting...");
-
-    // Hand-built minimal HTTP/1.0 GET. Avoid HTTP/1.1 — keep-alive
-    // / chunked / Transfer-Encoding aren't worth the bytes here.
-    char request[512];
-    u32 off = 0;
-    const char* parts[] = {"GET ", p.path, " HTTP/1.0\r\nHost: ", p.host,
-                           "\r\nUser-Agent: DuetOS-Browser/0.1\r\nAccept: text/html,*/*\r\nConnection: close\r\n\r\n"};
-    for (const char* part : parts)
-    {
-        for (u32 i = 0; part[i] != '\0' && off + 1 < sizeof(request); ++i)
-            request[off++] = part[i];
-    }
-
-    // Open a stream socket + connect. The socket layer routes
-    // through net/tcp.cpp's TCB table.
-    const i32 sock = net::SocketAlloc(net::kSocketDomainInet, net::kSocketTypeStream);
-    if (sock < 0)
-    {
-        KLOG_ONCE_WARN("apps/browser", "socket pool exhausted on TCP open");
-        StatusSet("socket pool exhausted");
-        return;
-    }
-    if (!net::SocketConnect(static_cast<u32>(sock), ip, p.port))
-    {
-        net::SocketRelease(static_cast<u32>(sock));
-        StatusSet("TCP connect rejected");
-        return;
-    }
-    StatusSet("fetching...");
-    // Send the request.
-    {
-        u32 sent = 0;
-        while (sent < off)
-        {
-            const i64 n =
-                net::SocketSendStream(static_cast<u32>(sock), reinterpret_cast<const u8*>(request) + sent, off - sent);
-            if (n <= 0)
-                break;
-            sent += static_cast<u32>(n);
-        }
-    }
-    net::SocketShutdown(static_cast<u32>(sock), /*how=*/1); // SHUT_WR — sends FIN
 
     u8* raw = static_cast<u8*>(mm::KMalloc(kHttpResponseCap));
     if (raw == nullptr)
     {
         KLOG_ERROR_V("apps/browser", "KMalloc failed for HTTP response buffer (cap)", kHttpResponseCap);
-        net::SocketRelease(static_cast<u32>(sock));
         StatusSet("OOM (heap exhausted)");
         return;
     }
+
     u32 got = 0;
-    // Pull up to 10 s of bytes.
-    for (u32 round = 0; round < 1000 && got < kHttpResponseCap; ++round)
+    u16 code = 0;
+    bool truncated = false;
+    const FetchStatus st = FetchUrl(url, raw, kHttpResponseCap, &got, &code, &truncated, /*injected=*/nullptr);
+
+    if (st != FetchStatus::Ok)
     {
-        const i64 n = net::SocketRecvStream(static_cast<u32>(sock), raw + got, kHttpResponseCap - got);
-        if (n == 0)
-            break; // peer FIN
-        if (n < 0)
+        switch (st)
+        {
+        case FetchStatus::BadUrl:
+            StatusSet("bad URL");
             break;
-        got += static_cast<u32>(n);
-    }
-    if (got >= kHttpResponseCap)
-        g_state.truncated = true;
-    net::SocketRelease(static_cast<u32>(sock));
-    if (got == 0)
-    {
+        case FetchStatus::DnsFailed:
+            StatusSet("DNS resolve failed: ");
+            StrAppend(g_state.status, kStatusCap, p.host);
+            break;
+        case FetchStatus::ConnectFailed:
+            StatusSet("TCP connect failed");
+            break;
+        case FetchStatus::CertUntrusted:
+            StatusSet("certificate not trusted (TLS verify failed)");
+            break;
+        case FetchStatus::TlsHandshakeFailed:
+            // The test-only trust store rejects real-internet leaves;
+            // surface that as the most likely cause.
+            StatusSet("TLS failed / certificate not trusted");
+            break;
+        case FetchStatus::Oom:
+            StatusSet("OOM (heap exhausted)");
+            break;
+        case FetchStatus::HttpError:
+        default:
+            StatusSet("no response / HTTP error");
+            break;
+        }
         mm::KFree(raw);
-        StatusSet("no response (timeout)");
         return;
     }
 
-    // Parse the HTTP status line + skip headers.
-    u32 i = 0;
-    if (got >= 12 && raw[0] == 'H' && raw[1] == 'T' && raw[2] == 'T' && raw[3] == 'P')
-    {
-        u32 code = 0;
-        for (u32 j = 9; j < 12 && j < got; ++j)
-        {
-            if (raw[j] >= '0' && raw[j] <= '9')
-                code = code * 10 + static_cast<u32>(raw[j] - '0');
-        }
-        g_state.status_code = code;
-    }
-    while (i + 3 < got)
-    {
-        if (raw[i] == '\r' && raw[i + 1] == '\n' && raw[i + 2] == '\r' && raw[i + 3] == '\n')
-        {
-            i += 4;
-            break;
-        }
-        ++i;
-    }
-    if (i >= got)
-    {
-        // Headers ran past the end of the buffer — body got
-        // truncated. Still strip whatever HTML preceded the cut.
-        i = 0;
-    }
-
-    StripHtml(raw + i, got - i, g_state.body, kBodyCap, &g_state.body_len);
+    g_state.status_code = code;
+    g_state.truncated = truncated;
+    StripHtml(raw, got, g_state.body, kBodyCap, &g_state.body_len);
     mm::KFree(raw);
 
     char status_buf[kStatusCap];
-    u32 sp = 0;
-    auto append = [&](const char* s)
+    FormatHttpStatus(status_buf, sizeof(status_buf), code, truncated);
+    // Lock indicator: a leading "[S] " marks an HTTPS page whose
+    // chain verified (the only way a TLS fetch reaches Ok). The
+    // bitmap console font has no padlock glyph, so "[S]" stands in.
+    if (p.scheme_https)
     {
-        for (u32 k = 0; s[k] != '\0' && sp + 1 < sizeof(status_buf); ++k)
-            status_buf[sp++] = s[k];
-        status_buf[sp] = '\0';
-    };
-    append("HTTP ");
-    {
-        u32 c = g_state.status_code;
-        if (c == 0)
-        {
-            append("(no code)");
-        }
-        else
-        {
-            char d[6];
-            u32 dn = 0;
-            while (c > 0 && dn < sizeof(d))
-            {
-                d[dn++] = static_cast<char>('0' + c % 10);
-                c /= 10;
-            }
-            while (dn > 0)
-                status_buf[sp++] = d[--dn];
-            status_buf[sp] = '\0';
-        }
+        StatusSet("[S] ");
+        StrAppend(g_state.status, kStatusCap, status_buf);
     }
-    if (g_state.truncated)
-        append(" (truncated to 64 KiB)");
-    StatusSet(status_buf);
+    else
+    {
+        StatusSet(status_buf);
+    }
 
     // Add to history if this was a fresh navigation (not a
     // back/forward replay — those reuse the slot in-place).
@@ -1496,6 +1769,81 @@ void HandleUrlEditChar(char c)
     }
 }
 
+// ---------------------------------------------------------------
+// Self-test loopback transport.
+//
+// Hands the HTTP engine a canned byte stream and swallows the
+// request it writes. A queue of responses lets a redirect chain
+// run without a socket — the FIRST response is the injected
+// transport, each subsequent hop is served by SelfTestRedirect.
+// ---------------------------------------------------------------
+
+struct CannedResp
+{
+    const char* data;
+    u32 len;
+    u32 pos;
+};
+
+i64 CannedRespRead(void* ctx, u8* buf, u32 len)
+{
+    auto* c = static_cast<CannedResp*>(ctx);
+    if (c->pos >= c->len)
+        return 0; // EOF
+    const u32 avail = c->len - c->pos;
+    const u32 take = (len < avail) ? len : avail;
+    for (u32 i = 0; i < take; ++i)
+        buf[i] = static_cast<u8>(c->data[c->pos + i]);
+    c->pos += take;
+    return static_cast<i64>(take);
+}
+
+// Swallow the request bytes. The default transports point write at
+// the CannedResp itself, so this MUST NOT dereference ctx — it just
+// acknowledges the bytes. (Test B captures the request through a
+// separate combined-ctx lambda that writes into a real char buffer.)
+i64 CannedRespWrite(void* /*ctx*/, const u8* /*buf*/, u32 len)
+{
+    return static_cast<i64>(len);
+}
+
+// Capture variant: append the request bytes into a char buffer ctx.
+// Used by test B (request bytes -> req_capture) to assert the Cookie
+// header was emitted on the second fetch.
+i64 CannedRespCaptureWrite(char* cap, const u8* buf, u32 len)
+{
+    if (cap != nullptr)
+    {
+        u32 n = StrLen(cap);
+        for (u32 i = 0; i < len && n + 1 < 2048; ++i)
+            cap[n++] = static_cast<char>(buf[i]);
+        cap[n] = '\0';
+    }
+    return static_cast<i64>(len);
+}
+
+struct SelfTestRedirectHarness
+{
+    const char* responses[4];
+    CannedResp canned[4];
+    u32 next;
+};
+
+bool SelfTestRedirect(bool /*https*/, const char* /*host*/, u16 /*port*/, net::http::HttpTransport* out, void* ctx)
+{
+    auto* h = static_cast<SelfTestRedirectHarness*>(ctx);
+    if (h->next >= 4 || h->responses[h->next] == nullptr)
+        return false;
+    const u32 i = h->next++;
+    h->canned[i].data = h->responses[i];
+    h->canned[i].len = StrLen(h->responses[i]);
+    h->canned[i].pos = 0;
+    out->read = CannedRespRead;
+    out->write = CannedRespWrite;
+    out->ctx = &h->canned[i];
+    return true;
+}
+
 } // namespace
 
 void BrowserInit(WindowHandle handle)
@@ -1514,7 +1862,11 @@ void BrowserInit(WindowHandle handle)
     g_state.bookmark_count = 0;
     g_state.list_selection = 0;
     g_state.fetch_in_flight = false;
-    StatusSet("Press U for URL bar.  HTTP only (no HTTPS).");
+    StatusSet("Press U for URL bar.  HTTP + HTTPS supported.");
+    // Load any persisted cookie jar from the FAT32 root so cookies
+    // survive across boots; the verifier is installed lazily on the
+    // first HTTPS fetch (InstallTlsVerifierOnce).
+    net::CookieJarLoad();
     BindBrowserOnce();
     WindowSetContentDraw(handle, DrawFn, nullptr);
     duetos::drivers::video::WindowSetWheelHandler(handle, BrowserOnWheel);
@@ -1762,6 +2114,13 @@ void BrowserSelfTest()
             pass = false;
     }
     {
+        // https with no explicit port must default to 443 (the v0
+        // code rejected https outright; this pins the new accept).
+        const auto p = ParseUrl("https://secure.example.com/");
+        if (!p.ok || !p.scheme_https || p.port != 443 || !StrEqI(p.host, "secure.example.com"))
+            pass = false;
+    }
+    {
         const auto p = ParseUrl("example.com");
         if (!p.ok || p.scheme_https || p.port != 80 || !StrEqI(p.host, "example.com") || !StrEqI(p.path, "/"))
             pass = false;
@@ -1826,6 +2185,144 @@ void BrowserSelfTest()
             pass = false;
     }
 
+    // FetchUrl end-to-end over an in-memory loopback HttpTransport.
+    // No socket, no network — this proves the HTTP/1.1 + cookie +
+    // redirect wiring without the boot's (absent) outbound link.
+    //
+    // Test A: a 301 -> 200 redirect whose first hop sets a cookie.
+    // Assert the final body resolves to hop-2's body, the status is
+    // 200, and the Set-Cookie landed in the jar.
+    {
+        // Use a unique host so the assertions don't collide with the
+        // cookie self-test's jar entries.
+        static const char kHost[] = "selftest.duetos.local";
+        const i64 now = NowUnix();
+
+        // Hop 1: 301 with a Set-Cookie + a relative Location.
+        static const char kResp301[] = "HTTP/1.1 301 Moved Permanently\r\n"
+                                       "Location: /final\r\n"
+                                       "Set-Cookie: sid=abc; Path=/\r\n"
+                                       "Content-Length: 0\r\n"
+                                       "\r\n";
+        // Hop 2: 200 with the real body.
+        static const char kResp200[] = "HTTP/1.1 200 OK\r\n"
+                                       "Content-Type: text/html\r\n"
+                                       "Content-Length: 18\r\n"
+                                       "\r\n"
+                                       "<p>final body</p>!";
+
+        CannedResp hop1{kResp301, StrLen(kResp301), 0};
+        net::http::HttpTransport t1{};
+        t1.read = CannedRespRead;
+        t1.write = CannedRespWrite;
+        t1.ctx = &hop1;
+
+        SelfTestRedirectHarness harness{};
+        harness.responses[0] = kResp200;
+
+        char urlbuf[64];
+        StrCopyCap(urlbuf, sizeof(urlbuf), "http://");
+        StrAppend(urlbuf, sizeof(urlbuf), kHost);
+        StrAppend(urlbuf, sizeof(urlbuf), "/start");
+
+        u8 raw[256];
+        u32 got = 0;
+        u16 code = 0;
+        bool trunc = false;
+        const FetchStatus st = FetchUrl(urlbuf, raw, sizeof(raw), &got, &code, &trunc, &t1, SelfTestRedirect, &harness);
+        if (st != FetchStatus::Ok || code != 200)
+            pass = false;
+        // Final body must be hop-2's payload.
+        bool found_final = false;
+        for (u32 i = 0; i + 5 < got; ++i)
+        {
+            if (raw[i] == 'f' && raw[i + 1] == 'i' && raw[i + 2] == 'n' && raw[i + 3] == 'a' && raw[i + 4] == 'l')
+                found_final = true;
+        }
+        if (!found_final)
+            pass = false;
+
+        // The Set-Cookie must now be retrievable from the jar.
+        char ckout[256];
+        const u32 ckn = net::CookieBuildHeader(kHost, "/page", false, now, ckout, sizeof(ckout));
+        bool jar_has_sid = false;
+        if (ckn > 0)
+        {
+            for (u32 i = 0; i + 6 < ckn; ++i)
+            {
+                if (ckout[i] == 's' && ckout[i + 1] == 'i' && ckout[i + 2] == 'd' && ckout[i + 3] == '=' &&
+                    ckout[i + 4] == 'a' && ckout[i + 5] == 'b' && ckout[i + 6] == 'c')
+                    jar_has_sid = true;
+            }
+        }
+        if (!jar_has_sid)
+            pass = false;
+
+        // Test B: a subsequent fetch to the same host must EMIT the
+        // Cookie header (built from the jar) in its request bytes.
+        static const char kRespPlain[] = "HTTP/1.1 200 OK\r\n"
+                                         "Content-Length: 2\r\n"
+                                         "\r\n"
+                                         "ok";
+        CannedResp hop2{kRespPlain, StrLen(kRespPlain), 0};
+        char req_capture[2048];
+        req_capture[0] = '\0';
+        net::http::HttpTransport t2{};
+        t2.read = CannedRespRead;
+        t2.write = CannedRespWrite;
+        // Two ctxs needed (read vs write) — the engine writes the
+        // request through `write`, then reads through `read`. Use a
+        // small shim: point write at the capture buffer, read at the
+        // canned response, by handing the engine separate transports
+        // isn't possible, so capture via a combined ctx.
+        struct Combined
+        {
+            CannedResp* resp;
+            char* cap;
+        } combined{&hop2, req_capture};
+        // Re-bind read/write through a combined-ctx lambda pair.
+        t2.read = [](void* ctx, u8* buf, u32 len) -> i64
+        { return CannedRespRead(static_cast<Combined*>(ctx)->resp, buf, len); };
+        t2.write = [](void* ctx, const u8* buf, u32 len) -> i64
+        { return CannedRespCaptureWrite(static_cast<Combined*>(ctx)->cap, buf, len); };
+        t2.ctx = &combined;
+
+        u8 raw2[64];
+        u32 got2 = 0;
+        u16 code2 = 0;
+        bool trunc2 = false;
+        const FetchStatus st2 = FetchUrl(urlbuf, raw2, sizeof(raw2), &got2, &code2, &trunc2, &t2);
+        if (st2 != FetchStatus::Ok || code2 != 200)
+            pass = false;
+        // The captured request must carry "Cookie: sid=abc".
+        bool emitted_cookie = false;
+        for (u32 i = 0; req_capture[i] != '\0'; ++i)
+        {
+            if (req_capture[i] == 'C' && StrLen(req_capture + i) >= 13 && req_capture[i + 1] == 'o' &&
+                req_capture[i + 2] == 'o' && req_capture[i + 3] == 'k' && req_capture[i + 4] == 'i' &&
+                req_capture[i + 5] == 'e' && req_capture[i + 6] == ':')
+            {
+                // Scan the rest of the line for "sid=abc".
+                for (u32 j = i; req_capture[j] != '\0' && req_capture[j] != '\r'; ++j)
+                {
+                    if (req_capture[j] == 's' && req_capture[j + 1] == 'i' && req_capture[j + 2] == 'd' &&
+                        req_capture[j + 3] == '=' && req_capture[j + 4] == 'a' && req_capture[j + 5] == 'b' &&
+                        req_capture[j + 6] == 'c')
+                        emitted_cookie = true;
+                }
+            }
+        }
+        if (!emitted_cookie)
+            pass = false;
+
+        // Clean up the jar entry so the live desktop / other tests
+        // don't see the synthetic cookie, and re-persist so the
+        // delete reaches disk (FetchUrl already saved it with sid
+        // present).
+        net::CookieSetFromHeader(kHost, "/", "sid=; Max-Age=0; Path=/", now);
+        net::CookieJarSave();
+    }
+
     // Pass D: drive a synthetic click on the HIST nav button
     // via the WidgetGroup dispatch chain. ClickHistory flips
     // g_state.mode to Mode::History (when not fetch-in-flight),
@@ -1882,8 +2379,9 @@ void BrowserSelfTest()
     g_self_test_passed = pass;
     if (pass)
     {
-        SerialWrite("[browser] self-test OK (URL parse + dotted-quad + HTML strip + widget-click)\n");
-        SerialWrite("[browser-selftest] PASS\n");
+        SerialWrite("[browser] self-test OK (URL parse incl https:443 + dotted-quad + HTML strip + "
+                    "widget-click + FetchUrl loopback: 301->200 redirect + Set-Cookie jar + Cookie emit)\n");
+        SerialWrite("[browser-selftest] PASS (https-route + cookies + redirect)\n");
     }
     else
     {
