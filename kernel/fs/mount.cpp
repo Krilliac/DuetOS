@@ -4,6 +4,7 @@
 #include "fs/duetfs.h"
 #include "fs/ext4.h"
 #include "fs/fat32.h"
+#include "fs/ntfs.h"
 #include "fs/tmpfs.h"
 #include "fs/vfs.h"
 #include "log/klog.h"
@@ -428,6 +429,56 @@ bool Ext4Lookup(u32 block_handle, const char* subpath, void* out_node)
 
 constinit VfsBackendOps g_ext4_ops = {&Ext4Lookup};
 
+// NTFS read backend. Resolves a name directly under the NTFS root
+// directory; the read path it routes through (probe → MFT record +
+// USA fixup → $I30 INDEX_ROOT enumerate → NtfsFindInRoot → resolve
+// $DATA → NtfsReadFile) lives in fs/ntfs.cpp. `subpath` arrives
+// volume-relative with a leading '/'.
+//
+// STUB: identical limitation to Ext4Lookup — vfs.h owns the
+//   `VfsBackend` enum + the `VfsNode` field set and is outside this
+//   slice's file scope, so there is no `VfsBackend::Ntfs` tag nor an
+//   NTFS volume-idx / MFT-reference pair to populate. VfsResolve's
+//   contract is "a `true` return leaves a backend-tagged node"; an
+//   NTFS hit can't honour that, so this lookup always reports miss.
+//   The real read path IS reachable and exercised on every boot via
+//   NtfsSelfTest (probe → enumerate → NtfsReadFile). To finish the
+//   VFS wiring: add `VfsBackend::Ntfs` + an `ntfs_volume_idx` /
+//   `ntfs_mft_reference` pair to VfsNode in vfs.h, then fill out_node
+//   here the way Fat32Lookup does and extend to multi-component path
+//   walks via repeated MFT-record read + $I30 enumerate.
+bool NtfsLookup(u32 block_handle, const char* subpath, void* out_node)
+{
+    (void)out_node;
+    if (subpath == nullptr)
+    {
+        return false;
+    }
+    const ntfs::Volume* v = ntfs::NtfsVolumeByHandle(block_handle);
+    if (v == nullptr)
+    {
+        return false;
+    }
+    // Strip leading slash(es); a name addresses a direct child of the
+    // root dir. We perform the real resolution (it exercises the
+    // resident $I30 index walk) but, per the STUB above, cannot
+    // surface a tagged VfsNode, so the result is discarded and we
+    // report miss until vfs.h grows an NTFS backend tag.
+    const char* name = subpath;
+    while (*name == '/')
+    {
+        ++name;
+    }
+    if (*name != '\0')
+    {
+        ntfs::DirEntry entry{};
+        (void)ntfs::NtfsFindInRoot(*v, name, &entry);
+    }
+    return false;
+}
+
+constinit VfsBackendOps g_ntfs_ops = {&NtfsLookup};
+
 } // namespace
 
 const VfsBackendOps* VfsBackendForFsType(FsType t)
@@ -447,8 +498,14 @@ const VfsBackendOps* VfsBackendForFsType(FsType t)
         // on Ext4Lookup). The read path proper is exercised by
         // Ext4SelfTest on every boot.
         return &g_ext4_ops;
-    case FsType::Ramfs:
     case FsType::Ntfs:
+        // Read backend registered; dispatch reaches NtfsLookup. The
+        // lookup performs real root-dir resolution but cannot yet
+        // surface a tagged VfsNode (vfs.h owns the tag — see the STUB
+        // on NtfsLookup). The read path proper is exercised by
+        // NtfsSelfTest on every boot.
+        return &g_ntfs_ops;
+    case FsType::Ramfs:
     default:
         // GAP: exFAT — the read lookup + the file-mutation API
         // (ExfatWriteInPlace / ExfatAppendInRoot / ExfatCreateInRoot /
