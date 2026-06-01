@@ -1,0 +1,67 @@
+#pragma once
+
+/*
+ * DuetOS — HTML tokenizer + tree builder (parse substrate).
+ *
+ * `ParseHtml` turns a byte buffer of (possibly messy) HTML into a
+ * DOM tree rooted at a synthetic Document node, allocating every
+ * node/attribute/string out of the caller's `Arena`. No rendering,
+ * no styling, no scripting — that is a later swarm's job.
+ *
+ * What the parser handles (REAL):
+ *   - Open / close / self-closing tags, with attributes that are
+ *     double-quoted, single-quoted, unquoted, or valueless.
+ *   - Text runs with HTML entity decoding (&amp; &lt; &gt; &quot;
+ *     &apos; &nbsp; &copy; &#NN; &#xHH; and a small named set).
+ *   - Comments <!-- ... --> (preserved as Comment nodes) and the
+ *     doctype declaration (skipped).
+ *   - Void elements (br, img, hr, input, meta, link, ...) — never
+ *     get children, auto-closed on open.
+ *   - Pragmatic recovery: <li> closes an open <li>, a block-level
+ *     start closes an open <p>, stray close tags that match no open
+ *     element are ignored, and everything still open at EOF is
+ *     closed against the Document root.
+ *   - <script>/<style>/<title>/<textarea> raw-text modes: their
+ *     content is captured verbatim as a single Text child (entities
+ *     are NOT decoded inside script/style) and not interpreted.
+ *
+ * GAP (deliberately out of scope for v0 — revisit when CSS/layout
+ * lands and demands more conformance):
+ *   - Full HTML5 tree construction: table foster-parenting, the
+ *     adoption-agency formatting-element algorithm, the insertion-
+ *     mode state machine. We use a flat open-element stack with a
+ *     handful of recovery rules, not the spec's mode machine.
+ *   - <template> content document fragments.
+ *   - SVG / MathML foreign-content namespaces.
+ *   - Character-encoding sniffing: input is assumed UTF-8 / ASCII;
+ *     bytes >= 0x80 pass through untouched.
+ *   - Script execution (captured raw, never run).
+ */
+
+#include "util/types.h"
+#include "web/dom.h"
+
+namespace duetos::web
+{
+
+using duetos::u32;
+
+/// Parse `len` bytes of `html` into a DOM tree. Returns the synthetic
+/// Document root (kind == NodeKind::Document), or nullptr if the arena
+/// could not even hold the root node. The Document's children are the
+/// top-level parsed nodes.
+Node* ParseHtml(const char* html, u32 len, Arena& arena);
+
+/// Recursively concatenate the text content of `node` and all its
+/// descendants into `out` (NUL-terminated, truncated to `outCap-1`
+/// bytes). Comment nodes are skipped. Returns the number of bytes
+/// written (excluding the NUL).
+u32 CollectText(const Node* node, char* out, u32 outCap);
+
+/// Boot self-test: parse representative fragments and assert the tree
+/// shape, attributes, entity decoding, recovery, and text extraction.
+/// Emits `[html-dom-selftest] PASS (...)` on success; on failure fires
+/// KBP_PROBE_V(kBootSelftestFail, ...) and emits a FAIL line.
+void HtmlDomSelfTest();
+
+} // namespace duetos::web
