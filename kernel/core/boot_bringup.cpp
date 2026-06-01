@@ -173,6 +173,7 @@
 #include "apps/calculator.h"
 #include "apps/about.h"
 #include "apps/browser.h"
+#include "web/css.h"
 #include "web/html.h"
 #include "web/png.h"
 #include "apps/calendar.h"
@@ -3185,6 +3186,12 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // Runs after the browser/net self-tests; proves the step budget
     // kills a runaway script instead of hanging the boot.
     DUETOS_BOOT_SELFTEST(duetos::web::js::JsSelfTest());
+
+    // CSS cascade engine self-test (kernel/web). Parses an author sheet
+    // over the UA defaults, computes a style per DOM element, and proves
+    // specificity ordering, inline-over-sheet, inheritance, a UA default,
+    // and display:none. Produces the styles a future layout swarm reads.
+    DUETOS_BOOT_SELFTEST(duetos::web::CssSelfTest());
 
     // CALENDAR — windowed month-view sibling of the read-only
     // taskbar-clock popup. Lets the user page through past / future
