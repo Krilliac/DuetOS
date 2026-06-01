@@ -25,11 +25,26 @@
  *   - Root-directory walk (first cluster only — a multi-cluster
  *     root would need the FAT walk, which is deferred).
  *   - Up to kMaxDirEntries entries captured per volume.
+ *   - Root-directory file mutation: write-in-place, append/grow,
+ *     create, truncate. Mirrors the proven FAT32 write path
+ *     (kernel/fs/fat32_write.cpp + fat32_create.cpp): allocate
+ *     free clusters, chain them through the FAT (4-byte LE
+ *     entries, EOC == 0xFFFFFFFF), flip the allocation-bitmap
+ *     bits, then plant / patch the File (0x85) + Stream-Extension
+ *     (0xC0) + FileName (0xC1) dirent set with a correct
+ *     SetChecksum and NameHash.
  *
- * Not in scope:
- *   - FAT-backed multi-cluster chain walk.
- *   - Writes.
- *   - Subdirectory recursion.
+ * Not in scope (precise GAPs annotated at the call sites):
+ *   - Subdirectory targets — create/append/truncate operate on
+ *     the ROOT directory's first cluster only.
+ *   - Up-case-table-aware name hashing — v0 up-cases ASCII
+ *     a-z → A-Z only; the on-disk Up-case Table dirent is not
+ *     parsed, so names with non-ASCII letters hash with their raw
+ *     code units (still self-consistent on our own volumes).
+ *   - Defragmentation / contiguous (NoFatChain) allocation — every
+ *     file we create is FAT-chained.
+ *   - TexFAT (the transactional safe-FAT second FAT) — volumes
+ *     with NumberOfFats == 2 get only FAT #1 maintained.
  *
  * Context: kernel, polling synchronous.
  */
@@ -79,5 +94,47 @@ struct Volume
 u32 ExfatVolumeCount();
 const Volume* ExfatVolumeByIndex(u32 index);
 void ExfatScanAll();
+
+// ---------------------------------------------------------------
+// Write path (root directory only — see header GAP list). All take
+// a non-const Volume* because a successful create/append/truncate
+// refreshes the cached root snapshot (root_entries / root_entry_count)
+// so a follow-up read sees the new state without a re-probe. They
+// fail with -1 / false on a read-only device, full disk, I/O error,
+// or a target outside the supported (root-dir, FAT-chained) shape.
+// ---------------------------------------------------------------
+
+/// Look up `name` (case-insensitive 8.3-or-long, as decoded into
+/// DirEntry.name) in the cached root snapshot. Returns nullptr on
+/// miss. Pointer is into the volume's snapshot — stable until the
+/// next mutating call refreshes it.
+const DirEntry* ExfatFindInRoot(const Volume* v, const char* name);
+
+/// Overwrite `len` bytes at byte offset `offset` inside `e`. NO
+/// size change, NO allocation — `offset + len` MUST be <=
+/// `e->size_bytes`. Full clusters inside the span are written
+/// directly; head/tail partial clusters are read-modify-written.
+/// Returns bytes written (== len on success) or -1.
+i64 ExfatWriteInPlace(const Volume* v, const DirEntry* e, u64 offset, const void* buf, u64 len);
+
+/// Append `len` bytes to the end of a root-dir file, allocating and
+/// chaining clusters as needed, flipping the allocation-bitmap
+/// bits, and patching the on-disk Stream-Extension entry's
+/// valid_data_len + data_length fields. Returns bytes appended
+/// (== len) or -1.
+i64 ExfatAppendInRoot(Volume* v, const char* name, const void* buf, u64 len);
+
+/// Create a new file in the root directory with `name` and initial
+/// content. Allocates content clusters, plants the File +
+/// Stream-Extension + FileName dirent set (attr = 0x20 ARCHIVE)
+/// with a valid SetChecksum + NameHash. Returns the new size on
+/// success, -1 on a full root cluster, duplicate name, name too
+/// long for the per-volume dirent budget, or I/O error.
+i64 ExfatCreateInRoot(Volume* v, const char* name, const void* buf, u64 len);
+
+/// Truncate a root-dir file to `new_size`. Grows (zero-fill) via
+/// the append path, shrinks by trimming the cluster chain + freeing
+/// the bitmap bits, or no-ops when equal. Returns the new size or -1.
+i64 ExfatTruncateInRoot(Volume* v, const char* name, u64 new_size);
 
 } // namespace duetos::fs::exfat
