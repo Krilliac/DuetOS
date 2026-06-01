@@ -393,6 +393,14 @@ const VfsBackendOps* VfsBackendForFsType(FsType t)
     case FsType::Ext4:
     case FsType::Ntfs:
     default:
+        // GAP: exFAT — the read lookup + the file-mutation API
+        // (ExfatWriteInPlace / ExfatAppendInRoot / ExfatCreateInRoot /
+        // ExfatTruncateInRoot in fs/exfat.cpp) are live and reachable
+        // through the exfat:: registry, but exFAT has no `FsType`
+        // member yet, so it cannot be VfsMount'd / dispatched here.
+        // Revisit when an `FsType::Exfat` lands in fs/mount.h: add the
+        // enum member + an `ExfatLookup` arm beside g_fat32_ops, the
+        // same way FAT32 routes its VfsNode through the volume index.
         return nullptr;
     }
 }
