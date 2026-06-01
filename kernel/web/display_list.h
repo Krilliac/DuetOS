@@ -83,6 +83,19 @@ struct DisplayItem
     // owned, NUL-terminated). The painter resolves + decodes it.
     const char* src = nullptr;
     u32 srcLen = 0;
+
+    // Link source: when this item was produced by content inside an
+    // <a href="..."> element, `href` points at the nearest ancestor
+    // anchor's raw (un-resolved) href attribute value — arena-owned,
+    // NUL-terminated, pointing into the DOM attribute storage so it
+    // lives as long as the display list. nullptr means "not a link".
+    // Meaningful for TextRun and ImageBox (the visible link surfaces);
+    // the layout engine also tags an anchor's own background/border
+    // FillRect/Border so a styled link block is hit-testable. Consumers
+    // (the browser) scan the list for items with href != nullptr to
+    // build hit-test rects and follow the link on click / Enter.
+    const char* href = nullptr;
+    u32 hrefLen = 0;
 };
 
 /// A display list: a bump-grown array of DisplayItems in paint order

@@ -14,6 +14,7 @@
  * through the caller's web::Arena (reused from dom.h via css_arena.h).
  */
 
+#include "util/string.h" // StrEqual / StrLen (AnchorHref helper)
 #include "util/types.h"
 #include "web/css.h"
 #include "web/display_list.h"
@@ -93,6 +94,28 @@ inline const ComputedStyle* StyleOf(const LayoutCtx& ctx, const Node* n)
     return ctx.styles.Get(n);
 }
 
+/// If `n` is an <a> element with a non-empty href attribute, return that
+/// (arena-owned, NUL-terminated) href string; otherwise nullptr. Used to
+/// thread the nearest-ancestor anchor's href into the display items its
+/// content produces so the browser can hit-test links back to a target.
+inline const char* AnchorHref(const Node* n)
+{
+    if (n == nullptr || n->kind != NodeKind::Element || n->tag == nullptr)
+    {
+        return nullptr;
+    }
+    if (!duetos::core::StrEqual(n->tag, "a"))
+    {
+        return nullptr;
+    }
+    const char* href = n->GetAttr("href");
+    if (href == nullptr || href[0] == '\0')
+    {
+        return nullptr;
+    }
+    return href;
+}
+
 /// An inline "run": a contiguous text slice carrying the style of the
 /// element that owns it. Shared between the block pass (loose-text
 /// fallback) and the inline pass.
@@ -101,6 +124,10 @@ struct InlineRun
     const char* text = nullptr; // points into arena-owned DOM text
     u32 len = 0;
     const ComputedStyle* style = nullptr; // owning element's style
+    // Nearest-ancestor <a href> for this run (arena-owned, NUL-terminated),
+    // or nullptr when the run is not inside a link. Threaded onto every
+    // TextRun the run emits so the painter/browser can hit-test it.
+    const char* href = nullptr;
 };
 
 // Defined in layout_inline.cpp: emit one TextRun command for the slice
@@ -111,14 +138,19 @@ void EmitTextRun(LayoutCtx& ctx, const InlineRun& run, u32 start, u32 len, i32 x
 
 // Defined in layout_inline.cpp: lay the inline runs of `parent` out
 // within the content box [contentX, contentX+contentW) from `originY`;
-// returns the y just past the last line.
+// returns the y just past the last line. `parentHref` is the nearest
+// ancestor <a href> threaded from the block pass (nullptr when no anchor
+// wraps this block); each emitted TextRun carries the resolved link so the
+// browser can hit-test it.
 i32 LayoutInline(LayoutCtx& ctx, const Node* parent, const ComputedStyle& parentStyle, i32 contentX, i32 contentW,
-                 i32 originY);
+                 i32 originY, const char* parentHref);
 
 // Defined in layout.cpp: lay one block-level box out; returns the y just
 // past the box's bottom margin edge. Declared here so the inline TU's
 // (currently none) and the recursive block walk share one prototype.
-i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 originY);
+// `linkHref` is the nearest-ancestor <a href> (nullptr when none) so a
+// link wrapping block content tags the items its subtree produces.
+i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 originY, const char* linkHref);
 
 } // namespace layout_detail
 

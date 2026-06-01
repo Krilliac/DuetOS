@@ -42,6 +42,11 @@ void EmitTextRun(LayoutCtx& ctx, const InlineRun& run, u32 start, u32 len, i32 x
     it.bold = (s.fontWeight == FontWeight::Bold);
     it.italic = (s.fontStyle == FontStyleKind::Italic);
     it.fontPx = s.fontSize;
+    if (run.href != nullptr)
+    {
+        it.href = run.href;
+        it.hrefLen = static_cast<u32>(duetos::core::StrLen(run.href));
+    }
     ctx.out->Push(it);
 }
 
@@ -52,8 +57,8 @@ namespace
 // (bounded by `cap`); returns the count produced. Inline elements
 // contribute their text children carrying the element's own style.
 // display:none subtrees are skipped. (GAP: inline images.)
-u32 CollectInlineRuns(const LayoutCtx& ctx, const Node* parent, const ComputedStyle* inheritedStyle, InlineRun* runs,
-                      u32 cap, u32 count)
+u32 CollectInlineRuns(const LayoutCtx& ctx, const Node* parent, const ComputedStyle* inheritedStyle,
+                      const char* inheritedHref, InlineRun* runs, u32 cap, u32 count)
 {
     for (const Node* c = parent->firstChild; c != nullptr; c = c->nextSibling)
     {
@@ -68,6 +73,7 @@ u32 CollectInlineRuns(const LayoutCtx& ctx, const Node* parent, const ComputedSt
                 runs[count].text = c->text;
                 runs[count].len = static_cast<u32>(duetos::core::StrLen(c->text));
                 runs[count].style = inheritedStyle;
+                runs[count].href = inheritedHref;
                 ++count;
             }
         }
@@ -79,7 +85,16 @@ u32 CollectInlineRuns(const LayoutCtx& ctx, const Node* parent, const ComputedSt
                 continue;
             }
             const ComputedStyle* childStyle = (cs != nullptr) ? cs : inheritedStyle;
-            count = CollectInlineRuns(ctx, c, childStyle, runs, cap, count);
+            // An inline <a href> in the descent sets the link for its
+            // subtree; a nested <a> (illegal HTML, but be defensive) just
+            // shadows the outer one. Non-anchor elements keep the
+            // inherited link so a <b>/<span> inside an <a> stays a link.
+            const char* childHref = AnchorHref(c);
+            if (childHref == nullptr)
+            {
+                childHref = inheritedHref;
+            }
+            count = CollectInlineRuns(ctx, c, childStyle, childHref, runs, cap, count);
         }
     }
     return count;
@@ -128,7 +143,7 @@ void FlushLine(LayoutCtx& ctx, LineFrag* frags, u32 nFrags, i32 contentX, i32 co
 } // namespace
 
 i32 LayoutInline(LayoutCtx& ctx, const Node* parent, const ComputedStyle& parentStyle, i32 contentX, i32 contentW,
-                 i32 originY)
+                 i32 originY, const char* parentHref)
 {
     // Gather runs. Bound the run count; deep inline trees beyond this
     // truncate (GAP) rather than over-allocating.
@@ -138,7 +153,15 @@ i32 LayoutInline(LayoutCtx& ctx, const Node* parent, const ComputedStyle& parent
     {
         return originY;
     }
-    const u32 nRuns = CollectInlineRuns(ctx, parent, &parentStyle, runs, kMaxRuns, 0);
+    // If the inline-context block is itself an <a href>, its inline
+    // content is part of that link; otherwise inherit the link the block
+    // pass threaded down (an ancestor anchor wrapping a block).
+    const char* selfHref = AnchorHref(parent);
+    if (selfHref == nullptr)
+    {
+        selfHref = parentHref;
+    }
+    const u32 nRuns = CollectInlineRuns(ctx, parent, &parentStyle, selfHref, runs, kMaxRuns, 0);
     if (nRuns == 0)
     {
         return originY;
