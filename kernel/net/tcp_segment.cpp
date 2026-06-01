@@ -96,12 +96,10 @@ u32 BuildOptions(const Tcb& t, u8 flags, u8* opts)
         opts[i++] = 3;
         opts[i++] = 0; // shift count
         // SACK-permitted. v1 emits SACK blocks from the receiver
-        // side (out-of-order reassembly queue → option), so the
-        // option is now load-bearing rather than aspirational.
-        // STUB: sender-side processing of incoming SACK blocks
-        // (scoreboard + RFC-6675 NextSeg) is the next slice; we
-        // accept SACK from peers for the negotiation but ignore
-        // their bytes on the TX path.
+        // side (out-of-order reassembly queue → option) AND consumes
+        // inbound SACK blocks on the sender side (ParseSackBlocks →
+        // ApplySackScoreboard → SackNextSeg, RFC 6675): the option is
+        // load-bearing in both directions.
         opts[i++] = kOptSackPermitted;
         opts[i++] = 2;
     }
@@ -210,6 +208,151 @@ ParsedOptions ParseOptions(const u8* opts, u32 opts_len)
     po.tsval = rs.tsval;
     po.tsecr = rs.tsecr;
     return po;
+}
+
+// ------------------------------------------------------------------
+// Sender-side SACK (RFC 2018 receipt / RFC 6675 loss recovery).
+//
+// The parsers_rust ParsedOptions aggregate doesn't carry the SACK
+// blocks (only sack_permitted), so we walk the raw option bytes here.
+// Every TLV boundary is peer-controlled, so the loop bounds-checks
+// each (i + len) edge, caps at the TCP option budget, and clamps the
+// block count at kMaxSackBlocks — mirroring the Rust walker's hostile-
+// input discipline.
+//
+// Wired here: scoreboard marking (ApplySackScoreboard), fast-retransmit
+// hole selection (SackNextSeg) in the 3-dup-ACK and in-recovery legs of
+// DeliverSegment, and "don't drop SACKed bytes on cumulative ACK"
+// (segments stay marked until snd_una passes them).
+//
+// GAP: on a true RTO the scoreboard should be FLUSHED (RFC 6675 §5.1 /
+// RFC 2018 §8 — the receiver may renege, so every sacked bit becomes
+// untrustworthy). That flush belongs in tcp_timer.cpp's
+// RetransmitFirstUnacked (out of this slice's file scope); until it
+// lands, a post-RTO retransmit can leave stale sacked bits that
+// briefly suppress a fast retransmit of the same range — revisit when
+// the timer TU is next touched.
+// ------------------------------------------------------------------
+
+u32 ParseSackBlocks(const u8* opts, u32 opts_len, SackBlock* out)
+{
+    if (opts == nullptr || out == nullptr)
+        return 0;
+    u32 count = 0;
+    for (u32 i = 0; i < opts_len;)
+    {
+        const u8 kind = opts[i];
+        if (kind == kOptEnd)
+            break;
+        if (kind == kOptNop)
+        {
+            ++i;
+            continue;
+        }
+        if (i + 1 >= opts_len)
+            break;
+        const u8 len = opts[i + 1];
+        // A TLV length below 2 or running past the stream is malformed;
+        // stop the walk rather than trust attacker-shaped arithmetic.
+        if (len < 2 || u32(i) + len > opts_len)
+            break;
+        if (kind == kOptSack)
+        {
+            // SACK option body is N × 8 bytes of (left,right) edges.
+            const u32 body = u32(len) - 2;
+            const u32 blocks = body / 8;
+            for (u32 b = 0; b < blocks && count < kMaxSackBlocks; ++b)
+            {
+                const u32 off = i + 2 + b * 8;
+                const u32 left = (u32(opts[off]) << 24) | (u32(opts[off + 1]) << 16) | (u32(opts[off + 2]) << 8) |
+                                 u32(opts[off + 3]);
+                const u32 right = (u32(opts[off + 4]) << 24) | (u32(opts[off + 5]) << 16) | (u32(opts[off + 6]) << 8) |
+                                  u32(opts[off + 7]);
+                out[count].left = left;
+                out[count].right = right;
+                ++count;
+            }
+        }
+        i += len;
+    }
+    return count;
+}
+
+// True iff the half-open byte range [seg, seg+seg_len) lies entirely
+// within the SACK block [blk_left, blk_right). All compares are
+// mod-2^32 (sequence-space) via signed-difference tests so wraparound
+// at the 32-bit boundary is handled the same way AckInWindow does.
+DUETOS_NO_SANITIZE_WRAP static bool SegCoveredByBlock(u32 seg, u32 seg_len, u32 blk_left, u32 blk_right)
+{
+    // Empty / zero-width block covers nothing.
+    if (static_cast<i32>(blk_right - blk_left) <= 0)
+        return false;
+    const u32 seg_end = seg + seg_len;
+    // seg >= blk_left  AND  seg_end <= blk_right (mod-2^32).
+    const bool left_ok = static_cast<i32>(seg - blk_left) >= 0;
+    const bool right_ok = static_cast<i32>(blk_right - seg_end) >= 0;
+    return left_ok && right_ok;
+}
+
+DUETOS_NO_SANITIZE_WRAP bool ApplySackScoreboard(Tcb& t, const SackBlock* blocks, u32 count)
+{
+    if (t.rtx_queue == nullptr || blocks == nullptr || count == 0)
+        return false;
+    bool progressed = false;
+    for (u32 b = 0; b < count; ++b)
+    {
+        const u32 left = blocks[b].left;
+        const u32 right = blocks[b].right;
+        // Ignore a block at or below snd_una (already cumulatively
+        // acked) or that doesn't advance past it — nothing to learn.
+        if (static_cast<i32>(right - t.snd_una) <= 0)
+            continue;
+        // Track the highest SACKed edge (RFC 6675 HighData proxy) so
+        // NextSeg only fills holes below something the receiver has.
+        if (static_cast<i32>(right - t.sack_high) > 0)
+            t.sack_high = right;
+        for (u32 i = 0; i < kRtxQueueMax; ++i)
+        {
+            SegmentBuf& sb = t.rtx_queue[i];
+            if (sb.len == 0 || sb.sacked)
+                continue;
+            if (SegCoveredByBlock(sb.seq, sb.len, left, right))
+            {
+                sb.sacked = true;
+                progressed = true;
+            }
+        }
+    }
+    return progressed;
+}
+
+DUETOS_NO_SANITIZE_WRAP u32 SackNextSeg(const Tcb& t)
+{
+    if (t.rtx_queue == nullptr)
+        return kRtxQueueMax;
+    // Lowest-sequence un-SACKed segment that sits below the highest
+    // SACKed edge is a confirmed hole: the receiver has data beyond it
+    // but not it, so it was lost. Retransmit that one (RFC 6675 §3, the
+    // (3.2) "there exists ... S2 ... is SACKed" rule, approximated by
+    // sack_high as the upper edge).
+    u32 best_slot = kRtxQueueMax;
+    u32 best_off = 0xFFFFFFFFu;
+    for (u32 i = 0; i < kRtxQueueMax; ++i)
+    {
+        const SegmentBuf& sb = t.rtx_queue[i];
+        if (sb.len == 0 || sb.sacked)
+            continue;
+        // Only a hole if something past it has been SACKed.
+        if (static_cast<i32>(t.sack_high - (sb.seq + sb.len)) < 0)
+            continue;
+        const u32 off = sb.seq - t.snd_una;
+        if (off < best_off)
+        {
+            best_off = off;
+            best_slot = i;
+        }
+    }
+    return best_slot;
 }
 
 bool SendSegment(Tcb& t, u8 flags, u32 seq, u32 ack, const u8* payload, u32 payload_len)
@@ -398,6 +541,7 @@ void DrainSendBuffer(Tcb& t, u32 extra_cwnd)
         sb.seq = t.snd_nxt;
         sb.len = take;
         sb.flags = kFlagAck | kFlagPsh;
+        sb.sacked = false; // freshly queued — not yet SACKed by the peer.
         sb.ticks_sent = NowTicks();
         for (u32 i = 0; i < take; ++i)
         {
@@ -776,6 +920,21 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
     const u8 ws = t.peer_supports_wscale ? t.snd_wscale : 0;
     t.snd_wnd = u32(win) << ws;
 
+    // Sender-side SACK scoreboard (RFC 2018 receipt). Parse any SACK
+    // blocks the peer attached and mark the matching rtx_queue
+    // segments so ProcessAck won't drop them prematurely and the
+    // fast-retransmit leg can fill the real hole via NextSeg. Only
+    // meaningful once we have something in flight and the peer
+    // negotiated SACK-permitted on the handshake.
+    bool sack_progress = false;
+    if (t.peer_supports_sack && (flags & kFlagAck) != 0 && t.rtx_count > 0)
+    {
+        SackBlock blocks[kMaxSackBlocks];
+        const u32 nblk = ParseSackBlocks(opts, opts_len, blocks);
+        if (nblk > 0)
+            sack_progress = ApplySackScoreboard(t, blocks, nblk);
+    }
+
     // SYN_SENT → ESTABLISHED on SYN+ACK.
     if (t.state == State::SynSent)
     {
@@ -795,6 +954,7 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
                 t.mss_send = po.mss;
             // Mark our SYN as acked.
             t.snd_una = ack;
+            t.sack_high = ack; // seed the SACK scoreboard at snd_una.
             t.rtx_count = 0;
             for (u32 i = 0; i < kRtxQueueMax; ++i)
                 t.rtx_queue[i].len = 0;
@@ -822,6 +982,7 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
         if ((flags & kFlagAck) != 0 && AckInWindow(ack, t.snd_una, t.snd_nxt))
         {
             t.snd_una = ack;
+            t.sack_high = ack; // seed the SACK scoreboard at snd_una.
             t.rtx_count = 0;
             for (u32 i = 0; i < kRtxQueueMax; ++i)
                 t.rtx_queue[i].len = 0;
@@ -866,21 +1027,53 @@ void DeliverSegment(u32 idx, const MacAddress& peer_mac, Ipv4Address peer_ip, co
                         t.ssthresh = (t.cwnd / 2 < 2u * t.mss_send) ? 2u * t.mss_send : t.cwnd / 2;
                     }
                     t.cwnd = t.ssthresh + 3u * t.mss_send;
-                    // Resend first unacked.
-                    for (u32 i = 0; i < kRtxQueueMax; ++i)
+                    // Pick what to retransmit. With SACK state, RFC 6675
+                    // NextSeg names the lowest un-SACKed hole the receiver
+                    // is actually missing; without it (peer not SACKing,
+                    // or no blocks yet), fall back to the classic "first
+                    // unacked at snd_una" NewReno behaviour.
+                    u32 slot = SackNextSeg(t);
+                    if (slot == kRtxQueueMax)
                     {
-                        SegmentBuf& sb = t.rtx_queue[i];
-                        if (sb.len != 0 && sb.seq == t.snd_una)
+                        for (u32 i = 0; i < kRtxQueueMax; ++i)
                         {
-                            SendSegment(t, sb.flags, sb.seq, t.rcv_nxt, sb.data, sb.len);
-                            ++g_stats.retrans;
-                            break;
+                            SegmentBuf& sb = t.rtx_queue[i];
+                            if (sb.len != 0 && !sb.sacked && sb.seq == t.snd_una)
+                            {
+                                slot = i;
+                                break;
+                            }
                         }
+                    }
+                    if (slot != kRtxQueueMax)
+                    {
+                        SegmentBuf& sb = t.rtx_queue[slot];
+                        SendSegment(t, sb.flags, sb.seq, t.rcv_nxt, sb.data, sb.len);
+                        sb.ticks_sent = NowTicks();
+                        ++g_stats.retrans;
                     }
                 }
                 else if (t.in_fast_recovery)
                 {
+                    // RFC 6675 §3.5: while in recovery, inflate cwnd by
+                    // one SMSS per dup-ACK (the existing NewReno
+                    // behaviour). If this dup-ACK's SACK blocks exposed a
+                    // *new* hole, also retransmit that hole now rather
+                    // than waiting for the RTO — this is the SACK-driven
+                    // "rescue" leg that keeps recovery moving when
+                    // multiple segments are lost in one window.
                     t.cwnd += t.mss_send;
+                    if (sack_progress)
+                    {
+                        const u32 slot = SackNextSeg(t);
+                        if (slot != kRtxQueueMax)
+                        {
+                            SegmentBuf& sb = t.rtx_queue[slot];
+                            SendSegment(t, sb.flags, sb.seq, t.rcv_nxt, sb.data, sb.len);
+                            sb.ticks_sent = NowTicks();
+                            ++g_stats.retrans;
+                        }
+                    }
                 }
                 else if (t.dup_acks < 3)
                 {
