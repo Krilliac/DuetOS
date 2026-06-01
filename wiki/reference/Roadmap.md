@@ -111,6 +111,22 @@ cleanup debt: move the residual up and delete the rest.
   Gated by a 6-boot determinism sweep (3/3 APs online, byte-stable,
   zero panic/triple/fallback) + a 6/6-clean `gui-fuzz.sh 18` SMP
   matrix. `g_promote_to_panic` may now be reconsidered.
+  - **Recurrence note (2026-06-01) — NOT fully resolved under lockdep.**
+    The `sync/spinlock : release out-of-order` line still appears
+    intermittently (observed 1 of 3 boots) under the
+    `x86_64-release-audit` build (strict lockdep on) ~9s into a 4-CPU
+    boot, on `cpu::g_state_lock` and `mm::g_frame_lock`. Self-tests
+    still pass (OK=183, FAIL=0) and there is no panic / triple-fault /
+    task-kill, so this is a residual lockdep-accounting symptom, not
+    data corruption — but the 2026-05-19 "RESOLVED" claim overstates
+    it: the original 6-boot determinism gate ran under the *release*
+    config, which does not exercise the lockdep checker. NOT caused by
+    the 2026-06-01 parallel-agents batch (the locks are core cpu/mm,
+    untouched by that work; the symptom fires ~7s after those slices'
+    self-tests). Needs a dedicated SMP slice: re-run the determinism
+    sweep *under* the audit/lockdep config and trace the late-boot
+    `g_frame_lock` / `g_state_lock` release ordering against the
+    per-CPU held-stack discipline.
 - **Per-CPU held-stack storage — LANDED (2026-05-22).** The
   global `g_per_cpu[0]` alias is gone. `kLockdepCpuMax =
   acpi::kMaxCpus`, each CPU indexes its own slot via
