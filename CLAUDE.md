@@ -65,6 +65,32 @@ find kernel drivers subsystems userland -type f \
 
 If the task involves any file over the threshold, trim it first.
 
+**Step 4 — Parallel-session check:** if other Claude Code sessions may be
+running concurrently, follow the [Parallel Sessions](#parallel-sessions)
+protocol below — run `tools/parallel/status.sh` and claim your subsystem
+before editing.
+
+## Parallel Sessions
+
+See [CLAUDE_PARALLEL.md](./CLAUDE_PARALLEL.md) — follow this protocol every
+session when concurrent sessions are possible.
+
+DuetOS may be worked on by several Claude Code sessions at once. File ownership
+is coordinated through the tracked coordinator `PARALLEL_WORK.md` and the
+helper scripts under `tools/parallel/`:
+
+```bash
+tools/parallel/status.sh                          # See active/completed sessions + conflicts
+tools/parallel/claim.sh <sub> "<files>" "<desc>"  # Claim a subsystem before editing
+tools/parallel/release.sh <sub>                   # Push your session branch when done
+tools/parallel/release.sh <sub> --merge           # ...and merge to main (explicit opt-in)
+```
+
+`claim.sh` rebases on `origin/main`, warns on already-claimed files, and keeps
+you on your `claude/*` session branch. `release.sh` pushes with
+`--force-with-lease`; `--merge` is the explicit opt-in DuetOS requires before
+touching `main` (CI must be green first). Do not hand-edit `PARALLEL_WORK.md`.
+
 ## Anti-Bloat Guidelines
 
 AI-assisted development has a structural bias toward complexity: adding features "just in case," creating helpers for single uses, over-engineering simple problems, building systems without wiring them in. In an OS codebase — where the wrong abstraction lives forever in the kernel ABI — this bias is **more** dangerous than in application code. The goal is **sanity, not sacrifice** — keep code clean without stripping legitimate verbosity or readability.

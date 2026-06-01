@@ -8,6 +8,7 @@ For every new session/chat in this repo:
 2. Then skim the wiki — start at `wiki/Home.md` or `wiki/_Sidebar.md` for the table of contents.
 3. Pending and deferred work is tracked in `wiki/reference/Roadmap.md`.
 4. Use `CLAUDE.md` plus the relevant wiki pages as persistent project context for workflow, conventions, and task execution.
+5. If concurrent sessions are possible, follow `CLAUDE_PARALLEL.md` — run `tools/parallel/status.sh` and claim your subsystem before editing.
 
 If `CLAUDE.md` is missing, report that clearly and continue with available context.
 
