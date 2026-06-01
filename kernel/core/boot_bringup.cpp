@@ -105,6 +105,7 @@
 #include "drivers/net/rtl88xx_upload.h"
 #include "net/bluetooth/diag.h"
 #include "net/drsh/drsh.h"
+#include "net/cookies.h"
 #include "net/http.h"
 #include "net/bluetooth/hci.h"
 #include "net/bluetooth/hid.h"
@@ -2243,6 +2244,10 @@ void BootBringupDevices(bool force_net_smoke)
     // and asserts Content-Length + chunked decode, redirect chains,
     // the Set-Cookie hook, and hostile-input rejection.
     DUETOS_BOOT_SELFTEST(duetos::net::http::HttpSelfTest());
+    // Cookie jar: Set-Cookie parse, domain/path/expiry/secure/host-only
+    // matching, eviction, and same-name overwrite. In-memory only; disk
+    // round-trip requires a live FAT32 volume (GAP'd from the self-test).
+    DUETOS_BOOT_SELFTEST(duetos::net::CookieSelfTest());
 
     // Disk-installer layout-math self-test. Pure math (no block I/O,
     // no GPT writes), so cheap to run on every boot. A regression
