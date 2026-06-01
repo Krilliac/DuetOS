@@ -175,6 +175,7 @@
 #include "apps/browser.h"
 #include "web/css.h"
 #include "web/html.h"
+#include "web/jpeg.h"
 #include "web/js_dom.h"
 #include "web/png.h"
 #include "apps/calendar.h"
@@ -3177,6 +3178,13 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     duetos::drivers::video::WindowSetVisible(browser_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
+
+    // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG
+    // decoder behind the <img> path: decodes embedded 4:2:0 / 4:2:2 /
+    // grayscale baseline fixtures against host-libjpeg references (lossy
+    // tolerance) and proves a progressive / truncated / garbage input is
+    // rejected without a crash.
+    DUETOS_BOOT_SELFTEST(duetos::web::JpegSelfTest());
 
     // HTML tokenizer + DOM tree builder self-test (kernel/web). Parses
     // representative fragments and asserts the resulting tree; the
