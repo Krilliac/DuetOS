@@ -137,4 +137,12 @@ i64 ExfatCreateInRoot(Volume* v, const char* name, const void* buf, u64 len);
 /// the bitmap bits, or no-ops when equal. Returns the new size or -1.
 i64 ExfatTruncateInRoot(Volume* v, const char* name, u64 new_size);
 
+/// Boot self-test: builds a synthetic exFAT volume in a RAM block
+/// device and drives the write path (create -> find -> write-in-place
+/// -> append -> truncate) with read-back verification. Emits a single
+/// `[exfat-selftest] PASS (...)` line on success; a FAIL line + a
+/// kBootSelftestFail probe on any failed assertion. Registered on the
+/// boot self-test list (see kernel/core/boot_bringup.cpp).
+void ExfatSelfTest();
+
 } // namespace duetos::fs::exfat
