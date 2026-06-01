@@ -117,6 +117,9 @@
 #include "proc/spawn.h"
 #include "syscall/audio_syscall.h"
 #include "syscall/time_syscall.h"
+#include "time/tick.h"
+#include "time/timekeeper.h"
+#include "util/string.h"
 
 // Defined in exceptions.S (via `ISR_NOERR 128`) — the .global label for
 // the int-0x80 stub. SyscallInit installs its address into the IDT with
@@ -1197,10 +1200,12 @@ void SyscallDispatch(arch::TrapFrame* frame)
 
     case SYS_PROCESS_QUERY_INFO:
     {
-        // rdi = ProcessHandle (-1 for self), rsi = info class
-        // (only ProcessBasicInformation = 0 honoured in v0),
+        // rdi = ProcessHandle (-1 for self), rsi = info class,
         // rdx = user buffer, r10 = buffer cap,
         // r8 = user u32* return_length.
+        // Implemented classes: 0 (Basic), 4 (Times), 7 (DebugPort),
+        //   9 (Wow64), 20 (HandleCount), 24 (Session), 27 (ImageFileName),
+        //   43 (ImageFileNameWin32). Others return STATUS_NOT_IMPLEMENTED.
         Process* caller = CurrentProcess();
         if (caller == nullptr)
         {
@@ -1230,76 +1235,281 @@ void SyscallDispatch(arch::TrapFrame* frame)
                 return;
             }
         }
-        if (info_class != kProcessBasicInformation)
+        // NT ProcessInformationClass constants.
+        constexpr u64 kProcessTimes = 4;
+        constexpr u64 kProcessDebugPort = 7;
+        constexpr u64 kProcessWow64Information = 9;
+        constexpr u64 kProcessHandleCount = 20;
+        constexpr u64 kProcessSessionInformation = 24;
+        constexpr u64 kProcessImageFileName = 27;
+        constexpr u64 kProcessImageFileNameWin32 = 43;
+        constexpr u64 kStatusInfoLengthMismatch = 0xC0000004ULL;
+
+        // Helper: copy a kernel-side buffer to user, set *ReturnLength, and
+        // write frame->rax. Calling code returns immediately after.
+        // Returns false if the caller must set kStatusAccessViolation
+        // (pointer fault) or kStatusInfoLengthMismatch (buf too small).
+        auto WriteInfo = [&](const void* src, u32 needed) -> bool
         {
+            if (buf_cap < needed)
+            {
+                if (user_retlen != 0)
+                {
+                    if (!mm::CopyToUser(reinterpret_cast<void*>(user_retlen), &needed, sizeof(needed)))
+                    {
+                        // Caller's ReturnLength pointer is bad; prefer
+                        // STATUS_ACCESS_VIOLATION over STATUS_INFO_LENGTH_MISMATCH
+                        // so the caller can distinguish the two failure modes.
+                        frame->rax = kStatusAccessViolation;
+                        return false;
+                    }
+                }
+                frame->rax = kStatusInfoLengthMismatch;
+                return false;
+            }
+            if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), src, needed))
+            {
+                frame->rax = kStatusAccessViolation;
+                return false;
+            }
+            if (user_retlen != 0)
+            {
+                if (!mm::CopyToUser(reinterpret_cast<void*>(user_retlen), &needed, sizeof(needed)))
+                {
+                    // Main buffer wrote ok but ReturnLength pointer faulted.
+                    // NT contract: *ReturnLength is always set on STATUS_SUCCESS,
+                    // so a fault here is an access violation on the caller's part.
+                    frame->rax = kStatusAccessViolation;
+                    return false;
+                }
+            }
+            frame->rax = kStatusSuccess;
+            return true;
+        };
+
+        switch (info_class)
+        {
+        case kProcessBasicInformation:
+        {
+            // PROCESS_BASIC_INFORMATION layout (48 bytes on x64):
+            //   PVOID         Reserved1;       // ExitStatus
+            //   PVOID         PebBaseAddress;
+            //   PVOID         Reserved2[2];    // AffinityMask, BasePriority
+            //   ULONG_PTR     UniqueProcessId;
+            //   ULONG_PTR     Reserved3;       // InheritedFromUniqueProcessId
+            struct ProcessBasicInfo
+            {
+                u64 exit_status;
+                u64 peb_base;
+                u64 affinity_mask;
+                u64 base_priority;
+                u64 unique_pid;
+                u64 inherited_from_pid;
+            };
+            ProcessBasicInfo info{};
+            info.exit_status = 0; // STILL_ACTIVE (0x103) rounded to 0; running processes always 0
+            info.peb_base = target->user_gs_base;
+            info.affinity_mask = 1; // single-CPU v0
+            info.base_priority = 8; // NORMAL_PRIORITY_CLASS midpoint
+            info.unique_pid = target->pid;
+            info.inherited_from_pid = 0;
+            WriteInfo(&info, sizeof(info));
+            return;
+        }
+
+        case kProcessTimes:
+        {
+            // KERNEL_USER_TIMES: { CreateTime, ExitTime, KernelTime, UserTime }
+            // Each is a LARGE_INTEGER (i64) in 100-nanosecond intervals.
+            //
+            // CreateTime: Process does not record its spawn wall-clock time in v0;
+            //   return 0 (callers that need STILL_ACTIVE detection use ExitTime).
+            // ExitTime: 0 for a running process (not yet terminated).
+            // KernelTime: ticks_used × (10ms / tick) in 100-ns units.
+            //   100 Hz tick → 10ms per tick → 100,000 × 100-ns intervals per tick.
+            //   All CPU time is attributed as kernel time in v0; we don't split
+            //   ring-0 vs ring-3 accounting yet.
+            // UserTime: 0 (sub-GAP; same reason as KernelTime approximation).
+            struct KernelUserTimes
+            {
+                i64 create_time;
+                i64 exit_time;
+                i64 kernel_time;
+                i64 user_time;
+            };
+            constexpr u64 kHundredNsPerTick = 100'000ULL; // 10ms per 100Hz tick
+            KernelUserTimes info{};
+            info.create_time = 0;
+            info.exit_time = 0;
+            info.kernel_time = static_cast<i64>(target->ticks_used * kHundredNsPerTick);
+            info.user_time = 0;
+            WriteInfo(&info, sizeof(info));
+            return;
+        }
+
+        case kProcessDebugPort:
+        {
+            // A PVOID (8 bytes on x64). Non-zero means a debugger is attached.
+            // DuetOS v0 has no debug-port infrastructure; facade returns 0.
+            u64 port = 0;
+            WriteInfo(&port, sizeof(port));
+            return;
+        }
+
+        case kProcessWow64Information:
+        {
+            // A ULONG_PTR (8 bytes on x64). Non-zero = process is 32-bit (WOW64).
+            // DuetOS only supports native 64-bit processes in v0 (PE32 processes
+            // run in compat mode but are not WOW64 in the NT sense). Return 0.
+            u64 wow = 0;
+            WriteInfo(&wow, sizeof(wow));
+            return;
+        }
+
+        case kProcessHandleCount:
+        {
+            // A ULONG (4 bytes). Count of kernel-tracked handles open in this
+            // process. We walk the three per-process handle surfaces:
+            //   1. kobj_handles (unified KObject table: mutexes, events, sems).
+            //   2. win32_handles (file handles).
+            //   3. Other per-type arrays counted when in-use.
+            u32 count = 0;
+            // Unified KObject table.
+            for (u32 i = 0; i < ::duetos::ipc::kHandleTableCapacity; ++i)
+            {
+                if (target->kobj_handles.slots[i].obj != nullptr)
+                    ++count;
+            }
+            // Win32 file handles.
+            for (u64 i = 0; i < Process::kWin32HandleCap; ++i)
+            {
+                if (target->win32_handles[i].kind != Process::FsBackingKind::None)
+                    ++count;
+            }
+            // Win32 process handles.
+            for (u64 i = 0; i < Process::kWin32ProcessCap; ++i)
+            {
+                if (target->win32_proc_handles[i].in_use)
+                    ++count;
+            }
+            // Win32 registry handles.
+            for (u64 i = 0; i < Process::kWin32RegistryCap; ++i)
+            {
+                if (target->win32_reg_handles[i].in_use)
+                    ++count;
+            }
+            // Win32 directory handles.
+            for (u64 i = 0; i < Process::kWin32DirCap; ++i)
+            {
+                if (target->win32_dirs[i].in_use)
+                    ++count;
+            }
+            // Win32 section handles.
+            for (u64 i = 0; i < Process::kWin32SectionCap; ++i)
+            {
+                if (target->win32_section_handles[i].in_use)
+                    ++count;
+            }
+            // win32_threads, win32_foreign_threads — thread handles.
+            for (u64 i = 0; i < Process::kWin32ThreadCap; ++i)
+            {
+                if (target->win32_threads[i].in_use)
+                    ++count;
+            }
+            for (u64 i = 0; i < Process::kWin32ForeignThreadCap; ++i)
+            {
+                if (target->win32_foreign_threads[i].in_use)
+                    ++count;
+            }
+            WriteInfo(&count, sizeof(count));
+            return;
+        }
+
+        case kProcessSessionInformation:
+        {
+            // PROCESS_SESSION_INFORMATION: { ULONG SessionId; }
+            // DuetOS v0 has one session (session 0 = the console session).
+            struct ProcessSessionInfo
+            {
+                u32 session_id;
+            };
+            ProcessSessionInfo info{};
+            info.session_id = 0;
+            WriteInfo(&info, sizeof(info));
+            return;
+        }
+
+        case kProcessImageFileName:
+        case kProcessImageFileNameWin32:
+        {
+            // Returns a UNICODE_STRING with an inline buffer (the Buffer
+            // pointer points into the output allocation immediately after
+            // the header). NT layout on x64:
+            //   u16 Length;          // byte count of the string, NOT NUL
+            //   u16 MaximumLength;
+            //   u32 _pad;            // natural alignment to 8 bytes
+            //   u64 Buffer;          // pointer to string bytes in user space
+            //   u16 chars[...];      // the UTF-16LE string follows inline
+            //
+            // ProcessImageFileName uses an NT device path prefix:
+            //   \Device\DuetOS\<name>
+            // ProcessImageFileNameWin32 uses a Win32 path:
+            //   C:\<name>
+            //
+            // Process::name is a short ASCII label (e.g. "winkill.exe").
+            // We expand it to UTF-16LE inline; ASCII codepoints map 1:1.
+            //
+            // Buffer VA in the output: the UNICODE_STRING header is at
+            // user_buf; the string bytes follow at user_buf + 12 (packed
+            // layout: 2+2+4+... but the Buffer field at offset 8 must be
+            // 8-byte-aligned, so the actual header size on x64 is 16 bytes
+            // using the natural UNICODE_STRING ABI: u16, u16, u32-pad, u64).
+            // NT callers expect the Buffer pointer to be valid in their
+            // address space — we set it to user_buf + 16.
+            constexpr u32 kUnicodeStringHeaderSize = 16; // 2+2+4(pad)+8
+            const char* prefix = (info_class == kProcessImageFileName) ? "\\Device\\DuetOS\\" : "C:\\";
+
+            const char* name = (target->name != nullptr) ? target->name : "";
+            const usize prefix_len = StrLen(prefix);
+            const usize name_len = StrLen(name);
+            const usize total_chars = prefix_len + name_len; // UTF-16 char count
+            // Each char is 2 bytes in UTF-16LE; cap at 255 chars to stay
+            // well inside a kernel-stack local buffer.
+            constexpr usize kMaxChars = 255;
+            const usize capped = (total_chars > kMaxChars) ? kMaxChars : total_chars;
+            const u16 str_bytes = static_cast<u16>(capped * 2);
+            const u32 total_size = kUnicodeStringHeaderSize + static_cast<u32>(str_bytes);
+
+            // Build the full output buffer on the kernel stack.
+            // Max: 16 (header) + 255 * 2 (chars) = 526 bytes — well within budget.
+            u8 outbuf[kUnicodeStringHeaderSize + kMaxChars * 2]{};
+
+            // UNICODE_STRING header.
+            u16* h_length = reinterpret_cast<u16*>(&outbuf[0]);
+            u16* h_maxlen = reinterpret_cast<u16*>(&outbuf[2]);
+            // pad bytes [4..7] stay zero.
+            u64* h_buffer = reinterpret_cast<u64*>(&outbuf[8]);
+            *h_length = str_bytes;
+            *h_maxlen = str_bytes;
+            *h_buffer = user_buf + kUnicodeStringHeaderSize; // user-space VA
+
+            // Write UTF-16LE chars: prefix then name (ASCII → LE wide).
+            u16* chars = reinterpret_cast<u16*>(&outbuf[kUnicodeStringHeaderSize]);
+            usize ci = 0;
+            for (usize i = 0; i < prefix_len && ci < capped; ++i, ++ci)
+                chars[ci] = static_cast<u16>(static_cast<u8>(prefix[i]));
+            for (usize i = 0; i < name_len && ci < capped; ++i, ++ci)
+                chars[ci] = static_cast<u16>(static_cast<u8>(name[i]));
+
+            WriteInfo(outbuf, total_size);
+            return;
+        }
+
+        default:
+            // GAP: remaining ProcessInfoClasses — revisit when callers need them.
             frame->rax = kStatusNotImplemented;
             return;
         }
-        // PROCESS_BASIC_INFORMATION layout (48 bytes on x64):
-        //   PVOID  Reserved1;        // ExitStatus
-        //   PVOID  PebBaseAddress;
-        //   PVOID  Reserved2[2];     // AffinityMask, BasePriority
-        //   ULONG_PTR UniqueProcessId;
-        //   ULONG_PTR Reserved3;     // InheritedFromUniqueProcessId
-        struct ProcessBasicInfo
-        {
-            u64 exit_status;
-            u64 peb_base;
-            u64 affinity_mask;
-            u64 base_priority;
-            u64 unique_pid;
-            u64 inherited_from_pid;
-        };
-        ProcessBasicInfo info{};
-        info.exit_status = 0; // STILL_ACTIVE if running, 0 here
-        info.peb_base = target->user_gs_base;
-        info.affinity_mask = 1; // single-CPU v0
-        info.base_priority = 8; // NORMAL_PRIORITY_CLASS midpoint
-        info.unique_pid = target->pid;
-        info.inherited_from_pid = 0;
-        if (buf_cap < sizeof(info))
-        {
-            constexpr u64 kStatusInfoLengthMismatch = 0xC0000004ULL;
-            if (user_retlen != 0)
-            {
-                u32 needed = sizeof(info);
-                if (!mm::CopyToUser(reinterpret_cast<void*>(user_retlen), &needed, sizeof(needed)))
-                {
-                    // Caller passed a non-null ReturnLength pointer but
-                    // it became invalid mid-syscall. NT contract: the
-                    // length-mismatch status only sets *ReturnLength
-                    // when the write succeeds; on write failure we
-                    // surface the access violation instead so the
-                    // caller can distinguish "buffer too small" from
-                    // "your output pointer is broken".
-                    frame->rax = kStatusAccessViolation;
-                    return;
-                }
-            }
-            frame->rax = kStatusInfoLengthMismatch;
-            return;
-        }
-        if (!mm::CopyToUser(reinterpret_cast<void*>(user_buf), &info, sizeof(info)))
-        {
-            frame->rax = kStatusAccessViolation;
-            return;
-        }
-        if (user_retlen != 0)
-        {
-            u32 written = sizeof(info);
-            if (!mm::CopyToUser(reinterpret_cast<void*>(user_retlen), &written, sizeof(written)))
-            {
-                // Main buffer wrote ok, but ReturnLength faulted. NT
-                // contract guarantees *ReturnLength is set on
-                // STATUS_SUCCESS — failing to honour that would make a
-                // caller that reads *ReturnLength see uninitialised
-                // memory. Surface as access violation.
-                frame->rax = kStatusAccessViolation;
-                return;
-            }
-        }
-        frame->rax = kStatusSuccess;
-        return;
     }
 
     case SYS_VM_ALLOCATE:
