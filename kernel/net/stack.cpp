@@ -2126,6 +2126,9 @@ void NetStackInjectRx(u32 iface_index, const void* frame, u64 len)
     case kEtherTypeIpv4:
         (void)Ipv4HandleIncoming(iface_index, frame, len);
         break;
+    case kEtherTypeIpv6:
+        (void)Ipv6HandleIncoming(iface_index, frame, len);
+        break;
     default:
         // Silently drop unknown ethertypes — no upper protocol
         // claims them. Per-ethertype counter goes to the generic

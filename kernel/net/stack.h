@@ -93,6 +93,52 @@ inline constexpr u8 kIpProtoTcp = 0x06;
 inline constexpr u8 kIpProtoUdp = 0x11;
 
 // -------------------------------------------------------------------
+// L3: IPv6 (partial — see net/ipv6.cpp).
+//
+// v0 scope: 40-byte fixed-header parse + build, ICMPv6 echo
+// reply, the minimal Neighbor Discovery (NS -> NA) needed for
+// link-local reachability, and the IPv6 pseudo-header checksum
+// used to validate/generate UDP and TCP transport. Next-Header
+// is demuxed to ICMPv6 / UDP / TCP and the UDP/TCP halves feed
+// the EXISTING v4-keyed demux (one stack — see ipv6.cpp for the
+// honest GAP on the peer-address threading).
+//
+// GAP: extension headers (Hop-by-Hop, Routing, Fragment, Dest
+//      Options), fragmentation/reassembly, full ND (Router
+//      Solicit/Advert, DAD, redirect), SLAAC, MLD, and routing
+//      are all deferred — revisit when a real v6 socket layer
+//      and on-link prefix model land.
+// -------------------------------------------------------------------
+
+struct Ipv6Address
+{
+    u8 octets[16];
+};
+
+// IPv6 fixed header (RFC 8200 §3). The first 32 bits pack
+// version (4b) / traffic-class (8b) / flow-label (20b); we keep
+// them as a big-endian word and only read the version nibble.
+struct Ipv6Header
+{
+    u8 ver_tc_flow[4]; // big-endian: version | traffic class | flow label
+    u16 payload_len;   // big-endian, length after this 40-byte header
+    u8 next_header;    // 58 ICMPv6, 6 TCP, 17 UDP
+    u8 hop_limit;
+    Ipv6Address src;
+    Ipv6Address dst;
+};
+static_assert(sizeof(Ipv6Header) == 40, "IPv6 fixed header is 40 bytes");
+
+inline constexpr u64 kIpv6HeaderBytes = 40;
+inline constexpr u8 kIpProtoIcmpv6 = 58;
+
+// ICMPv6 message types we act on (RFC 4443 / RFC 4861).
+inline constexpr u8 kIcmpv6EchoRequest = 128;
+inline constexpr u8 kIcmpv6EchoReply = 129;
+inline constexpr u8 kIcmpv6NeighborSolicit = 135;
+inline constexpr u8 kIcmpv6NeighborAdvert = 136;
+
+// -------------------------------------------------------------------
 // L3: ARP
 // -------------------------------------------------------------------
 
@@ -515,5 +561,68 @@ DhcpLease DhcpLeaseRead(u32 iface_index);
 // through the socket layer (net/socket.{h,cpp}) or directly through
 // the tcp:: namespace.
 // -------------------------------------------------------------------
+
+// -------------------------------------------------------------------
+// IPv6 protocol surface (implementation in net/ipv6.cpp).
+// -------------------------------------------------------------------
+
+/// Read the version nibble from an IPv6 fixed header laid out at
+/// `buf` (>= 40 bytes). Returns 6 for a valid header, 0xFF if the
+/// buffer is too short to read the first byte.
+u8 Ipv6Version(const void* buf, u64 len);
+
+/// Parse a 40-byte IPv6 fixed header from `buf` into `out`. Bounds-
+/// checked: returns false if `len` < 40, the version nibble != 6,
+/// or the declared payload length overruns the buffer. On success
+/// `payload_off` is set to 40 (start of the next header) and the
+/// caller can read `out.payload_len` bytes after it.
+bool Ipv6HeaderParse(const void* buf, u64 len, Ipv6Header& out, u64& payload_off);
+
+/// Build a 40-byte IPv6 fixed header into `buf` (must be >= 40
+/// bytes). version=6, traffic class / flow label = 0. Returns the
+/// header size (40) written.
+u64 Ipv6HeaderBuild(void* buf, const Ipv6Address& src, const Ipv6Address& dst, u8 next_header, u16 payload_len,
+                    u8 hop_limit);
+
+/// RFC 8200 §8.1 transport pseudo-header checksum over an IPv6
+/// {src, dst, upper-layer length, next-header} prefix followed by
+/// the L4 segment `l4`/`l4_len`. The L4 checksum field must be
+/// zeroed in `l4` before calling when generating; when validating
+/// a received segment, leave it in place and compare the result
+/// to 0. Folds carries per RFC 1071.
+u16 Ipv6PseudoChecksum(const Ipv6Address& src, const Ipv6Address& dst, u8 next_header, const void* l4, u64 l4_len);
+
+struct Ipv6Stats
+{
+    u64 rx_packets;
+    u64 rx_bad_length;
+    u64 rx_bad_version;
+    u64 rx_icmpv6;
+    u64 rx_udp;
+    u64 rx_tcp;
+    u64 rx_other_proto;
+    u64 icmpv6_echo_rx;
+    u64 icmpv6_echo_tx;
+    u64 nd_solicit_rx;
+    u64 nd_advert_tx;
+    u64 tx_failures;
+};
+
+Ipv6Stats Ipv6StatsRead();
+
+/// Process an incoming Ethernet+IPv6 frame (ethertype 0x86DD).
+/// Validates the fixed header, demuxes Next-Header to ICMPv6 / UDP
+/// / TCP, replies to ICMPv6 echo requests and Neighbor
+/// Solicitations targeting a bound interface, and verifies the
+/// transport pseudo-header checksum before handing UDP/TCP to the
+/// shared demux. Returns true iff a counter was touched.
+bool Ipv6HandleIncoming(u32 iface_index, const void* frame, u64 len);
+
+/// Boot-time IPv6 self-test. Builds synthetic frames in memory and
+/// asserts header parse/build round-trip, ICMPv6 echo-reply
+/// generation, pseudo-header checksum, and hostile-length
+/// rejection. Emits `[net/ipv6-selftest] PASS (...)`. Called from
+/// the net self-test entry (net/tcp_selftest.cpp).
+void Ipv6SelfTest();
 
 } // namespace duetos::net
