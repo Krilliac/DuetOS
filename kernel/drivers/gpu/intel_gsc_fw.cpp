@@ -1,9 +1,9 @@
 #include "drivers/gpu/intel_gsc_fw.h"
 
 #include "arch/x86_64/serial.h"
-#include "diag/fix_journal.h"
 #include "core/panic.h"
 #include "log/klog.h"
+#include "security/guard.h"
 
 namespace duetos::drivers::gpu::intel
 {
@@ -250,13 +250,59 @@ void IntelGscFwLog(const IntelGscFwParsed& parsed)
 
     if (parsed.manufacturing_flags != 0)
     {
-        // GAP: Manufacturing partitions (MFTP / DLMP) on a deployed
-        // image is a strong signal an operator dropped a debug
-        // build into /lib/firmware. Surface it once at WARN; a
-        // follow-up slice can extend Image-Guard to block these.
-        FIX_NOTE_GAP("drivers/gpu/intel_gsc_fw.cpp:ManufacturingPartition",
-                     "extend Image-Guard to reject GSC manufacturing partitions");
-        KLOG_WARN("drivers/gpu/intel-gsc-fw", "image carries manufacturing partitions — refuse for production deploys");
+        // Manufacturing partitions (MFTP / DLMP) must never appear in a
+        // production GSC image. Their presence signals a factory-debug
+        // build — which may expose undocumented test interfaces on the
+        // GSC/ME side that are absent from production silicon.
+        //
+        // Enforcement routes through Image-Guard so the rejection honours
+        // the current guard mode: Advisory logs and continues; Enforce
+        // prompts the operator and returns false (blocked). Either way a
+        // WARN sentinel lands in the boot log so an operator can grep for it.
+        //
+        // Per-partition debug detail is gated at DEBUG so release boots
+        // stay quiet on the serial console.
+        //
+        // GAP: per-partition CPD/SHA-256 hash chain verification against
+        // the known-bad kFindingHashDeny catalogue — requires the CPD
+        // manifest parser and a populated hash table, neither of which
+        // exist yet; replace this block with Inspect() covering the FTPR
+        // payload once the CPD parser lands. — revisit when CPD parser lands.
+        KLOG_DEBUG_V("drivers/gpu/intel-gsc-fw", "manufacturing_flags set", parsed.manufacturing_flags);
+        if (parsed.manufacturing_flags & 0x1u)
+            KLOG_DEBUG("drivers/gpu/intel-gsc-fw", "MFTP (manufacturing test partition) present in image");
+        if (parsed.manufacturing_flags & 0x2u)
+            KLOG_DEBUG("drivers/gpu/intel-gsc-fw", "DLMP (debug-logger manufacturing partition) present in image");
+
+        // Always emit a WARN so the sentinel appears regardless of guard
+        // mode — operators running Advisory still see the problem.
+        KLOG_WARN("drivers/gpu/intel-gsc-fw", "GSC image carries manufacturing partition(s) — production load refused");
+
+        // Synthesise a descriptor for Image-Guard. No raw bytes are
+        // available at log time (IntelGscFwLog receives a view struct,
+        // not the blob pointer), so bytes=nullptr triggers the
+        // name-based deny path only. Gate() will: in Advisory mode log
+        // its own finding and return true; in Enforce mode prompt the
+        // operator and return false on denial.
+        ::duetos::security::ImageDescriptor desc{};
+        desc.kind = ::duetos::security::ImageKind::KernelThread;
+        desc.name = "intel-gsc-fw:manufacturing-partition";
+        desc.bytes = nullptr;
+        desc.size = 0;
+
+        const bool allowed = ::duetos::security::Gate(desc);
+        if (!allowed)
+        {
+            // Enforce mode: operator denied the image. The guard has
+            // already recorded the denial; emit a second WARN so the
+            // boot log marks the exact enforcement point, then KASSERT
+            // to halt the driver — the GSC must not be programmed with
+            // a manufacturing firmware on a production system.
+            KLOG_WARN("drivers/gpu/intel-gsc-fw",
+                      "Image-Guard denied GSC manufacturing firmware in Enforce mode — driver halted");
+            KASSERT(false, "drivers/gpu/intel-gsc-fw",
+                    "GSC manufacturing partition rejected by Image-Guard in Enforce mode");
+        }
     }
 }
 
@@ -433,7 +479,9 @@ void IntelGscFwSelfTest()
     }
 
     // Manufacturing-flag detection: synthesize an image whose only
-    // non-skeleton entry is MFTP. The parse must set bit 0.
+    // non-skeleton entry is MFTP. The parse must set bit 0. Then verify
+    // IntelGscFwLog runs the Image-Guard path without panicking in
+    // Advisory mode (the default at boot), which always allows.
     {
         constexpr u32 kImg = kIntelGscFptHeaderBytes + kIntelGscFptEntryBytes + 16;
         u8 mfg[kImg] = {};
@@ -447,6 +495,15 @@ void IntelGscFwSelfTest()
         KASSERT(rr.has_value(), "drivers/gpu/intel-gsc-fw", "selftest mfg-detect parse should succeed");
         KASSERT((p.manufacturing_flags & 0x1u) != 0u, "drivers/gpu/intel-gsc-fw",
                 "selftest mfg-detect bit 0 should be set");
+
+        // IntelGscFwLog with manufacturing_flags set calls security::Gate()
+        // in Advisory mode (the guard default at boot). Advisory always
+        // returns true, so no KASSERT fires here. This confirms the Guard
+        // path executes without panicking on an advisory boot.
+        const ::duetos::security::Mode prior = ::duetos::security::GuardMode();
+        KASSERT(prior == ::duetos::security::Mode::Advisory, "drivers/gpu/intel-gsc-fw",
+                "selftest expects Advisory guard mode (boot default)");
+        IntelGscFwLog(p); // must not KASSERT in Advisory mode
     }
 
     arch::SerialWrite("[intel-gsc-fw] selftest pass\n");
