@@ -113,6 +113,18 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
     if (obj.type == JsType::Object)
     {
         JsObject* o = obj.as.obj;
+        // Host objects (DOM elements) resolve members through their C++
+        // hook first. A non-Undefined result wins; Undefined falls
+        // through so an ad-hoc JS property set on the host object (or a
+        // shared method below) can still be read.
+        if (o->hostGet)
+        {
+            Result<JsValue> hr = o->hostGet(I, o, key, keyLen);
+            if (!hr)
+                return hr;
+            if (hr.value().type != JsType::Undefined)
+                return hr.value();
+        }
         if (o->isArray)
         {
             if (NameEq(key, keyLen, "length"))

@@ -18,6 +18,13 @@ namespace duetos::web::js
 using duetos::core::Result;
 
 // Native function identifiers. 0 is reserved for "not native".
+//
+// kNativeCallback is a reserved sentinel: a JsFunction carrying it is
+// dispatched through its `nativeCall` C++ callback pointer rather than
+// the closed switch in CallNative. Host embedders (the DOM bindings in
+// js_dom.cpp) use it to expose arbitrary native methods without
+// growing this enum. It sits at the top of the u16 space so it can
+// never collide with a real builtin id.
 enum NativeFn : u16
 {
     kNativeNone = 0,
@@ -53,6 +60,10 @@ enum NativeFn : u16
     // JSON.*
     kJsonStringify,
     kJsonParse,
+    // Sentinel: dispatch via JsFunction::nativeCall (host embedding).
+    // Parked at the top of the u16 space so it never collides with a
+    // real builtin id added above.
+    kNativeCallback = 0xFFFF,
 };
 
 // Install all builtins into I.global. Implemented in builtins.cpp.
