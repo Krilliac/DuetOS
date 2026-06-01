@@ -275,6 +275,11 @@ struct E1000Ctx
     u64 tx_packets;
     u64 tx_bytes;
     NicInfo* nic;
+    // Network-stack interface index this controller is bound to.
+    // Set in E1000BringUp; used by E1000DrainRx to route frames
+    // to the right stack slot. Each e1000 gets a distinct index
+    // matching its g_nics[] position.
+    u32 iface_index;
     // MSI-X state. `irq_vector` is non-zero when binding
     // succeeded; in that case the RX polling task blocks on
     // `rx_wait` and the handler wakes it on RX/link events
@@ -283,15 +288,24 @@ struct E1000Ctx
     duetos::sched::WaitQueue rx_wait;
 };
 
-constinit E1000Ctx g_e1000 = {};
+// Per-controller state. One slot per discovered e1000 adapter;
+// the count mirrors the order in which E1000BringUp() is called
+// during NetInit. kMaxNics (4) is an upper bound — the stack
+// also caps at kMaxInterfaces (4) so the indices line up cleanly.
+constexpr u32 kMaxE1000 = 4;
+E1000Ctx g_e1000s[kMaxE1000] = {};
+u32 g_e1000_count = 0;
 
-void E1000Write(u64 off, u32 value)
+// Per-controller MMIO helpers — each function takes an explicit
+// ctx so all the driver functions work on whichever controller
+// the caller is operating on instead of a file-scope singleton.
+void E1000Write(E1000Ctx& ctx, u64 off, u32 value)
 {
-    *reinterpret_cast<volatile u32*>(g_e1000.mmio + off) = value;
+    *reinterpret_cast<volatile u32*>(ctx.mmio + off) = value;
 }
-u32 E1000Read(u64 off)
+u32 E1000Read(E1000Ctx& ctx, u64 off)
 {
-    return *reinterpret_cast<volatile u32*>(g_e1000.mmio + off);
+    return *reinterpret_cast<volatile u32*>(ctx.mmio + off);
 }
 
 // Spin a small number of cycles so the controller sees our MMIO
@@ -303,21 +317,21 @@ void E1000Delay()
         asm volatile("pause" ::: "memory");
 }
 
-bool E1000Reset()
+bool E1000Reset(E1000Ctx& ctx)
 {
     // Mask all interrupts, read ICR to clear any pending, then reset.
-    E1000Write(kE1000RegImc, 0xFFFFFFFFu);
-    (void)E1000Read(kE1000RegIcr);
-    E1000Write(kE1000RegCtrl, E1000Read(kE1000RegCtrl) | kE1000CtrlRst);
+    E1000Write(ctx, kE1000RegImc, 0xFFFFFFFFu);
+    (void)E1000Read(ctx, kE1000RegIcr);
+    E1000Write(ctx, kE1000RegCtrl, E1000Read(ctx, kE1000RegCtrl) | kE1000CtrlRst);
     // Reset takes ~1 ms; poll CTRL.RST to clear.
     for (u32 i = 0; i < 100; ++i)
     {
         E1000Delay();
-        if ((E1000Read(kE1000RegCtrl) & kE1000CtrlRst) == 0)
+        if ((E1000Read(ctx, kE1000RegCtrl) & kE1000CtrlRst) == 0)
         {
             // Mask IRQs again — reset may have re-enabled some.
-            E1000Write(kE1000RegImc, 0xFFFFFFFFu);
-            (void)E1000Read(kE1000RegIcr);
+            E1000Write(ctx, kE1000RegImc, 0xFFFFFFFFu);
+            (void)E1000Read(ctx, kE1000RegIcr);
             return true;
         }
     }
@@ -325,13 +339,13 @@ bool E1000Reset()
     return false;
 }
 
-void E1000ClearMulticastTable()
+void E1000ClearMulticastTable(E1000Ctx& ctx)
 {
     for (u32 i = 0; i < 128; ++i)
-        E1000Write(kE1000RegMta0 + u64(i) * 4, 0);
+        E1000Write(ctx, kE1000RegMta0 + u64(i) * 4, 0);
 }
 
-bool E1000SetupRxRing()
+bool E1000SetupRxRing(E1000Ctx& ctx)
 {
     // One 4 KiB frame for the RX descriptor ring (256 × 16 B).
     auto ring_phys_r = mm::AllocateFrame();
@@ -341,8 +355,8 @@ bool E1000SetupRxRing()
     auto* ring_virt = static_cast<u8*>(mm::PhysToVirt(ring_phys));
     for (u64 i = 0; i < mm::kPageSize; ++i)
         ring_virt[i] = 0;
-    g_e1000.rx_ring_phys = ring_phys;
-    g_e1000.rx_ring = reinterpret_cast<E1000RxDesc*>(ring_virt);
+    ctx.rx_ring_phys = ring_phys;
+    ctx.rx_ring = reinterpret_cast<E1000RxDesc*>(ring_virt);
 
     // 256 × 2 KiB = 128 pages contiguous for RX buffers. Each
     // descriptor points at buf_base + slot × 2048.
@@ -354,28 +368,28 @@ bool E1000SetupRxRing()
         return false;
     }
     const mm::PhysAddr buf_phys = buf_phys_r.value();
-    g_e1000.rx_buf_base_phys = buf_phys;
-    g_e1000.rx_buf_base_virt = static_cast<u8*>(mm::PhysToVirt(buf_phys));
+    ctx.rx_buf_base_phys = buf_phys;
+    ctx.rx_buf_base_virt = static_cast<u8*>(mm::PhysToVirt(buf_phys));
     for (u32 i = 0; i < kE1000RxRingSlots; ++i)
     {
-        g_e1000.rx_ring[i].addr = buf_phys + u64(i) * kE1000RxBufBytes;
-        g_e1000.rx_ring[i].status = 0;
+        ctx.rx_ring[i].addr = buf_phys + u64(i) * kE1000RxBufBytes;
+        ctx.rx_ring[i].status = 0;
     }
 
-    E1000Write(kE1000RegRdbal, u32(ring_phys));
-    E1000Write(kE1000RegRdbah, u32(ring_phys >> 32));
-    E1000Write(kE1000RegRdlen, kE1000RxRingSlots * sizeof(E1000RxDesc));
-    E1000Write(kE1000RegRdh, 0);
-    E1000Write(kE1000RegRdt, kE1000RxRingSlots - 1);
-    g_e1000.rx_tail = kE1000RxRingSlots - 1;
+    E1000Write(ctx, kE1000RegRdbal, u32(ring_phys));
+    E1000Write(ctx, kE1000RegRdbah, u32(ring_phys >> 32));
+    E1000Write(ctx, kE1000RegRdlen, kE1000RxRingSlots * sizeof(E1000RxDesc));
+    E1000Write(ctx, kE1000RegRdh, 0);
+    E1000Write(ctx, kE1000RegRdt, kE1000RxRingSlots - 1);
+    ctx.rx_tail = kE1000RxRingSlots - 1;
 
     // Enable receive: broadcast accept, strip CRC, 2 KiB buffers (BSIZE=00).
     u32 rctl = kE1000RctlEn | kE1000RctlBam | kE1000RctlSecrc;
-    E1000Write(kE1000RegRctl, rctl);
+    E1000Write(ctx, kE1000RegRctl, rctl);
     return true;
 }
 
-bool E1000SetupTxRing()
+bool E1000SetupTxRing(E1000Ctx& ctx)
 {
     auto ring_phys_r = mm::AllocateFrame();
     if (!ring_phys_r)
@@ -384,8 +398,8 @@ bool E1000SetupTxRing()
     auto* ring_virt = static_cast<u8*>(mm::PhysToVirt(ring_phys));
     for (u64 i = 0; i < mm::kPageSize; ++i)
         ring_virt[i] = 0;
-    g_e1000.tx_ring_phys = ring_phys;
-    g_e1000.tx_ring = reinterpret_cast<E1000TxDesc*>(ring_virt);
+    ctx.tx_ring_phys = ring_phys;
+    ctx.tx_ring = reinterpret_cast<E1000TxDesc*>(ring_virt);
 
     constexpr u32 kTxBufPages = (kE1000TxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
     auto buf_phys_r = mm::AllocateContiguousFrames(kTxBufPages);
@@ -395,40 +409,40 @@ bool E1000SetupTxRing()
         return false;
     }
     const mm::PhysAddr buf_phys = buf_phys_r.value();
-    g_e1000.tx_buf_base_phys = buf_phys;
-    g_e1000.tx_buf_base_virt = static_cast<u8*>(mm::PhysToVirt(buf_phys));
+    ctx.tx_buf_base_phys = buf_phys;
+    ctx.tx_buf_base_virt = static_cast<u8*>(mm::PhysToVirt(buf_phys));
 
-    E1000Write(kE1000RegTdbal, u32(ring_phys));
-    E1000Write(kE1000RegTdbah, u32(ring_phys >> 32));
-    E1000Write(kE1000RegTdlen, kE1000RxRingSlots * sizeof(E1000TxDesc));
-    E1000Write(kE1000RegTdh, 0);
-    E1000Write(kE1000RegTdt, 0);
-    g_e1000.tx_tail = 0;
+    E1000Write(ctx, kE1000RegTdbal, u32(ring_phys));
+    E1000Write(ctx, kE1000RegTdbah, u32(ring_phys >> 32));
+    E1000Write(ctx, kE1000RegTdlen, kE1000RxRingSlots * sizeof(E1000TxDesc));
+    E1000Write(ctx, kE1000RegTdh, 0);
+    E1000Write(ctx, kE1000RegTdt, 0);
+    ctx.tx_tail = 0;
 
     // TIPG: IPGT=10, IPGR1=8 (0xA << 10), IPGR2=6 (0x6 << 20).
     // Canonical 0x0060200A for 82540EM.
-    E1000Write(kE1000RegTipg, 0x0060200AU);
+    E1000Write(ctx, kE1000RegTipg, 0x0060200AU);
 
     // Enable transmit: PSP, CT=0x10 (bits 4..11), COLD=0x40 (bits 12..21).
     u32 tctl = kE1000TctlEn | kE1000TctlPsp | (0x10u << 4) | (0x40u << 12);
-    E1000Write(kE1000RegTctl, tctl);
+    E1000Write(ctx, kE1000RegTctl, tctl);
     return true;
 }
 
-bool E1000Send(const u8* data, u32 len)
+bool E1000Send(E1000Ctx& ctx, const u8* data, u32 len)
 {
-    if (!g_e1000.online || data == nullptr || len == 0)
+    if (!ctx.online || data == nullptr || len == 0)
         return false;
     if (len > kE1000RxBufBytes)
         return false;
 
-    const u32 slot = g_e1000.tx_tail;
-    u8* buf = g_e1000.tx_buf_base_virt + u64(slot) * kE1000RxBufBytes;
+    const u32 slot = ctx.tx_tail;
+    u8* buf = ctx.tx_buf_base_virt + u64(slot) * kE1000RxBufBytes;
     for (u32 i = 0; i < len; ++i)
         buf[i] = data[i];
 
-    E1000TxDesc& d = g_e1000.tx_ring[slot];
-    d.addr = g_e1000.tx_buf_base_phys + u64(slot) * kE1000RxBufBytes;
+    E1000TxDesc& d = ctx.tx_ring[slot];
+    d.addr = ctx.tx_buf_base_phys + u64(slot) * kE1000RxBufBytes;
     d.length = u16(len);
     d.cso = 0;
     d.cmd = kE1000TxCmdEop | kE1000TxCmdIfcs | kE1000TxCmdRs;
@@ -437,28 +451,28 @@ bool E1000Send(const u8* data, u32 len)
     d.special = 0;
 
     const u32 next = (slot + 1) % kE1000TxRingSlots;
-    g_e1000.tx_tail = next;
-    E1000Write(kE1000RegTdt, next);
-    ++g_e1000.tx_packets;
-    g_e1000.tx_bytes += len;
+    ctx.tx_tail = next;
+    E1000Write(ctx, kE1000RegTdt, next);
+    ++ctx.tx_packets;
+    ctx.tx_bytes += len;
     return true;
 }
 
-// Drain every RX descriptor whose DD bit is set. For each valid
-// EOP descriptor log the first 32 bytes (ethernet dst+src+type +
-// a few payload bytes). A real TCP/IP stack would hand the frame
-// up to the protocol layer here; v0 just counts + logs.
-u32 E1000DrainRx(u32 budget_packets)
+// Drain every RX descriptor whose DD bit is set. Hands each
+// valid frame up to the network stack via the iface_index bound
+// in E1000BringUp — each controller delivers to its own stack
+// slot rather than all feeding index 0.
+u32 E1000DrainRx(E1000Ctx& ctx, u32 budget_packets)
 {
-    if (!g_e1000.online)
+    if (!ctx.online)
         return 0;
     u32 drained = 0;
     for (u32 checked = 0; checked < kE1000RxRingSlots; ++checked)
     {
         if (budget_packets != 0 && drained >= budget_packets)
             break;
-        const u32 slot = (g_e1000.rx_tail + 1) % kE1000RxRingSlots;
-        volatile E1000RxDesc& d = g_e1000.rx_ring[slot];
+        const u32 slot = (ctx.rx_tail + 1) % kE1000RxRingSlots;
+        volatile E1000RxDesc& d = ctx.rx_ring[slot];
         if ((d.status & kE1000RxStatusDd) == 0)
             break;
         const u16 len = d.length;
@@ -471,61 +485,97 @@ u32 E1000DrainRx(u32 budget_packets)
         // descriptors instead of injecting them.
         if (len == 0 || len > kE1000RxBufBytes)
         {
-            ++g_e1000.rx_dropped;
+            ++ctx.rx_dropped;
             d.status = 0;
-            g_e1000.rx_tail = slot;
-            E1000Write(kE1000RegRdt, slot);
+            ctx.rx_tail = slot;
+            E1000Write(ctx, kE1000RegRdt, slot);
             continue;
         }
-        u8* buf = g_e1000.rx_buf_base_virt + u64(slot) * kE1000RxBufBytes;
-        ++g_e1000.rx_packets;
-        g_e1000.rx_bytes += len;
-        // Hand the frame up the stack — ARP / IPv4 dispatch
-        // lives in net/stack.cpp. Interface index 0 matches
-        // the NetStackBindInterface call in E1000BringUp.
-        duetos::net::NetStackInjectRx(/*iface_index=*/0, buf, len);
+        u8* buf = ctx.rx_buf_base_virt + u64(slot) * kE1000RxBufBytes;
+        ++ctx.rx_packets;
+        ctx.rx_bytes += len;
+        // Deliver to the stack slot this controller is bound to.
+        duetos::net::NetStackInjectRx(ctx.iface_index, buf, len);
         // Release the descriptor back to the controller.
         d.status = 0;
-        g_e1000.rx_tail = slot;
-        E1000Write(kE1000RegRdt, slot);
+        ctx.rx_tail = slot;
+        E1000Write(ctx, kE1000RegRdt, slot);
         ++drained;
     }
     return drained;
 }
 
-void E1000ConfigureMsixIvar(u8 vector)
+void E1000ConfigureMsixIvar(E1000Ctx& ctx, u8 vector)
 {
     // 82574/e1000e layout: one byte per queue source in IVAR.
     // Program queue 0 RX + queue 0 TX + misc causes to the same
     // vector and set the VALID bit on each programmed byte.
     const u32 entry = (u32(vector & 0x1F) | kE1000IvarValid);
     const u32 ivar = entry | (entry << 8) | (entry << 16) | (entry << 24);
-    E1000Write(kE1000RegIvar, ivar);
-    E1000Write(kE1000RegIvargp, entry);
+    E1000Write(ctx, kE1000RegIvar, ivar);
+    E1000Write(ctx, kE1000RegIvargp, entry);
     core::CleanroomTraceRecord("e1000", "ivar-programmed", vector, ivar, entry);
 }
 
-// MSI-X / MSI handler. ICR (Interrupt Cause Read) clear-on-read:
-// the single read below acknowledges every pending bit in one
-// shot. We don't act on the specific cause (RXT0 / RXO / LSC /
-// TXDW) — the RX task drains the ring unconditionally and any
-// rare link-status change is picked up the next time we look at
-// the status register. Waking is enough.
-void E1000IrqHandler()
+// MSI-X / MSI handlers — one per controller slot. IrqHandler is
+// void(*)() with no argument, so per-controller dispatch uses
+// per-slot thunks rather than a closure. Each thunk indexes
+// directly into g_e1000s[]. Slots beyond kMaxE1000 are never
+// bound because E1000AllocCtx caps allocation.
+//
+// ICR (Interrupt Cause Read) is clear-on-read: the single read
+// acknowledges every pending bit. Waking the RX poll task is
+// sufficient — it drains unconditionally and re-reads link state.
+void E1000IrqHandlerSlot0()
 {
-    if (g_e1000.mmio == nullptr)
+    if (g_e1000s[0].mmio == nullptr)
         return;
-    (void)E1000Read(kE1000RegIcr);
-    duetos::sched::WaitQueueWakeOne(&g_e1000.rx_wait);
+    (void)E1000Read(g_e1000s[0], kE1000RegIcr);
+    duetos::sched::WaitQueueWakeOne(&g_e1000s[0].rx_wait);
+}
+void E1000IrqHandlerSlot1()
+{
+    if (g_e1000s[1].mmio == nullptr)
+        return;
+    (void)E1000Read(g_e1000s[1], kE1000RegIcr);
+    duetos::sched::WaitQueueWakeOne(&g_e1000s[1].rx_wait);
+}
+void E1000IrqHandlerSlot2()
+{
+    if (g_e1000s[2].mmio == nullptr)
+        return;
+    (void)E1000Read(g_e1000s[2], kE1000RegIcr);
+    duetos::sched::WaitQueueWakeOne(&g_e1000s[2].rx_wait);
+}
+void E1000IrqHandlerSlot3()
+{
+    if (g_e1000s[3].mmio == nullptr)
+        return;
+    (void)E1000Read(g_e1000s[3], kE1000RegIcr);
+    duetos::sched::WaitQueueWakeOne(&g_e1000s[3].rx_wait);
 }
 
-void E1000RxPollEntry(void*)
+// Table of per-slot handlers — indexed by the slot assigned in
+// E1000AllocCtx. One entry per kMaxE1000.
+constexpr duetos::arch::IrqHandler kE1000SlotHandlers[kMaxE1000] = {
+    E1000IrqHandlerSlot0,
+    E1000IrqHandlerSlot1,
+    E1000IrqHandlerSlot2,
+    E1000IrqHandlerSlot3,
+};
+
+// RX poll task entry. `arg` is &g_e1000s[n] — the slot outlives
+// the task (module-scope array).
+void E1000RxPollEntry(void* arg)
 {
-    const bool have_msix = (g_e1000.irq_vector != 0);
+    E1000Ctx* ctx = static_cast<E1000Ctx*>(arg);
+    if (ctx == nullptr)
+        return;
+    const bool have_msix = (ctx->irq_vector != 0);
     constexpr u32 kRxPollBudget = 64;
     for (;;)
     {
-        const u32 drained = E1000DrainRx(kRxPollBudget);
+        const u32 drained = E1000DrainRx(*ctx, kRxPollBudget);
         if (drained == kRxPollBudget)
             continue;
         if (have_msix)
@@ -535,8 +585,8 @@ void E1000RxPollEntry(void*)
             // the next RX descriptor is marked DD; if so we
             // skip blocking and loop to drain.
             duetos::arch::Cli();
-            const u32 slot = (g_e1000.rx_tail + 1) % kE1000RxRingSlots;
-            if ((g_e1000.rx_ring[slot].status & kE1000RxStatusDd) != 0)
+            const u32 slot = (ctx->rx_tail + 1) % kE1000RxRingSlots;
+            if ((ctx->rx_ring[slot].status & kE1000RxStatusDd) != 0)
             {
                 duetos::arch::Sti();
                 continue;
@@ -546,7 +596,7 @@ void E1000RxPollEntry(void*)
             // particular). The 10 ms timeout makes the RX poll
             // path tick-poll as a safety net while still benefiting
             // from real IRQ wakeups when they fire.
-            duetos::sched::WaitQueueBlockTimeout(&g_e1000.rx_wait, /*ticks=*/1);
+            duetos::sched::WaitQueueBlockTimeout(&ctx->rx_wait, /*ticks=*/1);
         }
         else
         {
@@ -561,7 +611,7 @@ constexpr u8 kBroadcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 // Minimum ethernet payload is 46 bytes; controller will pad (PSP)
 // up to 60 + 4 CRC = 64-byte wire length. We ship 60 bytes of our
 // own content so the padding is deterministic.
-void E1000SelfTestTx(const NicInfo& n)
+void E1000SelfTestTx(E1000Ctx& ctx, const NicInfo& n)
 {
     u8 frame[60] = {};
     // Dst = broadcast.
@@ -580,7 +630,7 @@ void E1000SelfTestTx(const NicInfo& n)
     for (u32 i = 0; i < sizeof(kMarker) - 1 && 14 + i < sizeof(frame); ++i)
         frame[14 + i] = u8(kMarker[i]);
 
-    if (E1000Send(frame, sizeof(frame)))
+    if (E1000Send(ctx, frame, sizeof(frame)))
     {
         arch::SerialWrite("[e1000] self-test TX: 60-byte broadcast marker emitted\n");
     }
@@ -593,62 +643,103 @@ void E1000SelfTestTx(const NicInfo& n)
     }
 }
 
-bool E1000BringUp(NicInfo& n)
+// Claim the next free E1000Ctx slot. Returns nullptr when the
+// per-family cap (kMaxE1000) is reached. The cap matches
+// kMaxNics and kMaxInterfaces so the three tables stay aligned.
+// The caller is responsible for rolling back g_e1000_count if
+// bring-up fails after this point (see E1000BringUp).
+E1000Ctx* E1000AllocCtx()
+{
+    if (g_e1000_count >= kMaxE1000)
+        return nullptr;
+    return &g_e1000s[g_e1000_count++];
+}
+
+bool E1000BringUp(NicInfo& n, u32 iface_index)
 {
     if (n.mmio_virt == nullptr)
         return false;
-    if (g_e1000.online)
+
+    // Claim the next per-controller slot. Remember the count before
+    // allocation so we can roll it back on any bring-up failure.
+    const u32 saved_count = g_e1000_count;
+    E1000Ctx* ctx = E1000AllocCtx();
+    if (ctx == nullptr)
     {
-        // v0 supports a single e1000 controller; subsequent NICs
-        // stay at probe level.
+        // GAP: more than kMaxE1000 e1000 adapters present — additional
+        // controllers are left at probe-only state — revisit when
+        // kMaxE1000 / kMaxInterfaces are lifted.
+        KLOG_WARN_V("drivers/net/e1000", "e1000 slot limit reached; controller skipped", iface_index);
         return false;
     }
-    g_e1000.mmio = static_cast<volatile u8*>(n.mmio_virt);
-    g_e1000.nic = &n;
 
-    if (!E1000Reset())
+    ctx->mmio = static_cast<volatile u8*>(n.mmio_virt);
+    ctx->nic = &n;
+    ctx->iface_index = iface_index;
+
+    if (!E1000Reset(*ctx))
+    {
+        *ctx = {};
+        g_e1000_count = saved_count;
         return false;
+    }
 
     // Re-read MAC after reset (EEPROM reload populates RAL/RAH).
     ProbeE1000State(n);
 
     // Bring the link up + auto-speed-detect.
-    const u32 ctrl = (E1000Read(kE1000RegCtrl) | kE1000CtrlSlu | kE1000CtrlAsde) & ~u32(0);
-    E1000Write(kE1000RegCtrl, ctrl);
-    E1000ClearMulticastTable();
+    const u32 ctrl = (E1000Read(*ctx, kE1000RegCtrl) | kE1000CtrlSlu | kE1000CtrlAsde) & ~u32(0);
+    E1000Write(*ctx, kE1000RegCtrl, ctrl);
+    E1000ClearMulticastTable(*ctx);
 
-    if (!E1000SetupRxRing())
+    if (!E1000SetupRxRing(*ctx))
+    {
+        *ctx = {};
+        g_e1000_count = saved_count;
         return false;
-    if (!E1000SetupTxRing())
+    }
+    if (!E1000SetupTxRing(*ctx))
+    {
+        // RX ring was allocated — free it before rolling back.
+        if (ctx->rx_ring_phys != mm::kNullFrame)
+            mm::FreeFrame(ctx->rx_ring_phys);
+        constexpr u32 kRxBufPages = (kE1000RxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
+        if (ctx->rx_buf_base_phys != mm::kNullFrame)
+            mm::FreeContiguousFrames(ctx->rx_buf_base_phys, kRxBufPages);
+        *ctx = {};
+        g_e1000_count = saved_count;
         return false;
+    }
 
-    g_e1000.online = true;
+    ctx->online = true;
     n.driver_online = true;
     n.firmware_pending = false;
     n.wireless_fw_state = NicInfo::WirelessFwState::NotApplicable;
 
-    // MSI-X bring-up. If bind succeeds, program IVAR so RX/TX/other
-    // causes route to the bound vector before IMS unmask.
+    // MSI-X bring-up. IrqHandler is void(*)() — use the per-slot
+    // thunk table so each controller wakes its own RX wait queue.
+    // The slot index is (ctx - g_e1000s), set just above.
+    const u32 slot_idx = u32(ctx - g_e1000s);
     pci::DeviceAddress addr{};
     addr.bus = n.bus;
     addr.device = n.device;
     addr.function = n.function;
-    auto r = pci::PciMsixBindSimple(addr, /*entry_index=*/0, E1000IrqHandler, /*out_route=*/nullptr);
+    auto r = pci::PciMsixBindSimple(addr, /*entry_index=*/0, kE1000SlotHandlers[slot_idx], /*out_route=*/nullptr);
     if (r.has_value())
     {
-        g_e1000.irq_vector = r.value();
-        E1000ConfigureMsixIvar(g_e1000.irq_vector);
+        ctx->irq_vector = r.value();
+        E1000ConfigureMsixIvar(*ctx, ctx->irq_vector);
         // Enable RX + link + TX-writeback IRQ sources. Writing
         // to IMS (Interrupt Mask SET) turns bits on; IMC
         // (clear) takes them off. Read ICR once to clear any
         // pending state before we unmask.
-        (void)E1000Read(kE1000RegIcr);
+        (void)E1000Read(*ctx, kE1000RegIcr);
         const u32 mask = kE1000IntRxt0 | kE1000IntRxdmt0 | kE1000IntRxo | kE1000IntLsc | kE1000IntTxdw;
-        E1000Write(kE1000RegImsSet, mask);
+        E1000Write(*ctx, kE1000RegImsSet, mask);
         arch::SerialWrite("[e1000] MSI-X bound vector=");
-        arch::SerialWriteHex(g_e1000.irq_vector);
+        arch::SerialWriteHex(ctx->irq_vector);
         arch::SerialWrite(" (IVAR programmed)\n");
-        core::CleanroomTraceRecord("e1000", "msix-bound", g_e1000.irq_vector, 1, 0);
+        core::CleanroomTraceRecord("e1000", "msix-bound", ctx->irq_vector, 1, 0);
     }
     else
     {
@@ -659,10 +750,12 @@ bool E1000BringUp(NicInfo& n)
     // Re-read link state now that we've asserted SLU — can take a
     // moment on real silicon, but QEMU brings it up instantly.
     E1000Delay();
-    const u32 status = E1000Read(kE1000RegStatus);
+    const u32 status = E1000Read(*ctx, kE1000RegStatus);
     n.link_up = (status & kE1000StatusLinkUp) != 0;
 
-    arch::SerialWrite("[e1000] online pci=");
+    arch::SerialWrite("[e1000] online iface=");
+    arch::SerialWriteHex(iface_index);
+    arch::SerialWrite(" pci=");
     arch::SerialWriteHex(n.bus);
     arch::SerialWrite(":");
     arch::SerialWriteHex(n.device);
@@ -677,40 +770,47 @@ bool E1000BringUp(NicInfo& n)
     }
     arch::SerialWrite(n.link_up ? " link=up" : " link=down");
     arch::SerialWrite(" rx_ring=");
-    arch::SerialWriteHex(g_e1000.rx_ring_phys);
+    arch::SerialWriteHex(ctx->rx_ring_phys);
     arch::SerialWrite(" tx_ring=");
-    arch::SerialWriteHex(g_e1000.tx_ring_phys);
+    arch::SerialWriteHex(ctx->tx_ring_phys);
     arch::SerialWrite("\n");
 
-    // Spawn RX polling task — the real interrupt path comes in the
-    // MSI-X wiring follow-up. Polling at 10 ms is plenty for v0
-    // (QEMU's user netdev generates no traffic unless the host
-    // initiates; on real hardware the tick cadence is unrelated to
-    // line rate since we're draining a batch per tick).
-    duetos::sched::SchedCreate(E1000RxPollEntry, nullptr, "e1000-rx-poll");
+    // Spawn per-controller RX polling task. The task receives ctx
+    // as its argument so it operates on the correct ring.
+    duetos::sched::SchedCreate(E1000RxPollEntry, ctx, "e1000-rx-poll");
 
-    // Bind to the network stack. Static IP 10.0.2.15 matches
-    // QEMU's default SLIRP DHCP lease so the host can ping us
-    // without manual configuration. Real hardware will want a
-    // DHCP client or a cmdline override — follow-up slice.
-    auto tx_trampoline = [](u32 iface_index, const void* frame, u64 len) -> bool
+    // Bind to the network stack at iface_index. NetTxFn is
+    // bool(*)(u32 iface_index, const void*, u64); the stateless
+    // lambda below converts to a function pointer because it
+    // captures nothing — the iface_index argument the stack
+    // passes back routes to the matching e1000 ctx directly.
+    // GAP: multi-NIC routing policy (source-based routing, bonding,
+    // failover) is not implemented — each iface is independent and
+    // the upper stack selects the outbound iface per-packet using
+    // its own route table — revisit when the route table lands.
+    auto tx_fn = [](u32 iface_idx, const void* frame, u64 len) -> bool
     {
-        (void)iface_index;
-        return E1000Send(static_cast<const u8*>(frame), u32(len));
+        for (u32 i = 0; i < g_e1000_count; ++i)
+        {
+            if (g_e1000s[i].iface_index == iface_idx && g_e1000s[i].online)
+                return E1000Send(g_e1000s[i], static_cast<const u8*>(frame), u32(len));
+        }
+        return false;
     };
+
     duetos::net::MacAddress mac{};
     for (u64 i = 0; i < 6; ++i)
         mac.octets[i] = n.mac[i];
     // Start with the all-zero IP so DHCP's DISCOVER uses the
-    // correct src=0.0.0.0. The stack rebinds iface 0 to the
+    // correct src=0.0.0.0. The stack rebinds the iface to the
     // leased IP on ACK.
     duetos::net::Ipv4Address ip{{0, 0, 0, 0}};
-    duetos::net::NetStackBindInterface(/*iface_index=*/0, mac, ip, tx_trampoline);
-    duetos::net::DhcpStart(/*iface_index=*/0);
+    duetos::net::NetStackBindInterface(iface_index, mac, ip, tx_fn);
+    duetos::net::DhcpStart(iface_index);
 
     // Self-test: emit one broadcast frame so a tcpdump on the host
     // side can confirm the TX path works end-to-end.
-    E1000SelfTestTx(n);
+    E1000SelfTestTx(*ctx, n);
     return true;
 }
 
@@ -720,7 +820,12 @@ bool E1000BringUp(NicInfo& n)
 // it set up rather than registering a half-initialised NIC entry. A
 // matched-but-not-brought-up device still returns true; it stays in
 // the registry so device manager can list it as `(probe only)`.
-bool RunVendorProbe(NicInfo& n)
+//
+// `iface_index` is the network-stack interface slot this NIC will
+// occupy once added to g_nics[]. It equals g_nic_count at call time
+// and is passed through to E1000BringUp so each controller is bound
+// to a distinct stack slot.
+bool RunVendorProbe(NicInfo& n, u32 iface_index)
 {
     const char* family = nullptr;
     switch (n.vendor_id)
@@ -770,7 +875,7 @@ bool RunVendorProbe(NicInfo& n)
         const bool is_e1000e_modern = (n.device_id >= 0x1500 && n.device_id <= 0x15FF);
         if (is_classic || is_e1000e_early || is_e1000e_modern)
         {
-            brought_up = E1000BringUp(n);
+            brought_up = E1000BringUp(n, iface_index);
         }
     }
     // Wireless dispatch — order matters only insofar as each `Matches`
@@ -912,7 +1017,9 @@ void NetInit()
         // MMIO and skip the registry add — keeping the entry would
         // leak a 2 MiB MMIO mapping per unrecognised PCI network
         // controller for the lifetime of the boot.
-        if (!RunVendorProbe(nic))
+        // iface_index is the g_nics[] slot this NIC will occupy on
+        // success — equal to g_nic_count before the increment below.
+        if (!RunVendorProbe(nic, u32(g_nic_count)))
         {
             if (nic.mmio_virt != nullptr && map_bytes != 0)
             {
@@ -951,69 +1058,78 @@ void NetInit()
 namespace
 {
 
-// Quiesce a brought-up e1000 controller and release its DMA rings
-// + buffer frames. Safe to call when `g_e1000.online` is false (the
-// register touches are skipped). The MSI-X handler stays installed
-// — the device-side IMC mask + reset stops further events; a
-// subsequent `E1000BringUp` rebinds via `PciMsixBindSimple`. The
-// RX-poll task spawned by bring-up keeps running but observes
-// `online == false` (E1000Send / E1000DrainRx both early-return)
-// so it idles cheaply until the next bring-up replaces the rings.
-void E1000Quiesce()
+// Quiesce one e1000 controller and release its DMA rings + buffer
+// frames. Safe to call when ctx.online is false (register touches
+// are skipped). The MSI-X handler stays installed — the device-side
+// IMC mask + reset stops further events; a subsequent E1000BringUp
+// rebinds via PciMsixBindSimple. The RX-poll task spawned by
+// bring-up keeps running but observes `online == false`
+// (E1000Send / E1000DrainRx both early-return) so it idles cheaply.
+void E1000QuiesceOne(E1000Ctx& ctx)
 {
-    if (!g_e1000.online)
+    if (!ctx.online)
         return;
 
     // 1. Mask all interrupt sources, drain any pending cause bits,
     //    clear the IVAR routing so a stray IRQ during reset doesn't
     //    target a stale vector.
-    E1000Write(kE1000RegImc, 0xFFFFFFFFu);
-    (void)E1000Read(kE1000RegIcr);
-    E1000Write(kE1000RegIvar, 0);
-    E1000Write(kE1000RegIvargp, 0);
+    E1000Write(ctx, kE1000RegImc, 0xFFFFFFFFu);
+    (void)E1000Read(ctx, kE1000RegIcr);
+    E1000Write(ctx, kE1000RegIvar, 0);
+    E1000Write(ctx, kE1000RegIvargp, 0);
 
     // 2. Disable receive + transmit so the controller stops touching
     //    descriptor memory before we free the backing frames.
-    E1000Write(kE1000RegRctl, 0);
-    E1000Write(kE1000RegTctl, 0);
+    E1000Write(ctx, kE1000RegRctl, 0);
+    E1000Write(ctx, kE1000RegTctl, 0);
 
     // 3. Software reset returns ring-pointer registers (RDBAL/RDBAH/
     //    TDBAL/TDBAH/RDLEN/TDLEN/RDH/RDT/TDH/TDT) to their power-on
     //    defaults. Failure here just means the controller didn't
     //    acknowledge — the ring-pointer registers we care about are
     //    no longer being read because RCTL/TCTL are already cleared.
-    (void)E1000Reset();
+    (void)E1000Reset(ctx);
 
     // 4. Free the descriptor rings and buffer pools. AllocateFrame
     //    handed out one page each for the rings, AllocateContiguousFrames
     //    a multi-page run for the buffers.
-    if (g_e1000.rx_ring_phys != mm::kNullFrame)
-        mm::FreeFrame(g_e1000.rx_ring_phys);
-    if (g_e1000.tx_ring_phys != mm::kNullFrame)
-        mm::FreeFrame(g_e1000.tx_ring_phys);
+    if (ctx.rx_ring_phys != mm::kNullFrame)
+        mm::FreeFrame(ctx.rx_ring_phys);
+    if (ctx.tx_ring_phys != mm::kNullFrame)
+        mm::FreeFrame(ctx.tx_ring_phys);
     constexpr u32 kRxBufPages = (kE1000RxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
     constexpr u32 kTxBufPages = (kE1000TxRingSlots * kE1000RxBufBytes) / mm::kPageSize;
-    if (g_e1000.rx_buf_base_phys != mm::kNullFrame)
-        mm::FreeContiguousFrames(g_e1000.rx_buf_base_phys, kRxBufPages);
-    if (g_e1000.tx_buf_base_phys != mm::kNullFrame)
-        mm::FreeContiguousFrames(g_e1000.tx_buf_base_phys, kTxBufPages);
+    if (ctx.rx_buf_base_phys != mm::kNullFrame)
+        mm::FreeContiguousFrames(ctx.rx_buf_base_phys, kRxBufPages);
+    if (ctx.tx_buf_base_phys != mm::kNullFrame)
+        mm::FreeContiguousFrames(ctx.tx_buf_base_phys, kTxBufPages);
 
     // 5. Wake any sleeper on the RX wait queue so the polling task
     //    re-checks `online` and stops dereferencing freed ring
     //    pointers. The wake happens BEFORE the context zero so the
     //    WaitQueue node list is still intact when WakeAll walks it.
-    (void)duetos::sched::WaitQueueWakeAll(&g_e1000.rx_wait);
+    (void)duetos::sched::WaitQueueWakeAll(&ctx.rx_wait);
 
     // 6. Clear the context. `online = false` is the wake-up gate the
     //    RX-poll task and E1000Send check on every entry; clearing
     //    it before the rest of the state means a racing TX submission
     //    bails before reading a freed pointer.
-    NicInfo* nic = g_e1000.nic;
-    g_e1000 = {};
+    NicInfo* nic = ctx.nic;
+    ctx = {};
     if (nic != nullptr)
         nic->driver_online = false;
 
     arch::SerialWrite("[e1000] quiesced — IRQs masked, RX/TX disabled, rings freed\n");
+}
+
+// Quiesce all online e1000 controllers and reset the per-family
+// count so E1000AllocCtx works correctly after a NetInit/NetShutdown
+// cycle.
+void E1000QuiesceAll()
+{
+    for (u32 i = 0; i < g_e1000_count; ++i)
+        E1000QuiesceOne(g_e1000s[i]);
+    g_e1000_count = 0;
 }
 
 } // namespace
@@ -1021,7 +1137,7 @@ void E1000Quiesce()
 ::duetos::core::Result<void> NetShutdown()
 {
     KLOG_TRACE_SCOPE("drivers/net", "NetShutdown");
-    E1000Quiesce();
+    E1000QuiesceAll();
     const u64 dropped = g_nic_count;
     g_nic_count = 0;
     g_init_done = false;
