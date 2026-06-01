@@ -81,11 +81,13 @@ constexpr u64 kHdaSdRegFormat = 0x12; // 2 bytes
 constexpr u64 kHdaSdRegBdlPl = 0x18;  // 4 bytes — BDL phys low
 constexpr u64 kHdaSdRegBdlPu = 0x1C;  // 4 bytes — BDL phys high
 
-// Stream descriptor CTL bits (24-bit field, low byte). RUN
-// (bit 1) and STS / LPIB / FIFOD register offsets land in the
-// follow-up slice that actually starts a stream — for now this
-// file only programs SRST + the BDL pointer, so we keep the
-// register-map definition narrow.
+// Stream descriptor CTL bits (24-bit field, low byte). SRST
+// resets the descriptor; RUN starts the DMA engine pulling from
+// the BDL into the link. StreamArm() programs SRST + BDL pointer
+// + CBL/LVI/FORMAT + the stream tag, leaving RUN clear; StreamRun()
+// flips RUN once the caller's BDL points at real buffer pages.
+// STS (interrupt/error status) and FIFOD bits are not consumed
+// yet — see the position-buffer / IRQ GAP at StreamPosition().
 constexpr u8 kHdaSdCtlSrst = 1u << 0; // Stream reset
 constexpr u8 kHdaSdCtlRun = 1u << 1;  // Stream run
 
@@ -648,6 +650,16 @@ void WalkCodec(const AudioControllerInfo& a, u8 slot)
     return {};
 }
 
+// GAP: input/capture streams are arm-able here (the SD-slot picker
+// handles StreamDirection::Input), but the codec-side capture wiring
+// (ADC converter format + SET_CONVERTER_STREAM on an input widget)
+// has no caller yet — the only live producer is the output path in
+// kernel/subsystems/audio/audio_backend.cpp. Revisit when a capture
+// source (mic/line-in) front-end lands.
+// GAP: multi-stream mixing is not done — each StreamArm() grabs its
+// own SD slot and the controller plays them independently; there is
+// no software mixer combining N PCM rings into one output SD.
+// Revisit when the audio server grows a mixer.
 ::duetos::core::Result<u8> StreamArm(const AudioControllerInfo& a, StreamDirection dir, const StreamFormat& fmt,
                                      u64 bdl_phys, u32 buffer_bytes, u8 last_valid_index)
 {
@@ -830,6 +842,12 @@ u32 ArmedStreamCount()
     return {};
 }
 
+// GAP: position reporting reads SD_LPIB directly each call rather than
+// the DMA Position-In-Buffer (DPIB) buffer the controller can write to
+// host memory, and there is no IRQ-driven refill — the BDL is filled
+// once with IOC clear and the producer polls LPIB. A streaming workload
+// that needs sample-accurate wrap timing wants DPLBASE/DPUBASE + an SD
+// completion IRQ. Revisit when the audio server needs gapless refill.
 u32 StreamPosition(const AudioControllerInfo& a, u8 sd_idx)
 {
     if (!g.brought_up || a.mmio_virt == nullptr)
