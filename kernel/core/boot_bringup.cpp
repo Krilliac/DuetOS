@@ -155,6 +155,7 @@
 #include "net/stack.h"
 #include "net/tcp.h"
 #include "net/tls.h"
+#include "net/tls_socket.h"
 #include "subsystems/graphics/graphics.h"
 #include "subsystems/graphics/graphics_vk_spirv.h"
 #include "drivers/storage/ahci.h"
@@ -2248,6 +2249,9 @@ void BootBringupDevices(bool force_net_smoke)
     // matching, eviction, and same-name overwrite. In-memory only; disk
     // round-trip requires a live FAT32 volume (GAP'd from the self-test).
     DUETOS_BOOT_SELFTEST(duetos::net::CookieSelfTest());
+    // TLS-over-transport driver: in-memory loopback handshake reaches
+    // Established + app-data round-trips both directions.
+    DUETOS_BOOT_SELFTEST(duetos::net::tls::TlsSocketSelfTest());
 
     // Disk-installer layout-math self-test. Pure math (no block I/O,
     // no GPT writes), so cheap to run on every boot. A regression
