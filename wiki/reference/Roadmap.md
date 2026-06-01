@@ -111,22 +111,34 @@ cleanup debt: move the residual up and delete the rest.
   Gated by a 6-boot determinism sweep (3/3 APs online, byte-stable,
   zero panic/triple/fallback) + a 6/6-clean `gui-fuzz.sh 18` SMP
   matrix. `g_promote_to_panic` may now be reconsidered.
-  - **Recurrence note (2026-06-01) — NOT fully resolved under lockdep.**
-    The `sync/spinlock : release out-of-order` line still appears
-    intermittently (observed 1 of 3 boots) under the
-    `x86_64-release-audit` build (strict lockdep on) ~9s into a 4-CPU
-    boot, on `cpu::g_state_lock` and `mm::g_frame_lock`. Self-tests
-    still pass (OK=183, FAIL=0) and there is no panic / triple-fault /
-    task-kill, so this is a residual lockdep-accounting symptom, not
-    data corruption — but the 2026-05-19 "RESOLVED" claim overstates
-    it: the original 6-boot determinism gate ran under the *release*
-    config, which does not exercise the lockdep checker. NOT caused by
-    the 2026-06-01 parallel-agents batch (the locks are core cpu/mm,
-    untouched by that work; the symptom fires ~7s after those slices'
-    self-tests). Needs a dedicated SMP slice: re-run the determinism
-    sweep *under* the audit/lockdep config and trace the late-boot
-    `g_frame_lock` / `g_state_lock` release ordering against the
-    per-CPU held-stack discipline.
+  - **Recurrence — ROOT-CAUSED + FIXED (2026-06-01, dedicated SMP slice).**
+    Reproduced the `sync/spinlock : release out-of-order` line under
+    `x86_64-release-audit` at ~2/12 boots (17%; one escalated to a
+    serial self-deadlock panic). Root cause: the AP runs its ENTIRE
+    `CpuhpBringUp` chain — including the `StartingGdt` / `StartingGsBase`
+    states — BEFORE `CpuhpStartGsBase` programs a kernel GSBASE, so
+    every `cpu::CurrentCpu()` in that window has GSBASE=0 and falls into
+    the LAPIC-ID resolver. That resolver scanned only up to
+    `arch::SmpCpuIdLimit()`, which the 2026-05-22 "deferred g_cpu_id_limit
+    bump" fix deliberately keeps from covering the booting AP until it
+    signals online. So the LAPIC match FAILED and the resolver returned
+    `&g_bsp_percpu`: the AP pushed `g_state_lock` / `g_frame_lock` onto
+    the BSP's per-CPU held-locks stack and stamped `owner_cpu=BSP`. Once
+    `CpuhpStartGsBase` ran, GSBASE became valid and the AP's later
+    releases hit its OWN slot, leaving the BSP's stack with a phantom
+    entry → `release out-of-order` on the next release; the raw-serial
+    diagnostic then re-entered `g_serial_lock` and self-deadlocked. The
+    two prior fixes (2026-05-19 LAPIC fallback, 2026-05-22 deferred bump)
+    were each correct but mutually undermining. Fix: `cpu::CurrentCpu()`'s
+    LAPIC fallback now scans the full allocated-slot space
+    (`acpi::kMaxCpus`) instead of `SmpCpuIdLimit()` — the AP's
+    `g_ap_percpus[cpu_id]` + `lapic_id` are stamped before SIPI, so the
+    booting AP's real slot is always found; scheduler wake-routing still
+    uses `SmpCpuIdLimit()` + the `PerCpu::online` predicate, so routing
+    behaviour is unchanged. Verified: 17/17 clean `x86_64-release-audit`
+    boots (zero out-of-order / self-deadlock / panic, `online=4/4`, all
+    self-tests PASS, `boot-log-analyze` verdict OK) + 2/2 clean
+    `x86_64-release` boots. One file changed: `kernel/cpu/percpu.cpp`.
 - **Per-CPU held-stack storage — LANDED (2026-05-22).** The
   global `g_per_cpu[0]` alias is gone. `kLockdepCpuMax =
   acpi::kMaxCpus`, each CPU indexes its own slot via
