@@ -16,9 +16,10 @@
  * That is the conjunction of four independent checks, ALL of which
  * must hold for Verify() to return true:
  *
- *   1. Signature(s): every certificate in the path is RSA-PKCS#1
- *      v1.5 + SHA-256 signed by the public key of the next cert up,
- *      terminating at a key we trust a priori.
+ *   1. Signature(s): every certificate in the path is signed by the
+ *      public key of the next cert up — RSA-PKCS#1 v1.5 + SHA-256, OR
+ *      ECDSA + SHA-256 (P-256) / SHA-384 (P-384) — terminating at a key
+ *      we trust a priori.
  *   2. Chain-to-anchor: the path terminates at a certificate whose
  *      public key is in our embedded trust store (a small set of
  *      self-signed roots). Depth is bounded at 2 (leaf, optional
@@ -37,24 +38,30 @@
  * unsupported shape fails CLOSED (returns false / "not trusted"), and
  * no path returns true without all four checks passing.
  *
- * GAP (deliberately unimplemented in v0 — fail closed on each):
- *   - ECDSA / Ed25519 / RSA-PSS certificates. RSA-PKCS#1 v1.5 +
- *     SHA-256 only. A cert signed any other way fails verification.
+ * Supported signature primitives: RSA-PKCS#1 v1.5 + SHA-256, and ECDSA
+ * over NIST P-256 (ecdsa-with-SHA256) and P-384 (ecdsa-with-SHA384). The
+ * EC math lives in net/ec.{h,cpp}; SHA-384 in crypto/sha384.{h,cpp}.
+ *
+ * GAP (deliberately unimplemented — fail closed on each):
+ *   - Other signature schemes: RSA-PSS, Ed25519/Ed448, ECDSA over P-521 /
+ *     brainpool, ecdsa-with-SHA1 / SHA-512, compressed EC points (only the
+ *     0x04 uncompressed SEC1 form is accepted). A cert signed any other
+ *     way fails verification.
  *   - Name constraints, EKU / KU policy enforcement, basicConstraints
  *     pathLen beyond the hard depth-2 cap.
  *   - CRL / OCSP revocation. A revoked-but-unexpired cert still
  *     verifies. Revisit when the network stack can fetch OCSP.
  *   - The full Mozilla / CCADB root program. The embedded store carries
- *     a synthetic test root PLUS a small hand-picked set of real,
- *     widely-trusted RSA-2048 roots whose self-signature is sha256WithRSA
- *     (DigiCert Global Root G2, Amazon Root CA 1, GlobalSign Root CA - R3,
- *     Go Daddy Root CA - G2, AffirmTrust Commercial). Sites whose chains
- *     terminate at any OTHER root — every ECDSA root, and every RSA-4096
- *     root (e.g. ISRG Root X1 / Let's Encrypt; see below) — fail closed
- *     until that root (or the missing primitive) lands.
+ *     synthetic test roots PLUS a small hand-picked set of real,
+ *     widely-trusted roots: RSA-2048 sha256WithRSA roots (DigiCert Global
+ *     Root G2, Amazon Root CA 1, GlobalSign Root CA - R3, Go Daddy Root
+ *     CA - G2, AffirmTrust Commercial) and P-384 ecdsa-with-SHA384 roots
+ *     (DigiCert Global Root G3, ISRG Root X2). Sites whose chains
+ *     terminate at any OTHER root fail closed until that root lands.
  *   - RSA-4096 moduli. The kernel bigint is 4096 bits wide, which holds a
  *     2048-bit modulus's squared intermediate but overflows on a 4096-bit
  *     one. RSA-4096 roots/leaves fail closed until the bigint widens.
+ *     (EC operands are far smaller — P-384's 768-bit product fits easily.)
  *   - Cross-signed / multi-path chains, chains deeper than one
  *     intermediate.
  */
@@ -103,18 +110,21 @@ bool Verify(const u8* leaf_der, u32 leaf_len, const u8* const* chain_ders, const
 using CertVerifyFn = bool (*)(const u8* leaf_der, u32 leaf_len, const u8* const* chain_ders, const u32* chain_lens,
                               u32 chain_count, const char* hostname, u64 now_unix);
 
-/// Boot self-test. Embeds real OpenSSL-generated DER fixtures (a
-/// self-signed root, a leaf it signed for "test.duetos.local" with a
-/// SAN, an intermediate, and a depth-2 leaf) and asserts:
-///   - the valid leaf->root path verifies TRUE,
-///   - the valid leaf->intermediate->root path verifies TRUE,
-///   - a tampered signature byte verifies FALSE,
+/// Boot self-test. First runs the SHA-384 and EC/ECDSA primitive KATs
+/// (crypto::Sha384SelfTest, ec::EcSelfTest), then embeds real
+/// OpenSSL-generated DER fixtures — an RSA self-signed root + leaf +
+/// intermediate + depth-2 leaf, AND a P-256 ECDSA self-signed root + leaf
+/// for "ec.test.duetos.local" — and asserts:
+///   - the valid RSA leaf->root and leaf->intermediate->root paths TRUE,
+///   - the valid ECDSA leaf->root path (+ SAN wildcard) TRUE,
+///   - a tampered signature byte (RSA and ECDSA) verifies FALSE,
 ///   - a wrong hostname verifies FALSE,
 ///   - an out-of-window `now_unix` verifies FALSE,
 ///   - a leaf with no trusted issuer verifies FALSE,
 ///   - every embedded REAL root parses and its own self-signature
-///     verifies through the RSA+SHA-256 path (proving the chain-verify
-///     code works on real-world DER, not just the synthetic fixture).
+///     verifies (RSA+SHA-256 for the 5 RSA roots, ECDSA+SHA-384 for the
+///     2 P-384 roots), proving the chain-verify code works on real-world
+///     DER, not just the synthetic fixtures.
 /// Real leaves are deliberately NOT embedded: they expire, so a
 /// hardcoded live leaf is not a durable self-test — only the roots'
 /// long-lived self-signatures are asserted.

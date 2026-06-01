@@ -67,6 +67,22 @@ testable functionality:
 - `crypto/x509.{h,cpp}` — Certificate parser exposing
   `tbs`, `sig_algo`, `signature`, `subject_rsa`, and the
   validity-time byte slices. `[x509] PASS`.
+- `crypto/sha384.{h,cpp}` — SHA-384 (SHA-512 core, truncated),
+  needed to hash the tbsCertificate for ecdsa-with-SHA384 (the
+  P-384 ECDSA web roots). FIPS 180-4 "abc"/empty KATs.
+- `net/ec.{h,cpp}` — ECDSA verify over NIST P-256 / P-384
+  (prime-field arithmetic on the kernel bigint, Jacobian point
+  add/double, double-and-add scalar mul, FIPS 186-4 verify).
+  Verify-only / public-data / fail-closed (off-curve, r/s range,
+  identity rejected). `[ec-selftest] PASS (P-256+P-384, 4 pos /
+  4 neg)`.
+- `net/x509_verify.{h,cpp}` — full chain verifier now validates
+  ECDSA certs/roots in addition to RSA: ecdsa-with-SHA256 (P-256)
+  and ecdsa-with-SHA384 (P-384) signature algorithms, id-ecPublicKey
+  SPKI (0x04 uncompressed), embedded P-384 roots (DigiCert Global
+  Root G3, ISRG Root X2) alongside the 5 RSA-2048 roots. GAP:
+  P-521 / brainpool / Ed25519 / compressed points / ecdsa-with-SHA1
+  / full root program / revocation. `[x509-verify-selftest] PASS`.
 - `crypto/aes_gcm.{h,cpp}` — AES-128-GCM AEAD encrypt +
   decrypt, validated against NIST SP 800-38D vectors v1 + v2
   with round-trip + tamper detection. `[aes-gcm] PASS`.
