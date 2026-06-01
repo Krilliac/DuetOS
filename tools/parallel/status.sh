@@ -48,10 +48,15 @@ echo "════════════════════════�
 echo ""
 echo "Conflict check:"
 
-# Pull out each claimed Files value and look for duplicates. The sed backref
-# is sed syntax (not a shell expansion), so single quotes are intentional.
-# shellcheck disable=SC2016
-FILES_LIST="$(grep "^\- \*\*Files\*\*:" "$WORK_FILE" | sed 's/.*`\(.*\)`.*/\1/')"
+# Collect the Files value of each ACTIVE (🟢) claim and look for duplicates —
+# two live sessions owning the same path is the real conflict. Completed
+# claims have released their files, so they're excluded.
+FILES_LIST="$(awk '
+    /^### / { active = ($0 ~ /🟢/) }
+    active && /\*\*Files\*\*:/ {
+        v = $0; sub(/^[^`]*`/, "", v); sub(/`.*/, "", v); print v
+    }
+' "$WORK_FILE")"
 DUPES="$(printf '%s\n' "$FILES_LIST" | sort | uniq -d | grep -v '^$' || true)"
 if [[ -n "$DUPES" ]]; then
     echo "  ⚠️  POTENTIAL CONFLICT on:"
