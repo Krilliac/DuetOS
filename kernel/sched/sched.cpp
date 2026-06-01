@@ -1414,24 +1414,74 @@ Task* BalancePullOnce(cpu::PerCpu* self)
     }
     Task* head = RunqHeadNormal(victim);
     KASSERT(head != nullptr, "sched", "BalancePullOnce: victim normal_len > 0 but head null");
-    if (!TaskAllowedOn(head, self->cpu_id))
+    // Walk the victim's Normal queue for the first task whose affinity
+    // mask permits execution on `self`. The heaviest peer's head may be
+    // pinned away from us (NUMA-pinned worker, IRQ-affined task); a
+    // deeper task that IS allowed here should still migrate so the
+    // overloaded peer actually drains rather than staying hot because
+    // its head happens to be pinned. Mirrors `StealNormalFromPeer`'s
+    // bounded single-pass scan + prev-tracking unlink exactly, so the
+    // runqueue invariants (head/tail pointers, intrusive-link nulling,
+    // counter) stay byte-for-byte identical between the two paths.
+    // kBalanceScanCap bounds the worst case under a queue pinned
+    // entirely away from us; beyond it we yield this tick and let the
+    // next period retry.
+    //
+    // Lock ordering: the whole walk + unlink + RunqueuePushOn runs under
+    // the single g_sched_lock (asserted above) that guards every
+    // per-CPU runqueue, so both the victim's and self's queues are
+    // mutated atomically with no second lock to order against — same
+    // convention as StealNormalFromPeer and the rest of this file.
+    //
+    // GAP: NUMA distance weighting — we migrate the first
+    //      affinity-eligible task regardless of memory locality.
+    //      Revisit when the topology layer exposes per-node distances
+    //      to the balancer.
+    constexpr u32 kBalanceScanCap = 32;
+    Task* prev = nullptr;
+    Task* victim_task = nullptr;
+    u32 scanned = 0;
+    for (Task* t = head; t != nullptr && scanned < kBalanceScanCap; t = t->next, ++scanned)
     {
-        // The heaviest peer's head is pinned away from us. Skip
-        // this balance tick rather than migrate onto a forbidden
-        // CPU. GAP: same head-only limitation as the steal path.
+        if (TaskAllowedOn(t, self->cpu_id))
+        {
+            victim_task = t;
+            break;
+        }
+        prev = t;
+    }
+    if (victim_task == nullptr)
+    {
+        // Every reachable task on the heaviest peer is pinned away from
+        // us (or the queue is deeper than the scan cap). Skip this tick.
         return nullptr;
     }
-    RunqHeadNormal(victim) = head->next;
+    // Unlink `victim_task` — same head / middle / tail handling as the
+    // steal path. `prev == nullptr` is the head case.
+    if (prev == nullptr)
+    {
+        RunqHeadNormal(victim) = victim_task->next;
+    }
+    else
+    {
+        prev->next = victim_task->next;
+    }
     if (RunqHeadNormal(victim) == nullptr)
     {
         RunqTailNormal(victim) = nullptr;
     }
-    head->next = nullptr;
+    else if (victim_task == RunqTailNormal(victim))
+    {
+        // Migrated the tail (a deeper-than-head allowed task that
+        // happened to be last); the predecessor becomes the new tail.
+        RunqTailNormal(victim) = prev;
+    }
+    victim_task->next = nullptr;
     KASSERT(victim->runq_normal_len > 0, "sched", "BalancePullOnce: victim normal_len underflow");
     --victim->runq_normal_len;
-    head->last_cpu = self->cpu_id;
-    RunqueuePushOn(self, head);
-    return head;
+    victim_task->last_cpu = self->cpu_id;
+    RunqueuePushOn(self, victim_task);
+    return victim_task;
 }
 
 // IRQ-context hook fired from `OnTimerTick`. Phase-shifted per CPU
