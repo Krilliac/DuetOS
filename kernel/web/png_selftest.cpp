@@ -127,7 +127,7 @@ void PngSelfTest()
 {
     bool ok = true;
     u32 fail_code = 0;
-    Arena arena(g_arena_buf, sizeof(g_arena_buf));
+    PngArena arena(g_arena_buf, sizeof(g_arena_buf));
 
     // ----- Fixture 1: 2x2 RGBA.
     {

@@ -75,7 +75,7 @@ struct Header
 
 } // namespace
 
-bool PngDecode(const u8* data, u32 len, Arena& arena, PngImage* out)
+bool PngDecode(const u8* data, u32 len, PngArena& arena, PngImage* out)
 {
     if (data == nullptr || out == nullptr)
         return false;

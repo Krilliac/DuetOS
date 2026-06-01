@@ -39,9 +39,9 @@
  *
  * Memory: all working buffers (concatenated IDAT, inflated
  * scanlines, and the output RGBA pixels) come from a caller-
- * supplied bump Arena — no kheap, no global state. The Arena is a
+ * supplied bump PngArena — no kheap, no global state. The PngArena is a
  * thin freestanding bump allocator over a caller-owned byte span
- * (see Arena below); when it runs dry the decode fails cleanly
+ * (see PngArena below); when it runs dry the decode fails cleanly
  * rather than overrunning.
  *
  * GAP — deliberately unimplemented (web targets don't need them
@@ -69,14 +69,14 @@ inline constexpr u32 kPngMaxInputBytes = 16u * 1024u * 1024u;
 /// free — the whole arena is reclaimed by the caller when the
 /// decode is done. Allocation past capacity returns nullptr, which
 /// the decoder treats as a clean failure.
-struct Arena
+struct PngArena
 {
     u8* base = nullptr;
     u32 cap = 0;
     u32 used = 0;
 
-    Arena() = default;
-    Arena(u8* b, u32 c) : base(b), cap(c), used(0) {}
+    PngArena() = default;
+    PngArena(u8* b, u32 c) : base(b), cap(c), used(0) {}
 
     /// Allocate `n` bytes, 8-byte aligned. Returns nullptr if the
     /// request (after alignment) would exceed capacity.
@@ -106,7 +106,7 @@ struct PngImage
 /// oversized input returns false without writing past any buffer.
 /// `out->pixels` is owned by `arena`; it stays valid as long as the
 /// arena's backing span does.
-bool PngDecode(const u8* data, u32 len, Arena& arena, PngImage* out);
+bool PngDecode(const u8* data, u32 len, PngArena& arena, PngImage* out);
 
 /// Boot-time self-test. Decodes embedded known-answer fixtures
 /// covering every supported colour type + a Paeth-filtered row,
