@@ -175,6 +175,7 @@
 #include "apps/browser.h"
 #include "web/css.h"
 #include "web/html.h"
+#include "web/js_dom.h"
 #include "web/png.h"
 #include "apps/calendar.h"
 #include "apps/charmap.h"
@@ -3192,6 +3193,11 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // specificity ordering, inline-over-sheet, inheritance, a UA default,
     // and display:none. Produces the styles a future layout swarm reads.
     DUETOS_BOOT_SELFTEST(duetos::web::CssSelfTest());
+    // JS ⇄ DOM bindings self-test — proves a script can read and MUTATE
+    // the parsed page (getElementById/textContent/setAttribute/
+    // createElement+appendChild/getElementsByTagName), asserting effects
+    // via the console buffer and an independent DOM re-walk.
+    DUETOS_BOOT_SELFTEST(duetos::web::JsDomSelfTest());
 
     // CALENDAR — windowed month-view sibling of the read-only
     // taskbar-clock popup. Lets the user page through past / future

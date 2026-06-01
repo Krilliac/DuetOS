@@ -233,7 +233,18 @@ static Result<JsValue> DoAssign(Interp& I, const AstNode* target, const JsValue&
         JS_TRY_ASSIGN(JsValue obj, EvalExpr(I, target->a, env));
         if (obj.type != JsType::Object)
             return Err{ErrorCode::BadState};
-        if (!ObjSet(obj.as.obj, I.arena, target->str, target->strLen, val))
+        // Host objects (DOM elements) intercept property writes first
+        // (e.g. `el.id = 'x'` reflects into the attribute). A hook that
+        // returns false didn't claim the write, so it falls through to
+        // the plain property map.
+        JsObject* o = obj.as.obj;
+        if (o->hostSet)
+        {
+            JS_TRY_ASSIGN(bool handled, o->hostSet(I, o, target->str, target->strLen, val));
+            if (handled)
+                return val;
+        }
+        if (!ObjSet(o, I.arena, target->str, target->strLen, val))
             return Err{ErrorCode::OutOfMemory};
         return val;
     }
@@ -353,6 +364,11 @@ static Result<JsValue> EvalCall(Interp& I, const AstNode* n, Env* env)
     }
 
     JsFunction* fn = callee.as.fn;
+    // Host-callback methods (DOM bindings) dispatch through their C++
+    // function pointer; everything else goes through the closed builtin
+    // switch or the JS closure path.
+    if (fn->nativeId == kNativeCallback && fn->nativeCall)
+        return fn->nativeCall(I, recv, argbuf, argc, fn->nativeCtx);
     if (fn->nativeId != 0)
         return CallNative(I, fn->nativeId, recv, argbuf, argc);
     return CallFunction(I, fn, argbuf, argc, recv);

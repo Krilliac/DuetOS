@@ -1,5 +1,6 @@
 #pragma once
 
+#include "util/result.h"
 #include "util/soft_float.h"
 #include "util/types.h"
 
@@ -38,6 +39,29 @@ class Arena;
 struct JsObject;
 struct AstNode;
 struct Env;
+struct Interp;
+struct JsValue;
+
+// ---- host embedding (DOM bindings etc.) ----
+//
+// A native C++ callback invoked when JS calls a host function value.
+// `recv` is the method receiver (the host object the method was read
+// from), `args`/`argc` the JS-evaluated arguments, `ctx` the opaque
+// pointer the host stashed on the JsFunction at creation time. The
+// engine dispatches these when JsFunction::nativeId == kNativeCallback
+// (see builtins.h). Returns a Result so the host can surface errors
+// through the same Result<> channel the rest of the engine uses.
+using JsNativeCall = duetos::core::Result<JsValue> (*)(Interp& I, const JsValue& recv, const JsValue* args, u32 argc,
+                                                       void* ctx);
+
+// Host property get/set hooks attached to a host JsObject. `Get`
+// resolves a member name to a value (return Undefined for a miss).
+// `Set` returns true if it handled the write (false => fall back to
+// the plain property map). Both reach the backing C++ object via
+// `self->hostData`.
+using JsHostGet = duetos::core::Result<JsValue> (*)(Interp& I, JsObject* self, const char* key, u32 keyLen);
+using JsHostSet = duetos::core::Result<bool> (*)(Interp& I, JsObject* self, const char* key, u32 keyLen,
+                                                 const JsValue& v);
 
 enum class JsType : u8
 {
@@ -68,6 +92,14 @@ struct JsFunction
     // The dispatcher (NativeId) selects which C++ routine runs.
     u16 nativeId; // 0 == not native; see builtins.h NativeFn enum
     const char* name;
+
+    // Host-callback dispatch. When nativeId == kNativeCallback the
+    // interpreter calls `nativeCall(I, recv, args, argc, nativeCtx)`
+    // instead of the closed builtin switch — this is how DOM methods
+    // (getElementById, appendChild, …) plug C++ into JS without
+    // growing the NativeFn enum. nativeCtx carries per-method state.
+    JsNativeCall nativeCall = nullptr;
+    void* nativeCtx = nullptr;
 };
 
 struct JsValue

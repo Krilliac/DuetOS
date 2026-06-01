@@ -51,6 +51,16 @@ struct JsObject
     JsValue* elems;
     u32 length;   // logical array length
     u32 elemsCap; // capacity of `elems`
+
+    // ---- host embedding (DOM bindings etc.) ----
+    // When `hostGet`/`hostSet` are non-null this object is a host
+    // object: member reads/writes route to the C++ hooks first, with
+    // `hostData` carrying the backing native pointer (a DOM Node*).
+    // A miss in `hostGet` (Undefined) falls through to the plain
+    // property map, so a host object can still hold ad-hoc JS props.
+    void* hostData = nullptr;
+    JsHostGet hostGet = nullptr;
+    JsHostSet hostSet = nullptr;
 };
 
 // Lexical environment. `vars` is a small property map of name->value.
