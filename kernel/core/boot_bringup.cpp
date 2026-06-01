@@ -2202,6 +2202,15 @@ void BootBringupDevices(bool force_net_smoke)
     // KERNEL_INITCALL(Drivers, "fs/fat32.module", ...) in
     // `kernel/fs/fat32.cpp`.
 
+    // exFAT write-path self-test. Unlike FAT32 (which uses the QEMU GPT
+    // image), this builds a synthetic exFAT volume in a fresh RAM disk
+    // and drives create/find/write/append/truncate end to end — the
+    // boot wire-in for the exFAT write ops. Self-contained, so it runs
+    // here next to FAT32 rather than waiting for the late exFAT disk
+    // scan in the bringup tail.
+    SerialWrite("[boot] exFAT write-path self-test (synthetic RAM volume).\n");
+    DUETOS_BOOT_SELFTEST(duetos::fs::exfat::ExfatSelfTest());
+
     // Disk-installer layout-math self-test. Pure math (no block I/O,
     // no GPT writes), so cheap to run on every boot. A regression
     // here means the partition layout planner drifted — surfaces
