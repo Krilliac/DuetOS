@@ -9,9 +9,11 @@
  * future ECDH + ECDSA paths in `crypto/ecp.{h,cpp}` (TLS Tier 2).
  * Scope is deliberately narrow:
  *
- *   - Fixed maximum width (kBigIntLimbs * 32 bits = 4096 bits).
- *     Sized for RSA-2048 verify with room for the squared-modulus
- *     product (4096 bits) used inside modular exponentiation.
+ *   - Fixed maximum operand width (kBigIntLimbs * 32 bits = 4096
+ *     bits). Holds an RSA-4096 modulus directly; the 8192-bit
+ *     squared-modulus product used inside modular exponentiation
+ *     lives in a file-local double-width accumulator (bigint.cpp),
+ *     not in a `BigInt`, so the public type stays 512 bytes.
  *   - Unsigned only — RSA / DH / ECP all live in non-negative
  *     modular rings. The Sub family clamps to zero / asserts on
  *     wrap.
@@ -35,10 +37,14 @@
 namespace duetos::crypto
 {
 
-// 128 u32 limbs * 32 bits = 4096 bits. Sized so that an RSA-2048
-// (`BigInt`) value squared fits in the same width without
-// truncation — modular exponentiation does `a^2 mod n` repeatedly
-// and we need the unreduced product to live in the same type.
+// 128 u32 limbs * 32 bits = 4096 bits. This is the maximum OPERAND
+// width — it holds an RSA-4096 modulus (and 2048/3072) directly. The
+// unreduced a*b / a^2 product inside modular exponentiation is up to
+// twice this (8192 bits for RSA-4096); it does NOT live in a `BigInt`.
+// ModExp computes it in a file-local double-width accumulator
+// (`BigIntWide`, bigint.cpp) and reduces it modulo `m` straight back
+// into a `BigInt`, so the public type stays 512 bytes and only ModExp
+// pays the wide cost on its own stack frame.
 inline constexpr u32 kBigIntLimbs = 128;
 inline constexpr u32 kBigIntBits = kBigIntLimbs * 32;
 
@@ -123,7 +129,12 @@ void BigIntModExp(BigInt* out, const BigInt& base, const BigInt& exp, const BigI
 ///   - Mod matches a known small remainder.
 ///   - ModExp computes 2^10 mod 1000 = 24 and 3^65537 mod 65537 = 3
 ///     (Fermat for prime 65537).
-/// Emits `[bigint] PASS` / `[bigint] FAIL <step>` on serial.
+///   - RSA-4096 known-answer vector: sig^e mod n reproduces the
+///     EMSA-PKCS1-v1_5 encoded message (host-OpenSSL provenance, see
+///     bigint_rsa4096_vector.h), plus a full-width (n-1)^2 == 1 (mod n)
+///     carry-stress check. Both exercise the 8192-bit intermediate
+///     product handled by the file-local double-width accumulator.
+/// Emits `[bigint] PASS (... incl 4096)` / `[bigint] FAIL <step>` on serial.
 void BigIntSelfTest();
 
 } // namespace duetos::crypto

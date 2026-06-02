@@ -53,15 +53,14 @@
  *     verifies. Revisit when the network stack can fetch OCSP.
  *   - The full Mozilla / CCADB root program. The embedded store carries
  *     synthetic test roots PLUS a small hand-picked set of real,
- *     widely-trusted roots: RSA-2048 sha256WithRSA roots (DigiCert Global
- *     Root G2, Amazon Root CA 1, GlobalSign Root CA - R3, Go Daddy Root
- *     CA - G2, AffirmTrust Commercial) and P-384 ecdsa-with-SHA384 roots
- *     (DigiCert Global Root G3, ISRG Root X2). Sites whose chains
- *     terminate at any OTHER root fail closed until that root lands.
- *   - RSA-4096 moduli. The kernel bigint is 4096 bits wide, which holds a
- *     2048-bit modulus's squared intermediate but overflows on a 4096-bit
- *     one. RSA-4096 roots/leaves fail closed until the bigint widens.
- *     (EC operands are far smaller — P-384's 768-bit product fits easily.)
+ *     widely-trusted roots: RSA sha256WithRSA roots (the RSA-2048 DigiCert
+ *     Global Root G2, Amazon Root CA 1, GlobalSign Root CA - R3, Go Daddy
+ *     Root CA - G2, AffirmTrust Commercial, plus the RSA-4096 ISRG Root X1 /
+ *     Let's Encrypt) and P-384 ecdsa-with-SHA384 roots (DigiCert Global Root
+ *     G3, ISRG Root X2). Sites whose chains terminate at any OTHER root fail
+ *     closed until that root lands. RSA-4096 moduli are supported: ModExp
+ *     reduces the 8192-bit squared-modulus product in a file-local
+ *     double-width accumulator (crypto/bigint.cpp).
  *   - Cross-signed / multi-path chains, chains deeper than one
  *     intermediate.
  */
@@ -121,10 +120,14 @@ using CertVerifyFn = bool (*)(const u8* leaf_der, u32 leaf_len, const u8* const*
 ///   - a wrong hostname verifies FALSE,
 ///   - an out-of-window `now_unix` verifies FALSE,
 ///   - a leaf with no trusted issuer verifies FALSE,
-///   - every embedded REAL root parses and its own self-signature
-///     verifies (RSA+SHA-256 for the 5 RSA roots, ECDSA+SHA-384 for the
-///     2 P-384 roots), proving the chain-verify code works on real-world
-///     DER, not just the synthetic fixtures.
+///   - every embedded REAL root (6 RSA incl the RSA-4096 ISRG Root X1,
+///     plus 2 P-384 ECDSA) parses, and one representative of each
+///     signature family additionally self-verifies (RSA+SHA-256 on the
+///     first RSA root, ECDSA+SHA-384 on the first ECDSA root), proving
+///     the chain-verify code works on real-world DER, not just the
+///     synthetic fixtures. The RSA-4096 root is parse-only at boot (its
+///     expensive 4096-bit self-verify is gated instead by the bigint
+///     RSA-4096 known-answer vector, crypto/bigint.cpp).
 /// Real leaves are deliberately NOT embedded: they expire, so a
 /// hardcoded live leaf is not a durable self-test — only the roots'
 /// long-lived self-signatures are asserted.
