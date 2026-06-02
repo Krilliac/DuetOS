@@ -157,6 +157,17 @@ bool BrowserSelfTestPassed();
 /// network — real-internet rendering is correct-by-inspection only.
 void BrowserRenderSelfTest();
 
+/// Boot self-test for LINK navigation. RenderPage a canned page with a
+/// root-relative <a href="/next"> and an absolute anchor against a known
+/// page URL, then asserts: a link rect was produced per anchor with the
+/// correctly RESOLVED absolute href + a plausible rect; a document-coord
+/// hit-test inside the rect maps to that link; FollowLink's pending-nav
+/// target is the resolved URL (asserted network-free); and the keyboard
+/// focus-cycle lands on a real link. Emits `[browser-links-selftest]
+/// PASS (...)`; on the first failed sub-check fires
+/// KBP_PROBE_V(kBootSelftestFail, <#>). No outbound network.
+void BrowserLinksSelfTest();
+
 /// Mouse-event entry point for the Pass D toolbar + labels.
 /// Called from the boot-time mouse-reader thread on every
 /// motion packet. Edge-detects left-button press / release

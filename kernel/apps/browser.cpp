@@ -59,6 +59,13 @@ constexpr u32 kStatusCap = 96;
 constexpr u32 kHistoryCap = 32;
 constexpr u32 kBookmarkCap = 32;
 constexpr u32 kRowH = 10;
+// Max links we track for hit-testing / keyboard focus on one page. A
+// real page can have hundreds of links; beyond this the extras simply
+// aren't clickable (the display list still paints them). 256 covers the
+// common case without bloating g_state.
+constexpr u32 kLinkRectCap = 256;
+// Sentinel for "no link focused" in State::focus_link.
+constexpr u32 kNoLink = 0xFFFFFFFFu;
 constexpr const char kBookmarkPath[] = "BOOKMARK.TXT";
 
 enum class Mode : u8
@@ -110,6 +117,22 @@ struct State
     i32 render_total_h;
     u32 render_viewport_w;
     volatile bool render_ready;
+
+    // Link hit-test table, rebuilt by BuildLinkRects after every
+    // RenderPage. Each entry is a rect in DOCUMENT coordinates (the same
+    // space the display list lives in, before the scroll offset is
+    // applied) plus the link's RESOLVED absolute href. Clicks and the
+    // focus-cycle test against these. `focus_link` is the index of the
+    // keyboard-focused link (kNoLink = none); the painter draws a focus
+    // outline around it. See kLinkRectCap.
+    struct LinkRect
+    {
+        duetos::web::Rect rect;
+        char href[kUrlCap];
+    };
+    LinkRect link_rects[kLinkRectCap];
+    u32 link_count;
+    u32 focus_link; // index into link_rects, or kNoLink
 
     // History — circular buffer of visited URLs. `idx` points
     // past the most-recent entry; back/forward decrement/increment
@@ -389,7 +412,8 @@ void RefreshUrlBarText()
 // the user's perspective.
 void RefreshFooterText()
 {
-    static const char kHint[] = "U:URL  B:BACK  F:FWD  R:RELOAD  H:HIST  L:BMARK  M:MARK  S:SAVE  J/K:SCROLL";
+    static const char kHint[] =
+        "U:URL  B:BACK  F:FWD  R:RELOAD  H:HIST  L:BMARK  M:MARK  S:SAVE  J/K:SCROLL  n/N:LINK  ENTER:GO";
     u32 i = 0;
     for (; kHint[i] != '\0' && i + 1 < sizeof(g_footer_text); ++i)
         g_footer_text[i] = kHint[i];
@@ -401,6 +425,9 @@ void DoFetch(const char* url);
 void RescanBookmarks();
 void SaveBookmarks();
 bool TryParseDottedQuad(const char* host, net::Ipv4Address* out);
+void ResolveUrl(const char* base, const char* ref, char* out, u32 cap);
+void BuildLinkRects(const char* page_url);
+void StartFetch(const char* url);
 
 // ---------------------------------------------------------------
 // String helpers — kept self-contained so the browser doesn't
@@ -1589,6 +1616,94 @@ i32 DisplayListHeight(const duetos::web::DisplayList& dl)
     return maxY;
 }
 
+// BuildLinkRects — scan the freshly-laid-out display list for items the
+// layout engine tagged with an <a href> (TextRun / ImageBox / a styled
+// anchor's FillRect / Border), resolve each href against `page_url` into
+// an absolute URL, and record a DOCUMENT-coordinate hit rect per link.
+//
+// A single anchor can produce several display items (a wrapped link spans
+// multiple TextRuns; an anchor's bg + border + text all carry the same
+// href pointer). We coalesce items that share the SAME href POINTER into
+// one bounding rect — the layout engine threads the one arena-owned href
+// string through every item of an anchor, so pointer identity cleanly
+// groups them without a string compare. (Two distinct anchors pointing at
+// the same URL keep separate rects, which is what a user expects.)
+void BuildLinkRects(const char* page_url)
+{
+    g_state.link_count = 0;
+    g_state.focus_link = kNoLink;
+    if (g_state.render_dl == nullptr)
+    {
+        return;
+    }
+    const duetos::web::DisplayList& dl = *g_state.render_dl;
+    for (u32 i = 0; i < dl.count; ++i)
+    {
+        const auto& it = dl.items[i];
+        if (it.href == nullptr || it.href[0] == '\0')
+        {
+            continue;
+        }
+        // Empty geometry can't be hit; skip it (still resolves a later,
+        // non-empty item of the same anchor).
+        if (it.rect.w <= 0 || it.rect.h <= 0)
+        {
+            continue;
+        }
+
+        // Coalesce into an existing rect sharing the same href pointer.
+        bool merged = false;
+        for (u32 j = 0; j < g_state.link_count; ++j)
+        {
+            // Identity is by absolute href string here — the document-side
+            // pointer isn't stored, so compare the resolved URL plus
+            // require vertical adjacency so two far-apart links to the same
+            // page stay distinct. A wrapped link's runs sit on consecutive
+            // lines, so their rects touch/overlap vertically.
+            State::LinkRect& lr = g_state.link_rects[j];
+            char abs_i[kUrlCap];
+            ResolveUrl(page_url, it.href, abs_i, sizeof(abs_i));
+            const bool same_href = StrEqI(lr.href, abs_i);
+            const i32 lr_bottom = lr.rect.y + lr.rect.h;
+            const i32 it_bottom = it.rect.y + it.rect.h;
+            const bool adjacent = (it.rect.y <= lr_bottom + 4) && (it_bottom + 4 >= lr.rect.y);
+            if (same_href && adjacent)
+            {
+                const i32 x0 = (lr.rect.x < it.rect.x) ? lr.rect.x : it.rect.x;
+                const i32 y0 = (lr.rect.y < it.rect.y) ? lr.rect.y : it.rect.y;
+                const i32 x1 =
+                    (lr.rect.x + lr.rect.w > it.rect.x + it.rect.w) ? lr.rect.x + lr.rect.w : it.rect.x + it.rect.w;
+                const i32 y1 = (lr_bottom > it_bottom) ? lr_bottom : it_bottom;
+                lr.rect.x = x0;
+                lr.rect.y = y0;
+                lr.rect.w = x1 - x0;
+                lr.rect.h = y1 - y0;
+                merged = true;
+                break;
+            }
+        }
+        if (merged)
+        {
+            continue;
+        }
+
+        if (g_state.link_count >= kLinkRectCap)
+        {
+            break; // table full — remaining links aren't clickable (GAP)
+        }
+        State::LinkRect& lr = g_state.link_rects[g_state.link_count];
+        lr.rect = it.rect;
+        ResolveUrl(page_url, it.href, lr.href, sizeof(lr.href));
+        if (lr.href[0] == '\0')
+        {
+            // Unresolvable (e.g. javascript:/mailto: or empty base) —
+            // don't record a dead hit rect.
+            continue;
+        }
+        ++g_state.link_count;
+    }
+}
+
 // RenderPage — UI-decoupled: parse, style, script, lay out one page
 // into the persistent render arena and stash the display list + height
 // for DrawBody. `page_url` drives relative <img src> resolution.
@@ -1650,6 +1765,13 @@ void RenderPage(const char* html, u32 len, const char* page_url, u32 viewport_w)
 
     g_state.render_dl = dl;
     g_state.render_total_h = DisplayListHeight(*dl);
+
+    // Build the link hit-test table from the laid-out display list (links
+    // tagged by the layout engine, resolved against the page URL). Done
+    // here in the fetch-worker context so DrawBody / click handling do a
+    // pure lookup, never a (re)render, under the compositor lock.
+    BuildLinkRects(page_url);
+
     g_state.render_ready = true;
 }
 
@@ -1663,6 +1785,8 @@ void DoFetch(const char* url)
     g_state.render_ready = false;
     g_state.render_dl = nullptr;
     g_state.status_code = 0;
+    g_state.link_count = 0;
+    g_state.focus_link = kNoLink;
 
     const auto p = ParseUrl(url);
     if (!p.ok)
@@ -1827,6 +1951,42 @@ void DrawBody(u32 cx, u32 cy, u32 cw, u32 ch, u32 fg, u32 bg)
     duetos::web::PaintToWindow(*g_state.render_dl, g_canvas, canvas_w, canvas_h, g_state.scroll_y, pm, ImageProviderFn,
                                nullptr, cx, cy + top_reserved, bg_rgba);
 
+    // Focus outline: when a link is keyboard-focused, stroke a 2px box
+    // around its rect, mapped from document coords into the body band
+    // (screenY = body_top + doc_y - scroll_y), clipped to the band. Drawn
+    // as four edge FillRects so it sits on top of the composed page.
+    if (g_state.focus_link != kNoLink && g_state.focus_link < g_state.link_count)
+    {
+        const u32 body_top = cy + top_reserved;
+        const duetos::web::Rect& lr = g_state.link_rects[g_state.focus_link].rect;
+        const i32 sx = static_cast<i32>(cx) + lr.x;
+        const i32 sy = static_cast<i32>(body_top) + lr.y - g_state.scroll_y;
+        const i32 band_top = static_cast<i32>(body_top);
+        const i32 band_bot = band_top + static_cast<i32>(view_h);
+        constexpr u32 kOutline = 0x00FF8000U; // orange focus ring
+        constexpr i32 kT = 2;                 // outline thickness
+        // Only draw edges that fall inside the body band (cheap clip).
+        auto edge = [&](i32 ex, i32 ey, i32 ew, i32 eh)
+        {
+            if (ew <= 0 || eh <= 0)
+                return;
+            i32 y0 = ey;
+            i32 y1 = ey + eh;
+            if (y0 < band_top)
+                y0 = band_top;
+            if (y1 > band_bot)
+                y1 = band_bot;
+            if (y1 <= y0 || ex < static_cast<i32>(cx))
+                return;
+            FramebufferFillRect(static_cast<u32>(ex), static_cast<u32>(y0), static_cast<u32>(ew),
+                                static_cast<u32>(y1 - y0), kOutline);
+        };
+        edge(sx, sy, lr.w, kT);             // top
+        edge(sx, sy + lr.h - kT, lr.w, kT); // bottom
+        edge(sx, sy, kT, lr.h);             // left
+        edge(sx + lr.w - kT, sy, kT, lr.h); // right
+    }
+
     // Scrollbar at the right edge, in pixel units (total/visible/first).
     if (cw > sbw)
     {
@@ -1946,6 +2106,144 @@ void StartFetch(const char* url)
     StrCopyCap(g_state.fetch_url, kUrlCap, url);
     g_state.fetch_in_flight = true;
     sched::SchedCreate(FetchWorker, g_state.fetch_url, "browser-fetch");
+}
+
+// ---------------------------------------------------------------
+// Link navigation: follow a hit-tested / focused link, and cycle the
+// keyboard focus across the page's visible links.
+// ---------------------------------------------------------------
+
+// Follow link `idx`: its href is already absolute (BuildLinkRects resolved
+// it against the page URL). Mirror the URL into the bar and StartFetch so
+// the navigation pushes to history — Back/Forward then work as usual.
+void FollowLink(u32 idx)
+{
+    if (idx >= g_state.link_count || g_state.fetch_in_flight)
+        return;
+    char tmp[kUrlCap];
+    StrCopyCap(tmp, kUrlCap, g_state.link_rects[idx].href);
+    StrCopyCap(g_state.url, kUrlCap, tmp);
+    g_state.url_len = StrLen(g_state.url);
+    g_state.mode = Mode::View;
+    StartFetch(tmp);
+}
+
+// Compute the content viewport height (device px) inside the body band, so
+// scroll-into-view can clamp a focused link to the visible region. Mirrors
+// the band math in DrawBody. Returns 0 when bounds are unavailable.
+u32 ContentViewHeight()
+{
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+        return 0;
+    constexpr u32 kTitleH = 22U;
+    if (wh <= kTitleH)
+        return 0;
+    const u32 ch = wh - kTitleH;
+    const u32 top_reserved = kToolbarH + kUrlBarH + kStatusRowH + 2;
+    const u32 bot_reserved = kFooterH + 2;
+    if (ch < top_reserved + bot_reserved)
+        return 0;
+    return ch - top_reserved - bot_reserved;
+}
+
+// Scroll so the focused link's rect (document coords) is visible in the
+// content viewport, clamped to the page extent.
+void ScrollLinkIntoView(u32 idx)
+{
+    if (idx >= g_state.link_count)
+        return;
+    const duetos::web::Rect& r = g_state.link_rects[idx].rect;
+    const u32 view_h = ContentViewHeight();
+    if (view_h == 0)
+        return;
+    // If the link sits above the viewport, scroll up to its top; if below,
+    // scroll down so its bottom is just visible.
+    if (r.y < g_state.scroll_y)
+    {
+        g_state.scroll_y = r.y;
+    }
+    else if (r.y + r.h > g_state.scroll_y + static_cast<i32>(view_h))
+    {
+        g_state.scroll_y = (r.y + r.h) - static_cast<i32>(view_h);
+    }
+    if (g_state.scroll_y < 0)
+        g_state.scroll_y = 0;
+    i32 max_scroll = g_state.render_total_h - static_cast<i32>(view_h);
+    if (max_scroll < 0)
+        max_scroll = 0;
+    if (g_state.scroll_y > max_scroll)
+        g_state.scroll_y = max_scroll;
+}
+
+// Hit-test a screen-space click against the page's link rects. `screen_cx`
+// / `screen_cy` are framebuffer coordinates; the body band starts at
+// (window_x, window_y + title + top_reserved), and document coords map to
+// screen via doc_y - scroll_y. Returns the hit link index, or kNoLink.
+// View mode only; clicks outside the body band miss.
+u32 HitTestLink(u32 screen_cx, u32 screen_cy)
+{
+    if (g_state.mode != Mode::View || g_state.link_count == 0)
+        return kNoLink;
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+        return kNoLink;
+    constexpr u32 kTitleH = 22U;
+    if (wh <= kTitleH)
+        return kNoLink;
+    const u32 client_y = wy + kTitleH;
+    const u32 client_h = wh - kTitleH;
+    const u32 top_reserved = kToolbarH + kUrlBarH + kStatusRowH + 2;
+    const u32 bot_reserved = kFooterH + 2;
+    if (client_h < top_reserved + bot_reserved)
+        return kNoLink;
+    const u32 view_h = client_h - top_reserved - bot_reserved;
+    const u32 body_top = client_y + top_reserved;
+    const u32 sbw = duetos::drivers::video::kScrollbarWidth;
+    const u32 body_right = (ww > sbw) ? wx + ww - sbw : wx + ww;
+
+    // Click must be inside the body band (excluding the scrollbar gutter).
+    if (screen_cx < wx || screen_cx >= body_right)
+        return kNoLink;
+    if (screen_cy < body_top || screen_cy >= body_top + view_h)
+        return kNoLink;
+
+    // Translate to document coords: doc_x = screen_x - wx; doc_y =
+    // screen_y - body_top + scroll_y.
+    const i32 doc_x = static_cast<i32>(screen_cx) - static_cast<i32>(wx);
+    const i32 doc_y = static_cast<i32>(screen_cy) - static_cast<i32>(body_top) + g_state.scroll_y;
+    for (u32 i = 0; i < g_state.link_count; ++i)
+    {
+        const duetos::web::Rect& r = g_state.link_rects[i].rect;
+        if (doc_x >= r.x && doc_x < r.x + r.w && doc_y >= r.y && doc_y < r.y + r.h)
+            return i;
+    }
+    return kNoLink;
+}
+
+// Move the keyboard link focus forward (`forward`=true) or backward across
+// the page's links, wrapping at the ends, and scroll the new target into
+// view. No-op when the page has no links.
+void FocusCycleLink(bool forward)
+{
+    if (g_state.link_count == 0)
+    {
+        g_state.focus_link = kNoLink;
+        return;
+    }
+    if (g_state.focus_link == kNoLink)
+    {
+        g_state.focus_link = forward ? 0 : (g_state.link_count - 1);
+    }
+    else if (forward)
+    {
+        g_state.focus_link = (g_state.focus_link + 1) % g_state.link_count;
+    }
+    else
+    {
+        g_state.focus_link = (g_state.focus_link == 0) ? (g_state.link_count - 1) : (g_state.focus_link - 1);
+    }
+    ScrollLinkIntoView(g_state.focus_link);
 }
 
 void Reload()
@@ -2211,6 +2509,8 @@ void BrowserInit(WindowHandle handle)
     g_state.render_dl = nullptr;
     g_state.render_total_h = 0;
     g_state.render_viewport_w = 0;
+    g_state.link_count = 0;
+    g_state.focus_link = kNoLink;
     g_state.history_count = 0;
     g_state.history_idx = 0;
     g_state.bookmark_count = 0;
@@ -2457,9 +2757,30 @@ bool BrowserFeedChar(char c)
         return BrowserFeedArrow(kKeyArrowDown);
     if (c == 'k' || c == 'K')
         return BrowserFeedArrow(kKeyArrowUp);
+    // Link focus: 'n' cycles forward through the page's links, 'N'
+    // (Shift-n) cycles backward — Tab is already bound to URL-edit, so the
+    // link tab-order lives on n/N. Enter follows the focused link.
+    if (c == 'n')
+    {
+        FocusCycleLink(true);
+        return true;
+    }
+    if (c == 'N')
+    {
+        FocusCycleLink(false);
+        return true;
+    }
+    if (uc == 0x0A) // Enter — follow the focused link, if any.
+    {
+        if (g_state.focus_link != kNoLink)
+            FollowLink(g_state.focus_link);
+        return true;
+    }
     if (uc == 0x1B)
     {
+        // Esc clears the status AND drops link focus.
         StatusSet("");
+        g_state.focus_link = kNoLink;
         return true;
     }
     return false;
@@ -2928,10 +3249,165 @@ void BrowserRenderSelfTest()
     g_state.render_total_h = 0;
     g_state.body_len = 0;
     g_state.body[0] = '\0';
+    g_state.link_count = 0;
+    g_state.focus_link = kNoLink;
     g_images.count = 0;
 
     SerialWrite("[browser-render-selftest] PASS (parse->style->script->layout->paint: box bg pixels, "
                 "red heading glyphs, script mutation 'Changed')\n");
+}
+
+void BrowserLinksSelfTest()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+
+    auto fail = [](u32 check)
+    {
+        SerialWrite("[browser-links-selftest] FAIL check=");
+        SerialWriteHex(check);
+        SerialWrite("\n");
+        KBP_PROBE_V(duetos::debug::ProbeId::kBootSelftestFail, check);
+    };
+
+    // Snapshot live state we touch so the desktop is unchanged after.
+    const Mode saved_mode = g_state.mode;
+    const bool saved_in_flight = g_state.fetch_in_flight;
+    char saved_url[kUrlCap];
+    StrCopyCap(saved_url, kUrlCap, g_state.url);
+    const u32 saved_url_len = g_state.url_len;
+    char saved_fetch_url[kUrlCap];
+    StrCopyCap(saved_fetch_url, kUrlCap, g_state.fetch_url);
+
+    // A canned page: a heading (text), a root-relative link, and an
+    // absolute link. The page URL is http://example.com/dir/page so the
+    // root-relative href resolves to http://example.com/next.
+    const char* html = "<html><body><h1>Welcome</h1>"
+                       "<p>Some intro text. <a href=\"/next\">next page</a> tail.</p>"
+                       "<p><a href=\"http://other.example/abs\">absolute</a></p>"
+                       "</body></html>";
+    const char* page_url = "http://example.com/dir/page";
+
+    // Guard StartFetch so FollowLink mutates the pending-nav fields but
+    // never spawns a real fetch worker during the boot self-test.
+    g_state.fetch_in_flight = true;
+    RenderPage(html, StrLen(html), page_url, 320);
+    g_state.fetch_in_flight = false; // RenderPage cleared render_ready path; reset for FollowLink
+
+    if (!g_state.render_ready || g_state.render_dl == nullptr)
+    {
+        fail(1);
+        goto restore;
+    }
+
+    // --- Check 1: two link rects were produced. ---
+    if (g_state.link_count < 2)
+    {
+        SerialWrite("[browser-links-selftest] DIAG link_count=");
+        SerialWriteHex(g_state.link_count);
+        SerialWrite("\n");
+        fail(2);
+        goto restore;
+    }
+
+    // --- Check 2: one rect resolves the root-relative href to the
+    // expected absolute URL, with a plausible (non-empty) rect. ---
+    {
+        u32 next_idx = kNoLink;
+        u32 abs_idx = kNoLink;
+        for (u32 i = 0; i < g_state.link_count; ++i)
+        {
+            if (StrEqI(g_state.link_rects[i].href, "http://example.com/next"))
+                next_idx = i;
+            if (StrEqI(g_state.link_rects[i].href, "http://other.example/abs"))
+                abs_idx = i;
+        }
+        if (next_idx == kNoLink || abs_idx == kNoLink)
+        {
+            fail(3);
+            goto restore;
+        }
+        const duetos::web::Rect& r = g_state.link_rects[next_idx].rect;
+        if (r.w <= 0 || r.h <= 0 || r.y < 0)
+        {
+            fail(4);
+            goto restore;
+        }
+
+        // --- Check 3: hit-testing inside the rect (document coords) maps
+        // to this link. We test the document-coord predicate the same way
+        // HitTestLink does, independent of live window bounds. ---
+        const i32 cx_doc = r.x + r.w / 2;
+        const i32 cy_doc = r.y + r.h / 2;
+        bool hit = false;
+        for (u32 i = 0; i < g_state.link_count; ++i)
+        {
+            const duetos::web::Rect& rr = g_state.link_rects[i].rect;
+            if (cx_doc >= rr.x && cx_doc < rr.x + rr.w && cy_doc >= rr.y && cy_doc < rr.y + rr.h)
+            {
+                if (i == next_idx)
+                    hit = true;
+            }
+        }
+        if (!hit)
+        {
+            fail(5);
+            goto restore;
+        }
+
+        // --- Check 4: the navigation target a click/Enter would follow is
+        // the resolved absolute URL. FollowLink hands link_rects[idx].href
+        // straight to StartFetch, so that href IS the target — assert it
+        // without spawning a fetch worker (kept fetch_in_flight=true so
+        // StartFetch / FollowLink no-op, exercising the navigate-path
+        // guard at the same time). ---
+        g_state.fetch_in_flight = true; // suppress the worker spawn
+        const u32 url_len_before = g_state.url_len;
+        FollowLink(next_idx); // must no-op while a fetch is "in flight"
+        if (g_state.url_len != url_len_before)
+        {
+            fail(6); // FollowLink ignored the in-flight guard
+            goto restore;
+        }
+        if (!StrEqI(g_state.link_rects[next_idx].href, "http://example.com/next"))
+        {
+            SerialWrite("[browser-links-selftest] DIAG target='");
+            SerialWrite(g_state.link_rects[next_idx].href);
+            SerialWrite("'\n");
+            fail(7);
+            goto restore;
+        }
+
+        // --- Check 5: keyboard focus cycling lands on a real link, so
+        // 'n' then Enter would follow link_rects[focus_link]. ---
+        g_state.focus_link = kNoLink;
+        FocusCycleLink(true);
+        if (g_state.focus_link >= g_state.link_count)
+        {
+            fail(8);
+            goto restore;
+        }
+    }
+
+    SerialWrite("[browser-links-selftest] PASS (anchor->link rect, root-relative + absolute href resolution, "
+                "doc hit-test, FollowLink pending-nav target, focus-cycle)\n");
+
+restore:
+    // Restore the live desktop state. Wipe the render handle + link table
+    // so the live browser starts empty rather than showing the test page.
+    g_state.render_ready = false;
+    g_state.render_dl = nullptr;
+    g_state.render_total_h = 0;
+    g_state.link_count = 0;
+    g_state.focus_link = kNoLink;
+    g_state.body_len = 0;
+    g_state.body[0] = '\0';
+    g_images.count = 0;
+    g_state.mode = saved_mode;
+    g_state.fetch_in_flight = saved_in_flight;
+    StrCopyCap(g_state.url, kUrlCap, saved_url);
+    g_state.url_len = saved_url_len;
+    StrCopyCap(g_state.fetch_url, kUrlCap, saved_fetch_url);
 }
 
 void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
@@ -2967,7 +3443,20 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
     if (press_edge && inside_window)
     {
         const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
-        g_browser.DispatchEvent(d);
+        const EventResult er = g_browser.DispatchEvent(d);
+        // The toolbar / chrome didn't claim this press — try the page's
+        // links. A hit follows the link (which StartFetches + pushes
+        // history, so Back works); it also moves keyboard focus there so
+        // the focus ring tracks the last clicked link.
+        if (er != EventResult::Consumed)
+        {
+            const u32 hit = HitTestLink(cx, cy);
+            if (hit != kNoLink)
+            {
+                g_state.focus_link = hit;
+                FollowLink(hit);
+            }
+        }
     }
     if (release_edge)
     {

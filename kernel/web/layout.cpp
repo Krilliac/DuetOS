@@ -72,8 +72,10 @@ bool HasBlockChild(const LayoutCtx& ctx, const Node* node)
 }
 
 // Emit an <img> ImageBox sized by width/height style (default placeholder
-// otherwise). Returns the box height consumed.
-i32 LayoutImage(LayoutCtx& ctx, const Node* node, const ComputedStyle& s, i32 x, i32 cbWidth, i32 y)
+// otherwise). Returns the box height consumed. `linkHref` (when non-null)
+// tags the box so an <a href><img></a> is hit-testable as a link.
+i32 LayoutImage(LayoutCtx& ctx, const Node* node, const ComputedStyle& s, i32 x, i32 cbWidth, i32 y,
+                const char* linkHref)
 {
     const i32 w = ResolveLength(s.width, cbWidth, kDefaultImgW);
     const i32 h = ResolveLength(s.height, 0, kDefaultImgH);
@@ -89,6 +91,11 @@ i32 LayoutImage(LayoutCtx& ctx, const Node* node, const ComputedStyle& s, i32 x,
         it.src = src;
         it.srcLen = static_cast<u32>(duetos::core::StrLen(src));
     }
+    if (linkHref != nullptr)
+    {
+        it.href = linkHref;
+        it.hrefLen = static_cast<u32>(duetos::core::StrLen(linkHref));
+    }
     ctx.out->Push(it);
     return it.rect.h;
 }
@@ -98,7 +105,7 @@ i32 LayoutImage(LayoutCtx& ctx, const Node* node, const ComputedStyle& s, i32 x,
 // Lay one block-level `node` out. The containing block content runs from
 // [cbX, cbX+cbWidth); the box's top margin edge sits at `originY`.
 // Returns the y just past this box's bottom margin edge.
-i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 originY)
+i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 originY, const char* linkHref)
 {
     const ComputedStyle* sp = StyleOf(ctx, node);
     if (sp == nullptr)
@@ -111,13 +118,22 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
         return originY; // skip subtree entirely
     }
 
+    // An <a href> at block level becomes the active link for this box and
+    // everything it contains; non-anchor blocks keep the inherited link so
+    // a block wrapped by an ancestor anchor stays a link surface.
+    const char* selfHref = AnchorHref(node);
+    if (selfHref == nullptr)
+    {
+        selfHref = linkHref;
+    }
+
     // <img> as a block-level box.
     if (node->tag != nullptr && duetos::core::StrEqual(node->tag, "img"))
     {
         const i32 mTop = EdgePx(s.margin.top, cbWidth);
         const i32 mBot = EdgePx(s.margin.bottom, cbWidth);
         const i32 mLeft = EdgePx(s.margin.left, cbWidth);
-        const i32 h = LayoutImage(ctx, node, s, cbX + mLeft, cbWidth, originY + mTop);
+        const i32 h = LayoutImage(ctx, node, s, cbX + mLeft, cbWidth, originY + mTop, selfHref);
         return originY + mTop + h + mBot;
     }
 
@@ -155,11 +171,18 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
     constexpr u32 kNoSlot = 0xFFFFFFFFu;
     u32 bgSlot = kNoSlot;
     u32 borderSlot = kNoSlot;
+    // A styled <a href> block (background / border) is a clickable surface
+    // too, so tag its bg/border items with the link — that way a link with
+    // no text run (e.g. an image-only or padding-only anchor) is still
+    // hit-testable from its painted box.
+    const u32 selfHrefLen = (selfHref != nullptr) ? static_cast<u32>(duetos::core::StrLen(selfHref)) : 0;
     if (s.backgroundColor.a != 0)
     {
         DisplayItem placeholder; // FillRect, geometry backfilled below
         placeholder.cmd = DisplayCmd::FillRect;
         placeholder.color = s.backgroundColor;
+        placeholder.href = selfHref;
+        placeholder.hrefLen = selfHrefLen;
         if (ctx.out->Push(placeholder))
         {
             bgSlot = ctx.out->count - 1;
@@ -171,6 +194,8 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
         placeholder.cmd = DisplayCmd::Border;
         placeholder.color = s.border.color;
         placeholder.borderWidth = bw;
+        placeholder.href = selfHref;
+        placeholder.hrefLen = selfHrefLen;
         if (ctx.out->Push(placeholder))
         {
             borderSlot = ctx.out->count - 1;
@@ -182,7 +207,7 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
     const bool inlineCtx = !HasBlockChild(ctx, node);
     if (inlineCtx)
     {
-        childY = LayoutInline(ctx, node, s, contentX, contentW, contentTop);
+        childY = LayoutInline(ctx, node, s, contentX, contentW, contentTop, selfHref);
     }
     else
     {
@@ -190,7 +215,7 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
         {
             if (c->kind == NodeKind::Element)
             {
-                childY = LayoutBlock(ctx, c, contentX, contentW, childY);
+                childY = LayoutBlock(ctx, c, contentX, contentW, childY, selfHref);
             }
             else if (c->kind == NodeKind::Text && c->text != nullptr)
             {
@@ -211,7 +236,7 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
                 }
                 if (nonWs)
                 {
-                    InlineRun one{c->text, static_cast<u32>(duetos::core::StrLen(c->text)), &s};
+                    InlineRun one{c->text, static_cast<u32>(duetos::core::StrLen(c->text)), &s, selfHref};
                     EmitTextRun(ctx, one, 0, one.len, contentX, childY);
                     childY += LineHeightPx(s);
                 }
@@ -286,7 +311,7 @@ DisplayList* LayoutDocument(const Node* doc, const StyleMap& styles, u32 viewpor
     {
         if (c->kind == NodeKind::Element)
         {
-            y = layout_detail::LayoutBlock(ctx, c, 0, static_cast<i32>(viewportW), y);
+            y = layout_detail::LayoutBlock(ctx, c, 0, static_cast<i32>(viewportW), y, /*linkHref=*/nullptr);
         }
     }
     return list;

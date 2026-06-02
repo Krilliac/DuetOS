@@ -3231,6 +3231,13 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // pixels + that the script mutation reached the display list.
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserRenderSelfTest());
 
+    // Browser LINK navigation self-test. Renders a canned page with a
+    // root-relative + absolute <a href>, asserts the layout-tagged link
+    // rects resolve to the right absolute URLs, that a hit-test inside a
+    // rect maps to the link, and that the follow/focus paths target the
+    // resolved URL — all network-free.
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserLinksSelfTest());
+
     // CALENDAR — windowed month-view sibling of the read-only
     // taskbar-clock popup. Lets the user page through past / future
     // months. Hidden by default; raised from the Start menu's
