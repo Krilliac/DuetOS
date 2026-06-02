@@ -1,6 +1,7 @@
 #include "net/ec.h"
 
 #include "arch/x86_64/serial.h"
+#include "core/panic.h"
 #include "crypto/bigint.h"
 #include "debug/probes.h"
 
@@ -319,6 +320,17 @@ bool ScalarMul(Point* out, const BigInt& k, const Point& base, const BigInt& a, 
     // soft-lockup watchdog under TCG. k.used == 0 means k == 0 -> infinity.
     if (k.used == 0)
         return JacToAffine(out, acc, p);
+
+    // Defensive backstop: a correctly reduced scalar (k < n) walks at most
+    // n's bit length of doublings (256 for P-256, 384 for P-384). The
+    // bound below (k.used * 32) is the populated width and is what the
+    // loop actually iterates; the KASSERT pins it to a sane ceiling so a
+    // future caller that forgets to reduce k mod n trips here instead of
+    // pinning the CPU. kMaxScalarBits covers any supported curve with
+    // generous slack and never fires on the reduced ECDSA-verify inputs.
+    constexpr u32 kMaxScalarBits = 521;
+    KASSERT(k.used * 32u <= kMaxScalarBits, "net/ec", "ScalarMul: scalar wider than any supported curve (unreduced?)");
+
     for (i32 limb = static_cast<i32>(k.used) - 1; limb >= 0; --limb)
     {
         for (i32 bit = 31; bit >= 0; --bit)

@@ -83,6 +83,21 @@ testable functionality:
   Root G3, ISRG Root X2) alongside the 5 RSA-2048 roots. GAP:
   P-521 / brainpool / Ed25519 / compressed points / ecdsa-with-SHA1
   / full root program / revocation. `[x509-verify-selftest] PASS`.
+  Chain building gates the signature verify on RFC 5280 issuer/subject
+  DN equality (`IssuerSigns` short-circuits before spending an
+  ECDSA/RSA verify on a non-matching anchor) — correctness AND a
+  boot-budget guard. The boot real-root pass PARSES every embedded
+  anchor but self-signature-verifies only ONE representative per
+  signature family (1 RSA + 1 ECDSA); a full public-key self-verify of
+  every anchor was too costly under TCG (a single P-384 ECDSA verify is
+  tens of seconds). Both `IssuerSigns` legs are still exercised.
+- `crypto/bigint.cpp` — `BigIntMod` uses a fast narrow long-division
+  path bounded to the modulus' active limb window rather than the full
+  128-limb (4096-bit) width. The old full-width shift/subtract per bit
+  turned a P-384 ECDSA verify into a multi-minute grind and froze the
+  audit boot self-test right after `[ec-selftest] PASS`. `ScalarMul`
+  carries a defensive KASSERT that an unreduced scalar (wider than any
+  supported curve) trips instead of pinning the CPU. `[bigint] PASS`.
 - `crypto/aes_gcm.{h,cpp}` — AES-128-GCM AEAD encrypt +
   decrypt, validated against NIST SP 800-38D vectors v1 + v2
   with round-trip + tamper detection. `[aes-gcm] PASS`.
