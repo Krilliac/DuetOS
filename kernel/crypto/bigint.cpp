@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "crypto/bigint_rsa4096_vector.h"
 #include "util/compiler.h"
 
 namespace duetos::crypto
@@ -44,6 +45,178 @@ u32 GetBit(const BigInt& a, u32 idx)
     if (limb >= kBigIntLimbs)
         return 0;
     return (a.limbs[limb] >> (idx % 32)) & 1u;
+}
+
+// ---- double-width product accumulator ---------------------------
+//
+// A `BigInt` holds an operand up to kBigIntBits (4096). Squaring a
+// 4096-bit value (RSA-4096 ModExp) yields up to 8192 bits, which does
+// not fit in a `BigInt` — the narrow BigIntMul tripped its "Mul carry
+// overflow" KASSERT on exactly that case. ModExp computes that product
+// here in a file-local 8192-bit accumulator, then reduces it modulo
+// `m` straight back into a `BigInt`. The wide type NEVER escapes this
+// file and the public `BigInt` stays 512 bytes: only ModExp pays the
+// wide (1 KiB) cost, and only on its own stack frame.
+//
+// The narrow-window `BigIntMod` fast path (below) is untouched — it is
+// the hot path for ECDSA P-256/P-384 reductions, where operands are a
+// dozen limbs and routing through the full 8192-bit loop would be a
+// gross regression. Wide reduction is used ONLY inside ModExp.
+inline constexpr u32 kBigIntProductLimbs = kBigIntLimbs * 2; // 256 limbs = 8192 bits
+
+struct BigIntWide
+{
+    u32 limbs[kBigIntProductLimbs];
+    u32 used;
+};
+
+void WideTrimUsed(BigIntWide* a)
+{
+    u32 u = kBigIntProductLimbs;
+    while (u > 0 && a->limbs[u - 1] == 0)
+        --u;
+    a->used = u;
+}
+
+u32 WideBitLength(const BigIntWide& a)
+{
+    if (a.used == 0)
+        return 0;
+    u32 v = a.limbs[a.used - 1];
+    u32 bits = (a.used - 1) * 32;
+    while (v != 0)
+    {
+        ++bits;
+        v >>= 1;
+    }
+    return bits;
+}
+
+u32 WideGetBit(const BigIntWide& a, u32 idx)
+{
+    const u32 limb = idx / 32;
+    if (limb >= kBigIntProductLimbs)
+        return 0;
+    return (a.limbs[limb] >> (idx % 32)) & 1u;
+}
+
+// out = a * b into the double-width accumulator. Both operands are at
+// most kBigIntBits, so the product is at most 2*kBigIntBits and every
+// column index stays < kBigIntProductLimbs. Schoolbook O(n^2), same
+// shape as the narrow BigIntMul but with no carry assertion because
+// the accumulator cannot overflow.
+DUETOS_NO_SANITIZE_WRAP void MulWide(BigIntWide* out, const BigInt& a, const BigInt& b)
+{
+    for (u32 i = 0; i < kBigIntProductLimbs; ++i)
+        out->limbs[i] = 0;
+    const u32 a_used = a.used;
+    const u32 b_used = b.used;
+    for (u32 i = 0; i < a_used; ++i)
+    {
+        if (a.limbs[i] == 0)
+            continue;
+        u64 carry = 0;
+        for (u32 j = 0; j < b_used; ++j)
+        {
+            const u32 idx = i + j;
+            const u64 acc = u64(out->limbs[idx]) + u64(a.limbs[i]) * u64(b.limbs[j]) + carry;
+            out->limbs[idx] = static_cast<u32>(acc & 0xFFFFFFFFu);
+            carry = acc >> 32;
+        }
+        // Propagate the final carry into the higher columns. Column
+        // i + b_used may already hold a partial sum from an earlier
+        // row, so adding `carry` can itself carry — ripple it up.
+        // i + b_used <= a_used + b_used <= 2*kBigIntLimbs, so every
+        // touched column is in range and the ripple terminates well
+        // before kBigIntProductLimbs.
+        u32 k = i + b_used;
+        while (carry != 0)
+        {
+            const u64 acc = u64(out->limbs[k]) + carry;
+            out->limbs[k] = static_cast<u32>(acc & 0xFFFFFFFFu);
+            carry = acc >> 32;
+            ++k;
+        }
+    }
+    WideTrimUsed(out);
+}
+
+// out = a mod m, where `a` is a double-width value and `m` is a
+// `BigInt` (the modulus, <= kBigIntBits). Bit-by-bit MSB-first long
+// division, mirroring the narrow BigIntMod but with the running
+// remainder `r` living in a `BigIntWide`: the per-step intermediate
+// 2*r + bit can reach bits(m)+1 bits, which for a full-width 4096-bit
+// modulus is one bit past a `BigInt`. The wide accumulator absorbs it;
+// `m` is subtracted once when r >= m so the final remainder is < m and
+// copies cleanly into the (< m, hence <= kBigIntBits) `BigInt` out.
+//
+// As in the narrow path, the shift / compare / subtract are bounded to
+// the active window `rl` = (limbs in m) + 1 so a small modulus does not
+// pay for the full 256-limb width. `rl` is clamped to the wide width,
+// so a full 4096-bit modulus (rl = 129) still divides correctly.
+DUETOS_NO_SANITIZE_WRAP void ModWide(BigInt* out, const BigIntWide& a, const BigInt& m)
+{
+    KASSERT(!BigIntIsZero(m), "bigint", "ModWide by zero");
+    const u32 abits = WideBitLength(a);
+    const u32 mlimbs = m.used; // m != 0 here, so >= 1
+    const u32 rl = (mlimbs + 1 <= kBigIntProductLimbs) ? (mlimbs + 1) : kBigIntProductLimbs;
+
+    BigIntWide r{};
+    for (u32 i = 0; i < kBigIntProductLimbs; ++i)
+        r.limbs[i] = 0;
+    for (u32 i = abits; i-- > 0;)
+    {
+        // r <<= 1 over just the active window.
+        u32 carry = 0;
+        for (u32 j = 0; j < rl; ++j)
+        {
+            const u32 v = r.limbs[j];
+            r.limbs[j] = (v << 1) | carry;
+            carry = (v >> 31) & 1u;
+        }
+        // OR in the next bit of a.
+        r.limbs[0] |= WideGetBit(a, i);
+
+        // Compare r >= m over the window (MSB-first), then subtract m
+        // if so. m's high limbs above m.used are zero, and rl spans at
+        // least m.used + 1 limbs, so the comparison sees all of m.
+        bool ge = true; // all-equal falls through to true (r == m -> r >= m)
+        for (u32 j = rl; j-- > 0;)
+        {
+            const u32 rv = r.limbs[j];
+            const u32 mv = (j < kBigIntLimbs) ? m.limbs[j] : 0u;
+            if (rv != mv)
+            {
+                ge = (rv > mv);
+                break;
+            }
+        }
+        if (ge)
+        {
+            i64 borrow = 0;
+            for (u32 j = 0; j < rl; ++j)
+            {
+                const i64 mlimb = (j < kBigIntLimbs) ? i64(m.limbs[j]) : 0;
+                const i64 diff = i64(r.limbs[j]) - mlimb - borrow;
+                if (diff < 0)
+                {
+                    r.limbs[j] = static_cast<u32>(diff + (i64(1) << 32));
+                    borrow = 1;
+                }
+                else
+                {
+                    r.limbs[j] = static_cast<u32>(diff);
+                    borrow = 0;
+                }
+            }
+        }
+    }
+    // r is now < m <= kBigIntBits, so its high (wide-only) limbs are
+    // all zero and it copies cleanly into a `BigInt`.
+    BigIntZero(out);
+    for (u32 i = 0; i < kBigIntLimbs; ++i)
+        out->limbs[i] = r.limbs[i];
+    TrimUsed(out);
 }
 
 } // namespace
@@ -290,19 +463,28 @@ DUETOS_NO_SANITIZE_WRAP void BigIntModExp(BigInt* out, const BigInt& base, const
     // unconditionally and multiply-mod by `running` if the bit
     // is 1. Walking MSB-first means the first nonzero bit just
     // copies `running` into `result`, then every subsequent bit
-    // squares it. Square-mod and mul-mod both go through Mul +
-    // Mod so the working values stay bounded.
+    // squares it.
+    //
+    // `result` and `running` are both reduced (< m, hence at most
+    // kBigIntBits). Their product is up to 2*kBigIntBits, which a
+    // `BigInt` cannot hold — for RSA-4096 this is exactly the
+    // 8192-bit value that used to trip "Mul carry overflow" in
+    // BigIntMul. So the multiply lands in the file-local double-width
+    // accumulator and ModWide reduces it straight back into the (< m)
+    // `BigInt` `result`. For RSA-2048/3072 (and the small-modulus KATs)
+    // the product still fits a `BigInt`, but routing through the wide
+    // path is correct there too and keeps one code path.
+    BigIntWide product{};
     for (u32 i = ebits; i-- > 0;)
     {
         // result = result^2 mod m
-        BigInt sq{};
-        BigIntMul(&sq, result, result);
-        BigIntMod(&result, sq, m);
+        MulWide(&product, result, result);
+        ModWide(&result, product, m);
         if (GetBit(exp, i))
         {
-            BigInt prod{};
-            BigIntMul(&prod, result, running);
-            BigIntMod(&result, prod, m);
+            // result = (result * running) mod m
+            MulWide(&product, result, running);
+            ModWide(&result, product, m);
         }
     }
     BigIntCopy(out, result);
@@ -441,7 +623,68 @@ void BigIntSelfTest()
         }
     }
 
-    SerialWrite("[bigint] PASS (add/sub/mul/mod/modexp/be-rt)\n");
+    // RSA-4096 known-answer vector (host-OpenSSL provenance; see
+    // bigint_rsa4096_vector.h). Compute m = sig^e mod n and check it
+    // equals the EMSA-PKCS1-v1_5 encoded message. The squaring inside
+    // ModExp produces an 8192-bit intermediate product — the case that
+    // used to panic "Mul carry overflow" in BigIntMul before the
+    // double-width accumulator landed. This proves the RSA-4096 verify
+    // path works end to end and gates the regression.
+    BigInt n4096{};
+    BigInt sig4096{};
+    if (!BigIntFromBytesBE(&n4096, kRsa4096N, sizeof(kRsa4096N)) ||
+        !BigIntFromBytesBE(&sig4096, kRsa4096Sig, sizeof(kRsa4096Sig)))
+    {
+        SerialWrite("[bigint] FAIL rsa4096-load\n");
+        return;
+    }
+    BigInt e4096{};
+    BigIntZero(&e4096);
+    e4096.limbs[0] = kRsa4096E;
+    e4096.used = 1;
+    // sig < n is a precondition of RSAVP1; assert it holds for this
+    // vector so a malformed regenerated vector is caught here rather
+    // than silently producing the wrong remainder.
+    if (BigIntCompare(sig4096, n4096) >= 0)
+    {
+        SerialWrite("[bigint] FAIL rsa4096-sig-range\n");
+        return;
+    }
+    BigInt m4096{};
+    BigIntModExp(&m4096, sig4096, e4096, n4096);
+    u8 em4096[sizeof(kRsa4096Em)] = {0};
+    BigIntToBytesBE(m4096, em4096, sizeof(em4096));
+    for (u32 i = 0; i < sizeof(kRsa4096Em); ++i)
+    {
+        if (em4096[i] != kRsa4096Em[i])
+        {
+            SerialWrite("[bigint] FAIL rsa4096-modexp\n");
+            return;
+        }
+    }
+
+    // Carry-stress invariant on the full-width modulus: for any n,
+    // (n-1)^2 = n^2 - 2n + 1 == 1 (mod n). With the 4096-bit n above,
+    // n-1 has its low limbs near 0xFFFFFFFF, so squaring it maximally
+    // exercises the MulWide carry ripple and the full-width ModWide
+    // long division. A dropped carry anywhere corrupts the result and
+    // this exact-equality check trips. No external oracle needed — the
+    // identity is self-checking.
+    BigInt nm1{};
+    BigIntSub(&nm1, n4096, one);
+    BigInt two_exp{};
+    BigIntZero(&two_exp);
+    two_exp.limbs[0] = 2;
+    two_exp.used = 1;
+    BigInt sq_mod{};
+    BigIntModExp(&sq_mod, nm1, two_exp, n4096);
+    if (!SmallEq(sq_mod, 1))
+    {
+        SerialWrite("[bigint] FAIL rsa4096-carry-stress\n");
+        return;
+    }
+
+    SerialWrite("[bigint] PASS (add/sub/mul/mod/modexp/be-rt incl 4096)\n");
 }
 
 } // namespace duetos::crypto

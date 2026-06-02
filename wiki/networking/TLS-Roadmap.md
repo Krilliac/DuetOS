@@ -56,7 +56,12 @@ testable functionality:
 **Shipped this session** (every line a boot self-test):
 
 - `crypto/bigint.{h,cpp}` — 128-limb (4096-bit) BigInt with
-  `Add/Sub/Mul/Mod/ModExp`, BE byte round-trip. `[bigint] PASS`.
+  `Add/Sub/Mul/Mod/ModExp`, BE byte round-trip. RSA-4096 modexp works:
+  the 8192-bit squared-modulus product is reduced in a file-local
+  double-width accumulator (`BigIntWide`, 256 limbs) inside `ModExp`,
+  so the public `BigInt` stays 512 bytes and only ModExp's stack frame
+  pays the wide cost. Gated by an RSA-4096 known-answer vector.
+  `[bigint] PASS (... incl 4096)`.
 - `crypto/asn1.{h,cpp}` — DER reader (INTEGER, BIT STRING,
   OCTET STRING, NULL, OID, UTF8/Printable/IA5String, UTCTime,
   GeneralizedTime, SEQUENCE, SET) with `IntegerToBytesBE` and
@@ -80,7 +85,8 @@ testable functionality:
   ECDSA certs/roots in addition to RSA: ecdsa-with-SHA256 (P-256)
   and ecdsa-with-SHA384 (P-384) signature algorithms, id-ecPublicKey
   SPKI (0x04 uncompressed), embedded P-384 roots (DigiCert Global
-  Root G3, ISRG Root X2) alongside the 5 RSA-2048 roots. GAP:
+  Root G3, ISRG Root X2) alongside 6 RSA roots — 5 RSA-2048 plus the
+  RSA-4096 ISRG Root X1 (Let's Encrypt), parse-only at boot. GAP:
   P-521 / brainpool / Ed25519 / compressed points / ecdsa-with-SHA1
   / full root program / revocation. `[x509-verify-selftest] PASS`.
   Chain building gates the signature verify on RFC 5280 issuer/subject
