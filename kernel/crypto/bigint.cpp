@@ -21,22 +21,6 @@ inline void TrimUsed(BigInt* a)
     a->used = u;
 }
 
-// In-place a <<= 1. The high bit shifted off the top is asserted
-// zero — callers must keep BigInts within `kBigIntBits - 1` of
-// the modulus before calling ModExp's internal shift.
-DUETOS_NO_SANITIZE_WRAP void ShiftLeft1(BigInt* a)
-{
-    u32 carry = 0;
-    for (u32 i = 0; i < kBigIntLimbs; ++i)
-    {
-        const u32 v = a->limbs[i];
-        a->limbs[i] = (v << 1) | carry;
-        carry = (v >> 31) & 1;
-    }
-    KASSERT(carry == 0, "bigint", "ShiftLeft1 overflow");
-    TrimUsed(a);
-}
-
 // Bit length of `a`. Used by ModExp to walk only the populated
 // high bits of the exponent.
 u32 BitLength(const BigInt& a)
@@ -221,26 +205,72 @@ DUETOS_NO_SANITIZE_WRAP void BigIntMod(BigInt* out, const BigInt& a, const BigIn
         BigIntCopy(out, a);
         return;
     }
-    // Long division by repeated shift-and-subtract. `r` is the
-    // running remainder; we walk a bit-by-bit MSB-first, shifting
-    // `r` left by 1 each step, OR-ing in the next bit of `a`, and
-    // subtracting `m` once if r >= m.
+
+    // Bit-by-bit MSB-first long division: the running remainder `r` is
+    // shifted left by one each step, the next bit of `a` is OR-ed in, and
+    // `m` is subtracted once when r >= m. `r` is always < m by the end of
+    // each step, so it never needs more limbs than `m` has plus the one
+    // carry bit the shift can produce. The full BigInt is 128 limbs wide
+    // (sized for the RSA-4096 squared-modulus product), but a P-384 field
+    // or group modulus is only ~12 limbs — touching all 128 limbs per
+    // shift/subtract turned an ECDSA P-384 verify into a multi-minute
+    // grind under TCG and froze the boot self-test. So we bound every
+    // inner operation to the active window `rl` = (limbs in m) + 1, which
+    // is the fast narrow path. `rl` is clamped to the full width, so a
+    // modulus that fills the whole BigInt still divides correctly (just at
+    // the original full-width cost) — there is no separate slow branch.
+    const u32 abits = BitLength(a);
+    const u32 mlimbs = m.used; // m != 0 here, so >= 1
+    const u32 rl = (mlimbs + 1 <= kBigIntLimbs) ? (mlimbs + 1) : kBigIntLimbs;
+
     BigInt r{};
     BigIntZero(&r);
-    const u32 abits = BitLength(a);
     for (u32 i = abits; i-- > 0;)
     {
-        ShiftLeft1(&r);
-        if (GetBit(a, i))
-            r.limbs[0] |= 1u;
-        TrimUsed(&r);
-        if (BigIntCompare(r, m) >= 0)
+        // r <<= 1 over just the active window.
+        u32 carry = 0;
+        for (u32 j = 0; j < rl; ++j)
         {
-            BigInt tmp{};
-            BigIntSub(&tmp, r, m);
-            BigIntCopy(&r, tmp);
+            const u32 v = r.limbs[j];
+            r.limbs[j] = (v << 1) | carry;
+            carry = (v >> 31) & 1u;
+        }
+        // OR in the next bit of a.
+        r.limbs[0] |= GetBit(a, i);
+
+        // Compare r >= m over the window (MSB-first), then subtract m if so.
+        // rl <= kBigIntLimbs, so r.limbs[j] / m.limbs[j] are always in range.
+        bool ge = true; // all-limbs-equal falls through to true (r == m -> r >= m)
+        for (u32 j = rl; j-- > 0;)
+        {
+            const u32 rv = r.limbs[j];
+            const u32 mv = m.limbs[j];
+            if (rv != mv)
+            {
+                ge = (rv > mv);
+                break;
+            }
+        }
+        if (ge)
+        {
+            i64 borrow = 0;
+            for (u32 j = 0; j < rl; ++j)
+            {
+                const i64 diff = i64(r.limbs[j]) - i64(m.limbs[j]) - borrow;
+                if (diff < 0)
+                {
+                    r.limbs[j] = static_cast<u32>(diff + (i64(1) << 32));
+                    borrow = 1;
+                }
+                else
+                {
+                    r.limbs[j] = static_cast<u32>(diff);
+                    borrow = 0;
+                }
+            }
         }
     }
+    TrimUsed(&r);
     BigIntCopy(out, r);
 }
 
