@@ -22,6 +22,7 @@ enum class Ast : u8
     // expressions
     NumberLit,
     StringLit,
+    RegexLit, // /pattern/flags — str/strLen = pattern, reFlags/reFlagsLen = flags
     BoolLit,
     NullLit,
     UndefinedLit,
@@ -102,8 +103,12 @@ struct AstNode
     i64 numI;
     Sf32 numF;
     bool boolVal;
-    const char* str; // ident name / string-lit value / object key text
+    const char* str; // ident name / string-lit value / object key text / regex pattern
     u32 strLen;
+
+    // RegexLit: the trailing flag characters (g/i/m).
+    const char* reFlags;
+    u32 reFlagsLen;
 
     // child links (reused per node kind — see comments above)
     AstNode* a; // lhs / cond / callee / obj / operand / init / target

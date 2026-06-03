@@ -438,6 +438,101 @@ TmplStop ScanTemplateChunk(Scanner& sc, Token& t, const char*& err)
     return TmplStop::Error;
 }
 
+// A `/` begins a regex literal only where an expression is expected. The
+// disambiguation is by the PREVIOUS significant token: after a value
+// (identifier, number, string, `)`, `]`, template) a `/` is division;
+// everywhere else (statement start, after an operator / `(` / `,` / `=`
+// / `return` / etc.) it starts a regex. `Tok::Eof` as the prev (i.e.
+// the very first token) also allows a regex.
+bool RegexAllowedAfter(Tok prev)
+{
+    switch (prev)
+    {
+    // After a value-producing token, `/` is the division operator.
+    case Tok::Number:
+    case Tok::String:
+    case Tok::Ident:
+    case Tok::Regex:
+    case Tok::TemplateStr:
+    case Tok::RParen:
+    case Tok::RBracket:
+    case Tok::KwTrue:
+    case Tok::KwFalse:
+    case Tok::KwNull:
+    case Tok::KwUndefined:
+        return false;
+    default:
+        // Statement start / after operator / `(` `,` `=` `:` `[` `{` `;`
+        // `return` `typeof` `in` `new` … — an expression is expected.
+        return true;
+    }
+}
+
+// Scan a regex literal starting at the opening `/` (already at sc.pos).
+// Captures the raw pattern body (between the slashes; escapes left raw —
+// the regex compiler decodes them) into the arena and the trailing flag
+// run. Tracks character classes so a `/` inside `[...]` does not close the
+// literal. Returns false on an unterminated literal / newline inside it.
+bool ScanRegex(Scanner& sc, Token& t, const char*& err)
+{
+    sc.Adv(); // consume opening '/'
+    const u32 maxLen = sc.n - sc.pos;
+    char* buf = static_cast<char*>(sc.arena.Alloc(maxLen + 1, 1));
+    if (!buf)
+    {
+        err = "out of memory in regex literal";
+        return false;
+    }
+    u32 out = 0;
+    bool inClass = false;
+    while (!sc.Eof())
+    {
+        char c = sc.Peek();
+        if (c == '\n')
+        {
+            err = "newline in regex literal";
+            return false;
+        }
+        if (c == '\\')
+        {
+            // Keep the escape verbatim (two chars) for the regex compiler.
+            buf[out++] = sc.Adv();
+            if (sc.Eof() || sc.Peek() == '\n')
+            {
+                err = "unterminated regex escape";
+                return false;
+            }
+            buf[out++] = sc.Adv();
+            continue;
+        }
+        if (c == '[')
+            inClass = true;
+        else if (c == ']')
+            inClass = false;
+        else if (c == '/' && !inClass)
+        {
+            sc.Adv(); // closing '/'
+            buf[out] = '\0';
+            t.strData = buf;
+            t.strLen = out;
+            // Trailing flags: a run of identifier chars.
+            const char* flagStart = sc.s + sc.pos;
+            u32 flagLen = 0;
+            while (IsIdentPart(sc.Peek()))
+            {
+                sc.Adv();
+                ++flagLen;
+            }
+            t.reFlags = flagStart;
+            t.reFlagsLen = flagLen;
+            return true;
+        }
+        buf[out++] = sc.Adv();
+    }
+    err = "unterminated regex literal";
+    return false;
+}
+
 // Emit one operator/punctuation token, advancing past it.
 Tok ScanOperator(Scanner& sc)
 {
@@ -707,6 +802,27 @@ TokenStream Lex(const char* src, u32 len, Arena& arena)
             const char* p = sc.s + startPos;
             u32 il = sc.pos - startPos;
             emit(KeywordKind(p, il), p, il);
+        }
+        else if (c == '/' && sc.Peek(1) != '=' && RegexAllowedAfter(count ? toks[count - 1].kind : Tok::Eof))
+        {
+            // A `/` where an expression is expected starts a regex literal.
+            // (`/=` is excluded above so a divide-assign isn't misread.)
+            Token tmp{};
+            const char* rerr = nullptr;
+            if (!ScanRegex(sc, tmp, rerr))
+            {
+                ts.ok = false;
+                ts.errMsg = rerr;
+                ts.errLine = sc.line;
+                return ts;
+            }
+            Token* tk = emit(Tok::Regex, sc.s + startPos, sc.pos - startPos);
+            if (!tk)
+                break;
+            tk->strData = tmp.strData;
+            tk->strLen = tmp.strLen;
+            tk->reFlags = tmp.reFlags;
+            tk->reFlagsLen = tmp.reFlagsLen;
         }
         else
         {

@@ -98,6 +98,11 @@ void JsDomSelfTest()
                        "<p class='lead'>First</p>"
                        "<p>Second</p>"
                        "<div id='box'></div>"
+                       "<ul id='list'>"
+                       "<li class='item'>A</li>"
+                       "<li class='item active'>B</li>"
+                       "<li>C</li>"
+                       "</ul>"
                        "</body></html>";
     Document* doc = ParseHtml(html, u32(duetos::core::StrLen(html)), dom);
 
@@ -241,6 +246,73 @@ void JsDomSelfTest()
             second->kind == NodeKind::Element && duetos::core::StrEqual(second->tag, "td") &&
             second->nextSibling == nullptr && fn == 2 && duetos::core::StrEqual(fbuf, "hi") && sn == 1 &&
             duetos::core::StrEqual(sbuf, "x"));
+    }
+
+    // 12. getElementsByTagName('li').length over the whole document.
+    run(RunExpectConsole(doc, dom, "console.log(document.getElementsByTagName('li').length);", "3\n"));
+
+    // 13. getElementsByClassName('item').length (two of the three <li>).
+    run(RunExpectConsole(doc, dom, "console.log(document.getElementsByClassName('item').length);", "2\n"));
+
+    // 14. querySelector('.lead') returns the right element (the <p class=lead>),
+    // and querySelector('li.active') matches the compound (tag + class).
+    run(RunExpectConsole(doc, dom,
+                         "console.log(document.querySelector('.lead').textContent + ',' +"
+                         " document.querySelector('li.active').textContent + ',' +"
+                         " document.querySelector('#list').tagName);",
+                         "First,B,UL\n"));
+
+    // 15. querySelectorAll('.item') returns a JS array of both matches; the
+    // first carries text 'A'. Also exercise '*' via getElementsByTagName on
+    // a scoped element below.
+    run(RunExpectConsole(doc, dom,
+                         "var all=document.querySelectorAll('.item');"
+                         "console.log(all.length + ',' + all[0].textContent + ',' + all[1].textContent);",
+                         "2,A,B\n"));
+
+    // 16. Element-scoped querySelectorAll / getElementsByTagName: rooted at
+    // <ul id=list>, 'li' finds the three list items (and only those).
+    run(RunExpectConsole(doc, dom,
+                         "var ul=document.getElementById('list');"
+                         "console.log(ul.querySelectorAll('li').length + ',' +"
+                         " ul.getElementsByTagName('li').length + ',' +"
+                         " ul.getElementsByClassName('item').length);",
+                         "3,3,2\n"));
+
+    // 17. classList.add / contains: add a token, observe membership flips to
+    // true and the className attribute reflects it.
+    run(RunExpectConsole(doc, dom,
+                         "var li=document.querySelector('li');" // the first <li class='item'>
+                         "var before=li.classList.contains('x');"
+                         "li.classList.add('x');"
+                         "console.log(before + ',' + li.classList.contains('x') + ',' + li.className);",
+                         "false,true,item x\n"));
+
+    // 18. classList.remove: removing 'x' drops it but keeps 'item'.
+    run(RunExpectConsole(doc, dom,
+                         "var li=document.querySelector('li');"
+                         "li.classList.remove('x');"
+                         "console.log(li.classList.contains('x') + ',' + li.className);",
+                         "false,item\n"));
+
+    // 19. classList.toggle: toggling 'on' adds it (returns true), toggling
+    // again removes it (returns false).
+    run(RunExpectConsole(doc, dom,
+                         "var li=document.querySelector('li');"
+                         "var a=li.classList.toggle('on');"
+                         "var hasAfterAdd=li.classList.contains('on');"
+                         "var b=li.classList.toggle('on');"
+                         "console.log(a + ',' + hasAfterAdd + ',' + b + ',' + li.classList.contains('on'));",
+                         "true,true,false,false\n"));
+
+    // Independent DOM walk: after the add/remove/toggle churn the first
+    // <li>'s class attribute is back to exactly 'item' (no leftover tokens).
+    {
+        Node* list = FindElementById(doc, "list");
+        Node* li = list ? list->firstChild : nullptr;
+        const char* cls = li ? li->GetAttr("class") : nullptr;
+        run(li && li->kind == NodeKind::Element && duetos::core::StrEqual(li->tag, "li") && cls &&
+            duetos::core::StrEqual(cls, "item"));
     }
 
     char numBuf[12];

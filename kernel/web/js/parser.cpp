@@ -530,6 +530,18 @@ AstNode* ParsePrimary(Parser& p)
         p.Adv();
         return n;
     }
+    case Tok::Regex:
+    {
+        AstNode* n = p.Node(Ast::RegexLit);
+        if (!n)
+            return nullptr;
+        n->str = tk.strData;
+        n->strLen = tk.strLen;
+        n->reFlags = tk.reFlags;
+        n->reFlagsLen = tk.reFlagsLen;
+        p.Adv();
+        return n;
+    }
     case Tok::KwTrue:
     case Tok::KwFalse:
     {
