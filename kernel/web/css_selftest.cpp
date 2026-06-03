@@ -24,6 +24,13 @@
  *      following p siblings;
  *  14. :not(.skip) matches every element that lacks the class;
  *  15. :nth-child(2n+1) colours the odd-positioned items.
+ *  16. :nth-of-type(N) counts per-tag, so it picks a DIFFERENT element
+ *      than :nth-child(N) on a mixed-tag sibling list;
+ *  17. :first-of-type / :last-of-type select the first/last of each tag;
+ *  18. :only-of-type matches a tag with a single instance among mixed
+ *      siblings (and :only-child matches a sole child);
+ *  19. :nth-last-child(1) == :last-child (counted from the end);
+ *  20. :nth-last-of-type(1) == :last-of-type.
  *
  * On success emits one grep-able `[css-selftest] PASS (...)` line; on
  * the first failed sub-check fires KBP_PROBE_V(kBootSelftestFail, <#>)
@@ -99,8 +106,9 @@ const Node* NthElementChild(const Node* parent, u32 n)
 void CssSelfTest()
 {
     // Generous shared arena: DOM + parsed sheets + style map all live
-    // here. Function-local static keeps it off the boot stack.
-    static u8 s_arenaBuf[96 * 1024];
+    // here (four DOM/sheet/map sets, including the -of-type fixtures).
+    // Function-local static keeps it off the boot stack.
+    static u8 s_arenaBuf[160 * 1024];
     Arena arena(s_arenaBuf, sizeof(s_arenaBuf));
 
     // --- Check 7 first: standalone color parsing equivalence ---------
@@ -604,9 +612,220 @@ void CssSelfTest()
         return;
     }
 
+    // --- Checks 16-20: the -of-type / nth-last / only families --------
+    // A mixed-tag sibling list is the whole point: <p> and <span> are
+    // interleaved so :nth-child(N) (counts ALL element siblings) and
+    // :nth-of-type(N) (counts only same-tag siblings) land on DIFFERENT
+    // elements. A second container exercises :only-of-type (one tag has a
+    // single instance, another has two) and :only-child (a sole child).
+    //
+    //   <div id="mix">
+    //     <p id="m1">     child 1   p 1
+    //     <span id="m2">  child 2   span 1
+    //     <p id="m3">     child 3   p 2
+    //     <span id="m4">  child 4   span 2  (last span)
+    //     <p id="m5">     child 5   p 3      (last child, last p)
+    //   </div>
+    //   <div id="otype">
+    //     <h2 id="oh">   only h2 of its type
+    //     <p id="op1">   one of two p
+    //     <p id="op2">   one of two p
+    //   </div>
+    //   <div id="solo"><b id="sb">x</b></div>   b is the only child
+    const char* html4 = "<html><body>"
+                        "<div id=\"mix\">"
+                        "<p id=\"m1\">1</p>"
+                        "<span id=\"m2\">2</span>"
+                        "<p id=\"m3\">3</p>"
+                        "<span id=\"m4\">4</span>"
+                        "<p id=\"m5\">5</p>"
+                        "</div>"
+                        "<div id=\"otype\">"
+                        "<h2 id=\"oh\">h</h2>"
+                        "<p id=\"op1\">a</p>"
+                        "<p id=\"op2\">b</p>"
+                        "</div>"
+                        "<div id=\"solo\"><b id=\"sb\">x</b></div>"
+                        "</body></html>";
+    Node* doc4 = ParseHtml(html4, static_cast<u32>(duetos::core::StrLen(html4)), arena);
+    if (doc4 == nullptr)
+    {
+        Fail(118);
+        return;
+    }
+
+    // background-color is NON-inherited, so each rule's effect is the
+    // element's OWN structural match — no inheritance to confuse the proof.
+    //   p:nth-child(3)        -> m3 (3rd CHILD overall)
+    //   p:nth-of-type(3)      -> m5 (3rd P specifically)  [check 16]
+    //   p:first-of-type       -> m1   span:last-of-type -> m4  [check 17]
+    //   p:last-of-type        -> m5
+    //   h2:only-of-type       -> oh ; p:only-of-type -> (none in #otype) [18]
+    //   b:only-child          -> sb                              [18]
+    //   p:nth-last-child(1)   -> m5 (== last child)              [19]
+    //   span:nth-last-of-type(1) -> m4 (== last span)            [20]
+    const char* css4 = "p:nth-child(3) { color: red; }"
+                       "p:nth-of-type(3) { background-color: rgb(0,0,255); }"
+                       "p:first-of-type { background-color: rgb(0,255,0); }"
+                       "span:last-of-type { background-color: rgb(255,255,0); }"
+                       "p:last-of-type { color: rgb(0,128,0); }"
+                       "h2:only-of-type { background-color: rgb(255,0,255); }"
+                       "p:only-of-type { background-color: rgb(1,2,3); }"
+                       "b:only-child { background-color: rgb(0,255,255); }"
+                       "p:nth-last-child(1) { font-weight: bold; }"
+                       "span:nth-last-of-type(1) { font-style: italic; }";
+    StyleSheet sheet4{};
+    ParseStyleSheet(sheet4, css4, static_cast<u32>(duetos::core::StrLen(css4)), /*userAgent=*/false, arena);
+    StyleMap map4 = ComputeStyles(doc4, sheet4, arena);
+    if (map4.count == 0)
+    {
+        Fail(119);
+        return;
+    }
+
+    // Resolve all the ids we assert against.
+    const Node* m1 = nullptr;
+    const Node* m3 = nullptr;
+    const Node* m4 = nullptr;
+    const Node* m5 = nullptr;
+    const Node* oh = nullptr;
+    const Node* op2 = nullptr;
+    const Node* sb = nullptr;
+    for (u32 i = 0; i < map4.count; ++i)
+    {
+        const Node* n = map4.keys[i];
+        const char* id = n->GetAttr("id");
+        if (id == nullptr)
+        {
+            continue;
+        }
+        if (duetos::core::StrEqual(id, "m1"))
+        {
+            m1 = n;
+        }
+        else if (duetos::core::StrEqual(id, "m3"))
+        {
+            m3 = n;
+        }
+        else if (duetos::core::StrEqual(id, "m4"))
+        {
+            m4 = n;
+        }
+        else if (duetos::core::StrEqual(id, "m5"))
+        {
+            m5 = n;
+        }
+        else if (duetos::core::StrEqual(id, "oh"))
+        {
+            oh = n;
+        }
+        else if (duetos::core::StrEqual(id, "op2"))
+        {
+            op2 = n;
+        }
+        else if (duetos::core::StrEqual(id, "sb"))
+        {
+            sb = n;
+        }
+    }
+    if (m1 == nullptr || m3 == nullptr || m4 == nullptr || m5 == nullptr || oh == nullptr || op2 == nullptr ||
+        sb == nullptr)
+    {
+        Fail(120);
+        return;
+    }
+    const ComputedStyle* m1s = map4.Get(m1);
+    const ComputedStyle* m3s = map4.Get(m3);
+    const ComputedStyle* m4s = map4.Get(m4);
+    const ComputedStyle* m5s = map4.Get(m5);
+    const ComputedStyle* ohs = map4.Get(oh);
+    const ComputedStyle* op2s = map4.Get(op2);
+    const ComputedStyle* sbs = map4.Get(sb);
+    if (m1s == nullptr || m3s == nullptr || m4s == nullptr || m5s == nullptr || ohs == nullptr || op2s == nullptr ||
+        sbs == nullptr)
+    {
+        Fail(121);
+        return;
+    }
+
+    // --- Check 16: :nth-child(3) != :nth-of-type(3) on a mixed list ---
+    // The 3rd CHILD is m3 (a <p>), so p:nth-child(3) reddens m3. The 3rd
+    // P is m5, so p:nth-of-type(3) blues m5's background. They are DISTINCT
+    // elements — the defining difference this feature adds.
+    if (!ColorEq(m3s->color, 255, 0, 0))
+    {
+        Fail(16); // :nth-child counted all siblings -> m3
+        return;
+    }
+    if (m5s->backgroundColor.b != 255 || m3s->backgroundColor.b == 255)
+    {
+        Fail(16); // :nth-of-type counted only <p> -> m5, NOT m3
+        return;
+    }
+
+    // --- Check 17: :first-of-type / :last-of-type ---------------------
+    // first <p> is m1 (green bg); last <span> is m4 (yellow bg); last <p>
+    // is m5 (green text). m3 is a middle <p> -> none of these.
+    if (m1s->backgroundColor.g != 255 || m1s->backgroundColor.r != 0)
+    {
+        Fail(17); // p:first-of-type -> m1
+        return;
+    }
+    if (m4s->backgroundColor.r != 255 || m4s->backgroundColor.g != 255)
+    {
+        Fail(17); // span:last-of-type -> m4
+        return;
+    }
+    if (!ColorEq(m5s->color, 0, 128, 0) || ColorEq(m1s->color, 0, 128, 0))
+    {
+        Fail(17); // p:last-of-type -> m5, not m1
+        return;
+    }
+
+    // --- Check 18: :only-of-type and :only-child ----------------------
+    // In #otype, <h2> is the ONLY h2 -> h2:only-of-type matches (magenta).
+    // The two <p> are NOT each an only-of-type -> p:only-of-type must NOT
+    // match op2 (it gets NO background at all; op1 we avoid because it also
+    // matches p:first-of-type within #otype). In #solo, <b> is the sole
+    // child -> b:only-child matches (cyan).
+    if (ohs->backgroundColor.r != 255 || ohs->backgroundColor.b != 255 || ohs->backgroundColor.g != 0)
+    {
+        Fail(18); // h2:only-of-type -> oh
+        return;
+    }
+    if (op2s->backgroundColor.a != 0)
+    {
+        Fail(18); // p:only-of-type must NOT match op2 (two p siblings)
+        return;
+    }
+    if (sbs->backgroundColor.g != 255 || sbs->backgroundColor.b != 255 || sbs->backgroundColor.r != 0)
+    {
+        Fail(18); // b:only-child -> sb
+        return;
+    }
+
+    // --- Check 19: :nth-last-child(1) == :last-child ------------------
+    // The last child of #mix is m5; counting from the end, position 1 is
+    // m5 -> bold. m1 (first child) must stay normal weight.
+    if (m5s->fontWeight != FontWeight::Bold || m1s->fontWeight == FontWeight::Bold)
+    {
+        Fail(19);
+        return;
+    }
+
+    // --- Check 20: :nth-last-of-type(1) == :last-of-type --------------
+    // The last <span> is m4; span:nth-last-of-type(1) italicises it. m4 is
+    // the 2nd span counting forward but position 1 from the end.
+    if (m4s->fontStyle != FontStyleKind::Italic)
+    {
+        Fail(20);
+        return;
+    }
+
     arch::SerialWrite("[css-selftest] PASS (cascade specificity inline inherit UA display-none color "
                       "first-child last-child nth-child attr-selectors child-combinator "
-                      "sibling-combinators not nth-formula)\n");
+                      "sibling-combinators not nth-formula of-type nth-of-type "
+                      "first/last-of-type only-child only-of-type nth-last-child nth-last-of-type)\n");
 }
 
 } // namespace duetos::web

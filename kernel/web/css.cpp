@@ -16,14 +16,16 @@
  *
  * Matching honors type, .class, #id, universal, the descendant (space),
  * child (>), adjacent-sibling (+) and general-sibling (~) combinators,
- * the structural pseudo-classes :first-child / :last-child /
- * :nth-child(N|even|odd|an+b), :not(simple), and attribute selectors
+ * the structural pseudo-classes :first-child / :last-child / :only-child,
+ * the same -of-type family (:first-of-type / :last-of-type / :only-of-type),
+ * :nth-child / :nth-last-child / :nth-of-type / :nth-last-of-type
+ * (each taking N|even|odd|an+b), :not(simple), and attribute selectors
  * ([attr], [attr="v"], [attr~=], [attr^=], [attr$=], [attr*=]).
  *
- * GAP: :not() with a compound/complex argument, :nth-of-type /
- * :nth-last-child, the column combinator (||), and dynamic pseudo-classes
- * (:hover, …) are not matched. !important is parsed but not given its own
- * cascade tier (best-effort). em/rem/vh resolve as px.
+ * GAP: :not() with a compound/complex argument, the column combinator (||),
+ * and dynamic pseudo-classes (:hover, …) are not matched. !important is
+ * parsed but not given its own cascade tier (best-effort). em/rem/vh resolve
+ * as px.
  */
 
 #include "web/css.h"
@@ -107,10 +109,26 @@ bool HasClass(const Node* el, const char* cls)
     return false;
 }
 
-// 1-based index of `el` among its parent's *element* children, and the
-// total element-child count. For a root element (no parent) the element
-// is treated as an only child at position 1.
-void SiblingPosition(const Node* el, u32& posOut, u32& totalOut)
+// Do two tag names denote the same element type? Tag names are stored
+// lowercased on both the DOM node and (when parsed) the selector, so a
+// plain byte compare suffices — but we go through StrEqual for safety and
+// to mirror the comparison used in MatchesCompound.
+bool TagEq(const char* a, const char* b)
+{
+    if (a == nullptr || b == nullptr)
+    {
+        return a == b;
+    }
+    return duetos::core::StrEqual(a, b);
+}
+
+// 1-based index of `el` among its parent's element children, plus the
+// total count over that same set. When `ofType` is set the set is
+// restricted to siblings sharing `el`'s tag name; otherwise it is all
+// element siblings. When `fromEnd` is set the returned position is counted
+// from the last sibling (so the last element is position 1). For a root
+// element (no parent) the element is an only child at position 1.
+void SiblingPosition(const Node* el, bool ofType, bool fromEnd, u32& posOut, u32& totalOut)
 {
     posOut = 0;
     totalOut = 0;
@@ -122,22 +140,52 @@ void SiblingPosition(const Node* el, u32& posOut, u32& totalOut)
         return;
     }
     u32 idx = 0;
+    u32 forwardPos = 0;
     for (const Node* c = parent->firstChild; c != nullptr; c = c->nextSibling)
     {
         if (c->kind != NodeKind::Element)
         {
             continue;
         }
+        if (ofType && !TagEq(c->tag, el->tag))
+        {
+            continue;
+        }
         ++idx;
         if (c == el)
         {
-            posOut = idx;
+            forwardPos = idx;
         }
     }
     totalOut = idx;
+    // From-end position: the last sibling in the set is position 1.
+    posOut = fromEnd ? (totalOut - forwardPos + 1) : forwardPos;
 }
 
-// Evaluate the structural pseudo-class (if any) on `el`.
+// Does the An+B formula (a, b) select 1-based position `pos`? Matches iff
+// there is an integer k >= 0 with pos == a*k + b. Shared by every nth-*
+// variant (child / of-type / last-child / last-of-type).
+bool NthMatches(i32 a, i32 b, u32 pos)
+{
+    const i32 p = static_cast<i32>(pos);
+    if (a == 0)
+    {
+        return p == b; // "0n+b" == ":nth-*(b)"
+    }
+    // p = a*k + b  =>  (p - b) must be a multiple of a with k >= 0.
+    const i32 diff = p - b;
+    if (a > 0)
+    {
+        return diff >= 0 && (diff % a) == 0;
+    }
+    // a < 0: k = diff/a must still be >= 0, i.e. diff and a share sign
+    // (diff <= 0) and a divides diff evenly.
+    return diff <= 0 && (diff % a) == 0;
+}
+
+// Evaluate the structural pseudo-class (if any) on `el`. The `ofType` and
+// `fromEnd` flags on `sel` select which sibling set the position is
+// computed over and from which end (see StructuralPseudo in css.h).
 bool MatchesPseudo(const SimpleSelector* sel, const Node* el)
 {
     if (sel->pseudo == StructuralPseudo::None)
@@ -145,13 +193,20 @@ bool MatchesPseudo(const SimpleSelector* sel, const Node* el)
         return true;
     }
     u32 pos = 0, total = 0;
-    SiblingPosition(el, pos, total);
+    SiblingPosition(el, sel->ofType, sel->fromEnd, pos, total);
     switch (sel->pseudo)
     {
     case StructuralPseudo::FirstChild:
+        // :first-child / :first-of-type. With fromEnd this is :last-* (the
+        // parser uses LastChild for those, but honour the flag regardless).
         return pos == 1;
     case StructuralPseudo::LastChild:
+        // :last-child / :last-of-type. `pos` already accounts for fromEnd;
+        // the last element of the set is whichever has pos == total.
         return pos == total;
+    case StructuralPseudo::OnlyChild:
+        // :only-child / :only-of-type — sole member of its sibling set.
+        return total == 1;
     case StructuralPseudo::NthChildLit:
         return sel->nthChild > 0 && pos == static_cast<u32>(sel->nthChild);
     case StructuralPseudo::NthChildEven:
@@ -159,26 +214,7 @@ bool MatchesPseudo(const SimpleSelector* sel, const Node* el)
     case StructuralPseudo::NthChildOdd:
         return (pos % 2) == 1;
     case StructuralPseudo::NthChildFormula:
-    {
-        // :nth-child(an+b) matches position `pos` (1-based) iff there is
-        // an integer k >= 0 with pos == a*k + b.
-        const i32 a = sel->nthA;
-        const i32 b = sel->nthB;
-        const i32 p = static_cast<i32>(pos);
-        if (a == 0)
-        {
-            return p == b; // "0n+b" == ":nth-child(b)"
-        }
-        // p = a*k + b  =>  (p - b) must be a non-negative multiple of a.
-        const i32 diff = p - b;
-        if (a > 0)
-        {
-            return diff >= 0 && (diff % a) == 0;
-        }
-        // a < 0: k = diff/a must still be >= 0, i.e. diff and a share sign
-        // (diff <= 0) and a divides diff evenly.
-        return diff <= 0 && (diff % a) == 0;
-    }
+        return NthMatches(sel->nthA, sel->nthB, pos);
     default:
         return true;
     }
