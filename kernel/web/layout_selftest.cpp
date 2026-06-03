@@ -153,6 +153,13 @@ void LayoutSelfTest()
                        // max(20,30)=30, NOT 20+30=50.
                        "<div class=mc1>MCONE</div>"
                        "<div class=mc2>MCTWO</div>"
+                       // Parent-child TOP margin collapsing: .pc has no border
+                       // or padding and a known background; its first in-flow
+                       // child .pck has margin-top:40px. The 40px must collapse
+                       // THROUGH .pc — appearing ABOVE .pc's border box, not as
+                       // interior space — so the child's content y equals .pc's
+                       // border-box (background FillRect) top exactly.
+                       "<div class=pc><div class=pck>PCKID</div></div>"
                        "</body>";
 
     const char* css = "#box { background-color: #112233; padding: 10px; width: 200px; }"
@@ -165,6 +172,12 @@ void LayoutSelfTest()
                       ".mc1 { margin-bottom: 20px; line-height: 16px; }"
                       ".mc2 { margin-top: 30px; line-height: 16px; }"
                       ".inblk { margin: 0; line-height: 16px; }"
+                      // Parent-child top collapse: .pc has its own margins 0 and
+                      // no border/padding (so its top edge is open); a known bg
+                      // color marks its border box. .pck's 40px top margin must
+                      // collapse through .pc rather than indent inside it.
+                      ".pc { margin: 0; background-color: #445566; line-height: 16px; }"
+                      ".pck { margin-top: 40px; line-height: 16px; }"
                       "span { line-height: 16px; }"
                       // Make geometry deterministic: drop the UA body margin
                       // (8px) so child boxes start at the viewport origin, and
@@ -409,9 +422,47 @@ void LayoutSelfTest()
         return;
     }
 
+    // --- Check 10: parent-child TOP margin collapsing. ---
+    // ".pc" (margin 0, no border/padding, bg #445566) wraps ".pck" whose
+    // margin-top is 40px. Because nothing separates .pc's top edge from its
+    // first child, the 40px margin collapses THROUGH .pc: it lands ABOVE
+    // .pc's border box, so the child's content y must equal .pc's border-box
+    // (background FillRect) top exactly — there must be NO 40px interior gap
+    // between the box top and its child (which is what the un-collapsed GAP
+    // behavior would produce). The bg FillRect of .pc marks its border box.
+    const DisplayItem* pcBg = FindFillRect(*dl, 0x44, 0x55, 0x66);
+    const DisplayItem* pckRun = FindTextRun(*dl, "PCKID");
+    if (pcBg == nullptr || pckRun == nullptr)
+    {
+        Fail(27);
+        return;
+    }
+    // Collapsed through: the child content sits exactly at the parent border
+    // box top (zero interior gap), proving the 40px margin escaped upward
+    // rather than indenting the child inside the parent.
+    if (pckRun->rect.y != pcBg->rect.y)
+    {
+        arch::SerialWrite("[layout-selftest] pc childY=");
+        arch::SerialWriteHex(static_cast<u64>(static_cast<u32>(pckRun->rect.y)));
+        arch::SerialWrite(" boxY=");
+        arch::SerialWriteHex(static_cast<u64>(static_cast<u32>(pcBg->rect.y)));
+        arch::SerialWrite("\n");
+        Fail(28);
+        return;
+    }
+    // And the parent border box itself sat 40px below where it would have
+    // without the margin (the margin is real, just hoisted above the box):
+    // .pc's bg height is exactly the child's one 16px line (no interior
+    // margin baked in).
+    if (pcBg->rect.h != 16)
+    {
+        Fail(29);
+        return;
+    }
+
     arch::SerialWrite("[layout-selftest] PASS (block+inline display list: bg-rect, bold heading, wrap, "
                       "stacked-y, display:none, center-align, anon-block-wrap, block-in-inline, "
-                      "margin-collapse)\n");
+                      "margin-collapse, parent-child-collapse)\n");
 }
 
 } // namespace duetos::web

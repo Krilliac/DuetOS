@@ -47,15 +47,34 @@
  *     among a block's block-level children, including the anonymous-block
  *     and block-in-inline split pieces (an inline/anonymous fragment has no
  *     collapsible vertical margin and breaks the carry).
+ *   - Vertical margin collapsing, PARENT-CHILD: a block's top margin
+ *     collapses with its FIRST in-flow block child's top margin when no
+ *     top border/padding separates them (the collapsed margin appears
+ *     ABOVE the parent's border box, not as interior space); symmetrically
+ *     its bottom margin collapses with its LAST in-flow block child's
+ *     bottom margin when no bottom border/padding separates them (the
+ *     child's bottom margin escapes out through the parent to the next
+ *     sibling). An inline formatting context's top/bottom margin does NOT
+ *     collapse through its line content (only block-level first/last
+ *     children participate).
+ *   - Empty-block SELF-collapsing: a block with no in-flow content, no
+ *     explicit height, and no top/bottom border/padding collapses its own
+ *     top and bottom margins together (and any margin collapsing in from
+ *     above) — they all pass THROUGH the zero-height box to the next
+ *     sibling as one collapsed margin.
  *
- * GAP (deliberately out of scope for this slice): margin collapsing's
- * PARENT-CHILD case (a block's top margin collapsing with its first
- * in-flow child's top margin, or bottom with last child, when no
- * border/padding/clearance separates them) — the engine retains a child's
- * outer margin inside the parent's content box instead, so a margin set on
- * a first/last child does not currently escape its parent; and
- * empty-block self-collapsing (a zero-height block collapsing its own top
- * and bottom margins together). Also out of scope: inline-box DECORATION
+ * GAP (deliberately out of scope for this slice): parent-child collapsing
+ * only re-seats the parent's border box by the FIRST-LEVEL collapse (the
+ * direct child's resolved top margin); if that first child ALSO has an open
+ * top edge and its OWN first grandchild carries a larger top margin, the
+ * deeper collapse-through is laid out correctly for the descendants but the
+ * parent's border box is not hoisted by the extra grandchild margin (the
+ * common single-level case the engine targets is exact). Likewise the
+ * peek treats a block-in-inline split's leading block as a zero-margin
+ * anonymous fragment, so a parent collapsing into a block-in-inline first
+ * child does not hoist by that inner block's top margin. Clearance is not
+ * modelled (no floats yet), so margins never fail to collapse for that
+ * reason. Also out of scope: inline-box DECORATION
  * splitting (the block-in-inline split stacks the inline element's text
  * but does NOT re-draw the split inline element's own borders/padding/
  * background on the before/after fragments); floats; position

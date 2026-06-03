@@ -14,11 +14,15 @@
  * application lives in css_apply.cpp; this file owns selector matching,
  * inheritance, the cascade priority sort, and the tree walk.
  *
- * GAP: the matching only honors type, .class, #id, universal, and the
- * descendant combinator; pseudo-classes, attribute selectors,
- * sibling/child combinators, and :nth-child are not matched. !important
- * is parsed but not given its own cascade tier (best-effort). em/rem/vh
- * resolve as px.
+ * Matching honors type, .class, #id, universal, the descendant
+ * combinator, the structural pseudo-classes :first-child / :last-child /
+ * :nth-child(N|even|odd), and attribute selectors ([attr], [attr="v"],
+ * [attr~=], [attr^=], [attr$=], [attr*=]).
+ *
+ * GAP: sibling/child combinators (>, +, ~), :nth-child(an+b) formula,
+ * and dynamic pseudo-classes (:hover, :not, …) are not matched.
+ * !important is parsed but not given its own cascade tier (best-effort).
+ * em/rem/vh resolve as px.
  */
 
 #include "web/css.h"
@@ -102,6 +106,220 @@ bool HasClass(const Node* el, const char* cls)
     return false;
 }
 
+// 1-based index of `el` among its parent's *element* children, and the
+// total element-child count. For a root element (no parent) the element
+// is treated as an only child at position 1.
+void SiblingPosition(const Node* el, u32& posOut, u32& totalOut)
+{
+    posOut = 0;
+    totalOut = 0;
+    const Node* parent = el->parent;
+    if (parent == nullptr)
+    {
+        posOut = 1;
+        totalOut = 1;
+        return;
+    }
+    u32 idx = 0;
+    for (const Node* c = parent->firstChild; c != nullptr; c = c->nextSibling)
+    {
+        if (c->kind != NodeKind::Element)
+        {
+            continue;
+        }
+        ++idx;
+        if (c == el)
+        {
+            posOut = idx;
+        }
+    }
+    totalOut = idx;
+}
+
+// Evaluate the structural pseudo-class (if any) on `el`.
+bool MatchesPseudo(const SimpleSelector* sel, const Node* el)
+{
+    if (sel->pseudo == StructuralPseudo::None)
+    {
+        return true;
+    }
+    u32 pos = 0, total = 0;
+    SiblingPosition(el, pos, total);
+    switch (sel->pseudo)
+    {
+    case StructuralPseudo::FirstChild:
+        return pos == 1;
+    case StructuralPseudo::LastChild:
+        return pos == total;
+    case StructuralPseudo::NthChildLit:
+        return sel->nthChild > 0 && pos == static_cast<u32>(sel->nthChild);
+    case StructuralPseudo::NthChildEven:
+        return (pos % 2) == 0;
+    case StructuralPseudo::NthChildOdd:
+        return (pos % 2) == 1;
+    default:
+        return true;
+    }
+}
+
+// Is `c` a separator inside a whitespace-list attribute value?
+bool IsWsSep(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+}
+
+// [attr~="v"]: does the space-separated attribute value contain the
+// exact word `needle`? An empty needle never matches (per spec).
+bool AttrHasWord(const char* haystack, const char* needle)
+{
+    if (haystack == nullptr || needle == nullptr || needle[0] == '\0')
+    {
+        return false;
+    }
+    u32 nlen = static_cast<u32>(duetos::core::StrLen(needle));
+    const char* p = haystack;
+    while (*p != '\0')
+    {
+        while (*p != '\0' && IsWsSep(*p))
+        {
+            ++p;
+        }
+        const char* tokB = p;
+        while (*p != '\0' && !IsWsSep(*p))
+        {
+            ++p;
+        }
+        u32 tlen = static_cast<u32>(p - tokB);
+        if (tlen == nlen)
+        {
+            bool eq = true;
+            for (u32 i = 0; i < tlen; ++i)
+            {
+                if (tokB[i] != needle[i])
+                {
+                    eq = false;
+                    break;
+                }
+            }
+            if (eq)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// Prefix / suffix / substring tests (case-sensitive, matching the
+// authored value verbatim). Empty value never matches for ^=/$=/*=.
+bool StrHasPrefix(const char* s, const char* pre)
+{
+    if (pre[0] == '\0')
+    {
+        return false;
+    }
+    for (u32 i = 0; pre[i] != '\0'; ++i)
+    {
+        if (s[i] != pre[i])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool StrHasSuffix(const char* s, const char* suf)
+{
+    u32 slen = static_cast<u32>(duetos::core::StrLen(s));
+    u32 flen = static_cast<u32>(duetos::core::StrLen(suf));
+    if (flen == 0 || flen > slen)
+    {
+        return false;
+    }
+    const char* start = s + (slen - flen);
+    for (u32 i = 0; i < flen; ++i)
+    {
+        if (start[i] != suf[i])
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool StrHasSubstr(const char* s, const char* sub)
+{
+    if (sub[0] == '\0')
+    {
+        return false;
+    }
+    for (const char* p = s; *p != '\0'; ++p)
+    {
+        u32 i = 0;
+        for (; sub[i] != '\0'; ++i)
+        {
+            if (p[i] != sub[i])
+            {
+                break;
+            }
+        }
+        if (sub[i] == '\0')
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Evaluate all attribute-selector clauses on `el`.
+bool MatchesAttrs(const SimpleSelector* sel, const Node* el)
+{
+    for (const AttrSelector* a = sel->attrs; a != nullptr; a = a->next)
+    {
+        const char* v = el->GetAttr(a->name);
+        if (v == nullptr)
+        {
+            return false; // attribute absent — every op requires presence
+        }
+        switch (a->op)
+        {
+        case AttrOp::Exists:
+            break; // presence already satisfied
+        case AttrOp::Exact:
+            if (!StrEq(v, a->value))
+            {
+                return false;
+            }
+            break;
+        case AttrOp::Whitespace:
+            if (!AttrHasWord(v, a->value))
+            {
+                return false;
+            }
+            break;
+        case AttrOp::Prefix:
+            if (!StrHasPrefix(v, a->value))
+            {
+                return false;
+            }
+            break;
+        case AttrOp::Suffix:
+            if (!StrHasSuffix(v, a->value))
+            {
+                return false;
+            }
+            break;
+        case AttrOp::Substring:
+            if (!StrHasSubstr(v, a->value))
+            {
+                return false;
+            }
+            break;
+        }
+    }
+    return true;
+}
+
 // Does one compound selector match this element (ignoring ancestry)?
 bool MatchesCompound(const SimpleSelector* sel, const Node* el)
 {
@@ -136,6 +354,14 @@ bool MatchesCompound(const SimpleSelector* sel, const Node* el)
         }
     }
     if (sel->className != nullptr && !HasClass(el, sel->className))
+    {
+        return false;
+    }
+    if (sel->attrs != nullptr && !MatchesAttrs(sel, el))
+    {
+        return false;
+    }
+    if (!MatchesPseudo(sel, el))
     {
         return false;
     }

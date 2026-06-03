@@ -22,8 +22,15 @@
  * display:none skips the subtree. Adjacent in-flow block siblings collapse
  * their touching vertical margins (CSS2 §8.3.1) via a carried bottom margin
  * threaded between siblings (see CollapseMargins / LayoutBlock's
- * `carryMargin`). GAP: parent-child margin collapsing, inline-box
- * DECORATION splitting (split fragments don't re-draw the inline element's
+ * `carryMargin`). A block's top margin also collapses with its first
+ * in-flow block child's (and bottom with its last child's) when no
+ * border/padding separates them — the parent's border box is re-seated so
+ * the collapsed margin lands outside it (see `deferTop` /
+ * `topCollapsedThrough` and the bottom-margin reporting near the return);
+ * an empty borderless/paddingless zero-height block collapses its own top
+ * and bottom margins through itself (`selfCollapses`). GAP: deeper-than-
+ * one-level parent-child collapse-through hoisting, inline-box DECORATION
+ * splitting (split fragments don't re-draw the inline element's
  * border/padding), floats, positioning — see layout.h.
  */
 
@@ -186,6 +193,62 @@ bool HasRenderableInline(const LayoutCtx& ctx, const Node* first, const Node* st
     return false;
 }
 
+// The collapsible top margin (device px, resolved against `cbWidth`) of
+// the FIRST in-flow content `node` would place, for parent-child top
+// collapsing. Mirrors LayoutBlock's own placement decision: a block-level
+// child contributes its resolved top margin; inline-level content (text /
+// inline element with no block descendant) contributes none (an anonymous
+// block box carries no collapsible margin). Returns 0 when `node` has no
+// in-flow content. Used to peek how far the parent's collapsed-through top
+// margin sinks before the parent's border box is positioned.
+i32 FirstChildTopMargin(const LayoutCtx& ctx, const Node* node, i32 cbWidth)
+{
+    for (const Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
+    {
+        if (BreaksInlineFlow(ctx, c))
+        {
+            if (IsBlockLevelChild(ctx, c))
+            {
+                const ComputedStyle* cs = StyleOf(ctx, c);
+                if (cs == nullptr || cs->display == Display::None)
+                {
+                    continue; // generates no box; not the first in-flow child
+                }
+                return EdgePx(cs->margin.top, cbWidth);
+            }
+            // An inline element split around a block (block-in-inline): its
+            // leading fragment is an anonymous block — no collapsible margin.
+            return 0;
+        }
+        if (c->kind == NodeKind::Text)
+        {
+            // Renderable loose text starts an anonymous block (no margin);
+            // pure whitespace between blocks generates no box, so skip it.
+            if (c->text != nullptr)
+            {
+                for (const char* p = c->text; *p != '\0'; ++p)
+                {
+                    if (!IsWhitespaceByte(*p))
+                    {
+                        return 0;
+                    }
+                }
+            }
+            continue;
+        }
+        if (c->kind == NodeKind::Element)
+        {
+            const ComputedStyle* cs = StyleOf(ctx, c);
+            if (cs == nullptr || cs->display == Display::None)
+            {
+                continue;
+            }
+            return 0; // an in-flow inline element -> anonymous block, no margin
+        }
+    }
+    return 0;
+}
+
 // Emit an <img> ImageBox sized by width/height style (default placeholder
 // otherwise). Returns the box height consumed. `linkHref` (when non-null)
 // tags the box so an <a href><img></a> is hit-testable as a link.
@@ -289,14 +352,40 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
         contentW = 0;
     }
 
+    // Whether each vertical edge is "open" for parent-child collapsing: a
+    // zero border AND zero padding on that edge means nothing separates the
+    // parent's margin from its first/last in-flow child's margin, so they
+    // collapse through (CSS2 §8.3.1). Top openness lets this box's top margin
+    // collapse with its first child's; bottom openness lets the last child's
+    // bottom margin collapse out through this box.
+    const bool topEdgeOpen = (bw == 0 && pTop == 0);
+    const bool botEdgeOpen = (bw == 0 && pBot == 0);
+
+    // Formatting context: a block context (has block-level children) collapses
+    // its top margin THROUGH into its first block child when the top edge is
+    // open, so we defer this box's top offset and let the child carry resolve
+    // it. An inline context (text / inline children only) does not collapse
+    // its top margin through its line content, so it keeps `incomingTop` as a
+    // plain offset. Computed up front because it drives the provisional
+    // border-box top.
+    const bool hasBlockCtx = HasBlockChild(ctx, node);
+
     // Border-box + content-box top-left. The top margin collapses with the
     // carried bottom margin of the preceding in-flow sibling (CSS2 §8.3.1):
-    // the gap is CollapseMargins(carry, mTop), not their sum.
+    // the gap is CollapseMargins(carry, mTop), not their sum. `incomingTop` is
+    // that collapsed margin entering this box. When the top edge is open AND
+    // this is a block context, the offset is DEFERRED: the box is provisionally
+    // placed at `originY`, `incomingTop` is seeded into the child carry so it
+    // collapses with the first block child's top margin, and the real border
+    // top is re-seated once the collapse resolves (see `topCollapsedThrough`).
+    // Otherwise `incomingTop` is this box's own top offset.
+    const i32 incomingTop = CollapseMargins(*carryMargin, mTop);
+    const bool deferTop = topEdgeOpen && hasBlockCtx;
     const i32 borderX = cbX + mLeft;
-    const i32 borderY = originY + CollapseMargins(*carryMargin, mTop);
+    i32 borderY = deferTop ? originY : (originY + incomingTop);
     const i32 borderBoxW = contentW + 2 * bw + pLeft + pRight;
     const i32 contentX = borderX + bw + pLeft;
-    const i32 contentTop = borderY + bw + pTop;
+    i32 contentTop = borderY + bw + pTop;
 
     // Reserve display-list slots for the background + border NOW, before
     // any child content is pushed, so paint order is correct (background
@@ -337,10 +426,23 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
     }
 
     // Lay children to learn content height (unless height is fixed).
+    // `topCollapsedThrough` is how far below the provisional border top
+    // (originY, for a deferred open top edge) the first in-flow block child's
+    // top edge landed — the parent-child collapsed top margin that belongs
+    // ABOVE this box's border box; it re-seats the border box below. It stays
+    // 0 for a closed top edge or an inline-formatting box. `lastChildCarry`
+    // holds the last in-flow block child's leftover bottom margin so an open
+    // bottom edge can collapse it OUT through this box (parent-child bottom
+    // collapse) instead of retaining it as interior space.
     i32 childY = contentTop;
-    const bool inlineCtx = !HasBlockChild(ctx, node);
+    i32 topCollapsedThrough = 0;
+    i32 lastChildCarry = 0;
+    const bool inlineCtx = !hasBlockCtx;
     if (inlineCtx)
     {
+        // An inline formatting context: its content was placed at `contentTop`,
+        // which already includes this box's top offset (`incomingTop`) since an
+        // inline box's top margin does not collapse through its line content.
         childY = LayoutInline(ctx, node, s, contentX, contentW, contentTop, selfHref);
     }
     else
@@ -357,13 +459,28 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
         // so adjacent siblings collapse (CSS2 §8.3.1). An anonymous block of
         // inline content has no collapsible vertical margin, so the carry is
         // flushed to 0 on either side of one.
-        // GAP: parent-child margin collapsing — this box's own top margin
-        //   does NOT collapse with its first block child's top margin (the
-        //   child loop seeds childCarry=0, not the parent's top margin), and
-        //   its bottom margin does NOT collapse with the last child's bottom
-        //   margin (leftover childCarry is retained inside this box's content
-        //   height below). Revisit when parent-child collapsing is needed.
+        //
+        // Parent-child TOP collapsing: when the top edge is open (zero top
+        // border+padding), this box's collapsible top margin (`incomingTop`)
+        // is seeded into the child carry so the FIRST in-flow block child's
+        // top margin collapses with it; the collapsed-through amount is
+        // captured into `topCollapsedThrough` (via a peek of the first
+        // child's top margin) and re-applied to the parent's border-box top
+        // below, so the margin appears ABOVE this box's border box rather
+        // than as interior space. A closed top edge keeps `incomingTop` as
+        // this box's offset (already folded into provisional `borderY`) and
+        // seeds the carry at 0.
         i32 childCarry = 0;
+        if (deferTop)
+        {
+            childCarry = incomingTop;
+            // Peek where the first in-flow child's top edge will land relative
+            // to the provisional border top (originY == contentTop here). For
+            // a block first child this is the collapse of the seeded carry with
+            // its own top margin; for inline-first content the carry flushes as
+            // plain space (inline content does not collapse through).
+            topCollapsedThrough = CollapseMargins(incomingTop, FirstChildTopMargin(ctx, node, cbWidth));
+        }
         const Node* inlineStart = nullptr; // first sibling of the pending inline run
         for (const Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
         {
@@ -405,16 +522,40 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
             }
         }
         // A trailing inline run after the last block child: settle any
-        // carried block bottom margin before it.
+        // carried block bottom margin before it. A trailing inline run means
+        // the LAST in-flow content is inline (an anonymous block), which has
+        // no collapsible bottom margin — so its presence closes the bottom
+        // collapse and childCarry is consumed as interior space here.
         if (inlineStart != nullptr && HasRenderableInline(ctx, inlineStart, nullptr))
         {
             childY += childCarry;
             childCarry = 0;
             childY = LayoutInlineSiblings(ctx, s, inlineStart, nullptr, contentX, contentW, childY, selfHref);
         }
-        // Retain the last block child's bottom margin inside this box's
-        // content height (parent-child bottom collapse is GAP'd above).
-        childY += childCarry;
+        // `childCarry` now holds the last in-flow block child's bottom margin
+        // (0 if the last in-flow content was inline). When the bottom edge is
+        // open it collapses OUT through this box (handled below by reporting
+        // it as part of this box's own bottom margin); otherwise it stays as
+        // interior space and is folded into the content height here.
+        lastChildCarry = childCarry;
+        if (!botEdgeOpen)
+        {
+            childY += lastChildCarry;
+            lastChildCarry = 0;
+        }
+    }
+
+    // When the top edge collapsed through (deferred block context), the
+    // parent's border box top sinks to where the first child's top edge
+    // landed; the collapsed margin sits above the border box (which was
+    // provisionally placed at originY). Re-seat the border box and content
+    // top so the interior space excludes the collapsed-through margin. The
+    // block children are already at their absolute positions (originY +
+    // collapsed), so only the box frame moves to wrap them.
+    if (topCollapsedThrough != 0)
+    {
+        borderY += topCollapsedThrough;
+        contentTop += topCollapsedThrough;
     }
 
     const i32 contentHeight = childY - contentTop;
@@ -427,17 +568,37 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
     }
 
     // The padding box wraps content + padding (background paints here);
-    // the border box wraps the padding box + the border stroke.
+    // the border box wraps the padding box + the border stroke. The padding
+    // box top (y) is computed after the self-collapse re-seat below, since an
+    // empty self-collapsing box pulls its border top back to originY.
     const i32 paddingBoxX = borderX + bw;
-    const i32 paddingBoxY = borderY + bw;
     const i32 paddingBoxW = contentW + pLeft + pRight;
     const i32 paddingBoxH = finalContentH + pTop + pBot;
     const i32 borderBoxH = paddingBoxH + 2 * bw;
 
+    // Empty-block self-collapsing (CSS2 §8.3.1): a box with no border, no
+    // padding, no in-flow content and no explicit height has nothing to
+    // separate its top margin from its bottom margin, so they collapse
+    // THROUGH it together (along with any margin collapsing in from above).
+    // The zero-height border box was provisionally placed at originY +
+    // incomingTop; pull it back to originY and let the WHOLE collapsed margin
+    // — incomingTop collapsed with this box's own bottom margin — pass out to
+    // the next sibling via `*carryMargin`. The next sibling then positions
+    // itself relative to originY, exactly as if this box contributed only a
+    // single collapsed margin.
+    const bool selfCollapses = botEdgeOpen && topEdgeOpen && finalContentH == 0;
+    if (selfCollapses)
+    {
+        borderY = originY;
+    }
+
+    // The padding box backfills with the (possibly re-seated) border top.
+    const i32 finalPaddingBoxY = borderY + bw;
+
     // Backfill the reserved slots now that geometry is known.
     if (bgSlot != kNoSlot)
     {
-        ctx.out->items[bgSlot].rect = Rect{paddingBoxX, paddingBoxY, paddingBoxW, paddingBoxH};
+        ctx.out->items[bgSlot].rect = Rect{paddingBoxX, finalPaddingBoxY, paddingBoxW, paddingBoxH};
     }
     if (borderSlot != kNoSlot)
     {
@@ -447,7 +608,24 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
     // Report this box's bottom margin for the next sibling to collapse
     // against, and return the bottom BORDER edge (the bottom margin is no
     // longer baked into the return — see CollapseMargins / carryMargin).
-    *carryMargin = mBot;
+    //   - Self-collapsing empty box: report incomingTop collapsed with mBot so
+    //     the entire run of margins passes through as one.
+    //   - Open bottom edge with a last block child: that child's leftover
+    //     bottom margin (lastChildCarry) collapses with this box's own bottom
+    //     margin and is reported together (parent-child bottom collapse).
+    //   - Otherwise: just this box's own bottom margin.
+    if (selfCollapses)
+    {
+        *carryMargin = CollapseMargins(incomingTop, mBot);
+    }
+    else if (botEdgeOpen)
+    {
+        *carryMargin = CollapseMargins(lastChildCarry, mBot);
+    }
+    else
+    {
+        *carryMargin = mBot;
+    }
     return borderY + borderBoxH;
 }
 

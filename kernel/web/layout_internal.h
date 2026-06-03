@@ -183,10 +183,21 @@ i32 LayoutInlineSiblings(LayoutCtx& ctx, const ComputedStyle& parentStyle, const
 // from the preceding in-flow block sibling (0 when this is the first child
 // or there is no preceding margin to collapse with); the box advances its
 // top margin edge by the COLLAPSED gap (see CollapseMargins) rather than
-// summing. On return `*carryMargin` holds this box's own bottom margin for
-// the next sibling to collapse against. A caller that wants the y past the
+// summing. On return `*carryMargin` holds the bottom margin this box hands
+// to its next sibling: normally its own bottom margin, but when the box's
+// bottom edge is open (no bottom border/padding) it is COLLAPSED with the
+// last in-flow block child's leftover bottom margin (parent-child bottom
+// collapse), and when the box is empty and self-collapsing it is the whole
+// run of through-collapsed margins. A caller that wants the y past the
 // final box's bottom margin adds the leftover `*carryMargin` after the
 // loop.
+//
+// Parent-child TOP collapse is internal: when the box's top edge is open
+// (no top border/padding) and it establishes a block formatting context,
+// its incoming top margin is collapsed with its first in-flow block child's
+// top margin and re-seated to sit ABOVE the box's border box rather than as
+// interior space. An empty borderless/paddingless zero-height box collapses
+// its top and bottom margins through itself.
 //
 // `linkHref` is the nearest-ancestor <a href> (nullptr when none) so a
 // link wrapping block content tags the items its subtree produces.

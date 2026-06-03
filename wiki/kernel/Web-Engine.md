@@ -44,10 +44,10 @@ RGBA canvas, then blits to the window.
 | Area | Files | What's REAL |
 |------|-------|-------------|
 | HTML | `html.cpp`, `entities.cpp`, `dom.{h,cpp}` | Tokeniser + tree builder, void elements, comments, named/numeric entities, `<p>`/`<li>` recovery. Fragment parse (`ParseHtmlFragment`) backs `innerHTML`. |
-| CSS | `css*.cpp` (`parse`, `apply`, `values`, `ua`) | Selector parse, specificity cascade, inheritance, the UA sheet, `display:none`, the common box/text/colour properties. |
+| CSS | `css*.cpp` (`parse`, `apply`, `values`, `ua`) | Selector parse, specificity cascade, inheritance, the UA sheet, `display:none`, the common box/text/colour properties. **Structural pseudo-classes** (`:first-child`/`:last-child`/`:nth-child(int\|even\|odd)`) and **attribute selectors** (`[attr]`, `[attr=]`, `~=`/`^=`/`$=`/`*=`). |
 | DOM bindings | `js_dom.cpp` | `document`/element host objects: `getElementById`, `children`, `tagName`, `id`/`className`/`textContent` get+set, and `innerHTML` get **and set** (parse-and-replace). |
-| JavaScript | `js/*` | Lexer → Pratt parser → tree-walking interp. Closures, `for`/`while`, recursion, objects/arrays, string methods, `JSON.parse`/`stringify`, **template literals**, object-to-primitive (`valueOf`/`toString`) coercion. Step budget + native-stack guard bound a hostile script. |
-| Layout | `layout*.cpp`, `display_list.h` | Block formatting (vertical stacking, margin/border/padding box, width/height), inline formatting (line boxes, word wrap, text-align), `<img>` boxes, and **anonymous-block wrapping** of inline runs adjacent to block siblings. |
+| JavaScript | `js/*` | Lexer → Pratt parser → tree-walking interp. Closures, `for`/`while`, recursion, objects/arrays, **prototype chain** (`Object.prototype`), **template literals**, object-to-primitive coercion, `JSON.parse`/`stringify`. Built-ins: `Array` (`map`/`filter`/`forEach`/`slice`/`join`/…), `String`, `Number` (`toFixed`, `toString(radix)`), `Math`, `Object.keys`, `parseInt(radix)`/`parseFloat`/`isNaN`/`isFinite`. Step budget + native-stack guard bound a hostile script. |
+| Layout | `layout*.cpp`, `display_list.h` | Block formatting (vertical stacking, margin/border/padding box, width/height), inline formatting (line boxes, word wrap, text-align), `<img>` boxes, **anonymous-block wrapping**, the **block-in-inline split**, and **vertical margin collapsing** (adjacent-sibling + parent-child + empty-block). |
 | Paint | `paint.cpp` | Fills, glyph runs, borders, image blits, clip rects, scroll offset → framebuffer. |
 | Images | `png.cpp`, `jpeg.cpp` | PNG: greyscale/palette/truecolour ±alpha, bit depths **1/2/4/8/16**, **Adam7 interlacing**, tRNS. JPEG: baseline + progressive, 4:2:0 / 4:2:2 / greyscale. Both reject corrupt/truncated input. |
 
@@ -106,27 +106,34 @@ Every stage boots a self-test, registered in
 
 ## Known limits (greppable `// GAP:`)
 
-- **JS:** there IS a prototype chain (plain objects inherit
-  `Object.prototype.toString`/`valueOf`), but it is read-only — no
-  `__proto__` / `Object.create` / `getPrototypeOf`, and only plain
-  objects get a default prototype (no Array/String/Function prototype
-  objects). `JSON.parse` surrogate pairs decode each half independently;
-  no `Symbol.toPrimitive`, no `try`/`catch`.
+- **JS:** the prototype chain is read-only — no `__proto__` /
+  `Object.create` / `getPrototypeOf`; `Array`/`String`/`Number` methods
+  dispatch through a special-cased path rather than real
+  `Array.prototype` objects. `Number.toString(radix)` drops the fraction
+  for non-decimal radixes; `toFixed` rounds half-away and carries only
+  binary32 precision. No `Symbol.toPrimitive`, no `try`/`catch`, no regex.
+- **CSS:** `:nth-child` takes a literal int / `even` / `odd` only (no
+  `an+b`); no `:not()`, `:nth-of-type`, `:only-child`, or the `>`/`+`/`~`
+  combinators (descendant only); dynamic/state pseudo-classes (`:hover`)
+  parse but never match.
 - **DOM:** `ParseHtmlFragment` seeds the element-specific *initial*
   insertion context (`table`/`tbody`/`thead`/`tfoot`/`tr`/`colgroup`/
   `select`), so `el.innerHTML = '<td>…'` on a `<tr>` parses correctly. It
   does not implement the full insertion-mode state machine (table
   foster-parenting, `<template>` content fragments).
-- **Layout:** the block-in-inline split is handled (an inline element
-  containing a block stacks around it), but the split fragments do not
-  re-draw the inline element's own borders/padding/background. No floats,
-  positioning, flexbox/grid, tables, margin-collapsing, z-index, overflow
-  clipping; monospace metrics only.
+- **Layout:** vertical margin collapsing handles adjacent-sibling +
+  parent-child + empty-block, but parent-child re-seating is first-level
+  only (a grandchild's larger margin lays out correctly but doesn't hoist
+  the ancestor's border box); the block-in-inline split doesn't re-draw
+  the inline element's own borders/padding. No floats, positioning,
+  flexbox/grid, tables, z-index, overflow clipping; monospace metrics only.
 - **PNG:** no APNG, gamma/ICC colour management, or ancillary chunks
   beyond tRNS.
-- **TLS trust:** the browser's x509 verifier uses a test-only trust
-  store; a real-internet leaf fails until the Mozilla root program is
-  wired in (`apps/browser.cpp::BrowserCertVerify`).
+- **TLS trust:** HTTPS verifies the server's full chain against x509's
+  embedded **real** roots (incl. ISRG Root X1) — see
+  `apps/browser.cpp::BrowserCertVerify`. GAP: no CRL/OCSP revocation, no
+  name constraints, and the root set is a curated subset (sites chaining
+  to any other root fail closed).
 
 Re-derive the live inventory with `git grep -nE "// (STUB|GAP):"
 kernel/web`.
