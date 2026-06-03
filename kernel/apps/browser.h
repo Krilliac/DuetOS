@@ -31,6 +31,16 @@
  *   - Body cap is `kHttpResponseCap` (64 KiB). Pages larger than
  *     this show a `(truncated)` banner — streamed downloads to disk
  *     are a follow-up.
+ *   - File downloads: a fetched response is SAVED to the FAT32 root
+ *     instead of rendered when it is marked
+ *     `Content-Disposition: attachment` OR carries a non-renderable
+ *     `Content-Type` (anything other than text/html, text/plain,
+ *     application/xhtml+xml; a missing type renders as HTML). The
+ *     filename comes from the disposition's `filename=`, else the
+ *     URL path basename, else `DLNNNN.<ext>` with the extension
+ *     mapped from the Content-Type; all squeezed into FAT32 8.3.
+ *     The status line reads `Downloaded: <name>`. GAP: no resume,
+ *     no progress UI, no body-byte MIME sniffing, 8.3 truncation.
  *   - Real rendering: pages flow through the kernel/web engine —
  *     ParseHtml -> author CSS (from <style> + inline style="") ->
  *     ComputeStyles -> <script> execution against the live DOM (so
@@ -78,8 +88,10 @@
  *   - Bookmarks live in `BOOKMARK.TXT` on the FAT32 root, one URL
  *     per line. Loaded on first window-show, saved after every
  *     mutation. Plain ASCII `\n`-terminated so users can hand-edit.
- *   - Downloads land at the next free `DLNNNN.HTM` slot on the
- *     FAT32 root, raw response body (no HTML stripping).
+ *   - The manual `S` save lands at the next free `DLNNNN.HTM` slot
+ *     on the FAT32 root (raw body, no HTML stripping). Automatic
+ *     downloads (see above) name the file from the response headers
+ *     / URL and write the raw response body.
  *   - History is in-memory only — by design, intuitive for a "type
  *     a URL, see if it works" tool.
  *

@@ -1038,6 +1038,279 @@ void SaveDownload()
 }
 
 // ---------------------------------------------------------------
+// Download decision + filename derivation.
+//
+// A real browser RENDERS text/* responses and SAVES everything else
+// (images, archives, PDFs, octet-streams, or any response marked
+// `Content-Disposition: attachment`). These helpers are pure compute
+// so the self-test can table-test them without spawning the worker.
+// ---------------------------------------------------------------
+
+// Case-insensitive substring search. Returns true iff `needle`
+// (which must be lowercase) appears anywhere in `hay`.
+bool StrContainsI(const char* hay, const char* needle)
+{
+    if (needle[0] == '\0')
+        return true;
+    auto lo = [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c; };
+    for (u32 i = 0; hay[i] != '\0'; ++i)
+    {
+        u32 j = 0;
+        while (needle[j] != '\0' && hay[i + j] != '\0' && lo(hay[i + j]) == needle[j])
+            ++j;
+        if (needle[j] == '\0')
+            return true;
+    }
+    return false;
+}
+
+// True iff a response carrying `content_type` should be rendered as a
+// page rather than saved. A missing/empty type is treated as
+// renderable (legacy servers omit it for HTML). Only the renderable
+// text types qualify; everything else downloads. Matching is on the
+// type prefix so "text/html; charset=utf-8" still renders.
+bool IsRenderableType(const char* content_type)
+{
+    if (content_type == nullptr || content_type[0] == '\0')
+        return true;
+    auto isPrefixI = [](const char* s, const char* pfx)
+    {
+        auto lo = [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c; };
+        u32 i = 0;
+        for (; pfx[i] != '\0'; ++i)
+            if (lo(s[i]) != pfx[i])
+                return false;
+        return true;
+    };
+    return isPrefixI(content_type, "text/html") || isPrefixI(content_type, "text/plain") ||
+           isPrefixI(content_type, "application/xhtml+xml");
+}
+
+// Render-vs-download predicate. DOWNLOAD when the response is marked
+// as an attachment, OR carries a non-renderable Content-Type.
+bool ShouldDownload(const char* content_type, const char* content_disposition)
+{
+    if (content_disposition != nullptr && StrContainsI(content_disposition, "attachment"))
+        return true;
+    return !IsRenderableType(content_type);
+}
+
+// Map a Content-Type to a FAT32 3-char extension for the DLxxxx
+// fallback name. GAP: small known-type table — unknown types fall
+// back to BIN rather than sniffing the body bytes.
+const char* ExtForType(const char* content_type)
+{
+    if (content_type != nullptr)
+    {
+        auto pfx = [](const char* s, const char* p)
+        {
+            auto lo = [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c; };
+            for (u32 i = 0; p[i] != '\0'; ++i)
+                if (lo(s[i]) != p[i])
+                    return false;
+            return true;
+        };
+        if (pfx(content_type, "application/pdf"))
+            return "PDF";
+        if (pfx(content_type, "image/png"))
+            return "PNG";
+        if (pfx(content_type, "image/jpeg"))
+            return "JPG";
+        if (pfx(content_type, "application/zip"))
+            return "ZIP";
+    }
+    return "BIN";
+}
+
+// Append `c` to an 8.3 component buffer, uppercasing and dropping any
+// char outside [A-Z0-9]. `cap` bounds the component (8 for stem, 3 for
+// ext); `*n` tracks the live length.
+void Push83(char* comp, u32 cap, u32* n, char c)
+{
+    if (*n >= cap)
+        return;
+    char u = (c >= 'a' && c <= 'z') ? static_cast<char>(c - ('a' - 'A')) : c;
+    const bool ok = (u >= 'A' && u <= 'Z') || (u >= '0' && u <= '9');
+    if (ok)
+        comp[(*n)++] = u;
+}
+
+// Derive an 8.3 download filename into `out` (cap >= 13: 8+'.'+3+NUL).
+// Priority: (1) a `filename="..."` token in Content-Disposition;
+// (2) the URL path's basename if it carries an extension; (3) the
+// DLxxxx counter with an extension mapped from Content-Type.
+// GAP: 8.3 only — long names and non-ASCII are truncated/dropped, no
+// collision-suffixing beyond the DLxxxx counter.
+void DeriveDownloadFilename(const char* url, const char* content_type, const char* content_disposition, u32 dl_index,
+                            char* out, u32 cap)
+{
+    char stem[9];
+    char ext[4];
+    u32 sn = 0;
+    u32 en = 0;
+    bool have_name = false;
+
+    // (1) Content-Disposition: filename="...".
+    if (content_disposition != nullptr)
+    {
+        const char* fn = nullptr;
+        auto lo = [](char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c + ('a' - 'A')) : c; };
+        const char want[] = "filename";
+        for (u32 i = 0; content_disposition[i] != '\0'; ++i)
+        {
+            // Match the "filename" token case-insensitively at i.
+            const char* p = content_disposition + i;
+            u32 j = 0;
+            for (; want[j] != '\0'; ++j)
+                if (lo(p[j]) != want[j])
+                    break;
+            if (want[j] != '\0')
+                continue;
+            const char* q = p + j;
+            while (*q == ' ')
+                ++q;
+            if (*q != '=')
+                continue;
+            ++q;
+            while (*q == ' ' || *q == '"')
+                ++q;
+            fn = q;
+            break;
+        }
+        if (fn != nullptr)
+        {
+            // Read up to the closing quote / separator into stem.ext,
+            // splitting on the LAST '.'.
+            char raw_name[64];
+            u32 rn = 0;
+            for (u32 i = 0; fn[i] != '\0' && fn[i] != '"' && fn[i] != ';' && rn + 1 < sizeof(raw_name); ++i)
+                raw_name[rn++] = fn[i];
+            raw_name[rn] = '\0';
+            u32 dot = rn;
+            for (u32 i = 0; i < rn; ++i)
+                if (raw_name[i] == '.')
+                    dot = i;
+            for (u32 i = 0; i < dot; ++i)
+                Push83(stem, 8, &sn, raw_name[i]);
+            for (u32 i = dot + 1; i < rn; ++i)
+                Push83(ext, 3, &en, raw_name[i]);
+            if (sn > 0)
+                have_name = true;
+        }
+    }
+
+    // (2) URL path basename with an extension. Reset any partial
+    // component left by a disposition whose name sanitised to empty.
+    if (!have_name && url != nullptr)
+    {
+        sn = 0;
+        en = 0;
+        const ParsedUrl pu = ParseUrl(url);
+        if (pu.ok)
+        {
+            const char* path = pu.path;
+            u32 plen = StrLen(path);
+            // Strip a trailing query (?...) for basename purposes.
+            for (u32 i = 0; i < plen; ++i)
+                if (path[i] == '?')
+                {
+                    plen = i;
+                    break;
+                }
+            u32 slash = 0;
+            for (u32 i = 0; i < plen; ++i)
+                if (path[i] == '/')
+                    slash = i + 1;
+            u32 dot = plen;
+            for (u32 i = slash; i < plen; ++i)
+                if (path[i] == '.')
+                    dot = i;
+            if (dot < plen && dot + 1 < plen) // has a non-empty extension
+            {
+                for (u32 i = slash; i < dot; ++i)
+                    Push83(stem, 8, &sn, path[i]);
+                for (u32 i = dot + 1; i < plen; ++i)
+                    Push83(ext, 3, &en, path[i]);
+                if (sn > 0 && en > 0)
+                    have_name = true;
+                else
+                {
+                    sn = 0;
+                    en = 0;
+                }
+            }
+        }
+    }
+
+    // (3) DLxxxx fallback, extension from Content-Type.
+    if (!have_name)
+    {
+        sn = 0;
+        en = 0;
+        const char dl[] = "DL";
+        Push83(stem, 8, &sn, dl[0]);
+        Push83(stem, 8, &sn, dl[1]);
+        Push83(stem, 8, &sn, static_cast<char>('0' + (dl_index / 1000) % 10));
+        Push83(stem, 8, &sn, static_cast<char>('0' + (dl_index / 100) % 10));
+        Push83(stem, 8, &sn, static_cast<char>('0' + (dl_index / 10) % 10));
+        Push83(stem, 8, &sn, static_cast<char>('0' + dl_index % 10));
+        const char* e = ExtForType(content_type);
+        for (u32 i = 0; e[i] != '\0'; ++i)
+            Push83(ext, 3, &en, e[i]);
+    }
+
+    // An all-illegal stem (sanitized to empty) falls back to "DL".
+    if (sn == 0)
+    {
+        stem[sn++] = 'D';
+        stem[sn++] = 'L';
+    }
+    if (en == 0)
+    {
+        const char* e = ExtForType(content_type);
+        for (u32 i = 0; e[i] != '\0'; ++i)
+            Push83(ext, 3, &en, e[i]);
+    }
+
+    // Assemble STEM.EXT into out (cap presumed >= 13).
+    u32 o = 0;
+    for (u32 i = 0; i < sn && o + 1 < cap; ++i)
+        out[o++] = stem[i];
+    if (en > 0 && o + 1 < cap)
+        out[o++] = '.';
+    for (u32 i = 0; i < en && o + 1 < cap; ++i)
+        out[o++] = ext[i];
+    out[o] = '\0';
+}
+
+// Write `len` raw response bytes to FAT32 root under `filename`.
+// Replaces an existing entry (the DLxxxx counter usually makes this a
+// fresh name, but a Content-Disposition / URL-derived name can repeat).
+// Returns true on success and sets g_state.status accordingly.
+bool SaveDownloadAs(const u8* data, u32 len, const char* filename)
+{
+    namespace fat = fs::fat32;
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+    {
+        StatusSet("download: no FAT32 volume");
+        return false;
+    }
+    fat::DirEntry probe;
+    if (fat::Fat32LookupPath(v, filename, &probe))
+        fat::Fat32DeleteAtPath(v, filename);
+    const i64 rc = fat::Fat32CreateAtPath(v, filename, data, len);
+    if (rc < 0)
+    {
+        StatusSet("download: write failed");
+        return false;
+    }
+    StatusSet("Downloaded: ");
+    StrAppend(g_state.status, kStatusCap, filename);
+    return true;
+}
+
+// ---------------------------------------------------------------
 // Fetch worker.
 // ---------------------------------------------------------------
 
@@ -1310,13 +1583,22 @@ void OnSetCookie(const char* header_value, void* ctx)
 // when non-null, is used as-is (the self-test injects a loopback
 // transport); when null FetchUrl opens a real socket/TLS transport.
 // ---------------------------------------------------------------
+// `ct_out` / `cd_out`, when non-null, receive the response's
+// Content-Type / Content-Disposition header values (copied out of the
+// short-lived `result`). They are emptied first so a missing header
+// reads as "". `ct_cap` / `cd_cap` are their buffer capacities.
 FetchStatus FetchUrl(const char* url, u8* raw_buf, u32 raw_cap, u32* raw_len, u16* status_out, bool* truncated_out,
                      net::http::HttpTransport* injected, net::http::HttpConnect injected_connect = nullptr,
-                     void* injected_connect_ctx = nullptr)
+                     void* injected_connect_ctx = nullptr, char* ct_out = nullptr, u32 ct_cap = 0,
+                     char* cd_out = nullptr, u32 cd_cap = 0)
 {
     *raw_len = 0;
     *status_out = 0;
     *truncated_out = false;
+    if (ct_out != nullptr && ct_cap > 0)
+        ct_out[0] = '\0';
+    if (cd_out != nullptr && cd_cap > 0)
+        cd_out[0] = '\0';
 
     const auto p = ParseUrl(url);
     if (!p.ok)
@@ -1378,6 +1660,22 @@ FetchStatus FetchUrl(const char* url, u8* raw_buf, u32 raw_cap, u32* raw_len, u1
     *status_out = static_cast<u16>(result.status_code);
     *raw_len = result.body_len;
     *truncated_out = result.body_truncated || (result.body_len >= raw_cap);
+
+    // Copy the content-classification headers out before `result` (a
+    // stack local) goes out of scope; the caller uses them to decide
+    // render-vs-download and to derive a saved filename.
+    if (ct_out != nullptr && ct_cap > 0)
+    {
+        const char* ct = result.FindHeader("Content-Type");
+        if (ct != nullptr)
+            StrCopyCap(ct_out, ct_cap, ct);
+    }
+    if (cd_out != nullptr && cd_cap > 0)
+    {
+        const char* cd = result.FindHeader("Content-Disposition");
+        if (cd != nullptr)
+            StrCopyCap(cd_out, cd_cap, cd);
+    }
 
     // Persist any cookies the response set.
     net::CookieJarSave();
@@ -1818,7 +2116,11 @@ void DoFetch(const char* url)
     u32 got = 0;
     u16 code = 0;
     bool truncated = false;
-    const FetchStatus st = FetchUrl(url, raw, kHttpResponseCap, &got, &code, &truncated, /*injected=*/nullptr);
+    char content_type[128] = {};
+    char content_disp[256] = {};
+    const FetchStatus st = FetchUrl(url, raw, kHttpResponseCap, &got, &code, &truncated, /*injected=*/nullptr,
+                                    /*injected_connect=*/nullptr, /*injected_connect_ctx=*/nullptr, content_type,
+                                    sizeof(content_type), content_disp, sizeof(content_disp));
 
     if (st != FetchStatus::Ok)
     {
@@ -1856,6 +2158,25 @@ void DoFetch(const char* url)
 
     g_state.status_code = code;
     g_state.truncated = truncated;
+
+    // Download path: an attachment-marked or non-text response is
+    // SAVED to disk (raw bytes) instead of rendered. GAP: no resume,
+    // no progress UI, no body-byte MIME sniffing — the decision is
+    // header-driven only, and the body is capped at kHttpResponseCap.
+    if (ShouldDownload(content_type, content_disp))
+    {
+        namespace fat = fs::fat32;
+        const fat::Volume* dlv = fat::Fat32Volume(0);
+        const u32 dl_index = (dlv != nullptr) ? NextDownloadIndex(dlv) : 0;
+        char filename[16];
+        DeriveDownloadFilename(url, content_type, content_disp, dl_index, filename, sizeof(filename));
+        SaveDownloadAs(raw, got, filename);
+        mm::KFree(raw);
+        // Record the navigation; do NOT RenderPage (status already set
+        // by SaveDownloadAs to "Downloaded: <name>").
+        HistoryPush(url);
+        return;
+    }
 
     // Keep the RAW HTML in g_state.body so Save writes the actual page
     // source, and render the page through the full pipeline (parse ->
@@ -3021,6 +3342,98 @@ void BrowserSelfTest()
         net::CookieJarSave();
     }
 
+    // Test E: file downloads.
+    //
+    // E1 — pure-compute table tests for the render-vs-download
+    // predicate and the 8.3 filename derivation (the exact logic
+    // DoFetch routes through). E2 — drive the FULL download path
+    // (FetchUrl over an injected attachment response -> ShouldDownload
+    // -> DeriveDownloadFilename -> SaveDownloadAs) and assert the file
+    // landed on the FAT32 root.
+    {
+        // E1: decision predicate.
+        if (!IsRenderableType(nullptr) || !IsRenderableType(""))
+            pass = false; // missing type renders (legacy HTML).
+        if (!IsRenderableType("text/html; charset=utf-8") || !IsRenderableType("text/plain"))
+            pass = false;
+        if (IsRenderableType("application/pdf") || IsRenderableType("image/png"))
+            pass = false;
+        if (ShouldDownload("text/html", nullptr)) // renderable, no disposition
+            pass = false;
+        if (!ShouldDownload("application/octet-stream", nullptr)) // non-text type
+            pass = false;
+        if (!ShouldDownload("text/html", "attachment; filename=\"x.txt\"")) // attachment wins
+            pass = false;
+
+        // E1: filename derivation. Content-Disposition filename wins,
+        // sanitised + truncated to 8.3.
+        char fn[16];
+        DeriveDownloadFilename("http://h/p", "application/octet-stream", "attachment; filename=\"report.pdf\"", 7, fn,
+                               sizeof(fn));
+        if (!StrEqI(fn, "REPORT.PDF"))
+            pass = false;
+        // URL basename when no disposition.
+        DeriveDownloadFilename("http://h/dir/photo.png", "image/png", nullptr, 7, fn, sizeof(fn));
+        if (!StrEqI(fn, "PHOTO.PNG"))
+            pass = false;
+        // DLxxxx fallback (no usable name) with Content-Type extension.
+        DeriveDownloadFilename("http://h/", "application/zip", nullptr, 42, fn, sizeof(fn));
+        if (!StrEqI(fn, "DL0042.ZIP"))
+            pass = false;
+
+        // E2: full download path over an injected attachment response.
+        static const char kDlBody[] = "BINARYPAYLOAD";
+        static const char kDlResp[] = "HTTP/1.1 200 OK\r\n"
+                                      "Content-Type: application/octet-stream\r\n"
+                                      "Content-Disposition: attachment; filename=\"hi.bin\"\r\n"
+                                      "Content-Length: 13\r\n"
+                                      "\r\n"
+                                      "BINARYPAYLOAD";
+        CannedResp dlhop{kDlResp, StrLen(kDlResp), 0};
+        net::http::HttpTransport tdl{};
+        tdl.read = CannedRespRead;
+        tdl.write = CannedRespWrite;
+        tdl.ctx = &dlhop;
+
+        u8 dlraw[256];
+        u32 dlgot = 0;
+        u16 dlcode = 0;
+        bool dltrunc = false;
+        char ct[128] = {};
+        char cd[256] = {};
+        const FetchStatus dlst = FetchUrl("http://selftest.duetos.local/file", dlraw, sizeof(dlraw), &dlgot, &dlcode,
+                                          &dltrunc, &tdl, nullptr, nullptr, ct, sizeof(ct), cd, sizeof(cd));
+        if (dlst != FetchStatus::Ok || dlcode != 200 || dlgot != StrLen(kDlBody))
+            pass = false;
+        // The headers must have been captured and classified as a
+        // download with the disposition-supplied filename.
+        if (!ShouldDownload(ct, cd))
+            pass = false;
+        char dlfn[16];
+        DeriveDownloadFilename("http://selftest.duetos.local/file", ct, cd, 1, dlfn, sizeof(dlfn));
+        if (!StrEqI(dlfn, "HI.BIN"))
+            pass = false;
+
+        // Drive the real save + probe FAT32 for the result. Skip the
+        // disk assertion when no volume is mounted (the predicate /
+        // filename checks above already validate the logic).
+        namespace fat = fs::fat32;
+        const fat::Volume* dv = fat::Fat32Volume(0);
+        if (dv != nullptr)
+        {
+            const bool saved = SaveDownloadAs(dlraw, dlgot, dlfn);
+            fat::DirEntry probe;
+            if (!saved || !fat::Fat32LookupPath(dv, dlfn, &probe))
+                pass = false;
+            // Status must read "Downloaded: HI.BIN".
+            if (g_state.status[0] != 'D' || g_state.status[1] != 'o' || g_state.status[2] != 'w')
+                pass = false;
+            // Clean up so the live desktop doesn't keep the synthetic file.
+            if (saved)
+                fat::Fat32DeleteAtPath(dv, dlfn);
+        }
+    }
+
     // Pass D: drive a synthetic click on the HIST nav button
     // via the WidgetGroup dispatch chain. ClickHistory flips
     // g_state.mode to Mode::History (when not fetch-in-flight),
@@ -3078,8 +3491,9 @@ void BrowserSelfTest()
     if (pass)
     {
         SerialWrite("[browser] self-test OK (URL parse incl https:443 + dotted-quad + HTML strip + "
-                    "widget-click + FetchUrl loopback: 301->200 redirect + Set-Cookie jar + Cookie emit)\n");
-        SerialWrite("[browser-selftest] PASS (https-route + cookies + redirect)\n");
+                    "widget-click + FetchUrl loopback: 301->200 redirect + Set-Cookie jar + Cookie emit + "
+                    "download decision/filename + attachment save)\n");
+        SerialWrite("[browser-selftest] PASS (https-route + cookies + redirect + downloads)\n");
     }
     else
     {
