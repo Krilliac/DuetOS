@@ -44,9 +44,9 @@ RGBA canvas, then blits to the window.
 | Area | Files | What's REAL |
 |------|-------|-------------|
 | HTML | `html.cpp`, `entities.cpp`, `dom.{h,cpp}` | Tokeniser + tree builder, void elements, comments, named/numeric entities, `<p>`/`<li>` recovery. Fragment parse (`ParseHtmlFragment`) backs `innerHTML`. |
-| CSS | `css*.cpp` (`parse`, `apply`, `values`, `ua`) | Selector parse, specificity cascade, inheritance, the UA sheet, `display:none`, the common box/text/colour properties. **Structural pseudo-classes** (`:first-child`/`:last-child`/`:nth-child(an+b\|even\|odd)`), **attribute selectors** (`[attr]`, `[attr=]`, `~=`/`^=`/`$=`/`*=`), the **`>`/`+`/`~` combinators**, and **`:not(simple)`**. |
+| CSS | `css*.cpp` (`parse`, `apply`, `values`, `ua`) | Selector parse, specificity cascade, inheritance, the UA sheet, `display:none`, the common box/text/colour properties. **Structural pseudo-classes** — `:first-child`/`:last-child`/`:nth-child(an+b\|even\|odd)`, the **of-type family** (`:first-of-type`/`:last-of-type`/`:nth-of-type`/`:only-of-type`), the **from-end variants** (`:nth-last-child`/`:nth-last-of-type`), and `:only-child` — **attribute selectors** (`[attr]`, `[attr=]`, `~=`/`^=`/`$=`/`*=`), the **`>`/`+`/`~` combinators**, and **`:not(simple)`**. |
 | DOM bindings | `js_dom.cpp` | `document`/element host objects: `getElementById`, `getElementsByTagName`/`ClassName`, `querySelector`/`querySelectorAll` (single-compound), `classList` (`add`/`remove`/`contains`/`toggle`), a **programmatic event model** (`addEventListener`/`removeEventListener`/`dispatchEvent`/`click()` with bubbling + `stopPropagation`/`preventDefault`), `children`, `tagName`, `id`/`className`/`textContent` get+set, and `innerHTML` get **and set** (parse-and-replace). |
-| JavaScript | `js/*` | Lexer → Pratt parser → tree-walking interp. Closures, `for`/`while`, recursion, objects/arrays, **`++`/`--` (prefix + postfix)**, **prototype chain** (`Object.prototype`), **template literals**, object-to-primitive coercion, `JSON.parse`/`stringify`, **a bounded RegExp engine** (`regexp*.cpp` — bytecode + explicit backtrack stack, step-budget-bounded so a hostile pattern can't smash the kernel stack or hang), `new` (native ctors). Built-ins: `Array` (`map`/`filter`/`forEach`/`slice`/`join`/…), `String` (incl. regex `match`/`replace`/`split`/`search`), `Number` (`toFixed`, `toString(radix)`), `Math` (incl. `random`/`sin`/`cos`/`tan`/`log`/`exp`/`sqrt`/`pow`), **`Date`** (`new Date()`/`(ms)`, `Date.now`, UTC getters, `toISOString`), `Object.keys`, `parseInt(radix)`/`parseFloat`/`isNaN`/`isFinite`. Step budget + native-stack guard bound a hostile script. |
+| JavaScript | `js/*` | Lexer → Pratt parser → tree-walking interp. Closures, `for`/`while`, recursion, objects/arrays, **`++`/`--` (prefix + postfix)**, **`try`/`catch`/`finally`/`throw`**, **prototype chain** (`Object.prototype`), **template literals**, object-to-primitive coercion, `JSON.parse`/`stringify`, **a bounded RegExp engine** (`regexp*.cpp` — bytecode + explicit backtrack stack, step-budget-bounded so a hostile pattern can't smash the kernel stack or hang), `new` (native ctors). Built-ins: `Array` (`map`/`filter`/`forEach`/`slice`/`join`/…), `String` (incl. regex `match`/`replace`/`split`/`search`), `Number` (`toFixed`, `toString(radix)`), `Math` (incl. `random`/`sin`/`cos`/`tan`/`log`/`exp`/`sqrt`/`pow`), **`Date`** (`new Date()`/`(ms)`, `Date.now`, UTC getters, `toISOString`), `Object.keys`, `parseInt(radix)`/`parseFloat`/`isNaN`/`isFinite`. Step budget + native-stack guard bound a hostile script. |
 | Layout | `layout*.cpp`, `display_list.h` | Block formatting (vertical stacking, margin/border/padding box, width/height), inline formatting (line boxes, word wrap, text-align), `<img>` boxes, **anonymous-block wrapping**, the **block-in-inline split**, and **vertical margin collapsing** (adjacent-sibling + parent-child + empty-block). |
 | Paint | `paint.cpp` | Fills, glyph runs, borders, image blits, clip rects, scroll offset → framebuffer. |
 | Images | `png.cpp`, `jpeg.cpp` | PNG: greyscale/palette/truecolour ±alpha, bit depths **1/2/4/8/16**, **Adam7 interlacing**, tRNS. JPEG: baseline + progressive, 4:2:0 / 4:2:2 / greyscale. Both reject corrupt/truncated input. |
@@ -90,12 +90,15 @@ Every stage boots a self-test, registered in
   rejection.
 - `[html-dom-selftest]` — nesting, void elements, entities, `<p>`/`<li>`
   recovery, comments, doc text.
-- `[js-selftest]` — 93 snippets: precedence, closures, recursion, loops,
-  `++`/`--` (prefix + postfix, ident/member/index lvalues), string
-  methods, JSON round-trip, template literals, object coercion, plus
-  runaway-loop / depth-cap / syntax-error error paths.
+- `[js-selftest]` — 102 snippets: precedence, closures, recursion, loops,
+  `++`/`--` (prefix + postfix, ident/member/index lvalues),
+  `try`/`catch`/`finally`/`throw` (caught/uncaught/re-throw/finally-order,
+  plus the guard case proving a runaway loop in `try` is **not** caught),
+  string methods, JSON round-trip, template literals, object coercion,
+  plus runaway-loop / depth-cap / syntax-error error paths.
 - `[css-selftest]` — cascade, specificity, inline, inheritance, UA,
-  `display:none`, colour.
+  `display:none`, colour, the structural pseudo-class families (incl. the
+  `:nth-child` vs `:nth-of-type` divergence on mixed-tag siblings).
 - `[js-dom-selftest]` — DOM queries and the `innerHTML` get/set round
   trip (14 checks).
 - `[layout-selftest]` — bg rect, bold heading, wrap, stacked-y,
@@ -112,7 +115,13 @@ Every stage boots a self-test, registered in
   dispatch through a special-cased path rather than real
   `Array.prototype` objects. `Number.toString(radix)` drops the fraction
   for non-decimal radixes; `toFixed` rounds half-away and carries only
-  binary32 precision. No `Symbol.toPrimitive`, no `try`/`catch`.
+  binary32 precision. No `Symbol.toPrimitive`. `try`/`catch`/`finally`/
+  `throw` work, but the catch binding is **required** (`catch {}` without
+  `(e)` is a syntax error) and only an explicit `throw` is catchable —
+  engine-raised faults real JS would surface as `TypeError`/`RangeError`
+  (calling a non-callable, a bad assign target) are not catchable, and the
+  step-budget `Timeout` / stack-guard `Overflow` propagate **through**
+  `try`/`catch` by design.
   Arithmetic (incl. `++`/`--`, `-`/`*`/`/`) does not numeric-parse
   strings — `'5' - 1` and `'5'++` both yield `NaN` (only `+` coerces, as
   concatenation); numeric lvalues are unaffected. No
@@ -127,10 +136,11 @@ Every stage boots a self-test, registered in
   locale; `new` works only for native ctors (e.g. `Date`).
 - **Layout:** no floats, positioning, flexbox/grid, or tables (CSS `float`
   is not yet parsed/laid out — a future slice).
-- **CSS:** `:not()` takes a SIMPLE arg only; no `:nth-of-type`,
-  `:nth-last-child`, `:only-child`, the column combinator, or
-  dynamic/state pseudo-classes (`:hover` parses but never matches).
-  Descendant/general-sibling steps match greedily without backtracking.
+- **CSS:** `:not()` takes a SIMPLE arg only; the of-type / from-end / only
+  structural pseudo-classes are now supported, but there is still no
+  `:nth-col`/column combinator (`||`) and no dynamic/state pseudo-classes
+  (`:hover`/`:focus` parse but never match). Descendant/general-sibling
+  steps match greedily without backtracking.
 - **DOM:** `querySelector`/`All` match a SINGLE compound (tag/`.class`/
   `#id`/`*`) only — they use a self-contained matcher, not the full CSS
   selector engine (whose parse/match entry points are file-private), so
