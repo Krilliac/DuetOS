@@ -183,6 +183,20 @@ void BrowserRenderSelfTest();
 /// KBP_PROBE_V(kBootSelftestFail, <#>). No outbound network.
 void BrowserLinksSelfTest();
 
+/// Boot self-test for INTERACTIVE click plumbing (interactivity step 3/3).
+/// RenderPage a small page with a <button> + a <script> that registers a
+/// click listener (via the SAME render path that retains the JS context),
+/// then dispatches a click through the retained context onto the button's
+/// DOM node and asserts the handler fired (the button's textContent is
+/// rewritten to "hit"); also asserts BrowserHitTestNode maps the button's
+/// and anchor's rect centres back to their DOM nodes (anchor with its
+/// href). Proves retain->hit-test->dispatch end-to-end without a GUI.
+/// Emits `[browser-click-selftest] PASS (...)`; on the first failed
+/// sub-check fires KBP_PROBE_V(kBootSelftestFail, <#>). No outbound
+/// network. GAP: a real on-screen window-manager click is verified only
+/// via the GUI harness.
+void BrowserClickSelfTest();
+
 /// Mouse-event entry point for the Pass D toolbar + labels.
 /// Called from the boot-time mouse-reader thread on every
 /// motion packet. Edge-detects left-button press / release

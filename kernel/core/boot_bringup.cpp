@@ -3237,6 +3237,7 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // rect maps to the link, and that the follow/focus paths target the
     // resolved URL — all network-free.
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserLinksSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserClickSelfTest());
 
     // CALENDAR — windowed month-view sibling of the read-only
     // taskbar-clock popup. Lets the user page through past / future
