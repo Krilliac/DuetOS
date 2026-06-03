@@ -20,10 +20,11 @@
  *   - an in-memory pipe (the boot self-test's loopback handshake).
  *
  * Trust model: this module does NOT reimplement crypto and does NOT
- * itself validate the server certificate chain. It exposes a
+ * itself validate the server certificate chain. It parses the full
+ * server Certificate message (leaf + intermediates) and hands it to a
  * decoupled verifier hook (CertVerifyFn) so the x509 chain-validation
  * module can be wired in without this file depending on it. Until a
- * verifier is installed, a permissive default accepts any leaf and
+ * verifier is installed, a permissive default accepts any chain and
  * logs one warning — see the GAP marker in tls_socket.cpp.
  *
  * Threading: TlsSocketState is caller-owned. No global mutable state
@@ -49,14 +50,26 @@ struct TlsTransport
 };
 
 /// Certificate-verify hook. Called once, right after the server's
-/// Certificate message is parsed and the leaf DER is available.
+/// Certificate message is parsed and the full chain DER is available.
 /// Returns true to accept the chain, false to abort the handshake.
-/// `ctx` is the opaque pointer registered alongside the function.
+///
+///   leaf_der / leaf_len   The server's leaf certificate, DER.
+///   chain_ders / chain_lens / chain_count
+///                         The intermediate certificates the server
+///                         sent after the leaf, in wire order (each a
+///                         DER pointer into the handshake buffer). May
+///                         be empty (count 0, ptrs nullptr) when the
+///                         server presented only a leaf.
+///   hostname              NUL-terminated dialed hostname (SNI).
+///   ctx                   The opaque pointer registered alongside.
 ///
 /// Decoupled on purpose: this header has NO dependency on the x509
-/// module, so the verifier can be wired in (swarm 2) without
-/// dragging crypto/x509.h into every TLS-socket caller.
-using CertVerifyFn = bool (*)(const u8* leaf_der, u32 leaf_len, const char* hostname, void* ctx);
+/// module — the pointer/length-array shape deliberately mirrors
+/// net::x509::Verify's intermediate-chain parameters so the browser's
+/// adapter forwards them 1:1 without this header pulling in
+/// crypto/x509.h.
+using CertVerifyFn = bool (*)(const u8* leaf_der, u32 leaf_len, const u8* const* chain_ders, const u32* chain_lens,
+                              u32 chain_count, const char* hostname, void* ctx);
 
 /// Install the process-wide certificate verifier. Pass nullptr to
 /// fall back to the permissive default (accept-any + one warning).

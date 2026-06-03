@@ -83,6 +83,22 @@ inline i32 EdgePx(const Length& len, i32 basis)
     return ResolveLength(len, basis, 0);
 }
 
+/// Collapse two adjacent vertical margins (CSS2 §8.3.1). Two touching
+/// margins do not sum: the collapsed value is the larger of the positive
+/// margins plus the most-negative of the negative margins (so a positive
+/// and a negative margin partially cancel). `prev` is the bottom margin
+/// carried from the preceding in-flow block; `next` is the top margin of
+/// the block about to be placed. For two non-negative margins this reduces
+/// to max(prev, next) — the common case the self-test pins.
+inline i32 CollapseMargins(i32 prev, i32 next)
+{
+    const i32 maxPos = (prev > next) ? prev : next; // larger positive
+    const i32 minNeg = (prev < next) ? prev : next; // more-negative
+    const i32 pos = (maxPos > 0) ? maxPos : 0;      // ignore if both <= 0
+    const i32 neg = (minNeg < 0) ? minNeg : 0;      // ignore if both >= 0
+    return pos + neg;
+}
+
 inline bool IsWhitespaceByte(char c)
 {
     return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
@@ -145,12 +161,37 @@ void EmitTextRun(LayoutCtx& ctx, const InlineRun& run, u32 start, u32 len, i32 x
 i32 LayoutInline(LayoutCtx& ctx, const Node* parent, const ComputedStyle& parentStyle, i32 contentX, i32 contentW,
                  i32 originY, const char* parentHref);
 
-// Defined in layout.cpp: lay one block-level box out; returns the y just
-// past the box's bottom margin edge. Declared here so the inline TU's
-// (currently none) and the recursive block walk share one prototype.
+// Defined in layout_inline.cpp: lay an ANONYMOUS BLOCK's inline content
+// out. The anonymous block wraps the consecutive inline-level sibling run
+// [first, stopBefore) (a half-open range over a block container's child
+// list, where `stopBefore` is the first block-level sibling that ended the
+// run, or nullptr to run to the end of the list). The run inherits
+// `parentStyle` (the containing block establishes the IFC's default
+// style); `parentHref` threads the nearest ancestor <a href>. Behaves like
+// LayoutInline but gathers runs from a sibling slice rather than a single
+// parent's whole subtree. Returns the y just past the last line.
+i32 LayoutInlineSiblings(LayoutCtx& ctx, const ComputedStyle& parentStyle, const Node* first, const Node* stopBefore,
+                         i32 contentX, i32 contentW, i32 originY, const char* parentHref);
+
+// Defined in layout.cpp: lay one block-level box out. Returns the y of the
+// box's BOTTOM BORDER edge (NOT including the box's own bottom margin) so
+// adjacent-sibling margin collapsing works: the box's bottom margin is
+// reported back via `*carryMargin` instead of being baked into the return,
+// letting the next sibling collapse its top margin against it.
+//
+// `*carryMargin` is in/out: on entry it holds the bottom margin carried
+// from the preceding in-flow block sibling (0 when this is the first child
+// or there is no preceding margin to collapse with); the box advances its
+// top margin edge by the COLLAPSED gap (see CollapseMargins) rather than
+// summing. On return `*carryMargin` holds this box's own bottom margin for
+// the next sibling to collapse against. A caller that wants the y past the
+// final box's bottom margin adds the leftover `*carryMargin` after the
+// loop.
+//
 // `linkHref` is the nearest-ancestor <a href> (nullptr when none) so a
 // link wrapping block content tags the items its subtree produces.
-i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 originY, const char* linkHref);
+i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 originY, const char* linkHref,
+                i32* carryMargin);
 
 } // namespace layout_detail
 

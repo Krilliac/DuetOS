@@ -410,6 +410,81 @@ AstNode* ParseFunctionExpr(Parser& p)
     return fn;
 }
 
+// Template literal: a TemplateStr head, then zero or more
+// (TemplateExprStart expr TemplateExprEnd TemplateStr) groups. Folds
+// into an Ast::Template node: keys[] = cooked chunks (kidCount+1 of
+// them), kids[] = interpolated expressions.
+AstNode* ParseTemplate(Parser& p)
+{
+    AstNode* tpl = p.Node(Ast::Template);
+    if (!tpl)
+        return nullptr;
+
+    const char* chunks[65];
+    u32 chunkLens[65];
+    AstNode* exprs[64];
+    u32 chunkCount = 0;
+    u32 exprCount = 0;
+
+    // head chunk
+    chunks[chunkCount] = p.Cur().strData;
+    chunkLens[chunkCount] = p.Cur().strLen;
+    chunkCount++;
+    p.Adv();
+
+    while (p.Is(Tok::TemplateExprStart))
+    {
+        if (exprCount >= 64)
+        {
+            p.Fail("too many template interpolations");
+            return nullptr;
+        }
+        p.Adv(); // ${
+        exprs[exprCount] = ParseExpr(p);
+        if (!p.ok)
+            return nullptr;
+        exprCount++;
+        if (!p.Expect(Tok::TemplateExprEnd, "expected '}' to close template interpolation"))
+            return nullptr;
+        if (!p.Is(Tok::TemplateStr))
+        {
+            p.Fail("expected template chunk after interpolation");
+            return nullptr;
+        }
+        chunks[chunkCount] = p.Cur().strData;
+        chunkLens[chunkCount] = p.Cur().strLen;
+        chunkCount++;
+        p.Adv();
+    }
+
+    if (exprCount)
+    {
+        tpl->kids = p.arena.NewArray<AstNode*>(exprCount);
+        if (!tpl->kids)
+        {
+            p.Fail("out of memory");
+            return nullptr;
+        }
+        for (u32 i = 0; i < exprCount; ++i)
+            tpl->kids[i] = exprs[i];
+    }
+    tpl->kidCount = exprCount;
+
+    tpl->keys = p.arena.NewArray<const char*>(chunkCount);
+    tpl->keyLens = p.arena.NewArray<u32>(chunkCount);
+    if (!tpl->keys || !tpl->keyLens)
+    {
+        p.Fail("out of memory");
+        return nullptr;
+    }
+    for (u32 i = 0; i < chunkCount; ++i)
+    {
+        tpl->keys[i] = chunks[i];
+        tpl->keyLens[i] = chunkLens[i];
+    }
+    return tpl;
+}
+
 AstNode* ParsePrimary(Parser& p)
 {
     if (LooksLikeArrow(p))
@@ -487,6 +562,8 @@ AstNode* ParsePrimary(Parser& p)
         p.Adv();
         return n;
     }
+    case Tok::TemplateStr:
+        return ParseTemplate(p);
     case Tok::KwFunction:
         return ParseFunctionExpr(p);
     case Tok::LParen:

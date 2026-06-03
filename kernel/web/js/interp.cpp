@@ -1,7 +1,10 @@
 #include "web/js/interp.h"
 
+#include "mm/frame_allocator.h"
+#include "mm/kstack.h"
 #include "util/string.h"
 #include "web/js/builtins.h"
+#include "web/js/engine.h"
 
 /*
  * DuetOS — kernel/web/js: the tree-walking interpreter.
@@ -43,7 +46,7 @@ static Result<JsValue> EvalArrayLit(Interp& I, const AstNode* n, Env* env)
 
 static Result<JsValue> EvalObjectLit(Interp& I, const AstNode* n, Env* env)
 {
-    JsObject* obj = ObjNew(I.arena, false);
+    JsObject* obj = NewPlainObject(I);
     if (!obj)
         return Err{ErrorCode::OutOfMemory};
     for (u32 i = 0; i < n->kidCount; ++i)
@@ -53,6 +56,56 @@ static Result<JsValue> EvalObjectLit(Interp& I, const AstNode* n, Env* env)
             return Err{ErrorCode::OutOfMemory};
     }
     return JsValue::Obj(obj);
+}
+
+// Append `n` bytes from `src` to a growing arena string buffer, growing
+// it (copy-on-grow, since the arena is bump-only) when needed. Returns
+// false on OOM.
+static bool TemplateAppend(Arena& a, char*& buf, u32& len, u32& cap, const char* src, u32 n)
+{
+    if (len + n + 1 > cap)
+    {
+        u32 newCap = cap ? cap * 2 : 64;
+        while (newCap < len + n + 1)
+            newCap *= 2;
+        char* nb = static_cast<char*>(a.Alloc(newCap, 1));
+        if (!nb)
+            return false;
+        for (u32 i = 0; i < len; ++i)
+            nb[i] = buf[i];
+        buf = nb;
+        cap = newCap;
+    }
+    for (u32 i = 0; i < n; ++i)
+        buf[len + i] = src[i];
+    len += n;
+    return true;
+}
+
+// Evaluate a template literal: cook chunk[0] + ToString(expr[0]) +
+// chunk[1] + … + chunk[kidCount]. Chunks live in keys[]/keyLens[]
+// (kidCount+1 of them); interpolated expressions in kids[].
+static Result<JsValue> EvalTemplate(Interp& I, const AstNode* n, Env* env)
+{
+    char* buf = nullptr;
+    u32 len = 0;
+    u32 cap = 0;
+    const u32 chunkCount = n->kidCount + 1;
+    for (u32 i = 0; i < chunkCount; ++i)
+    {
+        if (!TemplateAppend(I.arena, buf, len, cap, n->keys[i], n->keyLens[i]))
+            return Err{ErrorCode::OutOfMemory};
+        if (i < n->kidCount)
+        {
+            JS_TRY_ASSIGN(JsValue v, EvalExpr(I, n->kids[i], env));
+            JsString* s = ToJsString(I, v);
+            if (!s)
+                return Err{ErrorCode::OutOfMemory};
+            if (!TemplateAppend(I.arena, buf, len, cap, s->data, s->len))
+                return Err{ErrorCode::OutOfMemory};
+        }
+    }
+    return JsValue::Str(MakeString(I.arena, buf ? buf : "", len));
 }
 
 static Result<JsValue> EvalUnary(Interp& I, const AstNode* n, Env* env)
@@ -92,6 +145,26 @@ static Result<JsValue> EvalBinary(Interp& I, const AstNode* n, Env* env)
 {
     JS_TRY_ASSIGN(JsValue a, EvalExpr(I, n->a, env));
     JS_TRY_ASSIGN(JsValue b, EvalExpr(I, n->b, env));
+
+    // Object operands of arithmetic / relational / additive operators
+    // coerce to a primitive first (default hint = valueOf-then-toString).
+    // Equality (== / != / === / !==) does its own coercion in
+    // LooseEquals, so leave object operands intact for those.
+    if (n->op != Op::EqEq && n->op != Op::NotEq && n->op != Op::StrictEq && n->op != Op::StrictNotEq)
+    {
+        if (a.type == JsType::Object)
+        {
+            JS_TRY_ASSIGN(JsValue pa, ToPrimitive(I, a, /*stringHint=*/false));
+            if (pa.type != JsType::Undefined)
+                a = pa;
+        }
+        if (b.type == JsType::Object)
+        {
+            JS_TRY_ASSIGN(JsValue pb, ToPrimitive(I, b, /*stringHint=*/false));
+            if (pb.type != JsType::Undefined)
+                b = pb;
+        }
+    }
 
     switch (n->op)
     {
@@ -417,6 +490,8 @@ Result<JsValue> EvalExpr(Interp& I, const AstNode* n, Env* env)
         JS_TRY_ASSIGN(JsValue c, EvalExpr(I, n->a, env));
         return EvalExpr(I, ToBoolean(c) ? n->b : n->c, env);
     }
+    case Ast::Template:
+        return EvalTemplate(I, n, env);
     case Ast::Member:
     {
         JS_TRY_ASSIGN(JsValue obj, EvalExpr(I, n->a, env));
@@ -628,6 +703,24 @@ Result<JsValue> CallFunction(Interp& I, JsFunction* fn, const JsValue* args, u32
 {
     if (I.depth >= I.maxDepth)
         return Err{ErrorCode::Overflow};
+    // Native (kernel) stack-overflow guard. The logical depth cap above
+    // cannot see real C++ stack consumption — each JS call level burns
+    // several native frames (~15 KiB in debug) — so on the kernel's 64 KiB
+    // arena stack a deep recursion would smash the guard page long before
+    // `maxDepth`. When this thread runs on a kstack-arena slot, bail with
+    // Overflow once the current frame is within kJsStackGuardMargin of the
+    // slot's guard page. (Boot-context threads run on a larger non-arena
+    // stack and are bounded by `maxDepth` alone.)
+    {
+        const u64 fr = reinterpret_cast<u64>(__builtin_frame_address(0));
+        if (fr >= mm::kKernelStackArenaBase && fr < mm::kKernelStackArenaBase + mm::kKernelStackArenaBytes)
+        {
+            const u64 offInSlot = (fr - mm::kKernelStackArenaBase) % mm::kKernelStackSlotBytes;
+            const u64 floor = mm::kKernelStackGuardPages * mm::kPageSize + kJsStackGuardMargin;
+            if (offInSlot <= floor)
+                return Err{ErrorCode::Overflow};
+        }
+    }
     I.depth++;
 
     Env* callEnv = EnvNew(I.arena, fn->closure);

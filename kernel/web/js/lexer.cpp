@@ -17,6 +17,7 @@ namespace
 {
 
 constexpr u32 kMaxTokens = 65536;
+constexpr u32 kMaxTemplateNesting = 16;
 
 struct Scanner
 {
@@ -27,6 +28,14 @@ struct Scanner
     Arena& arena;
 
     bool sawNewline; // pending "a newline preceded the next token"
+
+    // Template-literal interpolation tracking. Each open `${` pushes a
+    // frame holding the running `{`/`}` balance of the interpolation
+    // body, so a `}` that closes a nested object literal does not end
+    // the interpolation prematurely. tmplDepth == 0 means "not inside an
+    // interpolation": a `}` then is a plain RBrace.
+    u32 tmplBrace[kMaxTemplateNesting];
+    u32 tmplDepth;
 
     bool Eof() const { return pos >= n; }
     char Peek(u32 o = 0) const { return (pos + o < n) ? s[pos + o] : '\0'; }
@@ -320,6 +329,115 @@ bool ScanString(Scanner& sc, Token& t, const char*& err)
     return false;
 }
 
+// How a template cooked-chunk scan terminated.
+enum class TmplStop : u8
+{
+    Backtick, // reached the closing `  — template literal is complete
+    Interp,   // reached ${       — an interpolation follows
+    Error,
+};
+
+// Scan one cooked chunk of a template literal starting at sc.pos (which
+// sits just past the opening ` or the closing } of a prior ${ … }).
+// Decodes the same escapes as a single-/double-quoted string but allows
+// raw newlines (templates are multi-line). On success fills t.strData /
+// t.strLen with the cooked text and reports where it stopped.
+TmplStop ScanTemplateChunk(Scanner& sc, Token& t, const char*& err)
+{
+    const u32 maxLen = sc.n - sc.pos;
+    char* buf = static_cast<char*>(sc.arena.Alloc(maxLen + 1, 1));
+    if (!buf)
+    {
+        err = "out of memory in template literal";
+        return TmplStop::Error;
+    }
+    u32 out = 0;
+    while (!sc.Eof())
+    {
+        char c = sc.Peek();
+        if (c == '`')
+        {
+            sc.Adv();
+            buf[out] = '\0';
+            t.strData = buf;
+            t.strLen = out;
+            return TmplStop::Backtick;
+        }
+        if (c == '$' && sc.Peek(1) == '{')
+        {
+            sc.Adv();
+            sc.Adv();
+            buf[out] = '\0';
+            t.strData = buf;
+            t.strLen = out;
+            return TmplStop::Interp;
+        }
+        if (c == '\n')
+        {
+            sc.sawNewline = true;
+            sc.line++;
+            buf[out++] = sc.Adv();
+            continue;
+        }
+        if (c == '\\')
+        {
+            sc.Adv();
+            char e = sc.Adv();
+            switch (e)
+            {
+            case 'n':
+                buf[out++] = '\n';
+                break;
+            case 't':
+                buf[out++] = '\t';
+                break;
+            case 'r':
+                buf[out++] = '\r';
+                break;
+            case '0':
+                buf[out++] = '\0';
+                break;
+            case '\\':
+                buf[out++] = '\\';
+                break;
+            case '`':
+                buf[out++] = '`';
+                break;
+            case '$':
+                buf[out++] = '$';
+                break;
+            case '\'':
+                buf[out++] = '\'';
+                break;
+            case '"':
+                buf[out++] = '"';
+                break;
+            case 'x':
+            {
+                if (!IsHex(sc.Peek()) || !IsHex(sc.Peek(1)))
+                {
+                    err = "invalid \\x escape";
+                    return TmplStop::Error;
+                }
+                int hi = HexVal(sc.Adv());
+                int lo = HexVal(sc.Adv());
+                buf[out++] = char((hi << 4) | lo);
+                break;
+            }
+            default:
+                buf[out++] = e; // unknown escape -> literal char
+                break;
+            }
+        }
+        else
+        {
+            buf[out++] = sc.Adv();
+        }
+    }
+    err = "unterminated template literal";
+    return TmplStop::Error;
+}
+
 // Emit one operator/punctuation token, advancing past it.
 Tok ScanOperator(Scanner& sc)
 {
@@ -466,8 +584,41 @@ TokenStream Lex(const char* src, u32 len, Arena& arena)
         return ts;
     }
 
-    Scanner sc{src, len, 0, 1, arena, false};
+    Scanner sc{src, len, 0, 1, arena, false, {}, 0};
     u32 count = 0;
+
+    // Scan one template literal beginning just past the opening `.
+    // Emits TemplateStr chunks and TemplateExprStart markers; for each
+    // ${ it pushes a brace frame so the main loop knows the matching }
+    // ends the interpolation (handled below). Returns false on a lexical
+    // error (caller has already set ts.* and returns).
+    auto beginTemplate = [&](auto&& emitFn) -> bool
+    {
+        Token chunk{};
+        const char* terr = nullptr;
+        TmplStop stop = ScanTemplateChunk(sc, chunk, terr);
+        if (stop == TmplStop::Error)
+        {
+            ts.ok = false;
+            ts.errMsg = terr;
+            ts.errLine = sc.line;
+            return false;
+        }
+        Token* st = emitFn(Tok::TemplateStr, chunk.strData, chunk.strLen);
+        if (st)
+        {
+            st->strData = chunk.strData;
+            st->strLen = chunk.strLen;
+        }
+        if (stop == TmplStop::Interp)
+        {
+            emitFn(Tok::TemplateExprStart, sc.s + sc.pos, 0);
+            if (sc.tmplDepth < kMaxTemplateNesting)
+                sc.tmplBrace[sc.tmplDepth] = 0;
+            sc.tmplDepth++;
+        }
+        return true;
+    };
 
     auto emit = [&](Tok kind, const char* start, u32 tlen) -> Token*
     {
@@ -538,11 +689,16 @@ TokenStream Lex(const char* src, u32 len, Arena& arena)
         }
         else if (c == '`')
         {
-            // GAP: template literals are not supported.
-            ts.ok = false;
-            ts.errMsg = "template literals not supported (GAP)";
-            ts.errLine = sc.line;
-            return ts;
+            sc.Adv(); // consume opening `
+            if (sc.tmplDepth >= kMaxTemplateNesting)
+            {
+                ts.ok = false;
+                ts.errMsg = "template literals nested too deeply";
+                ts.errLine = sc.line;
+                return ts;
+            }
+            if (!beginTemplate(emit))
+                return ts;
         }
         else if (IsIdentStart(c))
         {
@@ -562,7 +718,29 @@ TokenStream Lex(const char* src, u32 len, Arena& arena)
                 ts.errLine = sc.line;
                 return ts;
             }
-            emit(op, sc.s + startPos, sc.pos - startPos);
+            // Inside a ${ … } interpolation, a `}` that balances the
+            // interpolation body ends it: emit TemplateExprEnd and
+            // resume scanning the following cooked chunk instead of a
+            // plain RBrace. Braces from nested object literals balance
+            // against tmplBrace[top] first.
+            if (op == Tok::LBrace && sc.tmplDepth > 0)
+            {
+                sc.tmplBrace[sc.tmplDepth - 1]++;
+                emit(op, sc.s + startPos, sc.pos - startPos);
+            }
+            else if (op == Tok::RBrace && sc.tmplDepth > 0 && sc.tmplBrace[sc.tmplDepth - 1] == 0)
+            {
+                emit(Tok::TemplateExprEnd, sc.s + startPos, sc.pos - startPos);
+                sc.tmplDepth--;
+                if (!beginTemplate(emit))
+                    return ts;
+            }
+            else
+            {
+                if (op == Tok::RBrace && sc.tmplDepth > 0)
+                    sc.tmplBrace[sc.tmplDepth - 1]--;
+                emit(op, sc.s + startPos, sc.pos - startPos);
+            }
         }
     }
 

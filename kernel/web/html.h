@@ -52,6 +52,38 @@ using duetos::u32;
 /// top-level parsed nodes.
 Node* ParseHtml(const char* html, u32 len, Arena& arena);
 
+/// Parse `len` bytes of `html` as an HTML *fragment* (the markup that
+/// would live inside an element, e.g. an `innerHTML` assignment). Shares
+/// the same tokenizer / tree builder as `ParseHtml`; the difference is
+/// purely the caller's contract — the returned node is a detached
+/// container (kind == NodeKind::Element, tag `nullptr`) whose children
+/// are the parsed fragment nodes, ready to be re-parented under the
+/// target element. Returns nullptr if the arena could not hold the
+/// container node. The container itself is a scratch holder and is not
+/// meant to be inserted into a live tree.
+///
+/// `contextTag` is the lowercased tag name of the element the fragment is
+/// being parsed *into* (the `innerHTML` target), or nullptr for a generic
+/// (Document-like) context. Table-related contexts seed the tree builder
+/// with the synthetic ancestor chain the HTML5 fragment-parsing algorithm
+/// requires, so the fragment's natural children nest correctly:
+///   - `table`                   → table > (tr/td land under an implied tbody-equivalent)
+///   - `tbody` / `thead` / `tfoot` → table > tbody, so a bare `<tr>` nests
+///   - `tr`                      → table > tbody > tr, so a bare `<td>`/`<th>` nests
+///   - `colgroup`                → table > colgroup, so a bare `<col>` nests
+///   - `select`                  → select, so a bare `<option>`/`<optgroup>` nests
+/// Any other (or null) context falls back to the generic Document-like
+/// path. The synthetic ancestors are scratch — only the fragment's own
+/// children are returned under the detached container.
+///
+/// GAP: this seeds the *initial insertion context* (the element-specific
+/// ancestor chain) but still drives the existing flat-stack tree builder,
+/// not the spec's full insertion-mode state machine. Foster-parenting of
+/// non-table content inside a table, the "in cell"/"in caption" mode
+/// transitions, and `<template>` content fragments remain unimplemented —
+/// revisit when CSS/layout demands fuller table conformance.
+Node* ParseHtmlFragment(const char* html, u32 len, Arena& arena, const char* contextTag = nullptr);
+
 /// Recursively concatenate the text content of `node` and all its
 /// descendants into `out` (NUL-terminated, truncated to `outCap-1`
 /// bytes). Comment nodes are skipped. Returns the number of bytes

@@ -181,6 +181,68 @@ void JsDomSelfTest()
                          "console.log(box.innerHTML.indexOf('<span') >= 0);",
                          "true\n"));
 
+    // 10. innerHTML SET (parse-and-replace): assigning markup parses it
+    // into a fragment and swaps in the new children. Assert via JS that
+    // the element now has exactly 2 element children with the parsed tag
+    // names, and that reading innerHTML back reflects the new subtree.
+    run(RunExpectConsole(doc, dom,
+                         "var box=document.getElementById('box');"
+                         "box.innerHTML='<b>hi</b><i>x</i>';"
+                         "console.log(box.children.length + ',' +"
+                         " box.children[0].tagName + ',' + box.children[1].tagName + ',' +"
+                         " (box.innerHTML.indexOf('<b>') >= 0) + ',' +"
+                         " (box.innerHTML.indexOf('<i>') >= 0));",
+                         "2,B,I,true,true\n"));
+
+    // Independent DOM walk: #box's children are now <b>hi</b><i>x</i>,
+    // proving the parse-and-replace landed in the live Node tree (not
+    // just a JS-side view), and that the old <span> child is gone.
+    {
+        Node* box = FindElementById(doc, "box");
+        Node* first = box ? box->firstChild : nullptr;
+        Node* second = first ? first->nextSibling : nullptr;
+        char fbuf[8];
+        char sbuf[8];
+        u32 fn = first ? web::CollectText(first, fbuf, sizeof(fbuf)) : 0;
+        u32 sn = second ? web::CollectText(second, sbuf, sizeof(sbuf)) : 0;
+        run(first && first->kind == NodeKind::Element && duetos::core::StrEqual(first->tag, "b") && second &&
+            second->kind == NodeKind::Element && duetos::core::StrEqual(second->tag, "i") &&
+            second->nextSibling == nullptr && fn == 2 && duetos::core::StrEqual(fbuf, "hi") && sn == 1 &&
+            duetos::core::StrEqual(sbuf, "x"));
+    }
+
+    // 11. innerHTML SET in an element-specific fragment context: assigning
+    // table-cell markup to a <tr> element must parse the bare <td>s in the
+    // "in row" context and yield two <td> element children (not text, not
+    // dropped). Build the <tr> via createElement so its tag drives the
+    // fragment context, attach it to #box so a DOM re-walk can find it.
+    run(RunExpectConsole(doc, dom,
+                         "var box=document.getElementById('box');"
+                         "var tr=document.createElement('tr');"
+                         "tr.id='row';"
+                         "box.appendChild(tr);"
+                         "tr.innerHTML='<td>hi</td><td>x</td>';"
+                         "console.log(tr.children.length + ',' +"
+                         " tr.children[0].tagName + ',' + tr.children[1].tagName);",
+                         "2,TD,TD\n"));
+
+    // Independent DOM walk: the <tr> now has exactly two <td> element
+    // children with the expected text, proving the table-context fragment
+    // parse landed real <td> nodes in the live tree.
+    {
+        Node* row = FindElementById(doc, "row");
+        Node* first = row ? row->firstChild : nullptr;
+        Node* second = first ? first->nextSibling : nullptr;
+        char fbuf[8];
+        char sbuf[8];
+        u32 fn = first ? web::CollectText(first, fbuf, sizeof(fbuf)) : 0;
+        u32 sn = second ? web::CollectText(second, sbuf, sizeof(sbuf)) : 0;
+        run(first && first->kind == NodeKind::Element && duetos::core::StrEqual(first->tag, "td") && second &&
+            second->kind == NodeKind::Element && duetos::core::StrEqual(second->tag, "td") &&
+            second->nextSibling == nullptr && fn == 2 && duetos::core::StrEqual(fbuf, "hi") && sn == 1 &&
+            duetos::core::StrEqual(sbuf, "x"));
+    }
+
     char numBuf[12];
     if (failIdx >= 0)
     {

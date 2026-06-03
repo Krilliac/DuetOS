@@ -72,6 +72,14 @@ inline i32 BlockDeviceWrite(u32, u64, u32, const void*)
     return -1; // read-only fuzz disk; GptInitDisk is not fuzzed
 }
 
+// Real contract: returns 0 on success. The fuzz disk is read-only, so a
+// flush has nothing to commit — report success so the FS write paths that
+// flush after a (no-op) write don't spuriously surface an I/O error.
+inline i32 BlockDeviceFlush(u32)
+{
+    return 0;
+}
+
 inline u32 PartitionBlockDeviceCreate(const char*, u32, u64, u64)
 {
     return 0;

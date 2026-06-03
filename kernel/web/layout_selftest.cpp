@@ -140,6 +140,19 @@ void LayoutSelfTest()
                        "<div class=b>BBBB</div>"
                        "<div class=gone>HIDDEN</div>"
                        "<p class=ctr>mid</p>"
+                       // Mixed block + inline children: the loose text
+                       // "alpha" and "omega" must each be wrapped in an
+                       // anonymous block box around the real <p> block.
+                       "<div class=mix>alpha<p>blockmid</p>omega</div>"
+                       // Block-in-inline split: a <span> (inline) wrapping a
+                       // block <div> must be split into three stacked block
+                       // pieces — inline "pre", block "MID", inline "post".
+                       "<div class=mix2><span>pre<div class=inblk>MID</div>post</span></div>"
+                       // Adjacent-sibling margin collapsing: .mc1's 20px
+                       // bottom margin and .mc2's 30px top margin collapse to
+                       // max(20,30)=30, NOT 20+30=50.
+                       "<div class=mc1>MCONE</div>"
+                       "<div class=mc2>MCTWO</div>"
                        "</body>";
 
     const char* css = "#box { background-color: #112233; padding: 10px; width: 200px; }"
@@ -147,6 +160,12 @@ void LayoutSelfTest()
                       ".b { height: 40px; }"
                       ".gone { display: none; }"
                       ".ctr { text-align: center; }"
+                      ".mix { margin: 0; }"
+                      ".mix2 { margin: 0; }"
+                      ".mc1 { margin-bottom: 20px; line-height: 16px; }"
+                      ".mc2 { margin-top: 30px; line-height: 16px; }"
+                      ".inblk { margin: 0; line-height: 16px; }"
+                      "span { line-height: 16px; }"
                       // Make geometry deterministic: drop the UA body margin
                       // (8px) so child boxes start at the viewport origin, and
                       // pin line-height == cell height everywhere.
@@ -282,8 +301,117 @@ void LayoutSelfTest()
         return;
     }
 
+    // --- Check 7: anonymous-block wrapping of loose inline content. ---
+    // ".mix" is a <div> whose children are: loose text "alpha", a block
+    // <p>blockmid</p>, then loose text "omega". Box generation must wrap
+    // "alpha" and "omega" each in an anonymous block box, stacking three
+    // block-level boxes vertically: anon("alpha"), p("blockmid"),
+    // anon("omega"). All three text runs must exist and their y-ranges
+    // (each one 16px line tall) must be strictly increasing and
+    // non-overlapping, with the real <p> sandwiched between the two
+    // anonymous blocks.
+    const DisplayItem* aAnon = FindTextRun(*dl, "alpha");
+    const DisplayItem* pBlock = FindTextRun(*dl, "blockmid");
+    const DisplayItem* oAnon = FindTextRun(*dl, "omega");
+    if (aAnon == nullptr || pBlock == nullptr || oAnon == nullptr)
+    {
+        Fail(15);
+        return;
+    }
+    // Each run is exactly one 16px line tall (deterministic metrics).
+    if (aAnon->rect.h != 16 || pBlock->rect.h != 16 || oAnon->rect.h != 16)
+    {
+        Fail(16);
+        return;
+    }
+    // Strict vertical stacking: the <p> sits one line below the leading
+    // anonymous block, and the trailing anonymous block one line below the
+    // <p>. This proves the loose text was wrapped into stacked block boxes
+    // (not dropped, and not flowed inline into a single line).
+    if (pBlock->rect.y - aAnon->rect.y != 16)
+    {
+        Fail(17);
+        return;
+    }
+    if (oAnon->rect.y - pBlock->rect.y != 16)
+    {
+        Fail(18);
+        return;
+    }
+    // Non-overlap: each box's [y, y+h) range must end at or before the
+    // next box's top (here exactly abutting at 16px steps).
+    if (aAnon->rect.y + aAnon->rect.h > pBlock->rect.y || pBlock->rect.y + pBlock->rect.h > oAnon->rect.y)
+    {
+        Fail(19);
+        return;
+    }
+
+    // --- Check 8: block-in-inline split (anonymous-inline-box gen). ---
+    // ".mix2" is <div><span>pre<div>MID</div>post</span></div>. The <span>
+    // is inline but contains a block <div>, so box generation must SPLIT
+    // the span around the block: inline "pre" becomes an anonymous block,
+    // the <div>MID</div> stays a block, and inline "post" becomes another
+    // anonymous block — three boxes stacked vertically. (Without the split
+    // the three would flow inline onto one line at the same y, or "MID"
+    // would be flowed inline instead of pulled out as a block.)
+    const DisplayItem* preRun = FindTextRun(*dl, "pre");
+    const DisplayItem* midRun = FindTextRun(*dl, "MID");
+    const DisplayItem* postRun = FindTextRun(*dl, "post");
+    if (preRun == nullptr || midRun == nullptr || postRun == nullptr)
+    {
+        Fail(20);
+        return;
+    }
+    // Each piece is exactly one 16px line tall.
+    if (preRun->rect.h != 16 || midRun->rect.h != 16 || postRun->rect.h != 16)
+    {
+        Fail(21);
+        return;
+    }
+    // Strict vertical stacking at 16px steps: pre, then MID one line below,
+    // then post one line below MID.
+    if (midRun->rect.y - preRun->rect.y != 16)
+    {
+        Fail(22);
+        return;
+    }
+    if (postRun->rect.y - midRun->rect.y != 16)
+    {
+        Fail(23);
+        return;
+    }
+    // Non-overlap: each piece's [y, y+h) ends at or before the next's top.
+    if (preRun->rect.y + preRun->rect.h > midRun->rect.y || midRun->rect.y + midRun->rect.h > postRun->rect.y)
+    {
+        Fail(24);
+        return;
+    }
+
+    // --- Check 9: adjacent-sibling vertical margin collapsing. ---
+    // ".mc1" (one 16px line, margin-bottom:20px) is immediately followed by
+    // ".mc2" (margin-top:30px). The two touching margins collapse to
+    // max(20,30)=30, so .mc2's run sits 16 (mc1 content height) + 30
+    // (collapsed gap) = 46px below .mc1's run — NOT 16 + (20+30)=66px, which
+    // is what summing the margins would give.
+    const DisplayItem* mc1Run = FindTextRun(*dl, "MCONE");
+    const DisplayItem* mc2Run = FindTextRun(*dl, "MCTWO");
+    if (mc1Run == nullptr || mc2Run == nullptr)
+    {
+        Fail(25);
+        return;
+    }
+    if (mc2Run->rect.y - mc1Run->rect.y != 46)
+    {
+        arch::SerialWrite("[layout-selftest] mc gap=");
+        arch::SerialWriteHex(static_cast<u64>(static_cast<u32>(mc2Run->rect.y - mc1Run->rect.y)));
+        arch::SerialWrite("\n");
+        Fail(26);
+        return;
+    }
+
     arch::SerialWrite("[layout-selftest] PASS (block+inline display list: bg-rect, bold heading, wrap, "
-                      "stacked-y, display:none, center-align)\n");
+                      "stacked-y, display:none, center-align, anon-block-wrap, block-in-inline, "
+                      "margin-collapse)\n");
 }
 
 } // namespace duetos::web

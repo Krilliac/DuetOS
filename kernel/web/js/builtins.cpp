@@ -6,9 +6,10 @@
 /*
  * DuetOS — kernel/web/js: builtin functions and member resolution.
  *
- * GAP: JSON.parse is not implemented (returns undefined). JSON.stringify
- *      covers number/string/bool/null/array/flat-object; nested-object
- *      recursion is shallow-bounded by the step budget.
+ * GAP: JSON.stringify covers number/string/bool/null/array/flat-object;
+ *      nested-object recursion is shallow-bounded by the step budget.
+ *      JSON.parse handles the full grammar but returns undefined (rather
+ *      than throwing) on malformed input — the engine has no try/catch.
  * GAP: String/Array methods operate on ASCII; no Unicode awareness.
  */
 
@@ -35,10 +36,39 @@ static JsObject* MakeNamespace(Interp& I)
     return ObjNew(I.arena, false);
 }
 
+// Create a plain object carrying Object.prototype as its [[Prototype]].
+JsObject* NewPlainObject(Interp& I)
+{
+    JsObject* o = ObjNew(I.arena, false);
+    if (o)
+        o->proto = I.objectProto;
+    return o;
+}
+
 Result<void> InstallBuiltins(Interp& I)
 {
     Arena& a = I.arena;
     Env* g = I.global;
+
+    // Object.prototype: the shared root of the prototype chain. It has
+    // no [[Prototype]] of its own (proto stays null = chain end) and
+    // carries the inherited toString/valueOf. Created first so every
+    // plain object below (and via NewPlainObject) can inherit it.
+    JsObject* objectProto = ObjNew(a, false);
+    if (!objectProto)
+        return Err{ErrorCode::OutOfMemory};
+    ObjSet(objectProto, a, "toString", 8, NativeFnVal(I, kObjToString, "toString"));
+    ObjSet(objectProto, a, "valueOf", 7, NativeFnVal(I, kObjValueOf, "valueOf"));
+    I.objectProto = objectProto;
+
+    // Object global, with Object.prototype reachable as a property.
+    JsObject* objectCtor = ObjNew(a, false);
+    if (!objectCtor)
+        return Err{ErrorCode::OutOfMemory};
+    objectCtor->proto = objectProto;
+    ObjSet(objectCtor, a, "prototype", 9, JsValue::Obj(objectProto));
+    ObjSet(objectCtor, a, "keys", 4, NativeFnVal(I, kObjKeys, "keys"));
+    EnvDefine(g, a, "Object", 6, JsValue::Obj(objectCtor));
 
     // console = { log: <native> }
     JsObject* console = MakeNamespace(I);
@@ -98,6 +128,8 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
             return JsValue::Int(obj.as.str ? i64(obj.as.str->len) : 0);
         if (NameEq(key, keyLen, "charAt"))
             return NativeFnVal(I, kStrCharAt, "charAt");
+        if (NameEq(key, keyLen, "charCodeAt"))
+            return NativeFnVal(I, kStrCharCodeAt, "charCodeAt");
         if (NameEq(key, keyLen, "indexOf"))
             return NativeFnVal(I, kStrIndexOf, "indexOf");
         if (NameEq(key, keyLen, "slice"))
@@ -108,6 +140,10 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
             return NativeFnVal(I, kStrToLower, "toLowerCase");
         if (NameEq(key, keyLen, "split"))
             return NativeFnVal(I, kStrSplit, "split");
+        if (NameEq(key, keyLen, "replace"))
+            return NativeFnVal(I, kStrReplace, "replace");
+        if (NameEq(key, keyLen, "trim"))
+            return NativeFnVal(I, kStrTrim, "trim");
         return JsValue::Undefined();
     }
     if (obj.type == JsType::Object)
@@ -137,6 +173,8 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
                 return NativeFnVal(I, kArrJoin, "join");
             if (NameEq(key, keyLen, "indexOf"))
                 return NativeFnVal(I, kArrIndexOf, "indexOf");
+            if (NameEq(key, keyLen, "slice"))
+                return NativeFnVal(I, kArrSlice, "slice");
             if (NameEq(key, keyLen, "map"))
                 return NativeFnVal(I, kArrMap, "map");
             if (NameEq(key, keyLen, "filter"))
@@ -144,9 +182,13 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
             if (NameEq(key, keyLen, "forEach"))
                 return NativeFnVal(I, kArrForEach, "forEach");
         }
+        // Own property, then walk the prototype chain iteratively. The
+        // loop (never recursion) keeps the native frame flat — see the
+        // native-stack budget note in CallFunction.
         JsValue v{};
-        if (ObjGet(o, key, keyLen, v))
-            return v;
+        for (const JsObject* cur = o; cur; cur = cur->proto)
+            if (ObjGet(cur, key, keyLen, v))
+                return v;
         return JsValue::Undefined();
     }
     return JsValue::Undefined();
@@ -380,6 +422,92 @@ static Result<JsValue> StrSplit(Interp& I, const JsValue& recv, const JsValue* a
     return JsValue::Obj(arr);
 }
 
+static Result<JsValue> StrCharCodeAt(Interp&, const JsValue& recv, const JsValue* args, u32 argc)
+{
+    const JsString* s = recv.as.str;
+    i64 idx = ToInt(ArgOr(args, argc, 0));
+    // GAP: ASCII only — returns the raw byte, not the UTF-16 code unit a
+    // spec-compliant charCodeAt would for non-BMP / multibyte input.
+    if (!s || idx < 0 || idx >= i64(s->len))
+        return JsValue::Float(Sf32QNaN());
+    return JsValue::Int(i64(static_cast<unsigned char>(s->data[idx])));
+}
+
+// String.prototype.replace — first-occurrence, string pattern only.
+// GAP: no regex pattern, no function replacer, no `$&`/`$1` capture
+// substitutions, no global ('g') flag (replaces only the first match).
+static Result<JsValue> StrReplace(Interp& I, const JsValue& recv, const JsValue* args, u32 argc)
+{
+    const JsString* s = recv.as.str;
+    if (!s)
+        return JsValue::Str(MakeString(I.arena, "", 0));
+    JsValue patV = ArgOr(args, argc, 0);
+    JsValue repV = ArgOr(args, argc, 1);
+    // A non-string pattern can't match under the string-only contract:
+    // return the receiver unchanged.
+    if (patV.type != JsType::String || repV.type != JsType::String)
+        return JsValue::Str(MakeString(I.arena, s->data, s->len));
+    const JsString* pat = patV.as.str;
+    const JsString* rep = repV.as.str;
+    // Locate the first occurrence of the pattern.
+    u32 at = s->len; // sentinel: "not found"
+    if (pat->len == 0)
+    {
+        at = 0; // empty pattern matches at the start
+    }
+    else if (pat->len <= s->len)
+    {
+        for (u32 i = 0; i + pat->len <= s->len; ++i)
+        {
+            bool eq = true;
+            for (u32 j = 0; j < pat->len; ++j)
+                if (s->data[i + j] != pat->data[j])
+                {
+                    eq = false;
+                    break;
+                }
+            if (eq)
+            {
+                at = i;
+                break;
+            }
+        }
+    }
+    if (at == s->len && pat->len != 0)
+        return JsValue::Str(MakeString(I.arena, s->data, s->len)); // no match
+    u32 outLen = s->len - pat->len + rep->len;
+    char* buf = static_cast<char*>(I.arena.Alloc(outLen + 1, 1));
+    if (!buf)
+        return Err{ErrorCode::OutOfMemory};
+    u32 o = 0;
+    for (u32 i = 0; i < at; ++i)
+        buf[o++] = s->data[i];
+    for (u32 i = 0; i < rep->len; ++i)
+        buf[o++] = rep->data[i];
+    for (u32 i = at + pat->len; i < s->len; ++i)
+        buf[o++] = s->data[i];
+    buf[o] = '\0';
+    return JsValue::Str(MakeString(I.arena, buf, o));
+}
+
+// String.prototype.trim — strip leading/trailing ASCII whitespace.
+// GAP: ASCII whitespace only (space/tab/newline/CR/FF/VT); Unicode
+// whitespace (NBSP, the various spaces) is not recognised.
+static Result<JsValue> StrTrim(Interp& I, const JsValue& recv)
+{
+    const JsString* s = recv.as.str;
+    if (!s)
+        return JsValue::Str(MakeString(I.arena, "", 0));
+    auto isWs = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; };
+    u32 start = 0;
+    u32 end = s->len;
+    while (start < end && isWs(s->data[start]))
+        ++start;
+    while (end > start && isWs(s->data[end - 1]))
+        --end;
+    return JsValue::Str(MakeString(I.arena, s->data + start, end - start));
+}
+
 static Result<JsValue> ArrJoin(Interp& I, const JsValue& recv, const JsValue* args, u32 argc)
 {
     JsObject* arr = recv.as.obj;
@@ -411,6 +539,31 @@ static Result<JsValue> ArrIndexOf(Interp&, const JsValue& recv, const JsValue* a
         if (StrictEquals(arr->elems[i], target))
             return JsValue::Int(i64(i));
     return JsValue::Int(-1);
+}
+
+// Array.prototype.slice — shallow copy of [start, end) with negative
+// indices counting from the end (matching String.prototype.slice).
+static Result<JsValue> ArrSlice(Interp& I, const JsValue& recv, const JsValue* args, u32 argc)
+{
+    JsObject* arr = recv.as.obj;
+    JsObject* out = ObjNew(I.arena, true);
+    if (!out)
+        return Err{ErrorCode::OutOfMemory};
+    i64 len = i64(arr->length);
+    i64 start = ToInt(ArgOr(args, argc, 0));
+    i64 end = argc >= 2 ? ToInt(args[1]) : len;
+    if (start < 0)
+        start = len + start;
+    if (end < 0)
+        end = len + end;
+    if (start < 0)
+        start = 0;
+    if (end > len)
+        end = len;
+    for (i64 i = start; i < end; ++i)
+        if (!ArrPush(out, I.arena, arr->elems[i]))
+            return Err{ErrorCode::OutOfMemory};
+    return JsValue::Obj(out);
 }
 
 // Array higher-order helpers — invoke a user callback per element.
@@ -544,6 +697,342 @@ static u32 JsonStr(Interp& I, const JsValue& v, char* out, u32 cap)
     }
 }
 
+// ----------------------- JSON.parse -----------------------
+
+static bool IsHexDigit(char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static int HexDigitVal(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    return c - 'A' + 10;
+}
+
+// Encode a Unicode code point (BMP range from \uXXXX) as UTF-8 into
+// `out`; returns the byte count written (1..3). Surrogate halves are
+// emitted as-is (3 bytes) — see the JsonParse GAP note.
+static u32 EncodeUtf8(u32 cp, char* out)
+{
+    if (cp < 0x80)
+    {
+        out[0] = char(cp);
+        return 1;
+    }
+    if (cp < 0x800)
+    {
+        out[0] = char(0xC0 | (cp >> 6));
+        out[1] = char(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    out[0] = char(0xE0 | (cp >> 12));
+    out[1] = char(0x80 | ((cp >> 6) & 0x3F));
+    out[2] = char(0x80 | (cp & 0x3F));
+    return 3;
+}
+
+// Recursive-descent JSON reader over a NUL-bounded char span. `pos`
+// walks the input; `ok` clears on any malformed token so the top-level
+// entry can return undefined gracefully (the engine has no exceptions).
+struct JsonReader
+{
+    Interp& I;
+    const char* s;
+    u32 n;
+    u32 pos;
+    bool ok;
+
+    char Peek() const { return pos < n ? s[pos] : '\0'; }
+    char Adv() { return pos < n ? s[pos++] : '\0'; }
+    void SkipWs()
+    {
+        while (pos < n)
+        {
+            char c = s[pos];
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+                ++pos;
+            else
+                break;
+        }
+    }
+    bool Match(const char* lit, u32 len)
+    {
+        if (pos + len > n)
+            return false;
+        for (u32 i = 0; i < len; ++i)
+            if (s[pos + i] != lit[i])
+                return false;
+        pos += len;
+        return true;
+    }
+};
+
+static JsValue JsonReadValue(JsonReader& r);
+
+static JsValue JsonReadString(JsonReader& r)
+{
+    // Caller has verified the opening quote. Decode escapes into the
+    // arena; the decoded form is never longer than the source span.
+    r.Adv(); // opening quote
+    const u32 maxLen = r.n - r.pos;
+    char* buf = static_cast<char*>(r.I.arena.Alloc(maxLen + 1, 1));
+    if (!buf)
+    {
+        r.ok = false;
+        return JsValue::Undefined();
+    }
+    u32 out = 0;
+    while (r.pos < r.n)
+    {
+        char c = r.Adv();
+        if (c == '"')
+        {
+            buf[out] = '\0';
+            return JsValue::Str(MakeString(r.I.arena, buf, out));
+        }
+        if (c == '\\')
+        {
+            char e = r.Adv();
+            switch (e)
+            {
+            case '"':
+                buf[out++] = '"';
+                break;
+            case '\\':
+                buf[out++] = '\\';
+                break;
+            case '/':
+                buf[out++] = '/';
+                break;
+            case 'n':
+                buf[out++] = '\n';
+                break;
+            case 't':
+                buf[out++] = '\t';
+                break;
+            case 'r':
+                buf[out++] = '\r';
+                break;
+            case 'b':
+                buf[out++] = '\b';
+                break;
+            case 'f':
+                buf[out++] = '\f';
+                break;
+            case 'u':
+            {
+                // \uXXXX — decode the BMP code point and emit UTF-8.
+                if (r.pos + 4 > r.n)
+                {
+                    r.ok = false;
+                    return JsValue::Undefined();
+                }
+                u32 cp = 0;
+                for (u32 k = 0; k < 4; ++k)
+                {
+                    char h = r.Adv();
+                    if (!IsHexDigit(h))
+                    {
+                        r.ok = false;
+                        return JsValue::Undefined();
+                    }
+                    cp = (cp << 4) | u32(HexDigitVal(h));
+                }
+                out += EncodeUtf8(cp, buf + out);
+                break;
+            }
+            default:
+                r.ok = false;
+                return JsValue::Undefined();
+            }
+        }
+        else if ((unsigned char)c < 0x20)
+        {
+            // Raw control chars are not legal inside a JSON string.
+            r.ok = false;
+            return JsValue::Undefined();
+        }
+        else
+        {
+            buf[out++] = c;
+        }
+    }
+    r.ok = false; // unterminated string
+    return JsValue::Undefined();
+}
+
+static JsValue JsonReadNumber(JsonReader& r)
+{
+    const u32 start = r.pos;
+    if (r.Peek() == '-')
+        r.Adv();
+    while (r.pos < r.n)
+    {
+        char c = r.s[r.pos];
+        if ((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')
+            ++r.pos;
+        else
+            break;
+    }
+    bool isInt;
+    i64 iv;
+    Sf32 fv;
+    if (!ParseNumberText(r.s + start, r.pos - start, isInt, iv, fv))
+    {
+        r.ok = false;
+        return JsValue::Undefined();
+    }
+    return isInt ? JsValue::Int(iv) : JsValue::Float(fv);
+}
+
+static JsValue JsonReadArray(JsonReader& r)
+{
+    r.Adv(); // '['
+    JsObject* arr = ObjNew(r.I.arena, true);
+    if (!arr)
+    {
+        r.ok = false;
+        return JsValue::Undefined();
+    }
+    r.SkipWs();
+    if (r.Peek() == ']')
+    {
+        r.Adv();
+        return JsValue::Obj(arr);
+    }
+    for (;;)
+    {
+        JsValue v = JsonReadValue(r);
+        if (!r.ok)
+            return JsValue::Undefined();
+        if (!ArrPush(arr, r.I.arena, v))
+        {
+            r.ok = false;
+            return JsValue::Undefined();
+        }
+        r.SkipWs();
+        char c = r.Adv();
+        if (c == ',')
+        {
+            r.SkipWs();
+            continue;
+        }
+        if (c == ']')
+            break;
+        r.ok = false;
+        return JsValue::Undefined();
+    }
+    return JsValue::Obj(arr);
+}
+
+static JsValue JsonReadObject(JsonReader& r)
+{
+    r.Adv(); // '{'
+    JsObject* obj = NewPlainObject(r.I);
+    if (!obj)
+    {
+        r.ok = false;
+        return JsValue::Undefined();
+    }
+    r.SkipWs();
+    if (r.Peek() == '}')
+    {
+        r.Adv();
+        return JsValue::Obj(obj);
+    }
+    for (;;)
+    {
+        r.SkipWs();
+        if (r.Peek() != '"')
+        {
+            r.ok = false;
+            return JsValue::Undefined();
+        }
+        JsValue key = JsonReadString(r);
+        if (!r.ok)
+            return JsValue::Undefined();
+        r.SkipWs();
+        if (r.Adv() != ':')
+        {
+            r.ok = false;
+            return JsValue::Undefined();
+        }
+        JsValue val = JsonReadValue(r);
+        if (!r.ok)
+            return JsValue::Undefined();
+        if (!ObjSet(obj, r.I.arena, key.as.str->data, key.as.str->len, val))
+        {
+            r.ok = false;
+            return JsValue::Undefined();
+        }
+        r.SkipWs();
+        char c = r.Adv();
+        if (c == ',')
+            continue;
+        if (c == '}')
+            break;
+        r.ok = false;
+        return JsValue::Undefined();
+    }
+    return JsValue::Obj(obj);
+}
+
+static JsValue JsonReadValue(JsonReader& r)
+{
+    r.SkipWs();
+    char c = r.Peek();
+    switch (c)
+    {
+    case '"':
+        return JsonReadString(r);
+    case '{':
+        return JsonReadObject(r);
+    case '[':
+        return JsonReadArray(r);
+    case 't':
+        if (r.Match("true", 4))
+            return JsValue::Bool(true);
+        break;
+    case 'f':
+        if (r.Match("false", 5))
+            return JsValue::Bool(false);
+        break;
+    case 'n':
+        if (r.Match("null", 4))
+            return JsValue::Null();
+        break;
+    default:
+        if (c == '-' || (c >= '0' && c <= '9'))
+            return JsonReadNumber(r);
+        break;
+    }
+    r.ok = false;
+    return JsValue::Undefined();
+}
+
+// JSON.parse(text): returns the parsed value, or undefined on any
+// malformed input (the engine surfaces parse errors as undefined rather
+// than throwing — it has no try/catch). GAP: surrogate-pair \uD800
+// sequences decode each half independently rather than combining.
+static JsValue JsonParse(Interp& I, const JsValue* args, u32 argc)
+{
+    JsValue v = ArgOr(args, argc, 0);
+    if (v.type != JsType::String || !v.as.str)
+        return JsValue::Undefined();
+    JsonReader r{I, v.as.str->data, v.as.str->len, 0, true};
+    JsValue result = JsonReadValue(r);
+    if (!r.ok)
+        return JsValue::Undefined();
+    r.SkipWs();
+    if (r.pos != r.n) // trailing garbage after the value
+        return JsValue::Undefined();
+    return result;
+}
+
 Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue* args, u32 argc)
 {
     switch (id)
@@ -647,6 +1136,8 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
 
     case kStrCharAt:
         return StrCharAt(I, recv, args, argc);
+    case kStrCharCodeAt:
+        return StrCharCodeAt(I, recv, args, argc);
     case kStrIndexOf:
         return StrIndexOf(I, recv, args, argc);
     case kStrSlice:
@@ -657,6 +1148,10 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
         return StrCase(I, recv, false);
     case kStrSplit:
         return StrSplit(I, recv, args, argc);
+    case kStrReplace:
+        return StrReplace(I, recv, args, argc);
+    case kStrTrim:
+        return StrTrim(I, recv);
 
     case kArrPush:
     {
@@ -677,6 +1172,8 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
         return ArrJoin(I, recv, args, argc);
     case kArrIndexOf:
         return ArrIndexOf(I, recv, args, argc);
+    case kArrSlice:
+        return ArrSlice(I, recv, args, argc);
     case kArrMap:
         return ArrHof(I, recv, args, argc, kArrMap);
     case kArrFilter:
@@ -691,8 +1188,67 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
         return JsValue::Str(MakeString(I.arena, out, n));
     }
     case kJsonParse:
-        // GAP: JSON.parse is not implemented.
-        return JsValue::Undefined();
+        return JsonParse(I, args, argc);
+
+    case kObjToString:
+        // Object.prototype.toString — the structural string form. Arrays
+        // override this with their own join in GetMemberImpl/ValueToChars;
+        // a plain object yields "[object Object]".
+        return JsValue::Str(MakeString(I.arena, "[object Object]", 15));
+    case kObjValueOf:
+        // Object.prototype.valueOf returns `this` unchanged: a primitive
+        // receiver passes through, an object receiver stays an object so
+        // ToPrimitive falls on to toString.
+        return recv;
+
+    case kObjKeys:
+    {
+        // Object.keys(obj): own enumerable string keys as an array. For
+        // an array, the keys are the decimal indices "0".."length-1".
+        // GAP: inherited properties are excluded (no chain walk) but the
+        // engine has no enumerability flag, so every own named prop is
+        // treated as enumerable. GAP: property order follows the chunk
+        // chain — within a single 8-slot chunk it is insertion order,
+        // but once an object spills to a second chunk the newest chunk
+        // (prepended at the head) enumerates first, so the cross-chunk
+        // order diverges from strict insertion order.
+        JsObject* result = ObjNew(I.arena, true);
+        if (!result)
+            return Err{ErrorCode::OutOfMemory};
+        JsValue arg = ArgOr(args, argc, 0);
+        if (arg.type != JsType::Object)
+            return JsValue::Obj(result);
+        JsObject* o = arg.as.obj;
+        if (o->isArray)
+        {
+            char num[12];
+            for (u32 i = 0; i < o->length; ++i)
+            {
+                u32 n = 0;
+                if (i == 0)
+                    num[n++] = '0';
+                else
+                {
+                    char rev[12];
+                    u32 t = 0;
+                    for (u32 v = i; v; v /= 10)
+                        rev[t++] = char('0' + (v % 10));
+                    while (t)
+                        num[n++] = rev[--t];
+                }
+                if (!ArrPush(result, I.arena, JsValue::Str(MakeString(I.arena, num, n))))
+                    return Err{ErrorCode::OutOfMemory};
+            }
+        }
+        // Named own properties (chunks are insertion-ordered).
+        for (PropChunk* c = o->head; c; c = c->next)
+            for (u32 i = 0; i < PropChunk::kSlots; ++i)
+                if (c->slots[i].used)
+                    if (!ArrPush(result, I.arena,
+                                 JsValue::Str(MakeString(I.arena, c->slots[i].key, c->slots[i].keyLen))))
+                        return Err{ErrorCode::OutOfMemory};
+        return JsValue::Obj(result);
+    }
 
     default:
         return Err{ErrorCode::Unsupported};

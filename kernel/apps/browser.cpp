@@ -1087,19 +1087,28 @@ i64 NowUnix()
     return static_cast<i64>(secs1601 - kFiletimeUnixOffset);
 }
 
-// x509 verifier adapter. net::tls::CertVerifyFn hands us only the
-// leaf DER + hostname; net::x509::Verify wants the (empty here)
-// intermediate chain + a wall-clock. We supply no intermediates —
-// the test trust store issues the leaf directly — and NowUnix().
+// x509 verifier adapter. net::tls::CertVerifyFn hands us the server's
+// leaf DER + the intermediate chain it sent + the hostname;
+// net::x509::Verify wants the same shape plus a wall-clock. The two
+// chain-parameter triples line up 1:1, so we forward them verbatim and
+// supply NowUnix() for the validity window. This verifies the server's
+// full chain against x509's embedded trust store — which now carries
+// real, widely-trusted roots (DigiCert, Amazon, ISRG/Let's Encrypt,
+// GlobalSign, Go Daddy, AffirmTrust; see x509_verify.h), so a
+// real-internet leaf that chains to one of those roots is accepted.
 //
-// GAP: production CA roots — x509's embedded trust store is
-//      test-only, so a real-internet leaf fails this check and the
-//      handshake aborts (the browser surfaces "certificate not
-//      trusted"). Wiring the Mozilla root program in is the seam.
-bool BrowserCertVerify(const u8* leaf_der, u32 leaf_len, const char* hostname, void* /*ctx*/)
+// GAP: NOT full PKI. Verification covers signature + chain-to-embedded-
+//      root (depth <= 2: leaf + one intermediate) + hostname (SAN/CN
+//      with leftmost wildcard) + validity window. It does NOT do CRL/
+//      OCSP revocation (a revoked-but-unexpired cert still verifies),
+//      name constraints, or EKU/KU policy, and the embedded root set is
+//      a hand-picked subset of the CCADB program — sites chaining to any
+//      other root fail closed. See x509_verify.h for the precise list.
+bool BrowserCertVerify(const u8* leaf_der, u32 leaf_len, const u8* const* chain_ders, const u32* chain_lens,
+                       u32 chain_count, const char* hostname, void* /*ctx*/)
 {
     const u64 now = static_cast<u64>(NowUnix());
-    return net::x509::Verify(leaf_der, leaf_len, nullptr, nullptr, 0, hostname, now);
+    return net::x509::Verify(leaf_der, leaf_len, chain_ders, chain_lens, chain_count, hostname, now);
 }
 
 void InstallTlsVerifierOnce()

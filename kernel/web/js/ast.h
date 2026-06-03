@@ -35,6 +35,8 @@ enum class Ast : u8
     Ternary,   // cond ? a : b
     Member,    // obj.prop          (lhs=obj, name=prop)
     Index,     // obj[expr]         (lhs=obj, rhs=expr)
+    Template,  // `a${x}b`: keys[]=cooked chunks, kids[]=interp exprs
+               //   (kidCount interps, kidCount+1 chunks)
     Call,      // callee + args[]
     Function,  // function expr/decl: params[] + body block
     Arrow,     // arrow: params[] + body (block OR expression)

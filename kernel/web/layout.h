@@ -28,14 +28,41 @@
  *     advances by glyph_h * line-height; one TextRun per run with the
  *     element's color/bold/italic/font-size; text-align left/center/right
  *     per line; white-space:pre keeps spaces + honors newlines.
+ *   - Block-in-inline split: an inline element (e.g. <span>) that
+ *     contains a block-level descendant is split around the block per
+ *     CSS box generation — the inline content before/after the block
+ *     each forms an anonymous block, the block child is pulled out, and
+ *     the three stack vertically in the block formatting context (the
+ *     inverse of the anonymous-block wrapping that wraps loose inline
+ *     siblings around a block). The split fragments carry the inline
+ *     element's own style.
  *   - <img> -> ImageBox sized by width/height style if present else a
  *     default placeholder; carries the src attr for the painter.
+ *   - Vertical margin collapsing (CSS2 §8.3.1), ADJACENT SIBLINGS: the
+ *     bottom margin of an in-flow block and the top margin of the next
+ *     in-flow block sibling collapse — the gap between them is the larger
+ *     positive margin plus the most-negative negative margin (so two
+ *     non-negative margins collapse to max(), and a positive + a negative
+ *     partially cancel), NOT their sum. Applies at the document root and
+ *     among a block's block-level children, including the anonymous-block
+ *     and block-in-inline split pieces (an inline/anonymous fragment has no
+ *     collapsible vertical margin and breaks the carry).
  *
- * GAP (deliberately out of scope for this slice): floats; position
- * (absolute/relative/fixed/sticky); flexbox/grid; tables;
- * margin-collapsing; z-index / stacking contexts; overflow/scroll
- * clipping; proportional/measured fonts (monospace only); inline-block
- * sizing nuances; vertical-align; bidi/RTL; writing-modes.
+ * GAP (deliberately out of scope for this slice): margin collapsing's
+ * PARENT-CHILD case (a block's top margin collapsing with its first
+ * in-flow child's top margin, or bottom with last child, when no
+ * border/padding/clearance separates them) — the engine retains a child's
+ * outer margin inside the parent's content box instead, so a margin set on
+ * a first/last child does not currently escape its parent; and
+ * empty-block self-collapsing (a zero-height block collapsing its own top
+ * and bottom margins together). Also out of scope: inline-box DECORATION
+ * splitting (the block-in-inline split stacks the inline element's text
+ * but does NOT re-draw the split inline element's own borders/padding/
+ * background on the before/after fragments); floats; position
+ * (absolute/relative/fixed/sticky); flexbox/grid; tables; z-index /
+ * stacking contexts; overflow/scroll clipping; proportional/measured fonts
+ * (monospace only); inline-block sizing nuances; vertical-align; bidi/RTL;
+ * writing-modes.
  *
  * Memory discipline (kernel rules: no naked new/delete, no libc): the
  * DisplayList, its item array, and any scratch all come from the

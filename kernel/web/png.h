@@ -8,14 +8,19 @@
  * This is the decoder the web stack's <img> path consumes. It is a
  * strict superset of the colour-type coverage in util/png (which
  * only handles 8-bit RGB / RGBA via the Rust img_meta header
- * walker). This decoder handles every 8-bit non-interlaced colour
- * type the modern web actually ships:
+ * walker). This decoder handles every colour type the modern web
+ * actually ships, at every PNG-legal bit depth, interlaced or not:
  *
- *   - colour-type 0 (grayscale)            bit_depth 8
- *   - colour-type 2 (truecolour, RGB)      bit_depth 8
- *   - colour-type 3 (palette / PLTE)       bit_depth 8, optional tRNS
- *   - colour-type 4 (grayscale + alpha)    bit_depth 8
- *   - colour-type 6 (truecolour + alpha)   bit_depth 8
+ *   - colour-type 0 (grayscale)            bit_depth 1/2/4/8/16
+ *   - colour-type 2 (truecolour, RGB)      bit_depth 8/16
+ *   - colour-type 3 (palette / PLTE)       bit_depth 1/2/4/8, optional tRNS
+ *   - colour-type 4 (grayscale + alpha)    bit_depth 8/16
+ *   - colour-type 6 (truecolour + alpha)   bit_depth 8/16
+ *
+ * 16-bit samples are downsampled to 8-bit (high byte taken) since
+ * the output surface is RGBA8888. Sub-byte depths (1/2/4) are
+ * unpacked MSB-first and scaled to the full 8-bit range. Adam7
+ * interlacing is de-interlaced across its seven passes.
  *
  * Output is always RGBA8888: a contiguous `width * height * 4`
  * byte buffer, four bytes per pixel in R, G, B, A order (byte 0 =
@@ -46,9 +51,6 @@
  *
  * GAP — deliberately unimplemented (web targets don't need them
  * in v0; revisit when a real page demands one):
- *   - Adam7 interlacing.
- *   - 16-bit sample depth.
- *   - 1 / 2 / 4-bit sub-byte sample depths.
  *   - APNG (animation).
  *   - gAMA / sRGB / iCCP gamma & colour-profile correction.
  *   - Ancillary chunks beyond tRNS (all walked past tolerantly).

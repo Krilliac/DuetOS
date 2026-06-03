@@ -21,10 +21,13 @@
  *     is fed back into the jar (net::CookieSetFromHeader), persisted
  *     to FAT32 via CookieJarSave.
  *   - HTTPS trust: the x509 chain verifier (net::x509::Verify) is
- *     installed into the TLS socket layer. NOTE its embedded trust
- *     store is TEST-ONLY today, so a real-internet leaf fails the
- *     chain check and the browser surfaces "certificate not trusted"
- *     rather than proceeding. Production roots are the GAP.
+ *     installed into the TLS socket layer and receives the server's
+ *     FULL certificate chain (leaf + intermediates) from the handshake,
+ *     validating it against x509's embedded REAL roots (incl. ISRG Root
+ *     X1). A real-internet leaf that chains (depth <= 2) to a trusted
+ *     root is accepted. GAP: no CRL/OCSP revocation, no name
+ *     constraints, and the root set is a hand-picked subset — sites
+ *     chaining to any other root fail closed.
  *   - Body cap is `kHttpResponseCap` (64 KiB). Pages larger than
  *     this show a `(truncated)` banner — streamed downloads to disk
  *     are a follow-up.

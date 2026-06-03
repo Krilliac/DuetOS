@@ -178,6 +178,24 @@ struct Builder
             --depth;
         }
     }
+
+    // Append a synthetic open element with the given (literal, already
+    // lowercase) tag under the current top and push it. Used to seed the
+    // fragment-parsing context's ancestor chain. Returns the new node, or
+    // nullptr on arena exhaustion (caller seeds best-effort).
+    Node* PushSynthetic(const char* tag)
+    {
+        Node* el = arena.AllocNode();
+        if (el == nullptr)
+        {
+            return nullptr;
+        }
+        el->kind = NodeKind::Element;
+        el->tag = arena.CopyString(tag, static_cast<u32>(duetos::core::StrLen(tag)));
+        Append(el);
+        Push(el);
+        return el;
+    }
 };
 
 // Emit accumulated text [start,end) as a Text child, decoding
@@ -381,20 +399,14 @@ u32 FindRawClose(const char* p, u32 len, const char* tag)
     return len;
 }
 
-} // namespace
-
-Node* ParseHtml(const char* html, u32 len, Arena& arena)
+// Drive the tokenizer + tree builder over [html, html+len) into an
+// already-seeded Builder `b` (its open-element stack must already hold
+// the Document root at index 0, plus any synthetic fragment-context
+// ancestors). Shared by the whole-document and fragment entry points so
+// there is exactly one parser, not two.
+void RunTreeBuilder(Builder& b, const char* html, u32 len)
 {
-    Builder b(arena);
-    Node* doc = arena.AllocNode();
-    if (doc == nullptr)
-    {
-        return nullptr;
-    }
-    doc->kind = NodeKind::Document;
-    b.document = doc;
-    b.Push(doc);
-
+    Arena& arena = b.arena;
     u32 i = 0;
     u32 textStart = 0;
     while (i < len)
@@ -552,6 +564,148 @@ Node* ParseHtml(const char* html, u32 len, Arena& arena)
     // Flush trailing text; unclosed elements are closed implicitly by
     // the stack simply not being popped (EOF recovery).
     EmitText(b, html + textStart, html + len);
+}
+
+// Seed `b` with the synthetic ancestor chain the HTML5 fragment-parsing
+// algorithm selects for `contextTag`, and return the element whose direct
+// children are the fragment's "natural" children — i.e. the deepest
+// seeded ancestor (or the Document root for a generic/null context). The
+// returned node is the one whose children the caller harvests as the
+// fragment. Best-effort: on arena exhaustion mid-seed it returns the
+// deepest node it managed to push.
+Node* SeedFragmentContext(Builder& b, const char* contextTag)
+{
+    if (contextTag == nullptr)
+    {
+        return b.Current();
+    }
+
+    // `table` context: implied tbody so bare <tr>/<td> nest. We push the
+    // tbody as the harvest point; <thead>/<tfoot>/<caption>/<colgroup>
+    // markup in the source still opens its own element under the table.
+    if (TagEq(contextTag, "table"))
+    {
+        Node* table = b.PushSynthetic("table");
+        if (table == nullptr)
+        {
+            return b.Current();
+        }
+        Node* tbody = b.PushSynthetic("tbody");
+        return (tbody != nullptr) ? tbody : table;
+    }
+
+    // Table-section contexts: a bare <tr> is the natural child.
+    if (TagEq(contextTag, "tbody") || TagEq(contextTag, "thead") || TagEq(contextTag, "tfoot"))
+    {
+        Node* table = b.PushSynthetic("table");
+        if (table == nullptr)
+        {
+            return b.Current();
+        }
+        Node* section = b.PushSynthetic(contextTag);
+        return (section != nullptr) ? section : table;
+    }
+
+    // Row context: table > tbody > tr, so a bare <td>/<th> is accepted.
+    if (TagEq(contextTag, "tr"))
+    {
+        Node* table = b.PushSynthetic("table");
+        if (table == nullptr)
+        {
+            return b.Current();
+        }
+        Node* tbody = b.PushSynthetic("tbody");
+        Node* tr = (tbody != nullptr) ? b.PushSynthetic("tr") : nullptr;
+        if (tr != nullptr)
+        {
+            return tr;
+        }
+        return (tbody != nullptr) ? tbody : table;
+    }
+
+    // Column-group context: a bare <col> is the natural child.
+    if (TagEq(contextTag, "colgroup"))
+    {
+        Node* table = b.PushSynthetic("table");
+        if (table == nullptr)
+        {
+            return b.Current();
+        }
+        Node* colgroup = b.PushSynthetic("colgroup");
+        return (colgroup != nullptr) ? colgroup : table;
+    }
+
+    // Select context: a bare <option>/<optgroup> is the natural child.
+    if (TagEq(contextTag, "select"))
+    {
+        Node* select = b.PushSynthetic("select");
+        return (select != nullptr) ? select : b.Current();
+    }
+
+    // Cell / caption / generic flow contexts: the existing "in body"
+    // behavior already accepts their natural children, so no synthetic
+    // ancestors are needed — harvest straight off the Document root.
+    return b.Current();
+}
+
+} // namespace
+
+Node* ParseHtml(const char* html, u32 len, Arena& arena)
+{
+    Builder b(arena);
+    Node* doc = arena.AllocNode();
+    if (doc == nullptr)
+    {
+        return nullptr;
+    }
+    doc->kind = NodeKind::Document;
+    b.document = doc;
+    b.Push(doc);
+
+    RunTreeBuilder(b, html, len);
+    return doc;
+}
+
+Node* ParseHtmlFragment(const char* html, u32 len, Arena& arena, const char* contextTag)
+{
+    Builder b(arena);
+    Node* doc = arena.AllocNode();
+    if (doc == nullptr)
+    {
+        return nullptr;
+    }
+    doc->kind = NodeKind::Document;
+    b.document = doc;
+    b.Push(doc);
+
+    // Seed the element-specific insertion context (table/section/row/...)
+    // so the fragment's natural children nest under the right ancestor.
+    // `harvest` is the element whose direct children ARE the fragment.
+    Node* harvest = SeedFragmentContext(b, contextTag);
+
+    RunTreeBuilder(b, html, len);
+
+    // Re-label the Document root as a detached element container and move
+    // the harvested children up onto it, so the caller always sees the
+    // fragment's children directly under the returned container regardless
+    // of how deep the synthetic context chain was. The synthetic ancestors
+    // (table/tbody/tr) remain in the arena but are not handed back.
+    doc->kind = NodeKind::Element;
+    doc->tag = nullptr;
+
+    if (harvest != doc)
+    {
+        // Detach `harvest`'s children and re-parent them under `doc`,
+        // replacing the synthetic ancestor subtree that currently hangs
+        // off `doc`.
+        doc->firstChild = harvest->firstChild;
+        doc->lastChild = harvest->lastChild;
+        for (Node* c = doc->firstChild; c != nullptr; c = c->nextSibling)
+        {
+            c->parent = doc;
+        }
+    }
+
     return doc;
 }
 
