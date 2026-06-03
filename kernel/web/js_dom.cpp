@@ -42,6 +42,18 @@ namespace
 
 struct NodeBind; // fwd
 
+// One addEventListener registration: a JS listener bound to a (Node,
+// type) pair. `type` is a JS-arena copy (no interning table — the cap is
+// small enough that a linear scan is fine). `fn` is the stored listener
+// (normally a JS closure; a native callback is accepted too).
+struct Listener
+{
+    Node* node = nullptr;
+    const char* type = nullptr; // JS-arena copy, NUL-terminated
+    js::JsFunction* fn = nullptr;
+    bool live = false; // false once removeEventListener clears the slot
+};
+
 struct DomCtx
 {
     Document* doc = nullptr;
@@ -54,6 +66,15 @@ struct DomCtx
     Node* cacheNode[kMaxWrappers] = {};
     JsObject* cacheObj[kMaxWrappers] = {};
     u32 cacheCount = 0;
+
+    // Event-listener registry. A flat table is fine: dispatch walks the
+    // ancestor chain and scans this list per node, and the cap bounds a
+    // hostile script that registers in a loop. Cap documented below;
+    // registrations past it are silently dropped (matching the parser's
+    // arena-exhaustion "stop growing rather than fault" discipline).
+    static constexpr u32 kMaxListeners = 128;
+    Listener listeners[kMaxListeners] = {};
+    u32 listenerCount = 0;
 };
 
 struct NodeBind
@@ -104,6 +125,16 @@ u32 ValToCStr(const JsValue& v, char* out, u32 cap)
     if (cap > 0)
         out[n < cap ? n : cap - 1] = '\0';
     return n;
+}
+
+// Copy `n` bytes of `s` into the JS scratch arena as a NUL-terminated
+// string and return the arena-owned pointer (or nullptr on exhaustion).
+// The JS arena has no raw CopyString; MakeString gives us the arena-owned
+// NUL-terminated buffer we want (we keep only its char* payload).
+const char* JsCopyStr(js::Arena& a, const char* s, u32 n)
+{
+    js::JsString* js = js::MakeString(a, s, n);
+    return js ? js->data : nullptr;
 }
 
 // ---------------------------------------------------------------------------
@@ -912,6 +943,263 @@ Result<JsValue> ClassListHostGet(Interp&, JsObject* self, const char* key, u32 k
 }
 
 // ---------------------------------------------------------------------------
+// DOM event model — addEventListener / removeEventListener / dispatchEvent
+// / click(). Programmatic only: a script registers a listener, then
+// dispatchEvent()/click() fires it on the target and BUBBLES up the
+// ancestor chain (dom.h `parent` links). The event object exposes
+// type / target / preventDefault() / defaultPrevented /
+// stopPropagation(); stopPropagation halts bubbling. Listeners run via
+// the engine's normal call path (CallFunction) at +1 interpreter depth —
+// the native-stack guard in CallFunction bounds runaway recursion; we add
+// no C++ recursion per listener beyond that single call.
+//
+// GAP: capture phase, `once`/`passive` options, and event delegation
+//   edge cases are out of scope.
+// GAP: real user input (mouse/keyboard) is NOT routed here yet — the
+//   window manager has no path into JsRunOnDocument's per-eval DomCtx, so
+//   only scripted dispatchEvent()/click() reaches listeners. Wiring real
+//   clicks needs the browser app (apps/browser.cpp) to keep a live
+//   DomCtx for the loaded page and translate a WM click on a layout box
+//   back to its Node, then call into a dispatch entry point. Revisit when
+//   the browser app owns a persistent script context.
+// ---------------------------------------------------------------------------
+
+// Per-dispatch event state, backing the JS event host object. Lives on
+// the JS arena for the duration of the eval (a dispatch completes before
+// the eval returns, so the bool flags are only read during bubbling).
+struct EventState
+{
+    DomCtx* ctx = nullptr;
+    Node* target = nullptr;
+    const char* type = nullptr; // JS-arena copy
+    bool defaultPrevented = false;
+    bool propagationStopped = false;
+};
+
+Result<JsValue> MEventPreventDefault(Interp&, const JsValue& recv, const JsValue*, u32, void*)
+{
+    if (recv.type == JsType::Object && recv.as.obj)
+        if (auto* ev = static_cast<EventState*>(recv.as.obj->hostData))
+            ev->defaultPrevented = true;
+    return JsValue::Undefined();
+}
+
+Result<JsValue> MEventStopPropagation(Interp&, const JsValue& recv, const JsValue*, u32, void*)
+{
+    if (recv.type == JsType::Object && recv.as.obj)
+        if (auto* ev = static_cast<EventState*>(recv.as.obj->hostData))
+            ev->propagationStopped = true;
+    return JsValue::Undefined();
+}
+
+// hostGet for the event object: type / target / defaultPrevented as
+// properties, preventDefault / stopPropagation as bound methods.
+Result<JsValue> EventHostGet(Interp& I, JsObject* self, const char* key, u32 keyLen)
+{
+    auto* ev = static_cast<EventState*>(self->hostData);
+    if (!ev)
+        return JsValue::Undefined();
+    if (KeyIs(key, keyLen, "type"))
+        return JsValue::Str(js::MakeString(I.arena, ev->type ? ev->type : "", Slen(ev->type)));
+    if (KeyIs(key, keyLen, "target"))
+        return WrapNode(*ev->ctx, ev->target);
+    if (KeyIs(key, keyLen, "defaultPrevented"))
+        return JsValue::Bool(ev->defaultPrevented);
+    if (KeyIs(key, keyLen, "preventDefault"))
+        return Method(*ev->ctx, MEventPreventDefault, "preventDefault");
+    if (KeyIs(key, keyLen, "stopPropagation"))
+        return Method(*ev->ctx, MEventStopPropagation, "stopPropagation");
+    return JsValue::Undefined();
+}
+
+// Build the JS event host object wrapping `ev`.
+JsValue MakeEventObject(DomCtx& ctx, EventState* ev)
+{
+    JsObject* o = js::ObjNew(*ctx.js, false);
+    if (!o)
+        return JsValue::Undefined();
+    o->hostData = ev;
+    o->hostGet = EventHostGet;
+    return JsValue::Obj(o);
+}
+
+// Find an existing live registration for (node, type, fn), or -1.
+i32 FindListener(DomCtx& ctx, Node* node, const char* type, js::JsFunction* fn)
+{
+    for (u32 i = 0; i < ctx.listenerCount; ++i)
+    {
+        Listener& l = ctx.listeners[i];
+        if (l.live && l.node == node && l.fn == fn && l.type && duetos::core::StrEqual(l.type, type))
+            return i32(i);
+    }
+    return -1;
+}
+
+// Invoke one stored listener with the event object as the sole argument.
+// Listeners are normally JS closures (CallFunction); a native-callback
+// listener is dispatched through its nativeCall instead (CallFunction
+// dereferences fn->node, which is null for native callbacks). Errors
+// (Timeout, Overflow, OOM) propagate so dispatch fails the eval the same
+// way any other script error does.
+Result<void> InvokeListener(Interp& I, js::JsFunction* fn, const JsValue& eventVal, const JsValue& recv)
+{
+    if (!fn)
+        return {};
+    if (fn->node)
+    {
+        JS_TRY(js::CallFunction(I, fn, &eventVal, 1, recv));
+    }
+    else if (fn->nativeCall)
+    {
+        JS_TRY(fn->nativeCall(I, recv, &eventVal, 1, fn->nativeCtx));
+    }
+    return {};
+}
+
+// Dispatch `type` to `target`, then bubble up the ancestor chain. At each
+// node on the path, every live listener registered for `type` fires (in
+// registration order). stopPropagation() halts the bubble after the
+// current node's listeners finish. The listener set is snapshotted per
+// node (by scanning `ctx.listeners`) so a listener that adds/removes
+// registrations does not perturb the in-progress walk's slot indices —
+// `live` is re-checked per fire so a removal mid-dispatch still takes
+// effect for not-yet-fired slots.
+// `defaultPrevented` (set by any listener calling preventDefault) is
+// reported back through the out-param so dispatchEvent can return the
+// DOM's "not cancelled" boolean.
+Result<void> DispatchEvent(Interp& I, DomCtx& ctx, Node* target, const char* type, bool& outPrevented)
+{
+    outPrevented = false;
+    EventState* ev = ctx.js->New<EventState>();
+    if (!ev)
+        return Err{ErrorCode::OutOfMemory};
+    ev->ctx = &ctx;
+    ev->target = target;
+    ev->type = type;
+    JsValue eventVal = MakeEventObject(ctx, ev);
+
+    for (Node* cur = target; cur; cur = cur->parent)
+    {
+        JsValue recv = WrapNode(ctx, cur);
+        // Snapshot the count up front so listeners added during this
+        // node's dispatch are not fired until a future dispatch.
+        u32 snap = ctx.listenerCount;
+        for (u32 i = 0; i < snap; ++i)
+        {
+            Listener& l = ctx.listeners[i];
+            if (!l.live || l.node != cur || !l.type || !duetos::core::StrEqual(l.type, type))
+                continue;
+            JS_TRY(InvokeListener(I, l.fn, eventVal, recv));
+        }
+        if (ev->propagationStopped)
+            break;
+    }
+    outPrevented = ev->defaultPrevented;
+    return {};
+}
+
+Result<JsValue> MAddEventListener(Interp&, const JsValue& recv, const JsValue* args, u32 argc, void*)
+{
+    NodeBind* nb = BindOf(recv);
+    if (!nb)
+        return JsValue::Undefined();
+    JsValue typeArg = ArgOr(args, argc, 0);
+    JsValue fnArg = ArgOr(args, argc, 1);
+    if (!fnArg.IsCallable())
+        return JsValue::Undefined(); // non-callable listener: no-op (DOM coerces; we drop)
+    DomCtx& ctx = *nb->ctx;
+    char tbuf[64];
+    u32 tl = ValToCStr(typeArg, tbuf, sizeof(tbuf));
+    const char* type = JsCopyStr(*ctx.js, tbuf, tl);
+    if (!type)
+        return Err{ErrorCode::OutOfMemory};
+    // De-dupe: the DOM ignores a repeat (type, listener) registration.
+    if (FindListener(ctx, nb->node, type, fnArg.as.fn) >= 0)
+        return JsValue::Undefined();
+    if (ctx.listenerCount >= DomCtx::kMaxListeners)
+        return JsValue::Undefined(); // cap reached — drop (documented bound)
+    Listener& l = ctx.listeners[ctx.listenerCount++];
+    l.node = nb->node;
+    l.type = type;
+    l.fn = fnArg.as.fn;
+    l.live = true;
+    return JsValue::Undefined();
+}
+
+Result<JsValue> MRemoveEventListener(Interp&, const JsValue& recv, const JsValue* args, u32 argc, void*)
+{
+    NodeBind* nb = BindOf(recv);
+    if (!nb)
+        return JsValue::Undefined();
+    JsValue fnArg = ArgOr(args, argc, 1);
+    if (!fnArg.IsCallable())
+        return JsValue::Undefined();
+    DomCtx& ctx = *nb->ctx;
+    char tbuf[64];
+    u32 tl = ValToCStr(ArgOr(args, argc, 0), tbuf, sizeof(tbuf));
+    const char* type = JsCopyStr(*ctx.js, tbuf, tl);
+    if (!type)
+        return JsValue::Undefined();
+    i32 idx = FindListener(ctx, nb->node, type, fnArg.as.fn);
+    if (idx >= 0)
+        ctx.listeners[idx].live = false; // tombstone; slot reuse not needed at this cap
+    return JsValue::Undefined();
+}
+
+Result<JsValue> MDispatchEvent(Interp& I, const JsValue& recv, const JsValue* args, u32 argc, void*)
+{
+    NodeBind* nb = BindOf(recv);
+    if (!nb)
+        return JsValue::Bool(false);
+    DomCtx& ctx = *nb->ctx;
+    // The event argument may be a string ("click") or an event-like
+    // object exposing a `type`. Pull the type out; default to the empty
+    // string (no listener will match, returns true).
+    JsValue arg = ArgOr(args, argc, 0);
+    char tbuf[64];
+    u32 tl = 0;
+    if (arg.type == JsType::Object && arg.as.obj)
+    {
+        JsValue t{};
+        if (js::ObjGet(arg.as.obj, "type", 4, t))
+            tl = ValToCStr(t, tbuf, sizeof(tbuf));
+        else if (arg.as.obj->hostGet)
+        {
+            // A host event object: read its `type` through the hook.
+            Result<JsValue> tv = arg.as.obj->hostGet(I, arg.as.obj, "type", 4);
+            if (tv)
+                tl = ValToCStr(tv.value(), tbuf, sizeof(tbuf));
+        }
+    }
+    else
+    {
+        tl = ValToCStr(arg, tbuf, sizeof(tbuf));
+    }
+    const char* type = JsCopyStr(*ctx.js, tbuf, tl);
+    if (!type)
+        return Err{ErrorCode::OutOfMemory};
+    bool prevented = false;
+    JS_TRY(DispatchEvent(I, ctx, nb->node, type, prevented));
+    // DOM dispatchEvent returns false iff a listener called
+    // preventDefault (the event is treated as cancelable), else true.
+    return JsValue::Bool(!prevented);
+}
+
+Result<JsValue> MClick(Interp& I, const JsValue& recv, const JsValue*, u32, void*)
+{
+    NodeBind* nb = BindOf(recv);
+    if (!nb)
+        return JsValue::Undefined();
+    DomCtx& ctx = *nb->ctx;
+    const char* type = JsCopyStr(*ctx.js, "click", 5);
+    if (!type)
+        return Err{ErrorCode::OutOfMemory};
+    bool prevented = false;
+    JS_TRY(DispatchEvent(I, ctx, nb->node, type, prevented));
+    return JsValue::Undefined();
+}
+
+// ---------------------------------------------------------------------------
 // document methods (recv = the document host object; ctx via nativeCtx).
 // ---------------------------------------------------------------------------
 
@@ -1157,6 +1445,16 @@ Result<JsValue> ElemHostGet(Interp& I, JsObject* self, const char* key, u32 keyL
         if (KeyIs(key, keyLen, "classList"))
             return MakeClassList(ctx, nb);
     }
+
+    // ---- event model (EventTarget surface — element + document) ----
+    if (KeyIs(key, keyLen, "addEventListener"))
+        return Method(ctx, MAddEventListener, "addEventListener");
+    if (KeyIs(key, keyLen, "removeEventListener"))
+        return Method(ctx, MRemoveEventListener, "removeEventListener");
+    if (KeyIs(key, keyLen, "dispatchEvent"))
+        return Method(ctx, MDispatchEvent, "dispatchEvent");
+    if (node->kind == NodeKind::Element && KeyIs(key, keyLen, "click"))
+        return Method(ctx, MClick, "click");
 
     return JsValue::Undefined(); // miss → fall through to plain props
 }

@@ -65,6 +65,14 @@ struct JsObject
     // compiled program here; builtins dispatch test/exec on it.
     JsRegExp* regexp = nullptr;
 
+    // Date instance tag. A Date is a plain JsObject (so it can still carry
+    // ad-hoc props) whose `isDate` flag is set and whose `dateMs` carries
+    // its time value — milliseconds since the Unix epoch (UTC). The
+    // getTime/getFullYear/... methods dispatch on this tag in
+    // GetMemberImpl, mirroring the RegExp special-case above.
+    bool isDate = false;
+    i64 dateMs = 0;
+
     // [[Prototype]] — the next link in the prototype chain, or null at
     // the chain's end. Plain objects get Object.prototype here at
     // creation; member lookup (GetMemberImpl) walks this iteratively.
