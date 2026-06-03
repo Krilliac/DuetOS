@@ -43,11 +43,13 @@
  * GAP (deliberately out of scope for this slice):
  *   - Event model: programmatic dispatchEvent()/click() + bubbling are
  *     REAL; capture phase, the `once`/`passive` listener options, and
- *     event delegation edge cases are unimplemented. Crucially, REAL
- *     user input (mouse/keyboard from the window manager) is NOT routed
- *     to these listeners yet — only scripted dispatch reaches them. See
- *     the event-model block in js_dom.cpp for what apps/browser.cpp must
- *     do to translate a WM click into a Node dispatch.
+ *     event delegation edge cases are unimplemented. REAL user input
+ *     (mouse/keyboard from the window manager) is not yet routed to these
+ *     listeners — but the retained JsDomContext below (with
+ *     JsDomContextDispatchClick) now provides the persistent listener
+ *     table + dispatch entry point a WM click can call once apps/browser.cpp
+ *     wires it (Create at render → RunScript per <script> → DispatchClick
+ *     on a click). See the event-model block in js_dom.cpp.
  *   - querySelector/All: only a SINGLE compound selector is matched
  *     (tag, .class, #id, or universal). Descendant/child/sibling combinators, attribute
  *     and pseudo selectors, and comma selector-lists are unsupported —
@@ -100,6 +102,67 @@ struct JsDomResult
  */
 JsDomResult JsRunOnDocument(Document* doc, const char* script, u32 len, Arena& domArena, char* console_out,
                             u32 console_cap);
+
+/*
+ * Retained DOM+JS context. Unlike JsRunOnDocument (one-shot: build an
+ * interpreter, run one script, discard everything), a JsDomContext
+ * PERSISTS the JS interpreter, its global env, and the DOM binding's
+ * listener table + wrapper cache across multiple RunScript calls and
+ * across the run→dispatch gap. This is the foundation for browser
+ * interactivity: a page <script> can register an `addEventListener`
+ * during render, and a later user click (translated by the browser app
+ * into a Node dispatch) still finds that listener alive.
+ *
+ * The context is an opaque, file-static SINGLETON — exactly one page is
+ * active at a time. (GAP: no tabs / no concurrent pages — a second
+ * Create resets the first. The browser app owns one loaded page, so the
+ * singleton matches today's need; lifting it to per-tab needs the arena
+ * backing store to become per-context rather than the single
+ * g_jsDomArena.)
+ *
+ * Lifetime contract the caller (apps/browser.cpp) must honor:
+ *   - The DOM nodes live in `domArena` (the browser's persistent render
+ *     arena that owns `doc`), NOT in the context's JS arena. The browser
+ *     keeps that arena + `doc` alive for as long as it dispatches into
+ *     the context. DispatchClick takes a raw Node* into that tree.
+ *   - The JS arena (listeners, closures, wrapper cache) is reset ONLY by
+ *     Create (a new page). It is NOT reset between RunScript and
+ *     DispatchClick, so a listener registered by one script survives to
+ *     be fired by a later dispatch.
+ */
+struct JsDomContext;
+
+/*
+ * (Re)create the single active context bound to `doc`. Resets the JS
+ * arena, reinstalls the language builtins + the live `document` binding,
+ * and points the DOM binding at `doc` / `domArena` (the arena that owns
+ * `doc`, so script-created nodes persist). `console_out` (optional) is
+ * mirrored the captured console.log output of each RunScript; pass null
+ * if the caller doesn't need it. Returns the singleton (never null on a
+ * valid `doc`), or null if `doc` is null or the global env / builtins
+ * fail to install.
+ */
+JsDomContext* JsDomContextCreate(Document* doc, Arena& domArena, char* console_out, u32 console_cap);
+
+/*
+ * Lex/parse/evaluate `script` (length `len`) against the RETAINED
+ * interpreter + global env + DOM binding. Listeners the script registers
+ * via addEventListener PERSIST in the context for a later DispatchClick.
+ * Returns the eval status (Ok, or InvalidArgument syntax error / Timeout
+ * runaway / Overflow recursion / OutOfMemory / BadState runtime error).
+ * A null / dead context returns InvalidArgument.
+ */
+Result<void> JsDomContextRunScript(JsDomContext* ctx, const char* script, u32 len);
+
+/*
+ * Dispatch a "click" event to `target` through the retained listener
+ * table, bubbling up the ancestor chain exactly like the scripted
+ * element.click() path. Returns true iff a listener called
+ * preventDefault() (so the browser knows whether to follow the default
+ * action, e.g. a link navigation). A null / dead context, or a null
+ * target, returns false.
+ */
+bool JsDomContextDispatchClick(JsDomContext* ctx, Node* target);
 
 /*
  * Boot self-test. Parses a small HTML document, runs a battery of

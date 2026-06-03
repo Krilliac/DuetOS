@@ -29,6 +29,10 @@ namespace
 // DOM arena for the self-test document + script mutations.
 alignas(16) u8 g_selftestDomArena[256 * 1024];
 
+// Second DOM arena for the retained-context cases (their own small pages,
+// kept separate from the main battery's document so a re-walk is clean).
+alignas(16) u8 g_selftestDomArena2[64 * 1024];
+
 void WriteDec(u32 v, char* out)
 {
     char tmp[12];
@@ -396,6 +400,86 @@ void JsDomSelfTest()
                          "t.dispatchEvent('tap');"
                          "console.log(log);",
                          "t\n"));
+
+    // ----------------------------------------------------------------
+    // RETAINED CONTEXT: the listener a script registers must survive to
+    // a LATER dispatch (the run→click gap). JsRunOnDocument is one-shot,
+    // so these cases drive the JsDomContext API directly: Create once,
+    // RunScript to register a listener, THEN DispatchClick — and assert
+    // (by an independent DOM re-walk) that the listener fired across the
+    // boundary. This is the whole point of the retained context.
+    // ----------------------------------------------------------------
+    {
+        Arena dom2(g_selftestDomArena2, sizeof(g_selftestDomArena2));
+        const char* html2 = "<html><body>"
+                            "<button id='btn'>Click</button>"
+                            "<span id='out'>idle</span>"
+                            "</body></html>";
+        Document* doc2 = ParseHtml(html2, u32(duetos::core::StrLen(html2)), dom2);
+
+        // 27. Create + RunScript registers a click listener that, when
+        // fired, mutates #out.textContent. The listener does NOT run yet.
+        char console2[256];
+        JsDomContext* ctx = JsDomContextCreate(doc2, dom2, console2, sizeof(console2));
+        const char* reg = "var n=0;"
+                          "document.getElementById('btn').addEventListener('click', function(e){"
+                          " n=n+1;"
+                          " document.getElementById('out').textContent='clicked';"
+                          "});";
+        bool ran = ctx && bool(JsDomContextRunScript(ctx, reg, u32(duetos::core::StrLen(reg))));
+        run(ctx != nullptr && ran);
+
+        // Before the click, #out is still 'idle' — the listener registered
+        // but has not fired (proving registration alone does not mutate).
+        {
+            Node* out = FindElementById(doc2, "out");
+            char buf[16];
+            u32 n = out ? web::CollectText(out, buf, sizeof(buf)) : 0;
+            run(out && n == 4 && duetos::core::StrEqual(buf, "idle"));
+        }
+
+        // 28. THE persistence check: dispatch a click to #btn THROUGH the
+        // retained context (the listener was registered in a PRIOR
+        // RunScript call). Re-walk the DOM and assert #out became
+        // 'clicked' — proving the listener survived the run→dispatch gap.
+        Node* btn = FindElementById(doc2, "btn");
+        bool prevented = JsDomContextDispatchClick(ctx, btn);
+        run(btn != nullptr && !prevented); // no preventDefault → false
+        {
+            Node* out = FindElementById(doc2, "out");
+            char buf[16];
+            u32 n = out ? web::CollectText(out, buf, sizeof(buf)) : 0;
+            run(out && n == 7 && duetos::core::StrEqual(buf, "clicked"));
+        }
+    }
+
+    // 29. preventDefault round-trip: a listener registered in one
+    // RunScript that calls event.preventDefault() makes DispatchClick
+    // return true; a fresh page whose listener does NOT call it returns
+    // false. Two independent Create/RunScript/DispatchClick cycles.
+    {
+        Arena dom3(g_selftestDomArena2, sizeof(g_selftestDomArena2));
+        const char* html3 = "<html><body><a id='lnk'>go</a></body></html>";
+        Document* doc3 = ParseHtml(html3, u32(duetos::core::StrLen(html3)), dom3);
+        char console3[128];
+
+        // With preventDefault → DispatchClick returns true.
+        JsDomContext* ctxP = JsDomContextCreate(doc3, dom3, console3, sizeof(console3));
+        const char* regP = "document.getElementById('lnk').addEventListener('click',"
+                           " function(e){ e.preventDefault(); });";
+        bool okP = ctxP && bool(JsDomContextRunScript(ctxP, regP, u32(duetos::core::StrLen(regP))));
+        Node* lnkP = FindElementById(doc3, "lnk");
+        run(okP && JsDomContextDispatchClick(ctxP, lnkP) == true);
+
+        // Re-create over the SAME page (resets the listener table) with a
+        // listener that does NOT preventDefault → DispatchClick is false.
+        JsDomContext* ctxN = JsDomContextCreate(doc3, dom3, console3, sizeof(console3));
+        const char* regN = "document.getElementById('lnk').addEventListener('click',"
+                           " function(e){ });";
+        bool okN = ctxN && bool(JsDomContextRunScript(ctxN, regN, u32(duetos::core::StrLen(regN))));
+        Node* lnkN = FindElementById(doc3, "lnk");
+        run(okN && JsDomContextDispatchClick(ctxN, lnkN) == false);
+    }
 
     char numBuf[12];
     if (failIdx >= 0)

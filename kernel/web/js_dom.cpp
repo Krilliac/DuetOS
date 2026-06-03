@@ -955,13 +955,16 @@ Result<JsValue> ClassListHostGet(Interp&, JsObject* self, const char* key, u32 k
 //
 // GAP: capture phase, `once`/`passive` options, and event delegation
 //   edge cases are out of scope.
-// GAP: real user input (mouse/keyboard) is NOT routed here yet — the
-//   window manager has no path into JsRunOnDocument's per-eval DomCtx, so
-//   only scripted dispatchEvent()/click() reaches listeners. Wiring real
-//   clicks needs the browser app (apps/browser.cpp) to keep a live
-//   DomCtx for the loaded page and translate a WM click on a layout box
-//   back to its Node, then call into a dispatch entry point. Revisit when
-//   the browser app owns a persistent script context.
+// GAP: real user input (mouse/keyboard) is NOT routed here yet — but the
+//   plumbing now exists. JsDomContext (see the retained-context section at
+//   the bottom of this file) keeps the DomCtx + listeners alive across the
+//   run→dispatch gap, and JsDomContextDispatchClick() is the dispatch
+//   entry point a WM click can call. What remains is for the browser app
+//   (apps/browser.cpp) to: Create the context at render, RunScript each
+//   page <script> into it (registering listeners), and on a WM click
+//   translate the hit layout box back to its Node and call
+//   JsDomContextDispatchClick(ctx, node). Until that wiring lands, only
+//   scripted dispatchEvent()/click() reaches listeners.
 // ---------------------------------------------------------------------------
 
 // Per-dispatch event state, backing the JS event host object. Lives on
@@ -1504,77 +1507,218 @@ alignas(16) u8 g_jsDomArena[768 * 1024];
 } // namespace
 
 // ---------------------------------------------------------------------------
-// Public entry point.
+// Retained DOM+JS context (singleton). See js_dom.h for the lifetime
+// contract. The whole point: the Interp, its global env, and the DomCtx
+// (listeners + wrapper cache) PERSIST across RunScript / DispatchClick so
+// a listener a page <script> registers survives to a later user click.
+//
+// CRITICAL lifetime invariant: Interp holds `Arena&` and `ConsoleBuf&` by
+// reference (interp.h), so those referents MUST outlive the Interp and
+// MUST be the context's OWN members — not stack temporaries. Hence the
+// member declaration order below is load-bearing: `jsArena` and `console`
+// are declared (and so constructed) BEFORE `interp`, and the constructor
+// member-initializes `interp(jsArena, console)` against THIS object's own
+// members.
+//
+// The JS arena is reset (by assigning a fresh Arena over g_jsDomArena in
+// Create — see the note there on why this rewinds the bump pointer while
+// keeping interp's reference valid) ONLY on a new page. It is NEVER reset
+// between RunScript and DispatchClick, so listeners + their closures + the
+// wrapper cache stay live across the run→dispatch gap.
 // ---------------------------------------------------------------------------
 
+// JsDomContext is defined at namespace (not anonymous) scope because it is
+// forward-declared in js_dom.h. It still names anonymous-namespace types
+// (DomCtx / Interp) — legal within this TU, where the anonymous namespace
+// is part of duetos::web.
+struct JsDomContext
+{
+    // --- declaration order matters: jsArena + console BEFORE interp ---
+    char consoleBuf[1024] = {};                                     // context-owned console backing store
+    js::Arena jsArena{g_jsDomArena, sizeof(g_jsDomArena)};          // bump arena over g_jsDomArena
+    js::ConsoleBuf console{consoleBuf, u32(sizeof(consoleBuf)), 0}; // writes into consoleBuf
+    Interp interp{jsArena, console};                                // refs THIS object's jsArena + console
+    DomCtx domCtx{};                                                // listeners + wrapper cache PERSIST here
+    Document* doc = nullptr;
+    bool live = false;
+
+    // Optional mirror of the captured console output for the browser app.
+    char* consoleOut = nullptr;
+    u32 consoleOutCap = 0;
+};
+
+namespace
+{
+
+// Single active context. (GAP: one page at a time — no tabs / concurrent
+// pages; Create resets this singleton.)
+JsDomContext g_domContext;
+
+// Wire a freshly (re)constructed context's interpreter: install the
+// language builtins and the live `document` binding. Returns the status;
+// on failure the context is left not-live.
+Result<void> ContextInstall(JsDomContext& c, Document* doc, Arena& domArena)
+{
+    Interp& I = c.interp;
+    I.stepBudget = js::kDefaultStepBudget;
+    I.maxDepth = js::kMaxCallDepth;
+    I.depth = 0;
+    I.flow = js::Flow::Normal;
+    I.returnValue = JsValue::Undefined();
+    I.global = js::EnvNew(c.jsArena, nullptr);
+    if (!I.global)
+        return Err{ErrorCode::OutOfMemory};
+    RESULT_TRY(js::InstallBuiltins(I));
+
+    // Point the retained DomCtx at this page. The DomCtx is a member, so
+    // its listener table + wrapper cache live for the context's lifetime
+    // (i.e. until the next Create), NOT just one eval.
+    c.domCtx.doc = doc;
+    c.domCtx.js = &c.jsArena;
+    c.domCtx.dom = &domArena;
+
+    JsValue documentVal = WrapNode(c.domCtx, doc);
+    js::EnvDefine(I.global, c.jsArena, "document", 8, documentVal);
+
+    c.doc = doc;
+    return {};
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Public entry points.
+// ---------------------------------------------------------------------------
+
+JsDomContext* JsDomContextCreate(Document* doc, Arena& domArena, char* console_out, u32 console_cap)
+{
+    if (!doc)
+        return nullptr;
+
+    // Reset the singleton WITHOUT reconstructing it — the freestanding
+    // kernel provides no placement-new, and reconstructing would also
+    // rebind interp's Arena&/ConsoleBuf& references. Instead reset each
+    // member in place:
+    //   - jsArena: assign a fresh Arena over g_jsDomArena. Arena is a
+    //     trivially-copyable value (base/cap/used/oom), so this rewinds
+    //     the bump pointer to 0 while interp.arena STILL references this
+    //     same `c.jsArena` member object (reference unchanged — we only
+    //     overwrote its bytes, not its address). This is the arena reset.
+    //   - console: rewind len to 0 (the backing buffer is reused).
+    //   - domCtx: assign a default DomCtx{} so the listener table and
+    //     wrapper cache counts go back to zero for the new page.
+    // interp itself is NOT reconstructed: its arena/console references
+    // remain bound to c.jsArena / c.console, which we just reset.
+    JsDomContext& c = g_domContext;
+    c.jsArena = js::Arena(g_jsDomArena, sizeof(g_jsDomArena));
+    c.console.len = 0;
+    c.consoleBuf[0] = '\0';
+    c.domCtx = DomCtx{};
+    c.doc = nullptr;
+    c.live = false;
+
+    c.consoleOut = console_out;
+    c.consoleOutCap = console_cap;
+    if (console_out && console_cap)
+        console_out[0] = '\0';
+
+    if (Result<void> r = ContextInstall(c, doc, domArena); !r)
+    {
+        c.live = false;
+        return nullptr;
+    }
+    c.live = true;
+    return &c;
+}
+
+Result<void> JsDomContextRunScript(JsDomContext* ctx, const char* script, u32 len)
+{
+    if (!ctx || !ctx->live)
+        return Err{ErrorCode::InvalidArgument};
+
+    Interp& I = ctx->interp;
+
+    // Lex + parse this script's AST into the RETAINED JS arena. (The AST
+    // is reachable only during this eval, but it shares the arena with the
+    // persistent listeners/closures — which is fine: the arena is reset
+    // only by the next Create, and the AST simply becomes dead space until
+    // then. A page runs a bounded number of <script> blocks.)
+    js::TokenStream toks = js::Lex(script, len, ctx->jsArena);
+    if (!toks.ok)
+        return Err{ErrorCode::InvalidArgument};
+    js::ParseResult pr = js::Parse(toks, ctx->jsArena);
+    if (!pr.ok)
+        return Err{ErrorCode::InvalidArgument};
+
+    // Each RunScript gets a fresh step budget and starts from the normal
+    // flow state; the global env + DomCtx (listeners) carry over.
+    I.stepBudget = js::kDefaultStepBudget;
+    I.depth = 0;
+    I.flow = js::Flow::Normal;
+    I.returnValue = JsValue::Undefined();
+
+    Result<JsValue> r = js::EvalStmt(I, pr.program, I.global);
+
+    // Mirror the (cumulative) console output into the caller's buffer.
+    if (ctx->consoleOut && ctx->consoleOutCap)
+    {
+        u32 n = ctx->console.len < ctx->consoleOutCap ? ctx->console.len : ctx->consoleOutCap - 1;
+        for (u32 i = 0; i < n; ++i)
+            ctx->consoleOut[i] = ctx->consoleBuf[i];
+        ctx->consoleOut[n] = '\0';
+    }
+
+    if (!r)
+        return Err{r.error()};
+    return {};
+}
+
+bool JsDomContextDispatchClick(JsDomContext* ctx, Node* target)
+{
+    if (!ctx || !ctx->live || !target)
+        return false;
+
+    Interp& I = ctx->interp;
+    // A dispatch may run listener closures, so give it a fresh budget and
+    // clean flow state (the same way RunScript primes each eval).
+    I.stepBudget = js::kDefaultStepBudget;
+    I.depth = 0;
+    I.flow = js::Flow::Normal;
+    I.returnValue = JsValue::Undefined();
+
+    bool prevented = false;
+    Result<void> r = DispatchEvent(I, ctx->domCtx, target, "click", prevented);
+    if (!r)
+        return false; // a faulting listener does not count as preventDefault
+    return prevented;
+}
+
+// JsRunOnDocument is now a thin one-shot adapter over the retained
+// context: Create a fresh context for `doc`, run the single script, map
+// the status into JsDomResult. This proves the retained path is
+// behaviorally identical to the old one-shot path (the self-test's 32
+// existing checks all flow through here).
 JsDomResult JsRunOnDocument(Document* doc, const char* script, u32 len, Arena& domArena, char* console_out,
                             u32 console_cap)
 {
     JsDomResult out{};
     if (console_out && console_cap)
         console_out[0] = '\0';
-    if (!doc)
-    {
-        out.status = Err{ErrorCode::InvalidArgument};
-        return out;
-    }
 
-    js::Arena jsArena(g_jsDomArena, sizeof(g_jsDomArena));
-
-    js::TokenStream toks = js::Lex(script, len, jsArena);
-    if (!toks.ok)
-    {
-        out.status = Err{ErrorCode::InvalidArgument};
-        return out;
-    }
-    js::ParseResult pr = js::Parse(toks, jsArena);
-    if (!pr.ok)
-    {
-        out.status = Err{ErrorCode::InvalidArgument};
-        return out;
-    }
-
-    js::ConsoleBuf console{console_out, console_cap, 0};
-    Interp I(jsArena, console);
-    I.stepBudget = js::kDefaultStepBudget;
-    I.maxDepth = js::kMaxCallDepth;
-    I.depth = 0;
-    I.flow = js::Flow::Normal;
-    I.returnValue = JsValue::Undefined();
-    I.global = js::EnvNew(jsArena, nullptr);
-    if (!I.global)
-    {
-        out.status = Err{ErrorCode::OutOfMemory};
-        return out;
-    }
-    if (Result<void> r = js::InstallBuiltins(I); !r)
-    {
-        out.status = Err{r.error()};
-        return out;
-    }
-
-    // Install the live `document` binding. The DomCtx lives on the JS
-    // arena so its wrapper cache outlives the eval body.
-    DomCtx* ctx = jsArena.New<DomCtx>();
+    JsDomContext* ctx = JsDomContextCreate(doc, domArena, console_out, console_cap);
     if (!ctx)
     {
-        out.status = Err{ErrorCode::OutOfMemory};
+        // doc null → InvalidArgument; install failure → OutOfMemory. Only
+        // a null doc reaches here with doc == nullptr.
+        out.status = doc ? Err{ErrorCode::OutOfMemory} : Err{ErrorCode::InvalidArgument};
         return out;
     }
-    ctx->doc = doc;
-    ctx->js = &jsArena;
-    ctx->dom = &domArena;
-    JsValue documentVal = WrapNode(*ctx, doc);
-    js::EnvDefine(I.global, jsArena, "document", 8, documentVal);
 
-    Result<JsValue> r = js::EvalStmt(I, pr.program, I.global);
+    out.status = JsDomContextRunScript(ctx, script, len);
 
-    if (console_out && console_cap)
-        console_out[console.len < console_cap ? console.len : console_cap - 1] = '\0';
-    out.consoleLen = console.len < console_cap ? console.len : (console_cap ? console_cap - 1 : 0);
-
-    if (!r)
-        out.status = Err{r.error()};
+    // Report the console byte count (excluding NUL), bounded like before.
+    u32 cap = console_cap;
+    out.consoleLen = ctx->console.len < cap ? ctx->console.len : (cap ? cap - 1 : 0);
     return out;
 }
 

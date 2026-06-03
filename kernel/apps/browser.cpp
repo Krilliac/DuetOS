@@ -155,6 +155,21 @@ struct State
     // `fetch_in_flight` to decide what to paint.
     char fetch_url[kUrlCap];
     volatile bool fetch_in_flight;
+
+    // Interactive scripting handle. Each RenderPage of an HTML page
+    // (re)creates ONE retained JS context bound to the freshly-parsed
+    // DOM root (`page_doc`) out of the render arena, runs every <script>
+    // against it so listeners persist, and keeps it alive until the next
+    // RenderPage. A user click then hit-tests the display list back to a
+    // DOM node and dispatches a bubbling `click` through `page_ctx`, so
+    // page JS click handlers fire (on buttons / divs / anything), not just
+    // anchors. Both are nullptr before the first render, on a non-HTML
+    // page, on a download (no RenderPage), or if context creation fails —
+    // callers MUST null-check and fall back to link-only navigation.
+    // The pointers reference the persistent render arena + the file-static
+    // singleton context, both of which outlive DoFetch.
+    duetos::web::JsDomContext* page_ctx;
+    duetos::web::Node* page_doc;
 };
 
 constinit State g_state = {};
@@ -183,6 +198,15 @@ constexpr u32 kImageCacheCap = 16u;
 alignas(16) u8 g_render_arena_buf[kRenderArenaBytes];
 alignas(16) u8 g_canvas[kCanvasW * kCanvasH * 4u];
 alignas(16) u8 g_image_arena_buf[kImageArenaBytes];
+
+// PERSISTENT render arena over g_render_arena_buf. It must OUTLIVE
+// RenderPage: the retained JsDomContext keeps `&domArena` to allocate
+// DOM nodes that listeners create at click time (textContent setters,
+// innerHTML), long after RenderPage returns. A RenderPage-local Arena
+// would dangle (the buffer persists, but the bump-pointer object would
+// be destroyed) and runtime DOM mutations would fault / spuriously OOM.
+// Reset (re-constructed over the buffer) at the top of each RenderPage.
+duetos::web::Arena g_render_arena{g_render_arena_buf, kRenderArenaBytes};
 
 struct ImageCacheEntry
 {
@@ -1883,12 +1907,14 @@ u32 GatherStyles(const duetos::web::Node* node, char* out, u32 cap, u32 len)
     return len;
 }
 
-// Run every <script> element's text against the live DOM (so scripts
-// mutate the tree before layout). Each call is bounded by the JS
-// engine's step budget, so a runaway page script returns Timeout rather
-// than hanging the browser.
-void RunScripts(duetos::web::Node* docRoot, duetos::web::Node* node, duetos::web::Arena& arena, char* console_buf,
-                u32 console_cap)
+// Run every <script> element's text against the RETAINED JS context (so
+// scripts mutate the tree before layout AND any listeners they register
+// via addEventListener persist into `ctx` for a later user-click
+// dispatch). All scripts on the page share the single `ctx`, so a handler
+// defined in one <script> sees globals from another. Each RunScript call
+// is bounded by the JS engine's step budget, so a runaway page script
+// returns an error rather than hanging the browser.
+void RunScripts(duetos::web::JsDomContext* ctx, duetos::web::Node* node)
 {
     using duetos::web::NodeKind;
     for (duetos::web::Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
@@ -1899,13 +1925,23 @@ void RunScripts(duetos::web::Node* docRoot, duetos::web::Node* node, duetos::web
             {
                 if (t->kind == NodeKind::Text && t->text != nullptr && t->text[0] != '\0')
                 {
-                    // Always run against the TRUE document root so
-                    // getElementById / querySelector see the whole tree.
-                    duetos::web::JsRunOnDocument(docRoot, t->text, StrLen(t->text), arena, console_buf, console_cap);
+                    // A page <script> that fails to parse/run is a normal
+                    // web condition (and an engine-coverage gap surfacer) —
+                    // log it gated rather than failing the render. Listeners
+                    // a failed script would have registered simply don't.
+                    // A page <script> that fails to parse/run is a normal
+                    // web condition — log it gated rather than failing the
+                    // render; listeners it would have registered just don't.
+                    const duetos::core::Result<void> sr =
+                        duetos::web::JsDomContextRunScript(ctx, t->text, StrLen(t->text));
+                    if (!sr)
+                    {
+                        KLOG_WARN("apps/browser", "page script error");
+                    }
                 }
             }
         }
-        RunScripts(docRoot, c, arena, console_buf, console_cap);
+        RunScripts(ctx, c);
     }
 }
 
@@ -2021,6 +2057,12 @@ void RenderPage(const char* html, u32 len, const char* page_url, u32 viewport_w)
     g_state.render_total_h = 0;
     g_state.scroll_y = 0;
     g_state.render_viewport_w = viewport_w;
+    // Drop the previous page's interactive context up front: if this
+    // render bails early (parse failure) or never installs a context
+    // (OOM), a stale ctx pointing at a freed/overwritten DOM must not
+    // survive into the click path.
+    g_state.page_ctx = nullptr;
+    g_state.page_doc = nullptr;
 
     // Reset the image cache for the new page (the decoded pixels in the
     // image arena are reclaimed wholesale).
@@ -2028,7 +2070,13 @@ void RenderPage(const char* html, u32 len, const char* page_url, u32 viewport_w)
     g_images.arena = duetos::web::PngArena(g_image_arena_buf, kImageArenaBytes);
     StrCopyCap(g_images.page_url, sizeof(g_images.page_url), page_url);
 
-    duetos::web::Arena arena(g_render_arena_buf, kRenderArenaBytes);
+    // Reset the PERSISTENT render arena (it must outlive this call so the
+    // retained JsDomContext can allocate listener-created DOM nodes at
+    // click time). `arena` aliases the global; passing it to
+    // JsDomContextCreate hands the context a pointer to the persistent
+    // object, not a soon-to-be-destroyed stack local.
+    g_render_arena = duetos::web::Arena(g_render_arena_buf, kRenderArenaBytes);
+    duetos::web::Arena& arena = g_render_arena;
 
     duetos::web::Node* doc = duetos::web::ParseHtml(html, len, arena);
     if (doc == nullptr)
@@ -2044,8 +2092,22 @@ void RenderPage(const char* html, u32 len, const char* page_url, u32 viewport_w)
     duetos::web::ParseStyleSheet(sheet, css_buf, StrLen(css_buf), /*userAgent=*/false, arena);
 
     // Run scripts BEFORE styling+layout so DOM mutations are reflected.
+    // Create ONE retained context for the whole page (so all <script>s
+    // share globals AND any addEventListener registrations survive to be
+    // fired by a later user click), then run each <script> against it.
+    // Keep ctx + doc in g_state so the click path can dispatch into the
+    // listeners; both stay valid until the next RenderPage (render arena +
+    // singleton context persist). If Create fails (OOM / no env), fall
+    // through with a null ctx — RunScripts is skipped and the page is
+    // link-only, never faulting.
     static char console_buf[4096];
-    RunScripts(doc, doc, arena, console_buf, sizeof(console_buf));
+    duetos::web::JsDomContext* ctx = duetos::web::JsDomContextCreate(doc, arena, console_buf, sizeof(console_buf));
+    if (ctx != nullptr)
+    {
+        RunScripts(ctx, doc);
+        g_state.page_ctx = ctx;
+        g_state.page_doc = doc;
+    }
 
     duetos::web::StyleMap styles = duetos::web::ComputeStyles(doc, sheet, arena);
 
@@ -2094,6 +2156,12 @@ void DoFetch(const char* url)
     g_state.status_code = 0;
     g_state.link_count = 0;
     g_state.focus_link = kNoLink;
+    // Drop the prior page's interactive context: a download / error /
+    // non-HTML response below may not call RenderPage, and a stale ctx
+    // would point at a DOM no longer reflected on screen. RenderPage
+    // re-creates it for an HTML page.
+    g_state.page_ctx = nullptr;
+    g_state.page_doc = nullptr;
 
     const auto p = ParseUrl(url);
     if (!p.ok)
@@ -2458,6 +2526,26 @@ void FollowLink(u32 idx)
     StartFetch(tmp);
 }
 
+// Follow a RAW (un-resolved) href, resolving it against the current
+// page's URL the same way BuildLinkRects does, then mirror it into the
+// URL bar and StartFetch (so history Back/Forward work). Used by the
+// node-click path, where the href comes straight off a display item and
+// hasn't been pre-resolved into the link table. No-op on a null/empty
+// href or while a fetch is in flight.
+void FollowHref(const char* raw_href)
+{
+    if (raw_href == nullptr || raw_href[0] == '\0' || g_state.fetch_in_flight)
+        return;
+    char abs[kUrlCap];
+    // Resolve against the rendered page's URL (g_images.page_url is the
+    // base BuildLinkRects also resolved against).
+    ResolveUrl(g_images.page_url, raw_href, abs, sizeof(abs));
+    StrCopyCap(g_state.url, kUrlCap, abs);
+    g_state.url_len = StrLen(g_state.url);
+    g_state.mode = Mode::View;
+    StartFetch(abs);
+}
+
 // Compute the content viewport height (device px) inside the body band, so
 // scroll-into-view can clamp a focused link to the visible region. Mirrors
 // the band math in DrawBody. Returns 0 when bounds are unavailable.
@@ -2506,27 +2594,31 @@ void ScrollLinkIntoView(u32 idx)
         g_state.scroll_y = max_scroll;
 }
 
-// Hit-test a screen-space click against the page's link rects. `screen_cx`
-// / `screen_cy` are framebuffer coordinates; the body band starts at
-// (window_x, window_y + title + top_reserved), and document coords map to
-// screen via doc_y - scroll_y. Returns the hit link index, or kNoLink.
-// View mode only; clicks outside the body band miss.
-u32 HitTestLink(u32 screen_cx, u32 screen_cy)
+// Map a SCREEN-space click to the page's DOCUMENT coordinates, the space
+// the display list + link rects live in (before the scroll offset is
+// applied). The body band starts at (window_x, window_y + title +
+// top_reserved); doc_y maps to screen via doc_y - scroll_y. Returns true
+// and fills *out_doc_x / *out_doc_y only when the click lands inside the
+// body band (View mode, excluding the scrollbar gutter); returns false for
+// clicks on the chrome / scrollbar / outside the window. The single source
+// of truth for the screen->doc transform — HitTestLink and
+// BrowserHitTestNode both go through it.
+bool ScreenToDoc(u32 screen_cx, u32 screen_cy, i32* out_doc_x, i32* out_doc_y)
 {
-    if (g_state.mode != Mode::View || g_state.link_count == 0)
-        return kNoLink;
+    if (g_state.mode != Mode::View)
+        return false;
     duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
     if (!duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
-        return kNoLink;
+        return false;
     constexpr u32 kTitleH = 22U;
     if (wh <= kTitleH)
-        return kNoLink;
+        return false;
     const u32 client_y = wy + kTitleH;
     const u32 client_h = wh - kTitleH;
     const u32 top_reserved = kToolbarH + kUrlBarH + kStatusRowH + 2;
     const u32 bot_reserved = kFooterH + 2;
     if (client_h < top_reserved + bot_reserved)
-        return kNoLink;
+        return false;
     const u32 view_h = client_h - top_reserved - bot_reserved;
     const u32 body_top = client_y + top_reserved;
     const u32 sbw = duetos::drivers::video::kScrollbarWidth;
@@ -2534,14 +2626,27 @@ u32 HitTestLink(u32 screen_cx, u32 screen_cy)
 
     // Click must be inside the body band (excluding the scrollbar gutter).
     if (screen_cx < wx || screen_cx >= body_right)
-        return kNoLink;
+        return false;
     if (screen_cy < body_top || screen_cy >= body_top + view_h)
-        return kNoLink;
+        return false;
 
-    // Translate to document coords: doc_x = screen_x - wx; doc_y =
-    // screen_y - body_top + scroll_y.
-    const i32 doc_x = static_cast<i32>(screen_cx) - static_cast<i32>(wx);
-    const i32 doc_y = static_cast<i32>(screen_cy) - static_cast<i32>(body_top) + g_state.scroll_y;
+    *out_doc_x = static_cast<i32>(screen_cx) - static_cast<i32>(wx);
+    *out_doc_y = static_cast<i32>(screen_cy) - static_cast<i32>(body_top) + g_state.scroll_y;
+    return true;
+}
+
+// Hit-test a screen-space click against the page's link rects. Returns the
+// hit link index, or kNoLink. View mode only; clicks outside the body band
+// miss. Used by the keyboard-focus path and as a fallback when the page has
+// no interactive context.
+u32 HitTestLink(u32 screen_cx, u32 screen_cy)
+{
+    if (g_state.link_count == 0)
+        return kNoLink;
+    i32 doc_x = 0;
+    i32 doc_y = 0;
+    if (!ScreenToDoc(screen_cx, screen_cy, &doc_x, &doc_y))
+        return kNoLink;
     for (u32 i = 0; i < g_state.link_count; ++i)
     {
         const duetos::web::Rect& r = g_state.link_rects[i].rect;
@@ -2549,6 +2654,41 @@ u32 HitTestLink(u32 screen_cx, u32 screen_cy)
             return i;
     }
     return kNoLink;
+}
+
+// Hit-test DOCUMENT coordinates against the laid-out display list and
+// return the TOPMOST element they fall on. Items are in back-to-front
+// paint order, so the LAST item whose rect contains (doc_x, doc_y) and
+// carries a non-null source `node` is the one on top. Sets *out_href to
+// that item's raw (un-resolved) href (may be null) so the caller can
+// follow a link after dispatching the click. Returns nullptr when nothing
+// is hit or no page is rendered.
+const duetos::web::Node* BrowserHitTestNode(i32 doc_x, i32 doc_y, const char** out_href)
+{
+    if (out_href != nullptr)
+        *out_href = nullptr;
+    if (g_state.render_dl == nullptr)
+        return nullptr;
+    const duetos::web::DisplayList& dl = *g_state.render_dl;
+    const duetos::web::Node* hit = nullptr;
+    const char* hit_href = nullptr;
+    for (u32 i = 0; i < dl.count; ++i)
+    {
+        const auto& it = dl.items[i];
+        if (it.node == nullptr)
+            continue;
+        if (it.rect.w <= 0 || it.rect.h <= 0)
+            continue;
+        if (doc_x >= it.rect.x && doc_x < it.rect.x + it.rect.w && doc_y >= it.rect.y && doc_y < it.rect.y + it.rect.h)
+        {
+            // Keep the last (top-most) match.
+            hit = it.node;
+            hit_href = it.href;
+        }
+    }
+    if (hit != nullptr && out_href != nullptr)
+        *out_href = hit_href;
+    return hit;
 }
 
 // Move the keyboard link focus forward (`forward`=true) or backward across
@@ -3825,6 +3965,215 @@ restore:
     g_state.focus_link = kNoLink;
     g_state.body_len = 0;
     g_state.body[0] = '\0';
+    g_state.page_ctx = nullptr;
+    g_state.page_doc = nullptr;
+    g_images.count = 0;
+    g_state.mode = saved_mode;
+    g_state.fetch_in_flight = saved_in_flight;
+    StrCopyCap(g_state.url, kUrlCap, saved_url);
+    g_state.url_len = saved_url_len;
+    StrCopyCap(g_state.fetch_url, kUrlCap, saved_fetch_url);
+}
+
+// Recursively find the first element in `node`'s subtree whose `id`
+// attribute matches `id`. Returns nullptr if none. Used by the click
+// self-test to locate the button DOM node and read its textContent back
+// without a JS round-trip. File-local (test-only helper).
+static duetos::web::Node* FindById(duetos::web::Node* node, const char* id)
+{
+    using duetos::web::NodeKind;
+    for (duetos::web::Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
+    {
+        if (c->kind == NodeKind::Element)
+        {
+            const char* cid = c->GetAttr("id");
+            if (cid != nullptr && StrEqI(cid, id))
+                return c;
+        }
+        if (duetos::web::Node* hit = FindById(c, id))
+            return hit;
+    }
+    return nullptr;
+}
+
+// Boot self-test for the INTERACTIVE click plumbing (retain -> hit-test
+// -> dispatch). Renders a small page through the SAME RenderPage path the
+// live browser uses, so the JS context is created + retained and the
+// <script>'s addEventListener registration persists. Then it dispatches a
+// click through that retained context onto the button's DOM node and
+// asserts the handler fired (by re-reading the button's textContent, which
+// the handler set to "hit"), and that BrowserHitTestNode maps the button's
+// rect centre back to the button node + the anchor's rect back to the
+// anchor node with its href. This proves retain->hit-test->dispatch
+// end-to-end WITHOUT a GUI.
+//
+// GAP: a REAL on-screen window-manager click (cursor -> BrowserMouseInput
+// -> ScreenToDoc -> BrowserHitTestNode -> dispatch) is verified only via
+// the GUI harness; this headless test exercises every link of that chain
+// except the live cursor->screen-coord leg.
+void BrowserClickSelfTest()
+{
+    using arch::SerialWrite;
+    using arch::SerialWriteHex;
+
+    auto fail = [](u32 check)
+    {
+        SerialWrite("[browser-click-selftest] FAIL check=");
+        SerialWriteHex(check);
+        SerialWrite("\n");
+        KBP_PROBE_V(duetos::debug::ProbeId::kBootSelftestFail, check);
+    };
+
+    // Snapshot live state we touch so the desktop is unchanged after.
+    const Mode saved_mode = g_state.mode;
+    const bool saved_in_flight = g_state.fetch_in_flight;
+    char saved_url[kUrlCap];
+    StrCopyCap(saved_url, kUrlCap, g_state.url);
+    const u32 saved_url_len = g_state.url_len;
+    char saved_fetch_url[kUrlCap];
+    StrCopyCap(saved_fetch_url, kUrlCap, g_state.fetch_url);
+
+    // A page with a button + a script that registers a click listener
+    // (which bumps a counter and rewrites the button's textContent), plus
+    // an anchor to exercise the link hit-test back-reference.
+    const char* html = "<html><body>"
+                       "<button id=\"b\">Go</button>"
+                       "<span id=\"out\">idle</span>"
+                       "<p><a id=\"lnk\" href=\"/next\">next</a></p>"
+                       "<script>"
+                       "document.getElementById('b').addEventListener('click',"
+                       "function(){ document.getElementById('out').textContent='hit'; });"
+                       "</script>"
+                       "</body></html>";
+    const char* page_url = "http://example.com/dir/page";
+
+    // Guard the fetch worker so any accidental navigation no-ops.
+    g_state.fetch_in_flight = true;
+    RenderPage(html, StrLen(html), page_url, 320);
+    g_state.fetch_in_flight = false;
+
+    if (!g_state.render_ready || g_state.render_dl == nullptr)
+    {
+        fail(1);
+        goto restore;
+    }
+
+    // --- Check 1: the retained context was created + stored. ---
+    if (g_state.page_ctx == nullptr || g_state.page_doc == nullptr)
+    {
+        fail(2);
+        goto restore;
+    }
+
+    {
+        // --- Check 2: locate the button node in the live DOM. ---
+        duetos::web::Node* button = FindById(g_state.page_doc, "b");
+        if (button == nullptr)
+        {
+            fail(3);
+            goto restore;
+        }
+
+        // The button's textContent starts as "Go" (its first Text child).
+        if (button->firstChild == nullptr || button->firstChild->text == nullptr ||
+            !StrEqI(button->firstChild->text, "Go"))
+        {
+            fail(4);
+            goto restore;
+        }
+
+        // --- Check 3: dispatch a click through the retained context. The
+        // listener the <script> registered during render must still be
+        // alive and fire, rewriting textContent to "hit". ---
+        duetos::web::JsDomContextDispatchClick(g_state.page_ctx, button);
+        // The listener rewrites a SEPARATE #out element's textContent to
+        // "hit" (mutating a node other than the dispatch target, mirroring
+        // the js-dom self-test's persistence case).
+        duetos::web::Node* outEl = FindById(g_state.page_doc, "out");
+        if (outEl == nullptr || outEl->firstChild == nullptr || outEl->firstChild->text == nullptr ||
+            !StrEqI(outEl->firstChild->text, "hit"))
+        {
+            SerialWrite("[browser-click-selftest] DIAG out='");
+            if (outEl != nullptr && outEl->firstChild != nullptr && outEl->firstChild->text != nullptr)
+                SerialWrite(outEl->firstChild->text);
+            SerialWrite("'\n");
+            fail(5);
+            goto restore;
+        }
+
+        // --- Check 4: BrowserHitTestNode at the button's rect centre maps
+        // back to the button node. Find the button's display item by node
+        // identity to get its document rect. ---
+        const duetos::web::DisplayList& dl = *g_state.render_dl;
+        const duetos::web::Rect* brect = nullptr;
+        for (u32 i = 0; i < dl.count; ++i)
+        {
+            if (dl.items[i].node == button && dl.items[i].rect.w > 0 && dl.items[i].rect.h > 0)
+            {
+                brect = &dl.items[i].rect;
+                break;
+            }
+        }
+        if (brect == nullptr)
+        {
+            fail(6);
+            goto restore;
+        }
+        {
+            const i32 bx = brect->x + brect->w / 2;
+            const i32 by = brect->y + brect->h / 2;
+            const char* href = nullptr;
+            const duetos::web::Node* hit = BrowserHitTestNode(bx, by, &href);
+            if (hit != button)
+            {
+                fail(7);
+                goto restore;
+            }
+        }
+
+        // --- Check 5: the anchor's rect centre hit-tests to a node
+        // carrying the anchor's href (the link surface). ---
+        const duetos::web::Rect* lrect = nullptr;
+        for (u32 i = 0; i < dl.count; ++i)
+        {
+            if (dl.items[i].node != nullptr && dl.items[i].href != nullptr && dl.items[i].href[0] != '\0' &&
+                dl.items[i].rect.w > 0 && dl.items[i].rect.h > 0)
+            {
+                lrect = &dl.items[i].rect;
+                break;
+            }
+        }
+        if (lrect == nullptr)
+        {
+            fail(8);
+            goto restore;
+        }
+        {
+            const i32 lx = lrect->x + lrect->w / 2;
+            const i32 ly = lrect->y + lrect->h / 2;
+            const char* href = nullptr;
+            const duetos::web::Node* hit = BrowserHitTestNode(lx, ly, &href);
+            if (hit == nullptr || href == nullptr || href[0] == '\0')
+            {
+                fail(9);
+                goto restore;
+            }
+        }
+    }
+
+    SerialWrite("[browser-click-selftest] PASS (retained ctx, addEventListener persists, dispatch fires handler "
+                "via textContent readback, hit-test node + href)\n");
+
+restore:
+    g_state.render_ready = false;
+    g_state.render_dl = nullptr;
+    g_state.render_total_h = 0;
+    g_state.link_count = 0;
+    g_state.focus_link = kNoLink;
+    g_state.body_len = 0;
+    g_state.body[0] = '\0';
+    g_state.page_ctx = nullptr;
+    g_state.page_doc = nullptr;
     g_images.count = 0;
     g_state.mode = saved_mode;
     g_state.fetch_in_flight = saved_in_flight;
@@ -3867,17 +4216,48 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
     {
         const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
         const EventResult er = g_browser.DispatchEvent(d);
-        // The toolbar / chrome didn't claim this press — try the page's
-        // links. A hit follows the link (which StartFetches + pushes
-        // history, so Back works); it also moves keyboard focus there so
-        // the focus ring tracks the last clicked link.
+        // The toolbar / chrome didn't claim this press — route it into the
+        // page. Unified interactive path: map screen->doc coords, hit-test
+        // the display list back to the topmost DOM node, dispatch a
+        // bubbling JS `click` so page handlers fire (on buttons / divs /
+        // anything, not just anchors), then — unless a handler called
+        // preventDefault() — follow the element's href if it has one. This
+        // also tracks keyboard focus on a clicked link so the focus ring
+        // follows. When there is no interactive context (download / parse
+        // failure / OOM), fall back to the link-only hit-test.
         if (er != EventResult::Consumed)
         {
-            const u32 hit = HitTestLink(cx, cy);
-            if (hit != kNoLink)
+            i32 doc_x = 0;
+            i32 doc_y = 0;
+            const bool in_body = ScreenToDoc(cx, cy, &doc_x, &doc_y);
+            if (in_body && g_state.page_ctx != nullptr)
             {
-                g_state.focus_link = hit;
-                FollowLink(hit);
+                const char* href = nullptr;
+                const duetos::web::Node* n = BrowserHitTestNode(doc_x, doc_y, &href);
+                // Keep the focus ring on a clicked link.
+                const u32 link_hit = HitTestLink(cx, cy);
+                if (link_hit != kNoLink)
+                    g_state.focus_link = link_hit;
+                bool prevented = false;
+                if (n != nullptr)
+                {
+                    // DispatchClick takes a mutable Node*; the back-ref is
+                    // const only to keep layout from mutating it.
+                    prevented =
+                        duetos::web::JsDomContextDispatchClick(g_state.page_ctx, const_cast<duetos::web::Node*>(n));
+                }
+                if (!prevented && href != nullptr && href[0] != '\0')
+                    FollowHref(href);
+            }
+            else
+            {
+                // No interactive context — link-only navigation.
+                const u32 hit = HitTestLink(cx, cy);
+                if (hit != kNoLink)
+                {
+                    g_state.focus_link = hit;
+                    FollowLink(hit);
+                }
             }
         }
     }

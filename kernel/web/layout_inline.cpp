@@ -47,11 +47,26 @@ void EmitTextRun(LayoutCtx& ctx, const InlineRun& run, u32 start, u32 len, i32 x
         it.href = run.href;
         it.hrefLen = static_cast<u32>(duetos::core::StrLen(run.href));
     }
+    it.node = run.node; // hit-test back-ref: the element this run belongs to
     ctx.out->Push(it);
 }
 
 namespace
 {
+
+// The nearest ELEMENT ancestor of `n` (walking up parent links), or
+// nullptr if none exists. A text node's owning element for hit-testing is
+// its nearest element ancestor; the immediate parent is normally that
+// element, but we walk up defensively in case it is not (e.g. a text node
+// directly under a non-element). Returns `n` itself if it is an element.
+const Node* NearestElement(const Node* n)
+{
+    while (n != nullptr && n->kind != NodeKind::Element)
+    {
+        n = n->parent;
+    }
+    return n;
+}
 
 // Collect inline runs from `parent`'s inline subtree into `runs[]`
 // (bounded by `cap`); returns the count produced. Inline elements
@@ -74,6 +89,9 @@ u32 CollectInlineRuns(const LayoutCtx& ctx, const Node* parent, const ComputedSt
                 runs[count].len = static_cast<u32>(duetos::core::StrLen(c->text));
                 runs[count].style = inheritedStyle;
                 runs[count].href = inheritedHref;
+                // Hit-test back-ref: the nearest element ancestor of this
+                // text node owns the run (nullptr for anonymous content).
+                runs[count].node = NearestElement(c->parent);
                 ++count;
             }
         }
@@ -165,6 +183,9 @@ u32 CollectInlineSiblings(const LayoutCtx& ctx, const ComputedStyle* inheritedSt
                 runs[count].len = static_cast<u32>(duetos::core::StrLen(c->text));
                 runs[count].style = inheritedStyle;
                 runs[count].href = inheritedHref;
+                // Hit-test back-ref: the nearest element ancestor of this
+                // text node owns the run (nullptr for anonymous content).
+                runs[count].node = NearestElement(c->parent);
                 ++count;
             }
         }
@@ -367,28 +388,36 @@ i32 LayInlineRuns(LayoutCtx& ctx, const InlineRun* runs, u32 nRuns, const Comput
 i32 LayoutInline(LayoutCtx& ctx, const Node* parent, const ComputedStyle& parentStyle, i32 contentX, i32 contentW,
                  i32 originY, const char* parentHref)
 {
+    // Scope the transient run/line scratch: mark BEFORE allocating `runs`,
+    // rewind on exit. LayInlineRuns allocates its line-fragment scratch
+    // ABOVE this mark, so the single rewind reclaims both — preventing
+    // per-block scratch from accumulating in the non-reclaiming arena
+    // (which would exhaust it and truncate a complex page's render). The
+    // returned y is a value, not a pointer, so reclaiming is safe.
+    const u32 mark = ctx.arena.BytesUsed();
+    i32 result = originY;
     // Gather runs. Bound the run count; deep inline trees beyond this
     // truncate (GAP) rather than over-allocating.
     constexpr u32 kMaxRuns = 256;
     InlineRun* runs = ArenaArray<InlineRun>(ctx.arena, kMaxRuns);
-    if (runs == nullptr)
+    if (runs != nullptr)
     {
-        return originY;
+        // If the inline-context block is itself an <a href>, its inline
+        // content is part of that link; otherwise inherit the link the
+        // block pass threaded down (an ancestor anchor wrapping a block).
+        const char* selfHref = AnchorHref(parent);
+        if (selfHref == nullptr)
+        {
+            selfHref = parentHref;
+        }
+        const u32 nRuns = CollectInlineRuns(ctx, parent, &parentStyle, selfHref, runs, kMaxRuns, 0);
+        if (nRuns != 0)
+        {
+            result = LayInlineRuns(ctx, runs, nRuns, parentStyle, contentX, contentW, originY);
+        }
     }
-    // If the inline-context block is itself an <a href>, its inline
-    // content is part of that link; otherwise inherit the link the block
-    // pass threaded down (an ancestor anchor wrapping a block).
-    const char* selfHref = AnchorHref(parent);
-    if (selfHref == nullptr)
-    {
-        selfHref = parentHref;
-    }
-    const u32 nRuns = CollectInlineRuns(ctx, parent, &parentStyle, selfHref, runs, kMaxRuns, 0);
-    if (nRuns == 0)
-    {
-        return originY;
-    }
-    return LayInlineRuns(ctx, runs, nRuns, parentStyle, contentX, contentW, originY);
+    ctx.arena.Rewind(mark);
+    return result;
 }
 
 i32 LayoutInlineSiblings(LayoutCtx& ctx, const ComputedStyle& parentStyle, const Node* first, const Node* stopBefore,
@@ -398,18 +427,22 @@ i32 LayoutInlineSiblings(LayoutCtx& ctx, const ComputedStyle& parentStyle, const
     // inline content inherits the containing block's style + link. There
     // is no anchor element AT the anonymous-block level (anonymous boxes
     // carry no element), so the link is purely the threaded `parentHref`.
+    // Scope the transient scratch — same mark/rewind discipline as
+    // LayoutInline (reclaims this call's `runs` + LayInlineRuns' frags).
+    const u32 mark = ctx.arena.BytesUsed();
+    i32 result = originY;
     constexpr u32 kMaxRuns = 256;
     InlineRun* runs = ArenaArray<InlineRun>(ctx.arena, kMaxRuns);
-    if (runs == nullptr)
+    if (runs != nullptr)
     {
-        return originY;
+        const u32 nRuns = CollectInlineSiblings(ctx, &parentStyle, parentHref, first, stopBefore, runs, kMaxRuns);
+        if (nRuns != 0)
+        {
+            result = LayInlineRuns(ctx, runs, nRuns, parentStyle, contentX, contentW, originY);
+        }
     }
-    const u32 nRuns = CollectInlineSiblings(ctx, &parentStyle, parentHref, first, stopBefore, runs, kMaxRuns);
-    if (nRuns == 0)
-    {
-        return originY;
-    }
-    return LayInlineRuns(ctx, runs, nRuns, parentStyle, contentX, contentW, originY);
+    ctx.arena.Rewind(mark);
+    return result;
 }
 
 } // namespace layout_detail
