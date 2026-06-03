@@ -30,6 +30,7 @@ enum class Ast : u8
     ArrayLit,  // a[] = children list
     ObjectLit, // keys[] / children[] pairs
     Unary,     // op + operand   (+ - ! typeof)
+    Update,    // ++ / -- : a=lvalue operand, op=Add/Sub, boolVal=prefix?
     Binary,    // op + lhs + rhs (arith/compare/equality)
     Logical,   // && ||  (short-circuit)
     Assign,    // op + target(lhs) + value(rhs)

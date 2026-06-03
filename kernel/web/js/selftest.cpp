@@ -327,6 +327,19 @@ void JsSelfTest()
     // 82. toISOString of the epoch is the canonical fixed form.
     run(CheckCase("new Date(0).toISOString();", "1970-01-01T00:00:00.000Z", nullptr));
 
+    // 83-90. increment/decrement (++/--), prefix and postfix.
+    //   postfix yields the OLD value, prefix the NEW value, and both
+    //   mutate the binding. Covers identifiers, members, array indices,
+    //   the in-expression return value, and the canonical for-loop idiom.
+    run(CheckCase("var i=0; i++; i;", "1", nullptr));                           // postfix mutates
+    run(CheckCase("var i=5; i--; i;", "4", nullptr));                           // postfix decrement
+    run(CheckCase("var i=0; ++i;", "1", nullptr));                              // prefix yields new
+    run(CheckCase("var i=5; i++;", "5", nullptr));                              // postfix yields old
+    run(CheckCase("var o={n:1}; o.n++; o.n;", "2", nullptr));                   // member lvalue
+    run(CheckCase("var a=[10]; a[0]++; a[0];", "11", nullptr));                 // index lvalue
+    run(CheckCase("var i=3; var a=i++ + 10; a + ',' + i;", "13,4", nullptr));   // postfix returns old in-expr
+    run(CheckCase("var s=0; for(var i=0;i<5;i++){ s+=i; } s;", "10", nullptr)); // for-loop idiom
+
     // ---- CRITICAL: a catastrophic-backtracking pattern must TERMINATE
     // (degrade to no-match / a bounded answer), NOT hang the boot. The
     // explicit-stack VM + step budget guarantee this. The classic

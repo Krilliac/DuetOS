@@ -606,6 +606,13 @@ AstNode* ParsePrimary(Parser& p)
     }
 }
 
+// ++ / -- may only target an assignable reference (identifier, member,
+// or index) — the same set DoAssign() can write back to.
+static bool IsUpdateTarget(const AstNode* n)
+{
+    return n && (n->kind == Ast::Ident || n->kind == Ast::Member || n->kind == Ast::Index);
+}
+
 // Member access, indexing, and calls (left-associative postfix).
 AstNode* ParsePostfix(Parser& p)
 {
@@ -660,6 +667,23 @@ AstNode* ParsePostfix(Parser& p)
         if (!p.ok)
             return nullptr;
     }
+    // Postfix increment/decrement: x++ / x-- — yields the OLD value.
+    // GAP: no automatic-semicolon-insertion before a postfix op, so
+    // `a\n++b` parses as `(a++) b` rather than `a; ++b` (the lexer does
+    // not record a preceding line break). Page scripts rarely depend on
+    // that ASI nuance; revisit if a real page breaks on it.
+    if ((p.Is(Tok::PlusPlus) || p.Is(Tok::MinusMinus)) && IsUpdateTarget(e))
+    {
+        const bool inc = p.Is(Tok::PlusPlus);
+        AstNode* n = p.Node(Ast::Update);
+        if (!n)
+            return nullptr;
+        n->a = e;
+        n->op = inc ? Op::Add : Op::Sub;
+        n->boolVal = false; // postfix
+        p.Adv();
+        e = n;
+    }
     return e;
 }
 
@@ -690,6 +714,27 @@ AstNode* ParseUnary(Parser& p)
         call->kidCount = 0;
         call->boolVal = true;
         return call;
+    }
+
+    // Prefix increment/decrement: ++x / --x — yields the NEW value.
+    if (p.Is(Tok::PlusPlus) || p.Is(Tok::MinusMinus))
+    {
+        const bool inc = p.Is(Tok::PlusPlus);
+        AstNode* n = p.Node(Ast::Update);
+        if (!n)
+            return nullptr;
+        p.Adv();
+        n->a = ParseUnary(p);
+        if (!p.ok)
+            return nullptr;
+        if (!IsUpdateTarget(n->a))
+        {
+            p.Fail("invalid left-hand side in prefix operation");
+            return nullptr;
+        }
+        n->op = inc ? Op::Add : Op::Sub;
+        n->boolVal = true; // prefix
+        return n;
     }
 
     Op op = Op::None;
