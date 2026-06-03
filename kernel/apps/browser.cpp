@@ -4225,7 +4225,18 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
         // also tracks keyboard focus on a clicked link so the focus ring
         // follows. When there is no interactive context (download / parse
         // failure / OOM), fall back to the link-only hit-test.
-        if (er != EventResult::Consumed)
+        //
+        // CONCURRENCY: the whole page-interaction block is gated on
+        // !fetch_in_flight. RenderPage runs on the browser-fetch worker
+        // thread and bump-allocates g_render_arena (DOM + display list +
+        // link_rects) for the WHOLE duration fetch_in_flight is true. If the
+        // compositor thread dispatched a click in that window, a JS handler's
+        // DOM mutation (innerHTML/textContent) would bump-allocate the SAME
+        // arena concurrently — a two-thread arena race — and BrowserHitTestNode
+        // would read a half-rebuilt render_dl / link_rects. Skipping page
+        // interaction while a fetch is loading closes both. (FollowLink /
+        // FollowHref already self-guard on this same flag.)
+        if (er != EventResult::Consumed && !g_state.fetch_in_flight)
         {
             i32 doc_x = 0;
             i32 doc_y = 0;
