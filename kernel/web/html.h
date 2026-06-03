@@ -52,6 +52,23 @@ using duetos::u32;
 /// top-level parsed nodes.
 Node* ParseHtml(const char* html, u32 len, Arena& arena);
 
+/// Parse `len` bytes of `html` as an HTML *fragment* (the markup that
+/// would live inside an element, e.g. an `innerHTML` assignment). Shares
+/// the same tokenizer / tree builder as `ParseHtml`; the difference is
+/// purely the caller's contract — the returned node is a detached
+/// container (kind == NodeKind::Element, tag `nullptr`) whose children
+/// are the parsed fragment nodes, ready to be re-parented under the
+/// target element. Returns nullptr if the arena could not hold the
+/// container node. The container itself is a scratch holder and is not
+/// meant to be inserted into a live tree.
+///
+/// GAP: the fragment is parsed in a generic (Document-like) insertion
+/// context, not the spec's element-specific fragment-parsing algorithm
+/// — e.g. a bare `<td>` is not auto-wrapped in a table context. Fine for
+/// the common `innerHTML` cases (flow content); revisit with the HTML5
+/// insertion-mode machine.
+Node* ParseHtmlFragment(const char* html, u32 len, Arena& arena);
+
 /// Recursively concatenate the text content of `node` and all its
 /// descendants into `out` (NUL-terminated, truncated to `outCap-1`
 /// bytes). Comment nodes are skipped. Returns the number of bytes

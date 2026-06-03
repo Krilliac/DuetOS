@@ -31,6 +31,20 @@ using duetos::core::Result;
 inline constexpr u64 kDefaultStepBudget = 5'000'000;
 inline constexpr u32 kMaxCallDepth = 200;
 
+// Native (kernel) stack-overflow guard margin (bytes). The interpreter
+// recurses on the C++ stack, so the kernel's 64 KiB arena stack — not
+// kMaxCallDepth — is the true recursion limit: each JS call level costs
+// several native frames (measured ~15 KiB in the debug build). When a JS
+// eval runs on a kstack-arena slot, CallFunction returns Overflow once the
+// current frame is within this many bytes of the slot's guard page, before
+// a deep recursion can smash it. Must exceed one JS level's descent so the
+// guard fires before the next check would land past the guard page.
+// GAP: this makes deep JS recursion return Overflow rather than run; the
+//      effective depth is shallow in debug (a few levels) and larger in
+//      release (smaller frames). A heap-allocated interpreter stack, or
+//      shrinking the per-level native frame, would lift the ceiling.
+inline constexpr u64 kJsStackGuardMargin = 24u * 1024u;
+
 // Total arena bytes the engine carves for one eval (tokens + AST +
 // runtime values + console buffer headroom). Caller may pass its own.
 inline constexpr u64 kDefaultArenaBytes = 512 * 1024;

@@ -6,9 +6,10 @@
 /*
  * DuetOS — kernel/web/js: builtin functions and member resolution.
  *
- * GAP: JSON.parse is not implemented (returns undefined). JSON.stringify
- *      covers number/string/bool/null/array/flat-object; nested-object
- *      recursion is shallow-bounded by the step budget.
+ * GAP: JSON.stringify covers number/string/bool/null/array/flat-object;
+ *      nested-object recursion is shallow-bounded by the step budget.
+ *      JSON.parse handles the full grammar but returns undefined (rather
+ *      than throwing) on malformed input — the engine has no try/catch.
  * GAP: String/Array methods operate on ASCII; no Unicode awareness.
  */
 
@@ -544,6 +545,342 @@ static u32 JsonStr(Interp& I, const JsValue& v, char* out, u32 cap)
     }
 }
 
+// ----------------------- JSON.parse -----------------------
+
+static bool IsHexDigit(char c)
+{
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+}
+
+static int HexDigitVal(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    return c - 'A' + 10;
+}
+
+// Encode a Unicode code point (BMP range from \uXXXX) as UTF-8 into
+// `out`; returns the byte count written (1..3). Surrogate halves are
+// emitted as-is (3 bytes) — see the JsonParse GAP note.
+static u32 EncodeUtf8(u32 cp, char* out)
+{
+    if (cp < 0x80)
+    {
+        out[0] = char(cp);
+        return 1;
+    }
+    if (cp < 0x800)
+    {
+        out[0] = char(0xC0 | (cp >> 6));
+        out[1] = char(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    out[0] = char(0xE0 | (cp >> 12));
+    out[1] = char(0x80 | ((cp >> 6) & 0x3F));
+    out[2] = char(0x80 | (cp & 0x3F));
+    return 3;
+}
+
+// Recursive-descent JSON reader over a NUL-bounded char span. `pos`
+// walks the input; `ok` clears on any malformed token so the top-level
+// entry can return undefined gracefully (the engine has no exceptions).
+struct JsonReader
+{
+    Interp& I;
+    const char* s;
+    u32 n;
+    u32 pos;
+    bool ok;
+
+    char Peek() const { return pos < n ? s[pos] : '\0'; }
+    char Adv() { return pos < n ? s[pos++] : '\0'; }
+    void SkipWs()
+    {
+        while (pos < n)
+        {
+            char c = s[pos];
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r')
+                ++pos;
+            else
+                break;
+        }
+    }
+    bool Match(const char* lit, u32 len)
+    {
+        if (pos + len > n)
+            return false;
+        for (u32 i = 0; i < len; ++i)
+            if (s[pos + i] != lit[i])
+                return false;
+        pos += len;
+        return true;
+    }
+};
+
+static JsValue JsonReadValue(JsonReader& r);
+
+static JsValue JsonReadString(JsonReader& r)
+{
+    // Caller has verified the opening quote. Decode escapes into the
+    // arena; the decoded form is never longer than the source span.
+    r.Adv(); // opening quote
+    const u32 maxLen = r.n - r.pos;
+    char* buf = static_cast<char*>(r.I.arena.Alloc(maxLen + 1, 1));
+    if (!buf)
+    {
+        r.ok = false;
+        return JsValue::Undefined();
+    }
+    u32 out = 0;
+    while (r.pos < r.n)
+    {
+        char c = r.Adv();
+        if (c == '"')
+        {
+            buf[out] = '\0';
+            return JsValue::Str(MakeString(r.I.arena, buf, out));
+        }
+        if (c == '\\')
+        {
+            char e = r.Adv();
+            switch (e)
+            {
+            case '"':
+                buf[out++] = '"';
+                break;
+            case '\\':
+                buf[out++] = '\\';
+                break;
+            case '/':
+                buf[out++] = '/';
+                break;
+            case 'n':
+                buf[out++] = '\n';
+                break;
+            case 't':
+                buf[out++] = '\t';
+                break;
+            case 'r':
+                buf[out++] = '\r';
+                break;
+            case 'b':
+                buf[out++] = '\b';
+                break;
+            case 'f':
+                buf[out++] = '\f';
+                break;
+            case 'u':
+            {
+                // \uXXXX — decode the BMP code point and emit UTF-8.
+                if (r.pos + 4 > r.n)
+                {
+                    r.ok = false;
+                    return JsValue::Undefined();
+                }
+                u32 cp = 0;
+                for (u32 k = 0; k < 4; ++k)
+                {
+                    char h = r.Adv();
+                    if (!IsHexDigit(h))
+                    {
+                        r.ok = false;
+                        return JsValue::Undefined();
+                    }
+                    cp = (cp << 4) | u32(HexDigitVal(h));
+                }
+                out += EncodeUtf8(cp, buf + out);
+                break;
+            }
+            default:
+                r.ok = false;
+                return JsValue::Undefined();
+            }
+        }
+        else if ((unsigned char)c < 0x20)
+        {
+            // Raw control chars are not legal inside a JSON string.
+            r.ok = false;
+            return JsValue::Undefined();
+        }
+        else
+        {
+            buf[out++] = c;
+        }
+    }
+    r.ok = false; // unterminated string
+    return JsValue::Undefined();
+}
+
+static JsValue JsonReadNumber(JsonReader& r)
+{
+    const u32 start = r.pos;
+    if (r.Peek() == '-')
+        r.Adv();
+    while (r.pos < r.n)
+    {
+        char c = r.s[r.pos];
+        if ((c >= '0' && c <= '9') || c == '.' || c == 'e' || c == 'E' || c == '+' || c == '-')
+            ++r.pos;
+        else
+            break;
+    }
+    bool isInt;
+    i64 iv;
+    Sf32 fv;
+    if (!ParseNumberText(r.s + start, r.pos - start, isInt, iv, fv))
+    {
+        r.ok = false;
+        return JsValue::Undefined();
+    }
+    return isInt ? JsValue::Int(iv) : JsValue::Float(fv);
+}
+
+static JsValue JsonReadArray(JsonReader& r)
+{
+    r.Adv(); // '['
+    JsObject* arr = ObjNew(r.I.arena, true);
+    if (!arr)
+    {
+        r.ok = false;
+        return JsValue::Undefined();
+    }
+    r.SkipWs();
+    if (r.Peek() == ']')
+    {
+        r.Adv();
+        return JsValue::Obj(arr);
+    }
+    for (;;)
+    {
+        JsValue v = JsonReadValue(r);
+        if (!r.ok)
+            return JsValue::Undefined();
+        if (!ArrPush(arr, r.I.arena, v))
+        {
+            r.ok = false;
+            return JsValue::Undefined();
+        }
+        r.SkipWs();
+        char c = r.Adv();
+        if (c == ',')
+        {
+            r.SkipWs();
+            continue;
+        }
+        if (c == ']')
+            break;
+        r.ok = false;
+        return JsValue::Undefined();
+    }
+    return JsValue::Obj(arr);
+}
+
+static JsValue JsonReadObject(JsonReader& r)
+{
+    r.Adv(); // '{'
+    JsObject* obj = ObjNew(r.I.arena, false);
+    if (!obj)
+    {
+        r.ok = false;
+        return JsValue::Undefined();
+    }
+    r.SkipWs();
+    if (r.Peek() == '}')
+    {
+        r.Adv();
+        return JsValue::Obj(obj);
+    }
+    for (;;)
+    {
+        r.SkipWs();
+        if (r.Peek() != '"')
+        {
+            r.ok = false;
+            return JsValue::Undefined();
+        }
+        JsValue key = JsonReadString(r);
+        if (!r.ok)
+            return JsValue::Undefined();
+        r.SkipWs();
+        if (r.Adv() != ':')
+        {
+            r.ok = false;
+            return JsValue::Undefined();
+        }
+        JsValue val = JsonReadValue(r);
+        if (!r.ok)
+            return JsValue::Undefined();
+        if (!ObjSet(obj, r.I.arena, key.as.str->data, key.as.str->len, val))
+        {
+            r.ok = false;
+            return JsValue::Undefined();
+        }
+        r.SkipWs();
+        char c = r.Adv();
+        if (c == ',')
+            continue;
+        if (c == '}')
+            break;
+        r.ok = false;
+        return JsValue::Undefined();
+    }
+    return JsValue::Obj(obj);
+}
+
+static JsValue JsonReadValue(JsonReader& r)
+{
+    r.SkipWs();
+    char c = r.Peek();
+    switch (c)
+    {
+    case '"':
+        return JsonReadString(r);
+    case '{':
+        return JsonReadObject(r);
+    case '[':
+        return JsonReadArray(r);
+    case 't':
+        if (r.Match("true", 4))
+            return JsValue::Bool(true);
+        break;
+    case 'f':
+        if (r.Match("false", 5))
+            return JsValue::Bool(false);
+        break;
+    case 'n':
+        if (r.Match("null", 4))
+            return JsValue::Null();
+        break;
+    default:
+        if (c == '-' || (c >= '0' && c <= '9'))
+            return JsonReadNumber(r);
+        break;
+    }
+    r.ok = false;
+    return JsValue::Undefined();
+}
+
+// JSON.parse(text): returns the parsed value, or undefined on any
+// malformed input (the engine surfaces parse errors as undefined rather
+// than throwing — it has no try/catch). GAP: surrogate-pair \uD800
+// sequences decode each half independently rather than combining.
+static JsValue JsonParse(Interp& I, const JsValue* args, u32 argc)
+{
+    JsValue v = ArgOr(args, argc, 0);
+    if (v.type != JsType::String || !v.as.str)
+        return JsValue::Undefined();
+    JsonReader r{I, v.as.str->data, v.as.str->len, 0, true};
+    JsValue result = JsonReadValue(r);
+    if (!r.ok)
+        return JsValue::Undefined();
+    r.SkipWs();
+    if (r.pos != r.n) // trailing garbage after the value
+        return JsValue::Undefined();
+    return result;
+}
+
 Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue* args, u32 argc)
 {
     switch (id)
@@ -691,8 +1028,7 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
         return JsValue::Str(MakeString(I.arena, out, n));
     }
     case kJsonParse:
-        // GAP: JSON.parse is not implemented.
-        return JsValue::Undefined();
+        return JsonParse(I, args, argc);
 
     default:
         return Err{ErrorCode::Unsupported};

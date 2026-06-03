@@ -124,6 +124,13 @@ Result<JsValue> CallNative(Interp& I, u16 nativeId, const JsValue& recv, const J
 // returning a bound native JsFunction). Returns Undefined for misses.
 Result<JsValue> GetMember(Interp& I, const JsValue& obj, const char* key, u32 keyLen);
 
+// ---- coercion ----
+// OrdinaryToPrimitive: coerce an object to a primitive by invoking its
+// valueOf()/toString() (order depends on `stringHint`). A primitive
+// input is returned unchanged. Returns Undefined if no method yields a
+// primitive (the caller then uses the structural fallback).
+Result<JsValue> ToPrimitive(Interp& I, const JsValue& v, bool stringHint);
+
 // ---- value <-> text ----
 // Coerce any value to its JS string form into the arena.
 JsString* ToJsString(Interp& I, const JsValue& v);

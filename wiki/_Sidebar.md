@@ -31,6 +31,7 @@
 - [Crypto Primitives](kernel/Crypto.md)
 - [Utilities](kernel/Util.md)
 - [In-Kernel Apps](kernel/Kernel-Apps.md)
+- [Web Engine (browser)](kernel/Web-Engine.md)
 - [Start Menu](kernel/Start-Menu.md)
 
 ### Drivers

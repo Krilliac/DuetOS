@@ -555,6 +555,24 @@ Node* ParseHtml(const char* html, u32 len, Arena& arena)
     return doc;
 }
 
+Node* ParseHtmlFragment(const char* html, u32 len, Arena& arena)
+{
+    // Reuse the whole-document path: it already builds the top-level
+    // markup as children of a synthetic root with each child's `parent`
+    // back-link set. We only re-label the root as a detached element
+    // container so the caller treats it as a fragment holder rather than
+    // a Document — the children themselves are unchanged and ready to be
+    // re-parented under the target element.
+    Node* container = ParseHtml(html, len, arena);
+    if (container == nullptr)
+    {
+        return nullptr;
+    }
+    container->kind = NodeKind::Element;
+    container->tag = nullptr;
+    return container;
+}
+
 u32 CollectText(const Node* node, char* out, u32 outCap)
 {
     if (node == nullptr || out == nullptr || outCap == 0)

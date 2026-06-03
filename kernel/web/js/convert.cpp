@@ -1,6 +1,7 @@
 #include "web/js/interp.h"
 
 #include "util/string.h"
+#include "web/js/builtins.h"
 
 /*
  * DuetOS — kernel/web/js: value <-> text conversion, equality, and
@@ -126,6 +127,78 @@ static u32 WriteSf32(Sf32 v, char* out, u32 cap)
     return o;
 }
 
+// ----------------------- object-to-primitive -----------------------
+
+// Is this value a primitive (i.e. not an object/array)? Functions count
+// as objects for ToPrimitive but the engine never calls ToPrimitive on a
+// bare function value, so treating only Object as the non-primitive case
+// matches every reachable call site.
+static bool IsPrimitive(const JsValue& v)
+{
+    return v.type != JsType::Object;
+}
+
+// Invoke a callable JsValue with the given receiver and no arguments,
+// dispatching native / host-callback / JS-closure exactly as EvalCall
+// does. Used to drive valueOf()/toString() during coercion.
+static Result<JsValue> CallNullary(Interp& I, const JsValue& callee, const JsValue& recv)
+{
+    JsFunction* fn = callee.as.fn;
+    if (fn->nativeId == kNativeCallback && fn->nativeCall)
+        return fn->nativeCall(I, recv, nullptr, 0, fn->nativeCtx);
+    if (fn->nativeId != 0)
+        return CallNative(I, fn->nativeId, recv, nullptr, 0);
+    return CallFunction(I, fn, nullptr, 0, recv);
+}
+
+// OrdinaryToPrimitive: for a "number"/default hint try valueOf() then
+// toString(); for a "string" hint try toString() then valueOf(). The
+// first method that exists, is callable, and returns a primitive wins.
+// A non-object input is already primitive and returned unchanged.
+//
+// GAP: valueOf/toString are looked up as OWN properties only — this
+// engine has no prototype chain (see object.h), so a plain object with
+// no own valueOf/toString yields no primitive here. ToJsString then
+// falls back to the structural "[object Object]" form, but the numeric
+// path (EvalBinary) leaves such an object uncoerced and arithmetic on it
+// produces NaN (vs. V8's "[object Object]" via Object.prototype). No
+// Symbol.toPrimitive (no Symbol keys); a method that returns Err
+// propagates rather than being skipped (the engine has no try/catch).
+Result<JsValue> ToPrimitive(Interp& I, const JsValue& v, bool stringHint)
+{
+    if (IsPrimitive(v))
+        return v;
+
+    const char* order[2];
+    if (stringHint)
+    {
+        order[0] = "toString";
+        order[1] = "valueOf";
+    }
+    else
+    {
+        order[0] = "valueOf";
+        order[1] = "toString";
+    }
+
+    for (u32 i = 0; i < 2; ++i)
+    {
+        const char* name = order[i];
+        u32 nameLen = duetos::core::StrLen(name);
+        JS_TRY_ASSIGN(JsValue method, GetMember(I, v, name, nameLen));
+        if (!method.IsCallable())
+            continue;
+        JS_TRY_ASSIGN(JsValue r, CallNullary(I, method, v));
+        if (IsPrimitive(r))
+            return r;
+    }
+
+    // Both methods missing/non-callable/object-returning: fall back to
+    // the engine's structural string form ("[object Object]" / joined
+    // array) so a coercion never produces another object.
+    return JsValue::Undefined();
+}
+
 u32 ValueToChars(const JsValue& v, char* out, u32 cap)
 {
     if (cap == 0)
@@ -184,8 +257,21 @@ JsString* ToJsString(Interp& I, const JsValue& v)
 {
     if (v.type == JsType::String)
         return v.as.str;
+    // An object coerces through ToPrimitive (string hint): a user
+    // valueOf()/toString() wins over the structural "[object Object]".
+    // ToJsString has no Result channel, so a method error falls back to
+    // the structural form rather than propagating.
+    JsValue prim = v;
+    if (v.type == JsType::Object)
+    {
+        Result<JsValue> p = ToPrimitive(I, v, /*stringHint=*/true);
+        if (p && p.value().type != JsType::Undefined)
+            prim = p.value();
+    }
+    if (prim.type == JsType::String)
+        return prim.as.str;
     char buf[256];
-    u32 n = ValueToChars(v, buf, sizeof(buf));
+    u32 n = ValueToChars(prim, buf, sizeof(buf));
     return MakeString(I.arena, buf, n);
 }
 
@@ -252,8 +338,8 @@ bool StrictEquals(const JsValue& a, const JsValue& b)
 //   - null == undefined (and vice versa) -> true
 //   - number vs string  -> string coerced to number
 //   - boolean vs any    -> boolean coerced to number
+//   - object vs primitive -> object coerced via ToPrimitive
 //   - everything else falls back to ===.
-// GAP: object-to-primitive (valueOf/toString) coercion.
 bool LooseEquals(Interp& I, const JsValue& a, const JsValue& b)
 {
     if (a.type == b.type)
@@ -279,6 +365,18 @@ bool LooseEquals(Interp& I, const JsValue& a, const JsValue& b)
         return false;
     }
     if (a.type == JsType::String && b.type == JsType::Number)
+        return LooseEquals(I, b, a);
+
+    // object vs (number/string): coerce the object to a primitive
+    // (default hint) and retry. null/undefined never == an object.
+    if (a.type == JsType::Object && (b.type == JsType::Number || b.type == JsType::String))
+    {
+        Result<JsValue> p = ToPrimitive(I, a, /*stringHint=*/false);
+        if (p && p.value().type != JsType::Undefined)
+            return LooseEquals(I, p.value(), b);
+        return false;
+    }
+    if (b.type == JsType::Object && (a.type == JsType::Number || a.type == JsType::String))
         return LooseEquals(I, b, a);
 
     return false;

@@ -145,6 +145,18 @@ void EmitTextRun(LayoutCtx& ctx, const InlineRun& run, u32 start, u32 len, i32 x
 i32 LayoutInline(LayoutCtx& ctx, const Node* parent, const ComputedStyle& parentStyle, i32 contentX, i32 contentW,
                  i32 originY, const char* parentHref);
 
+// Defined in layout_inline.cpp: lay an ANONYMOUS BLOCK's inline content
+// out. The anonymous block wraps the consecutive inline-level sibling run
+// [first, stopBefore) (a half-open range over a block container's child
+// list, where `stopBefore` is the first block-level sibling that ended the
+// run, or nullptr to run to the end of the list). The run inherits
+// `parentStyle` (the containing block establishes the IFC's default
+// style); `parentHref` threads the nearest ancestor <a href>. Behaves like
+// LayoutInline but gathers runs from a sibling slice rather than a single
+// parent's whole subtree. Returns the y just past the last line.
+i32 LayoutInlineSiblings(LayoutCtx& ctx, const ComputedStyle& parentStyle, const Node* first, const Node* stopBefore,
+                         i32 contentX, i32 contentW, i32 originY, const char* parentHref);
+
 // Defined in layout.cpp: lay one block-level box out; returns the y just
 // past the box's bottom margin edge. Declared here so the inline TU's
 // (currently none) and the recursive block walk share one prototype.

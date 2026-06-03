@@ -174,6 +174,26 @@ void JsSelfTest()
     run(CheckCase("function adder(a){ return function(b){ return a+b; }; } adder(10)(32);", "42", nullptr));
     // 20. JSON.stringify of a flat object/array
     run(CheckCase("JSON.stringify([1,'two',true,null]);", "[1,\"two\",true,null]", nullptr));
+    // 21. JSON.parse round-trips a nested object/array and re-stringifies
+    run(CheckCase("JSON.stringify(JSON.parse('{\"a\":[1,2,3],\"b\":\"x\"}'));", "{\"a\":[1,2,3],\"b\":\"x\"}",
+                  nullptr));
+    // 22. JSON.parse field access (number, string, array element)
+    run(CheckCase("var o=JSON.parse('{\"n\":42,\"s\":\"hi\",\"arr\":[7,8]}'); o.n + ',' + o.s + ',' + o.arr[1];",
+                  "42,hi,8", nullptr));
+    // 23. JSON.parse of malformed input yields undefined (no throw)
+    run(CheckCase("typeof JSON.parse('{bad json');", "undefined", nullptr));
+    // 24. template literal with an interpolated expression
+    run(CheckCase("`a${1+2}b`;", "a3b", nullptr));
+    // 25. template literal: multiple interpolations + identifiers
+    run(CheckCase("var name='duet'; var v=3; `hi ${name} v${v}!`;", "hi duet v3!", nullptr));
+    // 26. nested ${ } with an object literal inside the interpolation
+    run(CheckCase("`x=${ {n:5}.n + 1 }`;", "x=6", nullptr));
+    // 27. object-to-primitive: valueOf() drives numeric coercion
+    run(CheckCase("var o={valueOf:function(){return 5;}}; (o + 1) + ',' + (o + 1 === 6);", "6,true", nullptr));
+    // 28. object-to-primitive: toString() drives string coercion
+    run(CheckCase("var o={toString:function(){return 'OBJ';}}; `<${o}>`;", "<OBJ>", nullptr));
+    // 29. loose-equals coerces an object via valueOf
+    run(CheckCase("var o={valueOf:function(){return 7;}}; (o == 7) + ',' + (o == 8);", "true,false", nullptr));
 
     // ---- CRITICAL: runaway loop must be killed by the step budget,
     // not hang the boot. Use a tiny budget so it returns fast. ----
@@ -182,11 +202,16 @@ void JsSelfTest()
         tight.stepBudget = 100000;
         run(CheckErr("while(true){}", ErrorCode::Timeout, tight));
     }
-    // 22. runaway recursion must hit the depth cap (Overflow), not
-    // smash the native stack.
+    // 22. runaway recursion must hit the depth cap (Overflow), not smash
+    // the native stack. This self-test runs on the boot thread's large
+    // (non-arena) stack, where the kstack-arena native-stack guard does
+    // NOT apply, so the LOGICAL maxDepth is the only backstop — keep it
+    // low enough that maxDepth native frames (~15 KiB each in debug) stay
+    // within the boot stack. On an arena-stacked thread (e.g. the browser
+    // fetch worker) the native guard in CallFunction fires first.
     {
         EvalConfig cfg;
-        cfg.maxDepth = 64;
+        cfg.maxDepth = 4;
         run(CheckErr("function rec(){ return rec(); } rec();", ErrorCode::Overflow, cfg));
     }
     // 23. syntax error surfaces InvalidArgument, not a crash.

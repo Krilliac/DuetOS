@@ -23,17 +23,55 @@ def chunk(typ, data):
 
 def sig(): return bytes([0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A])
 
-def ihdr(w,h,bd,ct): return chunk(b"IHDR", struct.pack(">IIBBBBB", w,h,bd,ct,0,0,0))
+def ihdr(w,h,bd,ct,interlace=0): return chunk(b"IHDR", struct.pack(">IIBBBBB", w,h,bd,ct,0,0,interlace))
 
-def build(w,h,ct,raw_scanlines, plte=None, trns=None):
-    # raw_scanlines: list of (filter_byte, bytes) per row
-    out = sig() + ihdr(w,h,8,ct)
+def build(w,h,ct,raw_scanlines, plte=None, trns=None, bd=8, interlace=0):
+    # raw_scanlines: list of (filter_byte, bytes) per row — already the
+    # full set of (possibly Adam7-pass) filtered scanlines in stream order.
+    out = sig() + ihdr(w,h,bd,ct,interlace)
     if plte is not None: out += chunk(b"PLTE", plte)
     if trns is not None: out += chunk(b"tRNS", trns)
     raw = b"".join(bytes([f]) + bytes(d) for f,d in raw_scanlines)
-    out += chunk(b"IDAT", zlib.compress(raw, 0))  # level 0 = stored, but we want real deflate too
+    out += chunk(b"IDAT", zlib.compress(raw, 9))  # real DEFLATE (dynamic/fixed Huffman)
     out += chunk(b"IEND", b"")
     return out
+
+# Adam7 pass start/step tables (x_start,y_start,x_step,y_step).
+ADAM7 = [
+    (0,0,8,8),(4,0,8,8),(0,4,4,8),(2,0,4,4),(0,2,2,4),(1,0,2,2),(0,1,1,2),
+]
+
+def pack_bits(samples, depth):
+    # Pack a list of small integer samples MSB-first into bytes; each
+    # call starts on a fresh byte (a single scanline). depth in 1/2/4.
+    out = bytearray()
+    acc = 0; nbits = 0
+    for s in samples:
+        acc = (acc << depth) | (s & ((1<<depth)-1))
+        nbits += depth
+        while nbits >= 8:
+            nbits -= 8
+            out.append((acc >> nbits) & 0xFF)
+    if nbits:
+        out.append((acc << (8-nbits)) & 0xFF)
+    return bytes(out)
+
+def adam7_scanlines_gray8(w, h, pix):
+    # pix: function (x,y)->sample byte (8-bit gray). Returns list of
+    # (filter=0, rowbytes) scanlines across the 7 Adam7 passes, in
+    # stream order. Each pass row is one byte per sample.
+    rows = []
+    for (xs,ys,xstep,ystep) in ADAM7:
+        # sub-image dims
+        pw = (w - xs + xstep - 1)//xstep if xs < w else 0
+        ph = (h - ys + ystep - 1)//ystep if ys < h else 0
+        if pw == 0 or ph == 0:
+            continue
+        for ry in range(ph):
+            y = ys + ry*ystep
+            row = bytes(pix(xs + rx*xstep, y) for rx in range(pw))
+            rows.append((0, row))
+    return rows
 
 def emit_c(name, data):
     print(f"// {name} : {len(data)} bytes")
@@ -93,3 +131,37 @@ emit_c("kPng2x2GrayA", f4)
 # ---- Fixture 5: 2x1 grayscale (type 0)
 f5 = build(2,1,0,[(0,[0x00,0xFF])])
 emit_c("kPng2x1Gray", f5)
+
+# ---- Fixture 6: 4x1 grayscale, 4-bit depth (type 0, bd=4).
+# Source 4-bit samples: 0x0, 0x5, 0xA, 0xF.
+# Decoder scales each up to 8-bit by raw*(255/15):
+#   0x0->0x00, 0x5->0x55, 0xA->0xAA, 0xF->0xFF.
+g4 = [0x0, 0x5, 0xA, 0xF]
+f6 = build(4,1,0,[(0, pack_bits(g4,4))], bd=4)
+emit_c("kPng4x1Gray4", f6)
+print("// 4x1 gray4 samples:", g4, "-> 8-bit", [s*(255//15) for s in g4])
+
+# ---- Fixture 7: 2x1 grayscale, 16-bit depth (type 0, bd=16).
+# Source 16-bit samples: 0x1234, 0xABCD. High byte -> 0x12, 0xAB.
+g16 = [0x1234, 0xABCD]
+row16 = bytearray()
+for s in g16:
+    row16 += struct.pack(">H", s)
+f7 = build(2,1,0,[(0, bytes(row16))], bd=16)
+emit_c("kPng2x1Gray16", f7)
+print("// 2x1 gray16 samples:", [hex(s) for s in g16], "-> high byte", [hex(s>>8) for s in g16])
+
+# ---- Fixture 8a/8b: Adam7-interlaced 8x8 grayscale and its
+# non-interlaced twin. Same source pixels, must decode identically.
+# Source gradient: pixel(x,y) = (x*16 + y*2) & 0xFF, a value that
+# differs across every Adam7 pass so de-interlacing is genuinely tested.
+def src8(x,y): return (x*16 + y*2) & 0xFF
+# Non-interlaced: one byte per pixel per row, filter None.
+ni_rows = [(0, bytes(src8(x,y) for x in range(8))) for y in range(8)]
+f8ni = build(8,8,0, ni_rows, bd=8, interlace=0)
+emit_c("kPng8x8GrayNonInterlaced", f8ni)
+# Interlaced twin.
+il_rows = adam7_scanlines_gray8(8,8,src8)
+f8il = build(8,8,0, il_rows, bd=8, interlace=1)
+emit_c("kPng8x8GrayAdam7", f8il)
+print("// 8x8 gray pixel(x,y) = (x*16 + y*2) & 0xFF")

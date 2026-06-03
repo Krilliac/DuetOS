@@ -12,9 +12,11 @@
  *
  * Pipeline: Lex -> Parse -> InstallBuiltins -> walk Program. The whole
  * pipeline runs off a single bump arena so there is nothing to free.
- * The step budget bounds runtime; the call-depth cap bounds the native
- * stack; the arena cap bounds memory. A hostile script cannot hang or
- * exhaust the kernel.
+ * The step budget bounds runtime; the arena cap bounds memory. Native
+ * (kernel) stack recursion is bounded by CallFunction's kstack-arena
+ * guard (the logical call-depth cap alone does NOT — each JS level costs
+ * several native frames). A hostile script cannot hang or exhaust the
+ * kernel or smash its stack.
  */
 
 namespace duetos::web::js
@@ -53,6 +55,9 @@ Result<void> JsEval(const char* src, u32 len, JsValue* out, char* console_out, u
     I.stepBudget = cfg.stepBudget;
     I.maxDepth = cfg.maxDepth;
     I.depth = 0;
+    // Anchor the native-stack guard to this entry frame: CallFunction
+    // bails with Overflow once recursion descends kJsNativeStackBudget
+    // bytes below here, before the kernel stack guard page is hit.
     I.flow = Flow::Normal;
     I.returnValue = JsValue::Undefined();
 

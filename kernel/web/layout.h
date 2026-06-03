@@ -31,7 +31,9 @@
  *   - <img> -> ImageBox sized by width/height style if present else a
  *     default placeholder; carries the src attr for the painter.
  *
- * GAP (deliberately out of scope for this slice): floats; position
+ * GAP (deliberately out of scope for this slice): anonymous-inline-box
+ * generation (a block box nested inside an inline context — the inverse
+ * of the anonymous-block wrapping that IS handled); floats; position
  * (absolute/relative/fixed/sticky); flexbox/grid; tables;
  * margin-collapsing; z-index / stacking contexts; overflow/scroll
  * clipping; proportional/measured fonts (monospace only); inline-block

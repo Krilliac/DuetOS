@@ -15,7 +15,10 @@
  *   - ASI-lite: each token records whether a newline preceded it, so
  *     the parser can insert semicolons at statement boundaries.
  *
- * GAP: template literals (backtick) — lexed as an error token.
+ * Template literals (backtick) are supported: `text${expr}more` lexes
+ * into TemplateStr / TemplateExprStart / TemplateExprEnd pieces the
+ * parser folds into a string-concat tree. GAP: tagged templates and
+ * raw-string (String.raw) access are not supported.
  * GAP: full Unicode identifiers — ASCII + `_`/`$` only.
  * GAP: regex literals — `/` is always divide / comment.
  * GAP: full ASI restartable-production rules — we only insert before
@@ -34,6 +37,15 @@ enum class Tok : u8
     Number,
     String,
     Ident,
+
+    // Template-literal pieces. A `…${…}…` literal lexes to:
+    //   TemplateStr (head, cooked) [ TemplateExprStart <expr tokens>
+    //   TemplateExprEnd TemplateStr (middle/tail, cooked) ]*
+    // The parser folds the chunks + interpolations into a string-concat
+    // tree. A plain `…` (no interpolation) is a single TemplateStr.
+    TemplateStr,       // cooked literal chunk (strData/strLen)
+    TemplateExprStart, // begins a ${ … } interpolation
+    TemplateExprEnd,   // ends a ${ … } interpolation
 
     // keywords
     KwVar,

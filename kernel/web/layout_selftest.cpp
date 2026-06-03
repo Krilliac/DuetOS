@@ -140,6 +140,10 @@ void LayoutSelfTest()
                        "<div class=b>BBBB</div>"
                        "<div class=gone>HIDDEN</div>"
                        "<p class=ctr>mid</p>"
+                       // Mixed block + inline children: the loose text
+                       // "alpha" and "omega" must each be wrapped in an
+                       // anonymous block box around the real <p> block.
+                       "<div class=mix>alpha<p>blockmid</p>omega</div>"
                        "</body>";
 
     const char* css = "#box { background-color: #112233; padding: 10px; width: 200px; }"
@@ -147,6 +151,7 @@ void LayoutSelfTest()
                       ".b { height: 40px; }"
                       ".gone { display: none; }"
                       ".ctr { text-align: center; }"
+                      ".mix { margin: 0; }"
                       // Make geometry deterministic: drop the UA body margin
                       // (8px) so child boxes start at the viewport origin, and
                       // pin line-height == cell height everywhere.
@@ -282,8 +287,53 @@ void LayoutSelfTest()
         return;
     }
 
+    // --- Check 7: anonymous-block wrapping of loose inline content. ---
+    // ".mix" is a <div> whose children are: loose text "alpha", a block
+    // <p>blockmid</p>, then loose text "omega". Box generation must wrap
+    // "alpha" and "omega" each in an anonymous block box, stacking three
+    // block-level boxes vertically: anon("alpha"), p("blockmid"),
+    // anon("omega"). All three text runs must exist and their y-ranges
+    // (each one 16px line tall) must be strictly increasing and
+    // non-overlapping, with the real <p> sandwiched between the two
+    // anonymous blocks.
+    const DisplayItem* aAnon = FindTextRun(*dl, "alpha");
+    const DisplayItem* pBlock = FindTextRun(*dl, "blockmid");
+    const DisplayItem* oAnon = FindTextRun(*dl, "omega");
+    if (aAnon == nullptr || pBlock == nullptr || oAnon == nullptr)
+    {
+        Fail(15);
+        return;
+    }
+    // Each run is exactly one 16px line tall (deterministic metrics).
+    if (aAnon->rect.h != 16 || pBlock->rect.h != 16 || oAnon->rect.h != 16)
+    {
+        Fail(16);
+        return;
+    }
+    // Strict vertical stacking: the <p> sits one line below the leading
+    // anonymous block, and the trailing anonymous block one line below the
+    // <p>. This proves the loose text was wrapped into stacked block boxes
+    // (not dropped, and not flowed inline into a single line).
+    if (pBlock->rect.y - aAnon->rect.y != 16)
+    {
+        Fail(17);
+        return;
+    }
+    if (oAnon->rect.y - pBlock->rect.y != 16)
+    {
+        Fail(18);
+        return;
+    }
+    // Non-overlap: each box's [y, y+h) range must end at or before the
+    // next box's top (here exactly abutting at 16px steps).
+    if (aAnon->rect.y + aAnon->rect.h > pBlock->rect.y || pBlock->rect.y + pBlock->rect.h > oAnon->rect.y)
+    {
+        Fail(19);
+        return;
+    }
+
     arch::SerialWrite("[layout-selftest] PASS (block+inline display list: bg-rect, bold heading, wrap, "
-                      "stacked-y, display:none, center-align)\n");
+                      "stacked-y, display:none, center-align, anon-block-wrap)\n");
 }
 
 } // namespace duetos::web

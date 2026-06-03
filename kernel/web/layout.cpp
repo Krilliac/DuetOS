@@ -13,9 +13,11 @@
  * content height (sum of in-flow children) unless `height` is set; the
  * padding-box background paints first, then the border, then content.
  * A block whose children are all inline runs an inline formatting
- * context; a block child breaks the inline flow. display:none skips the
- * subtree. GAP: full anonymous-box generation, margin-collapsing,
- * floats, positioning — see layout.h.
+ * context; a block child breaks the inline flow, and each consecutive run
+ * of inline-level siblings adjacent to block siblings is wrapped in an
+ * anonymous block box (CSS box generation). display:none skips the
+ * subtree. GAP: anonymous-INLINE-box generation (block box inside an
+ * inline), margin-collapsing, floats, positioning — see layout.h.
  */
 
 #include "web/layout.h"
@@ -28,14 +30,12 @@ namespace duetos::web
 {
 
 using layout_detail::EdgePx;
-using layout_detail::EmitTextRun;
-using layout_detail::InlineRun;
 using layout_detail::IsWhitespaceByte;
 using layout_detail::kDefaultImgH;
 using layout_detail::kDefaultImgW;
 using layout_detail::LayoutCtx;
 using layout_detail::LayoutInline;
-using layout_detail::LineHeightPx;
+using layout_detail::LayoutInlineSiblings;
 using layout_detail::ResolveLength;
 using layout_detail::StyleOf;
 
@@ -44,28 +44,75 @@ namespace layout_detail
 namespace
 {
 
+// Is child `c` a block-level box that breaks its parent's inline flow?
+// Block / inline-block displays and a bare <img> count as block-level for
+// box generation; text nodes and inline elements do not. display:none and
+// unstyled elements are neither (they contribute no box). Returns false for
+// non-element nodes (text/comment) — those are inline-level content.
+bool IsBlockLevelChild(const LayoutCtx& ctx, const Node* c)
+{
+    if (c->kind != NodeKind::Element)
+    {
+        return false;
+    }
+    const ComputedStyle* cs = StyleOf(ctx, c);
+    if (cs == nullptr || cs->display == Display::None)
+    {
+        return false;
+    }
+    if (cs->display == Display::Block || cs->display == Display::InlineBlock)
+    {
+        return true;
+    }
+    return c->tag != nullptr && duetos::core::StrEqual(c->tag, "img");
+}
+
 // Does `node` contain any block-level (or img) element child? Decides
 // between an inline and a block formatting context for its children.
 bool HasBlockChild(const LayoutCtx& ctx, const Node* node)
 {
     for (const Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
     {
-        if (c->kind != NodeKind::Element)
-        {
-            continue;
-        }
-        const ComputedStyle* cs = StyleOf(ctx, c);
-        if (cs == nullptr || cs->display == Display::None)
-        {
-            continue;
-        }
-        if (cs->display == Display::Block || cs->display == Display::InlineBlock)
+        if (IsBlockLevelChild(ctx, c))
         {
             return true;
         }
-        if (c->tag != nullptr && duetos::core::StrEqual(c->tag, "img"))
+    }
+    return false;
+}
+
+// Does the half-open sibling range [first, stopBefore) hold any inline-
+// level content worth wrapping in an anonymous block? An all-whitespace
+// text run between two block siblings generates no anonymous box (per CSS
+// box generation, white space adjacent to block-level boxes that would
+// otherwise be collapsed away produces no box). Empty/whitespace-only runs
+// are skipped so we don't stack zero-height anonymous boxes.
+bool HasRenderableInline(const LayoutCtx& ctx, const Node* first, const Node* stopBefore)
+{
+    for (const Node* c = first; c != nullptr && c != stopBefore; c = c->nextSibling)
+    {
+        if (c->kind == NodeKind::Text)
         {
-            return true;
+            if (c->text == nullptr)
+            {
+                continue;
+            }
+            for (const char* p = c->text; *p != '\0'; ++p)
+            {
+                if (!IsWhitespaceByte(*p))
+                {
+                    return true;
+                }
+            }
+            continue;
+        }
+        if (c->kind == NodeKind::Element)
+        {
+            const ComputedStyle* cs = StyleOf(ctx, c);
+            if (cs != nullptr && cs->display != Display::None)
+            {
+                return true; // an inline element generates a box
+            }
         }
     }
     return false;
@@ -211,36 +258,42 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
     }
     else
     {
+        // Mixed block + inline children: per CSS box generation, each
+        // consecutive run of inline-level siblings (text + inline elements)
+        // adjacent to block siblings is wrapped in an ANONYMOUS BLOCK box
+        // that establishes its own inline formatting context, and those
+        // anonymous blocks stack vertically alongside the real block boxes.
+        // Walk the child list, flushing a pending inline run into an
+        // anonymous block whenever a block-level child interrupts it (and
+        // once more at the end).
+        const Node* inlineStart = nullptr; // first sibling of the pending inline run
         for (const Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
         {
-            if (c->kind == NodeKind::Element)
+            if (IsBlockLevelChild(ctx, c))
             {
+                // Flush any inline run that preceded this block child into
+                // an anonymous block laid out as a normal block box.
+                if (inlineStart != nullptr && HasRenderableInline(ctx, inlineStart, c))
+                {
+                    childY = LayoutInlineSiblings(ctx, s, inlineStart, c, contentX, contentW, childY, selfHref);
+                }
+                inlineStart = nullptr;
                 childY = LayoutBlock(ctx, c, contentX, contentW, childY, selfHref);
             }
-            else if (c->kind == NodeKind::Text && c->text != nullptr)
+            else
             {
-                // A loose text node sitting between block siblings: emit it
-                // as a single unwrapped line in the parent's style.
-                // GAP: anonymous-block wrapping — a loose text node next to
-                // block boxes is not wrapped to the content width; revisit
-                // when documents that mix bare text with block children
-                // (rare in practice) need it.
-                bool nonWs = false;
-                for (const char* p = c->text; *p != '\0'; ++p)
+                // Inline-level (text node or inline element): start a new
+                // pending run if none is open; otherwise extend it.
+                if (inlineStart == nullptr)
                 {
-                    if (!IsWhitespaceByte(*p))
-                    {
-                        nonWs = true;
-                        break;
-                    }
-                }
-                if (nonWs)
-                {
-                    InlineRun one{c->text, static_cast<u32>(duetos::core::StrLen(c->text)), &s, selfHref};
-                    EmitTextRun(ctx, one, 0, one.len, contentX, childY);
-                    childY += LineHeightPx(s);
+                    inlineStart = c;
                 }
             }
+        }
+        // A trailing inline run after the last block child.
+        if (inlineStart != nullptr && HasRenderableInline(ctx, inlineStart, nullptr))
+        {
+            childY = LayoutInlineSiblings(ctx, s, inlineStart, nullptr, contentX, contentW, childY, selfHref);
         }
     }
 

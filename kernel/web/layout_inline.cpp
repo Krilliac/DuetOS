@@ -140,33 +140,62 @@ void FlushLine(LayoutCtx& ctx, LineFrag* frags, u32 nFrags, i32 contentX, i32 co
     }
 }
 
-} // namespace
-
-i32 LayoutInline(LayoutCtx& ctx, const Node* parent, const ComputedStyle& parentStyle, i32 contentX, i32 contentW,
-                 i32 originY, const char* parentHref)
+// Collect inline runs from the half-open sibling range [first, stopBefore)
+// into `runs[]` (bounded by `cap`); returns the count produced. Used by
+// the anonymous-block path: a contiguous run of inline-level siblings that
+// sits between block siblings is wrapped in an anonymous block whose
+// inline content is exactly this slice. Each sibling contributes the same
+// way it would as a direct inline child of a block (text nodes carry the
+// inherited style; inline elements recurse with their own style).
+u32 CollectInlineSiblings(const LayoutCtx& ctx, const ComputedStyle* inheritedStyle, const char* inheritedHref,
+                          const Node* first, const Node* stopBefore, InlineRun* runs, u32 cap)
 {
-    // Gather runs. Bound the run count; deep inline trees beyond this
-    // truncate (GAP) rather than over-allocating.
-    constexpr u32 kMaxRuns = 256;
-    InlineRun* runs = ArenaArray<InlineRun>(ctx.arena, kMaxRuns);
-    if (runs == nullptr)
+    u32 count = 0;
+    for (const Node* c = first; c != nullptr && c != stopBefore; c = c->nextSibling)
     {
-        return originY;
+        if (count >= cap)
+        {
+            break;
+        }
+        if (c->kind == NodeKind::Text)
+        {
+            if (c->text != nullptr && c->text[0] != '\0')
+            {
+                runs[count].text = c->text;
+                runs[count].len = static_cast<u32>(duetos::core::StrLen(c->text));
+                runs[count].style = inheritedStyle;
+                runs[count].href = inheritedHref;
+                ++count;
+            }
+        }
+        else if (c->kind == NodeKind::Element)
+        {
+            const ComputedStyle* cs = StyleOf(ctx, c);
+            if (cs != nullptr && cs->display == Display::None)
+            {
+                continue;
+            }
+            const ComputedStyle* childStyle = (cs != nullptr) ? cs : inheritedStyle;
+            const char* childHref = AnchorHref(c);
+            if (childHref == nullptr)
+            {
+                childHref = inheritedHref;
+            }
+            count = CollectInlineRuns(ctx, c, childStyle, childHref, runs, cap, count);
+        }
     }
-    // If the inline-context block is itself an <a href>, its inline
-    // content is part of that link; otherwise inherit the link the block
-    // pass threaded down (an ancestor anchor wrapping a block).
-    const char* selfHref = AnchorHref(parent);
-    if (selfHref == nullptr)
-    {
-        selfHref = parentHref;
-    }
-    const u32 nRuns = CollectInlineRuns(ctx, parent, &parentStyle, selfHref, runs, kMaxRuns, 0);
-    if (nRuns == 0)
-    {
-        return originY;
-    }
+    return count;
+}
 
+// Break `nRuns` collected inline runs into line boxes within
+// [contentX, contentX+contentW) starting at `originY`, applying
+// `parentStyle`'s text-align and "normal" line-height default. Returns the
+// y just past the last line. The run-gathering differs between a whole
+// parent subtree (LayoutInline) and a sibling slice (LayoutInlineSiblings);
+// this is the shared line-breaking core both feed.
+i32 LayInlineRuns(LayoutCtx& ctx, const InlineRun* runs, u32 nRuns, const ComputedStyle& parentStyle, i32 contentX,
+                  i32 contentW, i32 originY)
+{
     // Line accumulator. Fragments per line are bounded; busy lines
     // truncate (GAP).
     constexpr u32 kMaxFragsPerLine = 256;
@@ -331,6 +360,56 @@ i32 LayoutInline(LayoutCtx& ctx, const Node* parent, const ComputedStyle& parent
     }
 
     return y;
+}
+
+} // namespace
+
+i32 LayoutInline(LayoutCtx& ctx, const Node* parent, const ComputedStyle& parentStyle, i32 contentX, i32 contentW,
+                 i32 originY, const char* parentHref)
+{
+    // Gather runs. Bound the run count; deep inline trees beyond this
+    // truncate (GAP) rather than over-allocating.
+    constexpr u32 kMaxRuns = 256;
+    InlineRun* runs = ArenaArray<InlineRun>(ctx.arena, kMaxRuns);
+    if (runs == nullptr)
+    {
+        return originY;
+    }
+    // If the inline-context block is itself an <a href>, its inline
+    // content is part of that link; otherwise inherit the link the block
+    // pass threaded down (an ancestor anchor wrapping a block).
+    const char* selfHref = AnchorHref(parent);
+    if (selfHref == nullptr)
+    {
+        selfHref = parentHref;
+    }
+    const u32 nRuns = CollectInlineRuns(ctx, parent, &parentStyle, selfHref, runs, kMaxRuns, 0);
+    if (nRuns == 0)
+    {
+        return originY;
+    }
+    return LayInlineRuns(ctx, runs, nRuns, parentStyle, contentX, contentW, originY);
+}
+
+i32 LayoutInlineSiblings(LayoutCtx& ctx, const ComputedStyle& parentStyle, const Node* first, const Node* stopBefore,
+                         i32 contentX, i32 contentW, i32 originY, const char* parentHref)
+{
+    // The anonymous block is generated by the containing block, so its
+    // inline content inherits the containing block's style + link. There
+    // is no anchor element AT the anonymous-block level (anonymous boxes
+    // carry no element), so the link is purely the threaded `parentHref`.
+    constexpr u32 kMaxRuns = 256;
+    InlineRun* runs = ArenaArray<InlineRun>(ctx.arena, kMaxRuns);
+    if (runs == nullptr)
+    {
+        return originY;
+    }
+    const u32 nRuns = CollectInlineSiblings(ctx, &parentStyle, parentHref, first, stopBefore, runs, kMaxRuns);
+    if (nRuns == 0)
+    {
+        return originY;
+    }
+    return LayInlineRuns(ctx, runs, nRuns, parentStyle, contentX, contentW, originY);
 }
 
 } // namespace layout_detail

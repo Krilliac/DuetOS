@@ -317,6 +317,22 @@ Node* MakeElement(DomCtx& ctx, const char* tag, u32 len)
     return n->tag ? n : nullptr;
 }
 
+// Detach every child of `el`, leaving it empty. Children keep their own
+// subtrees intact (they are arena-owned and may be re-appended); we only
+// sever the parent/sibling links so a later parse can repopulate `el`.
+void ClearChildren(Node* el)
+{
+    for (Node* c = el->firstChild; c;)
+    {
+        Node* next = c->nextSibling;
+        c->parent = nullptr;
+        c->nextSibling = nullptr;
+        c = next;
+    }
+    el->firstChild = nullptr;
+    el->lastChild = nullptr;
+}
+
 // Replace all children of `el` with a single Text node carrying `text`
 // (textContent setter).
 bool SetTextContent(DomCtx& ctx, Node* el, const char* text, u32 len)
@@ -324,9 +340,28 @@ bool SetTextContent(DomCtx& ctx, Node* el, const char* text, u32 len)
     Node* t = MakeTextNode(ctx, text, len);
     if (!t)
         return false;
-    el->firstChild = nullptr;
-    el->lastChild = nullptr;
+    ClearChildren(el);
     AppendChild(el, t);
+    return true;
+}
+
+// Parse `html` as a fragment and replace all children of `el` with the
+// parsed nodes (innerHTML setter). Fragment nodes are carved from the
+// same DOM arena that owns `el`, so they persist with the document.
+// Returns false only on a hard arena exhaustion (no container node);
+// a partially-parsed fragment still installs what it built, mirroring
+// the parser's own arena-exhaustion recovery.
+bool SetInnerHtml(DomCtx& ctx, Node* el, const char* html, u32 len)
+{
+    Node* frag = ParseHtmlFragment(html, len, *ctx.dom);
+    if (!frag)
+        return false;
+    ClearChildren(el);
+    // Move each top-level fragment child under `el`. AppendChild unlinks
+    // each from the scratch container first, so iterate by re-reading
+    // `frag->firstChild` rather than caching nextSibling.
+    while (Node* child = frag->firstChild)
+        AppendChild(el, child);
     return true;
 }
 
@@ -766,7 +801,16 @@ Result<bool> ElemHostSet(Interp&, JsObject* self, const char* key, u32 keyLen, c
         u32 n = ValToCStr(v, buf, sizeof(buf));
         return SetTextContent(ctx, node, buf, n) ? Result<bool>{true} : Err{ErrorCode::OutOfMemory};
     }
-    // GAP: innerHTML set (parse-and-replace) — innerHTML is get-only.
+    if (KeyIs(key, keyLen, "innerHTML"))
+    {
+        // Stage the assigned markup in a scratch buffer (sized to match
+        // the innerHTML getter's serialization buffer), then parse-and-
+        // replace. GAP: markup longer than the buffer is truncated — same
+        // bound the getter round-trips against.
+        char html[4096];
+        u32 n = ValToCStr(v, html, sizeof(html));
+        return SetInnerHtml(ctx, node, html, n) ? Result<bool>{true} : Err{ErrorCode::OutOfMemory};
+    }
     return false; // not handled → plain property map takes the write
 }
 
