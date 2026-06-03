@@ -34,10 +34,20 @@
  *           (get = serialize, set = parse-and-replace),
  *           querySelector / querySelectorAll / getElementsByTagName /
  *           getElementsByClassName (subtree-scoped to the element),
- *           classList.add / remove / contains / toggle.
+ *           classList.add / remove / contains / toggle,
+ *           addEventListener / removeEventListener / dispatchEvent /
+ *           click() — programmatic event dispatch with bubbling up the
+ *           ancestor chain, stopPropagation / preventDefault, and an
+ *           event object exposing type / target.
  *
  * GAP (deliberately out of scope for this slice):
- *   - Event model (addEventListener / dispatchEvent).
+ *   - Event model: programmatic dispatchEvent()/click() + bubbling are
+ *     REAL; capture phase, the `once`/`passive` listener options, and
+ *     event delegation edge cases are unimplemented. Crucially, REAL
+ *     user input (mouse/keyboard from the window manager) is NOT routed
+ *     to these listeners yet — only scripted dispatch reaches them. See
+ *     the event-model block in js_dom.cpp for what apps/browser.cpp must
+ *     do to translate a WM click into a Node dispatch.
  *   - querySelector/All: only a SINGLE compound selector is matched
  *     (tag, .class, #id, or universal). Descendant/child/sibling combinators, attribute
  *     and pseudo selectors, and comma selector-lists are unsupported —
@@ -98,7 +108,9 @@ JsDomResult JsRunOnDocument(Document* doc, const char* script, u32 len, Arena& d
  * setAttribute round-trip, textContent mutation, createElement +
  * appendChild growth, getElementsByTagName length, getElementsByClassName,
  * querySelector/querySelectorAll, classList add/remove/contains/toggle,
- * console.log of a DOM value). Emits `[js-dom-selftest] PASS (N/N)` on
+ * addEventListener + click() firing, event bubbling, stopPropagation,
+ * removeEventListener, event.target identity, console.log of a DOM
+ * value). Emits `[js-dom-selftest] PASS (N/N)` on
  * success; on any
  * failure fires KBP_PROBE_V(kBootSelftestFail, idx) and emits a FAIL
  * line. Wired into boot_bringup via DUETOS_BOOT_SELFTEST after the JS

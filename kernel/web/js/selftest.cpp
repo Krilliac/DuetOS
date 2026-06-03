@@ -295,6 +295,38 @@ void JsSelfTest()
     // 70. word-boundary anchor.
     run(CheckCase("/\\bcat\\b/.test('the cat sat') + ',' + /\\bcat\\b/.test('category');", "true,false", nullptr));
 
+    // ---- Math completion: random range + transcendentals ----
+    // 73. Math.random() is in [0, 1) — RANGE check only (non-deterministic
+    // by nature, so we never assert a specific value).
+    run(CheckCase("var r=Math.random(); (r>=0)&&(r<1);", "true", nullptr));
+    // 74. Math.sqrt of a perfect square is exact in the soft-float path.
+    run(CheckCase("Math.sqrt(16);", "4", nullptr));
+    // 75. Math.exp(0) == 1 exactly (the soft-float poly is exact at 0:
+    // n=0, r=0, so the series collapses to 1.0). The trig polynomials
+    // (sin/cos) carry ~3e-5 error so their identities are NOT asserted
+    // here — only that they return a finite number (range, not value).
+    run(CheckCase("Math.exp(0) + ',' + isFinite(Math.cos(0)) + ',' + isFinite(Math.sin(1)) + ',' + "
+                  "isFinite(Math.tan(1)) + ',' + isFinite(Math.log(10));",
+                  "1,true,true,true,true", nullptr));
+
+    // ---- Date (UTC, epoch-ms backed) ----
+    // 76. new Date(0) is the Unix epoch: 1970-01-01 (month 0).
+    run(CheckCase("new Date(0).getFullYear() + '-' + new Date(0).getMonth();", "1970-0", nullptr));
+    // 77. epoch day-of-month is the 1st; 1970-01-01 was a Thursday (day 4).
+    run(CheckCase("new Date(0).getDate() + ',' + new Date(0).getDay();", "1,4", nullptr));
+    // 78. midnight UTC: all time-of-day getters read zero.
+    run(CheckCase("new Date(0).getHours() + ':' + new Date(0).getMinutes() + ':' + new Date(0).getSeconds();", "0:0:0",
+                  nullptr));
+    // 79. getTime round-trips the constructor's epoch-ms argument.
+    run(CheckCase("new Date(1000).getTime();", "1000", nullptr));
+    // 80. one second past the epoch: getSeconds reads 1.
+    run(CheckCase("new Date(1000).getSeconds();", "1", nullptr));
+    // 81. Date.now() yields a number (value is wall-clock-dependent, so we
+    // assert only its type — deterministic regardless of the RTC).
+    run(CheckCase("typeof Date.now();", "number", nullptr));
+    // 82. toISOString of the epoch is the canonical fixed form.
+    run(CheckCase("new Date(0).toISOString();", "1970-01-01T00:00:00.000Z", nullptr));
+
     // ---- CRITICAL: a catastrophic-backtracking pattern must TERMINATE
     // (degrade to no-match / a bounded answer), NOT hang the boot. The
     // explicit-stack VM + step budget guarantee this. The classic

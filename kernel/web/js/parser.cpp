@@ -15,7 +15,10 @@
  *
  * GAP: for-in / for-of (parsed-and-rejected), labels, switch, do-while,
  *      try/catch/throw, class, getters/setters, destructuring,
- *      spread/rest, default params, computed object keys, `new`.
+ *      spread/rest, default params, computed object keys.
+ *      `new` is supported only for native constructors (Date); a `new`
+ *      on a user-defined function falls through to the same callee path
+ *      and currently behaves like a plain call (no `this`-object bind).
  */
 
 namespace duetos::web::js
@@ -662,6 +665,33 @@ AstNode* ParsePostfix(Parser& p)
 
 AstNode* ParseUnary(Parser& p)
 {
+    // `new Callee(args)` — construct. We parse the postfix expression that
+    // follows `new` and, if its top node is a Call, flag it as a
+    // construct (Call::boolVal == true). `new Callee` with no argument
+    // list is normalised to a zero-arg construct call. The interpreter
+    // routes a flagged Call to the native ctor (currently only Date).
+    if (p.Is(Tok::KwNew))
+    {
+        p.Adv();
+        AstNode* callee = ParsePostfix(p);
+        if (!p.ok)
+            return nullptr;
+        if (callee && callee->kind == Ast::Call)
+        {
+            callee->boolVal = true; // mark as a `new` construct call
+            return callee;
+        }
+        // `new Foo` (no parens): synthesise a zero-arg construct call.
+        AstNode* call = p.Node(Ast::Call);
+        if (!call)
+            return nullptr;
+        call->a = callee;
+        call->kids = nullptr;
+        call->kidCount = 0;
+        call->boolVal = true;
+        return call;
+    }
+
     Op op = Op::None;
     switch (p.Kind())
     {

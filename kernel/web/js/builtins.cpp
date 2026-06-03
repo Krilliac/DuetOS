@@ -1,5 +1,7 @@
 #include "web/js/builtins.h"
 
+#include "time/timekeeper.h"
+#include "util/random.h"
 #include "util/string.h"
 #include "web/js/object.h"
 #include "web/js/regexp.h"
@@ -126,7 +128,21 @@ Result<void> InstallBuiltins(Interp& I)
     ObjSet(math, a, "pow", 3, NativeFnVal(I, kMathPow, "pow"));
     ObjSet(math, a, "sqrt", 4, NativeFnVal(I, kMathSqrt, "sqrt"));
     ObjSet(math, a, "round", 5, NativeFnVal(I, kMathRound, "round"));
+    ObjSet(math, a, "random", 6, NativeFnVal(I, kMathRandom, "random"));
+    ObjSet(math, a, "sin", 3, NativeFnVal(I, kMathSin, "sin"));
+    ObjSet(math, a, "cos", 3, NativeFnVal(I, kMathCos, "cos"));
+    ObjSet(math, a, "tan", 3, NativeFnVal(I, kMathTan, "tan"));
+    ObjSet(math, a, "log", 3, NativeFnVal(I, kMathLog, "log"));
+    ObjSet(math, a, "exp", 3, NativeFnVal(I, kMathExp, "exp"));
     EnvDefine(g, a, "Math", 4, JsValue::Obj(math));
+
+    // Date — the callable global (new Date() / Date()) is the native ctor
+    // function. Its sole static, Date.now, is resolved specially in
+    // GetMemberImpl's Function path (a JsFunction has no property map, so
+    // the static can't be a stored property). Per-instance getters
+    // dispatch via GetMemberImpl on a Date-tagged object
+    // (JsObject::isDate), mirroring the RegExp special-case.
+    EnvDefine(g, a, "Date", 4, NativeFnVal(I, kDateCtor, "Date"));
 
     // RegExp(pattern[, flags]) — callable to build a regex from strings.
     // (The /.../ literal path goes through MakeRegExp directly.)
@@ -199,6 +215,15 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
             return NativeFnVal(I, kObjValueOf, "valueOf");
         return JsValue::Undefined();
     }
+    if (obj.type == JsType::Function)
+    {
+        // Statics on a native constructor function. The Date ctor exposes
+        // Date.now(); a JsFunction has no property map, so this is the
+        // only place the static can be resolved.
+        if (obj.as.fn && obj.as.fn->nativeId == kDateCtor && NameEq(key, keyLen, "now"))
+            return NativeFnVal(I, kDateNow, "now");
+        return JsValue::Undefined();
+    }
     if (obj.type == JsType::Object)
     {
         JsObject* o = obj.as.obj;
@@ -224,6 +249,31 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
                 return JsValue::Bool(re->prog->multiline);
             if (NameEq(key, keyLen, "lastIndex"))
                 return JsValue::Int(i64(re->lastIndex));
+            // other keys fall through to the plain property map below
+        }
+        // Date instances: the UTC getters dispatch on the isDate tag (the
+        // epoch-ms time value lives in JsObject::dateMs). Checked before
+        // the host/array paths since a Date is a plain object.
+        if (o->isDate)
+        {
+            if (NameEq(key, keyLen, "getTime"))
+                return NativeFnVal(I, kDateGetTime, "getTime");
+            if (NameEq(key, keyLen, "getFullYear"))
+                return NativeFnVal(I, kDateGetFullYear, "getFullYear");
+            if (NameEq(key, keyLen, "getMonth"))
+                return NativeFnVal(I, kDateGetMonth, "getMonth");
+            if (NameEq(key, keyLen, "getDate"))
+                return NativeFnVal(I, kDateGetDate, "getDate");
+            if (NameEq(key, keyLen, "getDay"))
+                return NativeFnVal(I, kDateGetDay, "getDay");
+            if (NameEq(key, keyLen, "getHours"))
+                return NativeFnVal(I, kDateGetHours, "getHours");
+            if (NameEq(key, keyLen, "getMinutes"))
+                return NativeFnVal(I, kDateGetMinutes, "getMinutes");
+            if (NameEq(key, keyLen, "getSeconds"))
+                return NativeFnVal(I, kDateGetSeconds, "getSeconds");
+            if (NameEq(key, keyLen, "toISOString"))
+                return NativeFnVal(I, kDateToISOString, "toISOString");
             // other keys fall through to the plain property map below
         }
         // Host objects (DOM elements) resolve members through their C++
@@ -1555,6 +1605,204 @@ static Result<JsValue> ReSplit(Interp& I, const JsString* s, JsObject* reObj)
     return JsValue::Obj(arr);
 }
 
+// ----------------------- Date runtime -----------------------
+//
+// A Date carries one number: `dateMs`, milliseconds since the Unix epoch
+// (UTC). The getters derive the civil calendar from it on demand with a
+// standard days-from-epoch algorithm; there is no per-field cache.
+//
+// GAP: UTC only — no local-timezone offset, no DST, so getHours/getDate/
+//      etc. report the UTC wall clock. The setter family (setFullYear,
+//      setHours, …), string parsing (Date.parse / new Date("...")), and
+//      the locale formatters (toLocaleString / toDateString) are not
+//      implemented; new Date("...") falls into the unrecognised-arg path
+//      and yields an Invalid-Date (dateMs treated as 0 by the getters).
+
+// Read the wall clock as milliseconds since the Unix epoch. Built on the
+// kernel's CMOS-RTC FILETIME source (100ns ticks since 1601). Returns 0
+// when the RTC is unavailable (FILETIME == 0) so Date degrades to the
+// epoch rather than faulting — matching browser.cpp::NowUnix.
+static i64 DateNowMs()
+{
+    constexpr u64 kFiletimePerMs = 10000ULL;                 // 100ns ticks per ms
+    constexpr u64 kFiletimeUnixOffsetMs = 11644473600000ULL; // ms 1601->1970
+    const u64 ft = duetos::time::RealtimeFiletime();
+    if (ft == 0)
+        return 0; // RTC unavailable — epoch
+    const u64 ms1601 = ft / kFiletimePerMs;
+    if (ms1601 <= kFiletimeUnixOffsetMs)
+        return 0;
+    return i64(ms1601 - kFiletimeUnixOffsetMs);
+}
+
+// Floor-divide / floor-mod for signed values (epoch ms can be negative
+// for pre-1970 dates). C++ `/` and `%` truncate toward zero, which is
+// wrong for the calendar arithmetic below when the numerator is negative.
+static i64 FloorDiv(i64 a, i64 b)
+{
+    i64 q = a / b;
+    if ((a % b != 0) && ((a < 0) != (b < 0)))
+        --q;
+    return q;
+}
+static i64 FloorMod(i64 a, i64 b)
+{
+    i64 r = a % b;
+    if (r != 0 && ((r < 0) != (b < 0)))
+        r += b;
+    return r;
+}
+
+// Broken-down UTC calendar fields derived from epoch milliseconds.
+struct CivilTime
+{
+    i64 year;    // full year, e.g. 1970
+    i64 month;   // 0..11 (0 = January)
+    i64 day;     // 1..31
+    i64 weekday; // 0..6 (0 = Sunday)
+    i64 hour;    // 0..23
+    i64 minute;  // 0..59
+    i64 second;  // 0..59
+};
+
+// Convert epoch ms to broken-down UTC fields. The date math is Howard
+// Hinnant's well-known days-from-epoch inverse (civil_from_days), which
+// is exact for the full proleptic-Gregorian range and handles negative
+// day counts (pre-1970) correctly.
+static CivilTime CivilFromMs(i64 ms)
+{
+    i64 days = FloorDiv(ms, 86400000LL);
+    i64 rem = FloorMod(ms, 86400000LL); // ms into the day, always >= 0
+
+    CivilTime ct{};
+    ct.hour = rem / 3600000LL;
+    rem %= 3600000LL;
+    ct.minute = rem / 60000LL;
+    rem %= 60000LL;
+    ct.second = rem / 1000LL;
+
+    // Weekday: 1970-01-01 was a Thursday (4). Floor-mod keeps it in 0..6
+    // even for negative `days`.
+    ct.weekday = FloorMod(days + 4, 7);
+
+    // civil_from_days: shift the era so the leap-day lands at the end of a
+    // 400-year cycle, then unwind year/month/day.
+    i64 z = days + 719468; // shift epoch to 0000-03-01
+    i64 era = FloorDiv(z, 146097);
+    i64 doe = z - era * 146097;                                      // [0, 146096]
+    i64 yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // [0, 399]
+    i64 y = yoe + era * 400;
+    i64 doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    i64 mp = (5 * doy + 2) / 153;                      // [0, 11], Mar=0
+    ct.day = doy - (153 * mp + 2) / 5 + 1;             // [1, 31]
+    ct.month = mp < 10 ? mp + 3 : mp - 9;              // [1, 12], Jan=1
+    ct.year = y + (ct.month <= 2 ? 1 : 0);
+    ct.month -= 1; // JS months are 0-based
+    return ct;
+}
+
+// Construct a Date object. `new Date()` / `Date()` -> now;
+// `new Date(ms)` -> the given epoch ms. A non-numeric single argument
+// (e.g. a date string) is unsupported (GAP) and yields dateMs == 0.
+static Result<JsValue> DateConstruct(Interp& I, const JsValue* args, u32 argc)
+{
+    JsObject* o = NewPlainObject(I);
+    if (!o)
+        return Err{ErrorCode::OutOfMemory};
+    o->isDate = true;
+    if (argc == 0)
+        o->dateMs = DateNowMs();
+    else
+    {
+        JsValue a0 = args[0];
+        if (a0.type == JsType::Number)
+            // Integer epoch-ms is exact (the common case: Date.now()'s
+            // value, a stored timestamp). GAP: a fractional/large numeric
+            // arg goes through the binary32 path and Sf32ToI32 saturates
+            // past ~2.1e9 ms — sufficient for the int-literal use here, not
+            // for arbitrary post-2038 fractional millisecond inputs.
+            o->dateMs = a0.as.num.isInt ? a0.as.num.ival : i64(Sf32ToI32(a0.as.num.fval));
+        else
+            o->dateMs = 0; // GAP: no date-string parsing
+    }
+    return JsValue::Obj(o);
+}
+
+// Dispatch the calendar getters (getFullYear/getMonth/.../getSeconds) on
+// a Date receiver. Returns NaN if the receiver isn't a Date.
+static Result<JsValue> DateGetField(const JsValue& recv, u16 id)
+{
+    if (recv.type != JsType::Object || !recv.as.obj || !recv.as.obj->isDate)
+        return JsValue::Float(Sf32QNaN());
+    CivilTime ct = CivilFromMs(recv.as.obj->dateMs);
+    switch (id)
+    {
+    case kDateGetFullYear:
+        return JsValue::Int(ct.year);
+    case kDateGetMonth:
+        return JsValue::Int(ct.month);
+    case kDateGetDate:
+        return JsValue::Int(ct.day);
+    case kDateGetDay:
+        return JsValue::Int(ct.weekday);
+    case kDateGetHours:
+        return JsValue::Int(ct.hour);
+    case kDateGetMinutes:
+        return JsValue::Int(ct.minute);
+    case kDateGetSeconds:
+        return JsValue::Int(ct.second);
+    default:
+        return JsValue::Float(Sf32QNaN());
+    }
+}
+
+// Date.prototype.toISOString -> "YYYY-MM-DDTHH:MM:SS.mmmZ" (UTC).
+static Result<JsValue> DateToISOString(Interp& I, const JsValue& recv)
+{
+    if (recv.type != JsType::Object || !recv.as.obj || !recv.as.obj->isDate)
+        return JsValue::Str(MakeString(I.arena, "Invalid Date", 12));
+    i64 ms = recv.as.obj->dateMs;
+    CivilTime ct = CivilFromMs(ms);
+    i64 millis = FloorMod(ms, 1000LL);
+
+    // Fixed-width zero-padded fields. Year is 4 digits (GAP: years
+    // outside 0..9999 are not given the ES +NNNNNN extended form).
+    char buf[28];
+    u32 o = 0;
+    auto pad = [&](i64 v, u32 width)
+    {
+        char tmp[8];
+        u32 t = 0;
+        u64 uv = v < 0 ? 0 : u64(v);
+        if (uv == 0)
+            tmp[t++] = '0';
+        while (uv)
+        {
+            tmp[t++] = char('0' + (uv % 10));
+            uv /= 10;
+        }
+        for (u32 k = t; k < width; ++k)
+            buf[o++] = '0';
+        while (t)
+            buf[o++] = tmp[--t];
+    };
+    pad(ct.year, 4);
+    buf[o++] = '-';
+    pad(ct.month + 1, 2);
+    buf[o++] = '-';
+    pad(ct.day, 2);
+    buf[o++] = 'T';
+    pad(ct.hour, 2);
+    buf[o++] = ':';
+    pad(ct.minute, 2);
+    buf[o++] = ':';
+    pad(ct.second, 2);
+    buf[o++] = '.';
+    pad(millis, 3);
+    buf[o++] = 'Z';
+    return JsValue::Str(MakeString(I.arena, buf, o));
+}
+
 Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue* args, u32 argc)
 {
     switch (id)
@@ -1684,6 +1932,54 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
     }
     case kMathSqrt:
         return JsValue::Float(Sf32Sqrt(NumberToSf32(ArgOr(args, argc, 0))));
+    case kMathSin:
+        return JsValue::Float(Sf32Sin(NumberToSf32(ArgOr(args, argc, 0))));
+    case kMathCos:
+        return JsValue::Float(Sf32Cos(NumberToSf32(ArgOr(args, argc, 0))));
+    case kMathTan:
+    {
+        // tan(x) = sin(x) / cos(x). The soft-float lib has no Sf32Tan, so
+        // we compose it; Sf32Div yields +/-Inf at the cos==0 poles, which
+        // is the correct JS result (Math.tan(PI/2) ~ a huge finite value
+        // in real JS too, since PI/2 isn't exactly representable).
+        Sf32 x = NumberToSf32(ArgOr(args, argc, 0));
+        return JsValue::Float(Sf32Div(Sf32Sin(x), Sf32Cos(x)));
+    }
+    case kMathLog:
+        return JsValue::Float(Sf32Log(NumberToSf32(ArgOr(args, argc, 0))));
+    case kMathExp:
+        return JsValue::Float(Sf32Exp(NumberToSf32(ArgOr(args, argc, 0))));
+    case kMathRandom:
+    {
+        // A double in [0, 1) from the kernel PRNG. We take 24 random bits
+        // (the binary32 mantissa width) and scale by 2^-24 so the result
+        // is always strictly < 1 and exactly representable in Sf32 — this
+        // avoids any rounding that could land on 1.0. Non-deterministic by
+        // nature; the self-test asserts the RANGE, never a specific value.
+        u32 bits24 = u32(duetos::core::RandomU64() & 0xFFFFFFu);
+        Sf32 num = Sf32FromU32(bits24);
+        Sf32 denom = Sf32FromU32(1u << 24); // 16777216.0, exact in binary32
+        return JsValue::Float(Sf32Div(num, denom));
+    }
+
+    case kDateCtor:
+        return DateConstruct(I, args, argc);
+    case kDateNow:
+        return JsValue::Int(DateNowMs());
+    case kDateGetTime:
+        if (recv.type == JsType::Object && recv.as.obj && recv.as.obj->isDate)
+            return JsValue::Int(recv.as.obj->dateMs);
+        return JsValue::Float(Sf32QNaN());
+    case kDateGetFullYear:
+    case kDateGetMonth:
+    case kDateGetDate:
+    case kDateGetDay:
+    case kDateGetHours:
+    case kDateGetMinutes:
+    case kDateGetSeconds:
+        return DateGetField(recv, id);
+    case kDateToISOString:
+        return DateToISOString(I, recv);
 
     case kNumToFixed:
         return NumToFixed(I, recv, args, argc);

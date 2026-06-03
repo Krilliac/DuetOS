@@ -315,6 +315,88 @@ void JsDomSelfTest()
             duetos::core::StrEqual(cls, "item"));
     }
 
+    // 20. addEventListener + click(): a click listener fires on el.click(),
+    // mutating a closure-captured counter. Listeners live only for the
+    // duration of one JsRunOnDocument call (the DomCtx — and its listener
+    // table — is per-eval), so register AND dispatch in one script.
+    run(RunExpectConsole(doc, dom,
+                         "var n=0;"
+                         "var t=document.getElementById('title');"
+                         "t.addEventListener('click', function(e){ n=n+1; });"
+                         "t.click();"
+                         "console.log(n);",
+                         "1\n"));
+
+    // 21. event.target is the clicked element (its id reflects through the
+    // event object passed to the handler).
+    run(RunExpectConsole(doc, dom,
+                         "var who='';"
+                         "var t=document.getElementById('title');"
+                         "t.addEventListener('click', function(e){ who=e.target.id + ',' + e.type; });"
+                         "t.click();"
+                         "console.log(who);",
+                         "title,click\n"));
+
+    // 22. Bubbling: a listener on an ANCESTOR fires when a descendant is
+    // clicked. Click the first <li> (child of <ul id=list>); a listener on
+    // the <ul> must also run. Order is target-then-ancestor.
+    run(RunExpectConsole(doc, dom,
+                         "var log='';"
+                         "var ul=document.getElementById('list');"
+                         "var li=ul.querySelector('li');"
+                         "li.addEventListener('click', function(e){ log=log+'li'; });"
+                         "ul.addEventListener('click', function(e){ log=log+'ul'; });"
+                         "li.click();"
+                         "console.log(log);",
+                         "liul\n"));
+
+    // 23. stopPropagation() halts bubbling: the target listener calls it,
+    // so the ancestor listener never runs.
+    run(RunExpectConsole(doc, dom,
+                         "var log='';"
+                         "var ul=document.getElementById('list');"
+                         "var li=ul.querySelector('li');"
+                         "li.addEventListener('click', function(e){ log=log+'li'; e.stopPropagation(); });"
+                         "ul.addEventListener('click', function(e){ log=log+'ul'; });"
+                         "li.click();"
+                         "console.log(log);",
+                         "li\n"));
+
+    // 24. removeEventListener prevents the handler from firing: register a
+    // named handler, remove it, then click — the counter stays 0.
+    run(RunExpectConsole(doc, dom,
+                         "var n=0;"
+                         "var t=document.getElementById('title');"
+                         "function h(e){ n=n+1; }"
+                         "t.addEventListener('click', h);"
+                         "t.removeEventListener('click', h);"
+                         "t.click();"
+                         "console.log(n);",
+                         "0\n"));
+
+    // 25. preventDefault() sets event.defaultPrevented, observable inside a
+    // later (bubbling) listener on the same event.
+    run(RunExpectConsole(doc, dom,
+                         "var seen='';"
+                         "var ul=document.getElementById('list');"
+                         "var li=ul.querySelector('li');"
+                         "li.addEventListener('click', function(e){ e.preventDefault(); });"
+                         "ul.addEventListener('click', function(e){ seen=e.defaultPrevented; });"
+                         "li.click();"
+                         "console.log(seen);",
+                         "true\n"));
+
+    // 26. dispatchEvent with a custom type only fires listeners for that
+    // type (a 'click' listener must NOT run for a dispatched 'tap').
+    run(RunExpectConsole(doc, dom,
+                         "var log='';"
+                         "var t=document.getElementById('title');"
+                         "t.addEventListener('click', function(e){ log=log+'c'; });"
+                         "t.addEventListener('tap', function(e){ log=log+'t'; });"
+                         "t.dispatchEvent('tap');"
+                         "console.log(log);",
+                         "t\n"));
+
     char numBuf[12];
     if (failIdx >= 0)
     {

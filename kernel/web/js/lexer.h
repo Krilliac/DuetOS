@@ -69,7 +69,7 @@ enum class Tok : u8
     KwUndefined,
     KwTypeof,
     KwIn,
-    KwNew, // lexed; parser GAPs it
+    KwNew, // `new Ctor(args)` — native ctors (Date); see ParseUnary
 
     // punctuation / operators
     LParen,

@@ -43,6 +43,12 @@ enum NativeFn : u16
     kMathPow,
     kMathSqrt,
     kMathRound,
+    kMathRandom,
+    kMathSin,
+    kMathCos,
+    kMathTan,
+    kMathLog,
+    kMathExp,
     // Number.prototype.*  (receiver = the number)
     kNumToFixed,
     kNumToString,
@@ -79,6 +85,19 @@ enum NativeFn : u16
     kObjValueOf,
     // Object.* statics (receiver = undefined; arg[0] = the object)
     kObjKeys,
+    // Date — ctor (new Date / Date()), the Date.now static, and the
+    // UTC getters (receiver = the Date object carrying JsObject::dateMs).
+    kDateCtor,
+    kDateNow,
+    kDateGetTime,
+    kDateGetFullYear,
+    kDateGetMonth,
+    kDateGetDate,
+    kDateGetDay,
+    kDateGetHours,
+    kDateGetMinutes,
+    kDateGetSeconds,
+    kDateToISOString,
     // Sentinel: dispatch via JsFunction::nativeCall (host embedding).
     // Parked at the top of the u16 space so it never collides with a
     // real builtin id added above.
