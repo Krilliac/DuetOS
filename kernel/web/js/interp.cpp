@@ -46,7 +46,7 @@ static Result<JsValue> EvalArrayLit(Interp& I, const AstNode* n, Env* env)
 
 static Result<JsValue> EvalObjectLit(Interp& I, const AstNode* n, Env* env)
 {
-    JsObject* obj = ObjNew(I.arena, false);
+    JsObject* obj = NewPlainObject(I);
     if (!obj)
         return Err{ErrorCode::OutOfMemory};
     for (u32 i = 0; i < n->kidCount; ++i)

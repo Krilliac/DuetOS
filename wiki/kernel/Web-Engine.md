@@ -106,16 +106,22 @@ Every stage boots a self-test, registered in
 
 ## Known limits (greppable `// GAP:`)
 
-- **JS:** `JSON.parse` surrogate pairs decode each half independently;
-  object-to-primitive resolves `valueOf`/`toString` as **own** properties
-  only (no prototype chain — `js/object.h`); no `Symbol.toPrimitive`, no
-  `try`/`catch`.
-- **DOM:** `ParseHtmlFragment` uses a generic insertion context, not the
-  HTML5 element-specific fragment algorithm (a bare `<td>` is not
-  auto-wrapped in a table context).
-- **Layout:** no anonymous-*inline*-box generation (block inside an
-  inline), floats, positioning, flexbox/grid, tables, margin-collapsing,
-  z-index, overflow clipping; monospace metrics only.
+- **JS:** there IS a prototype chain (plain objects inherit
+  `Object.prototype.toString`/`valueOf`), but it is read-only — no
+  `__proto__` / `Object.create` / `getPrototypeOf`, and only plain
+  objects get a default prototype (no Array/String/Function prototype
+  objects). `JSON.parse` surrogate pairs decode each half independently;
+  no `Symbol.toPrimitive`, no `try`/`catch`.
+- **DOM:** `ParseHtmlFragment` seeds the element-specific *initial*
+  insertion context (`table`/`tbody`/`thead`/`tfoot`/`tr`/`colgroup`/
+  `select`), so `el.innerHTML = '<td>…'` on a `<tr>` parses correctly. It
+  does not implement the full insertion-mode state machine (table
+  foster-parenting, `<template>` content fragments).
+- **Layout:** the block-in-inline split is handled (an inline element
+  containing a block stacks around it), but the split fragments do not
+  re-draw the inline element's own borders/padding/background. No floats,
+  positioning, flexbox/grid, tables, margin-collapsing, z-index, overflow
+  clipping; monospace metrics only.
 - **PNG:** no APNG, gamma/ICC colour management, or ancillary chunks
   beyond tRNS.
 - **TLS trust:** the browser's x509 verifier uses a test-only trust

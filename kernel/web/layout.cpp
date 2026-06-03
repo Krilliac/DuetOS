@@ -15,9 +15,13 @@
  * A block whose children are all inline runs an inline formatting
  * context; a block child breaks the inline flow, and each consecutive run
  * of inline-level siblings adjacent to block siblings is wrapped in an
- * anonymous block box (CSS box generation). display:none skips the
- * subtree. GAP: anonymous-INLINE-box generation (block box inside an
- * inline), margin-collapsing, floats, positioning — see layout.h.
+ * anonymous block box (CSS box generation). An inline element that
+ * contains a block-level descendant is itself split around that block
+ * (block-in-inline): the inline content before/after each becomes an
+ * anonymous block and the block is pulled out, all stacking vertically.
+ * display:none skips the subtree. GAP: inline-box DECORATION splitting
+ * (split fragments don't re-draw the inline element's border/padding),
+ * margin-collapsing, floats, positioning — see layout.h.
  */
 
 #include "web/layout.h"
@@ -67,13 +71,73 @@ bool IsBlockLevelChild(const LayoutCtx& ctx, const Node* c)
     return c->tag != nullptr && duetos::core::StrEqual(c->tag, "img");
 }
 
-// Does `node` contain any block-level (or img) element child? Decides
-// between an inline and a block formatting context for its children.
+// Does inline-level element `node`'s subtree TRANSITIVELY contain a
+// block-level box? Per CSS box generation, a block box nested inside an
+// inline box forces the inline box to be split around the block (the
+// "block-in-inline" case). This predicate lets the parent's
+// formatting-context decision treat such an inline child as
+// block-breaking even though the child itself is inline-level. Skips
+// display:none subtrees (they generate no box). Bounded by the DOM depth
+// the arena already caps (Arena::kMaxNodes), so plain recursion is safe.
+bool ContainsBlockDescendant(const LayoutCtx& ctx, const Node* node)
+{
+    for (const Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
+    {
+        if (c->kind != NodeKind::Element)
+        {
+            continue;
+        }
+        const ComputedStyle* cs = StyleOf(ctx, c);
+        if (cs == nullptr || cs->display == Display::None)
+        {
+            continue;
+        }
+        if (IsBlockLevelChild(ctx, c))
+        {
+            return true;
+        }
+        // Recurse only through inline-level element children.
+        if (ContainsBlockDescendant(ctx, c))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Is direct child `c` a child that breaks its parent's inline flow? This
+// is true for a block-level box (IsBlockLevelChild) AND for an
+// inline-level element that transitively contains a block descendant
+// (the block-in-inline split case — that inline element must be pulled
+// apart into stacked block-level pieces). Text/inline content without a
+// block descendant does not break the flow.
+bool BreaksInlineFlow(const LayoutCtx& ctx, const Node* c)
+{
+    if (IsBlockLevelChild(ctx, c))
+    {
+        return true;
+    }
+    if (c->kind != NodeKind::Element)
+    {
+        return false;
+    }
+    const ComputedStyle* cs = StyleOf(ctx, c);
+    if (cs == nullptr || cs->display == Display::None)
+    {
+        return false;
+    }
+    return ContainsBlockDescendant(ctx, c);
+}
+
+// Does `node` contain any direct child that breaks its inline flow?
+// Decides between an inline and a block formatting context for its
+// children. A block-level child OR an inline child carrying a block
+// descendant (block-in-inline) both force the block path.
 bool HasBlockChild(const LayoutCtx& ctx, const Node* node)
 {
     for (const Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
     {
-        if (IsBlockLevelChild(ctx, c))
+        if (BreaksInlineFlow(ctx, c))
         {
             return true;
         }
@@ -148,6 +212,13 @@ i32 LayoutImage(LayoutCtx& ctx, const Node* node, const ComputedStyle& s, i32 x,
 }
 
 } // namespace
+
+// Forward declaration: split an inline element that contains a block
+// descendant into stacked block-level pieces. Mutually recursive with
+// LayoutBlock (the contained block is laid out via LayoutBlock, which may
+// in turn re-enter the mixed-children walk). Defined below LayoutBlock.
+i32 LayoutBlockInInline(LayoutCtx& ctx, const Node* inlineEl, const ComputedStyle& cbStyle, i32 cbX, i32 cbWidth,
+                        i32 originY, const char* linkHref);
 
 // Lay one block-level `node` out. The containing block content runs from
 // [cbX, cbX+cbWidth); the box's top margin edge sits at `originY`.
@@ -269,21 +340,33 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
         const Node* inlineStart = nullptr; // first sibling of the pending inline run
         for (const Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
         {
-            if (IsBlockLevelChild(ctx, c))
+            if (BreaksInlineFlow(ctx, c))
             {
-                // Flush any inline run that preceded this block child into
-                // an anonymous block laid out as a normal block box.
+                // Flush any inline run that preceded this block-breaking
+                // child into an anonymous block laid out as a normal block
+                // box.
                 if (inlineStart != nullptr && HasRenderableInline(ctx, inlineStart, c))
                 {
                     childY = LayoutInlineSiblings(ctx, s, inlineStart, c, contentX, contentW, childY, selfHref);
                 }
                 inlineStart = nullptr;
-                childY = LayoutBlock(ctx, c, contentX, contentW, childY, selfHref);
+                if (IsBlockLevelChild(ctx, c))
+                {
+                    // A genuine block-level child: lay it out directly.
+                    childY = LayoutBlock(ctx, c, contentX, contentW, childY, selfHref);
+                }
+                else
+                {
+                    // An inline element carrying a block descendant: split
+                    // the inline box around the block (block-in-inline).
+                    childY = LayoutBlockInInline(ctx, c, s, contentX, contentW, childY, selfHref);
+                }
             }
             else
             {
-                // Inline-level (text node or inline element): start a new
-                // pending run if none is open; otherwise extend it.
+                // Inline-level (text node or inline element with no block
+                // descendant): start a new pending run if none is open;
+                // otherwise extend it.
                 if (inlineStart == nullptr)
                 {
                     inlineStart = c;
@@ -326,6 +409,80 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
 
     // Advance past this box's bottom margin edge.
     return borderY + borderBoxH + mBot;
+}
+
+// Split an inline element that contains a block-level descendant into
+// vertically-stacked block-level pieces (CSS box generation's
+// "block-in-inline"): the inline content before the block forms an
+// anonymous block, the block child is pulled out as its own block box,
+// and the inline content after forms another anonymous block. The three
+// stack in the containing block formatting context. `inlineEl` is the
+// inline element being split (e.g. a <span>); `cbStyle` is the
+// containing block's style (drives the anonymous blocks' inline
+// formatting context — text-align, line-height); the runs themselves
+// carry `inlineEl`'s own computed style so the span's color/font/weight
+// is preserved. Returns the y just past the last piece.
+//
+// GAP: the split does NOT re-create `inlineEl`'s own borders/padding/
+// background on the before/after fragments (CSS would draw the inline
+// box's left/right border on the first/last fragment) — only the text
+// content is stacked. Revisit when inline-box decoration splitting is
+// needed.
+i32 LayoutBlockInInline(LayoutCtx& ctx, const Node* inlineEl, const ComputedStyle& cbStyle, i32 cbX, i32 cbWidth,
+                        i32 originY, const char* linkHref)
+{
+    const ComputedStyle* sp = StyleOf(ctx, inlineEl);
+    // The inline element's own style drives its text runs; fall back to
+    // the containing block's style if (defensively) it has none.
+    const ComputedStyle& runStyle = (sp != nullptr) ? *sp : cbStyle;
+
+    // An <a href> inline element makes its content a link surface;
+    // otherwise inherit the threaded link.
+    const char* selfHref = AnchorHref(inlineEl);
+    if (selfHref == nullptr)
+    {
+        selfHref = linkHref;
+    }
+
+    i32 y = originY;
+    const Node* inlineStart = nullptr; // first pending inline-run child
+    for (const Node* c = inlineEl->firstChild; c != nullptr; c = c->nextSibling)
+    {
+        if (BreaksInlineFlow(ctx, c))
+        {
+            // Flush the inline run that preceded this block-breaking child
+            // into an anonymous block carrying the split inline element's
+            // style.
+            if (inlineStart != nullptr && HasRenderableInline(ctx, inlineStart, c))
+            {
+                y = LayoutInlineSiblings(ctx, runStyle, inlineStart, c, cbX, cbWidth, y, selfHref);
+            }
+            inlineStart = nullptr;
+            if (IsBlockLevelChild(ctx, c))
+            {
+                y = LayoutBlock(ctx, c, cbX, cbWidth, y, selfHref);
+            }
+            else
+            {
+                // A nested inline element that itself carries a block
+                // descendant: recurse to split it too.
+                y = LayoutBlockInInline(ctx, c, cbStyle, cbX, cbWidth, y, selfHref);
+            }
+        }
+        else
+        {
+            if (inlineStart == nullptr)
+            {
+                inlineStart = c;
+            }
+        }
+    }
+    // Trailing inline run after the last block-breaking child.
+    if (inlineStart != nullptr && HasRenderableInline(ctx, inlineStart, nullptr))
+    {
+        y = LayoutInlineSiblings(ctx, runStyle, inlineStart, nullptr, cbX, cbWidth, y, selfHref);
+    }
+    return y;
 }
 
 } // namespace layout_detail

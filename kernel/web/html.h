@@ -62,12 +62,27 @@ Node* ParseHtml(const char* html, u32 len, Arena& arena);
 /// container node. The container itself is a scratch holder and is not
 /// meant to be inserted into a live tree.
 ///
-/// GAP: the fragment is parsed in a generic (Document-like) insertion
-/// context, not the spec's element-specific fragment-parsing algorithm
-/// — e.g. a bare `<td>` is not auto-wrapped in a table context. Fine for
-/// the common `innerHTML` cases (flow content); revisit with the HTML5
-/// insertion-mode machine.
-Node* ParseHtmlFragment(const char* html, u32 len, Arena& arena);
+/// `contextTag` is the lowercased tag name of the element the fragment is
+/// being parsed *into* (the `innerHTML` target), or nullptr for a generic
+/// (Document-like) context. Table-related contexts seed the tree builder
+/// with the synthetic ancestor chain the HTML5 fragment-parsing algorithm
+/// requires, so the fragment's natural children nest correctly:
+///   - `table`                   → table > (tr/td land under an implied tbody-equivalent)
+///   - `tbody` / `thead` / `tfoot` → table > tbody, so a bare `<tr>` nests
+///   - `tr`                      → table > tbody > tr, so a bare `<td>`/`<th>` nests
+///   - `colgroup`                → table > colgroup, so a bare `<col>` nests
+///   - `select`                  → select, so a bare `<option>`/`<optgroup>` nests
+/// Any other (or null) context falls back to the generic Document-like
+/// path. The synthetic ancestors are scratch — only the fragment's own
+/// children are returned under the detached container.
+///
+/// GAP: this seeds the *initial insertion context* (the element-specific
+/// ancestor chain) but still drives the existing flat-stack tree builder,
+/// not the spec's full insertion-mode state machine. Foster-parenting of
+/// non-table content inside a table, the "in cell"/"in caption" mode
+/// transitions, and `<template>` content fragments remain unimplemented —
+/// revisit when CSS/layout demands fuller table conformance.
+Node* ParseHtmlFragment(const char* html, u32 len, Arena& arena, const char* contextTag = nullptr);
 
 /// Recursively concatenate the text content of `node` and all its
 /// descendants into `out` (NUL-terminated, truncated to `outCap-1`

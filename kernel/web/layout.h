@@ -28,12 +28,21 @@
  *     advances by glyph_h * line-height; one TextRun per run with the
  *     element's color/bold/italic/font-size; text-align left/center/right
  *     per line; white-space:pre keeps spaces + honors newlines.
+ *   - Block-in-inline split: an inline element (e.g. <span>) that
+ *     contains a block-level descendant is split around the block per
+ *     CSS box generation — the inline content before/after the block
+ *     each forms an anonymous block, the block child is pulled out, and
+ *     the three stack vertically in the block formatting context (the
+ *     inverse of the anonymous-block wrapping that wraps loose inline
+ *     siblings around a block). The split fragments carry the inline
+ *     element's own style.
  *   - <img> -> ImageBox sized by width/height style if present else a
  *     default placeholder; carries the src attr for the painter.
  *
- * GAP (deliberately out of scope for this slice): anonymous-inline-box
- * generation (a block box nested inside an inline context — the inverse
- * of the anonymous-block wrapping that IS handled); floats; position
+ * GAP (deliberately out of scope for this slice): inline-box DECORATION
+ * splitting (the block-in-inline split stacks the inline element's text
+ * but does NOT re-draw the split inline element's own borders/padding/
+ * background on the before/after fragments); floats; position
  * (absolute/relative/fixed/sticky); flexbox/grid; tables;
  * margin-collapsing; z-index / stacking contexts; overflow/scroll
  * clipping; proportional/measured fonts (monospace only); inline-block

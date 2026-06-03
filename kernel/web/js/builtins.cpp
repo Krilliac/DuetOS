@@ -36,10 +36,38 @@ static JsObject* MakeNamespace(Interp& I)
     return ObjNew(I.arena, false);
 }
 
+// Create a plain object carrying Object.prototype as its [[Prototype]].
+JsObject* NewPlainObject(Interp& I)
+{
+    JsObject* o = ObjNew(I.arena, false);
+    if (o)
+        o->proto = I.objectProto;
+    return o;
+}
+
 Result<void> InstallBuiltins(Interp& I)
 {
     Arena& a = I.arena;
     Env* g = I.global;
+
+    // Object.prototype: the shared root of the prototype chain. It has
+    // no [[Prototype]] of its own (proto stays null = chain end) and
+    // carries the inherited toString/valueOf. Created first so every
+    // plain object below (and via NewPlainObject) can inherit it.
+    JsObject* objectProto = ObjNew(a, false);
+    if (!objectProto)
+        return Err{ErrorCode::OutOfMemory};
+    ObjSet(objectProto, a, "toString", 8, NativeFnVal(I, kObjToString, "toString"));
+    ObjSet(objectProto, a, "valueOf", 7, NativeFnVal(I, kObjValueOf, "valueOf"));
+    I.objectProto = objectProto;
+
+    // Object global, with Object.prototype reachable as a property.
+    JsObject* objectCtor = ObjNew(a, false);
+    if (!objectCtor)
+        return Err{ErrorCode::OutOfMemory};
+    objectCtor->proto = objectProto;
+    ObjSet(objectCtor, a, "prototype", 9, JsValue::Obj(objectProto));
+    EnvDefine(g, a, "Object", 6, JsValue::Obj(objectCtor));
 
     // console = { log: <native> }
     JsObject* console = MakeNamespace(I);
@@ -145,9 +173,13 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
             if (NameEq(key, keyLen, "forEach"))
                 return NativeFnVal(I, kArrForEach, "forEach");
         }
+        // Own property, then walk the prototype chain iteratively. The
+        // loop (never recursion) keeps the native frame flat — see the
+        // native-stack budget note in CallFunction.
         JsValue v{};
-        if (ObjGet(o, key, keyLen, v))
-            return v;
+        for (const JsObject* cur = o; cur; cur = cur->proto)
+            if (ObjGet(cur, key, keyLen, v))
+                return v;
         return JsValue::Undefined();
     }
     return JsValue::Undefined();
@@ -780,7 +812,7 @@ static JsValue JsonReadArray(JsonReader& r)
 static JsValue JsonReadObject(JsonReader& r)
 {
     r.Adv(); // '{'
-    JsObject* obj = ObjNew(r.I.arena, false);
+    JsObject* obj = NewPlainObject(r.I);
     if (!obj)
     {
         r.ok = false;
@@ -1029,6 +1061,17 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
     }
     case kJsonParse:
         return JsonParse(I, args, argc);
+
+    case kObjToString:
+        // Object.prototype.toString — the structural string form. Arrays
+        // override this with their own join in GetMemberImpl/ValueToChars;
+        // a plain object yields "[object Object]".
+        return JsValue::Str(MakeString(I.arena, "[object Object]", 15));
+    case kObjValueOf:
+        // Object.prototype.valueOf returns `this` unchanged: a primitive
+        // receiver passes through, an object receiver stays an object so
+        // ToPrimitive falls on to toString.
+        return recv;
 
     default:
         return Err{ErrorCode::Unsupported};

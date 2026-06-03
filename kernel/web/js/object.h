@@ -15,10 +15,17 @@
  * Environments are the lexical scope chain: a parent pointer plus a
  * small property map of bindings. Closures capture an Env pointer.
  *
- * GAP: prototypes / prototype chain. Objects have no [[Prototype]];
- * String/Array "methods" are dispatched specially by the interpreter
- * rather than via a prototype lookup. No getters/setters, no property
- * descriptors, no Symbol keys.
+ * Plain objects carry a `proto` ([[Prototype]]) pointer; member lookup
+ * walks that chain iteratively (see GetMemberImpl). The shared
+ * Object.prototype (installed in builtins.cpp) gives every plain object
+ * a real toString/valueOf.
+ *
+ * GAP: prototypes are read-only here — no __proto__ accessor,
+ * Object.create, Object.getPrototypeOf/setPrototypeOf, and only plain
+ * objects get a default prototype (arrays/strings/functions still
+ * dispatch their methods specially in GetMemberImpl, not via a
+ * dedicated Array/String/Function.prototype). No getters/setters, no
+ * property descriptors, no Symbol keys.
  */
 
 namespace duetos::web::js
@@ -46,6 +53,11 @@ struct JsObject
     bool isArray;
     PropChunk* head; // linked list of property chunks (named props)
     u32 propCount;
+
+    // [[Prototype]] — the next link in the prototype chain, or null at
+    // the chain's end. Plain objects get Object.prototype here at
+    // creation; member lookup (GetMemberImpl) walks this iteratively.
+    JsObject* proto;
 
     // Dense array storage. For arrays, elements 0..length-1 live here.
     JsValue* elems;

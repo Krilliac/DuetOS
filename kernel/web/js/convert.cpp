@@ -156,14 +156,15 @@ static Result<JsValue> CallNullary(Interp& I, const JsValue& callee, const JsVal
 // first method that exists, is callable, and returns a primitive wins.
 // A non-object input is already primitive and returned unchanged.
 //
-// GAP: valueOf/toString are looked up as OWN properties only — this
-// engine has no prototype chain (see object.h), so a plain object with
-// no own valueOf/toString yields no primitive here. ToJsString then
-// falls back to the structural "[object Object]" form, but the numeric
-// path (EvalBinary) leaves such an object uncoerced and arithmetic on it
-// produces NaN (vs. V8's "[object Object]" via Object.prototype). No
-// Symbol.toPrimitive (no Symbol keys); a method that returns Err
-// propagates rather than being skipped (the engine has no try/catch).
+// Lookup walks the prototype chain (GetMember -> GetMemberImpl), so a
+// plain object with no own valueOf/toString still inherits them from
+// Object.prototype: valueOf returns `this` (an object, skipped) and
+// toString returns "[object Object]". Thus `obj + 1` now yields
+// "[object Object]1" rather than NaN.
+//
+// GAP: no Symbol.toPrimitive (no Symbol keys), and a method that
+// returns Err propagates rather than being skipped (the engine has no
+// try/catch).
 Result<JsValue> ToPrimitive(Interp& I, const JsValue& v, bool stringHint)
 {
     if (IsPrimitive(v))

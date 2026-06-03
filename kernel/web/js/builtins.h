@@ -60,6 +60,9 @@ enum NativeFn : u16
     // JSON.*
     kJsonStringify,
     kJsonParse,
+    // Object.prototype.*  (receiver = the object)
+    kObjToString,
+    kObjValueOf,
     // Sentinel: dispatch via JsFunction::nativeCall (host embedding).
     // Parked at the top of the u16 space so it never collides with a
     // real builtin id added above.

@@ -353,7 +353,10 @@ bool SetTextContent(DomCtx& ctx, Node* el, const char* text, u32 len)
 // the parser's own arena-exhaustion recovery.
 bool SetInnerHtml(DomCtx& ctx, Node* el, const char* html, u32 len)
 {
-    Node* frag = ParseHtmlFragment(html, len, *ctx.dom);
+    // Parse in the target element's own fragment context (its lowercased
+    // tag), so table-related contexts (tr/tbody/table/...) accept their
+    // natural children instead of mis-parsing in a generic context.
+    Node* frag = ParseHtmlFragment(html, len, *ctx.dom, el->tag);
     if (!frag)
         return false;
     ClearChildren(el);

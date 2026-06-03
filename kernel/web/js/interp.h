@@ -86,6 +86,12 @@ struct Interp
     ConsoleBuf& console;
     Env* global;
 
+    // Shared Object.prototype — the default [[Prototype]] handed to
+    // every plain object (see NewPlainObject). Installed by
+    // InstallBuiltins; null before that (the engine creates no plain
+    // objects before builtins are installed).
+    JsObject* objectProto = nullptr;
+
     u64 stepBudget; // decremented each evaluated node; 0 => Timeout
     u32 depth;      // current call depth
     u32 maxDepth;
@@ -112,6 +118,12 @@ Result<JsValue> EvalExpr(Interp& I, const AstNode* n, Env* env);
 Result<JsValue> EvalStmt(Interp& I, const AstNode* n, Env* env);
 // Run a function/arrow body with bound params.
 Result<JsValue> CallFunction(Interp& I, JsFunction* fn, const JsValue* args, u32 argc, const JsValue& thisArr);
+
+// Create a plain (non-array) object with I.objectProto as its
+// [[Prototype]]. Use this instead of bare ObjNew(I.arena, false) so the
+// object inherits Object.prototype's toString/valueOf. Returns nullptr
+// on arena exhaustion.
+JsObject* NewPlainObject(Interp& I);
 
 // Builtins: install console/Math/parseInt/etc into the global env.
 Result<void> InstallBuiltins(Interp& I);

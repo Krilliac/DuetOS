@@ -144,6 +144,10 @@ void LayoutSelfTest()
                        // "alpha" and "omega" must each be wrapped in an
                        // anonymous block box around the real <p> block.
                        "<div class=mix>alpha<p>blockmid</p>omega</div>"
+                       // Block-in-inline split: a <span> (inline) wrapping a
+                       // block <div> must be split into three stacked block
+                       // pieces — inline "pre", block "MID", inline "post".
+                       "<div class=mix2><span>pre<div class=inblk>MID</div>post</span></div>"
                        "</body>";
 
     const char* css = "#box { background-color: #112233; padding: 10px; width: 200px; }"
@@ -152,6 +156,9 @@ void LayoutSelfTest()
                       ".gone { display: none; }"
                       ".ctr { text-align: center; }"
                       ".mix { margin: 0; }"
+                      ".mix2 { margin: 0; }"
+                      ".inblk { margin: 0; line-height: 16px; }"
+                      "span { line-height: 16px; }"
                       // Make geometry deterministic: drop the UA body margin
                       // (8px) so child boxes start at the viewport origin, and
                       // pin line-height == cell height everywhere.
@@ -332,8 +339,49 @@ void LayoutSelfTest()
         return;
     }
 
+    // --- Check 8: block-in-inline split (anonymous-inline-box gen). ---
+    // ".mix2" is <div><span>pre<div>MID</div>post</span></div>. The <span>
+    // is inline but contains a block <div>, so box generation must SPLIT
+    // the span around the block: inline "pre" becomes an anonymous block,
+    // the <div>MID</div> stays a block, and inline "post" becomes another
+    // anonymous block — three boxes stacked vertically. (Without the split
+    // the three would flow inline onto one line at the same y, or "MID"
+    // would be flowed inline instead of pulled out as a block.)
+    const DisplayItem* preRun = FindTextRun(*dl, "pre");
+    const DisplayItem* midRun = FindTextRun(*dl, "MID");
+    const DisplayItem* postRun = FindTextRun(*dl, "post");
+    if (preRun == nullptr || midRun == nullptr || postRun == nullptr)
+    {
+        Fail(20);
+        return;
+    }
+    // Each piece is exactly one 16px line tall.
+    if (preRun->rect.h != 16 || midRun->rect.h != 16 || postRun->rect.h != 16)
+    {
+        Fail(21);
+        return;
+    }
+    // Strict vertical stacking at 16px steps: pre, then MID one line below,
+    // then post one line below MID.
+    if (midRun->rect.y - preRun->rect.y != 16)
+    {
+        Fail(22);
+        return;
+    }
+    if (postRun->rect.y - midRun->rect.y != 16)
+    {
+        Fail(23);
+        return;
+    }
+    // Non-overlap: each piece's [y, y+h) ends at or before the next's top.
+    if (preRun->rect.y + preRun->rect.h > midRun->rect.y || midRun->rect.y + midRun->rect.h > postRun->rect.y)
+    {
+        Fail(24);
+        return;
+    }
+
     arch::SerialWrite("[layout-selftest] PASS (block+inline display list: bg-rect, bold heading, wrap, "
-                      "stacked-y, display:none, center-align, anon-block-wrap)\n");
+                      "stacked-y, display:none, center-align, anon-block-wrap, block-in-inline)\n");
 }
 
 } // namespace duetos::web

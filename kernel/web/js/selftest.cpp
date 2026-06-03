@@ -194,6 +194,21 @@ void JsSelfTest()
     run(CheckCase("var o={toString:function(){return 'OBJ';}}; `<${o}>`;", "<OBJ>", nullptr));
     // 29. loose-equals coerces an object via valueOf
     run(CheckCase("var o={valueOf:function(){return 7;}}; (o == 7) + ',' + (o == 8);", "true,false", nullptr));
+    // 30. prototype chain: a plain {} inherits Object.prototype.toString,
+    // so string-coercing it yields "[object Object]" (not NaN/garbage).
+    run(CheckCase("'' + {};", "[object Object]", nullptr));
+    // 31. inherited toString is callable directly via the chain.
+    run(CheckCase("var o={}; o.toString();", "[object Object]", nullptr));
+    // 32. an OWN toString overrides the inherited Object.prototype one.
+    run(CheckCase("var o={toString:function(){return 'OWN';}}; '' + o;", "OWN", nullptr));
+    // 33. numeric path: a plain object inherits valueOf (returns `this`,
+    // skipped) then toString from Object.prototype, so `obj + 1` becomes
+    // "[object Object]1" instead of NaN — proves the chain feeds
+    // ToPrimitive's default-hint valueOf-then-toString ordering.
+    run(CheckCase("({}) + 1;", "[object Object]1", nullptr));
+    // 34. Object.prototype is reachable via the Object global and its
+    // toString resolves through the chain to the structural form.
+    run(CheckCase("typeof Object.prototype + ',' + Object.prototype.toString();", "object,[object Object]", nullptr));
 
     // ---- CRITICAL: runaway loop must be killed by the step budget,
     // not hang the boot. Use a tiny budget so it returns fast. ----
