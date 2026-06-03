@@ -210,6 +210,29 @@ void JsSelfTest()
     // toString resolves through the chain to the structural form.
     run(CheckCase("typeof Object.prototype + ',' + Object.prototype.toString();", "object,[object Object]", nullptr));
 
+    // 35. Array.prototype.map + join (callback at +1 depth).
+    run(CheckCase("[1,2,3].map(function(x){return x*2;}).join(',');", "2,4,6", nullptr));
+    // 36. Array.prototype.filter narrows by predicate; .length reads back.
+    run(CheckCase("[1,2,3,4].filter(function(x){return x>2;}).length;", "2", nullptr));
+    // 37. Array.prototype.slice with positive bounds, shallow copy.
+    run(CheckCase("[10,20,30,40].slice(1,3).join(',');", "20,30", nullptr));
+    // 38. Array.prototype.slice with a negative start counts from the end.
+    run(CheckCase("[1,2,3,4,5].slice(-2).join(',');", "4,5", nullptr));
+    // 39. Array.prototype.forEach runs the callback for its side effects.
+    run(CheckCase("var s=0; [1,2,3,4].forEach(function(x){ s+=x; }); s;", "10", nullptr));
+    // 40. String.prototype.split + index.
+    run(CheckCase("'a,b,c'.split(',')[1];", "b", nullptr));
+    // 41. String.prototype.charCodeAt returns the ASCII code unit.
+    run(CheckCase("'A'.charCodeAt(0) + ',' + 'a'.charCodeAt(0);", "65,97", nullptr));
+    // 42. String.prototype.replace — first occurrence, string pattern.
+    run(CheckCase("'a-b-c'.replace('-', '+');", "a+b-c", nullptr));
+    // 43. String.prototype.trim strips leading/trailing whitespace.
+    run(CheckCase("('  hi  '.trim()) + '|' + '  hi  '.trim().length;", "hi|2", nullptr));
+    // 44. Object.keys returns own keys as an array, join-able.
+    run(CheckCase("Object.keys({a:1,b:2}).join(',');", "a,b", nullptr));
+    // 45. Object.keys of an array yields its decimal index keys.
+    run(CheckCase("Object.keys([7,8,9]).join(',');", "0,1,2", nullptr));
+
     // ---- CRITICAL: runaway loop must be killed by the step budget,
     // not hang the boot. Use a tiny budget so it returns fast. ----
     {

@@ -19,9 +19,12 @@
  * contains a block-level descendant is itself split around that block
  * (block-in-inline): the inline content before/after each becomes an
  * anonymous block and the block is pulled out, all stacking vertically.
- * display:none skips the subtree. GAP: inline-box DECORATION splitting
- * (split fragments don't re-draw the inline element's border/padding),
- * margin-collapsing, floats, positioning — see layout.h.
+ * display:none skips the subtree. Adjacent in-flow block siblings collapse
+ * their touching vertical margins (CSS2 §8.3.1) via a carried bottom margin
+ * threaded between siblings (see CollapseMargins / LayoutBlock's
+ * `carryMargin`). GAP: parent-child margin collapsing, inline-box
+ * DECORATION splitting (split fragments don't re-draw the inline element's
+ * border/padding), floats, positioning — see layout.h.
  */
 
 #include "web/layout.h"
@@ -33,6 +36,7 @@
 namespace duetos::web
 {
 
+using layout_detail::CollapseMargins;
 using layout_detail::EdgePx;
 using layout_detail::IsWhitespaceByte;
 using layout_detail::kDefaultImgH;
@@ -218,22 +222,27 @@ i32 LayoutImage(LayoutCtx& ctx, const Node* node, const ComputedStyle& s, i32 x,
 // LayoutBlock (the contained block is laid out via LayoutBlock, which may
 // in turn re-enter the mixed-children walk). Defined below LayoutBlock.
 i32 LayoutBlockInInline(LayoutCtx& ctx, const Node* inlineEl, const ComputedStyle& cbStyle, i32 cbX, i32 cbWidth,
-                        i32 originY, const char* linkHref);
+                        i32 originY, const char* linkHref, i32* carryMargin);
 
 // Lay one block-level `node` out. The containing block content runs from
-// [cbX, cbX+cbWidth); the box's top margin edge sits at `originY`.
-// Returns the y just past this box's bottom margin edge.
-i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 originY, const char* linkHref)
+// [cbX, cbX+cbWidth). `originY` is the y just past the preceding sibling's
+// bottom BORDER edge; the gap between that edge and this box's top border
+// edge is the COLLAPSED margin (CollapseMargins of `*carryMargin` and this
+// box's top margin), not their sum. Returns the y of this box's bottom
+// border edge; reports this box's own bottom margin back through
+// `*carryMargin` for the next sibling to collapse against.
+i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 originY, const char* linkHref,
+                i32* carryMargin)
 {
     const ComputedStyle* sp = StyleOf(ctx, node);
     if (sp == nullptr)
     {
-        return originY; // unstyled element — nothing to place
+        return originY; // unstyled element — nothing to place; carry passes through
     }
     const ComputedStyle& s = *sp;
     if (s.display == Display::None)
     {
-        return originY; // skip subtree entirely
+        return originY; // skip subtree entirely; carry passes through
     }
 
     // An <a href> at block level becomes the active link for this box and
@@ -251,8 +260,13 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
         const i32 mTop = EdgePx(s.margin.top, cbWidth);
         const i32 mBot = EdgePx(s.margin.bottom, cbWidth);
         const i32 mLeft = EdgePx(s.margin.left, cbWidth);
-        const i32 h = LayoutImage(ctx, node, s, cbX + mLeft, cbWidth, originY + mTop, selfHref);
-        return originY + mTop + h + mBot;
+        // Collapse the carried bottom margin of the previous sibling with
+        // this box's top margin; advance the top edge by the collapsed gap.
+        const i32 topGap = CollapseMargins(*carryMargin, mTop);
+        const i32 imgY = originY + topGap;
+        const i32 h = LayoutImage(ctx, node, s, cbX + mLeft, cbWidth, imgY, selfHref);
+        *carryMargin = mBot; // carry this box's bottom margin to the next sibling
+        return imgY + h;     // bottom border edge (no border on <img>)
     }
 
     // Box metrics, resolved against the containing block width.
@@ -275,9 +289,11 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
         contentW = 0;
     }
 
-    // Border-box + content-box top-left.
+    // Border-box + content-box top-left. The top margin collapses with the
+    // carried bottom margin of the preceding in-flow sibling (CSS2 §8.3.1):
+    // the gap is CollapseMargins(carry, mTop), not their sum.
     const i32 borderX = cbX + mLeft;
-    const i32 borderY = originY + mTop;
+    const i32 borderY = originY + CollapseMargins(*carryMargin, mTop);
     const i32 borderBoxW = contentW + 2 * bw + pLeft + pRight;
     const i32 contentX = borderX + bw + pLeft;
     const i32 contentTop = borderY + bw + pTop;
@@ -337,6 +353,17 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
         // Walk the child list, flushing a pending inline run into an
         // anonymous block whenever a block-level child interrupts it (and
         // once more at the end).
+        // Bottom margin carried between consecutive in-flow block children
+        // so adjacent siblings collapse (CSS2 §8.3.1). An anonymous block of
+        // inline content has no collapsible vertical margin, so the carry is
+        // flushed to 0 on either side of one.
+        // GAP: parent-child margin collapsing — this box's own top margin
+        //   does NOT collapse with its first block child's top margin (the
+        //   child loop seeds childCarry=0, not the parent's top margin), and
+        //   its bottom margin does NOT collapse with the last child's bottom
+        //   margin (leftover childCarry is retained inside this box's content
+        //   height below). Revisit when parent-child collapsing is needed.
+        i32 childCarry = 0;
         const Node* inlineStart = nullptr; // first sibling of the pending inline run
         for (const Node* c = node->firstChild; c != nullptr; c = c->nextSibling)
         {
@@ -344,22 +371,26 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
             {
                 // Flush any inline run that preceded this block-breaking
                 // child into an anonymous block laid out as a normal block
-                // box.
+                // box. The pending block child's bottom margin (childCarry)
+                // does not collapse across the intervening inline content, so
+                // settle it into childY first, then reset.
                 if (inlineStart != nullptr && HasRenderableInline(ctx, inlineStart, c))
                 {
+                    childY += childCarry;
+                    childCarry = 0;
                     childY = LayoutInlineSiblings(ctx, s, inlineStart, c, contentX, contentW, childY, selfHref);
                 }
                 inlineStart = nullptr;
                 if (IsBlockLevelChild(ctx, c))
                 {
                     // A genuine block-level child: lay it out directly.
-                    childY = LayoutBlock(ctx, c, contentX, contentW, childY, selfHref);
+                    childY = LayoutBlock(ctx, c, contentX, contentW, childY, selfHref, &childCarry);
                 }
                 else
                 {
                     // An inline element carrying a block descendant: split
                     // the inline box around the block (block-in-inline).
-                    childY = LayoutBlockInInline(ctx, c, s, contentX, contentW, childY, selfHref);
+                    childY = LayoutBlockInInline(ctx, c, s, contentX, contentW, childY, selfHref, &childCarry);
                 }
             }
             else
@@ -373,11 +404,17 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
                 }
             }
         }
-        // A trailing inline run after the last block child.
+        // A trailing inline run after the last block child: settle any
+        // carried block bottom margin before it.
         if (inlineStart != nullptr && HasRenderableInline(ctx, inlineStart, nullptr))
         {
+            childY += childCarry;
+            childCarry = 0;
             childY = LayoutInlineSiblings(ctx, s, inlineStart, nullptr, contentX, contentW, childY, selfHref);
         }
+        // Retain the last block child's bottom margin inside this box's
+        // content height (parent-child bottom collapse is GAP'd above).
+        childY += childCarry;
     }
 
     const i32 contentHeight = childY - contentTop;
@@ -407,8 +444,11 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
         ctx.out->items[borderSlot].rect = Rect{borderX, borderY, borderBoxW, borderBoxH};
     }
 
-    // Advance past this box's bottom margin edge.
-    return borderY + borderBoxH + mBot;
+    // Report this box's bottom margin for the next sibling to collapse
+    // against, and return the bottom BORDER edge (the bottom margin is no
+    // longer baked into the return — see CollapseMargins / carryMargin).
+    *carryMargin = mBot;
+    return borderY + borderBoxH;
 }
 
 // Split an inline element that contains a block-level descendant into
@@ -429,7 +469,7 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
 // content is stacked. Revisit when inline-box decoration splitting is
 // needed.
 i32 LayoutBlockInInline(LayoutCtx& ctx, const Node* inlineEl, const ComputedStyle& cbStyle, i32 cbX, i32 cbWidth,
-                        i32 originY, const char* linkHref)
+                        i32 originY, const char* linkHref, i32* carryMargin)
 {
     const ComputedStyle* sp = StyleOf(ctx, inlineEl);
     // The inline element's own style drives its text runs; fall back to
@@ -444,6 +484,9 @@ i32 LayoutBlockInInline(LayoutCtx& ctx, const Node* inlineEl, const ComputedStyl
         selfHref = linkHref;
     }
 
+    // `carryMargin` is threaded through the pulled-out block pieces so they
+    // collapse with the surrounding block siblings; the inline (anonymous
+    // block) fragments have no collapsible vertical margin and flush it to 0.
     i32 y = originY;
     const Node* inlineStart = nullptr; // first pending inline-run child
     for (const Node* c = inlineEl->firstChild; c != nullptr; c = c->nextSibling)
@@ -452,21 +495,24 @@ i32 LayoutBlockInInline(LayoutCtx& ctx, const Node* inlineEl, const ComputedStyl
         {
             // Flush the inline run that preceded this block-breaking child
             // into an anonymous block carrying the split inline element's
-            // style.
+            // style. Settle any pending block bottom margin first (it does
+            // not collapse across the intervening inline fragment).
             if (inlineStart != nullptr && HasRenderableInline(ctx, inlineStart, c))
             {
+                y += *carryMargin;
+                *carryMargin = 0;
                 y = LayoutInlineSiblings(ctx, runStyle, inlineStart, c, cbX, cbWidth, y, selfHref);
             }
             inlineStart = nullptr;
             if (IsBlockLevelChild(ctx, c))
             {
-                y = LayoutBlock(ctx, c, cbX, cbWidth, y, selfHref);
+                y = LayoutBlock(ctx, c, cbX, cbWidth, y, selfHref, carryMargin);
             }
             else
             {
                 // A nested inline element that itself carries a block
                 // descendant: recurse to split it too.
-                y = LayoutBlockInInline(ctx, c, cbStyle, cbX, cbWidth, y, selfHref);
+                y = LayoutBlockInInline(ctx, c, cbStyle, cbX, cbWidth, y, selfHref, carryMargin);
             }
         }
         else
@@ -480,6 +526,8 @@ i32 LayoutBlockInInline(LayoutCtx& ctx, const Node* inlineEl, const ComputedStyl
     // Trailing inline run after the last block-breaking child.
     if (inlineStart != nullptr && HasRenderableInline(ctx, inlineStart, nullptr))
     {
+        y += *carryMargin;
+        *carryMargin = 0;
         y = LayoutInlineSiblings(ctx, runStyle, inlineStart, nullptr, cbX, cbWidth, y, selfHref);
     }
     return y;
@@ -515,13 +563,16 @@ DisplayList* LayoutDocument(const Node* doc, const StyleMap& styles, u32 viewpor
     layout_detail::LayoutCtx ctx{styles, metrics, list, arena};
 
     // The Document root has no box; lay its element children out as block
-    // boxes filling the viewport, stacked vertically from y=0.
+    // boxes filling the viewport, stacked vertically from y=0. A bottom
+    // margin carried between consecutive root blocks collapses with the next
+    // block's top margin (CSS2 §8.3.1).
     i32 y = 0;
+    i32 carry = 0; // bottom margin carried from the previous root block
     for (const Node* c = doc->firstChild; c != nullptr; c = c->nextSibling)
     {
         if (c->kind == NodeKind::Element)
         {
-            y = layout_detail::LayoutBlock(ctx, c, 0, static_cast<i32>(viewportW), y, /*linkHref=*/nullptr);
+            y = layout_detail::LayoutBlock(ctx, c, 0, static_cast<i32>(viewportW), y, /*linkHref=*/nullptr, &carry);
         }
     }
     return list;

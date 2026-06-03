@@ -51,11 +51,83 @@ u8 RandomNonzeroByte()
     }
 }
 
+// The server's Certificate message lists the leaf followed by zero or
+// more intermediates, all in wire order. We hand the verifier the leaf
+// plus up to this many intermediates; net::x509::Verify only consults
+// the first usable one (depth-2 cap), but we forward what the server
+// sent so the builder can search. Sized to match
+// net::x509::kMaxChainCerts without depending on that header.
+constexpr u32 kMaxIntermediates = 8;
+
+// Parsed server certificate chain: the leaf plus the intermediate DER
+// slices that followed it in the Certificate message. All pointers
+// alias into the caller's handshake buffer — valid only while that
+// buffer is live.
+struct ServerChain
+{
+    const u8* leaf;
+    u32 leaf_len;
+    const u8* inter[kMaxIntermediates];
+    u32 inter_len[kMaxIntermediates];
+    u32 inter_count;
+};
+
+// Walk one Certificate-message body (3-byte list_len, then a run of
+// [3-byte cert_len || cert_der] entries) and split out the leaf and
+// the trailing intermediates. Mirrors the wire format the Rust
+// TlsParseCertificateLeaf validates for the leaf, extended to the
+// remaining entries. Every length is bounds-checked against the body
+// and fails CLOSED (returns false) on any inconsistency — this body is
+// attacker-controlled. Returns true with `out` populated on success.
+bool ParseCertificateChain(const u8* body, u32 len, ServerChain* out)
+{
+    if (body == nullptr || out == nullptr || len < 6)
+        return false;
+    auto u24 = [](const u8* p) -> u32
+    { return (static_cast<u32>(p[0]) << 16) | (static_cast<u32>(p[1]) << 8) | static_cast<u32>(p[2]); };
+
+    const u32 list_len = u24(body);
+    if (list_len < 3 || 3u + list_len > len)
+        return false;
+
+    out->leaf = nullptr;
+    out->leaf_len = 0;
+    out->inter_count = 0;
+
+    u32 off = 3; // skip the 3-byte list length
+    const u32 list_end = 3 + list_len;
+    bool have_leaf = false;
+    while (off + 3 <= list_end)
+    {
+        const u32 cert_len = u24(body + off);
+        off += 3;
+        if (cert_len == 0 || off + cert_len > list_end)
+            return false;
+        const u8* cert = body + off;
+        if (!have_leaf)
+        {
+            out->leaf = cert;
+            out->leaf_len = cert_len;
+            have_leaf = true;
+        }
+        else if (out->inter_count < kMaxIntermediates)
+        {
+            out->inter[out->inter_count] = cert;
+            out->inter_len[out->inter_count] = cert_len;
+            ++out->inter_count;
+        }
+        // else: more intermediates than we forward — silently drop the
+        // overflow; the depth-2 verifier never needs them.
+        off += cert_len;
+    }
+    return have_leaf;
+}
+
 // Scan a buffered server flight (`buf[0..len)`, a run of TLS records)
-// for the Certificate handshake message and extract the leaf DER
-// slice. Returns true and populates the out-params on success. Uses
-// only the public peek/parse helpers from tls.h — no crypto.
-bool FindServerLeaf(const u8* buf, u32 len, const u8** out_leaf, u32* out_leaf_len)
+// for the Certificate handshake message and parse out the full chain
+// (leaf + intermediates). Returns true and populates `out` on success.
+// Uses only the public peek helpers from tls.h — no crypto.
+bool FindServerChain(const u8* buf, u32 len, ServerChain* out)
 {
     u32 rec_off = 0;
     while (rec_off + 5 <= len)
@@ -74,7 +146,7 @@ bool FindServerLeaf(const u8* buf, u32 len, const u8** out_leaf, u32* out_leaf_l
                 if (!TlsPeekHandshake(rv.payload + hs_off, rv.length - hs_off, &hv))
                     break;
                 if (hv.type == kHandshakeCertificate)
-                    return TlsParseCertificateLeaf(hv.body, hv.length, out_leaf, out_leaf_len);
+                    return ParseCertificateChain(hv.body, hv.length, out);
                 hs_off += 4u + hv.length;
             }
         }
@@ -84,15 +156,26 @@ bool FindServerLeaf(const u8* buf, u32 len, const u8** out_leaf, u32* out_leaf_l
 }
 
 // Run the installed verifier (or the permissive default) over the
-// leaf the server sent. `leaf`/`leaf_len` come from FindServerLeaf.
-bool RunCertVerifier(const u8* leaf, u32 leaf_len, const char* hostname)
+// chain the server sent. `chain` comes from FindServerChain; when the
+// chain could not be parsed, `chain` is nullptr (leaf unavailable).
+bool RunCertVerifier(const ServerChain* chain, const char* hostname)
 {
     if (g_cert_verify_fn != nullptr)
-        return g_cert_verify_fn(leaf, leaf_len, hostname, g_cert_verify_ctx);
+    {
+        const u8* leaf = (chain != nullptr) ? chain->leaf : nullptr;
+        const u32 leaf_len = (chain != nullptr) ? chain->leaf_len : 0;
+        const u8* const* inter = (chain != nullptr && chain->inter_count > 0) ? chain->inter : nullptr;
+        const u32* inter_len = (chain != nullptr && chain->inter_count > 0) ? chain->inter_len : nullptr;
+        const u32 inter_count = (chain != nullptr) ? chain->inter_count : 0;
+        return g_cert_verify_fn(leaf, leaf_len, inter, inter_len, inter_count, hostname, g_cert_verify_ctx);
+    }
 
-    // GAP: server cert chain NOT verified until x509 verifier is wired
-    // (swarm 2) — MITM-possible; do not ship to end users without it.
-    KLOG_WARN("net/tls-sock", "no cert verifier installed — accepting server leaf UNVERIFIED (MITM-possible)");
+    // GAP: no cert verifier installed (e.g. a non-browser TLS caller
+    // that never called TlsSocketSetVerifier) — chain NOT validated,
+    // MITM-possible. The browser DOES install net::x509::Verify (see
+    // apps/browser.cpp::InstallTlsVerifierOnce), so its HTTPS path is
+    // gated; this leg only fires for an uninstalled caller.
+    KLOG_WARN("net/tls-sock", "no cert verifier installed — accepting server chain UNVERIFIED (MITM-possible)");
     return true;
 }
 
@@ -199,12 +282,11 @@ bool TlsSocketHandshake(TlsSocketState* s, const TlsTransport& transport, const 
         // from the buffered flight via the public peek/parse helpers.
         if (!verifier_ran && s->conn.server_cert_seen)
         {
-            const u8* leaf = nullptr;
-            u32 leaf_len = 0;
-            const bool have_leaf = FindServerLeaf(in, in_len, &leaf, &leaf_len);
-            if (!RunCertVerifier(have_leaf ? leaf : nullptr, have_leaf ? leaf_len : 0, s->hostname))
+            ServerChain chain{};
+            const bool have_chain = FindServerChain(in, in_len, &chain);
+            if (!RunCertVerifier(have_chain ? &chain : nullptr, s->hostname))
             {
-                KLOG_WARN("net/tls-sock", "handshake: certificate verifier rejected leaf");
+                KLOG_WARN("net/tls-sock", "handshake: certificate verifier rejected chain");
                 TlsSocketClose(s);
                 return false;
             }
@@ -736,6 +818,75 @@ bool BytesEqual(const u8* a, const u8* b, u32 n)
     return true;
 }
 
+// Exercise ParseCertificateChain — the chain plumbing that now feeds
+// the verifier the server's intermediates as well as the leaf. We feed
+// a synthetic Certificate body with a leaf + one intermediate (the DER
+// payloads are opaque to the parser — it only walks the 3-byte length
+// framing) and assert the slices come back pointing at exactly the
+// bytes we packed. We also assert two malformed framings fail CLOSED.
+// This does NOT prove cryptographic chain validity (X509VerifySelfTest
+// owns that against embedded real roots); it pins the wire-splitting
+// that delivers the intermediates to net::x509::Verify. Returns true on
+// pass; on failure writes a label via the caller's EmitFail.
+bool ChainParserSelfCheck(const char** out_fail_label)
+{
+    // Build a Certificate body: 3-byte list_len || [3-byte len||DER]*.
+    // Two opaque "certs": leaf = 5 bytes, intermediate = 7 bytes.
+    const u8 leaf_bytes[5] = {0xAA, 0xBB, 0xCC, 0xDD, 0xEE};
+    const u8 inter_bytes[7] = {0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77};
+    u8 body[3 + 3 + sizeof(leaf_bytes) + 3 + sizeof(inter_bytes)];
+    u32 o = 0;
+    const u32 list_len = 3 + sizeof(leaf_bytes) + 3 + sizeof(inter_bytes);
+    body[o++] = static_cast<u8>((list_len >> 16) & 0xFF);
+    body[o++] = static_cast<u8>((list_len >> 8) & 0xFF);
+    body[o++] = static_cast<u8>(list_len & 0xFF);
+    body[o++] = 0x00;
+    body[o++] = 0x00;
+    body[o++] = static_cast<u8>(sizeof(leaf_bytes));
+    for (u8 b : leaf_bytes)
+        body[o++] = b;
+    body[o++] = 0x00;
+    body[o++] = 0x00;
+    body[o++] = static_cast<u8>(sizeof(inter_bytes));
+    for (u8 b : inter_bytes)
+        body[o++] = b;
+
+    ServerChain chain{};
+    if (!ParseCertificateChain(body, o, &chain))
+    {
+        *out_fail_label = "chain-parse-valid-rejected";
+        return false;
+    }
+    if (chain.leaf_len != sizeof(leaf_bytes) || !BytesEqual(chain.leaf, leaf_bytes, sizeof(leaf_bytes)))
+    {
+        *out_fail_label = "chain-parse-leaf-mismatch";
+        return false;
+    }
+    if (chain.inter_count != 1 || chain.inter_len[0] != sizeof(inter_bytes) ||
+        !BytesEqual(chain.inter[0], inter_bytes, sizeof(inter_bytes)))
+    {
+        *out_fail_label = "chain-parse-inter-mismatch";
+        return false;
+    }
+
+    // Malformed 1: list_len claims more than the body holds.
+    u8 over[6] = {0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x05};
+    ServerChain bad{};
+    if (ParseCertificateChain(over, sizeof(over), &bad))
+    {
+        *out_fail_label = "chain-parse-overflow-accepted";
+        return false;
+    }
+    // Malformed 2: an inner cert_len runs past the list end.
+    u8 runover[9] = {0x00, 0x00, 0x06, 0x00, 0x00, 0x09, 0x01, 0x02, 0x03};
+    if (ParseCertificateChain(runover, sizeof(runover), &bad))
+    {
+        *out_fail_label = "chain-parse-runover-accepted";
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 void TlsSocketSelfTest()
@@ -851,7 +1002,19 @@ void TlsSocketSelfTest()
 
     TlsSocketClose(&client);
 
-    arch::SerialWrite("[tls-socket-selftest] PASS (loopback handshake established + app-data round-trip both ways)\n");
+    // 4. Chain-parser plumbing: prove the leaf + intermediate split
+    //    that now feeds net::x509::Verify its intermediates.
+    {
+        const char* chain_fail = nullptr;
+        if (!ChainParserSelfCheck(&chain_fail))
+        {
+            EmitFail(chain_fail);
+            return;
+        }
+    }
+
+    arch::SerialWrite(
+        "[tls-socket-selftest] PASS (loopback handshake established + app-data round-trip both ways + chain-parse)\n");
 }
 
 } // namespace duetos::net::tls

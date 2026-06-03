@@ -67,6 +67,7 @@ Result<void> InstallBuiltins(Interp& I)
         return Err{ErrorCode::OutOfMemory};
     objectCtor->proto = objectProto;
     ObjSet(objectCtor, a, "prototype", 9, JsValue::Obj(objectProto));
+    ObjSet(objectCtor, a, "keys", 4, NativeFnVal(I, kObjKeys, "keys"));
     EnvDefine(g, a, "Object", 6, JsValue::Obj(objectCtor));
 
     // console = { log: <native> }
@@ -127,6 +128,8 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
             return JsValue::Int(obj.as.str ? i64(obj.as.str->len) : 0);
         if (NameEq(key, keyLen, "charAt"))
             return NativeFnVal(I, kStrCharAt, "charAt");
+        if (NameEq(key, keyLen, "charCodeAt"))
+            return NativeFnVal(I, kStrCharCodeAt, "charCodeAt");
         if (NameEq(key, keyLen, "indexOf"))
             return NativeFnVal(I, kStrIndexOf, "indexOf");
         if (NameEq(key, keyLen, "slice"))
@@ -137,6 +140,10 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
             return NativeFnVal(I, kStrToLower, "toLowerCase");
         if (NameEq(key, keyLen, "split"))
             return NativeFnVal(I, kStrSplit, "split");
+        if (NameEq(key, keyLen, "replace"))
+            return NativeFnVal(I, kStrReplace, "replace");
+        if (NameEq(key, keyLen, "trim"))
+            return NativeFnVal(I, kStrTrim, "trim");
         return JsValue::Undefined();
     }
     if (obj.type == JsType::Object)
@@ -166,6 +173,8 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
                 return NativeFnVal(I, kArrJoin, "join");
             if (NameEq(key, keyLen, "indexOf"))
                 return NativeFnVal(I, kArrIndexOf, "indexOf");
+            if (NameEq(key, keyLen, "slice"))
+                return NativeFnVal(I, kArrSlice, "slice");
             if (NameEq(key, keyLen, "map"))
                 return NativeFnVal(I, kArrMap, "map");
             if (NameEq(key, keyLen, "filter"))
@@ -413,6 +422,92 @@ static Result<JsValue> StrSplit(Interp& I, const JsValue& recv, const JsValue* a
     return JsValue::Obj(arr);
 }
 
+static Result<JsValue> StrCharCodeAt(Interp&, const JsValue& recv, const JsValue* args, u32 argc)
+{
+    const JsString* s = recv.as.str;
+    i64 idx = ToInt(ArgOr(args, argc, 0));
+    // GAP: ASCII only — returns the raw byte, not the UTF-16 code unit a
+    // spec-compliant charCodeAt would for non-BMP / multibyte input.
+    if (!s || idx < 0 || idx >= i64(s->len))
+        return JsValue::Float(Sf32QNaN());
+    return JsValue::Int(i64(static_cast<unsigned char>(s->data[idx])));
+}
+
+// String.prototype.replace — first-occurrence, string pattern only.
+// GAP: no regex pattern, no function replacer, no `$&`/`$1` capture
+// substitutions, no global ('g') flag (replaces only the first match).
+static Result<JsValue> StrReplace(Interp& I, const JsValue& recv, const JsValue* args, u32 argc)
+{
+    const JsString* s = recv.as.str;
+    if (!s)
+        return JsValue::Str(MakeString(I.arena, "", 0));
+    JsValue patV = ArgOr(args, argc, 0);
+    JsValue repV = ArgOr(args, argc, 1);
+    // A non-string pattern can't match under the string-only contract:
+    // return the receiver unchanged.
+    if (patV.type != JsType::String || repV.type != JsType::String)
+        return JsValue::Str(MakeString(I.arena, s->data, s->len));
+    const JsString* pat = patV.as.str;
+    const JsString* rep = repV.as.str;
+    // Locate the first occurrence of the pattern.
+    u32 at = s->len; // sentinel: "not found"
+    if (pat->len == 0)
+    {
+        at = 0; // empty pattern matches at the start
+    }
+    else if (pat->len <= s->len)
+    {
+        for (u32 i = 0; i + pat->len <= s->len; ++i)
+        {
+            bool eq = true;
+            for (u32 j = 0; j < pat->len; ++j)
+                if (s->data[i + j] != pat->data[j])
+                {
+                    eq = false;
+                    break;
+                }
+            if (eq)
+            {
+                at = i;
+                break;
+            }
+        }
+    }
+    if (at == s->len && pat->len != 0)
+        return JsValue::Str(MakeString(I.arena, s->data, s->len)); // no match
+    u32 outLen = s->len - pat->len + rep->len;
+    char* buf = static_cast<char*>(I.arena.Alloc(outLen + 1, 1));
+    if (!buf)
+        return Err{ErrorCode::OutOfMemory};
+    u32 o = 0;
+    for (u32 i = 0; i < at; ++i)
+        buf[o++] = s->data[i];
+    for (u32 i = 0; i < rep->len; ++i)
+        buf[o++] = rep->data[i];
+    for (u32 i = at + pat->len; i < s->len; ++i)
+        buf[o++] = s->data[i];
+    buf[o] = '\0';
+    return JsValue::Str(MakeString(I.arena, buf, o));
+}
+
+// String.prototype.trim — strip leading/trailing ASCII whitespace.
+// GAP: ASCII whitespace only (space/tab/newline/CR/FF/VT); Unicode
+// whitespace (NBSP, the various spaces) is not recognised.
+static Result<JsValue> StrTrim(Interp& I, const JsValue& recv)
+{
+    const JsString* s = recv.as.str;
+    if (!s)
+        return JsValue::Str(MakeString(I.arena, "", 0));
+    auto isWs = [](char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; };
+    u32 start = 0;
+    u32 end = s->len;
+    while (start < end && isWs(s->data[start]))
+        ++start;
+    while (end > start && isWs(s->data[end - 1]))
+        --end;
+    return JsValue::Str(MakeString(I.arena, s->data + start, end - start));
+}
+
 static Result<JsValue> ArrJoin(Interp& I, const JsValue& recv, const JsValue* args, u32 argc)
 {
     JsObject* arr = recv.as.obj;
@@ -444,6 +539,31 @@ static Result<JsValue> ArrIndexOf(Interp&, const JsValue& recv, const JsValue* a
         if (StrictEquals(arr->elems[i], target))
             return JsValue::Int(i64(i));
     return JsValue::Int(-1);
+}
+
+// Array.prototype.slice — shallow copy of [start, end) with negative
+// indices counting from the end (matching String.prototype.slice).
+static Result<JsValue> ArrSlice(Interp& I, const JsValue& recv, const JsValue* args, u32 argc)
+{
+    JsObject* arr = recv.as.obj;
+    JsObject* out = ObjNew(I.arena, true);
+    if (!out)
+        return Err{ErrorCode::OutOfMemory};
+    i64 len = i64(arr->length);
+    i64 start = ToInt(ArgOr(args, argc, 0));
+    i64 end = argc >= 2 ? ToInt(args[1]) : len;
+    if (start < 0)
+        start = len + start;
+    if (end < 0)
+        end = len + end;
+    if (start < 0)
+        start = 0;
+    if (end > len)
+        end = len;
+    for (i64 i = start; i < end; ++i)
+        if (!ArrPush(out, I.arena, arr->elems[i]))
+            return Err{ErrorCode::OutOfMemory};
+    return JsValue::Obj(out);
 }
 
 // Array higher-order helpers — invoke a user callback per element.
@@ -1016,6 +1136,8 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
 
     case kStrCharAt:
         return StrCharAt(I, recv, args, argc);
+    case kStrCharCodeAt:
+        return StrCharCodeAt(I, recv, args, argc);
     case kStrIndexOf:
         return StrIndexOf(I, recv, args, argc);
     case kStrSlice:
@@ -1026,6 +1148,10 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
         return StrCase(I, recv, false);
     case kStrSplit:
         return StrSplit(I, recv, args, argc);
+    case kStrReplace:
+        return StrReplace(I, recv, args, argc);
+    case kStrTrim:
+        return StrTrim(I, recv);
 
     case kArrPush:
     {
@@ -1046,6 +1172,8 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
         return ArrJoin(I, recv, args, argc);
     case kArrIndexOf:
         return ArrIndexOf(I, recv, args, argc);
+    case kArrSlice:
+        return ArrSlice(I, recv, args, argc);
     case kArrMap:
         return ArrHof(I, recv, args, argc, kArrMap);
     case kArrFilter:
@@ -1072,6 +1200,55 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
         // receiver passes through, an object receiver stays an object so
         // ToPrimitive falls on to toString.
         return recv;
+
+    case kObjKeys:
+    {
+        // Object.keys(obj): own enumerable string keys as an array. For
+        // an array, the keys are the decimal indices "0".."length-1".
+        // GAP: inherited properties are excluded (no chain walk) but the
+        // engine has no enumerability flag, so every own named prop is
+        // treated as enumerable. GAP: property order follows the chunk
+        // chain — within a single 8-slot chunk it is insertion order,
+        // but once an object spills to a second chunk the newest chunk
+        // (prepended at the head) enumerates first, so the cross-chunk
+        // order diverges from strict insertion order.
+        JsObject* result = ObjNew(I.arena, true);
+        if (!result)
+            return Err{ErrorCode::OutOfMemory};
+        JsValue arg = ArgOr(args, argc, 0);
+        if (arg.type != JsType::Object)
+            return JsValue::Obj(result);
+        JsObject* o = arg.as.obj;
+        if (o->isArray)
+        {
+            char num[12];
+            for (u32 i = 0; i < o->length; ++i)
+            {
+                u32 n = 0;
+                if (i == 0)
+                    num[n++] = '0';
+                else
+                {
+                    char rev[12];
+                    u32 t = 0;
+                    for (u32 v = i; v; v /= 10)
+                        rev[t++] = char('0' + (v % 10));
+                    while (t)
+                        num[n++] = rev[--t];
+                }
+                if (!ArrPush(result, I.arena, JsValue::Str(MakeString(I.arena, num, n))))
+                    return Err{ErrorCode::OutOfMemory};
+            }
+        }
+        // Named own properties (chunks are insertion-ordered).
+        for (PropChunk* c = o->head; c; c = c->next)
+            for (u32 i = 0; i < PropChunk::kSlots; ++i)
+                if (c->slots[i].used)
+                    if (!ArrPush(result, I.arena,
+                                 JsValue::Str(MakeString(I.arena, c->slots[i].key, c->slots[i].keyLen))))
+                        return Err{ErrorCode::OutOfMemory};
+        return JsValue::Obj(result);
+    }
 
     default:
         return Err{ErrorCode::Unsupported};

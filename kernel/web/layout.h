@@ -38,15 +38,31 @@
  *     element's own style.
  *   - <img> -> ImageBox sized by width/height style if present else a
  *     default placeholder; carries the src attr for the painter.
+ *   - Vertical margin collapsing (CSS2 §8.3.1), ADJACENT SIBLINGS: the
+ *     bottom margin of an in-flow block and the top margin of the next
+ *     in-flow block sibling collapse — the gap between them is the larger
+ *     positive margin plus the most-negative negative margin (so two
+ *     non-negative margins collapse to max(), and a positive + a negative
+ *     partially cancel), NOT their sum. Applies at the document root and
+ *     among a block's block-level children, including the anonymous-block
+ *     and block-in-inline split pieces (an inline/anonymous fragment has no
+ *     collapsible vertical margin and breaks the carry).
  *
- * GAP (deliberately out of scope for this slice): inline-box DECORATION
+ * GAP (deliberately out of scope for this slice): margin collapsing's
+ * PARENT-CHILD case (a block's top margin collapsing with its first
+ * in-flow child's top margin, or bottom with last child, when no
+ * border/padding/clearance separates them) — the engine retains a child's
+ * outer margin inside the parent's content box instead, so a margin set on
+ * a first/last child does not currently escape its parent; and
+ * empty-block self-collapsing (a zero-height block collapsing its own top
+ * and bottom margins together). Also out of scope: inline-box DECORATION
  * splitting (the block-in-inline split stacks the inline element's text
  * but does NOT re-draw the split inline element's own borders/padding/
  * background on the before/after fragments); floats; position
- * (absolute/relative/fixed/sticky); flexbox/grid; tables;
- * margin-collapsing; z-index / stacking contexts; overflow/scroll
- * clipping; proportional/measured fonts (monospace only); inline-block
- * sizing nuances; vertical-align; bidi/RTL; writing-modes.
+ * (absolute/relative/fixed/sticky); flexbox/grid; tables; z-index /
+ * stacking contexts; overflow/scroll clipping; proportional/measured fonts
+ * (monospace only); inline-block sizing nuances; vertical-align; bidi/RTL;
+ * writing-modes.
  *
  * Memory discipline (kernel rules: no naked new/delete, no libc): the
  * DisplayList, its item array, and any scratch all come from the

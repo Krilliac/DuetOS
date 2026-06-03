@@ -44,16 +44,20 @@ enum NativeFn : u16
     kMathRound,
     // String.prototype.*  (receiver = the string)
     kStrCharAt,
+    kStrCharCodeAt,
     kStrIndexOf,
     kStrSlice,
     kStrToUpper,
     kStrToLower,
     kStrSplit,
+    kStrReplace,
+    kStrTrim,
     // Array.prototype.*  (receiver = the array)
     kArrPush,
     kArrPop,
     kArrJoin,
     kArrIndexOf,
+    kArrSlice,
     kArrMap,
     kArrFilter,
     kArrForEach,
@@ -63,6 +67,8 @@ enum NativeFn : u16
     // Object.prototype.*  (receiver = the object)
     kObjToString,
     kObjValueOf,
+    // Object.* statics (receiver = undefined; arg[0] = the object)
+    kObjKeys,
     // Sentinel: dispatch via JsFunction::nativeCall (host embedding).
     // Parked at the top of the u16 space so it never collides with a
     // real builtin id added above.

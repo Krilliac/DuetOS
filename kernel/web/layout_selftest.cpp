@@ -148,6 +148,11 @@ void LayoutSelfTest()
                        // block <div> must be split into three stacked block
                        // pieces — inline "pre", block "MID", inline "post".
                        "<div class=mix2><span>pre<div class=inblk>MID</div>post</span></div>"
+                       // Adjacent-sibling margin collapsing: .mc1's 20px
+                       // bottom margin and .mc2's 30px top margin collapse to
+                       // max(20,30)=30, NOT 20+30=50.
+                       "<div class=mc1>MCONE</div>"
+                       "<div class=mc2>MCTWO</div>"
                        "</body>";
 
     const char* css = "#box { background-color: #112233; padding: 10px; width: 200px; }"
@@ -157,6 +162,8 @@ void LayoutSelfTest()
                       ".ctr { text-align: center; }"
                       ".mix { margin: 0; }"
                       ".mix2 { margin: 0; }"
+                      ".mc1 { margin-bottom: 20px; line-height: 16px; }"
+                      ".mc2 { margin-top: 30px; line-height: 16px; }"
                       ".inblk { margin: 0; line-height: 16px; }"
                       "span { line-height: 16px; }"
                       // Make geometry deterministic: drop the UA body margin
@@ -380,8 +387,31 @@ void LayoutSelfTest()
         return;
     }
 
+    // --- Check 9: adjacent-sibling vertical margin collapsing. ---
+    // ".mc1" (one 16px line, margin-bottom:20px) is immediately followed by
+    // ".mc2" (margin-top:30px). The two touching margins collapse to
+    // max(20,30)=30, so .mc2's run sits 16 (mc1 content height) + 30
+    // (collapsed gap) = 46px below .mc1's run — NOT 16 + (20+30)=66px, which
+    // is what summing the margins would give.
+    const DisplayItem* mc1Run = FindTextRun(*dl, "MCONE");
+    const DisplayItem* mc2Run = FindTextRun(*dl, "MCTWO");
+    if (mc1Run == nullptr || mc2Run == nullptr)
+    {
+        Fail(25);
+        return;
+    }
+    if (mc2Run->rect.y - mc1Run->rect.y != 46)
+    {
+        arch::SerialWrite("[layout-selftest] mc gap=");
+        arch::SerialWriteHex(static_cast<u64>(static_cast<u32>(mc2Run->rect.y - mc1Run->rect.y)));
+        arch::SerialWrite("\n");
+        Fail(26);
+        return;
+    }
+
     arch::SerialWrite("[layout-selftest] PASS (block+inline display list: bg-rect, bold heading, wrap, "
-                      "stacked-y, display:none, center-align, anon-block-wrap, block-in-inline)\n");
+                      "stacked-y, display:none, center-align, anon-block-wrap, block-in-inline, "
+                      "margin-collapse)\n");
 }
 
 } // namespace duetos::web
