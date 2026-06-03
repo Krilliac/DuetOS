@@ -12,6 +12,12 @@
  *   6. display:none is honored;
  *   7. a named color and the equivalent #hex parse to the same RGBA;
  *   8. a descendant combinator (`div p`) matches.
+ *   9. :first-child / :last-child / :nth-child(N) match the right
+ *      list items only;
+ *  10. attribute selectors ([type="text"], [data-x], [class~=], [href^=])
+ *      match by attribute presence/value;
+ *  11. a pseudo-class and an attribute selector each count as a
+ *      class-level specificity component (beat a bare type selector).
  *
  * On success emits one grep-able `[css-selftest] PASS (...)` line; on
  * the first failed sub-check fires KBP_PROBE_V(kBootSelftestFail, <#>)
@@ -61,6 +67,25 @@ const Node* FindByTag(const Node* node, const char* tag)
 bool ColorEq(const Color& a, u8 r, u8 g, u8 b)
 {
     return a.r == r && a.g == g && a.b == b;
+}
+
+// Nth (1-based) direct *element* child of `parent`, or nullptr.
+const Node* NthElementChild(const Node* parent, u32 n)
+{
+    u32 idx = 0;
+    for (const Node* c = parent->firstChild; c != nullptr; c = c->nextSibling)
+    {
+        if (c->kind != NodeKind::Element)
+        {
+            continue;
+        }
+        ++idx;
+        if (idx == n)
+        {
+            return c;
+        }
+    }
+    return nullptr;
 }
 
 } // namespace
@@ -242,7 +267,152 @@ void CssSelfTest()
         return;
     }
 
-    arch::SerialWrite("[css-selftest] PASS (cascade specificity inline inherit UA display-none color)\n");
+    // --- Checks 9-11: structural pseudo-classes + attribute selectors -
+    // Fresh DOM: a list whose items we colour by position, and an input
+    // we match by attribute. A separate sheet keeps the cascade simple.
+    const char* html2 = "<html><body>"
+                        "<ul>"
+                        "<li>one</li>"   // :first-child -> red
+                        "<li>two</li>"   // :nth-child(2) -> blue
+                        "<li>three</li>" // (nothing structural)
+                        "<li>four</li>"  // :last-child -> green
+                        "</ul>"
+                        "<input type=\"text\" data-role=\"name\" class=\"field big\">"
+                        "<input type=\"checkbox\">"
+                        "<a href=\"https://example.com\" id=\"lnk\">link</a>"
+                        "</body></html>";
+    Node* doc2 = ParseHtml(html2, static_cast<u32>(duetos::core::StrLen(html2)), arena);
+    if (doc2 == nullptr)
+    {
+        Fail(104);
+        return;
+    }
+
+    // li:first-child{red} / li:nth-child(2){blue} / li:last-child{green}
+    //   prove structural pseudo-classes match the right siblings.
+    // [type="text"]{italic} + [data-role]{underline} + [class~="big"]{bold}
+    //   + [href^="https"]{color:purple} prove attribute selectors.
+    // li{font-weight:bold} (type, c=1) vs li:first-child{font-weight:normal}
+    //   (b=1) — the pseudo-class must win on the first <li>, proving it
+    //   counts as class-level specificity (check 11). Likewise
+    //   a{color:black} (c=1) vs a[href^="https"]{color:purple} (c=1,b=1).
+    const char* css2 = "li { font-weight: bold; }"
+                       "li:first-child { color: red; font-weight: normal; }"
+                       "li:nth-child(2) { color: blue; }"
+                       "li:last-child { color: green; }"
+                       "[type=\"text\"] { font-style: italic; }"
+                       "[data-role] { text-decoration: underline; }"
+                       "[class~=\"big\"] { font-weight: bold; }"
+                       "a { color: black; }"
+                       "a[href^=\"https\"] { color: purple; }";
+    StyleSheet sheet2{};
+    ParseStyleSheet(sheet2, css2, static_cast<u32>(duetos::core::StrLen(css2)), /*userAgent=*/false, arena);
+    StyleMap map2 = ComputeStyles(doc2, sheet2, arena);
+    if (map2.count == 0)
+    {
+        Fail(105);
+        return;
+    }
+
+    const Node* ul = FindByTag(doc2, "ul");
+    if (ul == nullptr)
+    {
+        Fail(106);
+        return;
+    }
+    const Node* li1 = NthElementChild(ul, 1);
+    const Node* li2 = NthElementChild(ul, 2);
+    const Node* li3 = NthElementChild(ul, 3);
+    const Node* li4 = NthElementChild(ul, 4);
+    if (li1 == nullptr || li2 == nullptr || li3 == nullptr || li4 == nullptr)
+    {
+        Fail(107);
+        return;
+    }
+    const ComputedStyle* li1s = map2.Get(li1);
+    const ComputedStyle* li2s = map2.Get(li2);
+    const ComputedStyle* li3s = map2.Get(li3);
+    const ComputedStyle* li4s = map2.Get(li4);
+    if (li1s == nullptr || li2s == nullptr || li3s == nullptr || li4s == nullptr)
+    {
+        Fail(108);
+        return;
+    }
+
+    // --- Check 9: structural pseudo-classes match the right items -----
+    // first -> red, nth(2) -> blue, last -> green, the middle -> default
+    // (black, the initial color, untouched by any color rule).
+    if (!ColorEq(li1s->color, 255, 0, 0) || !ColorEq(li2s->color, 0, 0, 255) || !ColorEq(li4s->color, 0, 128, 0) ||
+        !ColorEq(li3s->color, 0, 0, 0))
+    {
+        Fail(9);
+        return;
+    }
+
+    // --- Check 11a: :first-child (b=1) beats li (type, c=1) -----------
+    // li{font-weight:bold} would make every <li> bold, but the more
+    // specific li:first-child{font-weight:normal} must override it on the
+    // first item — proving the pseudo-class adds class-level specificity.
+    if (li1s->fontWeight != FontWeight::Normal || li2s->fontWeight != FontWeight::Bold)
+    {
+        Fail(11);
+        return;
+    }
+
+    // --- Check 10: attribute selectors --------------------------------
+    const Node* textInput = nullptr;
+    const Node* checkInput = nullptr;
+    for (u32 i = 0; i < map2.count; ++i)
+    {
+        const Node* n = map2.keys[i];
+        if (n->tag != nullptr && duetos::core::StrEqual(n->tag, "input"))
+        {
+            const char* t = n->GetAttr("type");
+            if (t != nullptr && duetos::core::StrEqual(t, "text"))
+            {
+                textInput = n;
+            }
+            else if (t != nullptr && duetos::core::StrEqual(t, "checkbox"))
+            {
+                checkInput = n;
+            }
+        }
+    }
+    const Node* anchor = FindByTag(doc2, "a");
+    if (textInput == nullptr || checkInput == nullptr || anchor == nullptr)
+    {
+        Fail(109);
+        return;
+    }
+    const ComputedStyle* textS = map2.Get(textInput);
+    const ComputedStyle* checkS = map2.Get(checkInput);
+    const ComputedStyle* anchorS = map2.Get(anchor);
+    if (textS == nullptr || checkS == nullptr || anchorS == nullptr)
+    {
+        Fail(110);
+        return;
+    }
+    // [type="text"] -> the text input is italic, the checkbox is NOT.
+    // [data-role]   -> the text input is underlined (has the attr).
+    // [class~="big"]-> the text input is bold (class list has "big").
+    if (textS->fontStyle != FontStyleKind::Italic || checkS->fontStyle != FontStyleKind::Normal || !textS->underline ||
+        textS->fontWeight != FontWeight::Bold)
+    {
+        Fail(10);
+        return;
+    }
+
+    // --- Check 11b: a[href^="https"] (c=1,b=1) beats a (c=1) ----------
+    // Both are author rules; the attribute clause adds a class-level
+    // component, so the prefixed rule wins -> purple, not black.
+    if (!ColorEq(anchorS->color, 128, 0, 128))
+    {
+        Fail(11);
+        return;
+    }
+
+    arch::SerialWrite("[css-selftest] PASS (cascade specificity inline inherit UA display-none color "
+                      "first-child last-child nth-child attr-selectors)\n");
 }
 
 } // namespace duetos::web

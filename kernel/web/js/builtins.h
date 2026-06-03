@@ -33,6 +33,7 @@ enum NativeFn : u16
     kParseInt,
     kParseFloat,
     kIsNaN,
+    kIsFinite,
     // Math.*
     kMathFloor,
     kMathCeil,
@@ -42,6 +43,9 @@ enum NativeFn : u16
     kMathPow,
     kMathSqrt,
     kMathRound,
+    // Number.prototype.*  (receiver = the number)
+    kNumToFixed,
+    kNumToString,
     // String.prototype.*  (receiver = the string)
     kStrCharAt,
     kStrCharCodeAt,

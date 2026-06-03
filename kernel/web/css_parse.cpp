@@ -13,14 +13,19 @@
  * balanced-brace skipping. Malformed declarations are dropped. The
  * parser never reads past `end`.
  *
- * GAP: pseudo-classes/elements, attribute selectors, child/sibling
- * combinators, :nth-child — only type, .class, #id, universal, and the
- * descendant combinator are recognised. !important is detected
- * best-effort.
+ * Recognised selectors: type, .class, #id, universal, the descendant
+ * combinator (space), the structural pseudo-classes :first-child /
+ * :last-child / :nth-child(N|even|odd), and attribute selectors
+ * [attr], [attr="v"], [attr~="v"], [attr^="v"], [attr$="v"], [attr*="v"].
+ *
+ * GAP: :nth-child(an+b) formula form and other pseudo-classes/elements
+ * (:hover, ::before, :not, :nth-of-type, …), child/sibling combinators
+ * (>, +, ~). !important is detected best-effort.
  */
 
 #include "web/css.h"
 
+#include "util/string.h"
 #include "web/css_arena.h"
 
 namespace duetos::web
@@ -88,6 +93,237 @@ void Trim(const char*& b, const char*& e)
     }
 }
 
+// Is `c` a boundary that ends a simple-selector fragment (type, class,
+// or id name token)? A name runs until the next class/id/pseudo/attr
+// marker.
+bool IsFragBoundary(char c)
+{
+    return c == '.' || c == '#' || c == ':' || c == '[';
+}
+
+// Parse a `:pseudo` or `:pseudo(arg)` fragment beginning at *p (which
+// points just past the ':'). Advances *p past the fragment, records the
+// structural pseudo on `sel`, and bumps `bClasses` (pseudo-classes count
+// as a class-level specificity component). Unknown pseudo-classes are
+// skipped without setting anything (still consume their token + any
+// parenthesised arg) so a `:hover` etc. doesn't break the parse. GAP:
+// ::pseudo-elements and the an+b form of nth-child.
+void ParsePseudo(const char*& p, const char* e, SimpleSelector* sel, Arena& arena, u32& bClasses)
+{
+    const char* ns = p;
+    while (p < e && !IsFragBoundary(*p) && *p != '(')
+    {
+        ++p;
+    }
+    const char* name = CopyLower(ns, p, arena);
+
+    // Optional ( ... ) argument (e.g. nth-child(2)).
+    const char* argB = nullptr;
+    const char* argE = nullptr;
+    if (p < e && *p == '(')
+    {
+        ++p;
+        argB = p;
+        while (p < e && *p != ')')
+        {
+            ++p;
+        }
+        argE = p;
+        if (p < e) // consume ')'
+        {
+            ++p;
+        }
+        Trim(argB, argE);
+    }
+
+    if (name == nullptr)
+    {
+        return; // empty / OOM — skip
+    }
+
+    StructuralPseudo matched = StructuralPseudo::None;
+    if (duetos::core::StrEqual(name, "first-child"))
+    {
+        matched = StructuralPseudo::FirstChild;
+    }
+    else if (duetos::core::StrEqual(name, "last-child"))
+    {
+        matched = StructuralPseudo::LastChild;
+    }
+    else if (duetos::core::StrEqual(name, "nth-child") && argB != nullptr)
+    {
+        // even / odd keywords, or a literal positive integer. GAP: an+b.
+        u32 argLen = static_cast<u32>(argE - argB);
+        if (argLen == 4 && Lower(argB[0]) == 'e' && Lower(argB[1]) == 'v' && Lower(argB[2]) == 'e' &&
+            Lower(argB[3]) == 'n')
+        {
+            matched = StructuralPseudo::NthChildEven;
+        }
+        else if (argLen == 3 && Lower(argB[0]) == 'o' && Lower(argB[1]) == 'd' && Lower(argB[2]) == 'd')
+        {
+            matched = StructuralPseudo::NthChildOdd;
+        }
+        else
+        {
+            // Literal integer (no '+' / 'n' formula handling — GAP).
+            bool allDigits = argLen > 0;
+            i32 n = 0;
+            for (const char* d = argB; d < argE; ++d)
+            {
+                if (*d < '0' || *d > '9')
+                {
+                    allDigits = false;
+                    break;
+                }
+                n = n * 10 + (*d - '0');
+            }
+            if (allDigits)
+            {
+                matched = StructuralPseudo::NthChildLit;
+                sel->nthChild = n;
+            }
+        }
+    }
+
+    if (matched != StructuralPseudo::None)
+    {
+        // Only the first structural pseudo on a compound is honored
+        // (multiple structural pseudo-classes on one compound is a GAP);
+        // each still contributes to specificity.
+        if (sel->pseudo == StructuralPseudo::None)
+        {
+            sel->pseudo = matched;
+        }
+        ++bClasses;
+    }
+    // Unknown/dynamic pseudo-classes (:hover, :not, …) are skipped: token
+    // + arg already consumed. GAP: they neither match nor add specificity
+    // here (we have no way to evaluate them statically).
+}
+
+// Parse a `[attr op "val"]` fragment beginning at *p (which points just
+// past the '['). Advances *p past the closing ']', appends an
+// AttrSelector to `sel`, and bumps `bClasses` (attribute selectors count
+// as class-level). Tolerant of quoted or bare values and surrounding
+// whitespace.
+void ParseAttr(const char*& p, const char* e, SimpleSelector* sel, Arena& arena, u32& bClasses)
+{
+    // Name runs until an operator char, whitespace, or ']'.
+    while (p < e && IsSpace(*p))
+    {
+        ++p;
+    }
+    const char* ns = p;
+    while (p < e && *p != ']' && *p != '=' && *p != '~' && *p != '^' && *p != '$' && *p != '*' && !IsSpace(*p))
+    {
+        ++p;
+    }
+    const char* nameE = p;
+
+    while (p < e && IsSpace(*p))
+    {
+        ++p;
+    }
+
+    AttrOp op = AttrOp::Exists;
+    if (p < e && *p == '=')
+    {
+        op = AttrOp::Exact;
+        ++p;
+    }
+    else if (p < e && (*p == '~' || *p == '^' || *p == '$' || *p == '*') && (p + 1 < e) && p[1] == '=')
+    {
+        switch (*p)
+        {
+        case '~':
+            op = AttrOp::Whitespace;
+            break;
+        case '^':
+            op = AttrOp::Prefix;
+            break;
+        case '$':
+            op = AttrOp::Suffix;
+            break;
+        default:
+            op = AttrOp::Substring;
+            break;
+        }
+        p += 2;
+    }
+
+    const char* valB = nullptr;
+    const char* valE = nullptr;
+    if (op != AttrOp::Exists)
+    {
+        while (p < e && IsSpace(*p))
+        {
+            ++p;
+        }
+        if (p < e && (*p == '"' || *p == '\''))
+        {
+            char quote = *p;
+            ++p;
+            valB = p;
+            while (p < e && *p != quote)
+            {
+                ++p;
+            }
+            valE = p;
+            if (p < e) // consume closing quote
+            {
+                ++p;
+            }
+        }
+        else
+        {
+            valB = p;
+            while (p < e && *p != ']' && !IsSpace(*p))
+            {
+                ++p;
+            }
+            valE = p;
+        }
+    }
+
+    // Skip to and past the closing ']'.
+    while (p < e && *p != ']')
+    {
+        ++p;
+    }
+    if (p < e)
+    {
+        ++p;
+    }
+
+    const char* name = CopyLower(ns, nameE, arena);
+    if (name == nullptr)
+    {
+        return; // malformed empty name — drop
+    }
+
+    AttrSelector* a = ArenaNew<AttrSelector>(arena);
+    if (a == nullptr)
+    {
+        return; // OOM — drop this clause, keep the rest of the selector
+    }
+    a->name = name;
+    a->op = op;
+    if (op != AttrOp::Exists)
+    {
+        a->value = CopyVerbatim(valB, valE, arena);
+    }
+
+    // Append (preserve author order; order is irrelevant to matching but
+    // keeps the structure predictable).
+    AttrSelector** link = &sel->attrs;
+    while (*link != nullptr)
+    {
+        link = &(*link)->next;
+    }
+    *link = a;
+    ++bClasses;
+}
+
 // ----- compound selector: "div.note#x" -> SimpleSelector -----------
 // Reads the rightmost-or-only compound (no spaces inside). Folds the
 // specificity contribution into the a/b/c counters. nullptr on OOM /
@@ -112,10 +348,10 @@ SimpleSelector* ParseCompound(const char* b, const char* e, Arena& arena, u32& a
         sel->universal = true;
         ++p;
     }
-    else if (*p != '.' && *p != '#')
+    else if (!IsFragBoundary(*p))
     {
         const char* ts = p;
-        while (p < e && *p != '.' && *p != '#')
+        while (p < e && !IsFragBoundary(*p))
         {
             ++p;
         }
@@ -123,18 +359,30 @@ SimpleSelector* ParseCompound(const char* b, const char* e, Arena& arena, u32& a
         ++cTypes; // type selector adds to 'c'
     }
 
-    // Then a sequence of .class / #id fragments.
+    // Then a sequence of .class / #id / :pseudo / [attr] fragments.
     while (p < e)
     {
         char kind = *p;
+        if (kind == ':')
+        {
+            ++p;
+            ParsePseudo(p, e, sel, arena, bClasses);
+            continue;
+        }
+        if (kind == '[')
+        {
+            ++p;
+            ParseAttr(p, e, sel, arena, bClasses);
+            continue;
+        }
         if (kind != '.' && kind != '#')
         {
-            ++p; // skip anything unexpected (e.g. a stray ':')
+            ++p; // skip anything unexpected
             continue;
         }
         ++p;
         const char* fs = p;
-        while (p < e && *p != '.' && *p != '#')
+        while (p < e && !IsFragBoundary(*p))
         {
             ++p;
         }

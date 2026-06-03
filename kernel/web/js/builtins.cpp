@@ -81,6 +81,7 @@ Result<void> InstallBuiltins(Interp& I)
     EnvDefine(g, a, "parseInt", 8, NativeFnVal(I, kParseInt, "parseInt"));
     EnvDefine(g, a, "parseFloat", 10, NativeFnVal(I, kParseFloat, "parseFloat"));
     EnvDefine(g, a, "isNaN", 5, NativeFnVal(I, kIsNaN, "isNaN"));
+    EnvDefine(g, a, "isFinite", 8, NativeFnVal(I, kIsFinite, "isFinite"));
 
     // Math
     JsObject* math = MakeNamespace(I);
@@ -146,6 +147,19 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
             return NativeFnVal(I, kStrTrim, "trim");
         return JsValue::Undefined();
     }
+    if (obj.type == JsType::Number)
+    {
+        // Number.prototype methods dispatch on a Number receiver, mirroring
+        // the String special-case above. toString/valueOf are also wired so
+        // a Number coerces through the same path as other primitives.
+        if (NameEq(key, keyLen, "toFixed"))
+            return NativeFnVal(I, kNumToFixed, "toFixed");
+        if (NameEq(key, keyLen, "toString"))
+            return NativeFnVal(I, kNumToString, "toString");
+        if (NameEq(key, keyLen, "valueOf"))
+            return NativeFnVal(I, kObjValueOf, "valueOf");
+        return JsValue::Undefined();
+    }
     if (obj.type == JsType::Object)
     {
         JsObject* o = obj.as.obj;
@@ -201,6 +215,25 @@ static JsValue ArgOr(const JsValue* args, u32 argc, u32 i)
     return i < argc ? args[i] : JsValue::Undefined();
 }
 
+// Write an unsigned 64-bit value as decimal into `out` (no sign, no
+// NUL). Returns chars written; writes nothing if cap is 0.
+static u32 WriteU64Dec(u64 v, char* out, u32 cap)
+{
+    char tmp[24];
+    u32 t = 0;
+    if (v == 0)
+        tmp[t++] = '0';
+    while (v)
+    {
+        tmp[t++] = char('0' + (v % 10));
+        v /= 10;
+    }
+    u32 o = 0;
+    while (t && o < cap)
+        out[o++] = tmp[--t];
+    return o;
+}
+
 // ToInteger: number -> i64 (truncate), else parse string / NaN -> 0.
 static i64 ToInt(const JsValue& v)
 {
@@ -213,11 +246,26 @@ static i64 ToInt(const JsValue& v)
     return 0;
 }
 
-// Lenient base-10 integer prefix parse for parseInt: skip leading
-// whitespace, optional sign, consume the leading run of digits, ignore
-// any trailing garbage ("42px" -> 42). Returns false (NaN) only when
-// no digits are present. GAP: radix argument, 0x prefix detection.
-static bool ParseIntPrefix(const char* s, u32 len, i64& out)
+// Map a single character to its digit value in [0, 35], or -1 if it is
+// not an alphanumeric digit char.
+static int DigitVal(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'z')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'Z')
+        return c - 'A' + 10;
+    return -1;
+}
+
+// Lenient radix-aware integer prefix parse for parseInt: skip leading
+// whitespace, optional sign, consume the leading run of digits valid in
+// `radix`, ignore trailing garbage ("42px" -> 42). `radix == 0` selects
+// 16 when the text begins with a 0x/0X prefix, else 10. A radix of 16
+// also tolerates (and skips) a leading 0x/0X. Returns false (NaN) only
+// when no valid leading digit is present or the radix is out of range.
+static bool ParseIntPrefix(const char* s, u32 len, int radix, i64& out)
 {
     u32 i = 0;
     while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n'))
@@ -228,12 +276,29 @@ static bool ParseIntPrefix(const char* s, u32 len, i64& out)
         neg = (s[i] == '-');
         ++i;
     }
-    if (i >= len || s[i] < '0' || s[i] > '9')
+    // 0x / 0X prefix handling: consumed when radix is auto-detect (0) or
+    // explicitly 16; ignored for any other radix.
+    if (i + 1 < len && s[i] == '0' && (s[i + 1] == 'x' || s[i + 1] == 'X') && (radix == 0 || radix == 16))
+    {
+        radix = 16;
+        i += 2;
+    }
+    if (radix == 0)
+        radix = 10;
+    if (radix < 2 || radix > 36)
+        return false;
+    if (i >= len)
+        return false;
+    int d0 = DigitVal(s[i]);
+    if (d0 < 0 || d0 >= radix)
         return false;
     i64 v = 0;
-    while (i < len && s[i] >= '0' && s[i] <= '9')
+    while (i < len)
     {
-        v = v * 10 + (s[i] - '0');
+        int d = DigitVal(s[i]);
+        if (d < 0 || d >= radix)
+            break;
+        v = v * radix + d;
         ++i;
     }
     out = neg ? -v : v;
@@ -603,6 +668,148 @@ static Result<JsValue> ArrHof(Interp& I, const JsValue& recv, const JsValue* arg
     return JsValue::Undefined();
 }
 
+// --------------------- Number.prototype.* ---------------------
+
+// Number.prototype.toString(radix). For radix 10 (or absent) this
+// defers to the canonical ValueToChars form. For radix 2/8/16 (and any
+// 2..36) it formats the INTEGER part in that base — the common real-page
+// use is `(n).toString(16)` / `(n).toString(2)` on whole numbers.
+// GAP: a fractional value's digits after the point are NOT emitted for
+// a non-decimal radix (spec would render e.g. (3.5).toString(2) ==
+// "11.1"); the integer part is rendered correctly and the fraction is
+// dropped. Revisit if a real page needs non-decimal fractional output.
+static Result<JsValue> NumToString(Interp& I, const JsValue& recv, const JsValue* args, u32 argc)
+{
+    int radix = 10;
+    if (argc >= 1 && args[0].type == JsType::Number)
+        radix = int(ToInt(args[0]));
+    if (radix < 2 || radix > 36)
+        return Err{ErrorCode::InvalidArgument};
+    if (radix == 10)
+    {
+        char buf[64];
+        u32 n = ValueToChars(recv, buf, sizeof(buf));
+        return JsValue::Str(MakeString(I.arena, buf, n));
+    }
+    // Non-decimal radix: operate on the truncated integer magnitude.
+    i64 v = ToInt(recv);
+    bool neg = v < 0;
+    u64 mag = neg ? (u64(-(v + 1)) + 1) : u64(v);
+    char tmp[72];
+    u32 t = 0;
+    if (mag == 0)
+        tmp[t++] = '0';
+    const char* kDigits = "0123456789abcdefghijklmnopqrstuvwxyz";
+    while (mag)
+    {
+        tmp[t++] = kDigits[mag % u64(radix)];
+        mag /= u64(radix);
+    }
+    char out[80];
+    u32 o = 0;
+    if (neg)
+        out[o++] = '-';
+    while (t)
+        out[o++] = tmp[--t];
+    return JsValue::Str(MakeString(I.arena, out, o));
+}
+
+// Number.prototype.toFixed(digits): fixed-point decimal with exactly
+// `digits` fractional places, 0..20 clamped. Uses exact i64 scaling
+// (round-half-up) for integer receivers — exact — and Sf32 scaling for
+// fractional receivers. GAP: rounding is round-half-AWAY-from-zero (the
+// straightforward kernel form), whereas V8's toFixed uses the IEEE-754
+// shortest-round-trip rounding; the two can differ in the last digit on
+// values not exactly representable in binary32. Fractional receivers
+// also carry only ~7 significant digits (the engine's binary32 GAP).
+static Result<JsValue> NumToFixed(Interp& I, const JsValue& recv, const JsValue* args, u32 argc)
+{
+    i64 digits = (argc >= 1) ? ToInt(args[0]) : 0;
+    if (digits < 0)
+        digits = 0;
+    if (digits > 20)
+        digits = 20;
+
+    // NaN / Infinity render textually, ignoring the digit count.
+    if (recv.IsNumber() && !recv.as.num.isInt)
+    {
+        Sf32 f = recv.as.num.fval;
+        if (Sf32IsNaN(f) || Sf32IsInf(f))
+        {
+            char buf[16];
+            u32 n = ValueToChars(recv, buf, sizeof(buf));
+            return JsValue::Str(MakeString(I.arena, buf, n));
+        }
+    }
+
+    // pow10 fits in i64 for digits<=18; clamp the int fast-path there.
+    i64 pow10 = 1;
+    bool pow10Fits = digits <= 18;
+    if (pow10Fits)
+        for (i64 k = 0; k < digits; ++k)
+            pow10 *= 10;
+
+    char out[96];
+    u32 o = 0;
+
+    if (recv.IsNumber() && recv.as.num.isInt && pow10Fits)
+    {
+        // Exact integer path: the fractional digits are all zero.
+        i64 v = recv.as.num.ival;
+        if (v < 0)
+        {
+            out[o++] = '-';
+            v = -v;
+        }
+        o += WriteU64Dec(u64(v), out + o, sizeof(out) - o);
+        if (digits > 0)
+        {
+            out[o++] = '.';
+            for (i64 k = 0; k < digits; ++k)
+                out[o++] = '0';
+        }
+        return JsValue::Str(MakeString(I.arena, out, o));
+    }
+
+    // Fractional / large path: scale by 10^digits, round, split. Done in
+    // Sf32 — carries the engine's binary32 precision (documented GAP).
+    Sf32 val = NumberToSf32(recv);
+    bool neg = Sf32IsNegative(val) && !Sf32IsZero(val);
+    Sf32 mag = Sf32Abs(val);
+    Sf32 scale = Sf32One();
+    Sf32 ten = Sf32FromI32(10);
+    for (i64 k = 0; k < digits; ++k)
+        scale = Sf32Mul(scale, ten);
+    // round-half-away: floor(mag*scale + 0.5)
+    Sf32 scaled = Sf32Mul(mag, scale);
+    Sf32 half = Sf32FromBits(0x3F000000u); // 0.5
+    Sf32 rounded = Sf32Floor(Sf32Add(scaled, half));
+    // Extract the scaled integer. ToI32 saturates beyond ~2.1e9; for the
+    // common UI range (prices, percentages) this is ample. GAP: values
+    // whose scaled magnitude exceeds INT32_MAX saturate.
+    u64 scaledInt = u64(Sf32ToU32(rounded));
+
+    if (neg && scaledInt != 0)
+        out[o++] = '-';
+    if (digits == 0 || !pow10Fits)
+    {
+        o += WriteU64Dec(scaledInt, out + o, sizeof(out) - o);
+        return JsValue::Str(MakeString(I.arena, out, o));
+    }
+    u64 intPart = scaledInt / u64(pow10);
+    u64 fracPart = scaledInt % u64(pow10);
+    o += WriteU64Dec(intPart, out + o, sizeof(out) - o);
+    out[o++] = '.';
+    // Zero-pad the fractional part to exactly `digits` places.
+    char fbuf[24];
+    u32 fn = WriteU64Dec(fracPart, fbuf, sizeof(fbuf));
+    for (i64 k = fn; k < digits; ++k)
+        out[o++] = '0';
+    for (u32 k = 0; k < fn; ++k)
+        out[o++] = fbuf[k];
+    return JsValue::Str(MakeString(I.arena, out, o));
+}
+
 // JSON.stringify (shallow + flat objects/arrays). GAP: nested objects
 // recurse but cycle detection is absent (the step budget bounds it).
 static u32 JsonStr(Interp& I, const JsValue& v, char* out, u32 cap);
@@ -713,9 +920,11 @@ static int HexDigitVal(char c)
     return c - 'A' + 10;
 }
 
-// Encode a Unicode code point (BMP range from \uXXXX) as UTF-8 into
-// `out`; returns the byte count written (1..3). Surrogate halves are
-// emitted as-is (3 bytes) — see the JsonParse GAP note.
+// Encode a Unicode code point as UTF-8 into `out`; returns the byte
+// count written (1..4). Astral code points (>= 0x10000, produced by
+// combining a surrogate pair in JsonReadString) take the 4-byte form. A
+// lone surrogate half (0xD800-0xDFFF) still encodes as 3-byte WTF-8 —
+// see the JsonParse note.
 static u32 EncodeUtf8(u32 cp, char* out)
 {
     if (cp < 0x80)
@@ -729,10 +938,18 @@ static u32 EncodeUtf8(u32 cp, char* out)
         out[1] = char(0x80 | (cp & 0x3F));
         return 2;
     }
-    out[0] = char(0xE0 | (cp >> 12));
-    out[1] = char(0x80 | ((cp >> 6) & 0x3F));
-    out[2] = char(0x80 | (cp & 0x3F));
-    return 3;
+    if (cp < 0x10000)
+    {
+        out[0] = char(0xE0 | (cp >> 12));
+        out[1] = char(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = char(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = char(0xF0 | (cp >> 18));
+    out[1] = char(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = char(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = char(0x80 | (cp & 0x3F));
+    return 4;
 }
 
 // Recursive-descent JSON reader over a NUL-bounded char span. `pos`
@@ -825,7 +1042,12 @@ static JsValue JsonReadString(JsonReader& r)
                 break;
             case 'u':
             {
-                // \uXXXX — decode the BMP code point and emit UTF-8.
+                // \uXXXX — decode a 16-bit unit, combining a high+low
+                // surrogate pair (\uD800-\uDBFF followed by \uDC00-\uDFFF)
+                // into the single astral code point it encodes, then emit
+                // UTF-8. A lone / mismatched surrogate is emitted as-is
+                // (3-byte WTF-8) — the engine has no exceptions so the
+                // lenient form is preferable to rejecting the document.
                 if (r.pos + 4 > r.n)
                 {
                     r.ok = false;
@@ -841,6 +1063,27 @@ static JsValue JsonReadString(JsonReader& r)
                         return JsValue::Undefined();
                     }
                     cp = (cp << 4) | u32(HexDigitVal(h));
+                }
+                // High surrogate: look ahead for a "\uXXXX" low surrogate.
+                if (cp >= 0xD800 && cp <= 0xDBFF && r.pos + 6 <= r.n && r.s[r.pos] == '\\' && r.s[r.pos + 1] == 'u')
+                {
+                    u32 lo = 0;
+                    bool loOk = true;
+                    for (u32 k = 0; k < 4; ++k)
+                    {
+                        char h = r.s[r.pos + 2 + k];
+                        if (!IsHexDigit(h))
+                        {
+                            loOk = false;
+                            break;
+                        }
+                        lo = (lo << 4) | u32(HexDigitVal(h));
+                    }
+                    if (loOk && lo >= 0xDC00 && lo <= 0xDFFF)
+                    {
+                        r.pos += 6; // consume the "\uXXXX" low half
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    }
                 }
                 out += EncodeUtf8(cp, buf + out);
                 break;
@@ -1016,8 +1259,9 @@ static JsValue JsonReadValue(JsonReader& r)
 
 // JSON.parse(text): returns the parsed value, or undefined on any
 // malformed input (the engine surfaces parse errors as undefined rather
-// than throwing — it has no try/catch). GAP: surrogate-pair \uD800
-// sequences decode each half independently rather than combining.
+// than throwing — it has no try/catch). A 𐀀 surrogate pair is
+// combined into its astral code point and emitted as 4-byte UTF-8; a
+// lone surrogate half is emitted as 3-byte WTF-8 (lenient, not rejected).
 static JsValue JsonParse(Interp& I, const JsValue* args, u32 argc)
 {
     JsValue v = ArgOr(args, argc, 0);
@@ -1043,12 +1287,27 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
     case kParseInt:
     {
         JsValue v = ArgOr(args, argc, 0);
+        // Radix argument (arg[1]): 0 (or absent) auto-detects 0x/decimal.
+        int radix = 0;
+        if (argc >= 2 && args[1].type == JsType::Number)
+            radix = int(ToInt(args[1]));
         if (v.type == JsType::Number)
-            return JsValue::Int(ToInt(v));
+        {
+            // parseInt(number) with no/decimal radix truncates toward
+            // zero; a non-trivial radix re-parses the decimal text form.
+            if (radix == 0 || radix == 10)
+                return JsValue::Int(ToInt(v));
+            char buf[32];
+            u32 n = ValueToChars(v, buf, sizeof(buf));
+            i64 iv;
+            if (ParseIntPrefix(buf, n, radix, iv))
+                return JsValue::Int(iv);
+            return JsValue::Float(Sf32QNaN());
+        }
         if (v.type == JsType::String)
         {
             i64 iv;
-            if (ParseIntPrefix(v.as.str->data, v.as.str->len, iv))
+            if (ParseIntPrefix(v.as.str->data, v.as.str->len, radix, iv))
                 return JsValue::Int(iv);
         }
         return JsValue::Float(Sf32QNaN());
@@ -1072,6 +1331,20 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
     {
         JsValue v = ArgOr(args, argc, 0);
         return JsValue::Bool(NumIsNaN(v) || v.type != JsType::Number);
+    }
+    case kIsFinite:
+    {
+        // isFinite(v): true only for an actual finite Number. Integer
+        // payloads are always finite; a float payload must be neither
+        // NaN nor +/-Infinity. Non-numbers are not finite (no coercion —
+        // matches Number.isFinite rather than the coercing global, which
+        // is the safer subset for real-page scripts).
+        JsValue v = ArgOr(args, argc, 0);
+        if (v.type != JsType::Number)
+            return JsValue::Bool(false);
+        if (v.as.num.isInt)
+            return JsValue::Bool(true);
+        return JsValue::Bool(!Sf32IsNaN(v.as.num.fval) && !Sf32IsInf(v.as.num.fval));
     }
 
     case kMathFloor:
@@ -1133,6 +1406,11 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
     }
     case kMathSqrt:
         return JsValue::Float(Sf32Sqrt(NumberToSf32(ArgOr(args, argc, 0))));
+
+    case kNumToFixed:
+        return NumToFixed(I, recv, args, argc);
+    case kNumToString:
+        return NumToString(I, recv, args, argc);
 
     case kStrCharAt:
         return StrCharAt(I, recv, args, argc);

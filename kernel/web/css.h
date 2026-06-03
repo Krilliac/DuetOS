@@ -23,14 +23,21 @@
  *   - Tokenizer + parser for stylesheets and inline `style="..."`.
  *   - Selectors: type, .class, #id, *, descendant combinator (space),
  *     compound (div.note#x), comma selector-lists. Specificity (a,b,c).
+ *   - Structural pseudo-classes: :first-child, :last-child,
+ *     :nth-child(N) (literal integer / even / odd).
+ *   - Attribute selectors: [attr], [attr="v"], [attr~="v"], [attr^="v"],
+ *     [attr$="v"], [attr*="v"].
  *   - A practical ComputedStyle subset (see the struct below).
  *   - Value parsing: px, %, named colors + #rgb/#rrggbb + rgb()/rgba().
  *   - A built-in User-Agent default stylesheet.
  *   - Cascade UA < author, specificity then source order, inheritance.
  *
  * GAP (deliberately out of scope for this slice):
- *   - Pseudo-classes/elements (:hover, ::before), attribute selectors
- *     ([type=text]), child/sibling combinators (>, +, ~), :nth-child.
+ *   - :nth-child(an+b) formula form, :nth-last-child, :nth-of-type,
+ *     :only-child, :not(), :hover and other dynamic/state pseudo-classes,
+ *     ::before / ::after pseudo-elements.
+ *   - Child/sibling combinators (>, +, ~) — only the descendant
+ *     combinator (space) is matched.
  *   - @media / @import / @font-face (parsed-past, not honored).
  *   - calc(), custom properties / var(), !important (best-effort/GAP).
  *   - flexbox / grid / floats / position; em/rem/vh units. We support
@@ -173,15 +180,55 @@ struct ComputedStyle
 // Parsed stylesheet representation
 // ---------------------------------------------------------------------
 
+/// Structural pseudo-classes carried on a compound selector. `None`
+/// means no structural constraint. `:nth-child(N)` carries its literal
+/// position in `SimpleSelector::nthChild` (1-based; even/odd are mapped
+/// to the nth=2/0 parity test below). GAP: the an+b formula form.
+enum class StructuralPseudo : u8
+{
+    None,
+    FirstChild,   // :first-child
+    LastChild,    // :last-child
+    NthChildLit,  // :nth-child(<integer>)  — match the Nth element child
+    NthChildEven, // :nth-child(even)
+    NthChildOdd,  // :nth-child(odd)
+};
+
+/// The match operator of an attribute selector.
+enum class AttrOp : u8
+{
+    Exists,     // [attr]
+    Exact,      // [attr="v"]
+    Whitespace, // [attr~="v"]  — v is one space-separated word of attr
+    Prefix,     // [attr^="v"]
+    Suffix,     // [attr$="v"]
+    Substring,  // [attr*="v"]
+};
+
+/// One attribute selector clause on a compound, e.g. `[type="text"]`.
+/// `name` is lowercased (HTML attribute names are case-insensitive);
+/// `value` keeps the author's case. Chained via `next` so a compound may
+/// carry several, e.g. `a[href][target="_blank"]`.
+struct AttrSelector
+{
+    const char* name = nullptr;  // attribute name, lowercased
+    const char* value = nullptr; // match value (Exists ignores it)
+    AttrOp op = AttrOp::Exists;
+    AttrSelector* next = nullptr;
+};
+
 /// One simple compound selector, e.g. `div.note#x`. A descendant
 /// selector chains several of these via `ancestor` (the left side must
 /// match some ancestor of the element the right side matches).
 struct SimpleSelector
 {
-    const char* tag = nullptr;       // type selector; nullptr == universal/none
-    const char* id = nullptr;        // #id (one supported)
-    const char* className = nullptr; // .class (one supported)
-    bool universal = false;          // `*`
+    const char* tag = nullptr;                        // type selector; nullptr == universal/none
+    const char* id = nullptr;                         // #id (one supported)
+    const char* className = nullptr;                  // .class (one supported)
+    bool universal = false;                           // `*`
+    StructuralPseudo pseudo = StructuralPseudo::None; // structural pseudo-class
+    i32 nthChild = 0;                                 // literal N for NthChildLit
+    AttrSelector* attrs = nullptr;                    // [attr...] clauses (linked list)
     // For descendant combinator: this selector's match must have an
     // ancestor matching `ancestor` (which may itself chain further).
     SimpleSelector* ancestor = nullptr;
