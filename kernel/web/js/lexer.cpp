@@ -152,6 +152,10 @@ Tok KeywordKind(const char* p, u32 len)
         {"typeof", 6, Tok::KwTypeof},
         {"in", 2, Tok::KwIn},
         {"new", 3, Tok::KwNew},
+        {"try", 3, Tok::KwTry},
+        {"catch", 5, Tok::KwCatch},
+        {"finally", 7, Tok::KwFinally},
+        {"throw", 5, Tok::KwThrow},
     };
     for (const KW& k : table)
     {

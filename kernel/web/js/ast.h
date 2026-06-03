@@ -53,6 +53,9 @@ enum class Ast : u8
     Return,   // arg(optional)
     Break,
     Continue,
+    Try,     // a=try block, b=catch block(opt), c=finally block(opt);
+             //   str/strLen = catch binding name (null => no binding)
+    Throw,   // a=argument expression
     Program, // top-level: children[] = statements
 };
 

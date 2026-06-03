@@ -100,6 +100,18 @@ struct Interp
     JsValue returnValue;
     Flow flow;
 
+    // Catchable-exception channel. A `throw expr` sets pendingThrow to the
+    // thrown JS value, sets hasPendingThrow, and returns Err{ErrorCode::
+    // BadState} so the throw rides the existing Err-unwind path up to the
+    // nearest `try`. `hasPendingThrow` is THE discriminator between a
+    // catchable JS throw and a genuine engine error (Timeout / Overflow):
+    // `catch` clears+binds ONLY when hasPendingThrow is true, so a runaway-
+    // loop Timeout or stack-guard Overflow propagates straight THROUGH
+    // try/catch/finally uncaught — a hostile script cannot catch its way
+    // past the budget / native-stack guard.
+    JsValue pendingThrow;
+    bool hasPendingThrow = false;
+
     Interp(Arena& a, ConsoleBuf& c) : arena(a), console(c), global(nullptr) {}
 
     bool Tick()

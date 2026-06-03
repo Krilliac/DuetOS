@@ -340,6 +340,39 @@ void JsSelfTest()
     run(CheckCase("var i=3; var a=i++ + 10; a + ',' + i;", "13,4", nullptr));   // postfix returns old in-expr
     run(CheckCase("var s=0; for(var i=0;i<5;i++){ s+=i; } s;", "10", nullptr)); // for-loop idiom
 
+    // ---- try / catch / finally / throw ----
+    // basic throw is caught and the binding `e` holds the thrown value.
+    run(CheckCase("var r; try { throw 7; } catch (e) { r = e + 1; } r;", "8", nullptr));
+    // finally runs on the normal (non-throwing) path.
+    run(CheckCase("var r=''; try { r += 'a'; } finally { r += 'b'; } r;", "ab", nullptr));
+    // finally runs after a caught throw too (try -> catch -> finally order).
+    run(CheckCase("var r=''; try { r+='t'; throw 1; } catch (e) { r+='c'; } finally { r+='f'; } r;", "tcf", nullptr));
+    // a throw inside a called function unwinds to the OUTER catch.
+    run(CheckCase("function boom(){ throw 'X'; } var r='?'; try { boom(); } catch (e) { r = e; } r;", "X", nullptr));
+    // re-throw from catch: an inner catch re-throws and an outer catch sees it.
+    run(CheckCase("var r; try { try { throw 1; } catch (e) { throw e + 1; } } catch (e2) { r = e2; } r;", "2",
+                  nullptr));
+    // finally runs even when try `return`s, and the return value survives a
+    // normally-completing finally (proves Flow::Return is preserved across F).
+    run(CheckCase("function f(){ try { return 5; } finally { var q = 9; } } f();", "5", nullptr));
+    // a non-throwing try simply yields its block value; catch is not entered.
+    run(CheckCase("var hit=false; try { 1; } catch (e) { hit=true; } hit;", "false", nullptr));
+    // an UNCAUGHT throw at top level surfaces as an engine error (BadState),
+    // distinct from the budget/depth errors below.
+    {
+        EvalConfig cfg;
+        run(CheckErr("throw 42;", ErrorCode::BadState, cfg));
+    }
+    // CRITICAL GUARD: a runaway loop inside try{}catch{} must STILL be killed
+    // by the step budget and NOT be caught — hasPendingThrow is false for a
+    // Timeout, so catch cannot swallow it. This proves a hostile script can't
+    // try/catch its way past the runaway-loop guard.
+    {
+        EvalConfig tight;
+        tight.stepBudget = 100000;
+        run(CheckErr("try { while(true){} } catch (e) { 1; }", ErrorCode::Timeout, tight));
+    }
+
     // ---- CRITICAL: a catastrophic-backtracking pattern must TERMINATE
     // (degrade to no-match / a bounded answer), NOT hang the boot. The
     // explicit-stack VM + step budget guarantee this. The classic

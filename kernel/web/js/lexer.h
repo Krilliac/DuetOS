@@ -70,6 +70,10 @@ enum class Tok : u8
     KwTypeof,
     KwIn,
     KwNew, // `new Ctor(args)` — native ctors (Date); see ParseUnary
+    KwTry,
+    KwCatch,
+    KwFinally,
+    KwThrow,
 
     // punctuation / operators
     LParen,
