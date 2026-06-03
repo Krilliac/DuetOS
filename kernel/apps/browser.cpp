@@ -180,9 +180,13 @@ constinit State g_state = {};
 // raw HTML, so we keep ONE persistent arena (the display list it
 // produces must outlive DoFetch because DrawBody paints it later).
 //
-//   - kRenderArenaBytes: DOM + stylesheets + style map + display
-//     list for one page. 1 MiB comfortably holds a real-world page
-//     (capped by kHttpResponseCap = 64 KiB of source anyway).
+//   - kRenderArenaBytes: the DOM (+ runtime nodes created by click
+//     handlers) for one page. 1 MiB; with styles/layout moved to the
+//     layout arena, the whole budget is the DOM's, so handler mutations
+//     (textContent/innerHTML) have far more headroom before exhaustion.
+//   - kLayoutArenaBytes: stylesheets + style map + display list. RESET
+//     on every (re)layout (RelayoutFromDoc), so it never grows across
+//     re-renders — only the DOM arena does (see the GAP in RelayoutFromDoc).
 //   - kCanvasW/kCanvasH: the off-screen RGBA8888 compose surface the
 //     painter draws into before blitting to the framebuffer. Sized to
 //     a generous window content area; oversize windows clip to this.
@@ -190,12 +194,14 @@ constinit State g_state = {};
 //     each decoded into its own slice of kImageArenaBytes.
 // ---------------------------------------------------------------
 constexpr u32 kRenderArenaBytes = 1024u * 1024u;
+constexpr u32 kLayoutArenaBytes = 1024u * 1024u;
 constexpr u32 kCanvasW = 1024u;
 constexpr u32 kCanvasH = 1024u;
 constexpr u32 kImageArenaBytes = 4u * 1024u * 1024u;
 constexpr u32 kImageCacheCap = 16u;
 
 alignas(16) u8 g_render_arena_buf[kRenderArenaBytes];
+alignas(16) u8 g_layout_arena_buf[kLayoutArenaBytes];
 alignas(16) u8 g_canvas[kCanvasW * kCanvasH * 4u];
 alignas(16) u8 g_image_arena_buf[kImageArenaBytes];
 
@@ -207,6 +213,15 @@ alignas(16) u8 g_image_arena_buf[kImageArenaBytes];
 // be destroyed) and runtime DOM mutations would fault / spuriously OOM.
 // Reset (re-constructed over the buffer) at the top of each RenderPage.
 duetos::web::Arena g_render_arena{g_render_arena_buf, kRenderArenaBytes};
+
+// LAYOUT arena: stylesheets + style map + display list. Separate from the
+// DOM arena so a re-layout after a runtime DOM mutation (RelayoutFromDoc)
+// can RESET it wholesale without disturbing the DOM. The display list's
+// string payloads (TextRun bytes, href, the node back-ref) point back into
+// the DOM (g_render_arena), which persists; styles are copied BY VALUE into
+// each DisplayItem (color/bold/fontPx), so nothing in a built display list
+// outlives a layout-arena reset by reference. Reset per (re)layout.
+duetos::web::Arena g_layout_arena{g_layout_arena_buf, kLayoutArenaBytes};
 
 struct ImageCacheEntry
 {
@@ -2047,9 +2062,80 @@ void BuildLinkRects(const char* page_url)
     }
 }
 
-// RenderPage — UI-decoupled: parse, style, script, lay out one page
-// into the persistent render arena and stash the display list + height
-// for DrawBody. `page_url` drives relative <img src> resolution.
+// RelayoutFromDoc — (re)style + lay out an already-parsed DOM into the
+// resettable LAYOUT arena, refreshing render_dl / total height / link
+// rects. Called once by RenderPage after scripts run, and again by the
+// click path after a handler mutates the DOM (so the change reaches the
+// screen). Resets g_layout_arena each call, so re-layout never grows the
+// layout arena — only the DOM arena grows when a handler adds nodes.
+//
+// GAP: a click handler that mutates the DOM on every click (e.g. a
+// counter doing `el.textContent = n` each time) allocates a fresh DOM
+// node per mutation into g_render_arena, which the bump allocator never
+// frees (orphaned nodes persist). After ~thousands of mutations the DOM
+// arena exhausts and SetTextContent/SetInnerHtml start returning false
+// (the mutation is silently dropped, no fault). A real reclaiming DOM
+// allocator would lift this; for v0 the 1 MiB DOM budget covers ordinary
+// interactive pages. Uses g_images.page_url (set by RenderPage) for link
+// resolution, so the page URL need not be re-threaded. Returns false only
+// if layout itself fails (arena exhaustion).
+bool RelayoutFromDoc(duetos::web::Node* doc, u32 viewport_w)
+{
+    if (doc == nullptr)
+        return false;
+
+    // Reset the layout arena: the prior sheet/styles/display list are
+    // discarded wholesale. Their string payloads pointed into the DOM
+    // (which persists), so nothing dangles.
+    g_layout_arena = duetos::web::Arena(g_layout_arena_buf, kLayoutArenaBytes);
+    duetos::web::Arena& la = g_layout_arena;
+
+    // Author CSS from <style> elements (inline style="" is folded in by
+    // ComputeStyles directly off each element's attribute).
+    static char css_buf[16 * 1024];
+    GatherStyles(doc, css_buf, sizeof(css_buf), 0);
+
+    duetos::web::StyleSheet sheet;
+    duetos::web::AppendUserAgentStyles(sheet, la);
+    duetos::web::ParseStyleSheet(sheet, css_buf, StrLen(css_buf), /*userAgent=*/false, la);
+
+    duetos::web::StyleMap styles = duetos::web::ComputeStyles(doc, sheet, la);
+
+    // Monospace metrics matching the 8x8 console font (cell height 16px
+    // gives readable line spacing; the painter scales the 8x8 bitmap).
+    duetos::web::TextMetrics tm;
+    tm.glyphW = 8;
+    tm.glyphH = 16;
+    tm.baseFontPx = 16;
+
+    duetos::web::DisplayList* dl = duetos::web::LayoutDocument(doc, styles, viewport_w, tm, la);
+    if (dl == nullptr)
+        return false;
+
+    // Pre-warm the image cache (resolve + decode every ImageBox up front)
+    // so the ImageProvider is a pure cache lookup at PAINT time and DrawBody
+    // never does network I/O under the compositor lock.
+    for (u32 i = 0; i < dl->count; ++i)
+    {
+        if (dl->items[i].cmd == duetos::web::DisplayCmd::ImageBox)
+            ImageProviderFn(dl->items[i].src, dl->items[i].srcLen, nullptr);
+    }
+
+    g_state.render_dl = dl;
+    g_state.render_total_h = DisplayListHeight(*dl);
+    g_state.render_viewport_w = viewport_w;
+
+    // Rebuild the link hit-test table from the laid-out display list
+    // (links tagged by layout, resolved against the page URL).
+    BuildLinkRects(g_images.page_url);
+    return true;
+}
+
+// RenderPage — UI-decoupled: parse, script, lay out one page and stash
+// the display list + height for DrawBody. The DOM goes in the persistent
+// render arena (so click-time handler mutations persist); styles + layout
+// go in the resettable layout arena via RelayoutFromDoc. `page_url` drives
+// relative <img src> resolution.
 void RenderPage(const char* html, u32 len, const char* page_url, u32 viewport_w)
 {
     g_state.render_ready = false;
@@ -2082,15 +2168,6 @@ void RenderPage(const char* html, u32 len, const char* page_url, u32 viewport_w)
     if (doc == nullptr)
         return;
 
-    // Author CSS from <style> elements (inline style="" is folded in by
-    // ComputeStyles directly off each element's attribute).
-    static char css_buf[16 * 1024];
-    GatherStyles(doc, css_buf, sizeof(css_buf), 0);
-
-    duetos::web::StyleSheet sheet;
-    duetos::web::AppendUserAgentStyles(sheet, arena);
-    duetos::web::ParseStyleSheet(sheet, css_buf, StrLen(css_buf), /*userAgent=*/false, arena);
-
     // Run scripts BEFORE styling+layout so DOM mutations are reflected.
     // Create ONE retained context for the whole page (so all <script>s
     // share globals AND any addEventListener registrations survive to be
@@ -2105,41 +2182,17 @@ void RenderPage(const char* html, u32 len, const char* page_url, u32 viewport_w)
     if (ctx != nullptr)
     {
         RunScripts(ctx, doc);
+        // Scripts may have mutated the DOM before first paint; the upcoming
+        // layout reflects that, so consume the flag now (it must not survive
+        // into the first user click as a spurious re-layout request).
+        duetos::web::JsDomContextConsumeDirty(ctx);
         g_state.page_ctx = ctx;
         g_state.page_doc = doc;
     }
 
-    duetos::web::StyleMap styles = duetos::web::ComputeStyles(doc, sheet, arena);
-
-    // Monospace metrics matching the 8x8 console font (cell height 16px
-    // gives readable line spacing; the painter scales the 8x8 bitmap).
-    duetos::web::TextMetrics tm;
-    tm.glyphW = 8;
-    tm.glyphH = 16;
-    tm.baseFontPx = 16;
-
-    duetos::web::DisplayList* dl = duetos::web::LayoutDocument(doc, styles, viewport_w, tm, arena);
-    if (dl == nullptr)
+    // Style + lay out the (post-script) DOM into the layout arena.
+    if (!RelayoutFromDoc(doc, viewport_w))
         return;
-
-    // Pre-warm the image cache HERE (in the fetch-worker context) by
-    // resolving + decoding every ImageBox up front. This keeps the
-    // ImageProvider a pure cache lookup at PAINT time, so DrawBody never
-    // does network I/O under the compositor lock.
-    for (u32 i = 0; i < dl->count; ++i)
-    {
-        if (dl->items[i].cmd == duetos::web::DisplayCmd::ImageBox)
-            ImageProviderFn(dl->items[i].src, dl->items[i].srcLen, nullptr);
-    }
-
-    g_state.render_dl = dl;
-    g_state.render_total_h = DisplayListHeight(*dl);
-
-    // Build the link hit-test table from the laid-out display list (links
-    // tagged by the layout engine, resolved against the page URL). Done
-    // here in the fetch-worker context so DrawBody / click handling do a
-    // pure lookup, never a (re)render, under the compositor lock.
-    BuildLinkRects(page_url);
 
     g_state.render_ready = true;
 }
@@ -4101,6 +4154,42 @@ void BrowserClickSelfTest()
             goto restore;
         }
 
+        // --- Check 6: LIVE RE-RENDER. The handler's textContent='hit'
+        // marked the DOM dirty; consume the flag and re-lay-out the
+        // retained doc (exactly what BrowserMouseInput does after a real
+        // click). The FRESH display list must now carry a TextRun reading
+        // "hit" tagged with #out's node — proving a handler's DOM change
+        // reaches the SCREEN (the display list), not just the DOM tree. ---
+        if (!duetos::web::JsDomContextConsumeDirty(g_state.page_ctx))
+        {
+            fail(10); // mutation didn't set the dirty flag
+            goto restore;
+        }
+        if (!RelayoutFromDoc(g_state.page_doc, g_state.render_viewport_w) || g_state.render_dl == nullptr)
+        {
+            fail(11);
+            goto restore;
+        }
+        {
+            const duetos::web::DisplayList& rdl = *g_state.render_dl;
+            bool found_hit = false;
+            for (u32 i = 0; i < rdl.count; ++i)
+            {
+                const duetos::web::DisplayItem& it = rdl.items[i];
+                if (it.cmd == duetos::web::DisplayCmd::TextRun && it.node == outEl && it.text != nullptr &&
+                    it.textLen >= 3 && it.text[0] == 'h' && it.text[1] == 'i' && it.text[2] == 't')
+                {
+                    found_hit = true;
+                    break;
+                }
+            }
+            if (!found_hit)
+            {
+                fail(12); // re-render did not surface the mutated text
+                goto restore;
+            }
+        }
+
         // --- Check 4: BrowserHitTestNode at the button's rect centre maps
         // back to the button node. Find the button's display item by node
         // identity to get its document rect. ---
@@ -4162,7 +4251,7 @@ void BrowserClickSelfTest()
     }
 
     SerialWrite("[browser-click-selftest] PASS (retained ctx, addEventListener persists, dispatch fires handler "
-                "via textContent readback, hit-test node + href)\n");
+                "via textContent readback, live re-render surfaces mutated text, hit-test node + href)\n");
 
 restore:
     g_state.render_ready = false;
@@ -4256,6 +4345,14 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
                     // const only to keep layout from mutating it.
                     prevented =
                         duetos::web::JsDomContextDispatchClick(g_state.page_ctx, const_cast<duetos::web::Node*>(n));
+                    // If a listener mutated the DOM (textContent/innerHTML/
+                    // setAttribute/classList), re-lay-out the retained doc so
+                    // the change reaches the screen on the next compose. Safe
+                    // here: we hold the compositor context and !fetch_in_flight
+                    // (the enclosing guard), so the fetch worker is not racing
+                    // the same arenas.
+                    if (duetos::web::JsDomContextConsumeDirty(g_state.page_ctx))
+                        RelayoutFromDoc(g_state.page_doc, g_state.render_viewport_w);
                 }
                 if (!prevented && href != nullptr && href[0] != '\0')
                     FollowHref(href);

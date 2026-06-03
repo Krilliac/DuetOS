@@ -165,6 +165,16 @@ Result<void> JsDomContextRunScript(JsDomContext* ctx, const char* script, u32 le
 bool JsDomContextDispatchClick(JsDomContext* ctx, Node* target);
 
 /*
+ * Read-and-clear the context's "DOM was mutated" flag. Returns true iff a
+ * DOM-tree mutation (setAttribute / textContent / innerHTML / classList)
+ * has landed since the last consume. The browser calls this right after a
+ * click dispatch: a true result means the retained DOM changed, so the
+ * page must be re-laid-out for the change to reach the screen. A null
+ * context returns false. Idempotent after a true (clears the flag).
+ */
+bool JsDomContextConsumeDirty(JsDomContext* ctx);
+
+/*
  * Boot self-test. Parses a small HTML document, runs a battery of
  * scripts, and asserts the JS↔DOM effects both via the returned console
  * buffer and by re-walking the live DOM (getElementById textContent,
