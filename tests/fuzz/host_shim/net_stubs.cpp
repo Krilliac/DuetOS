@@ -8,6 +8,7 @@
 // are included for exact signatures (they compile in the
 // stack.cpp TU already).
 
+#include "debug/probes.h"
 #include "drivers/net/net.h"
 #include "net/wifi.h"
 #include "sched/sched.h"
@@ -80,3 +81,10 @@ bool PipeWriteReady(u32)
     return false;
 }
 } // namespace duetos::subsystems::linux::internal
+
+namespace duetos::debug
+{
+// ipv6.cpp's Ipv6SelfTest() fires KBP_PROBE on a failed sub-check; the
+// frame fuzzer never runs the self-test, so a no-op satisfies the link.
+void ProbeFire(ProbeId, u64, u64) {}
+} // namespace duetos::debug
