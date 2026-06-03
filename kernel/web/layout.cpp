@@ -274,6 +274,7 @@ i32 LayoutImage(LayoutCtx& ctx, const Node* node, const ComputedStyle& s, i32 x,
         it.href = linkHref;
         it.hrefLen = static_cast<u32>(duetos::core::StrLen(linkHref));
     }
+    it.node = node; // hit-test back-ref: the <img> element this box came from
     ctx.out->Push(it);
     return it.rect.h;
 }
@@ -406,6 +407,7 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
         placeholder.color = s.backgroundColor;
         placeholder.href = selfHref;
         placeholder.hrefLen = selfHrefLen;
+        placeholder.node = node; // hit-test back-ref: this box's element
         if (ctx.out->Push(placeholder))
         {
             bgSlot = ctx.out->count - 1;
@@ -419,6 +421,7 @@ i32 LayoutBlock(LayoutCtx& ctx, const Node* node, i32 cbX, i32 cbWidth, i32 orig
         placeholder.borderWidth = bw;
         placeholder.href = selfHref;
         placeholder.hrefLen = selfHrefLen;
+        placeholder.node = node; // hit-test back-ref: this box's element
         if (ctx.out->Push(placeholder))
         {
             borderSlot = ctx.out->count - 1;

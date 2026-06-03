@@ -259,6 +259,16 @@ void LayoutSelfTest()
         Fail(7);
         return;
     }
+    // --- node back-ref: the "Title" run points at its source <h1>. ---
+    // The hit-test back-reference must be threaded onto the TextRun: a click
+    // on the heading maps back to the DOM element that produced the pixel.
+    // The "Title" text node lives directly under <h1>, so its run's node is
+    // the <h1> element (non-null, tag == "h1").
+    if (h1run->node == nullptr || h1run->node->tag == nullptr || !duetos::core::StrEqual(h1run->node->tag, "h1"))
+    {
+        Fail(30);
+        return;
+    }
 
     // --- Check 3: the long paragraph wraps to >= 2 TextRuns. ---
     // 50 "w" words at 8px each + spaces vastly exceed the 160px content
@@ -462,7 +472,7 @@ void LayoutSelfTest()
 
     arch::SerialWrite("[layout-selftest] PASS (block+inline display list: bg-rect, bold heading, wrap, "
                       "stacked-y, display:none, center-align, anon-block-wrap, block-in-inline, "
-                      "margin-collapse, parent-child-collapse)\n");
+                      "margin-collapse, parent-child-collapse, node-ref)\n");
 }
 
 } // namespace duetos::web

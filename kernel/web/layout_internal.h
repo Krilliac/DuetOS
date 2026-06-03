@@ -144,6 +144,11 @@ struct InlineRun
     // or nullptr when the run is not inside a link. Threaded onto every
     // TextRun the run emits so the painter/browser can hit-test it.
     const char* href = nullptr;
+    // The DOM element this run's text belongs to (the nearest element
+    // ancestor of the text node, or the inline element itself). Non-owning;
+    // threaded onto every TextRun the run emits for hit-testing. nullptr
+    // for runs with no element ancestor (anonymous content).
+    const Node* node = nullptr;
 };
 
 // Defined in layout_inline.cpp: emit one TextRun command for the slice

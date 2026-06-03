@@ -100,6 +100,21 @@ class Arena
     u32 NodeCount() const { return m_nodeCount; }
     u32 BytesUsed() const { return m_used; }
 
+    /// Restore the bump pointer to a previous BytesUsed() mark, reclaiming
+    /// everything allocated since. Only ever shrinks (a stale/forward mark
+    /// is ignored). Used to scope transient layout scratch (per-block line
+    /// fragment + run arrays) so it does NOT accumulate in this
+    /// non-reclaiming arena — without this, a moderately complex page
+    /// exhausts the arena and the render truncates. The caller MUST NOT
+    /// retain any pointer into the reclaimed region.
+    void Rewind(u32 mark)
+    {
+        if (mark <= m_used)
+        {
+            m_used = mark;
+        }
+    }
+
     // Cap on total live nodes — a hostile/pathological document can
     // not blow past this even if the byte buffer is huge.
     static constexpr u32 kMaxNodes = 4096;
