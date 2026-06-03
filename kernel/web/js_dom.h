@@ -23,20 +23,31 @@
  * (a runaway script returns Timeout instead of hanging the boot).
  *
  * REAL surface (see the per-method comments in js_dom.cpp):
- *   document.getElementById / getElementsByTagName / querySelector
- *           (#id/.class/tag) / createElement / createTextNode /
- *           body / documentElement
+ *   document.getElementById / getElementsByTagName /
+ *           getElementsByClassName / querySelector / querySelectorAll
+ *           (single compound: tag / .class / #id / * , in combination) /
+ *           createElement / createTextNode / body / documentElement
  *   Element: tagName, id, className (get/set), getAttribute /
  *           setAttribute / hasAttribute / removeAttribute, textContent
  *           (get/set), children / childNodes, firstChild / parentNode /
- *           nextSibling, appendChild / removeChild, innerHTML (get =
- *           serialize).
+ *           nextSibling, appendChild / removeChild, innerHTML
+ *           (get = serialize, set = parse-and-replace),
+ *           querySelector / querySelectorAll / getElementsByTagName /
+ *           getElementsByClassName (subtree-scoped to the element),
+ *           classList.add / remove / contains / toggle.
  *
  * GAP (deliberately out of scope for this slice):
  *   - Event model (addEventListener / dispatchEvent).
- *   - innerHTML SET (get-only here; parse-and-replace is heavy).
- *   - querySelectorAll and complex/compound selectors.
- *   - Live HTMLCollection semantics (children/childNodes are snapshots).
+ *   - querySelector/All: only a SINGLE compound selector is matched
+ *     (tag, .class, #id, or universal). Descendant/child/sibling combinators, attribute
+ *     and pseudo selectors, and comma selector-lists are unsupported —
+ *     the CSS selector engine in kernel/web/css.cpp keeps its
+ *     parse/Matches entry points in an anonymous namespace, so they are
+ *     not reachable from here. Revisit once css.h exports a public
+ *     `ParseSelector` + `Matches(SimpleSelector*, const Node*)`.
+ *   - classList: no replace / item / length / iteration.
+ *   - Live HTMLCollection semantics (children/childNodes/getElementsBy*
+ *     and querySelectorAll all return snapshots, not live collections).
  *   - CSSOM / element.style.
  *   - Timers (setTimeout) and network (fetch / XMLHttpRequest).
  *   - The full HTMLElement property surface (offsetWidth, dataset, …).
@@ -85,8 +96,10 @@ JsDomResult JsRunOnDocument(Document* doc, const char* script, u32 len, Arena& d
  * scripts, and asserts the JS↔DOM effects both via the returned console
  * buffer and by re-walking the live DOM (getElementById textContent,
  * setAttribute round-trip, textContent mutation, createElement +
- * appendChild growth, getElementsByTagName length, console.log of a DOM
- * value). Emits `[js-dom-selftest] PASS (N/N)` on success; on any
+ * appendChild growth, getElementsByTagName length, getElementsByClassName,
+ * querySelector/querySelectorAll, classList add/remove/contains/toggle,
+ * console.log of a DOM value). Emits `[js-dom-selftest] PASS (N/N)` on
+ * success; on any
  * failure fires KBP_PROBE_V(kBootSelftestFail, idx) and emits a FAIL
  * line. Wired into boot_bringup via DUETOS_BOOT_SELFTEST after the JS
  * engine self-test.

@@ -48,11 +48,22 @@ struct PropChunk
     PropChunk* next;
 };
 
+// A RegExp instance's runtime payload: the compiled program, the
+// original source/flags text (for .source / .toString), and the mutable
+// `lastIndex` used by the `g` flag's stateful exec/test. Defined in
+// regexp.h; carried by a JsObject whose `regexp` field is non-null.
+struct JsRegExp;
+
 struct JsObject
 {
     bool isArray;
     PropChunk* head; // linked list of property chunks (named props)
     u32 propCount;
+
+    // Non-null iff this object is a RegExp instance. A regex object is a
+    // plain JsObject (so it can still carry ad-hoc props) tagged with its
+    // compiled program here; builtins dispatch test/exec on it.
+    JsRegExp* regexp = nullptr;
 
     // [[Prototype]] — the next link in the prototype chain, or null at
     // the chain's end. Plain objects get Object.prototype here at

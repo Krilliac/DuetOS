@@ -2,6 +2,7 @@
 
 #include "util/string.h"
 #include "web/js/object.h"
+#include "web/js/regexp.h"
 
 /*
  * DuetOS — kernel/web/js: builtin functions and member resolution.
@@ -43,6 +44,36 @@ JsObject* NewPlainObject(Interp& I)
     if (o)
         o->proto = I.objectProto;
     return o;
+}
+
+// Build a RegExp object from source + flags. The object is a plain
+// JsObject (inherits Object.prototype) tagged with its compiled program
+// via JsObject::regexp; test/exec/match/etc. dispatch on that tag.
+Result<JsValue> MakeRegExp(Interp& I, const char* src, u32 srcLen, const char* flags, u32 flagsLen)
+{
+    Result<ReProgram*> pr = ReCompile(I.arena, src, srcLen, flags, flagsLen);
+    if (!pr)
+        return Err{pr.error()};
+
+    JsObject* o = NewPlainObject(I);
+    if (!o)
+        return Err{ErrorCode::OutOfMemory};
+    JsRegExp* re = I.arena.New<JsRegExp>();
+    if (!re)
+        return Err{ErrorCode::OutOfMemory};
+    re->prog = pr.value();
+    // Copy the source/flags text into the arena so the object owns it.
+    JsString* s = MakeString(I.arena, src, srcLen);
+    JsString* f = MakeString(I.arena, flags, flagsLen);
+    if (!s || !f)
+        return Err{ErrorCode::OutOfMemory};
+    re->source = s->data;
+    re->sourceLen = s->len;
+    re->flags = f->data;
+    re->flagsLen = f->len;
+    re->lastIndex = 0;
+    o->regexp = re;
+    return JsValue::Obj(o);
 }
 
 Result<void> InstallBuiltins(Interp& I)
@@ -97,6 +128,10 @@ Result<void> InstallBuiltins(Interp& I)
     ObjSet(math, a, "round", 5, NativeFnVal(I, kMathRound, "round"));
     EnvDefine(g, a, "Math", 4, JsValue::Obj(math));
 
+    // RegExp(pattern[, flags]) — callable to build a regex from strings.
+    // (The /.../ literal path goes through MakeRegExp directly.)
+    EnvDefine(g, a, "RegExp", 6, NativeFnVal(I, kRegExpCtor, "RegExp"));
+
     // JSON
     JsObject* json = MakeNamespace(I);
     if (!json)
@@ -145,6 +180,10 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
             return NativeFnVal(I, kStrReplace, "replace");
         if (NameEq(key, keyLen, "trim"))
             return NativeFnVal(I, kStrTrim, "trim");
+        if (NameEq(key, keyLen, "match"))
+            return NativeFnVal(I, kStrMatch, "match");
+        if (NameEq(key, keyLen, "search"))
+            return NativeFnVal(I, kStrSearch, "search");
         return JsValue::Undefined();
     }
     if (obj.type == JsType::Number)
@@ -163,6 +202,30 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
     if (obj.type == JsType::Object)
     {
         JsObject* o = obj.as.obj;
+        // RegExp instances: test/exec methods + source/flags/global/
+        // lastIndex accessors. Checked before the host/array paths since a
+        // regex object is a plain object that happens to carry a program.
+        if (o->regexp)
+        {
+            JsRegExp* re = o->regexp;
+            if (NameEq(key, keyLen, "test"))
+                return NativeFnVal(I, kReTest, "test");
+            if (NameEq(key, keyLen, "exec"))
+                return NativeFnVal(I, kReExec, "exec");
+            if (NameEq(key, keyLen, "source"))
+                return JsValue::Str(MakeString(I.arena, re->source, re->sourceLen));
+            if (NameEq(key, keyLen, "flags"))
+                return JsValue::Str(MakeString(I.arena, re->flags, re->flagsLen));
+            if (NameEq(key, keyLen, "global"))
+                return JsValue::Bool(re->prog->global);
+            if (NameEq(key, keyLen, "ignoreCase"))
+                return JsValue::Bool(re->prog->ignoreCase);
+            if (NameEq(key, keyLen, "multiline"))
+                return JsValue::Bool(re->prog->multiline);
+            if (NameEq(key, keyLen, "lastIndex"))
+                return JsValue::Int(i64(re->lastIndex));
+            // other keys fall through to the plain property map below
+        }
         // Host objects (DOM elements) resolve members through their C++
         // hook first. A non-Undefined result wins; Undefined falls
         // through so an ad-hoc JS property set on the host object (or a
@@ -440,6 +503,12 @@ static Result<JsValue> StrCase(Interp& I, const JsValue& recv, bool upper)
     return JsValue::Str(MakeString(I.arena, buf, s->len));
 }
 
+// Forward decls for the regex-aware delegations (definitions live in the
+// RegExp-runtime section below). StrSplit / StrReplace dispatch to these
+// when handed a regex argument.
+static Result<JsValue> ReReplace(Interp& I, const JsString* s, JsObject* reObj, const JsString* rep);
+static Result<JsValue> ReSplit(Interp& I, const JsString* s, JsObject* reObj);
+
 static Result<JsValue> StrSplit(Interp& I, const JsValue& recv, const JsValue* args, u32 argc)
 {
     const JsString* s = recv.as.str;
@@ -447,6 +516,9 @@ static Result<JsValue> StrSplit(Interp& I, const JsValue& recv, const JsValue* a
     if (!arr || !s)
         return JsValue::Obj(arr);
     JsValue sep = ArgOr(args, argc, 0);
+    // Regex separator: delegate to the regex splitter.
+    if (sep.type == JsType::Object && sep.as.obj && sep.as.obj->regexp)
+        return ReSplit(I, s, sep.as.obj);
     if (sep.type != JsType::String || sep.as.str->len == 0)
     {
         // split("") -> each char; split(undefined) -> whole string
@@ -498,9 +570,11 @@ static Result<JsValue> StrCharCodeAt(Interp&, const JsValue& recv, const JsValue
     return JsValue::Int(i64(static_cast<unsigned char>(s->data[idx])));
 }
 
-// String.prototype.replace — first-occurrence, string pattern only.
-// GAP: no regex pattern, no function replacer, no `$&`/`$1` capture
-// substitutions, no global ('g') flag (replaces only the first match).
+// String.prototype.replace. A regex pattern routes through ReReplace
+// (which honors the `g` flag and `$&`/`$1` substitutions); a string
+// pattern replaces the FIRST occurrence only.
+// GAP: no function replacer; the string-pattern path is first-match only
+// (use a /.../g regex for global string replacement).
 static Result<JsValue> StrReplace(Interp& I, const JsValue& recv, const JsValue* args, u32 argc)
 {
     const JsString* s = recv.as.str;
@@ -508,6 +582,9 @@ static Result<JsValue> StrReplace(Interp& I, const JsValue& recv, const JsValue*
         return JsValue::Str(MakeString(I.arena, "", 0));
     JsValue patV = ArgOr(args, argc, 0);
     JsValue repV = ArgOr(args, argc, 1);
+    // Regex pattern: delegate to the regex replacer.
+    if (patV.type == JsType::Object && patV.as.obj && patV.as.obj->regexp && repV.type == JsType::String)
+        return ReReplace(I, s, patV.as.obj, repV.as.str);
     // A non-string pattern can't match under the string-only contract:
     // return the receiver unchanged.
     if (patV.type != JsType::String || repV.type != JsType::String)
@@ -1277,6 +1354,207 @@ static JsValue JsonParse(Interp& I, const JsValue* args, u32 argc)
     return result;
 }
 
+// ----------------------- RegExp runtime -----------------------
+
+// The per-match VM step budget, capped to the interpreter's remaining
+// budget so a regex can never out-run the global execution bound. A
+// representative cost is then charged back against I.stepBudget so a
+// script that runs many regexes still terminates.
+static u64 ReBudget(Interp& I)
+{
+    u64 b = I.stepBudget < kReDefaultSteps ? I.stepBudget : kReDefaultSteps;
+    return b;
+}
+
+// Charge `consumed`-ish work back against the interpreter budget. We
+// don't thread the exact VM step count back out; charging a flat
+// proportional amount keeps the accounting simple while ensuring forward
+// progress toward Timeout under a regex-heavy loop.
+static void ReCharge(Interp& I, u32 inputLen)
+{
+    u64 cost = 64 + u64(inputLen);
+    I.stepBudget = (I.stepBudget > cost) ? (I.stepBudget - cost) : 0;
+}
+
+// Coerce an argument to the regex object it denotes: a regex value passes
+// through; any other value is compiled as a literal source string (no
+// flags). Returns null on a bad pattern.
+static JsObject* AsRegExp(Interp& I, const JsValue& v)
+{
+    if (v.type == JsType::Object && v.as.obj && v.as.obj->regexp)
+        return v.as.obj;
+    JsString* s = ToJsString(I, v);
+    if (!s)
+        return nullptr;
+    Result<JsValue> r = MakeRegExp(I, s->data, s->len, "", 0);
+    if (!r || r.value().type != JsType::Object)
+        return nullptr;
+    return r.value().as.obj;
+}
+
+// Build the exec() result array: [whole, group1, group2, ...] plus an
+// `index` property. Unmatched groups become undefined.
+static Result<JsValue> ReBuildMatchArray(Interp& I, const JsString* s, const ReProgram* prog, const ReMatch& m)
+{
+    JsObject* arr = ObjNew(I.arena, true);
+    if (!arr)
+        return Err{ErrorCode::OutOfMemory};
+    for (u32 gi = 0; gi < prog->groupCount; ++gi)
+    {
+        u32 a = m.caps[2 * gi];
+        u32 b = m.caps[2 * gi + 1];
+        if (a == kReNoCap || b == kReNoCap || b < a)
+        {
+            if (!ArrPush(arr, I.arena, JsValue::Undefined()))
+                return Err{ErrorCode::OutOfMemory};
+        }
+        else
+        {
+            if (!ArrPush(arr, I.arena, JsValue::Str(MakeString(I.arena, s->data + a, b - a))))
+                return Err{ErrorCode::OutOfMemory};
+        }
+    }
+    ObjSet(arr, I.arena, "index", 5, JsValue::Int(i64(m.start)));
+    return JsValue::Obj(arr);
+}
+
+// String.prototype.replace with a regex pattern. Supports `$&` (whole
+// match) and `$1`..`$9` (captures) in the replacement; a `g` flag
+// replaces every (non-overlapping) match, else only the first.
+static Result<JsValue> ReReplace(Interp& I, const JsString* s, JsObject* reObj, const JsString* rep)
+{
+    JsRegExp* re = reObj->regexp;
+    const ReProgram* prog = re->prog;
+
+    char* out = nullptr;
+    u32 outLen = 0, outCap = 0;
+    auto append = [&](const char* src, u32 n) -> bool
+    {
+        if (outLen + n + 1 > outCap)
+        {
+            u32 nc = outCap ? outCap * 2 : 64;
+            while (nc < outLen + n + 1)
+                nc *= 2;
+            char* nb = static_cast<char*>(I.arena.Alloc(nc, 1));
+            if (!nb)
+                return false;
+            for (u32 i = 0; i < outLen; ++i)
+                nb[i] = out[i];
+            out = nb;
+            outCap = nc;
+        }
+        for (u32 i = 0; i < n; ++i)
+            out[outLen + i] = src[i];
+        outLen += n;
+        return true;
+    };
+
+    u32 pos = 0;
+    bool any = false;
+    while (pos <= s->len)
+    {
+        ReMatch m = ReExec(I.arena, prog, s->data, s->len, pos, ReBudget(I));
+        ReCharge(I, s->len);
+        if (!m.matched)
+            break;
+        // copy the gap before the match
+        if (!append(s->data + pos, m.start - pos))
+            return Err{ErrorCode::OutOfMemory};
+        // expand the replacement, honoring $& and $1..$9
+        for (u32 i = 0; i < rep->len; ++i)
+        {
+            char rc = rep->data[i];
+            if (rc == '$' && i + 1 < rep->len)
+            {
+                char nx = rep->data[i + 1];
+                if (nx == '&')
+                {
+                    if (!append(s->data + m.start, m.end - m.start))
+                        return Err{ErrorCode::OutOfMemory};
+                    ++i;
+                    continue;
+                }
+                if (nx == '$')
+                {
+                    if (!append("$", 1))
+                        return Err{ErrorCode::OutOfMemory};
+                    ++i;
+                    continue;
+                }
+                if (nx >= '1' && nx <= '9')
+                {
+                    u32 gi = u32(nx - '0');
+                    if (gi < prog->groupCount)
+                    {
+                        u32 a = m.caps[2 * gi], b = m.caps[2 * gi + 1];
+                        if (a != kReNoCap && b != kReNoCap && b >= a)
+                            if (!append(s->data + a, b - a))
+                                return Err{ErrorCode::OutOfMemory};
+                    }
+                    ++i;
+                    continue;
+                }
+            }
+            if (!append(&rc, 1))
+                return Err{ErrorCode::OutOfMemory};
+        }
+        any = true;
+        // advance; guard against a zero-width match looping forever.
+        if (m.end > pos)
+            pos = m.end;
+        else
+        {
+            if (pos < s->len)
+                if (!append(s->data + pos, 1))
+                    return Err{ErrorCode::OutOfMemory};
+            pos = pos + 1;
+        }
+        if (!prog->global)
+            break;
+    }
+    // tail
+    if (pos < s->len)
+        if (!append(s->data + pos, s->len - pos))
+            return Err{ErrorCode::OutOfMemory};
+    (void)any;
+    return JsValue::Str(MakeString(I.arena, out ? out : "", outLen));
+}
+
+// String.prototype.split with a regex separator. Splits at every match;
+// GAP: capture groups in the separator are NOT spliced into the result
+// (ES would insert them), and an empty-pattern match per-char is bounded
+// by advancing one byte past a zero-width match.
+static Result<JsValue> ReSplit(Interp& I, const JsString* s, JsObject* reObj)
+{
+    JsObject* arr = ObjNew(I.arena, true);
+    if (!arr)
+        return Err{ErrorCode::OutOfMemory};
+    const ReProgram* prog = reObj->regexp->prog;
+    u32 last = 0, pos = 0;
+    while (pos <= s->len)
+    {
+        ReMatch m = ReExec(I.arena, prog, s->data, s->len, pos, ReBudget(I));
+        ReCharge(I, s->len);
+        if (!m.matched)
+            break;
+        if (m.end == m.start)
+        {
+            // zero-width separator match: skip a byte to make progress.
+            if (m.start >= s->len)
+                break;
+            pos = m.start + 1;
+            continue;
+        }
+        if (!ArrPush(arr, I.arena, JsValue::Str(MakeString(I.arena, s->data + last, m.start - last))))
+            return Err{ErrorCode::OutOfMemory};
+        last = m.end;
+        pos = m.end;
+    }
+    if (!ArrPush(arr, I.arena, JsValue::Str(MakeString(I.arena, s->data + last, s->len - last))))
+        return Err{ErrorCode::OutOfMemory};
+    return JsValue::Obj(arr);
+}
+
 Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue* args, u32 argc)
 {
     switch (id)
@@ -1430,6 +1708,133 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
         return StrReplace(I, recv, args, argc);
     case kStrTrim:
         return StrTrim(I, recv);
+
+    case kStrMatch:
+    {
+        // String.prototype.match(re). Non-global: returns the exec-style
+        // array (with `index`) or null. Global: returns an array of all
+        // matched substrings (or null when none) — no capture groups,
+        // matching the ES `g`-flag form.
+        const JsString* s = recv.as.str;
+        if (!s)
+            return JsValue::Null();
+        JsObject* reObj = AsRegExp(I, ArgOr(args, argc, 0));
+        if (!reObj)
+            return Err{ErrorCode::InvalidArgument};
+        const ReProgram* prog = reObj->regexp->prog;
+        if (!prog->global)
+        {
+            ReMatch m = ReExec(I.arena, prog, s->data, s->len, 0, ReBudget(I));
+            ReCharge(I, s->len);
+            if (!m.matched)
+                return JsValue::Null();
+            return ReBuildMatchArray(I, s, prog, m);
+        }
+        JsObject* arr = ObjNew(I.arena, true);
+        if (!arr)
+            return Err{ErrorCode::OutOfMemory};
+        u32 pos = 0;
+        bool any = false;
+        while (pos <= s->len)
+        {
+            ReMatch m = ReExec(I.arena, prog, s->data, s->len, pos, ReBudget(I));
+            ReCharge(I, s->len);
+            if (!m.matched)
+                break;
+            any = true;
+            if (!ArrPush(arr, I.arena, JsValue::Str(MakeString(I.arena, s->data + m.start, m.end - m.start))))
+                return Err{ErrorCode::OutOfMemory};
+            pos = (m.end > m.start) ? m.end : m.end + 1; // bound zero-width
+        }
+        if (!any)
+            return JsValue::Null();
+        return JsValue::Obj(arr);
+    }
+    case kStrSearch:
+    {
+        // String.prototype.search(re): index of the first match, or -1.
+        const JsString* s = recv.as.str;
+        if (!s)
+            return JsValue::Int(-1);
+        JsObject* reObj = AsRegExp(I, ArgOr(args, argc, 0));
+        if (!reObj)
+            return Err{ErrorCode::InvalidArgument};
+        ReMatch m = ReExec(I.arena, reObj->regexp->prog, s->data, s->len, 0, ReBudget(I));
+        ReCharge(I, s->len);
+        return JsValue::Int(m.matched ? i64(m.start) : -1);
+    }
+
+    case kReTest:
+    {
+        // RegExp.prototype.test(str): true if the pattern matches. With a
+        // `g` flag, the search starts at lastIndex and advances it.
+        if (recv.type != JsType::Object || !recv.as.obj || !recv.as.obj->regexp)
+            return Err{ErrorCode::BadState};
+        JsRegExp* re = recv.as.obj->regexp;
+        JsString* s = ToJsString(I, ArgOr(args, argc, 0));
+        if (!s)
+            return Err{ErrorCode::OutOfMemory};
+        u32 startAt = re->prog->global ? re->lastIndex : 0;
+        if (startAt > s->len)
+            startAt = s->len;
+        ReMatch m = ReExec(I.arena, re->prog, s->data, s->len, startAt, ReBudget(I));
+        ReCharge(I, s->len);
+        if (re->prog->global)
+            re->lastIndex = m.matched ? (m.end > m.start ? m.end : m.end + 1) : 0;
+        return JsValue::Bool(m.matched);
+    }
+    case kReExec:
+    {
+        // RegExp.prototype.exec(str): the match array (+ `index`) or null.
+        if (recv.type != JsType::Object || !recv.as.obj || !recv.as.obj->regexp)
+            return Err{ErrorCode::BadState};
+        JsRegExp* re = recv.as.obj->regexp;
+        JsString* s = ToJsString(I, ArgOr(args, argc, 0));
+        if (!s)
+            return Err{ErrorCode::OutOfMemory};
+        u32 startAt = re->prog->global ? re->lastIndex : 0;
+        if (startAt > s->len)
+            startAt = s->len;
+        ReMatch m = ReExec(I.arena, re->prog, s->data, s->len, startAt, ReBudget(I));
+        ReCharge(I, s->len);
+        if (!m.matched)
+        {
+            if (re->prog->global)
+                re->lastIndex = 0;
+            return JsValue::Null();
+        }
+        if (re->prog->global)
+            re->lastIndex = (m.end > m.start) ? m.end : m.end + 1;
+        return ReBuildMatchArray(I, s, re->prog, m);
+    }
+    case kRegExpCtor:
+    {
+        // RegExp(pattern[, flags]). A regex first-arg is re-wrapped with
+        // (possibly new) flags; a string first-arg compiles directly.
+        JsValue p = ArgOr(args, argc, 0);
+        JsValue f = ArgOr(args, argc, 1);
+        const char* flags = "";
+        u32 flagsLen = 0;
+        if (f.type == JsType::String)
+        {
+            flags = f.as.str->data;
+            flagsLen = f.as.str->len;
+        }
+        if (p.type == JsType::Object && p.as.obj && p.as.obj->regexp)
+        {
+            JsRegExp* src = p.as.obj->regexp;
+            if (argc < 2)
+            {
+                flags = src->flags;
+                flagsLen = src->flagsLen;
+            }
+            return MakeRegExp(I, src->source, src->sourceLen, flags, flagsLen);
+        }
+        JsString* ps = ToJsString(I, p);
+        if (!ps)
+            return Err{ErrorCode::OutOfMemory};
+        return MakeRegExp(I, ps->data, ps->len, flags, flagsLen);
+    }
 
     case kArrPush:
     {

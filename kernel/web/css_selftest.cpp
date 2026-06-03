@@ -18,6 +18,12 @@
  *      match by attribute presence/value;
  *  11. a pseudo-class and an attribute selector each count as a
  *      class-level specificity component (beat a bare type selector).
+ *  12. the child combinator `ul > li` matches only direct children;
+ *  13. the adjacent-sibling combinator `h1 + p` matches only the p
+ *      immediately after an h1; the general-sibling `h1 ~ p` matches all
+ *      following p siblings;
+ *  14. :not(.skip) matches every element that lacks the class;
+ *  15. :nth-child(2n+1) colours the odd-positioned items.
  *
  * On success emits one grep-able `[css-selftest] PASS (...)` line; on
  * the first failed sub-check fires KBP_PROBE_V(kBootSelftestFail, <#>)
@@ -411,8 +417,196 @@ void CssSelfTest()
         return;
     }
 
+    // --- Checks 12-15: combinators, :not, and the an+b formula --------
+    // A nested structure exercises child vs descendant, sibling adjacency,
+    // negation, and the nth-child formula in one pass.
+    //
+    //   <section>
+    //     <ul>                       (the OUTER list)
+    //       <li>a</li> <li>b</li>    direct children of ul
+    //       <li>                     this li wraps a nested ul
+    //         <ul><li>nested</li></ul>
+    //       </li>
+    //     </ul>
+    //     <h1>H</h1>
+    //     <p>first</p>               immediately after h1 -> adjacent match
+    //     <p class="skip">second</p> a following sibling, but .skip
+    //     <p>third</p>               another following sibling
+    //   </section>
+    const char* html3 = "<html><body><section>"
+                        "<ul id=\"outer\">"
+                        "<li>a</li>"
+                        "<li>b</li>"
+                        "<li><ul id=\"inner\"><li>nested</li></ul></li>"
+                        "</ul>"
+                        "<h1>H</h1>"
+                        "<p id=\"p1\">first</p>"
+                        "<p id=\"p2\" class=\"skip\">second</p>"
+                        "<p id=\"p3\">third</p>"
+                        "</section></body></html>";
+    Node* doc3 = ParseHtml(html3, static_cast<u32>(duetos::core::StrLen(html3)), arena);
+    if (doc3 == nullptr)
+    {
+        Fail(111);
+        return;
+    }
+
+    // ul#outer > li { color: red }   -> only the 3 DIRECT children of the
+    //                                   OUTER ul, NOT the nested li.
+    // h1 + p { font-weight: bold }   -> only #p1 (immediately after h1).
+    // h1 ~ p { font-style: italic }  -> #p1, #p2, #p3 (all following p).
+    // p:not(.skip) { text-decoration: underline } -> #p1 and #p3, not #p2.
+    // ul#outer > li:nth-child(2n+1) { background: blue } -> li 1 and li 3.
+    const char* css3 = "#outer > li { color: red; }"
+                       "h1 + p { font-weight: bold; }"
+                       "h1 ~ p { font-style: italic; }"
+                       "p:not(.skip) { text-decoration: underline; }"
+                       "#outer > li:nth-child(2n+1) { background-color: blue; }";
+    StyleSheet sheet3{};
+    ParseStyleSheet(sheet3, css3, static_cast<u32>(duetos::core::StrLen(css3)), /*userAgent=*/false, arena);
+    StyleMap map3 = ComputeStyles(doc3, sheet3, arena);
+    if (map3.count == 0)
+    {
+        Fail(112);
+        return;
+    }
+
+    const Node* outerUl = nullptr;
+    const Node* innerUl = nullptr;
+    for (u32 i = 0; i < map3.count; ++i)
+    {
+        const Node* n = map3.keys[i];
+        if (n->tag != nullptr && duetos::core::StrEqual(n->tag, "ul"))
+        {
+            const char* id = n->GetAttr("id");
+            if (id != nullptr && duetos::core::StrEqual(id, "outer"))
+            {
+                outerUl = n;
+            }
+            else if (id != nullptr && duetos::core::StrEqual(id, "inner"))
+            {
+                innerUl = n;
+            }
+        }
+    }
+    if (outerUl == nullptr || innerUl == nullptr)
+    {
+        Fail(113);
+        return;
+    }
+    const Node* oli1 = NthElementChild(outerUl, 1);
+    const Node* oli2 = NthElementChild(outerUl, 2);
+    const Node* oli3 = NthElementChild(outerUl, 3);
+    const Node* nestedLi = NthElementChild(innerUl, 1);
+    if (oli1 == nullptr || oli2 == nullptr || oli3 == nullptr || nestedLi == nullptr)
+    {
+        Fail(114);
+        return;
+    }
+    const ComputedStyle* oli1s = map3.Get(oli1);
+    const ComputedStyle* oli2s = map3.Get(oli2);
+    const ComputedStyle* oli3s = map3.Get(oli3);
+    const ComputedStyle* nestedLiS = map3.Get(nestedLi);
+    if (oli1s == nullptr || oli2s == nullptr || oli3s == nullptr || nestedLiS == nullptr)
+    {
+        Fail(115);
+        return;
+    }
+
+    // --- Check 12: `#outer > li` colours only the direct children -----
+    // The nested <li> is a grandchild, so it must stay default (black).
+    if (!ColorEq(oli1s->color, 255, 0, 0) || !ColorEq(oli2s->color, 255, 0, 0) || !ColorEq(oli3s->color, 255, 0, 0))
+    {
+        Fail(12);
+        return;
+    }
+    // `color` INHERITS, so the nested <li> legitimately inherits red from its
+    // matched ancestor (the 3rd direct <li>) — that is correct CSS, NOT a
+    // combinator failure. Verify the child combinator EXCLUDES the nested li
+    // via a NON-inherited property instead: it must not pick up the blue
+    // background that `#outer > li:nth-child(2n+1)` gives a *direct* child.
+    if (nestedLiS->backgroundColor.a != 0)
+    {
+        Fail(12);
+        return;
+    }
+
+    // --- Check 15: nth-child(2n+1) on the outer list -> li 1 and li 3 --
+    // background-color blue on the odd items only.
+    if (oli1s->backgroundColor.b != 255 || oli3s->backgroundColor.b != 255 || oli2s->backgroundColor.a != 0)
+    {
+        Fail(15);
+        return;
+    }
+
+    // Locate the three <p> by id.
+    const Node* p1 = nullptr;
+    const Node* p2 = nullptr;
+    const Node* p3 = nullptr;
+    for (u32 i = 0; i < map3.count; ++i)
+    {
+        const Node* n = map3.keys[i];
+        if (n->tag == nullptr || !duetos::core::StrEqual(n->tag, "p"))
+        {
+            continue;
+        }
+        const char* id = n->GetAttr("id");
+        if (id == nullptr)
+        {
+            continue;
+        }
+        if (duetos::core::StrEqual(id, "p1"))
+        {
+            p1 = n;
+        }
+        else if (duetos::core::StrEqual(id, "p2"))
+        {
+            p2 = n;
+        }
+        else if (duetos::core::StrEqual(id, "p3"))
+        {
+            p3 = n;
+        }
+    }
+    if (p1 == nullptr || p2 == nullptr || p3 == nullptr)
+    {
+        Fail(116);
+        return;
+    }
+    const ComputedStyle* p1s = map3.Get(p1);
+    const ComputedStyle* p2s = map3.Get(p2);
+    const ComputedStyle* p3s = map3.Get(p3);
+    if (p1s == nullptr || p2s == nullptr || p3s == nullptr)
+    {
+        Fail(117);
+        return;
+    }
+
+    // --- Check 13: adjacent `h1 + p` matches only #p1; general `h1 ~ p`
+    //     matches all three. bold == adjacent, italic == general-sibling.
+    if (p1s->fontWeight != FontWeight::Bold || p2s->fontWeight != FontWeight::Normal ||
+        p3s->fontWeight != FontWeight::Normal)
+    {
+        Fail(13);
+        return;
+    }
+    if (p1s->fontStyle != FontStyleKind::Italic || p2s->fontStyle != FontStyleKind::Italic ||
+        p3s->fontStyle != FontStyleKind::Italic)
+    {
+        Fail(13);
+        return;
+    }
+
+    // --- Check 14: `p:not(.skip)` underlines #p1 and #p3, not #p2 ------
+    if (!p1s->underline || !p3s->underline || p2s->underline)
+    {
+        Fail(14);
+        return;
+    }
+
     arch::SerialWrite("[css-selftest] PASS (cascade specificity inline inherit UA display-none color "
-                      "first-child last-child nth-child attr-selectors)\n");
+                      "first-child last-child nth-child attr-selectors child-combinator "
+                      "sibling-combinators not nth-formula)\n");
 }
 
 } // namespace duetos::web

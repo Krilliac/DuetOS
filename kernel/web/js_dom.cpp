@@ -143,48 +143,181 @@ void CollectByTag(Node* n, const char* tag, Node** out, u32 cap, u32& count)
     }
 }
 
-// Recursive class search (first match, document order). `cls` is the
-// bare class token (no leading dot).
-Node* FindByClass(Node* n, const char* cls)
+// True if the whitespace-delimited token list `list` (e.g. a `class`
+// attribute value) contains `tok` (length `tokLen`) as a whole token.
+bool TokenListHas(const char* list, const char* tok, u32 tokLen)
 {
+    if (!list || tokLen == 0)
+        return false;
+    u32 total = Slen(list);
+    u32 i = 0;
+    while (i < total)
+    {
+        while (i < total && (list[i] == ' ' || list[i] == '\t' || list[i] == '\n'))
+            ++i;
+        u32 s = i;
+        while (i < total && list[i] != ' ' && list[i] != '\t' && list[i] != '\n')
+            ++i;
+        if (i - s == tokLen)
+        {
+            bool eq = true;
+            for (u32 k = 0; k < tokLen; ++k)
+                if (list[s + k] != tok[k])
+                {
+                    eq = false;
+                    break;
+                }
+            if (eq)
+                return true;
+        }
+    }
+    return false;
+}
+
+// Recursive class collection into a flat list (snapshot, document order).
+void CollectByClass(Node* n, const char* cls, Node** out, u32 cap, u32& count)
+{
+    u32 ln = Slen(cls);
     for (Node* c = n->firstChild; c; c = c->nextSibling)
     {
-        if (c->kind == NodeKind::Element)
+        if (c->kind == NodeKind::Element && TokenListHas(c->GetAttr("class"), cls, ln))
         {
-            const char* cn = c->GetAttr("class");
-            if (cn)
-            {
-                // Match `cls` as a whitespace-delimited token.
-                u32 ln = Slen(cls);
-                u32 i = 0;
-                u32 total = Slen(cn);
-                while (i < total)
-                {
-                    while (i < total && (cn[i] == ' ' || cn[i] == '\t' || cn[i] == '\n'))
-                        ++i;
-                    u32 s = i;
-                    while (i < total && cn[i] != ' ' && cn[i] != '\t' && cn[i] != '\n')
-                        ++i;
-                    if (i - s == ln)
-                    {
-                        bool eq = true;
-                        for (u32 k = 0; k < ln; ++k)
-                            if (cn[s + k] != cls[k])
-                            {
-                                eq = false;
-                                break;
-                            }
-                        if (eq)
-                            return c;
-                    }
-                }
-            }
+            if (count < cap)
+                out[count] = c;
+            ++count;
         }
-        Node* hit = FindByClass(c, cls);
+        CollectByClass(c, cls, out, cap, count);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// querySelector / querySelectorAll selector matching.
+//
+// GAP: the CSS selector engine (kernel/web/css.cpp) keeps its selector
+// PARSE + Matches()/MatchesCompound() entry points in an anonymous
+// namespace — they are NOT reachable through css.h's public API
+// (ParseStyleSheet / ComputeStyles / ParseColor / ParseLength only). So
+// these query methods cannot reuse it without a new public css entry
+// point (see js_dom.h GAP note + the final report). They support a
+// single compound of tag / .class / #id (in any combination, e.g.
+// `li.active`, `div#main`) and `*`; descendant combinators, attribute
+// selectors, pseudo-classes, and selector lists are GAP — revisit once
+// css.h exports a `ParseSelector` + `Matches(SimpleSelector*, Node*)`.
+// ---------------------------------------------------------------------------
+
+// One compound selector parsed out of a query string.
+struct LiteSelector
+{
+    bool universal = false;
+    char tag[64] = {}; // lowercased; empty == no type constraint
+    char id[64] = {};  // bare id (no '#'); empty == none
+    char cls[64] = {}; // bare class (no '.'); empty == none
+    bool valid = false;
+};
+
+void LiteCopyLower(char* dst, u32 cap, const char* src, u32 len)
+{
+    u32 m = len < cap - 1 ? len : cap - 1;
+    for (u32 i = 0; i < m; ++i)
+    {
+        char ch = src[i];
+        dst[i] = (ch >= 'A' && ch <= 'Z') ? char(ch + 32) : ch;
+    }
+    dst[m] = '\0';
+}
+
+// Parse one compound selector. Leading run is the type (or '*'); '.' and
+// '#' introduce class/id tokens. Whitespace ends parsing (no descendant
+// combinator support — only the first compound is honored). `id` keeps
+// the author's case (ids are case-sensitive); tag/class are lowercased
+// to match the parser's lowercased tags / the token compare.
+LiteSelector ParseLiteSelector(const char* sel, u32 len)
+{
+    LiteSelector ls{};
+    u32 i = 0;
+    while (i < len && (sel[i] == ' ' || sel[i] == '\t' || sel[i] == '\n'))
+        ++i;
+    // Leading type / universal (anything before the first . or #).
+    u32 typeStart = i;
+    while (i < len && sel[i] != '.' && sel[i] != '#' && sel[i] != ' ' && sel[i] != '\t' && sel[i] != '\n')
+        ++i;
+    u32 typeLen = i - typeStart;
+    if (typeLen == 1 && sel[typeStart] == '*')
+        ls.universal = true;
+    else if (typeLen > 0)
+        LiteCopyLower(ls.tag, sizeof(ls.tag), sel + typeStart, typeLen);
+    // Trailing .class / #id tokens (single of each supported).
+    while (i < len && sel[i] != ' ' && sel[i] != '\t' && sel[i] != '\n')
+    {
+        char kind = sel[i++];
+        u32 tokStart = i;
+        while (i < len && sel[i] != '.' && sel[i] != '#' && sel[i] != ' ' && sel[i] != '\t' && sel[i] != '\n')
+            ++i;
+        u32 tokLen = i - tokStart;
+        if (tokLen == 0)
+            return ls; // dangling '.'/'#' — invalid
+        if (kind == '#')
+        {
+            u32 m = tokLen < sizeof(ls.id) - 1 ? tokLen : u32(sizeof(ls.id) - 1);
+            for (u32 k = 0; k < m; ++k)
+                ls.id[k] = sel[tokStart + k];
+            ls.id[m] = '\0';
+        }
+        else // '.'
+        {
+            LiteCopyLower(ls.cls, sizeof(ls.cls), sel + tokStart, tokLen);
+        }
+    }
+    ls.valid = ls.universal || ls.tag[0] || ls.id[0] || ls.cls[0];
+    return ls;
+}
+
+// Test one element against a parsed compound selector.
+bool LiteMatch(const Node* el, const LiteSelector& ls)
+{
+    if (el->kind != NodeKind::Element)
+        return false;
+    if (!ls.universal && ls.tag[0])
+        if (!el->tag || !duetos::core::StrEqual(el->tag, ls.tag))
+            return false;
+    if (ls.id[0])
+    {
+        const char* elId = el->GetAttr("id");
+        if (!elId || !duetos::core::StrEqual(elId, ls.id))
+            return false;
+    }
+    if (ls.cls[0] && !TokenListHas(el->GetAttr("class"), ls.cls, Slen(ls.cls)))
+        return false;
+    return true;
+}
+
+// First descendant of `root` matching `ls` (document order), or null.
+Node* LiteFindFirst(Node* root, const LiteSelector& ls)
+{
+    for (Node* c = root->firstChild; c; c = c->nextSibling)
+    {
+        if (LiteMatch(c, ls))
+            return c;
+        Node* hit = LiteFindFirst(c, ls);
         if (hit)
             return hit;
     }
     return nullptr;
+}
+
+// Collect every descendant of `root` matching `ls` (snapshot, doc order).
+void LiteCollect(Node* root, const LiteSelector& ls, Node** out, u32 cap, u32& count)
+{
+    for (Node* c = root->firstChild; c; c = c->nextSibling)
+    {
+        if (LiteMatch(c, ls))
+        {
+            if (count < cap)
+                out[count] = c;
+            ++count;
+        }
+        LiteCollect(c, ls, out, cap, count);
+    }
 }
 
 // Set or replace an attribute on an element (DOM-arena strings).
@@ -563,6 +696,221 @@ Result<JsValue> MRemoveChild(Interp&, const JsValue& recv, const JsValue* args, 
     return args[0];
 }
 
+// ---- element-scoped query methods (subtree rooted at the receiver) ----
+
+Result<JsValue> MQuerySelector(Interp&, const JsValue& recv, const JsValue* args, u32 argc, void*)
+{
+    NodeBind* nb = BindOf(recv);
+    if (!nb)
+        return JsValue::Null();
+    char sel[128];
+    u32 sl = ValToCStr(ArgOr(args, argc, 0), sel, sizeof(sel));
+    LiteSelector ls = ParseLiteSelector(sel, sl);
+    if (!ls.valid)
+        return JsValue::Null();
+    return WrapNode(*nb->ctx, LiteFindFirst(nb->node, ls));
+}
+
+Result<JsValue> MQuerySelectorAll(Interp&, const JsValue& recv, const JsValue* args, u32 argc, void*)
+{
+    NodeBind* nb = BindOf(recv);
+    if (!nb)
+        return JsValue::Undefined();
+    char sel[128];
+    u32 sl = ValToCStr(ArgOr(args, argc, 0), sel, sizeof(sel));
+    LiteSelector ls = ParseLiteSelector(sel, sl);
+    Node* hits[256];
+    u32 count = 0;
+    if (ls.valid)
+        LiteCollect(nb->node, ls, hits, 256, count);
+    u32 n = count < 256 ? count : 256;
+    return WrapNodeList(*nb->ctx, hits, n);
+}
+
+Result<JsValue> MGetElementsByTagName(Interp&, const JsValue& recv, const JsValue* args, u32 argc, void*)
+{
+    NodeBind* nb = BindOf(recv);
+    if (!nb)
+        return JsValue::Undefined();
+    char tag[64];
+    u32 tl = ValToCStr(ArgOr(args, argc, 0), tag, sizeof(tag));
+    for (u32 i = 0; i < tl; ++i)
+        if (tag[i] >= 'A' && tag[i] <= 'Z')
+            tag[i] = char(tag[i] + 32);
+    Node* hits[256];
+    u32 count = 0;
+    // '*' collects all descendant elements (mirror querySelectorAll('*')).
+    if (tl == 1 && tag[0] == '*')
+    {
+        LiteSelector ls{};
+        ls.universal = true;
+        ls.valid = true;
+        LiteCollect(nb->node, ls, hits, 256, count);
+    }
+    else
+    {
+        CollectByTag(nb->node, tag, hits, 256, count);
+    }
+    u32 n = count < 256 ? count : 256;
+    return WrapNodeList(*nb->ctx, hits, n);
+}
+
+Result<JsValue> MGetElementsByClassName(Interp&, const JsValue& recv, const JsValue* args, u32 argc, void*)
+{
+    NodeBind* nb = BindOf(recv);
+    if (!nb)
+        return JsValue::Undefined();
+    char cls[128];
+    ValToCStr(ArgOr(args, argc, 0), cls, sizeof(cls));
+    Node* hits[256];
+    u32 count = 0;
+    CollectByClass(nb->node, cls, hits, 256, count);
+    u32 n = count < 256 ? count : 256;
+    return WrapNodeList(*nb->ctx, hits, n);
+}
+
+// ---------------------------------------------------------------------------
+// element.classList — a small live token-list facade over the `class`
+// attribute. add/remove/toggle rewrite the attribute through SetAttribute
+// (DOM-arena copy); contains tests membership. The receiver of each
+// method is the classList object itself, whose hostData is the OWNING
+// element's NodeBind (set up in MakeClassList), so mutations land on the
+// real element. GAP: no `replace`, no `item(i)`, no iterable/length —
+// the three mutators + contains cover the scripting need here.
+// ---------------------------------------------------------------------------
+
+// Rebuild a `class` attribute from the element's current tokens, with one
+// token added or removed. `add` true => ensure `tok` present; false =>
+// ensure absent. Writes the result back via SetAttribute. Returns whether
+// the token is present AFTER the operation.
+bool ClassListWrite(DomCtx& ctx, Node* el, const char* tok, u32 tokLen, bool add)
+{
+    char buf[1024];
+    u32 o = 0;
+    const char* cur = el->GetAttr("class");
+    u32 total = Slen(cur);
+    u32 i = 0;
+    bool present = false;
+    while (i < total)
+    {
+        while (i < total && (cur[i] == ' ' || cur[i] == '\t' || cur[i] == '\n'))
+            ++i;
+        u32 s = i;
+        while (i < total && cur[i] != ' ' && cur[i] != '\t' && cur[i] != '\n')
+            ++i;
+        u32 wl = i - s;
+        if (wl == 0)
+            continue;
+        bool same = (wl == tokLen);
+        for (u32 k = 0; same && k < tokLen; ++k)
+            if (cur[s + k] != tok[k])
+                same = false;
+        if (same)
+        {
+            present = true;
+            if (!add)
+                continue; // drop this token
+        }
+        // Keep this token.
+        if (o > 0 && o < sizeof(buf))
+            buf[o++] = ' ';
+        for (u32 k = 0; k < wl && o < sizeof(buf); ++k)
+            buf[o++] = cur[s + k];
+    }
+    if (add && !present)
+    {
+        if (o > 0 && o < sizeof(buf))
+            buf[o++] = ' ';
+        for (u32 k = 0; k < tokLen && o < sizeof(buf); ++k)
+            buf[o++] = tok[k];
+    }
+    SetAttribute(ctx, el, "class", 5, buf, o);
+    return add; // present-after: true for add, false for remove
+}
+
+Result<JsValue> MClassListAdd(Interp&, const JsValue& recv, const JsValue* args, u32 argc, void*)
+{
+    NodeBind* nb = BindOf(recv);
+    if (!nb || nb->node->kind != NodeKind::Element)
+        return JsValue::Undefined();
+    char tok[128];
+    u32 tl = ValToCStr(ArgOr(args, argc, 0), tok, sizeof(tok));
+    if (tl > 0)
+        ClassListWrite(*nb->ctx, nb->node, tok, tl, true);
+    return JsValue::Undefined();
+}
+
+Result<JsValue> MClassListRemove(Interp&, const JsValue& recv, const JsValue* args, u32 argc, void*)
+{
+    NodeBind* nb = BindOf(recv);
+    if (!nb || nb->node->kind != NodeKind::Element)
+        return JsValue::Undefined();
+    char tok[128];
+    u32 tl = ValToCStr(ArgOr(args, argc, 0), tok, sizeof(tok));
+    if (tl > 0)
+        ClassListWrite(*nb->ctx, nb->node, tok, tl, false);
+    return JsValue::Undefined();
+}
+
+Result<JsValue> MClassListContains(Interp&, const JsValue& recv, const JsValue* args, u32 argc, void*)
+{
+    NodeBind* nb = BindOf(recv);
+    if (!nb)
+        return JsValue::Bool(false);
+    char tok[128];
+    u32 tl = ValToCStr(ArgOr(args, argc, 0), tok, sizeof(tok));
+    return JsValue::Bool(TokenListHas(nb->node->GetAttr("class"), tok, tl));
+}
+
+// toggle(tok[, force]): if force given, behaves like add/remove; else
+// flips membership. Returns the present-after-state as a JS bool.
+Result<JsValue> MClassListToggle(Interp&, const JsValue& recv, const JsValue* args, u32 argc, void*)
+{
+    NodeBind* nb = BindOf(recv);
+    if (!nb || nb->node->kind != NodeKind::Element)
+        return JsValue::Bool(false);
+    char tok[128];
+    u32 tl = ValToCStr(ArgOr(args, argc, 0), tok, sizeof(tok));
+    if (tl == 0)
+        return JsValue::Bool(false);
+    bool has = TokenListHas(nb->node->GetAttr("class"), tok, tl);
+    bool add = (argc >= 2) ? js::ToBoolean(args[1]) : !has;
+    ClassListWrite(*nb->ctx, nb->node, tok, tl, add);
+    return JsValue::Bool(add);
+}
+
+// Build the classList host object. Its hostData is the SAME NodeBind as
+// the owning element (so its methods operate on that element); its
+// hostGet exposes only the four classList methods.
+Result<JsValue> ClassListHostGet(Interp&, JsObject* self, const char* key, u32 keyLen);
+
+JsValue MakeClassList(DomCtx& ctx, NodeBind* owner)
+{
+    JsObject* o = js::ObjNew(*ctx.js, false);
+    if (!o)
+        return JsValue::Undefined();
+    o->hostData = owner;
+    o->hostGet = ClassListHostGet;
+    return JsValue::Obj(o);
+}
+
+Result<JsValue> ClassListHostGet(Interp&, JsObject* self, const char* key, u32 keyLen)
+{
+    NodeBind* nb = static_cast<NodeBind*>(self->hostData);
+    if (!nb)
+        return JsValue::Undefined();
+    DomCtx& ctx = *nb->ctx;
+    if (KeyIs(key, keyLen, "add"))
+        return Method(ctx, MClassListAdd, "add");
+    if (KeyIs(key, keyLen, "remove"))
+        return Method(ctx, MClassListRemove, "remove");
+    if (KeyIs(key, keyLen, "contains"))
+        return Method(ctx, MClassListContains, "contains");
+    if (KeyIs(key, keyLen, "toggle"))
+        return Method(ctx, MClassListToggle, "toggle");
+    return JsValue::Undefined();
+}
+
 // ---------------------------------------------------------------------------
 // document methods (recv = the document host object; ctx via nativeCtx).
 // ---------------------------------------------------------------------------
@@ -591,26 +939,45 @@ Result<JsValue> DGetElementsByTagName(Interp&, const JsValue&, const JsValue* ar
     return WrapNodeList(*ctx, hits, n);
 }
 
-// querySelector lite: '#id', '.class', or a bare tag. GAP: compound /
-// descendant / attribute selectors.
+Result<JsValue> DGetElementsByClassName(Interp&, const JsValue&, const JsValue* args, u32 argc, void* ctxp)
+{
+    DomCtx* ctx = CtxOf(ctxp);
+    char cls[128];
+    ValToCStr(ArgOr(args, argc, 0), cls, sizeof(cls));
+    Node* hits[256];
+    u32 count = 0;
+    CollectByClass(ctx->doc, cls, hits, 256, count);
+    u32 n = count < 256 ? count : 256;
+    return WrapNodeList(*ctx, hits, n);
+}
+
+// querySelector: first descendant matching a single compound selector
+// (tag / .class / #id / *, in combination). GAP: descendant combinators,
+// attribute / pseudo selectors, selector lists — see ParseLiteSelector.
 Result<JsValue> DQuerySelector(Interp&, const JsValue&, const JsValue* args, u32 argc, void* ctxp)
 {
     DomCtx* ctx = CtxOf(ctxp);
     char sel[128];
     u32 sl = ValToCStr(ArgOr(args, argc, 0), sel, sizeof(sel));
-    if (sl == 0)
+    LiteSelector ls = ParseLiteSelector(sel, sl);
+    if (!ls.valid)
         return JsValue::Null();
-    if (sel[0] == '#')
-        return WrapNode(*ctx, FindById(ctx->doc, sel + 1));
-    if (sel[0] == '.')
-        return WrapNode(*ctx, FindByClass(ctx->doc, sel + 1));
-    for (u32 i = 0; i < sl; ++i)
-        if (sel[i] >= 'A' && sel[i] <= 'Z')
-            sel[i] = char(sel[i] + 32);
-    Node* hits[1];
+    return WrapNode(*ctx, LiteFindFirst(ctx->doc, ls));
+}
+
+// querySelectorAll: a JS array of every descendant matching the selector.
+Result<JsValue> DQuerySelectorAll(Interp&, const JsValue&, const JsValue* args, u32 argc, void* ctxp)
+{
+    DomCtx* ctx = CtxOf(ctxp);
+    char sel[128];
+    u32 sl = ValToCStr(ArgOr(args, argc, 0), sel, sizeof(sel));
+    LiteSelector ls = ParseLiteSelector(sel, sl);
+    Node* hits[256];
     u32 count = 0;
-    CollectByTag(ctx->doc, sel, hits, 1, count);
-    return WrapNode(*ctx, count > 0 ? hits[0] : nullptr);
+    if (ls.valid)
+        LiteCollect(ctx->doc, ls, hits, 256, count);
+    u32 n = count < 256 ? count : 256;
+    return WrapNodeList(*ctx, hits, n);
 }
 
 Result<JsValue> DCreateElement(Interp&, const JsValue&, const JsValue* args, u32 argc, void* ctxp)
@@ -685,8 +1052,12 @@ Result<JsValue> ElemHostGet(Interp& I, JsObject* self, const char* key, u32 keyL
             return Method(ctx, DGetElementById, "getElementById");
         if (KeyIs(key, keyLen, "getElementsByTagName"))
             return Method(ctx, DGetElementsByTagName, "getElementsByTagName");
+        if (KeyIs(key, keyLen, "getElementsByClassName"))
+            return Method(ctx, DGetElementsByClassName, "getElementsByClassName");
         if (KeyIs(key, keyLen, "querySelector"))
             return Method(ctx, DQuerySelector, "querySelector");
+        if (KeyIs(key, keyLen, "querySelectorAll"))
+            return Method(ctx, DQuerySelectorAll, "querySelectorAll");
         if (KeyIs(key, keyLen, "createElement"))
             return Method(ctx, DCreateElement, "createElement");
         if (KeyIs(key, keyLen, "createTextNode"))
@@ -775,6 +1146,16 @@ Result<JsValue> ElemHostGet(Interp& I, JsObject* self, const char* key, u32 keyL
             return Method(ctx, MAppendChild, "appendChild");
         if (KeyIs(key, keyLen, "removeChild"))
             return Method(ctx, MRemoveChild, "removeChild");
+        if (KeyIs(key, keyLen, "querySelector"))
+            return Method(ctx, MQuerySelector, "querySelector");
+        if (KeyIs(key, keyLen, "querySelectorAll"))
+            return Method(ctx, MQuerySelectorAll, "querySelectorAll");
+        if (KeyIs(key, keyLen, "getElementsByTagName"))
+            return Method(ctx, MGetElementsByTagName, "getElementsByTagName");
+        if (KeyIs(key, keyLen, "getElementsByClassName"))
+            return Method(ctx, MGetElementsByClassName, "getElementsByClassName");
+        if (KeyIs(key, keyLen, "classList"))
+            return MakeClassList(ctx, nb);
     }
 
     return JsValue::Undefined(); // miss → fall through to plain props

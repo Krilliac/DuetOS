@@ -14,13 +14,14 @@
  * parser never reads past `end`.
  *
  * Recognised selectors: type, .class, #id, universal, the descendant
- * combinator (space), the structural pseudo-classes :first-child /
- * :last-child / :nth-child(N|even|odd), and attribute selectors
+ * (space), child (>), adjacent-sibling (+) and general-sibling (~)
+ * combinators, the structural pseudo-classes :first-child / :last-child /
+ * :nth-child(N|even|odd|an+b), :not(simple), and attribute selectors
  * [attr], [attr="v"], [attr~="v"], [attr^="v"], [attr$="v"], [attr*="v"].
  *
- * GAP: :nth-child(an+b) formula form and other pseudo-classes/elements
- * (:hover, ::before, :not, :nth-of-type, …), child/sibling combinators
- * (>, +, ~). !important is detected best-effort.
+ * GAP: :not() with a compound/complex argument, other pseudo-classes /
+ * elements (:hover, ::before, :nth-of-type, :nth-last-child, …) and the
+ * column combinator (||). !important is detected best-effort.
  */
 
 #include "web/css.h"
@@ -101,14 +102,127 @@ bool IsFragBoundary(char c)
     return c == '.' || c == '#' || c == ':' || c == '[';
 }
 
+// Forward declaration: ParsePseudo's :not() handling needs to parse a
+// simple-selector argument, which ParseCompound provides (defined below).
+SimpleSelector* ParseCompound(const char* b, const char* e, Arena& arena, u32& aIds, u32& bClasses, u32& cTypes);
+
+// Parse the An+B microsyntax of :nth-child into (a, b). Accepts forms like
+// "2n+1", "2n-1", "-n+3", "n", "+n", "3n", "-3n", "+5", "5". Returns true
+// on a well-formed formula that actually contains an 'n' (a pure integer
+// is handled by the caller as the literal NthChildLit form). `aOut`/`bOut`
+// receive the coefficients. Whitespace inside the formula is tolerated.
+bool ParseAnPlusB(const char* b, const char* e, i32& aOut, i32& bOut)
+{
+    // Locate 'n' / 'N'. No 'n' means this is not the formula form.
+    const char* nPos = nullptr;
+    for (const char* s = b; s < e; ++s)
+    {
+        if (*s == 'n' || *s == 'N')
+        {
+            nPos = s;
+            break;
+        }
+    }
+    if (nPos == nullptr)
+    {
+        return false;
+    }
+
+    // --- coefficient 'a' is the signed integer before 'n' --------------
+    const char* ap = b;
+    while (ap < nPos && IsSpace(*ap))
+    {
+        ++ap;
+    }
+    i32 a = 1;
+    bool aNeg = false;
+    if (ap < nPos && (*ap == '+' || *ap == '-'))
+    {
+        aNeg = (*ap == '-');
+        ++ap;
+    }
+    if (ap < nPos)
+    {
+        // Explicit magnitude digits ("2n", "-3n"); else implicit 1 ("n").
+        i32 mag = 0;
+        bool sawDigit = false;
+        for (const char* d = ap; d < nPos; ++d)
+        {
+            if (*d < '0' || *d > '9')
+            {
+                return false; // junk between sign and 'n'
+            }
+            mag = mag * 10 + (*d - '0');
+            sawDigit = true;
+        }
+        if (sawDigit)
+        {
+            a = mag;
+        }
+    }
+    if (aNeg)
+    {
+        a = -a;
+    }
+
+    // --- offset 'b' is the signed integer after 'n' (optional) ---------
+    const char* bp = nPos + 1;
+    while (bp < e && IsSpace(*bp))
+    {
+        ++bp;
+    }
+    i32 bVal = 0;
+    if (bp < e)
+    {
+        bool bNeg = false;
+        if (*bp == '+' || *bp == '-')
+        {
+            bNeg = (*bp == '-');
+            ++bp;
+        }
+        else
+        {
+            return false; // 'n' must be followed by a sign (or nothing)
+        }
+        while (bp < e && IsSpace(*bp))
+        {
+            ++bp;
+        }
+        bool sawDigit = false;
+        for (; bp < e; ++bp)
+        {
+            if (*bp < '0' || *bp > '9')
+            {
+                return false;
+            }
+            bVal = bVal * 10 + (*bp - '0');
+            sawDigit = true;
+        }
+        if (!sawDigit)
+        {
+            return false;
+        }
+        if (bNeg)
+        {
+            bVal = -bVal;
+        }
+    }
+
+    aOut = a;
+    bOut = bVal;
+    return true;
+}
+
 // Parse a `:pseudo` or `:pseudo(arg)` fragment beginning at *p (which
 // points just past the ':'). Advances *p past the fragment, records the
-// structural pseudo on `sel`, and bumps `bClasses` (pseudo-classes count
-// as a class-level specificity component). Unknown pseudo-classes are
-// skipped without setting anything (still consume their token + any
-// parenthesised arg) so a `:hover` etc. doesn't break the parse. GAP:
-// ::pseudo-elements and the an+b form of nth-child.
-void ParsePseudo(const char*& p, const char* e, SimpleSelector* sel, Arena& arena, u32& bClasses)
+// structural pseudo on `sel`, and folds the pseudo's specificity into the
+// a/b/c counters (a normal pseudo-class is a single class-level 'b'
+// component; :not(simple) contributes its argument's components, which may
+// be an id 'a' or a type 'c'). Unknown pseudo-classes are skipped without
+// setting anything (still consume their token + any parenthesised arg) so
+// a `:hover` etc. doesn't break the parse.
+void ParsePseudo(const char*& p, const char* e, SimpleSelector* sel, Arena& arena, u32& aIdsFromNot, u32& bClasses,
+                 u32& cTypesFromNot)
 {
     const char* ns = p;
     while (p < e && !IsFragBoundary(*p) && *p != '(')
@@ -152,7 +266,8 @@ void ParsePseudo(const char*& p, const char* e, SimpleSelector* sel, Arena& aren
     }
     else if (duetos::core::StrEqual(name, "nth-child") && argB != nullptr)
     {
-        // even / odd keywords, or a literal positive integer. GAP: an+b.
+        // even / odd keywords, a literal positive integer, or an An+B
+        // formula (handled in the else branch below).
         u32 argLen = static_cast<u32>(argE - argB);
         if (argLen == 4 && Lower(argB[0]) == 'e' && Lower(argB[1]) == 'v' && Lower(argB[2]) == 'e' &&
             Lower(argB[3]) == 'n')
@@ -165,7 +280,7 @@ void ParsePseudo(const char*& p, const char* e, SimpleSelector* sel, Arena& aren
         }
         else
         {
-            // Literal integer (no '+' / 'n' formula handling — GAP).
+            // Literal positive integer, else the full An+B formula form.
             bool allDigits = argLen > 0;
             i32 n = 0;
             for (const char* d = argB; d < argE; ++d)
@@ -182,7 +297,46 @@ void ParsePseudo(const char*& p, const char* e, SimpleSelector* sel, Arena& aren
                 matched = StructuralPseudo::NthChildLit;
                 sel->nthChild = n;
             }
+            else
+            {
+                i32 a = 0, bOff = 0;
+                if (ParseAnPlusB(argB, argE, a, bOff))
+                {
+                    matched = StructuralPseudo::NthChildFormula;
+                    sel->nthA = a;
+                    sel->nthB = bOff;
+                }
+            }
         }
+    }
+    else if (duetos::core::StrEqual(name, "not") && argB != nullptr)
+    {
+        // :not(simple) — parse the argument as a single compound. Per CSS
+        // the argument's specificity is the largest of its components; a
+        // simple arg contributes exactly that component's level. We let
+        // ParseCompound fold the arg's specificity into the host's a/b/c
+        // counters directly (correct for a single simple selector). GAP:
+        // a compound/complex argument is parsed but only its first
+        // compound is honored, and only one simple component is matched.
+        u32 negA = 0, negB = 0, negC = 0;
+        SimpleSelector* neg = ParseCompound(argB, argE, arena, negA, negB, negC);
+        if (neg != nullptr)
+        {
+            // Append to the host compound's negation list.
+            SimpleSelector** link = &sel->negations;
+            while (*link != nullptr)
+            {
+                link = &(*link)->notNext;
+            }
+            *link = neg;
+            // The negation arg adds its own specificity to the host.
+            aIdsFromNot += negA;
+            bClasses += negB;
+            cTypesFromNot += negC;
+        }
+        // Skip the generic ++bClasses below; :not's specificity was folded
+        // in component-accurately above.
+        return;
     }
 
     if (matched != StructuralPseudo::None)
@@ -196,9 +350,9 @@ void ParsePseudo(const char*& p, const char* e, SimpleSelector* sel, Arena& aren
         }
         ++bClasses;
     }
-    // Unknown/dynamic pseudo-classes (:hover, :not, …) are skipped: token
-    // + arg already consumed. GAP: they neither match nor add specificity
-    // here (we have no way to evaluate them statically).
+    // Unknown/dynamic pseudo-classes (:hover, :focus, ::before, …) are
+    // skipped: token + arg already consumed. GAP: they neither match nor
+    // add specificity here (we have no way to evaluate them statically).
 }
 
 // Parse a `[attr op "val"]` fragment beginning at *p (which points just
@@ -366,7 +520,7 @@ SimpleSelector* ParseCompound(const char* b, const char* e, Arena& arena, u32& a
         if (kind == ':')
         {
             ++p;
-            ParsePseudo(p, e, sel, arena, bClasses);
+            ParsePseudo(p, e, sel, arena, aIds, bClasses, cTypes);
             continue;
         }
         if (kind == '[')
@@ -400,10 +554,18 @@ SimpleSelector* ParseCompound(const char* b, const char* e, Arena& arena, u32& a
     return sel;
 }
 
-// ----- complex selector: "ul li.note" (descendant chain) -----------
-// Splits on whitespace into compounds, builds a right-anchored chain
-// where the returned selector is the rightmost compound and its
-// `ancestor` links walk leftward. Computes packed specificity.
+// Is `c` an explicit combinator marker between compounds?
+bool IsCombinatorChar(char c)
+{
+    return c == '>' || c == '+' || c == '~';
+}
+
+// ----- complex selector: "ul > li.note", "h1 + p", "a ~ b" ----------
+// Tokenizes into compounds separated by combinators (descendant = run of
+// whitespace, or one of > + ~ optionally surrounded by whitespace).
+// Builds a right-anchored chain: the returned selector is the rightmost
+// compound, and each compound's `ancestor`/`combinator` describe the
+// compound to its left and how they relate. Computes packed specificity.
 SimpleSelector* ParseComplex(const char* b, const char* e, Arena& arena, u32& specOut)
 {
     Trim(b, e);
@@ -414,27 +576,74 @@ SimpleSelector* ParseComplex(const char* b, const char* e, Arena& arena, u32& sp
 
     u32 aIds = 0, bClasses = 0, cTypes = 0;
 
-    // Collect compounds left-to-right, chaining each new one as the
-    // `ancestor` of the previous tail... but we want the RIGHTMOST as
-    // the head with ancestor pointing left. So we build a small forward
-    // list then relink.
     SimpleSelector* rightmost = nullptr; // the element we ultimately match
     SimpleSelector* prevTail = nullptr;  // last-built compound (its ancestor = next-left)
 
     const char* p = b;
     while (p < e)
     {
-        while (p < e && IsSpace(*p)) // skip combinator whitespace
+        // Consume the combinator that separates the previous compound from
+        // the next one. Default is Descendant; an explicit > + ~ overrides.
+        while (p < e && IsSpace(*p))
         {
             ++p;
         }
+        Combinator combo = Combinator::Descendant;
+        if (p < e && IsCombinatorChar(*p))
+        {
+            switch (*p)
+            {
+            case '>':
+                combo = Combinator::Child;
+                break;
+            case '+':
+                combo = Combinator::Adjacent;
+                break;
+            default:
+                combo = Combinator::General;
+                break;
+            }
+            ++p;
+            while (p < e && IsSpace(*p)) // trailing whitespace after the combinator
+            {
+                ++p;
+            }
+        }
         if (p >= e)
         {
-            break;
+            break; // trailing combinator / whitespace — ignore
         }
+
+        // Read the next compound: up to the next whitespace or combinator
+        // that is NOT nested inside an attribute selector [...] or a
+        // pseudo-class argument (...). Those brackets can legitimately
+        // contain '~' / '+' / '>' (e.g. [attr~="v"], :nth-child(2n+1)).
         const char* cs = p;
-        while (p < e && !IsSpace(*p))
+        int bracket = 0; // depth of [ ]
+        int paren = 0;   // depth of ( )
+        while (p < e)
         {
+            char ch = *p;
+            if (ch == '[')
+            {
+                ++bracket;
+            }
+            else if (ch == ']' && bracket > 0)
+            {
+                --bracket;
+            }
+            else if (ch == '(')
+            {
+                ++paren;
+            }
+            else if (ch == ')' && paren > 0)
+            {
+                --paren;
+            }
+            else if (bracket == 0 && paren == 0 && (IsSpace(ch) || IsCombinatorChar(ch)))
+            {
+                break;
+            }
             ++p;
         }
         SimpleSelector* comp = ParseCompound(cs, p, arena, aIds, bClasses, cTypes);
@@ -442,26 +651,33 @@ SimpleSelector* ParseComplex(const char* b, const char* e, Arena& arena, u32& sp
         {
             return nullptr;
         }
+
         if (rightmost == nullptr)
         {
+            // First (leftmost) compound. A leading combinator here is
+            // malformed (e.g. "> p"); we ignore the combinator and treat
+            // the compound as a bare selector.
             rightmost = comp;
             prevTail = comp;
         }
         else
         {
-            // `comp` is further right than prevTail. The element matches
-            // the rightmost compound; each compound to the left must
-            // match some ancestor. So the newer (righter) compound's
-            // `ancestor` points at the previous (lefter) one.
+            // `comp` is further right than prevTail. The combinator we just
+            // consumed sits BETWEEN prevTail (left) and comp (right), so it
+            // is recorded on `comp` describing its relationship to prevTail.
             comp->ancestor = prevTail;
+            comp->combinator = combo;
             prevTail = comp;
             rightmost = comp;
         }
     }
 
-    // `rightmost` is the last compound parsed (the rightmost in source),
-    // which is exactly the element-matching head; its ancestor chain
-    // walks leftward. Pack the specificity counters.
+    if (rightmost == nullptr)
+    {
+        return nullptr;
+    }
+
+    // Pack the specificity counters (capped at 255 per CSS-practical use).
     u32 a = aIds > 255 ? 255 : aIds;
     u32 bb = bClasses > 255 ? 255 : bClasses;
     u32 c = cTypes > 255 ? 255 : cTypes;

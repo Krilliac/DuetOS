@@ -265,6 +265,49 @@ void JsSelfTest()
     // JsonReadString — but is intentionally left without a self-test
     // rather than asserting on double-decoded bytes.
 
+    // ---- RegExp engine (bounded NFA matcher) ----
+    // 57. test(): digit-class quantifier matches a substring.
+    run(CheckCase("/\\d+/.test('abc123');", "true", nullptr));
+    // 58. test(): no match returns false.
+    run(CheckCase("/\\d+/.test('abc');", "false", nullptr));
+    // 59. global replace with a char-class escape.
+    run(CheckCase("'a1b2c3'.replace(/\\d/g,'#');", "a#b#c#", nullptr));
+    // 60. exec() returns a capture-group array; [1] is the first group.
+    run(CheckCase("/(\\w+)@(\\w+)/.exec('a@b')[1];", "a", nullptr));
+    // 61. exec() second capture group.
+    run(CheckCase("/(\\w+)@(\\w+)/.exec('foo@bar')[2];", "bar", nullptr));
+    // 62. split() on a char-class separator, re-joined.
+    run(CheckCase("'a,b;c'.split(/[,;]/).join('|');", "a|b|c", nullptr));
+    // 63. anchored full-string match.
+    run(CheckCase("/^foo$/.test('foo');", "true", nullptr));
+    // 64. anchors reject a partial string.
+    run(CheckCase("/^foo$/.test('foobar');", "false", nullptr));
+    // 65. case-insensitive flag.
+    run(CheckCase("/HELLO/i.test('hello world');", "true", nullptr));
+    // 66. alternation + match() returns the matched substring (non-global).
+    run(CheckCase("'cat'.match(/dog|cat/)[0];", "cat", nullptr));
+    // 67. search() returns the match index.
+    run(CheckCase("'hello world'.search(/world/);", "6", nullptr));
+    // 68. {n,m} bounded quantifier.
+    run(CheckCase("/a{2,3}/.test('aaaa') + ',' + /a{2,3}/.test('a');", "true,false", nullptr));
+    // 69. $& / $1 substitution in replace.
+    run(CheckCase("'John Smith'.replace(/(\\w+) (\\w+)/, '$2 $1');", "Smith John", nullptr));
+    // 70. word-boundary anchor.
+    run(CheckCase("/\\bcat\\b/.test('the cat sat') + ',' + /\\bcat\\b/.test('category');", "true,false", nullptr));
+
+    // ---- CRITICAL: a catastrophic-backtracking pattern must TERMINATE
+    // (degrade to no-match / a bounded answer), NOT hang the boot. The
+    // explicit-stack VM + step budget guarantee this. The classic
+    // exponential case `(a+)+$` on a long non-matching string would, with a
+    // naive recursive matcher, both blow the kernel stack and run for an
+    // astronomical number of steps. Here it must return a concrete boolean
+    // within the budget. We don't assert WHICH boolean (a budget-exhausted
+    // search returns false by design); we assert it RETURNS at all and the
+    // eval does not error out / hang. ----
+    run(CheckCase("/(a+)+$/.test('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!');", "false", nullptr));
+    // 72. a second pathological shape: nested optional star on a long run.
+    run(CheckCase("/(a*)*b/.test('aaaaaaaaaaaaaaaaaaaaaaaaaaaa');", "false", nullptr));
+
     // ---- CRITICAL: runaway loop must be killed by the step budget,
     // not hang the boot. Use a tiny budget so it returns fast. ----
     {

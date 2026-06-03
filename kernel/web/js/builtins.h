@@ -56,6 +56,12 @@ enum NativeFn : u16
     kStrSplit,
     kStrReplace,
     kStrTrim,
+    kStrMatch,
+    kStrSearch,
+    // RegExp.prototype.*  (receiver = the regex object)
+    kReTest,
+    kReExec,
+    kRegExpCtor, // RegExp(pattern[, flags]) free/constructor call
     // Array.prototype.*  (receiver = the array)
     kArrPush,
     kArrPop,
@@ -81,6 +87,12 @@ enum NativeFn : u16
 
 // Install all builtins into I.global. Implemented in builtins.cpp.
 Result<void> InstallBuiltins(Interp& I);
+
+// Compile `src`/`flags` into a RegExp object (a JsObject tagged with a
+// JsRegExp). Used by the interpreter for a `/pattern/flags` literal and by
+// the `new RegExp(...)`-style path. Returns InvalidArgument on a bad
+// pattern/flag. Implemented in builtins.cpp.
+Result<JsValue> MakeRegExp(Interp& I, const char* src, u32 srcLen, const char* flags, u32 flagsLen);
 
 // Member resolution for primitives & builtin objects. Returns a bound
 // native function for methods, or a value for properties (e.g.

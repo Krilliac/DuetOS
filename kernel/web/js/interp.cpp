@@ -460,6 +460,8 @@ Result<JsValue> EvalExpr(Interp& I, const AstNode* n, Env* env)
         return n->numIsInt ? JsValue::Int(n->numI) : JsValue::Float(n->numF);
     case Ast::StringLit:
         return JsValue::Str(MakeString(I.arena, n->str, n->strLen));
+    case Ast::RegexLit:
+        return MakeRegExp(I, n->str, n->strLen, n->reFlags, n->reFlagsLen);
     case Ast::BoolLit:
         return JsValue::Bool(n->boolVal);
     case Ast::NullLit:

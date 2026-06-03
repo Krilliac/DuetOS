@@ -2,6 +2,7 @@
 
 #include "util/string.h"
 #include "web/js/builtins.h"
+#include "web/js/regexp.h"
 
 /*
  * DuetOS — kernel/web/js: value <-> text conversion, equality, and
@@ -246,6 +247,22 @@ u32 ValueToChars(const JsValue& v, char* out, u32 cap)
                     out[o++] = ',';
                 o += ValueToChars(v.as.obj->elems[i], out + o, cap - o);
             }
+            return o;
+        }
+        // A RegExp stringifies as /source/flags (its JsRegExp payload),
+        // matching RegExp.prototype.toString.
+        if (v.as.obj && v.as.obj->regexp)
+        {
+            const JsRegExp* re = v.as.obj->regexp;
+            u32 o = 0;
+            if (o < cap)
+                out[o++] = '/';
+            for (u32 i = 0; i < re->sourceLen && o < cap; ++i)
+                out[o++] = re->source[i];
+            if (o < cap)
+                out[o++] = '/';
+            for (u32 i = 0; i < re->flagsLen && o < cap; ++i)
+                out[o++] = re->flags[i];
             return o;
         }
         return lit("[object Object]");

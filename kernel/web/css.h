@@ -21,10 +21,12 @@
  *
  * What is REAL:
  *   - Tokenizer + parser for stylesheets and inline `style="..."`.
- *   - Selectors: type, .class, #id, *, descendant combinator (space),
+ *   - Selectors: type, .class, #id, *, the descendant (space), child (>),
+ *     adjacent-sibling (+) and general-sibling (~) combinators,
  *     compound (div.note#x), comma selector-lists. Specificity (a,b,c).
  *   - Structural pseudo-classes: :first-child, :last-child,
- *     :nth-child(N) (literal integer / even / odd).
+ *     :nth-child(N | even | odd | an+b).
+ *   - Negation :not(simple) of a single simple selector.
  *   - Attribute selectors: [attr], [attr="v"], [attr~="v"], [attr^="v"],
  *     [attr$="v"], [attr*="v"].
  *   - A practical ComputedStyle subset (see the struct below).
@@ -33,11 +35,11 @@
  *   - Cascade UA < author, specificity then source order, inheritance.
  *
  * GAP (deliberately out of scope for this slice):
- *   - :nth-child(an+b) formula form, :nth-last-child, :nth-of-type,
- *     :only-child, :not(), :hover and other dynamic/state pseudo-classes,
- *     ::before / ::after pseudo-elements.
- *   - Child/sibling combinators (>, +, ~) — only the descendant
- *     combinator (space) is matched.
+ *   - :nth-last-child, :nth-of-type, :only-child, :hover and other
+ *     dynamic/state pseudo-classes, ::before / ::after pseudo-elements.
+ *   - :not() with a compound/complex argument (only a SIMPLE arg —
+ *     type/.class/#id/[attr]/:pseudo — is honored).
+ *   - The column combinator (||).
  *   - @media / @import / @font-face (parsed-past, not honored).
  *   - calc(), custom properties / var(), !important (best-effort/GAP).
  *   - flexbox / grid / floats / position; em/rem/vh units. We support
@@ -183,15 +185,29 @@ struct ComputedStyle
 /// Structural pseudo-classes carried on a compound selector. `None`
 /// means no structural constraint. `:nth-child(N)` carries its literal
 /// position in `SimpleSelector::nthChild` (1-based; even/odd are mapped
-/// to the nth=2/0 parity test below). GAP: the an+b formula form.
+/// to the nth=2/0 parity test below). `:nth-child(an+b)` carries its
+/// coefficients in `SimpleSelector::nthA` / `nthB`.
 enum class StructuralPseudo : u8
 {
     None,
-    FirstChild,   // :first-child
-    LastChild,    // :last-child
-    NthChildLit,  // :nth-child(<integer>)  — match the Nth element child
-    NthChildEven, // :nth-child(even)
-    NthChildOdd,  // :nth-child(odd)
+    FirstChild,     // :first-child
+    LastChild,      // :last-child
+    NthChildLit,    // :nth-child(<integer>)  — match the Nth element child
+    NthChildEven,   // :nth-child(even)
+    NthChildOdd,    // :nth-child(odd)
+    NthChildFormula // :nth-child(an+b)  — match positions a*k + b (k >= 0)
+};
+
+/// The relationship between a compound selector and the compound to its
+/// left (its `ancestor` link). The rightmost compound of a complex
+/// selector is matched against the candidate element directly; each
+/// link to its left is evaluated per this combinator.
+enum class Combinator : u8
+{
+    Descendant, // "A B"  — B's match has some ancestor matching A
+    Child,      // "A > B" — B's match's direct parent matches A
+    Adjacent,   // "A + B" — B's immediately-preceding element sibling matches A
+    General,    // "A ~ B" — some preceding element sibling of B matches A
 };
 
 /// The match operator of an attribute selector.
@@ -217,9 +233,9 @@ struct AttrSelector
     AttrSelector* next = nullptr;
 };
 
-/// One simple compound selector, e.g. `div.note#x`. A descendant
-/// selector chains several of these via `ancestor` (the left side must
-/// match some ancestor of the element the right side matches).
+/// One simple compound selector, e.g. `div.note#x`. A complex selector
+/// chains several of these via `ancestor`; the `combinator` field on each
+/// compound describes how it relates to the compound on its left.
 struct SimpleSelector
 {
     const char* tag = nullptr;                        // type selector; nullptr == universal/none
@@ -228,9 +244,19 @@ struct SimpleSelector
     bool universal = false;                           // `*`
     StructuralPseudo pseudo = StructuralPseudo::None; // structural pseudo-class
     i32 nthChild = 0;                                 // literal N for NthChildLit
+    i32 nthA = 0;                                     // 'a' coefficient for NthChildFormula
+    i32 nthB = 0;                                     // 'b' offset for NthChildFormula
     AttrSelector* attrs = nullptr;                    // [attr...] clauses (linked list)
-    // For descendant combinator: this selector's match must have an
-    // ancestor matching `ancestor` (which may itself chain further).
+    // :not(simple) arguments. Each entry is a one-component compound that
+    // the element must NOT match. Chained via `notNext`. GAP: a :not()
+    // whose argument is itself compound/complex is parsed but not honored.
+    SimpleSelector* negations = nullptr;
+    SimpleSelector* notNext = nullptr;
+    // Relationship to the compound to the left (`ancestor`). For the
+    // rightmost / only compound this is Descendant and unused.
+    Combinator combinator = Combinator::Descendant;
+    // The compound to the left of this one in a complex selector, or
+    // nullptr if this is the leftmost. Combined with `combinator` above.
     SimpleSelector* ancestor = nullptr;
 };
 

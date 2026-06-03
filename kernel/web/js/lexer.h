@@ -20,7 +20,10 @@
  * parser folds into a string-concat tree. GAP: tagged templates and
  * raw-string (String.raw) access are not supported.
  * GAP: full Unicode identifiers — ASCII + `_`/`$` only.
- * GAP: regex literals — `/` is always divide / comment.
+ * Regex literals (`/pattern/flags`) ARE lexed: a `/` starts a regex only
+ * where an expression is expected (statement start, or after `(` `,` `=`
+ * `:` `[` `{` `;` `return` `typeof`, an operator, etc.) — NOT after an
+ * identifier / number / `)` / `]`, where `/` is the division operator.
  * GAP: full ASI restartable-production rules — we only insert before
  *      `}` , at EOF, and after a newline when the next token can't
  *      continue the current expression (a pragmatic subset).
@@ -37,6 +40,7 @@ enum class Tok : u8
     Number,
     String,
     Ident,
+    Regex, // /pattern/flags — strData/strLen = pattern, reFlags/reFlagsLen = flags
 
     // Template-literal pieces. A `…${…}…` literal lexes to:
     //   TemplateStr (head, cooked) [ TemplateExprStart <expr tokens>
@@ -126,8 +130,13 @@ struct Token
 
     // For String: decoded (unescaped) text lives in `start`/`len` is
     // re-pointed to the arena copy; see Lexer.
+    // For Regex: strData/strLen carry the raw pattern body (between the
+    // delimiting slashes), reFlags/reFlagsLen the trailing flag chars.
     const char* strData;
     u32 strLen;
+
+    const char* reFlags; // Regex: flag characters (g/i/m), arena-owned
+    u32 reFlagsLen;
 };
 
 // Tokenize the whole source up-front into an arena-backed array. The
