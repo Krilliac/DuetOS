@@ -46,7 +46,7 @@ RGBA canvas, then blits to the window.
 | HTML | `html.cpp`, `entities.cpp`, `dom.{h,cpp}` | Tokeniser + tree builder, void elements, comments, named/numeric entities, `<p>`/`<li>` recovery. Fragment parse (`ParseHtmlFragment`) backs `innerHTML`. |
 | CSS | `css*.cpp` (`parse`, `apply`, `values`, `ua`) | Selector parse, specificity cascade, inheritance, the UA sheet, `display:none`, the common box/text/colour properties. **Structural pseudo-classes** (`:first-child`/`:last-child`/`:nth-child(an+b\|even\|odd)`), **attribute selectors** (`[attr]`, `[attr=]`, `~=`/`^=`/`$=`/`*=`), the **`>`/`+`/`~` combinators**, and **`:not(simple)`**. |
 | DOM bindings | `js_dom.cpp` | `document`/element host objects: `getElementById`, `getElementsByTagName`/`ClassName`, `querySelector`/`querySelectorAll` (single-compound), `classList` (`add`/`remove`/`contains`/`toggle`), a **programmatic event model** (`addEventListener`/`removeEventListener`/`dispatchEvent`/`click()` with bubbling + `stopPropagation`/`preventDefault`), `children`, `tagName`, `id`/`className`/`textContent` get+set, and `innerHTML` get **and set** (parse-and-replace). |
-| JavaScript | `js/*` | Lexer → Pratt parser → tree-walking interp. Closures, `for`/`while`, recursion, objects/arrays, **prototype chain** (`Object.prototype`), **template literals**, object-to-primitive coercion, `JSON.parse`/`stringify`, **a bounded RegExp engine** (`regexp*.cpp` — bytecode + explicit backtrack stack, step-budget-bounded so a hostile pattern can't smash the kernel stack or hang), `new` (native ctors). Built-ins: `Array` (`map`/`filter`/`forEach`/`slice`/`join`/…), `String` (incl. regex `match`/`replace`/`split`/`search`), `Number` (`toFixed`, `toString(radix)`), `Math` (incl. `random`/`sin`/`cos`/`tan`/`log`/`exp`/`sqrt`/`pow`), **`Date`** (`new Date()`/`(ms)`, `Date.now`, UTC getters, `toISOString`), `Object.keys`, `parseInt(radix)`/`parseFloat`/`isNaN`/`isFinite`. Step budget + native-stack guard bound a hostile script. |
+| JavaScript | `js/*` | Lexer → Pratt parser → tree-walking interp. Closures, `for`/`while`, recursion, objects/arrays, **`++`/`--` (prefix + postfix)**, **prototype chain** (`Object.prototype`), **template literals**, object-to-primitive coercion, `JSON.parse`/`stringify`, **a bounded RegExp engine** (`regexp*.cpp` — bytecode + explicit backtrack stack, step-budget-bounded so a hostile pattern can't smash the kernel stack or hang), `new` (native ctors). Built-ins: `Array` (`map`/`filter`/`forEach`/`slice`/`join`/…), `String` (incl. regex `match`/`replace`/`split`/`search`), `Number` (`toFixed`, `toString(radix)`), `Math` (incl. `random`/`sin`/`cos`/`tan`/`log`/`exp`/`sqrt`/`pow`), **`Date`** (`new Date()`/`(ms)`, `Date.now`, UTC getters, `toISOString`), `Object.keys`, `parseInt(radix)`/`parseFloat`/`isNaN`/`isFinite`. Step budget + native-stack guard bound a hostile script. |
 | Layout | `layout*.cpp`, `display_list.h` | Block formatting (vertical stacking, margin/border/padding box, width/height), inline formatting (line boxes, word wrap, text-align), `<img>` boxes, **anonymous-block wrapping**, the **block-in-inline split**, and **vertical margin collapsing** (adjacent-sibling + parent-child + empty-block). |
 | Paint | `paint.cpp` | Fills, glyph runs, borders, image blits, clip rects, scroll offset → framebuffer. |
 | Images | `png.cpp`, `jpeg.cpp` | PNG: greyscale/palette/truecolour ±alpha, bit depths **1/2/4/8/16**, **Adam7 interlacing**, tRNS. JPEG: baseline + progressive, 4:2:0 / 4:2:2 / greyscale. Both reject corrupt/truncated input. |
@@ -90,9 +90,10 @@ Every stage boots a self-test, registered in
   rejection.
 - `[html-dom-selftest]` — nesting, void elements, entities, `<p>`/`<li>`
   recovery, comments, doc text.
-- `[js-selftest]` — 32 snippets: precedence, closures, recursion, loops,
-  string methods, JSON round-trip, template literals, object coercion,
-  plus runaway-loop / depth-cap / syntax-error error paths.
+- `[js-selftest]` — 93 snippets: precedence, closures, recursion, loops,
+  `++`/`--` (prefix + postfix, ident/member/index lvalues), string
+  methods, JSON round-trip, template literals, object coercion, plus
+  runaway-loop / depth-cap / syntax-error error paths.
 - `[css-selftest]` — cascade, specificity, inline, inheritance, UA,
   `display:none`, colour.
 - `[js-dom-selftest]` — DOM queries and the `innerHTML` get/set round
@@ -111,8 +112,13 @@ Every stage boots a self-test, registered in
   dispatch through a special-cased path rather than real
   `Array.prototype` objects. `Number.toString(radix)` drops the fraction
   for non-decimal radixes; `toFixed` rounds half-away and carries only
-  binary32 precision. No `Symbol.toPrimitive`, no `try`/`catch`. The
-  **RegExp** engine is a bounded subset: no lookahead/lookbehind,
+  binary32 precision. No `Symbol.toPrimitive`, no `try`/`catch`.
+  Arithmetic (incl. `++`/`--`, `-`/`*`/`/`) does not numeric-parse
+  strings — `'5' - 1` and `'5'++` both yield `NaN` (only `+` coerces, as
+  concatenation); numeric lvalues are unaffected. No
+  automatic-semicolon-insertion before a postfix `++`/`--` (a newline
+  between the operand and the operator does not break the expression).
+  The **RegExp** engine is a bounded subset: no lookahead/lookbehind,
   backreferences, named groups, or the `s`/`u`/`y` flags; ASCII-only; a
   backtrack/input-overflow safety valve may miss a match rather than hang.
   `Math` transcendentals carry soft-float (not double) precision;

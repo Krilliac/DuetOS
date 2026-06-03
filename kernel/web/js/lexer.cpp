@@ -563,6 +563,11 @@ Tok ScanOperator(Scanner& sc)
     case '?':
         return Tok::Question;
     case '+':
+        if (d == '+')
+        {
+            sc.Adv();
+            return Tok::PlusPlus;
+        }
         if (d == '=')
         {
             sc.Adv();
@@ -570,6 +575,11 @@ Tok ScanOperator(Scanner& sc)
         }
         return Tok::Plus;
     case '-':
+        if (d == '-')
+        {
+            sc.Adv();
+            return Tok::MinusMinus;
+        }
         if (d == '=')
         {
             sc.Adv();

@@ -98,6 +98,9 @@ enum class Tok : u8
     Slash,
     Percent,
 
+    PlusPlus,   // ++
+    MinusMinus, // --
+
     EqEq,    // ==
     NotEq,   // !=
     EqEqEq,  // ===

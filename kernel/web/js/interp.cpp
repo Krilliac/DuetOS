@@ -394,6 +394,26 @@ static Result<JsValue> EvalAssign(Interp& I, const AstNode* n, Env* env)
     return DoAssign(I, n->a, res, env);
 }
 
+// ++ / -- : read the lvalue, coerce to Number via the engine's own
+// arithmetic, write back ±1. `NumAdd(cur, 0)` runs `cur` through the
+// same numeric coercion the binary operators use, so the result is a
+// Number (Int or Float). Prefix returns the new value; postfix returns
+// the coerced old value.
+// GAP: this inherits the engine's arithmetic coercion, which does NOT
+// numeric-parse strings (NumberToSf32 maps any non-Number to NaN). So
+// `'5'++` yields NaN — consistent with `'5' - 1` engine-wide — rather
+// than the spec's 6. Loop counters and numeric lvalues (the real use)
+// are unaffected; revisit if/when string→number arithmetic lands.
+static Result<JsValue> EvalUpdate(Interp& I, const AstNode* n, Env* env)
+{
+    JS_TRY_ASSIGN(JsValue cur, EvalExpr(I, n->a, env));
+    const JsValue oldNum = NumAdd(cur, JsValue::Int(0));
+    const JsValue one = JsValue::Int(1);
+    const JsValue res = (n->op == Op::Sub) ? NumSub(oldNum, one) : NumAdd(oldNum, one);
+    JS_TRY(DoAssign(I, n->a, res, env));
+    return n->boolVal ? res : oldNum;
+}
+
 static Result<JsValue> EvalCall(Interp& I, const AstNode* n, Env* env)
 {
     // Detect method calls (callee is Member/Index) so we can bind the
@@ -487,6 +507,8 @@ Result<JsValue> EvalExpr(Interp& I, const AstNode* n, Env* env)
         return EvalLogical(I, n, env);
     case Ast::Assign:
         return EvalAssign(I, n, env);
+    case Ast::Update:
+        return EvalUpdate(I, n, env);
     case Ast::Ternary:
     {
         JS_TRY_ASSIGN(JsValue c, EvalExpr(I, n->a, env));
