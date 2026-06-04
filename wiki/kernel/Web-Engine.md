@@ -116,8 +116,8 @@ Every stage boots a self-test, registered in
   `Array.prototype` objects. `Number.toString(radix)` drops the fraction
   for non-decimal radixes; `toFixed` rounds half-away and carries only
   binary32 precision. No `Symbol.toPrimitive`. `try`/`catch`/`finally`/
-  `throw` work, but the catch binding is **required** (`catch {}` without
-  `(e)` is a syntax error) and only an explicit `throw` is catchable —
+  `throw` work, including the ES2019 optional catch binding (`catch {}`
+  without `(e)`), and only an explicit `throw` is catchable —
   engine-raised faults real JS would surface as `TypeError`/`RangeError`
   (calling a non-callable, a bad assign target) are not catchable, and the
   step-budget `Timeout` / stack-guard `Overflow` propagate **through**

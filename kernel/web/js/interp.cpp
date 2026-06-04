@@ -635,8 +635,9 @@ static Result<JsValue> EvalTry(Interp& I, const AstNode* n, Env* env)
                 return Err{ErrorCode::OutOfMemory};
             EnvDefine(catchEnv, I.arena, n->str, n->strLen, thrown);
         }
-        // GAP: optional-binding `catch {}` (no `(e)`) is accepted with a
-        // null binding; the parser currently requires `catch (ident)`.
+        // ES2019 optional-binding `catch {}` (no `(e)`): the parser leaves
+        // n->str null, so no binding is defined and the thrown value is
+        // simply discarded — the catch body still runs.
         // newScope=true so the catch body's own declarations get a child
         // scope under catchEnv (matching plain-block semantics) while the
         // binding `e` lives in catchEnv and stays visible to them.

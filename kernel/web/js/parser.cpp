@@ -1020,8 +1020,9 @@ AstNode* ParseFor(Parser& p)
 }
 
 // try { ... } catch (e) { ... } finally { ... }
-// At least one of catch / finally is required. The catch binding is a
-// single identifier (required for v0).
+// At least one of catch / finally is required. The catch binding is a single
+// identifier; the binding is optional (ES2019 `catch {}` is accepted, leaving
+// the binding null).
 AstNode* ParseTry(Parser& p)
 {
     AstNode* n = p.Node(Ast::Try);
@@ -1034,20 +1035,24 @@ AstNode* ParseTry(Parser& p)
     if (p.Is(Tok::KwCatch))
     {
         p.Adv();
-        p.Expect(Tok::LParen, "expected '(' after catch");
-        // GAP: optional-binding `catch { }` (ES2019) not parsed — the
-        // binding identifier is required; bare `catch {}` is a syntax error.
-        if (!p.Is(Tok::Ident))
+        // ES2019 optional-binding `catch { ... }`: a `catch` immediately
+        // followed by `{` has no binding — leave n->str null and parse the
+        // block directly (no parens). Otherwise take the `catch (ident)` path.
+        if (!p.Is(Tok::LBrace))
         {
-            p.Fail("expected catch binding name");
-            return nullptr;
+            p.Expect(Tok::LParen, "expected '(' after catch");
+            if (!p.Is(Tok::Ident))
+            {
+                p.Fail("expected catch binding name");
+                return nullptr;
+            }
+            n->str = p.Cur().start;
+            n->strLen = p.Cur().len;
+            p.Adv();
+            p.Expect(Tok::RParen, "expected ')' after catch binding");
+            if (!p.ok)
+                return nullptr;
         }
-        n->str = p.Cur().start;
-        n->strLen = p.Cur().len;
-        p.Adv();
-        p.Expect(Tok::RParen, "expected ')' after catch binding");
-        if (!p.ok)
-            return nullptr;
         n->b = ParseBlock(p);
         if (!p.ok)
             return nullptr;

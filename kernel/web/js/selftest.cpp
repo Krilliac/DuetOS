@@ -357,6 +357,10 @@ void JsSelfTest()
     run(CheckCase("function f(){ try { return 5; } finally { var q = 9; } } f();", "5", nullptr));
     // a non-throwing try simply yields its block value; catch is not entered.
     run(CheckCase("var hit=false; try { 1; } catch (e) { hit=true; } hit;", "false", nullptr));
+    // ES2019 optional catch binding: `catch {}` (no `(e)`) still enters the body.
+    run(CheckCase("var caught=0; try { throw 5; } catch { caught = 1; } caught;", "1", nullptr));
+    // bindingless catch followed by finally: catch body and finally both run.
+    run(CheckCase("var r=''; try { throw 1; } catch { r+='c'; } finally { r+='f'; } r;", "cf", nullptr));
     // an UNCAUGHT throw at top level surfaces as an engine error (BadState),
     // distinct from the budget/depth errors below.
     {
