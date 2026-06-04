@@ -174,6 +174,8 @@
 #include "apps/about.h"
 #include "apps/browser.h"
 #include "apps/browser/dock_surface.h"
+#include "apps/browser/omnibox.h"
+#include "apps/browser/start_page.h"
 #include "apps/browser/tab_strip.h"
 #include "web/css.h"
 #include "web/html.h"
@@ -3187,6 +3189,10 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // TabStrip (browser shell redesign, Phase 1) — tab model + shrink-fit
     // layout + hit-testing. One live page at a time (multi-tab = Phase 3).
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::TabStripSelfTest());
+    // Omnibox (unified URL/search + toolbar control geometry) and the
+    // new-tab StartPage model — browser shell redesign, Phase 1.
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::OmniboxSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::StartPageSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG
