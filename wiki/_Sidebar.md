@@ -23,6 +23,7 @@
 - [Process Model](kernel/Process-Model.md)
 - [Image Loaders](kernel/Loader.md)
 - [Subsystem Isolation](kernel/Subsystem-Isolation.md)
+- [Privileged-Origin Mode](kernel/Privileged-Origin.md)
 - [Logging and Tracing](kernel/Logging-And-Tracing.md)
 - [Code Path Ledger (KPath)](kernel/Code-Path-Ledger.md)
 - [Diagnostics](kernel/Diagnostics.md)

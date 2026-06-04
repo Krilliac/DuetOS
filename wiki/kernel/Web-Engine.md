@@ -139,8 +139,9 @@ live `DrawFn` / mouse routing in
 docked surface overlays the content instead of reflowing it, and the
 drag/snap gesture + ghost preview aren't wired (the `DockSurface` model
 supports both); no real multi-tab engine; the AI assistant is a
-placeholder (Phase 2 = AI functionality + Privileged-Origin Mode). Pixel
-layout is verified by VM screenshot, not the headless self-tests.
+placeholder (Phase 2 = AI functionality + [Privileged-Origin
+Mode](Privileged-Origin.md)). Pixel layout is verified by VM screenshot, not
+the headless self-tests.
 
 ## Known limits (greppable `// GAP:`)
 
