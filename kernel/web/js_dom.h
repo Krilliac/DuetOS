@@ -181,9 +181,11 @@ bool JsDomContextConsumeDirty(JsDomContext* ctx);
  * setAttribute round-trip, textContent mutation, createElement +
  * appendChild growth, getElementsByTagName length, getElementsByClassName,
  * querySelector/querySelectorAll, classList add/remove/contains/toggle,
- * addEventListener + click() firing, event bubbling, stopPropagation,
- * removeEventListener, event.target identity, console.log of a DOM
- * value). Emits `[js-dom-selftest] PASS (N/N)` on
+ * addEventListener + click() firing, event bubbling, capture-phase
+ * dispatch firing ancestor-before-target, `once` listeners firing exactly
+ * once across two dispatches, stopPropagation, removeEventListener
+ * (including capture being part of listener identity), event.target
+ * identity, console.log of a DOM value). Emits `[js-dom-selftest] PASS (N/N)` on
  * success; on any
  * failure fires KBP_PROBE_V(kBootSelftestFail, idx) and emits a FAIL
  * line. Wired into boot_bringup via DUETOS_BOOT_SELFTEST after the JS

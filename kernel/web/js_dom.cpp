@@ -46,12 +46,22 @@ struct NodeBind; // fwd
 // type) pair. `type` is a JS-arena copy (no interning table — the cap is
 // small enough that a linear scan is fine). `fn` is the stored listener
 // (normally a JS closure; a native callback is accepted too).
+//
+// `capture` selects which phase the listener fires in (capture-phase,
+// outermost→target, vs the default bubble-phase, target→outermost) and is
+// part of the listener's identity per the DOM spec — (type, fn, capture)
+// is the key removeEventListener matches on. `once` removes the listener
+// the first time it fires (in either phase). `passive` is recorded for
+// fidelity but only documented, not enforced (see the GAP in MAddEventListener).
 struct Listener
 {
     Node* node = nullptr;
     const char* type = nullptr; // JS-arena copy, NUL-terminated
     js::JsFunction* fn = nullptr;
-    bool live = false; // false once removeEventListener clears the slot
+    bool live = false;    // false once removeEventListener clears the slot
+    bool capture = false; // true: fire in the capture phase, not the bubble phase
+    bool once = false;    // true: auto-remove after the first fire
+    bool passive = false; // recorded only; preventDefault still honored (see GAP)
 };
 
 struct DomCtx
@@ -956,16 +966,24 @@ Result<JsValue> ClassListHostGet(Interp&, JsObject* self, const char* key, u32 k
 // ---------------------------------------------------------------------------
 // DOM event model — addEventListener / removeEventListener / dispatchEvent
 // / click(). Programmatic only: a script registers a listener, then
-// dispatchEvent()/click() fires it on the target and BUBBLES up the
-// ancestor chain (dom.h `parent` links). The event object exposes
-// type / target / preventDefault() / defaultPrevented /
-// stopPropagation(); stopPropagation halts bubbling. Listeners run via
-// the engine's normal call path (CallFunction) at +1 interpreter depth —
-// the native-stack guard in CallFunction bounds runaway recursion; we add
-// no C++ recursion per listener beyond that single call.
+// dispatchEvent()/click() fires it on the target through a CAPTURE phase
+// (outermost ancestor → target) followed by a BUBBLE phase (target →
+// outermost ancestor, dom.h `parent` links). A listener registered with
+// `capture: true` (or addEventListener(type, fn, true)) fires only in the
+// capture phase; a default listener fires only in the bubble phase. The
+// event object exposes type / target / preventDefault() / defaultPrevented
+// / stopPropagation(); stopPropagation halts BOTH phases. `once: true`
+// listeners are removed after their first fire (in whichever phase). All
+// listeners run via the engine's normal call path (CallFunction) at +1
+// interpreter depth — the native-stack guard in CallFunction bounds
+// runaway recursion; we add no C++ recursion per listener beyond that
+// single call.
 //
-// GAP: capture phase, `once`/`passive` options, and event delegation
-//   edge cases are out of scope.
+// GAP: `passive: true` is accepted and stored but NOT enforced — a passive
+//   listener can still call preventDefault() and it takes effect (the spec
+//   says it must be ignored). Event delegation works through normal
+//   bubbling but matchesSelector-style delegation helpers and the full
+//   Event/UIEvent/MouseEvent property surface remain out of scope.
 // GAP: real user input (mouse/keyboard) is NOT routed here yet — but the
 //   plumbing now exists. JsDomContext (see the retained-context section at
 //   the bottom of this file) keeps the DomCtx + listeners alive across the
@@ -1037,13 +1055,17 @@ JsValue MakeEventObject(DomCtx& ctx, EventState* ev)
     return JsValue::Obj(o);
 }
 
-// Find an existing live registration for (node, type, fn), or -1.
-i32 FindListener(DomCtx& ctx, Node* node, const char* type, js::JsFunction* fn)
+// Find an existing live registration for (node, type, fn, capture), or -1.
+// `capture` is part of listener identity per the DOM spec: the same fn
+// registered for both phases is two distinct listeners, and
+// removeEventListener with a mismatched capture flag must NOT remove.
+i32 FindListener(DomCtx& ctx, Node* node, const char* type, js::JsFunction* fn, bool capture)
 {
     for (u32 i = 0; i < ctx.listenerCount; ++i)
     {
         Listener& l = ctx.listeners[i];
-        if (l.live && l.node == node && l.fn == fn && l.type && duetos::core::StrEqual(l.type, type))
+        if (l.live && l.node == node && l.fn == fn && l.capture == capture && l.type &&
+            duetos::core::StrEqual(l.type, type))
             return i32(i);
     }
     return -1;
@@ -1070,14 +1092,52 @@ Result<void> InvokeListener(Interp& I, js::JsFunction* fn, const JsValue& eventV
     return {};
 }
 
-// Dispatch `type` to `target`, then bubble up the ancestor chain. At each
-// node on the path, every live listener registered for `type` fires (in
-// registration order). stopPropagation() halts the bubble after the
-// current node's listeners finish. The listener set is snapshotted per
-// node (by scanning `ctx.listeners`) so a listener that adds/removes
-// registrations does not perturb the in-progress walk's slot indices —
-// `live` is re-checked per fire so a removal mid-dispatch still takes
-// effect for not-yet-fired slots.
+// Fire the matching listeners on a single node for one phase. `wantCapture`
+// selects capture-phase listeners (true) vs bubble/target-phase listeners
+// (false). Returns Ok unless an invoked listener errors; sets `*outStopped`
+// if stopPropagation was called (the caller halts the remaining path).
+//
+// The listener set is snapshotted by index up front (snap = listenerCount)
+// so a listener that *adds* a registration during this fire is not itself
+// fired until a future dispatch. `live` is re-checked per slot so a removal
+// mid-dispatch — including a `once` self-removal — still takes effect for
+// not-yet-fired slots. A `once` listener is tombstoned the instant it fires
+// (before InvokeListener so a re-entrant dispatch of the same event can't
+// double-fire it), regardless of which phase fired it.
+Result<void> FireNodePhase(Interp& I, DomCtx& ctx, Node* node, const char* type, bool wantCapture,
+                           const JsValue& eventVal, EventState* ev)
+{
+    JsValue recv = WrapNode(ctx, node);
+    u32 snap = ctx.listenerCount;
+    for (u32 i = 0; i < snap; ++i)
+    {
+        Listener& l = ctx.listeners[i];
+        if (!l.live || l.node != node || l.capture != wantCapture || !l.type || !duetos::core::StrEqual(l.type, type))
+            continue;
+        js::JsFunction* fn = l.fn;
+        if (l.once)
+            l.live = false; // remove-before-invoke: a once listener fires exactly once
+        JS_TRY(InvokeListener(I, fn, eventVal, recv));
+        if (ev->propagationStopped)
+            break;
+    }
+    return {};
+}
+
+// Dispatch `type` to `target` in two phases: a CAPTURE phase walking the
+// ancestor chain from the OUTERMOST ancestor down toward (but not
+// including) the target, then a BUBBLE phase from the target up to the
+// root. Capture-phase listeners fire only in the first walk; default
+// listeners fire only in the second. The target node itself participates in
+// the bubble walk (its non-capture listeners are the "target phase"; a
+// capture listener on the target also fires there per the DOM, which our
+// bubble walk picks up — see below). stopPropagation() halts BOTH phases.
+//
+// The ancestor chain is materialized once into a bounded buffer (the DOM
+// is shallow in practice; if it exceeds the buffer we cap the captured
+// ancestors — capture phase then starts from the deepest captured ancestor,
+// a graceful degradation rather than a fault).
+//
 // `defaultPrevented` (set by any listener calling preventDefault) is
 // reported back through the out-param so dispatchEvent can return the
 // DOM's "not cancelled" boolean.
@@ -1092,24 +1152,67 @@ Result<void> DispatchEvent(Interp& I, DomCtx& ctx, Node* target, const char* typ
     ev->type = type;
     JsValue eventVal = MakeEventObject(ctx, ev);
 
-    for (Node* cur = target; cur; cur = cur->parent)
+    // Materialize the strict ancestor chain (target's parent up to the
+    // root), nearest-first. Bounded buffer: a pathological depth caps the
+    // captured ancestors rather than recursing or faulting.
+    static constexpr u32 kMaxPath = 64;
+    Node* ancestors[kMaxPath];
+    u32 nAnc = 0;
+    for (Node* cur = target->parent; cur && nAnc < kMaxPath; cur = cur->parent)
+        ancestors[nAnc++] = cur;
+
+    // Capture phase: outermost ancestor → toward the target (skips target).
+    for (u32 i = nAnc; i-- > 0;)
     {
-        JsValue recv = WrapNode(ctx, cur);
-        // Snapshot the count up front so listeners added during this
-        // node's dispatch are not fired until a future dispatch.
-        u32 snap = ctx.listenerCount;
-        for (u32 i = 0; i < snap; ++i)
-        {
-            Listener& l = ctx.listeners[i];
-            if (!l.live || l.node != cur || !l.type || !duetos::core::StrEqual(l.type, type))
-                continue;
-            JS_TRY(InvokeListener(I, l.fn, eventVal, recv));
-        }
+        JS_TRY(FireNodePhase(I, ctx, ancestors[i], type, /*wantCapture=*/true, eventVal, ev));
         if (ev->propagationStopped)
-            break;
+        {
+            outPrevented = ev->defaultPrevented;
+            return {};
+        }
     }
+
+    // Target + bubble phase: target → outermost ancestor. At the target,
+    // both capture and bubble listeners fire (target-phase listeners are
+    // not split by the spec); ancestors fire only their bubble listeners.
+    JS_TRY(FireNodePhase(I, ctx, target, type, /*wantCapture=*/true, eventVal, ev));
+    if (!ev->propagationStopped)
+        JS_TRY(FireNodePhase(I, ctx, target, type, /*wantCapture=*/false, eventVal, ev));
+    if (!ev->propagationStopped)
+    {
+        for (u32 i = 0; i < nAnc; ++i)
+        {
+            JS_TRY(FireNodePhase(I, ctx, ancestors[i], type, /*wantCapture=*/false, eventVal, ev));
+            if (ev->propagationStopped)
+                break;
+        }
+    }
+
     outPrevented = ev->defaultPrevented;
     return {};
+}
+
+// Parse addEventListener's 3rd argument. Per the DOM it may be omitted, a
+// boolean (true == capture, the legacy form), or an options object
+// { capture, once, passive } (each a truthy/falsy member; absent == false).
+// `opt` may be Undefined. `outOnce`/`outPassive` are left untouched for the
+// boolean/omitted forms (only the options-object form sets them).
+void ParseListenerOptions(const JsValue& opt, bool& outCapture, bool& outOnce, bool& outPassive)
+{
+    if (opt.type == JsType::Object && opt.as.obj)
+    {
+        JsValue v{};
+        if (js::ObjGet(opt.as.obj, "capture", 7, v))
+            outCapture = js::ToBoolean(v);
+        if (js::ObjGet(opt.as.obj, "once", 4, v))
+            outOnce = js::ToBoolean(v);
+        if (js::ObjGet(opt.as.obj, "passive", 7, v))
+            outPassive = js::ToBoolean(v);
+        return;
+    }
+    // Boolean or omitted/undefined: ToBoolean(undefined) == false, so the
+    // omitted form correctly yields the default (bubble-phase) listener.
+    outCapture = js::ToBoolean(opt);
 }
 
 Result<JsValue> MAddEventListener(Interp&, const JsValue& recv, const JsValue* args, u32 argc, void*)
@@ -1121,14 +1224,20 @@ Result<JsValue> MAddEventListener(Interp&, const JsValue& recv, const JsValue* a
     JsValue fnArg = ArgOr(args, argc, 1);
     if (!fnArg.IsCallable())
         return JsValue::Undefined(); // non-callable listener: no-op (DOM coerces; we drop)
+    bool capture = false;
+    bool once = false;
+    bool passive = false;
+    ParseListenerOptions(ArgOr(args, argc, 2), capture, once, passive);
     DomCtx& ctx = *nb->ctx;
     char tbuf[64];
     u32 tl = ValToCStr(typeArg, tbuf, sizeof(tbuf));
     const char* type = JsCopyStr(*ctx.js, tbuf, tl);
     if (!type)
         return Err{ErrorCode::OutOfMemory};
-    // De-dupe: the DOM ignores a repeat (type, listener) registration.
-    if (FindListener(ctx, nb->node, type, fnArg.as.fn) >= 0)
+    // De-dupe: the DOM ignores a repeat (type, listener, capture)
+    // registration. capture is part of identity; once/passive are not — a
+    // duplicate that only changes once/passive is still ignored per spec.
+    if (FindListener(ctx, nb->node, type, fnArg.as.fn, capture) >= 0)
         return JsValue::Undefined();
     if (ctx.listenerCount >= DomCtx::kMaxListeners)
         return JsValue::Undefined(); // cap reached — drop (documented bound)
@@ -1137,6 +1246,11 @@ Result<JsValue> MAddEventListener(Interp&, const JsValue& recv, const JsValue* a
     l.type = type;
     l.fn = fnArg.as.fn;
     l.live = true;
+    l.capture = capture;
+    l.once = once;
+    // GAP: passive is recorded but not enforced — preventDefault() from a
+    //   passive listener still takes effect (spec says it must be ignored).
+    l.passive = passive;
     return JsValue::Undefined();
 }
 
@@ -1148,13 +1262,19 @@ Result<JsValue> MRemoveEventListener(Interp&, const JsValue& recv, const JsValue
     JsValue fnArg = ArgOr(args, argc, 1);
     if (!fnArg.IsCallable())
         return JsValue::Undefined();
+    // removeEventListener matches on (type, fn, capture). Only the capture
+    // flag of the options arg matters here (once/passive are not identity).
+    bool capture = false;
+    bool ignoredOnce = false;
+    bool ignoredPassive = false;
+    ParseListenerOptions(ArgOr(args, argc, 2), capture, ignoredOnce, ignoredPassive);
     DomCtx& ctx = *nb->ctx;
     char tbuf[64];
     u32 tl = ValToCStr(ArgOr(args, argc, 0), tbuf, sizeof(tbuf));
     const char* type = JsCopyStr(*ctx.js, tbuf, tl);
     if (!type)
         return JsValue::Undefined();
-    i32 idx = FindListener(ctx, nb->node, type, fnArg.as.fn);
+    i32 idx = FindListener(ctx, nb->node, type, fnArg.as.fn, capture);
     if (idx >= 0)
         ctx.listeners[idx].live = false; // tombstone; slot reuse not needed at this cap
     return JsValue::Undefined();

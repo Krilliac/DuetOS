@@ -401,6 +401,48 @@ void JsDomSelfTest()
                          "console.log(log);",
                          "t\n"));
 
+    // 27. Capture phase ordering: a CAPTURE-phase listener on an ANCESTOR
+    // must fire BEFORE the target's (bubble-phase) listener. Register the
+    // ancestor listener with capture=true (boolean 3rd arg) and the target
+    // listener with the default (bubble) form; clicking the target yields
+    // ancestor-then-target order (the reverse of plain bubbling).
+    run(RunExpectConsole(doc, dom,
+                         "var log='';"
+                         "var ul=document.getElementById('list');"
+                         "var li=ul.querySelector('li');"
+                         "ul.addEventListener('click', function(e){ log=log+'ulCap'; }, true);"
+                         "li.addEventListener('click', function(e){ log=log+'li'; });"
+                         "li.click();"
+                         "console.log(log);",
+                         "ulCapli\n"));
+
+    // 28. `once` fires exactly once across TWO dispatches: a once listener
+    // increments a counter, then two clicks leave the counter at 1 (the
+    // listener auto-removed itself after the first fire). Uses the options
+    // object form { once: true }.
+    run(RunExpectConsole(doc, dom,
+                         "var n=0;"
+                         "var t=document.getElementById('title');"
+                         "t.addEventListener('click', function(e){ n=n+1; }, { once: true });"
+                         "t.click();"
+                         "t.click();"
+                         "console.log(n);",
+                         "1\n"));
+
+    // 29. removeEventListener with a MISMATCHED capture flag does NOT
+    // remove: register a capture-phase listener, then attempt to remove it
+    // with the default (bubble) form — the listener survives and still
+    // fires. (type, fn, capture) is the identity key per the DOM spec.
+    run(RunExpectConsole(doc, dom,
+                         "var n=0;"
+                         "var t=document.getElementById('title');"
+                         "function h(e){ n=n+1; }"
+                         "t.addEventListener('click', h, true);"
+                         "t.removeEventListener('click', h);"
+                         "t.click();"
+                         "console.log(n);",
+                         "1\n"));
+
     // ----------------------------------------------------------------
     // RETAINED CONTEXT: the listener a script registers must survive to
     // a LATER dispatch (the run→click gap). JsRunOnDocument is one-shot,
@@ -417,7 +459,7 @@ void JsDomSelfTest()
                             "</body></html>";
         Document* doc2 = ParseHtml(html2, u32(duetos::core::StrLen(html2)), dom2);
 
-        // 27. Create + RunScript registers a click listener that, when
+        // 30. Create + RunScript registers a click listener that, when
         // fired, mutates #out.textContent. The listener does NOT run yet.
         char console2[256];
         JsDomContext* ctx = JsDomContextCreate(doc2, dom2, console2, sizeof(console2));
@@ -438,7 +480,7 @@ void JsDomSelfTest()
             run(out && n == 4 && duetos::core::StrEqual(buf, "idle"));
         }
 
-        // 28. THE persistence check: dispatch a click to #btn THROUGH the
+        // 31. THE persistence check: dispatch a click to #btn THROUGH the
         // retained context (the listener was registered in a PRIOR
         // RunScript call). Re-walk the DOM and assert #out became
         // 'clicked' — proving the listener survived the run→dispatch gap.
@@ -453,7 +495,7 @@ void JsDomSelfTest()
         }
     }
 
-    // 29. preventDefault round-trip: a listener registered in one
+    // 32. preventDefault round-trip: a listener registered in one
     // RunScript that calls event.preventDefault() makes DispatchClick
     // return true; a fresh page whose listener does NOT call it returns
     // false. Two independent Create/RunScript/DispatchClick cycles.
