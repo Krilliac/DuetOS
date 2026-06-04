@@ -984,16 +984,19 @@ Result<JsValue> ClassListHostGet(Interp&, JsObject* self, const char* key, u32 k
 //   says it must be ignored). Event delegation works through normal
 //   bubbling but matchesSelector-style delegation helpers and the full
 //   Event/UIEvent/MouseEvent property surface remain out of scope.
-// GAP: real user input (mouse/keyboard) is NOT routed here yet — but the
-//   plumbing now exists. JsDomContext (see the retained-context section at
-//   the bottom of this file) keeps the DomCtx + listeners alive across the
-//   run→dispatch gap, and JsDomContextDispatchClick() is the dispatch
-//   entry point a WM click can call. What remains is for the browser app
-//   (apps/browser.cpp) to: Create the context at render, RunScript each
-//   page <script> into it (registering listeners), and on a WM click
-//   translate the hit layout box back to its Node and call
-//   JsDomContextDispatchClick(ctx, node). Until that wiring lands, only
-//   scripted dispatchEvent()/click() reaches listeners.
+// Real user input is routed: a window-manager mouse click reaches page
+//   listeners through the retained JsDomContext (see the retained-context
+//   section at the bottom of this file), which keeps the DomCtx + listeners
+//   alive across the run→dispatch gap. The browser app creates the context
+//   at render, RunScripts() each page <script> into it (registering
+//   listeners), and on a WM click translates the hit layout box back to its
+//   Node and calls JsDomContextDispatchClick(ctx, node) — the live path is
+//   boot_tasks.cpp (compositor) → BrowserMouseInput → ScreenToDoc →
+//   BrowserHitTestNode → JsDomContextDispatchClick.
+// GAP: only "click" is delivered to page listeners. mousedown/mouseup/
+//   mousemove and keyboard events (keydown/keyup) are not yet routed to the
+//   page DOM (mousemove reaches only the browser chrome); revisit when a
+//   page needs them.
 // ---------------------------------------------------------------------------
 
 // Per-dispatch event state, backing the JS event host object. Lives on
