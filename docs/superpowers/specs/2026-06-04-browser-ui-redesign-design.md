@@ -172,7 +172,7 @@ The browser app holds bounded caps; the armed scope is a chosen subset; the kern
 
 Two independent gates, both required; **off by default**:
 
-1. **Feature availability — kernel boot flag** `--allow-claude-system-access` (kernel cmdline). Absent ⇒ the feature does not exist: no `window.duetos` binding is ever installed, the arm UI is hidden, the boot log records `priv-origin: disabled`. This is the machine-owner's master switch (analogous to granting a boot-time capability).
+1. **Feature availability — kernel boot flag** `--allow-claude-system-access[=root[:root2…]]` (kernel cmdline). Absent ⇒ the feature does not exist: no `window.duetos` binding is ever installed, the arm UI is hidden, the boot log records `priv-origin: disabled`. This is the machine-owner's master switch (analogous to granting a boot-time capability). The optional argument sets the **scoped roots** (§13.6); with no argument it defaults to a single conservative **user-workspace root** (`/home/user`) and **never** `/`, `/sys`, `/dev`, `/proc`, the boot/EFI partition, kernel pseudo-paths, or `audit.log` — those are excluded structurally regardless of what the flag names. When enabled, boot logs `priv-origin: enabled roots=[…]`.
 2. **Per-tab arming — explicit user action with reconfirm.** Even when available, the mode is inert until the user, on a tab currently showing the exact privileged origin, arms it via a setting/affordance that triggers a **reconfirm dialog**:
    > ⚠ **Arm privileged system access for `https://claude.ai/code`?** This page will be able to read/write files in *<scoped roots>*, spawn processes, and read kernel state **without asking each time**. It is audited and you can disarm instantly (Ctrl+Shift+Esc). **[Cancel]  [Arm for this tab only]**
    The dialog shows the exact origin, the cap scope being granted, and the disarm shortcut. Arming `kernel.installHandler` (§13.6) requires a *second*, separate confirm.
@@ -213,11 +213,15 @@ Each `window.duetos.*` namespace maps to an existing kernel cap gate and a struc
 | `fs.write` / `mkdir` / `remove` | `kCapFsWrite` | within scoped roots; `remove` never targets a root / `/` / device node; size bounds | ✅ |
 | `proc.spawn` / `list` / `signal` | `kCapSpawnThread` (+ proc) | spawn only from allowed exec roots; `signal` only PIDs this session spawned | ✅ |
 | `kernel.read` | read-only diag cap | introspection only (symbols, syscall scan, stats) — no mutation | ✅ |
-| `kernel.installHandler` / ABI modify | highest `kCap*` | **separate second confirm**; off in default arm | ❌ |
+| `kernel.installHandler` / ABI modify | highest `kCap*` | **specified but NOT implemented in v1** (see below) | 🚫 v1 |
 | `net.fetch` / `connect` | `kCapNet` | the same net stack + policy as a page fetch | ✅ |
 | *audit* | — | **not exposed** — the API can neither read nor write `audit.log` | 🚫 never |
 
-**Scoped roots** are configured by the boot flag / setting (default e.g. a project root + the user home directory). They **never** include `/`, kernel/device nodes, or `audit.log`. Every fs call is contained to them at *both* the broker and the kernel.
+**On `kernel.installHandler` — withheld from v1 (decision).** It is *defined* here for completeness, but the actual mutation path is **not built in v1**: the method is simply absent from `window.duetos.kernel` (calls return `undefined`). Rationale: this is the one capability that mutates the kernel's *structural* behaviour — the very invariant layer that bounds every other capability's blast radius (§13.1). Exposing it would lower the safety ceiling for a niche benefit; `kernel.read` (introspection) covers the legitimate "understand the system" need without mutation. It becomes a future slice gated behind its own threat review **and** a second, distinct confirm dialog.
+
+**Scoped roots** come from the boot flag's optional argument (§13.3), defaulting to a single conservative user-workspace root. They **never** include `/`, `/sys`, `/dev`, `/proc`, the boot/EFI partition, kernel pseudo-paths, or `audit.log`. Every fs call is contained to them at *both* the broker and the kernel.
+
+**Grant granularity (v1):** arming grants the **default set wholesale** (fs-scoped, proc, kernel.read, net) — the dialog *displays* the exact set but does not offer per-capability checkboxes (a future refinement). `installHandler` is never in any v1 grant.
 
 ## 13.7 API surface — `window.duetos.*` (chosen, with rationale)
 
@@ -285,9 +289,9 @@ Every one of those calls appends a structured `audit.log` entry (§13.8).
 ## 13.9 Kill switch
 
 Instant, page-independent revocation:
-- **Shortcut** `Ctrl+Shift+Esc` (proposed; confirm against the kernel shortcut map at implementation — fall back to `Ctrl+Shift+K` if reserved) **and** the red **[ Disarm ⎋ ]** button in the warning ribbon.
-- On trigger: revoke the armed scope, **tear down `window.duetos`** on the tab's JS context, write a final `disarmed` audit entry, and **reload the page in sandboxed (unprivileged) mode**.
-- Handled by **chrome / input routing, not the page's JS thread**, so it works even if the page is busy, looping, or hostile (it cannot trap or swallow the kill switch). This is the operator's always-available off-ramp.
+- **Shortcut (locked): `Ctrl+Shift+Esc`** — registered at the **highest input-routing priority** so it is claimed before the page or any widget. Documented fallback `Ctrl+Shift+K` only if the WM/kernel already reserves the `Ctrl+Shift+Esc` chord (confirm against the shortcut map at implementation). The ribbon's red **[ Disarm ]** button is the equivalent mouse path.
+- On trigger: **abort any in-flight broker request** (it returns `{ok:false, error:"EINTR: disarmed"}`; no new request is accepted), revoke the armed scope, **tear down `window.duetos`** on the tab's JS context, write a final `disarmed` audit entry, and **reload the page in sandboxed (unprivileged) mode**.
+- Handled by **chrome / input routing, not the page's JS thread**, so it works even if the page is busy, looping, or hostile (it cannot trap or swallow the kill switch). The chord disarms the **focused** armed tab; with multiple armed tabs each ribbon disarms its own. This is the operator's always-available off-ramp.
 
 ## 13.10 Lifetime model — per-tab, per-navigation (recommended)
 
@@ -300,8 +304,23 @@ Re-establishing privilege always requires the explicit arm dialog (§13.3) again
 
 ## 13.11 Non-goals / out of scope (v1)
 
-Persistent or always-armed grants; more than the one privileged origin (only `claude.ai/code`); arming a non-foreground tab; the page reading/altering `audit.log`; sandbox-escape hardening beyond the kernel's existing invariants. Each is a later, separately-reviewed slice.
+Persistent or always-armed grants; more than the one privileged origin (only `claude.ai/code`); arming a non-foreground tab; the page reading/altering `audit.log`; **`kernel.installHandler` implementation**; **per-capability grant checkboxes** (v1 grants the default set wholesale); sandbox-escape hardening beyond the kernel's existing invariants. Each is a later, separately-reviewed slice.
 
 ## 13.12 Implementation placement
 
 Privileged-Origin Mode depends on the **shell** (§4, the armed-state chrome) and on the **JS host-binding mechanism** (`js_dom.cpp`), but is **independent of the AI intelligence source** (§10 Phase 2) — it ships as its own security-reviewed slice once the shell lands. It is gated behind `--allow-claude-system-access` so it can land dark (compiled, off, no binding installed) and be enabled deliberately. The reviewable signal from [Subsystem-Isolation](../../../wiki/kernel/Subsystem-Isolation.md) applies directly: *"could the armed page do something the browser app's own caps could not?"* — by construction (§13.1), **no**.
+
+## 13.13 Locked v1 decisions (this round)
+
+Resolving the open items, per operator delegation:
+
+| Item | Decision |
+|------|----------|
+| **Kill-switch chord** | `Ctrl+Shift+Esc`, highest input priority (fallback `Ctrl+Shift+K`). Ribbon **[Disarm]** = mouse equivalent. |
+| **Default scoped roots** | One conservative user-workspace root (`/home/user`) when the flag carries no argument; settable via `--allow-claude-system-access=root[:root2…]`. System/kernel/boot/`audit.log` paths excluded structurally regardless. |
+| **`kernel.installHandler`** | **Specified, not built in v1.** Method absent from the binding; future slice + its own threat review + a second confirm. |
+| **Grant granularity** | v1 grants the default set wholesale (fs-scoped · proc · kernel.read · net); dialog displays it; per-cap checkboxes deferred. |
+| **In-flight on disarm** | Aborted → `{ok:false, error:"EINTR: disarmed"}`; no new request accepted post-disarm. |
+| **Concurrency** | Privileged calls are synchronous on the page's JS thread; the **broker serialises** requests per tab (no overlapping privileged syscalls from one tab). |
+| **Multiple armed tabs** | Allowed (each its own arm/audit/kill); the chord disarms the focused tab, each ribbon disarms its own. |
+| **Arm affirmation** | A deliberate click on **"Arm for this tab only"** (not an Enter-default), dialog shows exact origin + the granted set + the disarm chord. |
