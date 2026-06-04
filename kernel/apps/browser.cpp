@@ -24,6 +24,8 @@
 #include "net/x509_verify.h"
 #include "sched/sched.h"
 #include "time/timekeeper.h"
+#include "apps/browser/tab_strip.h"
+#include "apps/browser/tokens.h"
 #include "web/css.h"
 #include "web/dom.h"
 #include "web/html.h"
@@ -278,6 +280,14 @@ constexpr u32 kUrlBarH = kRowH + 4U;
 constexpr u32 kUrlBarPadX = 4U;
 constexpr u32 kStatusRowH = kRowH + 2U;
 constexpr u32 kFooterH = 12U;
+// Tab strip band above the toolbar (shell redesign Phase 1). The existing
+// toolbar/url/status chrome is anchored kTabStripH lower; the strip is
+// painted in [cy, cy+kTabStripH].
+constexpr u32 kTabStripH = 30U;
+
+// Live tab model (Phase 1: one page rendered at a time; the active tab
+// tracks the current URL/title — real per-tab render contexts are Phase 3).
+TabStrip g_tabs;
 constexpr u32 kNavBtnCount = 7U;
 
 using duetos::drivers::video::ChromeTextRole;
@@ -2354,7 +2364,7 @@ void DrawBody(u32 cx, u32 cy, u32 cw, u32 ch, u32 fg, u32 bg)
     // AppLabel footer at the bottom. The rendered page sits in the
     // middle band, painted from the display list at the live pixel
     // scroll offset.
-    const u32 top_reserved = kToolbarH + kUrlBarH + kStatusRowH + 2;
+    const u32 top_reserved = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + 2;
     const u32 bot_reserved = kFooterH + 2;
     if (ch < top_reserved + bot_reserved)
         return;
@@ -2496,6 +2506,31 @@ void DrawList(u32 cx, u32 cy, u32 cw, u32 ch, const char* title, char list[][kUr
     }
 }
 
+// Paint the Chrome-style tab strip in the top band [cy, cy+kTabStripH].
+// Active tab carries a teal top-accent; each tab a dual-accent favicon
+// chip (teal native / amber doc) + title. New-tab '+' at the end.
+void DrawTabStrip(u32 cx, u32 cy, u32 cw)
+{
+    FramebufferFillRect(cx, cy, cw, kTabStripH, tokens::kCanvas);
+    const Rect strip{cx, cy, cw, kTabStripH};
+    const u32 chipY = cy + (kTabStripH - 8U) / 2U;
+    for (u32 i = 0; i < g_tabs.count; ++i)
+    {
+        const Rect t = g_tabs.TabRect(i, strip);
+        const bool on = (i == g_tabs.active);
+        const u32 tabbg = on ? tokens::kPanelHi : tokens::kPanel;
+        const u32 tw = (t.w > 2U) ? t.w - 2U : t.w;
+        duetos::drivers::video::FramebufferFillRoundRect(t.x, t.y + 4U, tw, t.h - 4U, tokens::kRadTab, tabbg);
+        if (on)
+            FramebufferFillRect(t.x, t.y + 4U, tw, 2U, tokens::kAccentTeal);
+        const u32 chip = (g_tabs.tabs[i].accent == TabAccent::Doc) ? tokens::kAccentAmber : tokens::kAccentTeal;
+        duetos::drivers::video::FramebufferFillRoundRect(t.x + 8U, chipY, 8U, 8U, 2U, chip);
+        FramebufferDrawString(t.x + 20U, chipY, g_tabs.tabs[i].title, on ? 0x00E3E9EFU : tokens::kInkMute, tabbg);
+    }
+    const Rect nt = g_tabs.NewTabRect(strip);
+    FramebufferDrawString(nt.x + 8U, chipY, "+", tokens::kInkMute, tokens::kCanvas);
+}
+
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
     const auto& th = ThemeCurrent();
@@ -2513,7 +2548,10 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     BindBrowserOnce();
     RefreshUrlBarText();
     RefreshFooterText();
-    RebindBrowserBounds(cx, cy, cw, ch);
+    // Tab strip on top; anchor the existing chrome into the client rect
+    // shifted down by the strip height (footer re-anchors to the bottom).
+    DrawTabStrip(cx, cy, cw);
+    RebindBrowserBounds(cx, cy + kTabStripH, cw, (ch > kTabStripH) ? ch - kTabStripH : 0U);
 
     // Pre-paint a status-band tone behind the footer label so
     // the Caption-role glyphs sit on a uniform backdrop —
@@ -2526,7 +2564,7 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 
     // Body / modal-list paint area starts BELOW the toolbar +
     // URL bar + status row the AppToolbar / labels just painted.
-    const u32 top_band = kToolbarH + kUrlBarH + kStatusRowH;
+    const u32 top_band = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH;
 
     if (g_state.fetch_in_flight)
     {
@@ -2611,7 +2649,7 @@ u32 ContentViewHeight()
     if (wh <= kTitleH)
         return 0;
     const u32 ch = wh - kTitleH;
-    const u32 top_reserved = kToolbarH + kUrlBarH + kStatusRowH + 2;
+    const u32 top_reserved = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + 2;
     const u32 bot_reserved = kFooterH + 2;
     if (ch < top_reserved + bot_reserved)
         return 0;
@@ -2668,7 +2706,7 @@ bool ScreenToDoc(u32 screen_cx, u32 screen_cy, i32* out_doc_x, i32* out_doc_y)
         return false;
     const u32 client_y = wy + kTitleH;
     const u32 client_h = wh - kTitleH;
-    const u32 top_reserved = kToolbarH + kUrlBarH + kStatusRowH + 2;
+    const u32 top_reserved = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + 2;
     const u32 bot_reserved = kFooterH + 2;
     if (client_h < top_reserved + bot_reserved)
         return false;
@@ -3046,6 +3084,10 @@ void BrowserInit(WindowHandle handle)
     net::CookieJarLoad();
     BindBrowserOnce();
     WindowSetContentDraw(handle, DrawFn, nullptr);
+    // Seed the tab strip with one home tab (the live page). Real per-tab
+    // render contexts are Phase 3; here the active tab tracks the page.
+    if (g_tabs.count == 0)
+        g_tabs.AddTab("", "DuetOS - Home", TabAccent::Native);
     duetos::drivers::video::WindowSetWheelHandler(handle, BrowserOnWheel);
     duetos::drivers::video::WindowSetScrollHandler(handle,
                                                    [](duetos::u32 first)
@@ -3159,7 +3201,7 @@ bool BrowserOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
     constexpr u32 kTitle = 22;
     constexpr u32 kBorder = 2;
     const u32 client_y = wy + kTitle + kBorder;
-    const u32 top_band = kToolbarH + kUrlBarH + kStatusRowH;
+    const u32 top_band = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH;
     const u32 list_y0 = client_y + top_band + 4 + kRowH * 2;
     if (sy < list_y0)
         return false;
@@ -4355,6 +4397,29 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
     }
     if (press_edge && inside_window)
     {
+        // Tab strip band (top): route to the tab model before the page/chrome.
+        if (cy < client_y + kTabStripH)
+        {
+            const Rect strip{wx, client_y, ww, kTabStripH};
+            const TabHit th = g_tabs.HitTest(strip, cx, cy);
+            if (th.kind == TabHitKind::NewTab)
+            {
+                g_tabs.AddTab("", "New Tab", TabAccent::Native);
+            }
+            else if (th.kind == TabHitKind::Close)
+            {
+                g_tabs.CloseTab(th.index);
+            }
+            else if (th.kind == TabHitKind::Tab)
+            {
+                g_tabs.Select(th.index);
+                // Phase 1: one live page — selecting re-fetches the tab's URL
+                // if it has one (a fresh "New Tab" has none yet → no-op).
+                if (g_tabs.tabs[th.index].url[0] != '\0' && !g_state.fetch_in_flight)
+                    StartFetch(g_tabs.tabs[th.index].url);
+            }
+            return; // the strip consumed this press; next compose repaints it.
+        }
         const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
         const EventResult er = g_browser.DispatchEvent(d);
         // The toolbar / chrome didn't claim this press — route it into the
