@@ -176,6 +176,8 @@
 #include "apps/browser/dock_surface.h"
 #include "apps/browser/omnibox.h"
 #include "apps/browser/privileged/arm_state.h"
+#include "apps/browser/privileged/audit.h"
+#include "apps/browser/privileged/broker.h"
 #include "apps/browser/privileged/origin_predicate.h"
 #include "apps/browser/privileged/scope.h"
 #include "apps/browser/start_page.h"
@@ -3206,6 +3208,11 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // Per-tab arm state machine (arm binds scope; auto-disarm on leaving the
     // privileged origin / per-navigation lifetime).
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::ArmStateSelfTest());
+    // Unified client-tagged audit-entry formatter + the broker request
+    // validator (the enforcement contract: armed? cap-in-scope? contained?
+    // bounds?). Completes the pure Privilege-Engine security core.
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::AuditSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::BrokerSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG
