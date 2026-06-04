@@ -284,6 +284,8 @@ void JsSelfTest()
     run(CheckCase("/^foo$/.test('foobar');", "false", nullptr));
     // 65. case-insensitive flag.
     run(CheckCase("/HELLO/i.test('hello world');", "true", nullptr));
+    // 65b. dotAll ('s') flag: '.' excludes '\n' by default, matches it with 's'.
+    run(CheckCase("/a.b/.test('a\\nb') + ',' + /a.b/s.test('a\\nb');", "false,true", nullptr));
     // 66. alternation + match() returns the matched substring (non-global).
     run(CheckCase("'cat'.match(/dog|cat/)[0];", "cat", nullptr));
     // 67. search() returns the match index.

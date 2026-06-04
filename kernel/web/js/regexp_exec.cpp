@@ -117,7 +117,10 @@ ReMatch ReExec(Arena& arena, const ReProgram* prog, const char* input, u32 len, 
                     fail = true;
                 break;
             case ReOp::Any:
-                if (cur.sp < len && input[cur.sp] != '\n')
+                // Without dotAll, `.` matches any byte except '\n' (current
+                // behavior preserved). With the `s` flag, `.` matches line
+                // terminators too.
+                if (cur.sp < len && (prog->dotAll || input[cur.sp] != '\n'))
                 {
                     cur.sp++;
                     cur.pc++;

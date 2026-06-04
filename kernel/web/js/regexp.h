@@ -33,10 +33,11 @@
  *   anchors `^` `$`; word-boundary `\b` / `\B`; escapes `\d \D \w \W
  *   \s \S` and literal escapes (`\.` `\/` `\n` `\t` …); alternation `|`;
  *   capturing groups `(...)` and non-capturing `(?:...)`. Flags: `g`
- *   (global), `i` (case-insensitive ASCII), `m` (multiline `^`/`$`).
+ *   (global), `i` (case-insensitive ASCII), `m` (multiline `^`/`$`),
+ *   `s` (dotAll — `.` also matches line terminators).
  *
- * GAP: lookahead/lookbehind, backreferences, named groups, the `s`
- *      (dotAll), `u` (unicode), `y` (sticky) flags, and `{` as a literal
+ * GAP: lookahead/lookbehind, backreferences, named groups, the `u`
+ *      (unicode), `y` (sticky) flags, and `{` as a literal
  *      when not a valid quantifier are all unsupported. Matching is
  *      byte-oriented (ASCII) — no UTF-16/Unicode awareness. `i` folds
  *      ASCII A-Z/a-z only.
@@ -70,7 +71,7 @@ inline constexpr u64 kReDefaultSteps = 2'000'000; // VM step budget per match
 enum class ReOp : u8
 {
     Char,           // match one specific byte (arg.ch), advance
-    Any,            // match any byte except '\n', advance
+    Any,            // match any byte (except line terminators unless dotAll), advance
     Class,          // match a byte against class table [arg.classIdx]
     Match,          // accept: whole pattern matched
     Jmp,            // unconditional jump to arg.x
@@ -114,6 +115,7 @@ struct ReProgram
     bool global;     // 'g'
     bool ignoreCase; // 'i'
     bool multiline;  // 'm'
+    bool dotAll;     // 's'
 };
 
 // Compile `pattern` (length `patLen`) with `flags` (length `flagLen`)

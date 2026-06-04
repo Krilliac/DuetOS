@@ -866,7 +866,7 @@ Result<ReProgram*> ReCompile(Arena& arena, const char* pattern, u32 patLen, cons
     if (!prog)
         return Err{ErrorCode::OutOfMemory};
 
-    bool g = false, ic = false, ml = false;
+    bool g = false, ic = false, ml = false, dotAll = false;
     for (u32 i = 0; i < flagLen; ++i)
     {
         switch (flags[i])
@@ -880,8 +880,11 @@ Result<ReProgram*> ReCompile(Arena& arena, const char* pattern, u32 patLen, cons
         case 'm':
             ml = true;
             break;
+        case 's':
+            dotAll = true;
+            break;
         default:
-            // GAP: 's' (dotAll), 'u' (unicode), 'y' (sticky) unsupported.
+            // GAP: 'u' (unicode), 'y' (sticky) unsupported.
             return Err{ErrorCode::InvalidArgument};
         }
     }
@@ -918,6 +921,7 @@ Result<ReProgram*> ReCompile(Arena& arena, const char* pattern, u32 patLen, cons
     prog->global = g;
     prog->ignoreCase = ic;
     prog->multiline = ml;
+    prog->dotAll = dotAll;
     return prog;
 }
 
