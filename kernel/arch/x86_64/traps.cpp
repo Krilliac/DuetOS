@@ -707,6 +707,20 @@ static bool TrapFramePointerIsSane(const void* frame)
     return ::duetos::mm::SafeReadKernel(&probe, frame, sizeof(probe));
 }
 
+// DIAG (boot-tail wild-frame chase): runaway-fault-loop detector by TIGHT
+// DESCENT. A fault-on-fault loop marches DOWN one stack, each TrapDispatch frame
+// ~one frame-size (~0x1290) below the previous, with no work between. A plain
+// global re-entry depth can't see this — legitimate nesting across tasks (a
+// syscall here, a timer IRQ there) climbs it via context switches that suspend
+// frames without returning. So instead: count CONSECUTIVE entries whose frame is
+// just below the previous one on the same stack; ANY non-tight entry (context
+// switch, fresh trap, upward/far frame) resets it. Crossing the threshold means a
+// genuine same-stack recursion. Single-CPU diagnostic.
+constexpr ::duetos::u64 kTightDescentBytes = 3u * 0x1290u; // up to ~3 frame-sizes below
+constexpr ::duetos::u64 kMaxTightRecursion = 8;            // 8 tight descents in a row = runaway
+::duetos::u64 g_last_trap_frame = 0;
+::duetos::u64 g_tight_recursion = 0;
+
 // DIAG (boot-tail wild-frame chase): print the trap-entry ring oldest->newest.
 // In its OWN small frame (noinline) so the loop counter cannot alias
 // TrapDispatch's huge UBSAN stack frame — inlined, that aliasing left the
@@ -838,6 +852,33 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         DumpTrapEntryRing();
         ::duetos::core::PanicWithValue("arch/traps", "wild trap-frame pointer at dispatch entry", fp);
     }
+
+    // DIAG: runaway fault-loop catcher by tight descent (see kMaxTightRecursion).
+    // A fault-on-fault loop hands us frames marching DOWN one stack, each ~one
+    // TrapDispatch frame below the last. Count consecutive tight descents; ANY
+    // other shape (context switch to another stack, a fresh/higher frame) resets
+    // the run, so legitimate cross-task nesting never trips it. On a genuine run
+    // halt EARLY while the ring still holds the TRIGGER (the first traps, with a
+    // VALID vec/rip — before the loop corrupts the slots to -1) and dump it.
+    {
+        const ::duetos::u64 thisFrame = reinterpret_cast<::duetos::u64>(frame);
+        if (g_last_trap_frame != 0 && thisFrame < g_last_trap_frame &&
+            (g_last_trap_frame - thisFrame) < kTightDescentBytes)
+            ++g_tight_recursion;
+        else
+            g_tight_recursion = 0;
+        g_last_trap_frame = thisFrame;
+        if (g_tight_recursion > kMaxTightRecursion)
+        {
+            asm volatile("cli");
+            SerialWrite("[arch/traps] RUNAWAY trap recursion (tight descent) — halting + dumping trigger  run=");
+            SerialWriteHex(g_tight_recursion);
+            SerialWrite("\n");
+            DumpTrapEntryRing();
+            ::duetos::core::PanicWithValue("arch/traps", "runaway trap recursion (fault loop)", g_tight_recursion);
+        }
+    }
+
     RipIntegrityGuard guard(frame);
     // KPath: record that this vector fired before any handler-
     // specific dispatch. Single bounds check + relaxed atomic add;
