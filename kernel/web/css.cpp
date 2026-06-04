@@ -473,98 +473,92 @@ const Node* ParentElement(const Node* el)
     return nullptr;
 }
 
+// Recursively satisfy the combinator chain to the LEFT of `right`, given
+// that `right` has already matched `cur`. Returns true when the whole chain
+// from `right->ancestor` leftward can be satisfied starting from `cur`.
+//
+// Child and Adjacent each have exactly one candidate node (the direct
+// parent / immediately-preceding element sibling), so they are
+// deterministic — no choice to backtrack over. Descendant and General each
+// admit MULTIPLE candidates (any ancestor / any preceding element sibling);
+// for those we try each candidate in turn and recurse, falling through to
+// the next candidate when a deeper step fails. This backtracking is what
+// makes "a b a c"-shaped selectors resolve correctly: a greedy walk that
+// committed to the first matching candidate could foreclose a valid match
+// further left, whereas the recursion re-tries the remaining candidates.
+bool MatchFrom(const SimpleSelector* right, const Node* cur)
+{
+    const SimpleSelector* left = right->ancestor;
+    if (left == nullptr)
+    {
+        // Reached the leftmost compound — the whole chain is satisfied.
+        return true;
+    }
+    switch (right->combinator)
+    {
+    case Combinator::Child:
+    {
+        // Exactly one candidate: the direct parent element.
+        const Node* parent = ParentElement(cur);
+        return parent != nullptr && MatchesCompound(left, parent) && MatchFrom(left, parent);
+    }
+    case Combinator::Adjacent:
+    {
+        // Exactly one candidate: the immediately-preceding element sibling.
+        const Node* prev = PreviousElementSibling(cur);
+        return prev != nullptr && MatchesCompound(left, prev) && MatchFrom(left, prev);
+    }
+    case Combinator::General:
+    {
+        // Any preceding element sibling that matches `left` AND lets the
+        // rest of the chain resolve satisfies it; try each in turn.
+        for (const Node* prev = PreviousElementSibling(cur); prev != nullptr; prev = PreviousElementSibling(prev))
+        {
+            if (MatchesCompound(left, prev) && MatchFrom(left, prev))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+    case Combinator::Descendant:
+    default:
+    {
+        // Any ancestor that matches `left` AND lets the rest of the chain
+        // resolve satisfies it; try each ancestor walking upward.
+        for (const Node* anc = ParentElement(cur); anc != nullptr; anc = ParentElement(anc))
+        {
+            if (MatchesCompound(left, anc) && MatchFrom(left, anc))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+    }
+}
+
 // Full selector match across the combinator chain: the rightmost compound
 // (`sel`) must match `el`, and each compound to its left must match the
 // node reachable from the current node via that left compound's
 // combinator. The combinator lives on the *child* (right) compound and
 // describes its relationship to its `ancestor` (left) compound.
 //
-// GAP: the descendant and general-sibling steps match the FIRST candidate
-// greedily without backtracking. A pathological selector whose earlier
-// (righter) descendant/sibling choice forecloses a valid leftward match
-// (e.g. "a b a c" shapes) can therefore miss. Child and adjacent steps are
-// deterministic (single candidate) and exact. The common cases all resolve
-// correctly; full backtracking is deferred.
+// Descendant and general-sibling steps backtrack across every candidate
+// (each ancestor / each preceding element sibling) via MatchFrom, so an
+// earlier greedy choice can no longer foreclose a valid leftward match —
+// "a b a c" shapes resolve correctly. Child and adjacent steps remain
+// deterministic (a single candidate each) and exact.
+//
+// GAP: :has() and other relational pseudo-classes are not parsed, so the
+// matcher only ever looks leftward/upward — never at descendants of `el`.
 bool Matches(const SimpleSelector* sel, const Node* el)
 {
     if (!MatchesCompound(sel, el))
     {
         return false;
     }
-
-    // `right` is the compound we just matched against `cur`; we now walk
-    // to its `ancestor` (left) compound using `right->combinator`.
-    const SimpleSelector* right = sel;
-    const Node* cur = el;
-    while (right->ancestor != nullptr)
-    {
-        const SimpleSelector* left = right->ancestor;
-        switch (right->combinator)
-        {
-        case Combinator::Child:
-        {
-            const Node* parent = ParentElement(cur);
-            if (parent == nullptr || !MatchesCompound(left, parent))
-            {
-                return false;
-            }
-            cur = parent;
-            break;
-        }
-        case Combinator::Adjacent:
-        {
-            const Node* prev = PreviousElementSibling(cur);
-            if (prev == nullptr || !MatchesCompound(left, prev))
-            {
-                return false;
-            }
-            cur = prev;
-            break;
-        }
-        case Combinator::General:
-        {
-            // Any preceding element sibling matching `left` satisfies it;
-            // matching continues from that sibling.
-            bool found = false;
-            for (const Node* prev = PreviousElementSibling(cur); prev != nullptr; prev = PreviousElementSibling(prev))
-            {
-                if (MatchesCompound(left, prev))
-                {
-                    cur = prev;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found)
-            {
-                return false;
-            }
-            break;
-        }
-        case Combinator::Descendant:
-        default:
-        {
-            // Some ancestor must match `left`; matching continues from it.
-            bool found = false;
-            for (const Node* anc = ParentElement(cur); anc != nullptr; anc = ParentElement(anc))
-            {
-                if (MatchesCompound(left, anc))
-                {
-                    cur = anc;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found)
-            {
-                return false;
-            }
-            break;
-        }
-        }
-        right = left;
-    }
-    return true;
+    return MatchFrom(sel, el);
 }
 
 // Seed a child's style from its parent's: copy ONLY the inherited

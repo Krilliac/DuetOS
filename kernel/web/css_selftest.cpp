@@ -31,6 +31,9 @@
  *      siblings (and :only-child matches a sole child);
  *  19. :nth-last-child(1) == :last-child (counted from the end);
  *  20. :nth-last-of-type(1) == :last-of-type.
+ *  21. the matcher backtracks across descendant candidates: `.x > .y .z`
+ *      resolves even when the NEAREST .y ancestor forecloses the leftward
+ *      child step and a farther .y is the one that satisfies it.
  *
  * On success emits one grep-able `[css-selftest] PASS (...)` line; on
  * the first failed sub-check fires KBP_PROBE_V(kBootSelftestFail, <#>)
@@ -106,9 +109,10 @@ const Node* NthElementChild(const Node* parent, u32 n)
 void CssSelfTest()
 {
     // Generous shared arena: DOM + parsed sheets + style map all live
-    // here (four DOM/sheet/map sets, including the -of-type fixtures).
-    // Function-local static keeps it off the boot stack.
-    static u8 s_arenaBuf[160 * 1024];
+    // here (five DOM/sheet/map sets, including the -of-type and
+    // combinator-backtracking fixtures). Function-local static keeps it
+    // off the boot stack.
+    static u8 s_arenaBuf[192 * 1024];
     Arena arena(s_arenaBuf, sizeof(s_arenaBuf));
 
     // --- Check 7 first: standalone color parsing equivalence ---------
@@ -822,10 +826,75 @@ void CssSelfTest()
         return;
     }
 
+    // --- Check 21: combinator backtracking on the descendant step -----
+    // The OLD matcher walked the chain greedily, binding each descendant
+    // step to the NEAREST matching ancestor and never reconsidering. That
+    // forecloses a valid leftward match when a later (lefter) step is the
+    // deterministic child combinator. Selector: `.x > .y .z`.
+    //
+    //   <div class="x">          X     matches .x
+    //     <div class="y">        Y1    direct child of X  -> `.x > .y` holds
+    //       <div class="y">      Y2    NOT a direct child of X
+    //         <div class="z">    Z     the target
+    //
+    // Matching Z against `.x > .y .z`:
+    //   - `.z` matches Z.
+    //   - ` .y` (descendant): the NEAREST .y ancestor is Y2. A greedy bind
+    //     commits to Y2, then `.x > .y` needs Y2's PARENT to be .x — but
+    //     Y2's parent is Y1, not .x, so greedy FAILS here.
+    //   - Backtracking re-tries the next .y ancestor, Y1, whose parent IS
+    //     X (.x), so `.x > .y .z` resolves. red on #z proves the recursion
+    //     re-tried the farther candidate the greedy walk would have missed.
+    const char* html5 = "<html><body>"
+                        "<div class=\"x\">"
+                        "<div class=\"y\">"
+                        "<div class=\"y\">"
+                        "<div class=\"z\" id=\"z\">deep</div>"
+                        "</div></div></div>"
+                        "</body></html>";
+    Node* doc5 = ParseHtml(html5, static_cast<u32>(duetos::core::StrLen(html5)), arena);
+    if (doc5 == nullptr)
+    {
+        Fail(121);
+        return;
+    }
+    const char* css5 = ".x > .y .z { color: red; }";
+    StyleSheet sheet5{};
+    ParseStyleSheet(sheet5, css5, static_cast<u32>(duetos::core::StrLen(css5)), /*userAgent=*/false, arena);
+    StyleMap map5 = ComputeStyles(doc5, sheet5, arena);
+    if (map5.count == 0)
+    {
+        Fail(122);
+        return;
+    }
+    const Node* zNode = nullptr;
+    for (u32 i = 0; i < map5.count; ++i)
+    {
+        const Node* n = map5.keys[i];
+        const char* id = n->GetAttr("id");
+        if (id != nullptr && duetos::core::StrEqual(id, "z"))
+        {
+            zNode = n;
+            break;
+        }
+    }
+    if (zNode == nullptr)
+    {
+        Fail(123);
+        return;
+    }
+    const ComputedStyle* zs = map5.Get(zNode);
+    if (zs == nullptr || !ColorEq(zs->color, 255, 0, 0))
+    {
+        Fail(21); // backtracking did not re-try the farther .y ancestor
+        return;
+    }
+
     arch::SerialWrite("[css-selftest] PASS (cascade specificity inline inherit UA display-none color "
                       "first-child last-child nth-child attr-selectors child-combinator "
                       "sibling-combinators not nth-formula of-type nth-of-type "
-                      "first/last-of-type only-child only-of-type nth-last-child nth-last-of-type)\n");
+                      "first/last-of-type only-child only-of-type nth-last-child nth-last-of-type "
+                      "combinator-backtracking)\n");
 }
 
 } // namespace duetos::web
