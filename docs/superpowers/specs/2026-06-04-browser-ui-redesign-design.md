@@ -324,3 +324,23 @@ Resolving the open items, per operator delegation:
 | **Concurrency** | Privileged calls are synchronous on the page's JS thread; the **broker serialises** requests per tab (no overlapping privileged syscalls from one tab). |
 | **Multiple armed tabs** | Allowed (each its own arm/audit/kill); the chord disarms the focused tab, each ribbon disarms its own. |
 | **Arm affirmation** | A deliberate click on **"Arm for this tab only"** (not an Enter-default), dialog shows exact origin + the granted set + the disarm chord. |
+
+---
+
+# 14. Future Direction: On-Device Inference (Phase 4+)
+
+> **Documentation only — not in scope for Phase 1/2/3.** Captured so the boot-startup constraint is recorded at design time and future implementers treat the opt-in launch behaviour as intentional, not a forgotten feature.
+
+The near-term AI (§10 Phase 2) runs **off-device** — either an external LLM over TLS, or a local *heuristic* (non-LLM) assistant. **On-device local LLM inference** — running a real model on the machine itself — is a separate, later direction.
+
+**Deferred, but explicitly NOT permanently out of scope.** It should land eventually, once the foundation supports it. It is deferred because DuetOS does not yet have what it needs:
+- **Memory footprint** — even a quantised 7B model is multiple GiB resident; the MM/allocator story for that doesn't exist yet.
+- **GPU compute** — meaningful throughput needs compute-class GPU drivers (CUDA/ROCm/Vulkan-compute) DuetOS does **not** have yet (today's GPU work is display / 2D-accel oriented).
+- **CPU-only inference is unusable** — without GPU offload, tok/sec on CPU is far too slow for an interactive assistant.
+- **Model-runtime work** — it requires a substantial inference runtime (a `llama.cpp`-style port: GGUF loading, quantised kernels, a KV-cache, a sampler) that is a project in its own right.
+
+**Hard constraint when it does land — opt-in launch only; it MUST NOT auto-start at boot.** The inference runtime is **never** started by the boot / init path; it launches only on an explicit user action (opening the assistant in on-device mode / a deliberate "start local model" control) and shuts down when dismissed.
+
+**Reasoning (a design decision, not an oversight):** a 7B+ model at meaningful tok/sec draws GPU compute pulling **significant continuous wattage**. On a laptop / battery-powered device the user must **not** pay that idle power cost *passively* for a feature they aren't actively using — auto-starting at boot would silently drain the battery. The cost must always be the user's deliberate, visible choice. (This mirrors the project's broader "no passive cost" posture — cf. Privileged-Origin Mode §13's "off by default, explicit opt-in".)
+
+When this direction is planned it gets its own spec + threat/power review; this section exists only to pin the **opt-in, no-boot-autostart** invariant at design time.
