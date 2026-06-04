@@ -175,6 +175,7 @@
 #include "apps/browser.h"
 #include "apps/browser/dock_surface.h"
 #include "apps/browser/omnibox.h"
+#include "apps/browser/privileged/arm_state.h"
 #include "apps/browser/privileged/origin_predicate.h"
 #include "apps/browser/privileged/scope.h"
 #include "apps/browser/start_page.h"
@@ -3202,6 +3203,9 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // keystone (full adversarial battery: escapes, sibling-prefix, audit.log
     // fold/dot/ADS, dev/proc/sys/boot, separators, control/non-ASCII bytes).
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::ScopeSelfTest());
+    // Per-tab arm state machine (arm binds scope; auto-disarm on leaving the
+    // privileged origin / per-navigation lifetime).
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::ArmStateSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG
