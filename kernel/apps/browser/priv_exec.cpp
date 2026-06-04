@@ -136,14 +136,23 @@ duetos::i64 PrivSpawnExec(const char* canonPath, const char* const* argv, duetos
     // page-spawned child IS untrusted, so it must not inherit the trusted
     // ramfs view. The spawn API requires a non-null root — nullptr is rejected
     // up front (spawn.cpp) and would fail every launch — so the sandbox root is
-    // both the correct confinement AND the only working choice. Frame/tick
-    // budgets match the FAT32-staged launch in files.cpp.
+    // both the correct confinement AND the only working choice.
+    //
+    // Budgets are SANDBOX-class, NOT the trusted launch profile files.cpp uses:
+    //   - tick: kTickBudgetSandbox (~10 s) so the scheduler AUTO-KILLS a child
+    //     that runs away — a hostile page must not be able to spawn an
+    //     infinite-loop binary that starves a CPU core forever.
+    //   - frame: a bounded ceiling well below the trusted 8192. kFrameBudgetSandbox
+    //     (8) is too tight for a PE (the Win32 import set preloads ~44 DLLs, see
+    //     spawn.cpp), so we grant enough headroom for the preload + working set
+    //     while staying far from a trusted launch's full region table.
+    constexpr duetos::u64 kBrokeredSpawnFrames = 512;
     const duetos::fs::RamfsNode* childRoot = duetos::fs::RamfsSandboxRoot();
-    const duetos::u64 pid =
-        is_pe ? duetos::core::SpawnPeFile(canonPath, staging, entry.size_bytes, childCaps, childRoot,
-                                          duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted)
-              : duetos::core::SpawnElfFile(canonPath, staging, entry.size_bytes, childCaps, childRoot,
-                                           duetos::mm::kFrameBudgetTrusted, duetos::core::kTickBudgetTrusted);
+    const duetos::u64 pid = is_pe
+                                ? duetos::core::SpawnPeFile(canonPath, staging, entry.size_bytes, childCaps, childRoot,
+                                                            kBrokeredSpawnFrames, duetos::core::kTickBudgetSandbox)
+                                : duetos::core::SpawnElfFile(canonPath, staging, entry.size_bytes, childCaps, childRoot,
+                                                             kBrokeredSpawnFrames, duetos::core::kTickBudgetSandbox);
 
     // Spawn*File copies the bytes into the child's AS during load, so the
     // staging buffer is free to release regardless of spawn success.

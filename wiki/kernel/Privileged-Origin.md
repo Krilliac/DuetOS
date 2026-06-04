@@ -74,16 +74,21 @@ Installed onto the page's JS global env **only** when `available && tab.IsArmed(
 - `duetos.kernel.read()` → `{ok, uptimeNs}` — read-only introspection (monotonic
   uptime; no pointer / KASLR base / secret).
 - `duetos.proc.spawn(path[, args])` → `{ok, pid}` — validated + canonicalised +
-  **exec-root-contained** (v1: exec-roots = scoped-roots), audited, then executed via
-  an app-layer **executor hook**: read the image from FAT32, sniff PE/ELF, and spawn
-  it with caps **derived strictly from the armed scope** (child ⊆ broker — never
-  trusted) into the sandbox ramfs namespace. _GAP: `argv` is validated/audited as a
-  count but not delivered to the child — the spawn ABI carries no argv vector yet._
+  **exec-root-contained** (v1: exec-roots = scoped-roots), audited, **re-contained
+  immediately before the spawn** (TOCTOU re-check, symmetry with the fs path), then
+  executed via an app-layer **executor hook**: read the image from FAT32, sniff
+  PE/ELF, and spawn it with caps **derived strictly from the armed scope** (child ⊆
+  broker — never trusted) into the **sandbox** ramfs namespace under **sandbox-class
+  budgets** (tick: ~10 s auto-kill so a hostile page can't spawn an infinite-loop
+  DoS; frame: bounded, well below the trusted ceiling). _GAP: `argv` is
+  validated/audited as a count but not delivered — the spawn ABI carries no argv
+  vector yet._
 - `duetos.net.fetch(url[, opts])` → `{ok, status, body}` — URL shape-validated
   (`http`/`https`, non-empty host), audited (url + method, never the body), then run
   over the **same page-fetch transport** a normal load uses (`OpenTransport` +
-  `HttpRequest` + TLS), reusing the one firewall-governed net stack. v1 issues GET;
-  the executor already accepts POST (the LLM seam). Body bounded by a 256 KiB bounce.
+  `HttpRequest` + TLS), reusing the one firewall-governed net stack. Supports **GET
+  and POST** (`opts.method` / `opts.body` / `opts.contentType` — the LLM seam). Body
+  bounded by a 256 KiB bounce.
 - `kernel.installHandler` — **intentionally absent in v1** (spec §13.6); there is
   deliberately no such capability in the `Cap` enum.
 

@@ -303,9 +303,18 @@ Result<JsValue> MProcSpawn(Interp& I, const JsValue&, const JsValue* a, duetos::
     if (b->spawnExec == nullptr)
         return MakeResult(I, v.ok, v.error); // no executor: validate+audit only.
 
+    // Symlink-TOCTOU re-check (symmetry with FsValidate): re-confirm `canon` is
+    // STILL contained immediately before the spawn, closing the validate->execute
+    // window, and hand the re-validated path to the executor. GAP: FAT32 has no
+    // symlinks so containment is string-stable here; a symlink-capable exec
+    // backend (ext4) must re-enforce scope in the fs layer after path resolution.
+    char recheck[512];
+    if (!sp::CanonicalizeAndContain(canon, b->roots, recheck, sizeof(recheck)))
+        return MakeResult(I, false, "EPERM: spawn containment re-check failed");
+
     // argv is validated/audited as a count only; the executor drops it (GAP:
     // the spawn ABI carries no argv vector yet — see priv_exec.cpp).
-    const duetos::i64 pid = b->spawnExec(canon, nullptr, 0, b->tab->scope, b->execCtx);
+    const duetos::i64 pid = b->spawnExec(recheck, nullptr, 0, b->tab->scope, b->execCtx);
     if (pid < 0)
         return MakeResult(I, false, "EIO: spawn failed");
     JsObject* o = ObjNew(I.arena, false);
@@ -319,8 +328,8 @@ Result<JsValue> MProcSpawn(Interp& I, const JsValue&, const JsValue* a, duetos::
 // net.fetch(url[, opts]): validate the URL shape, audit (url+method — NEVER the
 // body), then — on allow and with a fetch executor registered — run the request
 // over the browser's page-fetch transport. Returns { ok:true, status, body } |
-// { ok:false, error }. v1 issues GET; POST opts are a follow-up (the executor
-// already accepts a method/body, so the seam is complete on the transport side).
+// { ok:false, error }. `opts` = { method:"GET"|"POST", body, contentType };
+// POST carries body + contentType to the executor (which already supports both).
 Result<JsValue> MNetFetch(Interp& I, const JsValue&, const JsValue* a, duetos::u32 n, void* c)
 {
     PrivBind* b = static_cast<PrivBind*>(c);
@@ -329,6 +338,21 @@ Result<JsValue> MNetFetch(Interp& I, const JsValue&, const JsValue* a, duetos::u
     char url[1024];
     const duetos::u32 ulen = (n > 0) ? ValueToChars(a[0], url, sizeof(url) - 1) : 0;
     url[ulen] = '\0'; // ValueToChars does not NUL-terminate.
+
+    // Method comes from opts.method (default GET); parsed up front so the audit
+    // records the real verb. Body/contentType are read later, only for POST.
+    char method[8] = "GET";
+    JsObject* opts = (n > 1 && a[1].type == JsType::Object) ? a[1].as.obj : nullptr;
+    if (opts != nullptr)
+    {
+        JsValue mv{};
+        if (ObjGet(opts, "method", 6, mv))
+        {
+            const duetos::u32 ml = ValueToChars(mv, method, sizeof(method) - 1);
+            method[ml] = '\0';
+        }
+    }
+    const bool isPost = method[0] == 'P' || method[0] == 'p';
 
     char canon[8];
     const sp::PrivRequest req{sp::Cap::Net, nullptr, 0, (n > 0) ? url : nullptr};
@@ -342,7 +366,9 @@ Result<JsValue> MNetFetch(Interp& I, const JsValue&, const JsValue* a, duetos::u
         summ[so++] = *p;
     for (const char* p = url; *p != '\0' && so + 16 < sizeof(summ); ++p)
         summ[so++] = *p;
-    for (const char* p = ",method=GET"; *p != '\0'; ++p)
+    for (const char* p = ",method="; *p != '\0'; ++p)
+        summ[so++] = *p;
+    for (const char* p = method; *p != '\0' && so + 1 < sizeof(summ); ++p)
         summ[so++] = *p;
     summ[so] = '\0';
     Audit(b, iso, sp::Cap::Net, summ, v.ok);
@@ -352,17 +378,48 @@ Result<JsValue> MNetFetch(Interp& I, const JsValue&, const JsValue* a, duetos::u
     if (b->fetchExec == nullptr)
         return MakeResult(I, v.ok, v.error); // no executor: validate+audit only.
 
+    // 256 KiB response bounce — intentionally larger than the page-fetch path's
+    // 64 KiB ceiling: a brokered fetch services API/JSON responses (the LLM seam)
+    // that legitimately run bigger. The executor caps the copy at this size.
     constexpr duetos::u32 kFetchBodyCap = 256u * 1024u;
     char* body = static_cast<char*>(mm::KMalloc(kFetchBodyCap));
     if (body == nullptr)
         return MakeResult(I, false, "EIO: no memory");
+
+    // For POST, capture body + contentType from opts into a bounded request
+    // buffer. Freed immediately after the synchronous executor call below.
+    char ctype[128] = {};
+    char* reqBody = nullptr;
+    duetos::u32 reqLen = 0;
+    if (isPost && opts != nullptr)
+    {
+        JsValue cv{};
+        if (ObjGet(opts, "contentType", 11, cv))
+        {
+            const duetos::u32 cl = ValueToChars(cv, ctype, sizeof(ctype) - 1);
+            ctype[cl] = '\0';
+        }
+        JsValue bv{};
+        if (ObjGet(opts, "body", 4, bv))
+        {
+            reqBody = static_cast<char*>(mm::KMalloc(kFetchBodyCap));
+            if (reqBody != nullptr)
+                reqLen = ValueToChars(bv, reqBody, kFetchBodyCap);
+        }
+    }
+
     FetchReq fr{};
     fr.url = url;
-    fr.method = "GET";
+    fr.method = isPost ? "POST" : "GET";
+    fr.body = reqBody;
+    fr.bodyLen = reqLen;
+    fr.contentType = (ctype[0] != '\0') ? ctype : nullptr;
     FetchRes fres{};
     fres.body = body;
     fres.bodyCap = kFetchBodyCap;
     const bool ok = b->fetchExec(fr, &fres, b->execCtx);
+    if (reqBody != nullptr)
+        mm::KFree(reqBody); // request body consumed synchronously by the executor
 
     JsValue out;
     if (!ok)

@@ -67,6 +67,9 @@ constexpr u32 kUrlCap = 256;
 constexpr u32 kHttpResponseCap = 65536;
 constexpr u32 kBodyCap = kHttpResponseCap + 256;
 constexpr u32 kStatusCap = 96;
+// Assistant dock (Phase 2b): the editable query line + the last backend reply.
+constexpr u32 kAssistInputCap = 160;
+constexpr u32 kAssistReplyCap = 192;
 constexpr u32 kHistoryCap = 32;
 constexpr u32 kBookmarkCap = 32;
 constexpr u32 kRowH = 10;
@@ -85,6 +88,7 @@ enum class Mode : u8
     UrlEdit = 1,
     History = 2,
     Bookmarks = 3,
+    AssistantEdit = 4, // typing into the Assistant dock's query line (Phase 2b)
 };
 
 struct State
@@ -106,6 +110,12 @@ struct State
     // Last status line (errors / progress / "OK 200").
     char status[kStatusCap];
     u32 status_code; // last HTTP status if known
+
+    // Assistant dock interactive input (Phase 2b): the editable query line (live
+    // while Mode::AssistantEdit) and the last local-backend reply shown above it.
+    char assistant_input[kAssistInputCap];
+    u32 assistant_input_len;
+    char assistant_reply[kAssistReplyCap];
 
     // Vertical scroll offset (in wrapped rows). Used by the History /
     // Bookmarks modal lists. Reset to 0 on a successful fetch.
@@ -2901,13 +2911,15 @@ void DrawStartPage(const Rect& content)
 // surface currently OVERLAYS the content rather than reflowing it, and the
 // drag/snap gesture + ghost preview are not yet wired (the DockSurface state
 // machine supports both — see DockSurfaceSelfTest — this is a UI-wiring GAP).
-// `bodyText` is the surface's content line. For the Assistant it is the live
-// AssistantRespond output (a real source -> sink wiring of the Phase 2b
-// backend); the Library still passes a placeholder. GAP: an interactive
-// text-input line (type a query -> AssistantRespond -> append reply) is not yet
-// wired — the dock has no text-input primitive (same UI-wiring GAP class as the
-// drag/snap gesture above); the backend is live and self-tested regardless.
-void DrawDockSurface(const DockSurface& s, const char* title, const Rect& body, const char* bodyText)
+// `bodyText` is the surface's content line. For the Assistant it is the last
+// local-backend reply (a real source -> sink wiring of the Phase 2b backend);
+// the Library passes a placeholder. `inputLine` (non-null only for the Assistant)
+// is the live editable query line rendered below the reply — the interactive
+// input wired via Mode::AssistantEdit + HandleAssistantEditChar. GAP: a docked
+// surface still OVERLAYS rather than reflows the content (the drag/snap gesture
+// remains unwired — same UI-wiring GAP class noted above).
+void DrawDockSurface(const DockSurface& s, const char* title, const Rect& body, const char* bodyText,
+                     const char* inputLine)
 {
     if (s.mode == DockMode::Hidden)
         return;
@@ -2922,6 +2934,8 @@ void DrawDockSurface(const DockSurface& s, const char* title, const Rect& body, 
     if (r.w > 20U)
         FramebufferDrawString(r.x + r.w - 16U, r.y + 6U, "x", tokens::kInkMute, tokens::kPanelHi);
     FramebufferDrawString(r.x + 8U, r.y + hH + 10U, bodyText, tokens::kInkDim, tokens::kPanel);
+    if (inputLine != nullptr)
+        FramebufferDrawString(r.x + 8U, r.y + hH + 26U, inputLine, tokens::kAccentTeal, tokens::kPanel);
 }
 
 // Route a press to a visible dock surface: a hit inside its rect is consumed;
@@ -3002,12 +3016,32 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // one DockSurface mechanism). `body` is the web-content rect below the
     // chrome they float/dock within.
     const Rect body{cx, cy + top_band, cw, (ch > top_band) ? ch - top_band : 0U};
-    // The Assistant surface renders the live local-backend output (Phase 2b);
-    // with no interactive input wired yet, it shows the capability/help line.
-    char assistLine[160];
-    AssistantRespond("help", assistLine, sizeof(assistLine));
-    DrawDockSurface(g_assistant, "* Assistant", body, assistLine);
-    DrawDockSurface(g_library, "L Library", body, "(placeholder)");
+    // Assistant (Phase 2b): show the last backend reply (or the help line if none
+    // yet) above the live editable query line ("> typed_"). Library: placeholder.
+    char assistHelp[kAssistReplyCap];
+    const char* replyLine;
+    if (g_state.assistant_reply[0] != '\0')
+    {
+        replyLine = g_state.assistant_reply;
+    }
+    else
+    {
+        AssistantRespond("help", assistHelp, sizeof(assistHelp));
+        replyLine = assistHelp;
+    }
+    char inputLine[kAssistInputCap + 4];
+    {
+        u32 p = 0;
+        inputLine[p++] = '>';
+        inputLine[p++] = ' ';
+        for (u32 i = 0; i < g_state.assistant_input_len && p + 2U < sizeof(inputLine); ++i)
+            inputLine[p++] = g_state.assistant_input[i];
+        if (g_state.mode == Mode::AssistantEdit && p + 1U < sizeof(inputLine))
+            inputLine[p++] = '_'; // caret
+        inputLine[p] = '\0';
+    }
+    DrawDockSurface(g_assistant, "* Assistant", body, replyLine, inputLine);
+    DrawDockSurface(g_library, "L Library", body, "(placeholder)", nullptr);
 
     // Privileged-Origin armed: a crimson border around the content frame —
     // a second unspoofable cue. Drawn after the content so it sits on top.
@@ -3429,6 +3463,65 @@ void HandleUrlEditChar(char c)
     {
         g_state.url[g_state.url_len++] = c;
         g_state.url[g_state.url_len] = '\0';
+    }
+}
+
+// Per-char input for the Assistant dock query line (Phase 2b interactive input).
+// Enter runs the local backend; a "navigate:<url>" reply is an intent that drives
+// the browser to that URL, anything else is shown as the reply above the input.
+void HandleAssistantEditChar(char c)
+{
+    const u8 uc = static_cast<u8>(c);
+    if (uc == 0x1B) // Esc — close the assistant
+    {
+        g_state.mode = Mode::View;
+        g_assistant.Dismiss();
+        return;
+    }
+    if (uc == 0x0A) // Enter — send the query to the local backend
+    {
+        if (g_state.assistant_input_len == 0)
+            return;
+        char reply[kAssistReplyCap];
+        AssistantRespond(g_state.assistant_input, reply, sizeof(reply));
+        // "navigate:<url>" reply → drive the browser to that URL.
+        const char* nav = "navigate:";
+        bool isNav = true;
+        for (u32 i = 0; nav[i] != '\0'; ++i)
+        {
+            if (reply[i] != nav[i])
+            {
+                isNav = false;
+                break;
+            }
+        }
+        g_state.assistant_input[0] = '\0';
+        g_state.assistant_input_len = 0;
+        if (isNav)
+        {
+            char tmp[kUrlCap];
+            StrCopyCap(tmp, kUrlCap, reply + 9); // past "navigate:"
+            g_state.assistant_reply[0] = '\0';
+            g_state.mode = Mode::View;
+            StartFetch(tmp);
+            return;
+        }
+        StrCopyCap(g_state.assistant_reply, kAssistReplyCap, reply);
+        return;
+    }
+    if (uc == 0x08) // Backspace
+    {
+        if (g_state.assistant_input_len > 0)
+        {
+            --g_state.assistant_input_len;
+            g_state.assistant_input[g_state.assistant_input_len] = '\0';
+        }
+        return;
+    }
+    if (uc >= 0x20 && uc <= 0x7E && g_state.assistant_input_len + 1 < kAssistInputCap)
+    {
+        g_state.assistant_input[g_state.assistant_input_len++] = c;
+        g_state.assistant_input[g_state.assistant_input_len] = '\0';
     }
 }
 
@@ -3873,6 +3966,17 @@ bool BrowserFeedArrow(u16 keycode)
 bool BrowserFeedChar(char c)
 {
     const u8 uc = static_cast<u8>(c);
+
+    // Self-heal: if the Assistant dock was closed (e.g. via its 'x' glyph) while
+    // we were still in its edit mode, fall back to View so keys route normally.
+    if (g_state.mode == Mode::AssistantEdit && g_assistant.mode == DockMode::Hidden)
+        g_state.mode = Mode::View;
+
+    if (g_state.mode == Mode::AssistantEdit)
+    {
+        HandleAssistantEditChar(c);
+        return true;
+    }
 
     if (g_state.mode == Mode::UrlEdit)
     {
@@ -5096,11 +5200,18 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
                 EnterUrlEdit();
                 break;
             case OmniHitKind::Ask:
-                // ✦ toggles the Assistant dock surface.
+                // ✦ toggles the Assistant dock surface + focuses its query line.
                 if (g_assistant.mode == DockMode::Hidden)
+                {
                     g_assistant.Summon(body);
+                    g_state.mode = Mode::AssistantEdit; // focus the input line
+                }
                 else
+                {
                     g_assistant.Dismiss();
+                    if (g_state.mode == Mode::AssistantEdit)
+                        g_state.mode = Mode::View;
+                }
                 break;
             case OmniHitKind::Library:
                 // ▤ toggles the Library dock surface.
