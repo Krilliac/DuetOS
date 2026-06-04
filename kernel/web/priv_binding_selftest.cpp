@@ -40,6 +40,28 @@ bool Has(const char* hay, const char* needle)
     return false;
 }
 
+// Mock executors (Phase 2b): record invocation so the test can assert the
+// validate -> audit -> EXECUTE path reaches them on an ALLOW and is NEVER
+// reached on a DENY — without a live process table or net stack.
+int g_mock_spawn_calls = 0;
+duetos::i64 MockSpawn(const char*, const char* const*, duetos::u32, const sp::CapSet&, void*)
+{
+    ++g_mock_spawn_calls;
+    return 4242;
+}
+int g_mock_fetch_calls = 0;
+bool MockFetch(const FetchReq&, FetchRes* out, void*)
+{
+    ++g_mock_fetch_calls;
+    if (out != nullptr)
+    {
+        out->status = 200;
+        out->bodyLen = 0;
+        out->ok = true;
+    }
+    return true;
+}
+
 alignas(16) unsigned char g_arena_buf[96 * 1024];
 } // namespace
 
@@ -202,9 +224,95 @@ void PrivBindingSelfTest()
     sp::AuditEntry probe{iso, "browser", "https://claude.ai/code", 0, "fs.read", "path=/home/user/x", false};
     sp::AuditAppend(probe);
 
+    // ---- Phase 2b: proc.spawn / net.fetch execution via the executor hooks ----
+    // Register mock executors so we can observe the validate -> audit -> EXECUTE
+    // path WITHOUT a real process table or net stack.
+    bind.spawnExec = &MockSpawn;
+    bind.fetchExec = &MockFetch;
+    g_mock_spawn_calls = 0;
+    g_mock_fetch_calls = 0;
+
+    // 13: armed + in-root proc.spawn reaches the executor and returns {ok,pid}.
+    js::JsValue procv = get(duetos, "proc");
+    js::JsValue spawnf = get(procv.as.obj, "spawn");
+    js::JsFunction* spfn = spawnf.as.fn;
+    js::JsValue spArgsOk[1] = {js::JsValue::Str(js::MakeString(arena, "/home/user/t.elf", 16))};
+    js::JsValue spRes = spfn->nativeCall(I, js::JsValue::Undefined(), spArgsOk, 1, spfn->nativeCtx).take();
+    {
+        js::JsValue okv{};
+        js::JsValue pidv{};
+        if (g_mock_spawn_calls != 1 || spRes.type != js::JsType::Object || !js::ObjGet(spRes.as.obj, "ok", 2, okv) ||
+            !StrEq(str(okv), "true") || !js::ObjGet(spRes.as.obj, "pid", 3, pidv) || !StrEq(str(pidv), "4242"))
+        {
+            fail(13);
+            return;
+        }
+    }
+
+    // 14: an out-of-root spawn target is DENIED before the executor (count steady).
+    js::JsValue spArgsBad[1] = {js::JsValue::Str(js::MakeString(arena, "/etc/shadow", 11))};
+    js::JsValue spBad = spfn->nativeCall(I, js::JsValue::Undefined(), spArgsBad, 1, spfn->nativeCtx).take();
+    {
+        js::JsValue okv{};
+        if (g_mock_spawn_calls != 1 || spBad.type != js::JsType::Object || !js::ObjGet(spBad.as.obj, "ok", 2, okv) ||
+            !StrEq(str(okv), "false"))
+        {
+            fail(14);
+            return;
+        }
+    }
+
+    // 15: a DISARMED bind's proc.spawn fails closed — even WITH an executor wired,
+    //     the not-armed check gates first, so the executor is never reached.
+    boff.spawnExec = &MockSpawn;
+    {
+        js::JsValue pv2 = get(dv2.as.obj, "proc");
+        js::JsValue sf2 = get(pv2.as.obj, "spawn");
+        js::JsFunction* spfn2 = sf2.as.fn;
+        js::JsValue r2 = spfn2->nativeCall(I, js::JsValue::Undefined(), spArgsOk, 1, spfn2->nativeCtx).take();
+        js::JsValue okv{};
+        if (g_mock_spawn_calls != 1 || r2.type != js::JsType::Object || !js::ObjGet(r2.as.obj, "ok", 2, okv) ||
+            !StrEq(str(okv), "false"))
+        {
+            fail(15);
+            return;
+        }
+    }
+
+    // 16: armed + well-formed net.fetch reaches the executor and returns {ok,status}.
+    js::JsValue netv = get(duetos, "net");
+    js::JsValue fetchf = get(netv.as.obj, "fetch");
+    js::JsFunction* ffn = fetchf.as.fn;
+    js::JsValue fArgsOk[1] = {js::JsValue::Str(js::MakeString(arena, "https://x.test/y", 16))};
+    js::JsValue fRes = ffn->nativeCall(I, js::JsValue::Undefined(), fArgsOk, 1, ffn->nativeCtx).take();
+    {
+        js::JsValue okv{};
+        js::JsValue stv{};
+        if (g_mock_fetch_calls != 1 || fRes.type != js::JsType::Object || !js::ObjGet(fRes.as.obj, "ok", 2, okv) ||
+            !StrEq(str(okv), "true") || !js::ObjGet(fRes.as.obj, "status", 6, stv) || !StrEq(str(stv), "200"))
+        {
+            fail(16);
+            return;
+        }
+    }
+
+    // 17: a malformed-URL net.fetch is DENIED before the executor (count steady).
+    js::JsValue fArgsBad[1] = {js::JsValue::Str(js::MakeString(arena, "ftp://nope", 10))};
+    js::JsValue fBad = ffn->nativeCall(I, js::JsValue::Undefined(), fArgsBad, 1, ffn->nativeCtx).take();
+    {
+        js::JsValue okv{};
+        if (g_mock_fetch_calls != 1 || fBad.type != js::JsType::Object || !js::ObjGet(fBad.as.obj, "ok", 2, okv) ||
+            !StrEq(str(okv), "false"))
+        {
+            fail(17);
+            return;
+        }
+    }
+
     arch::SerialWrite("[priv-binding-selftest] PASS (armed/disarmed gate, origin, scope caps, fs/kernel subs, "
                       "kernel.read present, installHandler absent, brokered fs.writeFile invoke+audit, disarmed "
-                      "fs.write fail-closed, ISO-8601 shape, AuditAppend volume-absent no-op)\n");
+                      "fs.write fail-closed, ISO-8601 shape, AuditAppend volume-absent no-op, proc.spawn "
+                      "exec+deny+disarm-gate, net.fetch exec+malformed-deny)\n");
 }
 
 } // namespace duetos::web::priv

@@ -89,11 +89,54 @@ void BrokerSelfTest()
         return;
     }
 
-    // 7: a non-fs cap (Net) in scope → ok, no path required.
-    v = ValidateRequest(armed, roots, PrivRequest{Cap::Net, nullptr, 0}, canon, sizeof(canon));
-    if (!v.ok)
+    // 7: proc.spawn at an in-root target → ok, canonicalised.
+    v = ValidateRequest(armed, roots, PrivRequest{Cap::ProcSpawn, "/home/user/bin/t.elf", 0, nullptr}, canon,
+                        sizeof(canon));
+    if (!v.ok || !StrEqZ(canon, "/home/user/bin/t.elf"))
     {
         fail(7);
+        return;
+    }
+
+    // 8: proc.spawn at an escape target → refused by containment.
+    v = ValidateRequest(armed, roots, PrivRequest{Cap::ProcSpawn, "/home/user/../etc/x", 0, nullptr}, canon,
+                        sizeof(canon));
+    if (v.ok || !StrEqZ(v.error, "EPERM: spawn target outside exec roots"))
+    {
+        fail(8);
+        return;
+    }
+
+    // 9: proc.spawn at a device node → refused (out of roots).
+    v = ValidateRequest(armed, roots, PrivRequest{Cap::ProcSpawn, "/dev/sda", 0, nullptr}, canon, sizeof(canon));
+    if (v.ok || !StrEqZ(v.error, "EPERM: spawn target outside exec roots"))
+    {
+        fail(9);
+        return;
+    }
+
+    // 10: net.fetch at a well-formed https URL → ok.
+    v = ValidateRequest(armed, roots, PrivRequest{Cap::Net, nullptr, 0, "https://api.example.com/x"}, canon,
+                        sizeof(canon));
+    if (!v.ok)
+    {
+        fail(10);
+        return;
+    }
+
+    // 11: net.fetch at a non-http(s) scheme → refused.
+    v = ValidateRequest(armed, roots, PrivRequest{Cap::Net, nullptr, 0, "ftp://nope"}, canon, sizeof(canon));
+    if (v.ok || !StrEqZ(v.error, "EINVAL: malformed url"))
+    {
+        fail(11);
+        return;
+    }
+
+    // 12: net.fetch at an empty URL → refused.
+    v = ValidateRequest(armed, roots, PrivRequest{Cap::Net, nullptr, 0, ""}, canon, sizeof(canon));
+    if (v.ok || !StrEqZ(v.error, "EINVAL: null url"))
+    {
+        fail(12);
         return;
     }
 
