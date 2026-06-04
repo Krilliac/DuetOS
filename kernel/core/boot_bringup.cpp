@@ -174,6 +174,7 @@
 #include "apps/about.h"
 #include "apps/browser.h"
 #include "apps/browser/dock_surface.h"
+#include "apps/browser/tab_strip.h"
 #include "web/css.h"
 #include "web/html.h"
 #include "web/jpeg.h"
@@ -3183,6 +3184,9 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // DockSurface (browser shell redesign, Phase 1) — snap-dock state
     // machine + geometry for the Assistant/Library surfaces. Pure logic.
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::DockSurfaceSelfTest());
+    // TabStrip (browser shell redesign, Phase 1) — tab model + shrink-fit
+    // layout + hit-testing. One live page at a time (multi-tab = Phase 3).
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::TabStripSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG
