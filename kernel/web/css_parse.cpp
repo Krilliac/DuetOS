@@ -16,12 +16,15 @@
  * Recognised selectors: type, .class, #id, universal, the descendant
  * (space), child (>), adjacent-sibling (+) and general-sibling (~)
  * combinators, the structural pseudo-classes :first-child / :last-child /
- * :nth-child(N|even|odd|an+b), :not(simple), and attribute selectors
- * [attr], [attr="v"], [attr~="v"], [attr^="v"], [attr$="v"], [attr*="v"].
+ * :only-child and their -of-type peers (:first-of-type / :last-of-type /
+ * :only-of-type), :nth-child / :nth-last-child / :nth-of-type /
+ * :nth-last-of-type (each taking N|even|odd|an+b), :not(simple), and the
+ * attribute selectors [attr], [attr="v"], [attr~="v"], [attr^="v"],
+ * [attr$="v"], [attr*="v"].
  *
  * GAP: :not() with a compound/complex argument, other pseudo-classes /
- * elements (:hover, ::before, :nth-of-type, :nth-last-child, …) and the
- * column combinator (||). !important is detected best-effort.
+ * elements (:hover, ::before, :nth-col, …) and the column combinator (||).
+ * !important is detected best-effort.
  */
 
 #include "web/css.h"
@@ -264,10 +267,38 @@ void ParsePseudo(const char*& p, const char* e, SimpleSelector* sel, Arena& aren
     {
         matched = StructuralPseudo::LastChild;
     }
-    else if (duetos::core::StrEqual(name, "nth-child") && argB != nullptr)
+    else if (duetos::core::StrEqual(name, "first-of-type"))
     {
-        // even / odd keywords, a literal positive integer, or an An+B
-        // formula (handled in the else branch below).
+        matched = StructuralPseudo::FirstChild;
+        sel->ofType = true;
+    }
+    else if (duetos::core::StrEqual(name, "last-of-type"))
+    {
+        matched = StructuralPseudo::LastChild;
+        sel->ofType = true;
+    }
+    else if (duetos::core::StrEqual(name, "only-child"))
+    {
+        matched = StructuralPseudo::OnlyChild;
+    }
+    else if (duetos::core::StrEqual(name, "only-of-type"))
+    {
+        matched = StructuralPseudo::OnlyChild;
+        sel->ofType = true;
+    }
+    else if (argB != nullptr &&
+             (duetos::core::StrEqual(name, "nth-child") || duetos::core::StrEqual(name, "nth-of-type") ||
+              duetos::core::StrEqual(name, "nth-last-child") || duetos::core::StrEqual(name, "nth-last-of-type")))
+    {
+        // The whole nth-* family shares one argument grammar (even / odd /
+        // literal integer / An+B). The pseudo NAME only decides which
+        // sibling set to count over (ofType) and from which end (fromEnd);
+        // the parsed coefficients land in the same nthA/nthB/nthChild
+        // fields, evaluated by MatchesPseudo against the right position.
+        sel->ofType = duetos::core::StrEqual(name, "nth-of-type") || duetos::core::StrEqual(name, "nth-last-of-type");
+        sel->fromEnd =
+            duetos::core::StrEqual(name, "nth-last-child") || duetos::core::StrEqual(name, "nth-last-of-type");
+
         u32 argLen = static_cast<u32>(argE - argB);
         if (argLen == 4 && Lower(argB[0]) == 'e' && Lower(argB[1]) == 'v' && Lower(argB[2]) == 'e' &&
             Lower(argB[3]) == 'n')

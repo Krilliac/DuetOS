@@ -14,8 +14,10 @@
  * line, before `}`, or at EOF.
  *
  * GAP: for-in / for-of (parsed-and-rejected), labels, switch, do-while,
- *      try/catch/throw, class, getters/setters, destructuring,
+ *      class, getters/setters, destructuring,
  *      spread/rest, default params, computed object keys.
+ *      try/catch/finally/throw ARE supported; the catch binding is
+ *      required (no ES2019 optional-binding `catch {}`).
  *      `new` is supported only for native constructors (Date); a `new`
  *      on a user-defined function falls through to the same callee path
  *      and currently behaves like a plain call (no `this`-object bind).
@@ -1017,6 +1019,54 @@ AstNode* ParseFor(Parser& p)
     return n;
 }
 
+// try { ... } catch (e) { ... } finally { ... }
+// At least one of catch / finally is required. The catch binding is a
+// single identifier (required for v0).
+AstNode* ParseTry(Parser& p)
+{
+    AstNode* n = p.Node(Ast::Try);
+    if (!n)
+        return nullptr;
+    p.Adv(); // 'try'
+    n->a = ParseBlock(p);
+    if (!p.ok)
+        return nullptr;
+    if (p.Is(Tok::KwCatch))
+    {
+        p.Adv();
+        p.Expect(Tok::LParen, "expected '(' after catch");
+        // GAP: optional-binding `catch { }` (ES2019) not parsed — the
+        // binding identifier is required; bare `catch {}` is a syntax error.
+        if (!p.Is(Tok::Ident))
+        {
+            p.Fail("expected catch binding name");
+            return nullptr;
+        }
+        n->str = p.Cur().start;
+        n->strLen = p.Cur().len;
+        p.Adv();
+        p.Expect(Tok::RParen, "expected ')' after catch binding");
+        if (!p.ok)
+            return nullptr;
+        n->b = ParseBlock(p);
+        if (!p.ok)
+            return nullptr;
+    }
+    if (p.Is(Tok::KwFinally))
+    {
+        p.Adv();
+        n->c = ParseBlock(p);
+        if (!p.ok)
+            return nullptr;
+    }
+    if (!n->b && !n->c)
+    {
+        p.Fail("missing catch or finally after try");
+        return nullptr;
+    }
+    return n;
+}
+
 AstNode* ParseFunctionDecl(Parser& p)
 {
     AstNode* fn = ParseFunctionExpr(p);
@@ -1050,6 +1100,25 @@ AstNode* ParseStatement(Parser& p)
         return ParseFor(p);
     case Tok::KwFunction:
         return ParseFunctionDecl(p);
+    case Tok::KwTry:
+        return ParseTry(p);
+    case Tok::KwThrow:
+    {
+        AstNode* n = p.Node(Ast::Throw);
+        if (!n)
+            return nullptr;
+        p.Adv();
+        // `throw` requires an expression on the same line (no ASI-newline
+        // before it); a bare `throw;` is a syntax error in real JS.
+        if (p.Is(Tok::Semicolon) || p.Is(Tok::RBrace) || p.AtEnd() || p.Cur().newlineBefore)
+        {
+            p.Fail("expected expression after 'throw'");
+            return nullptr;
+        }
+        n->a = ParseExpr(p);
+        ExpectSemi(p);
+        return n;
+    }
     case Tok::KwReturn:
     {
         AstNode* n = p.Node(Ast::Return);

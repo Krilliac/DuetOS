@@ -60,6 +60,13 @@ struct DomCtx
     js::Arena* js = nullptr; // JS scratch arena (wrappers, transient values)
     Arena* dom = nullptr;    // DOM arena (new nodes/attrs/strings persist)
 
+    // Set true whenever a DOM-tree mutation lands (setAttribute /
+    // textContent / innerHTML / classList — classList routes through
+    // SetAttribute). The browser consumes+clears it after a click dispatch
+    // (JsDomContextConsumeDirty) to decide whether to re-lay-out the page so
+    // a handler's change reaches the screen. Read-and-cleared, not latched.
+    bool domMutated = false;
+
     // Per-Node wrapper cache for identity. Linear is fine: a script
     // touches a handful of distinct nodes.
     static constexpr u32 kMaxWrappers = 256;
@@ -363,6 +370,7 @@ bool SetAttribute(DomCtx& ctx, Node* el, const char* name, u32 nameLen, const ch
         if (a->name && duetos::core::StrEqual(a->name, nameZ))
         {
             a->value = valZ;
+            ctx.domMutated = true;
             return true;
         }
     }
@@ -377,6 +385,7 @@ bool SetAttribute(DomCtx& ctx, Node* el, const char* name, u32 nameLen, const ch
     else
         el->attrs = a;
     el->attrsTail = a;
+    ctx.domMutated = true;
     return true;
 }
 
@@ -506,6 +515,7 @@ bool SetTextContent(DomCtx& ctx, Node* el, const char* text, u32 len)
         return false;
     ClearChildren(el);
     AppendChild(el, t);
+    ctx.domMutated = true;
     return true;
 }
 
@@ -529,6 +539,7 @@ bool SetInnerHtml(DomCtx& ctx, Node* el, const char* html, u32 len)
     // `frag->firstChild` rather than caching nextSibling.
     while (Node* child = frag->firstChild)
         AppendChild(el, child);
+    ctx.domMutated = true;
     return true;
 }
 
@@ -1691,6 +1702,15 @@ bool JsDomContextDispatchClick(JsDomContext* ctx, Node* target)
     if (!r)
         return false; // a faulting listener does not count as preventDefault
     return prevented;
+}
+
+bool JsDomContextConsumeDirty(JsDomContext* ctx)
+{
+    if (!ctx)
+        return false;
+    const bool dirty = ctx->domCtx.domMutated;
+    ctx->domCtx.domMutated = false;
+    return dirty;
 }
 
 // JsRunOnDocument is now a thin one-shot adapter over the retained

@@ -190,13 +190,27 @@ struct ComputedStyle
 enum class StructuralPseudo : u8
 {
     None,
-    FirstChild,     // :first-child
-    LastChild,      // :last-child
-    NthChildLit,    // :nth-child(<integer>)  — match the Nth element child
-    NthChildEven,   // :nth-child(even)
-    NthChildOdd,    // :nth-child(odd)
-    NthChildFormula // :nth-child(an+b)  — match positions a*k + b (k >= 0)
+    FirstChild,      // :first-child / :first-of-type  (position 1)
+    LastChild,       // :last-child  / :last-of-type   (position == count)
+    NthChildLit,     // :nth-child(<integer>)  — match the Nth element child
+    NthChildEven,    // :nth-child(even)
+    NthChildOdd,     // :nth-child(odd)
+    NthChildFormula, // :nth-child(an+b)  — match positions a*k + b (k >= 0)
+    OnlyChild        // :only-child / :only-of-type    (sole child of its set)
 };
+//
+// The `ofType` and `fromEnd` flags on SimpleSelector modulate the pseudo
+// above so the "-of-type", "nth-last-*", and "only-*" families reuse the
+// same enum values rather than multiplying them:
+//   ofType  — count only siblings sharing `el`'s tag name (the *-of-type
+//             variants) instead of all element siblings.
+//   fromEnd — count position from the last sibling (the nth-last-* variants).
+// e.g. :nth-of-type(an+b)     == NthChildFormula + ofType
+//      :nth-last-child(an+b)  == NthChildFormula + fromEnd
+//      :nth-last-of-type(...) == NthChildFormula + ofType + fromEnd
+//      :first-of-type         == FirstChild + ofType
+//      :last-of-type          == LastChild + ofType
+//      :only-of-type          == OnlyChild + ofType
 
 /// The relationship between a compound selector and the compound to its
 /// left (its `ancestor` link). The rightmost compound of a complex
@@ -246,6 +260,8 @@ struct SimpleSelector
     i32 nthChild = 0;                                 // literal N for NthChildLit
     i32 nthA = 0;                                     // 'a' coefficient for NthChildFormula
     i32 nthB = 0;                                     // 'b' offset for NthChildFormula
+    bool ofType = false;                              // count only same-tag siblings (-of-type family)
+    bool fromEnd = false;                             // count position from the last sibling (nth-last-*)
     AttrSelector* attrs = nullptr;                    // [attr...] clauses (linked list)
     // :not(simple) arguments. Each entry is a one-component compound that
     // the element must NOT match. Chained via `notNext`. GAP: a :not()

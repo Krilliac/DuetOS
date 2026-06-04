@@ -604,6 +604,71 @@ static Result<JsValue> EvalBlock(Interp& I, const AstNode* n, Env* parent, bool 
     return last;
 }
 
+// try { B } catch (e) { C } finally { F }.
+//
+// B runs first. If it unwinds with a CATCHABLE throw (Err + hasPendingThrow)
+// and a catch clause is present, the throw is consumed: the binding `e` is
+// defined in a fresh scope and C runs. An Err WITHOUT hasPendingThrow is a
+// genuine engine error (Timeout / Overflow) — it is NOT caught; finally still
+// runs and then the error propagates. `finally` (F) executes on every exit
+// path. A normal-completing F preserves whatever Flow / Err the try/catch
+// produced; an F that itself throws or sets a Flow overrides it.
+static Result<JsValue> EvalTry(Interp& I, const AstNode* n, Env* env)
+{
+    // --- try block ---
+    Result<JsValue> outcome = EvalStmt(I, n->a, env);
+    Flow pendingFlow = I.flow;
+
+    // --- catch ---
+    // Only catch a real JS throw (hasPendingThrow). Engine errors fall
+    // through with hasPendingThrow false and are re-propagated after finally.
+    if (!outcome && I.hasPendingThrow && n->b)
+    {
+        const JsValue thrown = I.pendingThrow;
+        I.hasPendingThrow = false;
+        I.flow = Flow::Normal;
+        Env* catchEnv = env;
+        if (n->str)
+        {
+            catchEnv = EnvNew(I.arena, env);
+            if (!catchEnv)
+                return Err{ErrorCode::OutOfMemory};
+            EnvDefine(catchEnv, I.arena, n->str, n->strLen, thrown);
+        }
+        // GAP: optional-binding `catch {}` (no `(e)`) is accepted with a
+        // null binding; the parser currently requires `catch (ident)`.
+        // newScope=true so the catch body's own declarations get a child
+        // scope under catchEnv (matching plain-block semantics) while the
+        // binding `e` lives in catchEnv and stays visible to them.
+        outcome = EvalBlock(I, n->b, catchEnv, true);
+        pendingFlow = I.flow;
+    }
+
+    // --- finally ---
+    // Runs unconditionally. Stash the try/catch completion (value/error +
+    // pending throw + Flow), neutralise the flow, run F, then decide who wins.
+    if (n->c)
+    {
+        const bool savedHasThrow = I.hasPendingThrow;
+        const JsValue savedThrow = I.pendingThrow;
+        I.hasPendingThrow = false;
+        I.flow = Flow::Normal;
+
+        Result<JsValue> fin = EvalBlock(I, n->c, env, true);
+        if (!fin || I.flow != Flow::Normal)
+            return fin; // F's abrupt completion (throw / engine err / Flow) wins.
+
+        // F completed normally: restore the try/catch completion it shadowed.
+        I.hasPendingThrow = savedHasThrow;
+        I.pendingThrow = savedThrow;
+        I.flow = pendingFlow;
+        return outcome;
+    }
+
+    I.flow = pendingFlow;
+    return outcome;
+}
+
 Result<JsValue> EvalStmt(Interp& I, const AstNode* n, Env* env)
 {
     if (!I.Tick())
@@ -713,6 +778,25 @@ Result<JsValue> EvalStmt(Interp& I, const AstNode* n, Env* env)
     case Ast::Continue:
         I.flow = Flow::Continue;
         return JsValue::Undefined();
+    case Ast::Throw:
+    {
+        JS_TRY_ASSIGN(JsValue v, EvalExpr(I, n->a, env));
+        // Ride the existing Err-unwind path; hasPendingThrow marks this as a
+        // CATCHABLE JS throw (vs an engine Timeout/Overflow). BadState is the
+        // unwind vehicle — EvalTry only inspects hasPendingThrow, never the
+        // code — and is distinct from Timeout/Overflow so an uncaught throw
+        // surfaces as a non-budget error at the top level.
+        I.pendingThrow = v;
+        I.hasPendingThrow = true;
+        // GAP: engine-internal faults that real JS would throw as catchable
+        // TypeError/RangeError (calling a non-callable, bad assign target —
+        // all Err{BadState} with hasPendingThrow=false) are NOT catchable
+        // here; only an explicit `throw` (hasPendingThrow=true) is. Revisit
+        // if a page relies on catching engine-raised TypeErrors.
+        return Err{ErrorCode::BadState};
+    }
+    case Ast::Try:
+        return EvalTry(I, n, env);
     case Ast::Program:
         return EvalBlock(I, n, env, false);
     default:
