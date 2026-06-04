@@ -173,6 +173,16 @@
 #include "apps/calculator.h"
 #include "apps/about.h"
 #include "apps/browser.h"
+#include "apps/browser/dock_surface.h"
+#include "apps/browser/omnibox.h"
+#include "security/privilege/arm_state.h"
+#include "security/privilege/audit.h"
+#include "security/privilege/broker.h"
+#include "security/privilege/config.h"
+#include "apps/browser/privileged/origin_predicate.h"
+#include "security/privilege/scope.h"
+#include "apps/browser/start_page.h"
+#include "apps/browser/tab_strip.h"
 #include "web/css.h"
 #include "web/html.h"
 #include "web/jpeg.h"
@@ -180,6 +190,7 @@
 #include "web/layout.h"
 #include "web/paint.h"
 #include "web/png.h"
+#include "web/priv_binding.h"
 #include "apps/calendar.h"
 #include "apps/charmap.h"
 #include "apps/clock.h"
@@ -3179,6 +3190,54 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     duetos::apps::browser::BrowserInit(browser_handle);
     duetos::drivers::video::WindowSetVisible(browser_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserSelfTest());
+    // DockSurface (browser shell redesign, Phase 1) — snap-dock state
+    // machine + geometry for the Assistant/Library surfaces. Pure logic.
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::DockSurfaceSelfTest());
+    // TabStrip (browser shell redesign, Phase 1) — tab model + shrink-fit
+    // layout + hit-testing. One live page at a time (multi-tab = Phase 3).
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::TabStripSelfTest());
+    // Omnibox (unified URL/search + toolbar control geometry) and the
+    // new-tab StartPage model — browser shell redesign, Phase 1.
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::OmniboxSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::StartPageSelfTest());
+    // Privileged-Origin Mode: parse the REAL kernel cmdline into the single
+    // boot config the Privilege Engine reads (PrivConfigCurrent()). Without the
+    // --allow-claude-system-access flag this stays available=false, so the
+    // browser never shows the arm affordance and no binding is ever installed
+    // (the feature ships dark unless the operator opts in at boot).
+    {
+        duetos::security::privilege::PrivConfig priv_cfg;
+        duetos::security::privilege::PrivConfigParse(FindBootCmdline(multiboot_info), priv_cfg);
+        duetos::security::privilege::PrivConfigSetCurrent(priv_cfg);
+        arch::SerialWrite(priv_cfg.available ? "[priv] config: enabled (--allow-claude-system-access)\n"
+                                             : "[priv] config: disabled\n");
+    }
+    // Privileged-Origin Mode (spec §13) security core — the exact-origin +
+    // SPKI-pin + no-redirect predicate that gates arming claude.ai/code.
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::OriginPredicateSelfTest());
+    // Path canonicalisation + scoped-root containment — the broker's security
+    // keystone (full adversarial battery: escapes, sibling-prefix, audit.log
+    // fold/dot/ADS, dev/proc/sys/boot, separators, control/non-ASCII bytes).
+    DUETOS_BOOT_SELFTEST(duetos::security::privilege::ScopeSelfTest());
+    // Per-tab arm state machine (arm binds scope; auto-disarm on leaving the
+    // privileged origin / per-navigation lifetime).
+    DUETOS_BOOT_SELFTEST(duetos::security::privilege::ArmStateSelfTest());
+    // Unified client-tagged audit-entry formatter + the broker request
+    // validator (the enforcement contract: armed? cap-in-scope? contained?
+    // bounds?). Completes the pure Privilege-Engine security core.
+    DUETOS_BOOT_SELFTEST(duetos::security::privilege::AuditSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::privilege::BrokerSelfTest());
+    // Boot-flag config (--allow-claude-system-access[=roots]) — the master
+    // switch + scoped-roots parse; absent => the feature is fully off.
+    DUETOS_BOOT_SELFTEST(duetos::security::privilege::PrivConfigSelfTest());
+    // window.duetos.* JS host binding (Client A adapter onto the engine) —
+    // host-object tree + per-method marshal to the broker validator.
+    DUETOS_BOOT_SELFTEST(duetos::web::priv::PrivBindingSelfTest());
+    // Privileged-Origin armed-state chrome (crimson omnibox/shield/ribbon/tab/
+    // frame) + arm/disarm + Ctrl+Shift+Esc kill switch + per-navigation
+    // lifetime — the browser-side Client-A integration. Pixels need VBox; this
+    // asserts the arm/disarm/kill/affordance LOGIC headlessly.
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserPrivChromeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG

@@ -107,6 +107,41 @@ Every stage boots a self-test, registered in
   scroll offset.
 - `[browser-selftest]` — URL parse, HTTPS routing, cookies, redirect
   (loopback transport).
+- `[dock-selftest]` / `[tabstrip-selftest]` / `[omnibox-selftest]` /
+  `[startpage-selftest]` — the shell-redesign models (see below).
+
+## Browser shell (Phase 1 redesign)
+
+The browser app's chrome is a from-scratch redesign (Chrome × Comet ×
+DuetOS — see the design spec
+`docs/superpowers/specs/2026-06-04-browser-ui-redesign-design.md`). The
+shell is built from small, value-semantic, boot-self-tested models under
+[`kernel/apps/browser/`](../../kernel/apps/browser/), composed into the
+live `DrawFn` / mouse routing in
+[`browser.cpp`](../../kernel/apps/browser.cpp):
+
+- **`DockSurface`** (`dock_surface.*`) — one movable surface with a
+  Floating default and four Aero-snap dock targets, reused for both the
+  **Assistant** (`✦`) and the **Library** (`▤`). State machine
+  (`Hidden`/`Floating`/`Docked`) + snap-zone geometry; the toolbar buttons
+  toggle them.
+- **`TabStrip`** (`tab_strip.*`) — Chrome-style tabs with shrink-fit
+  layout, dual-accent favicon chips, and new-tab/close hit-testing. One
+  live page at a time (real per-tab render contexts are Phase 3).
+- **`Omnibox`** (`omnibox.*`) — the unified URL/search field + the toolbar
+  control geometry (nav / pill / Ask / Library / menu).
+- **`StartPage`** (`start_page.*`) — the new-tab command-center (wordmark,
+  Ask/URL prompt, dual-accent shortcut tiles).
+- **`tokens.h`** — the "DuetOS touch" motif set (corner radii, soft-shadow
+  tiers, dual-accent palette).
+
+**GAPs (Phase 1):** ASCII glyph fallbacks (no `✦`/`◁`/`▤` glyphs yet); a
+docked surface overlays the content instead of reflowing it, and the
+drag/snap gesture + ghost preview aren't wired (the `DockSurface` model
+supports both); no real multi-tab engine; the AI assistant is a
+placeholder (Phase 2 = AI functionality + [Privileged-Origin
+Mode](Privileged-Origin.md)). Pixel layout is verified by VM screenshot, not
+the headless self-tests.
 
 ## Known limits (greppable `// GAP:`)
 

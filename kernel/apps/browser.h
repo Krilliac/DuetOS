@@ -156,6 +156,42 @@ void BrowserFocusUrl();
 void BrowserNavBack();
 void BrowserNavForward();
 
+/// Privileged-Origin Mode kill switch (spec §13.5). Bound by the
+/// global key reader to Ctrl+Shift+Esc at HIGHEST priority — BEFORE
+/// any per-app / per-page key dispatch — so a malicious page can
+/// never swallow the chord. Revokes ALL armed privilege the browser
+/// owns and re-renders the page sandboxed. Safe to call
+/// unconditionally; a no-op when nothing is armed. NOT
+/// active-window-gated (the chord must work regardless of focus while
+/// a privileged tab is armed).
+void BrowserPrivKillSwitch();
+
+/// Privileged-Origin Mode chrome predicate — true iff the active tab
+/// is armed (drives the crimson armed chrome). Exposed for the boot
+/// self-test; the chrome itself reads the internal state directly.
+bool BrowserPrivShouldRenderArmed();
+
+/// Boot self-test for the Privileged-Origin chrome + arm/disarm flow +
+/// kill switch + per-navigation lifetime (logic only — pixels need
+/// VBox and are out of scope). Emits `[priv-chrome-selftest] PASS`;
+/// on the first failed sub-check fires KBP_PROBE_V(kBootSelftestFail,
+/// <#>).
+void BrowserPrivChromeSelfTest();
+
+// Privileged-Origin chrome self-test bridges — boot self-test ONLY. They
+// drive + inspect the browser's file-static arm state in isolation (no
+// rendered page / history needed). Not for production callers.
+namespace priv_chrome_test
+{
+void Arm();
+void Disarm();
+bool IsArmed();
+void KillSwitchNoReload();
+void OnNavigation(bool stillPrivilegedOrigin);
+bool AffordanceVisibleFor(bool available, bool armed, bool originPriv);
+bool UrlIsPrivileged(const char* url);
+} // namespace priv_chrome_test
+
 /// Boot self-test — pure compute. Validates URL parsing
 /// (scheme/host/port/path extraction), HTML tag stripper +
 /// entity decoder, AND (Pass D) the toolbar widget dispatch

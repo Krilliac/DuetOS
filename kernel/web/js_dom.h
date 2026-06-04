@@ -72,6 +72,14 @@
 namespace duetos::web
 {
 
+// Privileged-Origin Mode binding (kernel/web/priv_binding.*). Forward-declared
+// so the install hook below can take it without js_dom.h pulling in the whole
+// privilege-engine header set.
+namespace priv
+{
+struct PrivBind;
+}
+
 using duetos::core::ErrorCode;
 using duetos::core::Result;
 
@@ -173,6 +181,20 @@ bool JsDomContextDispatchClick(JsDomContext* ctx, Node* target);
  * context returns false. Idempotent after a true (clears the flag).
  */
 bool JsDomContextConsumeDirty(JsDomContext* ctx);
+
+/*
+ * Install the Privileged-Origin Mode `window.duetos.*` host binding onto the
+ * retained context's live JS global env (spec §13.7). Called by the browser
+ * ONLY when a tab arms (PrivConfigCurrent().available && tab armed). The
+ * host objects are carved out of the context's JS arena, so they persist
+ * across later DispatchClick calls and are reclaimed on the next Create (a
+ * navigation/reload) — which is exactly the per-navigation teardown: a
+ * disarm clears the cap scope (so the broker fail-closes every call) and
+ * reloads, rebuilding the context without the binding. Returns false if the
+ * context is null/not-live or the binding could not be installed. A page on a
+ * non-armed tab never has this called, so `window.duetos === undefined`.
+ */
+bool JsDomContextInstallPrivBinding(JsDomContext* ctx, priv::PrivBind* bind);
 
 /*
  * Boot self-test. Parses a small HTML document, runs a battery of
