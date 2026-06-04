@@ -295,7 +295,7 @@ TabStrip g_tabs;
 // new-tab start page (shell redesign Phase 1).
 Omnibox g_omni;
 DockSurface g_assistant;
-[[maybe_unused]] DockSurface g_library; // rendered/wired in Task 6.3
+DockSurface g_library;
 [[maybe_unused]] StartPage g_startpage; // rendered/wired in Task 6.4
 constexpr u32 kNavBtnCount = 7U;
 
@@ -2577,6 +2577,43 @@ void DrawToolbar(u32 cx, u32 cy, u32 cw)
     FramebufferDrawString(mn.x + 7U, ty, ":", tokens::kInkMute, tokens::kPanelHi);
 }
 
+// Render a dockable surface (Assistant / Library) over the content. `body`
+// is the web-content rect the surface floats/docks within. GAP: a docked
+// surface currently OVERLAYS the content rather than reflowing it, and the
+// drag/snap gesture + ghost preview are not yet wired (the DockSurface state
+// machine supports both — see DockSurfaceSelfTest — this is a UI-wiring GAP).
+void DrawDockSurface(const DockSurface& s, const char* title, const Rect& body)
+{
+    if (s.mode == DockMode::Hidden)
+        return;
+    const Rect r = s.SurfaceRect(body);
+    if (r.w == 0U || r.h == 0U)
+        return;
+    duetos::drivers::video::FramebufferFillRoundRect(r.x, r.y, r.w, r.h, tokens::kRadPanel, tokens::kPanel);
+    FramebufferFillRect(r.x, r.y, r.w, 1U, tokens::kAccentTeal); // top accent
+    const u32 hH = 20U;
+    FramebufferFillRect(r.x, r.y + 1U, r.w, hH, tokens::kPanelHi); // header
+    FramebufferDrawString(r.x + 8U, r.y + 6U, title, tokens::kAccentTeal, tokens::kPanelHi);
+    if (r.w > 20U)
+        FramebufferDrawString(r.x + r.w - 16U, r.y + 6U, "x", tokens::kInkMute, tokens::kPanelHi);
+    FramebufferDrawString(r.x + 8U, r.y + hH + 10U, "(placeholder)", tokens::kInkDim, tokens::kPanel);
+}
+
+// Route a press to a visible dock surface: a hit inside its rect is consumed;
+// a hit on its close (x) glyph dismisses it. Returns true if consumed.
+bool HandleDockClick(DockSurface& s, const Rect& body, u32 cx, u32 cy)
+{
+    if (s.mode == DockMode::Hidden)
+        return false;
+    const Rect r = s.SurfaceRect(body);
+    if (r.w == 0U || r.h == 0U || !r.Contains(cx, cy))
+        return false;
+    const Rect close{(r.w > 20U) ? r.x + r.w - 20U : r.x, r.y + 2U, 18U, 18U};
+    if (close.Contains(cx, cy))
+        s.Dismiss();
+    return true; // the surface absorbs the press either way.
+}
+
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
     const auto& th = ThemeCurrent();
@@ -2622,8 +2659,13 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     {
         DrawBody(cx, cy, cw, ch, fg, bg);
     }
-    // Footer hint is now painted by the AppLabel inside
-    // g_browser — see RefreshFooterText.
+
+    // Dockable surfaces overlay the content (Assistant + Library share the
+    // one DockSurface mechanism). `body` is the web-content rect below the
+    // chrome they float/dock within.
+    const Rect body{cx, cy + top_band, cw, (ch > top_band) ? ch - top_band : 0U};
+    DrawDockSurface(g_assistant, "* Assistant", body);
+    DrawDockSurface(g_library, "L Library", body);
 }
 
 void StartFetch(const char* url)
@@ -4465,6 +4507,8 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
         if (cy < tb_top + tb_h)
         {
             const Rect tb{wx, tb_top, ww, tb_h};
+            const u32 body_top = tb_top + tb_h;
+            const Rect body{wx, body_top, ww, (wy + wh > body_top) ? wy + wh - body_top : 0U};
             const OmniHit oh = g_omni.HitTest(tb, cx, cy);
             switch (oh.kind)
             {
@@ -4480,12 +4524,18 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
                 EnterUrlEdit();
                 break;
             case OmniHitKind::Ask:
-                // Summon the Assistant dock surface (rendering wired in 6.3).
-                g_assistant.Summon(
-                    Rect{wx, tb_top + tb_h, ww, (wy + wh > tb_top + tb_h) ? wy + wh - tb_top - tb_h : 0U});
+                // ✦ toggles the Assistant dock surface.
+                if (g_assistant.mode == DockMode::Hidden)
+                    g_assistant.Summon(body);
+                else
+                    g_assistant.Dismiss();
                 break;
             case OmniHitKind::Library:
-                ClickHistory();
+                // ▤ toggles the Library dock surface.
+                if (g_library.mode == DockMode::Hidden)
+                    g_library.Summon(body);
+                else
+                    g_library.Dismiss();
                 break;
             case OmniHitKind::Menu:
                 ClickBookmarks();
@@ -4494,6 +4544,14 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
                 break;
             }
             return; // toolbar consumed this press.
+        }
+        // Dockable surfaces overlay the content — handle their clicks before
+        // the page. `body` here matches the DrawFn surface rect.
+        {
+            const u32 body_top = client_y + kTabStripH + kToolbarH + kUrlBarH + kStatusRowH;
+            const Rect body{wx, body_top, ww, (wy + wh > body_top) ? wy + wh - body_top : 0U};
+            if (HandleDockClick(g_assistant, body, cx, cy) || HandleDockClick(g_library, body, cx, cy))
+                return;
         }
         const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
         const EventResult er = g_browser.DispatchEvent(d);
