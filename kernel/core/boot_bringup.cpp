@@ -176,6 +176,7 @@
 #include "apps/browser/dock_surface.h"
 #include "apps/browser/omnibox.h"
 #include "apps/browser/privileged/origin_predicate.h"
+#include "apps/browser/privileged/scope.h"
 #include "apps/browser/start_page.h"
 #include "apps/browser/tab_strip.h"
 #include "web/css.h"
@@ -3197,6 +3198,10 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // Privileged-Origin Mode (spec §13) security core — the exact-origin +
     // SPKI-pin + no-redirect predicate that gates arming claude.ai/code.
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::OriginPredicateSelfTest());
+    // Path canonicalisation + scoped-root containment — the broker's security
+    // keystone (full adversarial battery: escapes, sibling-prefix, audit.log
+    // fold/dot/ADS, dev/proc/sys/boot, separators, control/non-ASCII bytes).
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::ScopeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG
