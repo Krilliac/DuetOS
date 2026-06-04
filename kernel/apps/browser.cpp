@@ -24,8 +24,10 @@
 #include "net/x509_verify.h"
 #include "sched/sched.h"
 #include "time/timekeeper.h"
+#include "apps/browser/assistant_backend.h"
 #include "apps/browser/dock_surface.h"
 #include "apps/browser/omnibox.h"
+#include "apps/browser/priv_exec.h"
 #include "apps/browser/start_page.h"
 #include "apps/browser/tab_strip.h"
 #include "apps/browser/tokens.h"
@@ -65,6 +67,9 @@ constexpr u32 kUrlCap = 256;
 constexpr u32 kHttpResponseCap = 65536;
 constexpr u32 kBodyCap = kHttpResponseCap + 256;
 constexpr u32 kStatusCap = 96;
+// Assistant dock (Phase 2b): the editable query line + the last backend reply.
+constexpr u32 kAssistInputCap = 160;
+constexpr u32 kAssistReplyCap = 192;
 constexpr u32 kHistoryCap = 32;
 constexpr u32 kBookmarkCap = 32;
 constexpr u32 kRowH = 10;
@@ -83,6 +88,7 @@ enum class Mode : u8
     UrlEdit = 1,
     History = 2,
     Bookmarks = 3,
+    AssistantEdit = 4, // typing into the Assistant dock's query line (Phase 2b)
 };
 
 struct State
@@ -104,6 +110,12 @@ struct State
     // Last status line (errors / progress / "OK 200").
     char status[kStatusCap];
     u32 status_code; // last HTTP status if known
+
+    // Assistant dock interactive input (Phase 2b): the editable query line (live
+    // while Mode::AssistantEdit) and the last local-backend reply shown above it.
+    char assistant_input[kAssistInputCap];
+    u32 assistant_input_len;
+    char assistant_reply[kAssistReplyCap];
 
     // Vertical scroll offset (in wrapped rows). Used by the History /
     // Bookmarks modal lists. Reset to 0 on a successful fetch.
@@ -2647,6 +2659,13 @@ void PrivArm()
     g_priv_bind = duetos::web::priv::PrivBind{};
     g_priv_bind.tab = &g_priv;
     g_priv_bind.roots = duetos::security::privilege::PrivConfigCurrent().roots;
+    // Phase 2b: register the app-layer EXECUTORS so proc.spawn / net.fetch
+    // actually run (validate -> audit -> execute). Child caps are derived from
+    // the armed scope (child <= broker); fetch reuses this app's page-fetch
+    // transport. Cleared automatically by the PrivBind{} reset on disarm.
+    g_priv_bind.spawnExec = &PrivSpawnExec;
+    g_priv_bind.fetchExec = &PrivFetchExec;
+    g_priv_bind.execCtx = nullptr; // executors are stateless in v1
     if (g_state.page_ctx != nullptr && duetos::web::JsDomContextInstallPrivBinding(g_state.page_ctx, &g_priv_bind))
     {
         arch::SerialWrite("[priv] armed: https://claude.ai/code (window.duetos.* installed)\n");
@@ -2892,7 +2911,15 @@ void DrawStartPage(const Rect& content)
 // surface currently OVERLAYS the content rather than reflowing it, and the
 // drag/snap gesture + ghost preview are not yet wired (the DockSurface state
 // machine supports both — see DockSurfaceSelfTest — this is a UI-wiring GAP).
-void DrawDockSurface(const DockSurface& s, const char* title, const Rect& body)
+// `bodyText` is the surface's content line. For the Assistant it is the last
+// local-backend reply (a real source -> sink wiring of the Phase 2b backend);
+// the Library passes a placeholder. `inputLine` (non-null only for the Assistant)
+// is the live editable query line rendered below the reply — the interactive
+// input wired via Mode::AssistantEdit + HandleAssistantEditChar. GAP: a docked
+// surface still OVERLAYS rather than reflows the content (the drag/snap gesture
+// remains unwired — same UI-wiring GAP class noted above).
+void DrawDockSurface(const DockSurface& s, const char* title, const Rect& body, const char* bodyText,
+                     const char* inputLine)
 {
     if (s.mode == DockMode::Hidden)
         return;
@@ -2906,7 +2933,9 @@ void DrawDockSurface(const DockSurface& s, const char* title, const Rect& body)
     FramebufferDrawString(r.x + 8U, r.y + 6U, title, tokens::kAccentTeal, tokens::kPanelHi);
     if (r.w > 20U)
         FramebufferDrawString(r.x + r.w - 16U, r.y + 6U, "x", tokens::kInkMute, tokens::kPanelHi);
-    FramebufferDrawString(r.x + 8U, r.y + hH + 10U, "(placeholder)", tokens::kInkDim, tokens::kPanel);
+    FramebufferDrawString(r.x + 8U, r.y + hH + 10U, bodyText, tokens::kInkDim, tokens::kPanel);
+    if (inputLine != nullptr)
+        FramebufferDrawString(r.x + 8U, r.y + hH + 26U, inputLine, tokens::kAccentTeal, tokens::kPanel);
 }
 
 // Route a press to a visible dock surface: a hit inside its rect is consumed;
@@ -2987,8 +3016,32 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // one DockSurface mechanism). `body` is the web-content rect below the
     // chrome they float/dock within.
     const Rect body{cx, cy + top_band, cw, (ch > top_band) ? ch - top_band : 0U};
-    DrawDockSurface(g_assistant, "* Assistant", body);
-    DrawDockSurface(g_library, "L Library", body);
+    // Assistant (Phase 2b): show the last backend reply (or the help line if none
+    // yet) above the live editable query line ("> typed_"). Library: placeholder.
+    char assistHelp[kAssistReplyCap];
+    const char* replyLine;
+    if (g_state.assistant_reply[0] != '\0')
+    {
+        replyLine = g_state.assistant_reply;
+    }
+    else
+    {
+        AssistantRespond("help", assistHelp, sizeof(assistHelp));
+        replyLine = assistHelp;
+    }
+    char inputLine[kAssistInputCap + 4];
+    {
+        u32 p = 0;
+        inputLine[p++] = '>';
+        inputLine[p++] = ' ';
+        for (u32 i = 0; i < g_state.assistant_input_len && p + 2U < sizeof(inputLine); ++i)
+            inputLine[p++] = g_state.assistant_input[i];
+        if (g_state.mode == Mode::AssistantEdit && p + 1U < sizeof(inputLine))
+            inputLine[p++] = '_'; // caret
+        inputLine[p] = '\0';
+    }
+    DrawDockSurface(g_assistant, "* Assistant", body, replyLine, inputLine);
+    DrawDockSurface(g_library, "L Library", body, "(placeholder)", nullptr);
 
     // Privileged-Origin armed: a crimson border around the content frame —
     // a second unspoofable cue. Drawn after the content so it sits on top.
@@ -3413,6 +3466,65 @@ void HandleUrlEditChar(char c)
     }
 }
 
+// Per-char input for the Assistant dock query line (Phase 2b interactive input).
+// Enter runs the local backend; a "navigate:<url>" reply is an intent that drives
+// the browser to that URL, anything else is shown as the reply above the input.
+void HandleAssistantEditChar(char c)
+{
+    const u8 uc = static_cast<u8>(c);
+    if (uc == 0x1B) // Esc — close the assistant
+    {
+        g_state.mode = Mode::View;
+        g_assistant.Dismiss();
+        return;
+    }
+    if (uc == 0x0A) // Enter — send the query to the local backend
+    {
+        if (g_state.assistant_input_len == 0)
+            return;
+        char reply[kAssistReplyCap];
+        AssistantRespond(g_state.assistant_input, reply, sizeof(reply));
+        // "navigate:<url>" reply → drive the browser to that URL.
+        const char* nav = "navigate:";
+        bool isNav = true;
+        for (u32 i = 0; nav[i] != '\0'; ++i)
+        {
+            if (reply[i] != nav[i])
+            {
+                isNav = false;
+                break;
+            }
+        }
+        g_state.assistant_input[0] = '\0';
+        g_state.assistant_input_len = 0;
+        if (isNav)
+        {
+            char tmp[kUrlCap];
+            StrCopyCap(tmp, kUrlCap, reply + 9); // past "navigate:"
+            g_state.assistant_reply[0] = '\0';
+            g_state.mode = Mode::View;
+            StartFetch(tmp);
+            return;
+        }
+        StrCopyCap(g_state.assistant_reply, kAssistReplyCap, reply);
+        return;
+    }
+    if (uc == 0x08) // Backspace
+    {
+        if (g_state.assistant_input_len > 0)
+        {
+            --g_state.assistant_input_len;
+            g_state.assistant_input[g_state.assistant_input_len] = '\0';
+        }
+        return;
+    }
+    if (uc >= 0x20 && uc <= 0x7E && g_state.assistant_input_len + 1 < kAssistInputCap)
+    {
+        g_state.assistant_input[g_state.assistant_input_len++] = c;
+        g_state.assistant_input[g_state.assistant_input_len] = '\0';
+    }
+}
+
 // ---------------------------------------------------------------
 // Self-test loopback transport.
 //
@@ -3489,6 +3601,68 @@ bool SelfTestRedirect(bool /*https*/, const char* /*host*/, u16 /*port*/, net::h
 }
 
 } // namespace
+
+// Privileged net.fetch executor (Phase 2b). DEFINED here, not in priv_exec.cpp,
+// because it reuses this TU's file-static OpenTransport / CloseTransport /
+// RedirectConnect TLS machinery — the SAME page-fetch transport a normal page
+// load uses (spec §13.6: "the same net stack + policy as a page fetch").
+// Declared in apps/browser/priv_exec.h; registered on g_priv_bind at arm time.
+// The anonymous-namespace helpers above remain visible here for the rest of the
+// TU, so this external-linkage definition can call them unqualified.
+bool PrivFetchExec(const duetos::web::priv::FetchReq& req, duetos::web::priv::FetchRes* out, void* /*ctx*/)
+{
+    if (out == nullptr || req.url == nullptr)
+        return false;
+    out->status = 0;
+    out->bodyLen = 0;
+    out->ok = false;
+
+    bool https = false;
+    char host[256];
+    u16 port = 0;
+    char path[1024];
+    if (!net::http::ParseUrl(req.url, &https, host, sizeof(host), &port, path, sizeof(path)) || host[0] == '\0')
+        return false;
+
+    net::http::HttpTransport transport{};
+    i32 sock = -1;
+    TlsState* tls = nullptr;
+    if (OpenTransport(https, host, port, &transport, &sock, &tls) != FetchStatus::Ok)
+        return false;
+
+    RedirectTracker redirects{};
+    net::http::HttpRequestSpec spec{};
+    const bool is_post = req.method != nullptr && (req.method[0] == 'P' || req.method[0] == 'p');
+    spec.method = is_post ? net::http::HttpMethod::Post : net::http::HttpMethod::Get;
+    spec.scheme_https = https;
+    StrCopyCap(spec.host, sizeof(spec.host), host);
+    spec.port = port;
+    StrCopyCap(spec.path, sizeof(spec.path), path);
+    spec.user_agent = "DuetOS-Browser/0.2";
+    spec.accept = "*/*";
+    if (is_post)
+    {
+        spec.content_type = req.contentType;
+        spec.body = reinterpret_cast<const u8*>(req.body);
+        spec.body_len = req.bodyLen;
+    }
+    spec.on_connect = RedirectConnect;
+    spec.connect_ctx = &redirects;
+    spec.body_buf = reinterpret_cast<u8*>(out->body);
+    spec.body_cap = out->bodyCap;
+
+    net::http::HttpResult result{};
+    const bool ok = net::http::HttpRequest(spec, &transport, &result);
+
+    CloseTransport(sock, tls);
+    for (u32 i = 0; i < redirects.count; ++i)
+        CloseTransport(redirects.socks[i], redirects.tlss[i]);
+
+    out->status = result.status_code;
+    out->bodyLen = result.body_len;
+    out->ok = ok && result.error == net::http::HttpError::None;
+    return out->ok;
+}
 
 void BrowserInit(WindowHandle handle)
 {
@@ -3792,6 +3966,17 @@ bool BrowserFeedArrow(u16 keycode)
 bool BrowserFeedChar(char c)
 {
     const u8 uc = static_cast<u8>(c);
+
+    // Self-heal: if the Assistant dock was closed (e.g. via its 'x' glyph) while
+    // we were still in its edit mode, fall back to View so keys route normally.
+    if (g_state.mode == Mode::AssistantEdit && g_assistant.mode == DockMode::Hidden)
+        g_state.mode = Mode::View;
+
+    if (g_state.mode == Mode::AssistantEdit)
+    {
+        HandleAssistantEditChar(c);
+        return true;
+    }
 
     if (g_state.mode == Mode::UrlEdit)
     {
@@ -5015,11 +5200,18 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
                 EnterUrlEdit();
                 break;
             case OmniHitKind::Ask:
-                // ✦ toggles the Assistant dock surface.
+                // ✦ toggles the Assistant dock surface + focuses its query line.
                 if (g_assistant.mode == DockMode::Hidden)
+                {
                     g_assistant.Summon(body);
+                    g_state.mode = Mode::AssistantEdit; // focus the input line
+                }
                 else
+                {
                     g_assistant.Dismiss();
+                    if (g_state.mode == Mode::AssistantEdit)
+                        g_state.mode = Mode::View;
+                }
                 break;
             case OmniHitKind::Library:
                 // ▤ toggles the Library dock surface.

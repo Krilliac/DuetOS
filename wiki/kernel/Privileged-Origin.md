@@ -73,8 +73,22 @@ Installed onto the page's JS global env **only** when `available && tab.IsArmed(
   — validated + canonicalised + scope-contained, then executed via `fs::fat32`.
 - `duetos.kernel.read()` → `{ok, uptimeNs}` — read-only introspection (monotonic
   uptime; no pointer / KASLR base / secret).
-- `duetos.proc.spawn()` / `duetos.net.fetch()` — validate + audit today; execution
-  is a documented **GAP** until the JS methods carry actionable arguments (Phase 2b).
+- `duetos.proc.spawn(path[, args])` → `{ok, pid}` — validated + canonicalised +
+  **exec-root-contained** (v1: exec-roots = scoped-roots), audited, **re-contained
+  immediately before the spawn** (TOCTOU re-check, symmetry with the fs path), then
+  executed via an app-layer **executor hook**: read the image from FAT32, sniff
+  PE/ELF, and spawn it with caps **derived strictly from the armed scope** (child ⊆
+  broker — never trusted) into the **sandbox** ramfs namespace under **sandbox-class
+  budgets** (tick: ~10 s auto-kill so a hostile page can't spawn an infinite-loop
+  DoS; frame: bounded, well below the trusted ceiling). _GAP: `argv` is
+  validated/audited as a count but not delivered — the spawn ABI carries no argv
+  vector yet._
+- `duetos.net.fetch(url[, opts])` → `{ok, status, body}` — URL shape-validated
+  (`http`/`https`, non-empty host), audited (url + method, never the body), then run
+  over the **same page-fetch transport** a normal load uses (`OpenTransport` +
+  `HttpRequest` + TLS), reusing the one firewall-governed net stack. Supports **GET
+  and POST** (`opts.method` / `opts.body` / `opts.contentType` — the LLM seam). Body
+  bounded by a 256 KiB bounce.
 - `kernel.installHandler` — **intentionally absent in v1** (spec §13.6); there is
   deliberately no such capability in the `Cap` enum.
 
@@ -144,8 +158,11 @@ disarmed fail-closed, ISO-8601 shape, volume-absent no-op),
 - **Symlink-TOCTOU** is closed by string containment + a re-check, which is
   sufficient on FAT32 (no symlinks). A symlink-capable write backend (ext4) must
   re-enforce scope in the fs layer **after** path resolution.
-- **`proc.spawn` / `net.fetch`** validate + audit but do not execute yet (no
-  actionable arguments until Phase 2b).
+- **`proc.spawn` argv** is validated/audited as a count but **not delivered** to the
+  child — the `SpawnPe/ElfFile` ABI carries no argv vector yet. Revisit when it gains one.
+- **Assistant `RemoteLlm` backend is inert** — the `net.fetch` transport seam is wired,
+  but the off-device LLM path stays disabled until a secret-store for the API key lands;
+  the live Assistant backend is the deterministic local heuristic (`assistant_heuristic.cpp`).
 - **SPKI pin + redirect detection** in the origin predicate use a build-constant
   pin and a lexical origin check; tightening to live TLS-pin/redirect data awaits
   the TLS layer exposing the leaf SPKI.

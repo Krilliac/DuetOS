@@ -259,24 +259,6 @@ JsValue FsValidate(Interp& I, sp::Cap cap, const JsValue* args, duetos::u32 argc
     return result;
 }
 
-JsValue CapValidate(Interp& I, sp::Cap cap, PrivBind* b)
-{
-    if (b == nullptr || b->tab == nullptr)
-        return MakeResult(I, false, "EPERM: no context");
-    char canon[8];
-    const sp::PrivRequest req{cap, nullptr, 0};
-    const sp::Verdict v = sp::ValidateRequest(*b->tab, b->roots, req, canon, sizeof(canon));
-    char iso[24];
-    FormatIso8601(iso, sizeof(iso));
-    Audit(b, iso, cap, "-", v.ok);
-    // GAP: proc.spawn / net.fetch validate + audit but do not yet EXECUTE — the
-    // JS methods carry no actionable arguments (a spawn target, a fetch URL).
-    // Fabricating one from nothing would be speculative; execution awaits these
-    // methods gaining real arguments in Phase 2b. The validate + audit is
-    // correct and load-bearing today. (kernel.read DOES execute — see MKernelRead.)
-    return MakeResult(I, v.ok, v.error);
-}
-
 Result<JsValue> MFsWrite(Interp& I, const JsValue&, const JsValue* a, duetos::u32 n, void* c)
 {
     return FsValidate(I, sp::Cap::FsWrite, a, n, static_cast<PrivBind*>(c));
@@ -285,13 +267,182 @@ Result<JsValue> MFsRead(Interp& I, const JsValue&, const JsValue* a, duetos::u32
 {
     return FsValidate(I, sp::Cap::FsRead, a, n, static_cast<PrivBind*>(c));
 }
-Result<JsValue> MProcSpawn(Interp& I, const JsValue&, const JsValue*, duetos::u32, void* c)
+// proc.spawn(path[, args]): validate the target against the exec roots, audit,
+// then — on allow and with a spawn executor registered — load+spawn the image
+// with caps derived from the armed scope (child <= broker; see priv_exec.cpp).
+// Returns { ok:true, pid } | { ok:false, error }. With no executor (self-test /
+// mid-bring-up) it degrades to validate+audit-only, returning { ok, error }.
+Result<JsValue> MProcSpawn(Interp& I, const JsValue&, const JsValue* a, duetos::u32 n, void* c)
 {
-    return CapValidate(I, sp::Cap::ProcSpawn, static_cast<PrivBind*>(c));
+    PrivBind* b = static_cast<PrivBind*>(c);
+    if (b == nullptr || b->tab == nullptr)
+        return MakeResult(I, false, "EPERM: no context");
+    char path[512];
+    const duetos::u32 plen = (n > 0) ? ValueToChars(a[0], path, sizeof(path) - 1) : 0;
+    path[plen] = '\0'; // ValueToChars does not NUL-terminate.
+
+    char canon[512];
+    const sp::PrivRequest req{sp::Cap::ProcSpawn, (n > 0) ? path : nullptr, 0, nullptr};
+    const sp::Verdict v = sp::ValidateRequest(*b->tab, b->roots, req, canon, sizeof(canon));
+
+    // Audit the canonical target (path only — never argv contents), with a real
+    // ISO-8601 timestamp. `iso` outlives the synchronous AuditAppend.
+    char iso[24];
+    FormatIso8601(iso, sizeof(iso));
+    char summ[560];
+    duetos::u32 so = 0;
+    for (const char* p = "path="; *p != '\0'; ++p)
+        summ[so++] = *p;
+    for (const char* p = v.ok ? canon : path; *p != '\0' && so + 1 < sizeof(summ); ++p)
+        summ[so++] = *p;
+    summ[so] = '\0';
+    Audit(b, iso, sp::Cap::ProcSpawn, summ, v.ok);
+
+    if (!v.ok)
+        return MakeResult(I, false, v.error); // denied: NEVER execute.
+    if (b->spawnExec == nullptr)
+        return MakeResult(I, v.ok, v.error); // no executor: validate+audit only.
+
+    // Symlink-TOCTOU re-check (symmetry with FsValidate): re-confirm `canon` is
+    // STILL contained immediately before the spawn, closing the validate->execute
+    // window, and hand the re-validated path to the executor. GAP: FAT32 has no
+    // symlinks so containment is string-stable here; a symlink-capable exec
+    // backend (ext4) must re-enforce scope in the fs layer after path resolution.
+    char recheck[512];
+    if (!sp::CanonicalizeAndContain(canon, b->roots, recheck, sizeof(recheck)))
+        return MakeResult(I, false, "EPERM: spawn containment re-check failed");
+
+    // argv is validated/audited as a count only; the executor drops it (GAP:
+    // the spawn ABI carries no argv vector yet — see priv_exec.cpp).
+    const duetos::i64 pid = b->spawnExec(recheck, nullptr, 0, b->tab->scope, b->execCtx);
+    if (pid < 0)
+        return MakeResult(I, false, "EIO: spawn failed");
+    JsObject* o = ObjNew(I.arena, false);
+    if (o == nullptr)
+        return JsValue::Undefined();
+    ObjSet(o, I.arena, "ok", 2, JsValue::Bool(true));
+    ObjSet(o, I.arena, "pid", 3, JsValue::Int(pid));
+    return JsValue::Obj(o);
 }
-Result<JsValue> MNetFetch(Interp& I, const JsValue&, const JsValue*, duetos::u32, void* c)
+
+// net.fetch(url[, opts]): validate the URL shape, audit (url+method — NEVER the
+// body), then — on allow and with a fetch executor registered — run the request
+// over the browser's page-fetch transport. Returns { ok:true, status, body } |
+// { ok:false, error }. `opts` = { method:"GET"|"POST", body, contentType };
+// POST carries body + contentType to the executor (which already supports both).
+Result<JsValue> MNetFetch(Interp& I, const JsValue&, const JsValue* a, duetos::u32 n, void* c)
 {
-    return CapValidate(I, sp::Cap::Net, static_cast<PrivBind*>(c));
+    PrivBind* b = static_cast<PrivBind*>(c);
+    if (b == nullptr || b->tab == nullptr)
+        return MakeResult(I, false, "EPERM: no context");
+    char url[1024];
+    const duetos::u32 ulen = (n > 0) ? ValueToChars(a[0], url, sizeof(url) - 1) : 0;
+    url[ulen] = '\0'; // ValueToChars does not NUL-terminate.
+
+    // Method comes from opts.method (default GET); parsed up front so the audit
+    // records the real verb. Body/contentType are read later, only for POST.
+    char method[8] = "GET";
+    JsObject* opts = (n > 1 && a[1].type == JsType::Object) ? a[1].as.obj : nullptr;
+    if (opts != nullptr)
+    {
+        JsValue mv{};
+        if (ObjGet(opts, "method", 6, mv))
+        {
+            const duetos::u32 ml = ValueToChars(mv, method, sizeof(method) - 1);
+            method[ml] = '\0';
+        }
+    }
+    const bool isPost = method[0] == 'P' || method[0] == 'p';
+
+    char canon[8];
+    const sp::PrivRequest req{sp::Cap::Net, nullptr, 0, (n > 0) ? url : nullptr};
+    const sp::Verdict v = sp::ValidateRequest(*b->tab, b->roots, req, canon, sizeof(canon));
+
+    char iso[24];
+    FormatIso8601(iso, sizeof(iso));
+    char summ[1080];
+    duetos::u32 so = 0;
+    for (const char* p = "url="; *p != '\0'; ++p)
+        summ[so++] = *p;
+    for (const char* p = url; *p != '\0' && so + 16 < sizeof(summ); ++p)
+        summ[so++] = *p;
+    for (const char* p = ",method="; *p != '\0'; ++p)
+        summ[so++] = *p;
+    for (const char* p = method; *p != '\0' && so + 1 < sizeof(summ); ++p)
+        summ[so++] = *p;
+    summ[so] = '\0';
+    Audit(b, iso, sp::Cap::Net, summ, v.ok);
+
+    if (!v.ok)
+        return MakeResult(I, false, v.error); // denied: NEVER execute.
+    if (b->fetchExec == nullptr)
+        return MakeResult(I, v.ok, v.error); // no executor: validate+audit only.
+
+    // 256 KiB response bounce — intentionally larger than the page-fetch path's
+    // 64 KiB ceiling: a brokered fetch services API/JSON responses (the LLM seam)
+    // that legitimately run bigger. The executor caps the copy at this size.
+    constexpr duetos::u32 kFetchBodyCap = 256u * 1024u;
+    char* body = static_cast<char*>(mm::KMalloc(kFetchBodyCap));
+    if (body == nullptr)
+        return MakeResult(I, false, "EIO: no memory");
+
+    // For POST, capture body + contentType from opts into a bounded request
+    // buffer. Freed immediately after the synchronous executor call below.
+    char ctype[128] = {};
+    char* reqBody = nullptr;
+    duetos::u32 reqLen = 0;
+    if (isPost && opts != nullptr)
+    {
+        JsValue cv{};
+        if (ObjGet(opts, "contentType", 11, cv))
+        {
+            const duetos::u32 cl = ValueToChars(cv, ctype, sizeof(ctype) - 1);
+            ctype[cl] = '\0';
+        }
+        JsValue bv{};
+        if (ObjGet(opts, "body", 4, bv))
+        {
+            reqBody = static_cast<char*>(mm::KMalloc(kFetchBodyCap));
+            if (reqBody != nullptr)
+                reqLen = ValueToChars(bv, reqBody, kFetchBodyCap);
+        }
+    }
+
+    FetchReq fr{};
+    fr.url = url;
+    fr.method = isPost ? "POST" : "GET";
+    fr.body = reqBody;
+    fr.bodyLen = reqLen;
+    fr.contentType = (ctype[0] != '\0') ? ctype : nullptr;
+    FetchRes fres{};
+    fres.body = body;
+    fres.bodyCap = kFetchBodyCap;
+    const bool ok = b->fetchExec(fr, &fres, b->execCtx);
+    if (reqBody != nullptr)
+        mm::KFree(reqBody); // request body consumed synchronously by the executor
+
+    JsValue out;
+    if (!ok)
+    {
+        out = MakeResult(I, false, "EIO: fetch failed");
+    }
+    else
+    {
+        JsObject* o = ObjNew(I.arena, false);
+        if (o == nullptr)
+        {
+            mm::KFree(body);
+            return JsValue::Undefined();
+        }
+        ObjSet(o, I.arena, "ok", 2, JsValue::Bool(true));
+        ObjSet(o, I.arena, "status", 6, JsValue::Int(static_cast<duetos::i64>(fres.status)));
+        JsString* s = MakeString(I.arena, fres.body, fres.bodyLen);
+        if (s != nullptr)
+            ObjSet(o, I.arena, "body", 4, JsValue::Str(s));
+        out = JsValue::Obj(o);
+    }
+    mm::KFree(body);
+    return out;
 }
 // kernel.read(): read-only introspection. Validates + audits the KernelRead
 // cap, then — on allow — returns a trivially-safe, already-available kernel

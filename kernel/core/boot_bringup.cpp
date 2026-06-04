@@ -173,6 +173,7 @@
 #include "apps/calculator.h"
 #include "apps/about.h"
 #include "apps/browser.h"
+#include "apps/browser/assistant_backend.h"
 #include "apps/browser/dock_surface.h"
 #include "apps/browser/omnibox.h"
 #include "security/privilege/arm_state.h"
@@ -3238,6 +3239,9 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // lifetime — the browser-side Client-A integration. Pixels need VBox; this
     // asserts the arm/disarm/kill/affordance LOGIC headlessly.
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserPrivChromeSelfTest());
+    // Local Assistant heuristic backend (Phase 2b) — deterministic intent
+    // responder behind the Assistant dock; pure (no fs/net), volume-free.
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::AssistantHeuristicSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG

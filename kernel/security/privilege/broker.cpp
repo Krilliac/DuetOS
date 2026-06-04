@@ -1,5 +1,7 @@
 #include "security/privilege/broker.h"
 
+#include "net/http.h"
+
 namespace duetos::security::privilege
 {
 Verdict ValidateRequest(const PrivTab& tab, const Roots& roots, const PrivRequest& r, char* canonOut, duetos::u32 cap)
@@ -23,6 +25,37 @@ Verdict ValidateRequest(const PrivTab& tab, const Roots& roots, const PrivReques
         // 4: bound a write.
         if (r.cap == Cap::FsWrite && r.byteLen > kMaxPrivWriteBytes)
             return Verdict{false, "EINVAL: oversize write"};
+    }
+
+    // 5: proc.spawn — the target must canonicalise + contain within the exec
+    //    roots (v1: exec-roots == scoped-roots, spec §13.6). Reuses the fs keystone.
+    if (r.cap == Cap::ProcSpawn)
+    {
+        if (r.path == nullptr)
+            return Verdict{false, "EINVAL: null spawn path"};
+        if (!CanonicalizeAndContain(r.path, roots, canonOut, cap))
+            return Verdict{false, "EPERM: spawn target outside exec roots"};
+    }
+
+    // 6: net.fetch — the URL must parse as http/https with a non-empty host.
+    //    Arbitrary hosts allowed (same policy as a page fetch, §13.6); the kernel
+    //    firewall remains the final net authority.
+    if (r.cap == Cap::Net)
+    {
+        if (r.url == nullptr || r.url[0] == '\0')
+            return Verdict{false, "EINVAL: null url"};
+        bool https = false;
+        char host[256];
+        duetos::u16 port = 0;
+        char path[1024];
+        if (!duetos::net::http::ParseUrl(r.url, &https, host, sizeof(host), &port, path, sizeof(path)) ||
+            host[0] == '\0')
+            return Verdict{false, "EINVAL: malformed url"};
+        // Only host-validity gates the verdict; the parsed scheme/port/path are
+        // not re-used here (the kernel firewall is the final net authority).
+        (void)https;
+        (void)port;
+        (void)path;
     }
 
     return Verdict{true, ""};

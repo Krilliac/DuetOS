@@ -23,8 +23,9 @@ constexpr duetos::u32 kMaxPrivWriteBytes = 16u * 1024u * 1024u;
 struct PrivRequest
 {
     Cap cap;
-    const char* path = nullptr; // required for fs caps
+    const char* path = nullptr; // required for fs caps; spawn target for ProcSpawn
     duetos::u32 byteLen = 0;    // for fs.write
+    const char* url = nullptr;  // required for Net (fetch target)
 };
 
 struct Verdict
