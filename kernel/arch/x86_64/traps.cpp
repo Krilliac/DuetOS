@@ -59,6 +59,7 @@
 #include "debug/extable.h"
 #include "debug/probes.h"
 #include "mm/kstack.h"
+#include "mm/paging.h"
 #include "mm/poison_alloc.h"
 #include "sched/sched.h"
 #include "subsystems/win32/vmap_syscall.h"
@@ -671,6 +672,22 @@ void HaltOnRecursiveFault(u64 vector, u64 rip)
     Halt();
 }
 
+// Is `frame` safe to dereference as a trap frame — canonical AND its first quad
+// present? Pure except for the fault-surviving SafeReadKernel probe (which returns
+// false instead of faulting on an unmapped source). Catches both observed wild
+// shapes: non-canonical (rejected by the arithmetic test, never dereferenced so it
+// can't #GP) and canonical-but-unmapped (rejected by the present probe). Exposed to
+// TrapsSelfTest so the reject path is verifiable without reproducing a wild trap.
+static bool TrapFramePointerIsSane(const void* frame)
+{
+    const ::duetos::u64 fp = reinterpret_cast<::duetos::u64>(frame);
+    const ::duetos::u64 hi17 = fp >> 47; // bits 63:47 — all-0 (low) or all-1 (high) => canonical
+    if (hi17 != 0ULL && hi17 != 0x1FFFFULL)
+        return false; // non-canonical — refuse without dereferencing (a deref would #GP)
+    ::duetos::u64 probe = 0;
+    return ::duetos::mm::SafeReadKernel(&probe, frame, sizeof(probe));
+}
+
 extern "C" void TrapDispatch(TrapFrame* frame)
 {
     // Diagnostic: snapshot the iretq-frame RIP at entry so the
@@ -747,6 +764,29 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             ::duetos::core::PanicWithValue("arch/traps", "trap frame RIP scribbled mid-handler", frame->rip);
         }
     };
+    // Defense-in-depth: the entry stub can hand us a WILD trap-frame pointer — the
+    // tracked boot-tail wild-frame bug (observed under VBox as frame=-1, canonical
+    // but unmapped, and a non-canonical 0x001d2025… shape). RipIntegrityGuard's ctor
+    // below dereferences frame->rip/cs immediately; on a wild pointer that #PFs, so
+    // the guard meant to DIAGNOSE corruption instead becomes a SECOND fault that
+    // buries the original context (cr2=-1, fault-site mislabeled as the guard ctor).
+    // Validate canonical-AND-present BEFORE any field access; on a wild pointer name
+    // the offender and halt cleanly so the NEXT occurrence is diagnosable, not a
+    // nested #PF. Does NOT fix the wild-frame root cause (tracked separately) — it
+    // stops that bug from masking itself. Sixth dispatcher-site validator.
+    if (!TrapFramePointerIsSane(frame))
+    {
+        const ::duetos::u64 fp = reinterpret_cast<::duetos::u64>(frame);
+        const ::duetos::u64 hi17 = fp >> 47;
+        const bool canonical = (hi17 == 0ULL) || (hi17 == 0x1FFFFULL);
+        KBP_PROBE_V(::duetos::debug::ProbeId::kTrapDispatchRipScribble, fp);
+        SerialWrite("[arch/traps] WILD trap-frame pointer — refusing to dereference  cpu=");
+        SerialWriteHex(::duetos::cpu::CurrentCpuIdOrBsp());
+        SerialWrite("  frame=");
+        SerialWriteHex(fp);
+        SerialWrite(canonical ? "  [canonical, not-present]\n" : "  [non-canonical]\n");
+        ::duetos::core::PanicWithValue("arch/traps", "wild trap-frame pointer at dispatch entry", fp);
+    }
     RipIntegrityGuard guard(frame);
     // KPath: record that this vector fired before any handler-
     // specific dispatch. Single bounds check + relaxed atomic add;
@@ -1861,6 +1901,26 @@ void TrapsSelfTest()
     // iretq's. Without the new install it would cascade to #NP and
     // halt — same easy regression signal.
     asm volatile("int $0x42");
+
+    // 3. Wild trap-frame-pointer guard (the TrapDispatch entry validator). The
+    //    non-canonical wild shape must be REFUSED and a live present address
+    //    ACCEPTED. Only fault-free cases run here: TrapsSelfTest precedes
+    //    TrapsRegisterExtable in boot, so probing an UNMAPPED address (the -1 shape)
+    //    would fault with no extable armed and triple-fault — that present-reject
+    //    path rides on SafeReadKernel's own contract. Non-canonical short-circuits
+    //    before any probe; the accept case reads a valid mapped stack address.
+    bool guard_ok = true;
+    guard_ok &= !TrapFramePointerIsSane(reinterpret_cast<void*>(0x001d2025001d2025ULL)); // non-canonical -> reject
+    guard_ok &= TrapFramePointerIsSane(&guard_ok);                                       // live frame -> accept
+    if (guard_ok)
+    {
+        SerialWrite("[traps] wild-frame-pointer guard OK (non-canonical refused, live frame accepted)\n");
+    }
+    else
+    {
+        SerialWrite("[traps] wild-frame-pointer guard FAIL\n");
+        KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x6u);
+    }
 
     SerialWrite("[traps] self-test OK — #BP and spurious both recovered\n");
 }
