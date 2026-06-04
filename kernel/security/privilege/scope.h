@@ -28,7 +28,7 @@
  * Fail-closed: anything ambiguous is refused.
  */
 
-namespace duetos::apps::browser::priv
+namespace duetos::security::privilege
 {
 enum class Cap : duetos::u8
 {
@@ -64,4 +64,4 @@ bool CanonicalizeAndContain(const char* in, const Roots& roots, char* out, dueto
 
 void ScopeSelfTest();
 
-} // namespace duetos::apps::browser::priv
+} // namespace duetos::security::privilege

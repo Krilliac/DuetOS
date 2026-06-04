@@ -1,9 +1,9 @@
-#include "apps/browser/privileged/audit.h"
+#include "security/privilege/audit.h"
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 
-namespace duetos::apps::browser::priv
+namespace duetos::security::privilege
 {
 namespace
 {
@@ -68,4 +68,4 @@ void AuditSelfTest()
                       "escaping)\n");
 }
 
-} // namespace duetos::apps::browser::priv
+} // namespace duetos::security::privilege

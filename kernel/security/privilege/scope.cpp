@@ -1,6 +1,6 @@
-#include "apps/browser/privileged/scope.h"
+#include "security/privilege/scope.h"
 
-namespace duetos::apps::browser::priv
+namespace duetos::security::privilege
 {
 using duetos::u32;
 
@@ -167,4 +167,4 @@ bool CanonicalizeAndContain(const char* in, const Roots& roots, char* out, u32 c
     return false;
 }
 
-} // namespace duetos::apps::browser::priv
+} // namespace duetos::security::privilege

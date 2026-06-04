@@ -1,6 +1,6 @@
 #pragma once
 
-#include "apps/browser/privileged/scope.h"
+#include "security/privilege/scope.h"
 #include "util/types.h"
 
 /*
@@ -10,7 +10,7 @@
  * origin (auto-disarm). Pure — boot-self-tested.
  */
 
-namespace duetos::apps::browser::priv
+namespace duetos::security::privilege
 {
 enum class ArmState : duetos::u8
 {
@@ -47,4 +47,4 @@ struct PrivTab
 
 void ArmStateSelfTest();
 
-} // namespace duetos::apps::browser::priv
+} // namespace duetos::security::privilege

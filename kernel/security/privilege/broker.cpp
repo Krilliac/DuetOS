@@ -1,6 +1,6 @@
-#include "apps/browser/privileged/broker.h"
+#include "security/privilege/broker.h"
 
-namespace duetos::apps::browser::priv
+namespace duetos::security::privilege
 {
 Verdict ValidateRequest(const PrivTab& tab, const Roots& roots, const PrivRequest& r, char* canonOut, duetos::u32 cap)
 {
@@ -28,4 +28,4 @@ Verdict ValidateRequest(const PrivTab& tab, const Roots& roots, const PrivReques
     return Verdict{true, ""};
 }
 
-} // namespace duetos::apps::browser::priv
+} // namespace duetos::security::privilege

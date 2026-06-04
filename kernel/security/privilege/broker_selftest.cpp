@@ -1,9 +1,9 @@
-#include "apps/browser/privileged/broker.h"
+#include "security/privilege/broker.h"
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 
-namespace duetos::apps::browser::priv
+namespace duetos::security::privilege
 {
 namespace
 {
@@ -101,4 +101,4 @@ void BrokerSelfTest()
                       "escape / oversize / null-path refused; non-fs cap ok)\n");
 }
 
-} // namespace duetos::apps::browser::priv
+} // namespace duetos::security::privilege

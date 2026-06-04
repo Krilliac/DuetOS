@@ -1,7 +1,7 @@
 #pragma once
 
-#include "apps/browser/privileged/arm_state.h"
-#include "apps/browser/privileged/scope.h"
+#include "security/privilege/arm_state.h"
+#include "security/privilege/scope.h"
 #include "util/types.h"
 
 /*
@@ -15,7 +15,7 @@
  * must never weaken.
  */
 
-namespace duetos::apps::browser::priv
+namespace duetos::security::privilege
 {
 // Upper bound on a single privileged write (spec §13.8 bounds-check).
 constexpr duetos::u32 kMaxPrivWriteBytes = 16u * 1024u * 1024u;
@@ -39,4 +39,4 @@ Verdict ValidateRequest(const PrivTab& tab, const Roots& roots, const PrivReques
 
 void BrokerSelfTest();
 
-} // namespace duetos::apps::browser::priv
+} // namespace duetos::security::privilege

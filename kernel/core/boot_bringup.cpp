@@ -175,11 +175,11 @@
 #include "apps/browser.h"
 #include "apps/browser/dock_surface.h"
 #include "apps/browser/omnibox.h"
-#include "apps/browser/privileged/arm_state.h"
-#include "apps/browser/privileged/audit.h"
-#include "apps/browser/privileged/broker.h"
+#include "security/privilege/arm_state.h"
+#include "security/privilege/audit.h"
+#include "security/privilege/broker.h"
 #include "apps/browser/privileged/origin_predicate.h"
-#include "apps/browser/privileged/scope.h"
+#include "security/privilege/scope.h"
 #include "apps/browser/start_page.h"
 #include "apps/browser/tab_strip.h"
 #include "web/css.h"
@@ -3204,15 +3204,15 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // Path canonicalisation + scoped-root containment — the broker's security
     // keystone (full adversarial battery: escapes, sibling-prefix, audit.log
     // fold/dot/ADS, dev/proc/sys/boot, separators, control/non-ASCII bytes).
-    DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::ScopeSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::privilege::ScopeSelfTest());
     // Per-tab arm state machine (arm binds scope; auto-disarm on leaving the
     // privileged origin / per-navigation lifetime).
-    DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::ArmStateSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::privilege::ArmStateSelfTest());
     // Unified client-tagged audit-entry formatter + the broker request
     // validator (the enforcement contract: armed? cap-in-scope? contained?
     // bounds?). Completes the pure Privilege-Engine security core.
-    DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::AuditSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::BrokerSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::privilege::AuditSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::security::privilege::BrokerSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG

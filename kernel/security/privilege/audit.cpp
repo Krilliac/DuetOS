@@ -1,8 +1,8 @@
-#include "apps/browser/privileged/audit.h"
+#include "security/privilege/audit.h"
 
 #include "arch/x86_64/serial.h"
 
-namespace duetos::apps::browser::priv
+namespace duetos::security::privilege
 {
 using duetos::u32;
 
@@ -100,4 +100,4 @@ void AuditAppend(const AuditEntry& e)
     arch::SerialWrite("\n");
 }
 
-} // namespace duetos::apps::browser::priv
+} // namespace duetos::security::privilege

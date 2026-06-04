@@ -1,9 +1,9 @@
-#include "apps/browser/privileged/scope.h"
+#include "security/privilege/scope.h"
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 
-namespace duetos::apps::browser::priv
+namespace duetos::security::privilege
 {
 namespace
 {
@@ -191,4 +191,4 @@ void ScopeSelfTest()
                       "trailing-space, non-absolute, out-of-roots)\n");
 }
 
-} // namespace duetos::apps::browser::priv
+} // namespace duetos::security::privilege

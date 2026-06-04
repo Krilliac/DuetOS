@@ -1,9 +1,9 @@
-#include "apps/browser/privileged/arm_state.h"
+#include "security/privilege/arm_state.h"
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
 
-namespace duetos::apps::browser::priv
+namespace duetos::security::privilege
 {
 void ArmStateSelfTest()
 {
@@ -58,4 +58,4 @@ void ArmStateSelfTest()
                       "explicit disarm clears)\n");
 }
 
-} // namespace duetos::apps::browser::priv
+} // namespace duetos::security::privilege

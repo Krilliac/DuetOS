@@ -11,7 +11,7 @@
  * the fs sink is wired in the broker-execution task.
  */
 
-namespace duetos::apps::browser::priv
+namespace duetos::security::privilege
 {
 struct AuditEntry
 {
@@ -35,4 +35,4 @@ void AuditAppend(const AuditEntry& e);
 
 void AuditSelfTest();
 
-} // namespace duetos::apps::browser::priv
+} // namespace duetos::security::privilege
