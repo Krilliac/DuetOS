@@ -190,6 +190,7 @@
 #include "web/layout.h"
 #include "web/paint.h"
 #include "web/png.h"
+#include "web/priv_binding.h"
 #include "apps/calendar.h"
 #include "apps/charmap.h"
 #include "apps/clock.h"
@@ -3217,6 +3218,9 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // Boot-flag config (--allow-claude-system-access[=roots]) — the master
     // switch + scoped-roots parse; absent => the feature is fully off.
     DUETOS_BOOT_SELFTEST(duetos::security::privilege::PrivConfigSelfTest());
+    // window.duetos.* JS host binding (Client A adapter onto the engine) —
+    // host-object tree + per-method marshal to the broker validator.
+    DUETOS_BOOT_SELFTEST(duetos::web::priv::PrivBindingSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG
