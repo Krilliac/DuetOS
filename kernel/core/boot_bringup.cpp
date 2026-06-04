@@ -175,6 +175,7 @@
 #include "apps/browser.h"
 #include "apps/browser/dock_surface.h"
 #include "apps/browser/omnibox.h"
+#include "apps/browser/privileged/origin_predicate.h"
 #include "apps/browser/start_page.h"
 #include "apps/browser/tab_strip.h"
 #include "web/css.h"
@@ -3193,6 +3194,9 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // new-tab StartPage model — browser shell redesign, Phase 1.
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::OmniboxSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::StartPageSelfTest());
+    // Privileged-Origin Mode (spec §13) security core — the exact-origin +
+    // SPKI-pin + no-redirect predicate that gates arming claude.ai/code.
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::OriginPredicateSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG
