@@ -173,6 +173,7 @@
 #include "apps/calculator.h"
 #include "apps/about.h"
 #include "apps/browser.h"
+#include "apps/browser/dock_surface.h"
 #include "web/css.h"
 #include "web/html.h"
 #include "web/jpeg.h"
@@ -3179,6 +3180,9 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     duetos::apps::browser::BrowserInit(browser_handle);
     duetos::drivers::video::WindowSetVisible(browser_handle, false);
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserSelfTest());
+    // DockSurface (browser shell redesign, Phase 1) — snap-dock state
+    // machine + geometry for the Assistant/Library surfaces. Pure logic.
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::DockSurfaceSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG
