@@ -296,7 +296,7 @@ TabStrip g_tabs;
 Omnibox g_omni;
 DockSurface g_assistant;
 DockSurface g_library;
-[[maybe_unused]] StartPage g_startpage; // rendered/wired in Task 6.4
+StartPage g_startpage;
 constexpr u32 kNavBtnCount = 7U;
 
 using duetos::drivers::video::ChromeTextRole;
@@ -2577,6 +2577,37 @@ void DrawToolbar(u32 cx, u32 cy, u32 cw)
     FramebufferDrawString(mn.x + 7U, ty, ":", tokens::kInkMute, tokens::kPanelHi);
 }
 
+// The DuetOS start page shows when the active tab has no rendered page
+// (a fresh / new tab), in View mode, not mid-fetch.
+bool ShowStartPage()
+{
+    return g_state.mode == Mode::View && !g_state.fetch_in_flight && !g_state.render_ready;
+}
+
+// Render the new-tab start page (wordmark + Ask/URL prompt + tile row) into
+// the content rect. GAP: the radial backdrop glow is a flat fill (the
+// painter's gradients are vertical-linear only) and the ✦ spark is an ASCII
+// '*' until the real glyph lands.
+void DrawStartPage(const Rect& content)
+{
+    FramebufferFillRect(content.x, content.y, content.w, content.h, tokens::kCanvas);
+    const Rect wm = g_startpage.WordmarkRect(content);
+    FramebufferDrawString(wm.x + 52U, wm.y + 8U, "DuetOS", tokens::kInk, tokens::kCanvas);
+    const Rect pr = g_startpage.PromptRect(content);
+    duetos::drivers::video::FramebufferFillRoundRect(pr.x, pr.y, pr.w, pr.h, tokens::kRadPill, 0x000D131AU);
+    FramebufferFillRect(pr.x, pr.y, pr.w, 1U, tokens::kAccentTeal);
+    FramebufferDrawString(pr.x + 14U, pr.y + pr.h / 2U - 4U, "* Ask anything, or type a URL", tokens::kInkMute,
+                          0x000D131AU);
+    for (u32 i = 0; i < g_startpage.tileCount; ++i)
+    {
+        const Rect t = g_startpage.TileRect(i, content);
+        duetos::drivers::video::FramebufferFillRoundRect(t.x, t.y, t.w, t.h, tokens::kRadTile, tokens::kPanel);
+        duetos::drivers::video::FramebufferFillRoundRect(t.x + t.w / 2U - 8U, t.y + 12U, 16U, 16U, 4U,
+                                                         g_startpage.tiles[i].accent);
+        FramebufferDrawString(t.x + 6U, t.y + t.h - 12U, g_startpage.tiles[i].label, tokens::kInkMute, tokens::kPanel);
+    }
+}
+
 // Render a dockable surface (Assistant / Library) over the content. `body`
 // is the web-content rect the surface floats/docks within. GAP: a docked
 // surface currently OVERLAYS the content rather than reflowing it, and the
@@ -2654,6 +2685,11 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     {
         DrawList(cx, cy + top_band, cw, (ch > top_band + kFooterH) ? ch - top_band - kFooterH : 0,
                  "BOOKMARKS (Enter:load X:remove Esc:back):", g_state.bookmarks, g_state.bookmark_count, fg, dim, bg);
+    }
+    else if (ShowStartPage())
+    {
+        const Rect content{cx, cy + top_band, cw, (ch > top_band) ? ch - top_band : 0U};
+        DrawStartPage(content);
     }
     else
     {
@@ -3168,6 +3204,7 @@ void BrowserInit(WindowHandle handle)
     // render contexts are Phase 3; here the active tab tracks the page.
     if (g_tabs.count == 0)
         g_tabs.AddTab("", "DuetOS - Home", TabAccent::Native);
+    g_startpage.InitDefault();
     duetos::drivers::video::WindowSetWheelHandler(handle, BrowserOnWheel);
     duetos::drivers::video::WindowSetScrollHandler(handle,
                                                    [](duetos::u32 first)
@@ -4445,6 +4482,19 @@ restore:
     StrCopyCap(g_state.fetch_url, kUrlCap, saved_fetch_url);
 }
 
+// Drop the rendered page so the start page shows (a fresh / blank tab).
+void ShowBlankTab()
+{
+    g_state.render_ready = false;
+    g_state.render_dl = nullptr;
+    g_state.render_total_h = 0;
+    g_state.body_len = 0;
+    g_state.body[0] = '\0';
+    g_state.scroll_y = 0;
+    g_state.url[0] = '\0';
+    g_state.url_len = 0;
+}
+
 void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
 {
     using duetos::drivers::input::kMouseButtonLeft;
@@ -4485,6 +4535,7 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
             if (th.kind == TabHitKind::NewTab)
             {
                 g_tabs.AddTab("", "New Tab", TabAccent::Native);
+                ShowBlankTab(); // a new tab opens on the start page.
             }
             else if (th.kind == TabHitKind::Close)
             {
@@ -4494,9 +4545,11 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
             {
                 g_tabs.Select(th.index);
                 // Phase 1: one live page — selecting re-fetches the tab's URL
-                // if it has one (a fresh "New Tab" has none yet → no-op).
+                // if it has one, else falls back to the start page.
                 if (g_tabs.tabs[th.index].url[0] != '\0' && !g_state.fetch_in_flight)
                     StartFetch(g_tabs.tabs[th.index].url);
+                else
+                    ShowBlankTab();
             }
             return; // the strip consumed this press; next compose repaints it.
         }
@@ -4552,6 +4605,16 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
             const Rect body{wx, body_top, ww, (wy + wh > body_top) ? wy + wh - body_top : 0U};
             if (HandleDockClick(g_assistant, body, cx, cy) || HandleDockClick(g_library, body, cx, cy))
                 return;
+            // Start page (blank tab): route tile / prompt clicks.
+            if (ShowStartPage())
+            {
+                const StartHit sh = g_startpage.HitTest(body, cx, cy);
+                if (sh.kind == StartHitKind::Tile && g_startpage.tiles[sh.index].url[0] != '\0')
+                    StartFetch(g_startpage.tiles[sh.index].url);
+                else if (sh.kind == StartHitKind::Prompt)
+                    EnterUrlEdit();
+                return; // the start page consumes body presses.
+            }
         }
         const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
         const EventResult er = g_browser.DispatchEvent(d);
