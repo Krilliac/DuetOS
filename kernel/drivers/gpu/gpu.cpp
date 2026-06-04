@@ -78,17 +78,6 @@ const VendorEntry* FindVendor(u16 vid)
     return nullptr;
 }
 
-// QEMU Bochs VGA registers at BAR 0. Memory-mapped on modern
-// QEMU (the legacy I/O ports 0x01CE/0x01CF still work too).
-// VBE index register at offset 0x500 (little-endian u16).
-u16 Mmio16(const GpuInfo& g, u64 offset)
-{
-    if (g.mmio_virt == nullptr)
-        return 0;
-    auto* p = reinterpret_cast<volatile u16*>(static_cast<u8*>(g.mmio_virt) + offset);
-    return *p;
-}
-
 // NVIDIA PMC_BOOT_0 architecture-nibble -> short codename. Used by
 // the cross-vendor diagnostic line in `LogGpu`. The nvidia driver
 // scaffold (drivers/gpu/nvidia_gpu.cpp) re-derives the same value
@@ -125,30 +114,6 @@ const char* NvidiaArchName(u8 arch)
         return "GB10x-blackwell";
     default:
         return nullptr;
-    }
-}
-
-void DecodeBochsVbe(const GpuInfo& g)
-{
-    if (g.mmio_virt == nullptr)
-        return;
-    // VBE_DISPI_INDEX_ID: reading it with the VBE aperture
-    // enabled returns 0xB0C0 | version; on QEMU's stdvga with
-    // the default framebuffer, bar0 + 0x500 is the VBE register
-    // bank (qemu-project.org, hw/display/bochs_display.c).
-    constexpr u64 kVbeIndexIdReg = 0x500;
-    const u16 id = Mmio16(g, kVbeIndexIdReg);
-    arch::SerialWrite("[bochs] vbe_id_reg=");
-    arch::SerialWriteHex(id);
-    if ((id & 0xFF00) == 0xB000)
-    {
-        arch::SerialWrite("  (VBE 0xB0Cx family; version nibble=");
-        arch::SerialWriteHex(id & 0xFF);
-        arch::SerialWrite(")\n");
-    }
-    else
-    {
-        arch::SerialWrite("  (register aperture not decoded this way on this BAR layout)\n");
     }
 }
 
@@ -283,11 +248,12 @@ void RunVendorProbe(GpuInfo& g)
     // vendor probes (Intel/AMD/NVIDIA) to land alongside it.
     if (g.vendor_id == kVendorQemuBochs && ::duetos::arch::IsEmulator())
     {
-        DecodeBochsVbe(g);
-        // Real driver-level query — talks to the device via the
-        // legacy port pair (works regardless of BAR mapping). The
-        // MMIO-bank decode above is QEMU-specific + BAR-layout
-        // dependent; VbeSelfTest is the canonical entry point.
+        // Driver-level query via the legacy VBE DISPI port pair
+        // (0x01CE/0x01CF) — BAR-independent and correct on QEMU stdvga,
+        // bochs-display, and real Bochs-compatible hardware. (A prior
+        // MMIO decode read BAR0 + 0x500 as the VBE register bank, but
+        // BAR0 is the framebuffer; on bochs-display the register bank
+        // is BAR2. VbeSelfTest is the canonical, correct entry point.)
         VbeSelfTest();
     }
     if (g.vendor_id == kVendorRedHatVirt && g.device_id == 0x1050)
