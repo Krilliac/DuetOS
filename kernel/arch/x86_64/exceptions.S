@@ -225,6 +225,33 @@ isr_common:
     push    r14
     push    r15
 
+    /* --- DIAG (boot-tail wild-frame chase, 2026-06-04): record this trap's
+     * entry shape into the fixed BSS ring (traps.cpp g_trap_ring) so a later
+     * wild-frame panic can show the trap sequence that produced it. rax..rdx
+     * are saved on the stack above and restored by the IRQ-return pop-all, so
+     * they are free scratch here; the 32-bit remap below and the C dispatcher
+     * read only stack slots, never live rax..rdx. Offsets from rsp after the
+     * 15 pushes: [rsp+120]=vector, [rsp+136]=saved rip, [rsp+160]=pre-trap rsp.
+     * Single-CPU diagnostic (the bug is single-CPU VBox); the non-atomic idx
+     * bump is acceptable. */
+    movabs  rcx, offset g_trap_ring_idx
+    mov     rax, [rcx]              /* idx */
+    mov     rbx, rax
+    and     rbx, 0xF               /* idx & 15 */
+    shl     rbx, 5                 /* * 32 bytes/slot */
+    movabs  rdx, offset g_trap_ring
+    add     rdx, rbx               /* &g_trap_ring[idx & 15] */
+    mov     rbx, [rsp + 120]       /* vector */
+    mov     [rdx + 0], rbx
+    mov     rbx, [rsp + 136]       /* saved rip */
+    mov     [rdx + 8], rbx
+    mov     rbx, [rsp + 160]       /* pre-trap rsp (CPU iretq frame) */
+    mov     [rdx + 16], rbx
+    mov     [rdx + 24], rsp        /* frame ptr handed to TrapDispatch */
+    inc     rax
+    mov     [rcx], rax             /* idx++ */
+    /* --- end DIAG --- */
+
     /* 32-bit syscall ABI remap. Trap frame layout after the 15 pushes:
      *   [rsp+0]    r15
      *   [rsp+8]    r14
