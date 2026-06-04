@@ -24,6 +24,9 @@
 #include "net/x509_verify.h"
 #include "sched/sched.h"
 #include "time/timekeeper.h"
+#include "apps/browser/dock_surface.h"
+#include "apps/browser/omnibox.h"
+#include "apps/browser/start_page.h"
 #include "apps/browser/tab_strip.h"
 #include "apps/browser/tokens.h"
 #include "web/css.h"
@@ -288,6 +291,12 @@ constexpr u32 kTabStripH = 30U;
 // Live tab model (Phase 1: one page rendered at a time; the active tab
 // tracks the current URL/title — real per-tab render contexts are Phase 3).
 TabStrip g_tabs;
+// Unified omnibox + the two dockable surfaces (Assistant / Library) + the
+// new-tab start page (shell redesign Phase 1).
+Omnibox g_omni;
+DockSurface g_assistant;
+[[maybe_unused]] DockSurface g_library; // rendered/wired in Task 6.3
+[[maybe_unused]] StartPage g_startpage; // rendered/wired in Task 6.4
 constexpr u32 kNavBtnCount = 7U;
 
 using duetos::drivers::video::ChromeTextRole;
@@ -2531,6 +2540,43 @@ void DrawTabStrip(u32 cx, u32 cy, u32 cw)
     FramebufferDrawString(nt.x + 8U, chipY, "+", tokens::kInkMute, tokens::kCanvas);
 }
 
+// New unified toolbar: nav (back/fwd/reload) + omnibox pill (URL/search) +
+// ✦ Ask AI + ▤ Library + ⋮ menu, drawn in the band of height kToolbarH +
+// kUrlBarH + kStatusRowH (replacing the old toolbar + URL bar + status row).
+// GAP: ASCII glyph fallbacks ('<' '>' '@' '*' 'L' ':') until the real chrome
+// glyph set (incl. the ✦ spark) lands.
+void DrawToolbar(u32 cx, u32 cy, u32 cw)
+{
+    const u32 H = kToolbarH + kUrlBarH + kStatusRowH;
+    FramebufferFillRect(cx, cy, cw, H, tokens::kPanelHi);
+    FramebufferFillRect(cx, cy + H - 1U, cw, 1U, tokens::kBorder);
+    const Rect tb{cx, cy, cw, H};
+    const u32 ty = cy + H / 2U - 4U; // glyph baseline-ish
+    const char* navg[3] = {"<", ">", "@"};
+    for (u32 i = 0; i < 3U; ++i)
+    {
+        const Rect r = g_omni.NavRect(i, tb);
+        FramebufferDrawString(r.x + 6U, ty, navg[i], tokens::kInkMute, tokens::kPanelHi);
+    }
+    const u32 pillH = 26U;
+    const u32 pillY = cy + (H - pillH) / 2U;
+    const Rect pill = g_omni.PillRect(tb);
+    duetos::drivers::video::FramebufferFillRoundRect(pill.x, pillY, pill.w, pillH, tokens::kRadPill, tokens::kCanvas);
+    const bool hasUrl = (g_state.url[0] != '\0');
+    FramebufferDrawString(pill.x + 12U, pillY + pillH / 2U - 4U, hasUrl ? g_state.url : "Ask anything, or type a URL",
+                          hasUrl ? tokens::kInk : tokens::kInkDim, tokens::kCanvas);
+    if (g_state.mode == Mode::UrlEdit)
+        FramebufferDrawString(pill.x + 12U + StrLen(g_state.url) * 8U, pillY + pillH / 2U - 4U, "_",
+                              tokens::kAccentTeal, tokens::kCanvas);
+    const Rect ask = g_omni.AskRect(tb);
+    duetos::drivers::video::FramebufferFillRoundRect(ask.x, pillY, ask.w, pillH, tokens::kRadPill, tokens::kPanel);
+    FramebufferDrawString(ask.x + 8U, pillY + pillH / 2U - 4U, "* Ask", tokens::kAccentTeal, tokens::kPanel);
+    const Rect lib = g_omni.LibraryRect(tb);
+    FramebufferDrawString(lib.x + 6U, ty, "L", tokens::kAccentTeal, tokens::kPanelHi);
+    const Rect mn = g_omni.MenuRect(tb);
+    FramebufferDrawString(mn.x + 7U, ty, ":", tokens::kInkMute, tokens::kPanelHi);
+}
+
 void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
 {
     const auto& th = ThemeCurrent();
@@ -2545,25 +2591,17 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     // raw-paint body / modal-list paths run below, OFFSET to
     // sit under the new top band the toolbar / URL bar / status
     // label carve out.
-    BindBrowserOnce();
+    // Shell redesign chrome: the tab strip + the new unified toolbar
+    // (Omnibox pill + ✦ Ask + ▤ Library + ⋮) replace the old WidgetGroup
+    // toolbar / URL bar / status row / footer. RebindBrowserBounds is kept
+    // so the (now-unpainted) AppButtons' bounds stay sane for any stray
+    // event, but the chrome is drawn manually below.
     RefreshUrlBarText();
-    RefreshFooterText();
-    // Tab strip on top; anchor the existing chrome into the client rect
-    // shifted down by the strip height (footer re-anchors to the bottom).
     DrawTabStrip(cx, cy, cw);
+    DrawToolbar(cx, cy + kTabStripH, cw);
     RebindBrowserBounds(cx, cy + kTabStripH, cw, (ch > kTabStripH) ? ch - kTabStripH : 0U);
 
-    // Pre-paint a status-band tone behind the footer label so
-    // the Caption-role glyphs sit on a uniform backdrop —
-    // mirrors the Notes status band.
-    if (ch > kFooterH)
-        FramebufferFillRect(cx, cy + ch - kFooterH, cw, kFooterH, 0x00C8C8B8U);
-
-    Compose compose_ctx{};
-    g_browser.PaintAll(compose_ctx);
-
-    // Body / modal-list paint area starts BELOW the toolbar +
-    // URL bar + status row the AppToolbar / labels just painted.
+    // Body / modal-list paint area starts BELOW the tab strip + toolbar band.
     const u32 top_band = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH;
 
     if (g_state.fetch_in_flight)
@@ -4419,6 +4457,43 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
                     StartFetch(g_tabs.tabs[th.index].url);
             }
             return; // the strip consumed this press; next compose repaints it.
+        }
+        // Toolbar band: route to the unified omnibox controls (same actions
+        // as the retired AppButtons), then to the page below.
+        const u32 tb_top = client_y + kTabStripH;
+        const u32 tb_h = kToolbarH + kUrlBarH + kStatusRowH;
+        if (cy < tb_top + tb_h)
+        {
+            const Rect tb{wx, tb_top, ww, tb_h};
+            const OmniHit oh = g_omni.HitTest(tb, cx, cy);
+            switch (oh.kind)
+            {
+            case OmniHitKind::Nav:
+                if (oh.navIndex == 0)
+                    ClickBack();
+                else if (oh.navIndex == 1)
+                    ClickForward();
+                else
+                    ClickReload();
+                break;
+            case OmniHitKind::Pill:
+                EnterUrlEdit();
+                break;
+            case OmniHitKind::Ask:
+                // Summon the Assistant dock surface (rendering wired in 6.3).
+                g_assistant.Summon(
+                    Rect{wx, tb_top + tb_h, ww, (wy + wh > tb_top + tb_h) ? wy + wh - tb_top - tb_h : 0U});
+                break;
+            case OmniHitKind::Library:
+                ClickHistory();
+                break;
+            case OmniHitKind::Menu:
+                ClickBookmarks();
+                break;
+            default:
+                break;
+            }
+            return; // toolbar consumed this press.
         }
         const Event d{EventKind::MouseDown, cx, cy, 0U, 0U};
         const EventResult er = g_browser.DispatchEvent(d);
