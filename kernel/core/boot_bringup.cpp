@@ -178,6 +178,7 @@
 #include "security/privilege/arm_state.h"
 #include "security/privilege/audit.h"
 #include "security/privilege/broker.h"
+#include "security/privilege/config.h"
 #include "apps/browser/privileged/origin_predicate.h"
 #include "security/privilege/scope.h"
 #include "apps/browser/start_page.h"
@@ -3213,6 +3214,9 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // bounds?). Completes the pure Privilege-Engine security core.
     DUETOS_BOOT_SELFTEST(duetos::security::privilege::AuditSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::security::privilege::BrokerSelfTest());
+    // Boot-flag config (--allow-claude-system-access[=roots]) — the master
+    // switch + scoped-roots parse; absent => the feature is fully off.
+    DUETOS_BOOT_SELFTEST(duetos::security::privilege::PrivConfigSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG
