@@ -115,6 +115,13 @@ void BrowserInit(duetos::drivers::video::WindowHandle handle);
 /// Handle of the Browser window, or `kWindowInvalid` until Init.
 duetos::drivers::video::WindowHandle BrowserWindow();
 
+/// Render a built-in welcome page through the full pipeline (parse ->
+/// style -> script -> layout -> display list) and show + raise the
+/// Browser window. Network-free; used by the `demo-browser=1` boot
+/// cmdline so a headless screenshot can capture the rendered browser
+/// without injecting a Start-menu click.
+void BrowserOpenDemo();
+
 /// Keyboard handler. Routes by current mode (see header comment).
 /// Returns true iff the key was consumed.
 bool BrowserFeedChar(char c);

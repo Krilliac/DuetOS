@@ -3600,6 +3600,12 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // mouse click. No effect on normal boots.
     const bool demo_calendar = CmdlineMatches(cmdline, "demo-calendar", "1");
 
+    // demo-browser=1 renders the built-in welcome page and shows the
+    // Browser window at boot so a headless screenshot can capture the
+    // rendered web engine without injecting a Start-menu click. No
+    // effect on normal boots.
+    const bool demo_browser = CmdlineMatches(cmdline, "demo-browser", "1");
+
     if (want_tty)
     {
         duetos::drivers::video::SetDisplayMode(duetos::drivers::video::DisplayMode::Tty);
@@ -3620,6 +3626,11 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
             const duetos::u32 ax = (kx + kw > pw) ? (kx + kw - pw) : 0;
             const duetos::u32 ay = (ky > ph) ? ky - ph : 0;
             duetos::drivers::video::CalendarOpen(ax, ay);
+            duetos::drivers::video::DesktopCompose(theme0.desktop_bg, nullptr);
+        }
+        if (demo_browser)
+        {
+            duetos::apps::browser::BrowserOpenDemo();
             duetos::drivers::video::DesktopCompose(theme0.desktop_bg, nullptr);
         }
     }

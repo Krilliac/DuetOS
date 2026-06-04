@@ -3057,6 +3057,58 @@ void BrowserInit(WindowHandle handle)
                                                    });
 }
 
+void BrowserOpenDemo()
+{
+    if (g_state.handle == kWindowInvalid)
+        return;
+
+    // Built-in welcome page. Network-free; exercises the real pipeline
+    // (HTML parse -> CSS cascade -> JS at render time -> layout -> paint)
+    // so a screenshot shows the engine actually working, not empty chrome.
+    static const char kDemoHtml[] =
+        "<html><head><style>"
+        "body { background:#eef2f8; color:#1a2330; margin:16px; }"
+        "h1 { color:#15507a; }"
+        ".card { background:#ffffff; border:2px solid #15507a; padding:10px; margin:10px 0; }"
+        ".ok { color:#1f8a4c; font-weight:bold; }"
+        "a { color:#15507a; }"
+        "</style></head><body>"
+        "<h1>Welcome to DuetOS</h1>"
+        "<p>This page is rendered by the in-kernel web engine: HTML parse, CSS "
+        "cascade, JavaScript, layout and paint &mdash; no external browser.</p>"
+        "<div class=\"card\">"
+        "<p class=\"ok\" id=\"js\">(script did not run)</p>"
+        "<ul>"
+        "<li>CSS selectors with backtracking combinators</li>"
+        "<li>JS try / catch / finally and the dotAll regexp flag</li>"
+        "<li>addEventListener capture phase &amp; once option</li>"
+        "</ul>"
+        "<p><a href=\"http://example.com/\">A sample link</a></p>"
+        "</div>"
+        "<script>document.getElementById('js').textContent = "
+        "'JavaScript executed at render time';</script>"
+        "</body></html>";
+
+    StrCopyCap(g_state.url, sizeof(g_state.url), "duet://welcome");
+    g_state.url_len = StrLen(g_state.url);
+    StatusSet("Welcome to DuetOS  -  rendered by the in-kernel web engine");
+
+    // Layout width = window content width minus the scrollbar gutter,
+    // mirroring the live-fetch render path.
+    duetos::u32 wx = 0, wy = 0, ww = 0, wh = 0;
+    duetos::u32 vw = 640;
+    if (duetos::drivers::video::WindowGetBounds(g_state.handle, &wx, &wy, &ww, &wh))
+    {
+        const duetos::u32 sbw = duetos::drivers::video::kScrollbarWidth;
+        vw = (ww > sbw) ? ww - sbw : ww;
+    }
+
+    RenderPage(kDemoHtml, StrLen(kDemoHtml), "duet://welcome", vw);
+
+    duetos::drivers::video::WindowSetVisible(g_state.handle, true);
+    duetos::drivers::video::WindowRaise(g_state.handle);
+}
+
 void BrowserOnWheel(duetos::i32 dz, duetos::u8 modifiers)
 {
     (void)modifiers;
