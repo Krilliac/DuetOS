@@ -1,5 +1,6 @@
 #include "web/priv_binding.h"
 
+#include "security/privilege/audit.h"
 #include "security/privilege/broker.h"
 #include "web/js/builtins.h"
 #include "web/js/object.h"
@@ -58,18 +59,39 @@ JsValue MakeMethod(Interp& I, JsNativeCall cb, const char* name, void* nctx)
 }
 
 // ---- methods: each marshals to the kernel Privilege Engine validator ----
-// GAP (Task 8): on a yes verdict, EXECUTE the matching cap-gated syscall
-// (fs::fat32 / net / proc) + AuditAppend. Here we return the verdict so the
-// page sees the structured allow/deny.
+const char* CapName(sp::Cap c)
+{
+    switch (c)
+    {
+    case sp::Cap::FsRead:
+        return "fs.read";
+    case sp::Cap::FsWrite:
+        return "fs.write";
+    case sp::Cap::ProcSpawn:
+        return "proc.spawn";
+    case sp::Cap::KernelRead:
+        return "kernel.read";
+    case sp::Cap::Net:
+        return "net";
+    }
+    return "?";
+}
+
+// Audit EVERY brokered call (allow AND deny), tagged with the client identity.
+// GAP: a real ISO-8601 timestamp (via the timekeeper) replaces the placeholder.
+void Audit(PrivBind* b, sp::Cap cap, const char* args, bool ok)
+{
+    const sp::AuditEntry e{"-", b->client, b->origin, 0, CapName(cap), args, ok};
+    sp::AuditAppend(e);
+}
+
 JsValue FsValidate(Interp& I, sp::Cap cap, const JsValue* args, duetos::u32 argc, PrivBind* b)
 {
     if (b == nullptr || b->tab == nullptr)
         return MakeResult(I, false, "EPERM: no context");
     char path[512];
-    if (argc > 0)
-        ValueToChars(args[0], path, sizeof(path));
-    else
-        path[0] = '\0';
+    const duetos::u32 plen = (argc > 0) ? ValueToChars(args[0], path, sizeof(path) - 1) : 0;
+    path[plen] = '\0'; // ValueToChars does not NUL-terminate.
     duetos::u32 byteLen = 0;
     if (cap == sp::Cap::FsWrite && argc > 1)
     {
@@ -79,6 +101,20 @@ JsValue FsValidate(Interp& I, sp::Cap cap, const JsValue* args, duetos::u32 argc
     char canon[512];
     const sp::PrivRequest req{cap, (argc > 0) ? path : nullptr, byteLen};
     const sp::Verdict v = sp::ValidateRequest(*b->tab, b->roots, req, canon, sizeof(canon));
+
+    // Build a bounded args summary (path only — never payload) and audit.
+    char summ[560];
+    duetos::u32 so = 0;
+    for (const char* p = "path="; *p != '\0'; ++p)
+        summ[so++] = *p;
+    for (const char* p = v.ok ? canon : path; *p != '\0' && so + 1 < sizeof(summ); ++p)
+        summ[so++] = *p;
+    summ[so] = '\0';
+    Audit(b, cap, summ, v.ok);
+
+    // GAP (Task 8b): on v.ok, EXECUTE the cap-gated fs syscall (fs::fat32 read/
+    // write of `canon`) AND the symlink-TOCTOU scope re-check after the kernel
+    // resolves the path. Until then the call validates + audits but is inert.
     return MakeResult(I, v.ok, v.error);
 }
 
@@ -89,6 +125,8 @@ JsValue CapValidate(Interp& I, sp::Cap cap, PrivBind* b)
     char canon[8];
     const sp::PrivRequest req{cap, nullptr, 0};
     const sp::Verdict v = sp::ValidateRequest(*b->tab, b->roots, req, canon, sizeof(canon));
+    Audit(b, cap, "-", v.ok);
+    // GAP (Task 8b): on v.ok, EXECUTE the cap-gated proc/net syscall.
     return MakeResult(I, v.ok, v.error);
 }
 

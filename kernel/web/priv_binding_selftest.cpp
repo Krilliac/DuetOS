@@ -140,9 +140,24 @@ void PrivBindingSelfTest()
         fail(8);
         return;
     }
+    // 9: invoking fs.writeFile marshals to the broker (armed + in-scope path =>
+    //    ok) and fires a [priv/audit] line (visible in the boot log). The call
+    //    returns a result object, not undefined.
+    js::JsValue fsv = get(duetos, "fs");
+    js::JsValue wf = get(fsv.as.obj, "writeFile");
+    js::JsFunction* fn = wf.as.fn;
+    js::JsValue cargs[2] = {js::JsValue::Str(js::MakeString(arena, "/home/user/x", 12)),
+                            js::JsValue::Str(js::MakeString(arena, "data", 4))};
+    auto rr = fn->nativeCall(I, js::JsValue::Undefined(), cargs, 2, fn->nativeCtx);
+    js::JsValue res = rr.take();
+    if (StrEq(str(res), "undefined"))
+    {
+        fail(9);
+        return;
+    }
 
     arch::SerialWrite("[priv-binding-selftest] PASS (armed/disarmed gate, origin, scope caps, fs/kernel subs, "
-                      "kernel.read present, installHandler absent)\n");
+                      "kernel.read present, installHandler absent, brokered fs.writeFile invoke+audit)\n");
 }
 
 } // namespace duetos::web::priv
