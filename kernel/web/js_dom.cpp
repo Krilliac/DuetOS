@@ -7,6 +7,7 @@
 #include "web/js/interp.h"
 #include "web/js/lexer.h"
 #include "web/js/object.h"
+#include "web/priv_binding.h"
 
 /*
  * DuetOS — kernel/web: JavaScript ⇄ DOM bindings (see js_dom.h).
@@ -1834,6 +1835,16 @@ bool JsDomContextConsumeDirty(JsDomContext* ctx)
     const bool dirty = ctx->domCtx.domMutated;
     ctx->domCtx.domMutated = false;
     return dirty;
+}
+
+bool JsDomContextInstallPrivBinding(JsDomContext* ctx, priv::PrivBind* bind)
+{
+    if (!ctx || !ctx->live || bind == nullptr)
+        return false;
+    // Install `duetos` + `window.duetos` onto this context's live global env.
+    // PrivBindingInstall carves the host objects out of I.arena (== ctx->jsArena),
+    // so they persist until the next Create (navigation/reload) reclaims the arena.
+    return priv::PrivBindingInstall(ctx->interp, bind);
 }
 
 // JsRunOnDocument is now a thin one-shot adapter over the retained

@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/serial.h"
 #include "debug/probes.h"
+#include "security/privilege/audit.h"
 #include "web/js/object.h" // EnvNew
 
 namespace duetos::web::priv
@@ -156,8 +157,54 @@ void PrivBindingSelfTest()
         return;
     }
 
+    // 10: a DISARMED bind's fs.writeFile FAILS CLOSED — validate denies, no
+    //     mutation, result carries ok:false (gating, not just origin display).
+    //     Runs without a mounted volume: a denied call never touches fs.
+    js::JsValue fsoff = get(dv2.as.obj, "fs");
+    js::JsValue wfoff = get(fsoff.as.obj, "writeFile");
+    js::JsFunction* fnoff = wfoff.as.fn;
+    auto rroff = fnoff->nativeCall(I, js::JsValue::Undefined(), cargs, 2, fnoff->nativeCtx);
+    js::JsValue resoff = rroff.take();
+    if (resoff.type != js::JsType::Object || resoff.as.obj == nullptr)
+    {
+        fail(10);
+        return;
+    }
+    js::JsValue okoff{};
+    if (!js::ObjGet(resoff.as.obj, "ok", 2, okoff) || !StrEq(str(okoff), "false"))
+    {
+        fail(10);
+        return;
+    }
+
+    // 11: the ISO-8601 stamp is well-formed: "YYYY-MM-DDTHH:MM:SSZ" — 20 chars,
+    //     digits + the fixed separators in the right positions. Volume-free.
+    char iso[24];
+    PrivBindingFormatIso8601(iso, sizeof(iso));
+    bool isoOk = Len(iso) == 20 && iso[4] == '-' && iso[7] == '-' && iso[10] == 'T' && iso[13] == ':' &&
+                 iso[16] == ':' && iso[19] == 'Z';
+    for (duetos::u32 i = 0; isoOk && i < 20; ++i)
+    {
+        if (i == 4 || i == 7 || i == 10 || i == 13 || i == 16 || i == 19)
+            continue; // separator positions
+        if (iso[i] < '0' || iso[i] > '9')
+            isoOk = false;
+    }
+    if (!isoOk)
+    {
+        fail(11);
+        return;
+    }
+
+    // 12: AuditAppend no-ops cleanly with no FAT32 volume mounted (the boot
+    //     order may run this before fs is up). It must not crash; the serial
+    //     mirror still fires. We exercise the path to assert it returns.
+    sp::AuditEntry probe{iso, "browser", "https://claude.ai/code", 0, "fs.read", "path=/home/user/x", false};
+    sp::AuditAppend(probe);
+
     arch::SerialWrite("[priv-binding-selftest] PASS (armed/disarmed gate, origin, scope caps, fs/kernel subs, "
-                      "kernel.read present, installHandler absent, brokered fs.writeFile invoke+audit)\n");
+                      "kernel.read present, installHandler absent, brokered fs.writeFile invoke+audit, disarmed "
+                      "fs.write fail-closed, ISO-8601 shape, AuditAppend volume-absent no-op)\n");
 }
 
 } // namespace duetos::web::priv

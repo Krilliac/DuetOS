@@ -302,6 +302,21 @@ void KbdReaderTask(void*)
         duetos::drivers::video::WindowSetModifierState(ev.modifiers);
         bool dirty = false;
 
+        // Ctrl+Shift+Esc — the Privileged-Origin kill switch (spec §13.5).
+        // Highest-priority chord, handled here in the kernel input path (NOT
+        // by the page), so a malicious armed page can never swallow it. It
+        // atomically revokes ALL armed privilege (today: the browser's tab)
+        // and is a no-op when nothing is armed. The `continue` is load-
+        // bearing: the Start-menu toggle below matches `ctrl && !alt && Esc`
+        // WITHOUT excluding shift, so without this earlier handler the chord
+        // would fall through and open the Start menu instead.
+        if (ctrl && shift && !alt && ev.code == kKeyEsc && !ev.is_release)
+        {
+            duetos::apps::browser::BrowserPrivKillSwitch();
+            SerialWrite("[ui] ctrl+shift+esc privileged kill switch\n");
+            continue;
+        }
+
         // Login gate takes absolute priority — while a
         // session isn't open, EVERY keystroke is an auth
         // input. Modifier-held shortcuts (Ctrl+Alt+T, Alt+Tab,

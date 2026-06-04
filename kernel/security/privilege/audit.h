@@ -28,9 +28,10 @@ struct AuditEntry
 // String values are JSON-escaped; control bytes are dropped.
 duetos::u32 FormatAuditLine(const AuditEntry& e, char* out, duetos::u32 cap);
 
-// Emit one audit entry. v0 mirrors to serial (a security audit must ALWAYS be
-// visible). GAP: the cap-gated fs append to audit.log lands with broker
-// execution (audit.log is excluded from the fs scope).
+// Emit one audit entry. Mirrors to serial (a security audit must ALWAYS be
+// visible) AND appends the formatted line to the engine's own /AUDIT.LOG via a
+// direct fat32 call (audit.log is excluded from the fs scope, so it is
+// unreachable by page JS). No-ops gracefully if no FAT32 volume is mounted.
 void AuditAppend(const AuditEntry& e);
 
 void AuditSelfTest();

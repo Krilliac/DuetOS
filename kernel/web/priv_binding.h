@@ -35,6 +35,12 @@ js::JsValue BuildDuetosObject(js::Interp& I, PrivBind* bind);
 // Call only when the tab is armed. Returns false if there is no global env.
 bool PrivBindingInstall(js::Interp& I, PrivBind* bind);
 
+// Test-only hook: format the current wall clock as "YYYY-MM-DDTHH:MM:SSZ" into
+// `out` (cap must be >= 21). Exposed solely so the boot self-test can assert the
+// stamp's shape without a mounted FAT32 volume; production code uses the
+// internal formatter directly.
+void PrivBindingFormatIso8601(char* out, duetos::u32 cap);
+
 void PrivBindingSelfTest();
 
 } // namespace duetos::web::priv

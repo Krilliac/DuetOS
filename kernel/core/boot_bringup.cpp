@@ -3200,6 +3200,18 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // new-tab StartPage model — browser shell redesign, Phase 1.
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::OmniboxSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::StartPageSelfTest());
+    // Privileged-Origin Mode: parse the REAL kernel cmdline into the single
+    // boot config the Privilege Engine reads (PrivConfigCurrent()). Without the
+    // --allow-claude-system-access flag this stays available=false, so the
+    // browser never shows the arm affordance and no binding is ever installed
+    // (the feature ships dark unless the operator opts in at boot).
+    {
+        duetos::security::privilege::PrivConfig priv_cfg;
+        duetos::security::privilege::PrivConfigParse(FindBootCmdline(multiboot_info), priv_cfg);
+        duetos::security::privilege::PrivConfigSetCurrent(priv_cfg);
+        arch::SerialWrite(priv_cfg.available ? "[priv] config: enabled (--allow-claude-system-access)\n"
+                                             : "[priv] config: disabled\n");
+    }
     // Privileged-Origin Mode (spec §13) security core — the exact-origin +
     // SPKI-pin + no-redirect predicate that gates arming claude.ai/code.
     DUETOS_BOOT_SELFTEST(duetos::apps::browser::priv::OriginPredicateSelfTest());
@@ -3221,6 +3233,11 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
     // window.duetos.* JS host binding (Client A adapter onto the engine) —
     // host-object tree + per-method marshal to the broker validator.
     DUETOS_BOOT_SELFTEST(duetos::web::priv::PrivBindingSelfTest());
+    // Privileged-Origin armed-state chrome (crimson omnibox/shield/ribbon/tab/
+    // frame) + arm/disarm + Ctrl+Shift+Esc kill switch + per-navigation
+    // lifetime — the browser-side Client-A integration. Pixels need VBox; this
+    // asserts the arm/disarm/kill/affordance LOGIC headlessly.
+    DUETOS_BOOT_SELFTEST(duetos::apps::browser::BrowserPrivChromeSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::web::PngSelfTest());
 
     // Baseline-JPEG decoder self-test (kernel/web). Sibling of the PNG

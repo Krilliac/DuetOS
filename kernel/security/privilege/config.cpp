@@ -57,6 +57,37 @@ void ParseRoots(PrivConfig& cfg, const char* p, u32 len, u32& storeUsed)
 }
 } // namespace
 
+namespace
+{
+PrivConfig g_current; // boot-time config; default {available=false} until wired.
+} // namespace
+
+const PrivConfig& PrivConfigCurrent()
+{
+    return g_current;
+}
+
+void PrivConfigSetCurrent(const PrivConfig& cfg)
+{
+    // NOTE: PrivConfig.roots.root[] point INTO storage[]; a by-value copy would
+    // leave them aimed at the source's storage (dangling once the source — a
+    // boot-time stack temporary — returns). Copy the bytes, then re-base each
+    // root pointer by its offset into g_current.storage.
+    g_current.available = cfg.available;
+    g_current.roots.count = 0;
+    for (u32 i = 0; i < sizeof(g_current.storage); ++i)
+        g_current.storage[i] = cfg.storage[i];
+    for (u32 i = 0; i < cfg.roots.count && i < 4; ++i)
+    {
+        if (cfg.roots.root[i] == nullptr)
+            continue;
+        const duetos::uptr off =
+            reinterpret_cast<duetos::uptr>(cfg.roots.root[i]) - reinterpret_cast<duetos::uptr>(&cfg.storage[0]);
+        if (off < sizeof(g_current.storage))
+            g_current.roots.root[g_current.roots.count++] = &g_current.storage[off];
+    }
+}
+
 void PrivConfigParse(const char* cmdline, PrivConfig& cfg)
 {
     cfg.available = false;

@@ -29,6 +29,9 @@
 #include "apps/browser/start_page.h"
 #include "apps/browser/tab_strip.h"
 #include "apps/browser/tokens.h"
+#include "security/privilege/arm_state.h"
+#include "security/privilege/config.h"
+#include "security/privilege/scope.h"
 #include "web/css.h"
 #include "web/dom.h"
 #include "web/html.h"
@@ -37,6 +40,7 @@
 #include "web/layout.h"
 #include "web/paint.h"
 #include "web/png.h"
+#include "web/priv_binding.h"
 
 namespace duetos::apps::browser
 {
@@ -298,6 +302,34 @@ DockSurface g_assistant;
 DockSurface g_library;
 StartPage g_startpage;
 constexpr u32 kNavBtnCount = 7U;
+
+// ---------------------------------------------------------------
+// Privileged-Origin Mode (spec §13). The browser owns ONE per-tab arm
+// state for the single live page (Phase 1 renders one tab at a time).
+// Arming is gated on PrivConfig.available && the live navigation being
+// the privileged origin; the armed chrome (crimson omnibox, shield
+// glyph, warning ribbon, red tab accent + content border) is the sole
+// trust signal because the page can never draw chrome. A reconfirm
+// dialog (g_priv_confirm) sits between the arm affordance and Arm().
+// ---------------------------------------------------------------
+duetos::security::privilege::PrivTab g_priv{};
+// The Client-A (browser) bind handed to the page's JS context on arm. Its
+// back-pointers (tab => g_priv; roots => the persistent boot config) outlive
+// the JsDomContext, so the window.duetos.* host objects stay valid for the
+// context's lifetime. Re-initialised on every PrivArm.
+duetos::web::priv::PrivBind g_priv_bind{};
+// Reconfirm dialog gate: true while the modal "really arm?" prompt is up.
+// The dialog is chrome-drawn + chrome-handled (the page cannot suppress or
+// satisfy it).
+constinit bool g_priv_confirm = false;
+// Full-width warning ribbon height, painted under the toolbar ONLY while
+// armed (no layout shift when disarmed — chrome is byte-for-byte as today).
+constexpr u32 kPrivRibbonH = 22U;
+// Forward decls: the armed-chrome predicate + ribbon-height helper are defined
+// further down (next to the draw code) but referenced by the layout/scroll/
+// hit-test math above it (top-band reserves include the ribbon while armed).
+bool PrivShouldRenderArmed();
+u32 PrivRibbonH();
 
 using duetos::drivers::video::ChromeTextRole;
 using duetos::drivers::video::ChromeTextWeight;
@@ -2372,8 +2404,10 @@ void DrawBody(u32 cx, u32 cy, u32 cw, u32 ch, u32 fg, u32 bg)
     // Reserve Pass D toolbar + URL bar + status row at the top and the
     // AppLabel footer at the bottom. The rendered page sits in the
     // middle band, painted from the display list at the live pixel
-    // scroll offset.
-    const u32 top_reserved = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + 2;
+    // scroll offset. PrivRibbonH() adds the armed-state warning ribbon
+    // band (0 when disarmed, so the layout is unchanged off the
+    // privileged path).
+    const u32 top_reserved = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + PrivRibbonH() + 2;
     const u32 bot_reserved = kFooterH + 2;
     if (ch < top_reserved + bot_reserved)
         return;
@@ -2515,6 +2549,139 @@ void DrawList(u32 cx, u32 cy, u32 cw, u32 ch, const char* title, char list[][kUr
     }
 }
 
+// ---------------------------------------------------------------
+// Privileged-Origin Mode — browser-side logic (spec §13).
+//
+// The arm/disarm decisions live here; the chrome below renders them.
+// All of this runs in kernel-owned browser chrome, never the page —
+// that unspoofability is the whole point of the mode.
+// ---------------------------------------------------------------
+
+// True iff `url` lexically satisfies the privileged origin:
+// https://claude.ai/code (exact scheme + host, path begins "/code").
+//
+// GAP: SPKI-pin + no-redirect — origin_predicate.h's IsPrivilegedOrigin
+// also requires `leafPin` matches the embedded claude.ai pin AND the page
+// was NOT reached via any 3xx/client redirect. The browser fetch path
+// (DoFetch/FetchUrl) does not yet surface the negotiated server-leaf SPKI
+// hash or a "reached-via-redirect" flag up to the chrome, so this check
+// covers only the scheme/host/path leg. Tighten to a full OriginCheck (and
+// route it through IsPrivilegedOrigin) once net::tls_socket exposes the
+// leaf SPKI + net::http exposes the redirect-observed flag. Until then the
+// kernel cap-gates (Task 8) remain the real enforcement; arming only skips
+// the interactive prompt, never the gate.
+bool UrlIsPrivilegedOrigin(const char* url)
+{
+    const auto p = ParseUrl(url);
+    if (!p.ok || !p.scheme_https)
+        return false;
+    if (!StrEqI(p.host, "claude.ai"))
+        return false;
+    // Path must begin with "/code" (exactly, or "/code/..."): a literal
+    // prefix match — ParseUrl already strips the scheme/host.
+    const char* path = p.path;
+    if (path[0] != '/' || path[1] != 'c' || path[2] != 'o' || path[3] != 'd' || path[4] != 'e')
+        return false;
+    const char nxt = path[5];
+    return nxt == '\0' || nxt == '/' || nxt == '?' || nxt == '#';
+}
+
+// The CURRENT live page's privileged-origin status (the rendered URL).
+bool CurrentUrlIsPrivilegedOrigin()
+{
+    return UrlIsPrivilegedOrigin(g_state.url);
+}
+
+// Chrome predicate: should the chrome render its crimson armed state?
+// (Tab armed — the arm-state machine is the single source of truth.)
+bool PrivShouldRenderArmed()
+{
+    return g_priv.IsArmed();
+}
+
+// Pure affordance predicate (spec §13.5): the arm affordance is shown ONLY
+// when the feature is available (boot flag set), the live page is the
+// privileged origin, and the tab is not already armed. Factored pure so the
+// boot self-test can assert the truth table (esp. available=false => false,
+// the "feature fully off => no privileged UI" rule) without mutating globals.
+bool PrivAffordanceVisibleFor(bool available, bool armed, bool originPriv)
+{
+    return available && !armed && originPriv;
+}
+
+// Chrome predicate: is the arm affordance shown? Wires the live globals into
+// the pure predicate above.
+bool PrivArmAffordanceVisible()
+{
+    return PrivAffordanceVisibleFor(duetos::security::privilege::PrivConfigCurrent().available, g_priv.IsArmed(),
+                                    CurrentUrlIsPrivilegedOrigin());
+}
+
+// Ribbon height: reserved ONLY while armed, so a disarmed tab's chrome
+// layout is unchanged from the pre-privilege build (no shift).
+u32 PrivRibbonH()
+{
+    return PrivShouldRenderArmed() ? kPrivRibbonH : 0U;
+}
+
+// Tear down the page-side privileged JS binding. The binding's host objects
+// (window.duetos.*) live in the JsDomContext's JS arena and are reclaimed when
+// the next JsDomContextCreate rebuilds the context — so the sandboxed reload
+// PrivDisarm performs is what physically removes them. Crucially, PrivDisarm
+// clears the cap scope BEFORE this, so even in the brief window before the
+// reload lands, every window.duetos.* call fail-closes at the broker (empty
+// scope => "EPERM: not armed"). The engine's env has no "undefine" primitive,
+// so the reload IS the teardown; this stays a deliberate no-op hook.
+void PrivBindingTeardownCurrent() {}
+
+// Arm the live tab: bind the default capability scope and install the
+// page-side window.duetos.* binding on the live JS context. Gated by the
+// caller (the reconfirm-confirm path) on PrivArmAffordanceVisible().
+void PrivArm()
+{
+    g_priv.Arm(duetos::security::privilege::DefaultArmScope());
+    // Build the bind from the live arm-state tab + the persistent boot config
+    // roots, then install window.duetos.* onto the page's JS global env. The
+    // kernel cap gates (Task 8) re-check every call independently, so the
+    // binding is a convenience surface, never the enforcement boundary.
+    g_priv_bind = duetos::web::priv::PrivBind{};
+    g_priv_bind.tab = &g_priv;
+    g_priv_bind.roots = duetos::security::privilege::PrivConfigCurrent().roots;
+    if (g_state.page_ctx != nullptr && duetos::web::JsDomContextInstallPrivBinding(g_state.page_ctx, &g_priv_bind))
+    {
+        arch::SerialWrite("[priv] armed: https://claude.ai/code (window.duetos.* installed)\n");
+    }
+    else
+    {
+        // GAP: the active page has no live JS context (a script-less or failed
+        // render leaves page_ctx null), so there is no global env to install
+        // onto — window.duetos.* appears on the next render that builds one.
+        // The arm state + crimson chrome are live and the cap gates enforce
+        // regardless, so this degraded case grants nothing and hides nothing.
+        arch::SerialWrite("[priv] armed: https://claude.ai/code (no live JS context — binding deferred)\n");
+    }
+}
+
+// Forward decl: Disarm re-fetches the page sandboxed, which lives below.
+void Reload();
+
+// Disarm the live tab: drop the cap scope, tear down the binding, and
+// re-render the page sandboxed. Instantaneous + total.
+void PrivDisarm()
+{
+    if (!g_priv.IsArmed())
+        return;
+    g_priv.Disarm();
+    g_priv_confirm = false;
+    PrivBindingTeardownCurrent();
+    // Re-render sandboxed: re-fetch the current page so the rebuilt JS
+    // context carries no privileged binding. Any in-flight privileged call
+    // is aborted by the cap scope being cleared above (the broker re-checks
+    // PrivTab.scope on every call — an empty scope fails closed).
+    arch::SerialWrite("[priv] disarmed (kill/ribbon): re-rendering sandboxed\n");
+    Reload();
+}
+
 // Paint the Chrome-style tab strip in the top band [cy, cy+kTabStripH].
 // Active tab carries a teal top-accent; each tab a dual-accent favicon
 // chip (teal native / amber doc) + title. New-tab '+' at the end.
@@ -2527,12 +2694,17 @@ void DrawTabStrip(u32 cx, u32 cy, u32 cw)
     {
         const Rect t = g_tabs.TabRect(i, strip);
         const bool on = (i == g_tabs.active);
+        // Privileged-Origin armed: the ACTIVE tab (the one live page) wears a
+        // crimson top-accent instead of the teal one — an unspoofable signal.
+        const bool armedTab = on && PrivShouldRenderArmed();
         const u32 tabbg = on ? tokens::kPanelHi : tokens::kPanel;
         const u32 tw = (t.w > 2U) ? t.w - 2U : t.w;
         duetos::drivers::video::FramebufferFillRoundRect(t.x, t.y + 4U, tw, t.h - 4U, tokens::kRadTab, tabbg);
         if (on)
-            FramebufferFillRect(t.x, t.y + 4U, tw, 2U, tokens::kAccentTeal);
-        const u32 chip = (g_tabs.tabs[i].accent == TabAccent::Doc) ? tokens::kAccentAmber : tokens::kAccentTeal;
+            FramebufferFillRect(t.x, t.y + 4U, tw, 2U, armedTab ? tokens::kAccentDanger : tokens::kAccentTeal);
+        const u32 chip = armedTab
+                             ? tokens::kAccentDanger
+                             : ((g_tabs.tabs[i].accent == TabAccent::Doc) ? tokens::kAccentAmber : tokens::kAccentTeal);
         duetos::drivers::video::FramebufferFillRoundRect(t.x + 8U, chipY, 8U, 8U, 2U, chip);
         FramebufferDrawString(t.x + 20U, chipY, g_tabs.tabs[i].title, on ? 0x00E3E9EFU : tokens::kInkMute, tabbg);
     }
@@ -2540,13 +2712,30 @@ void DrawTabStrip(u32 cx, u32 cy, u32 cw)
     FramebufferDrawString(nt.x + 8U, chipY, "+", tokens::kInkMute, tokens::kCanvas);
 }
 
+// The arm affordance chip — a small "[Arm]" button at the right end of the
+// omnibox pill, shown ONLY when PrivArmAffordanceVisible(). Draw + hit-test
+// derive geometry from this one helper so they never disagree.
+Rect PrivArmChipRect(const Rect& pill, u32 pillY, u32 pillH)
+{
+    constexpr u32 kChipW = 46U;
+    const u32 cx = (pill.x + pill.w > kChipW + 4U) ? pill.x + pill.w - kChipW - 4U : pill.x;
+    return Rect{cx, pillY + 3U, kChipW, (pillH > 6U) ? pillH - 6U : pillH};
+}
+
 // New unified toolbar: nav (back/fwd/reload) + omnibox pill (URL/search) +
 // ✦ Ask AI + ▤ Library + ⋮ menu, drawn in the band of height kToolbarH +
 // kUrlBarH + kStatusRowH (replacing the old toolbar + URL bar + status row).
 // GAP: ASCII glyph fallbacks ('<' '>' '@' '*' 'L' ':') until the real chrome
 // glyph set (incl. the ✦ spark) lands.
+//
+// Privileged-Origin armed (spec §13.5): the omnibox pill is tinted crimson
+// (tokens::kAccentDanger), the lock indicator becomes a red shield ("[!]"
+// ASCII fallback), and the "[Arm]" affordance is suppressed (the ribbon's
+// "[Disarm]" takes over). When NOT armed the toolbar is byte-for-byte as
+// before, save for the "[Arm]" chip when on the privileged origin.
 void DrawToolbar(u32 cx, u32 cy, u32 cw)
 {
+    const bool armed = PrivShouldRenderArmed();
     const u32 H = kToolbarH + kUrlBarH + kStatusRowH;
     FramebufferFillRect(cx, cy, cw, H, tokens::kPanelHi);
     FramebufferFillRect(cx, cy + H - 1U, cw, 1U, tokens::kBorder);
@@ -2561,13 +2750,34 @@ void DrawToolbar(u32 cx, u32 cy, u32 cw)
     const u32 pillH = 26U;
     const u32 pillY = cy + (H - pillH) / 2U;
     const Rect pill = g_omni.PillRect(tb);
-    duetos::drivers::video::FramebufferFillRoundRect(pill.x, pillY, pill.w, pillH, tokens::kRadPill, tokens::kCanvas);
+    // Armed: the pill is filled crimson (kAccentDanger), so its text/lock sit
+    // on the danger field; otherwise the usual canvas-dark pill.
+    const u32 pillBg = armed ? tokens::kAccentDanger : tokens::kCanvas;
+    duetos::drivers::video::FramebufferFillRoundRect(pill.x, pillY, pill.w, pillH, tokens::kRadPill, pillBg);
+    // Lock indicator: red shield ("[!]") when armed, else the usual nothing —
+    // the URL text starts after the indicator slot.
+    u32 textX = pill.x + 12U;
+    if (armed)
+    {
+        FramebufferDrawString(pill.x + 8U, pillY + pillH / 2U - 4U, "[!]", 0x00FFFFFFU, pillBg);
+        textX = pill.x + 36U;
+    }
     const bool hasUrl = (g_state.url[0] != '\0');
-    FramebufferDrawString(pill.x + 12U, pillY + pillH / 2U - 4U, hasUrl ? g_state.url : "Ask anything, or type a URL",
-                          hasUrl ? tokens::kInk : tokens::kInkDim, tokens::kCanvas);
+    const u32 urlFg = armed ? 0x00FFFFFFU : (hasUrl ? tokens::kInk : tokens::kInkDim);
+    FramebufferDrawString(textX, pillY + pillH / 2U - 4U, hasUrl ? g_state.url : "Ask anything, or type a URL", urlFg,
+                          pillBg);
     if (g_state.mode == Mode::UrlEdit)
-        FramebufferDrawString(pill.x + 12U + StrLen(g_state.url) * 8U, pillY + pillH / 2U - 4U, "_",
-                              tokens::kAccentTeal, tokens::kCanvas);
+        FramebufferDrawString(textX + StrLen(g_state.url) * 8U, pillY + pillH / 2U - 4U, "_",
+                              armed ? 0x00FFFFFFU : tokens::kAccentTeal, pillBg);
+    // Arm affordance: a "[Arm]" chip inside the pill's right end, only when
+    // the feature is available, on the privileged origin, and not yet armed.
+    if (PrivArmAffordanceVisible())
+    {
+        const Rect chip = PrivArmChipRect(pill, pillY, pillH);
+        duetos::drivers::video::FramebufferFillRoundRect(chip.x, chip.y, chip.w, chip.h, tokens::kRadBtn,
+                                                         tokens::kAccentDanger);
+        FramebufferDrawString(chip.x + 6U, chip.y + chip.h / 2U - 4U, "Arm", 0x00FFFFFFU, tokens::kAccentDanger);
+    }
     const Rect ask = g_omni.AskRect(tb);
     duetos::drivers::video::FramebufferFillRoundRect(ask.x, pillY, ask.w, pillH, tokens::kRadPill, tokens::kPanel);
     FramebufferDrawString(ask.x + 8U, pillY + pillH / 2U - 4U, "* Ask", tokens::kAccentTeal, tokens::kPanel);
@@ -2575,6 +2785,75 @@ void DrawToolbar(u32 cx, u32 cy, u32 cw)
     FramebufferDrawString(lib.x + 6U, ty, "L", tokens::kAccentTeal, tokens::kPanelHi);
     const Rect mn = g_omni.MenuRect(tb);
     FramebufferDrawString(mn.x + 7U, ty, ":", tokens::kInkMute, tokens::kPanelHi);
+}
+
+// Draw the full-width warning ribbon under the toolbar while armed, plus the
+// reconfirm dialog when up. Both are chrome-drawn — the page cannot touch
+// either. `cy` is the top of the ribbon band (directly below the toolbar);
+// returns nothing (the band height is PrivRibbonH()).
+//
+// Ribbon: "[!] PRIVILEGED SYSTEM ACCESS ARMED — claude.ai/code   [Disarm]"
+// (ASCII "[!]" fallback for the ⚠). The "[Disarm]" hit-rect is the right end.
+Rect PrivDisarmBtnRect(u32 cx, u32 cy, u32 cw)
+{
+    constexpr u32 kBtnW = 72U;
+    const u32 bx = (cw > kBtnW + 8U) ? cx + cw - kBtnW - 8U : cx;
+    const u32 by = cy + (kPrivRibbonH > 16U ? (kPrivRibbonH - 16U) / 2U : 0U);
+    return Rect{bx, by, kBtnW, 16U};
+}
+
+void DrawPrivRibbon(u32 cx, u32 cy, u32 cw)
+{
+    FramebufferFillRect(cx, cy, cw, kPrivRibbonH, tokens::kAccentDanger);
+    FramebufferDrawString(cx + 10U, cy + kPrivRibbonH / 2U - 4U, "[!] PRIVILEGED SYSTEM ACCESS ARMED - claude.ai/code",
+                          0x00FFFFFFU, tokens::kAccentDanger);
+    const Rect db = PrivDisarmBtnRect(cx, cy, cw);
+    duetos::drivers::video::FramebufferFillRoundRect(db.x, db.y, db.w, db.h, tokens::kRadBtn, 0x00FFFFFFU);
+    FramebufferDrawString(db.x + 8U, db.y + db.h / 2U - 4U, "Disarm", tokens::kAccentDanger, 0x00FFFFFFU);
+}
+
+// Reconfirm dialog geometry (centred over the content). Draw + hit-test
+// share these. Returns the dialog rect; the Confirm / Cancel buttons sit in
+// its lower half.
+Rect PrivConfirmDialogRect(const Rect& content)
+{
+    constexpr u32 kDlgW = 420U;
+    constexpr u32 kDlgH = 130U;
+    const u32 dx = content.x + ((content.w > kDlgW) ? (content.w - kDlgW) / 2U : 0U);
+    const u32 dy = content.y + ((content.h > kDlgH) ? (content.h - kDlgH) / 3U : 0U);
+    return Rect{dx, dy, kDlgW, kDlgH};
+}
+Rect PrivConfirmYesRect(const Rect& dlg)
+{
+    return Rect{dlg.x + 24U, dlg.y + dlg.h - 40U, 150U, 26U};
+}
+Rect PrivConfirmNoRect(const Rect& dlg)
+{
+    return Rect{dlg.x + dlg.w - 150U - 24U, dlg.y + dlg.h - 40U, 150U, 26U};
+}
+
+void DrawPrivConfirm(const Rect& content)
+{
+    if (!g_priv_confirm)
+        return;
+    // Dim the content behind the modal (a flat scrim — the painter has no
+    // alpha-blend primitive in this path).
+    FramebufferFillRect(content.x, content.y, content.w, content.h, 0x00050709U);
+    const Rect d = PrivConfirmDialogRect(content);
+    duetos::drivers::video::FramebufferFillRoundRect(d.x, d.y, d.w, d.h, tokens::kRadPanel, tokens::kPanel);
+    FramebufferFillRect(d.x, d.y, d.w, 2U, tokens::kAccentDanger); // danger top-accent
+    FramebufferDrawString(d.x + 16U, d.y + 14U, "Arm privileged system access?", tokens::kInk, tokens::kPanel);
+    FramebufferDrawString(d.x + 16U, d.y + 34U, "claude.ai/code will gain scoped fs/proc/kernel/net", tokens::kInkMute,
+                          tokens::kPanel);
+    FramebufferDrawString(d.x + 16U, d.y + 48U, "via kernel cap gates. Ctrl+Shift+Esc revokes instantly.",
+                          tokens::kInkMute, tokens::kPanel);
+    const Rect yes = PrivConfirmYesRect(d);
+    duetos::drivers::video::FramebufferFillRoundRect(yes.x, yes.y, yes.w, yes.h, tokens::kRadBtn,
+                                                     tokens::kAccentDanger);
+    FramebufferDrawString(yes.x + 10U, yes.y + yes.h / 2U - 4U, "Arm access", 0x00FFFFFFU, tokens::kAccentDanger);
+    const Rect no = PrivConfirmNoRect(d);
+    duetos::drivers::video::FramebufferFillRoundRect(no.x, no.y, no.w, no.h, tokens::kRadBtn, tokens::kPanelHi);
+    FramebufferDrawString(no.x + 10U, no.y + no.h / 2U - 4U, "Cancel", tokens::kInk, tokens::kPanelHi);
 }
 
 // The DuetOS start page shows when the active tab has no rendered page
@@ -2669,8 +2948,16 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     DrawToolbar(cx, cy + kTabStripH, cw);
     RebindBrowserBounds(cx, cy + kTabStripH, cw, (ch > kTabStripH) ? ch - kTabStripH : 0U);
 
-    // Body / modal-list paint area starts BELOW the tab strip + toolbar band.
-    const u32 top_band = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH;
+    // Privileged-Origin armed: the full-width crimson warning ribbon sits
+    // directly under the toolbar. Drawn by chrome — the page can never
+    // suppress it. PrivRibbonH() == kPrivRibbonH while armed, else 0.
+    const u32 ribbon_y = cy + kTabStripH + kToolbarH + kUrlBarH + kStatusRowH;
+    if (PrivShouldRenderArmed())
+        DrawPrivRibbon(cx, ribbon_y, cw);
+
+    // Body / modal-list paint area starts BELOW the tab strip + toolbar band
+    // (+ the armed ribbon band when present).
+    const u32 top_band = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + PrivRibbonH();
 
     if (g_state.fetch_in_flight)
     {
@@ -2702,12 +2989,45 @@ void DrawFn(u32 cx, u32 cy, u32 cw, u32 ch, void* /*cookie*/)
     const Rect body{cx, cy + top_band, cw, (ch > top_band) ? ch - top_band : 0U};
     DrawDockSurface(g_assistant, "* Assistant", body);
     DrawDockSurface(g_library, "L Library", body);
+
+    // Privileged-Origin armed: a crimson border around the content frame —
+    // a second unspoofable cue. Drawn after the content so it sits on top.
+    if (PrivShouldRenderArmed() && body.w > 4U && body.h > 4U)
+    {
+        FramebufferFillRect(body.x, body.y, body.w, 2U, tokens::kAccentDanger);
+        FramebufferFillRect(body.x, body.y + body.h - 2U, body.w, 2U, tokens::kAccentDanger);
+        FramebufferFillRect(body.x, body.y, 2U, body.h, tokens::kAccentDanger);
+        FramebufferFillRect(body.x + body.w - 2U, body.y, 2U, body.h, tokens::kAccentDanger);
+    }
+
+    // Reconfirm dialog (chrome-drawn, chrome-handled) sits on top of
+    // everything — the page can neither suppress nor satisfy it.
+    DrawPrivConfirm(body);
 }
 
 void StartFetch(const char* url)
 {
     if (g_state.fetch_in_flight)
         return;
+    // Per-navigation privilege lifetime (spec §13.10): EVERY navigation
+    // funnels through here (URL submit, link click, back/forward, reload,
+    // history/bookmark load, tab select, start-page tile). If the target
+    // leaves the privileged origin, privilege auto-disarms before the fetch
+    // — privilege NEVER survives leaving claude.ai/code. A reload onto the
+    // SAME privileged origin keeps the tab armed (the broker re-checks the
+    // live page on each call regardless).
+    const bool still_priv = UrlIsPrivilegedOrigin(url);
+    if (g_priv.IsArmed() && !still_priv)
+    {
+        g_priv.OnNavigation(false);
+        PrivBindingTeardownCurrent();
+        g_priv_confirm = false;
+        arch::SerialWrite("[priv] auto-disarm on navigation off privileged origin\n");
+    }
+    else
+    {
+        g_priv.OnNavigation(still_priv);
+    }
     StrCopyCap(g_state.fetch_url, kUrlCap, url);
     g_state.fetch_in_flight = true;
     sched::SchedCreate(FetchWorker, g_state.fetch_url, "browser-fetch");
@@ -2765,7 +3085,7 @@ u32 ContentViewHeight()
     if (wh <= kTitleH)
         return 0;
     const u32 ch = wh - kTitleH;
-    const u32 top_reserved = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + 2;
+    const u32 top_reserved = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + PrivRibbonH() + 2;
     const u32 bot_reserved = kFooterH + 2;
     if (ch < top_reserved + bot_reserved)
         return 0;
@@ -2822,7 +3142,7 @@ bool ScreenToDoc(u32 screen_cx, u32 screen_cy, i32* out_doc_x, i32* out_doc_y)
         return false;
     const u32 client_y = wy + kTitleH;
     const u32 client_h = wh - kTitleH;
-    const u32 top_reserved = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + 2;
+    const u32 top_reserved = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + PrivRibbonH() + 2;
     const u32 bot_reserved = kFooterH + 2;
     if (client_h < top_reserved + bot_reserved)
         return false;
@@ -3298,6 +3618,80 @@ void BrowserNavForward()
     NavigateBackForward(true);
 }
 
+// Privileged-Origin kill switch (spec §13.5). Routed at HIGHEST priority by
+// the global key reader (Ctrl+Shift+Esc) BEFORE any per-app / per-page key
+// dispatch, so a malicious page can never swallow the chord. Revokes ALL
+// armed privilege the browser owns and re-renders sandboxed. Safe to call
+// unconditionally — a no-op when nothing is armed.
+//
+// GAP: "all clients" = the browser's tabs only (Phase 1 has ONE live tab,
+// g_priv). The architecture intends an extensible revoke-all surface; when a
+// second privileged client lands (e.g. the headless self-dev agent), it must
+// register with this same kill switch and be revoked here too. Today there is
+// no client registry, so this disarms the single browser tab.
+void BrowserPrivKillSwitch()
+{
+    g_priv_confirm = false; // also cancel any pending reconfirm dialog
+    PrivDisarm();
+}
+
+// Chrome predicate bridge (spec §13.5) — true iff the armed crimson chrome
+// should render. Public so the boot self-test can assert the predicate; the
+// chrome paint path reads the anon-namespace PrivShouldRenderArmed() directly.
+bool BrowserPrivShouldRenderArmed()
+{
+    return PrivShouldRenderArmed();
+}
+
+// ---- Privileged-Origin chrome self-test bridges (boot self-test only) ----
+// These let the separate priv_chrome_selftest TU drive + inspect the
+// file-static arm state + config-gated affordance predicate WITHOUT exposing
+// the internals. Each one is a thin, side-effect-bounded shim; the self-test
+// arms via the SAME PrivArm() the real reconfirm-confirm path uses, and
+// restores g_priv on exit so runtime state is untouched.
+namespace priv_chrome_test
+{
+void Arm()
+{
+    PrivArm();
+}
+void Disarm()
+{
+    g_priv.Disarm(); // direct (no reload) — the test owns no history/page.
+}
+bool IsArmed()
+{
+    return g_priv.IsArmed();
+}
+void KillSwitchNoReload()
+{
+    // Mirror BrowserPrivKillSwitch's revoke WITHOUT the sandboxed Reload()
+    // (the test has no rendered page / history to reload). Asserts the
+    // chord's Armed->Disarmed transition in isolation.
+    g_priv_confirm = false;
+    if (g_priv.IsArmed())
+    {
+        g_priv.Disarm();
+        PrivBindingTeardownCurrent();
+    }
+}
+// Run OnNavigation against the LIVE g_priv exactly as StartFetch does.
+void OnNavigation(bool stillPriv)
+{
+    g_priv.OnNavigation(stillPriv);
+}
+// The pure affordance truth table (available && !armed && originPriv).
+bool AffordanceVisibleFor(bool available, bool armed, bool originPriv)
+{
+    return PrivAffordanceVisibleFor(available, armed, originPriv);
+}
+// The lexical privileged-origin check (scheme/host/path leg of §13).
+bool UrlIsPrivileged(const char* url)
+{
+    return UrlIsPrivilegedOrigin(url);
+}
+} // namespace priv_chrome_test
+
 bool BrowserOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
 {
     (void)sx;
@@ -3318,7 +3712,7 @@ bool BrowserOnDoubleClick(duetos::u32 sx, duetos::u32 sy)
     constexpr u32 kTitle = 22;
     constexpr u32 kBorder = 2;
     const u32 client_y = wy + kTitle + kBorder;
-    const u32 top_band = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH;
+    const u32 top_band = kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + PrivRibbonH();
     const u32 list_y0 = client_y + top_band + 4 + kRowH * 2;
     if (sy < list_y0)
         return false;
@@ -4485,6 +4879,15 @@ restore:
 // Drop the rendered page so the start page shows (a fresh / blank tab).
 void ShowBlankTab()
 {
+    // A blank tab is NOT the privileged origin — leaving a page this way
+    // (new tab / tab-select fallback) must auto-disarm just like a fetch
+    // navigation does (the start page must never inherit armed privilege).
+    if (g_priv.IsArmed())
+    {
+        g_priv.OnNavigation(false);
+        PrivBindingTeardownCurrent();
+        g_priv_confirm = false;
+    }
     g_state.render_ready = false;
     g_state.render_dl = nullptr;
     g_state.render_total_h = 0;
@@ -4527,6 +4930,27 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
     }
     if (press_edge && inside_window)
     {
+        // Reconfirm dialog is MODAL + chrome-owned: it steals every press
+        // while up. Yes => arm; anything else (Cancel or outside) => dismiss.
+        // The page never sees these clicks.
+        if (g_priv_confirm)
+        {
+            const u32 mb_top = client_y + kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + PrivRibbonH();
+            const Rect content{wx, mb_top, ww, (wy + wh > mb_top) ? wy + wh - mb_top : 0U};
+            const Rect d = PrivConfirmDialogRect(content);
+            const Rect yes = PrivConfirmYesRect(d);
+            if (yes.Contains(cx, cy))
+            {
+                g_priv_confirm = false;
+                if (PrivArmAffordanceVisible()) // re-check at confirm time
+                    PrivArm();
+            }
+            else
+            {
+                g_priv_confirm = false; // Cancel or click-away dismisses.
+            }
+            return;
+        }
         // Tab strip band (top): route to the tab model before the page/chrome.
         if (cy < client_y + kTabStripH)
         {
@@ -4560,8 +4984,22 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
         if (cy < tb_top + tb_h)
         {
             const Rect tb{wx, tb_top, ww, tb_h};
-            const u32 body_top = tb_top + tb_h;
+            const u32 body_top = tb_top + tb_h + PrivRibbonH();
             const Rect body{wx, body_top, ww, (wy + wh > body_top) ? wy + wh - body_top : 0U};
+            // Arm affordance: the "[Arm]" chip overlays the pill's right end.
+            // Check it before the omnibox hit-test (it sits inside the Pill
+            // region) — a press opens the reconfirm dialog, never arms directly.
+            if (PrivArmAffordanceVisible())
+            {
+                const u32 pillH = 26U;
+                const u32 pillY = tb_top + (tb_h - pillH) / 2U;
+                const Rect chip = PrivArmChipRect(g_omni.PillRect(tb), pillY, pillH);
+                if (chip.Contains(cx, cy))
+                {
+                    g_priv_confirm = true; // open the reconfirm dialog.
+                    return;
+                }
+            }
             const OmniHit oh = g_omni.HitTest(tb, cx, cy);
             switch (oh.kind)
             {
@@ -4598,10 +5036,24 @@ void BrowserMouseInput(duetos::u32 cx, duetos::u32 cy, duetos::u8 button_mask)
             }
             return; // toolbar consumed this press.
         }
+        // Armed warning ribbon band: the only interactive element is the
+        // "[Disarm]" button at its right end. Chrome-owned — the page never
+        // sees a press in this band.
+        if (PrivShouldRenderArmed())
+        {
+            const u32 rib_top = client_y + kTabStripH + kToolbarH + kUrlBarH + kStatusRowH;
+            if (cy >= rib_top && cy < rib_top + kPrivRibbonH)
+            {
+                const Rect db = PrivDisarmBtnRect(wx, rib_top, ww);
+                if (db.Contains(cx, cy))
+                    PrivDisarm();
+                return; // the ribbon absorbs the press either way.
+            }
+        }
         // Dockable surfaces overlay the content — handle their clicks before
         // the page. `body` here matches the DrawFn surface rect.
         {
-            const u32 body_top = client_y + kTabStripH + kToolbarH + kUrlBarH + kStatusRowH;
+            const u32 body_top = client_y + kTabStripH + kToolbarH + kUrlBarH + kStatusRowH + PrivRibbonH();
             const Rect body{wx, body_top, ww, (wy + wh > body_top) ? wy + wh - body_top : 0U};
             if (HandleDockClick(g_assistant, body, cx, cy) || HandleDockClick(g_library, body, cx, cy))
                 return;

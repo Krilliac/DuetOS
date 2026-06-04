@@ -24,6 +24,14 @@ struct PrivConfig
 // flag uses the default root "/home/user"; `=a:b` sets roots a, b (capped).
 void PrivConfigParse(const char* cmdline, PrivConfig& cfg);
 
+// The single boot-time config the whole Privilege Engine reads. Boot calls
+// PrivConfigSetCurrent once (after parsing the real kernel cmdline); every
+// client (browser chrome, the binding installer) reads PrivConfigCurrent().
+// Before the boot wire-up runs it reports a default {available=false} — so a
+// kernel built without the flag never exposes any privileged surface.
+const PrivConfig& PrivConfigCurrent();
+void PrivConfigSetCurrent(const PrivConfig& cfg);
+
 void PrivConfigSelfTest();
 
 } // namespace duetos::security::privilege

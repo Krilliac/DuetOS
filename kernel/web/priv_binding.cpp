@@ -1,7 +1,11 @@
 #include "web/priv_binding.h"
 
+#include "fs/fat32.h"
+#include "mm/kheap.h"
 #include "security/privilege/audit.h"
 #include "security/privilege/broker.h"
+#include "security/privilege/scope.h"
+#include "time/timekeeper.h"
 #include "web/js/builtins.h"
 #include "web/js/object.h"
 
@@ -77,12 +81,113 @@ const char* CapName(sp::Cap c)
     return "?";
 }
 
-// Audit EVERY brokered call (allow AND deny), tagged with the client identity.
-// GAP: a real ISO-8601 timestamp (via the timekeeper) replaces the placeholder.
-void Audit(PrivBind* b, sp::Cap cap, const char* args, bool ok)
+// Largest single privileged read/write we marshal through the JS binding. The
+// broker independently rejects > kMaxPrivWriteBytes; this is the binding-local
+// bounce buffer ceiling (well under that) so a page can't ask us to heap-alloc
+// 16 MiB per call. 64 KiB covers config/state files a privileged page edits.
+constexpr duetos::u32 k_MaxFsBounceBytes = 64u * 1024u;
+
+// Two-digit zero-padded append helper for the ISO-8601 stamp.
+duetos::u32 Put2(char* out, duetos::u32 pos, duetos::u32 v)
 {
-    const sp::AuditEntry e{"-", b->client, b->origin, 0, CapName(cap), args, ok};
+    out[pos++] = static_cast<char>('0' + (v / 10) % 10);
+    out[pos++] = static_cast<char>('0' + v % 10);
+    return pos;
+}
+
+// Format the current wall clock as "YYYY-MM-DDTHH:MM:SSZ" into out (>= 21 B,
+// incl. NUL). Sampled from the CMOS RTC via the timekeeper. Always succeeds.
+void FormatIso8601(char* out, duetos::u32 cap)
+{
+    if (out == nullptr || cap < 21)
+    {
+        if (out != nullptr && cap > 0)
+            out[0] = '\0';
+        return;
+    }
+    duetos::time::BrokenDownTime t{};
+    duetos::time::RealtimeBrokenDown(&t);
+    duetos::u32 p = 0;
+    p = Put2(out, p, t.year / 100);
+    p = Put2(out, p, t.year % 100);
+    out[p++] = '-';
+    p = Put2(out, p, t.month);
+    out[p++] = '-';
+    p = Put2(out, p, t.day);
+    out[p++] = 'T';
+    p = Put2(out, p, t.hour);
+    out[p++] = ':';
+    p = Put2(out, p, t.minute);
+    out[p++] = ':';
+    p = Put2(out, p, t.second);
+    out[p++] = 'Z';
+    out[p] = '\0';
+}
+
+// Audit EVERY brokered call (allow AND deny), tagged with the client identity.
+// The caller owns `iso8601` storage (it must outlive this synchronous call).
+void Audit(PrivBind* b, const char* iso8601, sp::Cap cap, const char* args, bool ok)
+{
+    const sp::AuditEntry e{iso8601, b->client, b->origin, 0, CapName(cap), args, ok};
     sp::AuditAppend(e);
+}
+
+// Build a { ok:true, data:"<contents>" } result for a successful read. The
+// payload is JSON/string-escaped through the arena's MakeString path.
+JsValue MakeReadResult(Interp& I, const char* data, duetos::u32 dataLen)
+{
+    JsObject* o = ObjNew(I.arena, false);
+    if (o == nullptr)
+        return JsValue::Undefined();
+    ObjSet(o, I.arena, "ok", 2, JsValue::Bool(true));
+    JsString* s = MakeString(I.arena, data, dataLen);
+    if (s != nullptr)
+        ObjSet(o, I.arena, "data", 4, JsValue::Str(s));
+    return JsValue::Obj(o);
+}
+
+// Execute the validated fs.write of `canon`: delete-then-create (the proven
+// SaveBookmarks pattern). `data`/`dataLen` are the bounded content bytes.
+JsValue ExecFsWrite(Interp& I, const char* canon, const char* data, duetos::u32 dataLen)
+{
+    namespace fat = duetos::fs::fat32;
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+        return MakeResult(I, false, "EIO: no volume");
+    fat::DirEntry probe;
+    if (fat::Fat32LookupPath(v, canon, &probe))
+        fat::Fat32DeleteAtPath(v, canon);
+    const duetos::i64 rc = fat::Fat32CreateAtPath(v, canon, data, dataLen);
+    if (rc < 0)
+        return MakeResult(I, false, "EIO: write failed");
+    return MakeResult(I, true, nullptr);
+}
+
+// Execute the validated fs.read of `canon`: lookup + bounded read.
+JsValue ExecFsRead(Interp& I, const char* canon)
+{
+    namespace fat = duetos::fs::fat32;
+    const fat::Volume* v = fat::Fat32Volume(0);
+    if (v == nullptr)
+        return MakeResult(I, false, "EIO: no volume");
+    fat::DirEntry e;
+    if (!fat::Fat32LookupPath(v, canon, &e) || (e.attributes & 0x10) != 0)
+        return MakeResult(I, false, "ENOENT: not found");
+    const duetos::u32 want = (e.size_bytes < k_MaxFsBounceBytes) ? e.size_bytes : k_MaxFsBounceBytes;
+    if (want == 0)
+        return MakeReadResult(I, "", 0);
+    char* buf = static_cast<char*>(mm::KMalloc(want));
+    if (buf == nullptr)
+        return MakeResult(I, false, "EIO: no memory");
+    const duetos::i64 n = fat::Fat32ReadFile(v, &e, buf, want);
+    if (n < 0)
+    {
+        mm::KFree(buf);
+        return MakeResult(I, false, "EIO: read failed");
+    }
+    const JsValue out = MakeReadResult(I, buf, static_cast<duetos::u32>(n));
+    mm::KFree(buf);
+    return out;
 }
 
 JsValue FsValidate(Interp& I, sp::Cap cap, const JsValue* args, duetos::u32 argc, PrivBind* b)
@@ -92,17 +197,28 @@ JsValue FsValidate(Interp& I, sp::Cap cap, const JsValue* args, duetos::u32 argc
     char path[512];
     const duetos::u32 plen = (argc > 0) ? ValueToChars(args[0], path, sizeof(path) - 1) : 0;
     path[plen] = '\0'; // ValueToChars does not NUL-terminate.
+
+    // Capture the actual write payload (bounded) — not just its length. The
+    // broker independently rejects oversize against kMaxPrivWriteBytes; this
+    // bounce buffer caps what the binding will heap-carry per call.
+    char* data = nullptr;
     duetos::u32 byteLen = 0;
     if (cap == sp::Cap::FsWrite && argc > 1)
     {
-        char data[256];
-        byteLen = ValueToChars(args[1], data, sizeof(data));
+        data = static_cast<char*>(mm::KMalloc(k_MaxFsBounceBytes));
+        if (data == nullptr)
+            return MakeResult(I, false, "EIO: no memory");
+        byteLen = ValueToChars(args[1], data, k_MaxFsBounceBytes);
     }
+
     char canon[512];
     const sp::PrivRequest req{cap, (argc > 0) ? path : nullptr, byteLen};
     const sp::Verdict v = sp::ValidateRequest(*b->tab, b->roots, req, canon, sizeof(canon));
 
-    // Build a bounded args summary (path only — never payload) and audit.
+    // Build a bounded args summary (path only — never payload) and audit, with
+    // a real ISO-8601 timestamp. `iso` outlives the synchronous AuditAppend.
+    char iso[24];
+    FormatIso8601(iso, sizeof(iso));
     char summ[560];
     duetos::u32 so = 0;
     for (const char* p = "path="; *p != '\0'; ++p)
@@ -110,12 +226,37 @@ JsValue FsValidate(Interp& I, sp::Cap cap, const JsValue* args, duetos::u32 argc
     for (const char* p = v.ok ? canon : path; *p != '\0' && so + 1 < sizeof(summ); ++p)
         summ[so++] = *p;
     summ[so] = '\0';
-    Audit(b, cap, summ, v.ok);
+    Audit(b, iso, cap, summ, v.ok);
 
-    // GAP (Task 8b): on v.ok, EXECUTE the cap-gated fs syscall (fs::fat32 read/
-    // write of `canon`) AND the symlink-TOCTOU scope re-check after the kernel
-    // resolves the path. Until then the call validates + audits but is inert.
-    return MakeResult(I, v.ok, v.error);
+    if (!v.ok)
+    {
+        if (data != nullptr)
+            mm::KFree(data);
+        return MakeResult(I, false, v.error); // denied: NEVER execute.
+    }
+
+    // Symlink-TOCTOU re-check: re-confirm `canon` is STILL within `roots`
+    // immediately before the fs syscall, closing the validate→execute window.
+    // GAP: FAT32 has no symlinks so string containment is sufficient here; real
+    // symlink resolution must be re-enforced by the fs layer AFTER path
+    // resolution on symlink-capable backends — revisit when ext4 write lands.
+    char recheck[512];
+    if (!sp::CanonicalizeAndContain(canon, b->roots, recheck, sizeof(recheck)))
+    {
+        if (data != nullptr)
+            mm::KFree(data);
+        return MakeResult(I, false, "EPERM: containment re-check failed");
+    }
+
+    JsValue result = JsValue::Undefined();
+    if (cap == sp::Cap::FsWrite)
+        result = ExecFsWrite(I, recheck, (data != nullptr) ? data : "", byteLen);
+    else
+        result = ExecFsRead(I, recheck);
+
+    if (data != nullptr)
+        mm::KFree(data);
+    return result;
 }
 
 JsValue CapValidate(Interp& I, sp::Cap cap, PrivBind* b)
@@ -125,8 +266,14 @@ JsValue CapValidate(Interp& I, sp::Cap cap, PrivBind* b)
     char canon[8];
     const sp::PrivRequest req{cap, nullptr, 0};
     const sp::Verdict v = sp::ValidateRequest(*b->tab, b->roots, req, canon, sizeof(canon));
-    Audit(b, cap, "-", v.ok);
-    // GAP (Task 8b): on v.ok, EXECUTE the cap-gated proc/net syscall.
+    char iso[24];
+    FormatIso8601(iso, sizeof(iso));
+    Audit(b, iso, cap, "-", v.ok);
+    // GAP: proc.spawn / net.fetch validate + audit but do not yet EXECUTE — the
+    // JS methods carry no actionable arguments (a spawn target, a fetch URL).
+    // Fabricating one from nothing would be speculative; execution awaits these
+    // methods gaining real arguments in Phase 2b. The validate + audit is
+    // correct and load-bearing today. (kernel.read DOES execute — see MKernelRead.)
     return MakeResult(I, v.ok, v.error);
 }
 
@@ -146,9 +293,29 @@ Result<JsValue> MNetFetch(Interp& I, const JsValue&, const JsValue*, duetos::u32
 {
     return CapValidate(I, sp::Cap::Net, static_cast<PrivBind*>(c));
 }
+// kernel.read(): read-only introspection. Validates + audits the KernelRead
+// cap, then — on allow — returns a trivially-safe, already-available kernel
+// datum: monotonic uptime in nanoseconds (a number a privileged page can read
+// without any capability to mutate state). No path, no side effect.
 Result<JsValue> MKernelRead(Interp& I, const JsValue&, const JsValue*, duetos::u32, void* c)
 {
-    return CapValidate(I, sp::Cap::KernelRead, static_cast<PrivBind*>(c));
+    PrivBind* b = static_cast<PrivBind*>(c);
+    if (b == nullptr || b->tab == nullptr)
+        return MakeResult(I, false, "EPERM: no context");
+    const sp::PrivRequest req{sp::Cap::KernelRead, nullptr, 0};
+    char canon[8];
+    const sp::Verdict v = sp::ValidateRequest(*b->tab, b->roots, req, canon, sizeof(canon));
+    char iso[24];
+    FormatIso8601(iso, sizeof(iso));
+    Audit(b, iso, sp::Cap::KernelRead, "datum=uptimeNs", v.ok);
+    if (!v.ok)
+        return MakeResult(I, false, v.error);
+    JsObject* o = ObjNew(I.arena, false);
+    if (o == nullptr)
+        return JsValue::Undefined();
+    ObjSet(o, I.arena, "ok", 2, JsValue::Bool(true));
+    ObjSet(o, I.arena, "uptimeNs", 8, JsValue::Int(static_cast<duetos::i64>(duetos::time::MonotonicNs())));
+    return JsValue::Obj(o);
 }
 
 Result<JsValue> FsHostGet(Interp& I, JsObject* self, const char* k, duetos::u32 kl)
@@ -251,6 +418,11 @@ Result<JsValue> WindowHostGet(Interp& I, JsObject* self, const char* k, duetos::
     return JsValue::Undefined();
 }
 } // namespace
+
+void PrivBindingFormatIso8601(char* out, duetos::u32 cap)
+{
+    FormatIso8601(out, cap);
+}
 
 JsValue BuildDuetosObject(Interp& I, PrivBind* bind)
 {
