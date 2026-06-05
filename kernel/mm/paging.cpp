@@ -1289,6 +1289,53 @@ void ProtectKernelImage()
     arch::SerialWrite("[mm/paging] kernel image W^X applied\n");
 }
 
+// Boot-stack guard page. boot.S reserves `boot_stack_guard_page` (in
+// .bss.boot, low VMA) as the 4 KiB immediately below `stack_bottom`. At
+// runtime the boot stack is used through its higher-half alias (boot.S
+// biases rsp by KERNEL_VIRTUAL_BASE right after long mode), so the guard's
+// runtime VA is kKernelVirtualBase + its link address.
+extern "C" u8 boot_stack_guard_page[];
+
+// Resolved guard VA, stashed for the #PF dispatcher's IsBootStackGuardFault.
+// 0 until InstallBootStackGuard runs (i.e. any pre-guard fault is NOT
+// mis-attributed to the guard).
+static u64 g_boot_stack_guard_va = 0;
+
+void InstallBootStackGuard()
+{
+    const u64 guard_va = kKernelVirtualBase + reinterpret_cast<u64>(boot_stack_guard_page);
+    if ((guard_va & kPageMask) != 0)
+    {
+        PanicPaging("InstallBootStackGuard: guard page not 4 KiB-aligned", guard_va);
+    }
+    // The first higher-half 2 MiB is still one PS page here — ProtectKernelImage
+    // only splits the high kernel sections (.text/.rodata/.data/.bss at 2 MiB+),
+    // not the boot region. Split it to 4 KiB granularity, then clear the present
+    // bit on the guard page alone. UnmapPage zeroes the PTE WITHOUT freeing the
+    // frame (the page stays kernel-image-owned); any access now #PFs with CR2 in
+    // the guard. Because identity + higher-half share boot_pd, this also guards
+    // the low alias — harmless, the boot stack is only used high post-jump.
+    SplitPsPage(guard_va & ~0x1FFFFFULL);
+    UnmapPage(guard_va);
+    g_boot_stack_guard_va = guard_va;
+
+    // Self-verify the PTE reads back not-present (flags 0), so a silent
+    // mis-split can't leave the guard live.
+    if (GetPteFlags4K(guard_va) != 0)
+    {
+        PanicPaging("InstallBootStackGuard: guard PTE still present after unmap", guard_va);
+    }
+    arch::SerialWrite("[mm/paging] boot-stack guard page armed @ ");
+    arch::SerialWriteHex(guard_va);
+    arch::SerialWrite(" (overflow below stack_bottom now faults here)\n");
+}
+
+bool IsBootStackGuardFault(u64 fault_va)
+{
+    return g_boot_stack_guard_va != 0 && fault_va >= g_boot_stack_guard_va &&
+           fault_va < g_boot_stack_guard_va + kPageSize;
+}
+
 PagingStats PagingStatsRead()
 {
     return PagingStats{

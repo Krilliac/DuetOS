@@ -173,6 +173,17 @@ void PagingSelfTest();
 /// won't run again.
 void ProtectKernelImage();
 
+/// Arm the boot-stack guard page: mark the 4 KiB below `stack_bottom`
+/// (boot.S `boot_stack_guard_page`) not-present so a boot-stack overflow
+/// faults at the boundary instead of silently corrupting low RAM. Call once,
+/// right after ProtectKernelImage, before any deep boot-time call chain.
+void InstallBootStackGuard();
+
+/// True if `fault_va` lands in the armed boot-stack guard page. The #PF
+/// dispatcher uses this to turn a guard hit into a named "boot stack
+/// overflow" panic. Returns false until InstallBootStackGuard has run.
+bool IsBootStackGuardFault(u64 fault_va);
+
 /// Overwrite the 4 KiB PTE flags for the page containing `virt`,
 /// keeping the physical frame unchanged. Splits the parent 2 MiB
 /// PS page if the range is still in the boot-time coarse mapping.

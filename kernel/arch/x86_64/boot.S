@@ -88,14 +88,20 @@ multiboot2_header_end:
 .section .bss.boot, "aw", @nobits
 .align 4096
 
-/* Stack FIRST in .bss.boot. The page tables follow ABOVE it (higher
- * addresses). On x86_64 the stack grows DOWN — overflow goes below
- * `stack_bottom`. By placing stack_bottom at the very start of
- * .bss.boot (lowest address in this section), an overflow grows
- * into the .bss.boot section's preceding region (.rodata.boot at
- * 0x1010e0 + .text.boot + .multiboot2 + ELF headers — read-only or
- * unmapped). The result is a hard #PF / #GP at the moment of
- * overflow rather than silent corruption of the live page tables.
+/* Guard page FIRST, then the stack, then the page tables (all in
+ * .bss.boot, ascending). On x86_64 the stack grows DOWN — overflow
+ * goes below `stack_bottom`. `boot_stack_guard_page` is the 4 KiB
+ * immediately below stack_bottom; mm::InstallBootStackGuard() marks
+ * it NOT-PRESENT once the kernel's page tables are up (it splits the
+ * first higher-half 2 MiB PS page and clears the guard PTE). The first
+ * byte an overflow writes below stack_bottom then takes an immediate
+ * kernel #PF whose CR2 lands in the guard page; the #PF dispatcher
+ * (traps.cpp) recognises that range and panics "boot stack overflow"
+ * at the exact site — instead of the silent low-RAM scribble + wild
+ * ret that the un-guarded stack produced (the 2026-06-05 boot-tail
+ * cascade). This mirrors the per-slot guard the heap kstack arena
+ * (mm/kstack.h) already carries; the boot stack was the one stack in
+ * the system without one.
  *
  * History: stack used to sit AFTER the page tables (boot_pml4 ..
  * boot_pd ahead of stack_bottom). With page tables IMMEDIATELY
@@ -123,16 +129,26 @@ multiboot2_header_end:
  *     (verified to 215 s guest uptime, zero faults). See Roadmap
  *     "SMP=4 boot-tail wild-jump cascade — LANDED".
  *
- *     NOTE: this stack has no guard page — the overflow that prompted the
- *     bump grew silently because the 2 MiB higher-half map is RW. The
- *     principled follow-up is a 4 KiB not-present guard page just below
- *     stack_bottom (split the first 2 MiB; .text.boot below is dead after
- *     the higher-half jump) so any FUTURE overflow faults at the boundary
- *     instead of corrupting low RAM. Until then, a recurrence of the
- *     0x...800dxxxx-rsp signature means demand outgrew 512 KiB and the
- *     real fix is to move the deep self-tests off the boot task's stack.
+ *     Measured (2026-06-05, tools/qemu/boot-stack-watermark.sh, debug
+ *     KASAN+UBSAN, SMP=4): true high-water through the deep self-test
+ *     chain is 318 KiB (peak rsp at phys 0x1326f8), leaving 194 KiB
+ *     (37.8%) free. The ≈268 KiB above was a lower-bound ESTIMATE from
+ *     the single captured wild-rsp frame; the direct scan shows demand
+ *     runs ~50 KiB deeper, so the 128 KiB stack actually overflowed by
+ *     ~190 KiB. 512 KiB still clears it with comfortable margin. Re-run
+ *     that tool if the deep self-test set grows.
+ *
+ *     The guard page below now makes a FUTURE overflow self-diagnosing:
+ *     a recurrence faults in boot_stack_guard_page with a named panic
+ *     instead of corrupting low RAM. If that fires, the demand outgrew
+ *     512 KiB and the real fix is to move the deep self-tests off the
+ *     boot task's stack (or shrink the tower's on-stack buffers).
  */
-.align 16
+.align 4096
+.global boot_stack_guard_page
+boot_stack_guard_page:
+    .skip 4096                  /* guard: not-present after InstallBootStackGuard() */
+.align 4096
 stack_bottom:
     .skip 524288                /* 512 KiB boot stack — see history above */
 stack_top:

@@ -5,8 +5,9 @@
 
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
-#include "log/klog.h"
 #include "core/panic.h"
+#include "debug/probes.h"
+#include "log/klog.h"
 #include "sync/spinlock.h"
 
 namespace duetos::mm
@@ -42,6 +43,23 @@ constinit u64 g_slots_in_use = 0;
 constinit u64 g_slots_ever_allocated = 0;
 constinit u64 g_slots_freed = 0;
 constinit u64 g_high_water_slots = 0;
+
+// Per-thread deep-usage canary (the "tripwire"). A sentinel word written at
+// the 75%-used line on allocation; downward stack growth that reaches it
+// overwrites it, so a single read at free time (or via the live accessor)
+// tells us the thread consumed >= 75% of its 64 KiB slot — an early warning
+// it is approaching the guard page (e.g. the deep TLS->x509->ASN.1->RSA/EC
+// tower run on a worker thread). O(1): one word written at alloc, one read
+// to check — no per-page scan, and re-armed on every alloc so slot reuse is
+// safe. Offset is from the USABLE base (just above the guard); rsp dropping
+// below it means (usable - offset) bytes used.
+constexpr u64 kStackTripwireWord = 0x574952454B435453ULL;         // "STCKWIRE" sentinel
+constexpr u64 kStackTripwireOffset = kKernelStackUsableBytes / 4; // 16 KiB -> trips at 75% (48 KiB) used
+
+inline volatile u64* TripwireSlot(uptr usable_base)
+{
+    return reinterpret_cast<volatile u64*>(usable_base + kStackTripwireOffset);
+}
 
 // Dedicated lock for the arena. Covers g_next_unseen_slot,
 // g_free_count, g_free_stack, and the stats counters. Does NOT
@@ -293,7 +311,21 @@ void* AllocateKernelStack(u64 stack_bytes)
         }
     }
 
-    return reinterpret_cast<void*>(UsableBaseFromSlot(slot_index));
+    const uptr usable_base = UsableBaseFromSlot(slot_index);
+    // Arm the deep-usage tripwire at the 75%-used line. The pages are mapped
+    // and zeroed; this single word sits in untouched stack until the thread
+    // (if ever) grows down past it.
+    *TripwireSlot(usable_base) = kStackTripwireWord;
+    return reinterpret_cast<void*>(usable_base);
+}
+
+bool KernelStackTripwireTripped(void* base)
+{
+    if (base == nullptr)
+    {
+        return false;
+    }
+    return *TripwireSlot(reinterpret_cast<uptr>(base)) != kStackTripwireWord;
 }
 
 void FreeKernelStack(void* base, u64 stack_bytes)
@@ -308,6 +340,17 @@ void FreeKernelStack(void* base, u64 stack_bytes)
     }
 
     const u32 slot_index = SlotIndexFromBase(base);
+
+    // Deep-usage canary — read the tripwire BEFORE TearDownStackPages unmaps
+    // the slot. If the sentinel was overwritten, this thread's stack crossed
+    // the 48 KiB (75%) line on its way toward the guard page.
+    if (KernelStackTripwireTripped(base))
+    {
+        const u64 peak_floor = kKernelStackUsableBytes - kStackTripwireOffset; // >= 48 KiB used
+        KBP_PROBE_V(::duetos::debug::ProbeId::kKernelStackDeepUsage, peak_floor);
+        KLOG_WARN_V("mm/kstack", "thread freed after using >=75% of its 64 KiB kernel stack; peak >= bytes",
+                    peak_floor);
+    }
 
     // Tear down pages outside the lock.
     TearDownStackPages(slot_index);

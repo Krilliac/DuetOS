@@ -69,6 +69,7 @@ constexpr ProbeRow kProbeTable[] = {
     {ProbeId::kResultExpectFail, "result.expect_fail", ProbeArm::ArmedLog},
     {ProbeId::kLockdepAssertHeldFailed, "sync.lockdep_assert_held_failed", ProbeArm::ArmedLog},
     {ProbeId::kHungTaskDetected, "diag.hung_task_detected", ProbeArm::ArmedLog},
+    {ProbeId::kKernelStackDeepUsage, "mm.kernel_stack_deep_usage", ProbeArm::ArmedLog},
 };
 static_assert(sizeof(kProbeTable) / sizeof(kProbeTable[0]) == static_cast<u64>(ProbeId::kCount),
               "kProbeTable size must match ProbeId::kCount — add a row for every enum entry");

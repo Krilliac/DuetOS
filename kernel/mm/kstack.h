@@ -136,6 +136,16 @@ void* AllocateKernelStack(u64 stack_bytes);
 /// the guard would be silent rather than corrupt.
 void FreeKernelStack(void* base, u64 stack_bytes);
 
+/// Deep-usage canary. True if the kernel thread whose stack usable-base is
+/// `base` has crossed the 75% tripwire — a sentinel word written at the
+/// 48 KiB-used line on allocation has been overwritten by downward stack
+/// growth. O(1) (one read); `base` must be a value AllocateKernelStack
+/// returned. FreeKernelStack checks this automatically and WARNs + fires the
+/// kKernelStackDeepUsage probe; this accessor lets a diagnostic scan LIVE
+/// (still-running, never-freed) worker threads — e.g. a future shell command
+/// auditing the net/TLS workers that run the deep cert-verify tower.
+bool KernelStackTripwireTripped(void* base);
+
 /// True iff `fault_va` lies inside the kernel-stack arena AND
 /// inside the guard-page region of its slot (the first
 /// kKernelStackGuardPages pages of the slot). Faults inside the

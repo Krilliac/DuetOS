@@ -21,6 +21,7 @@
 #include "crypto/x509.h"
 #include "debug/probes.h"
 #include "log/klog.h"
+#include "mm/kheap.h"
 #include "net/socket.h"
 #include "util/random.h"
 
@@ -216,9 +217,35 @@ bool TlsSocketHandshake(TlsSocketState* s, const TlsTransport& transport, const 
         s->hostname[i] = '\0';
     }
 
+    // The two 8 KiB TLS record buffers (`in` + `out`) live on the heap, not
+    // the stack. TlsSocketHandshake sits at the head of the deep
+    // handshake -> x509 -> ASN.1 -> RSA/EC verify chain; a 16 KiB stack frame
+    // here is what would push that chain past a 64 KiB scheduler-thread stack
+    // (boot ran it on the 512 KiB boot stack, but a real TLS handshake on a
+    // net worker thread has only 64 KiB). Off-stack, the chain fits a worker
+    // stack with comfortable margin. The local guard frees on EVERY exit path
+    // — this function has many early returns — so there is no per-return KFree.
+    struct RecordScratch
+    {
+        u8 in[kRecordBufBytes];
+        u8 out[kRecordBufBytes];
+    };
+    auto* scratch = static_cast<RecordScratch*>(mm::KMalloc(sizeof(RecordScratch)));
+    if (scratch == nullptr)
+    {
+        KLOG_WARN("net/tls-sock", "handshake: record-buffer alloc failed");
+        return false;
+    }
+    struct ScratchGuard
+    {
+        RecordScratch* p;
+        ~ScratchGuard() { mm::KFree(p); }
+    } scratch_guard{scratch};
+    u8* const out = scratch->out;
+    u8* const in = scratch->in;
+
     // 1. ClientHello (SNI = hostname).
-    u8 out[kRecordBufBytes];
-    const u32 ch_len = ConnectionStart(&s->conn, client_random, pms, s->hostname, out, sizeof(out));
+    const u32 ch_len = ConnectionStart(&s->conn, client_random, pms, s->hostname, out, kRecordBufBytes);
     if (ch_len == 0)
     {
         KLOG_WARN("net/tls-sock", "handshake: ClientHello build failed");
@@ -232,7 +259,6 @@ bool TlsSocketHandshake(TlsSocketState* s, const TlsTransport& transport, const 
 
     // 2. Drive the state machine: read a flight, feed it, write what
     //    the connection emits, until Established or Failed.
-    u8 in[kRecordBufBytes];
     u32 in_len = 0;
     bool verifier_ran = false;
     u32 guard = 0;
@@ -252,13 +278,13 @@ bool TlsSocketHandshake(TlsSocketState* s, const TlsTransport& transport, const 
             KLOG_WARN("net/tls-sock", "handshake: connection entered Failed");
             return false;
         }
-        if (in_len >= sizeof(in))
+        if (in_len >= kRecordBufBytes)
         {
             KLOG_WARN("net/tls-sock", "handshake: server flight exceeds record buffer");
             TlsSocketClose(s);
             return false;
         }
-        const i64 n = transport.read(transport.ctx, in + in_len, sizeof(in) - in_len);
+        const i64 n = transport.read(transport.ctx, in + in_len, kRecordBufBytes - in_len);
         if (n <= 0)
         {
             KLOG_WARN("net/tls-sock", "handshake: transport EOF/error mid-handshake");
@@ -266,7 +292,7 @@ bool TlsSocketHandshake(TlsSocketState* s, const TlsTransport& transport, const 
         }
         in_len += static_cast<u32>(n);
 
-        const u32 wrote = ConnectionFeed(&s->conn, in, in_len, out, sizeof(out), RandomNonzeroByte);
+        const u32 wrote = ConnectionFeed(&s->conn, in, in_len, out, kRecordBufBytes, RandomNonzeroByte);
         if (s->conn.state == State::Failed)
         {
             KLOG_WARN("net/tls-sock", "handshake: ConnectionFeed -> Failed");

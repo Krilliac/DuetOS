@@ -1500,11 +1500,31 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         arch::SerialWriteHex(frame->rsp);
         arch::SerialWrite("\n  rflags=");
         arch::SerialWriteHex(frame->rflags);
+        const u64 df_cr2 = ReadCr2();
         arch::SerialWrite("\n  cr2=");
-        arch::SerialWriteHex(ReadCr2());
+        arch::SerialWriteHex(df_cr2);
         arch::SerialWrite("\n  cr3=");
         arch::SerialWriteHex(ReadCr3());
-        arch::SerialWrite("\n[df] original trap stack likely overflowed or unmapped; halting.\n");
+        // Classify the cr2 against the stack guard pages. A deep stack
+        // overflow hits a guard page on the offending write, but the #PF
+        // frame can't be pushed onto the already-exhausted stack, so the
+        // fault escalates here to #DF. cr2 still names the guard, so we can
+        // diagnose precisely instead of the generic "stack overflowed".
+        if (mm::IsBootStackGuardFault(df_cr2))
+        {
+            arch::SerialWrite("\n[df] *** BOOT STACK OVERFLOW *** — cr2 in boot-stack guard page.\n"
+                              "[df] the boot task's 512 KiB stack overran stack_bottom; grow it or\n"
+                              "[df] move the deep call chain off the boot stack (see boot.S history).\n");
+        }
+        else if (mm::IsKernelStackGuardFault(df_cr2))
+        {
+            arch::SerialWrite("\n[df] *** KERNEL STACK OVERFLOW *** — cr2 in a kstack-arena guard page.\n"
+                              "[df] a 64 KiB scheduler thread stack overran its slot.\n");
+        }
+        else
+        {
+            arch::SerialWrite("\n[df] original trap stack likely overflowed or unmapped; halting.\n");
+        }
         // Mark panic-in-progress so any recursive halt path
         // short-circuits cleanly instead of trying to dump.
         PanicInProgressMark();
@@ -1531,6 +1551,22 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             SerialWriteHex(frame->rip);
             SerialWrite("\n");
             core::PanicWithValue("sched/kstack", "guard-page hit — kernel stack overflow", cr2);
+        }
+        // Boot-stack guard-page hit. The BSP boot task's 512 KiB stack
+        // carries its own guard page (the one stack not in the kstack
+        // arena); a kernel-mode #PF with CR2 inside it is an overflow of
+        // the boot stack — historically the silent low-RAM scribble +
+        // wild ret of the 2026-06-05 boot-tail cascade, now caught here.
+        if (mm::IsBootStackGuardFault(cr2))
+        {
+            SerialWrite("\n** BOOT STACK OVERFLOW **\n  task id : ");
+            SerialWriteHex(duetos::sched::CurrentTaskId());
+            SerialWrite("\n  cr2     : ");
+            SerialWriteHex(cr2);
+            SerialWrite("\n  rip     : ");
+            SerialWriteHex(frame->rip);
+            SerialWrite("\n");
+            core::PanicWithValue("boot/stack", "guard-page hit — boot stack overflow", cr2);
         }
         // mm/poison-alloc guard-page hit. A CR2 inside the poison
         // VA region is, by construction, a buffer overrun OR a use-
