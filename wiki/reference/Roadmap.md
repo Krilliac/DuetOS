@@ -357,6 +357,67 @@ area is readable immediately instead of corrupted.
   `SerialWriteNRecursiveFault` (serial.cpp). Blocks on: clean log
   from the harness pointing at the actual first-fault RIP.
 
+### SMP=4 x86_64-debug boot-tail wild-jump cascade (post-x509 self-test)
+
+- **Symptom:** `tools/test/ctest-boot-smoke.sh` (SMP=4, `-cpu qemu64`,
+  TCG) reproducibly faults the kernel **immediately after**
+  `[x509-verify-selftest] PASS` — the next self-test (`HttpSelfTest`)
+  never prints. Captured 2026-06-05; reproduces **byte-identically on
+  `origin/main`**, so it is a pre-existing guest bug, not a regression.
+- **Cascade shape** (from QEMU `-d int,cpu_reset` → `qemu.log`): a
+  single CPU takes a runaway re-entrant fault loop descending one
+  stack ~`0x12D0`/frame:
+
+  ```
+  5137-5145: v=0e (#PF) IP=0  err=0 (kernel data-read)  CR2=0x3e9d63263   (9 tight descents)
+  5146:      v=0d (#GP)  IP=0x662820683031746e   env EAX=0x3e9d63263
+  5147:      v=0e (#PF)  IP=0xffffffffffffffff   CR2=-1
+  ```
+
+- **ROOT lead:** the #GP RIP `0x662820683031746e` is **printable ASCII**
+  ("nt10h (f"-ish bytes) — a **code pointer clobbered by text/string
+  data**. `EAX == CR2 == 0x3e9d63263` (a TSC-shaped value) is being
+  used as a pointer across the cascade. Start the hunt at whatever
+  stores a TSC/timestamp where a function pointer or return address is
+  expected, near the x509-verify → HTTP self-test boundary in
+  `core/boot_bringup.cpp`. `tools/qemu/triage-truncated-boot.sh`
+  recovers this lead automatically (it flags the ASCII-RIP shape).
+- **Why no kernel dump appears:** two compounding issues.
+  1. **The host emulator aborts.** QEMU 8.2 TCG+SMP hits its own
+     `qemu_mutex_lock_iothread_impl: assertion failed` (BQL
+     re-entrancy, `system/cpus.c:504`) while the guest is mid-panic,
+     killing the VM. This is a **host bug** — reproduce on `accel=kvm`
+     or real HW to get an untruncated dump. The serial tail shows only
+     a bare `**` (the start of a `** … **` banner) then the abort.
+  2. **The runaway-fault detector does not fire.** The tight-descent
+     catcher (`g_tight_recursion` / `kMaxTightRecursion=8` in
+     `arch/traps`) should trip on this exact shape, but on the captured
+     cascade (9 descents, single stack) it never emits its `RUNAWAY`
+     line. Instrumenting it (lowering the threshold, making the
+     counters per-CPU) did **not** make it fire — the cascade faults
+     appear not to reach the detector's code in `TrapDispatch`, or its
+     output cannot escape before the host abort. **Open:** determine
+     why the dispatcher's entry-side detector is bypassed by this
+     null-RIP (`IP=0`) re-entrant #PF. Likely the fault recurs inside
+     the dispatcher prologue (the `IP=0` call target faults on
+     instruction fetch / the first data deref) before line reaches the
+     tight-descent block — needs a GDB-stub attach (`DUETOS_GDB_SERVER`)
+     on KVM to single-step the first fault.
+- **Mitigation landed (does not fix root):** `arch/traps` + `core/panic`
+  now emit a `[panic-precis]` line (vector/RIP/CR2/err/CPU + detected
+  hypervisor) as the **first** action of every panic, before the
+  device-heavy steps (FixJournal NVMe flush, NMI broadcast, minidump
+  egress) that a host abort / triple-fault / wedged peer can truncate.
+  When a panic DOES reach that path, the cause now survives even a
+  truncated dump. (This cascade is special — it never reaches the panic
+  path — so the precis does not appear for *this* bug; it is general
+  insurance for every other panic.)
+- **Triage tooling:** `tools/qemu/triage-truncated-boot.sh <serial>
+  [qemu.log]` classifies any sentinel-less boot as GUEST FAULT vs
+  HOST-EMULATOR ABORT vs HANG, and always recovers the guest fault
+  vector/RIP (incl. the ASCII-RIP root lead) from the `-d int` trace so
+  a host abort can never fully mask the kernel bug underneath it.
+
 ### Topology — cluster-scoped IPI fan-out
 
 - **Residual:** the *cluster-scoped* fan-out (one ICR write to

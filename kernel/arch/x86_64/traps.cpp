@@ -31,6 +31,7 @@
 #include "arch/x86_64/traps.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/lbr.h"
 #include "arch/x86_64/machine_check.h"
@@ -1775,6 +1776,41 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         HaltOnRecursiveFault(frame->vector, frame->rip);
     }
     PanicInProgressMark();
+
+    // Panic-precis — the single most important line of the dump,
+    // emitted FIRST, before any of the device-heavy steps that
+    // follow (the FAT32/NVMe fix-journal flush, the cross-CPU NMI
+    // broadcast, the debugcon minidump egress). Each of those can be
+    // truncated before the human-readable banner ever reaches the
+    // console: a wedged peer that never ACKs the NMI broadcast, a
+    // second fault taken inside the dump, or — observed on this
+    // tree — a buggy emulator that aborts the whole VM mid-write
+    // (QEMU-TCG's BQL assertion kills the process while we dump a
+    // wild-RIP #GP, so the operator otherwise sees only a bare
+    // "** CPU EXCEPTION **" with no cause). Raw panic-mode serial,
+    // no locks / klog / symbol resolve — just the root-cause quad
+    // (vector, RIP, CR2, error) plus CPU and the detected hypervisor
+    // so the fault stays actionable even when nothing else escapes,
+    // and so a truncated tail can be attributed to the emulator vs
+    // the kernel. Greppable sentinel: `[panic-precis]`.
+    arch::SerialEnterPanicMode();
+    {
+        const u64 precis_cr2 = ReadCr2();
+        const u64 precis_cpu = ::duetos::cpu::CurrentCpuIdOrBsp();
+        SerialWrite("\n[panic-precis] vec=0x");
+        SerialWriteHex(frame->vector);
+        SerialWrite(" rip=0x");
+        SerialWriteHex(frame->rip);
+        SerialWrite(" cr2=0x");
+        SerialWriteHex(precis_cr2);
+        SerialWrite(" err=0x");
+        SerialWriteHex(frame->error_code);
+        SerialWrite(" cpu=0x");
+        SerialWriteHex(precis_cpu);
+        SerialWrite(" hv=");
+        SerialWrite(HypervisorName(HypervisorInfoGet().kind));
+        SerialWrite("\n");
+    }
 
     // TrapCapture: deferred-slot record so the FAT32 / NVMe panic-
     // write tier picks up a structured (faulting-RIP, vector, CR2)
