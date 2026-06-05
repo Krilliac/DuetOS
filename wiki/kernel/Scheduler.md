@@ -112,9 +112,35 @@ Per-CPU singly-linked FIFO, head + tail, in two priority bands
 `runq_tail_idle`). The running task is **not** on the queue.
 `Schedule()` re-enqueues the previous task (if still `Ready`) on its
 `last_cpu` runqueue before popping the local head. Dead tasks are
-reaped — `SchedExit` pushes the dying task onto the global zombie
-list and wakes a reaper thread (`g_reaper_wq`) that frees the stack
-+ Task struct.
+reaped by a reaper thread (`g_reaper_wq`) that frees the stack + Task
+struct.
+
+**Deferred-zombie handoff (the reaper UAF invariant).** A dying task is
+**never** published to the global zombie list while a CPU is still
+executing on its kernel stack — doing so lets a peer-CPU reaper
+`FreeKernelStack` those pages out from under the in-flight
+`ContextSwitch`, whose `rsp`/`rip` save/restore then reads freed, reused
+memory and resumes wild (the "boot-tail wild-jump" cascade). Instead the
+terminating task is stashed into the per-CPU
+`ctxsw_dying_task_to_zombie` slot, and **`SchedFinishTaskSwitch`** —
+which runs on the *next* task's stack, after `ContextSwitch` has
+committed the rsp swap and the dying task is provably off-CPU on every
+peer — promotes it to `g_zombies` and wakes the reaper.
+`SchedFinishTaskSwitch` is the **single** zombie-publish site; both
+termination paths funnel through the slot:
+
+- **`SchedExit`** — cooperative/`[[noreturn]]` exit.
+- **`Schedule()`'s `kill_requested` branch** — budget-/policy-kill
+  (`FlagCurrentForKill`: tick-budget, sandbox-denial, fs-write-rate,
+  fault-react, canary). This path historically pushed to `g_zombies`
+  inline (before its `ContextSwitch`) and was the residual UAF the
+  2026-05-22 SMP=8 fix missed; it now uses the same deferred slot.
+
+Three permanent guards stand on the resume/reap path: a resume-context
+validator before every `ContextSwitch` (rejects a `next` that is `Dead`
+or whose `rsp` is outside its own kstack), a reaper reachability scan
+(panics if a to-be-freed task is still on any runqueue or any CPU's
+`current_task`), and a `RunqueuePop` sanity WARN+probe.
 
 Preemption (timer IRQ -> `need_resched`, per-CPU) and cooperative
 yield (`SchedYield()` -> `cli + Schedule + sti`) coexist; both push

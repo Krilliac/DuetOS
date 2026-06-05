@@ -10371,3 +10371,49 @@ GCC 16.1 `-Wunused-result` behaviour as reproduced above;
 "ref/ptr-returning `Result` functions", not "all `Result`
 returners". No separate roadmap item; tracked in the phase-1
 spec under `docs/superpowers/specs/`.
+
+## 2026-06-05 — Zombie publish is deferred to `SchedFinishTaskSwitch` for *every* termination path
+
+**Scope & commit:** `kernel/sched/sched.cpp` `Schedule()` budget-/policy-kill
+branch — boot-tail wild-jump reaper UAF.
+
+**Decision:** A dying task is published to the global zombie list at
+**exactly one** site — `SchedFinishTaskSwitch`, which runs on the *next*
+task's stack after `ContextSwitch` has committed the rsp swap — fed by the
+per-CPU `ctxsw_dying_task_to_zombie` slot. The `kill_requested` branch in
+`Schedule()` (budget/sandbox/fs-rate/fault-react/canary kills) no longer
+pushes onto `g_zombies` inline; it marks the task `Dead`, fires
+`OnTaskExited`, and stashes it into the slot, exactly as `SchedExit` does.
+
+**Why:** Publishing a zombie while the CPU is still executing on that
+task's kernel stack lets a peer-CPU reaper `FreeKernelStack` those pages
+before the in-flight `ContextSwitch` finishes saving/restoring `rsp`/`rip`;
+the resume then reads freed, reused memory and jumps wild (corrupt `rsp`
+into kernel `.text`, null/garbage `rip`, TSC-shaped register garbage —
+the SMP=4 post-x509 "boot-tail wild-jump" cascade). The 2026-05-22 SMP=8
+fix closed this for `SchedExit` via the deferred slot but left the
+parallel `kill_requested` branch — contractually "treat identically to
+SchedExit" — on the old inline-push path. This was a
+*whitelist/sentinel-divergence* class bug: two paths that must behave
+identically, only one updated.
+
+**What it rules out / defers:** No termination path may push to
+`g_zombies` directly again — the inline `g_zombies = prev` form is deleted
+and the single-publish-site invariant is documented in
+[`Scheduler.md`](../kernel/Scheduler.md). The three resume/reaper guards
+(resume-context validator, reaper reachability scan, `RunqueuePop` sanity)
+stay as permanent assertions; they are the regression net, not the fix.
+A future per-CPU `g_sched_lock` split must preserve "task is off every
+runqueue and off every CPU's `current_task` before its stack is freed".
+
+**Revisit when:** real KASAN lands (would have caught this UAF at the
+freed-page read directly), or the per-CPU runqueue-lock split changes the
+zombie-handoff locking. Re-verify on `accel=kvm`/real HW for an
+untruncated dump (QEMU 8.2 TCG+SMP aborts on a true guest panic via its
+own BQL re-entrancy, masking dumps — host bug, not guest).
+
+**Related roadmap track(s):** Scheduler / SMP. This closes a genuine
+latent reaper UAF on the kill path, but is **orthogonal** to — and does
+**not** resolve — the Roadmap entry "SMP=4 boot-tail wild-jump cascade
+(post-x509 self-test)", which reproduces a corrupt resume of a
+`stack_base==nullptr` boot/idle task and remains open.

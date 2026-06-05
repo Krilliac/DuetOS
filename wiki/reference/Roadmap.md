@@ -357,149 +357,105 @@ area is readable immediately instead of corrupted.
   `SerialWriteNRecursiveFault` (serial.cpp). Blocks on: clean log
   from the harness pointing at the actual first-fault RIP.
 
-### SMP=4 x86_64-debug boot-tail wild-jump cascade (post-x509 self-test)
+### SMP=4 boot-tail wild-jump cascade (post-x509 self-test) — STILL OPEN, root narrowed (2026-06-05)
 
-- **Symptom:** `tools/test/ctest-boot-smoke.sh` (SMP=4, `-cpu qemu64`,
-  TCG) reproducibly faults the kernel **immediately after**
-  `[x509-verify-selftest] PASS` — the next self-test (`HttpSelfTest`)
-  never prints. Captured 2026-06-05; reproduces **byte-identically on
-  `origin/main`**, so it is a pre-existing guest bug, not a regression.
-- **Cascade shape** (from QEMU `-d int,cpu_reset` → `qemu.log`): a
-  single CPU takes a runaway re-entrant fault loop descending one
-  stack ~`0x12D0`/frame:
+Reproduced again on this date with **unbuffered serial capture**
+(`DUETOS_SERIAL_FILE=`) + full `-d int` trace under `DUETOS_SMP=4
+DUETOS_CPU=qemu64` (TCG), `x86_64-debug`. The cascade is **not yet
+fixed**; what follows is the sharpened root lead from the new trace.
 
-  ```
-  5137-5145: v=0e (#PF) IP=0  err=0 (kernel data-read)  CR2=0x3e9d63263   (9 tight descents)
-  5146:      v=0d (#GP)  IP=0x662820683031746e   env EAX=0x3e9d63263
-  5147:      v=0e (#PF)  IP=0xffffffffffffffff   CR2=-1
-  ```
+**Exact trigger sequence (qemu `-d int`, interrupt counters):**
 
-- **ROOT lead (refined from the full `-d int` trace):** this is a
-  **scheduler resume of a corrupted/freed task context**, not a fault in
-  straight-line self-test code.
-  - The last NORMAL state before the cascade is the **reaper thread**:
-    `addr2line` puts the pre-cascade interruption RIP
-    (`0xffffffff80778d01`) in `duetos::sched::ReaperMain`
-    (`kernel/sched/sched.cpp`). An **MSI-X device IRQ (vector 0x32 = 50,
-    NOT the 0x20 timer)** preempts the reaper; its post-handler
-    `Schedule()` context-switches — and the stack flips from the
-    reaper's `0xffffffffe0065f80` (a normal dynamic kstack) to
-    `0xffffffff800dfc40`.
-  - `0xffffffff800dfc40` is **below the boot stack
-    (`0x...80102000`) and has no symbol** — it is inside the kernel
-    **.text/.rodata image**, i.e. NOT a valid stack. So the resumed
-    task's saved context is corrupt on BOTH axes: **RIP = 0 (null)** and
-    **RSP pointing into the kernel image**. The cascade
-    (`#PF IP=0` repeating, RSP marching `~0x12D0` down into the image)
-    is the trap frames nesting onto that bogus RSP; once they overwrite
-    enough, RIP goes fully wild (#GP at the ASCII address, then #PF -1).
-  - The fault `CR2` is a **TSC-shaped value that differs per boot**
-    (`0x3e9d63263` one run, `0x3fe48a7cd` another) — an `rdtsc` result
-    used as a pointer. The #GP RIP `0x662820683031746e` is printable
-    ASCII ("nt10h (f"-ish), i.e. a code pointer overwritten by text.
-  - **Prime suspect: a reaper-vs-scheduler task-teardown race** — a dead
-    task reaped (Process/AddressSpace/kstack torn down) while it is still
-    reachable from a runqueue, so `Schedule()` later loads its
-    freed/overwritten context. The freed kstack page gets reused (its
-    saved RIP/RSP slots now hold zero / a TSC stamp / heap text),
-    explaining the per-boot-varying garbage. Hunt in
-    `kernel/sched/sched.cpp` reaper ↔ runqueue/`Schedule` ordering: does
-    reap remove the task from EVERY runqueue and clear `need_resched`
-    /per-CPU `current` references BEFORE freeing the stack? Walk every
-    exit from the reaping scope for the refcount-asymmetry shape.
-  - `tools/qemu/triage-truncated-boot.sh` recovers the ASCII-RIP lead
-    automatically; the new `[wild-kernel-rip]` forensic's `[TEXT]` stack
-    quad will name the exact resume/teardown call site once captured on
-    a non-aborting host.
-- **Why no kernel dump appears:** two compounding issues.
-  1. **The host emulator aborts.** QEMU 8.2 TCG+SMP hits its own
-     `qemu_mutex_lock_iothread_impl: assertion failed` (BQL
-     re-entrancy, `system/cpus.c:504`) while the guest is mid-panic,
-     killing the VM. This is a **host bug** — reproduce on `accel=kvm`
-     or real HW to get an untruncated dump. The serial tail shows only
-     a bare `**` (the start of a `** … **` banner) then the abort.
-  2. **The runaway-fault detector does not fire.** The tight-descent
-     catcher (`g_tight_recursion` / `kMaxTightRecursion=8` in
-     `arch/traps`) should trip on this exact shape, but on the captured
-     cascade (9 descents, single stack) it never emits its `RUNAWAY`
-     line. Instrumenting it (lowering the threshold, making the
-     counters per-CPU) did **not** make it fire — the cascade faults
-     appear not to reach the detector's code in `TrapDispatch`, or its
-     output cannot escape before the host abort. **Open:** determine
-     why the dispatcher's entry-side detector is bypassed by this
-     null-RIP (`IP=0`) re-entrant #PF. Likely the fault recurs inside
-     the dispatcher prologue (the `IP=0` call target faults on
-     instruction fetch / the first data deref) before line reaches the
-     tight-descent block — needs a GDB-stub attach (`DUETOS_GDB_SERVER`)
-     on KVM to single-step the first fault.
-- **Mitigation landed (does not fix root):** `arch/traps` + `core/panic`
-  now emit a `[panic-precis]` line (vector/RIP/CR2/err/CPU + detected
-  hypervisor) as the **first** action of every panic, before the
-  device-heavy steps (FixJournal NVMe flush, NMI broadcast, minidump
-  egress) that a host abort / triple-fault / wedged peer can truncate.
-  When a panic DOES reach that path, the cause now survives even a
-  truncated dump. (This cascade is special — it never reaches the panic
-  path — so the precis does not appear for *this* bug; it is general
-  insurance for every other panic.)
-- **Triage tooling:** `tools/qemu/triage-truncated-boot.sh <serial>
-  [qemu.log]` classifies any sentinel-less boot as GUEST FAULT vs
-  HOST-EMULATOR ABORT vs HANG, and always recovers the guest fault
-  vector/RIP (incl. the ASCII-RIP root lead) from the `-d int` trace so
-  a host abort can never fully mask the kernel bug underneath it.
-- **Scheduler defense-in-depth checks landed (`kernel/sched/sched.cpp`):**
-  three guards around the suspect reaper↔resume path, to catch the bug at
-  the source and name the offender:
-  1. **Resume-context validation** — before every `ContextSwitch`,
-     `next` must be canonical, NOT `TaskState::Dead`, and `next->rsp` must
-     lie inside `next`'s own kstack `(stack_base, stack_base+size]`. The
-     observed corruption (rsp into the kernel image, state Dead) is caught
-     HERE, before the wild jump, naming `next` + `prev`; panics.
-  2. **Reaper reachability guard** — before freeing a task, the reaper
-     scans every CPU's runqueue (`ForEachRunqueueTask`) and per-CPU
-     `current_task`; if the to-be-freed task is still reachable it panics
-     naming it — the direct test of the "free a still-schedulable task"
-     UAF hypothesis.
-  3. **RunqueuePop sanity** — WARN+probe (no panic) when a popped task is
-     Dead / has an out-of-stack rsp, surfacing the runqueue as the
-     dangling-reference source.
-  Verified non-false-firing across a full SMP boot through every self-test
-  up to `ec-selftest` (the run reached one self-test SHORT of the x509
-  cascade point — the checks stayed silent on the entire healthy path, so
-  the corruption is confirmed NOT to occur during normal scheduling before
-  x509). Capturing a check actually FIRING on the cascade needs a host
-  that boots past x509: the originating sandbox (TCG, no `/dev/kvm`) plus
-  the checks' small per-schedule overhead pushed the cascade just beyond
-  the boot budget the harness allowed.
-- **Investigation probe landed:** `arch/traps` now has a one-shot
-  WILD-KERNEL-RIP forensic at dispatch entry — the FIRST kernel-mode
-  fault whose saved RIP is null / -1 / non-canonical (the cascade's
-  trigger shape) halts the CPU after dumping max context with MINIMAL
-  device access: vector/err/cr2, the base MSRs (`gs_base`/`kgs_base`/
-  `fs_base` — to test the "GSBASE clobbered with a TSC-shaped value"
-  theory), all GPRs, and a 32-quad fault-safe `rsp` window with `[TEXT]`
-  flags on kernel-text values (= the return address of whatever CALLed
-  the wild target — the root-cause lead). It emits NO NMI broadcast and
-  NO minidump, so it should not trip the QEMU BQL abort the way the full
-  dump does. It is also a genuine defensive halt (a wild kernel RIP can
-  never do useful work; it would Panic anyway).
-- **Observability blocker + fix:** under QEMU `-serial stdio` (the
-  harness default, redirected to a file), the serial stream is
-  block-buffered and the QEMU `abort()` does NOT flush it, so the
-  trailing ~4 KB — the precis, the forensic, the whole panic dump — is
-  LOST; only the `-d int` log (qemu.log, flushed per-line) survives,
-  which is why the cascade is only visible there. `run.sh` now takes
-  `DUETOS_SERIAL_FILE=<path>` to route COM1 through QEMU's *file*
-  chardev, which `write()`s unbuffered and survives the abort.
-- **NEXT STEP to root-cause:** run the smoke with
-  `DUETOS_SERIAL_FILE=/tmp/serial.log` on a **KVM** host (`accel=kvm`,
-  no TCG BQL abort) **or real hardware**, then read `/tmp/serial.log`
-  for the `[wild-kernel-rip]` block. Its `[TEXT]`-flagged stack quad is
-  the caller that jumped to the null/clobbered pointer; `addr2line` it
-  against `build/<preset>/kernel/duetos-kernel.elf` to find the source
-  site that stores a TSC-shaped value (`0x3e9d63263`-ish) where a code
-  pointer belongs. (Could not be captured in the originating session:
-  TCG aborts before the unbuffered re-run could complete on a degraded
-  sandbox with no `/dev/kvm`.)
+```
+#7516  v=20 (timer)  IP=ffffffff8027170b (arch::Sti)  RSP=ffffffffe0032c00  RAX=0xc894a5149
+#7517  v=32 (MSI-X device, vector 50)  same IP/RSP     RAX=0xc894a5149
+#7518  v=0e (#PF)    IP=0  RSP=ffffffff800dfc40  CR2=0xc894a5149   ← cascade onset
+        … RSP marches ~0x1540/frame down through the image … IP=-1, triple-faults
+```
+
+The task running at #7516/#7517 is the **TCP timer kernel thread**
+(`RBX=ffffffff806c4d00` = `net::tcp::TcpTimerEntry`), on a healthy
+dynamic kstack (`...e0032c00`). An **MSI-X device IRQ (vector 0x32=50)**
+preempts it; the handler's `Schedule()` `ContextSwitch`es into a `next`
+whose **`rsp = 0xffffffff800dfc40`** and whose saved return address is
+**0**. `RAX` is *preserved* across the switch (`0xc894a5149` at #7516,
+#7517 **and** #7518) — that is the `ContextSwitch` signature (it
+save/restores only callee-saved regs + the return address, never RAX),
+which **confirms #7518 is a genuine `ContextSwitch` resume**, not an
+errant `iretq`.
+
+**What `0xffffffff800dfc40` is:** higher-half of physical `0xdfc40`
+(~895 KiB) — **below the entire kernel image** (`.text.boot`@phys
+`0x101000`, `.bss.boot`/boot-stack@`0x102000`). It is **not** the boot
+stack and **not** a heap kstack (those live in the `...e0...` arena); it
+is junk low RAM (legacy <1 MiB region). So a task's saved `rsp` was
+overwritten with garbage and the task is being resumed into it.
+
+**Why the resume-context validator did NOT catch it:** the corrupt
+`next` is a **`stack_base == nullptr` task** (boot/idle/sentinel), and
+the validator's rsp-in-own-kstack arm is *guarded by*
+`next->stack_base != nullptr` (sched.cpp ~2916) — so for null-stack_base
+tasks it only checks canonical-pointer + not-Dead, both of which a
+corrupt-but-non-Dead boot/idle task passes. **The bug is a corrupt
+resume of a `stack_base==nullptr` task** (the BSP boot task, the BSP/AP
+idle task, or an AP boot sentinel) whose `Task::rsp` field — or the
+top-of-stack return slot — was clobbered to low-RAM garbage / zero.
+
+**Leads to chase (open):**
+1. *Who corrupts `Task::rsp` of a null-stack_base task?* A
+   `stack_base==nullptr` task's `rsp` is written only by
+   `ContextSwitch`'s first save. Either the Task struct's `rsp` field is
+   being overwritten (struct reuse / a neighbouring writer) or the boot
+   task's low-memory stack frame is being clobbered. The MSI-X (device)
+   correlation points at **DMA into low RAM (`0xd0000–0xe0000`)
+   colliding with the boot/idle task's stack or struct** — a
+   *lost-page/lost-slot collision* class bug (CLAUDE.md). Audit every
+   DMA-buffer / AP-trampoline / low-frame allocation for a frame in the
+   `<1 MiB` window that aliases boot/idle state.
+2. *Should a `stack_base==nullptr` task ever be a `Schedule()` `next`
+   candidate at all?* If the BSP boot task is left runnable on a
+   runqueue after `boot_bringup`, it can be picked. Determine its fate
+   after the self-tests and whether it should be parked un-resumably
+   (like Linux's swapper / xv6's per-CPU scheduler context) instead of
+   sitting selectable with a stale low-memory stack.
+3. *Strengthen the validator* to also bound null-stack_base resumes:
+   read the saved return address at `[next->rsp]` and require it to be
+   canonical kernel-text, OR give the boot/idle tasks a known
+   `stack_base`/`stack_size` so the existing rsp-range arm applies. This
+   converts the silent triple-fault into a named panic at the source.
+
+**Why no kernel dump / forensic appears even with unbuffered serial:**
+the resumed `next` faults at `IP=0`; the `#PF` then tries to push its
+trap frame to the bad `RSP=0xffffffff800dfc40` and nests immediately, so
+**execution never reaches `TrapDispatch`** — the `[wild-kernel-rip]`
+forensic and the tight-recursion detector are both downstream of the
+trap-frame delivery that is itself faulting. The corruption must be
+caught *before* the resume (lead 3) or *prevented* (leads 1–2); a
+post-fault dump is structurally impossible for this shape.
+
+**Adjacent real fix landed this session (NOT this cascade):** the
+`Schedule()` budget-/policy-kill (`kill_requested`) branch was still
+pushing the dying task to `g_zombies` inline — before its
+`ContextSwitch` — the *same* reaper-frees-running-stack UAF the
+2026-05-22 SMP=8 fix closed for `SchedExit`, left open on the kill path.
+It now routes through the per-CPU `ctxsw_dying_task_to_zombie` deferred
+slot, so `SchedFinishTaskSwitch` is the single post-switch zombie-publish
+site for *both* termination paths (see
+[`Scheduler.md`](../kernel/Scheduler.md) and the 2026-06-05
+Design-Decision). This is a genuine latent UAF, but it is **orthogonal**
+to the boot-tail cascade above (which resumes a `stack_base==nullptr`
+task, not a freed heap kstack) and does **not** make the cascade go away.
+
+**Diagnostic scaffolding (stays in tree):**
+`tools/qemu/triage-truncated-boot.sh`, the `[wild-kernel-rip]` /
+`[panic-precis]` forensics in `arch/traps`+`core/panic`, `run.sh`'s
+`DUETOS_SERIAL_FILE=` unbuffered-COM1 route, and the three
+`kernel/sched/sched.cpp` resume/reaper guards.
+
+> Host-emulator note: QEMU 8.2 TCG+SMP also hits its own
+> `qemu_mutex_lock_iothread_impl` BQL-reentrancy `abort()` when the guest
+> faults mid-boot, truncating serial; the `-d int` log (flushed per line)
+> is the reliable capture. Re-confirm on `accel=kvm` / real HW.
 
 ### Topology — cluster-scoped IPI fan-out
 
