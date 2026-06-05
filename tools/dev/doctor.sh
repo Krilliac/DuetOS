@@ -139,13 +139,26 @@ check_command clang-format clang-format-18 18
 check_any_command "ELF linker" lld-18 ld.lld lld
 check_command lld-link lld-18 18
 check_any_command "Windows import-library generator" llvm-18 llvm-dlltool llvm-dlltool-18 llvm-dlltool-19 llvm-dlltool-20 x86_64-w64-mingw32-dlltool
+
+# The DLL / vDSO embed scripts invoke the unversioned `llvm-objcopy`
+# by name. Ubuntu's llvm-18 ships only `llvm-objcopy-18`, so a bare
+# lookup fails until it is symlinked or /usr/lib/llvm-18/bin is on
+# PATH -- catch that here instead of ~180 build steps in.
+if have_command llvm-objcopy; then
+    ok "llvm-objcopy ($(command -v llvm-objcopy))"
+elif have_command llvm-objcopy-18; then
+    fail "llvm-objcopy missing but llvm-objcopy-18 present -- symlink it (sudo ln -sf /usr/lib/llvm-18/bin/llvm-objcopy /usr/bin/llvm-objcopy) or add /usr/lib/llvm-18/bin to PATH"
+else
+    fail "llvm-objcopy missing (apt: llvm-18, then symlink /usr/lib/llvm-18/bin/llvm-objcopy into PATH)"
+fi
+
 check_command xorriso xorriso
 check_command grub-mkrescue grub-common
 check_command mcopy mtools
 
 if [[ "${MODE}" == "live" ]]; then
     printf '\nLive-boot tools\n'
-    printf '---------------\n'
+    printf -- '---------------\n'
     check_command qemu-system-x86_64 qemu-system-x86
     check_file_any "OVMF firmware" \
         /usr/share/OVMF/OVMF_CODE.fd \
