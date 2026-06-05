@@ -267,6 +267,7 @@
 #include "log/klog.h"
 #include "util/random.h"
 #include "util/string.h"
+#include "core/boot_cmdline.h"
 #include "core/panic.h"
 #include "loader/pe_loader.h"
 #include "diag/log_names.h"
@@ -2312,7 +2313,17 @@ void StartRing3SmokeTask()
         // its own nop via SYS_BP_INSTALL, fires it once, removes via
         // SYS_BP_REMOVE. Proves per-task DR save/restore, the
         // kCapDebug gate, and the syscall surface.
-        SpawnBpProbeTask();
+        //
+        // Skipped under an external debugger host (debugstub=1): the
+        // probe's HW breakpoint fires #DB, which the host debugger owns —
+        // running it pauses the guest at a ring-3 address the host can't
+        // symbolize ("frame not in module"), which presents as a freeze.
+        // This is the runtime sibling of the boot-time int3/DR self-tests
+        // already stood down in BootBringupEarly.
+        if (!duetos::core::DebugStubAttached())
+        {
+            SpawnBpProbeTask();
+        }
     }
     // First PE executable on the system. Freestanding, compiled
     // from userland/apps/hello_pe/hello.c by the host clang +
