@@ -75,6 +75,16 @@
       "miDebuggerServerAddress": "localhost:1234",
       "stopAtConnect": true,
       "externalConsole": false,
+      // The kernel ELF is built in WSL, so its DWARF records source
+      // paths under the WSL checkout root (e.g. /root/source/DuetOS/...).
+      // Map that root to THIS Windows checkout so VS opens the right
+      // file and source-line breakpoints bind. LHS is the WSL build
+      // root (adjust if yours differs, e.g. /home/<you>/DuetOS); RHS
+      // resolves to the repo root via the workspace macro, so it stays
+      // portable across machines.
+      "sourceFileMap": {
+        "/root/source/DuetOS": "${workspaceRoot}/../.."
+      },
       "setupCommands": [
         { "text": "set confirm off", "ignoreFailures": true },
         { "text": "set print pretty on", "ignoreFailures": true },
