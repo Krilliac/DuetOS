@@ -347,6 +347,16 @@ enum class ProbeId : u8
     // blocked but never woken".
     kHungTaskDetected,
 
+    // Fired from `FreeKernelStack` (and the live-scan accessor) when a
+    // kernel thread's stack tripwire — a sentinel word written at the
+    // 75%-used line on allocation — was overwritten, i.e. the thread
+    // consumed >= 75% (48 KiB) of its 64 KiB slot. ArmedLog: a clean
+    // workload never trips it, so any fire is an early canary that a
+    // call chain is approaching the guard page (e.g. the deep
+    // TLS->x509->ASN.1->RSA/EC tower on a worker thread). Caller passes
+    // the observed peak usage in bytes as `value`.
+    kKernelStackDeepUsage,
+
     kCount, // sentinel
 };
 

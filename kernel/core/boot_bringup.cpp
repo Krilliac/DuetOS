@@ -1062,6 +1062,15 @@ void BootBringupMemPaging()
     // corrupt code silently later.
     ProtectKernelImage();
 
+    // Arm the boot-stack guard page now that the kernel image is at its
+    // final 4 KiB-granular protection. From here on, any overflow below
+    // stack_bottom (e.g. the deep TLS->x509->ASN.1->RSA/EC self-test tower
+    // that runs later on this same boot stack) faults at the guard with a
+    // named "boot stack overflow" panic instead of silently scribbling low
+    // RAM and producing a wild ret. Mirrors the per-slot guard the heap
+    // kstack arena already carries.
+    InstallBootStackGuard();
+
     // Breakpoint subsystem (int3 + DR0..DR3). Must run AFTER
     // ProtectKernelImage so we know .text is at its final 4 KiB-
     // granular protection and SetPteFlags4K can flip the W bit
