@@ -53,6 +53,14 @@ struct VmConfig
     uint32_t    fbW       = 0;
     uint32_t    fbH       = 0;
     bool        noWindow  = false;
+
+    // --break: halt at a native __debugbreak() once the VMM is fully
+    // constructed but before the vCPU runs. Fired from Vmm::Run (NOT
+    // main) so both debug channels are live at the stop: the GDB stub
+    // is already listening on gdbPort, and Vmm::Active() is set so the
+    // vmm_dbg:: bridge can resolve guest symbols. IsDebuggerPresent
+    // gates the trap, so --break in a headless run is a no-op.
+    bool        breakAtStart = false;
 };
 
 // Fixed guest-physical homes for the synthesised firmware blobs.
