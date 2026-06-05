@@ -380,6 +380,21 @@ if [[ "${DUETOS_QMP:-1}" != "0" ]]; then
     QMP_ARGS=(-qmp "unix:${QMP_SOCK},server=on,wait=off")
 fi
 
+# COM1 backend. Default `stdio` (the human log on this terminal). When
+# DUETOS_SERIAL_FILE is set, COM1 goes to QEMU's *file* chardev instead,
+# which write()s each chunk straight to the fd with NO stdio buffering —
+# so the trailing output survives even a host-side QEMU `abort()` (e.g.
+# the TCG BQL assertion) that would otherwise drop the block-buffered
+# stdio→pipe tail. Essential for capturing a panic/forensic dump that
+# fires just before such an abort. (Quote-stripped so the `file:` prefix
+# reaches QEMU intact.)
+if [[ -n "${DUETOS_SERIAL_FILE:-}" ]]; then
+    COM1_ARGS=(-serial "file:${DUETOS_SERIAL_FILE}")
+    echo "[run.sh] COM1 → unbuffered file: ${DUETOS_SERIAL_FILE}"
+else
+    COM1_ARGS=(-serial stdio)
+fi
+
 QEMU_ARGS=(
     -machine  "q35,accel=${ACCEL}"
     -cpu      "${CPU_MODEL}"
@@ -387,7 +402,7 @@ QEMU_ARGS=(
     -m        "${RAM_SIZE}"
     "${QMP_ARGS[@]}"
     -display  "${DISPLAY_MODE}"
-    -serial   stdio
+    "${COM1_ARGS[@]}"
     # COM2 → GDB transport. Default is a TCP server on
     # ${DUETOS_GDB_PORT} (1234) — the canonical attach path under
     # QEMU. Set DUETOS_GDB_TRANSPORT=pty to instead create a

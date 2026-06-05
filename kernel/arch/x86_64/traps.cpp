@@ -972,6 +972,132 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         ::duetos::core::PanicWithValue("arch/traps", "wild trap-frame pointer at dispatch entry", fp);
     }
 
+    // === WILD-KERNEL-RIP FORENSIC (boot-tail wild-jump investigation) ===
+    // The captured boot-tail cascade BEGINS with a kernel-mode fault whose
+    // SAVED rip is null (IP=0) or non-canonical — a call/return through a
+    // clobbered code pointer. Catch the FIRST such fault HERE: before the
+    // tight-descent accounting, before IrqNestScope's per-CPU access (which
+    // itself faults if GSBASE was clobbered), and before the heavy panic
+    // dump. Emit a minimal RAW-serial forensic — no NMI broadcast, no
+    // minidump, no per-CPU deref (only rdmsr READS of the base MSRs, never
+    // a GS-relative access) — so it neither re-faults on a corrupt GSBASE
+    // nor trips QEMU-TCG's BQL abort the way the full dump's IPI/debugcon
+    // storm does. Then HALT. One-shot (static guard). This is BOTH an
+    // investigation probe (the rsp window exposes the return address that
+    // CALLed the wild target; the base MSRs test the GSBASE-corruption
+    // theory) AND a genuine defensive halt: a wild kernel RIP can never do
+    // useful work, so stopping at fault #1 beats a stack-exhausting cascade
+    // that ends in a triple-fault or a host-emulator abort.
+    {
+        const bool kmode = (frame->cs & 3) == 0;
+        const ::duetos::u64 wr_rip = frame->rip;
+        const ::duetos::u64 wr_hi17 = wr_rip >> 47;
+        const bool wr_noncanon = (wr_hi17 != 0ULL && wr_hi17 != 0x1FFFFULL);
+        const bool wr_wild = (wr_rip == 0ULL) || (wr_rip == ~0ULL) || wr_noncanon;
+        static volatile ::duetos::u32 s_wild_rip_forensic_done = 0;
+        if (kmode && wr_wild && s_wild_rip_forensic_done == 0)
+        {
+            s_wild_rip_forensic_done = 1;
+            asm volatile("cli");
+            arch::SerialEnterPanicMode();
+            PanicInProgressMark();
+            extern duetos::u8 _text_start[];
+            extern duetos::u8 _text_end[];
+            const ::duetos::u64 wr_tlo = reinterpret_cast<::duetos::u64>(_text_start);
+            const ::duetos::u64 wr_thi = reinterpret_cast<::duetos::u64>(_text_end);
+
+            SerialWrite("\n=== [wild-kernel-rip] first wild kernel saved-RIP — halting before cascade ===\n");
+            SerialWrite("  vector  = ");
+            SerialWriteHex(frame->vector);
+            SerialWrite("  err = ");
+            SerialWriteHex(frame->error_code);
+            SerialWrite("\n  rip     = ");
+            SerialWriteHex(wr_rip);
+            SerialWrite(wr_rip == 0ULL ? "  [NULL call target]\n"
+                                       : (wr_noncanon ? "  [non-canonical -> code ptr clobbered]\n" : "\n"));
+            SerialWrite("  cr2     = ");
+            SerialWriteHex(ReadCr2());
+            SerialWrite("\n  rsp     = ");
+            SerialWriteHex(frame->rsp);
+            SerialWrite("\n  rbp     = ");
+            SerialWriteHex(frame->rbp);
+            SerialWrite("\n  cs/ss   = ");
+            SerialWriteHex(frame->cs);
+            SerialWrite(" / ");
+            SerialWriteHex(frame->ss);
+            SerialWrite("\n  rflags  = ");
+            SerialWriteHex(frame->rflags);
+            SerialWrite("\n  cr3     = ");
+            SerialWriteHex(ReadCr3());
+            // GSBASE-corruption test: a per-CPU base clobbered with the
+            // TSC-shaped value seen in the cascade's CR2 would make every
+            // CurrentCpu() deref fault at ~CR2. Read the base MSRs raw.
+            SerialWrite("\n  gs_base = ");
+            SerialWriteHex(arch::ReadMsr(0xC0000101));
+            SerialWrite("  kgs_base = ");
+            SerialWriteHex(arch::ReadMsr(0xC0000102));
+            SerialWrite("  fs_base = ");
+            SerialWriteHex(arch::ReadMsr(0xC0000100));
+            // GPRs — one of these may hold the clobbered pointer / TSC value.
+            SerialWrite("\n  rax=");
+            SerialWriteHex(frame->rax);
+            SerialWrite(" rbx=");
+            SerialWriteHex(frame->rbx);
+            SerialWrite(" rcx=");
+            SerialWriteHex(frame->rcx);
+            SerialWrite(" rdx=");
+            SerialWriteHex(frame->rdx);
+            SerialWrite("\n  rsi=");
+            SerialWriteHex(frame->rsi);
+            SerialWrite(" rdi=");
+            SerialWriteHex(frame->rdi);
+            SerialWrite(" r8=");
+            SerialWriteHex(frame->r8);
+            SerialWrite(" r9=");
+            SerialWriteHex(frame->r9);
+            SerialWrite("\n  r10=");
+            SerialWriteHex(frame->r10);
+            SerialWrite(" r11=");
+            SerialWriteHex(frame->r11);
+            SerialWrite(" r12=");
+            SerialWriteHex(frame->r12);
+            SerialWrite(" r13=");
+            SerialWriteHex(frame->r13);
+            SerialWrite("\n  r14=");
+            SerialWriteHex(frame->r14);
+            SerialWrite(" r15=");
+            SerialWriteHex(frame->r15);
+            // Stack window: the CALL that jumped to the wild RIP left its
+            // return address on the stack near rsp. 32 fault-safe quads;
+            // [TEXT] flags any value inside kernel .text => a likely
+            // return address (addr2line it to find the calling site).
+            SerialWrite("\n  --- stack @ rsp (32 quads; [TEXT] = in kernel .text => likely caller) ---\n");
+            for (::duetos::u64 i = 0; i < 32; ++i)
+            {
+                const ::duetos::u64 addr = frame->rsp + i * 8;
+                ::duetos::u64 val = 0;
+                const bool ok = ::duetos::mm::SafeReadKernel(&val, reinterpret_cast<const void*>(addr), sizeof(val));
+                SerialWrite("    [rsp+");
+                SerialWriteHex(i * 8);
+                SerialWrite("] = ");
+                if (ok)
+                {
+                    SerialWriteHex(val);
+                    if (val >= wr_tlo && val < wr_thi)
+                        SerialWrite("  [TEXT]");
+                }
+                else
+                {
+                    SerialWrite("<unreadable>");
+                }
+                SerialWrite("\n");
+            }
+            SerialWrite("=== [wild-kernel-rip] end — halting (no cascade, no broadcast) ===\n");
+            for (;;)
+                asm volatile("cli; hlt");
+        }
+    }
+
     // DIAG: runaway fault-loop catcher by tight descent (see kMaxTightRecursion).
     // A fault-on-fault loop hands us frames marching DOWN one stack, each ~one
     // TrapDispatch frame below the last. Count consecutive tight descents; ANY

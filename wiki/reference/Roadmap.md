@@ -417,6 +417,36 @@ area is readable immediately instead of corrupted.
   HOST-EMULATOR ABORT vs HANG, and always recovers the guest fault
   vector/RIP (incl. the ASCII-RIP root lead) from the `-d int` trace so
   a host abort can never fully mask the kernel bug underneath it.
+- **Investigation probe landed:** `arch/traps` now has a one-shot
+  WILD-KERNEL-RIP forensic at dispatch entry — the FIRST kernel-mode
+  fault whose saved RIP is null / -1 / non-canonical (the cascade's
+  trigger shape) halts the CPU after dumping max context with MINIMAL
+  device access: vector/err/cr2, the base MSRs (`gs_base`/`kgs_base`/
+  `fs_base` — to test the "GSBASE clobbered with a TSC-shaped value"
+  theory), all GPRs, and a 32-quad fault-safe `rsp` window with `[TEXT]`
+  flags on kernel-text values (= the return address of whatever CALLed
+  the wild target — the root-cause lead). It emits NO NMI broadcast and
+  NO minidump, so it should not trip the QEMU BQL abort the way the full
+  dump does. It is also a genuine defensive halt (a wild kernel RIP can
+  never do useful work; it would Panic anyway).
+- **Observability blocker + fix:** under QEMU `-serial stdio` (the
+  harness default, redirected to a file), the serial stream is
+  block-buffered and the QEMU `abort()` does NOT flush it, so the
+  trailing ~4 KB — the precis, the forensic, the whole panic dump — is
+  LOST; only the `-d int` log (qemu.log, flushed per-line) survives,
+  which is why the cascade is only visible there. `run.sh` now takes
+  `DUETOS_SERIAL_FILE=<path>` to route COM1 through QEMU's *file*
+  chardev, which `write()`s unbuffered and survives the abort.
+- **NEXT STEP to root-cause:** run the smoke with
+  `DUETOS_SERIAL_FILE=/tmp/serial.log` on a **KVM** host (`accel=kvm`,
+  no TCG BQL abort) **or real hardware**, then read `/tmp/serial.log`
+  for the `[wild-kernel-rip]` block. Its `[TEXT]`-flagged stack quad is
+  the caller that jumped to the null/clobbered pointer; `addr2line` it
+  against `build/<preset>/kernel/duetos-kernel.elf` to find the source
+  site that stores a TSC-shaped value (`0x3e9d63263`-ish) where a code
+  pointer belongs. (Could not be captured in the originating session:
+  TCG aborts before the unbuffered re-run could complete on a degraded
+  sandbox with no `/dev/kvm`.)
 
 ### Topology — cluster-scoped IPI fan-out
 
