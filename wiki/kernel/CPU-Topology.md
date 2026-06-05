@@ -1,5 +1,11 @@
 # CPU Topology & Scheduler Clustering
 
+> **Audience:** Kernel hackers, scheduler / SMP authors
+>
+> **Execution context:** Kernel — topology decode at boot (BSP + each AP);
+> per-CPU infrastructure (`critical`, `ipi_call`, `percpu`) runs at any
+> level per its own contract
+>
 > **Maturity:** v0 — locality-aware work-stealing, NUMA-aware frame allocator, cluster-aware wake placement, periodic active load balancing, SMT-aware placement, and hybrid P/E-core bias. Per-cluster runqueues and cluster-broadcast IPIs remain deferred follow-ups.
 
 ## What this is
@@ -116,6 +122,48 @@ bits  0..15: package_id
 - **Single-CPU regression** (`-smp 1`): `StealNormalFromPeer` returns at the `limit <= 1` guard before reading cluster bits — identical timing to pre-change.
 - **Manual locality trace**: arm `sched.context_switch`, boot multi-NUMA, observe stolen tasks' `last_cpu` stays within the original cluster on first pass.
 
+## Per-CPU Infrastructure
+
+`kernel/cpu/` is more than the topology decoder. Five further file
+pairs provide the per-CPU plumbing the scheduler and SMP paths build on:
+
+- **`percpu.{h,cpp}`** — the `PerCpu` struct, one per CPU, reached via
+  `IA32_GS_BASE` so any CPU reads its own data with a `gs:`-relative
+  load and zero synchronisation. `PerCpuInitBsp()` runs before
+  `SchedInit`; each AP trampoline allocates its own `PerCpu` and writes
+  GSBASE before entering kernel code. Offsets used by the syscall stub
+  (`kPerCpuKernelRsp = 32`, `kPerCpuUserRspScratch = 40`) are pinned by
+  `static_assert`.
+- **`cpuhp.{h,cpp}`** — the CPU hotplug state machine (Linux
+  `kernel/cpu.c` shape): a sparse ordered sequence of per-CPU states
+  (`Offline` … `Online`) with `(startup, teardown)` callbacks
+  registered per state. Bring-up walks forward (`CpuhpBringUp`),
+  takedown backward (`CpuhpTakeDown`); a failed startup rolls back
+  through the teardowns of every state already entered. PREPARE states
+  run on the BSP before SIPI; STARTING/ONLINE states run on the target
+  AP from `ApEntryFromTrampoline`.
+- **`critical.{h,cpp}`** — a preemption-off (IRQs-on) critical section
+  (FreeBSD `critical_enter(9)` shape). A per-CPU `critnest` counter
+  blocks the scheduler from migrating/preempting the current thread
+  *without* masking interrupts: ticks still fire, but a reschedule that
+  wants this CPU sets `deferred_preempt` and runs synchronously on
+  `CriticalExit`. ~5× cheaper than `cli`/`sti` per pair. Use
+  `CriticalGuard` (RAII) rather than the bare `CriticalEnter`/`Exit`.
+- **`ipi_call.{h,cpp}`** — the cross-CPU function-call primitive (Linux
+  `smp_call_function*` / Windows `KeIpiGenericCall` shape). Any CPU can
+  invoke an arbitrary function on one peer (`IpiCallOne`) or every
+  online CPU, with optional spin-wait for completion, via a per-CPU
+  16-slot MPSC mailbox ring. The callee `fn` runs in IRQ context with
+  IF=0 on the target CPU and must not sleep. Unblocks correct per-CPU
+  TLB shootdown and future stop-machine / live-patch primitives.
+- **`percpu_counter.{h,cpp}`** — a split per-CPU counter with bounded
+  slop. Hot writers (`Add`) bump only their CPU's stash and fold into
+  the 64-bit global under a short spinlock when the stash exceeds
+  `batch`. `ReadApproximate()` is a single atomic load (drift ≤
+  `batch * NR_CPUS`); `ReadExact()` sums every stash under the lock.
+  For read-mostly counters (free-page count, open-handle count,
+  scheduler stats) where a global atomic per increment would dominate.
+
 ## Files
 
 - `kernel/cpu/topology.h` / `topology.cpp` — public API + implementation
@@ -125,6 +173,15 @@ bits  0..15: package_id
 - `kernel/arch/x86_64/smp.cpp` — `TopologyInitAp` invocation in `ApEntryFromTrampoline`
 - `kernel/core/main.cpp` — `TopologyInitBsp` + `TopologyAssignClusters` + `TopologyDump` wiring
 - `kernel/debug/probes.h` / `probes.cpp` — `kTopologyParseFailed`
+
+## Known Limits / GAPs
+
+- **NUMA-unaware frame allocator detail** — SRAT NUMA ranges feed
+  `cluster_id`, but the frame allocator itself is still a single global
+  pool; per-node pools are deferred (see [Memory Management](Memory-Management.md)).
+- **SRAT entries with `apic_id >= 256`** — logged once and skipped,
+  out of v0 scope (see [Failure handling](#failure-handling) above).
+- The deferred follow-on slices below.
 
 ## Follow-on slices (deferred)
 

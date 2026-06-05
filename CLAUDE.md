@@ -15,7 +15,7 @@ This is a greenfield project. Treat every file in the tree as intentionally shap
 - **Boot**: UEFI-first (x86_64), with a secondary legacy-BIOS path only if/when a target machine demands it. No MBR-only code paths in new work.
 - **Memory**: 4-level paging (x86_64), NX, SMEP/SMAP, KASLR, per-process address spaces. Physical frame allocator + slab/buddy hybrid.
 - **Scheduler**: MLFQ + per-CPU runqueues, affinity, work-stealing. Real-time class reserved, not the default.
-- **Filesystem**: VFS abstraction. First backend: a native FS tuned for the project's needs. FAT32/exFAT/NTFS read-only tier for interoperability; ext4 read-only tier for Linux data partitions.
+- **Filesystem**: VFS abstraction. First backend: a native FS tuned for the project's needs. FAT32 and exFAT are read + bounded-write tiers (in-place / append / create / delete / rename; no cluster-chain growth) for interoperability; NTFS read-only tier for interoperability; ext4 read-only tier for Linux data partitions.
 - **Executable formats**: Native ELF-like format **and** full PE/COFF. The PE subsystem is a peer, not a shim.
 - **Win32 subsystem**: NT syscall layer → user-mode `ntdll`, `kernel32`, `user32`, `gdi32`, `d3d*`, `dxgi`, `winmm`, `xaudio2` reimplementations. Not a Wine fork — studied as prior art, not taken as a dependency.
 - **Graphics**: Direct GPU drivers for Intel/AMD/NVIDIA. Kernel-mode DRM-style layer + user-mode API (Vulkan-first, D3D11/D3D12 translation on top for the Win32 subsystem).

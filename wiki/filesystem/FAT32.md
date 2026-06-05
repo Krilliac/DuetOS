@@ -4,13 +4,39 @@
 >
 > **Execution context:** Kernel — process context
 >
-> **Maturity:** Read-only v0; LFN checksum validation live
+> **Maturity:** Read + bounded write (no cluster-chain growth); LFN checksum validation live
 
 ## Overview
 
-`kernel/fs/fat32/` reads FAT32 partitions for interoperability with
-Windows-formatted media. Read paths are live; writes are deferred
-behind the same FS-write gap as the other on-disk backends.
+`kernel/fs/fat32*.cpp` reads **and writes** FAT32 partitions for
+interoperability with Windows-formatted media. Read paths are live;
+write paths are live for in-place writes, append-only growth, and
+file create / delete / rename. The one bounded write that is **not**
+supported is a mid-file write that would grow a file's cluster chain
+(see [Known Limits](#known-limits--gaps)).
+
+## Threading & Locking Model
+
+All FAT32 ops run in process context and are polling-synchronous
+against the block device — none sleep across DMA. The write path is
+**not reentrant**: `fat32_write.cpp` reads and rewrites the FAT
+through a single file-static scratch buffer (`g_scratch`), so two
+concurrent writers on the same volume would corrupt each other's
+FAT updates. Today the only callers are the single shell thread and
+the single-threaded boot init; an SMP write workload would need a
+per-volume lock around the mutators before sharing `g_scratch`.
+
+## Capability / Privilege Surface
+
+FAT32 writes are gated by `kCapFsWrite` and reads by `kCapFsRead`.
+The gate is enforced in the **syscall layer**, not in `kernel/fs/`:
+the Linux ABI checks it in
+`kernel/subsystems/linux/syscall_io.cpp`,
+`kernel/subsystems/linux/syscall_fs_mut.cpp`, and
+`kernel/subsystems/linux/syscall_file.cpp`; the Win32 ABI gates it
+centrally through `SyscallGate` (`cap_table.def`). The FS backend
+trusts that the gate already ran. See
+[`security/Capabilities.md`](../security/Capabilities.md).
 
 ## Long File Name (LFN) Walker
 

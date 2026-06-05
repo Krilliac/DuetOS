@@ -20,7 +20,7 @@ DuetOS storage stack today:
         |
 [ Block layer (light) ]                kernel/fs/block.{h,cpp}
         |
-[ Storage driver ]                     kernel/drivers/storage/{nvme,ahci}/
+[ Storage driver ]                     kernel/drivers/storage/{nvme,ahci}.cpp
         |
 [ PCIe device ]
 ```

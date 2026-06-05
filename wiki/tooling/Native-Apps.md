@@ -41,17 +41,19 @@ userland/libc/src/string.S             ← strlen rax-clobber fix
 userland/native-apps/<name>/<name>.c   ← per-app source root
 ```
 
-Plus three portable native apps that boot every smoke run:
+Plus four portable native apps that boot every smoke run:
 
 | App | Source | Sentinel | Demonstrates |
 |-----|--------|----------|--------------|
 | `hello_native` | `userland/native-apps/hello_native/hello_native.c` | `[hello-native] portable native ELF spawned` | The pipeline works; libc `print_fmt` substitutes `%d` / `%x`. |
 | `nat_calc` | `userland/native-apps/nat_calc/nat_calc.c` | `[nat-calc] all eval cases passed` | Real logic in a portable app — recursive-descent arithmetic eval with operator precedence + parens. |
 | `nat_sysinfo` | `userland/native-apps/nat_sysinfo/nat_sysinfo.c` | `[nat-sysinfo] report complete` | Real syscalls (SYS_SYSTEM_INFO=49, SYS_MEM_STATUS=47, SYS_GETTIME_ST=40) reached from portable user code; reports arch + CPU count + memory + UTC time. Pure-CLI peer of the in-kernel `sysmon` widget app. |
+| `duet-pkg` | `userland/native-apps/duet-pkg/duet-pkg.c` | `[duet-pkg-selftest] PASS` | On-target package-manager scaffold (`duetos_native_app(duet-pkg)`, embedded in ramfs, spawned from `/bin/duet-pkg`). No-argv boot run exercises a clean-room FIPS 180-4 SHA-256 against the NIST KATs; subcommands (`hash`, `version`, `help`) work. Network fetch / signature verify / manifest parsing are deferred — `tools/pkg/` is the authoritative host-side implementation until the on-target port reaches parity. |
 
-All three spawn at boot from `kernel/core/main.cpp` next to
-`usershell.elf`. The smoke harness can grep for any sentinel
-to detect a regression in the native-app pipeline.
+All four spawn at boot (the first three from `kernel/core/main.cpp`
+next to `usershell.elf`; `duet-pkg` from `boot_bringup.cpp` via
+`SpawnElfFile("/bin/duet-pkg", ...)`). The smoke harness can grep
+for any sentinel to detect a regression in the native-app pipeline.
 
 ## Adding a new portable app
 

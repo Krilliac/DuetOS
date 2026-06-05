@@ -4,9 +4,10 @@
 >
 > **Execution context:** Userland — DLLs run in the target process's user-mode context
 >
-> **Maturity:** 45 production DLLs in tree, all preloaded on real
-> hardware; 7 non-essential entries are skipped under
-> `arch::IsEmulator()` to keep CI runs short
+> **Maturity:** 44 production DLLs in tree, all preloaded on real
+> hardware; 9 preload entries (7 non-essential production DLLs +
+> 2 `customdll*` fixtures) are skipped under `arch::IsEmulator()`
+> to keep CI runs short
 
 ## Overview
 
@@ -16,7 +17,7 @@ They are *not* parallel subsystems — there is one TCP stack in the
 kernel, one VFS, one registry, one window manager. The DLLs marshal
 Win32 calls into syscalls and trust the kernel's return.
 
-## DLL Inventory (45 production DLLs)
+## DLL Inventory (44 production DLLs)
 
 | Group | DLLs |
 |-------|------|
@@ -29,11 +30,22 @@ Win32 calls into syscalls and trust the kernel's return.
 | DirectX surface | `d3d9`, `d3d11`, `d3d12`, `dxgi`, `d2d1`, `dwrite`, `dinput8`, `ddraw`, `d3dcompiler` |
 | Vulkan | `vulkan-1` |
 
-Total: ~1100 exports across the 45 production DLLs (plus 2
+Total: ~1100 exports across the 44 production DLLs (plus 2
 `customdll*` test fixtures used by the dev-time export-resolver
 smoke). For per-DLL drilldown, LOC, and per-method REAL / GAP /
 STUB / MISSING status, see
 [`Win32-Surface-Status`](../reference/Win32-Surface-Status.md).
+
+### PE32 (32-bit) variants
+
+Thirteen DLLs ship a parallel 32-bit (`i386`) build under a `_32`
+suffix so a WoW64-shaped PE32 import table resolves against a
+matching PE32 image. These are not counted in the 44 production
+total — they are alternate-arch builds of DLLs already in the list:
+
+`advapi32_32`, `bcrypt_32`, `comctl32_32`, `comdlg32_32`,
+`crypt32_32`, `gdi32_32`, `iphlpapi_32`, `kernel32_32`,
+`msvcrt_32`, `shell32_32`, `shlwapi_32`, `user32_32`, `ws2_32_32`.
 
 ## Load Time
 
@@ -95,6 +107,48 @@ The DLLs are not flat stubs. Real implementations land per slice:
   built-in FileOpenDialog / FileSaveDialog / StdComponentCategoriesMgr
   factories, `REGDB_E_CLASSNOTREG` for unknown CLSIDs, and real
   `CoTaskMem*` / BSTR helpers.
+
+## Threading & Locking Model
+
+Every Win32 DLL runs in the **target PE process's user-mode
+context** — there is no kernel context here. Critical sections,
+SRW locks, and `InitOnce` are real spin-CAS on the caller's lock
+word, yielding via `SYS_YIELD` on contention; they never enter an
+IRQ-disabled region. Per-thread state (`GetLastError`, COM
+apartment) is kept in a scheduler `Task` slot or a per-thread
+block, so concurrent Win32 threads in one process keep
+independent error/apartment state. Shared mutable state across
+threads goes through a kernel object (`SYS_MUTEX_*`,
+`SYS_EVENT_*`, …), never a DLL-private global.
+
+## Capability / Privilege Surface
+
+These DLLs hold **no privilege of their own**. A PE binary reaches
+the kernel only through cap-gated syscalls — a write goes through
+`SYS_FILE_WRITE` (`kCapFsWrite`), a thread spawn through
+`SYS_THREAD_CREATE` (`kCapSpawnThread`), and so on. Any Win32
+privilege surface a DLL exposes (`AdjustTokenPrivileges`,
+`SeDebugPrivilege`, integrity levels, ACL APIs) is a
+**probe-satisfying facade**: it returns plausible success/failure
+shapes so callers proceed, but it grants and revokes nothing. The
+kernel's `Process::caps` (`kCap*`) bitset is the sole authority on
+what a guest binary can do. See
+[`security/Capabilities.md`](../security/Capabilities.md) and
+[Subsystem Isolation](../kernel/Subsystem-Isolation.md).
+
+## Known Limits / GAPs / STUBs
+
+The userland DLLs carry **zero** `// STUB:` / `// GAP:` markers in
+source today — this wiki and
+[`Win32-Surface-Status`](../reference/Win32-Surface-Status.md) are
+the authoritative stub inventory. The per-method REAL / GAP /
+STUB / MISSING breakdown lives there; consult it before assuming a
+named export is real. Page-level limits:
+
+- No lazy `LoadLibrary`-on-demand load — the whole production set
+  preloads at spawn (the emulator skip-list is the only trim).
+- No full writable TEB yet; `GetLastError` uses a scheduler slot.
+- Win32 privilege APIs are facades (see above); they do not gate.
 
 ## DLL Authoring Conventions
 

@@ -1,5 +1,13 @@
 # DRSH — DuetOS Remote SHell + Desktop
 
+> **Audience:** Net stack hackers, operators enabling remote access
+>
+> **Execution context:** Kernel — server accept loop + per-session
+> channel loop run in process context on a worker thread
+>
+> **Maturity:** active — encrypted PSK-authenticated shell + desktop
+> over TCP; single channel per session, no public-key auth (see v0 limits)
+
 DRSH is DuetOS's native equivalent of SSH: a single authenticated,
 encrypted carrier that multiplexes an interactive terminal channel and
 a remote-desktop (framebuffer + input) channel. It is **not**
@@ -74,6 +82,21 @@ DRSH does **not** provide:
   on its own 5-tuple, so multiple clients can connect at once
   without colliding. The v0 "single concurrent session" GAP that
   used to live here has been retired.
+
+## Threading & Locking Model
+
+- The **accept loop** (`drsh_server.cpp`) runs in process context on a
+  worker thread, blocking on `accept` on the listener socket. Each
+  accepted connection rides its own TCB on its own 5-tuple, so multiple
+  clients connect without colliding.
+- Each session's **channel loop** runs synchronously on the same worker:
+  it drives the handshake, then services exactly one channel (shell or
+  desktop) before tearing down — there is no per-channel task, which is
+  why v0 caps a session at one channel.
+- All socket I/O blocks in process context; nothing in DRSH runs from an
+  IRQ handler. Session state (keys, counters, the pre-shared password in
+  `g_global.password`) lives in kernel globals mutated only on this
+  worker path.
 
 ## Wire protocol
 

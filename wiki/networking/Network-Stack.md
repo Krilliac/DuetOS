@@ -28,7 +28,7 @@ See [Networking Drivers](../drivers/Networking-Drivers.md).
         |
 [ kernel net stack ]                       kernel/net/
         |
-[ ARP / IP / UDP / TCP / DNS / DHCP ]
+[ ARP / IPv4 / IPv6 / UDP / TCP / DNS / DHCP / HTTP / TLS ]
         |
 [ netif ]                                  driver-side adapter
         |
@@ -65,6 +65,62 @@ See [Networking Drivers](../drivers/Networking-Drivers.md).
 - **DHCP client** — gets an IP from the local network
 - **DNS resolver** — `getaddrinfo`-equivalent
 
+## Native Socket ABI (`SYS_SOCKET_OP`)
+
+`SYS_SOCKET_OP = 153` is the native ABI front-end into the stack — a
+multi-op syscall whose `rdi` selects the operation. `userland/libs/ws2_32/`
+translates Winsock onto the same op table. Defined in
+`kernel/syscall/syscall.h`, dispatched in `kernel/syscall/syscall.cpp`:
+
+| Op | Name | Purpose |
+|----|------|---------|
+| 1 | `kSockOpCreate` | Create a socket (`AF_INET`) |
+| 2 | `kSockOpBind` | Bind to a `sockaddr_in` |
+| 3 | `kSockOpConnect` | Connect to a `sockaddr_in` |
+| 4 | `kSockOpListen` | Listen with a backlog |
+| 5 | `kSockOpAccept` | Accept; fills peer `sockaddr_in` |
+| 6 | `kSockOpSendto` | Send to a buffer / address |
+| 7 | `kSockOpRecvfrom` | Receive into a buffer |
+| 8 | `kSockOpShutdown` | Half/full shutdown (how 0/1/2) |
+| 9 | `kSockOpClose` | Close the socket |
+| 10 | `kSockOpGetSock` | Read local `sockaddr` |
+| 11 | `kSockOpGetPeer` | Read peer `sockaddr` |
+| 12 | `kSockOpResolveA` | Blocking A-record lookup |
+| 13 | `kSockOpGetLease` | Snapshot the current DHCP lease |
+| 14 | `kSockOpPollEvents` | Non-blocking readiness probe (FD_READ / FD_WRITE / FD_ACCEPT / FD_CLOSE), backs the Winsock event surface (`net::SocketPollEvents`) |
+
+## HTTP Client
+
+`kernel/net/http.cpp` is the in-kernel HTTP/1.1 client used by the shell
+`wget` path, the browser, and the install fetchers. It drives a TCP (or
+TLS, via the TLS client below) socket, sends the request line + headers,
+and decodes the response body via both `Content-Length` and
+chunked transfer-encoding.
+
+GAP: `http.cpp:718` — chunked trailers are drained off the wire but not
+surfaced to the caller.
+
+## Cookie Jar
+
+`kernel/net/cookies.cpp` is the per-host cookie jar consumed by the HTTP
+client and browser. It parses `Set-Cookie`, honours expiry / `Max-Age` /
+`Path` / domain matching, and persists to a FAT32 volume when one is
+mounted (`cookies.cpp:730`).
+
+GAPs:
+
+- `cookies.cpp:26` + `cookies.h:14` — no public-suffix list, so eTLD+1
+  enforcement is absent (a site cannot be stopped from setting a cookie
+  for a too-broad domain like `.com` by the PSL, only by the basic
+  domain-match rule).
+- No `__Secure-` / `__Host-` cookie-prefix handling.
+
+## TLS Client
+
+The HTTPS path layers `kernel/net/tls.{h,cpp}` (a TLS 1.2 client) over
+the TCP socket. See [TLS Client](TLS-Roadmap.md) for the handshake state
+machine, the embedded root store, and the cert-verification GAPs.
+
 ## Live Verification
 
 DuetOS reaches Google over a real connection:
@@ -88,6 +144,23 @@ The kernel shell exposes:
 - `net <addr>` — quick reach test
 
 See [Shell Commands](../reference/Shell-Commands.md) for the full list.
+
+## Threading & Locking Model
+
+- **RX** runs from the netif driver's IRQ tail via `NetStackInjectRx`,
+  which copies the frame and hands it to the protocol demux. ARP / IPv4
+  / IPv6 dispatch, TCP reassembly, and UDP delivery all complete in this
+  context, so no sleeping primitive may be taken on the RX path.
+- **Socket syscalls** (`SYS_SOCKET_OP`) run in the calling process's
+  context. Blocking ops (`kSockOpConnect`, `kSockOpAccept`,
+  `kSockOpRecvfrom`, `kSockOpResolveA`) park the thread on a wait queue;
+  `kSockOpPollEvents` never blocks.
+- The TCB table, socket table, ARP cache, and DHCP lease are guarded by
+  per-table spinlocks taken IRQ-off, because the IRQ RX path and the
+  process-context syscall path both touch them.
+- **TLS / HTTP / cookies** run entirely in the caller's process context
+  on top of a socket — they may block on socket reads and never run from
+  IRQ.
 
 ## Capability Surface
 
@@ -133,8 +206,20 @@ throughput display.
 
 ## Known Limits / GAPs
 
-- **No IPv6.** v6 is on the deferred list — IPv4 covers the workload
-  surface today.
+- **IPv6 is partial.** `kernel/net/ipv6.cpp` parses/builds the 40-byte
+  fixed header, answers ICMPv6 echo, does the minimal Neighbor
+  Discovery (NS → NA) needed for link-local reachability, and computes
+  the IPv6 pseudo-header checksum for UDP/TCP. EtherType `0x86DD` is
+  demuxed in `stack.h` (`kEtherTypeIpv6`, the `Ipv6Header` struct).
+  Three GAPs cap the v0 surface:
+  - `ipv6.cpp:385` (UDP) and `ipv6.cpp:403` (TCP) — the transport demux
+    tables are keyed on `Ipv4Address`, so a v6 datagram is delivered
+    with a zero v4 placeholder peer. The shared transport runs but the
+    peer address is not threaded through; real v6 sockets need a tagged
+    address key.
+  - `stack.h:106` — extension headers (Hop-by-Hop, Routing, Fragment,
+    Dest Options), fragmentation/reassembly, full ND (RS/RA, DAD,
+    redirect), SLAAC, MLD, and routing are all deferred.
 - **`WSAEventSelect` / `WSAEnumNetworkEvents` /
   `WSAWaitForMultipleEvents` shipped** with a real producer
   side — `kSockOpPollEvents` (op 14 on `SYS_SOCKET_OP = 153`)
@@ -172,6 +257,21 @@ throughput display.
   landed; see [Firewall Roadmap](Firewall-Roadmap.md) for the live
   state machine and capacity. Default-deny inbound is still off by
   policy choice (Allow by default), not by missing infrastructure.
+
+## Troubleshooting
+
+- **No DHCP lease** — check `ifconfig` for a link-up netif, then `dhcp`
+  to re-kick the client; `kSockOpGetLease` (op 13) snapshots the current
+  lease for a programmatic check.
+- **DNS resolves but TCP connect hangs** — confirm a route exists
+  (`route`) and that no firewall Deny rule is shadowing the egress;
+  `firewall log` lists recent denials with the matched rule index.
+- **HTTPS fails where HTTP works** — a non-browser TLS caller that never
+  installed a cert verifier skips chain validation (`tls_socket.cpp:174`);
+  cert-chain rejects for unsupported algorithms fail closed (see the TLS
+  Client Known Limits).
+- **A socket reports readable but recv returns 0** — that is a peer FIN /
+  `FD_CLOSE`; re-check `kSockOpPollEvents` (op 14) for the `FD_CLOSE` bit.
 
 ## Related Pages
 

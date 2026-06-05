@@ -172,6 +172,40 @@ also validate the canonical ABI.
 D3D11's vtable was canonical from v0; nothing changed there beyond
 the new method additions.
 
+## Threading & Locking Model
+
+The D3D DLLs run in the calling PE's user-mode context. COM device
+and context objects are **not** internally synchronised — D3D11's
+`ID3D11DeviceContext` is single-threaded by contract, matching the
+real API. The software rasterizer in `dx_raster.h` is header-only
+and stateless per call; it writes only the caller-owned
+`DxBackBuffer` in user memory. The only kernel crossing per frame is
+`Present` → `SYS_GDI_BITBLT`, which serialises through the one
+kernel compositor BitBlt path shared with native and GDI clients.
+No D3D-private kernel lock exists.
+
+## Capability / Privilege Surface
+
+These DLLs hold no privilege of their own. Every effect on the
+system crosses a cap-gated syscall: back-buffer presentation goes
+through `SYS_GDI_BITBLT`, DirectInput through `SYS_WIN_GET_KEYSTATE`
+/ `SYS_WIN_CURSOR`. A PE can only present to an HWND it legitimately
+owns, gated by the kernel's window-manager mediation — the D3D ABI
+adds no privilege the PE's `Process::caps` (`kCap*`) did not already
+grant. See [`security/Capabilities.md`](../security/Capabilities.md)
+and [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
+
+## Known Limits / GAPs / STUBs
+
+The DirectX DLLs carry **zero** `// STUB:` / `// GAP:` markers in
+source — this page is the authoritative limit inventory. See
+[What Returns E_NOTIMPL](#what-returns-e_notimpl) above for the
+per-feature list (no shader execution, no texture sampling, no
+Z-buffer, no cross-DLL DXGI marriage, no fixed-function D3D9
+lighting). `d3dcompiler.dll` compiles a small HLSL subset to a
+DXBC-shaped blob, but the d3d11/d3d12 draw path ignores the
+bytecode and always uses the pass-through rasterizer.
+
 ## Related Pages
 
 - [Win32 DLLs](Win32-DLLs.md)

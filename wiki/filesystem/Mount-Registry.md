@@ -89,14 +89,23 @@ Today's wiring:
 |---------------|---------------------------------|
 | Ramfs         | **No** — see "Why no ramfs"     |
 | Fat32         | Yes                             |
-| Ext4          | Slot reserved; lookup is nullptr |
-| Ntfs          | Slot reserved; lookup is nullptr |
+| Ext4          | Yes — `g_ext4_ops` → `Ext4Lookup` (runs real resolution; returns false) |
+| Ntfs          | Yes — `g_ntfs_ops` → `NtfsLookup` (runs real resolution; returns false) |
 | DuetFs        | Yes                             |
 | RamVol        | Yes                             |
 
-`VfsBackendForFsType` returns nullptr for unwired types so
-`VfsResolve` falls back to the ramfs root instead of returning a
-misleading "not found."
+`VfsBackendForFsType` returns nullptr only for types with no
+registered ops; for those `VfsResolve` falls back to the ramfs root
+instead of returning a misleading "not found."
+
+The ext4 and NTFS arms (`mount.cpp:430` `g_ext4_ops`,
+`mount.cpp:480` `g_ntfs_ops`) are registered with **real** lookup
+functions that run the backend's resolution, but they return false
+today because `vfs.h` has no `VfsBackend::Ext4` / `VfsBackend::Ntfs`
+tag to stash the resolved node into — see the two `// STUB:`
+markers at `mount.cpp:387` (`Ext4Lookup`) and `mount.cpp:438`
+(`NtfsLookup`). The gating work is the `VfsBackend` enum + node
+plumbing, not the resolution itself.
 
 ## Why no ramfs in the vtable
 
@@ -155,9 +164,12 @@ walks `VfsMountEnumerate` for the list path.
 
 - **No SMP locking.** Documented above — premature until a
   concurrent mutator exists.
-- **Ext4 / NTFS lookup vtables unwired.** The registry slot is
-  reserved so a backend can land without touching this file; the
-  read paths themselves are the gating work.
+- **Ext4 / NTFS lookups resolve but can't surface a node.**
+  `g_ext4_ops` / `g_ntfs_ops` are registered with real lookup
+  functions, but they return false because `vfs.h` lacks a
+  `VfsBackend::Ext4` / `VfsBackend::Ntfs` tag — see `mount.cpp:387`
+  and `mount.cpp:438` `// STUB:`. Adding the enum members + node
+  plumbing is the gating work, not the backend resolution.
 - **No per-process mount visibility mask.** Every mount is visible
   to every process. Per-process namespaces would extend
   `MountEntry` with an owning-process or visibility set; the

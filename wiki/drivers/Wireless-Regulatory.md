@@ -2,8 +2,8 @@
 
 > **Audience:** Wi-Fi driver authors, MLME / scan code maintainers
 >
-> **Execution context:** Kernel — read by MLME scan, channel
-> selection, and TX gating
+> **Execution context:** Kernel — intended to be read by MLME scan,
+> channel selection, and TX gating (not yet wired in; see Known Limits)
 >
 > **Maturity:** v0 — three built-in domains (US / EU / JP), 802.11d
 > Country IE intersector, boot self-test
@@ -129,6 +129,16 @@ A regression fires `kBootSelftestFail` via the probe table.
 
 ## Known Limits / GAPs
 
+- **Built but not yet consumed by the MLME.** The tables, the 802.11d
+  intersector, and the boot self-test all exist and pass, but no caller
+  in the wireless stack invokes `regdb::FreqAllowed` / `MaxEirpMbm` /
+  `ActiveDomain` yet — a `git grep` for those symbols across
+  `mlme.cpp` / `wdev.cpp` / `beacon.cpp` returns zero hits. Until the
+  scan / channel-selection / TX-gating path is wired through this layer,
+  the database is dormant infrastructure and the effective channel set
+  is still the baked-in 802.11 table (see
+  [802.11 Wireless Stack](Wireless-80211.md#known-limits--gaps)). Wiring
+  it in is the next slice.
 - **Only 3 regions.** Add `kDomainXX` literals as DuetOS gains
   users in those regions. The `kRulesMaxPerDomain = 8` cap allows
   three more rules per region; bump if a domain needs > 8 rules.

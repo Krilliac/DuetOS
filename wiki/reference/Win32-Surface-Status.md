@@ -2320,6 +2320,44 @@ SetDisplayMode (recorded but ignored), CreateSurface.
 **IDirectDrawSurface7** — REAL: Lock, Unlock, Blt (COLORFILL).
 STUB: hardware overlay, video memory paging, palette.
 
+### d3dcompiler.dll  (~1 771 LOC) — `D3DCompile`, `D3DCompile2`, `D3DCreateBlob`, `D3DReflect`, `D3DDisassemble`
+
+**Shipped and preloaded.** Front-ends a real in-process HLSL
+compiler. REAL: a recursive-descent lexer/parser over a small HLSL
+subset (struct decls, `cbuffer`, function defs, `+ - * /` /
+unary-`-` / parenthesised / field-access / call / type-constructor
+expressions) and a deterministic DXBC-shaped bytecode emitter
+(`DXBC` magic + FNV-1a hash + SHEX/ISGN/OSGN/STAT chunks). Blobs
+are wrapped in canonical `ID3DBlob` COM objects; a second compile
+of identical source is byte-exact; `D3DReflect` round-trips the
+blob; `DuetOS_D3DCompiler_PeekBlobMagic` exposes the magic for
+smoke tests.
+
+GAP: the emitted bytecode is **not executed** by the d3d11/d3d12
+draw path — the rasterizer stays pass-through. STUB: texture /
+sampler grammar, control flow, intrinsic library, optimisation.
+`d3dcompiler_47.dll` (versioned alias) is not built today. See
+[`wiki/subsystems/DirectX.md`](../subsystems/DirectX.md) for the
+HLSL-subset narrative.
+
+### vulkan-1.dll  (~1 043 LOC) — `vkGetInstanceProcAddr`, `vkCreateInstance`, `vkEnumeratePhysicalDevices`, …
+
+**Shipped and preloaded.** Thin thunks over `SYS_VK_CALL`
+(syscall 211) into the in-kernel Vulkan ICD
+(`kernel/subsystems/graphics/graphics_vk.cpp`). REAL (v0 bind
+set): `vkCreateInstance` / `vkDestroyInstance`,
+`vkEnumeratePhysicalDevices`, `vkCreateDevice` /
+`vkDestroyDevice`, `vkGetDeviceQueue`, `vkDeviceWaitIdle` /
+`vkQueueWaitIdle`, `vkEnumerateInstanceVersion`, and the
+string→fn-ptr `vkGetInstanceProcAddr` / `vkGetDeviceProcAddr`
+lookup.
+
+STUB: buffer/memory/image creation (needs user-mappable shared
+memory), command-buffer record+submit, swapchain / surface / WSI,
+SPIR-V module create. These return `VK_ERROR_INITIALIZATION_FAILED`
+so a caller's `if (result != VK_SUCCESS) return;` early-exit works
+cleanly — many apps then fall back to D3D11.
+
 ---
 
 ## 8. COM / automation
@@ -2370,17 +2408,17 @@ IDispatch interface support, safe-array API beyond basics.
 
 ## 9. Major DLLs we don't ship at all
 
-A real Windows app reaches into far more DLLs than the 38 we
-ship. Here's what's missing — grouped by what would unlock if we
-did. PE imports of these names fail at PeLoad today.
+A real Windows app reaches into far more DLLs than the 44 we
+ship. Here's what's *not* shipped — grouped by what would unlock
+if we did. PE imports of these names fail at PeLoad today. DLLs we
+**do** ship — including `vulkan-1.dll` and `d3dcompiler.dll` — are
+covered in [§7 (DirectX surface)](#7-directx-surface-peer-of-win32-7000-loc)
+above and are deliberately absent from this list.
 
 ### Graphics / media
 
 - **opengl32.dll** — OpenGL 1.1+. Common in older games and
   CAD apps. Needs an ICD model + GLSL compiler.
-- **vulkan-1.dll** — modern GPU API. Real Vulkan ICDs are
-  the same scale as D3D. Some apps fall back to D3D11 if
-  vulkan-1 isn't there.
 - **mfplat.dll** / **mf.dll** / **mfreadwrite.dll** — Media
   Foundation (video / audio playback, capture). Needed for
   any modern video app.
@@ -2391,12 +2429,8 @@ did. PE imports of these names fail at PeLoad today.
 - **d3d10.dll** / **d3d10core.dll** / **d3d10_1.dll** —
   Direct3D 10. Mostly subsumed by D3D11 callers but a few
   legacy apps still link these.
-- **d3dcompiler.dll** — REAL (frontend). `D3DCompile` /
-  `D3DCompile2` / `D3DCreateBlob` / `D3DReflect` /
-  `D3DDisassemble` lex + parse a small HLSL subset and emit a
-  deterministic DXBC-shaped blob. The blob is not yet **executed**
-  by the d3d11/d3d12 draw path — that wires up next.
-- **d3dcompiler_47.dll** — versioned alias of the above is
+- **d3dcompiler_47.dll** — versioned alias of the shipped
+  `d3dcompiler.dll` (see [§7](#7-directx-surface-peer-of-win32-7000-loc));
   available by adding `d3dcompiler_47` to the duetos_stub_dll
   list. Not built today.
 - **d3dx*.dll** (d3dx9_43, d3dx10_43, d3dx11_43) — utility

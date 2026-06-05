@@ -170,6 +170,16 @@ Use cases:
 - The miss-sample logger uses one atomic per syscall number plus an
   `if (popcount(count) == 1)` test to decide whether to emit.
 
+## Capability / Privilege Surface
+
+The translation layer holds **no** capability of its own. It only
+reshapes a trap frame and hands it to the target ABI's dispatcher,
+which then enters the cap-gated native syscall path. A Linux or NT
+call that lacks the required `kCap*` is refused at the native gate
+exactly as a native caller would be — translation cannot widen the
+caller's authority. See [Capabilities](../security/Capabilities.md)
+and [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
+
 ## Known Limits / GAPs
 
 - **`NtTranslateToLinux` is wired** via `SYS_NT_INVOKE` in
@@ -181,8 +191,14 @@ Use cases:
   dedicated native handler.
 - **Locale and thread-info classes** are not exposed through
   translation — they are NT-only concepts with no Linux analogue
-  worth bridging. `// GAP:` markers in `translate.cpp` pin the
-  specific calls.
+  worth bridging. `// GAP:` markers in `translate.cpp` (e.g. the
+  thread-info classes near `translate.cpp:600`) pin the specific
+  calls.
+- **Alertable waits** — `NtTestAlert` (`translate.cpp:691`) returns
+  `STATUS_SUCCESS` because there is no alertable-wait state machine
+  yet, so there is nothing to drain. Once alertable waits land it
+  must consume the alert flag and run any queued user-APC. `// GAP:`
+  marker pins it.
 - **fork() / execve() / clone3()** are intentionally not translated.
   The native ABI does not yet have a process-fork primitive (see
   [Process Model](../kernel/Process-Model.md)) and translation can't

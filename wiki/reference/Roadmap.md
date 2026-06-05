@@ -998,39 +998,6 @@ estimator + 4-state machine, ~2000 LoC).
 - **Owner:** new `kernel/net/ipv6/` subdirectory; subsystem page
   follows the same shape as `Network-Stack.md`.
 
-### TLS certificate verification (vendor BearSSL `x509_minimal`)
-
-- **Cost:** ~6000 LoC X.509 + ASN.1 surface (vendored from
-  BearSSL; MIT-licensed; single author).
-- **Design:** streaming SAX-style chain validator (constant-RAM,
-  no malloc). Trust anchors stored as `{DN-hash, SPKI}` pairs
-  (~300 B each; 140-root Mozilla bundle = ~50 KB resident).
-- **Pipeline:**
-  1. Build-time: `tools/ca-bundle/extract_certs.py` reads NSS
-     `certdata.txt`, honours `CKA_TRUST_SERVER_AUTH` /
-     `NOT_TRUSTED` bits (most parsers miss this), emits both PEM
-     and the BearSSL-style compact `{DN, SPKI}` C array as
-     `kernel/net/x509/trust_anchors.gen.cpp`.
-  2. Runtime: `br_x509_minimal` validator pulled into
-     `kernel/net/x509/`, integrated with `tls.cpp`'s certificate
-     message handler.
-  3. RFC 6125 DNS-ID matching on `subjectAltName:dNSName`
-     (~100 LoC).
-- **TLS 1.2 first, TLS 1.3 after.** Same reasoning as BearSSL's:
-  TLS 1.3 deprecates chain ordering, which breaks constant-RAM
-  validation; workaround is a small N=8 intermediate buffer
-  (~32 KB scratch) for DFS path-building.
-- **Minimum cipher suites for 2026 CDNs:**
-  - TLS 1.2: `TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256` (0xC02F),
-    `TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256` (0xCCA8),
-    `TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256` (0xC02B).
-  - TLS 1.3: all three RFC-mandatory (0x1301/0x1302/0x1303).
-  - Extensions: SNI mandatory, ALPN with `["http/1.1"]`.
-- **Verification target:** HTTPS to `www.google.com` with chain
-  validated against bundled Mozilla CAs.
-- **Owner:** new `kernel/net/x509/`, updates to `kernel/net/tls.cpp`,
-  new `tools/ca-bundle/` for the refresh pipeline.
-
 ### Open-firmware adoption (per Wireless / GPU)
 
 - See [Open Firmware Landscape 2026](../drivers/Open-Firmware-Landscape-2026.md)

@@ -1,5 +1,11 @@
 # System Environment View
 
+> **Audience:** Kernel hackers, power / ACPI authors
+>
+> **Execution context:** Kernel — `EnvironmentInit` at boot (BSP); the
+> `env-monitor` task and the SCI handler run later (task and IRQ
+> context respectively)
+>
 > **Maturity:** v0, slices 1–3 complete — boot-time aggregation + canonical banner + query API + the `env-monitor` runtime poller + the ACPI SCI power-event path (power button → graceful shutdown, SCI-driven monitor wake). Known limits below: GPE `_Qxx` (lid/AC via EC) is acked but not yet evaluated, and the idle-path C-state reaction stays deferred (no safe lever exists yet). See [Roadmap](../reference/Roadmap.md).
 
 ## What this is
@@ -54,7 +60,9 @@ const char* EnvPlatformName/EnvFormFactorName/EnvPowerPolicyName(...);
 void EnvironmentSelfTest();                       // [env-selftest] PASS; panics on regression
 ```
 
-`EnvironmentGet()` returns **by value under a spinlock** (`g_env_lock`) — once the monitor is running the snapshot is mutated concurrently, so a reference would tear. `EnvironmentDerivePolicy()` stays pure (no lock, no side effects) so the monitor and the self-test recompute identically.
+## Threading & Locking
+
+`EnvironmentGet()` returns **by value under a spinlock** (`g_env_lock`) — once the monitor is running the snapshot is mutated concurrently, so a reference would tear. The `env-monitor` task is the only writer: `EnvironmentRecompose()` re-reads every source and atomically republishes the snapshot under `g_env_lock`. `EnvironmentDerivePolicy()` stays pure (no lock, no side effects) so the monitor and the self-test recompute identically. The SCI handler (IRQ context) touches no `env` state directly — it only latches `SciPending` and wakes `g_env_wq`, leaving the recompose to the task-context monitor.
 
 ## Runtime monitor (slice 2)
 

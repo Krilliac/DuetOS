@@ -20,7 +20,7 @@ emulator, no host OS underneath.
 ```
 Windows PE applications
         |  imports
-Win32 translator DLLs       userland/libs/   (45 production DLLs, ~1100 exports)
+Win32 translator DLLs       userland/libs/   (44 production DLLs, ~1100 exports)
         |  int 0x80
 Native DuetOS kernel
         |
@@ -43,8 +43,9 @@ Not enough argument. Use -h for help.
 
 That is `windows-kill.exe` — a real third-party 80 KB MSVC PE with 52
 imports across 6 DLLs (SEH + TLS + resources) — printing through our
-PE loader, our 44 production userland DLLs (38 preloaded), our
-scheduler, and our syscalls.
+PE loader, our 44 production userland DLLs (all preloaded on real
+hardware; 37 production DLLs preloaded under the emulator skip-list),
+our scheduler, and our syscalls.
 
 ## End-to-end Call Flow Example: `ws2_32!send`
 
@@ -69,9 +70,63 @@ sockets.
 | PE loader (stage 1+2) | `kernel/loader/pe_loader.cpp` | DOS + NT + PE32+ headers, sections, DIR64 reloc, IAT walk |
 | EAT parser | `kernel/loader/pe_exports.cpp` | `IMAGE_EXPORT_DIRECTORY`, binary-search lookup |
 | DLL loader | `kernel/loader/dll_loader.cpp` | Maps a DLL into a process, applies relocs, parses EAT |
-| Win32 syscall handlers | `kernel/subsystems/win32/` | `SYS_WIN_*`, `SYS_GDI_*`, `SYS_FILE_*`, `SYS_HEAP_*` etc. |
-| Translator DLLs | `userland/libs/{kernel32,ntdll,user32,gdi32,...}` | 45 production DLLs, ~1100 exports |
-| Flat-stubs page (legacy) | `kernel/subsystems/win32/` | Fallback for anything not yet ported to a real DLL |
+| NT syscall dispatch | `kernel/subsystems/win32/nt_dispatch.cpp`, `nt_syscall_entry.S` | NT-call entry, routes to the generated table |
+| Translator DLLs | `userland/libs/{kernel32,ntdll,user32,gdi32,...}` | 44 production DLLs, ~1100 exports |
+| Flat-stubs page (legacy) | `kernel/subsystems/win32/thunks.cpp` | Fallback for anything not yet ported to a real DLL |
+
+### NT syscall handlers (17 `*_syscall.cpp` TUs)
+
+Each TU owns one resource family; the kernel routes each `SYS_*`
+through the relevant TU. One subsystem per file (CLAUDE.md rule):
+
+| TU | Resource family |
+|----|-----------------|
+| `file_syscall.cpp` | File create/read/write/seek/close, attributes |
+| `dir_syscall.cpp` | Directory enumeration |
+| `heap_syscall.cpp` | Per-process heap arena (`SYS_HEAP_*`) |
+| `thread_syscall.cpp` | Thread create/exit/suspend/resume |
+| `mutex_syscall.cpp` | Kernel mutex objects |
+| `event_syscall.cpp` | Kernel event objects |
+| `semaphore_syscall.cpp` | Kernel semaphore objects |
+| `pipe_syscall.cpp` | Anonymous pipes |
+| `named_pipe_syscall.cpp` | Named pipes |
+| `named_kobj_syscall.cpp` | Named kernel objects (open-by-name) |
+| `tls_syscall.cpp` | Thread-local storage slots |
+| `spawn_syscall.cpp` | Process spawn |
+| `window_syscall.cpp` | Window/message surface (`SYS_WIN_*`) |
+| `apc_syscall.cpp` | Asynchronous procedure calls |
+| `waitaddr_syscall.cpp` | `WaitOnAddress` / `WakeByAddress` futex shape |
+| `token_syscall.cpp` | Token / privilege facade (probe-satisfying, see below) |
+| `vmap_syscall.cpp` | User virtual-memory mapping |
+
+Supporting handlers in the same directory: `iocp_job.cpp` (I/O
+completion ports + job objects), `proc_env.cpp` (per-process
+environment / command-line page the CRT reads at startup),
+`section.cpp` (section / memory-mapped-file objects), and
+`registry.cpp` + `registry_hive.cpp` (the registry tree —
+see [Win32 Registry](Win32-Registry.md)).
+
+### SEH unwind model
+
+Structured Exception Handling is load-bearing — `windows-kill.exe`
+and other real MSVC PEs install SEH frames. The dispatcher lives in
+`kernel/subsystems/win32/seh_dispatch.cpp` with the unwind trampoline
+in `seh_unwind.S`: a faulting PE thread's trap is converted into an
+`EXCEPTION_RECORD`, the registered `__C_specific_handler` /
+language-specific handlers are walked, and control is unwound to the
+selected handler frame (or the process is killed if none claims it).
+This is what lets a PE's `__try`/`__except` actually catch a fault
+raised inside our syscall path.
+
+### NT coverage figure
+
+`kernel/subsystems/win32/nt_coverage.cpp` prints a boot-log
+scoreboard from the generated tables in
+`nt_syscall_table_generated.h`: **50 / 292 bedrock NT calls**
+(present on every Windows XP→Win11 build) are wired to a DuetOS
+syscall, against a **489-entry full table** of every NT syscall
+known on the target Windows version. See
+[`Win32-Surface-Status` §11](../reference/Win32-Surface-Status.md).
 
 ## Per-process Bringup
 
@@ -79,12 +134,12 @@ When a PE spawns:
 
 1. PE bytes validated; `PeReport` summarises every directory.
 2. New `mm::AddressSpace` allocated.
-3. **Preload set:** all 45 production DLLs in `userland/libs/` (plus
-   2 customdll test fixtures) mapped into the new AS on real
+3. **Preload set:** all 44 production DLLs in `userland/libs/` (plus
+   2 `customdll*` test fixtures) mapped into the new AS on real
    hardware. Under `arch::IsEmulator()` the 9 entries flagged
-   `essential=false` (7 production + 2 fixtures) are skipped to keep
-   CI runs short; the 38 essential entries always map. No on-demand
-   `LoadLibraryA/W` path is wired today.
+   `essential=false` (7 production DLLs + 2 fixtures) are skipped to
+   keep CI runs short; the 37 essential production entries always
+   map. No on-demand `LoadLibraryA/W` path is wired today.
 4. PE sections mapped with characteristic-driven flags (W^X enforced).
 5. DIR64 base relocations applied.
 6. Imports walked: each `(dll, name)` resolved against the preloaded
@@ -131,6 +186,39 @@ See [History](../getting-started/History.md) for the full evolution.
 - **Most of `winsock2`'s asynchronous surface** (synchronous BSD
   socket subset works).
 - **Arbitrary file writes** through the FS write paths.
+
+## Threading & Locking Model
+
+A PE process runs as ordinary DuetOS user threads on the per-CPU
+scheduler — there is no Win32-private scheduler. Win32 sync
+primitives map to kernel objects: `mutex_syscall.cpp`,
+`event_syscall.cpp`, `semaphore_syscall.cpp`, and the
+`waitaddr_syscall.cpp` futex shape back `WaitForSingleObject` /
+`SetEvent` / `WaitOnAddress`. User-mode critical sections /
+SRW / InitOnce spin-CAS in the DLL and fall back to `SYS_YIELD`.
+The NT syscall handlers run in kernel/process context behind the
+`int 0x80` trap; they take the same kernel locks as the native
+ABI (one VFS lock, one registry lock, one window-manager lock) —
+the Win32 front-end adds no parallel locking.
+
+## Capability / Privilege Surface
+
+A PE binary has exactly the capabilities the kernel granted its
+`Process::caps` (`kCap*`) bitset — nothing the Win32 ABI shape
+implies. Every effect crosses a cap-gated syscall: a write needs
+`kCapFsWrite` (`SYS_FILE_WRITE`), a spawn needs `kCapSpawnThread`
+(`SYS_THREAD_CREATE`), and so on. The token / privilege handler
+(`token_syscall.cpp`) and the Win32 privilege APIs above it
+(`NtAdjustPrivilegesToken`, `SeDebugPrivilege`, integrity levels,
+ACLs) are a **probe-satisfying facade** — they return believable
+shapes so real PEs proceed, but they grant and revoke nothing.
+The kernel cap gates are the only authority. See
+[`security/Capabilities.md`](../security/Capabilities.md) and
+[Subsystem Isolation](../kernel/Subsystem-Isolation.md).
+
+> The reviewable signal: could a malicious PE use a Win32 path to
+> do something a native DuetOS process with the same caps could
+> not? If yes, the gate is wrong, not the workload.
 
 ## Related Pages
 

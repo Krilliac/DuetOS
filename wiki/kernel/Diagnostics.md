@@ -5,7 +5,7 @@
 > **Execution context:** Kernel — most APIs are IRQ-safe; a few self-tests
 > run from process context during boot
 >
-> **Maturity:** v0 stable — 22 active modules; UBSAN off by default
+> **Maturity:** v0 stable — 33 passive + 12 active modules; UBSAN off by default
 
 ## Overview
 
@@ -57,7 +57,14 @@ The contract every module follows:
 | `log_names` | [`log_names.h`](../../kernel/diag/log_names.h) | Symbolic resolvers (`SyscallName`, `PciVendorName`, `IdtVectorName`, `LinuxSignalName`, `NtStatusName`, …). | none (pure tables) |
 | `cleanroom_trace` | [`cleanroom_trace.h`](../../kernel/diag/cleanroom_trace.h) | Dual-region trace: sticky 256-entry boot + rolling 4096-entry tail. | none |
 | `crprobe` | [`crprobe.h`](../../kernel/diag/crprobe.h) | Cleanroom-trace exercise — fake Wi-Fi backend asks for an unsatisfiable firmware blob. | `CrProbeRun()` |
-| `boot_progress` | [`boot_progress.h`](../../kernel/diag/boot_progress.h) | Early-boot RDTSC markers, pre-HPET. Emits `[boot] tag +δ tsc=…` to COM1. | none |
+| `boot_observe` | [`boot_observe.h`](../../kernel/diag/boot_observe.h) | Early-boot RDTSC markers, pre-HPET, plus the init-wedge watchdog. Emits `[boot] tag +δ tsc=…` to COM1. | none |
+| `bsod` | [`bsod.h`](../../kernel/diag/bsod.h) | Fullscreen panic UI ("Blue Screen of Death"). Called from `Panic()` after the serial/minidump dump, before the final halt — title strip, subsystem + message + value, symbolised faulting RIP, register snapshot. | none |
+| `hung_task` | [`hung_task.h`](../../kernel/diag/hung_task.h) | Blocked-task detector (complement to `soft_lockup`): scans tasks stuck in `TaskState::Blocked`, warns once per TID when it crosses the threshold. No kill-on-hang escalation in v0. | `HungTaskSelfTest()` |
+| `kstat` | [`kstat.h`](../../kernel/diag/kstat.h) | Unified kernel-statistics registry — flat table of named typed counters/gauges (`module:name`) walked through one read interface (illumos `kstat(9F)` pattern). Boot-only registration. | `KstatSelfTest()` |
+| `panic_wait` | [`panic_wait.h`](../../kernel/diag/panic_wait.h) | "Wait for debugger" gate the panic / triple-fault paths consult when `panic_wait=gdb` is on cmdline — emits a sentinel + INT3 instead of halting so an attached GDB stub catches the panic state. | none |
+| `tlb_history` | [`tlb_history.h`](../../kernel/diag/tlb_history.h) | 64-entry circular ring of recent TLB-shootdown IPI broadcasts (source CPU/RIP, target AS, VA range, tick). Lock-free single-writer-per-CPU; read out at panic. | none |
+| `fma/ereport` | [`fma/ereport.h`](../../kernel/diag/fma/ereport.h) | Fault-management error-report ring — fixed BSS, wrapping slot index. Subsystems `EreportPost` hardware/error events for the FMA diagnosis engine to correlate. | none |
+| `fma/diagnose` | [`fma/diagnose.h`](../../kernel/diag/fma/diagnose.h) | FMA diagnosis engine — reads the ereport ring, applies correlation rules (ECC, …), appends `Suspect` records. Builds an audit trail; does not itself remediate. | `FmaSelfTest()` |
 | `diag_decode` | [`diag_decode.h`](../../kernel/diag/diag_decode.h) | CR/RFLAGS/page-walk decoders + `ClassifyVa()` region tagger. | `VaRegionSelfTest()` |
 | `debugcon` | [`debugcon.h`](../../kernel/diag/debugcon.h) | Binary writer to port 0xE9 (QEMU debugcon). | none |
 | `runtime_checker` | [`runtime_checker.h`](../../kernel/diag/runtime_checker.h) | Invariant scanner (31 issue types). Periodic from heartbeat. Fires probes on heap corruption, CR drift, stack overflow, fs-write storm, IRQ-nesting runaway (`IrqNestMax()` vs `kIrqNestingCeiling`). | `RuntimeCheckerInit()` captures baseline |
@@ -270,6 +277,12 @@ machine-check stack. See [Fault Injection](Fault-Injection.md).
   matching `patchable_function_entry` at once.
 - **Soft-lockup is single-CPU**; no per-CPU watchdog yet. Adequate while
   SMP AP bring-up is still pending.
+- **Init-wedge detector arms once the timer IRQ is firing**
+  ([`boot_observe.cpp:271`](../../kernel/diag/boot_observe.cpp)). A wedge
+  strictly *before* the timer is up (≈`Phase::Apic`) stays owned by the
+  triple-fault domain + early-console path — there is no periodic
+  context to observe a pre-timer hang from. Revisit only if a pre-timer
+  hang ever needs a structured code.
 
 ## Related Pages
 
