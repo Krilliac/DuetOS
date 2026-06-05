@@ -2543,18 +2543,34 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
             // identically to SchedExit but inline — we're already
             // inside Schedule()'s locked section, calling SchedExit
             // here would re-enter the lock and fight the state
-            // machine. Transition Running → Dead, push to zombies,
-            // wake the reaper.
+            // machine. Transition Running → Dead and DEFER the
+            // zombie-push exactly as SchedExit does.
             prev->state = TaskState::Dead;
             ++g_tasks_exited;
             SchedCpuDecLive();
-            prev->next = g_zombies;
-            g_zombies = prev;
-            // Wake the reaper; it's blocked on g_reaper_wq and
-            // noticing a new zombie needs a wake. WaitQueueWakeOne
-            // itself acquires g_sched_lock — but we already hold
-            // it. Use the _Locked variant to avoid recursive lock.
-            WaitQueueWakeOneLocked(&g_reaper_wq);
+            // Recovery Class C hook — fired for SchedExit too. Keep the
+            // two termination paths symmetric so a budget-killed ring-3
+            // task gets the same teardown (AS/fd/cap/ipc) once this hook
+            // grows teeth; today it is a no-op.
+            core::OnTaskExited();
+            // SMP-safe zombie handoff — DO NOT push to g_zombies here.
+            // We are still executing on `prev`'s kernel stack; the
+            // ContextSwitch that takes this CPU off it is far below in
+            // this same Schedule() call. Pushing `prev` onto g_zombies
+            // now (and waking the reaper) lets the reaper — running on a
+            // peer CPU — pop `prev`, FreeKernelStack(prev->stack_base),
+            // and unmap the very pages this CPU is still executing on.
+            // The subsequent ContextSwitch then saves/reloads rsp/rip
+            // out of freed, reused memory and the resume jumps wild.
+            // This is the SMP=4 boot-tail wild-jump cascade (Roadmap
+            // 2026-06-05): the SAME reaper-frees-running-stack UAF that
+            // SchedExit already closed via the deferred slot, on the
+            // budget-kill path that the 2026-05-22 fix missed. Stash
+            // `prev` into the per-CPU defer slot; SchedFinishTaskSwitch
+            // promotes it to g_zombies and wakes the reaper AFTER
+            // ContextSwitch has committed the rsp swap — at which point
+            // `prev` is provably off-CPU on every peer.
+            cpu::CurrentCpu()->ctxsw_dying_task_to_zombie = prev;
         }
         else if (prev->no_requeue)
         {
@@ -2897,12 +2913,44 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
         bool resume_ok = (next != nullptr) && next_canon && (next->state != TaskState::Dead);
         ::duetos::u64 sb = 0;
         ::duetos::u64 stop = 0;
+        // Floor for a "plausible kernel stack pointer": the kernel image
+        // base (KERNEL_VIRTUAL_BASE + 1 MiB, the linker's `. = 1M`
+        // `_kernel_start_phys`). Everything a kernel stack can legally live
+        // in — the boot stack (.bss.boot, just above 1 MiB), heap kstacks
+        // (the high `...e0...` arena), the AP trampoline/idle stacks — is
+        // at or above this. The reserved low-1 MiB direct map
+        // (`0xffffffff800xxxxx`) is BIOS/boot scratch, never a stack.
+        constexpr ::duetos::u64 kKernelStackFloor = 0xFFFFFFFF80000000ULL + 0x100000ULL;
+        bool rsp_below_floor = false;
         if (resume_ok && next->stack_base != nullptr)
         {
             sb = reinterpret_cast<::duetos::u64>(next->stack_base);
             stop = sb + next->stack_size;
             if (next->rsp <= sb || next->rsp > stop)
             {
+                resume_ok = false;
+            }
+        }
+        else if (resume_ok)
+        {
+            // stack_base == nullptr — the BSP boot task or an AP boot
+            // sentinel. The rsp-in-own-kstack arm above cannot apply (no
+            // heap kstack), and this arm USED to be a blanket skip — which
+            // is exactly the hole the boot-tail wild-jump fell through
+            // (Roadmap "SMP=4 boot-tail wild-jump cascade"): a boot/idle
+            // task resumed with rsp = 0xffffffff800dfc40 (phys 0xdfc40,
+            // BELOW the kernel image, in reserved low RAM) and a saved RIP
+            // of 0. We can't bound such a task to its own kstack, but a
+            // saved rsp below the kernel-image floor is never a legal
+            // kernel stack — catch it HERE and panic, naming `next`+`prev`,
+            // instead of ContextSwitch-ing into it and triple-faulting
+            // silently (the #PF then nests on the bad rsp before
+            // TrapDispatch ever runs, so a post-fault dump is impossible).
+            // rsp == 0 (a task resumed before its first context-save) is
+            // likewise illegal and < floor, so the same compare covers it.
+            if (next->rsp < kKernelStackFloor)
+            {
+                rsp_below_floor = true;
                 resume_ok = false;
             }
         }
@@ -2934,6 +2982,9 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
                 arch::SerialWrite((next->stack_base != nullptr && (next->rsp <= sb || next->rsp > stop))
                                       ? "  [rsp OUTSIDE own stack — corrupt context]"
                                       : "");
+                arch::SerialWrite(rsp_below_floor ? "  [rsp BELOW kernel image — boot/idle resume into low RAM "
+                                                    "(boot-tail wild-jump signature)]"
+                                                  : "");
                 arch::SerialWrite("\n  next first_run=");
                 arch::SerialWriteHex(static_cast<::duetos::u64>(next->first_run));
             }

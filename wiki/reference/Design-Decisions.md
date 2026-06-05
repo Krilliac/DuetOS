@@ -10371,3 +10371,90 @@ GCC 16.1 `-Wunused-result` behaviour as reproduced above;
 "ref/ptr-returning `Result` functions", not "all `Result`
 returners". No separate roadmap item; tracked in the phase-1
 spec under `docs/superpowers/specs/`.
+
+## 2026-06-05 — Zombie publish is deferred to `SchedFinishTaskSwitch` for *every* termination path
+
+**Scope & commit:** `kernel/sched/sched.cpp` `Schedule()` budget-/policy-kill
+branch — boot-tail wild-jump reaper UAF.
+
+**Decision:** A dying task is published to the global zombie list at
+**exactly one** site — `SchedFinishTaskSwitch`, which runs on the *next*
+task's stack after `ContextSwitch` has committed the rsp swap — fed by the
+per-CPU `ctxsw_dying_task_to_zombie` slot. The `kill_requested` branch in
+`Schedule()` (budget/sandbox/fs-rate/fault-react/canary kills) no longer
+pushes onto `g_zombies` inline; it marks the task `Dead`, fires
+`OnTaskExited`, and stashes it into the slot, exactly as `SchedExit` does.
+
+**Why:** Publishing a zombie while the CPU is still executing on that
+task's kernel stack lets a peer-CPU reaper `FreeKernelStack` those pages
+before the in-flight `ContextSwitch` finishes saving/restoring `rsp`/`rip`;
+the resume then reads freed, reused memory and jumps wild (corrupt `rsp`
+into kernel `.text`, null/garbage `rip`, TSC-shaped register garbage —
+the SMP=4 post-x509 "boot-tail wild-jump" cascade). The 2026-05-22 SMP=8
+fix closed this for `SchedExit` via the deferred slot but left the
+parallel `kill_requested` branch — contractually "treat identically to
+SchedExit" — on the old inline-push path. This was a
+*whitelist/sentinel-divergence* class bug: two paths that must behave
+identically, only one updated.
+
+**What it rules out / defers:** No termination path may push to
+`g_zombies` directly again — the inline `g_zombies = prev` form is deleted
+and the single-publish-site invariant is documented in
+[`Scheduler.md`](../kernel/Scheduler.md). The three resume/reaper guards
+(resume-context validator, reaper reachability scan, `RunqueuePop` sanity)
+stay as permanent assertions; they are the regression net, not the fix.
+A future per-CPU `g_sched_lock` split must preserve "task is off every
+runqueue and off every CPU's `current_task` before its stack is freed".
+
+**Revisit when:** real KASAN lands (would have caught this UAF at the
+freed-page read directly), or the per-CPU runqueue-lock split changes the
+zombie-handoff locking. Re-verify on `accel=kvm`/real HW for an
+untruncated dump (QEMU 8.2 TCG+SMP aborts on a true guest panic via its
+own BQL re-entrancy, masking dumps — host bug, not guest).
+
+**Related roadmap track(s):** Scheduler / SMP. This closes a genuine
+latent reaper UAF on the kill path, but is **orthogonal** to — and does
+**not** resolve — the Roadmap entry "SMP=4 boot-tail wild-jump cascade
+(post-x509 self-test)", which reproduces a corrupt resume of a
+`stack_base==nullptr` boot/idle task and remains open.
+
+## 2026-06-05 — Boot-tail wild-jump was a boot-stack overflow, not a reaper/scheduler UAF
+
+**Scope & commit:** `kernel/arch/x86_64/boot.S` (boot stack 128→512 KiB);
+investigation also touched `kernel/sched/sched.cpp`.
+
+**Decision:** The long-standing "SMP=4 boot-tail wild-jump cascade
+(post-x509)" is attributed to and fixed as a **boot-stack overflow** — the
+BSP boot task ran the deep post-x509 network self-test chain
+(TLS→x509→ASN.1→RSA/EC) on the 128 KiB boot stack, demanding ~268 KiB.
+Growing the boot stack to 512 KiB is the verified fix.
+
+**Why (and what it rules out):** Multiple sessions chased this as a
+reaper/scheduler use-after-free (resume of a freed `Task` with corrupt
+`rsp`). That hypothesis is **retired** for this symptom: an instrumented
+capture showed the wild transfer to `RIP=0` fired **none** of the four
+kernel control-transfer gates (`ContextSwitch` ret-check, kernel `iretq`
+RIP-check, retpoline, trampoline), each of which range-checks
+`[_text_start,_text_end)` and would catch a saved `RIP=0` on a scheduler/
+iretq path. No gate firing ⇒ an **ungated plain `ret` off a scribbled
+stack frame**, and the corrupt `rsp=0xffffffff800dfc40` sits ~140 KiB
+below `stack_bottom` — an overflow signature, not a freed-struct
+signature. The overflow was invisible because the higher-half 2 MiB map
+is RW (so growth past the boot sections into low RAM does not fault).
+
+**Forward guidance for the next slice (so the wrong tree isn't re-climbed):**
+a wild kernel jump whose `rsp` lands just below a known stack base, with
+NO control-transfer-gate banner, is a **stack overflow**, not a UAF —
+check stack depth / guard pages before instrumenting the reaper. The
+kill-path reaper UAF and the resume-validator hardening landed in the same
+investigation are genuine but were **orthogonal** (they did not change the
+cascade).
+
+**Revisit when:** the boot-stack guard page lands (then an overflow faults
+at the boundary and this becomes self-diagnosing), or the deep self-tests
+are moved off the boot task (then 512 KiB can shrink again). Re-confirm on
+`accel=kvm`/real HW (the TCG host `abort()`s on its BQL assertion mid-fault,
+so the `-d int` log + unbuffered serial were the capture path).
+
+**Related roadmap track(s):** Scheduler / SMP / boot. Closes the Roadmap
+entry "SMP=4 boot-tail wild-jump cascade (post-x509 self-test)".
