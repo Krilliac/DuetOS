@@ -374,14 +374,43 @@ area is readable immediately instead of corrupted.
   5147:      v=0e (#PF)  IP=0xffffffffffffffff   CR2=-1
   ```
 
-- **ROOT lead:** the #GP RIP `0x662820683031746e` is **printable ASCII**
-  ("nt10h (f"-ish bytes) — a **code pointer clobbered by text/string
-  data**. `EAX == CR2 == 0x3e9d63263` (a TSC-shaped value) is being
-  used as a pointer across the cascade. Start the hunt at whatever
-  stores a TSC/timestamp where a function pointer or return address is
-  expected, near the x509-verify → HTTP self-test boundary in
-  `core/boot_bringup.cpp`. `tools/qemu/triage-truncated-boot.sh`
-  recovers this lead automatically (it flags the ASCII-RIP shape).
+- **ROOT lead (refined from the full `-d int` trace):** this is a
+  **scheduler resume of a corrupted/freed task context**, not a fault in
+  straight-line self-test code.
+  - The last NORMAL state before the cascade is the **reaper thread**:
+    `addr2line` puts the pre-cascade interruption RIP
+    (`0xffffffff80778d01`) in `duetos::sched::ReaperMain`
+    (`kernel/sched/sched.cpp`). An **MSI-X device IRQ (vector 0x32 = 50,
+    NOT the 0x20 timer)** preempts the reaper; its post-handler
+    `Schedule()` context-switches — and the stack flips from the
+    reaper's `0xffffffffe0065f80` (a normal dynamic kstack) to
+    `0xffffffff800dfc40`.
+  - `0xffffffff800dfc40` is **below the boot stack
+    (`0x...80102000`) and has no symbol** — it is inside the kernel
+    **.text/.rodata image**, i.e. NOT a valid stack. So the resumed
+    task's saved context is corrupt on BOTH axes: **RIP = 0 (null)** and
+    **RSP pointing into the kernel image**. The cascade
+    (`#PF IP=0` repeating, RSP marching `~0x12D0` down into the image)
+    is the trap frames nesting onto that bogus RSP; once they overwrite
+    enough, RIP goes fully wild (#GP at the ASCII address, then #PF -1).
+  - The fault `CR2` is a **TSC-shaped value that differs per boot**
+    (`0x3e9d63263` one run, `0x3fe48a7cd` another) — an `rdtsc` result
+    used as a pointer. The #GP RIP `0x662820683031746e` is printable
+    ASCII ("nt10h (f"-ish), i.e. a code pointer overwritten by text.
+  - **Prime suspect: a reaper-vs-scheduler task-teardown race** — a dead
+    task reaped (Process/AddressSpace/kstack torn down) while it is still
+    reachable from a runqueue, so `Schedule()` later loads its
+    freed/overwritten context. The freed kstack page gets reused (its
+    saved RIP/RSP slots now hold zero / a TSC stamp / heap text),
+    explaining the per-boot-varying garbage. Hunt in
+    `kernel/sched/sched.cpp` reaper ↔ runqueue/`Schedule` ordering: does
+    reap remove the task from EVERY runqueue and clear `need_resched`
+    /per-CPU `current` references BEFORE freeing the stack? Walk every
+    exit from the reaping scope for the refcount-asymmetry shape.
+  - `tools/qemu/triage-truncated-boot.sh` recovers the ASCII-RIP lead
+    automatically; the new `[wild-kernel-rip]` forensic's `[TEXT]` stack
+    quad will name the exact resume/teardown call site once captured on
+    a non-aborting host.
 - **Why no kernel dump appears:** two compounding issues.
   1. **The host emulator aborts.** QEMU 8.2 TCG+SMP hits its own
      `qemu_mutex_lock_iothread_impl: assertion failed` (BQL
