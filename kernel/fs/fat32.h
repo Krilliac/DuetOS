@@ -369,6 +369,14 @@ void Fat32OwnershipSelfTest();
 /// they invoke this. Always succeeds.
 ::duetos::core::Result<void> Fat32Shutdown();
 
+/// Drop a single volume — the one whose `block_handle` matches — from
+/// the in-memory registry, compacting the remaining entries down. The
+/// on-disk content is untouched. Returns true if a matching volume was
+/// found and removed, false otherwise. Used to retract a transient
+/// fixture (e.g. the ownership self-test's RAM disk) so it can never be
+/// observed as `Fat32Volume(0)` by later boot/persistence paths.
+bool Fat32ForgetVolume(u32 block_handle);
+
 /// Lay down a fresh FAT32 file system on `block_handle` starting
 /// at the partition's LBA 0. Pre-conditions:
 ///   - The handle is writable (`BlockDeviceIsWritable`).

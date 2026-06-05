@@ -760,27 +760,41 @@ void Fat32OwnershipSelfTest()
     }
     SerialWrite("[fs/fat32] format-self-test OK (Fat32Format -> Fat32Probe round-trip + owned)\n");
 
+    // Retract the fixture from the registry now that the owned-adoption
+    // assertions have passed. Critical: this self-test runs on EVERY
+    // boot, and on a boot with no real owned FAT volume (e.g. a machine
+    // whose only disk is a foreign Windows/Linux one, now correctly
+    // rejected) the fixture would otherwise be left as Fat32Volume(0) —
+    // and the persistence sinks (KlogPersistInstall /
+    // FixJournalPersistInstall, which run later in boot) would write
+    // KERNEL.LOG / KERNEL.FIX to this ephemeral RAM disk instead of
+    // correctly skipping. The block device itself persists (no teardown
+    // API) but is no longer a registered volume.
+    if (!Fat32ForgetVolume(fmt_h))
+    {
+        SerialWrite("[fs/fat32] format-self-test FAILED: could not retract fixture volume\n");
+        return;
+    }
+
     // ---- Foreign-volume adoption gate (Vector B regression guard).
     // Strip the DuetOS markers from LBA 0 and re-probe: a volume with a
     // valid FAT32 BPB but no DuetOS marker (a Windows ESP, a real Linux
     // FAT, a USB stick) MUST NOT be adopted — otherwise it could become
-    // Fat32Volume(0), which the boot persistence sinks (KERNEL.LOG /
-    // KERNEL.FIX / ...) and ~all FAT-backed kernel storage treat as the
-    // system data volume, writing DuetOS files into a partition DuetOS
-    // does not own. The bug this pins: auto-adopting any probed FAT
-    // volume as the system volume.
+    // Fat32Volume(0), which the boot persistence sinks and ~all
+    // FAT-backed kernel storage treat as the system data volume, writing
+    // DuetOS files into a partition DuetOS does not own.
     {
         u8 sec[512];
-        u8 sec_orig[512];
         if (drivers::storage::BlockDeviceRead(fmt_h, 0, 1, sec) < 0)
         {
             SerialWrite("[fs/fat32] foreign-volume self-test SKIP: LBA 0 read failed\n");
             return;
         }
-        for (u32 i = 0; i < 512; ++i)
-            sec_orig[i] = sec[i];
         // Overwrite BS_VolID (offset 67) and BS_VolLab (offset 71) with a
         // generic non-DuetOS identity (serial 0, label "NO NAME    ").
+        // Left in place — NOT restored: a foreign LBA 0 means any later
+        // re-probe (the fault-domain recovery walks every handle) also
+        // refuses to re-adopt this leaked RAM disk, so it stays inert.
         sec[67] = sec[68] = sec[69] = sec[70] = 0;
         const char foreign_label[11] = {'N', 'O', ' ', 'N', 'A', 'M', 'E', ' ', ' ', ' ', ' '};
         for (u32 i = 0; i < 11; ++i)
@@ -793,10 +807,6 @@ void Fat32OwnershipSelfTest()
         const u32 count_before = Fat32VolumeCount();
         u32 foreign_idx = 0xFFFFFFFFu;
         const bool adopted = Fat32Probe(fmt_h, &foreign_idx);
-        // Restore the markers so the fixture stays a valid owned volume
-        // for any later re-probe (the fault-domain re-probe walks every
-        // handle); the test is non-destructive.
-        (void)drivers::storage::BlockDeviceWrite(fmt_h, 0, 1, sec_orig);
         if (adopted || Fat32VolumeCount() != count_before)
         {
             SerialWrite("[fs/fat32] foreign-volume self-test FAILED: unmarked FAT volume was adopted\n");

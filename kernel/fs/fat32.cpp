@@ -451,6 +451,29 @@ const Volume* Fat32Volume(u32 index)
     return &g_volumes[index];
 }
 
+bool Fat32ForgetVolume(u32 block_handle)
+{
+    Fat32Guard guard;
+    for (u32 i = 0; i < g_volume_count; ++i)
+    {
+        if (g_volumes[i].block_handle != block_handle)
+        {
+            continue;
+        }
+        // Compact: shift the higher-indexed volumes down one slot.
+        // Volume indices are never held across calls (every caller
+        // re-resolves via Fat32Volume), so renumbering is safe.
+        for (u32 j = i + 1; j < g_volume_count; ++j)
+        {
+            g_volumes[j - 1] = g_volumes[j];
+        }
+        --g_volume_count;
+        VZero(&g_volumes[g_volume_count], sizeof(g_volumes[g_volume_count]));
+        return true;
+    }
+    return false;
+}
+
 ::duetos::core::Result<void> Fat32Shutdown()
 {
     KLOG_TRACE_SCOPE("fs/fat32", "Fat32Shutdown");
