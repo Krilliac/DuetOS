@@ -78,7 +78,17 @@ Vmm::Vmm(VmConfig cfg)
              kMbInfoGpa + 0x10000}));
 
     Mb2Params mp;
+    // When the GDB stub is enabled, tell the guest kernel that a debugger
+    // host owns #BP/#DB so it stands down its boot-time int3 / DR
+    // self-tests (TrapsSelfTest's int3, BpSelfTest, WatchSelfTest), which
+    // would otherwise collide with our exception intercept and wedge or
+    // corrupt the boot. The kernel keys off the "debugstub=1" cmdline
+    // token (see kernel/core/boot_cmdline.cpp).
     mp.cmdline     = m_cfg.cmdline;
+    if (m_cfg.gdbPort != 0)
+    {
+        mp.cmdline += " debugstub=1";
+    }
     mp.ramBytes    = m_cfg.ramBytes;
     mp.reservedEnd = reservedEnd;
     mp.rsdp        = acpi.rsdp;

@@ -402,6 +402,20 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     SerialInit();
     SerialWrite("[boot] DuetOS kernel reached long mode.\n");
 
+    // Detect an external debugger host (duetos-vmm --gdb adds
+    // "debugstub=1" to the cmdline). Parsed here — early, while the low
+    // Multiboot2 info page is still identity-mapped, which also primes the
+    // FindBootCmdline cache for later callers. When set, the kernel stands
+    // down its boot-time int3 / hardware-breakpoint / watchpoint self-tests
+    // below: those execute int3 / arm DR slots, which the host debugger
+    // intercepts as #BP/#DB and would wedge or corrupt the boot.
+    duetos::core::DebugStubInit(duetos::core::FindBootCmdline(multiboot_info));
+    if (duetos::core::DebugStubAttached())
+    {
+        SerialWrite("[boot] debug stub attached — standing down int3/DR boot "
+                    "self-tests (host owns #BP/#DB)\n");
+    }
+
     // klog online as early as Serial. Self-test prints one line at
     // each severity so visual inspection of the early boot log
     // confirms the tag format + u64-value form are working. Trace
@@ -1077,7 +1091,10 @@ void BootBringupMemPaging()
     // for a BP install. Runs BEFORE SMP bring-up so the single-
     // CPU invariant the BP installer asserts is still true.
     duetos::debug::BpInit();
-    if (!duetos::debug::BpSelfTest())
+    // Skip under an external debugger host: BpSelfTest plants a real int3
+    // and arms a DR slot, which the host owns — it would intercept the
+    // #BP/#DB and corrupt the test (or wedge the boot).
+    if (!duetos::core::DebugStubAttached() && !duetos::debug::BpSelfTest())
     {
         SerialWrite("[boot] WARN: breakpoint self-test failed — see serial log\n");
     }
@@ -1088,7 +1105,9 @@ void BootBringupMemPaging()
     // for the operator-facing surface.
     if constexpr (duetos::core::kBootSelfTests)
     {
-        if (!duetos::debug::WatchSelfTest())
+        // WatchSelfTest arms a hardware watchpoint (DR slot) -> #DB, which
+        // the host debugger owns; skip it under the stub.
+        if (!duetos::core::DebugStubAttached() && !duetos::debug::WatchSelfTest())
         {
             SerialWrite("[boot] WARN: watchpoint self-test failed — see serial log\n");
         }
