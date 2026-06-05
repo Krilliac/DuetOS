@@ -703,6 +703,32 @@ Action-id allocation:
 | 200+ | `/APPS/*.MNF` shortcuts |
 | ≥ 0x10000 | PE-app dynamic ids (opaque to kernel) |
 
+## Threading & Locking Model
+
+The compositor is **in-kernel** and single-surface: one global
+window registry (`g_windows`, `kMaxWindows = 40`) and one global
+present path. Recompose, hit-testing, and chrome paint run from the
+kernel input readers (`kernel/core/main.cpp` mouse / keyboard loops)
+and the `WinTimerTicker` task, all in process context — not from an
+IRQ handler. Userland never touches the registry directly; it reaches
+the surface only through the `SYS_WIN_*` / `SYS_GDI_*` syscalls, which
+run the handler on the caller's thread. Blocking primitives that must
+not deadlock the readers (modal `MessageBox` / `InputBox`,
+`SYS_WIN_TRACK_POPUP`) are fire-and-forget with a callback or a
+Mutex+Condvar wait, never a synchronous spin on the reader thread.
+
+## Capability / Privilege Surface
+
+The `SYS_WIN_*` and `SYS_GDI_*` families are the only way a guest
+PE / ELF reaches the compositor, and they are gated at the syscall
+boundary like every other guest effect — a PE cannot paint outside
+its own window or enumerate another process's windows. Per-window
+ownership is tracked by pid (`RegisteredWindow`), so cursor / popup
+/ paint requests only affect windows the caller owns. In-kernel
+native apps are trusted code and call the compositor directly. See
+[Capabilities](../security/Capabilities.md) and
+[Subsystem Isolation](../kernel/Subsystem-Isolation.md).
+
 ## Known Limits / GAPs
 
 - **No GDI paint inside the client area for unfiled Win32 PEs** —

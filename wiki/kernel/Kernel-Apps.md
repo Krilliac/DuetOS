@@ -49,10 +49,12 @@ Apps marked **v0** are scaffolded but missing significant functionality
 > apps" counts **launchable apps** wired into `boot_bringup.cpp`
 > (`settings` is one row even though it has five `SettingsXxxInit`
 > sub-page TUs). [AppWidgets](../subsystems/AppWidgets.md)'s "28 of 33"
-> counts **desktop widgets / panel surfaces**. [Native
-> Apps](../tooling/Native-Apps.md)'s "57 native apps / 33 stems" counts
-> **translation units / file stems** under the userland surface, not
-> distinct launchable apps.
+> counts **apps migrated to the widget library** out of the migration
+> set. [Native Apps](../tooling/Native-Apps.md)'s "57 native apps"
+> counts **all `kernel/apps/` translation units** (every TU, including
+> helpers like `dbg_core` / `notes_persist` and the five
+> `settings_*` sub-pages), the migration target for splitting apps
+> out into standalone ELF binaries — not distinct launchable apps.
 
 ### Productivity
 

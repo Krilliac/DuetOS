@@ -241,6 +241,7 @@ All write-side FAT operations are admin-gated.
 | `hwmon` | Unified sensor view |
 | `hw`, `hardware` | Hardware-wide status / activation / serial capture (`status`, `activate`, `capture`) |
 | `gpu`, `lsgpu` | List discovered GPUs |
+| `npu`, `ml` | List discovered NPU / AI-accelerator devices (vendor/device, kind, BDF, MMIO BAR). Probe-only — no firmware / command-ring yet. Reports none when no PCI class=0x12 or known Intel NPU device-ID is present |
 | `gfx` | Graphics-stack overview (ICD counters + display info + render stats) |
 | `gfx reset` | Reset render-stats counters (frames composed/presented, dirty pixels) |
 | `vbe [W H [B]]` | Query / set Bochs VBE display mode |
@@ -268,6 +269,7 @@ All write-side FAT operations are admin-gated.
 | `http <ip> [port [path]]` | TCP connect + GET, prints 16 lines | |
 | `net <up\|status\|test>` | Bring up / status / end-to-end smoke | |
 | `usbnet [args...]` | USB-network helpers | |
+| `drshd <sub>` | DRSH remote-access service control | `status` shows state / counters / port; `start [port]`, `stop`, and `passwd <pw>` are admin-gated. Listener refuses to start without a pre-shared key set |
 | `fwpolicy [args...]` | Firewall policy view / edit | |
 | `fwtrace [show N]` | Firewall trace dispatch points | |
 | `crtrace [show N\|clear\|stats\|mark ...]` | Cleanroom-trace ring: dump / clear / boot+rolling counts / inject a manual marker | |
@@ -290,6 +292,8 @@ All write-side FAT operations are admin-gated.
 | `health`, `checkup` | Runtime invariant scan (heap/frames/sched/CRX) | |
 | `leakcheck [class <name>\|pid <n>\|<class>]` | Unified resource-leak summary | Aggregates heap / frames / kstack / AS regions / kobject + Win32 handles / sockets / GDI / CPU runaway / GPU contexts+surfaces+cmdbufs+VRAM. `leakcheck heap` shows top-N caller RIPs (same as `heap leaks`). `leakcheck pid <n>` reports residue attributable to a single PID. GPU rows return zero today — populated by the GPU driver as resource tracking lands. |
 | `dumpstate` | Snapshot every kernel subsystem to serial | |
+| `selfthink [sub]` | Cross-subsystem self-portrait + causal-chain ring | No gate — pure read over the same counters `resmon` / `ps` / `health` / `dfix` expose. Subcommands: `causality [N]` (last N causal entries, default 32), `baselines` (per-metric mean/stddev/anomalies), `feedback` (autonomic action outcomes), `why` (operator narrative), `prev` (prior-boot chain from `KERNEL.THK`). See [Self-Thinking](../kernel/Self-Thinking.md). |
+| `kpath <sub>` | Code-path execution ledger | No gate — reflects what the boot log already exposed. `list` (per-category visit summary), `show <category>`, `hits <substring>`, `dump` (full TSV to console), `flush` (rewrite `KERNEL.KPATH.TSV`). See [Code Path Ledger](../kernel/Code-Path-Ledger.md). |
 | `inspect ...` | RE / triage umbrella (syscalls / opcodes / ARM) | |
 | `instr <addr> [N]` | Instruction-byte dump at address | |
 | `addr2sym <addr>` | Resolve address to symbol | |
@@ -339,6 +343,8 @@ All write-side FAT operations are admin-gated.
 | `reboot` | Reset the machine (admin, no confirm) | |
 | `halt` | Stop the CPU (admin, no confirm) | |
 | `shutdown`, `poweroff` | ACPI soft-off via `_S5` (admin) | Halts on fallback |
+| `slotinfo` | Print A/B boot-slot state (active, pending, tries) | Read-only, no gate |
+| `bootslot <sub>` | Administer the A/B kernel layout | `install <a\|b> <kernel-path>` stages a kernel into a slot and sets it pending; `rollback` restores the previous active slot; `force-fail` (test-only) zeroes the pending slot's tries and reboots to exercise rollback. State persists to `/boot/duetos-slot.cfg` (FAT32). State-changing subcommands gate on admin; bare `bootslot` prints usage |
 | `beep [hz [ms]]` | PC speaker tone | Default 1000 Hz, 200 ms |
 | `sync` | Flush filesystem buffers | No-op in v0 (sync writes) |
 | `true` / `false` | No-op success / failure placeholders | |

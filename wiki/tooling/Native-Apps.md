@@ -4,10 +4,10 @@
 > of the in-kernel apps under `kernel/apps/` out into a separate
 > ELF
 >
-> **Maturity:** pattern + libc + build helper land; two demo
-> apps ship (`hello_native`, `nat_calc`); migration of the 57
-> in-kernel apps is multi-slice future work — see "Migration
-> roadmap" at the bottom
+> **Maturity:** pattern + libc + build helper land; four native
+> apps ship and boot every smoke run (`hello_native`, `nat_calc`,
+> `nat_sysinfo`, `duet-pkg`); migration of the 57 in-kernel apps is
+> multi-slice future work — see "Migration roadmap" at the bottom
 
 ## Why this exists
 

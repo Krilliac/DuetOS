@@ -55,10 +55,12 @@ When a slice ADDS a new DLL or new method:
 
 ## Summary counts (2026-05-26)
 
-- **Shipping DLLs:** 60 dirs in `userland/libs/` — 45 production
-  DLLs (PE64), 13 PE32 i386 variants (`*_32`) for cross-bitness
-  imports, and 2 `customdll*` test fixtures. Two `dx_*.h` files in
-  the same tree are shared headers, not DLLs.
+- **Shipping DLLs:** 60 dirs in `userland/libs/` — 44 production
+  PE64 DLLs, 13 PE32 i386 variants (`*_32`) for cross-bitness
+  imports, and 2 `customdll*` test fixtures (44 + 13 + 2 = 59; the
+  60th dir is `ws2_32`, a production PE64 DLL whose name happens to
+  end `_32`). Two `dx_*.h` files in the same tree are shared
+  headers, not DLLs.
 - **Approximate exports:** ~1100 across all shipping DLLs
 - **Source LOC across `userland/libs/`:** ~40 000
 - **Live STUB / GAP markers** in user-mode + win32 subsystem

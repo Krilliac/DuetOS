@@ -4,12 +4,14 @@
 >
 > **Execution context:** Kernel — process context.
 >
-> **Maturity:** v3 — per-block CRCs, symbolic links, hard links (link_count refcount).
+> **Maturity:** v8 — per-block CRCs, symlinks, hard links, journal,
+> AES-XTS encryption, LZ4 compression, snapshots, xattrs.
 
 ## Overview
 
 DuetFS is the project's **native filesystem**, written in Rust as the
-first Rust subsystem in the kernel. v3 ships:
+first Rust subsystem in the kernel. The on-disk format is at
+**version 8** (`format::VERSION`). The crate ships:
 
 - mkfs (format an empty image)
 - create / unlink (files + directories)
@@ -22,14 +24,27 @@ first Rust subsystem in the kernel. v3 ships:
 - **read-time CRC verification** for file, symlink-target, directory, and xattr data blocks
 - **per-block CRC table** at LBA 2 (one CRC32 per FS block; mismatch counted by fsck and checked on data reads)
 - **superblock CRC32** (corruption detection; mismatch fails open with `kStatusCorrupt`)
+- **journal** (v5) — write-ahead block journal with replay (`journal.rs`)
+- **AES-XTS-256 encryption + Argon2id KDF** (v6) — whole-volume, SB plaintext (`crypto.rs`)
+- **snapshots** (v7) — single frozen-metadata slot with allocator pinning (`snapshot.rs`)
+- **xattrs** (v8) — one xattr block per node (`xattr.rs`)
+- **LZ4 compression** primitives (`compress.rs`)
 - mounted at `/duetfs` from boot via `DuetFsBoot`
-- **on-disk auto-mount**: every kernel block-device handle holding a v3 superblock is mounted at `/disks/duetfs<N>`
+- **on-disk auto-mount**: every kernel block-device handle holding a valid superblock is mounted at `/disks/duetfs<N>` (disabled under an emulator — see [Known Limits](#known-limits-v8))
 - routed through the standard VFS (`VfsResolve("/duetfs/...")` returns a `VfsNode` with `backend == VfsBackend::DuetFs`)
 
+**Live-path vs. dormant.** The journal, encryption, compression,
+snapshot, and xattr crates are all present and exercised by
+`DuetFsSelfTest`, but the boot mount and the on-disk auto-mount
+path use plain `duetfs_mkfs` + `duetfs_write_at` — they are **not
+journaled, encrypted, or compressed** on the live volumes today.
+Those features are wired through their FFI entry points
+(`duetfs_journal_apply`, `duetfs_mkfs_encrypted`,
+`duetfs_lz4_compress`, `duetfs_snapshot_create`, `duetfs_xattr_*`)
+but not yet activated by the kernel's live mount path.
+
 CoW, multi-block CRC tables, and B-tree directory indexes land in
-later slices. (Journal in `journal.rs`, AES-XTS + Argon2 KDF in
-`crypto.rs`, LZ4 compression in `compress.rs`, snapshots in
-`snapshot.rs` all landed.)
+later slices.
 
 The lineage is **clean-room from RedoxFS** ([redox-os/redoxfs](https://github.com/redox-os/redoxfs),
 MIT). RedoxFS uses a B-tree and AES-XTS encryption; DuetFS v1 keeps
@@ -61,28 +76,38 @@ slice-defining workload makes them earn their complexity.
 - `cmake/DuetOSRust.cmake` — shared CMake helper used by the aggregate Rust staticlib.
 - `rust-toolchain.toml` — pinned nightly (rust-src + x86_64-unknown-none target).
 
-## On-disk format (v3)
+## On-disk format (v8)
 
 All multi-byte integers are little-endian. Magic = `"DuetFS01"`,
-version = 4.
+version = 8. The fixed-region layout has grown a journal (v5), a
+snapshot slot (v7), and per-node xattr storage (v8) since v3:
 
 ```
 Block 0          Superblock {
                    magic              u64  = "DuetFS01" (0x3130534674657544)
-                   version            u32  = 4
+                   version            u32  = 8
                    block_size         u32  = 4096
                    total_blocks       u32
                    node_count         u32  = 64
                    root_node          u32  = 0
                    bitmap_lba         u32  = 1
-                   crc_table_lba     u32  = 2
-                   crc_table_blocks  u32  = 1
+                   crc_table_lba      u32  = 2
+                   crc_table_blocks   u32  = 1
                    node_table_lba     u32  = 3
                    node_table_blocks  u32  = 4
-                   data_lba           u32  = 7
+                   data_lba           u32  = 22
                    free_blocks        u32  (accounting; rederivable)
                    sb_crc32           u32  (CRC32 over SB with this field zeroed)
-                   reserved[2]
+                   journal_lba        u32  = 7   (v5)
+                   journal_blocks     u32  = 8
+                   encrypted          u32  (ENCRYPTED_NO | ENCRYPTED_AES_XTS_256) (v6)
+                   kdf_m_cost_kib/t/p u32  × 3  (Argon2id params)
+                   kdf_salt[16]       u8
+                   snapshot_lba       u32  = 15  (v7)
+                   snapshot_blocks    u32  = 7
+                   snapshot_present   u32
+                   snapshot_reserved  u32
+                   snapshot_timestamp_ns u64
                  }
 
 Block 1          Free-block bitmap (1 bit per FS block, LSB-first
@@ -92,7 +117,7 @@ Block 2          Per-block CRC table. 1024 × u32 little-endian
                  entries, indexed by FS block LBA. Updated in
                  lockstep with every block write; verified at
                  fsck time. Entry [CRC_TABLE_LBA] is 0 (sentinel).
-                 Caps the image at 1024 blocks (4 MiB) in v3.
+                 Caps the image at 1024 blocks (4 MiB).
 
 Block 3..=6      Node table — fixed 256 B entries, 16 nodes/block,
                  64 nodes total.
@@ -107,14 +132,22 @@ Block 3..=6      Node table — fixed 256 B entries, 16 nodes/block,
                    reserved        u32
                    name[64]
                    extents[8]      8 × {block u32, blocks u32}  = 64 B
-                   pad[96]
+                   xattr_extent    {block u32, blocks u32}  (v8; blocks==0 = none)
+                   pad[...]
                  }
 
-Block 7..        Data blocks. Files: up to 8 inline extents per
+Block 7..=14     Journal region (v5) — write-ahead block journal,
+                 up to 7 ops per commit; replayed on open.
+Block 15..=21    Snapshot slot (v7) — frozen metadata copy when
+                 snapshot_present == YES; pinned by the allocator.
+Block 22..       Data blocks. Files: up to 8 inline extents per
                  file. Symlinks: target string in the first
                  extent's first block (NUL-padded). Dirs:
                  child_count × u32 child node IDs packed at the
                  head of the dir's first block (cap: 1024 children).
+                 Each node may own one xattr block (4 KiB) holding
+                 a stream of (name_len:u16, value_len:u16, name,
+                 value) records terminated by name_len == 0.
 ```
 
 ### CRC32
@@ -158,16 +191,16 @@ automatically recycled yet; until node clearing is journaled, repair
 keeps their extents pinned instead of risking reuse behind a live
 node-table entry.
 
-**Known limits (v3):**
+**Known limits (v8):** {#known-limits-v8}
 
 - Up to 8 inline extents per file (no indirect blocks). Files that need a 9th extent fail with `kStatusNoSpaceExtents`.
 - Directories cap at 1024 children (one block of child IDs).
 - Maximum image size: **4 MiB** (single-block CRC table — was 128 MiB before per-block CRCs).
 - Maximum node count: 64 per filesystem (4 blocks of node table).
 - Per-block CRCs are verified on file, symlink-target, directory child-list, and xattr reads; node-table / bitmap metadata verification remains fsck-led so repair can still inspect damaged metadata.
-- Hard link `new_path`'s last component must equal the target's existing name (v3 stores names on the inode; a separate dirent table lifts this in a future slice).
-- Symlink resolution stops at the symlink — caller re-resolves with the target. Auto-traversal in `lookup_path` lands later (cycle detection makes it non-trivial).
-- No CoW, no journal, no encryption, no compression.
+- Hard link `new_path`'s last component must equal the target's existing name (names live on the inode; a separate dirent table lifts this in a future slice).
+- **On-disk auto-mount is disabled under an emulator.** `duetfs.cpp:213` GAP — iterating real block devices through `duetfs_probe` (Rust) has wedged the KVM boot tail right after the `/duetfs` mount, so the loop is skipped when `arch::IsEmulator()` is true. The boot RAM mount at `/duetfs` is still up, but `/disks/duetfs<N>` will **not** appear under QEMU until the wedge is localised.
+- **Journal / encryption / compression / snapshots are present but dormant on the live path.** The crates and their FFI exist and pass self-test, but the boot mount and auto-mount use plain `duetfs_mkfs` + `duetfs_write_at` — live volumes are unjournaled, unencrypted, and uncompressed today. No CoW.
 
 ## Boot integration
 
@@ -259,32 +292,35 @@ A clean release boot drops the self-test entirely (`if constexpr
 └── apps/               (future — sample PE/ELF executables)
 ```
 
-The on-disk side of that tree, in v2, is laid out flat: every node
-above lives in the 64-entry node table (blocks 2..=5), and each
+The on-disk side of that tree is laid out flat: every node above
+lives in the 64-entry node table (blocks 3..=6), and each
 file/dir's data is one or more contiguous extents in the data
-region (blocks 6 onward). Compared to NTFS — which packs files
-into the MFT (Master File Table) records, with small files held
-inline and larger ones referencing extents called "data runs" —
-DuetFS v2 is the simplified shape: every node is fixed-size 256 B,
-every file's data is in 1..=8 extents listed inline on the node,
-and the file system has no concept of streams, ACLs, or hard links
-yet. The conceptual mapping is:
+region (block 22 onward; the journal and snapshot slots occupy
+blocks 7..=21). Compared to NTFS — which packs files into the MFT
+(Master File Table) records, with small files held inline and
+larger ones referencing extents called "data runs" — DuetFS is the
+simplified shape: every node is fixed-size 256 B and every file's
+data is in 1..=8 extents listed inline on the node. The conceptual
+mapping is:
 
-| DuetFS v2 | NTFS equivalent |
+| DuetFS v8 | NTFS equivalent |
 |---|---|
 | Superblock | `$Boot` |
 | Free-block bitmap | `$Bitmap` |
+| Per-block CRC table | (none — DuetFS-specific integrity) |
 | Node table | `$MFT` |
 | Node | MFT record |
 | inline extents | data runs |
+| per-node xattr block | `:stream` / ADS (DuetFS xattrs, v8) |
+| hard links (`link_count`) | hard links |
+| symlink nodes | reparse points / symlinks |
 | dir's child-id-array block | INDX (b-tree directory index — flat in DuetFS) |
-| (none) | `$LogFile` (journal — DuetFS has no journal yet) |
+| journal region (v5) | `$LogFile` |
 | (none) | `$Secure` (ACLs — DuetFS has no ACLs yet) |
-| (none) | reparse points / streams / ADS / hard links / symlinks |
 
 ext4 maps similarly: superblock → `$Boot`, block bitmap → `$Bitmap`,
 inode table → MFT, inode → MFT record. Of the three, ext4's shape is
-closest — DuetFS v2 picks ext4-style fixed inodes over NTFS-style
+closest — DuetFS picks ext4-style fixed inodes over NTFS-style
 self-describing records because fixed nodes parse with zero ambiguity
 and the format stays trivially walkable from a Rust-only `no_std` crate.
 
@@ -296,9 +332,7 @@ Tracked in [`Roadmap.md`](../reference/Roadmap.md):
 - Multi-block directories (raise the 1024-child cap).
 - Indirect extents (for files needing > 8 extents).
 - Separate dirent table (decouples hard-link names from the inode's `name`; supports `new_path` ≠ target's name).
-- Auto-symlink resolution in `lookup_path` with cycle detection.
 - B-tree directory index (when first directory grows past ~1000 entries).
-- CoW + journal (durability — currently no crash safety beyond SB + per-block CRC).
-- AES-XTS encryption + Argon2 KDF.
-- LZ4 compression.
+- **Wire the journal / encryption / compression / snapshot crates into the live mount path** — the FFI exists and self-tests pass, but boot/auto-mount volumes are plain (unjournaled / unencrypted / uncompressed). CoW.
+- Re-enable on-disk auto-mount under an emulator (`duetfs.cpp:213` GAP).
 - Userland syscall surface (file open/read/write that route through DuetFS via the existing VFS).
