@@ -109,20 +109,28 @@ multiboot2_header_end:
  *     (the canary prologue adds 16-24 bytes per frame, eating headroom
  *     on the deep PE/ELF-load chain).
  *   - 128 KiB: post-canary headroom recovery (2026-05-11).
- *   - 512 KiB: boot-tail wild-jump chase (2026-06-05). The post-x509
- *     network self-tests (TlsSocketSelfTest / HttpSelfTest) run the full
- *     TLS-handshake → x509-verify → ASN.1 → RSA/EC crypto chain on THIS
- *     stack; a captured cascade resumed a context with rsp=0xffffffff-
- *     800dfc40 (phys 0xdfc40, ~140 KiB BELOW stack_bottom), i.e. the
- *     128 KiB stack overflowed by ~140 KiB (≈268 KiB total demand) and —
- *     because the higher-half 2 MiB map is RW — the overflow grew
- *     SILENTLY into low RAM instead of faulting, scribbling the frame and
- *     producing the wild ret to RIP=0. 512 KiB covers the measured demand
- *     with headroom. (Diagnostic experiment; if a future capture shows
- *     rsp marching below stack_bottom AGAIN the demand is unbounded —
- *     recursion, not depth — and the fix moves the deep self-tests off the
- *     boot stack instead of growing it. See Roadmap "SMP=4 boot-tail
- *     wild-jump".)
+ *   - 512 KiB: boot-tail wild-jump fix (2026-06-05, VERIFIED). The
+ *     post-x509 network self-tests (TlsSocketSelfTest / HttpSelfTest) run
+ *     the full TLS-handshake → x509-verify → ASN.1 → RSA/EC crypto chain
+ *     on THIS stack; a captured cascade resumed a context with
+ *     rsp=0xffffffff800dfc40 (phys 0xdfc40, ~140 KiB BELOW stack_bottom),
+ *     i.e. the 128 KiB stack overflowed by ~140 KiB (≈268 KiB total
+ *     demand) and — because the higher-half 2 MiB map is RW — the
+ *     overflow grew SILENTLY into low RAM instead of faulting, scribbling
+ *     the frame and producing the ungated wild ret to RIP=0. 512 KiB
+ *     covers the measured demand with headroom; with it the SMP=4 debug
+ *     boot clears x509 → all HttpSelfTest PASS → steady-state runtime
+ *     (verified to 215 s guest uptime, zero faults). See Roadmap
+ *     "SMP=4 boot-tail wild-jump cascade — LANDED".
+ *
+ *     NOTE: this stack has no guard page — the overflow that prompted the
+ *     bump grew silently because the 2 MiB higher-half map is RW. The
+ *     principled follow-up is a 4 KiB not-present guard page just below
+ *     stack_bottom (split the first 2 MiB; .text.boot below is dead after
+ *     the higher-half jump) so any FUTURE overflow faults at the boundary
+ *     instead of corrupting low RAM. Until then, a recurrence of the
+ *     0x...800dxxxx-rsp signature means demand outgrew 512 KiB and the
+ *     real fix is to move the deep self-tests off the boot task's stack.
  */
 .align 16
 stack_bottom:

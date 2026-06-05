@@ -357,141 +357,83 @@ area is readable immediately instead of corrupted.
   `SerialWriteNRecursiveFault` (serial.cpp). Blocks on: clean log
   from the harness pointing at the actual first-fault RIP.
 
-### SMP=4 boot-tail wild-jump cascade (post-x509 self-test) — STILL OPEN, root narrowed (2026-06-05)
+### SMP=4 boot-tail wild-jump cascade (post-x509 self-test) — LANDED (2026-06-05)
 
-Reproduced again on this date with **unbuffered serial capture**
-(`DUETOS_SERIAL_FILE=`) + full `-d int` trace under `DUETOS_SMP=4
-DUETOS_CPU=qemu64` (TCG), `x86_64-debug`. The cascade is **not yet
-fixed**; what follows is the sharpened root lead from the new trace.
+**Root cause: boot-stack overflow.** The reproducible SMP=4 `x86_64-debug`
+cascade that faulted immediately after `[x509-verify-selftest] PASS`
+(next self-test `HttpSelfTest` never printed) was **not** a reaper/
+scheduler UAF — it was the **128 KiB boot stack overflowing** under the
+deep post-x509 network self-test chain (`TlsSocketSelfTest` /
+`HttpSelfTest` → TLS handshake → x509-verify → ASN.1 → RSA/EC crypto),
+all of which run on the BSP boot task's stack.
 
-**Exact trigger sequence (qemu `-d int`, interrupt counters):**
+**Evidence chain that pinned it:**
+- A full `-d int` capture showed the wild context was a `ContextSwitch`/
+  `ret`-shaped resume to **`RIP=0`** with **`RSP=0xffffffff800dfc40`**
+  (phys `0xdfc40`, **~140 KiB BELOW `stack_bottom=0x102000`**), `CR2` a
+  per-boot `rdtsc`-shaped value.
+- An instrumented run (resume validator extended to reject
+  `stack_base==nullptr` resumes below the kernel-image floor, unbuffered
+  serial) produced **no validator output** before the cascade, and
+  neither did the `ContextSwitch` ret gate (`context_switch.S`), the
+  kernel-mode `iretq` RIP gate (`exceptions.S`), the retpoline, nor the
+  trampoline gate — all of which range-check `[_text_start,_text_end)`
+  and would catch a saved `RIP=0`. Since **no gate fired**, the transfer
+  was an **ungated plain `ret`** off a scribbled stack frame, not a
+  scheduler resume of a freed Task. (`CR2`=the live TSC further proves
+  vaddr 0 was *executed* — the boot PML4 identity-maps `0..1 GiB` RWX, so
+  the wild `ret` ran low-RAM bytes instead of faulting.)
+- `rsp` ~140 KiB below a 128 KiB stack ⇒ ~268 KiB demand ⇒ a ~140 KiB
+  overflow. Because the higher-half **2 MiB map is RW**, the overflow
+  grew SILENTLY through the boot sections into reserved low RAM instead
+  of faulting (the old `boot.S` "overflow faults immediately" claim was
+  false under that mapping). This is the same deep-load-chain pressure
+  that already forced the boot stack's documented `16→64→128 KiB` bumps.
 
-```
-#7516  v=20 (timer)  IP=ffffffff8027170b (arch::Sti)  RSP=ffffffffe0032c00  RAX=0xc894a5149
-#7517  v=32 (MSI-X device, vector 50)  same IP/RSP     RAX=0xc894a5149
-#7518  v=0e (#PF)    IP=0  RSP=ffffffff800dfc40  CR2=0xc894a5149   ← cascade onset
-        … RSP marches ~0x1540/frame down through the image … IP=-1, triple-faults
-```
+**Fix (verified):** grow the boot stack `128 KiB → 512 KiB`
+(`kernel/arch/x86_64/boot.S`). With 512 KiB, `DUETOS_SMP=4
+DUETOS_CPU=qemu64` (TCG) `x86_64-debug` boots **past** the former crash
+point — `[x509-verify-selftest] PASS` → all eight `[net/http-selftest]
+PASS` lines → `TlsSocketSelfTest` → steady-state runtime (`kheartbeat`
+heap/frame stats, `cpu_busy_pct≈23%`) to **215 s guest uptime** with
+**zero** `v=0e`/`v=0d` runaway in the `-d int` log and **zero** panics.
+Pre-fix this faulted byte-identically (incl. on `origin/main`).
 
-The task running at #7516/#7517 is the **TCP timer kernel thread**
-(`RBX=ffffffff806c4d00` = `net::tcp::TcpTimerEntry`), on a healthy
-dynamic kstack (`...e0032c00`). An **MSI-X device IRQ (vector 0x32=50)**
-preempts it; shortly after, control transfers to a context with
-**`rsp = 0xffffffff800dfc40`** and **`RIP = 0`** — the wild jump.
-`RAX` is *preserved* across the transfer (`0xc894a5149` at #7516, #7517
-**and** #7518); since `RAX` is SysV caller-saved, a `ContextSwitch` `ret`
-**or** a plain function `ret` **or** an `iretq` would all leave it intact,
-so RAX-preservation alone does NOT distinguish the path. (An earlier draft
-read this as proof of a `ContextSwitch` resume; the guard evidence below
-overturns that.)
+**Follow-ups (hardening, not blockers):**
+1. **Boot-stack guard page** — map a 4 KiB not-present page just below
+   `stack_bottom` so a *future* overflow faults at the boundary
+   (attributable `#PF`) instead of silently corrupting low RAM. Needs a
+   2 MiB→4 KiB split in `boot.S` (the page below `stack_bottom` shares the
+   first 2 MiB with `.text.boot`, which is dead after the higher-half
+   jump, so it can double as the guard). This makes the `boot.S`
+   "overflow faults immediately" guarantee actually true.
+2. **`#PF`/`#GP`/`#DF` on IST stacks** so trap delivery survives a corrupt
+   `RSP` and the `[wild-kernel-rip]` forensic can fire on a whole-frame
+   scribble (today the nested push on the bad rsp triple-faults first).
+3. **Move deep self-tests off the boot task** (Linux/xv6 model: the boot
+   task becomes idle; heavy work runs on properly-stacked workers) so
+   boot-stack demand stays bounded regardless of self-test depth.
 
-**What `0xffffffff800dfc40` is:** higher-half of physical `0xdfc40`
-(~895 KiB) — **below the entire kernel image** (`.text.boot`@phys
-`0x101000`, `.bss.boot`/boot-stack@`0x102000`). It is **not** the boot
-stack and **not** a heap kstack (those live in the `...e0...` arena); it
-is junk low RAM (legacy <1 MiB region). Both the saved `rsp` AND the
-saved `rip` are garbage together — a **whole-frame scribble**, not a lone
-`Task::rsp` field overwrite.
-
-**The strengthened resume validator did NOT fire** (a run with the
-`sched.cpp` validator extended to reject `stack_base==nullptr` resumes
-with `rsp` below the kernel-image floor produced zero output before the
-cascade on unbuffered serial). That, combined with the silence of the
-`ContextSwitch` and `iretq` RIP gates (see table below), means the wild
-transfer is **NOT** a `Schedule()`→`ContextSwitch` resume of a corrupt
-task at all — it is an **ungated plain `ret`** whose return slot was
-scribbled. The "corrupt `stack_base==nullptr` task resumed by the
-scheduler" hypothesis is therefore **retired**; the validator hardening
-stays in tree as defence-in-depth but is not the catch for this shape.
-
-**The transfer to RIP=0 bypasses ALL FOUR existing control-transfer
-guards (decisive new evidence, 2026-06-05).** A run with a *strengthened*
-resume validator (reject `stack_base==nullptr` resumes whose `rsp` is
-below the kernel-image floor) was captured on unbuffered serial. The
-validator produced **no output** before the cascade, and neither did any
-of the other three gates. The kernel already range-checks `[_text_start,
-_text_end)` on every gated kernel control transfer:
-
-| gate | site | would catch RIP=0? | fired? |
-|------|------|--------------------|--------|
-| `ContextSwitch` `ret` target | `context_switch.S:92-115` (`SchedContextSwitchWildRetCallback`) | yes | **no** |
-| kernel-mode `iretq` target | `exceptions.S:399-412` (`IretqFrameWildCallback`) | yes | **no** |
-| indirect `call`/`jmp` (r11) | `__llvm_retpoline_r11` | yes | **no** |
-| fresh-task `call rbx` | `SchedTaskTrampolineValidateEntry` | yes | **no** |
-| resume `rsp` sanity (this slice) | `sched.cpp` validator | n/a (rsp shape) | **no** |
-
-Since `ContextSwitch` and `iretq` both *would* have caught a saved
-`RIP=0` and did not, the wild transfer is **through an UNGATED `ret`** —
-a normal C function return whose return address on the stack was
-scribbled to 0 — not the scheduler's `ContextSwitch` and not the trap
-`iretq`. (This also overturns the earlier "corrupt `Task::rsp` resumed by
-`Schedule()`" lead: had it been a `Schedule()`→`ContextSwitch`, the
-ret-target gate would have tripped.)
-
-**`CR2` = the TSC value ⇒ vaddr 0 is mapped and was *executed*.** The
-`#PF` at `IP=0` carries `CR2`=the `rdtsc` value still live in `RAX`, not
-`CR2=0`. An instruction-fetch fault at a *missing* page 0 would give
-`CR2=0`. Instead the byte(s) at vaddr 0 ran as code and the garbage
-instruction dereferenced `RAX`. The boot PML4 **identity-maps 0..1 GiB
-RWX in 2 MiB pages** (`boot.S`), so vaddr 0 is present+executable —
-a wild `ret`/`call` to 0 silently executes low-RAM (IVT/BIOS) bytes
-instead of faulting cleanly. Both `RIP=0` **and** `RSP=0xffffffff800dfc40`
-are corrupt together (a whole-frame scribble), which is why the `#PF`
-nests on the bad rsp before `TrapDispatch`/the `[wild-kernel-rip]`
-forensic can run.
-
-**Leads to chase (open), reprioritised by the above:**
-1. *Find the ungated `ret` with a scribbled return address.* The
-   transfer is a plain function-return, so the corruption is **a stack
-   return-slot overwrite**, not a `Task::rsp`/struct-field overwrite.
-   Around the trigger the running context is the **TCP timer kernel
-   thread** preempted by an **MSI-X device IRQ (vector 0x32=50)** — audit
-   the NIC/MSI-X bottom-half and the TCP timer path for a stack buffer
-   that can overrun its frame (a packet/descriptor copy sized from
-   device-controlled length writing past a stack array), scribbling the
-   saved return address + a neighbouring saved rsp. This is the
-   classic *stack-buffer-overflow → return-address clobber* shape, now
-   the leading hypothesis (it explains why every control-transfer gate is
-   silent: the wild value never went through one).
-2. *Diagnostic hardening — make the silent transfer loud.* (a) Unmap (or
-   mark NX) the **null page / low identity region** so a `ret`/`call` to
-   vaddr 0 faults *immediately* with `CR2=0,IP=0` instead of executing
-   low RAM — page 0 needs a 2 MiB→4 KiB split in `boot.S` because
-   `.text.boot` shares the first 2 MiB. (b) Put `#PF`/`#GP`/`#DF` on
-   **IST stacks** so trap delivery survives a corrupt `RSP` and the
-   `[wild-kernel-rip]` forensic can actually fire on this shape (today it
-   can't — the nested push on the bad rsp triple-faults first). (c) Add a
-   stack-canary / `STACK_END_MAGIC`-style end-of-frame check on the
-   suspect bottom-half (Linux `task_stack_end_corrupted`).
-3. *Single-step on KVM/real HW.* The originating host is TCG with no
-   `/dev/kvm`; QEMU's BQL `abort()` truncates the dump and TCG can't run
-   the GDB-stub single-step needed to catch the exact `ret`. Re-run
-   `DUETOS_SERIAL_FILE=…` on `accel=kvm`, `b ContextSwitch` / break on the
-   TCP-timer + MSI-X handlers, and watch the return-slot get scribbled.
-
-**Adjacent real fix landed this session (NOT this cascade):** the
-`Schedule()` budget-/policy-kill (`kill_requested`) branch was still
-pushing the dying task to `g_zombies` inline — before its
-`ContextSwitch` — the *same* reaper-frees-running-stack UAF the
-2026-05-22 SMP=8 fix closed for `SchedExit`, left open on the kill path.
-It now routes through the per-CPU `ctxsw_dying_task_to_zombie` deferred
-slot, so `SchedFinishTaskSwitch` is the single post-switch zombie-publish
-site for *both* termination paths (see
-[`Scheduler.md`](../kernel/Scheduler.md) and the 2026-06-05
-Design-Decision). This is a genuine latent UAF, but it is **orthogonal**
-to the boot-tail cascade above (which resumes a `stack_base==nullptr`
-task, not a freed heap kstack) and does **not** make the cascade go away.
+**Adjacent real fixes landed alongside (both kept, both orthogonal to the
+overflow root):**
+- **Kill-path reaper UAF** — `Schedule()`'s `kill_requested` branch pushed
+  the dying task to `g_zombies` inline (before its `ContextSwitch`), the
+  same reaper-frees-running-stack UAF the 2026-05-22 SMP=8 fix closed for
+  `SchedExit`. Now routes through the per-CPU deferred-zombie slot;
+  `SchedFinishTaskSwitch` is the single post-switch zombie-publish site
+  for both termination paths.
+- **Resume-validator hardening** — the validator now rejects
+  `stack_base==nullptr` resumes with `rsp` below the kernel-image floor
+  (defence-in-depth for a corrupt boot/idle resume; verified false-fire-
+  safe across a full boot).
 
 **Diagnostic scaffolding (stays in tree):**
 `tools/qemu/triage-truncated-boot.sh`, the `[wild-kernel-rip]` /
-`[panic-precis]` forensics in `arch/traps`+`core/panic`, `run.sh`'s
-`DUETOS_SERIAL_FILE=` unbuffered-COM1 route, and the three
-`kernel/sched/sched.cpp` resume/reaper guards.
-
-> Host-emulator note: QEMU 8.2 TCG+SMP also hits its own
-> `qemu_mutex_lock_iothread_impl` BQL-reentrancy `abort()` when the guest
-> faults mid-boot, truncating serial; the `-d int` log (flushed per line)
-> is the reliable capture. Re-confirm on `accel=kvm` / real HW.
+`[panic-precis]` forensics, `run.sh`'s `DUETOS_SERIAL_FILE=` unbuffered
+COM1 route (essential here — the `-d int` log was the only reliable
+capture because QEMU 8.2 TCG+SMP `abort()`s on its own BQL assertion when
+the guest faults mid-boot), and the `kernel/sched/sched.cpp` resume/reaper
+guards.
 
 ### Topology — cluster-scoped IPI fan-out
 

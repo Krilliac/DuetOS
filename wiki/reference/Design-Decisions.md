@@ -10417,3 +10417,44 @@ latent reaper UAF on the kill path, but is **orthogonal** to — and does
 **not** resolve — the Roadmap entry "SMP=4 boot-tail wild-jump cascade
 (post-x509 self-test)", which reproduces a corrupt resume of a
 `stack_base==nullptr` boot/idle task and remains open.
+
+## 2026-06-05 — Boot-tail wild-jump was a boot-stack overflow, not a reaper/scheduler UAF
+
+**Scope & commit:** `kernel/arch/x86_64/boot.S` (boot stack 128→512 KiB);
+investigation also touched `kernel/sched/sched.cpp`.
+
+**Decision:** The long-standing "SMP=4 boot-tail wild-jump cascade
+(post-x509)" is attributed to and fixed as a **boot-stack overflow** — the
+BSP boot task ran the deep post-x509 network self-test chain
+(TLS→x509→ASN.1→RSA/EC) on the 128 KiB boot stack, demanding ~268 KiB.
+Growing the boot stack to 512 KiB is the verified fix.
+
+**Why (and what it rules out):** Multiple sessions chased this as a
+reaper/scheduler use-after-free (resume of a freed `Task` with corrupt
+`rsp`). That hypothesis is **retired** for this symptom: an instrumented
+capture showed the wild transfer to `RIP=0` fired **none** of the four
+kernel control-transfer gates (`ContextSwitch` ret-check, kernel `iretq`
+RIP-check, retpoline, trampoline), each of which range-checks
+`[_text_start,_text_end)` and would catch a saved `RIP=0` on a scheduler/
+iretq path. No gate firing ⇒ an **ungated plain `ret` off a scribbled
+stack frame**, and the corrupt `rsp=0xffffffff800dfc40` sits ~140 KiB
+below `stack_bottom` — an overflow signature, not a freed-struct
+signature. The overflow was invisible because the higher-half 2 MiB map
+is RW (so growth past the boot sections into low RAM does not fault).
+
+**Forward guidance for the next slice (so the wrong tree isn't re-climbed):**
+a wild kernel jump whose `rsp` lands just below a known stack base, with
+NO control-transfer-gate banner, is a **stack overflow**, not a UAF —
+check stack depth / guard pages before instrumenting the reaper. The
+kill-path reaper UAF and the resume-validator hardening landed in the same
+investigation are genuine but were **orthogonal** (they did not change the
+cascade).
+
+**Revisit when:** the boot-stack guard page lands (then an overflow faults
+at the boundary and this becomes self-diagnosing), or the deep self-tests
+are moved off the boot task (then 512 KiB can shrink again). Re-confirm on
+`accel=kvm`/real HW (the TCG host `abort()`s on its BQL assertion mid-fault,
+so the `-d int` log + unbuffered serial were the capture path).
+
+**Related roadmap track(s):** Scheduler / SMP / boot. Closes the Roadmap
+entry "SMP=4 boot-tail wild-jump cascade (post-x509 self-test)".
