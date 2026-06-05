@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <intrin.h> // __debugbreak (used by --break / cfg.breakAtStart)
 #include <stdexcept>
 
 #include "debug/host_stop.h"
@@ -77,7 +78,17 @@ Vmm::Vmm(VmConfig cfg)
              kMbInfoGpa + 0x10000}));
 
     Mb2Params mp;
+    // When the GDB stub is enabled, tell the guest kernel that a debugger
+    // host owns #BP/#DB so it stands down its boot-time int3 / DR
+    // self-tests (TrapsSelfTest's int3, BpSelfTest, WatchSelfTest), which
+    // would otherwise collide with our exception intercept and wedge or
+    // corrupt the boot. The kernel keys off the "debugstub=1" cmdline
+    // token (see kernel/core/boot_cmdline.cpp).
     mp.cmdline     = m_cfg.cmdline;
+    if (m_cfg.gdbPort != 0)
+    {
+        mp.cmdline += " debugstub=1";
+    }
     mp.ramBytes    = m_cfg.ramBytes;
     mp.reservedEnd = reservedEnd;
     mp.rsdp        = acpi.rsdp;
@@ -515,6 +526,32 @@ int Vmm::Run()
     }
 
     StartHelperThreads();
+
+    // --break: halt under a native VS attach now that construction is
+    // complete and both debug channels are ready — the GDB stub (if
+    // --gdb) is already listening so the second VS instance can attach
+    // to tcp:<port>, and g_activeVmm is set so the vmm_dbg:: bridge
+    // resolves guest symbols (neither was true at the old main()
+    // break). For SOURCE-LEVEL kernel debugging via the stub, just
+    // continue past this break; do NOT call vmm_dbg::Claim() — Claim()
+    // routes #BP/#DB to the host bridge's __debugbreak (VMM host code)
+    // and starves the stub. IsDebuggerPresent gates the trap.
+    if (m_cfg.breakAtStart)
+    {
+        if (IsDebuggerPresent())
+        {
+            std::printf("[vmm] --break: halting after construction "
+                        "(GDB stub listening, vmm_dbg:: bridge live)\n");
+            std::fflush(stdout);
+            __debugbreak();
+        }
+        else
+        {
+            std::printf("[vmm] --break: no debugger attached, "
+                        "continuing\n");
+            std::fflush(stdout);
+        }
+    }
 
     if (m_gdb)
     {

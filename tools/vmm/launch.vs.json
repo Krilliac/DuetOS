@@ -15,18 +15,27 @@
   //   cleanly and the launch entries below appear in the toolbar
   //   dropdown immediately.
   //
-  // RECOMMENDED WORKFLOW (full-coverage two-window debug)
+  // RECOMMENDED WORKFLOW (source-level kernel debugging)
   //   1. First VS instance — open the DuetOS repo root, F5 the
   //      duetos-vmm CMake target. The VMM launches with --break and
-  //      --gdb 1234. Native-attach session is live for VMM + the
-  //      vmm_dbg:: bridge. Continue past the __debugbreak to let the
-  //      VMM open its GDB stub.
+  //      --gdb 1234. The GDB stub binds tcp:1234 DURING construction
+  //      (watch for "[vmm] gdb: stub listening on tcp:1234 — safe to
+  //      attach"), then the VMM halts at the --break __debugbreak with
+  //      the native-attach session live. Just press Continue (F5) — do
+  //      NOT call vmm_dbg::Claim(): Claim() routes guest breakpoints to
+  //      the host bridge's __debugbreak (VMM host code) and STARVES the
+  //      GDB stub, which is the classic "debugger only breaks into the
+  //      VMM, never the kernel" trap. (Claim() is for host-side struct
+  //      walking, a different tool from source debugging.)
   //
   //   2. Second VS instance — open tools/vmm/ (THIS folder). Pick
   //      "DuetOS: Attach (in-house VMM kernel, tcp:1234)" in the
   //      launch dropdown, F5. The kernel ELF is loaded, gdb connects
   //      to localhost:1234, the guest halts pre-first-instruction.
   //      Source-level kernel debugging is now live in this window.
+  //      (You can attach instance 2 either while instance 1 is parked
+  //      at the --break or after continuing it — the stub is already
+  //      listening either way.)
   //
   // GDB.EXE — needs to be a **Windows** gdb on PATH (NOT WSL's
   // /usr/bin/gdb — WSL2 cannot reach the Windows host via localhost).
@@ -66,6 +75,16 @@
       "miDebuggerServerAddress": "localhost:1234",
       "stopAtConnect": true,
       "externalConsole": false,
+      // The kernel ELF is built in WSL, so its DWARF records source
+      // paths under the WSL checkout root (e.g. /root/source/DuetOS/...).
+      // Map that root to THIS Windows checkout so VS opens the right
+      // file and source-line breakpoints bind. LHS is the WSL build
+      // root (adjust if yours differs, e.g. /home/<you>/DuetOS); RHS
+      // resolves to the repo root via the workspace macro, so it stays
+      // portable across machines.
+      "sourceFileMap": {
+        "/root/source/DuetOS": "${workspaceRoot}/../.."
+      },
       "setupCommands": [
         { "text": "set confirm off", "ignoreFailures": true },
         { "text": "set print pretty on", "ignoreFailures": true },

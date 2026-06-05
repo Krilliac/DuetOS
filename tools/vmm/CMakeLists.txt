@@ -136,11 +136,23 @@ if(CMAKE_GENERATOR MATCHES "Visual Studio")
     # stub enabled. The user gets full coverage by opening a second
     # VS instance and F5'ing the "DuetOS: Attach (in-house VMM,
     # tcp:1234)" launch.vs.json config — that one drives kernel-side
-    # source-level debugging via the GDB stub. The two sessions
-    # coexist (vmm_dbg::Claim() defaults off; GDB stub owns exceptions
-    # until the host-attach session explicitly claims).
-    #   --break  : __debugbreak in main() so the native-attach window's
-    #              Immediate is live before the vCPU runs (see wiki).
+    # source-level debugging via the GDB stub.
+    #
+    # The two channels are MUTUALLY EXCLUSIVE, not simultaneous:
+    #   * GDB stub (default, g_hostAttachOwns==false): guest #BP/#DB are
+    #     served to the second VS instance over tcp:1234 → you see GUEST
+    #     kernel source. This is the kernel-debugging path.
+    #   * vmm_dbg:: bridge (after vmm_dbg::Claim() in instance 1's
+    #     Immediate window): guest #BP/#DB fire a host __debugbreak →
+    #     instance 1 halts in VMM host code with guest state in
+    #     g_stop_state. This is host-side struct-walking, NOT source
+    #     debugging — calling Claim() STARVES the GDB stub.
+    # For source-level kernel debugging, continue past --break and DO
+    # NOT call Claim().
+    #   --break  : __debugbreak fired from Vmm::Run (after construction)
+    #              so the native window's Immediate is live before the
+    #              vCPU runs AND both channels are ready — the stub is
+    #              listening and Vmm::Active() is set (see wiki).
     #   --gdb 1234 : open the host-side GDB remote on tcp:1234 for the
     #              second VS instance to attach.
     # IsDebuggerPresent() gates the --break trap, so an accidental

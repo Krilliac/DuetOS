@@ -48,6 +48,7 @@
 #include "diag/hexdump.h"
 #include "diag/minidump.h"
 #include "diag/log_names.h"
+#include "core/boot_cmdline.h"
 #include "core/panic.h"
 #include "log/klog.h"
 #include "util/saturating.h"
@@ -2335,12 +2336,22 @@ void TrapsSelfTest()
 {
     SerialWrite("[traps] self-test\n");
 
+    // Stand down the int3 probe when an external debugger host owns #BP
+    // (duetos-vmm --gdb sets debugstub=1): its #BP interception would
+    // either wedge the boot or corrupt this test. Steps 2-5 below don't
+    // use #BP and still run, so the rest of the self-test is unaffected
+    // (step 4's nesting check is satisfied by step 2's int $0x42 alone).
+    const bool debug_stub = duetos::core::DebugStubAttached();
+
     // 1. Kernel-mode int3. Slice-80 policy: TrapResponse::LogAndContinue.
     // The dispatcher emits "[trap] #BP Breakpoint (recoverable) ..."
     // and iretq's; execution resumes on the line below. If the policy
     // regresses to Panic the kernel halts here instead of returning,
     // and the boot log shows the crash banner — easy regression signal.
-    asm volatile("int3");
+    if (!debug_stub)
+    {
+        asm volatile("int3");
+    }
 
     // 2. Stray-vector probe. Vector 0x42 (66) has no registered
     // handler. It lands in the dispatched MSI-X range [48,239], so it
@@ -2428,7 +2439,15 @@ void TrapsSelfTest()
         KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x8u);
     }
 
-    SerialWrite("[traps] self-test OK — #BP and spurious both recovered\n");
+    if (debug_stub)
+    {
+        SerialWrite("[traps] self-test OK — spurious recovered (#BP stood "
+                    "down for debug stub)\n");
+    }
+    else
+    {
+        SerialWrite("[traps] self-test OK — #BP and spurious both recovered\n");
+    }
 }
 
 } // namespace duetos::arch

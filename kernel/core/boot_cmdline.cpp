@@ -146,4 +146,22 @@ bool CmdlineMatches(const char* cmdline, const char* key, const char* want)
     return false;
 }
 
+namespace
+{
+// Cached "debugstub=1" result. Parsed once by DebugStubInit early in
+// boot; DebugStubAttached() reads this. constinit so it lives in .bss
+// with a defined value before any constructor runs.
+constinit bool g_debug_stub = false;
+} // namespace
+
+void DebugStubInit(const char* cmdline)
+{
+    g_debug_stub = CmdlineMatches(cmdline, "debugstub", "1");
+}
+
+bool DebugStubAttached()
+{
+    return g_debug_stub;
+}
+
 } // namespace duetos::core

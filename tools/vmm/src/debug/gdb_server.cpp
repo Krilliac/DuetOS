@@ -85,6 +85,14 @@ GdbServer::GdbServer(Partition& part, GuestMemory& mem, uint16_t port)
     {
         throw std::runtime_error("gdb: bind/listen failed");
     }
+    // The socket is bound + listening now, so a connect() to this port
+    // succeeds from here (it queues in the backlog until the accept()
+    // in WaitForConnection). This is the real "safe to attach the
+    // second VS instance" point — log it so the ordering is clear.
+    std::printf("[vmm] gdb: stub listening on tcp:%u — safe to "
+                "attach the second VS instance now\n",
+                port);
+    std::fflush(stdout);
 }
 
 GdbServer::~GdbServer()
