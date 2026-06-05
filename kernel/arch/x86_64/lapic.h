@@ -47,6 +47,14 @@ inline constexpr u64 kLapicRegTimerDivide = 0x3E0;
 // the NMI watchdog.
 inline constexpr u64 kLapicRegLvtPerf = 0x340;
 
+// In-Service Register base. The ISR is 256 bits spread across 8
+// 32-bit registers at 0x100, 0x110, ... 0x170; bit `v & 31` of
+// register `0x100 + (v >> 5) * 0x10` is set while vector `v` is
+// being serviced by this CPU and clears on EOI. x2APIC folds each
+// onto MSR 0x810 + (v >> 5), which LapicRead's offset>>4 mapping
+// already produces.
+inline constexpr u64 kLapicRegIsrBase = 0x100;
+
 /// Detect the LAPIC, map its MMIO window with cache-disable, set the
 /// spurious-vector register (vector 0xFF), and globally enable. Panics if
 /// the LAPIC is not present (shouldn't happen on x86_64).
@@ -55,6 +63,16 @@ void LapicInit();
 /// Acknowledge the in-service interrupt. Must be called by the IRQ
 /// dispatcher — handlers should NOT call EOI themselves (see traps.h).
 void LapicEoi();
+
+/// True iff vector `v`'s In-Service bit is set in this CPU's LAPIC —
+/// i.e. the interrupt was hardware-delivered and is awaiting EOI.
+/// A software-triggered `int n` and the spurious vector (0xFF) never
+/// set an ISR bit, so this returns false for them. The trap
+/// dispatcher uses it to decide whether an UNHANDLED vector still
+/// needs an EOI (a real device IRQ that latched the ISR would
+/// otherwise block every lower-priority vector on this CPU). Returns
+/// false before the LAPIC is mapped.
+bool LapicInServiceBitSet(u8 v);
 
 /// Raw register access. Caller is responsible for offset validity and
 /// register-specific semantics. Transparently dispatches to MMIO

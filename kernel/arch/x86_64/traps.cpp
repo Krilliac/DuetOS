@@ -817,6 +817,53 @@ constexpr ::duetos::u64 kMaxTightRecursion = 8;            // 8 tight descents i
     }
 }
 
+// Single source of truth mapping a CPU-exception vector to the
+// NTSTATUS a Win32 process would observe for that fault. Shared by
+// the ring-3 SEH delivery switch (which gates on a non-zero result
+// to decide dispatchability + supplies the code to ntdll's
+// KiUserExceptionDispatcher) and by the ring-3 minidump emit (which
+// labels the .dmp's exception record). Keeping ONE table prevents
+// the two sites drifting — the "sentinel divergence" class of bug
+// where one path is taught a new vector and the other isn't.
+//
+// Returns 0 for vectors with no Windows structured-exception
+// analogue (the caller substitutes its own fallback). #BP/#DB are
+// deliberately 0 here: they never reach the IsolateTask path (the
+// breakpoint / GDB subsystems claim them first under LogAndContinue
+// policy), so a PE never sees them as a delivered exception.
+static u32 VectorToUserNtStatus(u64 vector)
+{
+    switch (vector)
+    {
+    case 0:
+        return 0xC0000094; // #DE STATUS_INTEGER_DIVIDE_BY_ZERO
+    case 4:
+        return 0xC0000095; // #OF STATUS_INTEGER_OVERFLOW
+    case 5:
+        return 0xC000008C; // #BR STATUS_ARRAY_BOUNDS_EXCEEDED
+    case 6:
+        return 0xC000001D; // #UD STATUS_ILLEGAL_INSTRUCTION
+    case 13:
+        return 0xC0000005; // #GP STATUS_ACCESS_VIOLATION
+    case 14:
+        return 0xC0000005; // #PF STATUS_ACCESS_VIOLATION
+    case 16:
+        // GAP: x87 #MF carries a status word distinguishing
+        // divide-by-zero / overflow / underflow / inexact / denormal
+        // / invalid; we deliver the generic
+        // STATUS_FLOAT_INVALID_OPERATION rather than decoding the FSW.
+        return 0xC0000090; // #MF STATUS_FLOAT_INVALID_OPERATION
+    case 17:
+        return 0x80000002; // #AC STATUS_DATATYPE_MISALIGNMENT
+    case 19:
+        // GAP: SSE #XM's specific exception lives in MXCSR; we deliver
+        // the generic multiple-traps code rather than decoding it.
+        return 0xC00002B4; // #XM STATUS_FLOAT_MULTIPLE_TRAPS
+    default:
+        return 0; // no structured-exception analogue
+    }
+}
+
 extern "C" void TrapDispatch(TrapFrame* frame)
 {
     // Diagnostic: snapshot the iretq-frame RIP at entry so the
@@ -1089,6 +1136,25 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         }
         else
         {
+            // Defense-in-depth: an unhandled but HARDWARE-DELIVERED IRQ
+            // still latched this CPU's LAPIC In-Service bit. Leaving it
+            // un-EOI'd silently blocks every lower-priority vector on
+            // this CPU for the rest of the boot — a device that fires
+            // on a vector whose handler was cleared (MSI-X bind
+            // fallback, hot-unplug, a driver that unmasked before
+            // installing) would wedge the timer tick and freeze the
+            // box with no diagnostic. We must NOT blindly EOI here,
+            // though: a software-triggered `int n` to a vector in the
+            // dispatched range (the boot `int $0x42` self-test lands in
+            // the MSI-X pool) never set an ISR bit, and EOIing it would
+            // dismiss some OTHER genuinely in-flight interrupt. Reading
+            // the LAPIC ISR for exactly this vector distinguishes the
+            // two: set => hardware delivery, needs EOI; clear =>
+            // software int n / spurious, leave the LAPIC alone.
+            if (LapicInServiceBitSet(static_cast<u8>(frame->vector)))
+            {
+                LapicEoi();
+            }
             // First time we see this unhandled vector: route through
             // klog so it shows up in the ring buffer + any future
             // crash dump. Subsequent fires from the same vector are
@@ -1552,40 +1618,26 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         // T6-02: before tearing the task down, try to deliver the
         // fault to the faulting Win32 PE as a structured exception.
         // A PE with a covering __try/__except (or a vectored
-        // handler) catches it and continues; only #DE/#UD/#GP/#PF
-        // are dispatchable, and only when the process has our ntdll
-        // mapped. On success the trap frame now resumes at
-        // ntdll!KiUserExceptionDispatcher — just return so iretq
-        // lands there. Any failure (no ntdll, unwritable user
-        // stack, re-fault loop) falls through to the legacy
-        // task-kill path unchanged.
+        // handler) catches it and continues, and only when the
+        // process has our ntdll mapped. On success the trap frame now
+        // resumes at ntdll!KiUserExceptionDispatcher — just return so
+        // iretq lands there. Any failure (no ntdll, unwritable user
+        // stack, re-fault loop) falls through to the legacy task-kill
+        // path unchanged.
+        //
+        // The dispatchable set is every CPU exception Windows itself
+        // surfaces as a structured exception (see VectorToUserNtStatus,
+        // the shared vector->NTSTATUS table), each mapped to the
+        // matching code so a __try/__except filtering on a specific
+        // EXCEPTION_* value sees the right one. #BP/#DB are absent —
+        // they are claimed earlier by the breakpoint / GDB subsystems
+        // under LogAndContinue policy and never reach this block.
         {
-            u32 seh_status = 0;
-            bool seh_is_pf = false;
-            bool seh_pf_write = false;
-            u64 seh_fault_va = 0;
-            bool seh_dispatchable = true;
-            switch (frame->vector)
-            {
-            case 0: // #DE
-                seh_status = 0xC0000094;
-                break;
-            case 6: // #UD
-                seh_status = 0xC000001D;
-                break;
-            case 13: // #GP
-                seh_status = 0xC0000005;
-                break;
-            case 14: // #PF
-                seh_status = 0xC0000005;
-                seh_is_pf = true;
-                seh_pf_write = (frame->error_code & 0x2) != 0;
-                seh_fault_va = ReadCr2();
-                break;
-            default:
-                seh_dispatchable = false;
-                break;
-            }
+            const u32 seh_status = VectorToUserNtStatus(frame->vector);
+            const bool seh_dispatchable = (seh_status != 0);
+            const bool seh_is_pf = (frame->vector == 14);
+            const bool seh_pf_write = seh_is_pf && ((frame->error_code & 0x2) != 0);
+            const u64 seh_fault_va = seh_is_pf ? ReadCr2() : 0;
             if (seh_dispatchable && ::duetos::subsystems::win32::Win32DeliverException(frame, seh_status, seh_is_pf,
                                                                                        seh_pf_write, seh_fault_va))
             {
@@ -1668,13 +1720,15 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         // egressed via debugcon the host gets a real `.dmp` per ring-3
         // crash — loadable in WinDbg / VS / VSCode — and the NVMe
         // reserved slot picks up the same bytes for offline triage.
-        u32 user_ntstatus = 0x80000003;
-        if (frame->vector == 6)
-            user_ntstatus = 0xC000001D;
-        else if (frame->vector == 13)
-            user_ntstatus = 0xC0000005;
-        else if (frame->vector == 14)
-            user_ntstatus = 0xC0000005;
+        // Same vector->NTSTATUS table the SEH delivery used, so the
+        // .dmp's exception code matches what a covering __try/__except
+        // would have seen. Vectors with no structured-exception
+        // analogue fall back to STATUS_BREAKPOINT (0x80000003).
+        u32 user_ntstatus = VectorToUserNtStatus(frame->vector);
+        if (user_ntstatus == 0)
+        {
+            user_ntstatus = 0x80000003;
+        }
         duetos::diag::minidump::EmitMinidumpFromTrapFrame(frame, user_ntstatus);
         // UserFault: journal the ring-3 crash so a chronically-failing
         // PE binary becomes visible in dfix list and the offline
@@ -1959,21 +2013,19 @@ extern "C" void TrapDispatch(TrapFrame* frame)
 
     core::EndCrashDump();
 
-    // Binary minidump egress — see core::Panic for rationale.
-    // For traps we know the exception vector, so map it to a
-    // recognisable NTSTATUS code so a debugger that opens the
-    // .dmp shows the right exception kind:
-    //   #UD (vector 6)  → STATUS_ILLEGAL_INSTRUCTION 0xC000001D
-    //   #PF (vector 14) → STATUS_ACCESS_VIOLATION    0xC0000005
-    //   else            → STATUS_BREAKPOINT          0x80000003 (fallback)
-    // Use the TrapFrame-aware overload so all 16 GPRs + segment
-    // selectors + rflags land in the dump's CONTEXT_X64 — not
-    // just rip/rsp/rbp like the soft-panic path.
-    u32 ntstatus = 0x80000003;
-    if (frame->vector == 6)
-        ntstatus = 0xC000001D;
-    else if (frame->vector == 14)
-        ntstatus = 0xC0000005;
+    // Binary minidump egress — see core::Panic for rationale. Map the
+    // exception vector to a recognisable NTSTATUS via the shared table
+    // (the same one the ring-3 path uses) so a debugger that opens the
+    // .dmp shows the right exception kind for #DE/#UD/#GP/#PF/#MF/etc.
+    // Vectors with no analogue fall back to STATUS_BREAKPOINT. Use the
+    // TrapFrame-aware overload so all 16 GPRs + segment selectors +
+    // rflags land in the dump's CONTEXT_X64 — not just rip/rsp/rbp
+    // like the soft-panic path.
+    u32 ntstatus = VectorToUserNtStatus(frame->vector);
+    if (ntstatus == 0)
+    {
+        ntstatus = 0x80000003;
+    }
     duetos::diag::minidump::EmitMinidumpFromTrapFrame(frame, ntstatus);
 
     SerialWrite("[panic] Halting CPU.\n");
@@ -2092,12 +2144,17 @@ void TrapsSelfTest()
     // and the boot log shows the crash banner — easy regression signal.
     asm volatile("int3");
 
-    // 2. Spurious-vector probe. Vector 0x42 has no registered handler,
-    // no driver routes IRQs to it. With the prior full-IDT install
-    // it fires `mkstub 66` -> isr_common -> TrapDispatch's spurious
-    // branch, which logs "[idt] spurious vector 0x42 ..." and
-    // iretq's. Without the new install it would cascade to #NP and
-    // halt — same easy regression signal.
+    // 2. Stray-vector probe. Vector 0x42 (66) has no registered
+    // handler. It lands in the dispatched MSI-X range [48,239], so it
+    // takes the IRQ path's no-handler leg (logging "unhandled IRQ
+    // vector 0x42"), NOT the 48..255 "[idt] spurious" leg — which only
+    // covers vectors outside the dispatched range. That no-handler leg
+    // now also exercises the LAPIC-ISR EOI gate: because this is a
+    // software `int n`, the ISR bit for 0x42 is clear, so the gate
+    // must NOT EOI (an EOI here would dismiss a real in-flight IRQ).
+    // Either way the stub `mkstub 66` -> isr_common -> TrapDispatch
+    // must recover and iretq; without the full-IDT install it would
+    // cascade to #NP and halt — easy regression signal.
     asm volatile("int $0x42");
 
     // 3. Wild trap-frame-pointer guard (the TrapDispatch entry validator). The
@@ -2144,6 +2201,33 @@ void TrapsSelfTest()
         SerialWriteHex(nest_max);
         SerialWrite("\n");
         KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x7u);
+    }
+
+    // 5. Vector -> NTSTATUS table (VectorToUserNtStatus). Pure-function
+    //    spot-check of the single source of truth shared by the ring-3
+    //    SEH delivery switch and both minidump emits. A typo or an
+    //    accidental edit that desyncs a mapping (the "sentinel
+    //    divergence" class of bug) would silently hand a PE the wrong
+    //    EXCEPTION_* code or mislabel a .dmp; this catches it at boot.
+    //    Checks a representative spread plus the must-be-zero entries
+    //    (#BP and a reserved vector have no structured-exception
+    //    analogue and must return 0 so the caller's fallback fires).
+    bool ntmap_ok = true;
+    ntmap_ok &= (VectorToUserNtStatus(0) == 0xC0000094);  // #DE
+    ntmap_ok &= (VectorToUserNtStatus(6) == 0xC000001D);  // #UD
+    ntmap_ok &= (VectorToUserNtStatus(14) == 0xC0000005); // #PF
+    ntmap_ok &= (VectorToUserNtStatus(17) == 0x80000002); // #AC
+    ntmap_ok &= (VectorToUserNtStatus(19) == 0xC00002B4); // #XM
+    ntmap_ok &= (VectorToUserNtStatus(3) == 0);           // #BP — no analogue
+    ntmap_ok &= (VectorToUserNtStatus(15) == 0);          // reserved — no analogue
+    if (ntmap_ok)
+    {
+        SerialWrite("[traps] vector->NTSTATUS table OK (SEH delivery + minidump share one map)\n");
+    }
+    else
+    {
+        SerialWrite("[traps] vector->NTSTATUS table FAIL\n");
+        KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x8u);
     }
 
     SerialWrite("[traps] self-test OK — #BP and spurious both recovered\n");
