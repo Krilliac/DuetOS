@@ -46,6 +46,33 @@ shell can adjust at runtime (`klog scope mm trace`, etc.).
 - **Window sink** — once the compositor is up, a Kernel Log window
   (rendered through `kernel/apps/`) tails the ring into a window.
 
+## Log Persistence
+
+Once the FAT32 root volume is probed, the early-boot tmpfs file sink is
+replaced by a disk-backed sink
+([`kernel/log/klog_persist.h`](../../kernel/log/klog_persist.h)). It
+appends every Info+ line to `KERNEL.LOG` on the FAT32 root so a boot's
+log survives a reboot for post-mortem inspection.
+
+- **Install** — `KlogPersistInstall()` runs once after the FAT32 probe.
+  It truncates `KERNEL.LOG`, installs the file sink, and replays the
+  current log ring through it so pre-install Info+ history is captured.
+  Returns false (no-op) if no FAT32 volume is mounted. Idempotent.
+- **Flush** — `KlogPersistFlush()` drains the 4 KiB scratch to disk; it
+  is called on the 1 Hz UI tick so a long-uptime log reflects the ring
+  within roughly a second. Safe to call when the sink isn't installed.
+- **Cross-boot retention** — on install, `KERNEL.LOG` ages to
+  `KERNEL.0`, the existing `KERNEL.<i>` archive chain shifts down one
+  slot, and the oldest is dropped. A bounded number of past boots
+  (depth 4 currently) are kept on disk.
+- **Mid-boot rotation** — when `KERNEL.LOG` would grow past 256 KiB on
+  the next flush, the same chain shift runs in-place, so a long-running
+  boot doesn't grow the on-disk log unbounded.
+
+`KlogPersistSelfTest()` writes a marker, flushes, reads back the tail of
+`KERNEL.LOG`, and asserts the marker is present; it prints PASS / FAIL /
+SKIP to COM1 (SKIP when FAT32 isn't mounted).
+
 ## Trace Scopes
 
 Trace scopes carry a 32-bit scope_id. Filtering is by `subsys` plus

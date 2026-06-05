@@ -1,4 +1,13 @@
-# App Widgets (Pass D)
+# App Widgets
+
+> **Audience:** Kernel hackers, in-kernel app authors, UI contributors
+>
+> **Execution context:** Kernel — value-typed widgets painted and
+> dispatched from the app's draw / event hooks in process context
+>
+> **Maturity:** active — eight-widget library shipped (landed as
+> "Pass D"); 28 of 33 in-tree apps migrated, five raw-paint carve-outs
+> by design
 
 The **app widgets library** at `kernel/drivers/video/app_widgets/`
 collapses the imperative paint + click ladder every kernel app used
@@ -234,6 +243,24 @@ overlay, leave it raw; if it's chrome, migrate it.**
   Notes headlessly. See
   [`Roadmap`](../reference/Roadmap.md) "App widgets (Pass D) —
   residual polish".
+
+## Known Limits / GAPs
+
+- **Eight widgets only.** No Checkbox, Slider, Tabs, Dropdown, or
+  multi-line text area yet — future passes extend the set (see
+  Design Goals). Multi-line editors (Notes body, Browser address bar)
+  stay on raw paint until a multi-line `AppInput` lands.
+- **Five carve-outs stay raw by design** — debug overlays, gfx-demo
+  content modes, notes persistence backend, and the trash facade are
+  not migrated (see [Carve-outs](#carve-outs)); fixed grids (Files
+  list, Calendar cells, Terminal / Hexview cells) keep raw content
+  regions inside otherwise-migrated apps.
+- **C-style callbacks only.** `on_click` / `on_change` / `on_scroll`
+  are free-function pointers with no captures — state must live in
+  the caller, not a closure.
+- **Per-app window shots not headless-verified.** `qmp.sh` can't open
+  Calculator / Notes headlessly, so per-app visual verification is
+  deferred to VBox (see Acceptance + Verification).
 
 ## Related Pages
 

@@ -138,10 +138,31 @@ live `DrawFn` / mouse routing in
 **GAPs (Phase 1):** ASCII glyph fallbacks (no `✦`/`◁`/`▤` glyphs yet); a
 docked surface overlays the content instead of reflowing it, and the
 drag/snap gesture + ghost preview aren't wired (the `DockSurface` model
-supports both); no real multi-tab engine; the AI assistant is a
-placeholder (Phase 2 = AI functionality + [Privileged-Origin
-Mode](Privileged-Origin.md)). Pixel layout is verified by VM screenshot, not
+supports both); no real multi-tab engine. The assistant dock now has a
+live v1 backend (see **Assistant dock backend** below); the remaining
+Phase 2 work is the RemoteLlm path + [Privileged-Origin
+Mode](Privileged-Origin.md). Pixel layout is verified by VM screenshot, not
 the headless self-tests.
+
+## Assistant dock backend
+
+The Assistant dock (`✦`) is no longer a placeholder. The backend
+contract is one method —
+[`AssistantRespond`](../../kernel/apps/browser/assistant_backend.h)
+(`assistant_backend.h:20`), which maps a user message to a reply.
+v1 ships a deterministic **LocalHeuristic**
+([`assistant_heuristic.cpp`](../../kernel/apps/browser/assistant_heuristic.cpp)):
+a small fixed intent set plus a graceful catch-all fallback, with no
+external dependency. A reply that begins `navigate:<url>` is an
+**intent** the dock host acts on (it performs the navigation); all
+other replies are display text. The path is CI-testable —
+`AssistantHeuristicSelfTest` (`assistant_heuristic_selftest.cpp`)
+runs the intent set at boot.
+
+A `RemoteLlm` direction (POST through the privileged `net.fetch`
+executor) exists in the contract but is **inert in v1** — there is
+no secret-store for an API key yet, so the heuristic is the only
+live path.
 
 ## Known limits (greppable `// GAP:`)
 
@@ -214,6 +235,28 @@ the headless self-tests.
 
 Re-derive the live inventory with `git grep -nE "// (STUB|GAP):"
 kernel/web`.
+
+## Threading & Locking Model
+
+Every stage (parse, style, script, layout, paint) runs in the
+**calling thread's context** — the browser app thread or its fetch
+worker — over per-page bump arenas with no global mutable state, so
+two pages on two threads do not contend. The JS interpreter recurses
+on the C++ kernel stack and is bounded by the native-stack guard
+described under **Native-stack safety** above; the relevant threads
+are the fetch worker (kstack-arena, byte-measured guard) and the
+boot-context self-test (large boot stack, logical-depth bound).
+There is no engine-wide lock.
+
+## Capability / Privilege Surface
+
+The engine reaches the network only through the kernel HTTP/TLS
+stack (`net/http`, `tls_socket`), which is cap-gated like any other
+guest network access — the engine holds no capability of its own.
+The Assistant's inert `RemoteLlm` direction would route through the
+privileged `net.fetch` executor; elevated-origin behaviour is
+deferred to [Privileged-Origin Mode](Privileged-Origin.md). See
+[Capabilities](../security/Capabilities.md).
 
 ## See also
 

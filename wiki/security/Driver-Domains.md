@@ -163,6 +163,28 @@ Every domain state transition fires a structured event:
 
 The shell's `secevents` command can filter to `domain.*`.
 
+## Per-Domain Crash Dump
+
+When a domain faults but the kernel keeps running, the recovery path
+emits a **non-fatal** crash record through
+[`domain_dump.cpp`](../../kernel/security/domain_dump.cpp) — the
+parallel, non-halting shape of `core::BeginCrashDump`. Reusing the panic
+path here would dilute panic semantics and force it to grow a
+non-halting branch, so this is a separate emitter:
+
+- `BeginDomainDump(id, evidence)` writes the leading
+  `=== DUETOS DOMAIN DUMP <name> BEGIN ===` block plus the dump header
+  (state-before, `restart_count`, fault kind/RIP).
+- The body emits the optional trap frame and a klog tail filtered to the
+  domain's `LogArea`.
+- `EndDomainDump()` writes the closing marker and records the finished
+  record into an in-kernel "recent dumps" ring so a shell
+  `module dumps <name>` can replay it after the fact.
+
+The schema markers mirror `core::BeginCrashDump` so host-side tooling
+greps both, but the `DOMAIN DUMP` (vs `CRASH DUMP`) banner lets tools
+disambiguate a survivable domain fault from a kernel-dead panic.
+
 ## Boot Self-Test
 
 The fault-domain self-test:

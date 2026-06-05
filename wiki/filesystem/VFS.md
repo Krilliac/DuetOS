@@ -20,8 +20,9 @@ whose root is embedded inside a larger tree).
 - `kernel/fs/ramfs.{h,cpp}` — in-memory tree used as boot root + jails
 - `kernel/fs/tmpfs.{h,cpp}` — writable in-RAM tier mounted at `/tmp`
 - `kernel/fs/mount.{h,cpp}` — mount registry + per-FsType lookup vtable
-- `kernel/fs/file_route.{h,cpp}` — kernel-side helper API used by
-  `kernel/subsystems/win32/` and `kernel/subsystems/linux/`
+- `kernel/fs/file_route.{h,cpp}` — syscall-path routing layer used
+  by `kernel/subsystems/win32/` and `kernel/subsystems/linux/` (see
+  [Syscall Path Routing](#syscall-path-routing))
 - `kernel/fs/<backend>.{h,cpp}` — FAT32, ext4, exFAT, NTFS, DuetFS, GPT
 
 ## Path Resolution
@@ -53,6 +54,25 @@ or generation counter**. A future mutable-ramfs slice must flush this
 cache — the in-code `CONTRACT` comment in `vfs.cpp` pins the
 invariant.
 
+## Syscall Path Routing
+
+`kernel/fs/file_route.{h,cpp}` is the routing layer the syscall
+dispatcher (Win32 + Linux ABIs) calls so `SYS_FILE_OPEN / READ /
+WRITE / STAT` stay generic. It:
+
+- **Routes by prefix.** Paths under `/bin/` resolve to the embedded
+  ramfs (binaries baked into the kernel image at build time);
+  everything else routes to the active mount at the longest
+  matching prefix (FAT32 / ext4 / tmpfs / ramfs / DuetFS).
+- **Normalises before any FS sees the path.** Leading-`/`
+  enforcement and `..`-escape rejection happen here, so a guest
+  binary can't climb out of its mount via `..` regardless of which
+  backend serves the path.
+- **Routes named-pipe handles.** A handle backed by a named pipe
+  (`named_pipe_registry_slot >= 0`) is dispatched to the IPC
+  named-pipe layer (`ipc/named_pipes.h`) on close rather than to a
+  block-device backend.
+
 ## Backends
 
 | Backend | Path | Status |
@@ -60,10 +80,10 @@ invariant.
 | ramfs | `kernel/fs/ramfs.{h,cpp}` | Read-only constinit tree + mutable `/proc` snapshots |
 | tmpfs | `kernel/fs/tmpfs.{h,cpp}` | Writable flat `/tmp` (16 slots × 512 B) |
 | FAT32 | `kernel/fs/fat32.{h,cpp}` + `fat32_*.cpp` | Read + write (in-place / append / create / delete / rename); LFN-validated |
-| exFAT | `kernel/fs/exfat.{h,cpp}` | Probe + root-directory walk (first cluster only) |
-| ext4 | `kernel/fs/ext4.{h,cpp}` + `ext4_rust/` | Read-only; root-dir extents walked, depth>0 deferred |
-| NTFS | `kernel/fs/ntfs.{h,cpp}` + `ntfs_rust/` | Read-only (work in progress) |
-| DuetFS | `kernel/fs/duetfs.{h,cpp}` + `duetfs/` | Native Rust FS; v3 with per-block CRCs, symlinks, hard links |
+| exFAT | `kernel/fs/exfat.{h,cpp}` + `exfat_rust/` | Read + bounded root-dir write (in-place / append / create / truncate); first-cluster enumeration |
+| ext4 | `kernel/fs/ext4.{h,cpp}` + `ext4_rust/` | Read-only; dir extents walked every depth, file-extent reads depth-0 only |
+| NTFS | `kernel/fs/ntfs.{h,cpp}` + `ntfs_rust/` | Read-only; USA fixup + $I30 root enum + resident/single-run $DATA reads |
+| DuetFS | `kernel/fs/duetfs.{h,cpp}` + `duetfs/` | Native Rust FS; v8, per-block CRCs, symlinks, hard links, journal/crypto/snapshots (dormant on live path) |
 | GPT | `kernel/fs/gpt.{h,cpp}` | Partition discovery |
 
 ## File Handles
@@ -77,9 +97,15 @@ are preallocated with synthetic handles; `fwrite` / `fputs` route to
 ## Capability Surface
 
 - `kCapFsRead` — `SYS_FILE_OPEN` (RO), `SYS_FILE_READ`, `SYS_STAT`
-- `kCapFsWrite` — `SYS_FILE_WRITE` (when on-disk write paths land)
+- `kCapFsWrite` — `SYS_FILE_WRITE` and the create/delete/rename/
+  truncate mutators (on-disk write paths are live)
 
-See [Capabilities](../security/Capabilities.md).
+The gate is enforced in the **syscall layer**, not in `kernel/fs/`:
+the Linux ABI checks `kCapFsWrite` in
+`kernel/subsystems/linux/syscall_io.cpp`, `syscall_fs_mut.cpp`, and
+`syscall_file.cpp`; the Win32 ABI gates it centrally through
+`SyscallGate` (`cap_table.def`). The FS backends trust the gate has
+already run. See [Capabilities](../security/Capabilities.md).
 
 ## Known Limits / GAPs
 

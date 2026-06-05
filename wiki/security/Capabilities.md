@@ -22,8 +22,15 @@ the only privilege model.
   list (single source of truth for the bit values)
 - `kernel/syscall/cap_gate.{h,cpp}` — `CapGateCheck(cap)` and the
   denial log path
-- `kernel/core/process.{h,cpp}` — `CapSet`, `CapSetEmpty`,
-  `CapSetTrusted`, `CapName`
+- `kernel/proc/process.h` — the `kCap*` enum (source of truth for the
+  bit values), `CapSet`, `CapSetEmpty`, `CapSetTrusted`, `CapName`
+
+> A **separate, unrelated** `enum class Cap` lives at
+> `kernel/security/privilege/scope.h:33-41` (5 members: `FsRead`,
+> `FsWrite`, `ProcSpawn`, `KernelRead`, `Net`). It belongs to the
+> privileged-origin / `duetos::security::privilege` path and is a
+> distinct namespace from `core::Cap` (`kCap*`). The kernel cap gate
+> uses `kCap*`, not this enum — don't conflate the two.
 
 ## Two Profiles
 
@@ -79,27 +86,47 @@ another PID still hits the cap gate and fails (or succeeds if
 <!-- AUTO:cap_list -->
 | # | Capability |
 |---|------------|
-| 0 | `kCapNone` (sentinel — not a real cap) |
-| 1 | `kCapSerialConsole` |
-| 2 | `kCapFsRead` |
-| 3 | `kCapDebug` |
+| 1 | `kCapDebug` |
+| 2 | `kCapDiag` |
+| 3 | `kCapFsRead` |
 | 4 | `kCapFsWrite` |
-| 5 | `kCapSpawnThread` |
+| 5 | `kCapInput` |
 | 6 | `kCapNet` |
-| 7 | `kCapInput` |
-| 8 | `kCapNetAdmin` |
-| 9 | `kCapDiag` |
-| — | `kCapCount` (boundary marker — not a live cap) |
-
-Reserved-for-future, not in the live enum: `kCapNetSend` /
-`kCapNetRecv`. Splitting `kCapNet` into send/receive halves is
-deferred until a real workload proves the asymmetric profile is
-needed (see comment on `kCapNet` in `kernel/proc/process.h`).
+| 7 | `kCapNetAdmin` |
+| 8 | `kCapSerialConsole` |
+| 9 | `kCapSpawnThread` |
 <!-- /AUTO:cap_list -->
 
 _The capability inventory above is auto-synced by
 `docs/sync-wiki.sh sync` from the `kCap*` enum in
 `kernel/proc/process.h`._
+
+## Threading and Locking
+
+`CapSet` is per-process state, owned by the `Process` struct and only
+mutated at process setup (profile application) before the process runs.
+The cap gate reads `CurrentProcess()->caps` on the calling CPU during
+syscall dispatch — a read of the current process's own field, so no
+lock is taken on the gate path. Caps are not mutated by another CPU
+mid-syscall.
+
+## Performance
+
+The gate is a single bitmask test (`caps & (1 << capN)`) on the hot
+syscall-dispatch path — no allocation, no lock, no branch beyond the
+allow/deny decision. The denial log path runs only on the cold (denied)
+leg.
+
+## Troubleshooting
+
+- **`[sys] denied syscall=<NAME> pid=<P> cap=<NAME>`** — the process
+  lacks the required bit. Either it was started with `CapSetEmpty` (or
+  a profile missing that bit), or the syscall is gated on a cap the
+  workload legitimately needs and the profile should grant it.
+- **A Win32 PE got `STATUS_SUCCESS` from `NtAdjustPrivilegesToken` but
+  still can't do the thing.** Expected — that NT surface is a facade
+  (rule 2). The kernel `kCap*` bit is what gates; grant the cap on the
+  process, not the NT token.
 
 ## Related Pages
 

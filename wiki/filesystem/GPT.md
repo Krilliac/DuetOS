@@ -49,6 +49,15 @@ add when a real workload demands recovery from primary corruption).
   [`Daily-Driver-Readiness`](../reference/Daily-Driver-Readiness.md)
   Tier 0 for the path forward.
 
+## Capability / Privilege Surface
+
+GPT parsing runs in the kernel at probe time, before any user
+process exists — it is not reachable from a guest binary and has no
+`kCap*` gate of its own. The destructive `install` path that writes
+a new GPT layout is driven by the kernel shell, which is itself a
+privileged native context. See
+[`security/Capabilities.md`](../security/Capabilities.md).
+
 ## Related Pages
 
 - [VFS](VFS.md)

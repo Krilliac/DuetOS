@@ -43,6 +43,36 @@ context switch remains a single pointer load.
    `AddressSpace`. AS destructor unmaps every user-half page and
    returns frames.
 
+## Process Spawn
+
+`kernel/proc/spawn.{h,cpp}` is the actual process-creation entry
+surface — the place that ties an image's bytes to a fresh `Process`,
+an `AddressSpace`, and a queued ring-3 task. Three entry points, one
+per image flavour, all sharing the same parse → AS → `ProcessCreate`
+→ `SchedCreateUser` pipeline and the same contract (return the new pid
+on success, `0` on any failure, with all partial state unwound through
+`AddressSpaceRelease`):
+
+```cpp
+u64 SpawnElfFile (const char* name, const u8* elf_bytes, u64 elf_len, ...);  // spawn.h:99
+u64 SpawnElfLinux(const char* name, const u8* elf_bytes, u64 elf_len, ...);  // spawn.h:113
+u64 SpawnPeFile  (const char* name, const u8* pe_bytes,  u64 pe_len,  ...);  // spawn.h:122
+```
+
+- **`SpawnElfFile`** loads a native ELF via `ElfLoad` (see
+  [Loader](Loader.md#elf64-loader)). It auto-detects Linux-ABI images
+  by their `EI_OSABI` byte (`ELFOSABI_LINUX` = 3) and delegates to
+  `SpawnElfLinux` so the task's syscall dispatch lands on the Linux
+  dispatcher.
+- **`SpawnElfLinux`** is the Linux-ABI twin: same load pipeline, but
+  flips `Process::abi_flavor = kAbiLinux` so ring-3 `syscall`
+  instructions route through `MSR_LSTAR` (the Linux dispatcher) rather
+  than the native `int 0x80` path, and seeds `linux_brk_{base,current}`
+  + `linux_mmap_cursor`.
+- **`SpawnPeFile`** loads a PE/COFF image via the v0 PE loader. It
+  pre-loads the standard Win32 DLL set into the new AS before `PeLoad`
+  runs so `ResolveImports` can consult their export tables.
+
 ## Boot Output (trimmed example)
 
 ```
@@ -91,6 +121,44 @@ See [Sandboxing](../security/Sandboxing.md) for the full layered story.
   `t->process = nullptr`. Reaper's `process != nullptr` guard lets
   kernel threads (idle, reaper, workers, keyboard reader) fall
   through with no state change.
+
+## Threading & Locking Model
+
+- A `Process` is shared by all its ring-3 `Task`s, so per-process
+  mutable state (the cap set is read-mostly after spawn; the Linux fd
+  table, OFD pool, and VFS root are read/write) is protected by the
+  process's own locks rather than a global one.
+- Spawn (`SpawnElfFile` / `SpawnElfLinux` / `SpawnPeFile`) runs in the
+  caller's task context. It allocates an `AddressSpace` and maps user
+  pages before any second task can observe the process, so the load
+  itself needs no cross-task synchronisation; the cleanup-on-failure
+  path (`AddressSpaceRelease`) is single-owner.
+- Refcounting (`ProcessRetain` / `ProcessRelease`) is the
+  cross-context safe handle: the reaper releases on task death from a
+  different context than the spawner, and the destructor runs only when
+  the last reference drops.
+
+## Known Limits / GAPs
+
+These carry live `// GAP:` markers in
+[`kernel/proc/process.cpp`](../../kernel/proc/process.cpp):
+
+- **Pre-OFD open status flags seeded empty.** Opens that predate the
+  OFD (open-file-description) tracking get their description flags
+  seeded to `0` rather than the real status flags
+  ([`process.cpp:1445`](../../kernel/proc/process.cpp)) — revisit when
+  `sys_open` / `pipe2` / `socket` route through the OFD pool.
+- **Inline offset writers don't propagate to dup siblings.** Syscall
+  TUs that write `linux_fds[fd].offset` directly (read, write, lseek,
+  sendfile, splice) bypass `LinuxFdSetOffset`, so the shared offset
+  isn't propagated to `dup`'d siblings until those write sites migrate
+  to the accessor ([`process.cpp:1591`](../../kernel/proc/process.cpp)).
+  The OFD is the source of truth; the inline field is a per-fd cache.
+- **`fork` under OFD-pool pressure loses offset sharing.** If the OFD
+  pool is exhausted at `fork` time, the child's fd is degraded to a
+  private offset for that fd (safe, but no longer shared)
+  ([`process.cpp:1667`](../../kernel/proc/process.cpp)) — revisit by
+  growing `kOfdPoolCap`.
 
 ## Related Pages
 

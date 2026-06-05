@@ -4,32 +4,45 @@
 >
 > **Execution context:** Kernel — IRQ for RX/TX completions, softirq for stack
 >
-> **Maturity:** v0 e1000 + USB CDC-ECM + USB RNDIS; wireless shells in place
+> **Maturity:** v0 AMD PCnet (wired) + USB CDC-ECM + USB RNDIS; wireless shells in place
 
 ## Overview
 
-Three NIC paths feed the same kernel net stack today:
+Several NIC paths feed the same kernel net stack today:
 
 | Driver | Path | Maturity |
 |--------|------|----------|
-| Intel e1000 (wired gigabit) | `kernel/drivers/net/e1000/` | v0 — real packet I/O |
-| USB CDC-ECM | `kernel/drivers/usb/class/cdc-ecm/` | v0 — control + data plane |
-| USB RNDIS | `kernel/drivers/usb/class/rndis/` | v0 — control + data plane |
-| iwlwifi / rtl88xx / bcm43xx (wireless) | `kernel/drivers/net/wireless/` | shell only — chip-id bringup |
+| AMD PCnet (wired) | `kernel/drivers/net/pcnet.cpp` | v0 — real packet I/O |
+| USB CDC-ECM | `kernel/drivers/usb/cdc_ecm.cpp` | v0 — control + data plane |
+| USB RNDIS | `kernel/drivers/usb/rndis.cpp` | v0 — control + data plane |
+| iwlwifi / rtl88xx / bcm43xx / mt76 (PCIe wireless) | `kernel/drivers/net/{iwlwifi,rtl88xx,bcm43xx,mt76}.cpp` | shell only — chip-id bringup |
+| ath9k_htc (USB wireless) | `kernel/drivers/net/ath9k_htc.cpp` | shell — open-firmware upload |
 
-## Intel e1000 (Wired)
+Intel e1000 / e1000e is a planned Tier-1 target but is **not yet
+implemented** — there is no e1000 driver in the tree. The default
+wired NIC today is AMD PCnet, which is VirtualBox's default adapter
+and QEMU's `-device pcnet`, so a default-config VM gets real wired
+networking with no reconfiguration.
 
-`kernel/drivers/net/e1000/`.
+## AMD PCnet (Wired)
 
-- TX and RX descriptor rings programmed against MMIO registers.
-- IRQ-driven completion path (RXT0 / TXDW).
+`kernel/drivers/net/pcnet.cpp`. Am79C970A / Am79C973 (PCI 1022:2000).
+
+- TX and RX descriptor rings in guest memory, driven through the
+  RAP/RDP I/O-port register pair (BAR0 is an I/O BAR) in 32-bit
+  DWIO mode, SWSTYLE 2.
+- Polled RX/TX completion via a per-driver poll task — the emulated
+  card flips descriptor OWN bits regardless of interrupt enables, so
+  polling is reliable and sidesteps the IRQ-routing surface.
 - Real packet I/O: DHCP, ARP, ICMP, TCP all live on this path.
-- Used as the default for QEMU smoke tests (`-netdev user,model=e1000`).
+- `PcnetBringUp` runs from `RunVendorProbe` during `NetInit`, binding
+  iface 0 to the net stack and kicking off DHCP — the default for
+  QEMU / VirtualBox smoke tests.
 
 ## USB Network (CDC-ECM + RNDIS)
 
 USB-attached Ethernet adapters present through xHCI. Both path types
-register a netif identical in interface to the e1000 one — the net
+register a netif identical in interface to the PCnet one — the net
 stack does not know whether packets came from PCIe or USB.
 
 See [USB](USB.md) for the class-driver details.
@@ -39,12 +52,20 @@ See [USB](USB.md) for the class-driver details.
 Firmware source classification, open-firmware candidates, and closed-blob handling are tracked in [Wireless and GPU Firmware Research](Wireless-Firmware.md).
 
 
-`kernel/drivers/net/wireless/`. Three families have chip-identification
-scaffolding wired in:
+The wireless drivers live as flat files under `kernel/drivers/net/`
+(`iwlwifi.cpp`, `rtl88xx.cpp`, `bcm43xx.cpp`, `mt76.cpp`,
+`ath9k_htc.cpp`). Five families have chip-identification scaffolding
+wired in:
 
-- **iwlwifi** (Intel Wi-Fi)
-- **rtl88xx** (Realtek)
-- **bcm43xx** (Broadcom)
+- **iwlwifi** (Intel Wi-Fi, PCIe)
+- **rtl88xx** (Realtek, PCIe)
+- **bcm43xx** (Broadcom, PCIe)
+- **mt76** (MediaTek MT76xx, PCIe — MT7921/7922/7925 ship in the
+  majority of recent Ryzen 6000/7000/8000 laptops and current
+  Chromebooks)
+- **ath9k_htc** (Qualcomm Atheros AR9271 / AR7010, USB — the
+  canonical open-firmware Wi-Fi target; firmware is uploaded over
+  USB control transfers via the `core::FwLoad` path)
 
 The data-decode tier (per-vendor envelope parsers + 802.11 frame
 headers + beacon walker), the control tier (crypto + EAPOL + 4-way

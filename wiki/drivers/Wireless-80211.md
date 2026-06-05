@@ -81,8 +81,11 @@ struct WirelessDeviceOps {
 
 Per-device state:
 
-- Up to 38 channels (11 on 2.4 GHz + 25 on 5 GHz; 6 GHz pending the
-  regulatory database)
+- Up to 38 channels (11 on 2.4 GHz + 25 on 5 GHz; no 6 GHz). A
+  regulatory database exists (`kernel/net/wireless/regdb.{h,cpp}`, US /
+  EU / JP — see [Wireless Regulatory](Wireless-Regulatory.md)) but is
+  **not yet consumed** by the MLME scan / channel-selection / TX path,
+  so per-region frequency and EIRP gating is not enforced here yet.
 - Up to 32 scan results
 - Up to 8 cipher suites + 8 AKM suites per BSS
 - State machine: `Down → Idle → Scanning → Authenticating →
@@ -224,8 +227,14 @@ cannot scan or connect; elevation is required (see
 
 ## Known Limits / GAPs
 
-- **No regulatory database.** Channels are baked in for the US table;
-  international regions not modelled.
+- **Regulatory database present but not wired into the MLME.** A
+  three-region regdb (US / EU / JP) ships at
+  `kernel/net/wireless/regdb.{h,cpp}` with a boot self-test (see
+  [Wireless Regulatory](Wireless-Regulatory.md)), but no MLME / scan /
+  channel / TX site calls `regdb::FreqAllowed` / `MaxEirpMbm` yet — the
+  channel set is still effectively the baked-in US table. Wiring the
+  scan / channel-selection / TX-gating path through regdb is the next
+  slice.
 - **No 6 GHz / Wi-Fi 6E / Wi-Fi 7.** 5 GHz top.
 - **No monitor mode, no AP mode, no IBSS.** STA only.
 - **WPA3-SAE simplified.** v0 implements SAE-H2E for the most-common

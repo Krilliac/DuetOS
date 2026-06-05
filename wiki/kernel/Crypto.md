@@ -42,6 +42,23 @@ the panic-time persistence flush).
 | HMAC-SHA1 / HMAC-SHA256 | [`crypto/hmac.h`](../../kernel/crypto/hmac.h) | per underlying hash | PBKDF2, EAPOL MIC, WPA3-SAE PMK |
 | PBKDF2 | [`crypto/pbkdf2.h`](../../kernel/crypto/pbkdf2.h) | 4096 iters (WPA2 locked); configurable for password hash V1 | WPA2 PMK derivation, password hash V1 |
 | 802.11 PRF / KDF-Hash | [`crypto/prf.h`](../../kernel/crypto/prf.h) | SHA-1 PRF-384 → 48 B PTK; SHA-256 KDF variant | 4-way handshake PTK derivation, EAPOL MIC key, WPA3-suite AKMs |
+| SHA-384 | [`crypto/sha384.h`](../../kernel/crypto/sha384.h) | 48-byte digest, 128-byte block | Suite-B / future TLS-1.2-GCM-SHA384, RSA-PSS over SHA-384 |
+| HKDF (RFC 5869) | [`crypto/hkdf.h`](../../kernel/crypto/hkdf.h) | extract + expand over HMAC-SHA256 | Key-schedule derivation for future TLS / key separation |
+
+### AEAD: AES-GCM
+
+| Primitive | Header | Sizes | Use site |
+|-----------|--------|-------|----------|
+| AES-GCM | [`crypto/aes_gcm.h`](../../kernel/crypto/aes_gcm.h) | 128/256-bit key, 12-byte nonce, 16-byte tag | 802.11 GCMP, future TLS AEAD |
+
+### Public-Key: RSA, big-integer, ASN.1, X.509
+
+| Primitive | Header | Sizes | Use site |
+|-----------|--------|-------|----------|
+| Big-integer | [`crypto/bigint.h`](../../kernel/crypto/bigint.h) | up to RSA-4096 modulus (test vector `bigint_rsa4096_vector.h`) | RSA modexp backing store |
+| RSA (PKCS#1) | [`crypto/rsa.h`](../../kernel/crypto/rsa.h) | 2048 / 4096-bit | Signature verification for X.509 chains, future TLS |
+| ASN.1 DER | [`crypto/asn1.h`](../../kernel/crypto/asn1.h) | TLV parse | X.509 certificate decode |
+| X.509 | [`crypto/x509.h`](../../kernel/crypto/x509.h) | DER certificate parse + RSA signature check | Certificate-chain verification (future TLS / image signing) |
 
 ### Modern: BLAKE2b, ChaCha20-Poly1305, Argon2id
 
@@ -86,6 +103,10 @@ the spec's test appendix:
 | SHA-1 / SHA-256 | FIPS 180-4 |
 | HMAC-SHA-1 / -SHA-256 | RFC 2202 / RFC 4231 |
 | PBKDF2-HMAC-SHA256 | RFC 7914 §11 |
+| SHA-384 | FIPS 180-4 |
+| HKDF | RFC 5869 §A |
+| AES-GCM | NIST SP 800-38D test vectors |
+| RSA / X.509 | self-signed test cert + `bigint_rsa4096_vector.h` modexp vector |
 | BLAKE2b | RFC 7693 §A.1 |
 | ChaCha20-Poly1305 | RFC 8439 §2.6.2 / §2.8.2 |
 | Argon2id | RFC 9106 §6 |
@@ -126,15 +147,23 @@ the cap table.
 
 ## Known Limits / GAPs
 
-- **No GCM mode.** The current AEAD is ChaCha20-Poly1305 only. AES-GCM
-  is on the roadmap for 802.11 GCMP and for TLS once TLS lands.
-- **No public-key crypto.** Ed25519 / X25519 / Curve25519 land with the
-  first TLS slice; until then there is no asymmetric primitive in
-  the tree.
+- **No elliptic-curve crypto.** RSA is the only asymmetric primitive in
+  the tree; Ed25519 / X25519 / Curve25519 land with the first TLS slice.
 - **PBKDF2 is locked to 4096 iters in the WPA2 path.** That is the
   spec; if you want stronger stretch for password storage, use
   Argon2id (V2 password hash) instead.
 - **Constant-time review is intent-only.** No formal audit yet.
+
+## Troubleshooting
+
+- **Boot panics with `kBootSelftestFail` and a primitive tag.** A KAT
+  vector mismatched — the build is miscompiled or a primitive was edited
+  without updating its vector. There is no recovery path; fix the
+  primitive or the vector. Check the failing tag against the
+  Known-Answer-Tests table to find which `*SelfTest()` tripped.
+- **`Err{ErrorCode::Invalid}` from a KDF call.** A spec parameter is out
+  of range (Argon2id memory/time/parallelism, HKDF output length). The
+  primitives don't log — inspect the caller's parameters.
 
 ## Related Pages
 

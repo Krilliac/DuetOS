@@ -5,8 +5,8 @@
 > **Execution context:** Kernel — task context (loader runs on behalf of
 > a process being constructed)
 >
-> **Maturity:** PE/COFF loader v0 stable; ELF loader parser-only; DLL loader
-> active; firmware loader active
+> **Maturity:** PE/COFF loader v0 stable; ELF loader segment-loading
+> active (self-tested); DLL loader active; firmware loader active
 
 ## Overview
 
@@ -36,12 +36,14 @@ to. None of them executes code on its own — they construct an
 |------|---------|
 | [`pe_loader.h`](../../kernel/loader/pe_loader.h) / `.cpp` | Windows PE/COFF — see [PE Loader](../subsystems/PE-Loader.md) |
 | [`pe_exports.h`](../../kernel/loader/pe_exports.h) | PE export table walker (used by both DLL resolution and runtime `GetProcAddress` thunks) |
-| [`elf_loader.h`](../../kernel/loader/elf_loader.h) / `.cpp` | ELF64 parser; segment load deferred |
+| [`elf_loader.h`](../../kernel/loader/elf_loader.h) / `.cpp` | ELF64 validate + PT_LOAD segment load into an `AddressSpace` (`ElfLoad`) |
 | [`dll_loader.h`](../../kernel/loader/dll_loader.h) / `.cpp` | DLL loader + export resolver |
 | `dll_loader_selftest.cpp` | KAT-style boot test of name + ordinal resolution |
 | [`firmware_loader.h`](../../kernel/loader/firmware_loader.h) / `.cpp` | Firmware blob loader + trace ring |
 | [`firmware_package.h`](../../kernel/loader/firmware_package.h) / `.cpp` | Firmware package format parser |
 | [`compat_shim.h`](../../kernel/loader/compat_shim.h) / `.cpp` | Per-image compat policies (e.g. "this PE expects a 1 MiB stack guarantee", "ignore debugger checks") |
+| [`apiset_static.h`](../../kernel/loader/apiset_static.h) / `.cpp` | Static API-set schema (`api-ms-win-*` virtual DLL → host DLL redirection) for PE import resolution |
+| [`image_patch.h`](../../kernel/loader/image_patch.h) | Per-image byte-patch table applied to known-bad header/code bytes before spawn |
 | [`exec_meta_rust/`](../../kernel/loader/exec_meta_rust/) | Rust crate — common image header decoders (see [Rust Subsystems](../tooling/Rust-Subsystems.md)) |
 
 ## ELF64 Loader
@@ -54,17 +56,33 @@ loader::Result<u64>  ElfEntry(span<const u8> file);
 loader::Result<loader::ElfProgramHeaderInfo> ElfProgramHeaderInfo(span<const u8> file);
 ```
 
-Today the loader **parses** but does not yet spawn — the PT_LOAD segment
-walker that calls into `mm::AddressSpace` is the next slice. Until that
-lands the loader is wired in to:
+Beyond the structural queries above, the loader **loads**:
 
-- Validate the ELF magic + class + machine on any binary handed to it
-- Reject anything that isn't `ET_EXEC` x86_64 little-endian, version 1
-- Provide the entry-RIP for `inspect`-style tools
+```cpp
+core::ElfLoadResult ElfLoad(const u8* file, u64 file_len, mm::AddressSpace* as);
+```
 
-Native-app loading uses this header validator today; the actual segment
-mapping path is shared with the PE loader's `MapSegments` helper once
-the slice lands.
+`ElfLoad` ([`elf_loader.cpp:314`](../../kernel/loader/elf_loader.cpp))
+walks each PT_LOAD segment, allocates one frame per 4 KiB page, copies
+the file slice in (zero-padding the `memsz - filesz` tail), and installs
+the mapping into `as` with R/W/X flags derived from `p_flags`. It also
+maps a fixed v0 stack page and returns the entry RIP, stack VA, and
+stack top in `ElfLoadResult`.
+
+Allocation is fully unwound on failure: an internal
+`LoaderUnwindGuard` ([`elf_loader.cpp:172`](../../kernel/loader/elf_loader.cpp))
+tracks every page mapped during the call and rolls them back via
+`AddressSpaceUnmapUserPage` on any early return (invalid ELF, OOM), so a
+partial load leaks no frames. `ElfLoaderUnwindSelfTest`
+([`elf_loader.cpp:508`](../../kernel/loader/elf_loader.cpp)) drives a
+synthetic load with the test-only OOM injection
+(`FrameAllocatorSetFailAfter`) and asserts `FreeFramesCount` returns to
+its pre-test value — i.e. the guard freed every frame it mapped.
+
+`ElfLoad` is the segment-mapping path the
+[process spawn](Process-Model.md#process-spawn) entry points
+(`SpawnElfFile` / `SpawnElfLinux`) build on; the structural validators
+also back the `readelf` / `exec` shell tools.
 
 ## DLL Loader
 
@@ -168,6 +186,11 @@ Image loading itself is not user-facing — the spawn path is. The
 loader assumes the caller has already passed `kCapSpawnExec` (for the
 syscalls that spawn a process) and concerns itself only with the bytes.
 
+Two loader-facing syscalls reach this surface from user mode:
+`SYS_DLL_LOAD_FROM_PATH` (205) loads a DLL by path through the DLL
+loader, and `SYS_COMPAT_QUERY` (206) exposes the per-image compat /
+API-set policy state to a caller. See [Syscalls](Syscalls.md).
+
 ## Threading and Locking
 
 - The loader is **per-image stateless**: every call takes the image's
@@ -178,9 +201,9 @@ syscalls that spawn a process) and concerns itself only with the bytes.
 
 ## Known Limits / GAPs
 
-- **ELF segment load not wired.** `ElfValidate` is in production use;
-  the segment-mapping path that calls `mm::AddressSpace::MapRegion` is
-  on the next slice.
+- **Fixed v0 stack VA.** `ElfLoad` maps a single stack page at a fixed
+  low-canonical VA (`0x7FFFE000`) rather than a per-process stack arena;
+  stacks are neither growable nor TLS-aware yet.
 - **No PE forwarder chains.** A DLL export that forwards to another
   DLL's export resolves to one hop; multi-hop chains fail and need to
   be detected in the parser.

@@ -9,11 +9,14 @@
 ## Overview
 
 DuetOS uses `int 0x80` as the single native syscall gate. There are
-~190 numbered calls today (`SYS_*` numbered up through 201, with a
-few retired in the 0..201 range — see
+~168 numbered calls today (`SYS_*` numbered through 206, with a few
+retired numbers in the range — see
 [`Syscall-ABI`](../specifications/Syscall-ABI.md) for the canonical
-table). Both native binaries and the Win32 translator DLL surface
-marshal into this same gate.
+table). The high band includes `SYS_NAMED_PIPE_CREATE` (202),
+`SYS_NAMED_PIPE_OPEN` (203), `SYS_DIAG_FAULT_INJECT` (204),
+`SYS_DLL_LOAD_FROM_PATH` (205), and `SYS_COMPAT_QUERY` (206). Both
+native binaries and the Win32 translator DLL surface marshal into this
+same gate.
 
 ## Calling Convention
 
@@ -91,7 +94,11 @@ DuetOS process would hit. See
 
 `kernel/syscall/time_syscall.cpp` houses the time-related syscalls
 (`SYS_GET_TICKS`, `SYS_GET_FILETIME` analogues, etc.) and is split out
-from the main dispatcher for clarity.
+from the main dispatcher for clarity. Two further handler bands are
+split into their own TUs: `kernel/syscall/syscall_vk.cpp` (the Vulkan
+syscall band) and `kernel/syscall/audio_syscall.cpp` (the audio
+syscalls). All three are dispatched from the same `int 0x80` table in
+`syscall.cpp`.
 
 ## Related Pages
 

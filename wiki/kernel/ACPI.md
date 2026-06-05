@@ -52,6 +52,10 @@ Sources:
 - [`kernel/acpi/ec.h`](../../kernel/acpi/ec.h) +
   [`ec.cpp`](../../kernel/acpi/ec.cpp) — Embedded Controller driver +
   EmbeddedControl region handler
+- [`kernel/acpi/acpi_sci.h`](../../kernel/acpi/acpi_sci.h) +
+  [`acpi_sci.cpp`](../../kernel/acpi/acpi_sci.cpp) — System Control
+  Interrupt handler (power button, PM1/GPE status); see
+  [Environment](Environment.md#acpi-sci-power-events-slice-3)
 - [`kernel/acpi/acpi_power.h`](../../kernel/acpi/acpi_power.h) +
   [`acpi_power.cpp`](../../kernel/acpi/acpi_power.cpp) — battery / AC /
   lid / backlight method evaluators (consumed by `drivers/power`)
@@ -148,8 +152,10 @@ everything else as opaque bytes. That is enough to:
 - Find `_S5_` for clean shutdown
 - Count Device blocks under `\_SB.PCI0` to cross-check PCI enumeration
 
-It is **not** enough to execute `_BST` or to evaluate an EC region read.
-Adding those is the gate to live battery telemetry; see the Roadmap.
+The walker itself is **not** enough to execute `_BST` or to evaluate an
+EC region read — that is the job of the AML method interpreter
+([`aml_eval.cpp`](../../kernel/acpi/aml_eval.cpp), `AmlEvaluate` /
+`AmlEvaluateInteger`), which runs over the index this walker builds.
 
 ## Rust Decoders
 
@@ -178,15 +184,14 @@ gates; see [Capabilities](../security/Capabilities.md).
 
 ## Known Limits / GAPs
 
-- **No AML executor.** Methods (`_BST`, `_BIF`, `_PSV`, `_TMP` …) are
-  visible by name but not runnable. Power-subsystem battery telemetry
-  is consequently inert.
-- **No SCI handler.** SCI events from the embedded controller, lid
-  switch, power button, thermal trip points are unmasked at the IOAPIC
-  and dropped. Adding a handler is the prerequisite for lid-close /
-  power-button events.
-- **No EC driver.** The embedded controller is the gateway to most
-  laptop sensors. v0 leaves it untouched.
+- **No computed OperationRegion bounds.** The namespace walker decodes
+  constant region offsets/lengths only; a region whose base or length
+  is a computed expression is not resolved
+  ([`aml.cpp:622`](../../kernel/acpi/aml.cpp)).
+- **No >1 GiB SystemMemory region.** The AML interpreter's
+  SystemMemory FieldUnit read/write path caps the backing region size
+  ([`aml_eval.cpp:246`](../../kernel/acpi/aml_eval.cpp)) — revisit if a
+  real DSDT needs a larger region.
 - **No NUMA-aware allocation.** SRAT is parsed but the frame allocator
   is a single global pool; per-node pools land when SMP scaling
   demands them.

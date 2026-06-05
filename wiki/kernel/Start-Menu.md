@@ -1,5 +1,13 @@
 # Start Menu
 
+> **Audience:** Kernel hackers, UI / shell contributors
+>
+> **Execution context:** Kernel — built and dispatched from the input
+> readers in `kernel/core/main.cpp`, runs in process context
+>
+> **Maturity:** active — root + submenus + `/APPS` manifest shortcuts
+> shipped; per-open rebuild keeps dynamic content fresh
+
 The Start menu is the user's primary launcher and the seat of
 session-level controls (Lock, Log Out, Reboot, Shut Down). It is
 anchored to the START button on the taskbar and built fresh each
@@ -51,6 +59,18 @@ The dispatch handler is `DispatchMenuAction` in
 - **Per-open rebuild.** The kernel rebuilds `kStartItems` every
   time the user clicks START, so dynamic content (USER APPS) is
   always fresh.
+
+## Known Limits / GAPs
+
+- **Hard 12-item panel cap.** Rows past index 11 are silently
+  dropped by the renderer (`kMaxItems`), not scrolled — a panel that
+  overflows loses entries with no warning. Split into a submenu.
+- **No icons or native section headers.** Grouping is limited to
+  separators and disabled rows; there is no glyph/icon column.
+- **No search / type-to-filter.** The launcher is click-to-navigate
+  only.
+- **USER APPS capped at 12 shortcuts.** `/APPS/*.MNF` entries beyond
+  the 12th are not shown.
 
 ## Relevant files
 

@@ -38,6 +38,9 @@ Source: `kernel/diag/fix_journal.h` — the on-disk record format. These values 
 | 5 | `SoftFaultRecov` | RetryWithBackoff success after >=1 retry, page-fault |
 | 6 | `LoaderReject` | PE/ELF loader rejected an image |
 | 7 | `CapDenial` | SyscallGate cap-set check denied a syscall. |
+| 8 | `TrapCapture` | Hard kernel-mode CPU exception about to |
+| 9 | `UserFault` | Ring-3 CPU exception (the user task is being |
+| 10 | `KassertFail` | `core::Panic` / KASSERT site reached. The |
 <!-- AUTO:journal-detectors END -->
 
 **Source pin shape per detector** (handwritten — the on-disk format

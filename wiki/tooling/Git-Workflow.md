@@ -112,6 +112,53 @@ For rebase conflicts, the canonical recipe is:
 Never use `git checkout --theirs` / `--ours` blanket-style across
 multiple files; review each.
 
+## Parallel Sessions
+
+DuetOS may be worked on by several Claude Code sessions at once. File
+ownership is coordinated through the tracked coordinator `PARALLEL_WORK.md`
+at the repo root plus three helper scripts under `tools/parallel/`. Do
+**not** hand-edit `PARALLEL_WORK.md` — the scripts own it. The full
+protocol lives in [`CLAUDE_PARALLEL.md`](../../CLAUDE_PARALLEL.md).
+
+```bash
+tools/parallel/status.sh                          # active/completed sessions + conflicts
+tools/parallel/claim.sh <sub> "<files>" "<desc>"  # claim a subsystem before editing
+tools/parallel/release.sh <sub>                   # push the session branch when done
+tools/parallel/release.sh <sub> --merge           # ...and merge to main (explicit opt-in)
+```
+
+- **`claim.sh`** rebases on `origin/main`, registers this session as
+  owning the named subsystem + file globs, warns on already-claimed
+  files, and keeps you on your `claude/*` session branch. Session
+  identity defaults to host-PID; override with `CLAUDE_SESSION_ID`.
+- **`status.sh`** prints each session block and flags the real conflict:
+  two live (🟢) claims owning the same path. Completed (✅) claims have
+  released their files and are excluded.
+- **`release.sh`** flips the subsystem marker 🟢 → ✅, stamps completion,
+  and pushes the session branch with `--force-with-lease`. `--merge` is
+  the explicit opt-in DuetOS requires before touching `main` — only with
+  CI green and no in-flight dependency on another session.
+
+Run `status.sh` and claim your subsystem before editing whenever
+concurrent sessions are possible.
+
+## Repository Tooling
+
+Other helper directories under `tools/` worth knowing about:
+
+- **`tools/linux-compat/`** — Linux ABI generators: `gen-linux-syscall-table.py`
+  (from `linux-syscalls-x86_64.csv`) and `check-syscall-ownership.py`.
+- **`tools/win32-compat/`** — Win32/NT ABI generators: `gen-nt-shim.py`
+  (from `nt-syscalls-x64.csv`).
+- **`tools/security/`** — host-side security drivers (`run_pentest_gui.py`,
+  `attack_from_gui.py`); see [Attack Simulation](../security/Attack-Simulation.md).
+- **`tools/cleanroom/`** — cleanroom-trace decoders (`decode_hash.py`,
+  `decode_syscall.py`) and the `run-trace-survey.sh` survey harness.
+- **`tools/release/`** — release bookkeeping (`update-lifetime-downloads.py`).
+
+Each tool dir keeps a header comment / `README.md` describing usage; the
+shared discipline is in `CLAUDE.md` ("Reusable Tooling — Save It").
+
 ## Related Pages
 
 - [Build System](Build-System.md)

@@ -20,15 +20,19 @@ directly.
 | Class | Path | Notable drivers |
 |-------|------|-----------------|
 | PCI bus | `kernel/drivers/pci/` | PCIe enumeration |
-| VirtIO | `kernel/drivers/virtio/` | Shared transport + virtio-rng, virtio-blk, virtio-net (probe-only v0) |
+| VirtIO | `kernel/drivers/virtio/` | Shared transport + virtio-rng, virtio-blk, virtio-net (virtqueues + I/O) |
 | Storage | `kernel/drivers/storage/` | NVMe, AHCI |
 | USB | `kernel/drivers/usb/` | xHCI host + HID/MSC/CDC-ECM/RNDIS class |
-| Network | `kernel/drivers/net/` | Intel e1000 |
+| Network | `kernel/drivers/net/` | AMD PCnet (wired); mt76 / iwlwifi / rtl88xx / bcm43xx / ath9k_htc (wireless shells) |
 | GPU | `kernel/drivers/gpu/` | virtio-gpu, Intel/AMD/NVIDIA discovery |
 | Audio | `kernel/drivers/audio/` | Intel HDA |
 | Input | `kernel/drivers/input/` | PS/2 keyboard/mouse |
 | Video | `kernel/drivers/video/` | Framebuffer, compositor primitives, theme |
 | Power | `kernel/drivers/power/` | Reboot / shutdown |
+| IOMMU | `kernel/drivers/iommu/` | Intel VT-d + AMD-Vi DMA remapping — see [IOMMU](IOMMU.md) |
+| MEI | `kernel/drivers/mei/` | Intel Management Engine Interface (HECI) — see [ME/PSP Mitigation](../security/ME-PSP-Mitigation.md) |
+| PSP | `kernel/drivers/psp/` | AMD Platform Security Processor probe — see [ME/PSP Mitigation](../security/ME-PSP-Mitigation.md) |
+| NPU | `kernel/drivers/npu/` | Intel AI Boost / AMD XDNA inference accelerator probe — see [Neural Engine](Neural-Engine.md) |
 
 The **VirtIO bus** is the canonical entry point for guest workloads
 running under QEMU / KVM / cloud hypervisors — every cloud /CI
@@ -38,10 +42,11 @@ PCI function (vendor `0x1AF4`, device `0x1040..0x107F`), maps the
 common / notify / isr / device cfg cap regions through `mm::MapMmio`,
 runs the reset → ACK → DRIVER → FEATURES_OK → DRIVER_OK status
 dance, and dispatches by class to the per-device probe. v0 ships
-`virtio-rng`, `virtio-blk` and `virtio-net` as attach-only probes —
-they negotiate features and log the device but don't yet set up
-virtqueues. Queue setup + I/O dispatch is the next slice; the
-shared transport hosts the seam where it lands.
+`virtio-rng`, `virtio-blk` and `virtio-net` as full drivers:
+each negotiates features, sets up its virtqueues, and runs real
+I/O — virtio-blk does read/write/flush/discard, virtio-net wires
+the RX/TX queue pair into the kernel net stack. See
+[VirtIO](Virtio.md) for the per-device detail.
 
 ## Hardware Target Matrix
 
@@ -53,7 +58,7 @@ tier 3 the dev/QEMU-only path.
 |-------|--------|--------|--------------|
 | CPU | Intel x86_64 (Coffee Lake → Sapphire Rapids), AMD Zen+ | Intel pre-Coffee Lake, AMD pre-Zen+ | QEMU TCG |
 | GPU | Intel iGPU (Gen9+), AMD Radeon (GFX9+), NVIDIA (Turing+) | Older Intel/AMD/NVIDIA | virtio-gpu |
-| NIC | Intel e1000 / e1000e | Realtek rtl8169, Broadcom bcm57xx | virtio-net |
+| NIC | AMD PCnet (implemented); Intel e1000 / e1000e (planned, not yet implemented) | Realtek rtl8169, Broadcom bcm57xx | virtio-net, AMD PCnet |
 | Wi-Fi | iwlwifi (Intel), rtl88xx, bcm43xx | (none yet) | (none) |
 | USB | xHCI 1.0+ | EHCI (legacy fallback) | (none) |
 | Storage | NVMe, AHCI/SATA | (legacy IDE deferred) | virtio-blk |
@@ -98,17 +103,18 @@ userland. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 | Class | Source files | Path |
 |-------|--------------|------|
 | `audio` | 5 | `kernel/drivers/audio/` |
-| `gpu` | 16 | `kernel/drivers/gpu/` |
+| `gpu` | 24 | `kernel/drivers/gpu/` |
 | `input` | 3 | `kernel/drivers/input/` |
+| `iommu` | 5 | `kernel/drivers/iommu/` |
 | `mei` | 1 | `kernel/drivers/mei/` |
-| `net` | 18 | `kernel/drivers/net/` |
+| `net` | 19 | `kernel/drivers/net/` |
 | `npu` | 1 | `kernel/drivers/npu/` |
 | `pci` | 1 | `kernel/drivers/pci/` |
 | `power` | 1 | `kernel/drivers/power/` |
 | `psp` | 1 | `kernel/drivers/psp/` |
 | `storage` | 3 | `kernel/drivers/storage/` |
 | `usb` | 21 | `kernel/drivers/usb/` |
-| `video` | 37 | `kernel/drivers/video/` |
+| `video` | 39 | `kernel/drivers/video/` |
 | `virtio` | 9 | `kernel/drivers/virtio/` |
 <!-- /AUTO:driver_list -->
 

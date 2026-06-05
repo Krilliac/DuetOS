@@ -40,11 +40,16 @@ HTTP fetch and asserts a 2xx / 3xx response.
 
 ## Known Limits / GAPs
 
-- **DNS over UDP only.** No DoT/DoH yet (and no real cert store, so
-  TLS verification is out of scope until a separate slice lands).
-- **No HTTPS.** The fetch above is plain HTTP. The TLS slice is part
-  of the broader crypto track.
-- **IPv6** is not the default and not heavily exercised.
+- **DNS over UDP only.** No DoT/DoH yet.
+- **HTTPS lands** via the in-kernel TLS 1.2 client
+  ([TLS Client](TLS-Roadmap.md)) with an embedded root store, so the
+  fetch above can run over `https://` as well as plain HTTP. The known
+  cert-verification limits (no P-521 / RSA-PSS / Ed25519, depth-2 chain
+  cap) live on the TLS page.
+- **IPv6 is partial.** `kernel/net/ipv6.cpp` answers ICMPv6 echo and
+  link-local Neighbor Discovery, but the transport demux is still
+  v4-keyed (`ipv6.cpp:385`, `:403`), so the live verification above runs
+  over IPv4. See [Network Stack](Network-Stack.md#known-limits--gaps).
 
 ## Related Pages
 

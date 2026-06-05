@@ -304,6 +304,27 @@ written down first.
 - A subsystem proposes Class F recovery — review the bounded-ness
   argument before accepting.
 
+## Incident-response runbook
+
+Governing principle 5 ("every recovery emits an audit event") has an
+operator-facing companion: the blue-team incident-response runbook in
+[`kernel/security/ir_runbook.cpp`](../../kernel/security/ir_runbook.cpp).
+For every wall trip / detector fire it emits a short
+"what just happened + what to check next + escalation lever" stanza to
+the serial console and publishes an `IrRunbookEmitted` event so the
+purple-team scorecard (see
+[Attack Simulation](Attack-Simulation.md)) can confirm the runbook
+actually ran.
+
+The data is a `constexpr` table indexed by `EventKind`; each entry
+carries a one-line summary, a forensic narrative, an ordered list of
+shell commands to run (`secevents`, `imagelog`, `guard show`, …), and a
+policy escalation lever. Adding a new `EventKind` without a matching
+runbook entry trips `IrRunbookSelfTest` at boot — so detectors can't
+slide in without follow-up guidance. Bookkeeping kinds
+(`PolicyChanged`, `AttackSimRun`, `IrRunbookEmitted`, …) are explicitly
+opted out, since emitting a runbook for them would be circular.
+
 ## See also
 
 - `security-malware-hard-stop-plan.md` — the security posture Class

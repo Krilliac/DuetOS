@@ -7,7 +7,10 @@
 > non-kernel code executes
 >
 > **Maturity:** v0 — host-side MMIO fence + AMT network blocks online;
-> IOMMU DMA fence deferred until VT-d / AMD-Vi land
+> IOMMU discovery + Intel VT-d enable have landed (see
+> [IOMMU](../drivers/IOMMU.md)), but per-device ME/PSP DMA quarantine still
+> needs per-BDF contexts (the VT-d default is identity passthrough, which does
+> not isolate), and AMD-Vi enable is still deferred
 
 ## What this is
 
@@ -38,7 +41,7 @@ does not, and how to verify the posture on a given platform.
 | Win32 / Linux subsystem mediates access to the BAR | **Yes** | Subsystems never reach the BAR; they call kernel APIs that go through the same gate |
 | Compromised driver reaches in via legacy 0xCF8/0xCFC and rewrites BARs, IRQs, capabilities | **Yes** | `PciConfigWrite32` consults the guard's BDF deny-list and refuses |
 | Coprocessor DMAs into host RAM via the standard PCIe BME path | **Yes** | Bus Master Enable is cleared on the fenced BDF at probe time |
-| Coprocessor DMAs into host RAM via its own private chipset-internal route | **No, v0** | Needs IOMMU. Deferred — see "Deferred" below |
+| Coprocessor DMAs into host RAM via its own private chipset-internal route | **Not yet** | Needs per-device IOMMU contexts. The [IOMMU](../drivers/IOMMU.md) driver (DMAR/IVRS parse + Intel VT-d enable) has landed, but its v0 default is *identity passthrough*, which does not isolate any BDF — per-device ME/PSP quarantine is still deferred. See "Deferred" below |
 | Remote attacker connects to AMT web UI / RAS over the host network stack | **Yes** | Kernel firewall drops AMT / vPro / IPMI ports in both directions |
 | Operator can't tell if `me_cleaner` actually nerfed the chip | **Yes** | HFS1 register decoded at boot; `mode=DISABLED-HAP` is the success signal |
 | ME / PSP receives traffic delivered to it below the OS (transparent NIC interception) | **No** | Architecturally impossible at OS level — the coprocessor sees the wire before the host stack does |
@@ -149,7 +152,9 @@ The kernel shell exposes `mepsp` (alias `vpro`, `amt`). It prints:
   signal — log who tried and why).
 - Active AMT firewall rule count and total lifetime hits (hits are an
   intrusion signal — something on the wire is trying to reach AMT).
-- A reminder that IOMMU DMA fencing is not yet active.
+- A reminder that per-device IOMMU DMA quarantine for the fenced BDFs is
+  not yet active (the IOMMU driver exists and Intel VT-d can be enabled, but
+  only in identity-passthrough mode, which does not isolate the ME/PSP BDFs).
 
 ### 5. PCI config-write deny-list
 
@@ -239,12 +244,20 @@ the fence.
 These are real gaps. They are out of scope for v0 because the
 prerequisites are not in the tree yet, not because they are unimportant.
 
-- **IOMMU DMA fencing.** The strongest available mitigation: use
-  VT-d (Intel) or AMD-Vi to deny DMA from the ME / PSP BDFs into kernel
-  and user RAM. Requires DMAR / IVRS ACPI table parsing and an IOMMU
-  domain manager — neither exists in `kernel/` yet. When they land, the
-  guard grows a `MePspGuardDmaQuarantine(bdf)` call and every fenced
-  device's `dma_quarantine` field becomes meaningful.
+- **Per-device IOMMU DMA fencing for the ME / PSP BDFs.** The strongest
+  available mitigation: use VT-d (Intel) or AMD-Vi to deny DMA from the
+  ME / PSP BDFs into kernel and user RAM. The prerequisites have *partly*
+  landed since this page was first written: DMAR / IVRS ACPI table parsing
+  and the Intel VT-d enable path now exist in
+  [`kernel/drivers/iommu/`](../drivers/IOMMU.md) (`IommuInit` →
+  `VtdProgramAndEnable`, gated by `DUETOS_IOMMU_ENABLE`, off by default).
+  What is still missing is *per-device* isolation: the v0 IOMMU programs a
+  single identity-passthrough context shared by every BDF, so turning it on
+  does not yet fence the ME / PSP. When per-device contexts land, the guard
+  grows a `MePspGuardDmaQuarantine(bdf)` call that installs a deny-all (or
+  tightly-scoped) context for the fenced BDFs, and every fenced device's
+  `dma_quarantine` field becomes meaningful. AMD-Vi enable is also still
+  deferred (only the IVRS parser runs today).
 - **HAP (Intel "High Assurance Platform") bit detection.** The HAP
   bit lives in the ME firmware region on SPI flash; it tells the ME
   to halt after BRINGUP. We cannot toggle it (it is set with

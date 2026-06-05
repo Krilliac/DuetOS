@@ -5,19 +5,27 @@
 > **Execution context:** Kernel — process context, polling synchronous
 > at probe time
 >
-> **Maturity:** v0 — signature probe + root-directory (first cluster)
-> walk; subdirectory recursion and FAT-backed multi-cluster chains
-> are deferred
+> **Maturity:** Read + bounded root-directory write (in-place / append /
+> create / truncate); subdirectory recursion deferred
 
 ## Overview
 
-[`kernel/fs/exfat.{h,cpp}`](../../kernel/fs/exfat.h) reads exFAT
-volumes for interoperability with cameras, SD cards, and other
-removable media that Windows formats with exFAT instead of FAT32
-(any media > 32 GiB on a modern Windows host). It is **not** a
-FAT32 extension; the directory entry shape and free-cluster
-bitmap layout differ enough that the two backends are kept as
-separate files.
+[`kernel/fs/exfat.{h,cpp}`](../../kernel/fs/exfat.h) reads **and
+writes** exFAT volumes for interoperability with cameras, SD cards,
+and other removable media that Windows formats with exFAT instead
+of FAT32 (any media > 32 GiB on a modern Windows host). It is
+**not** a FAT32 extension; the directory entry shape and
+free-cluster bitmap layout differ enough that the two backends are
+kept as separate files.
+
+The byte-parsing layer is Rust: `kernel/fs/exfat_rust/` is a
+**production crate** (no_std) that owns the boot-sector probe,
+geometry derivation, the FAT chain walker, and the dirent-set
+decoder (File `0x85` + Stream-Extension `0xC0` + FileName `0xC1`
+tuples). The C++ wrapper in `exfat.cpp` delegates parsing to the
+crate and keeps block I/O, scratch management, the per-volume
+registry, the write/flush paths, and the UTF-16 → ASCII glyph
+filter (which draws on `util::Utf16CpToSafeAscii`).
 
 ## Why a Separate Backend
 
@@ -59,10 +67,19 @@ boot sector first and dispatch by signature.
 
 | Function                  | Purpose                                                                       |
 |---------------------------|-------------------------------------------------------------------------------|
-| `ExfatProbe(handle)`      | Sniff a block device; on `EXFAT` signature, parse the boot sector and root.   |
-| `ExfatVolumeCount()`      | Live volume count.                                                            |
-| `ExfatVolumeByIndex(i)`   | Stable pointer to the `Volume` record for inspection.                         |
-| `ExfatScanAll()`          | Iterate every registered block handle and call `ExfatProbe`.                  |
+| `ExfatProbe(handle)`        | Sniff a block device; on `EXFAT` signature, parse the boot sector and root. |
+| `ExfatVolumeCount()`        | Live volume count.                                                          |
+| `ExfatVolumeByIndex(i)`     | Stable pointer to the `Volume` record for inspection.                       |
+| `ExfatScanAll()`            | Iterate every registered block handle and call `ExfatProbe`.               |
+| `ExfatFindInRoot(v, name)`  | Look up a root entry by name; returns the cached `DirEntry` or nullptr.     |
+| `ExfatWriteInPlace(...)`    | Write `len` bytes at `offset` within an existing root file (FAT chain walk + flush). |
+| `ExfatAppendInRoot(...)`    | Append to a root file, extending the FAT chain, then flush.                 |
+| `ExfatCreateInRoot(...)`    | Create a new root file from a byte buffer, then flush.                      |
+| `ExfatTruncateInRoot(...)`  | Grow / shrink a root file's logical size (zero-fill on grow), then flush.   |
+
+All write paths refuse a read-only device (`BlockDeviceIsWritable`)
+and route a `BlockDeviceFlush` through to non-volatile media on
+success.
 
 ## Directory Entry Shape
 
@@ -83,22 +100,41 @@ clear.
 
 ## Known Limits / GAPs
 
-- **First cluster of root only.** A multi-cluster root needs the
-  FAT chain walker, which is the next slice. Practically, the
-  first cluster (≥ 32 KiB on default-formatted media) carries the
-  first ~100 root entries — adequate for verifying the probe path
-  on test images, inadequate for a fully-populated camera SD card.
-- **No subdirectory recursion.** Only the root is walked; opening
-  a subdirectory is a future slice.
-- **No reads of file content.** The walker captures
-  `first_cluster` + `size_bytes` but the read path (chain walk +
-  cluster fetch) is unwired.
-- **No writes.** Write support is its own slice (and a much harder
-  one given the allocation-bitmap design — see Microsoft's exFAT
-  spec for the FAT-vs-bitmap interplay).
+- **First cluster of root only (enumeration).** Probe enumerates
+  only the root's first cluster into the registry; a multi-cluster
+  root's later entries aren't cached. The FAT chain walker exists
+  (used by the read/write paths) but the probe-time enumeration is
+  still first-cluster. Practically the first cluster (≥ 32 KiB on
+  default-formatted media) carries the first ~100 root entries —
+  adequate for test images, inadequate for a fully-populated camera
+  SD card.
+- **No subdirectory recursion.** Only the root is walked / written;
+  opening a subdirectory is a future slice. All write APIs are
+  `…InRoot`.
+- **Dirent-set GAPs.** `exfat.cpp:772` — a dirent set that straddles
+  a sector boundary is not produced by the walker (the read path
+  assumes the set lives within one buffered sector). `exfat.cpp:826`
+  — a dirent set larger than one sector is unsupported and rejected.
 - **No upcase-table awareness.** Case-insensitive matching uses
   raw ASCII; correct exFAT behaviour requires consulting the
   on-disk upcase table for non-ASCII collation.
+
+## Threading & Locking Model
+
+All ops run in process context, polling-synchronous, and do not
+sleep across DMA. The read/write paths share two file-static
+scratch buffers (`g_scratch`, `g_dir_scratch` in `exfat.cpp`), so
+the surface is **not reentrant** — two concurrent operations on a
+volume would clobber each other's buffer. Today the only callers
+are single-threaded; an SMP workload would need a per-volume lock.
+
+## Capability / Privilege Surface
+
+exFAT writes are gated by `kCapFsWrite`, reads by `kCapFsRead`. As
+with FAT32, the gate is enforced in the **syscall layer** — not in
+`kernel/fs/` — by `kernel/subsystems/linux/syscall_io.cpp`,
+`syscall_fs_mut.cpp`, `syscall_file.cpp`, and the Win32 `SyscallGate`.
+See [`security/Capabilities.md`](../security/Capabilities.md).
 
 ## Reference
 

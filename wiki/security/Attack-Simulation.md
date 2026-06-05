@@ -16,9 +16,18 @@ detector / panic / refusal is the pass condition.
 
 ## Files
 
-- `kernel/security/attack_sim/` — the attack suite
-- `kernel/security/pentest/` — pentest probes (ring 3 adversarial)
-- `kernel/security/redteam/` — coverage matrix + slice-order roadmap
+- [`kernel/security/attack_sim.{cpp,h}`](../../kernel/security/attack_sim.cpp)
+  — the in-kernel attack suite (`AttackSimRun`)
+- [`kernel/security/purple_team.{cpp,h}`](../../kernel/security/purple_team.cpp)
+  — purple-team coverage scorecard that wraps `AttackSimRun`
+- [`kernel/security/auth_pentest.{cpp,h}`](../../kernel/security/auth_pentest.cpp)
+  — boot-time auth brute-force probe
+- [`kernel/security/pentest_gui.{cpp,h}`](../../kernel/security/pentest_gui.cpp)
+  — self-driving GUI pentest runner (login gate + shell)
+- [`kernel/security/gui_fuzz.{cpp,h}`](../../kernel/security/gui_fuzz.cpp)
+  — seeded keyboard/mouse fuzz harness for the desktop dispatch
+- [`kernel/security/ir_runbook.{cpp,h}`](../../kernel/security/ir_runbook.cpp)
+  — blue-team incident-response runbook (see [Runtime Recovery](Runtime-Recovery.md))
 
 ## Active Attacks (v1)
 
@@ -83,6 +92,51 @@ The IR runbook publishes per-EventKind follow-up guidance (summary +
 steps + escalation, 20 entries) back to the event ring. A boot-time
 self-test enforces coverage so every EventKind has a runbook
 entry.
+
+## Purple-Team Scorecard
+
+[`purple_team.cpp`](../../kernel/security/purple_team.cpp) brackets
+`AttackSimRun()` with pre/post snapshots of the security event ring plus
+per-attack wall-clock timing, then reports a coverage score: whether at
+least one event fired in the run window, how long the window was, the
+per-attack PASS/FAIL ratio carried over from `AttackSimRun`, and whether
+any events were dropped (which would mean the ring is too small for the
+workload). Per-attack EventKind expectation tables are deferred to v1
+until `runtime_checker.cpp` publishes kind-labelled events.
+
+## Self-Driving Adversarial Probes
+
+Three probes drive the live system the way a real attacker would,
+arming only on a cmdline token so a normal boot pays nothing:
+
+- **Auth brute-force** —
+  [`auth_pentest.cpp`](../../kernel/security/auth_pentest.cpp) pounds
+  `AuthVerify` with random wrong passwords against the seeded admin
+  account, confirms lockout fires, confirms the correct password is
+  rejected while locked, and confirms `AuthUnlockUser` restores access.
+  Informational (never panics); publishes one block per phase to COM1
+  plus the event-ring delta. Costs ~50 PBKDF2-HMAC-SHA256 derivations.
+- **GUI pentest runner** —
+  [`pentest_gui.cpp`](../../kernel/security/pentest_gui.cpp) (armed by
+  `pentest=gui`) waits for the login gate, then injects a scripted
+  keystroke sequence into the same input ring the xHCI HID keyboard
+  driver feeds, exercising the login gate + post-login shell without the
+  QEMU monitor's flaky `sendkey`. Runs as a dedicated scheduler task so
+  it can yield between keystrokes; each probe restores a boot-like state.
+- **GUI fuzz harness** —
+  [`gui_fuzz.cpp`](../../kernel/security/gui_fuzz.cpp) (armed by
+  `gui-fuzz[=<seconds>]`, optional `gui-fuzz-seed=<n>` for reproducible
+  runs) pumps a seeded randomised stream of keyboard + mouse events
+  through the live desktop dispatch to shake out crashes in the window
+  manager, widgets, menus, calendar, console and hotkey paths. Pair with
+  `autologin=1` so events land on the desktop, not the login gate. Emits
+  a `[gui-fuzz] complete iters=...` sentinel and exits QEMU
+  deterministically; a panic/oops during the run is caught by the normal
+  boot-log regression scan.
+
+Host-side drivers live under [`tools/security/`](../../tools/security/):
+`run_pentest_gui.py` boots the kernel with `pentest=gui` and scrapes the
+serial transcript, and `attack_from_gui.py` drives the GUI attack flow.
 
 ## FS-Write Rate Guard + Canary Wall
 

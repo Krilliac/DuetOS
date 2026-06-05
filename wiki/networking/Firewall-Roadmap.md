@@ -1,12 +1,22 @@
-# Firewall — Roadmap
+# Firewall
 
-DuetOS ships a v0 packet filter wired into the IPv4 ingress
-path (`Ipv4HandleIncoming`) and the IPv4 egress helper
-(`IfaceTx`). The Start menu's **FIREWALL** entry renders the
-live rule table — direction, protocol, src/dst prefixes,
-action, and per-rule hit counters.
+> **Audience:** Net stack hackers, QA
+>
+> **Execution context:** Kernel — verdicts run on the IPv4 ingress
+> (IRQ/softirq RX) and egress (TX) paths; edits run in process context
+>
+> **Maturity:** active — stateful packet filter with conntrack, denial
+> ring, and a `firewall` shell command, wired into both hooks
 
-## Today (v0 — landed)
+## Overview
+
+DuetOS ships a packet filter in `kernel/net/firewall.{h,cpp}`, wired into
+the IPv4 ingress path (`Ipv4HandleIncoming`) and the IPv4 egress helper
+(`IfaceTx`). The Start menu's **FIREWALL** entry renders the live rule
+table — direction, protocol, src/dst prefixes, action, and per-rule hit
+counters.
+
+## Today (landed)
 
 - **Connection tracking** for TCP / UDP with a real TCP
   state machine. Every egress packet that no rule
@@ -103,6 +113,21 @@ The kernel shell runs trusted, so its calls satisfy
 issuing the same calls through a syscall surface will
 gate on the cap.
 
+## Threading & Locking Model
+
+- **Verdicts** (`FwEvaluate` from `Ipv4HandleIncoming` and `IfaceTx`) run
+  on the network RX/TX path — IRQ/softirq context for received frames,
+  the sender's context on TX. They must not sleep.
+- **Edits** (`FwAdd` / `FwRemove` / `FwToggle` / `FwSetDefaultPolicy` /
+  conntrack mutation) and reads (`FwLogSnapshot`, `Stats`) run in process
+  context, today via the trusted kernel shell.
+- The rule table, conntrack table, denial ring, and stats are
+  `constinit` file-local globals. v0 relies on the rarity of concurrent
+  edits (single trusted shell) rather than an explicit lock; the
+  first-match-wins evaluation reads a coherent rule snapshot. Adding a
+  per-table spinlock taken IRQ-off is the prerequisite for a userland
+  editor that mutates rules concurrently with live traffic.
+
 ## Planned (not committed yet)
 
 1. **Desktop editor surface in `kernel/apps/firewall.cpp`.**
@@ -120,3 +145,18 @@ The placeholder text on the Firewall app stays accurate as
 each item lands: today the app shows real rules, real
 defaults, and real per-rule hit counters; the editor
 surface is the next slice.
+
+## Troubleshooting
+
+- **Traffic that should pass is dropped** — run `firewall log` to see
+  the recent denials with the matched rule index (or `kFwMaxRules` for a
+  default-policy deny), then `firewall list` to inspect that rule.
+- **A return packet is denied under default-deny inbound** — the egress
+  packet must have registered a conntrack entry first; check
+  `firewall conntrack` for the reverse-direction tuple and its state.
+- **Edits from the desktop app appear to do nothing** — the app is
+  read-only today; edits go through the `firewall` shell command, gated
+  on `kCapNetAdmin`.
+- **Counters look stale** — `firewall stats` is a snapshot; re-run it.
+  `firewall reset` wipes the rule table, conntrack, and log, restoring
+  allow/allow defaults.

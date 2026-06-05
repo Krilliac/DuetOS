@@ -304,6 +304,21 @@ struct PasswordHashRecord {
   password-derivation envelope the existing decoy path already
   smooths.
 
+## Known Limits / GAPs
+
+- **Role + membership tables are in-memory only** — `RbacInit` re-seeds
+  the built-in roles and memberships on every boot, so any runtime
+  `roleadd` / `roledel` / `RoleRegister` change is lost on reboot
+  ([`rbac.cpp:302`](../../kernel/security/rbac.cpp)). Carries a
+  `FIX_NOTE_GAP` marker so the fix journal flags it at runtime.
+  Persistence is blocked on a writable system FS + the
+  `/system/secrets/` layout (see *Persistence* above) and tracked in
+  [`wiki/reference/Roadmap.md`](../reference/Roadmap.md).
+- **On-disk persistence (`/system/secrets/`) is deferred** — the
+  encrypted-at-rest, TPM-sealed envelope and the installer-driven
+  first-boot flow that replaces hardcoded seeding both wait on the same
+  writable-system-FS slice.
+
 ## Related pages
 
 - [Capabilities](Capabilities.md)

@@ -90,9 +90,14 @@ collect_inventory() {
     SYSCALL_COUNT=$(echo "$SYSCALL_LIST" | grep -c '|' || true)
 
     # --- Capability bits (kCap* enumerators in kernel/proc/process.h) ---
+    # Count only the real, numbered capability bits — i.e. enumerators with an
+    # explicit `kCapFoo = N` assignment — and drop the kCapNone (0) / kCapCount
+    # (boundary) sentinels plus any alias mentions that lack their own value.
     CAP_LIST=""
     if [ -f "$PROJECT_ROOT/kernel/proc/process.h" ]; then
-        CAP_LIST=$(grep -oE '\bkCap[A-Z][A-Za-z0-9_]*' "$PROJECT_ROOT/kernel/proc/process.h" 2>/dev/null \
+        CAP_LIST=$(grep -oE '\bkCap[A-Za-z0-9_]+[[:space:]]*=[[:space:]]*[0-9]+' "$PROJECT_ROOT/kernel/proc/process.h" 2>/dev/null \
+            | sed -E 's/[[:space:]]*=.*//' \
+            | grep -vE '^kCap(None|Count)$' \
             | sort -u)
     fi
     CAP_COUNT=$(echo "$CAP_LIST" | grep -c 'kCap' || true)

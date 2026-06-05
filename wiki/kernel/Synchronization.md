@@ -28,6 +28,7 @@ brackets even on uniprocessor.
 |-----------|------|---------|-----------|----------|
 | `SpinLock` | [`spinlock.h`](../../kernel/sync/spinlock.h) | no | yes (saves IFLAGS) | Short critical sections, IRQ + process contexts mix |
 | `Mutex` (via `KMutex` in `ipc/`) | [`ipc/kmutex.h`](../../kernel/ipc/kmutex.h) | yes | no | Long critical sections in process context |
+| `AdaptiveMutex` | [`adaptive_mutex.h`](../../kernel/sync/adaptive_mutex.h) | maybe (spins first, parks if needed) | no | Contended mutex where the holder is usually about to release |
 | `RwLock` | [`rwlock.h`](../../kernel/sync/rwlock.h) | yes | no | Read-mostly data structures, process context only |
 | `Seqlock` | [`seqlock.h`](../../kernel/sync/seqlock.h) | reader: no, writer: no | yes (writer disables IRQ) | Read-side wants no atomics; writer rare |
 | `RCU` | [`rcu.h`](../../kernel/sync/rcu.h) | reader: no | yes | Read-mostly, no reader blocking, deferred reclaim |
@@ -113,6 +114,41 @@ is a pointer.
 The kernel never holds a `KMutex` across a sleeping operation that depends on
 the mutex (no recursion, no nested blocking I/O). The lockdep class for each
 mutex must be registered on first use.
+
+## Adaptive Mutex
+
+[`AdaptiveMutex`](../../kernel/sync/adaptive_mutex.h) is an illumos-style
+spin-then-park mutex, interface-compatible with the `sched::Mutex`
+parking pattern. The uncontested fast path is the same CAS-claim; the
+slow path is what distinguishes it:
+
+- **Holder on-CPU** → spin (reading `holder->on_cpu` with acquire
+  semantics each iteration). Release is imminent, so busy-waiting beats
+  paying two context-switch costs to park and unpark.
+- **Holder off-CPU** (blocked / sleeping / ready elsewhere) → park on
+  the mutex's `sched::WaitQueue`.
+- **Spin cap** `kAdaptiveSpinLimit` (10000 iterations, ~50 µs) is the
+  safety net: a runaway holder stuck on its own CPU falls through to
+  the park path rather than pinning a peer forever.
+
+```cpp
+void AdaptiveMutexLock(AdaptiveMutex& m);            // spin-then-park
+void AdaptiveMutexUnlock(AdaptiveMutex& m);          // wakes one waiter (FIFO)
+bool AdaptiveMutexTryLock(AdaptiveMutex& m);         // non-blocking
+bool AdaptiveMutexIsHeld(const AdaptiveMutex& m);    // diagnostic only
+```
+
+It is a strict Pareto improvement over always-park `sched::Mutex`: the
+uncontested case is identical, the contended case is at worst what
+`sched::Mutex` already pays. **Not** recursive, **not** IRQ-safe (both
+the spin and park paths can block; IRQ-context callers use `SpinLock`),
+no priority inheritance, and no timed acquire (use `MutexLockTimed` for
+that). Lockdep integration mirrors `sched::Mutex` via the `m_class_id`
+field; untagged mutexes short-circuit the hooks. A boot self-test
+(`AdaptiveMutexSelfTest`, called from `boot_bringup.cpp` after the
+SpinLock self-test) exercises the fast path, `TryLock`, lockdep
+round-trip, and two-task contention, emitting
+`[adaptive-mutex] self-test OK`.
 
 ## RwLock
 

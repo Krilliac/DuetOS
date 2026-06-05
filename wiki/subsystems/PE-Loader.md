@@ -33,12 +33,13 @@ resolution, binary-search EAT lookup.
    loader's evolution.
 3. **Address space**: allocate `mm::AddressSpace`, mirror kernel half.
 4. **Preload set**: register every userland DLL into the per-process
-   DLL table (`Process::dll_images[]`). All 45 production DLLs in
+   DLL table (`Process::dll_images[]`). All 44 production DLLs in
    `userland/libs/` are preloaded on real hardware (plus 2 customdll
-   test fixtures, for 47 total entries in `preload_set[]`). Under
+   test fixtures, for 46 total entries in `preload_set[]`). Under
    `arch::IsEmulator()` the 9 entries marked `essential=false`
-   (7 production + 2 fixtures) are skipped to keep CI runs short;
-   the 38 essential DLLs always preload. ~1100 exports total.
+   (7 production DLLs + 2 fixtures) are skipped to keep CI runs
+   short; the 37 essential production DLLs always preload.
+   ~1100 exports total.
    Per-DLL status lives in
    [`Win32-Surface-Status`](../reference/Win32-Surface-Status.md).
 5. **Map sections**: each PE section mapped at `ImageBase + VA` with

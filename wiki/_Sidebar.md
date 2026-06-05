@@ -38,6 +38,7 @@
 ### Drivers
 - [Driver Overview](drivers/Driver-Overview.md)
 - [PCIe Enumeration](drivers/PCIe-Enumeration.md)
+- [IOMMU (VT-d + AMD-Vi)](drivers/IOMMU.md)
 - [Storage (NVMe + AHCI)](drivers/Storage.md)
 - [USB (xHCI + Class)](drivers/USB.md)
 - [Networking Drivers](drivers/Networking-Drivers.md)
@@ -83,8 +84,8 @@
 - [Network Stack](networking/Network-Stack.md)
 - [TCP State Machine](networking/TCP-State-Machine.md)
 - [Live Internet Verification](networking/Live-Internet.md)
-- [TLS Roadmap](networking/TLS-Roadmap.md)
-- [Firewall Roadmap](networking/Firewall-Roadmap.md)
+- [TLS Client](networking/TLS-Roadmap.md)
+- [Firewall](networking/Firewall-Roadmap.md)
 - [DRSH Remote Access](networking/DRSH-Remote-Access.md)
 
 ### Security

@@ -30,11 +30,16 @@ on real hardware) from a single image: `tools/build/iso/grub.cfg`
 declares both `multiboot2` and `chainloader` paths, and `grub-mkrescue`
 embeds the El-Torito boot record alongside the EFI System Partition.
 
-The native `boot/uefi/BOOTX64.EFI` exists today as a Phase A toolchain
-proof — it builds, the firmware accepts it, and `efi_main` prints a
-banner via `ConOut`. It does not yet load the kernel; the GRUB path
-remains canonical until Phase B replaces `efi_main` with a real ELF
-loader + kernel handoff. See [`UEFI-Loader.md`](UEFI-Loader.md).
+The native `boot/uefi/BOOTX64.EFI` exists today through Phase B.1.
+Phase A locked the toolchain (the firmware accepts the image and
+`efi_main` prints a banner via `ConOut` + COM1); **Phase B.1** then
+added the file-system probe and ELF header validation — it walks
+`LoadedImage → SimpleFileSystem → \duetos-kernel.elf`, reads and
+validates the `Elf64_Ehdr` (magic / class / `EM_X86_64` / `e_phnum`),
+logs `e_entry`, and halts. It does **not** yet load the PT_LOAD
+segments or hand off (Phase B.2 / B.3, pending), so the GRUB path
+remains canonical. See [`UEFI-Loader.md`](UEFI-Loader.md) for the
+full phase breakdown.
 
 ## Kernel execution order at boot
 

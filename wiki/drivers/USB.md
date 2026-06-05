@@ -11,18 +11,19 @@
 ```
 [ USB device ]
      |
-[ xHCI host controller ]               kernel/drivers/usb/xhci/
+[ xHCI host controller ]               kernel/drivers/usb/xhci*.cpp
      |
-[ USB core ]                           kernel/drivers/usb/core/
+[ USB core ]                           kernel/drivers/usb/usb.{h,cpp}
      |
-[ Class driver ]                       kernel/drivers/usb/class/{hid,msc,cdc-ecm,rndis}/
+[ Class driver ]                       kernel/drivers/usb/{hid_*,msc_scsi*,cdc_ecm,rndis}.cpp
      |
 [ Subsystem (input, net, fs) ]
 ```
 
 ## xHCI Host v0
 
-`kernel/drivers/usb/xhci/`.
+`kernel/drivers/usb/xhci*.cpp` (`xhci.cpp` plus the per-stage TUs:
+`xhci_init`, `xhci_enum`, `xhci_ring`, `xhci_xfer`, `xhci_irq`, …).
 
 - Initializes capability + operational + runtime + doorbell register
   spaces.
@@ -52,7 +53,7 @@ pointer/length pair.
 
 ## HID Boot Keyboard
 
-`kernel/drivers/usb/class/hid/keyboard/`.
+`kernel/drivers/usb/hid_descriptor.cpp` (+ the `hid_rust/` report-descriptor parser).
 
 End-to-end USB keyboard input on boot. The boot-protocol report layout
 (8-byte fixed-format report) is decoded into key events and routed
@@ -61,7 +62,7 @@ compositor's focused window.
 
 ## CDC-ECM
 
-`kernel/drivers/usb/class/cdc-ecm/`.
+`kernel/drivers/usb/cdc_ecm.cpp`.
 
 USB Communications Device Class — Ethernet Control Model. Presents a
 USB device as a netif via the kernel net stack. Used by USB Ethernet
@@ -71,7 +72,7 @@ GAP: probe is not yet auto-called (deferred to a follow-up).
 
 ## RNDIS
 
-`kernel/drivers/usb/class/rndis/`.
+`kernel/drivers/usb/rndis.cpp`.
 
 Remote Network Driver Interface Specification — Microsoft's USB
 ethernet protocol. Control plane (initialize / set OID / query OID)
@@ -84,8 +85,12 @@ mid-poll.
 
 ## Known Limits / GAPs
 
-- **No MSC (mass-storage class) driver yet.** USB sticks are not
-  bootable as system disks today.
+- **MSC (mass-storage class) bulk transfer not wired.** The class
+  driver exists (`kernel/drivers/usb/msc_scsi.cpp`, registered in the
+  class table via `MscProbe`) with live CBW/CSW + SCSI CDB builders
+  and response parsers, but `MscProbe` refuses the attach until the
+  Bulk-Only Transport (BBB) bulk-in/bulk-out path lands. USB sticks
+  are therefore not bootable as system disks today.
 - **Hot-plug after boot** is not exercised; the device list is what
   the host enumerated at boot.
 - **No xHCI suspend / resume.**

@@ -6,7 +6,7 @@
 > [UI Toolkit](../subsystems/UI-Toolkit.md), accept input from the
 > compositor
 >
-> **Maturity:** v0 — 22 apps wired, ranging from one-screen demos to
+> **Maturity:** v0 — 23 apps wired, ranging from one-screen demos to
 > functional editors
 
 ## Overview
@@ -44,6 +44,18 @@ end-user entry point.
 Apps marked **v0** are scaffolded but missing significant functionality
 (noted per row). The rest are functional within their stated scope.
 
+> **Counting note:** the three app-related counts across the wiki count
+> different things, so they differ on purpose. This catalogue's "23
+> apps" counts **launchable apps** wired into `boot_bringup.cpp`
+> (`settings` is one row even though it has five `SettingsXxxInit`
+> sub-page TUs). [AppWidgets](../subsystems/AppWidgets.md)'s "28 of 33"
+> counts **apps migrated to the widget library** out of the migration
+> set. [Native Apps](../tooling/Native-Apps.md)'s "57 native apps"
+> counts **all `kernel/apps/` translation units** (every TU, including
+> helpers like `dbg_core` / `notes_persist` and the five
+> `settings_*` sub-pages), the migration target for splitting apps
+> out into standalone ELF binaries — not distinct launchable apps.
+
 ### Productivity
 
 | App | Source | What it does | Subsystems touched |
@@ -74,6 +86,7 @@ Apps marked **v0** are scaffolded but missing significant functionality
 | **taskman** | [`taskman.h`](../../kernel/apps/taskman.h) | Process / thread lister with kill. | scheduler |
 | **netstatus** | [`netstatus.h`](../../kernel/apps/netstatus.h) | Live interface stats (RX/TX bytes, link state). | [network stack](../networking/Network-Stack.md) |
 | **firewall** | [`firewall.cpp`](../../kernel/apps/firewall.cpp) | ACL editor for `kernel/net/` rules. | network stack |
+| **terminal** | [`terminal.cpp`](../../kernel/apps/terminal.cpp) / [`terminal.h`](../../kernel/apps/terminal.h) | Windowed terminal emulator — a character-cell grid that mirrors the live kernel shell session byte-for-byte, parses VT/ANSI via `util/vt_parser`, and routes keystrokes back through `ShellFeedChar`/`ShellSubmit`. | kernel shell, [framebuffer console](../subsystems/UI-Toolkit.md), util/vt_parser |
 
 ### Debug / Demo
 
@@ -161,6 +174,27 @@ thread**. That means:
   read-write profile.
 - **notes** — atomic save is best-effort (write then rename); a real
   journal is on the roadmap.
+- **files (ramfs)** — `files.cpp:2343` carries a `GAP:` marker: the
+  ramfs backend is read-only (`constinit`), so the file browser's
+  delete action only notifies "ramfs is read-only". A writable
+  backend would route it through `RamfsUnlink` + a rescan.
+- **terminal** — windowed shell mirror is live, but routing Win32
+  console PEs through the widget and drag-selection are out of scope
+  for v0 (recorded in the Toaru port plan, not as `// GAP:` markers
+  since there are no callers today — see the header comment around
+  `terminal.h:60`). Copy uses the Ctrl+Shift+C "copy visible
+  viewport" path instead.
+
+## Capability / Privilege Surface
+
+Kernel apps run as kernel tasks and are **not** cap-gated the way a
+ring-3 PE / ELF is — they are trusted, in-kernel code. The
+capability model applies at the syscall boundary to guest binaries;
+these apps call kernel subsystems directly. When an app surfaces a
+guest-facing resource (the file browser's FS view, the firewall's
+ACL editor), the underlying kernel subsystem still enforces its own
+invariants. See [Capabilities](../security/Capabilities.md) and
+[Subsystem Isolation](Subsystem-Isolation.md).
 
 ## Related Pages
 

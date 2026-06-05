@@ -119,11 +119,13 @@ the syscall surface, not to be a complete FS.
 
 | Operation              | Behaviour                                                                |
 |------------------------|--------------------------------------------------------------------------|
-| Create `/tmp/<name>`   | Reserves a slot; succeeds idempotently on a duplicate name.              |
-| Write `/tmp/<name>`    | Replaces the slot's content; bounded by `kTmpFsContentMax`.              |
-| Read `/tmp/<name>`     | Returns the slot's bytes.                                                |
-| Delete `/tmp/<name>`   | Frees the slot.                                                          |
-| List `/tmp/`           | Walks the slot table; empty slots elided.                                |
+| Create `/tmp/<name>`   | `TmpFsTouch` — reserves a slot; succeeds idempotently on a duplicate name. |
+| Write `/tmp/<name>`    | `TmpFsWrite` — replaces the slot's content; bounded by `kTmpFsContentMax`. |
+| Append `/tmp/<name>`   | `TmpFsAppend` — appends to the slot's content; fills up to `kTmpFsContentMax`. |
+| Read `/tmp/<name>`     | `TmpFsRead` — returns the slot's bytes.                                  |
+| Rename `/tmp/<src>` → `/tmp/<dst>` | `TmpFsRename` — renames a slot in place (both names validated). |
+| Delete `/tmp/<name>`   | `TmpFsUnlink` — frees the slot.                                          |
+| List `/tmp/`           | `TmpFsEnumerate` — walks the slot table; empty slots elided.             |
 
 ### Why kept separate from ramfs
 
