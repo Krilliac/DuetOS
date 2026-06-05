@@ -80,10 +80,10 @@ WRITE / STAT` stay generic. It:
 | ramfs | `kernel/fs/ramfs.{h,cpp}` | Read-only constinit tree + mutable `/proc` snapshots |
 | tmpfs | `kernel/fs/tmpfs.{h,cpp}` | Writable flat `/tmp` (16 slots × 512 B) |
 | FAT32 | `kernel/fs/fat32.{h,cpp}` + `fat32_*.cpp` | Read + write (in-place / append / create / delete / rename); LFN-validated |
-| exFAT | `kernel/fs/exfat.{h,cpp}` | Probe + root-directory walk (first cluster only) |
-| ext4 | `kernel/fs/ext4.{h,cpp}` + `ext4_rust/` | Read-only; root-dir extents walked, depth>0 deferred |
-| NTFS | `kernel/fs/ntfs.{h,cpp}` + `ntfs_rust/` | Read-only (work in progress) |
-| DuetFS | `kernel/fs/duetfs.{h,cpp}` + `duetfs/` | Native Rust FS; v3 with per-block CRCs, symlinks, hard links |
+| exFAT | `kernel/fs/exfat.{h,cpp}` + `exfat_rust/` | Read + bounded root-dir write (in-place / append / create / truncate); first-cluster enumeration |
+| ext4 | `kernel/fs/ext4.{h,cpp}` + `ext4_rust/` | Read-only; dir extents walked every depth, file-extent reads depth-0 only |
+| NTFS | `kernel/fs/ntfs.{h,cpp}` + `ntfs_rust/` | Read-only; USA fixup + $I30 root enum + resident/single-run $DATA reads |
+| DuetFS | `kernel/fs/duetfs.{h,cpp}` + `duetfs/` | Native Rust FS; v8, per-block CRCs, symlinks, hard links, journal/crypto/snapshots (dormant on live path) |
 | GPT | `kernel/fs/gpt.{h,cpp}` | Partition discovery |
 
 ## File Handles

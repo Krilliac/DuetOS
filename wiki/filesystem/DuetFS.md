@@ -30,7 +30,7 @@ first Rust subsystem in the kernel. The on-disk format is at
 - **xattrs** (v8) — one xattr block per node (`xattr.rs`)
 - **LZ4 compression** primitives (`compress.rs`)
 - mounted at `/duetfs` from boot via `DuetFsBoot`
-- **on-disk auto-mount**: every kernel block-device handle holding a valid superblock is mounted at `/disks/duetfs<N>` (disabled under an emulator — see [Known Limits](#known-limits-v8))
+- **on-disk auto-mount**: every kernel block-device handle holding a valid superblock is mounted at `/disks/duetfs<N>` (disabled under an emulator — see "Known limits (v8)" below)
 - routed through the standard VFS (`VfsResolve("/duetfs/...")` returns a `VfsNode` with `backend == VfsBackend::DuetFs`)
 
 **Live-path vs. dormant.** The journal, encryption, compression,
@@ -47,9 +47,10 @@ CoW, multi-block CRC tables, and B-tree directory indexes land in
 later slices.
 
 The lineage is **clean-room from RedoxFS** ([redox-os/redoxfs](https://github.com/redox-os/redoxfs),
-MIT). RedoxFS uses a B-tree and AES-XTS encryption; DuetFS v1 keeps
-neither — they land later, behind their own slices, when the
-slice-defining workload makes them earn their complexity.
+MIT). RedoxFS uses a B-tree directory index; DuetFS keeps flat
+child-id arrays — the B-tree lands later, when a directory grows
+past ~1000 entries. (DuetFS does ship AES-XTS encryption as of v6,
+though it is not yet active on the live mount path.)
 
 ## Files
 
@@ -191,7 +192,7 @@ automatically recycled yet; until node clearing is journaled, repair
 keeps their extents pinned instead of risking reuse behind a live
 node-table entry.
 
-**Known limits (v8):** {#known-limits-v8}
+**Known limits (v8):**
 
 - Up to 8 inline extents per file (no indirect blocks). Files that need a 9th extent fail with `kStatusNoSpaceExtents`.
 - Directories cap at 1024 children (one block of child IDs).
@@ -210,7 +211,7 @@ node-table entry.
 2. Calls `duetfs_mkfs` to format it (kStatusOk required).
 3. Seeds `/etc/version` with `"DuetFS v1 (kernel boot)\n"` so any boot-log checker can confirm DuetFS is alive.
 4. Registers the volume in the VFS mount table at `/duetfs` with `FsType::DuetFs` and `block_handle = 0xFFFFFFFFu` (the boot-handle sentinel).
-5. **Walks every kernel block-device handle** (ignoring partition-view handles and devices smaller than `kMinDiskBlocks = 7`). For each handle that holds a valid DuetFS superblock, mounts it at `/disks/duetfs<N>`. Devices that don't probe as DuetFS are left alone — auto-mkfs of a real disk is too destructive to do silently.
+5. **On real hardware, walks every kernel block-device handle** (ignoring partition-view handles and devices smaller than `kMinDiskBlocks = 23`). For each handle that holds a valid DuetFS superblock, mounts it at `/disks/duetfs<N>`. Devices that don't probe as DuetFS are left alone — auto-mkfs of a real disk is too destructive to do silently. **Under an emulator this loop is skipped** (`duetfs.cpp:213` GAP — `duetfs_probe` has wedged the KVM boot tail), so `/disks/duetfs<N>` does not appear in QEMU.
 
 After boot, every `VfsResolve("/duetfs/<path>")` call dispatches
 through `mount.cpp`'s `DuetFsLookup`, which builds a fresh `Device`
@@ -226,7 +227,7 @@ side reads `src/ffi.rs`.
 
 | Function | Purpose |
 |---|---|
-| `duetfs_probe(dev)` | Return 1 if the device holds a valid v1 superblock. |
+| `duetfs_probe(dev)` | Return 1 if the device holds a valid v8 superblock (`Fs::open` requires `version == VERSION`). |
 | `duetfs_mkfs(dev)` | Format the device. Wipes superblock + bitmap + node table; creates the root dir. |
 | `duetfs_lookup(dev, path, path_max, out)` | Resolve a path; fill `LookupResult{kind, node_id, size_bytes, child_count}`. |
 | `duetfs_read_file(dev, node_id, off, dst, dst_max, out_copied)` | Copy file bytes into `dst`. |

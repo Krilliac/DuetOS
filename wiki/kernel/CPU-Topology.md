@@ -134,8 +134,8 @@ pairs provide the per-CPU plumbing the scheduler and SMP paths build on:
   GSBASE before entering kernel code. Offsets used by the syscall stub
   (`kPerCpuKernelRsp = 32`, `kPerCpuUserRspScratch = 40`) are pinned by
   `static_assert`.
-- **`cpuhp.{h,cpp}`** — the CPU hotplug state machine (Linux
-  `kernel/cpu.c` shape): a sparse ordered sequence of per-CPU states
+- **`cpuhp.{h,cpp}`** — the CPU hotplug state machine (modelled on the
+  Linux hotplug state machine): a sparse ordered sequence of per-CPU states
   (`Offline` … `Online`) with `(startup, teardown)` callbacks
   registered per state. Bring-up walks forward (`CpuhpBringUp`),
   takedown backward (`CpuhpTakeDown`); a failed startup rolls back

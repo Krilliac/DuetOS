@@ -86,22 +86,15 @@ another PID still hits the cap gate and fails (or succeeds if
 <!-- AUTO:cap_list -->
 | # | Capability |
 |---|------------|
-| 0 | `kCapNone` (sentinel — not a real cap) |
-| 1 | `kCapSerialConsole` |
-| 2 | `kCapFsRead` |
-| 3 | `kCapDebug` |
+| 1 | `kCapDebug` |
+| 2 | `kCapDiag` |
+| 3 | `kCapFsRead` |
 | 4 | `kCapFsWrite` |
-| 5 | `kCapSpawnThread` |
+| 5 | `kCapInput` |
 | 6 | `kCapNet` |
-| 7 | `kCapInput` |
-| 8 | `kCapNetAdmin` |
-| 9 | `kCapDiag` |
-| — | `kCapCount` (boundary marker — not a live cap) |
-
-Reserved-for-future, not in the live enum: `kCapNetSend` /
-`kCapNetRecv`. Splitting `kCapNet` into send/receive halves is
-deferred until a real workload proves the asymmetric profile is
-needed (see comment on `kCapNet` in `kernel/proc/process.h`).
+| 7 | `kCapNetAdmin` |
+| 8 | `kCapSerialConsole` |
+| 9 | `kCapSpawnThread` |
 <!-- /AUTO:cap_list -->
 
 _The capability inventory above is auto-synced by

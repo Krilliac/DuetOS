@@ -103,17 +103,18 @@ userland. See [Subsystem Isolation](../kernel/Subsystem-Isolation.md).
 | Class | Source files | Path |
 |-------|--------------|------|
 | `audio` | 5 | `kernel/drivers/audio/` |
-| `gpu` | 16 | `kernel/drivers/gpu/` |
+| `gpu` | 24 | `kernel/drivers/gpu/` |
 | `input` | 3 | `kernel/drivers/input/` |
+| `iommu` | 5 | `kernel/drivers/iommu/` |
 | `mei` | 1 | `kernel/drivers/mei/` |
-| `net` | 18 | `kernel/drivers/net/` |
+| `net` | 19 | `kernel/drivers/net/` |
 | `npu` | 1 | `kernel/drivers/npu/` |
 | `pci` | 1 | `kernel/drivers/pci/` |
 | `power` | 1 | `kernel/drivers/power/` |
 | `psp` | 1 | `kernel/drivers/psp/` |
 | `storage` | 3 | `kernel/drivers/storage/` |
 | `usb` | 21 | `kernel/drivers/usb/` |
-| `video` | 37 | `kernel/drivers/video/` |
+| `video` | 39 | `kernel/drivers/video/` |
 | `virtio` | 9 | `kernel/drivers/virtio/` |
 <!-- /AUTO:driver_list -->
 
