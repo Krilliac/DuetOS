@@ -184,11 +184,24 @@ extern "C"
 {
     struct TrapEntryRingSlot
     {
-        duetos::u64 vector;    // [rsp+120] at isr_common after the 15 pushes
-        duetos::u64 saved_rip; // [rsp+136] — where the CPU was when the trap fired
-        duetos::u64 cpu_rsp;   // [rsp+160] — the CPU's rsp BEFORE the trap (iretq frame)
-        duetos::u64 frame_rsp; // rsp itself — the pointer handed to TrapDispatch as 'frame'
+        // Full iretq-frame context per trap entry, captured by isr_common's asm
+        // from fixed stack offsets after the 15 GPR pushes. The extra fields
+        // (error/cs/rflags/ss) make the wild-frame capture self-discriminating:
+        // on the wild-frame trap, a SANE cs/rflags means our own context-restore
+        // corrupted rsp (the frame=rsp the dispatcher saw); a GARBAGE cs means the
+        // hypervisor delivered a malformed frame. cpu_rsp vs frame_rsp reveals
+        // whether a privilege/IST stack switch happened on this entry. 64-byte
+        // slot (8 u64) so the asm index math stays a clean shl-by-6.
+        duetos::u64 vector;       // [rsp+120]
+        duetos::u64 error_code;   // [rsp+128]
+        duetos::u64 saved_rip;    // [rsp+136] — where the CPU was when the trap fired
+        duetos::u64 saved_cs;     // [rsp+144] — ring of the trapped context (RPL discriminator)
+        duetos::u64 saved_rflags; // [rsp+152] — IF / sanity of the trapped context
+        duetos::u64 cpu_rsp;      // [rsp+160] — the CPU's rsp BEFORE the trap (iretq frame)
+        duetos::u64 saved_ss;     // [rsp+168] — stack segment of the trapped context
+        duetos::u64 frame_rsp;    // rsp itself — the pointer handed to TrapDispatch as 'frame'
     };
+    static_assert(sizeof(TrapEntryRingSlot) == 64, "asm in exceptions.S indexes slots by shl-6 (64B)");
     constexpr duetos::u64 kTrapRingSlots = 16; // power of two; asm masks with & 0xF
     alignas(64) TrapEntryRingSlot g_trap_ring[kTrapRingSlots] = {};
     duetos::u64 g_trap_ring_idx = 0; // next slot to write; (idx-1)&0xF is the newest
@@ -729,17 +742,25 @@ constexpr ::duetos::u64 kMaxTightRecursion = 8;            // 8 tight descents i
 // vec/rip/cpu_rsp localise the origin.
 [[gnu::noinline]] static void DumpTrapEntryRing()
 {
-    SerialWrite("[arch/traps] trap-entry ring (oldest->newest)  vec|rip|cpu_rsp|frame:\n");
+    SerialWrite("[arch/traps] trap-entry ring (oldest->newest)  vec|err|rip|cs|rflags|cpu_rsp|ss|frame:\n");
     for (::duetos::u64 k = 0; k < kTrapRingSlots; ++k)
     {
         const ::duetos::u64 idx = (g_trap_ring_idx + k) & (kTrapRingSlots - 1);
         const TrapEntryRingSlot& e = g_trap_ring[idx];
         SerialWrite("  vec=");
         SerialWriteHex(e.vector);
+        SerialWrite(" err=");
+        SerialWriteHex(e.error_code);
         SerialWrite(" rip=");
         SerialWriteHex(e.saved_rip);
+        SerialWrite(" cs=");
+        SerialWriteHex(e.saved_cs);
+        SerialWrite(" rflags=");
+        SerialWriteHex(e.saved_rflags);
         SerialWrite(" cpu_rsp=");
         SerialWriteHex(e.cpu_rsp);
+        SerialWrite(" ss=");
+        SerialWriteHex(e.saved_ss);
         SerialWrite(" frame=");
         SerialWriteHex(e.frame_rsp);
         SerialWrite("\n");

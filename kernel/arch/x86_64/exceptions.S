@@ -230,24 +230,37 @@ isr_common:
      * wild-frame panic can show the trap sequence that produced it. rax..rdx
      * are saved on the stack above and restored by the IRQ-return pop-all, so
      * they are free scratch here; the 32-bit remap below and the C dispatcher
-     * read only stack slots, never live rax..rdx. Offsets from rsp after the
-     * 15 pushes: [rsp+120]=vector, [rsp+136]=saved rip, [rsp+160]=pre-trap rsp.
-     * Single-CPU diagnostic (the bug is single-CPU VBox); the non-atomic idx
-     * bump is acceptable. */
+     * read only stack slots, never live rax..rdx. Full iretq-frame context is
+     * captured so a wild-frame dump is self-discriminating (sane cs/rflags =>
+     * our context-restore corrupted rsp; garbage cs => hypervisor delivered a
+     * malformed frame). Offsets from rsp after the 15 pushes:
+     *   [rsp+120]=vector  [rsp+128]=error  [rsp+136]=rip  [rsp+144]=cs
+     *   [rsp+152]=rflags  [rsp+160]=pre-trap rsp  [rsp+168]=ss
+     * Slot is 64 bytes (TrapEntryRingSlot, 8 u64) so the index math is shl-6.
+     * Single-CPU diagnostic (the bug is single-CPU hardware-virt); the
+     * non-atomic idx bump is acceptable. */
     movabs  rcx, offset g_trap_ring_idx
     mov     rax, [rcx]              /* idx */
     mov     rbx, rax
     and     rbx, 0xF               /* idx & 15 */
-    shl     rbx, 5                 /* * 32 bytes/slot */
+    shl     rbx, 6                 /* * 64 bytes/slot */
     movabs  rdx, offset g_trap_ring
     add     rdx, rbx               /* &g_trap_ring[idx & 15] */
     mov     rbx, [rsp + 120]       /* vector */
     mov     [rdx + 0], rbx
-    mov     rbx, [rsp + 136]       /* saved rip */
+    mov     rbx, [rsp + 128]       /* error code */
     mov     [rdx + 8], rbx
-    mov     rbx, [rsp + 160]       /* pre-trap rsp (CPU iretq frame) */
+    mov     rbx, [rsp + 136]       /* saved rip */
     mov     [rdx + 16], rbx
-    mov     [rdx + 24], rsp        /* frame ptr handed to TrapDispatch */
+    mov     rbx, [rsp + 144]       /* saved cs */
+    mov     [rdx + 24], rbx
+    mov     rbx, [rsp + 152]       /* saved rflags */
+    mov     [rdx + 32], rbx
+    mov     rbx, [rsp + 160]       /* pre-trap rsp (CPU iretq frame) */
+    mov     [rdx + 40], rbx
+    mov     rbx, [rsp + 168]       /* saved ss */
+    mov     [rdx + 48], rbx
+    mov     [rdx + 56], rsp        /* frame ptr handed to TrapDispatch */
     inc     rax
     mov     [rcx], rax             /* idx++ */
     /* --- end DIAG --- */
