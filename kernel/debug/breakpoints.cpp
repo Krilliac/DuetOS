@@ -967,8 +967,11 @@ BpEntry* FindById(u32 id) /* MUST hold g_lock */
 // Phase 3 safety: only ring-3 hits suspend. A kernel-mode hit with
 // suspend_on_hit set logs a "rejected" warning and resumes — we
 // can't safely park a kernel-mode task without knowing it isn't
-// holding a spinlock / mid-IRQ (IrqNestDepthRaw is still stubbed
-// per traps.cpp). Phase 4 relaxes this once that telemetry lands.
+// holding a spinlock / mid-IRQ. The IrqNestDepthRaw telemetry that
+// gates this is now live (traps.cpp), so Phase 4 — relaxing the
+// kernel-mode suspend when depth == 0 and no locks are held — is
+// unblocked; this site still takes the conservative resume until
+// that relaxation is wired.
 void MaybeSuspend(u32 bp_id, arch::TrapFrame* frame)
 {
     if ((frame->cs & 3) != 3)

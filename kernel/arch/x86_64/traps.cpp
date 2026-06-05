@@ -278,6 +278,22 @@ static inline bool ClaimVectorWarnSlot(u64 (&bitmap)[4], u8 vector)
 // footprint matters for the IPI/wake hot path).
 constinit u64 g_irq_counts_per_cpu[acpi::kMaxCpus][256] = {};
 
+// Per-CPU live IRQ/trap nesting depth. Incremented at TrapDispatch
+// entry and decremented at every normal-return exit via the RAII
+// IrqNestScope below; saved/restored PER TASK across context
+// switches by sched::Schedule (prev->irq_depth = IrqNestDepthRaw();
+// IrqNestDepthSet(next->irq_depth)). The invariant the two halves
+// jointly maintain: slot[cpu] == the nesting depth of the task
+// currently running on `cpu`. 0 = not in interrupt/trap context,
+// 1 = one level deep (normal), >= 2 = a handler was itself
+// interrupted. The combination is migration-safe: an increment on
+// CPU X that is preempted mid-handler is carried to the task's
+// saved irq_depth on switch-out and reloaded onto whatever CPU
+// resumes the task, so the matching decrement always lands on the
+// slot that holds this invocation's increment. Single-CPU writes
+// under IF=0; no atomic needed on the slot itself.
+constinit u64 g_irq_nest_depth_per_cpu[acpi::kMaxCpus] = {};
+
 // Global fault counters by category. Bumped on every CPU
 // exception dump (user-mode task-kill or kernel panic). Read
 // only by diagnostic paths (shell health command / log prints);
@@ -584,38 +600,72 @@ const char* TrapResponseName(TrapResponse r)
     }
 }
 
-// IRQ nesting-depth tracking. Two live-test attempts (slices
-// 69 and 71) exposed that a correct counter needs both:
-//   * per-task save/restore across Schedule (done, via
-//     Task.irq_depth in sched.cpp), AND
-//   * decrement at every exit path of TrapDispatch, including
-//     the CPU-exception paths that don't return (task-kill,
-//     panic), the NMI halt-forever path, and the fault-fixup
-//     rewrite path.
-// The exception paths are where the counter leaked last time.
-// Getting all of those right without regressing something else
-// is its own slice; for now the accessor reports 0 so the
-// health check's ceiling test stays clean, and the per-task
-// field is zeroed at task creation so the save/restore plumb
-// is ready to switch on once the exception-path audit lands.
-constinit u64 g_irq_nest_depth = 0;
+// IRQ nesting-depth tracking. Two earlier live-test attempts (slices
+// 69 and 71) exposed that a correct counter needs BOTH halves:
+//   * per-task save/restore across Schedule (sched.cpp does
+//     prev->irq_depth = IrqNestDepthRaw(); IrqNestDepthSet(next->irq_depth)
+//     at every context switch), AND
+//   * increment-at-entry / decrement-at-exit of TrapDispatch.
+// The decrement is the part the previous attempts leaked, because
+// TrapDispatch has many non-returning exits (task-kill via SchedExit,
+// the kernel-mode Panic outcome, the #DF / NMI halt-forever spins).
+// The fix is to drive the decrement from a RAII guard (IrqNestScope,
+// in TrapDispatch) whose dtor fires on EVERY normal return, paired
+// with the per-task save/restore that fixes up the non-returning
+// paths for free: SchedExit -> Schedule saves the (still-elevated)
+// live depth into the dying task (reaped, value discarded) and loads
+// the incoming task's depth, so the live slot is correct for whoever
+// runs next; the Panic / Halt paths leave the slot elevated but the
+// box is dead, so nothing reads it. The result: the runtime checker's
+// IrqNesting ceiling and the panic-snapshot depth field, both wired
+// up and waiting, finally see real values instead of a constant 0.
+//
+// The live depth is a per-CPU array (g_irq_nest_depth_per_cpu),
+// indexed by the current CPU id; g_irq_nest_max is the global
+// monotonic high-water mark read by the health check.
 constinit u64 g_irq_nest_max = 0;
+
+// Current CPU's live-depth slot. CurrentCpuIdOrBsp() falls back to
+// the BSP id (0) before per-CPU state is installed, so this is safe
+// to call from the very first boot trap. Out-of-range ids (should
+// not happen) clamp to slot 0 rather than scribble past the array.
+static inline u64& IrqNestSlot()
+{
+    const u32 id = ::duetos::cpu::CurrentCpuIdOrBsp();
+    const u32 idx = (id < acpi::kMaxCpus) ? id : 0u;
+    return g_irq_nest_depth_per_cpu[idx];
+}
+
+// Relaxed cross-CPU high-water update. The CAS loop only spins when
+// `depth` actually exceeds the current max — once the system has
+// reached its steady-state nesting (depth 1 for an un-nested trap)
+// the common case is a single relaxed load + compare that skips the
+// CAS entirely, so the per-trap hot path stays cheap.
+static inline void IrqNestMaxObserve(u64 depth)
+{
+    u64 cur = __atomic_load_n(&g_irq_nest_max, __ATOMIC_RELAXED);
+    while (depth > cur)
+    {
+        if (__atomic_compare_exchange_n(&g_irq_nest_max, &cur, depth, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            break;
+    }
+}
 
 u64 IrqNestDepth()
 {
-    return 0;
+    return IrqNestSlot();
 }
 u64 IrqNestMax()
 {
-    return 0;
+    return __atomic_load_n(&g_irq_nest_max, __ATOMIC_RELAXED);
 }
 u64 IrqNestDepthRaw()
 {
-    return 0;
+    return IrqNestSlot();
 }
-void IrqNestDepthSet(u64 /*v*/)
+void IrqNestDepthSet(u64 v)
 {
-    // stub
+    IrqNestSlot() = v;
 }
 
 bool PanicInProgress()
@@ -901,6 +951,41 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     }
 
     RipIntegrityGuard guard(frame);
+
+    // IRQ/trap nesting-depth accounting. Increment the current CPU's
+    // live depth on entry (updating the global high-water mark) and
+    // decrement on EVERY normal return via the dtor — including the
+    // recoverable IRQ / syscall / extable / LogAndContinue paths.
+    // The non-returning exits (SchedExit task-kill, the Panic / Halt
+    // outcomes, the #DF / NMI halt-spins) skip the dtor by design: a
+    // killed task's elevated slot is corrected by the very next
+    // context switch's IrqNestDepthSet, and a halted kernel never
+    // reads the slot again. Declared AFTER `guard` so it destructs
+    // first — the depth unwinds before the RIP-scribble check runs.
+    // This is what makes the runtime checker's IrqNesting ceiling
+    // (kIrqNestingCeiling) and the panic-snapshot depth field live
+    // signals instead of constants.
+    struct IrqNestScope
+    {
+        IrqNestScope()
+        {
+            const u64 depth = ++IrqNestSlot();
+            IrqNestMaxObserve(depth);
+        }
+        ~IrqNestScope()
+        {
+            // Defensive floor: never wrap a slot that is somehow
+            // already 0 (a stray decrement on a non-returning path
+            // that later re-entered) to u64-max — that would trip
+            // the ceiling alarm forever. Underflow-safe by design.
+            u64& slot = IrqNestSlot();
+            if (slot != 0)
+            {
+                --slot;
+            }
+        }
+    } nest_scope;
+
     // KPath: record that this vector fired before any handler-
     // specific dispatch. Single bounds check + relaxed atomic add;
     // safe in trap / IRQ context (no allocation, no klog, no locks).
@@ -2033,6 +2118,32 @@ void TrapsSelfTest()
     {
         SerialWrite("[traps] wild-frame-pointer guard FAIL\n");
         KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x6u);
+    }
+
+    // 4. IRQ/trap nesting-depth counter. Steps 1+2 each drove a trap
+    //    through TrapDispatch, so IrqNestScope incremented then
+    //    decremented the live depth twice and bumped the high-water
+    //    mark to at least 1. We are back in straight-line kernel code
+    //    now (no handler on the stack), so the live depth MUST read 0
+    //    and the max MUST be >= 1. A regression where the accessors
+    //    revert to the old constant-0 stubs (silently disarming the
+    //    runtime checker's IrqNesting ceiling + the panic-snapshot
+    //    depth field) trips this: max stays 0. A regression where the
+    //    dtor stops firing leaves the live depth elevated: depth != 0.
+    const u64 nest_now = IrqNestDepth();
+    const u64 nest_max = IrqNestMax();
+    if (nest_now == 0 && nest_max >= 1)
+    {
+        SerialWrite("[traps] irq-nest-depth counter OK (live=0 after self-test, max>=1)\n");
+    }
+    else
+    {
+        SerialWrite("[traps] irq-nest-depth counter FAIL live=");
+        SerialWriteHex(nest_now);
+        SerialWrite(" max=");
+        SerialWriteHex(nest_max);
+        SerialWrite("\n");
+        KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x7u);
     }
 
     SerialWrite("[traps] self-test OK — #BP and spurious both recovered\n");

@@ -2631,11 +2631,15 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
         prev->fs_base = (static_cast<u64>(hi) << 32) | lo;
     }
 
-    // IRQ-depth handoff. Stash the outgoing task's current
-    // global depth, then load the incoming task's saved depth
-    // into the global so IrqNestDepth() reflects the resumed
-    // task's nesting. Without this the global leaks monotonically
-    // across switches (see traps.cpp comments).
+    // IRQ-depth handoff. Stash this CPU's live nesting depth into
+    // the outgoing task, then load the incoming task's saved depth
+    // into the live per-CPU slot so IrqNestDepth() reflects the
+    // resumed task's nesting. This is the half of the counter that
+    // makes TrapDispatch's increment/decrement migration-safe: an
+    // increment taken on one CPU travels with the task here and the
+    // matching decrement lands on whatever CPU resumes it. Without
+    // this handoff the live slot would leak across switches (see the
+    // IrqNestScope comment in traps.cpp).
     prev->irq_depth = arch::IrqNestDepthRaw();
     arch::IrqNestDepthSet(next->irq_depth);
 
