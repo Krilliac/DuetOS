@@ -70,9 +70,9 @@ void AhciSelfTest();
 //
 // The panic path falls back to AHCI when NVMe isn't available
 // (no NVMe controller, or the namespace failed to come up).
-// Reserved LBA range is sourced from GPT first
-// (GptFindCrashDumpRegion); otherwise the last
-// kAhciDumpReservedSectors of the first online port's drive.
+// Reserved LBA range comes ONLY from a DuetOS-owned GPT partition
+// (GptFindCrashDumpRegion + GptCrashDumpRegionSane). There is no
+// tail-of-drive fallback — see nvme.h for the rationale.
 // -------------------------------------------------------------
 
 inline constexpr u64 kAhciDumpReservedSectors = 8192; // 4 MiB at 512B sectors
@@ -89,10 +89,10 @@ u32 AhciNamespaceSectorSize();
 /// online.
 u64 AhciNamespaceSectorCount();
 
-/// First LBA of the reserved crash-dump region on the first
-/// online port's drive. Consults GPT for a recorded reservation
-/// first (kDuetCrashDumpTypeGuid partition); falls back to the
-/// tail-of-drive reservation otherwise. 0 if no drive online.
+/// First LBA of the reserved crash-dump region on the first online
+/// port's drive — the start of a DuetOS-owned kDuetCrashDumpTypeGuid
+/// partition, bounds-checked sane. 0 when no drive online OR no
+/// owned/sane region exists; a 0 return means "skip disk persistence".
 u64 AhciDumpReservedLba();
 
 /// Write `len` bytes to the reserved crash-dump region on the

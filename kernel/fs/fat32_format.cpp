@@ -100,19 +100,20 @@ void BuildBootSector(u8 sec[kSectorSize], u32 sectors_per_cluster, u32 fat_size_
     StoreU16(sec + 48, kFsInfoLba);       // fs_info_sector
     StoreU16(sec + 50, kBackupBootLba);   // backup_boot_sector
     // Reserved (12 bytes at 52..63) stays zero.
-    sec[64] = 0x80;                  // drive_number
-    sec[65] = 0;                     // reserved
-    sec[66] = 0x29;                  // boot_sig (extended)
-    StoreU32(sec + 67, 0xCAFEBABEu); // volume_id (arbitrary, fresh-format marker)
-    // Volume label (11 bytes) = "DUETOS     ".
-    sec[71] = 'D';
-    sec[72] = 'U';
-    sec[73] = 'E';
-    sec[74] = 'T';
-    sec[75] = 'O';
-    sec[76] = 'S';
-    for (u32 i = 77; i < 82; ++i)
-        sec[i] = ' ';
+    sec[64] = 0x80; // drive_number
+    sec[65] = 0;    // reserved
+    sec[66] = 0x29; // boot_sig (extended)
+    // volume_id + label are the DuetOS-ownership markers Fat32Probe
+    // checks (see Fat32VolumeIsDuetOsOwned). Stamped from the shared
+    // fat32.h constants so the formatter and the adoption gate can't
+    // drift; tools/qemu/make-gpt-image.py stamps the same values.
+    StoreU32(sec + 67, kDuetOsVolumeId); // volume_id (DuetOS-owned marker)
+    // Volume label (11 bytes) = "DUETOS     " (space-padded).
+    u32 lbl = 0;
+    for (; kDuetOsVolumeLabel[lbl] != '\0' && lbl < 11; ++lbl)
+        sec[71 + lbl] = static_cast<u8>(kDuetOsVolumeLabel[lbl]);
+    for (; lbl < 11; ++lbl)
+        sec[71 + lbl] = ' ';
     // Filesystem-type string "FAT32   " (8 bytes).
     sec[82] = 'F';
     sec[83] = 'A';

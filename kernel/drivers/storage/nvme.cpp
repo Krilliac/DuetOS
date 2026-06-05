@@ -1197,24 +1197,26 @@ u64 NvmeDumpReservedLba()
     {
         return 0;
     }
-    // Prefer a GPT-recorded reservation when one exists. Disk-
-    // installer-laid partitions with kDuetCrashDumpTypeGuid pin
-    // the dump region explicitly so user data sitting at the
-    // namespace tail isn't trampled. Falls back to the legacy
-    // "last kNvmeDumpReservedSectors of namespace" reservation
-    // when no GPT entry has been laid (early-boot-only disks).
+    // Crash-dump persistence writes ONLY into a GPT region DuetOS
+    // positively owns — a partition the installer laid with
+    // kDuetCrashDumpTypeGuid. There is deliberately NO "last N sectors
+    // of the namespace" fallback: on a disk DuetOS didn't partition
+    // (e.g. a laptop's internal SSD with Windows installed) the
+    // namespace tail holds the user's data and the backup GPT, and a
+    // crash dump written there corrupts the partition table. No owned,
+    // sane region → 0 → the panic path skips the disk write entirely
+    // (the serial/debugcon copy of the dump still emits).
     u64 gpt_first = 0;
     u64 gpt_count = 0;
-    if (fs::gpt::GptFindCrashDumpRegion(g_ctrl.block_handle, &gpt_first, &gpt_count) &&
-        gpt_count >= kNvmeDumpReservedSectors)
-    {
-        return gpt_first;
-    }
-    if (g_ctrl.ns_sector_count <= kNvmeDumpReservedSectors)
+    if (!fs::gpt::GptFindCrashDumpRegion(g_ctrl.block_handle, &gpt_first, &gpt_count))
     {
         return 0;
     }
-    return g_ctrl.ns_sector_count - kNvmeDumpReservedSectors;
+    if (!fs::gpt::GptCrashDumpRegionSane(gpt_first, gpt_count, g_ctrl.ns_sector_count, kNvmeDumpReservedSectors))
+    {
+        return 0;
+    }
+    return gpt_first;
 }
 
 bool NvmePanicWriteDump(const u8* bytes, u64 len)

@@ -277,6 +277,31 @@ void LogEntry(const DirEntry& e)
 
 } // namespace
 
+bool Fat32VolumeIsDuetOsOwned(const Volume* v)
+{
+    if (v == nullptr)
+        return false;
+    if (v->volume_id != kDuetOsVolumeId)
+        return false;
+    // The BPB label is space-padded to 11 bytes; match the
+    // kDuetOsVolumeLabel prefix ("DUETOS") exactly, then require the
+    // remaining characters to be spaces or NUL so a foreign label like
+    // "DUETOSX" can't pass on the prefix alone.
+    u32 i = 0;
+    for (; kDuetOsVolumeLabel[i] != '\0'; ++i)
+    {
+        if (v->volume_label[i] != kDuetOsVolumeLabel[i])
+            return false;
+    }
+    for (; i < 11; ++i)
+    {
+        const char c = v->volume_label[i];
+        if (c != ' ' && c != '\0')
+            return false;
+    }
+    return true;
+}
+
 bool Fat32Probe(u32 block_handle, u32* out_index)
 {
     KLOG_TRACE_SCOPE("fs/fat32", "Fat32Probe");
@@ -349,6 +374,37 @@ bool Fat32Probe(u32 block_handle, u32* out_index)
         return false;
     }
     v.data_start_sector = static_cast<u32>(data_start_u64);
+
+    // Capture the DuetOS-ownership markers from the BPB (BS_VolID at
+    // offset 67, BS_VolLab at offset 71). These tell a volume DuetOS
+    // formatted (Fat32Format / make-gpt-image.py both stamp them) from
+    // a foreign one (Windows ESP, real Linux FAT, USB stick).
+    v.volume_id = LeU32(g_scratch + 67);
+    for (u32 i = 0; i < 11; ++i)
+        v.volume_label[i] = static_cast<char>(g_scratch[71 + i]);
+    v.volume_label[11] = '\0';
+
+    // Adoption gate: DuetOS only registers volumes it owns as writable
+    // system volumes. A foreign FAT volume is recognised and logged but
+    // NOT added to the registry — otherwise it could become
+    // Fat32Volume(0), which the boot-time persistence sinks
+    // (KERNEL.LOG / KERNEL.FIX / KERNEL.KPATH) and ~all of the kernel's
+    // FAT-backed storage treat as "the system data volume". Adopting a
+    // Windows EFI System Partition there would write DuetOS files into
+    // the user's Windows install. Inert-by-default: no DuetOS marker →
+    // not adopted.
+    if (!Fat32VolumeIsDuetOsOwned(&v))
+    {
+        SerialWrite("[fs/fat32] foreign FAT volume (no DuetOS marker) — not adopting; handle=");
+        arch::SerialWriteHex(static_cast<u64>(block_handle));
+        SerialWrite(" volume_id=");
+        arch::SerialWriteHex(static_cast<u64>(v.volume_id));
+        SerialWrite("\n");
+        // GAP: foreign-FAT interop READ (mounting a Windows ESP / Linux
+        // FAT / USB stick read-only) is a deliberate future opt-in mount
+        // path, not a boot auto-adopt — revisit when interop-read lands.
+        return false;
+    }
 
     SerialWrite("[fs/fat32] volume:");
     SerialWrite(" handle=");

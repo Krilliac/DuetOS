@@ -125,12 +125,17 @@ const char* NvmeOpcodeName(u8 set, u8 opcode);
 // staging cap. Both live here so the diag/minidump module can
 // reach them without pulling in the block layer.
 //
-// Reservation policy: the LAST `kNvmeDumpReservedSectors`
-// sectors of namespace 1 are reserved for crash dumps — well
-// past anything a v0 filesystem would ever touch. The shipped
-// scratch image is small enough that nothing collides in
-// practice; once a real disk installer lands, the reservation
-// is recorded in the partition table.
+// Reservation policy: crash dumps are written ONLY into a GPT
+// partition DuetOS positively owns — one the installer laid with
+// kDuetCrashDumpTypeGuid (discovered via GptFindCrashDumpRegion and
+// bounds-checked by GptCrashDumpRegionSane). There is no "tail of the
+// namespace" fallback: on a disk DuetOS didn't partition (a real
+// machine's SSD with Windows/Linux installed) the namespace tail is
+// the user's data + the backup GPT, and writing there corrupts the
+// partition table. No owned region → no disk persistence (the
+// serial/debugcon copy of the dump still emits). `kNvmeDumpReserved-
+// Sectors` is now only the MINIMUM size an owned crash-dump partition
+// must be, not a tail offset.
 // -------------------------------------------------------------
 
 inline constexpr u64 kNvmeDumpReservedSectors = 8192; // 4 MiB at 512B sectors
@@ -147,9 +152,11 @@ u32 NvmeNamespaceSectorSize();
 /// Sector count of namespace 1. 0 if no namespace.
 u64 NvmeNamespaceSectorCount();
 
-/// First LBA of the reserved crash-dump region (last
-/// `kNvmeDumpReservedSectors` sectors). Returns 0 if no
-/// namespace; callers MUST check NvmeAvailable() first.
+/// First LBA of the reserved crash-dump region — the start of the
+/// DuetOS-owned kDuetCrashDumpTypeGuid partition, bounds-checked sane.
+/// Returns 0 when no namespace OR no owned/sane region exists (e.g. a
+/// disk DuetOS didn't partition); a 0 return means "skip disk
+/// persistence". Callers MUST treat 0 as "no reservation".
 u64 NvmeDumpReservedLba();
 
 /// Write `len` bytes of `bytes` to the reserved crash-dump

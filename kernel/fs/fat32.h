@@ -36,6 +36,26 @@ namespace duetos::fs::fat32
 /// the block layer caps at 16, so 16 here matches.
 inline constexpr u32 kMaxVolumes = 16;
 
+/// DuetOS-ownership markers stamped into the FAT32 BPB by every
+/// volume DuetOS itself formats. The BS_VolID serial (offset 67) is
+/// set to `kDuetOsVolumeId` and the 11-byte volume label (offset 71)
+/// begins with `kDuetOsVolumeLabel`. Both `Fat32Format` (the on-target
+/// formatter) and `tools/qemu/make-gpt-image.py` (the CI/dev scratch
+/// image builder) stamp these, so the boot FAT volume in QEMU and any
+/// installer-laid volume carry them; a foreign volume (a Windows EFI
+/// System Partition, a real Linux FAT, a random USB stick) does not.
+///
+/// This is the single source of truth for "is this FAT volume one
+/// DuetOS owns?" — `Fat32Probe` adopts only volumes that match BOTH
+/// markers as writable system volumes (see `Fat32VolumeIsDuetOsOwned`).
+/// Requiring both makes an accidental match on a foreign disk
+/// vanishingly unlikely. (Not a security boundary: a disk that
+/// deliberately forges both markers can still get adopted — the
+/// threat model here is accidental corruption of the user's own
+/// Windows/Linux install, not a hostile disk.)
+inline constexpr u32 kDuetOsVolumeId = 0xCAFEBABE;
+inline constexpr char kDuetOsVolumeLabel[] = "DUETOS";
+
 /// Max directory entries we carry in a per-volume snapshot. Enough
 /// for a handful of test files; real filesystems should enumerate
 /// on demand (follow-up slice).
@@ -64,9 +84,21 @@ struct Volume
     u32 total_sectors;
     u32 root_cluster;
     u32 data_start_sector; // LBA (within the partition) of cluster 2
+    u32 volume_id;         // BS_VolID serial (BPB offset 67)
+    char volume_label[12]; // BS_VolLab (BPB offset 71, 11 bytes), NUL-terminated
     u32 root_entry_count;  // filled count of root_entries below
     DirEntry root_entries[kMaxDirEntries];
 };
+
+/// True iff `v` carries BOTH DuetOS-ownership markers (BPB serial ==
+/// kDuetOsVolumeId and label begins with kDuetOsVolumeLabel). Used by
+/// `Fat32Probe` to decide whether to adopt the volume as a writable
+/// system volume. A foreign FAT volume returns false and is never
+/// registered at boot, so `Fat32Volume(0)` (which ~all kernel/userland
+/// persistence treats as "the system data volume") can never resolve to
+/// a partition DuetOS does not own. Safe to call with v == nullptr
+/// (returns false).
+bool Fat32VolumeIsDuetOsOwned(const Volume* v);
 
 /// Probe a block-device handle for a FAT32 volume. On success:
 /// fills the volume registry, logs one summary line + one line per
@@ -318,6 +350,15 @@ bool Fat32RmdirAtPath(const Volume* v, const char* path);
 /// the seed file HELLO.TXT reads back exactly as the image-
 /// builder wrote it.
 void Fat32SelfTest();
+
+/// Ownership-gate self-test, on a private RAM disk. Verifies that a
+/// DuetOS-formatted volume is adopted (and recognised by
+/// `Fat32VolumeIsDuetOsOwned`) while a FAT32 volume lacking the DuetOS
+/// markers is NOT adopted into the registry. Runs unconditionally
+/// (no emulator skip) — it never touches the emulated NVMe/AHCI MMIO
+/// path, so it's cheap under QEMU and gates CI. This is the regression
+/// guard for the foreign-volume-adoption bug.
+void Fat32OwnershipSelfTest();
 
 /// Drop the in-memory volume registry. Used by the
 /// `fs/fat32` fault-domain teardown so a subsequent `Fat32Probe`

@@ -1145,22 +1145,24 @@ u64 AhciDumpReservedLba()
     {
         return 0;
     }
-    // Prefer a GPT-recorded reservation when one exists. Same
-    // policy as NvmeDumpReservedLba — the legacy "tail of drive"
-    // path is a fallback for early-boot disks that haven't been
-    // partitioned yet.
+    // Crash dumps are written ONLY into a GPT region DuetOS positively
+    // owns (a kDuetCrashDumpTypeGuid partition the installer laid),
+    // bounds-checked sane. Same policy as NvmeDumpReservedLba — there is
+    // NO "tail of drive" fallback, because on a disk DuetOS didn't
+    // partition that tail is the user's data + the backup GPT and a
+    // dump written there corrupts the partition table. No owned, sane
+    // region → 0 → the panic path skips the disk write.
     u64 gpt_first = 0;
     u64 gpt_count = 0;
-    if (fs::gpt::GptFindCrashDumpRegion(p->block_handle, &gpt_first, &gpt_count) &&
-        gpt_count >= kAhciDumpReservedSectors)
-    {
-        return gpt_first;
-    }
-    if (p->sector_count <= kAhciDumpReservedSectors)
+    if (!fs::gpt::GptFindCrashDumpRegion(p->block_handle, &gpt_first, &gpt_count))
     {
         return 0;
     }
-    return p->sector_count - kAhciDumpReservedSectors;
+    if (!fs::gpt::GptCrashDumpRegionSane(gpt_first, gpt_count, p->sector_count, kAhciDumpReservedSectors))
+    {
+        return 0;
+    }
+    return gpt_first;
 }
 
 bool AhciPanicWriteDump(const u8* bytes, u64 len)

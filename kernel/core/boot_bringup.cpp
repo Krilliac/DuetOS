@@ -2203,7 +2203,6 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Bringing up NVMe controller.\n");
     duetos::drivers::storage::NvmeInit();
     DUETOS_BOOT_SELFTEST(duetos::drivers::storage::NvmeSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::diag::minidump::DiskPersistSelfTest());
 
     SerialWrite("[boot] Bringing up AHCI controller(s).\n");
     duetos::drivers::storage::AhciInit();
@@ -2248,8 +2247,19 @@ void BootBringupDevices(bool force_net_smoke)
     SerialWrite("[boot] Probing GPT on block devices.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::gpt::GptSelfTest());
 
+    // Crash-dump disk-persist self-test runs HERE — after NvmeInit,
+    // AhciInit, AND GptSelfTest. It needs all three: the NVMe/AHCI
+    // backends online, and the GPT disk registry populated (GptSelfTest
+    // calls GptProbe, which is what GptFindCrashDumpRegion searches).
+    // Run earlier (right after NvmeInit) it could only ever SKIP — the
+    // GPT registry was empty so DumpReservedLba always returned 0, and
+    // AHCI wasn't up yet. Here it can actually exercise the owned-region
+    // write path on an installed disk that carries a crash-dump partition.
+    DUETOS_BOOT_SELFTEST(duetos::diag::minidump::DiskPersistSelfTest());
+
     SerialWrite("[boot] Probing FAT32 on block devices.\n");
     DUETOS_BOOT_SELFTEST(duetos::fs::fat32::Fat32SelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::fs::fat32::Fat32OwnershipSelfTest());
     // fs/fat32 fault domain self-registers via
     // KERNEL_INITCALL(Drivers, "fs/fat32.module", ...) in
     // `kernel/fs/fat32.cpp`.

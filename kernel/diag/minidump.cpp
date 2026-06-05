@@ -909,18 +909,37 @@ void MinidumpSelfTest()
 
 void DiskPersistSelfTest()
 {
-    // Run AFTER NvmeInit (MinidumpSelfTest fires too early in boot
-    // — the NVMe driver hasn't enumerated yet at that point).
-    // Builds a synthetic dump, writes it to the reserved LBA
-    // region, and reports the result. Surfaces a clean PASS/FAIL
-    // line so a regression in the panic-write path doesn't slip
-    // through silently.
+    // Must run AFTER NvmeInit + AhciInit + GptSelfTest (wired in
+    // boot_bringup right after GptSelfTest). It needs the storage
+    // backends online AND the GPT disk registry populated —
+    // DumpReservedLba consults GptFindCrashDumpRegion, which searches
+    // the registry GptProbe builds. Run earlier it could only ever
+    // SKIP (empty registry → DumpReservedLba == 0; AHCI not yet up).
+    // Builds a synthetic dump, writes it to the reserved LBA region,
+    // and reports the result. Surfaces a clean PASS/SKIP/FAIL line so a
+    // regression in the panic-write path doesn't slip through silently.
     namespace stor = duetos::drivers::storage;
     const bool have_nvme = stor::NvmeAvailable();
     const bool have_ahci = stor::AhciAvailable();
     if (!have_nvme && !have_ahci)
     {
         arch::SerialWrite("[minidump] disk-persist self-test SKIP (no NVMe / AHCI backend)\n");
+        return;
+    }
+    // A backend being present is NOT enough: the dump only persists into
+    // a DuetOS-owned crash-dump GPT partition. On any disk DuetOS didn't
+    // partition (QEMU's scratch image, a real machine's Windows/Linux
+    // SSD), DumpReservedLba returns 0 and the persist path correctly
+    // declines to write — that is the SAFE state, not a failure. SKIP
+    // rather than FAIL so a clean boot on an unpartitioned disk stays
+    // green. (Writing here unconditionally is exactly the bug that
+    // corrupted bare-metal disks: a crash-dump self-test that wrote the
+    // namespace tail on every boot.)
+    const bool nvme_reserved = have_nvme && stor::NvmeDumpReservedLba() != 0;
+    const bool ahci_reserved = have_ahci && stor::AhciDumpReservedLba() != 0;
+    if (!nvme_reserved && !ahci_reserved)
+    {
+        arch::SerialWrite("[minidump] disk-persist self-test SKIP (no DuetOS crash-dump reservation)\n");
         return;
     }
     ContextRegs synth{};
@@ -932,7 +951,7 @@ void DiskPersistSelfTest()
     synth.ss = 0x10;
     synth.rflags = 0x202;
     const u64 disk_bytes = BuildMinidumpInto(synth, /*exception_code=*/0xC0000005);
-    if (have_nvme)
+    if (nvme_reserved)
     {
         const bool persisted = stor::NvmePanicWriteDump(g_buf, disk_bytes);
         if (!persisted)
@@ -950,7 +969,7 @@ void DiskPersistSelfTest()
             arch::SerialWrite("\n");
         }
     }
-    if (have_ahci)
+    if (ahci_reserved)
     {
         const bool persisted = stor::AhciPanicWriteDump(g_buf, disk_bytes);
         if (!persisted)
