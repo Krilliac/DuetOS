@@ -195,8 +195,29 @@ inline constexpr u8 kDuetFsTypeGuid[kGuidBytes] = {
 /// matches kDuetCrashDumpTypeGuid AND whose block_handle equals
 /// `block_handle`. On hit, fills *first_lba_out and *sector_count_out
 /// with the partition's inclusive LBA range expressed as base + count
-/// and returns true. On miss returns false; callers fall back to a
-/// driver-private "tail of namespace" reservation.
+/// and returns true. On miss returns false.
+///
+/// There is deliberately NO "tail of namespace" fallback: the crash-
+/// dump persist path writes ONLY into a region DuetOS positively owns
+/// (a partition the installer laid with kDuetCrashDumpTypeGuid). On a
+/// disk DuetOS didn't partition, a miss means "no disk persistence" —
+/// the serial/debugcon copy of the dump still emits. See the storage
+/// drivers' DumpReservedLba functions.
 bool GptFindCrashDumpRegion(u32 block_handle, u64* first_lba_out, u64* sector_count_out);
+
+/// Sanity-bound a crash-dump reservation before a driver trusts it for
+/// a panic write. Returns true iff [first_lba, first_lba+sector_count)
+/// on a `device_sectors`-sector device is:
+///   - at least `min_sectors` long,
+///   - starts at/after the first usable LBA (LBA 34 — past the
+///     protective MBR + primary GPT header + 32-sector entry array),
+///   - ends at/before the last usable LBA (before the 33-sector backup
+///     GPT header+entries at the device tail),
+///   - free of integer overflow in first+count.
+/// A region failing any check must be treated by the caller as "no
+/// reservation" (return 0) so a malformed or hostile GPT entry can
+/// never steer a panic write into user data or the backup GPT. Pure
+/// arithmetic — safe to call from panic context.
+bool GptCrashDumpRegionSane(u64 first_lba, u64 sector_count, u64 device_sectors, u64 min_sectors);
 
 } // namespace duetos::fs::gpt

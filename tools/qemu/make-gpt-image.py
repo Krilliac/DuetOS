@@ -463,8 +463,14 @@ def build_fat32(part_sector_count: int) -> bytearray:
     bs[64] = 0x80                                   # drive_number
     bs[65] = 0                                      # reserved
     bs[66] = 0x29                                   # boot_sig
-    struct.pack_into("<I", bs, 67, 0xCAFEBABE)      # volume_id
-    bs[71:82] = b"DUETOS     "                    # volume_label (11 bytes, space-padded)
+    # volume_id + label are the DuetOS-ownership markers the kernel's
+    # Fat32Probe checks (Fat32VolumeIsDuetOsOwned, kernel/fs/fat32.h:
+    # kDuetOsVolumeId / kDuetOsVolumeLabel). Keep these three stamps in
+    # sync — kernel/fs/fat32_format.cpp stamps the same values. Without
+    # them the kernel treats this scratch image as a foreign volume and
+    # refuses to adopt it (every FAT-backed self-test would then SKIP).
+    struct.pack_into("<I", bs, 67, 0xCAFEBABE)      # volume_id  (== kDuetOsVolumeId)
+    bs[71:82] = b"DUETOS     "                    # volume_label (== kDuetOsVolumeLabel, space-padded)
     bs[82:90] = b"FAT32   "                         # fs_type (8 bytes)
     bs[510] = 0x55
     bs[511] = 0xAA

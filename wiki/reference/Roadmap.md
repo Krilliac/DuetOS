@@ -645,14 +645,43 @@ In rough priority:
    landed; the read path + NTFS *write* are separate items —
    write is **T7-04** below.)
 
+### Foreign-FAT interop read — explicit opt-in mount
+
+- **Residual:** `Fat32Probe` now adopts ONLY DuetOS-owned volumes
+  (BPB serial `kDuetOsVolumeId` + label `kDuetOsVolumeLabel`, via
+  `Fat32VolumeIsDuetOsOwned`). A FAT32 volume without those markers —
+  a Windows EFI System Partition, a real Linux FAT, a USB stick — is
+  recognised and logged but **not** registered, so it can never become
+  `Fat32Volume(0)` and have the boot persistence sinks write into it.
+  This closed the bare-metal vector where DuetOS wrote `KERNEL.LOG` /
+  `KERNEL.FIX` into a foreign partition.
+- **Gap:** the long-term FAT32 *interop-read* goal (mount a foreign
+  FAT read-only for `.exe` loading / data import) now needs an
+  **explicit, user-invoked, read-only mount path** that bypasses the
+  ownership gate deliberately — it must register the foreign volume at
+  an index ≥1 (never slot 0) and mark it read-only so no sink targets
+  it. Not wired at boot today; marked `// GAP:` in
+  `kernel/fs/fat32.cpp` (`Fat32Probe` foreign-volume branch).
+- **Owner:** `kernel/fs/fat32.cpp`, `kernel/fs/mount.cpp`.
+
 ### Crash-dump persistence — real-hardware verification
 
 - **Residual:** an unforced panic on an installed laptop is the
   last step to graduate this from "shipped" to "lived through it
   once." The encode + transport layers (QEMU debugcon + in-RAM
   minidump + NVMe/AHCI reserved-region + installer
-  `kDuetCrashDumpTypeGuid` partition) are all in tree and
-  exercised every boot via `DiskPersistSelfTest`.
+  `kDuetCrashDumpTypeGuid` partition) are all in tree.
+- **Safety invariant (landed):** the disk-persist path writes ONLY
+  into a DuetOS-owned `kDuetCrashDumpTypeGuid` partition, discovered
+  via `GptFindCrashDumpRegion` and bounds-checked by
+  `GptCrashDumpRegionSane`. There is **no** "tail of namespace"
+  fallback — on a disk DuetOS didn't partition (a real machine's SSD
+  with Windows/Linux installed) a crash dump is NOT written to disk
+  (the serial/debugcon copy still emits). `DiskPersistSelfTest` SKIPs
+  (rather than writing) when no owned reservation exists, so the
+  real-HW verification above requires booting the **installer** first
+  to lay the crash-dump partition; until then disk persistence is
+  intentionally inert.
 
 ---
 

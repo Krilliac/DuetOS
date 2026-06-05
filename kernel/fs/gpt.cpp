@@ -1,6 +1,7 @@
 #include "fs/gpt.h"
 
 #include "arch/x86_64/serial.h"
+#include "core/panic.h"
 #include "drivers/storage/block.h"
 #include "log/klog.h"
 #include "mm/kheap.h"
@@ -511,6 +512,39 @@ bool GptFindCrashDumpRegion(u32 block_handle, u64* first_lba_out, u64* sector_co
     return false;
 }
 
+bool GptCrashDumpRegionSane(u64 first_lba, u64 sector_count, u64 device_sectors, u64 min_sectors)
+{
+    // LBA 0..33 = protective MBR + primary GPT header + 128-entry array.
+    constexpr u64 kPrimaryReservedSectors = 34;
+    // Last 33 LBAs = backup partition-entry array (32) + backup header (1).
+    constexpr u64 kBackupReservedSectors = 33;
+
+    if (sector_count < min_sectors)
+    {
+        return false;
+    }
+    if (first_lba < kPrimaryReservedSectors)
+    {
+        return false;
+    }
+    if (device_sectors <= kBackupReservedSectors)
+    {
+        return false;
+    }
+    // Exclusive upper bound = first LBA of the backup-GPT region.
+    const u64 last_usable_exclusive = device_sectors - kBackupReservedSectors;
+    // Overflow-safe first + count.
+    if (first_lba > 0xFFFFFFFFFFFFFFFFULL - sector_count)
+    {
+        return false;
+    }
+    if (first_lba + sector_count > last_usable_exclusive)
+    {
+        return false;
+    }
+    return true;
+}
+
 namespace
 {
 
@@ -784,6 +818,42 @@ void GptSelfTest()
         return;
     }
     arch::SerialWrite("[fs/gpt]   -> GptInitDisk + reparse PASS (1 partition, LBA 64..200)\n");
+
+    // ---- Crash-dump reservation bounds math (Vector A regression guard).
+    // This is the safety check that decides whether a panic-time dump is
+    // allowed to write a given LBA range. The bug it pins: the removed
+    // "tail of namespace" fallback handed crash dumps an LBA range that
+    // overlapped the user's data + the backup GPT. Any future regression
+    // that loosens these bounds halts the boot here rather than silently
+    // corrupting a disk. Pure arithmetic — no I/O.
+    {
+        constexpr u64 kDev = 1'000'000; // device sectors
+        constexpr u64 kMin = 8192;      // minimum reservation
+        // last-usable-exclusive = kDev - 33 = 999'967.
+        // Each case pins a distinct id so a failure says which invariant broke.
+        auto check = [](bool got, bool want, u32 id)
+        {
+            if (got != want)
+            {
+                ::duetos::core::PanicWithValue("fs/gpt", "GptCrashDumpRegionSane regression", id);
+            }
+        };
+        // 1: valid mid-disk region.
+        check(GptCrashDumpRegionSane(100, kMin, kDev, kMin), true, 1);
+        // 2: too small (count < min).
+        check(GptCrashDumpRegionSane(100, kMin - 1, kDev, kMin), false, 2);
+        // 3: starts inside the primary GPT (first < 34).
+        check(GptCrashDumpRegionSane(10, kMin, kDev, kMin), false, 3);
+        // 4: runs into the backup GPT (first+count > kDev-33).
+        check(GptCrashDumpRegionSane(kDev - 33 - kMin + 1, kMin, kDev, kMin), false, 4);
+        // 5: exactly flush against the last usable LBA — allowed.
+        check(GptCrashDumpRegionSane(kDev - 33 - kMin, kMin, kDev, kMin), true, 5);
+        // 6: first+count overflows u64.
+        check(GptCrashDumpRegionSane(0xFFFFFFFFFFFFF000ULL, 0x2000, kDev, kMin), false, 6);
+        // 7: device too small to even hold a backup GPT.
+        check(GptCrashDumpRegionSane(34, kMin, 10, kMin), false, 7);
+        arch::SerialWrite("[fs/gpt] crash-dump-bounds self-test OK (7 cases)\n");
+    }
 }
 
 void FormatGuid(const u8 guid[kGuidBytes], char* out_buf, u32 buf_cap)
