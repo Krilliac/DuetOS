@@ -376,62 +376,98 @@ fixed**; what follows is the sharpened root lead from the new trace.
 The task running at #7516/#7517 is the **TCP timer kernel thread**
 (`RBX=ffffffff806c4d00` = `net::tcp::TcpTimerEntry`), on a healthy
 dynamic kstack (`...e0032c00`). An **MSI-X device IRQ (vector 0x32=50)**
-preempts it; the handler's `Schedule()` `ContextSwitch`es into a `next`
-whose **`rsp = 0xffffffff800dfc40`** and whose saved return address is
-**0**. `RAX` is *preserved* across the switch (`0xc894a5149` at #7516,
-#7517 **and** #7518) — that is the `ContextSwitch` signature (it
-save/restores only callee-saved regs + the return address, never RAX),
-which **confirms #7518 is a genuine `ContextSwitch` resume**, not an
-errant `iretq`.
+preempts it; shortly after, control transfers to a context with
+**`rsp = 0xffffffff800dfc40`** and **`RIP = 0`** — the wild jump.
+`RAX` is *preserved* across the transfer (`0xc894a5149` at #7516, #7517
+**and** #7518); since `RAX` is SysV caller-saved, a `ContextSwitch` `ret`
+**or** a plain function `ret` **or** an `iretq` would all leave it intact,
+so RAX-preservation alone does NOT distinguish the path. (An earlier draft
+read this as proof of a `ContextSwitch` resume; the guard evidence below
+overturns that.)
 
 **What `0xffffffff800dfc40` is:** higher-half of physical `0xdfc40`
 (~895 KiB) — **below the entire kernel image** (`.text.boot`@phys
 `0x101000`, `.bss.boot`/boot-stack@`0x102000`). It is **not** the boot
 stack and **not** a heap kstack (those live in the `...e0...` arena); it
-is junk low RAM (legacy <1 MiB region). So a task's saved `rsp` was
-overwritten with garbage and the task is being resumed into it.
+is junk low RAM (legacy <1 MiB region). Both the saved `rsp` AND the
+saved `rip` are garbage together — a **whole-frame scribble**, not a lone
+`Task::rsp` field overwrite.
 
-**Why the resume-context validator did NOT catch it:** the corrupt
-`next` is a **`stack_base == nullptr` task** (boot/idle/sentinel), and
-the validator's rsp-in-own-kstack arm is *guarded by*
-`next->stack_base != nullptr` (sched.cpp ~2916) — so for null-stack_base
-tasks it only checks canonical-pointer + not-Dead, both of which a
-corrupt-but-non-Dead boot/idle task passes. **The bug is a corrupt
-resume of a `stack_base==nullptr` task** (the BSP boot task, the BSP/AP
-idle task, or an AP boot sentinel) whose `Task::rsp` field — or the
-top-of-stack return slot — was clobbered to low-RAM garbage / zero.
+**The strengthened resume validator did NOT fire** (a run with the
+`sched.cpp` validator extended to reject `stack_base==nullptr` resumes
+with `rsp` below the kernel-image floor produced zero output before the
+cascade on unbuffered serial). That, combined with the silence of the
+`ContextSwitch` and `iretq` RIP gates (see table below), means the wild
+transfer is **NOT** a `Schedule()`→`ContextSwitch` resume of a corrupt
+task at all — it is an **ungated plain `ret`** whose return slot was
+scribbled. The "corrupt `stack_base==nullptr` task resumed by the
+scheduler" hypothesis is therefore **retired**; the validator hardening
+stays in tree as defence-in-depth but is not the catch for this shape.
 
-**Leads to chase (open):**
-1. *Who corrupts `Task::rsp` of a null-stack_base task?* A
-   `stack_base==nullptr` task's `rsp` is written only by
-   `ContextSwitch`'s first save. Either the Task struct's `rsp` field is
-   being overwritten (struct reuse / a neighbouring writer) or the boot
-   task's low-memory stack frame is being clobbered. The MSI-X (device)
-   correlation points at **DMA into low RAM (`0xd0000–0xe0000`)
-   colliding with the boot/idle task's stack or struct** — a
-   *lost-page/lost-slot collision* class bug (CLAUDE.md). Audit every
-   DMA-buffer / AP-trampoline / low-frame allocation for a frame in the
-   `<1 MiB` window that aliases boot/idle state.
-2. *Should a `stack_base==nullptr` task ever be a `Schedule()` `next`
-   candidate at all?* If the BSP boot task is left runnable on a
-   runqueue after `boot_bringup`, it can be picked. Determine its fate
-   after the self-tests and whether it should be parked un-resumably
-   (like Linux's swapper / xv6's per-CPU scheduler context) instead of
-   sitting selectable with a stale low-memory stack.
-3. *Strengthen the validator* to also bound null-stack_base resumes:
-   read the saved return address at `[next->rsp]` and require it to be
-   canonical kernel-text, OR give the boot/idle tasks a known
-   `stack_base`/`stack_size` so the existing rsp-range arm applies. This
-   converts the silent triple-fault into a named panic at the source.
+**The transfer to RIP=0 bypasses ALL FOUR existing control-transfer
+guards (decisive new evidence, 2026-06-05).** A run with a *strengthened*
+resume validator (reject `stack_base==nullptr` resumes whose `rsp` is
+below the kernel-image floor) was captured on unbuffered serial. The
+validator produced **no output** before the cascade, and neither did any
+of the other three gates. The kernel already range-checks `[_text_start,
+_text_end)` on every gated kernel control transfer:
 
-**Why no kernel dump / forensic appears even with unbuffered serial:**
-the resumed `next` faults at `IP=0`; the `#PF` then tries to push its
-trap frame to the bad `RSP=0xffffffff800dfc40` and nests immediately, so
-**execution never reaches `TrapDispatch`** — the `[wild-kernel-rip]`
-forensic and the tight-recursion detector are both downstream of the
-trap-frame delivery that is itself faulting. The corruption must be
-caught *before* the resume (lead 3) or *prevented* (leads 1–2); a
-post-fault dump is structurally impossible for this shape.
+| gate | site | would catch RIP=0? | fired? |
+|------|------|--------------------|--------|
+| `ContextSwitch` `ret` target | `context_switch.S:92-115` (`SchedContextSwitchWildRetCallback`) | yes | **no** |
+| kernel-mode `iretq` target | `exceptions.S:399-412` (`IretqFrameWildCallback`) | yes | **no** |
+| indirect `call`/`jmp` (r11) | `__llvm_retpoline_r11` | yes | **no** |
+| fresh-task `call rbx` | `SchedTaskTrampolineValidateEntry` | yes | **no** |
+| resume `rsp` sanity (this slice) | `sched.cpp` validator | n/a (rsp shape) | **no** |
+
+Since `ContextSwitch` and `iretq` both *would* have caught a saved
+`RIP=0` and did not, the wild transfer is **through an UNGATED `ret`** —
+a normal C function return whose return address on the stack was
+scribbled to 0 — not the scheduler's `ContextSwitch` and not the trap
+`iretq`. (This also overturns the earlier "corrupt `Task::rsp` resumed by
+`Schedule()`" lead: had it been a `Schedule()`→`ContextSwitch`, the
+ret-target gate would have tripped.)
+
+**`CR2` = the TSC value ⇒ vaddr 0 is mapped and was *executed*.** The
+`#PF` at `IP=0` carries `CR2`=the `rdtsc` value still live in `RAX`, not
+`CR2=0`. An instruction-fetch fault at a *missing* page 0 would give
+`CR2=0`. Instead the byte(s) at vaddr 0 ran as code and the garbage
+instruction dereferenced `RAX`. The boot PML4 **identity-maps 0..1 GiB
+RWX in 2 MiB pages** (`boot.S`), so vaddr 0 is present+executable —
+a wild `ret`/`call` to 0 silently executes low-RAM (IVT/BIOS) bytes
+instead of faulting cleanly. Both `RIP=0` **and** `RSP=0xffffffff800dfc40`
+are corrupt together (a whole-frame scribble), which is why the `#PF`
+nests on the bad rsp before `TrapDispatch`/the `[wild-kernel-rip]`
+forensic can run.
+
+**Leads to chase (open), reprioritised by the above:**
+1. *Find the ungated `ret` with a scribbled return address.* The
+   transfer is a plain function-return, so the corruption is **a stack
+   return-slot overwrite**, not a `Task::rsp`/struct-field overwrite.
+   Around the trigger the running context is the **TCP timer kernel
+   thread** preempted by an **MSI-X device IRQ (vector 0x32=50)** — audit
+   the NIC/MSI-X bottom-half and the TCP timer path for a stack buffer
+   that can overrun its frame (a packet/descriptor copy sized from
+   device-controlled length writing past a stack array), scribbling the
+   saved return address + a neighbouring saved rsp. This is the
+   classic *stack-buffer-overflow → return-address clobber* shape, now
+   the leading hypothesis (it explains why every control-transfer gate is
+   silent: the wild value never went through one).
+2. *Diagnostic hardening — make the silent transfer loud.* (a) Unmap (or
+   mark NX) the **null page / low identity region** so a `ret`/`call` to
+   vaddr 0 faults *immediately* with `CR2=0,IP=0` instead of executing
+   low RAM — page 0 needs a 2 MiB→4 KiB split in `boot.S` because
+   `.text.boot` shares the first 2 MiB. (b) Put `#PF`/`#GP`/`#DF` on
+   **IST stacks** so trap delivery survives a corrupt `RSP` and the
+   `[wild-kernel-rip]` forensic can actually fire on this shape (today it
+   can't — the nested push on the bad rsp triple-faults first). (c) Add a
+   stack-canary / `STACK_END_MAGIC`-style end-of-frame check on the
+   suspect bottom-half (Linux `task_stack_end_corrupted`).
+3. *Single-step on KVM/real HW.* The originating host is TCG with no
+   `/dev/kvm`; QEMU's BQL `abort()` truncates the dump and TCG can't run
+   the GDB-stub single-step needed to catch the exact `ret`. Re-run
+   `DUETOS_SERIAL_FILE=…` on `accel=kvm`, `b ContextSwitch` / break on the
+   TCP-timer + MSI-X handlers, and watch the return-slot get scribbled.
 
 **Adjacent real fix landed this session (NOT this cascade):** the
 `Schedule()` budget-/policy-kill (`kill_requested`) branch was still
