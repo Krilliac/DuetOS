@@ -109,10 +109,24 @@ multiboot2_header_end:
  *     (the canary prologue adds 16-24 bytes per frame, eating headroom
  *     on the deep PE/ELF-load chain).
  *   - 128 KiB: post-canary headroom recovery (2026-05-11).
+ *   - 512 KiB: boot-tail wild-jump chase (2026-06-05). The post-x509
+ *     network self-tests (TlsSocketSelfTest / HttpSelfTest) run the full
+ *     TLS-handshake → x509-verify → ASN.1 → RSA/EC crypto chain on THIS
+ *     stack; a captured cascade resumed a context with rsp=0xffffffff-
+ *     800dfc40 (phys 0xdfc40, ~140 KiB BELOW stack_bottom), i.e. the
+ *     128 KiB stack overflowed by ~140 KiB (≈268 KiB total demand) and —
+ *     because the higher-half 2 MiB map is RW — the overflow grew
+ *     SILENTLY into low RAM instead of faulting, scribbling the frame and
+ *     producing the wild ret to RIP=0. 512 KiB covers the measured demand
+ *     with headroom. (Diagnostic experiment; if a future capture shows
+ *     rsp marching below stack_bottom AGAIN the demand is unbounded —
+ *     recursion, not depth — and the fix moves the deep self-tests off the
+ *     boot stack instead of growing it. See Roadmap "SMP=4 boot-tail
+ *     wild-jump".)
  */
 .align 16
 stack_bottom:
-    .skip 131072                /* 128 KiB boot stack */
+    .skip 524288                /* 512 KiB boot stack — see history above */
 stack_top:
 
 .align 4096
