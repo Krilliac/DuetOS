@@ -10010,6 +10010,34 @@ shape that the 6 indirect-control-flow validators kept silent
 on. Validator suite stays in place as regression armour for
 unrelated wild-target dispatch shapes.
 
+**2026-06-04 addendum — a NEW manifestation under VirtualBox, +
+a sixth dispatcher-site validator.** A user VBox boot (single
+CPU — note the SMP-focused trampoline fix above was verified on
+SMP=8) crashed at boot-tail (~13 s, just after `x509-verify-
+selftest`) with a *different* wild shape than the documented
+`0x10`-in-RA: `TrapDispatch` was entered with a wild trap-frame
+*pointer* (`frame = 0xffff'ffff'ffff'ffff`, canonical-but-
+unmapped) and the kstack region was filled with a non-canonical
+`0x001d2025…`. The fatal fault was a SECOND #PF: `RipIntegrity
+Guard`'s ctor dereferences `frame->rip/cs` immediately, so the
+diagnostic guard *itself* faulted on the wild pointer — burying
+the original context (cr2=-1, fault-site mislabeled as the guard
+ctor). **Fix (this slice, `traps.cpp`): a sixth dispatcher-site
+validator `TrapFramePointerIsSane(frame)` runs BEFORE the guard
+ctor** — a pure-arithmetic canonical test (a non-canonical deref
+would #GP, so never deref) then a fault-surviving
+`mm::SafeReadKernel` probe for present; on a wild pointer it
+names the offender (`[arch/traps] WILD trap-frame pointer …`) and
+halts cleanly. This does **not** fix the wild-frame *root* (still
+the tracked boot-tail bug — this single-CPU/VBox shape needs a
+VBox + gdb-stub repro to localise); it stops that bug from
+masking itself so the next occurrence is diagnosable instead of a
+nested #PF. `TrapsSelfTest` exercises the validator's fault-free
+legs (non-canonical refused, live frame accepted); the unmapped-
+present-reject leg rides on `SafeReadKernel`'s own contract
+(`TrapsSelfTest` precedes `TrapsRegisterExtable` in boot, so it
+cannot safely probe an unmapped address itself).
+
 ## 2026-05-26 — MADT Local x2APIC (type 9) entries are parsed and registered
 
 **Decision:** `kernel/acpi/acpi.cpp::ParseMadt` accepts MADT

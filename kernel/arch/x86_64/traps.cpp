@@ -59,6 +59,7 @@
 #include "debug/extable.h"
 #include "debug/probes.h"
 #include "mm/kstack.h"
+#include "mm/paging.h"
 #include "mm/poison_alloc.h"
 #include "sched/sched.h"
 #include "subsystems/win32/vmap_syscall.h"
@@ -172,6 +173,25 @@ extern "C" [[noreturn]] void SchedContextSwitchWildRetCallback(void* target)
     arch::SerialWriteHex(sched::CurrentTaskId());
     arch::SerialWrite("\n");
     core::PanicWithValue("sched/ctxsw", "context-switch ret target out of kernel text range", fn);
+}
+
+// DIAG (boot-tail wild-frame chase, 2026-06-04): isr_common (exceptions.S)
+// records each trap's entry shape into this fixed BSS ring on EVERY trap, so the
+// wild-frame guard below can print the sequence of traps that led to a wild one.
+// C linkage + global scope so the assembly can reach the symbols by name. The
+// frame layout the asm reads is fixed by isr_common's 15-push prologue.
+extern "C"
+{
+    struct TrapEntryRingSlot
+    {
+        duetos::u64 vector;    // [rsp+120] at isr_common after the 15 pushes
+        duetos::u64 saved_rip; // [rsp+136] — where the CPU was when the trap fired
+        duetos::u64 cpu_rsp;   // [rsp+160] — the CPU's rsp BEFORE the trap (iretq frame)
+        duetos::u64 frame_rsp; // rsp itself — the pointer handed to TrapDispatch as 'frame'
+    };
+    constexpr duetos::u64 kTrapRingSlots = 16; // power of two; asm masks with & 0xF
+    alignas(64) TrapEntryRingSlot g_trap_ring[kTrapRingSlots] = {};
+    duetos::u64 g_trap_ring_idx = 0; // next slot to write; (idx-1)&0xF is the newest
 }
 
 namespace duetos::arch
@@ -671,6 +691,61 @@ void HaltOnRecursiveFault(u64 vector, u64 rip)
     Halt();
 }
 
+// Is `frame` safe to dereference as a trap frame — canonical AND its first quad
+// present? Pure except for the fault-surviving SafeReadKernel probe (which returns
+// false instead of faulting on an unmapped source). Catches both observed wild
+// shapes: non-canonical (rejected by the arithmetic test, never dereferenced so it
+// can't #GP) and canonical-but-unmapped (rejected by the present probe). Exposed to
+// TrapsSelfTest so the reject path is verifiable without reproducing a wild trap.
+static bool TrapFramePointerIsSane(const void* frame)
+{
+    const ::duetos::u64 fp = reinterpret_cast<::duetos::u64>(frame);
+    const ::duetos::u64 hi17 = fp >> 47; // bits 63:47 — all-0 (low) or all-1 (high) => canonical
+    if (hi17 != 0ULL && hi17 != 0x1FFFFULL)
+        return false; // non-canonical — refuse without dereferencing (a deref would #GP)
+    ::duetos::u64 probe = 0;
+    return ::duetos::mm::SafeReadKernel(&probe, frame, sizeof(probe));
+}
+
+// DIAG (boot-tail wild-frame chase): runaway-fault-loop detector by TIGHT
+// DESCENT. A fault-on-fault loop marches DOWN one stack, each TrapDispatch frame
+// ~one frame-size (~0x1290) below the previous, with no work between. A plain
+// global re-entry depth can't see this — legitimate nesting across tasks (a
+// syscall here, a timer IRQ there) climbs it via context switches that suspend
+// frames without returning. So instead: count CONSECUTIVE entries whose frame is
+// just below the previous one on the same stack; ANY non-tight entry (context
+// switch, fresh trap, upward/far frame) resets it. Crossing the threshold means a
+// genuine same-stack recursion. Single-CPU diagnostic.
+constexpr ::duetos::u64 kTightDescentBytes = 3u * 0x1290u; // up to ~3 frame-sizes below
+constexpr ::duetos::u64 kMaxTightRecursion = 8;            // 8 tight descents in a row = runaway
+::duetos::u64 g_last_trap_frame = 0;
+::duetos::u64 g_tight_recursion = 0;
+
+// DIAG (boot-tail wild-frame chase): print the trap-entry ring oldest->newest.
+// In its OWN small frame (noinline) so the loop counter cannot alias
+// TrapDispatch's huge UBSAN stack frame — inlined, that aliasing left the
+// counter >= kTrapRingSlots and silently skipped the loop. Called only from the
+// wild-frame bail. The newest entry whose frame=-1 is the wild trap; its
+// vec/rip/cpu_rsp localise the origin.
+[[gnu::noinline]] static void DumpTrapEntryRing()
+{
+    SerialWrite("[arch/traps] trap-entry ring (oldest->newest)  vec|rip|cpu_rsp|frame:\n");
+    for (::duetos::u64 k = 0; k < kTrapRingSlots; ++k)
+    {
+        const ::duetos::u64 idx = (g_trap_ring_idx + k) & (kTrapRingSlots - 1);
+        const TrapEntryRingSlot& e = g_trap_ring[idx];
+        SerialWrite("  vec=");
+        SerialWriteHex(e.vector);
+        SerialWrite(" rip=");
+        SerialWriteHex(e.saved_rip);
+        SerialWrite(" cpu_rsp=");
+        SerialWriteHex(e.cpu_rsp);
+        SerialWrite(" frame=");
+        SerialWriteHex(e.frame_rsp);
+        SerialWrite("\n");
+    }
+}
+
 extern "C" void TrapDispatch(TrapFrame* frame)
 {
     // Diagnostic: snapshot the iretq-frame RIP at entry so the
@@ -747,6 +822,63 @@ extern "C" void TrapDispatch(TrapFrame* frame)
             ::duetos::core::PanicWithValue("arch/traps", "trap frame RIP scribbled mid-handler", frame->rip);
         }
     };
+    // Defense-in-depth: the entry stub can hand us a WILD trap-frame pointer — the
+    // tracked boot-tail wild-frame bug (observed under VBox as frame=-1, canonical
+    // but unmapped, and a non-canonical 0x001d2025… shape). RipIntegrityGuard's ctor
+    // below dereferences frame->rip/cs immediately; on a wild pointer that #PFs, so
+    // the guard meant to DIAGNOSE corruption instead becomes a SECOND fault that
+    // buries the original context (cr2=-1, fault-site mislabeled as the guard ctor).
+    // Validate canonical-AND-present BEFORE any field access; on a wild pointer name
+    // the offender and halt cleanly so the NEXT occurrence is diagnosable, not a
+    // nested #PF. Does NOT fix the wild-frame root cause (tracked separately) — it
+    // stops that bug from masking itself. Sixth dispatcher-site validator.
+    if (!TrapFramePointerIsSane(frame))
+    {
+        const ::duetos::u64 fp = reinterpret_cast<::duetos::u64>(frame);
+        const ::duetos::u64 hi17 = fp >> 47;
+        const bool canonical = (hi17 == 0ULL) || (hi17 == 0x1FFFFULL);
+        KBP_PROBE_V(::duetos::debug::ProbeId::kTrapDispatchRipScribble, fp);
+        SerialWrite("[arch/traps] WILD trap-frame pointer — refusing to dereference  cpu=");
+        SerialWriteHex(::duetos::cpu::CurrentCpuIdOrBsp());
+        SerialWrite("  frame=");
+        SerialWriteHex(fp);
+        SerialWrite(canonical ? "  [canonical, not-present]\n" : "  [non-canonical]\n");
+        // DIAG: dump the trap-entry ring (oldest -> newest). The newest entry
+        // whose frame=-1 IS this wild trap; its vector/rip/cpu_rsp reveal where
+        // the wild frame came from (the SafeReadKernel #PF the present-probe just
+        // took is also in the ring — identify the wild one by frame=0xff..ff).
+        // Done in a dedicated noinline fn: TrapDispatch's huge UBSAN frame was
+        // aliasing the loop counter's stack slot, skipping the loop entirely.
+        DumpTrapEntryRing();
+        ::duetos::core::PanicWithValue("arch/traps", "wild trap-frame pointer at dispatch entry", fp);
+    }
+
+    // DIAG: runaway fault-loop catcher by tight descent (see kMaxTightRecursion).
+    // A fault-on-fault loop hands us frames marching DOWN one stack, each ~one
+    // TrapDispatch frame below the last. Count consecutive tight descents; ANY
+    // other shape (context switch to another stack, a fresh/higher frame) resets
+    // the run, so legitimate cross-task nesting never trips it. On a genuine run
+    // halt EARLY while the ring still holds the TRIGGER (the first traps, with a
+    // VALID vec/rip — before the loop corrupts the slots to -1) and dump it.
+    {
+        const ::duetos::u64 thisFrame = reinterpret_cast<::duetos::u64>(frame);
+        if (g_last_trap_frame != 0 && thisFrame < g_last_trap_frame &&
+            (g_last_trap_frame - thisFrame) < kTightDescentBytes)
+            ++g_tight_recursion;
+        else
+            g_tight_recursion = 0;
+        g_last_trap_frame = thisFrame;
+        if (g_tight_recursion > kMaxTightRecursion)
+        {
+            asm volatile("cli");
+            SerialWrite("[arch/traps] RUNAWAY trap recursion (tight descent) — halting + dumping trigger  run=");
+            SerialWriteHex(g_tight_recursion);
+            SerialWrite("\n");
+            DumpTrapEntryRing();
+            ::duetos::core::PanicWithValue("arch/traps", "runaway trap recursion (fault loop)", g_tight_recursion);
+        }
+    }
+
     RipIntegrityGuard guard(frame);
     // KPath: record that this vector fired before any handler-
     // specific dispatch. Single bounds check + relaxed atomic add;
@@ -1861,6 +1993,26 @@ void TrapsSelfTest()
     // iretq's. Without the new install it would cascade to #NP and
     // halt — same easy regression signal.
     asm volatile("int $0x42");
+
+    // 3. Wild trap-frame-pointer guard (the TrapDispatch entry validator). The
+    //    non-canonical wild shape must be REFUSED and a live present address
+    //    ACCEPTED. Only fault-free cases run here: TrapsSelfTest precedes
+    //    TrapsRegisterExtable in boot, so probing an UNMAPPED address (the -1 shape)
+    //    would fault with no extable armed and triple-fault — that present-reject
+    //    path rides on SafeReadKernel's own contract. Non-canonical short-circuits
+    //    before any probe; the accept case reads a valid mapped stack address.
+    bool guard_ok = true;
+    guard_ok &= !TrapFramePointerIsSane(reinterpret_cast<void*>(0x001d2025001d2025ULL)); // non-canonical -> reject
+    guard_ok &= TrapFramePointerIsSane(&guard_ok);                                       // live frame -> accept
+    if (guard_ok)
+    {
+        SerialWrite("[traps] wild-frame-pointer guard OK (non-canonical refused, live frame accepted)\n");
+    }
+    else
+    {
+        SerialWrite("[traps] wild-frame-pointer guard FAIL\n");
+        KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x6u);
+    }
 
     SerialWrite("[traps] self-test OK — #BP and spurious both recovered\n");
 }
