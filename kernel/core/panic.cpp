@@ -2,6 +2,7 @@
 
 #include "arch/x86_64/cpu.h"
 #include "arch/x86_64/gdt.h"
+#include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/lbr.h"
 #include "arch/x86_64/nmi_watchdog.h"
 #include "arch/x86_64/serial.h"
@@ -1034,6 +1035,36 @@ void DumpDiagnostics(u64 rip, u64 rsp, u64 rbp)
     duetos::net::wireless::diag::Dump(0);
 }
 
+// Panic-precis: emit the root cause on raw panic-mode serial BEFORE
+// any of the device-heavy dump steps (FixJournal NVMe flush, NMI
+// broadcast, minidump egress) that can be truncated by a wedged
+// peer, a second fault inside the dump, or a buggy emulator that
+// aborts the VM mid-write (QEMU-TCG's BQL assertion). One contiguous
+// line — subsystem/message/value plus the panic call site, CPU, and
+// detected hypervisor — so a soft panic stays actionable even when
+// the full dump never escapes, mirroring the trap dispatcher's
+// `[panic-precis]` line. Greppable sentinel shared with arch/traps.
+static void EmitPanicPrecis(const char* subsystem, const char* message, bool has_value, u64 value, u64 caller_rip)
+{
+    arch::SerialEnterPanicMode();
+    arch::SerialWrite("\n[panic-precis] ");
+    arch::SerialWrite(subsystem);
+    arch::SerialWrite(": ");
+    arch::SerialWrite(message);
+    if (has_value)
+    {
+        arch::SerialWrite(" value=0x");
+        arch::SerialWriteHex(value);
+    }
+    arch::SerialWrite(" caller=0x");
+    arch::SerialWriteHex(caller_rip);
+    arch::SerialWrite(" cpu=0x");
+    arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
+    arch::SerialWrite(" hv=");
+    arch::SerialWrite(arch::HypervisorName(arch::HypervisorInfoGet().kind));
+    arch::SerialWrite("\n");
+}
+
 void Panic(const char* subsystem, const char* message)
 {
     // Capture the caller's register state BEFORE anything else
@@ -1076,6 +1107,9 @@ void Panic(const char* subsystem, const char* message)
         arch::Halt();
     }
     arch::PanicInProgressMark();
+    // Front-load the cause before any device-heavy / cross-CPU step
+    // below can truncate the dump (see EmitPanicPrecis).
+    EmitPanicPrecis(subsystem, message, /*has_value=*/false, 0, reinterpret_cast<u64>(__builtin_return_address(0)));
     // KassertFail journal record: capture the (subsystem, message,
     // caller_rip) tuple BEFORE the diagnostic dump so the FAT32 /
     // NVMe panic-write tier picks up a structured record for the
@@ -1212,6 +1246,9 @@ void PanicWithValue(const char* subsystem, const char* message, u64 value)
         arch::Halt();
     }
     arch::PanicInProgressMark();
+    // Front-load the cause (incl. the value) before any device-heavy
+    // / cross-CPU step below can truncate the dump (see EmitPanicPrecis).
+    EmitPanicPrecis(subsystem, message, /*has_value=*/true, value, reinterpret_cast<u64>(__builtin_return_address(0)));
     // KassertFail journal record — same shape as Panic() above but
     // with `value` captured into ctx_b so the offline brief can
     // surface the OOB index / count / address that triggered the

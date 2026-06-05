@@ -101,6 +101,20 @@ void LapicEoi()
     LapicWrite(kLapicRegEoi, 0);
 }
 
+bool LapicInServiceBitSet(u8 v)
+{
+    if (!g_lapic_ready)
+    {
+        return false;
+    }
+    // ISR register for vector v lives at base + (v >> 5) * 0x10;
+    // the bit within it is (v & 31). LapicRead transparently maps
+    // the offset to the x2APIC MSR (0x810 + (v >> 5)) when needed.
+    const u64 reg = kLapicRegIsrBase + (static_cast<u64>(v >> 5) * 0x10u);
+    const u32 word = LapicRead(reg);
+    return (word & (1u << (v & 31))) != 0u;
+}
+
 void LapicSendIcr(u32 dest, u32 icr_low)
 {
     if (g_x2apic)

@@ -31,6 +31,7 @@
 #include "arch/x86_64/traps.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/hypervisor.h"
 #include "arch/x86_64/lapic.h"
 #include "arch/x86_64/lbr.h"
 #include "arch/x86_64/machine_check.h"
@@ -277,6 +278,22 @@ static inline bool ClaimVectorWarnSlot(u64 (&bitmap)[4], u8 vector)
 // for a kernel-static; no per-PerCpu growth (PerCpu cache-line
 // footprint matters for the IPI/wake hot path).
 constinit u64 g_irq_counts_per_cpu[acpi::kMaxCpus][256] = {};
+
+// Per-CPU live IRQ/trap nesting depth. Incremented at TrapDispatch
+// entry and decremented at every normal-return exit via the RAII
+// IrqNestScope below; saved/restored PER TASK across context
+// switches by sched::Schedule (prev->irq_depth = IrqNestDepthRaw();
+// IrqNestDepthSet(next->irq_depth)). The invariant the two halves
+// jointly maintain: slot[cpu] == the nesting depth of the task
+// currently running on `cpu`. 0 = not in interrupt/trap context,
+// 1 = one level deep (normal), >= 2 = a handler was itself
+// interrupted. The combination is migration-safe: an increment on
+// CPU X that is preempted mid-handler is carried to the task's
+// saved irq_depth on switch-out and reloaded onto whatever CPU
+// resumes the task, so the matching decrement always lands on the
+// slot that holds this invocation's increment. Single-CPU writes
+// under IF=0; no atomic needed on the slot itself.
+constinit u64 g_irq_nest_depth_per_cpu[acpi::kMaxCpus] = {};
 
 // Global fault counters by category. Bumped on every CPU
 // exception dump (user-mode task-kill or kernel panic). Read
@@ -584,38 +601,72 @@ const char* TrapResponseName(TrapResponse r)
     }
 }
 
-// IRQ nesting-depth tracking. Two live-test attempts (slices
-// 69 and 71) exposed that a correct counter needs both:
-//   * per-task save/restore across Schedule (done, via
-//     Task.irq_depth in sched.cpp), AND
-//   * decrement at every exit path of TrapDispatch, including
-//     the CPU-exception paths that don't return (task-kill,
-//     panic), the NMI halt-forever path, and the fault-fixup
-//     rewrite path.
-// The exception paths are where the counter leaked last time.
-// Getting all of those right without regressing something else
-// is its own slice; for now the accessor reports 0 so the
-// health check's ceiling test stays clean, and the per-task
-// field is zeroed at task creation so the save/restore plumb
-// is ready to switch on once the exception-path audit lands.
-constinit u64 g_irq_nest_depth = 0;
+// IRQ nesting-depth tracking. Two earlier live-test attempts (slices
+// 69 and 71) exposed that a correct counter needs BOTH halves:
+//   * per-task save/restore across Schedule (sched.cpp does
+//     prev->irq_depth = IrqNestDepthRaw(); IrqNestDepthSet(next->irq_depth)
+//     at every context switch), AND
+//   * increment-at-entry / decrement-at-exit of TrapDispatch.
+// The decrement is the part the previous attempts leaked, because
+// TrapDispatch has many non-returning exits (task-kill via SchedExit,
+// the kernel-mode Panic outcome, the #DF / NMI halt-forever spins).
+// The fix is to drive the decrement from a RAII guard (IrqNestScope,
+// in TrapDispatch) whose dtor fires on EVERY normal return, paired
+// with the per-task save/restore that fixes up the non-returning
+// paths for free: SchedExit -> Schedule saves the (still-elevated)
+// live depth into the dying task (reaped, value discarded) and loads
+// the incoming task's depth, so the live slot is correct for whoever
+// runs next; the Panic / Halt paths leave the slot elevated but the
+// box is dead, so nothing reads it. The result: the runtime checker's
+// IrqNesting ceiling and the panic-snapshot depth field, both wired
+// up and waiting, finally see real values instead of a constant 0.
+//
+// The live depth is a per-CPU array (g_irq_nest_depth_per_cpu),
+// indexed by the current CPU id; g_irq_nest_max is the global
+// monotonic high-water mark read by the health check.
 constinit u64 g_irq_nest_max = 0;
+
+// Current CPU's live-depth slot. CurrentCpuIdOrBsp() falls back to
+// the BSP id (0) before per-CPU state is installed, so this is safe
+// to call from the very first boot trap. Out-of-range ids (should
+// not happen) clamp to slot 0 rather than scribble past the array.
+static inline u64& IrqNestSlot()
+{
+    const u32 id = ::duetos::cpu::CurrentCpuIdOrBsp();
+    const u32 idx = (id < acpi::kMaxCpus) ? id : 0u;
+    return g_irq_nest_depth_per_cpu[idx];
+}
+
+// Relaxed cross-CPU high-water update. The CAS loop only spins when
+// `depth` actually exceeds the current max — once the system has
+// reached its steady-state nesting (depth 1 for an un-nested trap)
+// the common case is a single relaxed load + compare that skips the
+// CAS entirely, so the per-trap hot path stays cheap.
+static inline void IrqNestMaxObserve(u64 depth)
+{
+    u64 cur = __atomic_load_n(&g_irq_nest_max, __ATOMIC_RELAXED);
+    while (depth > cur)
+    {
+        if (__atomic_compare_exchange_n(&g_irq_nest_max, &cur, depth, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            break;
+    }
+}
 
 u64 IrqNestDepth()
 {
-    return 0;
+    return IrqNestSlot();
 }
 u64 IrqNestMax()
 {
-    return 0;
+    return __atomic_load_n(&g_irq_nest_max, __ATOMIC_RELAXED);
 }
 u64 IrqNestDepthRaw()
 {
-    return 0;
+    return IrqNestSlot();
 }
-void IrqNestDepthSet(u64 /*v*/)
+void IrqNestDepthSet(u64 v)
 {
-    // stub
+    IrqNestSlot() = v;
 }
 
 bool PanicInProgress()
@@ -767,6 +818,53 @@ constexpr ::duetos::u64 kMaxTightRecursion = 8;            // 8 tight descents i
     }
 }
 
+// Single source of truth mapping a CPU-exception vector to the
+// NTSTATUS a Win32 process would observe for that fault. Shared by
+// the ring-3 SEH delivery switch (which gates on a non-zero result
+// to decide dispatchability + supplies the code to ntdll's
+// KiUserExceptionDispatcher) and by the ring-3 minidump emit (which
+// labels the .dmp's exception record). Keeping ONE table prevents
+// the two sites drifting — the "sentinel divergence" class of bug
+// where one path is taught a new vector and the other isn't.
+//
+// Returns 0 for vectors with no Windows structured-exception
+// analogue (the caller substitutes its own fallback). #BP/#DB are
+// deliberately 0 here: they never reach the IsolateTask path (the
+// breakpoint / GDB subsystems claim them first under LogAndContinue
+// policy), so a PE never sees them as a delivered exception.
+static u32 VectorToUserNtStatus(u64 vector)
+{
+    switch (vector)
+    {
+    case 0:
+        return 0xC0000094; // #DE STATUS_INTEGER_DIVIDE_BY_ZERO
+    case 4:
+        return 0xC0000095; // #OF STATUS_INTEGER_OVERFLOW
+    case 5:
+        return 0xC000008C; // #BR STATUS_ARRAY_BOUNDS_EXCEEDED
+    case 6:
+        return 0xC000001D; // #UD STATUS_ILLEGAL_INSTRUCTION
+    case 13:
+        return 0xC0000005; // #GP STATUS_ACCESS_VIOLATION
+    case 14:
+        return 0xC0000005; // #PF STATUS_ACCESS_VIOLATION
+    case 16:
+        // GAP: x87 #MF carries a status word distinguishing
+        // divide-by-zero / overflow / underflow / inexact / denormal
+        // / invalid; we deliver the generic
+        // STATUS_FLOAT_INVALID_OPERATION rather than decoding the FSW.
+        return 0xC0000090; // #MF STATUS_FLOAT_INVALID_OPERATION
+    case 17:
+        return 0x80000002; // #AC STATUS_DATATYPE_MISALIGNMENT
+    case 19:
+        // GAP: SSE #XM's specific exception lives in MXCSR; we deliver
+        // the generic multiple-traps code rather than decoding it.
+        return 0xC00002B4; // #XM STATUS_FLOAT_MULTIPLE_TRAPS
+    default:
+        return 0; // no structured-exception analogue
+    }
+}
+
 extern "C" void TrapDispatch(TrapFrame* frame)
 {
     // Diagnostic: snapshot the iretq-frame RIP at entry so the
@@ -874,6 +972,132 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         ::duetos::core::PanicWithValue("arch/traps", "wild trap-frame pointer at dispatch entry", fp);
     }
 
+    // === WILD-KERNEL-RIP FORENSIC (boot-tail wild-jump investigation) ===
+    // The captured boot-tail cascade BEGINS with a kernel-mode fault whose
+    // SAVED rip is null (IP=0) or non-canonical — a call/return through a
+    // clobbered code pointer. Catch the FIRST such fault HERE: before the
+    // tight-descent accounting, before IrqNestScope's per-CPU access (which
+    // itself faults if GSBASE was clobbered), and before the heavy panic
+    // dump. Emit a minimal RAW-serial forensic — no NMI broadcast, no
+    // minidump, no per-CPU deref (only rdmsr READS of the base MSRs, never
+    // a GS-relative access) — so it neither re-faults on a corrupt GSBASE
+    // nor trips QEMU-TCG's BQL abort the way the full dump's IPI/debugcon
+    // storm does. Then HALT. One-shot (static guard). This is BOTH an
+    // investigation probe (the rsp window exposes the return address that
+    // CALLed the wild target; the base MSRs test the GSBASE-corruption
+    // theory) AND a genuine defensive halt: a wild kernel RIP can never do
+    // useful work, so stopping at fault #1 beats a stack-exhausting cascade
+    // that ends in a triple-fault or a host-emulator abort.
+    {
+        const bool kmode = (frame->cs & 3) == 0;
+        const ::duetos::u64 wr_rip = frame->rip;
+        const ::duetos::u64 wr_hi17 = wr_rip >> 47;
+        const bool wr_noncanon = (wr_hi17 != 0ULL && wr_hi17 != 0x1FFFFULL);
+        const bool wr_wild = (wr_rip == 0ULL) || (wr_rip == ~0ULL) || wr_noncanon;
+        static volatile ::duetos::u32 s_wild_rip_forensic_done = 0;
+        if (kmode && wr_wild && s_wild_rip_forensic_done == 0)
+        {
+            s_wild_rip_forensic_done = 1;
+            asm volatile("cli");
+            arch::SerialEnterPanicMode();
+            PanicInProgressMark();
+            extern duetos::u8 _text_start[];
+            extern duetos::u8 _text_end[];
+            const ::duetos::u64 wr_tlo = reinterpret_cast<::duetos::u64>(_text_start);
+            const ::duetos::u64 wr_thi = reinterpret_cast<::duetos::u64>(_text_end);
+
+            SerialWrite("\n=== [wild-kernel-rip] first wild kernel saved-RIP — halting before cascade ===\n");
+            SerialWrite("  vector  = ");
+            SerialWriteHex(frame->vector);
+            SerialWrite("  err = ");
+            SerialWriteHex(frame->error_code);
+            SerialWrite("\n  rip     = ");
+            SerialWriteHex(wr_rip);
+            SerialWrite(wr_rip == 0ULL ? "  [NULL call target]\n"
+                                       : (wr_noncanon ? "  [non-canonical -> code ptr clobbered]\n" : "\n"));
+            SerialWrite("  cr2     = ");
+            SerialWriteHex(ReadCr2());
+            SerialWrite("\n  rsp     = ");
+            SerialWriteHex(frame->rsp);
+            SerialWrite("\n  rbp     = ");
+            SerialWriteHex(frame->rbp);
+            SerialWrite("\n  cs/ss   = ");
+            SerialWriteHex(frame->cs);
+            SerialWrite(" / ");
+            SerialWriteHex(frame->ss);
+            SerialWrite("\n  rflags  = ");
+            SerialWriteHex(frame->rflags);
+            SerialWrite("\n  cr3     = ");
+            SerialWriteHex(ReadCr3());
+            // GSBASE-corruption test: a per-CPU base clobbered with the
+            // TSC-shaped value seen in the cascade's CR2 would make every
+            // CurrentCpu() deref fault at ~CR2. Read the base MSRs raw.
+            SerialWrite("\n  gs_base = ");
+            SerialWriteHex(arch::ReadMsr(0xC0000101));
+            SerialWrite("  kgs_base = ");
+            SerialWriteHex(arch::ReadMsr(0xC0000102));
+            SerialWrite("  fs_base = ");
+            SerialWriteHex(arch::ReadMsr(0xC0000100));
+            // GPRs — one of these may hold the clobbered pointer / TSC value.
+            SerialWrite("\n  rax=");
+            SerialWriteHex(frame->rax);
+            SerialWrite(" rbx=");
+            SerialWriteHex(frame->rbx);
+            SerialWrite(" rcx=");
+            SerialWriteHex(frame->rcx);
+            SerialWrite(" rdx=");
+            SerialWriteHex(frame->rdx);
+            SerialWrite("\n  rsi=");
+            SerialWriteHex(frame->rsi);
+            SerialWrite(" rdi=");
+            SerialWriteHex(frame->rdi);
+            SerialWrite(" r8=");
+            SerialWriteHex(frame->r8);
+            SerialWrite(" r9=");
+            SerialWriteHex(frame->r9);
+            SerialWrite("\n  r10=");
+            SerialWriteHex(frame->r10);
+            SerialWrite(" r11=");
+            SerialWriteHex(frame->r11);
+            SerialWrite(" r12=");
+            SerialWriteHex(frame->r12);
+            SerialWrite(" r13=");
+            SerialWriteHex(frame->r13);
+            SerialWrite("\n  r14=");
+            SerialWriteHex(frame->r14);
+            SerialWrite(" r15=");
+            SerialWriteHex(frame->r15);
+            // Stack window: the CALL that jumped to the wild RIP left its
+            // return address on the stack near rsp. 32 fault-safe quads;
+            // [TEXT] flags any value inside kernel .text => a likely
+            // return address (addr2line it to find the calling site).
+            SerialWrite("\n  --- stack @ rsp (32 quads; [TEXT] = in kernel .text => likely caller) ---\n");
+            for (::duetos::u64 i = 0; i < 32; ++i)
+            {
+                const ::duetos::u64 addr = frame->rsp + i * 8;
+                ::duetos::u64 val = 0;
+                const bool ok = ::duetos::mm::SafeReadKernel(&val, reinterpret_cast<const void*>(addr), sizeof(val));
+                SerialWrite("    [rsp+");
+                SerialWriteHex(i * 8);
+                SerialWrite("] = ");
+                if (ok)
+                {
+                    SerialWriteHex(val);
+                    if (val >= wr_tlo && val < wr_thi)
+                        SerialWrite("  [TEXT]");
+                }
+                else
+                {
+                    SerialWrite("<unreadable>");
+                }
+                SerialWrite("\n");
+            }
+            SerialWrite("=== [wild-kernel-rip] end — halting (no cascade, no broadcast) ===\n");
+            for (;;)
+                asm volatile("cli; hlt");
+        }
+    }
+
     // DIAG: runaway fault-loop catcher by tight descent (see kMaxTightRecursion).
     // A fault-on-fault loop hands us frames marching DOWN one stack, each ~one
     // TrapDispatch frame below the last. Count consecutive tight descents; ANY
@@ -901,6 +1125,41 @@ extern "C" void TrapDispatch(TrapFrame* frame)
     }
 
     RipIntegrityGuard guard(frame);
+
+    // IRQ/trap nesting-depth accounting. Increment the current CPU's
+    // live depth on entry (updating the global high-water mark) and
+    // decrement on EVERY normal return via the dtor — including the
+    // recoverable IRQ / syscall / extable / LogAndContinue paths.
+    // The non-returning exits (SchedExit task-kill, the Panic / Halt
+    // outcomes, the #DF / NMI halt-spins) skip the dtor by design: a
+    // killed task's elevated slot is corrected by the very next
+    // context switch's IrqNestDepthSet, and a halted kernel never
+    // reads the slot again. Declared AFTER `guard` so it destructs
+    // first — the depth unwinds before the RIP-scribble check runs.
+    // This is what makes the runtime checker's IrqNesting ceiling
+    // (kIrqNestingCeiling) and the panic-snapshot depth field live
+    // signals instead of constants.
+    struct IrqNestScope
+    {
+        IrqNestScope()
+        {
+            const u64 depth = ++IrqNestSlot();
+            IrqNestMaxObserve(depth);
+        }
+        ~IrqNestScope()
+        {
+            // Defensive floor: never wrap a slot that is somehow
+            // already 0 (a stray decrement on a non-returning path
+            // that later re-entered) to u64-max — that would trip
+            // the ceiling alarm forever. Underflow-safe by design.
+            u64& slot = IrqNestSlot();
+            if (slot != 0)
+            {
+                --slot;
+            }
+        }
+    } nest_scope;
+
     // KPath: record that this vector fired before any handler-
     // specific dispatch. Single bounds check + relaxed atomic add;
     // safe in trap / IRQ context (no allocation, no klog, no locks).
@@ -1004,6 +1263,25 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         }
         else
         {
+            // Defense-in-depth: an unhandled but HARDWARE-DELIVERED IRQ
+            // still latched this CPU's LAPIC In-Service bit. Leaving it
+            // un-EOI'd silently blocks every lower-priority vector on
+            // this CPU for the rest of the boot — a device that fires
+            // on a vector whose handler was cleared (MSI-X bind
+            // fallback, hot-unplug, a driver that unmasked before
+            // installing) would wedge the timer tick and freeze the
+            // box with no diagnostic. We must NOT blindly EOI here,
+            // though: a software-triggered `int n` to a vector in the
+            // dispatched range (the boot `int $0x42` self-test lands in
+            // the MSI-X pool) never set an ISR bit, and EOIing it would
+            // dismiss some OTHER genuinely in-flight interrupt. Reading
+            // the LAPIC ISR for exactly this vector distinguishes the
+            // two: set => hardware delivery, needs EOI; clear =>
+            // software int n / spurious, leave the LAPIC alone.
+            if (LapicInServiceBitSet(static_cast<u8>(frame->vector)))
+            {
+                LapicEoi();
+            }
             // First time we see this unhandled vector: route through
             // klog so it shows up in the ring buffer + any future
             // crash dump. Subsequent fires from the same vector are
@@ -1467,40 +1745,26 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         // T6-02: before tearing the task down, try to deliver the
         // fault to the faulting Win32 PE as a structured exception.
         // A PE with a covering __try/__except (or a vectored
-        // handler) catches it and continues; only #DE/#UD/#GP/#PF
-        // are dispatchable, and only when the process has our ntdll
-        // mapped. On success the trap frame now resumes at
-        // ntdll!KiUserExceptionDispatcher — just return so iretq
-        // lands there. Any failure (no ntdll, unwritable user
-        // stack, re-fault loop) falls through to the legacy
-        // task-kill path unchanged.
+        // handler) catches it and continues, and only when the
+        // process has our ntdll mapped. On success the trap frame now
+        // resumes at ntdll!KiUserExceptionDispatcher — just return so
+        // iretq lands there. Any failure (no ntdll, unwritable user
+        // stack, re-fault loop) falls through to the legacy task-kill
+        // path unchanged.
+        //
+        // The dispatchable set is every CPU exception Windows itself
+        // surfaces as a structured exception (see VectorToUserNtStatus,
+        // the shared vector->NTSTATUS table), each mapped to the
+        // matching code so a __try/__except filtering on a specific
+        // EXCEPTION_* value sees the right one. #BP/#DB are absent —
+        // they are claimed earlier by the breakpoint / GDB subsystems
+        // under LogAndContinue policy and never reach this block.
         {
-            u32 seh_status = 0;
-            bool seh_is_pf = false;
-            bool seh_pf_write = false;
-            u64 seh_fault_va = 0;
-            bool seh_dispatchable = true;
-            switch (frame->vector)
-            {
-            case 0: // #DE
-                seh_status = 0xC0000094;
-                break;
-            case 6: // #UD
-                seh_status = 0xC000001D;
-                break;
-            case 13: // #GP
-                seh_status = 0xC0000005;
-                break;
-            case 14: // #PF
-                seh_status = 0xC0000005;
-                seh_is_pf = true;
-                seh_pf_write = (frame->error_code & 0x2) != 0;
-                seh_fault_va = ReadCr2();
-                break;
-            default:
-                seh_dispatchable = false;
-                break;
-            }
+            const u32 seh_status = VectorToUserNtStatus(frame->vector);
+            const bool seh_dispatchable = (seh_status != 0);
+            const bool seh_is_pf = (frame->vector == 14);
+            const bool seh_pf_write = seh_is_pf && ((frame->error_code & 0x2) != 0);
+            const u64 seh_fault_va = seh_is_pf ? ReadCr2() : 0;
             if (seh_dispatchable && ::duetos::subsystems::win32::Win32DeliverException(frame, seh_status, seh_is_pf,
                                                                                        seh_pf_write, seh_fault_va))
             {
@@ -1583,13 +1847,15 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         // egressed via debugcon the host gets a real `.dmp` per ring-3
         // crash — loadable in WinDbg / VS / VSCode — and the NVMe
         // reserved slot picks up the same bytes for offline triage.
-        u32 user_ntstatus = 0x80000003;
-        if (frame->vector == 6)
-            user_ntstatus = 0xC000001D;
-        else if (frame->vector == 13)
-            user_ntstatus = 0xC0000005;
-        else if (frame->vector == 14)
-            user_ntstatus = 0xC0000005;
+        // Same vector->NTSTATUS table the SEH delivery used, so the
+        // .dmp's exception code matches what a covering __try/__except
+        // would have seen. Vectors with no structured-exception
+        // analogue fall back to STATUS_BREAKPOINT (0x80000003).
+        u32 user_ntstatus = VectorToUserNtStatus(frame->vector);
+        if (user_ntstatus == 0)
+        {
+            user_ntstatus = 0x80000003;
+        }
         duetos::diag::minidump::EmitMinidumpFromTrapFrame(frame, user_ntstatus);
         // UserFault: journal the ring-3 crash so a chronically-failing
         // PE binary becomes visible in dfix list and the offline
@@ -1636,6 +1902,41 @@ extern "C" void TrapDispatch(TrapFrame* frame)
         HaltOnRecursiveFault(frame->vector, frame->rip);
     }
     PanicInProgressMark();
+
+    // Panic-precis — the single most important line of the dump,
+    // emitted FIRST, before any of the device-heavy steps that
+    // follow (the FAT32/NVMe fix-journal flush, the cross-CPU NMI
+    // broadcast, the debugcon minidump egress). Each of those can be
+    // truncated before the human-readable banner ever reaches the
+    // console: a wedged peer that never ACKs the NMI broadcast, a
+    // second fault taken inside the dump, or — observed on this
+    // tree — a buggy emulator that aborts the whole VM mid-write
+    // (QEMU-TCG's BQL assertion kills the process while we dump a
+    // wild-RIP #GP, so the operator otherwise sees only a bare
+    // "** CPU EXCEPTION **" with no cause). Raw panic-mode serial,
+    // no locks / klog / symbol resolve — just the root-cause quad
+    // (vector, RIP, CR2, error) plus CPU and the detected hypervisor
+    // so the fault stays actionable even when nothing else escapes,
+    // and so a truncated tail can be attributed to the emulator vs
+    // the kernel. Greppable sentinel: `[panic-precis]`.
+    arch::SerialEnterPanicMode();
+    {
+        const u64 precis_cr2 = ReadCr2();
+        const u64 precis_cpu = ::duetos::cpu::CurrentCpuIdOrBsp();
+        SerialWrite("\n[panic-precis] vec=0x");
+        SerialWriteHex(frame->vector);
+        SerialWrite(" rip=0x");
+        SerialWriteHex(frame->rip);
+        SerialWrite(" cr2=0x");
+        SerialWriteHex(precis_cr2);
+        SerialWrite(" err=0x");
+        SerialWriteHex(frame->error_code);
+        SerialWrite(" cpu=0x");
+        SerialWriteHex(precis_cpu);
+        SerialWrite(" hv=");
+        SerialWrite(HypervisorName(HypervisorInfoGet().kind));
+        SerialWrite("\n");
+    }
 
     // TrapCapture: deferred-slot record so the FAT32 / NVMe panic-
     // write tier picks up a structured (faulting-RIP, vector, CR2)
@@ -1874,21 +2175,19 @@ extern "C" void TrapDispatch(TrapFrame* frame)
 
     core::EndCrashDump();
 
-    // Binary minidump egress — see core::Panic for rationale.
-    // For traps we know the exception vector, so map it to a
-    // recognisable NTSTATUS code so a debugger that opens the
-    // .dmp shows the right exception kind:
-    //   #UD (vector 6)  → STATUS_ILLEGAL_INSTRUCTION 0xC000001D
-    //   #PF (vector 14) → STATUS_ACCESS_VIOLATION    0xC0000005
-    //   else            → STATUS_BREAKPOINT          0x80000003 (fallback)
-    // Use the TrapFrame-aware overload so all 16 GPRs + segment
-    // selectors + rflags land in the dump's CONTEXT_X64 — not
-    // just rip/rsp/rbp like the soft-panic path.
-    u32 ntstatus = 0x80000003;
-    if (frame->vector == 6)
-        ntstatus = 0xC000001D;
-    else if (frame->vector == 14)
-        ntstatus = 0xC0000005;
+    // Binary minidump egress — see core::Panic for rationale. Map the
+    // exception vector to a recognisable NTSTATUS via the shared table
+    // (the same one the ring-3 path uses) so a debugger that opens the
+    // .dmp shows the right exception kind for #DE/#UD/#GP/#PF/#MF/etc.
+    // Vectors with no analogue fall back to STATUS_BREAKPOINT. Use the
+    // TrapFrame-aware overload so all 16 GPRs + segment selectors +
+    // rflags land in the dump's CONTEXT_X64 — not just rip/rsp/rbp
+    // like the soft-panic path.
+    u32 ntstatus = VectorToUserNtStatus(frame->vector);
+    if (ntstatus == 0)
+    {
+        ntstatus = 0x80000003;
+    }
     duetos::diag::minidump::EmitMinidumpFromTrapFrame(frame, ntstatus);
 
     SerialWrite("[panic] Halting CPU.\n");
@@ -2007,12 +2306,17 @@ void TrapsSelfTest()
     // and the boot log shows the crash banner — easy regression signal.
     asm volatile("int3");
 
-    // 2. Spurious-vector probe. Vector 0x42 has no registered handler,
-    // no driver routes IRQs to it. With the prior full-IDT install
-    // it fires `mkstub 66` -> isr_common -> TrapDispatch's spurious
-    // branch, which logs "[idt] spurious vector 0x42 ..." and
-    // iretq's. Without the new install it would cascade to #NP and
-    // halt — same easy regression signal.
+    // 2. Stray-vector probe. Vector 0x42 (66) has no registered
+    // handler. It lands in the dispatched MSI-X range [48,239], so it
+    // takes the IRQ path's no-handler leg (logging "unhandled IRQ
+    // vector 0x42"), NOT the 48..255 "[idt] spurious" leg — which only
+    // covers vectors outside the dispatched range. That no-handler leg
+    // now also exercises the LAPIC-ISR EOI gate: because this is a
+    // software `int n`, the ISR bit for 0x42 is clear, so the gate
+    // must NOT EOI (an EOI here would dismiss a real in-flight IRQ).
+    // Either way the stub `mkstub 66` -> isr_common -> TrapDispatch
+    // must recover and iretq; without the full-IDT install it would
+    // cascade to #NP and halt — easy regression signal.
     asm volatile("int $0x42");
 
     // 3. Wild trap-frame-pointer guard (the TrapDispatch entry validator). The
@@ -2033,6 +2337,59 @@ void TrapsSelfTest()
     {
         SerialWrite("[traps] wild-frame-pointer guard FAIL\n");
         KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x6u);
+    }
+
+    // 4. IRQ/trap nesting-depth counter. Steps 1+2 each drove a trap
+    //    through TrapDispatch, so IrqNestScope incremented then
+    //    decremented the live depth twice and bumped the high-water
+    //    mark to at least 1. We are back in straight-line kernel code
+    //    now (no handler on the stack), so the live depth MUST read 0
+    //    and the max MUST be >= 1. A regression where the accessors
+    //    revert to the old constant-0 stubs (silently disarming the
+    //    runtime checker's IrqNesting ceiling + the panic-snapshot
+    //    depth field) trips this: max stays 0. A regression where the
+    //    dtor stops firing leaves the live depth elevated: depth != 0.
+    const u64 nest_now = IrqNestDepth();
+    const u64 nest_max = IrqNestMax();
+    if (nest_now == 0 && nest_max >= 1)
+    {
+        SerialWrite("[traps] irq-nest-depth counter OK (live=0 after self-test, max>=1)\n");
+    }
+    else
+    {
+        SerialWrite("[traps] irq-nest-depth counter FAIL live=");
+        SerialWriteHex(nest_now);
+        SerialWrite(" max=");
+        SerialWriteHex(nest_max);
+        SerialWrite("\n");
+        KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x7u);
+    }
+
+    // 5. Vector -> NTSTATUS table (VectorToUserNtStatus). Pure-function
+    //    spot-check of the single source of truth shared by the ring-3
+    //    SEH delivery switch and both minidump emits. A typo or an
+    //    accidental edit that desyncs a mapping (the "sentinel
+    //    divergence" class of bug) would silently hand a PE the wrong
+    //    EXCEPTION_* code or mislabel a .dmp; this catches it at boot.
+    //    Checks a representative spread plus the must-be-zero entries
+    //    (#BP and a reserved vector have no structured-exception
+    //    analogue and must return 0 so the caller's fallback fires).
+    bool ntmap_ok = true;
+    ntmap_ok &= (VectorToUserNtStatus(0) == 0xC0000094);  // #DE
+    ntmap_ok &= (VectorToUserNtStatus(6) == 0xC000001D);  // #UD
+    ntmap_ok &= (VectorToUserNtStatus(14) == 0xC0000005); // #PF
+    ntmap_ok &= (VectorToUserNtStatus(17) == 0x80000002); // #AC
+    ntmap_ok &= (VectorToUserNtStatus(19) == 0xC00002B4); // #XM
+    ntmap_ok &= (VectorToUserNtStatus(3) == 0);           // #BP — no analogue
+    ntmap_ok &= (VectorToUserNtStatus(15) == 0);          // reserved — no analogue
+    if (ntmap_ok)
+    {
+        SerialWrite("[traps] vector->NTSTATUS table OK (SEH delivery + minidump share one map)\n");
+    }
+    else
+    {
+        SerialWrite("[traps] vector->NTSTATUS table FAIL\n");
+        KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x8u);
     }
 
     SerialWrite("[traps] self-test OK — #BP and spurious both recovered\n");
