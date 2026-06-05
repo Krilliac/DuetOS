@@ -123,6 +123,15 @@ multiboot2_header_end:
  *     (verified to 215 s guest uptime, zero faults). See Roadmap
  *     "SMP=4 boot-tail wild-jump cascade — LANDED".
  *
+ *     Measured (2026-06-05, tools/qemu/boot-stack-watermark.sh, debug
+ *     KASAN+UBSAN, SMP=4): true high-water through the deep self-test
+ *     chain is 318 KiB (peak rsp at phys 0x1326f8), leaving 194 KiB
+ *     (37.8%) free. The ≈268 KiB above was a lower-bound ESTIMATE from
+ *     the single captured wild-rsp frame; the direct scan shows demand
+ *     runs ~50 KiB deeper, so the 128 KiB stack actually overflowed by
+ *     ~190 KiB. 512 KiB still clears it with comfortable margin. Re-run
+ *     that tool if the deep self-test set grows.
+ *
  *     NOTE: this stack has no guard page — the overflow that prompted the
  *     bump grew silently because the 2 MiB higher-half map is RW. The
  *     principled follow-up is a 4 KiB not-present guard page just below
