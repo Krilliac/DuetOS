@@ -1,5 +1,7 @@
 # DuetOS
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/krilliac/duetos)
+
 **A from-scratch operating system that boots on real PC hardware and runs Windows `.exe` files natively** — not under a VM, not through Wine, not as an emulator on top of Linux. The PE loader, the NT syscall layer, and 44 reimplemented Win32 DLLs (`kernel32`, `ntdll`, `user32`, `gdi32`, `ucrtbase`, `msvcp140`, `d3d11`, …) live in this repo as a peer ABI alongside the native one.
 
 ![DuetOS desktop, Duet theme — Calculator, Notepad, Files, Task Manager, Kernel Log, Clock, GFX Demo, System Monitor, themed taskbar](docs/screenshots/06-desktop-duet.png)
