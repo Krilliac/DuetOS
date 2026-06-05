@@ -446,6 +446,30 @@ area is readable immediately instead of corrupted.
   HOST-EMULATOR ABORT vs HANG, and always recovers the guest fault
   vector/RIP (incl. the ASCII-RIP root lead) from the `-d int` trace so
   a host abort can never fully mask the kernel bug underneath it.
+- **Scheduler defense-in-depth checks landed (`kernel/sched/sched.cpp`):**
+  three guards around the suspect reaper↔resume path, to catch the bug at
+  the source and name the offender:
+  1. **Resume-context validation** — before every `ContextSwitch`,
+     `next` must be canonical, NOT `TaskState::Dead`, and `next->rsp` must
+     lie inside `next`'s own kstack `(stack_base, stack_base+size]`. The
+     observed corruption (rsp into the kernel image, state Dead) is caught
+     HERE, before the wild jump, naming `next` + `prev`; panics.
+  2. **Reaper reachability guard** — before freeing a task, the reaper
+     scans every CPU's runqueue (`ForEachRunqueueTask`) and per-CPU
+     `current_task`; if the to-be-freed task is still reachable it panics
+     naming it — the direct test of the "free a still-schedulable task"
+     UAF hypothesis.
+  3. **RunqueuePop sanity** — WARN+probe (no panic) when a popped task is
+     Dead / has an out-of-stack rsp, surfacing the runqueue as the
+     dangling-reference source.
+  Verified non-false-firing across a full SMP boot through every self-test
+  up to `ec-selftest` (the run reached one self-test SHORT of the x509
+  cascade point — the checks stayed silent on the entire healthy path, so
+  the corruption is confirmed NOT to occur during normal scheduling before
+  x509). Capturing a check actually FIRING on the cascade needs a host
+  that boots past x509: the originating sandbox (TCG, no `/dev/kvm`) plus
+  the checks' small per-schedule overhead pushed the cascade just beyond
+  the boot budget the harness allowed.
 - **Investigation probe landed:** `arch/traps` now has a one-shot
   WILD-KERNEL-RIP forensic at dispatch entry — the FIRST kernel-mode
   fault whose saved RIP is null / -1 / non-canonical (the cascade's

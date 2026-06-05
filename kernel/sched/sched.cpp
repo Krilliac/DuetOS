@@ -1078,6 +1078,52 @@ template <typename F> bool ForEachRunqueueTask(F&& fn)
 // when Normal is empty. Work-stealing across peer CPUs is a
 // commit-6 follow-up; today an empty local runqueue means this
 // CPU has no work and falls through to its idle task.
+// Diagnostic-only sanity check on a task just dequeued from a runqueue
+// (UAF hunt, 2026-06-05). A task on the runqueue should be Ready with a
+// saved rsp inside its own kstack; a Dead state or an out-of-stack rsp
+// means a freed/corrupt task struct is still runqueue-reachable — the
+// dangling-reference SOURCE of the boot-tail wild-jump. WARN + probe only
+// (no panic): the downstream resume validator before ContextSwitch hard-
+// stops; this earlier signal localises the corruption to the runqueue.
+// One WARN per offending task pointer (a static seen-bitmap would be
+// overkill in trap context — dedup by only warning when the shape is
+// genuinely wrong, which on a healthy boot is never). Cheap: a handful of
+// compares on the hot pop path.
+inline void RunqueuePoppedSanity(Task* t)
+{
+    if (t == nullptr)
+    {
+        return;
+    }
+    bool bad_state = (t->state == TaskState::Dead);
+    bool bad_rsp = false;
+    if (t->stack_base != nullptr)
+    {
+        const u64 sb = reinterpret_cast<u64>(t->stack_base);
+        const u64 stop = sb + t->stack_size;
+        bad_rsp = (t->rsp <= sb || t->rsp > stop);
+    }
+    if (bad_state || bad_rsp)
+    {
+        KBP_PROBE_V(::duetos::debug::ProbeId::kSchedContextSwitchWildRet, t->rsp);
+        arch::SerialLineGuard guard;
+        arch::SerialWrite("[sched] CORRUPT TASK ON RUNQUEUE (popped)  task=");
+        arch::SerialWriteHex(reinterpret_cast<u64>(t));
+        arch::SerialWrite("  id=");
+        arch::SerialWriteHex(t->id);
+        arch::SerialWrite("  name=\"");
+        arch::SerialWrite(t->name ? t->name : "<null>");
+        arch::SerialWrite("\"  state=");
+        arch::SerialWriteHex(static_cast<u64>(t->state));
+        arch::SerialWrite(bad_state ? "  [DEAD]" : "");
+        arch::SerialWrite("  rsp=");
+        arch::SerialWriteHex(t->rsp);
+        arch::SerialWrite(bad_rsp ? "  [rsp OUTSIDE own stack]" : "");
+        arch::SerialWrite("\n");
+        // No panic — resume validator before ContextSwitch is the gate.
+    }
+}
+
 Task* RunqueuePop()
 {
     // Dequeue funnel — same documented g_sched_lock precondition as
@@ -1098,6 +1144,7 @@ Task* RunqueuePop()
         // should never go negative on a real pop path.
         KASSERT(p->runq_normal_len > 0, "sched", "RunqueuePop: normal_len underflow");
         --p->runq_normal_len;
+        RunqueuePoppedSanity(t);
         return t;
     }
     t = RunqHeadIdle(p);
@@ -1109,6 +1156,7 @@ Task* RunqueuePop()
             RunqTailIdle(p) = nullptr;
         }
         t->next = nullptr;
+        RunqueuePoppedSanity(t);
         return t;
     }
     return nullptr;
@@ -2816,6 +2864,92 @@ void ScheduleLockedHandoff(sync::IrqFlags lock_flags)
                 // the authoritative gate. This warn is the early-
                 // surfacing diagnostic; the panic is downstream.
             }
+        }
+    }
+
+    // === RESUME-CONTEXT VALIDATION (reaper/scheduler UAF hunt, 2026-06-05) ===
+    // We are about to ContextSwitch INTO `next` by loading next->rsp as the
+    // kernel stack and `ret`-ing through whatever that stack holds. The
+    // boot-tail wild-jump (Roadmap "SMP=4 x86_64-debug boot-tail wild-jump")
+    // was exactly this: Schedule() resumed a task whose saved context had
+    // been clobbered (freed-and-reused Task struct) — rsp pointing into the
+    // kernel image (0xffffffff800d.... — below the boot stack, not a real
+    // stack), a null/garbage saved RIP, a TSC-shaped value in a register.
+    // The trampoline-slot checks above only cover FIRST-RUN tasks; a RESUMED
+    // task with a corrupt rsp slips straight through to ContextSwitch and the
+    // `ret` jumps into garbage. Validate `next` HERE, on every switch-in:
+    //   * non-null + canonical pointer (the picked Task* itself),
+    //   * state != Dead (a Dead task's stack is reclaimable; resuming it
+    //     loads freed/garbage context — the observed failure),
+    //   * rsp strictly inside next's OWN kernel stack (sb, sb+size]. A
+    //     SchedCreate-primed first-run task has rsp = slot_top-56; a resumed
+    //     task is deeper but still inside. An rsp OUTSIDE that window is the
+    //     corruption signature — caught here, BEFORE the wild jump, naming
+    //     both `next` (the corrupt task) and `prev` (who is handing off).
+    // Boot/sentinel tasks (stack_base == nullptr) skip the rsp-range arm
+    // (they have no heap kstack); the not-Dead + canonical arms still apply.
+    // Cheap on the happy path (a handful of compares); the heavy dump only
+    // runs on a true hit. SerialLineGuard keeps the dump atomic under SMP.
+    {
+        const ::duetos::u64 next_ptr = reinterpret_cast<::duetos::u64>(next);
+        const ::duetos::u64 next_hi17 = next_ptr >> 47;
+        const bool next_canon = (next_hi17 == 0ULL) || (next_hi17 == 0x1FFFFULL);
+        bool resume_ok = (next != nullptr) && next_canon && (next->state != TaskState::Dead);
+        ::duetos::u64 sb = 0;
+        ::duetos::u64 stop = 0;
+        if (resume_ok && next->stack_base != nullptr)
+        {
+            sb = reinterpret_cast<::duetos::u64>(next->stack_base);
+            stop = sb + next->stack_size;
+            if (next->rsp <= sb || next->rsp > stop)
+            {
+                resume_ok = false;
+            }
+        }
+        if (!resume_ok)
+        {
+            KBP_PROBE_V(::duetos::debug::ProbeId::kSchedContextSwitchWildRet, next ? next->rsp : 0);
+            arch::SerialLineGuard guard;
+            arch::SerialWrite("\n[sched] WILD RESUME CONTEXT — refusing ContextSwitch (reaper/UAF?)  cpu=");
+            arch::SerialWriteHex(cpu::CurrentCpuIdOrBsp());
+            arch::SerialWrite("\n  next      = ");
+            arch::SerialWriteHex(next_ptr);
+            arch::SerialWrite(next_canon ? "" : "  [non-canonical Task*]");
+            if (next != nullptr)
+            {
+                arch::SerialWrite("\n  next id   = ");
+                arch::SerialWriteHex(next->id);
+                arch::SerialWrite("  name=\"");
+                arch::SerialWrite(next->name ? next->name : "<null>");
+                arch::SerialWrite("\"  state=");
+                arch::SerialWriteHex(static_cast<::duetos::u64>(next->state));
+                arch::SerialWrite(next->state == TaskState::Dead ? "  [DEAD — reaped task resumed!]" : "");
+                arch::SerialWrite("\n  next rsp  = ");
+                arch::SerialWriteHex(next->rsp);
+                arch::SerialWrite("  stack=[");
+                arch::SerialWriteHex(sb);
+                arch::SerialWrite("..");
+                arch::SerialWriteHex(stop);
+                arch::SerialWrite("]");
+                arch::SerialWrite((next->stack_base != nullptr && (next->rsp <= sb || next->rsp > stop))
+                                      ? "  [rsp OUTSIDE own stack — corrupt context]"
+                                      : "");
+                arch::SerialWrite("\n  next first_run=");
+                arch::SerialWriteHex(static_cast<::duetos::u64>(next->first_run));
+            }
+            arch::SerialWrite("\n  prev      = ");
+            arch::SerialWriteHex(reinterpret_cast<::duetos::u64>(prev));
+            if (prev != nullptr)
+            {
+                arch::SerialWrite("  id=");
+                arch::SerialWriteHex(prev->id);
+                arch::SerialWrite("  name=\"");
+                arch::SerialWrite(prev->name ? prev->name : "<null>");
+                arch::SerialWrite("\"");
+            }
+            arch::SerialWrite("\n");
+            core::PanicWithValue("sched", "resume of task with corrupt saved context (reaper UAF?)",
+                                 next ? next->rsp : 0);
         }
     }
 
@@ -5025,6 +5159,61 @@ namespace
             {
                 mm::AddressSpaceRelease(dead->as);
                 dead->as = nullptr;
+            }
+
+            // === REAPER REACHABILITY GUARD (UAF hunt, 2026-06-05) ===
+            // The smoking-gun test for the boot-tail wild-jump hypothesis
+            // (Schedule() later resumes a freed task). BEFORE we free this
+            // task's stack and struct, prove it is genuinely unreachable: it
+            // must NOT be on any CPU's runqueue and must NOT be any CPU's
+            // `current_task`. By construction it should already be off-CPU
+            // and off-runqueue (zombie handoff in SchedFinishTaskSwitch), so
+            // a hit here means the reaper is about to free a task that
+            // Schedule() can still pick — exactly the UAF that produces the
+            // corrupt resume. Scan under g_sched_lock (the producer of both
+            // structures); capture the verdict, release, then panic naming
+            // the offender so we catch the ROOT here, before the wild jump.
+            {
+                bool on_runq = false;
+                bool is_current = false;
+                ::duetos::u32 cur_cpu = 0;
+                {
+                    sync::IrqFlags lf = sync::SpinLockAcquire(g_sched_lock);
+                    on_runq = ForEachRunqueueTask([dead](Task* t) { return t == dead; });
+                    const u32 lim = arch::SmpCpuIdLimit();
+                    for (u32 i = 0; i < lim; ++i)
+                    {
+                        cpu::PerCpu* p = arch::SmpGetPercpu(i);
+                        if (p != nullptr && p->current_task == dead)
+                        {
+                            is_current = true;
+                            cur_cpu = i;
+                            break;
+                        }
+                    }
+                    sync::SpinLockRelease(g_sched_lock, lf);
+                }
+                if (on_runq || is_current)
+                {
+                    arch::SerialLineGuard guard;
+                    arch::SerialWrite("\n[sched/reaper] REACHABLE TASK ABOUT TO BE FREED — UAF root  task=");
+                    arch::SerialWriteHex(reinterpret_cast<::duetos::u64>(dead));
+                    arch::SerialWrite("  id=");
+                    arch::SerialWriteHex(dead->id);
+                    arch::SerialWrite("  name=\"");
+                    arch::SerialWrite(dead->name ? dead->name : "<null>");
+                    arch::SerialWrite("\"  state=");
+                    arch::SerialWriteHex(static_cast<::duetos::u64>(dead->state));
+                    arch::SerialWrite(on_runq ? "  [STILL ON A RUNQUEUE]" : "");
+                    if (is_current)
+                    {
+                        arch::SerialWrite("  [IS current_task on cpu ");
+                        arch::SerialWriteHex(cur_cpu);
+                        arch::SerialWrite("]");
+                    }
+                    arch::SerialWrite("\n");
+                    core::PanicWithValue("sched/reaper", "freeing a still-reachable task (resume UAF root)", dead->id);
+                }
             }
 
             // Stack_base can be nullptr for the boot task (task 0);
