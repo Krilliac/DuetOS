@@ -96,6 +96,7 @@
 - [Driver and Fault Domains](security/Driver-Domains.md)
 - [Persistence (secrets at rest)](security/Persistence.md)
 - [W^X / NX Enforcement](security/WX-Enforcement.md)
+- [Hardware Safety (default-inert contract)](security/Hardware-Safety.md)
 - [Intel ME / AMD PSP Mitigation](security/ME-PSP-Mitigation.md)
 - [Attack Simulation](security/Attack-Simulation.md)
 - [Runtime Recovery Strategy](security/Runtime-Recovery.md)

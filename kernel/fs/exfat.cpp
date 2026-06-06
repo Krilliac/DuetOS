@@ -146,6 +146,13 @@ void WalkRootDir(Volume& v)
 
 } // namespace
 
+bool ExfatVolumeIsDuetOsOwned(const Volume* v)
+{
+    if (v == nullptr)
+        return false;
+    return v->volume_serial == kDuetOsVolumeSerial;
+}
+
 ::duetos::core::Result<u32> ExfatProbe(u32 block_handle)
 {
     using ::duetos::core::Err;
@@ -178,8 +185,30 @@ void WalkRootDir(Volume& v)
     v.cluster_heap_offset_sectors = bs.cluster_heap_offset;
     v.cluster_count = bs.cluster_count;
     v.first_cluster_of_root = bs.root_dir_first_cluster;
+    v.volume_serial = bs.volume_serial;
     v.bytes_per_sector_shift = bs.bytes_per_sector_shift;
     v.sectors_per_cluster_shift = bs.sectors_per_cluster_shift;
+
+    // Adoption gate: DuetOS only registers exFAT volumes it owns. A
+    // foreign exFAT volume (a Windows / macOS SD card, a USB stick) is
+    // recognised and logged but NOT added to the registry — otherwise
+    // its root-dir write paths (ExfatCreateInRoot / ExfatAppendInRoot /
+    // ExfatTruncateInRoot) could mutate a partition DuetOS does not own
+    // the moment exFAT is wired into the VFS. Inert-by-default: no
+    // DuetOS marker -> not adopted. Mirrors the FAT32 adoption gate
+    // landed in commit 7bb94062.
+    if (!ExfatVolumeIsDuetOsOwned(&v))
+    {
+        arch::SerialWrite("[exfat] foreign exFAT volume (no DuetOS marker) — not adopting; handle=");
+        arch::SerialWriteHex(block_handle);
+        arch::SerialWrite(" volume_serial=");
+        arch::SerialWriteHex(v.volume_serial);
+        arch::SerialWrite("\n");
+        // GAP: foreign-exFAT interop READ (mounting a foreign exFAT
+        // volume read-only) is a deliberate future opt-in mount path,
+        // not a boot auto-adopt — revisit when interop-read lands.
+        return Err{ErrorCode::NotFound};
+    }
 
     arch::SerialWrite("[exfat] probe OK handle=");
     arch::SerialWriteHex(block_handle);

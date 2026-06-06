@@ -10458,3 +10458,41 @@ so the `-d int` log + unbuffered serial were the capture path).
 
 **Related roadmap track(s):** Scheduler / SMP / boot. Closes the Roadmap
 entry "SMP=4 boot-tail wild-jump cascade (post-x509 self-test)".
+
+## 2026-06-06 — exFAT adopts only DuetOS-owned volumes (serial marker), mirroring the FAT32 gate
+
+Following the hardware-safety audit generalizing commit 7bb94062, the
+exFAT probe was inverted from default-to-act to default-to-inert.
+
+**Decision.** `ExfatProbe` registers a parsed exFAT volume **only** when
+its VBR VolumeSerialNumber (offset 0x64) equals
+`exfat::kDuetOsVolumeSerial` (0xCAFEBABE) — checked via the new
+`ExfatVolumeIsDuetOsOwned` predicate, the exFAT analogue of
+`Fat32VolumeIsDuetOsOwned`. A foreign exFAT volume (a Windows / macOS SD
+card, a USB stick) is parsed and logged but **not** added to the
+registry, so its root-dir write paths can never reach a partition DuetOS
+does not own once exFAT is wired into the VFS.
+
+**Alternatives ruled out (so the next slice doesn't re-pick them):**
+
+- *Adopt any parseable exFAT volume* (the pre-fix behaviour) — this is
+  exactly Vector B of the incident; a foreign exFAT volume would become
+  writable the moment exFAT is exposed through the VFS.
+- *Gate on the volume label instead of the serial* — exFAT carries its
+  label in a root-directory entry (type 0x83), not the boot sector, so
+  it isn't available at probe time without a second walk. FAT32 requires
+  BOTH serial + label because the BPB gives it both cheaply; for exFAT
+  the boot-sector serial alone is the pragmatic marker. A 1-in-2³²
+  accidental collision is acceptable under this threat model (accidental
+  corruption of the user's own data, not a hostile disk) — the same
+  "not a security boundary" framing as the FAT32 marker.
+
+**Required of every exFAT producer.** The synthetic selftest VBR
+(`exfat_selftest.cpp`) now stamps the marker, and a new foreign-reject
+leg asserts a non-marked volume is refused (`Fail("foreign-not-rejected")`
+/ `Fail("foreign-registered")`). A future on-target exFAT formatter must
+stamp `kDuetOsVolumeSerial` in the VolumeSerialNumber field.
+
+**Related.** The full hardware-safety contract and the pre-landing
+precondition table for every still-unimplemented risky controller live
+in [`security/Hardware-Safety`](../security/Hardware-Safety.md).

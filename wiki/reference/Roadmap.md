@@ -876,6 +876,72 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 
 ---
 
+## Hardware safety
+
+> The governing contract — *default to inert; mutate persistent /
+> physical hardware state only on positive DuetOS ownership + explicit
+> operator action* — lives in
+> [`security/Hardware-Safety`](../security/Hardware-Safety.md). That page
+> carries the full **pre-landing precondition table**: the safety gate
+> each unimplemented risky controller (UEFI NVRAM, SPI flash, GPU
+> VBIOS/fan/clock, NIC EEPROM, voltage/RAPL/thermal MSRs, Wi-Fi TX power,
+> secure-erase, …) **must ship in the same slice** that implements it.
+> The items below are the *active* safety work; everything else is the
+> "don't build the writer without its gate" rule enforced at review.
+
+### Enable the IOMMU by default (DMA protection)
+
+- **Residual:** VT-d discovery → decode → identity page tables → enable
+  is implemented but **gated OFF by default** (`IommuEnableAtBoot`);
+  AMD-Vi is parse-only (IVRS), with register decode / paging / enable
+  deferred until an AMD test machine exists. Until the IOMMU enforces,
+  any bus-master driver fed a bad descriptor can scribble firmware /
+  other-OS memory (mitigated today only by the NVMe/AHCI staging-buffer
+  discipline). See [`drivers/IOMMU`](../drivers/IOMMU.md).
+- **What's needed:** validate VT-d enforce against the live NVMe/AHCI/
+  xHCI/e1000 DMA paths (SWIOTLB-style bounce or per-driver IOVA mapping),
+  then flip the default to ON; implement AMD-Vi decode/paging/enable.
+- **Precondition for every new bus-master driver:** map only
+  driver-owned buffers into device address space; validate descriptor
+  targets. (Hardware-Safety pre-landing row "DMA without IOMMU".)
+
+### Ownership write-chokepoint — one predicate, not N call-sites
+
+- **Residual:** disk-write ownership is enforced per-call-site
+  (`Fat32VolumeIsDuetOsOwned`, `ExfatVolumeIsDuetOsOwned`,
+  `GptCrashDumpRegionSane`). The incident (7bb94062) happened because one
+  call-site missed its check. The block layer's `BlockWriteGuard`
+  (Off/Advisory/Deny) is defense-in-depth but not mandatory.
+- **What's needed:** a single `DiskRegionIsOwned(handle, lba, len)` that
+  *every* persistent block-write primitive routes through, so a new
+  writer cannot compile without passing the gate — converting the
+  allow-list class-of-bug into an enforced property. Land it with a
+  foreign-reject self-test.
+
+### DuetFS superblock owner GUID (probe hardening)
+
+- **Residual:** `ProbeBlockHandle` mounts a DuetFS volume on a bare
+  superblock-magic match with no DuetOS-owner GUID. Real-world risk is
+  very low (a foreign disk would need valid DuetFS magic at the exact
+  offset), but it's inconsistent with the FAT32/exFAT ownership gates.
+- **What's needed:** add a DuetOS-owner GUID/UUID to the DuetFS
+  superblock (Rust crate) and verify it in `ProbeBlockHandle` before
+  mounting. Optional / low priority.
+
+### Wi-Fi regulatory + TX-power clamp (before live TX lands)
+
+- **Residual:** the wireless stack has no TX-power programming yet (safe
+  by absence). When live silicon TX lands (see *Drivers → iwlwifi /
+  ath9k_htc*), TX power must be clamped to the lesser of the regulatory
+  limit and the EEPROM-calibrated max, defaulting to the most-restrictive
+  ("world") domain until a country is set — exceeding limits overheats
+  the PA/PHY and is illegal. See
+  [`drivers/Wireless-Regulatory`](../drivers/Wireless-Regulatory.md) and
+  the Hardware-Safety "Wi-Fi TX power" row. **Precondition, not a
+  standalone slice** — it ships with the TX path.
+
+---
+
 ## Win32 / NT subsystem
 
 ### Locale / format-picture surface (residual)
