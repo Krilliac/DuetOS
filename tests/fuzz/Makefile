@@ -59,7 +59,7 @@ HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuz
              $(BIN)/fuzz_usbclass $(BIN)/fuzz_usbhid \
              $(BIN)/fuzz_tls \
              $(BIN)/fuzz_nvidia_gsp_fw $(BIN)/fuzz_amd_gfx_fw \
-             $(BIN)/fuzz_acpi $(BIN)/fuzz_aml
+             $(BIN)/fuzz_acpi $(BIN)/fuzz_aml $(BIN)/fuzz_ec
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -540,6 +540,16 @@ $(BIN)/libduetos_aml_fuzz.a: host_shim/aml_fuzz_shim.rs \
 $(BIN)/fuzz_aml: fuzz_aml.cpp $(KERNEL)/acpi/aml.cpp \
 		$(BIN)/libduetos_aml_fuzz.a | $(BIN)
 	$(CXX) $(CXXFLAGS) -DDUETOS_FIX_JOURNAL_OFF $^ -o $@
+
+# --- EC public-key (SEC1 point) parser ---------------------------
+#
+# ParsePublicKey decodes the uncompressed EC point out of an X.509
+# cert's SubjectPublicKeyInfo (attacker-chosen TLS cert). Pure
+# (const u8*, len) -> Point over the kernel bigint; links ec.cpp +
+# crypto/bigint.cpp (host-clean, also linked by fuzz_x509). The
+# ProbeFire stub for ec.cpp's self-test path lives in the harness.
+$(BIN)/fuzz_ec: fuzz_ec.cpp $(NET)/ec.cpp $(CRYPTO)/bigint.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
 
 # Each run-* keeps a persistent corpus and stops after 60 s.
 # run-pe seeds the corpus first (see seeds/gen_pe_seeds.py) so the
