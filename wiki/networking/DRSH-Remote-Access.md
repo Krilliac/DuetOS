@@ -66,6 +66,18 @@ Specifically, DRSH provides:
 - **No password exfil**: the password never crosses the wire, only an
   HMAC-SHA256 response under a PBKDF2-derived PMK salted with the
   server's per-session nonce.
+- **Brute-force lockout**: after `kDrshLockoutThreshold` (5) consecutive
+  handshakes that complete the AUTH step with a wrong password, the
+  listener refuses **all** new connections — without running any crypto —
+  for `kDrshLockoutDurationNs` (60 s), auto-thawing on expiry. This
+  mirrors the console-login lockout in `security/auth.cpp`, so a remote
+  attacker faces the same wall the local login already puts up. Only
+  genuine wrong-password handshakes feed the streak: malformed frames,
+  version mismatches, and bare TCP connects that drop before AUTH do
+  **not** count, so a port scanner can't lock the admin out (self-DoS).
+  A successful handshake, a `drshd passwd` rotation, or `drshd unlock`
+  clears the streak; `drshd status` shows `lockout=`, `failed_streak`,
+  and `throttled` (connections refused while locked).
 
 DRSH does **not** provide:
 

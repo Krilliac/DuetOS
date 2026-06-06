@@ -73,6 +73,35 @@ u64 SpawnPeFile  (const char* name, const u8* pe_bytes,  u64 pe_len,  ...);  // 
   pre-loads the standard Win32 DLL set into the new AS before `PeLoad`
   runs so `ResolveImports` can consult their export tables.
 
+## Service Manager (init / supervisor)
+
+`kernel/core/service.{h,cpp}` is the kernel-resident init equivalent. It
+owns a single declarative manifest of the userland programs DuetOS
+launches at boot (`usershell`, `hello_native`, `nat_calc`, `nat_sysinfo`,
+`duet-pkg`) — replacing the hand-unrolled `SpawnElfFile` blocks that used
+to live inline in `boot_bringup.cpp`. `ServiceManagerStartAll()` (called
+from boot) spawns every `autostart` entry in manifest order through the
+canonical `core::Spawn*File` API and starts the `svcmon` supervisor task,
+which:
+
+- polls the scheduler to track each service's live state
+  (`Running` → `Exited`), using monotonic PIDs so a poll-by-pid can never
+  adopt a reused id;
+- respawns `ServiceRestartPolicy::Always` services on exit with
+  fault-domain-style crash-loop protection (≤ 5 respawns / 60 s, else
+  `Failed`).
+
+The `svc` shell command drives the set at runtime (`list` for any user;
+`start`/`stop`/`restart <name>` admin-gated). v0 scope: services run with
+the trusted cap-set (a per-service sandbox profile is a future knob); all
+current entries are oneshot (`Never`), so the respawn path is unit-tested
+via `ServiceManagerSelfTest` (the crash-loop rate limiter) and ready for
+the first long-running userland daemon. **Why kernel-resident rather than
+a `/sbin/init` ELF:** a userland PID-1 needs ring-3 process-spawns-process
+plumbing that does not exist yet; the supervisor lives where the other
+system services (heartbeat, selfthink, autonomic) already live, and a
+future userland init can adopt the same manifest shape.
+
 ## Boot Output (trimmed example)
 
 ```
