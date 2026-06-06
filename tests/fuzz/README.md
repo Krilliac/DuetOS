@@ -43,6 +43,8 @@ silently drop a parser from coverage.
 | `fuzz_fw_pkg` | `FwPackageLooksLike` + `FwPackageParse` (`loader/firmware_package.cpp` + the real `crypto/sha256`) — the 160-byte DuetOS firmware envelope (magic/version/family/flags/length + SHA-256 payload digest) wrapping a vendor blob. The digest gate is exercised, not stubbed. |
 | `fuzz_pe_exports` | `PeParseExports` + `PeExportAt` / `PeExportLookupOrdinal` (`loader/pe_exports.cpp` + `util/string`) — IMAGE_EXPORT_DIRECTORY + EAT/ENT/EOT array walk, forwarder classification, name-table binary search. A distinct entry point from the PE loader (`fuzz_pe`). |
 | `fuzz_vt` | `ParserFeed` (`util/vt_parser.cpp` + `util/unicode`) — the DEC ANSI state machine over a PTY byte stream: C0 controls, UTF-8 multi-byte join, bounded CSI param array, bounded OSC string with truncation flag. Non-null no-op callbacks installed so the CSI/OSC dispatch arms are reached. |
+| `fuzz_acpi` | The seven `duetos_acpi` (Rust) firmware-table walkers (`acpi/acpi_rust/`): `duetos_acpi_parse_{rsdp,table_header,madt_entry_header,fadt,mcfg_entry,hpet,srat_memory_affinity}` — RSDP v1/v2 + 8-bit-additive checksum, the 36-byte generic table header, and the MADT / FADT / MCFG / HPET / SRAT bodies. One input drives every parser plus the chained MADT-subtable and SRAT-memory-affinity length walks. These bytes are firmware-supplied — fully attacker-controlled on a malicious VM host. Same rlib + panic=abort staticlib recipe as `fuzz_exfat`; links no kernel C++ TU. |
+| `fuzz_aml` | `AmlNamespaceBuild` + the post-walk byte consumers `AmlMethodBody` / `AmlNameValue` / `AmlReadS5` (`acpi/aml.cpp`) — the recursive AML bytecode walker over the DSDT/SSDT (PkgLength, NameString, Scope/Device/Method push, Buffer/Package, OperationRegion + Field lists). The harness serves the fuzz input as the DSDT by defining the `AcpiMapTable`/`DsdtAddress` accessors itself and drives the real public API, resetting global namespace state with `AmlNamespaceShutdown` between iterations — no kernel-source change. **Found a 1-byte heap-OOB read in `ReadNameString` (a malformed `PkgLength` shorter than its own encoding underflowed `pkg_end - name_off`); fixed at all four package-length sites.** |
 
 `fuzz_pe` links the real no_std `duetos_exec_meta` Rust crate (built as
 an rlib + a panic=abort staticlib wrapper, so a Rust-side overflow/index
@@ -109,6 +111,8 @@ make -C tests/fuzz run-x509        # 60 s (no seed gate)
 make -C tests/fuzz run-fw_pkg      # seeds the corpus first, then 60 s
 make -C tests/fuzz run-pe_exports  # 60 s
 make -C tests/fuzz run-vt          # 60 s (no seed gate)
+make -C tests/fuzz run-acpi        # seeds the corpus first, then 60 s
+make -C tests/fuzz run-aml         # seeds the corpus first, then 60 s
 ```
 
 Each `run-*` target creates `corpus/<name>/` and lets libFuzzer

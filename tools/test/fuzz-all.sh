@@ -59,7 +59,9 @@ maxlen_for() {
         fuzz_ext4)  echo 1048576 ;;
         fuzz_pe)    echo 131072  ;;
         fuzz_gpt|fuzz_fat32|fuzz_exfat|fuzz_ntfs) echo 262144 ;;
+        fuzz_aml)   echo 262144  ;;
         fuzz_net)   echo 2048    ;;
+        fuzz_acpi)  echo 65536   ;;
         *)          echo 4096    ;;
     esac
 }

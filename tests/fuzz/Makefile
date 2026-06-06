@@ -58,7 +58,8 @@ HARNESSES := $(BIN)/fuzz_iwl_fw $(BIN)/fuzz_rtl_fw $(BIN)/fuzz_bcm_fw $(BIN)/fuz
              $(BIN)/fuzz_edid $(BIN)/fuzz_cea861 \
              $(BIN)/fuzz_usbclass $(BIN)/fuzz_usbhid \
              $(BIN)/fuzz_tls \
-             $(BIN)/fuzz_nvidia_gsp_fw $(BIN)/fuzz_amd_gfx_fw
+             $(BIN)/fuzz_nvidia_gsp_fw $(BIN)/fuzz_amd_gfx_fw \
+             $(BIN)/fuzz_acpi $(BIN)/fuzz_aml
 
 .PHONY: all clean
 all: $(HARNESSES)
@@ -481,6 +482,46 @@ $(BIN)/libduetos_amd_gfx_fw_fuzz.a: host_shim/amd_gfx_fw_fuzz_shim.rs \
 $(BIN)/fuzz_amd_gfx_fw: fuzz_amd_gfx_fw.cpp $(GPUDRV)/amd_gfx_fw.cpp \
 		host_shim/gpu_fw_stubs.cpp $(BIN)/libduetos_amd_gfx_fw_fuzz.a | $(BIN)
 	$(CXX) $(CXXFLAGS) -I $(AMD_GFX_FW_RUST)/include $^ -o $@
+
+# --- ACPI firmware-table parsers (Rust-backed) ------------------
+#
+# The RSDP / table-header / MADT / FADT / MCFG / HPET / SRAT byte
+# walkers are the no_std `duetos_acpi` crate (kernel/acpi/acpi_rust/);
+# the C++ acpi.cpp wrapper is a thin FFI caller. Same rlib +
+# panic=abort staticlib recipe as fuzz_exfat / fuzz_ntfs — a
+# Rust-side bounds/overflow bug in any table walker aborts as a
+# libFuzzer crash. No kernel C++ TU is linked: the harness drives
+# the crate's C ABI directly through acpi_rust.h.
+ACPI_RUST := $(KERNEL)/acpi/acpi_rust
+
+$(BIN)/libduetos_acpi.rlib: $(ACPI_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_acpi -O $< -o $@
+
+$(BIN)/libduetos_acpi_fuzz.a: host_shim/acpi_rust_fuzz_shim.rs \
+		$(BIN)/libduetos_acpi.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_acpi=$(BIN)/libduetos_acpi.rlib $< -o $@
+
+$(BIN)/fuzz_acpi: fuzz_acpi.cpp $(BIN)/libduetos_acpi_fuzz.a | $(BIN)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+# --- AML bytecode interpreter (DSDT/SSDT namespace walker) -------
+#
+# The C++ AML walker in kernel/acpi/aml.cpp consumes the AML
+# bytecode of the DSDT + every SSDT — firmware-supplied, fully
+# attacker-controlled on a malicious VM host. The harness serves
+# the fuzz input as the DSDT by defining the AcpiMapTable /
+# DsdtAddress / DsdtLength / Ssdt* accessors itself (see
+# fuzz_aml.cpp), then drives the real public AmlNamespaceBuild()
+# entry point and resets global state with AmlNamespaceShutdown()
+# between iterations. No kernel-source change: the walker is
+# exercised exactly as boot reaches it. Compiled with
+# -DDUETOS_FIX_JOURNAL_OFF so the FIX_NOTE_GAP markers no-op
+# (no fix-journal sink to link); host_shim/mm/page.h shadows the
+# unused mm include.
+$(BIN)/fuzz_aml: fuzz_aml.cpp $(KERNEL)/acpi/aml.cpp | $(BIN)
+	$(CXX) $(CXXFLAGS) -DDUETOS_FIX_JOURNAL_OFF $^ -o $@
 
 # Each run-* keeps a persistent corpus and stops after 60 s.
 # run-pe seeds the corpus first (see seeds/gen_pe_seeds.py) so the

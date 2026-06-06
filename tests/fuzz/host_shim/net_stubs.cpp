@@ -70,6 +70,17 @@ i64 PipeWrite(u32, u64, u64)
 {
     return -1;
 }
+// Kernel-buffer pipe I/O — socket.cpp's stream send/recv funnel
+// through these. The frame fuzzer drives the RX parse path, not the
+// loopback stream, so a no-op (no bytes moved) satisfies the link.
+i64 PipeReadKernel(u32, u8*, u64)
+{
+    return -1;
+}
+i64 PipeWriteKernel(u32, const u8*, u64)
+{
+    return -1;
+}
 void PipeReleaseRead(u32) {}
 void PipeReleaseWrite(u32) {}
 bool PipeReadReady(u32)

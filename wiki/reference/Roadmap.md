@@ -1712,10 +1712,20 @@ established `tests/fuzz/` pattern (host harness + `host_shim/`
 stubs + a `seeds/gen_*_seeds.py`); the codec/cert ones are pure
 `bytes → struct` and need *less* shimming than the FS probes.
 
-- **AML interpreter** — `kernel/acpi/aml.cpp`, `aml_eval.cpp`.
-  Firmware-provided bytecode the kernel *executes*; large
-  attack surface, heavier harness (needs an ACPI namespace
-  stub).
+<!-- AML interpreter bullet retired 2026-06-06: fuzz_aml harness
+     (tests/fuzz/fuzz_aml.cpp) + seeds/gen_aml_seeds.py landed. The
+     harness needs NO ACPI namespace stub after all — it defines the
+     AcpiMapTable / DsdtAddress accessors itself, serves the fuzz
+     input as the DSDT, drives the real public AmlNamespaceBuild()
+     and resets state with AmlNamespaceShutdown() between iterations
+     (no kernel-source change). Found + fixed a 1-byte heap-OOB read
+     in ReadNameString — an under-length PkgLength underflowed
+     pkg_end - name_off; guarded at all four package sites. Runs
+     ≈ 42k execs/s clean on the 5-seed corpus. The firmware ACPI
+     *tables* (RSDP / header / MADT / FADT / MCFG / HPET / SRAT) got
+     fuzz_acpi in the same slice (driving the duetos_acpi Rust crate
+     directly, ≈ 440k/s clean). Both auto-picked up by
+     tools/test/fuzz-all.sh. -->
 - **CDC-ECM + RNDIS** — `kernel/drivers/usb/cdc_ecm.cpp`,
   `rndis.cpp`. Device-supplied configuration/data-frame bytes;
   parser surface beyond the standard class-descriptor walker.

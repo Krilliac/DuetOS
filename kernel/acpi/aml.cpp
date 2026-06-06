@@ -698,6 +698,13 @@ struct Walker
         // wiki/security/Linux-CVE-Audit.md class M.
         if (pkg_len > end - after_op)
             return false;
+        // PkgLength counts its own encoding bytes (ACPI 6.x §20.2.4),
+        // so pkg_len < plen_consumed is malformed. Without this guard
+        // name_off would exceed pkg_end and `pkg_end - name_off`
+        // underflows to a near-4 GiB length, OOB-reading the table in
+        // ReadNameString. (Found by fuzz_aml.)
+        if (pkg_len < plen_consumed)
+            return false;
         const u32 pkg_end = after_op + pkg_len;
         const u32 name_off = after_op + plen_consumed;
         NameStringInfo ns;
@@ -732,6 +739,10 @@ struct Walker
             return false;
         // Overflow-safe — see HandleContainer note above.
         if (pkg_len > end - after_op)
+            return false;
+        // pkg_len < plen_consumed would push name_off past pkg_end and
+        // underflow `pkg_end - name_off` — see HandleContainer.
+        if (pkg_len < plen_consumed)
             return false;
         const u32 pkg_end = after_op + pkg_len;
         const u32 name_off = after_op + plen_consumed;
@@ -781,6 +792,10 @@ struct Walker
         if (!ReadPkgLength(base + after_op, end - after_op, &pkg_len, &plen_consumed))
             return false;
         if (pkg_len > end - after_op)
+            return false;
+        // pkg_len < plen_consumed would push q past pkg_end and
+        // underflow `pkg_end - q` — see HandleContainer.
+        if (pkg_len < plen_consumed)
             return false;
         const u32 pkg_end = after_op + pkg_len;
         next_pos_ = pkg_end; // walk continues here whatever we parse
@@ -1305,6 +1320,10 @@ bool AmlMethodBody(const AmlNamespaceEntry* entry, const u8** body, u32* body_le
     if (!ReadPkgLength(aml + q, aml_len - q, &pkg_len, &pc))
         return false;
     if (pkg_len > aml_len - q)
+        return false;
+    // pkg_len < pc would push q past pkg_end and underflow
+    // `pkg_end - q` — same class as the namespace-walk sites.
+    if (pkg_len < pc)
         return false;
     const u32 pkg_end = q + pkg_len;
     q += pc;

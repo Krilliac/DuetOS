@@ -90,6 +90,11 @@ inline u32 RamBlockDeviceCreate(const char*, u32, u64)
     return 0;
 }
 
+// Block-layer owned-write chokepoint registration. The kernel uses
+// this to mark a DuetOS-owned partition as write-permitted; the
+// fuzz harness has no write-enforcement layer, so it is a no-op.
+inline void BlockOwnedRegionAdd(u32, u64, u64, const char*) {}
+
 inline ::duetos::core::Result<void> TryBlockDeviceRead(u32 handle, u64 lba, u32 count, void* buf)
 {
     if (BlockDeviceRead(handle, lba, count, buf) < 0)
