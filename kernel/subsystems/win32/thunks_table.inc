@@ -1799,8 +1799,18 @@
     // ---- vcruntime140 — exception-handler aliases ----
     {"vcruntime140.dll", "_purecall", kOffTerminate},   // pure-virtual call -> abort
     {"vcruntime140.dll", "memchr", kOffPinReturn0},     // not-found
-    {"ntdll.dll", "NtRaiseException", kOffMissLogger},  // GAP: auto-added from fix journal seq=24 — implement thunk
-    {"ntdll.dll", "RtlCaptureContext", kOffMissLogger}, // GAP: auto-added from fix journal seq=25 — implement thunk
-    {"ntdll.dll", "RtlLookupFunctionEntry",
-     kOffMissLogger},                             // GAP: auto-added from fix journal seq=26 — implement thunk
-    {"ntdll.dll", "RtlUnwindEx", kOffMissLogger}, // GAP: auto-added from fix journal seq=27 — implement thunk
+    // SEH / unwind quartet: these are FALLBACK-ONLY entries. The
+    // preloaded userland ntdll.dll exports real implementations
+    // (userland/libs/ntdll/ntdll_seh.c, ntdll_dispatch.c,
+    // seh_trampolines.S), and ResolveImports in pe_loader.cpp
+    // consults the preloaded-DLL exports BEFORE this thunk table
+    // (TryResolveViaPreloadedDlls at the top of the per-import
+    // resolution loop). So a normally-loaded PE binds these to the
+    // real userland code and never reaches kOffMissLogger. The
+    // miss-logger routing is retained only so a pathological load
+    // that somehow lacks the preloaded ntdll still logs the miss
+    // instead of faulting — not a GAP, just a dead-fallback safety net.
+    {"ntdll.dll", "NtRaiseException", kOffMissLogger},
+    {"ntdll.dll", "RtlCaptureContext", kOffMissLogger},
+    {"ntdll.dll", "RtlLookupFunctionEntry", kOffMissLogger},
+    {"ntdll.dll", "RtlUnwindEx", kOffMissLogger},
