@@ -496,21 +496,22 @@ bool Ext4Lookup(u32 block_handle, const char* subpath, void* out_node)
 
 constinit VfsBackendOps g_ext4_ops = {&Ext4Lookup};
 
-// NTFS read backend. Resolves a name directly under the NTFS root
-// directory; the read path it routes through (probe → MFT record +
-// USA fixup → $I30 INDEX_ROOT enumerate → NtfsFindInRoot → resolve
-// $DATA → NtfsReadFile) lives in fs/ntfs.cpp. `subpath` arrives
-// volume-relative with a leading '/'. A successful resolve leaves an
-// `Ntfs`-tagged VfsNode carrying the mount block_handle + MFT record
-// reference (a stable handle) plus a size / is-dir snapshot; reads
-// re-read the record + resolve $DATA, then stream NtfsReadFile (see
-// shell_fsio.cpp).
+// NTFS read backend. Resolves a (possibly multi-component) path under
+// the NTFS root by walking one directory at a time: start at the root
+// MFT record (5), find the next component's $I30 entry in it, descend
+// into the child MFT record if it is a directory, repeat. The read
+// path each component routes through (probe → MFT record + USA fixup →
+// $I30 INDEX_ROOT enumerate → NtfsFindInDir → resolve $DATA →
+// NtfsReadFile) lives in fs/ntfs.cpp. `subpath` arrives volume-relative
+// with a leading '/'. A successful resolve leaves an `Ntfs`-tagged
+// VfsNode carrying the mount block_handle + MFT record reference (a
+// stable handle) plus a size / is-dir snapshot; reads re-read the
+// record + resolve $DATA, then stream NtfsReadFile (see shell_fsio.cpp).
 //
-// GAP: single-component paths only — a bare "/" addresses the root
-//   directory (MFT record 5) and "<name>" a direct child of root,
-//   matching NtfsFindInRoot's reach. Multi-component walks miss;
-//   lifting that needs repeated MFT-record read + $I30 enumerate.
-//   — revisit when a nested NTFS image is in test.
+// GAP: resident $INDEX_ROOT only — a directory whose $I30 index spilled
+//   into a non-resident $INDEX_ALLOCATION b-tree is only enumerated for
+//   the resident slice (same limit as NtfsFindInDir, at every level);
+//   path components longer than 127 chars cannot match.
 bool NtfsLookup(u32 block_handle, const char* subpath, void* out_node)
 {
     if (subpath == nullptr || out_node == nullptr)
@@ -522,13 +523,14 @@ bool NtfsLookup(u32 block_handle, const char* subpath, void* out_node)
     {
         return false;
     }
-    const char* name = subpath;
-    while (*name == '/')
-    {
-        ++name;
-    }
     auto* out = static_cast<VfsNode*>(out_node);
-    if (*name == '\0')
+
+    const char* p = subpath;
+    while (*p == '/')
+    {
+        ++p;
+    }
+    if (*p == '\0')
     {
         // Bare mount point — the volume's root directory (MFT record 5).
         out->backend = VfsBackend::Ntfs;
@@ -538,11 +540,51 @@ bool NtfsLookup(u32 block_handle, const char* subpath, void* out_node)
         out->ntfs_is_dir = true;
         return true;
     }
+
+    // Walk components from the root directory MFT record (record 5).
+    u64 dir_record = 5;
     ntfs::DirEntry entry{};
-    if (!ntfs::NtfsFindInRoot(*v, name, &entry))
+    while (*p != '\0')
     {
-        return false;
+        char comp[128];
+        u32 ci = 0;
+        while (*p != '\0' && *p != '/' && ci + 1 < sizeof(comp))
+        {
+            comp[ci++] = *p++;
+        }
+        comp[ci] = '\0';
+        // A component that overran the buffer (next char neither '/'
+        // nor end) is longer than any storable dir-entry name — miss.
+        if (*p != '\0' && *p != '/')
+        {
+            return false;
+        }
+        while (*p == '/')
+        {
+            ++p;
+        }
+        if (ci == 0)
+        {
+            continue; // collapse "//" / trailing slash
+        }
+        if (!ntfs::NtfsFindInDir(*v, dir_record, comp, &entry))
+        {
+            return false;
+        }
+        if (*p != '\0')
+        {
+            // More components follow — `entry` must be a directory to
+            // descend into. NtfsFindInDir reads the record itself, so no
+            // separate record-read step is needed here.
+            if (!entry.is_directory)
+            {
+                return false;
+            }
+            dir_record = entry.mft_reference;
+        }
     }
+
+    // `entry` is now the final path component.
     u64 size = 0;
     if (!entry.is_directory)
     {

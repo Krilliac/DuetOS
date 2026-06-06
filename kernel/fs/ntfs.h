@@ -35,7 +35,9 @@
  * GAP (not in scope):
  *   - $INDEX_ALLOCATION b-trees: a directory whose $I30 index
  *     overflows INDEX_ROOT into non-resident INDEX_ALLOCATION
- *     blocks is only enumerated for the resident slice.
+ *     blocks is only enumerated for the resident slice. This applies
+ *     at every directory level of a multi-component path walk
+ *     (NtfsEnumerateDir / NtfsFindInDir), not just the root.
  *   - Multi-run / compressed / sparse / encrypted $DATA: the
  *     non-resident decoder follows the FIRST data run only.
  *   - Alternate data streams (named $DATA), reparse points /
@@ -144,17 +146,33 @@ void NtfsScanAll();
 ///   multi-run / compressed / sparse / encrypted $DATA is not mapped.
 ::duetos::core::Result<void> NtfsResolveData(const Volume& v, const u8* rec, DataLocation* out);
 
-/// Enumerate the root directory ($Root, MFT record 5) of volume `v`
-/// from its resident $INDEX_ROOT ($I30) index. Writes up to
+/// Enumerate the directory whose MFT record is `dir_record_num` on
+/// volume `v` from its resident $INDEX_ROOT ($I30) index. Writes up to
 /// `kMaxDirEntries` entries into `out_entries[]` and reports the count
-/// via `*out_count`.
+/// via `*out_count`. Used at every level of a multi-component walk.
 ///   GAP: resident INDEX_ROOT only — entries that spilled into a
-///   non-resident $INDEX_ALLOCATION b-tree are not walked.
+///   non-resident $INDEX_ALLOCATION b-tree are not walked. Applies at
+///   every directory level, not just the root.
+///   NOTE: non-reentrant — decodes through a module-static scratch
+///   buffer, so each level's DirEntry results (value copies) must be
+///   consumed before the next NtfsEnumerateDir / NtfsFindInDir call.
+::duetos::core::Result<void> NtfsEnumerateDir(const Volume& v, u64 dir_record_num, DirEntry* out_entries, u32 cap,
+                                              u32* out_count);
+
+/// Enumerate the root directory ($Root, MFT record 5) of volume `v`.
+/// Thin wrapper over NtfsEnumerateDir(v, 5, ...); same GAP applies.
 ::duetos::core::Result<void> NtfsEnumerateRoot(const Volume& v, DirEntry* out_entries, u32 cap, u32* out_count);
+
+/// Find a child named `name` directly under the directory whose MFT
+/// record is `dir_record_num` on `v`, filling `*out` with its directory
+/// entry. Returns NotFound if absent. Re-enumerates the resident index
+/// per call (no cache). The descend primitive for a component walk: the
+/// returned `mft_reference` is the next level's `dir_record_num`.
+::duetos::core::Result<void> NtfsFindInDir(const Volume& v, u64 dir_record_num, const char* name, DirEntry* out);
 
 /// Find a child named `name` directly under the root directory of
 /// `v`, filling `*out` with its directory entry. Returns NotFound if
-/// absent. Re-enumerates the resident root index per call (no cache).
+/// absent. Thin wrapper over NtfsFindInDir(v, 5, ...).
 ::duetos::core::Result<void> NtfsFindInRoot(const Volume& v, const char* name, DirEntry* out);
 
 /// Read up to `len` bytes of regular-file data starting at byte

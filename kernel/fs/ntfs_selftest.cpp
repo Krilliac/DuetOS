@@ -54,16 +54,27 @@ constexpr u32 kBytesPerCluster = kSectorSize * kSectorsPerCluster;
 constexpr u32 kRecordSize = 1024; // 2 sectors per record
 constexpr u32 kSectorsPerRecord = kRecordSize / kSectorSize;
 
-constexpr u64 kMftLcn = 4;         // $MFT starts at LBA 4
-constexpr u64 kRootRecordNum = 5;  // $Root
-constexpr u64 kFileRecordNum = 24; // our regular file
-constexpr u32 kTotalSectors = 128; // tiny volume
+constexpr u64 kMftLcn = 4;             // $MFT starts at LBA 4
+constexpr u64 kRootRecordNum = 5;      // $Root
+constexpr u64 kFileRecordNum = 24;     // our regular file (direct child of root)
+constexpr u64 kSubDirRecordNum = 25;   // "sub" directory (child of root)
+constexpr u64 kDeepFileRecordNum = 26; // "deep.txt" file (child of "sub")
+constexpr u32 kTotalSectors = 128;     // tiny volume
 
 // File body the test plants and reads back.
 constexpr char kFileBody[] = "hello from ntfs\n";
 constexpr u32 kFileBodyLen = 16; // strlen, excludes the NUL
 constexpr char kFileName[] = "hello.txt";
 constexpr u8 kFileNameUnits = 9;
+
+// Nested fixture for the multi-component walk: root → "sub" (a
+// directory) → "deep.txt" (a regular file with resident $DATA).
+constexpr char kSubDirName[] = "sub";
+constexpr u8 kSubDirNameUnits = 3;
+constexpr char kDeepFileName[] = "deep.txt";
+constexpr u8 kDeepFileNameUnits = 8;
+constexpr char kDeepBody[] = "deep ntfs file\n";
+constexpr u32 kDeepBodyLen = 15; // strlen, excludes the NUL
 
 inline void StoreLe16(u8* p, u16 v)
 {
@@ -147,9 +158,37 @@ bool PutBootSector(u32 handle)
     return drivers::storage::BlockDeviceWrite(handle, 0, 1, bs) == 0;
 }
 
+// Lay down one resident $INDEX_ROOT ($I30) INDEX_ENTRY at `*cursor`
+// and advance `*cursor` past it. Mirrors the byte layout the C++
+// reader (NtfsEnumerateDir) decodes:
+//   +0x00 mft_reference (u64; low 48 = record number)
+//   +0x08 entry_length (u16, 8-byte aligned)
+//   +0x0A key_length   (u16)  ($FILE_NAME size)
+//   +0x0C flags        (u16)  bit 0x02 = last entry (not set here)
+//   +0x10 key: $FILE_NAME — file_attributes @ +0x38 (dir bit
+//         0x10000000), name_length @ +0x40 (UTF-16 units), name @ +0x42.
+// Used by PutRootRecord (twice) and PutSubDirRecord (once) so the
+// offset math lives in one place and can't drift between callers.
+void PutIndexEntry(u8* rec, u32* cursor, u64 mft_ref, const char* name, u8 units, bool is_dir)
+{
+    const u32 entry = *cursor;
+    const u32 key = entry + 0x10;
+    const u32 key_len = 0x42 + u32(units) * 2;          // FILE_NAME size
+    const u32 entry_len = 0x10 + ((key_len + 7) & ~7u); // 8-byte aligned
+    StoreLe64(rec + entry + 0x00, mft_ref);
+    StoreLe16(rec + entry + 0x08, u16(entry_len));
+    StoreLe16(rec + entry + 0x0A, u16(key_len));
+    StoreLe16(rec + entry + 0x0C, 0x0000);                           // not the last entry
+    StoreLe32(rec + key + 0x38, is_dir ? 0x10000000u : 0x00000000u); // FILE_ATTR_DIRECTORY
+    rec[key + 0x40] = units;                                         // name length (UTF-16 units)
+    PutUtf16Name(rec + key + 0x42, name, units);
+    *cursor = entry + entry_len;
+}
+
 // Build $Root (record 5): a FILE record whose only attribute of
-// interest is a resident $INDEX_ROOT ($I30) holding a single index
-// entry that points to the file record by name.
+// interest is a resident $INDEX_ROOT ($I30) holding two index entries
+// — one for the regular file "hello.txt" and one for the subdirectory
+// "sub" — each pointing at its MFT record by name.
 bool PutRootRecord(u32 handle)
 {
     u8 rec[kRecordSize];
@@ -171,28 +210,16 @@ bool PutRootRecord(u32 handle)
     // the 0x10-byte header (entries_offset = 0x10 relative to header).
     const u32 hdr = value + 0x10;
     const u32 entries_off = 0x10;
-    const u32 entry = hdr + entries_off;
 
-    // INDEX_ENTRY (key = $FILE_NAME). Layout we fill:
-    //   +0x00 mft_reference (u64; low 48 = record number)
-    //   +0x08 entry_length (u16)
-    //   +0x0A key_length   (u16)
-    //   +0x0C flags        (u16)
-    //   +0x10 key: $FILE_NAME — name_length @ +0x40, name @ +0x42,
-    //         file_attributes @ +0x38.
-    const u32 key = entry + 0x10;
-    const u32 key_len = 0x42 + u32(kFileNameUnits) * 2; // FILE_NAME size
-    const u32 entry_len = 0x10 + ((key_len + 7) & ~7u); // 8-byte aligned
-    StoreLe64(rec + entry + 0x00, kFileRecordNum);
-    StoreLe16(rec + entry + 0x08, u16(entry_len));
-    StoreLe16(rec + entry + 0x0A, u16(key_len));
-    StoreLe16(rec + entry + 0x0C, 0x0000);   // not the last entry
-    StoreLe32(rec + key + 0x38, 0x00000000); // file_attributes: not a dir
-    rec[key + 0x40] = kFileNameUnits;        // name length (UTF-16 units)
-    PutUtf16Name(rec + key + 0x42, kFileName, kFileNameUnits);
+    // Two real INDEX_ENTRYs then the last-entry sentinel. `cursor`
+    // walks past each entry's 8-byte-aligned length so index_used picks
+    // up the exact span both entries occupy.
+    u32 cursor = hdr + entries_off;
+    PutIndexEntry(rec, &cursor, kFileRecordNum, kFileName, kFileNameUnits, /*is_dir=*/false);
+    PutIndexEntry(rec, &cursor, kSubDirRecordNum, kSubDirName, kSubDirNameUnits, /*is_dir=*/true);
 
     // Trailing "last entry" sentinel (flags bit 0x02, no key).
-    const u32 last = entry + entry_len;
+    const u32 last = cursor;
     StoreLe16(rec + last + 0x08, 0x10); // entry_length (>= 0x10)
     StoreLe16(rec + last + 0x0C, 0x02); // flags: last entry
     const u32 list_end = last + 0x10;
@@ -253,9 +280,90 @@ bool PutFileRecord(u32 handle)
     return PutRecord(handle, kFileRecordNum, rec);
 }
 
+// Build the "sub" directory record (record 25): a near-clone of
+// PutRootRecord whose single $I30 entry points at "deep.txt" (a file).
+// Marked in_use | is_directory like the root.
+bool PutSubDirRecord(u32 handle)
+{
+    u8 rec[kRecordSize];
+    Zero(rec, sizeof(rec));
+    StoreLe32(rec + 0, kFileRecordMagic); // "FILE"
+    StoreLe16(rec + 0x16, u16(0x0003));   // flags: in_use | is_directory
+    constexpr u16 kFirstAttr = 0x38;
+    StoreLe16(rec + 0x14, kFirstAttr);
+
+    const u32 attr = kFirstAttr;
+    const u32 value = attr + 0x18;
+    const u32 hdr = value + 0x10;
+    const u32 entries_off = 0x10;
+
+    // One real INDEX_ENTRY ("deep.txt", a file) then the sentinel.
+    u32 cursor = hdr + entries_off;
+    PutIndexEntry(rec, &cursor, kDeepFileRecordNum, kDeepFileName, kDeepFileNameUnits, /*is_dir=*/false);
+
+    const u32 last = cursor;
+    StoreLe16(rec + last + 0x08, 0x10); // entry_length (>= 0x10)
+    StoreLe16(rec + last + 0x0C, 0x02); // flags: last entry
+    const u32 list_end = last + 0x10;
+
+    // INDEX_HEADER fields.
+    StoreLe32(rec + hdr + 0x00, entries_off);    // entries_offset
+    StoreLe32(rec + hdr + 0x04, list_end - hdr); // index_used (total size)
+    StoreLe32(rec + hdr + 0x08, list_end - hdr); // allocated size
+    rec[hdr + 0x0C] = 0;                         // flags: small index
+
+    // INDEX_ROOT prefix.
+    StoreLe32(rec + value + 0x00, kAttrTypeFileName);
+    StoreLe32(rec + value + 0x04, 0x00000001); // collation rule
+    StoreLe32(rec + value + 0x08, kBytesPerCluster);
+    rec[value + 0x0C] = 1;
+
+    const u32 val_len = (list_end - value);
+    const u32 attr_len_aligned = ((0x18 + val_len) + 7) & ~7u;
+    StoreLe32(rec + attr + 0x00, kAttrTypeIndexRoot);
+    StoreLe32(rec + attr + 0x04, attr_len_aligned); // attribute length
+    rec[attr + 0x08] = 0;                           // resident
+    rec[attr + 0x09] = 0;                           // name length (unnamed)
+    StoreLe32(rec + attr + 0x10, val_len);          // value length
+    StoreLe16(rec + attr + 0x14, 0x18);             // value offset
+
+    StoreLe32(rec + attr + attr_len_aligned, kAttrTypeEnd);
+
+    return PutRecord(handle, kSubDirRecordNum, rec);
+}
+
+// Build the nested file record (record 26): a clone of PutFileRecord
+// carrying the resident $DATA body for "/sub/deep.txt".
+bool PutDeepFileRecord(u32 handle)
+{
+    u8 rec[kRecordSize];
+    Zero(rec, sizeof(rec));
+    StoreLe32(rec + 0, kFileRecordMagic); // "FILE"
+    StoreLe16(rec + 0x16, u16(0x0001));   // flags: in_use, not dir
+    constexpr u16 kFirstAttr = 0x38;
+    StoreLe16(rec + 0x14, kFirstAttr);
+
+    // ---- $DATA attribute (type 0x80), resident, unnamed.
+    const u32 attr = kFirstAttr;
+    const u32 value = attr + 0x18;
+    for (u32 i = 0; i < kDeepBodyLen; ++i)
+        rec[value + i] = u8(kDeepBody[i]);
+    const u32 attr_len_aligned = ((0x18 + kDeepBodyLen) + 7) & ~7u;
+    StoreLe32(rec + attr + 0x00, kAttrTypeData);
+    StoreLe32(rec + attr + 0x04, attr_len_aligned);
+    rec[attr + 0x08] = 0;                       // resident
+    rec[attr + 0x09] = 0;                       // unnamed
+    StoreLe32(rec + attr + 0x10, kDeepBodyLen); // value length
+    StoreLe16(rec + attr + 0x14, 0x18);         // value offset
+
+    StoreLe32(rec + attr + attr_len_aligned, kAttrTypeEnd);
+    return PutRecord(handle, kDeepFileRecordNum, rec);
+}
+
 bool BuildSyntheticVolume(u32 handle)
 {
-    return PutBootSector(handle) && PutRootRecord(handle) && PutFileRecord(handle);
+    return PutBootSector(handle) && PutRootRecord(handle) && PutFileRecord(handle) && PutSubDirRecord(handle) &&
+           PutDeepFileRecord(handle);
 }
 
 void Fail(const char* phase)
@@ -438,8 +546,78 @@ void NtfsSelfTest()
         return;
     }
 
+    // ---- Phase 8: multi-component resolve. "/sub/deep.txt" walks
+    // root → "sub" (a directory) → "deep.txt", exercising the descend-
+    // into-subdirectory path (NtfsFindInDir at each level). First the
+    // two raw NtfsFindInDir descend steps, then the VFS-level resolve.
+    DirEntry sub{};
+    if (!NtfsFindInDir(*v, kRootRecordNum, kSubDirName, &sub))
+    {
+        Fail("find-sub");
+        return;
+    }
+    if (!sub.is_directory || sub.mft_reference != kSubDirRecordNum)
+    {
+        Fail("sub-fields");
+        return;
+    }
+    DirEntry deep{};
+    if (!NtfsFindInDir(*v, kSubDirRecordNum, kDeepFileName, &deep))
+    {
+        Fail("find-deep");
+        return;
+    }
+    if (deep.mft_reference != kDeepFileRecordNum)
+    {
+        Fail("deep-reference");
+        return;
+    }
+
+    // The subdirectory itself must resolve as a directory through the VFS.
+    const char kSubPath[] = "/mnt/ntfs-selftest/sub";
+    const VfsNode subnode = VfsResolve(RamfsTrustedRoot(), kSubPath, 256);
+    if (subnode.backend != VfsBackend::Ntfs || !VfsNodeIsDir(subnode) || VfsNodeIsFile(subnode))
+    {
+        Fail("vfs-subdir");
+        return;
+    }
+
+    const char kDeepPath[] = "/mnt/ntfs-selftest/sub/deep.txt";
+    const VfsNode dnode = VfsResolve(RamfsTrustedRoot(), kDeepPath, 256);
+    if (dnode.backend != VfsBackend::Ntfs || !VfsNodeIsFile(dnode))
+    {
+        Fail("vfs-deep-resolve");
+        return;
+    }
+    if (VfsNodeSize(dnode) != kDeepBodyLen || dnode.ntfs_mft_reference != kDeepFileRecordNum)
+    {
+        Fail("vfs-deep-fields");
+        return;
+    }
+    // Read the nested body back exactly as the shell read path does.
+    const Volume* dvol = NtfsVolumeByHandle(dnode.ntfs_block_handle);
+    u8 drec[kRecordSize];
+    DataLocation ddata{};
+    u8 dbuf[64];
+    u64 dread = 0;
+    if (dvol == nullptr || !NtfsReadMftRecord(*dvol, dnode.ntfs_mft_reference, drec) ||
+        !NtfsResolveData(*dvol, drec, &ddata) || !ddata.valid ||
+        !NtfsReadFile(*dvol, drec, ddata, 0, dbuf, sizeof(dbuf), &dread) || dread != kDeepBodyLen)
+    {
+        Fail("vfs-deep-read");
+        return;
+    }
+    for (u32 i = 0; i < kDeepBodyLen; ++i)
+    {
+        if (dbuf[i] != u8(kDeepBody[i]))
+        {
+            Fail("vfs-deep-content");
+            return;
+        }
+    }
+
     SerialWrite("[ntfs-selftest] PASS (synthetic volume: probe+USA-fixup+root-index+resident-data file read + VFS "
-                "resolve verified)\n");
+                "resolve (single + multi-component) verified)\n");
 }
 
 } // namespace duetos::fs::ntfs
