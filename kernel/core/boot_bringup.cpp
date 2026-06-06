@@ -35,6 +35,10 @@
 #include "arch/x86_64/thermal.h"
 #include "arch/x86_64/rapl.h"
 #include "arch/x86_64/cpufreq.h"
+#include "arch/x86_64/spi_flash.h"
+#include "drivers/gpu/gpu_telemetry.h"
+#include "drivers/net/nic_telemetry.h"
+#include "net/wireless/reg_telemetry.h"
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/idt.h"
 #include "arch/x86_64/ioapic.h"
@@ -686,6 +690,10 @@ void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
     DUETOS_BOOT_SELFTEST(duetos::core::Sf32SelfTest());
     DUETOS_BOOT_SELFTEST(duetos::arch::RaplSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::arch::CpuFreqSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::arch::SpiFlashSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::gpu::GpuTelemetrySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::net::NicTelemetrySelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::net::wireless::RegTelemetrySelfTest());
 
     // KASLR — compute the candidate slide from the now-seeded entropy
     // pool. The slide isn't applied to the kernel image yet (that
@@ -2133,6 +2141,14 @@ void BootBringupDevices(bool force_net_smoke)
     // drivers/net fault domain self-registers via
     // KERNEL_INITCALL(Drivers, "drivers/net.module", ...) in
     // `kernel/drivers/net/net.cpp`.
+
+    // Read-only hardware telemetry probes — PCI, GPU and NIC are all up
+    // by here, so each reader can report what it found.
+    SerialWrite("[boot] Reading hardware telemetry (SPI / GPU / NIC / Wi-Fi regulatory).\n");
+    duetos::arch::SpiFlashProbe();
+    duetos::drivers::gpu::GpuTelemetryProbe();
+    duetos::drivers::net::NicTelemetryProbe();
+    duetos::net::wireless::RegTelemetryProbe();
 
     SerialWrite("[boot] Detecting USB host controllers.\n");
     duetos::drivers::usb::UsbInit();

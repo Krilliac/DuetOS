@@ -10603,3 +10603,37 @@ PASS/FAIL verdict line.
 - `run.sh` gained the ability to append `DUETOS_EXTRA_CMDLINE` to a smoke
   profile's cmdline (so `bringup` + `selftests=full` compose) for manual
   on-target checks.
+
+## 2026-06-06 — Hardware telemetry readers: SPI flash, GPU, NIC, Wi-Fi regulatory (read-only)
+
+Batch of read-only telemetry readers extending the RAPL/cpufreq pattern, so
+every hardware-safety pre-landing surface has a *reader in place* before any
+*writer* is contemplated.
+
+**Decision — all four are read-only, each with honest GAP markers where QEMU
+or per-generation decode limits what's reachable:**
+- `arch/x86_64/spi_flash.cpp` — finds the Intel PCH SPI controller (0:1f.5,
+  BAR0=SPIBAR) and reads HSFSTS FDV/FLOCKDN on Skylake+. The legacy ICH9
+  RCBA path (QEMU q35 / 8086:2918 LPC) is detected-only + GAP'd; JEDEC RDID
+  GAP'd. Never writes the controller or flash (a write bricks the board).
+- `drivers/gpu/gpu_telemetry.cpp` — reads the Intel GT P-state register
+  (GEN6_RPSTAT1) and reports the raw dword + a GAP-flagged Gen9+ CAGF→MHz
+  estimate. Temperature + AMD/NVIDIA frequency GAP'd. Never writes a GPU reg.
+- `drivers/net/nic_telemetry.cpp` — surfaces the MAC/link the vendor probe
+  already read into `NicInfo`; the RAL/RAH→MAC decode is unit-tested. Never
+  writes NIC NVM/MAC.
+- `net/wireless/reg_telemetry.cpp` — reports the active regdb domain + per-
+  band EIRP caps. Never programs radio TX power.
+
+**Why GAP-not-fabricate.** Under QEMU the SPI HSFS (q35 is ICH9, no 1f.5),
+GPU clock/temp (bochs-vga), and Intel-specific paths are unreachable. Rather
+than emit fabricated numbers, each reader reports "unavailable" with the
+specific GAP reason, and the verifiable part is a pure-math decode self-test
+(HSFS bits, CAGF→MHz, RAL/RAH→MAC, channel→freq + EIRP rounding) that gates
+CI identically on QEMU and bare metal. Verified at boot: all four probes emit
+honest lines, all four self-tests PASS, 0 FAILs.
+
+**Ruled out for the next slice.** Do not add any *writer* (SPI flash write,
+GPU clock/fan, NIC EEPROM, radio TX power) without the default-inert
+capability gate from the Hardware-Safety contract — the readers exist
+precisely so a control surface, if ever added, reads-before-it-writes.
