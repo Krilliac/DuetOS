@@ -308,7 +308,7 @@ usize ScanBytes(u64 pid, const u8* needle, usize nlen, u64* hits, usize cap)
         const u8* hi = _text_end;
         if (hi <= lo)
             return 0;
-        const u64 size = (u64)(hi - lo);
+        const u64 size = static_cast<u64>(hi - lo);
         for (u64 off = 0; off + nlen <= size && hit_count < cap; ++off)
         {
             bool match = true;
@@ -530,7 +530,7 @@ void WatchRefresh()
         }
         u64 vu = 0;
         for (u8 b = 0; b < want; ++b)
-            vu |= ((u64)raw[b]) << (b * 8);
+            vu |= (static_cast<u64>(raw[b])) << (b * 8);
         switch (e.type)
         {
         case WatchType::U8:
@@ -543,7 +543,8 @@ void WatchRefresh()
         case WatchType::I64:
         {
             // Reformat as signed if MSB set.
-            i64 sv = (e.type == WatchType::I32) ? (i64)(i32)(u32)vu : (i64)vu;
+            i64 sv = (e.type == WatchType::I32) ? static_cast<i64>(static_cast<i32>(static_cast<u32>(vu)))
+                                                : static_cast<i64>(vu);
             char tmp[32];
             // Tiny signed decimal formatter.
             u32 w = 0;
@@ -558,7 +559,7 @@ void WatchRefresh()
                 rev[n++] = '0';
             while (sv != 0 && n < sizeof(rev))
             {
-                rev[n++] = (char)('0' + (sv % 10));
+                rev[n++] = static_cast<char>('0' + (sv % 10));
                 sv /= 10;
             }
             while (n > 0 && w + 1 < sizeof(tmp))

@@ -72,7 +72,7 @@ void StoreName(NamedKObjectEntry& e, const char* name)
 u32 PickVictimSlot()
 {
     u32 victim = 0;
-    u64 oldest = (u64)-1;
+    u64 oldest = static_cast<u64>(-1);
     for (u32 i = 0; i < kNamedKObjectSlots; ++i)
     {
         if (!g_table[i].valid)

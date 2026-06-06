@@ -57,7 +57,14 @@ GDB server) it adds:
   `-fno-sanitize=function -fno-sanitize-trap=all`. The emitted
   `__ubsan_handle_*` calls resolve to the in-tree runtime in
   `kernel/diag/ubsan.cpp` (one klog WARN + serial line per incident,
-  then execution continues — visibility, not enforcement).
+  then execution continues — visibility, not enforcement). The
+  `x86_64-debug-ubsan-trap` preset (`DUETOS_UBSAN_TRAP=ON`) flips this
+  to **fail-fast**: each check emits a `ud2` instead of a handler call,
+  so the *first* UB faults into the `#UD` handler (→ ring-3 task-kill /
+  ring-0 panic) and no log-and-continue runtime is consulted. Use trap
+  mode as a CI / on-hardware gate where "stop at the first UB" beats
+  "log them all"; use the default log mode to enumerate every site in
+  one boot.
 - `DUETOS_KASAN=ON` — the in-tree **ASAN-equivalent** diagnostics
   (heap trailer canaries, freed-payload / freed-page poison, plus the
   `+kasan` boot banner). Real `-fsanitize=address` /
@@ -71,9 +78,11 @@ Dedicated single-axis presets mirror this:
 
 | Preset | What it adds over `x86_64-debug` |
 |--------|----------------------------------|
-| `x86_64-debug-ubsan` | re-asserts `DUETOS_ENABLE_UBSAN` only |
+| `x86_64-debug-ubsan` | re-asserts `DUETOS_ENABLE_UBSAN` only (log-and-continue) |
+| `x86_64-debug-ubsan-trap` | UBSan in **trap mode** (`DUETOS_UBSAN_TRAP`): first UB → `ud2` → `#UD`, no log runtime — fail-fast gate |
 | `x86_64-debug-asan`  | re-asserts `DUETOS_KASAN` only |
 | `x86_64-debug-san`   | the **full suite**: `-fsanitize=integer` family on (`DUETOS_ENABLE_UBSAN_INTEGER`), KASAN, lock-order audit, full cap audit |
+| `x86_64-debug-conv`  | `DUETOS_ENABLE_CONVERSION_AUDIT=ON` — `-Wconversion`/`-Wsign-conversion` as **non-fatal** warnings (compile-time analogue of the integer sanitizer; see the conversion-audit note below) |
 | `x86_64-debug-redteam` | `DUETOS_ATTACK_SIM=ON` — runs the AttackSim red-team suite at end of `kernel_main`. Escalates the security guard to Enforce and the block write-guard to Deny, which poisons every subsequent image-load / sensitive-LBA write for the session — **not a normal-boot build**. |
 
 Knobs deliberately **not** in the default debug preset, because they
@@ -86,6 +95,20 @@ make the build unbootable or unusable rather than more-checked:
   enough to prevent the boot from completing inside the QEMU
   smoke window. Lives in `x86_64-debug-san` for targeted
   conversion/truncation hunts.
+- `-Wconversion` / `-Wsign-conversion` as a build-floor gate. Same
+  reason as the integer sanitizer above: the kernel narrows
+  deliberately and pervasively (network header fields are `u16`,
+  lengths live in `u32`, ring indices wrap), so ~150 sites are
+  intentional, not bugs. A permanent `-Werror` gate would impose
+  explicit-cast friction on every future net/fs line for almost no
+  steady-state signal. Instead they are an **opt-in compile-time
+  audit** (`x86_64-debug-conv` / `DUETOS_ENABLE_CONVERSION_AUDIT`):
+  the flags surface as non-fatal warnings so one build lists every
+  narrowing at once, and you eyeball the list for the dangerous
+  cases — an oversize length truncated to `u32`, a negative reaching
+  an unsigned `size`. (The first audit found zero such bugs; the
+  fallout was entirely intentional narrowing and bounds-checked
+  decoder paths.)
 - `DUETOS_KLOG_DEFAULT=0` (Trace **runtime** default). The
   compile floor is already Trace in debug, so `loglevel t` at
   runtime exposes every trace site on demand; making Trace the
@@ -155,6 +178,44 @@ Output trees:
   configure (or `cmake --build --fresh`) to pick it up.
 - **Rust** via rustup nightly pinned in `rust-toolchain.toml` (when
   Rust subsystems land — see [Roadmap > Rust bring-up](../reference/Roadmap.md#rust-bring-up))
+
+### Kernel warning floor
+
+The kernel image builds `-Werror` with a floor that goes well beyond
+`-Wall -Wextra -Wpedantic -Wshadow` (defined in
+`cmake/toolchains/x86_64-kernel.cmake`). The additions are the warnings
+that catch *freestanding-kernel* mistakes the base set misses — where
+the wrong cast / promotion / stack shape is a fault on real hardware,
+not a lint nit:
+
+- **FP tripwires** — `-Wdouble-promotion -Wfloat-equal`. The kernel
+  builds `-mgeneral-regs-only -mno-sse`, so any float in codegen is a
+  latent `#UD` / corrupted-FPU-state bug.
+- **Memory / cast hygiene** — `-Wcast-qual` (const/volatile drop — a
+  volatile-drop silently breaks MMIO ordering), `-Wold-style-cast`
+  (C++ casts only, so the cast's intent is explicit),
+  `-Wpointer-arith`, `-Wover-aligned`, `-Wnull-dereference`,
+  `-Wzero-as-null-pointer-constant`.
+- **Stack safety** — `-Wvla` (a runtime-sized stack array on our small
+  fixed kernel / IRQ stacks is a stack-overflow → triple-fault).
+- **Control-flow / init** — `-Wconditional-uninitialized`,
+  `-Wimplicit-fallthrough` (force `[[fallthrough]]`), `-Wundef`
+  (typo'd config macro evaluating to 0).
+- **Surface / format** — `-Wmissing-declarations` (link-surface drift),
+  `-Wformat=2`, `-Wcomma`, `-Wextra-semi`, `-Wnon-virtual-dtor`,
+  `-Woverloaded-virtual`.
+- **`-Wthread-safety`** — clang's lock-capability analysis. Inert until
+  headers carry `GUARDED_BY` / `REQUIRES` annotations, but on now so
+  the enforcement lands the moment they do.
+
+Intentionally **omitted**: `-Walloca` and `-Wredundant-decls` (clang
+no-ops for this target), `-Wcast-align` (never fires on x86_64 — legal
+unaligned access; revisit for the aarch64 tier), and the conversion
+family (opt-in audit, see [Presets](#presets) above).
+
+`-Wconversion`/`-Wsign-conversion` already gate the **host** tests
+(`tests/host`) and `tools/`, where the code is ordinary rather than
+hardware-narrowing.
 
 ## Live-test Tooling — Install on Demand
 

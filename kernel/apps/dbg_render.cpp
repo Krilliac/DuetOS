@@ -130,7 +130,7 @@ void DrawDecU64(u32 x, u32 y, u64 v, u32 fg, u32 bg)
         u32 n = 0;
         while (v != 0 && n < sizeof(tmp))
         {
-            tmp[n++] = (char)('0' + (v % 10));
+            tmp[n++] = static_cast<char>('0' + (v % 10));
             v /= 10;
         }
         u32 w = 0;
@@ -220,7 +220,7 @@ void RenderMemory(u32 x, u32 y, u32 w, u32 h)
     u8 buf[16];
     for (u32 i = 0; i < max_visible; ++i)
     {
-        const u64 row_va = base + (u64)i * 16;
+        const u64 row_va = base + static_cast<u64>(i) * 16;
         const u32 ry = y + (i + 1) * kRowPx;
         DrawHexU64(x, ry, row_va, kFgText, kBgClient);
         const u64 got = core::ReadMem(internal::g_state.current_pid, row_va, buf, 16);

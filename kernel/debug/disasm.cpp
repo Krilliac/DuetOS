@@ -342,19 +342,19 @@ u8 FormatRmOperand(char* dst, u32 cap, const ModRm& mod_rm, OpW reg_w, OpW mem_w
     else if (rip_rel || needs_disp32_only)
         disp_bytes = 4;
 
-    if (trailing_avail < (u64)consumed + disp_bytes)
+    if (trailing_avail < static_cast<u64>(consumed) + disp_bytes)
         return 0xFF;
 
     i64 disp = 0;
     if (disp_bytes == 1)
     {
-        disp = (i64)(i8)trailing[consumed];
+        disp = static_cast<i64>(static_cast<i8>(trailing[consumed]));
     }
     else if (disp_bytes == 4)
     {
-        u32 raw = (u32)trailing[consumed] | ((u32)trailing[consumed + 1] << 8) | ((u32)trailing[consumed + 2] << 16) |
-                  ((u32)trailing[consumed + 3] << 24);
-        disp = (i64)(i32)raw;
+        u32 raw = static_cast<u32>(trailing[consumed]) | (static_cast<u32>(trailing[consumed + 1]) << 8) |
+                  (static_cast<u32>(trailing[consumed + 2]) << 16) | (static_cast<u32>(trailing[consumed + 3]) << 24);
+        disp = static_cast<i64>(static_cast<i32>(raw));
     }
     consumed += disp_bytes;
 
@@ -381,7 +381,7 @@ u8 FormatRmOperand(char* dst, u32 cap, const ModRm& mod_rm, OpW reg_w, OpW mem_w
         if (scale > 0)
         {
             AppendChar(dst, cap, '*');
-            char s[2] = {(char)('0' + (1 << scale)), 0};
+            char s[2] = {static_cast<char>('0' + (1 << scale)), 0};
             StrAppend(dst, cap, s);
         }
         wrote_term = true;
@@ -394,7 +394,7 @@ u8 FormatRmOperand(char* dst, u32 cap, const ModRm& mod_rm, OpW reg_w, OpW mem_w
         }
         else
         {
-            AppendHexU64(dst, cap, (u64)disp & 0xFFFFFFFFULL);
+            AppendHexU64(dst, cap, static_cast<u64>(disp) & 0xFFFFFFFFULL);
         }
     }
     AppendChar(dst, cap, ']');
@@ -408,17 +408,18 @@ i64 ReadImmSigned(const u8* src, u8 bytes)
     switch (bytes)
     {
     case 1:
-        return (i64)(i8)src[0];
+        return static_cast<i64>(static_cast<i8>(src[0]));
     case 2:
-        return (i64)(i16)((u16)src[0] | ((u16)src[1] << 8));
+        return static_cast<i64>(static_cast<i16>(static_cast<u16>(src[0]) | (static_cast<u16>(src[1]) << 8)));
     case 4:
-        return (i64)(i32)((u32)src[0] | ((u32)src[1] << 8) | ((u32)src[2] << 16) | ((u32)src[3] << 24));
+        return static_cast<i64>(static_cast<i32>(static_cast<u32>(src[0]) | (static_cast<u32>(src[1]) << 8) |
+                                                 (static_cast<u32>(src[2]) << 16) | (static_cast<u32>(src[3]) << 24)));
     case 8:
     {
         u64 v = 0;
         for (u8 i = 0; i < 8; ++i)
-            v |= ((u64)src[i] << (i * 8));
-        return (i64)v;
+            v |= (static_cast<u64>(src[i]) << (i * 8));
+        return static_cast<i64>(v);
     }
     }
     return 0;
@@ -428,7 +429,7 @@ u64 ReadImmU(const u8* src, u8 bytes)
 {
     u64 v = 0;
     for (u8 i = 0; i < bytes; ++i)
-        v |= ((u64)src[i] << (i * 8));
+        v |= (static_cast<u64>(src[i]) << (i * 8));
     return v;
 }
 
@@ -603,7 +604,7 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
             const OpW w = GprWidth(p, false);
             StrAppend(out->operands, kBufOpr, RegName(0, w, p.rex_seen));
             StrAppend(out->operands, kBufOpr, ", ");
-            AppendHexU64(out->operands, kBufOpr, (u64)imm);
+            AppendHexU64(out->operands, kBufOpr, static_cast<u64>(imm));
             out->len = cur;
             out->decoded = true;
             record_bytes(cur);
@@ -676,7 +677,7 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
         const i64 imm = ReadImmSigned(&bytes[cur], imm_bytes);
         cur += imm_bytes;
         StrCopy(out->mnemonic, kBufMnem, "push");
-        AppendHexU64(out->operands, kBufOpr, (u64)imm);
+        AppendHexU64(out->operands, kBufOpr, static_cast<u64>(imm));
         out->len = cur;
         out->decoded = true;
         record_bytes(cur);
@@ -688,9 +689,9 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
     {
         if (cur + 1 > available)
             return fail_db(op);
-        const i8 rel = (i8)bytes[cur];
+        const i8 rel = static_cast<i8>(bytes[cur]);
         ++cur;
-        const u64 target = va + cur + (i64)rel;
+        const u64 target = va + cur + static_cast<i64>(rel);
         char m[8] = {0};
         StrAppend(m, sizeof(m), "j");
         StrAppend(m, sizeof(m), kCc[op & 0xF]);
@@ -727,7 +728,7 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
         StrCopy(out->mnemonic, kBufMnem, kAluMnem[mr.reg_idx & 0x7]);
         StrAppend(out->operands, kBufOpr, rm_buf);
         StrAppend(out->operands, kBufOpr, ", ");
-        AppendHexU64(out->operands, kBufOpr, (u64)imm);
+        AppendHexU64(out->operands, kBufOpr, static_cast<u64>(imm));
         out->len = cur;
         out->decoded = true;
         record_bytes(cur);
@@ -865,10 +866,10 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
     {
         if (cur + 2 > available)
             return fail_db(op);
-        const u16 imm = (u16)bytes[cur] | ((u16)bytes[cur + 1] << 8);
+        const u16 imm = static_cast<u16>(bytes[cur]) | (static_cast<u16>(bytes[cur + 1]) << 8);
         cur += 2;
         StrCopy(out->mnemonic, kBufMnem, "ret");
-        AppendHexU64(out->operands, kBufOpr, (u64)imm);
+        AppendHexU64(out->operands, kBufOpr, static_cast<u64>(imm));
         out->len = cur;
         out->decoded = true;
         record_bytes(cur);
@@ -957,9 +958,9 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
     {
         if (cur + 4 > available)
             return fail_db(op);
-        const i32 rel = (i32)ReadImmU(&bytes[cur], 4);
+        const i32 rel = static_cast<i32>(ReadImmU(&bytes[cur], 4));
         cur += 4;
-        const u64 target = va + cur + (i64)rel;
+        const u64 target = va + cur + static_cast<i64>(rel);
         StrCopy(out->mnemonic, kBufMnem, op == 0xE8 ? "call" : "jmp");
         AppendBranchTarget(out->operands, kBufOpr, target);
         out->len = cur;
@@ -971,9 +972,9 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
     {
         if (cur + 1 > available)
             return fail_db(op);
-        const i8 rel = (i8)bytes[cur];
+        const i8 rel = static_cast<i8>(bytes[cur]);
         ++cur;
-        const u64 target = va + cur + (i64)rel;
+        const u64 target = va + cur + static_cast<i64>(rel);
         StrCopy(out->mnemonic, kBufMnem, "jmp");
         AppendBranchTarget(out->operands, kBufOpr, target);
         out->len = cur;
@@ -1136,9 +1137,9 @@ u8 DecodeOne(const u8* bytes, u64 available, u64 va, DecodedInsn* out)
         {
             if (cur + 4 > available)
                 return fail_db(op);
-            const i32 rel = (i32)ReadImmU(&bytes[cur], 4);
+            const i32 rel = static_cast<i32>(ReadImmU(&bytes[cur], 4));
             cur += 4;
-            const u64 target = va + cur + (i64)rel;
+            const u64 target = va + cur + static_cast<i64>(rel);
             char m[8] = {0};
             StrAppend(m, sizeof(m), "j");
             StrAppend(m, sizeof(m), kCc[op2 & 0xF]);
@@ -1735,7 +1736,7 @@ u64 DecodeStream(const u8* bytes, u64 available, u64 va, DecodedInsn* out, u64 r
         if (used == 0)
             break;
         // Don't emit a ragged row that ran past `available`.
-        if ((u64)used > available - off)
+        if (static_cast<u64>(used) > available - off)
             break;
         off += used;
         ++rows;

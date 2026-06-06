@@ -81,11 +81,11 @@ usize ParseHexBytes(const char* s, u8* out, usize cap)
             continue;
         u8 d = 0;
         if (c >= '0' && c <= '9')
-            d = (u8)(c - '0');
+            d = static_cast<u8>(c - '0');
         else if (c >= 'a' && c <= 'f')
-            d = (u8)(10 + c - 'a');
+            d = static_cast<u8>(10 + c - 'a');
         else if (c >= 'A' && c <= 'F')
-            d = (u8)(10 + c - 'A');
+            d = static_cast<u8>(10 + c - 'A');
         else
             return 0;
         if (!have_nibble)
@@ -95,7 +95,7 @@ usize ParseHexBytes(const char* s, u8* out, usize cap)
         }
         else
         {
-            out[n++] = (u8)((nibble << 4) | d);
+            out[n++] = static_cast<u8>((nibble << 4) | d);
             have_nibble = false;
         }
     }
@@ -329,7 +329,7 @@ void DoBp(u32 argc, char** argv)
         u64 id = 0;
         if (!ParseU64Str(argv[3], &id))
             return;
-        const auto rv = dc::RemoveBp({(u32)id}, /*requester_pid=*/0);
+        const auto rv = dc::RemoveBp({static_cast<u32>(id)}, /*requester_pid=*/0);
         ConsoleWriteln(rv == duetos::debug::BpError::None ? "DBG BP RM: OK" : "DBG BP RM: FAIL");
         return;
     }
@@ -340,7 +340,7 @@ void DoBp(u32 argc, char** argv)
         u64 id = 0;
         if (!ParseU64Str(argv[3], &id))
             return;
-        const auto rv = dc::ResumeBp({(u32)id});
+        const auto rv = dc::ResumeBp({static_cast<u32>(id)});
         ConsoleWriteln(rv == duetos::debug::BpError::None ? "DBG BP RESUME: OK" : "DBG BP RESUME: FAIL");
         return;
     }
@@ -351,7 +351,7 @@ void DoBp(u32 argc, char** argv)
         u64 id = 0;
         if (!ParseU64Str(argv[3], &id))
             return;
-        const auto rv = dc::StepBp({(u32)id});
+        const auto rv = dc::StepBp({static_cast<u32>(id)});
         ConsoleWriteln(rv == duetos::debug::BpError::None ? "DBG BP STEP: OK" : "DBG BP STEP: FAIL");
         return;
     }
@@ -371,7 +371,7 @@ void DoRegs(u32 argc, char** argv)
         return;
     }
     arch::TrapFrame f{};
-    if (!dc::RegsRead({(u32)id}, &f))
+    if (!dc::RegsRead({static_cast<u32>(id)}, &f))
     {
         ConsoleWriteln("DBG REGS: NO PARKED TASK");
         return;
@@ -497,7 +497,7 @@ void DoWatch(u32 argc, char** argv)
         u64 slot = 0;
         if (!ParseU64Str(argv[3], &slot))
             return;
-        ConsoleWriteln(dc::WatchRemove((u32)slot) ? "DBG WATCH RM: OK" : "DBG WATCH RM: FAIL");
+        ConsoleWriteln(dc::WatchRemove(static_cast<u32>(slot)) ? "DBG WATCH RM: OK" : "DBG WATCH RM: FAIL");
         return;
     }
 }

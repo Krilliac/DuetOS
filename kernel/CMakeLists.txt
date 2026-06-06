@@ -1631,6 +1631,17 @@ option(DUETOS_ENABLE_UBSAN "Build the kernel with the diagnostic sanitizer suite
 # signal. The `x86_64-debug-san` preset turns it on for runs that
 # specifically hunt conversion/truncation bugs.
 option(DUETOS_ENABLE_UBSAN_INTEGER "Also enable the noisy -fsanitize=integer family (opt-in; x86_64-debug-san)" OFF)
+# Trap mode (opt-in; x86_64-debug-ubsan-trap). The default UBSan above
+# is "visibility, not enforcement" — each check calls a handler in
+# kernel/diag/ubsan.cpp that logs and returns, so a boot surfaces every
+# UB site without dying. Trap mode is the opposite contract: each check
+# emits a `ud1`/`ud2` instead of a call, so the FIRST UB faults into the
+# existing #UD handler (→ ring-3 task-kill / ring-0 panic). No
+# __ubsan_handle_* runtime is needed in trap mode (the link stays closed
+# without ubsan.cpp), and there is no per-site log overhead. Use it as a
+# fail-fast CI / on-hardware gate where "stop at the first UB" beats
+# "log them all and keep going".
+option(DUETOS_UBSAN_TRAP "Make UBSan checks trap (ud2 → #UD) instead of log-and-continue (opt-in; x86_64-debug-ubsan-trap)" OFF)
 if(DUETOS_ENABLE_UBSAN)
     # `-fno-sanitize=function` suppresses the call-through-mismatched-
     # function-pointer-type check (`__ubsan_handle_function_type_mismatch`).
@@ -1646,15 +1657,56 @@ if(DUETOS_ENABLE_UBSAN)
     # of which checks fire.
     set(DUETOS_UBSAN_FLAGS
         -fsanitize=undefined,nullability,float-divide-by-zero
-        -fno-sanitize=function
-        -fno-sanitize-trap=all)
+        -fno-sanitize=function)
+    if(DUETOS_UBSAN_TRAP)
+        # Trap the same set we enable. Faults at the first UB via #UD;
+        # no log-and-continue runtime is consulted for trapped checks.
+        list(APPEND DUETOS_UBSAN_FLAGS -fsanitize-trap=undefined,nullability,float-divide-by-zero)
+    else()
+        # Log-and-continue: every check resolves to a kernel/diag/ubsan.cpp
+        # handler that emits one klog warning + serial line and returns.
+        list(APPEND DUETOS_UBSAN_FLAGS -fno-sanitize-trap=all)
+    endif()
     if(DUETOS_ENABLE_UBSAN_INTEGER)
         list(APPEND DUETOS_UBSAN_FLAGS -fsanitize=integer)
+        if(DUETOS_UBSAN_TRAP)
+            list(APPEND DUETOS_UBSAN_FLAGS -fsanitize-trap=integer)
+        endif()
     endif()
     target_compile_options(duetos-kernel        PRIVATE ${DUETOS_UBSAN_FLAGS})
     target_compile_options(duetos-kernel-stage1 PRIVATE ${DUETOS_UBSAN_FLAGS})
     target_compile_definitions(duetos-kernel          PRIVATE DUETOS_UBSAN=1)
     target_compile_definitions(duetos-kernel-stage1   PRIVATE DUETOS_UBSAN=1)
+endif()
+
+# Integer-conversion audit (opt-in; x86_64-debug-conv preset).
+#
+# -Wconversion / -Wsign-conversion flag every implicit narrowing and
+# signedness change. The kernel does this *deliberately* and pervasively
+# — network header fields are u16, lengths are stored in u32, ring
+# indices wrap — so the overwhelming majority are intentional, not bugs.
+# That is the same reason the integer UBSan family above is off by
+# default. Carrying these as a permanent -Werror gate would impose
+# explicit-cast friction on every future net/fs line for almost no
+# steady-state signal, so they are NOT part of the toolchain floor.
+#
+# Instead this is an on-demand audit: turn it ON to surface the full
+# narrowing set in one build, then eyeball the list for the dangerous
+# cases (an oversize length truncated to u32, a negative reaching an
+# unsigned size). The -Wno-error= lines keep these as warnings so the
+# audit run completes and shows ALL sites at once rather than failing at
+# the first — the rest of the -Werror floor still bites as normal.
+option(DUETOS_ENABLE_CONVERSION_AUDIT "Build the kernel with -Wconversion/-Wsign-conversion as non-fatal warnings (opt-in audit; x86_64-debug-conv)" OFF)
+if(DUETOS_ENABLE_CONVERSION_AUDIT)
+    set(DUETOS_CONV_AUDIT_FLAGS
+        -Wconversion
+        -Wsign-conversion
+        -Wno-error=conversion
+        -Wno-error=sign-conversion
+        -Wno-error=shorten-64-to-32
+        -Wno-error=implicit-int-conversion)
+    target_compile_options(duetos-kernel        PRIVATE ${DUETOS_CONV_AUDIT_FLAGS})
+    target_compile_options(duetos-kernel-stage1 PRIVATE ${DUETOS_CONV_AUDIT_FLAGS})
 endif()
 
 # Debug builds upgrade the toolchain's -fstack-protector-strong to

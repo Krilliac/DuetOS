@@ -578,8 +578,8 @@ void OnCsi(void* /*cookie*/, char final_byte, char /*private_marker*/, const u16
         const u16 c = ParamOr(params, nparams, 1, 1);
         const u32 max_y = (g_state.rows > 0) ? (g_state.rows - 1) : 0;
         const u32 max_x = (g_state.cols > 0) ? (g_state.cols - 1) : 0;
-        g_state.cur_y = (r > 0) ? (((u32)(r - 1) > max_y) ? max_y : (u32)(r - 1)) : 0;
-        g_state.cur_x = (c > 0) ? (((u32)(c - 1) > max_x) ? max_x : (u32)(c - 1)) : 0;
+        g_state.cur_y = (r > 0) ? ((static_cast<u32>(r - 1) > max_y) ? max_y : static_cast<u32>(r - 1)) : 0;
+        g_state.cur_x = (c > 0) ? ((static_cast<u32>(c - 1) > max_x) ? max_x : static_cast<u32>(c - 1)) : 0;
         break;
     }
     case 'J':
