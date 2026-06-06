@@ -135,8 +135,16 @@ multiboot2_header_end:
  *     (37.8%) free. The ≈268 KiB above was a lower-bound ESTIMATE from
  *     the single captured wild-rsp frame; the direct scan shows demand
  *     runs ~50 KiB deeper, so the 128 KiB stack actually overflowed by
- *     ~190 KiB. 512 KiB still clears it with comfortable margin. Re-run
- *     that tool if the deep self-test set grows.
+ *     ~190 KiB. Re-run that tool if the deep self-test set grows.
+ *   - 1 MiB: permanent-headroom bump. The FS read-tier self-tests grew
+ *     (ext4 depth>0 + multi-component, NTFS multi-component) and run
+ *     ON THIS stack alongside the network/crypto chain, each lookup
+ *     carrying a 4 KiB on-stack dir/MFT-record buffer. Rather than
+ *     re-measure on every self-test addition, double 512→1 MiB so the
+ *     318 KiB-and-growing demand keeps a ≥60% margin without further
+ *     tuning. The guard page below still self-diagnoses a future
+ *     overflow; the real long-term fix remains moving the deep
+ *     self-tests off the boot task (Roadmap follow-up).
  *
  *     The guard page below now makes a FUTURE overflow self-diagnosing:
  *     a recurrence faults in boot_stack_guard_page with a named panic
@@ -150,7 +158,7 @@ boot_stack_guard_page:
     .skip 4096                  /* guard: not-present after InstallBootStackGuard() */
 .align 4096
 stack_bottom:
-    .skip 524288                /* 512 KiB boot stack — see history above */
+    .skip 1048576                /* 1 MiB boot stack — see history above */
 stack_top:
 
 .align 4096
