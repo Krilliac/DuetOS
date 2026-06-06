@@ -75,6 +75,15 @@
             }
         },
         {
+            "name": "x86_64-debug-ubsan-trap",
+            "displayName": "x86_64 debug + UBSAN in trap mode (fail-fast: first UB → #UD, no log runtime)",
+            "inherits": "x86_64-debug",
+            "cacheVariables": {
+                "DUETOS_ENABLE_UBSAN": "ON",
+                "DUETOS_UBSAN_TRAP": "ON"
+            }
+        },
+        {
             "name": "x86_64-debug-redteam",
             "displayName": "x86_64 debug + AttackSim red-team suite (escalates guards; not a normal-boot build)",
             "inherits": "x86_64-debug",
@@ -173,6 +182,10 @@
         {
             "name": "x86_64-debug-conv",
             "configurePreset": "x86_64-debug-conv"
+        },
+        {
+            "name": "x86_64-debug-ubsan-trap",
+            "configurePreset": "x86_64-debug-ubsan-trap"
         },
         {
             "name": "x86_64-debug-redteam",

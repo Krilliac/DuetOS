@@ -57,7 +57,14 @@ GDB server) it adds:
   `-fno-sanitize=function -fno-sanitize-trap=all`. The emitted
   `__ubsan_handle_*` calls resolve to the in-tree runtime in
   `kernel/diag/ubsan.cpp` (one klog WARN + serial line per incident,
-  then execution continues — visibility, not enforcement).
+  then execution continues — visibility, not enforcement). The
+  `x86_64-debug-ubsan-trap` preset (`DUETOS_UBSAN_TRAP=ON`) flips this
+  to **fail-fast**: each check emits a `ud2` instead of a handler call,
+  so the *first* UB faults into the `#UD` handler (→ ring-3 task-kill /
+  ring-0 panic) and no log-and-continue runtime is consulted. Use trap
+  mode as a CI / on-hardware gate where "stop at the first UB" beats
+  "log them all"; use the default log mode to enumerate every site in
+  one boot.
 - `DUETOS_KASAN=ON` — the in-tree **ASAN-equivalent** diagnostics
   (heap trailer canaries, freed-payload / freed-page poison, plus the
   `+kasan` boot banner). Real `-fsanitize=address` /
@@ -71,7 +78,8 @@ Dedicated single-axis presets mirror this:
 
 | Preset | What it adds over `x86_64-debug` |
 |--------|----------------------------------|
-| `x86_64-debug-ubsan` | re-asserts `DUETOS_ENABLE_UBSAN` only |
+| `x86_64-debug-ubsan` | re-asserts `DUETOS_ENABLE_UBSAN` only (log-and-continue) |
+| `x86_64-debug-ubsan-trap` | UBSan in **trap mode** (`DUETOS_UBSAN_TRAP`): first UB → `ud2` → `#UD`, no log runtime — fail-fast gate |
 | `x86_64-debug-asan`  | re-asserts `DUETOS_KASAN` only |
 | `x86_64-debug-san`   | the **full suite**: `-fsanitize=integer` family on (`DUETOS_ENABLE_UBSAN_INTEGER`), KASAN, lock-order audit, full cap audit |
 | `x86_64-debug-conv`  | `DUETOS_ENABLE_CONVERSION_AUDIT=ON` — `-Wconversion`/`-Wsign-conversion` as **non-fatal** warnings (compile-time analogue of the integer sanitizer; see the conversion-audit note below) |

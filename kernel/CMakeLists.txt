@@ -1631,6 +1631,17 @@ option(DUETOS_ENABLE_UBSAN "Build the kernel with the diagnostic sanitizer suite
 # signal. The `x86_64-debug-san` preset turns it on for runs that
 # specifically hunt conversion/truncation bugs.
 option(DUETOS_ENABLE_UBSAN_INTEGER "Also enable the noisy -fsanitize=integer family (opt-in; x86_64-debug-san)" OFF)
+# Trap mode (opt-in; x86_64-debug-ubsan-trap). The default UBSan above
+# is "visibility, not enforcement" — each check calls a handler in
+# kernel/diag/ubsan.cpp that logs and returns, so a boot surfaces every
+# UB site without dying. Trap mode is the opposite contract: each check
+# emits a `ud1`/`ud2` instead of a call, so the FIRST UB faults into the
+# existing #UD handler (→ ring-3 task-kill / ring-0 panic). No
+# __ubsan_handle_* runtime is needed in trap mode (the link stays closed
+# without ubsan.cpp), and there is no per-site log overhead. Use it as a
+# fail-fast CI / on-hardware gate where "stop at the first UB" beats
+# "log them all and keep going".
+option(DUETOS_UBSAN_TRAP "Make UBSan checks trap (ud2 → #UD) instead of log-and-continue (opt-in; x86_64-debug-ubsan-trap)" OFF)
 if(DUETOS_ENABLE_UBSAN)
     # `-fno-sanitize=function` suppresses the call-through-mismatched-
     # function-pointer-type check (`__ubsan_handle_function_type_mismatch`).
@@ -1646,10 +1657,21 @@ if(DUETOS_ENABLE_UBSAN)
     # of which checks fire.
     set(DUETOS_UBSAN_FLAGS
         -fsanitize=undefined,nullability,float-divide-by-zero
-        -fno-sanitize=function
-        -fno-sanitize-trap=all)
+        -fno-sanitize=function)
+    if(DUETOS_UBSAN_TRAP)
+        # Trap the same set we enable. Faults at the first UB via #UD;
+        # no log-and-continue runtime is consulted for trapped checks.
+        list(APPEND DUETOS_UBSAN_FLAGS -fsanitize-trap=undefined,nullability,float-divide-by-zero)
+    else()
+        # Log-and-continue: every check resolves to a kernel/diag/ubsan.cpp
+        # handler that emits one klog warning + serial line and returns.
+        list(APPEND DUETOS_UBSAN_FLAGS -fno-sanitize-trap=all)
+    endif()
     if(DUETOS_ENABLE_UBSAN_INTEGER)
         list(APPEND DUETOS_UBSAN_FLAGS -fsanitize=integer)
+        if(DUETOS_UBSAN_TRAP)
+            list(APPEND DUETOS_UBSAN_FLAGS -fsanitize-trap=integer)
+        endif()
     endif()
     target_compile_options(duetos-kernel        PRIVATE ${DUETOS_UBSAN_FLAGS})
     target_compile_options(duetos-kernel-stage1 PRIVATE ${DUETOS_UBSAN_FLAGS})
