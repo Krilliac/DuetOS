@@ -36,7 +36,20 @@ BIN="${WORK_DIR}/vdso.bin"
 
 CLANG="${CLANG:-clang}"
 LD="${LD:-ld.lld}"
-OBJCOPY="${OBJCOPY:-llvm-objcopy}"
+# Prefer llvm-objcopy, but fall back to GNU binutils objcopy when it is
+# absent (e.g. the release-channels CI runner installs clang/lld but not
+# the full llvm package). Both support `-O binary --only-section`. A bare
+# `OBJCOPY:-llvm-objcopy` default produced a cryptic exit 127 here.
+if [[ -z "${OBJCOPY:-}" ]]; then
+    if command -v llvm-objcopy >/dev/null 2>&1; then
+        OBJCOPY="llvm-objcopy"
+    elif command -v objcopy >/dev/null 2>&1; then
+        OBJCOPY="objcopy"
+    else
+        echo "build-linux-vdso.sh: neither llvm-objcopy nor objcopy found on PATH" >&2
+        exit 1
+    fi
+fi
 
 # Assemble for the Linux x86_64 ABI (System V) — this code runs
 # in Linux-ELF user processes, NOT in the Windows PE userland.
