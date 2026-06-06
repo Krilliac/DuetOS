@@ -91,7 +91,7 @@ tree already follows the contract everywhere except one latent gap
 | **GPU telemetry** | Read-only (landed 2026-06-06) | `drivers/gpu/gpu_telemetry.cpp` reads the Intel GT P-state register only; never writes clock/voltage/fan. MHz decode + temp GAP'd |
 | **NIC telemetry** | Read-only (landed 2026-06-06) | `drivers/net/nic_telemetry.cpp` surfaces the already-read MAC/link; never writes NIC NVM/MAC |
 | **Wi-Fi TX-power caps** | Read-only (landed 2026-06-06) | `net/wireless/reg_telemetry.cpp` reports the regdb regulatory caps; never programs radio TX power (the clamp belongs in the future TX path) |
-| **UEFI firmware/NVRAM** | Read-only (landed 2026-06-06) | `arch/x86_64/uefi_nvram.cpp` reads the EFI System Table header (revision, RT-services presence) via multiboot2 tag 12; never calls `SetVariable`. `GetVariable` itself is GAP'd (needs tag-17 RT-region mapping) |
+| **UEFI firmware/NVRAM** | Read-only (landed 2026-06-06) | `arch/x86_64/uefi_nvram.cpp` reads the EFI System Table + (opt-in `uefi-getvar`) calls RuntimeServices->GetVariable to read `BootOrder`/`Boot####`; never calls `SetVariable`. The firmware call is cmdline-gated (off by default) |
 | **UEFI NVRAM** | No writes | No `SetVariable` / capsule / `UpdateCapsule` path exists |
 | **SPI flash / microcode** | No writes | None; **ME/PSP guard** actively refuses PCI config writes to coprocessor BDFs (`me_psp_guard`) |
 | **CMOS / RTC** | Bounded | `RtcWrite` bounds-checked, freeze/unfreeze, touches only time bytes 0x00–0x09 |

@@ -10702,3 +10702,38 @@ identity map), interrupt remapping, AMD-Vi enable, and a DMAR fault-IRQ
 handler (faults are contained but not yet *reported*) remain follow-ups —
 see Roadmap. Do NOT switch to per-device domains without first mapping
 every driver's DMA buffers, or devices will fault.
+
+## 2026-06-06 — UEFI GetVariable: physical-mode firmware call via a raw asm thunk
+
+Completed the UEFI reader's GAP: reading Boot####/BootOrder through
+RuntimeServices->GetVariable.
+
+**Decision — call firmware in physical mode via the low identity map, no
+SetVirtualAddressMap, no tag 17.** The boot identity map (PML4[0], 0..1 GiB,
+phys==virt) persists post-boot and is RWX (boot.S fills boot_pd with
+0x83 = P|RW|PS, NX clear), and OVMF's RT services live at phys ~0x1f000000
+(< 1 GiB). So the firmware code is directly callable where it sits; the EFI
+memory map (tag 17) is not needed and is deliberately NOT requested (it
+bloats the multiboot snapshot). The reader guards on rt_phys < 1 GiB and
+no-ops otherwise.
+
+**Decision — a hand-written asm thunk, because the retpoline guard forbids
+the call.** The kernel's compiler-emitted indirect calls all route through
+the validating retpoline thunk (retpoline_thunks.S), which PANICS on a
+target outside [_text_start,_text_end) — and a firmware address is exactly
+that (observed first: "[retpoline] WILD indirect call — refusing dispatch
+target=0x1fad5b94"). `arch/x86_64/uefi_call.S::EfiCallGetVariable` issues a
+RAW `call *%rax` (which the compiler does not rewrite) and bridges System V
+-> Microsoft x64 (rcx/rdx/r8/r9 + 5th arg above the 32-byte shadow space).
+Interrupts are masked across the call (RFLAGS saved/restored).
+
+**Decision — the firmware call is opt-in (`uefi-getvar` cmdline).** Calling
+firmware is the one genuinely risky operation in the reader (a faulting/
+hanging RT service is hard to recover), so a default boot never makes it —
+it reports `getvar=available(pass uefi-getvar)`. Verified under OVMF with
+the flag: "[uefi] BootOrder OK: 0x12 bytes (9 boot entries) Boot0..Boot8",
+no fault, selftest PASS.
+
+**Stays read-only forever.** Only GetVariable (read) is implemented;
+SetVariable (write) is out of scope by the Hardware-Safety contract (a
+NVRAM write can brick a board), not just by v0 scope.

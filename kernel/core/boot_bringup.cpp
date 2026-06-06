@@ -416,6 +416,13 @@ constinit duetos::drivers::video::TtfFont g_chrome_bold_font_storage{};
 // by DUETOS_BOOT_SELFTEST_CI (see below).
 constinit bool g_expensive_selftests = false;
 
+// Operator opt-in (`uefi-getvar` on the cmdline) to call the firmware's
+// GetVariable in physical mode and read BootOrder. Off by default — the
+// firmware call is the one risky operation in the UEFI reader, so a normal
+// boot never makes it. Set in BootBringupKernelServices, consumed by the
+// UEFI telemetry probe in BootBringupDevices.
+constinit bool g_uefi_read_vars = false;
+
 // Minimal substring search — the kernel has no strstr in scope here and
 // the cmdline is a short, NUL-terminated string.
 bool CmdlineContains(const char* haystack, const char* needle)
@@ -1270,6 +1277,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // boot (see g_expensive_selftests). Done here — before the crypto
     // cluster in BootBringupDevices, which has no cmdline of its own.
     g_expensive_selftests = CmdlineEnablesExpensiveSelfTests(cmdline);
+    g_uefi_read_vars = CmdlineContains(cmdline, "uefi-getvar");
     SerialWrite(g_expensive_selftests
                     ? "[boot] expensive self-tests ENABLED (selftests=full)\n"
                     : "[boot] expensive self-tests skipped (default; pass selftests=full to run heavy crypto/TLS)\n");
@@ -2158,7 +2166,7 @@ void BootBringupDevices(bool force_net_smoke)
     duetos::drivers::gpu::GpuTelemetryProbe();
     duetos::drivers::net::NicTelemetryProbe();
     duetos::net::wireless::RegTelemetryProbe();
-    duetos::arch::UefiNvramProbe();
+    duetos::arch::UefiNvramProbe(g_uefi_read_vars);
 
     SerialWrite("[boot] Detecting USB host controllers.\n");
     duetos::drivers::usb::UsbInit();

@@ -49,6 +49,19 @@ struct [[gnu::packed]] EfiSystemTable
 };
 static_assert(sizeof(EfiSystemTable) == 120, "EFI_SYSTEM_TABLE head layout");
 
+// UEFI global-variable GUID: 8BE4DF61-93CA-11D2-AA0D-00E098032B8C.
+constexpr EfiGuid kGlobalVariableGuid = {
+    0x8BE4DF61u, 0x93CAu, 0x11D2u, {0xAAu, 0x0Du, 0x00u, 0xE0u, 0x98u, 0x03u, 0x2Bu, 0x8Cu}};
+
+// UTF-16 "BootOrder".
+constexpr u16 kBootOrderName[] = {'B', 'o', 'o', 't', 'O', 'r', 'd', 'e', 'r', 0};
+
+// RuntimeServices->GetVariable byte offset 72 = index 9 of u64 pointers:
+// Hdr(24) + GetTime/SetTime/GetWakeupTime/SetWakeupTime(32) +
+// SetVirtualAddressMap/ConvertPointer(16) = 72.
+constexpr u64 kRtGetVariableIndex = 9;
+constexpr u64 kIdentityMapLimit = 0x40000000ULL; // low 1 GiB identity map (RWX)
+
 } // namespace
 
 u64 FindEfiSystemTablePhys(const void* mb_info, u64 size)
@@ -102,7 +115,63 @@ UefiNvramReading UefiNvramRead()
     return r;
 }
 
-void UefiNvramProbe()
+// Hand-written SysV->MS-x64 thunk that issues a RAW indirect call,
+// bypassing the kernel's retpoline guard (which panics on a call target
+// outside kernel text — and a firmware address is exactly that). See
+// arch/x86_64/uefi_call.S.
+extern "C" u64 EfiCallGetVariable(void* fn, const u16* name, const EfiGuid* guid, u32* attrs, u64* data_size,
+                                  void* data);
+
+const EfiGuid& UefiGlobalVariableGuid()
+{
+    return kGlobalVariableGuid;
+}
+
+UefiVariableResult UefiGetVariable(const u16* name, const EfiGuid* guid)
+{
+    UefiVariableResult r = {};
+    const void* mb = mm::MultibootInfoSnapshot();
+    const u64 st_phys = FindEfiSystemTablePhys(mb, mm::MultibootInfoSnapshotSize());
+    // The System Table, the Runtime Services table, and the firmware code
+    // must all sit in the low 1 GiB identity map (RWX, phys==virt) for a
+    // physical-mode call after ExitBootServices. OVMF places them there;
+    // if anything is above 1 GiB we cannot safely call and return inert.
+    if (st_phys == 0 || st_phys >= kIdentityMapLimit)
+        return r;
+    void* st_virt = mm::MapMmio(st_phys, sizeof(EfiSystemTable));
+    if (st_virt == nullptr)
+        return r;
+    const auto* st = static_cast<const volatile EfiSystemTable*>(st_virt);
+    if (st->hdr.signature != kEfiSystemTableSignature)
+        return r;
+    const u64 rt_phys = st->runtime_services;
+    if (rt_phys == 0 || rt_phys >= kIdentityMapLimit)
+        return r;
+
+    const u64* rt = reinterpret_cast<const u64*>(rt_phys);
+    void* get_var = reinterpret_cast<void*>(rt[kRtGetVariableIndex]);
+    if (get_var == nullptr || reinterpret_cast<u64>(get_var) >= kIdentityMapLimit)
+        return r;
+
+    u64 data_size = sizeof(r.data);
+    // Save RFLAGS, mask interrupts across the firmware call (RT services
+    // don't expect kernel-IRQ re-entry in physical mode), then restore the
+    // caller's interrupt state exactly.
+    u64 saved_flags = 0;
+    asm volatile("pushfq; pop %0; cli" : "=r"(saved_flags) : : "memory");
+    const u64 status = EfiCallGetVariable(get_var, name, guid, nullptr, &data_size, r.data);
+    asm volatile("push %0; popfq" : : "r"(saved_flags) : "memory", "cc");
+
+    r.efi_status = status;
+    if (status == 0)
+    {
+        r.ok = true;
+        r.size = (data_size <= sizeof(r.data)) ? data_size : sizeof(r.data);
+    }
+    return r;
+}
+
+void UefiNvramProbe(bool read_variables)
 {
     using arch::SerialWrite;
     const UefiNvramReading r = UefiNvramRead();
@@ -149,9 +218,43 @@ void UefiNvramProbe()
     SerialWrite(" fw_rev=");
     arch::SerialWriteHex(r.firmware_revision);
     SerialWrite(r.runtime_services_present ? " runtime-services=present" : " runtime-services=absent");
-    // GAP: GetVariable (Boot####/BootOrder) needs the tag-17 EFI memory
-    // map parsed + RT regions mapped + an MS-ABI call thunk — deferred.
-    SerialWrite(" getvar=GAP\n");
+    if (!read_variables)
+    {
+        // The firmware GetVariable call is opt-in (cmdline `uefi-getvar`):
+        // it calls firmware code in physical mode, so a default boot does
+        // not risk it.
+        SerialWrite(" getvar=available(pass uefi-getvar)\n");
+        return;
+    }
+    if (!r.runtime_services_present)
+    {
+        SerialWrite(" getvar=skip(no-rt-services)\n");
+        return;
+    }
+    // Diagnostic before the firmware call so a fault/hang is localised.
+    SerialWrite("\n[uefi] calling GetVariable(BootOrder)...\n");
+    const UefiVariableResult bo = UefiGetVariable(kBootOrderName, &kGlobalVariableGuid);
+    if (bo.ok)
+    {
+        SerialWrite("[uefi] BootOrder OK: ");
+        arch::SerialWriteHex(bo.size);
+        SerialWrite(" bytes (");
+        arch::SerialWriteHex(bo.size / 2);
+        SerialWrite(" boot entries):");
+        for (u64 i = 0; i + 1 < bo.size; i += 2)
+        {
+            const u16 idx = static_cast<u16>(bo.data[i] | (static_cast<u16>(bo.data[i + 1]) << 8));
+            SerialWrite(" Boot");
+            arch::SerialWriteHex(idx);
+        }
+        SerialWrite("\n");
+    }
+    else
+    {
+        SerialWrite("[uefi] GetVariable(BootOrder) failed status=");
+        arch::SerialWriteHex(bo.efi_status);
+        SerialWrite("\n");
+    }
 }
 
 void UefiNvramSelfTest()
@@ -187,7 +290,13 @@ void UefiNvramSelfTest()
     if (FindEfiSystemTablePhys(nullptr, 0) != 0 || FindEfiSystemTablePhys(blob, 4) != 0)
         PanicWithValue("arch/uefi", "degenerate input not zero", 3);
 
-    arch::SerialWrite("[uefi-nvram-selftest] PASS (tag-12 walker + signature constant)\n");
+    // The global-variable GUID constant (8BE4DF61-93CA-11D2-AA0D-...8C).
+    const EfiGuid& g = kGlobalVariableGuid;
+    if (g.data1 != 0x8BE4DF61u || g.data2 != 0x93CAu || g.data3 != 0x11D2u || g.data4[0] != 0xAAu ||
+        g.data4[7] != 0x8Cu)
+        PanicWithValue("arch/uefi", "global-variable GUID constant wrong", g.data1);
+
+    arch::SerialWrite("[uefi-nvram-selftest] PASS (tag-12 walker + signature + GUID constant)\n");
 }
 
 } // namespace duetos::arch
