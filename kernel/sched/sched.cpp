@@ -3091,6 +3091,10 @@ void SchedSleepTicks(u64 ticks)
     // the hottest blocking path: every worker / reader / ticker).
     sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
     Task* current = Current();
+    // Precondition: only a dispatched task blocks itself, so Current()
+    // is non-null. Assert before the state/wake_tick derefs so a stray
+    // pre-Schedule caller fails with a diagnostic, not a page fault.
+    KASSERT(current != nullptr, "sched", "SchedSleepTicks with no current task");
     current->state = TaskState::Sleeping;
     // Saturate (same idiom as WaitQueueBlockTimeout): an unclamped
     // sum can wrap to 0, which is the "not a timed waiter" sentinel
@@ -3125,6 +3129,8 @@ void SchedSleepUntil(u64 deadline_tick)
     // timer wake can't double-run this task.
     sync::IrqFlags f = sync::SpinLockAcquire(g_sched_lock);
     Task* current = Current();
+    // Precondition mirrors SchedSleepTicks: a dispatched task only.
+    KASSERT(current != nullptr, "sched", "SchedSleepUntil with no current task");
     current->state = TaskState::Sleeping;
     current->wake_tick = deadline_tick;
     SleepqueueInsert(current);
@@ -3147,6 +3153,15 @@ void SchedExit()
     KASSERT_WITH_VALUE(cpu::CriticalNesting() == 0, "sched", "SchedExit with critnest != 0", cpu::CriticalNesting());
     arch::Cli();
     Task* self = Current();
+    // Precondition: SchedExit runs in a dispatched task's context, so
+    // Current() is non-null here. Assert it before the self->state
+    // deref below — otherwise a future stray caller (the comment on
+    // the next KASSERT anticipates exactly this) would page-fault
+    // *inside* that KASSERT, turning a catchable invariant violation
+    // into a triple-fault with no diagnostic. Current() is documented
+    // nullable (sched.h) and guarded in sibling paths (OnTimerTick,
+    // SchedExemptCurrentFromHungTask); this keeps SchedExit consistent.
+    KASSERT(self != nullptr, "sched", "SchedExit with no current task");
     // SchedExit must fire exactly once per task. A second call would
     // double-decrement sched_tasks_live, double-push onto the zombie list
     // (corrupting the intrusive `next` link), and re-arm the reaper
