@@ -393,7 +393,68 @@ constinit duetos::drivers::video::TtfFont g_chrome_font_storage{};
 // the TTF dispatch path picks this face up.
 constinit duetos::drivers::video::TtfFont g_chrome_bold_font_storage{};
 
+// Expensive boot self-tests (heavy asymmetric crypto: RSA, RSA-4096 +
+// ECDSA P-256/P-384 X.509 chain verify, Argon2id password hashing, TLS
+// handshakes) cost ~200 s under QEMU TCG. That blows the budget in BOTH
+// directions: it makes an interactive boot crawl AND it eats the CI
+// smoke job's entire timeout, so it must NOT be tied to the smoke
+// profile. They are therefore OFF by default everywhere — normal boot
+// AND the CI smoke gate — and run ONLY behind an explicit opt-in:
+//   - the kernel cmdline token `selftests=full`.
+// A dedicated/nightly full-verification job (or a developer chasing a
+// crypto regression) passes `selftests=full` and budgets the longer
+// timeout; the fast smoke gate stays fast. The smoke harness asserts no
+// crypto sentinels, so skipping them under smoke breaks no CI check.
+// Set once at the top of BootBringupKernelServices (which has the
+// cmdline) before the crypto cluster in BootBringupDevices runs. Gated
+// by DUETOS_BOOT_SELFTEST_CI (see below).
+constinit bool g_expensive_selftests = false;
+
+// Minimal substring search — the kernel has no strstr in scope here and
+// the cmdline is a short, NUL-terminated string.
+bool CmdlineContains(const char* haystack, const char* needle)
+{
+    if (haystack == nullptr || needle == nullptr)
+        return false;
+    for (const char* h = haystack; *h != '\0'; ++h)
+    {
+        const char* a = h;
+        const char* b = needle;
+        while (*a != '\0' && *b != '\0' && *a == *b)
+        {
+            ++a;
+            ++b;
+        }
+        if (*b == '\0')
+            return true;
+    }
+    return false;
+}
+
+bool CmdlineEnablesExpensiveSelfTests(const char* cmdline)
+{
+    // Explicit opt-in ONLY. Deliberately not triggered by `smoke=` —
+    // the CI smoke gate must stay fast (these tests eat its whole
+    // timeout). A full-verification run passes `selftests=full`.
+    return CmdlineContains(cmdline, "selftests=full");
+}
+
 } // namespace
+
+// Wrap a heavy self-test so it runs only under an explicit
+// `selftests=full` opt-in (OFF in normal boots and the CI smoke gate).
+// Expands inside namespace duetos::core, so the unqualified
+// g_expensive_selftests resolves to the anonymous-namespace flag above.
+// Nests DUETOS_BOOT_SELFTEST, so release builds still drop the call
+// entirely via the kBootSelfTests compile gate.
+#define DUETOS_BOOT_SELFTEST_CI(call)                                                                                  \
+    do                                                                                                                 \
+    {                                                                                                                  \
+        if (g_expensive_selftests)                                                                                     \
+        {                                                                                                              \
+            DUETOS_BOOT_SELFTEST(call);                                                                                \
+        }                                                                                                              \
+    } while (0)
 
 void BootBringupEarly(duetos::u32 multiboot_magic, duetos::uptr multiboot_info)
 {
@@ -1189,6 +1250,14 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
 {
     using namespace duetos::arch;
     using namespace duetos::mm;
+
+    // Decide once whether the expensive crypto/TLS self-tests run this
+    // boot (see g_expensive_selftests). Done here — before the crypto
+    // cluster in BootBringupDevices, which has no cmdline of its own.
+    g_expensive_selftests = CmdlineEnablesExpensiveSelfTests(cmdline);
+    SerialWrite(g_expensive_selftests
+                    ? "[boot] expensive self-tests ENABLED (selftests=full)\n"
+                    : "[boot] expensive self-tests skipped (default; pass selftests=full to run heavy crypto/TLS)\n");
 
     // Phase::Vfs — ramfs init imperative (it lays down the v0 root
     // hierarchy + seed files); VFS self-test routes through the
@@ -2026,11 +2095,11 @@ void BootBringupDevices(bool force_net_smoke)
     DUETOS_BOOT_SELFTEST(duetos::crypto::AesGcmSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::BigIntSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::asn1::Asn1SelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::crypto::RsaSelfTest());
+    DUETOS_BOOT_SELFTEST_CI(duetos::crypto::RsaSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::crypto::HkdfSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::crypto::x509::X509SelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::net::tls::TlsSelfTest());
-    DUETOS_BOOT_SELFTEST(duetos::security::PasswordHashSelfTest());
+    DUETOS_BOOT_SELFTEST_CI(duetos::crypto::x509::X509SelfTest());
+    DUETOS_BOOT_SELFTEST_CI(duetos::net::tls::TlsSelfTest());
+    DUETOS_BOOT_SELFTEST_CI(duetos::security::PasswordHashSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::EapolSelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::FourWaySelfTest());
     DUETOS_BOOT_SELFTEST(duetos::net::wireless::GcmpSelfTest());
@@ -2302,7 +2371,7 @@ void BootBringupDevices(bool force_net_smoke)
     // and leaf->intermediate->root paths verify TRUE while a tampered
     // signature, wrong hostname, expired window, and untrusted issuer
     // all verify FALSE. Pure compute over embedded data (no I/O).
-    DUETOS_BOOT_SELFTEST(duetos::net::x509::X509VerifySelfTest());
+    DUETOS_BOOT_SELFTEST_CI(duetos::net::x509::X509VerifySelfTest());
     // HTTP/1.1 client self-test (transport-abstracted): drives an
     // in-memory canned-response transport through the request engine
     // and asserts Content-Length + chunked decode, redirect chains,
@@ -2314,7 +2383,7 @@ void BootBringupDevices(bool force_net_smoke)
     DUETOS_BOOT_SELFTEST(duetos::net::CookieSelfTest());
     // TLS-over-transport driver: in-memory loopback handshake reaches
     // Established + app-data round-trips both directions.
-    DUETOS_BOOT_SELFTEST(duetos::net::tls::TlsSocketSelfTest());
+    DUETOS_BOOT_SELFTEST_CI(duetos::net::tls::TlsSocketSelfTest());
 
     // Disk-installer layout-math self-test. Pure math (no block I/O,
     // no GPT writes), so cheap to run on every boot. A regression

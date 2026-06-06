@@ -259,6 +259,34 @@ catalogue:
 See [QEMU Smoke](../tooling/QEMU-Smoke.md) for the profile contract
 and what each profile asserts at boot exit.
 
+### Expensive self-tests are opt-in (`selftests=full`)
+
+The heavy asymmetric-crypto boot self-tests — `RsaSelfTest`,
+`X509SelfTest`, `X509VerifySelfTest` (RSA-4096 + ECDSA P-256/P-384, and
+the ECDSA `EcSelfTest` it calls), `TlsSelfTest`, `TlsSocketSelfTest`, and
+`PasswordHashSelfTest` (Argon2id) — cost **~200 s under QEMU TCG**. That
+blew the budget in both directions: it made an interactive boot crawl
+*and* ate the entire CI smoke timeout.
+
+They are therefore **OFF by default everywhere** — the normal interactive
+boot AND the CI `bringup` smoke gate — and run only behind an explicit
+kernel-cmdline opt-in:
+
+```
+multiboot2 /boot/duetos-kernel.elf ... selftests=full
+```
+
+Wired via `g_expensive_selftests` + the `DUETOS_BOOT_SELFTEST_CI` macro in
+`kernel/core/boot_bringup.cpp`. Deliberately **not** triggered by the
+`smoke=` profile token, so the smoke gate stays fast. The smoke harness
+(`tools/test/ctest-boot-smoke.sh`) asserts no crypto sentinels, so
+skipping them under smoke breaks no CI check. Result: the `bringup` smoke
+reaches `boot : metrics bringup-complete` in ~45 s of guest time instead
+of ~520 s. A full-verification run (locally or a dedicated/nightly CI
+job) passes `selftests=full` — e.g.
+`DUETOS_EXTRA_CMDLINE="selftests=full" tools/qemu/run.sh` — and budgets
+the longer timeout.
+
 ## Known Limits / GAPs
 
 - **PE smokes alone.** No ELF smoke harness yet — ELF segment load is

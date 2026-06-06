@@ -10528,3 +10528,38 @@ MSR/register reads tightly coupled to existing C++ arch code
 reserved for the later device-blob *parsers* in this program (EDID,
 SPI SFDP, NIC EEPROM image) — the standalone-parser shape the
 `exfat_rust` / `ntfs_rust` crates already use.
+
+## 2026-06-06 — Heavy crypto boot self-tests are opt-in (`selftests=full`), default off everywhere
+
+The asymmetric-crypto boot self-tests (`RsaSelfTest`, `X509SelfTest`,
+`X509VerifySelfTest` incl. the ECDSA `EcSelfTest`, `TlsSelfTest`,
+`TlsSocketSelfTest`, Argon2id `PasswordHashSelfTest`) cost ~200 s under
+QEMU TCG — a single contiguous block that dominated boot time.
+
+**Decision.** Gate them behind an explicit `selftests=full` kernel-cmdline
+token (`g_expensive_selftests` + `DUETOS_BOOT_SELFTEST_CI` in
+`boot_bringup.cpp`), OFF by default. They run neither on a normal
+interactive boot nor under the CI `bringup` smoke gate.
+
+**Why not tie them to the `smoke=` profile.** The first cut keyed "expensive
+enabled" off any `smoke=` token, reasoning that CI wants full coverage. That
+was wrong: the CI smoke job *is* the time-constrained path — running the
+200 s crypto block there ate its entire timeout. The whole point is to keep
+the smoke gate fast, so the trigger is a dedicated `selftests=full` that CI's
+main job does not pass. A full-verification run (developer chasing a crypto
+regression, or a dedicated/nightly job) opts in explicitly and budgets the
+longer timeout.
+
+**Safety of skipping.** These are pure self-tests (validate + panic on fail,
+no init side effects — the `DUETOS_BOOT_SELFTEST` contract), so skipping
+changes no runtime state. The smoke harness (`ctest-boot-smoke.sh`) asserts
+no crypto sentinels, so nothing downstream breaks.
+
+**Measured effect.** The `bringup` smoke (`profile-boot-smoke.sh bringup`,
+the exact CI path) drops from ~520 s of guest time (timing out) to ~45 s
+guest / ~59 s wall, `boot-report result=pass`.
+
+**Ruled out for the next slice.** Do not re-enable these on the default boot
+path "for coverage" — coverage belongs in the explicit `selftests=full`
+lane. Further gating of other heavy tests (SMP saturation / stress) can reuse
+the same `DUETOS_BOOT_SELFTEST_CI` macro if they later dominate.
