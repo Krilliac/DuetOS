@@ -1373,7 +1373,14 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // (build flag). When DUETOS_IOMMU_REQUIRE is also set, a
     // failed enable panics — the deployment-safety gate that lets
     // release builds refuse to run without IOMMU protection.
-    if (duetos::drivers::iommu::IommuEnableEffective())
+    // `iommu=off` on the kernel cmdline is the boot-time escape hatch:
+    // if VT-d enforcement is suspected in a real-hardware regression, an
+    // operator disables it without rebuilding.
+    if (CmdlineContains(cmdline, "iommu=off"))
+    {
+        SerialWrite("[boot] IOMMU enable skipped — iommu=off on cmdline\n");
+    }
+    else if (duetos::drivers::iommu::IommuEnableEffective())
     {
         auto r = duetos::drivers::iommu::IommuEnableAtBoot();
         if (!r.has_value())

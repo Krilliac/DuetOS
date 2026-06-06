@@ -889,18 +889,23 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
 > The items below are the *active* safety work; everything else is the
 > "don't build the writer without its gate" rule enforced at review.
 
-### Enable the IOMMU by default (DMA protection)
+### IOMMU — AMD-Vi enable + DMAR fault-IRQ handler (residual)
 
-- **Residual:** VT-d discovery → decode → identity page tables → enable
-  is implemented but **gated OFF by default** (`IommuEnableAtBoot`);
-  AMD-Vi is parse-only (IVRS), with register decode / paging / enable
-  deferred until an AMD test machine exists. Until the IOMMU enforces,
-  any bus-master driver fed a bad descriptor can scribble firmware /
-  other-OS memory (mitigated today only by the NVMe/AHCI staging-buffer
-  discipline). See [`drivers/IOMMU`](../drivers/IOMMU.md).
-- **What's needed:** validate VT-d enforce against the live NVMe/AHCI/
-  xHCI/e1000 DMA paths (SWIOTLB-style bounce or per-driver IOVA mapping),
-  then flip the default to ON; implement AMD-Vi decode/paging/enable.
+- **Landed 2026-06-06:** Intel VT-d is now **enforcing by default**
+  (`DUETOS_IOMMU_ENABLE` defaults ON). It builds a full identity map
+  (IOVA==phys, 0..512 GiB) + programs GCMD.TE when a DMAR is present;
+  every existing driver's physical-address DMA keeps working while a
+  rogue device is confined. No-ops without a DMAR; `iommu=off` cmdline
+  escape hatch; verified under `DUETOS_IOMMU_DEVICE=1 tools/qemu/run.sh`
+  (translation ENABLED, all device I/O works, 0 faults).
+- **Residual:** (1) **AMD-Vi** is parse-only (IVRS) — register decode /
+  paging / enable deferred until an AMD test machine exists. (2) **No
+  DMAR fault-IRQ handler:** an out-of-range device DMA is silently
+  blocked (write-protection works) but not *reported* — wire FECTL/FSTS
+  + the fault-record buffer to a handler so faults are logged, not just
+  contained. (3) Interrupt remapping (intremap) is decoded but not
+  programmed. (4) Per-device domains (real isolation vs the shared
+  identity map) are a later slice.
 - **Precondition for every new bus-master driver:** map only
   driver-owned buffers into device address space; validate descriptor
   targets. (Hardware-Safety pre-landing row "DMA without IOMMU".)

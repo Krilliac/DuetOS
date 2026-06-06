@@ -404,8 +404,23 @@ else
     COM1_ARGS=(-serial stdio)
 fi
 
+# Optional Intel VT-d IOMMU emulation. The kernel's VT-d driver no-ops
+# without a DMAR table, so by default QEMU exposes none and the IOMMU
+# stays inert. DUETOS_IOMMU_DEVICE=1 adds `-device intel-iommu` (DMA
+# remapping only, intremap=off) plus the split irqchip QEMU requires for
+# it; the kernel then programs VT-d identity translation at boot. Used to
+# verify DMA-remapping enforcement under QEMU.
+MACHINE_OPTS="q35,accel=${ACCEL}"
+IOMMU_DEVICE_ARGS=()
+if [[ "${DUETOS_IOMMU_DEVICE:-0}" != "0" ]]; then
+    MACHINE_OPTS="${MACHINE_OPTS},kernel-irqchip=split"
+    IOMMU_DEVICE_ARGS=(-device "intel-iommu,intremap=off")
+    echo "[run.sh] Intel VT-d IOMMU device enabled (intremap=off)" >&2
+fi
+
 QEMU_ARGS=(
-    -machine  "q35,accel=${ACCEL}"
+    -machine  "${MACHINE_OPTS}"
+    "${IOMMU_DEVICE_ARGS[@]}"
     -cpu      "${CPU_MODEL}"
     "${SMP_ARGS[@]}"
     -m        "${RAM_SIZE}"

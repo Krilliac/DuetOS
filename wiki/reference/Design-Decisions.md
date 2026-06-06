@@ -10670,3 +10670,35 @@ just by v0 scope.
 **Diagnostic kept:** when no tag 12 is relayed, the probe dumps the
 multiboot tag types present, so "firmware didn't relay" is distinguishable
 from a walker bug (the distinction that cost a debug cycle here).
+
+## 2026-06-06 — Intel VT-d enforcing by default (identity map); iommu=off escape hatch
+
+The IOMMU DMA-remapping path (discover DMAR → decode → build identity page
+tables → program RTADDR + GCMD.TE) was complete but gated OFF behind
+`DUETOS_IOMMU_ENABLE`. Flipped the default to ON.
+
+**Why it's safe to default on.** `VtdPagingInit` builds a FULL identity map
+(IOVA==phys for 0..512 GiB, 1 GiB leaves), so every existing driver's
+physical-address DMA (NVMe PRP, AHCI PRDT, xHCI rings, e1000 descriptors)
+keeps working unchanged — the IOMMU translates phys X to itself — while a
+buggy/malicious device is confined to the mapped range. The enable also
+(a) no-ops cleanly when no DMAR table is present (QEMU without
+`-device intel-iommu`, machines without VT-d), and (b) logs + leaves
+translation off on a program timeout rather than wedging. Verified under
+`DUETOS_IOMMU_DEVICE=1 tools/qemu/run.sh`: "[vtd] translation ENABLED",
+all NVMe/AHCI/FAT32/ext4 I/O works, 0 faults.
+
+**Escape hatch.** `iommu=off` on the kernel cmdline skips the enable
+without a rebuild — the recovery path if a real-hardware regression is
+suspected (checked at the boot call site in BootBringupKernelServices).
+
+**QEMU testing.** `tools/qemu/run.sh` gained `DUETOS_IOMMU_DEVICE=1` which
+adds `-device intel-iommu,intremap=off` + `kernel-irqchip=split`; without
+it QEMU exposes no DMAR and the path stays inert (so the default CI smoke
+is unaffected).
+
+**Ruled out / residual.** Per-device domains (real isolation vs the shared
+identity map), interrupt remapping, AMD-Vi enable, and a DMAR fault-IRQ
+handler (faults are contained but not yet *reported*) remain follow-ups —
+see Roadmap. Do NOT switch to per-device domains without first mapping
+every driver's DMA buffers, or devices will fault.

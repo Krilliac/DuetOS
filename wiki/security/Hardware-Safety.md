@@ -100,7 +100,7 @@ tree already follows the contract everywhere except one latent gap
 | **DMA** | Owned-buffer only | NVMe PRP / AHCI PRDT point only at kernel-owned staging buffers; zone-clamped with panic-on-violation |
 | **PCI BARs** | Firmware-assigned | Size-probe writes restored; no permanent BAR reprogram |
 | **GPU / display / NIC / audio** | Volatile-only | No clock/voltage/fan/VBIOS/EEPROM/MAC/TX-power writes; modeset uses readback-verify; HDA gain hardcoded mid-range |
-| **IOMMU** | Present, **OFF by default** | VT-d discovery→enable implemented but gated off; AMD-Vi parse-only. See *pre-landing* below |
+| **IOMMU** | **VT-d enforcing by default** (landed 2026-06-06) | `DUETOS_IOMMU_ENABLE` defaults ON; VT-d programs a full identity map (IOVA==phys) + GCMD.TE when a DMAR is present, confining device DMA. No-ops cleanly without a DMAR; `iommu=off` cmdline escape hatch. AMD-Vi + fault-IRQ still residual |
 
 ## Pre-landing preconditions — bind these BEFORE the owning driver lands
 
