@@ -2,14 +2,20 @@
 # DuetOS network-ingest fuzz seed generator.
 #
 # WHAT  Emits well-formed Ethernet frames (ARP request, IPv4+ICMP
-#       echo, IPv4+UDP, IPv4+TCP SYN) with correct IPv4 / ICMP
-#       header checksums, so fuzz_net's NetStackInjectRx walks
-#       past the ethertype + IPv4 sanity gates and exercises the
-#       ICMP / UDP / TCP parsers (and the duetos_net_parsers Rust
-#       DHCP/DNS option walkers) on mutated input.
+#       echo, IPv4+UDP, IPv4+TCP SYN, and the IPv6 peers: IPv6+ICMPv6
+#       echo, IPv6+UDP, IPv6+TCP SYN) with correct IPv4 / ICMP and
+#       IPv6 upper-layer pseudo-header checksums, so fuzz_net's
+#       NetStackInjectRx walks past the ethertype + L3 sanity gates
+#       and exercises the ICMP(v6) / UDP / TCP parsers (and the
+#       duetos_net_parsers Rust DHCP/DNS option walkers) on mutated
+#       input — for both address families.
 #
-# WHY   Random bytes reach ARP/IPv4 occasionally but rarely carry
-#       a valid IPv4 header (version/IHL + checksum) to reach L4.
+# WHY   Random bytes reach ARP/IPv4 occasionally but rarely carry a
+#       valid IPv4/IPv6 header (version + checksum) to reach L4. The
+#       ethertype-0x86DD branch (Ipv6HandleIncoming -> Ipv6HeaderParse
+#       -> ICMPv6/UDP/TCP) was wired into NetStackInjectRx but had no
+#       seed, so the whole IPv6 RX parse surface was effectively dark
+#       under fuzzing until these three seeds landed.
 #
 # USAGE  python3 gen_net_seeds.py <out_dir>
 
@@ -54,6 +60,70 @@ def ipv4(proto: int, payload: bytes) -> bytes:
     ck = inet_checksum(bytes(ip))
     struct.pack_into(">H", ip, 10, ck)
     return bytes(ip) + payload
+
+
+# Link-local IPv6 addresses (fe80::/64). The exact value does not
+# matter for the parser walk — these just have to form a valid v6
+# header so NetStackInjectRx demuxes ethertype 0x86DD into
+# Ipv6HandleIncoming -> Ipv6HeaderParse and the ICMPv6 / UDP / TCP
+# sub-parsers, which were dark until this seed landed.
+SRC_IP6 = bytes([0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0x02, 0x11, 0x22, 0xFF, 0xFE, 0x33, 0x44, 0x55])
+DST_IP6 = bytes([0xFE, 0x80, 0, 0, 0, 0, 0, 0, 0x02, 0xAA, 0xBB, 0xFF, 0xFE, 0xCC, 0xDD, 0xEE])
+
+
+def ipv6(next_header: int, payload: bytes, hop_limit: int = 255) -> bytes:
+    hdr = bytearray(40)
+    hdr[0] = 0x60                              # version 6
+    struct.pack_into(">H", hdr, 4, len(payload))  # payload length
+    hdr[6] = next_header
+    hdr[7] = hop_limit
+    hdr[8:24] = SRC_IP6
+    hdr[24:40] = DST_IP6
+    return bytes(hdr) + payload
+
+
+def ipv6_pseudo_checksum(next_header: int, payload: bytes) -> int:
+    # RFC 8200 §8.1 upper-layer checksum: ones-complement sum over
+    # {src(16) dst(16) upper_len(4) zero(3) next_header(1)} + payload,
+    # with the L4 checksum field already zeroed in `payload`.
+    ph = SRC_IP6 + DST_IP6 + struct.pack(">I", len(payload)) + bytes([0, 0, 0, next_header])
+    return inet_checksum(ph + payload)
+
+
+def seed_ipv6_icmp6() -> bytes:
+    # ICMPv6 Echo Request (type 128) — checksum-validated by
+    # HandleIcmpv6 before the type dispatch.
+    icmp = bytearray([128, 0, 0, 0, 0x00, 0x01, 0x00, 0x02]) + b"ping"
+    ck = ipv6_pseudo_checksum(58, bytes(icmp))
+    struct.pack_into(">H", icmp, 2, ck)
+    return bytes(eth(0x86DD) + ipv6(58, bytes(icmp)))
+
+
+def seed_ipv6_udp() -> bytes:
+    # UDP datagram over IPv6 — reaches NetUdpDispatch (and the
+    # duetos_net_parsers DHCP/DNS option walkers on the payload).
+    payload = b"\x00\x01\x02\x03"
+    udp = bytearray(8) + payload
+    struct.pack_into(">H", udp, 0, 5353)         # src port
+    struct.pack_into(">H", udp, 2, 53)           # dst port (DNS)
+    struct.pack_into(">H", udp, 4, len(udp))     # length
+    ck = ipv6_pseudo_checksum(17, bytes(udp))
+    struct.pack_into(">H", udp, 6, ck if ck != 0 else 0xFFFF)
+    return bytes(eth(0x86DD) + ipv6(17, bytes(udp)))
+
+
+def seed_ipv6_tcp() -> bytes:
+    # TCP SYN over IPv6 — reaches the segment parser + ParseSackBlocks.
+    tcp = bytearray(20)
+    struct.pack_into(">H", tcp, 0, 12345)        # src port
+    struct.pack_into(">H", tcp, 2, 80)           # dst port
+    struct.pack_into(">I", tcp, 4, 1)            # seq
+    tcp[12] = 0x50                               # data offset 5
+    tcp[13] = 0x02                               # SYN
+    struct.pack_into(">H", tcp, 14, 1024)        # window
+    ck = ipv6_pseudo_checksum(6, bytes(tcp))
+    struct.pack_into(">H", tcp, 16, ck)
+    return bytes(eth(0x86DD) + ipv6(6, bytes(tcp)))
 
 
 def seed_arp() -> bytes:
@@ -111,6 +181,9 @@ def main():
         "icmp.bin": seed_icmp(),
         "udp.bin": seed_udp(),
         "tcp.bin": seed_tcp(),
+        "ipv6_icmp6.bin": seed_ipv6_icmp6(),
+        "ipv6_udp.bin": seed_ipv6_udp(),
+        "ipv6_tcp.bin": seed_ipv6_tcp(),
     }
     for name, data in seeds.items():
         with open(os.path.join(out, name), "wb") as fh:

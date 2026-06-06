@@ -18,6 +18,7 @@ crate-type = ["staticlib"]
 [dependencies]
 duetfs = { path = "../fs/duetfs" }
 duetos_acpi = { path = "../acpi/acpi_rust" }
+duetos_aml = { path = "../acpi/aml_rust" }
 duetos_amd_gfx_fw = { path = "../drivers/gpu/amd_gfx_fw_rust" }
 duetos_bcm43xx_fw = { path = "../drivers/net/bcm43xx_fw_rust" }
 duetos_dmar = { path = "../drivers/iommu/dmar_rust" }

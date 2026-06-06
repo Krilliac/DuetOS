@@ -4,11 +4,11 @@
 >
 > **Execution context:** Kernel build tooling and kernel-linked Rust crates.
 >
-> **Maturity:** Stable foundation; twenty-three production Rust subsystems live in the kernel tree.
+> **Maturity:** Stable foundation; twenty-four production Rust subsystems live in the kernel tree.
 >
-> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options / IPv4-header byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA / JPEG header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, Multiboot2 info-structure walker, TLS 1.2 record + handshake walker, VT/ANSI escape parser, NVIDIA GSP firmware-image (nvfw_bin_hdr) parser, AMD GFX9+ microcode-image (gfx_firmware_header_v1_0) parser, Intel iwlwifi TLV firmware parser, Realtek rtlwifi/rtw88/rtw89 firmware-header parser, and Broadcom b43 firmware-record-stream parser.
+> Production: DuetFS, USB HID, USB class config, DHCP / DNS / TCP-options / IPv4-header byte-walkers, USB MSC SCSI responses, PNG / BMP / TGA / JPEG header validators, ELF / PE-image validators, NTFS metadata walker, exFAT metadata walker, ext4 metadata walker, ACPI table walker, ACPI AML namespace walker, IEEE 802.11 management-frame walker, Bluetooth HCI walker, SMBIOS table walker, PCI / PCIe capability list walkers, Multiboot2 info-structure walker, TLS 1.2 record + handshake walker, VT/ANSI escape parser, NVIDIA GSP firmware-image (nvfw_bin_hdr) parser, AMD GFX9+ microcode-image (gfx_firmware_header_v1_0) parser, Intel iwlwifi TLV firmware parser, Realtek rtlwifi/rtw88/rtw89 firmware-header parser, and Broadcom b43 firmware-record-stream parser.
 >
-> All twenty-three crates have a current C++ caller; there are no skeleton crates left in this slice.
+> All twenty-four crates have a current C++ caller; there are no skeleton crates left in this slice.
 
 ## Overview
 
@@ -129,6 +129,18 @@ The repository now has one shared Rust foundation **and actual Rust subsystem co
   signature + checksum validation to the crate; `ParseFadt`
   cross-validates its packed-struct overlay against the Rust
   decoder.
+- `/kernel/acpi/aml_rust/` (`duetos_aml`) is the recursive AML
+  TermList walker over the DSDT / SSDT bytecode: PkgLength /
+  NameString decode, Scope / Device / Method / Name / OperationRegion /
+  Mutex / Event / Alias / External / Processor / ThermalZone /
+  PowerResource records, and the constant-bound NamedField index.
+  `kernel/acpi/aml.cpp::WalkTable` delegates one table's byte parse to
+  the crate's `duetos_aml_walk_table`, which appends named-object
+  records straight into the kernel's namespace / region / field tables
+  (layout-asserted FFI mirrors). C++ keeps the table storage,
+  accessors, and the offset slicers (`AmlMethodBody` / `AmlNameValue` /
+  `AmlReadS5`); the AML *evaluator* (`aml_eval.cpp`, hardware FieldUnit
+  I/O) stays C++. Continuously fuzzed by `tests/fuzz/fuzz_aml`.
 - `/kernel/net/wifi80211_rust/` (`duetos_wifi80211`) parses 802.11
   frame headers, Beacon / Probe Response body prefixes, the IE
   (Information Element) list, and EAPOL-Key (4-way handshake)
