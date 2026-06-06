@@ -282,10 +282,22 @@ Wired via `g_expensive_selftests` + the `DUETOS_BOOT_SELFTEST_CI` macro in
 (`tools/test/ctest-boot-smoke.sh`) asserts no crypto sentinels, so
 skipping them under smoke breaks no CI check. Result: the `bringup` smoke
 reaches `boot : metrics bringup-complete` in ~45 s of guest time instead
-of ~520 s. A full-verification run (locally or a dedicated/nightly CI
-job) passes `selftests=full` — e.g.
-`DUETOS_EXTRA_CMDLINE="selftests=full" tools/qemu/run.sh` — and budgets
-the longer timeout.
+of ~520 s. A full on-target verification run passes `selftests=full` —
+e.g. `DUETOS_EXTRA_CMDLINE="selftests=full" tools/qemu/run.sh`, or with
+the bringup profile via `DUETOS_EXTRA_CMDLINE="selftests=full"
+tools/test/profile-boot-smoke.sh bringup`.
+
+**Where the per-PR crypto coverage actually lives: hosted ctest.** The
+heavy crypto verification is pure computation over embedded byte
+fixtures, so booting a whole kernel under TCG to run it is the wrong
+tool. The same production crypto TUs are compiled and run **natively**
+as `tests/host/test_ec.cpp` (ECDSA P-256/P-384) and
+`tests/host/test_x509_verify.cpp` (RSA-4096 + ECDSA + 8-root chain
+verify), driving the kernel's own `EcSelfTest()` / `X509VerifySelfTest()`
+with host shims (`tests/host/crypto_host_shims.h`). They run in ~13 s
+total in the existing `host-tests` CI job on **every** PR — no QEMU, no
+TCG penalty. The `selftests=full` boot path is the on-target counterpart
+for when you want to exercise the same code in the real kernel.
 
 ## Known Limits / GAPs
 

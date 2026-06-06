@@ -10563,3 +10563,43 @@ guest / ~59 s wall, `boot-report result=pass`.
 path "for coverage" — coverage belongs in the explicit `selftests=full`
 lane. Further gating of other heavy tests (SMP saturation / stress) can reuse
 the same `DUETOS_BOOT_SELFTEST_CI` macro if they later dominate.
+
+## 2026-06-06 — Heavy crypto verification runs as hosted ctest, not a QEMU boot
+
+Follow-on to the `selftests=full` gating: the gated crypto self-tests still
+needed automated CI coverage, but a nightly QEMU boot would pay the full
+~200 s TCG penalty for what is pure computation over embedded byte fixtures.
+
+**Decision.** Verify the heavy crypto in **hosted ctest** — compile the real
+production crypto TUs natively and run their own self-test entrypoints:
+`tests/host/test_ec.cpp` (drives `duetos::net::ec::EcSelfTest`, ECDSA
+P-256/P-384) and `tests/host/test_x509_verify.cpp` (drives
+`duetos::net::x509::X509VerifySelfTest`, RSA-4096 + ECDSA + 8-root chain).
+They run in ~4.5 s + ~8.5 s on every PR via the existing `host-tests` job —
+no QEMU, no TCG. The nightly-QEMU approach was built and then dropped in
+favour of this.
+
+**Why this is sound.** These tests compile the SAME production code
+(`ec.cpp`, `bigint.cpp`, `rsa.cpp`, `x509.cpp`, `asn1.cpp`, `sha256/384.cpp`,
+`x509_verify.cpp`) — they are not a verbatim reproduction (cf.
+`test_text_hash.cpp`), so a regression in the real verifier is caught. The
+kernel-only symbols (`arch::SerialWrite`, `core::Panic*`,
+`debug::ProbeFire`) come from `tests/host/crypto_host_shims.h`, which
+captures the serial output so the test reads back the self-test's own
+PASS/FAIL verdict line.
+
+**Consequences / ruled out.**
+- The in-kernel boot copies stay gated behind `selftests=full` (on-target
+  counterpart), so nothing is lost — the algorithm is verified per-PR
+  natively, the on-target integration on demand.
+- `crypto_host_shims.h` uses plain (non-`inline`) external definitions:
+  the kernel TUs are separate compilation units needing emitted symbols,
+  and each crypto test is its own executable with exactly one TU including
+  the header. Include it from a single TU per test executable.
+- TLS (`TlsSelfTest`/`TlsSocketSelfTest`) and Argon2id
+  (`PasswordHashSelfTest`) are NOT yet hosted — their dep graphs pull the
+  net/TLS stack. They remain `selftests=full`-gated; host them next if
+  per-PR coverage is wanted.
+- `run.sh` gained the ability to append `DUETOS_EXTRA_CMDLINE` to a smoke
+  profile's cmdline (so `bringup` + `selftests=full` compose) for manual
+  on-target checks.
