@@ -357,17 +357,37 @@ struct OwnedRegion
     const char* tag;
     bool valid;
 };
-constexpr u64 kMaxOwnedRegions = 16;
+constexpr u64 kMaxOwnedRegions = 32;
 constinit OwnedRegion g_owned_regions[kMaxOwnedRegions] = {};
 constinit u64 g_owned_region_count = 0;
 constinit WriteGuardMode g_owned_write_mode = WriteGuardMode::Off;
 constinit util::SatU64 g_owned_write_deny_count = 0;
-} // namespace
 
-void BlockOwnedRegionAdd(u32 handle, u64 first_lba, u64 count, const char* tag)
+// Resolve a partition handle down to its parent disk handle,
+// accumulating the LBA offset. A write to a partition device is
+// translated to (parent_handle, parent_first_lba + lba) by
+// PartitionBlockWrite BEFORE the owned-write chokepoint in
+// BlockDeviceWrite runs — so an owned region must be registered in
+// parent terms or it will never match. Bounded loop guards against a
+// pathological cycle. RAM / whole-disk handles are left unchanged.
+void ResolveToParent(u32& handle, u64& first_lba)
 {
-    if (count == 0)
-        return;
+    for (int depth = 0; depth < 8; ++depth)
+    {
+        if (!ValidHandle(handle))
+            return;
+        const BlockDesc& d = g_devices[handle].desc;
+        if (d.ops != &kPartitionBlockOps && d.ops != &kPartitionBlockOpsRO)
+            return;
+        const auto* p = static_cast<const PartitionBlock*>(d.cookie);
+        first_lba += p->first_lba;
+        handle = p->parent_handle;
+    }
+}
+
+// Append one owned region verbatim (no resolution). Internal helper.
+void AddOneRegion(u32 handle, u64 first_lba, u64 count, const char* tag)
+{
     if (g_owned_region_count >= kMaxOwnedRegions)
     {
         core::Log(core::LogLevel::Warn, "blockguard", "owned-region table full — dropping new region");
@@ -377,12 +397,34 @@ void BlockOwnedRegionAdd(u32 handle, u64 first_lba, u64 count, const char* tag)
     ++g_owned_region_count;
 }
 
-void BlockOwnedRegionClear()
+// Drop owned regions [to, count) — append-only truncation. Lets the
+// self-test append + roll back its own test regions without clobbering
+// production registrations that came before it.
+void TruncateOwnedRegions(u64 to)
 {
-    for (u64 i = 0; i < g_owned_region_count; ++i)
+    if (to > g_owned_region_count)
+        return;
+    for (u64 i = to; i < g_owned_region_count; ++i)
         g_owned_regions[i].valid = false;
-    g_owned_region_count = 0;
+    g_owned_region_count = to;
 }
+} // namespace
+
+void BlockOwnedRegionAdd(u32 handle, u64 first_lba, u64 count, const char* tag)
+{
+    if (count == 0)
+        return;
+    // The chokepoint runs at BOTH the FS-facing handle and — because
+    // PartitionBlockWrite re-enters BlockDeviceWrite on the parent — the
+    // parent disk. Own the region in both terms so neither check trips.
+    AddOneRegion(handle, first_lba, count, tag);
+    u32 parent = handle;
+    u64 parent_lba = first_lba;
+    ResolveToParent(parent, parent_lba);
+    if (parent != handle)
+        AddOneRegion(parent, parent_lba, count, tag);
+}
+
 
 bool DiskRegionIsOwned(u32 handle, u64 lba, u32 count)
 {
@@ -423,13 +465,15 @@ u64 BlockOwnedWriteDenyCount()
 void BlockOwnedRegionSelfTest()
 {
     using ::duetos::core::PanicWithValue;
-    BlockOwnedRegionClear();
+    // Preserve production owned regions registered before this test (RAM
+    // auto-owns, the FAT32 system volume): we only append + roll back.
+    const u64 snap = g_owned_region_count;
 
-    // --- Predicate logic. H owns [100, 150).
-    const u32 H = 7;
+    // --- Predicate logic on a fake handle no real device uses.
+    const u32 H = 0xFFFF0001u;
     if (DiskRegionIsOwned(H, 0, 1))
-        PanicWithValue("blockguard", "owned with no regions", 0);
-    BlockOwnedRegionAdd(H, 100, 50, "test");
+        PanicWithValue("blockguard", "owned with no region for handle", 0);
+    BlockOwnedRegionAdd(H, 100, 50, "test"); // owns [100, 150)
     if (!DiskRegionIsOwned(H, 100, 50))
         PanicWithValue("blockguard", "exact region not owned", 1);
     if (!DiskRegionIsOwned(H, 120, 10))
@@ -442,18 +486,18 @@ void BlockOwnedRegionSelfTest()
         PanicWithValue("blockguard", "outside region owned", 5);
     if (DiskRegionIsOwned(H + 1, 120, 10))
         PanicWithValue("blockguard", "wrong handle owned", 6);
-    // Wildcard handle owns everything.
-    BlockOwnedRegionAdd(kBlockHandleInvalid, 0, 1000000, "any");
+    BlockOwnedRegionAdd(kBlockHandleInvalid, 0, 1000000, "any"); // wildcard
     if (!DiskRegionIsOwned(H + 1, 500, 1))
         PanicWithValue("blockguard", "wildcard region miss", 7);
-    BlockOwnedRegionClear();
+    TruncateOwnedRegions(snap); // drop the test + wildcard regions
 
-    // --- Deny-mode write refusal on a RAM disk. Own only sectors 0..3.
-    const u32 ram = RamBlockDeviceCreate("ramowntest", 512, 8);
+    // --- Deny-mode write refusal on a fresh RAM disk owning only [0, 4).
+    const u32 ram = RamBlockDeviceCreate("ramowntest", 512, 8); // auto-owns [0, 8)
     if (ram == kBlockHandleInvalid)
         PanicWithValue("blockguard", "ram create failed", 8);
-    BlockOwnedRegionClear();
+    TruncateOwnedRegions(snap); // drop the auto-own so sector 5 is unowned
     BlockOwnedRegionAdd(ram, 0, 4, "owned-half");
+    const WriteGuardMode saved_mode = BlockOwnedWriteMode();
     BlockOwnedWriteSetMode(WriteGuardMode::Deny);
     u8 buf[512] = {};
     if (BlockDeviceWrite(ram, 0, 1, buf) < 0)
@@ -462,8 +506,10 @@ void BlockOwnedRegionSelfTest()
         PanicWithValue("blockguard", "unowned write was allowed", 10);
     if (BlockOwnedWriteDenyCount() == 0)
         PanicWithValue("blockguard", "deny counter did not advance", 11);
-    BlockOwnedWriteSetMode(WriteGuardMode::Off);
-    BlockOwnedRegionClear();
+    // Restore the operator's mode (may be advisory/deny via cmdline) and
+    // roll back to exactly the production regions we started with.
+    BlockOwnedWriteSetMode(saved_mode);
+    TruncateOwnedRegions(snap);
 
     arch::SerialWrite("[block-owned-selftest] PASS (containment + straddle + wildcard + Deny refusal)\n");
 }
@@ -657,7 +703,13 @@ u32 RamBlockDeviceCreate(const char* name, u32 sector_size, u64 sector_count)
     desc.cookie = dev;
     desc.sector_size = sector_size;
     desc.sector_count = sector_count;
-    return BlockDeviceRegister(desc);
+    const u32 handle = BlockDeviceRegister(desc);
+    // RAM block devices are kernel-owned scratch — register the whole
+    // device as a DuetOS-owned region so the owned-write chokepoint
+    // permits writes to it when enforcement is enabled.
+    if (handle != kBlockHandleInvalid)
+        BlockOwnedRegionAdd(handle, 0, sector_count, "ram-scratch");
+    return handle;
 }
 
 u32 PartitionBlockDeviceCreate(const char* name, u32 parent_handle, u64 first_lba, u64 last_lba)

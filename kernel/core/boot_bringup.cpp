@@ -1278,6 +1278,16 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // cluster in BootBringupDevices, which has no cmdline of its own.
     g_expensive_selftests = CmdlineEnablesExpensiveSelfTests(cmdline);
     g_uefi_read_vars = CmdlineContains(cmdline, "uefi-getvar");
+
+    // Owned-write chokepoint enforcement opt-in. Default Off; an operator
+    // can soak the registry coverage (`ownedwrite=advisory`, logs writes
+    // outside any owned region) or enforce it (`ownedwrite=deny`, refuses
+    // them). Set here, before device bringup registers the owned regions
+    // at create/adopt time.
+    if (CmdlineContains(cmdline, "ownedwrite=deny"))
+        duetos::drivers::storage::BlockOwnedWriteSetMode(duetos::drivers::storage::WriteGuardMode::Deny);
+    else if (CmdlineContains(cmdline, "ownedwrite=advisory"))
+        duetos::drivers::storage::BlockOwnedWriteSetMode(duetos::drivers::storage::WriteGuardMode::Advisory);
     SerialWrite(g_expensive_selftests
                     ? "[boot] expensive self-tests ENABLED (selftests=full)\n"
                     : "[boot] expensive self-tests skipped (default; pass selftests=full to run heavy crypto/TLS)\n");

@@ -265,9 +265,6 @@ u64 BlockWriteGuardDenyCount();
 /// writable. Up to 16 regions cached.
 void BlockOwnedRegionAdd(u32 handle, u64 first_lba, u64 count, const char* tag);
 
-/// Drop every owned-region registration. For self-test teardown — do
-/// NOT call in production (it un-owns everything).
-void BlockOwnedRegionClear();
 
 /// True iff [lba, lba+count) is FULLY contained in some registered
 /// owned region for `handle`. The single ownership predicate the write

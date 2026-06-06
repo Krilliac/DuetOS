@@ -921,14 +921,23 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
   `BlockOwnedRegionSelfTest` proves containment / straddle / wrong-handle
   / wildcard + a RAM-disk allowed/denied write pair. **Default mode is
   Off** — no behaviour change yet.
-- **Residual:** (1) register every legitimate writer's owned region —
-  the FAT32 system volume's partition (at `Fat32Probe` adoption), the
-  crash-dump partition (`GptFindCrashDumpRegion`), RAM scratch devices
-  (auto-own on create), and the disk installer's target (declared before
-  it writes). (2) Then flip the default to Advisory (soak — log every
-  write outside an owned region) and finally Deny. Until the registry is
-  fully populated, Deny would refuse legitimate writes, so the flip waits
-  on the registration pass.
+- **Registration pass landed 2026-06-06 (boot writers):** RAM scratch
+  devices auto-own on create; the FAT32 system volume's partition
+  registers at `Fat32Probe` adoption. `BlockOwnedRegionAdd` resolves a
+  partition handle down to its parent disk + LBA offset and owns the
+  region in BOTH terms (the chokepoint runs at the FS-facing handle AND
+  again when `PartitionBlockWrite` re-enters on the parent). An
+  `ownedwrite=advisory|deny` cmdline opt-in drives enforcement. **Verified
+  at boot: zero writes fall outside an owned region under both Advisory
+  and Deny** — the registry fully covers the boot write set, so Deny does
+  not break the boot.
+- **Residual:** (1) register the remaining writers before flipping the
+  default — the disk installer's target (declared before it formats a
+  not-yet-owned disk), disk-backed DuetFS volumes, and the crash-dump
+  partition (panic-only). (2) Runtime soak under Advisory (boot is clean;
+  confirm steady-state app/FS writes are too) → then flip the default to
+  Advisory and finally Deny. The mechanism is proven enforceable; the
+  flip waits on installer/DuetFS registration + the runtime soak.
 
 ### DuetFS superblock owner GUID (probe hardening)
 

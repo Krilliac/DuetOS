@@ -10765,3 +10765,33 @@ legitimate writes (notably break the installer). So this slice lands the
 chokepoint + a thorough self-test (containment / straddle / wrong-handle /
 wildcard + a RAM-disk Deny-mode allowed/denied write pair, verified at boot)
 and leaves the enforcement opt-in.
+
+## 2026-06-06 — Write-chokepoint registration: own in both partition AND parent terms
+
+Populated the owned-region registry (the chokepoint from the prior slice) for
+the boot write set and proved it enforceable.
+
+**Decision — register RAM scratch (auto-own on create) + the FAT32 system
+volume (at adoption), resolving partition handles to the parent.** A write to a
+partition device is translated by `PartitionBlockWrite` to
+`(parent_handle, parent_first_lba + lba)` and re-enters `BlockDeviceWrite` — so
+the owned-write chokepoint runs at BOTH the FS-facing partition handle and the
+parent disk handle. `BlockOwnedRegionAdd` therefore registers the region in
+both terms (`ResolveToParent` walks the partition→parent chain and accumulates
+the offset). Registering only one term left the other check tripping (first the
+parent writes flagged, then — after the naive parent-only fix — the partition
+writes flagged); owning both is the correct model.
+
+**Decision — `ownedwrite=advisory|deny` cmdline opt-in, default Off.** Verified
+at boot under both: zero legitimate writes fall outside an owned region, so Deny
+does not break the boot — the chokepoint is proven enforceable, not just latent.
+The default stays Off because the disk installer writes a disk that is being
+*created* (not yet owned) and disk-backed DuetFS volumes aren't registered yet;
+flipping the default to Deny before those register would refuse legitimate
+writes. The installer/DuetFS registration + a runtime soak gate the default
+flip (Roadmap).
+
+**Detail.** The self-test snapshots the registry count and rolls back only its
+own appended test regions (`TruncateOwnedRegions(snap)`), so it no longer
+clobbers the production registrations that now precede it. Region table bumped
+16 → 32 (two entries per partition volume + RAM devices + headroom).
