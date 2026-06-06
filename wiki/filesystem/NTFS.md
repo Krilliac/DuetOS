@@ -85,9 +85,14 @@ for the gate locations). There is no write surface to gate.
   `VfsResolve` on an NTFS mount surfaces an `Ntfs`-tagged `VfsNode`
   (mount block_handle + MFT reference + size/is-dir snapshot); the
   shell read path streams it via `NtfsReadMftRecord` →
-  `NtfsResolveData` → `NtfsReadFile`. Single-component paths only
-  (root + direct children of root); verified by the
-  `[ntfs-selftest]` "VFS resolve verified" boot gate.
+  `NtfsResolveData` → `NtfsReadFile`. Multi-component paths
+  (`/sub/file`) are walked one directory record at a time via
+  `NtfsFindInDir` over each record's resident `$I30` index
+  (root MFT record 5 → component → descend into the child record →
+  repeat); verified by the `[ntfs-selftest]` "VFS resolve
+  (single + multi-component) verified" boot gate.
+  `$INDEX_ALLOCATION`-spilled large directories are not walked
+  (resident `$INDEX_ROOT` only, at every level).
 - [Storage (NVMe + AHCI)](../drivers/Storage.md)
 - [GPT](GPT.md)
 - [DuetFS](DuetFS.md) — the native FS NTFS-typed partitions

@@ -81,8 +81,8 @@ WRITE / STAT` stay generic. It:
 | tmpfs | `kernel/fs/tmpfs.{h,cpp}` | Writable flat `/tmp` (16 slots × 512 B) |
 | FAT32 | `kernel/fs/fat32.{h,cpp}` + `fat32_*.cpp` | Read + write (in-place / append / create / delete / rename); LFN-validated |
 | exFAT | `kernel/fs/exfat.{h,cpp}` + `exfat_rust/` | Read + bounded root-dir write (in-place / append / create / truncate); first-cluster enumeration |
-| ext4 | `kernel/fs/ext4.{h,cpp}` + `ext4_rust/` | Read-only; dir extents walked every depth, file-extent reads depth-0 only |
-| NTFS | `kernel/fs/ntfs.{h,cpp}` + `ntfs_rust/` | Read-only; USA fixup + $I30 root enum + resident/single-run $DATA reads |
+| ext4 | `kernel/fs/ext4.{h,cpp}` + `ext4_rust/` | Read-only; dir + file extents walked every depth (file reads capped at depth 16); multi-component path resolve |
+| NTFS | `kernel/fs/ntfs.{h,cpp}` + `ntfs_rust/` | Read-only; USA fixup + $I30 enum + resident/single-run $DATA reads; multi-component path resolve (resident $INDEX_ROOT only) |
 | DuetFS | `kernel/fs/duetfs.{h,cpp}` + `duetfs/` | Native Rust FS; v8, per-block CRCs, symlinks, hard links, journal/crypto/snapshots (dormant on live path) |
 | GPT | `kernel/fs/gpt.{h,cpp}` | Partition discovery |
 

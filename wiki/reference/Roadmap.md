@@ -435,6 +435,19 @@ capture because QEMU 8.2 TCG+SMP `abort()`s on its own BQL assertion when
 the guest faults mid-boot), and the `kernel/sched/sched.cpp` resume/reaper
 guards.
 
+**Recurrence + permanent headroom bump (2026-06-06).** An intermittent
+(~1/7 boots) `sched.trampoline_wild_entry` / `[panic] probe-fires`
+wild-jump resurfaced on `x86_64-release-audit` after the ext4/NTFS
+read-tier self-tests grew (depth>0 + multi-component resolve phases run
+ON the boot task's stack, each lookup carrying a 4 KiB on-stack
+dir/MFT-record buffer) — exactly the "demand outgrew the stack" scenario
+the 512 KiB note warned about (measured demand was already 318 KiB).
+Fix: doubled the boot stack **512 KiB → 1 MiB** (`boot.S`). Verified
+9/9 clean boots (was ~1/7) with both FS self-tests passing. The deeper
+follow-up (#3 above — move the deep self-tests off the boot task so
+demand stays bounded regardless of self-test depth) remains the real
+long-term fix; the guard page still self-diagnoses any future overflow.
+
 ### Topology — cluster-scoped IPI fan-out
 
 - **Residual:** the *cluster-scoped* fan-out (one ICR write to
@@ -648,12 +661,14 @@ In rough priority:
    `NtfsReadFile`; ext4 read-only landed identically — see
    `Ext4Lookup` / `NtfsLookup` in `kernel/fs/mount.cpp` and the
    `[ext4-selftest]` / `[ntfs-selftest]` "VFS resolve verified"
-   boot gates. ext4 walks **multi-component** paths (`/sub/file`)
-   via `Ext4FindInDir`; **residual:** NTFS resolve is still
-   single-component (root + direct children) — multi-component
-   needs a generic `NtfsFindInDir` over an arbitrary record's $I30
-   index, mirroring the ext4 template. NTFS *write* is a separate
-   item — **T7-04** below.)
+   boot gates. Both walk **multi-component** paths (`/sub/file`):
+   ext4 via `Ext4FindInDir`, NTFS via `NtfsFindInDir` over each
+   record's resident `$I30` index. ext4 file reads follow depth>0
+   extent trees (`MapLogicalBlock`, capped at `kMaxExtentDepth=16`).
+   **Residual:** NTFS does not walk `$INDEX_ALLOCATION`-spilled
+   large directories (resident `$INDEX_ROOT` only); neither follows
+   symlinks/reparse points; ext4 htree directories are unwalked.
+   NTFS *write* is a separate item — **T7-04** below.)
 
 ### Foreign-FAT interop read — explicit opt-in mount
 
