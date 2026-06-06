@@ -195,6 +195,11 @@ const u8* RamfsNatCalcBytes();
 u64 RamfsNatCalcSize();
 const u8* RamfsNatSysinfoBytes();
 u64 RamfsNatSysinfoSize();
+// `/bin/netd` — first resident userland network daemon (TCP echo
+// server on :7777). Runs as a restart=Always service via the service
+// manager; uses the native libc BSD socket wrappers (duet/socket.h).
+const u8* RamfsNetdBytes();
+u64 RamfsNetdSize();
 // `/bin/duet-pkg` — on-target package manager scaffold (slice A of
 // the self-sufficiency bundle). v0 ships a SHA-256 selftest + argv
 // parser; fetch / verify / install land in follow-on slices.

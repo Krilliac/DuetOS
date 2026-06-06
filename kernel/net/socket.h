@@ -68,7 +68,11 @@ struct Socket
     u16 family;      // AF_INET only in v0
     u16 type;        // SOCK_DGRAM or SOCK_STREAM
     u32 iface_index; // interface this socket is anchored to (always 0 in v0)
-    u32 _pad1;
+    // Owning userland PID, stamped by the SYS_SOCKET_OP handler on
+    // create/accept so process teardown can reclaim leaked sockets via
+    // SocketReleaseByOwner. 0 = kernel-owned (e.g. DRSH) — never swept
+    // by a process exit.
+    u64 owner_pid;
 
     // Endpoint state.
     bool bound;
@@ -121,6 +125,18 @@ void SocketRetain(u32 idx);
 /// Decrement refs; on last release, drain RX queue + free pool entry
 /// + close any owned TCB.
 void SocketRelease(u32 idx);
+
+/// Stamp the owning userland PID on a socket (called by the
+/// SYS_SOCKET_OP handler after create/accept). Idempotent on bad idx.
+void SocketSetOwner(u32 idx, u64 pid);
+
+/// Force-release every socket owned by `pid`, regardless of refcount —
+/// called from process teardown (proc/process.cpp ProcessRelease) so a
+/// process that exits without closing its sockets doesn't leak the pool
+/// slot or leave its listener port bound (which would make a
+/// restart=Always respawn fail with EADDRINUSE). pid 0 is a no-op
+/// (kernel-owned sockets are never swept).
+void SocketReleaseByOwner(u64 pid);
 
 /// True iff `idx` is a live pool entry.
 bool SocketAlive(u32 idx);

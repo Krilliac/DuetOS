@@ -115,6 +115,7 @@ i32 SocketAlloc(u16 domain, u16 type)
         s.family = domain;
         s.type = type;
         s.iface_index = 0;
+        s.owner_pid = 0; // stamped by SocketSetOwner from the syscall handler
         s.bound = false;
         s.connected = false;
         s.listening = false;
@@ -152,6 +153,40 @@ void SocketRetain(u32 idx)
     if (g_pool[idx].in_use)
         ++g_pool[idx].refs;
     arch::Sti();
+}
+
+void SocketSetOwner(u32 idx, u64 pid)
+{
+    if (idx >= kSocketPoolCap)
+        return;
+    arch::Cli();
+    if (g_pool[idx].in_use)
+        g_pool[idx].owner_pid = pid;
+    arch::Sti();
+}
+
+void SocketReleaseByOwner(u64 pid)
+{
+    if (pid == 0)
+        return; // kernel-owned sockets are never swept by a process exit
+    for (u32 i = 0; i < kSocketPoolCap; ++i)
+    {
+        arch::Cli();
+        const bool match = g_pool[i].in_use && g_pool[i].owner_pid == pid;
+        if (match)
+        {
+            // Force the full teardown regardless of any lingering dup
+            // refs: the owning process is gone, so no valid handle to
+            // this slot survives. Collapse refs to 1 and clear the
+            // owner so the SocketRelease below runs the real teardown
+            // (RX drain, TCB close, loopback pipe release) exactly once.
+            g_pool[i].refs = 1;
+            g_pool[i].owner_pid = 0;
+        }
+        arch::Sti();
+        if (match)
+            SocketRelease(i);
+    }
 }
 
 void SocketRelease(u32 idx)

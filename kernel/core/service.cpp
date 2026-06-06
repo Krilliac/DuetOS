@@ -13,13 +13,15 @@
 /*
  * Service manager implementation. See service.h for the design.
  *
- * The manifest is the five userland programs DuetOS shipped as inline
- * SpawnElfFile blocks in boot_bringup.cpp before this slice. They are
- * all oneshot (ServiceRestartPolicy::Never): each prints / runs a self-test
- * and exits. The supervisor still tracks their state transition to
- * Exited so `svc` reports the truth, and the operator can re-run any of
- * them with `svc start <name>`. The Always (respawn) path is live in
- * the tick and unit-tested, ready for the first userland daemon.
+ * The manifest is the five oneshot userland programs DuetOS shipped as
+ * inline SpawnElfFile blocks in boot_bringup.cpp before this slice
+ * (ServiceRestartPolicy::Never — each prints / runs a self-test and
+ * exits; the supervisor tracks their Running -> Exited transition so
+ * `svc` reports the truth, and the operator can re-run any with
+ * `svc start <name>`), plus `netd` — the first resident daemon
+ * (restart=Always), a TCP echo server the supervisor keeps alive. So
+ * the respawn path is now exercised by a real process as well as by
+ * ServiceManagerSelfTest's crash-loop-rate-limiter unit test.
  */
 
 namespace duetos::core
@@ -41,6 +43,12 @@ constexpr ServiceDesc kManifest[] = {
      &duetos::fs::RamfsNatSysinfoBytes, &duetos::fs::RamfsNatSysinfoSize},
     {"duet-pkg", "/bin/duet-pkg", ServiceKind::NativeElf, ServiceRestartPolicy::Never, true,
      &duetos::fs::RamfsDuetPkgBytes, &duetos::fs::RamfsDuetPkgSize},
+    // First resident daemon: a TCP echo server on :7777. restart=Always
+    // — the supervisor keeps it alive (and the crash-loop guard catches
+    // a persistently broken net stack). Exercises the Always path with a
+    // real process, not just the unit test.
+    {"netd", "/bin/netd", ServiceKind::NativeElf, ServiceRestartPolicy::Always, true, &duetos::fs::RamfsNetdBytes,
+     &duetos::fs::RamfsNetdSize},
 };
 
 constexpr u32 kManifestCount = static_cast<u32>(sizeof(kManifest) / sizeof(kManifest[0]));
@@ -189,11 +197,15 @@ void ServiceManagerTick()
         ServiceRuntime& rt = g_rt[i];
         if (rt.state != ServiceState::Running)
             continue;
-        // A monotonic PID can never be reused, so "no live task with
-        // this pid" unambiguously means our instance left the live
-        // lists (oneshot finished, or crashed). Zombies are excluded
-        // from SchedFindProcessByPid; the reaper cleans them up.
-        if (duetos::sched::SchedFindProcessByPid(rt.pid) != nullptr)
+        // Liveness MUST include Blocked tasks: a resident daemon spends
+        // its life parked in a blocking syscall (e.g. netd in accept()),
+        // and a Blocked task is NOT on the runqueue/sleep/zombie lists
+        // SchedFindProcessByPid walks — using that here made the
+        // supervisor mistake a healthy blocked daemon for a dead one and
+        // spawn duplicates that collided on the port. SchedProcessAlive
+        // walks the all-tasks registry, so it sees Blocked tasks too.
+        // Monotonic PIDs mean a "not alive" verdict can't be a reused id.
+        if (duetos::sched::SchedProcessAlive(rt.pid))
             continue;
         rt.state = ServiceState::Exited;
         rt.last_exit_ns = now;

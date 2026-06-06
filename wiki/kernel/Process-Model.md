@@ -84,19 +84,29 @@ from boot) spawns every `autostart` entry in manifest order through the
 canonical `core::Spawn*File` API and starts the `svcmon` supervisor task,
 which:
 
-- polls the scheduler to track each service's live state
-  (`Running` → `Exited`), using monotonic PIDs so a poll-by-pid can never
-  adopt a reused id;
+- polls liveness via `SchedProcessAlive(pid)` to track each service's
+  state (`Running` → `Exited`). This walks the scheduler's *all-tasks*
+  registry, so a daemon parked in a blocking syscall (e.g. `netd` in
+  `accept()`, `TaskState::Blocked` on a WaitQueue) correctly reads as
+  alive — `SchedFindProcessByPid` only walks the runqueue/sleep/zombie
+  lists and would mistake a healthy blocked daemon for a dead one.
+  Monotonic PIDs mean a "not alive" verdict can never be a reused id;
 - respawns `ServiceRestartPolicy::Always` services on exit with
   fault-domain-style crash-loop protection (≤ 5 respawns / 60 s, else
   `Failed`).
 
 The `svc` shell command drives the set at runtime (`list` for any user;
 `start`/`stop`/`restart <name>` admin-gated). v0 scope: services run with
-the trusted cap-set (a per-service sandbox profile is a future knob); all
-current entries are oneshot (`Never`), so the respawn path is unit-tested
-via `ServiceManagerSelfTest` (the crash-loop rate limiter) and ready for
-the first long-running userland daemon. **Why kernel-resident rather than
+the trusted cap-set (a per-service sandbox profile is a future knob). The
+five boot programs are oneshot (`Never`); **`netd`** — a resident TCP echo
+server on :7777 (`userland/native-apps/netd`, using the native-libc BSD
+socket wrappers in `duet/socket.h`) — is the first `Always` entry, so the
+respawn path is exercised by a real resident process as well as by
+`ServiceManagerSelfTest`'s crash-loop-rate-limiter unit test. So that a
+crashed daemon can actually re-bind its port on respawn, kernel sockets
+are now owner-stamped and reclaimed on process exit
+(`SocketReleaseByOwner`, called from `ProcessRelease`). **Why
+kernel-resident rather than
 a `/sbin/init` ELF:** a userland PID-1 needs ring-3 process-spawns-process
 plumbing that does not exist yet; the supervisor lives where the other
 system services (heartbeat, selfthink, autonomic) already live, and a

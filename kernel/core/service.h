@@ -35,8 +35,10 @@
  *     future knob (GAP, below) — today every manifest entry is a
  *     kernel-shipped, kernel-trusted program.
  *   - Restart policy is Never (oneshot) or Always (respawn-on-exit).
- *     OnFailure (respawn only on non-zero exit) needs the exit code
- *     captured at reap time and is deferred.
+ *     The five boot programs are Never; `netd` (the resident TCP echo
+ *     daemon) is the first Always entry. OnFailure (respawn only on
+ *     non-zero exit) needs the exit code captured at reap time and is
+ *     deferred.
  *   - Liveness is polled, not event-driven: the supervisor wakes on a
  *     ~1 s cadence. PIDs are monotonic (proc/process.cpp g_next_pid),
  *     so a poll-by-pid can never be fooled into adopting a reused id.
@@ -138,8 +140,8 @@ bool ServiceStatusAt(u32 idx, ServiceStatusView* out);
 
 /// Boot self-test for the restart-decision + crash-loop-backoff logic
 /// (a pure function over synthetic timings — does not spawn). Emits a
-/// PASS line so a healthy boot leaves grep-able proof; the supervisor
-/// respawn path has no live daemon to exercise it at boot yet.
+/// PASS line so a healthy boot leaves grep-able proof. The live respawn
+/// path is additionally exercised by the resident `netd` daemon.
 void ServiceManagerSelfTest();
 
 } // namespace duetos::core

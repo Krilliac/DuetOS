@@ -14,6 +14,7 @@
 #include "drivers/video/widget.h"
 #include "mm/address_space.h"
 #include "mm/kheap.h"
+#include "net/socket.h"
 #include "util/string.h"
 #include "subsystems/win32/custom.h"
 #include "subsystems/win32/window_syscall.h"
@@ -457,6 +458,14 @@ void ProcessRelease(Process* p)
     // (raw FindFirstFile callers without an attached Linux fd).
     ::duetos::ipc::HandleTableDrain(p->kobj_handles);
     arch::SerialWrite("[proc] release: post-HandleTableDrain\n");
+
+    // Reclaim any kernel sockets this process left bound/open. Without
+    // this, a networked process that exits (or crashes) leaks its pool
+    // slot and leaves its listener port bound — which would make a
+    // restart=Always service (e.g. netd) fail to re-bind on respawn
+    // with EADDRINUSE. Kernel-owned sockets (owner_pid 0, e.g. DRSH)
+    // are not touched.
+    ::duetos::net::SocketReleaseByOwner(p->pid);
 
     // Surface anything still attributable to this PID after the
     // earlier drain steps (kobject handles, Win32 handle slots,

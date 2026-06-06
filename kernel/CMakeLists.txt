@@ -213,6 +213,7 @@ duetos_embed_blob(generated_usershell_elf.h
         "${CMAKE_SOURCE_DIR}/userland/libc/src/string.S"
         "${CMAKE_SOURCE_DIR}/userland/libc/src/setjmp.S"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/syscall.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/socket.h"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/string.h"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/setjmp.h"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/unistd.h"
@@ -241,6 +242,7 @@ function(duetos_native_app app_name)
         "${CMAKE_SOURCE_DIR}/userland/libc/src/setjmp.S"
         "${CMAKE_SOURCE_DIR}/userland/libc/src/stdio.c"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/syscall.h"
+        "${CMAKE_SOURCE_DIR}/userland/libc/include/duet/socket.h"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/string.h"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/setjmp.h"
         "${CMAKE_SOURCE_DIR}/userland/libc/include/stdio.h"
@@ -261,6 +263,7 @@ duetos_native_app(hello_native)
 duetos_native_app(nat_calc)
 duetos_native_app(nat_sysinfo)
 duetos_native_app(duet-pkg)
+duetos_native_app(netd)
 
 duetos_embed_blob(generated_hello_winapi.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-hello-winapi.sh"

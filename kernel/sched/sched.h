@@ -143,6 +143,17 @@ core::Process* SchedFindProcessByPid(u64 target_pid);
 /// arch::Cli.
 bool SchedIsPidZombie(u64 target_pid);
 
+/// True iff the process `target_pid` has at least one non-Dead task
+/// in ANY state — Running, Ready, Sleeping, OR Blocked. Unlike
+/// SchedFindProcessByPid (which walks only the runqueues + sleep +
+/// zombie lists and therefore MISSES a task parked on a WaitQueue),
+/// this walks the global all-tasks registry under g_sched_lock, so a
+/// daemon blocked in a syscall (e.g. a server in accept()) correctly
+/// reads as alive. This is the liveness predicate a supervisor must
+/// use to decide whether a service has actually exited — see
+/// core/service.cpp.
+bool SchedProcessAlive(u64 target_pid);
+
 /// Count of currently-live processes whose
 /// `linux_parent_pid == parent_pid`. Used by Linux fork/clone
 /// to enforce RLIMIT_NPROC when the soft cap has been lowered
