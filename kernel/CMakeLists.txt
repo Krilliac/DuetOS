@@ -264,6 +264,7 @@ duetos_native_app(nat_calc)
 duetos_native_app(nat_sysinfo)
 duetos_native_app(duet-pkg)
 duetos_native_app(netd)
+duetos_native_app(netd_probe)
 
 duetos_embed_blob(generated_hello_winapi.h
     SCRIPT   "${CMAKE_SOURCE_DIR}/tools/build/build-hello-winapi.sh"

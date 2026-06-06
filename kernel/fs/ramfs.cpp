@@ -57,6 +57,7 @@
 #include "generated_nat_calc_native.h"
 #include "generated_nat_sysinfo_native.h"
 #include "generated_netd_native.h"
+#include "generated_netd_probe_native.h"
 
 /*
  * Seed trees are declared at file scope as constinit data so the
@@ -1060,6 +1061,16 @@ const u8* RamfsNetdBytes()
 u64 RamfsNetdSize()
 {
     return ::duetos::fs::generated::kBinNetdBytes_len;
+}
+
+const u8* RamfsNetdProbeBytes()
+{
+    return ::duetos::fs::generated::kBinNetdProbeBytes;
+}
+
+u64 RamfsNetdProbeSize()
+{
+    return ::duetos::fs::generated::kBinNetdProbeBytes_len;
 }
 
 const u8* RamfsDuetPkgBytes()

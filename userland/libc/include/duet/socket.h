@@ -60,6 +60,16 @@ static inline void duet_sockaddr_in_any(struct duet_sockaddr_in* sa, unsigned sh
         sa->sin_zero[i] = 0;
 }
 
+/* Fill an AF_INET sockaddr for 127.0.0.1:<port> (loopback). */
+static inline void duet_sockaddr_in_loopback(struct duet_sockaddr_in* sa, unsigned short port)
+{
+    duet_sockaddr_in_any(sa, port);
+    sa->sin_addr[0] = 127;
+    sa->sin_addr[1] = 0;
+    sa->sin_addr[2] = 0;
+    sa->sin_addr[3] = 1;
+}
+
 /* Returns a kernel socket index (>= 0) or a negative -errno. */
 static inline int duet_socket(int domain, int type)
 {
@@ -76,6 +86,13 @@ static inline int duet_bind(int s, const struct duet_sockaddr_in* addr, int len)
 static inline int duet_listen(int s, int backlog)
 {
     return (int)duet_socket_op(DUET_SOCKOP_LISTEN, s, backlog, 0, 0, 0);
+}
+
+/* Connect to addr (a struct duet_sockaddr_in*; len is its byte size, a
+ * value). Returns 0 on success or negative -errno. */
+static inline int duet_connect(int s, const struct duet_sockaddr_in* addr, int len)
+{
+    return (int)duet_socket_op(DUET_SOCKOP_CONNECT, s, (long)addr, len, 0, 0);
 }
 
 /* Blocks until a connection arrives. `addr`/`addrlen` may be NULL when

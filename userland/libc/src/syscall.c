@@ -60,6 +60,13 @@ void exit(int code)
     DUET_USER_TRAP_UNREACHABLE();
 }
 
+void duet_sleep_ms(unsigned long ms)
+{
+    long rv;
+    __asm__ volatile("int $0x80" : "=a"(rv) : "a"((long)DUET_SYS_SLEEP_MS), "D"(ms) : "memory", "rcx", "r11");
+    (void)rv;
+}
+
 long duet_socket_op(long op, long a1, long a2, long a3, long a4, long a5)
 {
     /* Six-arg int 0x80 ABI: arg3/4/5 land in r10/r8/r9 (Linux-shaped).

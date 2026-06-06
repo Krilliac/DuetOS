@@ -683,8 +683,11 @@ i64 SocketSendStream(u32 idx, const u8* data, u32 len)
         return 0;
     if (s.loopback_paired && s.loopback_pipe_send_idx >= 0)
     {
-        const i64 wrote = ::duetos::subsystems::linux::internal::PipeWrite(static_cast<u32>(s.loopback_pipe_send_idx),
-                                                                           reinterpret_cast<u64>(data), len);
+        // Kernel-buffer variant: `data` is the syscall handler's kernel
+        // staging buffer, not a user pointer — the user-pointer PipeWrite
+        // would CopyFromUser it and fail the user-range check (-EFAULT).
+        const i64 wrote = ::duetos::subsystems::linux::internal::PipeWriteKernel(
+            static_cast<u32>(s.loopback_pipe_send_idx), data, len);
         if (wrote > 0)
             ++g_stats.stream_tx;
         return wrote;
@@ -730,8 +733,11 @@ i64 SocketRecvStream(u32 idx, u8* out, u32 cap)
         return -107;
     if (s.loopback_paired && s.loopback_pipe_recv_idx >= 0)
     {
-        const i64 got = ::duetos::subsystems::linux::internal::PipeRead(static_cast<u32>(s.loopback_pipe_recv_idx),
-                                                                        reinterpret_cast<u64>(out), cap);
+        // Kernel-buffer variant: `out` is the syscall handler's kernel
+        // staging buffer (the handler CopyToUser's it afterwards), so the
+        // user-pointer PipeRead would CopyToUser it and fail (-EFAULT).
+        const i64 got =
+            ::duetos::subsystems::linux::internal::PipeReadKernel(static_cast<u32>(s.loopback_pipe_recv_idx), out, cap);
         if (got > 0)
             ++g_stats.stream_rx;
         return got;

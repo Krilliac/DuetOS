@@ -49,6 +49,11 @@ constexpr ServiceDesc kManifest[] = {
     // real process, not just the unit test.
     {"netd", "/bin/netd", ServiceKind::NativeElf, ServiceRestartPolicy::Always, true, &duetos::fs::RamfsNetdBytes,
      &duetos::fs::RamfsNetdSize},
+    // Oneshot client: connects to netd and asserts the echo round-trip,
+    // proving the resident daemon serves traffic cross-process. Spawned
+    // after netd; retries connect while netd finishes binding.
+    {"netd_probe", "/bin/netd_probe", ServiceKind::NativeElf, ServiceRestartPolicy::Never, true,
+     &duetos::fs::RamfsNetdProbeBytes, &duetos::fs::RamfsNetdProbeSize},
 };
 
 constexpr u32 kManifestCount = static_cast<u32>(sizeof(kManifest) / sizeof(kManifest[0]));
