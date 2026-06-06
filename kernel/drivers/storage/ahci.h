@@ -31,7 +31,12 @@
  * Not in scope for v1:
  *   - Write path. ATAPI (CD-ROM). Port multipliers. Multiple
  *     simultaneous in-flight commands. Power management.
- *   - Hotplug. Sleeping-controller wake-up sequences.
+ *   - Hotplug *re-attach* (re-enumerating a drive plugged back in).
+ *     Surprise-removal *detection* IS handled: a port whose MMIO
+ *     decode reads all-ones or whose SATA link drops is latched
+ *     offline (fail-fast) by the I/O path + AhciHealthPoll; bringing
+ *     a re-plugged drive back online is a future slice.
+ *   - Sleeping-controller wake-up sequences.
  *   - MBR fallback — callers reach us through the block layer,
  *     which the GPT parser already consumes.
  *
@@ -64,6 +69,14 @@ void AhciTeardown();
 /// confirm every storage backend read-path works end-to-end.
 /// No-op + log "skipped" if no SATA drive is registered.
 void AhciSelfTest();
+
+/// Surprise-removal sweep: for every online SATA port, read PxSSTS
+/// and latch the port offline if its MMIO decode reads all-ones
+/// (controller hot-unplugged) or its SATA link is no longer
+/// established (drive unplugged). Called from the kernel heartbeat
+/// so a drive yanked while idle is noticed within one beat instead
+/// of only at the next I/O. Silent when every port is healthy.
+void AhciHealthPoll();
 
 // -------------------------------------------------------------
 // Panic-time surface — mirrors NVMe's contract.

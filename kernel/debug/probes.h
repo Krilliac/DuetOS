@@ -122,6 +122,16 @@ enum class ProbeId : u8
                                // regression. Caller passes the LAPIC ID as
                                // `value`. ArmedLog so an attached GDB can
                                // `b duetos::debug::ProbeFire`.
+    kStorageDeviceGone,        // a storage controller's MMIO decode read back
+                               // all-ones (PCIe surprise-removal / hard link
+                               // drop) or latched a fatal-status bit, so the
+                               // driver gave up on it and marked it offline.
+                               // Caller passes the AHCI port index or the raw
+                               // NVMe CSTS word as `value`. ArmedLog: a clean
+                               // boot never surprise-removes its boot disk, so
+                               // any fire is a real hardware event — an
+                               // attached GDB can `b duetos::debug::ProbeFire`
+                               // and halt at the exact frame the device vanished.
 
     // Medium-frequency events — disarmed by default, the
     // operator arms these when hunting a specific issue.

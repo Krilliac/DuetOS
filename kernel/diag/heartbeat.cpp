@@ -3,6 +3,8 @@
 #include "arch/x86_64/serial.h"
 #include "arch/x86_64/smp.h"
 #include "drivers/iommu/vtd.h"
+#include "drivers/storage/ahci.h"
+#include "drivers/storage/nvme.h"
 #include "mm/frame_allocator.h"
 #include "mm/kheap.h"
 #include "sched/sched.h"
@@ -385,6 +387,18 @@ void RegisterHeartbeatKstats()
         // the last beat. Silent when clean; no-op when VT-d isn't enabled.
         // Bridges the gap until a fault MSI/IRQ handler lands.
         ::duetos::drivers::iommu::VtdFaultPoll();
+
+        // Sweep the storage controllers for surprise-removal: a SATA
+        // drive or NVMe controller unplugged while idle never raises an
+        // I/O error (nothing is issuing commands), so without this poll
+        // the kernel would keep believing a yanked-but-idle disk is
+        // alive until the next read. Each call latches a vanished
+        // device offline so subsequent I/O fails fast. Silent when
+        // every device is healthy; no-op when none are present. Same
+        // "poll from the heartbeat until a hot-unplug IRQ lands" pattern
+        // as the VT-d fault poll above.
+        ::duetos::drivers::storage::AhciHealthPoll();
+        ::duetos::drivers::storage::NvmeHealthPoll();
 
         // FMA diagnosis pass. Runs AFTER FaultReactDrainPending +
         // FaultDomainTick so the engine sees the full picture of

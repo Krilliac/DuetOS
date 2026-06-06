@@ -43,6 +43,7 @@ constexpr ProbeRow kProbeTable[] = {
     {ProbeId::kFaultInjectFired, "diag.fault_inject_fired", ProbeArm::ArmedLog},
     {ProbeId::kGpuRingBringupFail, "gpu.ring_bringup_fail", ProbeArm::ArmedLog},
     {ProbeId::kCurrentCpuGsbaseFallback, "cpu.gsbase_fallback", ProbeArm::ArmedLog},
+    {ProbeId::kStorageDeviceGone, "storage.device_gone", ProbeArm::ArmedLog},
     {ProbeId::kRing3Spawn, "ring3.spawn", ProbeArm::Disarmed},
     {ProbeId::kProcessCreate, "proc.create", ProbeArm::Disarmed},
     {ProbeId::kProcessDestroy, "proc.destroy", ProbeArm::Disarmed},

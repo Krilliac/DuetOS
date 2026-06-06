@@ -97,6 +97,14 @@ void NvmeTeardown();
 /// "skipped" — not a test failure.
 void NvmeSelfTest();
 
+/// Surprise-removal sweep: if a controller is online, read CSTS and
+/// latch it offline when the MMIO decode reads all-ones (controller
+/// hot-unplugged) or the fatal-status bit (CFS) is set. Called from
+/// the kernel heartbeat so a drive yanked while idle is noticed
+/// within one beat instead of only at the next I/O. Silent when the
+/// controller is healthy.
+void NvmeHealthPoll();
+
 /// Translate an NVMe status-code-type / status-code pair into a
 /// short human-readable name. SCT 0 = Generic Command Status,
 /// SCT 1 = Command Specific Status, SCT 2 = Media and Data
