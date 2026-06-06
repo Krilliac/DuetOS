@@ -1384,6 +1384,7 @@ void BootBringupKernelServices(const char* cmdline, duetos::uptr multiboot_info)
     // self-test exercises the in-memory walk independently of
     // whether any real IOMMU is present.
     DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::vtd_paging::VtdPagingSelfTest());
+    DUETOS_BOOT_SELFTEST(duetos::drivers::iommu::VtdFaultSelfTest());
 
     // Vendor-neutral IOMMU enable. Routes through
     // drivers/iommu/iommu.cpp which picks Intel vs AMD based on

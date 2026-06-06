@@ -899,13 +899,14 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
   escape hatch; verified under `DUETOS_IOMMU_DEVICE=1 tools/qemu/run.sh`
   (translation ENABLED, all device I/O works, 0 faults).
 - **Residual:** (1) **AMD-Vi** is parse-only (IVRS) — register decode /
-  paging / enable deferred until an AMD test machine exists. (2) **No
-  DMAR fault-IRQ handler:** an out-of-range device DMA is silently
-  blocked (write-protection works) but not *reported* — wire FECTL/FSTS
-  + the fault-record buffer to a handler so faults are logged, not just
-  contained. (3) Interrupt remapping (intremap) is decoded but not
-  programmed. (4) Per-device domains (real isolation vs the shared
-  identity map) are a later slice.
+  paging / enable deferred until an AMD test machine exists. (2) **DMAR
+  fault reporting landed 2026-06-06** (`VtdDecodeFault` + `LogAndClearFaults`
+  read FSTS + the fault-record buffer after enable and log + clear any
+  pending DMA fault; `VtdFaultPoll()` for runtime; `[vtd] no DMA faults
+  pending` verified). Residual: wire FECTL + a fault MSI so faults raise
+  an *interrupt* instead of needing a poll. (3) Interrupt remapping
+  (intremap) is decoded but not programmed. (4) Per-device domains (real
+  isolation vs the shared identity map) are a later slice.
 - **Precondition for every new bus-master driver:** map only
   driver-owned buffers into device address space; validate descriptor
   targets. (Hardware-Safety pre-landing row "DMA without IOMMU".)

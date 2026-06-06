@@ -107,4 +107,28 @@ bool VtdEnableRequested();
 /// VtdProgramAndEnable does NOT consult the build flag itself.
 ::duetos::core::Result<void> VtdProgramAndEnable();
 
+/// A decoded VT-d primary fault record (FRCD): which device (SID) tried
+/// to touch which address, and why (reason). Translation confines a bad
+/// DMA; this is how the fault is *reported* rather than silently dropped.
+struct VtdFaultRecord
+{
+    bool valid; // F bit — the record holds a real fault
+    u8 reason;  // Fault Reason code
+    u16 sid;    // Source ID (bus/dev/func) of the faulting device
+    u64 addr;   // Faulting address (page-aligned)
+};
+
+/// Decode an FRCD low+high 64-bit pair into a VtdFaultRecord. Pure
+/// function — exposed for the self-test.
+VtdFaultRecord VtdDecodeFault(u64 low, u64 high);
+
+/// Read every IOMMU's fault status + fault-record buffer, log any
+/// pending DMA fault, and clear it. Called once after enable; can also
+/// be polled. No-op when VT-d is not available.
+void VtdFaultPoll();
+
+/// Pure-math self-test of the FRCD decode. Panics on mismatch; emits
+/// "[vtd-fault-selftest] PASS".
+void VtdFaultSelfTest();
+
 } // namespace duetos::drivers::iommu
