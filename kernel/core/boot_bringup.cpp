@@ -2858,6 +2858,12 @@ void BootBringupDesktop(duetos::uptr multiboot_info)
             duetos::arch::SerialWrite("[pass-c-selftest] PASS (chrome-text=ok)\n");
         }
     }
+    // GDI client-area display list. Guards the per-window primitive
+    // ring invariants the Win32 BeginPaint paint cycle depends on
+    // (fresh-empty, cap + evict-oldest, clear-resets) — a regression
+    // here is what makes a PE's client area ghost or lose its
+    // earliest primitives. Emits `[displaylist-selftest] PASS`.
+    DUETOS_BOOT_SELFTEST(duetos::drivers::video::WindowDisplayListSelfTest());
     // Pass D — app-widget framework. AppWidgetsSelfTest constructs
     // each concrete widget (button/listrow/label/panel), drives
     // synthetic mouse events, and verifies state-flag transitions

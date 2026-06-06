@@ -556,16 +556,24 @@ void WindowDispatchWheel(WindowHandle h, i32 client_x, i32 client_y, i32 dz, u32
 // Each window also owns a small display list of GDI primitives —
 // FillRect / TextOut / Rectangle recordings — that the compositor
 // replays after chrome paint on every DesktopCompose. Display-list
-// overflow drops oldest; callers that want a clean slate call
-// WindowClearDisplayList first (backing WM_PAINT / InvalidateRect
-// with bErase = TRUE).
+// overflow drops oldest. The list is reset at SYS_WIN_BEGIN_PAINT
+// (Win32 BeginPaint) so each paint cycle starts from a clean slate —
+// this bounds the depth to a single frame's worth of primitives
+// rather than an unbounded accumulation across frames. Callers
+// outside the paint lifecycle that want a clean slate call
+// WindowClearDisplayList directly (also backing SYS_GDI_CLEAR).
 // ---------------------------------------------------------------
 
 /// Maximum messages queued per window. Oldest-dropped on overflow.
 constexpr u32 kWinMsgQueueDepth = 32;
 
-/// Maximum recorded GDI primitives per window. Oldest-dropped.
-constexpr u32 kWinDisplayListDepth = 32;
+/// Maximum recorded GDI primitives per window, per paint cycle.
+/// Oldest-dropped on overflow. Sized to cover a full client area of
+/// 8 px text rows (a ~500 px-tall client is ~60 TextOut lines) plus
+/// the fills/rectangles a typical WM_PAINT layers underneath, so a
+/// single-pass repaint of a text-heavy window doesn't silently lose
+/// its earliest primitives. BeginPaint resets the count each frame.
+constexpr u32 kWinDisplayListDepth = 64;
 
 /// Maximum ASCII text length stored per TextOut primitive.
 constexpr u32 kWinTextOutMax = 47; // + NUL = 48
@@ -715,9 +723,17 @@ void WindowClientBitBlt(WindowHandle h, i32 dst_x, i32 dst_y, const u32* src_pix
 /// compositor and never shows.
 inline constexpr u32 kWinBlitMaxPx = kWinBlitPoolBytes / 4;
 
-/// Drop every recorded GDI primitive for `h` (WM_PAINT with
-/// bErase = TRUE support).
+/// Drop every recorded GDI primitive for `h` (and reset the blit
+/// pool). Issued by SYS_WIN_BEGIN_PAINT each paint cycle and by
+/// SYS_GDI_CLEAR.
 void WindowClearDisplayList(WindowHandle h);
+
+/// Boot self-test for the GDI display-list invariants BeginPaint
+/// relies on (fresh-empty, cap + evict-oldest, clear). Emits
+/// `[displaylist-selftest] PASS` / `FAIL ...` on the serial console;
+/// the aggregator reads WindowDisplayListSelfTestPassed().
+void WindowDisplayListSelfTest();
+bool WindowDisplayListSelfTestPassed();
 
 /// Read the owning pid — used by the keyboard router to decide
 /// whether to post to the window's queue (PE-owned, pid > 0) or

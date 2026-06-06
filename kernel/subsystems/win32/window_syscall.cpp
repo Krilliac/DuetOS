@@ -1581,6 +1581,19 @@ void DoWinBeginPaint(arch::TrapFrame* frame)
             // dirty bit — matches v1 behaviour (no partial-region
             // tracking).
             WindowValidate(h_comp);
+            // Win32 hands the app a clean device context for the
+            // (whole-client) update region each paint cycle: the app
+            // is expected to repaint everything between BeginPaint
+            // and EndPaint. Reset the per-window GDI display list
+            // here so the new frame starts from a clean slate. Without
+            // this, primitives recorded by earlier paints accumulate
+            // in the fixed-depth ring — frame N ghosts under frame
+            // N+1 and the ring silently evicts its oldest entries once
+            // saturated. The app's GDI calls issued after BeginPaint
+            // returns refill the list for this frame. (Apps that draw
+            // outside a BeginPaint/EndPaint pair via GetDC never reach
+            // this path, so their persistent drawing is unaffected.)
+            WindowClearDisplayList(h_comp);
             ok = true;
         }
     }

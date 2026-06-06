@@ -36,7 +36,9 @@
 #include "drivers/video/widget.h"
 
 #include "arch/x86_64/cpu.h"
+#include "arch/x86_64/serial.h"
 #include "arch/x86_64/timer.h"
+#include "debug/probes.h"
 #include "drivers/input/ps2mouse.h"
 #include "sched/sched.h"
 #include "sync/lockdep.h"
@@ -935,7 +937,7 @@ void WindowRaise(WindowHandle h)
     g_active_window = h;
     // Find `h` in the z-order, shift everything above it down
     // by one, place `h` at the top. O(count) — fine for tiny
-    // counts; a linked list would be overkill at kMaxWindows=4.
+    // counts; a linked list would be overkill at kMaxWindows=40.
     u32 idx = 0;
     for (; idx < g_window_count; ++idx)
     {
@@ -3295,6 +3297,114 @@ void WindowClearDisplayList(WindowHandle h)
     }
     g_windows[h].prim_count = 0;
     g_windows[h].blit_pool_used = 0;
+}
+
+namespace
+{
+constinit bool s_displaylist_selftest_passed = false;
+} // namespace
+
+// Guards the per-window GDI display-list invariants the BeginPaint
+// paint cycle depends on: a fresh window starts empty, the ring caps
+// at kWinDisplayListDepth and evicts oldest on overflow, and
+// WindowClearDisplayList (the reset SYS_WIN_BEGIN_PAINT issues each
+// frame) returns the list — and the blit-pool bump — to empty. A
+// regression here is what makes a Win32 PE's client area ghost or
+// silently lose its earliest primitives, so it earns a boot gate.
+void WindowDisplayListSelfTest()
+{
+    using duetos::arch::SerialWrite;
+
+    // WindowClose leaks its slot (g_window_count is never
+    // decremented), so register a scratch window, exercise it, then
+    // restore the table cursor + active handle by hand — otherwise
+    // every boot would burn one of the kMaxWindows slots here. Safe
+    // because boot self-tests run single-threaded.
+    const u32 saved_count = g_window_count;
+    const WindowHandle saved_active = g_active_window;
+
+    WindowChrome chrome{};
+    chrome.w = 200;
+    chrome.h = 120;
+    chrome.title_height = 22;
+    const WindowHandle h = WindowRegister(chrome, "dl-selftest");
+
+    u32 fail_code = 0;
+    const char* fail_msg = nullptr;
+
+    if (h == kWindowInvalid)
+    {
+        fail_code = 0xD0;
+        fail_msg = "[displaylist-selftest] FAIL register returned invalid handle";
+    }
+    else if (g_windows[h].prim_count != 0)
+    {
+        fail_code = 0xD1;
+        fail_msg = "[displaylist-selftest] FAIL fresh window prim_count != 0";
+    }
+    else
+    {
+        // Fill the ring to exactly the cap; encode the append index
+        // in the colour so eviction order is observable.
+        for (u32 i = 0; i < kWinDisplayListDepth; ++i)
+        {
+            WindowClientFillRect(h, 0, 0, 1, 1, i);
+        }
+        if (g_windows[h].prim_count != kWinDisplayListDepth)
+        {
+            fail_code = 0xD2;
+            fail_msg = "[displaylist-selftest] FAIL ring did not reach cap";
+        }
+        else
+        {
+            // One more append must hold the cap and evict the oldest
+            // (colour 0), leaving the second-appended prim (colour 1)
+            // at slot 0.
+            WindowClientFillRect(h, 0, 0, 1, 1, 0xABCDEF);
+            if (g_windows[h].prim_count != kWinDisplayListDepth)
+            {
+                fail_code = 0xD3;
+                fail_msg = "[displaylist-selftest] FAIL cap exceeded after overflow";
+            }
+            else if (g_windows[h].prims[0].colour_rgb != 1)
+            {
+                fail_code = 0xD4;
+                fail_msg = "[displaylist-selftest] FAIL overflow did not evict oldest";
+            }
+            else
+            {
+                // The reset BeginPaint relies on every paint cycle.
+                WindowClearDisplayList(h);
+                if (g_windows[h].prim_count != 0 || g_windows[h].blit_pool_used != 0)
+                {
+                    fail_code = 0xD5;
+                    fail_msg = "[displaylist-selftest] FAIL clear left residual state";
+                }
+            }
+        }
+        WindowClose(h);
+    }
+
+    // Restore the window-table cursor so the scratch slot is reused
+    // by the next real WindowRegister rather than leaked.
+    g_window_count = saved_count;
+    g_active_window = saved_active;
+
+    if (fail_msg != nullptr)
+    {
+        SerialWrite(fail_msg);
+        SerialWrite("\n");
+        KBP_PROBE_V(duetos::debug::ProbeId::kBootSelftestFail, fail_code);
+        return;
+    }
+
+    SerialWrite("[displaylist-selftest] PASS\n");
+    s_displaylist_selftest_passed = true;
+}
+
+bool WindowDisplayListSelfTestPassed()
+{
+    return s_displaylist_selftest_passed;
 }
 
 bool WindowIsVisible(WindowHandle h)
