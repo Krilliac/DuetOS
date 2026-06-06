@@ -186,9 +186,14 @@ set(DUETOS_KERNEL_C_FLAGS
 set(DUETOS_KERNEL_CXX_FLAGS
     ${DUETOS_KERNEL_C_FLAGS}
     # C++-only additions to the extended floor above.
+    # -Wold-style-cast: enforce C++ casts. A C-cast silently spans
+    #   static_cast / reinterpret_cast / const_cast, hiding exactly the
+    #   const/volatile-drop and alignment problems the floor above is
+    #   trying to catch — make the cast's intent explicit at the site.
     # -Wzero-as-null-pointer-constant: `0`/`NULL` used as a pointer.
     # -Wnon-virtual-dtor / -Woverloaded-virtual: polymorphism foot-guns
     #   that survive even with -fno-rtti.
+    -Wold-style-cast
     -Wzero-as-null-pointer-constant
     -Wnon-virtual-dtor
     -Woverloaded-virtual

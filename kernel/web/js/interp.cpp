@@ -220,7 +220,7 @@ static Result<JsValue> EvalBinary(Interp& I, const AstNode* n, Env* env)
             {
                 if (x->data[i] != y->data[i])
                 {
-                    cmp = (unsigned char)x->data[i] < (unsigned char)y->data[i] ? -1 : 1;
+                    cmp = static_cast<unsigned char>(x->data[i]) < static_cast<unsigned char>(y->data[i]) ? -1 : 1;
                     break;
                 }
             }
@@ -329,7 +329,7 @@ static Result<JsValue> DoAssign(Interp& I, const AstNode* target, const JsValue&
             return Err{ErrorCode::BadState};
         if (obj.as.obj->isArray && idx.IsNumber() && idx.as.num.isInt && idx.as.num.ival >= 0)
         {
-            if (!ArrSet(obj.as.obj, I.arena, u32(idx.as.num.ival), val))
+            if (!ArrSet(obj.as.obj, I.arena, static_cast<u32>(idx.as.num.ival), val))
                 return Err{ErrorCode::OutOfMemory};
             return val;
         }
@@ -529,7 +529,7 @@ Result<JsValue> EvalExpr(Interp& I, const AstNode* n, Env* env)
             idx.as.num.ival >= 0)
         {
             JsValue out;
-            if (ArrGet(obj.as.obj, u32(idx.as.num.ival), out))
+            if (ArrGet(obj.as.obj, static_cast<u32>(idx.as.num.ival), out))
                 return out;
             return JsValue::Undefined();
         }

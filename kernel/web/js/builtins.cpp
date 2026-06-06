@@ -177,7 +177,7 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
     if (obj.type == JsType::String)
     {
         if (NameEq(key, keyLen, "length"))
-            return JsValue::Int(obj.as.str ? i64(obj.as.str->len) : 0);
+            return JsValue::Int(obj.as.str ? static_cast<i64>(obj.as.str->len) : 0);
         if (NameEq(key, keyLen, "charAt"))
             return NativeFnVal(I, kStrCharAt, "charAt");
         if (NameEq(key, keyLen, "charCodeAt"))
@@ -248,7 +248,7 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
             if (NameEq(key, keyLen, "multiline"))
                 return JsValue::Bool(re->prog->multiline);
             if (NameEq(key, keyLen, "lastIndex"))
-                return JsValue::Int(i64(re->lastIndex));
+                return JsValue::Int(static_cast<i64>(re->lastIndex));
             // other keys fall through to the plain property map below
         }
         // Date instances: the UTC getters dispatch on the isDate tag (the
@@ -291,7 +291,7 @@ Result<JsValue> GetMemberImpl(Interp& I, const JsValue& obj, const char* key, u3
         if (o->isArray)
         {
             if (NameEq(key, keyLen, "length"))
-                return JsValue::Int(i64(o->length));
+                return JsValue::Int(static_cast<i64>(o->length));
             if (NameEq(key, keyLen, "push"))
                 return NativeFnVal(I, kArrPush, "push");
             if (NameEq(key, keyLen, "pop"))
@@ -338,7 +338,7 @@ static u32 WriteU64Dec(u64 v, char* out, u32 cap)
         tmp[t++] = '0';
     while (v)
     {
-        tmp[t++] = char('0' + (v % 10));
+        tmp[t++] = static_cast<char>('0' + (v % 10));
         v /= 10;
     }
     u32 o = 0;
@@ -479,7 +479,7 @@ static Result<JsValue> StrCharAt(Interp& I, const JsValue& recv, const JsValue* 
 {
     const JsString* s = recv.as.str;
     i64 idx = ToInt(ArgOr(args, argc, 0));
-    if (!s || idx < 0 || idx >= i64(s->len))
+    if (!s || idx < 0 || idx >= static_cast<i64>(s->len))
         return JsValue::Str(MakeString(I.arena, "", 0));
     char c = s->data[idx];
     return JsValue::Str(MakeString(I.arena, &c, 1));
@@ -506,7 +506,7 @@ static Result<JsValue> StrIndexOf(Interp&, const JsValue& recv, const JsValue* a
                 break;
             }
         if (eq)
-            return JsValue::Int(i64(i));
+            return JsValue::Int(static_cast<i64>(i));
     }
     return JsValue::Int(-1);
 }
@@ -516,7 +516,7 @@ static Result<JsValue> StrSlice(Interp& I, const JsValue& recv, const JsValue* a
     const JsString* s = recv.as.str;
     if (!s)
         return JsValue::Str(MakeString(I.arena, "", 0));
-    i64 len = i64(s->len);
+    i64 len = static_cast<i64>(s->len);
     i64 start = ToInt(ArgOr(args, argc, 0));
     i64 end = argc >= 2 ? ToInt(args[1]) : len;
     if (start < 0)
@@ -529,7 +529,7 @@ static Result<JsValue> StrSlice(Interp& I, const JsValue& recv, const JsValue* a
         end = len;
     if (start >= end)
         return JsValue::Str(MakeString(I.arena, "", 0));
-    return JsValue::Str(MakeString(I.arena, s->data + start, u32(end - start)));
+    return JsValue::Str(MakeString(I.arena, s->data + start, static_cast<u32>(end - start)));
 }
 
 static Result<JsValue> StrCase(Interp& I, const JsValue& recv, bool upper)
@@ -544,9 +544,9 @@ static Result<JsValue> StrCase(Interp& I, const JsValue& recv, bool upper)
     {
         char c = s->data[i];
         if (upper && c >= 'a' && c <= 'z')
-            c = char(c - 32);
+            c = static_cast<char>(c - 32);
         else if (!upper && c >= 'A' && c <= 'Z')
-            c = char(c + 32);
+            c = static_cast<char>(c + 32);
         buf[i] = c;
     }
     buf[s->len] = '\0';
@@ -615,9 +615,9 @@ static Result<JsValue> StrCharCodeAt(Interp&, const JsValue& recv, const JsValue
     i64 idx = ToInt(ArgOr(args, argc, 0));
     // GAP: ASCII only — returns the raw byte, not the UTF-16 code unit a
     // spec-compliant charCodeAt would for non-BMP / multibyte input.
-    if (!s || idx < 0 || idx >= i64(s->len))
+    if (!s || idx < 0 || idx >= static_cast<i64>(s->len))
         return JsValue::Float(Sf32QNaN());
-    return JsValue::Int(i64(static_cast<unsigned char>(s->data[idx])));
+    return JsValue::Int(static_cast<i64>(static_cast<unsigned char>(s->data[idx])));
 }
 
 // String.prototype.replace. A regex pattern routes through ReReplace
@@ -718,7 +718,7 @@ static Result<JsValue> ArrJoin(Interp& I, const JsValue& recv, const JsValue* ar
         if (i)
             for (u32 k = 0; k < sepLen && o < sizeof(out); ++k)
                 out[o++] = sep[k];
-        o += ValueToChars(arr->elems[i], out + o, u32(sizeof(out)) - o);
+        o += ValueToChars(arr->elems[i], out + o, static_cast<u32>(sizeof(out)) - o);
     }
     return JsValue::Str(MakeString(I.arena, out, o));
 }
@@ -729,7 +729,7 @@ static Result<JsValue> ArrIndexOf(Interp&, const JsValue& recv, const JsValue* a
     JsValue target = ArgOr(args, argc, 0);
     for (u32 i = 0; i < arr->length; ++i)
         if (StrictEquals(arr->elems[i], target))
-            return JsValue::Int(i64(i));
+            return JsValue::Int(static_cast<i64>(i));
     return JsValue::Int(-1);
 }
 
@@ -741,7 +741,7 @@ static Result<JsValue> ArrSlice(Interp& I, const JsValue& recv, const JsValue* a
     JsObject* out = ObjNew(I.arena, true);
     if (!out)
         return Err{ErrorCode::OutOfMemory};
-    i64 len = i64(arr->length);
+    i64 len = static_cast<i64>(arr->length);
     i64 start = ToInt(ArgOr(args, argc, 0));
     i64 end = argc >= 2 ? ToInt(args[1]) : len;
     if (start < 0)
@@ -776,7 +776,7 @@ static Result<JsValue> ArrHof(Interp& I, const JsValue& recv, const JsValue* arg
     }
     for (u32 i = 0; i < arr->length; ++i)
     {
-        JsValue cbArgs[2] = {arr->elems[i], JsValue::Int(i64(i))};
+        JsValue cbArgs[2] = {arr->elems[i], JsValue::Int(static_cast<i64>(i))};
         Result<JsValue> r = CallFunction(I, cb, cbArgs, 2, JsValue::Undefined());
         if (!r)
             return r;
@@ -809,7 +809,7 @@ static Result<JsValue> NumToString(Interp& I, const JsValue& recv, const JsValue
 {
     int radix = 10;
     if (argc >= 1 && args[0].type == JsType::Number)
-        radix = int(ToInt(args[0]));
+        radix = static_cast<int>(ToInt(args[0]));
     if (radix < 2 || radix > 36)
         return Err{ErrorCode::InvalidArgument};
     if (radix == 10)
@@ -821,7 +821,7 @@ static Result<JsValue> NumToString(Interp& I, const JsValue& recv, const JsValue
     // Non-decimal radix: operate on the truncated integer magnitude.
     i64 v = ToInt(recv);
     bool neg = v < 0;
-    u64 mag = neg ? (u64(-(v + 1)) + 1) : u64(v);
+    u64 mag = neg ? (static_cast<u64>(-(v + 1)) + 1) : static_cast<u64>(v);
     char tmp[72];
     u32 t = 0;
     if (mag == 0)
@@ -829,8 +829,8 @@ static Result<JsValue> NumToString(Interp& I, const JsValue& recv, const JsValue
     const char* kDigits = "0123456789abcdefghijklmnopqrstuvwxyz";
     while (mag)
     {
-        tmp[t++] = kDigits[mag % u64(radix)];
-        mag /= u64(radix);
+        tmp[t++] = kDigits[mag % static_cast<u64>(radix)];
+        mag /= static_cast<u64>(radix);
     }
     char out[80];
     u32 o = 0;
@@ -888,7 +888,7 @@ static Result<JsValue> NumToFixed(Interp& I, const JsValue& recv, const JsValue*
             out[o++] = '-';
             v = -v;
         }
-        o += WriteU64Dec(u64(v), out + o, sizeof(out) - o);
+        o += WriteU64Dec(static_cast<u64>(v), out + o, sizeof(out) - o);
         if (digits > 0)
         {
             out[o++] = '.';
@@ -914,7 +914,7 @@ static Result<JsValue> NumToFixed(Interp& I, const JsValue& recv, const JsValue*
     // Extract the scaled integer. ToI32 saturates beyond ~2.1e9; for the
     // common UI range (prices, percentages) this is ample. GAP: values
     // whose scaled magnitude exceeds INT32_MAX saturate.
-    u64 scaledInt = u64(Sf32ToU32(rounded));
+    u64 scaledInt = static_cast<u64>(Sf32ToU32(rounded));
 
     if (neg && scaledInt != 0)
         out[o++] = '-';
@@ -923,8 +923,8 @@ static Result<JsValue> NumToFixed(Interp& I, const JsValue& recv, const JsValue*
         o += WriteU64Dec(scaledInt, out + o, sizeof(out) - o);
         return JsValue::Str(MakeString(I.arena, out, o));
     }
-    u64 intPart = scaledInt / u64(pow10);
-    u64 fracPart = scaledInt % u64(pow10);
+    u64 intPart = scaledInt / static_cast<u64>(pow10);
+    u64 fracPart = scaledInt % static_cast<u64>(pow10);
     o += WriteU64Dec(intPart, out + o, sizeof(out) - o);
     out[o++] = '.';
     // Zero-pad the fractional part to exactly `digits` places.
@@ -1056,26 +1056,26 @@ static u32 EncodeUtf8(u32 cp, char* out)
 {
     if (cp < 0x80)
     {
-        out[0] = char(cp);
+        out[0] = static_cast<char>(cp);
         return 1;
     }
     if (cp < 0x800)
     {
-        out[0] = char(0xC0 | (cp >> 6));
-        out[1] = char(0x80 | (cp & 0x3F));
+        out[0] = static_cast<char>(0xC0 | (cp >> 6));
+        out[1] = static_cast<char>(0x80 | (cp & 0x3F));
         return 2;
     }
     if (cp < 0x10000)
     {
-        out[0] = char(0xE0 | (cp >> 12));
-        out[1] = char(0x80 | ((cp >> 6) & 0x3F));
-        out[2] = char(0x80 | (cp & 0x3F));
+        out[0] = static_cast<char>(0xE0 | (cp >> 12));
+        out[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = static_cast<char>(0x80 | (cp & 0x3F));
         return 3;
     }
-    out[0] = char(0xF0 | (cp >> 18));
-    out[1] = char(0x80 | ((cp >> 12) & 0x3F));
-    out[2] = char(0x80 | ((cp >> 6) & 0x3F));
-    out[3] = char(0x80 | (cp & 0x3F));
+    out[0] = static_cast<char>(0xF0 | (cp >> 18));
+    out[1] = static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out[3] = static_cast<char>(0x80 | (cp & 0x3F));
     return 4;
 }
 
@@ -1189,7 +1189,7 @@ static JsValue JsonReadString(JsonReader& r)
                         r.ok = false;
                         return JsValue::Undefined();
                     }
-                    cp = (cp << 4) | u32(HexDigitVal(h));
+                    cp = (cp << 4) | static_cast<u32>(HexDigitVal(h));
                 }
                 // High surrogate: look ahead for a "\uXXXX" low surrogate.
                 if (cp >= 0xD800 && cp <= 0xDBFF && r.pos + 6 <= r.n && r.s[r.pos] == '\\' && r.s[r.pos + 1] == 'u')
@@ -1204,7 +1204,7 @@ static JsValue JsonReadString(JsonReader& r)
                             loOk = false;
                             break;
                         }
-                        lo = (lo << 4) | u32(HexDigitVal(h));
+                        lo = (lo << 4) | static_cast<u32>(HexDigitVal(h));
                     }
                     if (loOk && lo >= 0xDC00 && lo <= 0xDFFF)
                     {
@@ -1220,7 +1220,7 @@ static JsValue JsonReadString(JsonReader& r)
                 return JsValue::Undefined();
             }
         }
-        else if ((unsigned char)c < 0x20)
+        else if (static_cast<unsigned char>(c) < 0x20)
         {
             // Raw control chars are not legal inside a JSON string.
             r.ok = false;
@@ -1422,7 +1422,7 @@ static u64 ReBudget(Interp& I)
 // progress toward Timeout under a regex-heavy loop.
 static void ReCharge(Interp& I, u32 inputLen)
 {
-    u64 cost = 64 + u64(inputLen);
+    u64 cost = 64 + static_cast<u64>(inputLen);
     I.stepBudget = (I.stepBudget > cost) ? (I.stepBudget - cost) : 0;
 }
 
@@ -1464,7 +1464,7 @@ static Result<JsValue> ReBuildMatchArray(Interp& I, const JsString* s, const ReP
                 return Err{ErrorCode::OutOfMemory};
         }
     }
-    ObjSet(arr, I.arena, "index", 5, JsValue::Int(i64(m.start)));
+    ObjSet(arr, I.arena, "index", 5, JsValue::Int(static_cast<i64>(m.start)));
     return JsValue::Obj(arr);
 }
 
@@ -1533,7 +1533,7 @@ static Result<JsValue> ReReplace(Interp& I, const JsString* s, JsObject* reObj, 
                 }
                 if (nx >= '1' && nx <= '9')
                 {
-                    u32 gi = u32(nx - '0');
+                    u32 gi = static_cast<u32>(nx - '0');
                     if (gi < prog->groupCount)
                     {
                         u32 a = m.caps[2 * gi], b = m.caps[2 * gi + 1];
@@ -1632,7 +1632,7 @@ static i64 DateNowMs()
     const u64 ms1601 = ft / kFiletimePerMs;
     if (ms1601 <= kFiletimeUnixOffsetMs)
         return 0;
-    return i64(ms1601 - kFiletimeUnixOffsetMs);
+    return static_cast<i64>(ms1601 - kFiletimeUnixOffsetMs);
 }
 
 // Floor-divide / floor-mod for signed values (epoch ms can be negative
@@ -1721,7 +1721,7 @@ static Result<JsValue> DateConstruct(Interp& I, const JsValue* args, u32 argc)
             // arg goes through the binary32 path and Sf32ToI32 saturates
             // past ~2.1e9 ms — sufficient for the int-literal use here, not
             // for arbitrary post-2038 fractional millisecond inputs.
-            o->dateMs = a0.as.num.isInt ? a0.as.num.ival : i64(Sf32ToI32(a0.as.num.fval));
+            o->dateMs = a0.as.num.isInt ? a0.as.num.ival : static_cast<i64>(Sf32ToI32(a0.as.num.fval));
         else
             o->dateMs = 0; // GAP: no date-string parsing
     }
@@ -1773,12 +1773,12 @@ static Result<JsValue> DateToISOString(Interp& I, const JsValue& recv)
     {
         char tmp[8];
         u32 t = 0;
-        u64 uv = v < 0 ? 0 : u64(v);
+        u64 uv = v < 0 ? 0 : static_cast<u64>(v);
         if (uv == 0)
             tmp[t++] = '0';
         while (uv)
         {
-            tmp[t++] = char('0' + (uv % 10));
+            tmp[t++] = static_cast<char>('0' + (uv % 10));
             uv /= 10;
         }
         for (u32 k = t; k < width; ++k)
@@ -1816,7 +1816,7 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
         // Radix argument (arg[1]): 0 (or absent) auto-detects 0x/decimal.
         int radix = 0;
         if (argc >= 2 && args[1].type == JsType::Number)
-            radix = int(ToInt(args[1]));
+            radix = static_cast<int>(ToInt(args[1]));
         if (v.type == JsType::Number)
         {
             // parseInt(number) with no/decimal radix truncates toward
@@ -1956,7 +1956,7 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
         // is always strictly < 1 and exactly representable in Sf32 — this
         // avoids any rounding that could land on 1.0. Non-deterministic by
         // nature; the self-test asserts the RANGE, never a specific value.
-        u32 bits24 = u32(duetos::core::RandomU64() & 0xFFFFFFu);
+        u32 bits24 = static_cast<u32>(duetos::core::RandomU64() & 0xFFFFFFu);
         Sf32 num = Sf32FromU32(bits24);
         Sf32 denom = Sf32FromU32(1u << 24); // 16777216.0, exact in binary32
         return JsValue::Float(Sf32Div(num, denom));
@@ -2057,7 +2057,7 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
             return Err{ErrorCode::InvalidArgument};
         ReMatch m = ReExec(I.arena, reObj->regexp->prog, s->data, s->len, 0, ReBudget(I));
         ReCharge(I, s->len);
-        return JsValue::Int(m.matched ? i64(m.start) : -1);
+        return JsValue::Int(m.matched ? static_cast<i64>(m.start) : -1);
     }
 
     case kReTest:
@@ -2137,7 +2137,7 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
         for (u32 i = 0; i < argc; ++i)
             if (!ArrPush(recv.as.obj, I.arena, args[i]))
                 return Err{ErrorCode::OutOfMemory};
-        return JsValue::Int(i64(recv.as.obj->length));
+        return JsValue::Int(static_cast<i64>(recv.as.obj->length));
     }
     case kArrPop:
     {
@@ -2211,7 +2211,7 @@ Result<JsValue> CallNative(Interp& I, u16 id, const JsValue& recv, const JsValue
                     char rev[12];
                     u32 t = 0;
                     for (u32 v = i; v; v /= 10)
-                        rev[t++] = char('0' + (v % 10));
+                        rev[t++] = static_cast<char>('0' + (v % 10));
                     while (t)
                         num[n++] = rev[--t];
                 }
