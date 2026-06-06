@@ -1,5 +1,5 @@
 {
-  "asset_count": 6,
+  "asset_count": 3,
   "by_asset": {
     "440273035": {
       "count": 0,
@@ -15,26 +15,11 @@
       "count": 0,
       "name": "duetos-kernel-debug.elf",
       "release_tag": "latest-debug"
-    },
-    "440273063": {
-      "count": 0,
-      "name": "SHA256SUMS.txt",
-      "release_tag": "latest-release"
-    },
-    "440273064": {
-      "count": 0,
-      "name": "duetos-release.iso",
-      "release_tag": "latest-release"
-    },
-    "440273068": {
-      "count": 0,
-      "name": "duetos-kernel-release.elf",
-      "release_tag": "latest-release"
     }
   },
   "delta_this_run": 0,
   "lifetime_total": 9,
   "live_assets_total": 0,
   "repo": "Krilliac/DuetOS",
-  "snapshot_at": "2026-06-06T16:06:42+00:00"
+  "snapshot_at": "2026-06-06T16:06:51+00:00"
 }
