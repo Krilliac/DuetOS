@@ -65,6 +65,14 @@ constexpr u32 kFileIno = 3;
 // 384 and 512, < 1024) alongside inodes 1..3 — no lost-slot collision.
 constexpr u32 kSubDirIno = 4;
 constexpr u32 kDeepFileIno = 5;
+// Depth-1 extent file "big.bin" (inode 6). Its record sits at offset
+// (6-1)*128 = 640 < 1024, so it stays in the first inode-table block
+// (FS block 5) alongside inodes 1..5 — no lost-slot collision. Its
+// inode's i_block holds a depth-1 extent header pointing at a single
+// interior/leaf node block (kBigLeafNodeBlock) whose one leaf extent
+// maps logical 0..1 → physical kBigData0..kBigData1. This proves the
+// read path actually follows the depth>0 index node.
+constexpr u32 kBigFileIno = 6;
 
 // Block numbers (FS-relative, 1 KiB units).
 constexpr u32 kGdtBlock = 2;
@@ -75,6 +83,11 @@ constexpr u32 kRootDirBlock = 6;
 constexpr u32 kFileDataBlock = 7;
 constexpr u32 kSubDirBlock = 8;   // "sub" directory data
 constexpr u32 kDeepDataBlock = 9; // "deep.txt" file data
+// Depth-1 "big.bin" blocks: an interior/leaf extent node block, then
+// the two data blocks its single leaf extent maps.
+constexpr u32 kBigLeafNodeBlock = 10; // depth-1 child node (full block)
+constexpr u32 kBigData0 = 11;         // big.bin logical block 0
+constexpr u32 kBigData1 = 12;         // big.bin logical block 1
 
 constexpr u16 kExtentHeaderMagic = 0xF30A;
 constexpr u32 kInodeFlagExtents = 0x80000;
@@ -86,6 +99,16 @@ constexpr u32 kFileBodyLen = 16; // strlen, excludes the NUL
 // Body of the nested file "/sub/deep.txt" (multi-component walk test).
 constexpr char kDeepBody[] = "deep ext4 file\n";
 constexpr u32 kDeepBodyLen = 15; // strlen, excludes the NUL
+// "big.bin" body: 1100 bytes of a deterministic pattern, spanning two
+// 1 KiB data blocks (1024 + 76). Generated rather than stored — the
+// byte at logical offset i is BigByte(i); the read-back asserts the
+// same. >1024 forces the second extent/data block to be reached.
+constexpr u32 kBigBodyLen = 1100;
+
+inline u8 BigByte(u32 i)
+{
+    return u8((i * 31u + 7u) & 0xFF);
+}
 
 inline void StoreLe16(u8* p, u16 v)
 {
@@ -145,6 +168,59 @@ void PutInode(u8* table, u32 ino, u16 mode, u32 size_bytes, u16 links, u32 data_
     StoreLe16(p + 0x1A, links);             // i_links_count
     StoreLe32(p + 0x20, kInodeFlagExtents); // i_flags (EXT4_EXTENTS_FL)
     FillInlineExtent(p + 0x28, data_block); // i_block (extent tree)
+}
+
+// Fill `i_block` (60 bytes) with a depth-1 extent header plus a single
+// 12-byte index record pointing at `leaf_node_block` (the interior/leaf
+// node that actually holds the leaf extents). This is the shape that
+// forces the read path to descend a depth>0 index node.
+void FillIndexExtent(u8* i_block, u32 leaf_node_block)
+{
+    Zero(i_block, 60);
+    // Extent header (12 bytes), depth = 1.
+    StoreLe16(i_block + 0, kExtentHeaderMagic); // eh_magic
+    StoreLe16(i_block + 2, 1);                  // eh_entries
+    StoreLe16(i_block + 4, 4);                  // eh_max (4 fit inline)
+    StoreLe16(i_block + 6, 1);                  // eh_depth = 1 (index)
+    StoreLe32(i_block + 8, 0);                  // eh_generation
+    // One index record (12 bytes) at offset 12.
+    StoreLe32(i_block + 12, 0);               // ei_block (logical key)
+    StoreLe32(i_block + 16, leaf_node_block); // ei_leaf_lo (child block)
+    StoreLe16(i_block + 20, 0);               // ei_leaf_hi
+    StoreLe16(i_block + 22, 0);               // ei_unused
+}
+
+// Fill a full block with a standalone extent node header (depth 0) and
+// one leaf extent mapping logical 0..len-1 → physical phys_start.. .
+// This is the child node a depth-1 index record points at.
+void FillLeafNode(u8* block, u32 phys_start, u16 len)
+{
+    Zero(block, kBlockSize);
+    // Extent header (12 bytes), depth = 0 (leaf node).
+    StoreLe16(block + 0, kExtentHeaderMagic);          // eh_magic
+    StoreLe16(block + 2, 1);                           // eh_entries
+    StoreLe16(block + 4, u16((kBlockSize - 12) / 12)); // eh_max
+    StoreLe16(block + 6, 0);                           // eh_depth = 0 (leaf)
+    StoreLe32(block + 8, 0);                           // eh_generation
+    // One leaf extent record (12 bytes) at offset 12.
+    StoreLe32(block + 12, 0);          // ee_block (logical)
+    StoreLe16(block + 16, len);        // ee_len (blocks)
+    StoreLe16(block + 18, 0);          // ee_start_hi
+    StoreLe32(block + 20, phys_start); // ee_start_lo (physical)
+}
+
+// Write inode `ino` (1-based) as a depth-1 extent file: i_block holds
+// an index header pointing at `leaf_node_block`. mode is regular file.
+void PutBigFileInode(u8* table, u32 ino, u32 size_bytes, u32 leaf_node_block)
+{
+    const u32 off = (ino - 1) * kInodeSize;
+    u8* p = table + off;
+    Zero(p, kInodeSize);
+    StoreLe16(p + 0x00, 0x81A4);                // i_mode (reg|0644)
+    StoreLe32(p + 0x04, size_bytes);            // i_size_lo
+    StoreLe16(p + 0x1A, 1);                     // i_links_count
+    StoreLe32(p + 0x20, kInodeFlagExtents);     // i_flags (EXT4_EXTENTS_FL)
+    FillIndexExtent(p + 0x28, leaf_node_block); // i_block (depth-1 tree)
 }
 
 // Append one linux_dirent record to `block` at `*off`. rec_len is
@@ -217,18 +293,24 @@ bool BuildSyntheticVolume(u32 handle)
     // "sub" directory (one block of dir data) and the nested file.
     PutInode(block, kSubDirIno, 0x41ED, kBlockSize, 2, kSubDirBlock);
     PutInode(block, kDeepFileIno, 0x81A4, kDeepBodyLen, 1, kDeepDataBlock);
+    // "big.bin" (inode 6): depth-1 extent tree → kBigLeafNodeBlock.
+    PutBigFileInode(block, kBigFileIno, kBigBodyLen, kBigLeafNodeBlock);
     if (!PutBlock(handle, kInodeTableBlock, block))
         return false;
 
     // ---- Root directory data (FS block 6). Records: ".", "..",
-    // "hello.txt" → inode 3, "sub" → inode 4. rec_lens are 4-byte
-    // aligned; the last record stretches to the block end.
+    // "hello.txt" → inode 3, "big.bin" → inode 6, "sub" → inode 4.
+    // rec_lens are 4-byte aligned; the last record stretches to the
+    // block end. Offsets: "."→12, ".."→24, "hello.txt"(20)→44,
+    // "big.bin"(16)→60, "sub"(stretch = 1024-60 = 964)→1024.
     Zero(block, sizeof(block));
     u32 off = 0;
     PutDirent(block, off, kRootIno, ".", 1, 2, 12);
     PutDirent(block, off, kRootIno, "..", 2, 2, 12);
     // "hello.txt" = 9 chars → 8 + 9 = 17 → round to 20.
     PutDirent(block, off, kFileIno, "hello.txt", 9, 1, 20);
+    // "big.bin" = 7 chars → 8 + 7 = 15 → round to 16 (file_type 1 = reg).
+    PutDirent(block, off, kBigFileIno, "big.bin", 7, 1, 16);
     // "sub" (file_type 2 = dir) is last → stretch to the block end.
     PutDirent(block, off, kSubDirIno, "sub", 3, 2, u16(kBlockSize - off));
     if (!PutBlock(handle, kRootDirBlock, block))
@@ -256,6 +338,30 @@ bool BuildSyntheticVolume(u32 handle)
     for (u32 i = 0; i < kDeepBodyLen; ++i)
         block[i] = u8(kDeepBody[i]);
     if (!PutBlock(handle, kDeepDataBlock, block))
+        return false;
+
+    // ---- "big.bin" depth-1 child node (FS block 10): a standalone
+    // extent node whose single leaf maps logical 0..1 → physical
+    // kBigData0..kBigData1 (length 2). This is the node the inode's
+    // depth-1 index record points at; the read path must descend it.
+    Zero(block, sizeof(block));
+    FillLeafNode(block, kBigData0, 2);
+    if (!PutBlock(handle, kBigLeafNodeBlock, block))
+        return false;
+
+    // ---- "big.bin" data block 0 (FS block 11): first 1024 body bytes.
+    Zero(block, sizeof(block));
+    for (u32 i = 0; i < kBlockSize; ++i)
+        block[i] = BigByte(i);
+    if (!PutBlock(handle, kBigData0, block))
+        return false;
+
+    // ---- "big.bin" data block 1 (FS block 12): remaining 76 body
+    // bytes (1100 - 1024), rest zero-padded.
+    Zero(block, sizeof(block));
+    for (u32 i = kBlockSize; i < kBigBodyLen; ++i)
+        block[i - kBlockSize] = BigByte(i);
+    if (!PutBlock(handle, kBigData1, block))
         return false;
 
     return true;
@@ -478,8 +584,84 @@ void Ext4SelfTest()
         }
     }
 
-    SerialWrite("[ext4-selftest] PASS (synthetic volume: probe+gdt+inode+root-dir+extent file read + VFS resolve "
-                "(single + multi-component) verified)\n");
+    // ---- Phase 7: depth-1 extent read. "big.bin" (inode 6) is mapped
+    // by a depth-1 extent tree: the inode's i_block holds an index
+    // record pointing at kBigLeafNodeBlock, whose single leaf maps
+    // logical 0..1 → physical kBigData0..kBigData1. Reading it proves
+    // MapLogicalBlock actually descends the interior index node rather
+    // than bailing on depth != 0. The 1100-byte body spans two data
+    // blocks, so a full read + a cross-block partial read at the 1024
+    // boundary together prove BOTH data blocks behind the leaf extent
+    // are reached.
+    Ext4DirEntry big{};
+    if (!Ext4FindInRoot(*v, "big.bin", &big))
+    {
+        Fail("depth1-find");
+        return;
+    }
+    if (big.inode != kBigFileIno || big.file_type != 1 /*reg*/)
+    {
+        Fail("depth1-dirent");
+        return;
+    }
+    InodeInfo bino{};
+    if (!Ext4ReadInode(*v, big.inode, &bino))
+    {
+        Fail("depth1-read-inode");
+        return;
+    }
+    if (bino.size_bytes != kBigBodyLen || !bino.uses_extents)
+    {
+        Fail("depth1-inode-fields");
+        return;
+    }
+
+    // Full read of all 1100 bytes — both data blocks behind the depth-1
+    // leaf must be returned, byte-for-byte matching the planted pattern.
+    u8 bigbuf[kBigBodyLen];
+    u64 bread = 0;
+    if (!Ext4ReadFile(*v, bino, 0, bigbuf, sizeof(bigbuf), &bread))
+    {
+        Fail("depth1-read-file");
+        return;
+    }
+    if (bread != kBigBodyLen)
+    {
+        Fail("depth1-read-len");
+        return;
+    }
+    for (u32 i = 0; i < kBigBodyLen; ++i)
+    {
+        if (bigbuf[i] != BigByte(i))
+        {
+            Fail("depth1-content");
+            return;
+        }
+    }
+
+    // Cross-block partial read straddling the 1024 boundary (offset
+    // 1020, len 8 → bytes 1020..1027). Bytes 1020..1023 live in the
+    // first data block, 1024..1027 in the SECOND — so a correct result
+    // proves the leaf's coverage of logical block 1 (the second data
+    // block) is honoured, not just block 0.
+    u8 spanbuf[8];
+    u64 spanread = 0;
+    if (!Ext4ReadFile(*v, bino, 1020, spanbuf, sizeof(spanbuf), &spanread) || spanread != 8)
+    {
+        Fail("depth1-span-read");
+        return;
+    }
+    for (u32 i = 0; i < 8; ++i)
+    {
+        if (spanbuf[i] != BigByte(1020 + i))
+        {
+            Fail("depth1-span-content");
+            return;
+        }
+    }
+
+    SerialWrite("[ext4-selftest] PASS (synthetic volume: probe+gdt+inode+root-dir+extent file read "
+                "(depth-0 + depth-1 index node) + VFS resolve (single + multi-component) verified)\n");
 }
 
 } // namespace duetos::fs::ext4

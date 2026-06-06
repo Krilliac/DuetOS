@@ -589,24 +589,16 @@ void CopyInode(const DuetosExt4Inode& ino, InodeInfo& out)
         out.i_block[i] = ino.i_block[i];
 }
 
-// Translate a file-logical block index to its physical FS block via
-// the inode's depth-0 extent tree (the i_block[60] inline header).
-// Returns true and sets `*phys` when `logical` falls inside a leaf
-// extent; returns false for a hole / out-of-range / depth>0 tree.
-bool MapLogicalBlockInline(const InodeInfo& inode, u32 logical, u64& phys)
+// Scan a single extent-tree node's leaf records (`buf`/`buf_len`,
+// `entries` records) for the one covering `logical`. Sets `phys` and
+// returns true on a hit; false for a hole or a parse failure. Shared
+// by the depth-0 and depth>0 paths of MapLogicalBlock.
+bool ScanLeafForLogical(const u8* buf, u32 buf_len, u16 entries, u32 logical, u64& phys)
 {
-    using namespace duetos::fs::ext4_rust;
-    DuetosExt4ExtentHeader hdr{};
-    if (!duetos_ext4_parse_extent_header(inode.i_block, 60, &hdr))
-        return false;
-    if (hdr.depth != 0)
-        return false; // GAP: depth>0 file extent tree — see Ext4ReadFile doc.
-    constexpr u16 kInlineMaxRecords = 4;
-    const u16 count = hdr.entries < kInlineMaxRecords ? hdr.entries : kInlineMaxRecords;
-    for (u16 ei = 0; ei < count; ++ei)
+    for (u16 ei = 0; ei < entries; ++ei)
     {
         DuetosExt4Extent ext{};
-        if (!duetos_ext4_parse_extent_leaf(inode.i_block, 60, ei, &ext))
+        if (!duetos::fs::ext4_rust::duetos_ext4_parse_extent_leaf(buf, buf_len, ei, &ext))
             return false;
         if (ext.length_blocks == 0)
             continue;
@@ -617,6 +609,91 @@ bool MapLogicalBlockInline(const InodeInfo& inode, u32 logical, u64& phys)
         }
     }
     return false;
+}
+
+// Cap on extent-tree depth descended per lookup. ext4 trees are at
+// most 5 levels deep in practice; 16 is a generous bound that defends
+// against a corrupt or cyclic tree spinning the descend loop forever.
+constexpr u32 kMaxExtentDepth = 16;
+
+// Translate a file-logical block index to its physical FS block by
+// descending the inode's extent tree (depth 0 inline, or depth>0 via
+// interior index nodes read into g_extent_node_scratch). Returns true
+// and sets `phys` when `logical` falls inside a leaf extent; false for
+// a hole / out-of-range / malformed tree. Uses g_extent_node_scratch
+// (NOT g_block_scratch) for interior/leaf node blocks, so it never
+// clobbers Ext4ReadFile's data buffer.
+bool MapLogicalBlock(const Volume& v, const InodeInfo& inode, u32 logical, u32 sector_size, u64& phys)
+{
+    using namespace duetos::fs::ext4_rust;
+    DuetosExt4ExtentHeader hdr{};
+    if (!duetos_ext4_parse_extent_header(inode.i_block, 60, &hdr))
+        return false;
+
+    constexpr u16 kInlineMaxRecords = 4;
+    if (hdr.depth == 0)
+    {
+        const u16 count = hdr.entries < kInlineMaxRecords ? hdr.entries : kInlineMaxRecords;
+        return ScanLeafForLogical(inode.i_block, 60, count, logical, phys);
+    }
+
+    // depth>0: descend one covering child per level. The root index
+    // records live inline in i_block (60 bytes, <= 4 records); interior
+    // node records live in a full block read into g_extent_node_scratch.
+    if (sector_size == 0 || v.block_size == 0 || (v.block_size % sector_size) != 0)
+        return false;
+    const u32 count_per_block = v.block_size / sector_size;
+    if (count_per_block == 0)
+        return false;
+    const u16 max_records_per_node = u16((v.block_size - 12) / 12);
+
+    const u8* cur_buf = inode.i_block;
+    u32 cur_len = 60;
+    u16 cur_entries = hdr.entries < kInlineMaxRecords ? hdr.entries : kInlineMaxRecords;
+    u16 cur_depth = hdr.depth;
+
+    for (u32 level = 0; level < kMaxExtentDepth && cur_depth > 0; ++level)
+    {
+        // Pick the index record with the GREATEST logical_block <=
+        // `logical` — that's the child whose key range contains it.
+        bool have_child = false;
+        u64 child_block = 0;
+        u32 best_key = 0;
+        for (u16 ei = 0; ei < cur_entries; ++ei)
+        {
+            DuetosExt4ExtentIndex idx{};
+            if (!duetos_ext4_parse_extent_index(cur_buf, cur_len, ei, &idx))
+                return false;
+            if (idx.logical_block <= logical && (!have_child || idx.logical_block >= best_key))
+            {
+                have_child = true;
+                best_key = idx.logical_block;
+                child_block = idx.leaf_block;
+            }
+        }
+        if (!have_child)
+            return false; // hole — logical is below the first index key.
+
+        // Same overflow guard the root walker uses: `child_block` came
+        // from a disk-resident extent-index entry — never trust it.
+        if (child_block > u64(-1) / v.block_size)
+            return false;
+        const u64 lba = child_block * v.block_size / sector_size;
+        if (drivers::storage::BlockDeviceRead(v.block_handle, lba, count_per_block, g_extent_node_scratch) < 0)
+            return false;
+
+        DuetosExt4ExtentHeader nhdr{};
+        if (!duetos_ext4_parse_extent_header(g_extent_node_scratch, sizeof(g_extent_node_scratch), &nhdr))
+            return false;
+        cur_buf = g_extent_node_scratch;
+        cur_len = v.block_size;
+        cur_entries = nhdr.entries < max_records_per_node ? nhdr.entries : max_records_per_node;
+        cur_depth = nhdr.depth;
+    }
+
+    if (cur_depth != 0)
+        return false; // exceeded kMaxExtentDepth without reaching a leaf.
+    return ScanLeafForLogical(cur_buf, cur_len, cur_entries, logical, phys);
 }
 
 } // namespace
@@ -802,7 +879,7 @@ static bool FindDirentInBlock(const u8* block, u32 block_size, const char* name,
         const u32 in_block = u32(file_pos % v.block_size);
 
         u64 phys = 0;
-        if (!MapLogicalBlockInline(inode, logical, phys))
+        if (!MapLogicalBlock(v, inode, logical, sector_size, phys))
         {
             // Hole or unmapped logical block: ext4 reads holes as
             // zeroes. Fill the rest of this block with zero.
