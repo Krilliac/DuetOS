@@ -1,14 +1,14 @@
 // DuetOS — AML bytecode interpreter fuzz harness.
 //
-// kernel/acpi/aml.cpp walks the AML byte stream of the DSDT and
-// every SSDT to build the ACPI namespace (devices, methods,
-// operation regions, field units, _S5 sleep package). Those bytes
-// are supplied by platform firmware — and fully attacker-controlled
-// on a malicious VM / cloud host that hands the guest a crafted
-// DSDT. The walker is a recursive TermList decoder (PkgLength,
-// NameString, Scope/Device/Method push, Buffer/Package, Field
-// lists): exactly the shape that grows out-of-bounds reads and
-// pointer-arithmetic mistakes on malformed input.
+// AmlNamespaceBuild (kernel/acpi/aml.cpp) walks the AML byte stream
+// of the DSDT and every SSDT to build the ACPI namespace (devices,
+// methods, operation regions, field units, _S5 sleep package). Those
+// bytes are supplied by platform firmware — and fully attacker-
+// controlled on a malicious VM / cloud host that hands the guest a
+// crafted DSDT. The recursive TermList decoder (PkgLength, NameString,
+// Scope/Device/Method push, Buffer/Package, Field lists) now lives in
+// the memory-safe no_std `duetos_aml` Rust crate; aml.cpp is a thin
+// FFI caller plus the offset slicers the evaluator drives.
 //
 // The harness serves the fuzz input as the DSDT. The kernel's AML
 // path reaches a table only through the AcpiMapTable / DsdtAddress /
@@ -21,15 +21,21 @@
 // and call AmlNamespaceShutdown() to clear the global namespace +
 // "built" flag so the next iteration re-walks from clean state.
 //
-// No kernel source is modified: the walker is exercised through its
-// real API exactly as boot reaches it. ASan catches any OOB read
-// past the declared table length; UBSan catches the offset/shift
-// overflow bugs in PkgLength / field-width math.
+// This drives the real integrated path: a bounds/overflow bug in the
+// Rust walker aborts as a libFuzzer crash (panic=abort staticlib
+// shim), while ASan/UBSan guard the C++ orchestration + the offset
+// slicers (PkgLength / field-width math in AmlMethodBody etc.).
 
 #include "acpi/aml.h"
 
 #include <cstddef>
 #include <cstdint>
+
+// The panic=abort Rust staticlib references the unwinder personality
+// routine; it is never called under panic=abort, but the symbol must
+// resolve at link time. fuzz_aml links no kernel-symbol stub TU, so
+// it carries the one-liner itself (as fuzz_acpi does).
+extern "C" void rust_eh_personality() {}
 
 namespace
 {

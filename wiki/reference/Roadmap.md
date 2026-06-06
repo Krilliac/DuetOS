@@ -1713,18 +1713,22 @@ stubs + a `seeds/gen_*_seeds.py`); the codec/cert ones are pure
 `bytes → struct` and need *less* shimming than the FS probes.
 
 <!-- AML interpreter bullet retired 2026-06-06: fuzz_aml harness
-     (tests/fuzz/fuzz_aml.cpp) + seeds/gen_aml_seeds.py landed. The
-     harness needs NO ACPI namespace stub after all — it defines the
-     AcpiMapTable / DsdtAddress accessors itself, serves the fuzz
-     input as the DSDT, drives the real public AmlNamespaceBuild()
-     and resets state with AmlNamespaceShutdown() between iterations
-     (no kernel-source change). Found + fixed a 1-byte heap-OOB read
-     in ReadNameString — an under-length PkgLength underflowed
-     pkg_end - name_off; guarded at all four package sites. Runs
-     ≈ 42k execs/s clean on the 5-seed corpus. The firmware ACPI
-     *tables* (RSDP / header / MADT / FADT / MCFG / HPET / SRAT) got
-     fuzz_acpi in the same slice (driving the duetos_acpi Rust crate
-     directly, ≈ 440k/s clean). Both auto-picked up by
+     (tests/fuzz/fuzz_aml.cpp) + seeds/gen_aml_seeds.py landed, and
+     the recursive TermList walker was then PORTED to the memory-safe
+     no_std duetos_aml Rust crate (kernel/acpi/aml_rust/) — aml.cpp is
+     now a thin FFI caller (namespace storage + accessors + the offset
+     slicers AmlMethodBody/AmlNameValue/AmlReadS5). fuzz_aml drives the
+     real integrated path and serves the fuzz input as the DSDT via
+     self-defined AcpiMapTable/DsdtAddress accessors. Found + fixed a
+     1-byte heap-OOB read in the original C++ ReadNameString — an
+     under-length PkgLength underflowed pkg_end - name_off; the Rust
+     port carries the guard at all four package sites. Verified
+     byte-for-byte equivalent to the C++ walker on QEMU's DSDT (275
+     entries / 81 methods / 42 devices / 15 scopes / 7 opregions, both
+     builds) and fuzzes ≈ 50k execs/s clean (4.5M runs). The firmware
+     ACPI *tables* (RSDP / header / MADT / FADT / MCFG / HPET / SRAT)
+     got fuzz_acpi in the same series (driving the duetos_acpi Rust
+     crate directly, ≈ 440k/s clean). Both auto-picked up by
      tools/test/fuzz-all.sh. -->
 - **CDC-ECM + RNDIS** — `kernel/drivers/usb/cdc_ecm.cpp`,
   `rndis.cpp`. Device-supplied configuration/data-frame bytes;

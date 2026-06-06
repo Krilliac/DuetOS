@@ -20,7 +20,13 @@ ACPI on DuetOS is two things:
 2. **AML namespace walker + field/region index** — a DSDT/SSDT
    bytecode walker that records every Name / Method / OperationRegion /
    FieldUnit by canonical path, with constant region offsets/lengths
-   decoded so FieldUnits resolve to a backing address.
+   decoded so FieldUnits resolve to a backing address. The recursive
+   TermList byte parse — the firmware-controlled-input attack surface —
+   lives in the memory-safe no_std `duetos_aml` Rust crate
+   (`kernel/acpi/aml_rust/`); `aml.cpp` is a thin FFI caller that owns
+   the namespace-table storage + accessors and the offset slicers
+   (`AmlMethodBody` / `AmlNameValue` / `AmlReadS5`) the evaluator drives.
+   It is continuously fuzzed by `tests/fuzz/fuzz_aml`.
 3. **AML method interpreter** (`kernel/acpi/aml_eval.{h,cpp}`) — a v0
    recursive tree-walker that actually *executes* a method body:
    operands (Arg/Local/constants/Buffer/Package), arithmetic / bitwise
@@ -45,8 +51,10 @@ Sources:
 - [`kernel/acpi/acpi.h`](../../kernel/acpi/acpi.h) +
   [`acpi.cpp`](../../kernel/acpi/acpi.cpp) — table discovery + decode
 - [`kernel/acpi/aml.h`](../../kernel/acpi/aml.h) +
-  [`aml.cpp`](../../kernel/acpi/aml.cpp) — namespace walker +
-  field/region index
+  [`aml.cpp`](../../kernel/acpi/aml.cpp) — namespace-table storage,
+  accessors, and the FFI bridge to the Rust walker
+- [`kernel/acpi/aml_rust/`](../../kernel/acpi/aml_rust/) — memory-safe
+  no_std AML TermList walker (the recursive byte parser)
 - [`kernel/acpi/aml_eval.h`](../../kernel/acpi/aml_eval.h) +
   [`aml_eval.cpp`](../../kernel/acpi/aml_eval.cpp) — v0 method interpreter
 - [`kernel/acpi/ec.h`](../../kernel/acpi/ec.h) +

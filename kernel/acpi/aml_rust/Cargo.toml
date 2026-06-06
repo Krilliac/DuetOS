@@ -1,0 +1,31 @@
+# DuetOS ACPI AML namespace walker.
+#
+# Production crate. Walks the AML byte stream of the DSDT + every
+# SSDT and builds a flat table of named ACPI objects (Scope, Device,
+# Method, Name, OperationRegion, Field, ...) plus the constant-bound
+# OperationRegion + NamedField index the C++ AML evaluator backs
+# FieldUnit reads with. The C++ caller at `kernel/acpi/aml.cpp`
+# delegates the recursive byte parse to this crate; AML *execution*
+# (FieldUnit hardware reads, method evaluation) stays in C++
+# (`aml_eval.cpp`), as do the namespace-table accessors.
+#
+# Memory-safe replacement for the former hand-written C++ TermList
+# walker. The walker is the firmware-controlled-byte attack surface
+# fuzzed by tests/fuzz/fuzz_aml.
+#
+# Spec: ACPI 6.5 (UEFI Forum) §20.2 (AML byte-stream encoding).
+
+[package]
+name = "duetos_aml"
+version = "0.0.1"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "DuetOS ACPI AML namespace walker"
+
+[lib]
+name = "duetos_aml"
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

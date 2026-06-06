@@ -516,11 +516,29 @@ $(BIN)/fuzz_acpi: fuzz_acpi.cpp $(BIN)/libduetos_acpi_fuzz.a | $(BIN)
 # fuzz_aml.cpp), then drives the real public AmlNamespaceBuild()
 # entry point and resets global state with AmlNamespaceShutdown()
 # between iterations. No kernel-source change: the walker is
-# exercised exactly as boot reaches it. Compiled with
-# -DDUETOS_FIX_JOURNAL_OFF so the FIX_NOTE_GAP markers no-op
-# (no fix-journal sink to link); host_shim/mm/page.h shadows the
-# unused mm include.
-$(BIN)/fuzz_aml: fuzz_aml.cpp $(KERNEL)/acpi/aml.cpp | $(BIN)
+# exercised exactly as boot reaches it.
+#
+# The recursive TermList walker itself now lives in the no_std
+# `duetos_aml` Rust crate (kernel/acpi/aml_rust/) — aml.cpp is a thin
+# FFI caller — so the harness links the crate via the same rlib +
+# panic=abort staticlib recipe as fuzz_acpi. fuzz_aml therefore
+# fuzzes the real integrated C++ orchestration + Rust walker path; a
+# Rust-side bounds/overflow aborts as a libFuzzer crash. Compiled
+# with -DDUETOS_FIX_JOURNAL_OFF so the FIX_NOTE_GAP markers no-op
+# (no fix-journal sink to link).
+AML_RUST := $(KERNEL)/acpi/aml_rust
+
+$(BIN)/libduetos_aml.rlib: $(AML_RUST)/src/lib.rs | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type rlib \
+		--crate-name duetos_aml -O $< -o $@
+
+$(BIN)/libduetos_aml_fuzz.a: host_shim/aml_fuzz_shim.rs \
+		$(BIN)/libduetos_aml.rlib | $(BIN)
+	$(RUSTC) --edition $(RUST_EDITION) -C panic=abort --crate-type staticlib \
+		--extern duetos_aml=$(BIN)/libduetos_aml.rlib $< -o $@
+
+$(BIN)/fuzz_aml: fuzz_aml.cpp $(KERNEL)/acpi/aml.cpp \
+		$(BIN)/libduetos_aml_fuzz.a | $(BIN)
 	$(CXX) $(CXXFLAGS) -DDUETOS_FIX_JOURNAL_OFF $^ -o $@
 
 # Each run-* keeps a persistent corpus and stops after 60 s.

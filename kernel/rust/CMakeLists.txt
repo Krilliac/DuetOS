@@ -29,6 +29,8 @@ file(GLOB_RECURSE DUETOS_RUST_SUBSYSTEM_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_SOURCE_DIR}/kernel/fs/ext4_rust/Cargo.toml"
     "${CMAKE_SOURCE_DIR}/kernel/acpi/acpi_rust/src/*.rs"
     "${CMAKE_SOURCE_DIR}/kernel/acpi/acpi_rust/Cargo.toml"
+    "${CMAKE_SOURCE_DIR}/kernel/acpi/aml_rust/src/*.rs"
+    "${CMAKE_SOURCE_DIR}/kernel/acpi/aml_rust/Cargo.toml"
     "${CMAKE_SOURCE_DIR}/kernel/net/wifi80211_rust/src/*.rs"
     "${CMAKE_SOURCE_DIR}/kernel/net/wifi80211_rust/Cargo.toml"
     "${CMAKE_SOURCE_DIR}/kernel/net/hci_rust/src/*.rs"
@@ -56,6 +58,7 @@ duetos_add_rust_staticlib(
         "${CMAKE_SOURCE_DIR}/kernel/fs/exfat_rust/include/exfat_rust.h"
         "${CMAKE_SOURCE_DIR}/kernel/fs/ext4_rust/include/ext4_rust.h"
         "${CMAKE_SOURCE_DIR}/kernel/acpi/acpi_rust/include/acpi_rust.h"
+        "${CMAKE_SOURCE_DIR}/kernel/acpi/aml_rust/include/aml_rust.h"
         "${CMAKE_SOURCE_DIR}/kernel/net/wifi80211_rust/include/wifi80211_rust.h"
         "${CMAKE_SOURCE_DIR}/kernel/net/hci_rust/include/hci_rust.h"
 )
