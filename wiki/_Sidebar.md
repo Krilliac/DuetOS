@@ -109,6 +109,7 @@
 - [Build System](tooling/Build-System.md)
 - [Rust Subsystems](tooling/Rust-Subsystems.md)
 - [Coding Standards](tooling/Coding-Standards.md)
+- [Dev-Host Setup](tooling/Dev-Host-Setup.md)
 - [Anti-Bloat Guidelines](tooling/Anti-Bloat-Guidelines.md)
 - [Codebase Analysis](tooling/Codebase-Analysis.md)
 - [Git Workflow](tooling/Git-Workflow.md)

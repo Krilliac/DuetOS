@@ -46,6 +46,24 @@ Violations of these rules are bugs even if they compile. If you find code that b
 
 The full rationale and the audit checklist live in [`wiki/kernel/Subsystem-Isolation.md`](wiki/kernel/Subsystem-Isolation.md).
 
+## Definition of Done — before you call a slice complete
+
+Compiling is not "done." Before committing / opening a PR, walk this list —
+the obligations most often missed:
+
+- [ ] **Re-scan every signal**, not just the one you started on — build, tests,
+      clang-format, boot log, CI. Fix what surfaces. (→ [Fix Anything You Surface](#fix-anything-you-surface--no-deferring))
+- [ ] **Landed a Roadmap item?** Delete its section from `wiki/reference/Roadmap.md`
+      in the same commit. (→ [Updating roadmap items](#updating-roadmap-items))
+- [ ] **Update the owning wiki page** (`wiki/<area>/…`) to reflect the new state —
+      incl. `wiki/reference/Win32-Surface-Status.md` if a slice flipped a REAL/STUB/MISSING row.
+- [ ] **Append to `wiki/reference/Design-Decisions.md`** if the change rules out an
+      alternative a future slice could otherwise pick.
+- [ ] **Update `wiki/getting-started/History.md`** if a project-level milestone moved.
+- [ ] **New subsystem / driver / DLL / spec?** Add a wiki page; a one-paragraph
+      addendum amends the existing page instead. (→ [When to write a new wiki page](#when-to-write-a-new-wiki-page))
+- [ ] **STUB/GAP markers** present on deliberate omissions, absent on code that does its job.
+
 ## Session start (run at the beginning of every session)
 
 **Step 1 — Git sync** (see [Git Sync Workflow](#git-sync-workflow) below for the commands):
@@ -258,87 +276,12 @@ Until the build system exists, **do not invent a fake preset**. If a task asks "
 
 ### Live-test runtime tooling — install on demand
 
-The dev host does not ship with `qemu-system-x86_64`,
-`grub-mkrescue`, `xorriso`, `mtools`, or `ovmf`. Build-clean is the
-only signal available until they are installed.
-
-**If a task legitimately requires a live-boot smoke test**, install
-the packages before proceeding — do not fake it, do not ship a
-"compiled cleanly, therefore it works" claim for code whose
-correctness can only be proven at runtime:
-
-```bash
-sudo apt-get update
-# Live-boot runtime: QEMU + UEFI + ISO build chain.
-sudo apt-get install -y qemu-system-x86 grub-common grub-pc-bin grub-efi-amd64-bin xorriso mtools ovmf
-# PE smoke fixtures: mingw cross-toolchains (otherwise the kernel
-# build emits the smoke PE blobs as _len=0 stubs and ring3-* PE
-# tests can't actually load).
-sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
-# Live-debug toolbox: GDB stub attach, syscall/process tracing,
-# fd/lock inspection, network capture. Install these EVERY session
-# the moment a runtime-behaviour task is on the table — the GDB
-# stub the DUETOS_GDB_SERVER preset publishes is useless without a
-# host gdb to attach. Cheap to keep installed; expensive to
-# discover missing mid-investigation.
-sudo apt-get install -y gdb strace ltrace lsof tcpdump
-# Binary / ELF / disassembly inspection. `objdump`/`readelf`/`nm`
-# come from binutils-x86-64-linux-gnu (already a clang dep on most
-# hosts but pin it). `addr2line` resolves a kernel RIP to file:line
-# from the .elf. `gdbserver` lets a remote gdb attach to a
-# host-side trace harness; `valgrind` doesn't run kernel code but
-# is invaluable for the cross-built userland tools under tools/.
-sudo apt-get install -y binutils binutils-x86-64-linux-gnu gdbserver valgrind
-# Disk / FS forensics: GPT/MBR/ISO inspection during the boot-
-# image plumbing (`fdisk -l`, `parted print`, `losetup`, `dumpe2fs`,
-# `mtools` already covered above). `hexdump` ships with bsdmainutils
-# / util-linux but we want the GNU one. `xxd` is in vim-common.
-sudo apt-get install -y parted util-linux bsdmainutils vim-common
-# JSON / log slicing: `jq` cuts the QEMU QMP / boot-determinism
-# TSV output cleanly; `ripgrep` is faster than grep across the
-# tree under load and respects `.gitignore`.
-sudo apt-get install -y jq ripgrep
-# Script hygiene + diagnostic automation: `shellcheck` catches
-# the `grep -c file || echo 0` class of bugs that bombed
-# fat32-concurrent.sh on a clean run; `yamllint` keeps GitHub
-# Actions / CI configs honest. `expect` + `socat` automate
-# QEMU stdio / GDB-stub interactions for the babysit-boot rig.
-# `bear` produces a compile_commands.json from a build (clangd
-# / ide friendly). `universal-ctags` + `silversearcher-ag`
-# accelerate cross-tree navigation; `entr` watches files and
-# re-runs a command on change (useful with `find kernel | entr
-# -c cmake --build build/...`). `moreutils` adds `ts` for time-
-# stamping piped output and `sponge` for in-place edits.
-sudo apt-get install -y shellcheck yamllint expect socat bear universal-ctags silversearcher-ag entr moreutils
-```
-
-Install the **full** toolbox up front, not just `qemu-system-x86`.
-A diagnosis that starts as "the boot hangs in SmpStartAps" turns
-into "I need to attach gdb to localise it" five minutes later, and
-the user re-typing the install line is friction the session can
-avoid by paying it once.
-
-Count as "legitimately requires":
-
-- The commit introduces or changes an observable runtime
-  behaviour (scheduler ordering, new syscall return codes, new
-  boot-log line, new trap path, new sandbox-policy refusal).
-- The commit claims end-to-end correctness for a path that a
-  compile-time check cannot prove (address-space isolation, TLB
-  shootdown, IRQ routing, timer drift, PE-image execution).
-- A previous slice's runtime claim has never been verified on
-  this host and the new slice depends on it.
-
-Do NOT install for:
-
-- Pure refactors with no behavioural delta.
-- Docs / CLAUDE.md / `wiki/` changes only.
-- Code that compiles but is not yet wired into any live path.
-
-After install, `DUETOS_TIMEOUT=20 tools/qemu/run.sh` is the
-canonical headless smoke invocation (see script header for other
-env-var overrides). Once CI lands, the same install line goes in
-the workflow file.
+The dev host ships without QEMU/OVMF/GRUB/xorriso/mtools. When a task
+**legitimately requires a live-boot smoke test** (runtime behaviour changed, or a
+correctness claim a compile can't prove), install the **full** toolbox up front —
+don't fake a "compiles, therefore works" claim. Package list, the "legitimately
+requires" test, and the smoke invocation:
+[`wiki/tooling/Dev-Host-Setup.md`](wiki/tooling/Dev-Host-Setup.md).
 
 IMPORTANT: assembly (`.S`) files are NOT formatted by
 `clang-format`. Never pass a `.S` file to `clang-format -i` — it
