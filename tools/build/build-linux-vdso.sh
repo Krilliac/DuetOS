@@ -89,7 +89,18 @@ python3 "${EMBED}" \
 # gets a kOffLinuxVdso<Camel> constant; missing exports are a
 # hard error so a fat-fingered rename in vdso.S can't ship
 # undetected.
-NM="${NM:-llvm-nm}"
+# Same llvm-vs-binutils fallback as OBJCOPY above: `nm --defined-only`
+# is supported by both llvm-nm and GNU binutils nm.
+if [[ -z "${NM:-}" ]]; then
+    if command -v llvm-nm >/dev/null 2>&1; then
+        NM="llvm-nm"
+    elif command -v nm >/dev/null 2>&1; then
+        NM="nm"
+    else
+        echo "build-linux-vdso.sh: neither llvm-nm nor nm found on PATH" >&2
+        exit 1
+    fi
+fi
 declare -A WANTED_OFFSETS=(
     [__kernel_rt_sigreturn]=kOffLinuxVdsoRtSigreturn
     [__vdso_clock_gettime]=kOffLinuxVdsoClockGettime
