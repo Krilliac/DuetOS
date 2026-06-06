@@ -23,6 +23,8 @@
 #include "arch/x86_64/hpet.h"
 #include "arch/x86_64/serial.h"
 #include "core/panic.h"
+#include "debug/probes.h"
+#include "diag/fma/ereport.h"
 #include "diag/kdbg.h"
 #include "drivers/pci/pci.h"
 #include "drivers/storage/block.h"
@@ -199,6 +201,48 @@ void CpuPause()
     asm volatile("pause" ::: "memory");
 }
 
+// All-ones is what a PCIe root complex synthesises for a read to a
+// device whose config/BAR decode is gone — the canonical "the card
+// isn't there any more" signal. A live AHCI port never reads all-ones
+// from a real status register (reserved bits read 0), so this is an
+// unambiguous surprise-removal sentinel.
+constexpr u32 kMmioGone = 0xFFFFFFFFu;
+
+// True when the port's hardware has vanished out from under us: the
+// HBA's MMIO decode reads all-ones (controller surprise-removed), OR
+// the SATA link's DET field no longer reports an established device
+// (the drive itself was unplugged while the HBA stayed put). Reading
+// PxSSTS is side-effect-free, so this is safe to call from any context
+// — including the heartbeat poll while an I/O is in flight on the port.
+bool AhciPortVanished(volatile u8* port)
+{
+    const u32 ssts = Reg(port, kPortRegSsts);
+    if (ssts == kMmioGone)
+        return true;
+    return (ssts & 0xF) != kSstsDetReady;
+}
+
+// Latch a vanished port offline so every subsequent I/O fails fast
+// (the `!p.online` guard at the top of each block op) instead of
+// re-spinning the full per-command timeout against absent hardware.
+// Idempotent: only the first transition logs / fires, so a poll that
+// keeps observing the same dead port stays quiet after the first beat.
+// Leaves a WARN sentinel + an ArmedLog probe + a StorageError ereport
+// (so the FMA diagnosis engine correlates the loss) behind it.
+void AhciMarkGone(Port& p, const char* where)
+{
+    if (!p.online)
+        return;
+    p.online = false;
+    KLOG_WARN_2V("drivers/ahci", "port vanished — marking offline (surprise-removal / link loss)", "port_idx",
+                 p.port_idx, "PxSSTS", Reg(p.regs, kPortRegSsts));
+    KLOG_DEBUG_S("drivers/ahci", "device-gone detected at", "where", where);
+    KBP_PROBE_V(::duetos::debug::ProbeId::kStorageDeviceGone, p.port_idx);
+    ::duetos::diag::fma::EreportPost(::duetos::diag::fma::EreportClass::StorageError,
+                                     ::duetos::diag::fma::EreportSeverity::Critical, p.port_idx,
+                                     Reg(p.regs, kPortRegSsts), 0, "drv.ahci");
+}
+
 // HPET-deadline helpers, sibling to the NVMe driver's pair. Letting
 // each driver carry its own copy keeps the TU self-contained and
 // avoids a kernel/util/timer.h cross-cutting header. The two
@@ -319,6 +363,16 @@ bool IssueSlot0(volatile u8* port)
     for (;;)
     {
         const u32 is = Reg(port, kPortRegIs);
+        if (is == kMmioGone)
+        {
+            // PxIS reading all-ones means the HBA's MMIO decode is gone:
+            // the controller was surprise-removed (PCIe hot-unplug) or
+            // the link dropped hard. Bail in microseconds instead of
+            // spinning the full 30 s command budget against absent
+            // hardware. The caller re-checks AhciPortVanished and latches
+            // the port offline so the NEXT I/O fails fast too.
+            return false;
+        }
         if ((is & kIsTfes) != 0)
         {
             // Task-file error. PxTFD carries the ATA Status (bits
@@ -469,7 +523,10 @@ i32 AhciBlockRead(void* cookie, u64 lba, u32 count, void* buf)
              /*dir_write=*/false);
     if (!IssueSlot0(p->regs))
     {
-        core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "read: slot0 failed lba=", lba);
+        if (AhciPortVanished(p->regs))
+            AhciMarkGone(*p, "read");
+        else
+            core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "read: slot0 failed lba=", lba);
         return -1;
     }
     return 0;
@@ -501,7 +558,10 @@ i32 AhciBlockWrite(void* cookie, u64 lba, u32 count, const void* buf)
              /*dir_write=*/true);
     if (!IssueSlot0(p->regs))
     {
-        core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "write: slot0 failed lba=", lba);
+        if (AhciPortVanished(p->regs))
+            AhciMarkGone(*p, "write");
+        else
+            core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "write: slot0 failed lba=", lba);
         return -1;
     }
     return 0;
@@ -549,7 +609,10 @@ i32 AhciBlockFlush(void* cookie)
     BuildNonDataCmd(*p, kAtaCmdFlushCacheExt);
     if (!IssueSlot0(p->regs))
     {
-        core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "flush: slot0 failed port_idx=", p->port_idx);
+        if (AhciPortVanished(p->regs))
+            AhciMarkGone(*p, "flush");
+        else
+            core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "flush: slot0 failed port_idx=", p->port_idx);
         return -1;
     }
     return 0;
@@ -657,7 +720,10 @@ i32 AhciBlockDiscard(void* cookie, u64 lba, u32 count)
 
     if (!IssueSlot0(p->regs))
     {
-        core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "discard: slot0 failed lba=", lba);
+        if (AhciPortVanished(p->regs))
+            AhciMarkGone(*p, "discard");
+        else
+            core::LogWithValue(core::LogLevel::Error, "drivers/ahci", "discard: slot0 failed lba=", lba);
         return -1;
     }
     return 0;
@@ -1001,6 +1067,40 @@ void AhciSelfTest()
 {
     KLOG_TRACE_SCOPE("drivers/ahci", "AhciSelfTest");
     using arch::SerialWrite;
+
+    // Surprise-removal predicate check — runs unconditionally (no
+    // SATA drive required) so the device-gone detection logic is
+    // exercised on every boot, including the QEMU `-vga std` profile
+    // that ships no AHCI controller. Drives AhciPortVanished over a
+    // synthetic 0x40-byte register window with PxSSTS planted at the
+    // four boundary values: established-link (DET=3) must read present;
+    // all-ones (MMIO decode gone), absent-link (DET=0) and
+    // PHY-not-established (DET=1) must all read vanished.
+    {
+        static volatile u32 fake_port[0x40 / 4];
+        for (u32 i = 0; i < 0x40 / 4; ++i)
+            fake_port[i] = 0;
+        auto* fp = reinterpret_cast<volatile u8*>(fake_port);
+        bool ok = true;
+        Reg(fp, kPortRegSsts) = 0x00000133u; // IPM=1, SPD=3, DET=3 — live link
+        ok = ok && !AhciPortVanished(fp);
+        Reg(fp, kPortRegSsts) = kMmioGone; // controller surprise-removed
+        ok = ok && AhciPortVanished(fp);
+        Reg(fp, kPortRegSsts) = 0x00000000u; // DET=0 — no device
+        ok = ok && AhciPortVanished(fp);
+        Reg(fp, kPortRegSsts) = 0x00000131u; // DET=1 — present, no PHY comm
+        ok = ok && AhciPortVanished(fp);
+        if (!ok)
+        {
+            SerialWrite("[ahci] self-test FAILED: surprise-removal predicate misclassified\n");
+            KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0xA4C1u);
+        }
+        else
+        {
+            SerialWrite("[ahci-selftest] PASS (surprise-removal predicate)\n");
+        }
+    }
+
     if (g_port_count == 0)
     {
         SerialWrite("[ahci] self-test skipped (no SATA drives online)\n");
@@ -1033,6 +1133,23 @@ void AhciSelfTest()
         return;
     }
     SerialWrite("[ahci] self-test OK (LBA 0 read + 0x55AA signature present)\n");
+}
+
+void AhciHealthPoll()
+{
+    // Catch a port that was surprise-removed BETWEEN I/O operations:
+    // the per-command path only notices a vanished device when it next
+    // issues a command, so without this poll a yanked-but-idle drive
+    // stays marked online indefinitely and the kernel keeps believing
+    // a dead device is alive. Called from the heartbeat. Silent when
+    // clean (AhciMarkGone only logs the first transition); cheap — one
+    // PxSSTS read per online port, no allocations, no locks.
+    for (u32 i = 0; i < g_port_count; ++i)
+    {
+        Port& p = g_ports[i];
+        if (p.online && AhciPortVanished(p.regs))
+            AhciMarkGone(p, "poll");
+    }
 }
 
 // ---------------------------------------------------------------

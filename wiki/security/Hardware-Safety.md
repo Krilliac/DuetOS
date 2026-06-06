@@ -101,6 +101,7 @@ tree already follows the contract everywhere except one latent gap
 | **PCI BARs** | Firmware-assigned | Size-probe writes restored; no permanent BAR reprogram |
 | **GPU / display / NIC / audio** | Volatile-only | No clock/voltage/fan/VBIOS/EEPROM/MAC/TX-power writes; modeset uses readback-verify; HDA gain hardcoded mid-range |
 | **IOMMU** | **VT-d enforcing by default** (landed 2026-06-06) | `DUETOS_IOMMU_ENABLE` defaults ON; VT-d programs a full identity map (IOVA==phys) + GCMD.TE when a DMAR is present, confining device DMA. No-ops cleanly without a DMAR; `iommu=off` cmdline escape hatch. AMD-Vi + fault-IRQ still residual |
+| **Storage surprise-removal** | **Fail-fast detect (landed 2026-06-06)** | A SATA/NVMe device unplugged at runtime is detected (all-ones MMIO decode / SATA-link DET loss / NVMe CFS) and latched offline so I/O fails fast instead of hanging the full per-command timeout. See [Runtime hardware faults](#runtime-hardware-faults--device-disappears-or-misbehaves-at-runtime) below |
 
 ## Pre-landing preconditions — bind these BEFORE the owning driver lands
 
@@ -163,6 +164,65 @@ class-of-bug that caused the incident) into enforced properties:
    target by serial number, so an enumeration-order change can't redirect
    the operation onto the wrong drive.
 
+## Runtime hardware faults — device disappears or misbehaves at runtime
+
+The rest of this page is about *data*-safety: don't write to hardware
+DuetOS doesn't own. This section is the orthogonal *availability*-safety
+facet: the hardware was fine at boot but **breaks, is removed, or starts
+returning garbage while the OS is running** — someone yanks a SATA/NVMe
+drive out of a running machine, a PCIe link drops, a controller wedges. A
+driver that assumes its device is immortal hangs (spinning a command
+timeout against absent hardware) or, worse, mis-reads the synthesized
+all-ones bus reply as a valid register value.
+
+**The signal.** When a PCIe device's config/BAR decode goes away (surprise
+removal, fatal link error), the root complex synthesizes **all-ones
+(`0xFFFFFFFF`)** for every MMIO read to it. A live controller never reads
+all-ones from a real status register (reserved bits read 0), so all-ones
+is an unambiguous "the card isn't there any more" sentinel. SATA adds a
+second in-band signal: `PxSSTS.DET != 3` means the link is no longer
+established (the drive was unplugged but the HBA stayed put). NVMe adds
+`CSTS.CFS` (Controller Fatal Status).
+
+**The contract (storage, landed 2026-06-06).** Both block drivers now:
+
+1. **Bail fast in the hot poll loop.** `IssueSlot0` (AHCI) and
+   `SubmitAndWait` (NVMe) check the gone-sentinel each pending iteration
+   and return in microseconds instead of burning the full 30 s / CAP.TO
+   command budget against a device that will never answer. NVMe's
+   completion slot lives in host RAM (a removed device simply never flips
+   the phase bit), so the loop reads the MMIO `CSTS` register — the only
+   reliable in-band liveness signal — on the still-pending path.
+2. **Latch the device offline.** First detection flips `online = false`
+   (`AhciMarkGone` / `NvmeMarkGone`), so every *subsequent* I/O fails fast
+   at the `!online` guard rather than re-hanging. The latch is idempotent:
+   only the first transition logs.
+3. **Surface it loud + correlatable.** Each transition leaves a
+   `KLOG_WARN` sentinel, fires the `kStorageDeviceGone` probe (ArmedLog —
+   an attached GDB can `b duetos::debug::ProbeFire`), and posts a
+   `StorageError` ereport so the heartbeat FMA engine correlates the loss
+   with any concurrent MCA/driver events.
+4. **Sweep idle devices from the heartbeat.** `AhciHealthPoll` /
+   `NvmeHealthPoll` run each `kheartbeat` beat (next to `VtdFaultPoll`),
+   reading one cheap status register per online device. This catches a
+   drive yanked *while idle* — no I/O in flight to trip the per-command
+   path — within one beat. Silent when every device is healthy.
+
+**Why fail-fast, not auto-recover.** Bringing a *re-plugged* drive back
+online (re-enumeration, COMRESET, re-IDENTIFY, re-register) is a separate,
+larger slice — see the AHCI/NVMe headers' scope notes. The landed work is
+the safety half: a broken/absent device fails predictably and loudly
+instead of wedging the caller or feeding it synthesized garbage.
+
+**Adjacent runtime-fault surfaces already covered.** CPU/memory hardware
+faults have their own handlers, distinct from this storage work: `#MC`
+(vector 18, `arch/x86_64/machine_check.cpp` — MCA bank decode, ECC class,
+SRAR frame-poison verdict), the chipset-NMI decode (port-0x61 SERR#/IOCHK#
+→ `kChipsetNmi`), and the heartbeat FMA engine that correlates ECC /
+driver / kernel-integrity ereports. The storage detection above feeds the
+same ereport ring, so a drive vanishing and a DIMM throwing ECC in the
+same window are correlated by one engine.
+
 ## Re-running the audit
 
 This contract was derived by a five-way parallel audit. To re-run it
@@ -184,6 +244,15 @@ after a hardware slice lands (or on a cadence):
   `ExfatSelfTest` (foreign-reject leg), and the `GptCrashDumpRegionSane`
   math test panic-on-fail and gate CI. A new ownership gate should land
   with a matching foreign-reject self-test.
+- **Runtime-fault anchors.** The storage surprise-removal predicates run
+  unconditionally in `AhciSelfTest` / `NvmeSelfTest` (no device required)
+  and emit `[ahci-selftest] PASS (surprise-removal predicate)` /
+  `[nvme-selftest] PASS (...)`; a clean boot also emits **no**
+  `storage.device_gone` probe fire and no `port/controller vanished` WARN.
+  Grep the gone-detection surface with:
+  ```
+  git grep -nE '0xFFFFFFFFu?|kMmioGone|Vanished|MarkGone|CstsGone|HealthPoll'
+  ```
 
 ## Sources
 

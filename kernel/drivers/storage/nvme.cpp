@@ -30,6 +30,8 @@
 #include "arch/x86_64/serial.h"
 #include "core/init.h"
 #include "core/panic.h"
+#include "debug/probes.h"
+#include "diag/fma/ereport.h"
 #include "diag/kdbg.h"
 #include "drivers/pci/pci.h"
 #include "drivers/storage/block.h"
@@ -233,6 +235,43 @@ inline volatile u64& Reg64(u64 offset)
 void CpuPause()
 {
     asm volatile("pause" ::: "memory");
+}
+
+// All-ones is what a PCIe root complex synthesises for a read to a
+// device whose BAR decode is gone — the canonical "the controller
+// isn't there any more" signal. CSTS never legitimately reads all-ones
+// on a live controller (its upper bits are reserved-zero), so combined
+// with CFS (Controller Fatal Status) this is an unambiguous
+// surprise-removal / dead-controller sentinel.
+constexpr u32 kMmioGone = 0xFFFFFFFFu;
+
+// True when `csts` (a freshly-read CSTS word) says the controller is
+// gone or wedged: all-ones MMIO decode, or the latched fatal-status
+// bit. Unlike AHCI the NVMe completion slot lives in host RAM — a
+// removed device simply never writes the phase bit — so CSTS (which IS
+// MMIO) is the only reliable in-band "device vanished" signal.
+bool NvmeCstsGone(u32 csts)
+{
+    return csts == kMmioGone || (csts & kCstsCfs) != 0;
+}
+
+// Latch the controller offline so every subsequent I/O fails fast (the
+// `!g_ctrl.online` guard at the top of each op) instead of re-burning
+// the full CAP.TO+500 ms completion budget against absent hardware.
+// Idempotent: only the first transition logs / fires, so a poll that
+// keeps observing the dead controller stays quiet after the first beat.
+// Leaves a WARN sentinel + an ArmedLog probe + a StorageError ereport
+// (so the FMA diagnosis engine correlates the loss) behind it.
+void NvmeMarkGone(u32 csts)
+{
+    if (!g_ctrl.online)
+        return;
+    g_ctrl.online = false;
+    KLOG_WARN_V("drivers/nvme", "controller vanished — marking offline (surprise-removal / fatal status)", csts);
+    KBP_PROBE_V(::duetos::debug::ProbeId::kStorageDeviceGone, csts);
+    ::duetos::diag::fma::EreportPost(::duetos::diag::fma::EreportClass::StorageError,
+                                     ::duetos::diag::fma::EreportSeverity::Critical, /*target_id=*/0, csts, 0,
+                                     "drv.nvme");
 }
 
 // True if HPET is online and ready to tell time. HpetReadCounter
@@ -506,6 +545,23 @@ bool SubmitAndWait(Queue& q, SqEntry entry)
                 return false;
             }
             return true;
+        }
+        // Still pending. Before paying the deadline check, ask whether
+        // the controller is even still there. A surprise-removed NVMe
+        // device never writes the CQ phase bit (the CQ lives in host
+        // RAM the absent device can't reach), so without this the loop
+        // would burn the full CAP.TO+500 ms budget on EVERY I/O to a
+        // yanked drive, and the controller would stay marked online.
+        // CSTS is MMIO: it reads all-ones once the BAR decode is gone
+        // and latches CFS on a fatal internal error — either means
+        // "stop polling, fail fast forever". The normal fast-completion
+        // path above returns before reaching this read, so a healthy
+        // controller never pays for it.
+        const u32 csts = Reg32(kRegCsts);
+        if (NvmeCstsGone(csts))
+        {
+            NvmeMarkGone(csts);
+            return false;
         }
         if (have_hpet)
         {
@@ -1488,6 +1544,25 @@ void NvmeSelfTest()
 {
     KLOG_TRACE_SCOPE("drivers/nvme", "NvmeSelfTest");
     using arch::SerialWrite;
+
+    // Surprise-removal predicate check — runs unconditionally (no
+    // controller required) so the device-gone classifier is exercised
+    // on every boot, including profiles with no NVMe controller.
+    // Healthy CSTS.RDY must read present; all-ones (BAR decode gone)
+    // and CFS-set (fatal status) must both read gone.
+    {
+        const bool ok = !NvmeCstsGone(kCstsReady) && NvmeCstsGone(kMmioGone) && NvmeCstsGone(kCstsReady | kCstsCfs);
+        if (!ok)
+        {
+            SerialWrite("[nvme] self-test FAILED: surprise-removal predicate misclassified\n");
+            KBP_PROBE_V(::duetos::debug::ProbeId::kBootSelftestFail, 0x47E1u);
+        }
+        else
+        {
+            SerialWrite("[nvme-selftest] PASS (surprise-removal predicate)\n");
+        }
+    }
+
     if (!g_ctrl.online)
     {
         SerialWrite("[nvme] self-test skipped (no controller online)\n");
@@ -1520,6 +1595,21 @@ void NvmeSelfTest()
         return;
     }
     SerialWrite("[nvme] self-test OK (LBA 0 read + 0x55AA signature present)\n");
+}
+
+void NvmeHealthPoll()
+{
+    // Catch a controller surprise-removed BETWEEN I/O operations: the
+    // completion path only notices a vanished device when it next
+    // submits a command, so without this poll a yanked-but-idle NVMe
+    // drive stays marked online indefinitely. Called from the
+    // heartbeat. Silent when clean (NvmeMarkGone only logs the first
+    // transition); cheap — one CSTS read, no allocations, no locks.
+    if (!g_ctrl.online)
+        return;
+    const u32 csts = Reg32(kRegCsts);
+    if (NvmeCstsGone(csts))
+        NvmeMarkGone(csts);
 }
 
 const char* NvmeStatusName(u8 sct, u8 sc)

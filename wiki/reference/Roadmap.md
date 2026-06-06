@@ -912,6 +912,32 @@ Re-derive the full inventory with `git grep -nE "// (STUB|GAP):"`.
   driver-owned buffers into device address space; validate descriptor
   targets. (Hardware-Safety pre-landing row "DMA without IOMMU".)
 
+### Storage surprise-removal — re-attach recovery (residual)
+
+- **Landed 2026-06-06:** runtime surprise-removal *detection* for both
+  block drivers. A SATA/NVMe device unplugged or hard-link-dropped while
+  running is detected via the all-ones MMIO-decode sentinel (`kMmioGone`),
+  SATA `PxSSTS.DET` loss, or NVMe `CSTS.CFS`, and latched offline so I/O
+  fails fast instead of spinning the full per-command timeout against
+  absent hardware. The hot poll loops (`IssueSlot0`, `SubmitAndWait`) bail
+  in microseconds; idle devices are swept by `AhciHealthPoll` /
+  `NvmeHealthPoll` from the `kheartbeat` beat (next to `VtdFaultPoll`);
+  each loss leaves a `KLOG_WARN` + `kStorageDeviceGone` probe +
+  `StorageError` ereport. Predicate self-tests (`[ahci/nvme-selftest] PASS
+  (surprise-removal predicate)`) run unconditionally. Full rationale:
+  [`security/Hardware-Safety` → Runtime hardware faults](../security/Hardware-Safety.md#runtime-hardware-faults--device-disappears-or-misbehaves-at-runtime).
+- **Residual:** (1) **Re-attach** — bringing a re-plugged drive back
+  online (re-enumerate, COMRESET / NVMe CC.EN reset, re-IDENTIFY,
+  re-register with the block layer) is unimplemented; a latched-offline
+  device stays offline until reboot. (2) **Block-layer unregister** — a
+  vanished device's `BlockDeviceRegister` handle leaks (no
+  `BlockDeviceUnregister` yet), so the name slot isn't reclaimed. (3) A
+  **PCIe hot-plug IRQ** (Downstream Port Containment / PME) would replace
+  the once-per-beat poll, same way the VT-d fault MSI replaces
+  `VtdFaultPoll`. (4) **xHCI/USB + NIC** surprise-removal detection is not
+  yet wired — the same all-ones sentinel pattern applies and is the
+  natural next slice.
+
 ### Ownership write-chokepoint — populate the registry + flip to Deny
 
 - **Landed 2026-06-06:** the mechanism. `DiskRegionIsOwned(handle, lba,
